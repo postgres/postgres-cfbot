@@ -13,6 +13,7 @@ OBJS = \
 	clogdesc.o \
 	committsdesc.o \
 	dbasedesc.o \
+	fileopsdesc.o \
 	genericdesc.o \
 	gindesc.o \
 	gistdesc.o \

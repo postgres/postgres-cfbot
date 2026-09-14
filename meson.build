@@ -1587,6 +1587,17 @@ endif
 
 
 ###############################################################
+# Library: FILEOPS
+###############################################################
+
+# FILEOPS transactional filesystem operations (WAL rmgr RM_FILEOPS_ID) is
+# always built.  Mirrors USE_FILEOPS in src/Makefile.global.in: without it the
+# rmgrlist.h entry is compiled out and every RM_FILEOPS_ID reference fails to
+# build.
+cdata.set('USE_FILEOPS', 1)
+
+
+###############################################################
 # Library: selinux
 ###############################################################
 

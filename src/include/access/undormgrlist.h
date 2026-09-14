@@ -31,3 +31,6 @@
  */
 
 /* there is deliberately not an #ifndef UNDORMGRLIST_H here */
+
+/* FILEOPS: transactional filesystem operations UNDO rmgr (UNDO_RMID_FILEOPS=2) */
+UNDO_RMGR_INIT(FileopsUndoRmgrInit)

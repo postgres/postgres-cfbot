@@ -6,6 +6,7 @@
  * src/backend/access/transam/rmgr.c
  */
 #include "postgres.h"
+#include "storage/fileops.h"
 
 #include "access/rmgr.h"
 #include "access/xlog_internal.h"

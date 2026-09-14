@@ -99,6 +99,7 @@
 #include "replication/origin.h"
 #include "replication/syncrep.h"
 #include "storage/fd.h"
+#include "storage/fileops.h"
 #include "storage/ipc.h"
 #include "storage/md.h"
 #include "storage/predicate.h"
@@ -148,6 +149,15 @@ int			max_prepared_xacts = 0;
  * typedef struct GlobalTransactionData *GlobalTransaction appears in
  * twophase.h
  */
+
+/*
+ * FILEOPS 2PC prepare hook (fileops.c).  Declared locally by prototype to
+ * avoid pulling storage/fileops.h into this file.  Serializes this
+ * transaction's pending file operations into the 2PC state file so
+ * COMMIT/ROLLBACK PREPARED -- possibly from another backend after a crash --
+ * can perform the deferred commit-time ops or the abort-time filesystem undo.
+ */
+extern void FileOpsAtPrepare(void);
 
 typedef struct GlobalTransactionData
 {
@@ -996,11 +1006,17 @@ TwoPhaseFilePath(char *path, FullTransactionId fxid)
  *
  * TWOPHASE_MAGIC must be bumped whenever xl_xact_prepare changes layout.
  * The struct gained last_batch_lsn[NUndoPersistenceLevels] (24 bytes) for
- * UNDO chain tracking across 2PC boundaries, requiring this bump from
+ * UNDO chain tracking across 2PC boundaries, requiring a bump from
  * 0x57F94534 to 0x57F94535 to prevent old servers from silently misreading
  * the variable-length arrays that follow the fixed header at the wrong offsets.
+ *
+ * Bumped again to 0x57F94536: FILEOPS now registers TWOPHASE_RM_FILEOPS_ID
+ * records so deferred commit-time file operations (RENAME/DELETE/RMDIR/RMTREE)
+ * and abort-time filesystem undo survive PREPARE.  This adds a new 2PC record
+ * type (not a header field), but a bump still keeps a mixed-version cluster
+ * from replaying a state file whose record stream it does not understand.
  */
-#define TWOPHASE_MAGIC	0x57F94535	/* format identifier */
+#define TWOPHASE_MAGIC	0x57F94536	/* format identifier */
 
 typedef xl_xact_prepare TwoPhaseFileHeader;
 
@@ -1178,6 +1194,14 @@ EndPrepare(GlobalTransaction gxact)
 	TwoPhaseFileHeader *hdr;
 	StateFileChunk *record;
 	bool		replorigin;
+
+	/*
+	 * FILEOPS: persist this transaction's pending file operations into the
+	 * 2PC state file, for the same reasons the per-backend UNDO prepare hook
+	 * does.  Must run before the END sentinel while the record chain is still
+	 * open.  A no-op if this transaction registered no file operations.
+	 */
+	FileOpsAtPrepare();
 
 	/* Add the end sentinel to the list of 2PC records */
 	RegisterTwoPhaseRecord(TWOPHASE_RM_END_ID, 0,

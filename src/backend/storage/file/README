@@ -1,0 +1,202 @@
+src/backend/storage/file/README
+
+Transactional File Operations (FILEOPS)
+=======================================
+
+This directory's fileops.c implements FILEOPS: a set of filesystem
+operations that participate in PostgreSQL transactions.  An ordinary
+unlink() or rename() issued in the middle of a transaction is not covered by
+WAL and is not reversed if the transaction aborts or the server crashes.
+FILEOPS closes that gap for the filesystem mutations the server performs
+outside the buffer manager.
+
+FILEOPS is NOT used for relation files.  Creating and dropping tables,
+indexes, TRUNCATE, and CREATE/DROP DATABASE|TABLESPACE at the catalog/smgr
+level go through smgr and catalog/storage.c, which have zero FileOps calls.
+The only in-core callers of the FileOps* API are:
+
+  - dbcommands.c   (CREATE/ALTER/DROP DATABASE: directory + PG_VERSION,
+                    ALTER DATABASE ... SET TABLESPACE)
+  - tablespace.c   (CREATE/DROP TABLESPACE: the per-tablespace directory
+                    and symlink; the LOCATION paths are absolute by design)
+  - copydir.c      (the destination tree of a directory copy)
+
+
+Two op classes: constructive (immediate) vs destructive (deferred)
+------------------------------------------------------------------
+
+CONSTRUCTIVE operations run IMMEDIATELY when the API is called, so the file
+or directory can be used within the same transaction, and each registers an
+abort-time undo action that reverses it if the transaction rolls back:
+
+  FileOpsCreate    -- create() now; UNDO/pending-delete on abort
+  FileOpsMkdir     -- mkdir() now; UNDO rmdir on abort
+  FileOpsChmod     -- chmod() now; UNDO restore old mode on abort
+  FileOpsChown     -- chown() now; UNDO restore old uid/gid on abort
+  FileOpsTruncate  -- ftruncate() now; UNDO restore old length on abort
+  FileOpsSymlink   -- symlink() now; UNDO unlink on abort
+  FileOpsLink      -- link() now; UNDO unlink on abort
+  FileOpsWrite     -- pwrite() now (content, WAL-logged; no UNDO)
+  FileOpsSetXattr / FileOpsRemoveXattr -- now; UNDO restore old value on abort
+
+DESTRUCTIVE operations are DEFERRED: the API only records a PendingFileOp,
+and the filesystem is touched at transaction end:
+
+  FileOpsRename    -- deferred, always at_commit
+  FileOpsDelete    -- deferred; at_commit chooses commit vs abort
+  FileOpsRmdir / FileOpsRmdirRecursive -- deferred; at_commit
+  FileOpsRmtree    -- deferred; walked at execute time (copydir abort cleanup)
+
+FileOpsDoPendingOps(isCommit) runs the pending list at transaction end: the
+at_commit=true ops fire on commit, the at_commit=false ops fire on abort.
+
+
+When FILEOPS is durable: only at wal_level >= replica
+-----------------------------------------------------
+
+FILEOPS writes WAL and UNDO records ONLY when XLogIsNeeded() is true, i.e.
+wal_level >= replica.  At wal_level = minimal it emits no WAL and no UNDO:
+
+  - There is NO crash safety at minimal.  The immediate constructive ops
+    mutate the filesystem with no WAL record to redo, and the only reversal
+    for a crash-mid-transaction is the in-memory pendingFileOps list, which
+    does not survive a crash.
+
+  - There is NO 2PC safety at minimal.  With nothing serialized, a PREPARE'd
+    transaction's file operations cannot be reproduced after a crash.
+
+Every FILEOPS + crash-recovery + 2PC guarantee below assumes wal_level >=
+replica, which is what any deployment relying on those guarantees must set.
+
+
+Revert and recovery model (NO fileops_cleanup)
+----------------------------------------------
+
+There is NO fileops_cleanup() function.  The RM_FILEOPS_ID WAL resource
+manager registers only rm_redo/rm_desc/rm_identify; its rm_startup and
+rm_cleanup slots are NULL (see access/rmgrlist.h).  Reversal rides two
+mechanisms, both on the COMMON WAL stream:
+
+  1. Live-transaction abort (in-memory).  ROLLBACK runs
+     FileOpsDoPendingOps(false), executing each constructive op's registered
+     abort-time undo (delete the created file, restore the old
+     mode/length/xattr, rmdir the created directory, ...).  No WAL needed;
+     the in-process list has the state.
+
+  2. Crash / async revert (common-WAL UNDO records).  Each constructive op
+     also prepares an UNDO record (PrepareXactUndoData(UNDO_RMID_FILEOPS,...))
+     and inserts it (InsertXactUndoData) in the same critical section as its
+     forward WAL record.  On crash, a loser transaction's UNDO chain is
+     applied by the cluster-wide UNDO engine's recovery pass
+     (PerformUndoRecovery, at end of redo); the apply side is
+     fileops_undo_apply() in fileops_undo.c, registered through the UNDO rmgr
+     registry (FileopsUndoRmgrInit), NOT through a WAL rm_cleanup callback.
+
+Deferred DESTRUCTIVE ops emit their forward WAL record at commit-EXECUTION
+time, inside FileOpsDoPendingOps() when the op actually happens on the
+primary, so a physical standby reproduces it by redo.  Their redo handlers
+are idempotent (delete of an already-absent file, rename whose source is
+gone, rmdir of an already-absent directory all count as success).  Only the
+commit path is logged; an at_commit=false delete/rmdir run during abort emits
+no WAL, because a standby must never apply an aborted transaction's effect.
+
+Two deliberate exceptions:
+
+  RMTREE (FileOpsRmtree) writes no WAL and has no redo.  Its only core caller
+  (copydir.c) registers it at_commit=false, so it fires only on ABORT to
+  clean up a partially-copied tree; aborts are never replayed as committed,
+  so it cannot diverge a standby.
+
+  SYMLINK redo is an intentional no-op.  FileOpsSymlink is used only for
+  tablespace symlinks; standby/crash-recovery replay of those is owned by
+  RM_TBLSPC, which applies the recovery-time layout remap.
+
+
+Two-phase commit
+----------------
+
+PREPARE TRANSACTION serializes the transaction's pending FileOps into the
+2PC state file so they survive to COMMIT/ROLLBACK PREPARED, including from a
+different backend after a crash between PREPARE and the final decision:
+
+  - FileOpsAtPrepare(), called from EndPrepare() between StartPrepare() and
+    the END sentinel, writes one TWOPHASE_RM_FILEOPS_ID record per pending
+    at_commit=true op into the durable 2PC state.
+
+  - The FILEOPS 2PC post-commit callback performs those deferred commit-time
+    ops (rename/delete/rmdir/rmtree), reusing the same per-op executor as
+    FileOpsDoPendingOps().  COMMIT PREPARED thus applies them; a crash before
+    it re-drives them from the durable 2PC state.
+
+  - The abort-time ops (at_commit=false, the immediate constructive ops' undo)
+    are NOT serialized here.  They are reversed on ROLLBACK PREPARED by the
+    constructive op's cluster-wide UNDO record, handed to the async revert
+    machinery via ATMAddAborted() in FinishPreparedTransaction() -- the same
+    path a non-prepared abort uses.  Duplicating them in the 2PC record stream
+    would double-revert and race that async path.  The FILEOPS post-abort
+    callback is therefore effectively a no-op.
+
+  - PostPrepare_FileOps() then discards this backend's in-memory list; the
+    durable 2PC state (for commit-time ops) and the UNDO chain (for abort-time
+    reversal), not this backend, drive the eventual work.
+
+Before this, PostPrepare_FileOps() freed the pending list without recording
+it, so deferred commit-time ops were lost across PREPARE.  Adding the
+TWOPHASE_RM_FILEOPS_ID record type bumped TWOPHASE_MAGIC (twophase.c).
+
+
+How to use the API
+------------------
+
+The public API is declared in src/include/storage/fileops.h.  Call these in
+place of the raw libc/syscall equivalents whenever the operation must be
+transactional.
+
+  register_delete (FileOpsCreate).  When true, the newly created file is
+  registered for deletion if the transaction aborts.
+
+  at_commit (FileOpsDelete, FileOpsRmdir, FileOpsRmdirRecursive,
+  FileOpsRmtree).  at_commit = true removes on commit (dropping state the
+  transaction is logically deleting); at_commit = false removes only on abort
+  (cleaning up something the transaction just created, e.g. a copy tree).
+
+FileOpsRmtree defers its tree walk to execute time (removing whatever ended
+up on disk by commit/abort), where FileOpsRmdirRecursive enumerates contents
+at registration time.
+
+The API hides platform differences: PG_O_DIRECT for unbuffered I/O,
+pg_fsync() for the correct per-platform flush, fsync_parent_path() for
+directory durability on Unix, and durable_rename()/durable_unlink() for
+crash-safe rename and unlink ordering.
+
+
+Transaction lifecycle integration
+----------------------------------
+
+The deferred operations are driven by AM-neutral hooks that xact.c calls
+(wired to the FileOps* functions in fileops_undo.c):
+
+  FileOpsDoPendingOps(isCommit) -- executes the pending list at end of xact.
+  AtSubCommit_FileOps()         -- reparents a subxact's pending ops.
+  AtSubAbort_FileOps()          -- runs a subxact's abort-time ops.
+  FileOpsAtPrepare()            -- serializes pending ops into 2PC state.
+  PostPrepare_FileOps()         -- discards the in-memory list after PREPARE.
+  FileOpsCancelPendingDelete()  -- removes a registered delete entry.
+  FileOpsSync()                 -- forces durability of a path immediately.
+
+
+WAL replay
+----------
+
+fileops_redo() dispatches each XLOG_FILEOPS_* record to the matching action
+during recovery; fileops_desc()/fileops_identify() render records for
+pg_waldump.  Because the redo handler is itself the recovery action, code
+paths that run under WAL replay (the "redo" arms in dbcommands.c,
+tablespace.c, and copydir.c) call the raw syscalls directly rather than
+re-entering the FileOps* API.
+
+Tests: src/test/recovery/t/062_fileops_recovery.pl (crash recovery),
+063_fileops_2pc.pl (constructive-op 2PC via chmod),
+060_fileops_standby_divergence.pl (physical-standby convergence),
+061_fileops_2pc_deferred.pl (deferred commit-time ops through PREPARE +
+crash), and the test_fileops module's regression test.

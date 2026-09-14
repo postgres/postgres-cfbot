@@ -28,7 +28,8 @@ typedef uint8 TwoPhaseRmgrId;
 #define TWOPHASE_RM_PGSTAT_ID		2
 #define TWOPHASE_RM_MULTIXACT_ID	3
 #define TWOPHASE_RM_PREDICATELOCK_ID	4
-#define TWOPHASE_RM_MAX_ID			TWOPHASE_RM_PREDICATELOCK_ID
+#define TWOPHASE_RM_FILEOPS_ID		5
+#define TWOPHASE_RM_MAX_ID			TWOPHASE_RM_FILEOPS_ID
 
 extern PGDLLIMPORT const TwoPhaseCallback twophase_recover_callbacks[];
 extern PGDLLIMPORT const TwoPhaseCallback twophase_postcommit_callbacks[];
@@ -38,5 +39,11 @@ extern PGDLLIMPORT const TwoPhaseCallback twophase_standby_recover_callbacks[];
 
 extern void RegisterTwoPhaseRecord(TwoPhaseRmgrId rmid, uint16 info,
 								   const void *data, uint32 len);
+
+/* FILEOPS two-phase commit callbacks (defined in storage/file/fileops.c) */
+extern void fileops_twophase_postcommit(FullTransactionId fxid, uint16 info,
+										void *recdata, uint32 len);
+extern void fileops_twophase_postabort(FullTransactionId fxid, uint16 info,
+									   void *recdata, uint32 len);
 
 #endif							/* TWOPHASE_RMGR_H */
