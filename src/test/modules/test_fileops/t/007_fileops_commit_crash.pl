@@ -73,5 +73,23 @@ TODO:
 		'committed FileOpsRmdir happened despite the crash');
 }
 
+# DROP TABLESPACE is safe: its XLOG_TBLSPC_DROP precedes the commit record
+# and its redo removes the directories.  (In-place, so they are under
+# pg_tblspc.)
+$node->safe_psql('postgres',
+	'SET allow_in_place_tablespaces = on; CREATE TABLESPACE ts LOCATION \'\''
+);
+my $tsoid = $node->safe_psql('postgres',
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'ts'");
+ok(-d "$datadir/pg_tblspc/$tsoid", 'tablespace directory exists');
+commit_and_crash('DROP TABLESPACE ts;');
+is( $node->safe_psql(
+		'postgres', "SELECT count(*) FROM pg_tablespace WHERE spcname = 'ts'"
+	),
+	'0',
+	'DROP TABLESPACE committed');
+ok(!-e "$datadir/pg_tblspc/$tsoid",
+	'committed DROP TABLESPACE removed its directory despite the crash');
+
 $node->stop;
 done_testing();

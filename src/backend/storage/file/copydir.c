@@ -24,11 +24,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "access/xlog.h"
+#include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/copydir.h"
 #include "storage/fd.h"
+#include "storage/fileops.h"
 #include "utils/wait_event.h"
 
 /* GUCs */
@@ -44,16 +47,24 @@ static void clone_file(const char *fromfile, const char *tofile);
  *
  * This function uses the file_copy_method GUC.  New uses of this function must
  * be documented in doc/src/sgml/config.sgml.
+ *
+ * If register_for_abort_cleanup is true and we are not in WAL replay, the
+ * destination is created with FileOpsMkdirTree(), so that a transaction
+ * abort, or a crash before commit, removes the partial copy.  Recovery
+ * callers pass false because they are themselves the recovery action.
  */
 void
-copydir(const char *fromdir, const char *todir, bool recurse)
+copydir(const char *fromdir, const char *todir, bool recurse,
+		bool register_for_abort_cleanup)
 {
 	DIR		   *xldir;
 	struct dirent *xlde;
 	char		fromfile[MAXPGPATH * 2];
 	char		tofile[MAXPGPATH * 2];
 
-	if (MakePGDirectory(todir) != 0)
+	if (register_for_abort_cleanup && !RecoveryInProgress())
+		FileOpsMkdirTree(todir, pg_dir_create_mode, InvalidOid);
+	else if (MakePGDirectory(todir) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create directory \"%s\": %m", todir)));
@@ -78,9 +89,13 @@ copydir(const char *fromdir, const char *todir, bool recurse)
 
 		if (xlde_type == PGFILETYPE_DIR)
 		{
-			/* recurse to handle subdirectories */
+			/*
+			 * Recurse to handle subdirectories.  Pass false for
+			 * register_for_abort_cleanup: removing the top-level destination
+			 * tree removes them too.
+			 */
 			if (recurse)
-				copydir(fromfile, tofile, true);
+				copydir(fromfile, tofile, true, false);
 		}
 		else if (xlde_type == PGFILETYPE_REG)
 		{

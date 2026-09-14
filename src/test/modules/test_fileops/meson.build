@@ -40,6 +40,7 @@ tests += {
       't/005_fileops_checkpoint_loser.pl',
       't/007_fileops_commit_crash.pl',
       't/008_fileops_standby_abort.pl',
+      't/010_fileops_abort_redo.pl',
       't/018_fileops_rename.pl',
       't/023_fileops_inline_abort_ctx.pl',
       't/024_fileops_recovery_apply_failure.pl',
