@@ -46,10 +46,11 @@ SELECT EXISTS (
 EOM
 ok($result, "WAL summarization caught up after insert");
 
-# The WAL summarizer should have generated some IO statistics.
+# The WAL summarizer should have generated some IO statistics. The WAL it
+# reads back comes either from the WAL buffers or from a file, so count both.
 $node1->poll_query_until(
 	'postgres',
-	q{SELECT sum(reads) > 0 FROM pg_stat_io
+	q{SELECT sum(hits) + sum(reads) > 0 FROM pg_stat_io
    WHERE backend_type = 'walsummarizer' AND object = 'wal'})
   or die
   "Timed out while waiting for WAL summarizer to generate statistics for WAL reads";
