@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "miscadmin.h"
+#include "nodes/plannodes.h"
 #include "utils/datum.h"
 
 
@@ -164,6 +165,32 @@ static Bitmapset *
 _copyBitmapset(const Bitmapset *from)
 {
 	return bms_copy(from);
+}
+
+static RPRPattern *
+_copyRPRPattern(const RPRPattern *from)
+{
+	RPRPattern *newnode = makeNode(RPRPattern);
+
+	COPY_SCALAR_FIELD(numVars);
+	COPY_SCALAR_FIELD(maxDepth);
+	COPY_SCALAR_FIELD(numElements);
+
+	/* Deep copy the varNames array (DEFINE clause is required) */
+	Assert(from->numVars > 0);
+	newnode->varNames = palloc0_array(char *, from->numVars);
+	for (int i = 0; i < from->numVars; i++)
+		newnode->varNames[i] = pstrdup(from->varNames[i]);
+
+	/* Deep copy the elements array (always has at least one element + FIN) */
+	Assert(from->numElements >= 2);
+	newnode->elements = palloc_array(RPRPatternElement, from->numElements);
+	memcpy(newnode->elements, from->elements,
+		   from->numElements * sizeof(RPRPatternElement));
+
+	COPY_SCALAR_FIELD(isAbsorbable);
+
+	return newnode;
 }
 
 

@@ -96,6 +96,14 @@ static void checkWellFormedRecursion(CteState *cstate);
 static bool checkWellFormedRecursionWalker(Node *node, CteState *cstate);
 static void checkWellFormedSelectStmt(SelectStmt *stmt, CteState *cstate);
 
+/* Recursive-WITH RPR rejection */
+typedef struct
+{
+	ParseLoc	location;		/* location of first RPR window, or -1 */
+} ContainRPRContext;
+
+static bool contain_rpr_walker(Node *node, void *context);
+
 
 /*
  * transformWithClause -
@@ -163,6 +171,28 @@ transformWithClause(ParseState *pstate, WithClause *withClause)
 		 */
 		CteState	cstate;
 		int			i;
+
+		/*
+		 * Per ISO/IEC 9075-2:2016 7.17 Syntax Rule 3)e)f), every <with list
+		 * element> in a WITH RECURSIVE clause is "potentially recursive" and
+		 * shall not contain a <row pattern common syntax>.  (PostgreSQL does
+		 * not implement <row pattern measures>, so only the common syntax
+		 * needs to be checked.)  ISO/IEC 19075-5 6.17.5 (R020) and 4.18.5
+		 * (R010) restate the prohibition for CREATE RECURSIVE VIEW, which is
+		 * rewritten to WITH RECURSIVE by makeRecursiveViewSelect() and so
+		 * flows through here as well.
+		 */
+		foreach_node(CommonTableExpr, cte, withClause->ctes)
+		{
+			ContainRPRContext ctx;
+
+			ctx.location = -1;
+			if (contain_rpr_walker(cte->ctequery, &ctx))
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("cannot use row pattern recognition in a recursive query"),
+						parser_errposition(pstate, ctx.location));
+		}
 
 		cstate.pstate = pstate;
 		cstate.numitems = list_length(withClause->ctes);
@@ -1267,4 +1297,28 @@ checkWellFormedSelectStmt(SelectStmt *stmt, CteState *cstate)
 					 (int) stmt->op);
 		}
 	}
+}
+
+
+/*
+ * contain_rpr_walker
+ *	  Returns true if the raw parse tree contains any <row pattern common
+ *	  syntax> -- i.e., any WindowDef with PATTERN/DEFINE attached.
+ */
+static bool
+contain_rpr_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, WindowDef))
+	{
+		WindowDef  *wd = (WindowDef *) node;
+
+		if (wd->rpCommonSyntax != NULL)
+		{
+			((ContainRPRContext *) context)->location = wd->rpCommonSyntax->location;
+			return true;
+		}
+	}
+	return raw_expression_tree_walker(node, contain_rpr_walker, context);
 }

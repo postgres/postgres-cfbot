@@ -60,8 +60,10 @@
 #include "access/tupconvert.h"
 #include "catalog/pg_type.h"
 #include "commands/sequence.h"
+#include "common/int.h"
 #include "executor/execExpr.h"
 #include "executor/nodeSubplan.h"
+#include "executor/nodeWindowAgg.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
@@ -586,6 +588,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_WINDOW_FUNC,
 		&&CASE_EEOP_MERGE_SUPPORT_FUNC,
 		&&CASE_EEOP_SUBPLAN,
+		&&CASE_EEOP_RPR_NAV_SET,
+		&&CASE_EEOP_RPR_NAV_RESTORE,
 		&&CASE_EEOP_AGG_STRICT_DESERIALIZE,
 		&&CASE_EEOP_AGG_DESERIALIZE,
 		&&CASE_EEOP_AGG_STRICT_INPUT_CHECK_ARGS,
@@ -2009,6 +2013,24 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			ExecEvalSubPlan(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		/* RPR navigation: swap slot to target row */
+		EEO_CASE(EEOP_RPR_NAV_SET)
+		{
+			ExecEvalRPRNavSet(state, op, econtext);
+			outerslot = econtext->ecxt_outertuple;
+
+			EEO_NEXT();
+		}
+
+		/* RPR navigation: restore slot to original row */
+		EEO_CASE(EEOP_RPR_NAV_RESTORE)
+		{
+			ExecEvalRPRNavRestore(state, op, econtext);
+			outerslot = econtext->ecxt_outertuple;
 
 			EEO_NEXT();
 		}
@@ -5987,4 +6009,239 @@ ExecAggPlainTransByRef(AggState *aggstate, AggStatePerTrans pertrans,
 	pergroup->transValueIsNull = fcinfo->isnull;
 
 	MemoryContextSwitchTo(oldContext);
+}
+
+/*
+ * Evaluate RPR navigation (PREV/NEXT/FIRST/LAST): swap slot to target row.
+ *
+ * Saves the current outertuple into winstate for later restore, computes
+ * the target row position, fetches the corresponding slot from the
+ * tuplestore, and replaces econtext->ecxt_outertuple with it.
+ *
+ * This is called both from the interpreter inline handler and from
+ * JIT-compiled expressions via build_EvalXFunc.
+ */
+void
+ExecEvalRPRNavSet(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	WindowAggState *winstate;
+	int64		offset;
+	int64		compound_offset;
+	int64		target_pos;
+	TupleTableSlot *target_slot;
+	RPRNavState *rprnavstate = op->d.rpr_nav.rprnavstate;
+
+	winstate = rprnavstate->winstate;
+
+	/* Save current slot for later restore */
+	winstate->nav_saved_outertuple = econtext->ecxt_outertuple;
+
+	/*
+	 * resolve_nav_offsets() settled both offsets for this scan: it writes
+	 * them as non-null, and where either is negative it raises the error and
+	 * never writes them at all.  Assert the invariants rather than repeating
+	 * those checks here.
+	 */
+	Assert(!rprnavstate->offset.isnull && !rprnavstate->compound_offset.isnull);
+
+	offset = DatumGetInt64(rprnavstate->offset.value);
+	compound_offset = DatumGetInt64(rprnavstate->compound_offset.value);
+
+	Assert(offset >= 0 && compound_offset >= 0);
+
+	/*
+	 * Calculate target position based on navigation direction.  On overflow,
+	 * use -1 so that ExecRPRNavGetSlot treats it as out of range.
+	 */
+	switch (rprnavstate->rprnavexpr->kind)
+	{
+		case RPR_NAV_PREV:
+
+			/*
+			 * currentpos and offset are both non-negative, so the subtraction
+			 * cannot underflow; assert the invariant rather than guarding an
+			 * unreachable overflow.
+			 */
+			Assert(!pg_sub_s64_overflow(winstate->currentpos, offset, &target_pos));
+			target_pos = winstate->currentpos - offset;
+			break;
+		case RPR_NAV_NEXT:
+			if (pg_add_s64_overflow(winstate->currentpos, offset, &target_pos))
+				target_pos = -1;
+			break;
+		case RPR_NAV_FIRST:
+			/* FIRST: offset from match_start, clamped to currentpos */
+			if (pg_add_s64_overflow(winstate->nav_match_start, offset, &target_pos))
+				target_pos = -1;
+			else if (target_pos > winstate->currentpos)
+				target_pos = -1;	/* beyond current match range */
+			break;
+		case RPR_NAV_LAST:
+			/* LAST: offset backward from currentpos, clamped to match_start */
+			if (pg_sub_s64_overflow(winstate->currentpos, offset, &target_pos))
+				target_pos = -1;
+			else if (target_pos < winstate->nav_match_start)
+				target_pos = -1;	/* before match_start */
+			break;
+
+		case RPR_NAV_PREV_FIRST:
+		case RPR_NAV_NEXT_FIRST:
+			{
+				int64		inner_pos;
+
+				/* Inner: match_start + offset */
+				if (pg_add_s64_overflow(winstate->nav_match_start, offset, &inner_pos))
+				{
+					target_pos = -1;
+					break;
+				}
+				if (inner_pos > winstate->currentpos || inner_pos < 0)
+				{
+					target_pos = -1;
+					break;
+				}
+
+				/* Apply outer: PREV subtracts, NEXT adds */
+				if (rprnavstate->rprnavexpr->kind == RPR_NAV_PREV_FIRST)
+				{
+					/*
+					 * inner_pos is in [0, currentpos] and compound_offset is
+					 * non-negative, so this cannot underflow.
+					 */
+					Assert(!pg_sub_s64_overflow(inner_pos, compound_offset, &target_pos));
+					target_pos = inner_pos - compound_offset;
+				}
+				else
+				{
+					if (pg_add_s64_overflow(inner_pos, compound_offset, &target_pos))
+						target_pos = -1;
+				}
+			}
+			break;
+
+		case RPR_NAV_PREV_LAST:
+		case RPR_NAV_NEXT_LAST:
+			{
+				int64		inner_pos;
+
+				/* Inner: currentpos - offset */
+				if (pg_sub_s64_overflow(winstate->currentpos, offset, &inner_pos))
+				{
+					target_pos = -1;
+					break;
+				}
+				if (inner_pos < winstate->nav_match_start)
+				{
+					target_pos = -1;
+					break;
+				}
+
+				/* Apply outer: PREV subtracts, NEXT adds */
+				if (rprnavstate->rprnavexpr->kind == RPR_NAV_PREV_LAST)
+				{
+					/*
+					 * inner_pos is in [nav_match_start, currentpos] (>= 0)
+					 * and compound_offset is non-negative, so this cannot
+					 * underflow.
+					 */
+					Assert(!pg_sub_s64_overflow(inner_pos, compound_offset, &target_pos));
+					target_pos = inner_pos - compound_offset;
+				}
+				else
+				{
+					if (pg_add_s64_overflow(inner_pos, compound_offset, &target_pos))
+						target_pos = -1;
+				}
+			}
+			break;
+		default:
+			elog(ERROR, "unrecognized RPR navigation kind: %d",
+				 (int) rprnavstate->rprnavexpr->kind);
+			break;
+	}
+
+	/*
+	 * Slot swap elision: if target_pos is the current row, skip the
+	 * tuplestore fetch and slot swap entirely.  This benefits LAST(expr),
+	 * PREV(expr, 0), NEXT(expr, 0), and similar cases.
+	 *
+	 * We must still set nav_saved_outertuple (done above) so that
+	 * EEOP_RPR_NAV_RESTORE is a harmless no-op.
+	 */
+	if (target_pos == winstate->currentpos)
+	{
+		/* target row trivially exists; see comment below */
+		*op->resnull = false;
+		return;
+	}
+
+	target_slot = ExecRPRNavGetSlot(winstate, target_pos);
+
+	/*
+	 * Report whether the target row exists through resnull, which the jump
+	 * step tests before the argument expression gets to overwrite it: null
+	 * when the row is out of range, so the jump skips the argument, and a
+	 * definitive false otherwise, since resnull may still hold a stale value
+	 * from a previous evaluation.
+	 */
+	if (target_slot == NULL)
+	{
+		*op->resvalue = (Datum) 0;
+		*op->resnull = true;
+		return;
+	}
+	*op->resnull = false;
+
+	/*
+	 * Update econtext to point to the target slot.  Also decompress the new
+	 * slot's attributes since FETCHSOME already ran for the original slot.
+	 * The caller (interpreter or JIT) is responsible for updating any local
+	 * slot cache (e.g. outerslot) from econtext after we return.
+	 */
+	slot_getallattrs(target_slot);
+	econtext->ecxt_outertuple = target_slot;
+}
+
+/*
+ * Evaluate RPR navigation: restore slot to original row.
+ *
+ * Restores econtext->ecxt_outertuple from the saved slot in winstate.
+ * The caller is responsible for updating any local slot cache.
+ *
+ * For pass-by-reference result types, the result datum points into
+ * nav_slot's tuple memory.  If a subsequent navigation in the same
+ * expression re-fetches nav_slot for a different position, the old
+ * tuple is freed, leaving a dangling pointer.  We prevent this by
+ * copying pass-by-ref results into per-tuple memory, which survives
+ * until the next ResetExprContext.
+ */
+void
+ExecEvalRPRNavRestore(ExprState *state, ExprEvalStep *op,
+					  ExprContext *econtext)
+{
+	WindowAggState *winstate = op->d.rpr_nav.rprnavstate->winstate;
+
+	/*
+	 * When the slot swap was elided (target == currentpos), restoring is a
+	 * no-op, and the argument read the current row's slot rather than
+	 * nav_slot, so no re-fetch of nav_slot can invalidate a pass-by-ref
+	 * result.
+	 */
+	if (econtext->ecxt_outertuple == winstate->nav_saved_outertuple)
+		return;
+
+	econtext->ecxt_outertuple = winstate->nav_saved_outertuple;
+
+	/* Stabilize pass-by-ref result against nav_slot re-fetch */
+	if (!op->d.rpr_nav.rprnavstate->resulttypbyval &&
+		!*op->resnull)
+	{
+		MemoryContext oldContext;
+
+		oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+		*op->resvalue = datumCopy(*op->resvalue,
+								  false,
+								  op->d.rpr_nav.rprnavstate->resulttyplen);
+		MemoryContextSwitchTo(oldContext);
+	}
 }
