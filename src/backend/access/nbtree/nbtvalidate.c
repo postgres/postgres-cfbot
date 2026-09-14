@@ -107,6 +107,7 @@ btvalidate(Oid opclassoid)
 				ok = check_amoptsproc_signature(procform->amproc);
 				break;
 			case BTSKIPSUPPORT_PROC:
+			case BTBINSEARCH_PROC:
 				ok = check_amproc_signature(procform->amproc, VOIDOID, true,
 											1, 1, INTERNALOID);
 				break;
