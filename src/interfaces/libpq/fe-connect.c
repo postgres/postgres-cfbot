@@ -8000,6 +8000,10 @@ pwdfMatchesString(char *buf, const char *token)
 /*
  * Get a password from the password file. Return value is malloc'd.
  *
+ * The returned string holds nothing but the de-escaped password and its
+ * terminating zero byte, so callers can clear it with
+ * explicit_bzero(ret, strlen(ret)); pqReleaseConnHosts() relies on this.
+ *
  * On failure, *errmsg is set to an error to be returned.  It is
  * left NULL on success, or if no password could be found.
  */
@@ -8116,6 +8120,23 @@ passwordFromFile(const char *hostname, const char *port,
 						   *p1,
 						   *p2;
 
+				/*
+				 * De-escape the password in place, within the line buffer,
+				 * before copying it out.  Copying first and de-escaping the
+				 * copy would leave the tail of the escaped password, and
+				 * anything following it on the line, in the result past the
+				 * terminating zero byte, where a caller that clears
+				 * strlen(ret) bytes (as pqReleaseConnHosts() does) cannot
+				 * reach it.  The line buffer itself is cleared below.
+				 */
+				for (p1 = p2 = t; *p1 != ':' && *p1 != '\0'; ++p1, ++p2)
+				{
+					if (*p1 == '\\' && p1[1] != '\0')
+						++p1;
+					*p2 = *p1;
+				}
+				*p2 = '\0';
+
 				ret = strdup(t);
 
 				fclose(fp);
@@ -8127,15 +8148,6 @@ passwordFromFile(const char *hostname, const char *port,
 					*errmsg = libpq_gettext("out of memory");
 					return NULL;
 				}
-
-				/* De-escape password. */
-				for (p1 = p2 = ret; *p1 != ':' && *p1 != '\0'; ++p1, ++p2)
-				{
-					if (*p1 == '\\' && p1[1] != '\0')
-						++p1;
-					*p2 = *p1;
-				}
-				*p2 = '\0';
 
 				return ret;
 			}
