@@ -2207,6 +2207,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	BufferDesc *victim_buf_hdr;
 	uint64		victim_buf_state;
 	uint64		set_bits = 0;
+	BufTableScanResult mapping;
 
 	/* Make sure we will have room to remember the buffer pin */
 	ResourceOwnerEnlarge(CurrentResourceOwner);
@@ -2284,7 +2285,7 @@ retry_lookup:
 	 * victim buffer we acquired and use the already inserted one.
 	 */
 	LWLockAcquire(newPartitionLock, LW_EXCLUSIVE);
-	existing_buf_id = BufTableInsert(&newTag, newHash, victim_buf_hdr->buf_id);
+	existing_buf_id = BufTablePrepareInsert(&newTag, newHash, &mapping);
 	if (existing_buf_id >= 0)
 	{
 		BufferDesc *existing_buf_hdr;
@@ -2307,6 +2308,7 @@ retry_lookup:
 		existing_buf_hdr = GetBufferDescriptor(existing_buf_id);
 
 		valid = PinBuffer(existing_buf_hdr, strategy, false);
+		Assert(BufferTagsEqual(&newTag, &existing_buf_hdr->tag));
 
 		/* Can release the mapping lock as soon as we've pinned it */
 		LWLockRelease(newPartitionLock);
@@ -2325,9 +2327,10 @@ retry_lookup:
 
 		return existing_buf_hdr;
 	}
-
 	/*
 	 * Need to lock the buffer header too in order to change its tag.
+	 * Publish the mapping while the header is still locked so a lock-free
+	 * lookup cannot pin until tag is updated and BM_TAG_VALID is set.
 	 */
 	victim_buf_state = LockBufHdr(victim_buf_hdr);
 
@@ -2346,6 +2349,8 @@ retry_lookup:
 	set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
 	if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 		set_bits |= BM_PERMANENT;
+
+	BufTableInsert(&mapping, &newTag, newHash, victim_buf_hdr->buf_id);
 
 	UnlockBufHdrExt(victim_buf_hdr, victim_buf_state,
 					set_bits, 0, 0);
@@ -2384,7 +2389,7 @@ InvalidateBuffer(BufferDesc *buf)
 	LWLock	   *oldPartitionLock;	/* buffer partition lock for it */
 	uint32		oldFlags;
 	uint64		buf_state;
-
+	BufTableScanResult mapping;
 	/* Save the original buffer tag before dropping the spinlock */
 	oldTag = buf->tag;
 
@@ -2405,6 +2410,7 @@ retry:
 	 * association.
 	 */
 	LWLockAcquire(oldPartitionLock, LW_EXCLUSIVE);
+	BufTablePrepareDelete(&oldTag, oldHash, &mapping);
 
 	/* Re-lock the buffer header */
 	buf_state = LockBufHdr(buf);
@@ -2418,15 +2424,15 @@ retry:
 	}
 
 	/*
-	 * We assume the reason for it to be pinned is that either we were
-	 * asynchronously reading the page in before erroring out or someone else
-	 * is flushing the page out.  Wait for the IO to finish.  (This could be
-	 * an infinite loop if the refcount is messed up... it would be nice to
-	 * time out after awhile, but there seems no way to be sure how many loops
-	 * may be needed.  Note that if the other guy has pinned the buffer but
-	 * not yet done StartBufferIO, WaitIO will fall through and we'll
-	 * effectively be busy-looping here.)
-	 */
+		* We assume the reason for it to be pinned is that either we were
+		* asynchronously reading the page in before erroring out or someone else
+		* is flushing the page out.  Wait for the IO to finish.  (This could be
+		* an infinite loop if the refcount is messed up... it would be nice to
+		* time out after awhile, but there seems no way to be sure how many loops
+		* may be needed.  Note that if the other guy has pinned the buffer but
+		* not yet done StartBufferIO, WaitIO will fall through and we'll
+		* effectively be busy-looping here.)
+		*/
 	if (BUF_STATE_GET_REFCOUNT(buf_state) != 0)
 	{
 		UnlockBufHdr(buf);
@@ -2439,28 +2445,30 @@ retry:
 	}
 
 	/*
-	 * An invalidated buffer should not have any backends waiting to lock the
-	 * buffer, therefore BM_LOCK_WAKE_IN_PROGRESS should not be set.
-	 */
+		* An invalidated buffer should not have any backends waiting to lock the
+		* buffer, therefore BM_LOCK_WAKE_IN_PROGRESS should not be set.
+		*/
 	Assert(!(buf_state & BM_LOCK_WAKE_IN_PROGRESS));
 
 	/*
-	 * Clear out the buffer's tag and flags.  We must do this to ensure that
-	 * linear scans of the buffer array don't think the buffer is valid.
-	 */
+		* Clear out the buffer's tag and flags.  We must do this to ensure that
+		* linear scans of the buffer array don't think the buffer is valid.
+		*/
 	oldFlags = buf_state & BUF_FLAG_MASK;
+
+	if (oldFlags & BM_TAG_VALID)
+	{
+		if (mapping.found != buf->buf_id)
+			elog(ERROR, "shared buffer hash table corrupted");
+		BufTableUnlink(&mapping);
+	}
+
 	ClearBufferTag(&buf->tag);
 
 	UnlockBufHdrExt(buf, buf_state,
 					0,
 					BUF_FLAG_MASK | BUF_USAGECOUNT_MASK,
 					0);
-
-	/*
-	 * Remove the buffer from the lookup hashtable, if it was in there.
-	 */
-	if (oldFlags & BM_TAG_VALID)
-		BufTableDelete(&oldTag, oldHash);
 
 	/*
 	 * Done with mapping lock.
@@ -2484,6 +2492,7 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 	uint32		hash;
 	LWLock	   *partition_lock;
 	BufferTag	tag;
+	BufTableScanResult mapping;
 
 	Assert(GetPrivateRefCount(BufferDescriptorGetBuffer(buf_hdr)) == 1);
 
@@ -2495,21 +2504,23 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 
 	LWLockAcquire(partition_lock, LW_EXCLUSIVE);
 
+	BufTablePrepareDelete(&tag, hash, &mapping);
+
 	/* lock the buffer header */
 	buf_state = LockBufHdr(buf_hdr);
 
 	/*
-	 * We have the buffer pinned nobody else should have been able to unset
-	 * this concurrently.
-	 */
+		* We have the buffer pinned nobody else should have been able to unset
+		* this concurrently.
+		*/
 	Assert(buf_state & BM_TAG_VALID);
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
 	Assert(BufferTagsEqual(&buf_hdr->tag, &tag));
 
 	/*
-	 * If somebody else pinned the buffer since, or even worse, dirtied it,
-	 * give up on this buffer: It's clearly in use.
-	 */
+		* If somebody else pinned the buffer since, or even worse, dirtied it,
+		* give up on this buffer: It's clearly in use.
+		*/
 	if (BUF_STATE_GET_REFCOUNT(buf_state) != 1 || (buf_state & BM_DIRTY))
 	{
 		Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
@@ -2521,10 +2532,14 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 	}
 
 	/*
-	 * An invalidated buffer should not have any backends waiting to lock the
-	 * buffer, therefore BM_LOCK_WAKE_IN_PROGRESS should not be set.
-	 */
+		* An invalidated buffer should not have any backends waiting to lock the
+		* buffer, therefore BM_LOCK_WAKE_IN_PROGRESS should not be set.
+		*/
 	Assert(!(buf_state & BM_LOCK_WAKE_IN_PROGRESS));
+
+	if (mapping.found != buf_hdr->buf_id)
+		elog(ERROR, "shared buffer hash table corrupted");
+	BufTableUnlink(&mapping);
 
 	/*
 	 * Clear out the buffer's tag and flags and usagecount.  This is not
@@ -2540,9 +2555,6 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 					0);
 
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
-
-	/* finally delete buffer from the buffer mapping table */
-	BufTableDelete(&tag, hash);
 
 	LWLockRelease(partition_lock);
 
@@ -2927,6 +2939,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 		uint32		hash;
 		LWLock	   *partition_lock;
 		int			existing_id;
+		BufTableScanResult mapping;
 
 		/* in case we need to pin an existing buffer below */
 		ResourceOwnerEnlarge(CurrentResourceOwner);
@@ -2939,7 +2952,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 		LWLockAcquire(partition_lock, LW_EXCLUSIVE);
 
-		existing_id = BufTableInsert(&tag, hash, victim_buf_hdr->buf_id);
+		existing_id = BufTablePrepareInsert(&tag, hash, &mapping);
 
 		/*
 		 * We get here only in the corner case where we are trying to extend
@@ -3015,6 +3028,8 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 			set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
 			if (bmr.relpersistence == RELPERSISTENCE_PERMANENT || fork == INIT_FORKNUM)
 				set_bits |= BM_PERMANENT;
+
+			BufTableInsert(&mapping, &tag, hash, victim_buf_hdr->buf_id);
 
 			UnlockBufHdrExt(victim_buf_hdr, buf_state,
 							set_bits, 0,
