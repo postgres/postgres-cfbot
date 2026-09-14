@@ -37,7 +37,6 @@
  */
 #include "postgres.h"
 
-#include "access/htup_details.h"
 #include "catalog/pg_propgraph_element.h"
 #include "executor/executor.h"
 #include "executor/nodeGraphScan.h"
@@ -47,26 +46,27 @@
 #include "utils/array.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/syscache.h"
 
 static TupleTableSlot *ExecGraphScan(PlanState *pstate);
-static void build_arms(GraphScanState * node, GraphScan * plan);
+static void build_arms(GraphScanState * node);
 static void build_arm_keys(List *keys, int *nkeys, FmgrInfo **eq, Oid **colls);
-static bool graph_fetch_seed(GraphScanState * node, GraphScan * plan);
+static bool graph_fetch_seed(GraphScanState * node);
 static void graph_bind_side(GraphScanState * node, GraphDepthFrameData * fr,
 							bool active, int first_slot, int nslots);
 static void graph_bind_vertex_params(GraphScanState * node,
 									 GraphDepthFrameData * fr);
-static bool graph_next(GraphScanState * node, GraphScan * plan);
-static bool graph_step(GraphScanState * node, GraphScan * plan,
-					   GraphDepthFrameData * fr);
-static int	graph_try_edge(GraphScanState * node, GraphScan * plan,
+static bool graph_next(GraphScanState * node);
+static bool graph_step(GraphScanState * node, GraphDepthFrameData * fr);
+static bool try_traverse(GraphDepthFrameData * fr, TupleTableSlot *eslot,
+						 GraphScanArmData * arm, bool match_src,
+						 Oid *newelem, int *newnkeys, Datum *newvid,
+						 bool *newnull);
+static bool graph_try_edge(GraphScanState * node,
 						   GraphDepthFrameData * fr, TupleTableSlot *eslot,
 						   Oid *newelem, int *newnkeys, Datum *newvid,
 						   bool *newnull, Datum *eprops, bool *epropsnull);
-static bool edge_key_matches(GraphScanState * node, GraphDepthFrameData * fr,
-							 TupleTableSlot *eslot, GraphScanArmData * arm,
-							 bool issrc);
+static bool edge_key_matches(GraphDepthFrameData * fr, TupleTableSlot *eslot,
+							 GraphScanArmData * arm, bool issrc);
 static int	graph_find_arm(GraphScanState * node, Oid relid);
 static void graph_push(GraphScanState * node, Oid newelem, int newnkeys,
 					   Datum *newvid, bool *newnull, Datum *eprops,
@@ -78,19 +78,15 @@ static TupleTableSlot *graph_emit_row(GraphScanState * node, TupleTableSlot *slo
 static Datum graph_build_edge_array(GraphScanState * node, TupleTableSlot *slot,
 									int pi);
 
-/* Result values of graph_try_edge */
-#define GRAPH_EDGE_NONE 0		/* not traversable */
-#define GRAPH_EDGE_FORWARD 1	/* traversable in the forward direction */
-#define GRAPH_EDGE_FORWARD 1	/* forward traversal */
-
 /*
  * Compile, per edge element arm, the metadata needed to match edges against
  * the current vertex: element ids, source/destination key column positions
  * within the arm's output row, and default equality functions.
  */
 static void
-build_arms(GraphScanState * node, GraphScan * plan)
+build_arms(GraphScanState * node)
 {
+	GraphScan  *plan = castNode(GraphScan, node->ss.ps.plan);
 	int			nprops = node->nprops;
 
 	node->arms = palloc0(sizeof(GraphScanArmData) * node->narms);
@@ -98,18 +94,10 @@ build_arms(GraphScanState * node, GraphScan * plan)
 	for (int a = 0; a < node->narms; a++)
 	{
 		Oid			elemoid = list_nth_oid(plan->edge_element_oids, a);
-		HeapTuple	etup;
-		Form_pg_propgraph_element pge;
 		GraphScanArmData *arm = &node->arms[a];
 
-		etup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
-		if (!HeapTupleIsValid(etup))
-			elog(ERROR, "cache lookup failed for property graph element %u", elemoid);
-		pge = (Form_pg_propgraph_element) GETSTRUCT(etup);
-
-		arm->arm_relid = pge->pgerelid;
-		arm->arm_srcvertex = pge->pgesrcvertexid;
-		arm->arm_dstvertex = pge->pgedestvertexid;
+		get_graph_element_identity(elemoid, &arm->arm_relid,
+								   &arm->arm_srcvertex, &arm->arm_dstvertex);
 		arm->arm_src_first = nprops + 2;
 		arm->arm_dst_first = nprops + 2 + node->max_nsrc;
 
@@ -119,8 +107,6 @@ build_arms(GraphScanState * node, GraphScan * plan)
 		build_arm_keys(get_graph_element_key_columns(elemoid,
 													 Anum_pg_propgraph_element_pgedestkey),
 					   &arm->arm_ndst, &arm->arm_dsteq, &arm->arm_dstcoll);
-
-		ReleaseSysCache(etup);
 	}
 }
 
@@ -154,7 +140,7 @@ build_arm_keys(List *keys, int *nkeys, FmgrInfo **eq, Oid **colls)
  * is no (usable) seed; the scan is then exhausted.
  */
 static bool
-graph_fetch_seed(GraphScanState * node, GraphScan * plan)
+graph_fetch_seed(GraphScanState * node)
 {
 	EState	   *estate = node->ss.ps.state;
 	GraphDepthFrameData *fr = &node->frames[0];
@@ -272,13 +258,13 @@ graph_bind_vertex_params(GraphScanState * node, GraphDepthFrameData * fr)
  * seed is exhausted (caller must fetch a new seed).
  */
 static bool
-graph_next(GraphScanState * node, GraphScan * plan)
+graph_next(GraphScanState * node)
 {
 	for (;;)
 	{
 		GraphDepthFrameData *fr = &node->frames[node->cur_depth];
 
-		if (graph_step(node, plan, fr))
+		if (graph_step(node, fr))
 		{
 			/* descended one edge; emit whenever the new depth is deep enough */
 			if (node->cur_depth >= node->min_depth)
@@ -301,9 +287,9 @@ graph_next(GraphScanState * node, GraphScan * plan)
  * true if a new depth was pushed onto the stack.
  */
 static bool
-graph_step(GraphScanState * node, GraphScan * plan,
-		   GraphDepthFrameData * fr)
+graph_step(GraphScanState * node, GraphDepthFrameData * fr)
 {
+	GraphScan  *plan = castNode(GraphScan, node->ss.ps.plan);
 	TupleTableSlot *eslot;
 	Oid			newelem;
 	int			newnkeys;
@@ -330,32 +316,24 @@ graph_step(GraphScanState * node, GraphScan * plan,
 	 * (the frame's vertex) before pulling any rows.  Parameterized index
 	 * scans only re-evaluate their scan keys when (re)started, so a frame
 	 * whose vertex was (re)set (a fresh push or a new seed) must have its
-	 * inner scan (re)initialized or rescanned now, first and only time it is
-	 * stepped for that vertex.
+	 * inner scan rescanned now, first and only time it is stepped for that
+	 * vertex.
 	 */
 	graph_bind_vertex_params(node, fr);
 	if (fr->need_init)
 	{
-		if (fr->inner_state == NULL)
-			fr->inner_state =
-				ExecInitNode(copyObject(plan->inner_plan),
-							 node->ss.ps.state, node->eflags);
-		else
-			ExecReScan(fr->inner_state);
+		ExecReScan(fr->inner_state);
 		fr->need_init = false;
 	}
 
 	for (;;)
 	{
-		int			res;
-
 		eslot = ExecProcNode(fr->inner_state);
 		if (TupIsNull(eslot))
 			return false;
 
-		res = graph_try_edge(node, plan, fr, eslot, &newelem, &newnkeys, newvid,
-							 newnull, newprops, newpropsnull);
-		if (res != GRAPH_EDGE_NONE)
+		if (graph_try_edge(node, fr, eslot, &newelem, &newnkeys, newvid,
+						   newnull, newprops, newpropsnull))
 		{
 			graph_push(node, newelem, newnkeys, newvid, newnull, newprops,
 					   newpropsnull);
@@ -365,24 +343,62 @@ graph_step(GraphScanState * node, GraphScan * plan,
 }
 
 /*
+ * Try to adopt a candidate edge (one row of the inner plan) as the next
+ * traversal step: the current vertex must match the given side (source or
+ * destination) of the edge, in which case the next vertex is the element on
+ * the opposite side.  The direction of the hop decides which side is tried.
+ */
+static bool
+try_traverse(GraphDepthFrameData * fr, TupleTableSlot *eslot,
+			 GraphScanArmData * arm, bool match_src,
+			 Oid *newelem, int *newnkeys, Datum *newvid,
+			 bool *newnull)
+{
+	Oid			next_elem;
+	int			next_nkeys;
+	int			next_first;
+
+	if (match_src)
+	{
+		next_elem = arm->arm_dstvertex;
+		next_nkeys = arm->arm_ndst;
+		next_first = arm->arm_dst_first;
+	}
+	else
+	{
+		next_elem = arm->arm_srcvertex;
+		next_nkeys = arm->arm_nsrc;
+		next_first = arm->arm_src_first;
+	}
+
+	if (!edge_key_matches(fr, eslot, arm, match_src))
+		return false;
+
+	*newelem = next_elem;
+	*newnkeys = next_nkeys;
+	for (int i = 0; i < next_nkeys; i++)
+		newvid[i] = slot_getattr(eslot, next_first + i + 1, &newnull[i]);
+	return true;
+}
+
+/*
  * Check whether a candidate edge (one row of the inner plan) is traversable
  * from the current vertex, according to the hop's direction, and if so fill
  * the next vertex plus the edge's VLE property values.
- *
- * Returns GRAPH_EDGE_NONE / _FORWARD / _BOTH (the latter for an undirected
- * non-loop edge, whose reverse traversal is also valid and is deferred).
  */
-static int
-graph_try_edge(GraphScanState * node, GraphScan * plan,
-			   GraphDepthFrameData * fr, TupleTableSlot *eslot,
-			   Oid *newelem, int *newnkeys, Datum *newvid,
-			   bool *newnull, Datum *eprops, bool *epropsnull)
+static bool
+graph_try_edge(GraphScanState * node, GraphDepthFrameData * fr,
+			   TupleTableSlot *eslot, Oid *newelem, int *newnkeys,
+			   Datum *newvid, bool *newnull, Datum *eprops,
+			   bool *epropsnull)
 {
+	GraphScan  *plan = castNode(GraphScan, node->ss.ps.plan);
 	Oid			tbl;
 	bool		isnull;
 	int			armno;
 	GraphScanArmData *arm;
 	int			nprops = node->nprops;
+	bool		matched;
 
 	/* identify the edge element by its table OID */
 	tbl = DatumGetObjectId(slot_getattr(eslot, nprops + 2, &isnull));
@@ -391,69 +407,37 @@ graph_try_edge(GraphScanState * node, GraphScan * plan,
 		elog(ERROR, "graph scan encountered unknown edge element table %u", tbl);
 	arm = &node->arms[armno];
 
-	/* VLE property values of the edge (may be filtered out below) */
-	for (int i = 0; i < nprops; i++)
-	{
-		eprops[i] = slot_getattr(eslot, i + 1, &epropsnull[i]);
-	}
-
 	switch (plan->direction)
 	{
 		case GRAPH_DIR_INCOMING:
-			if (edge_key_matches(node, fr, eslot, arm, false))
-			{
-				*newelem = arm->arm_srcvertex;
-				*newnkeys = arm->arm_nsrc;
-				for (int i = 0; i < arm->arm_nsrc; i++)
-					newvid[i] =
-						slot_getattr(eslot, arm->arm_src_first + i + 1, &newnull[i]);
-				return GRAPH_EDGE_FORWARD;
-			}
+			/* traverse the edge from its destination (the current vertex) */
+			matched = try_traverse(fr, eslot, arm, false,
+								   newelem, newnkeys, newvid, newnull);
 			break;
 
 		case GRAPH_DIR_UNDIRECTED:
-
-			/*
-			 * An undirected edge is traversable from the current vertex when
-			 * it matches either endpoint: as the source it yields the
-			 * destination as next vertex, as the destination it yields the
-			 * source (the reverse traversal, generated here rather than with
-			 * a deferred mechanism).
-			 */
-			if (edge_key_matches(node, fr, eslot, arm, true))
-			{
-				*newelem = arm->arm_dstvertex;
-				*newnkeys = arm->arm_ndst;
-				for (int i = 0; i < arm->arm_ndst; i++)
-					newvid[i] =
-						slot_getattr(eslot, arm->arm_dst_first + i + 1, &newnull[i]);
-				return GRAPH_EDGE_FORWARD;
-			}
-			if (edge_key_matches(node, fr, eslot, arm, false))
-			{
-				*newelem = arm->arm_srcvertex;
-				*newnkeys = arm->arm_nsrc;
-				for (int i = 0; i < arm->arm_nsrc; i++)
-					newvid[i] =
-						slot_getattr(eslot, arm->arm_src_first + i + 1, &newnull[i]);
-				return GRAPH_EDGE_FORWARD;
-			}
+			/* traverse from either endpoint; try the source side first */
+			matched = try_traverse(fr, eslot, arm, true,
+								   newelem, newnkeys, newvid, newnull);
+			if (!matched)
+				matched = try_traverse(fr, eslot, arm, false,
+									   newelem, newnkeys, newvid, newnull);
 			break;
 
 		default:				/* GRAPH_DIR_OUTGOING */
-			if (edge_key_matches(node, fr, eslot, arm, true))
-			{
-				*newelem = arm->arm_dstvertex;
-				*newnkeys = arm->arm_ndst;
-				for (int i = 0; i < arm->arm_ndst; i++)
-					newvid[i] =
-						slot_getattr(eslot, arm->arm_dst_first + i + 1, &newnull[i]);
-				return GRAPH_EDGE_FORWARD;
-			}
+			/* traverse the edge from its source (the current vertex) */
+			matched = try_traverse(fr, eslot, arm, true,
+								   newelem, newnkeys, newvid, newnull);
 			break;
 	}
 
-	return GRAPH_EDGE_NONE;
+	if (!matched)
+		return false;
+
+	/* VLE property values of the edge */
+	for (int i = 0; i < nprops; i++)
+		eprops[i] = slot_getattr(eslot, i + 1, &epropsnull[i]);
+	return true;
 }
 
 /*
@@ -462,9 +446,8 @@ graph_try_edge(GraphScanState * node, GraphScan * plan,
  * destination) vertex element must equal the current vertex's element.
  */
 static bool
-edge_key_matches(GraphScanState * node, GraphDepthFrameData * fr,
-				 TupleTableSlot *eslot, GraphScanArmData * arm,
-				 bool issrc)
+edge_key_matches(GraphDepthFrameData * fr, TupleTableSlot *eslot,
+				 GraphScanArmData * arm, bool issrc)
 {
 	int			n;
 	int			first;
@@ -551,11 +534,8 @@ graph_push(GraphScanState * node, Oid newelem, int newnkeys,
 	nfr->vid_nkeys = newnkeys;
 	memcpy(nfr->vid, newvid, sizeof(Datum) * newnkeys);
 	memcpy(nfr->vidnull, newnull, sizeof(bool) * newnkeys);
-	if (eprops != NULL)
-	{
-		memcpy(nfr->edge_props, eprops, sizeof(Datum) * node->nprops);
-		memcpy(nfr->edge_propsnull, epropsnull, sizeof(bool) * node->nprops);
-	}
+	memcpy(nfr->edge_props, eprops, sizeof(Datum) * node->nprops);
+	memcpy(nfr->edge_propsnull, epropsnull, sizeof(bool) * node->nprops);
 	/* the new vertex's inner scan must (re)start (see graph_step) */
 	nfr->need_init = true;
 	node->cur_depth = d;
@@ -574,10 +554,10 @@ graph_backtrack(GraphScanState * node)
 static void
 graph_reset(GraphScanState * node)
 {
-	for (; node->cur_depth > 0; node->cur_depth--)
+	while (node->cur_depth > 0)
 	{
 		node->ss.ps.state->es_graph_stack_depth--;
-		(void) 0;
+		node->cur_depth--;
 	}
 	Assert(node->ss.ps.state->es_graph_stack_depth >= 0);
 	node->cur_depth = -1;
@@ -588,7 +568,6 @@ static TupleTableSlot *
 ExecGraphScan(PlanState *pstate)
 {
 	GraphScanState *node = castNode(GraphScanState, pstate);
-	GraphScan  *plan = castNode(GraphScan, pstate->plan);
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 
 	for (;;)
@@ -606,7 +585,7 @@ ExecGraphScan(PlanState *pstate)
 			if (!node->need_seed)
 				return NULL;
 			node->need_seed = false;
-			if (!graph_fetch_seed(node, plan))
+			if (!graph_fetch_seed(node))
 				return NULL;
 		}
 
@@ -623,7 +602,7 @@ ExecGraphScan(PlanState *pstate)
 		}
 
 		/* try to descend along another edge (or backtrack) */
-		if (graph_next(node, plan))
+		if (graph_next(node))
 		{
 			TupleTableSlot *res = graph_emit_row(node, slot);
 
@@ -774,7 +753,6 @@ ExecInitGraphScan(GraphScan * node, EState *estate, int eflags)
 	scanstate->vertex_params = node->vertex_param_ids;
 	scanstate->fwd_active = (node->direction != GRAPH_DIR_INCOMING);
 	scanstate->rev_active = (node->direction != GRAPH_DIR_OUTGOING);
-	scanstate->eflags = eflags;
 
 	/*
 	 * Effective maximum depth.  Explicit bounds are honored; unbounded (or
@@ -787,7 +765,7 @@ ExecInitGraphScan(GraphScan * node, EState *estate, int eflags)
 	scanstate->frames = palloc0(sizeof(GraphDepthFrameData) * scanstate->ndepths);
 
 	/* Compile the per-arm edge element metadata. */
-	build_arms(scanstate, node);
+	build_arms(scanstate);
 
 	/*
 	 * Initialize the scan slot.  There is no heap relation to describe it, so

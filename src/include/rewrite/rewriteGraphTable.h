@@ -73,6 +73,14 @@ typedef struct GraphElementKeyCol
 extern List *get_graph_element_key_columns(Oid elemoid, int key_attnum);
 
 /*
+ * Look up the backing table (relid) and the source/destination vertex
+ * element references of a graph element.  Shared by the native planner and
+ * the native executor.
+ */
+extern void get_graph_element_identity(Oid elemoid, Oid *relid,
+									   Oid *srcvertex, Oid *dstvertex);
+
+/*
  * Return an equality operator suitable for a graph key datatype: the type's
  * default equality operator.  Key values are compared with this operator,
  * both by the filters pushed into the GraphScan's inner (1-hop) expansion

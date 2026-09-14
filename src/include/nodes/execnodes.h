@@ -1987,9 +1987,6 @@ typedef struct GraphScanState
 	int			narms;
 	struct GraphScanArmData *arms;
 
-	/* Flags passed to ExecInitGraphScan (needed for lazy inner init). */
-	int			eflags;
-
 	/*
 	 * Seed key values of the current seed column (List of Param or Const, one
 	 * per seed key column, in key order); see GraphScan.seed_params.

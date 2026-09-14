@@ -2241,9 +2241,6 @@ typedef struct GraphPath
 	/* Vertex element the (ghost) seed belongs to. */
 	Oid			seed_elem_oid;
 
-	/* PARAM_EXEC ids of the seed key columns (filled at create_plan time). */
-	List	   *seed_param_ids;
-
 	/*
 	 * PARAM_EXEC ids of the current-vertex key values used to parameterize
 	 * the inner (1-hop) arm scans; see GraphScan.vertex_param_ids.
