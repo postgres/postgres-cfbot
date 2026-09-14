@@ -2504,6 +2504,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 					errno = save_errno;
 					ereport(PANIC,
 							(errcode_for_file_access(),
+							 errnocoredump_on_errno(ENOSPC),
 							 errmsg("could not write to log file \"%s\" at offset %u, length %zu: %m",
 									xlogfname, startoffset, nleft)));
 				}
@@ -3303,6 +3304,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 		if (errno != ENOENT)
 			ereport(ERROR,
 					(errcode_for_file_access(),
+					 errnocoredump_on_errno(ENOSPC),
 					 errmsg("could not open file \"%s\": %m", path)));
 	}
 	else
@@ -3328,6 +3330,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not create file \"%s\": %m", tmppath)));
 
 	/* Measure I/O timing when initializing segment */
@@ -3381,6 +3384,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 
 		ereport(ERROR,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
 
@@ -3403,6 +3407,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 		errno = save_errno;
 		ereport(ERROR,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
 	}
 	pgstat_report_wait_end();
@@ -3413,6 +3418,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	if (close(fd) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not close file \"%s\": %m", tmppath)));
 
 	/*
@@ -3483,6 +3489,7 @@ XLogFileInit(XLogSegNo logsegno, TimeLineID logtli)
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not open file \"%s\": %m", path)));
 	return fd;
 }
@@ -3601,6 +3608,7 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
 	if (pg_fsync(fd) != 0)
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
 	pgstat_report_wait_end();
 
@@ -3715,6 +3723,7 @@ XLogFileOpen(XLogSegNo segno, TimeLineID tli)
 	if (fd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not open file \"%s\": %m", path)));
 
 	return fd;
@@ -3748,6 +3757,7 @@ XLogFileClose(void)
 		errno = save_errno;
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not close file \"%s\": %m", xlogfname)));
 	}
 
@@ -4408,6 +4418,7 @@ WriteControlFile(void)
 	if (fd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not create file \"%s\": %m",
 						XLOG_CONTROL_FILE)));
 
@@ -4420,6 +4431,7 @@ WriteControlFile(void)
 			errno = ENOSPC;
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not write to file \"%s\": %m",
 						XLOG_CONTROL_FILE)));
 	}
@@ -4429,6 +4441,7 @@ WriteControlFile(void)
 	if (pg_fsync(fd) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not fsync file \"%s\": %m",
 						XLOG_CONTROL_FILE)));
 	pgstat_report_wait_end();
@@ -4436,6 +4449,7 @@ WriteControlFile(void)
 	if (close(fd) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not close file \"%s\": %m",
 						XLOG_CONTROL_FILE)));
 }
@@ -4456,6 +4470,7 @@ ReadControlFile(void)
 	if (fd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not open file \"%s\": %m",
 						XLOG_CONTROL_FILE)));
 
@@ -4466,6 +4481,7 @@ ReadControlFile(void)
 		if (r < 0)
 			ereport(PANIC,
 					(errcode_for_file_access(),
+					 errnocoredump_on_errno(ENOSPC),
 					 errmsg("could not read file \"%s\": %m",
 							XLOG_CONTROL_FILE)));
 		else
@@ -5632,6 +5648,7 @@ BootStrapXLOG(uint32 data_checksum_version)
 			errno = ENOSPC;
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not write bootstrap write-ahead log file: %m")));
 	}
 	pgstat_report_wait_end();
@@ -5640,12 +5657,14 @@ BootStrapXLOG(uint32 data_checksum_version)
 	if (pg_fsync(openLogFile) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not fsync bootstrap write-ahead log file: %m")));
 	pgstat_report_wait_end();
 
 	if (close(openLogFile) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not close bootstrap write-ahead log file: %m")));
 
 	openLogFile = -1;
@@ -9431,6 +9450,7 @@ assign_wal_sync_method(int new_wal_sync_method, void *extra)
 				errno = save_errno;
 				ereport(PANIC,
 						(errcode_for_file_access(),
+						 errnocoredump_on_errno(ENOSPC),
 						 errmsg("could not fsync file \"%s\": %m", xlogfname)));
 			}
 
@@ -9509,6 +9529,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 		errno = save_errno;
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg(msg, xlogfname)));
 	}
 

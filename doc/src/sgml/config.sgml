@@ -13546,6 +13546,29 @@ LOG:  CleanUpLock: deleting: lock(0xb7acd844) id(24688,24696,0,0,0,1)
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-force-core-dump-on-panic" xreflabel="force_core_dump_on_panic">
+       <term><varname>force_core_dump_on_panic</varname> (<type>boolean</type>)
+       <indexterm>
+        <primary><varname>force_core_dump_on_panic</varname> configuration parameter</primary>
+       </indexterm>
+       </term>
+       <listitem>
+        <para>
+         Some <literal>PANIC</literal> errors are marked to terminate without
+         requesting a core dump.  When this option is set to
+         <literal>on</literal>, those errors call
+         <function>abort()</function> instead, which normally produces a core
+         dump file.  This can be useful for debugging, but repeated failures
+         can consume significant disk space.  Unlike
+         <xref linkend="guc-send-abort-for-crash"/>, this parameter controls
+         the process reporting the <literal>PANIC</literal>, not the other
+         processes terminated by the postmaster afterwards.  This parameter
+         can only be set in the <filename>postgresql.conf</filename> file or on
+         the server command line.
+        </para>
+       </listitem>
+      </varlistentry>
+
      <varlistentry id="guc-debug-logical-replication-streaming" xreflabel="debug_logical_replication_streaming">
       <term><varname>debug_logical_replication_streaming</varname> (<type>enum</type>)
       <indexterm>
