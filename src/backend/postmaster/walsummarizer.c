@@ -1658,6 +1658,7 @@ summarizer_read_local_xlog_page(XLogReaderState *state,
 	int			count;
 	WALReadError errinfo;
 	SummarizerReadLocalXLogPrivate *private_data;
+	Size		rbytes;
 
 	ProcessWalSummarizerInterrupts();
 
@@ -1749,9 +1750,32 @@ summarizer_read_local_xlog_page(XLogReaderState *state,
 		}
 	}
 
-	if (!WALRead(state, cur_page, targetPagePtr, count,
-				 private_data->tli, &errinfo))
-		WALReadRaiseError(&errinfo);
+	/* attempt to read WAL from WAL buffers first */
+	rbytes = WALReadFromBuffers(cur_page, targetPagePtr, count,
+								private_data->tli);
+
+	/* now read the remaining WAL from WAL file */
+	if (rbytes < count)
+	{
+		if (!WALRead(state,
+					 cur_page + rbytes,
+					 targetPagePtr + rbytes,
+					 count - rbytes,
+					 private_data->tli,
+					 &errinfo))
+			WALReadRaiseError(&errinfo);
+	}
+	else if (state->seg.ws_file >= 0 &&
+			 !XLByteInSeg(targetPagePtr, state->seg.ws_segno,
+						  state->segcxt.ws_segsize))
+	{
+		/*
+		 * Close the segment when a read that comes entirely from the WAL
+		 * buffers is not in the open segment, so that the next file read
+		 * reopens the correct one.
+		 */
+		state->routine.segment_close(state);
+	}
 
 	/* Track that we read a page, for sleep time calculation. */
 	++pages_read_since_last_sleep;
