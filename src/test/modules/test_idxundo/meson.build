@@ -48,7 +48,9 @@ tests += {
       't/007_idxundo_2pc_database.pl',
       't/008_idxundo_revert_liveness.pl',
       't/009_idxundo_recovery_first_batch.pl',
+      't/010_slog_abort.pl',
       't/011_idxundo_wal_consistency.pl',
+      't/012_flux_delete_nowait.pl',
     ],
   },
 }

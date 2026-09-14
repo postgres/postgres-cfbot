@@ -1,0 +1,445 @@
+--
+-- FLUX and foreign TOAST pointers.
+--
+-- A value read from another table can reach a table AM as an on-disk TOAST
+-- pointer into that table's TOAST relation.  The AM must not store such a
+-- pointer verbatim: the value has to go into the target's own TOAST relation
+-- (or inline), otherwise dropping the source makes the row unreadable.  heap
+-- does this in heap_toast_insert_or_update.  Likewise an oversized inline
+-- value must be compressed/externalized the way heap would.
+--
+-- Every path below runs against heap (the control) and FLUX.  The sources are
+-- then dropped and each row is re-read and compared by md5 and length, every
+-- external pointer is checked to resolve in the table's own TOAST relation,
+-- and the stored shape (size, compression, external or not) of every FLUX row
+-- is compared with its heap twin.
+--
+
+\getenv abs_builddir PG_ABS_BUILDDIR
+\set tf_file :abs_builddir '/results/flux_toast_foreign.data'
+SELECT set_config('tf.file', :'tf_file', false) IS NOT NULL AS ok,
+       set_config('tf.cut', '0', false) IS NOT NULL AS ok;
+
+-- Row 1: 100 kB incompressible EXTERNAL v, 1 MB compressible w (external,
+-- compressed).  Rows 2-3: 100 kB v.  Row 4: short v, 5000-byte compressible w
+-- (inline compressed in the source).
+CREATE TABLE heap_src (id int PRIMARY KEY, v text, w text) USING heap;
+ALTER TABLE heap_src ALTER COLUMN v SET STORAGE EXTERNAL;
+INSERT INTO heap_src
+SELECT g,
+       CASE WHEN g < 4 THEN (SELECT string_agg(md5((g * 10000 + i)::text), '')
+                             FROM generate_series(1, 3125) i)
+            ELSE 'short' END,
+       CASE g WHEN 1 THEN repeat(md5('w'), 32768) WHEN 2 THEN NULL
+              WHEN 3 THEN 'w3' ELSE repeat('x', 5000) END
+FROM generate_series(1, 4) g;
+
+SELECT id, length(v) AS lv,
+       pg_column_toast_chunk_id(v) IS NOT NULL AS v_ext,
+       pg_column_compression(v) IS NOT NULL AS v_cmp,
+       length(w) AS lw,
+       pg_column_toast_chunk_id(w) IS NOT NULL AS w_ext,
+       pg_column_compression(w) IS NOT NULL AS w_cmp
+FROM heap_src ORDER BY id;
+
+CREATE TABLE tf_ref AS
+  SELECT id, length(v) AS lv, md5(v) AS mv, length(w) AS lw, md5(w) AS mw
+  FROM heap_src;
+
+-- The reverse-direction source: FLUX values in FLUX's own TOAST relation.
+CREATE TABLE flux_src USING flux AS SELECT * FROM heap_src;
+
+COPY heap_src TO :'tf_file';
+\set tf_file1 :abs_builddir '/results/flux_toast_foreign_1.data'
+SELECT set_config('tf.file1', :'tf_file1', false) IS NOT NULL AS ok;
+COPY (SELECT 1 FROM generate_series(1, 4)) TO :'tf_file1';
+
+-- STABLE, so COPY keeps its multi-insert path for a column defaulting to it;
+-- the result is heap_src's TOAST pointer, not a detoasted copy.
+-- Materialized views read heap_src through dynamic SQL, so that heap_src can
+-- be dropped while they exist.
+CREATE FUNCTION tf_src(cut int) RETURNS TABLE (id int, v text, w text)
+  LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  RETURN QUERY EXECUTE 'SELECT * FROM public.heap_src WHERE id <= $1' USING cut;
+END $$;
+CREATE FUNCTION tf_def_v() RETURNS text STABLE LANGUAGE sql
+  AS 'SELECT v FROM heap_src WHERE id = 1';
+CREATE FUNCTION tf_def_w() RETURNS text STABLE LANGUAGE sql
+  AS 'SELECT w FROM heap_src WHERE id = 1';
+CREATE FUNCTION tf_rdef_v() RETURNS text STABLE LANGUAGE sql
+  AS 'SELECT v FROM flux_src WHERE id = 1';
+CREATE FUNCTION tf_rdef_w() RETURNS text STABLE LANGUAGE sql
+  AS 'SELECT w FROM flux_src WHERE id = 1';
+
+-- Row count, rows whose content differs from tf_ref, and rows holding an
+-- external pointer that does not resolve in the table's own TOAST relation.
+CREATE FUNCTION tf_check(tbl regclass) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  toast regclass;
+  nrows int;
+  nbad int;
+  nforeign int;
+BEGIN
+  SELECT reltoastrelid::regclass INTO toast FROM pg_class WHERE oid = tbl;
+  EXECUTE format($q$
+    SELECT count(*),
+           count(*) FILTER (WHERE r.id IS NULL
+                   OR length(t.v) IS DISTINCT FROM r.lv
+                   OR md5(t.v) IS DISTINCT FROM r.mv
+                   OR length(t.w) IS DISTINCT FROM r.lw
+                   OR md5(t.w) IS DISTINCT FROM r.mw),
+           count(*) FILTER (WHERE
+                   (pg_column_toast_chunk_id(t.v) IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM %2$s c WHERE c.chunk_id::text = pg_column_toast_chunk_id(t.v)::text))
+                OR (pg_column_toast_chunk_id(t.w) IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM %2$s c WHERE c.chunk_id::text = pg_column_toast_chunk_id(t.w)::text)))
+    FROM %1$s t LEFT JOIN tf_ref r USING (id)$q$, tbl, toast)
+  INTO nrows, nbad, nforeign;
+  RETURN format('rows=%s bad=%s foreign=%s', nrows, nbad, nforeign);
+EXCEPTION WHEN OTHERS THEN
+  RETURN 'ERROR: ' || regexp_replace(SQLERRM, '[0-9]+', 'N', 'g');
+END $$;
+
+-- How each value is stored: compressed, external, and whether it is held
+-- inline at more than the TOAST target.  (Exact sizes differ by design: FLUX
+-- does not convert short varlenas to 1-byte headers.)
+CREATE FUNCTION tf_shape(tbl regclass)
+RETURNS TABLE (id int, bv bool, cv bool, ev bool, bw bool, cw bool, ew bool)
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF tbl IS NULL THEN
+    RETURN;
+  END IF;
+  RETURN QUERY EXECUTE format($q$
+    SELECT id, pg_column_size(v) > 2000 AND pg_column_toast_chunk_id(v) IS NULL,
+           pg_column_compression(v) IS NOT NULL,
+           pg_column_toast_chunk_id(v) IS NOT NULL,
+           pg_column_size(w) > 2000 AND pg_column_toast_chunk_id(w) IS NULL,
+           pg_column_compression(w) IS NOT NULL,
+           pg_column_toast_chunk_id(w) IS NOT NULL
+    FROM %s$q$, tbl);
+END $$;
+
+-- Run one path's statements against table tbl of access method am.  A failure
+-- is reported as a NOTICE and leaves the table absent from the listings.
+CREATE FUNCTION tf_path(tbl text, am text, VARIADIC stmts text[])
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+  s text;
+BEGIN
+  FOREACH s IN ARRAY stmts LOOP
+    EXECUTE replace(replace(s, '$T', quote_ident(tbl)), '$AM', am);
+  END LOOP;
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE '%: %', tbl, regexp_replace(SQLERRM, '[0-9]+', 'N', 'g');
+END $$;
+
+-- Phase 1: build and load.  One transaction.
+DO $do$
+DECLARE
+  am text;
+  cols text := '(id int, v text, w text)';
+  pk text := '(id int PRIMARY KEY, v text, w text)';
+BEGIN
+  FOREACH am IN ARRAY ARRAY['heap', 'flux'] LOOP
+    -- INSERT ... SELECT, one row and several rows
+    PERFORM tf_path('tf_ins1_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src WHERE id = 1');
+    PERFORM tf_path('tf_insm_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src');
+    -- INSERT ... ON CONFLICT DO NOTHING (speculative insertion)
+    PERFORM tf_path('tf_ocn_' || am, am,
+      'CREATE TABLE $T ' || pk || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src ON CONFLICT DO NOTHING');
+    -- the same into a partition
+    PERFORM tf_path('tf_ocnp_' || am, am,
+      'CREATE TABLE $T ' || pk || ' PARTITION BY LIST (id)',
+      'CREATE TABLE tf_ocnp_part_$AM PARTITION OF $T DEFAULT USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src ON CONFLICT DO NOTHING');
+    -- the same with oversized inline values
+    PERFORM tf_path('tf_ocbig_' || am, am,
+      'CREATE TABLE $T ' || pk || ' USING $AM',
+      'INSERT INTO $T SELECT id, v || '''', w || '''' FROM heap_src ON CONFLICT DO NOTHING');
+    -- ON CONFLICT DO UPDATE: row 1 exists (committed before phase 2)
+    PERFORM tf_path('tf_ocu_' || am, am,
+      'CREATE TABLE $T ' || pk || ' USING $AM',
+      'INSERT INTO $T VALUES (1, ''a'', ''b'')');
+    -- UPDATE targets, loaded with placeholders or own values
+    PERFORM tf_path('tf_upd_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT id, ''a'', ''b'' FROM heap_src');
+    PERFORM tf_path('tf_upd1_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT id, ''a'', w FROM heap_src');
+    PERFORM tf_path('tf_updk_' || am, am,
+      'CREATE TABLE $T ' || pk || ' USING $AM',
+      'INSERT INTO $T SELECT id, ''a'', ''b'' FROM heap_src');
+    -- same-size in-place UPDATE of a MAIN column (CAS fast path in FLUX)
+    PERFORM tf_path('tf_cas_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'ALTER TABLE $T ALTER COLUMN w SET STORAGE MAIN',
+      'INSERT INTO $T SELECT 4, ''short'', left(string_agg(md5(i::text), ''''), 5000)
+         FROM generate_series(1, 200) i');
+    -- COPY FROM a file (multi_insert)
+    PERFORM tf_path('tf_copy_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      format('COPY $T FROM %L', current_setting('tf.file')));
+    PERFORM tf_path('tf_pcopy_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM');
+    -- COPY FROM with defaults that return heap_src's pointers (multi_insert),
+    -- into a plain table and into a partition
+    PERFORM tf_path('tf_cdef_' || am, am,
+      'CREATE TABLE $T (id int, v text DEFAULT tf_def_v(),
+                        w text DEFAULT tf_def_w()) USING $AM',
+      format('COPY $T (id) FROM %L', current_setting('tf.file1')));
+    PERFORM tf_path('tf_cdefp_' || am, am,
+      'CREATE TABLE $T (id int, v text DEFAULT tf_def_v(),
+                        w text DEFAULT tf_def_w()) PARTITION BY LIST (id)',
+      'CREATE TABLE tf_cdefp_part_$AM PARTITION OF $T DEFAULT USING $AM',
+      format('COPY $T (id) FROM %L', current_setting('tf.file1')));
+    -- CREATE TABLE AS
+    PERFORM tf_path('tf_ctas_' || am, am,
+      'CREATE TABLE $T USING $AM AS SELECT * FROM heap_src');
+    -- materialized views: plain REFRESH, and REFRESH CONCURRENTLY from empty
+    PERFORM tf_path('tf_mv_' || am, am,
+      'CREATE MATERIALIZED VIEW $T USING $AM AS SELECT * FROM tf_src(4)',
+      'REFRESH MATERIALIZED VIEW $T');
+    PERFORM tf_path('tf_mvc_' || am, am,
+      'CREATE MATERIALIZED VIEW $T USING $AM AS
+         SELECT * FROM tf_src(current_setting(''tf.cut'')::int)',
+      'CREATE UNIQUE INDEX ON $T (id)',
+      'SELECT set_config(''tf.cut'', ''4'', false)',
+      'REFRESH MATERIALIZED VIEW CONCURRENTLY $T',
+      'SELECT set_config(''tf.cut'', ''0'', false)');
+    -- plpgsql: scalar variables and a record variable
+    PERFORM tf_path('tf_plv_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'DO $p$ DECLARE xv text; xw text; BEGIN
+         FOR i IN 1..4 LOOP
+           SELECT v, w INTO xv, xw FROM heap_src WHERE id = i;
+           INSERT INTO $T VALUES (i, xv, xw);
+         END LOOP; END $p$');
+    PERFORM tf_path('tf_plr_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'DO $p$ DECLARE r record; BEGIN
+         FOR r IN SELECT * FROM heap_src LOOP
+           INSERT INTO $T VALUES (r.id, r.v, r.w);
+         END LOOP; END $p$');
+    -- SET ACCESS METHOD to the other AM, and there and back
+    PERFORM tf_path('tf_sam_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src',
+      'ALTER TABLE $T SET ACCESS METHOD ' || CASE am WHEN 'heap' THEN 'flux' ELSE 'heap' END);
+    PERFORM tf_path('tf_samrt_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src',
+      'ALTER TABLE $T SET ACCESS METHOD ' || CASE am WHEN 'heap' THEN 'flux' ELSE 'heap' END,
+      'ALTER TABLE $T SET ACCESS METHOD $AM');
+    -- VACUUM FULL target (run below, outside a transaction block)
+    PERFORM tf_path('tf_vf_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM heap_src');
+    -- reverse direction: FLUX values into heap and into another FLUX table
+    PERFORM tf_path('tf_rins_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM flux_src');
+    PERFORM tf_path('tf_rocn_' || am, am,
+      'CREATE TABLE $T ' || pk || ' USING $AM',
+      'INSERT INTO $T SELECT * FROM flux_src ON CONFLICT DO NOTHING');
+    PERFORM tf_path('tf_rcdef_' || am, am,
+      'CREATE TABLE $T (id int, v text DEFAULT tf_rdef_v(),
+                        w text DEFAULT tf_rdef_w()) USING $AM',
+      format('COPY $T (id) FROM %L', current_setting('tf.file1')));
+    PERFORM tf_path('tf_rctas_' || am, am,
+      'CREATE TABLE $T USING $AM AS SELECT * FROM flux_src');
+    PERFORM tf_path('tf_rupd_' || am, am,
+      'CREATE TABLE $T ' || cols || ' USING $AM',
+      'INSERT INTO $T SELECT id, ''a'', ''b'' FROM flux_src');
+  END LOOP;
+END
+$do$;
+
+-- Phase 2: UPDATEs against committed rows.
+DO $do$
+DECLARE
+  am text;
+BEGIN
+  FOREACH am IN ARRAY ARRAY['heap', 'flux'] LOOP
+    PERFORM tf_path('tf_ocu_' || am, am,
+      'INSERT INTO $T SELECT * FROM heap_src
+         ON CONFLICT (id) DO UPDATE SET v = EXCLUDED.v, w = EXCLUDED.w');
+    PERFORM tf_path('tf_upd_' || am, am,
+      'UPDATE $T t SET v = (SELECT v FROM heap_src s WHERE s.id = t.id),
+                       w = (SELECT w FROM heap_src s WHERE s.id = t.id)');
+    PERFORM tf_path('tf_upd1_' || am, am,
+      'UPDATE $T t SET v = (SELECT v FROM heap_src s WHERE s.id = t.id)');
+    PERFORM tf_path('tf_updk_' || am, am,
+      'UPDATE $T t SET id = -t.id,
+                       v = (SELECT v FROM heap_src s WHERE s.id = t.id),
+                       w = (SELECT w FROM heap_src s WHERE s.id = t.id)',
+      'UPDATE $T SET id = -id');
+    PERFORM tf_path('tf_rupd_' || am, am,
+      'UPDATE $T t SET v = (SELECT v FROM flux_src s WHERE s.id = t.id),
+                       w = (SELECT w FROM flux_src s WHERE s.id = t.id)');
+  END LOOP;
+END
+$do$;
+
+UPDATE tf_cas_heap SET w = repeat('x', 5000);
+UPDATE tf_cas_flux SET w = repeat('x', 5000);
+
+-- psql's \copy takes its arguments verbatim, so use a relative path.
+\cd :abs_builddir
+\copy tf_pcopy_heap FROM 'results/flux_toast_foreign.data'
+\copy tf_pcopy_flux FROM 'results/flux_toast_foreign.data'
+
+VACUUM FULL tf_vf_heap;
+VACUUM FULL tf_vf_flux;
+
+-- Before the drop.  Each check query lists only failures.
+SELECT c.relname, a.amname, r.res
+FROM pg_class c JOIN pg_am a ON a.oid = c.relam, LATERAL tf_check(c.oid) r(res)
+WHERE (c.relname LIKE 'tf\_%' OR c.relname IN ('heap_src', 'flux_src'))
+  AND c.relname <> 'tf_ref' AND c.relkind IN ('r', 'm')
+  AND r.res !~ '^rows=[14] bad=0 foreign=0$'
+ORDER BY 1; -- expect none
+
+-- Storage shape: every FLUX table must store its rows the way its heap twin
+-- does.  Lists the rows that differ.
+SELECT p.path, d.*
+FROM (SELECT left(relname, -5) AS path FROM pg_class
+      WHERE relname LIKE 'tf\_%\_heap' AND relkind IN ('r', 'm')) p,
+     LATERAL (SELECT 'heap' AS side, * FROM
+                (SELECT * FROM tf_shape(to_regclass(p.path || '_heap'))
+                 EXCEPT SELECT * FROM tf_shape(to_regclass(p.path || '_flux'))) x
+              UNION ALL
+              SELECT 'flux', * FROM
+                (SELECT * FROM tf_shape(to_regclass(p.path || '_flux'))
+                 EXCEPT SELECT * FROM tf_shape(to_regclass(p.path || '_heap'))) y) d
+ORDER BY 1, 2, 3; -- expect none
+
+DROP TABLE heap_src, flux_src;
+
+-- After the drop, in a new session.
+\c
+SELECT c.relname, a.amname, r.res
+FROM pg_class c JOIN pg_am a ON a.oid = c.relam, LATERAL tf_check(c.oid) r(res)
+WHERE c.relname LIKE 'tf\_%' AND c.relname <> 'tf_ref' AND c.relkind IN ('r', 'm')
+  AND r.res !~ '^rows=[14] bad=0 foreign=0$'
+ORDER BY 1; -- expect none
+-- 27 paths, each on heap and flux; a path that failed is missing.
+SELECT n FROM (SELECT count(*) AS n FROM pg_class
+               WHERE relname LIKE 'tf\_%' AND relname <> 'tf_ref'
+                 AND relkind IN ('r', 'm')) s
+WHERE n <> 54; -- expect none
+
+--
+-- FLUX commit-time work after the relation's storage was replaced in the same
+-- transaction.  Rows written to the old storage must not be confused with the
+-- tuples at the same TIDs in the new storage.  (VACUUM FULL cannot run in a
+-- transaction block; CLUSTER is the in-transaction rewrite.)
+--
+CREATE TABLE tr_ref AS
+  SELECT g AS id, repeat(md5(g::text), 150) AS w FROM generate_series(1, 20) g;
+CREATE FUNCTION tr_bad(tbl regclass) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  n bigint;
+BEGIN
+  EXECUTE format('SELECT count(*) FROM
+    ((SELECT id::int, w FROM %1$s EXCEPT ALL SELECT * FROM tr_ref)
+     UNION ALL
+     (SELECT * FROM tr_ref EXCEPT ALL SELECT id::int, w FROM %1$s)) x', tbl)
+  INTO n;
+  RETURN n;
+EXCEPTION WHEN OTHERS THEN
+  RETURN -1;
+END $$;
+CREATE TABLE tr_fh (id int, w text) USING flux;
+CREATE TABLE tr_fhf (id int, w text) USING flux;
+CREATE TABLE tr_cl (id int PRIMARY KEY, w text) USING flux;
+CREATE TABLE tr_act (id int, w text) USING flux;
+CREATE TABLE tr_trunc (id int, w text) USING flux;
+CREATE TABLE tr_spa (id int, w text) USING flux;
+CREATE TABLE tr_spr (id int, w text) USING flux;
+CREATE TABLE tr_spr2 (id int, w text) USING flux;
+-- flux -> heap
+BEGIN;
+INSERT INTO tr_fh SELECT * FROM tr_ref;
+ALTER TABLE tr_fh SET ACCESS METHOD heap;
+COMMIT;
+-- flux -> heap -> flux
+BEGIN;
+INSERT INTO tr_fhf SELECT * FROM tr_ref;
+ALTER TABLE tr_fhf SET ACCESS METHOD heap;
+ALTER TABLE tr_fhf SET ACCESS METHOD flux;
+COMMIT;
+-- CLUSTER (reorders the rows, so TIDs name other rows)
+BEGIN;
+INSERT INTO tr_cl SELECT * FROM tr_ref ORDER BY id DESC;
+CLUSTER tr_cl USING tr_cl_pkey;
+COMMIT;
+-- ALTER COLUMN TYPE
+BEGIN;
+INSERT INTO tr_act SELECT * FROM tr_ref;
+ALTER TABLE tr_act ALTER COLUMN id TYPE bigint;
+COMMIT;
+-- rows rolled back to a savepoint, then TRUNCATE and refill the same TIDs
+BEGIN;
+SAVEPOINT a;
+INSERT INTO tr_trunc SELECT -id, w FROM tr_ref;
+ROLLBACK TO a;
+TRUNCATE tr_trunc;
+INSERT INTO tr_trunc SELECT * FROM tr_ref;
+COMMIT;
+-- rows rolled back to a savepoint, then a rewrite moves live rows onto their TIDs
+BEGIN;
+SAVEPOINT a;
+INSERT INTO tr_spa SELECT -id, w FROM tr_ref;
+ROLLBACK TO a;
+INSERT INTO tr_spa SELECT * FROM tr_ref;
+ALTER TABLE tr_spa ALTER COLUMN id TYPE bigint;
+COMMIT;
+-- a rewrite inside a savepoint that rolls back: the old storage is current
+-- again and its commit-time work must still be done
+BEGIN;
+INSERT INTO tr_spr SELECT * FROM tr_ref;
+SAVEPOINT a;
+ALTER TABLE tr_spr SET ACCESS METHOD heap;
+ROLLBACK TO a;
+COMMIT;
+BEGIN;
+SAVEPOINT a;
+INSERT INTO tr_spr2 SELECT -id, w FROM tr_ref;
+ROLLBACK TO a;
+INSERT INTO tr_spr2 SELECT * FROM tr_ref;
+SAVEPOINT b;
+ALTER TABLE tr_spr2 ALTER COLUMN id TYPE bigint;
+ROLLBACK TO b;
+COMMIT;
+SELECT t, tr_bad(t::regclass) AS bad
+FROM unnest(ARRAY['tr_fh', 'tr_fhf', 'tr_cl', 'tr_act', 'tr_trunc', 'tr_spa',
+                  'tr_spr', 'tr_spr2']) t
+WHERE tr_bad(t::regclass) <> 0
+ORDER BY 1; -- expect none
+DROP TABLE tr_fh, tr_fhf, tr_cl, tr_act, tr_trunc, tr_spa, tr_spr, tr_spr2, tr_ref;
+DROP FUNCTION tr_bad(regclass);
+
+-- Clean up.
+DO $do$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN SELECT relname, relkind FROM pg_class
+           WHERE relname LIKE 'tf\_%' AND relkind IN ('r', 'm', 'p')
+             AND NOT relispartition LOOP
+    EXECUTE format('DROP %s %I',
+                   CASE r.relkind WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,
+                   r.relname);
+  END LOOP;
+END
+$do$;
+DROP FUNCTION tf_check(regclass), tf_shape(regclass), tf_path(text, text, text[]),
+  tf_def_v(), tf_def_w(), tf_rdef_v(), tf_rdef_w(), tf_src(int);

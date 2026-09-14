@@ -1,0 +1,196 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1b s2b s1u s2u s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE xt SET v = v + 1 WHERE id = 1;
+step s2u: UPDATE xt SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|2|[1,10)|    1
+(1 row)
+
+
+starting permutation: s1b s2b s1uk s2uk s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2uk: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|2|[1,12)|    1
+(1 row)
+
+
+starting permutation: s1b s2b s1uk s2u s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2u: UPDATE xt SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|2|[1,11)|    1
+(1 row)
+
+
+starting permutation: s1b s2b s1u s2uk s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE xt SET v = v + 1 WHERE id = 1;
+step s2uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2uk: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|2|[1,11)|    1
+(1 row)
+
+
+starting permutation: s1b s2b s1uk s2d s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2d: DELETE FROM xt WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r|nrows
+--+-+-+-----
+(0 rows)
+
+
+starting permutation: s1b s2b s1uk s2u s1r s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2u: UPDATE xt SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|1|[1,10)|    1
+(1 row)
+
+
+starting permutation: s1b s2b s1uk s2uk s1r s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2uk: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|1|[1,11)|    1
+(1 row)
+
+
+starting permutation: s1b s2brr s1uk s2u s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2u: UPDATE xt SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|1|[1,11)|    1
+(1 row)
+
+
+starting permutation: s1b s2brr s2sel s1uk s1c s2d s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2sel: SELECT id, v, r FROM xt;
+id|v|r     
+--+-+------
+ 1|0|[1,10)
+(1 row)
+
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s1c: COMMIT;
+step s2d: DELETE FROM xt WHERE id = 1;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|1|[1,11)|    1
+(1 row)
+
+
+starting permutation: s1b s2b s1up s2ins s1c s2c
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1up: UPDATE xp SET valid_at = '[2020-01-01,2026-01-01)' WHERE id = '[1,2)';
+step s2ins: INSERT INTO xc VALUES ('[1,2)', '[2020-01-01,2025-01-01)', '[1,2)'); <waiting ...>
+step s1c: COMMIT;
+step s2ins: <... completed>
+step s2c: COMMIT;
+
+starting permutation: s1b s2brr s1up s2ins s1c s2c
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1up: UPDATE xp SET valid_at = '[2020-01-01,2026-01-01)' WHERE id = '[1,2)';
+step s2ins: INSERT INTO xc VALUES ('[1,2)', '[2020-01-01,2025-01-01)', '[1,2)'); <waiting ...>
+step s1c: COMMIT;
+step s2ins: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+
+starting permutation: s1b s2b s1uk s2fu s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s2fu: SELECT id, v, r FROM xt WHERE id = 1 FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2fu: <... completed>
+id|v|r     
+--+-+------
+ 1|1|[1,11)
+(1 row)
+
+step s2c: COMMIT;
+step s1sel: SELECT id, v, r, count(*) OVER () AS nrows FROM xt;
+id|v|r     |nrows
+--+-+------+-----
+ 1|1|[1,11)|    1
+(1 row)
+
+
+starting permutation: s1b s2brr s2sel s1uk s1c s2fu s2c
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2sel: SELECT id, v, r FROM xt;
+id|v|r     
+--+-+------
+ 1|0|[1,10)
+(1 row)
+
+step s1uk: UPDATE xt SET v = v + 1, r = int4range(lower(r), upper(r) + 1) WHERE id = 1;
+step s1c: COMMIT;
+step s2fu: SELECT id, v, r FROM xt WHERE id = 1 FOR UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;

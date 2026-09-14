@@ -28,6 +28,7 @@
 
 /* Shared memory sizing and initialization */
 extern Size ATMShmemSize(void);
+extern void ATMEnsureCreated(void);
 extern void ATMShmemInit(void);
 
 /* Core API */

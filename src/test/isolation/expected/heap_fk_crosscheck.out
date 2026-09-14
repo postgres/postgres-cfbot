@@ -1,0 +1,81 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1brr s1ic s2brr s2d s1c s2c s1sel
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1ic: INSERT INTO fkc VALUES (2);
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2d: DELETE FROM pk WHERE a = 2; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s1sel: SELECT 'pk' t, a FROM pk UNION ALL SELECT 'fkc', a FROM fkc UNION ALL SELECT 'fkn', a FROM fkn ORDER BY 1, 2;
+t  |a
+---+-
+fkc|2
+pk |2
+(2 rows)
+
+
+starting permutation: s1brr s1in s2brr s2d s1c s2c s1sel
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1in: INSERT INTO fkn VALUES (2);
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2d: DELETE FROM pk WHERE a = 2; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s1sel: SELECT 'pk' t, a FROM pk UNION ALL SELECT 'fkc', a FROM fkc UNION ALL SELECT 'fkn', a FROM fkn ORDER BY 1, 2;
+t  |a
+---+-
+fkn|2
+pk |2
+(2 rows)
+
+
+starting permutation: s1brr s1ic s2brr s2u s1c s2c s1sel
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1ic: INSERT INTO fkc VALUES (2);
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2u: UPDATE pk SET a = 3 WHERE a = 2; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s1sel: SELECT 'pk' t, a FROM pk UNION ALL SELECT 'fkc', a FROM fkc UNION ALL SELECT 'fkn', a FROM fkn ORDER BY 1, 2;
+t  |a
+---+-
+fkc|2
+pk |2
+(2 rows)
+
+
+starting permutation: s1brr s1ic s2brc s2d s1c s2c s1sel
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1ic: INSERT INTO fkc VALUES (2);
+step s2brc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2d: DELETE FROM pk WHERE a = 2; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT 'pk' t, a FROM pk UNION ALL SELECT 'fkc', a FROM fkc UNION ALL SELECT 'fkn', a FROM fkn ORDER BY 1, 2;
+t|a
+-+-
+(0 rows)
+
+
+starting permutation: s1brr s1in s2brc s2d s1c s2c s1sel
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1in: INSERT INTO fkn VALUES (2);
+step s2brc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2d: DELETE FROM pk WHERE a = 2; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT 'pk' t, a FROM pk UNION ALL SELECT 'fkc', a FROM fkc UNION ALL SELECT 'fkn', a FROM fkn ORDER BY 1, 2;
+t  |a
+---+-
+fkn| 
+(1 row)
+

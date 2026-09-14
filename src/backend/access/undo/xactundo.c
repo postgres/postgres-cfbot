@@ -395,7 +395,13 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	XactUndoSubTransactionState *cur;
 	UndoRecPtr *sub_start_location;
 
-	/* Remember that we've done something undo-related. */
+	/*
+	 * Remember that we've done something undo-related.  The first time, make
+	 * sure the ATM exists, as aborting may defer this transaction's UNDO to
+	 * it and must not allocate.
+	 */
+	if (!XactUndo.has_undo)
+		ATMEnsureCreated();
 	XactUndo.has_undo = true;
 	if (rmid != UNDO_RMID_NBTREE && rmid != UNDO_RMID_HASH)
 		XactUndo.needs_inline_abort = true;
@@ -497,7 +503,13 @@ PrepareXactUndoDataParts(XactUndoContext *ctx, char persistence,
 	XactUndoSubTransactionState *cur;
 	UndoRecPtr *sub_start_location;
 
-	/* Remember that we've done something undo-related. */
+	/*
+	 * Remember that we've done something undo-related.  The first time, make
+	 * sure the ATM exists, as aborting may defer this transaction's UNDO to
+	 * it and must not allocate.
+	 */
+	if (!XactUndo.has_undo)
+		ATMEnsureCreated();
 	XactUndo.has_undo = true;
 	if (rmid != UNDO_RMID_NBTREE && rmid != UNDO_RMID_HASH)
 		XactUndo.needs_inline_abort = true;
@@ -1139,13 +1151,12 @@ AtAbort_XactUndo(void)
 					{
 						/*
 						 * Already inside AbortTransaction: we cannot abort
-						 * again or rethrow. Repeat its early cleanup and
-						 * fall back to ATM; its ResourceOwnerRelease will
-						 * release pins and other resources later.
-						 * Release any content locks the failed chain left
-						 * held before unwinding.  The error reset
-						 * InterruptHoldoffCount, but the abort that runs this
-						 * still holds interrupts.
+						 * again or rethrow. Repeat its early cleanup and fall
+						 * back to ATM; its ResourceOwnerRelease will release
+						 * pins and other resources later. Release any content
+						 * locks the failed chain left held before unwinding.
+						 * The error reset InterruptHoldoffCount, but the
+						 * abort that runs this still holds interrupts.
 						 */
 						InterruptHoldoffCount = saved_holdoff;
 						BufferLockReleaseAll();
@@ -1454,10 +1465,10 @@ AtSubAbort_XactUndo(int level)
 					/*
 					 * Already inside AbortSubTransaction, so do not abort
 					 * again or rethrow. Repeat its early cleanup; its
-					 * ResourceOwnerRelease will release the rest.
-					 * Release any content locks the failed subxact UNDO chain
-					 * left held before unwinding, and hold interrupts again
-					 * as the subtransaction abort did (see AtAbort_XactUndo).
+					 * ResourceOwnerRelease will release the rest. Release any
+					 * content locks the failed subxact UNDO chain left held
+					 * before unwinding, and hold interrupts again as the
+					 * subtransaction abort did (see AtAbort_XactUndo).
 					 */
 					InterruptHoldoffCount = saved_holdoff;
 					BufferLockReleaseAll();

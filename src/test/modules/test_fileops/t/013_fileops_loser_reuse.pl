@@ -12,14 +12,16 @@ for my $crash_again (0, 1)
 {
 	my $node = PostgreSQL::Test::Cluster->new("loser_$crash_again");
 	$node->init;
-	$node->append_conf('postgresql.conf', q{
+	$node->append_conf(
+		'postgresql.conf', q{
 wal_level = replica
 autovacuum = off
 max_logical_revert_workers = 0
 logical_revert_naptime = 100ms
 });
 	$node->start;
-	$node->safe_psql('postgres', q{
+	$node->safe_psql(
+		'postgres', q{
 CREATE EXTENSION test_fileops;
 CREATE EXTENSION test_idxundo;
 CREATE TABLE t (id int primary key) WITH (index_undo = on);
@@ -35,10 +37,12 @@ CHECKPOINT;
 	$node->start;
 	my $path = $node->data_dir . '/loser.dat';
 	ok(!-e $path, "$crash_again: startup removed loser file");
-	is($node->safe_psql('postgres',
-		'SELECT test_fileops_atm_oldest_lsn() IS NOT NULL'), 't',
+	is( $node->safe_psql(
+			'postgres', 'SELECT test_fileops_atm_oldest_lsn() IS NOT NULL'),
+		't',
 		"$crash_again: index chain deferred");
-	$node->safe_psql('postgres', q{
+	$node->safe_psql(
+		'postgres', q{
 BEGIN;
 SELECT test_fileops_create('loser.dat', 384);
 SELECT test_fileops_write('loser.dat', 0, 'T2-committed');
@@ -50,23 +54,28 @@ COMMIT;
 		# its subsequent WAL while the worker is still disabled.
 		$node->stop('immediate');
 		$node->start;
-		is(-e $path ? slurp_file($path) : '<missing>', 'T2-committed',
+		is(-e $path ? slurp_file($path) : '<missing>',
+			'T2-committed',
 			'second crash preserves committed reuse before worker runs');
-		is($node->safe_psql('postgres',
-			'SELECT test_fileops_atm_oldest_lsn() IS NOT NULL'), 't',
+		is( $node->safe_psql(
+				'postgres',
+				'SELECT test_fileops_atm_oldest_lsn() IS NOT NULL'),
+			't',
 			'second crash retains deferred index chain');
 	}
 	$node->safe_psql('postgres', 'CHECKPOINT');
 	$node->append_conf('postgresql.conf', 'max_logical_revert_workers = 2');
 	$node->restart;
-	ok($node->poll_query_until('postgres',
-		'SELECT test_fileops_atm_oldest_lsn() IS NULL'),
+	ok( $node->poll_query_until(
+			'postgres', 'SELECT test_fileops_atm_oldest_lsn() IS NULL'),
 		"$crash_again: worker drained ATM");
 	# The worker leaves index entries for VACUUM (see nbtree_undo_apply()).
-	is($node->safe_psql('postgres',
-		"SELECT idxundo_count_dead_all('t_pkey')"), '0',
+	is( $node->safe_psql(
+			'postgres', "SELECT idxundo_count_dead_all('t_pkey')"),
+		'0',
 		"$crash_again: worker left index entries for VACUUM");
-	is(-e $path ? slurp_file($path) : '<missing>', 'T2-committed',
+	is(-e $path ? slurp_file($path) : '<missing>',
+		'T2-committed',
 		"$crash_again: committed reuse survives deferred loser revert");
 	$node->stop;
 }

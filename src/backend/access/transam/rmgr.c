@@ -43,6 +43,9 @@
 #include "utils/relmapper.h"
 #include "access/undo_xlog.h"
 #include "access/atm.h"
+#ifdef USE_FLUX
+#include "access/flux_xlog.h"
+#endif
 #include "access/perbackend/pbu_undolog_xlog.h"
 #include "access/perbackend/pbu_undoaction_xlog.h"
 /* IWYU pragma: end_keep */

@@ -4,9 +4,15 @@ tests += {
   'name': 'brin',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
+  'regress': {
+    'sql': [
+      'flux_summarize',
+    ],
+  },
   'isolation': {
     'specs': [
       'summarization-and-inprogress-insertion',
+      'flux-summarization-and-inprogress-insertion',
     ],
   },
   'tap': {

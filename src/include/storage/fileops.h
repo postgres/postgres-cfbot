@@ -410,7 +410,7 @@ typedef struct FileopsUndoWrite
 	uint32		before_len;
 	uint32		after_len;
 	uint16		path_len;
-}			FileopsUndoWrite;
+} FileopsUndoWrite;
 
 /* TRUNCATE undo payload: path, followed by the bytes removed by a shrink. */
 typedef struct FileopsUndoTruncate

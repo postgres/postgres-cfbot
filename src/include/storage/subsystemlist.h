@@ -100,3 +100,6 @@ PG_SHMEM_SUBSYSTEM(UndoShmemCallbacks)
  * any consumer.  See slog.c's SLogShmemCallbacks for details.
  */
 PG_SHMEM_SUBSYSTEM(SLogShmemCallbacks)
+
+/* FLUX table access method subsystems */
+PG_SHMEM_SUBSYSTEM(FluxMvccShmemCallbacks)

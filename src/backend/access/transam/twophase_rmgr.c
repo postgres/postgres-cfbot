@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/multixact.h"
+#include "access/flux.h"
 #include "access/twophase_rmgr.h"
 #include "pgstat.h"
 #include "storage/lock.h"
@@ -48,7 +49,8 @@ const TwoPhaseCallback twophase_recover_callbacks[TWOPHASE_RM_MAX_ID + 1] =
 	multixact_twophase_recover, /* MultiXact */
 	predicatelock_twophase_recover, /* PredicateLock */
 	NULL,						/* FILEOPS (post-commit/abort only) */
-	NULL						/* per-backend UNDO (postabort-only) */
+	NULL,						/* per-backend UNDO (postabort-only) */
+	flux_twophase_recover		/* FLUX */
 };
 
 const TwoPhaseCallback twophase_postcommit_callbacks[TWOPHASE_RM_MAX_ID + 1] =
@@ -59,7 +61,8 @@ const TwoPhaseCallback twophase_postcommit_callbacks[TWOPHASE_RM_MAX_ID + 1] =
 	multixact_twophase_postcommit,	/* MultiXact */
 	NULL,						/* PredicateLock */
 	fileops_twophase_postcommit,	/* FILEOPS */
-	pbu_twophase_postcommit		/* per-backend UNDO */
+	pbu_twophase_postcommit,	/* per-backend UNDO */
+	flux_twophase_postcommit	/* FLUX */
 };
 
 const TwoPhaseCallback twophase_postabort_callbacks[TWOPHASE_RM_MAX_ID + 1] =
@@ -70,7 +73,8 @@ const TwoPhaseCallback twophase_postabort_callbacks[TWOPHASE_RM_MAX_ID + 1] =
 	multixact_twophase_postabort,	/* MultiXact */
 	NULL,						/* PredicateLock */
 	fileops_twophase_postabort, /* FILEOPS */
-	pbu_twophase_postabort		/* per-backend UNDO */
+	pbu_twophase_postabort,		/* per-backend UNDO */
+	flux_twophase_postabort		/* FLUX */
 };
 
 const TwoPhaseCallback twophase_standby_recover_callbacks[TWOPHASE_RM_MAX_ID + 1] =
@@ -81,5 +85,6 @@ const TwoPhaseCallback twophase_standby_recover_callbacks[TWOPHASE_RM_MAX_ID + 1
 	NULL,						/* MultiXact */
 	NULL,						/* PredicateLock */
 	NULL,						/* FILEOPS */
-	NULL						/* per-backend UNDO */
+	NULL,						/* per-backend UNDO */
+	flux_twophase_recover		/* FLUX */
 };

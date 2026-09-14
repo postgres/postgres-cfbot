@@ -156,14 +156,14 @@ UndoShmemRequest_internal(void *arg)
 			 * The per-backend UNDO engine's discard worker reclaims undo log
 			 * space, and its undo launcher applies rollbacks deferred by
 			 * crash recovery.  Neither is optional: without the discard
-			 * worker the undo segment files of any FLUX table grow
-			 * without bound. Both hibernate when there is no per-backend UNDO
-			 * to process, so a cluster that never uses those AMs pays only
-			 * for two idle processes on top of the cluster-wide UNDO worker
-			 * and logical revert launcher.  The default max_worker_processes
-			 * is sized to leave parallel query its full budget alongside
-			 * these.  Registered here (request_fn phase) for the same reason
-			 * as UndoWorkerRegister(): a static background worker cannot be
+			 * worker the undo segment files of any FLUX table grow without
+			 * bound. Both hibernate when there is no per-backend UNDO to
+			 * process, so a cluster that never uses those AMs pays only for
+			 * two idle processes on top of the cluster-wide UNDO worker and
+			 * logical revert launcher.  The default max_worker_processes is
+			 * sized to leave parallel query its full budget alongside these.
+			 * Registered here (request_fn phase) for the same reason as
+			 * UndoWorkerRegister(): a static background worker cannot be
 			 * registered after BackgroundWorkerShmemInit().
 			 */
 			DiscardWorkerRegister();

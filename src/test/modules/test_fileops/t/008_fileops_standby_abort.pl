@@ -16,7 +16,8 @@ $primary->backup('backup');
 my $standby = PostgreSQL::Test::Cluster->new('standby');
 $standby->init_from_backup($primary, 'backup', has_streaming => 1);
 $standby->start;
-$primary->safe_psql('postgres', q{
+$primary->safe_psql(
+	'postgres', q{
 BEGIN;
 SELECT test_fileops_create('base.dat', 384);
 SELECT test_fileops_write('base.dat', 0, 'committed-base');
@@ -30,7 +31,8 @@ BEGIN; SELECT test_fileops_chmod('base.dat', 448); ROLLBACK;
 BEGIN; SELECT test_fileops_write('base.dat', 0, 'OVERWRITTEN!!!'); ROLLBACK;
 BEGIN; SELECT test_fileops_truncate('base.dat', 3); ROLLBACK;
 });
-$primary->safe_psql('postgres', q{
+$primary->safe_psql(
+	'postgres', q{
 BEGIN;
 SELECT test_fileops_write('base.dat', 0, 'prepared');
 SELECT test_fileops_truncate('base.dat', 2);
@@ -46,8 +48,10 @@ $primary->wait_for_catchup($standby);
 if ($ENV{enable_injection_points} eq 'yes')
 {
 	$standby->safe_psql('postgres',
-		"SELECT injection_points_attach('fileops-abort-after-flush', 'wait')");
-	$primary->safe_psql('postgres', q{
+		"SELECT injection_points_attach('fileops-abort-after-flush', 'wait')"
+	);
+	$primary->safe_psql(
+		'postgres', q{
 BEGIN;
 SELECT test_fileops_create('standby-window.dat', 384);
 ROLLBACK;
@@ -70,8 +74,10 @@ for my $stage ('streaming', 'promoted')
 		my $name = $node->name;
 		ok(!-e "$dir/abort.dat", "$stage $name: aborted create absent");
 		ok(!-e "$dir/abortdir", "$stage $name: aborted mkdir absent");
-		is((stat("$dir/base.dat"))[2] & 07777, 0600, "$stage $name: original mode");
-		is(slurp_file("$dir/base.dat"), 'committed-base', "$stage $name: original bytes");
+		is((stat("$dir/base.dat"))[2] & 07777,
+			0600, "$stage $name: original mode");
+		is(slurp_file("$dir/base.dat"),
+			'committed-base', "$stage $name: original bytes");
 	}
 }
 $standby->stop;

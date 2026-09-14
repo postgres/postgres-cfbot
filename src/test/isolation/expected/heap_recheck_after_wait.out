@@ -1,0 +1,165 @@
+Parsed test spec with 4 sessions
+
+starting permutation: s1sh s2d s3d s1r s2r s3c s4sel
+step s1sh: SELECT id FROM rw FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2d: DELETE FROM rw RETURNING id, v; <waiting ...>
+step s3d: DELETE FROM rw WHERE v = 0 RETURNING id, v; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2r: ROLLBACK;
+step s3d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s3c: COMMIT;
+step s4sel: SELECT id, v FROM rw;
+id|v
+--+-
+(0 rows)
+
+
+starting permutation: s1sh s2d s3u s1r s2r s3c s4sel
+step s1sh: SELECT id FROM rw FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2d: DELETE FROM rw RETURNING id, v; <waiting ...>
+step s3u: UPDATE rw SET v = v + 10 RETURNING id, v; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2r: ROLLBACK;
+step s3u: <... completed>
+id| v
+--+--
+ 1|10
+(1 row)
+
+step s3c: COMMIT;
+step s4sel: SELECT id, v FROM rw;
+id| v
+--+--
+ 1|10
+(1 row)
+
+
+starting permutation: s1u s2d s3d s1r s2r s3c s4sel
+step s1u: UPDATE rw SET v = 5;
+step s2d: DELETE FROM rw RETURNING id, v; <waiting ...>
+step s3d: DELETE FROM rw WHERE v = 0 RETURNING id, v; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2r: ROLLBACK;
+step s3d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s3c: COMMIT;
+step s4sel: SELECT id, v FROM rw;
+id|v
+--+-
+(0 rows)
+
+
+starting permutation: s1u s2d s3u s1r s2r s3c s4sel
+step s1u: UPDATE rw SET v = 5;
+step s2d: DELETE FROM rw RETURNING id, v; <waiting ...>
+step s3u: UPDATE rw SET v = v + 10 RETURNING id, v; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2r: ROLLBACK;
+step s3u: <... completed>
+id| v
+--+--
+ 1|10
+(1 row)
+
+step s3c: COMMIT;
+step s4sel: SELECT id, v FROM rw;
+id| v
+--+--
+ 1|10
+(1 row)
+
+
+starting permutation: s1sh s2d s3d s1r s2c s3c s4sel
+step s1sh: SELECT id FROM rw FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2d: DELETE FROM rw RETURNING id, v; <waiting ...>
+step s3d: DELETE FROM rw WHERE v = 0 RETURNING id, v; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3d: <... completed>
+id|v
+--+-
+(0 rows)
+
+step s3c: COMMIT;
+step s4sel: SELECT id, v FROM rw;
+id|v
+--+-
+(0 rows)
+
+
+starting permutation: s1sh s3d s1u s1c s3c s4sel
+step s1sh: SELECT id FROM rw FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s3d: DELETE FROM rw WHERE v = 0 RETURNING id, v; <waiting ...>
+step s1u: UPDATE rw SET v = 5;
+step s1c: COMMIT;
+step s3d: <... completed>
+id|v
+--+-
+(0 rows)
+
+step s3c: COMMIT;
+step s4sel: SELECT id, v FROM rw;
+id|v
+--+-
+ 1|5
+(1 row)
+

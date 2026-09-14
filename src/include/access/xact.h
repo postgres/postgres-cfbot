@@ -399,8 +399,8 @@ typedef struct xl_xact_prepare
 
 	/*
 	 * Oldest batch of the permanent-level chain.  WAL from here on is
-	 * retained while the transaction stays prepared, and handed to the ATM
-	 * by ROLLBACK PREPARED, because the revert worker reads the whole chain.
+	 * retained while the transaction stays prepared, and handed to the ATM by
+	 * ROLLBACK PREPARED, because the revert worker reads the whole chain.
 	 */
 	XLogRecPtr	undo_first_batch_lsn;
 } xl_xact_prepare;
@@ -476,7 +476,7 @@ typedef struct xl_xact_parsed_abort
 
 	XLogRecPtr	origin_lsn;
 	TimestampTz origin_timestamp;
-	uint32 fileops_len;
+	uint32		fileops_len;
 	const char *fileops;
 } xl_xact_parsed_abort;
 
@@ -589,6 +589,7 @@ extern bool IsInParallelMode(void);
 /* UNDO chain management */
 extern void SetCurrentTransactionUndoRecPtr(uint64 undo_ptr);
 extern uint64 GetCurrentTransactionUndoRecPtr(void);
+
 /*
  * Number of per-backend UNDO persistence levels (permanent, unlogged, temp);
  * must match UndoPersistenceLevels in access/perbackend/pbu_undolog.h, which

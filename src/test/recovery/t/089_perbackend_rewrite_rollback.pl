@@ -19,19 +19,44 @@ $node->init;
 $node->append_conf('postgresql.conf',
 	"autovacuum = off\nrestart_after_crash = on\n");
 $node->start;
+if (!$node->check_extension('pageinspect'))
+{
+	plan skip_all => 'Extension pageinspect not installed';
+}
+
+# The tables live in rr, so that the undo apply worker, which connects to the
+# database it reverts, can be kept out of it (ALLOW_CONNECTIONS false) while
+# a rollback handed to it is checked to be still pending.
+$node->safe_psql('postgres', 'CREATE DATABASE rr');
+$node->safe_psql(
+	'rr', q{
+CREATE EXTENSION pageinspect;
+CREATE TABLE mk (v int) USING flux;
+INSERT INTO mk VALUES (0);
+VACUUM (FREEZE) mk;
+});
+
+# Freeze the marker before capturing its bytes: DML before-images can freeze
+# globally visible xmin, so an unfrozen baseline is not byte-stable.
+#
+# A deferred transaction updates the marker row mk first, so that its undo
+# record is the last of the request to be applied: while mk's raw bytes
+# differ from the committed image the rollback is pending, and once they are
+# back the worker has applied all of it.
 #
 # The comparison is exact except for the two CLOG hint bits in the high byte
-# of t_flags (byte 37 of the FLUX tuple header): FLUX_TUPLE_XMIN_COMMITTED
+# of t_flags (byte 33 of the FLUX tuple header): FLUX_TUPLE_XMIN_COMMITTED
 # (0x02) and FLUX_TUPLE_XMAX_COMMITTED (0x04).  The UPDATE's visibility
 # check may set them on the page after the committed image was read here and
 # before the UPDATE copies its before-image, so the image the worker puts
 # back can carry a hint the committed image did not.  A hint bit only caches
 # what CLOG says about t_xmin or t_xmax, which both images share; it is not
 # WAL-logged and wal_consistency_checking masks it.  Every other byte,
-# including the reserved word at bytes 16-19, must match.
-my $raw_mk = q{SELECT encode(set_byte(t, 37, get_byte(t, 37) & ~6), 'hex')
+# must match.
+my $raw_mk = q{SELECT encode(set_byte(t, 33, get_byte(t, 33) & ~6), 'hex')
   FROM (SELECT substr(get_raw_page('mk', 0), lp_off + 1, lp_len) AS t
           FROM heap_page_items(get_raw_page('mk', 0)) WHERE lp = 1) s};
+my $orig_mk = $node->safe_psql('rr', $raw_mk);
 
 my %cases = (
 	'a_update_truncate_insert' => sub {
@@ -71,15 +96,17 @@ ALTER TABLE $t ALTER COLUMN v TYPE varchar(100);
 ROLLBACK;);
 	},);
 
-# The worker path applies undo in the background; give it a moment.
+# The cases whose top-level ROLLBACK goes to the worker on the worker path.
+my %deferred = (a => 1, b => 1, d => 1);
+
+# The worker path applies undo in the background; wait for it.
 sub check
 {
 	my ($t, $what) = @_;
-	ok( $node->poll_query_until(
-			'postgres',
-			"SELECT count(*) || ',' || count(*) FILTER (WHERE v = 'orig') FROM $t",
-			'10,10'),
-		$what);
+	my $q =
+	  "SELECT count(*) || ',' || count(*) FILTER (WHERE v = 'orig') FROM $t";
+	ok($node->poll_query_until('rr', $q, '10,10'), $what)
+	  or diag($node->safe_psql('rr', $q));
 }
 
 foreach my $path ('inline', 'worker')
@@ -92,25 +119,50 @@ foreach my $path ('inline', 'worker')
 	}
 
 	my @tables;
+	my $bg = $node->background_psql('rr', on_error_stop => 0);
 	foreach my $am ('flux')
 	{
 		foreach my $case (sort keys %cases)
 		{
-			my $t = "${path}_${am}_" . substr($case, 0, 1);
+			my $c = substr($case, 0, 1);
+			my $t = "${path}_${am}_$c";
 			my $what = "$path, $am, $case";
-			$node->poll_query_until('postgres', 'SELECT true');
-			$node->safe_psql(
-				'postgres', qq(
+			my $defer = $path eq 'worker' && $deferred{$c};
+			$bg->query_safe(
+				qq(
 CREATE TABLE $t (id int primary key, v text) USING $am;
 INSERT INTO $t SELECT g, 'orig' FROM generate_series(1, 10) g;
 ));
-			my ($ret, $out, $err) =
-			  $node->psql('postgres', $cases{$case}->($t));
-			is($ret, 0, "$what: no error") or diag($err);
+			my $sql = $cases{$case}->($t);
+			if ($defer)
+			{
+				$sql =~ s/BEGIN;/BEGIN;\nUPDATE mk SET v = v + 1;/;
+				$node->safe_psql('postgres',
+					'ALTER DATABASE rr ALLOW_CONNECTIONS false');
+				ok( $node->poll_query_until(
+						'postgres',
+						q{SELECT count(*) = 0 FROM pg_stat_activity
+						  WHERE backend_type = 'undo apply worker'}),
+					"$what: no undo apply worker is connected");
+			}
+			$bg->{stderr} = '';
+			$bg->query($sql);
+			is($bg->{stderr}, '', "$what: no error");
+			if ($defer)
+			{
+				isnt($bg->query_safe($raw_mk),
+					$orig_mk, "$what: the rollback is left to the worker");
+				$node->safe_psql('postgres',
+					'ALTER DATABASE rr ALLOW_CONNECTIONS true');
+				ok( $node->poll_query_until(
+						'rr', "SELECT ($raw_mk) = '$orig_mk'"),
+					"$what: the worker applied the rollback");
+			}
 			check($t, "$what: rows restored");
 			push @tables, [ $t, $what ];
 		}
 	}
+	$bg->quit;
 
 	$node->restart;
 	check($_->[0], "$_->[1]: rows restored after restart") foreach @tables;

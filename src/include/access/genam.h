@@ -158,6 +158,8 @@ extern bool index_delete_mark(Relation indexRelation,
 							  Datum *values, bool *isnull,
 							  ItemPointer heap_t_ctid,
 							  Relation heapRelation);
+extern bool index_probe_delete_mark(Relation indexRelation, Datum *values,
+									bool *isnull, ItemPointer tid, Relation heapRelation);
 extern bool index_undo_mark(Relation indexRelation,
 							Datum *values, bool *isnull,
 							ItemPointer heap_t_ctid,

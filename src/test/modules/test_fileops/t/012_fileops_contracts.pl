@@ -15,6 +15,8 @@ my @syncs = $apply =~ /(fsync_fname_ext\([^;]+;)/g;
 is(scalar @syncs, 2, 'inverse syncs file and parent');
 # 016_fileops_inverse_fsync.pl tests what a failed inverse sync does.
 my $header = slurp_file("$src/include/access/xlog_internal.h");
-unlike($header, qr/#define XLOG_PAGE_MAGIC 0xD125\b/,
- 'incompatible FILEOPS and ATM records change WAL magic');
+unlike(
+	$header,
+	qr/#define XLOG_PAGE_MAGIC 0xD125\b/,
+	'incompatible FILEOPS and ATM records change WAL magic');
 done_testing();

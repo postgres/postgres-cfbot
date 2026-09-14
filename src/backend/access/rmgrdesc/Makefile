@@ -15,6 +15,7 @@ OBJS = \
 	committsdesc.o \
 	dbasedesc.o \
 	fileopsdesc.o \
+	fluxdesc.o \
 	genericdesc.o \
 	gindesc.o \
 	gistdesc.o \

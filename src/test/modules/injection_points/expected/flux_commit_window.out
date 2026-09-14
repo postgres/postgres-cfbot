@@ -1,0 +1,29 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1u s2u s3w s2r
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1u: UPDATE fcw SET v = v + 1 WHERE id = 1; <waiting ...>
+step s2u: UPDATE fcw SET v = v + 1 WHERE id = 1; <waiting ...>
+step s3w: SELECT injection_points_wakeup('commit-before-clog-update');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1u: <... completed>
+step s2u: <... completed>
+step s2r: SELECT v FROM fcw WHERE id = 1;
+v
+-
+2
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

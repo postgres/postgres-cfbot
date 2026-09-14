@@ -1,24 +1,32 @@
 /*-------------------------------------------------------------------------
  *
  * slog.c
- *	  Secondary Log (sLog) -- transaction Aborted Transaction Map (ATM)
+ *	  Secondary Log (sLog) -- the transaction sLog, which holds the
+ *	  Aborted Transaction Map (ATM)
  *
- * The sLog tracks aborted transactions in shared memory for the UNDO
- * subsystem's Constant-Time Recovery.
+ * The sLog is the UNDO subsystem's shared state that is not WAL.  It has
+ * two parts:
+ *
+ *   - The transaction sLog (this file): the aborted transactions whose UNDO
+ *     has not been applied yet (the ATM, atm.c), which the logical revert
+ *     worker reverts and which checkpoints and redo carry across a crash
+ *     (RM_ATM_ID records).
+ *   - The tuple sLog (slog_tuple.c): per-tuple state of UNDO-based table
+ *     AMs -- who holds row locks on their tuples (they record no locker in
+ *     the tuple), and which tuples this transaction inserted.
  *
  * Transaction sLog (adaptive radix tree):
  *   - A shared-memory adaptive radix tree (radixtree.h, RT_SHMEM) keyed by
  *     (xid, reloid) packed into a uint64 stores full abort metadata.  With
  *     xid in the high bits, ordered iteration groups all entries for a
  *     given xid contiguously, enabling efficient per-xid range operations.
- *   - The tree lives in the sLog's DSA area and grows on demand.
+ *   - The tree lives in a DSA area of its own, created by the first
+ *     transaction that writes UNDO (SLogTxnEnsureCreated), and grows on
+ *     demand.  Nothing but the lock and the tree's handle is
+ *     allocated at startup.  Until it exists, the ATM is empty: readers say
+ *     so without creating it.
  *   - The radix tree is protected by a single LWLock (sLog modifications
  *     only occur on transaction abort, an uncommon path).
- *
- * An optional per-tuple flat-hash extension (see the tuple sLog, added by
- * the consumer that needs bounded-recovery uncommitted-writer tracking)
- * shares this file's shared-memory segment and initialization but is not
- * required by the UNDO core.
  *
  * Locking: Transaction sLog uses LWTRANCHE_SLOG.
  *
@@ -124,10 +132,8 @@ slog_atm_key_reloid(uint64 key)
 }
 
 /*
- * Initial size for the sLog DSA area (backs the aborted-txn radix tree).
- * Grows dynamically as needed up to slog_dsa_max_size_mb.  SLOG_DSA_INIT_SIZE
- * and the shared-state struct are defined in access/slog_internal.h, shared
- * with the optional tuple sLog (slog_tuple.c).
+ * Maximum size of the ATM's DSA area.  The shared-state struct is defined in
+ * access/slog_internal.h.
  */
 #define SLOG_DSA_MAX_SIZE_MB	256 /* default max: 256 MB */
 
@@ -140,7 +146,7 @@ int			slog_dsa_max_size_mb = SLOG_DSA_MAX_SIZE_MB;
  */
 SLogSharedState *SLogState = NULL;
 
-/* Per-backend DSA attachment (lazy, via SLogEnsureDsaAttached) */
+/* Per-backend attachment of the ATM's DSA area (lazy, via slog_atm_tree) */
 static dsa_area *slog_dsa_handle = NULL;
 
 /* Per-backend attached ATM radix tree (lazy, via slog_atm_tree) */
@@ -151,33 +157,94 @@ static slog_atm_radix_tree * slog_atm_tree_local = NULL;
  * slog_atm_tree
  *		Return this backend's attached ATM radix tree, attaching lazily.
  *
- * Ensures the sLog DSA area is attached, then attaches to the shared
- * radix tree via its handle.  The attached wrapper is cached for the
- * life of the backend (the control block lives in the pinned DSA area).
- * The caller must hold txn_lock across any use of the returned tree.
+ * Returns NULL if the tree was never created and create is false; readers
+ * then treat the ATM as empty.  With create, the first caller in the cluster
+ * creates the DSA area and the tree, which raises ERROR on failure: callers
+ * that must not fail (an aborting transaction) pass false, and their
+ * transaction created the tree when it first wrote UNDO
+ * (SLogTxnEnsureCreated).  Once created the area is pinned and lasts until
+ * shared memory is reinitialized.  The attached wrapper is cached for the
+ * life of the backend.  The caller must hold txn_lock across any use of the
+ * returned tree, and must not hold it here.
  */
 static slog_atm_radix_tree *
-slog_atm_tree(void)
+slog_atm_tree(bool create)
 {
 	MemoryContext oldcxt;
+	bool		created = false;
 
 	if (slog_atm_tree_local != NULL)
 		return slog_atm_tree_local;
 
-	SLogEnsureDsaAttached();
-	if (slog_dsa_handle == NULL)
-		elog(PANIC, "sLog: DSA not attached for ATM radix tree");
+	LWLockAcquire(&SLogState->txn_lock.lock, create ? LW_EXCLUSIVE : LW_SHARED);
+	if (!DsaPointerIsValid(SLogState->atm_handle) && !create)
+	{
+		LWLockRelease(&SLogState->txn_lock.lock);
+		return NULL;
+	}
 
 	/*
-	 * Attach in TopMemoryContext so the wrapper persists across transactions,
-	 * mirroring the DSA attach above.
+	 * Keep the attachment and the wrapper across transactions.  The area is
+	 * remembered only once its mapping is pinned, so that an ERROR in between
+	 * cannot leave a dangling pointer behind.  The smallest first segment
+	 * will do: an entry is a few dozen bytes, and the area grows as needed.
 	 */
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	slog_atm_tree_local = slog_atm_attach(slog_dsa_handle,
-										  SLogState->atm_handle);
+	if (slog_dsa_handle == NULL)
+	{
+		dsa_area   *area;
+
+		if (SLogState->area != DSA_HANDLE_INVALID)
+		{
+			area = dsa_attach(SLogState->area);
+			dsa_pin_mapping(area);
+		}
+		else
+		{
+			area = dsa_create_ext(LWTRANCHE_SLOG, DSA_MIN_SEGMENT_SIZE,
+								  DSA_MAX_SEGMENT_SIZE);
+			dsa_pin_mapping(area);
+			dsa_pin(area);
+			dsa_set_size_limit(area,
+							   (Size) slog_dsa_max_size_mb * 1024 * 1024);
+			SLogState->area = dsa_get_handle(area);
+		}
+		slog_dsa_handle = area;
+	}
+	if (!DsaPointerIsValid(SLogState->atm_handle))
+	{
+		slog_atm_radix_tree *tree;
+
+		tree = slog_atm_create(slog_dsa_handle, LWTRANCHE_SLOG);
+		SLogState->atm_handle = slog_atm_get_handle(tree);
+		slog_atm_tree_local = tree;
+		created = true;
+	}
+	else
+		slog_atm_tree_local = slog_atm_attach(slog_dsa_handle,
+											  SLogState->atm_handle);
 	MemoryContextSwitchTo(oldcxt);
+	LWLockRelease(&SLogState->txn_lock.lock);
+
+	if (created)
+		elog(DEBUG1, "created the aborted transaction map");
 
 	return slog_atm_tree_local;
+}
+
+/*
+ * SLogTxnEnsureCreated
+ *		Create the ATM now, if nobody has yet, so that this transaction can
+ *		abort into it without allocating.
+ *
+ * Called when a transaction first writes UNDO, and by ROLLBACK PREPARED,
+ * outside any critical section: a failure here is an ordinary ERROR, before
+ * anything that would need rolling back exists.
+ */
+void
+SLogTxnEnsureCreated(void)
+{
+	(void) slog_atm_tree(true);
 }
 
 /* ----------------------------------------------------------------
@@ -189,23 +256,20 @@ slog_atm_tree(void)
  * SLogShmemSize
  *		Calculate shared memory needed for the sLog.
  *
- * Note: The DSA initial region is embedded in SLogSharedState (dsa_space[]),
- * so sizeof(SLogSharedState) already includes SLOG_DSA_INIT_SIZE.  The ATM
- * radix tree is allocated from that DSA area on demand, so it needs no fixed
- * reservation here.
+ * Only the lock and the tree's handle: the tree and its DSA area are
+ * created on first use (slog_atm_tree).
  */
 Size
 SLogShmemSize(void)
 {
-	return add_size(MAXALIGN(sizeof(SLogSharedState)), SLogTupleShmemSize());
+	return MAXALIGN(sizeof(SLogSharedState));
 }
 
 /*
  * SLogShmemRequest
  *		Register shared memory needs for the sLog.
  *
- * Registers the shared state struct (which embeds the DSA initial region
- * backing the aborted-transaction radix tree).
+ * Registers the shared state struct.
  */
 void
 SLogShmemRequest(void)
@@ -215,9 +279,6 @@ SLogShmemRequest(void)
 					   .size = sizeof(SLogSharedState),
 					   .ptr = (void **) &SLogState,
 		);
-
-	/* Optional tuple sLog: register its flat-hash partition block. */
-	SLogTupleShmemRequest();
 }
 
 /*
@@ -225,46 +286,14 @@ SLogShmemRequest(void)
  *		Initialize sLog shared memory contents.
  *
  * Called during the init_fn phase.  The framework has already allocated
- * SLogState.  We initialize the transaction ATM radix tree and its DSA area.
+ * SLogState.  The ATM's DSA area and tree do not exist yet.
  */
 void
 SLogShmemInit(void)
 {
-	/* ATM radix tree is created below, after the DSA area exists. */
-	SLogState->atm_handle = InvalidDsaPointer;
-
-	/* ---- Initialize locks ---- */
 	LWLockInitialize(&SLogState->txn_lock.lock, LWTRANCHE_SLOG);
-
-	/* ---- Optional tuple sLog: allocate + init the flat-hash partitions ---- */
-	SLogTupleShmemInit();
-
-	/* ---- Initialize DSA area (backs the aborted-txn radix tree) ---- */
-	SLogState->dsa_area = dsa_create_in_place(SLogState->dsa_space,
-											  SLOG_DSA_INIT_SIZE,
-											  LWTRANCHE_SLOG,
-											  0);
-	dsa_pin(SLogState->dsa_area);
-	dsa_set_size_limit(SLogState->dsa_area,
-					   (Size) slog_dsa_max_size_mb * 1024 * 1024);
-
-	/*
-	 * Create the ATM radix tree in the DSA area and record its handle.  The
-	 * transient tree wrapper returned here is discarded when init's memory
-	 * context is reset; the control block lives in the pinned DSA area, and
-	 * each backend re-attaches lazily via slog_atm_tree().  We reuse
-	 * LWTRANCHE_SLOG for the tree's internal lock (unused -- txn_lock
-	 * serializes all access -- but a valid tranche is required).
-	 */
-	{
-		slog_atm_radix_tree *tree;
-
-		tree = slog_atm_create(SLogState->dsa_area, LWTRANCHE_SLOG);
-		SLogState->atm_handle = slog_atm_get_handle(tree);
-	}
-
-	dsa_detach(SLogState->dsa_area);
-	SLogState->dsa_area = NULL; /* backends re-attach lazily */
+	SLogState->area = DSA_HANDLE_INVALID;
+	SLogState->atm_handle = InvalidDsaPointer;
 }
 
 /*
@@ -297,41 +326,6 @@ const ShmemCallbacks SLogShmemCallbacks = {
 	.request_fn = SLogShmemRequest_cb,
 	.init_fn = SLogShmemInit_cb,
 };
-
-/* ----------------------------------------------------------------
- * DSA lifecycle for the shared sLog DSA area
- * ----------------------------------------------------------------
- */
-
-/*
- * SLogEnsureDsaAttached
- *		Lazy per-backend DSA attachment.
- *
- * Must be called before any DSA alloc/free/get_address operations.
- * Safe to call multiple times (no-op after first attach).
- */
-void
-SLogEnsureDsaAttached(void)
-{
-	MemoryContext oldcxt;
-
-	if (slog_dsa_handle != NULL)
-		return;					/* already attached */
-
-	if (SLogState == NULL)
-		return;					/* sLog not yet initialized */
-
-	/*
-	 * Allocate in TopMemoryContext so the dsa_area struct persists across
-	 * transactions.  dsa_attach_in_place internally palloc's, so if we're in
-	 * a transaction context, the handle would become a dangling pointer after
-	 * transaction end.
-	 */
-	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	slog_dsa_handle = dsa_attach_in_place(SLogState->dsa_space, NULL);
-	dsa_pin_mapping(slog_dsa_handle);
-	MemoryContextSwitchTo(oldcxt);
-}
 
 /* ================================================================
  * Transaction sLog functions
@@ -367,10 +361,14 @@ SLogTxnInsert(TransactionId xid, Oid reloid, Oid dboid,
 			  XLogRecPtr first_batch_lsn, bool fileops_owned,
 			  bool check_space)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(!check_space);
 	uint64		key = slog_atm_key(xid, reloid);
 	slog_atm_value_t value;
 	slog_atm_value_t *found;
+
+	/* Aborting, and the ATM was never created: report it as full. */
+	if (tree == NULL)
+		return false;
 
 	value.last_batch_lsn = last_batch_lsn;
 	value.stop_lsn = stop_lsn;
@@ -428,9 +426,13 @@ SLogTxnInsert(TransactionId xid, Oid reloid, Oid dboid,
 bool
 SLogTxnLookup(TransactionId xid, Oid reloid, SLogTxnEntry *entry_out)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	uint64		key = slog_atm_key(xid, reloid);
 	slog_atm_value_t *found;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return false;
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_SHARED);
 
@@ -467,11 +469,15 @@ SLogTxnLookup(TransactionId xid, Oid reloid, SLogTxnEntry *entry_out)
 bool
 SLogTxnLookupByXid(TransactionId xid, XLogRecPtr *lsn_out)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
 	bool		result = false;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return false;
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_SHARED);
 
@@ -503,8 +509,12 @@ SLogTxnLookupByXid(TransactionId xid, XLogRecPtr *lsn_out)
 void
 SLogTxnRemove(TransactionId xid, Oid reloid)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	uint64		key = slog_atm_key(xid, reloid);
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return;
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_EXCLUSIVE);
 
@@ -525,7 +535,7 @@ SLogTxnRemove(TransactionId xid, Oid reloid)
 void
 SLogTxnRemoveByXid(TransactionId xid)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
@@ -533,6 +543,10 @@ SLogTxnRemoveByXid(TransactionId xid)
 	int			nremove = 0;
 	int			max_remove = 64;
 	int			i;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return;
 
 	to_remove = (uint64 *) palloc(max_remove * sizeof(uint64));
 
@@ -582,7 +596,7 @@ SLogTxnRemoveByXid(TransactionId xid)
 void
 SLogTxnMarkReverted(TransactionId xid)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
@@ -591,6 +605,10 @@ SLogTxnMarkReverted(TransactionId xid)
 	int			n = 0;
 	int			max_n = 64;
 	int			i;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return;
 
 	keys = (uint64 *) palloc(max_n * sizeof(uint64));
 	vals = (slog_atm_value_t *) palloc(max_n * sizeof(slog_atm_value_t));
@@ -647,11 +665,15 @@ SLogTxnGetNextUnreverted(Oid dboid, TransactionId after_xid,
 						 TransactionId *xid_out,
 						 XLogRecPtr *lsn_out, XLogRecPtr *stop_lsn_out)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
 	bool		result = false;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return false;
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_SHARED);
 
@@ -690,11 +712,15 @@ SLogTxnGetNextUnreverted(Oid dboid, TransactionId after_xid,
 int
 SLogTxnCollectUnrevertedDatabases(Oid *dboids, int max_dboids)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
 	int			n = 0;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return 0;
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_SHARED);
 
@@ -731,12 +757,22 @@ SLogTxnCollectUnrevertedDatabases(Oid *dboids, int max_dboids)
 void
 SLogRecoveryFinalize(int *total_out, int *unreverted_out)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
 	int			total = 0;
 	int			unreverted = 0;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+	{
+		if (total_out)
+			*total_out = 0;
+		if (unreverted_out)
+			*unreverted_out = 0;
+		return;
+	}
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_SHARED);
 
@@ -769,11 +805,15 @@ SLogRecoveryFinalize(int *total_out, int *unreverted_out)
 XLogRecPtr
 SLogTxnGetOldestUnrevertedLSN(void)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
 	XLogRecPtr	oldest = InvalidXLogRecPtr;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return InvalidXLogRecPtr;
 
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_SHARED);
 
@@ -813,7 +853,7 @@ SLogTxnGetOldestUnrevertedLSN(void)
 int
 SLogTxnSnapshotForCheckpoint(SLogTxnEntry **entries_out)
 {
-	slog_atm_radix_tree *tree = slog_atm_tree();
+	slog_atm_radix_tree *tree = slog_atm_tree(false);
 	slog_atm_iter *iter;
 	slog_atm_value_t *val;
 	uint64		k;
@@ -822,6 +862,10 @@ SLogTxnSnapshotForCheckpoint(SLogTxnEntry **entries_out)
 	int			capacity = 64;
 
 	*entries_out = NULL;
+
+	/* never created: the ATM is empty */
+	if (tree == NULL)
+		return 0;
 
 	arr = (SLogTxnEntry *) palloc(sizeof(SLogTxnEntry) * capacity);
 

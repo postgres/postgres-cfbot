@@ -99,6 +99,7 @@ LogicalMessage
 XLOG2
 Undo
 ATM
+FLUX
 FileOps
 UndoLog
 UndoAction$/,

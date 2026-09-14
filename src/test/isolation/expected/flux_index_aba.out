@@ -1,0 +1,104 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1b s2c s2a s1a s1c s1e s2r
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT k FROM fx WHERE id = 12;
+ k
+--
+12
+(1 row)
+
+step s2c: UPDATE fx SET k = 3000012 WHERE id = 12; UPDATE hp SET k = 3000012 WHERE id = 12;
+step s2a: BEGIN; UPDATE fx SET k = 12 WHERE id = 12; UPDATE hp SET k = 12 WHERE id = 12; ROLLBACK;
+step s1a: SELECT * FROM aba_rows(12);
+via   |id| k
+------+--+--
+fx-idx|12|12
+hp-idx|12|12
+fx-seq|12|12
+hp-seq|12|12
+(4 rows)
+
+step s1c: SELECT * FROM aba_rows(3000012);
+via|id|k
+---+--+-
+(0 rows)
+
+step s1e: COMMIT;
+step s2r: SELECT * FROM aba_rows(12) UNION ALL SELECT * FROM aba_rows(3000012);
+via   |id|      k
+------+--+-------
+fx-idx|12|3000012
+hp-idx|12|3000012
+fx-seq|12|3000012
+hp-seq|12|3000012
+(4 rows)
+
+
+starting permutation: s1b s2c s2x s1a s1c s1e s2r
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT k FROM fx WHERE id = 12;
+ k
+--
+12
+(1 row)
+
+step s2c: UPDATE fx SET k = 3000012 WHERE id = 12; UPDATE hp SET k = 3000012 WHERE id = 12;
+step s2x: BEGIN;
+			  UPDATE fx SET k = 12 WHERE id = 12; UPDATE hp SET k = 12 WHERE id = 12;
+			  UPDATE fx SET k = 3000012 WHERE id = 12; UPDATE hp SET k = 3000012 WHERE id = 12;
+			  UPDATE fx SET k = 12 WHERE id = 12; UPDATE hp SET k = 12 WHERE id = 12;
+			  ROLLBACK;
+step s1a: SELECT * FROM aba_rows(12);
+via   |id| k
+------+--+--
+fx-idx|12|12
+hp-idx|12|12
+fx-seq|12|12
+hp-seq|12|12
+(4 rows)
+
+step s1c: SELECT * FROM aba_rows(3000012);
+via|id|k
+---+--+-
+(0 rows)
+
+step s1e: COMMIT;
+step s2r: SELECT * FROM aba_rows(12) UNION ALL SELECT * FROM aba_rows(3000012);
+via   |id|      k
+------+--+-------
+fx-idx|12|3000012
+hp-idx|12|3000012
+fx-seq|12|3000012
+hp-seq|12|3000012
+(4 rows)
+
+
+starting permutation: s1b s2b s1a s1e s2r
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT k FROM fx WHERE id = 12;
+ k
+--
+12
+(1 row)
+
+step s2b: BEGIN;
+			  UPDATE fx SET k = 4000012 WHERE id = 12; UPDATE hp SET k = 4000012 WHERE id = 12;
+			  UPDATE fx SET k = 12 WHERE id = 12; UPDATE hp SET k = 12 WHERE id = 12;
+			  ROLLBACK;
+step s1a: SELECT * FROM aba_rows(12);
+via   |id| k
+------+--+--
+fx-idx|12|12
+hp-idx|12|12
+fx-seq|12|12
+hp-seq|12|12
+(4 rows)
+
+step s1e: COMMIT;
+step s2r: SELECT * FROM aba_rows(12) UNION ALL SELECT * FROM aba_rows(3000012);
+via   |id| k
+------+--+--
+fx-idx|12|12
+hp-idx|12|12
+fx-seq|12|12
+hp-seq|12|12
+(4 rows)
+

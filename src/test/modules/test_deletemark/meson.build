@@ -33,6 +33,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_deletemark_recovery.pl',
+      't/002_deletemark_lp_dead.pl',
     ],
   },
 }

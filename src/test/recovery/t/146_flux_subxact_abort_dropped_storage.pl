@@ -114,6 +114,27 @@ $rollback
 			"$am: $scope rollback restores the old index file");
 	}
 
+	# DROP INDEX: the index UNDO names an index the subtransaction dropped,
+	# which the relcache cannot open until the subtransaction's catalog
+	# changes are rolled back.  Left unreversed, the index keeps the aborted
+	# (k_new, TID) entry live, and moving the row there again inserts a
+	# second entry with the same key and TID.
+	$node->safe_psql(
+		'postgres', qq(
+BEGIN;
+SAVEPOINT s;
+UPDATE ${am}_keep SET v = v + 1000 WHERE id BETWEEN 1 AND 5;
+DROP INDEX ${am}_keep_v;
+ROLLBACK TO s;
+COMMIT;
+UPDATE ${am}_keep SET v = v + 1000 WHERE id BETWEEN 1 AND 5;
+UPDATE ${am}_keep SET v = v - 1000 WHERE id BETWEEN 1 AND 5;
+));
+	is( $node->psql(
+			'postgres', "SELECT bt_index_check('${am}_keep_v', true)"),
+		0,
+		"$am: savepoint rollback of DROP INDEX restores the index");
+
 	is( $node->safe_psql(
 			'postgres', "SELECT count(*), sum(v) FROM ${am}_keep"),
 		'13|0',

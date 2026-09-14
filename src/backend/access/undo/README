@@ -118,8 +118,8 @@ and the snapshot used, redo of WAL that still refers to that log can fail
 with an error such as "cannot find undo log number N for xid X", and the
 server does not start.
 
-No in-tree access method writes per-backend UNDO yet; the engine compiles,
-links, and registers, and its dispatch path is ready for a future consumer.
+The FLUX table access method (src/backend/access/flux) writes its table
+UNDO to the per-backend engine.
 
 
 ## Recovery Model
@@ -186,14 +186,18 @@ deferring the physical undo to the background:
     redo) and ROLLBACK returns without applying the UNDO, so its latency
     does not depend on how much UNDO the transaction wrote.
 
-  - **sLog (slog.c, slog_flathash.c, slog_tuple.c).**  A shared-memory
-    map consulted by an in-place-update AM's visibility checks so that an
-    aborted transaction's writes are invisible to every reader
-    immediately, before any physical undo has run.  The sLog serves the
-    abort/self-visibility window; the commit oracle remains CLOG.  The
-    optional per-tuple flat-hash extension (the tuple sLog) tracks
-    uncommitted writers for bounded recovery and is engine-agnostic
-    (keyed on physical tuple identity).
+  - **sLog (slog.c, slog_tuple.c).**  The transaction sLog (slog.c) is
+    the ATM above, kept in shared memory.  The tuple sLog (slog_tuple.c)
+    is per-tuple state for UNDO-based table AMs, keyed by (relation OID,
+    relation storage, TID) and independent of any AM's page format.  Such
+    an AM records no row locker in the tuple (no locker xmax, no
+    MultiXact), so SLogTupleLock* keeps the holder, strength and locking
+    subtransaction of each row lock, in per-backend records and hash
+    tables in shared memory created on the first row lock, with a holder
+    index that lets a conflict probe visit only the backends that may hold
+    a lock on its tuple; PREPARE hands them to the prepared transaction.  It also tracks, backend-locally, the tuples the current
+    transaction inserted.  The commit oracle remains CLOG and the writer
+    xids in the tuple header.
 
   - **Logical Revert worker (logical_revert_worker.c).**  A background
     worker that scans the ATM for entries not yet reverted and calls

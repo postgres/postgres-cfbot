@@ -339,10 +339,10 @@ _bt_killitems(IndexScanDesc scan)
 				/*
 				 * A delete-marked tombstone is never LP_DEAD-killed via
 				 * kill_prior_tuple: it must linger for old-snapshot readers
-				 * until VACUUM decides it is removable.  Also, its t_tid holds
-				 * alt-TID metadata rather than the heap TID, so comparing it
-				 * against kitem->heapTid would be meaningless. Leave killtuple
-				 * false.
+				 * until VACUUM decides it is removable.  Also, its t_tid
+				 * holds alt-TID metadata rather than the heap TID, so
+				 * comparing it against kitem->heapTid would be meaningless.
+				 * Leave killtuple false.
 				 */
 			}
 			else if (ItemPointerEquals(&ituple->t_tid, &kitem->heapTid))
@@ -720,15 +720,14 @@ _bt_truncate(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 	Assert(!BTreeTupleIsPivot(lastleft) && !BTreeTupleIsPivot(firstright));
 
 	/*
-	 * A delete-marked leaf tuple carries alt-TID status metadata
-	 * in t_tid and its heap TID in a trailer.  index_truncate_tuple() would
-	 * copy that alt-TID metadata / oversized trailer into the new pivot,
-	 * producing a malformed separator whose heap-TID tiebreaker is wrong (a
-	 * later scantid descent then routes to the wrong leaf -- the delete-mark
-	 * revive miss that leaves a duplicate (key,TID)).  Demote firstright to a
-	 * plain leaf tuple (same key attrs, heap TID back in t_tid, no trailer,
-	 * no status bit) for forming the pivot; the pivot only needs key + heap
-	 * TID.
+	 * A delete-marked leaf tuple carries alt-TID status metadata in t_tid and
+	 * its heap TID in a trailer.  index_truncate_tuple() would copy that
+	 * alt-TID metadata / oversized trailer into the new pivot, producing a
+	 * malformed separator whose heap-TID tiebreaker is wrong (a later scantid
+	 * descent then routes to the wrong leaf -- the delete-mark revive miss
+	 * that leaves a duplicate (key,TID)).  Demote firstright to a plain leaf
+	 * tuple (same key attrs, heap TID back in t_tid, no trailer, no status
+	 * bit) for forming the pivot; the pivot only needs key + heap TID.
 	 */
 	if (BTreeTupleIsDeleteMarked(firstright))
 	{

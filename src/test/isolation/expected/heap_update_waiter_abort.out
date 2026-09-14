@@ -1,0 +1,338 @@
+Parsed test spec with 4 sessions
+
+starting permutation: s1b s1w s2b s2u s1c s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+v| w|v| w
+-+--+-+--
+0|10|1|10
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v| w
+--+-+--
+ 1|1|10
+ 2|0| 0
+(2 rows)
+
+
+starting permutation: s1b s1w s2b s2u s1r s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+0|0|1|0
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|0|0
+(2 rows)
+
+
+starting permutation: s1b s1w s2rr s2u s1c s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v| w
+--+-+--
+ 1|0|10
+ 2|0| 0
+(2 rows)
+
+
+starting permutation: s1b s1w s2rr s2u s1r s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+0|0|1|0
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|0|0
+(2 rows)
+
+
+starting permutation: s1b s1sp s1w s2b s2u s1rs s1c s2c chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+0|0|1|0
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|0|0
+(2 rows)
+
+
+starting permutation: s1b s1w s1sp s1w2 s2b s2u s1rs s1c s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s1sp: SAVEPOINT a;
+step s1w2: UPDATE vh SET w = 20 WHERE id = 1;
+step s2b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s2u: <... completed>
+v| w|v| w
+-+--+-+--
+0|10|1|10
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v| w
+--+-+--
+ 1|1|10
+ 2|0| 0
+(2 rows)
+
+
+starting permutation: s1b s1w s2b s2d s1c s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2d: DELETE FROM vh WHERE id = 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+id|v| w
+--+-+--
+ 1|0|10
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 2|0|0
+(1 row)
+
+
+starting permutation: s1b s1w s2b s2d s1r s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2d: DELETE FROM vh WHERE id = 1 RETURNING *; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+id|v|w
+--+-+-
+ 1|0|0
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 2|0|0
+(1 row)
+
+
+starting permutation: s1b s1w s2b s2l s1r s2c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2l: SELECT * FROM vh WHERE id = 1 FOR UPDATE; <waiting ...>
+step s1r: ROLLBACK;
+step s2l: <... completed>
+id|v|w
+--+-+-
+ 1|0|0
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 1|0|0
+ 2|0|0
+(2 rows)
+
+
+starting permutation: s1b s1w s2b s3b s2u s3u s1c s2c s3c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s3b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s3u: UPDATE vh SET v = v + 10 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+v| w|v| w
+-+--+-+--
+0|10|1|10
+(1 row)
+
+step s2c: COMMIT;
+step s3u: <... completed>
+v| w| v| w
+-+--+--+--
+1|10|11|10
+(1 row)
+
+step s3c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id| v| w
+--+--+--
+ 1|11|10
+ 2| 0| 0
+(2 rows)
+
+
+starting permutation: s1b s1w s2b s3b s2u s3u s1r s2c s3c chk
+step s1b: BEGIN;
+step s1w: UPDATE vh SET w = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s3b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s3u: UPDATE vh SET v = v + 10 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+0|0|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3u: <... completed>
+v|w| v|w
+-+-+--+-
+1|0|11|0
+(1 row)
+
+step s3c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id| v|w
+--+--+-
+ 1|11|0
+ 2| 0|0
+(2 rows)
+
+
+starting permutation: s1b s1k s2b s2u s1c s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE vh SET id = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+(0 rows)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 2|0|0
+10|0|0
+(2 rows)
+
+
+starting permutation: s1b s1k s2b s2u s1r s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE vh SET id = 10 WHERE id = 1;
+step s2b: BEGIN;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+0|0|1|0
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|0|0
+(2 rows)
+
+
+starting permutation: s2b s2w5 s2u s2c chk
+step s2b: BEGIN;
+step s2w5: UPDATE vh SET w = 5 WHERE id = 1;
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w;
+v|w|v|w
+-+-+-+-
+0|5|1|5
+(1 row)
+
+step s2c: COMMIT;
+step chk: SELECT * FROM vh ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|5
+ 2|0|0
+(2 rows)
+
+
+starting permutation: s1b s2b s3b s1u1 s3u2 s2u s3u1 s1u2 s1c s2h s2c s3c chkh
+step s1b: BEGIN;
+step s2b: BEGIN;
+step s3b: BEGIN;
+step s1u1: UPDATE vh SET v = v + 1 WHERE id = 1; INSERT INTO vh_hist VALUES (1);
+step s3u2: UPDATE vh SET v = v + 1 WHERE id = 2; INSERT INTO vh_hist VALUES (2);
+step s2u: UPDATE vh SET v = v + 1 WHERE id = 1 RETURNING old.v, old.w, new.v, new.w; <waiting ...>
+step s3u1: UPDATE vh SET v = v + 1 WHERE id = 1; INSERT INTO vh_hist VALUES (1); <waiting ...>
+step s1u2: UPDATE vh SET v = v + 1 WHERE id = 2; INSERT INTO vh_hist VALUES (2); <waiting ...>
+step s1u2: <... completed>
+ERROR:  deadlock detected
+step s2u: <... completed>
+v|w|v|w
+-+-+-+-
+0|0|1|0
+(1 row)
+
+step s1c: COMMIT;
+step s2h: INSERT INTO vh_hist VALUES (1);
+step s2c: COMMIT;
+step s3u1: <... completed>
+step s3c: COMMIT;
+step chkh: SELECT f.id, f.v, f.w, count(h.id) AS committed FROM vh f LEFT JOIN vh_hist h USING (id) GROUP BY f.id, f.v, f.w ORDER BY f.id;
+id|v|w|committed
+--+-+-+---------
+ 1|2|0|        2
+ 2|1|0|        1
+(2 rows)
+

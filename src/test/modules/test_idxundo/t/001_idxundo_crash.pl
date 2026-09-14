@@ -86,7 +86,8 @@ COMMIT;
 my $bg = $node->background_psql('postgres');
 $bg->query_safe('BEGIN');
 $bg->query_safe(
-	q{INSERT INTO ct SELECT g, 'aborted-' || g FROM generate_series(10001, 10300) g});
+	q{INSERT INTO ct SELECT g, 'aborted-' || g FROM generate_series(10001, 10300) g}
+);
 
 # The rows are visible to their own transaction, so the insert really happened
 # and its UNDO is in WAL.
@@ -107,8 +108,10 @@ $node->stop('immediate');
 $node->start;
 
 # The killed transaction never committed, so none of its rows may be visible.
-my $after = $node->safe_psql('postgres', 'SELECT count(*) FROM ct WHERE id >= 10001');
-is($after, '0', 'rows from the killed transaction are not visible after recovery');
+my $after =
+  $node->safe_psql('postgres', 'SELECT count(*) FROM ct WHERE id >= 10001');
+is($after, '0',
+	'rows from the killed transaction are not visible after recovery');
 
 # The committed rows survived.
 is($node->safe_psql('postgres', 'SELECT count(*) FROM ct'),
@@ -146,10 +149,13 @@ is( $node->safe_psql(
 # The worker leaves the killed transaction's index entries for VACUUM: after
 # the abort is visible their heap TIDs could hold committed rows, so index UNDO
 # is applied only by the aborting backend itself.
-is($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('ct_pkey')"),
-	'0', 'killed transaction\'s primary key entries are left for VACUUM');
-is($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('ct_val_idx')"),
-	'0', 'killed transaction\'s secondary index entries are left for VACUUM');
+is( $node->safe_psql('postgres', "SELECT idxundo_count_dead_all('ct_pkey')"),
+	'0',
+	'killed transaction\'s primary key entries are left for VACUUM');
+is( $node->safe_psql(
+		'postgres', "SELECT idxundo_count_dead_all('ct_val_idx')"),
+	'0',
+	'killed transaction\'s secondary index entries are left for VACUUM');
 
 # The property that matters: every index agrees with the heap.  A forced
 # index-only path must not produce a row the heap scan does not, and amcheck
@@ -196,19 +202,23 @@ SET enable_seqscan = off;
 SELECT count(*) FROM cc WHERE id BETWEEN 1 AND 300;
 }),
 	'300',
-	'committed rows with deferred index UNDO still reachable through the index');
-is($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('cc_pkey')"),
-	'0', 'no index entry of the committed transaction was marked dead');
-is($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('cs_pkey')"),
+	'committed rows with deferred index UNDO still reachable through the index'
+);
+is( $node->safe_psql('postgres', "SELECT idxundo_count_dead_all('cc_pkey')"),
 	'0',
-	'no index entry of the committed subtransaction-first writer was marked dead');
+	'no index entry of the committed transaction was marked dead');
+is( $node->safe_psql('postgres', "SELECT idxundo_count_dead_all('cs_pkey')"),
+	'0',
+	'no index entry of the committed subtransaction-first writer was marked dead'
+);
 is( $node->safe_psql(
 		'postgres', q{
 SET enable_seqscan = off;
 SELECT count(*) FROM cs WHERE id BETWEEN 1 AND 310;
 }),
 	'310',
-	'committed rows first written in a subtransaction reachable through the index');
+	'committed rows first written in a subtransaction reachable through the index'
+);
 
 $node->stop;
 done_testing();

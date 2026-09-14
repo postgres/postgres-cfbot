@@ -1751,6 +1751,12 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 			XLogRecPtr	perm_lsn =
 				hdr->last_batch_lsn[UNDOPERSISTENCE_PERMANENT];
 
+			/*
+			 * The prepared transaction's backend may be from before a
+			 * restart.
+			 */
+			if (XLogRecPtrIsValid(perm_lsn))
+				ATMEnsureCreated();
 			if (XLogRecPtrIsValid(perm_lsn) &&
 				!ATMAddAborted(xid, hdr->database, perm_lsn,
 							   hdr->undo_first_batch_lsn, true))

@@ -1,0 +1,141 @@
+Parsed test spec with 4 sessions
+
+starting permutation: pick_fx s1b s1k s2k s3d s1r sync wake s3sel s2det
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: ALTER TABLE ur_fx RENAME TO kw;
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2k: UPDATE kw SET k = 100, v = 2 WHERE id = 3 RETURNING id, k, v; <waiting ...>
+step s3d: DELETE FROM kw WHERE id = 3 RETURNING id, k, v; <waiting ...>
+step s1r: ROLLBACK;
+step sync: 
+  DO $$
+  DECLARE
+    n int := 0;
+  BEGIN
+    LOOP
+      PERFORM pg_stat_clear_snapshot();
+      EXIT WHEN EXISTS (
+        SELECT FROM pg_stat_activity a2, pg_stat_activity a3
+         WHERE a2.application_name LIKE '%/s2'
+           AND a3.application_name LIKE '%/s3'
+           AND (a2.wait_event = 'flux-update-redecide' OR a2.state = 'idle')
+           AND (a3.state = 'idle' OR a2.pid = ANY (pg_blocking_pids(a3.pid))));
+      n := n + 1;
+      IF n > 30000 THEN
+        RAISE EXCEPTION 's2 and s3 did not settle';
+      END IF;
+      PERFORM pg_sleep(0.01);
+    END LOOP;
+  END $$;
+
+step wake: 
+  DO $$
+  BEGIN
+    IF EXISTS (SELECT FROM pg_stat_activity
+                WHERE wait_event = 'flux-update-redecide') THEN
+      PERFORM injection_points_wakeup('flux-update-redecide');
+    END IF;
+  END $$;
+
+step s2k: <... completed>
+id|  k|v
+--+---+-
+ 3|100|2
+(1 row)
+
+step s3d: <... completed>
+id|  k|v
+--+---+-
+ 3|100|2
+(1 row)
+
+step s3sel: SELECT id, k, v FROM kw ORDER BY id;
+id|k|v
+--+-+-
+ 1|1|0
+ 2|2|0
+ 4|4|0
+ 5|5|0
+(4 rows)
+
+step s2det: SELECT injection_points_detach('flux-update-redecide');
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp s1b s1k s2k s3d s1r sync wake s3sel s2det
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: ALTER TABLE ur_hp RENAME TO kw;
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2k: UPDATE kw SET k = 100, v = 2 WHERE id = 3 RETURNING id, k, v; <waiting ...>
+step s3d: DELETE FROM kw WHERE id = 3 RETURNING id, k, v; <waiting ...>
+step s1r: ROLLBACK;
+step s2k: <... completed>
+id|  k|v
+--+---+-
+ 3|100|2
+(1 row)
+
+step s3d: <... completed>
+id|  k|v
+--+---+-
+ 3|100|2
+(1 row)
+
+step sync: 
+  DO $$
+  DECLARE
+    n int := 0;
+  BEGIN
+    LOOP
+      PERFORM pg_stat_clear_snapshot();
+      EXIT WHEN EXISTS (
+        SELECT FROM pg_stat_activity a2, pg_stat_activity a3
+         WHERE a2.application_name LIKE '%/s2'
+           AND a3.application_name LIKE '%/s3'
+           AND (a2.wait_event = 'flux-update-redecide' OR a2.state = 'idle')
+           AND (a3.state = 'idle' OR a2.pid = ANY (pg_blocking_pids(a3.pid))));
+      n := n + 1;
+      IF n > 30000 THEN
+        RAISE EXCEPTION 's2 and s3 did not settle';
+      END IF;
+      PERFORM pg_sleep(0.01);
+    END LOOP;
+  END $$;
+
+step wake: 
+  DO $$
+  BEGIN
+    IF EXISTS (SELECT FROM pg_stat_activity
+                WHERE wait_event = 'flux-update-redecide') THEN
+      PERFORM injection_points_wakeup('flux-update-redecide');
+    END IF;
+  END $$;
+
+step s3sel: SELECT id, k, v FROM kw ORDER BY id;
+id|k|v
+--+-+-
+ 1|1|0
+ 2|2|0
+ 4|4|0
+ 5|5|0
+(4 rows)
+
+step s2det: SELECT injection_points_detach('flux-update-redecide');
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

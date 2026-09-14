@@ -29,8 +29,8 @@ CREATE TABLE t (id int primary key)
 
 # The oldest entry has a malformed chain: it points at a checkpoint record.
 # Its xid wrote nothing, so treating it as aborted changes no data.
-my $bad = $node->safe_psql('postgres',
-	'BEGIN; SELECT pg_current_xact_id(); COMMIT;');
+my $bad =
+  $node->safe_psql('postgres', 'BEGIN; SELECT pg_current_xact_id(); COMMIT;');
 ($bad) = $bad =~ /(\d+)\s*$/;
 $node->safe_psql('postgres', 'CHECKPOINT');
 is( $node->safe_psql(

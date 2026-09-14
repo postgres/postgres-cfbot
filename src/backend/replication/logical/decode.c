@@ -27,6 +27,7 @@
 #include "postgres.h"
 
 #include "access/heapam_xlog.h"
+#include "access/flux_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
@@ -68,6 +69,8 @@ static inline bool FilterPrepare(LogicalDecodingContext *ctx,
 static bool DecodeTXNNeedSkip(LogicalDecodingContext *ctx,
 							  XLogRecordBuffer *buf, Oid txn_dbid,
 							  ReplOriginId origin_id);
+static inline bool FilterByOrigin(LogicalDecodingContext *ctx,
+								  ReplOriginId origin_id);
 
 /*
  * Take every XLogReadRecord()ed record and perform the actions required to
@@ -563,6 +566,520 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			break;
 	}
 }
+
+/*
+ * Parse XLOG_FLUX_INSERT from wal into proper tuplebufs.
+ *
+ * Inserts contain the new tuple in FLUX format.
+ */
+static void
+DecodeFluxInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
+{
+	XLogReaderState *r = buf->record;
+	xl_flux_insert *xlrec;
+	ReorderBufferChange *change;
+	RelFileLocator target_locator;
+
+	xlrec = (xl_flux_insert *) XLogRecGetData(r);
+
+	/*
+	 * Ignore an insert logged without a logical image, as heap does: the
+	 * relation was not logically logged, or TABLE_INSERT_NO_LOGICAL, as for
+	 * the insert half of an UPDATE that moved the row, which its
+	 * XLOG_FLUX_SUPERSEDE record decodes.  A speculative insertion's
+	 * confirmation carries no tuple, so it is identified by its own flag.
+	 */
+	if (!(xlrec->flags & (FLUX_WAL_LOGICAL_TUPLE | FLUX_WAL_SPECULATIVE |
+						  FLUX_WAL_SPEC_CONFIRM)))
+		return;
+
+	/* only interested in our database */
+	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
+	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* output plugin doesn't look for this origin, no need to queue */
+	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
+		return;
+
+	change = ReorderBufferAllocChange(ctx->reorder);
+	if (xlrec->flags & FLUX_WAL_SPEC_CONFIRM)
+		change->action = REORDER_BUFFER_CHANGE_INTERNAL_SPEC_CONFIRM;
+	else if (xlrec->flags & FLUX_WAL_SPECULATIVE)
+		change->action = REORDER_BUFFER_CHANGE_INTERNAL_SPEC_INSERT;
+	else
+		change->action = REORDER_BUFFER_CHANGE_INSERT;
+	change->origin_id = XLogRecGetOrigin(r);
+
+	memcpy(&change->data.tp.rlocator, &target_locator, sizeof(RelFileLocator));
+
+	/*
+	 * When FLUX_WAL_LOGICAL_TUPLE is set, the write path appended a
+	 * heap-format image at the END of the main WAL data: ... [heap bytes]
+	 * [uint32 heap_len] Read heap_len from the last 4 bytes, then back up
+	 * heap_len more bytes to find the heap tuple payload.  This is immune to
+	 * whatever compression data precedes it.
+	 */
+	if (xlrec->flags & FLUX_WAL_SPEC_CONFIRM)
+	{
+		/* Confirmation carries no tuple; the speculative insert did. */
+	}
+	else if (xlrec->flags & FLUX_WAL_LOGICAL_TUPLE)
+	{
+		Size		full_len = XLogRecGetDataLen(r);
+		char	   *end = (char *) xlrec + full_len;
+		uint32		heap_len;
+		char	   *heap_data;
+
+		memcpy(&heap_len, end - sizeof(uint32), sizeof(uint32));
+		elog(DEBUG1, "FLUX DecodeInsert: full_len=%zu heap_len=%u action=INSERT lsn=%X/%X",
+			 full_len, heap_len,
+			 (uint32) (buf->origptr >> 32), (uint32) buf->origptr);
+		heap_data = end - sizeof(uint32) - heap_len;
+
+		change->data.tp.newtuple =
+			ReorderBufferAllocTupleBuf(ctx->reorder,
+									   heap_len - SizeofHeapTupleHeader);
+		change->data.tp.newtuple->t_len = heap_len;
+		ItemPointerSetInvalid(&change->data.tp.newtuple->t_self);
+		change->data.tp.newtuple->t_tableOid = InvalidOid;
+		memcpy(change->data.tp.newtuple->t_data, heap_data, heap_len);
+	}
+	else
+	{
+		/*
+		 * A speculative insertion into a relation that was not logically
+		 * logged: its body is in FLUX format, which no output plugin can
+		 * read.
+		 */
+		elog(ERROR, "FLUX record without logical image");
+	}
+
+	change->data.tp.clear_toast_afterwards = true;
+
+	ReorderBufferQueueChange(ctx->reorder, XLogRecGetXid(r), buf->origptr,
+							 change, false);
+}
+
+/*
+ * Parse XLOG_FLUX_MULTI_INSERT from wal into proper tuplebufs.
+ *
+ * A batched insert carries N tuples on one page.  The record layout is:
+ *
+ *	xl_flux_multi_insert							-- header
+ *	N * { xl_flux_multi_insert_tuple | FLUX body }-- per-tuple region
+ *	N * { heap body | uint32 len }					-- when FLUX_WAL_LOGICAL_TUPLE
+ *
+ * We queue one REORDER_BUFFER_CHANGE_INSERT per tuple, preferring the
+ * trailing heap-format image when present (mirrors DecodeFluxInsert).  The
+ * heap images are appended in tuple order, so the i-th image from the front
+ * of the trailing region corresponds to the i-th per-tuple entry.
+ */
+static void
+DecodeFluxMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
+{
+	XLogReaderState *r = buf->record;
+	xl_flux_multi_insert *xlrec;
+	RelFileLocator target_locator;
+	char	   *data;
+	char	   *cursor;
+	Size		total_len;
+	int			ntuples;
+	int			i;
+	bool		has_logical;
+	char	  **image_data = NULL;
+	uint32	   *image_len = NULL;
+
+	xlrec = (xl_flux_multi_insert *) XLogRecGetData(r);
+	ntuples = xlrec->ntuples;
+
+	/* only interested in our database */
+	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
+	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* output plugin doesn't look for this origin, no need to queue */
+	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
+		return;
+
+	data = XLogRecGetData(r);
+	total_len = XLogRecGetDataLen(r);
+	has_logical = (xlrec->flags & FLUX_WAL_LOGICAL_TUPLE) != 0;
+
+	/*
+	 * When heap-format images are present, locate each one up front by
+	 * walking the trailing image region from the record tail backward (each
+	 * region is "[heap bytes][uint32 len]").  The images were appended in
+	 * tuple order, so walking back collects them in reverse; we store them
+	 * indexed by tuple so the queue loop can read them front-to-back.
+	 */
+	if (has_logical)
+	{
+		const char *end = data + total_len;
+
+		image_data = (char **) palloc(ntuples * sizeof(char *));
+		image_len = (uint32 *) palloc(ntuples * sizeof(uint32));
+
+		for (i = ntuples - 1; i >= 0; i--)
+		{
+			uint32		heap_len;
+
+			memcpy(&heap_len, end - sizeof(uint32), sizeof(uint32));
+			end -= sizeof(uint32);
+			end -= heap_len;
+			image_data[i] = (char *) end;
+			image_len[i] = heap_len;
+		}
+	}
+
+	/* Walk the per-tuple region forward, queuing one INSERT per tuple */
+	cursor = data + SizeOfFluxMultiInsert;
+	for (i = 0; i < ntuples; i++)
+	{
+		xl_flux_multi_insert_tuple *tuphdr;
+		ReorderBufferChange *change;
+
+		cursor = (char *) SHORTALIGN(cursor);
+		tuphdr = (xl_flux_multi_insert_tuple *) cursor;
+		cursor += SizeOfFluxMultiInsertTuple;
+		cursor += tuphdr->datalen;
+
+		change = ReorderBufferAllocChange(ctx->reorder);
+		change->action = REORDER_BUFFER_CHANGE_INSERT;
+		change->origin_id = XLogRecGetOrigin(r);
+		memcpy(&change->data.tp.rlocator, &target_locator,
+			   sizeof(RelFileLocator));
+
+		if (has_logical)
+		{
+			uint32		heap_len = image_len[i];
+
+			change->data.tp.newtuple =
+				ReorderBufferAllocTupleBuf(ctx->reorder,
+										   heap_len - SizeofHeapTupleHeader);
+			change->data.tp.newtuple->t_len = heap_len;
+			ItemPointerSetInvalid(&change->data.tp.newtuple->t_self);
+			change->data.tp.newtuple->t_tableOid = InvalidOid;
+			memcpy(change->data.tp.newtuple->t_data, image_data[i], heap_len);
+		}
+		else
+		{
+			/*
+			 * The relation was not logically logged when the record was
+			 * written, so the body is in FLUX format, which no output plugin
+			 * can read.
+			 */
+			elog(ERROR, "FLUX record without logical image");
+		}
+
+		change->data.tp.clear_toast_afterwards = (i == ntuples - 1);
+
+		ReorderBufferQueueChange(ctx->reorder, XLogRecGetXid(r), buf->origptr,
+								 change, false);
+	}
+
+	if (has_logical)
+	{
+		pfree(image_data);
+		pfree(image_len);
+	}
+}
+
+/*
+ * Parse XLOG_FLUX_UPDATE_INPLACE from wal into proper tuplebufs.
+ *
+ * Updates contain both the old and new tuple in FLUX format.
+ *
+ * Also parse an XLOG_FLUX_SUPERSEDE record that carries logical images: it
+ * links the old version of a row an UPDATE moved to the new one, and is the
+ * UPDATE's logical change.  Its images have the same layout.
+ */
+static void
+DecodeFluxUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
+{
+	XLogReaderState *r = buf->record;
+	xl_flux_update *xlrec;
+	ReorderBufferChange *change;
+	RelFileLocator target_locator;
+	bool		has_images;
+
+	xlrec = (xl_flux_update *) XLogRecGetData(r);
+	if ((XLogRecGetInfo(r) & XLOG_FLUX_OPMASK) == XLOG_FLUX_SUPERSEDE)
+		has_images = true;		/* checked by the caller */
+	else
+	{
+		/*
+		 * Skip an UPDATE that was marked as ignorable at origin, as
+		 * DecodeUpdate skips heap's UPDATE without a new tuple (REPACK
+		 * (CONCURRENTLY) replaying onto its transient table).
+		 */
+		if (xlrec->flags & FLUX_WAL_NO_LOGICAL)
+			return;
+		has_images = (xlrec->flags & FLUX_WAL_LOGICAL_TUPLE) != 0;
+	}
+
+	/* only interested in our database */
+	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
+	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* output plugin doesn't look for this origin, no need to queue */
+	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
+		return;
+
+	change = ReorderBufferAllocChange(ctx->reorder);
+	change->action = REORDER_BUFFER_CHANGE_UPDATE;
+	change->origin_id = XLogRecGetOrigin(r);
+	memcpy(&change->data.tp.rlocator, &target_locator, sizeof(RelFileLocator));
+
+	/*
+	 * Get old and new tuple data from WAL record. The structure is:
+	 * xl_flux_update | old_tuple | new_tuple [| logical images]
+	 */
+	if (has_images)
+	{
+		/*
+		 * Two heap-format images appended at the END of the record, each with
+		 * trailing length:
+		 *
+		 * ... [old_heap bytes] [uint32 old_heap_len] [new_heap bytes] [uint32
+		 * new_heap_len]
+		 *
+		 * Walk backwards from end: read new_heap_len last, then old_heap_len
+		 * before the new bytes + its length.
+		 */
+		Size		full_len = XLogRecGetDataLen(r);
+		char	   *end = (char *) xlrec + full_len;
+		uint32		old_heap_len;
+		uint32		new_heap_len;
+		char	   *old_heap_data;
+		char	   *new_heap_data;
+
+		memcpy(&new_heap_len, end - sizeof(uint32), sizeof(uint32));
+		new_heap_data = end - sizeof(uint32) - new_heap_len;
+		memcpy(&old_heap_len,
+			   new_heap_data - sizeof(uint32), sizeof(uint32));
+		old_heap_data = new_heap_data - sizeof(uint32) - old_heap_len;
+
+		if (old_heap_len > 0)
+		{
+			change->data.tp.oldtuple =
+				ReorderBufferAllocTupleBuf(ctx->reorder,
+										   old_heap_len - SizeofHeapTupleHeader);
+			change->data.tp.oldtuple->t_len = old_heap_len;
+			ItemPointerSetInvalid(&change->data.tp.oldtuple->t_self);
+			change->data.tp.oldtuple->t_tableOid = InvalidOid;
+			memcpy(change->data.tp.oldtuple->t_data, old_heap_data, old_heap_len);
+		}
+
+		change->data.tp.newtuple =
+			ReorderBufferAllocTupleBuf(ctx->reorder,
+									   new_heap_len - SizeofHeapTupleHeader);
+		change->data.tp.newtuple->t_len = new_heap_len;
+		ItemPointerSetInvalid(&change->data.tp.newtuple->t_self);
+		change->data.tp.newtuple->t_tableOid = InvalidOid;
+		memcpy(change->data.tp.newtuple->t_data, new_heap_data, new_heap_len);
+	}
+	else
+	{
+		/*
+		 * The relation was not logically logged when the record was written,
+		 * so the bodies are in FLUX format, which no output plugin can read.
+		 */
+		elog(ERROR, "FLUX record without logical image");
+	}
+
+	change->data.tp.clear_toast_afterwards = true;
+
+	ReorderBufferQueueChange(ctx->reorder, XLogRecGetXid(r), buf->origptr,
+							 change, false);
+}
+
+/*
+ * Parse XLOG_FLUX_DELETE from wal into proper tuplebufs.
+ *
+ * Deletes contain the old tuple for UNDO purposes.
+ */
+static void
+DecodeFluxDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
+{
+	XLogReaderState *r = buf->record;
+	xl_flux_delete *xlrec;
+	ReorderBufferChange *change;
+	RelFileLocator target_locator;
+
+	xlrec = (xl_flux_delete *) XLogRecGetData(r);
+
+	/*
+	 * Ignore a delete logged without a logical image:
+	 * TABLE_DELETE_NO_LOGICAL, as for the delete half of an UPDATE that moved
+	 * the row, which its XLOG_FLUX_SUPERSEDE record decodes.
+	 */
+	if (!(xlrec->flags & (FLUX_WAL_LOGICAL_TUPLE | FLUX_WAL_SPECULATIVE)))
+		return;
+
+	/* only interested in our database */
+	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
+	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* output plugin doesn't look for this origin, no need to queue */
+	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
+		return;
+
+	change = ReorderBufferAllocChange(ctx->reorder);
+	change->action = (xlrec->flags & FLUX_WAL_SPECULATIVE) ?
+		REORDER_BUFFER_CHANGE_INTERNAL_SPEC_ABORT : REORDER_BUFFER_CHANGE_DELETE;
+	change->origin_id = XLogRecGetOrigin(r);
+	memcpy(&change->data.tp.rlocator, &target_locator, sizeof(RelFileLocator));
+
+	if (xlrec->flags & FLUX_WAL_SPECULATIVE)
+	{
+		/* An aborted speculative insertion has no old identity. */
+	}
+	else
+	{
+		/*
+		 * Heap image is the last region of the WAL record: ... [heap bytes]
+		 * [uint32 heap_len]
+		 */
+		Size		full_len = XLogRecGetDataLen(r);
+		char	   *end = (char *) xlrec + full_len;
+		uint32		heap_len;
+		char	   *heap_data;
+
+		memcpy(&heap_len, end - sizeof(uint32), sizeof(uint32));
+		heap_data = end - sizeof(uint32) - heap_len;
+
+		if (heap_len > 0)
+		{
+			change->data.tp.oldtuple =
+				ReorderBufferAllocTupleBuf(ctx->reorder,
+										   heap_len - SizeofHeapTupleHeader);
+			change->data.tp.oldtuple->t_len = heap_len;
+			ItemPointerSetInvalid(&change->data.tp.oldtuple->t_self);
+			change->data.tp.oldtuple->t_tableOid = InvalidOid;
+			memcpy(change->data.tp.oldtuple->t_data, heap_data, heap_len);
+		}
+	}
+
+	change->data.tp.clear_toast_afterwards = true;
+
+	ReorderBufferQueueChange(ctx->reorder, XLogRecGetXid(r), buf->origptr,
+							 change, false);
+}
+
+
+/*
+ * Handle rmgr FLUX records for LogicalDecodingProcessRecord().
+ *
+ * FLUX's WAL record layout and the XLOG_FLUX_* opcodes are defined in
+ * flux_xlog.h; the FLUX decode helpers above interpret them directly.
+ */
+void
+flux_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
+{
+	uint8		info = XLogRecGetInfo(buf->record) & XLOG_FLUX_OPMASK;
+	TransactionId xid = XLogRecGetXid(buf->record);
+	SnapBuild  *builder = ctx->snapshot_builder;
+
+	ReorderBufferProcessXid(ctx->reorder, xid, buf->origptr);
+
+	if (SnapBuildCurrentState(builder) < SNAPBUILD_FULL_SNAPSHOT)
+		return;
+
+	switch (info)
+	{
+		case XLOG_FLUX_INSERT:
+			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
+				DecodeFluxInsert(ctx, buf);
+			break;
+
+		case XLOG_FLUX_MULTI_INSERT:
+			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
+				DecodeFluxMultiInsert(ctx, buf);
+			break;
+
+		case XLOG_FLUX_UPDATE_INPLACE:
+			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
+				DecodeFluxUpdate(ctx, buf);
+			break;
+
+		case XLOG_FLUX_DELETE:
+			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
+				DecodeFluxDelete(ctx, buf);
+			break;
+
+		case XLOG_FLUX_FREEZE_PAGE:
+		case XLOG_FLUX_DEFRAG:
+		case XLOG_FLUX_COMPRESS:
+		case XLOG_FLUX_OVERFLOW_WRITE:
+		case XLOG_FLUX_INIT_PAGE:
+		case XLOG_FLUX_LOCK:
+		case XLOG_FLUX_VM_SET:
+		case XLOG_FLUX_VM_CLEAR:
+		case XLOG_FLUX_WRITE_DICT:
+			/* No row change to decode: page maintenance, locking, VM, dict. */
+			break;
+
+		case XLOG_FLUX_SUPERSEDE:
+			/* The UPDATE that moved a row, unless logged without images */
+			if ((((xl_flux_supersede *) XLogRecGetData(buf->record))->flags &
+				 FLUX_WAL_LOGICAL_TUPLE) &&
+				SnapBuildProcessChange(builder, xid, buf->origptr) &&
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
+				DecodeFluxUpdate(ctx, buf);
+			break;
+
+		case XLOG_FLUX_CAS_UPDATE:
+		case XLOG_FLUX_CAS_UPDATE_UNDO:
+
+			/*
+			 * Same-size in-place UPDATE fast path.  These records carry only
+			 * a byte-diff, not a full tuple, so they cannot be decoded into a
+			 * logical change.  flux_update() refuses the CAS path for a
+			 * logically-logged relation (see flux_operations.c), routing such
+			 * UPDATEs through XLOG_FLUX_UPDATE_INPLACE instead, so a record
+			 * of a relation that was not logically logged is ignored.  The
+			 * emitter marks one that was with FLUX_WAL_LOGICAL_REL; skipping
+			 * that would silently lose a change.
+			 */
+			{
+				uint16		flags;
+				RelFileLocator target_locator;
+
+				if (info == XLOG_FLUX_CAS_UPDATE)
+					flags = ((xl_flux_cas_update *)
+							 XLogRecGetData(buf->record))->flags;
+				else
+					flags = ((xl_flux_cas_update_undo *)
+							 XLogRecGetData(buf->record))->flags;
+				XLogRecGetBlockTag(buf->record, 0, &target_locator, NULL, NULL);
+				if ((flags & FLUX_WAL_LOGICAL_REL) &&
+					target_locator.dbOid == ctx->slot->data.database &&
+					SnapBuildProcessChange(builder, xid, buf->origptr) &&
+					!ctx->fast_forward &&
+					!change_useless_for_repack(buf))
+					elog(ERROR, "FLUX CAS update of a logically logged relation at %X/%08X cannot be decoded",
+						 LSN_FORMAT_ARGS(buf->origptr));
+			}
+			break;
+
+		default:
+			elog(ERROR, "unexpected RM_FLUX_ID record type: %u", info);
+			break;
+	}
+}
+
 
 /*
  * Ask output plugin whether we want to skip this PREPARE and send

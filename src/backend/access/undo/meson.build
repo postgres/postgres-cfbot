@@ -4,7 +4,6 @@ backend_sources += files(
   'atm.c',
   'logical_revert_worker.c',
   'slog.c',
-  'slog_flathash.c',
   'slog_tuple.c',
   'undo.c',
   'undo_bufmgr.c',

@@ -1,0 +1,149 @@
+Parsed test spec with 3 sessions
+
+starting permutation: tplan lock tread upd unlock tdone
+step tplan: EXPLAIN (COSTS OFF) SELECT v FROM t WHERE ctid >= '(0,1)';
+QUERY PLAN                        
+----------------------------------
+Tid Range Scan on t               
+  TID Cond: (ctid >= '(0,1)'::tid)
+(2 rows)
+
+step lock: SELECT pg_advisory_lock(881);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step tread: SELECT id, v, CASE WHEN id = 1 THEN pg_advisory_lock(881) END IS NULL AS waited
+              FROM t WHERE ctid >= '(0,1)'; <waiting ...>
+step upd: UPDATE t SET v = CASE id WHEN 1 THEN 'bbbb' ELSE 'dddd' END;
+step unlock: SELECT pg_advisory_unlock(881);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step tread: <... completed>
+id|v   |waited
+--+----+------
+ 1|aaaa|f     
+ 2|cccc|t     
+(2 rows)
+
+step tdone: SELECT pg_advisory_unlock_all();
+pg_advisory_unlock_all
+----------------------
+                      
+(1 row)
+
+
+starting permutation: tplan lock tread del unlock tdone
+step tplan: EXPLAIN (COSTS OFF) SELECT v FROM t WHERE ctid >= '(0,1)';
+QUERY PLAN                        
+----------------------------------
+Tid Range Scan on t               
+  TID Cond: (ctid >= '(0,1)'::tid)
+(2 rows)
+
+step lock: SELECT pg_advisory_lock(881);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step tread: SELECT id, v, CASE WHEN id = 1 THEN pg_advisory_lock(881) END IS NULL AS waited
+              FROM t WHERE ctid >= '(0,1)'; <waiting ...>
+step del: DELETE FROM t WHERE id = 2;
+step unlock: SELECT pg_advisory_unlock(881);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step tread: <... completed>
+id|v   |waited
+--+----+------
+ 1|aaaa|f     
+ 2|cccc|t     
+(2 rows)
+
+step tdone: SELECT pg_advisory_unlock_all();
+pg_advisory_unlock_all
+----------------------
+                      
+(1 row)
+
+
+starting permutation: splan lock sread upd unlock sdone
+step splan: EXPLAIN (COSTS OFF) SELECT v FROM t TABLESAMPLE SYSTEM (100);
+QUERY PLAN                      
+--------------------------------
+Sample Scan on t                
+  Sampling: system ('100'::real)
+(2 rows)
+
+step lock: SELECT pg_advisory_lock(881);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step sread: SELECT id, v, CASE WHEN id = 1 THEN pg_advisory_lock(881) END IS NULL AS waited
+              FROM t TABLESAMPLE SYSTEM (100); <waiting ...>
+step upd: UPDATE t SET v = CASE id WHEN 1 THEN 'bbbb' ELSE 'dddd' END;
+step unlock: SELECT pg_advisory_unlock(881);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step sread: <... completed>
+id|v   |waited
+--+----+------
+ 1|aaaa|f     
+ 2|cccc|t     
+(2 rows)
+
+step sdone: SELECT pg_advisory_unlock_all();
+pg_advisory_unlock_all
+----------------------
+                      
+(1 row)
+
+
+starting permutation: splan lock sread del unlock sdone
+step splan: EXPLAIN (COSTS OFF) SELECT v FROM t TABLESAMPLE SYSTEM (100);
+QUERY PLAN                      
+--------------------------------
+Sample Scan on t                
+  Sampling: system ('100'::real)
+(2 rows)
+
+step lock: SELECT pg_advisory_lock(881);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step sread: SELECT id, v, CASE WHEN id = 1 THEN pg_advisory_lock(881) END IS NULL AS waited
+              FROM t TABLESAMPLE SYSTEM (100); <waiting ...>
+step del: DELETE FROM t WHERE id = 2;
+step unlock: SELECT pg_advisory_unlock(881);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step sread: <... completed>
+id|v   |waited
+--+----+------
+ 1|aaaa|f     
+ 2|cccc|t     
+(2 rows)
+
+step sdone: SELECT pg_advisory_unlock_all();
+pg_advisory_unlock_all
+----------------------
+                      
+(1 row)
+

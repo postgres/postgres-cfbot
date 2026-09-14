@@ -226,7 +226,10 @@ typedef bool (*amdeletemark_function) (Relation indexRelation,
  *   clear_mark == true : the (key, TID) entry is a delete-marked tombstone of
  *                        the OLD key; demote it back to a plain live entry.
  *   clear_mark == false: the (key, TID) entry is the NEW key's live entry that
- *                        the aborted update inserted; kill it (LP_DEAD).
+ *                        the aborted update inserted; physically remove it.
+ * With probe=true, only test whether the exact entry is delete-marked; the
+ * caller is about to revive it in a forward UPDATE, so the AM must report the
+ * serializable rw-conflict an insert of the entry would (it may ERROR).
  * Returns true if the entry was found and reversed, false otherwise (already
  * gone -- not an error).
  */
@@ -235,7 +238,7 @@ typedef bool (*amundomark_function) (Relation indexRelation,
 									 Datum *values,
 									 bool *isnull,
 									 ItemPointer heap_t_ctid,
-									 bool clear_mark);
+									 bool clear_mark, bool probe);
 
 /* end index scan */
 typedef void (*amendscan_function) (IndexScanDesc scan);

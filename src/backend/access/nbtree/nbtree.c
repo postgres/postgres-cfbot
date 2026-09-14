@@ -34,6 +34,7 @@
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/lwlock.h"
+#include "storage/predicate.h"
 #include "storage/read_stream.h"
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
@@ -1592,14 +1593,14 @@ backtrack:
 				if (BTreeTupleIsDeleteMarked(itup))
 				{
 					/*
-					 * Delete-marked tombstone: its heap TID lives
-					 * in the trailer, not in t_tid.  Ask the callback about
-					 * that TID. The callback (driven by undo-informed index
+					 * Delete-marked tombstone: its heap TID lives in the
+					 * trailer, not in t_tid.  Ask the callback about that
+					 * TID. The callback (driven by undo-informed index
 					 * pruning) is the sole authority on removability: we
 					 * remove the tombstone only when it says so -- i.e. when
-					 * no snapshot can still need the before-image at this TID.
-					 * We never remove a tombstone merely
-					 * because it is marked.
+					 * no snapshot can still need the before-image at this
+					 * TID. We never remove a tombstone merely because it is
+					 * marked.
 					 */
 					ItemPointer htid = BTreeTupleGetHeapTID(itup);
 					TransactionId conflict_xid = InvalidTransactionId;
@@ -2146,13 +2147,17 @@ btdeletemark(Relation rel, Relation heapRel,
  * reports as "item order invariant violated".  VACUUM cannot be relied on to
  * clean up first, and LP_DEAD is only a hint, so it can also be lost.
  *
+ * probe == true: only report whether the exact entry is delete-marked.  The
+ * caller is about to revive it in a forward in-place UPDATE, so a found
+ * tombstone is checked for a serializable rw-conflict here, as an insert is.
+ *
  * Returns true if the entry was found and reversed, false otherwise (already
  * gone -- not an error).
  */
 bool
 btundomark(Relation rel, Relation heapRel,
 		   Datum *values, bool *isnull, ItemPointer heap_t_ctid,
-		   bool clear_mark)
+		   bool clear_mark, bool probe)
 {
 	IndexTuple	searchitup;
 	BTScanInsert itup_key;
@@ -2202,7 +2207,22 @@ btundomark(Relation rel, Relation heapRel,
 		itemid = PageGetItemId(page, offnum);
 		olditup = (IndexTuple) PageGetItem(page, itemid);
 
-		if (clear_mark)
+		if (probe)
+		{
+			done = BTreeTupleIsDeleteMarked(olditup);
+
+			/*
+			 * The caller revives this tombstone instead of inserting a new
+			 * entry, so report the rw-conflict an insert would report to
+			 * serializable readers that locked this leaf page (see
+			 * _bt_doinsert).  The probe runs only in the forward path, before
+			 * anything is changed, so an error here is harmless; the revive
+			 * itself must not check, as a rollback reuses it.
+			 */
+			if (done)
+				CheckForSerializableConflictIn(rel, NULL, BufferGetBlockNumber(buf));
+		}
+		else if (clear_mark)
 		{
 			/* Demote the OLD key's tombstone back to a plain live entry. */
 			if (BTreeTupleIsDeleteMarked(olditup))

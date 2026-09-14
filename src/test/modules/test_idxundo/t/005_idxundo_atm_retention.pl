@@ -60,8 +60,8 @@ sub revert_and_check
 		"revert worker drained the ATM ($what)");
 
 	# The worker leaves index entries for VACUUM (see nbtree_undo_apply()).
-	is( $node->safe_psql('postgres',
-			"SELECT idxundo_count_dead_all('${table}_pkey')"),
+	is( $node->safe_psql(
+			'postgres', "SELECT idxundo_count_dead_all('${table}_pkey')"),
 		'0',
 		"the $what chain's index entries are left for VACUUM");
 
@@ -76,8 +76,10 @@ BEGIN;
 INSERT INTO a SELECT g FROM generate_series(1, $nrows) g;
 ROLLBACK;
 });
-is($node->safe_psql('postgres', 'SELECT count(*) FROM idxundo_atm_entries()'),
-	'1', 'large abort is queued in the ATM');
+is( $node->safe_psql(
+		'postgres', 'SELECT count(*) FROM idxundo_atm_entries()'),
+	'1',
+	'large abort is queued in the ATM');
 recycle_wal();
 revert_and_check('a', 'aborted');
 
@@ -94,7 +96,8 @@ $node->safe_psql('postgres', "ROLLBACK PREPARED 'big'");
 recycle_wal();
 revert_and_check('p', 'rolled-back prepared');
 
-unlike(slurp_file($node->logfile),
+unlike(
+	slurp_file($node->logfile),
 	qr/could not read batch|no longer exists \(recycled/,
 	'no UNDO batch was recycled before it was applied');
 

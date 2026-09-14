@@ -1,0 +1,1017 @@
+Parsed test spec with 6 sessions
+
+starting permutation: pick_fx b1l c_cic w1b w1u b1c w1c chk100 chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_cic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic w1b w1u b1c w1c chk100 chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_cic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_cic w1b w1u b2l b1c w1c w2a b2c chk1 chk100
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step w2a: UPDATE t SET k = 1 WHERE id = 1;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic w1b w1u b2l b1c w1c w2a b2c chk1 chk100
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step w2a: UPDATE t SET k = 1 WHERE id = 1;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_cic w1b w1x w1i b1c w1c chk100 chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1x: DELETE FROM t WHERE id = 1;
+step w1i: INSERT INTO t VALUES (23, 100);
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_cic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic w1b w1x w1i b1c w1c chk100 chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1x: DELETE FROM t WHERE id = 1;
+step w1i: INSERT INTO t VALUES (23, 100);
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_cic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_cic w1b w1u b1c w1r chk100 chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1r: ROLLBACK;
+step c_cic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic w1b w1u b1c w1r chk100 chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1r: ROLLBACK;
+step c_cic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_cic b2l b1c w2b w2u b2c w2r chk300 chk3
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w2b: BEGIN;
+step w2u: UPDATE t SET k = 300 WHERE id = 3;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step w2r: ROLLBACK;
+step chk300: SELECT * FROM chk('k = 300');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+step chk3: SELECT * FROM chk('k = 3');
+via    |ids
+-------+---
+idx    |3  
+seq    |3  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic b2l b1c w2b w2u b2c w2r chk300 chk3
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w2b: BEGIN;
+step w2u: UPDATE t SET k = 300 WHERE id = 3;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step w2r: ROLLBACK;
+step chk300: SELECT * FROM chk('k = 300');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+step chk3: SELECT * FROM chk('k = 3');
+via    |ids
+-------+---
+idx    |3  
+seq    |3  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_cic w1b w1i b2l b1c w1c w2b w2v b2c w2r chk100 chk500
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1i: INSERT INTO t VALUES (23, 100);
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step w2b: BEGIN;
+step w2v: UPDATE t SET k = 500 WHERE id = 23;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step w2r: ROLLBACK;
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+step chk500: SELECT * FROM chk('k = 500');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic w1b w1i b2l b1c w1c w2b w2v b2c w2r chk100 chk500
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1i: INSERT INTO t VALUES (23, 100);
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step w2b: BEGIN;
+step w2v: UPDATE t SET k = 500 WHERE id = 23;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step w2r: ROLLBACK;
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+step chk500: SELECT * FROM chk('k = 500');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_cic w1b w1i b2l b1c w1c w2b w2v b2c rrb w2c chk100 rrc chk500
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1i: INSERT INTO t VALUES (23, 100);
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step w2b: BEGIN;
+step w2v: UPDATE t SET k = 500 WHERE id = 23;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step rrb: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1 AS snap;
+snap
+----
+   1
+(1 row)
+
+step w2c: COMMIT;
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+step rrc: COMMIT;
+step chk500: SELECT * FROM chk('k = 500');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_cic w1b w1i b2l b1c w1c w2b w2v b2c rrb w2c chk100 rrc chk500
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_cic: CREATE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1i: INSERT INTO t VALUES (23, 100);
+step b2l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step w2b: BEGIN;
+step w2v: UPDATE t SET k = 500 WHERE id = 23;
+step b2c: COMMIT;
+step c_cic: <... completed>
+step rrb: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1 AS snap;
+snap
+----
+   1
+(1 row)
+
+step w2c: COMMIT;
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+step rrc: COMMIT;
+step chk500: SELECT * FROM chk('k = 500');
+via    |ids
+-------+---
+idx    |23 
+seq    |23 
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_ucic w1b w1d b1c w1c c_state chk2
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ucic: CREATE UNIQUE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1d: UPDATE t SET k = 2 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ucic: <... completed>
+ERROR:  duplicate key value violates unique constraint "t_k"
+step c_state: 
+  SELECT c.relname, i.indisready, i.indisvalid FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  WHERE c.relname = 't_k';
+
+relname|indisready|indisvalid
+-------+----------+----------
+t_k    |t         |f         
+(1 row)
+
+step chk2: SELECT * FROM chk('k = 2');
+via    |ids
+-------+---
+idx    |1,2
+seq    |1,2
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_ucic w1b w1d b1c w1c c_state chk2
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ucic: CREATE UNIQUE INDEX CONCURRENTLY t_k ON t (k); <waiting ...>
+step w1b: BEGIN;
+step w1d: UPDATE t SET k = 2 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ucic: <... completed>
+ERROR:  duplicate key value violates unique constraint "t_k"
+step c_state: 
+  SELECT c.relname, i.indisready, i.indisvalid FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  WHERE c.relname = 't_k';
+
+relname|indisready|indisvalid
+-------+----------+----------
+t_k    |t         |f         
+(1 row)
+
+step chk2: SELECT * FROM chk('k = 2');
+via    |ids
+-------+---
+idx    |1,2
+seq    |1,2
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_ecic w1b w1u b1c w1c chke
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ecic: CREATE INDEX CONCURRENTLY t_k ON t ((k * 2)); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ecic: <... completed>
+step chke: SELECT * FROM chk('k * 2 = 200');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_ecic w1b w1u b1c w1c chke
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ecic: CREATE INDEX CONCURRENTLY t_k ON t ((k * 2)); <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ecic: <... completed>
+step chke: SELECT * FROM chk('k * 2 = 200');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_pcic w1b w1u b1c w1c chkp
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_pcic: CREATE INDEX CONCURRENTLY t_k ON t (k) WHERE k < 1000; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_pcic: <... completed>
+step chkp: SELECT * FROM chk('k = 100 AND k < 1000');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_pcic w1b w1u b1c w1c chkp
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_pcic: CREATE INDEX CONCURRENTLY t_k ON t (k) WHERE k < 1000; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_pcic: <... completed>
+step chkp: SELECT * FROM chk('k = 100 AND k < 1000');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx b1l c_icic w1b w1v b1c w1c chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_icic: CREATE INDEX CONCURRENTLY t_k ON t (k) INCLUDE (v); <waiting ...>
+step w1b: BEGIN;
+step w1v: UPDATE t SET v = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_icic: <... completed>
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp b1l c_icic w1b w1v b1c w1c chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_icic: CREATE INDEX CONCURRENTLY t_k ON t (k) INCLUDE (v); <waiting ...>
+step w1b: BEGIN;
+step w1v: UPDATE t SET v = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_icic: <... completed>
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx c_uidx b1l c_ric w1b w1u b1c w1c chk100 w2i100 w2i1 chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step c_uidx: CREATE UNIQUE INDEX t_k ON t (k);
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ric: REINDEX INDEX CONCURRENTLY t_k; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ric: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step w2i100: INSERT INTO t VALUES (22, 100);
+ERROR:  duplicate key value violates unique constraint "t_k"
+step w2i1: INSERT INTO t VALUES (21, 1);
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |21 
+seq    |21 
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp c_uidx b1l c_ric w1b w1u b1c w1c chk100 w2i100 w2i1 chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step c_uidx: CREATE UNIQUE INDEX t_k ON t (k);
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ric: REINDEX INDEX CONCURRENTLY t_k; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ric: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step w2i100: INSERT INTO t VALUES (22, 100);
+ERROR:  duplicate key value violates unique constraint "t_k"
+step w2i1: INSERT INTO t VALUES (21, 1);
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |21 
+seq    |21 
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx c_idx w1b w1u c_dic w1c chk100 chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step c_idx: CREATE INDEX t_k ON t (k);
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step c_dic: DROP INDEX CONCURRENTLY t_k; <waiting ...>
+step w1c: COMMIT;
+step c_dic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp c_idx w1b w1u c_dic w1c chk100 chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step c_idx: CREATE INDEX t_k ON t (k);
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step c_dic: DROP INDEX CONCURRENTLY t_k; <waiting ...>
+step w1c: COMMIT;
+step c_dic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx c_idx b1l c_dic w1b w1u b1c w1c chk100 chk1
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step c_idx: CREATE INDEX t_k ON t (k);
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_dic: DROP INDEX CONCURRENTLY t_k; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_dic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp c_idx b1l c_dic w1b w1u b1c w1c chk100 chk1
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step c_idx: CREATE INDEX t_k ON t (k);
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_dic: DROP INDEX CONCURRENTLY t_k; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_dic: <... completed>
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk1: SELECT * FROM chk('k = 1');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx c_dup c_ucic c_undup c_state c_tid w1b w1n w1u2 w1c chk200 c_tid b1l c_ric w1b w1u b1c w1c c_state chk100 chk200
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step c_dup: UPDATE t SET k = 2 WHERE id = 1;
+step c_ucic: CREATE UNIQUE INDEX CONCURRENTLY t_k ON t (k);
+ERROR:  could not create unique index "t_k"
+step c_undup: UPDATE t SET k = 1 WHERE id = 1;
+step c_state: 
+  SELECT c.relname, i.indisready, i.indisvalid FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  WHERE c.relname = 't_k';
+
+relname|indisready|indisvalid
+-------+----------+----------
+t_k    |f         |f         
+(1 row)
+
+step c_tid: SELECT tid_at(1);
+tid_at
+------
+      
+(1 row)
+
+step w1b: BEGIN;
+step w1n: UPDATE t SET v = 1000 WHERE id = 1; SELECT tid_kept(1) AS in_place;
+in_place
+--------
+t       
+(1 row)
+
+step w1u2: UPDATE t SET k = 200 WHERE id = 1; SELECT tid_kept(1) AS in_place;
+in_place
+--------
+f       
+(1 row)
+
+step w1c: COMMIT;
+step chk200: SELECT * FROM chk('k = 200');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step c_tid: SELECT tid_at(1);
+tid_at
+------
+      
+(1 row)
+
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ric: REINDEX INDEX CONCURRENTLY t_k; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ric: <... completed>
+step c_state: 
+  SELECT c.relname, i.indisready, i.indisvalid FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  WHERE c.relname = 't_k';
+
+relname|indisready|indisvalid
+-------+----------+----------
+t_k    |t         |t         
+(1 row)
+
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk200: SELECT * FROM chk('k = 200');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp c_dup c_ucic c_undup c_state c_tid w1b w1n w1u2 w1c chk200 c_tid b1l c_ric w1b w1u b1c w1c c_state chk100 chk200
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step c_dup: UPDATE t SET k = 2 WHERE id = 1;
+step c_ucic: CREATE UNIQUE INDEX CONCURRENTLY t_k ON t (k);
+ERROR:  could not create unique index "t_k"
+step c_undup: UPDATE t SET k = 1 WHERE id = 1;
+step c_state: 
+  SELECT c.relname, i.indisready, i.indisvalid FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  WHERE c.relname = 't_k';
+
+relname|indisready|indisvalid
+-------+----------+----------
+t_k    |f         |f         
+(1 row)
+
+step c_tid: SELECT tid_at(1);
+tid_at
+------
+      
+(1 row)
+
+step w1b: BEGIN;
+step w1n: UPDATE t SET v = 1000 WHERE id = 1; SELECT tid_kept(1) AS in_place;
+in_place
+--------
+f       
+(1 row)
+
+step w1u2: UPDATE t SET k = 200 WHERE id = 1; SELECT tid_kept(1) AS in_place;
+in_place
+--------
+f       
+(1 row)
+
+step w1c: COMMIT;
+step chk200: SELECT * FROM chk('k = 200');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step c_tid: SELECT tid_at(1);
+tid_at
+------
+      
+(1 row)
+
+step b1l: BEGIN; LOCK TABLE t IN ROW EXCLUSIVE MODE;
+step c_ric: REINDEX INDEX CONCURRENTLY t_k; <waiting ...>
+step w1b: BEGIN;
+step w1u: UPDATE t SET k = 100 WHERE id = 1;
+step b1c: COMMIT;
+step w1c: COMMIT;
+step c_ric: <... completed>
+step c_state: 
+  SELECT c.relname, i.indisready, i.indisvalid FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  WHERE c.relname = 't_k';
+
+relname|indisready|indisvalid
+-------+----------+----------
+t_k    |t         |t         
+(1 row)
+
+step chk100: SELECT * FROM chk('k = 100');
+via    |ids
+-------+---
+idx    |1  
+seq    |1  
+amcheck|ok 
+(3 rows)
+
+step chk200: SELECT * FROM chk('k = 200');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_fx c_idx c_attach c_ric w2b w2u r_wake w2r c_done chk300 chk3
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step c_idx: CREATE INDEX t_k ON t (k);
+step c_attach: 
+  SELECT injection_points_set_local();
+  SELECT injection_points_attach('reindex-relation-concurrently-before-swap', 'wait');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step c_ric: REINDEX INDEX CONCURRENTLY t_k; <waiting ...>
+step w2b: BEGIN;
+step w2u: UPDATE t SET k = 300 WHERE id = 3;
+step r_wake: 
+  SELECT injection_points_detach('reindex-relation-concurrently-before-swap');
+  SELECT injection_points_wakeup('reindex-relation-concurrently-before-swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step w2r: ROLLBACK;
+step c_ric: <... completed>
+step c_done: 
+step chk300: SELECT * FROM chk('k = 300');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+step chk3: SELECT * FROM chk('k = 3');
+via    |ids
+-------+---
+idx    |3  
+seq    |3  
+amcheck|ok 
+(3 rows)
+
+
+starting permutation: pick_hp c_idx c_attach c_ric w2b w2u r_wake w2r c_done chk300 chk3
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step c_idx: CREATE INDEX t_k ON t (k);
+step c_attach: 
+  SELECT injection_points_set_local();
+  SELECT injection_points_attach('reindex-relation-concurrently-before-swap', 'wait');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step c_ric: REINDEX INDEX CONCURRENTLY t_k; <waiting ...>
+step w2b: BEGIN;
+step w2u: UPDATE t SET k = 300 WHERE id = 3;
+step r_wake: 
+  SELECT injection_points_detach('reindex-relation-concurrently-before-swap');
+  SELECT injection_points_wakeup('reindex-relation-concurrently-before-swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step w2r: ROLLBACK;
+step c_ric: <... completed>
+step c_done: 
+step chk300: SELECT * FROM chk('k = 300');
+via    |ids
+-------+---
+idx    |   
+seq    |   
+amcheck|ok 
+(3 rows)
+
+step chk3: SELECT * FROM chk('k = 3');
+via    |ids
+-------+---
+idx    |3  
+seq    |3  
+amcheck|ok 
+(3 rows)
+

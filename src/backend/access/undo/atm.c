@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * atm.c
- *	  Aborted Transaction Map for CTR (Constant-Time Recovery)
+ *	  Aborted Transaction Map: aborted transactions whose UNDO is not applied
  *
  * The ATM is a shared-memory data structure mapping TransactionId to UNDO
  * chain metadata for aborted transactions. It enables:
@@ -14,9 +14,8 @@
  *      ATM entry (sLog + WAL) instead of performing synchronous
  *      rollback, making ROLLBACK O(1).
  *
- * Implementation: All ATM functions are thin wrappers around the sLog
- * (Secondary Log) hash tables defined in access/slog.h.  The sLog
- * provides O(1) lookups, replacing the old fixed-size linear array.
+ * Implementation: All ATM functions are thin wrappers around the
+ * transaction sLog (access/slog.h), a shared radix tree.
  *
  * WAL: ATMAddAborted() emits XLOG_ATM_ABORT; ATMForget() emits
  * XLOG_ATM_FORGET. During recovery, atm_redo() replays these without
@@ -115,6 +114,18 @@ void
 ATMShmemInit(void)
 {
 	/* sLog initialization is done separately via SLogShmemInit() */
+}
+
+/*
+ * ATMEnsureCreated
+ *		Create the ATM's shared memory if nobody has yet.  Call it where an
+ *		ERROR is still harmless, before a transaction may have to abort into
+ *		the ATM: the abort path does not allocate it (SLogTxnInsert).
+ */
+void
+ATMEnsureCreated(void)
+{
+	SLogTxnEnsureCreated();
 }
 
 /*

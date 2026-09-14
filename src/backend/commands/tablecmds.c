@@ -688,6 +688,7 @@ static ObjectAddress ATExecClusterOn(Relation rel, const char *indexName,
 									 LOCKMODE lockmode);
 static void ATExecDropCluster(Relation rel, LOCKMODE lockmode);
 static void ATPrepSetAccessMethod(AlteredTableInfo *tab, Relation rel, const char *amname);
+static void CheckFluxUserCatalogTable(Oid accessMethodId, Datum reloptions);
 static void ATExecSetAccessMethodNoStorage(Relation rel, Oid newAccessMethodId);
 static void ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel,
 									bool toLogged);
@@ -1074,6 +1075,9 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		if (RELKIND_HAS_TABLE_AM(relkind) && !OidIsValid(accessMethodId))
 			accessMethodId = get_table_am_oid(default_table_access_method, false);
 	}
+
+	/* An access method without historic-snapshot reads cannot be a catalog. */
+	CheckFluxUserCatalogTable(accessMethodId, reloptions);
 
 	/*
 	 * Create the relation.  Inherited defaults and CHECK constraints are
@@ -17162,6 +17166,40 @@ ATExecDropCluster(Relation rel, LOCKMODE lockmode)
 }
 
 /*
+ * Refuse user_catalog_table on an access method that cannot serve logical
+ * decoding's historic-snapshot reads.
+ *
+ * A user_catalog_table is read during logical decoding under a historic
+ * snapshot that reconstructs a past catalog state from older row versions.
+ * The FLUX access method stores old versions in undo and reuses the tuple
+ * slot in place, so it cannot answer those reads; marking a FLUX relation as
+ * a user_catalog_table would silently break any output plugin that depends on
+ * it.  Refuse the combination here, where both the chosen access method and
+ * the proposed reloptions are known, so CREATE TABLE and ALTER TABLE ... SET
+ * are covered by one check.  (SET ACCESS METHOD to FLUX on an already-marked
+ * heap table is refused separately, in ATPrepSetAccessMethod.)
+ *
+ * accessMethodId may be InvalidOid (partitioned tables, which have no storage
+ * and never carry undo); such relations are left to core's own validation.
+ */
+static void
+CheckFluxUserCatalogTable(Oid accessMethodId, Datum reloptions)
+{
+	StdRdOptions *rdopts;
+
+	if (accessMethodId != FLUX_TABLE_AM_OID)
+		return;
+
+	rdopts = (StdRdOptions *) heap_reloptions(RELKIND_RELATION, reloptions,
+											  false);
+	if (rdopts != NULL && rdopts->user_catalog_table)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("user_catalog_table is not supported for the \"flux\" access method"),
+				 errhint("Put logical-decoding plugin metadata in a table that uses the \"heap\" access method.")));
+}
+
+/*
  * Preparation phase for SET ACCESS METHOD
  *
  * Check that the access method exists and determine whether a change is
@@ -17187,6 +17225,19 @@ ATPrepSetAccessMethod(AlteredTableInfo *tab, Relation rel, const char *amname)
 	/* if it's a match, phase 3 doesn't need to do anything */
 	if (rel->rd_rel->relam == amoid)
 		return;
+
+	/*
+	 * A user_catalog_table cannot live under an access method that cannot
+	 * serve logical decoding's historic-snapshot reads (see
+	 * CheckFluxUserCatalogTable).  Refuse the conversion here with the
+	 * access-method-specific message; core would otherwise refuse the rewrite
+	 * anyway, but less helpfully.
+	 */
+	if (amoid == FLUX_TABLE_AM_OID && RelationIsUsedAsCatalogTable(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("user_catalog_table is not supported for the \"flux\" access method"),
+				 errhint("Put logical-decoding plugin metadata in a table that uses the \"heap\" access method.")));
 
 	/* Save info for Phase 3 to do the real work */
 	tab->rewrite |= AT_REWRITE_ACCESS_METHOD;
@@ -17397,6 +17448,9 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 					 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 			break;
 	}
+
+	/* An access method without historic-snapshot reads cannot be a catalog. */
+	CheckFluxUserCatalogTable(rel->rd_rel->relam, newOptions);
 
 	/* Special-case validation of view options */
 	if (rel->rd_rel->relkind == RELKIND_VIEW)

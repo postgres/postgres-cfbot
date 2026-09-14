@@ -1037,12 +1037,11 @@ _bt_saveitem(BTScanOpaque so, int itemIndex,
 	Assert(!BTreeTupleIsPivot(itup) && !BTreeTupleIsPosting(itup));
 
 	/*
-	 * A delete-marked leaf tuple stores its heap TID in a trailer,
-	 * not in t_tid (which holds alt-TID metadata).  Use
-	 * BTreeTupleGetHeapTID() to fetch the real TID, and flag the item so the
-	 * caller rechecks the qual against the visible heap version: the
-	 * delete-marked entry's key may describe an older version of the
-	 * row.
+	 * A delete-marked leaf tuple stores its heap TID in a trailer, not in
+	 * t_tid (which holds alt-TID metadata).  Use BTreeTupleGetHeapTID() to
+	 * fetch the real TID, and flag the item so the caller rechecks the qual
+	 * against the visible heap version: the delete-marked entry's key may
+	 * describe an older version of the row.
 	 */
 	if (BTreeTupleIsDeleteMarked(itup))
 	{

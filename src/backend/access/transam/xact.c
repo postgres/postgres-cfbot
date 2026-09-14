@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "access/commit_ts.h"
+#include "access/flux.h"
 #include "access/multixact.h"
 #include "access/parallel.h"
 #include "access/subtrans.h"
@@ -3054,6 +3055,7 @@ PrepareTransaction(void)
 	AtPrepare_PgStat();
 	AtPrepare_MultiXact();
 	AtPrepare_RelationMap();
+	AtPrepare_Flux();
 
 	/*
 	 * Here is where we really truly prepare.
@@ -3336,9 +3338,9 @@ AbortTransaction(void)
 	 * Roll back the per-backend UNDO engine's records for this transaction,
 	 * if any.  This engine coexists with the per-relation engine handled by
 	 * AtAbort_XactUndo() above; the call is a no-op unless the per-backend
-	 * engine produced UNDO for this xact (FLUX tables do). UNDO
-	 * appliers open relations, so present TRANS_INPROGRESS for the duration
-	 * (all backing resources are still live at this point).
+	 * engine produced UNDO for this xact (FLUX tables do). UNDO appliers open
+	 * relations, so present TRANS_INPROGRESS for the duration (all backing
+	 * resources are still live at this point).
 	 */
 	{
 		int			pbu_saved_state = EnterInlineUndoApplyState();

@@ -35,3 +35,12 @@ RETURNS void AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- (needs shared_preload_libraries = 'test_idxundo').
 CREATE FUNCTION idxundo_write_ordered_undo(n int)
 RETURNS void AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- FLUX's count of active transactions (oldest-active timestamp slots).
+CREATE FUNCTION idxundo_flux_active_xacts()
+RETURNS int AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- table_tuple_delete of t with wait = false: the result and the xid it
+-- reports.
+CREATE FUNCTION idxundo_delete_nowait(rel regclass, t tid)
+RETURNS text AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

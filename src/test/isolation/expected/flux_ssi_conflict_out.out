@@ -1,0 +1,130 @@
+Parsed test spec with 9 sessions
+
+starting permutation: foo_begin bar_begin trouble_begin foo_select bar_insert foo_insert foo_commit trouble_update bar_select bar_commit trouble_abort
+step foo_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step bar_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step trouble_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step foo_select: SELECT * FROM txn0 WHERE id = 42;
+id|val
+--+---
+(0 rows)
+
+step bar_insert: INSERT INTO txn0 SELECT 42, 'bar_insert';
+step foo_insert: INSERT INTO txn1 SELECT 7, 'foo_insert';
+step foo_commit: COMMIT;
+step trouble_update: UPDATE txn1 SET val = 'add physical version for "bar_select"' WHERE id = 7;
+step bar_select: SELECT * FROM txn1 WHERE id = 7;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step bar_commit: COMMIT;
+step trouble_abort: ABORT;
+
+starting permutation: foo_begin bar_begin trouble_begin foo_select bar_insert foo_insert foo_commit trouble_delete bar_select bar_commit trouble_abort
+step foo_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step bar_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step trouble_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step foo_select: SELECT * FROM txn0 WHERE id = 42;
+id|val
+--+---
+(0 rows)
+
+step bar_insert: INSERT INTO txn0 SELECT 42, 'bar_insert';
+step foo_insert: INSERT INTO txn1 SELECT 7, 'foo_insert';
+step foo_commit: COMMIT;
+step trouble_delete: DELETE FROM txn1 WHERE id = 7;
+step bar_select: SELECT * FROM txn1 WHERE id = 7;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step bar_commit: COMMIT;
+step trouble_abort: ABORT;
+
+starting permutation: w1b w1snap w2b w2r2 w2w1 w2c w1r1 w1w2 w1c
+step w1b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step w1snap: SELECT v FROM ws WHERE id = 3;
+v
+-
+0
+(1 row)
+
+step w2b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step w2r2: SELECT v FROM ws WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w2w1: UPDATE ws SET v = v + 10 WHERE id = 1;
+step w2c: COMMIT;
+step w1r1: SELECT v FROM ws WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step w1w2: UPDATE ws SET v = v + 1 WHERE id = 2;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step w1c: COMMIT;
+
+starting permutation: w1b w1snap w2b w2r2 w2w1 w2c w3b w3w1 w1r1 w1w2 w1c w3a
+step w1b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step w1snap: SELECT v FROM ws WHERE id = 3;
+v
+-
+0
+(1 row)
+
+step w2b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step w2r2: SELECT v FROM ws WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w2w1: UPDATE ws SET v = v + 10 WHERE id = 1;
+step w2c: COMMIT;
+step w3b: BEGIN;
+step w3w1: UPDATE ws SET v = v + 100 WHERE id = 1;
+step w1r1: SELECT v FROM ws WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step w1w2: UPDATE ws SET v = v + 1 WHERE id = 2;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step w1c: COMMIT;
+step w3a: ABORT;
+
+starting permutation: s1b s2b s3b rxwy1 wx2 c2 rx3 c1 ry3 c3
+step s1b: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s2b: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s3b: BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY;
+step rxwy1: INSERT INTO receipt VALUES (3, (SELECT deposit_date FROM ctl WHERE k = 'receipt'), 4.00);
+step wx2: UPDATE ctl SET deposit_date = DATE '2008-12-23' WHERE k = 'receipt';
+step c2: COMMIT;
+step rx3: SELECT * FROM ctl WHERE k = 'receipt';
+k      |deposit_date
+-------+------------
+receipt|  12-23-2008
+(1 row)
+
+step c1: COMMIT;
+step ry3: SELECT * FROM receipt WHERE deposit_date = DATE '2008-12-22';
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step c3: COMMIT;
+
+starting permutation: s1b s2b s3b wx2 rxwy1 c2 rx3 c1 ry3 c3
+step s1b: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s2b: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s3b: BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY;
+step wx2: UPDATE ctl SET deposit_date = DATE '2008-12-23' WHERE k = 'receipt';
+step rxwy1: INSERT INTO receipt VALUES (3, (SELECT deposit_date FROM ctl WHERE k = 'receipt'), 4.00);
+step c2: COMMIT;
+step rx3: SELECT * FROM ctl WHERE k = 'receipt';
+k      |deposit_date
+-------+------------
+receipt|  12-23-2008
+(1 row)
+
+step c1: COMMIT;
+step ry3: SELECT * FROM receipt WHERE deposit_date = DATE '2008-12-22';
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step c3: COMMIT;

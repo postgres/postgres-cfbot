@@ -1097,6 +1097,12 @@
   options => 'file_extend_method_options',
 },
 
+{ name => 'flux_lazy_uncommitted_clear', type => 'bool', context => 'PGC_USERSET', group => 'CLIENT_CONN_STATEMENT',
+  short_desc => 'Skip commit-time page re-visits for FLUX UNCOMMITTED flag clearing.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'flux_lazy_uncommitted_clear',
+  boot_val => 'false',
+},
 
 { name => 'from_collapse_limit', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
   short_desc => 'Sets the FROM-list size beyond which subqueries are not collapsed.',
@@ -2785,15 +2791,6 @@
   boot_val => '256',
   min => '1',
   max => '16384',
-},
-
-{ name => 'slog_num_partitions', type => 'int', context => 'PGC_POSTMASTER', group => 'WAL_SETTINGS',
-  short_desc => 'Number of sLog flat hash partitions (0 = auto from CPU count).',
-  long_desc => 'Controls the number of partitions for the optional sLog tuple tracking hash. More partitions reduce writer lock contention. Set 0 for auto-sizing (4x CPUs, clamped 16-256, power of 2). Requires restart.',
-  variable => 'slog_num_partitions',
-  boot_val => '0',
-  min => '0',
-  max => '256',
 },
 
 { name => 'ssl', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_SSL',
