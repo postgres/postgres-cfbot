@@ -167,6 +167,21 @@ typedef struct buftag
 	BlockNumber blockNum;		/* blknum relative to begin of reln */
 } BufferTag;
 
+/*
+ * Result of a mapping-table walk, used to finish an insert or delete.
+ *
+ * link points at the predecessor's next pointer (or the bucket head) and is
+ * only valid while the caller holds exclusive BufMappingLock for this tag's
+ * partition.  found is the matching buf_id, or -1 if the tag is absent.
+ */
+typedef struct BufTableScanResult
+{
+	int		   *link;
+	int			found;
+	int			bucket;
+} BufTableScanResult;
+
+
 static inline RelFileNumber
 BufTagGetRelNumber(const BufferTag *tag)
 {
@@ -597,8 +612,13 @@ extern void StrategyNotifyBgWriter(int bgwprocno);
 /* buf_table.c */
 extern uint32 BufTableHashCode(BufferTag *tagPtr);
 extern int	BufTableLookup(BufferTag *tagPtr, uint32 hashcode);
-extern int	BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id);
-extern void BufTableDelete(BufferTag *tagPtr, uint32 hashcode);
+extern int	BufTablePrepareInsert(BufferTag *tagPtr, uint32 hashcode,
+								  BufTableScanResult *result);
+extern void BufTableInsert(BufTableScanResult *result, BufferTag *tagPtr,
+						   uint32 hashcode, int buf_id);
+extern int	BufTablePrepareDelete(BufferTag *tagPtr, uint32 hashcode,
+								  BufTableScanResult *result);
+extern void BufTableUnlink(BufTableScanResult *result);
 
 /* localbuf.c */
 extern bool PinLocalBuffer(BufferDesc *buf_hdr, bool adjust_usagecount);

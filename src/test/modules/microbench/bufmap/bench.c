@@ -115,7 +115,15 @@ run_bufmap_bench(int proc_id, int n_parallel, int rounds, int iterations,
 				hash = BufTableHashCode(tag);
 				lock = BufMappingPartitionLock(hash);
 				group_id = LWLockAcquire(lock, LW_EXCLUSIVE) ? 0 : 1;
-				sink += BufTableInsert(tag, hash, (Buffer)bufids[i]);
+				{
+					BufTableScanResult mapping;
+					int			found;
+
+					found = BufTablePrepareInsert(tag, hash, &mapping);
+					if (found < 0)
+						BufTableInsert(&mapping, tag, hash, (int) bufids[i]);
+					sink += found;
+				}
 				LWLockRelease(lock);
 			}
 		END_GROUPED_TIMING;
@@ -157,7 +165,12 @@ run_bufmap_bench(int proc_id, int n_parallel, int rounds, int iterations,
 				hash = BufTableHashCode(tag);
 				lock = BufMappingPartitionLock(hash);
 				group_id = LWLockAcquire(lock, LW_EXCLUSIVE) ? 0 : 1;
-				BufTableDelete(tag, hash);
+				{
+					BufTableScanResult mapping;
+
+					if (BufTablePrepareDelete(tag, hash, &mapping) >= 0)
+						BufTableUnlink(&mapping);
+				}
 				LWLockRelease(lock);
 			}
 		END_GROUPED_TIMING;

@@ -11,11 +11,11 @@
  *	  entries[NBuffers]     - one entry per buffer, indexed by buf_id
  *
  * Each buffer slot i permanently owns entry slot i, so no freelist is needed:
- * bufmgr always removes a buffer's old mapping (BufTableDelete, called from
+ * bufmgr always removes a buffer's old mapping (BufTableUnlink, called from
  * InvalidateVictimBuffer) before inserting a new tag for that same buf_id (see
  * GetVictimBuffer / BufferAlloc in bufmgr.c).  Empty entry slots are marked by
- * tag.blockNum == P_NEW; chains are linked by int index and terminated by
- * BUF_TABLE_CHAIN_END.
+ * bucket == BUF_TABLE_CHAIN_END; chains are linked by int index and terminated
+ * by BUF_TABLE_CHAIN_END.
  *
  * num_buckets is a power of two and a multiple of NUM_BUFFER_PARTITIONS, so the
  * bucket index (hashcode % num_buckets) shares its low bits with the partition
@@ -24,10 +24,15 @@
  * fully serializes each chain -- the same guarantee the dynahash table relied
  * on.
  *
- * Insert and delete require the caller to hold exclusive BufMappingLock for
- * the tag's partition.  Lookup should be called without a lock and it takes
- * a shared partition lock only if it gets a stale node during the concurrent
- * scan.
+ * Prepare/insert/unlink require the caller to hold exclusive BufMappingLock
+ * for the tag's partition for the whole prepare + mutate sequence:
+ * BufTableScanResult.link is a pointer into the shared chain and is invalid
+ * after that lock is released.  The actual pointer swing (BufTableInsert /
+ * BufTableUnlink) is done while also holding the buffer header spinlock, so a
+ * lock-free lookup cannot pin a buffer whose identity is still being changed.
+ *
+ * Lookup is called without a lock and takes a shared partition lock only if it
+ * hits a stale node during the concurrent scan.
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -59,8 +64,8 @@ typedef struct
 /* entry for buffer lookup hashtable */
 typedef struct
 {
-	uint32 		hashcode;
-	BufferTag	tag;			/* Tag of a disk page, or P_NEW if empty */
+	uint32		hashcode;
+	BufferTag	tag;			/* Tag of a disk page */
 	int			next;			/* next entry in hash chain */
 	uint32		bucket;
 } BufferLookupEnt;
@@ -121,7 +126,7 @@ BufTableShmemRequest(void *arg)
  *
  * Shared memory is zeroed, but zero is a valid buf_id and block 0 is a valid
  * block number, so we must explicitly mark every bucket empty
- * (BUF_TABLE_CHAIN_END) and every entry empty (tag.blockNum == P_NEW).
+ * (BUF_TABLE_CHAIN_END) and every entry empty.
  */
 void
 BufTableShmemInit(void *arg)
@@ -165,17 +170,10 @@ BufTableHashCode(BufferTag *tagPtr)
 	return tag_hash(tagPtr, sizeof(BufferTag));
 }
 
-typedef enum BufTableScanAction
-{
-	BUFTABLE_SCAN_LOOKUP,
-	BUFTABLE_SCAN_INSERT,
-	BUFTABLE_SCAN_DELETE,
-} BufTableScanAction;
-
 /*
  * BufTableScan
- *		unified code to scan the hash table and perform
- *		insertion backup and deletion.
+ *		Walk one hash chain.  Does not modify the table.
+ *
  * Invariants:
  *  - entries[id] is associated with buffer id.
  *  - a chain must end with a link to BUF_TABLE_CHAIN_END
@@ -184,119 +182,169 @@ typedef enum BufTableScanAction
  *  - entries[buckets[bucket].head].bucket == bucket
  *  - entries[entries[id].next].bucket == entries[id].bucket
  *
- * Chains are sorted by hashcode.  Insert splices at the first node with a
- * greater hash (or at the end).  A node whose bucket field does not match is
- * a leftover pointer to a recycled slot; lookup retries under a shared
- * partition lock, insert/delete treat that as corruption.
+ * On a hit, result->found is the buf_id and result->link points at the
+ * predecessor's next pointer.  On a miss, found is BUF_TABLE_CHAIN_END and
+ * link is the splice point (first node with a greater hash, or the tail).
+ *
+ * A node whose bucket field does not match is a leftover pointer to a
+ * recycled slot: result->link is left NULL so lookup can retry under a
+ * shared partition lock.  Prepare insert/delete treat that as corruption.
  */
-static pg_always_inline int
+static pg_always_inline void
 BufTableScan(BufferTag *tagPtr, uint32 hashcode,
-			 BufTableScanAction action, int buf_id)
+			 BufTableScanResult *result)
 {
 	int			bucket = hashcode & (num_buckets - 1);
 	int		   *link;
-	LWLock	   *lock = NULL;
 	int			id;
 
-scan:
+	result->link = NULL;
+	result->bucket = bucket;
+	result->found = BUF_TABLE_CHAIN_END;
+
 	for (link = &buckets[bucket].head;
 		 (id = *link) != BUF_TABLE_CHAIN_END;
 		 link = &entries[id].next)
 	{
+		pg_read_barrier();
 		if (entries[id].bucket != bucket)
-			goto broken;
+			return;
 		if (entries[id].hashcode > hashcode)
 			break;
 		if (entries[id].hashcode < hashcode)
 			continue;
 		if (BufferTagsEqual(&entries[id].tag, tagPtr))
 		{
-			if (action == BUFTABLE_SCAN_DELETE)
-			{
-				*link = entries[id].next;
-				entries[id].next = BUF_TABLE_CHAIN_END;
-				entries[id].bucket = BUF_TABLE_CHAIN_END;
-			}
-			if (lock)
-				LWLockRelease(lock);
-			return id;
+			result->link = link;
+			result->found = id;
+			return;
 		}
 	}
-
-	if (action == BUFTABLE_SCAN_INSERT)
-	{
-		Assert(entries[buf_id].bucket == BUF_TABLE_CHAIN_END);
-		entries[buf_id].tag = *tagPtr;
-		entries[buf_id].hashcode = hashcode;
-		entries[buf_id].next = id;
-		entries[buf_id].bucket = bucket;
-		*link = buf_id;
-	}
-	else if (action == BUFTABLE_SCAN_DELETE)
-		elog(ERROR, "shared buffer hash table corrupted");
-
-	if (lock)
-		LWLockRelease(lock);
-	return -1;
-
-broken:
-	if (action != BUFTABLE_SCAN_LOOKUP || lock)
-	{
-		if (lock)
-			LWLockRelease(lock);
-		elog(ERROR, "shared buffer hash table corrupted");
-	}
-	lock = BufMappingPartitionLock(hashcode);
-	LWLockAcquire(lock, LW_SHARED);
-	goto scan;
+	result->link = link;
 }
+
 /*
  * BufTableLookup
  *		Lookup the given BufferTag; return buffer ID, or -1 if not found
  *
- * Fast path attempt without a lock, it might fail if a node is reused,
- * while we hold a reference to it. In that case the a shared lock is
- * acquired and the scan is repeated.
+ * Fast path attempt without a lock; it might fail if a node is reused while
+ * we hold a reference to it.  In that case a shared lock is acquired and the
+ * scan is repeated.
  *
  * Concurrency:
- *   Conflicts with deletion on the same bucket, concurrent insertions
- *   linearise with lookup. On conflict it acquires a LW_SHARED partition
- *   lock, so that a caller doesn't have to hold as long as deletions
- *   hold a LW_EXCLUSIVE partition lock.
+ *   Conflicts with deletion on the same bucket; concurrent insertions
+ *   linearize with lookup.  On a stale node it acquires LW_SHARED so the
+ *   caller need not hold a lock for as long as deletions hold LW_EXCLUSIVE.
  */
 int
 BufTableLookup(BufferTag *tagPtr, uint32 hashcode)
 {
-	return BufTableScan(tagPtr, hashcode, BUFTABLE_SCAN_LOOKUP, BUF_TABLE_CHAIN_END);
+	BufTableScanResult r;
+	LWLock	   *lock = NULL;
+
+	for (;;)
+	{
+		BufTableScan(tagPtr, hashcode, &r);
+		if (r.link != NULL)
+		{
+			if (lock)
+				LWLockRelease(lock);
+			return r.found;
+		}
+
+		/* Concurrent reuse of a node we were following. */
+		if (lock)
+			elog(ERROR, "shared buffer hash table corrupted");
+
+		lock = BufMappingPartitionLock(hashcode);
+		LWLockAcquire(lock, LW_SHARED);
+	}
+}
+
+/*
+ * BufTablePrepareInsert
+ *		Determine the splice point for a given tag without modifying the table.
+ *
+ * The subsequent BufTableInsert must run before the exclusive partition lock
+ * is released, typically while also holding the victim's buffer header lock.
+ *
+ * Concurrency:
+ *   Conflicts with same-tag insertion and with deletions on the same bucket.
+ *
+ * Returns the existing buf_id on collision, or -1 if the tag is absent.
+ */
+int
+BufTablePrepareInsert(BufferTag *tagPtr, uint32 hashcode,
+					  BufTableScanResult *result)
+{
+	BufTableScan(tagPtr, hashcode, result);
+	if (result->link == NULL)
+		elog(ERROR, "shared buffer hash table corrupted");
+	return result->found;
 }
 
 /*
  * BufTableInsert
- *   Insert a hashtable entry for given tag and buffer ID,
- *   unless an entry already exists for that tag
+ *		Splice buf_id into the chain at the prepared location.
  *
- * Returns -1 on successful insertion.  If a conflicting entry exists
- * already, returns the buffer ID in that entry.
- *
- * Concurrency:
- *   Conflicts with same tag insertion and deletions on same bucket.
+ * Must be called only after a miss from BufTablePrepareInsert (found < 0).
+ * Writes the entry fields, then publishes *link so lock-free lookup can see
+ * the node.  Caller should hold the buffer header spinlock so PinBuffer waits
+ * until BufferDesc.tag / BM_TAG_VALID are installed.
  */
-int
-BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id)
+void
+BufTableInsert(BufTableScanResult *result, BufferTag *tagPtr,
+			   uint32 hashcode, int buf_id)
 {
 	Assert(buf_id >= 0 && buf_id < NBuffers);
-	return BufTableScan(tagPtr, hashcode, BUFTABLE_SCAN_INSERT, buf_id);
+	Assert(result->link != NULL);
+	Assert(result->found == BUF_TABLE_CHAIN_END);
+	Assert(entries[buf_id].bucket == (uint32) BUF_TABLE_CHAIN_END);
+
+	entries[buf_id].tag = *tagPtr;
+	entries[buf_id].hashcode = hashcode;
+	entries[buf_id].next = *result->link;
+	entries[buf_id].bucket = result->bucket;
+	pg_write_barrier();
+	*result->link = buf_id;
 }
 
 /*
- * BufTableDelete
- *		Delete the hashtable entry for given tag (which must exist)
+ * BufTablePrepareDelete
+ *		Find the predecessor link for an existing entry without unlinking it.
+ *
+ * The subsequent BufTableUnlink must run before the exclusive partition lock
+ * is released, typically while also holding the buffer header spinlock.
+ *
+ * Returns the matching buf_id, or -1 if the tag is not in the table.
+ */
+int
+BufTablePrepareDelete(BufferTag *tagPtr, uint32 hashcode,
+					  BufTableScanResult *result)
+{
+	BufTableScan(tagPtr, hashcode, result);
+	if (result->link == NULL)
+		elog(ERROR, "shared buffer hash table corrupted");
+	return result->found;
+}
+
+/*
+ * BufTableUnlink
+ *		Remove the prepared entry from its hash chain.
  *
  * Concurrency:
- * 		Conflicts with deletion or insertion on the same bucket.
+ *		Conflicts with deletion or insertion on the same bucket.
  */
 void
-BufTableDelete(BufferTag *tagPtr, uint32 hashcode)
+BufTableUnlink(BufTableScanResult *result)
 {
-	BufTableScan(tagPtr, hashcode, BUFTABLE_SCAN_DELETE, BUF_TABLE_CHAIN_END);
+	int			id = result->found;
+
+	Assert(result->link != NULL);
+	Assert(id >= 0 && id < NBuffers);
+
+	*result->link = entries[id].next;
+	pg_write_barrier();
+	entries[id].next = BUF_TABLE_CHAIN_END;
+	entries[id].bucket = BUF_TABLE_CHAIN_END;
 }
