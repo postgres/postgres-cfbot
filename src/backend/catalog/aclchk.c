@@ -2775,6 +2775,7 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
 					case OBJECT_TSPARSER:
 					case OBJECT_TSTEMPLATE:
 					case OBJECT_USER_MAPPING:
+					case OBJECT_WHOLE_ROW:
 						elog(ERROR, "unsupported object type: %d", objtype);
 				}
 
@@ -2913,6 +2914,7 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
 					case OBJECT_TSPARSER:
 					case OBJECT_TSTEMPLATE:
 					case OBJECT_USER_MAPPING:
+					case OBJECT_WHOLE_ROW:
 						elog(ERROR, "unsupported object type: %d", objtype);
 				}
 
