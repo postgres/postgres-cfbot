@@ -1321,7 +1321,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
          </para>
 
          <para>
-          In a temporal foreign key, this option is not supported.
+          In a temporal foreign key, only the portion of the referenced
+          row's application time that is actually changed/removed is checked, not
+          its entire period.  An update or delete that leaves the referenced
+          instants intact is therefore allowed, for example an update that grows
+          the period or a delete that shrinks it but without losing any
+          referenced instants.
          </para>
         </listitem>
        </varlistentry>
@@ -1336,7 +1341,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
          </para>
 
          <para>
-          In a temporal foreign key, this option is not supported.
+          In a temporal foreign key, the delete/update will use
+          <literal>FOR PORTION OF</literal> semantics to constrain the
+          effect to the bounds being deleted/updated in the referenced row.
+          If an update shortens the referenced row's application time, then
+          the referencing rows are deleted for the time that was lost, and
+          the new key values are cascaded to the time that was kept.
          </para>
         </listitem>
        </varlistentry>
@@ -1351,7 +1361,14 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
          </para>
 
          <para>
-          In a temporal foreign key, this option is not supported.
+          In a temporal foreign key, the change will use <literal>FOR PORTION
+          OF</literal> semantics to constrain the effect to the bounds being
+          deleted/updated in the referenced row. If an update shortens the
+          referenced row's application time but leaves the rest of the key
+          alone, then only the time that was lost is set to null, since the
+          referencing rows are still valid for the time that was kept. The
+          column marked with <literal>PERIOD</literal> cannot be set to
+          null.
          </para>
         </listitem>
        </varlistentry>
@@ -1368,7 +1385,14 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
          </para>
 
          <para>
-          In a temporal foreign key, this option is not supported.
+          In a temporal foreign key, the change will use <literal>FOR PORTION
+          OF</literal> semantics to constrain the effect to the bounds being
+          deleted/updated in the referenced row. If an update shortens the
+          referenced row's application time but leaves the rest of the key
+          alone, then only the time that was lost is set to a default value,
+          since the referencing rows are still valid for the time that was
+          kept. The column marked with <literal>PERIOD</literal> cannot be
+          set to a default value.
          </para>
         </listitem>
        </varlistentry>
