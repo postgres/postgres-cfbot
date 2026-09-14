@@ -122,13 +122,21 @@ INSERT INTO test_toast_oid (a, b)
 	(SELECT gs, repeat('xyzzy', 20000) FROM generate_series(1,5) gs);
 INSERT INTO test_toast_oid8 (a, b)
 	(SELECT gs, repeat('xyzzy', 20000) FROM generate_series(1,5) gs);
--- Compressed out-of-line values.
+-- Compressed out-of-line values.  These have to be large enough to stay
+-- out of line once compressed.
 ALTER TABLE test_toast_oid ALTER COLUMN b SET STORAGE EXTENDED;
 ALTER TABLE test_toast_oid8 ALTER COLUMN b SET STORAGE EXTENDED;
 INSERT INTO test_toast_oid (a, b)
-	(SELECT gs, repeat('xyzzy', 20000) FROM generate_series(6,10) gs);
+	(SELECT gs, repeat('xyzzy', 100000) FROM generate_series(6,10) gs);
 INSERT INTO test_toast_oid8 (a, b)
-	(SELECT gs, repeat('xyzzy', 20000) FROM generate_series(6,10) gs);
+	(SELECT gs, repeat('xyzzy', 100000) FROM generate_series(6,10) gs);
+-- All values are out of line, half of them compressed.
+SELECT 'test_toast_oid' AS relname, count(pg_column_toast_chunk_id(b)) AS out_of_line,
+       count(pg_column_compression(b)) AS compressed FROM test_toast_oid
+UNION ALL
+SELECT 'test_toast_oid8', count(pg_column_toast_chunk_id(b)),
+       count(pg_column_compression(b)) FROM test_toast_oid8
+	ORDER BY 1;
 SELECT c.relname, a.atttypid::regtype AS chunk_id_type
 	FROM pg_class AS c, pg_attribute AS a
 	WHERE c.relname IN ('test_toast_oid', 'test_toast_oid8') AND
