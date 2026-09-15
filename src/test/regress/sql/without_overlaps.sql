@@ -1247,6 +1247,53 @@ ALTER TABLE temporal_fk_rng2rng
   REFERENCES temporal_rng;
 
 --
+-- test NOT VALID and NOT ENFORCED with rows already
+--
+-- Validating a temporal FK must use PERIOD semantics, so a row whose
+-- range is not covered by the referenced row(s) must be rejected.
+
+CREATE TABLE temporal_rng_nv (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng_nv_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+);
+INSERT INTO temporal_rng_nv (id, valid_at) VALUES
+  ('[1,2)', daterange('2018-01-01', '2018-02-01'));
+CREATE TABLE temporal_fk_nv (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range
+);
+INSERT INTO temporal_fk_nv (id, valid_at, parent_id) VALUES
+  ('[1,2)', daterange('2018-01-01', '2018-06-01'), '[1,2)');
+
+ALTER TABLE temporal_fk_nv
+  ADD CONSTRAINT temporal_fk_nv_fk
+  FOREIGN KEY (parent_id, PERIOD valid_at)
+  REFERENCES temporal_rng_nv
+  NOT VALID;
+-- should fail:
+ALTER TABLE temporal_fk_nv VALIDATE CONSTRAINT temporal_fk_nv_fk;
+-- okay once the row is covered:
+UPDATE temporal_fk_nv SET valid_at = daterange('2018-01-01', '2018-02-01');
+ALTER TABLE temporal_fk_nv VALIDATE CONSTRAINT temporal_fk_nv_fk;
+ALTER TABLE temporal_fk_nv DROP CONSTRAINT temporal_fk_nv_fk;
+
+UPDATE temporal_fk_nv SET valid_at = daterange('2018-01-01', '2018-06-01');
+ALTER TABLE temporal_fk_nv
+  ADD CONSTRAINT temporal_fk_nv_fk
+  FOREIGN KEY (parent_id, PERIOD valid_at)
+  REFERENCES temporal_rng_nv
+  NOT ENFORCED;
+-- should fail:
+ALTER TABLE temporal_fk_nv ALTER CONSTRAINT temporal_fk_nv_fk ENFORCED;
+-- okay once the row is covered:
+UPDATE temporal_fk_nv SET valid_at = daterange('2018-01-01', '2018-02-01');
+ALTER TABLE temporal_fk_nv ALTER CONSTRAINT temporal_fk_nv_fk ENFORCED;
+DROP TABLE temporal_fk_nv;
+DROP TABLE temporal_rng_nv;
+
+--
 -- test pg_get_constraintdef
 --
 
@@ -2015,6 +2062,72 @@ ALTER TABLE temporal_partitioned_fk_rng2rng
 
 DROP TABLE temporal_partitioned_fk_rng2rng;
 DROP TABLE temporal_partitioned_rng;
+
+--
+-- partitioned FK referencing: ATTACH PARTITION with rows already
+--
+-- Attaching a populated table must validate its rows with PERIOD
+-- semantics, i.e. each referencing range must be contained in the union
+-- of the matching referenced ranges.
+
+CREATE TABLE temporal_rng_att (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng_att_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+);
+INSERT INTO temporal_rng_att (id, valid_at) VALUES
+  ('[1,2)', daterange('2000-01-01', '2000-02-01')),
+  ('[1,2)', daterange('2000-02-01', '2000-03-01'));
+
+CREATE TABLE temporal_partitioned_fk_att (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_partitioned_fk_att_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng_att (id, PERIOD valid_at)
+) PARTITION BY LIST (id);
+
+-- okay: the row is covered by the two referenced rows combined
+CREATE TABLE temporal_fk_att1 (LIKE temporal_partitioned_fk_att);
+INSERT INTO temporal_fk_att1 (id, valid_at, parent_id) VALUES
+  ('[1,2)', daterange('2000-01-15', '2000-02-15'), '[1,2)');
+ALTER TABLE temporal_partitioned_fk_att
+  ATTACH PARTITION temporal_fk_att1 FOR VALUES IN ('[1,2)');
+
+-- should fail: the row's range is not covered by the referenced rows
+CREATE TABLE temporal_fk_att2 (LIKE temporal_partitioned_fk_att);
+INSERT INTO temporal_fk_att2 (id, valid_at, parent_id) VALUES
+  ('[2,3)', daterange('2000-01-01', '2010-01-01'), '[1,2)');
+ALTER TABLE temporal_partitioned_fk_att
+  ATTACH PARTITION temporal_fk_att2 FOR VALUES IN ('[2,3)');
+-- okay once the row is covered:
+UPDATE temporal_fk_att2 SET valid_at = daterange('2000-01-01', '2000-03-01');
+ALTER TABLE temporal_partitioned_fk_att
+  ATTACH PARTITION temporal_fk_att2 FOR VALUES IN ('[2,3)');
+-- and the constraint is still enforced with PERIOD semantics afterward:
+INSERT INTO temporal_partitioned_fk_att (id, valid_at, parent_id) VALUES
+  ('[2,3)', daterange('2000-03-01', '2000-04-01'), '[1,2)');
+
+-- Same again, but the candidate partition already has an equivalent
+-- NOT VALID constraint, so it is reparented instead of cloned.
+-- should fail:
+CREATE TABLE temporal_fk_att3 (LIKE temporal_partitioned_fk_att);
+INSERT INTO temporal_fk_att3 (id, valid_at, parent_id) VALUES
+  ('[3,4)', daterange('2000-01-01', '2010-01-01'), '[1,2)');
+ALTER TABLE temporal_fk_att3
+  ADD CONSTRAINT temporal_partitioned_fk_att_fk
+  FOREIGN KEY (parent_id, PERIOD valid_at)
+  REFERENCES temporal_rng_att (id, PERIOD valid_at)
+  NOT VALID;
+ALTER TABLE temporal_partitioned_fk_att
+  ATTACH PARTITION temporal_fk_att3 FOR VALUES IN ('[3,4)');
+-- okay once the row is covered:
+UPDATE temporal_fk_att3 SET valid_at = daterange('2000-01-01', '2000-03-01');
+ALTER TABLE temporal_partitioned_fk_att
+  ATTACH PARTITION temporal_fk_att3 FOR VALUES IN ('[3,4)');
+
+DROP TABLE temporal_partitioned_fk_att;
+DROP TABLE temporal_rng_att;
 
 --
 -- FK between partitioned tables: multiranges
