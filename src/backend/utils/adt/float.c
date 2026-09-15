@@ -221,7 +221,7 @@ float4in(PG_FUNCTION_ARGS)
  * comments also apply here, except regarding use in geometric types.
  */
 float4
-float4in_internal(char *num, char **endptr_p,
+float4in_internal(const char *num, char **endptr_p,
 				  const char *type_name, const char *orig_string,
 				  struct Node *escontext)
 {
@@ -269,37 +269,37 @@ float4in_internal(char *num, char **endptr_p,
 		if (pg_strncasecmp(num, "NaN", 3) == 0)
 		{
 			val = get_float4_nan();
-			endptr = num + 3;
+			endptr = unconstify(char *, num) + 3;
 		}
 		else if (pg_strncasecmp(num, "Infinity", 8) == 0)
 		{
 			val = get_float4_infinity();
-			endptr = num + 8;
+			endptr = unconstify(char *, num) + 8;
 		}
 		else if (pg_strncasecmp(num, "+Infinity", 9) == 0)
 		{
 			val = get_float4_infinity();
-			endptr = num + 9;
+			endptr = unconstify(char *, num) + 9;
 		}
 		else if (pg_strncasecmp(num, "-Infinity", 9) == 0)
 		{
 			val = -get_float4_infinity();
-			endptr = num + 9;
+			endptr = unconstify(char *, num) + 9;
 		}
 		else if (pg_strncasecmp(num, "inf", 3) == 0)
 		{
 			val = get_float4_infinity();
-			endptr = num + 3;
+			endptr = unconstify(char *, num) + 3;
 		}
 		else if (pg_strncasecmp(num, "+inf", 4) == 0)
 		{
 			val = get_float4_infinity();
-			endptr = num + 4;
+			endptr = unconstify(char *, num) + 4;
 		}
 		else if (pg_strncasecmp(num, "-inf", 4) == 0)
 		{
 			val = -get_float4_infinity();
-			endptr = num + 4;
+			endptr = unconstify(char *, num) + 4;
 		}
 		else if (save_errno == ERANGE)
 		{
@@ -433,7 +433,7 @@ float8in(PG_FUNCTION_ARGS)
  * unreasonable amount of extra casting both here and in callers, so we don't.
  */
 float8
-float8in_internal(char *num, char **endptr_p,
+float8in_internal(const char *num, char **endptr_p,
 				  const char *type_name, const char *orig_string,
 				  struct Node *escontext)
 {
@@ -475,37 +475,37 @@ float8in_internal(char *num, char **endptr_p,
 		if (pg_strncasecmp(num, "NaN", 3) == 0)
 		{
 			val = get_float8_nan();
-			endptr = num + 3;
+			endptr = unconstify(char *, num) + 3;
 		}
 		else if (pg_strncasecmp(num, "Infinity", 8) == 0)
 		{
 			val = get_float8_infinity();
-			endptr = num + 8;
+			endptr = unconstify(char *, num) + 8;
 		}
 		else if (pg_strncasecmp(num, "+Infinity", 9) == 0)
 		{
 			val = get_float8_infinity();
-			endptr = num + 9;
+			endptr = unconstify(char *, num) + 9;
 		}
 		else if (pg_strncasecmp(num, "-Infinity", 9) == 0)
 		{
 			val = -get_float8_infinity();
-			endptr = num + 9;
+			endptr = unconstify(char *, num) + 9;
 		}
 		else if (pg_strncasecmp(num, "inf", 3) == 0)
 		{
 			val = get_float8_infinity();
-			endptr = num + 3;
+			endptr = unconstify(char *, num) + 3;
 		}
 		else if (pg_strncasecmp(num, "+inf", 4) == 0)
 		{
 			val = get_float8_infinity();
-			endptr = num + 4;
+			endptr = unconstify(char *, num) + 4;
 		}
 		else if (pg_strncasecmp(num, "-inf", 4) == 0)
 		{
 			val = -get_float8_infinity();
-			endptr = num + 4;
+			endptr = unconstify(char *, num) + 4;
 		}
 		else if (save_errno == ERANGE)
 		{
