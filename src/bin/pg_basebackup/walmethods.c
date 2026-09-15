@@ -51,6 +51,7 @@ static ssize_t dir_get_file_size(WalWriteMethod *wwmethod,
 static char *dir_get_file_name(WalWriteMethod *wwmethod,
 							   const char *pathname, const char *temp_suffix);
 static ssize_t dir_write(Walfile *f, const void *buf, size_t count);
+static ssize_t dir_write_zeros(Walfile *f, size_t count);
 static int	dir_sync(Walfile *f);
 static bool dir_finish(WalWriteMethod *wwmethod);
 static void dir_free(WalWriteMethod *wwmethod);
@@ -62,6 +63,7 @@ static const WalWriteMethodOps WalDirectoryMethodOps = {
 	.get_file_size = dir_get_file_size,
 	.get_file_name = dir_get_file_name,
 	.write = dir_write,
+	.write_zeros = dir_write_zeros,
 	.sync = dir_sync,
 	.finish = dir_finish,
 	.free = dir_free
@@ -84,6 +86,7 @@ typedef struct DirectoryMethodFile
 	Walfile		base;
 	int			fd;
 	char	   *fullpath;
+	bool		remainder_is_zero;
 	char	   *temp_suffix;
 #ifdef HAVE_LIBZ
 	gzFile		gzfp;
@@ -294,6 +297,7 @@ dir_open_for_write(WalWriteMethod *wwmethod, const char *pathname,
 	f->base.pathname = pg_strdup(pathname);
 	f->fd = fd;
 	f->fullpath = pg_strdup(tmppath);
+	f->remainder_is_zero = pad_to_size != 0;
 	if (temp_suffix)
 		f->temp_suffix = pg_strdup(temp_suffix);
 
@@ -379,6 +383,56 @@ dir_write(Walfile *f, const void *buf, size_t count)
 	if (r > 0)
 		df->base.currpos += r;
 	return r;
+}
+
+static ssize_t
+dir_write_zeros(Walfile *f, size_t count)
+{
+	DirectoryMethodFile *df = (DirectoryMethodFile *) f;
+
+	if (f->wwmethod->compression_algorithm == PG_COMPRESSION_NONE)
+	{
+		pgoff_t		newpos = f->currpos + count;
+		ssize_t		rc;
+
+		clear_error(f->wwmethod);
+
+		/* A file opened after an earlier run can contain stale data here. */
+		if (!df->remainder_is_zero)
+		{
+			rc = pg_pwrite_zeros(df->fd, count, f->currpos);
+			if (rc < 0)
+			{
+				f->wwmethod->lasterrno = errno;
+				return -1;
+			}
+		}
+
+		/* On Windows, pg_pwrite_zeros() may have moved the file position. */
+		if (lseek(df->fd, newpos, SEEK_SET) != newpos)
+		{
+			f->wwmethod->lasterrno = errno;
+			return -1;
+		}
+
+		f->currpos = newpos;
+		return count;
+	}
+	else
+	{
+		PGAlignedXLogBlock zerobuf = {0};
+		size_t		remaining = count;
+
+		while (remaining > 0)
+		{
+			size_t		chunk = Min(remaining, sizeof(zerobuf.data));
+
+			if (dir_write(f, zerobuf.data, chunk) != chunk)
+				return -1;
+			remaining -= chunk;
+		}
+		return count;
+	}
 }
 
 static int
@@ -672,6 +726,7 @@ static ssize_t tar_get_file_size(WalWriteMethod *wwmethod,
 static char *tar_get_file_name(WalWriteMethod *wwmethod,
 							   const char *pathname, const char *temp_suffix);
 static ssize_t tar_write(Walfile *f, const void *buf, size_t count);
+static ssize_t tar_write_zeros(Walfile *f, size_t count);
 static int	tar_sync(Walfile *f);
 static bool tar_finish(WalWriteMethod *wwmethod);
 static void tar_free(WalWriteMethod *wwmethod);
@@ -683,6 +738,7 @@ static const WalWriteMethodOps WalTarMethodOps = {
 	.get_file_size = tar_get_file_size,
 	.get_file_name = tar_get_file_name,
 	.write = tar_write,
+	.write_zeros = tar_write_zeros,
 	.sync = tar_sync,
 	.finish = tar_finish,
 	.free = tar_free
@@ -799,6 +855,23 @@ tar_write(Walfile *f, const void *buf, size_t count)
 		f->wwmethod->lasterrno = ENOSYS;
 		return -1;
 	}
+}
+
+static ssize_t
+tar_write_zeros(Walfile *f, size_t count)
+{
+	PGAlignedXLogBlock zerobuf = {0};
+	size_t		remaining = count;
+
+	while (remaining > 0)
+	{
+		size_t		chunk = Min(remaining, sizeof(zerobuf.data));
+
+		if (tar_write(f, zerobuf.data, chunk) != chunk)
+			return -1;
+		remaining -= chunk;
+	}
+	return count;
 }
 
 static bool
