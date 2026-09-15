@@ -967,6 +967,14 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_native_graphtable', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables the native graph table executor.',
+  long_desc => 'When enabled, graph queries are decomposed and executed natively by the planner and the graph scan executor instead of being rewritten into relational subqueries by the rewriter.  The default is currently off because the native planner support is not yet implemented; it will become on by default once the native path lands.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_native_graphtable',
+  boot_val => 'false',
+},
+
 { name => 'enable_nestloop', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of nested-loop join plans.',
   flags => 'GUC_EXPLAIN',
@@ -2007,6 +2015,16 @@
   boot_val => 'FUNC_MAX_ARGS',
   min => 'FUNC_MAX_ARGS',
   max => 'FUNC_MAX_ARGS',
+},
+
+{ name => 'max_graph_stack_depth', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Sets the maximum total path length in a native graph traversal.',
+  long_desc => 'Limits the total number of edges in any path of a native graph traversal across the whole graph pattern, not just a single variable-length hop, to prevent runaway execution on cyclic or excessively long patterns.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'max_graph_stack_depth',
+  boot_val => '1000',
+  min => '1',
+  max => '1000000',
 },
 
 { name => 'max_identifier_length', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',

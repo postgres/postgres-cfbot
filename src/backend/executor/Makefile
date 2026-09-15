@@ -68,6 +68,7 @@ OBJS = \
 	nodeSort.o \
 	nodeSubplan.o \
 	nodeSubqueryscan.o \
+	nodeGraphScan.o \
 	nodeTableFuncscan.o \
 	nodeTidrangescan.o \
 	nodeTidscan.o \

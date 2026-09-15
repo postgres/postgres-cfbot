@@ -2184,6 +2184,33 @@ typedef struct ReturningExpr
 	Expr	   *retexpr;		/* expression to be returned */
 } ReturningExpr;
 
+/*
+ * GraphLabelRef - label reference in label expression inside GRAPH_TABLE clause
+ */
+typedef struct GraphLabelRef
+{
+	NodeTag		type;
+	Oid			labelid;
+	ParseLoc	location;
+} GraphLabelRef;
+
+/*
+ * GraphPropertyRef - property reference inside GRAPH_TABLE clause
+ */
+typedef struct GraphPropertyRef
+{
+	Expr		xpr;
+	const char *elvarname;
+	Oid			propid;
+	Oid			typeId;
+	int32		typmod;
+	Oid			collation;
+	bool		vle_list;		/* reference outside a quantified (VLE) edge's
+								 * own WHERE: value is the array of the
+							 	 * property's value over every traversed edge */
+	ParseLoc	location;
+} GraphPropertyRef;
+
 /*--------------------
  * TargetEntry -
  *	   a target entry (used in query target lists)

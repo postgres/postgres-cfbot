@@ -56,6 +56,7 @@ backend_sources += files(
   'nodeSort.c',
   'nodeSubplan.c',
   'nodeSubqueryscan.c',
+  'nodeGraphScan.c',
   'nodeTableFuncscan.c',
   'nodeTidrangescan.c',
   'nodeTidscan.c',

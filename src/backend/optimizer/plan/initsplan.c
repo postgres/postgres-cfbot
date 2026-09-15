@@ -1103,6 +1103,47 @@ extract_lateral_references(PlannerInfo *root, RelOptInfo *brel, Index rtindex)
 		vars = pull_vars_of_level((Node *) rte->tablefunc, 0);
 	else if (rte->rtekind == RTE_VALUES)
 		vars = pull_vars_of_level((Node *) rte->values_lists, 0);
+	else if (rte->rtekind == RTE_GRAPH_TABLE)
+	{
+		/*
+		 * The pattern and the list of graph properties may contain Vars
+		 * referencing relations outside the graph pattern (i.e. LATERAL
+		 * references).  Note that for the user-visible RTE the columns are
+		 * GraphPropertyRef nodes, while the internal (decomposed) RTE holds
+		 * TargetEntries; both may contain Vars.  Vars referencing the graph
+		 * RTE itself are its own output (projection) columns, not lateral
+		 * references, and must be dropped.
+		 */
+		ListCell   *lc2;
+
+		vars = pull_vars_of_level((Node *) rte->graph_pattern, 0);
+		foreach(lc2, rte->graph_table_columns)
+		{
+			Node	   *item = lfirst(lc2);
+
+			if (IsA(item, TargetEntry))
+				vars = list_concat(vars,
+								   pull_vars_of_level((Node *) ((TargetEntry *) item)->expr, 0));
+			else
+				vars = list_concat(vars,
+								   pull_vars_of_level(item, 0));
+		}
+
+		foreach(lc2, vars)
+		{
+			Node	   *node = (Node *) lfirst(lc2);
+
+			if (IsA(node, Var))
+			{
+				Var		   *var = (Var *) node;
+
+				if (var->varno == rtindex)
+				{
+					vars = foreach_delete_current(vars, lc2);
+				}
+			}
+		}
+	}
 	else
 	{
 		Assert(false);

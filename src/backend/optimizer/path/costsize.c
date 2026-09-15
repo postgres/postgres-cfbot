@@ -143,6 +143,13 @@ Cost		disable_cost = 1.0e10;
 
 int			max_parallel_workers_per_gather = 2;
 
+/*
+ * Maximum total number of edges in any path of a native graph traversal,
+ * across the whole graph pattern (not just a single variable-length hop).
+ * Guard against runaway execution on cyclic or excessively long patterns.
+ */
+int			max_graph_stack_depth = 1000;
+
 bool		enable_seqscan = true;
 bool		enable_indexscan = true;
 bool		enable_indexonlyscan = true;
@@ -155,6 +162,7 @@ bool		enable_groupagg = true;
 bool		enable_nestloop = true;
 bool		enable_material = true;
 bool		enable_memoize = true;
+bool		enable_native_graphtable = false;
 bool		enable_mergejoin = true;
 bool		enable_hashjoin = true;
 bool		enable_gathermerge = true;
@@ -1489,7 +1497,8 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 
 	/* Should only be applied to base relations that are subqueries */
 	Assert(baserel->relid > 0);
-	Assert(baserel->rtekind == RTE_SUBQUERY);
+	Assert(baserel->rtekind == RTE_SUBQUERY ||
+		   baserel->rtekind == RTE_GRAPH_TABLE);
 
 	/*
 	 * We compute the rowcount estimate as the subplan's estimate times the
@@ -6166,7 +6175,8 @@ set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 
 	/* Should only be applied to base relations that are subqueries */
 	Assert(rel->relid > 0);
-	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_SUBQUERY);
+	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_SUBQUERY ||
+		   planner_rt_fetch(rel->relid, root)->rtekind == RTE_GRAPH_TABLE);
 
 	/*
 	 * Copy raw number of output rows from subquery.  All of its paths should

@@ -373,10 +373,11 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 		case RTE_VALUES:
 		case RTE_CTE:
 		case RTE_NAMEDTUPLESTORE:
+		case RTE_GRAPH_TABLE:
 
 			/*
-			 * Subquery, function, tablefunc, values list, CTE, or ENR --- set
-			 * up attr range and arrays
+			 * Subquery, function, tablefunc, values list, CTE, ENR, or graph
+			 * table --- set up attr range and arrays
 			 *
 			 * Note: 0 is included in range to support whole-row Vars
 			 */

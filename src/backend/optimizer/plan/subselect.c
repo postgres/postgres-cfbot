@@ -2756,6 +2756,49 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			}
 			break;
 
+		case T_GraphScan:
+			{
+				GraphScan  *gs = (GraphScan *) plan;
+				RelOptInfo *rel;
+				Bitmapset  *subquery_params;
+
+				/* We must run finalize_plan on the inner (1-hop) query */
+				if (gs->inner_plan != NULL)
+				{
+					rel = find_base_rel(root, gs->scan.scanrelid);
+					subquery_params = rel->subroot->outer_params;
+					if (gather_param >= 0)
+						subquery_params = bms_add_member(bms_copy(subquery_params),
+														 gather_param);
+					finalize_plan(rel->subroot, gs->inner_plan,
+								  gather_param, subquery_params, NULL);
+
+					/* Now we can add its extParams to the parent's params */
+					context.paramids = bms_add_members(context.paramids,
+													   gs->inner_plan->extParam);
+
+					/*
+					 * The current-vertex PARAM_EXEC ids referenced by the
+					 * inner (arm) plans are supplied by the GraphScan node
+					 * itself (as a NestLoop supplies its nestParams), so they
+					 * must not count as external params of this level.
+					 */
+					if (gs->vertex_param_ids != NIL)
+					{
+						Bitmapset  *vp = NULL;
+
+						foreach_int(pid, gs->vertex_param_ids)
+							vp = bms_add_member(vp, pid);
+						context.paramids =
+							bms_del_members(context.paramids, vp);
+					}
+				}
+
+				context.paramids = bms_add_members(context.paramids,
+												   scan_params);
+			}
+			break;
+
 		case T_FunctionScan:
 			{
 				FunctionScan *fscan = (FunctionScan *) plan;

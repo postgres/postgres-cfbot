@@ -554,6 +554,102 @@ typedef struct SeqScan
 } SeqScan;
 
 /* ----------------
+ *		graph scan node
+ *
+ * A GraphScan evaluates a single quantified (variable-length) hop of a graph
+ * pattern with a depth-first search.  It is planned like any other scan and
+ * acts as "just another scan" in the query; its lefttree/seed rows are
+ * provided by the surrounding join (the scan is a parameterized inner), and
+ * its "righttree" (inner_plan) is the parameterized 1-hop expansion over the
+ * edge element tables matching the hop's edge pattern.
+ *
+ * scanrelid refers to an internal RTE_GRAPH_TABLE entry describing the hop.
+ * ----------------
+ */
+
+/* Direction in which a hop traverses its edges. */
+typedef enum EdgeDirection
+{
+	GRAPH_DIR_OUTGOING = 0,		/* -(e)-> or -> */
+	GRAPH_DIR_INCOMING,			/* <-(e)- or <- */
+	GRAPH_DIR_UNDIRECTED		/* -(e)- */
+}			EdgeDirection;
+
+typedef struct GraphScan
+{
+	Scan		scan;
+
+	/*
+	 * Depth of the quantified hop: min_depth/max_depth, taken verbatim from
+	 * the edge quantifier (max_depth -1 = unbounded).
+	 */
+	int			min_depth;
+	int			max_depth;
+
+	/* Direction of the hop. */
+	EdgeDirection direction;
+
+	/*
+	 * The ghost seed (pd) and ghost terminal (td) key columns of the internal
+	 * RTE, as 1-based output attnos of this scan.  The seed drives the DFS;
+	 * the terminal keys feed the relational terminal join above this node.
+	 */
+	List	   *seed_key_cols;	/* List of AttrNumber */
+	List	   *terminal_key_cols;	/* List of AttrNumber */
+
+	/* Output attnos of the VLE edge-list (array) columns, if any. */
+	List	   *edge_list_cols; /* List of AttrNumber */
+
+	/*
+	 * Edge element OIDs behind the inner 1-hop expansion (in inner_plan
+	 * order), used by the executor to interpret rows of the expansion.
+	 */
+	List	   *edge_element_oids;	/* List of Oid */
+
+	/*
+	 * The internal RTE's output columns (List of TargetEntry), in RTE column
+	 * order (seed keys, terminal keys, VLE edge-list columns).  Used by the
+	 * executor to build the scan's (positional) tuple descriptor.
+	 */
+	List	   *graph_columns;
+
+	/*
+	 * The parameterized 1-hop expansion plan (the righttree).  It was planned
+	 * out-of-band with rel->subroot (see allpaths.c), whose rtable is spliced
+	 * into the global rtable at setrefs time.  The enclosing nestloop
+	 * supplies the current-vertex value as a nestloop param.
+	 */
+	Plan	   *inner_plan;
+
+	/* Vertex element the (ghost) seed belongs to. */
+	Oid			seed_elem_oid;
+
+	/*
+	 * Seed key values (List, one entry per seed key column, in key order).
+	 * Each entry is either a Param (PARAM_EXEC) that the enclosing nestloop
+	 * fills from the outer row, or -- when the planner can prove the seed
+	 * relation is a single row (e.g. a constant equality on its primary key)
+	 * -- a Const substituted directly on the scan.  The executor seeds the
+	 * traversal from these values.
+	 */
+	List	   *seed_params;
+
+	/*
+	 * PARAM_EXEC ids of the current-vertex key values used to parameterize
+	 * the inner (1-hop) arm scans, ordered [forward (source key) slots,
+	 * reverse (destination key) slots]; see build_graphscan_inner_query().
+	 * The executor binds the active direction's parameters from the current
+	 * vertex before each depth frame's fetch.  finalize_plan treats these ids
+	 * as supplied by this node (see the T_GraphScan case in subselect.c).
+	 */
+	List	   *vertex_param_ids;
+
+	/* Hop-wide max src/dest key widths over the edge element arms. */
+	int			max_nsrc;
+	int			max_ndst;
+}			GraphScan;
+
+/* ----------------
  *		table sample scan node
  * ----------------
  */
