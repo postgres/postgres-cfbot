@@ -297,6 +297,7 @@ PostgreSQL documentation
         specifies the target directory instead of a file. In this case the
         directory is created by <command>pg_dump</command> unless the directory
         exists and is empty.
+        This option and <option>--pipe</option> can't be used together.
        </para>
       </listitem>
      </varlistentry>
@@ -1213,6 +1214,32 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--pipe</option></term>
+      <listitem>
+       <para>
+        This option is only supported with the directory output
+        format. It can be used to write to multiple streams which
+        otherwise would not be possible with the directory mode.
+        For each stream, it starts a process which runs the
+        specified command and pipes the pg_dump output to this
+        process.
+        This option is not valid if <option>--file</option>
+        is also specified.
+       </para>
+       <para>
+        The pipe can be used to perform operations like compress
+        using a custom algorithm, filter, or write the output to a cloud
+        storage etc. The user would need a way to pipe the final output of
+        each stream to a file. To handle that, the pipe command supports a format
+        specifier %f. And all the instances of %f in the command string
+        will be replaced with the corresponding file name which
+        would have been used in the directory mode with <option>--file</option>.
+        See <xref linkend="pg-dump-examples"/> below.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--quote-all-identifiers</option></term>
       <listitem>
        <para>
@@ -1787,6 +1814,35 @@ CREATE DATABASE foo WITH TEMPLATE template0;
 
 <screen>
 <prompt>$</prompt> <userinput>pg_dump -Fd mydb -j 5 -f dumpdir</userinput>
+</screen>
+  </para>
+
+  <para>
+   To use pipe to dump a database into a directory-format archive
+   (the directory <literal>dumpdir</literal> needs to exist before running the command).
+
+<screen>
+<prompt>$</prompt> <userinput>pg_dump -Fd mydb --pipe="cat > dumpdir/%f"</userinput>
+</screen>
+  </para>
+
+  <para>
+   To use pipe to dump a database into a directory-format archive
+   in parallel with 5 worker jobs (the directory <literal>dumpdir</literal> needs to exist
+   before running the command).
+
+<screen>
+<prompt>$</prompt> <userinput>pg_dump -Fd mydb -j 5 --pipe="cat > dumpdir/%f"</userinput>
+</screen>
+  </para>
+
+  <para>
+   To use pipe to compress and dump a database into a
+   directory-format archive (the directory <literal>dumpdir</literal> needs to
+   exist before running the command).
+
+<screen>
+<prompt>$</prompt> <userinput>pg_dump -Fd mydb --pipe="gzip > dumpdir/%f.gz"</userinput>
 </screen>
   </para>
 
