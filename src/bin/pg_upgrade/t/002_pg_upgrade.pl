@@ -556,14 +556,37 @@ ok(-d $newnode->data_dir . "/pg_upgrade_output.d",
 	"pg_upgrade_output.d/ not removed after pg_upgrade failure");
 rmtree($newnode->data_dir . "/pg_upgrade_output.d");
 
-# Check that pg_upgrade aborts when encountering an invalid database
-# (However, versions that were out of support by commit c66a7d75e652 don't
-# know how to do this, so skip this test there.)
+# Check how pg_upgrade handles an invalid database. With
+# --invalid-databases=error it is reported and the upgrade aborts; by default
+# it is skipped and the upgrade proceeds. (Versions that were out of support
+# by commit c66a7d75e652 can't mark a database invalid, so skip these checks
+# there.)
 SKIP:
 {
-	skip "database invalidation not implemented", 1
+	skip "database invalidation not implemented", 2
 	  if $oldnode->pg_version < 11;
 
+	# --invalid-databases=error preserves the historical hard failure.
+	command_checks_all(
+		[
+			'pg_upgrade', '--no-sync',
+			'--old-datadir' => $oldnode->data_dir,
+			'--new-datadir' => $newnode->data_dir,
+			'--old-bindir' => $oldbindir,
+			'--new-bindir' => $newbindir,
+			'--socketdir' => $newnode->host,
+			'--old-port' => $oldnode->port,
+			'--new-port' => $newnode->port,
+			$mode, '--check', '--invalid-databases' => 'error',
+		],
+		1,
+		[qr/datconnlimit/],
+		[qr/^$/],
+		'invalid database causes failure with --invalid-databases=error');
+	rmtree($newnode->data_dir . "/pg_upgrade_output.d");
+
+	# The default skips invalid databases, so --check succeeds while naming
+	# the database that will not be upgraded.
 	command_checks_all(
 		[
 			'pg_upgrade', '--no-sync',
@@ -576,10 +599,10 @@ SKIP:
 			'--new-port' => $newnode->port,
 			$mode, '--check',
 		],
-		1,
-		[qr/datconnlimit/],
+		0,
+		[qr/invalid database "regression_invalid" will not be upgraded/],
 		[qr/^$/],
-		'invalid database causes failure');
+		'invalid database is skipped by default');
 	rmtree($newnode->data_dir . "/pg_upgrade_output.d");
 }
 

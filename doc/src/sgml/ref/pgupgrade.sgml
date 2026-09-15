@@ -263,6 +263,30 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--invalid-databases=</option><replaceable>option</replaceable></term>
+      <listitem>
+       <para>
+        Choose how to treat invalid databases in the old cluster, that is
+        databases whose <command>DROP DATABASE</command> was interrupted,
+        leaving them with <structfield>datconnlimit</structfield> set to
+        <literal>-2</literal> in
+        <link linkend="catalog-pg-database"><structname>pg_database</structname></link>.
+        Such a database can no longer be connected to and can never be
+        upgraded. Possible values are <literal>skip</literal> (the default)
+        and <literal>error</literal>.
+       </para>
+       <para>
+        With <literal>skip</literal>, invalid databases are reported and left
+        behind while the rest of the cluster is upgraded; their files are
+        removed along with the old cluster by the generated
+        <filename>delete_old_cluster</filename> script. With
+        <literal>error</literal>, invalid databases are reported and the
+        upgrade is aborted.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--no-statistics</option></term>
       <listitem>
        <para>

@@ -249,6 +249,15 @@ typedef enum
 } transferMode;
 
 /*
+ * Enumeration to denote how to treat invalid databases in the old cluster
+ */
+typedef enum
+{
+	INVALID_DB_SKIP,			/* skip them, don't upgrade them (default) */
+	INVALID_DB_ERROR,			/* report them and abort the upgrade */
+} invalidDbMode;
+
+/*
  * Enumeration to denote pg_log modes
  */
 typedef enum
@@ -325,6 +334,7 @@ typedef struct
 	int			char_signedness;	/* default char signedness: -1 for initial
 									 * value, 1 for "signed" and 0 for
 									 * "unsigned" */
+	invalidDbMode invalid_db_mode;	/* how to treat invalid databases */
 } UserOpts;
 
 typedef struct

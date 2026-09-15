@@ -423,6 +423,8 @@ get_db_infos(ClusterInfo *cluster)
 			 " LEFT OUTER JOIN pg_catalog.pg_tablespace t "
 			 " ON d.dattablespace = t.oid "
 			 "WHERE d.datallowconn = true "
+	/* skip invalid databases, whose DROP DATABASE was interrupted */
+			 "  AND d.datconnlimit <> -2 "
 			 "ORDER BY 1");
 
 	res = executeQueryOrDie(conn, "%s", query);
