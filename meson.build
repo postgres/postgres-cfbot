@@ -2203,6 +2203,7 @@ unroll_loops_cflags = cc.get_supported_arguments(['-funroll-loops'])
 
 common_warning_flags = [
   '-Wpointer-arith',
+  '-Wcast-qual',
   # Really don't want VLAs to be used in our dialect of C
   '-Werror=vla',
   # On macOS, complain about usage of symbols newer than the deployment target
