@@ -58,6 +58,7 @@ tests += {
       'wait_cleanup',
       'heap_lock_update',
       'on_conflict_probe_window',
+      'multixact-aborted-updater',
     ],
     'runningcheck': false, # see syscache-update-pruned
     # Some tests wait for all snapshots, so avoid parallel execution
