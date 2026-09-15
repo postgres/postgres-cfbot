@@ -1,0 +1,7 @@
+# Generated header
+/pg_stat_log_errcodes.h
+
+# Generated subdirectories
+/log/
+/results/
+/tmp_check/
