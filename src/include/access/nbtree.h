@@ -832,6 +832,7 @@ typedef struct BTInsertStateData
 	 * _bt_findinsertloc for details.
 	 */
 	bool		bounds_valid;
+	bool		is_duplicate;
 	OffsetNumber low;
 	OffsetNumber stricthigh;
 

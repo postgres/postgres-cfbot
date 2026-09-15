@@ -33,7 +33,7 @@ static Buffer _bt_moveright(Relation rel, Relation heaprel, BTScanInsert key,
 							Buffer buf, bool forupdate, BTStack stack,
 							int access);
 static OffsetNumber _bt_binsrch(Relation rel, BTScanInsert key, Buffer buf);
-static int	_bt_binsrch_posting(BTScanInsert key, Page page,
+static int	_bt_binsrch_posting(BTInsertState insertstate, Page page,
 								OffsetNumber offnum);
 static inline void _bt_returnitem(IndexScanDesc scan, BTScanOpaque so);
 static bool _bt_steppage(IndexScanDesc scan, ScanDirection dir);
@@ -482,8 +482,7 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 	OffsetNumber low,
 				high,
 				stricthigh;
-	int32		result,
-				cmpval;
+	int32		result;
 
 	page = BufferGetPage(insertstate->buf);
 	opaque = BTPageGetOpaque(page);
@@ -491,6 +490,7 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 	Assert(P_ISLEAF(opaque));
 	Assert(!key->nextkey);
 	Assert(insertstate->postingoff == 0);
+	insertstate->is_duplicate = false;
 
 	if (!insertstate->bounds_valid)
 	{
@@ -529,8 +529,6 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 		high++;					/* establish the loop invariant for high */
 	stricthigh = high;			/* high initially strictly higher */
 
-	cmpval = 1;					/* !nextkey comparison value */
-
 	while (high > low)
 	{
 		OffsetNumber mid = low + ((high - low) / 2);
@@ -539,7 +537,7 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 
 		result = _bt_compare(rel, key, page, mid);
 
-		if (result >= cmpval)
+		if (result > 0)
 			low = mid + 1;
 		else
 		{
@@ -547,7 +545,6 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 			if (result != 0)
 				stricthigh = high;
 		}
-
 		/*
 		 * If tuple at offset located by binary search is a posting list whose
 		 * TID range overlaps with caller's scantid, perform posting list
@@ -572,7 +569,7 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 										 BufferGetBlockNumber(insertstate->buf),
 										 RelationGetRelationName(rel))));
 
-			insertstate->postingoff = _bt_binsrch_posting(key, page, mid);
+			insertstate->postingoff = _bt_binsrch_posting(insertstate, page, mid);
 		}
 	}
 
@@ -602,8 +599,9 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
  *----------
  */
 static int
-_bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
+_bt_binsrch_posting(BTInsertState insertstate, Page page, OffsetNumber offnum)
 {
+	BTScanInsert key = insertstate->itup_key;
 	IndexTuple	itup;
 	ItemId		itemid;
 	int			low,
@@ -624,7 +622,17 @@ _bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
 	itemid = PageGetItemId(page, offnum);
 	itup = (IndexTuple) PageGetItem(page, itemid);
 	if (!BTreeTupleIsPosting(itup))
+	{
+		/*
+		 * Let K be the tuple (scankey, tid) being inserted.
+		 * For this search there is is at least one tuple x such that
+		 * L <= x <= K <= H
+		 * Since itup is not a posting list, the search space shrinks
+		 * to L = H, forcing x = K.
+		 */
+		insertstate->is_duplicate = true;
 		return 0;
+	}
 
 	Assert(key->heapkeyspace && key->allequalimage);
 
@@ -653,7 +661,10 @@ _bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
 		else if (res < 0)
 			high = mid;
 		else
+		{
+			insertstate->is_duplicate = true;
 			return mid;
+		}
 	}
 
 	/* Exact match not found */
