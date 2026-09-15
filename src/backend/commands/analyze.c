@@ -2481,6 +2481,8 @@ compute_scalar_stats(VacAttrStatsP stats,
 	int			values_cnt = 0;
 	int		   *tupnoLink;
 	ScalarMCVItem *track;
+	ScalarMCVItem *track_sorted_values; /* tracks values sorted by
+										 * compare_scalars() */
 	int			track_cnt = 0;
 	int			num_mcv = stats->attstattarget;
 	int			num_bins = stats->attstattarget;
@@ -2489,6 +2491,7 @@ compute_scalar_stats(VacAttrStatsP stats,
 	values = palloc_array(ScalarItem, samplerows);
 	tupnoLink = palloc_array(int, samplerows);
 	track = palloc_array(ScalarMCVItem, num_mcv);
+	track_sorted_values = palloc_array(ScalarMCVItem, num_mcv);
 
 	memset(&ssup, 0, sizeof(ssup));
 	ssup.ssup_cxt = CurrentMemoryContext;
@@ -2633,6 +2636,9 @@ compute_scalar_stats(VacAttrStatsP stats,
 						}
 						track[j].count = dups_cnt;
 						track[j].first = i + 1 - dups_cnt;
+						track_sorted_values[track_cnt - 1].count = dups_cnt;
+						track_sorted_values[track_cnt - 1].first = i + 1 - dups_cnt;
+
 					}
 				}
 				dups_cnt = 0;
@@ -2776,10 +2782,11 @@ compute_scalar_stats(VacAttrStatsP stats,
 			mcv_freqs = palloc_array(float4, num_mcv);
 			for (i = 0; i < num_mcv; i++)
 			{
-				mcv_values[i] = datumCopy(values[track[i].first].value,
+				/* copy in value order */
+				mcv_values[i] = datumCopy(values[track_sorted_values[i].first].value,
 										  stats->attrtype->typbyval,
 										  stats->attrtype->typlen);
-				mcv_freqs[i] = (double) track[i].count / (double) samplerows;
+				mcv_freqs[i] = (double) track_sorted_values[i].count / (double) samplerows;
 			}
 			MemoryContextSwitchTo(old_context);
 
