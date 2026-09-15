@@ -46,6 +46,39 @@
 bool		Trace_connection_negotiation = false;
 uint32		log_connections = 0;
 char	   *log_connections_string = NULL;
+uint32		expose_information = 0;
+char	   *expose_information_string = NULL;
+
+/* Expose information bitmap */
+#define EXPOSE_INFO_ROLE	 1
+#define EXPOSE_INFO_SYSID	 2
+#define EXPOSE_INFO_VERSION  4
+
+#define EXPOSE_MIN_QUERY 10		/* Shortest possible line: "GET /sysid" */
+#define EXPOSE_MAX_QUERY 16		/* Longest possible GET line */
+
+#define EXPOSE_SEND_TIMEOUT_MS 2000 /* Maximum time to wait for clients to
+									 * read info (milliseconds) */
+#define EXPOSE_SEND_RETRY_SLEEP_US 10000	/* How long to sleep between
+											 * send() calls (microseconds) */
+
+typedef enum
+{
+	EXPOSE_TYPE_NOTHING,
+	EXPOSE_TYPE_HEAD_REPLICA,
+	EXPOSE_TYPE_GET_REPLICA,
+	EXPOSE_TYPE_HEAD_PRIMARY,
+	EXPOSE_TYPE_GET_PRIMARY,
+	EXPOSE_TYPE_GET_SYSID,
+	EXPOSE_TYPE_GET_VERSION,
+}			ExposeReturnType;
+
+typedef struct
+{
+	const char *endpoint;
+	int			require;
+	ExposeReturnType type;
+}			ExposeEndpointAction;
 
 /* Other globals */
 
@@ -65,6 +98,7 @@ static void SendNegotiateProtocolVersion(List *unrecognized_protocol_options);
 static void process_startup_packet_die(SIGNAL_ARGS);
 static void StartupPacketTimeoutHandler(void);
 static bool validate_log_connections_options(List *elemlist, uint32 *flags);
+static bool ExposeInformation(pgsocket fd);
 
 /*
  * Entry point for a new backend process.
@@ -147,6 +181,15 @@ BackendInitialize(ClientSocket *client_sock, CAC_state cac)
 	char		remote_port[NI_MAXSERV];
 	StringInfoData ps_data;
 	MemoryContext oldcontext;
+
+	/*
+	 * Scan for a simple GET / HEAD request. If this is detected and handled,
+	 * we are done and can immediately exit.
+	 */
+	if ((expose_information > 0)
+		&& ExposeInformation(client_sock->sock))
+		_exit(0);				/* Safe to use exit: no state or resources
+								 * created yet */
 
 	/* Tell fd.c about the long-lived FD associated with the client_sock */
 	ReserveExternalFD();
@@ -1109,6 +1152,72 @@ next:	;
 
 
 /*
+ * GUC check_hook for expose_information
+ */
+bool
+check_expose_information(char **newval, void **extra, GucSource source)
+{
+	char	   *rawstring;
+	List	   *elemlist;
+	ListCell   *l;
+	int			newexpose = 0;
+	int		   *myextra;
+
+	/* Need a modifiable copy of string */
+	rawstring = pstrdup(*newval);
+
+	/* Parse string into list of identifiers */
+	if (!SplitIdentifierString(rawstring, ',', &elemlist))
+	{
+		/* syntax error in list */
+		GUC_check_errdetail("List syntax is invalid.");
+		pfree(rawstring);
+		list_free(elemlist);
+		return false;
+	}
+
+	foreach(l, elemlist)
+	{
+		char	   *tok = (char *) lfirst(l);
+
+		if (pg_strcasecmp(tok, "role") == 0)
+			newexpose |= EXPOSE_INFO_ROLE;
+		else if (pg_strcasecmp(tok, "sysid") == 0)
+			newexpose |= EXPOSE_INFO_SYSID;
+		else if (pg_strcasecmp(tok, "version") == 0)
+			newexpose |= EXPOSE_INFO_VERSION;
+		else
+		{
+			GUC_check_errdetail("Unrecognized key word: \"%s\".", tok);
+			pfree(rawstring);
+			list_free(elemlist);
+			return false;
+		}
+	}
+
+	pfree(rawstring);
+	list_free(elemlist);
+
+	myextra = (int *) guc_malloc(LOG, sizeof(int));
+	if (!myextra)
+		return false;
+	*myextra = newexpose;
+	*extra = myextra;
+
+	return true;
+}
+
+/*
+ * GUC assign_hook for expose_information
+ */
+void
+assign_expose_information(const char *newval, void *extra)
+{
+	expose_information = *((int *) extra);
+}
+
+
+/*
  * GUC check hook for log_connections
  */
 bool
@@ -1159,4 +1268,229 @@ void
 assign_log_connections(const char *newval, void *extra)
 {
 	log_connections = *((int *) extra);
+}
+
+/*
+ * ExposeInformation
+ *
+ * Handle early socket probe before full backend startup.
+ * Responds to small set of predefined endpoints (e.g. GET /replica)
+ *
+ * Requires the expose_information GUC to be non-empty
+ *
+ * Returns true if any endpoint is recognized.
+ */
+
+static bool
+ExposeInformation(pgsocket fd)
+{
+	ssize_t		n;
+	char		buf[EXPOSE_MAX_QUERY + 1];
+	ExposeReturnType type;
+	bool		result = false;
+#ifdef WIN32
+	int			save_win32_noblock = pgwin32_noblock;
+#endif
+
+	/* Matching string, required setting, type of response */
+	static const ExposeEndpointAction endpoint_actions[] =
+	{
+		{
+			"HEAD /replica", EXPOSE_INFO_ROLE, EXPOSE_TYPE_HEAD_REPLICA
+		},
+		{
+			"GET /replica", EXPOSE_INFO_ROLE, EXPOSE_TYPE_GET_REPLICA
+		},
+		{
+			"HEAD /primary", EXPOSE_INFO_ROLE, EXPOSE_TYPE_HEAD_PRIMARY
+		},
+		{
+			"GET /primary", EXPOSE_INFO_ROLE, EXPOSE_TYPE_GET_PRIMARY
+		},
+		{
+			"GET /sysid", EXPOSE_INFO_SYSID, EXPOSE_TYPE_GET_SYSID
+		},
+		{
+			"GET /version", EXPOSE_INFO_VERSION, EXPOSE_TYPE_GET_VERSION
+		},
+	};
+
+	Assert(expose_information > 0);
+
+#ifdef WIN32
+	pgwin32_noblock = true;
+#else
+	if (!pg_set_noblock(fd))
+		goto cleanup;
+#endif
+
+	do
+	{
+		n = recv(fd, buf, EXPOSE_MAX_QUERY, MSG_PEEK);
+	} while (n < 0 && errno == EINTR);
+
+	/*
+	 * If there was a problem (n == -1), or the input is too short, we simply
+	 * leave and let the normal flow continue.
+	 */
+	if (n < EXPOSE_MIN_QUERY)
+		goto cleanup;
+
+	buf[n] = '\0';
+
+	type = EXPOSE_TYPE_NOTHING;
+	for (int i = 0; i < lengthof(endpoint_actions); i++)
+	{
+		size_t		endpoint_len = strlen(endpoint_actions[i].endpoint);
+
+		if (
+			(expose_information & endpoint_actions[i].require)
+			&&
+			strncmp(buf, endpoint_actions[i].endpoint, endpoint_len) == 0
+			&&
+			(buf[endpoint_len] == ' ' || buf[endpoint_len] == '\r' || buf[endpoint_len] == '\0')
+			)
+		{
+			type = endpoint_actions[i].type;
+			break;
+		}
+	}
+	if (type == EXPOSE_TYPE_NOTHING)
+		goto cleanup;
+
+	/* From this point onwards, we return true, as we have found a match */
+	result = true;
+
+	{
+		static const char http_version[] = "HTTP/1.1";
+		static const char http_type[] = "Content-Type: text/plain";
+		static const char http_conn[] = "Connection: close";
+		static const char http_len[] = "Content-Length";
+
+		/* Total bytes of above: 8 + 24 + 17 + 14 = 63 bytes */
+
+		StringInfoData msg;
+
+		TimestampTz start_time = 0;
+		size_t		sent = 0;
+		bool		send_failed = false;
+
+		if (type == EXPOSE_TYPE_HEAD_REPLICA || type == EXPOSE_TYPE_HEAD_PRIMARY)
+		{
+			/*
+			 * Caller only cares about the HTTP response code, so no content
+			 * needed
+			 */
+
+			bool		recovery_in_progress = RecoveryInProgress();
+
+			initStringInfoExt(&msg, 90);
+
+			appendStringInfo(&msg,
+							 "%s %s\r\n"
+							 "%s\r\n"
+							 "%s\r\n\r\n",
+							 http_version,
+							 (((recovery_in_progress && type == EXPOSE_TYPE_HEAD_REPLICA)
+							   || (!recovery_in_progress && type == EXPOSE_TYPE_HEAD_PRIMARY))
+							  ? "200 OK" : "503 Service Unavailable"),
+							 http_type,
+							 http_conn
+				);
+		}
+		else
+		{
+			StringInfoData content;
+
+			initStringInfoExt(&content, MAXINT8LEN + 3);
+
+			switch (type)
+			{
+
+				case EXPOSE_TYPE_GET_SYSID:
+					appendStringInfo(&content, UINT64_FORMAT "\r\n",
+									 GetSystemIdentifier());
+					break;
+				case EXPOSE_TYPE_GET_VERSION:
+					appendStringInfo(&content, "%d\r\n",
+									 PG_VERSION_NUM);
+					break;
+				case EXPOSE_TYPE_GET_REPLICA:
+					appendStringInfo(&content, "%d\r\n",
+									 RecoveryInProgress() ? 1 : 0);
+					break;
+				case EXPOSE_TYPE_GET_PRIMARY:
+					appendStringInfo(&content, "%d\r\n",
+									 RecoveryInProgress() ? 0 : 1);
+					break;
+				default:
+					elog(ERROR, "unrecognized ExposeReturnType: %d", (int) type);
+			}
+
+			initStringInfoExt(&msg, 128);
+			appendStringInfo(&msg,
+							 "%s 200 OK\r\n"
+							 "%s\r\n"
+							 "%s: %d\r\n"
+							 "%s\r\n\r\n"
+							 "%s",
+							 http_version,
+							 http_type,
+							 http_len, content.len,
+							 http_conn,
+							 content.data
+				);
+
+			pfree(content.data);
+		}
+
+		/*
+		 * Send the response. As this is at an early and important point, we
+		 * want to quickly close the connection if the client stops reading,
+		 * so we add a timeout.
+		 */
+
+		while (sent < (size_t) msg.len && !send_failed)
+		{
+
+			n = send(fd, msg.data + sent, msg.len - sent, 0);
+
+			if (n > 0)
+			{
+				sent += n;
+				continue;
+			}
+
+			/* While n==0 should not happen, we treat as a retry as well */
+			if (n == 0 ||
+				(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)))
+			{
+				if (start_time == 0)
+					start_time = GetCurrentTimestamp();
+				else if (TimestampDifferenceExceeds(start_time, GetCurrentTimestamp(),
+													EXPOSE_SEND_TIMEOUT_MS))
+					send_failed = true;
+				else
+					pg_usleep(EXPOSE_SEND_RETRY_SLEEP_US);
+
+				continue;
+			}
+
+			/* The send() call failed in some way we cannot handle */
+			elog(LOG, "failed to send information to client: %m");
+			send_failed = true;
+
+		}
+
+		pfree(msg.data);
+
+	}
+
+cleanup:
+#ifdef WIN32
+	pgwin32_noblock = save_win32_noblock;
+#else
+	(void) pg_set_block(fd);
+#endif
+	return result;
 }
