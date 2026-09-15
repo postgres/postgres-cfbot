@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
@@ -38,6 +39,7 @@
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
+#include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/checksum.h"
 #include "storage/dsm_impl.h"
@@ -106,6 +108,13 @@ static off_t read_file_data_into_buffer(bbsink *sink,
 										BlockNumber blkno,
 										bool verify_checksum,
 										int *checksum_failures);
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+static void prefetch_next_incremental_run(int fd,
+										  BlockNumber *incremental_blocks,
+										  unsigned num_incremental_blocks,
+										  unsigned max_run_len,
+										  unsigned *prefetch_idx);
+#endif
 static void push_to_sink(bbsink *sink, pg_checksum_context *checksum_ctx,
 						 size_t *bytes_done, void *data, size_t length);
 static bool backup_checksums_verifiable(XLogRecPtr start_lsn);
@@ -1591,7 +1600,11 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 	pgoff_t		bytes_done = 0;
 	bool		verify_checksum = false;
 	pg_checksum_context checksum_ctx;
-	int			ibindex = 0;
+	unsigned	ibindex = 0;
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+	unsigned	prefetch_idx = 0;
+	unsigned	prefetch_window_size = maintenance_io_concurrency;
+#endif
 
 	if (pg_checksum_init(&checksum_ctx, manifest->checksum_type) < 0)
 		elog(ERROR, "could not initialize checksum of file \"%s\"",
@@ -1606,6 +1619,36 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", readfilename)));
 	}
+
+	/*
+	 * On full backups, let the OS know that we are going to read the whole file.
+	 * It's just an hint, but it helps avoid longer synchronous read stalls.
+	 */
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_SEQUENTIAL)
+	if (incremental_blocks == NULL)
+		(void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+
+	/*
+	 * On incremental backups, let the OS know the exact blocks we'll need.
+	 * For that, maintain a bounded window of readahead hints, sized by
+	 * maintenance_io_concurrency: we keep at least N runs fadvised ahead
+	 * of what we're currently reading (N = maintenance_io_concurrency),
+	 * which increases I/O concurrency.
+	 *
+	 * Initially, advance the window by triggering prefetch_window_size runs.
+	*/
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+	if (incremental_blocks != NULL && prefetch_window_size > 1)
+	{
+		int			initial_prefetch = prefetch_window_size;
+
+		while (initial_prefetch-- > 0 && prefetch_idx < num_incremental_blocks)
+			prefetch_next_incremental_run(fd, incremental_blocks,
+										  num_incremental_blocks,
+										  prefetch_window_size, &prefetch_idx);
+	}
+#endif
 
 	_tarWriteHeader(sink, tarfilename, NULL, statbuf, false);
 
@@ -1730,12 +1773,22 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 			 * supposed to include.
 			 */
 			relative_blkno = incremental_blocks[ibindex++];
+
 			cnt = read_file_data_into_buffer(sink, readfilename, fd,
 											 relative_blkno * BLCKSZ,
 											 BLCKSZ,
 											 relative_blkno + segno * RELSEG_SIZE,
 											 verify_checksum,
 											 &checksum_failures);
+
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+			/* Advance the prefetch window by prefetching another run */
+			if (prefetch_window_size > 1 && prefetch_idx < num_incremental_blocks)
+				prefetch_next_incremental_run(fd, incremental_blocks,
+											  num_incremental_blocks,
+											  prefetch_window_size,
+											  &prefetch_idx);
+#endif
 
 			/*
 			 * If we get a partial read, that must mean that the relation is
@@ -1839,6 +1892,45 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 
 	return true;
 }
+
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+
+/*
+ * Prefetch the next run of blocks of a file that will be needed soon.
+ *
+ * Advance *prefetch_idx past the next run of block numbers in incremental_blocks
+ * and issue a single readahead hint covering that whole run. This is advisory only:
+ * posix_fadvise() failures are ignored, since the worst that happens is that we
+ * don't get the intended prefetching benefit.
+ *
+ * Note that a "run" does not mean a "block": contiguous blocks are merged into
+ * the same run (up to max_run_len blocks) and fadvised altogether.
+ */
+static void
+prefetch_next_incremental_run(int fd, BlockNumber *incremental_blocks,
+							  unsigned num_incremental_blocks,
+							  unsigned max_run_len,
+							  unsigned *prefetch_idx)
+{
+	BlockNumber run_start = incremental_blocks[(*prefetch_idx)++];
+	unsigned	run_len = 1;
+
+	/*
+	 * Merge contiguous blocks into a single run, up to max_run_len
+	 */
+	while (run_len < max_run_len &&
+		   *prefetch_idx < num_incremental_blocks &&
+		   incremental_blocks[*prefetch_idx] == run_start + run_len)
+	{
+		run_len++;
+		(*prefetch_idx)++;
+	}
+
+	(void) posix_fadvise(fd, (off_t) run_start * BLCKSZ,
+						 (off_t) run_len * BLCKSZ,
+						 POSIX_FADV_WILLNEED);
+}
+#endif
 
 /*
  * Read some more data from the file into the bbsink's buffer, verifying
