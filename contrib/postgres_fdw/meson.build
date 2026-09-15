@@ -38,6 +38,7 @@ tests += {
   'regress': {
     'sql': [
       'postgres_fdw',
+      'remote_plans_formats',
       'query_cancel',
     ],
     'regress_args': ['--dlpath', meson.project_build_root() / 'src/test/regress'],
