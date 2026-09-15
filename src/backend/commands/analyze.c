@@ -74,6 +74,8 @@ int			default_statistics_target = 100;
 static MemoryContext anl_context = NULL;
 static BufferAccessStrategy vac_strategy;
 
+/* Hook for plugins to acquire sample rows for ANALYZE */
+AcquireSampleRowsFunc_hook_type AcquireSampleRowsFunc_hook = NULL;
 
 static void do_analyze_rel(Relation onerel,
 						   const VacuumParams *params, List *va_cols,
@@ -213,8 +215,15 @@ analyze_rel(Oid relid, RangeVar *relation,
 	if (onerel->rd_rel->relkind == RELKIND_RELATION ||
 		onerel->rd_rel->relkind == RELKIND_MATVIEW)
 	{
-		/* Regular table, so we'll use the regular row acquisition function */
-		acquirefunc = acquire_sample_rows;
+		/*
+		 * Regular table, so we'll use the regular row acquisition function.
+		 * If a plugin has registered a hook to acquire sample rows, use it;
+		 * otherwise use the default function.
+		 */
+		if (AcquireSampleRowsFunc_hook)
+			acquirefunc = AcquireSampleRowsFunc_hook;
+		else
+			acquirefunc = acquire_sample_rows;
 		/* Also get regular table's size */
 		relpages = RelationGetNumberOfBlocks(onerel);
 	}
@@ -1529,8 +1538,15 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 		if (childrel->rd_rel->relkind == RELKIND_RELATION ||
 			childrel->rd_rel->relkind == RELKIND_MATVIEW)
 		{
-			/* Regular table, so use the regular row acquisition function */
-			acquirefunc = acquire_sample_rows;
+			/*
+			 * Regular table, so use the regular row acquisition function.
+			 * If a plugin has registered a hook to acquire sample rows, use it;
+			 * otherwise use the default function.
+			 */
+			if (AcquireSampleRowsFunc_hook)
+				acquirefunc = AcquireSampleRowsFunc_hook;
+			else
+				acquirefunc = acquire_sample_rows;
 			relpages = RelationGetNumberOfBlocks(childrel);
 		}
 		else if (childrel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
