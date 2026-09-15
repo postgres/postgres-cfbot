@@ -3752,7 +3752,7 @@ include_dir 'conf.d'
         but any positive value less than <literal>32kB</literal> will be
         treated as <literal>32kB</literal>.
         If this value is specified without units, it is taken as WAL blocks,
-        that is <symbol>XLOG_BLCKSZ</symbol> bytes, typically 8kB.
+        that is <symbol>XLOG_BLCKSZ</symbol> bytes, typically 4kB.
         This parameter can only be set at server start.
        </para>
 
@@ -3812,7 +3812,7 @@ include_dir 'conf.d'
         flushed to disk.  If <varname>wal_writer_flush_after</varname> is set
         to <literal>0</literal> then WAL data is always flushed immediately.
         If this value is specified without units, it is taken as WAL blocks,
-        that is <symbol>XLOG_BLCKSZ</symbol> bytes, typically 8kB.
+        that is <symbol>XLOG_BLCKSZ</symbol> bytes, typically 4kB.
         The default is <literal>1MB</literal>.
         This parameter can only be set in the
         <filename>postgresql.conf</filename> file or on the server command line.
@@ -12696,7 +12696,7 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
        <para>
         Reports the size of a WAL disk block.  It is determined by the value
         of <literal>XLOG_BLCKSZ</literal> when building the server. The default value
-        is 8192 bytes.
+        is 4096 bytes.
        </para>
       </listitem>
      </varlistentry>
