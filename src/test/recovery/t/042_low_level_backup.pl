@@ -165,4 +165,12 @@ ok( $node_replica->log_contains(
 		'FATAL: .*could not locate required checkpoint record at'),
 	'ends with FATAL for missing required checkpoint record');
 
+# A low-level backup copies pg_control from the running cluster, so it does not
+# require backup_label and the hint still offers removing the file as a way to
+# recover a cluster that is not being restored from a backup.  Backups made
+# with pg_basebackup do require it and get a different hint; see
+# 057_backup_label_required.pl.
+ok($node_replica->log_contains('try removing the file .*backup_label'),
+	'hint offers removing backup_label when it is not required');
+
 done_testing();
