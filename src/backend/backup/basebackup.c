@@ -324,6 +324,9 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 			state.bytes_total_is_valid = true;
 		}
 
+		/* Allow tests to wait before the client receives the startpoint. */
+		INJECTION_POINT("basebackup-before-send-startpoint", NULL);
+
 		/* notify basebackup sink about start of backup */
 		bbsink_begin_backup(sink, &state, SINK_BUFFER_LENGTH);
 
