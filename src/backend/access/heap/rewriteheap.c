@@ -1104,13 +1104,13 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 	 * Truncate all data that's not guaranteed to have been safely fsynced (by
 	 * previous record or by the last checkpoint).
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE);
 	if (ftruncate(fd, xlrec->offset) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not truncate file \"%s\" to %lld: %m",
 						path, (long long int) xlrec->offset)));
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	data = XLogRecGetData(r) + sizeof(*xlrec);
 
@@ -1118,7 +1118,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 
 	/* write out tail end of mapping file (again) */
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
 	if (pg_pwrite(fd, data, len, xlrec->offset) != len)
 	{
 		/* if write didn't set errno, assume problem is no disk space */
@@ -1128,19 +1128,19 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", path)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/*
 	 * Now fsync all previously written data. We could improve things and only
 	 * do this for the last write to a file, but the required bookkeeping
 	 * doesn't seem worth the trouble.
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC);
 	if (pg_fsync(fd) != 0)
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", path)));
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 		ereport(ERROR,
@@ -1240,12 +1240,12 @@ CheckPointLogicalRewriteHeap(void)
 			 * changed or have only been created since the checkpoint's start,
 			 * but it's currently not deemed worth the effort.
 			 */
-			pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC);
+			pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC);
 			if (pg_fsync(fd) != 0)
 				ereport(data_sync_elevel(ERROR),
 						(errcode_for_file_access(),
 						 errmsg("could not fsync file \"%s\": %m", path)));
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 
 			if (CloseTransientFile(fd) != 0)
 				ereport(ERROR,

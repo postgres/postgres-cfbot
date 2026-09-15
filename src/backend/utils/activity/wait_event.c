@@ -40,6 +40,10 @@ static const char *pgstat_get_wait_io(WaitEventIO w);
 static uint32 local_my_wait_event_info;
 uint32	   *my_wait_event_info = &local_my_wait_event_info;
 
+wait_event_hook_type wait_event_begin_hook = NULL;
+wait_event_hook_type wait_event_end_hook = NULL;
+int			wait_event_hook_depth = 0;
+
 #define WAIT_EVENT_CLASS_MASK	0xFF000000
 #define WAIT_EVENT_ID_MASK		0x0000FFFF
 
