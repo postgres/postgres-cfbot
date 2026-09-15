@@ -61,6 +61,16 @@ PostgreSQL documentation
   </para>
 
   <para>
+   The copy of <filename>pg_control</filename> stored in the backup is flagged
+   to require the <filename>backup_label</filename> file for recovery. If
+   <filename>backup_label</filename> is removed, recovery refuses to start
+   rather than silently producing an inconsistent cluster. The flag is cleared
+   automatically once recovery has read <filename>backup_label</filename>;
+   <xref linkend="app-pgresetwal"/> is the only way to clear it otherwise, and
+   doing so on a backup that has not been recovered will corrupt it.
+  </para>
+
+  <para>
    The backup is made over a regular <productname>PostgreSQL</productname>
    connection that uses the replication protocol. The connection must be made
    with a user ID that has <literal>REPLICATION</literal> permissions
