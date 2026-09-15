@@ -436,6 +436,15 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 	int			one = 1;
 #endif
 
+#ifndef IPPROTO_MPTCP
+	if (ListenMPTCP)
+	{
+		ereport(WARNING,
+				(errmsg("setting the MPTCP listening socket is not supported on this platform")));
+		return STATUS_ERROR;
+	}
+#endif
+
 	/* Initialize hint structure */
 	MemSet(&hint, 0, sizeof(hint));
 	hint.ai_family = family;
@@ -485,6 +494,8 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 
 	for (addr = addrs; addr; addr = addr->ai_next)
 	{
+		int			ipprotocol = 0;
+
 		if (family != AF_UNIX && addr->ai_family == AF_UNIX)
 		{
 			/*
@@ -536,7 +547,14 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 			addrDesc = addrBuf;
 		}
 
-		if ((fd = socket(addr->ai_family, SOCK_STREAM, 0)) == PGINVALID_SOCKET)
+		/*
+		 * enable MPTCP only on IP and IPv6 sockets and not for UNIX domain
+		 * sockets
+		 */
+		if (addr->ai_family != AF_UNIX)
+			ipprotocol = ListenMPTCP ? IPPROTO_MPTCP : 0;
+
+		if ((fd = socket(addr->ai_family, SOCK_STREAM, ipprotocol)) == PGINVALID_SOCKET)
 		{
 			ereport(LOG,
 					(errcode_for_socket_access(),

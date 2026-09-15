@@ -59,7 +59,7 @@
  * NB: The buffer size is required to be a multiple of the system block
  * size, so use that value instead if it's bigger than our preference.
  */
-#define SINK_BUFFER_LENGTH			Max(32768, BLCKSZ)
+#define SINK_BUFFER_LENGTH			Max(256 * 1024, BLCKSZ)
 
 typedef struct
 {
@@ -1606,6 +1606,14 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", readfilename)));
 	}
+
+	/*
+	 * Let the OS know that we are going to read the whole file. It's just an
+	 * hint, but it helps avoid longer synchronous read stalls.
+	 */
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_SEQUENTIAL)
+	(void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
 
 	_tarWriteHeader(sink, tarfilename, NULL, statbuf, false);
 
