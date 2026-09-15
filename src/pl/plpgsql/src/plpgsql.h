@@ -299,6 +299,7 @@ typedef struct PLpgSQL_datum
 {
 	PLpgSQL_datum_type dtype;
 	int			dno;
+	char	   *refname;
 } PLpgSQL_datum;
 
 /*
@@ -444,9 +445,9 @@ typedef struct PLpgSQL_recfield
 {
 	PLpgSQL_datum_type dtype;
 	int			dno;
+	char	   *fieldname;		/* name of field */
 	/* end of PLpgSQL_datum fields */
 
-	char	   *fieldname;		/* name of field */
 	int			recparentno;	/* dno of parent record */
 	int			nextfield;		/* dno of next child, or -1 if none */
 	uint64		rectupledescid; /* record's tupledesc ID as of last lookup */
