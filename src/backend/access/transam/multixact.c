@@ -2996,19 +2996,31 @@ multixact_redo(XLogReaderState *record)
 }
 
 /*
- * Entrypoint for sync.c to sync offsets files.
+ * Entrypoints for sync.c to sync and reopen offsets files.
  */
-int
-multixactoffsetssyncfiletag(const FileTag *ftag, char *path)
+void
+multixactoffsetssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(MultiXactOffsetCtl, ftag, path);
+	SlruSyncFileTag(MultiXactOffsetCtl, ioh, entry);
+}
+
+int
+multixactoffsetsopenfiletag(const FileTag *ftag)
+{
+	return SlruOpenFileTag(MultiXactOffsetCtl, ftag);
 }
 
 /*
- * Entrypoint for sync.c to sync members files.
+ * Entrypoints for sync.c to sync and reopen members files.
  */
-int
-multixactmemberssyncfiletag(const FileTag *ftag, char *path)
+void
+multixactmemberssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(MultiXactMemberCtl, ftag, path);
+	SlruSyncFileTag(MultiXactMemberCtl, ioh, entry);
+}
+
+int
+multixactmembersopenfiletag(const FileTag *ftag)
+{
+	return SlruOpenFileTag(MultiXactMemberCtl, ftag);
 }

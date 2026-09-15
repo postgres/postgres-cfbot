@@ -26,7 +26,9 @@
 #include "pgstat.h"
 #include "portability/instr_time.h"
 #include "postmaster/bgwriter.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
+#include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/md.h"
 #include "utils/hsearch.h"
@@ -54,11 +56,22 @@
  */
 typedef uint16 CycleCtr;		/* can be any convenient integer size */
 
-typedef struct
+typedef struct PendingFsyncEntry
 {
 	FileTag		tag;			/* identifies handler and file */
 	CycleCtr	cycle_ctr;		/* sync_cycle_ctr of oldest request */
 	bool		canceled;		/* canceled is true if we canceled "recently" */
+
+	/*
+	 * Set when a request arrives for a tag that already has an entry, and
+	 * cleared whenever an fsync for it is started.  If it is set once that
+	 * fsync completes, the request came in while the fsync was in flight, so
+	 * the fsync cannot be assumed to have covered it.
+	 */
+	bool		re_requested;
+
+	/* fsync is done, pending hash-table bookkeeping */
+	bool		sync_completed;
 } PendingFsyncEntry;
 
 typedef struct
@@ -68,9 +81,43 @@ typedef struct
 	bool		canceled;		/* true if request has been canceled */
 } PendingUnlinkEntry;
 
+/*
+ * Transient state used while processing a batch of fsync requests.  A single
+ * SyncState instance lives on the stack of ProcessSyncRequests() so that no
+ * partial state survives across calls.
+ */
+typedef struct SyncState
+{
+	dlist_head	inflight;		/* InflightSyncEntry being fsync'd right now */
+	dlist_head	retry;			/* InflightSyncEntry to be retried */
+	int			inflight_count; /* number of entries in "inflight" */
+	int			max_inflight;	/* max number of concurrent fsyncs */
+	int			absorb_counter;
+
+	/* stats */
+	int			processed;
+	instr_time	longest;
+	instr_time	total_elapsed;
+} SyncState;
+
 static HTAB *pendingOps = NULL;
 static List *pendingUnlinks = NIL;
 static MemoryContext pendingOpsCxt; /* context for the above  */
+
+/*
+ * Context for the InflightSyncEntry structs allocated while a batch of fsync
+ * requests is being processed.  It is kept separate from pendingOpsCxt (which
+ * must survive for the lifetime of the process, as it holds pendingOps
+ * itself), so that it can be reset between batches.
+ */
+static MemoryContext inflightSyncCxt;
+
+/*
+ * All InflightSyncEntry structs that have not yet been freed.  Unlike the
+ * lists in SyncState, this survives an error so that handler-owned files can
+ * be closed before their entries are discarded.
+ */
+static dlist_head activeSyncEntries = DLIST_STATIC_INIT(activeSyncEntries);
 
 static CycleCtr sync_cycle_ctr = 0;
 static CycleCtr checkpoint_cycle_ctr = 0;
@@ -84,10 +131,20 @@ static CycleCtr checkpoint_cycle_ctr = 0;
  */
 typedef struct SyncOps
 {
-	int			(*sync_syncfiletag) (const FileTag *ftag, char *path);
+	void		(*sync_syncfiletag) (PgAioHandle *ioh, InflightSyncEntry *entry);
+
+	/*
+	 * Optional.  Reopen the file identified by ftag, so that an fsync started
+	 * by sync_syncfiletag() can be executed in a different process, e.g. an
+	 * IO worker.  Returns a file descriptor opened with OpenTransientFile(),
+	 * or -1 with errno set.  Handlers that provide this must use the
+	 * PGAIO_TID_SYNC_FILETAG target (see pgaio_io_set_target_sync_filetag()).
+	 */
+	int			(*sync_openfiletag) (const FileTag *ftag);
 	int			(*sync_unlinkfiletag) (const FileTag *ftag, char *path);
 	bool		(*sync_filetagmatches) (const FileTag *ftag,
 										const FileTag *candidate);
+	const char *sync_target_name;
 } SyncOps;
 
 /*
@@ -102,21 +159,128 @@ static const SyncOps syncsw[] = {
 	},
 	/* pg_xact */
 	[SYNC_HANDLER_CLOG] = {
-		.sync_syncfiletag = clogsyncfiletag
+		.sync_syncfiletag = clogsyncfiletag,
+		.sync_openfiletag = clogopenfiletag,
+		.sync_target_name = "pg_xact"
 	},
 	/* pg_commit_ts */
 	[SYNC_HANDLER_COMMIT_TS] = {
-		.sync_syncfiletag = committssyncfiletag
+		.sync_syncfiletag = committssyncfiletag,
+		.sync_openfiletag = committsopenfiletag,
+		.sync_target_name = "pg_commit_ts"
 	},
 	/* pg_multixact/offsets */
 	[SYNC_HANDLER_MULTIXACT_OFFSET] = {
-		.sync_syncfiletag = multixactoffsetssyncfiletag
+		.sync_syncfiletag = multixactoffsetssyncfiletag,
+		.sync_openfiletag = multixactoffsetsopenfiletag,
+		.sync_target_name = "pg_multixact/offsets"
 	},
 	/* pg_multixact/members */
 	[SYNC_HANDLER_MULTIXACT_MEMBER] = {
-		.sync_syncfiletag = multixactmemberssyncfiletag
+		.sync_syncfiletag = multixactmemberssyncfiletag,
+		.sync_openfiletag = multixactmembersopenfiletag,
+		.sync_target_name = "pg_multixact/members"
 	}
 };
+
+static void sync_aio_reopen(PgAioHandle *ioh);
+static void sync_aio_close(PgAioHandle *ioh);
+static char *sync_aio_describe_identity(const PgAioTargetData *sd);
+
+/*
+ * Target info for files identified by a FileTag (see PGAIO_TID_SYNC_FILETAG).
+ * Unlike PGAIO_TID_SYNC, a FileTag contains everything needed to find the
+ * file again in another process, so such IOs can be executed by IO workers.
+ */
+const PgAioTargetInfo aio_sync_filetag_target_info = {
+	.name = "sync_filetag",
+	.reopen = sync_aio_reopen,
+	.close = sync_aio_close,
+	.describe_identity = sync_aio_describe_identity,
+};
+
+/*
+ * Set up ioh to operate on the file identified by ftag.
+ */
+void
+pgaio_io_set_target_sync_filetag(PgAioHandle *ioh, const FileTag *ftag)
+{
+	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
+
+	Assert(syncsw[ftag->handler].sync_openfiletag != NULL);
+	Assert(syncsw[ftag->handler].sync_target_name != NULL);
+
+	pgaio_io_set_target(ioh, PGAIO_TID_SYNC_FILETAG);
+
+	sd->sync_filetag = *ftag;
+}
+
+static FileTag
+sync_aio_filetag(const PgAioTargetData *sd)
+{
+	return sd->sync_filetag;
+}
+
+/*
+ * reopen callback for PGAIO_TID_SYNC_FILETAG, to open the file in the process
+ * executing the IO.
+ */
+static void
+sync_aio_reopen(PgAioHandle *ioh)
+{
+	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
+	PgAioOpData *od = pgaio_io_get_op_data(ioh);
+	FileTag		ftag = sync_aio_filetag(sd);
+	int			fd;
+
+	/*
+	 * The caller needs to prevent interrupts from being processed, otherwise
+	 * the FD could be closed again before we get to executing the IO.
+	 */
+	Assert(!INTERRUPTS_CAN_BE_PROCESSED());
+
+	Assert(pgaio_io_get_op(ioh) == PGAIO_OP_FSYNC);
+
+	fd = syncsw[ftag.handler].sync_openfiletag(&ftag);
+	if (fd < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open segment " UINT64_FORMAT " of SLRU \"%s\": %m",
+						ftag.segno,
+						syncsw[ftag.handler].sync_target_name)));
+
+	od->fsync.fd = fd;
+}
+
+/*
+ * close callback for PGAIO_TID_SYNC_FILETAG, releasing the descriptor
+ * acquired by sync_aio_reopen().
+ *
+ * Called in a critical section, so a failure to close cannot be reported.
+ * That is not a meaningful loss: the data has already been flushed by the
+ * fsync, and the descriptor is not written to.
+ */
+static void
+sync_aio_close(PgAioHandle *ioh)
+{
+	PgAioOpData *od = pgaio_io_get_op_data(ioh);
+
+	(void) CloseTransientFile(od->fsync.fd);
+	od->fsync.fd = -1;
+}
+
+/*
+ * describe_identity callback for PGAIO_TID_SYNC_FILETAG.
+ */
+static char *
+sync_aio_describe_identity(const PgAioTargetData *sd)
+{
+	FileTag		ftag = sync_aio_filetag(sd);
+
+	return psprintf(_("segment " UINT64_FORMAT " of SLRU \"%s\""),
+					ftag.segno,
+					syncsw[ftag.handler].sync_target_name);
+}
 
 /*
  * Initialize data structures for the file sync tracking.
@@ -155,6 +319,10 @@ InitSync(void)
 								 &hash_ctl,
 								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 		pendingUnlinks = NIL;
+
+		inflightSyncCxt = AllocSetContextCreate(TopMemoryContext,
+												"Inflight sync context",
+												ALLOCSET_DEFAULT_SIZES);
 	}
 }
 
@@ -281,25 +449,295 @@ SyncPostCheckpoint(void)
 }
 
 /*
- *	ProcessSyncRequests() -- Process queued fsync requests.
+ * Close the file that a sync handler opened for an in-flight fsync.
  */
-void
-ProcessSyncRequests(void)
+static void
+sync_close_file(InflightSyncEntry *entry)
+{
+	switch (entry->close_method)
+	{
+		case SYNC_CLOSE_NONE:
+			break;
+		case SYNC_CLOSE_TRANSIENT:
+			CloseTransientFile(entry->close_file);
+			break;
+		case SYNC_CLOSE_VFD:
+			FileClose((File) entry->close_file);
+			break;
+		default:
+			pg_unreachable();
+	}
+
+	entry->close_method = SYNC_CLOSE_NONE;
+}
+
+static void
+sync_free_entry(InflightSyncEntry *entry)
+{
+	dlist_delete_from(&activeSyncEntries, &entry->cleanup_node);
+	pfree(entry);
+}
+
+/*
+ * Error cleanup callback for ProcessSyncRequests().
+ */
+static void
+sync_cleanup_inflight(int code, Datum arg)
+{
+	while (!dlist_is_empty(&activeSyncEntries))
+	{
+		dlist_node *node = dlist_pop_head_node(&activeSyncEntries);
+		InflightSyncEntry *entry;
+
+		entry = dlist_container(InflightSyncEntry, cleanup_node, node);
+
+		if (entry->started)
+			pgaio_wref_wait(&entry->iow);
+
+		sync_close_file(entry);
+		pfree(entry);
+	}
+}
+
+static void
+sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
+{
+	struct PgAioHandle *ioh;
+	instr_time	io_start;
+
+	INSTR_TIME_SET_CURRENT(io_start);
+	entry->start_time = io_start;
+
+	entry->started = false;
+	entry->open_errno = 0;
+	entry->close_method = SYNC_CLOSE_NONE;
+	pgaio_wref_clear(&entry->iow);
+
+	/*
+	 * Any request that arrives from here on may cover data that the fsync
+	 * started below does not, so start out with a clean slate.  This has to
+	 * happen before the IO is submitted; requests absorbed in between are
+	 * covered by the fsync, so treating them as newer is merely conservative.
+	 */
+	entry->hash_entry->re_requested = false;
+
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &entry->ioret);
+	pgaio_io_get_wref(ioh, &entry->iow);
+
+	/*
+	 * The handler opens the file, assigns the target and stages the fsync.
+	 * Hold interrupts so that the referenced descriptor cannot be closed
+	 * during submission.
+	 */
+	HOLD_INTERRUPTS();
+	syncsw[entry->tag.handler].sync_syncfiletag(ioh, entry);
+	RESUME_INTERRUPTS();
+
+	if (!entry->started)
+		pgaio_io_release(ioh);
+
+	dlist_push_tail(&sync_state->inflight, &entry->node);
+	sync_state->inflight_count++;
+}
+
+static void
+sync_drain_one(SyncState *sync_state)
+{
+	dlist_node *node;
+	InflightSyncEntry *entry;
+	int			result;
+
+	Assert(sync_state->inflight_count > 0);
+
+	node = dlist_pop_head_node(&sync_state->inflight);
+	entry = dlist_container(InflightSyncEntry, node, node);
+	sync_state->inflight_count--;
+
+	if (entry->started)
+	{
+		pgaio_wref_wait(&entry->iow);
+
+		/*
+		 * We did not register a completion callback, so the distilled status
+		 * is always PGAIO_RS_OK and the raw fsync() return value (0 on
+		 * success, -errno on failure) is available in ->result.result.
+		 */
+		result = -entry->ioret.result.result;
+	}
+	else
+		result = entry->open_errno;
+
+	sync_close_file(entry);
+
+	if (!result)
+	{
+		instr_time	io_time;
+
+		/*
+		 * These values measure submission-to-reap time, not necessarily fsync
+		 * duration.  Submission-order reaping can overstate individual
+		 * durations, and the aggregate can exceed wall-clock time because
+		 * fsyncs overlap.
+		 */
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, entry->start_time);
+
+		if (INSTR_TIME_GT(io_time, sync_state->longest))
+			sync_state->longest = io_time;
+		INSTR_TIME_ADD(sync_state->total_elapsed, io_time);
+		sync_state->processed++;
+
+		if (log_checkpoints)
+			elog(DEBUG1, "checkpoint sync: number=%d file=%s time=%.3f ms",
+				 sync_state->processed,
+				 entry->path,
+				 INSTR_TIME_GET_MILLISEC(io_time));
+
+		entry->hash_entry->sync_completed = true;
+		sync_free_entry(entry);
+	}
+	else
+	{
+		/*
+		 * The request may have been canceled after we started the fsync, e.g.
+		 * because the relation was dropped in the meantime and an intervening
+		 * AbsorbSyncRequests() picked up the cancel message.  Since
+		 * mdunlink() queues the "cancel" before actually unlinking, a
+		 * cancellation means the failure is expected and the entry can simply
+		 * be dropped.
+		 *
+		 * The upstream, synchronous code checked this at the top of its retry
+		 * loop; because the fsync is now in flight while requests are being
+		 * absorbed, we have to re-check it here.
+		 */
+		if (entry->hash_entry->canceled)
+		{
+			entry->hash_entry->sync_completed = true;
+			sync_free_entry(entry);
+			return;
+		}
+
+		/*
+		 * It is possible that the relation has been dropped or truncated
+		 * since the fsync request was entered. Therefore, allow ENOENT, but
+		 * only if we didn't fail already on this file.
+		 */
+		errno = result;
+		if (!FILE_POSSIBLY_DELETED(errno) || entry->retry_count > 0)
+			ereport(data_sync_elevel(ERROR),
+					(errcode_for_file_access(),
+					 errmsg("could not fsync file \"%s\": %m",
+							entry->path)));
+		else
+			ereport(DEBUG1,
+					(errcode_for_file_access(),
+					 errmsg_internal("could not fsync file \"%s\" but retrying: %m",
+									 entry->path)));
+
+		entry->retry_count++;
+		dlist_push_tail(&sync_state->retry, &entry->node);
+	}
+}
+
+static void
+sync_drain_all(SyncState *sync_state)
+{
+	while (sync_state->inflight_count)
+		sync_drain_one(sync_state);
+}
+
+/*
+ * Finish requests whose fsyncs have completed.
+ *
+ * The main hash scan may only remove the entry it most recently returned, so
+ * completion processing is deferred until it ends.  This second scan can then
+ * remove each completed entry as the current entry.  Recheck the hash entry
+ * now because requests absorbed since the fsync completed may require it to
+ * remain for the next checkpoint cycle.
+ */
+static void
+sync_process_completed(void)
+{
+	HASH_SEQ_STATUS hstat;
+	PendingFsyncEntry *entry;
+
+	hash_seq_init(&hstat, pendingOps);
+	while ((entry = (PendingFsyncEntry *) hash_seq_search(&hstat)) != NULL)
+	{
+		if (!entry->sync_completed)
+			continue;
+
+		/*
+		 * We are done with this entry, unless a request for it arrived while
+		 * the fsync was in flight.  A cancel supersedes any such request, as
+		 * RememberSyncRequest() clears "canceled" when it records a new one.
+		 */
+		if (!entry->re_requested || entry->canceled)
+		{
+			if (hash_search(pendingOps, &entry->tag, HASH_REMOVE, NULL) == NULL)
+				elog(ERROR, "pendingOps corrupted");
+		}
+		else
+			entry->sync_completed = false;
+	}
+}
+
+/*
+ * Reissue any fsync requests that previously failed with an ignorable error.
+ *
+ * The fsync table could contain requests to fsync segments that have been
+ * deleted (unlinked) by the time we get to them. Rather than just hoping an
+ * ENOENT (or EACCES on Windows) error can be ignored, what we do on error is
+ * absorb pending requests and then retry. Since mdunlink() queues a "cancel"
+ * message before actually unlinking, the fsync request is guaranteed to be
+ * marked canceled after the absorb if it really was this case.
+ */
+static void
+sync_process_retries(SyncState *sync_state)
+{
+	if (dlist_is_empty(&sync_state->retry))
+		return;
+
+	AbsorbSyncRequests();
+
+	while (!dlist_is_empty(&sync_state->retry))
+	{
+		dlist_node *node = dlist_pop_head_node(&sync_state->retry);
+		InflightSyncEntry *entry = dlist_container(InflightSyncEntry, node, node);
+
+		if (entry->hash_entry->canceled)
+		{
+			/* Safe to remove here, the scan has already finished. */
+			if (hash_search(pendingOps, &entry->hash_entry->tag,
+							HASH_REMOVE, NULL) == NULL)
+				elog(ERROR, "pendingOps corrupted");
+			sync_free_entry(entry);
+			continue;
+		}
+
+		Assert(sync_state->inflight_count <= sync_state->max_inflight);
+		if (sync_state->inflight_count == sync_state->max_inflight)
+			sync_drain_one(sync_state);
+
+		sync_start_one(sync_state, entry);
+	}
+
+	sync_drain_all(sync_state);
+	sync_process_completed();
+}
+
+/*
+ * Process queued fsync requests.  The public wrapper ensures that any error
+ * closes files owned by in-flight entries.
+ */
+static void
+ProcessSyncRequestsInternal(void)
 {
 	static bool sync_in_progress = false;
 
 	HASH_SEQ_STATUS hstat;
 	PendingFsyncEntry *entry;
-	int			absorb_counter;
-
-	/* Statistics on sync times */
-	int			processed = 0;
-	instr_time	sync_start,
-				sync_end,
-				sync_diff;
-	uint64		elapsed;
-	uint64		longest = 0;
-	uint64		total_elapsed = 0;
+	SyncState	sync_state;
 
 	/*
 	 * This is only called during checkpoints, and checkpoints should only
@@ -350,6 +788,7 @@ ProcessSyncRequests(void)
 		while ((entry = (PendingFsyncEntry *) hash_seq_search(&hstat)) != NULL)
 		{
 			entry->cycle_ctr = sync_cycle_ctr;
+			entry->sync_completed = false;
 		}
 	}
 
@@ -359,13 +798,26 @@ ProcessSyncRequests(void)
 	/* Set flag to detect failure if we don't reach the end of the loop */
 	sync_in_progress = true;
 
+	/*
+	 * Bound concurrent fsyncs by both the AIO handle and transient descriptor
+	 * budgets.
+	 */
+	dlist_init(&sync_state.inflight);
+	dlist_init(&sync_state.retry);
+	sync_state.inflight_count = 0;
+	sync_state.max_inflight = GetFsyncConcurrencyLimit();
+	sync_state.processed = 0;
+	INSTR_TIME_SET_ZERO(sync_state.longest);
+	INSTR_TIME_SET_ZERO(sync_state.total_elapsed);
+
+	Assert(dlist_is_empty(&activeSyncEntries));
+	MemoryContextReset(inflightSyncCxt);
+
 	/* Now scan the hashtable for fsync requests to process */
-	absorb_counter = FSYNCS_PER_ABSORB;
+	sync_state.absorb_counter = FSYNCS_PER_ABSORB;
 	hash_seq_init(&hstat, pendingOps);
 	while ((entry = (PendingFsyncEntry *) hash_seq_search(&hstat)) != NULL)
 	{
-		int			failures;
-
 		/*
 		 * If the entry is new then don't process it this time; it is new.
 		 * Note "continue" bypasses the hash-remove call at the bottom of the
@@ -378,101 +830,92 @@ ProcessSyncRequests(void)
 		Assert((CycleCtr) (entry->cycle_ctr + 1) == sync_cycle_ctr);
 
 		/*
-		 * If fsync is off then we don't have to bother opening the file at
-		 * all.  (We delay checking until this point so that changing fsync on
-		 * the fly behaves sensibly.)
+		 * If in checkpointer, we want to absorb pending requests every so
+		 * often to prevent overflow of the fsync request queue.  It is
+		 * unspecified whether newly-added entries will be visited by
+		 * hash_seq_search, but we don't care since we don't need to process
+		 * them anyway.
 		 */
-		if (enableFsync)
+		if (enableFsync && --sync_state.absorb_counter <= 0)
 		{
-			/*
-			 * If in checkpointer, we want to absorb pending requests every so
-			 * often to prevent overflow of the fsync request queue.  It is
-			 * unspecified whether newly-added entries will be visited by
-			 * hash_seq_search, but we don't care since we don't need to
-			 * process them anyway.
-			 */
-			if (--absorb_counter <= 0)
-			{
-				AbsorbSyncRequests();
-				absorb_counter = FSYNCS_PER_ABSORB;
-			}
-
-			/*
-			 * The fsync table could contain requests to fsync segments that
-			 * have been deleted (unlinked) by the time we get to them. Rather
-			 * than just hoping an ENOENT (or EACCES on Windows) error can be
-			 * ignored, what we do on error is absorb pending requests and
-			 * then retry. Since mdunlink() queues a "cancel" message before
-			 * actually unlinking, the fsync request is guaranteed to be
-			 * marked canceled after the absorb if it really was this case.
-			 * DROP DATABASE likewise has to tell us to forget fsync requests
-			 * before it starts deletions.
-			 */
-			for (failures = 0; !entry->canceled; failures++)
-			{
-				char		path[MAXPGPATH];
-
-				INSTR_TIME_SET_CURRENT(sync_start);
-				if (syncsw[entry->tag.handler].sync_syncfiletag(&entry->tag,
-																path) == 0)
-				{
-					/* Success; update statistics about sync timing */
-					INSTR_TIME_SET_CURRENT(sync_end);
-					sync_diff = sync_end;
-					INSTR_TIME_SUBTRACT(sync_diff, sync_start);
-					elapsed = INSTR_TIME_GET_MICROSEC(sync_diff);
-					if (elapsed > longest)
-						longest = elapsed;
-					total_elapsed += elapsed;
-					processed++;
-
-					if (log_checkpoints)
-						elog(DEBUG1, "checkpoint sync: number=%d file=%s time=%.3f ms",
-							 processed,
-							 path,
-							 (double) elapsed / 1000);
-
-					break;		/* out of retry loop */
-				}
-
-				/*
-				 * It is possible that the relation has been dropped or
-				 * truncated since the fsync request was entered. Therefore,
-				 * allow ENOENT, but only if we didn't fail already on this
-				 * file.
-				 */
-				if (!FILE_POSSIBLY_DELETED(errno) || failures > 0)
-					ereport(data_sync_elevel(ERROR),
-							(errcode_for_file_access(),
-							 errmsg("could not fsync file \"%s\": %m",
-									path)));
-				else
-					ereport(DEBUG1,
-							(errcode_for_file_access(),
-							 errmsg_internal("could not fsync file \"%s\" but retrying: %m",
-											 path)));
-
-				/*
-				 * Absorb incoming requests and check to see if a cancel
-				 * arrived for this relation fork.
-				 */
-				AbsorbSyncRequests();
-				absorb_counter = FSYNCS_PER_ABSORB; /* might as well... */
-			}					/* end retry loop */
+			AbsorbSyncRequests();
+			sync_state.absorb_counter = FSYNCS_PER_ABSORB;
 		}
 
-		/* We are done with this entry, remove it */
-		if (hash_search(pendingOps, &entry->tag, HASH_REMOVE, NULL) == NULL)
-			elog(ERROR, "pendingOps corrupted");
-	}							/* end loop over hashtable entries */
+		if (!enableFsync || entry->canceled)
+		{
+			/* We are done with this entry, remove it */
+			if (hash_search(pendingOps, &entry->tag, HASH_REMOVE, NULL) == NULL)
+				elog(ERROR, "pendingOps corrupted");
+		}
+		else
+		{
+			InflightSyncEntry *inflight_entry;
+
+			Assert(sync_state.inflight_count <= sync_state.max_inflight);
+			if (sync_state.inflight_count == sync_state.max_inflight)
+				sync_drain_one(&sync_state);
+
+			/*
+			 * Mark the entry as already dealt with in this cycle.  It must
+			 * remain in the hash table until its fsync completes and the scan
+			 * ends.  If a new request arrives meanwhile, this cycle counter
+			 * leaves the entry to be processed by the next checkpoint.
+			 */
+			entry->cycle_ctr = sync_cycle_ctr;
+
+			inflight_entry = MemoryContextAllocZero(inflightSyncCxt,
+													sizeof(InflightSyncEntry));
+			inflight_entry->tag = entry->tag;
+			inflight_entry->hash_entry = entry;
+			dlist_push_tail(&activeSyncEntries,
+							&inflight_entry->cleanup_node);
+
+			sync_start_one(&sync_state, inflight_entry);
+		}
+	}
+
+	sync_drain_all(&sync_state);
+	sync_process_completed();
+
+	/*
+	 * A second failure raises an error, so normally one retry pass is enough.
+	 * Keep an explicit bound in case that changes.
+	 */
+	for (int failures = 0; failures < 5; failures++)
+	{
+		if (dlist_is_empty(&sync_state.retry))
+			break;
+
+		sync_process_retries(&sync_state);
+	}
+
+	if (!dlist_is_empty(&sync_state.inflight) ||
+		!dlist_is_empty(&sync_state.retry))
+		elog(PANIC, "in-flight sync requests remain after ProcessSyncRequests");
 
 	/* Return sync performance metrics for report at checkpoint end */
-	CheckpointStats.ckpt_sync_rels = processed;
-	CheckpointStats.ckpt_longest_sync = longest;
-	CheckpointStats.ckpt_agg_sync_time = total_elapsed;
+	CheckpointStats.ckpt_sync_rels = sync_state.processed;
+	CheckpointStats.ckpt_longest_sync = INSTR_TIME_GET_MICROSEC(sync_state.longest);
+	CheckpointStats.ckpt_agg_sync_time = INSTR_TIME_GET_MICROSEC(sync_state.total_elapsed);
 
 	/* Flag successful completion of ProcessSyncRequests */
 	sync_in_progress = false;
+}
+
+/*
+ *	ProcessSyncRequests() -- Process queued fsync requests.
+ */
+void
+ProcessSyncRequests(void)
+{
+	PG_ENSURE_ERROR_CLEANUP(sync_cleanup_inflight, (Datum) 0);
+	{
+		ProcessSyncRequestsInternal();
+	}
+	PG_END_ENSURE_ERROR_CLEANUP(sync_cleanup_inflight, (Datum) 0);
+
+	Assert(dlist_is_empty(&activeSyncEntries));
 }
 
 /*
@@ -554,11 +997,20 @@ RememberSyncRequest(const FileTag *ftag, SyncRequestType type)
 												  ftag,
 												  HASH_ENTER,
 												  &found);
+
+		/*
+		 * If an entry already existed, an fsync for it may be in flight right
+		 * now, in which case it cannot be assumed to cover this request; see
+		 * sync_drain_one().
+		 */
+		entry->re_requested = found;
+
 		/* if new entry, or was previously canceled, initialize it */
 		if (!found || entry->canceled)
 		{
 			entry->cycle_ctr = sync_cycle_ctr;
 			entry->canceled = false;
+			entry->sync_completed = false;
 		}
 
 		/*

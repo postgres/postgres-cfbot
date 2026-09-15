@@ -1026,10 +1026,16 @@ commit_ts_redo(XLogReaderState *record)
 }
 
 /*
- * Entrypoint for sync.c to sync commit_ts files.
+ * Entrypoints for sync.c to sync and reopen commit_ts files.
  */
-int
-committssyncfiletag(const FileTag *ftag, char *path)
+void
+committssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(CommitTsCtl, ftag, path);
+	SlruSyncFileTag(CommitTsCtl, ioh, entry);
+}
+
+int
+committsopenfiletag(const FileTag *ftag)
+{
+	return SlruOpenFileTag(CommitTsCtl, ftag);
 }
