@@ -538,5 +538,7 @@ extern void PageIndexTupleDeleteNoCompact(Page page, OffsetNumber offnum);
 extern bool PageIndexTupleOverwrite(Page page, OffsetNumber offnum,
 									const void *newtup, Size newsize);
 extern void PageSetChecksum(Page page, BlockNumber blkno);
+extern void PagesSetChecksum(Page *pages, const BlockNumber *blknos,
+							 uint32 length);
 
 #endif							/* BUFPAGE_H */
