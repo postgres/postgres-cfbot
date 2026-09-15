@@ -94,3 +94,18 @@ select box(point(i,j))
   from generate_series(1,100,5) i,
        generate_series(1,10,5) j;
 -- leave this table around, to help in testing dump/restore
+-- Check getQuadrant with large coords near a power-of-two boundary (bug #19597)
+create table spgist_quad_fp_tbl(p point);
+insert into spgist_quad_fp_tbl
+  select point(17179869183.999998, 17179869183.999998)
+  from generate_series(1, 4000);
+create index spgist_quad_fp_idx on spgist_quad_fp_tbl using spgist(p);
+insert into spgist_quad_fp_tbl
+  select point(17179869184.0, 17179869184.0)
+  from generate_series(1, 400);
+select count(*) from spgist_quad_fp_tbl where p ~= point(17179869184.0, 17179869184.0);
+ count 
+-------
+   400
+(1 row)
+
