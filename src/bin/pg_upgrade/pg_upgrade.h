@@ -115,6 +115,18 @@ extern char *output_files[];
 #define DEFAULT_CHAR_SIGNEDNESS_CAT_VER 202502212
 
 /*
+ * The visibility map widened from 2 to 4 bits per heap block to add
+ * VISIBILITYMAP_LOCATOR_SPLIT.  A cluster whose catalog version predates this
+ * has 2-bit _vm forks that pg_upgrade must rewrite; see rewriteVisibilityMap().
+ *
+ * XXX: this must equal the CATALOG_VERSION_NO that the commit widening the
+ * map installs.  Any lower value would leave a cluster initdb'd in between
+ * with 2-bit _vm forks that are not rewritten.  The committer re-picks both
+ * values at commit time.
+ */
+#define VISIBILITYMAP_WIDTH_CHANGE_CAT_VER 202610071
+
+/*
  * Each relation is represented by a relinfo structure.
  */
 typedef struct
@@ -434,6 +446,8 @@ void		get_sock_dir(ClusterInfo *cluster);
 
 /* relfilenumber.c */
 
+void		rewriteVisibilityMap(const char *fromfile, const char *tofile,
+								 const char *nspname, const char *relname);
 void		transfer_all_new_tablespaces(DbInfoArr *old_db_arr,
 										 DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata);
 void		transfer_all_new_dbs(DbInfoArr *old_db_arr,
