@@ -14,9 +14,9 @@ use lib $FindBin::RealBin;
 
 use SSL::Server;
 
-if ($ENV{with_ssl} ne 'openssl')
+if ($ENV{with_ssl} ne 'openssl' && $ENV{with_ssl} ne 'libressl')
 {
-	plan skip_all => 'OpenSSL not supported by this build';
+	plan skip_all => 'SSL not supported by this build';
 }
 if (!$ENV{PG_TEST_EXTRA} || $ENV{PG_TEST_EXTRA} !~ /\bssl\b/)
 {
