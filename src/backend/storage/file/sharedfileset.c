@@ -38,8 +38,7 @@ void
 SharedFileSetInit(SharedFileSet *fileset, dsm_segment *seg)
 {
 	/* Initialize the shared fileset specific members. */
-	SpinLockInit(&fileset->mutex);
-	fileset->refcnt = 1;
+	pg_atomic_init_u32(&fileset->refcnt, 1);
 
 	/* Initialize the fileset. */
 	FileSetInit(&fileset->fs);
@@ -55,19 +54,15 @@ SharedFileSetInit(SharedFileSet *fileset, dsm_segment *seg)
 void
 SharedFileSetAttach(SharedFileSet *fileset, dsm_segment *seg)
 {
-	bool		success;
+	uint32		refcnt;
 
-	SpinLockAcquire(&fileset->mutex);
-	if (fileset->refcnt == 0)
-		success = false;
-	else
-	{
-		++fileset->refcnt;
-		success = true;
-	}
-	SpinLockRelease(&fileset->mutex);
+	refcnt = pg_atomic_read_u32(&fileset->refcnt);
+	while (refcnt != 0 &&
+		   !pg_atomic_compare_exchange_u32(&fileset->refcnt, &refcnt,
+										   refcnt + 1))
+		;
 
-	if (!success)
+	if (refcnt == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("could not attach to a SharedFileSet that is already destroyed")));
@@ -98,11 +93,9 @@ SharedFileSetOnDetach(dsm_segment *segment, Datum datum)
 	bool		unlink_all = false;
 	SharedFileSet *fileset = (SharedFileSet *) DatumGetPointer(datum);
 
-	SpinLockAcquire(&fileset->mutex);
-	Assert(fileset->refcnt > 0);
-	if (--fileset->refcnt == 0)
+	Assert(pg_atomic_read_u32(&fileset->refcnt) > 0);
+	if (pg_atomic_sub_fetch_u32(&fileset->refcnt, 1) == 0)
 		unlink_all = true;
-	SpinLockRelease(&fileset->mutex);
 
 	/*
 	 * If we are the last to detach, we delete the directory in all
