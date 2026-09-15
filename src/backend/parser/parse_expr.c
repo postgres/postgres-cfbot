@@ -54,6 +54,7 @@ static Node *transformAExprDistinct(ParseState *pstate, A_Expr *a);
 static Node *transformAExprNullIf(ParseState *pstate, A_Expr *a);
 static Node *transformAExprIn(ParseState *pstate, A_Expr *a);
 static Node *transformAExprBetween(ParseState *pstate, A_Expr *a);
+static Node *transformAExprImplies(ParseState *pstate, A_Expr *a);
 static Node *transformMergeSupportFunc(ParseState *pstate, MergeSupportFunc *f);
 static Node *transformBoolExpr(ParseState *pstate, BoolExpr *a);
 static Node *transformFuncCall(ParseState *pstate, FuncCall *fn);
@@ -212,6 +213,9 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 					case AEXPR_BETWEEN_SYM:
 					case AEXPR_NOT_BETWEEN_SYM:
 						result = transformAExprBetween(pstate, a);
+						break;
+					case AEXPR_IMPLIES:
+						result = transformAExprImplies(pstate, a);
 						break;
 					default:
 						elog(ERROR, "unrecognized A_Expr kind: %d", a->kind);
@@ -1447,6 +1451,37 @@ transformBoolExpr(ParseState *pstate, BoolExpr *a)
 	}
 
 	return (Node *) makeBoolExpr(a->boolop, args, a->location);
+}
+
+/*
+ * Transform "a IMPLIES b" into the equivalent "NOT a OR b".
+ *
+ * We expand this here rather than in gram.y so that a non-boolean operand is
+ * complained of in terms of IMPLIES, rather than in terms of the NOT or OR
+ * that the construct happens to be built from.
+ */
+static Node *
+transformAExprImplies(ParseState *pstate, A_Expr *a)
+{
+	Node	   *lexpr;
+	Node	   *rexpr;
+
+	lexpr = transformExprRecurse(pstate, a->lexpr);
+	rexpr = transformExprRecurse(pstate, a->rexpr);
+
+	lexpr = coerce_to_boolean(pstate, lexpr, "IMPLIES");
+	rexpr = coerce_to_boolean(pstate, rexpr, "IMPLIES");
+
+	/*
+	 * Each operand appears exactly once in the expansion, so unlike BETWEEN
+	 * this does not risk evaluating anything twice.
+	 */
+	return (Node *) makeBoolExpr(OR_EXPR,
+								 list_make2(makeBoolExpr(NOT_EXPR,
+														 list_make1(lexpr),
+														 exprLocation(lexpr)),
+											rexpr),
+								 a->location);
 }
 
 static Node *
