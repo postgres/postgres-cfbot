@@ -3773,7 +3773,7 @@ RelationBuildLocalRelation(const char *relname,
  * remainder of the current transaction.  This limits the usefulness to cases
  * such as TRUNCATE or rebuilding an index from scratch.
  *
- * Caller must already hold exclusive lock on the relation.
+ * Caller must already hold access exclusive lock on the relation.
  */
 void
 RelationSetNewRelfilenumber(Relation relation, char persistence)

@@ -489,6 +489,12 @@ AlterSequence(ParseState *pstate, AlterSeqStmt *stmt)
 	/* If needed, rewrite the sequence relation itself */
 	if (need_seq_rewrite)
 	{
+		/*
+		 * RelationSetNewRelfilenumber destroys the existing relation file,
+		 * so it conflicts with SELECT (AccessShareLock)
+		 */
+		LockRelationOid(relid, AccessExclusiveLock);
+
 		/* check the comment above nextval_internal()'s equivalent call. */
 		if (RelationNeedsWAL(seqrel))
 			GetTopTransactionId();
