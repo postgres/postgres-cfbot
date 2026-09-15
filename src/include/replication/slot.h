@@ -343,6 +343,8 @@ extern void ReplicationSlotAcquire(const char *name, bool nowait,
 								   bool error_if_invalid);
 extern void ReplicationSlotRelease(void);
 extern void ReplicationSlotCleanup(bool synced_only);
+extern void AtEOSubXact_ReplicationSlot(bool isCommit, SubTransactionId mySubid,
+										SubTransactionId parentSubid);
 extern void ReplicationSlotSave(void);
 extern void ReplicationSlotMarkDirty(void);
 
