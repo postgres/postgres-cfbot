@@ -136,7 +136,43 @@
 #define FROZEN_MASK8	(0xaa)	/* The upper bit of each bit pair */
 
 /* prototypes for internal routines */
+
 static Buffer vm_readbuf(Relation rel, BlockNumber blkno, bool extend);
+
+/*
+ * visibilitymap_get_locator_split
+ *		Lock-free test of VISIBILITYMAP_LOCATOR_SPLIT for heapBlk.
+ *
+ * Like VM_ALL_VISIBLE this reads the map without locking the VM buffer, so the
+ * answer may be slightly stale; callers (BitmapAnd) must be correct under that,
+ * which they are: the bit is set before the fresh index entry is inserted and
+ * both precede commit, so a snapshot that can see the new row version was taken
+ * after a full barrier (ProcArrayLock) that follows the set.  *vmbuf caches the
+ * pinned VM page across a scan, exactly as VM_ALL_VISIBLE does.
+ */
+bool
+visibilitymap_get_locator_split(Relation rel, BlockNumber heapBlk, Buffer *vmbuf)
+{
+	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
+	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+	uint8		mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	char	   *map;
+	bool		result;
+
+	if (!BufferIsValid(*vmbuf) || BufferGetBlockNumber(*vmbuf) != mapBlock)
+	{
+		if (BufferIsValid(*vmbuf))
+			ReleaseBuffer(*vmbuf);
+		*vmbuf = vm_readbuf(rel, mapBlock, false);
+		if (!BufferIsValid(*vmbuf))
+			return false;
+	}
+
+	map = PageGetContents(BufferGetPage(*vmbuf));
+	result = ((map[mapByte] >> mapOffset) & VISIBILITYMAP_LOCATOR_SPLIT) != 0;
+	return result;
+}
+
 static Buffer vm_extend(Relation rel, BlockNumber vm_nblocks);
 
 /*

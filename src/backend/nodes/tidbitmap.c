@@ -43,6 +43,7 @@
 #include "access/htup_details.h"
 #include "common/hashfn.h"
 #include "common/int.h"
+#include "access/tableam.h"
 #include "nodes/bitmapset.h"
 #include "nodes/tidbitmap.h"
 #include "storage/lwlock.h"
@@ -159,6 +160,21 @@ struct TIDBitmap
 	dsa_pointer ptpages;		/* dsa_pointer to the page array */
 	dsa_pointer ptchunks;		/* dsa_pointer to the chunk array */
 	dsa_area   *dsa;			/* reference to per-query dsa area */
+
+	/*
+	 * The relation this bitmap describes, or NULL.  Recorded at create time by
+	 * the executor (where the relation is in scope) so that a combining
+	 * operation can ask the table AM, per group, whether that group's slots
+	 * can be combined exactly (see bitmap_and_inexact / bitmap_or_inexact in
+	 * amlocator.h).  gin's private intermediate bitmap leaves this NULL and
+	 * behaves exactly as before.
+	 */
+	Relation	relation;
+	bool		(*bitmap_and_inexact) (Relation rel, uint64 group,
+									   Buffer *cache);
+	bool		(*bitmap_or_inexact) (Relation rel, uint64 group,
+									  Buffer *cache);
+	Buffer		vmcache;		/* pinned VM buffer reused across a combine */
 };
 
 /*
@@ -270,8 +286,31 @@ tbm_create(Size maxbytes, dsa_area *dsa)
 	tbm->dsapagetableold = InvalidDsaPointer;
 	tbm->ptpages = InvalidDsaPointer;
 	tbm->ptchunks = InvalidDsaPointer;
+	tbm->relation = NULL;
+	tbm->bitmap_and_inexact = NULL;
+	tbm->bitmap_or_inexact = NULL;
+	tbm->vmcache = InvalidBuffer;
 
 	return tbm;
+}
+
+/*
+ * tbm_set_relation
+ *		Record the relation this bitmap describes.
+ *
+ * Called by the executor after tbm_create() when the relation is in scope, so
+ * that tbm_intersect() and tbm_union() can consult the table AM's per-group
+ * inexact callbacks.  A bitmap with no relation set (gin's private
+ * intermediate) combines groups exactly, as it always has.
+ */
+void
+tbm_set_relation(TIDBitmap *tbm, Relation relation)
+{
+	const LocatorDesc *desc = RelationGetLocatorDesc(relation);
+
+	tbm->relation = relation;
+	tbm->bitmap_and_inexact = desc->bitmap_and_inexact;
+	tbm->bitmap_or_inexact = desc->bitmap_or_inexact;
 }
 
 /*
@@ -311,6 +350,11 @@ tbm_create_pagetable(TIDBitmap *tbm)
 void
 tbm_free(TIDBitmap *tbm)
 {
+	if (BufferIsValid(tbm->vmcache))
+	{
+		ReleaseBuffer(tbm->vmcache);
+		tbm->vmcache = InvalidBuffer;
+	}
 	if (tbm->pagetable)
 		pagetable_destroy(tbm->pagetable);
 	if (tbm->spages)
@@ -512,6 +556,16 @@ tbm_union_page(TIDBitmap *a, const PagetableEntry *bpage)
 			for (int wordnum = 0; wordnum < WORDS_PER_PAGE; wordnum++)
 				apage->words[wordnum] |= bpage->words[wordnum];
 			apage->recheck |= bpage->recheck;
+
+			/*
+			 * Union keeps a slot when any input has it, so it cannot lose a
+			 * row and needs no help for heap.  A table AM whose union is not
+			 * exact may still force a recheck of this group; see
+			 * bitmap_or_inexact in amlocator.h.
+			 */
+			if (a->bitmap_or_inexact != NULL &&
+				a->bitmap_or_inexact(a->relation, apage->blockno, &a->vmcache))
+				apage->recheck = true;
 		}
 	}
 
@@ -637,13 +691,38 @@ tbm_intersect_page(TIDBitmap *a, PagetableEntry *apage, const TIDBitmap *b)
 		{
 			/* Both pages are exact, merge at the bit level */
 			Assert(!bpage->ischunk);
-			for (int wordnum = 0; wordnum < WORDS_PER_PAGE; wordnum++)
+
+			/*
+			 * If the table AM says two indexes' entries for one row may name
+			 * different slots in this group (a selective-indexed update; see
+			 * bitmap_and_inexact in amlocator.h), union the slots and force a
+			 * recheck instead of intersecting: an exact intersection would
+			 * drop the row when the two entries disagree.  Otherwise intersect
+			 * exactly, as always.  The hook is a lock-free VM probe for heap
+			 * and NULL for every table without selective-indexed indexes, so
+			 * the common path is unchanged.
+			 */
+			if (a->bitmap_and_inexact != NULL &&
+				a->bitmap_and_inexact(a->relation, apage->blockno, &a->vmcache))
 			{
-				apage->words[wordnum] &= bpage->words[wordnum];
-				if (apage->words[wordnum] != 0)
-					candelete = false;
+				for (int wordnum = 0; wordnum < WORDS_PER_PAGE; wordnum++)
+				{
+					apage->words[wordnum] |= bpage->words[wordnum];
+					if (apage->words[wordnum] != 0)
+						candelete = false;
+				}
+				apage->recheck = true;
 			}
-			apage->recheck |= bpage->recheck;
+			else
+			{
+				for (int wordnum = 0; wordnum < WORDS_PER_PAGE; wordnum++)
+				{
+					apage->words[wordnum] &= bpage->words[wordnum];
+					if (apage->words[wordnum] != 0)
+						candelete = false;
+				}
+				apage->recheck |= bpage->recheck;
+			}
 		}
 		/* If there is no matching b page, we can just delete the a page */
 		return candelete;

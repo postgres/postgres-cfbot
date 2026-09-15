@@ -662,7 +662,7 @@ Note that indexes do not have VMs.
 </para>
 
 <para>
-The visibility map stores two bits per heap page.  The first bit, if set,
+The visibility map stores four bits per heap page.  The first bit, if set,
 indicates that the page is all-visible, or in other words that the page does
 not contain any tuples that need to be vacuumed.
 This information can also be used
@@ -670,6 +670,10 @@ by <link linkend="indexes-index-only-scans"><firstterm>index-only
 scans</firstterm></link> to answer queries using only the index tuple.
 The second bit, if set, means that all tuples on the page have been frozen.
 That means that even an anti-wraparound vacuum need not revisit the page.
+The third bit is not about visibility: it is set by a selective index update
+and records that two indexes' entries for one row on the page may name
+different line pointers, which a bitmap AND scan must allow for.  The fourth
+bit is unused.
 </para>
 
 <para>
