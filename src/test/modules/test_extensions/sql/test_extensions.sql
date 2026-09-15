@@ -303,3 +303,186 @@ ALTER EXTENSION test_ext_req_schema1 SET SCHEMA test_s_dep2;  -- now ok
 SELECT test_s_dep2.dep_req1();
 SELECT test_s_dep.dep_req2();
 DROP EXTENSION test_ext_req_schema1 CASCADE;
+
+-- Verify that name resolution during an extension script cannot be captured
+-- by objects an unprivileged user planted in the extension's schema.
+CREATE ROLE regress_ext_user;
+CREATE SCHEMA test_overload;
+GRANT CREATE, USAGE ON SCHEMA test_overload TO regress_ext_user;
+-- As the unprivileged user, plant differently-typed siblings and the sole
+-- definition of helper_only().
+SET ROLE regress_ext_user;
+CREATE FUNCTION test_overload.f(text) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION test_overload.opimpl_bad(text, text) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+CREATE OPERATOR test_overload.### (leftarg = text, rightarg = text,
+                                   function = test_overload.opimpl_bad);
+CREATE FUNCTION test_overload.helper_only(text) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION test_overload.opimpl_only(text, text) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+CREATE OPERATOR test_overload.@@@ (leftarg = text, rightarg = text,
+                                   function = test_overload.opimpl_only);
+CREATE FUNCTION test_overload.opimpl_vc(varchar, varchar) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+CREATE OPERATOR test_overload.<<< (leftarg = varchar, rightarg = varchar,
+                                   function = test_overload.opimpl_vc);
+RESET ROLE;
+-- A schema outside the script's search path, holding a planted operator.
+CREATE SCHEMA test_overload_other;
+GRANT CREATE, USAGE ON SCHEMA test_overload_other TO regress_ext_user;
+SET ROLE regress_ext_user;
+CREATE OPERATOR test_overload_other.&&& (leftarg = text, rightarg = text,
+                                         function = test_overload.opimpl_only);
+RESET ROLE;
+-- Installing the extension resolves f('abc') and the ### operator to the
+-- extension's own (trusted) objects, not the planted ones.
+CREATE EXTENSION test_ext_overload SCHEMA test_overload;
+SELECT fn, op FROM test_overload.captured;
+-- Outside of extension scripts, ordinary resolution rules are unchanged: the
+-- same calls reach the planted objects.
+SELECT test_overload.f('abc') AS fn,
+       ('a' OPERATOR(test_overload.###) 'b') AS op;
+-- When only an untrusted candidate exists, the script refuses to call it.
+CREATE EXTENSION test_ext_overload_strict SCHEMA test_overload;  -- fails
+CREATE EXTENSION test_ext_overload_strict SCHEMA test_overload VERSION '2.0';  -- fails
+-- A planted operator named as COMMUTATOR is refused as well.
+CREATE EXTENSION test_ext_overload_strict SCHEMA test_overload VERSION '3.0';  -- fails
+-- Trusted candidate visible but arguments don't match: argument error, with
+-- the untrusted candidate as a hint.
+CREATE EXTENSION test_ext_overload_strict SCHEMA test_overload VERSION '4.0';  -- fails
+CREATE EXTENSION test_ext_overload_strict SCHEMA test_overload VERSION '5.0';  -- fails
+-- Untrusted candidate outside the search path: ordinary not-in-path error.
+CREATE EXTENSION test_ext_overload_strict SCHEMA test_overload VERSION '6.0';  -- fails
+DROP EXTENSION test_ext_overload;
+DROP SCHEMA test_overload CASCADE;
+DROP SCHEMA test_overload_other CASCADE;
+DROP ROLE regress_ext_user;
+
+-- A "superuser = false" script runs as the invoking user, so its objects are
+-- owned by that role.  They must still be trusted, and another user's plant
+-- must not be.
+CREATE ROLE regress_ext_owner;
+CREATE ROLE regress_ext_attacker;
+DO $$ BEGIN
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO regress_ext_owner',
+                   current_database());
+END $$;
+CREATE SCHEMA test_nosuper AUTHORIZATION regress_ext_owner;
+GRANT CREATE, USAGE ON SCHEMA test_nosuper TO regress_ext_attacker;
+-- Attacker plants a preferred-type (text) sibling of the extension's g().
+SET ROLE regress_ext_attacker;
+CREATE FUNCTION test_nosuper.g(text) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+RESET ROLE;
+-- The script runs as regress_ext_owner and must resolve g('abc') to its own
+-- varchar function, not the attacker's text one.
+SET ROLE regress_ext_owner;
+CREATE EXTENSION test_ext_overload_nosuper SCHEMA test_nosuper;
+SELECT fn FROM test_nosuper.captured_nosuper;
+RESET ROLE;
+-- An update run by another role (here the superuser) must still reach the
+-- extension's own g(), which the install left owned by regress_ext_owner.
+ALTER EXTENSION test_ext_overload_nosuper UPDATE TO '2.0';
+SELECT fn FROM test_nosuper.updated;
+DROP EXTENSION test_ext_overload_nosuper;
+DROP SCHEMA test_nosuper CASCADE;
+DO $$ BEGIN
+    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM regress_ext_owner',
+                   current_database());
+END $$;
+DROP ROLE regress_ext_owner;
+DROP ROLE regress_ext_attacker;
+
+-- Resolution in a parallel worker must apply the same check, so
+-- creating_extension must reach the worker.  Force wrap() into a worker with
+-- debug_parallel_query.
+CREATE ROLE regress_ext_attacker NOSUPERUSER;
+CREATE SCHEMA test_parallel;
+GRANT CREATE, USAGE ON SCHEMA test_parallel TO regress_ext_attacker;
+SET ROLE regress_ext_attacker;
+CREATE FUNCTION test_parallel.probe(text) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE PARALLEL SAFE;
+RESET ROLE;
+SET debug_parallel_query = on;
+CREATE EXTENSION test_ext_overload_parallel SCHEMA test_parallel;
+RESET debug_parallel_query;
+-- The worker resolved probe('x') to the extension's own probe(varchar), not
+-- the planted probe(text).
+SELECT who FROM test_parallel.captured;
+DROP EXTENSION test_ext_overload_parallel;
+DROP SCHEMA test_parallel CASCADE;
+DROP ROLE regress_ext_attacker;
+
+-- A plant in the extension's own schema must not shadow a required
+-- extension's object, for any kind of reference: call, DDL by name, type,
+-- relation, or a resolution cached before the script.
+CREATE ROLE regress_ext_attacker;
+CREATE ROLE regress_ext_reqowner;
+DO $$ BEGIN
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO regress_ext_reqowner',
+                   current_database());
+END $$;
+CREATE SCHEMA test_reqdep AUTHORIZATION regress_ext_reqowner;
+CREATE SCHEMA test_req;
+GRANT CREATE, USAGE ON SCHEMA test_req TO regress_ext_attacker;
+-- The required extension is "superuser = false" and installed by an ordinary
+-- role, so its objects are reachable only through required-extension
+-- membership.
+SET ROLE regress_ext_reqowner;
+CREATE EXTENSION test_ext_overload_req_dep SCHEMA test_reqdep;
+RESET ROLE;
+SET ROLE regress_ext_attacker;
+CREATE FUNCTION test_req.reqcall(int) RETURNS text
+    AS $$ SELECT 'attacker'::text $$ LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION test_req.reqeq(int, int) RETURNS boolean
+    AS $$ SELECT false $$ LANGUAGE sql IMMUTABLE;
+CREATE OPERATOR test_req.=== (leftarg = integer, rightarg = integer,
+                              function = test_req.reqeq);
+-- Resolving to this domain would run pwn() with the script's privileges.
+CREATE FUNCTION test_req.pwn(text) RETURNS boolean
+    AS $$ BEGIN RAISE EXCEPTION 'attacker code executed'; END $$ LANGUAGE plpgsql;
+CREATE DOMAIN test_req.reqdom AS text CHECK (test_req.pwn(VALUE));
+CREATE TABLE test_req.reqtab(t text);
+RESET ROLE;
+-- Cache a resolution made outside any script, under the search_path the
+-- script will pin; that plan must not be reused inside the script.
+SET search_path = test_req, test_reqdep, pg_temp;
+SELECT test_reqdep.reqplpgsql() AS warmed_outside_script;
+RESET search_path;
+CREATE EXTENSION test_ext_overload_req SCHEMA test_req;
+-- Every reference resolved to the required extension's objects (in
+-- test_reqdep), not the planted ones in test_req.
+SELECT c.who, c.who_cached, n.nspname AS domain_schema
+  FROM test_req.captured c
+  JOIN pg_type t ON t.oid = c.dom
+  JOIN pg_namespace n ON n.oid = t.typnamespace;
+SELECT n.nspname AS operator_func_schema
+  FROM pg_operator o
+  JOIN pg_proc p ON p.oid = o.oprcode
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE o.oprname = '###' AND o.oprnamespace = 'test_req'::regnamespace;
+SELECT 'test_reqdep.reqtab' AS tbl, count(*) FROM test_reqdep.reqtab
+UNION ALL
+SELECT 'test_req.reqtab', count(*) FROM test_req.reqtab;
+SELECT n.nspname AS opfamily_member_schema
+  FROM pg_amop a
+  JOIN pg_opfamily f ON f.oid = a.amopfamily
+  JOIN pg_operator o ON o.oid = a.amopopr
+  JOIN pg_namespace n ON n.oid = o.oprnamespace
+ WHERE f.opfname = 'reqfam';
+-- Outside the script the cached plan is good again.
+SET search_path = test_req, test_reqdep, pg_temp;
+SELECT test_reqdep.reqplpgsql() AS after_script;
+RESET search_path;
+DROP EXTENSION test_ext_overload_req;
+DROP EXTENSION test_ext_overload_req_dep;
+DROP SCHEMA test_req CASCADE;
+DROP SCHEMA test_reqdep CASCADE;
+DO $$ BEGIN
+    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM regress_ext_reqowner',
+                   current_database());
+END $$;
+DROP ROLE regress_ext_attacker;
+DROP ROLE regress_ext_reqowner;
