@@ -214,6 +214,8 @@ FlushLocalBuffer(BufferDesc *bufHdr, SMgrRelation reln)
 	/* Temporary table I/O does not use Buffer Access Strategies */
 	pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
 							IOOP_WRITE, io_start, 1, BLCKSZ);
+	pgstat_count_tablespace_blk_write_time(reln->smgr_rlocator.locator.spcOid,
+										   io_start);
 
 	/* Mark not-dirty */
 	TerminateLocalBufferIO(bufHdr, true, 0, false);
@@ -471,6 +473,8 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 
 	pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_EXTEND,
 							io_start, 1, extend_by * BLCKSZ);
+	pgstat_count_tablespace_blk_write_time(BMR_GET_SMGR(bmr)->smgr_rlocator.locator.spcOid,
+										   io_start);
 
 	for (uint32 i = 0; i < extend_by; i++)
 	{
