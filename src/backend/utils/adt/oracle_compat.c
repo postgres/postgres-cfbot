@@ -1186,6 +1186,10 @@ repeat(PG_FUNCTION_ARGS)
 	SET_VARSIZE(result, tlen);
 	cp = VARDATA(result);
 	sp = VARDATA_ANY(string);
+
+	if (count == 0 || slen == 0)
+		PG_RETURN_TEXT_P(result);
+
 	for (i = 0; i < count; i++)
 	{
 		memcpy(cp, sp, slen);
