@@ -1219,6 +1219,7 @@ retry:
 	relation->rd_partcheck = NIL;
 	relation->rd_partcheckvalid = false;
 	relation->rd_partcheckcxt = NULL;
+	relation->rd_partancestorcount = -1;
 
 	/*
 	 * initialize access method information
@@ -2319,6 +2320,9 @@ RelationReloadIndexInfo(Relation relation)
 			 RelationGetRelid(relation));
 	relp = (Form_pg_class) GETSTRUCT(pg_class_tuple);
 	memcpy(relation->rd_rel, relp, CLASS_TUPLE_SIZE);
+	if (relation->rd_partancestorcount > 1)
+		pfree(relation->rd_partancestors.array);
+	relation->rd_partancestorcount = -1;
 	/* Reload reloptions in case they changed */
 	if (relation->rd_options)
 		pfree(relation->rd_options);
@@ -2511,6 +2515,8 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 		MemoryContextDelete(relation->rd_pddcxt);
 	if (relation->rd_partcheckcxt)
 		MemoryContextDelete(relation->rd_partcheckcxt);
+	if (relation->rd_partancestorcount > 1)
+		pfree(relation->rd_partancestors.array);
 	pfree(relation);
 }
 
@@ -3598,6 +3604,9 @@ RelationBuildLocalRelation(const char *relname,
 	rel->rd_newRelfilelocatorSubid = InvalidSubTransactionId;
 	rel->rd_firstRelfilelocatorSubid = InvalidSubTransactionId;
 	rel->rd_droppedSubid = InvalidSubTransactionId;
+
+	/* the partition-index ancestor cache is computed lazily */
+	rel->rd_partancestorcount = -1;
 
 	/*
 	 * create a new tuple descriptor from the one passed in.  We do this
@@ -6548,6 +6557,7 @@ load_relcache_init_file(bool shared)
 		rel->rd_partcheck = NIL;
 		rel->rd_partcheckvalid = false;
 		rel->rd_partcheckcxt = NULL;
+		rel->rd_partancestorcount = -1;
 		rel->rd_indexprs = NIL;
 		rel->rd_indpred = NIL;
 		rel->rd_exclops = NULL;
