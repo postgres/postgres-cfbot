@@ -2278,8 +2278,6 @@ typedef struct HashJoinState
  *
  *		materialize nodes are used to materialize the results
  *		of a subplan into a temporary file.
- *
- *		ss.ss_ScanTupleSlot refers to output of underlying plan.
  * ----------------
  */
 typedef struct MaterialState
