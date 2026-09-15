@@ -1,0 +1,246 @@
+--
+-- LIKE BMH optimization
+--
+-- Exercise the fast path for simple contains patterns ('%literal%') and the
+-- fallback cases that must preserve existing LIKE semantics.
+--
+-- Use table values so the planner cannot fold the LIKE expressions to Consts.
+CREATE TEMP TABLE like_bmh_text_data(id int, val text);
+INSERT INTO like_bmh_text_data VALUES
+	(1, ''),
+	(2, 'abc'),
+	(3, 'abcd'),
+	(4, 'xabcd'),
+	(5, 'abcdx'),
+	(6, 'xabcdx'),
+	(7, 'abxd'),
+	(8, NULL);
+SELECT id, val LIKE '%abcd%' AS matched
+FROM like_bmh_text_data
+ORDER BY id;
+ id | matched 
+----+---------
+  1 | f
+  2 | f
+  3 | t
+  4 | t
+  5 | t
+  6 | t
+  7 | f
+  8 | 
+(8 rows)
+
+-- Exercise escape removal in both eligible and short fallback literals.
+CREATE TEMP TABLE like_bmh_escape_data(id int, val text);
+INSERT INTO like_bmh_escape_data VALUES
+	(1, 'xxa%cdexx'),
+	(2, 'xxa%zzzxx'),
+	(3, 'xxa_cdexx'),
+	(4, 'xxa\cdexx'),
+	(5, 'xxa%cxx');
+SELECT id, val LIKE '%a\%cde%' AS matched
+FROM like_bmh_escape_data WHERE id IN (1, 2) ORDER BY id;
+ id | matched 
+----+---------
+  1 | t
+  2 | f
+(2 rows)
+
+SELECT id, val LIKE '%a\_cde%' AS matched
+FROM like_bmh_escape_data WHERE id = 3;
+ id | matched 
+----+---------
+  3 | t
+(1 row)
+
+SELECT id, val LIKE '%a\\cde%' AS matched
+FROM like_bmh_escape_data WHERE id = 4;
+ id | matched 
+----+---------
+  4 | t
+(1 row)
+
+SELECT id, val LIKE '%a#%cde%' ESCAPE '#' AS matched
+FROM like_bmh_escape_data WHERE id = 1;
+ id | matched 
+----+---------
+  1 | t
+(1 row)
+
+SELECT id, val LIKE '%a\%c%' AS matched
+FROM like_bmh_escape_data WHERE id = 5;
+ id | matched 
+----+---------
+  5 | t
+(1 row)
+
+-- Check the threshold and the main pattern-shape fallback cases.
+SELECT val LIKE '%abc%' AS len3_fallback,
+       val LIKE '%abcd%' AS len4_bmh
+FROM like_bmh_text_data WHERE id = 6;
+ len3_fallback | len4_bmh 
+---------------+----------
+ t             | t
+(1 row)
+
+SELECT val LIKE 'abcd' AS exact_fallback
+FROM like_bmh_text_data WHERE id = 3;
+ exact_fallback 
+----------------
+ t
+(1 row)
+
+SELECT val LIKE 'abcd%' AS prefix_fallback
+FROM like_bmh_text_data WHERE id = 5;
+ prefix_fallback 
+-----------------
+ t
+(1 row)
+
+SELECT val LIKE '%abcd' AS suffix_fallback
+FROM like_bmh_text_data WHERE id = 4;
+ suffix_fallback 
+-----------------
+ t
+(1 row)
+
+SELECT val LIKE '%%' AS empty_literal_fallback
+FROM like_bmh_text_data WHERE id = 6;
+ empty_literal_fallback 
+------------------------
+ t
+(1 row)
+
+SELECT val LIKE '%%abcd%%' AS extra_percent_fallback
+FROM like_bmh_text_data WHERE id = 6;
+ extra_percent_fallback 
+------------------------
+ t
+(1 row)
+
+SELECT val LIKE '%abc\%' AS escaped_trailing_percent_fallback
+FROM (VALUES ('abc%')) AS v(val);
+ escaped_trailing_percent_fallback 
+-----------------------------------
+ t
+(1 row)
+
+-- name input goes through the namelike entry point.
+CREATE TEMP TABLE like_bmh_name_data(id int, val name);
+INSERT INTO like_bmh_name_data VALUES
+	(1, 'xxclassxx'),
+	(2, 'xxotherxx'),
+	(3, NULL);
+SELECT id, val LIKE '%class%' AS matched
+FROM like_bmh_name_data
+ORDER BY id;
+ id | matched 
+----+---------
+  1 | t
+  2 | f
+  3 | 
+(3 rows)
+
+-- Row-varying patterns must use the generic matcher.
+CREATE TEMP TABLE like_bmh_patterns(p text);
+INSERT INTO like_bmh_patterns VALUES
+	('%abcd%'), ('%wxyz%'), ('%b_d%'), ('%b%e%');
+SELECT p, 'xxabcdxx' LIKE p AS matched
+FROM like_bmh_patterns
+ORDER BY p COLLATE "C";
+   p    | matched 
+--------+---------
+ %abcd% | t
+ %b%e%  | f
+ %b_d%  | t
+ %wxyz% | f
+(4 rows)
+
+-- A ScalarArrayOpExpr must not reuse state across different array elements.
+SELECT val LIKE ANY (ARRAY['%abcd%', '%wxyz%']) AS text_any
+FROM (VALUES ('xxwxyzxx')) AS v(val);
+ text_any 
+----------
+ t
+(1 row)
+
+SELECT val LIKE ALL (ARRAY['%abcd%', '%wxyz%']) AS text_all
+FROM (VALUES ('xxabcdxx')) AS v(val);
+ text_all 
+----------
+ f
+(1 row)
+
+SELECT val LIKE ANY (ARRAY['%abcd%', NULL, '%wxyz%']) AS text_any_null
+FROM (VALUES ('xxwxyzxx')) AS v(val);
+ text_any_null 
+---------------
+ t
+(1 row)
+
+SELECT val::name LIKE ANY (ARRAY['%other%', '%class%']) AS name_any
+FROM (VALUES ('xxclassxx')) AS v(val);
+ name_any 
+----------
+ t
+(1 row)
+
+-- A custom plan sees a Const pattern; a generic plan sees a stable Param.
+SET plan_cache_mode = force_custom_plan;
+PREPARE like_bmh_text(text) AS
+	SELECT id, val LIKE $1 AS matched
+	FROM like_bmh_text_data WHERE id IN (6, 7) ORDER BY id;
+EXECUTE like_bmh_text('%abcd%');
+ id | matched 
+----+---------
+  6 | t
+  7 | f
+(2 rows)
+
+EXECUTE like_bmh_text('%wxyz%');
+ id | matched 
+----+---------
+  6 | f
+  7 | f
+(2 rows)
+
+DEALLOCATE like_bmh_text;
+RESET plan_cache_mode;
+SET plan_cache_mode = force_generic_plan;
+PREPARE like_bmh_text(text) AS
+	SELECT id, val LIKE $1 AS matched
+	FROM like_bmh_text_data WHERE id IN (6, 7) ORDER BY id;
+EXECUTE like_bmh_text('%abcd%');
+ id | matched 
+----+---------
+  6 | t
+  7 | f
+(2 rows)
+
+EXECUTE like_bmh_text('%wxyz%');
+ id | matched 
+----+---------
+  6 | f
+  7 | f
+(2 rows)
+
+DEALLOCATE like_bmh_text;
+PREPARE like_bmh_name(text) AS
+	SELECT id, val LIKE $1 AS matched
+	FROM like_bmh_name_data WHERE id IN (1, 2) ORDER BY id;
+EXECUTE like_bmh_name('%class%');
+ id | matched 
+----+---------
+  1 | t
+  2 | f
+(2 rows)
+
+EXECUTE like_bmh_name('%other%');
+ id | matched 
+----+---------
+  1 | f
+  2 | t
+(2 rows)
+
+DEALLOCATE like_bmh_name;
+RESET plan_cache_mode;
