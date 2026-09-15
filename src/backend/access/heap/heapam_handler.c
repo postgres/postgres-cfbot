@@ -2687,6 +2687,8 @@ static const LocatorDesc heapam_locator_desc = {
 	.name = "tid",
 	.stable = false,
 	.old_version_retained = true,
+	.bitmap_and_inexact = NULL,
+	.bitmap_or_inexact = NULL,
 };
 
 static const LocatorDesc *
