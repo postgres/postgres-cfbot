@@ -93,6 +93,13 @@
                                         # disconnection while running queries;
                                         # 0 for never
 
+# - Expose information -
+
+#expose_information = '' # comma-separated list of items to expose
+                         # role = if the server is in recovery or not
+                         # sysid = the current system identifier for this server
+                         # version = the current version of this server
+
 # - Authentication -
 
 #authentication_timeout = 1min          # 1s-600s
