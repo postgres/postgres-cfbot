@@ -1379,19 +1379,19 @@ typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
 #else							/* !__cplusplus */
 #define unconstify(underlying_type, expr) \
 	(StaticAssertVariableIsOfTypeMacro(expr, const underlying_type), \
-	 (underlying_type) (expr))
+	 (underlying_type) (uintptr_t) (expr))
 #define unvolatize(underlying_type, expr) \
 	(StaticAssertVariableIsOfTypeMacro(expr, volatile underlying_type), \
-	 (underlying_type) (expr))
+	 (underlying_type) (uintptr_t) (expr))
 #ifdef __GNUC__
 #define unconstify_constexpr(underlying_type, expr) \
 	__builtin_choose_expr( \
 		_Generic((expr), const underlying_type: 1, default: 0), \
-		(underlying_type) (expr), \
+		(underlying_type) (uintptr_t) (expr), \
 		(void) 0)
 #else							/* !__GNUC_ */
 #define unconstify_constexpr(underlying_type, expr) \
-	((underlying_type) (expr))
+	((underlying_type) (uintptr_t) (expr))
 #endif							/* !__GNUC_ */
 #endif							/* !__cplusplus */
 
