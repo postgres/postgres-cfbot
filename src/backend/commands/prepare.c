@@ -207,6 +207,7 @@ ExecuteQuery(ParseState *pstate,
 					  query_string,
 					  entry->plansource->commandTag,
 					  plan_list,
+					  entry->plansource,
 					  cplan);
 
 	/*
@@ -587,6 +588,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
+	QueryDesc  *prep_qd = NULL;
 
 	if (es->memory)
 	{
@@ -632,8 +634,40 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	}
 
 	/* Replan if needed, and acquire a transient refcount */
-	cplan = GetCachedPlan(entry->plansource, paramLI,
-						  CurrentResourceOwner, pstate->p_queryEnv);
+	for (;;)
+	{
+		cplan = GetCachedPlan(entry->plansource, paramLI,
+							  CurrentResourceOwner,
+							  pstate->p_queryEnv);
+		plan_list = cplan->stmt_list;
+
+		if (!CachedPlanCanPrep(cplan, entry->plansource))
+		{
+			if (AcquireExecutorLocks(cplan))
+				break;
+			ReleaseCachedPlan(cplan, CurrentResourceOwner);
+			continue;
+		}
+
+		prep_qd = CreateQueryDesc(linitial_node(PlannedStmt, plan_list),
+								  query_string,
+								  GetActiveSnapshot(),
+								  InvalidSnapshot,
+								  None_Receiver,	/* ExplainOnePlan will fix */
+								  paramLI,
+								  pstate->p_queryEnv,
+								  0 /* ExplainOnePlan will fix */ );
+		if (ExecutorPrepAndLock(prep_qd,
+								CurrentResourceOwner,
+								es->generic ? EXEC_FLAG_EXPLAIN_GENERIC : 0,
+								&cplan->is_valid))
+			break;
+
+		/* Try again. */
+		ExecutorPrepCleanup(prep_qd);
+		FreeQueryDesc(prep_qd);
+		ReleaseCachedPlan(cplan, CurrentResourceOwner);
+	}
 
 	INSTR_TIME_SET_CURRENT(planduration);
 	INSTR_TIME_SUBTRACT(planduration, planstart);
@@ -654,6 +688,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	plan_list = cplan->stmt_list;
 
 	/* Explain each query */
+	Assert(prep_qd == NULL || list_length(plan_list) == 1);
 	foreach(p, plan_list)
 	{
 		PlannedStmt *pstmt = lfirst_node(PlannedStmt, p);
@@ -661,7 +696,8 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		if (pstmt->commandType != CMD_UTILITY)
 			ExplainOnePlan(pstmt, into, es, query_string, paramLI, pstate->p_queryEnv,
 						   &planduration, (es->buffers ? &bufusage : NULL),
-						   es->memory ? &mem_counters : NULL);
+						   es->memory ? &mem_counters : NULL,
+						   prep_qd);
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, pstate, paramLI);
 

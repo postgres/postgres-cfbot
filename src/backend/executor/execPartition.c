@@ -185,8 +185,7 @@ static char *ExecBuildSlotPartitionKeyDescription(Relation rel,
 static List *adjust_partition_colnos(List *colnos, ResultRelInfo *leaf_part_rri);
 static List *adjust_partition_colnos_using_map(List *colnos, AttrMap *attrMap);
 static PartitionPruneState *CreatePartitionPruneState(EState *estate,
-													  PartitionPruneInfo *pruneinfo,
-													  Bitmapset **all_leafpart_rtis);
+													  PartitionPruneInfo *pruneinfo);
 static void InitPartitionPruneContext(PartitionPruneContext *context,
 									  List *pruning_steps,
 									  PartitionDesc partdesc,
@@ -1979,7 +1978,7 @@ adjust_partition_colnos_using_map(List *colnos, AttrMap *attrMap)
  * estate->es_part_prune_infos. For each entry, it creates a PartitionPruneState
  * and adds it to es_part_prune_states.  ExecInitPartitionExecPruning() accesses
  * these states through their corresponding indexes in es_part_prune_states and
- * assign each state to the parent node's PlanState, from where it will be used
+ * assigns each state to the parent node's PlanState, from where it will be used
  * for "exec" pruning.
  *
  * If initial pruning steps exist for a PartitionPruneInfo entry, this function
@@ -1997,29 +1996,31 @@ ExecDoInitialPruning(EState *estate)
 {
 	ListCell   *lc;
 
+	Assert(estate->es_part_prune_results == NULL);
 	foreach(lc, estate->es_part_prune_infos)
 	{
 		PartitionPruneInfo *pruneinfo = lfirst_node(PartitionPruneInfo, lc);
 		PartitionPruneState *prunestate;
 		Bitmapset  *validsubplans = NULL;
-		Bitmapset  *all_leafpart_rtis = NULL;
 		Bitmapset  *validsubplan_rtis = NULL;
 
 		/* Create and save the PartitionPruneState. */
-		prunestate = CreatePartitionPruneState(estate, pruneinfo,
-											   &all_leafpart_rtis);
+		prunestate = CreatePartitionPruneState(estate, pruneinfo);
 		estate->es_part_prune_states = lappend(estate->es_part_prune_states,
 											   prunestate);
 
 		/*
 		 * Perform initial pruning steps, if any, and save the result
-		 * bitmapset or NULL as described in the header comment.
+		 * bitmapset or NULL as described in the header comment.  RT indexes
+		 * of surviving partitions would be added to validsubplan_rtis.
+		 *
+		 * Note that when do_initial_prune is false,
+		 * CreatePartitionPruneState() would have already added the RT indexes
+		 * of all leaf partitions to es_unpruned_relids directly.
 		 */
 		if (prunestate->do_initial_prune)
 			validsubplans = ExecFindMatchingSubPlans(prunestate, true,
 													 &validsubplan_rtis);
-		else
-			validsubplan_rtis = all_leafpart_rtis;
 
 		estate->es_unpruned_relids = bms_add_members(estate->es_unpruned_relids,
 													 validsubplan_rtis);
@@ -2137,14 +2138,12 @@ ExecInitPartitionExecPruning(PlanState *planstate,
  * parent plan node's PlanState.
  *
  * If initial pruning steps are to be skipped (e.g., during EXPLAIN
- * (GENERIC_PLAN)), *all_leafpart_rtis will be populated with the RT indexes of
- * all leaf partitions whose scanning subnode is included in the parent plan
- * node's list of child plans. The caller must add these RT indexes to
- * estate->es_unpruned_relids.
+ * (GENERIC_PLAN)), the RT indexes of all leaf partitions whose scanning
+ * subnode is included in the parent plan node's list of child plans are
+ * added to estate->es_unpruned_relids.
  */
 static PartitionPruneState *
-CreatePartitionPruneState(EState *estate, PartitionPruneInfo *pruneinfo,
-						  Bitmapset **all_leafpart_rtis)
+CreatePartitionPruneState(EState *estate, PartitionPruneInfo *pruneinfo)
 {
 	PartitionPruneState *prunestate;
 	int			n_part_hierarchies;
@@ -2378,8 +2377,8 @@ CreatePartitionPruneState(EState *estate, PartitionPruneInfo *pruneinfo,
 													   pinfo->execparamids);
 
 			/*
-			 * Return all leaf partition indexes if we're skipping pruning in
-			 * the EXPLAIN (GENERIC_PLAN) case.
+			 * Add all leaf partition indexes to es_unpruned_relids if we're
+			 * skipping pruning in the EXPLAIN (GENERIC_PLAN) case.
 			 */
 			if (pinfo->initial_pruning_steps && !prunestate->do_initial_prune)
 			{
@@ -2391,9 +2390,28 @@ CreatePartitionPruneState(EState *estate, PartitionPruneInfo *pruneinfo,
 					Index		rtindex = pprune->leafpart_rti_map[part_index];
 
 					if (rtindex)
-						*all_leafpart_rtis = bms_add_member(*all_leafpart_rtis,
-															rtindex);
+						estate->es_unpruned_relids =
+							bms_add_member(estate->es_unpruned_relids, rtindex);
 				}
+			}
+			else if (pinfo->initial_pruning_steps == NIL)
+			{
+				/*
+				 * All partitions better be present in es_unpruned_relids when
+				 * none are initially prunable.
+				 */
+#ifdef USE_ASSERT_CHECKING
+				int			part_index = -1;
+
+				while ((part_index = bms_next_member(pprune->present_parts,
+													 part_index)) >= 0)
+				{
+					Index		rtindex = pprune->leafpart_rti_map[part_index];
+
+					if (rtindex)
+						Assert(bms_is_member(rtindex, estate->es_unpruned_relids));
+				}
+#endif
 			}
 
 			j++;
@@ -2491,9 +2509,10 @@ InitPartitionPruneContext(PartitionPruneContext *context,
  *		Initialize exec pruning contexts deferred by CreatePartitionPruneState()
  *
  * This function finalizes exec pruning setup for a PartitionPruneState by
- * initializing contexts for pruning steps that require the parent plan's
- * PlanState. It iterates over PartitionPruningData entries and sets up the
- * necessary execution contexts for pruning during query execution.
+ * initializing contexts for pruning steps that require PARAM_EXEC parameters
+ * and the parent plan's PlanState. It iterates over PartitionPruningData
+ * entries and sets up the necessary execution contexts for pruning during
+ * query execution.
  *
  * Also fix the mapping of partition indexes to subplan indexes contained in
  * prunestate by considering the new list of subplans that survived initial
@@ -2521,8 +2540,15 @@ InitExecPartitionPruneContexts(PartitionPruneState *prunestate,
 	bool		fix_subplan_map = false;
 
 	Assert(prunestate->do_exec_prune);
+	Assert(prunestate->econtext);
 	Assert(parent_plan != NULL);
 	estate = parent_plan->state;
+
+	/*
+	 * These might not be available when ExecCreatePartitionPruneState() is
+	 * called.
+	 */
+	prunestate->econtext->ecxt_param_exec_vals = estate->es_param_exec_vals;
 
 	/*
 	 * No need to fix subplans maps if initial pruning didn't eliminate any
