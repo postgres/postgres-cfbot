@@ -623,7 +623,7 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 	lasttup = (IndexTuple) PageGetItem(pstate->page, iid);
 
 	/* Determine the first attribute whose values change on caller's page */
-	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
+	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup, NULL);
 
 	for (; startikey < so->numberOfKeys; startikey++)
 	{
