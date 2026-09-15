@@ -252,6 +252,18 @@ my_tableam_handler(PG_FUNCTION_ARGS)
      </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry>
+    <term><structfield>bitmap_and_inexact</structfield>, <structfield>bitmap_or_inexact</structfield></term>
+    <listitem>
+     <para>
+      Optional per-block callbacks that let the access method tell a
+      <literal>BitmapAnd</literal> or <literal>BitmapOr</literal> that a
+      block's item numbers cannot be combined exactly; the block is then
+      combined conservatively and rechecked.
+     </para>
+    </listitem>
+   </varlistentry>
   </variablelist>
 
   <para>

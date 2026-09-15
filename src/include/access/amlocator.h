@@ -54,6 +54,7 @@
 #ifndef AMLOCATOR_H
 #define AMLOCATOR_H
 
+#include "storage/buf.h"
 #include "storage/off.h"
 
 /* avoid including rel.h here; rel.h and tableam.h include this header */
@@ -127,6 +128,34 @@ typedef struct LocatorDesc
 	 * version current at that time, not the one the event was queued for.
 	 */
 	bool		old_version_retained;
+
+	/*
+	 * May a set intersection (BitmapAnd) lose a row in this group?  A bitmap
+	 * scan splits each locator into a group and a slot within it, the block
+	 * and line pointer offset for heap, and an intersection keeps a slot only
+	 * when every input has it.  If two index entries for one row version can
+	 * name different slots in a group, the intersection would drop the row;
+	 * when this returns true, BitmapAnd unions the inputs' slots for the
+	 * group instead and marks it for recheck.
+	 *
+	 * BitmapAnd consults only this callback, never the table.  The callback
+	 * may keep a buffer pinned in *cache across calls on one scan; the caller
+	 * releases it.  NULL means every group intersects exactly.
+	 */
+	bool		(*bitmap_and_inexact) (struct RelationData *rel, uint64 group,
+									   Buffer *cache);
+
+	/*
+	 * May a set union (BitmapOr) mishandle this group?  Union keeps a slot
+	 * when any input has it, so for heap it cannot lose a row.  This is for
+	 * an AM whose groups do not correspond one to one with its storage, so
+	 * that a union of two exact inputs may still need the group rechecked;
+	 * when it returns true, BitmapOr marks the group for recheck.  Same
+	 * calling convention as bitmap_and_inexact; NULL means every group unions
+	 * exactly.
+	 */
+	bool		(*bitmap_or_inexact) (struct RelationData *rel, uint64 group,
+									  Buffer *cache);
 } LocatorDesc;
 
 #endif							/* AMLOCATOR_H */
