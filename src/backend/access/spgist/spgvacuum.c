@@ -625,7 +625,18 @@ spgvacuumpage(spgBulkDeleteState *bds, Buffer buffer)
 	BlockNumber blkno = BufferGetBlockNumber(buffer);
 	Page		page;
 
-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+	/*
+	 * Get a full cleanup lock on this page.  We must get such a lock on every
+	 * leaf page over the course of the vacuum scan, whether or not it
+	 * actually contains any deletable tuples.
+	 *
+	 * Note: we could avoid this for inner pages, but not for the root page.
+	 * The root page can start out as a leaf page, but subsequently become an
+	 * inner page, even while a scan holds an interlock pin on that page (this
+	 * isn't possible in nbtree because root splits always create a new root
+	 * page, stored within a separate block number).
+	 */
+	LockBufferForCleanup(buffer);
 	page = BufferGetPage(buffer);
 
 	if (PageIsNew(page))
@@ -706,7 +717,7 @@ spgprocesspending(spgBulkDeleteState *bds)
 		blkno = ItemPointerGetBlockNumber(&pitem->tid);
 		buffer = ReadBufferExtended(index, MAIN_FORKNUM, blkno,
 									RBM_NORMAL, bds->info->strategy);
-		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+		LockBufferForCleanup(buffer);
 		page = BufferGetPage(buffer);
 
 		if (PageIsNew(page) || SpGistPageIsDeleted(page))
@@ -794,6 +805,16 @@ spgprocesspending(spgBulkDeleteState *bds)
 }
 
 /*
+ * Chunk size for the main bulkdelete scan: the pending list is drained at each
+ * chunk boundary, the only point where the read stream is idle (see
+ * spgvacuumscan).  This trades read-ahead against memory -- a larger interval
+ * lets the stream prefetch further between resets, but lets the pending list
+ * grow larger before it is bounded.  4096 keeps prefetch effective while
+ * capping the list at a few thousand entries under heavy concurrent insertion.
+ */
+#define SPGIST_VACUUM_DRAIN_INTERVAL	4096
+
+/*
  * Perform a bulkdelete scan
  */
 static void
@@ -845,22 +866,29 @@ spgvacuumscan(spgBulkDeleteState *bds)
 	 * delete some deletable tuples.  See more extensive comments about this
 	 * in btvacuumscan().
 	 */
+	num_pages = 0;				/* 0 forces an initial length check below */
 	for (;;)
 	{
-		/* Get the current relation length */
-		if (needLock)
-			LockRelationForExtension(index, ExclusiveLock);
-		num_pages = RelationGetNumberOfBlocks(index);
-		if (needLock)
-			UnlockRelationForExtension(index, ExclusiveLock);
-
-		/* Quit if we've scanned the whole relation */
+		/* Refresh the relation length once we have caught up to it */
 		if (p.current_blocknum >= num_pages)
-			break;
+		{
+			if (needLock)
+				LockRelationForExtension(index, ExclusiveLock);
+			num_pages = RelationGetNumberOfBlocks(index);
+			if (needLock)
+				UnlockRelationForExtension(index, ExclusiveLock);
 
-		p.last_exclusive = num_pages;
+			/* Quit if we've scanned the whole relation */
+			if (p.current_blocknum >= num_pages)
+				break;
+		}
 
-		/* Iterate over pages, then loop back to recheck length */
+		/* Give the stream the next chunk; see SPGIST_VACUUM_DRAIN_INTERVAL */
+		if (num_pages - p.current_blocknum > SPGIST_VACUUM_DRAIN_INTERVAL)
+			p.last_exclusive = p.current_blocknum + SPGIST_VACUUM_DRAIN_INTERVAL;
+		else
+			p.last_exclusive = num_pages;
+
 		while (true)
 		{
 			Buffer		buf;
@@ -874,18 +902,18 @@ spgvacuumscan(spgBulkDeleteState *bds)
 				break;
 
 			spgvacuumpage(bds, buf);
-
-			/* empty the pending-list after each page */
-			if (bds->pendingList != NULL)
-				spgprocesspending(bds);
 		}
 
 		/*
-		 * We have to reset the read stream to use it again. After returning
-		 * InvalidBuffer, the read stream API won't invoke our callback again
-		 * until the stream has been reset.
+		 * Reset the read stream for the next chunk (after returning
+		 * InvalidBuffer it won't call our callback again until reset).  Now
+		 * that it is idle, drain the pending list: spgprocesspending revisits
+		 * redirect-relocated tuples under the same cleanup-lock interlock.
 		 */
 		read_stream_reset(stream);
+
+		if (bds->pendingList != NULL)
+			spgprocesspending(bds);
 	}
 
 	read_stream_end(stream);

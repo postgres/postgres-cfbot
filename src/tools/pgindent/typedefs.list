@@ -207,6 +207,7 @@ BOOL
 BOOLEAN
 BOX
 BTArrayKeyInfo
+BTBatchData
 BTBuildState
 BTCallbackState
 BTCycleId
@@ -234,8 +235,6 @@ BTScanInsertData
 BTScanKeyPreproc
 BTScanOpaque
 BTScanOpaqueData
-BTScanPosData
-BTScanPosItem
 BTShared
 BTSortArrayContext
 BTSpool
@@ -264,6 +263,10 @@ BaseBackupCmd
 BaseBackupTargetHandle
 BaseBackupTargetType
 BatchMVCCState
+BatchMatchingItem
+BatchPosAdvanceResult
+BatchRingBuffer
+BatchRingItemPos
 BeginDirectModify_function
 BeginForeignInsert_function
 BeginForeignModify_function
@@ -1047,6 +1050,8 @@ GBT_NUMKEY_R
 GBT_VARKEY
 GBT_VARKEY_R
 GENERAL_NAME
+GISTBatchData
+GISTBatchItem
 GISTBuildBuffers
 GISTBuildState
 GISTDeletedPageContents
@@ -1211,6 +1216,7 @@ Hash
 HashAggBatch
 HashAggSpill
 HashAllocFunc
+HashBatchData
 HashBuildState
 HashBulkDeleteStreamPrivate
 HashCompareFunc
@@ -1232,8 +1238,6 @@ HashPageStat
 HashPath
 HashScanOpaque
 HashScanOpaqueData
-HashScanPosData
-HashScanPosItem
 HashSkewBucket
 HashState
 HashValueFunc
@@ -1241,6 +1245,7 @@ HbaLine
 HeadlineJsonState
 HeadlineParsedText
 HeadlineWordEntry
+HeapBatchData
 HeapCheckContext
 HeapCheckReadStreamData
 HeapPageFreeze
@@ -1321,6 +1326,8 @@ IndexOrderByDistance
 IndexPath
 IndexRuntimeKeyInfo
 IndexScan
+IndexScanBatch
+IndexScanBatchData
 IndexScanDesc
 IndexScanDescData
 IndexScanHeapData
@@ -2950,6 +2957,8 @@ SortSupportData
 SortTuple
 SortTupleComparator
 SortedPoint
+SpGistBatchData
+SpGistBatchItem
 SpGistBuildState
 SpGistCache
 SpGistDeadTuple
@@ -3571,20 +3580,22 @@ amcanreturn_function
 amcostestimate_function
 amendscan_function
 amestimateparallelscan_function
+amgetbatch_function
 amgetbitmap_function
 amgettreeheight_function
 amgettuple_function
 aminitparallelscan_function
 aminsert_function
 aminsertcleanup_function
-ammarkpos_function
+amkillitemsbatch_function
 amoptions_function
 amparallelrescan_function
+amposreset_function
 amproperty_function
 amrescan_function
-amrestrpos_function
 amtranslate_cmptype_function
 amtranslate_strategy_function
+amunguardbatch_function
 amvacuumcleanup_function
 amvalidate_function
 array_iter
@@ -4329,7 +4340,6 @@ standard_qp_extra
 stemmer_module
 stmtCacheEntry
 storeInfo
-storeRes_func
 stream_stop_callback
 string
 substitute_actual_parameters_context
