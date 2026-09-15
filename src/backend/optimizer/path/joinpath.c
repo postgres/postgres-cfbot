@@ -301,6 +301,19 @@ add_paths_to_joinrel(PlannerInfo *root,
 	}
 
 	/*
+	 * The rules above parameterize a join where a SpecialJoinInfo constrains
+	 * the join order.  A join folded into an existence check is probed once
+	 * per row of whatever drives it, and the join order leaves that shape
+	 * optional.  Add the parameterization it needs, from any relation outside
+	 * the join.
+	 */
+	if (root->filter_only_rels != NULL &&
+		bms_is_subset(joinrelids, root->filter_only_rels))
+		extra.param_source_rels =
+			bms_join(extra.param_source_rels,
+					 bms_difference(root->all_baserels, joinrelids));
+
+	/*
 	 * However, when a LATERAL subquery is involved, there will simply not be
 	 * any paths for the joinrel that aren't parameterized by whatever the
 	 * subquery is parameterized by, unless its parameterization is resolved

@@ -1487,7 +1487,9 @@ GROUP BY c1.w, c1.z;
 
 -- Pathkeys, built in a subtree, can be used to optimize GROUP-BY clause
 -- ordering.  Also, here we check that it doesn't depend on the initial clause
--- order in the GROUP-BY list.
+-- order in the GROUP-BY list.  Eager aggregation is disabled so that the
+-- pathkeys of the join are what reaches the grouping step.
+SET enable_eager_aggregate = off;
 EXPLAIN (COSTS OFF)
 SELECT c1.y,c1.x FROM group_agg_pk c1
   JOIN group_agg_pk c2
@@ -1498,6 +1500,7 @@ SELECT c1.y,c1.x FROM group_agg_pk c1
   JOIN group_agg_pk c2
   ON c1.x = c2.x
 GROUP BY c1.y,c2.x,c1.x;
+RESET enable_eager_aggregate;
 
 RESET enable_nestloop;
 RESET enable_hashjoin;
