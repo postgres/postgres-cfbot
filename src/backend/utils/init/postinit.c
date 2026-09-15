@@ -34,6 +34,7 @@
 #include "catalog/pg_db_role_setting.h"
 #include "catalog/pg_tablespace.h"
 #include "libpq/auth.h"
+#include "libpq/auth-validate.h"
 #include "libpq/libpq-be.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -96,6 +97,7 @@ static void TransactionTimeoutHandler(void);
 static void IdleSessionTimeoutHandler(void);
 static void IdleStatsUpdateTimeoutHandler(void);
 static void ClientCheckTimeoutHandler(void);
+static void CredentialValidationTimeoutHandler(void);
 static bool ThereIsAtLeastOneRole(void);
 static void process_startup_options(Port *port, bool am_superuser);
 static void process_settings(Oid databaseid, Oid roleid);
@@ -806,6 +808,8 @@ InitPostgres(const char *in_dbname, Oid dboid,
 		RegisterTimeout(CLIENT_CONNECTION_CHECK_TIMEOUT, ClientCheckTimeoutHandler);
 		RegisterTimeout(IDLE_STATS_UPDATE_TIMEOUT,
 						IdleStatsUpdateTimeoutHandler);
+		RegisterTimeout(CREDENTIAL_VALIDATION_TIMEOUT,
+						CredentialValidationTimeoutHandler);
 	}
 
 	/*
@@ -1269,6 +1273,12 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	/* Initialize this backend's session state. */
 	InitializeSession();
 
+	/* Initialize credential validation system */
+	InitializeCredentialValidation();
+
+	/* Enable credential validation timeout if configured */
+	EnableCredentialValidationTimeout();
+
 	/*
 	 * If this is an interactive session, load any libraries that should be
 	 * preloaded at backend start.  Since those are determined by GUCs, this
@@ -1471,6 +1481,14 @@ static void
 IdleStatsUpdateTimeoutHandler(void)
 {
 	IdleStatsUpdateTimeoutPending = true;
+	InterruptPending = true;
+	SetLatch(MyLatch);
+}
+
+static void
+CredentialValidationTimeoutHandler(void)
+{
+	CredentialValidationTimeoutPending = true;
 	InterruptPending = true;
 	SetLatch(MyLatch);
 }

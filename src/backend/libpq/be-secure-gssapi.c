@@ -788,3 +788,40 @@ be_gssapi_get_delegation(Port *port)
 
 	return port->gss->delegated_creds;
 }
+
+/*
+ * Report whether the GSSAPI security context established at authentication
+ * time has passed its expiration.
+ *
+ * The lifetime of the GSS context is derived from the Kerberos ticket the
+ * client presented at connection time.  gss_context_time() reports how many
+ * seconds the context will remain valid; once that reaches zero (or the call
+ * reports GSS_S_CONTEXT_EXPIRED) the credential that authenticated this
+ * session has expired.  This is a purely local check and involves no
+ * round-trip to the KDC.
+ *
+ * Returns true if a context is present and has expired, false otherwise.  If
+ * no GSS context is present, or the lifetime cannot be read, the session is
+ * conservatively treated as not expired so that callers do not terminate it on
+ * the basis of missing or unreadable state.
+ */
+bool
+be_gssapi_get_context_expired(Port *port)
+{
+	OM_uint32	major,
+				minor,
+				lifetime;
+
+	if (!port || !port->gss || port->gss->ctx == GSS_C_NO_CONTEXT)
+		return false;
+
+	major = gss_context_time(&minor, port->gss->ctx, &lifetime);
+
+	if (major == GSS_S_CONTEXT_EXPIRED)
+		return true;
+
+	if (GSS_ERROR(major))
+		return false;
+
+	return (lifetime == 0);
+}

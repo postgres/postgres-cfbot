@@ -2277,6 +2277,35 @@ be_tls_get_peer_serial(Port *port, char *ptr, size_t len)
 		ptr[0] = '\0';
 }
 
+/*
+ * Report whether the client's certificate has passed its notAfter date.
+ *
+ * Returns true if a peer certificate is present and its validity period has
+ * already ended (i.e. the certificate is expired as of now), false otherwise.
+ * If no peer certificate is present, or the notAfter field cannot be parsed,
+ * the certificate is conservatively treated as not expired so that callers do
+ * not terminate a session on the basis of an unreadable field.
+ */
+bool
+be_tls_get_peer_cert_expired(Port *port)
+{
+	const ASN1_TIME *not_after;
+
+	if (port->peer == NULL)
+		return false;
+
+	not_after = X509_get0_notAfter(port->peer);
+	if (not_after == NULL)
+		return false;
+
+	/*
+	 * X509_cmp_current_time() returns -1 if the supplied time is in the past
+	 * relative to now, 1 if it is in the future, and 0 on a parse error.  A
+	 * notAfter that lies in the past means the certificate has expired.
+	 */
+	return (X509_cmp_current_time(not_after) < 0);
+}
+
 char *
 be_tls_get_certificate_hash(Port *port, size_t *len)
 {
