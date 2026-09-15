@@ -21,7 +21,6 @@ static void create_rel_filename_map(const char *old_data, const char *new_data,
 static void report_unmatched_relation(const RelInfo *rel, const DbInfo *db,
 									  bool is_new_db);
 static void free_db_and_rel_infos(DbInfoArr *db_arr);
-static void get_template0_info(ClusterInfo *cluster);
 static void get_db_infos(ClusterInfo *cluster);
 static char *get_rel_infos_query(void);
 static void process_rel_infos(DbInfo *dbinfo, PGresult *res, void *arg);
@@ -328,7 +327,7 @@ get_db_rel_and_slot_infos(ClusterInfo *cluster)
  * Get information about template0, which will be copied from the old cluster
  * to the new cluster.
  */
-static void
+void
 get_template0_info(ClusterInfo *cluster)
 {
 	PGconn	   *conn = connectToServer(cluster, "template1");
