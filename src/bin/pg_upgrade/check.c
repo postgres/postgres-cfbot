@@ -734,6 +734,14 @@ check_new_cluster(void)
 			 * system boundaries.
 			 */
 			check_hard_link(TRANSFER_MODE_SWAP);
+
+			/*
+			 * Swap mode moves the old cluster's relation files into place, so
+			 * it cannot rewrite visibility maps from before the 4-bit layout.
+			 */
+			if (old_cluster.controldata.cat_ver < VISIBILITYMAP_WIDTH_CHANGE_CAT_VER)
+				pg_fatal("Swap mode cannot upgrade clusters whose visibility maps must be rewritten.\n"
+						 "Use a different transfer mode.");
 			break;
 	}
 
