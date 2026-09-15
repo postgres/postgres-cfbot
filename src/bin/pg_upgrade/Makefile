@@ -4,6 +4,7 @@ PGFILEDESC = "pg_upgrade - an in-place binary upgrade utility"
 PGAPPICON = win32
 
 EXTRA_INSTALL=contrib/dblink \
+	contrib/pg_visibility \
 	contrib/postgres_fdw \
 	contrib/test_decoding \
 	src/test/modules/dummy_seclabel \
