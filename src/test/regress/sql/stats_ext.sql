@@ -1835,20 +1835,32 @@ DROP USER regress_stats_user1;
 -- CREATE STATISTICS checks for the owner
 CREATE ROLE regress_relowner;
 CREATE ROLE regress_stxowner;
-CREATE TABLE stats_ext_tbl (a int, b int);
+CREATE ROLE regress_stxowner1;
+CREATE TABLE stats_ext_tbl (
+  a int, b int, c int,
+  d int generated always as (c + 1) virtual,
+  e int generated always as (c + 1) stored);
 ALTER TABLE stats_ext_tbl OWNER TO regress_relowner;
 CREATE STATISTICS tst ON a, b FROM stats_ext_tbl;
+CREATE STATISTICS tst1 ON a, c, d FROM stats_ext_tbl;
 ALTER STATISTICS tst OWNER TO regress_stxowner;
+ALTER STATISTICS tst1 OWNER TO regress_stxowner1;
 SELECT stxowner::regrole FROM pg_statistic_ext WHERE stxname = 'tst';
 
 -- re-creating statistics via ALTER TABLE preserve the statistics owner.
 ALTER TABLE stats_ext_tbl ALTER COLUMN a TYPE bigint;
 SELECT stxowner::regrole FROM pg_statistic_ext WHERE stxname = 'tst';
+ALTER TABLE stats_ext_tbl
+  ALTER COLUMN b TYPE int,
+  ALTER COLUMN d SET EXPRESSION AS (c + 2),
+  ALTER COLUMN e SET EXPRESSION AS (c + 2);
+SELECT stxname, stxowner::regrole FROM pg_statistic_ext WHERE stxname IN ('tst', 'tst1');
 
 -- Tidy up
 DROP TABLE stats_ext_tbl;
 DROP ROLE regress_relowner;
 DROP ROLE regress_stxowner;
+DROP ROLE regress_stxowner1;
 
 CREATE TABLE grouping_unique (x integer);
 INSERT INTO grouping_unique (x) SELECT gs FROM generate_series(1,1000) AS gs;
