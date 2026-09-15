@@ -7,6 +7,26 @@
  * atomically and dealing with cache coherency. Used to implement locking
  * facilities and lockless algorithms/data structures.
  *
+ * IMPLEMENTATION SELECTION:
+ *
+ * PostgreSQL's atomic operations can be implemented using either:
+ *
+ * 1. C11 stdatomic.h (when USE_STDATOMIC_H is defined)
+ *    - Uses standard C11 <stdatomic.h> for all atomic operations
+ *    - Better portability and compiler optimizations
+ *    - Requires MSVC 2022+ or GCC 4.9+/Clang 3.1+
+ *
+ * 2. Traditional platform-specific implementations (when USE_STDATOMIC_H is not defined)
+ *    - Uses battle-tested PostgreSQL implementations
+ *    - Architecture-specific: arch-x86.h, arch-arm.h, arch-ppc.h
+ *    - Compiler intrinsics: generic-gcc.h, generic-msvc.h
+ *    - Fallback implementations: generic.h, fallback.h
+ *
+ * Both implementations provide identical public API and semantics.
+ * Selection is made at build time via -Duse_stdatomic=auto/yes/no.
+ *
+ * PORTING NOTES:
+ *
  * To bring up postgres on a platform/compiler at the very least
  * implementations for the following operations should be provided:
  * * pg_compiler_barrier(), pg_write_barrier(), pg_read_barrier()
@@ -14,13 +34,8 @@
  * * pg_atomic_test_set_flag(), pg_atomic_init_flag(), pg_atomic_clear_flag()
  * * PG_HAVE_8BYTE_SINGLE_COPY_ATOMICITY should be defined if appropriate.
  *
- * There exist generic, hardware independent, implementations for several
- * compilers which might be sufficient, although possibly not optimal, for a
- * new platform. If no such generic implementation is available spinlocks will
- * be used to implement the 64-bit parts of the API.
- *
- * Implement _u64 atomics if and only if your platform can use them
- * efficiently (and obviously correctly).
+ * For new platforms, prefer using stdatomic.h if available, as it reduces
+ * maintenance burden and leverages compiler-provided implementations.
  *
  * Use higher level functionality (lwlocks, spinlocks, heavyweight locks)
  * whenever possible. Writing correct code using these facilities is hard.
@@ -38,15 +53,76 @@
 #ifndef ATOMICS_H
 #define ATOMICS_H
 
+/*
+ * Frontend code restriction
+ *
+ * Traditionally, atomics.h could not be included from frontend code because
+ * the platform-specific implementations often relied on backend-only features.
+ *
+ * With the stdatomic.h implementation, this restriction is no longer necessary
+ * since stdatomic.h is a standard header. However, we keep the restriction for
+ * the traditional implementation path to maintain compatibility.
+ */
 #ifdef FRONTEND
-#error "atomics.h may not be included from frontend code"
+#ifndef USE_STDATOMIC_H
+#error "atomics.h may not be included from frontend code (use -Duse_stdatomic=yes if atomics are needed)"
+#endif
 #endif
 
 #define INSIDE_ATOMICS_H
 
+/*
+ * The public API and the _impl signatures keep the historical volatile
+ * qualifier on the atomic pointer, because many callers reach atomic fields
+ * through volatile-qualified struct pointers.  Under C11 the _Atomic types
+ * carry their own ordering guarantees, so the volatile is redundant for the
+ * atomic accesses themselves and is accepted (and effectively ignored for the
+ * atomic operation) by the supported compilers, including MSVC.
+ */
+
 #include <limits.h>
 
 /*
+ * PostgreSQL atomics can be implemented using either C11 stdatomic.h
+ * or platform-specific implementations. The choice is made at build
+ * configuration time via the USE_STDATOMIC_H preprocessor definition.
+ *
+ * When USE_STDATOMIC_H is defined, we use C11 <stdatomic.h> for all
+ * atomic operations. This provides better portability and potentially
+ * better compiler optimizations.
+ *
+ * When USE_STDATOMIC_H is not defined (default initially), we use
+ * traditional platform-specific implementations (arch-*.h, generic-*.h)
+ * that have been battle-tested in PostgreSQL for many years.
+ *
+ * Both paths provide identical public API and semantics.
+ */
+
+#ifdef USE_STDATOMIC_H
+
+/*
+ * C11 stdatomic.h implementation path
+ *
+ * This uses the standard C11 <stdatomic.h> header for atomic operations.
+ * The type definitions and implementations are in stdatomic_impl.h.
+ */
+
+#include "port/atomics/stdatomic_impl.h"
+
+/*
+ * The public API is provided by static inline functions in the common code
+ * section below. Those functions call _impl functions, which are provided by
+ * stdatomic_impl.h for this path.
+ */
+
+#else							/* !USE_STDATOMIC_H */
+
+/*
+ * Traditional platform-specific implementation path
+ *
+ * This is the original PostgreSQL atomics implementation using
+ * architecture-specific headers and compiler intrinsics.
+ *
  * First a set of architecture specific files is included.
  *
  * These files can provide the full set of atomics or can do pretty much
@@ -116,6 +192,17 @@
  */
 #include "port/atomics/generic.h"
 
+#endif							/* USE_STDATOMIC_H */
+
+/*
+ * Common code for both stdatomic.h and traditional implementations.
+ *
+ * The following definitions provide the public API that works identically
+ * regardless of which implementation is used. The static inline functions
+ * below call _impl functions which are provided by either stdatomic_impl.h
+ * (when USE_STDATOMIC_H is defined) or the traditional implementation files
+ * (generic.h, etc.) otherwise.
+ */
 
 /*
  * pg_compiler_barrier - prevent the compiler from moving code across
