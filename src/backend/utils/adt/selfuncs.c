@@ -413,6 +413,7 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		AttStatsSlot sslot;
 		bool		match = false;
 		int			i;
+		double		sumcommon = 0.0;
 
 		/*
 		 * Is the constant "=" to any of the column's most common values?
@@ -427,6 +428,7 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		{
 			LOCAL_FCINFO(fcinfo, 2);
 			FmgrInfo	eqproc;
+			bool		scan_entire_mcv = false;
 
 			fmgr_info(opfuncoid, &eqproc);
 
@@ -446,6 +448,33 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 			else
 				fcinfo->args[0].value = constval;
 
+			/*
+			 * Scanning the entire MCV array is needed when the collation used
+			 * for the comparison is nondeterministic and differs from the
+			 * statistics collation. In this case, the comparison may match
+			 * multiple MCV values, so we must continue scanning after finding
+			 * a match.
+			 */
+			if (sslot.stacoll != collation && OidIsValid(collation))
+			{
+				pg_locale_t mylocale = pg_newlocale_from_collation(collation);
+
+				scan_entire_mcv = !mylocale->deterministic;
+			}
+
+			/*
+			 * Compare the constant expression with the MCVs.
+			 *
+			 * If the constant matches the current MCV, stop here when a full
+			 * MCV scan is not required. Otherwise, continue scanning the
+			 * remaining MCVs and accumulate the selectivity of all matching
+			 * MCVs.
+			 *
+			 * While scanning, also accumulate the selectivity of the MCVs
+			 * examined so far. This is used later to estimate the selectivity
+			 * of a non-NULL constant that does not match any MCV.
+			 */
+			selec = 0.0;
 			for (i = 0; i < sslot.nvalues; i++)
 			{
 				Datum		fresult;
@@ -458,9 +487,22 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 				fresult = FunctionCallInvoke(fcinfo);
 				if (!fcinfo->isnull && DatumGetBool(fresult))
 				{
+					/*
+					 * Constant is "=" to this common value.  We know
+					 * selectivity exactly (or as exactly as ANALYZE could
+					 * calculate it, anyway).
+					 */
 					match = true;
-					break;
+					if (!scan_entire_mcv)
+					{
+						selec = sslot.numbers[i];
+						break;
+					}
+
+					selec += sslot.numbers[i];
 				}
+
+				sumcommon += sslot.numbers[i];
 			}
 		}
 		else
@@ -469,26 +511,15 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 			i = 0;				/* keep compiler quiet */
 		}
 
-		if (match)
-		{
-			/*
-			 * Constant is "=" to this common value.  We know selectivity
-			 * exactly (or as exactly as ANALYZE could calculate it, anyway).
-			 */
-			selec = sslot.numbers[i];
-		}
-		else
+		if (!match)
 		{
 			/*
 			 * Comparison is against a constant that is neither NULL nor any
 			 * of the common values.  Its selectivity cannot be more than
 			 * this:
 			 */
-			double		sumcommon = 0.0;
 			double		otherdistinct;
 
-			for (i = 0; i < sslot.nnumbers; i++)
-				sumcommon += sslot.numbers[i];
 			selec = 1.0 - sumcommon - nullfrac;
 			CLAMP_PROBABILITY(selec);
 
