@@ -195,6 +195,7 @@
 
 #include "access/parallel.h"
 #include "access/slru.h"
+#include "access/subtrans.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/twophase_rmgr.h"
@@ -3933,6 +3934,56 @@ CheckForSerializableConflictOutNeeded(Relation relation, Snapshot snapshot)
 	}
 
 	return true;
+}
+
+/*
+ * Fail if we already have an rw-conflict out to the given transaction.
+ *
+ * This is used when a unique check is about to rely on that transaction's
+ * deletion.  The preexisting conflict requires us to appear before the
+ * deleting transaction, while reusing its key requires us to appear after it.
+ */
+void
+CheckForSerializableConflictOutToXid(TransactionId xid)
+{
+	SERIALIZABLEXIDTAG sxidtag;
+	SERIALIZABLEXID *sxid;
+	bool		failure = false;
+
+	if (MySerializableXact == InvalidSerializableXact)
+		return;
+
+	Assert(TransactionIdIsValid(xid));
+
+	if (TransactionIdIsCurrentTransactionId(xid))
+		return;
+
+	xid = SubTransGetTopmostTransaction(xid);
+	sxidtag.xid = xid;
+
+	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
+	if (SxactIsDoomed(MySerializableXact))
+		failure = true;
+	else
+	{
+		sxid = (SERIALIZABLEXID *)
+			hash_search(SerializableXidHash, &sxidtag, HASH_FIND, NULL);
+		if (sxid != NULL && sxid->myXact != MySerializableXact &&
+			RWConflictExists(MySerializableXact, sxid->myXact))
+		{
+			/* Make the error persistent across a subtransaction rollback. */
+			MySerializableXact->flags |= SXACT_FLAG_DOOMED;
+			failure = true;
+		}
+	}
+	LWLockRelease(SerializableXactHashLock);
+
+	if (failure)
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("could not serialize access due to read/write dependencies among transactions"),
+				 errdetail_internal("Reason code: Canceled because a unique check relied on a concurrent deletion."),
+				 errhint("The transaction might succeed if retried.")));
 }
 
 /*
