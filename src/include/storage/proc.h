@@ -383,6 +383,15 @@ typedef struct PGPROC
 	 ************************************************************************/
 
 	uint32		wait_event_info;	/* proc's wait information */
+
+	/************************************************************************
+	 * Global temporary tables
+	 ************************************************************************/
+
+	TransactionId tempfrozenxid;	/* minimum relfrozenxid over all global
+									 * temporary tables in use */
+	MultiXactId tempminmxid;	/* minimum relminmxid over all global
+								 * temporary tables in use */
 }
 PGPROC;
 

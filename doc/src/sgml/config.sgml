@@ -10067,7 +10067,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        <listitem>
         <para>
          <command>VACUUM</command> performs an aggressive scan if the table's
-         <structname>pg_class</structname>.<structfield>relfrozenxid</structfield> field has reached
+         <structname>pg_class</structname>.<structfield>relfrozenxid</structfield>
+         field (or the in-memory value held for a global temporary table) has reached
          the age specified by this setting.  An aggressive scan differs from
          a regular <command>VACUUM</command> in that it visits every page that might
          contain unfrozen XIDs or MXIDs, not just those that might contain dead
@@ -10115,7 +10116,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         <para>
          Specifies the maximum age (in transactions) that a table's
          <structname>pg_class</structname>.<structfield>relfrozenxid</structfield>
-         field can attain before <command>VACUUM</command> takes
+         field (or the in-memory value held for a global temporary table)
+         can attain before <command>VACUUM</command> takes
          extraordinary measures to avoid system-wide transaction ID
          wraparound failure.  This is <command>VACUUM</command>'s
          strategy of last resort.  The failsafe typically triggers
@@ -10151,7 +10153,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        <listitem>
         <para>
          <command>VACUUM</command> performs an aggressive scan if the table's
-         <structname>pg_class</structname>.<structfield>relminmxid</structfield> field has reached
+         <structname>pg_class</structname>.<structfield>relminmxid</structfield>
+         field (or the in-memory value held for a global temporary table) has reached
          the age specified by this setting.  An aggressive scan differs from
          a regular <command>VACUUM</command> in that it visits every page that might
          contain unfrozen XIDs or MXIDs, not just those that might contain dead
@@ -10197,7 +10200,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         <para>
          Specifies the maximum age (in multixacts) that a table's
          <structname>pg_class</structname>.<structfield>relminmxid</structfield>
-         field can attain before <command>VACUUM</command> takes
+         field (or the in-memory value held for a global temporary table)
+         can attain before <command>VACUUM</command> takes
          extraordinary measures to avoid system-wide multixact ID
          wraparound failure.  This is <command>VACUUM</command>'s
          strategy of last resort.  The failsafe typically triggers when

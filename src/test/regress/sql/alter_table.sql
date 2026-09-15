@@ -2212,6 +2212,7 @@ FROM pg_class,
     pg_filenode_relation(reltablespace, pg_relation_filenode(oid)) AS mapped_oid
 WHERE relkind IN ('r', 'i', 'S', 't', 'm')
   AND relpersistence != 't'
+  AND relpersistence != 'g'
   AND mapped_oid IS DISTINCT FROM oid;
 SELECT m.* FROM filenode_mapping m LEFT JOIN pg_class c ON c.oid = m.oid
 WHERE c.oid IS NOT NULL OR m.mapped_oid IS NOT NULL;
@@ -2476,8 +2477,10 @@ DROP TABLE parent CASCADE;
 -- check any TEMP-ness
 CREATE TEMP TABLE temp_parted (a int) PARTITION BY LIST (a);
 CREATE TABLE perm_part (a int);
+CREATE GLOBAL TEMP TABLE global_temp_part (a int);
 ALTER TABLE temp_parted ATTACH PARTITION perm_part FOR VALUES IN (1);
-DROP TABLE temp_parted, perm_part;
+ALTER TABLE temp_parted ATTACH PARTITION global_temp_part FOR VALUES IN (1);
+DROP TABLE temp_parted, perm_part, global_temp_part;
 
 -- check that the table being attached is not a typed table
 CREATE TYPE mytype AS (a int);

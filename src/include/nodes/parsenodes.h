@@ -3543,7 +3543,8 @@ typedef struct IndexStmt
 	bool		unique;			/* is index unique? */
 	bool		nulls_not_distinct; /* null treatment for UNIQUE constraints */
 	bool		primary;		/* is index a primary key? */
-	bool		isconstraint;	/* is it for a pkey/unique constraint? */
+	bool		isconstraint;	/* is it for a pkey/unique/exclusion
+								 * constraint? */
 	bool		iswithoutoverlaps;	/* is the constraint WITHOUT OVERLAPS? */
 	bool		deferrable;		/* is the constraint DEFERRABLE? */
 	bool		initdeferred;	/* is the constraint INITIALLY DEFERRED? */
@@ -4114,6 +4115,7 @@ typedef enum DiscardMode
 	DISCARD_PLANS,
 	DISCARD_SEQUENCES,
 	DISCARD_TEMP,
+	DISCARD_GLOBAL_TEMP,
 } DiscardMode;
 
 typedef struct DiscardStmt

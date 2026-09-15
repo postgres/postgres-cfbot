@@ -197,7 +197,7 @@ extern void blrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 extern void blendscan(IndexScanDesc scan);
 extern IndexBuildResult *blbuild(Relation heap, Relation index,
 								 struct IndexInfo *indexInfo);
-extern void blbuildempty(Relation index);
+extern void blbuildempty(Relation index, ForkNumber forknum);
 extern IndexBulkDeleteResult *blbulkdelete(IndexVacuumInfo *info,
 										   IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback,
 										   void *callback_state);

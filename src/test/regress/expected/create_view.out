@@ -123,7 +123,7 @@ CREATE VIEW temp_view_test.v2 AS SELECT * FROM base_table;
 CREATE VIEW temp_view_test.v3_temp AS SELECT * FROM temp_table;
 NOTICE:  view "v3_temp" will be a temporary view
 DETAIL:  It depends on temporary table temp_table.
-ERROR:  cannot create temporary relation in non-temporary schema
+ERROR:  cannot create local temporary relation in non-temporary schema
 -- should fail
 CREATE SCHEMA test_view_schema
     CREATE TEMP VIEW testview AS SELECT 1;

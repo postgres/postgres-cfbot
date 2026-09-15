@@ -24,6 +24,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
+#include "catalog/global_temp.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "miscadmin.h"
@@ -119,7 +120,7 @@ AddPendingSync(const RelFileLocator *rlocator)
  * pass register_delete = false.
  */
 SMgrRelation
-RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
+RelationCreateStorage(Oid relid, RelFileLocator rlocator, char relpersistence,
 					  bool register_delete)
 {
 	SMgrRelation srel;
@@ -128,10 +129,20 @@ RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
 
 	Assert(!IsInParallelMode());	/* couldn't update pendingSyncHash */
 
+	/* relid is only needed for global temporary relations */
+	Assert(OidIsValid(relid) || relpersistence != RELPERSISTENCE_GLOBAL_TEMP);
+
 	switch (relpersistence)
 	{
 		case RELPERSISTENCE_TEMP:
 			procNumber = ProcNumberForTempRelations();
+			needs_wal = false;
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			/* Track storage created for global temporary relations */
+			procNumber = ProcNumberForTempRelations();
+			TrackGlobalTempRelationStorage(relid, rlocator, procNumber, true,
+										   register_delete);
 			needs_wal = false;
 			break;
 		case RELPERSISTENCE_UNLOGGED:
@@ -207,6 +218,11 @@ void
 RelationDropStorage(Relation rel)
 {
 	PendingRelDelete *pending;
+
+	/* Track to-be-deleted storage for global temporary relations */
+	if (RELATION_IS_GLOBAL_TEMP(rel))
+		TrackGlobalTempRelationStorage(rel->rd_id, rel->rd_locator,
+									   rel->rd_backend, false, false);
 
 	/* Add the relation to the list of stuff to delete at commit */
 	pending = (PendingRelDelete *)
