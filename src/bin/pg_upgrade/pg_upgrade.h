@@ -115,6 +115,18 @@ extern char *output_files[];
 #define DEFAULT_CHAR_SIGNEDNESS_CAT_VER 202502212
 
 /*
+ * The visibility map widened from 2 to 4 bits per heap block to add
+ * VISIBILITYMAP_LOCATOR_SPLIT.  A cluster whose catalog version predates this
+ * has 2-bit _vm forks that pg_upgrade must rewrite; see rewriteVisibilityMap().
+ *
+ * XXX: this must equal the CATALOG_VERSION_NO that the commit widening the
+ * map installs.  Any lower value would leave a cluster initdb'd in between
+ * with 2-bit _vm forks that are not rewritten.  The committer re-picks both
+ * values at commit time, along with the copy in t/010_vm_conversion.pl.
+ */
+#define VISIBILITYMAP_WIDTH_CHANGE_CAT_VER 202610201
+
+/*
  * Each relation is represented by a relinfo structure.
  */
 typedef struct
@@ -410,6 +422,8 @@ void		linkFile(const char *src, const char *dst,
 void		check_file_clone(void);
 void		check_copy_file_range(void);
 void		check_hard_link(transferMode transfer_mode);
+void		rewriteVisibilityMap(const char *fromfile, const char *tofile,
+								 const char *nspname, const char *relname);
 
 /* fopen_priv() is no longer different from fopen() */
 #define fopen_priv(path, mode)	fopen(path, mode)
