@@ -155,7 +155,7 @@ ProcSignalShmemInit(void *arg)
 		SpinLockInit(&slot->pss_mutex);
 		pg_atomic_init_u32(&slot->pss_pid, 0);
 		slot->pss_cancel_key_len = 0;
-		MemSet(slot->pss_signalFlags, 0, sizeof(slot->pss_signalFlags));
+		MemSet(unvolatize(sig_atomic_t *, slot->pss_signalFlags), 0, sizeof(slot->pss_signalFlags));
 		pg_atomic_init_u64(&slot->pss_barrierGeneration, PG_UINT64_MAX);
 		pg_atomic_init_u32(&slot->pss_barrierCheckMask, 0);
 		ConditionVariableInit(&slot->pss_barrierCV);
@@ -186,7 +186,7 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 	old_pss_pid = pg_atomic_read_u32(&slot->pss_pid);
 
 	/* Clear out any leftover signal reasons */
-	MemSet(slot->pss_signalFlags, 0, NUM_PROCSIGNALS * sizeof(sig_atomic_t));
+	MemSet(unvolatize(sig_atomic_t *, slot->pss_signalFlags), 0, NUM_PROCSIGNALS * sizeof(sig_atomic_t));
 
 	/*
 	 * Publish the PID before reading the global barrier generation to ensure
