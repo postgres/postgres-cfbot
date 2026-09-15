@@ -121,7 +121,7 @@ sub test_mode
 			'--new-port' => $new->port,
 			$mode
 		],
-		qr/.* not supported on this platform|could not .* between old and new data directories: .*/,
+		qr/.* not supported on this platform|could not .* between old and new data directories: .*|Swap mode cannot upgrade clusters whose visibility maps must be rewritten/,
 		qr/^$/,
 		"pg_upgrade with transfer mode $mode");
 
