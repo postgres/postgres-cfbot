@@ -2366,7 +2366,9 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
    certificate authorities. If <literal>clientcert=verify-full</literal>
    is specified, the server will not only verify the certificate
    chain, but it will also check whether the username or its mapping
-   matches the <literal>cn</literal> (Common Name) of the provided certificate.
+   matches the certificate field selected by <literal>clientname</literal>
+   (see <xref linkend="auth-pg-hba-conf"/>), <literal>cn</literal>
+   (Common Name) by default.
    Note that certificate chain validation is always ensured when the
    <literal>cert</literal> authentication method is used
    (see <xref linkend="auth-cert"/>).
@@ -2402,7 +2404,9 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
    (It is not necessary to specify any <literal>clientcert</literal> options
    explicitly when using the <literal>cert</literal> authentication method.)
    In this case, the <literal>cn</literal> (Common Name) provided in
-   the certificate is checked against the user name or an applicable mapping.
+   the certificate is checked against the user name or an applicable mapping;
+   the <literal>clientname</literal> option selects which certificate field
+   is compared (see <xref linkend="auth-pg-hba-conf"/>).
   </para>
 
   <para>
@@ -2411,8 +2415,9 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
    <literal>clientcert</literal> authentication option to <literal>verify-ca</literal>
    or <literal>verify-full</literal>. The former option only enforces that
    the certificate is valid, while the latter also ensures that the
-   <literal>cn</literal> (Common Name) in the certificate matches
-   the user name or an applicable mapping.
+   user name or an applicable mapping matches the certificate field
+   selected by <literal>clientname</literal> (see
+   <xref linkend="auth-pg-hba-conf"/>).
   </para>
   </sect2>
 
