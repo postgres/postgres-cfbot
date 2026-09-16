@@ -93,8 +93,13 @@ extern void check_of_type(HeapTuple typetuple);
 extern void register_on_commit_action(Oid relid, OnCommitAction action);
 extern void remove_on_commit_action(Oid relid);
 
+extern void PreCommit_deferred_tablespace_moves(void);
 extern void PreCommit_on_commit_actions(void);
+extern void AtEOXact_deferred_tablespace_moves(bool isCommit);
 extern void AtEOXact_on_commit_actions(bool isCommit);
+extern void AtEOSubXact_deferred_tablespace_moves(bool isCommit,
+												  SubTransactionId mySubid,
+												  SubTransactionId parentSubid);
 extern void AtEOSubXact_on_commit_actions(bool isCommit,
 										  SubTransactionId mySubid,
 										  SubTransactionId parentSubid);

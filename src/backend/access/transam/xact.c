@@ -2362,6 +2362,12 @@ CommitTransaction(void)
 	PreCommit_on_commit_actions();
 
 	/*
+	 * Perform the physical copy of relation files that were deferred
+	 * during execution of SET TABLESPACE commands.
+	 */
+	PreCommit_deferred_tablespace_moves();
+
+	/*
 	 * Synchronize files that are created and not WAL-logged during this
 	 * transaction. This must happen before AtEOXact_RelationMap(), so that we
 	 * don't see committed-but-broken files after a crash.
@@ -2518,6 +2524,7 @@ CommitTransaction(void)
 	AtEOXact_SPI(true);
 	AtEOXact_Enum();
 	AtEOXact_on_commit_actions(true);
+	AtEOXact_deferred_tablespace_moves(true);
 	AtEOXact_Namespace(true, is_parallel_worker);
 	AtEOXact_SMgr();
 	AtEOXact_Files(true);
@@ -2623,6 +2630,7 @@ PrepareTransaction(void)
 	 * cursors, to avoid dangling-reference problems)
 	 */
 	PreCommit_on_commit_actions();
+	PreCommit_deferred_tablespace_moves();
 
 	/*
 	 * Synchronize files that are created and not WAL-logged during this
@@ -2814,6 +2822,7 @@ PrepareTransaction(void)
 	AtEOXact_SPI(true);
 	AtEOXact_Enum();
 	AtEOXact_on_commit_actions(true);
+	AtEOXact_deferred_tablespace_moves(true);
 	AtEOXact_Namespace(true, false);
 	AtEOXact_SMgr();
 	AtEOXact_Files(true);
@@ -3045,6 +3054,7 @@ AbortTransaction(void)
 		AtEOXact_SPI(false);
 		AtEOXact_Enum();
 		AtEOXact_on_commit_actions(false);
+		AtEOXact_deferred_tablespace_moves(false);
 		AtEOXact_Namespace(false, is_parallel_worker);
 		AtEOXact_SMgr();
 		AtEOXact_Files(false);
@@ -5250,6 +5260,8 @@ CommitSubTransaction(void)
 	AtEOSubXact_SPI(true, s->subTransactionId);
 	AtEOSubXact_on_commit_actions(true, s->subTransactionId,
 								  s->parent->subTransactionId);
+	AtEOSubXact_deferred_tablespace_moves(true, s->subTransactionId,
+										  s->parent->subTransactionId);
 	AtEOSubXact_Namespace(true, s->subTransactionId,
 						  s->parent->subTransactionId);
 	AtEOSubXact_Files(true, s->subTransactionId,
@@ -5425,6 +5437,8 @@ AbortSubTransaction(void)
 		AtEOSubXact_SPI(false, s->subTransactionId);
 		AtEOSubXact_on_commit_actions(false, s->subTransactionId,
 									  s->parent->subTransactionId);
+		AtEOSubXact_deferred_tablespace_moves(false, s->subTransactionId,
+											  s->parent->subTransactionId);
 		AtEOSubXact_Namespace(false, s->subTransactionId,
 							  s->parent->subTransactionId);
 		AtEOSubXact_Files(false, s->subTransactionId,
