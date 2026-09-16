@@ -2290,6 +2290,7 @@ constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 {
 	ListCell   *ltl;
 	ListCell   *rtl;
+	int			resno = 1;
 
 	/*
 	 * Verify that the two children have the same number of non-junk columns,
@@ -2409,13 +2410,15 @@ constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 		if (op->op != SETOP_UNION || !op->all)
 		{
 			ParseCallbackState pcbstate;
+			SortGroupClause *grpcl;
 
 			setup_parser_errposition_callback(&pcbstate, pstate,
 											  bestlocation);
 
 			/* If it's a recursive union, we need to require hashing support. */
-			op->groupClauses = lappend(op->groupClauses,
-									   makeSortGroupClauseForSetOp(rescoltype, recursive));
+			grpcl = makeSortGroupClauseForSetOp(rescoltype, recursive);
+			grpcl->tleSortGroupRef = resno;
+			op->groupClauses = lappend(op->groupClauses, grpcl);
 
 			cancel_parser_errposition_callback(&pcbstate);
 		}
@@ -2440,6 +2443,8 @@ constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 									 false);
 			*targetlist = lappend(*targetlist, restle);
 		}
+
+		resno++;
 	}
 }
 
