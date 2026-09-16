@@ -3767,6 +3767,40 @@ ReorderBufferXidHasCatalogChanges(ReorderBuffer *rb, TransactionId xid)
 }
 
 /*
+ * Check if a transaction (or its subtransaction) contains a heap change.
+ */
+bool
+ReorderBufferXidHasHeapChanges(ReorderBuffer *rb, TransactionId xid)
+{
+	ReorderBufferTXN *txn;
+	dlist_iter	iter;
+
+	txn = ReorderBufferTXNByXid(rb, xid, false, NULL, InvalidXLogRecPtr,
+								false);
+	if (txn == NULL)
+		return false;
+
+	dlist_foreach(iter, &txn->changes)
+	{
+		ReorderBufferChange *change;
+
+		change = dlist_container(ReorderBufferChange, node, iter.cur);
+
+		switch (change->action)
+		{
+			case REORDER_BUFFER_CHANGE_INSERT:
+			case REORDER_BUFFER_CHANGE_UPDATE:
+			case REORDER_BUFFER_CHANGE_DELETE:
+				return true;
+			default:
+				break;
+		}
+	}
+
+	return false;
+}
+
+/*
  * ReorderBufferXidHasBaseSnapshot
  *		Have we already set the base snapshot for the given txn/subtxn?
  */
@@ -5271,6 +5305,12 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	tmphtup = heap_form_tuple(desc, attrs, isnull);
 	Assert(newtup->t_len <= MaxHeapTupleSize);
 	Assert(newtup->t_data == (HeapTupleHeader) ((char *) newtup + HEAPTUPLESIZE));
+
+	/*
+	 * Preserve TID - REPACK relies on it when dealing with block ranges. XXX
+	 * Shouldn't we add a new field to ReorderBufferChange instead?
+	 */
+	tmphtup->t_data->t_ctid = newtup->t_data->t_ctid;
 
 	memcpy(newtup->t_data, tmphtup->t_data, tmphtup->t_len);
 	newtup->t_len = tmphtup->t_len;

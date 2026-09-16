@@ -33,6 +33,7 @@
 #include "postgres.h"
 
 #include "access/amapi.h"
+#include "access/detoast.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/relscan.h"
@@ -96,6 +97,12 @@ typedef struct
 } RelToCluster;
 
 /*
+ * When REPACK (CONCURRENTLY) copies data to the new heap, a new snapshot is
+ * built after processing this many pages. XXX Tune the value.
+ */
+int			repack_pages_per_snapshot = 1024;
+
+/*
  * Backend-local information to control the decoding worker.
  */
 typedef struct DecodingWorker
@@ -129,11 +136,11 @@ static void check_index_requirements(Relation rel, RepackCommand cmd);
 static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							 Oid ident_idx);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-							Snapshot snapshot,
 							bool verbose,
 							bool *pSwapToastByContent,
 							TransactionId *pFreezeXid,
-							MultiXactId *pCutoffMulti);
+							MultiXactId *pCutoffMulti,
+							ChangeContext *chgcxt);
 static List *get_tables_to_repack(RepackCommand cmd, bool usingindex,
 								  MemoryContext permcxt);
 static List *get_tables_to_repack_partitioned(RepackStmt *stmt,
@@ -143,23 +150,26 @@ static bool repack_is_permitted_for_relation(RepackCommand cmd,
 											 Oid relid, Oid userid,
 											 bool already_locked);
 
-static void apply_concurrent_changes(ChangeContext *chgcxt);
+static void apply_concurrent_changes(ChangeContext *chgcxt,
+									 BlockNumber range_start,
+									 BlockNumber range_end);
 static void apply_concurrent_insert(RepackDest *dest, TupleTableSlot *slot);
 static void apply_concurrent_update(RepackDest *dest,
 									TupleTableSlot *spilled_tuple,
 									TupleTableSlot *ondisk_tuple);
 static void apply_concurrent_delete(Relation rel, TupleTableSlot *slot);
 static void restore_tuple(BufFile *file, Relation relation,
-						  TupleTableSlot *slot);
+						  TupleTableSlot *slot, BlockNumber *block_nr_p,
+						  BlockNumber *old_block_nr_p);
 static void adjust_toast_pointers(Relation relation, TupleTableSlot *dest,
 								  TupleTableSlot *src);
+static bool is_block_in_range(BlockNumber blknum, BlockNumber start,
+							  BlockNumber end);
 static bool find_target_tuple(RepackDest *dest, TupleTableSlot *locator,
 							  TupleTableSlot *retrieved);
-static bool identity_key_equal(RepackDest *dest, TupleTableSlot *locator,
+static bool identity_key_equal(RepackDest *dest,
+							   TupleTableSlot *locator,
 							   TupleTableSlot *candidate);
-static void process_concurrent_changes(XLogRecPtr end_of_wal,
-									   ChangeContext *chgcxt,
-									   bool done);
 static void initialize_change_context(ChangeContext *chgcxt,
 									  Relation relation,
 									  Oid ident_index_id);
@@ -170,8 +180,12 @@ static void release_change_dest(RepackDest *dest);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 											   Oid identIdx,
 											   TransactionId frozenXid,
-											   MultiXactId cutoffMulti);
+											   MultiXactId cutoffMulti,
+											   ChangeContext *chgcxt);
+static void process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap,
+									Oid identIdx);
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
+static Oid	build_new_index(Relation NewHeap, Relation OldHeap, Oid oldindex);
 static void copy_index_constraints(Relation old_index, Oid new_index_id,
 								   Oid new_heap_id);
 static void copy_attribute_defaults(Oid old_heap_oid, Oid new_heap_oid);
@@ -186,7 +200,6 @@ static void start_repack_decoding_worker(Oid relid);
 static void wait_for_repack_decoding_worker(void);
 static void stop_repack_decoding_worker(void);
 static void stop_repack_decoding_worker_cb(int code, Datum arg);
-static Snapshot get_initial_snapshot(DecodingWorker *worker);
 
 static void ProcessRepackMessage(StringInfo msg);
 static const char *RepackCommandAsString(RepackCommand cmd);
@@ -1032,12 +1045,19 @@ check_concurrent_repack_requirements(Relation rel, Oid *ident_idx_p)
 				errmsg("cannot execute %s on relation \"%s\"",
 					   "REPACK (CONCURRENTLY)", RelationGetRelationName(rel)),
 				errdetail("Relation \"%s\" has no identity index.",
-						  RelationGetRelationName(rel)));
+						RelationGetRelationName(rel)));
 	}
+
+	/*
+	 * In the CONCURRENTLY mode we don't want to use the same snapshot
+	 * throughout the whole processing, as it could block the progress of xmin
+	 * horizon. Assert should be ok as we already disallow transaction block
+	 * in the CONCURRENTLY case.
+	 */
+	Assert(!IsolationUsesXactSnapshot());
 
 	*ident_idx_p = ident_idx;
 }
-
 
 /*
  * rebuild_relation: rebuild an existing relation in index or physical order
@@ -1071,7 +1091,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	TransactionId frozenXid;
 	MultiXactId cutoffMulti;
 	bool		concurrent = OidIsValid(ident_idx);
-	Snapshot	snapshot = NULL;
+	ChangeContext *chgcxt = NULL;
 #if USE_ASSERT_CHECKING
 	LOCKMODE	lmode;
 
@@ -1108,13 +1128,6 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 		 * REPACK CONCURRENTLY.
 		 */
 		start_repack_decoding_worker(tableOid);
-
-		/*
-		 * Wait until the worker has the initial snapshot and retrieve it.
-		 */
-		snapshot = get_initial_snapshot(decoding_worker);
-
-		PushActiveSnapshot(snapshot);
 	}
 
 	/* for CLUSTER or REPACK USING INDEX, mark the index as the one to use */
@@ -1137,26 +1150,115 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock, false));
 	NewHeap = table_open(OIDNewHeap, NoLock);
 
-	/*
-	 * In concurrent mode, create a copy of the attribute defaults on the temp
-	 * table, which the executor needs when replaying concurrent data changes.
-	 */
 	if (concurrent)
+	{
+		bool		need_aux_rel;
+
+		/*
+		 * Auxiliary table is needed for clustering in the CONCURRENTLY mode,
+		 * see comments in ChangeContext. FIXME Non-btree indexes are allowed
+		 * historically, but in general, these can hardly define any useful
+		 * order. We ignore them here.
+		 */
+		need_aux_rel = index != NULL && index->rd_rel->relam == BTREE_AM_OID;
+
+		/* Gather information to apply concurrent changes. */
+		chgcxt = palloc0_object(ChangeContext);
+
+		/*
+		 * Create a copy of the attribute defaults on the temp table, which
+		 * the executor needs when replaying concurrent data changes.
+		 */
 		copy_attribute_defaults(tableOid, OIDNewHeap);
 
-	/* Copy the heap data into the new table in the desired order */
-	copy_table_data(NewHeap, OldHeap, index, snapshot, verbose,
-					&swap_toast_by_content, &frozenXid, &cutoffMulti);
+		if (!need_aux_rel)
+		{
+			Oid			ident_idx_new;
 
-	/* The historic snapshot won't be needed anymore. */
-	if (snapshot)
-	{
-		PopActiveSnapshot();
-		UpdateActiveSnapshotCommandId();
+			/*
+			 * Create the identity index. We will need it during data copying
+			 * so that we can apply the data changes at the appropriate time -
+			 * see comments around the call of
+			 * repack_process_concurrent_changes() with block range specified.
+			 *
+			 * XXX NewHeap is empty - should we pass INDEX_CREATE_SKIP_BUILD?
+			 */
+			ident_idx_new = build_new_index(NewHeap, OldHeap, ident_idx);
+
+			initialize_change_context(chgcxt, NewHeap, ident_idx_new);
+		}
+		else
+		{
+			Oid			aux_oid;
+			Relation	aux_rel;
+			Oid			aux_ident_idx;
+
+			/*
+			 * As the concurrent data changes will be applied to the auxiliary
+			 * heap, the new heap does not need the identity index yet. We'll
+			 * build it after having copied the data from the auxiliary heap.
+			 * (Bulk insert should be more efficient.)
+			 */
+			initialize_change_context(chgcxt, NewHeap, InvalidOid);
+
+			/*
+			 * Like above, but only temporary - no other backend should need
+			 * it.
+			 */
+			aux_oid = make_new_heap(tableOid, tableSpace, accessMethod,
+									RELPERSISTENCE_TEMP, NoLock);
+			Assert(CheckRelationOidLockedByMe(aux_oid, AccessExclusiveLock,
+											  false));
+			aux_rel = table_open(aux_oid, NoLock);
+
+
+			/*
+			 * Copy the attribute defaults as we did for the new heap above -
+			 * the concurrent changes also need to be applied to the auxiliary
+			 * table.
+			 */
+			copy_attribute_defaults(tableOid, aux_oid);
+
+			/*
+			 * The same for identity index. (The additional
+			 * ShareUpdateExclusiveLock on ident_idx is not a problem, it'll
+			 * be released at the end of transaction.)
+			 */
+			aux_ident_idx = build_new_index(aux_rel, OldHeap, ident_idx);
+
+			/*
+			 * Make the relation ready for use.
+			 */
+			chgcxt->cc_dest_aux = palloc0_object(RepackDest);
+			initialize_change_dest(chgcxt->cc_dest_aux, aux_rel,
+								   aux_ident_idx);
+
+			/*
+			 * Set OID of the old relation's clustering index if it's
+			 * different from the identity index. Otherwise set InvalidOid to
+			 * indicate that the identity index should be used for clustering.
+			 */
+			if (RelationGetRelid(index) != ident_idx)
+				chgcxt->cc_clustering_index = RelationGetRelid(index);
+			else
+				chgcxt->cc_clustering_index = InvalidOid;
+		}
 	}
 
+	/* Copy the heap data into the new table in the desired order */
+	copy_table_data(NewHeap, OldHeap, index, verbose,
+					&swap_toast_by_content, &frozenXid, &cutoffMulti,
+					chgcxt);
+
+	/* The historic snapshot won't be needed anymore. */
 	if (concurrent)
 	{
+		/*
+		 * Make sure the active snapshot can see the data copied, so the rows
+		 * can be updated / deleted.
+		 */
+		UpdateActiveSnapshotCommandId();
+
 		Assert(!swap_toast_by_content);
 
 		/*
@@ -1167,10 +1269,16 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 			index_close(index, NoLock);
 
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, ident_idx,
-										   frozenXid, cutoffMulti);
+										   frozenXid, cutoffMulti, chgcxt);
 
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
+
+		/*
+		 * REPACK (CONCURRENTLY) launches separate transaction(s) so it
+		 * shouldn't rely on the current portal to pop the active snapshot.
+		 */
+		PopActiveSnapshot();
 	}
 	else
 	{
@@ -1333,10 +1441,9 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
  * Insert tuple when processing REPACK CONCURRENTLY.
  *
  * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
- * difficult to do the same in the catch-up phase (as the logical
- * decoding does not provide us with sufficient visibility
- * information). Thus we must use heap_insert() both during the
- * catch-up and here.
+ * difficult to do the same in the catch-up phase (as the logical decoding
+ * does not provide us with sufficient visibility information). Thus we must
+ * use heap_insert() both during the catch-up and here.
  *
  * 'reform' is a slot to use for tuple "reforming", typically to get set
  * values of dropped columns to NULL.
@@ -1344,17 +1451,24 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
  * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
  * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
  * this relation, so no logical replication subscription should need the data.
- *
- * BulkInsertState is used because many tuples are inserted in the typical
- * case.
  */
 void
-heap_insert_for_repack(Relation rel, TupleTableSlot *src,
-					   TupleTableSlot *reform, BulkInsertStateData *bistate)
+heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
+					   TupleTableSlot *reform)
 {
 	HeapTuple	tuple;
 	bool		shouldFree;
 	TupleTableSlot *slot;
+	RepackDest *dest;
+
+	/*
+	 * Use the current auxiliary table as output if one is active, otherwise
+	 * insert the tuple into the actual destination table.
+	 */
+	if (chgcxt->cc_dest_aux)
+		dest = chgcxt->cc_dest_aux;
+	else
+		dest = &chgcxt->cc_dest;
 
 	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
 
@@ -1364,7 +1478,7 @@ heap_insert_for_repack(Relation rel, TupleTableSlot *src,
 	Assert(TTS_IS_BUFFERTUPLE(src));
 	Assert(!shouldFree);
 
-	if (tuple_needs_reform(tuple, src->tts_tupleDescriptor))
+	if (reform != NULL && tuple_needs_reform(tuple, src->tts_tupleDescriptor))
 	{
 		clear_dropped_attributes(tuple, reform);
 		slot = reform;
@@ -1372,8 +1486,16 @@ heap_insert_for_repack(Relation rel, TupleTableSlot *src,
 	else
 		slot = src;
 
-	table_tuple_insert(rel, slot, GetCurrentCommandId(true),
-					   TABLE_INSERT_NO_LOGICAL, bistate);
+	table_tuple_insert(dest->rel, slot, GetCurrentCommandId(true),
+					   TABLE_INSERT_NO_LOGICAL, dest->bistate);
+
+	/*
+	 * Insert the tuple into the identity index. initialize_change_context()
+	 * may skip opening of indexes if the identity index is not needed
+	 * immediately.
+	 */
+	if (dest->rri)
+		ExecInsertIndexTuples(dest->rri, dest->estate, 0, slot, NIL, NULL);
 }
 
 bool
@@ -1423,9 +1545,6 @@ clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform)
 /*
  * Do the physical copying of table data.
  *
- * 'snapshot' and 'decoding_ctx': see table_relation_copy_for_cluster(). Pass
- * iff concurrent processing is required.
- *
  * There are three output parameters:
  * *pSwapToastByContent is set true if toast tables must be swapped by content.
  * *pFreezeXid receives the TransactionId used as freeze cutoff point.
@@ -1433,8 +1552,9 @@ clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform)
  */
 static void
 copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-				Snapshot snapshot, bool verbose, bool *pSwapToastByContent,
-				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti)
+				bool verbose, bool *pSwapToastByContent,
+				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti,
+				ChangeContext *chgcxt)
 {
 	Relation	relRelation;
 	HeapTuple	reltup;
@@ -1451,7 +1571,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	int			elevel = verbose ? INFO : DEBUG2;
 	PGRUsage	ru0;
 	char	   *nspname;
-	bool		concurrent = snapshot != NULL;
+	bool		concurrent = chgcxt != NULL;
 	LOCKMODE	lmode;
 
 	lmode = RepackLockLevel(concurrent);
@@ -1555,20 +1675,28 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 			cutoffs.MultiXactCutoff = relminmxid;
 	}
 
-	/*
-	 * Decide whether to use an indexscan or seqscan-and-optional-sort to scan
-	 * the OldHeap.  If the index is a btree, ask the planner to choose via
-	 * normal path cost comparison.
-	 *
-	 * The underlying tuplesort.c code doesn't support AMs other than btree,
-	 * so we must always use a normal indexscan if a non-btree index is
-	 * specified -- or an unsorted seqscan if no index is given.
-	 */
-	if (OldIndex != NULL && OldIndex->rd_rel->relam == BTREE_AM_OID)
-		use_sort = plan_cluster_use_sort(RelationGetRelid(OldHeap),
-										 RelationGetRelid(OldIndex));
+	if (!concurrent)
+	{
+		/*
+		 * Decide whether to use an indexscan or seqscan-and-optional-sort to
+		 * scan the OldHeap.  If the index is a btree, ask the planner to
+		 * choose via normal path cost comparison.
+		 *
+		 * The underlying tuplesort.c code doesn't support AMs other than
+		 * btree, so we must always use a normal indexscan if a non-btree
+		 * index is specified -- or an unsorted seqscan if no index is given.
+		 */
+		if (OldIndex != NULL && OldIndex->rd_rel->relam == BTREE_AM_OID)
+			use_sort = plan_cluster_use_sort(RelationGetRelid(OldHeap),
+											 RelationGetRelid(OldIndex));
+	}
 	else
-		use_sort = false;
+	{
+		/*
+		 * To use multiple snapshots, we need to read the table sequentially.
+		 */
+		use_sort = true;
+	}
 
 	/* Log what we're doing */
 	if (OldIndex != NULL && !use_sort)
@@ -1595,11 +1723,11 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * values (e.g. because the AM doesn't use freezing).
 	 */
 	table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
-									cutoffs.OldestXmin, snapshot,
+									cutoffs.OldestXmin,
 									&cutoffs.FreezeLimit,
 									&cutoffs.MultiXactCutoff,
 									&num_tuples, &tups_vacuumed,
-									&tups_recently_dead);
+									&tups_recently_dead, chgcxt);
 
 	/* return selected values to caller, get set as relfrozenxid/minmxid */
 	*pFreezeXid = cutoffs.FreezeLimit;
@@ -2581,6 +2709,8 @@ repack_is_permitted_for_relation(RepackCommand cmd, Oid relid, Oid userid,
  * instead return the opened and locked relcache entry, so that caller can
  * process the partitions using the multiple-table handling code.  In this
  * case, if an index name is given, it's up to the caller to resolve it.
+ *
+ * A new transaction is started in either case.
  */
 static Relation
 process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
@@ -2592,6 +2722,31 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 	Assert(stmt->relation != NULL);
 	Assert(stmt->command == REPACK_COMMAND_CLUSTER ||
 		   stmt->command == REPACK_COMMAND_REPACK);
+
+	if (params->options & CLUOPT_CONCURRENT)
+	{
+		/*
+		 * Since REPACK (CONCURRENTLY) pops the active snapshot during the
+		 * processing (it creates and pushes snapshots on its own), and since
+		 * that snapshot can be referenced by the current portal, we need to
+		 * make sure that the portal has no dangling pointer to the snapshot.
+		 * Starting a new transaction seems to be the simplest way.
+		 *
+		 * XXX The following patches in the series make this unnecessary, as
+		 * they start new transactions for other reasons elsewhere.
+		 */
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+
+		/* Start a new transaction. */
+		StartTransactionCommand();
+
+		/*
+		 * Functions in indexes may want a snapshot set. Note that the portal
+		 * is not aware of this one, so the caller needs to pop it explicitly.
+		 */
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 
 	/*
 	 * Make sure ANALYZE is specified if a column list is present.
@@ -2732,10 +2887,11 @@ RepackCommandAsString(RepackCommand cmd)
 }
 
 /*
- * Apply all the changes provided by decoding worker.
+ * Apply data changes that affect pages in given range.
  */
 static void
-apply_concurrent_changes(ChangeContext *chgcxt)
+apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
+						 BlockNumber range_end)
 {
 	ConcurrentChangeKind kind = '\0';
 	RepackDest *dest;
@@ -2744,18 +2900,31 @@ apply_concurrent_changes(ChangeContext *chgcxt)
 	TupleTableSlot *old_update_tuple;
 	TupleTableSlot *ondisk_tuple;
 	bool		have_old_tuple = false;
+	bool		check_range;
 	MemoryContext oldcxt;
 	DecodingWorkerShared *shared;
 	char		fname[MAXPGPATH];
 	BufFile    *file;
 
-	dest = &chgcxt->cc_dest;
+	/*
+	 * Use the auxiliary table if one exists, otherwise the "final"
+	 * destination table.
+	 */
+	dest = chgcxt->cc_dest_aux ? chgcxt->cc_dest_aux : &chgcxt->cc_dest;
 	rel = dest->rel;
+
+	/*
+	 * Range needs to be checked if the bounds are specified. Expect either
+	 * both or none.
+	 */
+	Assert(BlockNumberIsValid(range_start) == BlockNumberIsValid(range_end));
+	check_range = BlockNumberIsValid(range_start);
 
 	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 
 	/* Open the file containing the changes. */
-	DecodingWorkerFileName(fname, shared->relid, chgcxt->cc_file_seq);
+	DecodingWorkerFileName(fname, shared->relid, chgcxt->cc_file_seq_changes,
+						   false);
 	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
 
 	spilled_tuple = MakeSingleTupleTableSlot(RelationGetDescr(rel),
@@ -2771,6 +2940,9 @@ apply_concurrent_changes(ChangeContext *chgcxt)
 	{
 		size_t		nread;
 		ConcurrentChangeKind prevkind = kind;
+		BlockNumber block,
+					old_block;
+		BlockNumber *old_block_p;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -2785,7 +2957,7 @@ apply_concurrent_changes(ChangeContext *chgcxt)
 		 */
 		if (kind == CHANGE_UPDATE_OLD)
 		{
-			restore_tuple(file, rel, old_update_tuple);
+			restore_tuple(file, rel, old_update_tuple, NULL, NULL);
 			have_old_tuple = true;
 			continue;
 		}
@@ -2809,22 +2981,39 @@ apply_concurrent_changes(ChangeContext *chgcxt)
 
 		/*
 		 * Now restore the tuple into the slot and execute the change.
+		 *
+		 * old_block is only stored with UPDATE_NEW.
 		 */
-		restore_tuple(file, rel, spilled_tuple);
+		old_block_p = kind == CHANGE_UPDATE_NEW ? &old_block : NULL;
+		restore_tuple(file, rel, spilled_tuple, &block, old_block_p);
 
 		if (kind == CHANGE_INSERT)
 		{
-			apply_concurrent_insert(dest, spilled_tuple);
+			/*
+			 * Only insert the tuple if it fits into the current range (or if
+			 * range does not matter).
+			 */
+			if (!check_range ||
+				is_block_in_range(block, range_start, range_end))
+				apply_concurrent_insert(dest, spilled_tuple);
 		}
 		else if (kind == CHANGE_DELETE)
 		{
-			bool		found;
+			/*
+			 * Only delete the tuple if it fits into the current range (or if
+			 * range does not matter).
+			 */
+			if (!check_range ||
+				is_block_in_range(block, range_start, range_end))
+			{
+				bool		found;
 
-			/* Find the tuple to be deleted */
-			found = find_target_tuple(dest, spilled_tuple, ondisk_tuple);
-			if (!found)
-				elog(ERROR, "could not find target tuple");
-			apply_concurrent_delete(rel, ondisk_tuple);
+				/* Find the tuple to be deleted */
+				found = find_target_tuple(dest, spilled_tuple, ondisk_tuple);
+				if (!found)
+					elog(ERROR, "could not find target tuple");
+				apply_concurrent_delete(rel, ondisk_tuple);
+			}
 		}
 		else if (kind == CHANGE_UPDATE_NEW)
 		{
@@ -2836,21 +3025,71 @@ apply_concurrent_changes(ChangeContext *chgcxt)
 			else
 				key = spilled_tuple;
 
-			/* Find the tuple to be updated or deleted. */
-			found = find_target_tuple(dest, key, ondisk_tuple);
-			if (!found)
-				elog(ERROR, "could not find target tuple");
-
 			/*
-			 * If 'tup' contains TOAST pointers, they point to the old
-			 * relation's toast. Copy the corresponding TOAST pointers for the
-			 * new relation from the existing tuple. (The fact that we
-			 * received a TOAST pointer here implies that the attribute hasn't
-			 * changed.)
+			 * Perform normal update if both old and new version are in the
+			 * current range.
 			 */
-			adjust_toast_pointers(rel, spilled_tuple, ondisk_tuple);
+			if (!check_range ||
+				(is_block_in_range(old_block, range_start, range_end) &&
+				 is_block_in_range(block, range_start, range_end)))
+			{
+				/* Find the tuple to be updated or deleted. */
+				found = find_target_tuple(dest, key, ondisk_tuple);
+				if (!found)
+					elog(ERROR, "could not find target tuple");
 
-			apply_concurrent_update(dest, spilled_tuple, ondisk_tuple);
+				/*
+				 * If 'spilled_tuple' contains TOAST pointers, they point to
+				 * the old relation's toast. Copy the corresponding TOAST
+				 * pointers for the new relation from the existing tuple. (The
+				 * fact that we received a TOAST pointer here implies that the
+				 * attribute hasn't changed.)
+				 */
+				adjust_toast_pointers(rel, spilled_tuple, ondisk_tuple);
+
+				apply_concurrent_update(dest, spilled_tuple, ondisk_tuple);
+			}
+			else
+			{
+				Assert(check_range);
+
+				if (is_block_in_range(block, range_start, range_end))
+				{
+					/*
+					 * The old key is in another range, so only insert the new
+					 * one into the current range. The old version should not
+					 * be visible to the snapshot that we'll use to copy the
+					 * other range.
+					 *
+					 * Unlike UPDATE, there's no old tuple to copy the TOAST
+					 * pointers from. Therefore pass NULL for the source
+					 * tuple, to enforce detoasting of the TOAST pointers in
+					 * 'spilled_tuple'.
+					 */
+					adjust_toast_pointers(rel, spilled_tuple, NULL);
+
+					apply_concurrent_insert(dest, spilled_tuple);
+				}
+				else if (is_block_in_range(old_block, range_start, range_end))
+				{
+					found = find_target_tuple(dest, key, ondisk_tuple);
+					if (!found)
+						elog(ERROR, "could not find target tuple");
+
+					/*
+					 * The new key is in another range, so only delete the old
+					 * one from the current range. The new version should be
+					 * visible to the snapshot that we'll use to copy the
+					 * other range.
+					 */
+					apply_concurrent_delete(rel, ondisk_tuple);
+				}
+
+				/*
+				 * Otherwise, both tuple versions belong to another range, so
+				 * there's nothing to do here.
+				 */
+			}
 
 			ExecClearTuple(old_update_tuple);
 			have_old_tuple = false;
@@ -2972,7 +3211,8 @@ apply_concurrent_delete(Relation rel, TupleTableSlot *slot)
  * smaller than MaxAllocSize but the whole tuple is bigger.
  */
 static void
-restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot)
+restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot,
+			  BlockNumber *block_nr_p, BlockNumber *old_block_nr_p)
 {
 	uint32		t_len;
 	HeapTuple	tup;
@@ -2984,7 +3224,6 @@ restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot)
 	tup->t_data = (HeapTupleHeader) ((char *) tup + HEAPTUPLESIZE);
 	BufFileReadExact(file, tup->t_data, t_len);
 	tup->t_len = t_len;
-	ItemPointerSetInvalid(&tup->t_self);
 	tup->t_tableOid = RelationGetRelid(relation);
 
 	/*
@@ -2992,6 +3231,12 @@ restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot)
 	 * the external attributes in place.
 	 */
 	ExecForceStoreHeapTuple(tup, slot, false);
+
+	/* Handle TID separate because not all tuple slots care about it. */
+	if (block_nr_p)
+		*block_nr_p = ItemPointerGetBlockNumber(&tup->t_data->t_ctid);
+	if (old_block_nr_p)
+		BufFileReadExact(file, old_block_nr_p, sizeof(BlockNumber));
 
 	/*
 	 * Next, read any attributes we stored separately into the tts_values
@@ -3042,10 +3287,12 @@ restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot)
 
 /*
  * Adjust 'dest' replacing any EXTERNAL_ONDISK toast pointers with the
- * corresponding ones from 'src'.
+ * corresponding ones from 'src'. If 'src' is NULL, replace the toast pointer
+ * with the actual value.
  */
 static void
-adjust_toast_pointers(Relation relation, TupleTableSlot *dest, TupleTableSlot *src)
+adjust_toast_pointers(Relation relation, TupleTableSlot *dest,
+					  TupleTableSlot *src)
 {
 	TupleDesc	desc = dest->tts_tupleDescriptor;
 
@@ -3066,9 +3313,44 @@ adjust_toast_pointers(Relation relation, TupleTableSlot *dest, TupleTableSlot *s
 		varlena_dst = (varlena *) DatumGetPointer(dest->tts_values[i]);
 		if (!VARATT_IS_EXTERNAL_ONDISK(varlena_dst))
 			continue;
-		slot_getsomeattrs(src, i + 1);
 
-		dest->tts_values[i] = src->tts_values[i];
+		/*
+		 * Ideally we just copy the value, but if there is no source tuple, we
+		 * need to detoast the value.
+		 */
+		if (src)
+		{
+			slot_getsomeattrs(src, i + 1);
+			dest->tts_values[i] = src->tts_values[i];
+		}
+		else
+		{
+			varlena    *detoasted;
+
+			detoasted = detoast_external_attr(varlena_dst);
+			dest->tts_values[i] = PointerGetDatum(detoasted);
+		}
+	}
+}
+
+/*
+ * Check if tuple originates from given range of blocks that have already been
+ * copied.
+ */
+static bool
+is_block_in_range(BlockNumber blknum, BlockNumber start, BlockNumber end)
+{
+	Assert(BlockNumberIsValid(start) && BlockNumberIsValid(end));
+	Assert(BlockNumberIsValid(blknum));
+
+	if (start < end)
+		return blknum >= start && blknum < end;
+	else
+	{
+		/* Has the scan position wrapped around? */
+		Assert(start > end);
+
+		return blknum >= start || blknum < end;
 	}
 }
 
@@ -3164,75 +3446,19 @@ identity_key_equal(RepackDest *dest, TupleTableSlot *locator,
 }
 
 /*
- * Decode and apply concurrent changes, up to (and including) the record whose
- * LSN is 'end_of_wal'.
- *
- * XXX the names "process_concurrent_changes" and "apply_concurrent_changes"
- * are far too similar to each other.
+ * Initialize the ChangeContext struct for the given relation.
  */
 static void
-process_concurrent_changes(XLogRecPtr end_of_wal, ChangeContext *chgcxt, bool done)
-{
-	DecodingWorkerShared *shared;
-	char		fname[MAXPGPATH];
-	BufFile    *file;
-
-	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
-								 PROGRESS_REPACK_PHASE_CATCH_UP);
-
-	/* Ask the worker for the file. */
-	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
-	SpinLockAcquire(&shared->mutex);
-	shared->lsn_upto = end_of_wal;
-	shared->done = done;
-	SpinLockRelease(&shared->mutex);
-
-	/*
-	 * The worker needs to finish processing of the current WAL record. Even
-	 * if it's idle, it'll need to close the output file. Thus we're likely to
-	 * wait, so prepare for sleep.
-	 */
-	ConditionVariablePrepareToSleep(&shared->cv);
-	for (;;)
-	{
-		int			last_exported;
-
-		SpinLockAcquire(&shared->mutex);
-		last_exported = shared->last_exported;
-		SpinLockRelease(&shared->mutex);
-
-		/*
-		 * Has the worker exported the file we are waiting for?
-		 */
-		if (last_exported == chgcxt->cc_file_seq)
-			break;
-
-		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
-	}
-	ConditionVariableCancelSleep();
-
-	/* Open the file. */
-	DecodingWorkerFileName(fname, shared->relid, chgcxt->cc_file_seq);
-	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
-	apply_concurrent_changes(chgcxt);
-
-	BufFileClose(file);
-
-	/* Get ready for the next file. */
-	chgcxt->cc_file_seq++;
-}
-
-/*
- * Initialize the ChangeContext struct for the given relation, with
- * the given index as identity index.
- */
-static void
-initialize_change_context(ChangeContext *chgcxt,
-						  Relation relation, Oid ident_index_id)
+initialize_change_context(ChangeContext *chgcxt, Relation relation,
+						  Oid ident_index_id)
 {
 	initialize_change_dest(&chgcxt->cc_dest, relation, ident_index_id);
 
-	chgcxt->cc_file_seq = WORKER_FILE_SNAPSHOT + 1;
+	chgcxt->cc_file_seq_snapshot = 0;
+	chgcxt->cc_file_seq_changes = 0;
+
+	chgcxt->cc_dest_aux = NULL;
+	chgcxt->cc_clustering_index = InvalidOid;
 }
 
 /*
@@ -3242,6 +3468,8 @@ static void
 release_change_context(ChangeContext *chgcxt)
 {
 	release_change_dest(&chgcxt->cc_dest);
+	if (chgcxt->cc_dest_aux)
+		release_change_dest(chgcxt->cc_dest_aux);
 }
 
 /*
@@ -3255,6 +3483,10 @@ initialize_change_dest(RepackDest *dest, Relation relation,
 {
 	dest->rel = relation;
 	dest->bistate = GetBulkInsertState();
+
+	/* If there's no identity index yet, there should be no indexes at all. */
+	if (!OidIsValid(ident_index_id))
+		return;
 
 	/* Only initialize fields needed by ExecInsertIndexTuples(). */
 	dest->estate = CreateExecutorState();
@@ -3393,6 +3625,11 @@ static void
 release_change_dest(RepackDest *dest)
 {
 	FreeBulkInsertState(dest->bistate);
+
+	/* It's possible that no indexes were opened during initialization. */
+	if (dest->rri == NULL)
+		return;
+
 	ExecCloseIndices(dest->rri);
 	FreeExecutorState(dest->estate);
 	/* XXX are these pfrees necessary? */
@@ -3411,7 +3648,8 @@ release_change_dest(RepackDest *dest)
 static void
 rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 								   Oid identIdx, TransactionId frozenXid,
-								   MultiXactId cutoffMulti)
+								   MultiXactId cutoffMulti,
+								   ChangeContext *chgcxt)
 {
 	List	   *ind_oids_new;
 	Oid			old_table_oid = RelationGetRelid(OldHeap);
@@ -3421,13 +3659,16 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 			   *lc2;
 	char		relpersistence;
 	bool		is_system_catalog;
-	Oid			ident_idx_new;
 	XLogRecPtr	end_of_wal;
 	List	   *indexrels;
-	ChangeContext chgcxt;
+	List	   *inds_tmp = NIL;
 
 	Assert(CheckRelationLockedByMe(OldHeap, ShareUpdateExclusiveLock, false));
 	Assert(CheckRelationLockedByMe(NewHeap, AccessExclusiveLock, false));
+
+	/* If we have the auxiliary table, this is the moment we should use it. */
+	if (chgcxt->cc_dest_aux)
+		process_auxiliary_table(chgcxt, OldHeap, identIdx);
 
 	/*
 	 * Unlike the exclusive case, we build new indexes for the new relation
@@ -3444,32 +3685,26 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * might not be enough for commands like ALTER INDEX ... SET ... (Those
 	 * are not necessarily dangerous, but can make user confused if the
 	 * changes they do get lost due to REPACK.)
+	 *
+	 * As the identity index already had to be built, skip it here. XXX
+	 * Consider if the retail inserts during data copying (in the case w/o
+	 * auxiliary table) can be a problem in terms of index layout. Shouldn't
+	 * we drop the identity index and build it using bulk insert too?
 	 */
+	foreach_oid(ind_oid, ind_oids_old)
+	{
+		if (ind_oid != identIdx)
+			inds_tmp = lappend_oid(inds_tmp, ind_oid);
+	}
+	ind_oids_old = inds_tmp;
 	ind_oids_new = build_new_indexes(NewHeap, OldHeap, ind_oids_old);
 
 	/*
-	 * The identity index in the new relation appears in the same relative
-	 * position as the corresponding index in the old relation.  Find it.
+	 * The identity index will be involved in the following processing.
 	 */
-	ident_idx_new = InvalidOid;
-	foreach_oid(ind_old, ind_oids_old)
-	{
-		if (identIdx == ind_old)
-		{
-			int			pos = foreach_current_index(ind_old);
-
-			if (list_length(ind_oids_new) <= pos)
-				elog(ERROR, "list of new indexes too short");
-			ident_idx_new = list_nth_oid(ind_oids_new, pos);
-			break;
-		}
-	}
-	if (!OidIsValid(ident_idx_new))
-		elog(ERROR, "could not find index matching \"%s\" at the new relation",
-			 get_rel_name(identIdx));
-
-	/* Gather information to apply concurrent changes. */
-	initialize_change_context(&chgcxt, NewHeap, ident_idx_new);
+	ind_oids_old = lappend_oid(ind_oids_old, identIdx);
+	ind_oids_new = lappend_oid(ind_oids_new,
+							   RelationGetRelid(chgcxt->cc_dest.ident_index));
 
 	/*
 	 * During testing, wait for another backend to perform concurrent data
@@ -3486,11 +3721,13 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	end_of_wal = GetFlushRecPtr(NULL);
 
 	/*
-	 * Apply concurrent changes first time, to minimize the time we need to
-	 * hold AccessExclusiveLock. (Quite some amount of WAL could have been
+	 * Decode and apply concurrent changes again, to minimize the time we need
+	 * to hold AccessExclusiveLock. (Quite some amount of WAL could have been
 	 * written during the data copying and index creation.)
 	 */
-	process_concurrent_changes(end_of_wal, &chgcxt, false);
+	repack_process_concurrent_changes(chgcxt, end_of_wal,
+									  InvalidBlockNumber, InvalidBlockNumber,
+									  false, false);
 
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
@@ -3544,10 +3781,12 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	end_of_wal = GetFlushRecPtr(NULL);
 
 	/*
-	 * Apply the concurrent changes again. Indicate that the decoding worker
-	 * won't be needed anymore.
+	 * Decode and apply the concurrent changes again. Indicate that the
+	 * decoding worker won't be needed anymore.
 	 */
-	process_concurrent_changes(end_of_wal, &chgcxt, true);
+	repack_process_concurrent_changes(chgcxt, end_of_wal,
+									  InvalidBlockNumber, InvalidBlockNumber,
+									  false, true);
 
 	/* Remember info about rel before closing OldHeap */
 	relpersistence = OldHeap->rd_rel->relpersistence;
@@ -3595,7 +3834,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	table_close(NewHeap, NoLock);
 
 	/* Cleanup what we don't need anymore. (And close the identity index.) */
-	release_change_context(&chgcxt);
+	release_change_context(chgcxt);
 
 	/*
 	 * Swap the relations and their TOAST relations and TOAST indexes. This
@@ -3615,6 +3854,103 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 }
 
 /*
+ * Copy the contents of the auxiliary table to the new table in the desired
+ * order, then drop the auxiliary table.
+ */
+static void
+process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap, Oid identIdx)
+{
+	RepackDest *dest = chgcxt->cc_dest_aux;
+	Oid			ident_idx_new;
+	Relation	clustering_index;
+	IndexScanDesc scan;
+	TupleTableSlot *slot;
+	Oid			aux_oid;
+	ObjectAddress object;
+	Relation	rel;
+
+	/*
+	 * First, make sure the clustering index exists.
+	 */
+	if (OidIsValid(chgcxt->cc_clustering_index))
+	{
+		Oid			cl_ind_oid;
+
+		/*
+		 * Create it according to the clustering index on the old relation.
+		 */
+		cl_ind_oid = build_new_index(dest->rel, OldHeap,
+									 chgcxt->cc_clustering_index);
+		clustering_index = index_open(cl_ind_oid, NoLock);
+	}
+	else
+	{
+		/* The identity index is also the clustering index. */
+		clustering_index = dest->ident_index;
+	}
+
+	/*
+	 * Now do the copying. Before starting, clear ->cc_dest_aux so that
+	 * insertions go to the final table, rather than the auxiliary one.
+	 */
+	chgcxt->cc_dest_aux = NULL;
+	slot = table_slot_create(dest->rel, NULL);
+
+	/*
+	 * Note: the current active snapshot blocks the progress of xmin
+	 * horizon(s). The next patches in the series should fix this by using a
+	 * new kind of snapshot (which we can use here because there are no
+	 * transaction aborts in the auxiliary table).
+	 */
+	scan = index_beginscan(dest->rel, clustering_index, false,
+						   GetActiveSnapshot(), NULL, 0, 0, SO_NONE);
+	index_rescan(scan, NULL, 0, NULL, 0);
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		if (!table_index_getnext_slot(scan, ForwardScanDirection, slot))
+			break;
+
+		/*
+		 * Reforming should have been performed during insertions into the
+		 * auxiliary table.
+		 */
+		heap_insert_for_repack(chgcxt, slot, NULL);
+	}
+	index_endscan(scan);
+	ExecDropSingleTupleTableSlot(slot);
+
+	/*
+	 * Close the relation, its identity index and clustering index if we had
+	 * to open it above. Lock will be released on commit.
+	 */
+	aux_oid = RelationGetRelid(dest->rel);
+	table_close(dest->rel, NoLock);
+	if (OidIsValid(chgcxt->cc_clustering_index))
+		index_close(clustering_index, NoLock);
+	/* Here we close the other indexes. */
+	release_change_dest(dest);
+
+	/* Drop the auxiliary table. */
+	object.classId = RelationRelationId;
+	object.objectId = aux_oid;
+	object.objectSubId = 0;
+	performDeletion(&object, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
+
+	/* Build the identity index on the new relation. */
+	ident_idx_new = build_new_index(chgcxt->cc_dest.rel, OldHeap, identIdx);
+
+	/*
+	 * Make the new heap ready to use the index for future replaying of
+	 * concurrent changes.
+	 */
+	rel = chgcxt->cc_dest.rel;
+	release_change_dest(&chgcxt->cc_dest);
+	initialize_change_dest(&chgcxt->cc_dest, rel, ident_idx_new);
+}
+
+/*
  * Build indexes on NewHeap according to those on OldHeap.
  *
  * OldIndexes is the list of index OIDs on OldHeap. The contained indexes end
@@ -3629,34 +3965,48 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 {
 	List	   *result = NIL;
 
-	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
-								 PROGRESS_REPACK_PHASE_REBUILD_INDEX);
-
 	foreach_oid(oldindex, OldIndexes)
 	{
 		Oid			newindex;
-		char	   *newName;
-		Relation	ind;
 
-		ind = index_open(oldindex, ShareUpdateExclusiveLock);
-
-		newName = ChooseRelationName(get_rel_name(oldindex),
-									 NULL,
-									 "repacknew",
-									 get_rel_namespace(ind->rd_index->indrelid),
-									 false);
-		newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
-									 oldindex, ind->rd_rel->reltablespace,
-									 newName);
-		copy_index_constraints(ind, newindex, RelationGetRelid(NewHeap));
+		newindex = build_new_index(NewHeap, OldHeap, oldindex);
 		result = lappend_oid(result, newindex);
-
-		index_close(ind, NoLock);
-
-		pgstat_progress_incr_param(PROGRESS_REPACK_INDEX_REBUILD_COUNT, 1);
 	}
 
 	return result;
+}
+
+/*
+ * Subroutine of build_new_indexes().
+ */
+static Oid
+build_new_index(Relation NewHeap, Relation OldHeap, Oid oldindex)
+{
+	Oid			newindex;
+	char	   *newName;
+	Relation	ind;
+
+	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
+								 PROGRESS_REPACK_PHASE_REBUILD_INDEX);
+
+	ind = index_open(oldindex, ShareUpdateExclusiveLock);
+
+	newName = ChooseRelationName(get_rel_name(oldindex),
+								 NULL,
+								 "repacknew",
+								 get_rel_namespace(ind->rd_index->indrelid),
+								 false);
+	/* Functions in indexes may want a snapshot set. */
+	Assert(ActiveSnapshotSet());
+	newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
+								 oldindex, ind->rd_rel->reltablespace,
+								 newName);
+	copy_index_constraints(ind, newindex, RelationGetRelid(NewHeap));
+	index_close(ind, NoLock);
+
+	pgstat_progress_incr_param(PROGRESS_REPACK_INDEX_REBUILD_COUNT, 1);
+
+	return newindex;
 }
 
 /*
@@ -3847,10 +4197,13 @@ start_repack_decoding_worker(Oid relid)
 
 	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 	shared->initialized = false;
+	/* Snapshot is the first thing we need from the worker. */
+	shared->snapshot_requested = true;
 	shared->lsn_upto = InvalidXLogRecPtr;
 	shared->done = false;
 	SharedFileSetInit(&shared->sfs, decoding_worker->seg);
-	shared->last_exported = -1;
+	shared->last_exported_snapshot = -1;
+	shared->last_exported_changes = -1;
 	SpinLockInit(&shared->mutex);
 	shared->dbid = MyDatabaseId;
 
@@ -4075,10 +4428,10 @@ stop_repack_decoding_worker_cb(int code, Datum arg)
 }
 
 /*
- * Get the initial snapshot from the decoding worker.
+ * Get snapshot from the decoding worker.
  */
-static Snapshot
-get_initial_snapshot(DecodingWorker *worker)
+Snapshot
+repack_get_snapshot(ChangeContext *chgcxt)
 {
 	DecodingWorkerShared *shared;
 	char		fname[MAXPGPATH];
@@ -4087,12 +4440,13 @@ get_initial_snapshot(DecodingWorker *worker)
 	char	   *snap_space;
 	Snapshot	snapshot;
 
-	shared = (DecodingWorkerShared *) dsm_segment_address(worker->seg);
+	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 
 	/*
-	 * The worker needs to initialize the logical decoding, which usually
-	 * takes some time. Therefore it makes sense to prepare for the sleep
-	 * first.
+	 * For the first snapshot request, the worker needs to initialize the
+	 * logical decoding, which usually takes some time. Therefore it makes
+	 * sense to prepare for the sleep first. Does it make sense to skip the
+	 * preparation on the next requests?
 	 */
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
@@ -4100,13 +4454,13 @@ get_initial_snapshot(DecodingWorker *worker)
 		int			last_exported;
 
 		SpinLockAcquire(&shared->mutex);
-		last_exported = shared->last_exported;
+		last_exported = shared->last_exported_snapshot;
 		SpinLockRelease(&shared->mutex);
 
 		/*
 		 * Has the worker exported the file we are waiting for?
 		 */
-		if (last_exported == WORKER_FILE_SNAPSHOT)
+		if (last_exported == chgcxt->cc_file_seq_snapshot)
 			break;
 
 		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
@@ -4114,18 +4468,96 @@ get_initial_snapshot(DecodingWorker *worker)
 	ConditionVariableCancelSleep();
 
 	/* Read the snapshot from a file. */
-	DecodingWorkerFileName(fname, shared->relid, WORKER_FILE_SNAPSHOT);
+	DecodingWorkerFileName(fname, shared->relid, chgcxt->cc_file_seq_snapshot,
+						   true);
 	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
 	BufFileReadExact(file, &snap_size, sizeof(snap_size));
 	snap_space = (char *) palloc(snap_size);
 	BufFileReadExact(file, snap_space, snap_size);
 	BufFileClose(file);
 
+#ifdef USE_ASSERT_CHECKING
+	SpinLockAcquire(&shared->mutex);
+	Assert(!shared->snapshot_requested);
+	shared->snapshot_requested = false;
+	SpinLockRelease(&shared->mutex);
+#endif
+
 	/* Restore it. */
 	snapshot = RestoreSnapshot(snap_space);
 	pfree(snap_space);
 
+	/* Get ready for the next snapshot. */
+	chgcxt->cc_file_seq_snapshot++;
+
 	return snapshot;
+}
+
+/*
+ * Get concurrent changes, up to (and including) the record whose LSN is
+ * 'end_of_wal', from the decoding worker, and apply them to the new table. If
+ * block range is specified, only apply changes related to that range.
+ *
+ * If 'request_snapshot' is true, the snapshot built at LSN following the last
+ * data change needs to be exported too.
+ */
+void
+repack_process_concurrent_changes(ChangeContext *chgcxt,
+								  XLogRecPtr end_of_wal,
+								  BlockNumber range_start,
+								  BlockNumber range_end,
+								  bool request_snapshot, bool done)
+{
+	DecodingWorkerShared *shared;
+
+	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
+								 PROGRESS_REPACK_PHASE_CATCH_UP);
+
+	/* Ask the worker for the file. */
+	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
+	SpinLockAcquire(&shared->mutex);
+	shared->lsn_upto = end_of_wal;
+	Assert(!shared->snapshot_requested);
+	shared->snapshot_requested = request_snapshot;
+	shared->done = done;
+	SpinLockRelease(&shared->mutex);
+
+	/*
+	 * The worker needs to finish processing of the current WAL record. Even
+	 * if it's idle, it'll need to close the output file. Thus we're likely to
+	 * wait, so prepare for sleep.
+	 */
+	ConditionVariablePrepareToSleep(&shared->cv);
+	for (;;)
+	{
+		int			last_exported;
+
+		SpinLockAcquire(&shared->mutex);
+		last_exported = shared->last_exported_changes;
+		SpinLockRelease(&shared->mutex);
+
+		/*
+		 * Has the worker exported the file we are waiting for?
+		 */
+		if (last_exported == chgcxt->cc_file_seq_changes)
+			break;
+
+		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
+	}
+	ConditionVariableCancelSleep();
+
+#ifdef USE_ASSERT_CHECKING
+	/* No file is exported until the worker exports the next one. */
+	SpinLockAcquire(&shared->mutex);
+	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
+	SpinLockRelease(&shared->mutex);
+#endif
+
+	/* Apply the changes to the new table. */
+	apply_concurrent_changes(chgcxt, range_start, range_end);
+
+	/* Get ready for the next set of changes. */
+	chgcxt->cc_file_seq_changes++;
 }
 
 /*
@@ -4135,10 +4567,13 @@ get_initial_snapshot(DecodingWorker *worker)
  * be involved.
  */
 void
-DecodingWorkerFileName(char *fname, Oid relid, uint32 seq)
+DecodingWorkerFileName(char *fname, Oid relid, uint32 seq, bool snapshot)
 {
 	/* The PID is already present in the fileset name, so we needn't add it */
-	snprintf(fname, MAXPGPATH, "%u-%u", relid, seq);
+	if (!snapshot)
+		snprintf(fname, MAXPGPATH, "%u-%u", relid, seq);
+	else
+		snprintf(fname, MAXPGPATH, "%u-%u-snapshot", relid, seq);
 }
 
 /*

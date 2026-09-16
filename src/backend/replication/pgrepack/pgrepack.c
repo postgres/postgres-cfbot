@@ -33,7 +33,8 @@ static void repack_commit_txn(LogicalDecodingContext *ctx,
 static void repack_process_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 								  Relation relation, ReorderBufferChange *change);
 static void repack_store_change(LogicalDecodingContext *ctx, Relation relation,
-								ConcurrentChangeKind kind, HeapTuple tuple);
+								ConcurrentChangeKind kind, HeapTuple tuple,
+								BlockNumber old_blknum);
 
 void
 _PG_output_plugin_init(OutputPluginCallbacks *cb)
@@ -65,6 +66,9 @@ repack_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 	dstate->change_cxt = AllocSetContextCreate(ctx->context,
 											   "REPACK - change",
 											   ALLOCSET_DEFAULT_SIZES);
+	dstate->snapshot_cxt = AllocSetContextCreate(ctx->context,
+												 "REPACK - snapshot",
+												 ALLOCSET_DEFAULT_SIZES);
 	/* repack_setup_logical_decoding fills in the rest */
 	ctx->output_writer_private = dstate;
 
@@ -134,7 +138,8 @@ repack_process_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 				if (newtuple == NULL)
 					elog(ERROR, "incomplete insert info");
 
-				repack_store_change(ctx, relation, CHANGE_INSERT, newtuple);
+				repack_store_change(ctx, relation, CHANGE_INSERT, newtuple,
+									InvalidBlockNumber);
 			}
 			break;
 		case REORDER_BUFFER_CHANGE_UPDATE:
@@ -149,9 +154,11 @@ repack_process_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 					elog(ERROR, "incomplete update info");
 
 				if (oldtuple != NULL)
-					repack_store_change(ctx, relation, CHANGE_UPDATE_OLD, oldtuple);
+					repack_store_change(ctx, relation, CHANGE_UPDATE_OLD, oldtuple,
+										InvalidBlockNumber);
 
-				repack_store_change(ctx, relation, CHANGE_UPDATE_NEW, newtuple);
+				repack_store_change(ctx, relation, CHANGE_UPDATE_NEW, newtuple,
+									change->data.tp.old_blknum);
 			}
 			break;
 		case REORDER_BUFFER_CHANGE_DELETE:
@@ -163,7 +170,8 @@ repack_process_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 				if (oldtuple == NULL)
 					elog(ERROR, "incomplete delete info");
 
-				repack_store_change(ctx, relation, CHANGE_DELETE, oldtuple);
+				repack_store_change(ctx, relation, CHANGE_DELETE, oldtuple,
+									InvalidBlockNumber);
 			}
 			break;
 		default:
@@ -190,7 +198,8 @@ repack_process_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
  */
 static void
 repack_store_change(LogicalDecodingContext *ctx, Relation relation,
-					ConcurrentChangeKind kind, HeapTuple tuple)
+					ConcurrentChangeKind kind, HeapTuple tuple,
+					BlockNumber old_blknum)
 {
 	RepackDecodingState *dstate;
 	MemoryContext oldcxt;
@@ -286,6 +295,9 @@ repack_store_change(LogicalDecodingContext *ctx, Relation relation,
 	 */
 	BufFileWrite(file, &tuple->t_len, sizeof(tuple->t_len));
 	BufFileWrite(file, tuple->t_data, tuple->t_len);
+	/* If old_blknum is specified, write it too. */
+	if (old_blknum != InvalidBlockNumber)
+		BufFileWrite(file, &old_blknum, sizeof(old_blknum));
 
 	/* Then, write the number of external attributes we found. */
 	natt_ext = list_length(attrs_ext);
