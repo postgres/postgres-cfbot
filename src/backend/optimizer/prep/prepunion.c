@@ -36,6 +36,7 @@
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bitutils.h"
 #include "utils/selfuncs.h"
@@ -360,6 +361,28 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 /*
  * Generate paths for a recursive UNION node
  */
+static List *
+adjust_setop_sortclauses(List *sortClauses, List *query_tlist)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	if (sortClauses == NIL)
+		return NIL;
+
+	foreach(lc, sortClauses)
+	{
+		SortGroupClause *sortcl = (SortGroupClause *) lfirst(lc);
+		SortGroupClause *newcl = copyObject(sortcl);
+		TargetEntry *tle;
+
+		tle = get_sortgroupref_tle(sortcl->tleSortGroupRef, query_tlist);
+		newcl->tleSortGroupRef = tle->resno;
+		result = lappend(result, newcl);
+	}
+	return result;
+}
+
 static RelOptInfo *
 generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 						List *refnames_tlist,
@@ -463,6 +486,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 											   rpath,
 											   result_rel->reltarget,
 											   groupList,
+											   adjust_setop_sortclauses(setOp->sortClauses, root->parse->targetList),
 											   root->wt_param_id,
 											   dNumGroups);
 

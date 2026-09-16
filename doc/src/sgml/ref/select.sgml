@@ -1287,7 +1287,9 @@ SELECT DISTINCT ON (location ORDER BY time DESC) location, time, report
     If the optional <literal>ORDER BY</literal> clause is specified inside
     <literal>DISTINCT ON</literal>, it determines which row is kept from each set of
     duplicates (the first row according to this sort order). Otherwise, the kept
-    row is unpredictable.
+    row is unpredictable. When used in recursive CTEs (<literal>WITH RECURSIVE</literal>),
+    <literal>UNION DISTINCT ON</literal> with <literal>ORDER BY</literal> can be used
+    to prune the search space and find optimal solutions (e.g., shortest paths).
    </para>
 
    <para>
