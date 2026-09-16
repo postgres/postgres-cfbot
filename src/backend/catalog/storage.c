@@ -26,6 +26,7 @@
 #include "access/xlogutils.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "common/relpath.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bulk_write.h"
@@ -150,6 +151,9 @@ RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
 	srel = smgropen(rlocator, procNumber);
 	smgrcreate(srel, MAIN_FORKNUM, false);
 
+	elog(DEBUG1, "RelationCreateStorage: %s",
+		 relpathperm(rlocator, MAIN_FORKNUM).str);
+
 	if (needs_wal)
 		log_smgrcreate(&srel->smgr_rlocator.locator, MAIN_FORKNUM);
 
@@ -207,6 +211,10 @@ void
 RelationDropStorage(Relation rel)
 {
 	PendingRelDelete *pending;
+
+	elog(DEBUG1, "RelationDropStorage: oid %u %s",
+		 RelationGetRelid(rel),
+		 relpathperm(rel->rd_locator, MAIN_FORKNUM).str);
 
 	/* Add the relation to the list of stuff to delete at commit */
 	pending = (PendingRelDelete *)
@@ -700,6 +708,11 @@ smgrDoPendingDeletes(bool isCommit)
 			if (pending->atCommit == isCommit)
 			{
 				SMgrRelation srel;
+
+				elog(DEBUG1,
+					 "smgrDoPendingDeletes: %s %s",
+					 isCommit ? "commit" : "abort",
+					 relpathperm(pending->rlocator, MAIN_FORKNUM).str);
 
 				srel = smgropen(pending->rlocator, pending->procNumber);
 
