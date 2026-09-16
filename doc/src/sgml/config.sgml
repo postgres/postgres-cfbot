@@ -10500,9 +10500,11 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         the <literal>COMPRESSION</literal> column option in
         <command>CREATE TABLE</command> or
         <command>ALTER TABLE</command>.)
-        The supported compression methods are <literal>pglz</literal> and
+        The supported compression methods are <literal>pglz</literal>,
         (if <productname>PostgreSQL</productname> was compiled with
-        <option>--with-lz4</option>) <literal>lz4</literal>.
+        <option>--with-lz4</option>) <literal>lz4</literal>, and
+        (if <productname>PostgreSQL</productname> was compiled with
+        <option>--with-zstd</option>) <literal>zstd</literal>.
         The default is <literal>lz4</literal> (if available); otherwise,
         <literal>pglz</literal>.
        </para>
