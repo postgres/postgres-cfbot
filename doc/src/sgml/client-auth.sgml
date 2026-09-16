@@ -680,8 +680,9 @@ include_dir         <replaceable>directory</replaceable>
        <literal>verify-full</literal>. Both options require the client
        to present a valid (trusted) SSL certificate, while
        <literal>verify-full</literal> additionally enforces that the
-       <literal>cn</literal> (Common Name) in the certificate matches
-       the username or an applicable mapping.
+       username or an applicable mapping matches the certificate field
+       selected by <literal>clientname</literal>, <literal>cn</literal>
+       (Common Name) by default.
        This behavior is similar to the <literal>cert</literal> authentication
        method (see <xref linkend="auth-cert"/>) but enables pairing
        the verification of client certificates with any authentication
@@ -693,11 +694,20 @@ include_dir         <replaceable>directory</replaceable>
        using the <literal>clientcert</literal> option), you can specify
        which part of the client certificate credentials to match using
        the <literal>clientname</literal> option. This option can have one
-       of two values. If you specify <literal>clientname=CN</literal>, which
+       of three values. If you specify <literal>clientname=CN</literal>, which
        is the default, the username is matched against the certificate's
        <literal>Common Name (CN)</literal>. If instead you specify
        <literal>clientname=DN</literal> the username is matched against the
        entire <literal>Distinguished Name (DN)</literal> of the certificate.
+       Finally, if you specify <literal>clientname=URI</literal>, the username
+       is matched against the certificate's URI
+       <literal>Subject Alternative Name</literal>; the certificate must
+       contain exactly one URI subject alternative name.  The comparison is
+       case-sensitive and uses the exact URI as it appears in the
+       certificate.  When using regular expression user name maps with
+       <literal>clientname=URI</literal>, anchor the pattern to the URI's
+       scheme and authority so that it cannot match a URI from a different
+       authority.
        This option is probably best used in conjunction with a username map.
        The comparison is done with the <literal>DN</literal> in
        <ulink url="https://datatracker.ietf.org/doc/html/rfc2253">RFC 2253</ulink>
@@ -708,6 +718,35 @@ openssl x509 -in myclient.crt -noout -subject -nameopt RFC2253 | sed "s/^subject
 </programlisting>
         Care needs to be taken when using this option, especially when using
         regular expression matching against the <literal>DN</literal>.
+      </para>
+
+      <para>
+       With <literal>clientname=URI</literal>, the matched URI (rather than
+       the Subject DN) is recorded as the authenticated identity, and appears
+       in the <literal>connection authenticated: identity=...</literal> log
+       line.
+      </para>
+
+      <para>
+       Note that PostgreSQL does not verify any relationship between a
+       certificate's URI and the certificate authority that signed the
+       certificate.  If <literal>ssl_ca_file</literal> contains certificates
+       from more than one CA, any of them can issue a certificate carrying
+       any URI.  For SPIFFE deployments, configure
+       <literal>ssl_ca_file</literal> with a single trust domain's CA bundle;
+       SPIFFE federation is not supported.
+      </para>
+
+      <para>
+       For example, this <filename>pg_hba.conf</filename> entry authenticates
+       users by SPIFFE ID:
+<programlisting>
+hostssl mydb appuser 192.168.1.0/24 cert clientname=URI map=spiffe-map
+</programlisting>
+       with a corresponding entry in <filename>pg_ident.conf</filename>:
+<programlisting>
+spiffe-map spiffe://example.org/ns/default/sa/appuser appuser
+</programlisting>
       </para>
      </listitem>
     </varlistentry>
@@ -2093,11 +2132,13 @@ host ... ldap ldapbasedn="dc=example,dc=net"
     see <xref linkend="ssl-openssl-config"/> for SSL configuration instructions.
     When using this authentication method, the server will require that
     the client provide a valid, trusted certificate.  No password prompt
-    will be sent to the client.  The <literal>cn</literal> (Common Name)
-    attribute of the certificate
-    will be compared to the requested database user name, and if they match
-    the login will be allowed.  User name mapping can be used to allow
-    <literal>cn</literal> to be different from the database user name.
+    will be sent to the client.  By default, the <literal>cn</literal>
+    (Common Name) attribute of the certificate will be compared to the
+    requested database user name, and if they match the login will be
+    allowed.  The <literal>clientname</literal> option selects which part
+    of the certificate is compared, as described in
+    <xref linkend="auth-pg-hba-conf"/>.  User name mapping can be used to
+    allow <literal>cn</literal> to be different from the database user name.
    </para>
 
    <para>
