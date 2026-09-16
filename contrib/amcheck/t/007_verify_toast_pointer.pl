@@ -120,4 +120,104 @@ for my $id (1, 2)
 }
 is($node->safe_psql('postgres', q(SELECT 1)), '1', 'server still up');
 
+# zstd values use the long form of the pointer: the method bits say "long
+# form" and the method is the byte after the plain pointer.
+if (!check_pg_config("#define USE_ZSTD 1"))
+{
+	done_testing();
+	exit;
+}
+
+$node->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tz (id int, f text COMPRESSION zstd)
+		WITH (autovacuum_enabled = false, toast_tuple_target = 128);
+	INSERT INTO tz
+		SELECT g, (SELECT string_agg(md5((g * 1000 + i)::text), '')
+				   FROM generate_series(1, 60) i) || repeat('x', 4000)
+			FROM generate_series(1, 4) g;
+	CHECKPOINT;
+));
+is( $node->safe_psql(
+		'postgres', q(
+	SELECT string_agg(pg_column_compression(f) || ':' ||
+					  (pg_column_toast_chunk_id(f) IS NOT NULL), ',' ORDER BY id)
+		FROM tz)),
+	'zstd:true,zstd:true,zstd:true,zstd:true',
+	'values are compressed with zstd and external');
+is($node->safe_psql('postgres', q(SELECT * FROM verify_heapam('tz'))),
+	'', 'no corruption in long-form pointers before forging');
+
+$relpath = $node->data_dir . '/'
+  . $node->safe_psql('postgres', q(SELECT pg_relation_filepath('tz')));
+%extinfo_off = ();
+for my $row (
+	split /\n/,
+	$node->safe_psql(
+		'postgres', q(
+	SELECT lp, lp_off + t_hoff, get_byte(t_data, 4), get_byte(t_data, 5)
+		FROM heap_page_items(get_raw_page('tz', 0))
+		ORDER BY lp)))
+{
+	my ($lp, $dataoff, $b4, $b5) = split /\|/, $row;
+	is("$b4/$b5", "1/19", "tuple $lp holds a long on-disk TOAST pointer");
+	$extinfo_off{$lp} = $dataoff + 4 + 2 + 4;
+}
+
+$node->stop;
+open($fh, '+<', $relpath) or BAIL_OUT("open failed: $!");
+binmode $fh;
+
+# The method byte follows va_extinfo, va_valueid and va_toastrelid.
+sub set_method_byte
+{
+	my ($extinfo_off, $byte) = @_;
+
+	sysseek($fh, $extinfo_off + 4 + 4 + 4, 0) or BAIL_OUT("sysseek failed: $!");
+	syswrite($fh, pack('C', $byte)) == 1 or BAIL_OUT("syswrite failed: $!");
+}
+
+# Case 1: long pointer whose method bits do not say "long form"
+set_method_bits($extinfo_off{1}, 0);
+
+# Case 2: long pointer whose method byte names pglz, which uses the plain form
+set_method_byte($extinfo_off{2}, 0);
+
+# Case 3: long pointer whose method byte is not a method at all
+set_method_byte($extinfo_off{3}, 200);
+
+# Row 4 is left alone.
+close($fh) or BAIL_OUT("close failed: $!");
+$node->start;
+
+$result = $node->safe_psql('postgres',
+	q(SELECT offnum, msg FROM verify_heapam('tz') ORDER BY offnum, msg));
+like(
+	$result,
+	qr/^1\|toast value \d+ has a long TOAST pointer but compression method bits 0$/m,
+	'long pointer without long-form method bits is reported');
+like(
+	$result,
+	qr/^2\|toast value \d+ has a long TOAST pointer with invalid compression method id 0$/m,
+	'long pointer naming a plain-form method is reported');
+like(
+	$result,
+	qr/^3\|toast value \d+ has a long TOAST pointer with invalid compression method id 200$/m,
+	'long pointer with an unknown method byte is reported');
+unlike($result, qr/^4\|/m, 'well-formed long pointer is not reported');
+
+for my $id (1, 2, 3)
+{
+	my ($ret, $stdout, $stderr) = $node->psql('postgres',
+		"SELECT pg_column_compression(f) FROM tz WHERE id = $id");
+	like($stderr, qr/compressed data is corrupt/,
+		"pg_column_compression() rejects forged long pointer $id");
+}
+is( $node->safe_psql(
+		'postgres', q(
+	SELECT f = (SELECT string_agg(md5((4000 + i)::text), '')
+				FROM generate_series(1, 60) i) || repeat('x', 4000)
+		FROM tz WHERE id = 4)),
+	't', 'well-formed long pointer still reads back');
+
 done_testing();

@@ -50,6 +50,7 @@ typedef enum ToastCompressionId
 {
 	TOAST_PGLZ_COMPRESSION_ID = 0,
 	TOAST_LZ4_COMPRESSION_ID = 1,
+	TOAST_ZSTD_COMPRESSION_ID = 2,
 	TOAST_INVALID_COMPRESSION_ID = 3,
 } ToastCompressionId;
 
@@ -57,7 +58,7 @@ StaticAssertDecl(TOAST_INVALID_COMPRESSION_ID == VARLENA_COMPRESS_METHOD_LONG,
 				 "TOAST_INVALID_COMPRESSION_ID must match VARLENA_COMPRESS_METHOD_LONG");
 
 /* Largest compression method ID in use; IDs above it are not methods. */
-#define TOAST_LAST_COMPRESSION_ID	TOAST_LZ4_COMPRESSION_ID
+#define TOAST_LAST_COMPRESSION_ID	TOAST_ZSTD_COMPRESSION_ID
 
 /*
  * Does this compression method ID need a byte of its own?
@@ -140,6 +141,7 @@ toast_inline_compression_id(const void *PTR)
  */
 #define TOAST_PGLZ_COMPRESSION			'p'
 #define TOAST_LZ4_COMPRESSION			'l'
+#define TOAST_ZSTD_COMPRESSION			'z'
 #define InvalidCompressionMethod		'\0'
 
 #define CompressionMethodIsValid(cm)  ((cm) != InvalidCompressionMethod)
@@ -165,6 +167,12 @@ extern varlena *lz4_compress_datum(const varlena *value);
 extern varlena *lz4_decompress_datum(const varlena *value);
 extern varlena *lz4_decompress_datum_slice(const varlena *value,
 										   int32 slicelength);
+
+/* zstd compression/decompression routines */
+extern varlena *zstd_compress_datum(const varlena *value);
+extern varlena *zstd_decompress_datum(const varlena *value);
+extern varlena *zstd_decompress_datum_slice(const varlena *value,
+											int32 slicelength);
 
 /* other stuff */
 extern ToastCompressionId toast_get_compression_id(varlena *attr);
