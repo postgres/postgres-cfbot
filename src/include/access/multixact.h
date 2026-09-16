@@ -139,8 +139,8 @@ extern void GetMultiXactInfo(uint32 *multixacts, MultiXactOffset *nextOffset,
 							 MultiXactId *oldestMultiXactId,
 							 MultiXactOffset *oldestOffset);
 
-extern int	multixactoffsetssyncfiletag(const FileTag *ftag, char *path);
-extern int	multixactmemberssyncfiletag(const FileTag *ftag, char *path);
+extern void multixactoffsetssyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
+extern void multixactmemberssyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
 
 extern void AtEOXact_MultiXact(void);
 extern void AtPrepare_MultiXact(void);
