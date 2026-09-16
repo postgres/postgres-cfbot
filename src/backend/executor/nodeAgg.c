@@ -277,6 +277,7 @@
 #include "utils/memutils_memorychunk.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
+#include "utils/sortsupport.h"
 
 /*
  * Control how many partitions are created when spilling HashAgg to
@@ -1684,6 +1685,30 @@ find_hash_columns(AggState *aggstate)
 			ExecAllocTableSlot(&estate->es_tupleTable, hashDesc,
 							   &TTSOpsMinimalTuple, 0);
 
+		if (perhash->aggnode->numSortCols > 0)
+		{
+			perhash->hash_firstTupleSlot =
+				ExecAllocTableSlot(&estate->es_tupleTable, hashDesc,
+								   &TTSOpsMinimalTuple, 0);
+
+			/* Initialize sort support */
+			perhash->sortKeys = (SortSupport) palloc0(sizeof(SortSupportData) * perhash->aggnode->numSortCols);
+			for (i = 0; i < perhash->aggnode->numSortCols; i++)
+			{
+				SortSupport	skey = &perhash->sortKeys[i];
+
+				skey->ssup_collation = perhash->aggnode->sortCollations[i];
+				skey->ssup_nulls_first = perhash->aggnode->sortNullsFirst[i];
+				skey->ssup_attno = perhash->aggnode->sortColIdx[i];
+				PrepareSortSupportFromOrderingOp(perhash->aggnode->sortOperators[i], skey);
+			}
+		}
+		else
+		{
+			perhash->hash_firstTupleSlot = NULL;
+			perhash->sortKeys = NULL;
+		}
+
 		list_free(hashTlist);
 		bms_free(colnos);
 	}
@@ -1996,7 +2021,25 @@ hash_agg_update_metrics(AggState *aggstate, bool from_tape, int npartitions)
 static void
 hash_create_memory(AggState *aggstate)
 {
+	Agg		   *node = (Agg *) aggstate->ss.ps.plan;
 	Size		maxBlockSize = ALLOCSET_DEFAULT_MAXSIZE;
+	bool		use_allocset = false;
+	ListCell   *lc;
+
+	if (node->numSortCols > 0)
+		use_allocset = true;
+	else
+	{
+		foreach(lc, node->chain)
+		{
+			Agg *chained_node = lfirst_node(Agg, lc);
+			if (chained_node->numSortCols > 0)
+			{
+				use_allocset = true;
+				break;
+			}
+		}
+	}
 
 	/*
 	 * The hashcontext's per-tuple memory will be used for byref transition
@@ -2040,11 +2083,20 @@ hash_create_memory(AggState *aggstate)
 	/* and no smaller than ALLOCSET_DEFAULT_INITSIZE */
 	maxBlockSize = Max(maxBlockSize, ALLOCSET_DEFAULT_INITSIZE);
 
-	aggstate->hash_tuplescxt = BumpContextCreate(aggstate->ss.ps.state->es_query_cxt,
-												 "HashAgg hashed tuples",
-												 ALLOCSET_DEFAULT_MINSIZE,
-												 ALLOCSET_DEFAULT_INITSIZE,
-												 maxBlockSize);
+	if (use_allocset)
+	{
+		aggstate->hash_tuplescxt = AllocSetContextCreate(aggstate->ss.ps.state->es_query_cxt,
+														 "HashAgg hashed tuples",
+														 ALLOCSET_DEFAULT_SIZES);
+	}
+	else
+	{
+		aggstate->hash_tuplescxt = BumpContextCreate(aggstate->ss.ps.state->es_query_cxt,
+													 "HashAgg hashed tuples",
+													 ALLOCSET_DEFAULT_MINSIZE,
+													 ALLOCSET_DEFAULT_INITSIZE,
+													 maxBlockSize);
+	}
 
 }
 
@@ -2179,6 +2231,18 @@ initialize_hash_entry(AggState *aggstate, TupleHashTable hashtable,
  * efficient.
  */
 static void
+replace_hash_entry_if_better(AggState *aggstate, AggStatePerHash perhash,
+							TupleHashEntry entry, TupleTableSlot *newslot)
+{
+	ReplaceTupleHashEntryIfBetter(perhash->hashtable,
+								  entry,
+								  newslot,
+								  perhash->hash_firstTupleSlot,
+								  perhash->sortKeys,
+								  perhash->aggnode->numSortCols);
+}
+
+static void
 lookup_hash_entries(AggState *aggstate)
 {
 	AggStatePerGroup *pergroup = aggstate->hash_pergroup;
@@ -2210,6 +2274,8 @@ lookup_hash_entries(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
+			else if (perhash->aggnode->numSortCols > 0)
+				replace_hash_entry_if_better(aggstate, perhash, entry, hashslot);
 			pergroup[setno] = TupleHashEntryGetAdditional(hashtable, entry);
 		}
 		else
@@ -2770,6 +2836,8 @@ agg_refill_hash_table(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
+			else if (perhash->aggnode->numSortCols > 0)
+				replace_hash_entry_if_better(aggstate, perhash, entry, hashslot);
 			aggstate->hash_pergroup[batch->setno] = TupleHashEntryGetAdditional(hashtable, entry);
 			advance_aggregates(aggstate);
 		}
