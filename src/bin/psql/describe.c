@@ -2088,8 +2088,9 @@ describeOneTableDetails(const char *schemaname,
 			/* these strings are literal in our syntax, so not translated. */
 			printTableAddCell(&cont, (compression[0] == 'p' ? "pglz" :
 									  (compression[0] == 'l' ? "lz4" :
-									   (compression[0] == '\0' ? "" :
-										"???"))),
+									   (compression[0] == 'z' ? "zstd" :
+										(compression[0] == '\0' ? "" :
+										 "???")))),
 							  false, false);
 		}
 

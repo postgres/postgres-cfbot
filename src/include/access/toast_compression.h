@@ -50,6 +50,7 @@ typedef enum ToastCompressionId
 {
 	TOAST_PGLZ_COMPRESSION_ID = 0,
 	TOAST_LZ4_COMPRESSION_ID = 1,
+	TOAST_ZSTD_COMPRESSION_ID = 2,
 	TOAST_INVALID_COMPRESSION_ID = 3,
 } ToastCompressionId;
 
@@ -79,6 +80,7 @@ toast_compression_id_needs_cmid_byte(ToastCompressionId cmid)
  */
 #define TOAST_PGLZ_COMPRESSION			'p'
 #define TOAST_LZ4_COMPRESSION			'l'
+#define TOAST_ZSTD_COMPRESSION			'z'
 #define InvalidCompressionMethod		'\0'
 
 #define CompressionMethodIsValid(cm)  ((cm) != InvalidCompressionMethod)
@@ -104,6 +106,12 @@ extern varlena *lz4_compress_datum(const varlena *value);
 extern varlena *lz4_decompress_datum(const varlena *value);
 extern varlena *lz4_decompress_datum_slice(const varlena *value,
 										   int32 slicelength);
+
+/* zstd compression/decompression routines */
+extern varlena *zstd_compress_datum(const varlena *value);
+extern varlena *zstd_decompress_datum(const varlena *value);
+extern varlena *zstd_decompress_datum_slice(const varlena *value,
+											int32 slicelength);
 
 /* other stuff */
 extern ToastCompressionId toast_get_compression_id(varlena *attr);
