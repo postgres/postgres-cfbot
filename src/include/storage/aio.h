@@ -178,6 +178,12 @@ struct PgAioTargetInfo
 	 */
 	int			(*reopen) (PgAioHandle *ioh);
 
+	/*
+	 * Optional counterpart to reopen, releasing the file descriptor it
+	 * acquired once the IO has been executed.
+	 */
+	void		(*close) (PgAioHandle *ioh);
+
 	/* describe the target of the IO, used for log messages and views */
 	char	   *(*describe_identity) (const PgAioTargetData *sd);
 
@@ -209,6 +215,7 @@ typedef enum PgAioHandleCallbackID
 	PGAIO_HCB_INVALID = 0,
 
 	PGAIO_HCB_MD_READV,
+	PGAIO_HCB_MD_FSYNC,
 
 	PGAIO_HCB_SHARED_BUFFER_READV,
 

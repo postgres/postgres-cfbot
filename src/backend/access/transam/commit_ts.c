@@ -1028,8 +1028,8 @@ commit_ts_redo(XLogReaderState *record)
 /*
  * Entrypoint for sync.c to sync commit_ts files.
  */
-int
-committssyncfiletag(const FileTag *ftag, char *path)
+void
+committssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(CommitTsCtl, ftag, path);
+	SlruSyncFileTag(CommitTsCtl, ioh, entry);
 }
