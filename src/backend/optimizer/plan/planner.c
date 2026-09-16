@@ -1825,7 +1825,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		/*
 		 * Calculate pathkeys that represent result ordering requirements
 		 */
-		Assert(parse->distinctClause == NIL);
 		root->sort_pathkeys = make_pathkeys_for_sortclauses(root,
 															parse->sortClause,
 															root->processed_tlist);
@@ -3939,7 +3938,7 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 												   false,
 												   false,
 												   &sortable,
-												   false);
+												   true);
 		if (!sortable)
 			root->setop_pathkeys = NIL;
 	}
@@ -8700,7 +8699,8 @@ get_nth_nonjunk_tle(List *tlist, int n)
 static List *
 generate_setop_child_grouplist(SetOperationStmt *op, List *targetlist)
 {
-	List	   *grouplist = copyObject(op->groupClauses);
+	List	   *clauses = op->sortClauses ? op->sortClauses : op->groupClauses;
+	List	   *grouplist = copyObject(clauses);
 	ListCell   *lg;
 
 	foreach(lg, grouplist)
