@@ -436,8 +436,13 @@ static MinimalTuple hashagg_batch_read(HashAggBatch *batch, uint32 *hashp);
 static void hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset,
 							   int used_bits, double input_groups,
 							   double hashentrysize);
-static Size hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
-								TupleTableSlot *inputslot, uint32 hash);
+static void hashagg_init_spill_slot(AggState *aggstate);
+static pg_noinline Size hashagg_spill_tuple(AggState *aggstate,
+											HashAggSpill *spill,
+											TupleTableSlot *inputslot,
+											uint32 hash);
+static Size hashagg_spill_minimal_tuple(HashAggSpill *spill, MinimalTuple tuple,
+										uint32 hash);
 static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
 								 int setno);
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
@@ -2755,7 +2760,7 @@ agg_refill_hash_table(AggState *aggstate)
 	INJECTION_POINT("hash-aggregate-process-batch", NULL);
 	for (;;)
 	{
-		TupleTableSlot *spillslot = aggstate->hash_spill_rslot;
+		TupleTableSlot *inputslot = aggstate->hash_spill_rslot;
 		TupleTableSlot *hashslot = perhash->hashslot;
 		TupleHashTable hashtable = perhash->hashtable;
 		TupleHashEntry entry;
@@ -2770,8 +2775,27 @@ agg_refill_hash_table(AggState *aggstate)
 		if (tuple == NULL)
 			break;
 
-		ExecStoreMinimalTuple(tuple, spillslot, true);
-		aggstate->tmpcontext->ecxt_outertuple = spillslot;
+		if (aggstate->all_cols_needed)
+			ExecStoreMinimalTuple(tuple, inputslot, true);
+		else
+		{
+			TupleTableSlot *spillslot = aggstate->hash_spill_wslot;
+			int		   *colmap = aggstate->hash_spill_colmap;
+			int			natts = spillslot->tts_tupleDescriptor->natts;
+
+			ExecStoreMinimalTuple(tuple, spillslot, true);
+			slot_getallattrs(spillslot);
+			ExecClearTuple(inputslot);
+			for (int i = 0; i < natts; i++)
+			{
+				int			input_colno = colmap[i];
+
+				inputslot->tts_values[input_colno] = spillslot->tts_values[i];
+				inputslot->tts_isnull[input_colno] = spillslot->tts_isnull[i];
+			}
+			ExecStoreVirtualTuple(inputslot);
+		}
+		aggstate->tmpcontext->ecxt_outertuple = inputslot;
 
 		prepare_hash_slot(perhash,
 						  aggstate->tmpcontext->ecxt_outertuple,
@@ -2798,8 +2822,8 @@ agg_refill_hash_table(AggState *aggstate)
 				hashagg_spill_init(&spill, tapeset, batch->used_bits,
 								   batch->input_card, aggstate->hashentrysize);
 			}
-			/* no memory for a new group, spill */
-			hashagg_spill_tuple(aggstate, &spill, spillslot, hash);
+			/* no memory for a new group, spill the tuple that was read */
+			hashagg_spill_minimal_tuple(&spill, tuple, hash);
 
 			aggstate->hash_pergroup[batch->setno] = NULL;
 		}
@@ -3031,39 +3055,74 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
 }
 
 /*
+ * Initialize the compact spill slot on first use.
+ * Use the query context so it survives tuple resets and rescans.
+ */
+static void
+hashagg_init_spill_slot(AggState *aggstate)
+{
+	EState	   *estate = aggstate->ss.ps.state;
+	TupleDesc	scanDesc = aggstate->hash_spill_rslot->tts_tupleDescriptor;
+	MemoryContext oldcontext;
+	int			natts = bms_num_members(aggstate->colnos_needed);
+	TupleDesc	spilldesc;
+	int			spillattno = 0;
+	int			colno = -1;
+
+	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	spilldesc = CreateTemplateTupleDesc(natts);
+	aggstate->hash_spill_colmap = palloc_array(int, natts);
+	while ((colno = bms_next_member(aggstate->colnos_needed, colno)) > 0)
+	{
+		aggstate->hash_spill_colmap[spillattno] = colno - 1;
+		TupleDescCopyEntry(spilldesc, ++spillattno, scanDesc, colno);
+	}
+	TupleDescFinalize(spilldesc);
+	aggstate->hash_spill_wslot =
+		ExecInitExtraTupleSlot(estate, spilldesc, &TTSOpsMinimalTuple);
+	/* Keep omitted input columns NULL. */
+	memset(aggstate->hash_spill_rslot->tts_isnull, true,
+		   scanDesc->natts * sizeof(bool));
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
  * hashagg_spill_tuple
  *
  * No room for new groups in the hash table. Save for later in the appropriate
  * partition.
  */
-static Size
+static pg_noinline Size
 hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 					TupleTableSlot *inputslot, uint32 hash)
 {
 	TupleTableSlot *spillslot;
-	int			partition;
 	MinimalTuple tuple;
-	LogicalTape *tape;
-	int			total_written = 0;
+	Size		total_written;
 	bool		shouldFree;
 
-	Assert(spill->partitions != NULL);
-
-	/* spill only attributes that we actually need */
+	/* spill only attributes that we actually need, in column order */
 	if (!aggstate->all_cols_needed)
 	{
+		int		   *colmap;
+		int			natts;
+
+		if (aggstate->hash_spill_wslot == NULL)
+			hashagg_init_spill_slot(aggstate);
+
+		colmap = aggstate->hash_spill_colmap;
 		spillslot = aggstate->hash_spill_wslot;
+		natts = spillslot->tts_tupleDescriptor->natts;
 		slot_getsomeattrs(inputslot, aggstate->max_colno_needed);
 		ExecClearTuple(spillslot);
-		for (int i = 0; i < spillslot->tts_tupleDescriptor->natts; i++)
+		for (int i = 0; i < natts; i++)
 		{
-			if (bms_is_member(i + 1, aggstate->colnos_needed))
-			{
-				spillslot->tts_values[i] = inputslot->tts_values[i];
-				spillslot->tts_isnull[i] = inputslot->tts_isnull[i];
-			}
-			else
-				spillslot->tts_isnull[i] = true;
+			int			input_colno = colmap[i];
+
+			spillslot->tts_values[i] = inputslot->tts_values[input_colno];
+			spillslot->tts_isnull[i] = inputslot->tts_isnull[input_colno];
 		}
 		ExecStoreVirtualTuple(spillslot);
 	}
@@ -3071,6 +3130,30 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 		spillslot = inputslot;
 
 	tuple = ExecFetchSlotMinimalTuple(spillslot, &shouldFree);
+
+	total_written = hashagg_spill_minimal_tuple(spill, tuple, hash);
+
+	if (shouldFree)
+		pfree(tuple);
+
+	return total_written;
+}
+
+/*
+ * hashagg_spill_minimal_tuple
+ *
+ * Write a MinimalTuple that is already in spill format to the appropriate
+ * partition.
+ */
+static Size
+hashagg_spill_minimal_tuple(HashAggSpill *spill, MinimalTuple tuple,
+							uint32 hash)
+{
+	int			partition;
+	LogicalTape *tape;
+	Size		total_written = 0;
+
+	Assert(spill->partitions != NULL);
 
 	if (spill->shift < 32)
 		partition = (hash & spill->mask) >> spill->shift;
@@ -3093,9 +3176,6 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 
 	LogicalTapeWrite(tape, tuple, tuple->t_len);
 	total_written += tuple->t_len;
-
-	if (shouldFree)
-		pfree(tuple);
 
 	return total_written;
 }
@@ -3698,11 +3778,6 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		Plan	   *outerplan = outerPlan(node);
 		double		totalGroups = 0;
 
-		aggstate->hash_spill_rslot = ExecInitExtraTupleSlot(estate, scanDesc,
-															&TTSOpsMinimalTuple);
-		aggstate->hash_spill_wslot = ExecInitExtraTupleSlot(estate, scanDesc,
-															&TTSOpsVirtual);
-
 		/* this is an array of pointers, not structures */
 		aggstate->hash_pergroup = pergroups;
 
@@ -3724,6 +3799,9 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 							&aggstate->hash_ngroups_limit,
 							&aggstate->hash_planned_partitions);
 		find_hash_columns(aggstate);
+
+		aggstate->hash_spill_rslot = ExecInitExtraTupleSlot(estate, scanDesc,
+															&TTSOpsMinimalTuple);
 
 		/* Skip massive memory allocation if we are just doing EXPLAIN */
 		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
