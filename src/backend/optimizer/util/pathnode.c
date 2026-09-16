@@ -3654,6 +3654,7 @@ create_recursiveunion_path(PlannerInfo *root,
 						   Path *rightpath,
 						   PathTarget *target,
 						   List *distinctList,
+						   List *distinctSortClause,
 						   int wtParam,
 						   double numGroups)
 {
@@ -3675,6 +3676,7 @@ create_recursiveunion_path(PlannerInfo *root,
 	pathnode->leftpath = leftpath;
 	pathnode->rightpath = rightpath;
 	pathnode->distinctList = distinctList;
+	pathnode->distinctSortClause = distinctSortClause;
 	pathnode->wtParam = wtParam;
 	pathnode->numGroups = numGroups;
 
