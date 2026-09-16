@@ -2687,6 +2687,7 @@ typedef struct RecursiveUnionPath
 	Path	   *leftpath;		/* paths representing input sources */
 	Path	   *rightpath;
 	List	   *distinctList;	/* SortGroupClauses identifying target cols */
+	List	   *distinctSortClause; /* SortGroupClauses for ordering (if DISTINCT ON) */
 	int			wtParam;		/* ID of Param representing work table */
 	Cardinality numGroups;		/* estimated number of groups in input */
 } RecursiveUnionPath;
