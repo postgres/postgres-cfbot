@@ -35,7 +35,7 @@ SERVERS := server-cn-and-alt-names \
 	server-no-names \
 	server-revoked
 CLIENTS := client client-dn client-revoked client_ext client-long \
-	client-revoked-utf8
+	client-revoked-utf8 client-uri client-uri-multi client-uri-nosubject
 
 #
 # To add a new non-standard certificate, add it to SPECIAL_CERTS and then add
@@ -198,8 +198,15 @@ $(CLIENT_CERTS): ssl/%.crt: ssl/%.csr conf/%.config conf/cas.config ssl/client_c
 
 # The CSRs don't need to persist after a build.
 .INTERMEDIATE: $(CERTIFICATES:%=ssl/%.csr)
+
+# A certificate with an empty subject needs "-subj /" to be passed to
+# `openssl req`, since the config file alone cannot express an empty
+# subject.  REQ_SUBJ is empty by default.
+REQ_SUBJ :=
 ssl/%.csr: ssl/%.key conf/%.config
-	$(OPENSSL) req -new -utf8 -key $< -out $@ -config conf/$*.config
+	$(OPENSSL) req -new -utf8 -key $< $(REQ_SUBJ) -out $@ -config conf/$*.config
+
+ssl/client-uri-nosubject.csr: REQ_SUBJ = -subj /
 
 #
 # CA State
