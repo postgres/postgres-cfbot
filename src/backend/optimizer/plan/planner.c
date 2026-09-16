@@ -8622,48 +8622,58 @@ group_by_has_partkey(RelOptInfo *input_rel,
  * then we return an empty list.  This may leave some TLEs with unreferenced
  * ressortgroupref markings, but that's harmless.
  */
+static TargetEntry *
+get_nth_nonjunk_tle(List *tlist, int n)
+{
+	ListCell   *lc;
+	int			count = 0;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (!tle->resjunk)
+		{
+			count++;
+			if (count == n)
+				return tle;
+		}
+	}
+	return NULL;
+}
+
 static List *
 generate_setop_child_grouplist(SetOperationStmt *op, List *targetlist)
 {
 	List	   *grouplist = copyObject(op->groupClauses);
 	ListCell   *lg;
-	ListCell   *lt;
-	ListCell   *ct;
 
-	lg = list_head(grouplist);
-	ct = list_head(op->colTypes);
-	foreach(lt, targetlist)
+	foreach(lg, grouplist)
 	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lt);
-		SortGroupClause *sgc;
+		SortGroupClause *sgc = (SortGroupClause *) lfirst(lg);
+		Index		ref = sgc->tleSortGroupRef;
+		TargetEntry *tle;
 		Oid			coltype;
 
-		/* resjunk columns could have sortgrouprefs.  Leave these alone */
-		if (tle->resjunk)
-			continue;
+		/* If tleSortGroupRef is not set, we can't map it. */
+		if (ref == 0)
+			elog(ERROR, "missing tleSortGroupRef in setop groupClause");
 
-		/*
-		 * We expect every non-resjunk target to have a SortGroupClause and
-		 * colTypes.
-		 */
-		Assert(lg != NULL);
-		Assert(ct != NULL);
-		sgc = (SortGroupClause *) lfirst(lg);
-		coltype = lfirst_oid(ct);
+		tle = get_nth_nonjunk_tle(targetlist, ref);
+		if (tle == NULL)
+			elog(ERROR, "missing target entry for setop groupClause ref %d", ref);
+
+		/* We also need to get the type from op->colTypes */
+		Assert(ref <= list_length(op->colTypes));
+		coltype = list_nth_oid(op->colTypes, ref - 1);
 
 		/* reject if target type isn't the same as the setop target type */
 		if (coltype != exprType((Node *) tle->expr))
 			return NIL;
 
-		lg = lnext(grouplist, lg);
-		ct = lnext(op->colTypes, ct);
-
 		/* assign a tleSortGroupRef, or reuse the existing one */
 		sgc->tleSortGroupRef = assignSortGroupRef(tle, targetlist);
 	}
-
-	Assert(lg == NULL);
-	Assert(ct == NULL);
 
 	return grouplist;
 }

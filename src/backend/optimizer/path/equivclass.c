@@ -3053,30 +3053,31 @@ add_setop_child_rel_equivalences(PlannerInfo *root, RelOptInfo *child_rel,
 								 List *child_tlist, List *setop_pathkeys)
 {
 	ListCell   *lc;
-	ListCell   *lc2 = list_head(setop_pathkeys);
 
-	foreach(lc, child_tlist)
+	foreach(lc, setop_pathkeys)
 	{
-		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		PathKey    *pk = lfirst_node(PathKey, lc);
+		Index		ref = pk->pk_eclass->ec_sortref;
+		TargetEntry *tle = NULL;
+		ListCell   *lc2;
 		EquivalenceMember *parent_em;
-		PathKey    *pk;
 
-		if (tle->resjunk)
-			continue;
+		/* Find matching non-resjunk tle in child_tlist */
+		foreach(lc2, child_tlist)
+		{
+			TargetEntry *cur_tle = lfirst_node(TargetEntry, lc2);
+			if (cur_tle->ressortgroupref == ref && !cur_tle->resjunk)
+			{
+				tle = cur_tle;
+				break;
+			}
+		}
 
-		if (lc2 == NULL)
-			elog(ERROR, "too few pathkeys for set operation");
+		if (tle == NULL)
+			elog(ERROR, "could not find target entry for setop pathkey ref %d", ref);
 
-		pk = lfirst_node(PathKey, lc2);
 		parent_em = linitial(pk->pk_eclass->ec_members);
 
-		/*
-		 * We can safely pass the parent member as the first member in the
-		 * ec_members list as this is added first in generate_union_paths,
-		 * likewise, the JoinDomain can be that of the initial member of the
-		 * Pathkey's EquivalenceClass.  We pass -1 for ec_index since we
-		 * maintain the eclass_indexes for the child_rel after the loop.
-		 */
 		add_child_eq_member(root,
 							pk->pk_eclass,
 							-1,
@@ -3086,8 +3087,6 @@ add_setop_child_rel_equivalences(PlannerInfo *root, RelOptInfo *child_rel,
 							parent_em,
 							exprType((Node *) tle->expr),
 							child_rel->relid);
-
-		lc2 = lnext(setop_pathkeys, lc2);
 	}
 
 	/*
