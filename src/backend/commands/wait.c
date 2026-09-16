@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlogrecovery.h"
 #include "access/xlogwait.h"
@@ -132,6 +133,15 @@ ExecWaitStmt(ParseState *pstate, WaitStmt *stmt, bool isTopLevel,
 	}
 
 	/*
+	 * WAIT FOR must not be run in a transaction that uses a transaction
+	 * snapshot.
+	 */
+	if (IsolationUsesXactSnapshot())
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("WAIT cannot be executed within a transaction with an isolation level higher than READ COMMITTED"));
+
+	/*
 	 * We are going to wait for the LSN.  We should first care that we don't
 	 * hold a snapshot and correspondingly our MyProc->xmin is invalid.
 	 * Otherwise, our snapshot could prevent the replay of WAL records
@@ -155,8 +165,7 @@ ExecWaitStmt(ParseState *pstate, WaitStmt *stmt, bool isTopLevel,
 	if (HaveRegisteredOrActiveSnapshot())
 		ereport(ERROR,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				errmsg("WAIT must be called without an active or registered snapshot"),
-				errdetail("WAIT cannot be executed within a transaction with an isolation level higher than READ COMMITTED."));
+				errmsg("WAIT must be called without an active or registered snapshot"));
 
 	/*
 	 * As the result we should hold no snapshot, and correspondingly our xmin
