@@ -2313,6 +2313,7 @@ typedef struct SetOperationStmt
 	/* a list of SortGroupClause's */
 	List	   *groupClauses pg_node_attr(query_jumble_ignore);
 	/* groupClauses is NIL if UNION ALL, but must be set otherwise */
+	List	   *sortClauses pg_node_attr(query_jumble_ignore); /* inline DISTINCT ON ORDER BY clauses */
 } SetOperationStmt;
 
 
