@@ -316,6 +316,7 @@ extern RecursiveUnionPath *create_recursiveunion_path(PlannerInfo *root,
 													  Path *rightpath,
 													  PathTarget *target,
 													  List *distinctList,
+													  List *distinctSortClause,
 													  int wtParam,
 													  double numGroups);
 extern LockRowsPath *create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,

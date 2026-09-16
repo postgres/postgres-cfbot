@@ -1591,6 +1591,11 @@ typedef struct RecursiveUnionState
 	MemoryContext tempContext;	/* short-term context for comparisons */
 	TupleHashTable hashtable;	/* hash table for tuples already seen */
 	MemoryContext tuplesContext;	/* context containing hash table's tuples */
+
+	/* Sort keys for replacement (for subset DISTINCT ON with ORDER BY) */
+	SortSupport sortKeys;
+	TupleTableSlot *sort_firstTupleSlot;
+	Tuplestorestate *result_table; /* buffered results for UNION DISTINCT ON */
 } RecursiveUnionState;
 
 /* ----------------
