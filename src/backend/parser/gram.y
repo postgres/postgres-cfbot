@@ -13231,7 +13231,8 @@ simple_select:
 				{
 					SelectStmt *n = makeNode(SelectStmt);
 
-					n->distinctClause = $2;
+					n->distinctClause = linitial($2);
+					n->distinctSortClause = lsecond($2);
 					n->targetList = $3;
 					n->intoClause = $4;
 					n->fromClause = $5;
@@ -13485,8 +13486,9 @@ set_quantifier:
  * should be placed in the DISTINCT list during parsetree analysis.
  */
 distinct_clause:
-			DISTINCT								{ $$ = list_make1(NIL); }
-			| DISTINCT ON '(' expr_list ')'			{ $$ = $4; }
+			DISTINCT								{ $$ = list_make2(list_make1(NIL), NIL); }
+			| DISTINCT ON '(' expr_list ')'			{ $$ = list_make2($4, NIL); }
+			| DISTINCT ON '(' expr_list sort_clause ')' { $$ = list_make2($4, $5); }
 		;
 
 opt_all_clause:
@@ -17951,7 +17953,16 @@ PLpgSQL_Expr: opt_distinct_clause opt_target_list
 				{
 					SelectStmt *n = makeNode(SelectStmt);
 
-					n->distinctClause = $1;
+					if ($1)
+					{
+						n->distinctClause = linitial($1);
+						n->distinctSortClause = lsecond($1);
+					}
+					else
+					{
+						n->distinctClause = NIL;
+						n->distinctSortClause = NIL;
+					}
 					n->targetList = $2;
 					n->fromClause = $3;
 					n->whereClause = $4;

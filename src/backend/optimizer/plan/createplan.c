@@ -2193,6 +2193,52 @@ create_agg_plan(PlannerInfo *root, AggPath *best_path)
 					best_path->transitionSpace,
 					subplan);
 
+	/* Extract sort keys for inline DISTINCT ON ORDER BY */
+	if (best_path->distinctSortClause)
+	{
+		List	   *sortcls = best_path->distinctSortClause;
+		List	   *sub_tlist = subplan->targetlist;
+		ListCell   *l;
+		int			numsortkeys;
+		AttrNumber *sortColIdx;
+		Oid		   *sortOperators;
+		Oid		   *collations;
+		bool	   *nullsFirst;
+
+		numsortkeys = list_length(sortcls);
+		sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
+		sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
+		collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
+		nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+
+		numsortkeys = 0;
+		foreach(l, sortcls)
+		{
+			SortGroupClause *sortcl = (SortGroupClause *) lfirst(l);
+			TargetEntry *tle = get_sortgroupclause_tle(sortcl, sub_tlist);
+
+			sortColIdx[numsortkeys] = tle->resno;
+			sortOperators[numsortkeys] = sortcl->sortop;
+			collations[numsortkeys] = exprCollation((Node *) tle->expr);
+			nullsFirst[numsortkeys] = sortcl->nulls_first;
+			numsortkeys++;
+		}
+
+		plan->numSortCols = numsortkeys;
+		plan->sortColIdx = sortColIdx;
+		plan->sortOperators = sortOperators;
+		plan->sortCollations = collations;
+		plan->sortNullsFirst = nullsFirst;
+	}
+	else
+	{
+		plan->numSortCols = 0;
+		plan->sortColIdx = NULL;
+		plan->sortOperators = NULL;
+		plan->sortCollations = NULL;
+		plan->sortNullsFirst = NULL;
+	}
+
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
 	return plan;
