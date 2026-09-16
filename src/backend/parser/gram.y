@@ -13263,9 +13263,31 @@ simple_select:
 					n->fromClause = list_make1($2);
 					$$ = (Node *) n;
 				}
-			| select_clause UNION set_quantifier select_clause
+			| select_clause UNION select_clause				%prec UNION
 				{
-					$$ = makeSetOp(SETOP_UNION, $3 == SET_QUANTIFIER_ALL, $1, $4);
+					$$ = makeSetOp(SETOP_UNION, false, $1, $3);
+				}
+			| select_clause UNION ALL select_clause			%prec UNION
+				{
+					$$ = makeSetOp(SETOP_UNION, true, $1, $4);
+				}
+			| select_clause UNION distinct_clause select_clause	%prec UNION
+				{
+					List *distinctClause = linitial($3);
+					List *distinctSortClause = lsecond($3);
+					Node *n = makeSetOp(SETOP_UNION, false, $1, $4);
+					SelectStmt *s = (SelectStmt *) n;
+					if (linitial(distinctClause) == NULL && distinctSortClause == NIL)
+					{
+						s->distinctClause = NIL;
+						s->distinctSortClause = NIL;
+					}
+					else
+					{
+						s->distinctClause = distinctClause;
+						s->distinctSortClause = distinctSortClause;
+					}
+					$$ = (Node *) s;
 				}
 			| select_clause INTERSECT set_quantifier select_clause
 				{
