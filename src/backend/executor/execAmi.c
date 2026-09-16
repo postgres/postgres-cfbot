@@ -53,6 +53,7 @@
 #include "executor/nodeSort.h"
 #include "executor/nodeSubplan.h"
 #include "executor/nodeSubqueryscan.h"
+#include "executor/nodeGraphScan.h"
 #include "executor/nodeTableFuncscan.h"
 #include "executor/nodeTidrangescan.h"
 #include "executor/nodeTidscan.h"
@@ -205,6 +206,10 @@ ExecReScan(PlanState *node)
 
 		case T_SubqueryScanState:
 			ExecReScanSubqueryScan((SubqueryScanState *) node);
+			break;
+
+		case T_GraphScanState:
+			ExecReScanGraphScan((GraphScanState *) node);
 			break;
 
 		case T_FunctionScanState:
@@ -562,6 +567,9 @@ ExecSupportsBackwardScan(Plan *node)
 
 		case T_SubqueryScan:
 			return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan);
+
+		case T_GraphScan:
+			return false;
 
 		case T_CustomScan:
 			if (((CustomScan *) node)->flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN)

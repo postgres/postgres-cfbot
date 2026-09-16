@@ -20,17 +20,21 @@
 
 #include "access/sysattr.h"
 #include "access/tsmapi.h"
+#include "access/genam.h"
+#include "access/htup_details.h"
+#include "access/table.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_propgraph_element.h"
+#include "catalog/pg_statistic.h"
+#include "catalog/pg_type.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
-#ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
-#endif
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
@@ -38,17 +42,22 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/paramassign.h"
 #include "optimizer/plancat.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
+#include "optimizer/planmain.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
 #include "port/pg_bitutils.h"
+#include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
+#include "utils/syscache.h"
 
 
 /* Bitmask flags for pushdown_safety_info.unsafeFlags */
@@ -135,6 +144,13 @@ static Path *get_singleton_append_subpath(Path *path,
 static void set_dummy_rel_pathlist(RelOptInfo *rel);
 static void set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								  Index rti, RangeTblEntry *rte);
+static void set_graph_pathlist(PlannerInfo *root, RelOptInfo *rel,
+							   Index rti, RangeTblEntry *rte);
+static void set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel,
+								   Index rti, RangeTblEntry *rte);
+static Relids graph_pattern_lateral_relids(PlannerInfo *root,
+										   RangeTblEntry *rte);
+static bool graph_pattern_has_quantifier(GraphPattern *gp);
 static void set_function_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								  RangeTblEntry *rte);
 static void set_values_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -500,6 +516,17 @@ set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 				/* Might as well just build the path immediately */
 				set_result_pathlist(root, rel, rte);
 				break;
+			case RTE_GRAPH_TABLE:
+
+				/*
+				 * Graph tables don't support making a choice between
+				 * parameterized and unparameterized paths, so just go ahead
+				 * and build their paths immediately (the native planner
+				 * decomposes the pattern into an internal query and plans it,
+				 * like a subquery).
+				 */
+				set_graph_pathlist(root, rel, rti, rte);
+				break;
 			default:
 				elog(ERROR, "unexpected rtekind: %d", (int) rel->rtekind);
 				break;
@@ -573,6 +600,9 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 				break;
 			case RTE_RESULT:
 				/* simple Result --- fully handled during set_rel_size */
+				break;
+			case RTE_GRAPH_TABLE:
+				/* graph table --- fully handled during set_rel_size */
 				break;
 			default:
 				elog(ERROR, "unexpected rtekind: %d", (int) rel->rtekind);
@@ -791,6 +821,15 @@ set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 		case RTE_RESULT:
 			/* RESULT RTEs, in themselves, are no problem. */
 			break;
+
+		case RTE_GRAPH_TABLE:
+
+			/*
+			 * The native graph plan contains no parallel-aware nodes today,
+			 * so never consider scanning a graph table in a worker.
+			 */
+			return;
+
 		case RTE_GROUP:
 			/* Shouldn't happen; we're only considering baserels here. */
 			Assert(false);
@@ -3146,6 +3185,1244 @@ set_namedtuplestore_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate appropriate path */
 	add_path(rel, create_namedtuplestorescan_path(root, rel, required_outer));
+}
+
+/*
+ * set_graph_pathlist
+ *		Build the access path(s) for an RTE_GRAPH_TABLE
+ *
+ * The graph RTE is planned like a subquery: the pattern is decomposed by the
+ * rewriter's helpers into an internal Query that is then planned via
+ * subquery_planner().  Fully unquantified patterns become relational joins
+ * over the backing element tables; quantified (variable-length) hops are kept
+ * as internal RTE_GRAPH_TABLEs planned as GraphScan nodes in the internal
+ * query.
+ */
+static void
+set_graph_pathlist(PlannerInfo *root, RelOptInfo *rel,
+				   Index rti, RangeTblEntry *rte)
+{
+	Query	   *subquery;
+	Relids		required_outer;
+	double		tuple_fraction = 0.0;
+	RelOptInfo *sub_final_rel;
+	bool		trivial_pathtarget;
+	ListCell   *lc;
+
+	/*
+	 * Internal (single quantified hop) graph RTEs are planned directly as a
+	 * GraphScan node, not through a decomposed subquery.
+	 */
+	if (rte->is_internal_graph)
+	{
+		set_graphscan_pathlist(root, rel, rti, rte);
+		return;
+	}
+
+	/*
+	 * Decompose the pattern.  Fully unquantified patterns use the relational
+	 * decomposition; patterns with quantified hops use the native per-branch
+	 * decomposition that keeps each quantified hop as an internal graph RTE
+	 * (planned as a GraphScan).
+	 */
+	if (graph_pattern_has_quantifier(rte->graph_pattern))
+		subquery = copyObject(decomposeGraphNative(rte));
+	else
+		subquery = copyObject(decomposeGraphTable(rte));
+
+	/*
+	 * The decomposed query is planned without passing through the rewriter,
+	 * which is where RLS policies are normally attached; apply them here so
+	 * row-level security on the backing element tables is enforced.
+	 */
+	native_apply_rls_to_query(subquery);
+
+	/*
+	 * If the pattern or its COLUMNS reference outer relations (lateral), the
+	 * graph table must be treated as parameterized even though it is not
+	 * marked LATERAL in the jointree.
+	 */
+	required_outer = graph_pattern_lateral_relids(root, rte);
+
+	/* plan_params should not be in use in current query level */
+	Assert(root->plan_params == NIL);
+
+	/* Generate a subroot and Paths for the decomposed subquery */
+	rel->subroot = subquery_planner(root->glob, subquery,
+									choose_plan_name(root->glob,
+													 rte->eref->aliasname,
+													 false),
+									root, NULL, false,
+									tuple_fraction, NULL);
+
+	/* Isolate the params needed by this specific subplan */
+	rel->subplan_params = root->plan_params;
+	root->plan_params = NIL;
+
+	/*
+	 * It's possible that constraint exclusion proved the decomposed query
+	 * empty.  If so, it's desirable to produce an unadorned dummy path.
+	 */
+	sub_final_rel = fetch_upper_rel(rel->subroot, UPPERREL_FINAL, NULL);
+
+	if (IS_DUMMY_REL(sub_final_rel))
+	{
+		set_dummy_rel_pathlist(rel);
+		return;
+	}
+
+	/*
+	 * Mark rel with estimated output rows, width, etc.  Note that we have to
+	 * do this before generating outer-query paths, else cost_subqueryscan is
+	 * not happy.
+	 */
+	set_subquery_size_estimates(root, rel);
+
+	/*
+	 * Also detect whether the reltarget is trivial, so that we can pass that
+	 * info to cost_subqueryscan (rather than re-deriving it multiple times).
+	 */
+	if (list_length(rel->reltarget->exprs) != list_length(subquery->targetList))
+		trivial_pathtarget = false;
+	else
+	{
+		trivial_pathtarget = true;
+		foreach(lc, rel->reltarget->exprs)
+		{
+			Node	   *node = (Node *) lfirst(lc);
+			Var		   *var;
+
+			if (!IsA(node, Var))
+			{
+				trivial_pathtarget = false;
+				break;
+			}
+			var = (Var *) node;
+			if (var->varno != rti ||
+				var->varattno != foreach_current_index(lc) + 1)
+			{
+				trivial_pathtarget = false;
+				break;
+			}
+		}
+	}
+
+	/* For each Path that subquery_planner produced, make a SubqueryScanPath */
+	foreach(lc, sub_final_rel->pathlist)
+	{
+		Path	   *subpath = (Path *) lfirst(lc);
+		List	   *pathkeys;
+
+		/* Convert subpath's pathkeys to outer representation */
+		pathkeys = convert_subquery_pathkeys(root,
+											 rel,
+											 subpath->pathkeys,
+											 make_tlist_from_pathtarget(subpath->pathtarget));
+
+		/* Generate outer path using this subpath */
+		add_path(rel, (Path *)
+				 create_subqueryscan_path(root, rel, subpath,
+										  trivial_pathtarget,
+										  pathkeys, required_outer));
+	}
+}
+
+
+/*
+ * Return true if the graph pattern has any quantified (variable-length) hop.
+ */
+static bool
+graph_pattern_has_quantifier(GraphPattern *gp)
+{
+	List	   *path_pattern = linitial(gp->path_pattern_list);
+	ListCell   *lc;
+
+	foreach(lc, path_pattern)
+	{
+		GraphElementPattern *gep = lfirst_node(GraphElementPattern, lc);
+
+		if (gep->quantifier != NULL)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Mutator resolving the GraphPropertyRef nodes of a quantified edge's own
+ * WHERE clause against one concrete edge element (rtindex 1).  Used for each
+ * arm of the GraphScan's inner (1-hop) expansion.
+ */
+static Node *
+resolve_edge_where_mutator(Node *node, Oid *elemoid)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, GraphPropertyRef))
+	{
+		GraphPropertyRef *gpr = (GraphPropertyRef *) node;
+		Node	   *n;
+
+		n = get_element_property_expr(*elemoid, gpr->propid, 1);
+		if (!n)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("property \"%s\" for element variable \"%s\" not found",
+							get_propgraph_property_name(gpr->propid),
+							gpr->elvarname)));
+		return n;
+	}
+	return expression_tree_mutator(node, resolve_edge_where_mutator,
+								   (void *) elemoid);
+}
+
+/*
+ * Key-column mapping of one edge element of a hop (catatog pgesrckey /
+ * pgedestkey entry for the element).
+ */
+typedef struct GraphHopArmKeys
+{
+	Oid			arm_relid;		/* edge element table */
+	Oid			srcvertex;		/* source vertex element */
+	Oid			dstvertex;		/* destination vertex element */
+	List	   *srckeys;		/* source key columns (GraphElementKeyCol) */
+	List	   *dstkeys;		/* destination key columns
+								 * (GraphElementKeyCol) */
+}			GraphHopArmKeys;
+
+/*
+ * Build the equality clause "rel1.attno = <current vertex key>", where the
+ * right-hand side is the given PARAM_EXEC.  The operator is the datatype's
+ * default equality, the same one the GraphScan executor uses to validate
+ * candidate edges, so the pushed-down filter has exactly the executor's
+ * semantics.  Used to parameterize the inner (1-hop) arm scans on the
+ * current vertex, letting the planner choose index scans on the src/dst key
+ * columns.
+ */
+static Node *
+make_graph_key_param_clause(AttrNumber attno, Oid atttype, int32 atttypmod,
+							Oid attcoll, int paramid)
+{
+	Oid			eqop;
+	Var		   *var;
+	Param	   *param;
+
+	eqop = key_equality_operator(atttype);
+
+	var = makeVar(1, attno, atttype, atttypmod, attcoll, 0);
+	param = makeNode(Param);
+	param->paramkind = PARAM_EXEC;
+	param->paramid = paramid;
+	param->paramtype = atttype;
+	param->paramtypmod = atttypmod;
+	param->paramcollid = attcoll;
+	param->location = -1;
+
+	return (Node *) make_opclause(eqop, BOOLOID, false,
+								  (Expr *) var, (Expr *) param,
+								  InvalidOid, attcoll);
+}
+
+/*
+ * Build the equality clause "rel1.attno1 = rel1.attno2" for two key columns
+ * of the same datatype (the datatype's default equality operator), used to
+ * detect self-loop edges in the reverse variant of an undirected hop.
+ */
+static Node *
+make_graph_key_eq_clause(AttrNumber attno1, AttrNumber attno2,
+						 Oid atttype, int32 atttypmod, Oid attcoll)
+{
+	Oid			eqop;
+	Var		   *var1;
+	Var		   *var2;
+
+	eqop = key_equality_operator(atttype);
+
+	var1 = makeVar(1, attno1, atttype, atttypmod, attcoll, 0);
+	var2 = makeVar(1, attno2, atttype, atttypmod, attcoll, 0);
+
+	return (Node *) make_opclause(eqop, BOOLOID, false,
+								  (Expr *) var1, (Expr *) var2,
+								  InvalidOid, attcoll);
+}
+
+/*
+ * Build the Query for the GraphScan's inner 1-hop expansion over the given
+ * edge element tables: a UNION ALL of per-table SELECTs.  Each edge element
+ * contributes two SELECTs, a "forward" variant filtered on the element's
+ * source key columns and a "reverse" variant filtered on its destination key
+ * columns; both filter against PARAM_EXEC parameters bound, at execution,
+ * to the current vertex's key values (the executor leaves the inactive
+ * direction's parameters NULL, making its variants produce no rows).  Pushing
+ * these filters down lets the planner choose index scans on the src/dst key
+ * columns instead of always scanning whole edge tables.  Each arm outputs,
+ * for every traversed edge:
+ *
+ *	 one column per VLE edge-list property (the edge's property value,
+ *	   accumulated into arrays by the executor),
+ *	 the edge's ctid,
+ *	 the edge element table OID (so the executor can identify the source
+ *	   table of each row),
+ *	 the edge's source key columns (padded with NULLs to *max_nsrc), and
+ *	 the edge's destination key columns (padded with NULLs to *max_ndst).
+ *
+ * The hop-wide maxima *max_nsrc / *max_ndst are returned so the executor can
+ * interpret the padded layout.  All arms must agree on the datatype of each
+ * (padded) key slot, since the UNION result has one type per column.
+ *
+ * The PARAM_EXEC nodes allocated for the current-vertex key values are
+ * returned in *vertex_params, ordered [forward src-key slots (max_nsrc),
+ * reverse dst-key slots (max_ndst)].
+ *
+ * The returned Query is what we plan through a nested subquery_planner() to
+ * obtain the parameterized 1-hop subplan (righttree).
+ */
+static Query *
+build_graphscan_inner_query(PlannerInfo *root, Oid graphid,
+							GraphElementPattern *edge_gep,
+							List *edge_element_oids, List *array_props,
+							int *max_nsrc, int *max_ndst,
+							List **vertex_params)
+{
+	List	   *arm_queries = NIL;
+	List	   *arm_keys = NIL;
+	ListCell   *lc;
+
+	*max_nsrc = 0;
+	*max_ndst = 0;
+
+	if (edge_element_oids == NIL)
+		return NULL;
+
+	/* Read each edge element's src/dst key column mapping. */
+	foreach(lc, edge_element_oids)
+	{
+		Oid			elemoid = lfirst_oid(lc);
+		HeapTuple	etup;
+		Form_pg_propgraph_element pge;
+		GraphHopArmKeys *ak;
+
+		etup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
+		if (!HeapTupleIsValid(etup))
+			elog(ERROR, "cache lookup failed for property graph element %u",
+				 elemoid);
+		pge = (Form_pg_propgraph_element) GETSTRUCT(etup);
+
+		ak = palloc_object(GraphHopArmKeys);
+		ak->arm_relid = pge->pgerelid;
+		ak->srcvertex = pge->pgesrcvertexid;
+		ak->dstvertex = pge->pgedestvertexid;
+
+		ReleaseSysCache(etup);
+
+		ak->srckeys = get_graph_element_key_columns(elemoid,
+													Anum_pg_propgraph_element_pgesrckey);
+		ak->dstkeys = get_graph_element_key_columns(elemoid,
+													Anum_pg_propgraph_element_pgedestkey);
+
+		*max_nsrc = Max(*max_nsrc, list_length(ak->srckeys));
+		*max_ndst = Max(*max_ndst, list_length(ak->dstkeys));
+		arm_keys = lappend(arm_keys, ak);
+	}
+
+	/*
+	 * Type of each (padded) src/dst key slot: taken from the first arm that
+	 * defines the slot; every other arm must use the same datatype.
+	 */
+	{
+		Oid		   *src_types = palloc_array(Oid, Max(*max_nsrc, 1));
+		int32	   *src_typmods = palloc_array(int32, Max(*max_nsrc, 1));
+		Oid		   *src_colls = palloc_array(Oid, Max(*max_nsrc, 1));
+		Oid		   *dst_types = palloc_array(Oid, Max(*max_ndst, 1));
+		int32	   *dst_typmods = palloc_array(int32, Max(*max_ndst, 1));
+		Oid		   *dst_colls = palloc_array(Oid, Max(*max_ndst, 1));
+		int			ai = 0;
+
+		memset(src_types, 0, sizeof(Oid) * (Size) Max(*max_nsrc, 1));
+		memset(dst_types, 0, sizeof(Oid) * (Size) Max(*max_ndst, 1));
+
+		foreach_ptr(GraphHopArmKeys, ak, arm_keys)
+		{
+			int			k = 0;
+
+			foreach_ptr(GraphElementKeyCol, kc, ak->srckeys)
+			{
+				if (src_types[k] == InvalidOid)
+				{
+					src_types[k] = kc->typid;
+					src_typmods[k] = kc->typmod;
+					src_colls[k] = kc->collation;
+				}
+				else if (src_types[k] != kc->typid)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("graph hop source key column %d has different datatypes across edge elements", k + 1)));
+				k++;
+			}
+
+			k = 0;
+			foreach_ptr(GraphElementKeyCol, kc, ak->dstkeys)
+			{
+				if (dst_types[k] == InvalidOid)
+				{
+					dst_types[k] = kc->typid;
+					dst_typmods[k] = kc->typmod;
+					dst_colls[k] = kc->collation;
+				}
+				else if (dst_types[k] != kc->typid)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("graph hop destination key column %d has different datatypes across edge elements", k + 1)));
+				k++;
+			}
+		}
+
+		/*
+		 * Allocate the PARAM_EXEC params the forward/reverse variants filter
+		 * against: one per source key slot, then one per destination key
+		 * slot.  They are registered before the inner query is planned, so
+		 * the planner sees them as ordinary (indexable) parameters; the
+		 * executor binds them to the current vertex before each fetch.
+		 */
+		*vertex_params = NIL;
+		for (int k = 0; k < *max_nsrc; k++)
+			*vertex_params =
+				lappend(*vertex_params,
+						generate_new_exec_param(root, src_types[k],
+												src_typmods[k],
+												src_colls[k]));
+		for (int k = 0; k < *max_ndst; k++)
+			*vertex_params =
+				lappend(*vertex_params,
+						generate_new_exec_param(root, dst_types[k],
+												dst_typmods[k],
+												dst_colls[k]));
+
+		/*
+		 * Build one Query per edge element (arm): a "forward" variant whose
+		 * source key columns must equal the current vertex, and a "reverse"
+		 * variant whose destination key columns must.  Both are UNIONed into
+		 * the single inner expansion; the executor keeps only the variants
+		 * matching its direction active (the inactive direction's parameters
+		 * are NULL).
+		 */
+		ai = 0;
+		foreach_ptr(GraphHopArmKeys, ak, arm_keys)
+		{
+			Query	   *skeleton = makeNode(Query);
+			Relation	rel;
+			ParseNamespaceItem *pni;
+			List	   *tlist = NIL;
+			List	   *edgequals = NIL;
+			int			resno = 0;
+			Query	   *fwd;
+			Query	   *rev;
+
+			skeleton->commandType = CMD_SELECT;
+
+			rel = table_open(ak->arm_relid, AccessShareLock);
+			pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel,
+												AccessShareLock,
+												NULL, true, false);
+			table_close(rel, NoLock);
+			skeleton->rtable = lappend(skeleton->rtable, pni->p_rte);
+			skeleton->rteperminfos = lappend(skeleton->rteperminfos,
+											 pni->p_perminfo);
+			pni->p_rte->perminfoindex = list_length(skeleton->rteperminfos);
+			{
+				RangeTblRef *rtr = makeNode(RangeTblRef);
+
+				rtr->rtindex = 1;
+				skeleton->jointree = makeFromExpr(list_make1(rtr), NULL);
+			}
+
+			/* Property value columns for the VLE edge-list refs. */
+			{
+				Oid			elemoid = lfirst_oid(list_nth_cell(edge_element_oids, ai));
+
+				foreach_ptr(GraphPropertyRef, gpr, array_props)
+				{
+					Node	   *n;
+
+					resno++;
+					n = get_element_property_expr(elemoid, gpr->propid, 1);
+					if (!n)
+						n = (Node *) makeNullConst(gpr->typeId,
+												   gpr->typmod,
+												   gpr->collation);
+					tlist = lappend(tlist,
+									makeTargetEntry((Expr *) n, resno,
+													psprintf("gep%d", resno), false));
+				}
+			}
+
+			/* Edge row identity: ctid. */
+			resno++;
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) makeVar(1,
+															 SelfItemPointerAttributeNumber,
+															 TIDOID, -1,
+															 InvalidOid, 0),
+											resno, pstrdup("gs_ctid"), false));
+			/* Source edge element table OID. */
+			resno++;
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) makeConst(OIDOID, -1,
+															   InvalidOid,
+															   sizeof(Oid),
+															   ObjectIdGetDatum(ak->arm_relid),
+															   false, true),
+											resno, pstrdup("gs_tbl"), false));
+
+			/* Source key columns (padded to *max_nsrc). */
+			for (int k = 0; k < *max_nsrc; k++)
+			{
+				Node	   *n;
+
+				resno++;
+				if (k < list_length(ak->srckeys))
+				{
+					GraphElementKeyCol *kc = list_nth(ak->srckeys, k);
+
+					n = (Node *) makeVar(1, kc->attnum,
+										 kc->typid, kc->typmod,
+										 kc->collation, 0);
+				}
+				else
+					n = (Node *) makeNullConst(src_types[k], src_typmods[k],
+											   src_colls[k]);
+				tlist = lappend(tlist,
+								makeTargetEntry((Expr *) n, resno,
+												psprintf("gs_src%d", k + 1),
+												false));
+			}
+
+			/* Destination key columns (padded to *max_ndst). */
+			for (int k = 0; k < *max_ndst; k++)
+			{
+				Node	   *n;
+
+				resno++;
+				if (k < list_length(ak->dstkeys))
+				{
+					GraphElementKeyCol *kc = list_nth(ak->dstkeys, k);
+
+					n = (Node *) makeVar(1, kc->attnum,
+										 kc->typid, kc->typmod,
+										 kc->collation, 0);
+				}
+				else
+					n = (Node *) makeNullConst(dst_types[k], dst_typmods[k],
+											   dst_colls[k]);
+				tlist = lappend(tlist,
+								makeTargetEntry((Expr *) n, resno,
+												psprintf("gs_dst%d", k + 1),
+												false));
+			}
+
+			skeleton->targetList = tlist;
+
+			/* The edge's own WHERE, resolved against this edge element. */
+			if (edge_gep->whereClause)
+			{
+				Oid			elemoid = lfirst_oid(list_nth_cell(edge_element_oids, ai));
+				Node	   *w = copyObject(edge_gep->whereClause);
+
+				IncrementVarSublevelsUp(w, 1, 1);
+				edgequals = lappend(edgequals,
+									resolve_edge_where_mutator(w, &elemoid));
+			}
+
+			/*
+			 * Forward variant: the edge's source keys must equal the current
+			 * vertex's (PARAM_EXEC slots 0..*max_nsrc-1).
+			 */
+			fwd = copyObject(skeleton);
+			{
+				List	   *fquals = list_copy(edgequals);
+				int			k = 0;
+
+				foreach_ptr(GraphElementKeyCol, kc, ak->srckeys)
+				{
+					int			paramid =
+						((Param *) list_nth(*vertex_params, k))->paramid;
+
+					fquals = lappend(fquals,
+									 make_graph_key_param_clause(kc->attnum,
+																 kc->typid,
+																 kc->typmod,
+																 kc->collation,
+																 paramid));
+					k++;
+				}
+				((FromExpr *) fwd->jointree)->quals =
+					(Node *) makeBoolExpr(AND_EXPR, fquals, -1);
+			}
+			native_apply_rls_to_query(fwd);
+			arm_queries = lappend(arm_queries, fwd);
+
+			/*
+			 * Reverse variant: the edge's destination keys must equal the
+			 * current vertex's (PARAM_EXEC slots *max_nsrc..).  For an
+			 * undirected hop, skip self-loops here (the forward variant
+			 * already yields them), else they would be traversed twice; and
+			 * skip the deduplication for directed hops, where the reverse
+			 * variant must still traverse self-loops.
+			 */
+			rev = copyObject(skeleton);
+			{
+				List	   *rquals = list_copy(edgequals);
+				int			k = 0;
+
+				foreach_ptr(GraphElementKeyCol, kc, ak->dstkeys)
+				{
+					int			paramid =
+						((Param *) list_nth(*vertex_params,
+											*max_nsrc + k))->paramid;
+
+					rquals = lappend(rquals,
+									 make_graph_key_param_clause(kc->attnum,
+																 kc->typid,
+																 kc->typmod,
+																 kc->collation,
+																 paramid));
+					k++;
+				}
+
+				if (edge_gep->kind == EDGE_PATTERN_ANY &&
+					ak->srcvertex == ak->dstvertex)
+				{
+					List	   *selfeq = NIL;
+					ListCell   *lc2s,
+							   *lc2d;
+
+					forboth(lc2s, ak->srckeys, lc2d, ak->dstkeys)
+					{
+						GraphElementKeyCol *kc =
+							(GraphElementKeyCol *) lfirst(lc2s);
+						GraphElementKeyCol *dc =
+							(GraphElementKeyCol *) lfirst(lc2d);
+
+						selfeq = lappend(selfeq,
+										 make_graph_key_eq_clause(kc->attnum,
+																  dc->attnum,
+																  kc->typid,
+																  kc->typmod,
+																  kc->collation));
+					}
+					rquals = lappend(rquals,
+									 makeBoolExpr(NOT_EXPR,
+												  list_make1(makeBoolExpr(AND_EXPR,
+																		  selfeq,
+																		  -1)),
+												  -1));
+				}
+
+				((FromExpr *) rev->jointree)->quals =
+					(Node *) makeBoolExpr(AND_EXPR, rquals, -1);
+			}
+			native_apply_rls_to_query(rev);
+			arm_queries = lappend(arm_queries, rev);
+
+			ai++;
+		}
+	}
+
+	if (list_length(arm_queries) == 1)
+		return linitial_node(Query, arm_queries);
+
+	/* Build a UNION ALL of the per-table arms. */
+	{
+		SetOperationStmt *sostmt;
+		List	   *rtable = NIL;
+		Query	   *union_query;
+		Query	   *sample_query = linitial_node(Query, arm_queries);
+		Node	   *larg = NULL;
+		int			resno = 1;
+		ListCell   *lct,
+				   *lcm,
+				   *lcc,
+				   *lctl;
+
+		/* Build the left-deep UNION tree. */
+		for (int i = 0; i < list_length(arm_queries); i++)
+		{
+			Query	   *aq = list_nth_node(Query, arm_queries, i);
+			ParseNamespaceItem *pni;
+			RangeTblRef *rtr;
+
+			IncrementVarSublevelsUp((Node *) aq, 1, 1);
+			pni = addRangeTableEntryForSubquery(make_parsestate(NULL), aq,
+												NULL, false, false);
+			rtable = lappend(rtable, pni->p_rte);
+			rtr = makeNode(RangeTblRef);
+			rtr->rtindex = list_length(rtable);
+
+			if (larg == NULL)
+			{
+				larg = (Node *) rtr;
+				continue;
+			}
+			sostmt = makeNode(SetOperationStmt);
+			sostmt->op = SETOP_UNION;
+			sostmt->all = true;
+			sostmt->larg = larg;
+			sostmt->rarg = (Node *) rtr;
+			larg = (Node *) sostmt;
+		}
+
+		union_query = makeNode(Query);
+		union_query->commandType = CMD_SELECT;
+		union_query->rtable = rtable;
+		union_query->setOperations = larg;
+		union_query->jointree = makeFromExpr(NIL, NULL);
+
+		/*
+		 * Record the union's output column types on the topmost
+		 * SetOperationStmt; plan_set_operations() uses them to build the
+		 * result targetlist.
+		 */
+		foreach_ptr(TargetEntry, sample_tle, sample_query->targetList)
+		{
+			((SetOperationStmt *) larg)->colTypes =
+				lappend_oid(((SetOperationStmt *) larg)->colTypes,
+							exprType((Node *) sample_tle->expr));
+			((SetOperationStmt *) larg)->colTypmods =
+				lappend_int(((SetOperationStmt *) larg)->colTypmods,
+							exprTypmod((Node *) sample_tle->expr));
+			((SetOperationStmt *) larg)->colCollations =
+				lappend_oid(((SetOperationStmt *) larg)->colCollations,
+							exprCollation((Node *) sample_tle->expr));
+		}
+
+		/* Dummy targetlist on var 1, typed from the sample arm. */
+		union_query->targetList = NIL;
+		forfour(lct, ((SetOperationStmt *) larg)->colTypes,
+				lcm, ((SetOperationStmt *) larg)->colTypmods,
+				lcc, ((SetOperationStmt *) larg)->colCollations,
+				lctl, sample_query->targetList)
+		{
+			TargetEntry *sample_tle = (TargetEntry *) lfirst(lctl);
+			Var		   *var;
+
+			var = makeVar(1, sample_tle->resno, lfirst_oid(lct),
+						  lfirst_int(lcm), lfirst_oid(lcc), 0);
+			union_query->targetList =
+				lappend(union_query->targetList,
+						makeTargetEntry((Expr *) var, resno++,
+										pstrdup(sample_tle->resname), false));
+		}
+
+		return union_query;
+	}
+}
+
+/*
+ * Build the GraphScan's inner (1-hop) expansion plan (the righttree).
+ * Returns the Plan and stores its PlannerInfo into *inner_rootp.
+ *
+ * The current-vertex PARAM_EXEC nodes used by the inner (arm) plans are
+ * returned in *vertex_params.  Because the arm scans live in the set-operation
+ * branch subqueries of the inner query, they only see parameters whose IDs
+ * were registered in the plan_params of an ancestor query level: register
+ * them on the caller's root before planning, so the branch subroots' outer
+ * params (and hence finalize_plan's acceptance of them) include them.  They
+ * are also marked as outer params of the inner subroot itself.
+ */
+static Plan *
+build_graphscan_inner_plan(PlannerInfo *root, Oid graphid,
+						   GraphElementPattern *edge_gep,
+						   List *edge_element_oids,
+						   List *array_props,
+						   PlannerInfo **inner_rootp,
+						   int *max_nsrc, int *max_ndst,
+						   List **vertex_params)
+{
+	Query	   *qr;
+	PlannerInfo *subroot;
+	RelOptInfo *sub_final_rel;
+	Plan	   *plan;
+	Bitmapset  *vp;
+	char	   *plan_name;
+	int			orig_plen;
+
+	qr = build_graphscan_inner_query(root, graphid, edge_gep, edge_element_oids,
+									 array_props, max_nsrc, max_ndst,
+									 vertex_params);
+	if (qr == NULL)
+	{
+		*inner_rootp = NULL;
+		return NULL;
+	}
+
+	/*
+	 * Make the vertex params available to every descendant of the inner query
+	 * (including the set-op branch subroots), so finalize_plan accepts them
+	 * as externally supplied.  The GraphScan node itself binds them at
+	 * execution and the T_GraphScan finalize case subtracts them again, so
+	 * only this plan's descendants see them.
+	 *
+	 * The registration is temporary: the inner (and branch) subroots copy
+	 * these ids into their outer_params when SS_identify_outer_params() runs
+	 * during subquery_planner(), after which the entries must not remain in
+	 * root->plan_params (create_plan asserts that list is empty at every
+	 * query level).
+	 */
+
+	vp = NULL;
+	orig_plen = list_length(root->plan_params);
+
+	if (*vertex_params != NIL)
+	{
+		foreach_ptr(Param, prm, *vertex_params)
+		{
+			PlannerParamItem *pitem = makeNode(PlannerParamItem);
+
+			pitem->item = (Node *) prm;
+			pitem->paramId = prm->paramid;
+			root->plan_params = lappend(root->plan_params, pitem);
+			vp = bms_add_member(vp, prm->paramid);
+		}
+	}
+
+	plan_name = choose_plan_name(root->glob, "graph_hop", false);
+	subroot = subquery_planner(root->glob, qr, plan_name, root, NULL,
+							   false, 0.0, NULL);
+
+	if (vp != NULL)
+	{
+		/* Ensure the inner subroot itself also sees them as outer params. */
+		subroot->outer_params = bms_add_members(subroot->outer_params, vp);
+
+		/* Drop the temporary plan_params entries. */
+		root->plan_params = list_truncate(root->plan_params, orig_plen);
+	}
+
+	sub_final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);
+	if (IS_DUMMY_REL(sub_final_rel))
+	{
+		*inner_rootp = subroot;
+		return NULL;
+	}
+
+	plan = create_plan(subroot, sub_final_rel->cheapest_total_path);
+
+	*inner_rootp = subroot;
+	return plan;
+}
+
+/*
+ * Estimated number of distinct values of a key column, from pg_statistic
+ * (stadistinct < 0 means a fraction of the rows).  With no stats (unanalyzed
+ * table) we fall back to "all values distinct", which is the conservative
+ * choice here: it makes the estimated degree (and hence the walk count) as
+ * small as possible rather than letting a stale/fake cardinality blow it up.
+ */
+static double
+graph_est_key_distinct(Oid relid, AttrNumber attnum, double reltuples)
+{
+	HeapTuple	statup;
+	Form_pg_statistic stat;
+	double		ndistinct;
+
+	statup = SearchSysCache3(STATRELATTINH,
+							 ObjectIdGetDatum(relid),
+							 Int16GetDatum(attnum),
+							 BoolGetDatum(false));
+	if (!HeapTupleIsValid(statup))
+		return Max(reltuples, 1.0);
+
+	stat = (Form_pg_statistic) GETSTRUCT(statup);
+	ndistinct = stat->stadistinct;
+	ReleaseSysCache(statup);
+
+	if (ndistinct < 0)
+		ndistinct = -ndistinct * reltuples;
+	if (ndistinct <= 0)
+		ndistinct = Max(reltuples, 1.0);
+	return ndistinct;
+}
+
+/*
+ * Estimated number of rows that a GraphScan returns for a single seed
+ * vertex: the number of walks of length [min_depth, max_depth] from a seed
+ * to a terminal-eligible vertex, computed from catalog statistics:
+ *
+ *	 rows(seed) ~= walkcount * terminal_frac
+ *	 walkcount  = sum_{k=min..maxeff} term_k
+ *	 term_1     = fanout
+ *	 term_k     = fanout * (fanout * DAMPING)^(k-1)     (k >= 2)
+ *
+ * where fanout is the hop's average degree (source-side for outgoing,
+ * destination-side for incoming, both for undirected) over its own edge
+ * element tables, and terminal_frac is the share of the hop's endpoint
+ * vertex tables that carry the terminal's labels.  This is a heuristic (like
+ * the estimates for recursive queries); its purpose is to keep the outer
+ * planner from treating the hop as a one-row relation.
+ *
+ * The per-step damping models the fact that walks re-converge on shared
+ * vertices, so the number of distinct walks grows far more slowly than the
+ * branching tree; without it (and without the hard cap), a {0,5} hop on a
+ * moderately connected graph estimates tens of thousands of rows per seed
+ * where only a handful exist, which pushed the planner into pathological
+ * choices such as a full-table hash on the terminal side, rebuilt once per
+ * LATERAL iteration.
+ *
+ * We could use better estimate if we collected statistics on each table involved.
+ * Currently, those are "fine-tuned" based on the data I have available in my environment.
+ */
+#define GRAPH_EST_PER_STEP_DAMPING	0.5
+#define GRAPH_EST_MAX_ROWS	1000.0
+
+/*
+ * Look up a graph element, returning the OID of its backing table and its
+ * estimated row total (via estimate_rel_size), plus -- when the caller asks
+ * -- the vertex element ids the element connects (edges) or belongs to
+ * (vertices).  Shared by the three row-count loops of graph_estimate_rows().
+ */
+static void
+graph_est_element_rows(Oid elemoid, Oid *relid, Oid *srcvertex,
+					   Oid *dstvertex, double *tuples)
+{
+	Oid			rid;
+	Oid			srcv;
+	Oid			dstv;
+	Relation	rel;
+	BlockNumber pages;
+	double		allvisfrac;
+
+	get_graph_element_identity(elemoid, &rid, &srcv, &dstv);
+
+	if (relid)
+		*relid = rid;
+	if (srcvertex)
+		*srcvertex = srcv;
+	if (dstvertex)
+		*dstvertex = dstv;
+
+	rel = table_open(rid, AccessShareLock);
+	estimate_rel_size(rel, NULL, &pages, tuples, &allvisfrac);
+	table_close(rel, NoLock);
+}
+
+static double
+graph_estimate_rows(Oid graphid, GraphElementPattern *edge_gep,
+					GraphElementPattern *term_gep, List *edge_element_oids,
+					int min_depth, int max_depth)
+{
+	double		fanout = 0.0;
+	double		endpoint_rows = 0.0;
+	double		terminal_rows = 0.0;
+	List	   *endpoint_elems = NIL;
+	List	   *terminal_elems = NIL;
+	ListCell   *lc;
+	int			maxeff;
+	double		walkcount = 0.0;
+
+	foreach(lc, edge_element_oids)
+	{
+		Oid			elemoid = lfirst_oid(lc);
+		Oid			relid;
+		Oid			srcvertex;
+		Oid			dstvertex;
+		double		tuples;
+		double		src_nd = 1.0;
+		double		dst_nd = 1.0;
+
+		graph_est_element_rows(elemoid, &relid, &srcvertex, &dstvertex,
+							   &tuples);
+
+		if (srcvertex != InvalidOid)
+			endpoint_elems = lappend_oid(endpoint_elems, srcvertex);
+		if (dstvertex != InvalidOid)
+			endpoint_elems = lappend_oid(endpoint_elems, dstvertex);
+
+		if (tuples > 0)
+		{
+			foreach_ptr(GraphElementKeyCol, kc,
+						get_graph_element_key_columns(elemoid,
+													  Anum_pg_propgraph_element_pgesrckey))
+				src_nd *= graph_est_key_distinct(relid, kc->attnum, tuples);
+
+			foreach_ptr(GraphElementKeyCol, kc,
+						get_graph_element_key_columns(elemoid,
+													  Anum_pg_propgraph_element_pgedestkey))
+				dst_nd *= graph_est_key_distinct(relid, kc->attnum, tuples);
+
+			if (edge_gep->kind == EDGE_PATTERN_LEFT)
+				fanout += tuples / dst_nd;	/* incoming: matched on dst keys */
+			else if (edge_gep->kind == EDGE_PATTERN_ANY)
+				fanout += tuples / src_nd + tuples / dst_nd;	/* undirected */
+			else
+				fanout += tuples / src_nd;	/* outgoing */
+		}
+	}
+
+	/* Row total of the vertex tables that can be reached as endpoints. */
+	foreach_oid(endpoint_elem, endpoint_elems)
+	{
+		Oid			relid;
+		double		tuples;
+
+		graph_est_element_rows(endpoint_elem, &relid, NULL, NULL, &tuples);
+		if (tuples > 0)
+			endpoint_rows += tuples;
+	}
+
+	/* Row total of the vertex tables carrying the terminal's labels. */
+	if (term_gep != NULL)
+		terminal_elems = get_graph_vertex_element_oids(graphid, term_gep);
+	foreach_oid(term_elem, terminal_elems)
+	{
+		Oid			relid;
+		double		tuples;
+
+		graph_est_element_rows(term_elem, &relid, NULL, NULL, &tuples);
+		if (tuples > 0)
+			terminal_rows += tuples;
+	}
+
+	/*
+	 * Average-degree sum over k steps, capped: unbounded or very deep hops
+	 * make walk counts explode on any cyclic component, so never let the
+	 * estimate grow without bound.
+	 */
+	maxeff = (max_depth < 0) ? 8 : max_depth;
+	maxeff = Min(maxeff, 8);
+	if (maxeff < min_depth)
+		maxeff = min_depth;
+	for (int k = min_depth; k <= maxeff; k++)
+	{
+		double		term;
+
+		if (k == 0)
+			term = 1.0;			/* the seed vertex itself */
+		else if (k == 1)
+			term = fanout;
+		else
+		{
+			double		rgrowth = Max(fanout * GRAPH_EST_PER_STEP_DAMPING, 1.0);
+
+			term = fanout * pow(rgrowth, (double) (k - 1));
+		}
+
+		walkcount += term;
+		if (walkcount > GRAPH_EST_MAX_ROWS)
+		{
+			walkcount = GRAPH_EST_MAX_ROWS;
+			break;
+		}
+	}
+
+	{
+		double		term_frac = 1.0;
+
+		if (endpoint_rows > 0)
+			term_frac = Min(terminal_rows / endpoint_rows, 1.0);
+		return Max(walkcount * term_frac, 1.0);
+	}
+}
+
+/*
+ * set_graphscan_pathlist
+ *		Build the (single) access path for an internal RTE_GRAPH_TABLE
+ *		describing one quantified (variable-length) hop: a GraphPath that
+ *		plans to a GraphScan node.
+ */
+static void
+set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
+					   RangeTblEntry *rte)
+{
+	GraphPattern *gp = rte->graph_pattern;
+	List	   *path_term;
+	GraphElementPattern *edge_gep;
+	GraphPath  *gpath;
+	Relids		required_outer;
+	List	   *edge_element_oids;
+	List	   *array_props;
+	List	   *vertex_params = NIL;
+	PlannerInfo *inner_root;
+	Plan	   *inner_plan;
+	List	   *seed_key_cols = NIL;
+	List	   *terminal_key_cols = NIL;
+	List	   *edge_list_cols = NIL;
+	int			max_nsrc = 0;
+	int			max_ndst = 0;
+	int			col;
+	ListCell   *lc;
+
+	/* The internal pattern is exactly (pd)-[e]-{m,n}->(td). */
+	Assert(gp != NULL && gp->path_pattern_list != NIL);
+	path_term = linitial(gp->path_pattern_list);
+	edge_gep = lsecond(path_term);
+
+	/* Always a single, presumably quantified, hop. */
+	Assert(edge_gep->quantifier != NULL);
+
+	/* Determine the output column layout from the built columns. */
+	col = 1;
+	foreach(lc, rte->graph_table_columns)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		if (te->resname && strncmp(te->resname, "gs_seed", 7) == 0)
+			seed_key_cols = lappend_int(seed_key_cols, col);
+		else if (te->resname && strncmp(te->resname, "gs_term", 7) == 0)
+			terminal_key_cols = lappend_int(terminal_key_cols, col);
+		else
+			edge_list_cols = lappend_int(edge_list_cols, col);
+		col++;
+	}
+
+	/*
+	 * The seed dependency (required_outer) comes from the ghost seed's WHERE
+	 * clause, which references the previous segment's vertex.
+	 */
+	if (gp->whereClause == NULL &&
+		list_length(path_term) >= 3)
+	{
+		GraphElementPattern *pd = linitial(path_term);
+
+		required_outer = pull_varnos(root, (Node *) pd->whereClause);
+	}
+	else
+		required_outer = NULL;
+
+	/* Edge element tables backing the hop's edge pattern. */
+	edge_element_oids = get_graph_edge_element_oids(rte->relid, edge_gep);
+	array_props = rte->graph_vle_props;
+
+	/*
+	 * Estimate the row count; see graph_estimate_rows().  The estimate is for
+	 * one seed vertex (the scan is (re)started once per encountered seed), so
+	 * it is per-execution for parameterized uses as well.  A nonzero minimum
+	 * keeps the relation from being treated as dummy.
+	 */
+	{
+		GraphElementPattern *term_gep =
+			(list_length(path_term) >= 3) ?
+			lthird_node(GraphElementPattern, path_term) : NULL;
+
+		rel->rows =
+			graph_estimate_rows(rte->relid, edge_gep, term_gep,
+								edge_element_oids,
+								linitial_int(edge_gep->quantifier),
+								lsecond_int(edge_gep->quantifier));
+		rel->tuples = rel->rows;
+	}
+
+	/* Build the parameterized 1-hop inner expansion (righttree). */
+	inner_plan = build_graphscan_inner_plan(root, rte->relid, edge_gep,
+											edge_element_oids, array_props,
+											&inner_root, &max_nsrc, &max_ndst,
+											&vertex_params);
+
+	gpath = makeNode(GraphPath);
+	gpath->path.pathtype = T_GraphScan;
+	gpath->path.parent = rel;
+	gpath->path.pathtarget = rel->reltarget;
+	gpath->path.rows = rel->rows;
+	gpath->path.startup_cost = cpu_operator_cost * 10;
+	gpath->path.total_cost = rel->rows * cpu_tuple_cost + cpu_operator_cost * 100;
+	gpath->path.pathkeys = NIL;
+	gpath->min_depth = linitial_int(edge_gep->quantifier);
+	gpath->max_depth = lsecond_int(edge_gep->quantifier);
+
+	switch (edge_gep->kind)
+	{
+		case EDGE_PATTERN_LEFT:
+			gpath->direction = GRAPH_DIR_INCOMING;
+			break;
+		case EDGE_PATTERN_ANY:
+			gpath->direction = GRAPH_DIR_UNDIRECTED;
+			break;
+		default:
+			gpath->direction = GRAPH_DIR_OUTGOING;
+			break;
+	}
+
+	gpath->seed_key_cols = seed_key_cols;
+	gpath->terminal_key_cols = terminal_key_cols;
+	gpath->edge_list_cols = edge_list_cols;
+	gpath->edge_element_oids = edge_element_oids;
+	gpath->graph_columns = rte->graph_table_columns;
+	gpath->inner_plan = inner_plan;
+	gpath->subplan_params = (inner_root != NULL) ? inner_root->plan_params : NIL;
+	gpath->vertex_param_ids = NIL;
+	foreach_ptr(Param, vprm, vertex_params)
+		gpath->vertex_param_ids =
+		lappend_int(gpath->vertex_param_ids, vprm->paramid);
+	gpath->seed_elem_oid = rte->graph_seed_elem_oid;
+	gpath->max_nsrc = max_nsrc;
+	gpath->max_ndst = max_ndst;
+
+	/*
+	 * Remember the inner (1-hop) planner root on the RelOptInfo, like
+	 * set_subquery_pathlist() does for subquery rels.  setrefs and the
+	 * subselect finalize pass look it up again via find_base_rel() to fix up
+	 * the inner plan (its rtable is spliced into the global rtable there).
+	 */
+	rel->subroot = inner_root;
+
+	/* Parameterize the path when the seed references outer relations. */
+	if (!bms_is_empty(required_outer))
+	{
+		ParamPathInfo *param_info;
+
+		required_outer = bms_del_member(required_outer, rti);
+		param_info = get_baserel_parampathinfo(root, rel, required_outer);
+		gpath->path.param_info = param_info;
+
+		/*
+		 * get_baserel_parampathinfo() would scale rel->rows by the estimated
+		 * selectivity of the seed equality (v1.id = gs_seed), but that
+		 * equation is the scan's dispatch mechanism, not a filter: the scan
+		 * emits one seed vertex's worth of rows per execution.  Ship our
+		 * per-seed estimate directly.
+		 */
+		gpath->path.rows = rel->rows;
+	}
+
+	add_path(rel, (Path *) gpath);
+}
+
+/*
+ * Collect the set of outer relations referenced by the graph pattern (its
+ * element WHERE clauses, COLUMNS, and the graph-level WHERE clause).  These
+ * make the graph relation parameterized, even though the RTE_GRAPH_TABLE is
+ * not marked LATERAL in the jointree.
+ */
+static Relids
+graph_pattern_lateral_relids(PlannerInfo *root, RangeTblEntry *rte)
+{
+	GraphPattern *gp = rte->graph_pattern;
+	List	   *all = NIL;
+	List	   *path_pattern = linitial(gp->path_pattern_list);
+	ListCell   *lc;
+	Relids		result = NULL;
+
+	if (gp == NULL)
+		return NULL;
+
+	foreach(lc, path_pattern)
+	{
+		GraphElementPattern *gep = lfirst_node(GraphElementPattern, lc);
+
+		if (gep->whereClause)
+			all = lappend(all, gep->whereClause);
+		if (gep->subexpr)
+			all = list_concat(all, gep->subexpr);
+	}
+	if (gp->whereClause)
+		all = lappend(all, gp->whereClause);
+	foreach(lc, rte->graph_table_columns)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		all = lappend(all, (Node *) te->expr);
+	}
+
+	result = pull_varnos(root, (Node *) all);
+	return result;
 }
 
 /*

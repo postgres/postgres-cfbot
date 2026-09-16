@@ -604,6 +604,7 @@ pgpa_scanrelid(Plan *plan)
 		case T_CustomScan:
 		case T_IndexScan:
 		case T_IndexOnlyScan:
+		case T_GraphScan:
 			return ((Scan *) plan)->scanrelid;
 		default:
 			return 0;
