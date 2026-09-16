@@ -1250,9 +1250,11 @@
        The current compression method of the column.  Typically this is
        <literal>'\0'</literal> to specify use of the current default setting
        (see <xref linkend="guc-default-toast-compression"/>).  Otherwise,
-       <literal>'p'</literal> selects pglz compression, while
+       <literal>'p'</literal> selects pglz compression,
        <literal>'l'</literal> selects <productname>LZ4</productname>
-       compression.  However, this field is ignored
+       compression, and <literal>'z'</literal> selects
+       <productname>Zstandard</productname> compression.
+       However, this field is ignored
        whenever <structfield>attstorage</structfield> does not allow
        compression.
       </para></entry>

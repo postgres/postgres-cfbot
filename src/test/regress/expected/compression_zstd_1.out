@@ -1,0 +1,7 @@
+-- Tests for TOAST compression with zstd
+SELECT NOT(enumvals @> '{zstd}') AS skip_test FROM pg_settings WHERE
+  name = 'default_toast_compression' \gset
+\if :skip_test
+   \echo '*** skipping TOAST tests with zstd (not supported) ***'
+*** skipping TOAST tests with zstd (not supported) ***
+   \quit

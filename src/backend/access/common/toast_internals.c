@@ -107,6 +107,10 @@ toast_compress_datum(Datum value, char cmethod)
 			tmp = lz4_compress_datum((const varlena *) DatumGetPointer(value));
 			cmid = TOAST_LZ4_COMPRESSION_ID;
 			break;
+		case TOAST_ZSTD_COMPRESSION:
+			tmp = zstd_compress_datum((const varlena *) DatumGetPointer(value));
+			cmid = TOAST_ZSTD_COMPRESSION_ID;
+			break;
 		default:
 			elog(ERROR, "invalid compression method %c", cmethod);
 	}
@@ -279,7 +283,8 @@ toast_save_datum(Relation rel, Datum value,
 
 		/* set external size and compression method */
 		Assert(cmid == TOAST_PGLZ_COMPRESSION_ID ||
-			   cmid == TOAST_LZ4_COMPRESSION_ID);
+			   cmid == TOAST_LZ4_COMPRESSION_ID ||
+			   cmid == TOAST_ZSTD_COMPRESSION_ID);
 		if (toast_compression_id_needs_cmid_byte(cmid))
 		{
 			pointer_long = true;
