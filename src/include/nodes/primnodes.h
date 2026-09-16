@@ -765,6 +765,39 @@ typedef enum CoercionForm
 } CoercionForm;
 
 /*
+ * SafeTypeCastExpr -
+ *		Transformed representation of
+ * 		CAST(expr AS typename DEFAULT expr ON CONVERSION ERROR)
+ */
+typedef struct SafeTypeCastExpr
+{
+	Expr		xpr;
+
+	/*
+	 * The transformed input expression being cast, evaluated once and fed to
+	 * castexpr
+	 */
+	Expr	   *arg;
+
+	/*
+	 * coercion of arg to the target type, built over a CaseTestExpr that
+	 * stands for arg's value; NULL means no cast path exists, in which case
+	 * the result is always defexpr
+	 */
+	Expr	   *castexpr;
+	/* Fall-back to the default expression if cast evaluation fails */
+	Expr	   *defexpr;
+	/* target type Oid */
+	Oid			resulttype;
+	/* target type modifier */
+	int32		resulttypmod;
+	/* OID of collation, or InvalidOid if none */
+	Oid			resultcollid;
+	/* token location, or -1 if unknown */
+	ParseLoc	location;
+} SafeTypeCastExpr;
+
+/*
  * FuncExpr - expression node for a function call
  */
 typedef struct FuncExpr

@@ -73,6 +73,25 @@ SELECT 1 AS "int" OFFSET 2 FETCH FIRST 3 ROW ONLY;
 -----
 (0 rows)
 
+-- error safe type cast
+SELECT CAST('a' AS int DEFAULT 2 ON CONVERSION ERROR);
+ int4 
+------
+    2
+(1 row)
+
+SELECT CAST('12' AS numeric DEFAULT 2 ON CONVERSION ERROR);
+ numeric 
+---------
+      12
+(1 row)
+
+SELECT CAST('12' AS numeric(10) DEFAULT 2 ON CONVERSION ERROR);
+ numeric 
+---------
+      12
+(1 row)
+
 -- DISTINCT and ORDER BY patterns
 -- Try some query permutations which once produced identical query IDs
 SELECT DISTINCT 1 AS "int";
@@ -222,6 +241,9 @@ SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
      2 |    2 | SELECT $1 AS "int" ORDER BY 1
      1 |    2 | SELECT $1 AS i UNION SELECT $2 ORDER BY i
      1 |    1 | SELECT $1 || $2
+     1 |    1 | SELECT CAST($1 AS int DEFAULT $2 ON CONVERSION ERROR)
+     1 |    1 | SELECT CAST($1 AS numeric DEFAULT $2 ON CONVERSION ERROR)
+     1 |    1 | SELECT CAST($1 AS numeric(10) DEFAULT $2 ON CONVERSION ERROR)
      2 |    2 | SELECT DISTINCT $1 AS "int"
      0 |    0 | SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C"
      1 |    1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
@@ -230,7 +252,7 @@ SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
        |      | )                                                                           +
        |      |   SELECT f FROM t ORDER BY f
      1 |    1 | select $1::jsonb ? $2
-(17 rows)
+(20 rows)
 
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
  t 
