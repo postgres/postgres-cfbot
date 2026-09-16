@@ -34,6 +34,7 @@
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "commands/progress.h"
+#include "commands/repack.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -50,11 +51,6 @@
 
 static void reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
 									 RewriteState rwstate);
-static void heap_insert_for_repack(Relation rel, TupleTableSlot *src,
-								   TupleTableSlot *reform,
-								   BulkInsertStateData *bistate);
-static bool tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc);
-static void clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform);
 
 static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
@@ -2367,97 +2363,6 @@ reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
 		heap_freetuple(tuple);
 	if (shouldFreeNew)
 		heap_freetuple(newtuple);
-}
-
-/*
- * Insert tuple when processing REPACK CONCURRENTLY.
- *
- * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
- * difficult to do the same in the catch-up phase (as the logical
- * decoding does not provide us with sufficient visibility
- * information). Thus we must use heap_insert() both during the
- * catch-up and here.
- *
- * 'reform' is a slot to use for tuple "reforming", typically to get set
- * values of dropped columns to NULL.
- *
- * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
- * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
- * this relation, so no logical replication subscription should need the data.
- *
- * BulkInsertState is used because many tuples are inserted in the typical
- * case.
- */
-static void
-heap_insert_for_repack(Relation rel, TupleTableSlot *src,
-					   TupleTableSlot *reform, BulkInsertStateData *bistate)
-{
-	HeapTuple	tuple;
-	bool		shouldFree;
-	TupleTableSlot *slot;
-
-	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
-
-	/*
-	 * The source slot is not expected to create a copy of the tuple.
-	 */
-	Assert(TTS_IS_BUFFERTUPLE(src));
-	Assert(!shouldFree);
-
-	if (tuple_needs_reform(tuple, src->tts_tupleDescriptor))
-	{
-		clear_dropped_attributes(tuple, reform);
-		slot = reform;
-	}
-	else
-		slot = src;
-
-	table_tuple_insert(rel, slot, GetCurrentCommandId(true),
-					   TABLE_INSERT_NO_LOGICAL, bistate);
-}
-
-static bool
-tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc)
-{
-	/*
-	 * A short tuple might require values from attmissing val, so activate the
-	 * coding unconditionally in that case.  The value might legitimally be
-	 * NULL otherwise, so this is slightly wasteful, but it probably beats
-	 * having to test each attribute for presence of attmissingval each time.
-	 */
-	if (HeapTupleHeaderGetNatts(tuple->t_data) < tupDesc->natts)
-		return true;
-
-	/* Does it have dropped attributes? */
-	for (int i = 0; i < tupDesc->natts; i++)
-	{
-		if (TupleDescCompactAttr(tupDesc, i)->attisdropped &&
-			!heap_attisnull(tuple, i + 1, tupDesc))
-			return true;
-	}
-
-	return false;
-}
-
-/*
- * Subroutine for reform_and_rewrite_tuple and heap_insert_for_repack.
- *
- * Set values of dropped columns to NULL,
- */
-static void
-clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform)
-{
-	TupleDesc	tupDesc = reform->tts_tupleDescriptor;
-
-	/* Assuming 'reform' is virtual, this deforms the tuple. */
-	Assert(TTS_IS_VIRTUAL(reform));
-	ExecForceStoreHeapTuple(tuple, reform, false);
-
-	for (int i = 0; i < tupDesc->natts; i++)
-	{
-		if (TupleDescCompactAttr(tupDesc, i)->attisdropped)
-			reform->tts_isnull[i] = true;
-	}
 }
 
 /*

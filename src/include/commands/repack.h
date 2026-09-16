@@ -15,6 +15,8 @@
 
 #include <signal.h>
 
+#include "access/hio.h"
+#include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
 #include "storage/lockdefs.h"
@@ -48,6 +50,11 @@ extern void mark_index_clustered(Relation rel, Oid indexOid, bool is_internal);
 
 extern Oid	make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 						  char relpersistence, LOCKMODE lockmode);
+extern void heap_insert_for_repack(Relation rel, TupleTableSlot *src,
+								   TupleTableSlot *reform,
+								   BulkInsertStateData *bistate);
+extern bool tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc);
+extern void clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform);
 extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 							 bool is_system_catalog,
 							 bool swap_toast_by_content,
