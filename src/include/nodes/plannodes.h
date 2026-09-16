@@ -495,6 +495,13 @@ typedef struct RecursiveUnion
 
 	/* estimated number of groups in input */
 	Cardinality numGroups;
+
+	/* sort keys for replacement (for subset DISTINCT ON with ORDER BY) */
+	int			numSortCols;
+	AttrNumber *sortColIdx pg_node_attr(array_size(numSortCols));
+	Oid		   *sortOperators pg_node_attr(array_size(numSortCols));
+	Oid		   *sortCollations pg_node_attr(array_size(numSortCols));
+	bool	   *sortNullsFirst pg_node_attr(array_size(numSortCols));
 } RecursiveUnion;
 
 /* ----------------
