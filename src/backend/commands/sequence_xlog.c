@@ -26,7 +26,8 @@ seq_redo(XLogReaderState *record)
 	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
 	Buffer		buffer;
 	Page		page;
-	Page		localpage;
+	PGAlignedBlock localpage_buf;
+	Page		localpage = (Page) &localpage_buf;
 	char	   *item;
 	Size		itemsz;
 	xl_seq_rec *xlrec = (xl_seq_rec *) XLogRecGetData(record);
@@ -44,10 +45,8 @@ seq_redo(XLogReaderState *record)
 	 * is examining the page concurrently; so we mustn't transiently trash the
 	 * buffer.  The solution is to build the correct new page contents in
 	 * local workspace and then memcpy into the buffer.  Then only bytes that
-	 * are supposed to change will change, even transiently. We must palloc
-	 * the local page for alignment reasons.
+	 * are supposed to change will change, even transiently.
 	 */
-	localpage = (Page) palloc(BufferGetPageSize(buffer));
 
 	PageInit(localpage, BufferGetPageSize(buffer), sizeof(sequence_magic));
 	sm = (sequence_magic *) PageGetSpecialPointer(localpage);
@@ -65,8 +64,6 @@ seq_redo(XLogReaderState *record)
 	MarkBufferDirty(buffer);
 	XLogFlushBufferForRedoIfInit(record, 0, buffer);
 	UnlockReleaseBuffer(buffer);
-
-	pfree(localpage);
 }
 
 /*

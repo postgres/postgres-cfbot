@@ -155,7 +155,11 @@ copy_file(const char *fromfile, const char *tofile)
 #define FLUSH_DISTANCE (1024 * 1024)
 #endif
 
-	/* Use palloc to ensure we get a maxaligned buffer */
+	/*
+	 * Allocate the buffer dynamically, both because it is too large to put on
+	 * the stack and because that gets us a maxaligned buffer.  (For
+	 * performance, we might want an even bigger buffer here.)
+	 */
 	buffer = palloc(COPY_BUF_SIZE);
 
 	/*
