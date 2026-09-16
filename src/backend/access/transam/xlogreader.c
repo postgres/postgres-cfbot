@@ -119,21 +119,6 @@ XLogReaderAllocate(int wal_segment_size, const char *waldir,
 	/* initialize caller-provided support functions */
 	state->routine = *routine;
 
-	/*
-	 * Permanently allocate readBuf.  We do it this way, rather than just
-	 * making a static array, for two reasons: (1) no need to waste the
-	 * storage in most instantiations of the backend; (2) a static char array
-	 * isn't guaranteed to have any particular alignment, whereas
-	 * palloc_extended() will provide MAXALIGN'd storage.
-	 */
-	state->readBuf = (char *) palloc_extended(XLOG_BLCKSZ,
-											  MCXT_ALLOC_NO_OOM);
-	if (!state->readBuf)
-	{
-		pfree(state);
-		return NULL;
-	}
-
 	/* Initialize segment info. */
 	WALOpenSegmentInit(&state->seg, &state->segcxt, wal_segment_size,
 					   waldir);
@@ -145,7 +130,6 @@ XLogReaderAllocate(int wal_segment_size, const char *waldir,
 										  MCXT_ALLOC_NO_OOM);
 	if (!state->errormsg_buf)
 	{
-		pfree(state->readBuf);
 		pfree(state);
 		return NULL;
 	}
@@ -171,7 +155,6 @@ XLogReaderFree(XLogReaderState *state)
 	pfree(state->errormsg_buf);
 	if (state->readRecordBuf)
 		pfree(state->readRecordBuf);
-	pfree(state->readBuf);
 	pfree(state);
 }
 

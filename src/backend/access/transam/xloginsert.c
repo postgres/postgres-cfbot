@@ -105,17 +105,6 @@ static uint64 mainrdata_len;	/* total # of bytes in chain */
 /* flags for the in-progress insertion */
 static uint8 curinsert_flags = 0;
 
-/*
- * These are used to hold the record header while constructing a record.
- * 'hdr_scratch' is not a plain variable, but is palloc'd at initialization,
- * because we want it to be MAXALIGNed and padding bytes zeroed.
- *
- * For simplicity, it's allocated large enough to hold the headers for any
- * WAL record.
- */
-static XLogRecData hdr_rdt;
-static char *hdr_scratch = NULL;
-
 #define SizeOfXlogOrigin	(sizeof(ReplOriginId) + sizeof(char))
 #define SizeOfXLogTransactionId	(sizeof(TransactionId) + sizeof(char))
 
@@ -622,6 +611,16 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 				   XLogRecPtr *fpw_lsn, int *num_fpi, uint64 *fpi_bytes,
 				   bool *topxid_included)
 {
+	/*
+	 * These are used to hold the record header while constructing a record.
+	 * 'hdr_scratch' must be MAXALIGNed and padding bytes zeroed.
+	 *
+	 * For simplicity, it's allocated large enough to hold the headers for any
+	 * WAL record.
+	 */
+	static XLogRecData hdr_rdt;
+	static alignas(MAXIMUM_ALIGNOF) char hdr_scratch[HEADER_SCRATCH_SIZE];
+
 	XLogRecData *rdt;
 	uint64		total_len = 0;
 	int			block_id;
@@ -1430,11 +1429,4 @@ InitXLogInsert(void)
 									sizeof(XLogRecData) * XLR_NORMAL_RDATAS);
 		max_rdatas = XLR_NORMAL_RDATAS;
 	}
-
-	/*
-	 * Allocate a buffer to hold the header information for a WAL record.
-	 */
-	if (hdr_scratch == NULL)
-		hdr_scratch = MemoryContextAllocZero(xloginsert_cxt,
-											 HEADER_SCRATCH_SIZE);
 }
