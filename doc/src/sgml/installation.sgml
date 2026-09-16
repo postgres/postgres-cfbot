@@ -335,6 +335,7 @@
      <para>
       You need <productname>Zstandard</productname>, if you want to support
       compression of data with that method; see
+      <xref linkend="guc-default-toast-compression"/> and
       <xref linkend="guc-wal-compression"/>.
       The minimum required version is 1.4.0.
      </para>
