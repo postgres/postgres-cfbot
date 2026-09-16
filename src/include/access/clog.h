@@ -47,7 +47,7 @@ extern void CheckPointCLOG(void);
 extern void ExtendCLOG(TransactionId newestXact);
 extern void TruncateCLOG(TransactionId oldestXact, Oid oldestxid_datoid);
 
-extern int	clogsyncfiletag(const FileTag *ftag, char *path);
+extern void clogsyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
 
 /* XLOG stuff */
 #define CLOG_ZEROPAGE		0x00
