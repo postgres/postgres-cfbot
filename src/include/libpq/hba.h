@@ -75,6 +75,7 @@ typedef enum ClientCertName
 {
 	clientCertCN,
 	clientCertDN,
+	clientCertURI,
 } ClientCertName;
 
 /*

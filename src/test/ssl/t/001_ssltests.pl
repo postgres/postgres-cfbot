@@ -1007,6 +1007,57 @@ $node->connect_fails(
 		qr{Failed certificate data \(unverified\): subject "/CN=\\xce\\x9f\\xce\\xb4\\xcf\\x85\\xcf\\x83\\xcf\\x83\\xce\\xad\\xce\\xb1\\xcf\\x82", serial number \d+, issuer "/CN=Test CA for PostgreSQL SSL regression test client certs"},
 	]);
 
+# same thing but using URI subject alternative names
+my $uri_connstr = "$common_connstr dbname=certdb_uri";
+
+$node->connect_ok(
+	"$uri_connstr user=ssltestuser sslcert=ssl/client-uri.crt "
+	  . sslkey('client-uri.key'),
+	"certificate authorization succeeds with URI SAN mapping",
+	# the matched URI should be used as the authenticated identity
+	log_like => [
+		qr{connection authenticated: identity="spiffe://postgresql\.example/ns/default/sa/ssltestuser" method=cert}
+	],);
+
+$node->connect_fails(
+	"$uri_connstr user=anotheruser sslcert=ssl/client-uri.crt "
+	  . sslkey('client-uri.key'),
+	"certificate authorization fails when the URI SAN does not map to the requested user",
+	expected_stderr =>
+	  qr/certificate authentication failed for user "anotheruser"/);
+
+$node->connect_fails(
+	"$uri_connstr user=ssltestuser sslcert=ssl/client.crt "
+	  . sslkey('client.key'),
+	"certificate authorization fails when client certificate has no URI SAN",
+	expected_stderr =>
+	  qr/certificate authentication failed for user "ssltestuser"/);
+
+$node->connect_fails(
+	"$uri_connstr user=ssltestuser sslcert=ssl/client-uri-multi.crt "
+	  . sslkey('client-uri-multi.key'),
+	"certificate authorization fails when client certificate has multiple URI SANs",
+	expected_stderr =>
+	  qr/certificate authentication failed for user "ssltestuser"/);
+
+$node->connect_ok(
+	"$uri_connstr user=ssltestuser sslcert=ssl/client-uri-nosubject.crt "
+	  . sslkey('client-uri-nosubject.key'),
+	"certificate authorization succeeds with URI SAN mapping when the certificate has no subject",
+	log_like => [
+		qr{connection authenticated: identity="spiffe://postgresql\.example/ns/default/sa/ssltestuser" method=cert}
+	],);
+
+# With clientname=CN, a certificate without a subject has no CN to match
+# against, and authentication must fail cleanly rather than aborting the
+# TLS handshake.
+$node->connect_fails(
+	"$common_connstr dbname=certdb_cn user=ssltestuser sslcert=ssl/client-uri-nosubject.crt "
+	  . sslkey('client-uri-nosubject.key'),
+	"certificate authorization with clientname=CN fails when the certificate has no subject",
+	expected_stderr =>
+	  qr/certificate authentication failed for user "ssltestuser"/);
+
 SKIP:
 {
 	skip "sslmode require not supported in this build", 4

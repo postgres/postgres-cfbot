@@ -2081,6 +2081,10 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline,
 		{
 			hbaline->clientcertname = clientCertDN;
 		}
+		else if (strcmp(val, "URI") == 0)
+		{
+			hbaline->clientcertname = clientCertURI;
+		}
 		else
 		{
 			ereport(elevel,

@@ -693,11 +693,17 @@ include_dir         <replaceable>directory</replaceable>
        using the <literal>clientcert</literal> option), you can specify
        which part of the client certificate credentials to match using
        the <literal>clientname</literal> option. This option can have one
-       of two values. If you specify <literal>clientname=CN</literal>, which
+       of three values. If you specify <literal>clientname=CN</literal>, which
        is the default, the username is matched against the certificate's
        <literal>Common Name (CN)</literal>. If instead you specify
        <literal>clientname=DN</literal> the username is matched against the
        entire <literal>Distinguished Name (DN)</literal> of the certificate.
+       Finally, if you specify <literal>clientname=URI</literal>, the username
+       is matched against the certificate's URI
+       <literal>Subject Alternative Name</literal>; the certificate must
+       contain exactly one URI subject alternative name.  The comparison is
+       case-sensitive and uses the exact URI as it appears in the
+       certificate.
        This option is probably best used in conjunction with a username map.
        The comparison is done with the <literal>DN</literal> in
        <ulink url="https://datatracker.ietf.org/doc/html/rfc2253">RFC 2253</ulink>
@@ -708,6 +714,23 @@ openssl x509 -in myclient.crt -noout -subject -nameopt RFC2253 | sed "s/^subject
 </programlisting>
         Care needs to be taken when using this option, especially when using
         regular expression matching against the <literal>DN</literal>.
+      </para>
+
+      <para>
+       With <literal>clientname=URI</literal>, the matched URI (rather than
+       the Subject DN) is recorded as the authenticated identity, and appears
+       in the <literal>connection authenticated: identity=...</literal> log
+       line.
+      </para>
+
+      <para>
+       Note that PostgreSQL does not verify any relationship between a
+       certificate's URI and the certificate authority that signed the
+       certificate.  If <literal>ssl_ca_file</literal> contains certificates
+       for more than one trust domain, any of them can issue a certificate
+       for a URI in another trust domain.  For SPIFFE deployments, configure
+       <literal>ssl_ca_file</literal> with a single trust domain's CA bundle;
+       SPIFFE federation is not supported.
       </para>
      </listitem>
     </varlistentry>
