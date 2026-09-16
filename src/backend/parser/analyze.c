@@ -78,10 +78,13 @@ static Query *transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 static Query *transformValuesClause(ParseState *pstate, SelectStmt *stmt);
 static Query *transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt);
 static Node *transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
-									   bool isTopLevel, List **targetlist);
+									   bool isTopLevel, List **targetlist,
+									   List *distinctClause);
 static void constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 									 const List *ltargetlist, const List *rtargetlist,
-									 List **targetlist, const char *context, bool recursive);
+									 List **targetlist, const char *context, bool recursive,
+									 List *distinctClause);
+static bool col_in_distinct_on(const char *colname, int resno, List *distinctClause);
 static void determineRecursiveColTypes(ParseState *pstate,
 									   Node *larg, List *nrtargetlist);
 static Query *transformReturnStmt(ParseState *pstate, ReturnStmt *stmt);
@@ -1854,6 +1857,10 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	ParseNamespaceColumn *sortnscolumns;
 	int			sortcolindex;
 	int			tllen;
+	List	   *distinctClause = stmt->distinctClause;
+	List	   *distinctSortClause = stmt->distinctSortClause;
+	List	   *transformed_distinctSortClause = NIL;
+	int			distinct_tllen;
 
 	qry->commandType = CMD_SELECT;
 
@@ -1889,6 +1896,8 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	withClause = stmt->withClause;
 
 	stmt->sortClause = NIL;
+	stmt->distinctClause = NIL;
+	stmt->distinctSortClause = NIL;
 	stmt->limitOffset = NULL;
 	stmt->limitCount = NULL;
 	stmt->lockingClause = NIL;
@@ -1916,7 +1925,7 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	 * Recursively transform the components of the tree.
 	 */
 	sostmt = castNode(SetOperationStmt,
-					  transformSetOperationTree(pstate, stmt, true, NULL));
+					  transformSetOperationTree(pstate, stmt, true, NULL, distinctClause));
 	Assert(sostmt);
 	qry->setOperations = (Node *) sostmt;
 
@@ -2032,11 +2041,22 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
 
+	distinct_tllen = list_length(qry->targetList);
+	if (distinctSortClause)
+	{
+		List *full_sortby = prepend_distinct_to_sortby(distinctClause, distinctSortClause);
+		transformed_distinctSortClause = transformSortClause(pstate,
+															 full_sortby,
+															 &qry->targetList,
+															 EXPR_KIND_ORDER_BY,
+															 false);
+	}
+
 	/* restore namespace, remove join RTE from rtable */
 	pstate->p_namespace = sv_namespace;
 	pstate->p_rtable = list_truncate(pstate->p_rtable, sv_rtable_length);
 
-	if (tllen != list_length(qry->targetList))
+	if (tllen != distinct_tllen)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("invalid UNION/INTERSECT/EXCEPT ORDER BY clause"),
@@ -2044,6 +2064,26 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 				 errhint("Add the expression/function to every SELECT, or move the UNION into a FROM clause."),
 				 parser_errposition(pstate,
 									exprLocation(list_nth(qry->targetList, tllen)))));
+
+	if (distinct_tllen != list_length(qry->targetList))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("invalid UNION/INTERSECT/EXCEPT DISTINCT ON ORDER BY clause"),
+				 errdetail("Only result column names can be used, not expressions or functions."),
+				 parser_errposition(pstate,
+									exprLocation(list_nth(qry->targetList, distinct_tllen)))));
+
+	qry->distinctSortClause = transformed_distinctSortClause;
+	sostmt->sortClauses = transformed_distinctSortClause;
+
+	if (distinctClause)
+	{
+		qry->distinctClause = transformDistinctOnClause(pstate,
+														distinctClause,
+														&qry->targetList,
+														transformed_distinctSortClause ? transformed_distinctSortClause : qry->sortClause);
+		qry->hasDistinctOn = true;
+	}
 
 	qry->limitOffset = transformLimitClause(pstate, limitOffset,
 											EXPR_KIND_OFFSET, "OFFSET",
@@ -2133,7 +2173,8 @@ makeSortGroupClauseForSetOp(Oid rescoltype, bool require_hash)
  */
 static Node *
 transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
-						  bool isTopLevel, List **targetlist)
+						  bool isTopLevel, List **targetlist,
+						  List *distinctClause)
 {
 	bool		isLeaf;
 
@@ -2278,7 +2319,8 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 		 */
 		op->larg = transformSetOperationTree(pstate, stmt->larg,
 											 false,
-											 &ltargetlist);
+											 &ltargetlist,
+											 NIL);
 
 		/*
 		 * If we are processing a recursive union query, now is the time to
@@ -2294,10 +2336,11 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 		 */
 		op->rarg = transformSetOperationTree(pstate, stmt->rarg,
 											 false,
-											 &rtargetlist);
+											 &rtargetlist,
+											 NIL);
 
 		constructSetOpTargetlist(pstate, op, ltargetlist, rtargetlist, targetlist,
-								 context, recursive);
+								 context, recursive, distinctClause);
 
 		return (Node *) op;
 	}
@@ -2318,7 +2361,8 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 static void
 constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 						 const List *ltargetlist, const List *rtargetlist,
-						 List **targetlist, const char *context, bool recursive)
+						 List **targetlist, const char *context, bool recursive,
+						 List *distinctClause)
 {
 	ListCell   *ltl;
 	ListCell   *rtl;
@@ -2441,18 +2485,27 @@ constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 		 */
 		if (op->op != SETOP_UNION || !op->all)
 		{
-			ParseCallbackState pcbstate;
-			SortGroupClause *grpcl;
+			bool active = false;
+			if (distinctClause == NIL)
+				active = true;
+			else
+				active = col_in_distinct_on(ltle->resname, resno, distinctClause);
 
-			setup_parser_errposition_callback(&pcbstate, pstate,
-											  bestlocation);
+			if (active)
+			{
+				ParseCallbackState pcbstate;
+				SortGroupClause *grpcl;
 
-			/* If it's a recursive union, we need to require hashing support. */
-			grpcl = makeSortGroupClauseForSetOp(rescoltype, recursive);
-			grpcl->tleSortGroupRef = resno;
-			op->groupClauses = lappend(op->groupClauses, grpcl);
+				setup_parser_errposition_callback(&pcbstate, pstate,
+												  bestlocation);
 
-			cancel_parser_errposition_callback(&pcbstate);
+				/* If it's a recursive union, we need to require hashing support. */
+				grpcl = makeSortGroupClauseForSetOp(rescoltype, recursive);
+				grpcl->tleSortGroupRef = resno;
+				op->groupClauses = lappend(op->groupClauses, grpcl);
+
+				cancel_parser_errposition_callback(&pcbstate);
+			}
 		}
 
 		/*
@@ -3795,3 +3848,40 @@ test_raw_expression_coverage(Node *node, void *context)
 									  context);
 }
 #endif							/* DEBUG_NODE_TESTS_ENABLED */
+
+/*
+ * col_in_distinct_on -
+ *	  Check if a column name or its 1-based position matches any expression in distinctClause
+ */
+static bool
+col_in_distinct_on(const char *colname, int resno, List *distinctClause)
+{
+	ListCell   *lc;
+
+	foreach(lc, distinctClause)
+	{
+		Node	   *n = (Node *) lfirst(lc);
+
+		if (IsA(n, ColumnRef))
+		{
+			ColumnRef  *cr = (ColumnRef *) n;
+
+			if (list_length(cr->fields) == 1 && IsA(linitial(cr->fields), String))
+			{
+				if (strcmp(strVal(linitial(cr->fields)), colname) == 0)
+					return true;
+			}
+		}
+		else if (IsA(n, A_Const))
+		{
+			A_Const    *aconst = (A_Const *) n;
+
+			if (IsA(&aconst->val, Integer))
+			{
+				if (intVal(&aconst->val) == resno)
+					return true;
+			}
+		}
+	}
+	return false;
+}
