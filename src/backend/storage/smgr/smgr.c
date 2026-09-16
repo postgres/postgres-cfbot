@@ -165,7 +165,7 @@ static dlist_head unpinned_relns;
 static void smgrshutdown(int code, Datum arg);
 static void smgrdestroy(SMgrRelation reln);
 
-static void smgr_aio_reopen(PgAioHandle *ioh);
+static int	smgr_aio_reopen(PgAioHandle *ioh);
 static char *smgr_aio_describe_identity(const PgAioTargetData *sd);
 
 
@@ -1058,9 +1058,11 @@ pgaio_io_set_target_smgr(PgAioHandle *ioh,
 
 /*
  * Callback for the smgr AIO target, to reopen the file (e.g. because the IO
- * is executed in a worker).
+ * is executed in a worker).  Returns 0 on success.  Failures can return
+ * -errno, but relation read/write descriptor lookup retains its existing
+ * error reporting and may raise an error instead.
  */
-static void
+static int
 smgr_aio_reopen(PgAioHandle *ioh)
 {
 	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
@@ -1068,6 +1070,7 @@ smgr_aio_reopen(PgAioHandle *ioh)
 	SMgrRelation reln;
 	ProcNumber	procno;
 	uint32		off;
+	int			fd;
 
 	/*
 	 * The caller needs to prevent interrupts from being processed, otherwise
@@ -1089,15 +1092,18 @@ smgr_aio_reopen(PgAioHandle *ioh)
 		case PGAIO_OP_READV:
 			od->read.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			Assert(off == od->read.offset);
-			break;
+			return 0;
 		case PGAIO_OP_WRITEV:
 			od->write.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			Assert(off == od->write.offset);
-			break;
+			return 0;
 		case PGAIO_OP_FSYNC:
-			od->fsync.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
-			break;
+			fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
+			od->fsync.fd = fd;
+			return 0;
 	}
+
+	pg_unreachable();
 }
 
 /*

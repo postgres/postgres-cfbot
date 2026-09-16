@@ -168,8 +168,13 @@ struct PgAioTargetInfo
 	/*
 	 * To support executing using worker processes, the file descriptor for an
 	 * IO may need to be reopened in a different process.
+	 *
+	 * Returns 0 on success.  Callbacks can return -errno for an ordinary
+	 * failure to reopen, allowing the issuer to handle the failure without
+	 * terminating the worker.  Callbacks that raise an error instead use the
+	 * worker's exception-recovery path, which does not preserve errno.
 	 */
-	void		(*reopen) (PgAioHandle *ioh);
+	int			(*reopen) (PgAioHandle *ioh);
 
 	/* describe the target of the IO, used for log messages and views */
 	char	   *(*describe_identity) (const PgAioTargetData *sd);
