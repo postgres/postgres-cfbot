@@ -606,8 +606,11 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 		sos->colTypmods = lappend_int(sos->colTypmods, -1);
 		sos->colCollations = lappend_oid(sos->colCollations, InvalidOid);
 		if (!sos->all)
-			sos->groupClauses = lappend(sos->groupClauses,
-										makeSortGroupClauseForSetOp(search_seq_type, true));
+		{
+			SortGroupClause *sgc = makeSortGroupClauseForSetOp(search_seq_type, true);
+			sgc->tleSortGroupRef = list_length(sos->colTypes);
+			sos->groupClauses = lappend(sos->groupClauses, sgc);
+		}
 	}
 	if (cte->cycle_clause)
 	{
@@ -615,15 +618,21 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 		sos->colTypmods = lappend_int(sos->colTypmods, cte->cycle_clause->cycle_mark_typmod);
 		sos->colCollations = lappend_oid(sos->colCollations, cte->cycle_clause->cycle_mark_collation);
 		if (!sos->all)
-			sos->groupClauses = lappend(sos->groupClauses,
-										makeSortGroupClauseForSetOp(cte->cycle_clause->cycle_mark_type, true));
+		{
+			SortGroupClause *sgc = makeSortGroupClauseForSetOp(cte->cycle_clause->cycle_mark_type, true);
+			sgc->tleSortGroupRef = list_length(sos->colTypes);
+			sos->groupClauses = lappend(sos->groupClauses, sgc);
+		}
 
 		sos->colTypes = lappend_oid(sos->colTypes, RECORDARRAYOID);
 		sos->colTypmods = lappend_int(sos->colTypmods, -1);
 		sos->colCollations = lappend_oid(sos->colCollations, InvalidOid);
 		if (!sos->all)
-			sos->groupClauses = lappend(sos->groupClauses,
-										makeSortGroupClauseForSetOp(RECORDARRAYOID, true));
+		{
+			SortGroupClause *sgc = makeSortGroupClauseForSetOp(RECORDARRAYOID, true);
+			sgc->tleSortGroupRef = list_length(sos->colTypes);
+			sos->groupClauses = lappend(sos->groupClauses, sgc);
+		}
 	}
 
 	/*

@@ -1719,28 +1719,18 @@ generate_setop_grouplist(SetOperationStmt *op, List *targetlist)
 {
 	List	   *grouplist = copyObject(op->groupClauses);
 	ListCell   *lg;
-	ListCell   *lt;
 
-	lg = list_head(grouplist);
-	foreach(lt, targetlist)
+	foreach(lg, grouplist)
 	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lt);
-		SortGroupClause *sgc;
+		SortGroupClause *sgc = (SortGroupClause *) lfirst(lg);
+		Index		ref = sgc->tleSortGroupRef;
+		TargetEntry *tle;
 
+		Assert(ref > 0 && ref <= list_length(targetlist));
+		tle = list_nth(targetlist, ref - 1);
 		Assert(!tle->resjunk);
-
-		/* non-resjunk columns should have sortgroupref = resno */
-		Assert(tle->ressortgroupref == tle->resno);
-
-		/* non-resjunk columns should have grouping clauses */
-		Assert(lg != NULL);
-		sgc = (SortGroupClause *) lfirst(lg);
-		lg = lnext(grouplist, lg);
-		Assert(sgc->tleSortGroupRef == 0);
-
-		sgc->tleSortGroupRef = tle->ressortgroupref;
+		Assert(tle->ressortgroupref == ref);
 	}
-	Assert(lg == NULL);
 	return grouplist;
 }
 
