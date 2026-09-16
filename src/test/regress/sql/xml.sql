@@ -16,6 +16,8 @@ SELECT count(*) = 0 AS skip_test FROM xmltest \gset
 
 SELECT * FROM xmltest;
 
+SELECT CAST('<wrong'::text AS xml DEFAULT NULL ON CONVERSION ERROR) as to_xml;
+
 -- test non-throwing API, too
 SELECT pg_input_is_valid('<value>one</value>', 'xml');
 SELECT pg_input_is_valid('<value>one</', 'xml');
