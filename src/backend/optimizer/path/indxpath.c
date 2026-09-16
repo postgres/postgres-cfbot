@@ -4286,6 +4286,71 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
+ * unique_index_keys_match_groupby_cols
+ *	  Test whether an immediate unique index proves uniqueness under the
+ *	  equality semantics of the given GROUP BY columns.
+ *
+ * The caller passes simple GROUP BY Vars belonging to rel.  For each index key
+ * column, there must be a GROUP BY Var on the same column whose mergejoin
+ * opfamilies include the index opfamily and whose collation agrees on
+ * equality.  A NULLS DISTINCT index additionally requires every key column to
+ * be NOT NULL.
+ *
+ * If index_attnos isn't NULL, it is set to the heap attribute numbers of the
+ * matched index key columns.  This allows callers to compare the key against a
+ * set of grouping columns.
+ */
+bool
+unique_index_keys_match_groupby_cols(IndexOptInfo *index, RelOptInfo *rel,
+									 List *groupbycols,
+									 Bitmapset **index_attnos)
+{
+	if (index_attnos)
+		*index_attnos = NULL;
+
+	/*
+	 * Only an immediate, unconditional unique index proves that the input is
+	 * unique.  Expression and partial indexes cannot prove whole-relation
+	 * uniqueness.  Skip hypothetical indexes because they do not prove a
+	 * property of the physical relation.
+	 */
+	if (!index->unique || !index->immediate || index->indpred != NIL ||
+		index->indexprs != NIL || index->hypothetical)
+		return false;
+
+	for (int i = 0; i < index->nkeycolumns; i++)
+	{
+		AttrNumber	indkey = index->indexkeys[i];
+		ListCell   *lc;
+
+		if (indkey <= 0 ||
+			(!index->nullsnotdistinct &&
+			 !bms_is_member(indkey, rel->notnullattnums)))
+			return false;
+
+		foreach(lc, groupbycols)
+		{
+			GroupByColInfo *info = (GroupByColInfo *) lfirst(lc);
+
+			if (info->attno == indkey &&
+				list_member_oid(info->eq_opfamilies, index->opfamily[i]) &&
+				collations_agree_on_equality(index->indexcollations[i],
+											 info->coll))
+				break;
+		}
+		if (lc == NULL)
+			return false;
+
+		if (index_attnos)
+			*index_attnos = bms_add_member(*index_attnos,
+										   indkey -
+										   FirstLowInvalidHeapAttributeNumber);
+	}
+
+	return true;
+}
+
+/*
  * indexcol_is_bool_constant_for_query
  *
  * If an index column is constrained to have a constant value by the query's
