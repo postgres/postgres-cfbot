@@ -1269,16 +1269,16 @@ typedef struct PGIOAlignedBlock
 } PGIOAlignedBlock;
 
 /* Same, but for an XLOG_BLCKSZ-sized buffer */
-typedef struct PGAlignedXLogBlock
+typedef struct PGIOAlignedXLogBlock
 {
 	alignas(PG_IO_ALIGN_SIZE) char data[XLOG_BLCKSZ];
-} PGAlignedXLogBlock;
+} PGIOAlignedXLogBlock;
 
 #else							/* (g++ < 9) */
 
 /* Allow these types to be used as abstract types when using old g++ */
 typedef struct PGIOAlignedBlock PGIOAlignedBlock;
-typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
+typedef struct PGIOAlignedXLogBlock PGIOAlignedXLogBlock;
 
 #endif							/* !(g++ < 9) */
 

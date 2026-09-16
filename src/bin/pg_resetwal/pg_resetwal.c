@@ -1137,7 +1137,7 @@ KillExistingWALSummaries(void)
 static void
 WriteEmptyXLOG(void)
 {
-	PGAlignedXLogBlock buffer;
+	PGIOAlignedXLogBlock buffer;
 	XLogPageHeader page;
 	XLogLongPageHeader longpage;
 	XLogRecord *record;

@@ -68,7 +68,7 @@ static const char *progname;
 
 static unsigned int secs_per_test = 5;
 static int	needs_unlink = 0;
-alignas(PGAlignedXLogBlock) static char buf[DEFAULT_XLOG_SEG_SIZE];
+alignas(PGIOAlignedXLogBlock) static char buf[DEFAULT_XLOG_SEG_SIZE];
 static char *filename = FSYNC_FILENAME;
 static struct timeval start_t,
 			stop_t;
