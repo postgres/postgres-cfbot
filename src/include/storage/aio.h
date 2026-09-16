@@ -176,6 +176,12 @@ struct PgAioTargetInfo
 	 */
 	int			(*reopen) (PgAioHandle *ioh);
 
+	/*
+	 * Optional counterpart to reopen, releasing the file descriptor it
+	 * acquired once the IO has been executed.
+	 */
+	void		(*close) (PgAioHandle *ioh);
+
 	/* describe the target of the IO, used for log messages and views */
 	char	   *(*describe_identity) (const PgAioTargetData *sd);
 
