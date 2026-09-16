@@ -108,6 +108,18 @@ static uint8 curinsert_flags = 0;
 #define SizeOfXlogOrigin	(sizeof(ReplOriginId) + sizeof(char))
 #define SizeOfXLogTransactionId	(sizeof(TransactionId) + sizeof(char))
 
+/*
+ * Size of the workspace used to hold the record header while constructing a
+ * record.  It is large enough for the header of any WAL record: the
+ * fixed-size XLogRecord, a block header for every possible block ID, the main
+ * data header, and one term for each of the "special" block IDs.
+ *
+ * Every "special" block ID needs its own term here.  If you add one alongside
+ * XLR_BLOCK_ID_ORIGIN (SizeOfXlogOrigin) and XLR_BLOCK_ID_TOPLEVEL_XID
+ * (SizeOfXLogTransactionId), you must add a corresponding term below as well.
+ *
+ * XLogRecordAssemble() asserts that the assembled header actually fits.
+ */
 #define HEADER_SCRATCH_SIZE \
 	(SizeOfXLogRecord + \
 	 MaxSizeOfXLogRecordBlockHeader * (XLR_MAX_BLOCK_ID + 1) + \
@@ -965,6 +977,7 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	rdt_datas_last->next = NULL;
 
 	hdr_rdt.len = (scratch - hdr_scratch);
+	Assert(hdr_rdt.len <= HEADER_SCRATCH_SIZE);
 	total_len += hdr_rdt.len;
 
 	/*
