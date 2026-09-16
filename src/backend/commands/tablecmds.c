@@ -69,6 +69,7 @@
 #include "commands/user.h"
 #include "commands/vacuum.h"
 #include "common/int.h"
+#include "common/relpath.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -17560,6 +17561,13 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 	newrlocator = rel->rd_locator;
 	newrlocator.relNumber = newrelfilenumber;
 	newrlocator.spcOid = newTableSpace;
+
+	elog(DEBUG1,
+		 "SET TABLESPACE copy: rel \"%s\" oid %u, from %s to %s",
+		 RelationGetRelationName(rel),
+		 RelationGetRelid(rel),
+		 relpathperm(rel->rd_locator, MAIN_FORKNUM).str,
+		 relpathperm(newrlocator, MAIN_FORKNUM).str);
 
 	/* hand off to AM to actually create new rel storage and copy the data */
 	if (rel->rd_rel->relkind == RELKIND_INDEX)

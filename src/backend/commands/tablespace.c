@@ -176,6 +176,8 @@ TablespaceCreateDbspace(Oid spcOid, Oid dbOid, bool isRedo)
 								 errmsg("could not create directory \"%s\": %m",
 										dir)));
 				}
+
+				elog(DEBUG1, "TablespaceCreateDbspace: %s", dir);
 			}
 
 			LWLockRelease(TablespaceCreateLock);
@@ -676,6 +678,12 @@ create_tablespace_directories(const char *location, const Oid tablespaceoid)
 				(errcode_for_file_access(),
 				 errmsg("could not create symbolic link \"%s\": %m",
 						linkloc)));
+
+	if (in_place)
+		elog(DEBUG1, "tablespace directories: %s", linkloc);
+	else
+		elog(DEBUG1, "tablespace directories: %s -> %s",
+			 linkloc, location_with_version_dir);
 
 	pfree(linkloc);
 	pfree(location_with_version_dir);
