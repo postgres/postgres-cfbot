@@ -702,3 +702,16 @@ SELECT * FROM (
 
 DROP TABLE union_distinct_u1, union_distinct_u2;
 
+-- Recursive CTE Shortest Path (Pruning)
+CREATE TABLE union_distinct_edges (src int, dst int, cost int);
+INSERT INTO union_distinct_edges VALUES (1, 2, 10), (1, 3, 2), (3, 2, 3), (2, 4, 1);
+
+WITH RECURSIVE search(node, cost, path) AS (
+    SELECT 1 AS node, 0 AS cost, ARRAY[1] AS path
+  UNION DISTINCT ON (node ORDER BY cost ASC)
+    SELECT e.dst, s.cost + e.cost, s.path || e.dst
+    FROM search s JOIN union_distinct_edges e ON s.node = e.src
+)
+SELECT * FROM search ORDER BY node;
+
+DROP TABLE union_distinct_edges;
