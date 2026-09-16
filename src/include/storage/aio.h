@@ -118,9 +118,10 @@ typedef enum PgAioTargetID
 	/* intentionally the zero value, to help catch zeroed memory etc */
 	PGAIO_TID_INVALID = 0,
 	PGAIO_TID_SMGR,
+	PGAIO_TID_SYNC,
 } PgAioTargetID;
 
-#define PGAIO_TID_COUNT (PGAIO_TID_SMGR + 1)
+#define PGAIO_TID_COUNT (PGAIO_TID_SYNC + 1)
 
 
 /*
