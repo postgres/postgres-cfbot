@@ -91,6 +91,20 @@
   aggtransspace => '128', aggmtranstype => 'internal',
   aggmtransspace => '128' },
 
+# product
+{ aggfnoid => 'product(int2)', aggtransfn => 'int2_product_accum',
+  aggcombinefn => 'numeric_mul', aggtranstype => 'numeric' },
+{ aggfnoid => 'product(int4)', aggtransfn => 'int4_product_accum',
+  aggcombinefn => 'numeric_mul', aggtranstype => 'numeric' },
+{ aggfnoid => 'product(int8)', aggtransfn => 'int8_product_accum',
+  aggcombinefn => 'numeric_mul', aggtranstype => 'numeric' },
+{ aggfnoid => 'product(float4)', aggtransfn => 'float4_product_accum',
+  aggcombinefn => 'numeric_mul', aggtranstype => 'numeric' },
+{ aggfnoid => 'product(float8)', aggtransfn => 'float8_product_accum',
+  aggcombinefn => 'numeric_mul', aggtranstype => 'numeric' },
+{ aggfnoid => 'product(numeric)', aggtransfn => 'numeric_mul',
+  aggcombinefn => 'numeric_mul', aggtranstype => 'numeric' },
+
 # max
 { aggfnoid => 'max(int8)', aggtransfn => 'int8larger',
   aggcombinefn => 'int8larger', aggsortop => '>(int8,int8)',
