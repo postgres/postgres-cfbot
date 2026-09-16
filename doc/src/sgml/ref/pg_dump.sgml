@@ -834,6 +834,30 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--extra-dependencies=<replaceable class="parameter">dependencylist</replaceable></option></term>
+      <listitem>
+       <para>
+        Use this option to specify additional dependencies when determining
+        the table dump order.  Each dependency must be provided in the format
+        <replaceable class="parameter">tablename#referredtablename</replaceable>,
+        with multiple pairs separated by commas.  This ensures that the
+        referred table is dumped and its data loaded immediately after its
+        creation.
+       </para>
+       <para>
+        This is a special-purpose option intended for cases where a required
+        dependency is not recorded in the <literal>pg_depend</literal> system
+        catalog, such as with certain <application>PostGIS</application>
+        configurations.
+       </para>
+       <para>
+        Note that any table filters are ignored during this PRE-dump phase;
+        data is exported without regard to existing filter conditions.
+        </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--extra-float-digits=<replaceable class="parameter">ndigits</replaceable></option></term>
       <listitem>
        <para>
