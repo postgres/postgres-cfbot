@@ -153,6 +153,12 @@ extern uint32 TupleHashTableHash(TupleHashTable hashtable,
 extern TupleHashEntry LookupTupleHashEntryHash(TupleHashTable hashtable,
 											   TupleTableSlot *slot,
 											   bool *isnew, uint32 hash);
+extern bool ReplaceTupleHashEntryIfBetter(TupleHashTable hashtable,
+										  TupleHashEntry entry,
+										  TupleTableSlot *newslot,
+										  TupleTableSlot *firstslot,
+										  SortSupport sortKeys,
+										  int numSortCols);
 extern TupleHashEntry FindTupleHashEntry(TupleHashTable hashtable,
 										 TupleTableSlot *slot,
 										 ExprState *eqcomp,

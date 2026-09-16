@@ -1424,6 +1424,33 @@ count_rowexpr_columns(ParseState *pstate, Node *expr)
  * Note: this covers only cases with no set operations and no VALUES lists;
  * see below for the other cases.
  */
+static List *
+prepend_distinct_to_sortby(List *distinctClause, List *distinctSortClause)
+{
+	List	   *result = list_copy(distinctSortClause);
+	ListCell   *lc;
+	List	   *prepended = NIL;
+
+	/* If distinctClause is empty or has NULL (SELECT DISTINCT), do nothing */
+	if (distinctClause == NIL || linitial(distinctClause) == NULL)
+		return distinctSortClause;
+
+	foreach(lc, distinctClause)
+	{
+		Node	   *key = (Node *) lfirst(lc);
+		SortBy	   *sb = makeNode(SortBy);
+
+		sb->node = key;
+		sb->sortby_dir = SORTBY_DEFAULT;
+		sb->sortby_nulls = SORTBY_NULLS_DEFAULT;
+		sb->useOp = NIL;
+		sb->location = -1;
+		prepended = lappend(prepended, sb);
+	}
+
+	return list_concat(prepended, result);
+}
+
 static Query *
 transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 					SelectStmtPassthrough *passthru)
@@ -1431,6 +1458,7 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	Query	   *qry = makeNode(Query);
 	Node	   *qual;
 	ListCell   *l;
+	List	   *distinctSortClause = NIL;
 
 	qry->commandType = CMD_SELECT;
 
@@ -1503,6 +1531,17 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 											false /* allow SQL92 rules */ );
 	qry->groupDistinct = stmt->groupDistinct;
 
+	if (stmt->distinctSortClause)
+	{
+		List *full_sortby = prepend_distinct_to_sortby(stmt->distinctClause, stmt->distinctSortClause);
+		distinctSortClause = transformSortClause(pstate,
+												 full_sortby,
+												 &qry->targetList,
+												 EXPR_KIND_ORDER_BY,
+												 false);
+	}
+	qry->distinctSortClause = distinctSortClause;
+
 	if (stmt->distinctClause == NIL)
 	{
 		qry->distinctClause = NIL;
@@ -1523,7 +1562,7 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 		qry->distinctClause = transformDistinctOnClause(pstate,
 														stmt->distinctClause,
 														&qry->targetList,
-														qry->sortClause);
+														distinctSortClause ? distinctSortClause : qry->sortClause);
 		qry->hasDistinctOn = true;
 	}
 
