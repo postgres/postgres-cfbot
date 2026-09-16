@@ -165,10 +165,17 @@ static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 
 static PgAioResult md_readv_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data);
 static void md_readv_report(PgAioResult result, const PgAioTargetData *td, int elevel);
+static PgAioResult md_fsync_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data);
+static void md_fsync_report(PgAioResult result, const PgAioTargetData *td, int elevel);
 
 const PgAioHandleCallbacks aio_md_readv_cb = {
 	.complete_shared = md_readv_complete,
 	.report = md_readv_report,
+};
+
+const PgAioHandleCallbacks aio_md_fsync_cb = {
+	.complete_shared = md_fsync_complete,
+	.report = md_fsync_report,
 };
 
 
@@ -1506,6 +1513,22 @@ mdfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
 }
 
 /*
+ * Open the exact segment containing blocknum for fsync, or return -1 with
+ * errno set.
+ */
+int
+mdfsyncfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+{
+	MdPathStr	path;
+	BlockNumber segno;
+
+	segno = blocknum / ((BlockNumber) RELSEG_SIZE);
+	path = _mdfd_segpath(reln, forknum, segno);
+
+	return OpenTransientFile(path.str, _mdfd_open_flags());
+}
+
+/*
  * register_dirty_segment() -- Mark a relation segment as needing fsync
  *
  * If there is a local pending-ops table, just make an entry in it for
@@ -1896,26 +1919,27 @@ _mdnblocks(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 }
 
 /*
- * Sync a file to disk, given a file tag.  Write the path into an output
- * buffer so the caller can use it in error messages.
+ * Sync a file to disk, given a file tag.
  *
- * Return 0 on success, -1 on failure, with errno set.
+ * Starts an asynchronous fsync on the given AIO handle and records in "entry"
+ * the path (for error messages), whether an IO was started, and how the file
+ * is to be closed once the fsync has completed.
  */
-int
-mdsyncfiletag(const FileTag *ftag, char *path)
+void
+mdsyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry)
 {
+	FileTag    *ftag = &entry->tag;
 	SMgrRelation reln = smgropen(ftag->rlocator, INVALID_PROC_NUMBER);
+	BlockNumber segfirstblock = ftag->segno * ((BlockNumber) RELSEG_SIZE);
 	File		file;
-	instr_time	io_start;
 	bool		need_to_close;
-	int			result,
-				save_errno;
+	instr_time	io_start;
 
 	/* See if we already have the file open, or need to open it. */
 	if (ftag->segno < reln->md_num_open_segs[ftag->forknum])
 	{
 		file = reln->md_seg_fds[ftag->forknum][ftag->segno].mdfd_vfd;
-		strlcpy(path, FilePathName(file), MAXPGPATH);
+		strlcpy(entry->path, FilePathName(file), MAXPGPATH);
 		need_to_close = false;
 	}
 	else
@@ -1923,28 +1947,54 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		MdPathStr	p;
 
 		p = _mdfd_segpath(reln, ftag->forknum, ftag->segno);
-		strlcpy(path, p.str, MD_PATH_STR_MAXLEN);
+		strlcpy(entry->path, p.str, MD_PATH_STR_MAXLEN);
 
-		file = PathNameOpenFile(path, _mdfd_open_flags());
+		file = PathNameOpenFile(entry->path, _mdfd_open_flags());
 		if (file < 0)
-			return -1;
+		{
+			entry->started = false;
+			entry->open_errno = errno;
+			return;
+		}
 		need_to_close = true;
 	}
 
+	pgaio_io_set_target_smgr(ioh, reln, ftag->forknum, segfirstblock,
+							 0, false);
+	pgaio_io_register_callbacks(ioh, PGAIO_HCB_MD_FSYNC, 0);
+
+	/*
+	 * As with asynchronous reads, measure the time spent starting the IO.
+	 * Synchronous execution includes the fsync itself; otherwise this only
+	 * measures submission.
+	 */
 	io_start = pgstat_prepare_io_time(track_io_timing);
 
-	/* Sync the file. */
-	result = FileSync(file, WAIT_EVENT_DATA_FILE_SYNC);
-	save_errno = errno;
+	if (FileStartSync(ioh, file, false, WAIT_EVENT_DATA_FILE_SYNC) < 0)
+	{
+		entry->started = false;
+		entry->open_errno = errno;
+		if (need_to_close)
+			FileClose(file);
+		return;
+	}
 
+	pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC,
+							io_start, 1, 0);
+
+	entry->started = true;
+
+	/*
+	 * If we opened the segment ourselves it has to be closed once the fsync
+	 * has completed; segments owned by smgr are left to smgr to manage.
+	 */
 	if (need_to_close)
-		FileClose(file);
-
-	pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL,
-							IOOP_FSYNC, io_start, 1, 0);
-
-	errno = save_errno;
-	return result;
+	{
+		entry->close_method = SYNC_CLOSE_VFD;
+		entry->close_file = (int) file;
+	}
+	else
+		entry->close_method = SYNC_CLOSE_NONE;
 }
 
 /*
@@ -1984,6 +2034,48 @@ mdfiletagmatches(const FileTag *ftag, const FileTag *candidate)
 	 * the ftag from the SYNC_FILTER_REQUEST request, so they're forgotten.
 	 */
 	return ftag->rlocator.dbOid == candidate->rlocator.dbOid;
+}
+
+/*
+ * Relation fsync completion and error reporting.  Leave reporting to the
+ * issuer: a missing file can be an expected consequence of a concurrent drop
+ * or truncation, and checkpoint fsyncs must apply their retry policy first.
+ */
+static PgAioResult
+md_fsync_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data)
+{
+	PgAioResult result = prior_result;
+
+	Assert(prior_result.result <= 0);
+	if (prior_result.result < 0)
+	{
+		result.status = PGAIO_RS_ERROR;
+		result.id = PGAIO_HCB_MD_FSYNC;
+		result.error_data = -prior_result.result;
+	}
+
+	/* Keep the raw result for callers applying their own error policy. */
+	return result;
+}
+
+static void
+md_fsync_report(PgAioResult result, const PgAioTargetData *td, int elevel)
+{
+	RelPathStr	relpath;
+	MdPathStr	path;
+	BlockNumber segno = td->smgr.blockNum / ((BlockNumber) RELSEG_SIZE);
+
+	Assert(!td->smgr.is_temp);
+	relpath = relpathperm(td->smgr.rlocator, td->smgr.forkNum);
+	if (segno == 0)
+		strlcpy(path.str, relpath.str, sizeof(path.str));
+	else
+		snprintf(path.str, sizeof(path.str), "%s.%u", relpath.str, segno);
+
+	errno = result.error_data;
+	ereport(elevel,
+			(errcode_for_file_access(),
+			 errmsg("could not fsync file \"%s\": %m", path.str)));
 }
 
 /*
