@@ -51,6 +51,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_depend.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/toasting.h"
 #include "commands/defrem.h"
@@ -97,6 +98,38 @@ typedef struct
 } RelToCluster;
 
 /*
+ * Information needed to close and re-open relation on transaction boundary.
+ */
+typedef struct RelReopenInfo
+{
+	Oid			relid;
+	Relation   *p_rel;
+	bool		is_new;
+} RelReopenInfo;
+
+/*
+ * Information needed to release ans re-initialize ChangeContext on
+ * transaction boundary.
+ */
+typedef struct ChangeContexBackup
+{
+	/* The new relation. */
+	Relation	rel;
+	RelReopenInfo rel_ri;
+	Oid			ident_index;
+
+	/* Auxiliary relation. */
+	Relation	rel_aux;
+	RelReopenInfo rel_aux_ri;
+	Oid			ident_index_aux;
+
+	/* Common fields */
+	int			file_seq_snapshot;
+	int			file_seq_changes;
+	Oid			clustering_index;
+} ChangeContextBackup;
+
+/*
  * When REPACK (CONCURRENTLY) copies data to the new heap, a new snapshot is
  * built after processing this many pages. XXX Tune the value.
  */
@@ -121,6 +154,13 @@ typedef struct DecodingWorker
 static DecodingWorker *decoding_worker = NULL;
 
 /*
+ * In the CONCURRENTLY mode, we need multiple transactions to process a single
+ * table. Information that needs to survive commit should be stored in this
+ * context.
+ */
+static MemoryContext repack_cxt = NULL;
+
+/*
  * Is there a message sent by a repack worker that the backend needs to
  * receive?
  */
@@ -135,6 +175,14 @@ static void check_concurrent_repack_requirements(Relation rel,
 static void check_index_requirements(Relation rel, RepackCommand cmd);
 static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							 Oid ident_idx);
+static ChangeContext *make_new_heap_for_repack(Oid tablespace,
+											   Oid access_method,
+											   char relpersistence,
+											   Oid ident_idx,
+											   Relation *p_old_heap,
+											   Relation *p_clustering_index,
+											   IndexBuildSecurity *ibsec);
+static List *find_new_heaps(Oid relid_old);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 							bool verbose,
 							bool *pSwapToastByContent,
@@ -177,15 +225,30 @@ static void release_change_context(ChangeContext *chgcxt);
 static void initialize_change_dest(RepackDest *dest, Relation relation,
 								   Oid ident_index_id);
 static void release_change_dest(RepackDest *dest);
+static void backup_change_context(ChangeContext *chgcxt,
+								  ChangeContextBackup *backup);
+static ChangeContext *reinitialize_change_context(ChangeContextBackup *backup);
+static void enable_session_locks(Relation rel, LOCKMODE lmode, bool is_new);
+static void disable_session_locks(Relation rel, LOCKMODE lmode, bool is_new);
+static void prepare_relation_for_reopening(Relation *p_rel,
+										   RelReopenInfo *backup,
+										   bool is_new);
+static void reopen_relation(RelReopenInfo *backup);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 											   Oid identIdx,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti,
 											   ChangeContext *chgcxt);
-static void process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap,
-									Oid identIdx);
-static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
+static ChangeContext *process_auxiliary_table(ChangeContext *chgcxt,
+											  Relation *pOldHeap,
+											  Relation *pNewHeap,
+											  Oid identIdx);
+static List *build_new_indexes(List *OldIndexes, Relation *p_old,
+							   Relation *p_new,
+							   ChangeContext **p_chgcxt);
 static Oid	build_new_index(Relation NewHeap, Relation OldHeap, Oid oldindex);
+static ChangeContext *start_new_transaction(ChangeContext *chgcxt,
+											Relation *p_old, Relation *p_new);
 static void copy_index_constraints(Relation old_index, Oid new_index_id,
 								   Oid new_heap_id);
 static void copy_attribute_defaults(Oid old_heap_oid, Oid new_heap_oid);
@@ -641,6 +704,17 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	 */
 	if (concurrent)
 	{
+		/*
+		 * In the CONCURRENTLY mode, new transactions may be started. Make
+		 * sure we can preserve information across transaction boundaries.
+		 */
+		if (repack_cxt == NULL)
+			repack_cxt = AllocSetContextCreate(TopMemoryContext,
+											   "Repack - Top",
+											   ALLOCSET_DEFAULT_SIZES);
+		else
+			MemoryContextReset(repack_cxt);
+
 		PG_ENSURE_ERROR_CLEANUP(stop_repack_decoding_worker_cb, 0);
 		{
 			rebuild_relation(OldHeap, index, verbose, ident_idx);
@@ -1064,8 +1138,8 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	Oid			tableOid = RelationGetRelid(OldHeap);
 	Oid			accessMethod = OldHeap->rd_rel->relam;
 	Oid			tableSpace = OldHeap->rd_rel->reltablespace;
-	Oid			OIDNewHeap;
-	Relation	NewHeap;
+	Oid			OIDNewHeap = InvalidOid;
+	Relation	NewHeap = NULL;
 	char		relpersistence;
 	bool		swap_toast_by_content;
 	TransactionId frozenXid;
@@ -1089,6 +1163,8 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 
 	if (concurrent)
 	{
+		MemoryContext oldcxt;
+
 		/*
 		 * The worker needs to be member of the locking group we're the leader
 		 * of. We ought to become the leader before the worker starts. The
@@ -1112,8 +1188,12 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 		 * Not sure this risk is worth unlocking/locking the table (and its
 		 * clustering index) and checking again if it's still eligible for
 		 * REPACK CONCURRENTLY.
+		 *
+		 * Use a transaction context that survives transaction commit(s).
 		 */
+		oldcxt = MemoryContextSwitchTo(repack_cxt);
 		start_repack_decoding_worker(tableOid);
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	/* for CLUSTER or REPACK USING INDEX, mark the index as the one to use */
@@ -1123,112 +1203,32 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	/* Remember info about rel before closing OldHeap */
 	relpersistence = OldHeap->rd_rel->relpersistence;
 
-	/*
-	 * Create the transient table that will receive the re-ordered data.
-	 *
-	 * OldHeap is already locked, so no need to lock it again.  make_new_heap
-	 * obtains AccessExclusiveLock on the new heap and its toast table.
-	 */
-	OIDNewHeap = make_new_heap(tableOid, tableSpace,
-							   accessMethod,
-							   relpersistence,
-							   NoLock);
-	Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock, false));
-	NewHeap = table_open(OIDNewHeap, NoLock);
-
 	if (concurrent)
 	{
-		bool		need_aux_rel;
+		/*
+		 * Create the transient table that will receive the re-ordered data,
+		 * and possibly the auxiliary table for the ordered data.
+		 */
+		chgcxt = make_new_heap_for_repack(tableSpace, accessMethod,
+										  relpersistence, ident_idx,
+										  &OldHeap, &index, &ibsec);
+		NewHeap = chgcxt->cc_dest.rel;
+	}
+	else
+	{
+		Assert(CheckRelationLockedByMe(OldHeap, AccessExclusiveLock, false));
 
 		/*
-		 * Auxiliary table is needed for clustering in the CONCURRENTLY mode,
-		 * see comments in ChangeContext. FIXME Non-btree indexes are allowed
-		 * historically, but in general, these can hardly define any useful
-		 * order. We ignore them here.
+		 * Nothing special here. No locking as the caller should already have
+		 * a lock on the old relation, and the new one will be locked by
+		 * make_new_heap() anyway.
 		 */
-		need_aux_rel = index != NULL && index->rd_rel->relam == BTREE_AM_OID;
-
-		/* Gather information to apply concurrent changes. */
-		chgcxt = palloc0_object(ChangeContext);
-
-		/*
-		 * Create a copy of the attribute defaults on the temp table, which
-		 * the executor needs when replaying concurrent data changes.
-		 */
-		copy_attribute_defaults(tableOid, OIDNewHeap);
-
-		if (!need_aux_rel)
-		{
-			Oid			ident_idx_new;
-
-			/*
-			 * Create the identity index. We will need it during data copying
-			 * so that we can apply the data changes at the appropriate time -
-			 * see comments around the call of
-			 * repack_process_concurrent_changes() with block range specified.
-			 *
-			 * XXX NewHeap is empty - should we pass INDEX_CREATE_SKIP_BUILD?
-			 */
-			ident_idx_new = build_new_index(NewHeap, OldHeap, ident_idx);
-
-			initialize_change_context(chgcxt, NewHeap, ident_idx_new);
-		}
-		else
-		{
-			Oid			aux_oid;
-			Relation	aux_rel;
-			Oid			aux_ident_idx;
-
-			/*
-			 * As the concurrent data changes will be applied to the auxiliary
-			 * heap, the new heap does not need the identity index yet. We'll
-			 * build it after having copied the data from the auxiliary heap.
-			 * (Bulk insert should be more efficient.)
-			 */
-			initialize_change_context(chgcxt, NewHeap, InvalidOid);
-
-			/*
-			 * Like above, but only temporary - no other backend should need
-			 * it.
-			 */
-			aux_oid = make_new_heap(tableOid, tableSpace, accessMethod,
-									RELPERSISTENCE_TEMP, NoLock);
-			Assert(CheckRelationOidLockedByMe(aux_oid, AccessExclusiveLock,
-											  false));
-			aux_rel = table_open(aux_oid, NoLock);
-
-
-			/*
-			 * Copy the attribute defaults as we did for the new heap above -
-			 * the concurrent changes also need to be applied to the auxiliary
-			 * table.
-			 */
-			copy_attribute_defaults(tableOid, aux_oid);
-
-			/*
-			 * The same for identity index. (The additional
-			 * ShareUpdateExclusiveLock on ident_idx is not a problem, it'll
-			 * be released at the end of transaction.)
-			 */
-			aux_ident_idx = build_new_index(aux_rel, OldHeap, ident_idx);
-
-			/*
-			 * Make the relation ready for use.
-			 */
-			chgcxt->cc_dest_aux = palloc0_object(RepackDest);
-			initialize_change_dest(chgcxt->cc_dest_aux, aux_rel,
-								   aux_ident_idx);
-
-			/*
-			 * Set OID of the old relation's clustering index if it's
-			 * different from the identity index. Otherwise set InvalidOid to
-			 * indicate that the identity index should be used for clustering.
-			 */
-			if (RelationGetRelid(index) != ident_idx)
-				chgcxt->cc_clustering_index = RelationGetRelid(index);
-			else
-				chgcxt->cc_clustering_index = InvalidOid;
-		}
+		OIDNewHeap = make_new_heap(tableOid, tableSpace, accessMethod,
+								   relpersistence, NoLock, false);
+		/* No additional lock needed. */
+		Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock,
+										  false));
+		NewHeap = table_open(OIDNewHeap, NoLock);
 	}
 
 	/* Copy the heap data into the new table in the desired order */
@@ -1298,6 +1298,332 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 }
 
 /*
+ * Wrapper around make_new_heap() to handle specifics of REPACK
+ * (CONCURRENTLY).
+ *
+ * 'ident_idx' is the identity index, to handle replaying of concurrent data
+ * changes to the new heap.
+ *
+ * The function starts a new transaction. Therefore, both old heap and
+ * clustering index are passed in the form of pointer so the caller has the
+ * correct entries in the new transaction. New heap is returned in the
+ * ChangeContext object. On return, the new heap will be locked in
+ * AccessExclusiveLock mode.
+ */
+static ChangeContext *
+make_new_heap_for_repack(Oid tablespace, Oid access_method,
+						 char relpersistence, Oid ident_idx,
+						 Relation *p_old_heap, Relation *p_clustering_index,
+						 IndexBuildSecurity *ibsec)
+{
+	Relation	old_heap = *p_old_heap;
+	Relation	clustering_index = *p_clustering_index;
+	List	   *existing = NIL;
+	Relation	new_heap;
+	Oid			old_heap_oid = RelationGetRelid(old_heap);
+	bool		need_aux_rel;
+	Oid			new_heap_oid;
+	ObjectAddress old_obj,
+				new_obj;
+	Oid			ident_idx_new;
+	Oid			aux_oid = InvalidOid;
+	Oid			aux_ident_idx = InvalidOid;
+	Oid			clustering_index_oid = InvalidOid;
+	Relation	aux_rel = NULL;
+	ChangeContext *chgcxt;
+
+	/*
+	 * In the CONCURRENTLY case, we do the catalog changes in a separate
+	 * transaction so that we do not have XID assigned while copying the data.
+	 * (That XID would block the progress of the xmin horizon for VACUUM.)
+	 * Therefore, the new relation will be created in a separate transaction
+	 * and thus be visible to other transactions, although our lock should not
+	 * let them access it. However, if previous run of REPACK ended with
+	 * ERROR, such relation may still be there.
+	 *
+	 * Besides that, an auxiliary relation (for tuple sorting) might exist.
+	 * Thus we expect a list of zero, one or two items.
+	 *
+	 * Since the relations should depend on the old one (see below), we use
+	 * the pg_depend catalog to find it.
+	 */
+	existing = find_new_heaps(old_heap_oid);
+	Assert(list_length(existing) <= 2);
+	foreach_oid(existing_oid, existing)
+	{
+		/* There appears to be one, so simply drop it. */
+		new_obj.classId = RelationRelationId;
+		new_obj.objectId = existing_oid;
+		new_obj.objectSubId = InvalidOid;
+
+		/*
+		 * User is not supposed to create any dependencies on the relation, so
+		 * CASCADE.
+		 */
+		performDeletion(&new_obj, DROP_CASCADE, PERFORM_DELETION_INTERNAL);
+	}
+
+	/*
+	 * The old heap should already be locked by the caller. As for the new
+	 * one, lock is needed because the commit below will make it visible to
+	 * other transactions. make_new_heap() should lock it.
+	 */
+	Assert(CheckRelationLockedByMe(old_heap, ShareUpdateExclusiveLock,
+								   false));
+	new_heap_oid = make_new_heap(old_heap_oid, tablespace, access_method,
+								 relpersistence, NoLock, false);
+	Assert(CheckRelationOidLockedByMe(new_heap_oid, AccessExclusiveLock,
+									  false));
+
+	new_heap = table_open(new_heap_oid, NoLock);
+
+	/*
+	 * Create a copy of the attribute defaults on the temp table, which the
+	 * executor needs when replaying concurrent data changes.
+	 */
+	copy_attribute_defaults(old_heap_oid, new_heap_oid);
+
+	/*
+	 * Auxiliary table is needed for clustering in the CONCURRENTLY mode, see
+	 * comments in ChangeContext. FIXME Non-btree indexes are allowed
+	 * historically, but in general, these can hardly define any useful order.
+	 * We ignore them here.
+	 */
+	need_aux_rel = clustering_index != NULL &&
+		clustering_index->rd_rel->relam == BTREE_AM_OID;
+	if (!need_aux_rel)
+	{
+		/*
+		 * Create the identity index. We will need it during data copying so
+		 * that we can apply the data changes at the appropriate time - see
+		 * comments around the call of repack_process_concurrent_changes()
+		 * with block range specified.
+		 *
+		 * XXX NewHeap is empty - should we pass INDEX_CREATE_SKIP_BUILD?
+		 */
+		ident_idx_new = build_new_index(new_heap, old_heap, ident_idx);
+	}
+	else
+	{
+		/*
+		 * As the concurrent data changes will be applied to the auxiliary
+		 * heap, the new heap does not need the identity index yet. We'll
+		 * build it after having copied the data from the auxiliary heap.
+		 * (Bulk insert should be more efficient.)
+		 */
+		ident_idx_new = InvalidOid;
+
+		/*
+		 * Create the auxiliary table - like the new heap above, but only
+		 * unlogged - neither crash recovery nor replication is needed.
+		 */
+		aux_oid = make_new_heap(old_heap_oid, tablespace, access_method,
+								RELPERSISTENCE_UNLOGGED, NoLock, true);
+		Assert(CheckRelationOidLockedByMe(aux_oid, AccessExclusiveLock,
+										  false));
+
+		/*
+		 * The same for identity index. (The additional
+		 * ShareUpdateExclusiveLock on ident_idx is not a problem, it'll be
+		 * released at the end of transaction.)
+		 */
+		aux_rel = table_open(aux_oid, NoLock);
+		aux_ident_idx = build_new_index(aux_rel, old_heap, ident_idx);
+
+		clustering_index_oid = RelationGetRelid(clustering_index);
+
+		/*
+		 * Copy the attribute defaults as we did for the new heap above - the
+		 * concurrent changes also need to be applied to the auxiliary table.
+		 */
+		copy_attribute_defaults(old_heap_oid, aux_oid);
+	}
+
+	/*
+	 * Create dependencies on the old heap - it ensures that dropping the old
+	 * heap automatically cascades to the new ones.
+	 */
+	old_obj.classId = RelationRelationId;
+	old_obj.objectId = old_heap_oid;
+	old_obj.objectSubId = InvalidOid;
+	new_obj.classId = RelationRelationId;
+	new_obj.objectId = new_heap_oid;
+	new_obj.objectSubId = InvalidOid;
+	recordDependencyOn(&new_obj, &old_obj, DEPENDENCY_AUTO);
+
+	if (OidIsValid(aux_oid))
+	{
+		new_obj.objectId = aux_oid;
+		recordDependencyOn(&new_obj, &old_obj, DEPENDENCY_AUTO);
+	}
+
+	/*
+	 * Commit will release the locks, so make sure no one can alter or drop
+	 * the relations until we're done.
+	 */
+	enable_session_locks(old_heap, ShareUpdateExclusiveLock, false);
+	/* NoLock for simplicity, commit will release the existing lock anyway. */
+	table_close(old_heap, NoLock);
+
+	/* Likewise, acquire session lock for the new heap. */
+	enable_session_locks(new_heap, AccessExclusiveLock, true);
+	table_close(new_heap, NoLock);
+
+	/*
+	 * The same for the auxiliary relation and clustering index if ordering is
+	 * required.
+	 */
+	if (need_aux_rel)
+	{
+		enable_session_locks(aux_rel, AccessExclusiveLock, true);
+		table_close(aux_rel, NoLock);
+
+		/* is_new does not matter for index. */
+		enable_session_locks(clustering_index, ShareUpdateExclusiveLock,
+							 false);
+		index_close(clustering_index, NoLock);
+	}
+
+	/*
+	 * Even if the clustering index is not appropriate for sorting, we ought
+	 * to close it before committing the transaction.
+	 */
+	else if (clustering_index)
+		index_close(clustering_index, NoLock);
+
+	/*
+	 * Commit the current transaction and start a new one.
+	 */
+	disable_index_build_security(ibsec);
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	enable_index_build_security(ibsec->userid, ibsec);
+
+	/*
+	 * Open the new heap in the new transaction and disable the session
+	 * lock(s).
+	 */
+	new_heap = table_open(new_heap_oid, NoLock);
+	disable_session_locks(new_heap, AccessExclusiveLock, true);
+
+	/*
+	 * Allocate and initialize memory for the output information. We shouldn't
+	 * have done it in the memory context of the previous transaction.
+	 */
+	chgcxt = palloc0_object(ChangeContext);
+	initialize_change_context(chgcxt, new_heap, ident_idx_new);
+	chgcxt->cc_ind_build_sec = *ibsec;
+	if (need_aux_rel)
+	{
+		/*
+		 * Make the auxiliary relation ready for use.
+		 */
+		chgcxt->cc_dest_aux = palloc0_object(RepackDest);
+		aux_rel = table_open(aux_oid, NoLock);
+		disable_session_locks(aux_rel, AccessExclusiveLock, true);
+		initialize_change_dest(chgcxt->cc_dest_aux, aux_rel,
+							   aux_ident_idx);
+
+		/*
+		 * Set OID of the old relation's clustering index if it's different
+		 * from the identity index. Otherwise set InvalidOid to indicate that
+		 * the identity index should be used for clustering.
+		 */
+		if (clustering_index_oid != ident_idx)
+			chgcxt->cc_clustering_index = clustering_index_oid;
+		else
+			chgcxt->cc_clustering_index = InvalidOid;
+
+		/* Re-open the clustering index. */
+		clustering_index = index_open(clustering_index_oid, NoLock);
+		/* is_new does not matter for index. */
+		disable_session_locks(clustering_index, ShareUpdateExclusiveLock,
+							  false);
+	}
+	else
+		clustering_index = NULL;
+
+	/*
+	 * Re-open the old heap.
+	 */
+	old_heap = table_open(old_heap_oid, NoLock);
+	disable_session_locks(old_heap, ShareUpdateExclusiveLock, false);
+
+	*p_old_heap = old_heap;
+	*p_clustering_index = clustering_index;
+
+	return chgcxt;
+}
+
+/*
+ * Check if new heap, and possibly also an auxiliary heap, already exists for
+ * given old heap - typically due to failed REPACK (CONCURRENTLY). Return OIDs
+ * of in a list or NIL if there is none.
+ */
+static List *
+find_new_heaps(Oid relid_old)
+{
+	Relation	depRel;
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	List	   *result = NIL;
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				RelationRelationId);
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid_old));
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_refobjsubid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(InvalidOid));
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 3, key);
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend depform;
+
+		/*
+		 * There should be AUTO dependency from another table, which is the
+		 * new or the auxiliary one. If we found any other, just ignore them.
+		 */
+		depform = (Form_pg_depend) GETSTRUCT(tup);
+		if (depform->classid == RelationRelationId &&
+			depform->deptype == DEPENDENCY_AUTO)
+		{
+			Relation	rel;
+			Form_pg_class classForm;
+			Oid			matched = InvalidOid;
+
+			rel = relation_open(depform->objid, AccessShareLock);
+
+			/*
+			 * The new relation's relrewrite should point to the old relation.
+			 */
+			classForm = rel->rd_rel;
+			if (classForm->relrewrite == relid_old)
+				matched = depform->objid;
+			table_close(rel, AccessShareLock);
+
+			if (OidIsValid(matched))
+				result = lappend_oid(result, matched);
+		}
+	}
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return result;
+}
+
+/*
  * Create the transient table that will be filled with new data during
  * CLUSTER, ALTER TABLE, and similar operations.  The transient table
  * duplicates the logical structure of the OldHeap; but will have the
@@ -1309,7 +1635,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
  */
 Oid
 make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
-			  char relpersistence, LOCKMODE lockmode)
+			  char relpersistence, LOCKMODE lockmode, bool auxiliary)
 {
 	TupleDesc	OldHeapDesc;
 	char		NewHeapName[NAMEDATALEN];
@@ -1320,6 +1646,7 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 	Datum		reloptions;
 	bool		isNull;
 	Oid			namespaceid;
+	const char *suffix;
 
 	OldHeap = table_open(OIDOldHeap, lockmode);
 	OldHeapDesc = RelationGetDescr(OldHeap);
@@ -1359,7 +1686,9 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 	 * mapped.  This simplifies swap_relation_files, and is absolutely
 	 * necessary for rebuilding pg_class, for reasons explained there.
 	 */
-	snprintf(NewHeapName, sizeof(NewHeapName), "pg_temp_%u", OIDOldHeap);
+	suffix = auxiliary ? "_aux" : "";
+	snprintf(NewHeapName, sizeof(NewHeapName), "pg_temp_%u%s", OIDOldHeap,
+			 suffix);
 
 	OIDNewHeap = heap_create_with_catalog(NewHeapName,
 										  namespaceid,
@@ -2711,31 +3040,6 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 	Assert(stmt->command == REPACK_COMMAND_CLUSTER ||
 		   stmt->command == REPACK_COMMAND_REPACK);
 
-	if (params->options & CLUOPT_CONCURRENT)
-	{
-		/*
-		 * Since REPACK (CONCURRENTLY) pops the active snapshot during the
-		 * processing (it creates and pushes snapshots on its own), and since
-		 * that snapshot can be referenced by the current portal, we need to
-		 * make sure that the portal has no dangling pointer to the snapshot.
-		 * Starting a new transaction seems to be the simplest way.
-		 *
-		 * XXX The following patches in the series make this unnecessary, as
-		 * they start new transactions for other reasons elsewhere.
-		 */
-		PopActiveSnapshot();
-		CommitTransactionCommand();
-
-		/* Start a new transaction. */
-		StartTransactionCommand();
-
-		/*
-		 * Functions in indexes may want a snapshot set. Note that the portal
-		 * is not aware of this one, so the caller needs to pop it explicitly.
-		 */
-		PushActiveSnapshot(GetTransactionSnapshot());
-	}
-
 	/*
 	 * Make sure ANALYZE is specified if a column list is present.
 	 */
@@ -3626,6 +3930,176 @@ release_change_dest(RepackDest *dest)
 }
 
 /*
+ * Copy information needed to re-initialize 'chgcxt' to 'backup'.
+ */
+static void
+backup_change_context(ChangeContext *chgcxt, ChangeContextBackup *backup)
+{
+	RepackDest *dest;
+
+	memset(backup, 0, sizeof(ChangeContextBackup));
+
+	/* Store information on the new relation. */
+	dest = &chgcxt->cc_dest;
+	backup->rel = dest->rel;
+	prepare_relation_for_reopening(&backup->rel, &backup->rel_ri, true);
+	backup->ident_index = dest->ident_index ?
+		RelationGetRelid(dest->ident_index) : InvalidOid;
+
+	/* Store information on the auxiliary relation if one exists. */
+	if (chgcxt->cc_dest_aux)
+	{
+		dest = chgcxt->cc_dest_aux;
+		backup->rel_aux = dest->rel;
+		prepare_relation_for_reopening(&backup->rel_aux, &backup->rel_aux_ri,
+									   true);
+		backup->ident_index_aux = dest->ident_index ?
+			RelationGetRelid(dest->ident_index) : InvalidOid;
+	}
+	else
+	{
+		/* There should be no reopening. */
+		Assert(backup->rel_aux_ri.relid == InvalidOid);
+	}
+
+	/* Backup the common fields. */
+	backup->file_seq_snapshot = chgcxt->cc_file_seq_snapshot;
+	backup->file_seq_changes = chgcxt->cc_file_seq_changes;
+	backup->clustering_index = chgcxt->cc_clustering_index;
+}
+
+/*
+ * Create and initialize an instance of ChangeContext, based on previously
+ * existing instance. It includes re-opening of relations and indexes.
+ */
+static ChangeContext *
+reinitialize_change_context(ChangeContextBackup *backup)
+{
+	ChangeContext *chgcxt;
+	RelReopenInfo *rri;
+
+	chgcxt = palloc0_object(ChangeContext);
+
+	/* Re-initialize the new relation part. */
+	rri = &backup->rel_ri;
+	reopen_relation(rri);
+	initialize_change_context(chgcxt, backup->rel, backup->ident_index);
+
+	/* The same for the auxiliary relation, if it exists. */
+	rri = &backup->rel_aux_ri;
+	if (OidIsValid(rri->relid))
+	{
+		reopen_relation(rri);
+		chgcxt->cc_dest_aux = palloc0_object(RepackDest);
+		initialize_change_dest(chgcxt->cc_dest_aux, backup->rel_aux,
+							   backup->ident_index_aux);
+	}
+
+	/* Restore the common fields. */
+	chgcxt->cc_file_seq_snapshot = backup->file_seq_snapshot;
+	chgcxt->cc_file_seq_changes = backup->file_seq_changes;
+	chgcxt->cc_clustering_index = backup->clustering_index;
+
+	return chgcxt;
+}
+
+/*
+ * Lock the relation and its TOAST relation using a session lock.
+ */
+static void
+enable_session_locks(Relation rel, LOCKMODE lmode, bool is_new)
+{
+	LockRelId	lock;
+	Oid			toastid;
+
+	Assert(CheckRelationLockedByMe(rel, lmode, false));
+	lock = rel->rd_lockInfo.lockRelId;
+	LockRelationIdForSession(&lock, lmode);
+
+	/*
+	 * The same for TOAST relation. XXX Is it ok that we do not lock TOAST
+	 * relation of the old relation until we start swapping the files? (The
+	 * new relation's TOAST is locked on creation, so we keep it that way.)
+	 */
+	toastid = rel->rd_rel->reltoastrelid;
+	if (is_new && OidIsValid(toastid))
+	{
+		Assert(CheckRelationOidLockedByMe(toastid, lmode, false));
+		lock.relId = toastid;
+		LockRelationIdForSession(&lock, lmode);
+	}
+}
+
+/*
+ * Disable session locks acquired earlier by enable_session_locks(), but first
+ * acquire normal (transactional) lock(s).
+ */
+static void
+disable_session_locks(Relation rel, LOCKMODE lmode, bool is_new)
+{
+	LockRelId	lock;
+	Oid			toastid;
+
+	LockRelation(rel, lmode);
+	lock = rel->rd_lockInfo.lockRelId;
+	UnlockRelationIdForSession(&lock, lmode);
+	Assert(CheckRelationLockedByMe(rel, lmode, false));
+
+	/* The same for TOAST relation. See enable_session_locks(). */
+	toastid = rel->rd_rel->reltoastrelid;
+	if (is_new && OidIsValid(toastid))
+	{
+		lock.relId = toastid;
+		LockRelationId(&lock, lmode);
+		UnlockRelationIdForSession(&lock, lmode);
+		Assert(CheckRelationOidLockedByMe(toastid, lmode, false));
+	}
+}
+
+/*
+ * Remember OID of a relation, lock it using a session lock and close it. and a
+ *
+ * The lock mode is always ShareUpdateExclusiveLock, as this is related to
+ * REPACK (CONCURRENTLY).
+ */
+static void
+prepare_relation_for_reopening(Relation *p_rel, RelReopenInfo *backup,
+							   bool is_new)
+{
+	Relation	rel = *p_rel;
+	LOCKMODE	lmode;
+
+	lmode = is_new ? AccessExclusiveLock : ShareUpdateExclusiveLock;
+
+	/* Remember what we need to be able to re-open the relation later. */
+	backup->relid = RelationGetRelid(rel);
+	backup->p_rel = p_rel;
+	backup->is_new = is_new;
+
+	/*
+	 * Close it, but make sure the lock is not lost at transaction boundary.
+	 */
+	enable_session_locks(rel, lmode, is_new);
+	relation_close(rel, NoLock);
+}
+
+/*
+ * Open the relation, acquire transactional lock on it and release the session
+ * lock acquired by prepare_relation_for_reopening().
+ */
+static void
+reopen_relation(RelReopenInfo *backup)
+{
+	Relation	rel;
+	LOCKMODE	lmode;
+
+	lmode = backup->is_new ? AccessExclusiveLock : ShareUpdateExclusiveLock;
+	rel = relation_open(backup->relid, lmode);
+	disable_session_locks(rel, lmode, backup->is_new);
+	*backup->p_rel = rel;
+}
+
+/*
  * The final steps of rebuild_relation() for concurrent processing.
  *
  * On entry, NewHeap is locked in AccessExclusiveLock mode. OldHeap and its
@@ -3642,21 +4116,27 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	List	   *ind_oids_new;
 	Oid			old_table_oid = RelationGetRelid(OldHeap);
 	Oid			new_table_oid = RelationGetRelid(NewHeap);
-	List	   *ind_oids_old = RelationGetIndexList(OldHeap);
+	List	   *ind_oids_old;
 	ListCell   *lc,
 			   *lc2;
 	char		relpersistence;
 	bool		is_system_catalog;
 	XLogRecPtr	end_of_wal;
+	MemoryContext oldcxt;
 	List	   *indexrels;
 	List	   *inds_tmp = NIL;
 
 	Assert(CheckRelationLockedByMe(OldHeap, ShareUpdateExclusiveLock, false));
 	Assert(CheckRelationLockedByMe(NewHeap, AccessExclusiveLock, false));
 
-	/* If we have the auxiliary table, this is the moment we should use it. */
+	/*
+	 * If we have the auxiliary table, this is the moment we should use it.
+	 * Note that the function can start new transaction(s). In that case it
+	 * re-opens the new and old heap, so pass pointers to get the relation
+	 * cache entries updated.
+	 */
 	if (chgcxt->cc_dest_aux)
-		process_auxiliary_table(chgcxt, OldHeap, identIdx);
+		chgcxt = process_auxiliary_table(chgcxt, &OldHeap, &NewHeap, identIdx);
 
 	/*
 	 * Unlike the exclusive case, we build new indexes for the new relation
@@ -3679,13 +4159,17 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * auxiliary table) can be a problem in terms of index layout. Shouldn't
 	 * we drop the identity index and build it using bulk insert too?
 	 */
+	oldcxt = MemoryContextSwitchTo(repack_cxt);
+	ind_oids_old = RelationGetIndexList(OldHeap);
 	foreach_oid(ind_oid, ind_oids_old)
 	{
 		if (ind_oid != identIdx)
 			inds_tmp = lappend_oid(inds_tmp, ind_oid);
 	}
+	MemoryContextSwitchTo(oldcxt);
 	ind_oids_old = inds_tmp;
-	ind_oids_new = build_new_indexes(NewHeap, OldHeap, ind_oids_old);
+	ind_oids_new = build_new_indexes(ind_oids_old, &OldHeap, &NewHeap,
+									 &chgcxt);
 
 	/*
 	 * The identity index will be involved in the following processing.
@@ -3844,9 +4328,15 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 /*
  * Copy the contents of the auxiliary table to the new table in the desired
  * order, then drop the auxiliary table.
+ *
+ * All the opened relations may need to be closed and re-opened because the
+ * function may start a new transaction. That's why a pointer to old and new
+ * heap is passed. 'chgcxt' is re-created in that case, so user should use the
+ * returned value.
  */
-static void
-process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap, Oid identIdx)
+static ChangeContext *
+process_auxiliary_table(ChangeContext *chgcxt, Relation *pOldHeap,
+						Relation *pNewHeap, Oid identIdx)
 {
 	RepackDest *dest = chgcxt->cc_dest_aux;
 	Oid			ident_idx_new;
@@ -3867,8 +4357,16 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap, Oid identIdx)
 		/*
 		 * Create it according to the clustering index on the old relation.
 		 */
-		cl_ind_oid = build_new_index(dest->rel, OldHeap,
+		cl_ind_oid = build_new_index(dest->rel, *pOldHeap,
 									 chgcxt->cc_clustering_index);
+
+		/*
+		 * The index build generated a new XID, so commit the transaction and
+		 * start a new one.
+		 */
+		chgcxt = start_new_transaction(chgcxt, pOldHeap, pNewHeap);
+		dest = chgcxt->cc_dest_aux;
+
 		clustering_index = index_open(cl_ind_oid, NoLock);
 	}
 	else
@@ -3927,7 +4425,13 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap, Oid identIdx)
 	performDeletion(&object, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
 
 	/* Build the identity index on the new relation. */
-	ident_idx_new = build_new_index(chgcxt->cc_dest.rel, OldHeap, identIdx);
+	ident_idx_new = build_new_index(chgcxt->cc_dest.rel, *pOldHeap, identIdx);
+
+	/*
+	 * The index build generated a new XID, so commit the transaction and
+	 * start a new one.
+	 */
+	chgcxt = start_new_transaction(chgcxt, pOldHeap, pNewHeap);
 
 	/*
 	 * Make the new heap ready to use the index for future replaying of
@@ -3936,6 +4440,8 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap, Oid identIdx)
 	rel = chgcxt->cc_dest.rel;
 	release_change_dest(&chgcxt->cc_dest);
 	initialize_change_dest(&chgcxt->cc_dest, rel, ident_idx_new);
+
+	return chgcxt;
 }
 
 /*
@@ -3947,19 +4453,46 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation OldHeap, Oid identIdx)
  * A list of OIDs of the corresponding indexes created on NewHeap is
  * returned. The order of items does match, so we can use these arrays to swap
  * index storage.
+ *
+ * A separate transaction is used for each index. Therefore caller needs to
+ * pass pointers to the relcache entries so that we can provide him with new
+ * entries after reopening the relations. Likewise, pointer to ChangeContext
+ * is used to return the re-created instance.
  */
 static List *
-build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
+build_new_indexes(List *OldIndexes, Relation *p_old, Relation *p_new,
+				  ChangeContext **p_chgcxt)
 {
+	ChangeContext *chgcxt = *p_chgcxt;
 	List	   *result = NIL;
 
 	foreach_oid(oldindex, OldIndexes)
 	{
+		Relation	rel_old = *p_old;
+		Relation	rel_new = *p_new;
 		Oid			newindex;
+		MemoryContext oldcxt;
 
-		newindex = build_new_index(NewHeap, OldHeap, oldindex);
+		newindex = build_new_index(rel_new, rel_old, oldindex);
+
+		/*
+		 * Allocate the list in repack_cxt so it survives the current
+		 * transaction.
+		 */
+		oldcxt = MemoryContextSwitchTo(repack_cxt);
 		result = lappend_oid(result, newindex);
+		MemoryContextSwitchTo(oldcxt);
+
+		/*
+		 * Use one transaction per index, to limit the impact on xmin
+		 * horizons. XXX Does it make sense to even first commit the catalog
+		 * changes and then do the build in a new transaction (which should
+		 * not set MyProc->xmin until the build is complete)? Not sure.
+		 */
+		chgcxt = start_new_transaction(chgcxt, p_old, p_new);
 	}
+
+	*p_chgcxt = chgcxt;
 
 	return result;
 }
@@ -3984,17 +4517,62 @@ build_new_index(Relation NewHeap, Relation OldHeap, Oid oldindex)
 								 "repacknew",
 								 get_rel_namespace(ind->rd_index->indrelid),
 								 false);
+
 	/* Functions in indexes may want a snapshot set. */
 	Assert(ActiveSnapshotSet());
 	newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
 								 oldindex, ind->rd_rel->reltablespace,
 								 newName);
+
 	copy_index_constraints(ind, newindex, RelationGetRelid(NewHeap));
 	index_close(ind, NoLock);
 
 	pgstat_progress_incr_param(PROGRESS_REPACK_INDEX_REBUILD_COUNT, 1);
 
 	return newindex;
+}
+
+/*
+ * Start a new transaction, but make sure that the caller still has valid
+ * relcache entries as well as valid ChangeContext. The problem is that
+ * relcache references should be closed before transaction commit, so we need
+ * them re-opened in the new transaction. Also, commit releases all locks
+ * acquired in the transaction, however we don't want to lose our locks. We
+ * work it around by using session locks temporarily.
+ */
+static ChangeContext *
+start_new_transaction(ChangeContext *chgcxt, Relation *p_old, Relation *p_new)
+{
+	ChangeContextBackup chgcxt_backup;
+	RelReopenInfo rri_old;
+	MemoryContext oldcxt;
+	IndexBuildSecurity ibsec = chgcxt->cc_ind_build_sec;
+
+	/* This also closes the new relation. */
+	backup_change_context(chgcxt, &chgcxt_backup);
+	release_change_context(chgcxt);
+	prepare_relation_for_reopening(p_old, &rri_old, false);
+
+	disable_index_build_security(&ibsec);
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	enable_index_build_security(ibsec.userid, &ibsec);
+
+	/* Create 'chgcxt' using re-opened relations. */
+	oldcxt = MemoryContextSwitchTo(repack_cxt);
+	/* This also re-opens the new relation. */
+	chgcxt = reinitialize_change_context(&chgcxt_backup);
+	chgcxt->cc_ind_build_sec = ibsec;
+	MemoryContextSwitchTo(oldcxt);
+
+	reopen_relation(&rri_old);
+
+	/* Update the callers relcache entry for the new relation. */
+	*p_new = chgcxt->cc_dest.rel;
+
+	return chgcxt;
 }
 
 /*
@@ -4182,6 +4760,8 @@ start_repack_decoding_worker(Oid relid)
 	size = BUFFERALIGN(offsetof(DecodingWorkerShared, error_queue)) +
 		BUFFERALIGN(REPACK_ERROR_QUEUE_SIZE);
 	decoding_worker->seg = dsm_create(size, 0);
+	/* The segment should not be detached at transaction boundary. */
+	dsm_pin_mapping(decoding_worker->seg);
 
 	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 	shared->initialized = false;

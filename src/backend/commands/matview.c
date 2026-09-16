@@ -318,7 +318,7 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 	 */
 	OIDNewHeap = make_new_heap(matviewOid, tableSpace,
 							   matviewRel->rd_rel->relam,
-							   relpersistence, ExclusiveLock);
+							   relpersistence, ExclusiveLock, false);
 	Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock, false));
 
 	/* Generate the data, if wanted. */
