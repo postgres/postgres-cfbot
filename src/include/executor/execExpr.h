@@ -125,6 +125,10 @@ typedef enum ExprEvalOp
 	EEOP_FUNCEXPR_STRICT_2,
 	EEOP_FUNCEXPR_FUSAGE,
 	EEOP_FUNCEXPR_STRICT_FUSAGE,
+	EEOP_FUNCEXPR_SAFE,			/* called with an ErrorSaveContext */
+	EEOP_FUNCEXPR_STRICT_SAFE,
+	EEOP_FUNCEXPR_SAFE_FUSAGE,
+	EEOP_FUNCEXPR_STRICT_SAFE_FUSAGE,
 
 	/*
 	 * Evaluate boolean AND expression, one step per subexpression. FIRST/LAST
@@ -265,6 +269,7 @@ typedef enum ExprEvalOp
 	EEOP_XMLEXPR,
 	EEOP_JSON_CONSTRUCTOR,
 	EEOP_IS_JSON,
+	EEOP_SAFETYPE_CAST,
 	EEOP_JSONEXPR_PATH,
 	EEOP_JSONEXPR_COERCION,
 	EEOP_JSONEXPR_COERCION_FINISH,
@@ -754,6 +759,12 @@ typedef struct ExprEvalStep
 			JsonIsPredicate *pred;	/* original expression node */
 		}			is_json;
 
+		/* for EEOP_SAFETYPE_CAST */
+		struct
+		{
+			struct SafeTypeCastState *stcstate;
+		}			stcexpr;
+
 		/* for EEOP_JSONEXPR_PATH */
 		struct
 		{
@@ -856,6 +867,11 @@ extern void ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
 								   ExprContext *econtext);
 extern void ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
 										 ExprContext *econtext);
+extern void ExecEvalFuncSafe(ExprState *state, ExprEvalStep *op,
+							 ExprContext *econtext);
+extern void ExecEvalFuncSafeFusage(ExprState *state, ExprEvalStep *op,
+								   ExprContext *econtext);
+
 extern void ExecEvalParamExec(ExprState *state, ExprEvalStep *op,
 							  ExprContext *econtext);
 extern void ExecEvalParamSet(ExprState *state, ExprEvalStep *op,
