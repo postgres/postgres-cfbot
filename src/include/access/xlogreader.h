@@ -260,10 +260,9 @@ struct XLogReaderState
 	DecodedXLogRecord *decode_queue_tail;	/* newest decoded record */
 
 	/*
-	 * Buffer for currently read page (XLOG_BLCKSZ bytes, valid up to at least
-	 * readLen bytes)
+	 * Buffer for currently read page (valid up to at least readLen bytes)
 	 */
-	char	   *readBuf;
+	alignas(MAXIMUM_ALIGNOF) char readBuf[XLOG_BLCKSZ];
 	uint32		readLen;
 
 	/* last read XLOG position for data currently in readBuf */
