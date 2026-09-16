@@ -535,6 +535,51 @@ SELECT (current_schemas(true))[1] = ('pg_temp_' || beid::text) AS match
 FROM pg_stat_get_backend_idset() beid
 WHERE pg_stat_get_backend_pid(beid) = pg_backend_pid();
 
+-- The per-backend statistics functions report the details of a session only
+-- to a caller that is allowed to see them: a superuser, a role with
+-- privileges of pg_read_all_stats, or the role that owns the session.
+SELECT beid FROM pg_stat_get_backend_idset() beid
+WHERE pg_stat_get_backend_pid(beid) = pg_backend_pid() \gset
+SELECT current_user AS regress_stat_backend_owner \gset
+CREATE ROLE regress_stat_backend_role;
+-- a role with privileges of the role that owns this backend sees them
+GRANT :"regress_stat_backend_owner" TO regress_stat_backend_role;
+SET ROLE regress_stat_backend_role;
+SELECT (SELECT subxact_count IS NOT NULL
+          FROM pg_stat_get_backend_subxact(:beid)) AS subxact,
+       (SELECT count(*) > 0
+          FROM pg_stat_get_backend_io(pg_backend_pid())) AS io,
+       (SELECT count(*) > 0
+          FROM pg_stat_get_backend_lock(pg_backend_pid())) AS locks,
+       (SELECT wal_records IS NOT NULL
+          FROM pg_stat_get_backend_wal(pg_backend_pid())) AS wal;
+RESET ROLE;
+REVOKE :"regress_stat_backend_owner" FROM regress_stat_backend_role;
+SET ROLE regress_stat_backend_role;
+-- an unrelated role sees nothing
+SELECT (SELECT subxact_count IS NOT NULL
+          FROM pg_stat_get_backend_subxact(:beid)) AS subxact,
+       (SELECT count(*) > 0
+          FROM pg_stat_get_backend_io(pg_backend_pid())) AS io,
+       (SELECT count(*) > 0
+          FROM pg_stat_get_backend_lock(pg_backend_pid())) AS locks,
+       (SELECT wal_records IS NOT NULL
+          FROM pg_stat_get_backend_wal(pg_backend_pid())) AS wal;
+RESET ROLE;
+-- but a role with privileges of pg_read_all_stats sees them again
+GRANT pg_read_all_stats TO regress_stat_backend_role;
+SET ROLE regress_stat_backend_role;
+SELECT (SELECT subxact_count IS NOT NULL
+          FROM pg_stat_get_backend_subxact(:beid)) AS subxact,
+       (SELECT count(*) > 0
+          FROM pg_stat_get_backend_io(pg_backend_pid())) AS io,
+       (SELECT count(*) > 0
+          FROM pg_stat_get_backend_lock(pg_backend_pid())) AS locks,
+       (SELECT wal_records IS NOT NULL
+          FROM pg_stat_get_backend_wal(pg_backend_pid())) AS wal;
+RESET ROLE;
+DROP ROLE regress_stat_backend_role;
+
 -----
 -- Test that resetting stats works for reset timestamp
 -----
