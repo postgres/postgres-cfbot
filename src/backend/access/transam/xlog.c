@@ -3539,7 +3539,7 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
 {
 	char		path[MAXPGPATH];
 	char		tmppath[MAXPGPATH];
-	PGAlignedXLogBlock buffer;
+	PGIOAlignedXLogBlock buffer;
 	int			srcfd;
 	int			fd;
 	int			nbytes;
@@ -5691,7 +5691,7 @@ void
 BootStrapXLOG(uint32 data_checksum_version)
 {
 	CheckPoint	checkPoint;
-	PGAlignedXLogBlock buffer;
+	PGIOAlignedXLogBlock buffer;
 	XLogPageHeader page;
 	XLogLongPageHeader longpage;
 	XLogRecord *record;
