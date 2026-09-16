@@ -18,6 +18,17 @@
 #include "storage/aio_internal.h"
 #include "storage/smgr.h"
 
+static char *pgaio_sync_describe_identity(const PgAioTargetData *sd);
+
+/*
+ * Target info for generic file syncs (PGAIO_TID_SYNC). The file being synced
+ * is identified by a path that is not stored in shared memory, therefore no
+ * reopen callback is provided.
+ */
+static const PgAioTargetInfo aio_sync_target_info = {
+	.name = "sync",
+	.describe_identity = pgaio_sync_describe_identity,
+};
 
 /*
  * Registry for entities that can be the target of AIO.
@@ -27,7 +38,20 @@ static const PgAioTargetInfo *pgaio_target_info[] = {
 		.name = "invalid",
 	},
 	[PGAIO_TID_SMGR] = &aio_smgr_target_info,
+	[PGAIO_TID_SYNC] = &aio_sync_target_info,
 };
+
+
+/*
+ * describe_identity callback for PGAIO_TID_SYNC. As we do not store the path
+ * of the file being synced in shared memory, only a generic description can
+ * be provided.
+ */
+static char *
+pgaio_sync_describe_identity(const PgAioTargetData *sd)
+{
+	return pstrdup("generic file sync");
+}
 
 
 
