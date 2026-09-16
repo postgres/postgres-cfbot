@@ -2258,6 +2258,29 @@ FileStartReadV(PgAioHandle *ioh, File file,
 	return 0;
 }
 
+int
+FileStartSync(PgAioHandle *ioh, File file, bool datasync,
+			  uint32 wait_event_info)
+{
+	int			returnCode;
+	Vfd		   *vfdP;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileStartSync: %d (%s)",
+			   file, VfdCache[file].fileName));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
+	vfdP = &VfdCache[file];
+
+	pgaio_io_start_fsync(ioh, vfdP->fd, datasync, wait_event_info);
+
+	return 0;
+}
+
 ssize_t
 FileWriteV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
 		   uint32 wait_event_info)
@@ -3602,14 +3625,18 @@ do_syncfs(const char *path)
  *
  * Callers that fsync files opened with OpenTransientFile() hold one
  * AllocateDesc for each in-flight IO.  At most max_safe_fds / 3 of those can
- * be allocated at a time (see reserveAllocatedDesc()), and the callers of
- * interest also traverse directories (see walkdir()), which needs
- * AllocateDescs of its own. So, hand out at most half of the budget.
+ * be allocated at a time (see reserveAllocatedDesc()).  Keep half of that
+ * budget available for directory traversal and other AllocateDesc users.
+ *
+ * Other callers only need to respect the AIO handle limit.
  */
 int
-GetFsyncConcurrencyLimit(void)
+GetFsyncConcurrencyLimit(bool uses_transient_fd)
 {
-	return Max(1, Min(io_max_concurrency, max_safe_fds / 6));
+	if (uses_transient_fd)
+		return Max(1, Min(io_max_concurrency, max_safe_fds / 6));
+
+	return io_max_concurrency;
 }
 
 /*
@@ -3720,7 +3747,7 @@ SyncDataDirectory(void)
 	begin_startup_progress_phase();
 
 	sync_state_data.elevel = LOG;
-	sync_state_data.max_inflight = GetFsyncConcurrencyLimit();
+	sync_state_data.max_inflight = GetFsyncConcurrencyLimit(true);
 	sync_state_data.head = 0;
 	sync_state_data.count = 0;
 	sync_state_data.entries = palloc0(sizeof(DataDirSyncEntry) *
