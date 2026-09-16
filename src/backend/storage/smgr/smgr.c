@@ -881,7 +881,7 @@ smgrtruncate(SMgrRelation reln, ForkNumber *forknum, int nforks,
 	 * Get rid of any buffers for the about-to-be-deleted blocks. bufmgr will
 	 * just drop them without bothering to write the contents.
 	 */
-	DropRelationBuffers(reln, forknum, nforks, nblocks);
+	DropRelationBuffers(reln, forknum, nforks, old_nblocks, nblocks);
 
 	/*
 	 * Send a shared-inval message to force other backends to close any smgr

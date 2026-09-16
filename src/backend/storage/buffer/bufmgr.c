@@ -4782,11 +4782,17 @@ BufferGetLSNAtomic(Buffer buffer)
  *		later.  It is also the responsibility of higher-level code to ensure
  *		that no other process could be trying to load more pages of the
  *		relation into buffers.
+ *
+ *		If nForkBlocks is not NULL, it gives the current size of each fork,
+ *		and the caller must make sure that no fork can grow before we are
+ *		done.  If it is NULL, the sizes are taken from the smgr cache.  If
+ *		the size of any fork is unknown, the whole buffer pool is scanned.
  * --------------------------------------------------------------------
  */
 void
 DropRelationBuffers(SMgrRelation smgr_reln, ForkNumber *forkNum,
-					int nforks, BlockNumber *firstDelBlock)
+					int nforks, BlockNumber *nForkBlocks,
+					BlockNumber *firstDelBlock)
 {
 	int			i;
 	int			j;
@@ -4815,10 +4821,27 @@ DropRelationBuffers(SMgrRelation smgr_reln, ForkNumber *forkNum,
 	 * otherwise the background writer or checkpointer can lead to a PANIC
 	 * error while flushing buffers corresponding to files that don't exist.
 	 *
-	 * To know the exact size, we rely on the size cached for each fork by us
-	 * during recovery which limits the optimization to recovery and on
-	 * standbys but we can easily extend it once we have shared cache for
-	 * relation size.
+	 * A size that is too large would only cost some extra lookups, but a size
+	 * that is too small would leave buffers behind.
+	 *
+	 * If the caller supplied the sizes, use them.  smgrtruncate() does so,
+	 * after measuring the forks just before calling us.  Nothing can extend
+	 * the relation in between.  Outside recovery the caller holds
+	 * AccessExclusiveLock, and during recovery only the startup process
+	 * extends relations.  During recovery the supplied sizes are the same
+	 * values that the smgr cache would give us.
+	 *
+	 * Buffers can still exist beyond the measured size if an earlier attempt
+	 * to extend the relation failed, see ExtendBufferedRelShared().  Those
+	 * buffers are neither valid nor dirty, so nobody will try to write them,
+	 * and it is fine to leave them for the next extension to reuse.  Reading
+	 * past the end of the file with zero_damaged_pages can leave a valid but
+	 * clean buffer there too, but that setting is only meant for recovering
+	 * from corruption.
+	 *
+	 * Otherwise we fall back on the size cached for each fork, which is only
+	 * trustworthy during recovery, so the optimization is limited to recovery
+	 * and standbys.
 	 *
 	 * In recovery, we cache the value returned by the first lseek(SEEK_END)
 	 * and the future writes keeps the cached value up-to-date. See
@@ -4831,7 +4854,10 @@ DropRelationBuffers(SMgrRelation smgr_reln, ForkNumber *forkNum,
 	for (i = 0; i < nforks; i++)
 	{
 		/* Get the number of blocks for a relation's fork */
-		nForkBlock[i] = smgrnblocks_cached(smgr_reln, forkNum[i]);
+		if (nForkBlocks != NULL)
+			nForkBlock[i] = nForkBlocks[i];
+		else
+			nForkBlock[i] = smgrnblocks_cached(smgr_reln, forkNum[i]);
 
 		if (nForkBlock[i] == InvalidBlockNumber)
 		{

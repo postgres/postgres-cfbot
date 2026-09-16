@@ -30,6 +30,7 @@
 #include "pgstat.h"
 #include "storage/bulk_write.h"
 #include "storage/freespace.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
@@ -296,6 +297,12 @@ RelationTruncate(Relation rel, BlockNumber nblocks)
 	BlockNumber blocks[MAX_FORKNUM];
 	int			nforks = 0;
 	SMgrRelation reln;
+
+	/*
+	 * DropRelationBuffers() relies on the fork sizes we measure below staying
+	 * valid until the buffers are dropped, which needs this lock.
+	 */
+	Assert(CheckRelationLockedByMe(rel, AccessExclusiveLock, false));
 
 	/*
 	 * Make sure smgr_targblock etc aren't pointing somewhere past new end.

@@ -301,7 +301,8 @@ extern void CreateAndCopyRelationData(RelFileLocator src_rlocator,
 extern void FlushDatabaseBuffers(Oid dbid);
 extern void DropRelationBuffers(SMgrRelation smgr_reln,
 								ForkNumber *forkNum,
-								int nforks, BlockNumber *firstDelBlock);
+								int nforks, BlockNumber *nForkBlocks,
+								BlockNumber *firstDelBlock);
 extern void DropRelationsAllBuffers(SMgrRelation *smgr_reln,
 									int nlocators);
 extern void DropDatabaseBuffers(Oid dbid);
