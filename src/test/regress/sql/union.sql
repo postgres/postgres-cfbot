@@ -674,3 +674,31 @@ select null::int[] union all select null::int[] union all select null::bigint[];
 explain (costs off)
 select * from tenk1 t
 join (select ten from tenk1 union select ten from onek) s on s.ten = t.unique1;
+
+--
+-- UNION DISTINCT ON
+--
+
+CREATE TABLE union_distinct_u1 (a int, b int);
+CREATE TABLE union_distinct_u2 (a int, b int);
+INSERT INTO union_distinct_u1 VALUES (1, 10), (2, 20);
+INSERT INTO union_distinct_u2 VALUES (1, 100), (3, 30);
+
+-- UNION DISTINCT ON without ORDER BY
+SELECT a, b FROM union_distinct_u1 UNION DISTINCT ON (a) SELECT a, b FROM union_distinct_u2 ORDER BY a;
+
+-- UNION DISTINCT ON with ORDER BY (DESC)
+SELECT a, b FROM union_distinct_u1 UNION DISTINCT ON (a ORDER BY b DESC) SELECT a, b FROM union_distinct_u2 ORDER BY a;
+
+-- UNION DISTINCT ON with ORDER BY (ASC)
+SELECT a, b FROM union_distinct_u1 UNION DISTINCT ON (a ORDER BY b ASC) SELECT a, b FROM union_distinct_u2 ORDER BY a;
+
+-- Test subquery pushdown safety with UNION DISTINCT ON
+SELECT * FROM (
+    SELECT a, b FROM union_distinct_u1
+    UNION DISTINCT ON (a ORDER BY b DESC)
+    SELECT a, b FROM union_distinct_u2
+) s WHERE b > 15 ORDER BY a;
+
+DROP TABLE union_distinct_u1, union_distinct_u2;
+
