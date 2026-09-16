@@ -3868,16 +3868,46 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 
 		/* Make a copy since pathkey processing can modify the list */
 		root->processed_distinctClause = list_copy(parse->distinctClause);
-		root->distinct_pathkeys =
+		
+		if (parse->distinctSortClause)
+		{
+			/* We have DISTINCT ON with ORDER BY */
+			List *temp_distinct_clause = list_copy(parse->distinctSortClause);
+			bool temp_sortable;
+			root->distinct_pathkeys =
+				make_pathkeys_for_sortclauses_extended(root,
+													   &temp_distinct_clause,
+													   tlist,
+													   true,
+													   false,
+													   &sortable,
+													   false);
+			if (!sortable)
+				root->distinct_pathkeys = NIL;
+
+			/* We ALSO need to remove redundant keys from processed_distinctClause */
 			make_pathkeys_for_sortclauses_extended(root,
 												   &root->processed_distinctClause,
 												   tlist,
 												   true,
 												   false,
-												   &sortable,
+												   &temp_sortable,
 												   false);
-		if (!sortable)
-			root->distinct_pathkeys = NIL;
+		}
+		else
+		{
+			/* Standard DISTINCT or DISTINCT ON without ORDER BY */
+			root->distinct_pathkeys =
+				make_pathkeys_for_sortclauses_extended(root,
+													   &root->processed_distinctClause,
+													   tlist,
+													   true,
+													   false,
+													   &sortable,
+													   false);
+			if (!sortable)
+				root->distinct_pathkeys = NIL;
+		}
 	}
 	else
 		root->distinct_pathkeys = NIL;
@@ -5266,7 +5296,7 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					add_partial_path(partial_distinct_rel, (Path *)
 									 create_unique_path(root, partial_distinct_rel,
 														sorted_path,
-														list_length(root->distinct_pathkeys),
+														list_length(root->processed_distinctClause),
 														numDistinctRows));
 				}
 			}
@@ -5460,7 +5490,7 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					add_path(distinct_rel, (Path *)
 							 create_unique_path(root, distinct_rel,
 												sorted_path,
-												list_length(root->distinct_pathkeys),
+												list_length(root->processed_distinctClause),
 												numDistinctRows));
 				}
 			}
