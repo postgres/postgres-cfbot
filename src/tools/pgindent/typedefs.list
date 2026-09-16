@@ -1913,7 +1913,6 @@ PERL_CONTEXT
 PERL_SI
 PFN
 PGAlignedBlock
-PGAlignedXLogBlock
 PGAsyncStatusType
 PGCALL2
 PGCRYPTO_SHA_t
@@ -1932,6 +1931,7 @@ PGFInfoFunction
 PGFileType
 PGFunction
 PGIOAlignedBlock
+PGIOAlignedXLogBlock
 PGLZ_HistEntry
 PGLZ_Strategy
 PGLoadBalanceType
