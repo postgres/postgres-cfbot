@@ -189,6 +189,8 @@ static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldInde
 							TransactionId *pFreezeXid,
 							MultiXactId *pCutoffMulti,
 							ChangeContext *chgcxt);
+static void update_relation_cutoffs(Oid relid, TransactionId frozenXid,
+									MultiXactId cutoffMulti);
 static List *get_tables_to_repack(RepackCommand cmd, bool usingindex,
 								  MemoryContext permcxt);
 static List *get_tables_to_repack_partitioned(RepackStmt *stmt,
@@ -2113,13 +2115,6 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
  * links) while the latter is the only way to handle cases in which a toast
  * table is added or removed altogether.
  *
- * Additionally, the first relation is marked with relfrozenxid set to
- * frozenXid.  It seems a bit ugly to have this here, but the caller would
- * have to do it anyway, so having it here saves a heap_update.  Note: in
- * the swap-toast-links case, we assume we don't need to change the toast
- * table's relfrozenxid: the new version of the toast table should already
- * have relfrozenxid set to RecentXmin, which is good enough.
- *
  * Lastly, if r2 and its toast table and toast index (if any) are mapped,
  * their OIDs are emitted into mapped_tables[].  This is hacky but beats
  * having to look the information up again later in finish_heap_swap.
@@ -2128,9 +2123,7 @@ static void
 swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 					bool swap_toast_by_content,
 					bool is_internal,
-					TransactionId frozenXid,
-					MultiXactId cutoffMulti,
-					Oid *mapped_tables)
+					Oid *mapped_tables, Oid *r1_toastid)
 {
 	Relation	relRelation;
 	HeapTuple	reltup1,
@@ -2161,6 +2154,9 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 	relfilenumber2 = relform2->relfilenode;
 	relam1 = relform1->relam;
 	relam2 = relform2->relam;
+
+	if (r1_toastid)
+		*r1_toastid = relform1->reltoastrelid;
 
 	if (RelFileNumberIsValid(relfilenumber1) &&
 		RelFileNumberIsValid(relfilenumber2))
@@ -2277,15 +2273,6 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 	 * and then fail to commit the pg_class update.
 	 */
 
-	/* set rel1's frozen Xid and minimum MultiXid */
-	if (relform1->relkind != RELKIND_INDEX)
-	{
-		Assert(!TransactionIdIsValid(frozenXid) ||
-			   TransactionIdIsNormal(frozenXid));
-		relform1->relfrozenxid = frozenXid;
-		relform1->relminmxid = cutoffMulti;
-	}
-
 	/* swap size statistics too, since new rel has freshly-updated stats */
 	{
 		int32		swap_pages;
@@ -2387,9 +2374,8 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 									target_is_pg_class,
 									swap_toast_by_content,
 									is_internal,
-									frozenXid,
-									cutoffMulti,
-									mapped_tables);
+									mapped_tables,
+									NULL);
 			}
 			else
 			{
@@ -2490,15 +2476,44 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 							target_is_pg_class,
 							swap_toast_by_content,
 							is_internal,
-							InvalidTransactionId,
-							InvalidMultiXactId,
-							mapped_tables);
+							mapped_tables,
+							NULL);
 	}
 
 	/* Clean up. */
 	heap_freetuple(reltup1);
 	heap_freetuple(reltup2);
 
+	table_close(relRelation, RowExclusiveLock);
+}
+
+/*
+ * Update relfrozenxid and relminmxid attributes of pg_class entry, specified
+ * by OID.
+ */
+static void
+update_relation_cutoffs(Oid relid, TransactionId frozenXid,
+						MultiXactId cutoffMulti)
+{
+	Relation	relRelation;
+	HeapTuple	reltup;
+	Form_pg_class relform;
+	CatalogIndexState indstate;
+
+	relRelation = table_open(RelationRelationId, RowExclusiveLock);
+	reltup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(reltup))
+		elog(ERROR, "cache lookup failed for relation %u", relid);
+	relform = (Form_pg_class) GETSTRUCT(reltup);
+	relform->relfrozenxid = frozenXid;
+	relform->relminmxid = cutoffMulti;
+
+	indstate = CatalogOpenIndexes(relRelation);
+	CatalogTupleUpdateWithInfo(relRelation, &reltup->t_self, reltup,
+							   indstate);
+	CatalogCloseIndexes(indstate);
+
+	heap_freetuple(reltup);
 	table_close(relRelation, RowExclusiveLock);
 }
 
@@ -2519,6 +2534,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 {
 	ObjectAddress object;
 	Oid			mapped_tables[4];
+	Oid			oid_old_toastid;
 	int			i;
 
 	/* Report that we are now swapping relation files */
@@ -2535,7 +2551,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	swap_relation_files(OIDOldHeap, OIDNewHeap,
 						(OIDOldHeap == RelationRelationId),
 						swap_toast_by_content, is_internal,
-						frozenXid, cutoffMulti, mapped_tables);
+						mapped_tables, &oid_old_toastid);
 
 	/*
 	 * If it's a system catalog, queue a sinval message to flush all catcaches
@@ -2591,37 +2607,20 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 								 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
 
 	/*
-	 * If the relation being rebuilt is pg_class, swap_relation_files()
-	 * couldn't update pg_class's own pg_class entry (check comments in
-	 * swap_relation_files()), thus relfrozenxid was not updated. That's
-	 * annoying because a potential reason for doing a VACUUM FULL is a
-	 * imminent or actual anti-wraparound shutdown.  So, now that we can
-	 * access the new relation using its indices, update relfrozenxid.
-	 * pg_class doesn't have a toast relation, so we don't need to update the
-	 * corresponding toast relation. Not that there's little point moving all
-	 * relfrozenxid updates here since swap_relation_files() needs to write to
-	 * pg_class for non-mapped relations anyway.
+	 * Update relfrozenxid and relminmxid. CCI is needed to see the most
+	 * recent pg_class tuple, created by swap_relation_files(). However that
+	 * CCI makes us use the new relation file. Therefore we cannot do this
+	 * before indexes have been rebuilt too.
 	 */
-	if (OIDOldHeap == RelationRelationId)
-	{
-		Relation	relRelation;
-		HeapTuple	reltup;
-		Form_pg_class relform;
+	CommandCounterIncrement();
+	update_relation_cutoffs(OIDOldHeap, frozenXid, cutoffMulti);
 
-		relRelation = table_open(RelationRelationId, RowExclusiveLock);
-
-		reltup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(OIDOldHeap));
-		if (!HeapTupleIsValid(reltup))
-			elog(ERROR, "cache lookup failed for relation %u", OIDOldHeap);
-		relform = (Form_pg_class) GETSTRUCT(reltup);
-
-		relform->relfrozenxid = frozenXid;
-		relform->relminmxid = cutoffMulti;
-
-		CatalogTupleUpdate(relRelation, &reltup->t_self, reltup);
-
-		table_close(relRelation, RowExclusiveLock);
-	}
+	/*
+	 * The same for TOAST, if needed. In the swap-toast-links case, the new
+	 * toast table should already have relfrozenxid set to RecentXmin.
+	 */
+	if (OidIsValid(oid_old_toastid) && swap_toast_by_content)
+		update_relation_cutoffs(oid_old_toastid, frozenXid, cutoffMulti);
 
 	/* Destroy new heap with old filenumber */
 	object.classId = RelationRelationId;
@@ -4282,9 +4281,8 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 							(old_table_oid == RelationRelationId),
 							false,	/* swap_toast_by_content */
 							true,
-							InvalidTransactionId,
-							InvalidMultiXactId,
-							mapped_tables);
+							mapped_tables,
+							NULL);
 
 #ifdef USE_ASSERT_CHECKING
 
