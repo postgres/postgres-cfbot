@@ -4951,16 +4951,11 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 		 * Add a COERCION_FINISH step to check for errors that may occur when
 		 * coercing and rethrow them.
 		 */
-		if (jsexpr->on_error->coerce ||
-			IsA(jsexpr->on_error->expr, CoerceViaIO) ||
-			IsA(jsexpr->on_error->expr, CoerceToDomain))
-		{
-			scratch->opcode = EEOP_JSONEXPR_COERCION_FINISH;
-			scratch->resvalue = resv;
-			scratch->resnull = resnull;
-			scratch->d.jsonexpr.jsestate = jsestate;
-			ExprEvalPushStep(state, scratch);
-		}
+		scratch->opcode = EEOP_JSONEXPR_COERCION_FINISH;
+		scratch->resvalue = resv;
+		scratch->resnull = resnull;
+		scratch->d.jsonexpr.jsestate = jsestate;
+		ExprEvalPushStep(state, scratch);
 
 		/* JUMP to end to skip the ON EMPTY steps added below. */
 		jumps_to_end = lappend_int(jumps_to_end, state->steps_len);
@@ -5014,17 +5009,11 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 		 * Add a COERCION_FINISH step to check for errors that may occur when
 		 * coercing and rethrow them.
 		 */
-		if (jsexpr->on_empty->coerce ||
-			IsA(jsexpr->on_empty->expr, CoerceViaIO) ||
-			IsA(jsexpr->on_empty->expr, CoerceToDomain))
-		{
-
-			scratch->opcode = EEOP_JSONEXPR_COERCION_FINISH;
-			scratch->resvalue = resv;
-			scratch->resnull = resnull;
-			scratch->d.jsonexpr.jsestate = jsestate;
-			ExprEvalPushStep(state, scratch);
-		}
+		scratch->opcode = EEOP_JSONEXPR_COERCION_FINISH;
+		scratch->resvalue = resv;
+		scratch->resnull = resnull;
+		scratch->d.jsonexpr.jsestate = jsestate;
+		ExprEvalPushStep(state, scratch);
 	}
 
 	foreach(lc, jumps_to_end)
