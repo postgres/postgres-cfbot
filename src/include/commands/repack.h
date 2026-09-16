@@ -16,6 +16,7 @@
 #include <signal.h>
 
 #include "access/hio.h"
+#include "access/rewriteheap.h"
 #include "access/skey.h"
 #include "access/xlogdefs.h"
 #include "catalog/index.h"
@@ -110,10 +111,10 @@ typedef struct ChangeContext
 	 * Not sure, it'd require disk space for one more copy and the copying
 	 * itself is not free.
 	 *
-	 * TODO 1) make the tables unlogged, 2) if REPACK locks the TOAST relation
-	 * too (not sure it does) try to preserve TOAST pointers, instead of
-	 * storing them to TOAST relations of these tables, 3) Check that the
-	 * tables are dropped on transaction abort.
+	 * XXX REPACK currently does not lock the old TOAST relation. If it did,
+	 * we could perhaps copy TOAST pointers from the old relation to the
+	 * auxiliary relation, so that the auxiliary relation would not need its
+	 * own TOAST relation.
 	 */
 	RepackDest *cc_dest_aux;
 
@@ -127,6 +128,11 @@ typedef struct ChangeContext
 	 * functions. This is needed when starting a new transaction.
 	 */
 	IndexBuildSecurity cc_ind_build_sec;
+
+	/*
+	 * xmin of the last snapshot used to copy data.
+	 */
+	TransactionId cc_last_snapshot_xmin;
 } ChangeContext;
 
 extern PGDLLIMPORT int repack_pages_per_snapshot;
@@ -142,8 +148,6 @@ extern void mark_index_clustered(Relation rel, Oid indexOid, bool is_internal);
 extern Oid	make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 						  char relpersistence, LOCKMODE lockmode,
 						  bool auxiliary);
-extern void heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
-								   TupleTableSlot *reform);
 extern bool tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc);
 extern void clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform);
 extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
@@ -154,6 +158,7 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 							 bool reindex,
 							 TransactionId frozenXid,
 							 MultiXactId cutoffMulti,
+							 bool update_toast_cutoffs,
 							 char newrelpersistence);
 extern Snapshot repack_get_snapshot(ChangeContext *chgcxt);
 extern void repack_process_concurrent_changes(ChangeContext *chgcxt,

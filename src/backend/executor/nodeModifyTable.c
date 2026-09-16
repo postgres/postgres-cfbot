@@ -1530,6 +1530,7 @@ ExecDeleteAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		options |= TABLE_DELETE_CHANGING_PARTITION;
 
 	return table_tuple_delete(resultRelInfo->ri_RelationDesc, tupleid,
+							  InvalidTransactionId,
 							  estate->es_output_cid,
 							  options,
 							  estate->es_snapshot,
