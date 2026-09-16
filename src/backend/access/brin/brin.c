@@ -1391,10 +1391,8 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 	Oid			heapoid;
 	Relation	indexRel;
 	Relation	heapRel;
-	Oid			save_userid;
-	int			save_sec_context;
-	int			save_nestlevel;
 	double		numSummarized = 0;
+	IndexBuildSecurity ibsec;
 
 	if (RecoveryInProgress())
 		ereport(ERROR,
@@ -1420,27 +1418,12 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 		heapRel = table_open(heapoid, ShareUpdateExclusiveLock);
 
 		/*
-		 * Autovacuum calls us.  For its benefit, switch to the table owner's
-		 * userid, so that any index functions are run as that user.  Also
-		 * lock down security-restricted operations and arrange to make GUC
-		 * variable changes local to this command.  This is harmless, albeit
-		 * unnecessary, when called from SQL, because we fail shortly if the
-		 * user does not own the index.
+		 * Prevent index functions from doing what they are not supposed to.
 		 */
-		GetUserIdAndSecContext(&save_userid, &save_sec_context);
-		SetUserIdAndSecContext(heapRel->rd_rel->relowner,
-							   save_sec_context | SECURITY_RESTRICTED_OPERATION);
-		save_nestlevel = NewGUCNestLevel();
-		RestrictSearchPath();
+		enable_index_build_security(heapRel->rd_rel->relowner, &ibsec);
 	}
 	else
-	{
 		heapRel = NULL;
-		/* Set these just to suppress "uninitialized variable" warnings */
-		save_userid = InvalidOid;
-		save_sec_context = -1;
-		save_nestlevel = -1;
-	}
 
 	indexRel = index_open(indexoid, ShareUpdateExclusiveLock);
 
@@ -1453,7 +1436,8 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 						RelationGetRelationName(indexRel))));
 
 	/* User must own the index (comparable to privileges needed for VACUUM) */
-	if (heapRel != NULL && !object_ownercheck(RelationRelationId, indexoid, save_userid))
+	if (heapRel != NULL && !object_ownercheck(RelationRelationId, indexoid,
+											  ibsec.userid))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_INDEX,
 					   RelationGetRelationName(indexRel));
 
@@ -1477,11 +1461,9 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 				 errmsg("index \"%s\" is not valid",
 						RelationGetRelationName(indexRel))));
 
-	/* Roll back any GUC changes executed by index functions */
-	AtEOXact_GUC(false, save_nestlevel);
+	/* Relax the restrictions imposed above. */
+	disable_index_build_security(&ibsec);
 
-	/* Restore userid and security context */
-	SetUserIdAndSecContext(save_userid, save_sec_context);
 
 	index_close(indexRel, ShareUpdateExclusiveLock);
 	table_close(heapRel, ShareUpdateExclusiveLock);

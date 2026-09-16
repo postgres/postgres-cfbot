@@ -764,6 +764,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				 */
 				pgstat_progress_update_param(PROGRESS_REPACK_HEAP_BLKS_SCANNED,
 											 heapScan->rs_nblocks);
+
 				break;
 			}
 
