@@ -429,6 +429,7 @@ CatalogId
 CatalogIdMapEntry
 CatalogIndexState
 ChangeContext
+ChangeContextBackup
 ChangeVarNodes_context
 ChannelName
 CheckPoint
@@ -2589,6 +2590,7 @@ RelMapping
 RelOptInfo
 RelOptKind
 RelPathStr
+RelReopenInfo
 RelStatsInfo
 RelSyncCallbackFunction
 RelToCheck

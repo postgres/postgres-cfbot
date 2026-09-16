@@ -6039,7 +6039,7 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			 * unlogged anyway.
 			 */
 			OIDNewHeap = make_new_heap(tab->relid, NewTableSpace, NewAccessMethod,
-									   persistence, lockmode);
+									   persistence, lockmode, false);
 
 			/*
 			 * Copy the heap data into the new table with the desired
