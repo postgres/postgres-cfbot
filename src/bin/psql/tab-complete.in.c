@@ -2972,7 +2972,7 @@ match_previous_words(int pattern_id,
 	/* ALTER TABLE ALTER [COLUMN] <foo> SET COMPRESSION */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "COLUMN", MatchAny, "SET", "COMPRESSION") ||
 			 Matches("ALTER", "TABLE", MatchAny, "ALTER", MatchAny, "SET", "COMPRESSION"))
-		COMPLETE_WITH("DEFAULT", "PGLZ", "LZ4");
+		COMPLETE_WITH("DEFAULT", "PGLZ", "LZ4", "ZSTD");
 	/* ALTER TABLE ALTER [COLUMN] <foo> SET EXPRESSION */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "COLUMN", MatchAny, "SET", "EXPRESSION") ||
 			 Matches("ALTER", "TABLE", MatchAny, "ALTER", MatchAny, "SET", "EXPRESSION"))
