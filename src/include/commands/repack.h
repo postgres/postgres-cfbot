@@ -16,6 +16,7 @@
 #include <signal.h>
 
 #include "access/hio.h"
+#include "access/skey.h"
 #include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
@@ -39,6 +40,53 @@ typedef struct ClusterParams
 
 extern PGDLLIMPORT volatile sig_atomic_t RepackMessagePending;
 
+/*
+ * Table to apply concurrent data changes to.
+ */
+typedef struct RepackDest
+{
+	/* The relation the changes are applied to. */
+	Relation	rel;
+
+	BulkInsertStateData *bistate;
+
+	/* Needed to update indexes of cc_rel. */
+	ResultRelInfo *rri;
+	EState	   *estate;
+
+	/*
+	 * Existing tuples to UPDATE and DELETE are located via this index. We
+	 * keep the scankey in partially initialized state to avoid repeated work.
+	 * sk_argument is completed on the fly.
+	 */
+	Relation	ident_index;
+	ScanKey		ident_key;
+
+	int			ident_key_nentries;
+
+	/* The latest column we need to deform to have the tuple identity */
+	AttrNumber	last_key_attno;
+} RepackDest;
+
+/*
+ * The first file exported by the decoding worker must contain a snapshot, the
+ * following ones contain the data changes.
+ */
+#define WORKER_FILE_SNAPSHOT	0
+
+/*
+ * Information needed to apply concurrent data changes.
+ *
+ * XXX Now that it's in *.h file, rename to RepackChangeContext?
+ */
+typedef struct ChangeContext
+{
+	/* The destination table. */
+	RepackDest	cc_dest;
+
+	/* Sequential number of the file containing the changes. */
+	int			cc_file_seq;
+} ChangeContext;
 
 extern void ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel);
 
