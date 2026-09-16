@@ -441,7 +441,6 @@ DROP TABLESPACE regress_tblspace_renamed;
 -- Deferred heap copy for ALTER TABLE SET TABLESPACE on indexed tables
 --
 SET allow_in_place_tablespaces = true;
-SET client_min_messages = DEBUG1;
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
 CREATE TABLESPACE regress_tblspace LOCATION '';
