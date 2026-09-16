@@ -73,6 +73,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -127,6 +128,7 @@ typedef struct ChangeContexBackup
 	int			file_seq_snapshot;
 	int			file_seq_changes;
 	Oid			clustering_index;
+	TransactionId	last_snapshot_xmin;
 } ChangeContextBackup;
 
 /*
@@ -188,7 +190,11 @@ static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldInde
 							bool *pSwapToastByContent,
 							TransactionId *pFreezeXid,
 							MultiXactId *pCutoffMulti,
+							double *p_num_tuples,
 							ChangeContext *chgcxt);
+static void copy_table_data_update_stats(Relation OldHeap, Relation NewHeap,
+										 BlockNumber num_pages,
+										 double num_tuples);
 static void update_relation_cutoffs(Oid relid, TransactionId frozenXid,
 									MultiXactId cutoffMulti);
 static List *get_tables_to_repack(RepackCommand cmd, bool usingindex,
@@ -203,14 +209,21 @@ static bool repack_is_permitted_for_relation(RepackCommand cmd,
 static void apply_concurrent_changes(ChangeContext *chgcxt,
 									 BlockNumber range_start,
 									 BlockNumber range_end);
-static void apply_concurrent_insert(RepackDest *dest, TupleTableSlot *slot);
+static void apply_concurrent_insert(RepackDest *dest,
+									TupleTableSlot *spill_tuple,
+									TupleTableSlot *new_tuple,
+									TransactionId xid);
 static void apply_concurrent_update(RepackDest *dest,
 									TupleTableSlot *spilled_tuple,
-									TupleTableSlot *ondisk_tuple);
-static void apply_concurrent_delete(Relation rel, TupleTableSlot *slot);
+									TupleTableSlot *ondisk_tuple,
+									TupleTableSlot *new_tuple,
+									TransactionId xid);
+static void apply_concurrent_delete(Relation rel, TupleTableSlot *slot,
+									TransactionId xid);
 static void restore_tuple(BufFile *file, Relation relation,
 						  TupleTableSlot *slot, BlockNumber *block_nr_p,
-						  BlockNumber *old_block_nr_p);
+						  BlockNumber *old_block_nr_p,
+						  TransactionId *xid_p);
 static void adjust_toast_pointers(Relation relation, TupleTableSlot *dest,
 								  TupleTableSlot *src);
 static bool is_block_in_range(BlockNumber blknum, BlockNumber start,
@@ -240,11 +253,14 @@ static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHea
 											   Oid identIdx,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti,
+											   double num_tuples,
 											   ChangeContext *chgcxt);
 static ChangeContext *process_auxiliary_table(ChangeContext *chgcxt,
 											  Relation *pOldHeap,
 											  Relation *pNewHeap,
-											  Oid identIdx);
+											  Oid identIdx,
+											  TransactionId freeze_xid,
+											  MultiXactId cutoff_multi);
 static List *build_new_indexes(List *OldIndexes, Relation *p_old,
 							   Relation *p_new,
 							   ChangeContext **p_chgcxt);
@@ -1147,6 +1163,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	TransactionId frozenXid;
 	MultiXactId cutoffMulti;
 	bool		concurrent = OidIsValid(ident_idx);
+	double		num_tuples = 0;
 	IndexBuildSecurity ibsec;
 	ChangeContext *chgcxt = NULL;
 #if USE_ASSERT_CHECKING
@@ -1236,17 +1253,10 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	/* Copy the heap data into the new table in the desired order */
 	copy_table_data(NewHeap, OldHeap, index, verbose,
 					&swap_toast_by_content, &frozenXid, &cutoffMulti,
-					chgcxt);
+					&num_tuples, chgcxt);
 
-	/* The historic snapshot won't be needed anymore. */
 	if (concurrent)
 	{
-		/*
-		 * Make sure the active snapshot can see the data copied, so the rows
-		 * can be updated / deleted.
-		 */
-		UpdateActiveSnapshotCommandId();
-
 		Assert(!swap_toast_by_content);
 
 		/*
@@ -1257,7 +1267,8 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 			index_close(index, NoLock);
 
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, ident_idx,
-										   frozenXid, cutoffMulti, chgcxt);
+										   frozenXid, cutoffMulti, num_tuples,
+										   chgcxt);
 
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
@@ -1287,11 +1298,15 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 		/*
 		 * Swap the physical files of the target and transient tables, then
 		 * rebuild the target's indexes and throw away the transient table.
+		 *
+		 * If swap_toast_by_content is false, we don't need to update the
+		 * cutoffs because the TOAST relation is new.
 		 */
 		finish_heap_swap(tableOid, OIDNewHeap, is_system_catalog,
 						 swap_toast_by_content, false, true,
 						 true,	/* reindex */
 						 frozenXid, cutoffMulti,
+						 swap_toast_by_content, /* update_toast_cutoffs */
 						 relpersistence);
 	}
 
@@ -1756,67 +1771,6 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 	return OIDNewHeap;
 }
 
-/*
- * Insert tuple when processing REPACK CONCURRENTLY.
- *
- * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
- * difficult to do the same in the catch-up phase (as the logical decoding
- * does not provide us with sufficient visibility information). Thus we must
- * use heap_insert() both during the catch-up and here.
- *
- * 'reform' is a slot to use for tuple "reforming", typically to get set
- * values of dropped columns to NULL.
- *
- * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
- * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
- * this relation, so no logical replication subscription should need the data.
- */
-void
-heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
-					   TupleTableSlot *reform)
-{
-	HeapTuple	tuple;
-	bool		shouldFree;
-	TupleTableSlot *slot;
-	RepackDest *dest;
-
-	/*
-	 * Use the current auxiliary table as output if one is active, otherwise
-	 * insert the tuple into the actual destination table.
-	 */
-	if (chgcxt->cc_dest_aux)
-		dest = chgcxt->cc_dest_aux;
-	else
-		dest = &chgcxt->cc_dest;
-
-	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
-
-	/*
-	 * The source slot is not expected to create a copy of the tuple.
-	 */
-	Assert(TTS_IS_BUFFERTUPLE(src));
-	Assert(!shouldFree);
-
-	if (reform != NULL && tuple_needs_reform(tuple, src->tts_tupleDescriptor))
-	{
-		clear_dropped_attributes(tuple, reform);
-		slot = reform;
-	}
-	else
-		slot = src;
-
-	table_tuple_insert(dest->rel, slot, GetCurrentCommandId(true),
-					   TABLE_INSERT_NO_LOGICAL, dest->bistate);
-
-	/*
-	 * Insert the tuple into the identity index. initialize_change_context()
-	 * may skip opening of indexes if the identity index is not needed
-	 * immediately.
-	 */
-	if (dest->rri)
-		ExecInsertIndexTuples(dest->rri, dest->estate, 0, slot, NIL, NULL);
-}
-
 bool
 tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc)
 {
@@ -1850,14 +1804,22 @@ clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform)
 {
 	TupleDesc	tupDesc = reform->tts_tupleDescriptor;
 
-	/* Assuming 'reform' is virtual, this deforms the tuple. */
-	Assert(TTS_IS_VIRTUAL(reform));
+	Assert(TTS_IS_VIRTUAL(reform) || TTS_IS_HEAPTUPLE(reform));
 	ExecForceStoreHeapTuple(tuple, reform, false);
 
 	for (int i = 0; i < tupDesc->natts; i++)
 	{
 		if (TupleDescCompactAttr(tupDesc, i)->attisdropped)
+		{
+			/*
+			 * If 'reform' is virtual, all the attributes are already
+			 * deformed. XXX Should we use the virtual slot at all? .
+			 */
+			if (TTS_IS_HEAPTUPLE(reform))
+				slot_getsomeattrs(reform, i + 1);
+
 			reform->tts_isnull[i] = true;
+		}
 	}
 }
 
@@ -1868,16 +1830,14 @@ clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform)
  * *pSwapToastByContent is set true if toast tables must be swapped by content.
  * *pFreezeXid receives the TransactionId used as freeze cutoff point.
  * *pCutoffMulti receives the MultiXactId used as a cutoff point.
+ * *p_num_tuples receives the number of tuples copied.
  */
 static void
 copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 				bool verbose, bool *pSwapToastByContent,
 				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti,
-				ChangeContext *chgcxt)
+				double *p_num_tuples, ChangeContext *chgcxt)
 {
-	Relation	relRelation;
-	HeapTuple	reltup;
-	Form_pg_class relform;
 	TupleDesc	oldTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	TupleDesc	newTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	VacuumParams params;
@@ -1886,7 +1846,6 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	double		num_tuples = 0,
 				tups_vacuumed = 0,
 				tups_recently_dead = 0;
-	BlockNumber num_pages;
 	int			elevel = verbose ? INFO : DEBUG2;
 	PGRUsage	ru0;
 	char	   *nspname;
@@ -2059,8 +2018,6 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 */
 	NewHeap->rd_toastoid = InvalidOid;
 
-	num_pages = RelationGetNumberOfBlocks(NewHeap);
-
 	/* Log what we did */
 	ereport(elevel,
 			(errmsg("\"%s.%s\": found %.0f removable, %.0f nonremovable row versions in %u pages",
@@ -2072,6 +2029,35 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 					   "%s.",
 					   tups_recently_dead,
 					   pg_rusage_show(&ru0))));
+
+	/*
+	 * Update pg_class fields. In the CONCURRENTLY case we do it later because
+	 * 1) the catalog update triggers XID assignment, 2) the work is split
+	 * into several transactions, so the catalog update should take place in
+	 * the last one.
+	 */
+	if (!concurrent)
+	{
+		BlockNumber num_pages;
+
+		num_pages = RelationGetNumberOfBlocks(NewHeap);
+
+		copy_table_data_update_stats(OldHeap, NewHeap, num_pages, num_tuples);
+	}
+
+	*p_num_tuples = num_tuples;
+}
+
+/*
+ * Sub-routine of copy_table_data(), to update pg_class.
+ */
+static void
+copy_table_data_update_stats(Relation OldHeap, Relation NewHeap,
+							 BlockNumber num_pages, double num_tuples)
+{
+	Relation	relRelation;
+	HeapTuple	reltup;
+	Form_pg_class relform;
 
 	/* Update pg_class to reflect the correct values of pages and tuples. */
 	relRelation = table_open(RelationRelationId, RowExclusiveLock);
@@ -2520,6 +2506,9 @@ update_relation_cutoffs(Oid relid, TransactionId frozenXid,
 /*
  * Remove the transient table that was built by make_new_heap, and finish
  * cleaning up (including rebuilding all indexes on the old heap).
+ *
+ * 'update_toast_cutoffs' tells whether relfrozenxid and relminmxid of the
+ * TOAST relation should be updated too.
  */
 void
 finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
@@ -2530,12 +2519,24 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 				 bool reindex,
 				 TransactionId frozenXid,
 				 MultiXactId cutoffMulti,
+				 bool update_toast_cutoffs,
 				 char newrelpersistence)
 {
 	ObjectAddress object;
 	Oid			mapped_tables[4];
 	Oid			oid_old_toastid;
 	int			i;
+
+	/*
+	 * In the swap-toast-by-content case, we always need to update the
+	 * cutoffs. In the swap-toast-links case, we usually assume we don't need
+	 * to change the toast table's relfrozenxid: the new version of the toast
+	 * table should already have relfrozenxid set to RecentXmin, which is good
+	 * enough. However, there's a special case - REPACK (CONCURRENTLY) - which
+	 * still needs to update the cutoffs - see the related call for more info.
+	 */
+	Assert((swap_toast_by_content && update_toast_cutoffs) ||
+		   !swap_toast_by_content);
 
 	/* Report that we are now swapping relation files */
 	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
@@ -2614,12 +2615,8 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	 */
 	CommandCounterIncrement();
 	update_relation_cutoffs(OIDOldHeap, frozenXid, cutoffMulti);
-
-	/*
-	 * The same for TOAST, if needed. In the swap-toast-links case, the new
-	 * toast table should already have relfrozenxid set to RecentXmin.
-	 */
-	if (OidIsValid(oid_old_toastid) && swap_toast_by_content)
+	/* The same for TOAST, if requested. */
+	if (OidIsValid(oid_old_toastid) && update_toast_cutoffs)
 		update_relation_cutoffs(oid_old_toastid, frozenXid, cutoffMulti);
 
 	/* Destroy new heap with old filenumber */
@@ -3190,12 +3187,14 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 	TupleTableSlot *spilled_tuple;
 	TupleTableSlot *old_update_tuple;
 	TupleTableSlot *ondisk_tuple;
+	TupleTableSlot *new_tuple;
 	bool		have_old_tuple = false;
 	bool		check_range;
 	MemoryContext oldcxt;
 	DecodingWorkerShared *shared;
 	char		fname[MAXPGPATH];
 	BufFile    *file;
+	SnapshotData SnapshotNewHeap;
 
 	/*
 	 * Use the auxiliary table if one exists, otherwise the "final"
@@ -3224,16 +3223,25 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 											table_slot_callbacks(rel));
 	old_update_tuple = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 												&TTSOpsVirtual);
+	new_tuple = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+										 &TTSOpsHeapTuple);
 
 	oldcxt = MemoryContextSwitchTo(GetPerTupleMemoryContext(dest->estate));
+
+	/*
+	 * Finding tuples to UPDATE / DELETE is exactly the purpose of
+	 * SNAPSHOT_NEW_HEAP.
+	 */
+	InitNewHeapSnapshot(SnapshotNewHeap);
+	PushActiveSnapshot(&SnapshotNewHeap);
 
 	while (true)
 	{
 		size_t		nread;
-		ConcurrentChangeKind prevkind = kind;
 		BlockNumber block,
 					old_block;
 		BlockNumber *old_block_p;
+		TransactionId xid;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -3248,26 +3256,9 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 		 */
 		if (kind == CHANGE_UPDATE_OLD)
 		{
-			restore_tuple(file, rel, old_update_tuple, NULL, NULL);
+			restore_tuple(file, rel, old_update_tuple, NULL, NULL, NULL);
 			have_old_tuple = true;
 			continue;
-		}
-
-		/*
-		 * Just before an UPDATE or DELETE, we must update the command
-		 * counter, because the change could refer to a tuple that we have
-		 * just inserted; and before an INSERT, we have to do this also if the
-		 * previous command was either update or delete.
-		 *
-		 * With this approach we don't spend so many CCIs for long strings of
-		 * only INSERTs, which can't affect one another.
-		 */
-		if (kind == CHANGE_UPDATE_NEW || kind == CHANGE_DELETE ||
-			(kind == CHANGE_INSERT && (prevkind == CHANGE_UPDATE_NEW ||
-									   prevkind == CHANGE_DELETE)))
-		{
-			CommandCounterIncrement();
-			UpdateActiveSnapshotCommandId();
 		}
 
 		/*
@@ -3276,7 +3267,7 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 		 * old_block is only stored with UPDATE_NEW.
 		 */
 		old_block_p = kind == CHANGE_UPDATE_NEW ? &old_block : NULL;
-		restore_tuple(file, rel, spilled_tuple, &block, old_block_p);
+		restore_tuple(file, rel, spilled_tuple, &block, old_block_p, &xid);
 
 		if (kind == CHANGE_INSERT)
 		{
@@ -3286,7 +3277,7 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 			 */
 			if (!check_range ||
 				is_block_in_range(block, range_start, range_end))
-				apply_concurrent_insert(dest, spilled_tuple);
+				apply_concurrent_insert(dest, spilled_tuple, new_tuple, xid);
 		}
 		else if (kind == CHANGE_DELETE)
 		{
@@ -3303,7 +3294,7 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 				found = find_target_tuple(dest, spilled_tuple, ondisk_tuple);
 				if (!found)
 					elog(ERROR, "could not find target tuple");
-				apply_concurrent_delete(rel, ondisk_tuple);
+				apply_concurrent_delete(rel, ondisk_tuple, xid);
 			}
 		}
 		else if (kind == CHANGE_UPDATE_NEW)
@@ -3338,7 +3329,8 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 				 */
 				adjust_toast_pointers(rel, spilled_tuple, ondisk_tuple);
 
-				apply_concurrent_update(dest, spilled_tuple, ondisk_tuple);
+				apply_concurrent_update(dest, spilled_tuple, ondisk_tuple,
+										new_tuple, xid);
 			}
 			else
 			{
@@ -3359,7 +3351,8 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 					 */
 					adjust_toast_pointers(rel, spilled_tuple, NULL);
 
-					apply_concurrent_insert(dest, spilled_tuple);
+					apply_concurrent_insert(dest, spilled_tuple, new_tuple,
+											xid);
 				}
 				else if (is_block_in_range(old_block, range_start, range_end))
 				{
@@ -3373,7 +3366,7 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 					 * visible to the snapshot that we'll use to copy the
 					 * other range.
 					 */
-					apply_concurrent_delete(rel, ondisk_tuple);
+					apply_concurrent_delete(rel, ondisk_tuple, xid);
 				}
 
 				/*
@@ -3390,11 +3383,13 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 
 		ResetPerTupleExprContext(dest->estate);
 	}
+	PopActiveSnapshot();
 
 	/* Cleanup. */
 	ExecDropSingleTupleTableSlot(spilled_tuple);
 	ExecDropSingleTupleTableSlot(ondisk_tuple);
 	ExecDropSingleTupleTableSlot(old_update_tuple);
+	ExecDropSingleTupleTableSlot(new_tuple);
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -3403,44 +3398,85 @@ apply_concurrent_changes(ChangeContext *chgcxt, BlockNumber range_start,
 
 /*
  * Apply an insert from the spill of concurrent changes to the new copy of the
- * table.
+ * table. 'new_tuple' is the source for table AM.
  */
 static void
-apply_concurrent_insert(RepackDest *dest, TupleTableSlot *slot)
+apply_concurrent_insert(RepackDest *dest, TupleTableSlot *spill_tuple,
+						TupleTableSlot *new_tuple, TransactionId xid)
 {
-	/* Put the tuple in the table, but make sure it won't be decoded */
-	table_tuple_insert(dest->rel, slot, GetCurrentCommandId(true),
-					   TABLE_INSERT_NO_LOGICAL, NULL);
+	HeapTuple	tup;
+	bool		shouldFree;
+
+	/* Copy the contents to a slot that preserves the header fields. */
+	Assert(TTS_IS_HEAPTUPLE(new_tuple));
+	ExecCopySlot(new_tuple, spill_tuple);
+
+	/* Get pointer to the contained tuple (not a copy). */
+	tup = ExecFetchSlotHeapTuple(new_tuple, false, &shouldFree);
+	Assert(!shouldFree);
+
+	/* Set the XID. */
+	HeapTupleHeaderSetXmin(tup->t_data, xid);
+
+	/*
+	 * Put the tuple in the table, but make sure it won't be decoded. At the
+	 * same time, request that the XID we set above is used, instead of
+	 * generating a new one.
+	 *
+	 * FirstCommandId is ok in the new table because the transaction that
+	 * inserted the tuple has already committed, and no other transaction
+	 * should ever need the CID.
+	 */
+	table_tuple_insert(dest->rel, new_tuple, FirstCommandId,
+					   TABLE_INSERT_NO_LOGICAL | TABLE_REUSE_XID,
+					   NULL);
 
 	/* Update indexes with this new tuple. */
 	ExecInsertIndexTuples(dest->rri,
 						  dest->estate,
 						  0,
-						  slot,
+						  new_tuple,
 						  NIL, NULL);
 	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED, 1);
 }
 
 /*
  * Apply an update from the spill of concurrent changes to the new copy of the
- * table.
+ * table. 'new_tuple' is the source for table AM.
  */
 static void
 apply_concurrent_update(RepackDest *dest, TupleTableSlot *spilled_tuple,
-						TupleTableSlot *ondisk_tuple)
+						TupleTableSlot *ondisk_tuple,
+						TupleTableSlot *new_tuple, TransactionId xid)
 {
+	HeapTuple	tup;
+	bool		shouldFree;
 	Relation	rel = dest->rel;
 	LockTupleMode lockmode;
 	TM_FailureData tmfd;
 	TU_UpdateIndexes update_indexes;
 	TM_Result	res;
 
+	/* Copy the contents to a slot that preserves the header fields. */
+	Assert(TTS_IS_HEAPTUPLE(new_tuple));
+	ExecCopySlot(new_tuple, spilled_tuple);
+
+	/* Get pointer to the contained tuple (not a copy). */
+	tup = ExecFetchSlotHeapTuple(new_tuple, false, &shouldFree);
+	Assert(!shouldFree);
+
+	/* Set the XID. */
+	HeapTupleHeaderSetXmin(tup->t_data, xid);
+
 	/*
 	 * Carry out the update, skipping logical decoding for it.
+	 *
+	 * See comments in apply_concurrent_insert() to understand why
+	 * FirstCommandId is ok in the new table.
 	 */
-	res = table_tuple_update(rel, &(ondisk_tuple->tts_tid), spilled_tuple,
-							 GetCurrentCommandId(true),
-							 TABLE_UPDATE_NO_LOGICAL,
+	res = table_tuple_update(rel, &(ondisk_tuple->tts_tid), new_tuple,
+							 FirstCommandId,
+							 TABLE_UPDATE_NO_LOGICAL | TABLE_REUSE_XID,
 							 InvalidSnapshot,
 							 InvalidSnapshot,
 							 false,
@@ -3460,7 +3496,7 @@ apply_concurrent_update(RepackDest *dest, TupleTableSlot *spilled_tuple,
 		ExecInsertIndexTuples(dest->rri,
 							  dest->estate,
 							  flags,
-							  spilled_tuple,
+							  new_tuple,
 							  NIL, NULL);
 	}
 
@@ -3468,16 +3504,22 @@ apply_concurrent_update(RepackDest *dest, TupleTableSlot *spilled_tuple,
 }
 
 static void
-apply_concurrent_delete(Relation rel, TupleTableSlot *slot)
+apply_concurrent_delete(Relation rel, TupleTableSlot *slot, TransactionId xid)
 {
 	TM_Result	res;
 	TM_FailureData tmfd;
 
 	/*
 	 * Delete tuple from the new heap, skipping logical decoding for it.
+	 *
+	 * See comments in heap_insert_for_repack() to understand why
+	 * FirstCommandId is ok in the new table.
+	 *
+	 * See comments in apply_concurrent_insert() to understand why
+	 * FirstCommandId is ok in the new table.
 	 */
 	res = table_tuple_delete(rel, &(slot->tts_tid),
-							 GetCurrentCommandId(true),
+							 xid, FirstCommandId,
 							 TABLE_DELETE_NO_LOGICAL,
 							 InvalidSnapshot, InvalidSnapshot,
 							 false,
@@ -3503,7 +3545,8 @@ apply_concurrent_delete(Relation rel, TupleTableSlot *slot)
  */
 static void
 restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot,
-			  BlockNumber *block_nr_p, BlockNumber *old_block_nr_p)
+			  BlockNumber *block_nr_p, BlockNumber *old_block_nr_p,
+			  TransactionId *xid_p)
 {
 	uint32		t_len;
 	HeapTuple	tup;
@@ -3526,6 +3569,8 @@ restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot,
 	/* Handle TID separate because not all tuple slots care about it. */
 	if (block_nr_p)
 		*block_nr_p = ItemPointerGetBlockNumber(&tup->t_data->t_ctid);
+	if (xid_p)
+		*xid_p = HeapTupleHeaderGetXmin(tup->t_data);
 	if (old_block_nr_p)
 		BufFileReadExact(file, old_block_nr_p, sizeof(BlockNumber));
 
@@ -3750,6 +3795,7 @@ initialize_change_context(ChangeContext *chgcxt, Relation relation,
 
 	chgcxt->cc_dest_aux = NULL;
 	chgcxt->cc_clustering_index = InvalidOid;
+	chgcxt->cc_last_snapshot_xmin = InvalidTransactionId;
 }
 
 /*
@@ -3965,6 +4011,7 @@ backup_change_context(ChangeContext *chgcxt, ChangeContextBackup *backup)
 	backup->file_seq_snapshot = chgcxt->cc_file_seq_snapshot;
 	backup->file_seq_changes = chgcxt->cc_file_seq_changes;
 	backup->clustering_index = chgcxt->cc_clustering_index;
+	backup->last_snapshot_xmin = chgcxt->cc_last_snapshot_xmin;
 }
 
 /*
@@ -3998,6 +4045,7 @@ reinitialize_change_context(ChangeContextBackup *backup)
 	chgcxt->cc_file_seq_snapshot = backup->file_seq_snapshot;
 	chgcxt->cc_file_seq_changes = backup->file_seq_changes;
 	chgcxt->cc_clustering_index = backup->clustering_index;
+	chgcxt->cc_last_snapshot_xmin = backup->last_snapshot_xmin;
 
 	return chgcxt;
 }
@@ -4110,6 +4158,7 @@ static void
 rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 								   Oid identIdx, TransactionId frozenXid,
 								   MultiXactId cutoffMulti,
+								   double num_tuples,
 								   ChangeContext *chgcxt)
 {
 	List	   *ind_oids_new;
@@ -4124,6 +4173,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	MemoryContext oldcxt;
 	List	   *indexrels;
 	List	   *inds_tmp = NIL;
+	BlockNumber num_pages;
 
 	Assert(CheckRelationLockedByMe(OldHeap, ShareUpdateExclusiveLock, false));
 	Assert(CheckRelationLockedByMe(NewHeap, AccessExclusiveLock, false));
@@ -4135,7 +4185,8 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * cache entries updated.
 	 */
 	if (chgcxt->cc_dest_aux)
-		chgcxt = process_auxiliary_table(chgcxt, &OldHeap, &NewHeap, identIdx);
+		chgcxt = process_auxiliary_table(chgcxt, &OldHeap, &NewHeap, identIdx,
+										 frozenXid, cutoffMulti);
 
 	/*
 	 * Unlike the exclusive case, we build new indexes for the new relation
@@ -4176,6 +4227,43 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	ind_oids_old = lappend_oid(ind_oids_old, identIdx);
 	ind_oids_new = lappend_oid(ind_oids_new,
 							   RelationGetRelid(chgcxt->cc_dest.ident_index));
+
+	/*
+	 * Since we haven't copied "recently dead" tuples into the new heap, we
+	 * must not finish the processing until they are considered dead by all
+	 * backends.
+	 *
+	 * In particular, the VACUUM xmin horizon for the table must be at least
+	 * xmin of the last snapshot that we used to copy the data.  That means
+	 * even the least recently deleted tuples we omitted from the copying
+	 * (because we considered them dead) must be considered dead by anyone.
+	 *
+	 * Note: Although some time should have elapsed since the data copying
+	 * stage (at least the time to build the indexes), we might get stuck here
+	 * due to another backend running REPACK because its snapshot does not
+	 * allow the xmin horizon to advance for some time.
+	 *
+	 * TODO Consider this when determining the value of
+	 * repack_pages_per_snapshot (currently GUC, in the future preferably a
+	 * constant). Is this worth an additional phase in progress reporting?
+	 */
+	Assert(TransactionIdIsValid(chgcxt->cc_last_snapshot_xmin));
+	while (true)
+	{
+		TransactionId oldest_xmin;
+
+		oldest_xmin = GetOldestNonRemovableTransactionId(OldHeap);
+		if (TransactionIdFollowsOrEquals(oldest_xmin,
+										 chgcxt->cc_last_snapshot_xmin))
+			break;
+
+		/* Wait before the next check. */
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 1000L,
+						 WAIT_EVENT_REPACK_MVCC_SAFETY);
+		ResetLatch(MyLatch);
+	}
 
 	/*
 	 * During testing, wait for another backend to perform concurrent data
@@ -4298,6 +4386,10 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	/* The new indexes must be visible for deletion. */
 	CommandCounterIncrement();
 
+	/* Update the numbers of pages and tuples in pg_class. */
+	num_pages = RelationGetNumberOfBlocks(NewHeap);
+	copy_table_data_update_stats(OldHeap, NewHeap, num_pages, num_tuples);
+
 	/* Close the old heap but keep lock until transaction commit. */
 	table_close(OldHeap, NoLock);
 	/* Close the new heap. (We didn't have to open its indexes). */
@@ -4310,6 +4402,12 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * Swap the relations and their TOAST relations and TOAST indexes. This
 	 * also drops the new relation and its indexes.
 	 *
+	 * update_toast_cutoffs is true because REPACK (CONCURRENTLY) does not
+	 * freeze tuples decoded from WAL, and because RecentXmin is not affected
+	 * by logical decoding. Thus if we accepted relfrozenxid of the new TOAST
+	 * relation (derived from RecentXmin), it could incorrectly tell that we
+	 * froze more recent XID's than we actually did.
+	 *
 	 * (System catalogs are currently not supported.)
 	 */
 	Assert(!is_system_catalog);
@@ -4320,6 +4418,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 					 true,
 					 false,		/* reindex */
 					 frozenXid, cutoffMulti,
+					 true,		/* update_toast_cutoffs */
 					 relpersistence);
 }
 
@@ -4334,7 +4433,8 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
  */
 static ChangeContext *
 process_auxiliary_table(ChangeContext *chgcxt, Relation *pOldHeap,
-						Relation *pNewHeap, Oid identIdx)
+						Relation *pNewHeap, Oid identIdx,
+						TransactionId freeze_xid, MultiXactId cutoff_multi)
 {
 	RepackDest *dest = chgcxt->cc_dest_aux;
 	Oid			ident_idx_new;
@@ -4344,6 +4444,8 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation *pOldHeap,
 	Oid			aux_oid;
 	ObjectAddress object;
 	Relation	rel;
+	SnapshotData SnapshotNewHeap;
+	RewriteState rwstate;
 
 	/*
 	 * First, make sure the clustering index exists.
@@ -4373,37 +4475,81 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation *pOldHeap,
 		clustering_index = dest->ident_index;
 	}
 
-	/*
-	 * Now do the copying. Before starting, clear ->cc_dest_aux so that
-	 * insertions go to the final table, rather than the auxiliary one.
-	 */
-	chgcxt->cc_dest_aux = NULL;
+	/* Now do the copying. */
 	slot = table_slot_create(dest->rel, NULL);
 
 	/*
-	 * Note: the current active snapshot blocks the progress of xmin
-	 * horizon(s). The next patches in the series should fix this by using a
-	 * new kind of snapshot (which we can use here because there are no
-	 * transaction aborts in the auxiliary table).
+	 * No point in specifying the auxiliary relation as the old one: we
+	 * haven't frozen tuples when inserting them (one freezing is enough, see
+	 * below), so the tuples do not satisfy the relfrozenxid / relminmxid
+	 * limits, and thus the following freezing would fail.
 	 */
+	rwstate = begin_heap_rewrite(NULL, chgcxt->cc_dest.rel,
+	/* oldest_xmin only needed for rewriting */
+								 InvalidTransactionId,
+								 freeze_xid, cutoff_multi,
+								 true);
+
+	/*
+	 * Scan of the auxiliary table can take long time, but the SnapshotNewHeap
+	 * snapshot can be used here (because there should be no aborted
+	 * insertions in the table), so the scan should not affect the xmin
+	 * horizons.
+	 */
+	PopActiveSnapshot();
+	InitNewHeapSnapshot(SnapshotNewHeap);
+	PushActiveSnapshot(&SnapshotNewHeap);
 	scan = index_beginscan(dest->rel, clustering_index, false,
 						   GetActiveSnapshot(), NULL, 0, 0, SO_NONE);
 	index_rescan(scan, NULL, 0, NULL, 0);
 	for (;;)
 	{
+		HeapTuple	tuple;
+		bool		shouldFree;
+
 		CHECK_FOR_INTERRUPTS();
 
 		if (!table_index_getnext_slot(scan, ForwardScanDirection, slot))
 			break;
 
+		/* Make sure we have a writable copy of the tuple. */
+		tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFree);
+
 		/*
-		 * Reforming should have been performed during insertions into the
-		 * auxiliary table.
+		 * This kind of slot maintains the tuple header. We don't need to copy
+		 * the contents into a slot of other kind because reforming was
+		 * performed when populating the auxiliary table.
 		 */
-		heap_insert_for_repack(chgcxt, slot, NULL);
+		Assert(TTS_IS_BUFFERTUPLE(slot));
+		Assert(TransactionIdIsValid(HeapTupleHeaderGetXmin(tuple->t_data)));
+
+		/*
+		 * Insert the tuple into the new relation, and freeze it while doing
+		 * so.
+		 *
+		 * Since our copy is already writable, the tuple can be passed for
+		 * both old and new tuple.
+		 */
+		rewrite_heap_tuple_no_chains(rwstate, tuple, tuple, true);
+
+		if (shouldFree)
+			pfree(tuple);
 	}
 	index_endscan(scan);
+	PopActiveSnapshot();
+	InvalidateCatalogSnapshot();
+
+	/*
+	 * We should not be restricting the progress of xmin horizons at the
+	 * moment.
+	 */
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xid));
+	Assert(!HaveRegisteredOrActiveSnapshot());
+
+	PushActiveSnapshot(GetTransactionSnapshot());
 	ExecDropSingleTupleTableSlot(slot);
+	end_heap_rewrite(rwstate);
 
 	/*
 	 * Close the relation, its identity index and clustering index if we had
@@ -4415,6 +4561,7 @@ process_auxiliary_table(ChangeContext *chgcxt, Relation *pOldHeap,
 		index_close(clustering_index, NoLock);
 	/* Here we close the other indexes. */
 	release_change_dest(dest);
+	chgcxt->cc_dest_aux = NULL;
 
 	/* Drop the auxiliary table. */
 	object.classId = RelationRelationId;

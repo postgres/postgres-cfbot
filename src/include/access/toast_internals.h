@@ -12,6 +12,7 @@
 #ifndef TOAST_INTERNALS_H
 #define TOAST_INTERNALS_H
 
+#include "access/rewriteheap.h"
 #include "access/skey.h"
 #include "access/toast_compression.h"
 #include "storage/lockdefs.h"
@@ -49,9 +50,13 @@ typedef struct toast_compress_header
 extern Datum toast_compress_datum(Datum value, char cmethod);
 extern Oid	toast_get_valid_index(Oid toastoid, LOCKMODE lock);
 
-extern void toast_delete_datum(Relation rel, Datum value, bool is_speculative);
+extern void toast_delete_datum(Relation rel, Datum value, bool is_speculative,
+							   TransactionId xid);
 extern Datum toast_save_datum(Relation rel, Datum value,
-							  varlena *oldexternal, uint32 options);
+							  varlena *oldexternal,
+							  RewriteState rwstate,
+							  HeapTuple tup_main,
+							  uint32 options);
 
 extern void toast_valueid_scankey_init(ScanKey entry, Oid toast_typid,
 									   Oid8 valueid);

@@ -162,12 +162,15 @@ toast_preserve_valueid(Relation toastrel, Oid toastoid,
  * rel: the main relation we're working with (not the toast rel!)
  * value: datum to be pushed to toast storage
  * oldexternal: if not NULL, toast pointer previously representing the datum
+ * rwstate: state needed for "raw insert".
+ * tup_main: the tuple whose attribute we're saving
  * options: options to be passed to heap_insert() for toast rows
  * ----------
  */
 Datum
 toast_save_datum(Relation rel, Datum value,
-				 varlena *oldexternal, uint32 options)
+				 varlena *oldexternal, RewriteState rwstate,
+				 HeapTuple tup_main, uint32 options)
 {
 	Relation	toastrel;
 	Relation   *toastidxs;
@@ -333,7 +336,40 @@ toast_save_datum(Relation rel, Datum value,
 
 		toasttup = heap_form_tuple(toasttupDesc, t_values, t_isnull);
 
-		heap_insert(toastrel, toasttup, mycid, options, NULL);
+		if (rwstate == NULL)
+		{
+			/*
+			 * With REUSE_XID we'd need regular freezing, however that is
+			 * currently implemented only as a part of VACUUM or in
+			 * rewriteheap.c. On the other hand, tuples containing a new XID
+			 * can be marked as frozen in special cases - see the current uses
+			 * of TABLE_INSERT_FROZEN.
+			 */
+			Assert((options & HEAP_INSERT_FROZEN) == 0 ||
+				   (options & TABLE_REUSE_XID) == 0);
+
+			/*
+			 * If an existing XID should be used, the entire visibility info
+			 * of the TOAST tuple should be equal to that of corresponding
+			 * tuple in the main table.
+			 */
+			if (options & TABLE_REUSE_XID)
+				rewrite_copy_visibility_info(toasttup, tup_main);
+
+			heap_insert(toastrel, toasttup, mycid, options, NULL);
+		}
+		else
+		{
+			/*
+			 * During heap rewrite, XID is always reused and the tuple is
+			 * always frozen - we do not expect the user to tell us what to
+			 * do.
+			 */
+			Assert((options & HEAP_INSERT_FROZEN) == 0 &&
+				   (options & TABLE_REUSE_XID) == 0);
+
+			rewrite_heap_tuple_no_chains(rwstate, tup_main, toasttup, true);
+		}
 
 		/*
 		 * Create the index entry.  We cheat a little here by not using
@@ -438,7 +474,8 @@ toast_valueid_scankey_init(ScanKey entry, Oid toast_typid, Oid8 valueid)
  * ----------
  */
 void
-toast_delete_datum(Relation rel, Datum value, bool is_speculative)
+toast_delete_datum(Relation rel, Datum value, bool is_speculative,
+				   TransactionId xid)
 {
 	varlena    *attr = (varlena *) DatumGetPointer(value);
 	toast_external_data toast_ext_data;
@@ -493,7 +530,7 @@ toast_delete_datum(Relation rel, Datum value, bool is_speculative)
 		if (is_speculative)
 			heap_abort_speculative(toastrel, &toasttup->t_self);
 		else
-			simple_heap_delete(toastrel, &toasttup->t_self);
+			simple_heap_delete(toastrel, &toasttup->t_self, xid);
 	}
 
 	/*

@@ -45,8 +45,8 @@ step check2:
 
 	SELECT i, j FROM repack_test ORDER BY i, j;
 
-	INSERT INTO data_s2(i, j)
-	SELECT i, j FROM repack_test;
+	INSERT INTO data_s2(i, j, _xmin)
+	SELECT i, j, xmin FROM repack_test;
 
   i|  j
 ---+---
@@ -77,11 +77,11 @@ step check1:
 
 	SELECT i, j FROM repack_test ORDER BY i, j;
 
-	INSERT INTO data_s1(i, j)
-	SELECT i, j FROM repack_test;
+	INSERT INTO data_s1(i, j, _xmin)
+	SELECT i, j, xmin FROM repack_test;
 
 	SELECT count(*)
-	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j, _xmin)
 	WHERE d1.i ISNULL OR d2.i ISNULL;
 
 count
