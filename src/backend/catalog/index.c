@@ -1519,11 +1519,9 @@ index_concurrently_build(Oid heapRelationId,
 						 Oid indexRelationId)
 {
 	Relation	heapRel;
-	Oid			save_userid;
-	int			save_sec_context;
-	int			save_nestlevel;
 	Relation	indexRelation;
 	IndexInfo  *indexInfo;
+	IndexBuildSecurity ibsec;
 
 	/* This had better make sure that a snapshot is active */
 	Assert(ActiveSnapshotSet());
@@ -1532,15 +1530,9 @@ index_concurrently_build(Oid heapRelationId,
 	heapRel = table_open(heapRelationId, ShareUpdateExclusiveLock);
 
 	/*
-	 * Switch to the table owner's userid, so that any index functions are run
-	 * as that user.  Also lock down security-restricted operations and
-	 * arrange to make GUC variable changes local to this command.
+	 * Prevent index functions from doing what they are not supposed to.
 	 */
-	GetUserIdAndSecContext(&save_userid, &save_sec_context);
-	SetUserIdAndSecContext(heapRel->rd_rel->relowner,
-						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
-	save_nestlevel = NewGUCNestLevel();
-	RestrictSearchPath();
+	enable_index_build_security(heapRel->rd_rel->relowner, &ibsec);
 
 	indexRelation = index_open(indexRelationId, RowExclusiveLock);
 
@@ -1557,11 +1549,8 @@ index_concurrently_build(Oid heapRelationId,
 	/* Now build the index */
 	index_build(heapRel, indexRelation, indexInfo, false, true, true);
 
-	/* Roll back any GUC changes executed by index functions */
-	AtEOXact_GUC(false, save_nestlevel);
-
-	/* Restore userid and security context */
-	SetUserIdAndSecContext(save_userid, save_sec_context);
+	/* Relax the restrictions imposed above. */
+	disable_index_build_security(&ibsec);
 
 	/* Close both the relations, but keep the locks */
 	table_close(heapRel, NoLock);
@@ -3477,9 +3466,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	IndexInfo  *indexInfo;
 	IndexVacuumInfo ivinfo;
 	ValidateIndexState state;
-	Oid			save_userid;
-	int			save_sec_context;
-	int			save_nestlevel;
+	IndexBuildSecurity ibsec;
 
 	{
 		const int	progress_index[] = {
@@ -3501,15 +3488,9 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	heapRelation = table_open(heapId, ShareUpdateExclusiveLock);
 
 	/*
-	 * Switch to the table owner's userid, so that any index functions are run
-	 * as that user.  Also lock down security-restricted operations and
-	 * arrange to make GUC variable changes local to this command.
+	 * Prevent index functions from doing what they are not supposed to.
 	 */
-	GetUserIdAndSecContext(&save_userid, &save_sec_context);
-	SetUserIdAndSecContext(heapRelation->rd_rel->relowner,
-						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
-	save_nestlevel = NewGUCNestLevel();
-	RestrictSearchPath();
+	enable_index_build_security(heapRelation->rd_rel->relowner, &ibsec);
 
 	indexRelation = index_open(indexId, RowExclusiveLock);
 
@@ -3588,11 +3569,8 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 		 "validate_index found %.0f heap tuples, %.0f index tuples; inserted %.0f missing tuples",
 		 state.htups, state.itups, state.tups_inserted);
 
-	/* Roll back any GUC changes executed by index functions */
-	AtEOXact_GUC(false, save_nestlevel);
-
-	/* Restore userid and security context */
-	SetUserIdAndSecContext(save_userid, save_sec_context);
+	/* Relax the restrictions imposed above. */
+	disable_index_build_security(&ibsec);
 
 	/* Close rels, but keep locks */
 	index_close(indexRelation, NoLock);
@@ -4217,6 +4195,36 @@ reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 	return result;
 }
 
+/*
+ * Before building an index, witch to the table owner's userid, so that any
+ * index functions are run as that user. Also lock down security-restricted
+ * operations and arrange to make GUC variable changes local to this command.
+ *
+ * Information needed later by disable_index_build_security() is stored in
+ * *sec.
+ */
+void
+enable_index_build_security(Oid userid, IndexBuildSecurity *sec)
+{
+	GetUserIdAndSecContext(&sec->userid, &sec->sec_context);
+	SetUserIdAndSecContext(userid,
+						   sec->sec_context | SECURITY_RESTRICTED_OPERATION);
+	sec->nestlevel = NewGUCNestLevel();
+	RestrictSearchPath();
+}
+
+/*
+ * Undo what enable_index_build_security() did.
+ */
+void
+disable_index_build_security(IndexBuildSecurity *sec)
+{
+	/* Roll back any GUC changes executed by index functions */
+	AtEOXact_GUC(false, sec->nestlevel);
+
+	/* Restore userid and security context */
+	SetUserIdAndSecContext(sec->userid, sec->sec_context);
+}
 
 /* ----------------------------------------------------------------
  *		System index reindexing support

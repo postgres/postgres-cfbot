@@ -485,9 +485,6 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	Oid			tableOid = RelationGetRelid(OldHeap);
 	Relation	index;
 	LOCKMODE	lmode;
-	Oid			save_userid;
-	int			save_sec_context;
-	int			save_nestlevel;
 	bool		verbose = ((params->options & CLUOPT_VERBOSE) != 0);
 	bool		recheck = ((params->options & CLUOPT_RECHECK) != 0);
 	bool		concurrent = ((params->options & CLUOPT_CONCURRENT) != 0);
@@ -524,17 +521,6 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	pgstat_progress_update_multi_param(2, progress_index, progress_values);
 
 	/*
-	 * Switch to the table owner's userid, so that any index functions are run
-	 * as that user.  Also lock down security-restricted operations and
-	 * arrange to make GUC variable changes local to this command.
-	 */
-	GetUserIdAndSecContext(&save_userid, &save_sec_context);
-	SetUserIdAndSecContext(OldHeap->rd_rel->relowner,
-						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
-	save_nestlevel = NewGUCNestLevel();
-	RestrictSearchPath();
-
-	/*
 	 * Recheck that the relation is still what it was when we started.
 	 *
 	 * Note that it's critical to skip this in single-relation CLUSTER;
@@ -542,7 +528,7 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	 * not-previously-clustered index.
 	 */
 	if (recheck &&
-		!cluster_rel_recheck(cmd, OldHeap, indexOid, save_userid,
+		!cluster_rel_recheck(cmd, OldHeap, indexOid, GetUserId(),
 							 lmode, params->options))
 		goto out;
 
@@ -666,12 +652,6 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		rebuild_relation(OldHeap, index, verbose, ident_idx);
 
 out:
-	/* Roll back any GUC changes executed by index functions */
-	AtEOXact_GUC(false, save_nestlevel);
-
-	/* Restore userid and security context */
-	SetUserIdAndSecContext(save_userid, save_sec_context);
-
 	pgstat_progress_end_command();
 }
 
@@ -1091,6 +1071,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	TransactionId frozenXid;
 	MultiXactId cutoffMulti;
 	bool		concurrent = OidIsValid(ident_idx);
+	IndexBuildSecurity ibsec;
 	ChangeContext *chgcxt = NULL;
 #if USE_ASSERT_CHECKING
 	LOCKMODE	lmode;
@@ -1100,6 +1081,11 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	Assert(CheckRelationLockedByMe(OldHeap, lmode, false));
 	Assert(index == NULL || CheckRelationLockedByMe(index, lmode, false));
 #endif
+
+	/*
+	 * Prevent index functions from doing what they are not supposed to.
+	 */
+	enable_index_build_security(OldHeap->rd_rel->relowner, &ibsec);
 
 	if (concurrent)
 	{
@@ -1306,8 +1292,10 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 						 frozenXid, cutoffMulti,
 						 relpersistence);
 	}
-}
 
+	/* Relax the restrictions imposed above. */
+	disable_index_build_security(&ibsec);
+}
 
 /*
  * Create the transient table that will be filled with new data during
