@@ -17,11 +17,14 @@
 
 #include "access/hio.h"
 #include "access/skey.h"
+#include "access/xlogdefs.h"
 #include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
+#include "storage/block.h"
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
+#include "utils/snapshot.h"
 
 
 /* flag bits for ClusterParams->options */
@@ -66,13 +69,14 @@ typedef struct RepackDest
 
 	/* The latest column we need to deform to have the tuple identity */
 	AttrNumber	last_key_attno;
-} RepackDest;
 
-/*
- * The first file exported by the decoding worker must contain a snapshot, the
- * following ones contain the data changes.
- */
-#define WORKER_FILE_SNAPSHOT	0
+	/*
+	 * Range of blocks in the old table the contents of this table comes from.
+	 * Note that range_end is the first block of the next range.
+	 */
+	BlockNumber range_start;
+	BlockNumber range_end;
+} RepackDest;
 
 /*
  * Information needed to apply concurrent data changes.
@@ -84,9 +88,41 @@ typedef struct ChangeContext
 	/* The destination table. */
 	RepackDest	cc_dest;
 
-	/* Sequential number of the file containing the changes. */
-	int			cc_file_seq;
+	/* Sequential number of the file containing snapshot. */
+	int			cc_file_seq_snapshot;
+	/* Sequential number of the file containing data changes. */
+	int			cc_file_seq_changes;
+
+	/*
+	 * Auxiliary table to store ordered tuples temporarily.
+	 *
+	 * When the new relation needs to be clustered, we use this table instead
+	 * of tuplesort. The problem with a tuplesort is that data changes need to
+	 * be applied at range boundary (see heapam_relation_copy_for_cluster()
+	 * for more information), however it's not possible to look-up and change
+	 * tuples in tuplestore.
+	 *
+	 * Once the contents of the REPACKed table has been copied into the
+	 * auxiliary table, we build the clustering index (unless it's the same as
+	 * the identity index) and scan it to get the tuple in the desired order.
+	 * XXX Is it worth putting the contents into a tuplestore and sorting it?
+	 * Not sure, it'd require disk space for one more copy and the copying
+	 * itself is not free.
+	 *
+	 * TODO 1) make the tables unlogged, 2) if REPACK locks the TOAST relation
+	 * too (not sure it does) try to preserve TOAST pointers, instead of
+	 * storing them to TOAST relations of these tables, 3) Check that the
+	 * tables are dropped on transaction abort.
+	 */
+	RepackDest *cc_dest_aux;
+
+	/*
+	 * The index that defines ordering of the old table.
+	 */
+	Oid			cc_clustering_index;
 } ChangeContext;
+
+extern PGDLLIMPORT int repack_pages_per_snapshot;
 
 extern void ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel);
 
@@ -98,9 +134,8 @@ extern void mark_index_clustered(Relation rel, Oid indexOid, bool is_internal);
 
 extern Oid	make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 						  char relpersistence, LOCKMODE lockmode);
-extern void heap_insert_for_repack(Relation rel, TupleTableSlot *src,
-								   TupleTableSlot *reform,
-								   BulkInsertStateData *bistate);
+extern void heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
+								   TupleTableSlot *reform);
 extern bool tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc);
 extern void clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform);
 extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
@@ -112,7 +147,12 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 							 TransactionId frozenXid,
 							 MultiXactId cutoffMulti,
 							 char newrelpersistence);
-
+extern Snapshot repack_get_snapshot(ChangeContext *chgcxt);
+extern void repack_process_concurrent_changes(ChangeContext *chgcxt,
+											  XLogRecPtr end_of_wal,
+											  BlockNumber range_start,
+											  BlockNumber range_end,
+											  bool request_snapshot, bool done);
 extern void HandleRepackMessageInterrupt(void);
 extern void ProcessRepackMessages(void);
 

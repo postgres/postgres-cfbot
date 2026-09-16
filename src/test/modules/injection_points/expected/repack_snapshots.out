@@ -1,0 +1,401 @@
+Parsed test spec with 2 sessions
+
+starting permutation: load repack change_new_beyond change_old_beyond check2 wakeup_new_range check1
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step load: 
+	SELECT load(1);
+
+load
+----
+    
+(1 row)
+
+step repack: 
+	REPACK (CONCURRENTLY) repack_test;
+ <waiting ...>
+step change_new_beyond: 
+	INSERT INTO repack_test
+	SELECT max(i) + 1, gen_external()
+	FROM repack_test
+	RETURNING tid_block(ctid);
+
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT min(ctid) FROM repack_test)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block
+---------
+        1
+(1 row)
+
+tid_block|tid_block
+---------+---------
+        0|        1
+(1 row)
+
+step change_old_beyond: 
+	DELETE FROM repack_test
+	WHERE ctid=(SELECT max(ctid) FROM repack_test)
+	RETURNING tid_block(ctid);
+
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT max(ctid) FROM repack_test)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block
+---------
+        1
+(1 row)
+
+tid_block|tid_block
+---------+---------
+        1|        1
+(1 row)
+
+step check2: 
+	INSERT INTO data_s2(i, j)
+	SELECT i, j FROM repack_test;
+
+step wakeup_new_range: 
+	SELECT injection_points_wakeup('repack-concurrently-new-range');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step repack: <... completed>
+step check1: 
+	INSERT INTO data_s1(i, j)
+	SELECT i, j FROM repack_test;
+
+	SELECT count(*) > 0 FROM repack_test;
+
+	SELECT count(*)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	WHERE d1.i ISNULL OR d2.i ISNULL;
+
+?column?
+--------
+t       
+(1 row)
+
+count
+-----
+    0
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: load2 load2_vacuum repack change_old_beyond2 check2 wakeup_new_range wait_new_range wakeup_new_range check1
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step load2: 
+	SELECT load(2);
+
+	DELETE FROM repack_test WHERE i < 100;
+
+load
+----
+    
+(1 row)
+
+step load2_vacuum: 
+	VACUUM repack_test;
+
+step repack: 
+	REPACK (CONCURRENTLY) repack_test;
+ <waiting ...>
+step change_old_beyond2: 
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT max(ctid) FROM repack_test WHERE tid_block(ctid) = 1)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block|tid_block
+---------+---------
+        1|        0
+(1 row)
+
+step check2: 
+	INSERT INTO data_s2(i, j)
+	SELECT i, j FROM repack_test;
+
+step wakeup_new_range: 
+	SELECT injection_points_wakeup('repack-concurrently-new-range');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wait_new_range: 
+	SELECT wait_for_blocks_scanned('repack_test'::regclass, 3);
+
+wait_for_blocks_scanned
+-----------------------
+                       
+(1 row)
+
+step wakeup_new_range: 
+	SELECT injection_points_wakeup('repack-concurrently-new-range');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step repack: <... completed>
+step check1: 
+	INSERT INTO data_s1(i, j)
+	SELECT i, j FROM repack_test;
+
+	SELECT count(*) > 0 FROM repack_test;
+
+	SELECT count(*)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	WHERE d1.i ISNULL OR d2.i ISNULL;
+
+?column?
+--------
+t       
+(1 row)
+
+count
+-----
+    0
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: load repack_pkey change_new_beyond change_old_beyond check2 wakeup_new_range check1 check1_order_asc
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step load: 
+	SELECT load(1);
+
+load
+----
+    
+(1 row)
+
+step repack_pkey: 
+	REPACK (CONCURRENTLY) repack_test USING INDEX repack_test_pkey;
+ <waiting ...>
+step change_new_beyond: 
+	INSERT INTO repack_test
+	SELECT max(i) + 1, gen_external()
+	FROM repack_test
+	RETURNING tid_block(ctid);
+
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT min(ctid) FROM repack_test)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block
+---------
+        1
+(1 row)
+
+tid_block|tid_block
+---------+---------
+        0|        1
+(1 row)
+
+step change_old_beyond: 
+	DELETE FROM repack_test
+	WHERE ctid=(SELECT max(ctid) FROM repack_test)
+	RETURNING tid_block(ctid);
+
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT max(ctid) FROM repack_test)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block
+---------
+        1
+(1 row)
+
+tid_block|tid_block
+---------+---------
+        1|        1
+(1 row)
+
+step check2: 
+	INSERT INTO data_s2(i, j)
+	SELECT i, j FROM repack_test;
+
+step wakeup_new_range: 
+	SELECT injection_points_wakeup('repack-concurrently-new-range');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step repack_pkey: <... completed>
+step check1: 
+	INSERT INTO data_s1(i, j)
+	SELECT i, j FROM repack_test;
+
+	SELECT count(*) > 0 FROM repack_test;
+
+	SELECT count(*)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	WHERE d1.i ISNULL OR d2.i ISNULL;
+
+?column?
+--------
+t       
+(1 row)
+
+count
+-----
+    0
+(1 row)
+
+step check1_order_asc: 
+	SELECT i FROM repack_test LIMIT 10;
+
+ i
+--
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+(10 rows)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: load repack_other_index change_new_beyond change_old_beyond check2 wakeup_new_range check1 check1_order_desc
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step load: 
+	SELECT load(1);
+
+load
+----
+    
+(1 row)
+
+step repack_other_index: 
+	REPACK (CONCURRENTLY) repack_test USING INDEX repack_test_i_idx;
+ <waiting ...>
+step change_new_beyond: 
+	INSERT INTO repack_test
+	SELECT max(i) + 1, gen_external()
+	FROM repack_test
+	RETURNING tid_block(ctid);
+
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT min(ctid) FROM repack_test)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block
+---------
+        1
+(1 row)
+
+tid_block|tid_block
+---------+---------
+        0|        1
+(1 row)
+
+step change_old_beyond: 
+	DELETE FROM repack_test
+	WHERE ctid=(SELECT max(ctid) FROM repack_test)
+	RETURNING tid_block(ctid);
+
+	UPDATE repack_test SET j = gen_external()
+	WHERE ctid=(SELECT max(ctid) FROM repack_test)
+	RETURNING tid_block(OLD.ctid), tid_block(NEW.ctid);
+
+tid_block
+---------
+        1
+(1 row)
+
+tid_block|tid_block
+---------+---------
+        1|        1
+(1 row)
+
+step check2: 
+	INSERT INTO data_s2(i, j)
+	SELECT i, j FROM repack_test;
+
+step wakeup_new_range: 
+	SELECT injection_points_wakeup('repack-concurrently-new-range');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step repack_other_index: <... completed>
+step check1: 
+	INSERT INTO data_s1(i, j)
+	SELECT i, j FROM repack_test;
+
+	SELECT count(*) > 0 FROM repack_test;
+
+	SELECT count(*)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	WHERE d1.i ISNULL OR d2.i ISNULL;
+
+?column?
+--------
+t       
+(1 row)
+
+count
+-----
+    0
+(1 row)
+
+step check1_order_desc: 
+	WITH tmp(diff) as (
+		SELECT i - lag(i, 1, 10000) OVER (ORDER BY ctid)
+		FROM repack_test
+		LIMIT 10)
+	SELECT * FROM tmp WHERE diff > -1;
+
+diff
+----
+(0 rows)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
