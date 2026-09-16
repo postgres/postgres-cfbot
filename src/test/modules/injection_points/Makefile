@@ -11,7 +11,7 @@ PGFILEDESC = "injection_points - facility for injection points"
 
 EXTRA_INSTALL = contrib/test_decoding
 
-REGRESS = injection_points hashagg reindex_conc vacuum
+REGRESS = injection_points hashagg reindex_conc vacuum alter_table
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
 # wait_cleanup terminates another backend, whose FATAL message can be lost
