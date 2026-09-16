@@ -1520,6 +1520,20 @@ SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING d1 DEFAULT 'A'::d2 ON EMPTY) = '
 SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING d1 DEFAULT 'A' COLLATE "C" ON EMPTY) = 'a'; -- error
 DROP DOMAIN d1, d2;
 
+-- A unique index proves uniqueness only under its own collation.  The
+-- case-insensitive GROUP BY may merge rows that the deterministic "C" unique
+-- index treats as distinct, so singleton grouping elimination must reject the
+-- index as a proof.
+CREATE TABLE singleton_collation_mismatch (
+    val text COLLATE case_insensitive
+);
+CREATE UNIQUE INDEX singleton_collation_mismatch_val
+    ON singleton_collation_mismatch (val COLLATE "C");
+INSERT INTO singleton_collation_mismatch VALUES ('abc'), ('ABC');
+EXPLAIN (COSTS OFF)
+SELECT val FROM singleton_collation_mismatch GROUP BY val;
+DROP TABLE singleton_collation_mismatch;
+
 -- cleanup
 RESET search_path;
 SET client_min_messages TO warning;

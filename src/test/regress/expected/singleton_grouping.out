@@ -1,0 +1,628 @@
+-- Test path-level elimination of grouping when each input row is its own group.
+CREATE TEMP TABLE singleton_base (
+    id int PRIMARY KEY,
+    status text NOT NULL,
+    payload text
+);
+INSERT INTO singleton_base
+SELECT g, 'status' || g, 'payload' || g FROM generate_series(1, 5) g;
+-- The unique key makes each row its own group.
+EXPLAIN (COSTS OFF)
+SELECT id, status, payload FROM singleton_base GROUP BY id, status, payload;
+         QUERY PLAN         
+----------------------------
+ Seq Scan on singleton_base
+(1 row)
+
+SELECT id, string_agg(status, ',' ORDER BY status)
+FROM singleton_base GROUP BY id, status, payload ORDER BY id;
+ id | string_agg 
+----+------------
+  1 | status1
+  2 | status2
+  3 | status3
+  4 | status4
+  5 | status5
+(5 rows)
+
+-- The input pathkeys survive projection.
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_base GROUP BY id ORDER BY id;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Index Only Scan using singleton_base_pkey on singleton_base
+(1 row)
+
+-- A constant-covered grouping key may be reduced by equivalence processing;
+-- the original key still proves singleton grouping.
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_base WHERE id = 1 GROUP BY id;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Index Only Scan using singleton_base_pkey on singleton_base
+   Index Cond: (id = 1)
+(2 rows)
+
+-- Equivalence processing may remove only some original keys.  The untouched
+-- original clause still contains the unique key and remains a valid proof.
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_base WHERE id = 1 GROUP BY id, status;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Index Scan using singleton_base_pkey on singleton_base
+   Index Cond: (id = 1)
+(2 rows)
+
+-- A composite key is sufficient; remaining grouping keys may be redundant.
+CREATE TEMP TABLE singleton_composite (
+    a int, b int, c int, d text, PRIMARY KEY (a, b)
+);
+INSERT INTO singleton_composite
+VALUES (1, 1, 1, 'one'), (1, 2, 2, 'two'), (2, 1, 3, 'three');
+EXPLAIN (COSTS OFF)
+SELECT a, b, c, d FROM singleton_composite GROUP BY a, b, c, d;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on singleton_composite
+(1 row)
+
+-- Non-deferrable unique constraints and indexes, including NULLS NOT
+-- DISTINCT, also prove singleton grouping.
+CREATE TEMP TABLE singleton_unique (
+    id int NOT NULL, val text, UNIQUE (id)
+);
+INSERT INTO singleton_unique VALUES (1, 'one'), (2, 'two');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_unique GROUP BY id, val;
+          QUERY PLAN          
+------------------------------
+ Seq Scan on singleton_unique
+(1 row)
+
+CREATE TEMP TABLE singleton_plain_unique (id int NOT NULL, val text);
+CREATE UNIQUE INDEX singleton_plain_unique_id ON singleton_plain_unique (id);
+INSERT INTO singleton_plain_unique VALUES (1, 'one'), (2, 'two');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_plain_unique GROUP BY id, val;
+             QUERY PLAN             
+------------------------------------
+ Seq Scan on singleton_plain_unique
+(1 row)
+
+CREATE TEMP TABLE singleton_nulls_not_distinct (
+    id int, val text, UNIQUE NULLS NOT DISTINCT (id)
+);
+INSERT INTO singleton_nulls_not_distinct VALUES (1, 'one'), (2, 'two');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_nulls_not_distinct GROUP BY id, val;
+                QUERY PLAN                
+------------------------------------------
+ Seq Scan on singleton_nulls_not_distinct
+(1 row)
+
+-- A composite NULLS NOT DISTINCT index treats rows with NULL keys as
+-- duplicates, so nullable keys can still prove singleton grouping.
+CREATE TEMP TABLE singleton_composite_nnd (
+    a int, b int, val text,
+    UNIQUE NULLS NOT DISTINCT (a, b)
+);
+INSERT INTO singleton_composite_nnd
+VALUES (1, NULL, 'one'), (NULL, 1, 'two');
+EXPLAIN (COSTS OFF)
+SELECT a, b, val FROM singleton_composite_nnd GROUP BY a, b, val;
+             QUERY PLAN              
+-------------------------------------
+ Seq Scan on singleton_composite_nnd
+(1 row)
+
+-- A partitioned table has a table-wide unique proof.
+CREATE TEMP TABLE singleton_partitioned (
+    id int PRIMARY KEY, val text
+) PARTITION BY RANGE (id);
+CREATE TEMP TABLE singleton_partitioned_1
+    PARTITION OF singleton_partitioned FOR VALUES FROM (0) TO (10);
+CREATE TEMP TABLE singleton_partitioned_2
+    PARTITION OF singleton_partitioned FOR VALUES FROM (10) TO (20);
+INSERT INTO singleton_partitioned VALUES (1, 'one'), (11, 'eleven');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_partitioned GROUP BY id, val;
+                QUERY PLAN                 
+-------------------------------------------
+ Append
+   ->  Seq Scan on singleton_partitioned_1
+   ->  Seq Scan on singleton_partitioned_2
+(3 rows)
+
+SET enable_partitionwise_aggregate = on;
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_partitioned GROUP BY id, val;
+                QUERY PLAN                 
+-------------------------------------------
+ Append
+   ->  Seq Scan on singleton_partitioned_1
+   ->  Seq Scan on singleton_partitioned_2
+(3 rows)
+
+RESET enable_partitionwise_aggregate;
+-- Aggregate semantics must never be removed.
+EXPLAIN (COSTS OFF)
+SELECT id, count(*) FROM singleton_base GROUP BY id;
+            QUERY PLAN            
+----------------------------------
+ HashAggregate
+   Group Key: id
+   ->  Seq Scan on singleton_base
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_base GROUP BY id HAVING true;
+            QUERY PLAN            
+----------------------------------
+ HashAggregate
+   Group Key: id
+   ->  Seq Scan on singleton_base
+(3 rows)
+
+-- Aggregate-less implicit/degenerate grouping phases must not use singleton
+-- elimination.  A pure DISTINCT is a separate upper relation and has no
+-- GROUP BY proof.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM singleton_base;
+            QUERY PLAN            
+----------------------------------
+ Aggregate
+   ->  Seq Scan on singleton_base
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT true FROM singleton_base HAVING true;
+      QUERY PLAN       
+-----------------------
+ Result
+   Replaces: Aggregate
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id, status FROM singleton_base
+GROUP BY GROUPING SETS ((id), (status));
+            QUERY PLAN            
+----------------------------------
+ HashAggregate
+   Hash Key: id
+   Hash Key: status
+   ->  Seq Scan on singleton_base
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT id FROM singleton_base;
+            QUERY PLAN            
+----------------------------------
+ HashAggregate
+   Group Key: id
+   ->  Seq Scan on singleton_base
+(3 rows)
+
+-- A grouped view is planned as its own query.  Its explicit unique-key proof
+-- may be applied there even though the outer query sees only a subquery RTE.
+CREATE TEMP VIEW singleton_grouped_view AS
+    SELECT id FROM singleton_base GROUP BY id;
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_grouped_view;
+         QUERY PLAN         
+----------------------------
+ Seq Scan on singleton_base
+(1 row)
+
+-- Other row-changing or ordering-sensitive semantics remain excluded.
+EXPLAIN (COSTS OFF)
+SELECT id, row_number() OVER (ORDER BY id)
+FROM singleton_base GROUP BY id;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY id ROWS UNBOUNDED PRECEDING)
+   ->  Group
+         Group Key: id
+         ->  Index Only Scan using singleton_base_pkey on singleton_base
+(5 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id, generate_series(1, 1) FROM singleton_base GROUP BY id;
+               QUERY PLAN               
+----------------------------------------
+ ProjectSet
+   ->  HashAggregate
+         Group Key: id
+         ->  Seq Scan on singleton_base
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT id FROM singleton_base GROUP BY id;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: id
+   ->  HashAggregate
+         Group Key: id
+         ->  Seq Scan on singleton_base
+(5 rows)
+
+-- Set-operation children use a separate target convention and stay rejected.
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_base GROUP BY id
+UNION
+SELECT id FROM singleton_base GROUP BY id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ HashAggregate
+   Group Key: singleton_base.id
+   ->  Append
+         ->  HashAggregate
+               Group Key: singleton_base.id
+               ->  Seq Scan on singleton_base
+         ->  HashAggregate
+               Group Key: singleton_base_1.id
+               ->  Seq Scan on singleton_base singleton_base_1
+(9 rows)
+
+-- A non-flattenable subquery input stays rejected.
+EXPLAIN (COSTS OFF)
+SELECT id FROM (SELECT id FROM singleton_base OFFSET 0) s GROUP BY id;
+            QUERY PLAN            
+----------------------------------
+ HashAggregate
+   Group Key: singleton_base.id
+   ->  Seq Scan on singleton_base
+(3 rows)
+
+-- Additional non-simple grouping keys do not invalidate a unique-key proof.
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_base GROUP BY id, length(payload);
+         QUERY PLAN         
+----------------------------
+ Seq Scan on singleton_base
+(1 row)
+
+SELECT id, length(payload) FROM singleton_base GROUP BY id, length(payload)
+ORDER BY id, length(payload);
+ id | length 
+----+--------
+  1 |      8
+  2 |      8
+  3 |      8
+  4 |      8
+  5 |      8
+(5 rows)
+
+-- Only direct grouping Vars can cover unique keys; extra expressions may
+-- appear before, after, or alongside those Vars.
+EXPLAIN (COSTS OFF)
+SELECT a, b, c
+FROM singleton_composite
+GROUP BY c, a, length(d), b;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on singleton_composite
+(1 row)
+
+SELECT a, b, c, length(d)
+FROM singleton_composite
+GROUP BY c, a, length(d), b
+ORDER BY a, b, c;
+ a | b | c | length 
+---+---+---+--------
+ 1 | 1 | 1 |      3
+ 1 | 2 | 2 |      3
+ 2 | 1 | 3 |      5
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT a, b
+FROM singleton_composite
+GROUP BY a, b, a + 0, b + 0;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on singleton_composite
+(1 row)
+
+-- An expression cannot itself cover the unique key.
+EXPLAIN (COSTS OFF)
+SELECT length(payload) FROM singleton_base GROUP BY length(payload);
+            QUERY PLAN            
+----------------------------------
+ HashAggregate
+   Group Key: length(payload)
+   ->  Seq Scan on singleton_base
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT a, b + 0 FROM singleton_composite GROUP BY a, b + 0;
+              QUERY PLAN               
+---------------------------------------
+ HashAggregate
+   Group Key: a, (b + 0)
+   ->  Seq Scan on singleton_composite
+(3 rows)
+
+-- Expressions are also allowed with NULLS NOT DISTINCT proofs.
+EXPLAIN (COSTS OFF)
+SELECT a, b, val
+FROM singleton_composite_nnd
+GROUP BY a, b, val, length(val);
+             QUERY PLAN              
+-------------------------------------
+ Seq Scan on singleton_composite_nnd
+(1 row)
+
+-- Preserve evaluation of extra volatile grouping expressions.  The singleton
+-- plan must evaluate them once per input row.
+CREATE TEMP SEQUENCE singleton_expr_calls;
+CREATE FUNCTION pg_temp.singleton_expr_call() RETURNS int
+LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    RETURN nextval('singleton_expr_calls');
+END
+$$;
+SELECT setval('singleton_expr_calls', 1, false);
+ setval 
+--------
+      1
+(1 row)
+
+SELECT count(*) FROM (
+    SELECT id FROM singleton_base
+    GROUP BY id, pg_temp.singleton_expr_call()
+) q;
+ count 
+-------
+     5
+(1 row)
+
+SELECT last_value FROM singleton_expr_calls;
+ last_value 
+------------
+          5
+(1 row)
+
+-- A unique side does not make a join output unique.
+CREATE TEMP TABLE singleton_many (sid int, val text);
+INSERT INTO singleton_many
+SELECT g % 5, 'many' || g FROM generate_series(1, 10) g;
+EXPLAIN (COSTS OFF)
+SELECT b.id
+FROM singleton_base b JOIN singleton_many m ON m.sid = b.id
+GROUP BY b.id;
+                   QUERY PLAN                   
+------------------------------------------------
+ HashAggregate
+   Group Key: b.id
+   ->  Hash Join
+         Hash Cond: (m.sid = b.id)
+         ->  Seq Scan on singleton_many m
+         ->  Hash
+               ->  Seq Scan on singleton_base b
+(7 rows)
+
+-- A unique index proves uniqueness only under its own equality semantics.
+-- record_image_ops is bytewise equality, while plain GROUP BY on a composite
+-- uses record_ops.  Rows that the index distinguishes can still be one group.
+CREATE TYPE pg_temp.singleton_avg_rec AS (x numeric);
+CREATE TEMP TABLE singleton_opf (a singleton_avg_rec NOT NULL, val text);
+CREATE UNIQUE INDEX singleton_opf_a ON singleton_opf (a record_image_ops);
+INSERT INTO singleton_opf
+VALUES (row(1.0)::singleton_avg_rec, 'X'),
+       (row(1.00)::singleton_avg_rec, 'Y');
+EXPLAIN (COSTS OFF)
+SELECT a, val FROM singleton_opf GROUP BY a, val;
+           QUERY PLAN            
+---------------------------------
+ HashAggregate
+   Group Key: a, val
+   ->  Seq Scan on singleton_opf
+(3 rows)
+
+-- Unsafe uniqueness proofs remain rejected.
+CREATE TEMP TABLE singleton_nullable (id int, val text);
+CREATE UNIQUE INDEX singleton_nullable_id ON singleton_nullable (id);
+INSERT INTO singleton_nullable VALUES (NULL, 'one'), (NULL, 'two');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_nullable GROUP BY id, val;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: id, val
+   ->  Seq Scan on singleton_nullable
+(3 rows)
+
+-- Every key of a NULLS DISTINCT unique index must be NOT NULL.
+CREATE TEMP TABLE singleton_composite_nullable (
+    a int NOT NULL, b int, val text,
+    CONSTRAINT singleton_composite_nullable_key UNIQUE (a, b)
+);
+INSERT INTO singleton_composite_nullable
+VALUES (1, NULL, 'one'), (1, NULL, 'two');
+EXPLAIN (COSTS OFF)
+SELECT a, b, val FROM singleton_composite_nullable GROUP BY a, b, val;
+                   QUERY PLAN                   
+------------------------------------------------
+ HashAggregate
+   Group Key: a, b, val
+   ->  Seq Scan on singleton_composite_nullable
+(3 rows)
+
+-- Extra expressions cannot repair the missing NOT NULL proof.
+EXPLAIN (COSTS OFF)
+SELECT a, b, val
+FROM singleton_composite_nullable
+GROUP BY a, b, val, length(val);
+                   QUERY PLAN                   
+------------------------------------------------
+ HashAggregate
+   Group Key: a, b, val, length(val)
+   ->  Seq Scan on singleton_composite_nullable
+(3 rows)
+
+CREATE TEMP TABLE singleton_deferrable (
+    id int, CONSTRAINT singleton_deferrable_id UNIQUE (id) DEFERRABLE
+);
+INSERT INTO singleton_deferrable VALUES (1), (2);
+EXPLAIN (COSTS OFF)
+SELECT id FROM singleton_deferrable GROUP BY id;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: id
+   ->  Seq Scan on singleton_deferrable
+(3 rows)
+
+CREATE TEMP TABLE singleton_partial (id int NOT NULL, active boolean);
+CREATE UNIQUE INDEX singleton_partial_id
+    ON singleton_partial (id) WHERE active;
+INSERT INTO singleton_partial VALUES (1, true), (2, true);
+EXPLAIN (COSTS OFF)
+SELECT id, active FROM singleton_partial GROUP BY id, active;
+             QUERY PLAN              
+-------------------------------------
+ HashAggregate
+   Group Key: id, active
+   ->  Seq Scan on singleton_partial
+(3 rows)
+
+-- Even an apparently NULL-safe partial predicate is outside V1.
+CREATE TEMP TABLE singleton_partial_nullable (a int, b int, val text);
+CREATE UNIQUE INDEX singleton_partial_nullable_ab
+    ON singleton_partial_nullable (a, b)
+    WHERE a IS NOT NULL AND b IS NOT NULL;
+INSERT INTO singleton_partial_nullable
+VALUES (1, NULL, 'one'), (1, NULL, 'two');
+EXPLAIN (COSTS OFF)
+SELECT a, b, val FROM singleton_partial_nullable GROUP BY a, b, val;
+                  QUERY PLAN                  
+----------------------------------------------
+ HashAggregate
+   Group Key: a, b, val
+   ->  Seq Scan on singleton_partial_nullable
+(3 rows)
+
+CREATE TEMP TABLE singleton_expression (id int NOT NULL, val text);
+CREATE UNIQUE INDEX singleton_expression_upper
+    ON singleton_expression (upper(val));
+INSERT INTO singleton_expression VALUES (1, 'one'), (2, 'two');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_expression GROUP BY id, val;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: id, val
+   ->  Seq Scan on singleton_expression
+(3 rows)
+
+CREATE TEMP TABLE singleton_parent (id int PRIMARY KEY, val text);
+CREATE TEMP TABLE singleton_child () INHERITS (singleton_parent);
+INSERT INTO singleton_parent VALUES (1, 'parent');
+INSERT INTO singleton_child VALUES (1, 'child');
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM singleton_parent GROUP BY id, val;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ HashAggregate
+   Group Key: singleton_parent.id, singleton_parent.val
+   ->  Append
+         ->  Seq Scan on singleton_parent singleton_parent_1
+         ->  Seq Scan on singleton_child singleton_parent_2
+(5 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM ONLY singleton_parent GROUP BY id, val;
+          QUERY PLAN          
+------------------------------
+ Seq Scan on singleton_parent
+(1 row)
+
+-- A partitioned composite unique index must still prove every key.
+CREATE TEMP TABLE singleton_partitioned_nullable (
+    a int, b int, val text
+) PARTITION BY RANGE (a);
+CREATE UNIQUE INDEX singleton_partitioned_nullable_ab
+    ON singleton_partitioned_nullable (a, b);
+CREATE TEMP TABLE singleton_partitioned_nullable_1
+    PARTITION OF singleton_partitioned_nullable FOR VALUES FROM (0) TO (10);
+INSERT INTO singleton_partitioned_nullable
+VALUES (1, NULL, 'one'), (1, NULL, 'two');
+EXPLAIN (COSTS OFF)
+SELECT a, b, val
+FROM singleton_partitioned_nullable GROUP BY a, b, val;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ HashAggregate
+   Group Key: singleton_partitioned_nullable.a, singleton_partitioned_nullable.b, singleton_partitioned_nullable.val
+   ->  Seq Scan on singleton_partitioned_nullable_1 singleton_partitioned_nullable
+(3 rows)
+
+-- Dropping the proof must invalidate a cached plan.
+CREATE TEMP TABLE singleton_invalidate (id int PRIMARY KEY, val text);
+INSERT INTO singleton_invalidate VALUES (1, 'one'), (2, 'two');
+PREPARE singleton_prep AS
+    SELECT id, val FROM singleton_invalidate GROUP BY id, val;
+EXPLAIN (COSTS OFF) EXECUTE singleton_prep;
+            QUERY PLAN            
+----------------------------------
+ Seq Scan on singleton_invalidate
+(1 row)
+
+ALTER TABLE singleton_invalidate DROP CONSTRAINT singleton_invalidate_pkey;
+EXPLAIN (COSTS OFF) EXECUTE singleton_prep;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: id, val
+   ->  Seq Scan on singleton_invalidate
+(3 rows)
+
+DEALLOCATE singleton_prep;
+-- A plain unique index is also invalidation evidence for the proof.
+CREATE TEMP TABLE singleton_invalidate_index (id int NOT NULL, val text);
+CREATE UNIQUE INDEX singleton_invalidate_index_id
+    ON singleton_invalidate_index (id);
+INSERT INTO singleton_invalidate_index VALUES (1, 'one'), (2, 'two');
+PREPARE singleton_invalidate_index_prep AS
+    SELECT id, val FROM singleton_invalidate_index GROUP BY id, val;
+EXPLAIN (COSTS OFF) EXECUTE singleton_invalidate_index_prep;
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on singleton_invalidate_index
+(1 row)
+
+DROP INDEX singleton_invalidate_index_id;
+EXPLAIN (COSTS OFF) EXECUTE singleton_invalidate_index_prep;
+                  QUERY PLAN                  
+----------------------------------------------
+ HashAggregate
+   Group Key: id, val
+   ->  Seq Scan on singleton_invalidate_index
+(3 rows)
+
+DEALLOCATE singleton_invalidate_index_prep;
+-- Removing a key column's NOT NULL constraint must invalidate the proof.
+CREATE TEMP TABLE singleton_invalidate_notnull (id int NOT NULL, val text);
+CREATE UNIQUE INDEX singleton_invalidate_notnull_id
+    ON singleton_invalidate_notnull (id);
+INSERT INTO singleton_invalidate_notnull VALUES (1, 'one'), (2, 'two');
+PREPARE singleton_invalidate_notnull_prep AS
+    SELECT id, val FROM singleton_invalidate_notnull GROUP BY id, val;
+EXPLAIN (COSTS OFF) EXECUTE singleton_invalidate_notnull_prep;
+                QUERY PLAN                
+------------------------------------------
+ Seq Scan on singleton_invalidate_notnull
+(1 row)
+
+ALTER TABLE singleton_invalidate_notnull ALTER COLUMN id DROP NOT NULL;
+EXPLAIN (COSTS OFF) EXECUTE singleton_invalidate_notnull_prep;
+                   QUERY PLAN                   
+------------------------------------------------
+ HashAggregate
+   Group Key: id, val
+   ->  Seq Scan on singleton_invalidate_notnull
+(3 rows)
+
+DEALLOCATE singleton_invalidate_notnull_prep;

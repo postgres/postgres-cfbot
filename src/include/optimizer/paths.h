@@ -98,6 +98,9 @@ extern bool unique_index_keys_match_groupby_cols(IndexOptInfo *index,
 												 RelOptInfo *rel,
 												 List *groupbycols,
 												 Bitmapset **index_attnos);
+extern bool relation_has_unique_index_covered_by_group_keys(RelOptInfo *rel,
+															List *groupClause,
+															List *targetList);
 extern bool indexcol_is_bool_constant_for_query(PlannerInfo *root,
 												IndexOptInfo *index,
 												int indexcol);

@@ -74,7 +74,6 @@ typedef struct
 	int			indexcol;		/* index column we want to match to */
 } ec_member_matches_arg;
 
-
 static void consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 										IndexOptInfo *index,
 										IndexClauseSet *rclauseset,
@@ -4348,6 +4347,68 @@ unique_index_keys_match_groupby_cols(IndexOptInfo *index, RelOptInfo *rel,
 	}
 
 	return true;
+}
+
+/*
+ * relation_has_unique_index_covered_by_group_keys
+ *		Determine whether every input row is its own group under the given
+ *		plain GROUP BY keys.
+ *
+ * The caller has already restricted this to a single base relation and a plain
+ * GROUP BY list.  Only simple Vars from that relation can cover index keys;
+ * other grouping items are additional keys and cannot invalidate the proof.
+ * Index keys may be a subset of the grouping keys, just as an immediate PK
+ * makes every row its own group regardless of what else is listed in GROUP BY.
+ */
+bool
+relation_has_unique_index_covered_by_group_keys(RelOptInfo *rel,
+												List *groupClause,
+												List *targetList)
+{
+	List       *group_keys = NIL;
+	ListCell   *lc;
+
+	if (groupClause == NIL)
+		return false;
+
+	Assert(bms_membership(rel->relids) == BMS_SINGLETON);
+
+	foreach(lc, groupClause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle = get_sortgroupclause_tle(sgc, targetList);
+		Var            *var;
+		GroupByColInfo *key;
+
+		if (tle == NULL)
+			return false;
+
+		/* Extra grouping expressions do not affect the singleton proof. */
+		if (!IsA(tle->expr, Var))
+			continue;
+
+		var = (Var *) tle->expr;
+		if (var->varlevelsup != 0 || var->varattno <= 0 ||
+			var->varno != rel->relid)
+			continue;
+
+		key = palloc_object(GroupByColInfo);
+		key->attno = var->varattno;
+		key->eq_opfamilies = get_mergejoin_opfamilies(sgc->eqop);
+		key->coll = var->varcollid;
+		group_keys = lappend(group_keys, key);
+	}
+
+	if (group_keys == NIL)
+		return false;
+
+	foreach_node(IndexOptInfo, index, rel->indexlist)
+	{
+		if (unique_index_keys_match_groupby_cols(index, rel, group_keys, NULL))
+			return true;
+	}
+
+	return false;
 }
 
 /*
