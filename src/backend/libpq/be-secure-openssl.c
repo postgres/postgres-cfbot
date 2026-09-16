@@ -106,6 +106,8 @@ static int	sni_clienthello_cb(SSL *ssl, int *al, void *arg);
 #endif
 
 static char *X509_NAME_to_cstring(const X509_NAME *name);
+static char *X509_URI_to_cstring(const ASN1_STRING *uri);
+static bool be_tls_extract_peer_cert_names(Port *port, X509 *peer);
 
 static SSL_CTX *SSL_context = NULL;
 static MemoryContext SSL_hosts_memcxt = NULL;
@@ -1072,84 +1074,107 @@ aloop:
 	/* Get client certificate, if available. */
 	port->peer = SSL_get_peer_certificate(port->ssl);
 
-	/* and extract the Common Name and Distinguished Name from it. */
+	/* extract the Common Name, Distinguished Name, and URI SAN from it */
 	port->peer_cn = NULL;
 	port->peer_dn = NULL;
+	port->peer_uri = NULL;
+	port->peer_uri_count = 0;
 	port->peer_cert_valid = false;
+
 	if (port->peer != NULL)
 	{
-		int			len;
-		const X509_NAME *x509name = X509_get_subject_name(port->peer);
-		char	   *peer_dn;
-		BIO		   *bio = NULL;
-		BUF_MEM    *bio_buf = NULL;
-		int			index;
-
-		index = X509_NAME_get_index_by_NID(unconstify(X509_NAME *, x509name), NID_commonName, -1);
-		if (index >= 0)
-		{
-			const X509_NAME_ENTRY *entry;
-			const ASN1_STRING *peer_cn_asn1;
-			const unsigned char *peer_cn_internal;
-			char	   *peer_cn;
-
-			entry = X509_NAME_get_entry(unconstify(X509_NAME *, x509name), index);
-			peer_cn_asn1 = X509_NAME_ENTRY_get_data(entry);
-			len = ASN1_STRING_length(peer_cn_asn1);
-			peer_cn_internal = ASN1_STRING_get0_data(peer_cn_asn1);
-
-			peer_cn = MemoryContextAlloc(TopMemoryContext, len + 1);
-			memcpy(peer_cn, peer_cn_internal, len);
-			peer_cn[len] = '\0';
-
-			/*
-			 * Reject embedded NULLs in certificate common name to prevent
-			 * attacks like CVE-2009-4034.
-			 */
-			if (len != strlen(peer_cn))
-			{
-				ereport(COMMERROR,
-						(errcode(ERRCODE_PROTOCOL_VIOLATION),
-						 errmsg("SSL certificate's common name contains embedded null")));
-				pfree(peer_cn);
-				return -1;
-			}
-
-			port->peer_cn = peer_cn;
-		}
-
-		bio = BIO_new(BIO_s_mem());
-		if (!bio)
-		{
-			if (port->peer_cn != NULL)
-			{
-				pfree(port->peer_cn);
-				port->peer_cn = NULL;
-			}
+		if (!be_tls_extract_peer_cert_names(port, port->peer))
 			return -1;
-		}
+		port->peer_cert_valid = true;
+	}
+
+	return 0;
+}
+
+/*
+ * Extract the Common Name, Distinguished Name, and first URI subjectAltName
+ * from a client certificate, storing them on the Port.  Returns false if the
+ * certificate is malformed and the connection should be rejected.
+ */
+static bool
+be_tls_extract_peer_cert_names(Port *port, X509 *peer)
+{
+	int			len;
+	const X509_NAME *x509name = X509_get_subject_name(peer);
+	char	   *peer_dn;
+	BIO		   *bio = NULL;
+	BUF_MEM    *bio_buf = NULL;
+	int			index;
+
+	STACK_OF(GENERAL_NAME) * peer_san;
+
+	index = X509_NAME_get_index_by_NID(unconstify(X509_NAME *, x509name), NID_commonName, -1);
+	if (index >= 0)
+	{
+		const X509_NAME_ENTRY *entry;
+		const ASN1_STRING *peer_cn_asn1;
+		const unsigned char *peer_cn_internal;
+		char	   *peer_cn;
+
+		entry = X509_NAME_get_entry(unconstify(X509_NAME *, x509name), index);
+		peer_cn_asn1 = X509_NAME_ENTRY_get_data(entry);
+		len = ASN1_STRING_length(peer_cn_asn1);
+		peer_cn_internal = ASN1_STRING_get0_data(peer_cn_asn1);
+
+		peer_cn = MemoryContextAlloc(TopMemoryContext, len + 1);
+		memcpy(peer_cn, peer_cn_internal, len);
+		peer_cn[len] = '\0';
 
 		/*
-		 * RFC2253 is the closest thing to an accepted standard format for
-		 * DNs. We have documented how to produce this format from a
-		 * certificate. It uses commas instead of slashes for delimiters,
-		 * which make regular expression matching a bit easier. Also note that
-		 * it prints the Subject fields in reverse order.
+		 * Reject embedded NULLs in certificate common name to prevent attacks
+		 * like CVE-2009-4034.
 		 */
-		if (X509_NAME_print_ex(bio, x509name, 0, XN_FLAG_RFC2253) == -1 ||
-			BIO_get_mem_ptr(bio, &bio_buf) <= 0)
+		if (len != strlen(peer_cn))
 		{
-			BIO_free(bio);
-			if (port->peer_cn != NULL)
-			{
-				pfree(port->peer_cn);
-				port->peer_cn = NULL;
-			}
-			return -1;
+			ereport(COMMERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("SSL certificate's common name contains embedded null")));
+			pfree(peer_cn);
+			return false;
 		}
-		peer_dn = MemoryContextAlloc(TopMemoryContext, bio_buf->length + 1);
-		memcpy(peer_dn, bio_buf->data, bio_buf->length);
-		len = bio_buf->length;
+
+		port->peer_cn = peer_cn;
+	}
+
+	bio = BIO_new(BIO_s_mem());
+	if (!bio)
+	{
+		if (port->peer_cn != NULL)
+		{
+			pfree(port->peer_cn);
+			port->peer_cn = NULL;
+		}
+		return false;
+	}
+
+	/*
+	 * RFC2253 is the closest thing to an accepted standard format for DNs. We
+	 * have documented how to produce this format from a certificate. It uses
+	 * commas instead of slashes for delimiters, which make regular expression
+	 * matching a bit easier. Also note that it prints the Subject fields in
+	 * reverse order.
+	 */
+	if (X509_NAME_print_ex(bio, x509name, 0, XN_FLAG_RFC2253) == -1 ||
+		BIO_get_mem_ptr(bio, &bio_buf) < 0)
+	{
+		BIO_free(bio);
+		if (port->peer_cn != NULL)
+		{
+			pfree(port->peer_cn);
+			port->peer_cn = NULL;
+		}
+		return false;
+	}
+	len = bio_buf->length;
+	if (len > 0)
+	{
+		peer_dn = MemoryContextAlloc(TopMemoryContext, len + 1);
+		memcpy(peer_dn, bio_buf->data, len);
 		BIO_free(bio);
 		peer_dn[len] = '\0';
 		if (len != strlen(peer_dn))
@@ -1163,15 +1188,45 @@ aloop:
 				pfree(port->peer_cn);
 				port->peer_cn = NULL;
 			}
-			return -1;
+			return false;
 		}
 
 		port->peer_dn = peer_dn;
-
-		port->peer_cert_valid = true;
+	}
+	else
+	{
+		/*
+		 * An empty subject means there is no DN to record, so leave peer_dn
+		 * NULL.  RFC 5280 allows this when the subjectAltName extension is
+		 * present.
+		 */
+		BIO_free(bio);
 	}
 
-	return 0;
+	peer_san = (STACK_OF(GENERAL_NAME) *) X509_get_ext_d2i(peer, NID_subject_alt_name, NULL, NULL);
+	if (peer_san)
+	{
+		int			san_len = sk_GENERAL_NAME_num(peer_san);
+		int			i;
+
+		/* count the URI SANs and keep the first one */
+		for (i = 0; i < san_len; i++)
+		{
+			const GENERAL_NAME *name = sk_GENERAL_NAME_value(peer_san, i);
+
+			if (name->type == GEN_URI &&
+				port->peer_uri_count++ == 0)
+				port->peer_uri = X509_URI_to_cstring(name->d.uniformResourceIdentifier);
+		}
+
+		/* fail closed if the URI could not be converted */
+		if (port->peer_uri_count > 0 && port->peer_uri == NULL)
+			port->peer_uri_count = 0;
+
+		sk_GENERAL_NAME_pop_free(peer_san, GENERAL_NAME_free);
+	}
+
+	return true;
 }
 
 void
@@ -1201,6 +1256,13 @@ be_tls_close(Port *port)
 	{
 		pfree(port->peer_dn);
 		port->peer_dn = NULL;
+	}
+
+	if (port->peer_uri)
+	{
+		pfree(port->peer_uri);
+		port->peer_uri = NULL;
+		port->peer_uri_count = 0;
 	}
 }
 
@@ -2429,6 +2491,46 @@ X509_NAME_to_cstring(const X509_NAME *name)
 		pfree(dp);
 	if (BIO_free(membuf) != 1)
 		elog(ERROR, "could not free OpenSSL BIO structure");
+
+	return result;
+}
+
+/*
+ * Convert an X509 URI subjectAltName to a cstring.
+ */
+static char *
+X509_URI_to_cstring(const ASN1_STRING *uri)
+{
+	int			len;
+	const unsigned char *data;
+	char	   *result;
+
+	if (uri == NULL)
+	{
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("SSL certificate's URI subject alternative name is invalid")));
+		return NULL;
+	}
+
+	len = ASN1_STRING_length(uri);
+	data = ASN1_STRING_get0_data(uri);
+	result = MemoryContextAlloc(TopMemoryContext, len + 1);
+	memcpy(result, data, len);
+	result[len] = '\0';
+
+	/*
+	 * Reject embedded NULLs in certificate URI SANs to prevent confusion
+	 * between PostgreSQL's cstring handling and the certificate contents.
+	 */
+	if (len != strlen(result))
+	{
+		pfree(result);
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("SSL certificate's URI subject alternative name contains embedded null")));
+		return NULL;
+	}
 
 	return result;
 }
