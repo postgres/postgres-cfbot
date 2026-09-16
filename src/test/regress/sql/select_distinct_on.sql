@@ -82,3 +82,25 @@ SELECT DISTINCT ON (y, x) x, y FROM (select * from distinct_on_tbl order by x, z
 RESET enable_hashagg;
 
 DROP TABLE distinct_on_tbl;
+
+--
+-- Test SELECT DISTINCT ON with inline ORDER BY
+--
+CREATE TABLE distinct_inline_tbl (a int, b int);
+INSERT INTO distinct_inline_tbl VALUES (1, 10), (1, 20), (2, 5), (2, 15);
+
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl ORDER BY a;
+SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl ORDER BY a;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl ORDER BY a;
+SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl ORDER BY a;
+
+-- Test with HashAgg
+SET enable_sort TO OFF;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl;
+SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl ORDER BY a;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl;
+SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl ORDER BY a;
+RESET enable_sort;
+
+DROP TABLE distinct_inline_tbl;
+
