@@ -23,6 +23,7 @@
 #include "miscadmin.h"
 #include "utils/memutils.h"
 #include "utils/tuplestore.h"
+#include "utils/sortsupport.h"
 
 
 
@@ -77,6 +78,23 @@ build_hash_table(RecursiveUnionState *rustate)
  * 2.6 go back to 2.2
  * ----------------------------------------------------------------
  */
+static void
+populate_result_table_from_hash(RecursiveUnionState *rustate)
+{
+	TupleHashTable hashtable = rustate->hashtable;
+	tuplehash_iterator iter;
+	TupleHashEntry entry;
+	TupleTableSlot *slot = rustate->ps.ps_ResultTupleSlot;
+
+	tuplehash_start_iterate(hashtable->hashtab, &iter);
+	while ((entry = tuplehash_iterate(hashtable->hashtab, &iter)) != NULL)
+	{
+		ExecStoreMinimalTuple(entry->firstTuple, slot, false);
+		tuplestore_puttupleslot(rustate->result_table, slot);
+		ExecClearTuple(slot);
+	}
+}
+
 static TupleTableSlot *
 ExecRecursiveUnion(PlanState *pstate)
 {
@@ -89,6 +107,100 @@ ExecRecursiveUnion(PlanState *pstate)
 
 	CHECK_FOR_INTERRUPTS();
 
+	/* If we need sorting, we must buffer and return from result_table */
+	if (plan->numSortCols > 0)
+	{
+		if (node->result_table == NULL)
+		{
+			/* Run the entire recursion loop and buffer results */
+			node->result_table = tuplestore_begin_heap(false, false, work_mem);
+
+			/* 1. Process non-recursive term */
+			for (;;)
+			{
+				slot = ExecProcNode(outerPlan);
+				if (TupIsNull(slot))
+					break;
+
+				if (plan->numCols > 0)
+				{
+					TupleHashEntry entry;
+					entry = LookupTupleHashEntry(node->hashtable, slot, &isnew, NULL);
+					if (!isnew)
+					{
+						ReplaceTupleHashEntryIfBetter(node->hashtable,
+													  entry,
+													  slot,
+													  node->sort_firstTupleSlot,
+													  node->sortKeys,
+													  plan->numSortCols);
+						continue;
+					}
+				}
+				tuplestore_puttupleslot(node->working_table, slot);
+			}
+
+			/* 2. Process recursive term */
+			node->recursing = true;
+			for (;;)
+			{
+				slot = ExecProcNode(innerPlan);
+				if (TupIsNull(slot))
+				{
+					Tuplestorestate *swaptemp;
+
+					if (node->intermediate_empty)
+						break; /* End of recursion */
+
+					tuplestore_clear(node->working_table);
+					swaptemp = node->working_table;
+					node->working_table = node->intermediate_table;
+					node->intermediate_table = swaptemp;
+					node->intermediate_empty = true;
+					innerPlan->chgParam = bms_add_member(innerPlan->chgParam,
+														 plan->wtParam);
+					continue;
+				}
+
+				if (plan->numCols > 0)
+				{
+					TupleHashEntry entry;
+					entry = LookupTupleHashEntry(node->hashtable, slot, &isnew, NULL);
+					if (!isnew)
+					{
+						bool replaced = ReplaceTupleHashEntryIfBetter(node->hashtable,
+																	  entry,
+																	  slot,
+																	  node->sort_firstTupleSlot,
+																	  node->sortKeys,
+																	  plan->numSortCols);
+						if (replaced)
+						{
+							/* Replaced! Explore this better path */
+							node->intermediate_empty = false;
+							tuplestore_puttupleslot(node->intermediate_table, slot);
+						}
+						continue;
+					}
+				}
+
+				node->intermediate_empty = false;
+				tuplestore_puttupleslot(node->intermediate_table, slot);
+			}
+
+			/* Populate result_table from hashtable */
+			populate_result_table_from_hash(node);
+		}
+
+		/* Read from result_table */
+		slot = node->ps.ps_ResultTupleSlot;
+		if (tuplestore_gettupleslot(node->result_table, true, false, slot))
+			return slot;
+
+		return NULL;
+	}
+
+	/* Original pipelined behavior (numSortCols == 0) */
 	/* 1. Evaluate non-recursive term */
 	if (!node->recursing)
 	{
@@ -198,6 +310,9 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 	rustate->hashtable = NULL;
 	rustate->tempContext = NULL;
 	rustate->tuplesContext = NULL;
+	rustate->result_table = NULL;
+	rustate->sortKeys = NULL;
+	rustate->sort_firstTupleSlot = NULL;
 
 	/* initialize processing state */
 	rustate->recursing = false;
@@ -218,10 +333,20 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 			AllocSetContextCreate(CurrentMemoryContext,
 								  "RecursiveUnion",
 								  ALLOCSET_DEFAULT_SIZES);
-		rustate->tuplesContext =
-			BumpContextCreate(CurrentMemoryContext,
-							  "RecursiveUnion hashed tuples",
-							  ALLOCSET_DEFAULT_SIZES);
+		if (node->numSortCols > 0)
+		{
+			rustate->tuplesContext =
+				AllocSetContextCreate(CurrentMemoryContext,
+									  "RecursiveUnion hashed tuples",
+									  ALLOCSET_DEFAULT_SIZES);
+		}
+		else
+		{
+			rustate->tuplesContext =
+				BumpContextCreate(CurrentMemoryContext,
+								  "RecursiveUnion hashed tuples",
+								  ALLOCSET_DEFAULT_SIZES);
+		}
 	}
 
 	/*
@@ -246,6 +371,8 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 	 * tuples, so we have to initialize them.
 	 */
 	ExecInitResultTypeTL(&rustate->ps);
+	if (node->numSortCols > 0)
+		ExecInitResultSlot(&rustate->ps, &TTSOpsMinimalTuple);
 
 	/*
 	 * Initialize result tuple type.  (Note: we have to set up the result type
@@ -273,6 +400,26 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 		build_hash_table(rustate);
 	}
 
+	if (node->numSortCols > 0)
+	{
+		TupleDesc	desc = ExecGetResultType(outerPlanState(rustate));
+		int			i;
+
+		rustate->sortKeys = (SortSupportData *) palloc0(node->numSortCols * sizeof(SortSupportData));
+		rustate->sort_firstTupleSlot = ExecInitExtraTupleSlot(estate, desc, &TTSOpsMinimalTuple);
+
+		for (i = 0; i < node->numSortCols; i++)
+		{
+			SortSupport skey = &rustate->sortKeys[i];
+
+			skey->ssup_cxt = CurrentMemoryContext;
+			skey->ssup_collation = node->sortCollations[i];
+			skey->ssup_nulls_first = node->sortNullsFirst[i];
+			skey->ssup_attno = node->sortColIdx[i];
+			PrepareSortSupportFromOrderingOp(node->sortOperators[i], skey);
+		}
+	}
+
 	return rustate;
 }
 
@@ -294,6 +441,8 @@ ExecEndRecursiveUnion(RecursiveUnionState *node)
 		MemoryContextDelete(node->tempContext);
 	if (node->tuplesContext)
 		MemoryContextDelete(node->tuplesContext);
+	if (node->result_table)
+		tuplestore_end(node->result_table);
 
 	/*
 	 * close down subplans
@@ -338,4 +487,9 @@ ExecReScanRecursiveUnion(RecursiveUnionState *node)
 	node->intermediate_empty = true;
 	tuplestore_clear(node->working_table);
 	tuplestore_clear(node->intermediate_table);
+	if (node->result_table)
+	{
+		tuplestore_end(node->result_table);
+		node->result_table = NULL;
+	}
 }
