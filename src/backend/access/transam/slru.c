@@ -68,6 +68,7 @@
 #include "access/xlogutils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/shmem.h"
 #include "storage/shmem_internal.h"
@@ -1880,26 +1881,32 @@ SlruScanDirectory(SlruDesc *ctl, SlruScanCallback callback, void *data)
  * build the path), but they just forward to this common implementation that
  * performs the fsync.
  */
-int
-SlruSyncFileTag(SlruDesc *ctl, const FileTag *ftag, char *path)
+void
+SlruSyncFileTag(SlruDesc *ctl, struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
 	int			fd;
-	int			save_errno;
-	int			result;
 
-	SlruFileName(ctl, path, ftag->segno);
+	SlruFileName(ctl, entry->path, entry->tag.segno);
 
-	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+	fd = OpenTransientFile(entry->path, O_RDWR | PG_BINARY);
 	if (fd < 0)
-		return -1;
+	{
+		entry->started = false;
+		entry->open_errno = errno;
+		return;
+	}
 
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_FLUSH_SYNC);
-	result = pg_fsync(fd);
-	pgstat_report_wait_end();
-	save_errno = errno;
+	/*
+	 * Use the generic sync target.  SLRU segments are not smgr relations and
+	 * cannot be reopened from a FileTag in another process, so this fsync
+	 * will run synchronously in worker mode.
+	 */
+	pgaio_io_set_target(ioh, PGAIO_TID_SYNC);
 
-	CloseTransientFile(fd);
+	/* Start the asynchronous fsync; the fd is closed once it completes. */
+	pgaio_io_start_fsync(ioh, fd, false, WAIT_EVENT_SLRU_FLUSH_SYNC);
 
-	errno = save_errno;
-	return result;
+	entry->started = true;
+	entry->close_method = SYNC_CLOSE_TRANSIENT;
+	entry->close_file = fd;
 }

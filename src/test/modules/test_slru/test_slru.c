@@ -17,10 +17,13 @@
 #include "access/slru.h"
 #include "access/transam.h"
 #include "miscadmin.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
+#include "storage/sync.h"
 #include "utils/builtins.h"
+#include "utils/resowner.h"
 
 PG_MODULE_MAGIC;
 
@@ -152,15 +155,47 @@ Datum
 test_slru_page_sync(PG_FUNCTION_ARGS)
 {
 	int64		pageno = PG_GETARG_INT64(0);
-	FileTag		ftag;
-	char		path[MAXPGPATH];
+	InflightSyncEntry entry = {0};
+	PgAioHandle *ioh;
+	int			result;
 
 	/* note that this flushes the full file a segment is located in */
-	ftag.segno = pageno / SLRU_PAGES_PER_SEGMENT;
-	SlruSyncFileTag(TestSlruCtl, &ftag, path);
+	entry.tag.segno = pageno / SLRU_PAGES_PER_SEGMENT;
+
+	/*
+	 * SlruSyncFileTag() now performs the fsync asynchronously.  Drive it the
+	 * same way sync.c does: acquire an AIO handle, let the handler start the
+	 * fsync, wait for its completion and close the file it opened.
+	 */
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &entry.ioret);
+	pgaio_io_get_wref(ioh, &entry.iow);
+
+	HOLD_INTERRUPTS();
+	SlruSyncFileTag(TestSlruCtl, ioh, &entry);
+	RESUME_INTERRUPTS();
+
+	if (entry.started)
+	{
+		pgaio_wref_wait(&entry.iow);
+		result = -entry.ioret.result.result;
+		CloseTransientFile(entry.close_file);
+	}
+	else
+	{
+		pgaio_io_release(ioh);
+		result = entry.open_errno;
+	}
+
+	if (result != 0)
+	{
+		errno = result;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", entry.path)));
+	}
 
 	elog(NOTICE, "Called SlruSyncFileTag() for segment %" PRIu64 " on path %s",
-		 ftag.segno, path);
+		 entry.tag.segno, entry.path);
 
 	PG_RETURN_VOID();
 }
