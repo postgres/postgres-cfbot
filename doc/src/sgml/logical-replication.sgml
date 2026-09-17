@@ -2371,18 +2371,12 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
        <row>
         <entry><literal>replica_identity_full</literal></entry>
         <entry><type>boolean</type></entry>
-        <entry>Indicates whether <literal>replica_identity</literal> represents a full tuple (<literal>true</literal>) or key values of a replica identity index (<literal>false</literal>). This is <literal>NULL</literal> when <literal>replica_identity</literal> is not logged.</entry>
+        <entry>Indicates whether the conflicting relation uses <literal>REPLICA IDENTITY FULL</literal> (<literal>true</literal>) or a replica identity index (<literal>false</literal>). This is <literal>NULL</literal> when replica identity information is not applicable.</entry>
        </row>
        <row>
         <entry><literal>replica_identity</literal></entry>
         <entry><type>json</type></entry>
-        <entry>The JSON representation of the replica identity key values or full tuple.</entry>
-       </row>
-       <row>
-        <entry><literal>remote_tuple</literal></entry>
-        <entry><type>json</type></entry>
-        <entry>The JSON representation of the incoming remote row that caused
-        the conflict.</entry>
+        <entry>The JSON representation of the replica identity key values identifying the conflicting row. This is <literal>NULL</literal> when <literal>replica_identity_full</literal> is <literal>true</literal> or when replica identity is not applicable.</entry>
        </row>
        <row>
         <entry><literal>local_conflicts</literal></entry>
@@ -2391,9 +2385,8 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
          An array of JSON objects representing the state of existing local
          row(s) that caused the conflict. Each object includes the local
          transaction ID (<literal>xid</literal>), commit timestamp
-         (<literal>commit_ts</literal>), origin (<literal>origin</literal>),
-         and the full local row image (<literal>tuple</literal>). This is
-         <literal>NULL</literal> if there are no local conflicting rows
+         (<literal>commit_ts</literal>), and origin (<literal>origin</literal>).
+         This is <literal>NULL</literal> if there are no local conflicting rows
          (e.g., in <literal>update_missing</literal> and
          <literal>delete_missing</literal> conflicts).
         </entry>
@@ -2403,16 +2396,9 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
     </table>
 
     <para>
-     The conflicting row data, including the incoming remote row (<literal>remote_tuple</literal>)
-     and the associated local conflict details (<literal>local_conflicts</literal>), is stored in
+     The replica identity key values (<literal>replica_identity</literal>)
+     and the associated local conflict details (<literal>local_conflicts</literal>) are stored in
      <type>json</type> formats for flexible querying and analysis.
-    </para>
-
-    <para>
-     Note that virtual generated column values appear as
-     <literal>null</literal> in these JSON columns, because such columns have no
-     stored value on the subscriber. In the server log, such columns are instead
-     shown with the constant value <literal>virtual</literal>.
     </para>
    </sect3>
   </sect2>

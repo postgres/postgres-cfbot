@@ -339,6 +339,10 @@ my $clt_check_ba = $node_B->poll_query_until('postgres',
 	"SELECT count(*) > 0 FROM $clt_BA WHERE conflict_type = 'delete_origin_differs';");
 is($clt_check_ba, 1, 'delete_origin_differs logged into CLT on Node B');
 
+my $clt_row_ba = $node_B->safe_psql('postgres',
+	"SELECT replica_identity_full, replica_identity::text, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_BA WHERE conflict_type = 'delete_origin_differs';");
+is($clt_row_ba, 'f|{"a":1}|t', 'delete_origin_differs records RI key columns and local conflict xid');
+
 $log_location = -s $node_A->logfile;
 
 $node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
@@ -358,6 +362,10 @@ my $clt_AB = "pg_conflict.pg_conflict_log_$subid_AB";
 my $clt_check_ab = $node_A->poll_query_until('postgres',
 	"SELECT count(*) > 0 FROM $clt_AB WHERE conflict_type = 'update_deleted';");
 is($clt_check_ab, 1, 'update_deleted logged into CLT on Node A');
+
+my $clt_row_ab = $node_A->safe_psql('postgres',
+	"SELECT replica_identity_full, replica_identity::text, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_AB WHERE conflict_type = 'update_deleted';");
+is($clt_row_ab, 'f|{"a":1}|t', 'update_deleted records RI key columns and local conflict xid');
 
 # Remember the next transaction ID to be assigned
 my $next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
@@ -405,6 +413,10 @@ like(
 .*DETAIL:.* Could not find the row to be updated: remote row \(2, 4\), replica identity full \(2, 2\).*
 .*The row to be updated was deleted locally in transaction [0-9]+ at .*/,
 	'update target row was deleted in tab');
+
+my $clt_row_ab_full = $node_A->safe_psql('postgres',
+	"SELECT replica_identity_full, replica_identity IS NULL, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_AB WHERE replica_identity_full = true;");
+is($clt_row_ab_full, 't|t|t', 'update_deleted with REPLICA IDENTITY FULL sets replica_identity_full=true and replica_identity=NULL');
 
 ###############################################################################
 # Check that the xmin value of the conflict detection slot can be advanced when

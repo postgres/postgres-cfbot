@@ -61,9 +61,9 @@ typedef struct ConflictLogColumnDef
  * type OID; the table is created in this column order by
  * create_conflict_log_table().
  *
- * The tuple/key columns (replica_identity, remote_tuple, local_conflicts) are
- * typed json rather than jsonb on purpose: they hold an exact audit snapshot
- * of the applied tuples and replica identity, and json preserves the verbatim
+ * The replica_identity and local_conflicts columns are typed json rather than
+ * jsonb on purpose: they hold an exact audit snapshot of the replica identity
+ * key values and local conflict metadata, and json preserves the verbatim
  * representation whereas jsonb would normalize it. Indexing them (jsonb's main
  * advantage) wouldn't help anyway, as the conflict log is looked up by its
  * scalar columns (relid, conflict_type, commit timestamp) while these json
@@ -85,7 +85,6 @@ static const ConflictLogColumnDef ConflictLogSchema[] = {
 	{.attname = "remote_origin", .atttypid = TEXTOID},
 	{.attname = "replica_identity_full", .atttypid = BOOLOID},
 	{.attname = "replica_identity", .atttypid = JSONOID},
-	{.attname = "remote_tuple", .atttypid = JSONOID},
 	{.attname = "local_conflicts", .atttypid = JSONARRAYOID}
 };
 
@@ -98,8 +97,7 @@ static const ConflictLogColumnDef LocalConflictSchema[] =
 {
 	{.attname = "xid", .atttypid = XIDOID},
 	{.attname = "commit_ts", .atttypid = TIMESTAMPTZOID},
-	{.attname = "origin", .atttypid = TEXTOID},
-	{.attname = "tuple", .atttypid = JSONOID}
+	{.attname = "origin", .atttypid = TEXTOID}
 };
 
 #define NUM_LOCAL_CONFLICT_ATTRS lengthof(LocalConflictSchema)
@@ -138,7 +136,6 @@ static void build_index_datums_from_slot(EState *estate, Relation localrel,
 										 bool *isnull);
 static char *build_index_value_desc(EState *estate, Relation localrel,
 									TupleTableSlot *slot, Oid indexoid);
-static Datum tuple_table_slot_to_json_datum(TupleTableSlot *slot);
 static Datum tuple_table_slot_to_indextup_json(EState *estate,
 											   Relation localrel,
 											   Oid replica_index,
@@ -149,8 +146,7 @@ static void insert_conflict_log_tuple(EState *estate, Relation rel,
 									  Relation conflictlogrel,
 									  ConflictType conflict_type,
 									  TupleTableSlot *searchslot,
-									  List *conflicttuples,
-									  TupleTableSlot *remoteslot);
+									  List *conflicttuples);
 
 /*
  * Builds the TupleDesc for the conflict log table.
@@ -431,8 +427,7 @@ ReportApplyConflict(EState *estate, ResultRelInfo *relinfo, int elevel,
 								  conflictlogrel,
 								  type,
 								  searchslot,
-								  conflicttuples,
-								  remoteslot);
+								  conflicttuples);
 		table_close(conflictlogrel, NoLock);
 	}
 }
@@ -1010,29 +1005,6 @@ build_index_value_desc(EState *estate, Relation localrel, TupleTableSlot *slot,
 }
 
 /*
- * tuple_table_slot_to_json_datum
- *
- * Helper function to convert a TupleTableSlot to JSON.
- */
-static Datum
-tuple_table_slot_to_json_datum(TupleTableSlot *slot)
-{
-	HeapTuple	tuple;
-	Datum		datum;
-	Datum		json;
-
-	Assert(slot != NULL);
-
-	tuple = ExecCopySlotHeapTuple(slot);
-	datum = heap_copy_tuple_as_datum(tuple, slot->tts_tupleDescriptor);
-
-	json = DirectFunctionCall1(row_to_json, datum);
-	heap_freetuple(tuple);
-
-	return json;
-}
-
-/*
  * tuple_table_slot_to_indextup_json
  *
  * Fetch replica identity key from the tuple table slot and convert into a
@@ -1124,7 +1096,7 @@ build_local_conflicts_tupledesc(void)
  * ConflictTupleInfo objects.
  *
  * Example output structure:
- * [ { "xid": "1001", "commit_ts": "...", "origin": "...", "tuple": {...} }, ... ]
+ * [ { "xid": "1001", "commit_ts": "...", "origin": "..." }, ... ]
  */
 static Datum
 build_local_conflicts_json_array(List *conflicttuples)
@@ -1180,13 +1152,7 @@ build_local_conflicts_json_array(List *conflicttuples)
 		else
 			nulls[attno++] = true;
 
-		/* Convert conflicting tuple to JSON datum. */
-		if (conflicttuple->slot)
-			values[attno] = tuple_table_slot_to_json_datum(conflicttuple->slot);
-		else
-			nulls[attno] = true;
-
-		Assert(attno + 1 == NUM_LOCAL_CONFLICT_ATTRS);
+		Assert(attno == NUM_LOCAL_CONFLICT_ATTRS);
 
 		tuple = heap_form_tuple(tupdesc, values, nulls);
 
@@ -1231,8 +1197,7 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 						  Relation conflictlogrel,
 						  ConflictType conflict_type,
 						  TupleTableSlot *searchslot,
-						  List *conflicttuples,
-						  TupleTableSlot *remoteslot)
+						  List *conflicttuples)
 {
 	Datum		values[NUM_CONFLICT_ATTRS] = {0};
 	bool		nulls[NUM_CONFLICT_ATTRS] = {0};
@@ -1289,8 +1254,10 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 
 		/*
 		 * If the table has a valid replica identity index, build the index
-		 * JSON datum from key value. Otherwise, construct it from the
-		 * complete tuple in REPLICA IDENTITY FULL cases.
+		 * JSON datum from key value. Otherwise, in REPLICA IDENTITY FULL
+		 * cases, set replica_identity_full to true and leave replica_identity
+		 * NULL to avoid serializing full tuples that could exceed memory
+		 * allocation limits.
 		 */
 		if (OidIsValid(replica_index))
 		{
@@ -1302,7 +1269,7 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 		else
 		{
 			values[attno++] = BoolGetDatum(true);
-			values[attno++] = tuple_table_slot_to_json_datum(searchslot);
+			nulls[attno++] = true;
 		}
 	}
 	else
@@ -1310,11 +1277,6 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 		nulls[attno++] = true;
 		nulls[attno++] = true;
 	}
-
-	if (!TupIsNull(remoteslot))
-		values[attno++] = tuple_table_slot_to_json_datum(remoteslot);
-	else
-		nulls[attno++] = true;
 
 	/*
 	 * In update_missing and delete_missing conflicts, there are no local
