@@ -1124,6 +1124,51 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-credential-validation-enabled" xreflabel="credential_validation_enabled">
+      <term><varname>credential_validation_enabled</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>credential_validation_enabled</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+
+      <listitem>
+       <para>
+        When enabled, each backend periodically re-validates the credentials of
+        its active session and terminates the session if they are no longer
+        valid.  The baseline check verifies that the authenticated role still
+        exists and has not passed its <literal>VALID UNTIL</literal> expiration;
+        depending on the authentication method, an additional method-specific
+        check is applied, such as expiration of an <productname>OAuth</productname>
+        bearer token or of the client certificate.  The default is
+        <literal>off</literal>.
+       </para>
+       <para>
+        The re-validation period is controlled by
+        <xref linkend="guc-credential-validation-interval"/>.  Validation is
+        performed at command boundaries, so a session is never interrupted in
+        the middle of a running statement.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-credential-validation-interval" xreflabel="credential_validation_interval">
+      <term><varname>credential_validation_interval</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>credential_validation_interval</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+
+      <listitem>
+       <para>
+        Sets the interval between the periodic credential re-validations that are
+        performed when <xref linkend="guc-credential-validation-enabled"/> is
+        enabled.  If this value is specified without units, it is taken as
+        seconds.  The valid range is from 5 seconds to 3600 seconds (one hour),
+        and the default is 60 seconds.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-password-encryption" xreflabel="password_encryption">
       <term><varname>password_encryption</varname> (<type>enum</type>)
       <indexterm>

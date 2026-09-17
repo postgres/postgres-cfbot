@@ -42,6 +42,7 @@
 #include "commands/repack.h"
 #include "common/pg_prng.h"
 #include "jit/jit.h"
+#include "libpq/auth-validate.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
@@ -4771,6 +4772,11 @@ PostgresMain(const char *dbname, const char *username)
 					enable_timeout_after(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 										 IdleInTransactionSessionTimeout);
 				}
+
+				/* Re-enable credential validation timer if needed */
+				if (credential_validation_enabled &&
+					!get_timeout_active(CREDENTIAL_VALIDATION_TIMEOUT))
+					EnableCredentialValidationTimeout();
 			}
 			else
 			{
@@ -4823,6 +4829,11 @@ PostgresMain(const char *dbname, const char *username)
 					enable_timeout_after(IDLE_SESSION_TIMEOUT,
 										 IdleSessionTimeout);
 				}
+
+				/* Re-enable credential validation timer if needed */
+				if (credential_validation_enabled &&
+					!get_timeout_active(CREDENTIAL_VALIDATION_TIMEOUT))
+					EnableCredentialValidationTimeout();
 			}
 
 			/* Report any recently-changed GUC options */
@@ -4924,6 +4935,21 @@ PostgresMain(const char *dbname, const char *username)
 		 */
 		if (ignore_till_sync && firstchar != EOF)
 			continue;
+
+		/*
+		 * If a credential validation cycle came due while we were processing
+		 * the previous command or waiting for input, run it now -- a single
+		 * check-point that covers every command type below.  This is a safe
+		 * spot: we are between commands and hold no locks.  Skip it while
+		 * still starting up (e.g. during replication command setup), matching
+		 * the IsNormalProcessingMode() guard used elsewhere.
+		 */
+		if (CredentialValidationTimeoutPending && IsNormalProcessingMode())
+		{
+			CredentialValidationTimeoutPending = false;
+			ProcessCredentialValidation();	/* may FATAL if credentials expired */
+			EnableCredentialValidationTimeout();
+		}
 
 		switch (firstchar)
 		{
