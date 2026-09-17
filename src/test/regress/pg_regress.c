@@ -1710,7 +1710,39 @@ log_child_failure(int exitstatus)
 }
 
 /*
+ * During  the test execution the concurrency level varies
+ * this computes the average concurrency from the moment the
+ * first test starts to the moment the last test stops.
+ */
+static void
+log_group_concurrency(instr_time *test_start, instr_time *test_stop, int num_tests)
+{
+	double group_start = INSTR_TIME_GET_NANOSEC(test_start[0]);
+	double group_stop = INSTR_TIME_GET_NANOSEC(test_stop[0]);
+	double total = (group_stop - group_start);
+	for(int i = 1; i < num_tests; i++)
+	{
+		double t0 = INSTR_TIME_GET_NANOSEC(test_start[i]);
+		double tf = INSTR_TIME_GET_NANOSEC(test_stop[i]);
+		if (i == 0 || (t0 < group_start))
+			group_start = t0;
+		if (i == 0 || (tf > group_stop))
+			group_stop = tf;
+		total += tf - t0;
+	}
+	note("effective concurrency %.2f / %d", total / (group_stop - group_start), num_tests);
+}
+
+/*
  * Run all the tests specified in one schedule file
+ *
+ * Schedule file syntax:
+ *   Schedule = (Blank | Comment | Group)*
+ *   Group    = "test:" (Line | Comment) (Indent Line)*
+ *   Line     = token (Space+ token)* Comment?
+ *   Blank    = '\n'
+ *   Comment  = '#' [^\n]* \n
+ *   Indent   = [\t ]+
  */
 static void
 run_schedule(const char *schedule, test_start_function startfunc,
@@ -1728,45 +1760,84 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	char		scbuf[1024];
 	FILE	   *scf;
 	int			line_num = 0;
+	int			test_start = 0;
+	int			num_tests;
+	bool		in_group;
+	bool		eof = false;
+	int			i;
 
 	memset(tests, 0, sizeof(tests));
 	memset(resultfiles, 0, sizeof(resultfiles));
 	memset(expectfiles, 0, sizeof(expectfiles));
 	memset(tags, 0, sizeof(tags));
 
+
 	scf = fopen(schedule, "r");
 	if (!scf)
 		bail("could not open file \"%s\" for reading: %m", schedule);
 
-	while (fgets(scbuf, sizeof(scbuf), scf))
+	num_tests = 0;
+	in_group = false;
+
+	while (!eof)
 	{
 		char	   *test = NULL;
 		char	   *c;
-		int			num_tests;
 		bool		inword;
-		int			i;
+
+		if (!fgets(scbuf, sizeof(scbuf), scf))
+		{
+			eof = true;
+			goto run_group;
+		}
 
 		line_num++;
+
 
 		/* strip trailing whitespace, especially the newline */
 		i = strlen(scbuf);
 		while (i > 0 && isspace((unsigned char) scbuf[i - 1]))
 			scbuf[--i] = '\0';
 
-		if (scbuf[0] == '\0' || scbuf[0] == '#')
+		if (scbuf[0] == '#' || scbuf[0] == '\0')
 			continue;
-		if (strncmp(scbuf, "test: ", 6) == 0)
-			test = scbuf + 6;
+
+		if (scbuf[0] == ' ' || scbuf[0] == '\t')
+		{
+			if (!in_group)
+			{
+				bail("indented test name in schedule file \"%s\" line %d "
+					 "without a preceding \"test:\" line: %s",
+					 schedule, line_num, scbuf);
+			}
+			test = scbuf;
+		}
 		else
 		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
+			if (strncmp(scbuf, "test:", 5) != 0)
+			{
+				bail("syntax error in schedule file \"%s\" line %d: "
+					 "expected \"test:\", indented test group continuation, got \"%s\"",
+					 schedule, line_num, scbuf);
+			}
+			if (in_group)
+				goto run_group;
+
+
+test_line:
+			test_start = line_num;
+			in_group = true;
+			num_tests = 0;
+			test = scbuf + 5;
 		}
 
-		num_tests = 0;
+		while (*test == ' ' || *test == '\t')
+			test++;
 		inword = false;
 		for (c = test;; c++)
 		{
+			if (*c == '#')
+				break;
 			if (*c == '\0' || isspace((unsigned char) *c))
 			{
 				if (inword)
@@ -1796,12 +1867,15 @@ run_schedule(const char *schedule, test_start_function startfunc,
 				inword = true;
 			}
 		}
+		continue;
 
+run_group:
+		if (!in_group)
+			bail("pg_regress error while reading schedule file \"%s\" line %d",
+				 schedule, test_start);
 		if (num_tests == 0)
-		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
-		}
+			bail("empty test group in schedule file \"%s\" line %d",
+				 schedule, test_start);
 
 		if (num_tests == 1)
 		{
@@ -1849,6 +1923,9 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
 			note_end();
 		}
+
+		if(num_tests > 1)
+			log_group_concurrency(starttimes, stoptimes, num_tests);
 
 		/* Check results for all tests */
 		for (i = 0; i < num_tests; i++)
@@ -1901,7 +1978,6 @@ run_schedule(const char *schedule, test_start_function startfunc,
 				}
 			}
 		}
-
 		for (i = 0; i < num_tests; i++)
 		{
 			pg_free(tests[i]);
@@ -1910,10 +1986,18 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			free_stringlist(&expectfiles[i]);
 			free_stringlist(&tags[i]);
 		}
+		/* return */
+		if (strncmp(scbuf, "test:", 5) == 0)
+			goto test_line;
+
+		in_group = false;
+		num_tests = 0;
 	}
 
 	fclose(scf);
 }
+
+
 
 /*
  * Run a single test
