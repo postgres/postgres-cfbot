@@ -440,6 +440,14 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 								 remoterel->relkind,
 								 remoterel->nspname, remoterel->relname);
 
+		/* Local relation must not be global temporary */
+		if (RELATION_IS_GLOBAL_TEMP(entry->localrel))
+			ereport(ERROR,
+					errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					errmsg("cannot use relation \"%s.%s\" as logical replication target",
+						   remoterel->nspname, remoterel->relname),
+					errdetail("This operation is not supported for global temporary relations."));
+
 		/*
 		 * Build the mapping of local attribute numbers to remote attribute
 		 * numbers and validate that we don't miss any replicated columns as

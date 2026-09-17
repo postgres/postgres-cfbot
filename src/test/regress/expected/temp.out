@@ -42,6 +42,12 @@ SELECT * FROM temptest;
 DROP TABLE temptest;
 -- test temp table deletion
 CREATE TEMP TABLE temptest(col int);
+SELECT reloncommit FROM pg_class WHERE oid = 'temptest'::regclass;
+ reloncommit 
+-------------
+ n
+(1 row)
+
 \c
 SELECT * FROM temptest;
 ERROR:  relation "temptest" does not exist
@@ -49,6 +55,12 @@ LINE 1: SELECT * FROM temptest;
                       ^
 -- Test ON COMMIT DELETE ROWS
 CREATE TEMP TABLE temptest(col int) ON COMMIT DELETE ROWS;
+SELECT reloncommit FROM pg_class WHERE oid = 'temptest'::regclass;
+ reloncommit 
+-------------
+ d
+(1 row)
+
 -- while we're here, verify successful truncation of index with SQL function
 CREATE INDEX ON temptest(bit_length(''));
 BEGIN;
@@ -86,6 +98,12 @@ DROP TABLE temptest;
 -- Test ON COMMIT DROP
 BEGIN;
 CREATE TEMP TABLE temptest(col int) ON COMMIT DROP;
+SELECT reloncommit FROM pg_class WHERE oid = 'temptest'::regclass;
+ reloncommit 
+-------------
+ D
+(1 row)
+
 INSERT INTO temptest VALUES (1);
 INSERT INTO temptest VALUES (2);
 SELECT * FROM temptest;
@@ -284,6 +302,15 @@ create temp table temp_parted_oncommit_test1
 create temp table temp_parted_oncommit_test2
   partition of temp_parted_oncommit_test
   for values in (2) on commit drop;
+select relname, reloncommit from pg_class
+ where relname ~ 'temp_parted_oncommit_test' order by relname;
+          relname           | reloncommit 
+----------------------------+-------------
+ temp_parted_oncommit_test  | d
+ temp_parted_oncommit_test1 | p
+ temp_parted_oncommit_test2 | D
+(3 rows)
+
 insert into temp_parted_oncommit_test values (1), (2);
 commit;
 -- Data from the remaining partition is still here as its rows are

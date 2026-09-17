@@ -1,0 +1,172 @@
+Parsed test spec with 2 sessions
+
+starting permutation: create vacdml1 vac1 vacdml2 vac2 vacdml1 vac1prep vac1 vac1cmp vacdml2 vac2prep vac2 vac2cmp vacdml1 vac1prep vac1 vac1cmp vacdml2 vac2prep vac2 vac2cmp drop
+step create: CREATE GLOBAL TEMP TABLE vactest (a int);
+step vacdml1: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  DELETE FROM vactest WHERE a % 2 = 0;
+  INSERT INTO vactest SELECT a * 2 FROM vactest;
+
+step vac1: VACUUM (FREEZE);
+step vacdml2: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  UPDATE vactest SET a = a * 2 WHERE a % 2 = 1;
+
+step vac2: VACUUM (FREEZE);
+step vacdml1: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  DELETE FROM vactest WHERE a % 2 = 0;
+  INSERT INTO vactest SELECT a * 2 FROM vactest;
+
+step vac1prep: SELECT save_xids();
+save_xids
+---------
+         
+(1 row)
+
+step vac1: VACUUM (FREEZE);
+step vac1cmp: SELECT * FROM check_new_xids();
+local_xid|global_xid|db_xid |proc_xid
+---------+----------+-------+--------
+younger  |younger   |younger|younger 
+(1 row)
+
+step vacdml2: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  UPDATE vactest SET a = a * 2 WHERE a % 2 = 1;
+
+step vac2prep: SELECT save_xids();
+save_xids
+---------
+         
+(1 row)
+
+step vac2: VACUUM (FREEZE);
+step vac2cmp: SELECT * FROM check_new_xids();
+local_xid|global_xid|db_xid |proc_xid
+---------+----------+-------+--------
+younger  |younger   |younger|younger 
+(1 row)
+
+step vacdml1: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  DELETE FROM vactest WHERE a % 2 = 0;
+  INSERT INTO vactest SELECT a * 2 FROM vactest;
+
+step vac1prep: SELECT save_xids();
+save_xids
+---------
+         
+(1 row)
+
+step vac1: VACUUM (FREEZE);
+step vac1cmp: SELECT * FROM check_new_xids();
+local_xid|global_xid|db_xid |proc_xid
+---------+----------+-------+--------
+younger  |younger   |younger|younger 
+(1 row)
+
+step vacdml2: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  UPDATE vactest SET a = a * 2 WHERE a % 2 = 1;
+
+step vac2prep: SELECT save_xids();
+save_xids
+---------
+         
+(1 row)
+
+step vac2: VACUUM (FREEZE);
+step vac2cmp: SELECT * FROM check_new_xids();
+local_xid|global_xid|db_xid |proc_xid
+---------+----------+-------+--------
+younger  |younger   |younger|younger 
+(1 row)
+
+step drop: DROP TABLE vactest;
+
+starting permutation: create ocd_create ocd_use ocd_save vacdml1 vacdml2 vacdml1 vacdml2 ocd_use ocd_check ocd_use ocd_check ocd_save vacdml1 vacdml2 ocd_trunc ocd_check ocd_drop drop
+step create: CREATE GLOBAL TEMP TABLE vactest (a int);
+step ocd_create: 
+  CREATE GLOBAL TEMP TABLE ocdtest (a int, b text) ON COMMIT DELETE ROWS;
+  ALTER TABLE ocdtest ALTER COLUMN b SET STORAGE EXTERNAL;
+
+  CREATE FUNCTION ocd_check(OUT rel_xid text, OUT toast_xid text,
+                            OUT rows bigint, OUT proc_min_ok boolean)
+  BEGIN ATOMIC
+    SELECT cmp_xids(o.rel_xid, s.rel_xid),
+           cmp_xids(o.toast_xid, s.toast_xid),
+           (SELECT count(*) FROM ocdtest),
+           -- the value published in PGPROC must match the in-memory minimum
+           x.proc_xid = (SELECT min(t.relfrozenxid::text::bigint)
+                           FROM pg_gtrs_in_use() t
+                          WHERE t.relfrozenxid != 0)
+    FROM ocd_saved s, ocd_xids o, xids x;
+  END;
+
+step ocd_use: INSERT INTO ocdtest SELECT g, repeat('x', 3000) FROM generate_series(1, 20) g;
+step ocd_save: SELECT ocd_save();
+ocd_save
+--------
+        
+(1 row)
+
+step vacdml1: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  DELETE FROM vactest WHERE a % 2 = 0;
+  INSERT INTO vactest SELECT a * 2 FROM vactest;
+
+step vacdml2: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  UPDATE vactest SET a = a * 2 WHERE a % 2 = 1;
+
+step vacdml1: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  DELETE FROM vactest WHERE a % 2 = 0;
+  INSERT INTO vactest SELECT a * 2 FROM vactest;
+
+step vacdml2: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  UPDATE vactest SET a = a * 2 WHERE a % 2 = 1;
+
+step ocd_use: INSERT INTO ocdtest SELECT g, repeat('x', 3000) FROM generate_series(1, 20) g;
+step ocd_check: SELECT * FROM ocd_check();
+rel_xid|toast_xid|rows|proc_min_ok
+-------+---------+----+-----------
+younger|younger  |   0|t          
+(1 row)
+
+step ocd_use: INSERT INTO ocdtest SELECT g, repeat('x', 3000) FROM generate_series(1, 20) g;
+step ocd_check: SELECT * FROM ocd_check();
+rel_xid|toast_xid|rows|proc_min_ok
+-------+---------+----+-----------
+younger|younger  |   0|t          
+(1 row)
+
+step ocd_save: SELECT ocd_save();
+ocd_save
+--------
+        
+(1 row)
+
+step vacdml1: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  DELETE FROM vactest WHERE a % 2 = 0;
+  INSERT INTO vactest SELECT a * 2 FROM vactest;
+
+step vacdml2: 
+  INSERT INTO vactest SELECT * FROM generate_series(1, 10);
+  UPDATE vactest SET a = a * 2 WHERE a % 2 = 1;
+
+step ocd_trunc: TRUNCATE ocdtest;
+step ocd_check: SELECT * FROM ocd_check();
+rel_xid|toast_xid|rows|proc_min_ok
+-------+---------+----+-----------
+younger|younger  |   0|t          
+(1 row)
+
+step ocd_drop: 
+  DROP FUNCTION ocd_check;
+  DROP TABLE ocdtest;
+
+step drop: DROP TABLE vactest;

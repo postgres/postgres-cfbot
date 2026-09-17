@@ -28,6 +28,7 @@
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "statistics/extended_stats_internal.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 #include "varatt.h"
@@ -142,19 +143,22 @@ statext_ndistinct_build(double totalrows, StatsBuildData *data)
  *		Load the ndistinct value for the indicated pg_statistic_ext tuple
  */
 MVNDistinct *
-statext_ndistinct_load(Oid mvoid, bool inh)
+statext_ndistinct_load(Oid relid, Oid mvoid, bool inh)
 {
+	SysCacheIdentifier cacheId;
 	MVNDistinct *result;
 	bool		isnull;
 	Datum		ndist;
 	HeapTuple	htup;
 
-	htup = SearchSysCache2(STATEXTDATASTXOID,
+	cacheId = rel_is_global_temp(relid) ? TEMPSTATEXTDATASTXOID : STATEXTDATASTXOID;
+
+	htup = SearchSysCache2(cacheId,
 						   ObjectIdGetDatum(mvoid), BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
 
-	ndist = SysCacheGetAttr(STATEXTDATASTXOID, htup,
+	ndist = SysCacheGetAttr(cacheId, htup,
 							Anum_pg_statistic_ext_data_stxdndistinct, &isnull);
 	if (isnull)
 		elog(ERROR,

@@ -25,6 +25,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -269,7 +270,7 @@ CheckIndexCompatible(Oid oldId,
 					  0, NULL);
 
 	/* Get the soon-obsolete pg_index tuple. */
-	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(oldId));
+	tuple = GetEffectivePgIndexTuple(oldId);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for index %u", oldId);
 	indexForm = (Form_pg_index) GETSTRUCT(tuple);
@@ -282,7 +283,7 @@ CheckIndexCompatible(Oid oldId,
 		  heap_attisnull(tuple, Anum_pg_index_indexprs, NULL) &&
 		  indexForm->indisvalid))
 	{
-		ReleaseSysCache(tuple);
+		heap_freetuple(tuple);
 		return false;
 	}
 
@@ -299,7 +300,7 @@ CheckIndexCompatible(Oid oldId,
 	ret = (memcmp(old_indclass->values, opclassIds, old_natts * sizeof(Oid)) == 0 &&
 		   memcmp(old_indcollation->values, collationIds, old_natts * sizeof(Oid)) == 0);
 
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	if (!ret)
 		return false;
@@ -620,14 +621,30 @@ DefineIndex(ParseState *pstate,
 								 GUC_ACTION_SAVE, true, 0, false);
 
 	/*
-	 * Force non-concurrent build on temporary relations, even if CONCURRENTLY
-	 * was requested.  Other backends can't access a temporary relation, so
-	 * there's no harm in grabbing a stronger lock, and a non-concurrent DROP
-	 * is more efficient.  Do this before any use of the concurrent option is
-	 * done.
+	 * Force non-concurrent build on local temporary relations, even if
+	 * CONCURRENTLY was requested.  Other backends can't access a local
+	 * temporary relation, so there's no harm in grabbing a stronger lock.
+	 *
+	 * For now, we explicitly reject concurrent build on global temporary
+	 * relations, for consistency with what we must do for REINDEX --- see
+	 * comments in ReindexIndex() and ReindexTable().
+	 *
+	 * Do this before any use of the concurrent option is done.
 	 */
-	if (stmt->concurrent && get_rel_persistence(tableId) != RELPERSISTENCE_TEMP)
-		concurrent = true;
+	if (stmt->concurrent)
+	{
+		char		relpersistence = get_rel_persistence(tableId);
+
+		if (relpersistence == RELPERSISTENCE_TEMP)
+			concurrent = false;
+		else if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot create index on global temporary table \"%s\" concurrently",
+						   get_rel_name(tableId)));
+		else
+			concurrent = true;
+	}
 	else
 		concurrent = false;
 
@@ -1591,6 +1608,11 @@ DefineIndex(ParseState *pstate,
 				HeapTuple	tup,
 							newtup;
 
+				/*
+				 * For a global temporary index, we update indisvalid in both
+				 * pg_index and the session-local GtrInfo struct, so that the
+				 * change applies to this session and all future sessions.
+				 */
 				tup = SearchSysCache1(INDEXRELID,
 									  ObjectIdGetDatum(indexRelationId));
 				if (!HeapTupleIsValid(tup))
@@ -1602,6 +1624,14 @@ DefineIndex(ParseState *pstate,
 				ReleaseSysCache(tup);
 				table_close(pg_index, RowExclusiveLock);
 				heap_freetuple(newtup);
+
+				if (rel_is_global_temp(indexRelationId))
+				{
+					GtrInfo    *gtr_info;
+
+					gtr_info = GetGlobalTempRelationInfoForUpdate(indexRelationId);
+					gtr_info->indisvalid = false;
+				}
 
 				/*
 				 * CCI here to make this update visible, in case this recurses
@@ -3111,10 +3141,14 @@ ReindexIndex(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 	 * obtain lock on table first, to avoid deadlock hazard.  The lock level
 	 * used here must match the index lock obtained in reindex_index().
 	 *
-	 * If it's a temporary index, we will perform a non-concurrent reindex,
-	 * even if CONCURRENTLY was requested.  In that case, reindex_index() will
-	 * upgrade the lock, but that's OK, because other sessions can't hold
-	 * locks on our temporary table.
+	 * If it's a local temporary index, we will perform a non-concurrent
+	 * reindex, even if CONCURRENTLY was requested.  In that case,
+	 * reindex_index() will upgrade the lock, but that's OK, because other
+	 * sessions can't hold locks on our local temporary table.
+	 *
+	 * If it's a global temporary index, that's not OK, because other sessions
+	 * can hold locks on it.  Therefore, we must explicitly reject REINDEX ...
+	 * CONCURRENTLY on a global temporary index.
 	 */
 	state.params = *params;
 	state.locked_table_oid = InvalidOid;
@@ -3130,12 +3164,21 @@ ReindexIndex(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 	 * already hold a lock on the index.
 	 */
 	persistence = get_rel_persistence(indOid);
+
+	if (persistence == RELPERSISTENCE_GLOBAL_TEMP &&
+		(params->options & REINDEXOPT_CONCURRENTLY) != 0)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot reindex global temporary index \"%s\" concurrently",
+					   indexRelation->relname));
+
 	relkind = get_rel_relkind(indOid);
 
 	if (relkind == RELKIND_PARTITIONED_INDEX)
 		ReindexPartitions(stmt, indOid, params, isTopLevel);
 	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			 persistence != RELPERSISTENCE_TEMP)
+			 persistence != RELPERSISTENCE_TEMP &&
+			 persistence != RELPERSISTENCE_GLOBAL_TEMP)
 		ReindexRelationConcurrently(stmt, indOid, params);
 	else
 	{
@@ -3231,16 +3274,21 @@ static Oid
 ReindexTable(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLevel)
 {
 	Oid			heapOid;
+	char		persistence;
 	bool		result;
 	const RangeVar *relation = stmt->relation;
 
 	/*
 	 * The lock level used here should match reindex_relation().
 	 *
-	 * If it's a temporary table, we will perform a non-concurrent reindex,
-	 * even if CONCURRENTLY was requested.  In that case, reindex_relation()
-	 * will upgrade the lock, but that's OK, because other sessions can't hold
-	 * locks on our temporary table.
+	 * If it's a local temporary table, we will perform a non-concurrent
+	 * reindex, even if CONCURRENTLY was requested.  In that case,
+	 * reindex_relation() will upgrade the lock, but that's OK, because other
+	 * sessions can't hold locks on our local temporary table.
+	 *
+	 * If it's a global temporary table, that's not OK, because other sessions
+	 * can hold locks on it.  Therefore, we must explicitly reject REINDEX ...
+	 * CONCURRENTLY on a global temporary table.
 	 */
 	heapOid = RangeVarGetRelidExtended(relation,
 									   (params->options & REINDEXOPT_CONCURRENTLY) != 0 ?
@@ -3248,10 +3296,20 @@ ReindexTable(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 									   0,
 									   RangeVarCallbackMaintainsTable, NULL);
 
+	persistence = get_rel_persistence(heapOid);
+
+	if (persistence == RELPERSISTENCE_GLOBAL_TEMP &&
+		(params->options & REINDEXOPT_CONCURRENTLY) != 0)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot reindex global temporary table \"%s\" concurrently",
+					   relation->relname));
+
 	if (get_rel_relkind(heapOid) == RELKIND_PARTITIONED_TABLE)
 		ReindexPartitions(stmt, heapOid, params, isTopLevel);
 	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			 get_rel_persistence(heapOid) != RELPERSISTENCE_TEMP)
+			 persistence != RELPERSISTENCE_TEMP &&
+			 persistence != RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		result = ReindexRelationConcurrently(stmt, heapOid, params);
 
@@ -3300,6 +3358,7 @@ ReindexMultipleTables(const ReindexStmt *stmt, const ReindexParams *params)
 	List	   *relids = NIL;
 	int			num_keys;
 	bool		concurrent_warning = false;
+	bool		gtt_concurrent_warning = false;
 	bool		tablespace_warning = false;
 	const char *objectName = stmt->name;
 	const ReindexObjectType objectKind = stmt->kind;
@@ -3403,6 +3462,23 @@ ReindexMultipleTables(const ReindexStmt *stmt, const ReindexParams *params)
 		if (classtuple->relpersistence == RELPERSISTENCE_TEMP &&
 			!isTempNamespace(classtuple->relnamespace))
 			continue;
+
+		/* Skip global temporary tables not in use */
+		if (classtuple->relpersistence == RELPERSISTENCE_GLOBAL_TEMP &&
+			!IsGlobalTempRelationInUse(relid))
+			continue;
+
+		/* Skip global temporary tables, if CONCURRENTLY was requested */
+		if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
+			classtuple->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		{
+			if (!gtt_concurrent_warning)
+				ereport(WARNING,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot reindex global temporary tables concurrently, skipping all"));
+			gtt_concurrent_warning = true;
+			continue;
+		}
 
 		/*
 		 * Check user/system classification.  SYSTEM processes all the
@@ -3675,7 +3751,8 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 		Assert(!RELKIND_HAS_PARTITIONS(relkind));
 
 		if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			relpersistence != RELPERSISTENCE_TEMP)
+			relpersistence != RELPERSISTENCE_TEMP &&
+			relpersistence != RELPERSISTENCE_GLOBAL_TEMP)
 		{
 			ReindexParams newparams = *params;
 
@@ -4117,7 +4194,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		idx->amId = indexRel->rd_rel->relam;
 
 		/* This function shouldn't be called for temporary relations. */
-		if (indexRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		if (indexRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP ||
+			indexRel->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 			elog(ERROR, "cannot reindex a temporary table concurrently");
 
 		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, idx->tableId);

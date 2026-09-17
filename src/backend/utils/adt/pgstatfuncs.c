@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/multixact.h"
 #include "access/xlog.h"
 #include "access/xlogprefetcher.h"
 #include "catalog/catalog.h"
@@ -417,7 +418,7 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_activity(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_ACTIVITY_COLS	31
+#define PG_STAT_GET_ACTIVITY_COLS	33
 	int			num_backends = pgstat_fetch_stat_numbackends();
 	int			curr_backend;
 	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
@@ -513,6 +514,12 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 			/* leader_pid */
 			nulls[29] = true;
 
+			/* tempfrozenxid */
+			nulls[31] = true;
+
+			/* tempminmxid */
+			nulls[32] = true;
+
 			proc = BackendPidGetProc(beentry->st_procpid);
 
 			if (proc == NULL && (beentry->st_backendType != B_BACKEND))
@@ -525,19 +532,24 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 			}
 
 			/*
-			 * If a PGPROC entry was retrieved, display wait events and lock
-			 * group leader or apply leader information if any.  To avoid
-			 * extra overhead, no extra lock is being held, so there is no
-			 * guarantee of consistency across multiple rows.
+			 * If a PGPROC entry was retrieved, display wait events, lock
+			 * group leader or apply leader information if any, tempfrozenxid
+			 * and tempminmxid.  To avoid extra overhead, no extra lock is
+			 * being held, so there is no guarantee of consistency across
+			 * multiple rows.
 			 */
 			if (proc != NULL)
 			{
 				uint32		raw_wait_event;
 				PGPROC	   *leader;
+				TransactionId tempfrozenxid;
+				MultiXactId tempminmxid;
 
 				raw_wait_event = UINT32_ACCESS_ONCE(proc->wait_event_info);
 				wait_event_type = pgstat_get_wait_event_type(raw_wait_event);
 				wait_event = pgstat_get_wait_event(raw_wait_event);
+				tempfrozenxid = (TransactionId) UINT32_ACCESS_ONCE(proc->tempfrozenxid);
+				tempminmxid = (MultiXactId) UINT32_ACCESS_ONCE(proc->tempminmxid);
 
 				leader = proc->lockGroupLeader;
 
@@ -560,6 +572,23 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 						values[29] = Int32GetDatum(leader_pid);
 						nulls[29] = false;
 					}
+				}
+
+				/*
+				 * Show tempfrozenxid and tempminmxid, if valid.  This leaves
+				 * these fields as NULL if these XIDs are invalid (0), which
+				 * indicates the backend is not using any global temporary
+				 * relations.
+				 */
+				if (TransactionIdIsValid(tempfrozenxid))
+				{
+					values[31] = TransactionIdGetDatum(tempfrozenxid);
+					nulls[31] = false;
+				}
+				if (MultiXactIdIsValid(tempminmxid))
+				{
+					values[32] = MultiXactIdGetDatum(tempminmxid);
+					nulls[32] = false;
 				}
 			}
 
@@ -760,6 +789,8 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 			nulls[28] = true;
 			nulls[29] = true;
 			nulls[30] = true;
+			nulls[31] = true;
+			nulls[32] = true;
 		}
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);

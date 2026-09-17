@@ -62,8 +62,9 @@ DROP INDEX [ CONCURRENTLY ] [ IF EXISTS ] <replaceable class="parameter">name</r
       option.
      </para>
      <para>
-      For temporary tables, <command>DROP INDEX</command> is always
-      non-concurrent, as no other session can access them, and
+      This option is not supported for global temporary indexes.  For local
+      temporary indexes, it is accepted, but <command>DROP INDEX</command>
+      is always non-concurrent, as no other session can access them, and
       non-concurrent index drop is cheaper.
      </para>
     </listitem>

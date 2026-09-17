@@ -495,6 +495,9 @@ heapam_relation_set_new_filelocator(Relation rel,
 	 * Initialize to the minimum XID that could put tuples in the table. We
 	 * know that no xacts older than RecentXmin are still running, so that
 	 * will do.
+	 *
+	 * Note: Any change made to this or the way *minmulti is initialized
+	 * should be reflected in heapam_relation_nontransactional_truncate().
 	 */
 	*freezeXid = RecentXmin;
 
@@ -508,7 +511,7 @@ heapam_relation_set_new_filelocator(Relation rel,
 	 */
 	*minmulti = GetOldestMultiXactId();
 
-	srel = RelationCreateStorage(*newrlocator, persistence, true);
+	srel = RelationCreateStorage(rel->rd_id, *newrlocator, persistence, true);
 
 	/*
 	 * If required, set up an init fork for an unlogged table so that it can
@@ -526,8 +529,18 @@ heapam_relation_set_new_filelocator(Relation rel,
 }
 
 static void
-heapam_relation_nontransactional_truncate(Relation rel)
+heapam_relation_nontransactional_truncate(Relation rel,
+										  TransactionId *freezeXid,
+										  MultiXactId *minmulti)
 {
+	/*
+	 * Initialize *freezeXid and *minmulti in the same way as
+	 * heapam_relation_set_new_filelocator().
+	 */
+	*freezeXid = RecentXmin;
+	*minmulti = GetOldestMultiXactId();
+
+	/* Truncate the relation's storage */
 	RelationTruncate(rel, 0);
 }
 
@@ -551,7 +564,8 @@ heapam_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
 	 * NOTE: any conflict in relfilenumber value will be caught in
 	 * RelationCreateStorage().
 	 */
-	dstrel = RelationCreateStorage(*newrlocator, rel->rd_rel->relpersistence, true);
+	dstrel = RelationCreateStorage(rel->rd_id, *newrlocator,
+								   rel->rd_rel->relpersistence, true);
 
 	/* copy main fork */
 	RelationCopyStorage(RelationGetSmgr(rel), dstrel, MAIN_FORKNUM,

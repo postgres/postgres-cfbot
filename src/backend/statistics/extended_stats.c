@@ -23,6 +23,7 @@
 #include "catalog/indexing.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "catalog/pg_temp_statistic_ext_data.h"
 #include "commands/defrem.h"
 #include "commands/progress.h"
 #include "executor/executor.h"
@@ -77,7 +78,7 @@ typedef struct StatExtEntry
 static List *fetch_statentries_for_relation(Relation pg_statext, Relation rel);
 static VacAttrStats **lookup_var_attr_stats(Bitmapset *attrs, List *exprs,
 											int nvacatts, VacAttrStats **vacatts);
-static void statext_store(Oid statOid, bool inh,
+static void statext_store(Oid relid, Oid statOid, bool inh,
 						  MVNDistinct *ndistinct, MVDependencies *dependencies,
 						  MCVList *mcv, Datum exprs, VacAttrStats **stats);
 static int	statext_compute_stattarget(int stattarget,
@@ -227,7 +228,7 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 		}
 
 		/* store the statistics in the catalog */
-		statext_store(stat->statOid, inh,
+		statext_store(RelationGetRelid(onerel), stat->statOid, inh,
 					  ndistinct, dependencies, mcv, exprstats, stats);
 
 		/* for reporting progress */
@@ -805,7 +806,7 @@ lookup_var_attr_stats(Bitmapset *attrs, List *exprs,
  *	tuple.
  */
 static void
-statext_store(Oid statOid, bool inh,
+statext_store(Oid relid, Oid statOid, bool inh,
 			  MVNDistinct *ndistinct, MVDependencies *dependencies,
 			  MCVList *mcv, Datum exprs, VacAttrStats **stats)
 {
@@ -814,7 +815,12 @@ statext_store(Oid statOid, bool inh,
 	Datum		values[Natts_pg_statistic_ext_data];
 	bool		nulls[Natts_pg_statistic_ext_data];
 
-	pg_stextdata = table_open(StatisticExtDataRelationId, RowExclusiveLock);
+	if (rel_is_global_temp(relid))
+		pg_stextdata = table_open(TempStatisticExtDataRelationId,
+								  RowExclusiveLock);
+	else
+		pg_stextdata = table_open(StatisticExtDataRelationId,
+								  RowExclusiveLock);
 
 	memset(nulls, true, sizeof(nulls));
 	memset(values, 0, sizeof(values));
@@ -862,7 +868,7 @@ statext_store(Oid statOid, bool inh,
 	 * Delete the old tuple if it exists, and insert a new one. It's easier
 	 * than trying to update or insert, based on various conditions.
 	 */
-	RemoveStatisticsDataById(statOid, inh);
+	RemoveStatisticsDataById(relid, statOid, inh);
 
 	/* form and insert a new tuple */
 	stup = heap_form_tuple(RelationGetDescr(pg_stextdata), values, nulls);
@@ -1885,7 +1891,7 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 			MCVList    *mcv_list;
 
 			/* Load the MCV list stored in the statistics object */
-			mcv_list = statext_mcv_load(stat->statOid, rte->inh);
+			mcv_list = statext_mcv_load(rte->relid, stat->statOid, rte->inh);
 
 			/*
 			 * Compute the selectivity of the ORed list of clauses covered by
@@ -2444,8 +2450,9 @@ serialize_expr_stats(AnlExprData *exprdata, int nexprs)
  * data to use.
  */
 HeapTuple
-statext_expressions_load(Oid stxoid, bool inh, int idx)
+statext_expressions_load(Oid relid, Oid stxoid, bool inh, int idx)
 {
+	SysCacheIdentifier cacheId;
 	bool		isnull;
 	Datum		value;
 	HeapTuple	htup;
@@ -2454,12 +2461,14 @@ statext_expressions_load(Oid stxoid, bool inh, int idx)
 	HeapTupleData tmptup;
 	HeapTuple	tup;
 
-	htup = SearchSysCache2(STATEXTDATASTXOID,
+	cacheId = rel_is_global_temp(relid) ? TEMPSTATEXTDATASTXOID : STATEXTDATASTXOID;
+
+	htup = SearchSysCache2(cacheId,
 						   ObjectIdGetDatum(stxoid), BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", stxoid);
 
-	value = SysCacheGetAttr(STATEXTDATASTXOID, htup,
+	value = SysCacheGetAttr(cacheId, htup,
 							Anum_pg_statistic_ext_data_stxdexpr, &isnull);
 	if (isnull)
 		elog(ERROR,

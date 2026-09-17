@@ -347,6 +347,84 @@
       </row>
 
       <row>
+       <entry id="pg-gtr-index-info" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_gtr_index_info</primary>
+        </indexterm>
+        <function>pg_gtr_index_info</function> ( <type>oid</type> )
+        <returnvalue>record</returnvalue>
+        ( <parameter>indisvalid</parameter> <type>boolean</type>,
+        <parameter>indisready</parameter> <type>boolean</type> )
+       </para>
+       <para>
+        Returns information about a global temporary index relation being used
+        in the current session.  <structfield>indisvalid</structfield> is true
+        if the index is valid in the current session, and
+        <structfield>indisready</structfield> is true if it is ready for
+        inserts.  Otherwise the index is not valid or ready for inserts, and
+        <xref linkend="sql-reindex"/> needs to be run to make it usable.
+        If the input is not the OID of a global temporary index, or that index
+        has not yet been opened in the current session, then the return values
+        are <literal>NULL</literal>.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry id="pg-gtr-info" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_gtr_info</primary>
+        </indexterm>
+        <function>pg_gtr_info</function> ( <type>oid</type> )
+        <returnvalue>record</returnvalue>
+        ( <parameter>relfilenode</parameter> <type>oid</type>,
+        <parameter>reltablespace</parameter> <type>oid</type>,
+        <parameter>relpages</parameter> <type>int4</type>,
+        <parameter>reltuples</parameter> <type>float4</type>,
+        <parameter>relallvisible</parameter> <type>int4</type>,
+        <parameter>relallfrozen</parameter> <type>int4</type>,
+        <parameter>relfrozenxid</parameter> <type>xid</type>,
+        <parameter>relminmxid</parameter> <type>xid</type> )
+       </para>
+       <para>
+        Returns information about a global temporary relation being used in
+        the current session.  The values returned initially match the values
+        from <link linkend="catalog-pg-class"><structname>pg_class</structname></link>,
+        but various commands may cause them to change. For example,
+        <xref linkend="sql-truncate"/> alters a global temporary relation's
+        <structfield>relfilenode</structfield> without updating the
+        <structname>pg_class</structname> tuple, and this function may be used
+        to retrieve the new value.  If the input is not the OID of a global
+        temporary relation, or that relation has not been used in the current
+        session, then the return values are all <literal>NULL</literal>.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry id="pg-gtrs-in-use" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_gtrs_in_use</primary>
+        </indexterm>
+        <function>pg_gtrs_in_use</function> ()
+        <returnvalue>setof record</returnvalue>
+        ( <parameter>oid</parameter> <type>oid</type>,
+        <parameter>relfilenode</parameter> <type>oid</type>,
+        <parameter>reltablespace</parameter> <type>oid</type>,
+        <parameter>relpages</parameter> <type>int4</type>,
+        <parameter>reltuples</parameter> <type>float4</type>,
+        <parameter>relallvisible</parameter> <type>int4</type>,
+        <parameter>relallfrozen</parameter> <type>int4</type>,
+        <parameter>relfrozenxid</parameter> <type>xid</type>,
+        <parameter>relminmxid</parameter> <type>xid</type> )
+       </para>
+       <para>
+        Returns information about all global temporary relations being used in
+        the current session.  The <parameter>oid</parameter> column contains
+        the OID of a global temporary relation, and the values in the remaining
+        columns match those returned by <function>pg_gtr_info()</function>.
+       </para></entry>
+      </row>
+
+      <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
          <primary>pg_my_temp_schema</primary>

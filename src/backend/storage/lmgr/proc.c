@@ -34,6 +34,7 @@
 #include <sys/time.h>
 
 #include "access/clog.h"
+#include "access/multixact.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xlogutils.h"
@@ -523,6 +524,10 @@ InitProcess(void)
 	/* Initialize wait event information. */
 	MyProc->wait_event_info = 0;
 
+	/* Initialize global temporary table information */
+	MyProc->tempfrozenxid = InvalidTransactionId;
+	MyProc->tempminmxid = InvalidMultiXactId;
+
 	/* Initialize fields for group transaction status update. */
 	MyProc->clogGroupMember = false;
 	MyProc->clogGroupMemberXid = InvalidTransactionId;
@@ -689,6 +694,8 @@ InitAuxiliaryProcess(void)
 	MyProc->backendType = MyBackendType;
 	MyProc->delayChkptFlags = 0;
 	MyProc->statusFlags = 0;
+	MyProc->tempfrozenxid = InvalidTransactionId;
+	MyProc->tempminmxid = InvalidMultiXactId;
 	MyProc->lwWaiting = LW_WS_NOT_WAITING;
 	MyProc->lwWaitMode = 0;
 	MyProc->waitLock = NULL;

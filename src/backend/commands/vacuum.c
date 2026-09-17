@@ -35,6 +35,7 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/global_temp.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_inherits.h"
@@ -59,6 +60,7 @@
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
 #include "utils/injection_point.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -128,7 +130,8 @@ static void vac_truncate_clog(TransactionId frozenXID,
 							  TransactionId lastSaneFrozenXid,
 							  MultiXactId lastSaneMinMulti);
 static bool vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
-					   BufferAccessStrategy bstrategy, bool isTopLevel);
+					   BufferAccessStrategy bstrategy, bool isTopLevel,
+					   bool *isGtr);
 static double compute_parallel_delay(void);
 static VacOptValue get_vacoptval_from_boolean(DefElem *def);
 static bool vac_tid_reaped(ItemPointer itemptr, void *state);
@@ -501,6 +504,7 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 	const char *stmttype;
 	volatile bool in_outer_xact,
 				use_own_xacts;
+	bool		have_gtrs = false;
 
 	stmttype = (params->options & VACOPT_VACUUM) ? "VACUUM" : "ANALYZE";
 
@@ -629,11 +633,16 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 		foreach(cur, relations)
 		{
 			VacuumRelation *vrel = lfirst_node(VacuumRelation, cur);
+			bool		isGtr = false;
+			bool		doAnalyse;
 
 			if (params->options & VACOPT_VACUUM)
 			{
-				if (!vacuum_rel(vrel->oid, vrel->relation, *params, bstrategy,
-								isTopLevel))
+				doAnalyse = vacuum_rel(vrel->oid, vrel->relation, *params,
+									   bstrategy, isTopLevel, &isGtr);
+				if (isGtr)
+					have_gtrs = true;
+				if (!doAnalyse)
 					continue;
 			}
 
@@ -699,6 +708,19 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 		 * PostgresMain().
 		 */
 		StartTransactionCommand();
+	}
+
+	if (params->options & VACOPT_VACUUM && !AmAutoVacuumWorkerProcess())
+	{
+		/*
+		 * If we vacuumed any global temporary relations, update this
+		 * backend's tempfrozenxid and tempminmxid immediately (the vacuum
+		 * cannot be rolled back).  This makes the new values available to
+		 * vac_update_datfrozenxid(), below.  We skip this for autovacuum,
+		 * which cannot vacuum global temporary relations.
+		 */
+		if (have_gtrs)
+			UpdateTempFrozenXids(true);
 	}
 
 	if ((params->options & VACOPT_VACUUM) &&
@@ -1088,6 +1110,11 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 			!isTempOrTempToastNamespace(classForm->relnamespace))
 			continue;
 
+		/* Skip global temporary relations not in use */
+		if (classForm->relpersistence == RELPERSISTENCE_GLOBAL_TEMP &&
+			!IsGlobalTempRelationInUse(relid))
+			continue;
+
 		/* check permissions of relation */
 		if (!vacuum_is_permitted_for_relation(relid, classForm, options, true))
 			continue;
@@ -1144,7 +1171,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	freeze_table_age = params->freeze_table_age;
 	multixact_freeze_table_age = params->multixact_freeze_table_age;
 
-	/* Set pg_class fields in cutoffs */
+	/* Set pg_class / GtrInfo fields in cutoffs */
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
 
@@ -1412,7 +1439,8 @@ vac_estimate_reltuples(Relation relation,
  *	vac_update_relstats() -- update statistics for one relation
  *
  *		Update the whole-relation statistics that are kept in its pg_class
- *		row.  There are additional stats that will be updated if we are
+ *		row (and the session-local GtrInfo struct, for a global temporary
+ *		relation).  There are additional stats that will be updated if we are
  *		doing ANALYZE, but we always update these stats.  This routine works
  *		for both index and heap relation entries in pg_class.
  *
@@ -1464,7 +1492,9 @@ vac_update_relstats(Relation relation,
 	HeapTuple	ctup;
 	void	   *inplace_state;
 	Form_pg_class pgcform;
+	GtrInfo    *gtr_info;
 	bool		dirty,
+				gtr_dirty,
 				futurexid,
 				futuremxid;
 	TransactionId oldfrozenxid;
@@ -1484,29 +1514,27 @@ vac_update_relstats(Relation relation,
 			 relid);
 	pgcform = (Form_pg_class) GETSTRUCT(ctup);
 
-	/* Apply statistical updates, if any, to copied tuple */
+	/*
+	 * For a global temporary relation, do an in-place update of its GtrInfo
+	 * so that it behaves the same as a permanent relation.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(relation))
+		gtr_info = GetGlobalTempRelationInfoForInPlaceUpdate(relid);
+	else
+		gtr_info = NULL;
+
+	/* Apply statistical updates, if any, to copied tuple(s) */
 
 	dirty = false;
-	if (pgcform->relpages != (int32) num_pages)
-	{
-		pgcform->relpages = (int32) num_pages;
-		dirty = true;
-	}
-	if (pgcform->reltuples != (float4) num_tuples)
-	{
-		pgcform->reltuples = (float4) num_tuples;
-		dirty = true;
-	}
-	if (pgcform->relallvisible != (int32) num_all_visible_pages)
-	{
-		pgcform->relallvisible = (int32) num_all_visible_pages;
-		dirty = true;
-	}
-	if (pgcform->relallfrozen != (int32) num_all_frozen_pages)
-	{
-		pgcform->relallfrozen = (int32) num_all_frozen_pages;
-		dirty = true;
-	}
+	gtr_dirty = false;
+	SetEffective_relpages(pgcform, gtr_info, (int32) num_pages,
+						  &dirty, &gtr_dirty);
+	SetEffective_reltuples(pgcform, gtr_info, (float4) num_tuples,
+						   &dirty, &gtr_dirty);
+	SetEffective_relallvisible(pgcform, gtr_info, (int32) num_all_visible_pages,
+							   &dirty, &gtr_dirty);
+	SetEffective_relallfrozen(pgcform, gtr_info, (int32) num_all_frozen_pages,
+							  &dirty, &gtr_dirty);
 
 	/* Apply DDL updates, but not inside an outer transaction (see above) */
 
@@ -1543,8 +1571,15 @@ vac_update_relstats(Relation relation,
 	 * it's corrupt, and overwrite with the oldest remaining XID in the table.
 	 * This should match vac_update_datfrozenxid() concerning what we consider
 	 * to be "in the future".
+	 *
+	 * For a global temporary relation, frozenxid is only valid for the data
+	 * in our local instance of the relation, and is kept in memory, in its
+	 * session-local GtrInfo struct, instead of pg_class.  This contributes
+	 * towards tempfrozenxid for this backend and allows
+	 * vac_update_datfrozenxid() to advance datfrozenxid once every backend
+	 * accessing the relation has vacuumed it.
 	 */
-	oldfrozenxid = pgcform->relfrozenxid;
+	oldfrozenxid = GetEffective_relfrozenxid(pgcform, gtr_info);
 	futurexid = false;
 	if (frozenxid_updated)
 		*frozenxid_updated = false;
@@ -1559,15 +1594,15 @@ vac_update_relstats(Relation relation,
 
 		if (update)
 		{
-			pgcform->relfrozenxid = frozenxid;
-			dirty = true;
+			SetEffective_relfrozenxid(pgcform, gtr_info, frozenxid,
+									  &dirty, &gtr_dirty);
 			if (frozenxid_updated)
 				*frozenxid_updated = true;
 		}
 	}
 
 	/* Similarly for relminmxid */
-	oldminmulti = pgcform->relminmxid;
+	oldminmulti = GetEffective_relminmxid(pgcform, gtr_info);
 	futuremxid = false;
 	if (minmulti_updated)
 		*minmulti_updated = false;
@@ -1582,18 +1617,30 @@ vac_update_relstats(Relation relation,
 
 		if (update)
 		{
-			pgcform->relminmxid = minmulti;
-			dirty = true;
+			SetEffective_relminmxid(pgcform, gtr_info, minmulti,
+									&dirty, &gtr_dirty);
 			if (minmulti_updated)
 				*minmulti_updated = true;
 		}
 	}
 
-	/* If anything changed, write out the tuple. */
+	/* If anything in pg_class changed, write out the tuple */
 	if (dirty)
+	{
 		systable_inplace_update_finish(inplace_state, ctup);
+		/* the above sends transactional and immediate cache inval messages */
+	}
 	else
+	{
 		systable_inplace_update_cancel(inplace_state);
+
+		/*
+		 * If anything changed in a global temporary relation, we must also do
+		 * a relcache inval, to cause the new values to be loaded.
+		 */
+		if (gtr_dirty)
+			CacheInvalidateRelcacheByTuple(ctup);
+	}
 
 	table_close(rd, RowExclusiveLock);
 
@@ -1609,6 +1656,52 @@ vac_update_relstats(Relation relation,
 				 errmsg_internal("overwrote invalid relminmxid value %u with new value %u for table \"%s\"",
 								 oldminmulti, minmulti,
 								 RelationGetRelationName(relation))));
+}
+
+
+/*
+ *	vac_get_min_tempfrozenxids() -- get min temp XIDs over all backends
+ *
+ *		min_tempfrozenxid is set to the minimum tempfrozenxid from all
+ *		backends (including us) connected to our database.
+ *
+ *		min_tempminmxid is set to the minimum tempminmxid from all backends
+ *		(including us) connected to our database.
+ *
+ *		The values returned will be Invalid*Ids, if no backend is accessing
+ *		global temporary tables in our database.
+ */
+static void
+vac_get_min_tempfrozenxids(TransactionId *min_tempfrozenxid,
+						   MultiXactId *min_tempminmxid)
+{
+	/* Defaults, if no other backends found */
+	*min_tempfrozenxid = InvalidTransactionId;
+	*min_tempminmxid = InvalidMultiXactId;
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	for (int i = 0; i < ProcGlobal->allProcCount; i++)
+	{
+		PGPROC	   *proc = GetPGProcByNumber(i);
+
+		/* Ignore backends not connected to our database */
+		if (proc->pid == 0)
+			continue;
+		if (proc->databaseId != MyDatabaseId)
+			continue;
+
+		/* Update the minimum return values */
+		if (TransactionIdIsValid(proc->tempfrozenxid) &&
+			(!TransactionIdIsValid(*min_tempfrozenxid) ||
+			 TransactionIdPrecedes(proc->tempfrozenxid, *min_tempfrozenxid)))
+			*min_tempfrozenxid = proc->tempfrozenxid;
+
+		if (MultiXactIdIsValid(proc->tempminmxid) &&
+			(!MultiXactIdIsValid(*min_tempminmxid) ||
+			 MultiXactIdPrecedes(proc->tempminmxid, *min_tempminmxid)))
+			*min_tempminmxid = proc->tempminmxid;
+	}
+	LWLockRelease(ProcArrayLock);
 }
 
 
@@ -1646,6 +1739,8 @@ vac_update_datfrozenxid(void)
 	bool		dirty = false;
 	ScanKeyData key[1];
 	void	   *inplace_state;
+	TransactionId min_tempfrozenxid;
+	MultiXactId min_tempminmxid;
 
 	/*
 	 * Restrict this task to one backend per database.  This avoids race
@@ -1700,10 +1795,17 @@ vac_update_datfrozenxid(void)
 		/*
 		 * Only consider relations able to hold unfrozen XIDs (anything else
 		 * should have InvalidTransactionId in relfrozenxid anyway).
+		 *
+		 * We exclude global temporary relations here too because, although
+		 * they can hold unfrozen XIDs, their relfrozenxid and relminmxid
+		 * values are kept in memory, instead of in pg_class, and those values
+		 * contribute to tempfrozenxid and tempminmxid, which we account for
+		 * below.
 		 */
-		if (classForm->relkind != RELKIND_RELATION &&
-			classForm->relkind != RELKIND_MATVIEW &&
-			classForm->relkind != RELKIND_TOASTVALUE)
+		if ((classForm->relkind != RELKIND_RELATION &&
+			 classForm->relkind != RELKIND_MATVIEW &&
+			 classForm->relkind != RELKIND_TOASTVALUE) ||
+			classForm->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 		{
 			Assert(!TransactionIdIsValid(relfrozenxid));
 			Assert(!MultiXactIdIsValid(relminmxid));
@@ -1759,6 +1861,31 @@ vac_update_datfrozenxid(void)
 	/* we're done with pg_class */
 	systable_endscan(scan);
 	table_close(relation, AccessShareLock);
+
+	/*
+	 * Account for tempfrozenxid and tempminmxid from all backends connected
+	 * to our database.  This amounts to min(gtr_info.relfrozenxid) and
+	 * min(gtr_info.relminmxid) over all those backends.
+	 */
+	vac_get_min_tempfrozenxids(&min_tempfrozenxid, &min_tempminmxid);
+
+	if (TransactionIdIsValid(min_tempfrozenxid))
+	{
+		Assert(TransactionIdIsNormal(min_tempfrozenxid));
+
+		if (TransactionIdPrecedes(lastSaneFrozenXid, min_tempfrozenxid))
+			bogus = true;
+		else if (TransactionIdPrecedes(min_tempfrozenxid, newFrozenXid))
+			newFrozenXid = min_tempfrozenxid;
+	}
+
+	if (MultiXactIdIsValid(min_tempminmxid))
+	{
+		if (MultiXactIdPrecedes(lastSaneMinMulti, min_tempminmxid))
+			bogus = true;
+		else if (MultiXactIdPrecedes(min_tempminmxid, newMinMulti))
+			newMinMulti = min_tempminmxid;
+	}
 
 	/* chicken out if bogus data found */
 	if (bogus)
@@ -2030,7 +2157,7 @@ vac_truncate_clog(TransactionId frozenXID,
  */
 static bool
 vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
-		   BufferAccessStrategy bstrategy, bool isTopLevel)
+		   BufferAccessStrategy bstrategy, bool isTopLevel, bool *isGtr)
 {
 	LOCKMODE	lmode;
 	Relation	rel;
@@ -2117,6 +2244,10 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		CommitTransactionCommand();
 		return false;
 	}
+
+	/* tell caller if it was a global temporary relation */
+	if (RELATION_IS_GLOBAL_TEMP(rel))
+		*isGtr = true;
 
 	/*
 	 * When recursing to a TOAST table, check privileges on the parent.  NB:
@@ -2388,7 +2519,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		toast_vacuum_params.toast_parent = relid;
 
 		vacuum_rel(toast_relid, NULL, toast_vacuum_params, bstrategy,
-				   isTopLevel);
+				   isTopLevel, isGtr);
 	}
 
 	/*
