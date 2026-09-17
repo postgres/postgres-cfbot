@@ -46,6 +46,7 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
     FORCE_NULL { ( <replaceable class="parameter">column_name</replaceable> [, ...] ) | * }
     ON_ERROR <replaceable class="parameter">error_action</replaceable>
     REJECT_LIMIT <replaceable class="parameter">maxerror</replaceable>
+    ERROR_TABLE <replaceable class="parameter">error_saving_table</replaceable>
     ENCODING '<replaceable class="parameter">encoding_name</replaceable>'
     LOG_VERBOSITY <replaceable class="parameter">verbosity</replaceable>
 </synopsis>
@@ -450,11 +451,13 @@ COPY (SELECT j FROM (VALUES ('null'::json), (NULL::json)) v(j))
       <literal>stop</literal> means fail the command, while
       <literal>ignore</literal> means discard the input row and continue with the next one,
       and <literal>set_null</literal> means replace the field containing the invalid
-      input value with a null value and continue to the next field.
+      input value with a null value and continue to the next field,
+      and <literal>table</literal> means save error information to
+      <replaceable class="parameter">error_saving_table</replaceable> and continue with the next one.
       The default is <literal>stop</literal>.
      </para>
      <para>
-      The <literal>ignore</literal> and <literal>set_null</literal>
+      The <literal>ignore</literal>, <literal>set_null</literal> and <literal>table</literal>
       options are applicable only for <command>COPY FROM</command>
       when the <literal>FORMAT</literal> is <literal>text</literal> or <literal>csv</literal>.
      </para>
@@ -463,19 +466,35 @@ COPY (SELECT j FROM (VALUES ('null'::json), (NULL::json)) v(j))
       <literal>set_null</literal>, a <literal>NOTICE</literal> message is emitted at the end of the
       <command>COPY FROM</command> command containing the count of rows that were ignored or
       changed, if at least one row was affected.
+      If <literal>ON_ERROR</literal> option is set to <literal>table</literal>,
+      a <literal>NOTICE</literal> message containing the row count inserted to
+      <replaceable class="parameter">error_saving_table</replaceable> is
+      emitted at the end of the <command>COPY FROM</command>.
      </para>
      <para>
       When <literal>LOG_VERBOSITY</literal> option is set to <literal>verbose</literal>,
-      for <literal>ignore</literal> option, a <literal>NOTICE</literal> message
+      for <literal>ignore</literal> or <literal>table</literal> option, a <literal>NOTICE</literal> message
       containing the line of the input file and the column name whose input
       conversion has failed is emitted for each discarded row;
       for <literal>set_null</literal> option, a <literal>NOTICE</literal>
       message containing the line of the input file and the column name where
       value was replaced with <literal>NULL</literal> for each input conversion
-      failure.
+      failure,
+      for <literal>table</literal> option, a <literal>NOTICE</literal>
+      message containing the line of the input file and the column name whose input
+      conversion has failed is emitted for each row that inserted to
+      <replaceable class="parameter">error_saving_table</replaceable>.
       When it is set to <literal>silent</literal>, no message is emitted
       regarding input conversion failed rows.
      </para>
+
+     <para>
+      Triggers on <replaceable class="parameter">error_saving_table</replaceable>
+      will be fired. Therefore, the <literal>NOTICE</literal> message regarding
+      rows inserted into <replaceable class="parameter">error_saving_table</replaceable>
+      may differ from what is actually being inserted.
+     </para>
+
     </listitem>
    </varlistentry>
 
@@ -496,6 +515,25 @@ COPY (SELECT j FROM (VALUES ('null'::json), (NULL::json)) v(j))
      </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry id="sql-copy-params-error-table">
+    <term><literal>ERROR_TABLE</literal></term>
+    <listitem>
+      <para>
+        Insert error context details to the table <replaceable class="parameter">error_saving_table</replaceable>.
+        This option is allowed only in <command>COPY FROM</command> and
+        <literal>ON_ERROR</literal> is specified as <literal>TABLE</literal>.
+        The <replaceable class="parameter">error_saving_table</replaceable> must
+        be a typed table based on the system composite type
+        <link linkend="datatype-copy_error_saving"><command>copy_error_saving</command></link>,
+        and the user running <command>COPY FROM</command> requires <literal>INSERT</literal>
+        privileges on it. During the error records insertion,
+        <literal>NOT NULL</literal> and <literal>CHECK</literal> constraints are enforced,
+        and both row-level and statement-level triggers will be fired.
+      </para>
+    </listitem>
+   </varlistentry>
+
 
    <varlistentry id="sql-copy-params-encoding">
     <term><literal>ENCODING</literal></term>
@@ -522,8 +560,8 @@ COPY (SELECT j FROM (VALUES ('null'::json), (NULL::json)) v(j))
      </para>
      <para>
       This is currently used in <command>COPY FROM</command> command when
-      <literal>ON_ERROR</literal> option is set to <literal>ignore</literal>
-      or <literal>set_null</literal>.
+      <literal>ON_ERROR</literal> option is set to <literal>ignore</literal>,
+      <literal>set_null</literal> or <literal>table</literal>.
       </para>
     </listitem>
    </varlistentry>

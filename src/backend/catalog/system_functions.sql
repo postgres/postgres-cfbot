@@ -366,3 +366,16 @@ CREATE OR REPLACE FUNCTION ts_debug(document text,
 BEGIN ATOMIC
     SELECT * FROM ts_debug(get_current_ts_config(), $1);
 END;
+
+CREATE TYPE copy_error_saving AS(
+    userid  oid,
+    copy_tbl  oid,
+    filename  text COLLATE "C",
+    lineno  bigint,
+    line  text COLLATE "C",
+    colname text COLLATE "C",
+    raw_field_value text COLLATE "C",
+    err_message text COLLATE "C",
+    err_detail  text COLLATE "C",
+    errorcode text COLLATE "C"
+);

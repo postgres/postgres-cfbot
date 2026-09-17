@@ -36,6 +36,7 @@ typedef enum CopyOnErrorChoice
 	COPY_ON_ERROR_STOP = 0,		/* immediately throw errors, default */
 	COPY_ON_ERROR_IGNORE,		/* ignore errors */
 	COPY_ON_ERROR_SET_NULL,		/* set error field to null */
+	COPY_ON_ERROR_TABLE,		/* save input conversion errors info to table */
 } CopyOnErrorChoice;
 
 /*
@@ -96,6 +97,7 @@ typedef struct CopyFormatOptions
 	CopyOnErrorChoice on_error; /* what to do when error happened */
 	CopyLogVerbosityChoice log_verbosity;	/* verbosity of logged messages */
 	int64		reject_limit;	/* maximum tolerable number of errors */
+	char		*error_table; 	/* on error, save error info to the table, table name */
 	List	   *convert_select; /* list of column names (can be NIL) */
 } CopyFormatOptions;
 
