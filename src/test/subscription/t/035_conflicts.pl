@@ -84,6 +84,17 @@ $node_subscriber->wait_for_log(
 .*Key already exists in unique index \"conf_tab_c_key\", modified in transaction .*: key \(c\)=\(4\), local row \(4, 4, 4\)./,
 	$log_offset);
 
+# Verify the contents of the Conflict Log Table (CLT)
+# ERROR-level conflicts halt replication and are reported only to server logs,
+# so the CLT should remain empty.
+my $subid = $node_subscriber->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = 'sub_tab';");
+my $clt = "pg_conflict.pg_conflict_log_$subid";
+
+my $conflict_count = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM $clt;");
+is($conflict_count, '0', 'Verified multiple_unique_conflicts is not logged into conflict log table');
+
 pass('multiple_unique_conflicts detected during insert');
 
 # Truncate table to get rid of the error
@@ -113,6 +124,11 @@ $node_subscriber->wait_for_log(
 .*Key already exists in unique index \"conf_tab_b_key\", modified in transaction .*: key \(b\)=\(7\), local row \(7, 7, 7\).*
 .*Key already exists in unique index \"conf_tab_c_key\", modified in transaction .*: key \(c\)=\(8\), local row \(8, 8, 8\)./,
 	$log_offset);
+
+# Verify that the CLT still does not contain ERROR-level conflicts
+$conflict_count = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM $clt;");
+is($conflict_count, '0', 'Verified multiple_unique_conflicts during UPDATE is not logged into conflict log table');
 
 pass('multiple_unique_conflicts detected during update');
 
@@ -183,7 +199,7 @@ $node_B->safe_psql(
 	CREATE SUBSCRIPTION $subname_BA
 	CONNECTION '$node_A_connstr application_name=$subname_BA'
 	PUBLICATION tap_pub_A
-	WITH (origin = none, retain_dead_tuples = true)");
+	WITH (origin = none, retain_dead_tuples = true, conflict_log_destination = 'all')");
 
 # node_B (pub) -> node_A (sub)
 my $node_B_connstr = $node_B->connstr . ' dbname=postgres';
@@ -193,7 +209,7 @@ $node_A->safe_psql(
 	CREATE SUBSCRIPTION $subname_AB
 	CONNECTION '$node_B_connstr application_name=$subname_AB'
 	PUBLICATION tap_pub_B
-	WITH (origin = none, copy_data = off)");
+	WITH (origin = none, copy_data = off, conflict_log_destination = 'all')");
 
 # Wait for initial table sync to finish
 $node_A->wait_for_subscription_sync($node_B, $subname_AB);
@@ -316,6 +332,13 @@ like(
 .*DETAIL:.* Deleting the row that was modified locally in transaction [0-9]+ at .*: local row \(1, 3\), replica identity \(a\)=\(1\)./,
 	'delete target row was modified in tab');
 
+my $subid_BA = $node_B->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = '$subname_BA';");
+my $clt_BA = "pg_conflict.pg_conflict_log_$subid_BA";
+my $clt_check_ba = $node_B->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_BA WHERE conflict_type = 'delete_origin_differs';");
+is($clt_check_ba, 1, 'delete_origin_differs logged into CLT on Node B');
+
 $log_location = -s $node_A->logfile;
 
 $node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
@@ -328,6 +351,13 @@ like(
 .*DETAIL:.* Could not find the row to be updated: remote row \(1, 3\), replica identity \(a\)=\(1\).
 .*The row to be updated was deleted locally in transaction [0-9]+ at .*/,
 	'update target row was deleted in tab');
+
+my $subid_AB = $node_A->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = '$subname_AB';");
+my $clt_AB = "pg_conflict.pg_conflict_log_$subid_AB";
+my $clt_check_ab = $node_A->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_AB WHERE conflict_type = 'update_deleted';");
+is($clt_check_ab, 1, 'update_deleted logged into CLT on Node A');
 
 # Remember the next transaction ID to be assigned
 my $next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
@@ -741,10 +771,6 @@ ok( $node_A->poll_query_until(
 # A conflict log table is system-managed and cannot be altered directly, so
 # moving it to another tablespace must be rejected.
 ###############################################################################
-my $subid = $node_subscriber->safe_psql('postgres',
-	"SELECT oid FROM pg_subscription WHERE subname = 'sub_tab';");
-my $clt = "pg_conflict.pg_conflict_log_$subid";
-
 (undef, undef, $stderr) = $node_subscriber->psql('postgres',
 	"ALTER TABLE $clt SET TABLESPACE pg_default");
 like(
