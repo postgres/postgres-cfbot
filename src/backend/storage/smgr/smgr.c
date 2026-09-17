@@ -164,7 +164,6 @@ static dlist_head unpinned_relns;
 /* local function prototypes */
 static void smgrshutdown(int code, Datum arg);
 static void smgrdestroy(SMgrRelation reln);
-
 static void smgr_aio_reopen(PgAioHandle *ioh);
 static char *smgr_aio_describe_identity(const PgAioTargetData *sd);
 
@@ -317,7 +316,10 @@ smgrunpin(SMgrRelation reln)
 }
 
 /*
- * smgrdestroy() -- Delete an SMgrRelation object.
+ * smgrdestroy() -- Destroy an SMgrRelation object.
+ *
+ * This closes associated files, and frees memory allocated for a relation
+ * by removing any in-memory reference.
  */
 static void
 smgrdestroy(SMgrRelation reln)
@@ -342,9 +344,10 @@ smgrdestroy(SMgrRelation reln)
 }
 
 /*
- * smgrrelease() -- Release all resources used by this object.
+ * smgrrelease() -- Close relation files.
  *
- * The object remains valid.
+ * In contrast to smgrdestroy(), smgrrelease() retains the relation entry,
+ * and will not free memory associated with it.
  */
 void
 smgrrelease(SMgrRelation reln)
@@ -377,7 +380,7 @@ smgrclose(SMgrRelation reln)
 }
 
 /*
- * smgrdestroyall() -- Release resources used by all unpinned objects.
+ * smgrdestroyall() -- Destroy all unpinned objects.
  *
  * It must be known that there are no pointers to SMgrRelations, other than
  * those pinned with smgrpin().
@@ -406,7 +409,7 @@ smgrdestroyall(void)
 }
 
 /*
- * smgrreleaseall() -- Release resources used by all objects.
+ * smgrreleaseall() -- Close all relations.
  */
 void
 smgrreleaseall(void)
@@ -432,12 +435,11 @@ smgrreleaseall(void)
 }
 
 /*
- * smgrreleaserellocator() -- Release resources for given RelFileLocator, if
- *							  it's open.
+ * smgrreleaserellocator() -- Locate a relation and close it.
  *
  * This has the same effects as smgrrelease(smgropen(rlocator)), but avoids
- * uselessly creating a hashtable entry only to drop it again when no
- * such entry exists already.
+ * uselessly creating a hashtable entry, if a hashtable entry exists it is
+ * retained.
  */
 void
 smgrreleaserellocator(RelFileLocatorBackend rlocator)
@@ -454,6 +456,30 @@ smgrreleaserellocator(RelFileLocatorBackend rlocator)
 	if (reln != NULL)
 		smgrrelease(reln);
 }
+
+/*
+ * smgrdestroyrellocator() -- Locate a relation and destroy it.
+ *
+ * This has the same effects as smgrdestroy(smgropen(rlocator)), but avoids
+ * uselessly creating a hashtable entry only to drop it again when no
+ * such entry exists already.
+ */
+void
+smgrdestroyrellocator(RelFileLocatorBackend rlocator)
+{
+	SMgrRelation reln;
+
+	/* Nothing to do if hashtable not set up */
+	if (SMgrRelationHash == NULL)
+		return;
+
+	reln = (SMgrRelation) hash_search(SMgrRelationHash,
+									  &rlocator,
+									  HASH_FIND, NULL);
+	if (reln != NULL)
+		smgrdestroy(reln);
+}
+
 
 /*
  * smgrexists() -- Does the underlying file for a fork exist?
