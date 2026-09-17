@@ -81,6 +81,10 @@ const char *pretty_diff_opts = "--strip-trailing-cr -U3";
  */
 #define WAIT_TICKS_PER_SECOND 20
 
+/*
+ * Maximum supported number of concurrent tests
+ */
+#define MAX_PARALLEL_TESTS 100
 typedef enum TAPtype
 {
 	DIAG = 0,
@@ -105,7 +109,7 @@ char	   *bindir = PGBINDIR;
 char	   *launcher = NULL;
 static _stringlist *loadextension = NULL;
 static int	max_connections = 0;
-static int	max_concurrent_tests = 0;
+static int	max_concurrent_tests = MAX_PARALLEL_TESTS;
 static char *encoding = NULL;
 static _stringlist *schedulelist = NULL;
 static _stringlist *extra_tests = NULL;
@@ -1709,14 +1713,217 @@ log_child_failure(int exitstatus)
 		diag("(test process exited with unrecognized status %d)", exitstatus);
 }
 
+
+
 /*
- * Run all the tests specified in one schedule file
+ * schedule  = ( space | comment | group )+
+ * group     = "test:" name+
+ * name      = (space "\" space comment? newline)+ test-name
+ * comment   = "#" .*
+ * space     = [ \t]*
+ * newline   = "\n" | "\r\n"
+ * test-name = [^ \t\n\r#\\,:()]+
+ */
+typedef struct
+{
+	const char *schedule;
+	FILE	   *file;
+	int			line_num;
+	bool		line_has_name;
+	char		buf[1024];
+	char	   *p;
+} _sched;
+
+/*
+ * Read a line from the schedule file.
+ */
+static bool
+schedule_read_line(_sched *s)
+{
+	/* fgets overrides buf[N-1] only when the line does not fit */
+	const int N = sizeof(s->buf);
+	s->buf[0] = '\0';
+	s->buf[N - 2] = '\0';
+	s->p = s->buf;
+	if (fgets(s->buf, N, s->file) == NULL)
+		return false;
+	s->line_num++;
+	if (s->buf[N - 2] != '\0' && s->buf[N - 2] != '\n')
+		bail("line too long in schedule file \"%s\" line %d",
+			 s->schedule, s->line_num);
+	s->p = s->buf;
+	return true;
+}
+
+/*
+ * check whether the character at the current cursor marks the end of a line.
+ */
+static bool
+schedule_is_eol(const char c)
+{
+	switch (c)
+	{
+		case '\0':
+		case '\n':
+		case '\r':
+		case '#':
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* test if character is part of a test name */
+static bool
+schedule_is_name(const char c)
+{
+	switch (c)
+	{
+		/* line end */
+		case '\0':
+		case '\n':
+		case '\r':
+		case '#':
+		/* spaces */
+		case '\t':
+		case ' ':
+		/* reserved symbols */
+		case '\\':
+		case ':':
+		case ',':
+		case '(':
+		case ')':
+			return false;
+		default:
+			return true;
+	}
+}
+
+/*
+ * Skip leading whitespace characters.
+ */
+static void schedule_skip_whitespace(_sched *s)
+{
+	while (*s->p == ' ' || *s->p == '\t')
+		s->p++;
+}
+
+/* Read on test name, returns NULL if the next token is not a valid test name */
+static char *
+schedule_read_name(_sched *s)
+{
+	size_t		len;
+	char	   *name;
+
+	/* Discard witespaces comments and read more lines if necessary */
+	for(;;){
+		schedule_skip_whitespace(s);
+
+		/* test continues on next line */
+		if (*s->p == '\\')
+		{
+			s->p++;
+			/* accept spaces and comments after the backslash */
+			schedule_skip_whitespace(s);
+			if (!schedule_is_eol(*s->p))
+				bail("syntax error in schedule file \"%s\" line %d: "
+					"test name after \\",
+					s->schedule, s->line_num);
+			/* read the next line */
+			if (!schedule_read_line(s))
+				return NULL;
+			continue;
+		}
+		/* end of line, also end of test list */
+		if (schedule_is_eol(*s->p))
+		{
+			return NULL;
+		}
+		/* possibly a test */
+		break;
+	}
+
+	/* scan one single test name */
+	for (len = 0; len < sizeof(s->buf) ; ++len)
+	{
+		if (!schedule_is_name(s->p[len]))
+			break;
+	}
+
+	if (len == 0)
+		bail("syntax error in schedule file \"%s\" line %d: "
+			 "expected test name, got \"%.*s\"",
+			 s->schedule, s->line_num,
+			 (int) strcspn(s->p, "\r\n"), s->p);
+    
+	name = pg_malloc(len + 1);
+	strncpy(name, s->p, len);
+	name[len] = '\0';
+	s->p += len;
+	return name;
+}
+
+/* One group, or false at end of file. */
+static bool
+schedule_read_group(_sched *s, char **tests, int *num_tests)
+{
+	int start_line;
+	*num_tests = 0;
+	/* discard white spaces and comments */
+	for (;;)
+	{
+		schedule_skip_whitespace(s);
+		if (schedule_is_eol(*s->p))
+		{
+			if (!schedule_read_line(s))
+				return false;
+			continue;
+		}
+		break;
+	}
+	/* check the magic word test */
+	if (strncmp(s->p, "test", 4) != 0)
+		bail("syntax error in schedule file \"%s\" line %d: "
+			 "expected \"test:\" or comment, got \"%.*s\"",
+			 s->schedule, s->line_num,
+			 (int) strcspn(s->p, "\r\n"), s->p);
+
+	
+	/* skip spaces after `test` */
+	s->p += 4;
+	schedule_skip_whitespace(s);
+
+	/* check for the colon separator */
+	if (*(s->p++) != ':')
+		bail("syntax error in schedule file \"%s\" line %d: expected \":\" after \"test\"",
+			 s->schedule, s->line_num);
+	start_line = s->line_num;
+
+	/* read test names */
+	*num_tests = 0;
+	for (;;)
+	{
+		char	   *name = schedule_read_name(s);
+		if (name == NULL)
+			break;
+		if (*num_tests >= max_concurrent_tests)
+			bail("too many tests (%d) in schedule file \"%s\" line %d, test %s",
+				*num_tests, s->schedule, s->line_num, name);
+		tests[(*num_tests)++] = name;
+	}
+	if (*num_tests == 0)
+		bail("empty test group in schedule file \"%s\" line %d",
+			 s->schedule, start_line);
+	return true;
+}
+
+/*
+ * Run all the tests specified in one schedule file.
  */
 static void
 run_schedule(const char *schedule, test_start_function startfunc,
 			 postprocess_result_function postfunc)
 {
-#define MAX_PARALLEL_TESTS 100
 	char	   *tests[MAX_PARALLEL_TESTS];
 	_stringlist *resultfiles[MAX_PARALLEL_TESTS];
 	_stringlist *expectfiles[MAX_PARALLEL_TESTS];
@@ -1725,83 +1932,24 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	instr_time	starttimes[MAX_PARALLEL_TESTS];
 	instr_time	stoptimes[MAX_PARALLEL_TESTS];
 	int			statuses[MAX_PARALLEL_TESTS];
-	char		scbuf[1024];
-	FILE	   *scf;
-	int			line_num = 0;
+	_sched		rd;
+	int			num_tests;
 
 	memset(tests, 0, sizeof(tests));
 	memset(resultfiles, 0, sizeof(resultfiles));
 	memset(expectfiles, 0, sizeof(expectfiles));
 	memset(tags, 0, sizeof(tags));
 
-	scf = fopen(schedule, "r");
-	if (!scf)
+	memset(&rd, 0, sizeof(rd));
+	rd.schedule = schedule;
+	rd.p = rd.buf;
+	rd.file = fopen(schedule, "r");
+	if (!rd.file)
 		bail("could not open file \"%s\" for reading: %m", schedule);
 
-	while (fgets(scbuf, sizeof(scbuf), scf))
+	while (schedule_read_group(&rd, tests, &num_tests))
 	{
-		char	   *test = NULL;
-		char	   *c;
-		int			num_tests;
-		bool		inword;
 		int			i;
-
-		line_num++;
-
-		/* strip trailing whitespace, especially the newline */
-		i = strlen(scbuf);
-		while (i > 0 && isspace((unsigned char) scbuf[i - 1]))
-			scbuf[--i] = '\0';
-
-		if (scbuf[0] == '\0' || scbuf[0] == '#')
-			continue;
-		if (strncmp(scbuf, "test: ", 6) == 0)
-			test = scbuf + 6;
-		else
-		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
-		}
-
-		num_tests = 0;
-		inword = false;
-		for (c = test;; c++)
-		{
-			if (*c == '\0' || isspace((unsigned char) *c))
-			{
-				if (inword)
-				{
-					/* Reached end of a test name */
-					char		sav;
-
-					if (num_tests >= MAX_PARALLEL_TESTS)
-					{
-						bail("too many parallel tests (more than %d) in schedule file \"%s\" line %d: %s",
-							 MAX_PARALLEL_TESTS, schedule, line_num, scbuf);
-					}
-					sav = *c;
-					*c = '\0';
-					tests[num_tests] = pg_strdup(test);
-					num_tests++;
-					*c = sav;
-					inword = false;
-				}
-				if (*c == '\0')
-					break;		/* loop exit is here */
-			}
-			else if (!inword)
-			{
-				/* Start of a test name */
-				test = c;
-				inword = true;
-			}
-		}
-
-		if (num_tests == 0)
-		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
-		}
 
 		if (num_tests == 1)
 		{
@@ -1809,11 +1957,6 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			INSTR_TIME_SET_CURRENT(starttimes[0]);
 			wait_for_tests(pids, statuses, stoptimes, NULL, 1);
 			/* status line is finished below */
-		}
-		else if (max_concurrent_tests > 0 && max_concurrent_tests < num_tests)
-		{
-			bail("too many parallel tests (more than %d) in schedule file \"%s\" line %d: %s",
-				 max_concurrent_tests, schedule, line_num, scbuf);
 		}
 		else if (max_connections > 0 && max_connections < num_tests)
 		{
@@ -1912,7 +2055,7 @@ run_schedule(const char *schedule, test_start_function startfunc,
 		}
 	}
 
-	fclose(scf);
+	fclose(rd.file);
 }
 
 /*
@@ -2113,7 +2256,7 @@ help(void)
 	printf(_("      --max-connections=N       maximum number of concurrent connections\n"));
 	printf(_("                                (default is 0, meaning unlimited)\n"));
 	printf(_("      --max-concurrent-tests=N  maximum number of concurrent tests in schedule\n"));
-	printf(_("                                (default is 0, meaning unlimited)\n"));
+	printf(_("                                default: %d\n"), MAX_PARALLEL_TESTS);
 	printf(_("      --outputdir=DIR           place output files in DIR (default \".\")\n"));
 	printf(_("      --schedule=FILE           use test ordering schedule from FILE\n"));
 	printf(_("                                (can be used multiple times to concatenate)\n"));
@@ -2295,6 +2438,10 @@ regression_main(int argc, char *argv[],
 				break;
 			case 25:
 				max_concurrent_tests = atoi(optarg);
+				if (max_concurrent_tests <= 0 || max_concurrent_tests > MAX_PARALLEL_TESTS)
+					bail("--max-concurrent-tests=%s expected to be integer in range 1-%d" , optarg, MAX_PARALLEL_TESTS);
+				if (max_concurrent_tests > MAX_PARALLEL_TESTS)
+					bail("value for --max-concurrent-tests must be no more than %d", MAX_PARALLEL_TESTS);
 				break;
 			case 26:
 				expecteddir = pg_strdup(optarg);
