@@ -191,6 +191,7 @@ transformAggregateCall(ParseState *pstate, Aggref *agg,
 
 		torder = transformSortClause(pstate,
 									 aggorder,
+									 false /* ORDER BY ALL not applicable - aggregate ORDER BY sorts within groups, not query output */,
 									 &tlist,
 									 EXPR_KIND_ORDER_BY,
 									 true /* force SQL99 rules */ );
