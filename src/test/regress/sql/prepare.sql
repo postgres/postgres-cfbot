@@ -4,7 +4,7 @@
 
 SELECT name, statement, parameter_types, result_types FROM pg_prepared_statements;
 
-PREPARE q1 AS SELECT 1 AS a;
+SELECT 'bingo'\;  PREPARE q1 AS SELECT 1 AS a \; SELECT 42;
 EXECUTE q1;
 
 SELECT name, statement, parameter_types, result_types FROM pg_prepared_statements;
