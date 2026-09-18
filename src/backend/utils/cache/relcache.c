@@ -1671,14 +1671,12 @@ LookupOpclassInfo(Oid operatorClassOid,
 	HeapTuple	htup;
 	bool		indexOK;
 
+	Assert(CacheMemoryContext != NULL);
+
 	if (OpClassCache == NULL)
 	{
 		/* First time through: initialize the opclass cache */
 		HASHCTL		ctl;
-
-		/* Also make sure CacheMemoryContext exists */
-		if (!CacheMemoryContext)
-			CreateCacheMemoryContext();
 
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(OpClassCacheEnt);
@@ -3562,13 +3560,11 @@ RelationBuildLocalRelation(const char *relname,
 
 	/* Shared relations had better be mapped, too */
 	Assert(mapped_relation || !shared_relation);
+	Assert(CacheMemoryContext != NULL);
 
 	/*
 	 * switch to the cache context to create the relcache entry.
 	 */
-	if (!CacheMemoryContext)
-		CreateCacheMemoryContext();
-
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	/*
