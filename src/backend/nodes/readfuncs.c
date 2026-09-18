@@ -514,6 +514,11 @@ _readA_Expr(ReadNodeContext *ctx)
 		local_node->kind = AEXPR_NOT_BETWEEN_SYM;
 		READ_NODE_FIELD(name);
 	}
+	else if (length == 7 && strncmp(token, "IMPLIES", 7) == 0)
+	{
+		local_node->kind = AEXPR_IMPLIES;
+		READ_NODE_FIELD(name);
+	}
 	else if (length == 5 && strncmp(token, ":name", 5) == 0)
 	{
 		local_node->kind = AEXPR_OP;
