@@ -597,8 +597,8 @@ shared_preload_libraries = 'pg_wait_event_tracing'
         marker, one of <literal>QueryStart</literal>,
         <literal>ExecStart</literal>, <literal>ExecEnd</literal>,
         <literal>UtilityStart</literal>, <literal>UtilityEnd</literal>,
-        <literal>TxnCommit</literal>, <literal>TxnAbort</literal>, or
-        <literal>Idle</literal>.
+        <literal>TxnCommit</literal>, <literal>TxnAbort</literal>,
+        <literal>Idle</literal>, or <literal>IdleInTransaction</literal>.
        </para></entry>
       </row>
       <row>
@@ -619,7 +619,8 @@ shared_preload_libraries = 'pg_wait_event_tracing'
         <literal>ExecStart</literal>, <literal>ExecEnd</literal>,
         <literal>UtilityStart</literal>, or <literal>UtilityEnd</literal>;
         <literal>0</literal> for <literal>TxnCommit</literal>,
-        <literal>TxnAbort</literal>, <literal>Idle</literal>, and every
+        <literal>TxnAbort</literal>, <literal>Idle</literal>,
+        <literal>IdleInTransaction</literal>, and every
         wait record.  See the limitations in
         <xref linkend="pgwaiteventtracing-markers"/> for when this is
         <literal>0</literal> even on a start/end marker.
@@ -631,9 +632,16 @@ shared_preload_libraries = 'pg_wait_event_tracing'
        </para>
        <para>
         Executor nesting depth in effect when the marker fired
-        (<literal>0</literal> = top level); meaningful for
+        (<literal>0</literal> = top level): the number of planner and
+        executor calls (planning, start, run, finish, or end of a plan)
+        running in the backend at that moment; meaningful for
         <literal>QueryStart</literal>, <literal>UtilityStart</literal>,
-        <literal>ExecStart</literal>, and <literal>ExecEnd</literal>;
+        <literal>UtilityEnd</literal>, <literal>ExecStart</literal>, and
+        <literal>ExecEnd</literal>.
+        For <literal>TxnCommit</literal> and <literal>TxnAbort</literal>,
+        the number of utility statements running when the transaction
+        ended (nonzero for a <command>COMMIT</command> or
+        <command>ROLLBACK</command> inside a procedure, for example).
         <literal>0</literal> for everything else, including every wait
         record.
        </para></entry>
@@ -673,6 +681,22 @@ shared_preload_libraries = 'pg_wait_event_tracing'
     granted).
    </para>
 
+   <para>
+    The rule itself is
+    <function>pg_wait_event_trace_attribute(records
+    pg_wait_event_trace_record[]) returns setof record</function>, which
+    returns the same columns for an array of trace records (composite
+    type <type>pg_wait_event_trace_record</type>: <structfield>seq</structfield>,
+    <structfield>wait_event_type</structfield>,
+    <structfield>wait_event</structfield>,
+    <structfield>duration_us</structfield>,
+    <structfield>query_id</structfield>, <structfield>depth</structfield>,
+    as in <function>pg_get_wait_event_trace()</function>, in
+    <structfield>seq</structfield> order).  It reads nothing but its
+    argument, so any role may execute it; it can be applied to a ring
+    saved in a table, or to a hand-made marker stream.
+   </para>
+
    <table id="pgwaiteventtracing-by-statement-columns">
     <title><function>pg_wait_event_trace_by_statement</function> Columns</title>
     <tgroup cols="1">
@@ -693,8 +717,10 @@ shared_preload_libraries = 'pg_wait_event_tracing'
        </para>
        <para>
         The bucket's own opening <structfield>seq</structfield> as
-        text, or the synthetic value <literal>&lt;idle&gt;</literal> or
-        <literal>&lt;unattributed&gt;</literal>.
+        text, or one of the synthetic values
+        <literal>&lt;idle&gt;</literal>,
+        <literal>&lt;unattributed&gt;</literal> or
+        <literal>&lt;no-statement&gt;</literal>.
        </para></entry>
       </row>
       <row>
@@ -702,10 +728,10 @@ shared_preload_libraries = 'pg_wait_event_tracing'
         <structfield>statement_seq</structfield> <type>bigint</type>
        </para>
        <para>
-        <structfield>seq</structfield> of the <literal>QueryStart</literal>
-        or <literal>UtilityStart</literal> marker that opened this
-        bucket; <literal>NULL</literal> for
-        <literal>&lt;idle&gt;</literal>/<literal>&lt;unattributed&gt;</literal>.
+        <structfield>seq</structfield> of the <literal>QueryStart</literal>,
+        <literal>UtilityStart</literal> or <literal>ExecStart</literal>
+        marker that opened this bucket; <literal>NULL</literal> for the
+        synthetic buckets.
        </para></entry>
       </row>
       <row>
@@ -714,8 +740,19 @@ shared_preload_libraries = 'pg_wait_event_tracing'
        </para>
        <para>
         <structfield>query_id</structfield> carried by that start
-        marker; <literal>NULL</literal> for
-        <literal>&lt;idle&gt;</literal>/<literal>&lt;unattributed&gt;</literal>.
+        marker; <literal>NULL</literal> for the synthetic buckets.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>phase</structfield> <type>text</type>
+       </para>
+       <para>
+        <literal>pre</literal> for waits that happened after the
+        statement's request arrived but before its start marker was
+        written (see <xref linkend="pgwaiteventtracing-attribution-rule"/>),
+        <literal>statement</literal> for the rest of a statement bucket;
+        <literal>NULL</literal> for the synthetic buckets.
        </para></entry>
       </row>
       <row>
@@ -1249,18 +1286,27 @@ SELECT * FROM pg_get_wait_event_trace(42) ORDER BY seq;
       <entry>
        The executor is starting a plan, at whatever nesting depth is
        currently in effect (<literal>0</literal> = top-level query).
-       Depth is incremented immediately afterward, so a nested
-       invocation's own <literal>ExecStart</literal>/<literal>ExecEnd</literal>
-       pair is correctly bracketed inside the outer one's.
+       The depth counts the planner and executor calls in progress, so SQL
+       that a function runs while a plan is made, started (initial
+       partition pruning), executed, fetched from, finished, or ended (an
+       extension's end callback) is nested inside it, and a nested
+       invocation's own
+       <literal>ExecStart</literal>/<literal>ExecEnd</literal> pair is
+       correctly bracketed inside the outer one's.  A cursor's plan that
+       stays open after the statement that started it (<command>DECLARE
+       CURSOR</command>) does not count once that statement has
+       returned.
       </entry>
      </row>
      <row>
       <entry><literal>ExecEnd</literal></entry>
       <entry><function>ExecutorEnd_hook</function></entry>
       <entry>
-       The executor is finishing that plan; depth is decremented first,
-       so the record's own <structfield>depth</structfield> is the
-       nesting level <emphasis>after</emphasis> this invocation returns.
+       The executor has finished that plan.  The record's own
+       <structfield>depth</structfield> is the nesting level of the
+       context that ended it: <literal>0</literal> for a top-level query,
+       but also for a cursor closed by a top-level <command>CLOSE</command>
+       or at commit.
       </entry>
      </row>
      <row>
@@ -1275,10 +1321,18 @@ SELECT * FROM pg_get_wait_event_trace(42) ORDER BY seq;
       <entry><literal>UtilityEnd</literal></entry>
       <entry><function>ProcessUtility_hook</function> (after chaining returns)</entry>
       <entry>
-       That utility statement has finished. If it raises an error
-       instead of returning normally, this marker is simply never
-       written, exactly as an executor error skips
-       <literal>ExecEnd</literal>.
+       That utility statement has finished, normally or with an error.
+       It is written on error too, so that a utility statement whose
+       error is caught by an <literal>EXCEPTION</literal> block of the
+       procedure or <command>DO</command> block around it is still
+       closed; on error, only for a statement that started with
+       <varname>pg_wait_event_tracing.capture</varname> already at
+       <literal>trace</literal>, the one whose
+       <literal>UtilityStart</literal> is in the ring.  (An executor error, in contrast, skips
+       <literal>ExecEnd</literal>.)  <structfield>depth</structfield> is
+       the executor nesting depth around the statement: nonzero for a
+       utility statement that a function runs while a plan is made or
+       executed, which does not end the outer statement.
       </entry>
      </row>
      <row>
@@ -1289,17 +1343,28 @@ SELECT * FROM pg_get_wait_event_trace(42) ORDER BY seq;
        Any end-of-transaction wait, such as a WAL flush, precedes this
        marker and is therefore attributed to the statement that
        triggered the commit, not to whatever comes after.
+       <structfield>depth</structfield> is the number of utility
+       statements still running: nonzero for a
+       <command>COMMIT</command> inside a procedure or
+       <command>DO</command> block and for the internal transactions of
+       commands such as <command>VACUUM</command> and <command>CREATE
+       INDEX CONCURRENTLY</command>, which are not the end of a statement.
+       It is <literal>0</literal> during process exit, when the
+       statement that was running is not going to continue.
       </entry>
      </row>
      <row>
       <entry><literal>TxnAbort</literal></entry>
       <entry>Transaction-end callback, on abort or parallel-worker abort</entry>
       <entry>
-       The current transaction (or transaction block) has aborted. Also
-       defensively resets the nesting-depth counter to <literal>0</literal>,
-       since an error can unwind through any number of nested executor
-       invocations without each one's own <literal>ExecEnd</literal>
-       ever running.
+       The current transaction (or transaction block) has aborted.
+       <structfield>depth</structfield> as for
+       <literal>TxnCommit</literal>: nonzero for a
+       <command>ROLLBACK</command> inside a procedure.  An error unwinds
+       executor invocations without their <literal>ExecEnd</literal>
+       ever running, but the nesting depth goes back down as each
+       invocation is unwound, also when an <literal>EXCEPTION</literal>
+       block catches the error.
       </entry>
      </row>
      <row>
@@ -1310,8 +1375,22 @@ SELECT * FROM pg_get_wait_event_trace(42) ORDER BY seq;
        hook, because none of those fire while a backend is simply
        waiting for its next client message. Emitted the first time a
        backend blocks in a <literal>ClientRead</literal> wait after a
-       statement or transaction has already closed (see the state
-       machine below); marks the unambiguous start of client think time.
+       statement or transaction has already closed, outside any utility
+       statement (see the state machine below), when no transaction that
+       can still commit is open; marks the unambiguous start of client
+       think time.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>IdleInTransaction</literal></entry>
+      <entry>The wait-begin hook itself</entry>
+      <entry>
+       The same as <literal>Idle</literal>, written instead of it when a
+       valid transaction that may still commit is open: an explicit
+       transaction block, or the implicit transaction of the extended
+       query protocol waiting for its <literal>Sync</literal>.  A failed
+       transaction block (where only a rollback can follow) gets
+       <literal>Idle</literal>.
       </entry>
      </row>
     </tbody>
@@ -1339,15 +1418,30 @@ SELECT * FROM pg_get_wait_event_trace(42) ORDER BY seq;
     Each backend tracks one small piece of state, entirely separate from
     the ring itself, that decides whether an upcoming
     <literal>QueryStart</literal>/<literal>UtilityStart</literal>/<literal>ExecStart</literal>
-    should be preceded by a synthetic <literal>Idle</literal> marker:
+    should be preceded by a synthetic <literal>Idle</literal> or
+    <literal>IdleInTransaction</literal> marker:
    </para>
 
 <programlisting>
 IDLE  --(QueryStart | UtilityStart | ExecStart)-->  OPEN
-OPEN  --(ExecEnd at depth 0 | UtilityEnd | TxnCommit | TxnAbort)-->  AFTER_STATEMENT
-AFTER_STATEMENT  --(first ClientRead wait)-->  IDLE   (emits Idle)
+OPEN  --(ExecEnd or UtilityEnd with no statement running around it
+        | TxnCommit or TxnAbort at depth 0)-->  AFTER_STATEMENT
+AFTER_STATEMENT  --(first ClientRead wait, no utility statement running)-->  IDLE
+                 (emits IdleInTransaction if a transaction that can still
+                  commit is open, Idle otherwise)
 AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
 </programlisting>
+
+   <para>
+    "No statement running around it" means no planner or executor call
+    and no utility statement is left in progress once the statement has
+    ended: the statement of a trigger fired by <command>COPY</command>, or
+    a <command>SHOW</command> that a function runs inside a query, does not
+    end the outer statement.  The module also writes no
+    <literal>Idle</literal> marker while a utility statement runs; a
+    <command>COPY ... FROM STDIN</command> waiting for its next chunk of
+    data is still running.
+   </para>
 
    <para>
     The last transition is what makes a pipelined batch, a
@@ -1364,39 +1458,230 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
 
    <para>
     <function>pg_wait_event_trace_by_statement()</function> assigns
-    every ordinary wait record to exactly one bucket, using only three
-    kinds of marker as boundaries:
+    every ordinary wait record to exactly one bucket, reading a
+    backend's markers in order.  The number of calls over all returned
+    rows equals the number of ordinary (non-marker) records in the ring.
+   </para>
+
+   <para>
+    A start marker is <emphasis>top-level</emphasis> when its nesting
+    depth is <literal>0</literal> and no utility statement is open.  The
+    function tracks the number of open utility statements: a
+    <literal>UtilityStart</literal> adds one, a
+    <literal>UtilityEnd</literal> removes one (never going below zero),
+    and <literal>Idle</literal>, <literal>IdleInTransaction</literal>
+    and <literal>TxnAbort</literal> reset the count;
+    <literal>TxnCommit</literal> does not.  The statements that a top-level
+    <command>DO</command>, <command>CALL</command>,
+    <command>EXECUTE</command> or <command>CREATE TABLE AS</command>
+    runs write their markers at depth <literal>0</literal> as well, but
+    belong to the top-level statement.
+   </para>
+
+   <para>
+    A <literal>TxnCommit</literal> or <literal>TxnAbort</literal> with a
+    nonzero <structfield>depth</structfield> ended a transaction inside a
+    utility statement that goes on running (a <command>COMMIT</command>
+    or <command>ROLLBACK</command> inside a procedure, the internal
+    transactions of <command>VACUUM</command>): the rule ignores it.
+    In the rest of this section <literal>TxnCommit</literal> and
+    <literal>TxnAbort</literal> mean the markers with depth
+    <literal>0</literal>, and <literal>Idle</literal> stands for
+    <literal>IdleInTransaction</literal> too, except where that is named
+    separately.
    </para>
 
    <itemizedlist>
     <listitem>
      <para>
-      A <literal>QueryStart</literal> or <literal>UtilityStart</literal>
-      at nesting depth <literal>0</literal> opens a new statement
-      bucket, labelled by that marker's own <structfield>seq</structfield>
-      and <structfield>query_id</structfield>. Gating on depth
-      <literal>0</literal> specifically keeps a nested start (SPI from a
-      SQL or PL function) from appearing to close the outer statement's
-      own bucket.
+      A top-level <literal>QueryStart</literal> always opens a new
+      statement bucket, labelled by that marker's own
+      <structfield>seq</structfield> and
+      <structfield>query_id</structfield>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A top-level <literal>UtilityStart</literal> or
+      <literal>ExecStart</literal> opens a statement bucket too, unless
+      the nearest preceding marker among top-level
+      <literal>QueryStart</literal>, <literal>UtilityStart</literal> and
+      <literal>ExecStart</literal>, the <literal>UtilityEnd</literal> that
+      closes the last open utility statement, <literal>Idle</literal>,
+      <literal>TxnCommit</literal> and <literal>TxnAbort</literal> is a
+      top-level <literal>QueryStart</literal> or
+      <literal>UtilityStart</literal>: that statement is already open.
+      So executing a named prepared statement over the extended
+      protocol, which writes an <literal>ExecStart</literal> without a
+      <literal>QueryStart</literal>, gets a bucket of its own, even right
+      after a <command>CALL</command> in the same pipeline, while a
+      simple query's <literal>QueryStart</literal> and
+      <literal>ExecStart</literal> are one bucket.
      </para>
     </listitem>
     <listitem>
      <para>
       An <literal>Idle</literal> or a <literal>TxnAbort</literal> marker
       opens the synthetic <literal>&lt;idle&gt;</literal> bucket.
-      <literal>TxnAbort</literal> is treated the same as
-      <literal>Idle</literal> here on the reasoning that, from an
-      attribution standpoint, whatever follows an abort before the next
-      real statement is the same kind of gap as ordinary client think
-      time, rather than a third, separately named bucket.
+      Any wait recorded before the ring's very first bucket-opening
+      marker &mdash; for instance, because trace was enabled partway
+      through an already-running session &mdash; falls into the
+      synthetic <literal>&lt;unattributed&gt;</literal> bucket.
      </para>
     </listitem>
     <listitem>
      <para>
-      Any wait recorded before the ring's very first boundary marker of
-      either kind &mdash; for instance, because trace was enabled
-      partway through an already-running session &mdash; falls into the
-      synthetic <literal>&lt;unattributed&gt;</literal> bucket.
+      <emphasis>Pre-statement phase.</emphasis>  A backend can wait after
+      a request has arrived but before the statement's start marker is
+      written: on plan cache locks while binding a prepared statement, or
+      on relation locks during parse analysis.  If no other statement
+      opens between the nearest <literal>Idle</literal>,
+      <literal>TxnCommit</literal> or <literal>TxnAbort</literal> and a
+      statement-opening marker, the waits in between move to that
+      statement's bucket, with <structfield>phase</structfield>
+      <literal>pre</literal>.  Waits of type <literal>Client</literal>
+      (<literal>ClientRead</literal> and the like) stay in
+      <literal>&lt;idle&gt;</literal>: that is idle time.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Delayed commit.</emphasis>  In the extended query
+      protocol the client may send <literal>Sync</literal>, which commits
+      the implicit transaction, only after the backend has waited for
+      input: the statement ends, an <literal>IdleInTransaction</literal>
+      follows, and the commit comes after it.  If a statement opened
+      between the closer before that <literal>IdleInTransaction</literal>
+      and the <literal>IdleInTransaction</literal>, and none opens between
+      it and the next <literal>TxnCommit</literal>, the waits there (the
+      commit's WAL flush and synchronous replication wait), and those
+      between the <literal>TxnCommit</literal> and the next closer when no
+      statement opens there either (cleanup after the commit), go to the
+      bucket of the transaction's last statement with
+      <structfield>phase</structfield> <literal>statement</literal>: the
+      same bucket they get when <literal>Sync</literal> arrives together
+      with the statement.  This is an accounting convention, not a claim
+      that the last statement caused all of the transaction's commit
+      work.  Waits of type <literal>Client</literal> stay in
+      <literal>&lt;idle&gt;</literal>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Failed request.</emphasis>  The waits of a request that
+      fails before any statement starts (a <varname>lock_timeout</varname>
+      expiring while binding a prepared statement, for example) are those
+      after an <literal>Idle</literal> and before the following
+      <literal>TxnAbort</literal> or <literal>TxnCommit</literal>, with
+      no statement opened in between and a type other than
+      <literal>Client</literal>, unless they are a delayed commit as
+      above.  They are reported in the synthetic
+      <literal>&lt;no-statement&gt;</literal> bucket.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Every other wait stays in the bucket opened by the latest marker
+      above, so the waits after <literal>ExecEnd</literal> (the commit WAL
+      flush and the synchronous replication wait, which precede
+      <literal>TxnCommit</literal>) and after <literal>TxnCommit</literal>
+      (cleanup after the commit) but before the next
+      <literal>Idle</literal> remain with their statement.
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    Known ambiguities of the rule:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      In an explicit transaction or a pipeline with no commit between two
+      statements, the waits between the end of one statement and the start
+      marker of the next stay with the earlier statement.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      When the next request was already buffered, so that no
+      <literal>Idle</literal> was written, end-of-transaction work after
+      <literal>TxnCommit</literal> is counted as the next statement's
+      <literal>pre</literal> phase.  Likewise, a request that fails before
+      any statement starts is not recognized as such, and its waits are
+      reported with the statement that precedes it: the failed request has
+      no <literal>Idle</literal> in front of it, so the
+      <literal>&lt;no-statement&gt;</literal> rule does not apply.  This
+      happens to a client that pipelines requests (a statement with its
+      <literal>Sync</literal>, then a <literal>Bind</literal> that waits for
+      a lock and times out).  The function cannot tell this case from the
+      end-of-transaction work of the previous statement, which can also
+      follow <literal>TxnCommit</literal> without an
+      <literal>Idle</literal>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A commit that fails at a delayed <literal>Sync</literal> (a deferred
+      constraint, or a serialization failure) leaves
+      <literal>IdleInTransaction</literal>, its waits, then
+      <literal>TxnAbort</literal>: the same markers as a request that
+      fails after the pause.  Its waits are reported in
+      <literal>&lt;no-statement&gt;</literal>, while the same failure with
+      <literal>Sync</literal> sent together with the statement stays in
+      the statement's bucket.  The delayed-commit rule is independent of
+      the client's timing only for a commit that succeeds.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A wait of a type other than <literal>Client</literal> during the
+      pause before a delayed <literal>Sync</literal> (interrupt
+      processing while the backend waits for input) is reported with the
+      commit, in the last statement's bucket.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A <command>SELECT</command> executed over the extended protocol
+      keeps its portal, and its executor, open until the transaction ends
+      or the next statement is bound, so no idle marker follows it.  With a
+      delayed <literal>Sync</literal>, or an <literal>Execute</literal> with
+      a row limit, the client's pause is reported in that statement's
+      bucket, as <literal>Client</literal> waits, and so do the waits of
+      the resumed execution, also when the functions it calls run
+      utility statements.  (A statement with
+      <literal>RETURNING</literal> runs to completion before its rows are
+      sent, like an <command>INSERT</command> without it.)
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Statements that deferred triggers run at commit write top-level
+      markers, so they open buckets of their own, and the rest of the
+      commit's waits go to the last of them.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      When the ring holds the inside of a utility statement but not its
+      <literal>UtilityStart</literal> &mdash; capture was switched to
+      <literal>trace</literal> while the statement ran, or the ring
+      wrapped and overwrote the beginning of a long statement &mdash; the
+      count of open utility statements is too low until the next
+      <literal>Idle</literal> or <literal>TxnAbort</literal>, so the
+      statements it runs are taken for top-level ones.  (Switching capture
+      away from <literal>trace</literal> releases the ring, and switching
+      it back starts a new one, so a ring never ends in the middle of a
+      statement that way.)
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      When several Parse messages are pipelined ahead of their Execute
+      messages, the first Execute follows the last Parse's
+      <literal>QueryStart</literal> and is attributed to it.
      </para>
     </listitem>
    </itemizedlist>
@@ -1444,7 +1729,7 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
         Two statements sent in one simple-query protocol message
         (<literal>SELECT 1; SELECT 2;</literal> on one input line)
        </entry>
-       <entry><literal>QueryStart, ExecStart, ExecEnd, TxnCommit,
+       <entry><literal>QueryStart, ExecStart, ExecEnd,
   QueryStart, ExecStart, ExecEnd, TxnCommit</literal></entry>
       </row>
       <row>
@@ -1489,9 +1774,10 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
       constant-folding case in the table) produces
       <literal>QueryStart, ExecStart, TxnAbort</literal> &mdash; no
       matching <literal>ExecEnd</literal>, since an error unwinds past
-      <function>ExecutorEnd_hook</function> without calling it, exactly
-      as an erroring utility statement never reaches
-      <literal>UtilityEnd</literal>.
+      <function>ExecutorEnd_hook</function> without calling it.  An
+      erroring utility statement, in contrast, still writes
+      <literal>UtilityEnd</literal>, before
+      <literal>TxnAbort</literal>.
      </para>
     </listitem>
     <listitem>
@@ -1508,6 +1794,39 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
       statement's end is inferred the same way as in the multi-statement
       case: by the appearance of the next statement's own
       <literal>QueryStart</literal>.
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    Transaction ends that are not statement ends (these are exercised by
+    the module's TAP tests, with depths after a colon where they are not
+    <literal>0</literal>):
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      <emphasis>An <command>INSERT</command> over the extended protocol,
+      then <literal>Flush</literal>, a pause, and
+      <literal>Sync</literal></emphasis>:
+      <literal>QueryStart, ExecStart, ExecEnd, IdleInTransaction,
+      TxnCommit, Idle</literal>.  The commit's waits between
+      <literal>IdleInTransaction</literal> and
+      <literal>TxnCommit</literal>, and the cleanup waits up to
+      <literal>Idle</literal>, are reported with the
+      <command>INSERT</command>; the <literal>ClientRead</literal> of the
+      pause is in <literal>&lt;idle&gt;</literal>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis><literal>CALL p();</literal> where <literal>p</literal>
+      sleeps, runs <command>ROLLBACK</command>, and sleeps
+      again</emphasis>: <literal>QueryStart, UtilityStart, ...,
+      TxnAbort:1, ..., UtilityEnd, TxnCommit</literal>.  Both sleeps, and
+      the statements the procedure runs after its
+      <command>ROLLBACK</command>, belong to the <command>CALL</command>.
      </para>
     </listitem>
    </itemizedlist>
@@ -1533,7 +1852,13 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
       backend.</emphasis> A parallel worker's waits and markers go into
       its own ring, keyed to its own process number; the query leader's
       trace never contains them (see
-      <xref linkend="pgwaiteventtracing-semantics"/>).
+      <xref linkend="pgwaiteventtracing-semantics"/>).  A worker's
+      transaction end says nothing about the end of the leader's
+      statement.  A worker can run a utility statement (a
+      <command>SHOW</command> inside a parallel-safe function), but it has
+      ended by the time the worker's transaction ends, so that marker has
+      depth <literal>0</literal>; a worker never waits for a client, so
+      its ring has no idle markers.
      </para>
     </listitem>
     <listitem>
@@ -1562,14 +1887,12 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
       ... FROM STDIN</command> belongs to the
       <command>COPY</command>.</emphasis> While a
       <command>COPY ... FROM STDIN</command> is reading its data stream,
-      the marker state machine is still <literal>OPEN</literal> (the
-      matching <literal>ExecEnd</literal> has not fired yet), so the
-      condition that would synthesize an <literal>Idle</literal> marker
-      never matches: every <literal>ClientRead</literal> wait incurred
-      while waiting for more <command>COPY</command> data is recorded as
-      an ordinary wait attributed to the <command>COPY</command>
-      statement itself, not treated as client think time between
-      statements.
+      a utility statement is running, so no <literal>Idle</literal>
+      marker is written, even after a trigger's statement has ended:
+      every <literal>ClientRead</literal> wait incurred while waiting for
+      more <command>COPY</command> data is recorded as an ordinary wait
+      attributed to the <command>COPY</command> statement itself, not
+      treated as client think time between statements.
      </para>
     </listitem>
    </itemizedlist>
@@ -1605,10 +1928,20 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
    <varname>pg_wait_event_tracing.capture</varname> = <literal>off</literal>
    (paid by every backend regardless of whether any session ever raises
    the level, since every timed wait-reporting call site now runs one
-   extra, normally-not-taken branch); <literal>stats</literal> (two
+   extra, normally-not-taken branch, and since the planner, executor and
+   utility hooks keep the nesting depth at every level: each call of
+   these hooks puts a small record on the error context stack and takes
+   it off again, a few memory stores, with no <function>setjmp</function>,
+   and every message that collects error context while such calls are
+   running, and every <literal>GET DIAGNOSTICS ... PG_CONTEXT</literal>,
+   calls one empty callback per record);
+   <literal>stats</literal> (two
    timestamp reads and one small in-memory update per completed wait);
    and <literal>trace</literal> (stats, plus one 32-byte record append
-   per completed wait and one more per query-attribution marker).
+   per completed wait and one more per query-attribution marker, for
+   which the module counts its records on the error context stack, and
+   one <function>setjmp</function> per utility statement, to write its
+   <literal>UtilityEnd</literal> on error).
    Concrete per-level measurements are not included in this revision of
    the documentation; they will be re-measured on dedicated,
    non-virtualized hardware and added here before this module is

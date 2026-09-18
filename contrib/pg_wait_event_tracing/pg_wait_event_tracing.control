@@ -2,4 +2,4 @@
 comment = 'statistics and trace collection for explicitly instrumented wait events'
 default_version = '1.0'
 module_pathname = '$libdir/pg_wait_event_tracing'
-relocatable = true
+relocatable = false
