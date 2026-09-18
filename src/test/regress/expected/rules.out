@@ -1810,6 +1810,10 @@ pg_stat_all_indexes| SELECT c.oid AS relid,
     pg_stat_get_idx_lastscan(i.oid) AS last_idx_scan,
     pg_stat_get_idx_tuples_returned(i.oid) AS idx_tup_read,
     pg_stat_get_idx_tuples_fetched(i.oid) AS idx_tup_fetch,
+    pg_stat_get_idx_total_vacuum_time(i.oid) AS total_vacuum_time,
+    pg_stat_get_idx_total_autovacuum_time(i.oid) AS total_autovacuum_time,
+    pg_stat_get_idx_total_vacuum_delay_time(i.oid) AS total_vacuum_delay_time,
+    pg_stat_get_idx_total_autovacuum_delay_time(i.oid) AS total_autovacuum_delay_time,
     pg_stat_get_idx_stat_reset_time(i.oid) AS stats_reset
    FROM (((pg_class c
      JOIN pg_index x ON ((c.oid = x.indrelid)))
@@ -1846,7 +1850,12 @@ pg_stat_all_tables| SELECT c.oid AS relid,
     pg_stat_get_total_autovacuum_time(c.oid) AS total_autovacuum_time,
     pg_stat_get_total_analyze_time(c.oid) AS total_analyze_time,
     pg_stat_get_total_autoanalyze_time(c.oid) AS total_autoanalyze_time,
-    pg_stat_get_stat_reset_time(c.oid) AS stats_reset
+    pg_stat_get_total_vacuum_delay_time(c.oid) AS total_vacuum_delay_time,
+    pg_stat_get_total_autovacuum_delay_time(c.oid) AS total_autovacuum_delay_time,
+    pg_stat_get_vacuum_failsafe_count(c.oid) AS vacuum_failsafe_count,
+    pg_stat_get_stat_reset_time(c.oid) AS stats_reset,
+    pg_stat_get_visible_page_marks_cleared(c.oid) AS visible_page_marks_cleared,
+    pg_stat_get_frozen_page_marks_cleared(c.oid) AS frozen_page_marks_cleared
    FROM ((pg_class c
      LEFT JOIN pg_index i ON ((c.oid = i.indrelid)))
      LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
@@ -1913,6 +1922,12 @@ pg_stat_database| SELECT oid AS datid,
     pg_stat_get_db_checksum_last_failure(oid) AS checksum_last_failure,
     pg_stat_get_db_blk_read_time(oid) AS blk_read_time,
     pg_stat_get_db_blk_write_time(oid) AS blk_write_time,
+    pg_stat_get_db_total_vacuum_time(oid) AS total_vacuum_time,
+    pg_stat_get_db_total_autovacuum_time(oid) AS total_autovacuum_time,
+    pg_stat_get_db_total_vacuum_delay_time(oid) AS total_vacuum_delay_time,
+    pg_stat_get_db_total_autovacuum_delay_time(oid) AS total_autovacuum_delay_time,
+    pg_stat_get_db_vacuum_failsafe_count(oid) AS vacuum_failsafe_count,
+    pg_stat_get_db_vacuum_interrupt_count(oid) AS vacuum_interrupt_count,
     pg_stat_get_db_session_time(oid) AS session_time,
     pg_stat_get_db_active_time(oid) AS active_time,
     pg_stat_get_db_idle_in_transaction_time(oid) AS idle_in_transaction_time,
@@ -2336,6 +2351,10 @@ pg_stat_sys_indexes| SELECT relid,
     last_idx_scan,
     idx_tup_read,
     idx_tup_fetch,
+    total_vacuum_time,
+    total_autovacuum_time,
+    total_vacuum_delay_time,
+    total_autovacuum_delay_time,
     stats_reset
    FROM pg_stat_all_indexes
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
@@ -2369,7 +2388,12 @@ pg_stat_sys_tables| SELECT relid,
     total_autovacuum_time,
     total_analyze_time,
     total_autoanalyze_time,
-    stats_reset
+    total_vacuum_delay_time,
+    total_autovacuum_delay_time,
+    vacuum_failsafe_count,
+    stats_reset,
+    visible_page_marks_cleared,
+    frozen_page_marks_cleared
    FROM pg_stat_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
 pg_stat_user_functions| SELECT p.oid AS funcid,
@@ -2391,6 +2415,10 @@ pg_stat_user_indexes| SELECT relid,
     last_idx_scan,
     idx_tup_read,
     idx_tup_fetch,
+    total_vacuum_time,
+    total_autovacuum_time,
+    total_vacuum_delay_time,
+    total_autovacuum_delay_time,
     stats_reset
    FROM pg_stat_all_indexes
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
@@ -2424,7 +2452,12 @@ pg_stat_user_tables| SELECT relid,
     total_autovacuum_time,
     total_analyze_time,
     total_autoanalyze_time,
-    stats_reset
+    total_vacuum_delay_time,
+    total_autovacuum_delay_time,
+    vacuum_failsafe_count,
+    stats_reset,
+    visible_page_marks_cleared,
+    frozen_page_marks_cleared
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
 pg_stat_wal| SELECT wal_records,

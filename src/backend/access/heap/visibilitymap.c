@@ -102,6 +102,7 @@
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
 #include "storage/smgr.h"
@@ -136,6 +137,8 @@
 #define FROZEN_MASK8	(0xaa)	/* The upper bit of each bit pair */
 
 /* prototypes for internal routines */
+static bool vm_do_clear(Relation rel, RelFileLocator rlocator,
+						BlockNumber heapBlk, Buffer vmbuf, uint8 flags);
 static Buffer vm_readbuf(Relation rel, BlockNumber blkno, bool extend);
 static Buffer vm_extend(Relation rel, BlockNumber vm_nblocks);
 
@@ -147,10 +150,40 @@ static Buffer vm_extend(Relation rel, BlockNumber vm_nblocks);
  *
  * This function doesn't do any I/O. Returns true if any bits have been
  * cleared and false otherwise.
+ *
+ * This variant is for callers that only know the relation's file locator,
+ * such as recovery, and hence cannot count the clears in the relation's
+ * statistics; callers holding a Relation should use
+ * visibilitymap_clear_rel() instead.
  */
 bool
 visibilitymap_clear(RelFileLocator rlocator, BlockNumber heapBlk,
 					Buffer vmbuf, uint8 flags)
+{
+	return vm_do_clear(NULL, rlocator, heapBlk, vmbuf, flags);
+}
+
+/*
+ *	visibilitymap_clear_rel - visibilitymap_clear() for an open relation
+ *
+ * Same as visibilitymap_clear(), but additionally counts the cleared
+ * all-visible and all-frozen marks in the relation's statistics, which
+ * makes the stability of its visibility map observable.
+ */
+bool
+visibilitymap_clear_rel(Relation rel, BlockNumber heapBlk, Buffer vmbuf,
+						uint8 flags)
+{
+	return vm_do_clear(rel, rel->rd_locator, heapBlk, vmbuf, flags);
+}
+
+/*
+ * Workhorse of visibilitymap_clear() and visibilitymap_clear_rel().  'rel'
+ * is NULL when the caller has no relcache entry at hand.
+ */
+static bool
+vm_do_clear(Relation rel, RelFileLocator rlocator, BlockNumber heapBlk,
+			Buffer vmbuf, uint8 flags)
 {
 	int			mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
 	int			mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
@@ -180,6 +213,18 @@ visibilitymap_clear(RelFileLocator rlocator, BlockNumber heapBlk,
 
 	if (map[mapByte] & mask)
 	{
+		/*
+		 * Track how often all-visible or all-frozen bits are cleared in the
+		 * visibility map.
+		 */
+		if (rel != NULL)
+		{
+			if (map[mapByte] & ((flags & VISIBILITYMAP_ALL_VISIBLE) << mapOffset))
+				pgstat_count_visible_page_marks_cleared(rel);
+			if (map[mapByte] & ((flags & VISIBILITYMAP_ALL_FROZEN) << mapOffset))
+				pgstat_count_frozen_page_marks_cleared(rel);
+		}
+
 		map[mapByte] &= ~mask;
 
 		MarkBufferDirty(vmbuf);
