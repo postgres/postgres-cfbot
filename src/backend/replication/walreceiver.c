@@ -60,6 +60,7 @@
 #include "access/xlogrecovery.h"
 #include "access/xlogwait.h"
 #include "catalog/pg_authid.h"
+#include "common/file_utils.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
@@ -104,6 +105,7 @@ WalReceiverFunctionsType *WalReceiverFunctions = NULL;
 static int	recvFile = -1;
 static TimeLineID recvFileTLI = 0;
 static XLogSegNo recvSegNo = 0;
+static bool recvFileIsNew = false;
 
 /*
  * LogstreamResult indicates the byte positions that we have already
@@ -142,6 +144,9 @@ static void XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len,
 								 TimeLineID tli);
 static void XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr,
 							TimeLineID tli);
+static void XLogWalRcvWriteZeros(Size nbytes, XLogRecPtr recptr,
+								 TimeLineID tli);
+static void XLogWalRcvAdvanceWrite(XLogRecPtr recptr);
 static void XLogWalRcvFlush(bool dying, TimeLineID tli);
 static void XLogWalRcvClose(XLogRecPtr recptr, TimeLineID tli);
 static void XLogWalRcvSendReply(bool force, bool requestReply, bool checkApply);
@@ -732,6 +737,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 				XLogArchiveNotify(xlogfname);
 		}
 		recvFile = -1;
+		recvFileIsNew = false;
 
 		elog(DEBUG1, "walreceiver ended streaming and awaits new instructions");
 		WalRcvWaitForStartPosition(&startpoint, &startpointTLI);
@@ -952,6 +958,34 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len, TimeLineID tli)
 				XLogWalRcvWrite(buf, len, dataStart, tli);
 				break;
 			}
+		case PqReplMsg_WALDataZeros:
+			{
+				StringInfoData incoming_message;
+				uint64		nbytes;
+
+				hdrlen = sizeof(int64) + sizeof(int64) + sizeof(int64) +
+					sizeof(int64);
+				if (len != hdrlen)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+							 errmsg_internal("invalid zero WAL message received from primary")));
+
+				initReadOnlyStringInfo(&incoming_message, buf, hdrlen);
+				dataStart = pq_getmsgint64(&incoming_message);
+				walEnd = pq_getmsgint64(&incoming_message);
+				sendTime = pq_getmsgint64(&incoming_message);
+				nbytes = pq_getmsgint64(&incoming_message);
+
+				if (nbytes == 0 || nbytes > wal_segment_size ||
+					dataStart != LogstreamResult.Write)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+							 errmsg_internal("invalid zero WAL range received from primary")));
+
+				ProcessWalSndrMessage(walEnd, sendTime);
+				XLogWalRcvWriteZeros(nbytes, dataStart, tli);
+				break;
+			}
 		case PqReplMsg_Keepalive:
 			{
 				StringInfoData incoming_message;
@@ -986,6 +1020,81 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len, TimeLineID tli)
 }
 
 /*
+ * Reconstruct a run of zeros omitted from the replication stream.
+ *
+ * These messages represent the padding after XLOG_SWITCH, so the remainder of
+ * the segment is known to contain zeros.  A segment created by this receiver
+ * is already zero-filled according to wal_init_zero, but a pre-existing or
+ * recycled segment might still contain old data that must be overwritten.
+ */
+static void
+XLogWalRcvWriteZeros(Size nbytes, XLogRecPtr recptr, TimeLineID tli)
+{
+	int			startoff;
+	XLogRecPtr	endptr = recptr + nbytes;
+
+	if (recvFile >= 0 && !XLByteInSeg(recptr, recvSegNo, wal_segment_size))
+		XLogWalRcvClose(recptr, tli);
+
+	if (recvFile < 0)
+	{
+		XLByteToSeg(recptr, recvSegNo, wal_segment_size);
+		recvFile = XLogFileInit(recvSegNo, tli, &recvFileIsNew);
+		recvFileTLI = tli;
+	}
+
+	startoff = XLogSegmentOffset(recptr, wal_segment_size);
+	if (startoff + nbytes > wal_segment_size)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg_internal("zero WAL range crosses a segment boundary")));
+
+	if (!recvFileIsNew)
+	{
+		ssize_t		byteswritten;
+		instr_time	start;
+
+		start = pgstat_prepare_io_time(track_wal_io_timing);
+
+		pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
+		byteswritten = pg_pwrite_zeros(recvFile, nbytes,
+									   (pgoff_t) startoff);
+		pgstat_report_wait_end();
+
+		if (byteswritten < 0)
+		{
+			char		xlogfname[MAXFNAMELEN];
+			int			save_errno = errno;
+
+			XLogFileName(xlogfname, recvFileTLI, recvSegNo,
+						 wal_segment_size);
+			errno = save_errno;
+			ereport(PANIC,
+					(errcode_for_file_access(),
+					 errmsg("could not write to WAL segment %s at offset %d, length %zu: %m",
+							xlogfname, startoff, nbytes)));
+		}
+
+		pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
+								IOOP_WRITE, start, 1, byteswritten);
+	}
+
+	XLogWalRcvAdvanceWrite(endptr);
+
+	if (!XLByteInSeg(endptr, recvSegNo, wal_segment_size))
+		XLogWalRcvClose(endptr, tli);
+}
+
+static void
+XLogWalRcvAdvanceWrite(XLogRecPtr recptr)
+{
+	LogstreamResult.Write = recptr;
+
+	pg_atomic_write_membarrier_u64(&WalRcv->writtenUpto, recptr);
+	WaitLSNWakeup(WAIT_LSN_TYPE_STANDBY_WRITE, recptr);
+}
+
+/*
  * Write XLOG data to disk.
  */
 static void
@@ -1009,7 +1118,7 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr, TimeLineID tli)
 		{
 			/* Create/use new log file */
 			XLByteToSeg(recptr, recvSegNo, wal_segment_size);
-			recvFile = XLogFileInit(recvSegNo, tli);
+			recvFile = XLogFileInit(recvSegNo, tli, &recvFileIsNew);
 			recvFileTLI = tli;
 		}
 
@@ -1064,14 +1173,7 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr, TimeLineID tli)
 		LogstreamResult.Write = recptr;
 	}
 
-	/* Update shared-memory status */
-	pg_atomic_write_membarrier_u64(&WalRcv->writtenUpto, LogstreamResult.Write);
-
-	/*
-	 * Wake up processes waiting for standby write LSN to reach current write
-	 * position.
-	 */
-	WaitLSNWakeup(WAIT_LSN_TYPE_STANDBY_WRITE, LogstreamResult.Write);
+	XLogWalRcvAdvanceWrite(LogstreamResult.Write);
 
 	/*
 	 * Close the current segment if it's fully written up in the last cycle of
@@ -1187,6 +1289,7 @@ XLogWalRcvClose(XLogRecPtr recptr, TimeLineID tli)
 		XLogArchiveNotify(xlogfname);
 
 	recvFile = -1;
+	recvFileIsNew = false;
 }
 
 /*
