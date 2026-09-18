@@ -131,6 +131,7 @@
 #include <unistd.h>
 
 #include "access/slru.h"
+#include "common/int.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -535,6 +536,9 @@ InitShmemIndexEntry(ShmemRequest *request)
 	size_t		allocated_size;
 	void	   *structPtr;
 
+	/* Size must be known at this point. */
+	Assert(request->options->size != SHMEM_ATTACH_UNKNOWN_SIZE);
+
 	/* look it up in the shmem index */
 	index_entry = (ShmemIndexEnt *)
 		hash_search(ShmemIndex, name, HASH_ENTER_NULL, &found);
@@ -836,6 +840,8 @@ ShmemAllocNoError(Size size)
  *
  * Also sets *allocated_size to the number of bytes allocated, which will
  * be equal to the number requested plus any padding we choose to add.
+ *
+ * Returns NULL in case space can not be allocated.
  */
 static void *
 ShmemAllocRaw(Size size, Size alignment, Size *allocated_size)
@@ -866,8 +872,14 @@ ShmemAllocRaw(Size size, Size alignment, Size *allocated_size)
 	rawStart = ShmemAllocator->free_offset;
 	newStart = TYPEALIGN(alignment, rawStart);
 
-	newFree = newStart + size;
-	if (newFree <= ShmemSegHdr->totalsize)
+	/*
+	 * Check for overflow in case SHMEM_ATTACH_UNKNOWN_SIZE made all the way
+	 * here in an unlikely event. Avoid throwing an error while we hold a
+	 * spinlock. Let the caller handle it instead.
+	 */
+	if (unlikely(pg_add_size_overflow(newStart, size, &newFree)))
+		newSpace = NULL;
+	else if (newFree <= ShmemSegHdr->totalsize)
 	{
 		newSpace = (char *) ShmemBase + newStart;
 		ShmemAllocator->free_offset = newFree;
@@ -1024,7 +1036,14 @@ ProcessShmemRequestsAfterStartup(const ShmemCallbacks *callbacks)
 			found_any = true;
 		}
 		else
+		{
+			if (request->options->size == SHMEM_ATTACH_UNKNOWN_SIZE)
+				ereport(ERROR,
+						(errmsg("cannot attach to shared memory struct \"%s\" because it does not exist",
+								request->options->name),
+						 errdetail("SHMEM_ATTACH_UNKNOWN_SIZE can only be used to attach to an existing shared memory structure.")));
 			notfound_any = true;
+		}
 	}
 	if (found_any && notfound_any)
 		elog(ERROR, "some of the requested shmem areas have already been initialized");

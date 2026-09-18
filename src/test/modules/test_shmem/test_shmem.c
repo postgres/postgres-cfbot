@@ -35,12 +35,17 @@ typedef struct TestShmemData
 
 static TestShmemData *TestShmem;
 
-#define MIN_TEST_AREA_BYTES sizeof(TestShmemData)
-#define DEFAULT_TEST_AREA_BYTES MIN_TEST_AREA_BYTES
+/*
+ * The minimum is set to SHMEM_ATTACH_UNKNOWN_SIZE (instead of
+ * sizeof(TestShmemData)) to test behaviour when ShmemRequestStruct() is
+ * passed SHMEM_ATTACH_UNKNOWN_SIZE for an area that does not exist yet.
+ */
+#define MIN_TEST_AREA_BYTES SHMEM_ATTACH_UNKNOWN_SIZE
+#define DEFAULT_TEST_AREA_BYTES sizeof(TestShmemData)
 #define MAX_TEST_AREA_BYTES 1000000
 
 static bool attached_or_initialized = false;
-static int	test_shmem_area_size = MIN_TEST_AREA_BYTES;
+static int	test_shmem_area_size = DEFAULT_TEST_AREA_BYTES;
 static bool test_shmem_guc_defined = false;
 
 static void test_shmem_request(void *arg);
