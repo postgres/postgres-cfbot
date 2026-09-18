@@ -27,7 +27,8 @@ ISOLATION = basic \
 	    syscache-update-pruned \
 	    wait_cleanup \
 	    heap_lock_update \
-	    on_conflict_probe_window
+	    on_conflict_probe_window \
+	    vacuum_skip_lock_stats
 
 # some isolation tests require wal_level=replica
 ISOLATION_OPTS = --temp-config $(top_srcdir)/src/test/modules/injection_points/extra.conf
