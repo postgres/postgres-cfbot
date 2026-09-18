@@ -108,8 +108,18 @@ advice_item: TOK_TAG_JOIN_ORDER '(' join_order_target_list ')'
 				$$->tag = PGPA_TAG_BITMAP_HEAP_SCAN;
 			else if (strcmp($1, "do_not_scan") == 0)
 				$$->tag = PGPA_TAG_DO_NOT_SCAN;
+			else if (strcmp($1, "no_bitmap_heap_scan") == 0)
+				$$->tag = PGPA_TAG_NO_BITMAP_HEAP_SCAN;
 			else if (strcmp($1, "no_gather") == 0)
 				$$->tag = PGPA_TAG_NO_GATHER;
+			else if (strcmp($1, "no_index_only_scan") == 0)
+				$$->tag = PGPA_TAG_NO_INDEX_ONLY_SCAN;
+			else if (strcmp($1, "no_index_scan") == 0)
+				$$->tag = PGPA_TAG_NO_INDEX_SCAN;
+			else if (strcmp($1, "no_seq_scan") == 0)
+				$$->tag = PGPA_TAG_NO_SEQ_SCAN;
+			else if (strcmp($1, "no_tid_scan") == 0)
+				$$->tag = PGPA_TAG_NO_TID_SCAN;
 			else if (strcmp($1, "seq_scan") == 0)
 				$$->tag = PGPA_TAG_SEQ_SCAN;
 			else if (strcmp($1, "tid_scan") == 0)
