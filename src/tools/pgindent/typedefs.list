@@ -2465,10 +2465,14 @@ PushFunction
 PwetCaptureLevel
 PwetLWLockHash
 PwetLWLockHashEntry
+PwetMarkerState
 PwetRegionHeader
 PwetSlot
 PwetStats
 PwetTimingEntry
+PwetTraceRecord
+PwetTraceRowFields
+PwetTraceState
 PyCFunction
 PyMethodDef
 PyModuleDef
