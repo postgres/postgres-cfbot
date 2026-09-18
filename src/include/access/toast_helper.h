@@ -14,6 +14,7 @@
 #ifndef TOAST_HELPER_H
 #define TOAST_HELPER_H
 
+#include "access/rewriteheap.h"
 #include "utils/rel.h"
 
 /*
@@ -60,6 +61,15 @@ typedef struct
 	 */
 	uint8		ttc_flags;
 	ToastAttrInfo *ttc_attr;
+
+	/*
+	 * These fields are needed when the option HEAP_INSERT_REUSE_XID_FREEZE
+	 * was passed to heap_toast_insert_or_update(). We could actually use
+	 * normal insert, but that would require WAL support of
+	 * heap_freeze_tuple().
+	 */
+	RewriteState ttc_rwstate;
+	HeapTuple	ttc_tup_main;
 } ToastTupleContext;
 
 /*
@@ -108,9 +118,9 @@ extern int	toast_tuple_find_biggest_attribute(ToastTupleContext *ttc,
 extern void toast_tuple_try_compression(ToastTupleContext *ttc, int attribute);
 extern void toast_tuple_externalize(ToastTupleContext *ttc, int attribute,
 									uint32 options);
-extern void toast_tuple_cleanup(ToastTupleContext *ttc);
+extern void toast_tuple_cleanup(ToastTupleContext *ttc, TransactionId xid);
 
 extern void toast_delete_external(Relation rel, const Datum *values, const bool *isnull,
-								  bool is_speculative);
+								  bool is_speculative, TransactionId xid);
 
 #endif

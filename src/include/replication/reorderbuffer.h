@@ -104,6 +104,12 @@ typedef struct ReorderBufferChange
 			HeapTuple	oldtuple;
 			/* valid for INSERT || UPDATE */
 			HeapTuple	newtuple;
+
+			/*
+			 * valid for UPDATE - this is the physical location of the old
+			 * tuple version, valid even if 'oldtuple' is NULL.
+			 */
+			BlockNumber old_blknum;
 		}			tp;
 
 		/*
@@ -763,6 +769,7 @@ extern void ReorderBufferProcessXid(ReorderBuffer *rb, TransactionId xid, XLogRe
 
 extern void ReorderBufferXidSetCatalogChanges(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 extern bool ReorderBufferXidHasCatalogChanges(ReorderBuffer *rb, TransactionId xid);
+extern bool ReorderBufferXidHasHeapChanges(ReorderBuffer *rb, TransactionId xid);
 extern bool ReorderBufferXidHasBaseSnapshot(ReorderBuffer *rb, TransactionId xid);
 
 extern bool ReorderBufferRememberPrepareInfo(ReorderBuffer *rb, TransactionId xid,

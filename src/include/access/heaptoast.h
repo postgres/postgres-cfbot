@@ -14,6 +14,7 @@
 #define HEAPTOAST_H
 
 #include "access/htup_details.h"
+#include "access/rewriteheap.h"
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
 
@@ -109,7 +110,9 @@
  * ----------
  */
 extern HeapTuple heap_toast_insert_or_update(Relation rel, HeapTuple newtup,
-											 HeapTuple oldtup, uint32 options);
+											 HeapTuple oldtup,
+											 RewriteState rwstate,
+											 uint32 options);
 
 /* ----------
  * heap_toast_delete -
@@ -118,7 +121,7 @@ extern HeapTuple heap_toast_insert_or_update(Relation rel, HeapTuple newtup,
  * ----------
  */
 extern void heap_toast_delete(Relation rel, HeapTuple oldtup,
-							  bool is_speculative);
+							  bool is_speculative, TransactionId xid);
 
 /* ----------
  * toast_flatten_tuple -

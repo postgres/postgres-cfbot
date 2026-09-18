@@ -128,6 +128,7 @@
 #include "access/heapam_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "commands/repack.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -984,6 +985,13 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		}
 	}
 
+	/*
+	 * REPACK decoding worker may need timetravel anytime. It takes
+	 * responsibility for tracking transaction commits, see below.
+	 */
+	else if (AmRepackWorker())
+		needs_timetravel = true;
+
 	for (nxact = 0; nxact < nsubxacts; nxact++)
 	{
 		TransactionId subxid = subxacts[nxact];
@@ -991,8 +999,12 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		/*
 		 * Add subtransaction to base snapshot if catalog modifying, we don't
 		 * distinguish to toplevel transactions there.
+		 *
+		 * See comments on REPACK worker below.
 		 */
-		if (SnapBuildXidHasCatalogChanges(builder, subxid, xinfo))
+		if (SnapBuildXidHasCatalogChanges(builder, subxid, xinfo) ||
+			(AmRepackWorker() &&
+			 ReorderBufferXidHasHeapChanges(builder->reorder, xid)))
 		{
 			sub_needs_timetravel = true;
 			needs_snapshot = true;
@@ -1020,8 +1032,18 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		}
 	}
 
-	/* if top-level modified catalog, it'll need a snapshot */
-	if (SnapBuildXidHasCatalogChanges(builder, xid, xinfo))
+	/*
+	 * If top-level modified catalog, it'll need a snapshot.
+	 *
+	 * If we're decoding changes on behalf of REPACK (CONCURRENTLY), only
+	 * changes of the relation being processed are decoded - see
+	 * heap_decode(). Thus any heap change we find here must belong to that
+	 * relation. Add the transaction so that we can keep building snapshots to
+	 * scan that relation.
+	 */
+	if (SnapBuildXidHasCatalogChanges(builder, xid, xinfo) ||
+		(AmRepackWorker() &&
+		 ReorderBufferXidHasHeapChanges(builder->reorder, xid)))
 	{
 		elog(DEBUG2, "found top level transaction %u, with catalog changes",
 			 xid);
@@ -1189,7 +1211,7 @@ SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xact
 		xmin = running->oldestRunningXid;
 	elog(DEBUG3, "xmin: %u, xmax: %u, oldest running: %u, oldest xmin: %u",
 		 builder->xmin, builder->xmax, running->oldestRunningXid, xmin);
-	LogicalIncreaseXminForSlot(lsn, xmin);
+	LogicalIncreaseXminForSlot(lsn, xmin, true);
 
 	/*
 	 * Also tell the slot where we can restart decoding from. We don't want to

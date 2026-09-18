@@ -22,12 +22,21 @@
 typedef struct RewriteStateData *RewriteState;
 
 extern RewriteState begin_heap_rewrite(Relation old_heap, Relation new_heap,
-									   TransactionId oldest_xmin, TransactionId freeze_xid,
-									   MultiXactId cutoff_multi);
+									   TransactionId oldest_xmin,
+									   TransactionId freeze_xid,
+									   MultiXactId cutoff_multi,
+									   bool no_chains);
 extern void end_heap_rewrite(RewriteState state);
 extern void rewrite_heap_tuple(RewriteState state, HeapTuple old_tuple,
 							   HeapTuple new_tuple);
+extern void rewrite_heap_tuple_no_chains(RewriteState state,
+										 HeapTuple old_tuple,
+										 HeapTuple new_tuple,
+										 bool freeze);
 extern bool rewrite_heap_dead_tuple(RewriteState state, HeapTuple old_tuple);
+extern void rewrite_freeze_tuple(RewriteState state, HeapTuple tuple);
+extern void rewrite_copy_visibility_info(HeapTuple new_tuple,
+										 HeapTuple old_tuple);
 
 /*
  * On-Disk data format for an individual logical rewrite mapping.

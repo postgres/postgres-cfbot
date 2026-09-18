@@ -325,15 +325,6 @@ REPACK [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] USING
        </listitem>
       </itemizedlist>
      </para>
-
-     <warning>
-      <para>
-       <command>REPACK</command> with the <literal>CONCURRENTLY</literal>
-       option is not MVCC-safe, see <xref linkend="mvcc-caveats"/> for
-       details.
-      </para>
-     </warning>
-
     </listitem>
    </varlistentry>
 

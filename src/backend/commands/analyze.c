@@ -329,14 +329,12 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
 	MemoryContext caller_context;
-	Oid			save_userid;
-	int			save_sec_context;
-	int			save_nestlevel;
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	BufferUsage bufferusage;
 	PgStat_Counter startreadtime = 0;
 	PgStat_Counter startwritetime = 0;
+	IndexBuildSecurity ibsec;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -362,15 +360,9 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	caller_context = MemoryContextSwitchTo(anl_context);
 
 	/*
-	 * Switch to the table owner's userid, so that any index functions are run
-	 * as that user.  Also lock down security-restricted operations and
-	 * arrange to make GUC variable changes local to this command.
+	 * Prevent index functions from doing what they are not supposed to.
 	 */
-	GetUserIdAndSecContext(&save_userid, &save_sec_context);
-	SetUserIdAndSecContext(onerel->rd_rel->relowner,
-						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
-	save_nestlevel = NewGUCNestLevel();
-	RestrictSearchPath();
+	enable_index_build_security(onerel->rd_rel->relowner, &ibsec);
 
 	/*
 	 * When verbose or autovacuum logging is used, initialize a resource usage
@@ -857,11 +849,8 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 		}
 	}
 
-	/* Roll back any GUC changes executed by index functions */
-	AtEOXact_GUC(false, save_nestlevel);
-
-	/* Restore userid and security context */
-	SetUserIdAndSecContext(save_userid, save_sec_context);
+	/* Relax the restrictions imposed above. */
+	disable_index_build_security(&ibsec);
 
 	/* Restore current context and release memory */
 	MemoryContextSwitchTo(caller_context);

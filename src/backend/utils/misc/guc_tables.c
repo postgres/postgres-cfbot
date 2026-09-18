@@ -44,6 +44,7 @@
 #include "commands/async.h"
 #include "commands/extension.h"
 #include "commands/event_trigger.h"
+#include "commands/repack.h"
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
 #include "commands/user.h"
