@@ -34,9 +34,11 @@
 #include "commands/matview.h"
 #include "commands/prepare.h"
 #include "commands/tablecmds.h"
+#include "commands/tablespace.h"
 #include "commands/view.h"
 #include "executor/execdesc.h"
 #include "executor/executor.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/queryjumble.h"
@@ -63,6 +65,7 @@ typedef struct
 /* utility functions for CTAS definition creation */
 static ObjectAddress create_ctas_internal(List *attrList, IntoClause *into);
 static ObjectAddress create_ctas_nodata(List *tlist, IntoClause *into);
+static ObjectAddress create_ctas_replace(List *tlist, IntoClause *into, Oid matviewOid);
 
 /* DestReceiver routines for collecting data */
 static void intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo);
@@ -70,6 +73,7 @@ static bool intorel_receive(TupleTableSlot *slot, DestReceiver *self);
 static void intorel_shutdown(DestReceiver *self);
 static void intorel_destroy(DestReceiver *self);
 
+static bool CreateTableAsRelReplaceable(CreateTableAsStmt *ctas);
 
 /*
  * create_ctas_internal
@@ -157,6 +161,8 @@ create_ctas_nodata(List *tlist, IntoClause *into)
 	List	   *attrList;
 	ListCell   *t,
 			   *lc;
+	bool		is_matview = (into->viewQuery != NULL);
+	Oid			matviewOid = InvalidOid;
 
 	/*
 	 * Build list of ColumnDefs from non-junk elements of the tlist.  If a
@@ -211,8 +217,146 @@ create_ctas_nodata(List *tlist, IntoClause *into)
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("too many column names were specified")));
 
-	/* Create the relation definition using the ColumnDef list */
-	return create_ctas_internal(attrList, into);
+	/* Get the existing matview to be replaced */
+	if (is_matview && into->replace)
+		(void) RangeVarGetAndCheckCreationNamespace(into->rel,
+													AccessExclusiveLock,
+													&matviewOid);
+
+	if (OidIsValid(matviewOid))
+		/* Replace the existing matview */
+		return create_ctas_replace(attrList, into, matviewOid);
+	else
+		/* Create the relation definition using the ColumnDef list */
+		return create_ctas_internal(attrList, into);
+}
+
+
+/*
+ * create_ctas_replace
+ *
+ * Internal utility used for replacing the definition of a materialized view.
+ * Caller needs to provide a list of attributes (ColumnDef nodes) and the
+ * materialized view OID.
+ */
+static ObjectAddress
+create_ctas_replace(List *attrList, IntoClause *into, Oid matviewOid)
+{
+	ObjectAddress intoRelationAddr;
+	Relation	rel;
+	List	   *atcmds = NIL;
+	AlterTableCmd *atcmd;
+	TupleDesc	descriptor;
+	Query	   *query;
+
+	/* Relation is already locked, but we must build a relcache entry. */
+	rel = relation_open(matviewOid, NoLock);
+
+	/* Make sure it *is* a matview. */
+	if (rel->rd_rel->relkind != RELKIND_MATVIEW)
+		ereport(ERROR,
+				errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				errmsg("\"%s\" is not a materialized view",
+					   RelationGetRelationName(rel)));
+
+	/* Also check it's not in use already */
+	CheckTableNotInUse(rel, "CREATE OR REPLACE MATERIALIZED VIEW");
+
+	descriptor = BuildDescForRelation(attrList);
+	checkMatviewColumns(descriptor, rel->rd_att);
+
+	/*
+	 * If new attributes have been added, we must add pg_attribute entries for
+	 * them.  It is convenient (although overkill) to use the ALTER TABLE ADD
+	 * COLUMN infrastructure for this.
+	 *
+	 * Note that we must do this before updating the query for the matview,
+	 * since the rules system requires that the correct matview columns be in
+	 * place when defining the new rules.
+	 *
+	 * Also note that ALTER TABLE doesn't run parse transformation on
+	 * AT_AddColumnToView commands.  The ColumnDef we supply must be ready to
+	 * execute as-is.
+	 */
+	if (list_length(attrList) > rel->rd_att->natts)
+	{
+		ListCell   *c;
+
+		for_each_from(c, attrList, rel->rd_att->natts)
+		{
+			atcmd = makeNode(AlterTableCmd);
+			atcmd->subtype = AT_AddColumnToView;
+			atcmd->def = (Node *) lfirst(c);
+			atcmds = lappend(atcmds, atcmd);
+		}
+	}
+
+	/*
+	 * Use ALTER TABLE to set access method, tablespace, and storage options.
+	 * When replacing an existing matview we need to alter the relation such
+	 * that the defaults apply as if they have not been specified at all by
+	 * the CREATE OR REPLACE MATERIALIZED VIEW statement.
+	 */
+
+	/* access method */
+	atcmd = makeNode(AlterTableCmd);
+	atcmd->subtype = AT_SetAccessMethod;
+	atcmd->name = into->accessMethod
+		? into->accessMethod : default_table_access_method;
+	atcmds = lappend(atcmds, atcmd);
+
+	/* tablespace */
+	atcmd = makeNode(AlterTableCmd);
+	atcmd->subtype = AT_SetTableSpace;
+	if (into->tableSpaceName)
+		atcmd->name = into->tableSpaceName;
+	else
+	{
+		Oid			spcOid;
+		char	   *spcName;
+
+		/*
+		 * Must use the default tablespace if no explicit tablespace is
+		 * specified.
+		 */
+		spcOid = GetDefaultTablespace(RELPERSISTENCE_PERMANENT, false);
+		if (!OidIsValid(spcOid))
+			spcOid = MyDatabaseTableSpace;
+
+		spcName = get_tablespace_name(spcOid);
+		if (!spcName)			/* should not happen */
+			elog(ERROR, "could not find tuple for tablespace %u", spcOid);
+
+		atcmd->name = spcName;
+	}
+	atcmds = lappend(atcmds, atcmd);
+
+	/* storage options */
+	atcmd = makeNode(AlterTableCmd);
+	atcmd->subtype = AT_ReplaceRelOptions;
+	atcmd->def = (Node *) into->options;
+	atcmds = lappend(atcmds, atcmd);
+
+	/* EventTriggerAlterTableStart called by ProcessUtilitySlow */
+	AlterTableInternal(matviewOid, atcmds, true);
+
+	/* Make the new matview columns visible */
+	CommandCounterIncrement();
+
+	relation_close(rel, NoLock);
+	ObjectAddressSet(intoRelationAddr, RelationRelationId, matviewOid);
+
+	/*
+	 * Replace the "view" part of the matview.  StoreViewQuery scribbles on
+	 * tree, so make a copy.
+	 */
+	query = copyObject(into->viewQuery);
+	StoreViewQuery(intoRelationAddr.objectId, query, true);
+
+	/* Make the new matview query visible */
+	CommandCounterIncrement();
+
+	return intoRelationAddr;
 }
 
 
@@ -232,8 +376,37 @@ ExecCreateTableAs(ParseState *pstate, CreateTableAsStmt *stmt,
 	DestReceiver *dest;
 	ObjectAddress address;
 
-	/* Check if the relation exists or not */
-	if (CreateTableAsRelExists(stmt))
+	/*
+	 * Check if the relation exists or not.  An existing materialized view can
+	 * be replaced.
+	 */
+	if (is_matview && into->replace)
+	{
+		if (CreateTableAsRelReplaceable(stmt))
+		{
+			/* Change the relation to match the new query and other options. */
+			address = create_ctas_nodata(query->targetList, into);
+
+			/*
+			 * Refresh the materialized view with a fake statement unless we
+			 * must keep the old data.
+			 */
+			if (into->data != WITHDATA_OLD)
+			{
+				RefreshMatViewStmt *refresh;
+
+				refresh = makeNode(RefreshMatViewStmt);
+				refresh->relation = into->rel;
+				refresh->skipData = into->skipData;
+				refresh->concurrent = false;
+
+				address = ExecRefreshMatView(refresh, pstate->p_sourcetext, qc);
+			}
+
+			return address;
+		}
+	}
+	else if (CreateTableAsRelExists(stmt))
 		return InvalidObjectAddress;
 
 	/*
@@ -273,6 +446,11 @@ ExecCreateTableAs(ParseState *pstate, CreateTableAsStmt *stmt,
 	 */
 	if (is_matview)
 	{
+		if (into->data == WITHDATA_OLD)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("must not specify WITH OLD DATA when creating a new materialized view")));
+
 		do_refresh = !into->skipData;
 		into->skipData = true;
 	}
@@ -422,6 +600,49 @@ CreateTableAsRelExists(CreateTableAsStmt *ctas)
 				(errcode(ERRCODE_DUPLICATE_TABLE),
 				 errmsg("relation \"%s\" already exists, skipping",
 						into->rel->relname)));
+		return true;
+	}
+
+	/* Relation does not exist, it can be created */
+	return false;
+}
+
+/*
+ * CreateTableAsRelReplaceable --- check existence of replaceable relation for
+ * CreateTableAsStmt
+ *
+ * Utility wrapper checking if the relation pending for creation in this
+ * CreateTableAsStmt query already exists or not.  Returns true if the relation
+ * exists and should be replaced, otherwise false.
+ */
+static bool
+CreateTableAsRelReplaceable(CreateTableAsStmt *ctas)
+{
+	Oid			nspid;
+	Oid			oldrelid;
+	ObjectAddress address;
+	IntoClause *into = ctas->into;
+
+	nspid = RangeVarGetCreationNamespace(into->rel);
+
+	oldrelid = get_relname_relid(into->rel->relname, nspid);
+	if (OidIsValid(oldrelid))
+	{
+		if (!into->replace)
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_TABLE),
+					 errmsg("relation \"%s\" already exists",
+							into->rel->relname)));
+
+		/*
+		 * The relation exists and OR REPLACE has been specified.
+		 *
+		 * If we are in an extension script, insist that the pre-existing
+		 * object be a member of the extension, to avoid security risks.
+		 */
+		ObjectAddressSet(address, RelationRelationId, oldrelid);
+		checkMembershipInCurrentExtension(&address);
+
 		return true;
 	}
 
