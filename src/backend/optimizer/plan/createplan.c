@@ -225,6 +225,7 @@ static RecursiveUnion *make_recursive_union(List *tlist,
 											Plan *righttree,
 											int wtParam,
 											List *distinctList,
+											List *distinctSortClause,
 											Cardinality numGroups);
 static BitmapAnd *make_bitmap_and(List *bitmapplans);
 static BitmapOr *make_bitmap_or(List *bitmapplans);
@@ -2193,6 +2194,52 @@ create_agg_plan(PlannerInfo *root, AggPath *best_path)
 					best_path->transitionSpace,
 					subplan);
 
+	/* Extract sort keys for inline DISTINCT ON ORDER BY */
+	if (best_path->distinctSortClause)
+	{
+		List	   *sortcls = best_path->distinctSortClause;
+		List	   *sub_tlist = subplan->targetlist;
+		ListCell   *l;
+		int			numsortkeys;
+		AttrNumber *sortColIdx;
+		Oid		   *sortOperators;
+		Oid		   *collations;
+		bool	   *nullsFirst;
+
+		numsortkeys = list_length(sortcls);
+		sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
+		sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
+		collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
+		nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+
+		numsortkeys = 0;
+		foreach(l, sortcls)
+		{
+			SortGroupClause *sortcl = (SortGroupClause *) lfirst(l);
+			TargetEntry *tle = get_sortgroupclause_tle(sortcl, sub_tlist);
+
+			sortColIdx[numsortkeys] = tle->resno;
+			sortOperators[numsortkeys] = sortcl->sortop;
+			collations[numsortkeys] = exprCollation((Node *) tle->expr);
+			nullsFirst[numsortkeys] = sortcl->nulls_first;
+			numsortkeys++;
+		}
+
+		plan->numSortCols = numsortkeys;
+		plan->sortColIdx = sortColIdx;
+		plan->sortOperators = sortOperators;
+		plan->sortCollations = collations;
+		plan->sortNullsFirst = nullsFirst;
+	}
+	else
+	{
+		plan->numSortCols = 0;
+		plan->sortColIdx = NULL;
+		plan->sortOperators = NULL;
+		plan->sortCollations = NULL;
+		plan->sortNullsFirst = NULL;
+	}
+
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
 	return plan;
@@ -2621,6 +2668,7 @@ create_recursiveunion_plan(PlannerInfo *root, RecursiveUnionPath *best_path)
 								rightplan,
 								best_path->wtParam,
 								best_path->distinctList,
+								best_path->distinctSortClause,
 								best_path->numGroups);
 
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
@@ -5903,6 +5951,7 @@ make_recursive_union(List *tlist,
 					 Plan *righttree,
 					 int wtParam,
 					 List *distinctList,
+					 List *distinctSortClause,
 					 Cardinality numGroups)
 {
 	RecursiveUnion *node = makeNode(RecursiveUnion);
@@ -5948,6 +5997,45 @@ make_recursive_union(List *tlist,
 		node->dupOperators = dupOperators;
 		node->dupCollations = dupCollations;
 	}
+
+	/* Extract sort keys for inline DISTINCT ON ORDER BY */
+	if (distinctSortClause)
+	{
+		int			numsortkeys = list_length(distinctSortClause);
+		AttrNumber *sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
+		Oid		   *sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
+		Oid		   *collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
+		bool	   *nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+		int			keyno = 0;
+		ListCell   *l;
+
+		foreach(l, distinctSortClause)
+		{
+			SortGroupClause *sortcl = (SortGroupClause *) lfirst(l);
+			TargetEntry *tle = get_sortgroupclause_tle(sortcl, plan->targetlist);
+
+			sortColIdx[keyno] = tle->resno;
+			sortOperators[keyno] = sortcl->sortop;
+			collations[keyno] = exprCollation((Node *) tle->expr);
+			nullsFirst[keyno] = sortcl->nulls_first;
+			keyno++;
+		}
+
+		node->numSortCols = numsortkeys;
+		node->sortColIdx = sortColIdx;
+		node->sortOperators = sortOperators;
+		node->sortCollations = collations;
+		node->sortNullsFirst = nullsFirst;
+	}
+	else
+	{
+		node->numSortCols = 0;
+		node->sortColIdx = NULL;
+		node->sortOperators = NULL;
+		node->sortCollations = NULL;
+		node->sortNullsFirst = NULL;
+	}
+
 	node->numGroups = numGroups;
 
 	return node;

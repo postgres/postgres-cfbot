@@ -1806,7 +1806,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		/*
 		 * Calculate pathkeys that represent result ordering requirements
 		 */
-		Assert(parse->distinctClause == NIL);
 		root->sort_pathkeys = make_pathkeys_for_sortclauses(root,
 															parse->sortClause,
 															root->processed_tlist);
@@ -3856,16 +3855,46 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 
 		/* Make a copy since pathkey processing can modify the list */
 		root->processed_distinctClause = list_copy(parse->distinctClause);
-		root->distinct_pathkeys =
+		
+		if (parse->distinctSortClause)
+		{
+			/* We have DISTINCT ON with ORDER BY */
+			List *temp_distinct_clause = list_copy(parse->distinctSortClause);
+			bool temp_sortable;
+			root->distinct_pathkeys =
+				make_pathkeys_for_sortclauses_extended(root,
+													   &temp_distinct_clause,
+													   tlist,
+													   true,
+													   false,
+													   &sortable,
+													   false);
+			if (!sortable)
+				root->distinct_pathkeys = NIL;
+
+			/* We ALSO need to remove redundant keys from processed_distinctClause */
 			make_pathkeys_for_sortclauses_extended(root,
 												   &root->processed_distinctClause,
 												   tlist,
 												   true,
 												   false,
-												   &sortable,
+												   &temp_sortable,
 												   false);
-		if (!sortable)
-			root->distinct_pathkeys = NIL;
+		}
+		else
+		{
+			/* Standard DISTINCT or DISTINCT ON without ORDER BY */
+			root->distinct_pathkeys =
+				make_pathkeys_for_sortclauses_extended(root,
+													   &root->processed_distinctClause,
+													   tlist,
+													   true,
+													   false,
+													   &sortable,
+													   false);
+			if (!sortable)
+				root->distinct_pathkeys = NIL;
+		}
 	}
 	else
 		root->distinct_pathkeys = NIL;
@@ -3890,7 +3919,7 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 												   false,
 												   false,
 												   &sortable,
-												   false);
+												   true);
 		if (!sortable)
 			root->setop_pathkeys = NIL;
 	}
@@ -5254,7 +5283,7 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					add_partial_path(partial_distinct_rel, (Path *)
 									 create_unique_path(root, partial_distinct_rel,
 														sorted_path,
-														list_length(root->distinct_pathkeys),
+														list_length(root->processed_distinctClause),
 														numDistinctRows));
 				}
 			}
@@ -5448,7 +5477,7 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					add_path(distinct_rel, (Path *)
 							 create_unique_path(root, distinct_rel,
 												sorted_path,
-												list_length(root->distinct_pathkeys),
+												list_length(root->processed_distinctClause),
 												numDistinctRows));
 				}
 			}
@@ -8622,48 +8651,59 @@ group_by_has_partkey(RelOptInfo *input_rel,
  * then we return an empty list.  This may leave some TLEs with unreferenced
  * ressortgroupref markings, but that's harmless.
  */
+static TargetEntry *
+get_nth_nonjunk_tle(List *tlist, int n)
+{
+	ListCell   *lc;
+	int			count = 0;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (!tle->resjunk)
+		{
+			count++;
+			if (count == n)
+				return tle;
+		}
+	}
+	return NULL;
+}
+
 static List *
 generate_setop_child_grouplist(SetOperationStmt *op, List *targetlist)
 {
-	List	   *grouplist = copyObject(op->groupClauses);
+	List	   *clauses = op->sortClauses ? op->sortClauses : op->groupClauses;
+	List	   *grouplist = copyObject(clauses);
 	ListCell   *lg;
-	ListCell   *lt;
-	ListCell   *ct;
 
-	lg = list_head(grouplist);
-	ct = list_head(op->colTypes);
-	foreach(lt, targetlist)
+	foreach(lg, grouplist)
 	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lt);
-		SortGroupClause *sgc;
+		SortGroupClause *sgc = (SortGroupClause *) lfirst(lg);
+		Index		ref = sgc->tleSortGroupRef;
+		TargetEntry *tle;
 		Oid			coltype;
 
-		/* resjunk columns could have sortgrouprefs.  Leave these alone */
-		if (tle->resjunk)
-			continue;
+		/* If tleSortGroupRef is not set, we can't map it. */
+		if (ref == 0)
+			elog(ERROR, "missing tleSortGroupRef in setop groupClause");
 
-		/*
-		 * We expect every non-resjunk target to have a SortGroupClause and
-		 * colTypes.
-		 */
-		Assert(lg != NULL);
-		Assert(ct != NULL);
-		sgc = (SortGroupClause *) lfirst(lg);
-		coltype = lfirst_oid(ct);
+		tle = get_nth_nonjunk_tle(targetlist, ref);
+		if (tle == NULL)
+			elog(ERROR, "missing target entry for setop groupClause ref %d", ref);
+
+		/* We also need to get the type from op->colTypes */
+		Assert(ref <= list_length(op->colTypes));
+		coltype = list_nth_oid(op->colTypes, ref - 1);
 
 		/* reject if target type isn't the same as the setop target type */
 		if (coltype != exprType((Node *) tle->expr))
 			return NIL;
 
-		lg = lnext(grouplist, lg);
-		ct = lnext(op->colTypes, ct);
-
 		/* assign a tleSortGroupRef, or reuse the existing one */
 		sgc->tleSortGroupRef = assignSortGroupRef(tle, targetlist);
 	}
-
-	Assert(lg == NULL);
-	Assert(ct == NULL);
 
 	return grouplist;
 }
