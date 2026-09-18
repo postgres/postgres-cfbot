@@ -248,6 +248,24 @@ REPACK clstrpart;
 CREATE TEMP TABLE new_cluster_info AS SELECT relname, level, relfilenode, relkind FROM pg_partition_tree('clstrpart'::regclass) AS tree JOIN pg_class c ON c.oid=tree.relid ;
 SELECT relname, old.level, old.relkind, old.relfilenode = new.relfilenode FROM old_cluster_info AS old JOIN new_cluster_info AS new USING (relname) ORDER BY relname COLLATE "C";
 
+-- Check that partitions that are foreign tables are skipped, with a warning
+CREATE FOREIGN DATA WRAPPER clstr_fdw;
+CREATE SERVER clstr_fserv FOREIGN DATA WRAPPER clstr_fdw;
+CREATE FOREIGN TABLE clstrpart4 PARTITION OF clstrpart FOR VALUES FROM (20) TO (30) SERVER clstr_fserv;
+CLUSTER clstrpart USING clstrpart_idx;
+REPACK clstrpart USING INDEX clstrpart_idx;
+REPACK clstrpart;
+-- ... while processing a foreign table directly is still an error
+REPACK clstrpart4;
+-- ... and a parent with only foreign partitions is not a silent no-op
+CREATE TABLE clstrpart_foreign (a int) PARTITION BY RANGE (a);
+CREATE FOREIGN TABLE clstrpart_foreign1 PARTITION OF clstrpart_foreign FOR VALUES FROM (1) TO (10) SERVER clstr_fserv;
+REPACK clstrpart_foreign;
+DROP TABLE clstrpart_foreign;
+DROP FOREIGN TABLE clstrpart4;
+DROP SERVER clstr_fserv;
+DROP FOREIGN DATA WRAPPER clstr_fdw;
+
 -- Ownership of partitions is checked
 CREATE TABLE ptnowner(i int unique not null) PARTITION BY LIST (i);
 CREATE INDEX ptnowner_i_idx ON ptnowner(i);
