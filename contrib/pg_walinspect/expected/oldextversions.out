@@ -46,18 +46,21 @@ SELECT * FROM pg_get_wal_records_info_till_end_of_wal('FFFFFFFF/FFFFFFFF');
 ERROR:  WAL start LSN must be less than current LSN
 SELECT * FROM pg_get_wal_stats_till_end_of_wal('FFFFFFFF/FFFFFFFF');
 ERROR:  WAL start LSN must be less than current LSN
--- Move to new version 1.1.
+-- Test each upgrade step through the current version.
 ALTER EXTENSION pg_walinspect UPDATE TO '1.1';
--- List what version 1.1 contains.
+ALTER EXTENSION pg_walinspect UPDATE TO '1.2';
+-- List what the current version contains.
 \dx+ pg_walinspect
-         Objects in extension "pg_walinspect"
-                  Object description                   
--------------------------------------------------------
+                       Objects in extension "pg_walinspect"
+                                Object description                                
+----------------------------------------------------------------------------------
  function pg_get_wal_block_info(pg_lsn,pg_lsn,boolean)
+ function pg_get_wal_files(pg_lsn,pg_lsn)
+ function pg_get_wal_location_at_time(timestamp with time zone,interval,interval)
  function pg_get_wal_record_info(pg_lsn)
  function pg_get_wal_records_info(pg_lsn,pg_lsn)
  function pg_get_wal_stats(pg_lsn,pg_lsn,boolean)
-(4 rows)
+(6 rows)
 
 SELECT pg_drop_replication_slot('regress_pg_walinspect_slot');
  pg_drop_replication_slot 

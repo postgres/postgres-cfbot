@@ -34,9 +34,8 @@
  </note>
  <tip>
   <para>
-   All of the <filename>pg_walinspect</filename> functions that show
-   information about records that fall within a certain LSN range are
-   permissive about accepting <replaceable>end_lsn</replaceable>
+   All of the <filename>pg_walinspect</filename> functions that accept an LSN
+   range are permissive about accepting <replaceable>end_lsn</replaceable>
    arguments that are after the server's current LSN.  Using an
    <replaceable>end_lsn</replaceable> <quote>from the future</quote>
    will not raise an error.
@@ -60,6 +59,144 @@
   <title>General Functions</title>
 
   <variablelist>
+   <varlistentry id="pgwalinspect-funcs-pg-get-wal-files">
+    <term>
+     <function>pg_get_wal_files(start_lsn pg_lsn, end_lsn pg_lsn DEFAULT NULL) returns setof record</function>
+    </term>
+
+    <listitem>
+     <para>
+      If <replaceable>end_lsn</replaceable> is specified and differs from
+      <replaceable>start_lsn</replaceable>, returns each retained WAL segment
+      file that intersects the half-open WAL range
+      [<replaceable>start_lsn</replaceable>,
+      <replaceable>end_lsn</replaceable>).  If
+      <replaceable>end_lsn</replaceable> is omitted, is null, or equals
+      <replaceable>start_lsn</replaceable>, returns the segment containing
+      <replaceable>start_lsn</replaceable>.  The
+      <structfield>wal_file</structfield> column contains the file name, while
+      <structfield>segment_start_lsn</structfield> and
+      <structfield>segment_end_lsn</structfield> contain the complete segment
+      boundaries rather than boundaries clipped to the requested range.
+     </para>
+     <para>
+      File names use the timeline valid for each segment in the current
+      timeline's history.  This allows a returned range to cross a timeline
+      switch.  The function reports an error if any required segment file is
+      not currently retained in <filename>pg_wal</filename>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgwalinspect-funcs-pg-get-wal-location-at-time">
+    <term>
+     <function>pg_get_wal_location_at_time(target_time timestamptz, before interval DEFAULT '1 minute', after interval DEFAULT '1 minute') returns record</function>
+    </term>
+
+    <listitem>
+     <para>
+      Locates a nearby WAL region using records containing local event
+      timestamps as historical time anchors.  The requested time range extends
+      from <replaceable>target_time</replaceable> minus
+      <replaceable>before</replaceable> through
+      <replaceable>target_time</replaceable> plus
+      <replaceable>after</replaceable>.  It returns
+      <structfield>start_timestamp</structfield>,
+      <structfield>start_lsn</structfield>,
+      <structfield>end_timestamp</structfield>, and
+      <structfield>end_lsn</structfield>.  On successful return, the following
+      relationships hold:
+<programlisting>
+start_timestamp &lt;= target_time - before
+start_lsn       &lt; end_lsn
+</programlisting>
+      If <replaceable>target_time</replaceable> plus
+      <replaceable>after</replaceable> is not later than the current time, this
+      additional relationship holds:
+<programlisting>
+end_timestamp &gt;= target_time + after
+</programlisting>
+      Otherwise, the requested upper bound is capped at the current time, and
+      the function uses a timestamped WAL record at or before the current time
+      as the end boundary, so <literal>end_timestamp &lt;= current
+      time</literal>.  It does not construct an end boundary from the current
+      WAL position.  Thus, both returned boundaries come from actual
+      timestamped WAL records and form a valid forward WAL range.  Both
+      interval arguments must be greater than zero and not greater than one
+      day.
+     </para>
+     <para>
+      Most WAL records do not contain a wall-clock timestamp.  Historical
+      anchors can be transaction <literal>COMMIT</literal>,
+      <literal>COMMIT PREPARED</literal>, <literal>ABORT</literal>,
+      or <literal>ABORT PREPARED</literal> records, as well as restore point
+      records.  These are the WAL record types from which PostgreSQL recovery
+      can extract timestamps.  Their timestamps describe the corresponding
+      event; they do not assign timestamps to heap, index, or other records.
+     </para>
+     <para>
+      In particular, a commit timestamp describes when a transaction
+      committed, not when its earlier changes generated WAL.  For example, a
+      transaction might update a row at 14:00 and commit at 15:00; the heap
+      WAL was generated around 14:00, while the commit record is timestamped
+      15:00.  The returned LSNs therefore do not identify the exact generation
+      time of heap, index, or other WAL records, nor do they guarantee that
+      every record generated during the requested wall-clock range lies
+      between the returned LSNs.  On a cluster with little timestamped
+      activity, the returned timestamps can be far from the requested bounds.
+     </para>
+     <para>
+      WAL record timestamps are not guaranteed to increase with WAL position,
+      for example when concurrent transactions commit.  The function avoids
+      decoding all retained WAL: it uses WAL segment modification times as a
+      starting-position hint, WAL order as a search heuristic, and nearby
+      timestamped records as time anchors.  Therefore, the returned historical
+      records are not guaranteed to be the globally closest timestamped
+      records to either requested time bound.  If suitable time boundaries
+      cannot form a forward WAL range, the function reports an error rather
+      than returning a range with the LSNs reversed.
+     </para>
+     <para>
+      Only WAL that is currently retained in <filename>pg_wal</filename> can
+      be searched.  Unlike the other <application>pg_walinspect</application>
+      functions, this function may inspect retained WAL from the current
+      timeline's history as well as the current timeline.  The function
+      reports an error when either boundary cannot be found or a missing WAL
+      segment prevents the search from reaching it.  WAL segment modification
+      times are used internally to choose where to begin searching, but are
+      not used as record timestamps and are not part of the function's
+      semantics.
+     </para>
+     <para>
+      For example, a DBA can locate WAL around activity near a given time and
+      then inspect the returned range:
+<programlisting>
+SELECT *
+FROM pg_get_wal_location_at_time(
+    '2026-08-01 14:35:00+08',
+    before =&gt; '10 minutes',
+    after  =&gt; '10 minutes');
+
+SELECT *
+FROM pg_get_wal_files('<replaceable>start_lsn</replaceable>',
+                      '<replaceable>end_lsn</replaceable>');
+
+SELECT *
+FROM pg_get_wal_records_info('<replaceable>start_lsn</replaceable>',
+                             '<replaceable>end_lsn</replaceable>');
+</programlisting>
+      The corresponding retained WAL files can be obtained with
+      <function>pg_get_wal_files</function>.  If the returned WAL range does
+      not contain the records of interest, increase
+      <replaceable>before</replaceable> if the relevant activity might have
+      occurred earlier, or increase <replaceable>after</replaceable> if it
+      might have occurred later, and repeat the search.  Failure to find a
+      record in the first returned range does not necessarily mean that the
+      record is absent from retained WAL.
+     </para>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="pgwalinspect-funcs-pg-get-wal-record-info">
     <term>
      <function>pg_get_wal_record_info(in_lsn pg_lsn) returns record</function>
