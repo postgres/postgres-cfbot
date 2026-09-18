@@ -1550,6 +1550,7 @@ CREATE VIEW pg_stat_subscription_stats AS
         ss.apply_error_count,
         ss.sync_seq_error_count,
         ss.sync_table_error_count,
+        ss.worker_launch_failure_count,
         ss.confl_insert_exists,
         ss.confl_update_origin_differs,
         ss.confl_update_exists,

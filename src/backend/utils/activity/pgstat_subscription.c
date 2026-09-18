@@ -57,6 +57,20 @@ pgstat_report_subscription_error(Oid subid)
 }
 
 /*
+ * Report a worker error
+ */
+void
+pgstat_report_subscription_worker_launch_failure(Oid subid)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_BackendSubEntry *sub_entry;
+
+	entry_ref = pgstat_prep_pending_entry(PGSTAT_KIND_SUBSCRIPTION, InvalidOid, subid, NULL);
+	sub_entry = (PgStat_BackendSubEntry *) entry_ref->pending;
+	sub_entry->worker_launch_failure_count++;
+}
+
+/*
  * Report a subscription conflict.
  */
 void
