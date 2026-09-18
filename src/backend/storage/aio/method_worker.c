@@ -34,6 +34,7 @@
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "postmaster/auxprocess.h"
+#include "postmaster/bgwriter.h"
 #include "postmaster/interrupt.h"
 #include "storage/aio.h"
 #include "storage/aio_internal.h"
@@ -45,6 +46,7 @@
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/injection_point.h"
 #include "utils/memdebug.h"
@@ -870,6 +872,7 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 		if (io_index != -1)
 		{
 			PgAioHandle *ioh = NULL;
+			int			reopen_result;
 
 			/* Cancel timeout and update wakeup:work ratio. */
 			idle_timeout_abs = 0;
@@ -895,62 +898,72 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 			HOLD_INTERRUPTS();
 
 			/*
-			 * It's very unlikely, but possible, that reopen fails. E.g. due
-			 * to memory allocations failing or file permissions changing or
-			 * such.  In that case we need to fail the IO.
-			 *
-			 * There's not really a good errno we can report here.
+			 * Ordinary reopen failures can return -errno below.  If the
+			 * callback instead raises an error, use the existing worker-exit
+			 * recovery path, which has no reliable errno to report.
 			 */
 			error_errno = ENOENT;
-			pgaio_io_reopen(ioh);
+			reopen_result = pgaio_io_reopen(ioh);
 
-			/*
-			 * To be able to exercise the reopen-fails path, allow injection
-			 * points to trigger a failure at this point.
-			 */
-			INJECTION_POINT("aio-worker-after-reopen", ioh);
-
-			error_errno = 0;
-			error_ioh = NULL;
-
-			/*
-			 * As part of IO completion the buffer will be marked as NOACCESS,
-			 * until the buffer is pinned again - which never happens in io
-			 * workers. Therefore the next time there is IO for the same
-			 * buffer, the memory will be considered inaccessible. To avoid
-			 * that, explicitly allow access to the memory before reading data
-			 * into it.
-			 */
-#ifdef USE_VALGRIND
+			if (reopen_result < 0)
 			{
-				struct iovec *iov;
-				uint16		iov_length = pgaio_io_get_iovec_length(ioh, &iov);
+				error_errno = 0;
+				error_ioh = NULL;
 
-				for (int i = 0; i < iov_length; i++)
-					VALGRIND_MAKE_MEM_UNDEFINED(iov[i].iov_base, iov[i].iov_len);
+				START_CRIT_SECTION();
+				pgaio_io_process_completion(ioh, reopen_result);
+				END_CRIT_SECTION();
 			}
+			else
+			{
+				/*
+				 * To be able to exercise the reopen-fails path, allow
+				 * injection points to trigger a failure at this point.
+				 */
+				INJECTION_POINT("aio-worker-after-reopen", ioh);
+
+				error_errno = 0;
+				error_ioh = NULL;
+
+				/*
+				 * As part of IO completion the buffer will be marked as
+				 * NOACCESS, until the buffer is pinned again - which never
+				 * happens in io workers. Therefore the next time there is IO
+				 * for the same buffer, the memory will be considered
+				 * inaccessible. To avoid that, explicitly allow access to the
+				 * memory before reading data into it.
+				 */
+#ifdef USE_VALGRIND
+				{
+					struct iovec *iov;
+					uint16		iov_length = pgaio_io_get_iovec_length(ioh, &iov);
+
+					for (int i = 0; i < iov_length; i++)
+						VALGRIND_MAKE_MEM_UNDEFINED(iov[i].iov_base, iov[i].iov_len);
+				}
 #endif
 
 #ifdef PGAIO_WORKER_SHOW_PS_INFO
-			{
-				char	   *description = pgaio_io_get_target_description(ioh);
+				{
+					char	   *description = pgaio_io_get_target_description(ioh);
 
-				sprintf(cmd, "%d: [%s] %s",
-						MyIoWorkerId,
-						pgaio_io_get_op_name(ioh),
-						description);
-				pfree(description);
-				set_ps_display(cmd);
-			}
+					sprintf(cmd, "%d: [%s] %s",
+							MyIoWorkerId,
+							pgaio_io_get_op_name(ioh),
+							description);
+					pfree(description);
+					set_ps_display(cmd);
+				}
 #endif
 
-			/*
-			 * We don't expect this to ever fail with ERROR or FATAL, no need
-			 * to keep error_ioh set to the IO.
-			 * pgaio_io_perform_synchronously() contains a critical section to
-			 * ensure we don't accidentally fail.
-			 */
-			pgaio_io_perform_synchronously(ioh);
+				/*
+				 * We don't expect this to ever fail with ERROR or FATAL, no
+				 * need to keep error_ioh set to the IO.
+				 * pgaio_io_perform_synchronously() contains a critical
+				 * section to ensure we don't accidentally fail.
+				 */
+				pgaio_io_perform_synchronously(ioh);
+			}
 
 			RESUME_INTERRUPTS();
 			errcallback.arg = NULL;
@@ -961,6 +974,16 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 
 			/* Cancel new worker request if pending. */
 			pgaio_worker_cancel_grow();
+
+			/*
+			 * Like the background writer, IO workers don't have a
+			 * transaction-end cleanup to destroy SMGR objects, so do that
+			 * when idle after a checkpoint. Any IO has completed and its
+			 * error context has been cleared here, so no borrowed file
+			 * descriptors or SMGR references remain in use.
+			 */
+			if (FirstCallSinceLastCheckpoint())
+				smgrdestroyall();
 
 			/* Compute the remaining allowed idle time. */
 			if (io_worker_idle_timeout == -1)

@@ -68,6 +68,7 @@
 #include "miscadmin.h"
 #include "storage/aio.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
@@ -123,6 +124,7 @@ typedef struct f_smgr
 	void		(*smgr_immedsync) (SMgrRelation reln, ForkNumber forknum);
 	void		(*smgr_registersync) (SMgrRelation reln, ForkNumber forknum);
 	int			(*smgr_fd) (SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
+	int			(*smgr_fsync_fd) (SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum);
 } f_smgr;
 
 static const f_smgr smgrsw[] = {
@@ -148,6 +150,7 @@ static const f_smgr smgrsw[] = {
 		.smgr_immedsync = mdimmedsync,
 		.smgr_registersync = mdregistersync,
 		.smgr_fd = mdfd,
+		.smgr_fsync_fd = mdfsyncfd,
 	}
 };
 
@@ -165,13 +168,15 @@ static dlist_head unpinned_relns;
 static void smgrshutdown(int code, Datum arg);
 static void smgrdestroy(SMgrRelation reln);
 
-static void smgr_aio_reopen(PgAioHandle *ioh);
+static int	smgr_aio_reopen(PgAioHandle *ioh);
+static void smgr_aio_close(PgAioHandle *ioh);
 static char *smgr_aio_describe_identity(const PgAioTargetData *sd);
 
 
 const PgAioTargetInfo aio_smgr_target_info = {
 	.name = "smgr",
 	.reopen = smgr_aio_reopen,
+	.close = smgr_aio_close,
 	.describe_identity = smgr_aio_describe_identity,
 };
 
@@ -1002,6 +1007,18 @@ smgrfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
 }
 
 /*
+ * Open the exact segment containing blocknum for fsync, returning a transient
+ * descriptor, or -1 with errno set if the file cannot be opened.
+ */
+static int
+smgrfsyncfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+{
+	Assert(!INTERRUPTS_CAN_BE_PROCESSED());
+
+	return smgrsw[reln->smgr_which].smgr_fsync_fd(reln, forknum, blocknum);
+}
+
+/*
  * AtEOXact_SMgr
  *
  * This routine is called during transaction commit or abort (it doesn't
@@ -1058,9 +1075,11 @@ pgaio_io_set_target_smgr(PgAioHandle *ioh,
 
 /*
  * Callback for the smgr AIO target, to reopen the file (e.g. because the IO
- * is executed in a worker).
+ * is executed in a worker).  Returns 0 on success.  Failures can return
+ * -errno, but relation read/write descriptor lookup retains its existing
+ * error reporting and may raise an error instead.
  */
-static void
+static int
 smgr_aio_reopen(PgAioHandle *ioh)
 {
 	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
@@ -1068,6 +1087,7 @@ smgr_aio_reopen(PgAioHandle *ioh)
 	SMgrRelation reln;
 	ProcNumber	procno;
 	uint32		off;
+	int			fd;
 
 	/*
 	 * The caller needs to prevent interrupts from being processed, otherwise
@@ -1089,11 +1109,35 @@ smgr_aio_reopen(PgAioHandle *ioh)
 		case PGAIO_OP_READV:
 			od->read.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			Assert(off == od->read.offset);
-			break;
+			return 0;
 		case PGAIO_OP_WRITEV:
 			od->write.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			Assert(off == od->write.offset);
-			break;
+			return 0;
+		case PGAIO_OP_FSYNC:
+			fd = smgrfsyncfd(reln, sd->smgr.forkNum, sd->smgr.blockNum);
+			/* We need errno for only checkpointer fsyncs for now */
+			if (fd < 0)
+				return -errno;
+			od->fsync.fd = fd;
+			return 0;
+	}
+
+	pg_unreachable();
+}
+
+/*
+ * Release a transient descriptor opened for a worker-executed fsync.
+ */
+static void
+smgr_aio_close(PgAioHandle *ioh)
+{
+	PgAioOpData *od = pgaio_io_get_op_data(ioh);
+
+	if (pgaio_io_get_op(ioh) == PGAIO_OP_FSYNC)
+	{
+		(void) CloseTransientFile(od->fsync.fd);
+		od->fsync.fd = -1;
 	}
 }
 
@@ -1112,7 +1156,14 @@ smgr_aio_describe_identity(const PgAioTargetData *sd)
 						  sd->smgr.forkNum);
 
 	if (sd->smgr.nblocks == 0)
-		desc = psprintf(_("file \"%s\""), path.str);
+	{
+		BlockNumber segno = sd->smgr.blockNum / ((BlockNumber) RELSEG_SIZE);
+
+		if (segno > 0)
+			desc = psprintf(_("file \"%s.%u\""), path.str, segno);
+		else
+			desc = psprintf(_("file \"%s\""), path.str);
+	}
 	else if (sd->smgr.nblocks == 1)
 		desc = psprintf(_("block %u in file \"%s\""),
 						sd->smgr.blockNum,

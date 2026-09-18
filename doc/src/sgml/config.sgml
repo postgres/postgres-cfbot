@@ -12293,6 +12293,16 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
         copies created with <application>pg_basebackup</application>.
        </para>
        <para>
+        When this parameter is set to <literal>fsync</literal> and
+        <xref linkend="guc-io-method"/> is set to <literal>io_uring</literal>,
+        multiple file synchronization operations can run concurrently.
+        With <literal>worker</literal> or <literal>sync</literal>, these
+        operations run synchronously in the startup process.  Unlike relation
+        and SLRU synchronization during checkpoints, data-directory
+        synchronization does not provide the information needed for I/O
+        workers to reopen the files.
+       </para>
+       <para>
         On Linux, <literal>syncfs</literal> may be used instead, to ask the
         operating system to synchronize the file systems that contain the
         data directory, the WAL files and each tablespace (but not any other
