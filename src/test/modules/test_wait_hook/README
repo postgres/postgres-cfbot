@@ -1,0 +1,50 @@
+test_wait_hook is a test module for the wait_event_begin_hook /
+wait_event_end_hook contract defined in src/include/utils/wait_event.h:
+
+- a hook implementation may use only preallocated backend-local state; it
+  must not palloc, wait, take a lock, or call elog/ereport;
+- the wait_event_hook_depth guard prevents a hook body from re-entering the
+  hooks (directly or by triggering another instrumented wait);
+- a consumer that chains onto an already-installed hook must save the
+  previous begin/end pointers, call the previous begin hook before its own
+  begin work, and do its own end work before calling the previous end hook.
+
+All of this module's state -- the ring of recorded events, which consumers
+are installed, and the previous hook pointers each of them chains onto --
+is backend-local: preallocated static arrays and variables, exactly what
+the contract requires.  Nothing here is process-wide or shared memory.
+
+Two test consumers, 'A' and 'B', can be installed independently with
+test_wait_hook_install(), and each records the begin/end events it sees
+(consumer id, wait_event_info, and the wait_event_hook_depth value observed)
+into a 64-entry ring, retrievable and clearable with test_wait_hook_events().
+Installing 'B' while another hook is already in place chains 'B' onto it,
+which is what the regression test uses to show the required call order:
+the outer consumer's begin hook runs first and its end hook runs last.
+
+The hooks are installed for the whole backend, not just for the statement
+under test, so the ring only ever records PgSleep events (see the comment
+on ring_push() in test_wait_hook.c).  Otherwise this session's own
+housekeeping waits -- a ClientRead wait while idling between statements,
+or file I/O from ordinary catalog access -- would land in the ring too,
+nondeterministically.  The regression test uses test_wait_hook_wait() to
+generate its PgSleep waits rather than pg_sleep(): pg_sleep()'s loop
+passes WL_LATCH_SET to WaitLatch(), so if the process latch happens to
+already be set, it returns immediately and loops around for a second
+wait, recording a spurious extra pair.  test_wait_hook_wait() calls
+WaitLatch() once, without WL_LATCH_SET, so it always produces exactly one
+begin/end pair.
+
+test_wait_hook_nested_wait_in_hook(true) makes consumer A's begin hook
+itself wait on the process latch -- a deliberate violation of the "no
+waits inside a hook" rule -- to demonstrate that the depth guard keeps
+that nested wait from re-entering the hooks.  It also demonstrates a less
+obvious consequence: pgstat_report_wait_end_timed() unconditionally clears
+the raw wait-event state even when the depth guard suppresses the hook
+call, so the *outer* wait's end call goes on to read a stale value.  See
+the comment on consumerA_begin() in test_wait_hook.c for the mechanics.
+
+test_wait_hook_error_after_start() reports a wait start and then raises an
+error without reporting the matching end, to check that AbortTransaction()
+performs that end call as part of its normal cleanup, leaving my_wait_event
+tracking and the hooks in a consistent state for subsequent waits.
