@@ -1745,6 +1745,10 @@ pgstat_write_statsfile(void)
 		PgStatShared_Common *shstats;
 		const PgStat_KindInfo *kind_info = NULL;
 
+		/*
+		 * CHECK_FOR_INTERRUPTS_WITH_INTERRUPTS_HELD: dshash_seq_next()
+		 * returns with the current hash partition lock still held.
+		 */
 		CHECK_FOR_INTERRUPTS();
 
 		/*
