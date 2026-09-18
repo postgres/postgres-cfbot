@@ -478,6 +478,49 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
         </listitem>
        </varlistentry>
 
+       <varlistentry id="sql-createsubscription-params-with-messages">
+        <term><literal>messages</literal> (<type>boolean</type>)</term>
+        <listitem>
+         <para>
+          Specifies whether the subscription requests the publisher to send
+          logical decoding messages, that is, those emitted with
+          <link linkend="pg-logical-emit-message"><function>pg_logical_emit_message</function></link>.
+          The default is <literal>false</literal>.
+         </para>
+         <para>
+          Received messages are only acted upon if an extension installed on
+          the subscriber has registered a handler for them; otherwise they are
+          received and discarded. A message may be passed to the handler more
+          than once, for example after an apply worker restart, so a handler
+          must be prepared to process the same message repeatedly.
+         </para>
+         <para>
+          A transactional message is applied as part of the remote transaction
+          that emitted it, and is therefore delivered in commit order with
+          respect to other transactions, not in the order in which it was written.
+          Note that
+          <link linkend="sql-createsubscription-params-with-streaming"><literal>streaming</literal></link>
+          and <link linkend="sql-altersubscription-params-skip"><literal>SKIP</literal></link>
+          apply to transactional messages just as they do to other changes. A
+          non-transactional message is delivered as soon as it is decoded, even
+          if the transaction that emitted it later aborted.
+         </para>
+         <para>
+          Messages are not restricted to the tables or schemas of the
+          subscribed publications: every message emitted in the publisher
+          database is sent, subject only to
+          <link linkend="sql-createsubscription-params-with-origin"><literal>origin</literal></link>
+          filtering. Message contents are supplied by whoever calls
+          <function>pg_logical_emit_message</function> on the publisher, which
+          by default any role may do, so a handler should treat them as
+          untrusted input. A message is an arbitrary string of bytes, and is
+          transmitted without character set conversion; it may therefore
+          contain embedded nulls, and need not be valid text in the encoding
+          of either database.
+         </para>
+        </listitem>
+       </varlistentry>
+
        <varlistentry id="sql-createsubscription-params-with-origin">
         <term><literal>origin</literal> (<type>string</type>)</term>
         <listitem>
