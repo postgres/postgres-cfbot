@@ -117,6 +117,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
@@ -135,6 +136,7 @@
 #include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
+#include "utils/sortsupport.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
@@ -411,6 +413,7 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		AttStatsSlot sslot;
 		bool		match = false;
 		int			i;
+		double		sumcommon = 0.0;
 
 		/*
 		 * Is the constant "=" to any of the column's most common values?
@@ -425,6 +428,19 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		{
 			LOCAL_FCINFO(fcinfo, 2);
 			FmgrInfo	eqproc;
+			bool		scan_entire_mcv = false;
+/*
+ * Status codes for in_mcv_range:
+ * 0 - Need to compare against each MCV value.
+ * 1 - Falls within MCV range; still need to check whether present in list via binary search.
+ * 2 - Falls outside MCV range; no need to compare against each MCV value.
+ */
+#define IN_MCV_RANGE_UNKNOWN	0
+#define IN_MCV_RANGE_YES		1
+#define IN_MCV_RANGE_NO			2
+			int			in_mcv_range = IN_MCV_RANGE_UNKNOWN;
+			int			nvalues = sslot.nvalues;
+			SortSupportData ssup = {0};
 
 			fmgr_info(opfuncoid, &eqproc);
 
@@ -444,20 +460,195 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 			else
 				fcinfo->args[0].value = constval;
 
-			for (i = 0; i < sslot.nvalues; i++)
-			{
-				Datum		fresult;
+			selec = 0.0;
+			i = 0;
 
-				if (varonleft)
-					fcinfo->args[0].value = sslot.values[i];
-				else
-					fcinfo->args[1].value = sslot.values[i];
-				fcinfo->isnull = false;
-				fresult = FunctionCallInvoke(fcinfo);
-				if (!fcinfo->isnull && DatumGetBool(fresult))
+			if (sslot.stacoll == collation)
+			{
+				/*
+				 * If the collations are equal and the MCV values can be
+				 * sorted in ascending order, and the MCV list is already
+				 * sorted, first check whether the constant expression falls
+				 * within the range of MCV values:
+				 *
+				 * - If it is equal to the first or last MCV value, the lookup
+				 *   can be completed immediately.
+				 *
+				 * - If it falls within the MCV range, use binary search to find
+				 *   a matching value, reducing the average number of comparisons
+				 *   from N/2 to at most log(N).
+				 *
+				 * - If it falls outside the MCV range, subsequent processing can
+				 *   sum sumcommon directly without comparing against the MCV values.
+				 *   In this worst-case scenario where the constant does not match
+				 *   any MCV value, this reduces the number of comparisons from N to
+				 *   at most 2.
+				 */
+				Oid			ltopr;
+				Oid			eqopr;
+
+				/* Look for default "<" and "=" operators for sslot.valuetype */
+				get_sort_group_operators(sslot.valuetype,
+										 false, false, false,
+										 &ltopr, &eqopr, NULL,
+										 NULL);
+				if (OidIsValid(eqopr) && OidIsValid(ltopr))
 				{
-					match = true;
-					break;
+					int			compare;
+					double		number;
+
+					/*
+					 * This patch assumes MCV list is sorted by
+					 * value;follow‑up patches will handle compatibility
+					 * including sorted‑state checks.
+					 *
+					 * Todo
+					 */
+					ssup.ssup_cxt = CurrentMemoryContext;
+					ssup.ssup_collation = sslot.stacoll;
+					ssup.ssup_nulls_first = false;
+					ssup.abbreviate = false;
+					PrepareSortSupportFromOrderingOp(ltopr, &ssup);
+
+					/* First compare against values[0] */
+					compare = ApplySortComparator(constval, false,
+												  sslot.values[0], false, &ssup);
+					number = sslot.numbers[0];
+					if (compare == 0)
+					{
+						/*
+						 * Constant is "=" to this common value.  We know
+						 * selectivity exactly (or as exactly as ANALYZE could
+						 * calculate it, anyway).
+						 */
+						match = true;
+						selec = number;
+					}
+					else if (compare < 0 || nvalues == 1)
+					{
+						in_mcv_range = IN_MCV_RANGE_NO;
+					}
+					else
+					{
+						/* Next compare against values[nvalues - 1] */
+						nvalues--;
+						compare = ApplySortComparator(constval, false,
+													  sslot.values[nvalues], false, &ssup);
+						number = sslot.numbers[nvalues];
+						if (compare == 0)
+						{
+							/*
+							 * Constant is "=" to this common value.  We know
+							 * selectivity exactly (or as exactly as ANALYZE
+							 * could calculate it, anyway).
+							 */
+							match = true;
+							selec = number;
+						}
+						else if (compare > 0)
+							in_mcv_range = IN_MCV_RANGE_NO;
+						else
+						{
+							/* For binary search: refers to the first and last uncompared elements */
+							i = 1;
+							nvalues--;
+
+							in_mcv_range = IN_MCV_RANGE_YES;
+						}
+					}
+				}
+			}
+			else if (sslot.stacoll != collation && OidIsValid(collation))
+			{
+				/*
+				 * Scanning the entire MCV array is needed when the collation
+				 * used for the comparison is nondeterministic and differs
+				 * from the statistics collation. In this case, the comparison
+				 * may match multiple MCV values, so we must continue scanning
+				 * after finding a match.
+				 */
+				pg_locale_t mylocale = pg_newlocale_from_collation(collation);
+
+				scan_entire_mcv = !mylocale->deterministic;
+			}
+
+			if (!match)
+			{
+				if (in_mcv_range == IN_MCV_RANGE_YES)
+				{
+					/* Binary search */
+					while (i <= nvalues)
+					{
+						int		compare;
+						int		mid = (i + nvalues) / 2;
+
+						compare = ApplySortComparator(constval, false,
+													  sslot.values[mid], false, &ssup);
+						if (compare == 0)
+						{
+							/*
+							 * Constant is "=" to this common value.  We know
+							 * selectivity exactly (or as exactly as ANALYZE
+							 * could calculate it, anyway).
+							 */
+							match = true;
+							selec = sslot.numbers[mid];
+							break;
+						}
+						else if (compare > 0)
+							i = mid + 1;
+						else
+							nvalues = mid - 1;
+					}
+				}
+
+				if (!match)
+				{
+					/*
+					 * Compare the constant expression with the MCVs.
+					 *
+					 * If the constant matches the current MCV, stop here when
+					 * a full MCV scan is not required. Otherwise, continue
+					 * scanning the remaining MCVs and accumulate the
+					 * selectivity of all matching MCVs.
+					 *
+					 * While scanning, also accumulate the selectivity of the
+					 * MCVs examined so far. This is used later to estimate
+					 * the selectivity of a non-NULL constant that does not
+					 * match any MCV.
+					 */
+					for (i = 0; i < nvalues; i++)
+					{
+						if (in_mcv_range == IN_MCV_RANGE_UNKNOWN || scan_entire_mcv)
+						{
+							Datum		fresult;
+
+							if (varonleft)
+								fcinfo->args[0].value = sslot.values[i];
+							else
+								fcinfo->args[1].value = sslot.values[i];
+							fcinfo->isnull = false;
+							fresult = FunctionCallInvoke(fcinfo);
+							if (!fcinfo->isnull && DatumGetBool(fresult))
+							{
+								/*
+								 * Constant is "=" to this common value.  We
+								 * know selectivity exactly (or as exactly as
+								 * ANALYZE could calculate it, anyway).
+								 */
+								match = true;
+								if (!scan_entire_mcv)
+								{
+									selec = sslot.numbers[i];
+									break;
+								}
+
+								selec += sslot.numbers[i];
+							}
+						}
+
+						sumcommon += sslot.numbers[i];
+					}
 				}
 			}
 		}
@@ -467,26 +658,15 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 			i = 0;				/* keep compiler quiet */
 		}
 
-		if (match)
-		{
-			/*
-			 * Constant is "=" to this common value.  We know selectivity
-			 * exactly (or as exactly as ANALYZE could calculate it, anyway).
-			 */
-			selec = sslot.numbers[i];
-		}
-		else
+		if (!match)
 		{
 			/*
 			 * Comparison is against a constant that is neither NULL nor any
 			 * of the common values.  Its selectivity cannot be more than
 			 * this:
 			 */
-			double		sumcommon = 0.0;
 			double		otherdistinct;
 
-			for (i = 0; i < sslot.nnumbers; i++)
-				sumcommon += sslot.numbers[i];
 			selec = 1.0 - sumcommon - nullfrac;
 			CLAMP_PROBABILITY(selec);
 
