@@ -2329,7 +2329,7 @@
 { name => 'output_plugin_libraries', type => 'string', context => 'PGC_SUSET', group => 'REPLICATION_SENDING',
   short_desc => 'Lists libraries that may be named as logical decoding output plugins.',
   long_desc => 'Users with REPLICATION privileges may only use plugins in this list when creating logical replication slots.',
-  # Note that src/bin/pg_upgrade/check.c assumes GUC_LIST_QUOTE here.
+  # Note that src/bin/pg_upgrade/check.c and src/bin/pg_basebackup/pg_createsubscriber.c assume GUC_LIST_QUOTE here.
   flags => 'GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_SUPERUSER_ONLY',
   variable => 'output_plugin_libraries_string',
   boot_val => '"pgoutput, test_decoding"',

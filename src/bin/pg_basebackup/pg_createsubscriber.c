@@ -1007,6 +1007,86 @@ make_output_dirs(const char *log_basedir)
 }
 
 /*
+ * Check effective settings for each publisher database
+ */
+static void
+check_publisher_per_database(const struct LogicalRepInfo *dbinfo)
+{
+	for (int i = 0; i < num_dbs; i++)
+	{
+		PGconn	   *conn;
+		PGresult   *res;
+		char	   *output_plugin_libraries;
+		char	   *output_plugin_libraries_copy;
+		char	  **allowed_plugins;
+		bool		pgoutput_allowed = false;
+
+		conn = connect_database(dbinfo[i].pubconninfo, true);
+
+		/* Check whether output_plugin_libraries includes 'pgoutput' */
+		res = PQexec(conn,
+					 "SELECT setting FROM pg_catalog.pg_settings "
+					 "WHERE name = 'output_plugin_libraries'");
+
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		{
+			pg_log_error("could not obtain publisher settings in database \"%s\": %s",
+						 dbinfo[i].dbname, PQresultErrorMessage(res));
+			disconnect_database(conn, true);
+		}
+
+		/*
+		 * output_plugin_libraries is visible only for superuser or
+		 * pg_read_all_settings role. Skip checking on this database if it
+		 * cannot be read.
+		 */
+		if (PQntuples(res) != 1)
+		{
+			PQclear(res);
+			disconnect_database(conn, false);
+			continue;
+		}
+
+		output_plugin_libraries = pg_strdup(PQgetvalue(res, 0, 0));
+
+		PQclear(res);
+		pg_log_debug("publisher in database \"%s\": output_plugin_libraries: %s",
+					 dbinfo[i].dbname, output_plugin_libraries);
+
+		disconnect_database(conn, false);
+
+		output_plugin_libraries_copy = pg_strdup(output_plugin_libraries);
+
+		if (!SplitGUCList(output_plugin_libraries_copy, ',', &allowed_plugins))
+			pg_fatal("could not parse \"output_plugin_libraries\" setting '%s' in database \"%s\"",
+					 output_plugin_libraries, dbinfo[i].dbname);
+
+		/* Make sure the output_plugin_libraries setting includes "pgoutput" */
+		for (char **plugin = allowed_plugins; *plugin; plugin++)
+		{
+			if (strcmp(*plugin, "pgoutput") == 0)
+			{
+				pgoutput_allowed = true;
+				break;
+			}
+		}
+
+		if (!pgoutput_allowed)
+		{
+			pg_log_error("publisher does not allow the \"pgoutput\" output plugin in database \"%s\"",
+						 dbinfo[i].dbname);
+			pg_log_error_hint("Add \"pgoutput\" to the configuration parameter \"%s\".",
+							  "output_plugin_libraries");
+			exit(1);
+		}
+
+		pg_free(output_plugin_libraries);
+		pg_free(output_plugin_libraries_copy);
+		pg_free(allowed_plugins);
+	}
+}
+
+/*
  * Is the primary server ready for logical replication?
  *
  * XXX Does it not allow a synchronous replica?
@@ -1134,9 +1214,13 @@ check_publisher(const struct LogicalRepInfo *dbinfo)
 	}
 
 	pg_free(wal_level);
+	pg_free(max_slot_wal_keep_size);
 
 	if (failed)
 		exit(1);
+
+	/* Also check effective settings for each publisher database */
+	check_publisher_per_database(dbinfo);
 }
 
 /*

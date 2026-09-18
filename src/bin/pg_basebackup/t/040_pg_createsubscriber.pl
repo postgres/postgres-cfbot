@@ -334,6 +334,54 @@ is($node_s->safe_psql($db1, "SELECT COUNT(*) FROM pg_publication"),
 
 $node_s->stop;
 
+# pg_createsubscriber requires that output_plugin_libraries includes 'pgoutput'
+# on the publisher.
+$node_p->safe_psql($db2,
+	"ALTER DATABASE \"$db2\" SET output_plugin_libraries = 'test_decoding'");
+
+command_fails_like(
+	[
+		'pg_createsubscriber',
+		'--dry-run',
+		'--pgdata' => $node_s->data_dir,
+		'--publisher-server' => $node_p->connstr($db1),
+		'--socketdir' => $node_s->host,
+		'--subscriber-port' => $node_s->port,
+		'--database' => $db1,
+		'--database' => $db2,
+	],
+	qr/publisher does not allow the "pgoutput" output plugin in database "\Q$db2\E"/,
+	'publisher disallows pgoutput output plugin');
+
+$node_p->safe_psql($db2,
+	"ALTER DATABASE \"$db2\" RESET output_plugin_libraries");
+
+# This user cannot read output_plugin_libraries, so the check should be skipped
+# even when pgoutput is not allowed.
+my $publisher_user = 'regress_createsubscriber_user';
+$node_p->safe_psql('postgres',
+	"CREATE ROLE $publisher_user LOGIN REPLICATION");
+$node_p->safe_psql('postgres',
+	"ALTER ROLE $publisher_user SET output_plugin_libraries = 'test_decoding'");
+$result = $node_p->safe_psql($db1,
+	"SELECT count(*) FROM pg_catalog.pg_settings WHERE name = 'output_plugin_libraries'",
+	extra_params => [ '--username' => $publisher_user ]);
+is($result, '0', 'non-superuser cannot see output_plugin_libraries');
+
+command_ok(
+	[
+		'pg_createsubscriber',
+		'--dry-run',
+		'--pgdata' => $node_s->data_dir,
+		'--publisher-server' => $node_p->connstr($db1) . " user=$publisher_user",
+		'--socketdir' => $node_s->host,
+		'--subscriber-port' => $node_s->port,
+		'--database' => $db1,
+	],
+	'run pg_createsubscriber --dry-run as non-superuser');
+
+$node_p->safe_psql('postgres', "DROP ROLE $publisher_user");
+
 # dry run mode on node S. Use the same publication name for different
 # databases, since publication names are database-local.
 command_ok(
