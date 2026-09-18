@@ -27,6 +27,7 @@ AcquireSampleRowsFunc
 ActionList
 ActiveSnapshotElt
 AddForeignUpdateTargets_function
+AddGenConstrError
 AddrInfo
 AffixNode
 AffixNodeData
