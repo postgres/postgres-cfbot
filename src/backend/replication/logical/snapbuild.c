@@ -1657,7 +1657,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				 errmsg("could not open file \"%s\": %m", tmppath)));
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_SNAPBUILD_WRITE);
 	if ((write(fd, ondisk, needed_length)) != needed_length)
 	{
 		int			save_errno = errno;
@@ -1670,7 +1670,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/*
 	 * fsync the file before renaming so that even if we crash after this we
@@ -1683,7 +1683,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	 * some noticeable overhead since it's performed synchronously during
 	 * decoding?
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_SNAPBUILD_SYNC);
 	if (pg_fsync(fd) != 0)
 	{
 		int			save_errno = errno;
@@ -1694,7 +1694,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 		ereport(ERROR,
@@ -1940,9 +1940,9 @@ SnapBuildRestoreContents(int fd, void *dest, Size size, const char *path)
 {
 	ssize_t		readBytes;
 
-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, dest, size);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (readBytes != size)
 	{
 		int			save_errno = errno;
