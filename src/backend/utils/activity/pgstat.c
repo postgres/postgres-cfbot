@@ -457,8 +457,15 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.snapshot_ctl_off = offsetof(PgStat_Snapshot, io),
 		.shared_ctl_off = offsetof(PgStat_ShmemControl, io),
 		.shared_data_off = offsetof(PgStatShared_IO, stats),
-		.shared_data_len = sizeof(((PgStatShared_IO *) 0)->stats),
 
+		/*
+		 * Do not write everything using this .shared_data_len, as the IO
+		 * histogram backing store is handled by special-case (as it is
+		 * dynamic) in pgstat_write_statsfile() / pgstat_read_statsfile().
+		 */
+		.shared_data_len = offsetof(PgStat_IO, hist_time_buckets_slot_count),
+
+		.init_backend_cb = pgstat_io_init_backend_cb,
 		.flush_static_cb = pgstat_io_flush_cb,
 		.init_shmem_cb = pgstat_io_init_shmem_cb,
 		.reset_all_cb = pgstat_io_reset_all_cb,
@@ -1727,13 +1734,35 @@ pgstat_write_statsfile(void)
 
 		pgstat_build_snapshot_fixed(kind);
 		if (pgstat_is_kind_builtin(kind))
-			ptr = ((char *) &pgStatLocal.snapshot) + info->snapshot_ctl_off;
+		{
+			if (kind == PGSTAT_KIND_IO)
+				ptr = (char *) pgStatLocal.snapshot.io;
+			else
+				ptr = ((char *) &pgStatLocal.snapshot) + info->snapshot_ctl_off;
+		}
 		else
 			ptr = pgStatLocal.snapshot.custom_data[kind - PGSTAT_KIND_CUSTOM_MIN];
+
+		Assert(ptr != NULL);
 
 		fputc(PGSTAT_FILE_ENTRY_FIXED, fpout);
 		write_chunk_s(fpout, &kind);
 		write_chunk(fpout, ptr, info->shared_data_len);
+
+		/*
+		 * PGSTAT_KIND_IO has a dynamically-sized histogram that lives outside
+		 * the shared_data_len region. This assumes that PGSTAT_FILE_FORMAT_ID
+		 * would be bumped each time that pgstat_track_io*() logic is altered.
+		 */
+		if (kind == PGSTAT_KIND_IO)
+		{
+			PgStat_IO  *io = pgStatLocal.snapshot.io;
+
+			write_chunk_s(fpout, &io->hist_time_buckets_slot_count);
+			write_chunk(fpout, io->hist_time_buckets_slots,
+						(size_t) io->hist_time_buckets_slot_count *
+						PGSTAT_IO_HIST_BUCKETS * sizeof(uint64));
+		}
 	}
 
 	/*
@@ -1996,6 +2025,43 @@ pgstat_read_statsfile(void)
 						elog(WARNING, "could not read data of stats kind %u for entry of type %c with size %u",
 							 kind, t, info->shared_data_len);
 						goto error;
+					}
+
+					/*
+					 * PGSTAT_KIND_IO has a dynamically-sized histogram array
+					 * appended after the main chunk, preceded by its slot
+					 * count.  StatsShmemInit() already sized the backing
+					 * store.  The main chunk also contained the offset
+					 * tables; those are re-derived from this binary's rules
+					 * rather than trusted from the file.
+					 */
+					if (kind == PGSTAT_KIND_IO)
+					{
+						PgStat_IO  *io = &shmem->io.stats;
+						int			slot_count;
+						int			histogram_slots = pgstat_io_init_hist_offsets(io);
+
+						if (!read_chunk_s(fpin, &slot_count))
+						{
+							elog(WARNING, "could not read pgstat_io histogram slot count");
+							goto error;
+						}
+
+						Assert(histogram_slots == io->hist_time_buckets_slot_count);
+						if (histogram_slots != slot_count)
+						{
+							elog(WARNING, "pgstat_io histogram slot count mismatch: file %d, expected %d",
+								 slot_count, io->hist_time_buckets_slot_count);
+							goto error;
+						}
+
+						if (!read_chunk(fpin, io->hist_time_buckets_slots,
+										(size_t) io->hist_time_buckets_slot_count *
+										PGSTAT_IO_HIST_BUCKETS * sizeof(uint64)))
+						{
+							elog(WARNING, "could not read pgstat_io histogram backing store");
+							goto error;
+						}
 					}
 
 					break;
