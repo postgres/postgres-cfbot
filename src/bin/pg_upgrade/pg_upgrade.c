@@ -41,6 +41,7 @@
 
 #include "postgres_fe.h"
 
+#include <dirent.h>
 #include <time.h>
 
 #include "access/multixact.h"
@@ -64,6 +65,8 @@ static void prepare_new_cluster(void);
 static void prepare_new_globals(void);
 static void create_new_objects(void);
 static void copy_xact_xlog_xid(void);
+static void ensure_long_slru_segment_filenames(void);
+static void rename_slru_segments(const char *dirname);
 static void set_frozenxids(void);
 static void make_outputdirs(char *pgdata);
 static void setup(char *argv0);
@@ -162,6 +165,7 @@ main(int argc, char **argv)
 
 	copy_xact_xlog_xid();
 	set_new_cluster_char_signedness();
+	ensure_long_slru_segment_filenames();
 
 	/* New now using xids of the old system */
 
@@ -873,6 +877,75 @@ copy_xact_xlog_xid(void)
 	check_ok();
 }
 
+static void
+rename_slru_segments(const char *dirname)
+{
+	DIR		   *dir;
+	struct dirent *de;
+	int			len;
+	int64		segno;
+	char		dir_path[MAXPGPATH];
+	char		old_path[MAXPGPATH];
+	char		new_path[MAXPGPATH];
+
+	prep_status("Renaming SLRU segments in %s", dirname);
+	snprintf(dir_path, sizeof(dir_path), "%s/%s", new_cluster.pgdata, dirname);
+
+	dir = opendir(dir_path);
+	if (dir == NULL)
+		pg_fatal("could not open directory \"%s\": %m", dir_path);
+
+	while (errno = 0, (de = readdir(dir)) != NULL)
+	{
+		/*
+		 * ignore '.', '..' and everything else that doesn't look like an SLRU
+		 * segment with a short file name
+		 */
+
+		len = strlen(de->d_name);
+		if (len != 4 && len != 5 && len != 6)
+			continue;
+
+		if (strspn(de->d_name, "0123456789ABCDEF") != len)
+			continue;
+
+		segno = strtoi64(de->d_name, NULL, 16);
+		snprintf(new_path, MAXPGPATH, "%s/%015" PRIX64, dir_path,
+				 (uint64) segno);
+		snprintf(old_path, MAXPGPATH, "%s/%s", dir_path, de->d_name);
+
+		if (pg_mv_file(old_path, new_path) != 0)
+			pg_fatal("could not rename file \"%s\" to \"%s\": %m",
+					 old_path, new_path);
+	}
+
+	if (errno)
+		pg_fatal("could not read directory \"%s\": %m", dir_path);
+
+	if (closedir(dir))
+		pg_fatal("could not close directory \"%s\": %m", dir_path);
+
+	check_ok();
+}
+
+static void
+ensure_long_slru_segment_filenames(void)
+{
+	int			i;
+	static const char *dirs[] = {
+		"pg_xact",
+		"pg_commit_ts",
+		"pg_multixact/offsets",
+		"pg_subtrans",
+		"pg_serial",
+	};
+
+	if (old_cluster.controldata.cat_ver >= SLRU_SEG_FILENAMES_CHANGE_CAT_VER)
+		return;
+
+	for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+		rename_slru_segments(dirs[i]);
+}
 
 /*
  *	set_frozenxids()
