@@ -3411,6 +3411,7 @@ WaitEventCustomEntryByInfo
 WaitEventCustomEntryByName
 WaitEventIO
 WaitEventIPC
+WaitEventReportState
 WaitEventSet
 WaitEventTimeout
 WaitLSNProcInfo

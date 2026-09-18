@@ -66,7 +66,7 @@
  * s_lock_test.
  */
 static uint32 local_my_wait_event_info;
-uint32	   *my_wait_event_info = &local_my_wait_event_info;
+WaitEventReportState wait_event_report_state = {&local_my_wait_event_info, NULL, NULL};
 #endif
 
 static int	spins_per_delay = DEFAULT_SPINS_PER_DELAY;
