@@ -567,6 +567,16 @@ typedef struct XLogCtlData
 	XLogRecPtr	data_checksum_lsn;
 	bool		data_checksum_is_local;
 
+	/*
+	 * walLogHints is the authoritative value used by all backends to
+	 * determine whether to WAL-log hint bit updates. This shared value,
+	 * instead of the process-local wal_log_hints, is required because, when
+	 * wal_log_hints is changed by SIGHUP, we must ensure proper ordering
+	 * between the WAL parameter change record and the actual behavior change.
+	 * Checkpointer updates it after SIGHUP.
+	 */
+	bool		walLogHints;
+
 	slock_t		info_lck;		/* locks shared variables shown above */
 
 	/*
@@ -4742,6 +4752,23 @@ DataChecksumsNeedWrite(void)
 			LocalDataChecksumState == PG_DATA_CHECKSUM_INPROGRESS_OFF);
 }
 
+/*
+ * XLogHintBitIsNeeded
+ *		Returns whether hint bit must be written or not
+ *
+ * Returns true if wal_log_hints is enabled in shared memory, or if data
+ * checksums require writes. The shared memory value is used (rather than
+ * the process-local wal_log_hints) to ensure all backends observe the change
+ * atomically with respect to the WAL record that logs the state transition.
+ */
+bool
+XLogHintBitIsNeeded(void)
+{
+	volatile XLogCtlData *xlogctl = XLogCtl;
+
+	return (xlogctl->walLogHints || DataChecksumsNeedWrite());
+}
+
 
 bool
 DataChecksumsOff(void)
@@ -5650,6 +5677,9 @@ XLOGShmemInit(void *arg)
 	XLogCtl->data_checksum_lsn = ControlFile->data_checksum_lsn;
 	XLogCtl->data_checksum_is_local = ControlFile->data_checksum_is_local;
 	SetLocalDataChecksumState(XLogCtl->data_checksum_version);
+
+	/* Use wal_log_hints from control file */
+	XLogCtl->walLogHints = ControlFile->wal_log_hints;
 
 	SpinLockInit(&XLogCtl->Insert.insertpos_lck);
 	SpinLockInit(&XLogCtl->info_lck);
@@ -6821,6 +6851,9 @@ StartupXLOG(void)
 	 */
 	Insert->fullPageWrites = lastFullPageWrites;
 	UpdateFullPageWrites();
+
+	/* Update wal_log_hints in shared memory */
+	UpdateWalLogHints();
 
 	/*
 	 * Emit checkpoint or end-of-recovery record in XLOG, if required.
@@ -9253,6 +9286,55 @@ UpdateFullPageWrites(void)
 		Insert->fullPageWrites = false;
 		WALInsertLockRelease();
 	}
+	END_CRIT_SECTION();
+}
+
+/*
+ * Update wal_log_hints in shared memory, and write an
+ * XLOG_PARAMETER_CHANGE record if necessary.
+ *
+ * This follows the same ordering pattern as UpdateFullPageWrites():
+ * when setting to true, update shared memory first (so backends start
+ * WAL-logging hints before the WAL record), and when setting to false,
+ * write the WAL record first (so the change is logged before backends
+ * stop WAL-logging hints).
+ */
+void
+UpdateWalLogHints(void)
+{
+	bool		recoveryInProgress;
+
+	if (wal_log_hints == XLogCtl->walLogHints)
+		return;
+
+	/*
+	 * Perform this outside critical section so that the WAL insert
+	 * initialization done by RecoveryInProgress() doesn't trigger an
+	 * assertion failure.
+	 */
+	recoveryInProgress = RecoveryInProgress();
+
+	START_CRIT_SECTION();
+
+	/*
+	 * It's always safe to WAL-log hint bits, even when not strictly required,
+	 * but not the other round. So if we're setting wal_log_hints to true,
+	 * first set it true and then write the WAL record. If we're setting it to
+	 * false, first write the WAL record and then set the global flag.
+	 */
+	if (wal_log_hints)
+		XLogCtl->walLogHints = true;
+
+	/*
+	 * XLogReportParameters will WAL-log and update the control file. During
+	 * recovery, we can't write WAL so just update the shared flag.
+	 */
+	if (!recoveryInProgress)
+		XLogReportParameters();
+
+	if (!wal_log_hints)
+		XLogCtl->walLogHints = false;
+
 	END_CRIT_SECTION();
 }
 
