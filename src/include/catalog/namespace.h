@@ -103,6 +103,11 @@ extern Oid	RangeVarGetRelidExtended(const RangeVar *relation,
 									 LOCKMODE lockmode, uint32 flags,
 									 RangeVarGetRelidCallback callback,
 									 void *callback_arg);
+extern Oid RangeVarGetRelidExtendedSafe(const RangeVar *relation,
+										LOCKMODE lockmode, uint32 flags,
+										RangeVarGetRelidCallback callback,
+										void *callback_arg,
+										Node *escontext);
 extern Oid	RangeVarGetCreationNamespace(const RangeVar *newRelation);
 extern Oid	RangeVarGetAndCheckCreationNamespace(RangeVar *relation,
 												 LOCKMODE lockmode,
@@ -168,6 +173,7 @@ extern Oid	LookupCreationNamespace(const char *nspname);
 extern void CheckSetNamespace(Oid oldNspOid, Oid nspOid);
 extern Oid	QualifiedNameGetCreationNamespace(const List *names, char **objname_p);
 extern RangeVar *makeRangeVarFromNameList(const List *names);
+extern RangeVar *makeRangeVarFromNameListSafe(const List *names, Node *escontext);
 extern char *NameListToString(const List *names);
 extern char *NameListToQuotedString(const List *names);
 

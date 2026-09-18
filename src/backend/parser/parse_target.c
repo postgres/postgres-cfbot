@@ -835,7 +835,7 @@ transformAssignmentIndirection(ParseState *pstate,
 			 * the fields that the INSERT or UPDATE means to.
 			 */
 			if (baseTypeId != targetTypeId)
-				return coerce_to_domain((Node *) fstore,
+				return coerce_to_domain(NULL, (Node *) fstore,
 										baseTypeId, baseTypeMod,
 										targetTypeId,
 										COERCION_IMPLICIT,

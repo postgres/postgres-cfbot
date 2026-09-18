@@ -17,6 +17,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_cast.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -37,6 +38,7 @@
 #include "utils/date.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "utils/xml.h"
@@ -109,6 +111,7 @@ static Expr *make_distinct_op(ParseState *pstate, List *opname,
 static Node *make_nulltest_from_distinct(ParseState *pstate,
 										 A_Expr *distincta, Node *arg);
 
+static Node *transformSafeTypeCast(ParseState *pstate, TypeCast *tc);
 
 /*
  * transformExpr -
@@ -577,6 +580,7 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 		case EXPR_KIND_COPY_WHERE:
 		case EXPR_KIND_GENERATED_COLUMN:
 		case EXPR_KIND_CYCLE_MARK:
+		case EXPR_KIND_TYPECAST_DEFAULT:
 			/* okay */
 			break;
 
@@ -1871,6 +1875,9 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 		case EXPR_KIND_GENERATED_COLUMN:
 			err = _("cannot use subquery in column generation expression");
 			break;
+		case EXPR_KIND_TYPECAST_DEFAULT:
+			err = _("cannot use subquery in CAST DEFAULT expression");
+			break;
 
 			/*
 			 * There is intentionally no default: case here, so that the
@@ -2032,6 +2039,7 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 	ListCell   *element;
 	Oid			coerce_type;
 	bool		coerce_hard;
+	bool		coercion_failed = false;
 
 	/*
 	 * Transform the element expressions
@@ -2152,14 +2160,44 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 
 		if (coerce_hard)
 		{
-			newe = coerce_to_target_type(pstate, e,
-										 exprType(e),
-										 coerce_type,
-										 typmod,
-										 COERCION_EXPLICIT,
-										 COERCE_EXPLICIT_CAST,
-										 -1);
-			if (newe == NULL)
+			/*
+			 * For CAST(... DEFAULT ... ON CONVERSION ERROR), an element with
+			 * no cast path does not raise an error: we flag the cast as
+			 * impossible and keep the elements as they are, since the array
+			 * will never be evaluated.
+			 */
+			if (!coercion_failed)
+			{
+				newe = coerce_to_target_type(pstate, e,
+											 exprType(e),
+											 coerce_type,
+											 typmod,
+											 COERCION_EXPLICIT,
+											 COERCE_EXPLICIT_CAST,
+											 -1);
+
+				if ((newe == NULL && pstate->p_escontext != NULL)
+					|| SOFT_ERROR_OCCURRED(pstate->p_escontext))
+				{
+					((ErrorSaveContext *) pstate->p_escontext)->error_occurred = true;
+					coercion_failed = true;
+					newe = e;
+				}
+			}
+			else
+			{
+				if (exprType(e) == UNKNOWNOID)
+					e = coerce_to_target_type(pstate,
+											  e,
+											  UNKNOWNOID,
+											  TEXTOID,
+											  -1,
+											  COERCION_IMPLICIT,
+											  COERCE_IMPLICIT_CAST,
+											  exprLocation(e));
+				newe = e;
+			}
+			if (newe == NULL && pstate->p_escontext == NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_CANNOT_COERCE),
 						 errmsg("cannot cast type %s to %s",
@@ -2721,6 +2759,17 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 	Oid			targetType;
 	int32		targetTypmod;
 	int			location;
+	Node	   *saved_escontext;
+
+	if (tc->defexpr)
+		return transformSafeTypeCast(pstate, tc);
+
+	/*
+	 * A explicit CAST nested inside the argument of a DEFAULT cast converts
+	 * its literals at parse time with hard errors.
+	 */
+	saved_escontext = pstate->p_escontext;
+	pstate->p_escontext = NULL;
 
 	/* Look up the type name first */
 	typenameTypeIdAndMod(pstate, tc->typeName, &targetType, &targetTypmod);
@@ -2787,6 +2836,7 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 						format_type_be(targetType)),
 				 parser_coercion_errposition(pstate, location, expr)));
 
+	pstate->p_escontext = saved_escontext;
 	return result;
 }
 
@@ -2821,6 +2871,183 @@ transformCollateClause(ParseState *pstate, CollateClause *c)
 	newc->location = c->location;
 
 	return (Node *) newc;
+}
+
+/*
+ * Transform CAST(expr AS type DEFAULT defexpr ON CONVERSION ERROR).
+ *
+ * The argument is stored once, in "arg", and is not coerced itself; instead
+ * we coerce a CaseTestExpr placeholder of its type, so castexpr holds only
+ * the coercion and no tree walker sees the argument twice.  The transformed
+ * argument must be kept as is, since it may already have been adjusted for
+ * soft error handling.  At runtime the executor feeds the value of "arg" to
+ * the placeholder, as ArrayCoerceExpr does for elemexpr.
+ */
+static Node *
+transformSafeTypeCast(ParseState *pstate, TypeCast *tc)
+{
+	Node	   *defexpr;
+	Node	   *castexpr;
+	Node	   *arg = tc->arg;
+	Node	   *expr = NULL;
+	SafeTypeCastExpr *stc;
+	Oid			inputType;
+	Oid			targetType;
+	int32		targetTypmod;
+	Node	   *saved_escontext;
+	Oid			targetTypecoll;
+	CaseTestExpr *placeholder;
+	ErrorSaveContext *escontext = NULL;
+
+	/* Look up the type name first */
+	typenameTypeIdAndMod(pstate, tc->typeName, &targetType, &targetTypmod);
+
+	targetTypecoll = get_typcollation(targetType);
+
+	defexpr = transformExpr(pstate, tc->defexpr, EXPR_KIND_TYPECAST_DEFAULT);
+	defexpr = coerce_to_target_type(pstate, defexpr, exprType(defexpr),
+									targetType, targetTypmod,
+									COERCION_EXPLICIT,
+									COERCE_EXPLICIT_CAST,
+									exprLocation(defexpr));
+	assign_expr_collations(pstate, defexpr);
+
+	if (defexpr == NULL)
+		ereport(ERROR,
+				errcode(ERRCODE_CANNOT_COERCE),
+				errmsg("cannot coerce %s expression to type %s",
+					   "CAST DEFAULT",
+					   format_type_be(targetType)),
+				parser_coercion_errposition(pstate, exprLocation(tc->defexpr), defexpr));
+
+	/*
+	 * The collation of DEFAULT expression must match the collation of the
+	 * target type.
+	 */
+	if (targetTypecoll != exprCollation(defexpr))
+		ereport(ERROR,
+				errcode(ERRCODE_DATATYPE_MISMATCH),
+				errmsg("collation of CAST DEFAULT expression conflicts with target type collation"),
+				errdetail("\"%s\" versus \"%s\"",
+						  get_collation_name(exprCollation(defexpr)),
+						  get_collation_name(targetTypecoll)),
+				parser_errposition(pstate, exprLocation(defexpr)));
+
+	escontext = makeNode(ErrorSaveContext);
+	escontext->type = T_ErrorSaveContext;
+	escontext->error_occurred = false;
+	saved_escontext = pstate->p_escontext;
+	pstate->p_escontext = (Node *) escontext;
+
+	/*
+	 * If the subject of the typecast is an ARRAY[] construct and the target
+	 * type is an array type, we invoke transformArrayExpr() directly so that
+	 * we can pass down the type information.  This avoids some cases where
+	 * transformArrayExpr() might not infer the correct type.  Otherwise, just
+	 * transform the argument normally.
+	 */
+	if (IsA(arg, A_ArrayExpr))
+	{
+		Oid			targetBaseType;
+		int32		targetBaseTypmod;
+		Oid			elementType;
+
+		/*
+		 * If target is a domain over array, work with the base array type
+		 * here.  Below, we'll cast the array type to the domain.  In the
+		 * usual case that the target is not a domain, the remaining steps
+		 * will be a no-op.
+		 */
+		targetBaseTypmod = targetTypmod;
+		targetBaseType = getBaseTypeAndTypmod(targetType, &targetBaseTypmod);
+		elementType = get_element_type(targetBaseType);
+		if (OidIsValid(elementType))
+		{
+			expr = transformArrayExpr(pstate,
+									  (A_ArrayExpr *) arg,
+									  targetBaseType,
+									  elementType,
+									  targetBaseTypmod);
+		}
+		else
+			expr = transformExprRecurse(pstate, arg);
+	}
+	else
+		expr = transformExprRecurse(pstate, arg);
+
+	if (SOFT_ERROR_OCCURRED(pstate->p_escontext))
+		castexpr = NULL;
+	else
+	{
+		inputType = exprType(expr);
+
+		/*
+		 * if expr is an UNKNOWN literal, change it to TEXT.
+		 *
+		 * The argument is never coerced to the target type here, only the
+		 * below placeholder expression is, so it needs a real type;
+		 */
+		if (IsA(expr, CollateExpr) || inputType == UNKNOWNOID)
+		{
+			Node	   *origexpr = expr;
+			bool		stripped_collate;
+
+			while (expr && IsA(expr, CollateExpr))
+				expr = (Node *) ((CollateExpr *) expr)->arg;
+
+			stripped_collate = (expr != origexpr);
+
+			if (exprType(expr) == UNKNOWNOID)
+				expr = coerce_type(pstate,
+								   expr,
+								   UNKNOWNOID,
+								   TEXTOID,
+								   -1,
+								   COERCION_IMPLICIT,
+								   COERCE_IMPLICIT_CAST,
+								   exprLocation(expr));
+
+			if (stripped_collate)
+			{
+				/* Reinstall top CollateExpr */
+				CollateExpr *coll = (CollateExpr *) origexpr;
+				CollateExpr *newcoll = makeNode(CollateExpr);
+
+				newcoll->arg = (Expr *) expr;
+				newcoll->collOid = coll->collOid;
+				newcoll->location = coll->location;
+				expr = (Node *) newcoll;
+			}
+			inputType = exprType(expr);
+		}
+
+		placeholder = makeNode(CaseTestExpr);
+		placeholder->typeId = inputType;
+		placeholder->typeMod = exprTypmod(expr);
+		placeholder->collation = InvalidOid;
+
+		castexpr = coerce_to_target_type(pstate, (Node *) placeholder, inputType,
+										 targetType, targetTypmod,
+										 COERCION_EXPLICIT,
+										 COERCE_EXPLICIT_CAST,
+										 tc->location);
+
+		if (SOFT_ERROR_OCCURRED(pstate->p_escontext))
+			castexpr = NULL;
+	}
+
+	pstate->p_escontext = saved_escontext;
+
+	stc = makeNode(SafeTypeCastExpr);
+	stc->arg = (Expr *) expr;
+	stc->castexpr = (Expr *) castexpr;
+	stc->defexpr = (Expr *) defexpr;
+	stc->resulttype = targetType;
+	stc->resulttypmod = targetTypmod;
+	stc->resultcollid = targetTypecoll;
+	stc->location = tc->location;
+
+	return (Node *) stc;
 }
 
 /*
@@ -3230,6 +3457,8 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "GENERATED AS";
 		case EXPR_KIND_CYCLE_MARK:
 			return "CYCLE";
+		case EXPR_KIND_TYPECAST_DEFAULT:
+			return "CAST DEFAULT";
 
 			/*
 			 * There is intentionally no default: case here, so that the

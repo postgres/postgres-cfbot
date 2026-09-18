@@ -2721,6 +2721,12 @@ name_text(PG_FUNCTION_ARGS)
 List *
 textToQualifiedNameList(text *textval)
 {
+	return textToQualifiedNameListSafe(textval, NULL);
+}
+
+List *
+textToQualifiedNameListSafe(text *textval, Node *escontext)
+{
 	char	   *rawname;
 	List	   *result = NIL;
 	List	   *namelist;
@@ -2731,12 +2737,12 @@ textToQualifiedNameList(text *textval)
 	rawname = text_to_cstring(textval);
 
 	if (!SplitIdentifierString(rawname, '.', &namelist))
-		ereport(ERROR,
+		ereturn(escontext, NIL,
 				(errcode(ERRCODE_INVALID_NAME),
 				 errmsg("invalid name syntax")));
 
 	if (namelist == NIL)
-		ereport(ERROR,
+		ereturn(escontext, NIL,
 				(errcode(ERRCODE_INVALID_NAME),
 				 errmsg("invalid name syntax")));
 
