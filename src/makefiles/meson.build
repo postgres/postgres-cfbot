@@ -137,6 +137,30 @@ else
   }
 endif
 
+# ICU headers are pulled in by public server headers too, so extensions need
+# ICU's compiler flags.  Makefile.global adds $(ICU_CFLAGS) to CPPFLAGS.
+icu_cflags = []
+if icu.found()
+  if icu.type_name() == 'pkgconfig' and pkg_config.found()
+    icu_cflags_out = run_command(pkg_config, '--cflags', 'icu-uc',
+                                 check: false).stdout().strip()
+    if icu_cflags_out != ''
+      icu_cflags += icu_cflags_out.split()
+    endif
+  elif icu.type_name() == 'cmake'
+    foreach d : icu.get_variable(cmake: 'ICU_INCLUDE_DIRS',
+                                 default_value: '').split(';')
+      if d.strip() != ''
+        icu_cflags += '-I' + d.strip()
+      endif
+    endforeach
+  endif
+endif
+
+pgxs_kv += {
+  'ICU_CFLAGS': ' '.join(icu_cflags),
+}
+
 pgxs_bins = {
   'AR':
     find_program(['ar'], native: true, required: false),
@@ -156,8 +180,6 @@ pgxs_bins = {
 }
 
 pgxs_empty = [
-  'ICU_CFLAGS', # needs to be added, included by public server headers
-
   # hard to see why we'd need these ones?
   'ZIC',
   'TCLSH',
