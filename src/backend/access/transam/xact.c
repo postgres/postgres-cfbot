@@ -5205,6 +5205,7 @@ CommitSubTransaction(void)
 						s->parent->curTransactionOwner);
 	AtEOSubXact_LargeObject(true, s->subTransactionId,
 							s->parent->subTransactionId);
+	AtEOSubXact_ReplicationSlot(true, s->subTransactionId);
 	AtSubCommit_Notify();
 
 	CallSubXactCallbacks(SUBXACT_EVENT_COMMIT_SUB, s->subTransactionId,
@@ -5382,6 +5383,7 @@ AbortSubTransaction(void)
 						   s->parent->curTransactionOwner);
 		AtEOSubXact_LargeObject(false, s->subTransactionId,
 								s->parent->subTransactionId);
+		AtEOSubXact_ReplicationSlot(false, s->subTransactionId);
 		AtSubAbort_Notify();
 
 		/* Advertise the fact that we aborted in pg_xact. */
