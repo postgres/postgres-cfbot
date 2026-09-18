@@ -223,6 +223,8 @@ extern void GetXLogReceiptTime(TimestampTz *rtime, bool *fromStream);
 extern TimestampTz GetLatestXTime(void);
 extern TimestampTz GetCurrentChunkReplayStartTime(void);
 extern XLogRecPtr GetCurrentReplayRecPtr(TimeLineID *replayEndTLI);
+extern bool GetXLogRecordTimestamp(XLogReaderState *record,
+								   TimestampTz *recordXtime);
 
 extern bool PromoteIsTriggered(void);
 extern bool CheckPromoteSignal(void);

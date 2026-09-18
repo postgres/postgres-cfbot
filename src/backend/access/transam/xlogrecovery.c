@@ -356,7 +356,6 @@ static void xlog_outrec(StringInfo buf, XLogReaderState *record);
 static void xlog_block_info(StringInfo buf, XLogReaderState *record);
 static void checkTimeLineSwitch(XLogRecPtr lsn, TimeLineID newTLI,
 								TimeLineID prevTLI, TimeLineID replayTLI);
-static bool getRecordTimestamp(XLogReaderState *record, TimestampTz *recordXtime);
 static void verifyBackupPageConsistency(XLogReaderState *record);
 
 static bool recoveryStopsBefore(XLogReaderState *record);
@@ -2413,8 +2412,8 @@ checkTimeLineSwitch(XLogRecPtr lsn, TimeLineID newTLI, TimeLineID prevTLI,
  * Currently, only transaction commit/abort records and restore points contain
  * timestamps.
  */
-static bool
-getRecordTimestamp(XLogReaderState *record, TimestampTz *recordXtime)
+bool
+GetXLogRecordTimestamp(XLogReaderState *record, TimestampTz *recordXtime)
 {
 	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
 	uint8		xact_info = info & XLOG_XACT_OPMASK;
@@ -2663,10 +2662,10 @@ recoveryStopsBefore(XLogReaderState *record)
 
 	/*
 	 * Note: we must fetch recordXtime regardless of recoveryTarget setting.
-	 * We don't expect getRecordTimestamp ever to fail, since we already know
-	 * this is a commit or abort record; but test its result anyway.
+	 * We don't expect GetXLogRecordTimestamp ever to fail, since we already
+	 * know this is a commit or abort record; but test its result anyway.
 	 */
-	if (getRecordTimestamp(record, &recordXtime) &&
+	if (GetXLogRecordTimestamp(record, &recordXtime) &&
 		recoveryTarget == RECOVERY_TARGET_TIME)
 	{
 		/*
@@ -2747,7 +2746,7 @@ recoveryStopsAfter(XLogReaderState *record)
 			recoveryStopAfter = true;
 			recoveryStopXid = InvalidTransactionId;
 			recoveryStopLSN = InvalidXLogRecPtr;
-			(void) getRecordTimestamp(record, &recoveryStopTime);
+			(void) GetXLogRecordTimestamp(record, &recoveryStopTime);
 			strlcpy(recoveryStopName, recordRestorePointData->rp_name, MAXFNAMELEN);
 
 			ereport(LOG,
@@ -2787,7 +2786,7 @@ recoveryStopsAfter(XLogReaderState *record)
 		TransactionId recordXid;
 
 		/* Update the last applied transaction timestamp */
-		if (getRecordTimestamp(record, &recordXtime))
+		if (GetXLogRecordTimestamp(record, &recordXtime))
 			SetLatestXTime(recordXtime);
 
 		/* Extract the XID of the committed/aborted transaction */
@@ -3006,7 +3005,7 @@ recoveryApplyDelay(XLogReaderState *record)
 		xact_info != XLOG_XACT_COMMIT_PREPARED)
 		return false;
 
-	if (!getRecordTimestamp(record, &xtime))
+	if (!GetXLogRecordTimestamp(record, &xtime))
 		return false;
 
 	delayUntil = TimestampTzPlusMilliseconds(xtime, recovery_min_apply_delay);
