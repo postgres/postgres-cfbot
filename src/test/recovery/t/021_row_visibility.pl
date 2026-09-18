@@ -94,7 +94,7 @@ UPDATE test_visibility SET data = 'first update' RETURNING data;
 		qr/^UPDATE 1$/m),
 	'UPDATE');
 
-$node_primary->psql('postgres', "SELECT txid_current();");  # ensure WAL flush
+$node_primary->psql('postgres', "SELECT pg_current_xact_id();");  # ensure WAL flush
 $node_primary->wait_for_catchup($node_standby);
 
 ok( send_query_and_wait(
