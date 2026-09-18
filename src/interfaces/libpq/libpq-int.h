@@ -384,6 +384,9 @@ struct pg_conn
 	char	   *pgport;			/* the server's communication port number, or
 								 * a comma-separated list of ports */
 	char	   *connect_timeout;	/* connection timeout (numeric string) */
+	char	   *scram_max_iterations;	/* maximum acceptable server-advertised
+										 * SCRAM iteration count (numeric
+										 * string); 0 disables */
 	char	   *pgtcp_user_timeout; /* tcp user timeout (numeric string) */
 	char	   *client_encoding_initial;	/* encoding to use */
 	char	   *pgoptions;		/* options to start the backend with */
@@ -484,6 +487,14 @@ struct pg_conn
 	int			whichhost;		/* host we're currently trying/connected to */
 	pg_conn_host *connhost;		/* details about each named host */
 	char	   *connip;			/* IP address for current network connection */
+	/*
+	 * Deadline for the in-progress connection attempt against the current
+	 * host, in PQgetCurrentTimeUSec() units; -1 if no connect_timeout is in
+	 * effect.  This mirrors the local end_time tracked in
+	 * pqConnectDBComplete() so that code paths invoked during connection
+	 * establishment (e.g. authentication) can consult the deadline.
+	 */
+	pg_usec_time_t connect_deadline;
 
 	/*
 	 * The pending command queue as a singly-linked list.  Head is the command
