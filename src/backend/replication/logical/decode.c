@@ -725,9 +725,9 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	{
 		for (i = 0; i < parsed->nsubxacts; i++)
 		{
-			ReorderBufferForget(ctx->reorder, parsed->subxacts[i], buf->origptr);
+			ReorderBufferForget(ctx->reorder, parsed->subxacts[i], buf->origptr, true);
 		}
-		ReorderBufferForget(ctx->reorder, xid, buf->origptr);
+		ReorderBufferForget(ctx->reorder, xid, buf->origptr, true);
 
 		return;
 	}
