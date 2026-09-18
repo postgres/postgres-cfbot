@@ -134,6 +134,290 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_wait_event_tracing_hooks_installed'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 
+-- Trace level (pg_wait_event_tracing.capture = trace): a per-session ring
+-- buffer of individual completed waits plus query-attribution markers.
+-- Reading a session's trace exposes its query_id and wait sequence, which
+-- can leak across SECURITY DEFINER call chains, so the view AND both
+-- underlying SRFs are locked to pg_read_all_stats, matching v6.
+CREATE FUNCTION pg_get_backend_wait_event_trace(
+    OUT seq int8,
+    OUT timestamp_ns int8,
+    OUT wait_event_type text,
+    OUT wait_event text,
+    OUT duration_us float8,
+    OUT query_id int8,
+    OUT depth int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_get_backend_wait_event_trace'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE VIEW pg_backend_wait_event_trace AS
+    SELECT
+        t.seq,
+        t.timestamp_ns,
+        t.wait_event_type,
+        t.wait_event,
+        t.duration_us,
+        t.query_id,
+        t.depth
+    FROM pg_get_backend_wait_event_trace() t;
+REVOKE ALL ON pg_backend_wait_event_trace FROM PUBLIC;
+GRANT SELECT ON pg_backend_wait_event_trace TO pg_read_all_stats;
+-- Revoke the session-local SRF itself, not just the view, so a role that
+-- can enable trace cannot read its own ring via the function and bypass
+-- the view.
+REVOKE EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() TO pg_read_all_stats;
+
+-- Cross-backend reader, keyed by procnumber (reads ACTIVE and ORPHANED
+-- rings alike -- fix 3 -- tagging every row with owner_pid, the ring's
+-- producer, live or, for an orphan, its last-known pid; see
+-- pg_stat_clear_orphaned_wait_event_rings() below for the orphan
+-- lifecycle).
+CREATE FUNCTION pg_get_wait_event_trace(
+    procnumber int4,
+    OUT owner_pid int4,
+    OUT seq int8,
+    OUT timestamp_ns int8,
+    OUT wait_event_type text,
+    OUT wait_event text,
+    OUT duration_us float8,
+    OUT query_id int8,
+    OUT depth int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_get_wait_event_trace'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+REVOKE EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) TO pg_read_all_stats;
+
+-- Administrative sweep (fix 3): free every trace ring whose owner has
+-- exited.  Cluster-scope and mutating, so -- like
+-- pg_stat_reset_wait_event_timing_all() -- it is superuser-only in C and
+-- NOT granted to pg_read_all_stats.
+CREATE FUNCTION pg_stat_clear_orphaned_wait_event_rings()
+RETURNS int8
+AS 'MODULE_PATHNAME', 'pg_stat_clear_orphaned_wait_event_rings'
+LANGUAGE C VOLATILE;
+REVOKE EXECUTE ON FUNCTION pg_stat_clear_orphaned_wait_event_rings() FROM PUBLIC;
+
+-- Query-attribution view over a procnumber's trace ring (fix 6).  Each
+-- statement's waits are summed per wait event into a bucket named by the
+-- statement's opening marker.  The rule, applied to the markers in seq
+-- order:
+--
+--  * Utility level L counts open top-level-or-nested utility statements:
+--    UtilityStart adds one (after the marker), UtilityEnd subtracts one
+--    but never below zero, Idle and TxnAbort reset it.  TxnCommit does
+--    not (a COMMIT inside a procedure leaves its CALL open).  L at a
+--    marker is the value before that marker is applied.  A marker is
+--    "top-level" when its depth is 0 and L is 0: statements run by a
+--    DO block, a CALL, an EXECUTE or CREATE TABLE AS then belong to the
+--    outer statement, whose UtilityStart does not raise the executor
+--    depth but does raise L.
+--
+--  * A top-level QueryStart always opens a statement bucket.  A top-level
+--    UtilityStart or ExecStart opens one unless the nearest preceding
+--    marker among the top-level QueryStart/UtilityStart/ExecStart, Idle,
+--    TxnCommit and TxnAbort is a top-level QueryStart or UtilityStart (that
+--    statement is already open).  So an EXECUTE of a prepared statement
+--    over the extended protocol (ExecStart only, no QueryStart) opens a
+--    bucket, and so does an ExecStart right after TxnCommit with no Idle
+--    in between (the next message was already buffered), but a simple
+--    query's QueryStart/ExecStart pair, or a plan revalidation, is one
+--    bucket.
+--
+--  * Idle and TxnAbort open the synthetic '<idle>' bucket.  Waits before
+--    the first of these or of an opener are '<unattributed>'.
+--
+--  * Pre-statement phase.  Between the arrival of a request and its
+--    opening marker the backend can already wait: plan cache locks in
+--    Bind, relation locks in parse analysis.  Take an opener O and the
+--    nearest closer C (Idle, TxnCommit or TxnAbort) before it; if no other
+--    opener lies between them, the waits between C and O whose type is not
+--    'Client' belong to O, with phase 'pre'.  Client waits (ClientRead and
+--    the like) are idle time and stay in '<idle>'.
+--
+--  * A request that fails before any statement starts (lock_timeout
+--    during Bind, say) has the waits between its Idle and the following
+--    TxnAbort or TxnCommit, with no opener in between and type other than
+--    'Client', in the synthetic '<no-statement>' bucket.
+--
+--  * Every other wait stays in the bucket of the latest opener, Idle or
+--    TxnAbort, so the waits after ExecEnd or TxnCommit but before Idle
+--    (commit WAL flush) stay with their statement.
+--
+-- Output column phase: 'pre' for the moved waits, 'statement' for the
+-- rest of a statement bucket, NULL for the synthetic buckets.
+-- Every non-'Query' record in the ring is counted exactly once.
+--
+-- Known ambiguities: with no commit between two statements of an
+-- explicit transaction or pipeline, waits between the end of one
+-- statement and the start marker of the next stay with the earlier one;
+-- when the next request was already buffered (no Idle), end-of-
+-- transaction work after TxnCommit counts as the next statement's 'pre'
+-- phase; an error caught by a PL/pgSQL EXCEPTION block inside a utility
+-- statement can leave L too high until the next Idle or TxnAbort, which
+-- folds later statements of that top-level statement's call into it; and
+-- two Parse messages pipelined ahead of their Executes (QueryStart,
+-- QueryStart, ExecStart, ExecStart) attribute the first Execute to the
+-- second Parse.
+--
+-- Grants match the underlying pg_get_wait_event_trace(): PUBLIC revoked,
+-- pg_read_all_stats granted (this is a read-only view over the same
+-- data, just pre-aggregated).
+CREATE FUNCTION pg_wait_event_trace_by_statement(
+    procnumber int4,
+    OUT bucket text,
+    OUT statement_seq int8,
+    OUT query_id int8,
+    OUT phase text,
+    OUT wait_event_type text,
+    OUT wait_event text,
+    OUT calls int8,
+    OUT total_time_us float8)
+RETURNS SETOF record
+LANGUAGE SQL
+VOLATILE
+PARALLEL RESTRICTED
+AS $$
+WITH trace AS (
+    SELECT seq, wait_event_type, wait_event, duration_us, query_id, depth,
+           (wait_event_type = 'Query') AS is_marker
+    FROM pg_get_wait_event_trace(procnumber)
+),
+-- Utility level L: a running sum clamped at zero, restarted at every
+-- Idle/TxnAbort.  For a walk clamped at zero, L = P - min(0, min P) where P
+-- is the plain running sum.
+lvl1 AS (
+    SELECT t.*,
+           count(*) FILTER (WHERE is_marker AND wait_event IN ('Idle', 'TxnAbort'))
+               OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS ugrp,
+           CASE WHEN is_marker AND wait_event = 'UtilityStart' THEN 1
+                WHEN is_marker AND wait_event = 'UtilityEnd' THEN -1
+                ELSE 0 END AS dl
+    FROM trace t
+),
+lvl2 AS (
+    SELECT l.*,
+           sum(dl) OVER (PARTITION BY ugrp ORDER BY seq ROWS UNBOUNDED PRECEDING) AS p
+    FROM lvl1 l
+),
+lvl3 AS (
+    SELECT l.*,
+           p - least(0, min(p) OVER (PARTITION BY ugrp ORDER BY seq
+                                     ROWS UNBOUNDED PRECEDING)) AS l_after
+    FROM lvl2 l
+),
+lvl4 AS (
+    SELECT l.*,
+           coalesce(lag(l_after) OVER (PARTITION BY ugrp ORDER BY seq), 0) AS l_before
+    FROM lvl3 l
+),
+kinds AS (
+    SELECT seq, wait_event_type, wait_event, duration_us, query_id, is_marker,
+           (is_marker AND wait_event IN ('Idle', 'TxnCommit', 'TxnAbort')) AS is_closer,
+           CASE WHEN is_marker AND depth = 0 AND l_before = 0
+                THEN CASE wait_event WHEN 'QueryStart' THEN 'QS'
+                                     WHEN 'UtilityStart' THEN 'US'
+                                     WHEN 'ExecStart' THEN 'ES' END
+           END AS start_kind,
+           CASE WHEN is_marker AND wait_event IN ('Idle', 'TxnCommit', 'TxnAbort')
+                THEN wait_event END AS closer_kind
+    FROM lvl4
+),
+-- The marker immediately before each reference marker (top-level start or
+-- closer), among reference markers only.
+refs AS (
+    SELECT seq,
+           lag(coalesce(start_kind, closer_kind)) OVER (ORDER BY seq) AS prev_ref
+    FROM kinds
+    WHERE start_kind IS NOT NULL OR closer_kind IS NOT NULL
+),
+opened AS (
+    SELECT k.*,
+           (k.start_kind = 'QS'
+            OR (k.start_kind IN ('US', 'ES')
+                AND coalesce(r.prev_ref, '') NOT IN ('QS', 'US'))) AS is_opener,
+           (k.is_marker AND k.wait_event IN ('Idle', 'TxnAbort')) AS is_idle_open
+    FROM kinds k
+    LEFT JOIN refs r USING (seq)
+),
+-- bucket_group numbers the v11-style buckets (latest opener/Idle/TxnAbort);
+-- cl_in/cl_ex number the closer-delimited segments, counting the closer
+-- itself as the end (cl_ex) or the start (cl_in) of its segment.
+grouped AS (
+    SELECT o.*,
+           count(*) FILTER (WHERE is_opener OR is_idle_open)
+               OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS bucket_group,
+           count(*) FILTER (WHERE is_closer)
+               OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS cl_in
+    FROM opened o
+),
+seg AS (
+    SELECT g.*,
+           cl_in - (CASE WHEN is_closer THEN 1 ELSE 0 END) AS cl_ex
+    FROM grouped g
+),
+seg2 AS (
+    SELECT s.*,
+           min(bucket_group) FILTER (WHERE is_opener) OVER (PARTITION BY cl_ex)
+               AS seg_opener_group,
+           min(seq) FILTER (WHERE is_opener) OVER (PARTITION BY cl_ex)
+               AS seg_opener_seq,
+           max(closer_kind) OVER (PARTITION BY cl_in) AS seg_start_kind,
+           max(closer_kind) OVER (PARTITION BY cl_ex) AS seg_end_kind
+    FROM seg s
+),
+assigned AS (
+    SELECT s.*,
+           CASE
+               WHEN NOT is_marker AND wait_event_type <> 'Client'
+                    AND cl_ex >= 1 AND seg_opener_seq > seq
+                   THEN seg_opener_group
+               WHEN NOT is_marker AND wait_event_type <> 'Client'
+                    AND seg_start_kind = 'Idle' AND seg_opener_seq IS NULL
+                    AND seg_end_kind IN ('TxnAbort', 'TxnCommit')
+                   THEN -1
+               ELSE bucket_group
+           END AS eff_group,
+           coalesce(NOT is_marker AND wait_event_type <> 'Client'
+                    AND cl_ex >= 1 AND seg_opener_seq > seq, false) AS is_pre
+    FROM seg2 s
+),
+bucket_labels AS (
+    SELECT bucket_group,
+           seq AS statement_seq,
+           query_id AS bucket_query_id,
+           is_idle_open
+    FROM assigned
+    WHERE is_opener OR is_idle_open
+)
+SELECT
+    CASE
+        WHEN a.eff_group = -1 THEN '<no-statement>'
+        WHEN a.eff_group = 0 THEN '<unattributed>'
+        WHEN bl.is_idle_open THEN '<idle>'
+        ELSE bl.statement_seq::text
+    END AS bucket,
+    CASE WHEN NOT bl.is_idle_open THEN bl.statement_seq END AS statement_seq,
+    CASE WHEN NOT bl.is_idle_open THEN bl.bucket_query_id END AS query_id,
+    CASE WHEN a.eff_group > 0 AND NOT bl.is_idle_open
+         THEN CASE WHEN a.is_pre THEN 'pre' ELSE 'statement' END
+    END AS phase,
+    a.wait_event_type,
+    a.wait_event,
+    count(*) AS calls,
+    sum(a.duration_us) AS total_time_us
+FROM assigned a
+LEFT JOIN bucket_labels bl ON bl.bucket_group = a.eff_group
+WHERE NOT a.is_marker
+GROUP BY a.eff_group, bl.statement_seq, bl.bucket_query_id, bl.is_idle_open,
+         (a.is_pre), a.wait_event_type, a.wait_event
+ORDER BY min(a.seq), a.wait_event_type, a.wait_event;
+$$;
+REVOKE EXECUTE ON FUNCTION pg_wait_event_trace_by_statement(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_wait_event_trace_by_statement(int4) TO pg_read_all_stats;
+
 -- The histogram bucket boundaries are a constant lookup table, and the
 -- per-class capacities are compile-time limits of this module; neither
 -- says anything about any session, so both stay readable by everyone,
