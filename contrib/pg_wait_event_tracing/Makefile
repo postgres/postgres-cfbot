@@ -9,7 +9,7 @@ EXTENSION = pg_wait_event_tracing
 DATA = pg_wait_event_tracing--1.0.sql
 PGFILEDESC = "pg_wait_event_tracing - statistics and trace collection for explicitly instrumented wait events"
 
-REGRESS = pg_wait_event_tracing
+REGRESS = pg_wait_event_tracing pg_wait_event_tracing_trace
 REGRESS_OPTS = --temp-config $(top_srcdir)/contrib/pg_wait_event_tracing/pg_wait_event_tracing.conf
 
 # The tests need the module preloaded, which typical installcheck users
