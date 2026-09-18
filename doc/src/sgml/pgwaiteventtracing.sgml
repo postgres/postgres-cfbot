@@ -689,8 +689,10 @@ shared_preload_libraries = 'pg_wait_event_tracing'
        </para>
        <para>
         The bucket's own opening <structfield>seq</structfield> as
-        text, or the synthetic value <literal>&lt;idle&gt;</literal> or
-        <literal>&lt;unattributed&gt;</literal>.
+        text, or one of the synthetic values
+        <literal>&lt;idle&gt;</literal>,
+        <literal>&lt;unattributed&gt;</literal> or
+        <literal>&lt;no-statement&gt;</literal>.
        </para></entry>
       </row>
       <row>
@@ -698,10 +700,10 @@ shared_preload_libraries = 'pg_wait_event_tracing'
         <structfield>statement_seq</structfield> <type>bigint</type>
        </para>
        <para>
-        <structfield>seq</structfield> of the <literal>QueryStart</literal>
-        or <literal>UtilityStart</literal> marker that opened this
-        bucket; <literal>NULL</literal> for
-        <literal>&lt;idle&gt;</literal>/<literal>&lt;unattributed&gt;</literal>.
+        <structfield>seq</structfield> of the <literal>QueryStart</literal>,
+        <literal>UtilityStart</literal> or <literal>ExecStart</literal>
+        marker that opened this bucket; <literal>NULL</literal> for the
+        synthetic buckets.
        </para></entry>
       </row>
       <row>
@@ -710,8 +712,19 @@ shared_preload_libraries = 'pg_wait_event_tracing'
        </para>
        <para>
         <structfield>query_id</structfield> carried by that start
-        marker; <literal>NULL</literal> for
-        <literal>&lt;idle&gt;</literal>/<literal>&lt;unattributed&gt;</literal>.
+        marker; <literal>NULL</literal> for the synthetic buckets.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>phase</structfield> <type>text</type>
+       </para>
+       <para>
+        <literal>pre</literal> for waits that happened after the
+        statement's request arrived but before its start marker was
+        written (see <xref linkend="pgwaiteventtracing-attribution-rule"/>),
+        <literal>statement</literal> for the rest of a statement bucket;
+        <literal>NULL</literal> for the synthetic buckets.
        </para></entry>
       </row>
       <row>
@@ -1353,39 +1366,137 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
 
    <para>
     <function>pg_wait_event_trace_by_statement()</function> assigns
-    every ordinary wait record to exactly one bucket, using only three
-    kinds of marker as boundaries:
+    every ordinary wait record to exactly one bucket, reading a
+    backend's markers in order.  The number of calls over all returned
+    rows equals the number of ordinary (non-marker) records in the ring.
+   </para>
+
+   <para>
+    A start marker is <emphasis>top-level</emphasis> when its nesting
+    depth is <literal>0</literal> and no utility statement is open.  The
+    function tracks the number of open utility statements: a
+    <literal>UtilityStart</literal> adds one, a
+    <literal>UtilityEnd</literal> removes one (never going below zero),
+    and <literal>Idle</literal> and <literal>TxnAbort</literal> reset
+    the count; <literal>TxnCommit</literal> does not, so a
+    <command>COMMIT</command> inside a procedure leaves its
+    <command>CALL</command> open.  The statements that a top-level
+    <command>DO</command>, <command>CALL</command>,
+    <command>EXECUTE</command> or <command>CREATE TABLE AS</command>
+    runs write their markers at depth <literal>0</literal> as well, but
+    belong to the top-level statement.
    </para>
 
    <itemizedlist>
     <listitem>
      <para>
-      A <literal>QueryStart</literal> or <literal>UtilityStart</literal>
-      at nesting depth <literal>0</literal> opens a new statement
-      bucket, labelled by that marker's own <structfield>seq</structfield>
-      and <structfield>query_id</structfield>. Gating on depth
-      <literal>0</literal> specifically keeps a nested start (SPI from a
-      SQL or PL function) from appearing to close the outer statement's
-      own bucket.
+      A top-level <literal>QueryStart</literal> always opens a new
+      statement bucket, labelled by that marker's own
+      <structfield>seq</structfield> and
+      <structfield>query_id</structfield>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A top-level <literal>UtilityStart</literal> or
+      <literal>ExecStart</literal> opens a statement bucket too, unless
+      the nearest preceding marker among top-level
+      <literal>QueryStart</literal>, <literal>UtilityStart</literal> and
+      <literal>ExecStart</literal>, <literal>Idle</literal>,
+      <literal>TxnCommit</literal> and <literal>TxnAbort</literal> is a
+      top-level <literal>QueryStart</literal> or
+      <literal>UtilityStart</literal>: that statement is already open.
+      So executing a named prepared statement over the extended
+      protocol, which writes an <literal>ExecStart</literal> without a
+      <literal>QueryStart</literal>, gets a bucket of its own, while a
+      simple query's <literal>QueryStart</literal> and
+      <literal>ExecStart</literal> are one bucket.
      </para>
     </listitem>
     <listitem>
      <para>
       An <literal>Idle</literal> or a <literal>TxnAbort</literal> marker
       opens the synthetic <literal>&lt;idle&gt;</literal> bucket.
-      <literal>TxnAbort</literal> is treated the same as
-      <literal>Idle</literal> here on the reasoning that, from an
-      attribution standpoint, whatever follows an abort before the next
-      real statement is the same kind of gap as ordinary client think
-      time, rather than a third, separately named bucket.
+      Any wait recorded before the ring's very first bucket-opening
+      marker &mdash; for instance, because trace was enabled partway
+      through an already-running session &mdash; falls into the
+      synthetic <literal>&lt;unattributed&gt;</literal> bucket.
      </para>
     </listitem>
     <listitem>
      <para>
-      Any wait recorded before the ring's very first boundary marker of
-      either kind &mdash; for instance, because trace was enabled
-      partway through an already-running session &mdash; falls into the
-      synthetic <literal>&lt;unattributed&gt;</literal> bucket.
+      <emphasis>Pre-statement phase.</emphasis>  A backend can wait after
+      a request has arrived but before the statement's start marker is
+      written: on plan cache locks while binding a prepared statement, or
+      on relation locks during parse analysis.  If no other statement
+      opens between the nearest <literal>Idle</literal>,
+      <literal>TxnCommit</literal> or <literal>TxnAbort</literal> and a
+      statement-opening marker, the waits in between move to that
+      statement's bucket, with <structfield>phase</structfield>
+      <literal>pre</literal>.  Waits of type <literal>Client</literal>
+      (<literal>ClientRead</literal> and the like) stay in
+      <literal>&lt;idle&gt;</literal>: that is idle time.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Failed request.</emphasis>  The waits of a request that
+      fails before any statement starts (a <varname>lock_timeout</varname>
+      expiring while binding a prepared statement, for example) are those
+      after an <literal>Idle</literal> and before the following
+      <literal>TxnAbort</literal> or <literal>TxnCommit</literal>, with
+      no statement opened in between and a type other than
+      <literal>Client</literal>.  They are reported in the synthetic
+      <literal>&lt;no-statement&gt;</literal> bucket.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Every other wait stays in the bucket opened by the latest marker
+      above, so the waits after <literal>ExecEnd</literal> or
+      <literal>TxnCommit</literal> but before the next
+      <literal>Idle</literal> (the commit WAL flush, for example) remain
+      with their statement.
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    Known ambiguities of the rule:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      In an explicit transaction or a pipeline with no commit between two
+      statements, the waits between the end of one statement and the start
+      marker of the next stay with the earlier statement.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      When the next request was already buffered, so that no
+      <literal>Idle</literal> was written, end-of-transaction work after
+      <literal>TxnCommit</literal> is counted as the next statement's
+      <literal>pre</literal> phase.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      An error caught by a PL/pgSQL <literal>EXCEPTION</literal> block
+      inside a utility statement can leave the count of open utility
+      statements too high, because the matching
+      <literal>UtilityEnd</literal> is never written.  Until the next
+      <literal>Idle</literal> or <literal>TxnAbort</literal> the
+      following statements are then taken for part of that utility
+      statement.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      When several Parse messages are pipelined ahead of their Execute
+      messages, the first Execute follows the last Parse's
+      <literal>QueryStart</literal> and is attributed to it.
      </para>
     </listitem>
    </itemizedlist>

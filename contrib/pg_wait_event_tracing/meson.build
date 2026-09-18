@@ -29,6 +29,7 @@ tests += {
   'regress': {
     'sql': [
       'pg_wait_event_tracing',
+      'pg_wait_event_tracing_trace',
     ],
     'regress_args': ['--temp-config', files('pg_wait_event_tracing.conf')],
     # Needs shared_preload_libraries, which typical runningcheck users do
@@ -44,8 +45,16 @@ tests += {
       't/002_ownership.pl',
       't/003_reset_acl.pl',
       't/004_reset_race.pl',
+      't/005_orphan_reuse.pl',
       't/006_server_processes.pl',
       't/007_lazy_hooks.pl',
+      't/010_trace_seqlock.pl',
+      't/011_trace_wrap.pl',
+      't/012_trace_markers.pl',
+      't/013_deferred_flush.pl',
+      't/014_by_statement_pre.pl',
+      't/015_by_statement_pgbench.pl',
+      't/016_by_statement_oracle.pl',
     ],
   },
 }
