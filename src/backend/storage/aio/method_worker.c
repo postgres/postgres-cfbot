@@ -34,6 +34,7 @@
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "postmaster/auxprocess.h"
+#include "postmaster/bgwriter.h"
 #include "postmaster/interrupt.h"
 #include "storage/aio.h"
 #include "storage/aio_internal.h"
@@ -45,6 +46,7 @@
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/injection_point.h"
 #include "utils/memdebug.h"
@@ -961,6 +963,16 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 
 			/* Cancel new worker request if pending. */
 			pgaio_worker_cancel_grow();
+
+			/*
+			 * Like the background writer, IO workers don't have a
+			 * transaction-end cleanup to destroy SMGR objects, so do that
+			 * when idle after a checkpoint. Any IO has completed and its
+			 * error context has been cleared here, so no borrowed file
+			 * descriptors or SMGR references remain in use.
+			 */
+			if (FirstCallSinceLastCheckpoint())
+				smgrdestroyall();
 
 			/* Compute the remaining allowed idle time. */
 			if (io_worker_idle_timeout == -1)
