@@ -22,6 +22,7 @@ test: boolean char name varchar text int2 int4 int8 oid float4 float8 bit numeri
 # multirangetypes shouldn't run concurrently with type_sanity
 # ----------
 test: strings md5 numerology point lseg line box path polygon circle date time timetz timestamp timestamptz interval inet macaddr macaddr8 multirangetypes
+test: like_bmh
 
 # ----------
 # Another group of parallel tests
