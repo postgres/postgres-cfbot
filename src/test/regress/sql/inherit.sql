@@ -579,7 +579,8 @@ drop table gp cascade;
 create table gp(a int constraint gp_a_check check (a > 0) enforced);
 create table p1_c1() inherits (gp);
 create table p1() inherits (gp);
-alter table p1_c1 inherit p1;
+create table p2() inherits (p1);
+alter table p1_c1 inherit p2;
 alter table gp alter constraint gp_a_check not enforced; --ok
 select  conname, conenforced, convalidated, conrelid::regclass
 from    pg_constraint
