@@ -1471,6 +1471,27 @@ alter table at_partitioned alter column b type numeric using b::numeric;
 \d at_part_2
 drop table at_partitioned;
 
+-- Preserve explicitly renamed descendant index names across partitioned index
+-- rebuilds, and avoid auto-generating the same name for a missing sibling.
+create schema alter_type_partidx;
+set search_path = alter_type_partidx;
+create table p (id int not null, a int not null) partition by list (id);
+create table p1 partition of p for values in (1);
+create table p2 partition of p for values in (2);
+create index p_idx on only p (a);
+create index tmp on p2 (a);
+alter index p_idx attach partition tmp;
+alter index tmp rename to p1_a_idx;
+alter table p alter column a type bigint;
+select i.indrelid::regclass::text as partition, c.relname as index_name
+from pg_index i
+join pg_class c on c.oid = i.indexrelid
+where i.indexrelid in (select inhrelid from pg_inherits where inhparent = 'p_idx'::regclass)
+order by 1;
+reset search_path;
+drop table alter_type_partidx.p;
+drop schema alter_type_partidx;
+
 -- Alter column type when no table rewrite is required
 -- Also check that comments are preserved
 create table at_partitioned(id int, name varchar(64), unique (id, name))
@@ -1530,6 +1551,189 @@ select conname, obj_description(oid, 'pg_constraint') as desc
 
 -- Don't remove this DROP, it exposes bug #15672
 drop table at_partitioned;
+
+-- Per-column statistics targets should still exist after an ALTER COLUMN TYPE
+create table at_reb_plain (id int not null, val int not null);
+create index at_reb_plain_expr on at_reb_plain ((val + 1));
+create unique index at_reb_plain_u on at_reb_plain ((id + 0), (val + 0));
+alter table at_reb_plain add constraint at_reb_plain_c unique (id, val);
+alter index at_reb_plain_expr alter column 1 set statistics 321;
+alter index at_reb_plain_u alter column 1 set statistics 111;
+alter index at_reb_plain_u alter column 2 set statistics 222;
+alter index at_reb_plain_expr depends on extension plpgsql;
+alter index at_reb_plain_c depends on extension plpgsql;
+alter table at_reb_plain alter column val type bigint;
+select c.relname, a.attnum, a.attstattarget
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname in ('at_reb_plain_expr', 'at_reb_plain_u') and a.attnum > 0
+  order by c.relname, a.attnum;
+select c.relname, d.deptype, e.extname
+  from pg_depend d join pg_class c on c.oid = d.objid
+    join pg_extension e on e.oid = d.refobjid
+  where d.classid = 'pg_class'::regclass
+    and c.relname in ('at_reb_plain_expr', 'at_reb_plain_c')
+    and d.refclassid = 'pg_extension'::regclass
+  order by c.relname;
+drop table at_reb_plain;
+-- SET EXPRESSION rebuilds indexes through the same path.
+create table at_reb_set
+  (id int not null, val int not null,
+   gen int generated always as (val + 1) stored);
+create index at_reb_set_idx on at_reb_set ((gen + 1));
+alter index at_reb_set_idx alter column 1 set statistics 654;
+alter table at_reb_set alter column gen set expression as (val + 2);
+select c.relname, a.attnum, a.attstattarget
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname = 'at_reb_set_idx' and a.attnum > 0;
+drop table at_reb_set;
+
+-- Partitioned tables' descendant indexes should all preserve their properties
+-- across an ALTER COLUMN TYPE-triggered rebuild.
+create table at_reb (id int not null, val int not null) partition by range (id);
+create table at_reb_mid (id int not null, val int not null) partition by range (id);
+create table at_reb_1 partition of at_reb_mid for values from (0) to (50);
+create table at_reb_2 partition of at_reb_mid for values from (50) to (100);
+alter table at_reb attach partition at_reb_mid for values from (0) to (100);
+create index at_reb_expr on at_reb ((val + 1))
+  with (fillfactor = 71) tablespace regress_tblspace;
+create unique index at_reb_uniq on at_reb (id, val);
+-- Give descendant indexes stable, custom names (also exercises preservation).
+alter index at_reb_mid_val_1_idx rename to at_reb_expr_mid;
+alter index at_reb_mid_id_val_idx rename to at_reb_uniq_mid;
+alter index at_reb_1_val_1_idx rename to at_reb_expr_leaf;
+alter index at_reb_1_id_val_idx rename to at_reb_uniq_leaf;
+alter index at_reb_2_val_1_idx rename to at_reb_expr_leaf_2;
+alter index at_reb_2_id_val_idx rename to at_reb_uniq_leaf_2;
+-- A descendant index can use a different tablespace from its parent index.
+alter index at_reb_expr_leaf set tablespace pg_default;
+
+-- Load the descendant indexes with properties not preserved by the cloned definition.
+comment on index at_reb_expr_mid is 'mid expr index comment';
+comment on index at_reb_expr_leaf is 'descendant expr index comment';
+comment on index at_reb_expr_leaf_2 is 'second descendant expr index comment';
+alter index at_reb_expr_mid alter column 1 set statistics 654;
+alter index at_reb_expr_leaf alter column 1 set statistics 543;
+alter index at_reb_expr_leaf_2 alter column 1 set statistics 432;
+alter index at_reb_expr_leaf set (fillfactor = 55);
+alter index at_reb_expr_leaf_2 set (fillfactor = 66);
+alter table at_reb_mid replica identity using index at_reb_uniq_mid;
+alter table at_reb_1 replica identity using index at_reb_uniq_leaf;
+alter table at_reb_2 replica identity using index at_reb_uniq_leaf_2;
+alter table at_reb_1 cluster on at_reb_expr_leaf;
+alter table at_reb_2 cluster on at_reb_uniq_leaf_2;
+alter index at_reb_expr_leaf depends on extension plpgsql;
+
+-- Snapshot each catalog row describing the descendant indexes as jsonb. Remove
+-- the columns that legitimately differ across the rebuild: the physical
+-- identity (oid, relfilenode, and their indexrelid/indrelid/attrelid echoes),
+-- and the size estimates (relpages, reltuples, relallvisible, relallfrozen),
+-- which are recomputed by the fresh index build rather than carried over. Any
+-- other difference fails the test.
+create function at_reb_snapshot() returns table(cat text, disc text, body jsonb)
+language sql stable as $$
+  select 'pg_class', c.relname,
+         to_jsonb(c) - '{oid,relfilenode,relpages,reltuples,relallvisible,
+                         relallfrozen}'::text[]
+  from pg_class c
+  where c.relname in ('at_reb_expr_mid', 'at_reb_uniq_mid',
+                      'at_reb_expr_leaf', 'at_reb_uniq_leaf',
+                      'at_reb_expr_leaf_2', 'at_reb_uniq_leaf_2')
+  union all
+  select 'pg_index', c.relname,
+         to_jsonb(i) - '{indexrelid,indrelid}'::text[]
+  from pg_index i join pg_class c on c.oid = i.indexrelid
+  where c.relname in ('at_reb_expr_mid', 'at_reb_uniq_mid',
+                      'at_reb_expr_leaf', 'at_reb_uniq_leaf',
+                      'at_reb_expr_leaf_2', 'at_reb_uniq_leaf_2')
+  union all
+  select 'pg_attribute', c.relname || '.' || a.attnum,
+         to_jsonb(a) - '{attrelid}'::text[]
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname in ('at_reb_expr_mid', 'at_reb_uniq_mid',
+                      'at_reb_expr_leaf', 'at_reb_uniq_leaf',
+                      'at_reb_expr_leaf_2', 'at_reb_uniq_leaf_2')
+    and a.attnum > 0
+  union all
+  select 'comment', c.relname, to_jsonb(obj_description(c.oid, 'pg_class'))
+  from pg_class c
+  where c.relname in ('at_reb_expr_mid', 'at_reb_uniq_mid',
+                      'at_reb_expr_leaf', 'at_reb_uniq_leaf',
+                      'at_reb_expr_leaf_2', 'at_reb_uniq_leaf_2')
+  union all
+  -- owning table row, for relreplident (replica identity is recorded here too)
+  select 'pg_class_owner', tc.relname, to_jsonb(tc.relreplident)
+  from pg_index i join pg_class c on c.oid = i.indexrelid
+    join pg_class tc on tc.oid = i.indrelid
+  where c.relname in ('at_reb_expr_mid', 'at_reb_uniq_mid',
+                      'at_reb_expr_leaf', 'at_reb_uniq_leaf',
+                      'at_reb_expr_leaf_2', 'at_reb_uniq_leaf_2');
+$$;
+
+create temp table at_reb_before as select * from at_reb_snapshot();
+
+-- No-op type change: same type, but still rebuilds the descendant indexes.
+set default_tablespace = 'regress_tblspace';
+alter table at_reb alter column val type int;
+reset default_tablespace;
+
+-- The descendant's explicitly different tablespace must survive the rebuild.
+select c.relname, coalesce(s.spcname, '<db default>') as tablespace
+  from pg_class c left join pg_tablespace s on s.oid = c.reltablespace
+  where c.relname in ('at_reb_expr', 'at_reb_expr_leaf')
+  order by 1;
+
+-- Auto-extension dependencies must also survive the rebuild.
+select d.deptype, e.extname
+  from pg_depend d join pg_extension e on e.oid = d.refobjid
+  where d.classid = 'pg_class'::regclass
+    and d.objid = 'at_reb_expr_leaf'::regclass
+    and d.refclassid = 'pg_extension'::regclass;
+
+create temp table at_reb_after as select * from at_reb_snapshot();
+
+-- Both directions must be empty: nothing lost, nothing unexpectedly changed.
+select 'lost/changed' as dir, cat, disc from (
+  select * from at_reb_before except select * from at_reb_after) d
+union all
+select 'appeared/changed', cat, disc from (
+  select * from at_reb_after except select * from at_reb_before) d
+order by 1, 2, 3;
+
+drop function at_reb_snapshot();
+drop table at_reb;
+
+-- SET EXPRESSION rebuilds the same partition index hierarchy.
+create table at_reb_set
+  (id int not null, val int not null,
+   gen int generated always as (val + 1) stored) partition by range (id);
+create table at_reb_set_mid
+  (id int not null, val int not null,
+   gen int generated always as (val + 1) stored) partition by range (id);
+create table at_reb_set_leaf
+  (id int not null, val int not null,
+   gen int generated always as (val + 1) stored);
+create index at_reb_set_leaf_custom_idx on at_reb_set_leaf ((gen + 1));
+comment on index at_reb_set_leaf_custom_idx is 'set expression index comment';
+alter index at_reb_set_leaf_custom_idx alter column 1 set statistics 654;
+alter table at_reb_set_mid attach partition at_reb_set_leaf
+  for values from (0) to (100);
+alter table at_reb_set attach partition at_reb_set_mid
+  for values from (0) to (1000);
+create index at_reb_set_idx on at_reb_set ((gen + 1));
+create temp table at_reb_set_before as
+  select obj_description('at_reb_set_leaf_custom_idx'::regclass) as comment,
+         (select attstattarget from pg_attribute
+          where attrelid = 'at_reb_set_leaf_custom_idx'::regclass
+            and attnum = 1) as stattarget;
+alter table at_reb_set alter column gen set expression as (val + 2);
+select * from at_reb_set_before
+except
+select obj_description('at_reb_set_leaf_custom_idx'::regclass),
+       (select attstattarget from pg_attribute
+        where attrelid = 'at_reb_set_leaf_custom_idx'::regclass
+          and attnum = 1);
+drop table at_reb_set_before;
+drop table at_reb_set;
 
 -- disallow recursive containment of row types
 create temp table recur1 (f1 int);
