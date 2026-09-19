@@ -1070,4 +1070,82 @@ SELECT fastpath_exceeded > :backend_fastpath_exceeded_before
 
 DROP TABLE part_test;
 
+-- Test pg_stat_tablespace
+-- pg_default and pg_global always exist
+SELECT tablespace_name FROM pg_stat_tablespace
+  WHERE tablespace_name IN ('pg_default', 'pg_global')
+  ORDER BY tablespace_name;
+
+-- Check only that the counters move, not by how much.  pg_stat_tablespace
+-- aggregates every relation in the tablespace and other sessions in this
+-- parallel group are busy in pg_default too, so no exact value is
+-- reproducible.  I/O timings are only collected with track_io_timing on.
+SET track_io_timing = on;
+SELECT tup_inserted AS ts_ins_before,
+       tup_updated AS ts_upd_before,
+       tup_deleted AS ts_del_before,
+       tup_returned AS ts_ret_before,
+       blks_hit AS ts_hit_before,
+       blk_write_time AS ts_wtime_before
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default' \gset
+
+-- Make the table big enough to be extended a number of times, as extending
+-- a relation is what counts as write time here.
+CREATE TABLE test_tablespace_stats (a int);
+INSERT INTO test_tablespace_stats SELECT generate_series(1, 10000);
+UPDATE test_tablespace_stats SET a = a + 1 WHERE a > 5000;
+DELETE FROM test_tablespace_stats WHERE a > 9000;
+SELECT count(*) > 0 FROM test_tablespace_stats;
+SELECT pg_stat_force_next_flush();
+
+SELECT tup_inserted > :ts_ins_before AS inserts_counted,
+       tup_updated > :ts_upd_before AS updates_counted,
+       tup_deleted > :ts_del_before AS deletes_counted,
+       tup_returned > :ts_ret_before AS returns_counted,
+       blks_hit > :ts_hit_before AS hits_counted,
+       blk_write_time > :ts_wtime_before AS write_time_counted
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default';
+
+-- Block reads.  Moving the table to another tablespace rewrites it without
+-- going through shared buffers, so the SELECT has to read it back in, and
+-- those reads belong to the new tablespace.  Do this in a transaction to keep
+-- autovacuum from reading the rewritten table first.
+SELECT blks_read AS ts_read_before, blk_read_time AS ts_rtime_before
+  FROM pg_stat_tablespace WHERE tablespace_name = 'regress_tblspace' \gset
+BEGIN;
+ALTER TABLE test_tablespace_stats SET TABLESPACE regress_tblspace;
+SELECT count(*) > 0 FROM test_tablespace_stats;
+COMMIT;
+SELECT pg_stat_force_next_flush();
+
+SELECT blks_read > :ts_read_before AS reads_counted,
+       blk_read_time > :ts_rtime_before AS read_time_counted
+  FROM pg_stat_tablespace WHERE tablespace_name = 'regress_tblspace';
+RESET track_io_timing;
+
+DROP TABLE test_tablespace_stats;
+
+-- Temporary files are attributed to the tablespace they were created in,
+-- which without temp_tablespaces set is pg_default.
+SELECT temp_files AS ts_tmpf_before, temp_bytes AS ts_tmpb_before
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default' \gset
+
+SET work_mem = '64kB';
+SELECT count(*) > 0 FROM
+  (SELECT * FROM generate_series(1, 10000) AS s ORDER BY s DESC) AS foo;
+RESET work_mem;
+SELECT pg_stat_force_next_flush();
+
+SELECT temp_files > :ts_tmpf_before AS temp_files_counted,
+       temp_bytes > :ts_tmpb_before AS temp_bytes_counted
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default';
+
+-- Resetting sets the timestamp, and resetting again does not move it backwards
+SELECT pg_stat_reset_shared('tablespace');
+SELECT stats_reset AS ts_reset_before FROM pg_stat_tablespace
+  WHERE tablespace_name = 'pg_default' \gset
+SELECT pg_stat_reset_shared('tablespace');
+SELECT stats_reset >= :'ts_reset_before'::timestamptz FROM pg_stat_tablespace
+  WHERE tablespace_name = 'pg_default';
+
 -- End of Stats Test

@@ -301,6 +301,24 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.reset_timestamp_cb = pgstat_database_reset_timestamp_cb,
 	},
 
+	[PGSTAT_KIND_TABLESPACE] = {
+		.name = "tablespace",
+
+		.fixed_amount = false,
+		.write_to_file = true,
+		/* so pg_stat_tablespace can be read from any database */
+		.accessed_across_databases = true,
+
+		.shared_size = sizeof(PgStatShared_Tablespace),
+		.shared_data_off = offsetof(PgStatShared_Tablespace, stats),
+		.shared_data_len = sizeof(((PgStatShared_Tablespace *) 0)->stats),
+		.pending_size = sizeof(PgStat_StatTabspaceEntry),
+
+		.flush_pending_cb = pgstat_tablespace_flush_cb,
+		.flush_static_cb = pgstat_flush_tablespace_times,
+		.reset_timestamp_cb = pgstat_tablespace_reset_timestamp_cb,
+	},
+
 	[PGSTAT_KIND_RELATION] = {
 		.name = "relation",
 

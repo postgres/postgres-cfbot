@@ -420,6 +420,27 @@ REINDEX (TABLESPACE regress_tblspace) TABLE tablespace_table; -- fail
 REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE tablespace_table; -- fail
 RESET ROLE;
 
+-- A relation moved to another tablespace must be credited to the new one in
+-- pg_stat_tablespace.  pgstat_info is preserved across a relcache rebuild, so
+-- doing this while the relation is already in use exercises
+-- pgstat_relation_update_tablespace().
+CREATE TABLE tablespace_stats_move (a int);
+INSERT INTO tablespace_stats_move SELECT generate_series(1, 10);
+SELECT pg_stat_force_next_flush();
+SELECT tup_inserted AS stats_move_before FROM pg_stat_tablespace
+  WHERE tablespace_name = 'regress_tblspace' \gset
+
+BEGIN;
+SELECT count(*) > 0 FROM tablespace_stats_move;
+ALTER TABLE tablespace_stats_move SET TABLESPACE regress_tblspace;
+INSERT INTO tablespace_stats_move SELECT generate_series(1, 10);
+COMMIT;
+SELECT pg_stat_force_next_flush();
+
+SELECT tup_inserted > :stats_move_before AS credited_to_new_tablespace
+  FROM pg_stat_tablespace WHERE tablespace_name = 'regress_tblspace';
+DROP TABLE tablespace_stats_move;
+
 ALTER TABLESPACE regress_tblspace RENAME TO regress_tblspace_renamed;
 
 ALTER TABLE ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;

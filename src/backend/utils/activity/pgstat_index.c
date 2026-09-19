@@ -80,6 +80,21 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	dbentry->blocks_fetched += lstats->idx.blocks_fetched;
 	dbentry->blocks_hit += lstats->idx.blocks_hit;
 
+	/*
+	 * Likewise for the tablespace the index lives in, which need not be the
+	 * one holding the table.
+	 */
+	if (OidIsValid(lstats->tablespace_oid))
+	{
+		PgStat_StatTabspaceEntry *tsentry;
+
+		tsentry = pgstat_prep_tablespace_pending(lstats->tablespace_oid);
+		tsentry->tuples_returned += lstats->idx.tuples_returned;
+		tsentry->tuples_fetched += lstats->idx.tuples_fetched;
+		tsentry->blocks_fetched += lstats->idx.blocks_fetched;
+		tsentry->blocks_hit += lstats->idx.blocks_hit;
+	}
+
 	return true;
 }
 
