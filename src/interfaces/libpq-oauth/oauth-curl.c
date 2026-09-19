@@ -897,7 +897,7 @@ parse_oauth_json(struct async_ctx *actx, const struct json_field *fields)
 		return false;
 	}
 
-	makeJsonLexContextCstringLen(&lex, resp->data, resp->len, PG_UTF8, true);
+	makeJsonLexContextCstringLen(&lex, resp->data, resp->len, PG_UTF8, true, false);
 	setJsonLexContextOwnsTokens(&lex, true);	/* must not leak on error */
 
 	ctx.errbuf = &actx->errbuf;
