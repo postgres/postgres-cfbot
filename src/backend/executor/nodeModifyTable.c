@@ -1105,7 +1105,7 @@ ExecInsert(ModifyTableContext *context,
 		 * Check the constraints of the tuple.
 		 */
 		if (resultRelationDesc->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate);
+			ExecConstraints(CMD_INSERT, resultRelInfo, slot, estate);
 
 		/*
 		 * Also check the tuple against the partition constraint, if there is
@@ -2324,7 +2324,7 @@ lreplace:
 	 * have it validate all remaining checks.
 	 */
 	if (resultRelationDesc->rd_att->constr)
-		ExecConstraints(resultRelInfo, slot, estate);
+		ExecConstraints(CMD_UPDATE, resultRelInfo, slot, estate);
 
 	/*
 	 * replace the heap tuple
