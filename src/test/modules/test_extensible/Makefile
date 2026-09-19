@@ -9,7 +9,7 @@ PGFILEDESC = "test_extensible - test module for extensible node and custom scan"
 EXTENSION = test_extensible
 DATA = test_extensible--1.0.sql
 
-REGRESS = test_extensible
+REGRESS = test_extensible partial_agg
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
