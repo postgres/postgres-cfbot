@@ -30,7 +30,9 @@ tests += {
       'test_idxundo',
     ],
     # The end-to-end tests read the index back and verify it with amcheck.
-    'regress_args': ['--load-extension=amcheck'],
+    'regress_args': ['--load-extension=amcheck', '--load-extension=pageinspect',
+                     '--temp-config', files('test_idxundo.conf')],
+    'runningcheck': false,
   },
   'tap': {
     'env': {
@@ -46,6 +48,7 @@ tests += {
       't/007_idxundo_2pc_database.pl',
       't/008_idxundo_revert_liveness.pl',
       't/009_idxundo_recovery_first_batch.pl',
+      't/011_idxundo_wal_consistency.pl',
       't/013_idxundo_revert_error_after_checkpoint.pl',
       't/014_idxundo_revert_interrupt.pl',
       't/015_idxundo_inline_abort_ctx.pl',
