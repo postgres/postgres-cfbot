@@ -406,6 +406,9 @@
 #wal_retrieve_retry_interval = 5s       # time to wait before retrying to
                                         # retrieve WAL after a failed attempt
 #recovery_min_apply_delay = 0           # minimum delay for applying changes during recovery
+#recovery_pause_on_logical_slot_conflict = off
+                                        # pause recovery before invalidating a
+                                        # local logical replication slot
 #sync_replication_slots = off           # enables slot synchronization on the physical standby from the primary
 
 # - Subscribers -
