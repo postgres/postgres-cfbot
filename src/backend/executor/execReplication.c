@@ -31,6 +31,7 @@
 #include "replication/logicalrelation.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -229,8 +230,6 @@ retry:
 				continue;
 		}
 
-		ExecMaterializeSlot(outslot);
-
 		xwait = TransactionIdIsValid(snap.xmin) ?
 			snap.xmin : snap.xmax;
 
@@ -255,6 +254,8 @@ retry:
 		TM_FailureData tmfd;
 		TM_Result	res;
 
+		INJECTION_POINT("find-repl-tuple-by-index-before-lock", NULL);
+
 		PushActiveSnapshot(GetLatestSnapshot());
 
 		res = table_tuple_lock(rel, &(outslot->tts_tid), GetActiveSnapshot(),
@@ -269,6 +270,14 @@ retry:
 
 		if (should_refetch_tuple(res, &tmfd))
 			goto retry;
+
+		/*
+		 * Materialize the slot once before returning, so the tuple no longer
+		 * depends on the buffer.  Materializing earlier is unnecessary: the
+		 * scan keeps the buffer pinned, and neither the wait nor the lock
+		 * retry path uses the slot, as both restart the lookup.
+		 */
+		ExecMaterializeSlot(outslot);
 	}
 
 	index_endscan(scan);
@@ -370,7 +379,6 @@ bool
 RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 						 TupleTableSlot *searchslot, TupleTableSlot *outslot)
 {
-	TupleTableSlot *scanslot;
 	TableScanDesc scan;
 	SnapshotData snap;
 	TypeCacheEntry **eq;
@@ -386,7 +394,6 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 	InitDirtySnapshot(snap);
 	scan = table_beginscan(rel, &snap, 0, NULL,
 						   SO_NONE);
-	scanslot = table_slot_create(rel, NULL);
 
 retry:
 	found = false;
@@ -394,13 +401,10 @@ retry:
 	table_rescan(scan, NULL);
 
 	/* Try to find the tuple */
-	while (table_scan_getnextslot(scan, ForwardScanDirection, scanslot))
+	while (table_scan_getnextslot(scan, ForwardScanDirection, outslot))
 	{
-		if (!tuples_equal(scanslot, searchslot, eq, NULL))
+		if (!tuples_equal(outslot, searchslot, eq, NULL))
 			continue;
-
-		found = true;
-		ExecCopySlot(outslot, scanslot);
 
 		xwait = TransactionIdIsValid(snap.xmin) ?
 			snap.xmin : snap.xmax;
@@ -416,6 +420,7 @@ retry:
 		}
 
 		/* Found our tuple and it's not locked */
+		found = true;
 		break;
 	}
 
@@ -424,6 +429,8 @@ retry:
 	{
 		TM_FailureData tmfd;
 		TM_Result	res;
+
+		INJECTION_POINT("find-repl-tuple-seq-before-lock", NULL);
 
 		PushActiveSnapshot(GetLatestSnapshot());
 
@@ -439,10 +446,17 @@ retry:
 
 		if (should_refetch_tuple(res, &tmfd))
 			goto retry;
+
+		/*
+		 * Materialize the slot once before returning, so the tuple no longer
+		 * depends on the buffer.  Materializing earlier is unnecessary: the
+		 * scan keeps the buffer pinned, and neither the wait nor the lock
+		 * retry path uses the slot, as both restart the lookup.
+		 */
+		ExecMaterializeSlot(outslot);
 	}
 
 	table_endscan(scan);
-	ExecDropSingleTupleTableSlot(scanslot);
 
 	return found;
 }
