@@ -109,15 +109,22 @@ pgstat_prepare_io_time(bool track_io_guc)
  * pgBufferUsage is used for EXPLAIN.  pgBufferUsage has write and read stats
  * for shared, local and temporary blocks.  pg_stat_io does not track the
  * activity of temporary blocks, so these are ignored here.
+ *
+ * Returns the elapsed time, or zero if start_time is zero, that is, if timing
+ * is disabled.  Callers that attribute the same I/O somewhere else as well,
+ * as the buffer manager does for pg_stat_tablespace, can use that rather than
+ * reading the clock a second time.
  */
-void
+instr_time
 pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 						instr_time start_time, uint32 cnt, uint64 bytes)
 {
+	instr_time	io_time;
+
+	INSTR_TIME_SET_ZERO(io_time);
+
 	if (!INSTR_TIME_IS_ZERO(start_time))
 	{
-		instr_time	io_time;
-
 		INSTR_TIME_SET_CURRENT(io_time);
 		INSTR_TIME_SUBTRACT(io_time, start_time);
 
@@ -150,6 +157,8 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 	}
 
 	pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
+
+	return io_time;
 }
 
 PgStat_IO *

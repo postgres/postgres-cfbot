@@ -183,6 +183,7 @@ void
 FlushLocalBuffer(BufferDesc *bufHdr, SMgrRelation reln)
 {
 	instr_time	io_start;
+	instr_time	io_time;
 	Page		localpage = (char *) LocalBufHdrGetBlock(bufHdr);
 
 	Assert(LocalRefCount[-BufferDescriptorGetBuffer(bufHdr) - 1] > 0);
@@ -212,8 +213,10 @@ FlushLocalBuffer(BufferDesc *bufHdr, SMgrRelation reln)
 			  false);
 
 	/* Temporary table I/O does not use Buffer Access Strategies */
-	pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
-							IOOP_WRITE, io_start, 1, BLCKSZ);
+	io_time = pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
+									  IOOP_WRITE, io_start, 1, BLCKSZ);
+	pgstat_count_tablespace_blk_write_time(reln->smgr_rlocator.locator.spcOid,
+										   io_time);
 
 	/* Mark not-dirty */
 	TerminateLocalBufferIO(bufHdr, true, 0, false);
@@ -362,6 +365,7 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 {
 	BlockNumber first_block;
 	instr_time	io_start;
+	instr_time	io_time;
 
 	/* Initialize local buffers if first request in this session */
 	if (LocalBufHash == NULL)
@@ -469,8 +473,10 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 	/* actually extend relation */
 	smgrzeroextend(BMR_GET_SMGR(bmr), fork, first_block, extend_by, false);
 
-	pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_EXTEND,
-							io_start, 1, extend_by * BLCKSZ);
+	io_time = pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_EXTEND,
+									  io_start, 1, extend_by * BLCKSZ);
+	pgstat_count_tablespace_blk_write_time(BMR_GET_SMGR(bmr)->smgr_rlocator.locator.spcOid,
+										   io_time);
 
 	for (uint32 i = 0; i < extend_by; i++)
 	{

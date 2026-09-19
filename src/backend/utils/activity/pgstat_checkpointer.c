@@ -36,6 +36,15 @@ pgstat_report_checkpointer(void)
 	pgstat_assert_is_up();
 
 	/*
+	 * Flush out per-tablespace block I/O timings accumulated while writing
+	 * buffers.  This process never calls pgstat_report_stat(), so this is the
+	 * only chance they get reported; see pgstat_tablespace.c.  It has to
+	 * happen before the early return below, which only considers this
+	 * process's own statistics.
+	 */
+	pgstat_flush_tablespace_times(false);
+
+	/*
 	 * This function can be called even if nothing at all has happened. In
 	 * this case, avoid unnecessarily modifying the stats entry.
 	 */
