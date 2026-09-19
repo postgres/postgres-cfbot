@@ -24,6 +24,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_basic.pl',
+      't/002_orphan_remove.pl',
     ],
   },
 }
