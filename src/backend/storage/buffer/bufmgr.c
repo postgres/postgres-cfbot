@@ -1824,6 +1824,7 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 				!pgaio_wref_check_done(&operation->io_wref))
 			{
 				instr_time	io_start = pgstat_prepare_io_time(track_io_timing);
+				instr_time	io_time;
 
 				pgaio_wref_wait(&operation->io_wref);
 				needed_wait = true;
@@ -1833,8 +1834,10 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 				 * itself was already counted earlier in AsyncReadBuffers() --
 				 * either by us or by another backend if this is a foreign IO.
 				 */
-				pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
-										io_start, 0, 0);
+				io_time = pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
+												  io_start, 0, 0);
+				pgstat_count_tablespace_blk_read_time(operation->smgr->smgr_rlocator.locator.spcOid,
+													  io_time);
 			}
 			else
 			{
@@ -1952,6 +1955,7 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	IOContext	io_context;
 	IOObject	io_object;
 	instr_time	io_start;
+	instr_time	io_time;
 	StartBufferIOResult status;
 
 	if (persistence == RELPERSISTENCE_TEMP)
@@ -2153,8 +2157,10 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	smgrstartreadv(ioh, operation->smgr, forknum,
 				   blocknum,
 				   io_pages, io_buffers_len);
-	pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
-							io_start, 1, io_buffers_len * BLCKSZ);
+	io_time = pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
+									  io_start, 1, io_buffers_len * BLCKSZ);
+	pgstat_count_tablespace_blk_read_time(operation->smgr->smgr_rlocator.locator.spcOid,
+										  io_time);
 
 	if (persistence == RELPERSISTENCE_TEMP)
 		pgBufferUsage.local_blks_read += io_buffers_len;
@@ -2818,6 +2824,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 	BlockNumber first_block;
 	IOContext	io_context = IOContextForStrategy(strategy);
 	instr_time	io_start;
+	instr_time	io_time;
 
 	LimitAdditionalPins(&extend_by);
 
@@ -3041,8 +3048,16 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 	if (!(flags & EB_SKIP_EXTENSION_LOCK))
 		UnlockRelationForExtension(bmr.rel, ExclusiveLock);
 
-	pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_EXTEND,
-							io_start, 1, extend_by * BLCKSZ);
+	io_time = pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_EXTEND,
+									  io_start, 1, extend_by * BLCKSZ);
+
+	/*
+	 * Take the tablespace from the smgr rather than bmr.rel, which is NULL
+	 * when the caller used BMR_SMGR() -- as XLogReadBufferExtended() does
+	 * during WAL replay.
+	 */
+	pgstat_count_tablespace_blk_write_time(BMR_GET_SMGR(bmr)->smgr_rlocator.locator.spcOid,
+										   io_time);
 
 	/* Set BM_VALID, terminate IO, and wake up any waiters */
 	for (uint32 i = 0; i < extend_by; i++)
@@ -4529,6 +4544,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	XLogRecPtr	recptr;
 	ErrorContextCallback errcallback;
 	instr_time	io_start;
+	instr_time	io_time;
 	Block		bufBlock;
 
 	Assert(BufferLockHeldByMeInMode(buf, BUFFER_LOCK_EXCLUSIVE) ||
@@ -4621,8 +4637,10 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 * When a strategy is not in use, the write can only be a "regular" write
 	 * of a dirty shared buffer (IOCONTEXT_NORMAL IOOP_WRITE).
 	 */
-	pgstat_count_io_op_time(io_object, io_context,
-							IOOP_WRITE, io_start, 1, BLCKSZ);
+	io_time = pgstat_count_io_op_time(io_object, io_context,
+									  IOOP_WRITE, io_start, 1, BLCKSZ);
+	pgstat_count_tablespace_blk_write_time(reln->smgr_rlocator.locator.spcOid,
+										   io_time);
 
 	pgBufferUsage.shared_blks_written++;
 
