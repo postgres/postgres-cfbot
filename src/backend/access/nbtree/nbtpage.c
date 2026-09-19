@@ -39,11 +39,6 @@
 #include "utils/snapmgr.h"
 
 static BTMetaPageData *_bt_getmeta(Relation rel, Buffer metabuf);
-static void _bt_delitems_delete(Relation rel, Buffer buf,
-								TransactionId snapshotConflictHorizon,
-								bool isCatalogRel,
-								OffsetNumber *deletable, int ndeletable,
-								BTVacuumPosting *updatable, int nupdatable);
 static char *_bt_delitems_update(BTVacuumPosting *updatable, int nupdatable,
 								 OffsetNumber *updatedoffsets,
 								 Size *updatedbuflen, bool needswal);
@@ -1288,8 +1283,11 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
  * (from the tableam).  This is used by the REDO routine to generate recovery
  * conflicts.  The other difference is that only _bt_delitems_vacuum will
  * clear page's VACUUM cycle ID.
+ *
+ * btvacuumpage also uses it for delete-marked entries of live table TIDs,
+ * whose removal needs a recovery conflict that a VACUUM record lacks.
  */
-static void
+void
 _bt_delitems_delete(Relation rel, Buffer buf,
 					TransactionId snapshotConflictHorizon, bool isCatalogRel,
 					OffsetNumber *deletable, int ndeletable,

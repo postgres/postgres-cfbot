@@ -366,6 +366,24 @@ typedef struct TableAmRoutine
 	 */
 	UndoEngine	am_undo_engine;
 
+	/*
+	 * am_index_delete_marking: true if this AM performs in-place UPDATE of an
+	 * indexed column via nbtree delete-marking rather than moving the row to
+	 * a new TID.  When true: - the row keeps a STABLE TID across an
+	 * indexed-column UPDATE; - the AM itself drives index maintenance for the
+	 * changed indexes (insert the new (k_new,TID) entry + delete-mark the old
+	 * (k_old,TID) entry via index_delete_mark) and reports TU_None so the
+	 * executor does NOT re-insert; - the AM's own UNDO drives index cleanup
+	 * on rollback (remove the new entry + clear the old delete-mark), so
+	 * index AMs must NOT write their own index UNDO for such a parent table
+	 * (see nbtinsert.c/hashinsert.c); - index-only scans are suppressed for
+	 * indexes on the table (a delete-marked entry's key may not match the
+	 * live tuple), which the planner enforces via
+	 * RelationSupportsDeleteMarking() in get_relation_info(). Only meaningful
+	 * when am_supports_undo is true.
+	 */
+	bool		am_index_delete_marking;
+
 
 	/* ------------------------------------------------------------------------
 	 * Slot related callbacks.
@@ -544,6 +562,14 @@ typedef struct TableAmRoutine
 							  bool *all_dead);
 
 	/*
+	 * Optional, for am_index_delete_marking AMs; see
+	 * table_index_fetch_tid().
+	 */
+	bool		(*index_fetch_tid) (Relation rel, Relation irel,
+									IndexTuple itup, ItemPointer tid,
+									Snapshot snapshot, bool *all_dead);
+
+	/*
 	 * Fetch tuple at `tid` into `slot`, after doing a visibility test
 	 * according to `snapshot`. If a tuple was found and passed the visibility
 	 * test, returns true, false otherwise.
@@ -577,6 +603,14 @@ typedef struct TableAmRoutine
 	/* see table_index_delete_tuples() */
 	TransactionId (*index_delete_tuples) (Relation rel,
 										  TM_IndexDeleteOp *delstate);
+
+	/*
+	 * Optional, for am_index_delete_marking AMs; see
+	 * table_index_tombstone_removable().
+	 */
+	bool		(*index_tombstone_removable) (Relation rel, Relation irel,
+											  IndexTuple itup, ItemPointer tid,
+											  TransactionId *conflict_xid);
 
 
 	/* ------------------------------------------------------------------------
@@ -1393,6 +1427,70 @@ table_fetch_tid(Relation rel,
 }
 
 /*
+ * table_fetch_tid() for a uniqueness check that knows the index entry it
+ * found `tid` through: is there a version of the row that passes `snapshot`
+ * AND carries the key of the entry `itup` of unique index `irel`?
+ *
+ * A delete-marking AM (am_index_delete_marking) updates an indexed column in
+ * place, so one TID carries several keys over time: the UPDATE inserts a new
+ * (k_new, TID) entry and delete-marks the old (k_old, TID) one, which stays
+ * for snapshots that still see k_old.  The TID alone no longer says which
+ * version a uniqueness check is about; only the table AM can tell whether
+ * the version that carries the entry's key is live, being changed, or dead.
+ * This asks it.  It answers exactly what heap's table_fetch_tid() answers
+ * for the version that carries the key, as if that version had its own TID:
+ *
+ * - `itup` is the entry as the index stores it.  It may be delete-marked
+ *   (a tombstone); its key is the entry's key either way, and the caller has
+ *   already matched it against the key being inserted.  `tid` is the heap
+ *   TID it points to (for a tombstone, BTreeTupleGetHeapTID(), not t_tid),
+ *   and is not modified.
+ *
+ * - `snapshot` is SnapshotDirty or SnapshotSelf.  Returns true if a version
+ *   carrying the key passes it, false otherwise.
+ *
+ * - For SnapshotDirty, a version whose inserter, updater or deleter is still
+ *   in progress passes, and its xid is reported as heap does
+ *   (HeapTupleSatisfiesDirty): snapshot->xmin for a running writer that made
+ *   the version (and snapshot->speculativeToken for a speculative insertion
+ *   that is not yet confirmed), snapshot->xmax for a running writer that is
+ *   replacing it -- for an in-place key UPDATE in progress, the updater, on
+ *   both its old-key and its new-key entry.  The caller waits for that xid
+ *   and checks again.  Both are InvalidTransactionId and the token 0 when
+ *   there is nothing to wait for.
+ *
+ * - A version whose writer aborted is not the row's, even when the AM's
+ *   rollback has not been applied yet: the version before it is, so the old
+ *   key of an aborted key UPDATE passes and the new one does not.  A version
+ *   superseded by a committed key UPDATE (or deleted by a committed DELETE)
+ *   does not pass.
+ *
+ * - If all_dead is not NULL, *all_dead is set as by table_fetch_tid(): true
+ *   iff no snapshot, now or in the future, can need any version at `tid`, so
+ *   that a plain entry may be marked LP_DEAD.  The caller never marks a
+ *   tombstone LP_DEAD, whatever *all_dead says: tombstones are removed by
+ *   table_index_tombstone_removable() only.
+ *
+ * AMs without delete-marking leave the callback NULL; the call is then
+ * table_fetch_tid(rel, tid, snapshot, all_dead), which is right because
+ * their TIDs carry a single key, and which an AM with delete-marking may
+ * also be given for a plain entry.
+ */
+static inline bool
+table_index_fetch_tid(Relation rel, Relation irel, IndexTuple itup,
+					  ItemPointer tid, Snapshot snapshot, bool *all_dead)
+{
+	if (rel->rd_tableam->index_fetch_tid == NULL)
+		return table_fetch_tid(rel, tid, snapshot, all_dead);
+
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+		elog(ERROR, "unexpected table_index_fetch_tid call during logical decoding");
+
+	return rel->rd_tableam->index_fetch_tid(rel, irel, itup, tid, snapshot,
+											all_dead);
+}
+
+/*
  * Fetch tuple at `tid` into `slot`, after doing a visibility test according to
  * `snapshot`. If a tuple was found and passed the visibility test, returns
  * true, false otherwise.
@@ -1472,6 +1570,25 @@ static inline TransactionId
 table_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
 	return rel->rd_tableam->index_delete_tuples(rel, delstate);
+}
+
+/*
+ * May the delete-marked index entry itup of index irel be removed?
+ *
+ * A delete-marking AM's in-place UPDATE of an indexed column leaves the old
+ * entry delete-marked for older snapshots, at a TID that stays live, so the
+ * index AM's dead-TID test never removes it.  Returns true once no snapshot
+ * can need the row through that entry, setting *conflict_xid to the XID whose
+ * snapshots (on a standby) must have ended before it is removed.  AMs without
+ * the callback keep their delete-marked entries.
+ */
+static inline bool
+table_index_tombstone_removable(Relation rel, Relation irel, IndexTuple itup,
+								ItemPointer tid, TransactionId *conflict_xid)
+{
+	return rel->rd_tableam->index_tombstone_removable != NULL &&
+		rel->rd_tableam->index_tombstone_removable(rel, irel, itup, tid,
+												   conflict_xid);
 }
 
 
@@ -2211,5 +2328,6 @@ extern const TableAmRoutine *GetHeapamTableAmRoutine(void);
 
 extern bool RelationUsesIndexUndo(Relation indexrel, Relation heaprel);
 extern UndoEngine RelationUndoEngine(Relation rel);
+extern bool RelationSupportsDeleteMarking(Relation rel);
 
 #endif							/* TABLEAM_H */

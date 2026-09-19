@@ -238,6 +238,69 @@ index_insert(Relation indexRelation,
 											 indexInfo);
 }
 
+/* ----------------
+ *		index_delete_mark - delete-mark an existing (key, TID) index entry
+ *
+ * Called by a delete-marking-capable table AM during an in-place
+ * UPDATE of an indexed column: the old (values, heap_t_ctid) entry is promoted
+ * to a delete-marked tombstone rather than removed, so old-snapshot readers can
+ * still reach the before-image through this index.
+ *
+ * The AM must support delete-marking (amdeletemark != NULL) AND the parent
+ * table must use UNDO (RelationUndoEngine(heapRelation) != NONE).
+ *
+ * Returns true if a live entry was found and marked; false otherwise.
+ * ----------------
+ */
+bool
+index_delete_mark(Relation indexRelation,
+				  Datum *values,
+				  bool *isnull,
+				  ItemPointer heap_t_ctid,
+				  Relation heapRelation)
+{
+	RELATION_CHECKS;
+
+	/* Capability gate: AM method present AND table AM enables delete-marking */
+	if (indexRelation->rd_indam->amdeletemark == NULL)
+		return false;
+	if (RelationUndoEngine(heapRelation) == UNDO_ENGINE_NONE)
+		return false;
+
+	return indexRelation->rd_indam->amdeletemark(indexRelation, heapRelation,
+												 values, isnull, heap_t_ctid);
+}
+
+/* ----------------
+ *		index_undo_mark - reverse an in-place key UPDATE's index change
+ *
+ * Called by a delete-marking table AM's UNDO during ROLLBACK: clear_mark=true
+ * demotes the OLD key's delete-marked tombstone back to a live entry;
+ * clear_mark=false kills the NEW key's live entry the aborted update inserted.
+ * See amundomark_function in access/amapi.h.  Returns true if the entry was
+ * found and reversed.
+ * ----------------
+ */
+bool
+index_undo_mark(Relation indexRelation,
+				Datum *values,
+				bool *isnull,
+				ItemPointer heap_t_ctid,
+				Relation heapRelation,
+				bool clear_mark)
+{
+	RELATION_CHECKS;
+
+	if (indexRelation->rd_indam->amundomark == NULL)
+		return false;
+	if (RelationUndoEngine(heapRelation) == UNDO_ENGINE_NONE)
+		return false;
+
+	return indexRelation->rd_indam->amundomark(indexRelation, heapRelation,
+											   values, isnull, heap_t_ctid,
+											   clear_mark);
+}
+
 /* -------------------------
  *		index_insert_cleanup - clean up after all index inserts are done
  * -------------------------

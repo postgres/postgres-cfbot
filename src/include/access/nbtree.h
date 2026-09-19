@@ -167,6 +167,14 @@ typedef struct BTMetaPageData
 					MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) - \
 					MAXALIGN(sizeof(BTPageOpaqueData))) / 3) - \
 					MAXALIGN(sizeof(ItemPointerData)))
+/*
+ * A plain leaf entry in an index on a table that supports delete-marking may
+ * later become a tombstone, which is up to MAXALIGN(sizeof(ItemPointerData))
+ * bytes bigger (see BTreeTupleGetDeleteMarkedSize).  Such entries are limited
+ * to this size so that the tombstone still fits within BTMaxItemSize.
+ */
+#define BTMaxItemSizeDeleteMarking \
+	(BTMaxItemSize - MAXALIGN(sizeof(ItemPointerData)))
 #define BTMaxItemSizeNoHeapTid \
 	MAXALIGN_DOWN((BLCKSZ - \
 				   MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) - \
@@ -467,6 +475,20 @@ typedef struct BTVacState
 #define BT_IS_POSTING				0x2000
 
 /*
+ * Delete-marking: a delete-marked leaf tuple is a THIRD alt-TID
+ * non-pivot, non-posting subtype.  It has INDEX_ALT_TID_MASK set in t_info and
+ * BT_IS_DELETE_MARKED set (with BT_IS_POSTING clear) in t_tid's offset number.
+ * Its single heap TID is stored in a trailer at the end of the tuple, exactly
+ * like a pivot tuple's BT_PIVOT_HEAP_TID_ATTR heap TID, and is retrieved via
+ * BTreeTupleGetHeapTID().  Semantically it is an ordinary (non-pivot,
+ * non-posting) leaf entry whose index key no longer necessarily describes the
+ * live version of the heap tuple it points at; it lingers as a tombstone so
+ * old-snapshot readers can still reach the before-image.  See
+ * "Delete-marking" in src/backend/access/nbtree/README.
+ */
+#define BT_IS_DELETE_MARKED			0x4000	/* 0x8000 remains free */
+
+/*
  * Mask allocated for number of keys in index tuple must be able to fit
  * maximum possible number of index attributes
  */
@@ -485,6 +507,9 @@ BTreeTupleIsPivot(IndexTuple itup)
 	/* absence of BT_IS_POSTING in offset number indicates pivot tuple */
 	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_POSTING) != 0)
 		return false;
+	/* a delete-marked leaf tuple is a non-pivot alt-TID subtype */
+	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_DELETE_MARKED) != 0)
+		return false;
 
 	return true;
 }
@@ -496,6 +521,27 @@ BTreeTupleIsPosting(IndexTuple itup)
 		return false;
 	/* presence of BT_IS_POSTING in offset number indicates posting tuple */
 	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_POSTING) == 0)
+		return false;
+
+	return true;
+}
+
+/*
+ * BTreeTupleIsDeleteMarked() -- is itup a delete-marked leaf tuple?
+ *
+ * A delete-marked tuple carries INDEX_ALT_TID_MASK (like a pivot or posting
+ * tuple) but is classified as neither pivot nor posting: it has
+ * BT_IS_DELETE_MARKED set and BT_IS_POSTING clear in t_tid's offset number.
+ * BTreeTupleIsPivot()/BTreeTupleIsPosting() both return false for it.
+ */
+static inline bool
+BTreeTupleIsDeleteMarked(IndexTuple itup)
+{
+	if ((itup->t_info & INDEX_ALT_TID_MASK) == 0)
+		return false;
+	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_POSTING) != 0)
+		return false;
+	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_DELETE_MARKED) == 0)
 		return false;
 
 	return true;
@@ -651,6 +697,16 @@ BTreeTupleGetHeapTID(IndexTuple itup)
 	}
 	else if (BTreeTupleIsPosting(itup))
 		return BTreeTupleGetPosting(itup);
+	else if (BTreeTupleIsDeleteMarked(itup))
+	{
+		/*
+		 * Delete-marked leaf tuple: the single heap TID lives in a
+		 * trailer at the tuple end, exactly like a pivot's heap TID.  t_tid
+		 * itself holds only alt-TID status metadata here.
+		 */
+		return (ItemPointer) ((char *) itup + IndexTupleSize(itup) -
+							  sizeof(ItemPointerData));
+	}
 
 	return &itup->t_tid;
 }
@@ -673,7 +729,69 @@ BTreeTupleGetMaxHeapTID(IndexTuple itup)
 		return BTreeTupleGetPostingN(itup, nposting - 1);
 	}
 
+	/* Delete-marked tuples carry their single TID in the trailer */
+	if (BTreeTupleIsDeleteMarked(itup))
+		return (ItemPointer) ((char *) itup + IndexTupleSize(itup) -
+							  sizeof(ItemPointerData));
+
 	return &itup->t_tid;
+}
+
+/*
+ * Delete-marking accessors
+ *
+ * BTreeTupleSetDeleteMarked() promotes a plain non-pivot, non-posting leaf
+ * tuple into the delete-marked alt-TID form.  The caller is responsible for
+ * having reserved sizeof(ItemPointerData) of trailer space at the end of the
+ * tuple and for having set INDEX_SIZE_MASK in t_info to include that trailer
+ * (i.e. the tuple passed here must already be sized to hold the trailer).  The
+ * original heap TID (previously in t_tid) is written to the trailer.
+ *
+ * BTreeTupleGetDeleteMarkedSize() reports the tuple size (including the
+ * trailer) that a delete-marked form of a given plain leaf tuple requires.
+ */
+static inline Size
+BTreeTupleGetDeleteMarkedSize(IndexTuple plain)
+{
+	Assert(!BTreeTupleIsPivot(plain) && !BTreeTupleIsPosting(plain) &&
+		   !BTreeTupleIsDeleteMarked(plain));
+
+	/*
+	 * MAXALIGN the WHOLE tuple (not just the plain part): nbtree asserts
+	 * itemsz == MAXALIGN(IndexTupleSize(itup)) throughout (page splits, high
+	 * keys, dedup).  A bare +sizeof(ItemPointerData) trailer would leave the
+	 * size unaligned and trip those asserts, so pad to the next MAXALIGN
+	 * boundary.  BTreeTupleGetHeapTID reads the trailer at (end - 6), which
+	 * is exactly where BTreeTupleSetDeleteMarked writes it below, so the
+	 * padding (if any) sits between the plain body and the trailer
+	 * harmlessly.
+	 */
+	return MAXALIGN(MAXALIGN(IndexTupleSize(plain)) + sizeof(ItemPointerData));
+}
+
+static inline void
+BTreeTupleSetDeleteMarked(IndexTuple itup, ItemPointer heaptid, Size newsize)
+{
+	ItemPointer trailer;
+
+	Assert(!BTreeTupleIsPivot(itup) && !BTreeTupleIsPosting(itup) &&
+		   !BTreeTupleIsDeleteMarked(itup));
+	Assert(newsize >= IndexTupleSize(itup) + sizeof(ItemPointerData));
+	Assert(ItemPointerIsValid(heaptid));
+
+	/* Grow the tuple to include the trailer, then write the heap TID there */
+	itup->t_info &= ~INDEX_SIZE_MASK;
+	itup->t_info |= newsize;
+	trailer = (ItemPointer) ((char *) itup + newsize - sizeof(ItemPointerData));
+	ItemPointerCopy(heaptid, trailer);
+
+	/* Redefine t_tid as alt-TID delete-marked metadata */
+	itup->t_info |= INDEX_ALT_TID_MASK;
+	ItemPointerSetBlockNumber(&itup->t_tid, 0);
+	ItemPointerSetOffsetNumber(&itup->t_tid, BT_IS_DELETE_MARKED);
+
+	Assert(BTreeTupleIsDeleteMarked(itup));
+	Assert(!BTreeTupleIsPivot(itup) && !BTreeTupleIsPosting(itup));
 }
 
 /*
@@ -841,6 +959,8 @@ typedef struct BTInsertStateData
 	 * with an existing posting list tuple that has its LP_DEAD bit set.
 	 */
 	int			postingoff;
+	bool		nopostingsplit; /* delete-marking index: never
+								 * posting-split on insert */
 } BTInsertStateData;
 
 typedef BTInsertStateData *BTInsertState;
@@ -957,6 +1077,7 @@ typedef struct BTScanPosItem	/* what we remember about each match */
 	ItemPointerData heapTid;	/* TID of referenced heap item */
 	OffsetNumber indexOffset;	/* index item's location within page */
 	LocationIndex tupleOffset;	/* IndexTuple's offset in workspace, if any */
+	bool		recheck;		/* delete-marked entry: caller must recheck */
 } BTScanPosItem;
 
 typedef struct BTScanPosData
@@ -1162,6 +1283,11 @@ extern Size btestimateparallelscan(Relation rel, int nkeys, int norderbys);
 extern void btinitparallelscan(void *target);
 extern bool btgettuple(IndexScanDesc scan, ScanDirection dir);
 extern int64 btgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
+extern bool btdeletemark(Relation rel, Relation heapRel,
+						 Datum *values, bool *isnull, ItemPointer heap_t_ctid);
+extern bool btundomark(Relation rel, Relation heapRel,
+					   Datum *values, bool *isnull, ItemPointer heap_t_ctid,
+					   bool clear_mark);
 extern void btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 					 ScanKey orderbys, int norderbys);
 extern void btparallelrescan(IndexScanDesc scan);
@@ -1217,6 +1343,10 @@ extern bool _bt_doinsert(Relation rel, IndexTuple itup,
 						 Relation heapRel);
 extern void _bt_finish_split(Relation rel, Relation heaprel, Buffer lbuf,
 							 BTStack stack);
+extern void _bt_replace_split(Relation rel, Relation heaprel,
+							  BTScanInsert itup_key, Buffer buf, BTStack stack,
+							  IndexTuple itup, OffsetNumber offnum);
+extern void _bt_freestack(BTStack stack);
 extern Buffer _bt_getstackbuf(Relation rel, Relation heaprel, BTStack stack,
 							  BlockNumber child);
 
@@ -1252,6 +1382,11 @@ extern bool _bt_conditionallockbuf(Relation rel, Buffer buf);
 extern void _bt_upgradelockbufcleanup(Relation rel, Buffer buf);
 extern void _bt_pageinit(Page page, Size size);
 extern void _bt_delitems_vacuum(Relation rel, Buffer buf,
+								OffsetNumber *deletable, int ndeletable,
+								BTVacuumPosting *updatable, int nupdatable);
+extern void _bt_delitems_delete(Relation rel, Buffer buf,
+								TransactionId snapshotConflictHorizon,
+								bool isCatalogRel,
 								OffsetNumber *deletable, int ndeletable,
 								BTVacuumPosting *updatable, int nupdatable);
 struct TM_IndexDeleteOp;		/* avoid including tableam.h here */

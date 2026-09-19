@@ -154,6 +154,15 @@ extern bool index_insert(Relation indexRelation,
 						 IndexInfo *indexInfo);
 extern void index_insert_cleanup(Relation indexRelation,
 								 IndexInfo *indexInfo);
+extern bool index_delete_mark(Relation indexRelation,
+							  Datum *values, bool *isnull,
+							  ItemPointer heap_t_ctid,
+							  Relation heapRelation);
+extern bool index_undo_mark(Relation indexRelation,
+							Datum *values, bool *isnull,
+							ItemPointer heap_t_ctid,
+							Relation heapRelation,
+							bool clear_mark);
 
 extern IndexScanDesc index_beginscan(Relation heapRelation,
 									 Relation indexRelation,

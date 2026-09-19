@@ -905,6 +905,16 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 	Assert(targetblock != P_NONE);
 
 	/*
+	 * A delete-marked tombstone is not a live entry for its key: its row has
+	 * moved to another key, or is moving there.  Its heap TID is visible
+	 * under the new key, so checking it here would report a live entry with
+	 * the same key for another row as a duplicate.  Skip it without touching
+	 * lVis, so that live entries on either side are still compared.
+	 */
+	if (BTreeTupleIsDeleteMarked(itup))
+		return;
+
+	/*
 	 * Current tuple has posting list. Report duplicate if TID of any posting
 	 * list entry is visible and lVis->tid is valid.
 	 */
@@ -1475,7 +1485,36 @@ bt_target_page_check(BtreeCheckState *state)
 		{
 			IndexTuple	norm;
 
-			if (BTreeTupleIsPosting(itup))
+			if (BTreeTupleIsDeleteMarked(itup))
+			{
+				/*
+				 * A delete-marked tombstone keeps a row reachable under a key
+				 * it no longer has, for snapshots that still see that key.
+				 * Such a snapshot -- possibly ours, since writers run
+				 * concurrently -- derives exactly this (key, heap TID) from
+				 * the heap, and the tombstone is the only entry that holds
+				 * it.  Fingerprint it in plain form: key, with the heap TID
+				 * from the trailer in t_tid, as _bt_truncate demotes it.  An
+				 * extra fingerprint cannot cause a false report, since the
+				 * heap is only probed against the index.
+				 */
+				TupleDesc	itupdesc = RelationGetDescr(state->rel);
+				Datum		vals[INDEX_MAX_KEYS];
+				bool		nulls[INDEX_MAX_KEYS];
+				IndexTuple	plain;
+
+				index_deform_tuple(itup, itupdesc, vals, nulls);
+				plain = index_form_tuple(itupdesc, vals, nulls);
+				plain->t_tid = *BTreeTupleGetHeapTID(itup);
+				norm = bt_normalize_tuple(state, plain);
+				bloom_add_element(state->filter, (unsigned char *) norm,
+								  IndexTupleSize(norm));
+				/* Be tidy */
+				if (norm != plain)
+					pfree(norm);
+				pfree(plain);
+			}
+			else if (BTreeTupleIsPosting(itup))
 			{
 				/* Fingerprint all elements as distinct "plain" tuples */
 				for (int i = 0; i < BTreeTupleGetNPosting(itup); i++)
@@ -3026,6 +3065,7 @@ bt_rootdescend(BtreeCheckState *state, IndexTuple itup)
 		insertstate.itemsz = MAXALIGN(IndexTupleSize(itup));
 		insertstate.itup_key = key;
 		insertstate.postingoff = 0;
+		insertstate.nopostingsplit = false;
 		insertstate.bounds_valid = false;
 		insertstate.buf = lbuf;
 

@@ -19,8 +19,11 @@
 #include "postgres.h"
 
 #include "access/nbtree.h"
+#include "access/nbtxlog.h"
 #include "access/relscan.h"
 #include "access/stratnum.h"
+#include "access/tableam.h"
+#include "access/xloginsert.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "nodes/execnodes.h"
@@ -35,6 +38,7 @@
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
 #include "utils/index_selfuncs.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -163,6 +167,8 @@ bthandler(PG_FUNCTION_ARGS)
 		.amrescan = btrescan,
 		.amgettuple = btgettuple,
 		.amgetbitmap = btgetbitmap,
+		.amdeletemark = btdeletemark,
+		.amundomark = btundomark,
 		.amendscan = btendscan,
 		.ammarkpos = btmarkpos,
 		.amrestrpos = btrestrpos,
@@ -304,7 +310,8 @@ btgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 		{
 			/* Save tuple ID, and continue scanning */
 			heapTid = &scan->xs_heaptid;
-			tbm_add_tuples(tbm, heapTid, 1, false);
+			tbm_add_tuples(tbm, heapTid, 1,
+						   so->currPos.items[so->currPos.itemIndex].recheck);
 			ntids++;
 
 			for (;;)
@@ -320,9 +327,14 @@ btgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 						break;
 				}
 
-				/* Save tuple ID, and continue scanning */
+				/*
+				 * Save tuple ID, and continue scanning.  A delete-marked
+				 * entry is added with recheck=true so the bitmap-heap-scan
+				 * consumer re-evaluates the qual against the visible version.
+				 */
 				heapTid = &so->currPos.items[so->currPos.itemIndex].heapTid;
-				tbm_add_tuples(tbm, heapTid, 1, false);
+				tbm_add_tuples(tbm, heapTid, 1,
+							   so->currPos.items[so->currPos.itemIndex].recheck);
 				ntids++;
 			}
 		}
@@ -416,7 +428,7 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	 *
 	 * Note: so->dropPin should never change across rescans.
 	 */
-	so->dropPin = (!scan->xs_want_itup &&
+	so->dropPin = (!scan->xs_want_itup && !scan->xs_want_itup_recheck &&
 				   IsMVCCLikeSnapshot(scan->xs_snapshot) &&
 				   scan->heapRelation != NULL);
 
@@ -433,7 +445,8 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	 * overhead, both workspaces are allocated as one palloc block; only this
 	 * function and btendscan know that.
 	 */
-	if (scan->xs_want_itup && so->currTuples == NULL)
+	if ((scan->xs_want_itup || scan->xs_want_itup_recheck) &&
+		so->currTuples == NULL)
 	{
 		so->currTuples = (char *) palloc(BLCKSZ * 2);
 		so->markTuples = so->currTuples + BLCKSZ;
@@ -1524,6 +1537,9 @@ backtrack:
 		int			ndeletable;
 		BTVacuumPosting updatable[MaxIndexTuplesPerPage];
 		int			nupdatable;
+		OffsetNumber tombstones[MaxIndexTuplesPerPage];
+		int			ntombstones = 0;
+		TransactionId tombstone_horizon = InvalidTransactionId;
 		OffsetNumber offnum,
 					minoff,
 					maxoff;
@@ -1573,7 +1589,46 @@ backtrack:
 												PageGetItemId(page, offnum));
 
 				Assert(!BTreeTupleIsPivot(itup));
-				if (!BTreeTupleIsPosting(itup))
+				if (BTreeTupleIsDeleteMarked(itup))
+				{
+					/*
+					 * Delete-marked tombstone: its heap TID lives
+					 * in the trailer, not in t_tid.  Ask the callback about
+					 * that TID. The callback (driven by undo-informed index
+					 * pruning) is the sole authority on removability: we
+					 * remove the tombstone only when it says so -- i.e. when
+					 * no snapshot can still need the before-image at this TID.
+					 * We never remove a tombstone merely
+					 * because it is marked.
+					 */
+					ItemPointer htid = BTreeTupleGetHeapTID(itup);
+					TransactionId conflict_xid = InvalidTransactionId;
+
+					if (callback(htid, callback_state))
+					{
+						deletable[ndeletable++] = offnum;
+						nhtidsdead++;
+					}
+					else if (heaprel != NULL &&
+							 table_index_tombstone_removable(heaprel, rel, itup,
+															 htid,
+															 &conflict_xid))
+					{
+						/*
+						 * The TID is live but no snapshot can need the row
+						 * through this entry's key any more.
+						 */
+						tombstones[ntombstones++] = offnum;
+						if (TransactionIdIsNormal(conflict_xid) &&
+							(!TransactionIdIsValid(tombstone_horizon) ||
+							 TransactionIdFollows(conflict_xid,
+												  tombstone_horizon)))
+							tombstone_horizon = conflict_xid;
+					}
+					else
+						nhtidslive++;
+				}
+				else if (!BTreeTupleIsPosting(itup))
 				{
 					/* Regular tuple, standard table TID representation */
 					if (callback(&itup->t_tid, callback_state))
@@ -1668,6 +1723,29 @@ backtrack:
 				opaque->btpo_cycleid = 0;
 				MarkBufferDirtyHint(buf, true);
 			}
+		}
+
+		/*
+		 * Remove the prunable tombstones of live TIDs.  Unlike the entries
+		 * above, nothing table-side generated a recovery conflict for them,
+		 * so log them as a deletion carrying its own conflict horizon.  The
+		 * deletions above shifted the page's later items down.
+		 */
+		if (ntombstones > 0)
+		{
+			for (int i = 0, j = 0; i < ntombstones; i++)
+			{
+				while (j < ndeletable && deletable[j] < tombstones[i])
+					j++;
+				tombstones[i] -= j;
+			}
+			if (!XLogStandbyInfoActive())
+				tombstone_horizon = InvalidTransactionId;
+			_bt_delitems_delete(rel, buf, tombstone_horizon,
+								RelationIsAccessibleInLogicalDecoding(heaprel),
+								tombstones, ntombstones, NULL, 0);
+			stats->tuples_removed += ntombstones;
+			maxoff = PageGetMaxOffsetNumber(page);
 		}
 
 		/*
@@ -1796,7 +1874,22 @@ btreevacuumposting(BTVacState *vstate, IndexTuple posting,
 /*
  *	btcanreturn() -- Check whether btree indexes support index-only scans.
  *
- * btrees always do, so this is trivial.
+ * btrees always do.
+ *
+ * On a delete-marking table an index-only scan could return a delete-marked
+ * entry's stale key without visiting the heap (when the VM says
+ * all-visible), which would be wrong, so index-only scans must be disabled
+ * for such indexes.  That gate cannot live here:
+ * btcanreturn() is reachable during catalog/relcache bootstrap and planning,
+ * where determining the parent table's AM (opening the relation, or
+ * instantiating its table-AM routine) is unsafe and crashes
+ * RelationUndoEngine() on half-built relcache entries.
+ *
+ * We therefore return true (the upstream behaviour) here.  A delete-marked
+ * entry may carry a stale key, so index-only scans must be disabled for such
+ * indexes in the planner / index-open path that already holds the heap
+ * relation (forcing amcanreturn=false there) rather than by reaching for the
+ * table AM from inside this callback.
  */
 bool
 btcanreturn(Relation index, int attno)
@@ -1811,6 +1904,457 @@ int
 btgettreeheight(Relation rel)
 {
 	return _bt_getrootheight(rel);
+}
+
+/*
+ *	btdeletemark() -- delete-mark an existing (key, TID) leaf entry in place.
+ *
+ * Called by the table AM during an in-place UPDATE of an
+ * indexed column: after inserting the new (k_new, T) entry, the AM asks each
+ * affected index to delete-mark the OLD (k_old, T) entry so that it lingers as
+ * a tombstone (reachable by old-snapshot readers via the before-image) instead
+ * of being deleted.  See "Delete-marking" in src/backend/access/nbtree/README.
+ *
+ * 'values'/'isnull' describe k_old; heap_t_ctid is the stable heap TID T.
+ *
+ * Concurrency safety: we re-descend the tree by (k_old, T) using an insertion
+ * scankey with scantid = T (exactly as _bt_doinsert() does), so a concurrent
+ * page split cannot cause us to mark the wrong entry -- the heapkeyspace TID
+ * tiebreaker pins us to the one leaf tuple that has this exact TID.  We hold
+ * the leaf buffer's exclusive lock across the search result, the in-place
+ * promotion, and the WAL insert.
+ *
+ * Returns true if the entry was found and marked, false otherwise (already
+ * marked, or not present -- e.g. a concurrent VACUUM removed it).  A missing
+ * entry is not an error: the caller's new entry already covers new readers,
+ * and if the old entry is gone no old reader can still need it.
+ */
+bool
+btdeletemark(Relation rel, Relation heapRel,
+			 Datum *values, bool *isnull, ItemPointer heap_t_ctid)
+{
+	IndexTuple	searchitup;
+	BTScanInsert itup_key;
+	BTInsertStateData insertstate;
+	BTStack		stack;
+	Buffer		buf;
+	Page		page;
+	BTPageOpaque opaque;
+	OffsetNumber offnum;
+	ItemId		itemid;
+	IndexTuple	olditup;
+	IndexTuple	newitup;
+	Size		newsize;
+	ItemPointerData htid;
+	bool		marked = false;
+
+	/* Build the (k_old, T) search tuple and its insertion scankey. */
+	searchitup = index_form_tuple(RelationGetDescr(rel), values, isnull);
+	searchitup->t_tid = *heap_t_ctid;
+
+	itup_key = _bt_mkscankey(rel, searchitup);
+
+	/*
+	 * heapkeyspace is required: delete-marking relies on the heap-TID
+	 * tiebreaker to locate the exact entry.  Non-heapkeyspace (pre-v11)
+	 * indexes are not supported.
+	 */
+	if (!itup_key->heapkeyspace)
+	{
+		pfree(itup_key);
+		pfree(searchitup);
+		elog(ERROR, "btdeletemark requires a heapkeyspace (version 4) index");
+	}
+
+	/* scantid pins the search to the exact TID (concurrency-safe re-descend) */
+	itup_key->scantid = heap_t_ctid;
+
+	insertstate.itup = searchitup;
+	insertstate.itemsz = MAXALIGN(IndexTupleSize(searchitup));
+	insertstate.itup_key = itup_key;
+	insertstate.bounds_valid = false;
+	insertstate.postingoff = 0;
+	insertstate.nopostingsplit = (heapRel != NULL && RelationSupportsDeleteMarking(heapRel));
+
+	/*
+	 * Descend to the leaf level with an exclusive lock on the target page.
+	 * Keep the stack: growing the entry may have to split the leaf.
+	 */
+	stack = _bt_search(rel, heapRel, itup_key, &buf, BT_WRITE, true);
+
+	insertstate.buf = buf;
+	page = BufferGetPage(buf);
+	opaque = BTPageGetOpaque(page);
+	Assert(P_ISLEAF(opaque));
+
+	/*
+	 * _bt_binsrch_insert() returns the offset of the first entry >= the
+	 * scankey.  With scantid set, that is the exact (k_old, T) entry if it is
+	 * present on this page.
+	 */
+	offnum = _bt_binsrch_insert(rel, &insertstate);
+
+	if (offnum >= P_FIRSTDATAKEY(opaque) &&
+		offnum <= PageGetMaxOffsetNumber(page) &&
+		_bt_compare(rel, itup_key, page, offnum) == 0)
+	{
+		itemid = PageGetItemId(page, offnum);
+		olditup = (IndexTuple) PageGetItem(page, itemid);
+
+		/*
+		 * The scankey (with scantid) matched, so this must be the exact
+		 * single-TID entry we mean to mark: not a pivot (leaf), not a posting
+		 * list (posting tuples compare equal only across a TID range, and an
+		 * in-place UPDATE never targets a merged posting list -- dedup only
+		 * merges fully-live equal-key entries).  If it is already
+		 * delete-marked there is nothing to do.
+		 */
+		if (BTreeTupleIsDeleteMarked(olditup))
+		{
+			/* already a tombstone -- idempotent success */
+			marked = false;
+		}
+		else if (BTreeTupleIsPosting(olditup) || BTreeTupleIsPivot(olditup))
+		{
+			/* not a plain single-TID entry -- refuse (should not happen) */
+			marked = false;
+		}
+		else if (ItemIdIsDead(itemid))
+		{
+			/*
+			 * The LP_DEAD hint says the entry is dead to every snapshot, so
+			 * no old-snapshot reader needs it and there is nothing to mark.
+			 * Report "not present".  Marking it anyway would produce an
+			 * LP_DEAD tombstone (PageIndexTupleOverwrite keeps lp_flags),
+			 * which the scans it exists for would skip and which
+			 * _bt_simpledel_pass does not expect.
+			 */
+			marked = false;
+		}
+		else
+		{
+			/*
+			 * Build the delete-marked replacement.  Copy the existing tuple,
+			 * grow it by an ItemPointerData trailer, and promote it.  Its
+			 * heap TID (currently in t_tid) moves into the trailer.
+			 */
+			Size		oldsz = IndexTupleSize(olditup);
+
+			ItemPointerCopy(&olditup->t_tid, &htid);
+			newsize = BTreeTupleGetDeleteMarkedSize(olditup);
+			newitup = (IndexTuple) palloc0(newsize);
+			memcpy(newitup, olditup, oldsz);
+			BTreeTupleSetDeleteMarked(newitup, &htid, newsize);
+
+			START_CRIT_SECTION();
+
+			if (!PageIndexTupleOverwrite(page, offnum, newitup, newsize))
+			{
+				/*
+				 * No room to grow the entry in place by the delete-marked
+				 * trailer.  We must NOT leave it plain (that would keep a
+				 * stale live entry under the old key -- the source of
+				 * duplicate (key,TID) entries after key churn on full pages).
+				 * Replace it with the delete-marked tuple as part of a split
+				 * of this leaf, under the lock we found it with: one atomic
+				 * action, so an old-snapshot scan always finds one of the two
+				 * tuples, and an error leaves the plain entry in place.  The
+				 * page is unchanged so far.
+				 */
+				END_CRIT_SECTION();
+				_bt_replace_split(rel, heapRel, itup_key, buf, stack,
+								  newitup, offnum);
+
+				INJECTION_POINT("nbtree-deletemark-no-room", NULL);
+
+				_bt_freestack(stack);
+				pfree(newitup);
+				pfree(itup_key);
+				pfree(searchitup);
+				return true;
+			}
+
+			MarkBufferDirty(buf);
+
+			if (RelationNeedsWAL(rel))
+			{
+				xl_btree_delete_mark xlrec;
+				XLogRecPtr	recptr;
+
+				xlrec.offnum = offnum;
+				xlrec.setmark = true;
+				xlrec.deleted = false;
+
+				XLogBeginInsert();
+				XLogRegisterData((char *) &xlrec, SizeOfBtreeDeleteMark);
+				XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+				/* Log the exact final tuple image for deterministic redo */
+				XLogRegisterBufData(0, (char *) newitup, newsize);
+
+				recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_DELETE_MARK);
+				PageSetLSN(page, recptr);
+			}
+
+			END_CRIT_SECTION();
+
+			pfree(newitup);
+			marked = true;
+		}
+	}
+
+	_bt_relbuf(rel, buf);
+	_bt_freestack(stack);
+	pfree(itup_key);
+	pfree(searchitup);
+
+	return marked;
+}
+
+/*
+ *	btundomark() -- reverse an in-place key UPDATE's index change on ROLLBACK.
+ *
+ * Called by a delete-marking table AM's UNDO (e.g. FLUX
+ * flux_undo_apply) to restore an index to its pre-update state after an
+ * in-place indexed-column UPDATE is rolled back.  We re-descend by
+ * (values, heap_t_ctid) -- exactly as btdeletemark does, so a concurrent split
+ * cannot move us to the wrong entry -- and:
+ *
+ *   clear_mark == true : make a live entry for (values, heap_t_ctid) exist.
+ *                        Normally the located entry is the OLD key's
+ *                        delete-marked tombstone, which is DEMOTED back to a
+ *                        plain live entry (rebuilt from values/isnull with
+ *                        t_tid = the heap TID) and WAL-logged
+ *                        (XLOG_BTREE_DELETE_MARK, setmark=false).  If a plain
+ *                        entry for that exact (key, heap TID) is already
+ *                        present the request is already satisfied and we report
+ *                        success, so the caller does not insert a duplicate.
+ *
+ *   clear_mark == false: the located entry is the NEW key's live entry the
+ *                        aborted update inserted; DELETE it physically and
+ *                        WAL-log the deletion (XLOG_BTREE_DELETE_MARK,
+ *                        deleted=true).
+ *
+ * The kill must be a physical, WAL-logged delete rather than an LP_DEAD hint.
+ * An aborted update leaves no trace in the heap, so nothing will ever come back
+ * to reclaim a merely-hinted entry: LP_DEAD garbage for (k_new, TID) would
+ * accumulate without bound, one entry per abort of the same row.  That breaks
+ * the heapkeyspace ordering invariant, because a subsequent UPDATE of the same
+ * row to the same k_new finds the leftover entry not delete-marked (it is a
+ * plain entry that merely has its LP_DEAD bit set), declines to revive it, and
+ * inserts a second entry with an identical (key, heap TID).  Two entries that
+ * compare exactly equal are unordered with respect to each other, which amcheck
+ * reports as "item order invariant violated".  VACUUM cannot be relied on to
+ * clean up first, and LP_DEAD is only a hint, so it can also be lost.
+ *
+ * Returns true if the entry was found and reversed, false otherwise (already
+ * gone -- not an error).
+ */
+bool
+btundomark(Relation rel, Relation heapRel,
+		   Datum *values, bool *isnull, ItemPointer heap_t_ctid,
+		   bool clear_mark)
+{
+	IndexTuple	searchitup;
+	BTScanInsert itup_key;
+	BTInsertStateData insertstate;
+	BTStack		stack PG_USED_FOR_ASSERTS_ONLY;
+	Buffer		buf;
+	Page		page;
+	BTPageOpaque opaque;
+	OffsetNumber offnum;
+	ItemId		itemid;
+	IndexTuple	olditup;
+	bool		done = false;
+
+	searchitup = index_form_tuple(RelationGetDescr(rel), values, isnull);
+	searchitup->t_tid = *heap_t_ctid;
+
+	itup_key = _bt_mkscankey(rel, searchitup);
+	if (!itup_key->heapkeyspace)
+	{
+		pfree(itup_key);
+		pfree(searchitup);
+		elog(ERROR, "btundomark requires a heapkeyspace (version 4) index");
+	}
+	itup_key->scantid = heap_t_ctid;
+
+	insertstate.itup = searchitup;
+	insertstate.itemsz = MAXALIGN(IndexTupleSize(searchitup));
+	insertstate.itup_key = itup_key;
+	insertstate.bounds_valid = false;
+	insertstate.postingoff = 0;
+	insertstate.nopostingsplit = (heapRel != NULL && RelationSupportsDeleteMarking(heapRel));
+
+	stack = _bt_search(rel, heapRel, itup_key, &buf, BT_WRITE, false);
+	Assert(stack == NULL);
+
+	insertstate.buf = buf;
+	page = BufferGetPage(buf);
+	opaque = BTPageGetOpaque(page);
+	Assert(P_ISLEAF(opaque));
+
+	offnum = _bt_binsrch_insert(rel, &insertstate);
+
+	if (offnum >= P_FIRSTDATAKEY(opaque) &&
+		offnum <= PageGetMaxOffsetNumber(page) &&
+		_bt_compare(rel, itup_key, page, offnum) == 0)
+	{
+		itemid = PageGetItemId(page, offnum);
+		olditup = (IndexTuple) PageGetItem(page, itemid);
+
+		if (clear_mark)
+		{
+			/* Demote the OLD key's tombstone back to a plain live entry. */
+			if (BTreeTupleIsDeleteMarked(olditup))
+			{
+				IndexTuple	plainitup;
+				Size		plainsize;
+
+				plainitup = index_form_tuple(RelationGetDescr(rel),
+											 values, isnull);
+				plainitup->t_tid = *heap_t_ctid;
+				plainsize = IndexTupleSize(plainitup);
+
+				START_CRIT_SECTION();
+
+				if (!PageIndexTupleOverwrite(page, offnum, plainitup, plainsize))
+				{
+					END_CRIT_SECTION();
+					pfree(plainitup);
+					_bt_relbuf(rel, buf);
+					pfree(itup_key);
+					pfree(searchitup);
+					return false;
+				}
+
+				/*
+				 * The entry is live again, so an LP_DEAD hint must not
+				 * survive the overwrite (which keeps lp_flags): scans would
+				 * keep skipping it.  Redo does the same.
+				 */
+				if (ItemIdIsDead(itemid))
+					ItemIdSetNormal(itemid, ItemIdGetOffset(itemid),
+									ItemIdGetLength(itemid));
+
+				MarkBufferDirty(buf);
+
+				if (RelationNeedsWAL(rel))
+				{
+					xl_btree_delete_mark xlrec;
+					XLogRecPtr	recptr;
+
+					xlrec.offnum = offnum;
+					xlrec.setmark = false;
+					xlrec.deleted = false;
+
+					XLogBeginInsert();
+					XLogRegisterData((char *) &xlrec, SizeOfBtreeDeleteMark);
+					XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+					XLogRegisterBufData(0, (char *) plainitup, plainsize);
+					recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_DELETE_MARK);
+					PageSetLSN(page, recptr);
+				}
+
+				END_CRIT_SECTION();
+				pfree(plainitup);
+				done = true;
+			}
+			else if (!BTreeTupleIsPosting(olditup) &&
+					 !BTreeTupleIsPivot(olditup) &&
+					 ItemPointerEquals(&olditup->t_tid, heap_t_ctid))
+			{
+				/*
+				 * A plain entry for this exact (key, heap TID) is already
+				 * present, so the live entry the caller wants already exists.
+				 * Report success: an insert here would add a second entry
+				 * with an identical key and heap TID, and two entries that
+				 * compare exactly equal have no defined order relative to
+				 * each other.
+				 *
+				 * The caller reaches this state when another backend's
+				 * forward in-place UPDATE of the same row to the same key, or
+				 * the reversal of one, has already established the entry.
+				 * Only the LP_DEAD hint may need clearing, which makes the
+				 * entry visible to scans again; that is a page change, so it
+				 * is WAL-logged with the tuple image (redo clears LP_DEAD for
+				 * setmark=false).
+				 */
+				if (ItemIdIsDead(itemid))
+				{
+					Size		olditupsz = IndexTupleSize(olditup);
+
+					START_CRIT_SECTION();
+
+					ItemIdSetNormal(itemid, ItemIdGetOffset(itemid),
+									ItemIdGetLength(itemid));
+					MarkBufferDirty(buf);
+
+					if (RelationNeedsWAL(rel))
+					{
+						xl_btree_delete_mark xlrec;
+						XLogRecPtr	recptr;
+
+						xlrec.offnum = offnum;
+						xlrec.setmark = false;
+						xlrec.deleted = false;
+
+						XLogBeginInsert();
+						XLogRegisterData((char *) &xlrec, SizeOfBtreeDeleteMark);
+						XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+						XLogRegisterBufData(0, (char *) olditup, olditupsz);
+						recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_DELETE_MARK);
+						PageSetLSN(page, recptr);
+					}
+
+					END_CRIT_SECTION();
+				}
+
+				done = true;
+			}
+		}
+		else
+		{
+			/*
+			 * Remove the NEW key's entry that the aborted update inserted. A
+			 * posting list is never the target: an in-place indexed-column
+			 * UPDATE inserts with nopostingsplit, so its entry is always a
+			 * plain single-TID tuple.
+			 */
+			if (!BTreeTupleIsPosting(olditup) && !BTreeTupleIsPivot(olditup))
+			{
+				START_CRIT_SECTION();
+
+				PageIndexTupleDelete(page, offnum);
+				MarkBufferDirty(buf);
+
+				if (RelationNeedsWAL(rel))
+				{
+					xl_btree_delete_mark xlrec;
+					XLogRecPtr	recptr;
+
+					/* deleted=true => redo removes the entry (no tuple image) */
+					xlrec.offnum = offnum;
+					xlrec.setmark = false;
+					xlrec.deleted = true;
+
+					XLogBeginInsert();
+					XLogRegisterData((char *) &xlrec, SizeOfBtreeDeleteMark);
+					XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+					recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_DELETE_MARK);
+					PageSetLSN(page, recptr);
+				}
+
+				END_CRIT_SECTION();
+				done = true;
+			}
+		}
+	}
+
+	_bt_relbuf(rel, buf);
+	pfree(itup_key);
+	pfree(searchitup);
+
+	return done;
 }
 
 CompareType
