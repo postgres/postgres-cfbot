@@ -4755,6 +4755,23 @@ IndexSetParentIndex(Relation partitionIdx, Oid parentOid)
 		/* make our updates visible */
 		CommandCounterIncrement();
 	}
+
+	/*
+	 * Any indexes attached below partitionIdx have cached partition-ancestor
+	 * lists (see get_partition_index_ancestors) that include the link we
+	 * just changed, so invalidate the whole descendant-index subtree.
+	 * Re-parenting an index is rare, so the extra invalidation messages
+	 * are cheap.
+	 */
+	{
+		List	   *descendants;
+		ListCell   *lc;
+
+		descendants = find_all_inheritors(partRelid, NoLock, NULL);
+		foreach(lc, descendants)
+			CacheInvalidateRelcacheByRelid(lfirst_oid(lc));
+		list_free(descendants);
+	}
 }
 
 /*
