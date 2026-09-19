@@ -219,7 +219,12 @@ endef
 all: $(PROGRAM) $(DATA_built) $(HEADER_allbuilt) $(SCRIPTS_built) $(addsuffix $(DLSUFFIX), $(MODULES)) $(addsuffix .control, $(EXTENSION))
 
 ifeq ($(with_llvm), yes)
+# Ensure that .bc files for MODULES and OBJS get built with all
 all: $(addsuffix .bc, $(MODULES)) $(patsubst %.o,%.bc, $(OBJS))
+# Ensure that each .bc file depends on the corresponding .o file, to ensure
+# the dependencies required for it to be built are present.
+$(patsubst %.o,%.bc, $(OBJS)): $(OBJS)
+$(addsuffix .bc, $(MODULES)): $(addsuffix .o, $(MODULES))
 endif
 
 ifdef MODULE_big
