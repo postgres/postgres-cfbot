@@ -4,6 +4,10 @@
 \echo Use "CREATE EXTENSION test_shmem" to load this file. \quit
 
 
+CREATE FUNCTION test_shmem_legacy()
+RETURNS pg_catalog.bool STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
 CREATE FUNCTION get_test_shmem_attach_count()
 RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;

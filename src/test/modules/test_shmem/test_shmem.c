@@ -129,3 +129,19 @@ get_test_shmem_attach_count(PG_FUNCTION_ARGS)
 		elog(ERROR, "shmem area not yet initialized");
 	PG_RETURN_INT32(TestShmem->attach_count);
 }
+
+PG_FUNCTION_INFO_V1(test_shmem_legacy);
+Datum
+test_shmem_legacy(PG_FUNCTION_ARGS)
+{
+	void	   *first;
+	void	   *second;
+	bool		found;
+
+	first = ShmemInitStruct("test_shmem legacy", 64, &found);
+	second = ShmemInitStruct("test_shmem legacy", 64, &found);
+	if (!found || first != second)
+		elog(ERROR, "could not reattach to legacy shared memory area");
+
+	PG_RETURN_BOOL(found);
+}

@@ -29,6 +29,9 @@ my $attach_count2 =
 cmp_ok($attach_count2, '>', $attach_count1,
 	"attach callback is called in each backend");
 
+is($node->safe_psql("postgres", "SELECT test_shmem_legacy();"), 't',
+	"legacy shared memory allocation can attach to an existing area");
+
 $node->stop;
 
 ###
@@ -55,19 +58,21 @@ SKIP:
 {
 	# Skip the test on Windows, as single-user mode would fail on permission
 	# failure with privileged accounts.
-	skip 'single-user test is not supported by this platform', 1
+	skip 'single-user test is not supported by this platform', 2
 	  if $windows_os;
+	my @command = (
+		'postgres', '--single', '-F',
+		'-c' => 'exit_on_error=true',
+		'-D' => $node->data_dir,
+		'postgres');
 	my $query = "SELECT get_test_shmem_attach_count();\n";
-	my $result = run_log(
-		[
-			'postgres', '--single', '-F',
-			'-c' => 'exit_on_error=true',
-			'-D' => $node->data_dir,
-			'postgres'
-		],
-		'<' => \$query);
+	my $result = run_log(\@command, '<' => \$query);
 
 	ok($result, "shmem area is initialized in single-user mode");
+
+	$query = "SELECT test_shmem_legacy();\n";
+	$result = run_log(\@command, '<' => \$query);
+	ok($result, "legacy shared memory reattachment works in single-user mode");
 }
 
 ###

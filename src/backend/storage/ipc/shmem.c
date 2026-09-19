@@ -1131,12 +1131,7 @@ ShmemInitStruct(const char *name, Size size, bool *foundPtr)
 
 	LWLockAcquire(ShmemIndexLock, LW_EXCLUSIVE);
 
-	/*
-	 * During postmaster startup, look up the existing entry if any.
-	 */
-	*foundPtr = false;
-	if (IsUnderPostmaster)
-		*foundPtr = AttachShmemIndexEntry(&request, true);
+	*foundPtr = AttachShmemIndexEntry(&request, true);
 
 	/* Initialize it if not found */
 	if (!*foundPtr)
