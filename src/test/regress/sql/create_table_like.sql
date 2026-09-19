@@ -153,6 +153,7 @@ CREATE TABLE ctlt3 (a text CHECK (length(a) < 5), c text CHECK (length(c) < 7));
 ALTER TABLE ctlt3 ALTER COLUMN c SET STORAGE EXTERNAL;
 ALTER TABLE ctlt3 ALTER COLUMN a SET STORAGE MAIN;
 CREATE INDEX ctlt3_fnidx ON ctlt3 ((a || c));
+COMMENT ON TABLE ctlt3 IS 'ctlt3 table comment';
 COMMENT ON COLUMN ctlt3.a IS 'A3';
 COMMENT ON COLUMN ctlt3.c IS 'C';
 COMMENT ON CONSTRAINT ctlt3_a_check ON ctlt3 IS 't3_a_check';
@@ -173,6 +174,26 @@ CREATE TABLE ctlt13_inh () INHERITS (ctlt1, ctlt3);
 CREATE TABLE ctlt13_like (LIKE ctlt3 INCLUDING CONSTRAINTS INCLUDING INDEXES INCLUDING COMMENTS INCLUDING STORAGE) INHERITS (ctlt1);
 \d+ ctlt13_like
 SELECT description FROM pg_description, pg_constraint c WHERE classoid = 'pg_constraint'::regclass AND objoid = c.oid AND c.conrelid = 'ctlt13_like'::regclass;
+SELECT obj_description('ctlt13_like'::regclass, 'pg_class') AS table_comment;
+
+-- Test multiple LIKE clauses with table comments
+CREATE TABLE ctlt_comment1 (a int);
+COMMENT ON TABLE ctlt_comment1 IS 'table 1 comment';
+CREATE TABLE ctlt_comment2 (b int);
+COMMENT ON TABLE ctlt_comment2 IS 'table 2 comment';
+CREATE TABLE ctlt_comment3 (c int);
+COMMENT ON TABLE ctlt_comment3 IS 'table 3 comment';
+
+
+-- Multiple LIKE clauses should concatenate table comments
+CREATE TABLE ctlt_multi_comments (
+    LIKE ctlt_comment1 INCLUDING COMMENTS,
+    LIKE ctlt_comment3 INCLUDING COMMENTS,
+    LIKE ctlt_comment2 INCLUDING COMMENTS
+);
+-- The order of comments should be the same as the order of LIKE clauses
+SELECT obj_description('ctlt_multi_comments'::regclass, 'pg_class') AS table_comment;
+DROP TABLE ctlt_comment1, ctlt_comment2, ctlt_comment3, ctlt_multi_comments;
 
 CREATE TABLE ctlt_all (LIKE ctlt1 INCLUDING ALL);
 \d+ ctlt_all
