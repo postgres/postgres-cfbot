@@ -2415,9 +2415,10 @@ CheckVarSlotCompatibility(TupleTableSlot *slot, int attnum, Oid vartype)
 
 		attr = TupleDescAttr(slot_tupdesc, attnum - 1);
 
-		/* Internal error: somebody forgot to expand it. */
-		if (attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
-			elog(ERROR, "unexpected virtual generated column reference");
+		/*
+		 * Virtual generated columns are now computed and stored in the slot
+		 * by ExecComputeVirtualGenerated(), so reading them is valid.
+		 */
 
 		if (attr->attisdropped)
 			ereport(ERROR,
