@@ -65,6 +65,7 @@
 #include "utils/builtins.h"
 #include "utils/combocid.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/relmapper.h"
@@ -1914,6 +1915,12 @@ RecordTransactionAbort(bool isSubXact)
 		pfree(rels);
 	if (ndroppedstats)
 		pfree(droppedstats);
+
+	/*
+	 * Test the window where the transaction is aborted in pg_xact but still
+	 * present in ProcArray.
+	 */
+	INJECTION_POINT("transaction-abort-after-clog", NULL);
 
 	return latestXid;
 }
