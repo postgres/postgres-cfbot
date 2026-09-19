@@ -153,6 +153,15 @@ static relopt_bool boolRelOpts[] =
 		},
 		true
 	},
+	{
+		{
+			"index_undo",
+			"Reverses this table's index entries during ROLLBACK instead of leaving them for VACUUM",
+			RELOPT_KIND_HEAP,
+			AccessExclusiveLock
+		},
+		true
+	},
 	/* list terminator */
 	{{NULL}}
 };
@@ -2117,7 +2126,9 @@ static const relopt_parse_elt stdRdOptionsTab[] = {
 	{"vacuum_truncate", RELOPT_TYPE_TERNARY,
 	offsetof(StdRdOptions, vacuum_truncate)},
 	{"vacuum_max_eager_freeze_failure_rate", RELOPT_TYPE_REAL,
-	offsetof(StdRdOptions, vacuum_max_eager_freeze_failure_rate)}
+	offsetof(StdRdOptions, vacuum_max_eager_freeze_failure_rate)},
+	{"index_undo", RELOPT_TYPE_BOOL,
+	offsetof(StdRdOptions, index_undo)}
 };
 
 /*

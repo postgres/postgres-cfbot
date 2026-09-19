@@ -2668,6 +2668,21 @@ CommitTransaction(void)
 	if (!is_parallel_worker)
 		PreCommit_CheckForSerializationFailure();
 
+	/*
+	 * Write out any UNDO records the index AMs deferred for batching.
+	 *
+	 * This must happen before RecordTransactionCommit().  Until the commit
+	 * record is durable this transaction is a crash-recovery loser, and
+	 * recovery can only roll back what it finds in WAL.  Once the commit
+	 * record is written, the records are never needed again -- and writing
+	 * them after it would be actively harmful: redo forgets the xid at the
+	 * commit record and would then re-track it at the trailing batch, making
+	 * a committed transaction look incomplete after a crash.  Deferred
+	 * triggers and ON COMMIT actions, which can insert index entries, have
+	 * all run by now.  This mirrors the flush in PrepareTransaction().
+	 */
+	XactUndoFlushPending();
+
 	/* Prevent cancel/die interrupt while cleaning up */
 	HOLD_INTERRUPTS();
 

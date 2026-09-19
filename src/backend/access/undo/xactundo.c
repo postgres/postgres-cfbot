@@ -883,10 +883,8 @@ XactUndoHasUnrecoverableUndo(void)
  * On commit, undo records are no longer needed for rollback.
  * Free all record sets and reset state.
  *
- * UNDO pages are managed by shared_buffers and flushed by the
- * checkpointer -- no per-commit fdatasync is needed.  We only
- * flush the deferred WAL allocation records so recovery can
- * reconstruct the UNDO log insert pointer.
+ * The UNDO records are already in WAL (XLOG_UNDO_BATCH); there is nothing to
+ * sync here.
  *
  * NB: This code MUST NOT FAIL, since it is run as a post-commit step.
  */
@@ -896,16 +894,14 @@ AtCommit_XactUndo(void)
 	int			i;
 
 	/*
-	 * Write any deferred records before we decide there is nothing to do.
-	 *
-	 * A committing transaction will not apply its own UNDO, but the records
-	 * must still reach WAL: a later ROLLBACK PREPARED, the recovery UNDO
-	 * phase, or (for a subxact-aborted chain) the revert worker can all need
-	 * them, and the WAL retention bookkeeping keyed off the batch LSN must
-	 * see them too. Flushing here also keeps the invariant that no
-	 * UndoRecordSet is freed below while still holding unwritten records.
+	 * Any deferred batch was already written in CommitTransaction(), before
+	 * the commit record.  Nothing may be pending here: a batch written now
+	 * would follow the commit record in WAL and make recovery treat this
+	 * committed transaction as a loser.  (Records added after the commit
+	 * record would be useless anyway -- a committed transaction never applies
+	 * its own UNDO -- so ResetXactUndo() below simply drops them.)
 	 */
-	XactUndoFlushPending();
+	Assert(!XactUndoHasPendingData());
 
 	if (!XactUndo.has_undo)
 	{
@@ -1167,6 +1163,7 @@ AtAbort_XactUndo(void)
 					 */
 					BufferLockReleaseAll();
 					saved_trans_state = EnterInlineUndoApplyState();
+					UndoApplyInline = true;
 					saved_holdoff = InterruptHoldoffCount;
 					PG_TRY();
 					{
@@ -1194,6 +1191,7 @@ AtAbort_XactUndo(void)
 						undo_applied = false;
 					}
 					PG_END_TRY();
+					UndoApplyInline = false;
 					LeaveInlineUndoApplyState(saved_trans_state);
 
 					MemoryContextSwitchTo(old_ctx);
@@ -1207,7 +1205,8 @@ AtAbort_XactUndo(void)
 						 * type, a record that could not be applied, or an
 						 * error).  Register in ATM for deferred processing by
 						 * the revert worker; re-applying the records that did
-						 * apply is harmless (see ApplyOneUndoRecord).
+						 * apply is harmless (see ApplyOneUndoRecord), and the
+						 * worker leaves index entries to VACUUM.
 						 */
 						elog(DEBUG1, "inline UNDO failed for xid %u, "
 							 "deferring to ATM",
@@ -1477,6 +1476,7 @@ AtSubAbort_XactUndo(int level)
 				 */
 				BufferLockReleaseAll();
 				saved_trans_state = EnterInlineUndoApplyState();
+				UndoApplyInline = true;
 				saved_holdoff = InterruptHoldoffCount;
 				PG_TRY();
 				{
@@ -1503,6 +1503,7 @@ AtSubAbort_XactUndo(int level)
 					applied = false;
 				}
 				PG_END_TRY();
+				UndoApplyInline = false;
 				LeaveInlineUndoApplyState(saved_trans_state);
 
 				MemoryContextSwitchTo(old_ctx);

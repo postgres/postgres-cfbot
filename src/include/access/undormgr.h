@@ -106,6 +106,17 @@ typedef struct UndoRmgrData
 /* Global registration table */
 extern const UndoRmgrData *UndoRmgrs[MAX_UNDO_RMGRS];
 
+/*
+ * True while the aborting transaction applies its own UNDO inline, in
+ * AtAbort_XactUndo() or AtSubAbort_XactUndo(): the (sub)transaction's XID is
+ * still running, so nothing it wrote can have been pruned or vacuumed away
+ * yet.  False for every deferred apply (the logical revert worker, crash
+ * recovery), which runs after the abort is visible.  An rm_undo whose record
+ * identifies its target only by something a later transaction can reuse
+ * (a heap TID) must apply it only when this is set.
+ */
+extern PGDLLIMPORT bool UndoApplyInline;
+
 /* Registration function (called during _PG_init or startup) */
 extern void RegisterUndoRmgr(uint8 rmid, const UndoRmgrData *rmgr);
 

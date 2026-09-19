@@ -1233,6 +1233,17 @@ _bt_insertonpg(Relation rel,
 							   BufferGetBlockNumber(buf),
 							   BufferGetBlockNumber(rbuf));
 
+		/*
+		 * Write the nbtree UNDO record for the insertion, as the no-split
+		 * path below does.  The new item is now on the left or the right
+		 * half; record the left half's block, which is where the item would
+		 * have gone.  The apply searches that page and then moves right, the
+		 * same way it finds an entry a later split moved.
+		 */
+		if (RelationUsesIndexUndo(rel, heaprel))
+			NbtreeUndoLogInsert(rel, heaprel, buf, itup, itemsz, newitemoff,
+								isleaf);
+
 		/*----------
 		 * By here,
 		 *
@@ -1417,6 +1428,23 @@ _bt_insertonpg(Relation rel,
 		PageSetLSN(page, recptr);
 
 		END_CRIT_SECTION();
+
+		/*
+		 * Write an nbtree UNDO record for this insertion, so an abort can
+		 * reverse the provisionally-inserted entry without waiting for
+		 * VACUUM.  Done after the critical section (UNDO insertion does I/O)
+		 * but while the buffer lock is still held.
+		 *
+		 * Only when the parent table asks for it via the index_undo
+		 * reloption.  RelationUsesIndexUndo() applies every other condition
+		 * too; non-WAL relations and indexes built in this transaction, for
+		 * example, are excluded there.
+		 */
+		if (RelationUsesIndexUndo(rel, heaprel))
+		{
+			NbtreeUndoLogInsert(rel, heaprel, buf, itup,
+								itemsz, newitemoff, isleaf);
+		}
 
 		/* Release subsidiary buffers */
 		if (BufferIsValid(metabuf))

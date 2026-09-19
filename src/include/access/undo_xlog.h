@@ -169,6 +169,7 @@ typedef struct xl_undo_chain_state
 extern void undo_redo(XLogReaderState *record);
 extern void undo_desc(StringInfo buf, XLogReaderState *record);
 extern const char *undo_identify(uint8 info);
+extern void undo_mask(char *pagedata, BlockNumber blkno);
 
 /* Two-phase commit support */
 extern void undo_twophase_recover(FullTransactionId fxid, uint16 info,

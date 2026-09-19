@@ -76,6 +76,9 @@ tests += {
       't/071_perbackend_undo.pl',
       't/072_perbackend_crash_undo.pl',
       't/090_fileops_createdb_crash.pl',
+      't/126_atm_full_abort.pl',
+      't/124_index_undo_tid_reuse.pl',
+      't/134_undo_shmem_on_demand.pl',
     ],
   },
 }
