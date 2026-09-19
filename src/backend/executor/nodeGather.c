@@ -172,7 +172,8 @@ ExecGather(PlanState *pstate)
 			else
 				ExecParallelReinitialize(outerPlanState(node),
 										 node->pei,
-										 gather->initParam);
+										 gather->initParam,
+										 node->tuples_needed);
 
 			/*
 			 * Register backend workers. We might not get as many as we
