@@ -15,6 +15,7 @@ backend_sources += files(
   'pqformat.c',
   'pqmq.c',
   'pqsignal.c',
+  'proxy_protocol.c',
 )
 
 if ssl.found()
