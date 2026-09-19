@@ -119,9 +119,9 @@ pg_base64_decode(const uint8 *src, unsigned len, uint8 *dst)
 		else if (c == '=')
 		{
 			/*
-			 * end sequence
+			 * end sequence, after it only the second "=" of "==" is allowed
 			 */
-			if (!end)
+			if (!end || pos != 3)
 			{
 				if (pos == 2)
 					end = 1;
@@ -135,6 +135,10 @@ pg_base64_decode(const uint8 *src, unsigned len, uint8 *dst)
 		else if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
 			continue;
 		else
+			return PXE_PGP_CORRUPT_ARMOR;
+
+		/* no data is allowed after padding */
+		if (end && c != '=')
 			return PXE_PGP_CORRUPT_ARMOR;
 
 		/*
