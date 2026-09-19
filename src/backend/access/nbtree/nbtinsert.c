@@ -157,6 +157,7 @@ _bt_doinsert(Relation rel, IndexTuple itup,
 	insertstate.itemsz = MAXALIGN(IndexTupleSize(itup));
 	insertstate.itup_key = itup_key;
 	insertstate.bounds_valid = false;
+	insertstate.is_duplicate = false;
 	insertstate.buf = InvalidBuffer;
 	insertstate.postingoff = 0;
 
@@ -260,7 +261,15 @@ search:
 		 */
 		newitemoff = _bt_findinsertloc(rel, &insertstate, checkingunique,
 									   indexUnchanged, stack, heapRel);
-		_bt_insertonpg(rel, heapRel, itup_key, insertstate.buf, InvalidBuffer,
+
+		if (insertstate.is_duplicate)
+			elog(DEBUG1,
+				 "btree duplicate index tuple: index \"%s\" TID (%u,%u)",
+				 RelationGetRelationName(rel),
+				 ItemPointerGetBlockNumber(&itup->t_tid),
+				 ItemPointerGetOffsetNumber(&itup->t_tid));
+		else
+			_bt_insertonpg(rel, heapRel, itup_key, insertstate.buf, InvalidBuffer,
 					   stack, itup, insertstate.itemsz, newitemoff,
 					   insertstate.postingoff, false);
 	}

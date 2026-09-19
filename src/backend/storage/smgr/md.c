@@ -245,6 +245,8 @@ mdcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 
 	path = relpath(reln->smgr_rlocator, forknum);
 
+	elog(DEBUG1, "mdcreate: %s", path.str);
+
 	fd = PathNameOpenFile(path.str, _mdfd_open_flags() | O_CREAT | O_EXCL);
 
 	if (fd < 0)
