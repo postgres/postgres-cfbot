@@ -455,6 +455,10 @@ GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint, b
       defined as the result of <literal>pg_current_wal_insert_lsn()</literal>
       when rewinding from a live source or the last checkpoint LSN when
       rewinding from a stopped source.
+      <filename>pg_control</filename> is also flagged to require
+      <filename>backup_label</filename>, so that removing that file does not
+      allow the target to start up in an inconsistent state. The flag is
+      cleared once the target has processed <filename>backup_label</filename>.
      </para>
     </step>
     <step>

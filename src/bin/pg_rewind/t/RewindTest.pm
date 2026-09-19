@@ -353,6 +353,18 @@ sub run_pg_rewind
 		croak("Incorrect test mode specified");
 	}
 
+	# pg_rewind writes a backup_label of its own when it rewinds, and the
+	# target must then require it for recovery; the flag is cleared again when
+	# the target is restarted below and recovery consumes backup_label.  When
+	# the target is already an ancestor of the source no rewind takes place,
+	# and pg_control must be left alone so that the target still starts.
+	my $label_required =
+	  -f "$primary_pgdata/backup_label" ? 'yes' : 'no';
+	command_like(
+		[ 'pg_controldata', '--pgdata' => $primary_pgdata ],
+		qr/Backup label required: +$label_required/,
+		'backup_label requirement matches whether a rewind took place');
+
 	# Now move back postgresql.conf with old settings
 	move(
 		"$tmp_folder/primary-postgresql.conf.tmp",
