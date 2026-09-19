@@ -13,6 +13,8 @@ my $node = PostgreSQL::Test::Cluster->new('main');
 $node->init;
 $node->start;
 $node->safe_psql("postgres", "CREATE EXTENSION test_shmem");
+is($node->safe_psql("postgres", "SELECT test_shmem_unknown_size();"), 't',
+	"unknown-size attachment works in a normal backend");
 $node->stop;
 
 ###
@@ -28,6 +30,9 @@ my $attach_count2 =
   $node->safe_psql("postgres", "SELECT get_test_shmem_attach_count();");
 cmp_ok($attach_count2, '>', $attach_count1,
 	"attach callback is called in each backend");
+
+is($node->safe_psql("postgres", "SELECT test_shmem_legacy();"), 't',
+	"legacy shared memory allocation can attach to an existing area");
 
 $node->stop;
 
@@ -48,6 +53,28 @@ like(
 $node->stop;
 $node->adjust_conf('postgresql.conf', 'test_shmem.area_size', undef);
 
+SKIP:
+{
+	skip 'single-user test is not supported by this platform', 2
+	  if $windows_os;
+	my @command = (
+		'postgres', '--single', '-F',
+		'-c' => 'exit_on_error=true',
+		'-D' => $node->data_dir);
+	my $query = "SELECT test_shmem_unknown_size();\n";
+	my $result = run_log([@command, 'postgres'], '<' => \$query);
+	ok($result, "unknown-size attachment works in single-user mode");
+
+	my $stderr;
+	$result = run_log(
+		[@command,
+			'-c' => 'shared_preload_libraries=test_shmem',
+			'-c' => 'test_shmem.area_size=-1', 'postgres'],
+		'<' => \$query, '2>' => \$stderr);
+	ok(!$result && $stderr =~ /SHMEM_ATTACH_UNKNOWN_SIZE cannot be used during startup/,
+		"unknown-size requests are rejected during single-user startup");
+}
+
 ###
 # Test allocating memory after startup in single-user mode
 ###
@@ -55,19 +82,21 @@ SKIP:
 {
 	# Skip the test on Windows, as single-user mode would fail on permission
 	# failure with privileged accounts.
-	skip 'single-user test is not supported by this platform', 1
+	skip 'single-user test is not supported by this platform', 2
 	  if $windows_os;
+	my @command = (
+		'postgres', '--single', '-F',
+		'-c' => 'exit_on_error=true',
+		'-D' => $node->data_dir,
+		'postgres');
 	my $query = "SELECT get_test_shmem_attach_count();\n";
-	my $result = run_log(
-		[
-			'postgres', '--single', '-F',
-			'-c' => 'exit_on_error=true',
-			'-D' => $node->data_dir,
-			'postgres'
-		],
-		'<' => \$query);
+	my $result = run_log(\@command, '<' => \$query);
 
 	ok($result, "shmem area is initialized in single-user mode");
+
+	$query = "SELECT test_shmem_legacy();\n";
+	$result = run_log(\@command, '<' => \$query);
+	ok($result, "legacy shared memory reattachment works in single-user mode");
 }
 
 ###
