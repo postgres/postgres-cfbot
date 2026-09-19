@@ -134,8 +134,8 @@ pg_b64_decode(const char *src, int len, uint8 *dst, int dstlen)
 
 		if (c == '=')
 		{
-			/* end sequence */
-			if (!end)
+			/* end sequence, after it only the second "=" of "==" is allowed */
+			if (!end || pos != 3)
 			{
 				if (pos == 2)
 					end = 1;
@@ -155,7 +155,8 @@ pg_b64_decode(const char *src, int len, uint8 *dst, int dstlen)
 		else
 		{
 			b = -1;
-			if (c > 0 && c < 127)
+			/* no data is allowed after padding */
+			if (c > 0 && c < 127 && !end)
 				b = b64lookup[(unsigned char) c];
 			if (b < 0)
 			{
