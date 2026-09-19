@@ -120,13 +120,169 @@ typedef struct ParallelBlockTableScanWorkerData
 } ParallelBlockTableScanWorkerData;
 typedef struct ParallelBlockTableScanWorkerData *ParallelBlockTableScanWorker;
 
+/*
+ * Data structures used by amgetbatch index scans.
+ *
+ * The functions that operate on the batch ring buffer appear in
+ * access/tableam_indexscan.h.  Those that allocate and release batches on behalf
+ * of index AMs appear in access/batchscan.h.
+ */
+
+/*
+ * Location of a BatchMatchingItem within the scan's ring buffer
+ */
+typedef struct BatchRingItemPos
+{
+	/* Position references a valid IndexScanDescData.batchbuf[] entry? */
+	bool		valid;
+
+	/* IndexScanDescData.batchbuf[]-wise index to relevant IndexScanBatch */
+	uint8		batch;
+
+	/* IndexScanBatch.items[]-wise index to relevant BatchMatchingItem */
+	int			item;
+
+} BatchRingItemPos;
+
+/*
+ * Matching item returned by amgetbatch (in returned IndexScanBatch) during an
+ * index scan.  Used by table AM to locate relevant matching table tuple.
+ */
+typedef struct BatchMatchingItem
+{
+	ItemPointerData tableTid;	/* TID of referenced table item */
+	OffsetNumber indexOffset;	/* index item's location within page */
+	LocationIndex tupleOffset;	/* stored index tuple's offset, if any */
+} BatchMatchingItem;
+
+/*
+ * Data about one batch of items returned by (and passed to) amgetbatch during
+ * index scans.
+ *
+ * The batch pointer returned by amgetbatch points into the interior of a
+ * larger allocation, which also carries opaque areas for the table AM and the
+ * index AM.
+ */
+typedef struct IndexScanBatchData
+{
+	/* Index page's LSN, optionally used by amkillitemsbatch routines */
+	XLogRecPtr	lsn;
+
+	/* scan direction when the index page was read */
+	ScanDirection dir;
+
+	/*
+	 * knownEndBackward and knownEndForward indicate that this batch is the
+	 * last one with matching items in the relevant scan direction.  When
+	 * amgetbatch returns NULL for a given direction, the corresponding flag
+	 * is set on the priorbatch that was passed to that call.  Index AMs may
+	 * also set either flag proactively when amgetbatch returns a batch that
+	 * is provably the last (or the first) batch in the current direction.
+	 *
+	 * This allows table AMs to avoid redundant amgetbatch calls with the same
+	 * priorbatch -- the index AM might need to read additional index pages to
+	 * determine there are no more matching items beyond caller's priorbatch.
+	 * In particular, during prefetching the read stream callback discovers
+	 * the end-of-scan via prefetchBatch.  tableam_index_fetch_next_batch()
+	 * checks these flags so that the scan side doesn't repeat the same
+	 * amgetbatch call when it later reaches that batch as scanBatch.
+	 */
+	bool		knownEndBackward;
+	bool		knownEndForward;
+
+	/*
+	 * Batch still holds TID recycling interlock?
+	 */
+	bool		isGuarded;
+
+	/*
+	 * Matching items state for this batch.  Output by index AM for table AM.
+	 *
+	 * The items array is always ordered in index order (ie, by increasing
+	 * indexoffset).  When scanning backwards it is convenient for index AMs
+	 * to fill the array back-to-front, starting at the last item slot and
+	 * filling downwards.  This is why we need both a first-valid-entry and a
+	 * last-valid-entry counter.
+	 *
+	 * Note: these are signed because it's sometimes convenient to use -1 to
+	 * represent an out-of-bounds space just before firstItem (when it's 0).
+	 */
+	int			firstItem;		/* first valid index in items[] */
+	int			lastItem;		/* last valid index in items[] */
+
+	/* info about dead items, if any (palloc'd separately, NULL if unused) */
+	int			numDead;		/* number of currently stored items */
+	int		   *deadItems;		/* items[]-wise indexes of dead items */
+
+	/*
+	 * If we are doing an index-only scan, this is the tuple storage workspace
+	 * for the matching tuples (those referenced by items[]).  It is NULL for
+	 * plain index scans.
+	 */
+	char	   *tuples;
+
+	/* amgetbatch can only return a batch with at least one matching item */
+	BatchMatchingItem items[FLEXIBLE_ARRAY_MEMBER];
+} IndexScanBatchData;
+
+typedef struct IndexScanBatchData *IndexScanBatch;
+
+/*
+ * State used by table AMs to manage an index scan that uses the amgetbatch
+ * interface.  Scans use a ring buffer of batches returned by amgetbatch.
+ *
+ * This data structure provides table AMs with a way to read ahead of the
+ * current read position by _multiple_ batches/index pages.  The further out
+ * the table AM reads ahead like this, the further it can see into the future.
+ * That way the table AM is able to reorder work as aggressively as desired.
+ * Index scans sometimes need to readahead by several dozen batches in order
+ * to maintain an optimal I/O prefetch distance (for reading table blocks).
+ */
+typedef struct BatchRingBuffer
+{
+	/* current positions in IndexScanDescData.batchbuf[] for scan */
+	BatchRingItemPos scanPos;	/* scan's read position */
+	BatchRingItemPos prefetchPos;	/* prefetching position */
+	BatchRingItemPos markPos;	/* mark/restore position */
+
+	/* markPos's batch (not in ring buffer when markBatch != scanBatch) */
+	IndexScanBatch markBatch;
+
+	/*
+	 * headBatch is an index to the earliest still-valid ring buffer batch
+	 * slot in batchbuf[].  The actual array position for its IndexScanBatch
+	 * is headBatch & (INDEX_SCAN_MAX_BATCHES - 1), since these indexes use
+	 * unsigned wrapping arithmetic.  headBatch must be the scan's current
+	 * scanBatch (i.e. the current scanPos batch).
+	 */
+	uint8		headBatch;
+
+	/*
+	 * nextBatch is an index to the next _empty_ ring buffer batch slot in
+	 * batchbuf[] (i.e. it's the tail entry of our ring buffer).  The actual
+	 * batchbuf[] array position is nextBatch & (INDEX_SCAN_MAX_BATCHES - 1).
+	 *
+	 * Note: the scan's most recently appended batch is always located at
+	 * (nextBatch - 1) & (INDEX_SCAN_MAX_BATCHES - 1).
+	 */
+	uint8		nextBatch;
+} BatchRingBuffer;
+
 struct IndexScanInstrumentation;
 
 /*
  * We use the same IndexScanDescData structure for both amgettuple-based
  * and amgetbitmap-based index scans.  Some fields are only relevant in
- * amgettuple-based scans.
+ * amgettuple-based scans.  Others are only used in amgetbatch-based scans.
+ *
+ * The ring buffer used by amgetbatch scans is stored here as a fixed array of
+ * pointers to batches.  We need a minimum of two ring buffer batches (but use
+ * INDEX_SCAN_MAX_BATCHES), since table AMs only remove a batch after they've
+ * already called amgetbatch again and appended the returned batch.
  */
+#define INDEX_SCAN_CACHE_BATCHES	2
+#define INDEX_SCAN_MAX_BATCHES		64
+
 typedef struct IndexScanDescData
 {
 	/* scan parameters */
@@ -137,6 +293,26 @@ typedef struct IndexScanDescData
 	int			numberOfOrderBys;	/* number of ordering operators */
 	struct ScanKeyData *keyData;	/* array of index qualifier descriptors */
 	struct ScanKeyData *orderByData;	/* array of ordering op descriptors */
+
+	/* index access method's private state */
+	void	   *opaque;			/* access-method-specific info */
+
+	/* scan's amgetbatch state (only used by amgetbatch/usebatchring scans) */
+	BatchRingBuffer batchringbuf;
+
+	/*
+	 * Array of pointers to recyclable batches, used by all amgetbatch scans
+	 * and by amgetbitmap scans of an index AM that supports amgetbatch
+	 */
+	IndexScanBatch batchcache[INDEX_SCAN_CACHE_BATCHES];
+
+	/* Array of pointers to batches, referenced within batchringbuf */
+	IndexScanBatch batchbuf[INDEX_SCAN_MAX_BATCHES];
+
+	bool		usebatchring;	/* scan uses amgetbatch/batchringbuf? */
+	bool		batchImmediateUnguard;	/* eagerly drop TID recycling
+										 * interlock? */
+
 	bool		xs_want_itup;	/* caller requests index tuples */
 	bool		xs_temp_snap;	/* unregister snapshot at scan end? */
 
@@ -145,13 +321,12 @@ typedef struct IndexScanDescData
 	bool		ignore_killed_tuples;	/* do not return killed entries */
 	bool		xactStartedInRecovery;	/* prevents killing/seeing killed
 										 * tuples */
-
-	/* index access method's private state */
-	void	   *opaque;			/* access-method-specific info */
+	/* xs_snapshot uses an MVCC snapshot? */
+	bool		MVCCScan;
 
 	/*
-	 * Instrumentation counters maintained by all index AMs during both
-	 * amgettuple calls and amgetbitmap calls (unless field remains NULL)
+	 * Instrumentation counters maintained during amgetbatch, amgetbitmap, and
+	 * amgettuple scans (unless field remains NULL)
 	 */
 	struct IndexScanInstrumentation *instrument;
 
@@ -176,11 +351,33 @@ typedef struct IndexScanDescData
 
 	/*
 	 * Callback that table_index_getnext_slot dispatches to, set by the table
-	 * AM's index_scan_begin callback at the start of amgettuple scans
+	 * AM's index_scan_begin callback at the start of amgetbatch/amgettuple
+	 * scans
 	 */
 	bool		(*xs_getnext_slot) (struct IndexScanDescData *scan,
 									ScanDirection direction,
 									struct TupleTableSlot *slot);
+
+	/* batch size information, set once by index AM in ambeginscan */
+	uint16		maxitemsbatch;	/* size of each batch's items[] array */
+	uint16		batch_index_opaque_static;	/* compile-time opaque size */
+	uint16		batch_tuples_workspace; /* tuples workspace size */
+
+	/*
+	 * Optional table AM per-batch opaque area size, set once by
+	 * index_scan_begin (except during bitmap scans)
+	 */
+	uint32		batch_table_opaque_size;	/* table AM opaque area size */
+
+	/*
+	 * Optional dynamic opaque size, also set by index AM in ambeginscan
+	 */
+	uint32		batch_index_opaque_dyn;
+
+	/*
+	 * Offset used by index_scan_batch_base (set on first batch alloc)
+	 */
+	size_t		batch_base_offset;
 
 	/*
 	 * When fetching with an ordering operator, the values of the ORDER BY
@@ -213,6 +410,102 @@ typedef struct IndexScanDescData
 	/* parallel index scan information, in shared memory */
 	struct ParallelIndexScanDescData *parallel_scan;
 } IndexScanDescData;
+
+/* ----------------------------------------------------------------------------
+ * Batch memory layout accessors
+ *
+ * Each batch allocation has the following memory layout:
+ *
+ *   [table AM opaque area]    <- table AM area (batch_table_opaque_size),
+ *                                optionally requested by table AM
+ *   [index AM dyn opaque]     <- index AM area (batch_index_opaque_dyn),
+ *                                optionally requested by index AM
+ *   [index AM static opaque]  <- index AM area (batch_index_opaque_static),
+ *                                mandatory fixed-size index page info
+ *   [IndexScanBatchData]      <- batch pointer, returned by amgetbatch
+ *   [items[maxitemsbatch]]
+ *   [tuples workspace]        <- index tuple area (batch_tuples_workspace),
+ *                                only used during index-only scans
+ *
+ * batch_base_offset combines the table AM opaque area, the optional dynamic
+ * index AM opaque area, and the static index AM opaque area into a single
+ * offset from the batch pointer to the true allocation base.  We pfree a
+ * batch by passing pfree a pointer returned by index_scan_batch_base.  We
+ * rely on the assumption that batches have a fixed layout for the duration of
+ * an index scan (batches are cached for reuse to avoid palloc churn).
+ *
+ * The table AM accesses its opaque area (sized batch_table_opaque_size) using
+ * the index_scan_batch_table_area shim accessor.  The table AM is permitted
+ * to choose the layout of its opaque area as it sees fit (or to request no
+ * area) based on requirements that remain fixed throughout the whole scan.
+ * Bitmap scans never get a table AM opaque area, since the table AM isn't
+ * directly involved (amgetbitmap routines can be implemented using batches,
+ * though that's just to allow code sharing with the AM's amgetbatch routine).
+ *
+ * An index AM is required to provide a fixed-size opaque area.  This area is
+ * sized MAXALIGN(sizeof(the AM's struct)), and is always known at compile
+ * time.  Index AMs use index_scan_batch_index_opaque_static to access the
+ * area.  Access to the area is cheap (a compile-time-constant subtraction),
+ * but its size cannot vary from scan to scan.  Index AMs typically use this
+ * area to store things like index page sibling link block numbers.
+ *
+ * Index AMs can use a second, optional dynamically-sized private area
+ * (batch_index_opaque_dyn) that sits just before the static area.  Its size
+ * is chosen at scan start rather than at compile time.  It is accessed via
+ * index_scan_batch_index_opaque_dyn.  This second area is generally only used
+ * during scans where large amounts of supplemental metadata are required,
+ * that cannot reasonably be allocated for every scan.  Typically, this is
+ * granular information about the batch's items for use by the index AM's
+ * amgettransform routine (the tuples themselves are stored separately, in
+ * on-disk format, in the tuples workspace; amgettransform converts each
+ * one into the scan's returnable tuple).
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Return the true allocation base of a batch (used to pfree batches)
+ */
+static inline void *
+index_scan_batch_base(struct IndexScanDescData *scan, IndexScanBatch batch)
+{
+	Assert(scan->batch_base_offset > 0);
+
+	return (char *) batch - scan->batch_base_offset;
+}
+
+/*
+ * Return a pointer to the table AM opaque area
+ */
+static inline void *
+index_scan_batch_table_area(struct IndexScanDescData *scan, IndexScanBatch batch)
+{
+	/*
+	 * The table AM opaque area is always at the beginning of the batch's
+	 * allocated space
+	 */
+	return index_scan_batch_base(scan, batch);
+}
+
+/*
+ * Return a typed pointer to the index AM's static (compile-time sized) opaque
+ * area, which sits immediately before the batch pointer.  Index AMs use their
+ * own wrapper function-style macro, built on top of this.
+ */
+#define index_scan_batch_index_opaque_static(scan, batch, type) \
+	(AssertMacro((scan)->batch_index_opaque_static == MAXALIGN(sizeof(type))), \
+	 ((type *) ((char *) (batch) - MAXALIGN(sizeof(type)))))
+
+/*
+ * Return a pointer to the index AM's dynamic opaque area
+ */
+static inline void *
+index_scan_batch_index_opaque_dyn(struct IndexScanDescData *scan, IndexScanBatch batch)
+{
+	Assert(scan->batch_index_opaque_dyn > 0);
+
+	return (char *) batch - scan->batch_index_opaque_static -
+		MAXALIGN(scan->batch_index_opaque_dyn);
+}
 
 /* Generic structure for parallel scans */
 typedef struct ParallelIndexScanDescData
