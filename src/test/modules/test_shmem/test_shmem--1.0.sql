@@ -11,3 +11,7 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 CREATE FUNCTION get_test_shmem_attach_count()
 RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION test_shmem_unknown_size()
+RETURNS pg_catalog.bool STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;

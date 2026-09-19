@@ -45,6 +45,7 @@ static bool test_shmem_guc_defined = false;
 static void test_shmem_request(void *arg);
 static void test_shmem_init(void *arg);
 static void test_shmem_attach(void *arg);
+static void test_shmem_unknown_request(void *arg);
 
 static const ShmemCallbacks TestShmemCallbacks = {
 	.flags = SHMEM_CALLBACKS_ALLOW_AFTER_STARTUP,
@@ -61,6 +62,14 @@ test_shmem_request(void *arg)
 	ShmemRequestStruct(.name = "test_shmem area",
 					   .size = test_shmem_area_size,
 					   .ptr = (void **) &TestShmem);
+}
+
+static void
+test_shmem_unknown_request(void *arg)
+{
+	ShmemRequestStruct(.name = "test_shmem area",
+					   .size = SHMEM_ATTACH_UNKNOWN_SIZE,
+					   .ptr = (void **) arg);
 }
 
 static void
@@ -117,6 +126,24 @@ _PG_init(void)
 		test_shmem_guc_defined = true;
 	}
 	RegisterShmemCallbacks(&TestShmemCallbacks);
+}
+
+PG_FUNCTION_INFO_V1(test_shmem_unknown_size);
+Datum
+test_shmem_unknown_size(PG_FUNCTION_ARGS)
+{
+	TestShmemData *attached = NULL;
+	ShmemCallbacks callbacks = {
+		.flags = SHMEM_CALLBACKS_ALLOW_AFTER_STARTUP,
+		.request_fn = test_shmem_unknown_request,
+		.opaque_arg = &attached,
+	};
+
+	RegisterShmemCallbacks(&callbacks);
+	if (attached == NULL || attached != TestShmem || !attached->initialized)
+		elog(ERROR, "could not attach to shared memory with unknown size");
+
+	PG_RETURN_BOOL(true);
 }
 
 PG_FUNCTION_INFO_V1(get_test_shmem_attach_count);

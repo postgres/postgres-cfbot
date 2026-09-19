@@ -187,7 +187,7 @@ static List *pending_shmem_requests;	/* List of ShmemRequests */
  *   INITIAL -> REQUESTING -> ATTACHING -> DONE
  *
  * Late request:
- *   DONE -> REQUESTING -> AFTER_STARTUP_ATTACH_OR_INIT -> DONE
+ *   DONE -> REQUESTING_AFTER_STARTUP -> AFTER_STARTUP_ATTACH_OR_INIT -> DONE
  */
 enum shmem_request_state
 {
@@ -195,9 +195,8 @@ enum shmem_request_state
 	SRS_INITIAL,
 
 	/*
-	 * When we start calling the shmem_request callbacks, we enter the
-	 * SRS_REQUESTING phase.  All ShmemRequestStruct calls happen in this
-	 * state.
+	 * When we start calling the shmem_request callbacks during startup, we
+	 * enter the SRS_REQUESTING phase.
 	 */
 	SRS_REQUESTING,
 
@@ -212,6 +211,9 @@ enum shmem_request_state
 	 * called in this state.
 	 */
 	SRS_ATTACHING,
+
+	/* An after-startup request callback is running */
+	SRS_REQUESTING_AFTER_STARTUP,
 
 	/* An after-startup allocation or attachment is in progress */
 	SRS_AFTER_STARTUP_ATTACH_OR_INIT,
@@ -352,7 +354,7 @@ ShmemRequestInternal(ShmemStructOpts *options, ShmemRequestKind kind)
 	if (options->name == NULL)
 		elog(ERROR, "shared memory request is missing 'name' option");
 
-	if (IsUnderPostmaster)
+	if (IsUnderPostmaster || shmem_request_state == SRS_REQUESTING_AFTER_STARTUP)
 	{
 		if (options->size <= 0 && options->size != SHMEM_ATTACH_UNKNOWN_SIZE)
 			elog(ERROR, "invalid size %zd for shared memory request for \"%s\"",
@@ -372,7 +374,8 @@ ShmemRequestInternal(ShmemStructOpts *options, ShmemRequestKind kind)
 			 options->alignment, options->name);
 
 	/* Check that we're in the right state */
-	if (shmem_request_state != SRS_REQUESTING)
+	if (shmem_request_state != SRS_REQUESTING &&
+		shmem_request_state != SRS_REQUESTING_AFTER_STARTUP)
 		elog(ERROR, "ShmemRequestStruct can only be called from a shmem_request callback");
 
 	/* Check that it's not already registered in this process */
@@ -963,7 +966,7 @@ CallShmemCallbacksAfterStartup(const ShmemCallbacks *callbacks)
 
 	PG_TRY();
 	{
-		shmem_request_state = SRS_REQUESTING;
+		shmem_request_state = SRS_REQUESTING_AFTER_STARTUP;
 
 		/*
 		 * Call the request callback first.  The callback makes
@@ -1127,7 +1130,8 @@ ShmemInitStruct(const char *name, Size size, bool *foundPtr)
 
 	Assert(shmem_request_state == SRS_DONE ||
 		   shmem_request_state == SRS_INITIALIZING ||
-		   shmem_request_state == SRS_REQUESTING);
+		   shmem_request_state == SRS_REQUESTING ||
+		   shmem_request_state == SRS_REQUESTING_AFTER_STARTUP);
 
 	LWLockAcquire(ShmemIndexLock, LW_EXCLUSIVE);
 
