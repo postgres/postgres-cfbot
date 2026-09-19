@@ -2894,7 +2894,10 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
       <para>
        True if this is a temporary replication slot. Temporary slots are
        not saved to disk and are automatically dropped on error or when
-       the session has finished.
+       the session has finished. An error raised and caught in a
+       subtransaction, for example by a
+       <application>PL/pgSQL</application> exception block, does not drop
+       them.
       </para></entry>
      </row>
 
