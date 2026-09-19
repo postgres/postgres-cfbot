@@ -1337,8 +1337,8 @@ typedef struct RelAggInfo
  *		and links to the matching indexprs element for each expression column.
  *
  *		While most of these fields are filled when the IndexOptInfo is created
- *		(by plancat.c), indrestrictinfo and predOK are set later, in
- *		check_index_predicates().
+ *		(by plancat.c), indrestrictinfo, predOK, and predOKBase are set later,
+ *		in check_index_predicates().
  */
 
 struct IndexPath;				/* forward declaration */
@@ -1416,8 +1416,10 @@ typedef struct IndexOptInfo
 	 */
 	List	   *indrestrictinfo;
 
-	/* true if index predicate matches query */
+	/* true if usable query clauses imply the index predicate */
 	bool		predOK;
+	/* true if base restrictions imply the index predicate */
+	bool		predOKBase;
 	/* true if a unique index */
 	bool		unique;
 	/* true if the index was defined with NULLS NOT DISTINCT */
