@@ -942,6 +942,7 @@ PGAC_ARG_BOOL(with, pam, no,
               [build with PAM support],
               [AC_DEFINE([USE_PAM], 1, [Define to 1 to build with PAM support. (--with-pam)])])
 AC_MSG_RESULT([$with_pam])
+AC_SUBST(with_pam)
 
 
 #
@@ -1452,6 +1453,7 @@ AC_SUBST(with_ssl)
 
 if test "$with_pam" = yes ; then
   AC_CHECK_LIB(pam,    pam_start, [], [AC_MSG_ERROR([library 'pam' is required for PAM])])
+  AC_CHECK_FUNCS(pam_start_confdir)
 fi
 
 if test "$with_libxml" = yes ; then
