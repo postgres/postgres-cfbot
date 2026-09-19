@@ -1,0 +1,6 @@
+-- This test is about UHC (Windows-949 / CP949) encoding.  UHC is a
+-- client-only encoding, so exercise pg_uhc_verifychar() via convert_from()
+-- in a UTF8 database.
+SELECT getdatabaseencoding() <> 'UTF8' AS skip_test \gset
+\if :skip_test
+\quit
