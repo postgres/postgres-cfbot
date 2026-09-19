@@ -193,3 +193,49 @@ SELECT pg_drop_replication_slot('failover_true_slot');
 SELECT pg_drop_replication_slot('failover_false_slot');
 SELECT pg_drop_replication_slot('failover_default_slot');
 SELECT pg_drop_replication_slot('physical_slot');
+
+--
+-- Test that a replication slot gets released when the subtransaction holding
+-- it aborts on an error caught by a PL/pgSQL exception block.
+--
+
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_subxact_slot', 'test_decoding');
+
+-- An error caught by a PL/pgSQL exception block releases the slot.
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_slot', '0/1');
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'caught SQLSTATE %', SQLSTATE;
+END $$;
+SELECT active FROM pg_replication_slots WHERE slot_name = 'regress_subxact_slot';
+SELECT count(*) >= 0 AS peek_ok
+    FROM pg_logical_slot_peek_changes('regress_subxact_slot', NULL, NULL);
+
+-- An error not caught by a PL/pgSQL exception block releases the slot too.
+-- Show only the SQLSTATE for stable output.
+\set VERBOSITY sqlstate
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_slot', '0/1');
+EXCEPTION WHEN division_by_zero THEN
+    RAISE NOTICE 'unreachable';
+END $$;
+\set VERBOSITY default
+SELECT active FROM pg_replication_slots WHERE slot_name = 'regress_subxact_slot';
+SELECT count(*) >= 0 AS peek_ok
+    FROM pg_logical_slot_peek_changes('regress_subxact_slot', NULL, NULL);
+SELECT pg_drop_replication_slot('regress_subxact_slot');
+
+-- An error caught by a PL/pgSQL exception block releases the session's
+-- temporary slot, but does not drop it (unlike a top-level error).
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_subxact_temp_slot', 'test_decoding', true);
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_temp_slot', '0/1');
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'caught SQLSTATE %', SQLSTATE;
+END $$;
+SELECT count(*) = 1 AS temp_slot_kept
+    FROM pg_replication_slots WHERE slot_name = 'regress_subxact_temp_slot';
+SELECT pg_drop_replication_slot('regress_subxact_temp_slot');
