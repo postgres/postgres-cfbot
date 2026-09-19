@@ -347,7 +347,8 @@ extern int	DecodeTimezoneAbbrev(int field, const char *lowtoken,
 extern int	DecodeSpecial(int field, const char *lowtoken, int *val);
 extern int	DecodeUnits(int field, const char *lowtoken, int *val);
 
-extern int	DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz);
+extern int	DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz, 
+							   Node *errorcontext);
 extern pg_tz *DecodeTimezoneNameToTz(const char *tzname);
 
 extern int	DecodeTimezoneAbbrevPrefix(const char *str,
