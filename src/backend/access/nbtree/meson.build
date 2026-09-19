@@ -8,6 +8,7 @@ backend_sources += files(
   'nbtpreprocesskeys.c',
   'nbtreadpage.c',
   'nbtree.c',
+  'nbtree_undo.c',
   'nbtsearch.c',
   'nbtsort.c',
   'nbtsplitloc.c',

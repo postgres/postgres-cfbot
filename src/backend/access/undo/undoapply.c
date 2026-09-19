@@ -34,6 +34,9 @@
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 
+/* See undormgr.h */
+bool		UndoApplyInline = false;
+
 /*
  * ApplyOneUndoRecord - Apply a single UNDO record via RM dispatch
  *
@@ -57,13 +60,14 @@ ApplyOneUndoRecord(UndoRecordHeader *header, char *payload,
 	 * revert worker after a partial inline apply, so every rm_undo must be
 	 * idempotent.  They are so semantically, not by page LSN: they read the
 	 * target page with ReadBuffer (not XLogReadBufferForRedo) and act only if
-	 * the page still shows the effect being undone.  nbtree and hash kill
-	 * only a slot that is still LP_NORMAL and matches the record's heap TID
-	 * and key digest, so an entry already marked dead is "not found", a
-	 * successful no-op; FILEOPS acts only on an object that still shows the
-	 * operation's effect, recorded in the payload.  A CLR
-	 * (XLOG_UNDO_APPLY_RECORD) only makes the page change itself crash-safe
-	 * through ordinary redo; it does not mark the UNDO record as applied.
+	 * the page still shows the effect being undone.  FILEOPS acts only on an
+	 * object that still shows the operation's effect, recorded in the
+	 * payload.  nbtree and hash apply their records only inline
+	 * (UndoApplyInline) and skip them on every later walk, because after the
+	 * abort is visible the heap TID that identifies their entry can belong to
+	 * a committed row.  A CLR (XLOG_UNDO_APPLY_RECORD) only makes the page
+	 * change itself crash-safe through ordinary redo; it does not mark the
+	 * UNDO record as applied.
 	 */
 
 	/*

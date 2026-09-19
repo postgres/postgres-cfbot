@@ -376,10 +376,39 @@ typedef struct StdRdOptions
 	 * to freeze. 0 if disabled, -1 if unspecified.
 	 */
 	double		vacuum_max_eager_freeze_failure_rate;
+
+	/*
+	 * index_undo: reverse this table's index entries during ROLLBACK rather
+	 * than leaving them for VACUUM.  Defaults to ON -- see
+	 * RelationGetIndexUndoOption(), which must therefore also return true
+	 * when rd_options is NULL.  See RelationUsesIndexUndo() in
+	 * access/tableam.h -- index AMs consult that (not this field directly) so
+	 * its exclusions (catalogs, non-WAL relations, fresh index builds, ...)
+	 * cannot be bypassed.
+	 */
+	bool		index_undo;
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
 #define HEAP_DEFAULT_FILLFACTOR		100
+
+/*
+ * RelationGetIndexUndoOption
+ *		Returns the relation's index_undo reloption.
+ *
+ * Index UNDO is ON by default, so a relation with no reloptions at all (the
+ * overwhelmingly common case -- rd_options is NULL unless something was SET)
+ * must read as enabled.  Defaulting this to false instead would silently leave
+ * the feature off for every table that never had a reloption set, which is
+ * nearly all of them.
+ *
+ * Callers outside the relcache should use RelationUsesIndexUndo() in
+ * access/tableam.h, which also applies the catalog, WAL and other
+ * conditions.  Note multiple eval of argument!
+ */
+#define RelationGetIndexUndoOption(relation) \
+	((relation)->rd_options ? \
+	 ((StdRdOptions *) (relation)->rd_options)->index_undo : true)
 
 /*
  * RelationGetToastTupleTarget

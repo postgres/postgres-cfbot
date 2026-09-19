@@ -184,7 +184,7 @@ typedef struct RevertRetry
 	TransactionId xid;
 	int			attempts;		/* failed walks */
 	TimestampTz next_try;		/* do not walk again before this */
-}			RevertRetry;
+} RevertRetry;
 
 #define LOGICAL_REVERT_RETRY_SLOTS	64
 static RevertRetry revert_retries[LOGICAL_REVERT_RETRY_SLOTS];

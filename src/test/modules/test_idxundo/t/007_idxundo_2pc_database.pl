@@ -59,8 +59,9 @@ $node->restart;
 ok( $node->poll_query_until(
 		'postgres', 'SELECT count(*) = 0 FROM idxundo_atm_entries()'),
 	'the revert worker for that database drained it');
-cmp_ok($node->safe_psql('db1', "SELECT idxundo_count_dead_all('t_pkey')"),
-	'>=', 4900, 'the prepared transaction\'s index entries were reverted');
+# The worker leaves index entries for VACUUM (see nbtree_undo_apply()).
+is($node->safe_psql('db1', "SELECT idxundo_count_dead_all('t_pkey')"),
+	'0', 'the prepared transaction\'s index entries are left for VACUUM');
 
 $node->stop;
 done_testing();

@@ -212,6 +212,16 @@ the whole chain again after the database opens.  Transactions already in
 the ATM before the crash are back in it after redo and are reverted by the
 logical revert worker as during normal operation.
 
+Index UNDO (nbtree, hash) is applied only inline, by the aborting backend
+(UndoApplyInline, set by AtAbort_XactUndo() and AtSubAbort_XactUndo()).
+Its records find their entry by heap TID, which is unique only while the
+aborted heap tuple holds that TID.  Every deferred apply above runs after
+the abort is visible, when VACUUM may already have freed the TID for a
+committed row with the same key, so there the index callbacks return
+UNDO_APPLY_SKIPPED (which counts as done) and leave the entries for
+VACUUM.  An instant abort of index-only UNDO therefore does no index
+work at all.
+
 These components serve the cluster-wide engine only.  The per-backend
 engine's rollback requests go to its own undo apply workers (see "The UNDO
 Store: Per-Backend UNDO Logs" above).

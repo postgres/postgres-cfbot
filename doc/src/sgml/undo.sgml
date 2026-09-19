@@ -50,7 +50,11 @@ CREATE TABLE important_data (
    Index UNDO is separate and is controlled per relation by the
    <literal>index_undo</literal> storage parameter, which reverses a table's
    index entries during <command>ROLLBACK</command> instead of leaving them for
-   <command>VACUUM</command>.  It defaults to on:
+   <command>VACUUM</command>.  Only a rollback the aborting session applies
+   itself does this; the index entries of a rollback deferred to the logical
+   revert worker (see <varname>undo_instant_abort_threshold</varname>) or
+   to crash recovery are still left for <command>VACUUM</command>.  It
+   defaults to on:
   </para>
 
 <programlisting>

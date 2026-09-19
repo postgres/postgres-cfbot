@@ -1806,6 +1806,7 @@ MultirangeIOData
 MultirangeParseState
 MultirangeType
 MyUndoLogState
+NbtreeUndoInsertLeaf
 NDBOX
 NDistinctParseState
 NDistinctSemanticState
@@ -3353,6 +3354,7 @@ UndoApplyWorker
 UndoBatchData
 UndoBuffers
 UndoBufferStat
+UndoEngine
 UndoErrorQueue
 UndoFileMru
 UndoLogControl

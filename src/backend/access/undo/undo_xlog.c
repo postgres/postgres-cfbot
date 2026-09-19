@@ -36,6 +36,9 @@
 #include "postgres.h"
 
 #include "access/atm.h"
+#include "access/bufmask.h"
+#include "access/hash.h"
+#include "access/hash_xlog.h"
 #include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/twophase.h"
@@ -48,6 +51,8 @@
 #include "access/xlogreader.h"
 #include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
+#include "access/nbtree.h"
+#include "access/nbtxlog.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
@@ -1056,5 +1061,33 @@ UndoResetBatchReader(void)
 	{
 		XLogReaderFree(undo_batch_reader);
 		undo_batch_reader = NULL;
+	}
+}
+
+/*
+ * undo_mask - mask a page changed by an Undo record before consistency checks
+ *
+ * Only XLOG_UNDO_APPLY_RECORD registers a block.  Its target is a page of the
+ * table AM or index AM that applied the UNDO record, so hand the page to that
+ * AM's mask function, telling them apart by the special space the way
+ * pg_filedump does: hash pages end their 16-byte special space with
+ * HASHO_PAGE_ID, which no btree cycle ID can equal (MAX_BT_CYCLE_ID).
+ */
+void
+undo_mask(char *pagedata, BlockNumber blkno)
+{
+	Page		page = (Page) pagedata;
+	Size		special = PageGetSpecialSize(page);
+
+	if (special == MAXALIGN(sizeof(HashPageOpaqueData)) &&
+		HashPageGetOpaque(page)->hasho_page_id == HASHO_PAGE_ID)
+		hash_mask(pagedata, blkno);
+	else if (special == MAXALIGN(sizeof(BTPageOpaqueData)))
+		btree_mask(pagedata, blkno);
+	else
+	{
+		mask_page_lsn_and_checksum(page);
+		mask_page_hint_bits(page);
+		mask_unused_space(page);
 	}
 }

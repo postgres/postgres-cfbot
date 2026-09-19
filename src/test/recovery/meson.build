@@ -86,6 +86,7 @@ tests += {
       't/114_undo_recovery_error.pl',
       't/117_undo_rewind_snapshot.pl',
       't/126_atm_full_abort.pl',
+      't/124_index_undo_tid_reuse.pl',
       't/134_undo_shmem_on_demand.pl',
       't/152_undo_attach_order_after_checkpoint.pl',
     ],

@@ -75,8 +75,9 @@ ok( $node->poll_query_until(
 		'postgres',
 		"SELECT count(*) = 0 FROM idxundo_atm_entries() WHERE xid = '$xid'"),
 	'entry is reverted and forgotten on retry');
-cmp_ok($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('t_pkey')"),
-	'>=', 4900, 'the whole chain was reverted');
+# The worker leaves index entries for VACUUM (see nbtree_undo_apply()).
+is($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('t_pkey')"),
+	'0', 'its index entries are left for VACUUM');
 
 # ERROR must abort, not commit a transaction with outstanding resources.
 $node->safe_psql(

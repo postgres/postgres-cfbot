@@ -45,9 +45,10 @@ sub recycle_wal
 	}
 }
 
-# Run the revert worker (it is off until now) and check that it reverted the
-# whole chain of $table's index.  Each phase has a single deferred chain, so no
-# other entry's pin can cover for a missing one.
+# Run the revert worker (it is off until now) and check that it walked the
+# whole chain of $table's index: it forgets an entry only after reading every
+# batch, and a removed batch is a PANIC.  Each phase has a single deferred
+# chain, so no other entry's pin can cover for a missing one.
 sub revert_and_check
 {
 	my ($table, $what) = @_;
@@ -58,13 +59,11 @@ sub revert_and_check
 			'postgres', 'SELECT count(*) = 0 FROM idxundo_atm_entries()'),
 		"revert worker drained the ATM ($what)");
 
-	# A few entries may be left for VACUUM by the bounded right-link walk; a
-	# recycled batch would lose up to a thousand at a time.
-	cmp_ok(
-		$node->safe_psql('postgres',
+	# The worker leaves index entries for VACUUM (see nbtree_undo_apply()).
+	is( $node->safe_psql('postgres',
 			"SELECT idxundo_count_dead_all('${table}_pkey')"),
-		'>=', $nrows - 200,
-		"the whole $what chain was reverted");
+		'0',
+		"the $what chain's index entries are left for VACUUM");
 
 	$node->append_conf('postgresql.conf', 'max_logical_revert_workers = 0');
 	$node->restart;

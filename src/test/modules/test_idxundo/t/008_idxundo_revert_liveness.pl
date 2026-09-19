@@ -63,8 +63,9 @@ ok( $node->poll_query_until(
 		'postgres',
 		"SELECT count(*) = 0 FROM idxundo_atm_entries() WHERE xid = '$good'"),
 	'the entry behind the malformed one is reverted');
-cmp_ok($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('t_pkey')"),
-	'>=', 4900, 'its whole chain was reverted');
+# The worker leaves index entries for VACUUM (see nbtree_undo_apply()).
+is($node->safe_psql('postgres', "SELECT idxundo_count_dead_all('t_pkey')"),
+	'0', 'its index entries are left for VACUUM');
 
 $node->wait_for_log(
 	qr/giving up on transaction $bad, whose UNDO chain is malformed/,
