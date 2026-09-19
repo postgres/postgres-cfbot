@@ -539,6 +539,40 @@
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>product</primary>
+        </indexterm>
+        <function>product</function> ( <type>smallint</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>integer</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>bigint</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>numeric</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>real</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>double precision</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para>
+        Computes the product of the non-null input values.
+       </para></entry>
+       <entry>Yes</entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>range_agg</primary>
         </indexterm>
         <function>range_agg</function> ( <parameter>value</parameter>
@@ -667,6 +701,14 @@
    returns null rather than an empty array when there are no input
    rows.  The <function>coalesce</function> function can be used to
    substitute zero or an empty array for null when necessary.
+  </para>
+
+  <para>
+   The <function>product</function> aggregate always returns a
+   <type>numeric</type> result, regardless of the argument type, and
+   accumulates its running product as <type>numeric</type> to avoid
+   intermediate overflow.  A sufficiently large product can still
+   overflow the <type>numeric</type> type and raise an error.
   </para>
 
   <para>
