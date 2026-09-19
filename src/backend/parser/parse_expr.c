@@ -3710,8 +3710,11 @@ makeJsonConstructorExpr(ParseState *pstate, JsonConstructorType type,
 	{
 		CaseTestExpr *cte = makeNode(CaseTestExpr);
 
-		cte->typeId = returning->format->format_type == JS_FORMAT_JSONB ?
-			JSONBOID : JSONOID;
+		if (type == JSCTOR_JSON_SERIALIZE)
+			cte->typeId = exprType(linitial(args));
+		else
+			cte->typeId = returning->format->format_type == JS_FORMAT_JSONB ?
+				JSONBOID : JSONOID;
 		cte->typeMod = -1;
 		cte->collation = InvalidOid;
 
