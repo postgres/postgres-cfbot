@@ -135,6 +135,16 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	relation = table_open(relationObjectId, NoLock);
 
 	/*
+	 * Delete-marking entries can carry stale keys, so these tables must visit
+	 * and recheck the visible table tuple.  Clearing canreturn alone is not
+	 * enough: a zero-column scan (for example count(*)) needs no attributes
+	 * and therefore passes check_index_only's subset test even then.
+	 */
+	if (RelationSupportsDeleteMarking(relation))
+		rel->pgs_mask &= ~PGS_CONSIDER_INDEXONLY;
+
+
+	/*
 	 * Relations without a table AM can be used in a query only if they are of
 	 * special-cased relkinds.  This check prevents us from crashing later if,
 	 * for example, a view's ON SELECT rule has gone missing.  Note that
@@ -284,7 +294,20 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			for (i = 0; i < ncolumns; i++)
 			{
 				info->indexkeys[i] = index->indkey.values[i];
-				info->canreturn[i] = index_can_return(indexRelation, i + 1);
+
+				/*
+				 * Suppress index-only scans for indexes on a delete-marking
+				 * table: a delete-marked entry can carry a stale key that no
+				 * longer matches the live heap tuple, so an IOS that trusted
+				 * the index key without visiting the heap could return a wrong
+				 * result.  We do this here (not in btcanreturn) because we
+				 * hold the fully-built heap relcache entry, so
+				 * RelationSupportsDeleteMarking() is safe -- reaching for the
+				 * table AM from inside btcanreturn crashes on half-built
+				 * relcache entries during bootstrap.
+				 */
+				info->canreturn[i] = index_can_return(indexRelation, i + 1) &&
+					!RelationSupportsDeleteMarking(relation);
 			}
 
 			for (i = 0; i < nkeycolumns; i++)

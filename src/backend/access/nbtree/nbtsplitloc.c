@@ -716,7 +716,8 @@ _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
 	tup = (IndexTuple) PageGetItem(state->origpage, itemid);
 	/* Do cheaper test first */
 	if (BTreeTupleIsPosting(tup) ||
-		!_bt_adjacenthtid(&tup->t_tid, &state->newitem->t_tid))
+		!_bt_adjacenthtid(BTreeTupleGetHeapTID(tup),
+						  BTreeTupleGetHeapTID(state->newitem)))
 		return false;
 	/* Check same conditions as rightmost item case, too */
 	keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);

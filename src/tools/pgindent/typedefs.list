@@ -2,6 +2,8 @@ ACCESS_ALLOWED_ACE
 ACL
 ACL_SIZE_INFORMATION
 AFFIX
+amdeletemark_function
+amundomark_function
 ASN1_INTEGER
 ASN1_OBJECT
 ASN1_OCTET_STRING
@@ -3577,6 +3579,7 @@ XactUndoRecordInfo
 XactUndoSubTransactionState
 xl_atm_abort
 xl_atm_forget
+xl_btree_delete_mark
 xl_fileops_chmod
 xl_fileops_chown
 xl_fileops_create

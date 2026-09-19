@@ -64,6 +64,8 @@ GetTableAmRoutine(Oid amhandler)
 	Assert(routine->index_scan_end != NULL);
 
 	Assert(routine->fetch_tid != NULL);
+	Assert(routine->index_fetch_tid == NULL ||
+		   routine->am_index_delete_marking);
 	Assert(routine->tuple_fetch_row_version != NULL);
 	Assert(routine->tuple_tid_valid != NULL);
 	Assert(routine->tuple_get_latest_tid != NULL);

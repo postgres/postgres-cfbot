@@ -831,9 +831,8 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
  *   rd_firstRelfilelocatorSubid covers REINDEX, which keeps the index's OID but
  *   gives it a new relfilelocator in this transaction.
  *
- * A later commit adds one more condition here: a table AM that does its own
- * index cleanup via delete-marking must be refused, since a second independent
- * record for the same entry would double-apply.
+ * - A delete-marking table AM (FLUX) is refused; see the comment in the
+ *   body.
  */
 bool
 RelationUsesIndexUndo(Relation indexrel, Relation heaprel)
@@ -855,6 +854,16 @@ RelationUsesIndexUndo(Relation indexrel, Relation heaprel)
 	 */
 	if (IsCatalogRelation(heaprel) || IsCatalogRelation(indexrel) ||
 		IsToastRelation(heaprel))
+		return false;
+
+	/*
+	 * A delete-marking table AM drives index cleanup from its own table UNDO
+	 * -- it clears the old delete-mark and removes the new entry -- so an
+	 * independent index-UNDO record for the same entry would double-apply.
+	 * Refusing here, rather than at each call site, makes that unreachable
+	 * whatever the reloption says.
+	 */
+	if (RelationSupportsDeleteMarking(heaprel))
 		return false;
 
 	/* No WAL, no recoverable UNDO chain.  Excludes TEMP and UNLOGGED. */
@@ -886,4 +895,20 @@ RelationUndoEngine(Relation rel)
 
 	Assert(rel->rd_tableam->am_undo_engine == UNDO_ENGINE_PERBACKEND);
 	return UNDO_ENGINE_PERBACKEND;
+}
+
+/*
+ * RelationSupportsDeleteMarking
+ *		Returns true if the relation's table AM does in-place indexed-column
+ *		UPDATE via nbtree delete-marking.  Index AMs use this to
+ *		suppress their own index UNDO (the table AM's UNDO drives index cleanup
+ *		on rollback) and the planner uses it to disable index-only scans
+ *		(a delete-marked entry's key may not match the live tuple).
+ */
+bool
+RelationSupportsDeleteMarking(Relation rel)
+{
+	if (!rel->rd_tableam || !rel->rd_tableam->am_supports_undo)
+		return false;
+	return rel->rd_tableam->am_index_delete_marking;
 }

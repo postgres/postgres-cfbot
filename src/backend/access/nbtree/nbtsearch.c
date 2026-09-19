@@ -554,9 +554,28 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 		 * binary search to set postingoff for caller.  Caller must split the
 		 * posting list when postingoff is set.  This should happen
 		 * infrequently.
+		 *
+		 * An index on a delete-marking table has no posting lists (see
+		 * "Delete-marking" in the README), so finding one there means the
+		 * index is corrupt; inserting next to it would break TID order.
 		 */
 		if (unlikely(result == 0 && key->scantid != NULL))
 		{
+			if (unlikely(insertstate->nopostingsplit))
+			{
+				IndexTuple	itup;
+
+				itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, mid));
+				if (BTreeTupleIsPosting(itup))
+					ereport(ERROR,
+							(errcode(ERRCODE_INDEX_CORRUPTED),
+							 errmsg_internal("posting list tuple at offset %u of block %u in index \"%s\" on a delete-marking table",
+											 mid,
+											 BufferGetBlockNumber(insertstate->buf),
+											 RelationGetRelationName(rel))));
+				continue;
+			}
+
 			/*
 			 * postingoff should never be set more than once per leaf page
 			 * binary search.  That would mean that there are duplicate table
@@ -1637,6 +1656,9 @@ _bt_returnitem(IndexScanDesc scan, BTScanOpaque so)
 
 	/* Return next item, per amgettuple contract */
 	scan->xs_heaptid = currItem->heapTid;
+	/* Delete-marked entries force a recheck of the qual */
+	if (currItem->recheck)
+		scan->xs_recheck = true;
 	if (so->currTuples)
 		scan->xs_itup = (IndexTuple) (so->currTuples + currItem->tupleOffset);
 }

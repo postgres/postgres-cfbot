@@ -42,6 +42,8 @@
 										 * FSM */
 #define XLOG_BTREE_META_CLEANUP	0xE0	/* update cleanup-related data in the
 										 * metapage */
+#define XLOG_BTREE_DELETE_MARK	0xF0	/* delete-mark/unmark a leaf tuple in
+										 * place */
 
 /*
  * All that we need to regenerate the meta-data page
@@ -138,6 +140,14 @@ typedef struct xl_btree_insert
  * here, the concept and goals are exactly the same.  See _bt_swap_posting()
  * for details on posting list splits.
  *
+ * replace is set when newitem takes the place of the original page's item at
+ * newitemoff instead of going in front of it (btdeletemark grows a leaf entry
+ * this way when the bigger entry does not fit in place).  The split was
+ * computed on an image of the original page without that item, so REDO
+ * removes it from the original page before rebuilding the left page; the
+ * right page's tuples never include it.  replace is never combined with a
+ * posting list split.
+ *
  * Backup Blk 1: new right page
  *
  * The right page's data portion contains the right page's tuples in the form
@@ -156,9 +166,10 @@ typedef struct xl_btree_split
 	OffsetNumber firstrightoff; /* first origpage item on rightpage */
 	OffsetNumber newitemoff;	/* new item's offset */
 	uint16		postingoff;		/* offset inside orig posting tuple */
+	bool		replace;		/* newitem replaces item at newitemoff */
 } xl_btree_split;
 
-#define SizeOfBtreeSplit	(offsetof(xl_btree_split, postingoff) + sizeof(uint16))
+#define SizeOfBtreeSplit	(offsetof(xl_btree_split, replace) + sizeof(bool))
 
 /*
  * When page is deduplicated, consecutive groups of tuples with equal keys are
@@ -193,6 +204,32 @@ typedef struct xl_btree_reuse_page
 } xl_btree_reuse_page;
 
 #define SizeOfBtreeReusePage	(offsetof(xl_btree_reuse_page, isCatalogRel) + sizeof(bool))
+
+/*
+ * This is what we need to redo an in-place delete-mark (or unmark) of a single
+ * leaf tuple, or the removal of one (XLOG_BTREE_DELETE_MARK).
+ *
+ * Backup Blk 0: the leaf page.  Unless 'deleted' is set, the full replacement
+ * tuple image (already in its final delete-marked or plain form) follows the
+ * fixed portion of the record; redo overwrites the item at 'offnum' with it.
+ * Logging the exact final bytes keeps the redo deterministic for
+ * wal_consistency_checking.
+ *
+ * A delete-mark that does not fit on the page is not logged here: it is done
+ * by a page split, logged as XLOG_BTREE_SPLIT_L/R with 'replace' set.
+ */
+typedef struct xl_btree_delete_mark
+{
+	OffsetNumber offnum;		/* offset of the leaf tuple being rewritten */
+	bool		setmark;		/* true = set mark, false = clear mark */
+	bool		deleted;		/* true = remove the entry instead of
+								 * rewriting it; written only by btundomark()
+								 * when it removes the entry an aborted
+								 * in-place UPDATE inserted for its new key */
+	/* NEW TUPLE IMAGE FOLLOWS AT END OF STRUCT (absent when deleted) */
+} xl_btree_delete_mark;
+
+#define SizeOfBtreeDeleteMark	(offsetof(xl_btree_delete_mark, deleted) + sizeof(bool))
 
 /*
  * xl_btree_vacuum and xl_btree_delete records describe deletion of index

@@ -149,12 +149,22 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 		else if (state->deduplicate &&
+				 !BTreeTupleIsDeleteMarked(state->base) &&
+				 !BTreeTupleIsDeleteMarked(itup) &&
 				 _bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
 				 _bt_dedup_save_htid(state, itup))
 		{
 			/*
 			 * Tuple is equal to base tuple of pending posting list.  Heap
 			 * TID(s) for itup have been saved in state.
+			 *
+			 * A delete-marked tombstone is never merged in either
+			 * direction: it carries alt-TID metadata in t_tid instead of a
+			 * heap TID, and its key no longer describes the live version. The
+			 * guards above force it through the "not equal" path, where
+			 * _bt_dedup_finish_pending() emits it verbatim as a single-item
+			 * pending list (nitems stays 1, so the bogus t_tid is never
+			 * used).
 			 */
 		}
 		else
@@ -371,12 +381,29 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 
 		Assert(!ItemIdIsDead(itemid));
 
+		if (BTreeTupleIsDeleteMarked(itup))
+		{
+			/*
+			 * A delete-marked tombstone is never a bottom-up delete
+			 * candidate: its t_tid holds alt-TID metadata, not a heap TID,
+			 * and it must linger until VACUUM decides it is removable.
+			 * Finalize any pending interval and skip it, starting the next
+			 * interval fresh from the following tuple.
+			 */
+			if (state->nitems > 0)
+				_bt_bottomupdel_finish_pending(page, state, &delstate);
+			state->base = NULL;
+			state->baseoff = InvalidOffsetNumber;
+			continue;
+		}
+
 		if (offnum == minoff)
 		{
 			/* itup starts first pending interval */
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
-		else if (_bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
+		else if (state->base != NULL &&
+				 _bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
 				 _bt_dedup_save_htid(state, itup))
 		{
 			/* Tuple is equal; just added its TIDs to pending interval */
@@ -384,14 +411,16 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 		else
 		{
 			/* Finalize interval -- move its TIDs to delete state */
-			_bt_bottomupdel_finish_pending(page, state, &delstate);
+			if (state->nitems > 0)
+				_bt_bottomupdel_finish_pending(page, state, &delstate);
 
 			/* itup starts new pending interval */
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 	}
 	/* Finalize final interval -- move its TIDs to delete state */
-	_bt_bottomupdel_finish_pending(page, state, &delstate);
+	if (state->nitems > 0)
+		_bt_bottomupdel_finish_pending(page, state, &delstate);
 
 	/*
 	 * We don't give up now in the event of having few (or even zero)

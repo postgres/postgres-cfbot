@@ -138,6 +138,17 @@ typedef struct IndexScanDescData
 	struct ScanKeyData *keyData;	/* array of index qualifier descriptors */
 	struct ScanKeyData *orderByData;	/* array of ordering op descriptors */
 	bool		xs_want_itup;	/* caller requests index tuples */
+
+	/*
+	 * A plain index scan on a delete-marking table AM needs the index tuple
+	 * (xs_itup) to recheck a delete-marked entry's key against the visible
+	 * heap version, but
+	 * must NOT set xs_want_itup: that flag is now reserved for genuine
+	 * index-only scans (table_index_getnext_slot asserts an IOS uses a
+	 * virtual slot).  This separate flag asks the index AM to keep xs_itup
+	 * populated for the recheck during an ordinary (buffer-slot) index scan.
+	 */
+	bool		xs_want_itup_recheck;
 	bool		xs_temp_snap;	/* unregister snapshot at scan end? */
 
 	/* signaling to index AM about killing index tuples */
