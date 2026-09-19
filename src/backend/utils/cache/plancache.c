@@ -104,7 +104,7 @@ static bool choose_custom_plan(CachedPlanSource *plansource,
 							   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
 static Query *QueryListGetPrimaryStmt(List *stmts);
-static void AcquireExecutorLocks(List *stmt_list, bool acquire);
+static void AcquireExecutorLocksInt(List *stmt_list, bool acquire);
 static void AcquirePlannerLocks(List *stmt_list, bool acquire);
 static void ScanQueryForLocks(Query *parsetree, bool acquire);
 static bool ScanQueryWalker(Node *node, bool *acquire);
@@ -954,8 +954,9 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
  * Caller must have already called RevalidateCachedQuery to verify that the
  * querytree is up to date.
  *
- * On a "true" return, we have acquired the locks needed to run the plan.
- * (We must do this for the "true" result to be race-condition-free.)
+ * On a "true" return, the generic plan may be reused as a valid cached
+ * plan.  Any execution-time setup, including lock acquisition, is the
+ * caller's responsibility.
  */
 static bool
 CheckCachedPlan(CachedPlanSource *plansource)
@@ -992,8 +993,6 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		 */
 		Assert(plan->refcount > 0);
 
-		AcquireExecutorLocks(plan->stmt_list, true);
-
 		/*
 		 * If plan was transient, check to see if TransactionXmin has
 		 * advanced, and if so invalidate it.
@@ -1012,9 +1011,6 @@ CheckCachedPlan(CachedPlanSource *plansource)
 			/* Successfully revalidated and locked the query. */
 			return true;
 		}
-
-		/* Oops, the race case happened.  Release useless locks. */
-		AcquireExecutorLocks(plan->stmt_list, false);
 	}
 
 	/*
@@ -1291,8 +1287,11 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
  * plan or a custom plan for the given parameters: the caller does not know
  * which it will get.
  *
- * On return, the plan is valid and we have sufficient locks to begin
- * execution.
+ * On return, the plan is valid but no execution locks are held.
+ * The caller must call AcquireExecutorLocks() before executing.
+ * For freshly built plans (custom or new generic), the planner
+ * already holds the needed locks, so AcquireExecutorLocks() is
+ * redundant but harmless.
  *
  * On return, the refcount of the plan has been incremented; a later
  * ReleaseCachedPlan() call is expected.  If "owner" is not NULL then
@@ -1915,9 +1914,11 @@ QueryListGetPrimaryStmt(List *stmts)
 /*
  * AcquireExecutorLocks: acquire locks needed for execution of a cached plan;
  * or release them if acquire is false.
+ *
+ * This locks all relations in a given PlannedStmt's range table.
  */
 static void
-AcquireExecutorLocks(List *stmt_list, bool acquire)
+AcquireExecutorLocksInt(List *stmt_list, bool acquire)
 {
 	ListCell   *lc1;
 
@@ -1962,6 +1963,43 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 				UnlockRelationOid(rte->relid, rte->rellockmode);
 		}
 	}
+}
+
+/*
+ * AcquireExecutorLocks
+ *		Acquire execution locks on all relations in a cached plan.
+ *
+ * Returns true if the plan is still valid after locking.  Returns
+ * false if the plan was invalidated while locks were being acquired,
+ * in which case the locks have been released and the caller should
+ * discard this plan and retry with a fresh one from GetCachedPlan().
+ */
+bool
+AcquireExecutorLocks(CachedPlan *cplan)
+{
+	AcquireExecutorLocksInt(cplan->stmt_list, true);
+	if (!cplan->is_valid)
+	{
+		AcquireExecutorLocksInt(cplan->stmt_list, false);
+		return false;
+	}
+	return true;
+}
+
+/*
+ * CachedPlanCanPrep
+ *		Check whether a cached plan is eligible for pruning-aware locking
+ *		via ExecutorPrepAndLock().
+ *
+ * Only single-statement reused generic plans with a non-utility command
+ * qualify.
+ */
+bool
+CachedPlanCanPrep(CachedPlan *cplan, CachedPlanSource *plansource)
+{
+	return (cplan == plansource->gplan &&
+			list_length(cplan->stmt_list) == 1 &&
+			linitial_node(PlannedStmt, cplan->stmt_list)->commandType != CMD_UTILITY);
 }
 
 /*
