@@ -1708,49 +1708,89 @@ end;
 $$;
 create trigger upsert_after_trig after insert or update on upsert
   for each row execute procedure upsert_after_func();
-insert into upsert values(1, 'black') on conflict (key) do update set color = 'updated ' || upsert.color;
+insert into upsert values(1, 'black') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (1,black)
 WARNING:  after insert (new): (1,black)
-insert into upsert values(2, 'red') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key | color | key | color | key | color 
+-----+-------+-----+-------+-----+-------
+     |       |   1 | black |     | 
+(1 row)
+
+insert into upsert values(2, 'red') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (2,red)
 WARNING:  before insert (new, modified): (3,"red trig modified")
 WARNING:  after insert (new): (3,"red trig modified")
-insert into upsert values(3, 'orange') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key | color | key |       color       | key | color 
+-----+-------+-----+-------------------+-----+-------
+     |       |   3 | red trig modified |     | 
+(1 row)
+
+insert into upsert values(3, 'orange') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (3,orange)
 WARNING:  before update (old): (3,"red trig modified")
 WARNING:  before update (new): (3,"updated red trig modified")
 WARNING:  after update (old): (3,"red trig modified")
 WARNING:  after update (new): (3,"updated red trig modified")
-insert into upsert values(4, 'green') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key |       color       | key |           color           | key | color  
+-----+-------------------+-----+---------------------------+-----+--------
+   3 | red trig modified |   3 | updated red trig modified |   3 | orange
+(1 row)
+
+insert into upsert values(4, 'green') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (4,green)
 WARNING:  before insert (new, modified): (5,"green trig modified")
 WARNING:  after insert (new): (5,"green trig modified")
-insert into upsert values(5, 'purple') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key | color | key |        color        | key | color 
+-----+-------+-----+---------------------+-----+-------
+     |       |   5 | green trig modified |     | 
+(1 row)
+
+insert into upsert values(5, 'purple') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (5,purple)
 WARNING:  before update (old): (5,"green trig modified")
 WARNING:  before update (new): (5,"updated green trig modified")
 WARNING:  after update (old): (5,"green trig modified")
 WARNING:  after update (new): (5,"updated green trig modified")
-insert into upsert values(6, 'white') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key |        color        | key |            color            | key | color  
+-----+---------------------+-----+-----------------------------+-----+--------
+   5 | green trig modified |   5 | updated green trig modified |   5 | purple
+(1 row)
+
+insert into upsert values(6, 'white') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (6,white)
 WARNING:  before insert (new, modified): (7,"white trig modified")
 WARNING:  after insert (new): (7,"white trig modified")
-insert into upsert values(7, 'pink') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key | color | key |        color        | key | color 
+-----+-------+-----+---------------------+-----+-------
+     |       |   7 | white trig modified |     | 
+(1 row)
+
+insert into upsert values(7, 'pink') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (7,pink)
 WARNING:  before update (old): (7,"white trig modified")
 WARNING:  before update (new): (7,"updated white trig modified")
 WARNING:  after update (old): (7,"white trig modified")
 WARNING:  after update (new): (7,"updated white trig modified")
-insert into upsert values(8, 'yellow') on conflict (key) do update set color = 'updated ' || upsert.color;
+ key |        color        | key |            color            | key | color 
+-----+---------------------+-----+-----------------------------+-----+-------
+   7 | white trig modified |   7 | updated white trig modified |   7 | pink
+(1 row)
+
+insert into upsert values(8, 'yellow') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
 WARNING:  before insert (new): (8,yellow)
 WARNING:  before insert (new, modified): (9,"yellow trig modified")
 WARNING:  after insert (new): (9,"yellow trig modified")
-insert into upsert values(8, 'blue') on conflict (key) do select for update where upsert.color = 'yellow trig modified' returning old.*, new.*, upsert.*;
+ key | color | key |        color         | key | color 
+-----+-------+-----+----------------------+-----+-------
+     |       |   9 | yellow trig modified |     | 
+(1 row)
+
+insert into upsert values(8, 'blue') on conflict (key) do select for update where upsert.color = 'yellow trig modified' returning old.*, new.*, upsert.*, excluded.*;
 WARNING:  before insert (new): (8,blue)
 WARNING:  before insert (new, modified): (9,"blue trig modified")
- key |        color         | key |        color         | key |        color         
------+----------------------+-----+----------------------+-----+----------------------
-   9 | yellow trig modified |   9 | yellow trig modified |   9 | yellow trig modified
+ key |        color         | key |        color         | key |        color         | key |       color        
+-----+----------------------+-----+----------------------+-----+----------------------+-----+--------------------
+   9 | yellow trig modified |   9 | yellow trig modified |   9 | yellow trig modified |   9 | blue trig modified
 (1 row)
 
 select * from upsert;

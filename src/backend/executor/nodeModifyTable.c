@@ -294,6 +294,7 @@ ExecCheckPlanOutput(Relation resultRel, List *targetList)
  * oldSlot: slot holding old tuple deleted or updated
  * newSlot: slot holding new tuple inserted or updated
  * planSlot: slot holding tuple returned by top subplan node
+ * exclSlot: slot holding EXCLUDED tuple (for INSERT ... ON CONFLICT ...)
  *
  * Note: If oldSlot and newSlot are NULL, the FDW should have already provided
  * econtext's scan tuple and its old & new tuples are not needed (FDW direct-
@@ -310,8 +311,11 @@ ExecProcessReturning(ModifyTableContext *context,
 					 bool isDelete,
 					 TupleTableSlot *oldSlot,
 					 TupleTableSlot *newSlot,
-					 TupleTableSlot *planSlot)
+					 TupleTableSlot *planSlot,
+					 TupleTableSlot *exclSlot)
 {
+	ModifyTableState *mtstate = context->mtstate;
+	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
 	EState	   *estate = context->estate;
 	ProjectionInfo *projectReturning = resultRelInfo->ri_projectReturning;
 	ExprContext *econtext = projectReturning->pi_exprContext;
@@ -346,10 +350,18 @@ ExecProcessReturning(ModifyTableContext *context,
 	else
 		econtext->ecxt_newtuple = NULL; /* No references to NEW columns */
 
+	/* Make EXCLUDED tuple available to ExecProject, if required */
+	if (exclSlot)
+		econtext->ecxt_innertuple = exclSlot;
+	else if (node->onConflictAction != ONCONFLICT_NONE)
+		econtext->ecxt_innertuple = ExecGetAllNullSlot(estate, resultRelInfo);
+	else
+		econtext->ecxt_innertuple = NULL;
+
 	/*
-	 * Tell ExecProject whether or not the OLD/NEW rows actually exist.  This
-	 * information is required to evaluate ReturningExpr nodes and also in
-	 * ExecEvalSysVar() and ExecEvalWholeRowVar().
+	 * Tell ExecProject whether or not the OLD/NEW/EXCLUDED rows actually
+	 * exist.  This information is required to evaluate ReturningExpr nodes
+	 * and also in ExecEvalSysVar() and ExecEvalWholeRowVar().
 	 */
 	if (oldSlot == NULL)
 		projectReturning->pi_state.flags |= EEO_FLAG_OLD_IS_NULL;
@@ -360,6 +372,11 @@ ExecProcessReturning(ModifyTableContext *context,
 		projectReturning->pi_state.flags |= EEO_FLAG_NEW_IS_NULL;
 	else
 		projectReturning->pi_state.flags &= ~EEO_FLAG_NEW_IS_NULL;
+
+	if (exclSlot == NULL)
+		projectReturning->pi_state.flags |= EEO_FLAG_INNER_IS_NULL;
+	else
+		projectReturning->pi_state.flags &= ~EEO_FLAG_INNER_IS_NULL;
 
 	/* Compute the RETURNING expressions */
 	return ExecProject(projectReturning);
@@ -1361,7 +1378,7 @@ ExecInsert(ModifyTableContext *context,
 		}
 
 		result = ExecProcessReturning(context, resultRelInfo, false,
-									  oldSlot, slot, planSlot);
+									  oldSlot, slot, planSlot, NULL);
 
 		/*
 		 * For a cross-partition UPDATE, release the old tuple, first making
@@ -1926,7 +1943,7 @@ ldelete:
 		}
 
 		rslot = ExecProcessReturning(context, resultRelInfo, true,
-									 slot, NULL, context->planSlot);
+									 slot, NULL, context->planSlot, NULL);
 
 		/*
 		 * Before releasing the target tuple again, make sure rslot has a
@@ -2491,6 +2508,8 @@ ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
  *		planSlot is the output of the ModifyTable's subplan; we use it
  *		to access values from other input tables (for RETURNING),
  *		row-ID junk columns, etc.
+ *		exclSlot contains the EXCLUDED tuple if this is the auxiliary
+ *		UPDATE of an INSERT ... ON CONFLICT DO SELECT/UPDATE.
  *
  *		Returns RETURNING result if any, otherwise NULL.  On exit, if tupleid
  *		had identified the tuple to update, it will identify the tuple
@@ -2500,7 +2519,7 @@ ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
 static TupleTableSlot *
 ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		   ItemPointer tupleid, HeapTuple oldtuple, TupleTableSlot *oldSlot,
-		   TupleTableSlot *slot, bool canSetTag)
+		   TupleTableSlot *slot, TupleTableSlot *exclSlot, bool canSetTag)
 {
 	EState	   *estate = context->estate;
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
@@ -2752,7 +2771,8 @@ redo_act:
 	/* Process RETURNING if present */
 	if (resultRelInfo->ri_projectReturning)
 		return ExecProcessReturning(context, resultRelInfo, false,
-									oldSlot, slot, context->planSlot);
+									oldSlot, slot, context->planSlot,
+									exclSlot);
 
 	return NULL;
 }
@@ -2992,6 +3012,7 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	*returning = ExecUpdate(context, resultRelInfo,
 							conflictTid, NULL, existing,
 							resultRelInfo->ri_onConflict->oc_ProjSlot,
+							excludedSlot,
 							canSetTag);
 
 	/*
@@ -3124,7 +3145,8 @@ ExecOnConflictSelect(ModifyTableContext *context,
 	Assert(resultRelInfo->ri_projectReturning);
 
 	*returning = ExecProcessReturning(context, resultRelInfo, false,
-									  existing, existing, context->planSlot);
+									  existing, existing, context->planSlot,
+									  excludedSlot);
 
 	if (canSetTag)
 		context->estate->es_processed++;
@@ -3778,7 +3800,8 @@ lmerge_matched:
 												 false,
 												 resultRelInfo->ri_oldTupleSlot,
 												 newslot,
-												 context->planSlot);
+												 context->planSlot,
+												 NULL);
 					break;
 
 				case CMD_DELETE:
@@ -3787,7 +3810,8 @@ lmerge_matched:
 												 true,
 												 resultRelInfo->ri_oldTupleSlot,
 												 NULL,
-												 context->planSlot);
+												 context->planSlot,
+												 NULL);
 					break;
 
 				case CMD_NOTHING:
@@ -4551,13 +4575,17 @@ ExecModifyTable(PlanState *pstate)
 			 * provide it here.  The individual old and new slots are not
 			 * needed, since direct-modify is disabled if the RETURNING list
 			 * refers to OLD/NEW values.
+			 *
+			 * Currently, foreign tables do not support UNIQUE constraints,
+			 * and therefore they do not support INSERT ... ON CONFLICT DO
+			 * SELECT/UPDATE, and so the EXCLUDED slot is also not needed.
 			 */
 			Assert((resultRelInfo->ri_projectReturning->pi_state.flags & EEO_FLAG_HAS_OLD) == 0 &&
 				   (resultRelInfo->ri_projectReturning->pi_state.flags & EEO_FLAG_HAS_NEW) == 0);
 
 			slot = ExecProcessReturning(&context, resultRelInfo,
 										operation == CMD_DELETE,
-										NULL, NULL, context.planSlot);
+										NULL, NULL, context.planSlot, NULL);
 
 			return slot;
 		}
@@ -4751,7 +4779,7 @@ ExecModifyTable(PlanState *pstate)
 
 				/* Now apply the update. */
 				slot = ExecUpdate(&context, resultRelInfo, tupleid, oldtuple,
-								  oldSlot, slot, node->canSetTag);
+								  oldSlot, slot, NULL, node->canSetTag);
 				if (tuplock)
 					UnlockTuple(resultRelInfo->ri_RelationDesc, tupleid,
 								InplaceUpdateTupleLock);
