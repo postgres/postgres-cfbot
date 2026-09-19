@@ -114,6 +114,20 @@ void
 pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 						instr_time start_time, uint32 cnt, uint64 bytes)
 {
+	pgstat_count_io_op_time_ext(io_object, io_context, io_op, start_time,
+								cnt, bytes, InvalidOid);
+}
+
+/*
+ * Like pgstat_count_io_op_time() except the time is also credited to
+ * tablespace "spcoid", for pg_stat_tablespace.  The buffer manager uses this
+ * for relation I/O; everything else passes InvalidOid.
+ */
+void
+pgstat_count_io_op_time_ext(IOObject io_object, IOContext io_context,
+							IOOp io_op, instr_time start_time,
+							uint32 cnt, uint64 bytes, Oid spcoid)
+{
 	if (!INSTR_TIME_IS_ZERO(start_time))
 	{
 		instr_time	io_time;
@@ -147,6 +161,10 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 		/* Add the per-backend count */
 		pgstat_count_backend_io_op_time(io_object, io_context, io_op,
 										io_time);
+
+		/* Add the per-tablespace count */
+		if (OidIsValid(spcoid))
+			pgstat_count_tablespace_io_op_time(spcoid, io_op, io_time);
 	}
 
 	pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
@@ -162,11 +180,16 @@ pgstat_fetch_stat_io(void)
 
 /*
  * Simpler wrapper of pgstat_io_flush_cb()
+ *
+ * This also flushes the per-tablespace I/O times counted along with the I/O
+ * statistics, as some of the processes calling this, like the checkpointer
+ * and the background writer, never call pgstat_report_stat().
  */
 void
 pgstat_flush_io(bool nowait)
 {
 	(void) pgstat_io_flush_cb(nowait);
+	(void) pgstat_flush_tablespace_times(nowait);
 }
 
 /*
