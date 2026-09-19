@@ -16,8 +16,10 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "lib/stringinfo.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_coerce.h"
@@ -388,6 +390,13 @@ oper(ParseState *pstate, List *opname, Oid ltypeId, Oid rtypeId,
 	 */
 	key_ok = make_oper_cache_key(pstate, &key, opname, ltypeId, rtypeId, location);
 
+	/*
+	 * Skip the lookaside cache during an extension script, so the trust
+	 * checks below see the catalog state.
+	 */
+	if (creating_extension)
+		key_ok = false;
+
 	if (key_ok)
 	{
 		operOid = find_oper_cache_entry(&key);
@@ -540,6 +549,10 @@ left_oper(ParseState *pstate, List *op, Oid arg, bool noError, int location)
 	 */
 	key_ok = make_oper_cache_key(pstate, &key, op, InvalidOid, arg, location);
 
+	/* Skip the lookaside cache during an extension script; see oper() */
+	if (creating_extension)
+		key_ok = false;
+
 	if (key_ok)
 	{
 		operOid = find_oper_cache_entry(&key);
@@ -672,7 +685,12 @@ oper_lookup_failure_details(int fgc_flags, bool is_unary_op)
 	 */
 	if (!(fgc_flags & FGC_NAME_VISIBLE))
 	{
-		if (fgc_flags & FGC_SCHEMA_GIVEN)
+		if (fgc_flags & FGC_UNTRUSTED_SKIP)
+		{
+			(void) errdetail("An operator of that name exists, but it is not trusted while an extension script runs.");
+			return errhint("Only objects in pg_catalog, owned by a superuser, or belonging to the extension or one it requires are trusted.");
+		}
+		else if (fgc_flags & FGC_SCHEMA_GIVEN)
 			return 0;			/* schema-qualified name */
 		else if (!(fgc_flags & FGC_NAME_EXISTS))
 			return errdetail("There is no operator of that name.");
@@ -681,18 +699,19 @@ oper_lookup_failure_details(int fgc_flags, bool is_unary_op)
 	}
 
 	/*
-	 * Otherwise, the problem must be incorrect argument type(s).
+	 * Otherwise, the problem must be incorrect argument type(s); mention any
+	 * skipped untrusted candidate in place of the usual hint.
 	 */
 	if (is_unary_op)
-	{
 		(void) errdetail("No operator of that name accepts the given argument type.");
-		return errhint("You might need to add an explicit type cast.");
-	}
 	else
-	{
 		(void) errdetail("No operator of that name accepts the given argument types.");
+	if (fgc_flags & FGC_UNTRUSTED_SKIP)
+		return errhint("An operator of that name was ignored because it is not trusted while an extension script runs.");
+	else if (is_unary_op)
+		return errhint("You might need to add an explicit type cast.");
+	else
 		return errhint("You might need to add explicit type casts.");
-	}
 }
 
 /*

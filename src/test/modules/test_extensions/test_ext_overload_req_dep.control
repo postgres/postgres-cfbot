@@ -1,0 +1,4 @@
+comment = 'required extension providing objects for the overload-capture test'
+default_version = '1.0'
+relocatable = false
+superuser = false
