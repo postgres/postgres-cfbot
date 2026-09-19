@@ -1744,6 +1744,7 @@ run_schedule(const char *schedule, test_start_function startfunc,
 		char	   *c;
 		int			num_tests;
 		bool		inword;
+		bool		multiline_test;
 		int			i;
 
 		line_num++;
@@ -1755,7 +1756,7 @@ run_schedule(const char *schedule, test_start_function startfunc,
 
 		if (scbuf[0] == '\0' || scbuf[0] == '#')
 			continue;
-		if (strncmp(scbuf, "test: ", 6) == 0)
+		if (strncmp(scbuf, "test:", 5) == 0)
 			test = scbuf + 6;
 		else
 		{
@@ -1764,9 +1765,12 @@ run_schedule(const char *schedule, test_start_function startfunc,
 		}
 
 		num_tests = 0;
+
+test_line: /* avoid move this piece of code for now to keep v1 patch small */
 		inword = false;
 		for (c = test;; c++)
 		{
+			if(*c == '#') break;
 			if (*c == '\0' || isspace((unsigned char) *c))
 			{
 				if (inword)
@@ -1797,10 +1801,31 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			}
 		}
 
+		/*
+		 * Found `test: # no tests` treat it as a multiline test group
+		 */
 		if (num_tests == 0)
 		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
+			multiline_test = true;
+		}
+
+		if(multiline_test)
+		{
+			/* Scan one more line */
+			if(fgets(scbuf, sizeof(scbuf), scf))
+				line_num++;
+			else
+				scbuf[0] = 0;
+			/* if indented parse the test cases*/
+			if(scbuf[0] == ' ' || scbuf[0] == '\t')
+			{
+				test = scbuf + 1;
+				goto test_line;
+			} else if(strncmp(scbuf, "test:", 5) == 0) {
+				bail("%s line %d, expected a new line after a multiline test group", schedule, line_num++);
+			}
+			/* end of indented block, run! */
+			multiline_test = false;
 		}
 
 		if (num_tests == 1)
