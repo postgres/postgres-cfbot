@@ -976,7 +976,8 @@ ExecParallelCreateReaders(ParallelExecutorInfo *pei)
 void
 ExecParallelReinitialize(PlanState *planstate,
 						 ParallelExecutorInfo *pei,
-						 Bitmapset *sendParams)
+						 Bitmapset *sendParams,
+						 int64 tuples_needed)
 {
 	EState	   *estate = planstate->state;
 	FixedParallelExecutorState *fpes;
@@ -997,6 +998,13 @@ ExecParallelReinitialize(PlanState *planstate,
 	pei->finished = false;
 
 	fpes = shm_toc_lookup(pei->pcxt->toc, PARALLEL_KEY_EXECUTOR_FIXED, false);
+
+	/*
+	 * The tuple bound might have changed since the last scan, for instance if
+	 * a Limit node above us depends on a parameter.  Pass the current value
+	 * to the new batch of workers.
+	 */
+	fpes->tuples_needed = tuples_needed;
 
 	/* Free any serialized parameters from the last round. */
 	if (DsaPointerIsValid(fpes->param_exec))
