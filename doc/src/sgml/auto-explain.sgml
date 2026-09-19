@@ -63,6 +63,26 @@ LOAD 'auto_explain';
     </listitem>
    </varlistentry>
 
+   <varlistentry id="auto-explain-configuration-parameters-log-queryids">
+    <term>
+     <varname>auto_explain.log_queryids</varname> (<type>list of integers</type>)
+     <indexterm>
+      <primary><varname>auto_explain.log_queryids</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      <varname>auto_explain.log_queryids</varname> allows to specify list of
+      query IDs. Only plans with listed IDs will be logged. When this parameter
+      is empty (default), the query ID is not used for filtering. This doesn't
+      disable <varname>auto_explain.log_min_duration</varname>.
+      <varname>auto_explain.log_queryids</varname> and
+      <varname>auto_explain.log_min_duration</varname> work together. Only
+      superusers can change this setting.
+     </para>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="auto-explain-configuration-parameters-log-parameter-max-length">
     <term>
      <varname>auto_explain.log_parameter_max_length</varname> (<type>integer</type>)
