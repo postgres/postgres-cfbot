@@ -39,6 +39,7 @@
 #include "access/atm.h"
 #include "access/heapam.h"
 #include "access/logical_revert_worker.h"
+#include "access/slog.h"
 #include "access/table.h"
 #include "access/undo_xlog.h"
 #include "access/undorecord.h"
@@ -51,6 +52,7 @@
 #include "nodes/pg_list.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
+#include "storage/fileops.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/procarray.h"
@@ -391,6 +393,7 @@ LogicalRevertWorkerMain(Datum main_arg)
 		TransactionId xid;
 		XLogRecPtr	last_batch_lsn;
 		XLogRecPtr	stop_lsn;
+		SLogTxnEntry entry;
 		volatile bool done = false;
 		bool		error = false;
 		int			rc;
@@ -451,7 +454,11 @@ LogicalRevertWorkerMain(Datum main_arg)
 
 		PG_TRY();
 		{
+			if (!SLogTxnLookup(xid, InvalidOid, &entry))
+				elog(ERROR, "missing ATM entry for transaction %u", xid);
+			FileOpsSkipUndo = entry.fileops_owned;
 			done = process_revert_entry(xid, last_batch_lsn, stop_lsn);
+			FileOpsSkipUndo = false;
 
 			/*
 			 * Mark the ATM entry as reverted, then emit XLOG_ATM_FORGET and
@@ -465,6 +472,7 @@ LogicalRevertWorkerMain(Datum main_arg)
 		}
 		PG_CATCH();
 		{
+			FileOpsSkipUndo = false;
 			error = true;
 			HOLD_INTERRUPTS();
 			EmitErrorReport();

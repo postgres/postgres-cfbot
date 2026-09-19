@@ -439,9 +439,10 @@ undo_recovery_publish_retention(void)
  * UndoRecoveryRemoveXid - Remove an XID from recovery tracking
  *
  * Called when a commit or abort record is redone during recovery.
- * Committed transactions don't need UNDO rollback.  Aborted transactions
- * that were already fully rolled back (abort record present) also don't
- * need further work.
+ * Committed transactions don't need UNDO rollback.  Before an abort record
+ * is written, generic UNDO is either applied or registered in the ATM.
+ * FILEOPS inverses are embedded in the abort record and applied by redo.
+ * The ATM retains any outstanding generic rollback independently.
  */
 void
 UndoRecoveryRemoveXid(TransactionId xid)
@@ -493,6 +494,7 @@ typedef struct DeferredUndoXact
 	Oid			dboid;
 	XLogRecPtr	last_batch_lsn;
 	XLogRecPtr	first_batch_lsn;	/* oldest batch: WAL to retain */
+	bool		fileops_owned;	/* startup completed the FILEOPS inverses */
 	struct DeferredUndoXact *next;
 } DeferredUndoXact;
 
@@ -510,8 +512,12 @@ static DeferredUndoXact *deferred_undo_xacts = NULL;
  *
  * If UNDO application is skipped (e.g., due to syscache not being available),
  * the transaction is tracked for deferred processing after recovery completes.
+ *
+ * Return true if any FILEOPS inverse succeeded.  Before admitting writers,
+ * recovery must checkpoint those effects and any deferred ownership, so another
+ * crash cannot re-track the loser and undo a committed reuse of its paths.
  */
-void
+bool
 PerformUndoRecovery(void)
 {
 	int			i,
@@ -520,6 +526,7 @@ PerformUndoRecovery(void)
 	int			total_records = 0;
 	int			pending_xacts = 0;
 	int			deferred_xacts = 0;
+	bool		fileops_applied = false;
 
 	/* Count pending transactions for the opening log message. */
 	for (i = 0; i < undo_recovery_nentries; i++)
@@ -537,6 +544,7 @@ PerformUndoRecovery(void)
 	{
 		UndoRecoveryEntry *entry = &undo_recovery_entries[i];
 		bool		any_skipped = false;
+		bool		fileops_owned = true;
 		XLogRecPtr	perm_first = InvalidXLogRecPtr;
 
 		if (!TransactionIdIsValid(entry->xid))
@@ -596,14 +604,19 @@ PerformUndoRecovery(void)
 				 */
 				(void) UndoWalkChain(batch_lsn, InvalidXLogRecPtr, &res);
 				total_records += res.applied + res.skipped + res.failed;
+				fileops_owned &= res.complete && !res.fileops_failed;
+				fileops_applied |= res.fileops_applied;
 
 				/*
 				 * A record skipped here (an index AM needs the syscache,
 				 * which the startup process does not have) or one that failed
 				 * is handed to the logical revert worker, which walks the
-				 * whole chain again; the rm_undo callbacks are idempotent.
+				 * whole chain again.  FILEOPS cannot distinguish a new file
+				 * at the same path, so the ATM must remember when startup
+				 * completed all its inverses.  Index callbacks skip their
+				 * records there too (see UndoApplyInline).
 				 */
-				if (res.skipped > 0 || res.failed > 0)
+				if (!res.complete || res.skipped > 0 || res.failed > 0)
 					any_skipped = true;
 
 				/*
@@ -661,11 +674,12 @@ PerformUndoRecovery(void)
 				deferred->dboid = entry->dboid;
 				deferred->last_batch_lsn = perm_lsn;
 				deferred->first_batch_lsn = perm_first;
+				deferred->fileops_owned = fileops_owned;
 				deferred->next = deferred_undo_xacts;
 				deferred_undo_xacts = deferred;
 
 				ATMAddAbortedNoWAL(deferred->xid, deferred->dboid, perm_lsn,
-								   perm_first);
+								   perm_first, fileops_owned);
 
 				deferred_xacts++;
 				ereport(LOG,
@@ -699,6 +713,8 @@ PerformUndoRecovery(void)
 	}
 	undo_recovery_nentries = 0;
 	undo_recovery_capacity = 0;
+
+	return fileops_applied;
 }
 
 /*
@@ -706,8 +722,8 @@ PerformUndoRecovery(void)
  *
  * Called after recovery completes (when InRedo is false).  PerformUndoRecovery()
  * already put each deferred transaction into the Aborted Transaction Map
- * without WAL; this writes the XLOG_ATM_ABORT records for them (ATMAddAborted()
- * leaves the existing entries untouched), so standbys learn about them too.
+ * without WAL; this writes the XLOG_ATM_ABORT records, including ownership of
+ * the completed FILEOPS inverses, so standbys learn about them too.
  * The logical revert worker of each entry's database processes them
  * asynchronously.
  *
@@ -733,7 +749,7 @@ FlushDeferredUndoXacts(void)
 		deferred_undo_xacts = deferred->next;
 
 		ATMAddAborted(deferred->xid, deferred->dboid, deferred->last_batch_lsn,
-					  deferred->first_batch_lsn);
+					  deferred->first_batch_lsn, deferred->fileops_owned);
 		count++;
 
 		pfree(deferred);

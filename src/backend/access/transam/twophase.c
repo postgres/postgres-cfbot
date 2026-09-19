@@ -1720,9 +1720,9 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	}
 	else
 	{
-		char *fileops = NULL;
-		uint32 fileops_len = 0;
-		char *scan = bufptr;
+		char	   *fileops = NULL;
+		uint32		fileops_len = 0;
+		char	   *scan = bufptr;
 
 		/*
 		 * ROLLBACK PREPARED: hand any cluster-wide UNDO chain to the same
@@ -1753,7 +1753,7 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 
 			if (XLogRecPtrIsValid(perm_lsn) &&
 				!ATMAddAborted(xid, hdr->database, perm_lsn,
-							   hdr->undo_first_batch_lsn))
+							   hdr->undo_first_batch_lsn, true))
 				elog(WARNING,
 					 "ATM full: could not record rolled-back prepared "
 					 "transaction %u for UNDO", xid);
@@ -2704,9 +2704,16 @@ RecordTransactionAbortPrepared(TransactionId xid,
 	END_CRIT_SECTION();
 	if (fileops_len)
 	{
-		INJECTION_POINT("fileops-abort-after-flush", NULL);
-		FileOpsApplyAbort(fileops, fileops_len);
-		FileOpsEndAbort();
+		PG_TRY();
+		{
+			INJECTION_POINT("fileops-abort-after-flush", NULL);
+			FileOpsApplyAbort(fileops, fileops_len);
+		}
+		PG_FINALLY();
+		{
+			FileOpsEndAbort();
+		}
+		PG_END_TRY();
 	}
 
 	/*

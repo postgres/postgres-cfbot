@@ -789,7 +789,7 @@ static void UpdateLastRemovedPtr(char *filename);
 static void ValidateXLOGDirectoryStructure(void);
 static void CleanupBackupHistory(void);
 static void UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force);
-static bool PerformRecoveryXLogAction(void);
+static bool PerformRecoveryXLogAction(bool fileopsUndoApplied);
 static void CheckReplayedDataChecksumState(uint32 replayed_state);
 static void AdoptReplayedDataChecksumState(uint32 new_version, XLogRecPtr lsn);
 static void InitControlFile(uint64 sysidentifier, uint32 data_checksum_version);
@@ -6880,7 +6880,7 @@ StartupXLOG(void)
 	 * Emit checkpoint or end-of-recovery record in XLOG, if required.
 	 */
 	if (performedWalRecovery)
-		promoted = PerformRecoveryXLogAction();
+		promoted = PerformRecoveryXLogAction(endOfRecoveryInfo->fileopsUndoApplied);
 
 	/*
 	 * Finalize ATM state after recovery.  WAL replay has reconstructed the
@@ -7115,7 +7115,7 @@ ReachedEndOfBackup(XLogRecPtr EndRecPtr, TimeLineID tli)
  * allows some extra error checking in xlog_redo.
  */
 static bool
-PerformRecoveryXLogAction(void)
+PerformRecoveryXLogAction(bool fileopsUndoApplied)
 {
 	bool		promoted = false;
 	bool		flushForChecksums;
@@ -7147,10 +7147,14 @@ PerformRecoveryXLogAction(void)
 	 *
 	 * In promotion, only create a lightweight end-of-recovery record instead
 	 * of a full checkpoint. A checkpoint is requested later, after we're
-	 * fully out of recovery mode and already accepting queries.
+	 * fully out of recovery mode and already accepting queries.  However, if
+	 * startup applied FILEOPS loser inverses, checkpoint before admitting
+	 * writers: otherwise another crash can replay the old loser and apply its
+	 * inverses again, destroying a committed reuse of the same path.  The
+	 * checkpoint also persists FILEOPS ownership for deferred ATM entries.
 	 */
 	if (ArchiveRecoveryRequested && IsUnderPostmaster &&
-		PromoteIsTriggered() && !flushForChecksums)
+		PromoteIsTriggered() && !flushForChecksums && !fileopsUndoApplied)
 	{
 		promoted = true;
 

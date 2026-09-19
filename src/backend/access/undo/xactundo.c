@@ -76,6 +76,7 @@
 #include "miscadmin.h"
 #include "storage/aio_subsys.h"
 #include "storage/condition_variable.h"
+#include "storage/fileops.h"
 #include "storage/lwlock.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
@@ -1179,7 +1180,7 @@ AtAbort_XactUndo(void)
 
 						if (ATMAddAborted(GetCurrentTransactionId(),
 										  MyDatabaseId, perm_lsn,
-										  XactUndo.first_batch_lsn[UNDOPERSISTENCE_PERMANENT]))
+										  XactUndo.first_batch_lsn[UNDOPERSISTENCE_PERMANENT], true))
 							lsn_safely_held = true; /* ATM holds the LSN */
 						else
 							elog(WARNING, "ATM full: could not record aborted transaction %u", GetCurrentTransactionId());
@@ -1208,7 +1209,7 @@ AtAbort_XactUndo(void)
 				 */
 				if (ATMAddAborted(GetCurrentTransactionId(),
 								  MyDatabaseId, perm_lsn,
-								  XactUndo.first_batch_lsn[UNDOPERSISTENCE_PERMANENT]))
+								  XactUndo.first_batch_lsn[UNDOPERSISTENCE_PERMANENT], true))
 					lsn_safely_held = true;
 				else
 					elog(WARNING,
@@ -1518,7 +1519,7 @@ AtSubAbort_XactUndo(int level)
 
 				Assert(TransactionIdIsValid(subxid));
 				if (!ATMAddAbortedBounded(subxid, MyDatabaseId, sub_head,
-										  parent_head, first))
+										  parent_head, first, true))
 					elog(WARNING,
 						 "ATM full: could not record rolled-back subtransaction %u",
 						 subxid);
@@ -1652,11 +1653,7 @@ XactUndo_SubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 			break;
 
 		case SUBXACT_EVENT_ABORT_SUB:
-
-			/*
-			 * Subtransaction is aborting. Apply UNDO and clean up.
-			 */
-			AtSubAbort_XactUndo(mySubid);
+			/* AbortSubTransaction applies undo before logging the abort. */
 			break;
 
 		case SUBXACT_EVENT_PRE_COMMIT_SUB:

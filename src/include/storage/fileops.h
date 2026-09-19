@@ -118,7 +118,9 @@ extern void FileOpsSync(const char *path);
 #define FILEOPS_TWOPHASE_INVERSES 1
 extern void FileOpsGetAbortData(char **data, uint32 *len);
 extern void FileOpsApplyAbort(const char *data, uint32 len);
-extern void FileOpsResetAbortFailure(void);
+
+/* Scoped to a generic walk whose FILEOPS inverses belong to abort WAL. */
+extern PGDLLIMPORT bool FileOpsSkipUndo;
 extern void FileOpsApplyInverse(uint16 info, const char *data, uint32 len);
 extern void FileOpsBeginAbort(void);
 extern void FileOpsEndAbort(void);
@@ -198,8 +200,6 @@ typedef struct xl_fileops_write
 {
 	off_t		offset;			/* write offset in file */
 	uint32		len;			/* data length */
-	off_t		orig_length;
-	uint32		before_len;
 	uint16		path_len;		/* length of path (including NUL) */
 	/* variable-length path follows, then data */
 } xl_fileops_write;
@@ -216,12 +216,10 @@ extern int	FileOpsWrite(const char *path, off_t offset,
 typedef struct xl_fileops_truncate
 {
 	off_t		length;			/* new file length */
-	off_t		orig_length;	/* pre-truncate length */
-	uint32		before_len;
 	/* variable-length path follows */
 } xl_fileops_truncate;
 
-#define SizeOfFileOpsTruncate (offsetof(xl_fileops_truncate, before_len) + sizeof(uint32))
+#define SizeOfFileOpsTruncate (offsetof(xl_fileops_truncate, length) + sizeof(off_t))
 
 /* File truncation API */
 extern void FileOpsTruncate(const char *path, off_t length);
@@ -406,13 +404,13 @@ typedef struct FileopsUndoCreate
 /* WRITE undo: path, before-image, then after-image. */
 typedef struct FileopsUndoWrite
 {
-	off_t orig_length;
-	off_t new_length;
-	off_t offset;
-	uint32 before_len;
-	uint32 after_len;
-	uint16 path_len;
-} FileopsUndoWrite;
+	off_t		orig_length;
+	off_t		new_length;
+	off_t		offset;
+	uint32		before_len;
+	uint32		after_len;
+	uint16		path_len;
+}			FileopsUndoWrite;
 
 /* TRUNCATE undo payload: path, followed by the bytes removed by a shrink. */
 typedef struct FileopsUndoTruncate

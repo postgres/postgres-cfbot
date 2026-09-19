@@ -213,7 +213,7 @@ extern void UndoRecoveryTrackBatch(TransactionId xid, Oid dboid,
 extern void UndoRecoveryRemoveXid(TransactionId xid);
 extern void UndoRecoveryTrackInflight(const xl_undo_inflight_xact *x);
 extern bool UndoRecoveryNeeded(void);
-extern void PerformUndoRecovery(void);
+extern bool PerformUndoRecovery(void);
 extern void FlushDeferredUndoXacts(void);
 
 #endif							/* UNDO_XLOG_H */

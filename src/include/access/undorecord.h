@@ -245,6 +245,8 @@ typedef struct UndoChainWalkResult
 	int			applied;		/* records returning UNDO_APPLY_SUCCESS */
 	int			skipped;		/* records returning UNDO_APPLY_SKIPPED */
 	int			failed;			/* UNDO_APPLY_ERROR, or unknown rmgr */
+	bool		fileops_failed; /* a FILEOPS inverse was not applied */
+	bool		fileops_applied;	/* at least one FILEOPS inverse succeeded */
 	bool		complete;		/* walked to the end (or stop) of the chain */
 	bool		malformed;		/* if !complete, because of a malformed batch */
 	XLogRecPtr	oldest_batch;	/* LSN of the oldest batch read */

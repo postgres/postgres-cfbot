@@ -57,9 +57,11 @@
  */
 
 static bool applyingAbort = false;
-static bool abortApplyFailed = false;
+bool		FileOpsSkipUndo = false;
 
 /* Forward declarations */
+static void fileops_sync_inverse(uint16 info, const char *data, uint32 len,
+								 int elevel);
 static UndoApplyResult fileops_undo_apply(uint8 rmid, uint16 info,
 										  TransactionId xid, Oid reloid,
 										  const char *payload, Size payload_len,
@@ -194,8 +196,8 @@ fileops_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 	Assert(rmid == UNDO_RMID_FILEOPS);
 
 	/* Abort WAL owns completed aborts; generic UNDO is for crash losers. */
-	if (!applyingAbort && !InRecovery && TransactionIdDidAbort(xid))
-		return abortApplyFailed ? UNDO_APPLY_ERROR : UNDO_APPLY_SUCCESS;
+	if (!applyingAbort && FileOpsSkipUndo)
+		return UNDO_APPLY_SUCCESS;
 
 	INJECTION_POINT("fileops-undo-apply-begin", NULL);
 
@@ -240,8 +242,8 @@ fileops_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 				const char *path;
 				const char *before;
 				const char *after;
-				char *current;
-				int fd;
+				char	   *current;
+				int			fd;
 
 				if (payload_len < sizeof(hdr))
 					return UNDO_APPLY_ERROR;
@@ -653,14 +655,12 @@ fileops_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 
 	INJECTION_POINT("fileops-undo-apply-end", NULL);
 
-	return result;
-}
+	/* Startup can persist FILEOPS completion in the ATM after this returns. */
+	if (InRecovery && !applyingAbort && result == UNDO_APPLY_SUCCESS)
+		fileops_sync_inverse(info, payload, payload_len,
+							 data_sync_elevel(ERROR));
 
-/* Failure status belongs to this abort, not the lifetime of the backend. */
-void
-FileOpsResetAbortFailure(void)
-{
-	abortApplyFailed = false;
+	return result;
 }
 
 /*
@@ -668,51 +668,91 @@ FileOpsResetAbortFailure(void)
  * Ordinary syscall failures remain warnings.  A failed inverse can therefore
  * leave an online effect until recovery replays the abort record; callers must
  * not infer successful filesystem rollback merely from transaction abort.
+ *
+ * Failing to make the inverse durable is a PANIC regardless of
+ * data_sync_retry.  Online, we run after the abort record is flushed and the
+ * transaction is marked aborted in clog, so an ERROR would re-enter
+ * AbortTransaction and log a second abort record.  The caller holds off
+ * checkpoints until the inverses are applied, so crash recovery replays the
+ * abort record and applies the inverse again.
  */
 void
 FileOpsApplyInverse(uint16 info, const char *data, uint32 len)
 {
+	applyingAbort = true;
+	PG_TRY();
+	{
+		(void) fileops_undo_apply(UNDO_RMID_FILEOPS, info, InvalidTransactionId,
+								  InvalidOid, data, len, InvalidUndoRecPtr);
+	}
+	PG_FINALLY();
+	{
+		applyingAbort = false;
+	}
+	PG_END_TRY();
+	fileops_sync_inverse(info, data, len, PANIC);
+}
+
+/* Make an inverse durable before its completion can outlive recovery. */
+static void
+fileops_sync_inverse(uint16 info, const char *data, uint32 len, int elevel)
+{
 	const char *path = NULL;
 	struct stat st;
-	Size hdrlen = 0;
+	Size		hdrlen = 0;
 
-	applyingAbort = true;
-	if (fileops_undo_apply(UNDO_RMID_FILEOPS, info, InvalidTransactionId,
-						   InvalidOid, data, len, InvalidUndoRecPtr) != UNDO_APPLY_SUCCESS)
-		abortApplyFailed = true;
-	applyingAbort = false;
 	switch (info)
 	{
-		case FILEOPS_UNDO_CREATE: hdrlen = sizeof(FileopsUndoCreate); break;
-		case FILEOPS_UNDO_WRITE: hdrlen = sizeof(FileopsUndoWrite); break;
-		case FILEOPS_UNDO_TRUNCATE: hdrlen = sizeof(FileopsUndoTruncate); break;
-		case FILEOPS_UNDO_CHMOD: hdrlen = sizeof(FileopsUndoChmod); break;
-		case FILEOPS_UNDO_CHOWN: hdrlen = sizeof(FileopsUndoChown); break;
-		case FILEOPS_UNDO_MKDIR: hdrlen = sizeof(FileopsUndoMkdir); break;
-		case FILEOPS_UNDO_SYMLINK: hdrlen = sizeof(FileopsUndoSymlink); break;
-		case FILEOPS_UNDO_LINK: hdrlen = sizeof(FileopsUndoLink); break;
-		case FILEOPS_UNDO_SETXATTR: hdrlen = sizeof(FileopsUndoSetxattr); break;
-		case FILEOPS_UNDO_REMOVEXATTR: hdrlen = sizeof(FileopsUndoRemovexattr); break;
+		case FILEOPS_UNDO_CREATE:
+			hdrlen = sizeof(FileopsUndoCreate);
+			break;
+		case FILEOPS_UNDO_WRITE:
+			hdrlen = sizeof(FileopsUndoWrite);
+			break;
+		case FILEOPS_UNDO_TRUNCATE:
+			hdrlen = sizeof(FileopsUndoTruncate);
+			break;
+		case FILEOPS_UNDO_CHMOD:
+			hdrlen = sizeof(FileopsUndoChmod);
+			break;
+		case FILEOPS_UNDO_CHOWN:
+			hdrlen = sizeof(FileopsUndoChown);
+			break;
+		case FILEOPS_UNDO_MKDIR:
+			hdrlen = sizeof(FileopsUndoMkdir);
+			break;
+		case FILEOPS_UNDO_SYMLINK:
+			hdrlen = sizeof(FileopsUndoSymlink);
+			break;
+		case FILEOPS_UNDO_LINK:
+			hdrlen = sizeof(FileopsUndoLink);
+			break;
+		case FILEOPS_UNDO_SETXATTR:
+			hdrlen = sizeof(FileopsUndoSetxattr);
+			break;
+		case FILEOPS_UNDO_REMOVEXATTR:
+			hdrlen = sizeof(FileopsUndoRemovexattr);
+			break;
 	}
 	if (hdrlen == 0 || len <= hdrlen)
 		elog(PANIC, "invalid FILEOPS inverse payload");
 	path = data + hdrlen;
 	if (enableFsync)
 	{
-		char parent[MAXPGPATH];
-		char *sep;
+		char		parent[MAXPGPATH];
+		char	   *sep;
 
 #ifdef USE_INJECTION_POINTS
 		if (IS_INJECTION_POINT_ATTACHED("fileops-inverse-fsync-fail"))
 		{
 			errno = EIO;
-			ereport(data_sync_elevel(ERROR),
+			ereport(elevel,
 					(errcode_for_file_access(),
 					 errmsg("could not fsync file \"%s\": %m", path)));
 		}
 #endif
 		if (lstat(path, &st) == 0 && !S_ISLNK(st.st_mode))
-			fsync_fname_ext(path, S_ISDIR(st.st_mode), true, WARNING);
+			fsync_fname_ext(path, S_ISDIR(st.st_mode), true, elevel);
 		strlcpy(parent, path, sizeof(parent));
 		sep = strrchr(parent, '/');
 		if (sep == NULL)
@@ -721,7 +761,7 @@ FileOpsApplyInverse(uint16 info, const char *data, uint32 len)
 			parent[1] = '\0';
 		else
 			*sep = '\0';
-		fsync_fname_ext(parent, true, true, WARNING);
+		fsync_fname_ext(parent, true, true, elevel);
 	}
 }
 

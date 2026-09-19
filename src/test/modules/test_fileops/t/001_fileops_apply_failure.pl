@@ -1,11 +1,7 @@
 # Copyright (c) 2021-2026, PostgreSQL Global Development Group
 
-# A FILEOPS UNDO record that cannot be applied must be reported as a failure,
-# so the abort hands the chain to the logical revert worker instead of
-# treating it as rolled back.
-#
-# The transaction truncates a file, which is then made read-only behind its
-# back, so the truncation's UNDO cannot reopen it for writing.
+# FILEOPS inverses belong to the abort record, not the generic ATM.  A
+# syscall failure is reported; crash replay retries the embedded inverse.
 
 use strict;
 use warnings FATAL => 'all';
@@ -36,9 +32,9 @@ $bg->query('ROLLBACK');
 $bg->quit;
 
 is( $node->safe_psql(
-		'postgres', 'SELECT test_fileops_atm_oldest_lsn() IS NOT NULL'),
+		'postgres', 'SELECT test_fileops_atm_oldest_lsn() IS NULL'),
 	't',
-	'the rollback whose FILEOPS UNDO failed was handed to the ATM');
+	'FILEOPS abort inverses are not handed to the generic ATM');
 like(
 	slurp_file($node->logfile),
 	qr/FILEOPS UNDO TRUNCATE: could not open/,

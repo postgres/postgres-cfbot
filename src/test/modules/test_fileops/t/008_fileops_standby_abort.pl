@@ -10,6 +10,8 @@ $primary->init(allows_streaming => 1);
 $primary->append_conf('postgresql.conf', "max_prepared_transactions = 5\n");
 $primary->start;
 $primary->safe_psql('postgres', 'CREATE EXTENSION test_fileops');
+$primary->safe_psql('postgres', 'CREATE EXTENSION injection_points')
+  if $ENV{enable_injection_points} eq 'yes';
 $primary->backup('backup');
 my $standby = PostgreSQL::Test::Cluster->new('standby');
 $standby->init_from_backup($primary, 'backup', has_streaming => 1);
@@ -41,6 +43,24 @@ ROLLBACK TO a;
 COMMIT;
 });
 $primary->wait_for_catchup($standby);
+if ($ENV{enable_injection_points} eq 'yes')
+{
+	$standby->safe_psql('postgres',
+		"SELECT injection_points_attach('fileops-abort-after-flush', 'wait')");
+	$primary->safe_psql('postgres', q{
+BEGIN;
+SELECT test_fileops_create('standby-window.dat', 384);
+ROLLBACK;
+});
+	$standby->wait_for_event('startup', 'fileops-abort-after-flush');
+	ok(-e $standby->data_dir . '/standby-window.dat',
+		'standby paused before inverse');
+	$standby->stop('immediate');
+	$standby->start;
+	$primary->wait_for_catchup($standby);
+	ok(!-e $standby->data_dir . '/standby-window.dat',
+		'standby crash replays inverse');
+}
 for my $stage ('streaming', 'promoted')
 {
 	$standby->promote if $stage eq 'promoted';

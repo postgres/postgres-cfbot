@@ -30,7 +30,9 @@ tests += {
       'test_idxundo',
     ],
     # The end-to-end tests read the index back and verify it with amcheck.
-    'regress_args': ['--load-extension=amcheck'],
+    'regress_args': ['--load-extension=amcheck', '--load-extension=pageinspect',
+                     '--temp-config', files('test_idxundo.conf')],
+    'runningcheck': false,
   },
   'tap': {
     'env': {

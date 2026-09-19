@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "access/atm.h"
+#include "access/hash.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -46,7 +47,8 @@ void		_PG_init(void);
  * idxundo_count_dead_all(index regclass) -> total LP_DEAD items in the index
  *
  * The end-to-end tests do not know which block the aborted entries landed on,
- * so they count over every leaf page of the index.
+ * so they count over every entry-bearing page of the index: btree leaves, hash
+ * bucket and overflow pages.
  */
 PG_FUNCTION_INFO_V1(idxundo_count_dead_all);
 Datum
@@ -63,9 +65,9 @@ idxundo_count_dead_all(PG_FUNCTION_ARGS)
 	nblocks = RelationGetNumberOfBlocks(indexrel);
 	relam = indexrel->rd_rel->relam;
 
-	if (relam != BTREE_AM_OID)
+	if (relam != BTREE_AM_OID && relam != HASH_AM_OID)
 		ereport(ERROR,
-				(errmsg("index \"%s\" is not a btree index",
+				(errmsg("index \"%s\" is neither a btree nor a hash index",
 						RelationGetRelationName(indexrel))));
 
 	for (blk = 0; blk < nblocks; blk++)
@@ -79,12 +81,19 @@ idxundo_count_dead_all(PG_FUNCTION_ARGS)
 		page = BufferGetPage(buffer);
 
 		/*
-		 * Only leaf pages hold index entries; skip the metapage and
-		 * internals.
+		 * Only count line pointers on pages that actually hold index entries.
+		 * Every other page kind must be skipped, not merely tested for
+		 * emptiness: a hash bitmap page is a dense run of set bits, which
+		 * read as line pointers whose lp_flags happen to be LP_DEAD. Counting
+		 * those reports over a thousand phantom dead entries in a freshly
+		 * built hash index and makes the before/after comparison meaningless.
 		 */
 		if (!PageIsNew(page) && !PageIsEmpty(page) &&
 			PageGetSpecialSize(page) > 0 &&
-			P_ISLEAF(BTPageGetOpaque(page)))
+			(relam == BTREE_AM_OID
+			 ? P_ISLEAF(BTPageGetOpaque(page))
+			 : ((HashPageGetOpaque(page)->hasho_flag & LH_PAGE_TYPE) == LH_BUCKET_PAGE ||
+				(HashPageGetOpaque(page)->hasho_flag & LH_PAGE_TYPE) == LH_OVERFLOW_PAGE)))
 		{
 			maxoff = PageGetMaxOffsetNumber(page);
 			for (off = FirstOffsetNumber; off <= maxoff; off++)
@@ -178,7 +187,7 @@ idxundo_atm_add(PG_FUNCTION_ARGS)
 	TransactionId xid = DatumGetTransactionId(PG_GETARG_DATUM(0));
 	XLogRecPtr	lsn = PG_GETARG_LSN(1);
 
-	PG_RETURN_BOOL(ATMAddAborted(xid, MyDatabaseId, lsn, lsn));
+	PG_RETURN_BOOL(ATMAddAborted(xid, MyDatabaseId, lsn, lsn, false));
 }
 
 /*

@@ -119,6 +119,7 @@ typedef struct SLogTxnEntry
 	Oid			dboid;			/* database OID */
 	TimestampTz abort_time;		/* when transaction aborted */
 	bool		revert_complete;	/* has Logical Revert finished? */
+	bool		fileops_owned;	/* FILEOPS completed or owned by abort WAL */
 } SLogTxnEntry;
 
 /* ----------------------------------------------------------------
@@ -202,7 +203,8 @@ extern void SLogShmemInit(void);
  */
 extern bool SLogTxnInsert(TransactionId xid, Oid reloid, Oid dboid,
 						  XLogRecPtr last_batch_lsn, XLogRecPtr stop_lsn,
-						  XLogRecPtr first_batch_lsn);
+						  XLogRecPtr first_batch_lsn, bool fileops_owned,
+						  bool check_space);
 extern bool SLogTxnLookup(TransactionId xid, Oid reloid,
 						  SLogTxnEntry *entry_out);
 extern bool SLogTxnLookupByXid(TransactionId xid, XLogRecPtr *lsn_out);

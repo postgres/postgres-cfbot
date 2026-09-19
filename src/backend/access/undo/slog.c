@@ -53,6 +53,7 @@
 #include "storage/spin.h"
 #include "storage/subsystems.h"
 #include "utils/dsa.h"
+#include "utils/freepage.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
@@ -91,6 +92,7 @@ typedef struct slog_atm_value_t
 	Oid			dboid;
 	TimestampTz abort_time;
 	bool		revert_complete;
+	bool		fileops_owned;
 } slog_atm_value_t;
 
 #define RT_PREFIX slog_atm
@@ -337,26 +339,43 @@ SLogEnsureDsaAttached(void)
  */
 
 /*
+ * Free DSA space one new ATM entry may need: a fresh superblock (16 pages,
+ * DSA_PAGES_PER_SUPERBLOCK in dsa.c) for each size class the insert allocates
+ * from -- the node4s of a new path, one grown node, the leaf, and the span
+ * descriptors -- plus one for slack.
+ */
+#define SLOG_ATM_INSERT_RESERVE (5 * 16 * FPM_PAGE_SIZE)
+
+/*
  * SLogTxnInsert
  *		Insert an aborted transaction entry into the sLog.
  *
- * Creates an entry in the ATM radix tree.  The tree grows on demand from
- * the DSA area, so unlike the old fixed pool this never fails for lack of
- * space; the return type is retained for API compatibility and is always
- * true.
+ * Creates an entry in the ATM radix tree, which grows on demand from the DSA
+ * area up to slog_dsa_max_size_mb.  The tree's allocations raise ERROR when
+ * the area is full, and an ERROR midway through an insert leaves the tree
+ * corrupt.  With check_space, the caller is aborting a transaction and must
+ * not fail: first make sure the area has room for the insert, and return
+ * false if it does not.  Only this tree allocates from the area, and txn_lock
+ * serializes it, so the room cannot be taken in between.  Without
+ * check_space (redo, and restoring entries at startup) the insert raises
+ * ERROR when the area is full, failing startup rather than dropping a
+ * rollback.
  */
 bool
 SLogTxnInsert(TransactionId xid, Oid reloid, Oid dboid,
 			  XLogRecPtr last_batch_lsn, XLogRecPtr stop_lsn,
-			  XLogRecPtr first_batch_lsn)
+			  XLogRecPtr first_batch_lsn, bool fileops_owned,
+			  bool check_space)
 {
 	slog_atm_radix_tree *tree = slog_atm_tree();
 	uint64		key = slog_atm_key(xid, reloid);
 	slog_atm_value_t value;
+	slog_atm_value_t *found;
 
 	value.last_batch_lsn = last_batch_lsn;
 	value.stop_lsn = stop_lsn;
 	value.first_batch_lsn = first_batch_lsn;
+	value.fileops_owned = fileops_owned;
 	value.dboid = dboid;
 	value.abort_time = GetCurrentTimestamp();
 	value.revert_complete = false;
@@ -364,13 +383,37 @@ SLogTxnInsert(TransactionId xid, Oid reloid, Oid dboid,
 	LWLockAcquire(&SLogState->txn_lock.lock, LW_EXCLUSIVE);
 
 	/*
-	 * RT_SET returns whether the key already existed.  A duplicate insert is
-	 * a no-op on the (xid, reloid) identity; the original entry's data fields
-	 * would be overwritten, so preserve the old behavior of leaving an
-	 * existing entry untouched by finding first.
+	 * Keep the original chain and progress on duplicate insertion, but take
+	 * the latest FILEOPS ownership.  Recovery may supersede an online insert
+	 * made before an abort record that never reached WAL, or mark the
+	 * inverses complete after applying them itself.
 	 */
-	if (slog_atm_find(tree, key) == NULL)
+	found = slog_atm_find(tree, key);
+	if (found != NULL)
+		found->fileops_owned = fileops_owned;
+	else
+	{
+		if (check_space)
+		{
+			dsa_pointer reserve;
+
+			/*
+			 * Freeing a large allocation returns its pages, contiguous, to
+			 * the free page manager, where the insert's new superblocks find
+			 * them.
+			 */
+			reserve = dsa_allocate_extended(slog_dsa_handle,
+											SLOG_ATM_INSERT_RESERVE,
+											DSA_ALLOC_NO_OOM);
+			if (!DsaPointerIsValid(reserve))
+			{
+				LWLockRelease(&SLogState->txn_lock.lock);
+				return false;
+			}
+			dsa_free(slog_dsa_handle, reserve);
+		}
 		(void) slog_atm_set(tree, key, &value);
+	}
 
 	LWLockRelease(&SLogState->txn_lock.lock);
 	return true;
@@ -400,6 +443,7 @@ SLogTxnLookup(TransactionId xid, Oid reloid, SLogTxnEntry *entry_out)
 		entry_out->last_batch_lsn = found->last_batch_lsn;
 		entry_out->stop_lsn = found->stop_lsn;
 		entry_out->first_batch_lsn = found->first_batch_lsn;
+		entry_out->fileops_owned = found->fileops_owned;
 		entry_out->dboid = found->dboid;
 		entry_out->abort_time = found->abort_time;
 		entry_out->revert_complete = found->revert_complete;
@@ -798,6 +842,7 @@ SLogTxnSnapshotForCheckpoint(SLogTxnEntry **entries_out)
 		arr[count].last_batch_lsn = val->last_batch_lsn;
 		arr[count].stop_lsn = val->stop_lsn;
 		arr[count].first_batch_lsn = val->first_batch_lsn;
+		arr[count].fileops_owned = val->fileops_owned;
 		arr[count].dboid = val->dboid;
 		arr[count].abort_time = val->abort_time;
 		arr[count].revert_complete = val->revert_complete;

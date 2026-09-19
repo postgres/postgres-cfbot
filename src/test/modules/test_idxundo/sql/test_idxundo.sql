@@ -1,10 +1,10 @@
 -- ---------------------------------------------------------------------------
 -- Index UNDO, end to end through the real abort path.
 --
--- A table created WITH (index_undo = on) makes its btree indexes write UNDO
--- into the cluster-wide UNDO-in-WAL stream.  On ROLLBACK, AtAbort_XactUndo()
--- walks the chain and the apply callback marks the provisionally-inserted
--- entries LP_DEAD -- no VACUUM required.
+-- A table created WITH (index_undo = on) makes its btree and hash indexes
+-- write UNDO into the cluster-wide UNDO-in-WAL stream.  On ROLLBACK,
+-- AtAbort_XactUndo() walks the chain and the apply callbacks mark the
+-- provisionally-inserted entries LP_DEAD -- no VACUUM required.
 -- ---------------------------------------------------------------------------
 CREATE EXTENSION test_idxundo;
 CREATE EXTENSION amcheck;
@@ -141,6 +141,33 @@ SELECT count(*) AS heap_rows FROM iu_split;
 SELECT bt_index_check('iu_split_idx', heapallindexed => true);
 
 -- ===========================================================================
+-- hash indexes
+-- ===========================================================================
+
+CREATE TABLE iu_hash (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_hash_idx ON iu_hash USING hash (id);
+INSERT INTO iu_hash SELECT g, 'committed' FROM generate_series(1, 200) g;
+SELECT idxundo_count_dead_all('iu_hash_idx') AS dead_before;
+BEGIN;
+INSERT INTO iu_hash SELECT g, 'aborted' FROM generate_series(1001, 1100) g;
+SELECT idxundo_undo_chain_published() AS chain_published;
+ROLLBACK;
+SELECT idxundo_count_dead_all('iu_hash_idx') AS dead_after_rollback;
+-- The pages holding them carry the dead-tuples hint, so an insert that finds
+-- the page full reclaims them (_hash_vacuum_one_page) instead of waiting for
+-- VACUUM.
+SELECT bool_or((s.hasho_flag & 128) <> 0) AS has_dead_hint
+  FROM generate_series(1, pg_relation_size('iu_hash_idx') /
+                          current_setting('block_size')::int - 1) b,
+       LATERAL hash_page_stats(get_raw_page('iu_hash_idx', b::int)) s
+ WHERE hash_page_type(get_raw_page('iu_hash_idx', b::int)) IN ('bucket', 'overflow');
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_hash WHERE id BETWEEN 1 AND 200;
+SELECT count(*) AS aborted_via_index FROM iu_hash WHERE id BETWEEN 1001 AND 1100;
+RESET enable_seqscan;
+SELECT count(*) AS heap_rows FROM iu_hash;
+
+-- ===========================================================================
 -- Turning the option on AFTER rows already exist.
 --
 -- The option only governs whether NEW inserts write UNDO; pre-existing entries
@@ -163,7 +190,7 @@ SELECT count(*) AS preexisting_via_index FROM iu_late WHERE id BETWEEN 1 AND 100
 RESET enable_seqscan;
 SELECT bt_index_check('iu_late_idx', heapallindexed => true);
 
-DROP TABLE iu_btree, iu_off, iu_sub, iu_split, iu_late;
+DROP TABLE iu_btree, iu_off, iu_sub, iu_split, iu_hash, iu_late;
 
 -- ===========================================================================
 -- DEFERRED BATCHING SAFETY
@@ -294,20 +321,23 @@ SELECT bt_index_check('iu_big_idx', heapallindexed => true);
 -- notice -- so XactUndoFlushPending() is called before the capture, and
 -- AtPrepare_XactUndo() asserts nothing is left pending.
 --
--- dead_after_rollback_prepared is 0: ROLLBACK PREPARED hands the chain to the
--- logical revert worker, which leaves index entries for VACUUM (after the
--- abort is visible their heap TIDs could hold committed rows; see
--- nbtree_undo_apply()).  What this case proves is that PREPARE itself is safe:
--- it does not error, lose the chain, or trip the AtPrepare_XactUndo()
--- assertion, and the committed rows stay index-reachable.
+-- ROLLBACK PREPARED hands the chain to the logical revert worker through the
+-- ATM rather than applying it inline.  The worker is off for this test (see
+-- test_idxundo.conf), so the entries are still live afterwards and the ATM
+-- holds the transaction; t/007 shows the worker reverting it.  This case also
+-- proves PREPARE itself is safe: it does not error, lose the chain, or trip
+-- the AtPrepare_XactUndo() assertion, and the committed rows stay
+-- index-reachable.
 CREATE TABLE iu_2pc (id int, val text) WITH (index_undo = on);
 CREATE INDEX iu_2pc_idx ON iu_2pc (id);
 INSERT INTO iu_2pc SELECT g, 'committed' FROM generate_series(1, 100) g;
 BEGIN;
 INSERT INTO iu_2pc SELECT g, 'prepared' FROM generate_series(501, 560) g;
+SELECT pg_current_xact_id()::xid AS iu_p1_xid \gset
 PREPARE TRANSACTION 'iu_p1';
 ROLLBACK PREPARED 'iu_p1';
--- The 60 entries from the prepared-then-aborted transaction are left for VACUUM.
+SELECT count(*) AS queued_for_revert FROM idxundo_atm_entries()
+ WHERE xid = :'iu_p1_xid' AND NOT revert_complete;
 SELECT idxundo_count_dead_all('iu_2pc_idx') AS dead_after_rollback_prepared;
 SET enable_seqscan = off;
 SELECT count(*) AS committed_via_index FROM iu_2pc WHERE id BETWEEN 1 AND 100;
@@ -315,7 +345,20 @@ SELECT count(*) AS prepared_via_index FROM iu_2pc WHERE id BETWEEN 501 AND 560;
 RESET enable_seqscan;
 SELECT bt_index_check('iu_2pc_idx', heapallindexed => true);
 
-DROP TABLE iu_def, iu_sub2, iu_sub3, iu_nest, iu_big, iu_2pc;
+-- --- 7. hash AM, same deferral path -----------------------------------------
+CREATE TABLE iu_hash2 (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_hash2_idx ON iu_hash2 USING hash (id);
+INSERT INTO iu_hash2 SELECT g, 'committed' FROM generate_series(1, 200) g;
+BEGIN;
+INSERT INTO iu_hash2 SELECT g, 'aborted' FROM generate_series(1001, 1100) g;
+ROLLBACK;
+SELECT idxundo_count_dead_all('iu_hash2_idx') AS dead_after_rollback;
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_hash2 WHERE id BETWEEN 1 AND 200;
+SELECT count(*) AS aborted_via_index FROM iu_hash2 WHERE id BETWEEN 1001 AND 1100;
+RESET enable_seqscan;
+
+DROP TABLE iu_def, iu_sub2, iu_sub3, iu_nest, iu_big, iu_2pc, iu_hash2;
 
 DROP EXTENSION amcheck;
 DROP EXTENSION test_idxundo;

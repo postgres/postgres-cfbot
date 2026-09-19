@@ -216,6 +216,9 @@ typedef struct XLogPageReadPrivate
 /* flag to tell XLogPageRead that we have started replaying */
 static bool InRedo = false;
 
+/* Successful FILEOPS loser inverses require an end-of-recovery checkpoint. */
+static bool fileopsUndoApplied = false;
+
 /*
  * Codes indicating where we got a WAL file from during recovery, or where
  * to attempt to get one.
@@ -1579,6 +1582,7 @@ FinishWalRecovery(void)
 
 	result->standby_signal_file_found = standby_signal_file_found;
 	result->recovery_signal_file_found = recovery_signal_file_found;
+	result->fileopsUndoApplied = fileopsUndoApplied;
 
 	return result;
 }
@@ -1896,7 +1900,7 @@ PerformWalRecovery(void)
 		{
 			ereport(LOG,
 					(errmsg("starting undo phase for incomplete transactions")));
-			PerformUndoRecovery();
+			fileopsUndoApplied = PerformUndoRecovery();
 			ereport(LOG,
 					(errmsg("undo phase complete")));
 		}

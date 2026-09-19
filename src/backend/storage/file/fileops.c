@@ -274,7 +274,7 @@ AddPendingFileOpWithData(PendingFileOpType type, const char *path,
 /* Keep the same inverse for online abort, abort redo, and crash losers. */
 static void
 fileops_prepare_undo(XactUndoContext *ctx, char persistence, uint8 rmid,
-					uint16 info, Oid reloid, const char *payload, Size len)
+					 uint16 info, Oid reloid, const char *payload, Size len)
 {
 	AddPendingFileOpWithData(PENDING_FILEOP_INVERSE, "", NULL,
 							 info, payload, len, false);
@@ -288,7 +288,7 @@ FileOpsGetAbortData(char **data, uint32 *len)
 {
 	PendingFileOp *p;
 	StringInfoData buf;
-	int level = GetCurrentTransactionNestLevel();
+	int			level = GetCurrentTransactionNestLevel();
 
 	*data = NULL;
 	*len = 0;
@@ -297,8 +297,8 @@ FileOpsGetAbortData(char **data, uint32 *len)
 	initStringInfo(&buf);
 	for (p = pendingFileOps; p; p = p->next)
 	{
-		uint32 info = p->length;
-		uint32 size = p->data_len;
+		uint32		info = p->length;
+		uint32		size = p->data_len;
 
 		if (p->type != PENDING_FILEOP_INVERSE || p->nestLevel < level)
 			continue;
@@ -332,11 +332,10 @@ FileOpsEndAbort(void)
 void
 FileOpsApplyAbort(const char *data, uint32 len)
 {
-	FileOpsResetAbortFailure();
 	while (len > 0)
 	{
-		uint32 info;
-		uint32 size;
+		uint32		info;
+		uint32		size;
 
 		if (len < 2 * sizeof(uint32))
 			elog(PANIC, "invalid FILEOPS abort payload");
@@ -474,9 +473,9 @@ FileOpsCreate(const char *path, int flags, mode_t mode, bool register_delete)
 		hdr->path_len = (uint16) pathlen;
 		memcpy(undo_payload + sizeof(FileopsUndoCreate), path, pathlen);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_CREATE,
-							InvalidOid, undo_payload,
-							sizeof(FileopsUndoCreate) + pathlen);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_CREATE,
+							 InvalidOid, undo_payload,
+							 sizeof(FileopsUndoCreate) + pathlen);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsCreate);
@@ -540,7 +539,7 @@ FileOpsRename(const char *oldpath, const char *newpath)
 static char *
 fileops_before_image(int fd, const char *path, off_t offset, Size len)
 {
-	char *data;
+	char	   *data;
 
 	if (len > FILEOPS_MAX_DATA_BYTES)
 		ereport(ERROR,
@@ -572,10 +571,10 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 	ssize_t		nbytes;
 	int			pathlen = fileops_pathlen(path);
 	struct stat st;
-	char *before;
-	uint32 before_len;
-	char *payload;
-	Size payload_len;
+	char	   *before;
+	uint32		before_len;
+	char	   *payload;
+	Size		payload_len;
 	FileopsUndoWrite *hdr;
 	XactUndoContext undo_ctx;
 
@@ -611,11 +610,32 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 	memcpy(payload + sizeof(*hdr) + pathlen, before, before_len);
 	memcpy(payload + sizeof(*hdr) + pathlen + before_len, data, len);
 
-	nbytes = pg_pwrite(fd, data, len, offset);
+	/* Keep an inverse even if pwrite changes only part of the range. */
+	if (XLogIsNeeded())
+	{
+		(void) GetCurrentTransactionId();
+		AddPendingFileOpWithData(PENDING_FILEOP_INVERSE, "", NULL,
+								 FILEOPS_UNDO_WRITE, payload, payload_len, false);
+		inverseBytes += payload_len + 2 * sizeof(uint32);
+	}
+
+	nbytes = pg_pwrite(fd, data,
+					   IS_INJECTION_POINT_ATTACHED("fileops-write-short") ? len / 2 : len,
+					   offset);
 	if (nbytes != (ssize_t) len)
 	{
 		int			save_errno = errno;
 
+		/* Match the actual after-image, not the requested complete write. */
+		if (XLogIsNeeded())
+		{
+			FileopsUndoWrite *inverse = (FileopsUndoWrite *) pendingFileOps->data;
+
+			inverse->after_len = nbytes > 0 ? nbytes : 0;
+			inverse->new_length = nbytes > 0 ?
+				Max(st.st_size, offset + nbytes) : st.st_size;
+			pendingFileOps->data_len -= len - inverse->after_len;
+		}
 		CloseTransientFile(fd);
 		errno = save_errno;
 		ereport(ERROR,
@@ -644,11 +664,9 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 	{
 		xl_fileops_write xlrec;
 
-		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_WRITE,
-							 InvalidOid, payload, payload_len);
-		xlrec.orig_length = st.st_size;
-		xlrec.before_len = before_len;
+		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							UNDO_RMID_FILEOPS, FILEOPS_UNDO_WRITE,
+							InvalidOid, payload, payload_len);
 		xlrec.offset = offset;
 		xlrec.len = len;
 		xlrec.path_len = (uint16) pathlen;
@@ -657,8 +675,6 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 		XLogRegisterData(&xlrec, SizeOfFileOpsWrite);
 		XLogRegisterData(path, pathlen);
 		XLogRegisterData(data, len);
-		if (before_len)
-			XLogRegisterData(before, before_len);
 		fileops_log(XLOG_FILEOPS_WRITE, &undo_ctx);
 	}
 
@@ -681,8 +697,8 @@ FileOpsTruncate(const char *path, off_t length)
 	struct stat st;
 	off_t		orig_length = 0;
 	int			pathlen = fileops_pathlen(path);
-	char *before;
-	uint32 before_len;
+	char	   *before;
+	uint32		before_len;
 
 	Assert(!IsInParallelMode());
 
@@ -743,12 +759,10 @@ FileOpsTruncate(const char *path, off_t length)
 	{
 		xl_fileops_truncate xlrec;
 		XactUndoContext undo_ctx;
-		char *payload = palloc0(sizeof(FileopsUndoTruncate) + pathlen + before_len);
+		char	   *payload = palloc0(sizeof(FileopsUndoTruncate) + pathlen + before_len);
 		FileopsUndoTruncate *hdr = (FileopsUndoTruncate *) payload;
 
-		xlrec.before_len = before_len;
 		xlrec.length = length;
-		xlrec.orig_length = orig_length;
 
 		hdr->before_len = before_len;
 		hdr->orig_length = orig_length;
@@ -757,15 +771,13 @@ FileOpsTruncate(const char *path, off_t length)
 		memcpy(payload + sizeof(FileopsUndoTruncate), path, pathlen);
 		memcpy(payload + sizeof(FileopsUndoTruncate) + pathlen, before, before_len);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_TRUNCATE,
-							InvalidOid, payload,
-							sizeof(FileopsUndoTruncate) + pathlen + before_len);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_TRUNCATE,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoTruncate) + pathlen + before_len);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsTruncate);
 		XLogRegisterData(path, pathlen);
-		if (before_len)
-			XLogRegisterData(before, before_len);
 		fileops_log(XLOG_FILEOPS_TRUNCATE, &undo_ctx);
 		pfree(payload);
 	}
@@ -824,9 +836,9 @@ FileOpsChmod(const char *path, mode_t mode)
 		hdr->path_len = (uint16) pathlen;
 		memcpy(payload + sizeof(FileopsUndoChmod), path, pathlen);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHMOD,
-							InvalidOid, payload,
-							sizeof(FileopsUndoChmod) + pathlen);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHMOD,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoChmod) + pathlen);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsChmod);
@@ -898,9 +910,9 @@ FileOpsChown(const char *path, uid_t uid, gid_t gid)
 		hdr->path_len = (uint16) pathlen;
 		memcpy(payload + sizeof(FileopsUndoChown), path, pathlen);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHOWN,
-							InvalidOid, payload,
-							sizeof(FileopsUndoChown) + pathlen);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHOWN,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoChown) + pathlen);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsChown);
@@ -937,8 +949,8 @@ fileops_mkdir(const char *path, mode_t mode, uint16 flags, Oid dboid)
 	/* Remove the directory (or tree) if the transaction aborts */
 	if (!XLogIsNeeded())
 		AddPendingFileOp((flags & FILEOPS_MKDIR_TREE) ?
-					 PENDING_FILEOP_RMTREE : PENDING_FILEOP_RMDIR,
-					 path, NULL, 0, false);
+						 PENDING_FILEOP_RMTREE : PENDING_FILEOP_RMDIR,
+						 path, NULL, 0, false);
 
 	if (enableFsync)
 		fileops_fsync_parent(path, data_sync_elevel(ERROR));
@@ -965,9 +977,9 @@ fileops_mkdir(const char *path, mode_t mode, uint16 flags, Oid dboid)
 		hdr->path_len = (uint16) pathlen;
 		memcpy(payload + sizeof(FileopsUndoMkdir), path, pathlen);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_MKDIR,
-							InvalidOid, payload,
-							sizeof(FileopsUndoMkdir) + pathlen);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_MKDIR,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoMkdir) + pathlen);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsMkdir);
@@ -1124,10 +1136,10 @@ FileOpsSymlink(const char *target, const char *linkpath)
 		memcpy(payload + sizeof(FileopsUndoSymlink) + linkpathlen, target,
 			   targetlen);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_SYMLINK,
-							InvalidOid, payload,
-							sizeof(FileopsUndoSymlink) + linkpathlen +
-							targetlen);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_SYMLINK,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoSymlink) + linkpathlen +
+							 targetlen);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsSymlink);
@@ -1192,9 +1204,9 @@ FileOpsLink(const char *oldpath, const char *newpath)
 		hdr->newpath_len = (uint16) newpathlen;
 		memcpy(payload + sizeof(FileopsUndoLink), newpath, newpathlen);
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_LINK,
-							InvalidOid, payload,
-							sizeof(FileopsUndoLink) + newpathlen);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_LINK,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoLink) + newpathlen);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsLink);
@@ -1321,8 +1333,8 @@ FileOpsSetXattr(const char *path, const char *name,
 				   hdr->orig_value_len, value, len);
 
 		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_SETXATTR,
-							InvalidOid, payload, payload_len);
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_SETXATTR,
+							 InvalidOid, payload, payload_len);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsSetxattr);
@@ -1444,8 +1456,8 @@ FileOpsRemoveXattr(const char *path, const char *name)
 					   saved_value, saved_value_len);
 
 			fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
-								UNDO_RMID_FILEOPS, FILEOPS_UNDO_REMOVEXATTR,
-								InvalidOid, payload, payload_len);
+								 UNDO_RMID_FILEOPS, FILEOPS_UNDO_REMOVEXATTR,
+								 InvalidOid, payload, payload_len);
 		}
 
 		XLogBeginInsert();
@@ -1946,8 +1958,8 @@ void
 FileOpsAtPrepare(void)
 {
 	PendingFileOp *pending;
-	char *data;
-	uint32 len;
+	char	   *data;
+	uint32		len;
 
 	FileOpsGetAbortData(&data, &len);
 	if (len)

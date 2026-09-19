@@ -35,9 +35,10 @@ typedef struct xl_atm_abort
 									 * forgotten */
 	Oid			dboid;
 	Oid			reloid;			/* InvalidOid (kept for struct layout) */
+	bool		fileops_owned;	/* FILEOPS completed or owned by abort WAL */
 } xl_atm_abort;
 
-#define SizeOfXlAtmAbort	(offsetof(xl_atm_abort, reloid) + sizeof(Oid))
+#define SizeOfXlAtmAbort	(offsetof(xl_atm_abort, fileops_owned) + sizeof(bool))
 
 typedef struct xl_atm_forget
 {

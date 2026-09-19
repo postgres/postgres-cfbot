@@ -34,14 +34,14 @@ extern void ATMShmemInit(void);
 extern bool ATMGetLastBatchLSN(TransactionId xid, XLogRecPtr *lsn_out);
 extern bool ATMAddAborted(TransactionId xid, Oid dboid,
 						  XLogRecPtr last_batch_lsn,
-						  XLogRecPtr first_batch_lsn);
+						  XLogRecPtr first_batch_lsn, bool fileops_owned);
 extern bool ATMAddAbortedBounded(TransactionId xid, Oid dboid,
 								 XLogRecPtr last_batch_lsn,
 								 XLogRecPtr stop_lsn,
-								 XLogRecPtr first_batch_lsn);
+								 XLogRecPtr first_batch_lsn, bool fileops_owned);
 extern void ATMAddAbortedNoWAL(TransactionId xid, Oid dboid,
 							   XLogRecPtr last_batch_lsn,
-							   XLogRecPtr first_batch_lsn);
+							   XLogRecPtr first_batch_lsn, bool fileops_owned);
 extern void ATMForget(TransactionId xid);
 extern void ATMMarkReverted(TransactionId xid);
 

@@ -67,7 +67,7 @@
  */
 #define ATM_STATE_FILE		"pg_undo_atm"
 #define ATM_STATE_TMP_FILE	"pg_undo_atm.tmp"
-#define ATM_STATE_MAGIC		0x41544D33	/* "ATM3" */
+#define ATM_STATE_MAGIC		0x41544D34	/* "ATM4" */
 
 typedef struct AtmStateHeader
 {
@@ -84,13 +84,14 @@ typedef struct AtmStateRecord
 	XLogRecPtr	stop_lsn;
 	XLogRecPtr	first_batch_lsn;
 	bool		revert_complete;
+	bool		fileops_owned;
 } AtmStateRecord;
 
 /* Internal helpers that skip WAL emission (used during redo) */
 static bool ATMAddAbortedInternal(TransactionId xid, Oid dboid, Oid reloid,
 								  XLogRecPtr last_batch_lsn,
 								  XLogRecPtr stop_lsn,
-								  XLogRecPtr first_batch_lsn);
+								  XLogRecPtr first_batch_lsn, bool fileops_owned);
 static void ATMForgetInternal(TransactionId xid);
 
 /*
@@ -132,18 +133,17 @@ ATMGetLastBatchLSN(TransactionId xid, XLogRecPtr *lsn_out)
  * ATMAddAbortedInternal
  *		Add an entry to the ATM without emitting WAL.
  *
- * Used during both normal operation (after WAL has been written by the
- * caller) and during redo replay.
- *
- * Returns false if the sLog is full.
+ * For redo, crash-recovery UNDO, and restoring the checkpointed state.  An
+ * ATM too full for the entry raises ERROR, failing startup rather than
+ * dropping a rollback; it never returns false.
  */
 static bool
 ATMAddAbortedInternal(TransactionId xid, Oid dboid, Oid reloid,
 					  XLogRecPtr last_batch_lsn, XLogRecPtr stop_lsn,
-					  XLogRecPtr first_batch_lsn)
+					  XLogRecPtr first_batch_lsn, bool fileops_owned)
 {
 	return SLogTxnInsert(xid, reloid, dboid, last_batch_lsn, stop_lsn,
-						 first_batch_lsn);
+						 first_batch_lsn, fileops_owned, false);
 }
 
 /*
@@ -156,15 +156,21 @@ ATMAddAbortedInternal(TransactionId xid, Oid dboid, Oid reloid,
  * own retention (the per-backend slot, or the 2PC state) may be released once
  * this returns true.
  *
+ * fileops_owned is true for online aborts: their abort WAL record carries
+ * the FILEOPS inverses, which a later generic walk must not apply again.
+ * Startup also passes true after completing a loser's FILEOPS inverses.
+ * Preserve this ownership in both WAL and checkpoint state, including subxacts
+ * whose records carry the top-level xid rather than the aborting subxid.
+ *
  * Called from the abort path. Returns false if the sLog is full,
  * signaling the caller to fall back to synchronous rollback.
  */
 bool
 ATMAddAborted(TransactionId xid, Oid dboid, XLogRecPtr last_batch_lsn,
-			  XLogRecPtr first_batch_lsn)
+			  XLogRecPtr first_batch_lsn, bool fileops_owned)
 {
 	return ATMAddAbortedBounded(xid, dboid, last_batch_lsn, InvalidXLogRecPtr,
-								first_batch_lsn);
+								first_batch_lsn, fileops_owned);
 }
 
 /*
@@ -178,15 +184,28 @@ ATMAddAborted(TransactionId xid, Oid dboid, XLogRecPtr last_batch_lsn,
  */
 bool
 ATMAddAbortedBounded(TransactionId xid, Oid dboid, XLogRecPtr last_batch_lsn,
-					 XLogRecPtr stop_lsn, XLogRecPtr first_batch_lsn)
+					 XLogRecPtr stop_lsn, XLogRecPtr first_batch_lsn, bool fileops_owned)
 {
 	xl_atm_abort xlrec;
 
-	/* Write WAL first */
+	/*
+	 * Update shared memory first.  This runs while aborting, so it must not
+	 * fail: if the ATM is full, report that without writing WAL, and the
+	 * caller keeps its own WAL retention.  Writing the record first would
+	 * leave redo with an entry the primary lacks.  The entry is visible
+	 * before its record, but the revert worker skips it until the transaction
+	 * is no longer in progress, which comes after the abort record that
+	 * follows this one.
+	 */
+	if (!SLogTxnInsert(xid, InvalidOid, dboid, last_batch_lsn, stop_lsn,
+					   first_batch_lsn, fileops_owned, true))
+		return false;
+
 	xlrec.xid = xid;
 	xlrec.last_batch_lsn = last_batch_lsn;
 	xlrec.stop_lsn = stop_lsn;
 	xlrec.first_batch_lsn = first_batch_lsn;
+	xlrec.fileops_owned = fileops_owned;
 	xlrec.dboid = dboid;
 	xlrec.reloid = InvalidOid;
 
@@ -194,9 +213,7 @@ ATMAddAbortedBounded(TransactionId xid, Oid dboid, XLogRecPtr last_batch_lsn,
 	XLogRegisterData((char *) &xlrec, SizeOfXlAtmAbort);
 	XLogInsert(RM_ATM_ID, XLOG_ATM_ABORT);
 
-	/* Now update shared memory */
-	return ATMAddAbortedInternal(xid, dboid, InvalidOid, last_batch_lsn,
-								 stop_lsn, first_batch_lsn);
+	return true;
 }
 
 /*
@@ -208,14 +225,15 @@ ATMAddAbortedBounded(TransactionId xid, Oid dboid, XLogRecPtr last_batch_lsn,
  * end-of-recovery checkpoint's KeepLogSeg() sees it through
  * ATMGetOldestUnrevertedLSN(), and CheckPointATM() persists it.  The caller
  * must WAL-log it with ATMAddAborted() once WAL is writable, so standbys get
- * it too; that call finds the entry already present and leaves it alone.
+ * it too.  A recovery insert replaces any ownership marker from an online
+ * abort that crashed before writing its abort record.
  */
 void
 ATMAddAbortedNoWAL(TransactionId xid, Oid dboid, XLogRecPtr last_batch_lsn,
-				   XLogRecPtr first_batch_lsn)
+				   XLogRecPtr first_batch_lsn, bool fileops_owned)
 {
 	(void) ATMAddAbortedInternal(xid, dboid, InvalidOid, last_batch_lsn,
-								 InvalidXLogRecPtr, first_batch_lsn);
+								 InvalidXLogRecPtr, first_batch_lsn, fileops_owned);
 }
 
 /*
@@ -357,7 +375,7 @@ atm_redo(XLogReaderState *record)
 				ATMAddAbortedInternal(xlrec->xid, xlrec->dboid,
 									  xlrec->reloid, xlrec->last_batch_lsn,
 									  xlrec->stop_lsn,
-									  xlrec->first_batch_lsn);
+									  xlrec->first_batch_lsn, xlrec->fileops_owned);
 			}
 			break;
 
@@ -390,7 +408,7 @@ atm_redo(XLogReaderState *record)
  * We snapshot ALL entries, not only those with an XLOG_ATM_ABORT preceding
  * the redo point: an entry whose abort record follows the redo point will be
  * re-added by redo, and ATMAddAbortedInternal is idempotent on (xid, reloid)
- * (SLogTxnInsert leaves an existing entry untouched), so double-add across
+ * (SLogTxnInsert preserves its chain and progress), so double-add across
  * the checkpoint boundary converges to a single entry.  Persisting the whole
  * map is simpler than partitioning it by redo point and is cheap because the
  * ATM only holds un-forgotten aborts.
@@ -449,6 +467,7 @@ CheckPointATM(void)
 		rec.last_batch_lsn = entries[i].last_batch_lsn;
 		rec.stop_lsn = entries[i].stop_lsn;
 		rec.first_batch_lsn = entries[i].first_batch_lsn;
+		rec.fileops_owned = entries[i].fileops_owned;
 		rec.revert_complete = entries[i].revert_complete;
 
 		COMP_CRC32C(crc, &rec, sizeof(rec));
@@ -594,7 +613,7 @@ ATMReloadFromCheckpoint(void)
 		ATMAddAbortedInternal(records[i].xid, records[i].dboid,
 							  records[i].reloid, records[i].last_batch_lsn,
 							  records[i].stop_lsn,
-							  records[i].first_batch_lsn);
+							  records[i].first_batch_lsn, records[i].fileops_owned);
 		if (records[i].revert_complete)
 			ATMMarkReverted(records[i].xid);
 	}

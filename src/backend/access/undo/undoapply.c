@@ -31,6 +31,7 @@
 #include "access/undormgr.h"
 #include "access/undo_xlog.h"
 #include "miscadmin.h"
+#include "storage/fileops.h"
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 
@@ -357,6 +358,7 @@ UndoWalkChain(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn,
 			for (i = nrecords_in_batch - 1; i >= 0; i--)
 			{
 				UndoRecordHeader header;
+				UndoApplyResult result;
 				char	   *payload = NULL;
 
 				memcpy(&header, record_starts[i], SizeOfUndoRecordHeader);
@@ -364,7 +366,16 @@ UndoWalkChain(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn,
 				if (header.urec_payload_len > 0)
 					payload = record_starts[i] + SizeOfUndoRecordHeader;
 
-				switch (ApplyOneUndoRecord(&header, payload, InvalidUndoRecPtr))
+				result = ApplyOneUndoRecord(&header, payload, InvalidUndoRecPtr);
+				if (header.urec_rmid == UNDO_RMID_FILEOPS)
+				{
+					if (result == UNDO_APPLY_SUCCESS)
+						res->fileops_applied = true;
+					else
+						res->fileops_failed = true;
+				}
+
+				switch (result)
 				{
 					case UNDO_APPLY_SUCCESS:
 						res->applied++;

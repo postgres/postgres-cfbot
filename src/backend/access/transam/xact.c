@@ -224,6 +224,7 @@ typedef struct TransactionStateData
 	bool		chain;			/* start a new block after this one */
 	bool		topXidLogged;	/* for a subxact: is top-level XID logged? */
 	uint64		undoRecPtr;		/* most recent UNDO record in chain */
+
 	/*
 	 * Per-backend UNDO: first and most recent record of this (sub)transaction
 	 * in each persistence level's undo log (0 = none).  A transaction writing
@@ -1265,8 +1266,8 @@ AtSubCommit_PbuUndo(void)
  * AtSubAbort_PbuUndo
  *		Hand an aborted subtransaction's per-backend UNDO to its parent.
  *
- * The access methods have applied the subtransaction's records and marked
- * them applied (PbuApplySubxactUndo), but the records stay in the chain, and
+ * We have applied the subtransaction's records and marked
+ * them applied (PbuApplySubxactUndoAll), but the records stay in the chain, and
  * the parent takes them over exactly as for a commit.  If they are the first
  * records of the transaction in an undo log, the first one carries the
  * transaction header, which a rollback of the whole chain needs as its 'to'
@@ -1282,11 +1283,11 @@ AtSubAbort_PbuUndo(void)
 
 /*
  * AtSubAbort_PbuRetryUndo
- *		Apply the per-backend UNDO the SUBXACT_EVENT_ABORT_SUB callbacks could
+ *		Apply the per-backend UNDO the pre-abort walk could
  *		not, now that the subtransaction's catalog changes are rolled back.
  *
  * A subtransaction that updated a table and then truncated or dropped it
- * still sees the table empty or gone when the callbacks run.  Once its
+ * still sees the table empty or gone when the pre-abort walk runs.  Once its
  * relcache and invalidations are rolled back, the parent sees the table as
  * it was, so run the remaining records as the parent, before the
  * subtransaction's locks are released.
@@ -2056,8 +2057,8 @@ RecordTransactionAbort(bool isSubXact)
 	TransactionId *children;
 	TimestampTz xact_time;
 	bool		replorigin;
-	char *fileops;
-	uint32 fileops_len;
+	char	   *fileops;
+	uint32		fileops_len;
 
 	/*
 	 * If we haven't been assigned an XID, nobody will care whether we aborted
@@ -2076,9 +2077,9 @@ RecordTransactionAbort(bool isSubXact)
 	/*
 	 * We have a valid XID, so we should write an ABORT record for it.
 	 *
-	 * We do not flush XLOG to disk here, since the default assumption after a
-	 * crash would be that we aborted, anyway.  For the same reason, we don't
-	 * need to worry about interlocking against checkpoint start.
+	 * An ordinary abort need not flush WAL: a crash treats it as a loser.
+	 * FILEOPS inverses, however, must follow a durable abort decision, with
+	 * checkpoint start delayed until their filesystem effects are synced.
 	 */
 
 	/*
@@ -2155,9 +2156,16 @@ RecordTransactionAbort(bool isSubXact)
 
 	if (fileops_len)
 	{
-		INJECTION_POINT("fileops-abort-after-flush", NULL);
-		FileOpsApplyAbort(fileops, fileops_len);
-		FileOpsEndAbort();
+		PG_TRY();
+		{
+			INJECTION_POINT("fileops-abort-after-flush", NULL);
+			FileOpsApplyAbort(fileops, fileops_len);
+		}
+		PG_FINALLY();
+		{
+			FileOpsEndAbort();
+		}
+		PG_END_TRY();
 	}
 	if (fileops)
 		pfree(fileops);
@@ -3312,16 +3320,25 @@ AbortTransaction(void)
 	s->parallelModeLevel = 0;
 	s->parallelChildXact = false;	/* should be false already */
 
-	/* Flush pending UNDO before publishing the abort decision. */
-	XactUndoFlushPending();
+	/* Complete generic UNDO or register its ATM obligation before abort WAL. */
+	FileOpsSkipUndo = true;
+	PG_TRY();
+	{
+		AtAbort_XactUndo();
+	}
+	PG_FINALLY();
+	{
+		FileOpsSkipUndo = false;
+	}
+	PG_END_TRY();
 
 	/*
 	 * Roll back the per-backend UNDO engine's records for this transaction,
 	 * if any.  This engine coexists with the per-relation engine handled by
 	 * AtAbort_XactUndo() above; the call is a no-op unless the per-backend
-	 * engine produced UNDO for this xact (FLUX and RECNO tables do).
-	 * UNDO appliers open relations, so present TRANS_INPROGRESS for the
-	 * duration (all backing resources are still live at this point).
+	 * engine produced UNDO for this xact (FLUX tables do). UNDO
+	 * appliers open relations, so present TRANS_INPROGRESS for the duration
+	 * (all backing resources are still live at this point).
 	 */
 	{
 		int			pbu_saved_state = EnterInlineUndoApplyState();
@@ -3367,8 +3384,6 @@ AbortTransaction(void)
 		 */
 		XLogSetAsyncXactLSN(XactLastRecEnd);
 	}
-
-	AtAbort_XactUndo();
 
 	TRACE_POSTGRESQL_TRANSACTION_ABORT(MyProc->vxid.lxid);
 
@@ -5777,6 +5792,19 @@ AbortSubTransaction(void)
 								s->parent->subTransactionId);
 		AtSubAbort_Notify();
 
+		/* Undo must precede the abort record that drops subtransaction files. */
+		FileOpsSkipUndo = true;
+		PG_TRY();
+		{
+			AtSubAbort_XactUndo(s->subTransactionId);
+		}
+		PG_FINALLY();
+		{
+			FileOpsSkipUndo = false;
+		}
+		PG_END_TRY();
+		PbuApplySubxactUndoAll();
+
 		/* Advertise the fact that we aborted in pg_xact. */
 		(void) RecordTransactionAbort(true);
 
@@ -5787,7 +5815,7 @@ AbortSubTransaction(void)
 		CallSubXactCallbacks(SUBXACT_EVENT_ABORT_SUB, s->subTransactionId,
 							 s->parent->subTransactionId);
 
-		/* The callbacks above applied and marked its per-backend UNDO. */
+		/* The apply above marked its per-backend UNDO. */
 		AtSubAbort_PbuUndo();
 
 		ResourceOwnerRelease(s->curTransactionOwner,
@@ -6808,6 +6836,7 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
 	if (parsed->fileops_len)
 	{
 		XLogFlush(lsn);
+		INJECTION_POINT("fileops-abort-after-flush", NULL);
 		FileOpsApplyAbort(parsed->fileops, parsed->fileops_len);
 	}
 

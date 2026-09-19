@@ -37,7 +37,7 @@ abort-time undo action that reverses it if the transaction rolls back:
   FileOpsTruncate  -- ftruncate() now; UNDO restore old length on abort
   FileOpsSymlink   -- symlink() now; UNDO unlink on abort
   FileOpsLink      -- link() now; UNDO unlink on abort
-  FileOpsWrite     -- pwrite() now (content, WAL-logged; no UNDO)
+  FileOpsWrite     -- pwrite() now (WAL-logged, bounded before-image UNDO)
   FileOpsSetXattr / FileOpsRemoveXattr -- now; UNDO restore old value on abort
 
 DESTRUCTIVE operations are DEFERRED: the API only records a PendingFileOp,
