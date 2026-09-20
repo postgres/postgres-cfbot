@@ -58,6 +58,7 @@
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "port/pg_lfind.h"
+#include "replication/slot.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procsignal.h"
@@ -1615,6 +1616,40 @@ TransactionIdIsInProgress(TransactionId xid)
 
 
 /*
+ * Decide whether a proc's xmin/xid must be included when computing the
+ * horizon for non-shared relations (the data horizon, from which the catalog
+ * horizon is derived), rather than only the shared horizon.
+ *
+ * Normally sessions in other databases are ignored for anything but the
+ * shared horizon.
+ *
+ * However, include them when MyDatabaseId is not (yet) set.  A backend in
+ * the process of starting up must not compute a "too aggressive" horizon,
+ * otherwise we could end up using it to prune still-needed data away.  If
+ * the current backend never connects to a database this is harmless, because
+ * data_oldest_nonremovable will never be utilized.
+ *
+ * Also, sessions marked with PROC_AFFECTS_ALL_HORIZONS should always be
+ * included.  (This flag is used for hot standby feedback, which can't be
+ * tied to a specific database.)
+ *
+ * Also, while in recovery we cannot compute an accurate per-database
+ * horizon, as all xids are managed via the KnownAssignedXids machinery.
+ *
+ * The filter lives in this helper so that ComputeXidHorizons(), which uses
+ * it to compute the horizons, and GetXidHorizonBlockers(), which uses it to
+ * explain them, cannot drift apart.
+ */
+static inline bool
+ProcAffectsDataHorizon(PGPROC *proc, int8 statusFlags, bool in_recovery)
+{
+	return proc->databaseId == MyDatabaseId ||
+		MyDatabaseId == InvalidOid ||
+		(statusFlags & PROC_AFFECTS_ALL_HORIZONS) ||
+		in_recovery;
+}
+
+/*
  * Determine XID horizons.
  *
  * This is used by wrapper functions like GetOldestNonRemovableTransactionId()
@@ -1775,28 +1810,10 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			TransactionIdOlder(h->shared_oldest_nonremovable, xmin);
 
 		/*
-		 * Normally sessions in other databases are ignored for anything but
-		 * the shared horizon.
-		 *
-		 * However, include them when MyDatabaseId is not (yet) set.  A
-		 * backend in the process of starting up must not compute a "too
-		 * aggressive" horizon, otherwise we could end up using it to prune
-		 * still-needed data away.  If the current backend never connects to a
-		 * database this is harmless, because data_oldest_nonremovable will
-		 * never be utilized.
-		 *
-		 * Also, sessions marked with PROC_AFFECTS_ALL_HORIZONS should always
-		 * be included.  (This flag is used for hot standby feedback, which
-		 * can't be tied to a specific database.)
-		 *
-		 * Also, while in recovery we cannot compute an accurate per-database
-		 * horizon, as all xids are managed via the KnownAssignedXids
-		 * machinery.
+		 * Sessions in other databases are normally ignored for the data
+		 * horizon; see ProcAffectsDataHorizon() for the exceptions.
 		 */
-		if (proc->databaseId == MyDatabaseId ||
-			MyDatabaseId == InvalidOid ||
-			(statusFlags & PROC_AFFECTS_ALL_HORIZONS) ||
-			in_recovery)
+		if (ProcAffectsDataHorizon(proc, statusFlags, in_recovery))
 		{
 			h->data_oldest_nonremovable =
 				TransactionIdOlder(h->data_oldest_nonremovable, xmin);
@@ -1997,6 +2014,254 @@ GetReplicationHorizons(TransactionId *xmin, TransactionId *catalog_xmin)
 	 */
 	*xmin = horizons.shared_oldest_nonremovable_raw;
 	*catalog_xmin = horizons.slot_catalog_xmin;
+}
+
+/*
+ * Find the candidates holding back the given xid horizon.
+ *
+ * Scans the ProcArray and the replication slots for anything whose xid or
+ * xmin equals the horizon, and returns the matches unranked; see
+ * XidHorizonBlockerType for the kinds and their priority.
+ *
+ * The horizon kind (see GlobalVisHorizonKindForRel) determines which backends
+ * and slot reservations are relevant.  The database and catalog_xmin
+ * filtering ComputeXidHorizons() applied when computing the horizon is
+ * mirrored here, at the point of each scan (see the per-case comments below).
+ *
+ * Hot standby feedback deserves a note, because where the standby's xmin is
+ * stored depends on whether the connection uses a replication slot (see
+ * ProcessStandbyHSFeedbackMessage).  Without a slot, the xmin is held in the
+ * walsender's PGPROC, and the ProcArray scan below reports it as
+ * XHB_HOT_STANDBY_FEEDBACK.  With a slot, the walsender's PGPROC xmin is reset
+ * to invalid and the xmin is held in the slot, which the slot scan reports
+ * like any other slot.
+ *
+ * Because the horizon was computed earlier, the result is best-effort.  The
+ * transaction whose xid was the horizon may have committed by now, leaving
+ * only the snapshots still at the horizon to be found, or nothing at all.
+ *
+ * Returns a palloc'd array of candidate blockers and stores the number of
+ * entries in *nblockers.  The array may be empty if no blocker is found.
+ */
+static XidHorizonBlocker *
+GetXidHorizonBlockers(TransactionId horizon, GlobalVisHorizonKind kind,
+					  int *nblockers)
+{
+	ProcArrayStruct *arrayP = procArray;
+	TransactionId *other_xids = ProcGlobal->xids;
+	XidHorizonBlocker *result;
+	int			count = 0;
+	int			max_blockers;
+	int			max_slots = max_replication_slots + max_repack_replication_slots;
+
+	Assert(TransactionIdIsValid(horizon));
+	Assert(nblockers != NULL);
+
+	/*
+	 * The only caller (VACUUM) cannot run during recovery, and this function
+	 * does not support it: during recovery the horizon may stem from
+	 * KnownAssignedXids (see ComputeXidHorizons()), which the scans below
+	 * know nothing about, and the per-database filter would have to be
+	 * disabled.  A future caller that runs during recovery (e.g. a
+	 * SQL-callable view usable on a standby) needs to add that handling.
+	 */
+	Assert(!RecoveryInProgress());
+
+	/*
+	 * Size the result array for the worst case, one entry per PGPROC plus one
+	 * per replication slot, and allocate it before acquiring ProcArrayLock so
+	 * that the scan never allocates while holding the lock.
+	 */
+	max_blockers = arrayP->maxProcs + max_slots;
+	result = palloc_array(XidHorizonBlocker, max_blockers);
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+
+	for (int index = 0; index < arrayP->numProcs; index++)
+	{
+		int			pgprocno = arrayP->pgprocnos[index];
+		PGPROC	   *proc = &allProcs[pgprocno];
+		int8		statusFlags = ProcGlobal->statusFlags[index];
+		TransactionId proc_xid;
+		TransactionId proc_xmin;
+		XidHorizonBlocker *dst;
+		XidHorizonBlockerType type;
+
+		/* Reporting the caller to itself would be no help, so skip it */
+		if (proc == MyProc)
+			continue;
+
+		/*
+		 * Skip the backends ComputeXidHorizons() skips, those vacuuming or
+		 * doing logical decoding.  A decoding backend's xmin is covered by
+		 * the slot scan below.
+		 */
+		if (statusFlags & (PROC_IN_VACUUM | PROC_IN_LOGICAL_DECODING))
+			continue;
+
+		/*
+		 * For the data and catalog horizons, apply the same per-database
+		 * filter the horizon computation applied; the shared horizon
+		 * considers backends in all databases.  Recovery is ruled out by the
+		 * assertion above, hence in_recovery is passed as false.
+		 */
+		if (kind != VISHORIZON_SHARED &&
+			!ProcAffectsDataHorizon(proc, statusFlags, false))
+			continue;
+
+		/* Fetch xid just once - see GetNewTransactionId */
+		proc_xid = UINT32_ACCESS_ONCE(other_xids[index]);
+		proc_xmin = UINT32_ACCESS_ONCE(proc->xmin);
+
+		/*
+		 * Candidates are collected in ProcArray order; callers can reorder if
+		 * needed.  Only the blocker type is determined by the cases below;
+		 * the entry itself is filled in once afterwards.
+		 */
+		if (TransactionIdEquals(proc_xid, horizon))
+		{
+			/* A proc with no pid is a prepared transaction */
+			if (proc->pid == 0)
+				type = XHB_PREPARED_TRANSACTION;
+			else
+				type = XHB_TRANSACTION;
+		}
+		else if (TransactionIdEquals(proc_xmin, horizon))
+		{
+			if (statusFlags & PROC_AFFECTS_ALL_HORIZONS)
+				type = XHB_HOT_STANDBY_FEEDBACK;
+			else
+				type = XHB_XMIN_TRANSACTION;
+		}
+		else
+			continue;
+
+		dst = &result[count++];
+		dst->type = type;
+		dst->pid = proc->pid;
+		dst->xid = horizon;
+		dst->name[0] = '\0';
+	}
+
+	LWLockRelease(ProcArrayLock);
+
+	/*
+	 * Also check replication slots.  We compare against the effective xmin
+	 * values, the same ones ReplicationSlotsComputeRequiredXmin() aggregates
+	 * into the horizon (data.xmin/catalog_xmin can lag those, e.g. while a
+	 * logical slot is being created).
+	 */
+	if (max_slots > 0)
+	{
+		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
+
+		for (int i = 0; i < max_slots; i++)
+		{
+			ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
+			TransactionId slot_xmin;
+			TransactionId slot_catalog_xmin;
+			ReplicationSlotInvalidationCause invalidated;
+			XidHorizonBlocker *dst;
+
+			if (!s->in_use)
+				continue;
+
+			SpinLockAcquire(&s->mutex);
+			slot_xmin = s->effective_xmin;
+			slot_catalog_xmin = s->effective_catalog_xmin;
+			invalidated = s->data.invalidated;
+			SpinLockRelease(&s->mutex);
+
+			/* Invalidated slots no longer hold back the horizon. */
+			if (invalidated != RS_INVAL_NONE)
+				continue;
+
+			/*
+			 * A slot's xmin holds back every (non-temp) horizon, but its
+			 * catalog_xmin only holds back the shared and catalog horizons,
+			 * mirroring ComputeXidHorizons().
+			 */
+			if (!TransactionIdEquals(slot_xmin, horizon) &&
+				!(TransactionIdEquals(slot_catalog_xmin, horizon) &&
+				  (kind == VISHORIZON_SHARED || kind == VISHORIZON_CATALOG)))
+				continue;
+
+			/*
+			 * Copy the name while we still hold ReplicationSlotControlLock.
+			 * That is all the interlock needed, because the name of an
+			 * existing slot never changes (see ReplicationSlotName), and it
+			 * keeps us from having to re-find the slot by index afterwards,
+			 * when it could have been dropped and the index reused by an
+			 * unrelated slot.
+			 */
+			dst = &result[count++];
+			dst->type = XHB_REPLICATION_SLOT;
+			dst->pid = 0;
+			dst->xid = horizon;
+			strlcpy(dst->name, NameStr(s->data.name), sizeof(dst->name));
+		}
+
+		LWLockRelease(ReplicationSlotControlLock);
+	}
+
+	*nblockers = count;
+	return result;
+}
+
+/*
+ * Get the highest-priority blocker holding back the xid horizon of rel.
+ *
+ * horizon must be the cutoff GetOldestNonRemovableTransactionId(rel)
+ * computed, since blockers are found by matching it exactly.
+ *
+ * Returns true and stores the blocker in *blocker if any are found.
+ * Otherwise returns false and sets blocker->xid to InvalidTransactionId.
+ */
+bool
+GetXidHorizonBlocker(Relation rel, TransactionId horizon,
+					 XidHorizonBlocker *blocker)
+{
+	XidHorizonBlocker *blockers;
+	XidHorizonBlocker *best = NULL;
+	GlobalVisHorizonKind kind;
+	int			nblockers;
+
+	Assert(TransactionIdIsValid(horizon));
+	Assert(blocker != NULL);
+
+	blocker->xid = InvalidTransactionId;
+
+	kind = GlobalVisHorizonKindForRel(rel);
+
+	/*
+	 * The temp-table horizon is held back only by our own backend, which the
+	 * scan skips, so there is never an external blocker to report.
+	 */
+	if (kind == VISHORIZON_TEMP)
+		return false;
+
+	blockers = GetXidHorizonBlockers(horizon, kind, &nblockers);
+	for (int i = 0; i < nblockers; i++)
+	{
+		if (best == NULL || blockers[i].type < best->type)
+		{
+			best = &blockers[i];
+
+			/*
+			 * At most one proc can have the horizon as its xid, and it
+			 * outranks everything else, so stop once we find it.
+			 */
+			if (best->type <= XHB_PREPARED_TRANSACTION)
+				break;
+		}
+	}
+
+	if (best != NULL)
+		*blocker = *best;
+
+	pfree(blockers);
+
+	return (best != NULL);
 }
 
 /*

@@ -151,6 +151,7 @@
 #include "storage/freespace.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
+#include "storage/procarray.h"
 #include "storage/read_stream.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
@@ -274,6 +275,8 @@ typedef struct LVRelState
 
 	/* VACUUM operation's cutoffs for freezing and pruning */
 	struct VacuumCutoffs cutoffs;
+	/* What held back cutoffs.OldestXmin (invalid xid if unresolved) */
+	XidHorizonBlocker oldest_xmin_blocker;
 	GlobalVisState *vistest;
 	/* Tracks oldest extant XID/MXID for setting relfrozenxid/relminmxid */
 	TransactionId NewRelfrozenXid;
@@ -799,6 +802,18 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	 * to increase the number of dead tuples it can prune away.)
 	 */
 	vacrel->aggressive = vacuum_get_cutoffs(rel, params, &vacrel->cutoffs);
+
+	/*
+	 * For instrumented vacuums, resolve the blocker holding back OldestXmin
+	 * now.  By the time the log line is emitted, whatever held it back may be
+	 * gone, and a scan then would find nothing matching OldestXmin.  Avoiding
+	 * that is worth taking ProcArrayLock and ReplicationSlotControlLock here,
+	 * even though the log line may end up not mentioning the blocker.
+	 */
+	if (instrument)
+		(void) GetXidHorizonBlocker(rel, vacrel->cutoffs.OldestXmin,
+									&vacrel->oldest_xmin_blocker);
+
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
 	vacrel->vistest = GlobalVisTestFor(rel);
 
@@ -1083,6 +1098,34 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 			appendStringInfo(&buf,
 							 _("removable cutoff: %u, which was %d XIDs old when operation ended\n"),
 							 vacrel->cutoffs.OldestXmin, diff);
+			if (vacrel->recently_dead_tuples > 0 &&
+				TransactionIdIsValid(vacrel->oldest_xmin_blocker.xid))
+			{
+				XidHorizonBlocker *blocker = &vacrel->oldest_xmin_blocker;
+
+				switch (blocker->type)
+				{
+					case XHB_TRANSACTION:
+						appendStringInfo(&buf, _("removable cutoff was held back by: transaction (pid = %d)\n"),
+										 blocker->pid);
+						break;
+					case XHB_PREPARED_TRANSACTION:
+						appendStringInfoString(&buf, _("removable cutoff was held back by: prepared transaction\n"));
+						break;
+					case XHB_XMIN_TRANSACTION:
+						appendStringInfo(&buf, _("removable cutoff was held back by: transaction holding snapshot (pid = %d)\n"),
+										 blocker->pid);
+						break;
+					case XHB_HOT_STANDBY_FEEDBACK:
+						appendStringInfo(&buf, _("removable cutoff was held back by: hot standby feedback (pid = %d)\n"),
+										 blocker->pid);
+						break;
+					case XHB_REPLICATION_SLOT:
+						appendStringInfo(&buf, _("removable cutoff was held back by: replication slot (slot name = %s)\n"),
+										 blocker->name);
+						break;
+				}
+			}
 			if (frozenxid_updated)
 			{
 				diff = (int32) (vacrel->NewRelfrozenXid -
