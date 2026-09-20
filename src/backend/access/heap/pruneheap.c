@@ -1824,22 +1824,62 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 }
 
 /*
+ * Check if a tuple header belongs to an unindexed Direct TOAST tuple.
+ * In a TOAST table, chunk_id is the first attribute (attnum 1). Direct TOAST
+ * chunks leave chunk_id NULL since they are accessed directly by TID rather
+ * than via the TOAST index.
+ */
+static inline bool
+heap_tuple_header_is_unindexed_toast(HeapTupleHeader htup)
+{
+	return (htup != NULL &&
+			(htup->t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(0, htup->t_bits));
+}
+
+static inline bool
+heap_prune_is_unindexed_toast_tuple(PruneState *prstate, HeapTupleHeader htup)
+{
+	if (prstate->relation->rd_rel->relkind == RELKIND_TOASTVALUE &&
+		heap_tuple_header_is_unindexed_toast(htup))
+		return true;
+
+	return false;
+}
+
+/*
  * Depending on whether or not the caller set mark_unused_now to true, record that a
  * line pointer should be marked LP_DEAD or LP_UNUSED. There are other cases in
  * which we will mark line pointers LP_UNUSED, but we will not mark line
  * pointers LP_DEAD if mark_unused_now is true.
+ *
+ * For TOAST relations, tuples without an index entry (chunk_id is NULL) can also
+ * be marked LP_UNUSED immediately without waiting for index vacuuming.
  */
 static void
 heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
 								 bool was_normal)
 {
+	bool		is_unindexed_toast = false;
+
+	if (!prstate->mark_unused_now && was_normal)
+	{
+		ItemId		lp = PageGetItemId(prstate->page, offnum);
+		HeapTupleHeader htup;
+
+		Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
+		htup = (HeapTupleHeader) PageGetItem(prstate->page, lp);
+
+		is_unindexed_toast = heap_prune_is_unindexed_toast_tuple(prstate, htup);
+	}
+
 	/*
-	 * If the caller set mark_unused_now to true, we can remove dead tuples
-	 * during pruning instead of marking their line pointers dead. Set this
-	 * tuple's line pointer LP_UNUSED. We hint that this option is less
-	 * likely.
+	 * If the caller set mark_unused_now to true, or if this is an unindexed
+	 * TOAST tuple, we can remove dead tuples during pruning instead of
+	 * marking their line pointers dead. Set this tuple's line pointer
+	 * LP_UNUSED. We hint that this option is less likely.
 	 */
-	if (unlikely(prstate->mark_unused_now))
+	if (unlikely(prstate->mark_unused_now) || is_unindexed_toast)
 		heap_prune_record_unused(prstate, offnum, was_normal);
 	else
 		heap_prune_record_dead(prstate, offnum, was_normal);
@@ -1848,7 +1888,8 @@ heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
 	 * It's incorrect for the page to be set all-visible if it contains dead
 	 * items. Fix that on the heap page and check the VM for corruption as
 	 * well. Do that here rather than in heap_prune_record_dead() so we also
-	 * cover tuples that are directly marked LP_UNUSED via mark_unused_now.
+	 * cover tuples that are directly marked LP_UNUSED via mark_unused_now or
+	 * unindexed TOAST tuples.
 	 */
 	if (PageIsAllVisible(prstate->page))
 		heap_page_fix_vm_corruption(prstate, offnum, VM_CORRUPT_LPDEAD);
@@ -2246,13 +2287,15 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 			 * items to be made LP_UNUSED instead.  This is only possible if
 			 * the relation has no indexes.  If there are any dead items, then
 			 * mark_unused_now was not true and every item being marked
-			 * LP_UNUSED must refer to a heap-only tuple.
+			 * LP_UNUSED must refer to a heap-only tuple or an unindexed
+			 * TOAST tuple.
 			 */
 			if (ndead > 0)
 			{
 				Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
 				htup = (HeapTupleHeader) PageGetItem(page, lp);
-				Assert(HeapTupleHeaderIsHeapOnly(htup));
+				Assert(HeapTupleHeaderIsHeapOnly(htup) ||
+					   heap_tuple_header_is_unindexed_toast(htup));
 			}
 			else
 				Assert(ItemIdIsUsed(lp));
