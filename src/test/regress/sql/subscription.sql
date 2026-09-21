@@ -231,6 +231,15 @@ ALTER SUBSCRIPTION regress_testsub SKIP (lsn = '0/12345');
 -- ok - with lsn = NONE
 ALTER SUBSCRIPTION regress_testsub SKIP (lsn = NONE);
 
+SELECT pg_replication_origin_advance(
+    'pg_' || (SELECT oid FROM pg_subscription WHERE subname = 'regress_testsub'),
+    '0/12346');
+-- ok - LSN equal to the replication origin is accepted
+ALTER SUBSCRIPTION regress_testsub SKIP (lsn = '0/12346');
+ALTER SUBSCRIPTION regress_testsub SKIP (lsn = NONE);
+-- fail - LSN behind the replication origin is rejected
+ALTER SUBSCRIPTION regress_testsub SKIP (lsn = '0/12345');
+
 -- fail
 ALTER SUBSCRIPTION regress_testsub SKIP (lsn = '0/0');
 
