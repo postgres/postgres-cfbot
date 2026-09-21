@@ -1226,19 +1226,23 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	}
 
 	/*
-	 * For seqscan and sample scans in a serializable transaction, acquire a
-	 * predicate lock on the entire relation. This is required not only to
-	 * lock all the matching tuples, but also to conflict with new insertions
-	 * into the table. In an indexscan, we take page locks on the index pages
-	 * covering the range specified in the scan qual, but in a heap scan there
-	 * is nothing more fine-grained to lock. A bitmap scan is a different
-	 * story, there we have already scanned the index and locked the index
-	 * pages covering the predicate. But in that case we still have to lock
-	 * any matching heap tuples. For sample scan we could optimize the locking
-	 * to be at least page-level granularity, but we'd need to add per-tuple
-	 * locking for that.
+	 * For seqscan, sample and TID range scans in a serializable transaction,
+	 * acquire a predicate lock on the entire relation. This is required not
+	 * only to lock all the matching tuples, but also to conflict with new
+	 * insertions into the table. In an indexscan, we take page locks on the
+	 * index pages covering the range specified in the scan qual, but in a
+	 * heap scan there is nothing more fine-grained to lock. A bitmap scan is
+	 * a different story, there we have already scanned the index and locked
+	 * the index pages covering the predicate. But in that case we still have
+	 * to lock any matching heap tuples. For sample scan we could optimize the
+	 * locking to be at least page-level granularity, but we'd need to add
+	 * per-tuple locking for that.  A TID range scan is like a seqscan in this
+	 * respect: it reads heap blocks directly with no index involved, so there
+	 * is nothing finer to lock, and heap_insert() only checks for conflicts
+	 * against relation-level predicate locks anyway.
 	 */
-	if (scan->rs_base.rs_flags & (SO_TYPE_SEQSCAN | SO_TYPE_SAMPLESCAN))
+	if (scan->rs_base.rs_flags & (SO_TYPE_SEQSCAN | SO_TYPE_SAMPLESCAN |
+								  SO_TYPE_TIDRANGESCAN))
 	{
 		/*
 		 * Ensure a missing snapshot is noticed reliably, even if the
