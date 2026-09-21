@@ -341,7 +341,7 @@ is($clt_check_ba, 1, 'delete_origin_differs logged into CLT on Node B');
 
 my $clt_row_ba = $node_B->safe_psql('postgres',
 	"SELECT replica_identity_full, replica_identity::text, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_BA WHERE conflict_type = 'delete_origin_differs';");
-is($clt_row_ba, 'f|{"a":1}|t', 'delete_origin_differs records RI key columns and local conflict xid');
+is($clt_row_ba, 'f|{"a":"1"}|t', 'delete_origin_differs records RI key columns and local conflict xid');
 
 $log_location = -s $node_A->logfile;
 
@@ -365,7 +365,7 @@ is($clt_check_ab, 1, 'update_deleted logged into CLT on Node A');
 
 my $clt_row_ab = $node_A->safe_psql('postgres',
 	"SELECT replica_identity_full, replica_identity::text, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_AB WHERE conflict_type = 'update_deleted';");
-is($clt_row_ab, 'f|{"a":1}|t', 'update_deleted records RI key columns and local conflict xid');
+is($clt_row_ab, 'f|{"a":"1"}|t', 'update_deleted records RI key columns and local conflict xid');
 
 # Remember the next transaction ID to be assigned
 my $next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
@@ -417,6 +417,127 @@ like(
 my $clt_row_ab_full = $node_A->safe_psql('postgres',
 	"SELECT replica_identity_full, replica_identity IS NULL, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_AB WHERE replica_identity_full = true;");
 is($clt_row_ab_full, 't|t|t', 'update_deleted with REPLICA IDENTITY FULL sets replica_identity_full=true and replica_identity=NULL');
+
+###############################################################################
+# Check that a user-defined CAST (t AS json) is not consulted when recording
+# the replica identity.
+#
+# Each key value is rendered with its type's output function, as the server log
+# does, so a cast cannot substitute its own representation. This matters because
+# such a cast is a function no other part of apply calls, and its output bears no
+# relation to the size of the value received, so a tiny key could otherwise
+# render a json value past the 1GB limit and error out the apply worker.
+###############################################################################
+
+my $cast_ddl = qq{
+	CREATE TYPE ri_color AS ENUM ('red', 'green');
+	CREATE FUNCTION ri_color_to_json(ri_color) RETURNS json
+	  AS \$\$ SELECT '"cast-was-used"'::json \$\$ LANGUAGE sql IMMUTABLE;
+	CREATE CAST (ri_color AS json) WITH FUNCTION ri_color_to_json(ri_color);
+	CREATE TABLE tab_cast (a ri_color PRIMARY KEY, b int);
+};
+
+$node_A->safe_psql('postgres', $cast_ddl);
+$node_B->safe_psql('postgres', $cast_ddl);
+
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A ADD TABLE tab_cast");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_B->wait_for_subscription_sync($node_A, $subname_BA);
+
+# Replicate a row, remove it locally, then delete it on node_A so that the
+# delete cannot find its target and the replica identity gets recorded.
+$node_A->safe_psql('postgres', "INSERT INTO tab_cast VALUES ('red', 1)");
+$node_A->wait_for_catchup($subname_BA);
+$node_B->safe_psql('postgres', "DELETE FROM tab_cast");
+$node_A->safe_psql('postgres', "DELETE FROM tab_cast WHERE a = 'red'");
+$node_A->wait_for_catchup($subname_BA);
+
+my $clt_check_cast = $node_B->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_BA WHERE relname = 'tab_cast';");
+is($clt_check_cast, 1, 'delete_missing on tab_cast logged into CLT on Node B');
+
+my $clt_row_cast = $node_B->safe_psql('postgres',
+	"SELECT replica_identity::text FROM $clt_BA WHERE relname = 'tab_cast';");
+is($clt_row_cast, '{"a":"red"}',
+	'replica identity is rendered by the type output function, not by a cast to json'
+);
+
+# Restore tap_pub_A to publishing only 'tab'. Later tests subscribe to it from
+# another database, which does not have tab_cast.
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A DROP TABLE tab_cast");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+
+my $cast_cleanup = q{
+	DROP TABLE tab_cast;
+	DROP TYPE ri_color CASCADE;
+};
+
+$node_A->safe_psql('postgres', $cast_cleanup);
+$node_B->safe_psql('postgres', $cast_cleanup);
+
+###############################################################################
+# Check that a replica identity value too large to record is replaced by a
+# marker rather than stored, and that has_omitted_values flags the row.
+#
+# A value is omitted rather than truncated, because a partial value in a
+# queryable table would silently give wrong answers to equality and join
+# conditions.
+###############################################################################
+
+$node_A->safe_psql('postgres',
+	"CREATE TABLE tab_big (a text PRIMARY KEY, b int)");
+$node_B->safe_psql('postgres',
+	"CREATE TABLE tab_big (a text PRIMARY KEY, b int)");
+
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A ADD TABLE tab_big");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_B->wait_for_subscription_sync($node_A, $subname_BA);
+
+# One key just under the cap, recorded verbatim, and one over it, omitted.
+$node_A->safe_psql(
+	'postgres', qq{
+	INSERT INTO tab_big VALUES (repeat('s', 1024), 1);
+	INSERT INTO tab_big VALUES (repeat('L', 2048), 2);
+});
+$node_A->wait_for_catchup($subname_BA);
+$node_B->safe_psql('postgres', "DELETE FROM tab_big");
+$node_A->safe_psql('postgres', "DELETE FROM tab_big");
+$node_A->wait_for_catchup($subname_BA);
+
+my $clt_check_big = $node_B->poll_query_until('postgres',
+	"SELECT count(*) = 2 FROM $clt_BA WHERE relname = 'tab_big';");
+is($clt_check_big, 1, 'both delete_missing conflicts on tab_big logged into CLT');
+
+my $clt_row_small = $node_B->safe_psql('postgres',
+	"SELECT has_omitted_values, length(replica_identity->>'a')
+	 FROM $clt_BA
+	 WHERE relname = 'tab_big' AND NOT has_omitted_values;");
+is($clt_row_small, 'f|1024',
+	'a replica identity value at the cap is recorded verbatim');
+
+my $clt_row_big = $node_B->safe_psql('postgres',
+	"SELECT has_omitted_values,
+	        replica_identity->'a'->>'omitted',
+	        replica_identity->'a'->>'length'
+	 FROM $clt_BA
+	 WHERE relname = 'tab_big' AND has_omitted_values;");
+is($clt_row_big, 't|true|2048',
+	'an oversized replica identity value is replaced by a marker recording its length'
+);
+
+# Restore tap_pub_A to publishing only 'tab', as the later tests expect.
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A DROP TABLE tab_big");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_A->safe_psql('postgres', "DROP TABLE tab_big");
+$node_B->safe_psql('postgres', "DROP TABLE tab_big");
 
 ###############################################################################
 # Check that the xmin value of the conflict detection slot can be advanced when
