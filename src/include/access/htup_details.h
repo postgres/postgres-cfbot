@@ -798,6 +798,12 @@ extern void heap_fill_tuple(TupleDesc tupleDesc,
 							const Datum *values, const bool *isnull,
 							char *data, Size data_size,
 							uint16 *infomask, uint8 *bit);
+extern void heap_fill_tuple_attr(TupleDesc tupleDesc,
+								 const Datum *values, const bool *isnull,
+								 char *data, Size data_size,
+								 uint16 *infomask, uint8 *bit,
+								 const bool *skip_copy,
+								 char **attr_data);
 extern bool heap_attisnull(HeapTuple tup, int attnum, TupleDesc tupleDesc);
 extern Datum nocachegetattr(HeapTuple tup, int attnum,
 							TupleDesc tupleDesc);
