@@ -452,6 +452,22 @@ psql_fails_like(
 	'\set WATCH_INTERVAL 1e500',
 	qr/is out of range/,
 	'WATCH_INTERVAL variable is out of range');
+psql_like(
+	$node,
+	'\set WATCH_INTERVAL 1000000
+\echo :WATCH_INTERVAL',
+	qr/^1000000$/m,
+	'WATCH_INTERVAL accepts its upper bound');
+psql_fails_like(
+	$node,
+	'\set WATCH_INTERVAL -1',
+	qr/must be greater than or equal to 0\.00/,
+	'WATCH_INTERVAL variable is below its lower bound');
+psql_fails_like(
+	$node,
+	'\set WATCH_INTERVAL 1000001',
+	qr/must be less than or equal to 1000000\.00/,
+	'WATCH_INTERVAL variable is above its upper bound');
 psql_like($node, '\echo :WATCH_INTERVAL',
 	qr/^2$/m, 'WATCH_INTERVAL variable was not altered');
 
