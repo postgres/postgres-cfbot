@@ -31,6 +31,7 @@ OBJS = \
 	sampling.o \
 	stack_depth.o \
 	superuser.o \
+	system_version.o \
 	timeout.o \
 	tzparser.o
 
