@@ -363,6 +363,14 @@
 /* #define WAL_DEBUG */
 
 /*
+ * Log every change to a backend's command progress state (the values shown
+ * in the pg_stat_progress_* views) at LOG level, so that tests can check the
+ * whole sequence of values a command reports.  See backend_progress.c and
+ * src/test/modules/test_progress.
+ */
+/* #define PROGRESS_DEBUG */
+
+/*
  * Enable tracing of syncscan operations (see also the trace_syncscan GUC var).
  */
 /* #define TRACE_SYNCSCAN */
