@@ -49,7 +49,12 @@ typedef enum ScanOptions
 {
 	SO_NONE = 0,
 
-	/* one of SO_TYPE_* may be specified */
+	/*
+	 * One of SO_TYPE_* may be specified.  When adding a scan type, check
+	 * whether it must take predicate locks to be safe under SERIALIZABLE: see
+	 * the flag test in heap_beginscan() and "Heap locking" in
+	 * src/backend/storage/lmgr/README-SSI.
+	 */
 	SO_TYPE_SEQSCAN = 1 << 0,
 	SO_TYPE_BITMAPSCAN = 1 << 1,
 	SO_TYPE_SAMPLESCAN = 1 << 2,
