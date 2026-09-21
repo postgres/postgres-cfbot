@@ -108,6 +108,8 @@ test: vacuum-conflict
 test: vacuum-skip-locked
 test: stats
 test: horizons
+test: predicate-bitmap-scan
+test: predicate-tid-range-scan
 test: predicate-hash
 test: predicate-gist
 test: predicate-gin
