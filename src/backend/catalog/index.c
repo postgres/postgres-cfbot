@@ -3175,24 +3175,33 @@ index_build(Relation heapRelation,
 	save_nestlevel = NewGUCNestLevel();
 	RestrictSearchPath();
 
-	/* Set up initial progress report status */
-	if (progress)
+	/*
+	 * Set up initial progress report status.
+	 *
+	 * Index AMs report their subphase, tuple and block counts whether or not
+	 * the caller asked for progress, so reset those in any case: otherwise
+	 * they would start from the values left by an earlier index build of the
+	 * same command.  Their parameter numbers are reserved so as not to
+	 * collide with those of the commands that build indexes.  The phase is
+	 * only set when progress is reported.
+	 */
 	{
 		const int	progress_index[] = {
-			PROGRESS_CREATEIDX_PHASE,
 			PROGRESS_CREATEIDX_SUBPHASE,
 			PROGRESS_CREATEIDX_TUPLES_DONE,
 			PROGRESS_CREATEIDX_TUPLES_TOTAL,
 			PROGRESS_SCAN_BLOCKS_DONE,
-			PROGRESS_SCAN_BLOCKS_TOTAL
+			PROGRESS_SCAN_BLOCKS_TOTAL,
+			PROGRESS_CREATEIDX_PHASE
 		};
 		const int64 progress_vals[] = {
-			PROGRESS_CREATEIDX_PHASE_BUILD,
 			PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE,
-			0, 0, 0, 0
+			0, 0, 0, 0,
+			PROGRESS_CREATEIDX_PHASE_BUILD
 		};
 
-		pgstat_progress_update_multi_param(6, progress_index, progress_vals);
+		pgstat_progress_update_multi_param(progress ? 6 : 5,
+										   progress_index, progress_vals);
 	}
 
 	/*
