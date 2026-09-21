@@ -30,6 +30,7 @@
 #include "access/heaptoast.h"
 #include "access/toast_helper.h"
 #include "access/toast_internals.h"
+#include "utils/expandeddatum.h"
 #include "utils/fmgroids.h"
 
 
@@ -344,17 +345,31 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
  *
  *	Note: we expect the caller already checked HeapTupleHasExternal(tup),
  *	so there is no need for a short-circuit path.
+ *
+ *	External attributes are detoasted one at a time into pre-computed
+ *	positions in the result tuple, so peak memory is the result tuple
+ *	plus one detoasted attribute rather than all of them at once.
  * ----------
  */
 HeapTuple
 toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
 {
 	HeapTuple	new_tuple;
+	HeapTupleHeader td;
 	int			numAttrs = tupleDesc->natts;
 	int			i;
 	Datum		toast_values[MaxTupleAttributeNumber];
 	bool		toast_isnull[MaxTupleAttributeNumber];
+	bool		toast_skip[MaxTupleAttributeNumber];
 	bool		toast_free[MaxTupleAttributeNumber];
+	char	   *toast_attr_data[MaxTupleAttributeNumber];
+	Datum		toast_origvals[MaxTupleAttributeNumber];
+	int			toasted_atts[MaxTupleAttributeNumber];
+	int			ntoasted = 0;
+	bool		hasnull = false;
+	Size		data_len;
+	int			len;
+	int			hoff;
 
 	/*
 	 * Break down the tuple into fields.
@@ -362,31 +377,144 @@ toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
 	Assert(numAttrs <= MaxTupleAttributeNumber);
 	heap_deform_tuple(tup, tupleDesc, toast_values, toast_isnull);
 
-	memset(toast_free, 0, numAttrs * sizeof(bool));
+	memset(toast_skip, false, numAttrs * sizeof(bool));
+	memset(toast_free, false, numAttrs * sizeof(bool));
 
+	/*
+	 * Replace each external toast pointer with a size-only stub that has the
+	 * correct VARSIZE header.  heap_compute_data_size and
+	 * heap_fill_tuple_attr read only VARSIZE from these, never the payload.
+	 */
 	for (i = 0; i < numAttrs; i++)
 	{
-		/*
-		 * Look at non-null varlena attributes
-		 */
-		if (!toast_isnull[i] && TupleDescCompactAttr(tupleDesc, i)->attlen == -1)
-		{
-			varlena    *new_value;
+		varlena    *val;
+		varlena    *stub;
 
-			new_value = (varlena *) DatumGetPointer(toast_values[i]);
-			if (VARATT_IS_EXTERNAL(new_value))
-			{
-				new_value = detoast_external_attr(new_value);
-				toast_values[i] = PointerGetDatum(new_value);
-				toast_free[i] = true;
-			}
+		if (toast_isnull[i] || TupleDescCompactAttr(tupleDesc, i)->attlen != -1)
+			continue;
+
+		val = (varlena *) DatumGetPointer(toast_values[i]);
+		if (!VARATT_IS_EXTERNAL(val))
+			continue;
+
+		/*
+		 * INDIRECT externals can wrap compressed or short-header datums whose
+		 * detoasted format the stub cannot predict. Detoast inline.
+		 */
+		if (VARATT_IS_EXTERNAL_INDIRECT(val))
+		{
+			toast_values[i] = PointerGetDatum(detoast_external_attr(val));
+			toast_free[i] = true;
+			continue;
+		}
+
+		/*
+		 * Build a stub whose VARSIZE matches what detoast_external_attr will
+		 * return.  For on-disk compressed datums the fetched value stays
+		 * compressed, so the stub carries the compressed size and tag.  For
+		 * expanded objects EOH_get_flat_size gives the 4B_U size that
+		 * flattening will produce.
+		 */
+		stub = (varlena *) palloc(VARHDRSZ);
+		if (VARATT_IS_EXTERNAL_ONDISK(val))
+		{
+			toast_external_data toast_ext_data;
+			int32		extsize;
+
+			toast_external_info_get(val, &toast_ext_data);
+			extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+			if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo,
+											 toast_ext_data.rawsize))
+				SET_VARSIZE_COMPRESSED(stub, extsize + VARHDRSZ);
+			else
+				SET_VARSIZE(stub, extsize + VARHDRSZ);
+		}
+		else
+		{
+			Assert(VARATT_IS_EXTERNAL_EXPANDED(val));
+			SET_VARSIZE(stub, EOH_get_flat_size(DatumGetEOHP(toast_values[i])));
+		}
+
+		toast_origvals[ntoasted] = toast_values[i];
+		toasted_atts[ntoasted] = i;
+		ntoasted++;
+
+		toast_values[i] = PointerGetDatum(stub);
+		toast_skip[i] = true;
+	}
+
+	/* Compute tuple header and data lengths */
+	for (i = 0; i < numAttrs; i++)
+	{
+		if (toast_isnull[i])
+		{
+			hasnull = true;
+			break;
 		}
 	}
 
-	/*
-	 * Form the reconfigured tuple.
-	 */
-	new_tuple = heap_form_tuple(tupleDesc, toast_values, toast_isnull);
+	len = offsetof(HeapTupleHeaderData, t_bits);
+	if (hasnull)
+		len += BITMAPLEN(numAttrs);
+	hoff = len = MAXALIGN(len);
+
+	data_len = heap_compute_data_size(tupleDesc, toast_values, toast_isnull);
+	len += data_len;
+
+	new_tuple = (HeapTuple) palloc0(HEAPTUPLESIZE + len);
+	new_tuple->t_data = td = (HeapTupleHeader) ((char *) new_tuple + HEAPTUPLESIZE);
+
+	new_tuple->t_len = len;
+	ItemPointerSetInvalid(&(new_tuple->t_self));
+	new_tuple->t_tableOid = InvalidOid;
+
+	HeapTupleHeaderSetDatumLength(td, len);
+	HeapTupleHeaderSetTypeId(td, tupleDesc->tdtypeid);
+	HeapTupleHeaderSetTypMod(td, tupleDesc->tdtypmod);
+	ItemPointerSetInvalid(&(td->t_ctid));
+
+	HeapTupleHeaderSetNatts(td, numAttrs);
+	td->t_hoff = hoff;
+
+	/* Fill non-toasted attributes, recording positions of toasted ones */
+	heap_fill_tuple_attr(tupleDesc,
+						 toast_values, toast_isnull,
+						 (char *) td + hoff,
+						 data_len,
+						 &td->t_infomask,
+						 (hasnull ? td->t_bits : NULL),
+						 toast_skip,
+						 toast_attr_data);
+
+	/* Free stubs before detoasting to keep peak memory low */
+	for (i = 0; i < ntoasted; i++)
+		pfree(DatumGetPointer(toast_values[toasted_atts[i]]));
+
+	/* Detoast one attribute at a time into the pre-computed position */
+	for (i = 0; i < ntoasted; i++)
+	{
+		int			attn = toasted_atts[i];
+		CompactAttribute *att = TupleDescCompactAttr(tupleDesc, attn);
+		varlena    *detoasted;
+		char	   *dest = toast_attr_data[attn];
+
+		detoasted = detoast_external_attr(
+										  (varlena *) DatumGetPointer(toast_origvals[i]));
+
+		if (att->attispackable && VARATT_CAN_MAKE_SHORT(detoasted))
+		{
+			Size		short_len = VARATT_CONVERTED_SHORT_SIZE(detoasted);
+
+			SET_VARSIZE_SHORT(dest, short_len);
+			memcpy(dest + 1, VARDATA(detoasted), short_len - 1);
+		}
+		else
+		{
+			memcpy(dest, detoasted, VARSIZE(detoasted));
+		}
+
+		pfree(detoasted);
+	}
 
 	/*
 	 * Be sure to copy the tuple's identity fields.  We also make a point of
