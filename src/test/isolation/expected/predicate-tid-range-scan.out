@@ -1,0 +1,148 @@
+Parsed test spec with 2 sessions
+
+starting permutation: rxy1 rxy2 wx1 wy2 c1 c2
+step rxy1: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step rxy2: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step wx1: update tidrange_tbl set p = 1 where ctid = '(0,1)';
+step wy2: update tidrange_tbl set p = 1 where ctid = '(0,2)';
+step c1: commit;
+step c2: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: rxy1 rxy2 wy2 wx1 c1 c2
+step rxy1: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step rxy2: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step wy2: update tidrange_tbl set p = 1 where ctid = '(0,2)';
+step wx1: update tidrange_tbl set p = 1 where ctid = '(0,1)';
+step c1: commit;
+step c2: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: rxy2 rxy1 wx1 wy2 c2 c1
+step rxy2: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step rxy1: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step wx1: update tidrange_tbl set p = 1 where ctid = '(0,1)';
+step wy2: update tidrange_tbl set p = 1 where ctid = '(0,2)';
+step c2: commit;
+step c1: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: rxy1 rxy2 wi1 wi2 c1 c2
+step rxy1: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step rxy2: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step wi1: insert into tidrange_tbl values (3, 10);
+step wi2: insert into tidrange_tbl values (4, 20);
+step c1: commit;
+step c2: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: rxy2 rxy1 wi2 wi1 c2 c1
+step rxy2: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step rxy1: select sum(p) from tidrange_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+  0
+(1 row)
+
+step wi2: insert into tidrange_tbl values (4, 20);
+step wi1: insert into tidrange_tbl values (3, 10);
+step c2: commit;
+step c1: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: rz1 rz2 wz1 wz2 c1 c2
+step rz1: select sum(p) from tidrange_empty_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+   
+(1 row)
+
+step rz2: select sum(p) from tidrange_empty_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+   
+(1 row)
+
+step wz1: insert into tidrange_empty_tbl values (3, 10);
+step wz2: insert into tidrange_empty_tbl values (4, 20);
+step c1: commit;
+step c2: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: rz2 rz1 wz2 wz1 c2 c1
+step rz2: select sum(p) from tidrange_empty_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+   
+(1 row)
+
+step rz1: select sum(p) from tidrange_empty_tbl
+			  where ctid >= '(0,0)' and ctid < '(1,0)';
+sum
+---
+   
+(1 row)
+
+step wz2: insert into tidrange_empty_tbl values (4, 20);
+step wz1: insert into tidrange_empty_tbl values (3, 10);
+step c2: commit;
+step c1: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
