@@ -3527,9 +3527,21 @@ dead_items_add(LVRelState *vacrel, BlockNumber blkno, OffsetNumber *offsets,
 static void
 dead_items_reset(LVRelState *vacrel)
 {
+	const int	prog_index[2] = {
+		PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
+		PROGRESS_VACUUM_DEAD_TUPLE_BYTES
+	};
+	const int64 prog_val[2] = {0, 0};
+
 	/* Update statistics for dead items */
 	vacrel->num_dead_items_resets++;
 	vacrel->total_dead_items_bytes += TidStoreMemoryUsage(vacrel->dead_items);
+
+	/*
+	 * Both progress counters are documented as what was collected since the
+	 * last index vacuum cycle, which is nothing yet.
+	 */
+	pgstat_progress_update_multi_param(2, prog_index, prog_val);
 
 	if (ParallelVacuumIsActive(vacrel))
 	{
