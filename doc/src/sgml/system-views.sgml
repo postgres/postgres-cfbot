@@ -212,6 +212,11 @@
      </row>
 
      <row>
+      <entry><link linkend="view-pg-system-versions"><structname>pg_system_versions</structname></link></entry>
+      <entry>system versions</entry>
+     </row>
+
+     <row>
       <entry><link linkend="view-pg-tables"><structname>pg_tables</structname></link></entry>
       <entry>tables</entry>
      </row>
@@ -5156,6 +5161,66 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
    <xref linkend="guc-default-statistics-target"/> run-time parameter.
   </para>
 
+ </sect1>
+
+ <sect1 id="view-pg-system-versions">
+  <title><structname>pg_system_versions</structname></title>
+
+  <indexterm zone="view-pg-system-versions">
+   <primary>pg_system_versions</primary>
+  </indexterm>
+
+  <para>
+   The view <structname>pg_system_versions</structname> provides description
+   about the versions of various system components, e.g. PostgreSQL itself,
+   the compiler used to build it, dependencies.
+  </para>
+
+  <table>
+   <title><structname>pg_system_versions</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>name</structfield> <type>text</type>
+      </para>
+      <para>
+       Component name
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>version</structfield> <type>text</type>
+      </para>
+      <para>
+       Component version
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>type</structfield> <type>text</type>
+      </para>
+      <para>
+       Component type (Compile Time or Run Time)
+      </para></entry>
+     </row>
+
+    </tbody>
+   </tgroup>
+  </table>
  </sect1>
 
  <sect1 id="view-pg-tables">
