@@ -495,6 +495,9 @@ static void postgresGetForeignJoinPaths(PlannerInfo *root,
 										RelOptInfo *innerrel,
 										JoinType jointype,
 										JoinPathExtraData *extra);
+static Path *postgresReparameterizeForeignPath(PlannerInfo *root,
+											   ForeignPath *path,
+											   Relids required_outer);
 static bool postgresRecheckForeignScan(ForeignScanState *node,
 									   TupleTableSlot *slot);
 static void postgresGetForeignUpperPaths(PlannerInfo *root,
@@ -729,6 +732,9 @@ postgres_fdw_handler(PG_FUNCTION_ARGS)
 
 	/* Support functions for upper relation push-down */
 	routine->GetForeignUpperPaths = postgresGetForeignUpperPaths;
+
+	/* Support functions for path reparameterization */
+	routine->ReparameterizeForeignPath = postgresReparameterizeForeignPath;
 
 	/* Support functions for asynchronous execution */
 	routine->IsForeignPathAsyncCapable = postgresIsForeignPathAsyncCapable;
@@ -1345,6 +1351,72 @@ postgresGetForeignPaths(PlannerInfo *root,
 									   NIL);	/* no fdw_private list */
 		add_path(baserel, (Path *) path);
 	}
+}
+
+/*
+ * postgresReparameterizeForeignPath
+ *		Build a version of a base-relation foreign scan path that is
+ *		parameterized by required_outer, i.e. that additionally enforces the
+ *		join clauses available from those relations.
+ */
+static Path *
+postgresReparameterizeForeignPath(PlannerInfo *root, ForeignPath *path,
+								  Relids required_outer)
+{
+	RelOptInfo *baserel = path->path.parent;
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) baserel->fdw_private;
+	ParamPathInfo *param_info;
+	double		rows;
+	int			width;
+	int			disabled_nodes;
+	Cost		startup_cost;
+	Cost		total_cost;
+
+	Assert(IS_SIMPLE_REL(baserel));
+
+	/*
+	 * No way to get a good estimate on pushed down clauses, don't build
+	 * parameterized paths.
+	 */
+	if (!fpinfo->use_remote_estimate)
+		return NULL;
+
+	/*
+	 * We don't know how to carry an EPQ subplan along, but base-relation
+	 * paths never have one anyway.
+	 */
+	if (path->fdw_outerpath != NULL)
+		return NULL;
+
+	/*
+	 * Note that we ignore the given path's pathkeys and always produce an
+	 * unsorted path. A parameterized path is only ever used on the inside
+	 * of a NestLoop, where its ordering is of no interest.
+	 */
+
+	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
+	if (param_info == NULL)
+		return NULL;			/* shouldn't happen */
+
+	/* Get a cost estimate from the remote */
+	estimate_path_cost_size(root, baserel,
+							param_info->ppi_clauses, NIL, NULL,
+							&rows, &width, &disabled_nodes,
+							&startup_cost, &total_cost);
+
+	param_info->ppi_rows = rows;
+
+	return (Path *) create_foreignscan_path(root, baserel,
+											NULL,	/* default pathtarget */
+											rows,
+											disabled_nodes,
+											startup_cost,
+											total_cost,
+											NIL,	/* no pathkeys */
+											param_info->ppi_req_outer,
+											NULL,
+											NIL,	/* no fdw_restrictinfo list */
+											NIL);	/* no fdw_private list */
 }
 
 /*
