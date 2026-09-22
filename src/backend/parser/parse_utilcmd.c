@@ -45,6 +45,7 @@
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -63,6 +64,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
@@ -86,6 +88,7 @@ typedef struct
 	List	   *fkconstraints;	/* FOREIGN KEY constraints */
 	List	   *ixconstraints;	/* index-creating constraints */
 	List	   *likeclauses;	/* LIKE clauses that need post-processing */
+	StringInfo	tablecomment;	/* comment collected from LIKE clauses */
 	List	   *blist;			/* "before list" of things to do before
 								 * creating the table */
 	List	   *alist;			/* "after list" of things to do after creating
@@ -251,6 +254,7 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	cxt.fkconstraints = NIL;
 	cxt.ixconstraints = NIL;
 	cxt.likeclauses = NIL;
+	cxt.tablecomment = NULL;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
@@ -298,6 +302,25 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 					 (int) nodeTag(element));
 				break;
 		}
+	}
+
+	/*
+	 * If any LIKE clause collected a comment on its source table, emit a
+	 * single command applying the accumulated text to the new table.
+	 */
+	if (cxt.tablecomment != NULL)
+	{
+		CommentStmt *cstmt = makeNode(CommentStmt);
+
+		cstmt->objtype = cxt.isforeign ? OBJECT_FOREIGN_TABLE : OBJECT_TABLE;
+		if (cxt.relation->schemaname)
+			cstmt->object = (Node *) list_make2(makeString(cxt.relation->schemaname),
+												makeString(cxt.relation->relname));
+		else
+			cstmt->object = (Node *) list_make1(makeString(cxt.relation->relname));
+		cstmt->comment = cxt.tablecomment->data;
+
+		cxt.alist = lappend(cxt.alist, cstmt);
 	}
 
 	/*
@@ -1308,6 +1331,52 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 					cxt->alist = lappend(cxt->alist, stmt);
 				}
 			}
+		}
+	}
+
+	/*
+	 * Copy the comment on the source relation itself, if requested.  Several
+	 * LIKE clauses may each supply one; accumulate them in clause order and
+	 * let transformCreateStmt emit a single COMMENT command for the result.
+	 */
+	if (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS)
+	{
+		char	   *tblcomment;
+
+		/* A composite type's comment is attached to its pg_type entry */
+		if (relation->rd_rel->relkind == RELKIND_COMPOSITE_TYPE)
+			tblcomment = GetComment(relation->rd_rel->reltype,
+									TypeRelationId,
+									0);
+		else
+			tblcomment = GetComment(RelationGetRelid(relation),
+									RelationRelationId,
+									0);
+
+		if (tblcomment != NULL)
+		{
+			size_t		needed = strlen(tblcomment);
+
+			if (cxt->tablecomment == NULL)
+				cxt->tablecomment = makeStringInfo();
+			else
+				needed++;		/* the newline separator */
+
+			/*
+			 * Reject an over-long result explicitly, rather than letting the
+			 * user hit enlargeStringInfo()'s much less informative complaint.
+			 */
+			if ((size_t) cxt->tablecomment->len + needed >= MaxAllocSize)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("comment for relation \"%s\" is too long",
+								cxt->relation->relname),
+						 errdetail("The comment is the concatenation of comments copied from multiple relations named in LIKE clauses, and the result exceeds the maximum size allowed for a comment.")));
+
+			if (cxt->tablecomment->len > 0)
+				appendStringInfoChar(cxt->tablecomment, '\n');
+			appendStringInfoString(cxt->tablecomment, tblcomment);
+			pfree(tblcomment);
 		}
 	}
 
@@ -3624,6 +3693,7 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 	cxt.fkconstraints = NIL;
 	cxt.ixconstraints = NIL;
 	cxt.likeclauses = NIL;
+	cxt.tablecomment = NULL;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
