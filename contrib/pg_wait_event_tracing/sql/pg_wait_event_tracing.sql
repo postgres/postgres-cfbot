@@ -1,0 +1,239 @@
+--
+-- PG_WAIT_EVENT_TRACING
+--
+-- Exercises the statistics level: the capture GUC, the stats surface
+-- (pg_stat_get_wait_event_timing(), the pg_stat_wait_event_timing and
+-- histogram-buckets views, overflow counters), reset (self and
+-- cross-backend, including its authorization), and the per-class capacity
+-- table.  The trace level is a separate patch and is not exercised here.
+--
+CREATE EXTENSION pg_wait_event_tracing;
+
+-- Statistics are per backend: a parallel worker records its waits under
+-- its own pid.  CI forces parallel query on some platforms
+-- (debug_parallel_query = regress), which would move pg_sleep() below into
+-- a worker, so keep this session's statements in this session.
+SET debug_parallel_query = off;
+
+-- Default is off.
+SHOW pg_wait_event_tracing.capture;
+
+-- Lazy, per-process hook installation: a fresh session that
+-- has never turned capture on has never installed its wait-event hooks.
+SELECT pg_wait_event_tracing_hooks_installed();
+
+-- The taxonomy view is pure SQL.
+SELECT count(*) AS buckets FROM pg_wait_event_timing_histogram_buckets;
+SELECT bucket_idx, lower_ns, upper_ns, label
+FROM pg_wait_event_timing_histogram_buckets
+WHERE bucket_idx IN (0, 1, 31)
+ORDER BY bucket_idx;
+
+-- Enable stats capture and generate a deterministic wait: pg_sleep emits a
+-- Timeout / PgSleep wait.
+SET pg_wait_event_tracing.capture = stats;
+
+-- Pin the recording-gate equivalence: the SET above may
+-- itself attach a stats payload synchronously, inside the assign hook,
+-- and that attach takes an LWLock -- a timed wait.  That LWLock wait must
+-- not be counted: the assign hook masks recording, for its own duration,
+-- to what the stored capture value (still "off" while the hook runs)
+-- would have permitted, so no self-inflicted attach waits ever show up.
+SELECT count(*) AS lwlock_waits_during_attach
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event_type = 'LWLock';
+
+-- The SET above installed this backend's hooks (the assign hook calls
+-- pwet_install_wait_hooks() itself, before any attach logic runs).
+SELECT pg_wait_event_tracing_hooks_installed();
+
+SELECT pg_sleep(0.1);
+
+-- PgSleep must now be recorded for this backend, with the per-event
+-- invariants holding.  We print only booleans so the output is stable.
+SELECT calls >= 1 AS calls_ok,
+       calls = (SELECT sum(h) FROM unnest(histogram) AS h) AS hist_sum_eq_calls,
+       total_time_ms > 0 AS total_positive,
+       max_time_us > 0 AS max_positive,
+       array_length(histogram, 1)
+         = (SELECT count(*)::int FROM pg_wait_event_timing_histogram_buckets)
+         AS histogram_len_ok
+FROM pg_stat_get_wait_event_timing(pg_backend_pid())
+WHERE wait_event = 'PgSleep';
+
+-- The view surfaces the same row, with backend_type attached (v6 column
+-- set).
+SELECT backend_type, wait_event_type, wait_event
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+
+-- A non-NULL pid that does not exist yields no rows (silent, not an
+-- error).
+SELECT count(*) AS rows_for_bogus_pid
+FROM pg_stat_get_wait_event_timing(-1);
+
+-- Overflow/reset counters for this backend.  A plain test backend uses few
+-- LWLock tranches and no out-of-range classes, so both overflow counters
+-- are zero, and a fresh backend has not been reset.
+SELECT lwlock_overflow_count, flat_overflow_count, reset_count
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+
+-- Resetting our own backend is synchronous: the PgSleep row is cleared and
+-- reset_count advances.  (Filtering to PgSleep because inter-command waits
+-- such as ClientRead may be recorded again before the next statement
+-- runs.)
+SELECT pg_stat_reset_wait_event_timing(NULL);
+SELECT count(*) AS pgsleep_rows_after_reset
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+SELECT reset_count
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+
+--
+-- Deferred accounting (v11 patch 0004 fixup; see
+-- DECISION-deferred-accounting.md): pwet_wait_end_impl() no longer accounts
+-- a completed wait immediately -- it stashes it in a one-slot pending
+-- buffer, applied later by pwet_flush_pending(), at the next timed wait or
+-- one of several other ordering points, INCLUDING every SQL reader of a
+-- backend's own data.  So a wait completed earlier in the same statement
+-- (here, by pg_sleep()) must always be visible to a query run by the SAME
+-- session immediately afterward, with no special handling needed by the
+-- caller and no dependency on an intervening wait happening to flush it
+-- first.
+--
+SELECT pg_stat_reset_wait_event_timing();
+SELECT pg_sleep(0.02);
+SELECT calls >= 1 AS pgsleep_visible_immediately_in_same_session
+FROM pg_stat_get_wait_event_timing(pg_backend_pid())
+WHERE wait_event = 'PgSleep';
+
+--
+-- A cross-backend reset request is applied exactly once, at whichever
+-- flush next notices reset_generation has moved, even when a wait is
+-- pending -- possibly this session's own -- at the moment the request
+-- lands: the reset-generation check runs at the same position inside
+-- pwet_flush_pending() as it always did inline in wait_end, immediately
+-- before the pending record's own values are applied, and once noticed,
+-- pwet_last_reset_generation is updated so the same request can never be
+-- reapplied by a later flush.  reset_count is checked as a delta, not an
+-- absolute value.
+--
+-- pg_stat_wait_event_timing_overflow(), unlike pg_stat_get_wait_event_
+-- timing() and the trace readers, does NOT flush the calling backend's
+-- own pending record before reading (a gap in the module, not exercised
+-- by this test's assertion itself, only worked around below): reading
+-- reset_count through it right after the pg_sleep() below, with no
+-- flush in between, leaves the outcome dependent on whatever OTHER wait
+-- this session happens to incur first, which is not guaranteed on every
+-- platform (observed: a 64-bit build's incidental wait flushed it in
+-- time, a 32-bit build's did not).  A second, tiny pg_sleep() forces a
+-- deterministic flush here: pwet_wait_begin_impl() unconditionally
+-- flushes the previous pending record -- the first pg_sleep() below,
+-- which is what carries the reset-generation mismatch -- before timing
+-- itself, with no dependency on anything else this session might do.
+--
+SELECT reset_count AS reset_count_before
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid() \gset
+SELECT pg_stat_reset_wait_event_timing_all();
+SELECT pg_sleep(0.02);
+SELECT pg_sleep(0.01);
+SELECT reset_count - :reset_count_before AS reset_count_advanced_by_exactly_one
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+
+--
+-- SET capture = off right after a wait still accounts that wait before
+-- releasing the payload (flush before release): pwet_release_stats()/
+-- pwet_release_fixed_slot() call pwet_flush_pending() as the first thing
+-- they do, before touching stats_ptr, so a pending record is never
+-- silently dropped by an ordinary disable.  The payload itself does not
+-- survive release regardless (see "Disabling capture releases the
+-- payload" above; the row disappears either way, whether or not the last
+-- wait was accounted first), so what this checks is that disabling
+-- capture immediately after a wait -- with the two statements sent
+-- together, so there is no intervening statement boundary that could
+-- flush it first on its own -- is not itself a source of any error, and
+-- that the very next capture cycle starts from a clean slate.  The
+-- guarantee that the flush actually runs before, not after, the payload
+-- is freed is a call-ordering property verified by inspection (every
+-- release/orphan site's own first statement) and by a dedicated
+-- cross-session TAP check (t/013_deferred_flush.pl), neither of which a
+-- single-connection regress script can exercise: nothing distinguishes
+-- "flushed, then freed" from "dropped, then freed" once the freed
+-- backend's own payload is gone, without a second session positioned to
+-- read the row before that free happens.
+--
+SET pg_wait_event_tracing.capture = stats;
+SELECT pg_sleep(0.02); SET pg_wait_event_tracing.capture = off;
+SELECT count(*) AS rows_after_wait_then_immediate_disable
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid();
+SET pg_wait_event_tracing.capture = stats;
+SELECT count(*) AS rows_are_clean_on_next_cycle
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+RESET pg_wait_event_tracing.capture;
+
+-- The pid argument defaults to NULL, so a no-argument call resets the
+-- caller's own backend.
+SELECT pg_stat_reset_wait_event_timing();
+
+-- Resetting an unknown pid is a WARNING, not an ERROR, matching
+-- pg_signal_backend()'s own wording; the reset itself is a no-op.
+SELECT pg_stat_reset_wait_event_timing(2147483647);
+
+-- Disabling capture releases the payload (fix 1/2): even though the pid is
+-- unchanged, every row for it disappears, because the reader checks
+-- ownership, not just "is there a payload here".
+RESET pg_wait_event_tracing.capture;
+SELECT pg_sleep(0.05);
+SELECT count(*) AS rows_after_disable
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid();
+
+-- Hooks, once installed, are never removed: still true even
+-- though this backend's own capture is off again, so a later re-enable in
+-- this same process needs no reinstallation.
+SELECT pg_wait_event_tracing_hooks_installed();
+
+--
+-- Reset authorization (fix 4).  The pg_signal_backend-member-vs-ordinary-
+-- target and non-superuser-vs-superuser-target cases need a second, real
+-- backend with a different owning role; those live in the TAP test
+-- t/003_reset_acl.pl (WP4a), which can create and authenticate as extra
+-- roles portably (this regress test cannot: no second connection is
+-- available here, and resetting your own pid always takes the synchronous
+-- self-reset path regardless of role).  What is single-session-testable is
+-- _all()'s superuser requirement, which holds even for a role granted
+-- EXECUTE directly, not just relying on the extension script's default
+-- REVOKE EXECUTE FROM PUBLIC.
+--
+CREATE ROLE regress_pwet_signaler;
+GRANT EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all()
+    TO regress_pwet_signaler;
+SET ROLE regress_pwet_signaler;
+SELECT pg_stat_reset_wait_event_timing_all();
+RESET ROLE;
+REVOKE EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all()
+    FROM regress_pwet_signaler;
+DROP ROLE regress_pwet_signaler;
+--
+-- Per-class capacity (plan sec 3.1).  Every class pg_wait_events knows
+-- about must have a capacity row, and every class must have at least 4
+-- events of headroom below its capacity, so that whoever adds an event
+-- past that headroom is caught here rather than by silent overflow
+-- counting.
+--
+SELECT count(*) AS classes_missing_capacity
+FROM (SELECT DISTINCT type FROM pg_wait_events) t
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_wait_event_tracing_capacity() c WHERE c.type = t.type);
+
+SELECT bool_and(cap.capacity - cnt.n >= 4) AS capacity_headroom_ok
+FROM (SELECT type, count(*) AS n FROM pg_wait_events GROUP BY type) cnt
+JOIN pg_wait_event_tracing_capacity() cap USING (type);
+
+RESET pg_wait_event_tracing.capture;

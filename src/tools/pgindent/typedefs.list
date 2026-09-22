@@ -2460,6 +2460,13 @@ PullFilterOps
 PushFilter
 PushFilterOps
 PushFunction
+PwetCaptureLevel
+PwetLWLockHash
+PwetLWLockHashEntry
+PwetRegionHeader
+PwetSlot
+PwetStats
+PwetTimingEntry
 PyCFunction
 PyMethodDef
 PyModuleDef
