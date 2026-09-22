@@ -43,6 +43,7 @@ SUBDIRS = \
 		pgrowlocks	\
 		pgstattuple	\
 		pg_visibility	\
+		pg_wait_event_tracing \
 		pg_walinspect	\
 		postgres_fdw	\
 		seg		\
