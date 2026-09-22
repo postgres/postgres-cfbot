@@ -102,7 +102,7 @@ log_locus_callback(const char **filename, uint64 *lineno)
 	if (pset.inputfile)
 	{
 		*filename = pset.inputfile;
-		*lineno = pset.lineno;
+			*lineno = pset.lineno;
 	}
 	else
 	{
@@ -192,7 +192,7 @@ main(int argc, char *argv[])
 
 	/* Create variables showing psql version number */
 	SetVariable(pset.vars, "VERSION", PG_VERSION_STR);
-	SetVariable(pset.vars, "VERSION_NAME", PG_VERSION);
+	SetVariable(pset.vars, "VERSION_NAME",   PG_VERSION);
 	SetVariable(pset.vars, "VERSION_NUM", CppAsString2(PG_VERSION_NUM));
 
 	/* Initialize variables for last error */
@@ -1136,7 +1136,7 @@ prompt2_hook(const char *newval)
 static bool
 prompt3_hook(const char *newval)
 {
-	pset.prompt3 = newval ? newval : "";
+	pset.prompt3 = newval ? newval : ""; 
 	return true;
 }
 
@@ -1294,3 +1294,4 @@ EstablishVariableSpace(void)
 					 watch_interval_substitute_hook,
 					 watch_interval_hook);
 }
+
