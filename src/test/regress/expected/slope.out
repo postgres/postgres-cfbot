@@ -157,11 +157,17 @@ FROM generate_series(1, 1000) i;
 CREATE INDEX src_v_int4_idx ON src (v_int4);
 CREATE INDEX src_v_int8_idx ON src (v_int8);
 CREATE INDEX src_v_float8_idx ON src (v_float8);
+-- a table with a multi-column index
+CREATE TABLE grid AS
+SELECT i % 11 as w, i % 7 as x, i % 5 as y, i % 3 as z
+FROM generate_series(1, 50) i;
+CREATE INDEX ON grid (x, y, z);
 CREATE INDEX src_v_numeric_idx ON src (v_numeric);
 CREATE INDEX src_ts_idx ON src (ts);
 CREATE INDEX src_tstz_idx ON src (tstz);
 -- Analyze to get good statistics
 ANALYZE src;
+ANALYSE grid;
 --
 -- Test that SLOPE is enabled and can be disabled
 --
@@ -468,6 +474,161 @@ select floor(v_float8 + 1), count(*) from src group by 1;
    ->  Index Only Scan using src_v_float8_idx on slope.src
          Output: floor((v_float8 + '1'::double precision))
 (5 rows)
+
+--
+-- Multi-column tests
+--
+-- skip pinned x
+explain (costs off, verbose)
+select y, z from grid where x = 2
+order by 1, 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: y, z
+   Index Cond: (grid.x = 2)
+(3 rows)
+
+-- skip pinned x and rely on monotonicity w.r.t x and y
+explain (costs off, verbose)
+select 3 * y, 5 * z from grid where x = 2
+order by 1, 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: (3 * y), (5 * z)
+   Index Cond: (grid.x = 2)
+(3 rows)
+
+-- same as a bove, but decreasing (2)
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc nulls last;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: (2 * y), ('-3'::integer * z)
+   Index Cond: (grid.x = 2)
+(3 rows)
+
+-- same as above but desc (implicit nulls first) doesn't match the expression
+-- order for the index.
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Incremental Sort
+   Output: ((2 * y)), (('-3'::integer * z))
+   Sort Key: ((2 * grid.y)), (('-3'::integer * grid.z)) DESC
+   Presorted Key: ((2 * grid.y))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: (2 * y), ('-3'::integer * z)
+         Index Cond: (grid.x = 2)
+(7 rows)
+
+-- skip non-monotonic abs(x) with constant x
+explain (costs off, verbose)
+select abs(x), 3 * y, 5 * z from grid where x = 2
+order by 1, 2, 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: abs(x), (3 * y), (5 * z)
+   Index Cond: (grid.x = 2)
+(3 rows)
+
+-- pin middle column (y)
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2
+order by 1, 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: (3 * x), (5 * z)
+   Index Cond: (grid.y = 2)
+(3 rows)
+
+-- pin y and x via y
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2 AND x = y
+order by 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: (3 * x), (5 * z)
+   Index Cond: ((grid.x = 2) AND (grid.y = 2))
+(3 rows)
+
+-- x = 1 is not treated as a constant in an expression (x * z)
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1
+order by 1, 2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Incremental Sort
+   Output: y, ((x * z))
+   Sort Key: grid.y, ((grid.x * grid.z))
+   Presorted Key: grid.y
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: y, (x * z)
+         Index Cond: (grid.x = 1)
+(7 rows)
+
+-- same as above but sort key y = 1 skipped
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1 and y = 1
+order by 1, 2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sort
+   Output: y, ((x * z))
+   Sort Key: ((grid.x * grid.z))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: y, (x * z)
+         Index Cond: ((grid.x = 1) AND (grid.y = 1))
+(6 rows)
+
+-- skip constant (w = 1) pathkeys that is not an index key.
+explain (costs off, verbose)
+select w, x, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: w, x, y, z
+   Filter: (grid.w = 1)
+(3 rows)
+
+explain (costs off, verbose)
+select x, w, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: x, w, y, z
+   Filter: (grid.w = 1)
+(3 rows)
+
+explain (costs off, verbose)
+select x, y, w, z from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: x, y, w, z
+   Filter: (grid.w = 1)
+(3 rows)
+
+explain (costs off, verbose)
+select x, y, z, w from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: x, y, z, w
+   Filter: (grid.w = 1)
+(3 rows)
 
 --
 -- Test all index/query direction+nulls combinations for SLOPE.
@@ -845,7 +1006,7 @@ SELECT v_int4::oid FROM src ORDER BY 1;
 (3 rows)
 
 DROP SCHEMA slope CASCADE;
-NOTICE:  drop cascades to 14 other objects
+NOTICE:  drop cascades to 15 other objects
 DETAIL:  drop cascades to table t
 drop cascades to table u
 drop cascades to operator family test_int4_ops for access method btree
@@ -855,6 +1016,7 @@ drop cascades to operator <#(integer,integer)
 drop cascades to operator <=#(integer,integer)
 drop cascades to table t_op
 drop cascades to table src
+drop cascades to table grid
 drop cascades to table nulls_tmp
 drop cascades to type non42
 drop cascades to type fp_real
