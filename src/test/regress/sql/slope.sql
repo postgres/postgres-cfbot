@@ -135,13 +135,20 @@ FROM generate_series(1, 1000) i;
 CREATE INDEX src_v_int4_idx ON src (v_int4);
 CREATE INDEX src_v_int8_idx ON src (v_int8);
 CREATE INDEX src_v_float8_idx ON src (v_float8);
+
+-- a table with a multi-column index
+CREATE TABLE grid AS
+SELECT i % 11 as w, i % 7 as x, i % 5 as y, i % 3 as z
+FROM generate_series(1, 50) i;
+CREATE INDEX ON grid (x, y, z);
+
 CREATE INDEX src_v_numeric_idx ON src (v_numeric);
 CREATE INDEX src_ts_idx ON src (ts);
 CREATE INDEX src_tstz_idx ON src (tstz);
 
 -- Analyze to get good statistics
 ANALYZE src;
-
+ANALYSE grid;
 --
 -- Test that SLOPE is enabled and can be disabled
 --
@@ -267,6 +274,66 @@ select floor(floor(v_float8)), count(*) from src group by 1;
 explain (costs off, verbose)
 select floor(v_float8 + 1), count(*) from src group by 1;
 
+
+--
+-- Multi-column tests
+--
+
+-- skip pinned x
+explain (costs off, verbose)
+select y, z from grid where x = 2
+order by 1, 2;
+
+-- skip pinned x and rely on monotonicity w.r.t x and y
+explain (costs off, verbose)
+select 3 * y, 5 * z from grid where x = 2
+order by 1, 2;
+-- same as a bove, but decreasing (2)
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc nulls last;
+-- same as above but desc (implicit nulls first) doesn't match the expression
+-- order for the index.
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc;
+
+-- skip non-monotonic abs(x) with constant x
+explain (costs off, verbose)
+select abs(x), 3 * y, 5 * z from grid where x = 2
+order by 1, 2, 3;
+
+-- pin middle column (y)
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2
+order by 1, 2;
+-- pin y and x via y
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2 AND x = y
+order by 2;
+
+-- x = 1 is not treated as a constant in an expression (x * z)
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1
+order by 1, 2;
+-- same as above but sort key y = 1 skipped
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1 and y = 1
+order by 1, 2;
+
+-- skip constant (w = 1) pathkeys that is not an index key.
+explain (costs off, verbose)
+select w, x, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+explain (costs off, verbose)
+select x, w, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+explain (costs off, verbose)
+select x, y, w, z from grid where w = 1
+order by 1, 2, 3, 4;
+explain (costs off, verbose)
+select x, y, z, w from grid where w = 1
+order by 1, 2, 3, 4;
 --
 -- Test all index/query direction+nulls combinations for SLOPE.
 -- For an increasing function like floor(), the scan uses the index when both
