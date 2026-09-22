@@ -1722,6 +1722,36 @@ ReparameterizeForeignPathByChild(PlannerInfo *root, List *fdw_private,
     <literal>adjust_appendrel_attrs</literal> or
     <literal>adjust_appendrel_attrs_multilevel</literal> as required.
     </para>
+
+    <para>
+<programlisting>
+Path *
+ReparameterizeForeignPath(PlannerInfo *root, ForeignPath *path,
+                          Relids required_outer);
+</programlisting>
+    This function is called when the planner needs a version of an existing
+    base-relation <structname>ForeignPath</structname> that is parameterized
+    by the relations in <literal>required_outer</literal>, which is a
+    superset of the parameterization of <literal>path</literal>.  This
+    happens, for example, while building a parameterized
+    <literal>Append</literal> path over a partitioned table with foreign
+    partitions, since all children of such a path must have exactly the same
+    parameterization.  The function must return a new
+    <structname>ForeignPath</structname> whose <literal>param_info</literal>
+    is the value obtained from <function>get_baserel_parampathinfo</function>
+    for <literal>required_outer</literal>, and whose row count and cost
+    estimates account for the additional join clauses found in that value's
+    <structfield>ppi_clauses</structfield>; all of those clauses must be
+    enforced by the returned path, either remotely or locally.  It must
+    return <literal>NULL</literal> if no such path can be built, and it must
+    not pass the returned path to <function>add_path</function>.
+    </para>
+
+    <para>
+    This function is optional.  If it is not provided, the planner cannot
+    build a parameterized <literal>Append</literal> path unless every foreign
+    child relation already has a path with the required parameterization.
+    </para>
    </sect2>
 
    </sect1>
@@ -2015,7 +2045,10 @@ GetForeignServerByName(const char *name, bool missing_ok);
      to compute that value.  In <function>GetForeignPlan</function>, the
      <replaceable>local_variable</replaceable> portion of the join clause would be added
      to <structfield>fdw_exprs</structfield>, and then at run time the case works the
-     same as for an ordinary restriction clause.
+     same as for an ordinary restriction clause.  If the FDW provides
+     <function>ReparameterizeForeignPath</function>, the planner can also ask
+     it after the fact for a version of an existing path that uses additional
+     join clauses; see <xref linkend="fdw-callbacks-reparameterize-paths"/>.
     </para>
 
     <para>
