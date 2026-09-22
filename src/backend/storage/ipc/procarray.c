@@ -1767,7 +1767,7 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 		 * removed, as long as pg_subtrans is not truncated) or doing logical
 		 * decoding (which manages xmin separately, check below).
 		 */
-		if (statusFlags & (PROC_IN_VACUUM | PROC_IN_LOGICAL_DECODING))
+		if (statusFlags & PROC_HORIZON_EXEMPT_MASK)
 			continue;
 
 		/* shared tables need to take backends in all databases into account */
@@ -1845,7 +1845,8 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	 * catalog xmin is applied to the catalog one (so catalogs can be accessed
 	 * for logical decoding). Initialize with data horizon, and then back up
 	 * further if necessary. Have to back up the shared horizon as well, since
-	 * that also can contain catalogs.
+	 * that also can contain catalogs.  Keep how slot xmins feed each horizon
+	 * in sync with pg_get_xmin_horizon()'s per-slot classification.
 	 */
 	h->shared_oldest_nonremovable_raw = h->shared_oldest_nonremovable;
 	h->shared_oldest_nonremovable =
@@ -2261,7 +2262,7 @@ GetSnapshotData(Snapshot snapshot)
 			 * separately (check below) and ones running LAZY VACUUM.
 			 */
 			statusFlags = allStatusFlags[pgxactoff];
-			if (statusFlags & (PROC_IN_LOGICAL_DECODING | PROC_IN_VACUUM))
+			if (statusFlags & PROC_HORIZON_EXEMPT_MASK)
 				continue;
 
 			if (NormalTransactionIdPrecedes(xid, xmin))
@@ -3148,6 +3149,53 @@ ProcNumberGetTransactionIds(ProcNumber procNumber, TransactionId *xid,
 	}
 
 	LWLockRelease(ProcArrayLock);
+}
+
+/*
+ * GetXidHorizonProcs -- gather every active proc's horizon inputs
+ *
+ * Returns a palloc'd array with one entry per proc, gathered in one pass
+ * over the proc array under ProcArrayLock SHARED.  The number of entries is
+ * returned into *n.  The caller must free the array.
+ *
+ * ComputeXidHorizons() uses these same inputs.  The shared lock blocks
+ * ProcArrayAdd() and ProcArrayRemove().  A proc's xmin or xid can
+ * change during the pass.
+ */
+XidHorizonProc *
+GetXidHorizonProcs(int *n)
+{
+	XidHorizonProc *result;
+	ProcArrayStruct *arrayP = procArray;
+	int			numProcs;
+	int			index;
+
+	result = palloc_array(XidHorizonProc, arrayP->maxProcs);
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+
+	numProcs = arrayP->numProcs;
+	for (index = 0; index < numProcs; index++)
+	{
+		int			pgprocno = arrayP->pgprocnos[index];
+		PGPROC	   *proc = &allProcs[pgprocno];
+		XidHorizonProc *p = &result[index];
+
+		p->pid = proc->pid;
+		p->procNumber = pgprocno;
+		p->databaseId = proc->databaseId;
+		p->statusFlags = ProcGlobal->statusFlags[index];
+
+		/* Fetch xid just once - see GetNewTransactionId */
+		p->xid = UINT32_ACCESS_ONCE(ProcGlobal->xids[index]);
+		p->xmin = UINT32_ACCESS_ONCE(proc->xmin);
+	}
+
+	LWLockRelease(ProcArrayLock);
+
+	*n = numProcs;
+
+	return result;
 }
 
 /*
