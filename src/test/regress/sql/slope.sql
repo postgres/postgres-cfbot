@@ -274,6 +274,66 @@ select floor(floor(v_float8)), count(*) from src group by 1;
 explain (costs off, verbose)
 select floor(v_float8 + 1), count(*) from src group by 1;
 
+
+--
+-- Multi-column tests
+--
+
+-- skip pinned x
+explain (costs off, verbose)
+select y, z from grid where x = 2
+order by 1, 2;
+
+-- skip pinned x and rely on monotonicity w.r.t x and y
+explain (costs off, verbose)
+select 3 * y, 5 * z from grid where x = 2
+order by 1, 2;
+-- same as a bove, but decreasing (2)
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc nulls last;
+-- same as above but desc (implicit nulls first) doesn't match the expression
+-- order for the index.
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc;
+
+-- skip non-monotonic abs(x) with constant x
+explain (costs off, verbose)
+select abs(x), 3 * y, 5 * z from grid where x = 2
+order by 1, 2, 3;
+
+-- pin middle column (y)
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2
+order by 1, 2;
+-- pin y and x via y
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2 AND x = y
+order by 2;
+
+-- x = 1 is not treated as a constant in an expression (x * z)
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1
+order by 1, 2;
+-- same as above but sort key y = 1 skipped
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1 and y = 1
+order by 1, 2;
+
+-- skip constant (w = 1) pathkeys that is not an index key.
+explain (costs off, verbose)
+select w, x, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+explain (costs off, verbose)
+select x, w, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+explain (costs off, verbose)
+select x, y, w, z from grid where w = 1
+order by 1, 2, 3, 4;
+explain (costs off, verbose)
+select x, y, z, w from grid where w = 1
+order by 1, 2, 3, 4;
 --
 -- ties on multi-column path keys
 --

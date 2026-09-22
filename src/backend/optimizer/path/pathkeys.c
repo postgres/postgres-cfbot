@@ -1239,6 +1239,9 @@ build_index_pathkeys(PlannerInfo *root,
 											  index->rel->relids,
 											  false);
 
+		if (cpathkey && cpathkey->pk_eclass->ec_has_const)
+			column_pinned = true;
+
 		/*
 		 * If the first unmatched query pathkey is a monotonic function of
 		 * this index column, use that pathkey instead of the column's own

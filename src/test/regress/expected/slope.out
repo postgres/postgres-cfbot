@@ -476,6 +476,177 @@ select floor(v_float8 + 1), count(*) from src group by 1;
 (5 rows)
 
 --
+-- Multi-column tests
+--
+-- skip pinned x
+explain (costs off, verbose)
+select y, z from grid where x = 2
+order by 1, 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: y, z
+   Index Cond: (grid.x = 2)
+(3 rows)
+
+-- skip pinned x and rely on monotonicity w.r.t x and y
+explain (costs off, verbose)
+select 3 * y, 5 * z from grid where x = 2
+order by 1, 2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Incremental Sort
+   Output: ((3 * y)), ((5 * z))
+   Sort Key: ((3 * grid.y)), ((5 * grid.z))
+   Presorted Key: ((3 * grid.y))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: (3 * y), (5 * z)
+         Index Cond: (grid.x = 2)
+(7 rows)
+
+-- same as a bove, but decreasing (2)
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc nulls last;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Incremental Sort
+   Output: ((2 * y)), (('-3'::integer * z))
+   Sort Key: ((2 * grid.y)), (('-3'::integer * grid.z)) DESC NULLS LAST
+   Presorted Key: ((2 * grid.y))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: (2 * y), ('-3'::integer * z)
+         Index Cond: (grid.x = 2)
+(7 rows)
+
+-- same as above but desc (implicit nulls first) doesn't match the expression
+-- order for the index.
+explain (costs off, verbose)
+select 2 * y, -3 * z from grid where x = 2
+order by 1, 2 desc;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Incremental Sort
+   Output: ((2 * y)), (('-3'::integer * z))
+   Sort Key: ((2 * grid.y)), (('-3'::integer * grid.z)) DESC
+   Presorted Key: ((2 * grid.y))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: (2 * y), ('-3'::integer * z)
+         Index Cond: (grid.x = 2)
+(7 rows)
+
+-- skip non-monotonic abs(x) with constant x
+explain (costs off, verbose)
+select abs(x), 3 * y, 5 * z from grid where x = 2
+order by 1, 2, 3;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Incremental Sort
+   Output: (abs(x)), ((3 * y)), ((5 * z))
+   Sort Key: (abs(grid.x)), ((3 * grid.y)), ((5 * grid.z))
+   Presorted Key: (abs(grid.x)), ((3 * grid.y))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: abs(x), (3 * y), (5 * z)
+         Index Cond: (grid.x = 2)
+(7 rows)
+
+-- pin middle column (y)
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2
+order by 1, 2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Incremental Sort
+   Output: ((3 * x)), ((5 * z))
+   Sort Key: ((3 * grid.x)), ((5 * grid.z))
+   Presorted Key: ((3 * grid.x))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: (3 * x), (5 * z)
+         Index Cond: (grid.y = 2)
+(7 rows)
+
+-- pin y and x via y
+explain (costs off, verbose)
+select 3 * x, 5 * z from grid where y = 2 AND x = y
+order by 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using grid_x_y_z_idx on slope.grid
+   Output: (3 * x), (5 * z)
+   Index Cond: ((grid.x = 2) AND (grid.y = 2))
+(3 rows)
+
+-- x = 1 is not treated as a constant in an expression (x * z)
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1
+order by 1, 2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Incremental Sort
+   Output: y, ((x * z))
+   Sort Key: grid.y, ((grid.x * grid.z))
+   Presorted Key: grid.y
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: y, (x * z)
+         Index Cond: (grid.x = 1)
+(7 rows)
+
+-- same as above but sort key y = 1 skipped
+explain (costs off, verbose)
+select y, x * z from grid WHERE x = 1 and y = 1
+order by 1, 2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sort
+   Output: y, ((x * z))
+   Sort Key: ((grid.x * grid.z))
+   ->  Index Only Scan using grid_x_y_z_idx on slope.grid
+         Output: y, (x * z)
+         Index Cond: ((grid.x = 1) AND (grid.y = 1))
+(6 rows)
+
+-- skip constant (w = 1) pathkeys that is not an index key.
+explain (costs off, verbose)
+select w, x, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: w, x, y, z
+   Filter: (grid.w = 1)
+(3 rows)
+
+explain (costs off, verbose)
+select x, w, y, z from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: x, w, y, z
+   Filter: (grid.w = 1)
+(3 rows)
+
+explain (costs off, verbose)
+select x, y, w, z from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: x, y, w, z
+   Filter: (grid.w = 1)
+(3 rows)
+
+explain (costs off, verbose)
+select x, y, z, w from grid where w = 1
+order by 1, 2, 3, 4;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using grid_x_y_z_idx on slope.grid
+   Output: x, y, z, w
+   Filter: (grid.w = 1)
+(3 rows)
+
+--
 -- ties on multi-column path keys
 --
 explain (costs off, verbose)
