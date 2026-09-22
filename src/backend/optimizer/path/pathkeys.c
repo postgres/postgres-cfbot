@@ -1239,6 +1239,9 @@ build_index_pathkeys(PlannerInfo *root,
 											  index->rel->relids,
 											  false);
 
+		if (cpathkey && cpathkey->pk_eclass->ec_has_const)
+			column_pinned = true;
+
 		/*
 		 * If the first unmatched query pathkey is a monotonic function of
 		 * this index column, use that pathkey instead of the column's own
@@ -1347,6 +1350,13 @@ build_index_pathkeys(PlannerInfo *root,
 			}
 
 			/*
+			 * If the index column is pinned i.e. (constant EC) or it matched
+			 * a previous pathkey, we can try the next index column.
+			 */
+			if (pathkey_emitted || column_pinned)
+				break;
+
+			/*
 			 * Index can't satisfy query pathkeys any further
 			 */
 			query_pk_cell = NULL;
@@ -1365,7 +1375,7 @@ build_index_pathkeys(PlannerInfo *root,
 			column_pinned = true;
 		}
 
-		if (!column_pinned)
+		if (!column_pinned && !pathkey_emitted)
 		{
 			/*
 			 * Boolean index keys might be redundant even if they do not
