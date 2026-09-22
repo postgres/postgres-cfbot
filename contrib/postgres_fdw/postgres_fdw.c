@@ -308,6 +308,23 @@ typedef struct PgFdwAnalyzeState
 } PgFdwAnalyzeState;
 
 /*
+ * Cached size and cost estimate for a parameterized scan of a base relation,
+ * keyed by its (interned) ParamPathInfo.  These are kept in the
+ * param_path_costs list of the relation's PgFdwRelationInfo, so that
+ * reparameterizing a path does not require a second remote EXPLAIN for a
+ * parameterization we already costed.
+ */
+typedef struct PgFdwParamPathCost
+{
+	ParamPathInfo *param_info;
+	double		rows;
+	int			width;
+	int			disabled_nodes;
+	Cost		startup_cost;
+	Cost		total_cost;
+} PgFdwParamPathCost;
+
+/*
  * This enum describes what's kept in the fdw_private list for a ForeignPath.
  * We store:
  *
@@ -513,6 +530,12 @@ static void postgresForeignAsyncNotify(AsyncRequest *areq);
 /*
  * Helper functions
  */
+static void get_param_path_cost(PlannerInfo *root,
+								RelOptInfo *baserel,
+								ParamPathInfo *param_info,
+								double *p_rows, int *p_width,
+								int *p_disabled_nodes,
+								Cost *p_startup_cost, Cost *p_total_cost);
 static void estimate_path_cost_size(PlannerInfo *root,
 									RelOptInfo *foreignrel,
 									List *param_join_conds,
@@ -788,6 +811,9 @@ postgresGetForeignRelSize(PlannerInfo *root,
 
 	apply_server_options(fpinfo);
 	apply_table_options(fpinfo);
+
+	/* No parameterized-path estimates cached yet. */
+	fpinfo->param_path_costs = NIL;
 
 	/*
 	 * If the table or the server is configured to use remote estimates,
@@ -1325,17 +1351,10 @@ postgresGetForeignPaths(PlannerInfo *root,
 		Cost		startup_cost;
 		Cost		total_cost;
 
-		/* Get a cost estimate from the remote */
-		estimate_path_cost_size(root, baserel,
-								param_info->ppi_clauses, NIL, NULL,
-								&rows, &width, &disabled_nodes,
-								&startup_cost, &total_cost);
-
-		/*
-		 * ppi_rows currently won't get looked at by anything, but still we
-		 * may as well ensure that it matches our idea of the rowcount.
-		 */
-		param_info->ppi_rows = rows;
+		/* Get a cost estimate from the remote (or from our cache) */
+		get_param_path_cost(root, baserel, param_info,
+							&rows, &width, &disabled_nodes,
+							&startup_cost, &total_cost);
 
 		/* Make the path */
 		path = create_foreignscan_path(root, baserel,
@@ -1351,6 +1370,55 @@ postgresGetForeignPaths(PlannerInfo *root,
 									   NIL);	/* no fdw_private list */
 		add_path(baserel, (Path *) path);
 	}
+}
+
+/*
+ * get_param_path_cost
+ *		Estimate the size and cost of scanning baserel with the join clauses
+ *		of the given ParamPathInfo pushed down, caching the result.
+ */
+static void
+get_param_path_cost(PlannerInfo *root, RelOptInfo *baserel,
+					ParamPathInfo *param_info,
+					double *p_rows, int *p_width, int *p_disabled_nodes,
+					Cost *p_startup_cost, Cost *p_total_cost)
+{
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) baserel->fdw_private;
+	PgFdwParamPathCost *ppc = NULL;
+	ListCell   *lc;
+
+	foreach(lc, fpinfo->param_path_costs)
+	{
+		PgFdwParamPathCost *cached = (PgFdwParamPathCost *) lfirst(lc);
+
+		if (cached->param_info == param_info)
+		{
+			ppc = cached;
+			break;
+		}
+	}
+
+	if (ppc == NULL)
+	{
+		ppc = (PgFdwParamPathCost *) palloc(sizeof(PgFdwParamPathCost));
+		ppc->param_info = param_info;
+
+		/* Get a cost estimate from the remote */
+		estimate_path_cost_size(root, baserel,
+								param_info->ppi_clauses, NIL, NULL,
+								&ppc->rows, &ppc->width, &ppc->disabled_nodes,
+								&ppc->startup_cost, &ppc->total_cost);
+
+		param_info->ppi_rows = ppc->rows;
+
+		fpinfo->param_path_costs = lappend(fpinfo->param_path_costs, ppc);
+	}
+
+	*p_rows = ppc->rows;
+	*p_width = ppc->width;
+	*p_disabled_nodes = ppc->disabled_nodes;
+	*p_startup_cost = ppc->startup_cost;
+	*p_total_cost = ppc->total_cost;
 }
 
 /*
@@ -1391,20 +1459,19 @@ postgresReparameterizeForeignPath(PlannerInfo *root, ForeignPath *path,
 	/*
 	 * Note that we ignore the given path's pathkeys and always produce an
 	 * unsorted path. A parameterized path is only ever used on the inside
-	 * of a NestLoop, where its ordering is of no interest.
+	 * of a NestLoop, where its ordering is of no interest. Producing an
+	 * unsorted path also means that we get to reuse the cost estimate we
+	 * already made for this parameterization, if any.
 	 */
 
 	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
 	if (param_info == NULL)
 		return NULL;			/* shouldn't happen */
 
-	/* Get a cost estimate from the remote */
-	estimate_path_cost_size(root, baserel,
-							param_info->ppi_clauses, NIL, NULL,
-							&rows, &width, &disabled_nodes,
-							&startup_cost, &total_cost);
-
-	param_info->ppi_rows = rows;
+	/* Get a cost estimate from the remote (or from our cache) */
+	get_param_path_cost(root, baserel, param_info,
+						&rows, &width, &disabled_nodes,
+						&startup_cost, &total_cost);
 
 	return (Path *) create_foreignscan_path(root, baserel,
 											NULL,	/* default pathtarget */
