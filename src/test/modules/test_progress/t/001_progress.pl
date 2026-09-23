@@ -31,15 +31,7 @@ is_deeply(\@problems, [],
 	'ProgressCheck.pm describes every macro of commands/progress.h')
   or diag(join("\n", @problems));
 
-# Is the server compiled with PROGRESS_DEBUG?  It is set in the compiler
-# flags, as a buildfarm animal would (CPPFLAGS or CFLAGS with configure,
-# c_args with meson), or in pg_config_manual.h.  Find out without starting
-# a server, so that the test costs nothing in other builds.
-my ($cppflags) = run_command([ 'pg_config', '--cppflags' ]);
-my ($cflags) = run_command([ 'pg_config', '--cflags' ]);
-(my $manual_h = $progress_h) =~ s{commands/progress\.h$}{pg_config_manual.h};
-if ("$cppflags $cflags" !~ /-DPROGRESS_DEBUG\b/
-	&& slurp_file($manual_h) !~ /^\s*#\s*define\s+PROGRESS_DEBUG\b/m)
+if (!ProgressCheck::compiled_with_progress_debug($progress_h))
 {
 	note 'not compiled with PROGRESS_DEBUG, skipping the traces';
 	done_testing();
