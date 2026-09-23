@@ -105,7 +105,8 @@ RESET enable_hashjoin;
 -- check predicate lock on CTID
 BEGIN ISOLATION LEVEL SERIALIZABLE;
 SELECT * FROM tidscan WHERE ctid = '(0,1)';
--- locktype should be 'tuple'
+-- locktype should be 'relation': a TID scan can probe a TID that holds no
+-- tuple, which has nothing to lock at a finer granularity
 SELECT locktype, mode FROM pg_locks WHERE pid = pg_backend_pid() AND mode = 'SIReadLock';
 ROLLBACK;
 

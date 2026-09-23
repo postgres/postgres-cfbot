@@ -1226,23 +1226,37 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	}
 
 	/*
-	 * For seqscan, sample and TID range scans in a serializable transaction,
-	 * acquire a predicate lock on the entire relation. This is required not
-	 * only to lock all the matching tuples, but also to conflict with new
-	 * insertions into the table. In an indexscan, we take page locks on the
-	 * index pages covering the range specified in the scan qual, but in a
-	 * heap scan there is nothing more fine-grained to lock. A bitmap scan is
-	 * a different story, there we have already scanned the index and locked
-	 * the index pages covering the predicate. But in that case we still have
-	 * to lock any matching heap tuples. For sample scan we could optimize the
-	 * locking to be at least page-level granularity, but we'd need to add
-	 * per-tuple locking for that.  A TID range scan is like a seqscan in this
-	 * respect: it reads heap blocks directly with no index involved, so there
-	 * is nothing finer to lock, and heap_insert() only checks for conflicts
-	 * against relation-level predicate locks anyway.
+	 * In a serializable transaction, acquire a predicate lock on the entire
+	 * relation for the scan types tested below. This is required not only to
+	 * lock all the matching tuples, but also to conflict with new insertions
+	 * into the table; heap_insert() only checks for conflicts against
+	 * relation-level predicate locks, so nothing finer can serve that
+	 * purpose.
+	 *
+	 * For a seqscan there is nothing more fine-grained to lock. In an
+	 * indexscan, by contrast, we take page locks on the index pages covering
+	 * the range specified in the scan qual. A bitmap scan is a different
+	 * story again: there we have already scanned the index and locked the
+	 * index pages covering the predicate, but we still have to lock any
+	 * matching heap tuples.
+	 *
+	 * For a sample scan we could optimize the locking to be at least
+	 * page-level granularity, but we'd need to add per-tuple locking for
+	 * that.
+	 *
+	 * TID range scan addresses a range of heap blocks directly, with no
+	 * index involved, so like a seqscan it has nothing finer to lock. Heap
+	 * page locks would not do: they only aggregate tuple locks and do not
+	 * cover the gaps within a page.
+	 *
+	 * TID scan does have something finer to lock, and heap_fetch() locks
+	 * each tuple it returns. That is not sufficient on its own, though:
+	 * a probed TID that holds no tuple has nothing to lock, yet an insertion
+	 * later materializing a tuple at exactly that TID has to conflict with
+	 * the scan.
 	 */
 	if (scan->rs_base.rs_flags & (SO_TYPE_SEQSCAN | SO_TYPE_SAMPLESCAN |
-								  SO_TYPE_TIDRANGESCAN))
+								  SO_TYPE_TIDSCAN | SO_TYPE_TIDRANGESCAN))
 	{
 		/*
 		 * Ensure a missing snapshot is noticed reliably, even if the
