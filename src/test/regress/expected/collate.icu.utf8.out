@@ -1441,6 +1441,25 @@ SELECT * FROM test6 WHERE b LIKE 'zyäbc' COLLATE ctest_nondet;
  2 | zyäbc
 (2 rows)
 
+-- A four-byte multibyte literal can use BMH with a deterministic collation.
+-- The nondeterministic case must preserve canonical equivalence by falling
+-- back to the collation-aware matcher.
+SELECT a, b LIKE U&'%\00E4bc%' COLLATE ctest_det AS matched
+FROM test6 ORDER BY a;
+ a | matched 
+---+---------
+ 1 | t
+ 2 | f
+(2 rows)
+
+SELECT a, b LIKE U&'%\00E4bc%' COLLATE ctest_nondet AS matched
+FROM test6 ORDER BY a;
+ a | matched 
+---+---------
+ 1 | t
+ 2 | t
+(2 rows)
+
 -- same with arrays
 CREATE TABLE test6a (a int, b text[]);
 INSERT INTO test6a VALUES (1, ARRAY[U&'\00E4bc']);
