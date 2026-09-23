@@ -406,6 +406,7 @@ get_db_infos(ClusterInfo *cluster)
 				i_spclocation;
 	char		query[QUERY_ALLOC];
 
+	/* Skip invalid databases in the old cluster */
 	snprintf(query, sizeof(query),
 			 "SELECT d.oid, d.datname, "
 			 "pg_catalog.pg_tablespace_location(t.oid) AS spclocation "
@@ -413,7 +414,9 @@ get_db_infos(ClusterInfo *cluster)
 			 " LEFT OUTER JOIN pg_catalog.pg_tablespace t "
 			 " ON d.dattablespace = t.oid "
 			 "WHERE d.datallowconn = true "
-			 "ORDER BY 1");
+			 "%s"
+			 "ORDER BY 1",
+			 cluster == &old_cluster ? "  AND d.datconnlimit <> -2 " : "");
 
 	res = executeQueryOrDie(conn, "%s", query);
 
