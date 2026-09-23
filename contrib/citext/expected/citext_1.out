@@ -2120,6 +2120,46 @@ SELECT split_part('abcTdefTghi', 't'::citext, 2) = 'def' AS t;
  t
 (1 row)
 
+-- positions are handled as in the core split_part()
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -1) = 'ghi' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -3) = 'abc' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, 4) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -4) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, ''::citext, 1) = 'abcTdefTghi' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, ''::citext, 2) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, 0);
+ERROR:  field position must not be zero
+CONTEXT:  SQL function "split_part" statement 1
 SELECT strpos('high'::citext, 'gh'        ) = 3 AS t;
  t 
 ---
