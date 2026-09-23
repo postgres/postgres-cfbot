@@ -26,6 +26,30 @@
 /* GUC parameter */
 int			GinFuzzySearchLimit = 0;
 
+/*
+ * Scan keys with at least this many entries get their entries sorted before
+ * the pending list is scanned, see collectMatchesForHeapRow().  Below that,
+ * looking up each entry separately is cheap enough.
+ */
+#define GIN_PENDING_SORT_THRESHOLD	64
+
+/*
+ * Per-scan-key state for matching pending-list tuples, used only for scan
+ * keys with at least GIN_PENDING_SORT_THRESHOLD entries.
+ */
+typedef struct pendingKeyState
+{
+	/* indexes of exact-match entries, sorted by key */
+	uint32	   *sortedEntries;
+	uint32		nsortedEntries;
+	/* indexes of partial-match and GIN_CAT_EMPTY_QUERY entries */
+	uint32	   *otherEntries;
+	uint32		notherEntries;
+	/* indexes of entries set to GIN_TRUE for the current heap row */
+	uint32	   *trueEntries;
+	uint32		ntrueEntries;
+} pendingKeyState;
+
 typedef struct pendingPosition
 {
 	Buffer		pendingBuffer;
@@ -33,6 +57,10 @@ typedef struct pendingPosition
 	OffsetNumber lastOffset;
 	ItemPointerData item;
 	bool	   *hasMatchKey;
+	/* array of nkeys elements, or NULL if no scan key has many entries */
+	pendingKeyState *keyState;
+	/* consistent functions have been called since entryRes was reset */
+	bool		entryResDirty;
 } pendingPosition;
 
 
@@ -1606,6 +1634,161 @@ matchPartialInPendingList(GinState *ginstate, Page page,
 	return false;
 }
 
+typedef struct entrySortArg
+{
+	GinState   *ginstate;
+	GinScanKey	key;
+} entrySortArg;
+
+/*
+ * Comparison function for scan entry indexes.  Sorts by the entry's key, in
+ * the same order as the pending-list tuples of a heap row.
+ */
+static int
+entryIndexByKeyCmp(const void *a1, const void *a2, void *arg)
+{
+	entrySortArg *sortarg = arg;
+	GinScanEntry e1 = sortarg->key->scanEntry[*(const uint32 *) a1];
+	GinScanEntry e2 = sortarg->key->scanEntry[*(const uint32 *) a2];
+
+	return ginCompareEntries(sortarg->ginstate, sortarg->key->attnum,
+							 e1->queryKey, e1->queryCategory,
+							 e2->queryKey, e2->queryCategory);
+}
+
+/*
+ * Set up the pendingKeyState array for scanning the pending list.
+ *
+ * This sorts the entries of the scan keys, so the caller should not hold any
+ * buffer locks.
+ */
+static pendingKeyState *
+initPendingKeyStates(GinScanOpaque so)
+{
+	pendingKeyState *keyState;
+	MemoryContext oldCtx;
+
+	/* This lives as long as the scan keys */
+	oldCtx = MemoryContextSwitchTo(so->keyCtx);
+
+	keyState = palloc0_array(pendingKeyState, so->nkeys);
+	for (uint32 i = 0; i < so->nkeys; i++)
+	{
+		GinScanKey	key = so->keys + i;
+		pendingKeyState *ks = &keyState[i];
+		entrySortArg sortarg;
+
+		if (key->nentries < GIN_PENDING_SORT_THRESHOLD)
+			continue;
+
+		ks->sortedEntries = palloc_array(uint32, key->nentries);
+		ks->otherEntries = palloc_array(uint32, key->nentries);
+		ks->trueEntries = palloc_array(uint32, key->nentries);
+
+		for (uint32 j = 0; j < key->nentries; j++)
+		{
+			GinScanEntry entry = key->scanEntry[j];
+
+			if (entry->isPartialMatch ||
+				entry->queryCategory == GIN_CAT_EMPTY_QUERY)
+				ks->otherEntries[ks->notherEntries++] = j;
+			else
+				ks->sortedEntries[ks->nsortedEntries++] = j;
+		}
+
+		sortarg.ginstate = &so->ginstate;
+		sortarg.key = key;
+		qsort_arg(ks->sortedEntries, ks->nsortedEntries, sizeof(uint32),
+				  entryIndexByKeyCmp, &sortarg);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	MemoryContextSwitchTo(oldCtx);
+
+	return keyState;
+}
+
+/*
+ * Set entryRes for the sorted entries of a scan key that are equal to one of
+ * the pending-list tuples of the current heap row on this page.
+ *
+ * The tuples and the sorted entries are in the same order, so we look up each
+ * tuple in the entries with a binary search, starting where the search for
+ * the previous tuple ended.  With T tuples and E entries this costs about
+ * T * log(E) comparisons, instead of E * log(T) when looking up each entry
+ * in the tuples.
+ */
+static void
+matchSortedEntries(GinScanOpaque so, GinScanKey key, pendingKeyState *ks,
+				   Page page, pendingPosition *pos,
+				   Datum *datum, GinNullCategory *category,
+				   bool *datumExtracted)
+{
+	uint32		lo = 0;
+
+	for (OffsetNumber off = pos->firstOffset; off < pos->lastOffset; off++)
+	{
+		IndexTuple	itup;
+		OffsetNumber attrnum;
+		uint32		hi;
+
+		itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, off));
+		attrnum = gintuple_get_attrnum(&so->ginstate, itup);
+		if (attrnum < key->attnum)
+			continue;
+		if (attrnum > key->attnum)
+			break;
+
+		if (datumExtracted[off - 1] == false)
+		{
+			datum[off - 1] = gintuple_get_key(&so->ginstate, itup,
+											  &category[off - 1]);
+			datumExtracted[off - 1] = true;
+		}
+
+		/* Find the first entry that is not less than the tuple */
+		hi = ks->nsortedEntries;
+		while (lo < hi)
+		{
+			uint32		mid = lo + ((hi - lo) >> 1);
+			GinScanEntry entry = key->scanEntry[ks->sortedEntries[mid]];
+
+			if (ginCompareEntries(&so->ginstate, key->attnum,
+								  entry->queryKey, entry->queryCategory,
+								  datum[off - 1], category[off - 1]) < 0)
+				lo = mid + 1;
+			else
+				hi = mid;
+		}
+
+		/*
+		 * Set all entries equal to the tuple.  The query can have duplicates,
+		 * and each of them has its own entryRes slot.
+		 */
+		for (; lo < ks->nsortedEntries; lo++)
+		{
+			uint32		j = ks->sortedEntries[lo];
+			GinScanEntry entry = key->scanEntry[j];
+
+			if (ginCompareEntries(&so->ginstate, key->attnum,
+								  entry->queryKey, entry->queryCategory,
+								  datum[off - 1], category[off - 1]) != 0)
+				break;
+
+			if (!key->entryRes[j])
+			{
+				key->entryRes[j] = GIN_TRUE;
+				ks->trueEntries[ks->ntrueEntries++] = j;
+			}
+		}
+
+		/* No later tuple can match any entry */
+		if (lo >= ks->nsortedEntries)
+			break;
+	}
+}
+
 /*
  * Set up the entryRes array for each key by looking at
  * every entry for current heap row in pending list.
@@ -1615,6 +1798,14 @@ matchPartialInPendingList(GinState *ginstate, Page page,
  * try to apply the key's consistentFn.  (A tuple not meeting that requirement
  * cannot be returned by the normal search since no entry stream will
  * source its TID.)
+ *
+ * For a scan key with many entries, we avoid work proportional to the number
+ * of entries where we can, because this is done for every heap row in the
+ * pending list, while holding a buffer lock.  If the row has fewer tuples
+ * than the key has sorted entries, we look up each tuple in the entries
+ * rather than each entry in the tuples.  And instead of clearing the whole
+ * entryRes array for each row, we clear only the entries set for the
+ * previous row.
  *
  * The pendingBuffer is presumed pinned and share-locked on entry.
  */
@@ -1627,15 +1818,27 @@ collectMatchesForHeapRow(IndexScanDesc scan, pendingPosition *pos)
 	IndexTuple	itup;
 
 	/*
-	 * Reset all entryRes and hasMatchKey flags
+	 * Reset all entryRes and hasMatchKey flags.  The consistent functions get
+	 * a pointer to entryRes, and we don't rely on them leaving it alone, so
+	 * if they were called for the previous row, clear everything.
 	 */
 	for (uint32 i = 0; i < so->nkeys; i++)
 	{
 		GinScanKey	key = so->keys + i;
+		pendingKeyState *ks = pos->keyState ? &pos->keyState[i] : NULL;
 
-		memset(key->entryRes, GIN_FALSE, key->nentries);
+		if (ks != NULL && ks->trueEntries != NULL && !pos->entryResDirty)
+		{
+			for (uint32 k = 0; k < ks->ntrueEntries; k++)
+				key->entryRes[ks->trueEntries[k]] = GIN_FALSE;
+		}
+		else
+			memset(key->entryRes, GIN_FALSE, key->nentries);
+		if (ks != NULL)
+			ks->ntrueEntries = 0;
 	}
 	memset(pos->hasMatchKey, false, so->nkeys);
+	pos->entryResDirty = false;
 
 	/*
 	 * Outer loop iterates over multiple pending-list pages when a single heap
@@ -1656,9 +1859,28 @@ collectMatchesForHeapRow(IndexScanDesc scan, pendingPosition *pos)
 		for (uint32 i = 0; i < so->nkeys; i++)
 		{
 			GinScanKey	key = so->keys + i;
+			pendingKeyState *ks = pos->keyState ? &pos->keyState[i] : NULL;
+			uint32	   *entryList = NULL;
+			uint32		nentryList = key->nentries;
 
-			for (uint32 j = 0; j < key->nentries; j++)
+			if (ks != NULL &&
+				pos->lastOffset - pos->firstOffset < ks->nsortedEntries)
 			{
+				/*
+				 * Look up the tuples in the sorted entries, then check the
+				 * remaining entries one by one below.
+				 */
+				matchSortedEntries(so, key, ks, page, pos,
+								   datum, category, datumExtracted);
+				if (ks->ntrueEntries > 0)
+					pos->hasMatchKey[i] = true;
+				entryList = ks->otherEntries;
+				nentryList = ks->notherEntries;
+			}
+
+			for (uint32 n = 0; n < nentryList; n++)
+			{
+				uint32		j = entryList ? entryList[n] : n;
 				GinScanEntry entry = key->scanEntry[j];
 				OffsetNumber StopLow = pos->firstOffset,
 							StopHigh = pos->lastOffset,
@@ -1785,6 +2007,8 @@ collectMatchesForHeapRow(IndexScanDesc scan, pendingPosition *pos)
 				}
 
 				pos->hasMatchKey[i] |= key->entryRes[j];
+				if (key->entryRes[j] && ks != NULL && ks->trueEntries != NULL)
+					ks->trueEntries[ks->ntrueEntries++] = j;
 			}
 		}
 
@@ -1856,6 +2080,27 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 	blkno = GinPageGetMeta(page)->head;
 
 	/*
+	 * If there is a pending list, set up the per-key state for matching. That
+	 * can involve sorting a lot of entries, so don't hold the metapage lock
+	 * while doing it, and look at the head of the list again afterwards.
+	 */
+	pos.keyState = NULL;
+	if (blkno != InvalidBlockNumber)
+	{
+		for (uint32 i = 0; i < so->nkeys; i++)
+		{
+			if (so->keys[i].nentries >= GIN_PENDING_SORT_THRESHOLD)
+			{
+				LockBuffer(metabuffer, GIN_UNLOCK);
+				pos.keyState = initPendingKeyStates(so);
+				LockBuffer(metabuffer, GIN_SHARE);
+				blkno = GinPageGetMeta(page)->head;
+				break;
+			}
+		}
+	}
+
+	/*
 	 * fetch head of list before unlocking metapage. head page must be pinned
 	 * to prevent deletion by vacuum process
 	 */
@@ -1871,6 +2116,7 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 	pos.firstOffset = FirstOffsetNumber;
 	UnlockReleaseBuffer(metabuffer);
 	pos.hasMatchKey = palloc_array(bool, so->nkeys);
+	pos.entryResDirty = true;
 
 	/*
 	 * loop for each heap row. scanGetCandidate returns full row or row's
@@ -1895,6 +2141,7 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 		oldCtx = MemoryContextSwitchTo(so->tempCtx);
 		recheck = false;
 		match = true;
+		pos.entryResDirty = true;
 
 		for (uint32 i = 0; i < so->nkeys; i++)
 		{

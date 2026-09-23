@@ -3760,6 +3760,7 @@ ec_member_foreign_arg
 ec_member_matches_arg
 element_type
 emit_log_hook_type
+entrySortArg
 eval_const_expressions_context
 exec_thread_arg
 execution_state
@@ -4005,6 +4006,7 @@ partition_method_t
 pe_test_config
 pe_test_escape_func
 pe_test_vector
+pendingKeyState
 pendingPosition
 pending_label
 pgParameterStatus
