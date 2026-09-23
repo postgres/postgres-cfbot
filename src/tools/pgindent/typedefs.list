@@ -4000,6 +4000,7 @@ pe_test_config
 pe_test_escape_func
 pe_test_vector
 pendingKeyState
+pendingMatches
 pendingPosition
 pending_label
 pgParameterStatus
