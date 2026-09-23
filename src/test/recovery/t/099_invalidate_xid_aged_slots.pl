@@ -235,6 +235,72 @@ ok( $primary->log_contains(
 		$log_offset),
 	'aged xmin is reported on invalidation');
 
+# Testcase 6: a synced slot on the standby with an aged catalog_xmin is
+# invalidated by a restartpoint, which releases the catalog_xmin it had pinned
+# on the primary's physical slot.
+
+# The limit stays off on the primary, or its own checkpoints invalidate the
+# failover slot first.
+$primary->adjust_conf('postgresql.conf', 'max_slot_xid_age', '0');
+$primary->reload;
+$primary->poll_query_until('postgres',
+	"SELECT current_setting('max_slot_xid_age') = '0'")
+  or die "Timed out waiting for max_slot_xid_age to take effect";
+
+# A fresh slot, as an invalidated one cannot be streamed from
+$primary->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('phys_sync_slot', true)");
+
+# Created before the standby starts, or its xmin lags the standby and never syncs
+$primary->safe_psql('postgres',
+	"SELECT pg_create_logical_replication_slot('failover_slot', 'pgoutput', false, false, true)"
+);
+
+# Sync needs a dbname, and hs_feedback is what pins the synced catalog_xmin onto
+# the primary's slot.
+my $connstr = $primary->connstr;
+$standby->adjust_conf('postgresql.conf', 'primary_slot_name',
+	"'phys_sync_slot'");
+$standby->adjust_conf('postgresql.conf', 'primary_conninfo',
+	"'$connstr dbname=postgres'");
+$standby->adjust_conf('postgresql.conf', 'hot_standby_feedback', 'on');
+
+$standby->start;
+
+# Sync once by hand, so the synced catalog_xmin stays frozen. The standby has to
+# replay past the new slot first, or the sync only retries.
+$primary->wait_for_replay_catchup($standby);
+$standby->safe_psql('postgres', "SELECT pg_sync_replication_slots()");
+is( $standby->safe_psql('postgres',
+		"SELECT synced AND NOT temporary AND catalog_xmin IS NOT NULL AND invalidation_reason IS NULL FROM pg_replication_slots WHERE slot_name = 'failover_slot'"
+	),
+	't',
+	'logical failover slot is synced to the standby');
+
+# The primary's slot holds the synced catalog_xmin via hs_feedback
+my $frozen = $standby->safe_psql('postgres',
+	"SELECT catalog_xmin FROM pg_replication_slots WHERE slot_name = 'failover_slot'"
+);
+wait_for_slot($primary, 'phys_sync_slot', "catalog_xmin = '$frozen'");
+
+# Age it out; the primary's checkpoint gives the standby a restartpoint
+$primary->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+$primary->safe_psql('postgres', "CHECKPOINT");
+$primary->wait_for_replay_catchup($standby);
+$standby->safe_psql('postgres', "CHECKPOINT");
+wait_for_slot($standby, 'failover_slot', "invalidation_reason = 'xid_aged'");
+
+# Invalidation does not propagate, so a later sync recreates the slot
+is( $primary->safe_psql('postgres',
+		"SELECT invalidation_reason IS NULL FROM pg_replication_slots WHERE slot_name = 'failover_slot'"
+	),
+	't',
+	'slot on the primary not invalidated by the standby');
+
+# An invalidated slot drops out of the horizon the standby feeds back
+wait_for_slot($primary, 'phys_sync_slot', 'catalog_xmin IS NULL');
+
+$standby->stop;
 $primary->stop;
 
 done_testing();

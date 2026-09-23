@@ -1966,9 +1966,6 @@ GetSlotXidAgeLimit(void)
  * 2. Slot has a valid effective xmin or effective catalog_xmin
  * 3. The slot is not the conflict detection slot. Invalidating it would
  *	  silently lose conflict detection, and nothing recreates it.
- * 4. The slot is not being synced from the primary while the server is in
- *	  recovery. Note that they can still hold vacuum back on the primary as
- *	  catalog_xmin is synced from there.
  *
  * ReplicationSlotsComputeRequiredXmin() computes the oldest xmin from the
  * effective values, so those are the ones that hold vacuum back. They can
@@ -1977,6 +1974,16 @@ GetSlotXidAgeLimit(void)
  * advancing catalog xmin is written to disk before effective_catalog_xmin is
  * updated, so the effective value can be the older of the two (see
  * LogicalConfirmReceivedLocation()).
+ *
+ * Note that this includes synced slots on a standby. A synced slot's
+ * catalog_xmin is sent to the primary's physical slot when
+ * hot_standby_feedback is enabled, holding the catalog horizon back there, so
+ * a synced slot whose catalog_xmin has aged can keep vacuum on the primary
+ * from pruning dead catalog rows and freezing XIDs. Invalidating it advances
+ * the catalog_xmin held by the primary's physical slot, letting vacuum there
+ * proceed. As with the other causes that can invalidate a synced slot, such a
+ * slot is dropped and recreated by the next slot synchronization (see
+ * drop_local_obsolete_slots()).
  */
 static inline bool
 CanInvalidateXidAgedSlot(ReplicationSlot *s)
@@ -1984,8 +1991,7 @@ CanInvalidateXidAgedSlot(ReplicationSlot *s)
 	return (max_slot_xid_age != 0 &&
 			(TransactionIdIsValid(s->effective_xmin) ||
 			 TransactionIdIsValid(s->effective_catalog_xmin)) &&
-			!IsSlotForConflictCheck(NameStr(s->data.name)) &&
-			!(RecoveryInProgress() && s->data.synced));
+			!IsSlotForConflictCheck(NameStr(s->data.name)));
 }
 
 /*
