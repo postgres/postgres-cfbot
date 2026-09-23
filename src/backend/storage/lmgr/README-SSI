@@ -311,6 +311,11 @@ to lock, because heap page locks don't cover "gaps" (see below); a
 lock on just the pages in the range would not conflict with an insert
 of a new tuple into that range.
 
+    * A TID scan likewise locks the entire relation.  Locking the tuples
+it finds is not sufficient, because a TID which currently holds no
+tuple, or which lies beyond the end of the relation, has nothing to
+lock, and yet an insert may later place a tuple at exactly that TID.
+
     * Each tuple read which is visible to the reading transaction
 will be locked, whether or not it meets selection criteria; except
 that there is no need to acquire an SIREAD lock on a tuple when the

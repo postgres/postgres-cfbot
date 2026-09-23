@@ -117,6 +117,7 @@ test: stats-backend
 test: horizons
 test: broken-hot-chain
 test: predicate-bitmap-scan
+test: predicate-tid-scan
 test: predicate-tid-range-scan
 test: predicate-hash
 test: predicate-gist
