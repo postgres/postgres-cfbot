@@ -63,6 +63,22 @@ typedef struct pendingPosition
 	bool		entryResDirty;
 } pendingPosition;
 
+/*
+ * Matching pending-list rows whose consistent functions have not been called
+ * yet, see scanPendingInsert().
+ */
+typedef struct pendingMatches
+{
+	/* heap TIDs of the rows */
+	ItemPointerData *items;
+	uint32		nitems;
+	uint32		maxitems;
+	/* for each row and scan key: number of true entries, then their indexes */
+	uint32	   *entries;
+	Size		nentries;
+	Size		maxentries;
+} pendingMatches;
+
 
 /*
  * Goes to the next page if current offset is outside of bounds
@@ -2053,16 +2069,160 @@ collectMatchesForHeapRow(IndexScanDesc scan, pendingPosition *pos)
 }
 
 /*
+ * Call the consistent functions of all scan keys, with the current entryRes
+ * arrays.  Returns true if the row matches, and sets *recheck.
+ */
+static bool
+pendingRowIsConsistent(GinScanOpaque so, bool *recheck)
+{
+	MemoryContext oldCtx;
+	bool		match = true;
+
+	oldCtx = MemoryContextSwitchTo(so->tempCtx);
+	*recheck = false;
+
+	for (uint32 i = 0; i < so->nkeys; i++)
+	{
+		GinScanKey	key = so->keys + i;
+
+		if (!key->boolConsistentFn(key))
+		{
+			match = false;
+			break;
+		}
+		*recheck |= key->recheckCurItem;
+	}
+
+	MemoryContextSwitchTo(oldCtx);
+	MemoryContextReset(so->tempCtx);
+
+	return match;
+}
+
+/*
+ * Remember the current heap row and its true entries, so that its consistent
+ * functions can be called after the pending list has been scanned.  Returns
+ * false, and remembers nothing, if that would use more than work_mem.  That
+ * is in addition to the bitmap, which has its own work_mem limit.
+ */
+static bool
+savePendingMatch(GinScanOpaque so, pendingPosition *pos, pendingMatches *m)
+{
+	Size		needed = so->nkeys;
+
+	for (uint32 i = 0; i < so->nkeys; i++)
+	{
+		pendingKeyState *ks = &pos->keyState[i];
+
+		needed += ks->trueEntries ? ks->ntrueEntries : so->keys[i].nentries;
+	}
+
+	if (m->nitems == m->maxitems || m->nentries + needed > m->maxentries)
+	{
+		uint32		maxitems = m->maxitems;
+		Size		maxentries = m->maxentries;
+
+		if (m->nitems == maxitems)
+			maxitems = Max(maxitems * 2, 64);
+		while (m->nentries + needed > maxentries)
+			maxentries = Max(maxentries * 2, 1024);
+
+		if (maxitems * sizeof(ItemPointerData) + maxentries * sizeof(uint32) >
+			Min((Size) work_mem * 1024, MaxAllocSize))
+			return false;
+
+		if (m->items == NULL)
+		{
+			m->items = palloc_array(ItemPointerData, maxitems);
+			m->entries = palloc_array(uint32, maxentries);
+		}
+		else
+		{
+			m->items = repalloc_array(m->items, ItemPointerData, maxitems);
+			m->entries = repalloc_array(m->entries, uint32, maxentries);
+		}
+		m->maxitems = maxitems;
+		m->maxentries = maxentries;
+	}
+
+	m->items[m->nitems++] = pos->item;
+	for (uint32 i = 0; i < so->nkeys; i++)
+	{
+		GinScanKey	key = so->keys + i;
+		pendingKeyState *ks = &pos->keyState[i];
+
+		if (ks->trueEntries)
+		{
+			m->entries[m->nentries++] = ks->ntrueEntries;
+			memcpy(&m->entries[m->nentries], ks->trueEntries,
+				   ks->ntrueEntries * sizeof(uint32));
+			m->nentries += ks->ntrueEntries;
+		}
+		else
+		{
+			Size		countpos = m->nentries++;
+			uint32		count = 0;
+
+			for (uint32 j = 0; j < key->nentries; j++)
+			{
+				if (key->entryRes[j])
+				{
+					m->entries[m->nentries++] = j;
+					count++;
+				}
+			}
+			m->entries[countpos] = count;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * Call the consistent functions for the rows remembered by savePendingMatch(),
+ * and add the matching ones to the bitmap.  No buffer locks are held here, so
+ * this can be interrupted.
+ */
+static void
+checkPendingMatches(GinScanOpaque so, pendingMatches *m,
+					TIDBitmap *tbm, int64 *ntids)
+{
+	Size		off = 0;
+
+	for (uint32 r = 0; r < m->nitems; r++)
+	{
+		bool		recheck;
+
+		CHECK_FOR_INTERRUPTS();
+
+		for (uint32 i = 0; i < so->nkeys; i++)
+		{
+			GinScanKey	key = so->keys + i;
+			uint32		count = m->entries[off++];
+
+			memset(key->entryRes, GIN_FALSE, key->nentries);
+			for (uint32 k = 0; k < count; k++)
+				key->entryRes[m->entries[off++]] = GIN_TRUE;
+		}
+
+		if (pendingRowIsConsistent(so, &recheck))
+		{
+			tbm_add_tuples(tbm, &m->items[r], 1, recheck);
+			(*ntids)++;
+		}
+	}
+}
+
+/*
  * Collect all matched rows from pending list into bitmap.
  */
 static void
 scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 {
 	GinScanOpaque so = (GinScanOpaque) scan->opaque;
-	MemoryContext oldCtx;
-	bool		recheck,
-				match;
+	bool		recheck;
 	pendingPosition pos;
+	pendingMatches matches = {0};
 	Buffer		metabuffer = ReadBuffer(scan->indexRelation, GIN_METAPAGE_BLKNO);
 	Page		page;
 	BlockNumber blkno;
@@ -2135,30 +2295,20 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 			continue;
 
 		/*
+		 * With scan keys that have many entries, a consistent function call
+		 * can take a while, and we are holding a buffer lock that keeps us
+		 * from being canceled.  So just remember the row, and call the
+		 * consistent functions after the scan, if it fits in work_mem.
+		 */
+		if (pos.keyState != NULL && savePendingMatch(so, &pos, &matches))
+			continue;
+
+		/*
 		 * Matching of entries of one row is finished, so check row using
 		 * consistent functions.
 		 */
-		oldCtx = MemoryContextSwitchTo(so->tempCtx);
-		recheck = false;
-		match = true;
 		pos.entryResDirty = true;
-
-		for (uint32 i = 0; i < so->nkeys; i++)
-		{
-			GinScanKey	key = so->keys + i;
-
-			if (!key->boolConsistentFn(key))
-			{
-				match = false;
-				break;
-			}
-			recheck |= key->recheckCurItem;
-		}
-
-		MemoryContextSwitchTo(oldCtx);
-		MemoryContextReset(so->tempCtx);
-
-		if (match)
+		if (pendingRowIsConsistent(so, &recheck))
 		{
 			tbm_add_tuples(tbm, &pos.item, 1, recheck);
 			(*ntids)++;
@@ -2166,6 +2316,14 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 	}
 
 	pfree(pos.hasMatchKey);
+
+	/* scanGetCandidate() has released the last pending list page */
+	if (matches.items != NULL)
+	{
+		checkPendingMatches(so, &matches, tbm, ntids);
+		pfree(matches.items);
+		pfree(matches.entries);
+	}
 }
 
 
