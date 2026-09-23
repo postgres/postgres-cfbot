@@ -1681,7 +1681,7 @@ start_standby_server(const struct CreateSubscriberOptions *opt, bool restricted_
 	appendPQExpBufferStr(pg_ctl_cmd, " -s -o \"-c sync_replication_slots=off\"");
 
 	/* Prevent unintended slot invalidation */
-	appendPQExpBufferStr(pg_ctl_cmd, " -o \"-c idle_replication_slot_timeout=0\"");
+	appendPQExpBufferStr(pg_ctl_cmd, " -o \"-c idle_replication_slot_timeout=0 -c max_slot_xid_age=0\"");
 
 	if (restricted_access)
 	{

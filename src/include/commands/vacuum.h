@@ -295,6 +295,19 @@ struct VacuumCutoffs
 	 */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	/*
+	 * SlotXmin and SlotCatalogXmin are the oldest xmin and catalog_xmin of
+	 * any replication slot, from the same ComputeXidHorizons() call that
+	 * computed OldestXmin.
+	 *
+	 * SlotCatalogXminRelevant is whether a slot's catalog_xmin can hold
+	 * OldestXmin back, which is true for catalog and shared relations. See
+	 * InvalidateXidAgedReplicationSlots().
+	 */
+	TransactionId SlotXmin;
+	TransactionId SlotCatalogXmin;
+	bool		SlotCatalogXminRelevant;
 };
 
 /*

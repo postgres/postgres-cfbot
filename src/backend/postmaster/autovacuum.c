@@ -89,6 +89,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
+#include "replication/slot.h"
 #include "storage/aio_subsys.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
@@ -2559,6 +2560,16 @@ do_autovacuum(void)
 
 			/* this resets ProcGlobal->statusFlags[i] too */
 			AbortOutOfAnyTransaction();
+
+			/*
+			 * This worker may still hold a replication slot, from an error
+			 * thrown while invalidating an XID-aged slot during vacuum. The
+			 * transaction abort above does not release it, so release it here
+			 * before moving on to the next table.
+			 */
+			if (MyReplicationSlot != NULL)
+				ReplicationSlotRelease();
+
 			FlushErrorState();
 			MemoryContextReset(PortalContext);
 

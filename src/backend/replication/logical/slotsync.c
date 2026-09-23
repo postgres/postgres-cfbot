@@ -519,6 +519,8 @@ local_sync_slot_required(ReplicationSlot *local_slot, List *remote_slots)
  * reasons:
  * - The 'max_slot_wal_keep_size' on the standby is insufficient to retain WAL
  *   records from the restart_lsn of the slot.
+ * - The 'max_slot_xid_age' on the standby is insufficient to retain the
+ *   catalog_xmin of the slot.
  * - 'primary_slot_name' is temporarily reset to null and the physical slot is
  *   removed.
  * These dropped slots will get recreated in next sync-cycle and it is okay to
