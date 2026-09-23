@@ -462,6 +462,49 @@ SELECT * FROM temporal_rng3 ORDER BY id, valid_at;
 DROP TABLE temporal_rng3;
 
 --
+-- range UQ: NULLS NOT DISTINCT
+--
+
+CREATE TABLE temporal_rng3 (
+  id int4range,
+  valid_at int4range,
+  UNIQUE NULLS NOT DISTINCT (id, valid_at WITHOUT OVERLAPS)
+);
+INSERT INTO temporal_rng3 VALUES (NULL, '[1,10)');
+INSERT INTO temporal_rng3 VALUES (NULL, '[2,3)'); -- fails
+INSERT INTO temporal_rng3 VALUES (NULL, '[1,10)')
+  ON CONFLICT ON CONSTRAINT temporal_rng3_id_valid_at_key DO NOTHING RETURNING *; -- nothing
+SELECT * FROM temporal_rng3;
+REINDEX INDEX temporal_rng3_id_valid_at_key;
+ALTER TABLE temporal_rng3 DROP CONSTRAINT temporal_rng3_id_valid_at_key;
+ALTER TABLE temporal_rng3 ADD CONSTRAINT temporal_rng3_id_valid_at_key
+  UNIQUE NULLS NOT DISTINCT (id, valid_at WITHOUT OVERLAPS);
+DROP TABLE temporal_rng3;
+
+--
+-- multirange UQ: NULLS NOT DISTINCT
+--
+
+CREATE TABLE temporal_mltrng3 (
+  id int4multirange,
+  valid_at int4multirange,
+  UNIQUE NULLS NOT DISTINCT (id, valid_at WITHOUT OVERLAPS)
+);
+INSERT INTO temporal_mltrng3 VALUES (NULL, '{[1,10)}');
+INSERT INTO temporal_mltrng3 VALUES (NULL, '{[2,3)}'); -- fails
+INSERT INTO temporal_mltrng3 VALUES (NULL, '{[1,10)}')
+  ON CONFLICT ON CONSTRAINT temporal_mltrng3_id_valid_at_key DO NOTHING RETURNING *; -- nothing
+INSERT INTO temporal_mltrng3 VALUES ('{[1,2)}', '{[2,3)}'); -- okay: NULL id doesn't match non-NULL
+INSERT INTO temporal_mltrng3 VALUES ('{[1,2)}', NULL);
+INSERT INTO temporal_mltrng3 VALUES ('{[1,2)}', NULL); -- fails
+SELECT * FROM temporal_mltrng3 ORDER BY id, valid_at;
+REINDEX INDEX temporal_mltrng3_id_valid_at_key;
+ALTER TABLE temporal_mltrng3 DROP CONSTRAINT temporal_mltrng3_id_valid_at_key;
+ALTER TABLE temporal_mltrng3 ADD CONSTRAINT temporal_mltrng3_id_valid_at_key
+  UNIQUE NULLS NOT DISTINCT (id, valid_at WITHOUT OVERLAPS);
+DROP TABLE temporal_mltrng3;
+
+--
 -- multirange PK: test with existing rows
 --
 
