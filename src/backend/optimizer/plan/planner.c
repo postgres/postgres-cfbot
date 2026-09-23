@@ -5690,6 +5690,14 @@ create_ordered_paths(PlannerInfo *root,
 			sorted_path = apply_projection_to_path(root, ordered_rel,
 												   sorted_path, target);
 
+		/*
+		 * When is_sorted is true, sorted_path is input_path itself -- still
+		 * a live member of input_rel->pathlist, not a fresh path built for
+		 * ordered_rel.  add_path() detects this (sorted_path->parent is
+		 * input_rel, not ordered_rel) and won't pfree() it even if it's
+		 * found to be dominated here, so input_rel's own pathlist entry
+		 * stays intact.
+		 */
 		add_path(ordered_rel, sorted_path);
 	}
 
