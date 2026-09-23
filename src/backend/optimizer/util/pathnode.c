@@ -446,9 +446,21 @@ set_cheapest(RelOptInfo *parent_rel)
  *	  from any other rel, such as a higher-level join.  However, in some cases
  *	  it is possible that a Path is referenced by another Path for its own
  *	  rel; we must not delete such a Path, even if it is dominated by the new
- *	  Path.  Currently this occurs only for IndexPath objects, which may be
- *	  referenced as children of BitmapHeapPaths as well as being paths in
- *	  their own right.  Hence, we don't pfree IndexPaths when rejecting them.
+ *	  Path.  This occurs for IndexPath objects, which may be referenced as
+ *	  children of BitmapHeapPaths as well as being paths in their own right.
+ *	  Hence, we don't pfree IndexPaths when rejecting them.
+ *
+ *	  A related but distinct hazard is a Path that was built for, and still
+ *	  belongs to, some *other* rel than parent_rel: some callers (e.g.
+ *	  create_ordered_paths(), and grouping_planner()'s exposure of a scan/
+ *	  join rel's partial paths to an outer query level's final rel) pass in a
+ *	  path without copying it, while it remains a live member of its true
+ *	  parent's own pathlist/partial_pathlist.  We detect this generically by
+ *	  comparing the path's stamped-in path->parent against parent_rel: every
+ *	  path freshly built for parent_rel already has path->parent set to
+ *	  parent_rel by its create_*_path() constructor, so a mismatch can only
+ *	  mean the path is on loan from elsewhere and pfree'ing it here would
+ *	  leave that other rel's list with a dangling entry.
  *
  * 'parent_rel' is the relation entry to which the path corresponds.
  * 'new_path' is a potential path for parent_rel.
@@ -627,7 +639,7 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 			/*
 			 * Delete the data pointed-to by the deleted cell, if possible
 			 */
-			if (!IsA(old_path, IndexPath))
+			if (!IsA(old_path, IndexPath) && old_path->parent == parent_rel)
 				pfree(old_path);
 		}
 		else
@@ -660,7 +672,7 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 	else
 	{
 		/* Reject and recycle the new path */
-		if (!IsA(new_path, IndexPath))
+		if (!IsA(new_path, IndexPath) && new_path->parent == parent_rel)
 			pfree(new_path);
 	}
 }
@@ -788,6 +800,17 @@ add_path_precheck(RelOptInfo *parent_rel, int disabled_nodes,
  *	  we're done creating all partial paths for it.  Unlike add_path, we don't
  *	  take an exception for IndexPaths as partial index paths won't be
  *	  referenced by partial BitmapHeapPaths.
+ *
+ *	  We do take an exception for a partial path that doesn't actually belong
+ *	  to parent_rel (i.e. path->parent != parent_rel).  Ordinarily every
+ *	  partial path submitted here was freshly built for parent_rel, but
+ *	  grouping_planner() intentionally passes a scan/join rel's own partial
+ *	  paths to add_partial_path() for the outer query level's final rel (so
+ *	  an outer Gather can be built from them) without removing them from the
+ *	  original rel's partial_pathlist -- and if that original rel already
+ *	  built its own Gather/Gather Merge over one of them, we must not pfree
+ *	  the partial path out from under it just because it lost a comparison
+ *	  for this unrelated parent_rel.
  */
 void
 add_partial_path(RelOptInfo *parent_rel, Path *new_path)
@@ -863,7 +886,8 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		{
 			parent_rel->partial_pathlist =
 				foreach_delete_current(parent_rel->partial_pathlist, p1);
-			pfree(old_path);
+			if (old_path->parent == parent_rel)
+				pfree(old_path);
 		}
 		else
 		{
@@ -895,7 +919,8 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 	else
 	{
 		/* Reject and recycle the new path */
-		pfree(new_path);
+		if (new_path->parent == parent_rel)
+			pfree(new_path);
 	}
 }
 
