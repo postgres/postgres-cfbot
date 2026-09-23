@@ -244,3 +244,54 @@ SELECT DISTINCT city, similarity(city, 'Warsaw'), show_limit()
 SELECT set_limit(0.5);
 SELECT DISTINCT city, similarity(city, 'Warsaw'), show_limit()
   FROM restaurants WHERE city % 'Warsaw';
+
+-- A threshold of zero is met by every row: by the rows that share no trigram
+-- with the query, and by all of them when the query has no trigrams at all.
+-- The indexes must not lose any (bug #19701).
+SELECT set_limit(0);
+SET pg_trgm.word_similarity_threshold = 0;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM restaurants WHERE city % 'Warsaw';
+SELECT count(*) FROM restaurants WHERE city % 'Warsaw';
+SELECT count(*) FROM restaurants WHERE city % '';
+SELECT count(*) FROM restaurants WHERE 'Warsaw' <% city;
+DROP INDEX restaurants_city_idx;
+CREATE INDEX ON restaurants USING gin(city gin_trgm_ops);
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM restaurants WHERE city % 'Warsaw';
+SELECT count(*) FROM restaurants WHERE city % 'Warsaw';
+SELECT count(*) FROM restaurants WHERE city % '';
+SELECT count(*) FROM restaurants WHERE 'Warsaw' <% city;
+RESET pg_trgm.word_similarity_threshold;
+
+-- The same for rows that are still in the GIN pending list, and for strict
+-- word similarity, with empty strings and NULLs stored.  Every non-NULL row
+-- must be returned.
+SET pg_trgm.strict_word_similarity_threshold = 0;
+SET enable_seqscan = off;
+CREATE TEMP TABLE trgm_zero (t text);
+CREATE INDEX trgm_zero_idx ON trgm_zero
+  USING gin (t gin_trgm_ops) WITH (fastupdate = on);
+INSERT INTO trgm_zero VALUES ('Warsaw'), ('Szczecin'), (''), (''), (NULL);
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM trgm_zero WHERE t % '';
+SELECT count(*) FROM trgm_zero WHERE t % '';
+SELECT count(*) FROM trgm_zero WHERE t % 'Warsaw';
+SELECT count(*) FROM trgm_zero WHERE '' <<% t;
+SELECT count(*) FROM trgm_zero WHERE 'Warsaw' <<% t;
+SELECT gin_clean_pending_list('trgm_zero_idx') > 0 AS cleaned;
+SELECT count(*) FROM trgm_zero WHERE t % '';
+SELECT count(*) FROM trgm_zero WHERE t % 'Warsaw';
+SELECT count(*) FROM trgm_zero WHERE '' <<% t;
+SELECT count(*) FROM trgm_zero WHERE 'Warsaw' <<% t;
+-- Enough rows for the GiST index to have internal pages.
+DROP INDEX trgm_zero_idx;
+INSERT INTO trgm_zero SELECT 'Warsaw' FROM generate_series(1, 1000);
+CREATE INDEX trgm_zero_idx ON trgm_zero USING gist (t gist_trgm_ops);
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM trgm_zero WHERE '' <<% t;
+SELECT count(*) FROM trgm_zero WHERE '' <<% t;
+SELECT count(*) FROM trgm_zero WHERE 'Warsaw' <<% t;
+DROP TABLE trgm_zero;
+RESET enable_seqscan;
+RESET pg_trgm.strict_word_similarity_threshold;
