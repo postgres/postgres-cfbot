@@ -143,6 +143,31 @@ casefold(PG_FUNCTION_ARGS)
 }
 
 
+/*
+ * Append m characters of the padding string pad (padlen bytes) to dst,
+ * cycling through pad as needed, and return a pointer past the last byte
+ * written.
+ */
+static char *
+append_padding(char *dst, const char *pad, int padlen, int m)
+{
+	const char *p = pad;
+	const char *pend = pad + padlen;
+
+	while (m--)
+	{
+		int			mlen = pg_mblen_range(p, pend);
+
+		memcpy(dst, p, mlen);
+		dst += mlen;
+		p += mlen;
+		if (p == pend)			/* wrap around at end of pad */
+			p = pad;
+	}
+
+	return dst;
+}
+
 /********************************************************************
  *
  * lpad
@@ -167,10 +192,7 @@ lpad(PG_FUNCTION_ARGS)
 	text	   *string2 = PG_GETARG_TEXT_PP(2);
 	text	   *ret;
 	char	   *ptr1,
-			   *ptr2,
-			   *ptr2start,
 			   *ptr_ret;
-	const char *ptr2end;
 	int			m,
 				s1len,
 				s2len;
@@ -209,20 +231,7 @@ lpad(PG_FUNCTION_ARGS)
 
 	m = len - s1len;
 
-	ptr2 = ptr2start = VARDATA_ANY(string2);
-	ptr2end = ptr2 + s2len;
-	ptr_ret = VARDATA(ret);
-
-	while (m--)
-	{
-		int			mlen = pg_mblen_range(ptr2, ptr2end);
-
-		memcpy(ptr_ret, ptr2, mlen);
-		ptr_ret += mlen;
-		ptr2 += mlen;
-		if (ptr2 == ptr2end)	/* wrap around at end of s2 */
-			ptr2 = ptr2start;
-	}
+	ptr_ret = append_padding(VARDATA(ret), VARDATA_ANY(string2), s2len, m);
 
 	ptr1 = VARDATA_ANY(string1);
 
@@ -265,10 +274,7 @@ rpad(PG_FUNCTION_ARGS)
 	text	   *string2 = PG_GETARG_TEXT_PP(2);
 	text	   *ret;
 	char	   *ptr1,
-			   *ptr2,
-			   *ptr2start,
 			   *ptr_ret;
-	const char *ptr2end;
 	int			m,
 				s1len,
 				s2len;
@@ -320,19 +326,7 @@ rpad(PG_FUNCTION_ARGS)
 		ptr1 += mlen;
 	}
 
-	ptr2 = ptr2start = VARDATA_ANY(string2);
-	ptr2end = ptr2 + s2len;
-
-	while (m--)
-	{
-		int			mlen = pg_mblen_range(ptr2, ptr2end);
-
-		memcpy(ptr_ret, ptr2, mlen);
-		ptr_ret += mlen;
-		ptr2 += mlen;
-		if (ptr2 == ptr2end)	/* wrap around at end of s2 */
-			ptr2 = ptr2start;
-	}
+	ptr_ret = append_padding(ptr_ret, VARDATA_ANY(string2), s2len, m);
 
 	SET_VARSIZE(ret, ptr_ret - (char *) ret);
 
