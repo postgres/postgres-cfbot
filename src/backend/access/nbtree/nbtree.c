@@ -1339,9 +1339,7 @@ btvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 		if (needLock)
 			UnlockRelationForExtension(rel, ExclusiveLock);
 
-		if (info->report_progress)
-			pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL,
-										 num_pages);
+		pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL, num_pages);
 
 		/* Quit if we've scanned the whole relation */
 		if (p.current_blocknum >= num_pages)
@@ -1365,9 +1363,8 @@ btvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 
 			current_block = btvacuumpage(&vstate, buf);
 
-			if (info->report_progress)
-				pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE,
-											 current_block);
+			pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE,
+										 current_block);
 		}
 
 		/*
