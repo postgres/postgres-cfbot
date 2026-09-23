@@ -39,6 +39,7 @@ use strict;
 use warnings FATAL => 'all';
 
 use Carp;
+use PostgreSQL::Test::Utils qw(run_command slurp_file);
 
 # The number of parameters in a backend's progress state; see
 # PGSTAT_NUM_PROGRESS_PARAM.
@@ -215,6 +216,29 @@ our %COMMANDS = (
 =head1 FUNCTIONS
 
 =over
+
+=item compiled_with_progress_debug($progress_h)
+
+Return true if the server is compiled with PROGRESS_DEBUG.  It is set in
+the compiler flags, as a buildfarm animal would (CPPFLAGS or CFLAGS with
+configure, c_args with meson), or in pg_config_manual.h, which is found
+next to $progress_h.  This does not start a server, so that a test costs
+nothing in other builds.
+
+=cut
+
+sub compiled_with_progress_debug
+{
+	my ($progress_h) = @_;
+	my ($cppflags) = run_command([ 'pg_config', '--cppflags' ]);
+	my ($cflags) = run_command([ 'pg_config', '--cflags' ]);
+	(my $manual_h = $progress_h) =~
+	  s{commands/progress\.h$}{pg_config_manual.h};
+	return "$cppflags $cflags" =~ /-DPROGRESS_DEBUG\b/
+	  || slurp_file($manual_h) =~ /^\s*#\s*define\s+PROGRESS_DEBUG\b/m;
+}
+
+=pod
 
 =item load_spec($progress_h)
 
