@@ -367,7 +367,13 @@ extern void ReplicationSlotsDropDBSlots(Oid dboid);
 extern bool InvalidateObsoleteReplicationSlots(uint32 possible_causes,
 											   XLogSegNo oldestSegno,
 											   Oid dboid,
-											   TransactionId snapshotConflictHorizon);
+											   TransactionId snapshotConflictHorizon,
+											   bool nowait,
+											   bool check_catalog_xmin);
+extern bool InvalidateXidAgedReplicationSlots(TransactionId oldest_xmin,
+											  TransactionId slot_xmin,
+											  TransactionId slot_catalog_xmin,
+											  bool slot_catalog_xmin_relevant);
 extern ReplicationSlot *SearchNamedReplicationSlot(const char *name, bool need_lock);
 extern int	ReplicationSlotIndex(ReplicationSlot *slot);
 extern bool ReplicationSlotName(int index, Name name);
