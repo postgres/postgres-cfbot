@@ -504,7 +504,7 @@ CREATE POLICY <replaceable class="parameter">name</replaceable> ON <replaceable 
        <entry>&mdash;</entry>
       </row>
       <row>
-       <entry><command>INSERT</command></entry>
+       <entry><command>INSERT</command> / <command>COPY ... FROM</command></entry>
        <entry>
         Check new row&nbsp;<footnote id="rls-select-priv">
          <para>
