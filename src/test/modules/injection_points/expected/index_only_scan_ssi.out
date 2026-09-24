@@ -1,0 +1,257 @@
+Parsed test spec with 3 sessions
+
+starting permutation: begin1 begin2 read2 pause_delete delete2 read1 delete1 commit1 wake_delete wake_done commit2
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step begin1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step begin2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step read2: SELECT id FROM ios_a;
+id
+--
+ 1
+(1 row)
+
+step pause_delete: 
+	SELECT injection_points_attach('heap-delete-before-write', 'wait');
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step delete2: DELETE FROM ios_b; <waiting ...>
+step read1: 
+	EXPLAIN (COSTS OFF) SELECT id FROM ios_b WHERE present;
+	SELECT id FROM ios_b WHERE present;
+
+QUERY PLAN                              
+----------------------------------------
+Index Only Scan using ios_b_idx on ios_b
+(1 row)
+
+id
+--
+ 1
+(1 row)
+
+step delete1: DELETE FROM ios_a;
+step commit1: COMMIT;
+step wake_delete: 
+	SELECT injection_points_detach('heap-delete-before-write');
+	SELECT injection_points_wakeup('heap-delete-before-write');
+ <waiting ...>
+step delete2: <... completed>
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step wake_delete: <... completed>
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wake_done: 
+step commit2: COMMIT;
+
+starting permutation: begin1 begin2 read2 pause_update update2 read1 delete1 commit1 wake_update wake_done commit2
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step begin1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step begin2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step read2: SELECT id FROM ios_a;
+id
+--
+ 1
+(1 row)
+
+step pause_update: 
+	SELECT injection_points_attach('heap-update-before-write', 'wait');
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step update2: UPDATE ios_b SET present = false; <waiting ...>
+step read1: 
+	EXPLAIN (COSTS OFF) SELECT id FROM ios_b WHERE present;
+	SELECT id FROM ios_b WHERE present;
+
+QUERY PLAN                              
+----------------------------------------
+Index Only Scan using ios_b_idx on ios_b
+(1 row)
+
+id
+--
+ 1
+(1 row)
+
+step delete1: DELETE FROM ios_a;
+step commit1: COMMIT;
+step wake_update: 
+	SELECT injection_points_detach('heap-update-before-write');
+	SELECT injection_points_wakeup('heap-update-before-write');
+ <waiting ...>
+step update2: <... completed>
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step wake_update: <... completed>
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wake_done: 
+step commit2: COMMIT;
+
+starting permutation: begin1 begin2 read2 pause_reader read1 delete2 commit2 wake_reader wake_done delete1 commit1
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step begin1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step begin2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step read2: SELECT id FROM ios_a;
+id
+--
+ 1
+(1 row)
+
+step pause_reader: 
+	SELECT injection_points_attach('index-only-scan-before-predicate-lock', 'wait');
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step read1: 
+	EXPLAIN (COSTS OFF) SELECT id FROM ios_b WHERE present;
+	SELECT id FROM ios_b WHERE present;
+ <waiting ...>
+step delete2: DELETE FROM ios_b;
+step commit2: COMMIT;
+step wake_reader: 
+	SELECT injection_points_detach('index-only-scan-before-predicate-lock');
+	SELECT injection_points_wakeup('index-only-scan-before-predicate-lock');
+ <waiting ...>
+step read1: <... completed>
+QUERY PLAN                              
+----------------------------------------
+Index Only Scan using ios_b_idx on ios_b
+(1 row)
+
+id
+--
+ 1
+(1 row)
+
+step wake_reader: <... completed>
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wake_done: 
+step delete1: DELETE FROM ios_a;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step commit1: COMMIT;
+
+starting permutation: begin1 begin2 read2 pause_reader read1 update2 commit2 wake_reader wake_done delete1 commit1
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step begin1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step begin2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step read2: SELECT id FROM ios_a;
+id
+--
+ 1
+(1 row)
+
+step pause_reader: 
+	SELECT injection_points_attach('index-only-scan-before-predicate-lock', 'wait');
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step read1: 
+	EXPLAIN (COSTS OFF) SELECT id FROM ios_b WHERE present;
+	SELECT id FROM ios_b WHERE present;
+ <waiting ...>
+step update2: UPDATE ios_b SET present = false;
+step commit2: COMMIT;
+step wake_reader: 
+	SELECT injection_points_detach('index-only-scan-before-predicate-lock');
+	SELECT injection_points_wakeup('index-only-scan-before-predicate-lock');
+ <waiting ...>
+step read1: <... completed>
+QUERY PLAN                              
+----------------------------------------
+Index Only Scan using ios_b_idx on ios_b
+(1 row)
+
+id
+--
+ 1
+(1 row)
+
+step wake_reader: <... completed>
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wake_done: 
+step delete1: DELETE FROM ios_a;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step commit1: COMMIT;

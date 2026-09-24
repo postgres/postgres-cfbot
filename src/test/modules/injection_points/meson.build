@@ -58,6 +58,7 @@ tests += {
       'wait_cleanup',
       'heap_lock_update',
       'on_conflict_probe_window',
+      'index_only_scan_ssi',
     ],
     'runningcheck': false, # see syscache-update-pruned
     # Some tests wait for all snapshots, so avoid parallel execution
