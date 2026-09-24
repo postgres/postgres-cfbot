@@ -1187,8 +1187,10 @@ typedef struct BrinOpcInfo
  <para>
     Support function numbers 12 and 14 are provided to support
     irregularities of built-in data types.  Function number 12
-    is used to support network addresses from different families which
-    are not mergeable.  Function number 14 is used to support
+    is used to support network addresses from different families, and
+    boxes with NaN coordinates, which are not mergeable.  A value that is
+    not mergeable even with itself makes its block range always match.
+    Function number 14 is used to support
     empty ranges.  Function number 13 is an optional but
     recommended one, which allows the new value to be checked before
     it is passed to the union function.  As the BRIN framework can shortcut
