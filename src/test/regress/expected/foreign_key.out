@@ -4303,3 +4303,78 @@ SELECT count(*) AS deferred_rows FROM fp_deferred_fk;  -- 1, check passed at com
 (1 row)
 
 DROP TABLE fp_deferred_fk, fp_deferred_pk;
+-- ON DELETE CASCADE on a self-referencing table, with a BEFORE DELETE trigger
+-- that deletes from the same table.  The cascade's plan is invalidated (by
+-- the GRANT) while the cascade is executing it, and the nested DELETE reaches
+-- the same RI query again; the outer execution must still be able to finish.
+CREATE TABLE fk_self_ref (
+    id int PRIMARY KEY,
+    parent_id int REFERENCES fk_self_ref (id) ON DELETE CASCADE
+);
+CREATE FUNCTION fk_self_ref_before_del() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.id = 2 THEN
+        GRANT SELECT ON fk_self_ref TO PUBLIC;
+        REVOKE SELECT ON fk_self_ref FROM PUBLIC;
+        DELETE FROM fk_self_ref WHERE parent_id = OLD.id;
+    ELSIF OLD.id = 4 AND current_setting('fk_self_ref.fail', true) = 'on' THEN
+        RAISE EXCEPTION 'fk_self_ref: deleting %', OLD.id;
+    END IF;
+    RETURN OLD;
+END$$;
+CREATE TRIGGER fk_self_ref_before_del BEFORE DELETE ON fk_self_ref
+    FOR EACH ROW EXECUTE PROCEDURE fk_self_ref_before_del();
+INSERT INTO fk_self_ref VALUES (1, NULL), (2, 1), (3, 2), (4, 3), (5, 4),
+    (10, NULL), (11, 10);
+DELETE FROM fk_self_ref WHERE id = 1;
+SELECT * FROM fk_self_ref ORDER BY id;
+ id | parent_id 
+----+-----------
+ 10 |          
+ 11 |        10
+(2 rows)
+
+-- Same, but with the nested cascade failing, which aborts the executions
+-- that are using the plans.  Their pins must be released on error, so that
+-- the plans can be replaced and freed afterwards.
+INSERT INTO fk_self_ref VALUES (1, NULL), (2, 1), (3, 2), (4, 3), (5, 4);
+SET fk_self_ref.fail = on;
+DO $$
+DECLARE
+    failures int := 0;
+BEGIN
+    FOR i IN 1..10 LOOP
+        BEGIN
+            DELETE FROM fk_self_ref WHERE id = 1;
+        EXCEPTION WHEN raise_exception THEN
+            failures := failures + 1;
+        END;
+    END LOOP;
+    RAISE NOTICE 'failures: %', failures;
+END$$;
+NOTICE:  failures: 10
+SELECT * FROM fk_self_ref ORDER BY id;
+ id | parent_id 
+----+-----------
+  1 |          
+  2 |         1
+  3 |         2
+  4 |         3
+  5 |         4
+ 10 |          
+ 11 |        10
+(7 rows)
+
+RESET fk_self_ref.fail;
+GRANT SELECT ON fk_self_ref TO PUBLIC;
+REVOKE SELECT ON fk_self_ref FROM PUBLIC;
+DELETE FROM fk_self_ref WHERE id = 1;
+SELECT * FROM fk_self_ref ORDER BY id;
+ id | parent_id 
+----+-----------
+ 10 |          
+ 11 |        10
+(2 rows)
+
+DROP TABLE fk_self_ref;
+DROP FUNCTION fk_self_ref_before_del();

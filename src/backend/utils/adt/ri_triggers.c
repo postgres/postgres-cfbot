@@ -55,6 +55,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
@@ -307,11 +308,44 @@ typedef struct RI_FastPathEntry
 } RI_FastPathEntry;
 
 /*
+ * RI_QueryPlanCacheExecutingRefCountEntry
+ *
+ * Tracks a saved RI plan while ri_PerformCheck() is executing it.  RI checks
+ * can nest: a trigger fired by an RI query may run another RI query using the
+ * same plan (e.g. ON DELETE CASCADE on a self-referencing table, with a BEFORE
+ * DELETE trigger that deletes from that table).  If the inner call finds the
+ * plan invalid, it must not free it while an outer call is still executing
+ * it; instead it marks the plan for deletion, and the last execution frees it.
+ *
+ * An entry exists only while the plan is being executed, plus, for a plan
+ * marked for deletion whose last execution was aborted by an error, until the
+ * end of the aborted (sub)transaction.  A plan is never freed while it has an
+ * entry, so its address cannot be reused by another plan in the meantime.
+ *
+ * Each execution is also registered with the current resource owner, so that
+ * the count is decremented even if the query throws an error.
+ */
+typedef struct RI_QueryPlanCacheExecutingRefCountEntry
+{
+	SPIPlanPtr	plan;			/* hash key */
+	bool		markedForDeletion;	/* free when refcount reaches 0? */
+	uint32		refcount;		/* # of executions in progress */
+	dlist_node	node;			/* link in ri_plans_to_free */
+} RI_QueryPlanCacheExecutingRefCountEntry;
+
+/*
  * Local data
  */
 static HTAB *ri_constraint_cache = NULL;
 static HTAB *ri_query_cache = NULL;
 static HTAB *ri_compare_cache = NULL;
+static HTAB *ri_query_plan_cache_executing_refcount = NULL;
+
+/*
+ * Entries of plans marked for deletion whose last execution was aborted, to
+ * be freed by ri_PreparedPlanFreeUnused().
+ */
+static dlist_head ri_plans_to_free = DLIST_STATIC_INIT(ri_plans_to_free);
 static dclist_head ri_constraint_cache_valid_list;
 
 static HTAB *ri_fastpath_cache = NULL;
@@ -357,6 +391,22 @@ static void InvalidateConstraintCacheCallBack(Datum arg, SysCacheIdentifier cach
 static SPIPlanPtr ri_FetchPreparedPlan(RI_QueryKey *key);
 static void ri_HashPreparedPlan(RI_QueryKey *key, SPIPlanPtr plan);
 static RI_CompareHashEntry *ri_HashCompareOp(Oid eq_opr, Oid typeid);
+
+static void ri_PreparedPlanExecutionStarted(SPIPlanPtr plan);
+static void ri_PreparedPlanExecutionFinished(SPIPlanPtr plan);
+static void ri_PreparedPlanDecrementRefCount(SPIPlanPtr plan, bool canFree);
+static void ri_PreparedPlanReleaseASAP(SPIPlanPtr plan);
+static void ri_PreparedPlanFreeUnused(void);
+static void ResOwnerReleaseRIPlanExecution(Datum res);
+
+static const ResourceOwnerDesc ri_plan_execution_resowner_desc =
+{
+	.name = "RI plan execution",
+	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+	.release_priority = RELEASE_PRIO_FIRST,
+	.ReleaseResource = ResOwnerReleaseRIPlanExecution,
+	.DebugPrint = NULL			/* the default message is fine */
+};
 
 static void ri_CheckTrigger(FunctionCallInfo fcinfo, const char *funcname,
 							int tgkind);
@@ -2840,11 +2890,17 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 	 * Set fire_triggers to false to ensure that AFTER triggers are queued in
 	 * the outer query's after-trigger context and fire after all RI updates
 	 * on the same row are complete, rather than immediately.
+	 *
+	 * Triggers fired by the query may reach ri_FetchPreparedPlan() for the
+	 * same query key and find the plan invalid, so tell it that the plan is
+	 * in use while it runs.
 	 */
+	ri_PreparedPlanExecutionStarted(qplan);
 	spi_result = SPI_execute_snapshot(qplan,
 									  vals, nulls,
 									  test_snapshot, crosscheck_snapshot,
 									  false, false, limit);
+	ri_PreparedPlanExecutionFinished(qplan);
 
 	/* Restore UID and security context */
 	SetUserIdAndSecContext(save_userid, save_sec_context);
@@ -4104,6 +4160,13 @@ ri_InitHashTables(void)
 	ri_compare_cache = hash_create("RI compare cache",
 								   RI_INIT_QUERYHASHSIZE,
 								   &ctl, HASH_ELEM | HASH_BLOBS);
+
+	ctl.keysize = sizeof(SPIPlanPtr);
+	ctl.entrysize = sizeof(RI_QueryPlanCacheExecutingRefCountEntry);
+	ri_query_plan_cache_executing_refcount =
+		hash_create("RI plan execution refcount",
+					RI_INIT_QUERYHASHSIZE,
+					&ctl, HASH_ELEM | HASH_BLOBS);
 }
 
 
@@ -4150,11 +4213,13 @@ ri_FetchPreparedPlan(RI_QueryKey *key)
 
 	/*
 	 * Otherwise we might as well flush the cached plan now, to free a little
-	 * memory space before we make a new one.
+	 * memory space before we make a new one.  An RI check further up the
+	 * stack may still be executing it, though, in which case it's freed only
+	 * once that execution finishes.
 	 */
 	entry->plan = NULL;
 	if (plan)
-		SPI_freeplan(plan);
+		ri_PreparedPlanReleaseASAP(plan);
 
 	return NULL;
 }
@@ -4188,6 +4253,159 @@ ri_HashPreparedPlan(RI_QueryKey *key, SPIPlanPtr plan)
 	entry->plan = plan;
 }
 
+
+/*
+ * ri_PreparedPlanExecutionStarted -
+ *
+ * Record that ri_PerformCheck() is about to execute a saved plan, so that it
+ * is not freed under us.  The execution is also registered with the current
+ * resource owner, which undoes this if the execution is aborted by an error.
+ */
+static void
+ri_PreparedPlanExecutionStarted(SPIPlanPtr plan)
+{
+	RI_QueryPlanCacheExecutingRefCountEntry *entry;
+	bool		found;
+
+	/* The plan came from ri_FetchPreparedPlan() or ri_PlanCheck() */
+	Assert(ri_query_plan_cache_executing_refcount != NULL);
+
+	ResourceOwnerEnlarge(CurrentResourceOwner);
+
+	entry = (RI_QueryPlanCacheExecutingRefCountEntry *)
+		hash_search(ri_query_plan_cache_executing_refcount,
+					&plan, HASH_ENTER, &found);
+	if (!found)
+	{
+		entry->markedForDeletion = false;
+		entry->refcount = 0;
+	}
+	entry->refcount++;
+
+	ResourceOwnerRemember(CurrentResourceOwner, PointerGetDatum(plan),
+						  &ri_plan_execution_resowner_desc);
+}
+
+/*
+ * ri_PreparedPlanExecutionFinished -
+ *
+ * Record that an execution started by ri_PreparedPlanExecutionStarted() has
+ * finished normally.  If it was the last execution of a plan marked for
+ * deletion in the meantime, the plan is freed.
+ */
+static void
+ri_PreparedPlanExecutionFinished(SPIPlanPtr plan)
+{
+	ResourceOwnerForget(CurrentResourceOwner, PointerGetDatum(plan),
+						&ri_plan_execution_resowner_desc);
+	ri_PreparedPlanDecrementRefCount(plan, true);
+}
+
+/*
+ * ResOwnerReleaseRIPlanExecution -
+ *
+ * ResourceOwner callback, for an execution aborted by an error.  We only drop
+ * the count here: a plan marked for deletion whose last execution this was is
+ * freed later by ri_PreparedPlanFreeUnused(), called at the end of the
+ * (sub)transaction abort, rather than while releasing its resources.
+ */
+static void
+ResOwnerReleaseRIPlanExecution(Datum res)
+{
+	ri_PreparedPlanDecrementRefCount((SPIPlanPtr) DatumGetPointer(res), false);
+}
+
+/*
+ * ri_PreparedPlanDecrementRefCount -
+ *
+ * Drop one execution of a plan, removing its entry once no execution is left.
+ * If the plan was marked for deletion, it is freed at that point if canFree;
+ * otherwise its entry is queued for ri_PreparedPlanFreeUnused().
+ */
+static void
+ri_PreparedPlanDecrementRefCount(SPIPlanPtr plan, bool canFree)
+{
+	RI_QueryPlanCacheExecutingRefCountEntry *entry;
+
+	entry = (RI_QueryPlanCacheExecutingRefCountEntry *)
+		hash_search(ri_query_plan_cache_executing_refcount,
+					&plan, HASH_FIND, NULL);
+	Assert(entry != NULL);
+	Assert(entry->refcount > 0);
+
+	entry->refcount--;
+	if (entry->refcount > 0)
+		return;
+
+	if (!entry->markedForDeletion)
+		hash_search(ri_query_plan_cache_executing_refcount,
+					&plan, HASH_REMOVE, NULL);
+	else if (canFree)
+	{
+		hash_search(ri_query_plan_cache_executing_refcount,
+					&plan, HASH_REMOVE, NULL);
+		SPI_freeplan(plan);
+	}
+	else
+		dlist_push_head(&ri_plans_to_free, &entry->node);
+}
+
+/*
+ * ri_PreparedPlanReleaseASAP -
+ *
+ * Free a saved plan that has just been removed from the query hashtable, or,
+ * if it is being executed, mark it for deletion so that the last execution
+ * to finish frees it.
+ */
+static void
+ri_PreparedPlanReleaseASAP(SPIPlanPtr plan)
+{
+	RI_QueryPlanCacheExecutingRefCountEntry *entry;
+
+	/* Called from ri_FetchPreparedPlan(), so the hashtables exist */
+	Assert(ri_query_plan_cache_executing_refcount != NULL);
+
+	entry = (RI_QueryPlanCacheExecutingRefCountEntry *)
+		hash_search(ri_query_plan_cache_executing_refcount,
+					&plan, HASH_FIND, NULL);
+	if (entry == NULL)
+	{
+		SPI_freeplan(plan);
+		return;
+	}
+
+	Assert(entry->refcount > 0);
+	Assert(!entry->markedForDeletion);
+	entry->markedForDeletion = true;
+}
+
+/*
+ * ri_PreparedPlanFreeUnused -
+ *
+ * Free the plans marked for deletion whose last execution was aborted by an
+ * error, as queued by ri_PreparedPlanDecrementRefCount().
+ */
+static void
+ri_PreparedPlanFreeUnused(void)
+{
+	dlist_mutable_iter iter;
+
+	dlist_foreach_modify(iter, &ri_plans_to_free)
+	{
+		RI_QueryPlanCacheExecutingRefCountEntry *entry;
+		SPIPlanPtr	plan;
+
+		entry = dlist_container(RI_QueryPlanCacheExecutingRefCountEntry,
+								node, iter.cur);
+		plan = entry->plan;
+		Assert(entry->markedForDeletion && entry->refcount == 0);
+
+		dlist_delete(iter.cur);
+		hash_search(ri_query_plan_cache_executing_refcount,
+					&plan, HASH_REMOVE, NULL);
+		SPI_freeplan(plan);
+	}
+}
 
 /*
  * ri_KeysEqual -
@@ -4640,6 +4858,15 @@ AtEOXact_RI(bool isCommit)
 		MemoryContextDelete(dead->scratch_cxt);
 		pfree(dead);
 	}
+
+	/*
+	 * Likewise, free plans marked for deletion whose last execution was
+	 * aborted.  All subtransactions and resource owners have been released by
+	 * now, so the hash table must end up empty.
+	 */
+	ri_PreparedPlanFreeUnused();
+	Assert(ri_query_plan_cache_executing_refcount == NULL ||
+		   hash_get_num_entries(ri_query_plan_cache_executing_refcount) == 0);
 }
 
 /*
@@ -4672,6 +4899,15 @@ AtEOSubXact_RI(bool isCommit, SubTransactionId mySubid,
 	HASH_SEQ_STATUS status;
 	RI_FastPathEntry *entry;
 	long		remaining;
+
+	/*
+	 * On abort, free plans marked for deletion whose last execution was
+	 * aborted along with this subtransaction.  On commit there can be none,
+	 * since every execution started in the subtransaction has finished
+	 * normally.
+	 */
+	if (!isCommit)
+		ri_PreparedPlanFreeUnused();
 
 	if (ri_fastpath_cache == NULL)
 		return;

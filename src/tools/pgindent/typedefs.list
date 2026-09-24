@@ -2506,6 +2506,7 @@ RI_FastPathKey
 RI_FastPathState
 RI_QueryHashEntry
 RI_QueryKey
+RI_QueryPlanCacheExecutingRefCountEntry
 RTEKind
 RTEPermissionInfo
 RWConflict
