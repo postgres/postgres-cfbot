@@ -289,6 +289,19 @@ smgropen(RelFileLocator rlocator, ProcNumber backend)
 }
 
 /*
+ * smgrnumentries() -- Return the number of cached SMgrRelation objects,
+ *                    including pinned objects.
+ */
+int64
+smgrnumentries(void)
+{
+	if (SMgrRelationHash == NULL)
+		return 0;
+
+	return hash_get_num_entries(SMgrRelationHash);
+}
+
+/*
  * smgrpin() -- Prevent an SMgrRelation object from being destroyed at end of
  *				transaction
  */
