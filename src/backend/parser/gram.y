@@ -464,6 +464,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <list>	group_by_list
 %type <node>	group_by_item empty_grouping_set rollup_clause cube_clause
 %type <node>	grouping_sets_clause
+%type <node>	on_empty
 
 %type <list>	opt_fdw_options fdw_options
 %type <defelt>	fdw_option
@@ -16049,6 +16050,16 @@ func_application: func_name '(' ')'
 					n->agg_order = $7;
 					$$ = (Node *) n;
 				}
+			| func_name '(' func_arg_list ',' on_empty opt_sort_clause ')'
+				{
+					FuncCall   *n = makeFuncCall($1, $3,
+												 COERCE_EXPLICIT_CALL,
+												 @1);
+
+					n->agg_on_empty = $5;
+					n->agg_order = $6;
+					$$ = (Node *) n;
+				}
 			| func_name '(' ALL func_arg_list opt_sort_clause ')'
 				{
 					FuncCall   *n = makeFuncCall($1, $4,
@@ -16062,6 +16073,16 @@ func_application: func_name '(' ')'
 					 */
 					$$ = (Node *) n;
 				}
+			| func_name '(' ALL func_arg_list ',' on_empty opt_sort_clause ')'
+				{
+					FuncCall   *n = makeFuncCall($1, $4,
+												 COERCE_EXPLICIT_CALL,
+												 @1);
+
+					n->agg_on_empty = $6;
+					n->agg_order = $7;
+					$$ = (Node *) n;
+				}
 			| func_name '(' DISTINCT func_arg_list opt_sort_clause ')'
 				{
 					FuncCall   *n = makeFuncCall($1, $4,
@@ -16069,6 +16090,17 @@ func_application: func_name '(' ')'
 												 @1);
 
 					n->agg_order = $5;
+					n->agg_distinct = true;
+					$$ = (Node *) n;
+				}
+			| func_name '(' DISTINCT func_arg_list ',' on_empty opt_sort_clause ')'
+				{
+					FuncCall   *n = makeFuncCall($1, $4,
+												 COERCE_EXPLICIT_CALL,
+												 @1);
+
+					n->agg_on_empty = $6;
+					n->agg_order = $7;
 					n->agg_distinct = true;
 					$$ = (Node *) n;
 				}
@@ -16091,6 +16123,11 @@ func_application: func_name '(' ')'
 					n->agg_star = true;
 					$$ = (Node *) n;
 				}
+		;
+
+
+on_empty: a_expr ON EMPTY_P
+				{ $$ = $1; }
 		;
 
 
