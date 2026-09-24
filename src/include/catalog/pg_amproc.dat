@@ -2034,6 +2034,8 @@
 { amprocfamily => 'brin/box_inclusion_ops', amproclefttype => 'box',
   amprocrighttype => 'box', amprocnum => '11', amproc => 'bound_box' },
 { amprocfamily => 'brin/box_inclusion_ops', amproclefttype => 'box',
+  amprocrighttype => 'box', amprocnum => '12', amproc => 'box_mergeable' },
+{ amprocfamily => 'brin/box_inclusion_ops', amproclefttype => 'box',
   amprocrighttype => 'box', amprocnum => '13', amproc => 'box_contain' },
 
 ]
