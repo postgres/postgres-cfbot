@@ -11063,6 +11063,14 @@ get_agg_expr_helper(Aggref *aggref, deparse_context *context,
 		 */
 		Assert(!aggref->aggvariadic);
 		get_rule_expr((Node *) aggref->aggdirectargs, context, true);
+
+		if (aggref->aggonempty != NULL)
+		{
+			appendStringInfoString(buf, ", ");
+			get_rule_expr((Node *) aggref->aggonempty, context, false);
+			appendStringInfoString(buf, " ON EMPTY");
+		}
+
 		Assert(aggref->aggorder != NIL);
 		appendStringInfoString(buf, ") WITHIN GROUP (ORDER BY ");
 		get_rule_orderby(aggref->aggorder, aggref->args, false, context);
@@ -11106,6 +11114,13 @@ get_agg_expr_helper(Aggref *aggref, deparse_context *context,
 					appendStringInfoString(buf, "VARIADIC ");
 				get_rule_expr(arg, context, true);
 			}
+		}
+
+		if (aggref->aggonempty != NULL)
+		{
+			appendStringInfoString(buf, ", ");
+			get_rule_expr((Node *) aggref->aggonempty, context, false);
+			appendStringInfoString(buf, " ON EMPTY");
 		}
 
 		if (aggref->aggorder != NIL)
@@ -11206,6 +11221,13 @@ get_windowfunc_expr_helper(WindowFunc *wfunc, deparse_context *context,
 		}
 		else
 			get_rule_expr((Node *) wfunc->args, context, true);
+	}
+
+	if (wfunc->aggonempty != NULL)
+	{
+		appendStringInfoString(buf, ", ");
+		get_rule_expr((Node *) wfunc->aggonempty, context, false);
+		appendStringInfoString(buf, " ON EMPTY");
 	}
 
 	if (options)
