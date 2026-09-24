@@ -104,3 +104,9 @@ select count(distinct utc_offset) >= 24 as ok from pg_timezone_abbrevs;
 -- One specific case we can check without much fear of breakage
 -- is the historical local-mean-time value used for America/Los_Angeles.
 select * from pg_timezone_abbrevs where abbrev = 'LMT';
+
+-- Check that the pg_system_versions contains something. Three core versions
+-- should be present: architecture, core and compiler and glibc. More records
+-- may be present depending on the build configuration (e.g. with ICU, GlibC or
+-- JIT support).
+select exists (table pg_system_versions);

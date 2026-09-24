@@ -12778,4 +12778,10 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+{ oid => '9432', descr => 'describe system verions',
+  proname => 'pg_get_system_versions', procost => '10', prorows => '10',
+  proretset => 't', provolatile => 'v', prorettype => 'record',
+  proargtypes => '', proallargtypes => '{text,text,int8}',
+  proargmodes => '{o,o,o}', proargnames => '{name,version,type}',
+  prosrc => 'pg_get_system_versions' },
 ]

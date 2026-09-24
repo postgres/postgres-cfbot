@@ -1569,3 +1569,11 @@ CREATE VIEW pg_aios AS
     SELECT * FROM pg_get_aios();
 REVOKE ALL ON pg_aios FROM PUBLIC;
 GRANT SELECT ON pg_aios TO pg_read_all_stats;
+
+CREATE VIEW pg_system_versions AS
+    SELECT
+        name, version,
+        CASE type WHEN 0 THEN 'Compile Time'
+                  WHEN 1 THEN 'Run Time'
+                  END AS "type"
+    FROM pg_get_system_versions();

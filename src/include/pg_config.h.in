@@ -617,6 +617,10 @@
 /* PostgreSQL version as a number */
 #undef PG_VERSION_NUM
 
+#undef PG_CC_STR
+
+#undef PG_ARCH_STR
+
 /* A string containing the version number, platform, and C compiler */
 #undef PG_VERSION_STR
 

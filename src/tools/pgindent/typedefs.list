@@ -3064,6 +3064,7 @@ SysloggerStartupData
 SystemRowsSamplerData
 SystemSamplerData
 SystemTimeSamplerData
+SystemVersion
 TAPtype
 TAR_MEMBER
 TBMIterateResult
@@ -4424,6 +4425,7 @@ varlena
 vartag_external
 vbits
 verifier_context
+VersionType
 walrcv_alter_slot_fn
 walrcv_check_conninfo_fn
 walrcv_connect_fn

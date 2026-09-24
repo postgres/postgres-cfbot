@@ -2839,6 +2839,14 @@ pg_stats_ext_exprs| SELECT cn.nspname AS schemaname,
      JOIN LATERAL ( SELECT unnest(pg_get_statisticsobjdef_expressions(s.oid)) AS expr,
             unnest(sd.stxdexpr) AS a) stat ON ((stat.expr IS NOT NULL)))
   WHERE (pg_has_role(c.relowner, 'USAGE'::text) AND ((c.relrowsecurity = false) OR (NOT row_security_active(c.oid))));
+pg_system_versions| SELECT name,
+    version,
+        CASE type
+            WHEN 0 THEN 'Compile Time'::text
+            WHEN 1 THEN 'Run Time'::text
+            ELSE NULL::text
+        END AS type
+   FROM pg_get_system_versions() pg_get_system_versions(name, version, type);
 pg_tables| SELECT n.nspname AS schemaname,
     c.relname AS tablename,
     pg_get_userbyid(c.relowner) AS tableowner,
