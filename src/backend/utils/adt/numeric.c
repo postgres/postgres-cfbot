@@ -12195,3 +12195,113 @@ accum_sum_combine(NumericSumAccum *accum, NumericSumAccum *accum2)
 
 	free_var(&tmp_var);
 }
+
+/* PRODUCT aggregate supporting functions */
+
+/* state transition function for PRODUCT(int2) aggregate */
+Datum
+int2_product_accum(PG_FUNCTION_ARGS)
+{
+	Datum		dvalue;
+	Datum		result;
+
+	/* Need to handle NULLs as this is a non-strict function */
+
+	if (PG_ARGISNULL(0) && PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+
+	if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+
+	dvalue = NumericGetDatum(int64_to_numeric(PG_GETARG_INT16(1)));
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(dvalue);
+
+	result = DirectFunctionCall2(numeric_mul, PG_GETARG_DATUM(0), dvalue);
+
+	return result;
+}
+
+/* state transition function for PRODUCT(int4) aggregate */
+Datum
+int4_product_accum(PG_FUNCTION_ARGS)
+{
+	Datum		dvalue;
+	Datum		result;
+
+	/* Need to handle NULLs as this is a non-strict function */
+
+	if (PG_ARGISNULL(0) && PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+
+	if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+
+	dvalue = NumericGetDatum(int64_to_numeric(PG_GETARG_INT32(1)));
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(dvalue);
+
+	result = DirectFunctionCall2(numeric_mul, PG_GETARG_DATUM(0), dvalue);
+
+	return result;
+}
+
+/* state transition function for PRODUCT(int8) aggregate */
+Datum
+int8_product_accum(PG_FUNCTION_ARGS)
+{
+	Datum		dvalue;
+	Datum		result;
+
+	/* Need to handle NULLs as this is a non-strict function */
+
+	if (PG_ARGISNULL(0) && PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+
+	if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+
+	dvalue = NumericGetDatum(int64_to_numeric(PG_GETARG_INT64(1)));
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(dvalue);
+
+	result = DirectFunctionCall2(numeric_mul, PG_GETARG_DATUM(0), dvalue);
+
+	return result;
+}
+
+/*
+ * state transition function for PRODUCT(float4) aggregate
+ *
+ * Unlike the integer variants, the running product here is kept natively
+ * as float8 (the transition type), not promoted to Numeric.  The actual
+ * multiplication is delegated to float8_mul(), which raises an overflow
+ * error for a finite*finite multiplication that would yield Infinity
+ * (matching sum(float4)/sum(float8), and product(float8), which for the
+ * same reason uses float8mul() directly rather than the bare "*"
+ * operator).  Infinity is only produced when it is already present in
+ * the input.
+ */
+Datum
+float4_product_accum(PG_FUNCTION_ARGS)
+{
+	float8		newval;
+
+	/* Need to handle NULLs as this is a non-strict function */
+
+	if (PG_ARGISNULL(0) && PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+
+	if (PG_ARGISNULL(1))
+		PG_RETURN_FLOAT8(PG_GETARG_FLOAT8(0));
+
+	newval = (float8) PG_GETARG_FLOAT4(1);
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_FLOAT8(newval);
+
+	PG_RETURN_FLOAT8(float8_mul(PG_GETARG_FLOAT8(0), newval));
+}
