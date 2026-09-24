@@ -76,7 +76,7 @@ typedef enum SkipPages
 typedef struct ToastedAttribute
 {
 	Oid8		va_valueid;		/* value ID (works for both Oid and Oid8) */
-	uint32		va_extinfo;		/* external size and compression method */
+	int32		extsize;		/* external saved size */
 	vartag_external tag;		/* VARTAG_ONDISK_OID or VARTAG_ONDISK_OID8 */
 	BlockNumber blkno;			/* block in main table */
 	OffsetNumber offnum;		/* offset in main table */
@@ -1697,7 +1697,6 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	uint16		infomask;
 	Oid8		toast_pointer_valueid;
 	int32		va_rawsize;
-	uint32		va_extinfo;
 	CompactAttribute *thisatt;
 	vartag_external va_tag_value;
 	toast_external_data toast_ext_data;
@@ -1808,7 +1807,6 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	va_tag_value = toast_ext_data.tag;
 	toast_pointer_valueid = toast_ext_data.valueid;
 	va_rawsize = toast_ext_data.rawsize;
-	va_extinfo = toast_ext_data.extinfo;
 
 	/* Toasted attributes too large to be untoasted should never be stored */
 	if (va_rawsize > VARLENA_SIZE_LIMIT)
@@ -1818,13 +1816,13 @@ check_tuple_attribute(HeapCheckContext *ctx)
 								   va_rawsize,
 								   VARLENA_SIZE_LIMIT));
 
-	if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
+	if (toast_ext_data.is_compressed)
 	{
 		ToastCompressionId cmid;
 		bool		valid = false;
 
 		/* Compressed attributes should have a valid compression method */
-		cmid = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
+		cmid = toast_ext_data.compress_method;
 		switch (cmid)
 		{
 				/* List of all valid compression method IDs */
@@ -1881,7 +1879,7 @@ check_tuple_attribute(HeapCheckContext *ctx)
 		/* The pointer has already been decoded above, just reuse it */
 		ta->tag = va_tag_value;
 		ta->va_valueid = toast_pointer_valueid;
-		ta->va_extinfo = va_extinfo;
+		ta->extsize = toast_ext_data.extsize;
 		ta->blkno = ctx->blkno;
 		ta->offnum = ctx->offnum;
 		ta->attnum = ctx->attnum;
@@ -1913,7 +1911,7 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 	vartag_external expected_tag;
 
 	toast_valueid = ta->va_valueid;
-	extsize = VARATT_EXTINFO_GET_EXTSIZE(ta->va_extinfo);
+	extsize = ta->extsize;
 
 	/*
 	 * Take the chunk_id type from the TOAST table's own definition, not from

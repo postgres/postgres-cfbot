@@ -237,13 +237,13 @@ detoast_attr_slice(varlena *attr,
 	{
 		toast_external_data toast_ext_data;
 		int32		extsize;
-		uint32		compress_method;
+		ToastCompressionId compress_method;
 		bool		is_compressed;
 
 		toast_external_info_get(attr, &toast_ext_data);
-		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-		compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
-		is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+		extsize = toast_ext_data.extsize;
+		compress_method = toast_ext_data.compress_method;
+		is_compressed = toast_ext_data.is_compressed;
 
 		/* fast path for non-compressed external datums */
 		if (!is_compressed)
@@ -368,13 +368,13 @@ toast_fetch_datum(varlena *attr)
 		elog(ERROR, "toast_fetch_datum shouldn't be called for non-ondisk datums");
 
 	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+	attrsize = toast_ext_data.extsize;
 	toastrelid = toast_ext_data.toastrelid;
 	valueid = toast_ext_data.valueid;
 
 	result = (varlena *) palloc(attrsize + VARHDRSZ);
 
-	if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
+	if (toast_ext_data.is_compressed)
 		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
 	else
 		SET_VARSIZE(result, attrsize + VARHDRSZ);
@@ -425,10 +425,10 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 		elog(ERROR, "toast_fetch_datum_slice shouldn't be called for non-ondisk datums");
 
 	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+	attrsize = toast_ext_data.extsize;
 	toastrelid = toast_ext_data.toastrelid;
 	valueid = toast_ext_data.valueid;
-	is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+	is_compressed = toast_ext_data.is_compressed;
 
 	/*
 	 * It's nonsense to fetch slices of a compressed datum unless when it's a
@@ -634,7 +634,7 @@ toast_datum_size(Datum value)
 		toast_external_data toast_ext_data;
 
 		toast_external_info_get(attr, &toast_ext_data);
-		result = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+		result = toast_ext_data.extsize;
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
