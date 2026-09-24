@@ -280,6 +280,17 @@ can_minmax_aggs(PlannerInfo *root, List **context)
 		if (aggref->aggfilter != NULL)
 			return false;
 
+		/*
+		 * The generated subquery path bypasses the normal Agg node (and
+		 * hence finalize_aggregate()'s ON EMPTY handling) entirely, in
+		 * favor of a Limit atop an indexscan.  We could teach it to apply
+		 * the ON EMPTY default when the indexscan finds no matching row,
+		 * but for now, just punt and let this aggregate go through the
+		 * normal path, where ON EMPTY is handled correctly.
+		 */
+		if (aggref->aggonempty != NULL)
+			return false;
+
 		aggsortop = fetch_agg_sort_op(aggref->aggfnoid);
 		if (!OidIsValid(aggsortop))
 			return false;		/* not a MIN/MAX aggregate */
