@@ -533,6 +533,20 @@ select count(*) from gist_nan_point_tbl where p ~= point '(3,3)';
      1
 (1 row)
 
+-- a NaN point fails the bounding-box prefilter of the polygon and circle
+-- contains strategies, so the exact operator decides, as on the heap
+select count(*) from gist_nan_point_tbl where p <@ polygon '(0,0),(0,100),(100,100),(50,50),(100,0),(0,0)';
+ count 
+-------
+  7602
+(1 row)
+
+select count(*) from gist_nan_point_tbl where p <@ circle '<(50,50),50>';
+ count 
+-------
+  7843
+(1 row)
+
 reset enable_seqscan;
 reset enable_bitmapscan;
 drop table gist_nan_point_tbl;
