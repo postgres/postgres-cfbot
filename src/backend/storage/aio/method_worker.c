@@ -45,6 +45,7 @@
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/injection_point.h"
 #include "utils/memdebug.h"
@@ -64,6 +65,9 @@
  * chain.
  */
 #define PGAIO_WORKER_WAKEUP_RATIO_SATURATE 4
+
+/* Number of SMGR entries that triggers cleanup while busy. */
+#define PGAIO_WORKER_SMGR_CLEANUP_THRESHOLD 1024
 
 /* Debugging support: show current IO and wakeups:ios statistics in ps. */
 /* #define PGAIO_WORKER_SHOW_PS_INFO */
@@ -954,6 +958,17 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 
 			RESUME_INTERRUPTS();
 			errcallback.arg = NULL;
+
+			/*
+			 * IO workers don't have transaction-end cleanup to destroy SMGR
+			 * objects. Destroy them when the cache grows large enough.
+			 * Workers don't pin SMGR objects, so all entries can be
+			 * destroyed. The IO has completed and its error context has been
+			 * cleared, so no borrowed file descriptors or SMGR references
+			 * remain in use.
+			 */
+			if (smgrnumentries() >= PGAIO_WORKER_SMGR_CLEANUP_THRESHOLD)
+				smgrdestroyall();
 		}
 		else
 		{
@@ -961,6 +976,13 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 
 			/* Cancel new worker request if pending. */
 			pgaio_worker_cancel_grow();
+
+			/*
+			 * Release any remaining SMGR objects before sleeping. See
+			 * PGAIO_WORKER_SMGR_CLEANUP_THRESHOLD for more information.
+			 */
+			if (smgrnumentries() > 0)
+				smgrdestroyall();
 
 			/* Compute the remaining allowed idle time. */
 			if (io_worker_idle_timeout == -1)
