@@ -107,6 +107,7 @@
 #include "access/heapam.h"
 #include "access/heapam_xlog.h"
 #include "access/heaptoast.h"
+#include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -119,6 +120,7 @@
 #include "storage/bufmgr.h"
 #include "storage/bulk_write.h"
 #include "storage/fd.h"
+#include "storage/lmgr.h"
 #include "storage/procarray.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -151,6 +153,12 @@ typedef struct RewriteStateData
 	HTAB	   *rs_old_new_tid_map; /* unmatched B tuples */
 	HTAB	   *rs_logical_mappings;	/* logical remapping files */
 	uint32		rs_num_rewrite_mappings;	/* # in memory mappings */
+
+	/*
+	 * If this is initialized, raw_heap_insert() is also used for TOAST
+	 * relation.
+	 */
+	struct RewriteStateData *toast;
 } RewriteStateData;
 
 /*
@@ -211,6 +219,11 @@ typedef struct RewriteMappingDataEntry
 
 
 /* prototypes for internal functions */
+static RewriteState begin_heap_rewrite_common(Relation old_heap,
+											  Relation new_heap,
+											  TransactionId oldest_xmin,
+											  TransactionId freeze_xid,
+											  MultiXactId cutoff_multi);
 static void raw_heap_insert(RewriteState state, HeapTuple tup);
 
 /* internal logical remapping prototypes */
@@ -227,18 +240,19 @@ static void logical_end_heap_rewrite(RewriteState state);
  * oldest_xmin	xid used by the caller to determine which tuples are dead
  * freeze_xid	xid before which tuples will be frozen
  * cutoff_multi	multixact before which multis will be removed
+ * no_chains	only raw insert (and freezing), do not care of HOT chains
  *
  * Returns an opaque RewriteState, allocated in current memory context,
  * to be used in subsequent calls to the other functions.
  */
 RewriteState
 begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xmin,
-				   TransactionId freeze_xid, MultiXactId cutoff_multi)
+				   TransactionId freeze_xid, MultiXactId cutoff_multi,
+				   bool no_chains)
 {
-	RewriteState state;
 	MemoryContext rw_cxt;
 	MemoryContext old_cxt;
-	HASHCTL		hash_ctl;
+	RewriteState state;
 
 	/*
 	 * To ease cleanup, make a separate context that will contain the
@@ -249,9 +263,99 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
 								   ALLOCSET_DEFAULT_SIZES);
 	old_cxt = MemoryContextSwitchTo(rw_cxt);
 
+	state = begin_heap_rewrite_common(old_heap, new_heap, oldest_xmin,
+									  freeze_xid, cutoff_multi);
+	state->rs_cxt = rw_cxt;
+
+	if (!no_chains)
+	{
+		HASHCTL		hash_ctl;
+
+		/* Initialize hash tables used to track update chains */
+		hash_ctl.keysize = sizeof(TidHashKey);
+		hash_ctl.entrysize = sizeof(UnresolvedTupData);
+		hash_ctl.hcxt = state->rs_cxt;
+
+		state->rs_unresolved_tups =
+			hash_create("Rewrite / Unresolved ctids",
+						128,	/* arbitrary initial size */
+						&hash_ctl,
+						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		hash_ctl.entrysize = sizeof(OldToNewMappingData);
+
+		state->rs_old_new_tid_map =
+			hash_create("Rewrite / Old to new tid map",
+						128,	/* arbitrary initial size */
+						&hash_ctl,
+						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		logical_begin_heap_rewrite(state);
+	}
+	else
+	{
+		Oid			toastid;
+
+		/*
+		 * The current user of this mode, REPACK (CONCURRENTLY), does not want
+		 * XID assigned at all, so "raw insert" is also used for TOAST.
+		 *
+		 * XXX "raw insert" would be helpful for REPACK w/o CONCURRENTLY too,
+		 * as it writes the whole pages to WAL. The problem here is that it
+		 * might check the existence of chunk OIDs in the new TOAST relation
+		 * (see the hacks with rd_toastoid in toast_save_datum()), and that
+		 * doesn't work while the rewrite is still in progress: the relation
+		 * pages are not guaranteed to be flushed to disk (and read into
+		 * shared buffers) before the end of the rewrite.
+		 */
+		toastid = new_heap->rd_rel->reltoastrelid;
+		if (OidIsValid(toastid))
+		{
+			Oid			toastid_old;
+			Relation	toast_rel;
+			Relation	toast_rel_old = NULL;
+
+			/* New relation's TOAST should already be locked. */
+			Assert(CheckRelationOidLockedByMe(toastid, AccessExclusiveLock,
+											  false));
+			toast_rel = table_open(toastid, NoLock);
+
+			toastid_old = old_heap ? old_heap->rd_rel->reltoastrelid :
+				InvalidTransactionId;
+			if (OidIsValid(toastid_old))
+			{
+				/*
+				 * Currently we do not lock the old relation's TOAST. Use the
+				 * same lock mode we use for the parent relation.
+				 */
+				toast_rel_old = table_open(toastid_old,
+										   ShareUpdateExclusiveLock);
+			}
+
+			/* Create the state for TOAST insertions. */
+			state->toast = begin_heap_rewrite_common(toast_rel_old,
+													 toast_rel,
+													 oldest_xmin,
+													 freeze_xid,
+													 cutoff_multi);
+		}
+	}
+
+	MemoryContextSwitchTo(old_cxt);
+
+	return state;
+}
+
+static RewriteState
+begin_heap_rewrite_common(Relation old_heap, Relation new_heap,
+						  TransactionId oldest_xmin,
+						  TransactionId freeze_xid, MultiXactId cutoff_multi)
+
+{
+	RewriteState state;
+
 	/* Create and fill in the state struct */
 	state = palloc0_object(RewriteStateData);
-
 	state->rs_old_rel = old_heap;
 	state->rs_new_rel = new_heap;
 	state->rs_buffer = NULL;
@@ -260,31 +364,7 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
 	state->rs_oldest_xmin = oldest_xmin;
 	state->rs_freeze_xid = freeze_xid;
 	state->rs_cutoff_multi = cutoff_multi;
-	state->rs_cxt = rw_cxt;
 	state->rs_bulkstate = smgr_bulk_start_rel(new_heap, MAIN_FORKNUM);
-
-	/* Initialize hash tables used to track update chains */
-	hash_ctl.keysize = sizeof(TidHashKey);
-	hash_ctl.entrysize = sizeof(UnresolvedTupData);
-	hash_ctl.hcxt = state->rs_cxt;
-
-	state->rs_unresolved_tups =
-		hash_create("Rewrite / Unresolved ctids",
-					128,		/* arbitrary initial size */
-					&hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
-	hash_ctl.entrysize = sizeof(OldToNewMappingData);
-
-	state->rs_old_new_tid_map =
-		hash_create("Rewrite / Old to new tid map",
-					128,		/* arbitrary initial size */
-					&hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
-	MemoryContextSwitchTo(old_cxt);
-
-	logical_begin_heap_rewrite(state);
 
 	return state;
 }
@@ -300,16 +380,20 @@ end_heap_rewrite(RewriteState state)
 	HASH_SEQ_STATUS seq_status;
 	UnresolvedTup unresolved;
 
-	/*
-	 * Write any remaining tuples in the UnresolvedTups table. If we have any
-	 * left, they should in fact be dead, but let's err on the safe side.
-	 */
-	hash_seq_init(&seq_status, state->rs_unresolved_tups);
-
-	while ((unresolved = hash_seq_search(&seq_status)) != NULL)
+	if (state->rs_unresolved_tups)
 	{
-		ItemPointerSetInvalid(&unresolved->tuple->t_data->t_ctid);
-		raw_heap_insert(state, unresolved->tuple);
+		/*
+		 * Write any remaining tuples in the UnresolvedTups table. If we have
+		 * any left, they should in fact be dead, but let's err on the safe
+		 * side.
+		 */
+		hash_seq_init(&seq_status, state->rs_unresolved_tups);
+
+		while ((unresolved = hash_seq_search(&seq_status)) != NULL)
+		{
+			ItemPointerSetInvalid(&unresolved->tuple->t_data->t_ctid);
+			raw_heap_insert(state, unresolved->tuple);
+		}
 	}
 
 	/* Write the last page, if any */
@@ -318,10 +402,29 @@ end_heap_rewrite(RewriteState state)
 		smgr_bulk_write(state->rs_bulkstate, state->rs_blockno, state->rs_buffer, true);
 		state->rs_buffer = NULL;
 	}
-
 	smgr_bulk_finish(state->rs_bulkstate);
 
-	logical_end_heap_rewrite(state);
+	/* The same for TOAST */
+	if (state->toast)
+	{
+		RewriteState toast = state->toast;
+
+		if (toast->rs_buffer)
+		{
+			smgr_bulk_write(toast->rs_bulkstate, toast->rs_blockno,
+							toast->rs_buffer, true);
+			toast->rs_buffer = NULL;
+		}
+		smgr_bulk_finish(toast->rs_bulkstate);
+
+		/* Close relation(s) opened by begin_heap_rewrite(). */
+		table_close(toast->rs_new_rel, NoLock);
+		if (toast->rs_old_rel)
+			table_close(toast->rs_old_rel, ShareUpdateExclusiveLock);
+	}
+
+	if (state->rs_logical_rewrite)
+		logical_end_heap_rewrite(state);
 
 	/* Deleting the context frees everything */
 	MemoryContextDelete(state->rs_cxt);
@@ -350,30 +453,13 @@ rewrite_heap_tuple(RewriteState state,
 
 	old_cxt = MemoryContextSwitchTo(state->rs_cxt);
 
-	/*
-	 * Copy the original tuple's visibility information into new_tuple.
-	 *
-	 * XXX we might later need to copy some t_infomask2 bits, too? Right now,
-	 * we intentionally clear the HOT status bits.
-	 */
-	memcpy(&new_tuple->t_data->t_choice.t_heap,
-		   &old_tuple->t_data->t_choice.t_heap,
-		   sizeof(HeapTupleFields));
-
-	new_tuple->t_data->t_infomask &= ~HEAP_XACT_MASK;
-	new_tuple->t_data->t_infomask2 &= ~HEAP2_XACT_MASK;
-	new_tuple->t_data->t_infomask |=
-		old_tuple->t_data->t_infomask & HEAP_XACT_MASK;
+	rewrite_copy_visibility_info(new_tuple, old_tuple);
 
 	/*
 	 * While we have our hands on the tuple, we may as well freeze any
 	 * eligible xmin or xmax, so that future VACUUM effort can be saved.
 	 */
-	heap_freeze_tuple(new_tuple->t_data,
-					  state->rs_old_rel->rd_rel->relfrozenxid,
-					  state->rs_old_rel->rd_rel->relminmxid,
-					  state->rs_freeze_xid,
-					  state->rs_cutoff_multi);
+	rewrite_freeze_tuple(state, new_tuple);
 
 	/*
 	 * Invalid ctid means that ctid should point to the tuple itself. We'll
@@ -535,6 +621,24 @@ rewrite_heap_tuple(RewriteState state,
 }
 
 /*
+ * Like rewrite_heap_tuple(), but do not care about HOT chains. The user
+ * should have used the appropriate snapshot to pick at most one tuple of the
+ * chain - this is typical for REPACK (CONCURRENTLY).
+ */
+void
+rewrite_heap_tuple_no_chains(RewriteState state, HeapTuple old_tuple,
+							 HeapTuple new_tuple, bool freeze)
+{
+	if (new_tuple != old_tuple)
+		rewrite_copy_visibility_info(new_tuple, old_tuple);
+
+	if (freeze)
+		rewrite_freeze_tuple(state, new_tuple);
+
+	raw_heap_insert(state, new_tuple);
+}
+
+/*
  * Register a dead tuple with an ongoing rewrite. Dead tuples are not
  * copied to the new table, but we still make note of them so that we
  * can release some resources earlier.
@@ -628,7 +732,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 		options |= HEAP_INSERT_NO_LOGICAL;
 
 		heaptup = heap_toast_insert_or_update(state->rs_new_rel, tup, NULL,
-											  options);
+											  state->toast, options);
 	}
 	else
 		heaptup = tup;
@@ -702,6 +806,47 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 	/* If heaptup is a private copy, release it. */
 	if (heaptup != tup)
 		heap_freetuple(heaptup);
+}
+
+/*
+ * Freeze tuple. 'old_tuple' provides the initial visibility information.
+ */
+void
+rewrite_freeze_tuple(RewriteState state, HeapTuple tuple)
+{
+	TransactionId relfrozenxid = InvalidTransactionId;
+	MultiXactId relminmxid = InvalidMultiXactId;
+
+	/* The old relation may be missing if dealing with TOAST. */
+	if (state->rs_old_rel)
+	{
+		relfrozenxid = state->rs_old_rel->rd_rel->relfrozenxid;
+		relminmxid = state->rs_old_rel->rd_rel->relminmxid;
+	}
+
+	heap_freeze_tuple(tuple->t_data, relfrozenxid, relminmxid,
+					  state->rs_freeze_xid,
+					  state->rs_cutoff_multi);
+}
+
+/*
+ * Copy the old tuple's visibility information into the new tuple.
+ */
+void
+rewrite_copy_visibility_info(HeapTuple new_tuple, HeapTuple old_tuple)
+{
+	/*
+	 * XXX we might later need to copy some t_infomask2 bits, too? Right now,
+	 * we intentionally clear the HOT status bits.
+	 */
+	memcpy(&new_tuple->t_data->t_choice.t_heap,
+		   &old_tuple->t_data->t_choice.t_heap,
+		   sizeof(HeapTupleFields));
+
+	new_tuple->t_data->t_infomask &= ~HEAP_XACT_MASK;
+	new_tuple->t_data->t_infomask2 &= ~HEAP2_XACT_MASK;
+	new_tuple->t_data->t_infomask |=
+		old_tuple->t_data->t_infomask & HEAP_XACT_MASK;
 }
 
 /* ------------------------------------------------------------------------

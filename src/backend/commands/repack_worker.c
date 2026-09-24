@@ -35,8 +35,7 @@
 static void RepackWorkerShutdown(int code, Datum arg);
 static LogicalDecodingContext *repack_setup_logical_decoding(Oid relid);
 static void repack_cleanup_logical_decoding(LogicalDecodingContext *ctx);
-static void export_initial_snapshot(Snapshot snapshot,
-									DecodingWorkerShared *shared);
+static void export_snapshot(Snapshot snapshot, DecodingWorkerShared *shared);
 static bool decode_concurrent_changes(LogicalDecodingContext *ctx,
 									  DecodingWorkerShared *shared);
 
@@ -64,6 +63,8 @@ RepackWorkerMain(Datum main_arg)
 	shm_mq_handle *mqh;
 	LogicalDecodingContext *decoding_ctx;
 	SharedFileSet *sfs;
+	RepackDecodingState *dstate;
+	MemoryContext oldcxt;
 	Snapshot	snapshot;
 	char		buf[32];
 
@@ -130,7 +131,9 @@ RepackWorkerMain(Datum main_arg)
 	 * anything in the shared memory until we have serialized the snapshot.
 	 */
 	SpinLockAcquire(&shared->mutex);
-	Assert(!XLogRecPtrIsValid(shared->lsn_upto));
+	/* Initially we're expected to provide a snapshot and only that. */
+	Assert(shared->snapshot_requested &&
+		   XLogRecPtrIsInvalid(shared->lsn_upto));
 	sfs = &shared->sfs;
 	SpinLockRelease(&shared->mutex);
 
@@ -151,9 +154,25 @@ RepackWorkerMain(Datum main_arg)
 	XactIsoLevel = XACT_REPEATABLE_READ;
 	XactReadOnly = true;
 
-	/* Build the initial snapshot and export it. */
+	/*
+	 * Build the initial snapshot and export it.
+	 *
+	 * Since there is no API to free the "external snapshot", and since such
+	 * snapshot is not guaranteed to be flat (i.e. pfree() is not appropriate)
+	 * the easiest way to clean it up is to use a separate memory context for
+	 * it.
+	 */
+	dstate = (RepackDecodingState *) decoding_ctx->output_writer_private;
+	MemoryContextReset(dstate->snapshot_cxt);
+	oldcxt = MemoryContextSwitchTo(dstate->snapshot_cxt);
 	snapshot = SnapBuildInitialSnapshot(decoding_ctx->snapshot_builder);
-	export_initial_snapshot(snapshot, shared);
+	MemoryContextSwitchTo(oldcxt);
+	export_snapshot(snapshot, shared);
+
+	/*
+	 * Adjust the replication slot's xmin so that VACUUM can do more work.
+	 */
+	LogicalIncreaseXminForSlot(InvalidXLogRecPtr, snapshot->xmin, false);
 
 	/*
 	 * Only historic snapshots should be used now. Do not let us restrict the
@@ -335,7 +354,7 @@ repack_cleanup_logical_decoding(LogicalDecodingContext *ctx)
  * Make snapshot available to the backend that launched the decoding worker.
  */
 static void
-export_initial_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
+export_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
 {
 	char		fname[MAXPGPATH];
 	BufFile    *file;
@@ -346,7 +365,9 @@ export_initial_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
 	snap_space = (char *) palloc(snap_size);
 	SerializeSnapshot(snapshot, snap_space);
 
-	DecodingWorkerFileName(fname, shared->relid, shared->last_exported + 1);
+	DecodingWorkerFileName(fname, shared->relid,
+						   shared->last_exported_snapshot + 1,
+						   true);
 	file = BufFileCreateFileSet(&shared->sfs.fs, fname);
 	/* To make restoration easier, write the snapshot size first. */
 	BufFileWrite(file, &snap_size, sizeof(snap_size));
@@ -356,7 +377,8 @@ export_initial_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
 
 	/* Increase the counter to tell the backend that the file is available. */
 	SpinLockAcquire(&shared->mutex);
-	shared->last_exported++;
+	shared->last_exported_snapshot++;
+	shared->snapshot_requested = false;
 	SpinLockRelease(&shared->mutex);
 	ConditionVariableSignal(&shared->cv);
 }
@@ -371,6 +393,7 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 						  DecodingWorkerShared *shared)
 {
 	RepackDecodingState *dstate;
+	bool		snapshot_requested;
 	XLogRecPtr	lsn_upto;
 	bool		done;
 	char		fname[MAXPGPATH];
@@ -378,11 +401,14 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 	dstate = (RepackDecodingState *) ctx->output_writer_private;
 
 	/* Open the output file. */
-	DecodingWorkerFileName(fname, shared->relid, shared->last_exported + 1);
+	DecodingWorkerFileName(fname, shared->relid,
+						   shared->last_exported_changes + 1,
+						   false);
 	dstate->file = BufFileCreateFileSet(&shared->sfs.fs, fname);
 
 	SpinLockAcquire(&shared->mutex);
 	lsn_upto = shared->lsn_upto;
+	snapshot_requested = shared->snapshot_requested;
 	done = shared->done;
 	SpinLockRelease(&shared->mutex);
 
@@ -465,6 +491,7 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 		{
 			SpinLockAcquire(&shared->mutex);
 			lsn_upto = shared->lsn_upto;
+			snapshot_requested = shared->snapshot_requested;
 			/* 'done' should be set at the same time as 'lsn_upto' */
 			done = shared->done;
 			SpinLockRelease(&shared->mutex);
@@ -511,9 +538,59 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 	 */
 	BufFileClose(dstate->file);
 	dstate->file = NULL;
+
+	/*
+	 * Before publishing the data changes, export the snapshot too if
+	 * requested. Publishing both at once makes sense because both are needed
+	 * at the same time, and it's simpler.
+	 */
+	if (snapshot_requested)
+	{
+		Snapshot	snapshot;
+		MemoryContext oldcxt;
+
+		/* See comments about memory context in RepackWorkerMain(). */
+		MemoryContextReset(dstate->snapshot_cxt);
+		oldcxt = MemoryContextSwitchTo(dstate->snapshot_cxt);
+
+		/*
+		 * SnapBuildInitialSnapshot() assumes invalid XID, so set it. We do
+		 * not use the snapshot, so it's ok.
+		 */
+		MyProc->xmin = InvalidTransactionId;
+		snapshot = SnapBuildInitialSnapshot(ctx->snapshot_builder);
+		MemoryContextSwitchTo(oldcxt);
+		export_snapshot(snapshot, shared);
+
+		/*
+		 * Adjust the replication slot's xmin so that VACUUM can do more work.
+		 */
+		LogicalIncreaseXminForSlot(InvalidXLogRecPtr, snapshot->xmin, false);
+	}
+	else
+	{
+		/*
+		 * If data changes were requested but no following snapshot, we don't
+		 * care about xmin horizon because the heap copying should be done by
+		 * now.
+		 */
+		LogicalIncreaseXminForSlot(InvalidXLogRecPtr, InvalidTransactionId,
+								   false);
+
+	}
+
+	/*
+	 * Make sure the xmin of our slot is taken into account when computing new
+	 * VACUUM horizons.
+	 */
+	ReplicationSlotsComputeRequiredXmin(false);
+
+	/*
+	 * Now increase the counter(s) to announce that the output is available.
+	 */
 	SpinLockAcquire(&shared->mutex);
+	shared->last_exported_changes++;
 	shared->lsn_upto = InvalidXLogRecPtr;
-	shared->last_exported++;
 	SpinLockRelease(&shared->mutex);
 	ConditionVariableSignal(&shared->cv);
 

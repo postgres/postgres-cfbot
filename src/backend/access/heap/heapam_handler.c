@@ -34,6 +34,7 @@
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "commands/progress.h"
+#include "commands/repack.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -42,20 +43,31 @@
 #include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
+#include "utils/wait_event_types.h"
 
-static void reform_and_rewrite_tuple(HeapTuple tuple,
-									 Relation OldHeap, Relation NewHeap,
-									 Datum *values, bool *isnull, RewriteState rwstate);
-static void heap_insert_for_repack(HeapTuple tuple, Relation OldHeap,
-								   Relation NewHeap, Datum *values, bool *isnull,
-								   BulkInsertState bistate);
-static HeapTuple reform_tuple(HeapTuple tuple, Relation OldHeap,
-							  Relation NewHeap, Datum *values, bool *isnull);
+static void update_identity_index(ChangeContext *chgcxt,
+								  BlockNumber range_start,
+								  BlockNumber range_end);
+static Snapshot finalize_block_range(Relation rel_old, Relation rel_dst,
+									 TransactionId oldest_xmin,
+									 TransactionId xid_cutoff,
+									 MultiXactId multi_cutoff,
+									 ChangeContext *chgcxt, BlockNumber cur,
+									 BlockNumber start, BlockNumber *end_p,
+									 RewriteState *rwstate_p,
+									 BlockNumber *range_start_dst_p);
+static void reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
+									 RewriteState rwstate);
+static void heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
+								   TupleTableSlot *reform,
+								   RewriteState rwstate);
 
 static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
@@ -200,7 +212,8 @@ heapam_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 }
 
 static TM_Result
-heapam_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
+heapam_tuple_delete(Relation relation, ItemPointer tid, TransactionId xid,
+					CommandId cid,
 					uint32 options, Snapshot snapshot, Snapshot crosscheck,
 					bool wait, TM_FailureData *tmfd)
 {
@@ -209,7 +222,7 @@ heapam_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 	 * the storage itself is cleaning the dead tuples by itself, it is the
 	 * time to call the index tuple deletion also.
 	 */
-	return heap_delete(relation, tid, cid, options, crosscheck, wait,
+	return heap_delete(relation, tid, xid, cid, options, crosscheck, wait,
 					   tmfd);
 }
 
@@ -588,62 +601,59 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
-								 Snapshot snapshot,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
 								 double *tups_vacuumed,
-								 double *tups_recently_dead)
+								 double *tups_recently_dead,
+								 void *tableam_data)
 {
 	RewriteState rwstate;
-	BulkInsertState bistate;
 	IndexScanDesc indexScan;
 	TableScanDesc tableScan;
 	HeapScanDesc heapScan;
 	bool		is_system_catalog;
 	Tuplesortstate *tuplesort;
 	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
-	TupleDesc	newTupDesc = RelationGetDescr(NewHeap);
 	TupleTableSlot *slot;
-	int			natts;
-	Datum	   *values;
-	bool	   *isnull;
+	TupleTableSlot *reform_slot;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
-	bool		concurrent = snapshot != NULL;
+	ChangeContext *chgcxt = (ChangeContext *) tableam_data;
+	bool		concurrent = chgcxt != NULL;
+	Snapshot	snapshot = NULL;
+	BlockNumber range_start = InvalidBlockNumber;
+	BlockNumber range_end = InvalidBlockNumber;
+	BlockNumber range_start_new = InvalidBlockNumber;
+	BlockNumber range_end_new = InvalidBlockNumber;
+	Relation	rel_dst;
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
+
+	/* Determine the destination for the tuples. */
+	if (!concurrent || chgcxt->cc_dest_aux == NULL)
+		rel_dst = NewHeap;
+	else
+		rel_dst = chgcxt->cc_dest_aux->rel;
 
 	/*
 	 * Valid smgr_targblock implies something already wrote to the relation.
 	 * This may be harmless, but this function hasn't planned for it.
 	 */
-	Assert(RelationGetTargetBlock(NewHeap) == InvalidBlockNumber);
-
-	/* Preallocate values/isnull arrays */
-	natts = newTupDesc->natts;
-	values = palloc_array(Datum, natts);
-	isnull = palloc_array(bool, natts);
+	Assert(RelationGetTargetBlock(rel_dst) == InvalidBlockNumber);
 
 	/*
-	 * In non-concurrent mode, initialize the rewrite operation.  This is not
-	 * needed in concurrent mode.
+	 * Initialize the rewrite operation.
 	 */
-	if (!concurrent)
-		rwstate = begin_heap_rewrite(OldHeap, NewHeap, OldestXmin,
-									 *xid_cutoff, *multi_cutoff);
-	else
-		rwstate = NULL;
+	rwstate = begin_heap_rewrite(OldHeap, rel_dst, OldestXmin, *xid_cutoff,
+								 *multi_cutoff, concurrent);
 
-	/* In concurrent mode, prepare for bulk-insert operation. */
-	if (concurrent)
-		bistate = GetBulkInsertState();
-	else
-		bistate = NULL;
-
-	/* Set up sorting if wanted */
-	if (use_sort)
+	/*
+	 * Set up sorting if wanted. CONCURRENTLY sorts the tuple w/o tuplesort,
+	 * see below.
+	 */
+	if (use_sort && !concurrent)
 		tuplesort = tuplesort_begin_cluster(oldTupDesc, OldIndex,
 											maintenance_work_mem,
 											NULL, TUPLESORT_NONE);
@@ -655,20 +665,23 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * that still need to be copied, we scan with SnapshotAny and use
 	 * HeapTupleSatisfiesVacuum for the visibility test.
 	 *
-	 * In the CONCURRENTLY case, we do regular MVCC visibility tests, using
-	 * the snapshot passed by the caller.
+	 * In the CONCURRENTLY case, we do regular MVCC visibility tests. The
+	 * snapshot changes several times during the scan so that we do not block
+	 * the progress of the xmin horizon for VACUUM too much.  Index scan
+	 * should not be used because it returns tuples in random order, which
+	 * makes it impossible to split the scan into block ranges.
 	 */
 	if (OldIndex != NULL && !use_sort)
 	{
+		Assert(!concurrent);
+
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_INDEX_SCAN_HEAP);
 
 		tableScan = NULL;
 		heapScan = NULL;
-		indexScan = index_beginscan(OldHeap, OldIndex, false,
-									snapshot ? snapshot : SnapshotAny,
-									NULL, 0, 0,
-									SO_NONE);
+		indexScan = index_beginscan(OldHeap, OldIndex, false, SnapshotAny, NULL, 0,
+									0, SO_NONE);
 		index_rescan(indexScan, NULL, 0, NULL, 0);
 	}
 	else
@@ -677,24 +690,79 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_SEQ_SCAN_HEAP);
 
-		tableScan = table_beginscan(OldHeap,
-									snapshot ? snapshot : SnapshotAny,
-									0, (ScanKey) NULL,
+		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL,
 									SO_NONE);
 		heapScan = (HeapScanDesc) tableScan;
+
+		/*
+		 * In CONCURRENTLY mode we scan the table by ranges of blocks and the
+		 * algorithm below expects forward direction. (No other direction
+		 * should be set here regardless concurrently anyway.)
+		 */
+		Assert(heapScan->rs_dir == ForwardScanDirection || !concurrent);
 		indexScan = NULL;
 
 		/* Set total heap blocks */
 		pgstat_progress_update_param(PROGRESS_REPACK_TOTAL_HEAP_BLKS,
 									 heapScan->rs_nblocks);
+
+		/* Setup the first range. */
+		if (concurrent)
+		{
+			range_start = heapScan->rs_startblock;
+			range_end = range_start + repack_pages_per_snapshot;
+			range_start_new = RelationGetNumberOfBlocks(rel_dst);
+		}
 	}
 
 	slot = table_slot_create(OldHeap, NULL);
 	hslot = (BufferHeapTupleTableSlot *) slot;
+	reform_slot = MakeSingleTupleTableSlot(RelationGetDescr(OldHeap),
+										   &TTSOpsVirtual);
+
+	if (concurrent)
+	{
+		/*
+		 * Do not block the progress of xmin horizons.
+		 */
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+
+		/*
+		 * As there is no snapshot, our xmin should be invalid now. xid should
+		 * be invalid too because our transactions didn't have to do any
+		 * writes yet.
+		 */
+		Assert(!TransactionIdIsValid(MyProc->xmin));
+		Assert(!TransactionIdIsValid(MyProc->xid));
+
+		/*
+		 * Wait until the worker has the initial snapshot and retrieve it.
+		 */
+		snapshot = repack_get_snapshot(chgcxt);
+		chgcxt->cc_last_snapshot_xmin = snapshot->xmin;
+
+		/*
+		 * Since we currently do not freeze tuples when replaying data
+		 * changes, the replayed transactions should not precede the new value
+		 * of relfrozenxid. (Only transactions having XID >= snapshot->xmin
+		 * will be replayed.)
+		 *
+		 * Regarding multixacts, the corresponding cutoff is probably not
+		 * trivial to determine, however there should not be any multixacts in
+		 * the new relation at all: we do not replay tuple locking records an
+		 * that's ok because the tuple locks should no longer exist at the
+		 * moment we acquire AccessExclusiveLock on the old relation.
+		 */
+		if (TransactionIdFollows(*xid_cutoff, snapshot->xmin))
+			*xid_cutoff = snapshot->xmin;
+
+		PushActiveSnapshot(snapshot);
+	}
 
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
-	 * copy each tuple into the NewHeap, or transiently to the tuplesort
+	 * copy each tuple into the rel_dst, or transiently to the tuplesort
 	 * module.  Note that we don't bother sorting dead tuples (they won't get
 	 * to the new table anyway).
 	 */
@@ -708,8 +776,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		if (indexScan != NULL)
 		{
-			if (!table_index_getnext_slot(indexScan, ForwardScanDirection,
-										  slot))
+			/* See above. */
+			Assert(!concurrent);
+
+			if (!table_index_getnext_slot(indexScan, ForwardScanDirection, slot))
 				break;
 
 			/* Since we used no scan keys, should never need to recheck */
@@ -730,6 +800,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				 */
 				pgstat_progress_update_param(PROGRESS_REPACK_HEAP_BLKS_SCANNED,
 											 heapScan->rs_nblocks);
+
 				break;
 			}
 
@@ -846,10 +917,43 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				continue;
 			}
 		}
+		else
+		{
+			BlockNumber blkno;
+			bool		visible;
+
+			/*
+			 * With CONCURRENTLY, we use each snapshot only for certain range
+			 * of pages, so that VACUUM does not get blocked for too long. So
+			 * first check if the tuple falls into the current range.
+			 */
+			blkno = BufferGetBlockNumber(buf);
+
+			Assert(BlockNumberIsValid(range_end));
+
+			/* End of the current range or wraparound? */
+			if (blkno >= range_end || blkno < range_start)
+				snapshot = finalize_block_range(OldHeap, rel_dst,
+												OldestXmin, *xid_cutoff,
+												*multi_cutoff,
+												chgcxt, blkno, range_start,
+												&range_end, &rwstate,
+												&range_start_new);
+
+			/* Finally check the tuple visibility. */
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			visible = HeapTupleSatisfiesVisibility(tuple, snapshot, buf);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (!visible)
+				continue;
+		}
 
 		*num_tuples += 1;
 		if (tuplesort != NULL)
 		{
+			Assert(!concurrent);
+
 			tuplesort_putheaptuple(tuplesort, tuple);
 
 			/*
@@ -868,11 +972,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			int64		ct_val[2];
 
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
-										 values, isnull, rwstate);
+				reform_and_rewrite_tuple(slot, reform_slot, rwstate);
 			else
-				heap_insert_for_repack(tuple, OldHeap, NewHeap,
-									   values, isnull, bistate);
+				heap_insert_for_repack(chgcxt, slot, reform_slot, rwstate);
 
 			/*
 			 * In indexscan mode and also VACUUM FULL, report increase in
@@ -884,12 +986,45 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		}
 	}
 
+	if (concurrent)
+	{
+		XLogRecPtr	end_of_wal;
+
+		/* Write out any remaining tuples, and fsync if needed */
+		end_heap_rewrite(rwstate);
+
+		/* Finalize the last range in the new relation. */
+		range_end_new = RelationGetNumberOfBlocks(rel_dst);
+		update_identity_index(chgcxt, range_start_new, range_end_new);
+
+		/*
+		 * Process the changes belonging to the last range.
+		 */
+		end_of_wal = GetFlushRecPtr(NULL);
+		repack_process_concurrent_changes(chgcxt, end_of_wal,
+										  InvalidBlockNumber,
+										  InvalidBlockNumber,
+										  false, false);
+
+		/*
+		 * There was an active transaction snapshot on entry, so push one
+		 * before return. While there is no active snapshot, also invalidate
+		 * the catalog snapshot so that the xmin horizons for VACUUM can
+		 * advance.
+		 */
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+		Assert(!TransactionIdIsValid(MyProc->xmin));
+		Assert(!TransactionIdIsValid(MyProc->xid));
+		Assert(!HaveRegisteredOrActiveSnapshot());
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
 	if (indexScan != NULL)
 		index_endscan(indexScan);
 	if (tableScan != NULL)
 		table_endscan(tableScan);
-	if (slot)
-		ExecDropSingleTupleTableSlot(slot);
+	ExecDropSingleTupleTableSlot(slot);
 
 	/*
 	 * In scan-and-sort mode, complete the sort, then read out all live tuples
@@ -909,6 +1044,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_WRITE_NEW_HEAP);
 
+		slot = MakeSingleTupleTableSlot(RelationGetDescr(OldHeap),
+										&TTSOpsHeapTuple);
 		for (;;)
 		{
 			HeapTuple	tuple;
@@ -919,33 +1056,221 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			if (tuple == NULL)
 				break;
 
+			/*
+			 * XXX Ideally we should use tuplesort_gettupleslot() above, but
+			 * it retrieves minimal tuples and tuplesort_puttupleslot() cannot
+			 * get the tuple descriptor from tuplesort created by
+			 * tuplesort_begin_cluster().
+			 */
+			ExecStoreHeapTuple(tuple, slot, false);
+
 			n_tuples += 1;
-			if (!concurrent)
-				reform_and_rewrite_tuple(tuple,
-										 OldHeap, NewHeap,
-										 values, isnull,
-										 rwstate);
-			else
-				heap_insert_for_repack(tuple, OldHeap, NewHeap,
-									   values, isnull, bistate);
+
+			/*
+			 * The CONCURRENTLY mode uses auxiliary tables rather than
+			 * tuplesort.
+			 */
+			Assert(!concurrent);
+			reform_and_rewrite_tuple(slot, reform_slot, rwstate);
 
 			/* Report n_tuples */
 			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED,
 										 n_tuples);
 		}
 
+		ExecDropSingleTupleTableSlot(slot);
 		tuplesort_end(tuplesort);
 	}
 
-	/* Write out any remaining tuples, and fsync if needed */
-	if (rwstate)
-		end_heap_rewrite(rwstate);
-	if (bistate)
-		FreeBulkInsertState(bistate);
+	ExecDropSingleTupleTableSlot(reform_slot);
 
-	/* Clean up */
-	pfree(values);
-	pfree(isnull);
+	if (!concurrent)
+	{
+		/*
+		 * In the CONCURRENTLY case, we had to do away with the rewrite state
+		 * earlier.
+		 */
+		end_heap_rewrite(rwstate);
+	}
+}
+
+/*
+ * Scan range of the new / auxiliary relation and insert all the tuples into
+ * the identity index. range_end is the first block of the next range.
+ */
+static void
+update_identity_index(ChangeContext *chgcxt, BlockNumber range_start,
+					  BlockNumber range_end)
+{
+	RepackDest *dest;
+	BlockNumber first_block,
+				last_block;
+	ItemPointerData mintid,
+				maxtid;
+	TableScanDesc scan;
+	TupleTableSlot *slot;
+
+	/*
+	 * If an auxiliary table exists, it's the one we're copying the data into.
+	 */
+	if (chgcxt->cc_dest_aux)
+		dest = chgcxt->cc_dest_aux;
+	else
+		dest = &chgcxt->cc_dest;
+
+	first_block = range_start;
+
+	if (range_end > range_start)
+		last_block = range_end - 1;
+	else
+	{
+		Assert(range_start == range_end);
+
+		last_block = range_end;
+	}
+
+	ItemPointerSet(&mintid, first_block, FirstOffsetNumber);
+	ItemPointerSet(&maxtid, last_block, MaxOffsetNumber);
+
+	/* XXX flags? */
+	scan = table_beginscan_tidrange(dest->rel, SnapshotAny, &mintid, &maxtid,
+									0);
+	slot = table_slot_create(dest->rel, NULL);
+	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+		ExecInsertIndexTuples(dest->rri, dest->estate, 0, slot, NIL, NULL);
+	ExecDropSingleTupleTableSlot(slot);
+	table_endscan(scan);
+
+	/*
+	 * Index insertion could have accessed catalog when checking constraints,
+	 * so make sure that we no longer block the progress of xmin horizons for
+	 * VACUUM. (It's ok to have a snapshot throughout range scan, so there's
+	 * no point in doing this invalidation more often.)
+	 */
+	InvalidateCatalogSnapshot();
+}
+
+/*
+ * Finalize processing of the current block range.
+ *
+ * 'cur' is the current block, 'start' is the first block of the current
+ * range.
+ *
+ * '*end_p': on entry, the first block beyond the current range, on exit, the
+ * first block beyond the new range.
+ *
+ * Return the snapshot for the scan of the new range.
+ *
+ * TODO Consider a structure to accommodate (most of) the arguments.
+ */
+static Snapshot
+finalize_block_range(Relation rel_old, Relation rel_dst,
+					 TransactionId oldest_xmin,
+					 TransactionId xid_cutoff,
+					 MultiXactId multi_cutoff,
+					 ChangeContext *chgcxt, BlockNumber cur,
+					 BlockNumber start, BlockNumber *end_p,
+					 RewriteState *rwstate_p,
+					 BlockNumber *range_start_dst_p)
+{
+	BlockNumber end = *end_p;
+	RewriteState rwstate = *rwstate_p;
+	XLogRecPtr	end_of_wal;
+	Snapshot	snapshot;
+	BlockNumber range_end_dst;
+
+	/*
+	 * Wait here when testing how snapshot is changed at page boundary.
+	 */
+	INJECTION_POINT("repack-concurrently-new-range", NULL);
+
+	/*
+	 * Make sure the data is flushed to file before changes can be applied to
+	 * it. (Nothing of it should be in shared buffers so far.)
+	 */
+	end_heap_rewrite(rwstate);
+
+	/*
+	 * Now that the data can be accessed via shared buffers, scan it and add
+	 * each tuple to the identity index - this is necessary to update the
+	 * concurrent data changes below. We could not do that earlier because
+	 * even insertion into index might need to fetch heap tuples, in order to
+	 * check unique or exclusion constraints.
+	 */
+	range_end_dst = RelationGetNumberOfBlocks(rel_dst);
+	update_identity_index(chgcxt, *range_start_dst_p, range_end_dst);
+	*range_start_dst_p = range_end_dst;
+
+	/*
+	 * Decode all the concurrent data changes committed so far before
+	 * requesting the next snapshot - these changes are applicable on top of
+	 * the current snapshot. Since we only copied part of the table so far,
+	 * only changes applicable to that part can be applied.
+	 *
+	 * It's important to apply the changes before we start copying the next
+	 * range of blocks. Without that, in case of concurrent UPDATE, we could
+	 * end up with both old and new tuple present in the new table: the old
+	 * still visible in the current range and the new already visible in the
+	 * following range (for which we'll use more recent snapshot). Thus it'd
+	 * be non-trivial to apply the UPDATE later. By replaying it now, we get
+	 * rid of the old tuple in the current range.
+	 */
+	end_of_wal = GetFlushRecPtr(NULL);
+	repack_process_concurrent_changes(chgcxt, end_of_wal, start, end, true,
+									  false);
+
+	/*
+	 * A new snapshot will be pushed below. Note that it's important to not do
+	 * this earlier, because - while processing the concurrent data changes -
+	 * we might have needed to fetch TOASTed values from the old relation -
+	 * see the UPDATE-to-INSERT conversion in apply_concurrent_changes(). As
+	 * this snapshot protects the data copied from VACUUM, it should also
+	 * protect the TOAST values referenced by the consequent UPDATE
+	 * statements.
+	 */
+	PopActiveSnapshot();
+	InvalidateCatalogSnapshot();
+
+	/* See above. */
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xid));
+
+	/*
+	 * XXX It might be worth Assert(CatalogSnapshot == NULL) here, however
+	 * that symbol is not external.
+	 */
+
+	/*
+	 * Compute the end of the new range by aligning 'cur' to a multiple of
+	 * range boundary. This accounts for the possibility that some block
+	 * numbers could have been skipped (due to pages being empty) or that the
+	 * block number could have wrapped around.
+	 */
+	end = cur + repack_pages_per_snapshot - (cur % repack_pages_per_snapshot);
+	*end_p = end;
+
+	/*
+	 * Get the snapshot for the next range - it should have been built at the
+	 * position right after the last change decoded. Data present in the next
+	 * range of blocks will either be visible to the snapshot or appear in the
+	 * next batch of decoded changes.
+	 */
+	snapshot = repack_get_snapshot(chgcxt);
+
+	Assert(TransactionIdFollowsOrEquals(snapshot->xmin,
+										chgcxt->cc_last_snapshot_xmin));
+	chgcxt->cc_last_snapshot_xmin = snapshot->xmin;
+
+	PushActiveSnapshot(snapshot);
+
+	/*
+	 * Prepare for bulk insert of the next set of tuples. We rely on it to
+	 * start on a new page, even if the last existing page is not full.
+	 */
+	*rwstate_p = begin_heap_rewrite(rel_old, rel_dst, oldest_xmin, xid_cutoff,
+									multi_cutoff, true);
+
+	return snapshot;
 }
 
 /*
@@ -2333,110 +2658,107 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
  * currently only known to happen as an after-effect of ALTER TABLE
  * SET WITHOUT OIDS.
  *
- * So, we must reconstruct the tuple from component Datums.
+ * So, we must reconstruct the tuple from component Datums. 'reform' slot
+ * is a workspace for this reconstruction.
  */
 static void
-reform_and_rewrite_tuple(HeapTuple tuple,
-						 Relation OldHeap, Relation NewHeap,
-						 Datum *values, bool *isnull, RewriteState rwstate)
+reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
+						 RewriteState rwstate)
 {
-	HeapTuple	newtuple;
+	HeapTuple	tuple,
+				newtuple;
+	bool		shouldFree,
+				shouldFreeNew;
 
-	newtuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+	/*
+	 * The old tuple will not be modified, so do not request materialization.
+	 * (A copy can be created for specific slot type though, e.g.
+	 * TTSOpsMinimalTuple.)
+	 */
+	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
+	if (tuple_needs_reform(tuple, src->tts_tupleDescriptor))
+	{
+		clear_dropped_attributes(tuple, reform);
+
+		/* No need to materialize, copy will be created anyway. */
+		Assert(TTS_IS_VIRTUAL(reform));
+		newtuple = ExecFetchSlotHeapTuple(reform, false, &shouldFreeNew);
+	}
+	else
+	{
+		newtuple = heap_copytuple(tuple);
+		shouldFreeNew = true;
+	}
 
 	/* The heap rewrite module does the rest */
 	rewrite_heap_tuple(rwstate, tuple, newtuple);
 
-	heap_freetuple(newtuple);
+	if (shouldFree)
+		heap_freetuple(tuple);
+	if (shouldFreeNew)
+		heap_freetuple(newtuple);
 }
 
 /*
  * Insert tuple when processing REPACK CONCURRENTLY.
  *
- * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
- * difficult to do the same in the catch-up phase (as the logical
- * decoding does not provide us with sufficient visibility
- * information). Thus we must use heap_insert() both during the
- * catch-up and here.
+ * 'reform' is a slot to use for tuple "reforming", typically to get set
+ * values of dropped columns to NULL.
  *
  * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
  * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
  * this relation, so no logical replication subscription should need the data.
- *
- * BulkInsertState is used because many tuples are inserted in the typical
- * case.
  */
 static void
-heap_insert_for_repack(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
-					   Datum *values, bool *isnull, BulkInsertState bistate)
+heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
+					   TupleTableSlot *reform, RewriteState rwstate)
 {
-	HeapTuple	newtuple;
+	HeapTuple	tuple,
+				new_tuple;
+	TransactionId xid;
+	bool		shouldFree,
+				shouldFreeNew;
+	TupleTableSlot *slot;
+	bool		freeze;
 
-	newtuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+	if (chgcxt->cc_dest_aux)
+	{
+		/* Will freeze when copying data to the new table. */
+		freeze = false;
+	}
+	else
+		freeze = true;
 
-	heap_insert(NewHeap, newtuple, GetCurrentCommandId(true),
-				HEAP_INSERT_NO_LOGICAL, bistate);
-
-	heap_freetuple(newtuple);
-}
-
-/*
- * Subroutine for reform_and_rewrite_tuple and heap_insert_for_repack.
- *
- * Deform the given tuple, set values of dropped columns to NULL, and fill in
- * any values from attmissingval; then form a new tuple and return it.  If no
- * attributes need to be changed, a copy of the original tuple is returned.
- * Caller is responsible for freeing the returned tuple.
- *
- * XXX this coding assumes that both relations have the same tupledesc.
- */
-static HeapTuple
-reform_tuple(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
-			 Datum *values, bool *isnull)
-{
-	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
-	TupleDesc	newTupDesc = RelationGetDescr(NewHeap);
-	bool		needs_reform = false;
+	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
 
 	/*
-	 * A short tuple might require values from attmissing val, so activate the
-	 * coding unconditionally in that case.  The value might legitimally be
-	 * NULL otherwise, so this is slightly wasteful, but it probably beats
-	 * having to test each attribute for presence of attmissingval each time.
+	 * The source slot is not expected to create a copy of the tuple.
 	 */
-	if (HeapTupleHeaderGetNatts(tuple->t_data) < newTupDesc->natts)
-		needs_reform = true;
+	Assert(TTS_IS_BUFFERTUPLE(src));
+	Assert(!shouldFree);
 
-	/*
-	 * If the column has been dropped but a value is still present, we can
-	 * optimize storage now by getting rid of it.
-	 */
-	if (!needs_reform)
+	xid = HeapTupleHeaderGetXmin(tuple->t_data);
+	if (reform != NULL && tuple_needs_reform(tuple, src->tts_tupleDescriptor))
 	{
-		for (int i = 0; i < newTupDesc->natts; i++)
-		{
-			if (TupleDescCompactAttr(newTupDesc, i)->attisdropped &&
-				!heap_attisnull(tuple, i + 1, newTupDesc))
-			{
-				needs_reform = true;
-				break;
-			}
-		}
+		clear_dropped_attributes(tuple, reform);
+		slot = reform;
 	}
+	else
+		slot = src;
 
-	/* Skip work if no changes are needed */
-	if (!needs_reform)
-		return heap_copytuple(tuple);
+	/* Make sure we have a copy of the tuple, and set its XID. */
+	new_tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFreeNew);
+	HeapTupleHeaderSetXmin(new_tuple->t_data, xid);
 
-	heap_deform_tuple(tuple, oldTupDesc, values, isnull);
+	/* Perform the insertion. */
+	rewrite_heap_tuple_no_chains(rwstate, tuple, new_tuple, freeze);
 
-	for (int i = 0; i < newTupDesc->natts; i++)
-	{
-		if (TupleDescCompactAttr(newTupDesc, i)->attisdropped)
-			isnull[i] = true;
-	}
+	/* The insertion shouldn't have caused XID assignment. */
+	Assert(!TransactionIdIsValid(GetCurrentTransactionIdIfAny()));
 
-	return heap_form_tuple(newTupDesc, values, isnull);
+	/* Cleanup. */
+	if (shouldFreeNew)
+		heap_freetuple(new_tuple);
 }
 
 /*

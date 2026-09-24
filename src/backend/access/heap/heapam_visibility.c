@@ -1363,6 +1363,65 @@ HeapTupleSatisfiesNonVacuumable(HeapTuple htup, Snapshot snapshot,
 	return res != HEAPTUPLE_DEAD;
 }
 
+/*
+ * HeapTupleSatisfiesNewHeap
+ *		Consider all transactions committed or current.
+ *
+ * See SNAPSHOT_NEW_HEAP's definition for the intended behaviour.
+ *
+ */
+static bool
+HeapTupleSatisfiesNewHeap(HeapTuple htup, Snapshot snapshot, Buffer buffer)
+{
+	HeapTupleHeader tuple = htup->t_data;
+
+	Assert(ItemPointerIsValid(&htup->t_self));
+	Assert(htup->t_tableOid != InvalidOid);
+
+	/* xmin should always be there. */
+	Assert(TransactionIdIsValid(HeapTupleHeaderGetXmin(tuple)));
+
+	/*
+	 * No one should have the chance to set XMIN_INVALID until REPACK has
+	 * finished, and we do not need it.
+	 */
+	Assert(!HeapTupleHeaderXminInvalid(tuple));
+
+	/*
+	 * Unlike that, XMIN_COMMITTED might have been set earlier by REPACK
+	 * itself, but we don't need it here.
+	 */
+
+	/*
+	 * Set XMIN_COMMITTED to make the next checks (by any snapshot) faster.
+	 *
+	 * TODO Set the flag in the initial load and in
+	 * apply_concurrent_changes().
+	 */
+	SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED,
+				HeapTupleHeaderGetRawXmax(tuple));
+
+	/* Inserted tuples have XMAX_INVALID set. */
+	if (tuple->t_infomask & HEAP_XMAX_INVALID)
+		return true;
+
+	/*
+	 * REPACK could have set XMAX_COMMITTED during UPDATE or DELETE, or below.
+	 */
+	if (tuple->t_infomask & HEAP_XMAX_COMMITTED)
+		return false;
+
+	if (!TransactionIdIsValid(HeapTupleHeaderGetRawXmax(tuple)))
+		return true;
+
+	/*
+	 * Set XMAX_COMMITTED to make the next checks faster.
+	 */
+	SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED,
+				HeapTupleHeaderGetRawXmax(tuple));
+
+	return false;
+}
 
 /*
  * HeapTupleIsSurelyDead
@@ -1747,6 +1806,9 @@ HeapTupleSatisfiesVisibility(HeapTuple htup, Snapshot snapshot, Buffer buffer)
 			return HeapTupleSatisfiesHistoricMVCC(htup, snapshot, buffer);
 		case SNAPSHOT_NON_VACUUMABLE:
 			return HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer);
+		case SNAPSHOT_NEW_HEAP:
+			return HeapTupleSatisfiesNewHeap(htup, snapshot, buffer);
+
 	}
 
 	return false;				/* keep compiler quiet */

@@ -48,6 +48,7 @@ tests += {
       'reindex_concurrently_deferred',
       'repack',
       'repack_decode',
+      'repack_snapshots',
       'repack_temporal',
       'repack_temporal_multirange',
       'repack_toast',
