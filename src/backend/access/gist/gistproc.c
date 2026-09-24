@@ -1482,11 +1482,16 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 			{
 				POLYGON    *query = PG_GETARG_POLYGON_P(1);
 
-				result = DatumGetBool(DirectFunctionCall5(gist_poly_consistent,
-														  PointerGetDatum(entry),
-														  PolygonPGetDatum(query),
-														  Int16GetDatum(RTOverlapStrategyNumber),
-														  0, PointerGetDatum(recheck)));
+				/*
+				 * A NaN point fails the bounding-box prefilter, though the
+				 * exact operator below may still match it, as on the heap.
+				 */
+				result = box_has_nan(DatumGetBoxP(entry->key)) ||
+					DatumGetBool(DirectFunctionCall5(gist_poly_consistent,
+													 PointerGetDatum(entry),
+													 PolygonPGetDatum(query),
+													 Int16GetDatum(RTOverlapStrategyNumber),
+													 0, PointerGetDatum(recheck)));
 
 				if (GIST_LEAF(entry) && result)
 				{
@@ -1496,8 +1501,10 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 					 */
 					BOX		   *box = DatumGetBoxP(entry->key);
 
-					Assert(box->high.x == box->low.x
-						   && box->high.y == box->low.y);
+					Assert((box->high.x == box->low.x ||
+							(isnan(box->high.x) && isnan(box->low.x))) &&
+						   (box->high.y == box->low.y ||
+							(isnan(box->high.y) && isnan(box->low.y))));
 					result = DatumGetBool(DirectFunctionCall2(poly_contain_pt,
 															  PolygonPGetDatum(query),
 															  PointPGetDatum(&box->high)));
@@ -1509,11 +1516,16 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 			{
 				CIRCLE	   *query = PG_GETARG_CIRCLE_P(1);
 
-				result = DatumGetBool(DirectFunctionCall5(gist_circle_consistent,
-														  PointerGetDatum(entry),
-														  CirclePGetDatum(query),
-														  Int16GetDatum(RTOverlapStrategyNumber),
-														  0, PointerGetDatum(recheck)));
+				/*
+				 * A NaN point fails the bounding-box prefilter, though the
+				 * exact operator below may still match it, as on the heap.
+				 */
+				result = box_has_nan(DatumGetBoxP(entry->key)) ||
+					DatumGetBool(DirectFunctionCall5(gist_circle_consistent,
+													 PointerGetDatum(entry),
+													 CirclePGetDatum(query),
+													 Int16GetDatum(RTOverlapStrategyNumber),
+													 0, PointerGetDatum(recheck)));
 
 				if (GIST_LEAF(entry) && result)
 				{
@@ -1523,8 +1535,10 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 					 */
 					BOX		   *box = DatumGetBoxP(entry->key);
 
-					Assert(box->high.x == box->low.x
-						   && box->high.y == box->low.y);
+					Assert((box->high.x == box->low.x ||
+							(isnan(box->high.x) && isnan(box->low.x))) &&
+						   (box->high.y == box->low.y ||
+							(isnan(box->high.y) && isnan(box->low.y))));
 					result = DatumGetBool(DirectFunctionCall2(circle_contain_pt,
 															  CirclePGetDatum(query),
 															  PointPGetDatum(&box->high)));
