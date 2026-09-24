@@ -35,9 +35,9 @@ for my $i (1 .. 10)
 }
 
 # Consume enough XIDs to trigger truncation, and one more with
-# 'txid_current' to bump up the freeze horizon.
+# 'pg_current_xact_id' to bump up the freeze horizon.
 $node->safe_psql('postgres', 'select consume_xids(10000000);');
-$node->safe_psql('postgres', 'select txid_current()');
+$node->safe_psql('postgres', 'select pg_current_xact_id()');
 
 # Remember current datfrozenxid before vacuum freeze so that we can
 # check that it is advanced. (Taking the min() this way assumes that

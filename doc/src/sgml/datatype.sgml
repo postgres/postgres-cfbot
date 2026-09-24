@@ -5102,6 +5102,22 @@ WHERE ...
    </para>
 
    <para>
+    The <type>xid8</type> type supports the standard comparison operators,
+    like <literal>=</literal> and <literal>&gt;</literal>.  Two
+    <type>xid8</type> values can be subtracted using the <literal>-</literal>
+    operator; the result is the signed distance between them as a
+    <type>bigint</type>.  A <type>bigint</type> can also be added to or
+    subtracted from an <type>xid8</type> using the
+    <literal>+(xid8,bigint)</literal>, <literal>+(bigint,xid8)</literal>,
+    and <literal>-(xid8,bigint)</literal> operators, respectively.  Note
+    that the calculated <type>xid8</type> should be in the range of the
+    <type>xid8</type> type, i.e., between <literal>0</literal> and
+    <literal>18446744073709551615</literal>, and that subtracting two
+    <type>xid8</type> values yielding a result outside the range of
+    <type>bigint</type> raises an error.
+   </para>
+
+   <para>
     A third identifier type used by the system is <type>cid</type>, or
     command identifier.  This is the data type of the system columns
     <structfield>cmin</structfield> and <structfield>cmax</structfield>. Command identifiers are also 32-bit quantities.
