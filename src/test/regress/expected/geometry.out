@@ -5321,3 +5321,16 @@ SELECT * FROM pg_input_error_info('(1,2),-1', 'circle');
  invalid input syntax for type circle: "(1,2),-1" |        |      | 22P02
 (1 row)
 
+-- box_mergeable() rejects NaN coordinates (BRIN box_inclusion_ops)
+SELECT box_mergeable(box '(0,0),(1,1)', box '(NaN,3),(0,2)');
+ box_mergeable 
+---------------
+ f
+(1 row)
+
+SELECT box_mergeable(box '(0,0),(1,1)', box '(2,3),(0,2)');
+ box_mergeable 
+---------------
+ t
+(1 row)
+
