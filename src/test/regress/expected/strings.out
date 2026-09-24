@@ -3474,6 +3474,25 @@ SELECT rpad('', 50000, 'abc') = (SELECT string_agg('abc', '') FROM generate_seri
  t
 (1 row)
 
+-- repeat: one, several and five copies, and empty results
+SELECT repeat('abc', 1), repeat('abc', 2), repeat('ab', 5);
+ repeat | repeat |   repeat   
+--------+--------+------------
+ abc    | abcabc | ababababab
+(1 row)
+
+SELECT repeat('abc', 0), repeat('', 5), repeat('abc', -1);
+ repeat | repeat | repeat 
+--------+--------+--------
+        |        | 
+(1 row)
+
+SELECT repeat('abc', 10000) = (SELECT string_agg('abc', '') FROM generate_series(1, 10000));
+ ?column? 
+----------
+ t
+(1 row)
+
 SELECT ltrim('zzzytrim', 'xyz');
  ltrim 
 -------
