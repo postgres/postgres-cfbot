@@ -109,6 +109,9 @@ typedef struct ChangeContext
 	/* The relation the changes are applied to. */
 	Relation	cc_rel;
 
+	/* The tuple descriptor to deform decoded tuples with */
+	TupleDesc	cc_tupdesc;
+
 	/* Needed to update indexes of cc_rel. */
 	ResultRelInfo *cc_rri;
 	EState	   *cc_estate;
@@ -199,6 +202,7 @@ static void process_concurrent_changes(XLogRecPtr end_of_wal,
 									   bool done);
 static void initialize_change_context(ChangeContext *chgcxt,
 									  Relation relation,
+									  Relation src_relation,
 									  Oid ident_index_id);
 static void release_change_context(ChangeContext *chgcxt);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
@@ -2688,12 +2692,10 @@ apply_concurrent_changes(BufFile *file, ChangeContext *chgcxt)
 	bool		have_old_tuple = false;
 	MemoryContext oldcxt;
 
-	spilled_tuple = MakeSingleTupleTableSlot(RelationGetDescr(rel),
-											 &TTSOpsVirtual);
+	spilled_tuple = MakeSingleTupleTableSlot(chgcxt->cc_tupdesc, &TTSOpsVirtual);
 	ondisk_tuple = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 											table_slot_callbacks(rel));
-	old_update_tuple = MakeSingleTupleTableSlot(RelationGetDescr(rel),
-												&TTSOpsVirtual);
+	old_update_tuple = MakeSingleTupleTableSlot(chgcxt->cc_tupdesc, &TTSOpsVirtual);
 
 	oldcxt = MemoryContextSwitchTo(GetPerTupleMemoryContext(chgcxt->cc_estate));
 
@@ -3156,9 +3158,18 @@ process_concurrent_changes(XLogRecPtr end_of_wal, ChangeContext *chgcxt, bool do
  */
 static void
 initialize_change_context(ChangeContext *chgcxt,
-						  Relation relation, Oid ident_index_id)
+						  Relation relation, Relation src_relation,
+						  Oid ident_index_id)
 {
 	chgcxt->cc_rel = relation;
+
+	/*
+	 * Use the descriptor of the source relation as the one to deform the
+	 * decoded tuples with; in particular, this descriptor contains all the
+	 * missing attributes.  Tuples formed with it are also valid for the
+	 * target relation, as the attributes are otherwise identical.
+	 */
+	chgcxt->cc_tupdesc = RelationGetDescr(src_relation);
 
 	/* Only initialize fields needed by ExecInsertIndexTuples(). */
 	chgcxt->cc_estate = CreateExecutorState();
@@ -3377,7 +3388,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 			 get_rel_name(identIdx));
 
 	/* Gather information to apply concurrent changes. */
-	initialize_change_context(&chgcxt, NewHeap, ident_idx_new);
+	initialize_change_context(&chgcxt, NewHeap, OldHeap, ident_idx_new);
 
 	/*
 	 * During testing, wait for another backend to perform concurrent data
