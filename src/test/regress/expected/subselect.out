@@ -1042,6 +1042,378 @@ where exists (
   where road.name = ss.f1 );
 rollback;
 --
+-- Tests for pulling up EXISTS sublinks whose JOIN/ON clauses refer to the
+-- parent query
+--
+CREATE TEMP TABLE td (id int);
+INSERT INTO td SELECT g FROM generate_series(1, 100) g;
+ANALYZE td;
+-- Pull-up: correlated ON clause of an inner join
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tc.id
+           AND ta.id = tb.id
+);
+             QUERY PLAN             
+------------------------------------
+ Hash Right Semi Join
+   Hash Cond: (tc.id = ta.id)
+   ->  Hash Join
+         Hash Cond: (tb.id = tc.id)
+         ->  Seq Scan on tb
+         ->  Hash
+               ->  Seq Scan on tc
+   ->  Hash
+         ->  Seq Scan on ta
+(9 rows)
+
+-- Pull-up: the correlated ON clause refers only to the parent query
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+JOIN tb ON true
+WHERE EXISTS (
+  SELECT 1
+  FROM tb tb1
+  JOIN tc ON ta.id = tb.id
+);
+             QUERY PLAN             
+------------------------------------
+ Nested Loop Semi Join
+   ->  Hash Join
+         Hash Cond: (ta.id = tb.id)
+         ->  Seq Scan on ta
+         ->  Hash
+               ->  Seq Scan on tb
+   ->  Nested Loop
+         ->  Seq Scan on tb tb1
+         ->  Materialize
+               ->  Seq Scan on tc
+(10 rows)
+
+-- Pull-up: correlated ON clause of a join nested in another join
+EXPLAIN (COSTS OFF)
+SELECT ta.*
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON tc.id = tb.id
+         AND tb.id = ta.id
+  JOIN td ON td.id = tc.id
+);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Nested Loop
+   Join Filter: (ta.id = td.id)
+   ->  HashAggregate
+         Group Key: tb.id
+         ->  Nested Loop
+               Join Filter: (tc.id = td.id)
+               ->  Hash Join
+                     Hash Cond: (tb.id = td.id)
+                     ->  Seq Scan on tb
+                     ->  Hash
+                           ->  Seq Scan on td
+               ->  Index Only Scan using tc_pkey on tc
+                     Index Cond: (id = tb.id)
+   ->  Index Scan using ta_pkey on ta
+         Index Cond: (id = tc.id)
+(15 rows)
+
+-- Pull-up: correlated ON clause together with an EXISTS in the WHERE clause
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta ta1
+WHERE EXISTS (
+  SELECT 1
+  FROM ta
+  JOIN tb ON ta.id = ta1.id
+           AND ta1.val = 1
+  WHERE EXISTS (
+    SELECT 1
+    FROM ta ta2
+    WHERE ta2.id = ta1.id
+  )
+);
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop Semi Join
+   ->  Seq Scan on ta ta2
+         Filter: (val = 1)
+   ->  Nested Loop
+         ->  Index Only Scan using ta_pkey on ta
+               Index Cond: (id = ta2.id)
+         ->  Seq Scan on tb
+(7 rows)
+
+-- Pull-up: the moved ON clause contains an EXISTS sublink
+EXPLAIN (COSTS OFF)
+SELECT ta.id
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON tc.id = ta.id
+         AND EXISTS (
+           SELECT 1
+           FROM td
+           WHERE td.id = ta.id
+         )
+);
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop Semi Join
+   ->  Hash Semi Join
+         Hash Cond: (ta.id = td.id)
+         ->  Seq Scan on ta
+         ->  Hash
+               ->  Seq Scan on td
+   ->  Nested Loop
+         ->  Index Only Scan using tc_pkey on tc
+               Index Cond: (id = td.id)
+         ->  Seq Scan on tb
+(10 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT ta.id
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON tc.id = ta.id
+         AND EXISTS (
+           SELECT 1
+           FROM td
+           WHERE tb.id = ta.id
+         )
+);
+                 QUERY PLAN                 
+--------------------------------------------
+ Hash Right Semi Join
+   Hash Cond: (tc.id = ta.id)
+   Join Filter: EXISTS(SubPlan exists_1)
+   ->  Nested Loop
+         ->  Seq Scan on tb
+         ->  Materialize
+               ->  Seq Scan on tc
+   ->  Hash
+         ->  Seq Scan on ta
+   SubPlan exists_1
+     ->  Result
+           One-Time Filter: (tb.id = ta.id)
+           ->  Seq Scan on td
+(13 rows)
+
+-- No pull-up: the ON clause of an outer join refers to the parent query
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  RIGHT JOIN tc ON ta.id = tc.id
+);
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on ta
+   Filter: EXISTS(SubPlan exists_1)
+   SubPlan exists_1
+     ->  Nested Loop Left Join
+           Join Filter: (ta.id = tc.id)
+           ->  Seq Scan on tc
+           ->  Materialize
+                 ->  Seq Scan on tb
+(8 rows)
+
+DROP TABLE td;
+-- Check the results of queries where only some of the JOIN/ON clauses can be
+-- moved up
+CREATE TEMP TABLE ex_o (x int, y int);
+CREATE TEMP TABLE ex_a (x int, y int);
+CREATE TEMP TABLE ex_b (x int, y int);
+CREATE TEMP TABLE ex_c (x int, y int);
+INSERT INTO ex_o VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO ex_a VALUES (1, 10), (5, 50);
+INSERT INTO ex_b VALUES (7, 70);
+INSERT INTO ex_c VALUES (100, 1);
+ANALYZE ex_o, ex_a, ex_b, ex_c;
+-- No pull-up: the ON clause of a LEFT JOIN refers to the parent query
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a LEFT JOIN ex_b b ON a.x = o.x);
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on ex_o o
+   Filter: EXISTS(SubPlan exists_1)
+   SubPlan exists_1
+     ->  Nested Loop Left Join
+           Join Filter: (a.x = o.x)
+           ->  Seq Scan on ex_a a
+           ->  Materialize
+                 ->  Seq Scan on ex_b b
+(8 rows)
+
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a LEFT JOIN ex_b b ON a.x = o.x)
+ORDER BY 1;
+ x | y 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+(3 rows)
+
+-- No pull-up: correlated inner join below the nullable side of a LEFT JOIN
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a
+              LEFT JOIN (ex_b b JOIN ex_c c ON b.x = c.x AND c.y = o.y)
+              ON a.x = b.x);
+                   QUERY PLAN                   
+------------------------------------------------
+ Seq Scan on ex_o o
+   Filter: EXISTS(SubPlan exists_1)
+   SubPlan exists_1
+     ->  Nested Loop Left Join
+           Join Filter: (a.x = b.x)
+           ->  Seq Scan on ex_a a
+           ->  Materialize
+                 ->  Nested Loop
+                       Join Filter: (b.x = c.x)
+                       ->  Seq Scan on ex_b b
+                       ->  Seq Scan on ex_c c
+                             Filter: (y = o.y)
+(12 rows)
+
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a
+              LEFT JOIN (ex_b b JOIN ex_c c ON b.x = c.x AND c.y = o.y)
+              ON a.x = b.x)
+ORDER BY 1;
+ x | y 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+(3 rows)
+
+-- No pull-up: correlated inner join below a FULL JOIN
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM (ex_a a JOIN ex_c c ON a.x = o.x)
+              FULL JOIN ex_b b ON a.x = b.x);
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on ex_o o
+   Filter: EXISTS(SubPlan exists_1)
+   SubPlan exists_1
+     ->  Hash Full Join
+           Hash Cond: (a.x = b.x)
+           ->  Nested Loop
+                 ->  Seq Scan on ex_a a
+                       Filter: (x = o.x)
+                 ->  Seq Scan on ex_c c
+           ->  Hash
+                 ->  Seq Scan on ex_b b
+(11 rows)
+
+-- Pull-up: correlated inner join above a LEFT JOIN; the uncorrelated ON
+-- clause of the LEFT JOIN must be kept
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a LEFT JOIN ex_b b ON a.x = b.x
+              JOIN ex_c c ON b.y = c.y AND c.y = o.y);
+                  QUERY PLAN                  
+----------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (o.y = b.y)
+   ->  Seq Scan on ex_o o
+   ->  Materialize
+         ->  Nested Loop
+               Join Filter: (b.y = c.y)
+               ->  Nested Loop
+                     Join Filter: (a.x = b.x)
+                     ->  Seq Scan on ex_b b
+                     ->  Seq Scan on ex_a a
+               ->  Seq Scan on ex_c c
+(11 rows)
+
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a LEFT JOIN ex_b b ON a.x = b.x
+              JOIN ex_c c ON b.y = c.y AND c.y = o.y)
+ORDER BY 1;
+ x | y 
+---+---
+(0 rows)
+
+-- Pull-up: correlated inner join on the non-nullable side of a LEFT JOIN
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM (ex_a a JOIN ex_c c ON a.x = o.x)
+              LEFT JOIN ex_b b ON a.x = b.x);
+                    QUERY PLAN                    
+--------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (o.x = a.x)
+   ->  Seq Scan on ex_o o
+   ->  Materialize
+         ->  Nested Loop
+               ->  Seq Scan on ex_c c
+               ->  Nested Loop Left Join
+                     Join Filter: (a.x = b.x)
+                     ->  Seq Scan on ex_a a
+                     ->  Materialize
+                           ->  Seq Scan on ex_b b
+(11 rows)
+
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM (ex_a a JOIN ex_c c ON a.x = o.x)
+              LEFT JOIN ex_b b ON a.x = b.x)
+ORDER BY 1;
+ x | y 
+---+---
+ 1 | 1
+(1 row)
+
+-- Pull-up: the WHERE clause may refer to the nullable side of a LEFT JOIN
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a LEFT JOIN ex_b b ON a.x = b.x
+              WHERE b.y = o.y);
+               QUERY PLAN               
+----------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (o.y = b.y)
+   ->  Seq Scan on ex_o o
+   ->  Materialize
+         ->  Nested Loop
+               Join Filter: (a.x = b.x)
+               ->  Seq Scan on ex_b b
+               ->  Seq Scan on ex_a a
+(8 rows)
+
+-- No pull-up: volatile correlated ON clause
+EXPLAIN (COSTS OFF)
+SELECT * FROM ex_o o
+WHERE EXISTS (SELECT 1 FROM ex_a a JOIN ex_b b ON a.x = o.x AND random() > 0.5);
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Seq Scan on ex_o o
+   Filter: EXISTS(SubPlan exists_1)
+   SubPlan exists_1
+     ->  Nested Loop
+           Join Filter: (random() > '0.5'::double precision)
+           ->  Seq Scan on ex_a a
+                 Filter: (x = o.x)
+           ->  Seq Scan on ex_b b
+(8 rows)
+
+DROP TABLE ex_o, ex_a, ex_b, ex_c;
 -- Test case for sublinks pushed down into subselects via join alias expansion
 --
 select
