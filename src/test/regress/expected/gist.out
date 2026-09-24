@@ -463,3 +463,76 @@ create index gist_tbl_box_index on gist_tbl using gist (b);
 insert into gist_tbl
   select box(point(0.05*i, 0.05*i)) from generate_series(0,10) as i;
 drop table gist_tbl;
+-- a box with a NaN coordinate must not poison the union keys (bug #19705)
+create table gist_nan_tbl (b box);
+insert into gist_nan_tbl select box '(1,1),(2,2)' from generate_series(1, 1000);
+insert into gist_nan_tbl values (box '(NaN,NaN),(0,0)');
+create index gist_nan_tbl_index on gist_nan_tbl using gist (b);
+-- also insert rows after the build, to exercise the insertion path
+insert into gist_nan_tbl select box '(3,3),(4,4)' from generate_series(1, 1000);
+insert into gist_nan_tbl values (box '(NaN,NaN),(0,0)');
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+select count(*) from gist_nan_tbl where b && box(point(0,0), point(5,5));
+ count 
+-------
+  2000
+(1 row)
+
+select count(*) from gist_nan_tbl where b <@ box(point(0,0), point(5,5));
+ count 
+-------
+  2000
+(1 row)
+
+select count(*) from gist_nan_tbl where b @> point '(1.5,1.5)';
+ count 
+-------
+  1000
+(1 row)
+
+select count(*) from gist_nan_tbl where b ~= box '(NaN,NaN),(0,0)';
+ count 
+-------
+     2
+(1 row)
+
+reset enable_seqscan;
+reset enable_bitmapscan;
+drop table gist_nan_tbl;
+-- point ~= matches NaN coordinates exactly, the index must agree
+create table gist_nan_point_tbl (p point);
+insert into gist_nan_point_tbl
+  select point(i % 100, i / 100) from generate_series(0, 9999) i;
+insert into gist_nan_point_tbl
+  values ('(NaN,NaN)'), ('(NaN,3)'), ('(3,NaN)'), ('(NaN,NaN)');
+create index gist_nan_point_tbl_index on gist_nan_point_tbl using gist (p);
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+select count(*) from gist_nan_point_tbl where p ~= point '(NaN,NaN)';
+ count 
+-------
+     2
+(1 row)
+
+select count(*) from gist_nan_point_tbl where p ~= point '(NaN,3)';
+ count 
+-------
+     1
+(1 row)
+
+select count(*) from gist_nan_point_tbl where p ~= point '(3,NaN)';
+ count 
+-------
+     1
+(1 row)
+
+select count(*) from gist_nan_point_tbl where p ~= point '(3,3)';
+ count 
+-------
+     1
+(1 row)
+
+reset enable_seqscan;
+reset enable_bitmapscan;
+drop table gist_nan_point_tbl;
