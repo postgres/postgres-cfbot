@@ -12,6 +12,7 @@
 #ifndef DETOAST_H
 #define DETOAST_H
 
+#include "access/toast_compression.h"
 #include "varatt.h"
 
 /*
@@ -40,12 +41,18 @@ do { \
 
 /*
  * Decoded contents of an on-disk external TOAST pointer.
+ *
+ * Callers use these fields rather than decoding va_extinfo themselves.
+ * compress_method is TOAST_INVALID_COMPRESSION_ID when the value is not
+ * compressed.
  */
 typedef struct toast_external_data
 {
 	vartag_external tag;		/* VARTAG_ONDISK_* */
 	int32		rawsize;		/* original data size (includes header) */
-	uint32		extinfo;		/* saved size + compression method */
+	int32		extsize;		/* external saved size (without header) */
+	bool		is_compressed;	/* is the saved data compressed? */
+	ToastCompressionId compress_method; /* compression method ID */
 	Oid8		valueid;		/* value ID (can be widened from Oid) */
 	Oid			toastrelid;		/* OID of the TOAST table containing it */
 } toast_external_data;
@@ -56,6 +63,8 @@ typedef struct toast_external_data
 static inline void
 toast_external_info_get(const struct varlena *attr, toast_external_data *toast_ext_data)
 {
+	uint32		extinfo;
+
 	Assert(VARATT_IS_EXTERNAL_ONDISK(attr));
 
 	toast_ext_data->tag = VARTAG_EXTERNAL(attr);
@@ -65,7 +74,7 @@ toast_external_info_get(const struct varlena *attr, toast_external_data *toast_e
 
 		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
 		toast_ext_data->rawsize = toast_pointer.va_rawsize;
-		toast_ext_data->extinfo = toast_pointer.va_extinfo;
+		extinfo = toast_pointer.va_extinfo;
 		toast_ext_data->valueid = VARATT_EXTERNAL_OID8_GET_VALUEID(toast_pointer);
 		toast_ext_data->toastrelid = toast_pointer.va_toastrelid;
 	}
@@ -75,10 +84,25 @@ toast_external_info_get(const struct varlena *attr, toast_external_data *toast_e
 
 		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
 		toast_ext_data->rawsize = toast_pointer.va_rawsize;
-		toast_ext_data->extinfo = toast_pointer.va_extinfo;
+		extinfo = toast_pointer.va_extinfo;
 		toast_ext_data->valueid = toast_pointer.va_valueid;
 		toast_ext_data->toastrelid = toast_pointer.va_toastrelid;
 	}
+
+	toast_ext_data->extsize = VARATT_EXTINFO_GET_EXTSIZE(extinfo);
+	toast_ext_data->is_compressed =
+		VARATT_EXTINFO_IS_COMPRESSED(extinfo, toast_ext_data->rawsize);
+
+	/*
+	 * An external datum that is not compressed has no method; report it as
+	 * the invalid id rather than leaving the raw method bits (which read as
+	 * pglz) in place, so toast_external_data is self-describing.
+	 */
+	if (toast_ext_data->is_compressed)
+		toast_ext_data->compress_method = (ToastCompressionId)
+			(extinfo >> VARLENA_EXTSIZE_BITS);
+	else
+		toast_ext_data->compress_method = TOAST_INVALID_COMPRESSION_ID;
 }
 
 /* ----------

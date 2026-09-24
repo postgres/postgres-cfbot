@@ -5350,10 +5350,10 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				   VARSIZE(chunk) - VARHDRSZ);
 			data_done += VARSIZE(chunk) - VARHDRSZ;
 		}
-		Assert(data_done == VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo));
+		Assert(data_done == toast_ext_data.extsize);
 
 		/* make sure its marked as compressed or not */
-		if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
+		if (toast_ext_data.is_compressed)
 			SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
 		else
 			SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
