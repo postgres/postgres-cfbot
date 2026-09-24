@@ -37,6 +37,16 @@ SELECT substring(good, 3, 1) FROM regress_encoding;
 SELECT substring(good, 4, 1) FROM regress_encoding;
 SELECT regexp_replace(good, '^caf(.)$', '\1') FROM regress_encoding;
 SELECT reverse(good) FROM regress_encoding;
+-- multibyte pad strings: whole repetitions, a partial final repetition, and
+-- fewer than one repetition
+SELECT lpad(good, 7, 'é'), rpad(good, 7, 'é') FROM regress_encoding;
+SELECT lpad(good, 12, 'éab'), rpad(good, 12, 'éab') FROM regress_encoding;
+SELECT lpad(good, 5, 'éab'), rpad(good, 5, 'éab') FROM regress_encoding;
+-- a lone lead byte in the pad string is an error if the padding reaches it
+SELECT lpad(good, 7, test_bytea_to_text('\xc3')) FROM regress_encoding;
+SELECT rpad(good, 7, 'ab' || test_bytea_to_text('\xc3')) FROM regress_encoding;
+SELECT lpad(good, 5, 'ab' || test_bytea_to_text('\xc3')), rpad(good, 6, 'ab' || test_bytea_to_text('\xc3')) FROM regress_encoding;
+SELECT lpad(good, 4, test_bytea_to_text('\xc3')), rpad(good, 4, test_bytea_to_text('\xc3')) FROM regress_encoding;
 
 -- invalid short mb character = error
 SELECT length(truncated) FROM regress_encoding;
