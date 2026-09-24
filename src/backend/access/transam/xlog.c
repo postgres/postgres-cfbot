@@ -469,6 +469,9 @@ typedef struct XLogCtlData
 	/* Fake LSN counter, for unlogged relations. */
 	pg_atomic_uint64 unloggedLSN;
 
+	/* Shared-memory mirror of ControlFile->unloggedResetLSN. */
+	pg_atomic_uint64 unloggedResetLSN;
+
 	/* Time and LSN of last xlog segment switch. Protected by WALWriteLock. */
 	pg_time_t	lastSegSwitchTime;
 	XLogRecPtr	lastSegSwitchLSN;
@@ -5230,6 +5233,26 @@ GetFakeLSNForUnloggedRel(void)
 }
 
 /*
+ * Epoch stamped into pg_class.relpopulated for a populated unlogged matview:
+ * the end of WAL at the last reset of unlogged relations.
+ *
+ * A node stamps only after its reset, so a stamp is always below the LSN of
+ * the pg_class change carrying it.  Any node holding that change has replayed
+ * past it, so its own next reset lands beyond the stamp.  Hence a stale stamp
+ * cannot match the current epoch, no matter which node wrote it or on which
+ * timeline.  The epoch is always a real WAL position, so never one of the
+ * reserved values 0 and 1.
+ */
+uint64
+GetUnloggedPopulatedEpoch(void)
+{
+	uint64		epoch = pg_atomic_read_u64(&XLogCtl->unloggedResetLSN);
+
+	Assert(epoch > 1);
+	return epoch;
+}
+
+/*
  * Auto-tune the number of XLOG buffers.
  *
  * The preferred setting for wal_buffers is about 3% of shared_buffers, with
@@ -5658,6 +5681,7 @@ XLOGShmemInit(void *arg)
 	pg_atomic_init_u64(&XLogCtl->logFlushResult, InvalidXLogRecPtr);
 	pg_atomic_init_u64(&XLogCtl->unloggedLSN, InvalidXLogRecPtr);
 	pg_atomic_init_u64(&XLogCtl->lastChecksumChangeRecPtr, InvalidXLogRecPtr);
+	pg_atomic_init_u64(&XLogCtl->unloggedResetLSN, InvalidXLogRecPtr);
 }
 
 /*
@@ -5820,6 +5844,7 @@ BootStrapXLOG(uint32 data_checksum_version)
 	ControlFile->time = checkPoint.time;
 	ControlFile->checkPoint = checkPoint.redo;
 	ControlFile->checkPointCopy = checkPoint;
+	ControlFile->unloggedResetLSN = checkPoint.redo;
 
 	/* some additional ControlFile fields are set in WriteControlFile() */
 	WriteControlFile();
@@ -6341,6 +6366,9 @@ StartupXLOG(void)
 		pg_atomic_write_membarrier_u64(&XLogCtl->unloggedLSN,
 									   FirstNormalUnloggedLSN);
 
+	pg_atomic_write_membarrier_u64(&XLogCtl->unloggedResetLSN,
+								   ControlFile->unloggedResetLSN);
+
 	/*
 	 * Copy any missing timeline history files between 'now' and the recovery
 	 * target timeline from archive to pg_wal. While we don't need those files
@@ -6612,7 +6640,21 @@ StartupXLOG(void)
 	 * end-of-recovery steps fail.
 	 */
 	if (InRecovery)
+	{
 		ResetUnloggedRelations(UNLOGGED_RELATION_INIT);
+
+		/*
+		 * That discarded the contents of every unlogged relation, so start a
+		 * new epoch at the end of WAL; see GetUnloggedPopulatedEpoch().  If
+		 * we crash before this reaches disk, the next recovery ends at or
+		 * beyond this point anyway.
+		 */
+		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+		ControlFile->unloggedResetLSN = EndOfLog;
+		pg_atomic_write_membarrier_u64(&XLogCtl->unloggedResetLSN,
+									   ControlFile->unloggedResetLSN);
+		LWLockRelease(ControlFileLock);
+	}
 
 	/*
 	 * Pre-scan prepared transactions to find out the range of XIDs present.

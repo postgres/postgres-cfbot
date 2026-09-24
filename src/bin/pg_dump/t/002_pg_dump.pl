@@ -2976,6 +2976,25 @@ my %tests = (
 		},
 	},
 
+	'CREATE UNLOGGED MATERIALIZED VIEW matview_unlogged' => {
+		create_order => 21,
+		create_sql => 'CREATE UNLOGGED MATERIALIZED VIEW
+						   dump_test.matview_unlogged (col1) AS
+						   SELECT * FROM dump_test.matview;',
+		regexp => qr/^
+			\QCREATE UNLOGGED MATERIALIZED VIEW dump_test.matview_unlogged AS\E
+			\n\s+\QSELECT col1\E
+			\n\s+\QFROM dump_test.matview\E
+			\n\s+\QWITH NO DATA;\E
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CREATE MATERIALIZED VIEW matview_third' => {
 		create_order => 58,
 		create_sql => 'CREATE MATERIALIZED VIEW
@@ -4639,6 +4658,23 @@ my %tests = (
 
 	'REFRESH MATERIALIZED VIEW matview' => {
 		regexp => qr/^\QREFRESH MATERIALIZED VIEW dump_test.matview;\E/m,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_post_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			schema_only => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# not affected by --no-unlogged-table-data
+	'REFRESH MATERIALIZED VIEW matview_unlogged' => {
+		regexp => qr/^
+			\QREFRESH MATERIALIZED VIEW dump_test.matview;\E
+			\n.*
+			\QREFRESH MATERIALIZED VIEW dump_test.matview_unlogged;\E
+			/xms,
 		like =>
 		  { %full_runs, %dump_test_schema_runs, section_post_data => 1, },
 		unlike => {
