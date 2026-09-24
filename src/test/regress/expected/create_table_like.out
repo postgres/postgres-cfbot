@@ -635,6 +635,28 @@ Not-null constraints:
     "ctl_table_a_not_null" NOT NULL "a"
     "ctl_table_d_not_null" NOT NULL "d"
 
+CREATE FUNCTION trigger_func1() RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+	RAISE NOTICE ''trigger_func1(%) called: action = %, when = %, level = %'', TG_ARGV[0], TG_OP, TG_WHEN, TG_LEVEL;
+	RETURN NULL;
+END;';
+CREATE TRIGGER trigtest_before_stmt BEFORE DELETE OR UPDATE ON ctl_table
+FOR EACH ROW WHEN (OLD.a > 0)
+EXECUTE PROCEDURE trigger_func1('trigtest_before_stmt');
+CREATE TRIGGER trigtest_after_stmt AFTER UPDATE OF a, b ON ctl_table
+FOR EACH STATEMENT
+EXECUTE PROCEDURE trigger_func1('trigtest_after_stmt');
+ALTER TABLE ctl_table ENABLE REPLICA TRIGGER trigtest_before_stmt;
+ALTER TABLE ctl_table ENABLE ALWAYS TRIGGER trigtest_after_stmt;
+-- CREATE FOREIGN TABLE LIKE should not copy triggers that have transition tables
+CREATE TRIGGER trigtest_after_stmt1 AFTER INSERT ON ctl_table
+REFERENCING NEW TABLE AS new_table
+FOR EACH STATEMENT
+EXECUTE PROCEDURE trigger_func1('trigtest_after_stmt1');
+-- CREATE FOREIGN TABLE LIKE should not copy source table constraint trigger
+CREATE CONSTRAINT TRIGGER constr_trig
+AFTER INSERT ON ctl_table DEFERRABLE INITIALLY DEFERRED enforced FOR EACH ROW
+EXECUTE PROCEDURE trigger_func1();
 -- Test EXCLUDING ALL
 CREATE FOREIGN TABLE ctl_foreign_table1(LIKE ctl_table EXCLUDING ALL) SERVER ctl_s0;
 \d+ ctl_foreign_table1
@@ -683,6 +705,10 @@ Statistics objects:
 Not-null constraints:
     "ctl_table_a_not_null" NOT NULL "a"
     "ctl_table_d_not_null" NOT NULL "d"
+Triggers firing always:
+    trigtest_after_stmt AFTER UPDATE OF a, b ON ctl_foreign_table2 FOR EACH STATEMENT EXECUTE FUNCTION trigger_func1('trigtest_after_stmt')
+Triggers firing on replica only:
+    trigtest_before_stmt BEFORE DELETE OR UPDATE ON ctl_foreign_table2 FOR EACH ROW WHEN (old.a > 0) EXECUTE FUNCTION trigger_func1('trigtest_before_stmt')
 Server: ctl_s0
 
 -- \d+ does not report the value of attcompression for a foreign table, so
@@ -734,3 +760,4 @@ DROP FOREIGN TABLE ctl_foreign_table1;
 DROP FOREIGN TABLE ctl_foreign_table2;
 DROP FOREIGN DATA WRAPPER ctl_dummy CASCADE;
 NOTICE:  drop cascades to server ctl_s0
+DROP FUNCTION trigger_func1;

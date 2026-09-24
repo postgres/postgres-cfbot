@@ -100,7 +100,7 @@ class="parameter">referential_action</replaceable> ] [ ON UPDATE <replaceable cl
 
 <phrase>and <replaceable class="parameter">like_option</replaceable> is:</phrase>
 
-{ INCLUDING | EXCLUDING } { COMMENTS | COMPRESSION | CONSTRAINTS | DEFAULTS | GENERATED | IDENTITY | INDEXES | STATISTICS | STORAGE | ALL }
+{ INCLUDING | EXCLUDING } { COMMENTS | COMPRESSION | CONSTRAINTS | DEFAULTS | GENERATED | IDENTITY | INDEXES | STATISTICS | STORAGE | TRIGGERS | ALL }
 
 <phrase>and <replaceable class="parameter">partition_bound_spec</replaceable> is:</phrase>
 
@@ -693,7 +693,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
         <listitem>
          <para>
           Comments for the copied columns, check constraints,
-          not-null constraints, indexes, and extended statistics will be
+          not-null constraints, indexes, extended statistics, and triggers will be
           copied.  The default behavior is to exclude comments, resulting in
           the corresponding objects in the new table having no
           comments.
@@ -793,6 +793,19 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
           in the new table having type-specific default settings.  For more on
           <literal>STORAGE</literal> settings, see <xref
           linkend="storage-toast"/>.
+         </para>
+        </listitem>
+       </varlistentry>
+
+       <varlistentry id="sql-createtable-parms-like-opt-triggers">
+        <term><literal>INCLUDING TRIGGERS</literal></term>
+        <listitem>
+         <para>
+          All non-internal triggers are copied to the new table.
+          Because triggers on views differ significantly from those on tables, triggers from
+          source view are not copied.
+          The enabled state of each trigger (references <link linkend="catalog-pg-trigger"><structname>pg_trigger</structname></link>.<structfield>tgenabled</structfield>)
+          is preserved on the new table.
          </para>
         </listitem>
        </varlistentry>
