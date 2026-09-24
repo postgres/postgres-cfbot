@@ -1,0 +1,19 @@
+#!/usr/bin/perl
+
+# restore_command helper: wait until the server log shows a shutdown request.
+
+use strict;
+use warnings FATAL => 'all';
+use Time::HiRes qw(usleep);
+
+my ($logfile, $timeout) = @ARGV;
+
+print STDERR "restore_command waiting for shutdown\n";
+for (1 .. $timeout * 10)
+{
+	open my $fh, '<', $logfile or die "could not open $logfile: $!";
+	exit 1 if grep { /received \w+ shutdown request/ } <$fh>;
+	close $fh;
+	usleep(100_000);
+}
+die "timed out waiting for shutdown request\n";

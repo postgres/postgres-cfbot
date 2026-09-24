@@ -288,7 +288,7 @@ static StartupStatusEnum StartupStatus = STARTUP_NOT_RUNNING;
 
 static int	Shutdown = NoShutdown;
 
-static bool FatalError = false; /* T if recovering from backend crash */
+static bool FatalError = false; /* T while handling a fatal error */
 
 /*
  * We use a simple state machine to control startup, shutdown, and
@@ -329,9 +329,8 @@ static bool FatalError = false; /* T if recovering from backend crash */
  * states later than PM_RUN --- Shutdown and FatalError must be consulted
  * to find that out.  FatalError is never true in PM_RECOVERY, PM_HOT_STANDBY,
  * or PM_RUN states, nor in PM_WAIT_XLOG_SHUTDOWN states (because we don't
- * enter those states when trying to recover from a crash).  It can be true in
- * PM_STARTUP state, because we don't clear it until we've successfully
- * started WAL redo.
+ * enter those states when trying to recover from a crash).  It is cleared
+ * when the startup process is relaunched after reinitializing shared memory.
  */
 typedef enum
 {
@@ -2332,25 +2331,8 @@ process_pm_child_exit(void)
 				}
 				else
 					StartupStatus = STARTUP_CRASHED;
-
-				/*
-				 * If FatalError is already set, we are reinitializing after a
-				 * previous crash, and HandleChildCrash() would do nothing,
-				 * leaving the state machine stuck at PM_STARTUP.  Give up,
-				 * signal the remaining children and head for PM_NO_CHILDREN,
-				 * where STARTUP_CRASHED makes us exit.
-				 */
-				if (StartupStatus == STARTUP_CRASHED &&
-					FatalError && Shutdown != ImmediateShutdown)
-				{
-					LogChildExit(LOG, _("startup process"), pid, exitstatus);
-					ereport(LOG,
-							(errmsg("aborting startup due to startup process failure")));
-					HandleFatalError(PMQUIT_FOR_CRASH, true);
-				}
-				else
-					HandleChildCrash(pid, exitstatus,
-									 _("startup process"));
+				HandleChildCrash(pid, exitstatus,
+								 _("startup process"));
 				continue;
 			}
 
@@ -2740,13 +2722,15 @@ CleanupBackend(PMChild *bp,
  * happened. Commonly the caller will have logged the reason for entering
  * FatalError state.
  *
- * This should only be called when not already in ImmediateShutdown state.
+ * This should only be called when not already in FatalError or
+ * ImmediateShutdown state.
  */
 static void
 HandleFatalError(QuitSignalReason reason, bool consider_sigabrt)
 {
 	int			sigtosend;
 
+	Assert(!FatalError);
 	Assert(Shutdown != ImmediateShutdown);
 
 	SetQuitSignalReason(reason);
@@ -3280,7 +3264,8 @@ PostmasterStateMachine(void)
 		StartupPMChild = StartChildProcess(B_STARTUP);
 		Assert(StartupPMChild != NULL);
 		StartupStatus = STARTUP_RUNNING;
-		/* crash recovery started, reset SIGKILL flag */
+		/* The old children are gone; proceed as at initial startup */
+		FatalError = false;
 		AbortStartTime = 0;
 
 		/* start accepting server socket connection events again */
@@ -3756,9 +3741,7 @@ process_pm_pmsignal(void)
 	if (CheckPostmasterSignal(PMSIGNAL_RECOVERY_STARTED) &&
 		pmState == PM_STARTUP && Shutdown == NoShutdown)
 	{
-		/* WAL redo has started. We're out of reinitialization. */
-		FatalError = false;
-		AbortStartTime = 0;
+		/* WAL redo has started. */
 		reachedConsistency = false;
 
 		/*
@@ -4297,10 +4280,7 @@ maybe_start_bgworkers(void)
 	TimestampTz now = 0;
 	dlist_mutable_iter iter;
 
-	/*
-	 * During crash recovery, we have no need to be called until the state
-	 * transition out of recovery.
-	 */
+	/* Don't start workers until the old children have exited */
 	if (FatalError)
 	{
 		StartWorkerNeeded = false;
