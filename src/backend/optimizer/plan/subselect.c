@@ -93,6 +93,8 @@ static void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 static bool inline_cte_walker(Node *node, inline_cte_walker_context *context);
 static bool sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink);
 static bool simplify_EXISTS_query(PlannerInfo *root, Query *query);
+static bool collect_correlated_join_quals(Node *jtnode, bool nullable_side,
+										  List **hoist_nodes);
 static Query *convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
 									Node **testexpr, List **paramIds);
 static Node *replace_correlation_vars_mutator(Node *node, PlannerInfo *root);
@@ -1593,6 +1595,10 @@ sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink)
  * convert_EXISTS_sublink_to_join: try to convert an EXISTS SubLink to a join
  *
  * The API of this function is identical to convert_ANY_sublink_to_join's.
+ *
+ * References to the parent query are allowed in the WHERE clause of the
+ * sub-select and in the JOIN/ON clauses that can be moved to the WHERE
+ * clause without changing the result; see collect_correlated_join_quals().
  */
 JoinExpr *
 convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
@@ -1602,6 +1608,9 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	Query	   *parse = root->parse;
 	Query	   *subselect = (Query *) sublink->subselect;
 	Node	   *whereClause;
+	FromExpr   *jointree;
+	List	   *hoist_nodes = NIL;
+	ListCell   *lc;
 	PlannerInfo subroot;
 	int			rtoffset;
 	int			varno;
@@ -1637,31 +1646,29 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 		return NULL;
 
 	/*
-	 * Separate out the WHERE clause.  (We could theoretically also remove
-	 * top-level plain JOIN/ON clauses, but it's probably not worth the
-	 * trouble.)
+	 * Only the jointree (the WHERE clause and the JOIN/ON clauses) may refer
+	 * to Vars of the parent query; which of them can be moved to the join
+	 * qual is checked below.  The rest of the sub-select must not refer to
+	 * any Vars of the parent query.  (Vars of higher levels should be okay,
+	 * though.)
 	 */
-	whereClause = subselect->jointree->quals;
-	subselect->jointree->quals = NULL;
-
-	/*
-	 * The rest of the sub-select must not refer to any Vars of the parent
-	 * query.  (Vars of higher levels should be okay, though.)
-	 */
+	jointree = subselect->jointree;
+	subselect->jointree = NULL;
 	if (contain_vars_of_level((Node *) subselect, 1))
 		return NULL;
+	subselect->jointree = jointree;
 
 	/*
-	 * On the other hand, the WHERE clause must contain some Vars of the
-	 * parent query, else it's not gonna be a join.
+	 * On the other hand, the jointree must contain some Vars of the parent
+	 * query, else it's not gonna be a join.
 	 */
-	if (!contain_vars_of_level(whereClause, 1))
+	if (!contain_vars_of_level((Node *) jointree, 1))
 		return NULL;
 
 	/*
 	 * We don't risk optimizing if the WHERE clause is volatile, either.
 	 */
-	if (contain_volatile_functions(whereClause))
+	if (contain_volatile_functions(jointree->quals))
 		return NULL;
 
 	/*
@@ -1675,23 +1682,45 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 * Note: we construct up an entirely dummy PlannerInfo for use here.  This
 	 * is fine because only the "glob" and "parse" links will be used in this
 	 * case.
-	 *
-	 * Note: we temporarily assign back the WHERE clause so that any virtual
-	 * generated column references within it can be expanded.  It should be
-	 * separated out again afterward.
 	 */
 	MemSet(&subroot, 0, sizeof(subroot));
 	subroot.type = T_PlannerInfo;
 	subroot.glob = root->glob;
 	subroot.parse = subselect;
-	subselect->jointree->quals = whereClause;
 	subselect = preprocess_relation_rtes(&subroot);
 
 	/*
-	 * Now separate out the WHERE clause again.
+	 * Now separate out the WHERE clause.
 	 */
 	whereClause = subselect->jointree->quals;
 	subselect->jointree->quals = NULL;
+
+	/*
+	 * Find the JOIN/ON clauses that refer to the parent query, and move them
+	 * to the WHERE clause.  Fail if some of them can't be moved.
+	 */
+	if (!collect_correlated_join_quals((Node *) subselect->jointree, false,
+									   &hoist_nodes))
+		return NULL;
+
+	foreach(lc, hoist_nodes)
+	{
+		Node	   *node = (Node *) lfirst(lc);
+
+		if (IsA(node, JoinExpr))
+		{
+			whereClause = make_and_qual(whereClause, ((JoinExpr *) node)->quals);
+			((JoinExpr *) node)->quals = NULL;
+		}
+		else
+		{
+			whereClause = make_and_qual(whereClause, ((FromExpr *) node)->quals);
+			((FromExpr *) node)->quals = NULL;
+		}
+	}
+
+	/* Now the rest of the sub-select must not refer to the parent query */
+	Assert(!contain_vars_of_level((Node *) subselect, 1));
 
 	/*
 	 * The subquery must have a nonempty jointree, but we can make it so.
@@ -1775,6 +1804,94 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	result->rtindex = 0;		/* we don't need an RTE for it */
 
 	return result;
+}
+
+/*
+ * collect_correlated_join_quals: find the quals of an EXISTS sub-select's
+ * jointree that refer to the parent query
+ *
+ * convert_EXISTS_sublink_to_join() moves such quals to the WHERE clause of
+ * the sub-select, which then becomes the semijoin or antijoin qual.  That is
+ * only safe for the quals of inner joins (and of FROM lists) that are not
+ * below the nullable side of an outer join.  The ON clause of an outer join
+ * doesn't filter out rows of its non-nullable side, and a qual below the
+ * nullable side of an outer join only decides which rows are null-extended,
+ * so evaluating either of them above the join could change the result.
+ *
+ * nullable_side is true if jtnode is below the nullable side of some outer
+ * join.  JoinExpr and FromExpr nodes whose quals are to be moved are appended
+ * to *hoist_nodes.  Returns false if some quals referring to the parent query
+ * can't be moved, or are volatile.
+ */
+static bool
+collect_correlated_join_quals(Node *jtnode, bool nullable_side,
+							  List **hoist_nodes)
+{
+	if (jtnode == NULL || IsA(jtnode, RangeTblRef))
+		return true;
+
+	if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *f = (FromExpr *) jtnode;
+		ListCell   *lc;
+
+		if (contain_vars_of_level(f->quals, 1))
+		{
+			if (nullable_side || contain_volatile_functions(f->quals))
+				return false;
+			*hoist_nodes = lappend(*hoist_nodes, f);
+		}
+
+		foreach(lc, f->fromlist)
+		{
+			if (!collect_correlated_join_quals(lfirst(lc), nullable_side,
+											   hoist_nodes))
+				return false;
+		}
+	}
+	else if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+		bool		larg_nullable = nullable_side;
+		bool		rarg_nullable = nullable_side;
+
+		switch (j->jointype)
+		{
+			case JOIN_INNER:
+				break;
+			case JOIN_LEFT:
+				rarg_nullable = true;
+				break;
+			case JOIN_RIGHT:
+				larg_nullable = true;
+				break;
+			case JOIN_FULL:
+				larg_nullable = true;
+				rarg_nullable = true;
+				break;
+			default:
+				/* semijoins and antijoins aren't expected here */
+				return false;
+		}
+
+		if (contain_vars_of_level(j->quals, 1))
+		{
+			if (j->jointype != JOIN_INNER || nullable_side ||
+				contain_volatile_functions(j->quals))
+				return false;
+			*hoist_nodes = lappend(*hoist_nodes, j);
+		}
+
+		if (!collect_correlated_join_quals(j->larg, larg_nullable,
+										   hoist_nodes) ||
+			!collect_correlated_join_quals(j->rarg, rarg_nullable,
+										   hoist_nodes))
+			return false;
+	}
+	else
+		elog(ERROR, "unrecognized node type: %d", (int) nodeTag(jtnode));
+
+	return true;
 }
 
 /*
