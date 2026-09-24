@@ -34,6 +34,9 @@ modules/
   Extensions used only or mainly for test purposes, generally not suitable
   for installing in production databases
 
+pam/
+  Tests for PAM-based authentication
+
 perl/
   Infrastructure for Perl-based TAP tests
 
