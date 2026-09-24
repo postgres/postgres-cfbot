@@ -37,6 +37,7 @@
 #include "access/multixact.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/genam.h"
 #include "access/toast_internals.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -45,6 +46,7 @@
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
+#include "catalog/pg_depend.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_am.h"
@@ -499,6 +501,54 @@ RepackLockLevel(bool concurrent)
  * 'cmd' indicates which command is being executed, to be used for error
  * messages.
  */
+/*
+ * Find the parent relation OID of a TOAST table from pg_depend.
+ */
+static Oid
+toast_get_parent_relid(Oid toastrelid)
+{
+	Relation	depRel;
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	HeapTuple	depTuple;
+	Oid			parentrelid = InvalidOid;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(toastrelid));
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_objsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(0));
+
+	scan = systable_beginscan(depRel, DependDependerIndexId, true,
+							  NULL, 3, key);
+
+	while (HeapTupleIsValid(depTuple = systable_getnext(scan)))
+	{
+		Form_pg_depend dep = (Form_pg_depend) GETSTRUCT(depTuple);
+
+		if (dep->refclassid == RelationRelationId &&
+			dep->deptype == DEPENDENCY_INTERNAL)
+		{
+			parentrelid = dep->refobjid;
+			break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return parentrelid;
+}
+
 void
 cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 			ClusterParams *params, bool isTopLevel)
@@ -646,6 +696,36 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 			index_close(index, lmode);
 		relation_close(OldHeap, lmode);
 		goto out;
+	}
+
+
+	if (OldHeap->rd_rel->relkind == RELKIND_TOASTVALUE)
+	{
+		/*
+		 * If this TOAST table's parent uses Direct TOAST, disallow VACUUM FULL,
+		 * CLUSTER, or REPACK directly on the TOAST table. Rebuilding the TOAST
+		 * table independently would invalidate the physical TIDs stored in the
+		 * parent relation's tuples.
+		 */
+		Oid			parentrelid = toast_get_parent_relid(RelationGetRelid(OldHeap));
+
+		if (OidIsValid(parentrelid))
+		{
+			Relation	parentrel = relation_open(parentrelid, AccessShareLock);
+			bool		is_direct = (RelationGetToastFlavour(parentrel) == TOAST_FLAVOUR_DIRECT);
+
+			relation_close(parentrel, AccessShareLock);
+
+			if (is_direct)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot %s direct TOAST table directly",
+								RepackCommandAsString(cmd)),
+						 errhint("Execute %s on the parent table instead.",
+								 RepackCommandAsString(cmd))));
+			}
+		}
 	}
 
 	Assert(OldHeap->rd_rel->relkind == RELKIND_RELATION ||
@@ -2993,7 +3073,7 @@ adjust_toast_pointers(Relation relation, TupleTableSlot *dest, TupleTableSlot *s
 		slot_getsomeattrs(dest, i + 1);
 
 		varlena_dst = (varlena *) DatumGetPointer(dest->tts_values[i]);
-		if (!VARATT_IS_EXTERNAL_ONDISK(varlena_dst))
+		if (!VARATT_IS_EXTERNAL_ONDISK(varlena_dst) && !VARATT_IS_EXTERNAL_DIRECT(varlena_dst))
 			continue;
 		slot_getsomeattrs(src, i + 1);
 
