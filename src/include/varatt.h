@@ -569,18 +569,15 @@ VARDATA_COMPRESSED_SET_TCINFO(void *PTR, uint32 extsize, uint32 cmethod)
 }
 
 /*
- * Same for external Datums, saved into a va_extinfo.
+ * Same for the saved size of external Datums, stored in va_extinfo.
+ *
+ * There is deliberately no equivalent for the compression method: decode the
+ * pointer with toast_external_info_get() and use its compress_method field.
  */
 static inline Size
 VARATT_EXTINFO_GET_EXTSIZE(uint32 extinfo)
 {
 	return extinfo & VARLENA_EXTSIZE_MASK;
-}
-
-static inline uint32
-VARATT_EXTINFO_GET_COMPRESS_METHOD(uint32 extinfo)
-{
-	return extinfo >> VARLENA_EXTSIZE_BITS;
 }
 
 /*

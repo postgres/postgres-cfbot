@@ -267,7 +267,7 @@ toast_get_compression_id(varlena *attr)
 		toast_external_info_get(attr, &toast_ext_data);
 
 		if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
-			cmid = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
+			cmid = toast_ext_data.compress_method;
 	}
 	else if (VARATT_IS_COMPRESSED(attr))
 		cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
