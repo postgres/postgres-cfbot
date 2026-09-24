@@ -1236,9 +1236,6 @@ repeat(PG_FUNCTION_ARGS)
 	text	   *result;
 	int			slen,
 				tlen;
-	int			i;
-	char	   *cp,
-			   *sp;
 
 	if (count < 0)
 		count = 0;
@@ -1255,14 +1252,7 @@ repeat(PG_FUNCTION_ARGS)
 	result = (text *) palloc(tlen);
 
 	SET_VARSIZE(result, tlen);
-	cp = VARDATA(result);
-	sp = VARDATA_ANY(string);
-	for (i = 0; i < count; i++)
-	{
-		memcpy(cp, sp, slen);
-		cp += slen;
-		CHECK_FOR_INTERRUPTS();
-	}
+	repeat_bytes(VARDATA(result), VARDATA_ANY(string), slen, count);
 
 	PG_RETURN_TEXT_P(result);
 }
