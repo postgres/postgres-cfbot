@@ -228,12 +228,12 @@ detoast_attr_slice(varlena *attr,
 	{
 		toast_external_data toast_ext_data;
 		int32		extsize;
-		uint32		compress_method;
+		ToastCompressionId compress_method;
 		bool		is_compressed;
 
 		toast_external_info_get(attr, &toast_ext_data);
 		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-		compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
+		compress_method = toast_ext_data.compress_method;
 		is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
 
 		/* fast path for non-compressed external datums */
