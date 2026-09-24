@@ -23,6 +23,17 @@ INSERT INTO empsalary VALUES
 
 SELECT depname, empno, salary, sum(salary) OVER (PARTITION BY depname) FROM empsalary ORDER BY depname, salary;
 
+-- product() as a window function, over the whole partition, for every
+-- supported input type
+SELECT depname, empno, salary,
+    product(salary::smallint) OVER (PARTITION BY depname) product_smallint,
+    product(salary::int) OVER (PARTITION BY depname) product_int,
+    product(salary::bigint) OVER (PARTITION BY depname) product_bigint,
+    product(salary::float4) OVER (PARTITION BY depname) product_float4,
+    product(salary::float8) OVER (PARTITION BY depname) product_float8,
+    product(salary::numeric) OVER (PARTITION BY depname) product_numeric
+  FROM empsalary ORDER BY depname, salary;
+
 SELECT depname, empno, salary, rank() OVER (PARTITION BY depname ORDER BY salary) FROM empsalary;
 
 -- with GROUP BY
@@ -30,6 +41,23 @@ SELECT four, ten, SUM(SUM(four)) OVER (PARTITION BY four), AVG(ten) FROM tenk1
 GROUP BY four, ten ORDER BY four, ten;
 
 SELECT depname, empno, salary, sum(salary) OVER w FROM empsalary WINDOW w AS (PARTITION BY depname);
+
+-- product() as a window function using a named WINDOW clause
+SELECT depname, empno, salary,
+    product(salary::smallint) OVER w product_smallint,
+    product(salary::int) OVER w product_int,
+    product(salary::bigint) OVER w product_bigint,
+    product(salary::float4) OVER w product_float4,
+    product(salary::float8) OVER w product_float8,
+    product(salary::numeric) OVER w product_numeric
+  FROM empsalary WINDOW w AS (PARTITION BY depname);
+
+-- product() has no inverse transition function, so a moving frame must
+-- recompute the aggregate for every row.  Exercise that path.
+SELECT empno, salary,
+    product(salary::numeric) OVER (ORDER BY empno
+        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS product_moving
+  FROM empsalary ORDER BY empno;
 
 SELECT depname, empno, salary, rank() OVER w FROM empsalary WINDOW w AS (PARTITION BY depname ORDER BY salary) ORDER BY rank() OVER w;
 
