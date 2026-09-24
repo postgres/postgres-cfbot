@@ -69,6 +69,7 @@
 #include "commands/user.h"
 #include "commands/vacuum.h"
 #include "common/int.h"
+#include "common/relpath.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -131,6 +132,16 @@ typedef struct OnCommitItem
 } OnCommitItem;
 
 static List *on_commits = NIL;
+
+typedef struct PendingTablespaceMove
+{
+	Oid			relid;
+	Oid			newTableSpace;
+	SubTransactionId creating_subid;
+} PendingTablespaceMove;
+
+static List *deferred_tablespace_moves = NIL;
+
 
 
 /*
@@ -694,6 +705,9 @@ static void ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel,
 									bool toLogged);
 static void ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel,
 								const char *tablespacename, LOCKMODE lockmode);
+static bool ATRelationIsFreeToMove(Relation rel);
+static void ATExecSetTableSpaceCopy(Oid tableOid, Oid newTableSpace,
+									LOCKMODE lockmode);
 static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode);
 static void ATExecSetTableSpaceNoStorage(Relation rel, Oid newTableSpace);
 static void ATExecSetRelOptions(Relation rel, List *defList,
@@ -17516,7 +17530,7 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
  * rewriting to be done, so we just want to copy the data as fast as possible.
  */
 static void
-ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
+ATExecSetTableSpaceCopy(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 {
 	Relation	rel;
 	Oid			reltoastrelid;
@@ -17561,6 +17575,13 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 	newrlocator.relNumber = newrelfilenumber;
 	newrlocator.spcOid = newTableSpace;
 
+	elog(DEBUG1,
+		 "SET TABLESPACE copy: rel \"%s\" oid %u, from %s to %s",
+		 RelationGetRelationName(rel),
+		 RelationGetRelid(rel),
+		 relpathperm(rel->rd_locator, MAIN_FORKNUM).str,
+		 relpathperm(newrlocator, MAIN_FORKNUM).str);
+
 	/* hand off to AM to actually create new rel storage and copy the data */
 	if (rel->rd_rel->relkind == RELKIND_INDEX)
 	{
@@ -17599,6 +17620,77 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 
 	/* Clean up */
 	list_free(reltoastidxids);
+}
+
+
+/*
+ * ATRelationIsFreeToMove
+ *
+ * Determines whether a relation file can be copied immediately or it has to
+ * wait until the transaction commit.
+ *
+ * When the relation has indices in the old tablespace because we have to
+ * keep also invisible rows produced after the tablespace update must remain
+ * consistent in the case of a rollback.
+ */
+static bool
+ATRelationIsFreeToMove(Relation rel)
+{
+	char		relkind = rel->rd_rel->relkind;
+
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_MATVIEW)
+		return true;
+
+	return RelationGetIndexList(rel) == NIL;
+}
+
+/*
+ * ATExecSetTableSpace
+ *
+ * Either copy the relation files, or push the an item to the list of
+ * deferred tablespace moves, that are handled at commit.
+ */
+static void
+ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
+{
+	Relation	rel;
+	PendingTablespaceMove *pending;
+
+	rel = relation_open(tableOid, lockmode);
+
+	if (!CheckRelationTableSpaceMove(rel, newTableSpace))
+	{
+		InvokeObjectPostAlterHook(RelationRelationId,
+								  RelationGetRelid(rel), 0);
+		relation_close(rel, NoLock);
+		return;
+	}
+
+	if (ATRelationIsFreeToMove(rel))
+	{
+		relation_close(rel, NoLock);
+		ATExecSetTableSpaceCopy(tableOid, newTableSpace, lockmode);
+	}
+	else
+	{
+		MemoryContext oldcxt;
+
+		/*
+		 * Keep both the list cells and entries in TopTransactionContext for
+		 * the whole transaction, like on_commits uses CacheMemoryContext.
+		 */
+		oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+		pending = MemoryContextAlloc(TopTransactionContext,
+									 sizeof(PendingTablespaceMove));
+		pending->relid = tableOid;
+		pending->newTableSpace = newTableSpace;
+		pending->creating_subid = GetCurrentSubTransactionId();
+		deferred_tablespace_moves = lappend(deferred_tablespace_moves, pending);
+
+		MemoryContextSwitchTo(oldcxt);
+
+		relation_close(rel, NoLock);
+	}
 }
 
 /*
@@ -20105,6 +20197,72 @@ PreCommit_on_commit_actions(void)
 #endif
 	}
 }
+
+/*
+ * Perform the file copies that might have been deferred during the
+ * transaction.
+ * See also: ATRelationIsFreeToMove
+ */
+void
+PreCommit_deferred_tablespace_moves(void)
+{
+	ListCell   *lc;
+
+	foreach(lc, deferred_tablespace_moves)
+	{
+		PendingTablespaceMove *pending = (PendingTablespaceMove *) lfirst(lc);
+
+		ATExecSetTableSpaceCopy(pending->relid, pending->newTableSpace,
+								AccessExclusiveLock);
+	}
+
+	deferred_tablespace_moves = NIL;
+}
+
+/*
+ * Propagate deferred tablespace moves from sub transactions.
+ * The move should be performed only at the commit of the top level
+ * transaction.
+ */
+void
+AtEOSubXact_deferred_tablespace_moves(bool isCommit, SubTransactionId mySubid,
+									  SubTransactionId parentSubid)
+{
+	ListCell   *cur_item;
+
+	foreach(cur_item, deferred_tablespace_moves)
+	{
+		PendingTablespaceMove *pending = (PendingTablespaceMove *) lfirst(cur_item);
+		if (pending->creating_subid != mySubid)
+			continue;
+
+		if (isCommit)
+		{
+			pending->creating_subid = parentSubid;
+			continue;
+		}
+
+		deferred_tablespace_moves = foreach_delete_current(deferred_tablespace_moves,
+															   cur_item);
+		pfree(pending);
+	}
+}
+/*
+ * Clean up deferred tablespace moves list at top level transaction
+ */
+void
+AtEOXact_deferred_tablespace_moves(bool isCommit)
+{
+	if (!isCommit)
+	{
+		/*
+		 * TopTransactionContext is about to be reset, so just drop the
+		 * pointer.  Do not pfree entries here.
+		 */
+		deferred_tablespace_moves = NIL;
+	}
+}
+
 
 /*
  * Post-commit or post-abort cleanup for ON COMMIT management.

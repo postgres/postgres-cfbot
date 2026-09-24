@@ -437,6 +437,161 @@ name";
 -- Should succeed
 DROP TABLESPACE regress_tblspace_renamed;
 
+--
+-- Deferred heap copy for ALTER TABLE SET TABLESPACE on indexed tables
+--
+SET allow_in_place_tablespaces = true;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE TABLESPACE regress_tblspace LOCATION '';
+CREATE TABLESPACE regress_tblspace2 LOCATION '';
+
+-- COMMIT
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (3);
+COMMIT;
+INSERT INTO defer_t VALUES (4), (5);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- ROLLBACK
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (3);
+ROLLBACK;
+INSERT INTO defer_t VALUES (4), (5);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- PREPARE TRANSACTION, COMMIT PREPARED
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (3);
+PREPARE TRANSACTION 'defer_tblsp_prep_commit';
+COMMIT PREPARED 'defer_tblsp_prep_commit';
+INSERT INTO defer_t VALUES (4), (5);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- PREPARE TRANSACTION, ROLLBACK PREPARED
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace2;
+INSERT INTO defer_t VALUES (3);
+PREPARE TRANSACTION 'defer_tblsp_prep_rollback';
+ROLLBACK PREPARED 'defer_tblsp_prep_rollback';
+INSERT INTO defer_t VALUES (4), (5);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- Subtransaction: move in savepoint, subcommit, then top-level commit
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (3);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (4);
+RELEASE SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (5);
+COMMIT;
+INSERT INTO defer_t VALUES (6), (7);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- Subtransaction: move in savepoint, then rollback to savepoint
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (3);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (4);
+ROLLBACK TO SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (5);
+COMMIT;
+INSERT INTO defer_t VALUES (6), (7), (8);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- Subtransaction: subcommit move, then top-level rollback cancels move
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (3);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (4);
+RELEASE SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (5);
+ROLLBACK;
+INSERT INTO defer_t VALUES (6), (7), (8);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+-- Subtransaction: two deferred moves in one transaction
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (3);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (4);
+SAVEPOINT sp2;
+INSERT INTO defer_t VALUES (5);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace2;
+INSERT INTO defer_t VALUES (6);
+COMMIT;
+INSERT INTO defer_t VALUES (7), (8), (9);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+
+CREATE TABLE defer_t (a int);
+CREATE INDEX defer_t_idx ON defer_t (a);
+INSERT INTO defer_t VALUES (1);
+BEGIN;
+INSERT INTO defer_t VALUES (2);
+SAVEPOINT sp1;
+INSERT INTO defer_t VALUES (3);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace;
+INSERT INTO defer_t VALUES (4);
+SAVEPOINT sp2;
+INSERT INTO defer_t VALUES (5);
+ALTER TABLE defer_t SET TABLESPACE regress_tblspace2;
+INSERT INTO defer_t VALUES (6);
+ROLLBACK;
+INSERT INTO defer_t VALUES (7), (8), (9);
+SELECT ctid, a FROM defer_t ORDER BY a;
+DROP TABLE defer_t;
+RESET enable_sort;
+
+DROP TABLESPACE regress_tblspace;
+DROP TABLESPACE regress_tblspace2;
+
 DROP SCHEMA testschema CASCADE;
 
 DROP ROLE regress_tablespace_user1;

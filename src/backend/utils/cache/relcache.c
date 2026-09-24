@@ -61,6 +61,7 @@
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
+#include "common/relpath.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/schemapg.h"
@@ -3974,6 +3975,10 @@ RelationAssumeNewRelfilelocator(Relation relation)
 	relation->rd_newRelfilelocatorSubid = GetCurrentSubTransactionId();
 	if (relation->rd_firstRelfilelocatorSubid == InvalidSubTransactionId)
 		relation->rd_firstRelfilelocatorSubid = relation->rd_newRelfilelocatorSubid;
+
+	elog(DEBUG1, "RelationAssumeNewRelfilelocator: oid %u %s",
+		 RelationGetRelid(relation),
+		 relpathperm(relation->rd_locator, MAIN_FORKNUM).str);
 
 	/* Flag relation as needing eoxact cleanup (to clear these fields) */
 	EOXactListAdd(relation);
