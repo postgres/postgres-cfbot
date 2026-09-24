@@ -2406,6 +2406,55 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
        </para>
       </listitem>
      </varlistentry>
+     <varlistentry id="libpq-connect-require-wal-receiver" xreflabel="require_wal_receiver">
+      <term><literal>require_wal_receiver</literal></term>
+      <listitem>
+       <para>
+        If set to <literal>1</literal> (the default is <literal>0</literal>),
+        and the candidate host is a standby,
+        <productname>libpq</productname> verifies that the standby currently
+        has an active WAL receiver process before accepting the connection.
+        A standby with no active WAL receiver &mdash; for example one whose
+        upstream connection has been lost, or that has not yet connected
+        since starting &mdash; is skipped, and the next host in the list is
+        tried.
+       </para>
+       <para>
+        The check is skipped when connecting to a primary, or when
+        <literal>target_session_attrs</literal> is set to
+        <literal>primary</literal> or <literal>read-write</literal>.  It
+        applies with <literal>any</literal>, <literal>read-only</literal>,
+        <literal>standby</literal>, and <literal>prefer-standby</literal>.
+       </para>
+       <para>
+        With <literal>prefer-standby</literal>, the check applies only while
+        <productname>libpq</productname> is looking for a standby.  If no
+        host passes it, the fallback pass that accepts any server accepts a
+        standby without a WAL receiver too, so that
+        <literal>prefer-standby</literal> keeps degrading gracefully rather
+        than failing outright.
+       </para>
+       <para>
+        The check is also skipped on replication connections (see
+        <xref linkend="protocol-replication"/>), for which it is not
+        meaningful.
+       </para>
+       <para>
+        The check relies on <link
+        linkend="monitoring-pg-stat-wal-receiver-view"><structname>pg_stat_wal_receiver</structname></link>,
+        which was added in <productname>PostgreSQL</productname> 9.6.  A
+        standby running an older server cannot be verified, and is therefore
+        rejected; a primary running an older server is unaffected, since the
+        check does not apply to it.
+       </para>
+       <para>
+        This is a <emphasis>liveness</emphasis> check, not a freshness
+        guarantee: a standby that passes may still lag behind the primary,
+        and a standby recovering only from archived WAL (with no WAL
+        receiver) is rejected even though it may be current.
+       </para>
+      </listitem>
+     </varlistentry>
 
      <varlistentry id="libpq-connect-load-balance-hosts" xreflabel="load_balance_hosts">
       <term><literal>load_balance_hosts</literal></term>
@@ -9280,6 +9329,16 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       </indexterm>
       <envar>PGTARGETSESSIONATTRS</envar> behaves the same as the <xref
       linkend="libpq-connect-target-session-attrs"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGREQUIREWALRECEIVER</envar></primary>
+      </indexterm>
+      <envar>PGREQUIREWALRECEIVER</envar> behaves the same as the <xref
+      linkend="libpq-connect-require-wal-receiver"/> connection parameter.
      </para>
     </listitem>
 
