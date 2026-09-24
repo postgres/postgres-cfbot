@@ -171,6 +171,9 @@ typedef struct WindowStatePerAggData
 
 	/* Data local to eval_windowaggregates() */
 	bool		restart;		/* need to restart this agg in this cycle? */
+
+	/* ExprState for evaluating ON EMPTY default value, or NULL */
+	ExprState  *aggonemptystate;
 } WindowStatePerAggData;
 
 static void initialize_windowaggregate(WindowAggState *winstate,
@@ -690,6 +693,16 @@ finalize_windowaggregate(WindowAggState *winstate,
 									   peraggstate->transtypeLen);
 		*isnull = peraggstate->transValueIsNull;
 	}
+
+	/*
+	 * If an ON EMPTY default is specified and the normal result came out
+	 * NULL, substitute the default -- i.e. this is exactly
+	 * COALESCE(normal_result, default_expression).
+	 */
+	if (peraggstate->aggonemptystate != NULL && *isnull)
+		*result = ExecEvalExpr(peraggstate->aggonemptystate,
+							   winstate->ss.ps.ps_ExprContext,
+							   isnull);
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -3163,6 +3176,13 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	get_typlenbyval(aggtranstype,
 					&peraggstate->transtypeLen,
 					&peraggstate->transtypeByVal);
+
+	/* Build expression state for ON EMPTY default expression */
+	if (wfunc->aggonempty)
+		peraggstate->aggonemptystate = ExecInitExpr(wfunc->aggonempty,
+													(PlanState *) winstate);
+	else
+		peraggstate->aggonemptystate = NULL;
 
 	/*
 	 * initval is potentially null, so don't try to access it as a struct

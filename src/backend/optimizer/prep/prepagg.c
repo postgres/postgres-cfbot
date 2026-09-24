@@ -423,7 +423,8 @@ find_compatible_agg(PlannerInfo *root, Aggref *newagg,
 		if (newagg->aggfnoid == existingRef->aggfnoid &&
 			newagg->aggtype == existingRef->aggtype &&
 			newagg->aggcollid == existingRef->aggcollid &&
-			equal(newagg->aggdirectargs, existingRef->aggdirectargs))
+			equal(newagg->aggdirectargs, existingRef->aggdirectargs) &&
+			equal(newagg->aggonempty, existingRef->aggonempty))
 		{
 			list_free(*same_input_transnos);
 			*same_input_transnos = NIL;
