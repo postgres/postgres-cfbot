@@ -429,8 +429,12 @@ Gzip_open_write(const char *path, const char *mode, CompressFileHandle *CFH)
 
 void
 InitCompressFileHandleGzip(CompressFileHandle *CFH,
-						   const pg_compress_specification compression_spec)
+						   const pg_compress_specification compression_spec,
+						   bool is_pipe)
 {
+	if (is_pipe)
+		pg_fatal("cPipe command not supported for Gzip");
+
 	CFH->open_func = Gzip_open;
 	CFH->open_write_func = Gzip_open_write;
 	CFH->read_func = Gzip_read;
@@ -455,7 +459,8 @@ InitCompressorGzip(CompressorState *cs,
 
 void
 InitCompressFileHandleGzip(CompressFileHandle *CFH,
-						   const pg_compress_specification compression_spec)
+						   const pg_compress_specification compression_spec,
+						   bool is_pipe)
 {
 	pg_fatal("this build does not support compression with %s", "gzip");
 }
