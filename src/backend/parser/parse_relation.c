@@ -1467,7 +1467,8 @@ parserOpenTable(ParseState *pstate, const RangeVar *relation, LOCKMODE lockmode)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
 					 errmsg("relation \"%s.%s\" does not exist",
-							relation->schemaname, relation->relname)));
+							relation->schemaname, relation->relname),
+					 errdetail_untrusted_relation(relation)));
 		else
 		{
 			/*
@@ -1488,7 +1489,8 @@ parserOpenTable(ParseState *pstate, const RangeVar *relation, LOCKMODE lockmode)
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_TABLE),
 						 errmsg("relation \"%s\" does not exist",
-								relation->relname)));
+								relation->relname),
+						 errdetail_untrusted_relation(relation)));
 		}
 	}
 	cancel_parser_errposition_callback(&pcbstate);

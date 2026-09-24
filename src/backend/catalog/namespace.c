@@ -41,6 +41,7 @@
 #include "catalog/pg_ts_parser.h"
 #include "catalog/pg_ts_template.h"
 #include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "common/hashfn_unstable.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
@@ -225,6 +226,7 @@ static bool TSParserIsVisibleExt(Oid prsId, bool *is_missing);
 static bool TSDictionaryIsVisibleExt(Oid dictId, bool *is_missing);
 static bool TSTemplateIsVisibleExt(Oid tmplId, bool *is_missing);
 static bool TSConfigIsVisibleExt(Oid cfgid, bool *is_missing);
+static bool RelationIsTrustedInExtensionScript(Oid relid);
 static void recomputeNamespacePath(void);
 static void AccessTempTableNamespace(bool force);
 static void InitTempTableNamespace(void);
@@ -533,6 +535,14 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 				relId = InvalidOid;
 			else
 				relId = get_relname_relid(relation->relname, namespaceId);
+
+			/*
+			 * Treat an untrusted match as nonexistent while an extension
+			 * script runs, as RelnameGetRelid does for unqualified names.
+			 */
+			if (OidIsValid(relId) && creating_extension &&
+				!RelationIsTrustedInExtensionScript(relId))
+				relId = InvalidOid;
 		}
 		else
 		{
@@ -632,12 +642,14 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 			ereport(elevel,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
 					 errmsg("relation \"%s.%s\" does not exist",
-							relation->schemaname, relation->relname)));
+							relation->schemaname, relation->relname),
+					 errdetail_untrusted_relation(relation)));
 		else
 			ereport(elevel,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
 					 errmsg("relation \"%s\" does not exist",
-							relation->relname)));
+							relation->relname),
+					 errdetail_untrusted_relation(relation)));
 	}
 	return relId;
 }
@@ -896,11 +908,39 @@ RelnameGetRelid(const char *relname)
 
 		relid = get_relname_relid(relname, namespaceId);
 		if (OidIsValid(relid))
+		{
+			/* Skip untrusted matches while an extension script runs */
+			if (creating_extension &&
+				!RelationIsTrustedInExtensionScript(relid))
+				continue;
 			return relid;
+		}
 	}
 
 	/* Not found in path */
 	return InvalidOid;
+}
+
+/*
+ * RelationIsTrustedInExtensionScript
+ *		ObjectIsTrustedInExtensionScript for a relation, by OID.
+ */
+static bool
+RelationIsTrustedInExtensionScript(Oid relid)
+{
+	HeapTuple	tp;
+	Form_pg_class form;
+	bool		result;
+
+	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tp))
+		return true;
+	form = (Form_pg_class) GETSTRUCT(tp);
+	result = ObjectIsTrustedInExtensionScript(RelationRelationId, relid,
+											  form->relnamespace,
+											  form->relowner);
+	ReleaseSysCache(tp);
+	return result;
 }
 
 
@@ -1024,11 +1064,40 @@ TypenameGetTypidExtended(const char *typname, bool temp_ok)
 								PointerGetDatum(typname),
 								ObjectIdGetDatum(namespaceId));
 		if (OidIsValid(typid))
+		{
+			/* Skip untrusted matches while an extension script runs */
+			if (creating_extension && !TypeIsTrustedInExtensionScript(typid))
+				continue;
 			return typid;
+		}
 	}
 
 	/* Not found in path */
 	return InvalidOid;
+}
+
+/*
+ * TypeIsTrustedInExtensionScript
+ *		ObjectIsTrustedInExtensionScript for a type, by OID.
+ *
+ * Also used by LookupTypeName, which resolves qualified names itself.
+ */
+bool
+TypeIsTrustedInExtensionScript(Oid typid)
+{
+	HeapTuple	tp;
+	Form_pg_type form;
+	bool		result;
+
+	tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+	if (!HeapTupleIsValid(tp))
+		return true;
+	form = (Form_pg_type) GETSTRUCT(tp);
+	result = ObjectIsTrustedInExtensionScript(TypeRelationId, typid,
+											  form->typnamespace,
+											  form->typowner);
+	ReleaseSysCache(tp);
+	return result;
 }
 
 /*
@@ -1276,6 +1345,21 @@ FuncnameGetCandidates(List *names, int nargs, List *argnames,
 			}
 			if (nsp == NULL)
 				continue;		/* proc is not in search path */
+		}
+
+		/*
+		 * During an extension script, skip untrusted candidates before any
+		 * further flags are set, so the remaining flags describe trusted
+		 * candidates only (see ObjectIsTrustedInExtensionScript).
+		 */
+		if (creating_extension &&
+			!ObjectIsTrustedInExtensionScript(ProcedureRelationId,
+											  procform->oid,
+											  procform->pronamespace,
+											  procform->proowner))
+		{
+			*fgc_flags |= FGC_UNTRUSTED_SKIP;
+			continue;
 		}
 
 		*fgc_flags |= FGC_NAME_VISIBLE; /* routine is in the right schema */
@@ -1592,6 +1676,118 @@ FuncnameGetCandidates(List *names, int nargs, List *argnames,
 }
 
 /*
+ * ObjectIsTrustedInExtensionScript
+ *		May an extension script safely resolve a name to this object?
+ *
+ * Trusted means in pg_catalog, owned by a superuser, owned by the role running
+ * the script, or a member of the extension being installed or of one it
+ * requires.  The membership rule lets a script reach objects that an earlier
+ * version of itself, or a "superuser = false" required extension, created
+ * under some other role.
+ */
+bool
+ObjectIsTrustedInExtensionScript(Oid classId, Oid objectId,
+								 Oid namespaceId, Oid ownerId)
+{
+	Oid			extensionId;
+
+	if (namespaceId == PG_CATALOG_NAMESPACE ||
+		superuser_arg(ownerId) ||
+		ownerId == GetUserId())
+		return true;
+
+	extensionId = getExtensionOfObject(classId, objectId);
+	if (!OidIsValid(extensionId))
+		return false;
+
+	return extensionId == CurrentExtensionObject ||
+		CurrentExtensionRequires(extensionId);
+}
+
+/*
+ * errdetail_untrusted_relation
+ *		Explain a failed relation lookup during an extension script, if a
+ *		relation of that name exists but is not trusted.
+ */
+int
+errdetail_untrusted_relation(const RangeVar *relation)
+{
+	Oid			relid = InvalidOid;
+
+	if (!creating_extension)
+		return 0;
+
+	if (relation->schemaname)
+	{
+		Oid			namespaceId = get_namespace_oid(relation->schemaname, true);
+
+		if (OidIsValid(namespaceId))
+			relid = get_relname_relid(relation->relname, namespaceId);
+	}
+	else
+	{
+		ListCell   *l;
+
+		recomputeNamespacePath();
+		foreach(l, activeSearchPath)
+		{
+			relid = get_relname_relid(relation->relname, lfirst_oid(l));
+			if (OidIsValid(relid))
+				break;
+		}
+	}
+
+	if (!OidIsValid(relid) || RelationIsTrustedInExtensionScript(relid))
+		return 0;
+
+	errdetail("A relation of that name exists, but it is not trusted while an extension script runs.");
+	return errhint("Only objects in pg_catalog, owned by a superuser, or belonging to the extension or one it requires are trusted.");
+}
+
+/*
+ * errdetail_untrusted_type
+ *		Likewise for a type, given its schema (or NULL) and name.
+ */
+int
+errdetail_untrusted_type(const char *schemaname, const char *typname)
+{
+	Oid			typid = InvalidOid;
+
+	if (!creating_extension)
+		return 0;
+
+	if (schemaname)
+	{
+		Oid			namespaceId = get_namespace_oid(schemaname, true);
+
+		if (OidIsValid(namespaceId))
+			typid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+									PointerGetDatum(typname),
+									ObjectIdGetDatum(namespaceId));
+	}
+	else
+	{
+		ListCell   *l;
+
+		recomputeNamespacePath();
+		foreach(l, activeSearchPath)
+		{
+			typid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+									PointerGetDatum(typname),
+									ObjectIdGetDatum(lfirst_oid(l)));
+			if (OidIsValid(typid))
+				break;
+		}
+	}
+
+	if (!OidIsValid(typid) || TypeIsTrustedInExtensionScript(typid))
+		return 0;
+
+	errdetail("A type of that name exists, but it is not trusted while an extension script runs.");
+	return errhint("Only objects in pg_catalog, owned by a superuser, or belonging to the extension or one it requires are trusted.");
+}
+
+/*
  * MatchNamedCall
  *		Given a pg_proc heap tuple and a call's list of argument names,
  *		check whether the function could match the call.
@@ -1861,6 +2057,14 @@ OpernameGetOprid(List *names, Oid oprleft, Oid oprright)
 				Form_pg_operator operclass = (Form_pg_operator) GETSTRUCT(opertup);
 				Oid			result = operclass->oid;
 
+				/* Reject an untrusted match while an extension script runs */
+				if (creating_extension &&
+					!ObjectIsTrustedInExtensionScript(OperatorRelationId,
+													  result,
+													  operclass->oprnamespace,
+													  operclass->oprowner))
+					result = InvalidOid;
+
 				ReleaseSysCache(opertup);
 				return result;
 			}
@@ -1905,6 +2109,14 @@ OpernameGetOprid(List *names, Oid oprleft, Oid oprright)
 			if (operform->oprnamespace == namespaceId)
 			{
 				Oid			result = operform->oid;
+
+				/* Skip untrusted matches while an extension script runs */
+				if (creating_extension &&
+					!ObjectIsTrustedInExtensionScript(OperatorRelationId,
+													  result,
+													  operform->oprnamespace,
+													  operform->oprowner))
+					continue;
 
 				ReleaseSysCacheList(catlist);
 				return result;
@@ -2033,52 +2245,62 @@ OpernameGetCandidates(List *names, char oprkind, bool missing_schema_ok,
 			}
 			if (nsp == NULL)
 				continue;		/* oper is not in search path */
+		}
 
-			/*
-			 * Okay, it's in the search path, but does it have the same
-			 * arguments as something we already accepted?	If so, keep only
-			 * the one that appears earlier in the search path.
-			 *
-			 * If we have an ordered list from SearchSysCacheList (the normal
-			 * case), then any conflicting oper must immediately adjoin this
-			 * one in the list, so we only need to look at the newest result
-			 * item.  If we have an unordered list, we have to scan the whole
-			 * result list.
-			 */
-			if (resultList)
+		/* Likewise skip untrusted candidates, as in FuncnameGetCandidates */
+		if (creating_extension &&
+			!ObjectIsTrustedInExtensionScript(OperatorRelationId,
+											  operform->oid,
+											  operform->oprnamespace,
+											  operform->oprowner))
+		{
+			*fgc_flags |= FGC_UNTRUSTED_SKIP;
+			continue;
+		}
+
+		/*
+		 * Okay, it's in the search path, but does it have the same arguments
+		 * as something we already accepted?  If so, keep only the one that
+		 * appears earlier in the search path.
+		 *
+		 * If we have an ordered list from SearchSysCacheList (the normal
+		 * case), then any conflicting oper must immediately adjoin this one
+		 * in the list, so we only need to look at the newest result item.  If
+		 * we have an unordered list, we have to scan the whole result list.
+		 */
+		if (!OidIsValid(namespaceId) && resultList)
+		{
+			FuncCandidateList prevResult;
+
+			if (catlist->ordered)
 			{
-				FuncCandidateList prevResult;
-
-				if (catlist->ordered)
-				{
-					if (operform->oprleft == resultList->args[0] &&
-						operform->oprright == resultList->args[1])
-						prevResult = resultList;
-					else
-						prevResult = NULL;
-				}
+				if (operform->oprleft == resultList->args[0] &&
+					operform->oprright == resultList->args[1])
+					prevResult = resultList;
 				else
+					prevResult = NULL;
+			}
+			else
+			{
+				for (prevResult = resultList;
+					 prevResult;
+					 prevResult = prevResult->next)
 				{
-					for (prevResult = resultList;
-						 prevResult;
-						 prevResult = prevResult->next)
-					{
-						if (operform->oprleft == prevResult->args[0] &&
-							operform->oprright == prevResult->args[1])
-							break;
-					}
+					if (operform->oprleft == prevResult->args[0] &&
+						operform->oprright == prevResult->args[1])
+						break;
 				}
-				if (prevResult)
-				{
-					/* We have a match with a previous result */
-					Assert(pathpos != prevResult->pathpos);
-					if (pathpos > prevResult->pathpos)
-						continue;	/* keep previous result */
-					/* replace previous result */
-					prevResult->pathpos = pathpos;
-					prevResult->oid = operform->oid;
-					continue;	/* args are same, of course */
-				}
+			}
+			if (prevResult)
+			{
+				/* We have a match with a previous result */
+				Assert(pathpos != prevResult->pathpos);
+				if (pathpos > prevResult->pathpos)
+					continue;	/* keep previous result */
+				/* replace previous result */
+				prevResult->pathpos = pathpos;
+				prevResult->oid = operform->oid;
+				continue;		/* args are same, of course */
 			}
 		}
 
