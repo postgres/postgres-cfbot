@@ -348,6 +348,10 @@ visibilitymap_set(BlockNumber heapBlk,
  * the bit.  And for us to have a snapshot that includes the deleting
  * transaction (making the tuple invisible), we must have acquired
  * ProcArrayLock after that time, acting as a read barrier.
+ *
+ * A tuple can remain visible to our snapshot even if another transaction
+ * deleted it.  Serializable index-only scans must also detect conflicts
+ * with such writers; see heapam_index_getnext_slot().
  */
 uint8
 visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf)

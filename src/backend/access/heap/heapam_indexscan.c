@@ -19,8 +19,10 @@
 #include "access/relscan.h"
 #include "access/tableam_indexscan.h"
 #include "access/visibilitymap.h"
+#include "access/xact.h"
 #include "pgstat.h"
 #include "storage/predicate.h"
+#include "utils/injection_point.h"
 
 
 static bool heapam_index_plain_tuple_getnext_slot(IndexScanDesc scan,
@@ -365,6 +367,33 @@ heapam_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 										 ItemPointerGetBlockNumber(&scan->xs_heaptid),
 										 &hscan->xs_vmbuffer);
 
+			if (all_visible)
+			{
+				INJECTION_POINT("index-only-scan-before-predicate-lock", NULL);
+
+				/*
+				 * Index-only scan with all-visible item.
+				 *
+				 * If we don't access the heap, we'll need to take a predicate
+				 * lock explicitly, as if we had.  For now we do that at page
+				 * level.
+				 */
+				PredicateLockPage(scan->heapRelation,
+								  ItemPointerGetBlockNumber(&scan->xs_heaptid),
+								  scan->xs_snapshot);
+
+				/*
+				 * A writer may have cleared the VM bit before we acquired the
+				 * predicate lock.  If so, fetch the heap tuple below to check
+				 * visibility and SSI conflicts.  Writers that clear the bit
+				 * after this recheck must check our predicate lock themselves.
+				 */
+				if (IsolationIsSerializable())
+					all_visible = VM_ALL_VISIBLE(scan->heapRelation,
+												 ItemPointerGetBlockNumber(&scan->xs_heaptid),
+												 &hscan->xs_vmbuffer);
+			}
+
 			/* Page isn't all-visible, so verify visibility with a heap fetch */
 			if (unlikely(!all_visible))
 			{
@@ -376,19 +405,6 @@ heapam_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 
 					continue;	/* try next index entry */
 				}
-			}
-			else
-			{
-				/*
-				 * Index-only scan with all-visible item.
-				 *
-				 * We won't access the heap, so we'll need to take a predicate
-				 * lock explicitly, as if we had.  For now we do that at page
-				 * level.
-				 */
-				PredicateLockPage(scan->heapRelation,
-								  ItemPointerGetBlockNumber(&scan->xs_heaptid),
-								  scan->xs_snapshot);
 			}
 
 			/*
