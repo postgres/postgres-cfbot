@@ -185,13 +185,16 @@ static SyncStandbySlotsConfigData *synchronized_standby_slots_config;
 static XLogRecPtr ss_oldest_flush_lsn = InvalidXLogRecPtr;
 
 static void ReplicationSlotShmemExit(int code, Datum arg);
+static void ReplicationSlotReleaseInternal(bool update_inactive_since);
 static bool IsSlotForConflictCheck(const char *name);
 static void ReplicationSlotDropPtr(ReplicationSlot *slot);
 
 /* internal persistency functions */
 static void RestoreSlotFromDisk(const char *name);
 static void CreateSlotOnDisk(ReplicationSlot *slot);
-static void SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel);
+static void SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel,
+						   ReplicationSlotInvalidationCause invalidation_cause,
+						   bool clear_restart_lsn);
 
 /*
  * Register shared memory space needed for replication slots.
@@ -770,12 +773,22 @@ retry:
 void
 ReplicationSlotRelease(void)
 {
+	ReplicationSlotReleaseInternal(true);
+}
+
+/*
+ * Release the replication slot, optionally preserving inactive_since.
+ */
+static void
+ReplicationSlotReleaseInternal(bool update_inactive_since)
+{
 	ReplicationSlot *slot = MyReplicationSlot;
 	char	   *slotname = NULL;	/* keep compiler quiet */
 	bool		is_logical;
 	TimestampTz now = 0;
 
 	Assert(slot != NULL && slot->active_proc != INVALID_PROC_NUMBER);
+	Assert(update_inactive_since || slot->data.persistency == RS_PERSISTENT);
 
 	is_logical = SlotIsLogical(slot);
 
@@ -808,10 +821,12 @@ ReplicationSlotRelease(void)
 		}
 
 		/*
-		 * Set the time since the slot has become inactive. We get the current
-		 * time beforehand to avoid system call while holding the spinlock.
+		 * Set the time since the slot has become inactive, unless the caller
+		 * needs to preserve it. Get the current time beforehand to avoid a
+		 * system call while holding the spinlock.
 		 */
-		now = GetCurrentTimestamp();
+		if (update_inactive_since)
+			now = GetCurrentTimestamp();
 
 		if (slot->data.persistency == RS_PERSISTENT)
 		{
@@ -821,11 +836,12 @@ ReplicationSlotRelease(void)
 			 */
 			SpinLockAcquire(&slot->mutex);
 			slot->active_proc = INVALID_PROC_NUMBER;
-			ReplicationSlotSetInactiveSince(slot, now, false);
+			if (update_inactive_since)
+				ReplicationSlotSetInactiveSince(slot, now, false);
 			SpinLockRelease(&slot->mutex);
 			ConditionVariableBroadcast(&slot->active_cv);
 		}
-		else
+		else if (update_inactive_since)
 			ReplicationSlotSetInactiveSince(slot, now, true);
 
 		MyReplicationSlot = NULL;
@@ -1168,7 +1184,46 @@ ReplicationSlotSave(void)
 	Assert(MyReplicationSlot != NULL);
 
 	sprintf(path, "%s/%s", PG_REPLSLOT_DIR, NameStr(MyReplicationSlot->data.name));
-	SaveSlotToPath(MyReplicationSlot, path, ERROR);
+	SaveSlotToPath(MyReplicationSlot, path, ERROR, RS_INVAL_NONE, false);
+}
+
+/*
+ * Persist an invalidated image of the acquired slot before publishing the
+ * invalidation in shared memory.
+ *
+ * The caller must own the slot and hold its I/O lock. On success, the caller
+ * retains both. On ERROR, release slot ownership before the I/O lock and
+ * update inactive_since only if requested.
+ */
+void
+ReplicationSlotPersistInvalidation(ReplicationSlotInvalidationCause cause,
+								   bool clear_restart_lsn,
+								   bool update_inactive_since)
+{
+	char		path[MAXPGPATH];
+	ReplicationSlot *slot = MyReplicationSlot;
+
+	Assert(slot != NULL);
+	Assert(slot->data.persistency != RS_EPHEMERAL);
+	Assert(slot->data.invalidated == RS_INVAL_NONE);
+	Assert(cause != RS_INVAL_NONE);
+	Assert(!clear_restart_lsn || cause == RS_INVAL_WAL_REMOVED);
+	Assert(LWLockHeldByMeInMode(&slot->io_in_progress_lock, LW_EXCLUSIVE));
+
+	sprintf(path, "%s/%s", PG_REPLSLOT_DIR, NameStr(slot->data.name));
+
+	PG_TRY();
+	{
+		SaveSlotToPath(slot, path, ERROR, cause, clear_restart_lsn);
+	}
+	PG_CATCH();
+	{
+		HOLD_INTERRUPTS();		/* match the upcoming RESUME_INTERRUPTS */
+		ReplicationSlotReleaseInternal(update_inactive_since);
+		LWLockRelease(&slot->io_in_progress_lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -2005,6 +2060,49 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 			break;
 		}
 
+		/*
+		 * Serializing on the slot's I/O lock ensures that an internal
+		 * invalidator cannot be mistaken for a process using the slot. Avoid
+		 * waiting for the lock while holding ReplicationSlotControlLock.
+		 */
+		if (!LWLockConditionalAcquire(&s->io_in_progress_lock, LW_EXCLUSIVE))
+		{
+			/*
+			 * Avoid waiting for an unrelated slot save. The check after
+			 * acquiring the lock remains authoritative.
+			 */
+			if (possible_causes & RS_INVAL_IDLE_TIMEOUT)
+				now = GetCurrentTimestamp();
+
+			SpinLockAcquire(&s->mutex);
+
+			if (s->data.invalidated == RS_INVAL_NONE)
+				invalidation_cause = DetermineSlotInvalidationCause(possible_causes,
+																	s, oldestLSN,
+																	dboid,
+																	snapshotConflictHorizon,
+																	&inactive_since, now);
+
+			SpinLockRelease(&s->mutex);
+
+			if (invalidation_cause == RS_INVAL_NONE)
+			{
+				if (released_lock)
+					LWLockRelease(ReplicationSlotControlLock);
+
+				break;
+			}
+
+			LWLockRelease(ReplicationSlotControlLock);
+			released_lock = true;
+
+			if (LWLockAcquireOrWait(&s->io_in_progress_lock, LW_EXCLUSIVE))
+				LWLockRelease(&s->io_in_progress_lock);
+
+			LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
+			continue;
+		}
+
 		if (possible_causes & RS_INVAL_IDLE_TIMEOUT)
 		{
 			/*
@@ -2016,10 +2114,9 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 
 		/*
 		 * Check if the slot needs to be invalidated. If it needs to be
-		 * invalidated, and is not currently acquired, acquire it and mark it
-		 * as having been invalidated.  We do this with the spinlock held to
-		 * avoid race conditions -- for example the restart_lsn could move
-		 * forward, or the slot could be dropped.
+		 * invalidated and is not currently acquired, acquire it. We do this
+		 * with the spinlock held to avoid races where restart_lsn moves
+		 * forward or the slot is dropped.
 		 */
 		SpinLockAcquire(&s->mutex);
 
@@ -2038,6 +2135,7 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		if (invalidation_cause == RS_INVAL_NONE)
 		{
 			SpinLockRelease(&s->mutex);
+			LWLockRelease(&s->io_in_progress_lock);
 			if (released_lock)
 				LWLockRelease(ReplicationSlotControlLock);
 			break;
@@ -2047,9 +2145,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		active_proc = s->active_proc;
 
 		/*
-		 * If the slot can be acquired, do so and mark it invalidated
-		 * immediately.  Otherwise we'll signal the owning process, below, and
-		 * retry.
+		 * If the slot can be acquired, do so.  Otherwise we'll signal the
+		 * owning process, below, and retry.
 		 *
 		 * Note: Unlike other slot attributes, slot's inactive_since can't be
 		 * changed until the acquired slot is released or the owning process
@@ -2058,22 +2155,9 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		 */
 		if (active_proc == INVALID_PROC_NUMBER)
 		{
+			Assert(s->data.persistency == RS_PERSISTENT);
 			MyReplicationSlot = s;
 			s->active_proc = MyProcNumber;
-			s->data.invalidated = invalidation_cause;
-
-			/*
-			 * XXX: We should consider not overwriting restart_lsn and instead
-			 * just rely on .invalidated.
-			 */
-			if (invalidation_cause == RS_INVAL_WAL_REMOVED)
-			{
-				s->data.restart_lsn = InvalidXLogRecPtr;
-				s->last_saved_restart_lsn = InvalidXLogRecPtr;
-			}
-
-			/* Let caller know */
-			invalidated = true;
 		}
 		else
 		{
@@ -2099,11 +2183,11 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		{
 			/*
 			 * Prepare the sleep on the slot's condition variable before
-			 * releasing the lock, to close a possible race condition if the
-			 * slot is released before the sleep below.
+			 * releasing either lock.
 			 */
 			ConditionVariablePrepareToSleep(&s->active_cv);
 
+			LWLockRelease(&s->io_in_progress_lock);
 			LWLockRelease(ReplicationSlotControlLock);
 			released_lock = true;
 
@@ -2159,8 +2243,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		else
 		{
 			/*
-			 * We hold the slot now and have already invalidated it; flush it
-			 * to ensure that state persists.
+			 * We hold the slot now. Persist its invalidation before
+			 * publishing it in shared memory.
 			 *
 			 * Don't want to hold ReplicationSlotControlLock across file
 			 * system operations, so release it now but be sure to tell caller
@@ -2169,10 +2253,14 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 			LWLockRelease(ReplicationSlotControlLock);
 			released_lock = true;
 
-			/* Make sure the invalidated state persists across server restart */
-			ReplicationSlotMarkDirty();
-			ReplicationSlotSave();
+			ReplicationSlotPersistInvalidation(invalidation_cause,
+											   invalidation_cause == RS_INVAL_WAL_REMOVED,
+											   false);
+
+			/* Let caller know */
+			invalidated = true;
 			ReplicationSlotRelease();
+			LWLockRelease(&s->io_in_progress_lock);
 
 			ReportSlotInvalidation(invalidation_cause, false, active_pid,
 								   slotname, restart_lsn,
@@ -2380,7 +2468,7 @@ CheckPointReplicationSlots(bool is_shutdown)
 		if (s->last_saved_restart_lsn != s->data.restart_lsn)
 			last_saved_restart_lsn_updated = true;
 
-		SaveSlotToPath(s, path, LOG);
+		SaveSlotToPath(s, path, LOG, RS_INVAL_NONE, false);
 	}
 	LWLockRelease(ReplicationSlotAllocationLock);
 
@@ -2493,7 +2581,7 @@ CreateSlotOnDisk(ReplicationSlot *slot)
 
 	/* Write the actual state file. */
 	slot->dirty = true;			/* signal that we really need to write */
-	SaveSlotToPath(slot, tmppath, ERROR);
+	SaveSlotToPath(slot, tmppath, ERROR, RS_INVAL_NONE, false);
 
 	/* Rename the directory into place. */
 	if (rename(tmppath, path) != 0)
@@ -2517,15 +2605,23 @@ CreateSlotOnDisk(ReplicationSlot *slot)
 
 /*
  * Shared functionality between saving and creating a replication slot.
+ *
+ * When invalidation_cause is set, the caller has already acquired the slot's
+ * I/O lock and remains responsible for releasing it.
  */
 static void
-SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
+SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel,
+			   ReplicationSlotInvalidationCause invalidation_cause,
+			   bool clear_restart_lsn)
 {
 	char		tmppath[MAXPGPATH];
 	char		path[MAXPGPATH];
 	int			fd;
 	ReplicationSlotOnDisk cp;
 	bool		was_dirty;
+
+	Assert(!clear_restart_lsn || invalidation_cause == RS_INVAL_WAL_REMOVED);
+	Assert(invalidation_cause == RS_INVAL_NONE || elevel >= ERROR);
 
 	/* first check whether there's something to write out */
 	SpinLockAcquire(&slot->mutex);
@@ -2534,10 +2630,16 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	SpinLockRelease(&slot->mutex);
 
 	/* and don't do anything if there's nothing to write */
-	if (!was_dirty)
+	if (!was_dirty && invalidation_cause == RS_INVAL_NONE)
 		return;
 
-	LWLockAcquire(&slot->io_in_progress_lock, LW_EXCLUSIVE);
+	if (invalidation_cause != RS_INVAL_NONE)
+		Assert(LWLockHeldByMeInMode(&slot->io_in_progress_lock,
+									LW_EXCLUSIVE));
+	else
+		LWLockAcquire(&slot->io_in_progress_lock, LW_EXCLUSIVE);
+
+	INJECTION_POINT("replication-slot-save-error", NameStr(slot->data.name));
 
 	/* silence valgrind :( */
 	memset(&cp, 0, sizeof(ReplicationSlotOnDisk));
@@ -2549,14 +2651,14 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	if (fd < 0)
 	{
 		/*
-		 * If not an ERROR, then release the lock before returning.  In case
-		 * of an ERROR, the error recovery path automatically releases the
-		 * lock, but no harm in explicitly releasing even in that case.  Note
-		 * that LWLockRelease() could affect errno.
+		 * Keep a caller-owned lock until its error cleanup has rolled back
+		 * any associated shared-memory state. Note that LWLockRelease() could
+		 * affect errno.
 		 */
 		int			save_errno = errno;
 
-		LWLockRelease(&slot->io_in_progress_lock);
+		if (invalidation_cause == RS_INVAL_NONE)
+			LWLockRelease(&slot->io_in_progress_lock);
 		errno = save_errno;
 		ereport(elevel,
 				(errcode_for_file_access(),
@@ -2576,6 +2678,20 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 
 	SpinLockRelease(&slot->mutex);
 
+	if (invalidation_cause != RS_INVAL_NONE)
+	{
+		Assert(cp.slotdata.invalidated == RS_INVAL_NONE);
+
+		cp.slotdata.invalidated = invalidation_cause;
+
+		/*
+		 * XXX: We should consider not overwriting restart_lsn and instead
+		 * just rely on .invalidated.
+		 */
+		if (clear_restart_lsn)
+			cp.slotdata.restart_lsn = InvalidXLogRecPtr;
+	}
+
 	COMP_CRC32C(cp.checksum,
 				(char *) (&cp) + ReplicationSlotOnDiskNotChecksummedSize,
 				ReplicationSlotOnDiskChecksummedSize);
@@ -2590,7 +2706,8 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 		pgstat_report_wait_end();
 		CloseTransientFile(fd);
 		unlink(tmppath);
-		LWLockRelease(&slot->io_in_progress_lock);
+		if (invalidation_cause == RS_INVAL_NONE)
+			LWLockRelease(&slot->io_in_progress_lock);
 
 		/* if write didn't set errno, assume problem is no disk space */
 		errno = save_errno ? save_errno : ENOSPC;
@@ -2611,7 +2728,8 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 		pgstat_report_wait_end();
 		CloseTransientFile(fd);
 		unlink(tmppath);
-		LWLockRelease(&slot->io_in_progress_lock);
+		if (invalidation_cause == RS_INVAL_NONE)
+			LWLockRelease(&slot->io_in_progress_lock);
 
 		errno = save_errno;
 		ereport(elevel,
@@ -2627,7 +2745,8 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 		int			save_errno = errno;
 
 		unlink(tmppath);
-		LWLockRelease(&slot->io_in_progress_lock);
+		if (invalidation_cause == RS_INVAL_NONE)
+			LWLockRelease(&slot->io_in_progress_lock);
 
 		errno = save_errno;
 		ereport(elevel,
@@ -2643,7 +2762,8 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 		int			save_errno = errno;
 
 		unlink(tmppath);
-		LWLockRelease(&slot->io_in_progress_lock);
+		if (invalidation_cause == RS_INVAL_NONE)
+			LWLockRelease(&slot->io_in_progress_lock);
 
 		errno = save_errno;
 		ereport(elevel,
@@ -2669,13 +2789,22 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	 * already and remember the confirmed_flush LSN value.
 	 */
 	SpinLockAcquire(&slot->mutex);
+	if (invalidation_cause != RS_INVAL_NONE)
+	{
+		Assert(slot->data.invalidated == RS_INVAL_NONE);
+
+		slot->data.invalidated = invalidation_cause;
+		if (clear_restart_lsn)
+			slot->data.restart_lsn = InvalidXLogRecPtr;
+	}
 	if (!slot->just_dirtied)
 		slot->dirty = false;
 	slot->last_saved_confirmed_flush = cp.slotdata.confirmed_flush;
 	slot->last_saved_restart_lsn = cp.slotdata.restart_lsn;
 	SpinLockRelease(&slot->mutex);
 
-	LWLockRelease(&slot->io_in_progress_lock);
+	if (invalidation_cause == RS_INVAL_NONE)
+		LWLockRelease(&slot->io_in_progress_lock);
 }
 
 /*
