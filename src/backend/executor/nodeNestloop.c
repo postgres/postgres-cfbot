@@ -131,6 +131,9 @@ ExecNestLoop(PlanState *pstate)
 				prm->value = slot_getattr(outerTupleSlot,
 										  nlp->paramval->varattno,
 										  &(prm->isnull));
+				/* a detoasted copy may be kept beside the outer slot */
+				prm->detoast_slot = outerTupleSlot;
+				prm->detoast_attnum = nlp->paramval->varattno;
 				/* Flag parameter value as changed */
 				innerPlan->chgParam = bms_add_member(innerPlan->chgParam,
 													 paramno);

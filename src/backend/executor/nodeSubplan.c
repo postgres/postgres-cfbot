@@ -346,6 +346,7 @@ ExecScanSubPlan(SubPlanState *node,
 				Assert(prmdata->execPlan == NULL);
 				prmdata->value = heap_getattr(node->curTuple, col, tdesc,
 											  &(prmdata->isnull));
+				prmdata->detoast_slot = NULL;
 				col++;
 			}
 
@@ -390,6 +391,7 @@ ExecScanSubPlan(SubPlanState *node,
 			prmdata = &(econtext->ecxt_param_exec_vals[paramid]);
 			Assert(prmdata->execPlan == NULL);
 			prmdata->value = slot_getattr(slot, col, &(prmdata->isnull));
+			prmdata->detoast_slot = NULL;
 			col++;
 		}
 
@@ -459,6 +461,7 @@ ExecScanSubPlan(SubPlanState *node,
 				prmdata = &(econtext->ecxt_param_exec_vals[paramid]);
 				Assert(prmdata->execPlan == NULL);
 				prmdata->value = (Datum) 0;
+				prmdata->detoast_slot = NULL;
 				prmdata->isnull = true;
 			}
 		}
@@ -594,6 +597,7 @@ buildSubPlanHash(SubPlanState *node, ExprContext *econtext)
 			Assert(prmdata->execPlan == NULL);
 			prmdata->value = slot_getattr(slot, col,
 										  &(prmdata->isnull));
+			prmdata->detoast_slot = NULL;
 			col++;
 		}
 		slot = ExecProject(node->projRight);
@@ -1172,6 +1176,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 			prm->execPlan = NULL;
 			prm->value = BoolGetDatum(true);
 			prm->isnull = false;
+			prm->detoast_slot = NULL;
 			found = true;
 			break;
 		}
@@ -1222,6 +1227,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 			prm->execPlan = NULL;
 			prm->value = heap_getattr(node->curTuple, i, tdesc,
 									  &(prm->isnull));
+			prm->detoast_slot = NULL;
 			i++;
 		}
 	}
@@ -1245,6 +1251,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 		prm->execPlan = NULL;
 		prm->value = node->curArray;
 		prm->isnull = false;
+		prm->detoast_slot = NULL;
 	}
 	else if (!found)
 	{
@@ -1257,6 +1264,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 			prm->execPlan = NULL;
 			prm->value = BoolGetDatum(false);
 			prm->isnull = false;
+			prm->detoast_slot = NULL;
 		}
 		else
 		{
@@ -1269,6 +1277,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 				prm->execPlan = NULL;
 				prm->value = (Datum) 0;
 				prm->isnull = true;
+				prm->detoast_slot = NULL;
 			}
 		}
 	}

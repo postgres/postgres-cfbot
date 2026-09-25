@@ -568,6 +568,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_BOOLTEST_IS_FALSE,
 		&&CASE_EEOP_BOOLTEST_IS_NOT_FALSE,
 		&&CASE_EEOP_PARAM_EXEC,
+		&&CASE_EEOP_PARAM_EXEC_DETOAST,
 		&&CASE_EEOP_PARAM_EXTERN,
 		&&CASE_EEOP_PARAM_CALLBACK,
 		&&CASE_EEOP_PARAM_SET,
@@ -1393,6 +1394,12 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
+		EEO_CASE(EEOP_PARAM_EXEC_DETOAST)
+		{
+			ExecEvalParamExecDetoast(state, op, econtext);
+
+			EEO_NEXT();
+		}
 
 		EEO_CASE(EEOP_PARAM_EXEC)
 		{
@@ -3210,6 +3217,25 @@ ExecEvalParamSet(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 
 	prm->value = *op->resvalue;
 	prm->isnull = *op->resnull;
+
+	/* remember where a detoasted copy of a plain Var's value may be kept */
+	prm->detoast_slot = NULL;
+	if (op->d.param.srcattnum > 0)
+	{
+		switch (op->d.param.srcvarno)
+		{
+			case INNER_VAR:
+				prm->detoast_slot = econtext->ecxt_innertuple;
+				break;
+			case OUTER_VAR:
+				prm->detoast_slot = econtext->ecxt_outertuple;
+				break;
+			default:
+				prm->detoast_slot = econtext->ecxt_scantuple;
+				break;
+		}
+		prm->detoast_attnum = op->d.param.srcattnum;
+	}
 }
 
 /*
@@ -5883,6 +5909,35 @@ ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
 		resultslot->tts_detoast_src[resultnum] = resultslot->tts_values[resultnum];
 #endif
 	}
+}
+
+/*
+ * A PARAM_EXEC parameter in an argument position.  The parameter carries a
+ * reference to the slot and attribute its value was taken from, so the copy
+ * can be made there and shared with the other references of that outer row.
+ * The reference is followed only while that slot still holds the same datum.
+ */
+void
+ExecEvalParamExecDetoast(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext)
+{
+	ParamExecData *prm = &(econtext->ecxt_param_exec_vals[op->d.param.paramid]);
+	TupleTableSlot *slot;
+	int			attnum;
+	varlena    *attr;
+
+	ExecEvalParamExec(state, op, econtext);
+
+	slot = prm->detoast_slot;
+	if (prm->isnull || slot == NULL)
+		return;
+	attnum = prm->detoast_attnum - 1;
+	if (attnum < 0 || attnum >= slot->tts_nvalid ||
+		slot->tts_isnull[attnum] || slot->tts_values[attnum] != prm->value)
+		return;
+	attr = (varlena *) DatumGetPointer(prm->value);
+	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
+		*op->resvalue = slot_detoast_attr(slot, attnum, attr);
 }
 
 void
