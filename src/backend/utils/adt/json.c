@@ -100,22 +100,31 @@ static void add_json(Datum val, bool is_null, StringInfo result,
 static text *catenate_stringinfo_string(StringInfo buffer, const char *addon);
 
 /*
- * Input.
+ * Input.  Shared by json and json5: both store the input text verbatim and
+ * differ only in the syntax the lexer accepts.
  */
-Datum
-json_in(PG_FUNCTION_ARGS)
+static Datum
+json_in_common(FunctionCallInfo fcinfo, bool json5)
 {
 	char	   *json = PG_GETARG_CSTRING(0);
 	text	   *result = cstring_to_text(json);
 	JsonLexContext lex;
 
 	/* validate it */
-	makeJsonLexContext(&lex, result, false);
+	makeJsonLexContextCstringLen(&lex, VARDATA_ANY(result),
+								 VARSIZE_ANY_EXHDR(result),
+								 GetDatabaseEncoding(), false, json5);
 	if (!pg_parse_json_or_errsave(&lex, &nullSemAction, fcinfo->context))
 		PG_RETURN_NULL();
 
 	/* Internal representation is the same as text */
 	PG_RETURN_TEXT_P(result);
+}
+
+Datum
+json_in(PG_FUNCTION_ARGS)
+{
+	return json_in_common(fcinfo, false);
 }
 
 /*
@@ -145,10 +154,10 @@ json_send(PG_FUNCTION_ARGS)
 }
 
 /*
- * Binary receive.
+ * Binary receive.  Shared by json and json5, like the input function.
  */
-Datum
-json_recv(PG_FUNCTION_ARGS)
+static Datum
+json_recv_common(FunctionCallInfo fcinfo, bool json5)
 {
 	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
 	char	   *str;
@@ -159,10 +168,16 @@ json_recv(PG_FUNCTION_ARGS)
 
 	/* Validate it. */
 	makeJsonLexContextCstringLen(&lex, str, nbytes, GetDatabaseEncoding(),
-								 false);
+								 false, json5);
 	pg_parse_json_or_ereport(&lex, &nullSemAction);
 
 	PG_RETURN_TEXT_P(cstring_to_text_with_len(str, nbytes));
+}
+
+Datum
+json_recv(PG_FUNCTION_ARGS)
+{
+	return json_recv_common(fcinfo, false);
 }
 
 /*
@@ -1880,4 +1895,237 @@ json_typeof(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_TEXT_P(cstring_to_text(type));
+}
+
+/*
+ * json5 I/O functions
+ *
+ * json5 stores its text verbatim, same as json, but input is validated
+ * with the json5 lexer instead of the strict json one.  Output and binary
+ * send are shared with json at the catalog level (see pg_proc.dat).
+ */
+
+Datum
+json5_in(PG_FUNCTION_ARGS)
+{
+	return json_in_common(fcinfo, true);
+}
+
+Datum
+json5_recv(PG_FUNCTION_ARGS)
+{
+	return json_recv_common(fcinfo, true);
+}
+
+/*
+ * Does a json5 number token denote one of the non-finite values (Infinity
+ * or NaN, optionally signed) that neither json nor jsonb can represent?
+ */
+bool
+json5_nonfinite_number(const char *token)
+{
+	if (token[0] == '+' || token[0] == '-')
+		token++;
+	return strcmp(token, "Infinity") == 0 || strcmp(token, "NaN") == 0;
+}
+
+/*
+ * json5_to_json: convert json5 text to strict JSON
+ *
+ * Re-lexes the json5 text and re-emits standard JSON via the semantic
+ * callbacks below.  Infinity/NaN numbers have no strict JSON
+ * representation, so they're rejected here.
+ */
+
+typedef struct Json5ToJsonState
+{
+	StringInfo	result;
+	bool	   *has_previous;
+	int			depth;
+	int			capacity;
+} Json5ToJsonState;
+
+/* grow has_previous so it can hold at least s->depth + 1 entries */
+static void
+json5_to_json_push(Json5ToJsonState *s)
+{
+	if (s->depth >= s->capacity)
+	{
+		s->capacity *= 2;
+		s->has_previous = repalloc(s->has_previous,
+								   s->capacity * sizeof(bool));
+	}
+	s->has_previous[s->depth++] = false;
+}
+
+/* emit the separating comma if a sibling value precedes this one */
+static void
+json5_to_json_value_prefix(Json5ToJsonState *s)
+{
+	if (s->depth > 0 && s->has_previous[s->depth - 1])
+		appendStringInfoChar(s->result, ',');
+}
+
+static JsonParseErrorType
+json5_to_json_object_start(void *state)
+{
+	Json5ToJsonState *s = (Json5ToJsonState *) state;
+
+	json5_to_json_value_prefix(s);
+	appendStringInfoChar(s->result, '{');
+	json5_to_json_push(s);
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+json5_to_json_object_end(void *state)
+{
+	Json5ToJsonState *s = (Json5ToJsonState *) state;
+
+	s->depth--;
+	appendStringInfoChar(s->result, '}');
+	if (s->depth > 0)
+		s->has_previous[s->depth - 1] = true;
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+json5_to_json_array_start(void *state)
+{
+	Json5ToJsonState *s = (Json5ToJsonState *) state;
+
+	json5_to_json_value_prefix(s);
+	appendStringInfoChar(s->result, '[');
+	json5_to_json_push(s);
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+json5_to_json_array_end(void *state)
+{
+	Json5ToJsonState *s = (Json5ToJsonState *) state;
+
+	s->depth--;
+	appendStringInfoChar(s->result, ']');
+	if (s->depth > 0)
+		s->has_previous[s->depth - 1] = true;
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+json5_to_json_object_field_start(void *state, char *fname, bool isnull)
+{
+	Json5ToJsonState *s = (Json5ToJsonState *) state;
+
+	if (s->has_previous[s->depth - 1])
+		appendStringInfoChar(s->result, ',');
+	escape_json(s->result, fname);
+	appendStringInfoChar(s->result, ':');
+	/* comma already emitted here, the upcoming value must not add one */
+	s->has_previous[s->depth - 1] = false;
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+json5_to_json_scalar(void *state, char *token, JsonTokenType tokentype)
+{
+	Json5ToJsonState *s = (Json5ToJsonState *) state;
+
+	json5_to_json_value_prefix(s);
+
+	switch (tokentype)
+	{
+		case JSON_TOKEN_STRING:
+			escape_json(s->result, token);
+			break;
+		case JSON_TOKEN_NUMBER:
+			if (json5_nonfinite_number(token))
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("cannot convert JSON5 value \"%s\" to JSON",
+								token),
+						 errdetail("JSON does not support Infinity or NaN numeric values.")));
+			if (IsValidJsonNumber(token, strlen(token)))
+				appendStringInfoString(s->result, token);
+			else
+			{
+				/*
+				 * A json5-only number form (hex, leading/trailing decimal
+				 * point, explicit plus sign) has to be normalized through
+				 * numeric to become a valid JSON number.
+				 */
+				Datum		num = DirectFunctionCall3(numeric_in,
+													  CStringGetDatum(token),
+													  ObjectIdGetDatum(InvalidOid),
+													  Int32GetDatum(-1));
+
+				appendStringInfoString(s->result,
+									   DatumGetCString(DirectFunctionCall1(numeric_out, num)));
+			}
+			break;
+		case JSON_TOKEN_TRUE:
+			appendStringInfoString(s->result, "true");
+			break;
+		case JSON_TOKEN_FALSE:
+			appendStringInfoString(s->result, "false");
+			break;
+		case JSON_TOKEN_NULL:
+			appendStringInfoString(s->result, "null");
+			break;
+		default:
+			elog(ERROR, "unexpected json token type: %d", tokentype);
+			break;
+	}
+
+	if (s->depth > 0)
+		s->has_previous[s->depth - 1] = true;
+
+	return JSON_SUCCESS;
+}
+
+Datum
+json5_to_json(PG_FUNCTION_ARGS)
+{
+	text	   *json5 = PG_GETARG_TEXT_PP(0);
+	JsonLexContext lex;
+	JsonSemAction sem;
+	Json5ToJsonState state;
+	StringInfoData result;
+
+	/*
+	 * Fast path: json5 is a superset of json, so stored text that is
+	 * already valid strict JSON casts verbatim.  Besides skipping the
+	 * rebuild, this keeps \u0000 escapes intact, which the de-escaping
+	 * rebuild below cannot represent.
+	 */
+	makeJsonLexContextCstringLen(&lex, VARDATA_ANY(json5),
+								 VARSIZE_ANY_EXHDR(json5),
+								 GetDatabaseEncoding(), false, false);
+	if (pg_parse_json(&lex, &nullSemAction) == JSON_SUCCESS)
+		PG_RETURN_TEXT_P(json5);
+	freeJsonLexContext(&lex);
+
+	initStringInfo(&result);
+	memset(&state, 0, sizeof(state));
+	state.result = &result;
+	state.depth = 0;
+	state.capacity = 64;
+	state.has_previous = palloc(state.capacity * sizeof(bool));
+
+	memset(&sem, 0, sizeof(sem));
+	sem.semstate = &state;
+	sem.object_start = json5_to_json_object_start;
+	sem.object_end = json5_to_json_object_end;
+	sem.array_start = json5_to_json_array_start;
+	sem.array_end = json5_to_json_array_end;
+	sem.object_field_start = json5_to_json_object_field_start;
+	sem.scalar = json5_to_json_scalar;
+
+	makeJsonLexContextCstringLen(&lex, VARDATA_ANY(json5),
+								 VARSIZE_ANY_EXHDR(json5),
+								 GetDatabaseEncoding(), true, true);
+	pg_parse_json_or_ereport(&lex, &sem);
+	freeJsonLexContext(&lex);
+
+	PG_RETURN_TEXT_P(cstring_to_text_with_len(result.data, result.len));
 }

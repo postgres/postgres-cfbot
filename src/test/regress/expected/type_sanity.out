@@ -738,6 +738,7 @@ CREATE TABLE tab_core_types AS SELECT
   'now'::timestamptz,
   '12 seconds'::interval,
   '{"reason":"because"}'::json,
+  '{reason:"because"}'::json5,
   '{"when":"now"}'::jsonb,
   '$.a[*] ? (@ > 2)'::jsonpath,
   '127.0.0.1'::inet,
