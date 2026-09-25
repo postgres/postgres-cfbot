@@ -98,6 +98,7 @@ create_upper_paths_hook_type create_upper_paths_hook = NULL;
 #define EXPRKIND_TABLEFUNC			11
 #define EXPRKIND_TABLEFUNC_LATERAL	12
 #define EXPRKIND_GROUPEXPR			13
+#define EXPRKIND_ARBITER_WHERE		14
 
 /*
  * Data specific to grouping sets
@@ -1057,10 +1058,21 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 			preprocess_expression(root,
 								  (Node *) parse->onConflict->arbiterElems,
 								  EXPRKIND_ARBITER_ELEM);
+		/*
+		 * arbiterWhere is never evaluated as a runtime qual: it is only
+		 * used to match a partial index's predicate via
+		 * predicate_implied_by() in infer_arbiter_indexes().  Use
+		 * EXPRKIND_ARBITER_WHERE (not EXPRKIND_QUAL) so it still gets the
+		 * usual qual-shaped preprocessing (AND/OR flattening,
+		 * canonicalize_qual, implicit-AND format) but is not subject to the
+		 * qual-only constant folding in eval_const_expressions_qual(),
+		 * which could replace it with a bare Const and break the
+		 * structural predicate match.
+		 */
 		parse->onConflict->arbiterWhere =
 			preprocess_expression(root,
 								  parse->onConflict->arbiterWhere,
-								  EXPRKIND_QUAL);
+								  EXPRKIND_ARBITER_WHERE);
 		parse->onConflict->onConflictSet = (List *)
 			preprocess_expression(root,
 								  (Node *) parse->onConflict->onConflictSet,
@@ -1438,12 +1450,17 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * with AND directly under AND, nor OR directly under OR.
 	 */
 	if (kind != EXPRKIND_RTFUNC)
-		expr = eval_const_expressions(root, expr);
+	{
+		if (kind == EXPRKIND_QUAL)
+			expr = eval_const_expressions_qual(root, expr);
+		else
+			expr = eval_const_expressions(root, expr);
+	}
 
 	/*
 	 * If it's a qual or havingQual, canonicalize it.
 	 */
-	if (kind == EXPRKIND_QUAL)
+	if (kind == EXPRKIND_QUAL || kind == EXPRKIND_ARBITER_WHERE)
 	{
 		expr = (Node *) canonicalize_qual((Expr *) expr, false);
 
@@ -1458,7 +1475,8 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * hashfuncid of any that might execute more quickly by using hash lookups
 	 * instead of a linear search.
 	 */
-	if (kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET)
+	if (kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET ||
+		kind == EXPRKIND_ARBITER_WHERE)
 	{
 		convert_saop_to_hashed_saop(expr);
 	}
@@ -1474,7 +1492,9 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 
 	/* Expand SubLinks to SubPlans */
 	if (root->parse->hasSubLinks)
-		expr = SS_process_sublinks(root, expr, (kind == EXPRKIND_QUAL));
+		expr = SS_process_sublinks(root, expr,
+								  (kind == EXPRKIND_QUAL ||
+								   kind == EXPRKIND_ARBITER_WHERE));
 
 	/*
 	 * XXX do not insert anything here unless you have grokked the comments in
@@ -1491,7 +1511,7 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * would be unable to simplify a top-level AND correctly. Also,
 	 * SS_process_sublinks expects explicit-AND format.)
 	 */
-	if (kind == EXPRKIND_QUAL)
+	if (kind == EXPRKIND_QUAL || kind == EXPRKIND_ARBITER_WHERE)
 		expr = (Node *) make_ands_implicit((Expr *) expr);
 
 	return expr;
