@@ -84,6 +84,8 @@ pglz_decompress_datum(const varlena *value)
 	varlena    *result;
 	int32		rawsize;
 
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_PGLZ_COMPRESSION_ID);
+
 	/* allocate memory for the uncompressed data */
 	result = (varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
 
@@ -111,6 +113,8 @@ pglz_decompress_datum_slice(const varlena *value,
 {
 	varlena    *result;
 	int32		rawsize;
+
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_PGLZ_COMPRESSION_ID);
 
 	/* allocate memory for the uncompressed data */
 	result = (varlena *) palloc(slicelength + VARHDRSZ);
@@ -188,6 +192,8 @@ lz4_decompress_datum(const varlena *value)
 	int32		rawsize;
 	varlena    *result;
 
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_LZ4_COMPRESSION_ID);
+
 	/* allocate memory for the uncompressed data */
 	result = (varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
 
@@ -220,6 +226,8 @@ lz4_decompress_datum_slice(const varlena *value, int32 slicelength)
 #else
 	int32		rawsize;
 	varlena    *result;
+
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_LZ4_COMPRESSION_ID);
 
 	/* slice decompression not supported prior to 1.8.3 */
 	if (LZ4_versionNumber() < 10803)

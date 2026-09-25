@@ -43,7 +43,9 @@ do { \
  * Decoded contents of an on-disk external TOAST pointer.
  *
  * compress_method is only meaningful if the value is compressed, that is if
- * VARATT_EXTINFO_IS_COMPRESSED(extinfo, rawsize).
+ * VARATT_EXTINFO_IS_COMPRESSED(extinfo, rawsize).  Unlike the raw method bits
+ * of extinfo, it is the actual method ID whichever pointer form was used, or
+ * TOAST_INVALID_COMPRESSION_ID if the pointer is inconsistent.
  */
 typedef struct toast_external_data
 {
@@ -61,32 +63,65 @@ typedef struct toast_external_data
 static inline void
 toast_external_info_get(const struct varlena *attr, toast_external_data *toast_ext_data)
 {
+	const char *ptr = VARDATA_EXTERNAL(attr);
+	Size		fixedsize;
+
 	Assert(VARATT_IS_EXTERNAL_ONDISK(attr));
 
+	/*
+	 * The long form of a pointer is the plain form followed by the
+	 * compression method ID byte, so decoding the fixed part is the same for
+	 * both.  We can't use VARATT_EXTERNAL_GET_POINTER() here because it
+	 * insists on the datum being exactly the size of the struct.
+	 */
 	toast_ext_data->tag = VARTAG_EXTERNAL(attr);
-	if (toast_ext_data->tag == VARTAG_ONDISK_OID8)
+	if (VARTAG_IS_ONDISK_OID8(toast_ext_data->tag))
 	{
 		varatt_external_oid8 toast_pointer;
 
-		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
+		memcpy(&toast_pointer, ptr, sizeof(toast_pointer));
 		toast_ext_data->rawsize = toast_pointer.va_rawsize;
 		toast_ext_data->extinfo = toast_pointer.va_extinfo;
 		toast_ext_data->valueid = VARATT_EXTERNAL_OID8_GET_VALUEID(toast_pointer);
 		toast_ext_data->toastrelid = toast_pointer.va_toastrelid;
+		fixedsize = sizeof(toast_pointer);
 	}
 	else
 	{
 		varatt_external_oid toast_pointer;
 
-		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
+		memcpy(&toast_pointer, ptr, sizeof(toast_pointer));
 		toast_ext_data->rawsize = toast_pointer.va_rawsize;
 		toast_ext_data->extinfo = toast_pointer.va_extinfo;
 		toast_ext_data->valueid = toast_pointer.va_valueid;
 		toast_ext_data->toastrelid = toast_pointer.va_toastrelid;
+		fixedsize = sizeof(toast_pointer);
 	}
 
+	/*
+	 * Resolve the compression method: it is the two method bits of extinfo,
+	 * except in the long form of a pointer, where those bits only flag the
+	 * form and the method is in the trailing byte.
+	 *
+	 * A long-form pointer whose method bits say otherwise is corrupt.  This
+	 * is also used on data read from disk, notably by amcheck, so don't
+	 * assert on that: report an invalid method and let the caller deal with
+	 * it.
+	 */
 	toast_ext_data->compress_method = (ToastCompressionId)
 		(toast_ext_data->extinfo >> VARLENA_EXTSIZE_BITS);
+	if (VARTAG_IS_ONDISK_LONG(toast_ext_data->tag))
+	{
+		uint8		cmid;
+
+		if (toast_ext_data->compress_method == VARLENA_COMPRESS_METHOD_LONG)
+		{
+			memcpy(&cmid, ptr + fixedsize, sizeof(cmid));
+			toast_ext_data->compress_method = (ToastCompressionId) cmid;
+		}
+		else
+			toast_ext_data->compress_method = TOAST_INVALID_COMPRESSION_ID;
+	}
 }
 
 /* ----------

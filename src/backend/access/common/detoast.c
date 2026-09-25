@@ -436,11 +436,13 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 
 	/*
 	 * When fetching a prefix of a compressed external datum, account for the
-	 * space required by va_tcinfo, which is stored at the beginning as an
-	 * int32 value.
+	 * compressed header stored at its beginning: va_tcinfo, followed in the
+	 * long form by the compression method ID byte.
 	 */
 	if (is_compressed && slicelength > 0)
-		slicelength = slicelength + sizeof(int32);
+		slicelength += (VARTAG_IS_ONDISK_LONG(toast_ext_data.tag) ?
+						VARHDRSZ_COMPRESSED_LONG : VARHDRSZ_COMPRESSED) -
+			VARHDRSZ;
 
 	/*
 	 * Adjust length request if needed.  (Note: our sole caller,
