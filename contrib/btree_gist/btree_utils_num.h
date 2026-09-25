@@ -28,6 +28,18 @@ typedef struct
 	GBT_NUMKEY *t;
 } Nsrt;
 
+/*
+ * Query-value storage for the integer opclasses' cross-type path.  The caller
+ * owns one of these and passes its address to the per-type cross-type helper,
+ * which fills the right width and points the query pointer at it.
+ */
+typedef union
+{
+	int16		i2;
+	int32		i4;
+	int64		i8;
+} gbt_intkey;
+
 
 /* type description */
 
@@ -190,8 +202,33 @@ float_penalty_num_impl(double olower, double oupper,
 	 (ivp)->day * (24.0 * SECS_PER_HOUR) + \
 	 (ivp)->month * (30.0 * SECS_PER_DAY))
 
-/* This macro is not safe to use with actual float inputs, only integers */
-#define GET_FLOAT_DISTANCE(t, arg1, arg2)	fabs( ((float8) *((const t *) (arg1))) - ((float8) *((const t *) (arg2))) )
+/* These macros are not safe to use with actual float inputs, only integers */
+#define GET_FLOAT_DISTANCE2(t1, t2, arg1, arg2)	fabs( ((float8) *((const t1 *) (arg1))) - ((float8) *((const t2 *) (arg2))) )
+#define GET_FLOAT_DISTANCE(t, arg1, arg2)	GET_FLOAT_DISTANCE2(t, t, (arg1), (arg2))
+
+/*
+ * Generate the comparison/distance callbacks for a gbtree_ninfo whose query
+ * and key sides may be different (integer) types.  gbt_num_consistent() and
+ * gbt_num_distance() always invoke the callbacks as f_xx(query, key), so the
+ * first argument has the query type QT (the operator's right-hand subtype) and
+ * the second has the indexed key type KT.  Integer widening is value-preserving,
+ * so the comparisons need no explicit cast; the distance widens to float8 to
+ * avoid overflow in the subtraction.  Invoked with QT == KT this also generates
+ * the ordinary same-type callbacks.
+ */
+#define GBT_INT_CMP_FNS(prefix, QT, KT) \
+static bool prefix##gt(const void *a, const void *b, FmgrInfo *flinfo) \
+{ return *((const QT *) a) > *((const KT *) b); } \
+static bool prefix##ge(const void *a, const void *b, FmgrInfo *flinfo) \
+{ return *((const QT *) a) >= *((const KT *) b); } \
+static bool prefix##eq(const void *a, const void *b, FmgrInfo *flinfo) \
+{ return *((const QT *) a) == *((const KT *) b); } \
+static bool prefix##le(const void *a, const void *b, FmgrInfo *flinfo) \
+{ return *((const QT *) a) <= *((const KT *) b); } \
+static bool prefix##lt(const void *a, const void *b, FmgrInfo *flinfo) \
+{ return *((const QT *) a) < *((const KT *) b); } \
+static float8 prefix##dist(const void *a, const void *b, FmgrInfo *flinfo) \
+{ return GET_FLOAT_DISTANCE2(QT, KT, a, b); }
 
 
 extern Interval *abs_interval(Interval *a);
