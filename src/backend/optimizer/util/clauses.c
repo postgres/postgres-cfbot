@@ -6829,3 +6829,194 @@ make_SAOP_expr(Oid oper, Node *leftexpr, Oid coltype, Oid arraycollid,
 
 	return saopexpr;
 }
+
+/*****************************************************************************
+ *		Detoasting references to scan-slot Vars
+ *****************************************************************************/
+
+typedef struct
+{
+	Index		varno;			/* only Vars of this varno count; 0 = any */
+	Bitmapset  *seen;			/* attnos seen in a detoasting position */
+	Bitmapset  *multi;			/* attnos seen in two or more */
+	List	   *vars;			/* one Var per attno in seen */
+} pull_multi_detoast_context;
+
+static bool pull_multi_detoast_walker(Node *node,
+									  pull_multi_detoast_context *context);
+
+static Var *
+strip_relabel_var(Node *arg, Index varno)
+{
+	while (IsA(arg, RelabelType))
+		arg = (Node *) ((RelabelType *) arg)->arg;
+	if (IsA(arg, Var) && ((Var *) arg)->varattno > 0 &&
+		((Var *) arg)->varreturningtype == VAR_RETURNING_DEFAULT &&
+		(varno == 0 || ((Var *) arg)->varno == varno))
+		return (Var *) arg;
+	return NULL;
+}
+
+static void
+pull_multi_detoast_count(Node *arg, pull_multi_detoast_context *context)
+{
+	Var		   *var = strip_relabel_var(arg, context->varno);
+
+	if (var == NULL)
+	{
+		pull_multi_detoast_walker(arg, context);
+		return;
+	}
+	if (bms_is_member(var->varattno, context->seen))
+		context->multi = bms_add_member(context->multi, var->varattno);
+	else
+	{
+		context->seen = bms_add_member(context->seen, var->varattno);
+		context->vars = lappend(context->vars, var);
+	}
+}
+
+/*
+ * Treat each argument of a function-like node as a detoasting reference when
+ * it is a plain Var (possibly relabeled); recurse into anything else.
+ */
+static void
+pull_multi_detoast_args(List *args, bool detoasts,
+						pull_multi_detoast_context *context)
+{
+	ListCell   *lc;
+
+	foreach(lc, args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		if (detoasts)
+			pull_multi_detoast_count(arg, context);
+		else
+			pull_multi_detoast_walker(arg, context);
+	}
+}
+
+static bool
+pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
+{
+	if (node == NULL)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_Var:
+			/* a Var reached here is passed along whole, not detoasted */
+			return false;
+		case T_FuncExpr:
+			{
+				FuncExpr   *f = (FuncExpr *) node;
+
+				/*
+				 * Functions that inspect the stored form are compiled to
+				 * receive the stored datum (see ExecInitFunc), so like slice
+				 * readers they do not count as detoasting references.
+				 */
+				pull_multi_detoast_args(f->args,
+										!ExecFuncReadsStoredForm(f->funcid) &&
+										!ExecFuncReadsSliceOrSize(f->funcid),
+										context);
+				return false;
+			}
+		case T_OpExpr:
+		case T_DistinctExpr:
+			pull_multi_detoast_args(((OpExpr *) node)->args, true, context);
+			return false;
+		case T_ScalarArrayOpExpr:
+			pull_multi_detoast_args(((ScalarArrayOpExpr *) node)->args, true,
+									context);
+			return false;
+		case T_CoerceViaIO:
+			pull_multi_detoast_count((Node *) ((CoerceViaIO *) node)->arg,
+									 context);
+			return false;
+		case T_ArrayCoerceExpr:
+			pull_multi_detoast_count((Node *) ((ArrayCoerceExpr *) node)->arg,
+									 context);
+			pull_multi_detoast_walker((Node *) ((ArrayCoerceExpr *) node)->elemexpr,
+									  context);
+			return false;
+		case T_FieldSelect:
+			pull_multi_detoast_count((Node *) ((FieldSelect *) node)->arg,
+									 context);
+			return false;
+		case T_SubscriptingRef:
+			{
+				SubscriptingRef *sbsref = (SubscriptingRef *) node;
+
+				pull_multi_detoast_count((Node *) sbsref->refexpr, context);
+				pull_multi_detoast_walker((Node *) sbsref->refupperindexpr,
+										  context);
+				pull_multi_detoast_walker((Node *) sbsref->reflowerindexpr,
+										  context);
+				pull_multi_detoast_walker((Node *) sbsref->refassgnexpr,
+										  context);
+				return false;
+			}
+		case T_ArrayExpr:
+			pull_multi_detoast_args(((ArrayExpr *) node)->elements, true,
+									context);
+			return false;
+		case T_RowCompareExpr:
+			pull_multi_detoast_args(((RowCompareExpr *) node)->largs, true,
+									context);
+			pull_multi_detoast_args(((RowCompareExpr *) node)->rargs, true,
+									context);
+			return false;
+		default:
+
+			/*
+			 * Everything else (CASE, COALESCE, GREATEST/LEAST, NULLIF, ROW(),
+			 * boolean operators, NullTest, TargetEntry, ...) hands the datum
+			 * on without looking inside it, or returns it unchanged; only
+			 * what it feeds into can detoast.  The executor has the matching
+			 * list, the places ExecInitDetoastArg is used in execExpr.c, and
+			 * that one is what keeps a copy out of positions that return
+			 * their input; this one only decides where a copy is worth
+			 * making, so the two drifting apart costs a detoast rather than
+			 * correctness.
+			 */
+			return expression_tree_walker(node, pull_multi_detoast_walker,
+										  context);
+	}
+}
+
+/*
+ * pull_detoast_vars
+ *		Find the scan-slot Vars that a plan node's targetlist and qual would
+ *		detoast: one Var per attribute read in an argument position, with
+ *		*multi holding the attributes read in two or more.
+ *
+ * A reference counts when the Var is a direct argument of a function-like
+ * node that reads the whole value and does not return it: function and
+ * operator calls, casts through I/O functions, field and subscript access,
+ * array construction and row comparison.  Bare Vars, Vars under constructs
+ * that may return them unchanged (CASE, COALESCE, GREATEST/LEAST, NULLIF),
+ * and Vars passed to functions known to read only a slice or the size of
+ * their argument, or to a function that inspects the stored form, do not
+ * count.  Only Vars with the given varno count (0 means any, for scan nodes;
+ * OUTER_VAR or INNER_VAR for joins and aggregates).  The caller checks
+ * toastability.
+ */
+List *
+pull_detoast_vars(List *targetlist, List *qual, Index varno, Bitmapset **multi)
+{
+	pull_multi_detoast_context context;
+
+	context.varno = varno;
+	context.seen = NULL;
+	context.multi = NULL;
+	context.vars = NIL;
+
+	pull_multi_detoast_walker((Node *) targetlist, &context);
+	pull_multi_detoast_walker((Node *) qual, &context);
+
+	bms_free(context.seen);
+	*multi = context.multi;
+	return context.vars;
+}
