@@ -1067,6 +1067,12 @@ typedef struct BTScanOpaqueData
 	FmgrInfo   *orderProcs;		/* ORDER procs for required equality keys */
 	MemoryContext arrayContext; /* scan-lifespan context for array data */
 
+	/*
+	 * Running count of leaf pages read without finding a match, compared
+	 * against scan->xs_index_pages_limit to bound planner scans
+	 */
+	int			numNoMatchPages;	/* no-match leaf page count */
+
 	/* info about killed items if any (killedItems is NULL if never used) */
 	int		   *killedItems;	/* currPos.items indexes of killed items */
 	int			numKilled;		/* number of currently stored items */
