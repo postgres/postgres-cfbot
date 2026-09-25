@@ -116,6 +116,11 @@ typedef enum ExprEvalOp
 	EEOP_ASSIGN_OLD_VAR,
 	EEOP_ASSIGN_NEW_VAR,
 
+	/* same, carrying a detoasted copy of the column into the result slot */
+	EEOP_ASSIGN_INNER_VAR_DETOAST,
+	EEOP_ASSIGN_OUTER_VAR_DETOAST,
+	EEOP_ASSIGN_SCAN_VAR_DETOAST,
+
 	/* assign ExprState's resvalue/resnull to a column of its resultslot */
 	EEOP_ASSIGN_TMP,
 	/* ditto, applying MakeExpandedObjectReadOnly() */
@@ -918,6 +923,9 @@ extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
 extern void ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op,
 							   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
+									 ExprContext *econtext,
+									 TupleTableSlot *slot);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);
