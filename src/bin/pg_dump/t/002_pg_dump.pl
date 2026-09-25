@@ -3271,6 +3271,26 @@ my %tests = (
 		like => { %full_runs, section_post_data => 1, },
 	},
 
+	'CREATE PUBLICATION pub11' => {
+		create_order => 92,
+		create_sql => 'CREATE SEQUENCE test_except_seq;
+		   CREATE PUBLICATION pub11 FOR ALL SEQUENCES EXCEPT (SEQUENCE public.test_table_col1_seq, public.test_except_seq);',
+		regexp => qr/^
+			\QCREATE PUBLICATION pub11 FOR ALL SEQUENCES EXCEPT (SEQUENCE public.test_table_col1_seq, public.test_except_seq) WITH (publish = 'insert, update, delete, truncate');\E
+			/xm,
+		like => { %full_runs, section_post_data => 1, },
+	},
+
+	'CREATE PUBLICATION pub12' => {
+		create_order => 92,
+		create_sql =>
+		  'CREATE PUBLICATION pub12 FOR ALL TABLES EXCEPT (TABLE dump_test.test_table), ALL SEQUENCES EXCEPT (SEQUENCE public.test_table_col1_seq);',
+		regexp => qr/^
+			\QCREATE PUBLICATION pub12 FOR ALL TABLES EXCEPT (TABLE ONLY dump_test.test_table), ALL SEQUENCES EXCEPT (SEQUENCE public.test_table_col1_seq) WITH (publish = 'insert, update, delete, truncate');\E
+			/xm,
+		like => { %full_runs, section_post_data => 1, },
+	},
+
 	'CREATE SUBSCRIPTION sub1' => {
 		create_order => 50,
 		create_sql => 'CREATE SUBSCRIPTION sub1
@@ -4070,6 +4090,8 @@ my %tests = (
 	},
 
 	'CREATE SEQUENCE test_table_col1_seq' => {
+		create_order => 90,
+		create_sql => 'CREATE SEQUENCE test_table_col1_seq',
 		regexp => qr/^
 			\QCREATE SEQUENCE dump_test.test_table_col1_seq\E
 			\n\s+\QAS integer\E
