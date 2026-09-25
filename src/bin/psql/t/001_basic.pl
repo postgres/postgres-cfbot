@@ -368,14 +368,15 @@ psql_like(
 	'\copy from with DEFAULT');
 
 # Check \watch
-# Note: the interval value is parsed with locale-aware strtod()
 psql_like(
-	$node, sprintf('SELECT 1 \watch c=3 i=%g', 0.01),
+	$node,
+	sprintf('SELECT 1 \watch c=3 i=%s', $node->format_locale_number(0.01)),
 	qr/1\n1\n1/, '\watch with 3 iterations, interval of 0.01');
 
 # Sub-millisecond wait works, equivalent to 0.
 psql_like(
-	$node, sprintf('SELECT 1 \watch c=3 i=%g', 0.0001),
+	$node,
+	sprintf('SELECT 1 \watch c=3 i=%s', $node->format_locale_number(0.0001)),
 	qr/1\n1\n1/, '\watch with 3 iterations, interval of 0.0001');
 
 # Test zero interval
@@ -404,7 +405,8 @@ psql_like(
 		select now()-backend_start AS howlong
 		from pg_stat_activity
 		where pid = pg_backend_pid()
-	  ) select 123 from x where howlong < '2 seconds' \watch i=%g m=2}, 0.5),
+	  ) select 123 from x where howlong < '2 seconds' \watch i=%s m=2},
+		$node->format_locale_number(0.5)),
 	qr/^123$/,
 	'\watch, 2 minimum rows');
 
