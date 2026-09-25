@@ -18,10 +18,10 @@ typedef struct pthread_mutex_t
 } pthread_mutex_t;
 
 typedef DWORD pthread_key_t;
-typedef bool pthread_once_t;
+typedef LONG pthread_once_t;
 
 #define PTHREAD_MUTEX_INITIALIZER	{ 0 }
-#define PTHREAD_ONCE_INIT			false
+#define PTHREAD_ONCE_INIT			0
 
 int			pthread_mutex_init(pthread_mutex_t *, void *attr);
 int			pthread_mutex_lock(pthread_mutex_t *);
@@ -40,10 +40,7 @@ void		win32_pthread_once(volatile pthread_once_t *once, void (*fn) (void));
 	do { *(key) = TlsAlloc(); ((void)(destructor)); } while(0)
 
 #define pthread_once(once, fn) \
-	do { \
-		if (!*(once)) \
-			win32_pthread_once((once), (fn)); \
-	} while(0)
+	win32_pthread_once((once), (fn))
 #endif							/* WIN32 */
 
 #endif							/* _ECPG_PTHREAD_WIN32_H */
