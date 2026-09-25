@@ -85,6 +85,16 @@ typedef enum ExprEvalOp
 	EEOP_OLD_VAR,
 	EEOP_NEW_VAR,
 
+	/*
+	 * Same, but detoasting the value once per row and keeping the copy beside
+	 * the slot.  There are no OLD/NEW variants: the planner marks attributes
+	 * of a node's scan, outer and inner inputs only, so a Var of the old or
+	 * new tuple is never compiled to one of these.
+	 */
+	EEOP_INNER_VAR_DETOAST,
+	EEOP_OUTER_VAR_DETOAST,
+	EEOP_SCAN_VAR_DETOAST,
+
 	/* compute system Var value */
 	EEOP_INNER_SYSVAR,
 	EEOP_OUTER_SYSVAR,
@@ -906,6 +916,8 @@ extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op,
+							   ExprContext *econtext, TupleTableSlot *slot);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);
