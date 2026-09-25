@@ -954,3 +954,339 @@ SELECT id FROM bool_tab WHERE flag_null IS UNKNOWN;
 (1 row)
 
 DROP TABLE bool_tab;
+--
+-- Test that "x op ALL (array)" with a strict operator and a NULL array
+-- element is reduced to constant-FALSE where NULL and FALSE are equivalent
+--
+CREATE TABLE null_saop_tab (a int, b int, arr int[]);
+INSERT INTO null_saop_tab VALUES (1, 1, NULL), (42, 2, '{}'), (NULL, 3, NULL);
+ANALYZE null_saop_tab;
+-- Ensure NOT IN and <> ALL are reduced to constant-FALSE
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL);
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL);
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a <> ALL (ARRAY[42, b, NULL]);
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE a <> ALL (ARRAY[42, b, NULL]);
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+-- Ensure equivalent forms are reduced to constant-FALSE as well
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT (a IN (42, NULL));
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE NOT (a IN (42, NULL));
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT (a = ANY (ARRAY[42, NULL]));
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE NOT (a = ANY (ARRAY[42, NULL]));
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT NOT (a NOT IN (42, NULL));
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE NOT NOT (a NOT IN (42, NULL));
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) = true;
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) = true;
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+CREATE FUNCTION null_saop_func(int) RETURNS bool LANGUAGE sql IMMUTABLE
+AS $$ SELECT $1 NOT IN (42, NULL) $$;
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE null_saop_func(a);
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE null_saop_func(a);
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+DROP FUNCTION null_saop_func(int);
+-- Ensure it is reduced under AND and OR
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) AND b = 1;
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) AND b = 1;
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) OR b = 1;
+        QUERY PLAN         
+---------------------------
+ Seq Scan on null_saop_tab
+   Filter: (b = 1)
+(2 rows)
+
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) OR b = 1;
+ a | b | arr 
+---+---+-----
+ 1 | 1 | 
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab
+WHERE (b = 1 AND a NOT IN (42, NULL)) OR (b = 2 AND NOT (a IN (7, NULL)));
+            QUERY PLAN             
+-----------------------------------
+ Result
+   Replaces: Scan on null_saop_tab
+   One-Time Filter: false
+(3 rows)
+
+SELECT * FROM null_saop_tab
+WHERE (b = 1 AND a NOT IN (42, NULL)) OR (b = 2 AND NOT (a IN (7, NULL)));
+ a | b | arr 
+---+---+-----
+(0 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (b = 1 OR a NOT IN (42, NULL)) AND a > 0;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on null_saop_tab
+   Filter: ((a > 0) AND (b = 1))
+(2 rows)
+
+SELECT * FROM null_saop_tab WHERE (b = 1 OR a NOT IN (42, NULL)) AND a > 0;
+ a | b | arr 
+---+---+-----
+ 1 | 1 | 
+(1 row)
+
+-- Ensure it is reduced in a join clause
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab t1 LEFT JOIN null_saop_tab t2
+  ON t1.a = t2.a AND t2.b NOT IN (42, NULL);
+             QUERY PLAN             
+------------------------------------
+ Nested Loop Left Join
+   Join Filter: false
+   ->  Seq Scan on null_saop_tab t1
+   ->  Result
+         Replaces: Scan on t2
+         One-Time Filter: false
+(6 rows)
+
+SELECT * FROM null_saop_tab t1 LEFT JOIN null_saop_tab t2
+  ON t1.a = t2.a AND t2.b NOT IN (42, NULL)
+ORDER BY t1.b;
+ a  | b | arr | a | b | arr 
+----+---+-----+---+---+-----
+  1 | 1 |     |   |   | 
+ 42 | 2 | {}  |   |   | 
+    | 3 |     |   |   | 
+(3 rows)
+
+-- Ensure it is reduced in CASE WHEN conditions and FILTER clauses
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE 0 END FROM null_saop_tab;
+            QUERY PLAN            
+----------------------------------
+ Seq Scan on public.null_saop_tab
+   Output: b, 0
+(2 rows)
+
+SELECT b, CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE 0 END FROM null_saop_tab;
+ b | case 
+---+------
+ 1 |    0
+ 2 |    0
+ 3 |    0
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(*) FILTER (WHERE a NOT IN (42, NULL)) FROM null_saop_tab;
+               QUERY PLAN                
+-----------------------------------------
+ Aggregate
+   Output: count(*) FILTER (WHERE false)
+   ->  Seq Scan on public.null_saop_tab
+         Output: a, b, arr
+(4 rows)
+
+SELECT count(*) FILTER (WHERE a NOT IN (42, NULL)) FROM null_saop_tab;
+ count 
+-------
+     0
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, count(*) FILTER (WHERE a NOT IN (42, NULL)) OVER ()
+FROM null_saop_tab;
+                     QUERY PLAN                     
+----------------------------------------------------
+ WindowAgg
+   Output: b, count(*) FILTER (WHERE false) OVER w1
+   Window: w1 AS ()
+   ->  Seq Scan on public.null_saop_tab
+         Output: b
+(5 rows)
+
+SELECT b, count(*) FILTER (WHERE a NOT IN (42, NULL)) OVER ()
+FROM null_saop_tab;
+ b | count 
+---+-------
+ 1 |     0
+ 2 |     0
+ 3 |     0
+(3 rows)
+
+-- Ensure it is not reduced under NOT
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT (a NOT IN (42, NULL));
+                  QUERY PLAN                  
+----------------------------------------------
+ Seq Scan on null_saop_tab
+   Filter: (a = ANY ('{42,NULL}'::integer[]))
+(2 rows)
+
+SELECT * FROM null_saop_tab WHERE NOT (a NOT IN (42, NULL));
+ a  | b | arr 
+----+---+-----
+ 42 | 2 | {}
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) IS NOT TRUE ORDER BY b;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Sort
+   Sort Key: b
+   ->  Seq Scan on null_saop_tab
+         Filter: ((a <> ALL ('{42,NULL}'::integer[])) IS NOT TRUE)
+(4 rows)
+
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) IS NOT TRUE ORDER BY b;
+ a  | b | arr 
+----+---+-----
+  1 | 1 | 
+ 42 | 2 | {}
+    | 3 | 
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, CASE WHEN NOT (a NOT IN (42, NULL)) THEN 1 ELSE 0 END
+FROM null_saop_tab;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Seq Scan on public.null_saop_tab
+   Output: b, CASE WHEN (a = ANY ('{42,NULL}'::integer[])) THEN 1 ELSE 0 END
+(2 rows)
+
+SELECT b, CASE WHEN NOT (a NOT IN (42, NULL)) THEN 1 ELSE 0 END
+FROM null_saop_tab;
+ b | case 
+---+------
+ 1 |    0
+ 2 |    1
+ 3 |    0
+(3 rows)
+
+-- Ensure it is not reduced where NULL and FALSE are not equivalent
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, a NOT IN (42, NULL) FROM null_saop_tab;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Seq Scan on public.null_saop_tab
+   Output: b, (a <> ALL ('{42,NULL}'::integer[]))
+(2 rows)
+
+SELECT b, a NOT IN (42, NULL) FROM null_saop_tab;
+ b | ?column? 
+---+----------
+ 1 | 
+ 2 | f
+ 3 | 
+(3 rows)
+
+-- Ensure it is not reduced for a multidimensional ARRAY[]: NULL sub-arrays
+-- don't add NULL elements, and here the array is empty, so ALL is true
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE 1 <> ALL (ARRAY[NULL::int[], arr]) ORDER BY b;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sort
+   Sort Key: b
+   ->  Seq Scan on null_saop_tab
+         Filter: (1 <> ALL (ARRAY[NULL::integer[], arr]))
+(4 rows)
+
+SELECT * FROM null_saop_tab WHERE 1 <> ALL (ARRAY[NULL::int[], arr]) ORDER BY b;
+ a  | b | arr 
+----+---+-----
+  1 | 1 | 
+ 42 | 2 | {}
+    | 3 | 
+(3 rows)
+
+DROP TABLE null_saop_tab;

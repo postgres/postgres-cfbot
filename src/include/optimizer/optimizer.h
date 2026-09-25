@@ -145,6 +145,7 @@ extern bool contain_volatile_functions_after_planning(Expr *expr);
 extern bool contain_volatile_functions_not_nextval(Node *clause);
 
 extern Node *eval_const_expressions(PlannerInfo *root, Node *node);
+extern Node *eval_const_expressions_qual(PlannerInfo *root, Node *node);
 
 extern void convert_saop_to_hashed_saop(Node *node);
 
