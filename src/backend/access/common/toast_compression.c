@@ -89,6 +89,8 @@ pglz_decompress_datum(const varlena *value)
 	varlena    *result;
 	int32		rawsize;
 
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_PGLZ_COMPRESSION_ID);
+
 	/*
 	 * Allocate memory for the uncompressed data.  VARLENA_EXTSIZE_MASK
 	 * protects this against overflow.
@@ -119,6 +121,8 @@ pglz_decompress_datum_slice(const varlena *value,
 {
 	varlena    *result;
 	int32		rawsize;
+
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_PGLZ_COMPRESSION_ID);
 
 	/*
 	 * Allocate memory for the uncompressed data.  Caller must have checked
@@ -208,6 +212,8 @@ lz4_decompress_datum(const varlena *value)
 	int32		rawsize;
 	varlena    *result;
 
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_LZ4_COMPRESSION_ID);
+
 	/*
 	 * Allocate memory for the uncompressed data.  VARLENA_EXTSIZE_MASK
 	 * protects this against overflow.
@@ -244,6 +250,8 @@ lz4_decompress_datum_slice(const varlena *value, int32 slicelength)
 #else
 	int32		rawsize;
 	varlena    *result;
+
+	Assert(VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_LZ4_COMPRESSION_ID);
 
 	/* slice decompression not supported prior to 1.8.3 */
 	if (LZ4_versionNumber() < 10803)
@@ -296,9 +304,20 @@ toast_get_compression_id(varlena *attr)
 		toast_external_info_get(attr, &toast_ext_data);
 
 		cmid = toast_ext_data.compress_method;
+		if (toast_ext_data.is_compressed &&
+			cmid == TOAST_INVALID_COMPRESSION_ID)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("compressed data is corrupt")));
 	}
 	else if (VARATT_IS_COMPRESSED(attr))
-		cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
+	{
+		cmid = toast_inline_compression_id(attr);
+		if (cmid == TOAST_INVALID_COMPRESSION_ID)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("compressed data is corrupt")));
+	}
 
 	return cmid;
 }
