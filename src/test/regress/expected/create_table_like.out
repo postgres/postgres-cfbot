@@ -698,6 +698,102 @@ SELECT attname, attcompression FROM pg_attribute
  e       | 
 (5 rows)
 
+-- LIKE ... INCLUDING COMMENTS
+-- Test multiple LIKE clauses with table comments
+CREATE TABLE ctlt_comment1 (a int);
+COMMENT ON TABLE ctlt_comment1 IS 'comment1';
+CREATE FOREIGN TABLE ctlft_comment2 (b int) SERVER ctl_s0;
+COMMENT ON FOREIGN TABLE ctlft_comment2 IS 'comment2';
+CREATE VIEW ctlv_comment3 AS SELECT 42 AS c;
+COMMENT ON VIEW ctlv_comment3 IS 'comment3';
+CREATE TEMPORARY TABLE ctltt_comment4 (d int);
+COMMENT ON TABLE ctltt_comment4 IS 'comment4';
+-- Single LIKE clause should copy table comment when INCLUDING COMMENTS is specified.
+CREATE TABLE ctlt_single_comment (LIKE ctlt_comment1 INCLUDING COMMENTS);
+SELECT obj_description('ctlt_single_comment'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment1
+(1 row)
+
+-- Single LIKE clause should copy table comment when INCLUDING ALL is specified.
+CREATE TABLE ctlt_single_comment_all (LIKE ctlt_comment1 INCLUDING ALL);
+SELECT obj_description('ctlt_single_comment_all'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment1
+(1 row)
+
+-- Multiple LIKE clauses should concatenate table comments when INCLUDING COMMENTS is specified.
+-- INCLUDING ALL implies INCLUDING COMMENTS, and no comment is copied when neither is specified.
+-- The order of comments should be the same as the order of LIKE clauses
+CREATE TABLE ctlt_multi_comments (
+    LIKE ctlt_comment1 INCLUDING ALL,
+    LIKE ctlv_comment3 INCLUDING COMMENTS,
+    LIKE ctlft_comment2,
+    LIKE ctltt_comment4 INCLUDING COMMENTS
+);
+SELECT obj_description('ctlt_multi_comments'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment1     +
+ comment3     +
+ comment4
+(1 row)
+
+-- a comment-less source in the middle must not leave a stray separator
+CREATE TABLE ctlt_nocomment (e int);
+CREATE TABLE ctlt_gap_comments (
+    LIKE ctlt_comment1 INCLUDING COMMENTS,
+    LIKE ctlt_nocomment INCLUDING COMMENTS,
+    LIKE ctltt_comment4 INCLUDING COMMENTS
+);
+SELECT obj_description('ctlt_gap_comments'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment1     +
+ comment4
+(1 row)
+
+-- Test that INCLUDING COMMENTS works for target foreign tables
+CREATE FOREIGN TABLE ctlft_comment4 (LIKE ctlt_comment1 INCLUDING COMMENTS) SERVER ctl_s0;
+SELECT obj_description('ctlft_comment4'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment1
+(1 row)
+
+-- Test that INCLUDING COMMENTS works for target temporary tables
+CREATE TEMPORARY TABLE ctltt_comment5 (LIKE ctlt_comment1 INCLUDING COMMENTS);
+SELECT obj_description('ctltt_comment5'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment1
+(1 row)
+
+-- INCLUDING ALL EXCLUDING COMMENTS must not copy the comment
+CREATE TABLE ctlt_no_comment (LIKE ctlt_comment1 INCLUDING ALL EXCLUDING COMMENTS);
+SELECT obj_description('ctlt_no_comment'::regclass, 'pg_class') IS NULL AS no_comment;
+ no_comment 
+------------
+ t
+(1 row)
+
+-- A composite type's comment is stored on its pg_type entry, not on pg_class,
+-- but it should be copied just the same
+CREATE TYPE ctlty_comment6 AS (f int);
+COMMENT ON TYPE ctlty_comment6 IS 'comment6';
+CREATE TABLE ctlt_type_comment (LIKE ctlty_comment6 INCLUDING COMMENTS);
+SELECT obj_description('ctlt_type_comment'::regclass, 'pg_class') AS table_comment;
+ table_comment 
+---------------
+ comment6
+(1 row)
+
+DROP TABLE ctlt_comment1, ctlt_multi_comments, ctltt_comment4, ctltt_comment5, ctlt_single_comment, ctlt_nocomment, ctlt_gap_comments, ctlt_no_comment, ctlt_single_comment_all, ctlt_type_comment;
+DROP FOREIGN TABLE ctlft_comment2, ctlft_comment4;
+DROP VIEW ctlv_comment3;
+DROP TYPE ctlty_comment6;
 -- LIKE ... INCLUDING STATISTICS with dropped columns in the parent,
 -- so stxkeys attnums are not contiguous.
 CREATE TABLE ctl_stats3_parent (a int, b int, c int);
