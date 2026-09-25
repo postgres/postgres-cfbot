@@ -1065,6 +1065,16 @@
   boot_val => 'false',
 },
 
+{ name => 'expose_information', type => 'string', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',
+  short_desc => 'Expose limited information without needing to login',
+  long_desc => 'Valid values are combinations of "role", "sysid", and "version"',
+  flags => 'GUC_LIST_INPUT',
+  variable => 'expose_information_string',
+  boot_val => '""',
+  check_hook => 'check_expose_information',
+  assign_hook => 'assign_expose_information',
+},
+
 { name => 'extension_control_path', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
   short_desc => 'Sets the path for extension control files.',
   long_desc => 'The remaining extension script and secondary control files are then loaded from the same directory where the primary control file was found.',
