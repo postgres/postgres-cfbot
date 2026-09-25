@@ -1,0 +1,28 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1begin s1update s2lock s1abort s3update wake
+step s1begin: BEGIN;
+step s1update: UPDATE mxact_abort SET filler = 's1' WHERE id = 1;
+step s2lock: SELECT * FROM mxact_abort WHERE id = 1 FOR KEY SHARE;
+id|filler 
+--+-------
+ 1|initial
+(1 row)
+
+step s1abort: ROLLBACK; <waiting ...>
+s3: NOTICE:  session 3 update succeeded
+step s3update: 
+	DO $$
+	BEGIN
+		UPDATE mxact_abort SET filler = 's3' WHERE id = 1;
+		RAISE NOTICE 'session 3 update succeeded';
+	EXCEPTION WHEN OTHERS THEN
+		RAISE NOTICE 'session 3 update failed: %', split_part(SQLERRM, ':', 1);
+	END
+	$$;
+
+step wake: 
+	SELECT FROM injection_points_detach('transaction-abort-after-clog');
+	SELECT FROM injection_points_wakeup('transaction-abort-after-clog');
+
+step s1abort: <... completed>
