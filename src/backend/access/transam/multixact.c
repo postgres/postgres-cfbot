@@ -2966,6 +2966,15 @@ multixact_redo(XLogReaderState *record)
 		PerformMembersTruncation(xlrec.oldestOffset);
 		PerformOffsetsTruncation(xlrec.oldestMulti);
 
+		/*
+		 * Keep oldestOffset current during recovery too.  It is not
+		 * otherwise maintained until end of recovery, which would make
+		 * pg_get_multixact_stats() over-report members on a hot standby.
+		 */
+		LWLockAcquire(MultiXactGenLock, LW_EXCLUSIVE);
+		MultiXactState->oldestOffset = xlrec.oldestOffset;
+		LWLockRelease(MultiXactGenLock);
+
 		LWLockRelease(MultiXactTruncationLock);
 	}
 	else
