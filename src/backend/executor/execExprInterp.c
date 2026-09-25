@@ -535,6 +535,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_ASSIGN_SCAN_VAR,
 		&&CASE_EEOP_ASSIGN_OLD_VAR,
 		&&CASE_EEOP_ASSIGN_NEW_VAR,
+		&&CASE_EEOP_ASSIGN_INNER_VAR_DETOAST,
+		&&CASE_EEOP_ASSIGN_OUTER_VAR_DETOAST,
+		&&CASE_EEOP_ASSIGN_SCAN_VAR_DETOAST,
 		&&CASE_EEOP_ASSIGN_TMP,
 		&&CASE_EEOP_ASSIGN_TMP_MAKE_RO,
 		&&CASE_EEOP_CONST,
@@ -895,6 +898,26 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
+		EEO_CASE(EEOP_ASSIGN_INNER_VAR_DETOAST)
+		{
+			ExecEvalAssignVarDetoast(state, op, econtext, innerslot);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_OUTER_VAR_DETOAST)
+		{
+			ExecEvalAssignVarDetoast(state, op, econtext, outerslot);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_SCAN_VAR_DETOAST)
+		{
+			ExecEvalAssignVarDetoast(state, op, econtext, scanslot);
+
+			EEO_NEXT();
+		}
 
 		EEO_CASE(EEOP_ASSIGN_OLD_VAR)
 		{
@@ -5806,6 +5829,60 @@ ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 				   TupleTableSlot *slot)
 {
 	ExecEvalVarDetoastInline(op, slot);
+}
+
+/*
+ * Projection of a column the node detoasts once per row: the stored datum
+ * goes into the result slot as usual, and the copy alongside it, so a parent
+ * reading the column as an argument finds it rather than making its own.
+ *
+ * Both are borrowed, not owned: the result slot takes the source slot's
+ * pointers, and the detoasted copy stays in the source slot's detoast
+ * context, exactly as the stored datum stays in the source slot's tuple.
+ * The two therefore have the same lifetime, and any use of the result slot
+ * that is safe for the stored datum is safe for the copy.  Breaking that
+ * dependency is materialization, which drops the borrowed copies rather than
+ * copying them (see tts_virtual_materialize()), so a slot that outlives its
+ * source never holds a pointer into it.  ExecBuildProjectionInfo() emits
+ * this step only for a result slot whose implementation promises the resets
+ * that make keeping copies safe at all.
+ */
+void
+ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext, TupleTableSlot *slot)
+{
+	TupleTableSlot *resultslot = state->resultslot;
+	int			resultnum = op->d.assign_var.resultnum;
+	int			attnum = op->d.assign_var.attnum;
+
+	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
+	Assert(resultnum >= 0 && resultnum < resultslot->tts_tupleDescriptor->natts);
+	Assert(resultslot->tts_ops->resets_detoasted);
+	resultslot->tts_values[resultnum] = slot->tts_values[attnum];
+	resultslot->tts_isnull[resultnum] = slot->tts_isnull[attnum];
+
+	if (slot->tts_detoasted != NULL && slot->tts_detoasted[attnum] != (Datum) 0)
+	{
+		if (unlikely(resultslot->tts_detoast_cxt == NULL))
+			resultslot->tts_detoast_cxt =
+				GenerationContextCreate(resultslot->tts_mcxt,
+										"detoasted slot values",
+										ALLOCSET_DEFAULT_SIZES);
+		if (resultslot->tts_detoasted == NULL)
+			resultslot->tts_detoasted =
+				MemoryContextAllocZero(resultslot->tts_detoast_cxt,
+									   resultslot->tts_tupleDescriptor->natts *
+									   sizeof(Datum));
+		resultslot->tts_detoasted[resultnum] = slot->tts_detoasted[attnum];
+#ifdef USE_ASSERT_CHECKING
+		if (resultslot->tts_detoast_src == NULL)
+			resultslot->tts_detoast_src =
+				MemoryContextAllocZero(resultslot->tts_detoast_cxt,
+									   resultslot->tts_tupleDescriptor->natts *
+									   sizeof(Datum));
+		resultslot->tts_detoast_src[resultnum] = resultslot->tts_values[resultnum];
+#endif
+	}
 }
 
 void

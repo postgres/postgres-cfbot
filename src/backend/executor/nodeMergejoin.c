@@ -208,8 +208,8 @@ MJExamineQuals(List *mergeclauses,
 		/*
 		 * Prepare the input expressions for execution.
 		 */
-		clause->lexpr = ExecInitExpr((Expr *) linitial(qual->args), parent);
-		clause->rexpr = ExecInitExpr((Expr *) lsecond(qual->args), parent);
+		clause->lexpr = ExecInitExprArg((Expr *) linitial(qual->args), parent);
+		clause->rexpr = ExecInitExprArg((Expr *) lsecond(qual->args), parent);
 
 		/* Set up sort support data */
 		clause->ssup.ssup_cxt = CurrentMemoryContext;
