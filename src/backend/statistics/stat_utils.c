@@ -816,3 +816,58 @@ statatt_check_bounds_histogram(Datum arrayval)
 
 	return true;
 }
+
+/*
+ * max_mcv_numbers
+ *		For compatibility: for STATISTIC_KIND_MCV_VALUE_SORTED MCV stats,
+ * return the maximum numbers[] entry; return index [0] for STATISTIC_KIND_MCV.
+ *
+ * Return 0.0 for non-MCV statistics.
+ */
+float4
+max_mcv_numbers(AttStatsSlot *sslot, int statskind)
+{
+	int			i = 0;
+
+	if (statskind != STATISTIC_KIND_MCV &&
+		statskind != STATISTIC_KIND_MCV_VALUE_SORTED)
+		return 0.0;
+
+	if (statskind == STATISTIC_KIND_MCV_VALUE_SORTED)
+	{
+		for (int j = 1; j < sslot->nnumbers; j++)
+		{
+			if (sslot->numbers[j] > sslot->numbers[i])
+				i = j;
+		}
+	}
+
+	return sslot->numbers[i];
+}
+/*
+ * min_mcv_numbers
+ *		For compatibility: for STATISTIC_KIND_MCV_VALUE_SORTED MCV stats,
+ * return the minimum numbers[] entry; return index [sslot->nnumbers-1] for STATISTIC_KIND_MCV.
+ *
+ * Return 0.0 for non-MCV statistics.
+ */
+float4
+min_mcv_numbers(AttStatsSlot *sslot, int statskind)
+{
+	int			i = sslot->nnumbers - 1;
+
+	if (statskind != STATISTIC_KIND_MCV &&
+		statskind != STATISTIC_KIND_MCV_VALUE_SORTED)
+		return 0.0;
+
+	if (statskind == STATISTIC_KIND_MCV_VALUE_SORTED)
+	{
+		for (int j = 1; j < sslot->nnumbers; j++)
+		{
+			if (sslot->numbers[j] < sslot->numbers[i])
+				i = j;
+		}
+	}
+
+	return sslot->numbers[i];
+}

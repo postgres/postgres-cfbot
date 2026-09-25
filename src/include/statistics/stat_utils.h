@@ -15,6 +15,7 @@
 
 #include "access/attnum.h"
 #include "fmgr.h"
+#include "utils/lsyscache.h"
 
 /* avoid including primnodes.h here */
 typedef struct RangeVar RangeVar;
@@ -59,5 +60,8 @@ extern bool statatt_get_elem_type(Oid atttypid, char atttyptype,
 								  Oid *elemtypid, Oid *elem_eq_opr);
 
 extern bool statatt_check_bounds_histogram(Datum arrayval);
+
+extern float4 max_mcv_numbers(AttStatsSlot *sslot, int reqkind);
+extern float4 min_mcv_numbers(AttStatsSlot *sslot, int reqkind);
 
 #endif							/* STATS_UTILS_H */

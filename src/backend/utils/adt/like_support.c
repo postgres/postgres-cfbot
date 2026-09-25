@@ -730,7 +730,7 @@ patternsel_common(PlannerInfo *root,
 		 */
 		mcv_selec = mcv_selectivity(&vardata, &opproc, collation,
 									constval, true,
-									&sumcommon);
+									&sumcommon, opfuncid);
 
 		/*
 		 * Now merge the results from the MCV and histogram calculations,

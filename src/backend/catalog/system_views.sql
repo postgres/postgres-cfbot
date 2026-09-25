@@ -204,6 +204,11 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
             WHEN stakind3 = 1 THEN stavalues3
             WHEN stakind4 = 1 THEN stavalues4
             WHEN stakind5 = 1 THEN stavalues5
+            WHEN stakind1 = 8 THEN stavalues1
+            WHEN stakind2 = 8 THEN stavalues2
+            WHEN stakind3 = 8 THEN stavalues3
+            WHEN stakind4 = 8 THEN stavalues4
+            WHEN stakind5 = 8 THEN stavalues5
         END AS most_common_vals,
         CASE
             WHEN stakind1 = 1 THEN stanumbers1
@@ -211,6 +216,11 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
             WHEN stakind3 = 1 THEN stanumbers3
             WHEN stakind4 = 1 THEN stanumbers4
             WHEN stakind5 = 1 THEN stanumbers5
+            WHEN stakind1 = 8 THEN stanumbers1
+            WHEN stakind2 = 8 THEN stanumbers2
+            WHEN stakind3 = 8 THEN stanumbers3
+            WHEN stakind4 = 8 THEN stanumbers4
+            WHEN stakind5 = 8 THEN stanumbers5
         END AS most_common_freqs,
         CASE
             WHEN stakind1 = 2 THEN stavalues1
