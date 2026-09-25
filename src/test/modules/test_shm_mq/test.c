@@ -26,6 +26,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(test_shm_mq);
 PG_FUNCTION_INFO_V1(test_shm_mq_pipelined);
+PG_FUNCTION_INFO_V1(test_shm_mq_worker_stats);
 
 static void verify_message(Size origlen, char *origdata, Size newlen,
 						   char *newdata);
@@ -251,6 +252,56 @@ test_shm_mq_pipelined(PG_FUNCTION_ARGS)
 	dsm_detach(seg);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * Verify that a shmem-only worker can publish statistics through a routine
+ * nonblocking flush while it remains alive.
+ */
+Datum
+test_shm_mq_worker_stats(PG_FUNCTION_ARGS)
+{
+	const char *message = PG_TEST_SHM_MQ_STATS_MESSAGE;
+	PgStat_Counter before;
+	PgStat_Counter after;
+	dsm_segment *seg;
+	shm_mq_handle *outqh;
+	shm_mq_handle *inqh;
+	shm_mq_result res;
+	Size		len;
+	void	   *data;
+
+	pgstat_clear_snapshot();
+	before = pgstat_fetch_stat_wal()->wal_counters.wal_records;
+
+	test_shm_mq_setup(1024, 1, &seg, &outqh, &inqh);
+
+	res = shm_mq_send(outqh, strlen(message), message, false, true);
+
+	if (res != SHM_MQ_SUCCESS)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not send statistics test message")));
+
+	res = shm_mq_receive(inqh, &len, &data, false);
+
+	if (res != SHM_MQ_SUCCESS)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not receive statistics test message")));
+
+	verify_message(strlen(message), (char *) message, len, data);
+
+	/*
+	 * The worker is waiting for another message here. Check its live entry
+	 * before detaching the queues and triggering its shutdown flush.
+	 */
+	pgstat_clear_snapshot();
+	after = pgstat_fetch_stat_wal()->wal_counters.wal_records;
+
+	dsm_detach(seg);
+
+	PG_RETURN_BOOL(after >= before + PG_TEST_SHM_MQ_STATS_RECORDS);
 }
 
 /*
