@@ -94,6 +94,8 @@ extern PGDLLIMPORT ExecutorEnd_hook_type ExecutorEnd_hook;
 /* GUC parameter */
 extern PGDLLIMPORT bool detoast_reuse;
 
+extern ExprState *ExecInitExprArg(Expr *node, PlanState *parent);
+extern List *ExecInitExprArgList(List *nodes, PlanState *parent);
 extern bool ExecFuncReadsStoredForm(Oid funcid);
 extern bool ExecFuncReadsSliceOrSize(Oid funcid);
 

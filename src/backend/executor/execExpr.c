@@ -73,6 +73,8 @@ typedef struct ExprSetupInfo
 } ExprSetupInfo;
 
 static void ExecReadyExpr(ExprState *state);
+static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
+									   bool detoast_arg);
 static bool ExecPushDetoastArgStep(Expr *expr, ExprState *state,
 								   Datum *resv, bool *resnull);
 static inline void ExecInitDetoastArg(Expr *arg, ExprState *state,
@@ -150,6 +152,44 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
+	return ExecInitExprInternal(node, parent, false);
+}
+
+/*
+ * As ExecInitExpr, for an expression whose result the caller consumes without
+ * returning it, so that the whole expression is an argument position in the
+ * sense of ExecInitDetoastArg().  Merge clause sides and the arguments of a
+ * set-returning function call are compiled this way.
+ */
+ExprState *
+ExecInitExprArg(Expr *node, PlanState *parent)
+{
+	return ExecInitExprInternal(node, parent, true);
+}
+
+/*
+ * Call ExecInitExprArg() on a list of expressions, return a list of
+ * ExprStates.
+ */
+List *
+ExecInitExprArgList(List *nodes, PlanState *parent)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, nodes)
+	{
+		Expr	   *e = lfirst(lc);
+
+		result = lappend(result, ExecInitExprArg(e, parent));
+	}
+
+	return result;
+}
+
+static ExprState *
+ExecInitExprInternal(Expr *node, PlanState *parent, bool detoast_arg)
+{
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
 
@@ -167,7 +207,10 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	ExecCreateExprSetupSteps(state, (Node *) node);
 
 	/* Compile the expression proper */
-	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
+	if (detoast_arg)
+		ExecInitDetoastArg(node, state, &state->resvalue, &state->resnull);
+	else
+		ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
 
 	/* Finally, append a DONE step */
 	scratch.opcode = EEOP_DONE_RETURN;
@@ -385,6 +428,7 @@ ExecBuildProjectionInfo(List *targetList,
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
 	ListCell   *lc;
+	bool		carry_detoast;
 
 	projInfo->pi_exprContext = econtext;
 	/* We embed ExprState into ProjectionInfo instead of doing extra palloc */
@@ -395,6 +439,16 @@ ExecBuildProjectionInfo(List *targetList,
 	state->ext_params = NULL;
 
 	state->resultslot = slot;
+
+	/*
+	 * A column the node detoasts once per row can have its copy
+	 * carried into the result slot beside the stored datum.  The copy
+	 * is borrowed from the source slot rather than owned by the result
+	 * slot, so the result slot must be one that releases the copies
+	 * when it invalidates tts_values.  See ExecEvalAssignVarDetoast().
+	 */
+	carry_detoast = detoast_reuse && parent != NULL && parent->plan != NULL &&
+		slot->tts_ops->resets_detoasted;
 
 	/* Insert setup steps as needed */
 	ExecCreateExprSetupSteps(state, (Node *) targetList);
@@ -444,18 +498,31 @@ ExecBuildProjectionInfo(List *targetList,
 		if (isSafeVar)
 		{
 			/*
-			 * Fast-path: just generate an EEOP_ASSIGN_*_VAR step
+			 * Fast-path: just generate an EEOP_ASSIGN_*_VAR step.  A column
+			 * the node detoasts once per row gets the variant that carries
+			 * the copy into the result slot alongside the stored datum, so
+			 * that a parent reading the column as an argument finds it.
 			 */
 			switch (variable->varno)
 			{
 				case INNER_VAR:
 					/* get the tuple from the inner node */
-					scratch.opcode = EEOP_ASSIGN_INNER_VAR;
+					if (carry_detoast &&
+						bms_is_member(attnum,
+									  parent->plan->detoast_reuse_inner))
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR_DETOAST;
+					else
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR;
 					break;
 
 				case OUTER_VAR:
 					/* get the tuple from the outer node */
-					scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
+					if (carry_detoast &&
+						bms_is_member(attnum,
+									  parent->plan->detoast_reuse_outer))
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR_DETOAST;
+					else
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
 					break;
 
 					/* INDEX_VAR is handled by default case */
@@ -469,7 +536,12 @@ ExecBuildProjectionInfo(List *targetList,
 					switch (variable->varreturningtype)
 					{
 						case VAR_RETURNING_DEFAULT:
-							scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
+							if (carry_detoast &&
+								bms_is_member(attnum,
+											  parent->plan->detoast_reuse_scan))
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR_DETOAST;
+							else
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
 							break;
 						case VAR_RETURNING_OLD:
 							scratch.opcode = EEOP_ASSIGN_OLD_VAR;
