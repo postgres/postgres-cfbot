@@ -36,7 +36,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
 <phrase>and <replaceable class="parameter">publication_all_object</replaceable> is one of:</phrase>
 
     ALL TABLES [ EXCEPT ( <replaceable class="parameter">except_table_object</replaceable> [, ... ] ) ]
-    ALL SEQUENCES
+    ALL SEQUENCES [ EXCEPT ( <replaceable class="parameter">except_sequence_object</replaceable> [, ... ] ) ]
 
 <phrase>and <replaceable class="parameter">publication_drop_object</replaceable> is one of:</phrase>
 
@@ -54,6 +54,10 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
 <phrase>and <replaceable class="parameter">table_object</replaceable> is:</phrase>
 
    [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
+
+<phrase>and <replaceable class="parameter">except_sequence_object</replaceable> is:</phrase>
+
+    SEQUENCE <replaceable class="parameter">sequence_name</replaceable> [, ... ]
 </synopsis>
  </refsynopsisdiv>
 
@@ -73,27 +77,22 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
 
   <para>
    The third variant either modifies the included tables/schemas
-   or marks the publication as <literal>FOR ALL SEQUENCES</literal> or
-   <literal>FOR ALL TABLES</literal>, optionally using
-   <literal>EXCEPT</literal> to exclude specific tables. The
+   or marks the publication as <literal>FOR ALL TABLES</literal> or
+   <literal>FOR ALL SEQUENCES</literal>, optionally using
+   <literal>EXCEPT</literal> to exclude specific tables or sequences. The
    <literal>SET ALL TABLES</literal> clause can transform an empty publication,
    or one defined for <literal>ALL SEQUENCES</literal> (or both
    <literal>ALL TABLES</literal> and <literal>ALL SEQUENCES</literal>), into
-   a publication defined for ALL TABLES. Likewise,
+   a publication defined for <literal>ALL TABLES</literal>. Likewise,
    <literal>SET ALL SEQUENCES</literal> can convert an empty publication, or
    one defined for <literal>ALL TABLES</literal> (or both
    <literal>ALL TABLES</literal> and <literal>ALL SEQUENCES</literal>), into a
-   publication defined for <literal>ALL SEQUENCES</literal>. In addition,
-   <literal>SET ALL TABLES</literal> can be used to update the tables specified
-   in the <literal>EXCEPT</literal> clause of a
-   <literal>FOR ALL TABLES</literal> publication. If <literal>EXCEPT</literal>
-   is specified with a list of tables, the existing exclusion list is replaced
-   with the specified tables. If <literal>EXCEPT</literal> is omitted, the
-   existing exclusion list is cleared. The <literal>SET</literal> clause, when
-   used with a publication defined with <literal>FOR TABLE</literal> or
-   <literal>FOR TABLES IN SCHEMA</literal>, replaces the list of tables/schemas
-   in the publication with the specified list; the existing tables or schemas
-   that were present in the publication will be removed.
+   publication defined for <literal>ALL SEQUENCES</literal>.
+   The <literal>SET</literal> clause, when used with a publication defined with
+   <literal>FOR TABLE</literal> or
+   <literal>FOR TABLES IN SCHEMA</literal>, replaces the list of
+   tables/schemas in the publication with the specified list; the existing
+   tables or schemas that were present in the publication will be removed.
   </para>
 
   <para>
@@ -211,6 +210,33 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
     </listitem>
    </varlistentry>
 
+   <varlistentry id="sql-alterpublication-params-sequence-name">
+    <term><replaceable class="parameter">sequence_name</replaceable></term>
+    <listitem>
+     <para>
+      Name of an existing sequence.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-alterpublication-params-except">
+    <term><literal>EXCEPT</literal></term>
+    <listitem>
+     <para>
+      This clause specifies the tables to be excluded from an ALL TABLES
+      publication, or the sequences to be excluded from an ALL SEQUENCES
+      publication. The specified tables or sequences replaces any
+      existing exclusions. If <literal>EXCEPT</literal> is omitted, any existing
+      exclusions are cleared.
+     </para>
+
+     <para>
+      See <xref linkend="sql-createpublication-params-for-except"/> for
+      additional details on the semantics of <literal>EXCEPT</literal> clause.
+     </para>
+    </listitem>
+  </varlistentry>
+
    <varlistentry id="sql-alterpublication-params-set">
     <term><literal>SET ( <replaceable class="parameter">publication_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )</literal></term>
     <listitem>
@@ -286,10 +312,31 @@ ALTER PUBLICATION mypublication SET ALL TABLES EXCEPT (TABLE users, departments)
 </programlisting></para>
 
   <para>
-   Reset the publication to be a <literal>FOR ALL TABLES</literal> publication
-   with no excluded tables:
+   Reset the publication to be <literal>FOR ALL TABLES</literal> with no
+   exclusions:
 <programlisting>
 ALTER PUBLICATION mypublication SET ALL TABLES;
+</programlisting></para>
+
+  <para>
+   Reset the publication to be <literal>ALL SEQUENCES</literal> with no
+   exclusions:
+<programlisting>
+ALTER PUBLICATION mypublication SET ALL SEQUENCES;
+</programlisting></para>
+
+  <para>
+   Set the excluded sequences in the publication's <literal>EXCEPT</literal>
+   clause:
+<programlisting>
+ALTER PUBLICATION mypublication SET ALL SEQUENCES EXCEPT (SEQUENCE seq1, seq2);
+</programlisting></para>
+
+  <para>
+   Replace the table and sequence list in the publication's
+   <literal>EXCEPT</literal> clauses:
+<programlisting>
+ALTER PUBLICATION mypublication SET ALL TABLES EXCEPT (TABLE users, departments), ALL SEQUENCES EXCEPT (SEQUENCE seq1, seq2);
 </programlisting></para>
 
   <para>
