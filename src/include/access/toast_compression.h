@@ -13,6 +13,8 @@
 #ifndef TOAST_COMPRESSION_H
 #define TOAST_COMPRESSION_H
 
+#include "varatt.h"
+
 /*
  * GUC support.
  *
@@ -23,23 +25,90 @@
 extern PGDLLIMPORT int default_toast_compression;
 
 /*
- * Built-in compression method ID.  The toast compression header will store
- * this in the first 2 bits of the raw length.  These built-in compression
- * method IDs are directly mapped to the built-in compression methods.
+ * Built-in compression method ID.  These built-in compression method IDs are
+ * directly mapped to the built-in compression methods.
+ *
+ * A compressed varlena identifies its method in the two high-order bits of
+ * its tcinfo/extinfo word.  Only pglz and lz4 are stored there directly; all
+ * other methods use the long form of the header, flagged by
+ * VARLENA_COMPRESS_METHOD_LONG in those bits, which stores the ID in a byte
+ * of its own (see varatt.h) and so leaves room for IDs up to 255.
+ * toast_compression_id_needs_cmid_byte() tells which form a given ID uses.
+ *
+ * TOAST_INVALID_COMPRESSION_ID is not a real compression method and is never
+ * stored on disk; it only serves to report "this value is not compressed".
+ * It is deliberately equal to VARLENA_COMPRESS_METHOD_LONG, so that code
+ * that mistakenly interprets the raw two-bit field of a long-form value as a
+ * method ID ends up with an invalid ID rather than a real method.
  *
  * Don't use these values for anything other than understanding the meaning
  * of the raw bits from a varlena; in particular, if the goal is to identify
  * a compression method, use the constants TOAST_PGLZ_COMPRESSION, etc.
- * below. We might someday support more than 4 compression methods, but
- * we can never have more than 4 values in this enum, because there are
- * only 2 bits available in the places where this is stored.
+ * below.
  */
 typedef enum ToastCompressionId
 {
 	TOAST_PGLZ_COMPRESSION_ID = 0,
 	TOAST_LZ4_COMPRESSION_ID = 1,
-	TOAST_INVALID_COMPRESSION_ID = 2,
+	TOAST_INVALID_COMPRESSION_ID = 3,
 } ToastCompressionId;
+
+StaticAssertDecl(TOAST_INVALID_COMPRESSION_ID == VARLENA_COMPRESS_METHOD_LONG,
+				 "TOAST_INVALID_COMPRESSION_ID must match VARLENA_COMPRESS_METHOD_LONG");
+
+/* Largest compression method ID in use; IDs above it are not methods. */
+#define TOAST_LAST_COMPRESSION_ID	TOAST_LZ4_COMPRESSION_ID
+
+/*
+ * Does this compression method ID need a byte of its own?
+ *
+ * Only the two original methods fit in the two method bits of the header;
+ * every other method needs the long form of the compressed-in-line header
+ * and of the TOAST pointer, which carry the ID in a separate byte.  Not
+ * meaningful for TOAST_INVALID_COMPRESSION_ID.
+ */
+static inline bool
+toast_compression_id_needs_cmid_byte(ToastCompressionId cmid)
+{
+	Assert(cmid != TOAST_INVALID_COMPRESSION_ID);
+	return (cmid != TOAST_PGLZ_COMPRESSION_ID &&
+			cmid != TOAST_LZ4_COMPRESSION_ID);
+}
+
+/*
+ * Compression method ID of a compressed-in-line datum, or
+ * TOAST_INVALID_COMPRESSION_ID if its header is malformed: the datum is too
+ * short for the header form it claims, or the form does not match the method
+ * (pglz and lz4 use the plain form, every other method the long one).
+ *
+ * Use this rather than VARDATA_COMPRESSED_GET_COMPRESS_METHOD() on a datum
+ * that may come from disk.  A corrupt one could otherwise make us read past
+ * its end, or dispatch to a method that decodes it from the wrong offset.
+ */
+static inline ToastCompressionId
+toast_inline_compression_id(const void *PTR)
+{
+	uint32		method;
+
+	Assert(VARATT_IS_COMPRESSED(PTR));
+
+	if (VARSIZE(PTR) < VARHDRSZ_COMPRESSED)
+		return TOAST_INVALID_COMPRESSION_ID;
+	method = VARDATA_COMPRESSED_GET_RAW_METHOD(PTR);
+	if (method == VARLENA_COMPRESS_METHOD_LONG)
+	{
+		if (VARSIZE(PTR) < VARHDRSZ_COMPRESSED_LONG)
+			return TOAST_INVALID_COMPRESSION_ID;
+		method = ((const varattrib_4b_long *) PTR)->va_cmid;
+		if (method == TOAST_INVALID_COMPRESSION_ID ||
+			method > TOAST_LAST_COMPRESSION_ID ||
+			!toast_compression_id_needs_cmid_byte((ToastCompressionId) method))
+			return TOAST_INVALID_COMPRESSION_ID;
+	}
+	else if (toast_compression_id_needs_cmid_byte((ToastCompressionId) method))
+		return TOAST_INVALID_COMPRESSION_ID;
+	return (ToastCompressionId) method;
+}
 
 /*
  * Built-in compression methods.  pg_attribute will store these in the

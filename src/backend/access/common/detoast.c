@@ -436,11 +436,13 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 
 	/*
 	 * When fetching a prefix of a compressed external datum, account for the
-	 * space required by va_tcinfo, which is stored at the beginning as an
-	 * int32 value.
+	 * compressed header stored at its beginning: va_tcinfo, followed in the
+	 * long form by the compression method ID byte.
 	 */
 	if (is_compressed && slicelength > 0)
-		slicelength = slicelength + sizeof(int32);
+		slicelength += (VARTAG_IS_ONDISK_LONG(toast_ext_data.tag) ?
+						VARHDRSZ_COMPRESSED_LONG : VARHDRSZ_COMPRESSED) -
+			VARHDRSZ;
 
 	/*
 	 * Adjust length request if needed.  (Note: our sole caller,
@@ -490,7 +492,11 @@ toast_decompress_datum(varlena *attr)
 	 * Fetch the compression method id stored in the compression header and
 	 * decompress the data using the appropriate decompression routine.
 	 */
-	cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
+	cmid = toast_inline_compression_id(attr);
+	if (cmid == TOAST_INVALID_COMPRESSION_ID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed data is corrupt")));
 	switch (cmid)
 	{
 		case TOAST_PGLZ_COMPRESSION_ID:
@@ -519,6 +525,17 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 	Assert(VARATT_IS_COMPRESSED(attr));
 
 	/*
+	 * Fetch the compression method id stored in the compression header.  Do
+	 * it first, as it also checks the header is complete before we read the
+	 * decompressed size from it below.
+	 */
+	cmid = toast_inline_compression_id(attr);
+	if (cmid == TOAST_INVALID_COMPRESSION_ID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed data is corrupt")));
+
+	/*
 	 * Some callers may pass a slicelength that's more than the actual
 	 * decompressed size.  If so, just decompress normally.  This avoids
 	 * possibly allocating a larger-than-necessary result object, and may be
@@ -530,10 +547,8 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 		return toast_decompress_datum(attr);
 
 	/*
-	 * Fetch the compression method id stored in the compression header and
-	 * decompress the data slice using the appropriate decompression routine.
+	 * Decompress the data slice using the appropriate decompression routine.
 	 */
-	cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
 	switch (cmid)
 	{
 		case TOAST_PGLZ_COMPRESSION_ID:
@@ -584,6 +599,11 @@ toast_raw_datum_size(Datum value)
 	}
 	else if (VARATT_IS_COMPRESSED(attr))
 	{
+		/* the header must be complete for us to read the size from it */
+		if (VARSIZE(attr) < VARHDRSZ_COMPRESSED)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("compressed data is corrupt")));
 		/* here, va_rawsize is just the payload size */
 		result = VARDATA_COMPRESSED_GET_EXTSIZE(attr) + VARHDRSZ;
 	}
