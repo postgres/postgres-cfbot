@@ -811,6 +811,13 @@
   check_hook => 'check_default_with_oids',
 },
 
+{ name => 'detoast_reuse', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Allow an expression to detoast a column once and reuse the value.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'detoast_reuse',
+  boot_val => 'true',
+},
+
 { name => 'dynamic_library_path', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
   short_desc => 'Sets the path for dynamically loadable modules.',
   long_desc => 'If a dynamically loadable module needs to be opened and the specified name does not have a directory component (i.e., the name does not contain a slash), the system will search this path for the specified file.',
