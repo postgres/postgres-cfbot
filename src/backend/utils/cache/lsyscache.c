@@ -3651,6 +3651,28 @@ get_attstatsslot(AttStatsSlot *sslot, HeapTuple statstuple,
 }
 
 /*
+ * get_attstatsslot_mcv
+ *		For compatibility, callers not using compute_scalar_stats() to generate
+ * STATISTIC_KIND_MCV_VALUE_SORTED may still attempt to retrieve STATISTIC_KIND_MCV.
+ */
+int
+get_attstatsslot_mcv(AttStatsSlot *sslot, HeapTuple statstuple,
+					 Oid reqop, int flags)
+{
+	if (get_attstatsslot(sslot, statstuple,
+						 STATISTIC_KIND_MCV_VALUE_SORTED, reqop,
+						 flags))
+		return STATISTIC_KIND_MCV_VALUE_SORTED;
+
+	if (get_attstatsslot(sslot, statstuple,
+						 STATISTIC_KIND_MCV, reqop,
+						 flags))
+		return STATISTIC_KIND_MCV;
+
+	return 0;
+}
+
+/*
  * free_attstatsslot
  *		Free data allocated by get_attstatsslot
  */

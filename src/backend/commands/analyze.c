@@ -726,7 +726,6 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			ivinfo.index = Irel[ind];
 			ivinfo.heaprel = onerel;
 			ivinfo.analyze_only = true;
-			ivinfo.is_autovacuum = AmAutoVacuumWorkerProcess();
 			ivinfo.estimated_count = true;
 			ivinfo.message_level = elevel;
 			ivinfo.num_heap_tuples = onerel->rd_rel->reltuples;
@@ -2482,6 +2481,8 @@ compute_scalar_stats(VacAttrStatsP stats,
 	int			values_cnt = 0;
 	int		   *tupnoLink;
 	ScalarMCVItem *track;
+	ScalarMCVItem *track_sorted_values; /* tracks values sorted by
+										 * compare_scalars() */
 	int			track_cnt = 0;
 	int			num_mcv = stats->attstattarget;
 	int			num_bins = stats->attstattarget;
@@ -2490,6 +2491,7 @@ compute_scalar_stats(VacAttrStatsP stats,
 	values = palloc_array(ScalarItem, samplerows);
 	tupnoLink = palloc_array(int, samplerows);
 	track = palloc_array(ScalarMCVItem, num_mcv);
+	track_sorted_values = palloc0_array(ScalarMCVItem, num_mcv);
 
 	memset(&ssup, 0, sizeof(ssup));
 	ssup.ssup_cxt = CurrentMemoryContext;
@@ -2634,6 +2636,8 @@ compute_scalar_stats(VacAttrStatsP stats,
 						}
 						track[j].count = dups_cnt;
 						track[j].first = i + 1 - dups_cnt;
+						track_sorted_values[track_cnt - 1].count = track[j].count;
+						track_sorted_values[track_cnt - 1].first = track[j].first;
 					}
 				}
 				dups_cnt = 0;
@@ -2770,21 +2774,66 @@ compute_scalar_stats(VacAttrStatsP stats,
 			MemoryContext old_context;
 			Datum	   *mcv_values;
 			float4	   *mcv_freqs;
+			int 		index;
+			bool	   *in_mcv_list;
+
+			/*
+			 * Mark the entries in track_sorted_values[] that belong to the MCV list
+			 * determined by analyze_mcv_list().  The minimum MCV count is
+			 * track[num_mcv - 1].count.  First mark entries with counts greater than
+			 * this value, then mark entries with equal counts until num_mcv entries
+			 * have been marked.
+			 *
+			 * There may be more values with the minimum MCV count than the number of
+			 * remaining MCV entries.  We therefore select only enough of these equally
+			 * frequent values to reach num_mcv.  Since entries with the same count are
+			 * ordered by value in track[], this provides a deterministic tie-breaking
+			 * rule.
+			 */
+			in_mcv_list = palloc0_array(bool, track_cnt);
+			index = 0;			
+			for (int j = 0; j < track_cnt; j++)
+			{
+				if (track_cnt == num_mcv || 
+					track_sorted_values[j].count > track[num_mcv - 1].count)
+				{
+					in_mcv_list[j] = true;
+					index++;
+				}
+			}
+			for (int j = 0; index < num_mcv && j < track_cnt; j++)
+			{
+				if (track_sorted_values[j].count == track[num_mcv - 1].count)
+				{
+					in_mcv_list[j] = true;
+					index++;
+				}
+			}
+			Assert(index == num_mcv);
 
 			/* Must copy the target values into anl_context */
 			old_context = MemoryContextSwitchTo(stats->anl_context);
 			mcv_values = palloc_array(Datum, num_mcv);
 			mcv_freqs = palloc_array(float4, num_mcv);
-			for (i = 0; i < num_mcv; i++)
+
+			index = 0;
+			for (int j = 0; j < track_cnt; j++)
 			{
-				mcv_values[i] = datumCopy(values[track[i].first].value,
-										  stats->attrtype->typbyval,
-										  stats->attrtype->typlen);
-				mcv_freqs[i] = (double) track[i].count / (double) samplerows;
+				if (in_mcv_list[j])
+				{
+					mcv_values[index] = datumCopy(values[track_sorted_values[j].first].value,
+												  stats->attrtype->typbyval,
+												  stats->attrtype->typlen);
+					mcv_freqs[index] = (double) track_sorted_values[j].count /
+						(double) samplerows;
+					index++;
+				}
 			}
+			Assert(index == num_mcv);
+
 			MemoryContextSwitchTo(old_context);
 
-			stats->stakind[slot_idx] = STATISTIC_KIND_MCV;
+			stats->stakind[slot_idx] = STATISTIC_KIND_MCV_VALUE_SORTED;
 			stats->staop[slot_idx] = mystats->eqopr;
 			stats->stacoll[slot_idx] = stats->attrcollid;
 			stats->stanumbers[slot_idx] = mcv_freqs;
