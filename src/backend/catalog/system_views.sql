@@ -1282,6 +1282,17 @@ SELECT
        b.stats_reset
 FROM pg_stat_get_io() b;
 
+CREATE VIEW pg_stat_io_histogram AS
+SELECT
+       b.backend_type,
+       b.object,
+       b.context,
+       b.io_type,
+       b.bucket_latency_us,
+       b.bucket_count,
+       b.stats_reset
+FROM pg_stat_get_io_histogram() b;
+
 CREATE VIEW pg_stat_kind_info AS
     SELECT
         k.id,
