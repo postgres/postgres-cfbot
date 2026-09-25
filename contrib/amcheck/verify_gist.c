@@ -5,12 +5,12 @@
  *
  * Verification checks that all paths in GiST graph contain
  * consistent keys: tuples on parent pages consistently include tuples
- * from children pages. Also, verification checks graph invariants:
- * internal page must have at least one downlink, internal page can
- * reference either only leaf pages or only internal pages.
+ * from children pages. Also, verification checks that all leaf pages are
+ * at the same depth, so an internal page references either only leaf pages
+ * or only internal pages.
  *
  *
- * Copyright (c) 2017-2025, PostgreSQL Global Development Group
+ * Copyright (c) 2017-2026, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/amcheck/verify_gist.c
@@ -48,7 +48,8 @@ typedef struct GistScanItem
 
 	/*
 	 * LSN to handle concurrent scans of the page. It's necessary to avoid
-	 * missing some subtrees from the page that was split just before we read it.
+	 * missing some subtrees from the page that was split just before we read
+	 * it.
 	 */
 	XLogRecPtr	parentlsn;
 
@@ -60,7 +61,7 @@ typedef struct GistScanItem
 
 	/* Pointer to the next stack item. */
 	struct GistScanItem *next;
-}			GistScanItem;
+} GistScanItem;
 
 typedef struct GistCheckState
 {
@@ -83,14 +84,14 @@ typedef struct GistCheckState
 	BlockNumber deltablocks;
 
 	int			leafdepth;
-}			GistCheckState;
+} GistCheckState;
 
 PG_FUNCTION_INFO_V1(gist_index_check);
 
-static void giststate_init_heapallindexed(Relation rel, GistCheckState * result);
+static void giststate_init_heapallindexed(Relation rel, GistCheckState *result);
 static void gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
 											   void *callback_state, bool readonly);
-static void gist_check_page(GistCheckState * check_state, GistScanItem * stack,
+static void gist_check_page(GistCheckState *check_state, GistScanItem *stack,
 							Page page, bool heapallindexed,
 							BufferAccessStrategy strategy);
 static void check_index_page(Relation rel, Buffer buffer, BlockNumber blockNo);
@@ -102,8 +103,6 @@ static ItemId PageGetItemIdCareful(Relation rel, BlockNumber block,
 static void gist_tuple_present_callback(Relation index, ItemPointer tid,
 										Datum *values, bool *isnull,
 										bool tupleIsAlive, void *checkstate);
-static IndexTuple gistFormNormalizedTuple(GistCheckState *giststate,
-										  IndexTuple itup);
 
 /*
  * gist_index_check(index regclass)
@@ -128,11 +127,11 @@ gist_index_check(PG_FUNCTION_ARGS)
 }
 
 /*
- * Initialize GIST state files needed to perform.
- * This initialized bloom filter and snapshot.
+ * Set up the Bloom filter and the snapshot needed for the heapallindexed
+ * check.
  */
 static void
-giststate_init_heapallindexed(Relation rel, GistCheckState * result)
+giststate_init_heapallindexed(Relation rel, GistCheckState *result)
 {
 	int64		total_pages;
 	int64		total_elems;
@@ -177,7 +176,7 @@ giststate_init_heapallindexed(Relation rel, GistCheckState * result)
  *
  * This function verifies that tuples of internal pages cover all
  * the key space of each tuple on the leaf page. To do this we invoke
- * gist_check_internal_page() for every internal page.
+ * gist_check_page() for every page.
  *
  * This check allocates memory context and scans through
  * GiST graph. This scan is performed in a depth-first search using a stack of
@@ -185,9 +184,9 @@ giststate_init_heapallindexed(Relation rel, GistCheckState * result)
  * each iteration the top block number is replaced by referenced block numbers.
  *
  *
- * gist_check_internal_page() in its turn takes every tuple and tries to
- * adjust it by tuples on the referenced child page. Parent gist tuple should
- * never require any adjustments.
+ * gist_check_page() in its turn takes every tuple and tries to adjust the
+ * downlink we followed by it. Parent gist tuple should never require any
+ * adjustments.
  */
 static void
 gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
@@ -207,6 +206,8 @@ gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
 	oldcontext = MemoryContextSwitchTo(mctx);
 
 	state = initGISTstate(rel);
+	/* initGISTstate() leaves tempCxt pointing at scanCxt; we need our own */
+	state->tempCxt = createTempGistContext();
 
 	check_state->state = state;
 	check_state->rel = rel;
@@ -251,7 +252,7 @@ gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
 		if (check_state->scannedblocks > check_state->reportedblocks +
 			check_state->deltablocks)
 		{
-			elog(DEBUG1, "verified level %u blocks of approximately %u total",
+			elog(DEBUG1, "verified %u blocks of approximately %u total",
 				 check_state->scannedblocks, check_state->totalblocks);
 			check_state->reportedblocks = check_state->scannedblocks;
 		}
@@ -275,13 +276,30 @@ gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
 		if (GistFollowRight(page) || stack->parentlsn < GistPageGetNSN(page))
 		{
 			/* split page detected, install right link to the stack */
-			GistScanItem *ptr = (GistScanItem *) palloc(sizeof(GistScanItem));
+			GistScanItem *ptr;
+			BlockNumber rightlink = GistPageGetOpaque(page)->rightlink;
 
+			/*
+			 * The root page is never split in place.  InvalidBlockNumber is
+			 * P_NEW, and reading it would extend the index.
+			 */
+			if (stack->blkno == GIST_ROOT_BLKNO)
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("index \"%s\" has root page marked as split",
+								RelationGetRelationName(rel))));
+			if (!BlockNumberIsValid(rightlink))
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("index \"%s\" has page %u marked as split without right sibling",
+								RelationGetRelationName(rel), stack->blkno)));
+
+			ptr = (GistScanItem *) palloc(sizeof(GistScanItem));
 			ptr->depth = stack->depth;
 			ptr->parenttup = CopyIndexTuple(stack->parenttup);
 			ptr->parentblk = stack->parentblk;
 			ptr->parentlsn = stack->parentlsn;
-			ptr->blkno = GistPageGetOpaque(page)->rightlink;
+			ptr->blkno = rightlink;
 			ptr->next = stack->next;
 			stack->next = ptr;
 		}
@@ -298,12 +316,19 @@ gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
 				GistScanItem *ptr;
 				ItemId		iid = PageGetItemIdCareful(rel, stack->blkno, page, i);
 				IndexTuple	idxtuple = (IndexTuple) PageGetItem(page, iid);
+				BlockNumber childblkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
+
+				if (!BlockNumberIsValid(childblkno))
+					ereport(ERROR,
+							(errcode(ERRCODE_INDEX_CORRUPTED),
+							 errmsg("index \"%s\" has invalid downlink on page %u offset %u",
+									RelationGetRelationName(rel), stack->blkno, i)));
 
 				ptr = (GistScanItem *) palloc(sizeof(GistScanItem));
 				ptr->depth = stack->depth + 1;
 				ptr->parenttup = CopyIndexTuple(idxtuple);
 				ptr->parentblk = stack->blkno;
-				ptr->blkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
+				ptr->blkno = childblkno;
 				ptr->parentlsn = lsn;
 				ptr->next = stack->next;
 				stack->next = ptr;
@@ -366,10 +391,11 @@ gist_check_parent_keys_consistency(Relation rel, Relation heaprel,
 }
 
 static void
-gist_check_page(GistCheckState * check_state, GistScanItem * stack,
+gist_check_page(GistCheckState *check_state, GistScanItem *stack,
 				Page page, bool heapallindexed, BufferAccessStrategy strategy)
 {
 	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+	MemoryContext tempcxt = check_state->state->tempCxt;
 
 	/* Check that the tree has the same height in all branches */
 	if (GistPageIsLeaf(page))
@@ -391,7 +417,7 @@ gist_check_page(GistCheckState * check_state, GistScanItem * stack,
 	{
 		ItemId		iid = PageGetItemIdCareful(check_state->rel, stack->blkno, page, i);
 		IndexTuple	idxtuple = (IndexTuple) PageGetItem(page, iid);
-		IndexTuple  tmpTuple = NULL;
+		MemoryContext oldcxt;
 
 		/*
 		 * Check that it's not a leftover invalid tuple from pre-9.1 See also
@@ -413,62 +439,62 @@ gist_check_page(GistCheckState * check_state, GistScanItem * stack,
 							RelationGetRelationName(check_state->rel), stack->blkno, i)));
 
 		/*
+		 * gistgetadjusted() and the opclass support functions it calls
+		 * allocate memory.  Do that work in the per-tuple context, so memory
+		 * use does not grow with the size of the index.
+		 */
+		oldcxt = MemoryContextSwitchTo(tempcxt);
+
+		/*
 		 * Check if this tuple is consistent with the downlink in the parent.
 		 */
-		if (stack->parenttup)
-			tmpTuple = gistgetadjusted(check_state->rel, stack->parenttup, idxtuple, check_state->state);
-
-		if (tmpTuple)
+		if (stack->parenttup &&
+			gistgetadjusted(check_state->rel, stack->parenttup, idxtuple,
+							check_state->state) != NULL)
 		{
 			/*
 			 * There was a discrepancy between parent and child tuples. We
 			 * need to verify it is not a result of concurrent call of
-			 * gistplacetopage(). So, lock parent and try to find a downlink for
-			 * current page. It may be missing due to concurrent page split,
-			 * this is OK.
+			 * gistplacetopage(). So, lock parent and try to find a downlink
+			 * for current page. It may be missing due to concurrent page
+			 * split, this is OK.
 			 *
-			 * Note that when we acquire parent tuple now we hold lock for both
-			 * parent and child buffers. Thus the parent tuple must include the
-			 * keyspace of the child.
+			 * Note that when we acquire parent tuple now we hold lock for
+			 * both parent and child buffers. Thus the parent tuple must
+			 * include the keyspace of the child.
+			 *
+			 * The new parent tuple is used for the rest of the page, so it
+			 * must not live in the per-tuple context.
 			 */
-
-			pfree(tmpTuple);
+			MemoryContextSwitchTo(oldcxt);
 			pfree(stack->parenttup);
 			stack->parenttup = gist_refind_parent(check_state->rel, stack->parentblk,
 												  stack->blkno, strategy);
+			MemoryContextSwitchTo(tempcxt);
 
 			/* We found it - make a final check before failing */
 			if (!stack->parenttup)
-				elog(NOTICE, "Unable to find parent tuple for block %u on block %u due to concurrent split",
+				elog(DEBUG1, "unable to find parent tuple for block %u on block %u due to concurrent split",
 					 stack->blkno, stack->parentblk);
-			else if (gistgetadjusted(check_state->rel, stack->parenttup, idxtuple, check_state->state))
+			else if (gistgetadjusted(check_state->rel, stack->parenttup, idxtuple,
+									 check_state->state) != NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_INDEX_CORRUPTED),
 						 errmsg("index \"%s\" has inconsistent records on page %u offset %u",
 								RelationGetRelationName(check_state->rel), stack->blkno, i)));
-			else
-			{
-				/*
-				 * But now it is properly adjusted - nothing to do here.
-				 */
-			}
 		}
 
 		if (GistPageIsLeaf(page))
 		{
 			if (heapallindexed)
 			{
-				IndexTuple norm;
+				IndexTuple	norm;
 
-				norm = gistFormNormalizedTuple(check_state, idxtuple);
+				norm = amcheck_normalize_tuple(check_state->rel, idxtuple);
 
 				bloom_add_element(check_state->filter,
 								  (unsigned char *) norm,
 								  IndexTupleSize(norm));
-
-				/* Be tidy */
-				if (norm != idxtuple)
-					pfree(norm);
 			}
 		}
 		else
@@ -478,25 +504,13 @@ gist_check_page(GistCheckState * check_state, GistScanItem * stack,
 			if (off != TUPLE_IS_VALID)
 				ereport(ERROR,
 						(errcode(ERRCODE_INDEX_CORRUPTED),
-						 errmsg("index \"%s\" has on page %u offset %u has item id not pointing to 0xffff, but %hu",
+						 errmsg("index \"%s\" has item id not pointing to 0xffff on page %u offset %u, but %hu",
 								RelationGetRelationName(check_state->rel), stack->blkno, i, off)));
 		}
-	}
-}
 
-/*
- * gistFormNormalizedTuple - analogue to gistFormTuple, but performs deTOASTing
- * of all included data (for covering indexes). While we do not expect
- * toasted attributes in normal indexes, this can happen as a result of
- * intervention into system catalog. Detoasting of key attributes is expected
- * to be done by opclass decompression methods, if the indexed type might be
- * toasted.
- */
-static IndexTuple
-gistFormNormalizedTuple(GistCheckState *giststate,
-						IndexTuple itup)
-{
-	return amcheck_normalize_tuple(giststate->rel, itup);
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(tempcxt);
+	}
 }
 
 static void
@@ -504,15 +518,25 @@ gist_tuple_present_callback(Relation index, ItemPointer tid, Datum *values,
 							bool *isnull, bool tupleIsAlive, void *checkstate)
 {
 	GistCheckState *state = (GistCheckState *) checkstate;
-	IndexTuple itup, norm;
+	IndexTuple	itup,
+				norm;
 	Datum		compatt[INDEX_MAX_KEYS];
+	MemoryContext oldcxt;
+
+	/*
+	 * The opclass compress functions allocate memory for every heap tuple.
+	 * Work in the per-tuple context and reset it afterwards, like
+	 * gistBuildCallback() does, so memory use does not grow with the size of
+	 * the table.
+	 */
+	oldcxt = MemoryContextSwitchTo(state->state->tempCxt);
 
 	/* Generate a normalized index tuple for fingerprinting */
 	gistCompressValues(state->state, index, values, isnull, true, compatt);
 	itup = index_form_tuple(RelationGetDescr(index), compatt, isnull);
 	itup->t_tid = *tid;
 
-	norm = gistFormNormalizedTuple(state, itup);
+	norm = amcheck_normalize_tuple(state->rel, itup);
 
 	/* Probe Bloom filter -- tuple should be present */
 	if (bloom_lacks_element(state->filter, (unsigned char *) norm,
@@ -527,10 +551,8 @@ gist_tuple_present_callback(Relation index, ItemPointer tid, Datum *values,
 
 	state->heaptuplespresent++;
 
-	pfree(itup);
-	/* Be tidy */
-	if (norm != itup)
-		pfree(norm);
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextReset(state->state->tempCxt);
 }
 
 /*
@@ -584,7 +606,7 @@ gist_refind_parent(Relation rel,
 	Buffer		parentbuf;
 	Page		parentpage;
 	OffsetNumber parent_maxoff,
-						off;
+				off;
 	IndexTuple	result = NULL;
 
 	parentbuf = ReadBufferExtended(rel, MAIN_FORKNUM, parentblkno, RBM_NORMAL,
