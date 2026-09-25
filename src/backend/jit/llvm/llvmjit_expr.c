@@ -488,6 +488,26 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
+			case EEOP_INNER_VAR_DETOAST:
+			case EEOP_OUTER_VAR_DETOAST:
+			case EEOP_SCAN_VAR_DETOAST:
+				{
+					LLVMValueRef v_slot;
+
+					if (opcode == EEOP_INNER_VAR_DETOAST)
+						v_slot = v_innerslot;
+					else if (opcode == EEOP_OUTER_VAR_DETOAST)
+						v_slot = v_outerslot;
+					else
+						v_slot = v_scanslot;
+
+					build_EvalXFunc(b, mod, "ExecEvalVarDetoast",
+									v_state, op, v_econtext, v_slot);
+
+					LLVMBuildBr(b, opblocks[opno + 1]);
+					break;
+				}
+
 			case EEOP_INNER_SYSVAR:
 			case EEOP_OUTER_SYSVAR:
 			case EEOP_SCAN_SYSVAR:

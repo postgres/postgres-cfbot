@@ -139,6 +139,20 @@ typedef struct TupleTableSlot
 											 * TTS_FLAG_OBEYS_NOT_NULL_CONSTRAINTS */
 
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
+	MemoryContext tts_detoast_cxt;	/* holds tts_detoasted and the copies it
+									 * points to; created on demand, reset
+									 * whenever tts_values is invalidated */
+	Datum	   *tts_detoasted;	/* per attribute, a detoasted copy of the
+								 * tts_values entry, or 0; NULL until the
+								 * first copy of the current tuple is made.
+								 * tts_values itself always keeps the stored
+								 * datum. */
+#ifdef USE_ASSERT_CHECKING
+	Datum	   *tts_detoast_src;	/* the tts_values entry each copy was made
+									 * from, so that a copy outliving its
+									 * tuple can be caught; see
+									 * slot_detoast_attr() */
+#endif
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
 } TupleTableSlot;
@@ -239,6 +253,20 @@ struct TupleTableSlotOps
 	 * with the minimal tuple without the need for an additional allocation.
 	 */
 	MinimalTuple (*copy_minimal_tuple) (TupleTableSlot *slot, Size extra);
+
+	/*
+	 * Does this implementation call ExecSlotResetDetoast() wherever it
+	 * invalidates tts_values by other means than clear(), that is in every
+	 * function that stores a new tuple, copies another slot in, or
+	 * materializes the contents?  Only then may the executor keep detoasted
+	 * copies of this slot's values beside it (tts_detoasted); otherwise a
+	 * copy made for one tuple could be handed out for the next.
+	 *
+	 * Leaving this false, as an implementation that does not know about the
+	 * field does, only costs the optimization.  See the in-tree
+	 * implementations for what setting it entails.
+	 */
+	bool		resets_detoasted;
 };
 
 /*
@@ -355,6 +383,7 @@ extern TupleTableSlot *ExecStoreMinimalTuple(MinimalTuple mtup,
 extern void ExecForceStoreMinimalTuple(MinimalTuple mtup, TupleTableSlot *slot,
 									   bool shouldFree);
 extern TupleTableSlot *ExecStoreVirtualTuple(TupleTableSlot *slot);
+extern void ExecResetSlotDetoastContext(TupleTableSlot *slot);
 extern TupleTableSlot *ExecStoreAllNullTuple(TupleTableSlot *slot);
 extern void ExecStoreHeapTupleDatum(Datum data, TupleTableSlot *slot);
 extern HeapTuple ExecFetchSlotHeapTuple(TupleTableSlot *slot, bool materialize, bool *shouldFree);
@@ -470,11 +499,25 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
 }
 
 /*
+ * Release the detoasted copies made by EEOP_*_VAR_DETOAST steps or carried in
+ * by EEOP_ASSIGN_*_VAR_DETOAST.  A slot implementation calls this whenever the
+ * slot's tts_values are about to be invalidated, before any pointer into that
+ * memory could be looked at again; see resets_detoasted above.
+ */
+static inline void
+ExecSlotResetDetoast(TupleTableSlot *slot)
+{
+	if (unlikely(slot->tts_detoast_cxt != NULL))
+		ExecResetSlotDetoastContext(slot);
+}
+
+/*
  * ExecClearTuple - clear the slot's contents
  */
 static inline TupleTableSlot *
 ExecClearTuple(TupleTableSlot *slot)
 {
+	ExecSlotResetDetoast(slot);
 	slot->tts_ops->clear(slot);
 
 	return slot;

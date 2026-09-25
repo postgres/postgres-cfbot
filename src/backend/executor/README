@@ -267,6 +267,50 @@ executed for that row.  Statement triggers are fired always, regardless of
 whether any rows match the corresponding clauses.
 
 
+Detoasting a Column Once Per Row
+--------------------------------
+
+A TOASTed value is normally fetched and decompressed by every function that
+receives it, so a query mentioning the same large column in several
+expressions of one plan node pays for it several times.  The executor can
+instead detoast such a column once per row and hand the same plain value to
+every reference in that node.
+
+The value is kept beside the slot, in TupleTableSlot.tts_detoasted, for as
+long as the slot holds the tuple.  tts_values is never modified: it keeps the
+stored datum, out of line or compressed as it was.  That is the invariant the
+whole mechanism rests on, and it is what makes the rest of the executor need
+no changes.  Every other consumer reads tts_values and is therefore
+unaffected, whether it copies a slot, stores it in a tuple, a tuplestore, a
+hash table or a batch file, projects the column onward, or inspects its stored
+form.
+
+Only argument positions read the copy.  An argument position is a place where
+a construct consumes a value and does not return it: the arguments of a
+function or operator call, the two sides of a scalar array operation, the
+input of an I/O or array coercion, a field or subscript extraction, the
+elements of an array construction, the sides of a row comparison and the
+argument of a hash function built for a hash join or hashed grouping.  A Var
+anywhere else, in particular a bare targetlist entry or an input of CASE,
+COALESCE, GREATEST, LEAST or NULLIF, all of which can return their input
+unchanged, compiles as it always did and yields the stored datum.  This is
+why a detoasted copy can never become the result of an expression and never
+reaches code that must see the stored form.
+
+Two lists implement that rule: the argument positions themselves, which are
+the calls to ExecInitDetoastArg() in execExpr.c, and the functions whose
+result depends on the stored representation and which must therefore receive
+it, ExecFuncReadsStoredForm() in the same file.
+
+Lifetime.  A copy belongs to the tuple the slot holds.  A slot implementation
+promises, through TupleTableSlotOps.resets_detoasted, to release the copies
+whenever it invalidates tts_values, in its store, clear and materialize paths;
+an implementation that leaves the field false keeps no copies at all and
+simply detoasts per reference.
+
+Which columns are worth a copy is not decided here.  ExecInitDetoastArg()
+reads the sets on the Plan node, which nothing fills in yet.
+
 Memory Management
 -----------------
 

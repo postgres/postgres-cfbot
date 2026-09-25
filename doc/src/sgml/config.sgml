@@ -7003,6 +7003,7 @@ SELECT * FROM parent WHERE key = 2400;
       </listitem>
      </varlistentry>
 
+
      </variablelist>
     </sect2>
    </sect1>
@@ -12825,6 +12826,31 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-detoast-reuse" xreflabel="detoast_reuse">
+      <term><varname>detoast_reuse</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>detoast_reuse</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        When a query references the same large (<quote>TOASTed</quote>)
+        column in several expressions of one plan node, the executor normally
+        fetches and decompresses the value once per reference.  With this
+        parameter on, the planner marks such columns and the executor fetches
+        each value once per row, reusing the plain copy for the other
+        references.  The functions that report the stored form of a value,
+        <function>pg_column_size</function>,
+        <function>pg_column_compression</function> and
+        <function>pg_column_toast_chunk_id</function>, keep seeing it when
+        applied to the column directly; a function that receives the column
+        as an argument and calls them internally sees the fetched value, as
+        it would for any other argument.  The parameter is consulted when a
+        query is planned; setting it off restores the per-reference behavior
+        for plans made afterwards.  The default is <literal>on</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
      <varlistentry id="guc-debug-discard-caches" xreflabel="debug_discard_caches">
       <term><varname>debug_discard_caches</varname> (<type>integer</type>)
       <indexterm>
