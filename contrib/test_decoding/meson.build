@@ -66,6 +66,7 @@ tests += {
       'skip_snapshot_restore',
       'invalidation_distribution',
       'parallel_session_origin',
+      'lazy_snapshot_distribution',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
@@ -76,6 +77,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_repl_stats.pl',
+      't/002_lazy_snapshot_spill.pl',
     ],
   },
 }
