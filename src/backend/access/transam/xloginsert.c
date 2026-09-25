@@ -105,25 +105,39 @@ static uint64 mainrdata_len;	/* total # of bytes in chain */
 /* flags for the in-progress insertion */
 static uint8 curinsert_flags = 0;
 
-/*
- * These are used to hold the record header while constructing a record.
- * 'hdr_scratch' is not a plain variable, but is palloc'd at initialization,
- * because we want it to be MAXALIGNed and padding bytes zeroed.
- *
- * For simplicity, it's allocated large enough to hold the headers for any
- * WAL record.
- */
-static XLogRecData hdr_rdt;
-static char *hdr_scratch = NULL;
-
 #define SizeOfXlogOrigin	(sizeof(ReplOriginId) + sizeof(char))
 #define SizeOfXLogTransactionId	(sizeof(TransactionId) + sizeof(char))
 
+/*
+ * Size of the workspace used to hold the record header while constructing a
+ * record.  It is large enough for the header of any WAL record: the
+ * fixed-size XLogRecord, a block header for every possible block ID, the main
+ * data header, and one term for each of the "special" block IDs.
+ *
+ * Every "special" block ID needs its own term here.  If you add one alongside
+ * XLR_BLOCK_ID_ORIGIN (SizeOfXlogOrigin) and XLR_BLOCK_ID_TOPLEVEL_XID
+ * (SizeOfXLogTransactionId), you must add a corresponding term below as well.
+ *
+ * XLogRecordAssemble() asserts that the assembled header actually fits.
+ */
 #define HEADER_SCRATCH_SIZE \
 	(SizeOfXLogRecord + \
 	 MaxSizeOfXLogRecordBlockHeader * (XLR_MAX_BLOCK_ID + 1) + \
 	 SizeOfXLogRecordDataHeaderLong + SizeOfXlogOrigin + \
 	 SizeOfXLogTransactionId)
+
+/*
+ * This is used to hold the record header while constructing a record.
+ * 'scratch' must be MAXALIGNed and padding bytes zeroed.
+ *
+ * For simplicity, it's allocated large enough to hold the headers for any WAL
+ * record.
+ */
+struct XLogRecordHeaderScratch
+{
+	XLogRecData rdt;
+	alignas(MAXIMUM_ALIGNOF) char scratch[HEADER_SCRATCH_SIZE];
+};
 
 /*
  * An array of XLogRecData structs, to hold registered data.
@@ -141,7 +155,8 @@ static XLogRecData *XLogRecordAssemble(RmgrId rmid, uint8 info,
 									   XLogRecPtr RedoRecPtr, bool doPageWrites,
 									   XLogRecPtr *fpw_lsn, int *num_fpi,
 									   uint64 *fpi_bytes,
-									   bool *topxid_included);
+									   bool *topxid_included,
+									   struct XLogRecordHeaderScratch *hdr);
 static bool XLogCompressBackupBlock(const PageData *page, uint16 hole_offset,
 									uint16 hole_length, void *dest, uint16 *dlen);
 
@@ -510,6 +525,7 @@ XLogInsert(RmgrId rmid, uint8 info)
 
 	do
 	{
+		struct XLogRecordHeaderScratch hdr;
 		XLogRecPtr	RedoRecPtr;
 		bool		doPageWrites;
 		bool		topxid_included = false;
@@ -527,7 +543,7 @@ XLogInsert(RmgrId rmid, uint8 info)
 
 		rdt = XLogRecordAssemble(rmid, info, RedoRecPtr, doPageWrites,
 								 &fpw_lsn, &num_fpi, &fpi_bytes,
-								 &topxid_included);
+								 &topxid_included, &hdr);
 
 		EndPos = XLogInsertRecord(rdt, fpw_lsn, curinsert_flags, num_fpi,
 								  fpi_bytes, topxid_included);
@@ -615,12 +631,14 @@ XLogGetFakeLSN(Relation rel)
  *
  * *topxid_included is set if the topmost transaction ID is logged with the
  * current subtransaction.
+ *
+ * 'hdr' is caller-provided workspace for the record header.
  */
 static XLogRecData *
 XLogRecordAssemble(RmgrId rmid, uint8 info,
 				   XLogRecPtr RedoRecPtr, bool doPageWrites,
 				   XLogRecPtr *fpw_lsn, int *num_fpi, uint64 *fpi_bytes,
-				   bool *topxid_included)
+				   bool *topxid_included, struct XLogRecordHeaderScratch *hdr)
 {
 	XLogRecData *rdt;
 	uint64		total_len = 0;
@@ -629,20 +647,24 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	registered_buffer *prev_regbuf = NULL;
 	XLogRecData *rdt_datas_last;
 	XLogRecord *rechdr;
-	char	   *scratch = hdr_scratch;
+	char	   *scratch = hdr->scratch;
 
 	/*
 	 * Note: this function can be called multiple times for the same record.
 	 * All the modifications we do to the rdata chains below must handle that.
 	 */
 
-	/* The record begins with the fixed-size header */
+	/*
+	 * The record begins with the fixed-size header.  Zero it out first so
+	 * that there is no garbage in the padding bytes.
+	 */
 	rechdr = (XLogRecord *) scratch;
+	memset(rechdr, 0, SizeOfXLogRecord);
 	scratch += SizeOfXLogRecord;
 
-	hdr_rdt.next = NULL;
-	rdt_datas_last = &hdr_rdt;
-	hdr_rdt.data = hdr_scratch;
+	hdr->rdt.next = NULL;
+	rdt_datas_last = &hdr->rdt;
+	hdr->rdt.data = hdr->scratch;
 
 	/*
 	 * Enforce consistency checks for this record if user is looking for it.
@@ -965,8 +987,9 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	}
 	rdt_datas_last->next = NULL;
 
-	hdr_rdt.len = (scratch - hdr_scratch);
-	total_len += hdr_rdt.len;
+	hdr->rdt.len = (scratch - hdr->scratch);
+	Assert(hdr->rdt.len <= HEADER_SCRATCH_SIZE);
+	total_len += hdr->rdt.len;
 
 	/*
 	 * Calculate CRC of the data
@@ -977,8 +1000,8 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	 * header.
 	 */
 	INIT_CRC32C(rdata_crc);
-	COMP_CRC32C(rdata_crc, hdr_scratch + SizeOfXLogRecord, hdr_rdt.len - SizeOfXLogRecord);
-	for (rdt = hdr_rdt.next; rdt != NULL; rdt = rdt->next)
+	COMP_CRC32C(rdata_crc, hdr->scratch + SizeOfXLogRecord, hdr->rdt.len - SizeOfXLogRecord);
+	for (rdt = hdr->rdt.next; rdt != NULL; rdt = rdt->next)
 		COMP_CRC32C(rdata_crc, rdt->data, rdt->len);
 
 	/*
@@ -1006,7 +1029,7 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	rechdr->xl_prev = InvalidXLogRecPtr;
 	rechdr->xl_crc = rdata_crc;
 
-	return &hdr_rdt;
+	return &hdr->rdt;
 }
 
 /*
@@ -1430,11 +1453,4 @@ InitXLogInsert(void)
 									sizeof(XLogRecData) * XLR_NORMAL_RDATAS);
 		max_rdatas = XLR_NORMAL_RDATAS;
 	}
-
-	/*
-	 * Allocate a buffer to hold the header information for a WAL record.
-	 */
-	if (hdr_scratch == NULL)
-		hdr_scratch = MemoryContextAllocZero(xloginsert_cxt,
-											 HEADER_SCRATCH_SIZE);
 }

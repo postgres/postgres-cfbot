@@ -1247,6 +1247,12 @@ typedef struct PGAlignedBlock
 	alignas(MAXIMUM_ALIGNOF) char data[BLCKSZ];
 } PGAlignedBlock;
 
+/* Same, but for an XLOG_BLCKSZ-sized buffer */
+typedef struct PGAlignedXLogBlock
+{
+	alignas(MAXIMUM_ALIGNOF) char data[XLOG_BLCKSZ];
+} PGAlignedXLogBlock;
+
 /*
  * alignas with extended alignments is buggy in g++ < 9.  As a simple
  * workaround, we disable these definitions in that case.
@@ -1269,16 +1275,16 @@ typedef struct PGIOAlignedBlock
 } PGIOAlignedBlock;
 
 /* Same, but for an XLOG_BLCKSZ-sized buffer */
-typedef struct PGAlignedXLogBlock
+typedef struct PGIOAlignedXLogBlock
 {
 	alignas(PG_IO_ALIGN_SIZE) char data[XLOG_BLCKSZ];
-} PGAlignedXLogBlock;
+} PGIOAlignedXLogBlock;
 
 #else							/* (g++ < 9) */
 
 /* Allow these types to be used as abstract types when using old g++ */
 typedef struct PGIOAlignedBlock PGIOAlignedBlock;
-typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
+typedef struct PGIOAlignedXLogBlock PGIOAlignedXLogBlock;
 
 #endif							/* !(g++ < 9) */
 

@@ -532,10 +532,10 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 
 	/*
 	 * Allocate two page buffers dedicated to WAL consistency checks.  We do
-	 * it this way, rather than just making static arrays, for two reasons:
-	 * (1) no need to waste the storage in most instantiations of the backend;
-	 * (2) a static char array isn't guaranteed to have any particular
-	 * alignment, whereas palloc() will provide MAXALIGN'd storage.
+	 * it this way, rather than just making static arrays, because there is no
+	 * need to waste the storage in most instantiations of the backend.
+	 * (palloc() also gives us MAXALIGN'd storage, but nowadays that part
+	 * could be handled with alignas.)
 	 */
 	replay_image_masked = (char *) palloc(BLCKSZ);
 	primary_image_masked = (char *) palloc(BLCKSZ);
@@ -1543,7 +1543,7 @@ FinishWalRecovery(void)
 		/* Copy the valid part of the last block */
 		len = endOfLog % XLOG_BLCKSZ;
 		page = palloc(len);
-		memcpy(page, xlogreader->readBuf, len);
+		memcpy(page, xlogreader->readBuf.data, len);
 
 		result->lastPageBeginPtr = pageBeginPtr;
 		result->lastPage = page;

@@ -867,13 +867,11 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
 	else
 	{
 		/*
-		 * Allocate a buffer full of zeros.
-		 *
-		 * Note: palloc zbuffer, instead of just using a local char array, to
-		 * ensure it is reasonably well-aligned; this may save a few cycles
-		 * transferring data to the kernel.
+		 * A buffer full of zeros.  alignas ensures it is reasonably
+		 * well-aligned, which may save a few cycles transferring it to the
+		 * kernel.
 		 */
-		char	   *zbuffer = (char *) palloc0(ZBUFFER_SIZE);
+		alignas(MAXIMUM_ALIGNOF) const char zbuffer[ZBUFFER_SIZE] = {0};
 		Size		remaining = request_size;
 		bool		success = true;
 
