@@ -1,0 +1,624 @@
+/*--------------------------------------------------------------------------
+ *
+ * pg_stat_log.c
+ *		Cumulative statistics about log messages.
+ *
+ * Hooks into emit_log_hook to count log messages grouped by
+ * (elevel, sqlerrcode, database_oid, user_oid, backend_type).
+ *
+ * Uses the fixed-amount Custom Cumulative Stats API introduced in
+ * PostgreSQL 18, following the same pattern as test_custom_fixed_stats.c.
+ *
+ * Copyright (c) 2026, PostgreSQL Global Development Group
+ *
+ * IDENTIFICATION
+ *		contrib/pg_stat_log/pg_stat_log.c
+ *
+ *--------------------------------------------------------------------------
+ */
+
+#include "postgres.h"
+
+#include "funcapi.h"
+#include "miscadmin.h"
+#include "pgstat.h"
+#include "common/hashfn.h"
+#include "storage/proc.h"
+#include "utils/builtins.h"
+#include "utils/errcodes.h"
+#include "utils/guc.h"
+#include "utils/pgstat_internal.h"
+#include "utils/timestamp.h"
+#include "utils/tuplestore.h"
+
+#include "pg_stat_log_errcodes.h"
+
+#define PGSTAT_LOG_MODULE_NAME  "pg_stat_log"
+#define PGSTAT_LOG_TRANCHE_NAME PGSTAT_LOG_MODULE_NAME
+
+PG_MODULE_MAGIC_EXT(.name = PGSTAT_LOG_MODULE_NAME, .version = PG_VERSION);
+
+/*
+ * Custom stats kind ID — registered at
+ * https://wiki.postgresql.org/wiki/CustomCumulativeStats
+ */
+#define PGSTAT_KIND_LOG 28
+
+/* GUC defaults and bounds */
+#define PGSTAT_LOG_MAX_DEFAULT 1024
+#define PGSTAT_LOG_MIN_ENTRIES 64
+#define PGSTAT_LOG_MAX_ENTRIES (PGSTAT_LOG_MAX_DEFAULT * PGSTAT_LOG_MAX_DEFAULT)
+
+/*
+ * Data structures
+ */
+typedef struct PgStatLogSlot
+{
+    int32          next; /* next slot index in bucket chain, or -1 */
+    BackendType    backend_type;
+    Oid            dboid;
+    Oid            userid;
+    int            elevel;
+    int            sqlerrcode;
+    PgStat_Counter count;
+} PgStatLogSlot;
+
+/*
+ * Stats data block. Variable-length: a header followed by a payload laid out
+ * as (entries first to keep 8-byte alignment without padding):
+ *
+ *   PgStatLogSlot entries[max_entries]   insertion-ordered slots
+ *   int32         heads[max_entries]     bucket chain heads (-1 = empty)
+ *
+ * The slots form an index-based separate-chaining hash table: heads[bucket]
+ * points to the first slot of a chain and each slot's "next" links the rest.
+ * Slots are allocated sequentially (slot i is live iff i < num_entries) and
+ * never evicted, so lookups, inserts, and drops walk only one bucket chain
+ * (average length = load factor) and stay O(1) expected even at full load.
+ * Links are array indices (not pointers), so the block is snapshot- and
+ * persistence-safe.  Use the accessors below to reach each sub-array.
+ *
+ * Why not a standard PostgreSQL hash table?  The fixed-amount custom stats
+ * API snapshots this block with a raw memcpy and persists/restores it
+ * verbatim (fwrite/fread) with no serialize callbacks, so everything in the
+ * block must be position-independent and self-contained.  dynahash chains
+ * entries with raw pointers, simplehash is process-local and grows by
+ * reallocation, and dshash would require switching to variable-amount stats
+ * (64-bit key limit, unbounded DSA growth, no extension-visible enumeration,
+ * and allocation inside emit_log_hook).
+ */
+typedef struct PgStatLog
+{
+    int  max_entries;
+    int  num_entries;
+    char data[FLEXIBLE_ARRAY_MEMBER];
+} PgStatLog;
+
+/*
+ * Shared memory wrapper. LWLock + changecount + metadata + data. Metadata
+ * fields (stat_reset_timestamp, n_dropped) live outside the copied stats
+ * block so they can be read directly under the LWLock without the
+ * changecount protocol. The data area holds one PgStatLog block.
+ */
+typedef struct PgStatLogShared
+{
+    LWLock      lock;
+    uint32      changecount;
+    TimestampTz stat_reset_timestamp;
+    uint64      n_dropped;
+    char        data[FLEXIBLE_ARRAY_MEMBER];
+} PgStatLogShared;
+
+/*
+ * GUC variables
+ */
+static bool pg_stat_log_enabled    = true;
+static int  pg_stat_log_min_elevel = WARNING;
+static int  pg_stat_log_max        = PGSTAT_LOG_MAX_DEFAULT;
+
+/*
+ * Computed sizes (set in _PG_init based on pg_stat_log.max_entries)
+ */
+static Size stats_block_size; /* one PgStatLog block */
+
+/*
+ * Hook state
+ */
+static emit_log_hook_type prev_emit_log_hook = NULL;
+static bool                    in_emit_log_hook        = false;
+
+/*
+ * Accessor helpers
+ */
+static inline PgStatLog *
+pg_stat_log_get_stats(PgStatLogShared *shmem)
+{
+    return (PgStatLog *) shmem->data;
+}
+
+static inline PgStatLogSlot *
+pg_stat_log_entries(PgStatLog *s)
+{
+    return (PgStatLogSlot *) s->data;
+}
+
+static inline int32 *
+pg_stat_log_heads(PgStatLog *s)
+{
+    return (int32 *) (s->data + sizeof(PgStatLogSlot) * (Size) s->max_entries);
+}
+
+/*
+ * Errcode name lookup
+ */
+static const char *
+pg_stat_log_errcode_name(int sqlerrcode)
+{
+    for (int i = 0; pg_stat_log_errcodes[i].name != NULL; i++)
+    {
+        if (pg_stat_log_errcodes[i].sqlerrcode == sqlerrcode)
+            return pg_stat_log_errcodes[i].name;
+    }
+    return NULL;
+}
+
+/*
+ * Hash function for slot lookup — combines all key fields into a uint32
+ * used to pick a chain bucket (hash % max_entries).
+ */
+static inline uint32
+pg_stat_log_hash_key(BackendType backend_type, Oid dboid, Oid userid, int elevel, int sqlerrcode)
+{
+    uint32 h;
+
+    h = murmurhash32((uint32) backend_type);
+    h = hash_combine(h, murmurhash32((uint32) dboid));
+    h = hash_combine(h, murmurhash32((uint32) userid));
+    h = hash_combine(h, murmurhash32((uint32) elevel));
+    h = hash_combine(h, murmurhash32((uint32) sqlerrcode));
+    return h;
+}
+
+/*
+ * PgStat_KindInfo — filled dynamically in _PG_init
+ */
+static void pg_stat_log_init_backend_cb(void);
+static void pg_stat_log_init_shmem_cb(void *stats);
+static void pg_stat_log_reset_all_cb(TimestampTz ts);
+static void pg_stat_log_snapshot_cb(void);
+
+static PgStat_KindInfo log_stats_kind;
+
+/*
+ * init_backend_cb — per-backend initialization
+ *
+ * Runs in every backend after the stats file has been loaded by the
+ * startup process. Validates that persisted max_entries matches the
+ * current GUC. If pg_stat_log.max_entries was changed across a clean
+ * restart, the restored stats block has a stale layout — discard and
+ * reinitialize to prevent out-of-bounds access.
+ */
+static void
+pg_stat_log_init_backend_cb(void)
+{
+    PgStatLogShared *shmem;
+    PgStatLog       *s;
+
+    shmem = (PgStatLogShared *) pgstat_get_custom_shmem_data(PGSTAT_KIND_LOG);
+    s     = pg_stat_log_get_stats(shmem);
+
+    if (s->max_entries != pg_stat_log_max)
+    {
+        elog(LOG,
+             "pg_stat_log: discarding persisted stats "
+             "(max_entries changed from %d to %d)",
+             s->max_entries,
+             pg_stat_log_max);
+
+        LWLockAcquire(&shmem->lock, LW_EXCLUSIVE);
+
+        pgstat_begin_changecount_write(&shmem->changecount);
+        s->max_entries = pg_stat_log_max;
+        s->num_entries = 0;
+        memset(pg_stat_log_heads(s), 0xFF, sizeof(int32) * (Size) s->max_entries);
+        pgstat_end_changecount_write(&shmem->changecount);
+
+        shmem->stat_reset_timestamp = GetCurrentTimestamp();
+        shmem->n_dropped            = 0;
+
+        LWLockRelease(&shmem->lock);
+    }
+}
+
+/*
+ * init_shmem_cb — initialize shared memory
+ *
+ * Only runs in the postmaster (see StatsShmemInit), after the main LWLock
+ * array has been set up. This is the first place it is safe to call
+ * LWLockNewTrancheId(), which needs shared memory to exist.
+ */
+static void
+pg_stat_log_init_shmem_cb(void *stats)
+{
+    PgStatLogShared *shmem = (PgStatLogShared *) stats;
+    PgStatLog       *s;
+
+    LWLockInitialize(&shmem->lock, LWLockNewTrancheId(PGSTAT_LOG_TRANCHE_NAME));
+    shmem->stat_reset_timestamp = GetCurrentTimestamp();
+    shmem->n_dropped            = 0;
+
+    s              = pg_stat_log_get_stats(shmem);
+    s->max_entries = pg_stat_log_max;
+    s->num_entries = 0;
+    memset(pg_stat_log_heads(s), 0xFF, sizeof(int32) * (Size) s->max_entries);
+}
+
+/*
+ * reset_all_cb — reset statistics
+ *
+ * Empty all bucket chains and reset num_entries so slots are reclaimed for
+ * reuse. Otherwise, once max_entries is reached, a reset would not free
+ * capacity for new distinct combinations.
+ */
+static void
+pg_stat_log_reset_all_cb(TimestampTz ts)
+{
+    PgStatLogShared *shmem;
+    PgStatLog       *s;
+
+    shmem = (PgStatLogShared *) pgstat_get_custom_shmem_data(PGSTAT_KIND_LOG);
+    s     = pg_stat_log_get_stats(shmem);
+
+    LWLockAcquire(&shmem->lock, LW_EXCLUSIVE);
+
+    pgstat_begin_changecount_write(&shmem->changecount);
+    s->num_entries = 0;
+    memset(pg_stat_log_heads(s), 0xFF, sizeof(int32) * (Size) s->max_entries);
+    pgstat_end_changecount_write(&shmem->changecount);
+
+    shmem->stat_reset_timestamp = ts;
+    shmem->n_dropped            = 0;
+
+    LWLockRelease(&shmem->lock);
+}
+
+/*
+ * snapshot_cb — build snapshot for reads
+ */
+static void
+pg_stat_log_snapshot_cb(void)
+{
+    PgStatLogShared *shmem;
+    PgStatLog       *snap;
+
+    shmem = (PgStatLogShared *) pgstat_get_custom_shmem_data(PGSTAT_KIND_LOG);
+    snap  = (PgStatLog *) pgstat_get_custom_snapshot_data(PGSTAT_KIND_LOG);
+
+    /* Copy current stats via changecount protocol */
+    pgstat_copy_changecounted_stats(snap,
+                                    pg_stat_log_get_stats(shmem),
+                                    stats_block_size,
+                                    &shmem->changecount);
+}
+
+/*
+ * pg_stat_log_count_message — record one log message in shared memory
+ *
+ * Acquires the LWLock, walks the hash bucket chain to find or create the
+ * entry, increments the counter, and releases the lock. The chain walk is
+ * O(1) expected (average chain length = load factor) for all of lookup,
+ * insert, and drop, even when the table is full.
+ */
+static void
+pg_stat_log_count_message(ErrorData *edata)
+{
+    PgStatLogShared *shmem;
+    PgStatLog       *s;
+    PgStatLogSlot   *entries;
+    int32           *heads;
+    Oid              dboid;
+    Oid              userid;
+    int              sec_context;
+    uint32           hash;
+    uint32           bucket;
+    int32            idx;
+    bool             found;
+
+    shmem = (PgStatLogShared *) pgstat_get_custom_shmem_data(PGSTAT_KIND_LOG);
+
+    dboid = MyDatabaseId;
+    GetUserIdAndSecContext(&userid, &sec_context);
+
+    LWLockAcquire(&shmem->lock, LW_EXCLUSIVE);
+
+    s       = pg_stat_log_get_stats(shmem);
+    entries = pg_stat_log_entries(s);
+    heads   = pg_stat_log_heads(s);
+
+    hash   = pg_stat_log_hash_key(MyBackendType, dboid, userid, edata->elevel, edata->sqlerrcode);
+    bucket = hash % s->max_entries;
+
+    found = false;
+    for (idx = heads[bucket]; idx != -1; idx = entries[idx].next)
+    {
+        PgStatLogSlot *slot = &entries[idx];
+
+        if (slot->backend_type == MyBackendType && slot->dboid == dboid && slot->userid == userid &&
+            slot->elevel == edata->elevel && slot->sqlerrcode == edata->sqlerrcode)
+        {
+            pgstat_begin_changecount_write(&shmem->changecount);
+            slot->count++;
+            pgstat_end_changecount_write(&shmem->changecount);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found)
+    {
+        if (s->num_entries < s->max_entries)
+        {
+            int32          newidx = s->num_entries;
+            PgStatLogSlot *slot   = &entries[newidx];
+
+            pgstat_begin_changecount_write(&shmem->changecount);
+            slot->backend_type = MyBackendType;
+            slot->dboid        = dboid;
+            slot->userid       = userid;
+            slot->elevel       = edata->elevel;
+            slot->sqlerrcode   = edata->sqlerrcode;
+            slot->count        = 1;
+            slot->next         = heads[bucket];
+            heads[bucket]      = newidx;
+            s->num_entries++;
+            pgstat_end_changecount_write(&shmem->changecount);
+        }
+        else
+        {
+            shmem->n_dropped++;
+        }
+    }
+
+    LWLockRelease(&shmem->lock);
+}
+
+/*
+ * emit_log_hook — intercept log messages for counting
+ *
+ * Always forwards to the previous hook in the chain. Only counts the
+ * message if pg_stat_log is enabled and the severity meets the threshold.
+ */
+static void
+pg_stat_log_emit_hook(ErrorData *edata)
+{
+    if (in_emit_log_hook)
+        return;
+
+    /*
+     * pgstat shared memory might not be set up yet during early startup or
+     * in auxiliary processes before attachment.
+     */
+    if ((!IsUnderPostmaster && IsPostmasterEnvironment) || !MyProc)
+        return;
+
+    in_emit_log_hook = true;
+    PG_TRY();
+    {
+        if (prev_emit_log_hook)
+            prev_emit_log_hook(edata);
+
+        if (pg_stat_log_enabled && edata->elevel >= pg_stat_log_min_elevel)
+            pg_stat_log_count_message(edata);
+    }
+    PG_FINALLY();
+    {
+        in_emit_log_hook = false;
+    }
+    PG_END_TRY();
+}
+
+/*
+ * Module initialization
+ */
+void
+_PG_init(void)
+{
+    Size shared_size;
+
+    if (!process_shared_preload_libraries_in_progress)
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("pg_stat_log must be loaded via "
+                        "shared_preload_libraries")));
+
+    /* Define GUCs before computing sizes */
+    DefineCustomBoolVariable("pg_stat_log.enabled",
+                             "Enable collection of log statistics.",
+                             NULL,
+                             &pg_stat_log_enabled,
+                             true,
+                             PGC_SUSET,
+                             0,
+                             NULL,
+                             NULL,
+                             NULL);
+
+    DefineCustomEnumVariable("pg_stat_log.min_error_level",
+                             "Minimum error level to track.",
+                             NULL,
+                             &pg_stat_log_min_elevel,
+                             WARNING,
+                             server_message_level_options,
+                             PGC_SUSET,
+                             0,
+                             NULL,
+                             NULL,
+                             NULL);
+
+    DefineCustomIntVariable("pg_stat_log.max_entries",
+                            "Maximum number of distinct log entry "
+                            "combinations to track.",
+                            NULL,
+                            &pg_stat_log_max,
+                            PGSTAT_LOG_MAX_DEFAULT,
+                            PGSTAT_LOG_MIN_ENTRIES,
+                            PGSTAT_LOG_MAX_ENTRIES,
+                            PGC_POSTMASTER,
+                            0,
+                            NULL,
+                            NULL,
+                            NULL);
+
+    MarkGUCPrefixReserved("pg_stat_log");
+
+    /* Compute sizes based on pg_stat_log.max_entries */
+    stats_block_size = offsetof(PgStatLog, data)
+        + sizeof(PgStatLogSlot) * (Size) pg_stat_log_max
+        + sizeof(int32) * (Size) pg_stat_log_max;
+
+    shared_size = offsetof(PgStatLogShared, data) + stats_block_size;
+
+    /* Fill in the KindInfo struct — use memcpy because .name is const */
+    {
+        PgStat_KindInfo tmp = {
+            .name            = "pg_stat_log",
+            .fixed_amount    = true,
+            .write_to_file   = true,
+            .shared_size     = shared_size,
+            .shared_data_off = offsetof(PgStatLogShared, data),
+            .shared_data_len = stats_block_size,
+            .init_backend_cb = pg_stat_log_init_backend_cb,
+            .init_shmem_cb   = pg_stat_log_init_shmem_cb,
+            .reset_all_cb    = pg_stat_log_reset_all_cb,
+            .snapshot_cb     = pg_stat_log_snapshot_cb,
+        };
+
+        memcpy(&log_stats_kind, &tmp, sizeof(PgStat_KindInfo));
+    }
+
+    pgstat_register_kind(PGSTAT_KIND_LOG, &log_stats_kind);
+
+    /* Install emit_log_hook */
+    prev_emit_log_hook = emit_log_hook;
+    emit_log_hook      = pg_stat_log_emit_hook;
+}
+
+/*
+ * SQL-callable functions
+ */
+PG_FUNCTION_INFO_V1(pg_stat_log_data);
+
+/*
+ * pg_stat_log_data()
+ *		Return all tracked log statistics as a set of rows.
+ */
+Datum
+pg_stat_log_data(PG_FUNCTION_ARGS)
+{
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    PgStatLog     *snap;
+    PgStatLogSlot *entries;
+    int            i;
+
+    pgstat_snapshot_fixed(PGSTAT_KIND_LOG);
+    snap = (PgStatLog *) pgstat_get_custom_snapshot_data(PGSTAT_KIND_LOG);
+
+    InitMaterializedSRF(fcinfo, 0);
+
+    entries = pg_stat_log_entries(snap);
+
+    for (i = 0; i < snap->num_entries; i++)
+    {
+        Datum          values[7];
+        bool           nulls[7] = {0};
+        PgStatLogSlot *slot     = &entries[i];
+        const char    *errname;
+
+        if (slot->count <= 0)
+            continue;
+
+        values[0] = CStringGetTextDatum(GetBackendTypeDesc(slot->backend_type));
+
+        if (OidIsValid(slot->dboid))
+            values[1] = ObjectIdGetDatum(slot->dboid);
+        else
+            nulls[1] = true;
+
+        if (OidIsValid(slot->userid))
+            values[2] = ObjectIdGetDatum(slot->userid);
+        else
+            nulls[2] = true;
+
+        values[3] = CStringGetTextDatum(error_severity(slot->elevel));
+        values[4] = CStringGetTextDatum(unpack_sql_state(slot->sqlerrcode));
+
+        errname = pg_stat_log_errcode_name(slot->sqlerrcode);
+        if (errname)
+            values[5] = CStringGetTextDatum(errname);
+        else
+            nulls[5] = true;
+
+        values[6] = Int64GetDatum(slot->count);
+
+        tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+    }
+
+    return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_log_reset);
+
+/*
+ * pg_stat_log_reset()
+ *		Reset all tracked log statistics.
+ */
+Datum
+pg_stat_log_reset(PG_FUNCTION_ARGS)
+{
+    pgstat_reset_of_kind(PGSTAT_KIND_LOG);
+
+    PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_log_info);
+
+/*
+ * pg_stat_log_info()
+ *		Return metadata about the pg_stat_log shared memory area:
+ *		max_entries capacity, current num_entries, number of dropped
+ *		messages due to capacity, and the last reset timestamp.
+ */
+Datum
+pg_stat_log_info(PG_FUNCTION_ARGS)
+{
+    ReturnSetInfo   *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    PgStatLogShared *shmem;
+    PgStatLog       *s;
+    Datum            values[4];
+    bool             nulls[4] = {0};
+    int              max_entries;
+    int              num_entries;
+    uint64           n_dropped;
+    TimestampTz      stat_reset_timestamp;
+
+    InitMaterializedSRF(fcinfo, 0);
+
+    shmem = (PgStatLogShared *) pgstat_get_custom_shmem_data(PGSTAT_KIND_LOG);
+    s     = pg_stat_log_get_stats(shmem);
+
+    LWLockAcquire(&shmem->lock, LW_SHARED);
+    max_entries          = s->max_entries;
+    num_entries          = s->num_entries;
+    n_dropped            = shmem->n_dropped;
+    stat_reset_timestamp = shmem->stat_reset_timestamp;
+    LWLockRelease(&shmem->lock);
+
+    values[0] = Int32GetDatum(max_entries);
+    values[1] = Int32GetDatum(num_entries);
+    values[2] = Int64GetDatum((int64) n_dropped);
+    values[3] = TimestampTzGetDatum(stat_reset_timestamp);
+
+    tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+    return (Datum) 0;
+}
