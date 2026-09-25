@@ -83,6 +83,15 @@ typedef struct PlannedStmt
 	/* do I set the command result tag? */
 	bool		canSetTag;
 
+	/*
+	 * Was this plan built with detoasting a column once per row enabled? The
+	 * per-node decisions are in the Plan nodes; expression initialization
+	 * consults this where there is no node to ask, namely for the parameters
+	 * a subplan or a nestloop inner plan receives, whose copy was made
+	 * elsewhere (see ExecInitDetoastArg).
+	 */
+	bool		detoastReuse;
+
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
 
@@ -225,6 +234,17 @@ typedef struct Plan
 	 */
 	/* engage asynchronous-capable logic? */
 	bool		async_capable;
+
+	/*
+	 * Attributes of the scan tuple, the outer input and the inner input that
+	 * this node's expressions may detoast once per row, keeping the copy
+	 * beside the slot (see set_plan_detoast_reuse in setrefs.c).  The
+	 * executor compiles argument positions reading them to EEOP_*_VAR_DETOAST
+	 * steps.
+	 */
+	Bitmapset  *detoast_reuse_scan;
+	Bitmapset  *detoast_reuse_outer;
+	Bitmapset  *detoast_reuse_inner;
 
 	/*
 	 * Common structural data for all Plan types.
