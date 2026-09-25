@@ -488,7 +488,7 @@ pg_get_wal_record_info(PG_FUNCTION_ARGS)
 	if (lsn > curr_lsn)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("WAL input LSN must be less than current LSN"),
+				 errmsg("WAL input LSN must be less than or equal to current LSN"),
 				 errdetail("Current WAL LSN on the database system is at %X/%08X.",
 						   LSN_FORMAT_ARGS(curr_lsn))));
 
@@ -530,14 +530,14 @@ ValidateInputLSNs(XLogRecPtr start_lsn, XLogRecPtr *end_lsn)
 	if (start_lsn > curr_lsn)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("WAL start LSN must be less than current LSN"),
+				 errmsg("WAL start LSN must be less than or equal to current LSN"),
 				 errdetail("Current WAL LSN on the database system is at %X/%08X.",
 						   LSN_FORMAT_ARGS(curr_lsn))));
 
 	if (start_lsn > *end_lsn)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("WAL start LSN must be less than end LSN")));
+				 errmsg("WAL start LSN must be less than or equal to end LSN")));
 
 	if (*end_lsn > curr_lsn)
 		*end_lsn = curr_lsn;
@@ -836,7 +836,7 @@ pg_get_wal_records_info_till_end_of_wal(PG_FUNCTION_ARGS)
 	if (start_lsn > end_lsn)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("WAL start LSN must be less than current LSN"),
+				 errmsg("WAL start LSN must be less than or equal to current LSN"),
 				 errdetail("Current WAL LSN on the database system is at %X/%08X.",
 						   LSN_FORMAT_ARGS(end_lsn))));
 
@@ -855,7 +855,7 @@ pg_get_wal_stats_till_end_of_wal(PG_FUNCTION_ARGS)
 	if (start_lsn > end_lsn)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("WAL start LSN must be less than current LSN"),
+				 errmsg("WAL start LSN must be less than or equal to current LSN"),
 				 errdetail("Current WAL LSN on the database system is at %X/%08X.",
 						   LSN_FORMAT_ARGS(end_lsn))));
 
