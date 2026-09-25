@@ -23,6 +23,10 @@ extern void ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 									   EState *estate, TupleTableSlot *slot,
 									   CmdType cmdtype);
 
+extern void ExecComputeVirtualGenerated(ResultRelInfo *resultRelInfo,
+										EState *estate, TupleTableSlot *slot,
+										CmdType cmdtype);
+
 extern ModifyTableState *ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags);
 extern void ExecEndModifyTable(ModifyTableState *node);
 extern void ExecReScanModifyTable(ModifyTableState *node);
