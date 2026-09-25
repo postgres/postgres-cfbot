@@ -21,6 +21,7 @@
 #include "common/int.h"
 #include "common/pg_lzcompress.h"
 #include "utils/expandeddatum.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 
 static varlena *toast_fetch_datum(varlena *attr);
@@ -121,6 +122,7 @@ detoast_attr(varlena *attr)
 		/*
 		 * This is an externally stored datum --- fetch it back from there
 		 */
+		INJECTION_POINT("detoast-attr-external", NULL);
 		attr = toast_fetch_datum(attr);
 		/* If it's compressed, decompress it */
 		if (VARATT_IS_COMPRESSED(attr))
@@ -171,6 +173,7 @@ detoast_attr(varlena *attr)
 		/*
 		 * This is a compressed value inside of the main tuple
 		 */
+		INJECTION_POINT("detoast-attr-compressed", NULL);
 		attr = toast_decompress_datum(attr);
 	}
 	else if (VARATT_IS_SHORT(attr))
