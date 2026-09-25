@@ -31,10 +31,6 @@ static bool process_result(PGconn *conn, PGresult *res, int results,
 
 static const char *const progname = "libpq_pipeline";
 
-/* Options and defaults */
-static char *tracefile = NULL;	/* path to PQtrace() file */
-
-
 #ifdef DEBUG_OUTPUT
 #define	pg_debug(...)  do { fprintf(stderr, __VA_ARGS__); } while (0)
 #else
@@ -2109,7 +2105,6 @@ usage(const char *progname)
 	fprintf(stderr, "  %s [OPTION] tests\n", progname);
 	fprintf(stderr, "  %s [OPTION] TESTNAME [CONNINFO]\n", progname);
 	fprintf(stderr, "\nOptions:\n");
-	fprintf(stderr, "  -t TRACEFILE       generate a libpq trace to TRACEFILE\n");
 	fprintf(stderr, "  -r NUMROWS         use NUMROWS as the test size\n");
 }
 
@@ -2136,13 +2131,12 @@ main(int argc, char **argv)
 {
 	const char *conninfo = "";
 	PGconn	   *conn;
-	FILE	   *trace = NULL;
 	char	   *testname;
 	int			numrows = 10000;
 	PGresult   *res;
 	int			c;
 
-	while ((c = getopt(argc, argv, "r:t:")) != -1)
+	while ((c = getopt(argc, argv, "r:")) != -1)
 	{
 		switch (c)
 		{
@@ -2155,9 +2149,6 @@ main(int argc, char **argv)
 							optarg);
 					exit(1);
 				}
-				break;
-			case 't':			/* trace file */
-				tracefile = pg_strdup(optarg);
 				break;
 		}
 	}
@@ -2203,24 +2194,6 @@ main(int argc, char **argv)
 		pg_fatal("failed to set \"debug_parallel_query\": %s", PQerrorMessage(conn));
 	PQclear(res);
 
-	/* Set the trace file, if requested */
-	if (tracefile != NULL)
-	{
-		if (strcmp(tracefile, "-") == 0)
-			trace = stdout;
-		else
-			trace = fopen(tracefile, "w");
-		if (trace == NULL)
-			pg_fatal("could not open file \"%s\": %m", tracefile);
-
-		/* Make it line-buffered */
-		setvbuf(trace, NULL, PG_IOLBF, 0);
-
-		PQtrace(conn, trace);
-		PQsetTraceFlags(conn,
-						PQTRACE_SUPPRESS_TIMESTAMPS | PQTRACE_REGRESS_MODE);
-	}
-
 	if (strcmp(testname, "cancel") == 0)
 		test_cancel(conn);
 	else if (strcmp(testname, "disallowed_in_pipeline") == 0)
@@ -2255,9 +2228,6 @@ main(int argc, char **argv)
 
 	/* close the connection to the database and cleanup */
 	PQfinish(conn);
-
-	if (trace && trace != stdout)
-		fclose(trace);
 
 	return 0;
 }
