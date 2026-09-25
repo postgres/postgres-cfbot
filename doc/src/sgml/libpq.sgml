@@ -1444,6 +1444,46 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
        seconds, so the total time spent waiting for a connection might be
        up to 10 seconds.
       </para>
+      <para>
+       In addition to bounding network establishment, this deadline
+       also bounds client-side SCRAM PBKDF2 work performed during
+       authentication on the blocking connection path
+       (<xref linkend="libpq-PQconnectdb"/> and friends).  Connecting to
+       a server that advertises a very large SCRAM iteration count under
+       an unusually small <literal>connect_timeout</literal> may
+       therefore fail with
+       <literal>connection timeout expired</literal> during authentication
+       rather than during network establishment.
+      </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="libpq-connect-scram-max-iterations" xreflabel="scram_max_iterations">
+      <term><literal>scram_max_iterations</literal></term>
+      <listitem>
+      <para>
+       Maximum acceptable PBKDF2 iteration count advertised by the server
+       during a SCRAM authentication exchange.  If the server proposes a
+       higher count, the connection is aborted before any PBKDF2 work is
+       performed.
+       Defaults to <literal>100000</literal>, which is above PostgreSQL's
+       server-side <xref linkend="guc-scram-iterations"/> default of
+       <literal>4096</literal> and the per-role values
+       <application>psql</application>'s
+       <command>\password</command> command produces.
+       Set to <literal>0</literal> to disable the check entirely and accept
+       any iteration count.
+       Negative values are rejected at connection-option time.
+      </para>
+      <para>
+       This caps the client-side CPU cost of SCRAM authentication
+       independently of <xref linkend="libpq-connect-connect-timeout"/>,
+       so it protects callers that connect without a timeout, and
+       applies on both the blocking and asynchronous connection paths.
+       Clients connecting to servers configured with an unusually high
+       <literal>scram_iterations</literal> may need to raise this
+       parameter, or set it to <literal>0</literal> to disable the check.
+      </para>
       </listitem>
      </varlistentry>
 
@@ -9384,6 +9424,16 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       <envar>PGSYSCONFDIR</envar> sets the directory containing the
       <filename>pg_service.conf</filename> file and in a future version
       possibly other system-wide configuration files.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGSCRAMMAXITERATIONS</envar></primary>
+      </indexterm>
+      <envar>PGSCRAMMAXITERATIONS</envar> behaves the same as the <xref
+      linkend="libpq-connect-scram-max-iterations"/> connection parameter.
      </para>
     </listitem>
 

@@ -1,0 +1,122 @@
+--
+-- Direct tests for scram_parse_iterations() in src/common/scram-common.c.
+--
+CREATE EXTENSION test_scram;
+-- Accepted: non-empty digit-only strings whose value is in [1, INT_MAX].
+SELECT test_scram_parse_iterations('1');
+ test_scram_parse_iterations 
+-----------------------------
+ 1
+(1 row)
+
+SELECT test_scram_parse_iterations('4096');
+ test_scram_parse_iterations 
+-----------------------------
+ 4096
+(1 row)
+
+SELECT test_scram_parse_iterations('999999999');
+ test_scram_parse_iterations 
+-----------------------------
+ 999999999
+(1 row)
+
+SELECT test_scram_parse_iterations('2147483647'); -- INT_MAX on every supported platform
+ test_scram_parse_iterations 
+-----------------------------
+ 2147483647
+(1 row)
+
+SELECT test_scram_parse_iterations('0042');       -- leading zeros are still digits
+ test_scram_parse_iterations 
+-----------------------------
+ 42
+(1 row)
+
+-- Rejected: value below 1 (RFC 5802 requires a positive count).
+SELECT test_scram_parse_iterations('0');
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+-- Rejected: anything that is not a pure digit string.
+SELECT test_scram_parse_iterations('');           -- empty string
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('-1');         -- sign character
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('+1');         -- sign character
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations(' 1');         -- leading whitespace
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('1 ');         -- trailing whitespace
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('1.0');        -- decimal point
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('1a');         -- digit then letter
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('a1');         -- letter then digit
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('abc');        -- all letters
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('0x10');       -- hex prefix is not digits-only
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+-- Rejected: out-of-range values that would otherwise narrow to a bogus int.
+SELECT test_scram_parse_iterations('2147483648'); -- INT_MAX + 1
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('9999999999'); -- > INT_MAX on every supported platform
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
+SELECT test_scram_parse_iterations('99999999999999999999'); -- overflows long on every supported platform
+ test_scram_parse_iterations 
+-----------------------------
+ invalid
+(1 row)
+
