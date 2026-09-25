@@ -104,12 +104,34 @@ gistbeginscan(Relation r, int nkeys, int norderbys)
 		scan->xs_orderbyvals = palloc0_array(Datum, scan->numberOfOrderBys);
 		scan->xs_orderbynulls = palloc_array(bool, scan->numberOfOrderBys);
 		memset(scan->xs_orderbynulls, true, sizeof(bool) * scan->numberOfOrderBys);
-	}
 
-	so->killedItems = NULL;		/* until needed */
-	so->numKilled = 0;
-	so->curBlkno = InvalidBlockNumber;
-	so->curPageLSN = InvalidXLogRecPtr;
+		/*
+		 * Ordered scans fill a "virtual" batch by draining the
+		 * distance-ordered queue, so the batch size is a tuning knob with no
+		 * natural value. Testing has shown that a very small size will
+		 * increase per-batch overhead (and likely instruction-cache misses),
+		 * while a large size (such as MaxIndexTuplesPerPage) risks producing
+		 * many tuples that a LIMIT node never consumes.  This maxitemsbatch
+		 * is a compromise.
+		 */
+		scan->maxitemsbatch = MaxIndexTuplesPerPage / 32;
+	}
+	else
+		scan->maxitemsbatch = MaxIndexTuplesPerPage;
+
+	scan->batch_index_opaque_static = MAXALIGN(sizeof(GISTBatchData));
+
+	/*
+	 * Use second opaque area for our per-item data: a GISTBatchItem array
+	 * (with room for each item's ORDER BY distances) for ordered scans, or
+	 * just an array of qual recheck flags for unordered scans
+	 */
+	if (scan->numberOfOrderBys > 0)
+		scan->batch_index_opaque_dyn =
+			SizeOfGISTBatchItem(scan->numberOfOrderBys) * scan->maxitemsbatch;
+	else
+		scan->batch_index_opaque_dyn = sizeof(bool) * scan->maxitemsbatch;
+	scan->batch_tuples_workspace = BLCKSZ;
 
 	scan->opaque = so;
 
@@ -133,13 +155,12 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 	int			i;
 	MemoryContext oldCxt;
 
-	/* Before leaving current page, deal with any killed items */
-	if (so->numKilled > 0)
-		gistkillitems(scan);
+	if (scan->numberOfOrderBys > 0 && !scan->batchImmediateUnguard)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("GiST ordered index scans require a heap-fetching scan with an MVCC-compliant snapshot")));
 
 	/* rescan an existing indexscan --- reset state */
-	so->curBlkno = InvalidBlockNumber;
-	so->curPageLSN = InvalidXLogRecPtr;
 
 	/*
 	 * The first time through, we create the search queue in the scanCxt.
@@ -174,8 +195,7 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 
 	/*
 	 * If we're doing an index-only scan, on the first call, also initialize a
-	 * tuple descriptor to represent the returned index tuples and create a
-	 * memory context to hold them during the scan.
+	 * tuple descriptor to represent the returned index tuples.
 	 */
 	if (scan->xs_want_itup && !scan->xs_hitupdesc)
 	{
@@ -209,19 +229,12 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 		}
 		TupleDescFinalize(so->giststate->fetchTupdesc);
 		scan->xs_hitupdesc = so->giststate->fetchTupdesc;
-
-		/* Also create a memory context that will hold the returned tuples */
-		so->pageDataCxt = AllocSetContextCreate(so->giststate->scanCxt,
-												"GiST page data context",
-												ALLOCSET_DEFAULT_SIZES);
 	}
 
 	/* create new, empty pairing heap for search queue */
 	oldCxt = MemoryContextSwitchTo(so->queueCxt);
 	so->queue = pairingheap_allocate(pairingheap_GISTSearchItem_cmp, scan);
 	MemoryContextSwitchTo(oldCxt);
-
-	so->firstCall = true;
 
 	/* Update scan key, if a new one is given */
 	if (key && scan->numberOfKeys > 0)
@@ -346,7 +359,8 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 			pfree(fn_extras);
 	}
 
-	/* any previous xs_hitup will have been pfree'd in context resets above */
+	if (scan->xs_hitup)
+		pfree(scan->xs_hitup);
 	scan->xs_hitup = NULL;
 }
 
@@ -354,10 +368,6 @@ void
 gistendscan(IndexScanDesc scan)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
-
-	/* Before leaving current page, deal with any killed items */
-	if (so->numKilled > 0)
-		gistkillitems(scan);
 
 	/*
 	 * freeGISTstate is enough to clean up everything made by gistbeginscan,
