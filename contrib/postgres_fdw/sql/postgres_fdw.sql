@@ -1602,6 +1602,55 @@ REINDEX TABLE CONCURRENTLY reind_fdw_parent; -- ok
 DROP TABLE reind_fdw_parent;
 
 -- ===================================================================
+-- parameterized Append paths over foreign partitions
+-- ===================================================================
+-- With use_remote_estimate, each foreign partition gets a path parameterized
+-- by the join clause.  If add_path() discards that path for some partition
+-- (here: because the partition is empty, so the parameterized path is
+-- dominated by the unparameterized one), the planner must still be able to
+-- build a parameterized Append by reparameterizing the surviving path.
+CREATE TABLE pa_loc1 (a int);
+CREATE TABLE pa_loc2 (a int);
+CREATE INDEX ON pa_loc1 (a);
+CREATE INDEX ON pa_loc2 (a);
+CREATE TABLE pa_parent (a int) PARTITION BY HASH (a);
+CREATE FOREIGN TABLE pa_f1 PARTITION OF pa_parent
+  FOR VALUES WITH (MODULUS 2, REMAINDER 0)
+  SERVER loopback OPTIONS (table_name 'pa_loc1', use_remote_estimate 'true');
+CREATE FOREIGN TABLE pa_f2 PARTITION OF pa_parent
+  FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+  SERVER loopback OPTIONS (table_name 'pa_loc2', use_remote_estimate 'true');
+INSERT INTO pa_loc1 SELECT g FROM generate_series(1, 100000) g
+  WHERE satisfies_hash_partition('pa_parent'::regclass, 2, 0, g);
+INSERT INTO pa_loc2 SELECT g FROM generate_series(1, 100000) g
+  WHERE satisfies_hash_partition('pa_parent'::regclass, 2, 1, g);
+CREATE TABLE pa_outer (a int);
+INSERT INTO pa_outer VALUES (1);
+ANALYZE pa_loc1;
+ANALYZE pa_loc2;
+ANALYZE pa_f1;
+ANALYZE pa_f2;
+ANALYZE pa_outer;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM pa_outer o JOIN pa_parent p ON p.a = o.a;
+-- Empty one partition; its parameterized path is now dominated and dropped.
+DELETE FROM pa_f2;
+ANALYZE pa_loc2;
+ANALYZE pa_f2;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM pa_outer o JOIN pa_parent p ON p.a = o.a;
+SELECT * FROM pa_outer o JOIN pa_parent p ON p.a = o.a;
+-- Once the remote table is known to be empty, the sorted and unsorted plain
+-- scans are fuzzily equal in cost, so only the sorted one survives; we must
+-- be able to reparameterize that one, too.
+VACUUM ANALYZE pa_loc2;
+ANALYZE pa_f2;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM pa_outer o JOIN pa_parent p ON p.a = o.a;
+SELECT * FROM pa_outer o JOIN pa_parent p ON p.a = o.a;
+DROP TABLE pa_parent, pa_outer, pa_loc1, pa_loc2;
+
+-- ===================================================================
 -- conversion error
 -- ===================================================================
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE int;
