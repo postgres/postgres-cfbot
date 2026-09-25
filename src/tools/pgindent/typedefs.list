@@ -4418,6 +4418,7 @@ varatt_indirect
 varattrib_1b
 varattrib_1b_e
 varattrib_4b
+varattrib_4b_long
 varlena
 vartag_external
 vbits

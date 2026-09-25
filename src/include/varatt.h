@@ -83,9 +83,27 @@ VARATT_EXTERNAL_OID8_SET_VALUEID(varatt_external_oid8 *toast_pointer, Oid8 id)
 /*
  * These macros define the "saved size" portion of va_extinfo.  Its remaining
  * two high-order bits identify the compression method.
+ *
+ * Only the two original compression methods (pglz and lz4) are identified
+ * directly by those two bits.  Any other method uses the "long" form of the
+ * header, which is flagged by the value VARLENA_COMPRESS_METHOD_LONG in those
+ * bits and carries the actual method ID in a byte of its own following the
+ * fixed part; see varattrib_4b_long and the VARTAG_ONDISK_*_LONG TOAST
+ * pointers below.
  */
 #define VARLENA_EXTSIZE_BITS	30
 #define VARLENA_EXTSIZE_MASK	((1U << VARLENA_EXTSIZE_BITS) - 1)
+#define VARLENA_COMPRESS_METHOD_LONG	3
+
+/*
+ * Size of the compression method ID byte that the VARTAG_ONDISK_*_LONG TOAST
+ * pointers append to a varatt_external_oid or varatt_external_oid8.  No
+ * struct is declared for those pointers, because a struct containing that
+ * trailing byte would carry padding that we must not store on disk; decode
+ * the fixed part as usual and then read the extra byte (see
+ * toast_external_info_get()).
+ */
+#define VARATT_EXTERNAL_CMID_SIZE	sizeof(uint8)
 
 /*
  * varatt_indirect is a "TOAST pointer" representing an out-of-line
@@ -123,6 +141,13 @@ typedef struct varatt_expanded
  * value for VARTAG_ONDISK_OID comes from a requirement for on-disk
  * compatibility with a previous notion that the tag field was the pointer
  * datum's length.
+ *
+ * The _LONG variants of the on-disk tags denote the long form of a TOAST
+ * pointer, which appends a compression method ID byte to the corresponding
+ * plain form (see VARATT_EXTERNAL_CMID_SIZE).  It is used only for values
+ * whose compression method does not fit in the two method bits of
+ * va_extinfo.  Each _LONG tag is numbered next to its plain counterpart,
+ * but nothing relies on that.
  */
 typedef enum vartag_external
 {
@@ -130,7 +155,9 @@ typedef enum vartag_external
 	VARTAG_EXPANDED_RO = 2,
 	VARTAG_EXPANDED_RW = 3,
 	VARTAG_ONDISK_OID8 = 4,
-	VARTAG_ONDISK_OID = 18
+	VARTAG_ONDISK_OID8_LONG = 5,
+	VARTAG_ONDISK_OID = 18,
+	VARTAG_ONDISK_OID_LONG = 19
 } vartag_external;
 
 /* Is a TOAST pointer either type of expanded-object pointer? */
@@ -139,6 +166,23 @@ static inline bool
 VARTAG_IS_EXPANDED(vartag_external tag)
 {
 	return ((tag & ~1) == VARTAG_EXPANDED_RO);
+}
+
+/*
+ * Is a TOAST pointer an on-disk one with an Oid8 value ID, in either form?
+ * (Any other on-disk pointer has an Oid value ID.)
+ */
+static inline bool
+VARTAG_IS_ONDISK_OID8(vartag_external tag)
+{
+	return (tag == VARTAG_ONDISK_OID8 || tag == VARTAG_ONDISK_OID8_LONG);
+}
+
+/* Is a TOAST pointer the long form of an on-disk pointer? */
+static inline bool
+VARTAG_IS_ONDISK_LONG(vartag_external tag)
+{
+	return (tag == VARTAG_ONDISK_OID_LONG || tag == VARTAG_ONDISK_OID8_LONG);
 }
 
 /* Size of the data part of a "TOAST pointer" datum */
@@ -153,6 +197,10 @@ VARTAG_SIZE(vartag_external tag)
 		return sizeof(varatt_external_oid);
 	else if (tag == VARTAG_ONDISK_OID8)
 		return sizeof(varatt_external_oid8);
+	else if (tag == VARTAG_ONDISK_OID_LONG)
+		return sizeof(varatt_external_oid) + VARATT_EXTERNAL_CMID_SIZE;
+	else if (tag == VARTAG_ONDISK_OID8_LONG)
+		return sizeof(varatt_external_oid8) + VARATT_EXTERNAL_CMID_SIZE;
 	else
 	{
 		Assert(false);
@@ -184,6 +232,33 @@ typedef union
 		char		va_data[FLEXIBLE_ARRAY_MEMBER]; /* Compressed data */
 	}			va_compressed;
 } varattrib_4b;
+
+/*
+ * Long form of the compressed-in-line format, used when the method bits of
+ * va_tcinfo hold VARLENA_COMPRESS_METHOD_LONG.  It is the va_compressed
+ * layout above with the compression method ID inserted before the data.
+ *
+ * This is deliberately not a member of the varattrib_4b union: a member with
+ * the extra byte would pad to 12 bytes and so increase sizeof(varattrib_4b)
+ * from 8, and code all over the place inspects varlena headers of unknown or
+ * smaller size through pointers of that type.  Only ever use offsetof() on
+ * this struct, never sizeof(), as it has trailing padding.
+ */
+typedef struct
+{
+	uint32		va_header;
+	uint32		va_tcinfo;		/* As in va_compressed, with the method bits
+								 * set to VARLENA_COMPRESS_METHOD_LONG */
+	uint8		va_cmid;		/* Compression method ID */
+	char		va_data[FLEXIBLE_ARRAY_MEMBER]; /* Compressed data */
+} varattrib_4b_long;
+
+StaticAssertDecl(offsetof(varattrib_4b_long, va_tcinfo) ==
+				 offsetof(varattrib_4b, va_compressed.va_tcinfo),
+				 "varattrib_4b_long must extend va_compressed");
+StaticAssertDecl(offsetof(varattrib_4b_long, va_cmid) ==
+				 offsetof(varattrib_4b, va_compressed.va_data),
+				 "varattrib_4b_long must extend va_compressed");
 
 typedef struct
 {
@@ -321,6 +396,7 @@ typedef struct
 
 #define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
 #define VARHDRSZ_COMPRESSED		offsetof(varattrib_4b, va_compressed.va_data)
+#define VARHDRSZ_COMPRESSED_LONG	offsetof(varattrib_4b_long, va_data)
 #define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
 #define VARATT_SHORT_MAX		0x7F
 
@@ -411,7 +487,8 @@ VARATT_IS_EXTERNAL_ONDISK(const void *PTR)
 	if (!VARATT_IS_EXTERNAL(PTR))
 		return false;
 	tag = VARTAG_EXTERNAL(PTR);
-	return (tag == VARTAG_ONDISK_OID || tag == VARTAG_ONDISK_OID8);
+	return (tag == VARTAG_ONDISK_OID || tag == VARTAG_ONDISK_OID8 ||
+			VARTAG_IS_ONDISK_LONG(tag));
 }
 
 /* Is varlena datum an indirect pointer? */
@@ -546,33 +623,63 @@ VARDATA_COMPRESSED_GET_EXTSIZE(const void *PTR)
 	return ((const varattrib_4b *) PTR)->va_compressed.va_tcinfo & VARLENA_EXTSIZE_MASK;
 }
 
-/* Compression method of a compressed-in-line varlena datum */
+/*
+ * Compression method of a compressed-in-line varlena datum.  This handles
+ * both header forms, so it always returns the actual method ID.
+ */
 static inline uint32
 VARDATA_COMPRESSED_GET_COMPRESS_METHOD(const void *PTR)
 {
-	return ((const varattrib_4b *) PTR)->va_compressed.va_tcinfo >> VARLENA_EXTSIZE_BITS;
+	const varattrib_4b *va = (const varattrib_4b *) PTR;
+	uint32		method = va->va_compressed.va_tcinfo >> VARLENA_EXTSIZE_BITS;
+
+	if (method == VARLENA_COMPRESS_METHOD_LONG)
+		method = ((const varattrib_4b_long *) PTR)->va_cmid;
+	return method;
 }
 
 /*
  * Set the decompressed size and the compression method of a
  * compressed-in-line varlena datum.  The length word is not touched here; the
  * caller is expected to have set it with SET_VARSIZE_COMPRESSED().
+ *
+ * This writes the plain form of the header, so the method must be one that
+ * fits in the two method bits; VARLENA_COMPRESS_METHOD_LONG is not a method.
  */
 static inline void
 VARDATA_COMPRESSED_SET_TCINFO(void *PTR, uint32 extsize, uint32 cmethod)
 {
 	Assert(extsize > 0 && extsize <= VARLENA_EXTSIZE_MASK);
-	Assert(cmethod < (1U << (32 - VARLENA_EXTSIZE_BITS)));
+	Assert(cmethod < VARLENA_COMPRESS_METHOD_LONG);
 
 	((varattrib_4b *) PTR)->va_compressed.va_tcinfo =
 		extsize | (cmethod << VARLENA_EXTSIZE_BITS);
 }
 
 /*
+ * Same for the long form of the header: the method bits are set to
+ * VARLENA_COMPRESS_METHOD_LONG and the method goes into va_cmid.  The datum
+ * must have been laid out with VARHDRSZ_COMPRESSED_LONG bytes of header.
+ */
+static inline void
+VARDATA_COMPRESSED_SET_TCINFO_LONG(void *PTR, uint32 extsize, uint8 cmethod)
+{
+	varattrib_4b_long *va = (varattrib_4b_long *) PTR;
+
+	Assert(extsize > 0 && extsize <= VARLENA_EXTSIZE_MASK);
+
+	va->va_tcinfo = extsize |
+		((uint32) VARLENA_COMPRESS_METHOD_LONG << VARLENA_EXTSIZE_BITS);
+	va->va_cmid = cmethod;
+}
+
+/*
  * Same for the saved size of external Datums, stored in va_extinfo.
  *
- * There is deliberately no equivalent for the compression method: decode the
- * pointer with toast_external_info_get() and use its compress_method field.
+ * There is deliberately no equivalent for the compression method: in the long
+ * form of a TOAST pointer it lives in a separate byte, so it cannot be
+ * derived from va_extinfo alone.  Decode the pointer with
+ * toast_external_info_get() and use its compress_method field instead.
  */
 static inline Size
 VARATT_EXTINFO_GET_EXTSIZE(uint32 extinfo)

@@ -34,18 +34,33 @@ static bool toastid_valueid_exists(Oid toastrelid, Oid8 valueid);
  * toast_pointer_build -
  *
  *	Build an on-disk TOAST pointer datum based on the given tag from "ptr",
- *	itself a varatt_external_*.
+ *	itself a varatt_external_*.  For the long-form tags, the compression
+ *	method ID byte is appended to it.
  * ----------
  */
 static inline varlena *
-toast_pointer_build(vartag_external tag, const void *ptr)
+toast_pointer_build(vartag_external tag, const void *ptr,
+					ToastCompressionId cmid)
 {
 	varlena    *result;
+	char	   *data;
+	Size		size = VARTAG_SIZE(tag);
 
-	result = (varlena *) palloc(VARHDRSZ_EXTERNAL + VARTAG_SIZE(tag));
+	result = (varlena *) palloc(VARHDRSZ_EXTERNAL + size);
 	SET_VARTAG_EXTERNAL(result, tag);
 	Assert(VARATT_IS_EXTERNAL_ONDISK(result));
-	memcpy(VARDATA_EXTERNAL(result), ptr, VARTAG_SIZE(tag));
+	data = VARDATA_EXTERNAL(result);
+
+	if (VARTAG_IS_ONDISK_LONG(tag))
+	{
+		uint8		cmid_byte = (uint8) cmid;
+
+		Assert(cmid != TOAST_INVALID_COMPRESSION_ID &&
+			   toast_compression_id_needs_cmid_byte(cmid));
+		size -= VARATT_EXTERNAL_CMID_SIZE;
+		memcpy(data + size, &cmid_byte, sizeof(cmid_byte));
+	}
+	memcpy(data, ptr, size);
 
 	return result;
 }
@@ -111,9 +126,15 @@ toast_compress_datum(Datum value, char cmethod)
 	 */
 	if (VARSIZE(tmp) < valsize - 2)
 	{
-		/* successful compression */
+		/*
+		 * Successful compression.  The compression routine has laid out the
+		 * header in the form its method requires; fill it in accordingly.
+		 */
 		Assert(cmid != TOAST_INVALID_COMPRESSION_ID);
-		VARDATA_COMPRESSED_SET_TCINFO(tmp, valsize, cmid);
+		if (toast_compression_id_needs_cmid_byte(cmid))
+			VARDATA_COMPRESSED_SET_TCINFO_LONG(tmp, valsize, cmid);
+		else
+			VARDATA_COMPRESSED_SET_TCINFO(tmp, valsize, cmid);
 		return PointerGetDatum(tmp);
 	}
 	else
@@ -209,6 +230,8 @@ toast_save_datum(Relation rel, Datum value,
 	uint32		va_extinfo;
 	Oid8		va_valueid;
 	Oid			va_toastrelid;
+	ToastCompressionId cmid = TOAST_INVALID_COMPRESSION_ID;
+	bool		pointer_long = false;
 
 	Assert(!VARATT_IS_EXTERNAL(dval));
 
@@ -234,7 +257,9 @@ toast_save_datum(Relation rel, Datum value,
 	 *
 	 * va_extinfo stored the actual size of the data payload in the toast
 	 * records and the compression method in first 2 bits if data is
-	 * compressed.
+	 * compressed.  Methods that don't fit in those bits are flagged there
+	 * with VARLENA_COMPRESS_METHOD_LONG and require the long form of the
+	 * TOAST pointer, which carries the actual method ID in an extra byte.
 	 */
 	if (VARATT_IS_SHORT(dval))
 	{
@@ -245,7 +270,7 @@ toast_save_datum(Relation rel, Datum value,
 	}
 	else if (VARATT_IS_COMPRESSED(dval))
 	{
-		uint32		cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(dval);
+		cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(dval);
 
 		data_p = VARDATA(dval);
 		data_todo = VARSIZE(dval) - VARHDRSZ;
@@ -255,7 +280,14 @@ toast_save_datum(Relation rel, Datum value,
 		/* set external size and compression method */
 		Assert(cmid == TOAST_PGLZ_COMPRESSION_ID ||
 			   cmid == TOAST_LZ4_COMPRESSION_ID);
-		va_extinfo = data_todo | (cmid << VARLENA_EXTSIZE_BITS);
+		if (toast_compression_id_needs_cmid_byte(cmid))
+		{
+			pointer_long = true;
+			va_extinfo = data_todo |
+				((uint32) VARLENA_COMPRESS_METHOD_LONG << VARLENA_EXTSIZE_BITS);
+		}
+		else
+			va_extinfo = data_todo | ((uint32) cmid << VARLENA_EXTSIZE_BITS);
 
 		/* Assert that the numbers look like it's compressed */
 		Assert(VARATT_EXTINFO_IS_COMPRESSED(va_extinfo, va_rawsize));
@@ -400,7 +432,8 @@ toast_save_datum(Relation rel, Datum value,
 	table_close(toastrel, NoLock);
 
 	/*
-	 * Create the TOAST pointer value that we'll return
+	 * Create the TOAST pointer value that we'll return.  The long form is the
+	 * plain one followed by the compression method ID byte.
 	 */
 	if (toast_typid == OID8OID)
 	{
@@ -411,7 +444,8 @@ toast_save_datum(Relation rel, Datum value,
 		VARATT_EXTERNAL_OID8_SET_VALUEID(&toast_pointer, va_valueid);
 		toast_pointer.va_toastrelid = va_toastrelid;
 
-		result = toast_pointer_build(VARTAG_ONDISK_OID8, &toast_pointer);
+		result = toast_pointer_build(pointer_long ? VARTAG_ONDISK_OID8_LONG : VARTAG_ONDISK_OID8,
+									 &toast_pointer, cmid);
 	}
 	else
 	{
@@ -422,7 +456,8 @@ toast_save_datum(Relation rel, Datum value,
 		toast_pointer.va_valueid = (Oid) va_valueid;
 		toast_pointer.va_toastrelid = va_toastrelid;
 
-		result = toast_pointer_build(VARTAG_ONDISK_OID, &toast_pointer);
+		result = toast_pointer_build(pointer_long ? VARTAG_ONDISK_OID_LONG : VARTAG_ONDISK_OID,
+									 &toast_pointer, cmid);
 	}
 
 	return PointerGetDatum(result);
