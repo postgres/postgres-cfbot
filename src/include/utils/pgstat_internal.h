@@ -536,6 +536,9 @@ typedef struct PgStatShared_Backend
 {
 	PgStatShared_Common header;
 	PgStat_Backend stats;
+
+	/* copy of stats.userid, to restore it after a reset */
+	Oid			userid;
 } PgStatShared_Backend;
 
 /*

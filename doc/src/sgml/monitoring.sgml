@@ -5799,6 +5799,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         the background writer, the startup process and the autovacuum launcher
         as they are already visible in the <structname>pg_stat_io</structname>
         view and there is only one of each.
+       </para>
+       <para>
+        This function returns no rows unless the caller is a superuser, has
+        privileges of the <literal>pg_read_all_stats</literal> role, or is a
+        member of the role that owns the backend.
        </para></entry>
       </row>
 
@@ -5834,6 +5839,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <para>
         The function does not return lock statistics for the checkpointer,
         the background writer, the startup process and the autovacuum launcher.
+       </para>
+       <para>
+        This function returns no rows unless the caller is a superuser, has
+        privileges of the <literal>pg_read_all_stats</literal> role, or is a
+        member of the role that owns the backend.
        </para></entry>
       </row>
 
@@ -5853,6 +5863,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <para>
         The function does not return WAL statistics for the checkpointer,
         the background writer, the startup process and the autovacuum launcher.
+       </para>
+       <para>
+        This function returns NULL unless the caller is a superuser, has
+        privileges of the <literal>pg_read_all_stats</literal> role, or is a
+        member of the role that owns the backend.
        </para></entry>
       </row>
 
@@ -6209,6 +6224,16 @@ SELECT pg_stat_get_backend_pid(backendid) AS pid,
        pg_stat_get_backend_activity(backendid) AS query
 FROM pg_stat_get_backend_idset() AS backendid;
 </programlisting>
+  </para>
+
+  <para>
+   These functions are security restricted in the same way as
+   <structname>pg_stat_activity</structname>.  The existence of a session and
+   its general properties, such as its session user and database, are visible
+   to all users, but the details of a session's activity are only shown if
+   the caller is a superuser, has privileges of the
+   <link linkend="predefined-role-pg-monitor"><literal>pg_read_all_stats</literal></link>
+   role, or is a member of the role that owns the session.
   </para>
 
    <table id="monitoring-stats-backend-funcs-table">
