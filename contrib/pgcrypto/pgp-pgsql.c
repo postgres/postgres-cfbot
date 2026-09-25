@@ -164,6 +164,24 @@ show_debug(const char *msg)
 	ereport(NOTICE, (errmsg("dbg: %s", msg)));
 }
 
+/*
+ * Parse the value of an integer option.  Don't use atoi() here, as it would
+ * silently turn a value like "foo" into 0, which for s2k-mode means no salt.
+ */
+static int
+parse_int_arg(const char *val)
+{
+	char	   *endptr;
+	int			result;
+
+	errno = 0;
+	result = strtoint(val, &endptr, 10);
+	if (errno != 0 || endptr == val || *endptr != '\0')
+		px_THROW_ERROR(PXE_ARGUMENT_ERROR);
+
+	return result;
+}
+
 static int
 set_arg(PGP_Context *ctx, char *key, char *val,
 		struct debug_expect *ex)
@@ -173,34 +191,34 @@ set_arg(PGP_Context *ctx, char *key, char *val,
 	if (strcmp(key, "cipher-algo") == 0)
 		res = pgp_set_cipher_algo(ctx, val);
 	else if (strcmp(key, "disable-mdc") == 0)
-		res = pgp_disable_mdc(ctx, atoi(val));
+		res = pgp_disable_mdc(ctx, parse_int_arg(val));
 	else if (strcmp(key, "sess-key") == 0)
-		res = pgp_set_sess_key(ctx, atoi(val));
+		res = pgp_set_sess_key(ctx, parse_int_arg(val));
 	else if (strcmp(key, "s2k-mode") == 0)
-		res = pgp_set_s2k_mode(ctx, atoi(val));
+		res = pgp_set_s2k_mode(ctx, parse_int_arg(val));
 	else if (strcmp(key, "s2k-count") == 0)
-		res = pgp_set_s2k_count(ctx, atoi(val));
+		res = pgp_set_s2k_count(ctx, parse_int_arg(val));
 	else if (strcmp(key, "s2k-digest-algo") == 0)
 		res = pgp_set_s2k_digest_algo(ctx, val);
 	else if (strcmp(key, "s2k-cipher-algo") == 0)
 		res = pgp_set_s2k_cipher_algo(ctx, val);
 	else if (strcmp(key, "compress-algo") == 0)
-		res = pgp_set_compress_algo(ctx, atoi(val));
+		res = pgp_set_compress_algo(ctx, parse_int_arg(val));
 	else if (strcmp(key, "compress-level") == 0)
-		res = pgp_set_compress_level(ctx, atoi(val));
+		res = pgp_set_compress_level(ctx, parse_int_arg(val));
 	else if (strcmp(key, "convert-crlf") == 0)
-		res = pgp_set_convert_crlf(ctx, atoi(val));
+		res = pgp_set_convert_crlf(ctx, parse_int_arg(val));
 	else if (strcmp(key, "unicode-mode") == 0)
-		res = pgp_set_unicode_mode(ctx, atoi(val));
+		res = pgp_set_unicode_mode(ctx, parse_int_arg(val));
 	else if (strcmp(key, "ignore-cipher-failure") == 0)
-		res = pgp_set_ignore_cipher_failure(ctx, atoi(val));
+		res = pgp_set_ignore_cipher_failure(ctx, parse_int_arg(val));
 
 	/*
 	 * The remaining options are for debugging/testing and are therefore not
 	 * documented in the user-facing docs.
 	 */
 	else if (ex != NULL && strcmp(key, "debug") == 0)
-		ex->debug = atoi(val);
+		ex->debug = parse_int_arg(val);
 	else if (ex != NULL && strcmp(key, "expect-cipher-algo") == 0)
 	{
 		ex->expect = 1;
@@ -209,22 +227,22 @@ set_arg(PGP_Context *ctx, char *key, char *val,
 	else if (ex != NULL && strcmp(key, "expect-disable-mdc") == 0)
 	{
 		ex->expect = 1;
-		ex->disable_mdc = atoi(val);
+		ex->disable_mdc = parse_int_arg(val);
 	}
 	else if (ex != NULL && strcmp(key, "expect-sess-key") == 0)
 	{
 		ex->expect = 1;
-		ex->use_sess_key = atoi(val);
+		ex->use_sess_key = parse_int_arg(val);
 	}
 	else if (ex != NULL && strcmp(key, "expect-s2k-mode") == 0)
 	{
 		ex->expect = 1;
-		ex->s2k_mode = atoi(val);
+		ex->s2k_mode = parse_int_arg(val);
 	}
 	else if (ex != NULL && strcmp(key, "expect-s2k-count") == 0)
 	{
 		ex->expect = 1;
-		ex->s2k_count = atoi(val);
+		ex->s2k_count = parse_int_arg(val);
 	}
 	else if (ex != NULL && strcmp(key, "expect-s2k-digest-algo") == 0)
 	{
@@ -239,12 +257,12 @@ set_arg(PGP_Context *ctx, char *key, char *val,
 	else if (ex != NULL && strcmp(key, "expect-compress-algo") == 0)
 	{
 		ex->expect = 1;
-		ex->compress_algo = atoi(val);
+		ex->compress_algo = parse_int_arg(val);
 	}
 	else if (ex != NULL && strcmp(key, "expect-unicode-mode") == 0)
 	{
 		ex->expect = 1;
-		ex->unicode_mode = atoi(val);
+		ex->unicode_mode = parse_int_arg(val);
 	}
 	else
 		res = PXE_ARGUMENT_ERROR;
