@@ -676,10 +676,10 @@ UpdateLogicalDecodingStatusEndOfRecovery(void)
 	/*
 	 * Ensure all running processes have the updated status. We don't need to
 	 * wait for running transactions to finish as we don't accept any writes
-	 * yet. On the other hand, we need to wait for synchronizing
-	 * XLogLogicalInfo even if we've not updated the status above as the
-	 * status have been turned on and off during recovery, having running
-	 * processes have different status on their local caches.
+	 * yet. On the other hand, we need to wait for XLogLogicalInfo to be
+	 * synchronized even if we've not updated the status above, as the status
+	 * may have been turned on and off during recovery, leaving running
+	 * processes with different values in their local caches.
 	 */
 	if (IsUnderPostmaster)
 		WaitForProcSignalBarrier(
