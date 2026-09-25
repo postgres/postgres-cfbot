@@ -311,6 +311,32 @@ ROLLBACK;
       size, the number of I/O waits, and the average number of concurrent I/O
       requests). The request size is reported in blocks.
       In text format, only non-zero values are printed.
+     </para>
+     <para>
+      If possible, this option also displays <emphasis>Storage I/O</emphasis>
+      statistics at the end of the plan. The storage I/O
+      <emphasis>read</emphasis> value indicates the number of read operations
+      performed on storage during query planning and execution, while the
+      Storage I/O <emphasis>write</emphasis> value indicates the number of
+      write operations performed on storage during these phases.
+      These values are obtained from the <function>getrusage()</function> system
+      call for the backend process executing the query and for any parallel
+      query worker processes involved in the query.  Unlike the per-node I/O
+      information described above, these values cover the entire query and
+      are not limited to I/O performed by scan nodes.
+      On platforms where <function>getrusage()</function> does not provide
+      storage I/O counters, such as Windows, the values are always zero even
+      if reads or writes actually occur.  Also, when
+      <xref linkend="guc-io-method"/> is set to <literal>worker</literal>, no output
+      will be shown, as I/O handled by asynchronous workers cannot be measured
+      accurately.
+      The timing and unit of measurement for read and write operations may vary
+      depending on the platform. For example, on Linux, a read is counted only
+      if this process caused data to be fetched from the storage layer, and a
+      write is counted at the page-dirtying time. On Linux, the unit of
+      measurement for read and write operations is 512 bytes.
+     </para>
+     <para>
       This parameter may only be used when <literal>ANALYZE</literal> is also
       enabled.  It defaults to <literal>FALSE</literal>.
      </para>
