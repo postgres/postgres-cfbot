@@ -172,7 +172,14 @@ my_tableam_handler(PG_FUNCTION_ARGS)
     <listitem>
      <para>
       The locator's size in bytes; a negative value is the largest size of a
-      variable-width locator.
+      variable-width locator.  An index access method stores a locator as a
+      <acronym>TID</acronym> unless it sets
+      <structfield>amcanvarlocator</structfield> (reported by
+      <function>pg_indexam_has_property</function> as
+      <literal>can_var_locator</literal>), so it can be used only on a table
+      whose locator is fixed-width and no wider than 6 bytes; otherwise
+      <command>CREATE INDEX</command>, and any command that rebuilds the
+      table's indexes, fails.
      </para>
     </listitem>
    </varlistentry>
