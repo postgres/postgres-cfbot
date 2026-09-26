@@ -938,13 +938,19 @@ foreach my $run (sort keys %pgdump_runs)
 		next;
 	}
 
-	$node->command_ok(\@{ $pgdump_runs{$run}->{dump_cmd} },
-		"$run: pg_dump runs");
+	$node->command_checks_all(
+		\@{ $pgdump_runs{$run}->{dump_cmd} },
+		0, [qr/^/],
+		[qr/^(?!.*pg_dump: warning:)/s],
+		"$run: pg_dump runs without warnings");
 
 	if ($pgdump_runs{$run}->{restore_cmd})
 	{
-		$node->command_ok(\@{ $pgdump_runs{$run}->{restore_cmd} },
-			"$run: pg_restore runs");
+		$node->command_checks_all(
+			\@{ $pgdump_runs{$run}->{restore_cmd} },
+			0, [qr/^/],
+			[qr/^(?!.*pg_restore: warning:)/s],
+			"$run: pg_restore runs without warnings");
 	}
 
 	if ($pgdump_runs{$run}->{test_key})
