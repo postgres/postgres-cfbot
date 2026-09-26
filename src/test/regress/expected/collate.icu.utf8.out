@@ -1785,8 +1785,8 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM test3cs t1
   WHERE EXISTS (SELECT 1 FROM test3cs t2 WHERE t1.x = t2.x COLLATE case_insensitive)
 ORDER BY 1;
-                    QUERY PLAN                    
---------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Sort
    Sort Key: t1.x COLLATE case_sensitive
    ->  Hash Semi Join
@@ -1794,7 +1794,8 @@ ORDER BY 1;
          ->  Seq Scan on test3cs t1
          ->  Hash
                ->  Seq Scan on test3cs t2
-(7 rows)
+                     Filter: ((x)::text IS NOT NULL)
+(8 rows)
 
 SELECT * FROM test3cs t1
   WHERE EXISTS (SELECT 1 FROM test3cs t2 WHERE t1.x = t2.x COLLATE case_insensitive)
