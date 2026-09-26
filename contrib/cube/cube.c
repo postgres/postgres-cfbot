@@ -1377,7 +1377,7 @@ distance_chebyshev(PG_FUNCTION_ARGS)
 	{
 		d = fabs(distance_1D(LL_COORD(a, i), UR_COORD(a, i),
 							 LL_COORD(b, i), UR_COORD(b, i)));
-		if (d > distance)
+		if (isnan(d) || d > distance)
 			distance = d;
 	}
 
@@ -1385,7 +1385,7 @@ distance_chebyshev(PG_FUNCTION_ARGS)
 	for (i = DIM(b); i < DIM(a); i++)
 	{
 		d = fabs(distance_1D(LL_COORD(a, i), UR_COORD(a, i), 0.0, 0.0));
-		if (d > distance)
+		if (isnan(d) || d > distance)
 			distance = d;
 	}
 
@@ -1511,6 +1511,14 @@ g_cube_distance(PG_FUNCTION_ARGS)
 static double
 distance_1D(double a1, double a2, double b1, double b2)
 {
+	/*
+	 * If any endpoint is NaN, all the comparisons below are false and we'd
+	 * fall through to the "intersecting" case and return 0.  Return NaN
+	 * instead, so that callers propagate it as ordinary float arithmetic does.
+	 */
+	if (isnan(a1) || isnan(a2) || isnan(b1) || isnan(b2))
+		return get_float8_nan();
+
 	/* interval (a) is entirely on the left of (b) */
 	if ((a1 <= b1) && (a2 <= b1) && (a1 <= b2) && (a2 <= b2))
 		return (Min(b1, b2) - Max(a1, a2));
