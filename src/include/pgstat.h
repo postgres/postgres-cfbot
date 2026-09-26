@@ -116,6 +116,7 @@ typedef struct PgStat_BackendSubEntry
 	PgStat_Counter sync_seq_error_count;
 	PgStat_Counter sync_table_error_count;
 	PgStat_Counter conflict_count[CONFLICT_NUM_TYPES];
+	PgStat_Counter worker_launch_failure_count;
 } PgStat_BackendSubEntry;
 
 /* ----------
@@ -502,6 +503,7 @@ typedef struct PgStat_StatSubEntry
 	PgStat_Counter sync_seq_error_count;
 	PgStat_Counter sync_table_error_count;
 	PgStat_Counter conflict_count[CONFLICT_NUM_TYPES];
+	PgStat_Counter worker_launch_failure_count;
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
@@ -925,7 +927,7 @@ extern void pgstat_report_subscription_conflict(Oid subid, ConflictType type);
 extern void pgstat_create_subscription(Oid subid);
 extern void pgstat_drop_subscription(Oid subid);
 extern PgStat_StatSubEntry *pgstat_fetch_stat_subscription(Oid subid);
-
+extern void pgstat_report_subscription_worker_launch_failure(Oid subid);
 
 /*
  * Functions in pgstat_xact.c
