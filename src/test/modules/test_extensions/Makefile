@@ -10,7 +10,9 @@ EXTENSION = test_ext1 test_ext2 test_ext3 test_ext4 test_ext5 test_ext6 \
             test_ext_extschema \
             test_ext_evttrig \
             test_ext_set_schema \
-            test_ext_req_schema1 test_ext_req_schema2 test_ext_req_schema3
+            test_ext_req_schema1 test_ext_req_schema2 test_ext_req_schema3 \
+            test_ext_owned_schema test_ext_owned_schema_nosuperuser \
+            test_ext_owned_schema_trusted test_ext_owned_schema_relocatable
 
 OBJS = test_ext.o
 
@@ -28,7 +30,14 @@ DATA = test_ext1--1.0.sql test_ext2--1.0.sql test_ext3--1.0.sql \
        test_ext_set_schema--1.0.sql \
        test_ext_req_schema1--1.0.sql \
        test_ext_req_schema2--1.0.sql \
-       test_ext_req_schema3--1.0.sql
+       test_ext_req_schema3--1.0.sql \
+       test_ext_owned_schema--1.0.sql \
+       test_ext_owned_schema--1.0--1.1.sql \
+       test_ext_owned_schema_nosuperuser--1.0.sql \
+       test_ext_owned_schema_nosuperuser--1.0--1.1.sql \
+       test_ext_owned_schema_trusted--1.0.sql \
+       test_ext_owned_schema_trusted--1.0--1.1.sql \
+       test_ext_owned_schema_relocatable--1.0.sql
 
 REGRESS = test_extensions test_extdepend
 TAP_TESTS = 1
