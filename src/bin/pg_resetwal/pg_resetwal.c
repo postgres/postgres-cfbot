@@ -922,6 +922,7 @@ RewriteControlFile(void)
 	ControlFile.backupStartPoint = InvalidXLogRecPtr;
 	ControlFile.backupEndPoint = InvalidXLogRecPtr;
 	ControlFile.backupEndRequired = false;
+	ControlFile.backupLabelRequired = false;
 
 	/*
 	 * The old WAL is gone and the new position may lie below the old
