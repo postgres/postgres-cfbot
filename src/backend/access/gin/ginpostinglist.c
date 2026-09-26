@@ -279,9 +279,12 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 	unsigned char *endptr;
 
 	/*
-	 * Guess an initial size of the array.
+	 * Size from len, not segment->nbytes.  len can be smaller than a segment
+	 * header, so reading nbytes here could run off the buffer.  len also
+	 * bounds the item count, since every item costs at least a byte, so a
+	 * valid list never grows the array.
 	 */
-	nallocated = segment->nbytes * 2 + 1;
+	nallocated = Max(len, 1);
 	result = palloc_array(ItemPointerData, nallocated);
 
 	ndecoded = 0;
