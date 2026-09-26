@@ -108,6 +108,15 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 
+/* pg_stat_get_vacuum_failsafe_count */
+PG_STAT_GET_RELENTRY_INT64(vacuum_failsafe_count)
+
+/* pg_stat_get_visible_page_marks_cleared */
+PG_STAT_GET_RELENTRY_INT64(visible_page_marks_cleared)
+
+/* pg_stat_get_frozen_page_marks_cleared */
+PG_STAT_GET_RELENTRY_INT64(frozen_page_marks_cleared)
+
 /*
  * Accessor macro for index stats entries (PgStat_StatIdxEntry).
  */
@@ -169,6 +178,43 @@ PG_STAT_GET_RELENTRY_FLOAT8(total_analyze_time)
 
 /* pg_stat_get_total_autoanalyze_time */
 PG_STAT_GET_RELENTRY_FLOAT8(total_autoanalyze_time)
+
+/* pg_stat_get_total_vacuum_delay_time */
+PG_STAT_GET_RELENTRY_FLOAT8(total_vacuum_delay_time)
+
+/* pg_stat_get_total_autovacuum_delay_time */
+PG_STAT_GET_RELENTRY_FLOAT8(total_autovacuum_delay_time)
+
+/*
+ * Accessor macro for float8 fields of index stats entries.
+ */
+#define PG_STAT_GET_IDXENTRY_FLOAT8(stat)						\
+Datum															\
+CppConcat(pg_stat_get_idx_,stat)(PG_FUNCTION_ARGS)				\
+{																\
+	Oid			relid = PG_GETARG_OID(0);						\
+	double		result;											\
+	PgStat_StatIdxEntry *idxentry;								\
+																\
+	if ((idxentry = pgstat_fetch_stat_idxentry(relid)) == NULL)	\
+		result = 0;												\
+	else														\
+		result = (double) (idxentry->stat);						\
+																\
+	PG_RETURN_FLOAT8(result);									\
+}
+
+/* pg_stat_get_idx_total_vacuum_time */
+PG_STAT_GET_IDXENTRY_FLOAT8(total_vacuum_time)
+
+/* pg_stat_get_idx_total_autovacuum_time */
+PG_STAT_GET_IDXENTRY_FLOAT8(total_autovacuum_time)
+
+/* pg_stat_get_idx_total_vacuum_delay_time */
+PG_STAT_GET_IDXENTRY_FLOAT8(total_vacuum_delay_time)
+
+/* pg_stat_get_idx_total_autovacuum_delay_time */
+PG_STAT_GET_IDXENTRY_FLOAT8(total_autovacuum_delay_time)
 
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
@@ -1152,6 +1198,9 @@ PG_STAT_GET_DBENTRY_INT64(conflict_tablespace)
 /* pg_stat_get_db_deadlocks */
 PG_STAT_GET_DBENTRY_INT64(deadlocks)
 
+/* pg_stat_get_db_vacuum_interrupt_count */
+PG_STAT_GET_DBENTRY_INT64(vacuum_interrupt_count)
+
 /* pg_stat_get_db_sessions */
 PG_STAT_GET_DBENTRY_INT64(sessions)
 
@@ -1300,6 +1349,21 @@ PG_STAT_GET_DBENTRY_FLOAT8_MS(blk_write_time)
 
 /* pg_stat_get_db_idle_in_transaction_time */
 PG_STAT_GET_DBENTRY_FLOAT8_MS(idle_in_transaction_time)
+
+/* pg_stat_get_db_total_vacuum_time */
+PG_STAT_GET_DBENTRY_FLOAT8_MS(total_vacuum_time)
+
+/* pg_stat_get_db_total_autovacuum_time */
+PG_STAT_GET_DBENTRY_FLOAT8_MS(total_autovacuum_time)
+
+/* pg_stat_get_db_total_vacuum_delay_time */
+PG_STAT_GET_DBENTRY_FLOAT8_MS(total_vacuum_delay_time)
+
+/* pg_stat_get_db_total_autovacuum_delay_time */
+PG_STAT_GET_DBENTRY_FLOAT8_MS(total_autovacuum_delay_time)
+
+/* pg_stat_get_db_vacuum_failsafe_count */
+PG_STAT_GET_DBENTRY_INT64(vacuum_failsafe_count)
 
 /* pg_stat_get_db_session_time */
 PG_STAT_GET_DBENTRY_FLOAT8_MS(session_time)

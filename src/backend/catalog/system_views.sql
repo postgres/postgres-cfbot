@@ -747,7 +747,12 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_total_autovacuum_time(C.oid) AS total_autovacuum_time,
             pg_stat_get_total_analyze_time(C.oid) AS total_analyze_time,
             pg_stat_get_total_autoanalyze_time(C.oid) AS total_autoanalyze_time,
-            pg_stat_get_stat_reset_time(C.oid) AS stats_reset
+            pg_stat_get_total_vacuum_delay_time(C.oid) AS total_vacuum_delay_time,
+            pg_stat_get_total_autovacuum_delay_time(C.oid) AS total_autovacuum_delay_time,
+            pg_stat_get_vacuum_failsafe_count(C.oid) AS vacuum_failsafe_count,
+            pg_stat_get_stat_reset_time(C.oid) AS stats_reset,
+            pg_stat_get_visible_page_marks_cleared(C.oid) AS visible_page_marks_cleared,
+            pg_stat_get_frozen_page_marks_cleared(C.oid) AS frozen_page_marks_cleared
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
@@ -869,6 +874,10 @@ CREATE VIEW pg_stat_all_indexes AS
             pg_stat_get_idx_lastscan(I.oid) AS last_idx_scan,
             pg_stat_get_idx_tuples_returned(I.oid) AS idx_tup_read,
             pg_stat_get_idx_tuples_fetched(I.oid) AS idx_tup_fetch,
+            pg_stat_get_idx_total_vacuum_time(I.oid) AS total_vacuum_time,
+            pg_stat_get_idx_total_autovacuum_time(I.oid) AS total_autovacuum_time,
+            pg_stat_get_idx_total_vacuum_delay_time(I.oid) AS total_vacuum_delay_time,
+            pg_stat_get_idx_total_autovacuum_delay_time(I.oid) AS total_autovacuum_delay_time,
             pg_stat_get_idx_stat_reset_time(I.oid) AS stats_reset
     FROM pg_class C JOIN
             pg_index X ON C.oid = X.indrelid JOIN
@@ -1172,6 +1181,12 @@ CREATE VIEW pg_stat_database AS
             pg_stat_get_db_checksum_last_failure(D.oid) AS checksum_last_failure,
             pg_stat_get_db_blk_read_time(D.oid) AS blk_read_time,
             pg_stat_get_db_blk_write_time(D.oid) AS blk_write_time,
+            pg_stat_get_db_total_vacuum_time(D.oid) AS total_vacuum_time,
+            pg_stat_get_db_total_autovacuum_time(D.oid) AS total_autovacuum_time,
+            pg_stat_get_db_total_vacuum_delay_time(D.oid) AS total_vacuum_delay_time,
+            pg_stat_get_db_total_autovacuum_delay_time(D.oid) AS total_autovacuum_delay_time,
+            pg_stat_get_db_vacuum_failsafe_count(D.oid) AS vacuum_failsafe_count,
+            pg_stat_get_db_vacuum_interrupt_count(D.oid) AS vacuum_interrupt_count,
             pg_stat_get_db_session_time(D.oid) AS session_time,
             pg_stat_get_db_active_time(D.oid) AS active_time,
             pg_stat_get_db_idle_in_transaction_time(D.oid) AS idle_in_transaction_time,

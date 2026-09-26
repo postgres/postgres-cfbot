@@ -36,6 +36,13 @@ static int	pgStatXactCommit = 0;
 static int	pgStatXactRollback = 0;
 static PgStat_Counter pgLastSessionReportTime = 0;
 
+/*
+ * Vacuums interrupted by an error, counted from the vacuum error callback
+ * and folded into the pending database entries by pgstat_update_dbstats().
+ */
+static PgStat_Counter pgStatVacuumErrors = 0;
+static PgStat_Counter pgStatSharedVacuumErrors = 0;
+
 
 /*
  * Remove entry for the database being dropped.
@@ -326,8 +333,8 @@ pgstat_update_parallel_workers_stats(PgStat_Counter workers_to_launch,
 }
 
 /*
- * Subroutine for pgstat_report_stat(): Handle xact commit/rollback and I/O
- * timings.
+ * Subroutine for pgstat_report_stat(): Handle xact commit/rollback, I/O
+ * timings and interrupted vacuums.
  */
 void
 pgstat_update_dbstats(TimestampTz ts)
@@ -344,13 +351,14 @@ pgstat_update_dbstats(TimestampTz ts)
 	dbentry = pgstat_prep_database_pending(MyDatabaseId);
 
 	/*
-	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
-	 * current database.
+	 * Accumulate xact commit/rollback, I/O timings and interrupted vacuums to
+	 * stats entry of the current database.
 	 */
 	dbentry->xact_commit += pgStatXactCommit;
 	dbentry->xact_rollback += pgStatXactRollback;
 	dbentry->blk_read_time += pgStatBlockReadTime;
 	dbentry->blk_write_time += pgStatBlockWriteTime;
+	dbentry->vacuum_interrupt_count += pgStatVacuumErrors;
 
 	if (pgstat_should_report_connstat())
 	{
@@ -374,6 +382,15 @@ pgstat_update_dbstats(TimestampTz ts)
 	pgStatBlockWriteTime = 0;
 	pgStatActiveTime = 0;
 	pgStatTransactionIdleTime = 0;
+	pgStatVacuumErrors = 0;
+
+	/* Interrupted vacuums of shared relations go to the InvalidOid entry. */
+	if (pgStatSharedVacuumErrors > 0)
+	{
+		dbentry = pgstat_prep_database_pending(InvalidOid);
+		dbentry->vacuum_interrupt_count += pgStatSharedVacuumErrors;
+		pgStatSharedVacuumErrors = 0;
+	}
 }
 
 /*
@@ -387,6 +404,32 @@ static bool
 pgstat_should_report_connstat(void)
 {
 	return MyBackendType == B_BACKEND;
+}
+
+/*
+ * Count a vacuum that was interrupted by an error.
+ *
+ * This is called from the vacuum error callback, that is from inside the
+ * error handler, so it must not do anything that could fail or block: the
+ * error may well have been raised by the locking code itself, possibly
+ * while holding an LWLock.  Just bump a counter here; like the xact
+ * commit/rollback counters, it reaches the pending database entry in
+ * pgstat_update_dbstats(), outside of any transaction, at the next
+ * pgstat_report_stat().
+ *
+ * Vacuums of shared relations are counted in the InvalidOid entry, matching
+ * how their other stats are accounted.
+ */
+void
+pgstat_count_vacuum_error(bool shared)
+{
+	if (!pgstat_track_counts)
+		return;
+
+	if (shared)
+		pgStatSharedVacuumErrors++;
+	else
+		pgStatVacuumErrors++;
 }
 
 /*
@@ -480,6 +523,12 @@ pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	PGSTAT_ACCUM_DBCOUNT(blk_read_time);
 	PGSTAT_ACCUM_DBCOUNT(blk_write_time);
+	PGSTAT_ACCUM_DBCOUNT(total_vacuum_time);
+	PGSTAT_ACCUM_DBCOUNT(total_autovacuum_time);
+	PGSTAT_ACCUM_DBCOUNT(total_vacuum_delay_time);
+	PGSTAT_ACCUM_DBCOUNT(total_autovacuum_delay_time);
+	PGSTAT_ACCUM_DBCOUNT(vacuum_failsafe_count);
+	PGSTAT_ACCUM_DBCOUNT(vacuum_interrupt_count);
 
 	PGSTAT_ACCUM_DBCOUNT(sessions);
 	PGSTAT_ACCUM_DBCOUNT(session_time);
