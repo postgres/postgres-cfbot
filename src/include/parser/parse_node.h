@@ -82,6 +82,8 @@ typedef enum ParseExprKind
 	EXPR_KIND_COPY_WHERE,		/* WHERE condition in COPY FROM */
 	EXPR_KIND_GENERATED_COLUMN, /* generation expression for a column */
 	EXPR_KIND_CYCLE_MARK,		/* cycle mark value */
+	EXPR_KIND_TYPECAST_DEFAULT, /* default expression in CAST(expr AS type
+								 * DEFAULT defexor ON CONVERSION ERROR) */
 } ParseExprKind;
 
 
@@ -180,6 +182,10 @@ typedef Node *(*CoerceParamHook) (ParseState *pstate, Param *param,
  * p_last_srf: the set-returning FuncExpr or OpExpr most recently found in
  * the query, or NULL if none.
  *
+ * p_escontext: if not NULL, an ErrorSaveContext under which expressions are
+ * evaluated during parse analysis, so that conversion errors are reported
+ * softly instead of being thrown.
+ *
  * p_pre_columnref_hook, etc: optional parser hook functions for modifying the
  * interpretation of ColumnRefs and ParamRefs.
  *
@@ -225,6 +231,8 @@ struct ParseState
 	bool		p_hasModifyingCTE;
 
 	Node	   *p_last_srf;		/* most recent set-returning func/op found */
+
+	Node	   *p_escontext;	/* ErrorSaveContext pointer */
 
 	/*
 	 * Optional hook functions for parser callbacks.  These are null unless

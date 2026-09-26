@@ -153,6 +153,8 @@ void	   *referenced_functions[] =
 	ExecEvalFieldStoreForm,
 	ExecEvalFuncExprFusage,
 	ExecEvalFuncExprStrictFusage,
+	ExecEvalFuncSafe,
+	ExecEvalFuncSafeFusage,
 	ExecEvalGroupingFunc,
 	ExecEvalMergeSupportFunc,
 	ExecEvalMinMax,
