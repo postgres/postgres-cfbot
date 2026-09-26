@@ -17,6 +17,16 @@ CREATE TABLESPACE regress_tblspacewith LOCATION '' WITH (random_page_cost = 3.0)
 -- check to see the parameter was used
 SELECT spcoptions FROM pg_tablespace WHERE spcname = 'regress_tblspacewith';
 
+-- check size functions
+SELECT pg_tablespace_size('pg_default') BETWEEN 1_000_000 and 10_000_000_000, -- rough sanity check
+       pg_tablespace_size('pg_global') BETWEEN 100_000 and 10_000_000,
+       pg_tablespace_size('regress_tblspacewith'); -- empty
+SELECT pg_tablespace_size('missing');
+SELECT pg_tablespace_avail('pg_default') > 1_000_000,
+       pg_tablespace_avail('pg_global') > 1_000_000,
+       pg_tablespace_avail('regress_tblspacewith') > 1_000_000;
+SELECT pg_tablespace_avail('missing');
+
 -- drop the tablespace so we can re-use the location
 DROP TABLESPACE regress_tblspacewith;
 
