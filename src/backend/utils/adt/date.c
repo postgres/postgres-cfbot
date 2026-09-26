@@ -2176,7 +2176,12 @@ time_pl_interval(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 				 errmsg("cannot add infinite interval to time")));
 
-	result = time + span->time;
+	/*
+	 * The result wraps around at midnight, so only the interval's time field
+	 * modulo one day matters.  Reducing it first also prevents integer
+	 * overflow when the interval is very large.
+	 */
+	result = time + (span->time % USECS_PER_DAY);
 	result -= result / USECS_PER_DAY * USECS_PER_DAY;
 	if (result < INT64CONST(0))
 		result += USECS_PER_DAY;
@@ -2200,7 +2205,8 @@ time_mi_interval(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 				 errmsg("cannot subtract infinite interval from time")));
 
-	result = time - span->time;
+	/* As in time_pl_interval, reduce modulo one day to prevent overflow */
+	result = time - (span->time % USECS_PER_DAY);
 	result -= result / USECS_PER_DAY * USECS_PER_DAY;
 	if (result < INT64CONST(0))
 		result += USECS_PER_DAY;
@@ -2728,7 +2734,8 @@ timetz_pl_interval(PG_FUNCTION_ARGS)
 
 	result = palloc_object(TimeTzADT);
 
-	result->time = time->time + span->time;
+	/* As in time_pl_interval, reduce modulo one day to prevent overflow */
+	result->time = time->time + (span->time % USECS_PER_DAY);
 	result->time -= result->time / USECS_PER_DAY * USECS_PER_DAY;
 	if (result->time < INT64CONST(0))
 		result->time += USECS_PER_DAY;
@@ -2756,7 +2763,8 @@ timetz_mi_interval(PG_FUNCTION_ARGS)
 
 	result = palloc_object(TimeTzADT);
 
-	result->time = time->time - span->time;
+	/* As in time_pl_interval, reduce modulo one day to prevent overflow */
+	result->time = time->time - (span->time % USECS_PER_DAY);
 	result->time -= result->time / USECS_PER_DAY * USECS_PER_DAY;
 	if (result->time < INT64CONST(0))
 		result->time += USECS_PER_DAY;
