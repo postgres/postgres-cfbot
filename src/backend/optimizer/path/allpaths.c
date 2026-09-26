@@ -4161,6 +4161,25 @@ subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 	 */
 	if (subquery->setOperations == NULL)
 		check_output_expressions(subquery, safetyInfo);
+	else if (subquery->hasDistinctOn)
+	{
+		ListCell   *lc;
+
+		foreach(lc, subquery->targetList)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			if (tle->resjunk)
+				continue;
+
+			if ((safetyInfo->unsafeFlags[tle->resno] &
+				 UNSAFE_NOTIN_DISTINCTON_CLAUSE) == 0 &&
+				!targetIsInSortList(tle, InvalidOid, subquery->distinctClause))
+			{
+				safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_NOTIN_DISTINCTON_CLAUSE;
+			}
+		}
+	}
 
 	/* Are we at top level, or looking at a setop component? */
 	if (subquery == topquery)
