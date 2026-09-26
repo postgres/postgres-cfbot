@@ -17,6 +17,7 @@
 #ifndef TABLEAM_H
 #define TABLEAM_H
 
+#include "access/amlocator.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/xact.h"
@@ -323,6 +324,19 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+
+	/* ------------------------------------------------------------------------
+	 * Locator.
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * Return the locator descriptor for this relation, which describes the
+	 * locator this AM hands to indexes; see amlocator.h.  Must not return
+	 * NULL.  The relcache keeps the pointer for the life of the relation's
+	 * cache entry.  Callers use RelationGetLocatorDesc().
+	 */
+	const struct LocatorDesc *(*relation_locator) (Relation rel);
 
 
 	/* ------------------------------------------------------------------------
@@ -931,6 +945,72 @@ table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 		elog(ERROR, "scan started during logical decoding");
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
+}
+
+/* ----------------------------------------------------------------------------
+ * Locator inspection functions
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Return the relation's locator descriptor, fetching it from the table AM the
+ * first time and keeping it in the relcache entry after that.
+ */
+static inline const struct LocatorDesc *
+RelationGetLocatorDesc(Relation rel)
+{
+	if (rel->rd_locdesc == NULL)
+	{
+		/*
+		 * A table AM that predates the locator contract has no
+		 * relation_locator callback.  Treat it as heap does: a fixed-width
+		 * TID that serves bitmap scans and moves a row on update.
+		 */
+		static const LocatorDesc default_locdesc = {
+			.width = sizeof(ItemPointerData),
+			.max_offset = MaxHeapTuplesPerPage,
+			.name = "tid",
+			.stable = false,
+			.old_version_retained = true,
+		};
+
+		rel->rd_locdesc = rel->rd_tableam->relation_locator ?
+			rel->rd_tableam->relation_locator(rel) : &default_locdesc;
+		Assert(OffsetNumberIsValid(rel->rd_locdesc->max_offset));
+	}
+	return rel->rd_locdesc;
+}
+
+/*
+ * Does a row of this relation keep its locator for its whole life?  See the
+ * stable field in amlocator.h.
+ */
+static inline bool
+table_locator_is_stable(Relation rel)
+{
+	return RelationGetLocatorDesc(rel)->stable;
+}
+
+/*
+ * Is a row's pre-update version still fetchable by locator after the UPDATE
+ * that replaced it?  See the old_version_retained field in amlocator.h.
+ */
+static inline bool
+table_locator_old_version_retained(Relation rel)
+{
+	return RelationGetLocatorDesc(rel)->old_version_retained;
+}
+
+/*
+ * Does this relation's table AM overwrite a row's storage on UPDATE?  If so,
+ * code that needs the pre-update image after the write must capture it first.
+ * False for a relation without a table AM, such as a foreign table.
+ */
+static inline bool
+RelationUpdatesInPlace(Relation rel)
+{
+	return rel->rd_tableam != NULL &&
+		!table_locator_old_version_retained(rel);
 }
 
 /*
