@@ -1,0 +1,1608 @@
+<!-- doc/src/sgml/pgwaiteventtracing.sgml -->
+
+<sect1 id="pgwaiteventtracing" xreflabel="pg_wait_event_tracing">
+ <title>pg_wait_event_tracing &mdash; statistics and trace collection for explicitly instrumented wait events</title>
+
+ <indexterm zone="pgwaiteventtracing">
+  <primary>pg_wait_event_tracing</primary>
+ </indexterm>
+
+ <para>
+  <filename>pg_wait_event_tracing</filename> records what individual
+  backends actually waited on, and for how long.  It uses the
+  <function>pgstat_report_wait_start_timed</function>/<function>pgstat_report_wait_end_timed</function>
+  hook pair (see <xref linkend="xfunc-addin-wait-events"/>) rather than
+  sampling <structname>pg_stat_activity</structname>, so it never misses a
+  wait, however short, and needs no separate sampling process.
+ </para>
+
+ <para>
+  The module has three levels, controlled by
+  <xref linkend="guc-pg-wait-event-tracing-capture"/>, each a strict
+  superset of the one before it:
+ </para>
+
+ <itemizedlist>
+  <listitem>
+   <para>
+    <literal>off</literal> (the default): no collection.
+   </para>
+  </listitem>
+  <listitem>
+   <para>
+    <literal>stats</literal>: exact per-backend wait statistics &mdash;
+    a call count, total duration, maximum duration, and a 32-bucket
+    duration histogram &mdash; kept separately for every distinct
+    wait event (and, for <literal>LWLock</literal>, every distinct
+    tranche) the backend has waited on.  Because every wait is counted,
+    not sampled, these numbers are exact, not an estimate.
+   </para>
+  </listitem>
+  <listitem>
+   <para>
+    <literal>trace</literal>: additionally, an ordered, fixed-size ring
+    buffer per backend recording every individual completed wait
+    (timestamp, event, duration), interleaved with query-attribution
+    markers that record when statements, executor calls, utility
+    commands, and transactions start and end, so that waits can be
+    grouped by the statement that incurred them.
+   </para>
+  </listitem>
+ </itemizedlist>
+
+ <sect2 id="pgwaiteventtracing-loading">
+  <title>Loading the Module</title>
+
+  <para>
+   <filename>pg_wait_event_tracing</filename> needs additional shared
+   memory whenever collection is or might become active, so it must be
+   loaded via <xref linkend="guc-shared-preload-libraries"/>:
+<programlisting>
+shared_preload_libraries = 'pg_wait_event_tracing'
+</programlisting>
+   which requires a server restart.  If the module's functions are
+   installed (see below) without it having been preloaded, every
+   attempt to use them fails at load time with an error, the same
+   wording <filename>pg_stat_statements</filename> and
+   <filename>sepgsql</filename> use for the same situation
+   (<quote><literal>pg_wait_event_tracing</literal> must be loaded via
+   "shared_preload_libraries"</quote>).
+  </para>
+
+  <para>
+   Collection itself is cluster-wide and independent of which database,
+   if any, has the extension installed &mdash; every backend in the
+   cluster is a candidate for collection once
+   <varname>pg_wait_event_tracing.capture</varname> is not
+   <literal>off</literal>.  <command>CREATE EXTENSION
+   pg_wait_event_tracing</command> only needs to be run once, in
+   whichever database will be used to query the views and functions
+   described below, to install those SQL objects into that database's
+   catalog.
+  </para>
+
+  <para>
+   Being preloaded in every process is not the same as every process
+   paying for collection: a process installs its wait-event hooks the
+   first time <varname>pg_wait_event_tracing.capture</varname> becomes
+   non-<literal>off</literal> <emphasis>in that process</emphasis>, and
+   keeps them installed for the rest of its life even if capture is later
+   turned back off there.  A backend that never enables capture, in a
+   cluster where most sessions never do, therefore runs with the hooks
+   absent and pays no per-wait overhead for this module at all; see
+   <function>pg_wait_event_tracing_hooks_installed()</function> to check
+   a given backend.
+  </para>
+
+  <para>
+   The module defines three configuration parameters, described in
+   detail where each is most relevant below and summarized here:
+  </para>
+
+  <variablelist>
+   <varlistentry id="guc-pg-wait-event-tracing-capture" xreflabel="pg_wait_event_tracing.capture">
+    <term>
+     <varname>pg_wait_event_tracing.capture</varname> (<type>enum</type>)
+     <indexterm>
+      <primary><varname>pg_wait_event_tracing.capture</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Selects the collection level: <literal>off</literal> (default),
+      <literal>stats</literal>, or <literal>trace</literal>.  Context
+      <literal>SUSET</literal>: it can be changed by a superuser, by a
+      role granted <literal>SET</literal> privilege on the parameter
+      (<command>GRANT SET ON PARAMETER pg_wait_event_tracing.capture TO
+      ...</command>), in <filename>postgresql.conf</filename>, or via
+      <command>ALTER SYSTEM</command>/<command>ALTER
+      DATABASE</command>/<command>ALTER ROLE ... SET</command>.  An
+      ordinary client backend that issues <command>SET
+      pg_wait_event_tracing.capture = ...</command> directly takes
+      effect for that session at its next parse/executor safe point (in
+      practice, its very next statement); a change delivered only
+      through the configuration file takes effect for a given backend
+      only once that backend processes a configuration reload (or, for
+      a newly forked backend, at connection time).  Read access to the
+      resulting statistics and trace data is controlled separately,
+      through the views and functions' own grants (see
+      <xref linkend="pgwaiteventtracing-views"/>) and membership in
+      <link linkend="predefined-roles"><literal>pg_read_all_stats</literal></link>,
+      not by this parameter.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="guc-pg-wait-event-tracing-max-tranches" xreflabel="pg_wait_event_tracing.max_tranches">
+    <term>
+     <varname>pg_wait_event_tracing.max_tranches</varname> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>pg_wait_event_tracing.max_tranches</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Maximum number of distinct <literal>LWLock</literal> tranches
+      tracked individually, per collecting backend.  Context
+      <literal>POSTMASTER</literal>: it can only be set at server
+      start, since it determines the size of the per-backend payload
+      (see <xref linkend="pgwaiteventtracing-memory"/>).  The default
+      is <literal>192</literal>, with a minimum of <literal>16</literal>
+      and a maximum of <literal>65534</literal>.  A tranche encountered
+      once the per-backend table is already full is counted in
+      <structfield>lwlock_overflow_count</structfield> instead (see
+      <xref linkend="pgwaiteventtracing-overflow-view"/>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="guc-pg-wait-event-tracing-trace-ring-size" xreflabel="pg_wait_event_tracing.trace_ring_size">
+    <term>
+     <varname>pg_wait_event_tracing.trace_ring_size</varname> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>pg_wait_event_tracing.trace_ring_size</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Size of each backend's trace ring, used only at the
+      <literal>trace</literal> level.  Context
+      <literal>POSTMASTER</literal>.  If specified without units it is
+      taken as kilobytes; the value must be a power of two (each record
+      is 32 bytes, so this is equivalent to requiring a power-of-two
+      record count).  The default is <literal>4096</literal> (4&nbsp;MB,
+      131072 records), the minimum <literal>8</literal>, the maximum
+      <literal>32768</literal> (32&nbsp;MB).  A larger ring retains a
+      longer history before the oldest records are overwritten.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-views">
+  <title>Views and Functions</title>
+
+  <para>
+   Every view listed here is defined directly in terms of a same-named
+   (or obviously related) function, which can also be called on its
+   own with an explicit argument; the function reference notes any
+   difference in the two forms' default arguments or permissions.
+  </para>
+
+  <sect3 id="pgwaiteventtracing-stats-view">
+   <title>The <structname>pg_stat_wait_event_timing</structname> View</title>
+
+   <para>
+    One row per (collecting backend, wait event) pair with at least
+    one recorded wait, drawn from
+    <function>pg_stat_get_wait_event_timing(pid integer DEFAULT
+    NULL)</function>.  Passing an explicit <parameter>pid</parameter>
+    (to the function; the view always passes <literal>NULL</literal>)
+    restricts the result to that one backend.
+   </para>
+
+   <table id="pgwaiteventtracing-stats-columns">
+    <title><structname>pg_stat_wait_event_timing</structname> Columns</title>
+    <tgroup cols="1">
+     <thead>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para></entry>
+      </row>
+     </thead>
+     <tbody>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>pid</structfield> <type>integer</type>
+       </para>
+       <para>
+        Process ID of the backend.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>backend_type</structfield> <type>text</type>
+       </para>
+       <para>
+        Type of backend, using the same strings as the
+        <structfield>backend_type</structfield> column of
+        <structname>pg_stat_activity</structname> (for example
+        <literal>client backend</literal>, <literal>checkpointer</literal>,
+        <literal>walsender</literal>, <literal>autovacuum worker</literal>).
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>procnumber</structfield> <type>integer</type>
+       </para>
+       <para>
+        The backend's process number.  Pass this to
+        <function>pg_get_wait_event_trace</function> to read the
+        backend's trace ring, including after the backend has exited
+        (see <xref linkend="pgwaiteventtracing-trace-ring"/>).
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>wait_event_type</structfield> <type>text</type>
+       </para>
+       <para>
+        Wait event class, as in <structname>pg_stat_activity</structname>.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>wait_event</structfield> <type>text</type>
+       </para>
+       <para>
+        Wait event name within that class.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>calls</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of completed waits of this type since the backend
+        started collecting or was last reset.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>total_time_ms</structfield> <type>double precision</type>
+       </para>
+       <para>
+        Total time spent in this wait event, in milliseconds.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>avg_time_us</structfield> <type>double precision</type>
+       </para>
+       <para>
+        <structfield>total_time_ms</structfield> &times; 1000 /
+        <structfield>calls</structfield>, in microseconds; computed on
+        read, not separately stored.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>max_time_us</structfield> <type>double precision</type>
+       </para>
+       <para>
+        Longest single wait of this type, in microseconds.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>histogram</structfield> <type>bigint[]</type>
+       </para>
+       <para>
+        32-element array of per-bucket counts, in ascending order; see
+        <xref linkend="pgwaiteventtracing-histogram-view"/> for the
+        bucket boundaries.
+       </para></entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    <structname>pg_stat_wait_event_timing</structname> itself is
+    restricted (<literal>REVOKE ALL ... FROM PUBLIC</literal> plus
+    <literal>GRANT SELECT ... TO pg_read_all_stats</literal>), but the
+    underlying <function>pg_stat_get_wait_event_timing()</function>
+    function keeps its ordinary, unrevoked <literal>PUBLIC</literal>
+    execute privilege; each row it would return is checked individually
+    against the calling role's privileges on that row's own backend
+    (<function>has_privs_of_role</function> of the owning role, or
+    membership in <literal>pg_read_all_stats</literal>) and dropped on a
+    mismatch.  So any role can call the function directly with its own
+    <function>pg_backend_pid()</function> (or no argument at all, since
+    a non-matching row is simply filtered rather than raising an error)
+    to see its own statistics without needing
+    <literal>pg_read_all_stats</literal>; only the convenience view, and
+    any other backend's rows, require it.
+    <function>pg_stat_get_wait_event_timing_overflow()</function> (see
+    below) is filtered and granted the same way.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-overflow-view">
+   <title>The <structname>pg_stat_wait_event_timing_overflow</structname> View</title>
+
+   <para>
+    One row per backend that currently has a collecting payload
+    (whether or not any wait event has actually occurred), drawn from
+    <function>pg_stat_get_wait_event_timing_overflow(pid integer
+    DEFAULT NULL)</function>.  Exposes the two truncation counters that
+    the fixed-size accounting structures maintain, plus how many times
+    this backend's own statistics have been reset.
+   </para>
+
+   <table id="pgwaiteventtracing-overflow-columns">
+    <title><structname>pg_stat_wait_event_timing_overflow</structname> Columns</title>
+    <tgroup cols="1">
+     <thead>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para></entry>
+      </row>
+     </thead>
+     <tbody>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>pid</structfield> <type>integer</type>
+       </para>
+       <para>
+        Process ID of the backend.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>backend_type</structfield> <type>text</type>
+       </para>
+       <para>
+        Type of backend.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>procnumber</structfield> <type>integer</type>
+       </para>
+       <para>
+        The backend's process number.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>lwlock_overflow_count</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of <literal>LWLock</literal> waits on a tranche not
+        already in this backend's tranche table, encountered after that
+        table filled to <varname>pg_wait_event_tracing.max_tranches</varname>;
+        these are counted here rather than individually.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>flat_overflow_count</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of waits in a non-<literal>LWLock</literal> class whose
+        event id fell outside that class's compiled-in capacity (see
+        <xref linkend="pgwaiteventtracing-capacity-func"/>); in
+        practice this can only happen for the <literal>Extension</literal>
+        or <literal>InjectionPoint</literal> classes, whose custom wait
+        events are registered dynamically at runtime.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>reset_count</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times this backend's own counters have been reset
+        (self-reset or a completed cross-backend reset request); this
+        counter itself is never cleared by a reset.
+       </para></entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-histogram-view">
+   <title>The <structname>pg_wait_event_timing_histogram_buckets</structname> View</title>
+
+   <para>
+    A fixed, 32-row taxonomy for the <structfield>histogram</structfield>
+    column of <structname>pg_stat_wait_event_timing</structname>: bucket
+    <replaceable>i</replaceable> of the histogram array corresponds to
+    row <replaceable>i</replaceable> here (join via <literal>unnest(histogram)
+    WITH ORDINALITY</literal>, subtracting one from the ordinality to get
+    <structfield>bucket_idx</structfield>).  Bucket edges are powers of
+    two in nanoseconds; the last bucket is open-ended.
+   </para>
+
+   <table id="pgwaiteventtracing-histogram-columns">
+    <title><structname>pg_wait_event_timing_histogram_buckets</structname> Columns</title>
+    <tgroup cols="4">
+     <thead>
+      <row>
+       <entry><structfield>bucket_idx</structfield></entry>
+       <entry><structfield>lower_ns</structfield></entry>
+       <entry><structfield>upper_ns</structfield></entry>
+       <entry><structfield>label</structfield></entry>
+      </row>
+     </thead>
+     <tbody>
+      <row><entry>0</entry><entry>0</entry><entry>1024</entry><entry>&lt;1us</entry></row>
+      <row><entry>1</entry><entry>1024</entry><entry>2048</entry><entry>1-2us</entry></row>
+      <row><entry>2</entry><entry>2048</entry><entry>4096</entry><entry>2-4us</entry></row>
+      <row><entry>3</entry><entry>4096</entry><entry>8192</entry><entry>4-8us</entry></row>
+      <row><entry>4</entry><entry>8192</entry><entry>16384</entry><entry>8-16us</entry></row>
+      <row><entry>5</entry><entry>16384</entry><entry>32768</entry><entry>16-32us</entry></row>
+      <row><entry>6</entry><entry>32768</entry><entry>65536</entry><entry>32-64us</entry></row>
+      <row><entry>7</entry><entry>65536</entry><entry>131072</entry><entry>64-128us</entry></row>
+      <row><entry>8</entry><entry>131072</entry><entry>262144</entry><entry>128-256us</entry></row>
+      <row><entry>9</entry><entry>262144</entry><entry>524288</entry><entry>256-512us</entry></row>
+      <row><entry>10</entry><entry>524288</entry><entry>1048576</entry><entry>512us-1ms</entry></row>
+      <row><entry>11</entry><entry>1048576</entry><entry>2097152</entry><entry>1-2ms</entry></row>
+      <row><entry>12</entry><entry>2097152</entry><entry>4194304</entry><entry>2-4ms</entry></row>
+      <row><entry>13</entry><entry>4194304</entry><entry>8388608</entry><entry>4-8ms</entry></row>
+      <row><entry>14</entry><entry>8388608</entry><entry>16777216</entry><entry>8-16ms</entry></row>
+      <row><entry>15</entry><entry>16777216</entry><entry>33554432</entry><entry>16-32ms</entry></row>
+      <row><entry>16</entry><entry>33554432</entry><entry>67108864</entry><entry>32-64ms</entry></row>
+      <row><entry>17</entry><entry>67108864</entry><entry>134217728</entry><entry>64-128ms</entry></row>
+      <row><entry>18</entry><entry>134217728</entry><entry>268435456</entry><entry>128-256ms</entry></row>
+      <row><entry>19</entry><entry>268435456</entry><entry>536870912</entry><entry>256-512ms</entry></row>
+      <row><entry>20</entry><entry>536870912</entry><entry>1073741824</entry><entry>512ms-1s</entry></row>
+      <row><entry>21</entry><entry>1073741824</entry><entry>2147483648</entry><entry>1-2s</entry></row>
+      <row><entry>22</entry><entry>2147483648</entry><entry>4294967296</entry><entry>2-4s</entry></row>
+      <row><entry>23</entry><entry>4294967296</entry><entry>8589934592</entry><entry>4-8s</entry></row>
+      <row><entry>24</entry><entry>8589934592</entry><entry>17179869184</entry><entry>8-16s</entry></row>
+      <row><entry>25</entry><entry>17179869184</entry><entry>34359738368</entry><entry>16-32s</entry></row>
+      <row><entry>26</entry><entry>34359738368</entry><entry>68719476736</entry><entry>32-64s</entry></row>
+      <row><entry>27</entry><entry>68719476736</entry><entry>137438953472</entry><entry>64-128s</entry></row>
+      <row><entry>28</entry><entry>137438953472</entry><entry>274877906944</entry><entry>128-256s</entry></row>
+      <row><entry>29</entry><entry>274877906944</entry><entry>549755813888</entry><entry>256-512s</entry></row>
+      <row><entry>30</entry><entry>549755813888</entry><entry>1099511627776</entry><entry>512s-1024s</entry></row>
+      <row><entry>31</entry><entry>1099511627776</entry><entry><literal>NULL</literal></entry><entry>&gt;=1024s</entry></row>
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    This view carries no explicit <command>GRANT</command> or
+    <command>REVOKE</command> in the extension script, so it follows
+    the ordinary default privileges for a newly created view: readable
+    by its owner and by superusers, but not by <literal>PUBLIC</literal>
+    unless separately granted.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-capacity-func">
+   <title>The <function>pg_wait_event_tracing_capacity</function> Function</title>
+
+   <para>
+    <function>pg_wait_event_tracing_capacity() returns setof record
+    (type text, capacity int4)</function> reports the compiled-in
+    per-class capacity of the dense timing table, one row per class plus
+    one for <literal>LWLock</literal> (whose effective capacity is the
+    current value of <varname>pg_wait_event_tracing.max_tranches</varname>,
+    since <literal>LWLock</literal> waits are tracked through a
+    per-backend hash rather than a flat array).  It is meant to be
+    compared against <literal>SELECT type, count(*) FROM pg_wait_events
+    GROUP BY type</literal>: a class whose in-tree event count has grown
+    to within a handful of its capacity here needs the module's internal
+    table enlarged in a future release.  At the values current on this
+    branch: <literal>Lock</literal> 32, <literal>Buffer</literal> 16,
+    <literal>Activity</literal> 32, <literal>Client</literal> 32,
+    <literal>Extension</literal> 128, <literal>IPC</literal> 128,
+    <literal>Timeout</literal> 32, <literal>IO</literal> 128,
+    <literal>InjectionPoint</literal> 32.  This function carries no
+    explicit grant either, so it keeps a plain function's default
+    <literal>PUBLIC</literal> execute privilege.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-trace-view">
+   <title>The <structname>pg_backend_wait_event_trace</structname> View and Cross-Backend Reading</title>
+
+   <para>
+    <structname>pg_backend_wait_event_trace</structname>, backed by
+    <function>pg_get_backend_wait_event_trace()</function>, reads the
+    calling backend's own trace ring.
+    <function>pg_get_wait_event_trace(procnumber int4)</function> reads
+    any backend's ring (including an exited backend's orphaned ring; see
+    <xref linkend="pgwaiteventtracing-trace-ring"/>) by process number,
+    and has no view wrapper of its own.  Both share the same row shape
+    except that the cross-backend function leads with an extra
+    <structfield>owner_pid</structfield> column.
+   </para>
+
+   <table id="pgwaiteventtracing-trace-columns">
+    <title><structname>pg_backend_wait_event_trace</structname> / <function>pg_get_wait_event_trace</function> Columns</title>
+    <tgroup cols="1">
+     <thead>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para></entry>
+      </row>
+     </thead>
+     <tbody>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>owner_pid</structfield> <type>integer</type>
+        (<function>pg_get_wait_event_trace</function> only)
+       </para>
+       <para>
+        Process ID of the ring's producer &mdash; live, or, for an
+        orphaned ring, its last-known pid.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>seq</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Monotonically increasing position of this record in the ring
+        (not reset by wraparound); higher values are more recent.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>timestamp_ns</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Timestamp of the record, in nanoseconds (same clock source as
+        the rest of the module's timing).
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>wait_event_type</structfield> <type>text</type>
+       </para>
+       <para>
+        For a completed wait, its ordinary wait event class; for a
+        query-attribution marker, the fixed string <literal>Query</literal>
+        (see <xref linkend="pgwaiteventtracing-markers"/>).
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>wait_event</structfield> <type>text</type>
+       </para>
+       <para>
+        For a completed wait, its ordinary wait event name; for a
+        marker, one of <literal>QueryStart</literal>,
+        <literal>ExecStart</literal>, <literal>ExecEnd</literal>,
+        <literal>UtilityStart</literal>, <literal>UtilityEnd</literal>,
+        <literal>TxnCommit</literal>, <literal>TxnAbort</literal>, or
+        <literal>Idle</literal>.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>duration_us</structfield> <type>double precision</type>
+       </para>
+       <para>
+        Duration of a completed wait, in microseconds; <literal>0</literal>
+        for a marker.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>query_id</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Query identifier carried by <literal>QueryStart</literal>,
+        <literal>ExecStart</literal>, <literal>ExecEnd</literal>,
+        <literal>UtilityStart</literal>, or <literal>UtilityEnd</literal>;
+        <literal>0</literal> for <literal>TxnCommit</literal>,
+        <literal>TxnAbort</literal>, <literal>Idle</literal>, and every
+        wait record.  See the limitations in
+        <xref linkend="pgwaiteventtracing-markers"/> for when this is
+        <literal>0</literal> even on a start/end marker.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>depth</structfield> <type>integer</type>
+       </para>
+       <para>
+        Executor nesting depth in effect when the marker fired
+        (<literal>0</literal> = top level); meaningful for
+        <literal>QueryStart</literal>, <literal>UtilityStart</literal>,
+        <literal>ExecStart</literal>, and <literal>ExecEnd</literal>;
+        <literal>0</literal> for everything else, including every wait
+        record.
+       </para></entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    Because trace rows carry raw query identifiers and precise wait
+    sequences &mdash; information that can leak across a
+    <literal>SECURITY DEFINER</literal> call chain in a way that an
+    aggregate count or duration cannot &mdash; both the view and its
+    underlying functions are locked down more tightly than the stats
+    level: <literal>EXECUTE</literal> on
+    <function>pg_get_backend_wait_event_trace()</function> and
+    <function>pg_get_wait_event_trace()</function> is itself revoked
+    from <literal>PUBLIC</literal> and granted only to
+    <literal>pg_read_all_stats</literal>.  Unlike the stats-level
+    functions, there is no per-row fallback: reading even a session's
+    own trace ring requires <literal>pg_read_all_stats</literal>
+    membership.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-by-statement-func">
+   <title>The <function>pg_wait_event_trace_by_statement</function> Function</title>
+
+   <para>
+    <function>pg_wait_event_trace_by_statement(procnumber int4) returns
+    setof record</function> groups a backend's trace ring by statement,
+    using the query-attribution markers; see
+    <xref linkend="pgwaiteventtracing-markers"/> for the exact
+    attribution rule.  It is a plain SQL function over
+    <function>pg_get_wait_event_trace()</function>, granted the same way
+    (<literal>PUBLIC</literal> revoked, <literal>pg_read_all_stats</literal>
+    granted).
+   </para>
+
+   <table id="pgwaiteventtracing-by-statement-columns">
+    <title><function>pg_wait_event_trace_by_statement</function> Columns</title>
+    <tgroup cols="1">
+     <thead>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para></entry>
+      </row>
+     </thead>
+     <tbody>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>bucket</structfield> <type>text</type>
+       </para>
+       <para>
+        The bucket's own opening <structfield>seq</structfield> as
+        text, or the synthetic value <literal>&lt;idle&gt;</literal> or
+        <literal>&lt;unattributed&gt;</literal>.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>statement_seq</structfield> <type>bigint</type>
+       </para>
+       <para>
+        <structfield>seq</structfield> of the <literal>QueryStart</literal>
+        or <literal>UtilityStart</literal> marker that opened this
+        bucket; <literal>NULL</literal> for
+        <literal>&lt;idle&gt;</literal>/<literal>&lt;unattributed&gt;</literal>.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>query_id</structfield> <type>bigint</type>
+       </para>
+       <para>
+        <structfield>query_id</structfield> carried by that start
+        marker; <literal>NULL</literal> for
+        <literal>&lt;idle&gt;</literal>/<literal>&lt;unattributed&gt;</literal>.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>wait_event_type</structfield> <type>text</type>
+       </para>
+       <para>
+        Wait event class of the waits summed into this row.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>wait_event</structfield> <type>text</type>
+       </para>
+       <para>
+        Wait event name of the waits summed into this row.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>calls</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of waits of this type inside this bucket.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>total_time_us</structfield> <type>double precision</type>
+       </para>
+       <para>
+        Summed duration of those waits, in microseconds.
+       </para></entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-other-funcs">
+   <title>Other Functions</title>
+
+   <variablelist>
+    <varlistentry>
+     <term>
+      <function>pg_stat_reset_wait_event_timing(pid integer DEFAULT
+      NULL) returns void</function>
+      <indexterm>
+       <primary>pg_stat_reset_wait_event_timing</primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Resets a backend's own or another backend's statistics; see
+       <xref linkend="pgwaiteventtracing-reset"/> for the full rules.
+       Keeps the default <literal>PUBLIC</literal> execute privilege;
+       its target-authorization rule is enforced in C, not by revoking
+       <literal>EXECUTE</literal>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>
+      <function>pg_stat_reset_wait_event_timing_all() returns
+      void</function>
+      <indexterm>
+       <primary>pg_stat_reset_wait_event_timing_all</primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Resets every backend's statistics.  <literal>EXECUTE</literal> is
+       revoked from <literal>PUBLIC</literal> in the extension script,
+       and the function additionally hard-requires
+       <function>superuser()</function> in C, so re-granting
+       <literal>EXECUTE</literal> to a non-superuser role does not
+       enable it.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>
+      <function>pg_stat_clear_orphaned_wait_event_rings() returns
+      bigint</function>
+      <indexterm>
+       <primary>pg_stat_clear_orphaned_wait_event_rings</primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Frees every orphaned trace ring cluster-wide and returns how many
+       were freed; see <xref linkend="pgwaiteventtracing-trace-ring"/>.
+       Superuser-only in the same way as
+       <function>pg_stat_reset_wait_event_timing_all()</function>: both
+       <literal>REVOKE EXECUTE FROM PUBLIC</literal> and a C-level
+       <function>superuser()</function> check.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>
+      <function>pg_wait_event_tracing_hooks_installed() returns
+      boolean</function>
+      <indexterm>
+       <primary>pg_wait_event_tracing_hooks_installed</primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Diagnostic: whether the calling backend has installed its own
+       wait-event hooks yet.  See
+       <xref linkend="pgwaiteventtracing-loading"/> for the lazy,
+       per-process installation rule this reports on.  Reveals nothing
+       about any other backend or about what is being recorded, so it
+       keeps the default <literal>PUBLIC</literal> execute privilege.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-semantics">
+  <title>Statistics Semantics</title>
+
+  <para>
+   A row in <structname>pg_stat_wait_event_timing</structname> (or
+   <structname>_overflow</structname>) exists for exactly as long as its
+   backend is both alive and currently collecting: the row is keyed to
+   the live <structname>PgBackendStatus</structname> entry for that
+   process number, so it disappears the moment the backend exits or
+   turns capture off, and never survives a re-use of the same process
+   number by an unrelated successor process.
+  </para>
+
+  <para>
+   A session's own statistics do <emphasis>not</emphasis> include the
+   waits of any parallel workers it launches.  Each parallel worker is a
+   separate backend, with its own process number and its own row (or
+   rows) in <structname>pg_stat_wait_event_timing</structname>, tagged
+   with <structfield>backend_type</structfield> <literal>parallel
+   worker</literal>; those rows disappear as soon as the worker exits,
+   which typically happens before the leader's statement returns.  To
+   see the total wait time a parallel query incurred across all its
+   workers, either enable capture in the workers and read their rows
+   while the query is still running, or use the trace level and read
+   each worker's own ring after the fact by its process number.
+  </para>
+
+  <para>
+   Only wait events reported through
+   <function>pgstat_report_wait_start_timed</function>/<function>pgstat_report_wait_end_timed</function>
+   (see <xref linkend="xfunc-addin-wait-events"/>) are visible to any
+   capture level; a call site still using the ordinary
+   <function>pgstat_report_wait_start</function>/<function>pgstat_report_wait_end</function>
+   pair is invisible to this module no matter what
+   <varname>pg_wait_event_tracing.capture</varname> is set to.  On this
+   server, essentially every built-in wait event has been converted to
+   the timed pair &mdash; every <literal>LWLock</literal> and spinlock
+   wait, the great majority of I/O sites, WAL and replication waits,
+   the checkpointer/background writer/WAL writer/archiver/autovacuum/WAL
+   summarizer main loops, and ordinary client-protocol waits such as
+   <literal>ClientRead</literal> &mdash; so an installation that
+   preloads this module should expect to see essentially all of a
+   backend's wait time accounted for.  An extension's own hand-annotated
+   wait events are visible only once that extension is itself changed to
+   call the timed pair; simply having this module loaded does not make
+   any other module's existing <function>pgstat_report_wait_start()</function>
+   calls instrumented.
+  </para>
+
+  <para>
+   The counters behind these views (<structfield>count</structfield>,
+   <structfield>total_time_ms</structfield>-equivalent nanosecond total,
+   <structfield>max_time_us</structfield>-equivalent nanosecond maximum,
+   and each histogram bucket) are ordinary 64-bit integers, written by
+   their owning backend without any lock and read by a caller without
+   any lock or memory barrier beyond what the row-identity check itself
+   provides.  On a platform where a 64-bit load or store is not atomic
+   (32-bit builds), a concurrent reader can therefore, in principle,
+   observe a momentarily torn value for one of these fields; this is a
+   deliberate trade-off in favor of a lock-free hot path, not something
+   a future release plans to change.
+  </para>
+
+  <para>
+   Accounting a completed wait is deferred, not immediate: at the moment
+   a wait ends, the collector only reads the clock and stashes the
+   event, its duration, and that timestamp in a one-slot, backend-local
+   buffer; the count/total/maximum/histogram update (and, at the
+   <literal>trace</literal> level, the ring append) run later, at the
+   backend's own next timed wait, or at one of several other points where
+   ordering matters (a query/transaction boundary in trace mode, a
+   capture-level change, a reset, disabling capture, or process exit).
+   This is what keeps the collector's cost out of the interval a
+   contended lock's waiters are queued on: recording a wait's end used to
+   run to completion before returning control to the caller, which for an
+   <literal>LWLock</literal> wait is still inside the critical section
+   the lock protects.  Two consequences follow, both bounded:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <emphasis>Visibility latency.</emphasis>  A backend reading its own
+     data (<structname>pg_stat_wait_event_timing</structname>,
+     <structname>pg_backend_wait_event_trace</structname>,
+     <function>pg_wait_event_trace_by_statement()</function> called with
+     its own process number) always flushes its own pending wait first,
+     so it never observes a delay: an own-session read always reflects
+     every wait that has already completed.  A different session reading
+     that backend's row or ring, however, can see a wait appear only once
+     the owning backend's own next flush point is reached &mdash;
+     typically microseconds later, at its next wait, but possibly as late
+     as the end of the current statement, since a backend computing for a
+     long stretch with no further wait (a long CPU-bound query, for
+     instance) does not flush again until it does wait, or until that
+     statement ends.  A server-side process that blocks without a
+     timeout (for example a caught-up standby's startup process waiting
+     for WAL) makes its most recent completed wait visible only when its
+     next wait begins.  A cross-backend reader should treat what it sees
+     as current up to a small, bounded lag behind the owning backend's
+     own view, not as exactly real-time.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Crash loss.</emphasis>  If a backend is terminated
+     abruptly (killed, or a crash that takes the whole cluster down) in
+     the narrow window between a wait ending and that backend's own next
+     flush, that one pending wait is lost: it was never applied to the
+     statistics payload and never appended to the trace ring.  This is
+     strictly narrower than existing loss on a normal exit or crash
+     already implies &mdash; the statistics payload is released (and, on
+     a whole-cluster crash restart, every trace ring is discarded
+     regardless; see <xref linkend="pgwaiteventtracing-trace-ring"/>)
+     &mdash; it is called out here only because it is new: an orderly
+     exit's own cleanup flushes any still-pending wait first, so this
+     narrow loss window is specific to an abrupt kill, and affects at
+     most the single most recently completed wait.
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <sect3 id="pgwaiteventtracing-aux-processes">
+   <title>Server-Side (Non-Client) Processes</title>
+
+   <para>
+    The checkpointer, background writer, WAL writer, startup process
+    (including crash recovery), WAL receiver, archiver, WAL summarizer,
+    I/O workers, the autovacuum launcher and its workers, background
+    workers, and WAL senders never parse a query or run the executor, so
+    they have no ordinary opportunity to notice a change to
+    <varname>pg_wait_event_tracing.capture</varname>.  To still collect
+    from process start rather than only from the next reload, the
+    module reserves a small, fixed-size slice of shared memory &mdash;
+    one statistics payload per possible such process &mdash; but only
+    when <varname>pg_wait_event_tracing.capture</varname> is already
+    something other than <literal>off</literal> in the configuration at
+    postmaster start.  With capture off at start (the default), this
+    reservation is skipped entirely and costs nothing; with it already
+    on, the reservation is roughly 10&nbsp;MiB at typical default
+    settings (see <xref linkend="pgwaiteventtracing-memory"/> for the
+    exact figure and how it scales).  If capture is instead turned on
+    later, by a configuration reload, these processes pick up statistics
+    collection starting at that reload &mdash; the same gap an ordinary
+    client backend has until its own next statement, just without a
+    "next statement" of its own to close it sooner.
+   </para>
+
+   <para>
+    The <literal>trace</literal> level is <emphasis>never</emphasis>
+    covered by that reservation, regardless of the configuration at
+    postmaster start: a full trace ring per such process would cost
+    several additional megabytes each, which this module does not
+    reserve unconditionally.  A server-side process therefore only ever
+    starts tracing at the first configuration reload that sets
+    <literal>capture = trace</literal>, exactly like the reload path a
+    client backend would use if it could not rely on its own next
+    statement. One consequence worth stating plainly: crash recovery run
+    by the startup process at postmaster start can appear in
+    <emphasis>statistics</emphasis> (if capture was already on in the
+    configuration before that start) but can never be captured at the
+    <emphasis>trace</emphasis> level, since recovery typically completes
+    before any operator has the opportunity to trigger a reload.
+   </para>
+  </sect3>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-memory">
+  <title>Memory Usage</title>
+
+  <para>
+   Three kinds of shared memory are involved, only one of which is
+   unconditional:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <emphasis>Control table</emphasis>: one small, fixed-layout entry
+     per possible process number
+     (<literal>MaxBackends</literal>&nbsp;+ 38 auxiliary-process slots),
+     allocated in ordinary (non-dynamic) shared memory regardless of
+     <varname>pg_wait_event_tracing.capture</varname>, since it is what
+     every other piece of this module addresses through.  At typical
+     default settings (<varname>max_connections</varname> = 100,
+     <varname>autovacuum_worker_slots</varname> = 16,
+     <varname>max_worker_processes</varname> = 8,
+     <varname>max_wal_senders</varname> = 10,
+     <varname>io_max_workers</varname> = 8, giving
+     <literal>MaxBackends</literal> = 136) this table is on the order of
+     10&nbsp;KB, entirely independent of whether capture is ever turned
+     on.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Per-backend statistics payload</emphasis>: allocated from
+     a dynamic shared memory area, one payload per backend that is
+     actually collecting, sized from
+     <varname>pg_wait_event_tracing.max_tranches</varname>.  At the
+     default of 192, one payload is 212,664 bytes (about 207.7&nbsp;KiB)
+     on a common 64-bit platform; this is freed as soon as that backend
+     turns capture off or exits.  The reserved server-process region
+     described in <xref linkend="pgwaiteventtracing-aux-processes"/>
+     is simply a run of this same per-payload size, one slice per
+     eligible process number in range, allocated up front instead of
+     lazily: at the settings above that range holds 50 process numbers,
+     for a total reservation of about 10.1&nbsp;MiB.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Per-backend trace ring</emphasis>: allocated from its own
+     dynamic shared memory area, one ring per backend that has actually
+     enabled <literal>trace</literal>, sized by
+     <varname>pg_wait_event_tracing.trace_ring_size</varname> (4&nbsp;MiB
+     at the default).  Freed on an explicit step-down away from
+     <literal>trace</literal>; orphaned, not freed, on the owning
+     backend's exit (see
+     <xref linkend="pgwaiteventtracing-trace-ring"/>).
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <para>
+   Nothing in this module scales with
+   <varname>max_connections</varname> beyond the small, fixed control
+   table: the two memory-hungry pieces are both proportional only to the
+   number of backends that have actually turned capture (respectively
+   trace) on, not to how many backends the server is configured to
+   allow.
+  </para>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-reset">
+  <title>Resetting Statistics and Permissions</title>
+
+  <para>
+   <function>pg_stat_reset_wait_event_timing(NULL)</function>, or with
+   the caller's own <function>pg_backend_pid()</function>, resets the
+   caller's own counters immediately and synchronously.
+  </para>
+
+  <para>
+   Resetting another backend's statistics
+   (<function>pg_stat_reset_wait_event_timing(<replaceable>pid</replaceable>)</function>
+   with some other backend's pid) is subject to exactly the same
+   target-authorization rule
+   <function>pg_signal_backend()</function> uses: a target that is
+   superuser-owned or has no owning role at all (which, notably,
+   includes every autovacuum worker, since those are role-less) can only
+   be reset by a superuser; any other target can be reset by a caller
+   holding privileges of the target's role, or of the
+   <literal>pg_signal_backend</literal> role. Unlike
+   <function>pg_signal_backend()</function> itself, there is no separate
+   carve-out for autovacuum workers here &mdash; they simply fall under
+   the role-less case above and so already require superuser, which is
+   the more conservative (and, for a function whose entire effect is
+   erasing diagnostic state, arguably more appropriate) of the two
+   possible readings. An auxiliary process's pid (checkpointer, WAL
+   writer, and the like) can never be named this way at all: pid
+   resolution only recognizes ordinary backends, so such a pid produces
+   the same <literal>WARNING: PID %d is not a PostgreSQL backend
+   process</literal> that <function>pg_signal_backend()</function> would
+   give for an unknown pid, not an error &mdash; an auxiliary process's
+   statistics can still be reset, but only via
+   <function>pg_stat_reset_wait_event_timing_all()</function>.
+  </para>
+
+  <para>
+   A cross-backend reset is <emphasis>asynchronous</emphasis>: the
+   requesting call only publishes a request (tied, under the same lock,
+   to the exact process identity it resolved, so it cannot land on an
+   unrelated successor that has since reused the same process number);
+   the target backend notices and actually clears its own counters the
+   next time it finishes any wait of its own. There is no way to force
+   an idle target to reset any sooner than its next wait.
+  </para>
+
+  <para>
+   <function>pg_stat_reset_wait_event_timing_all()</function> is
+   superuser-only regardless of grants (see
+   <xref linkend="pgwaiteventtracing-other-funcs"/>); it requests a
+   reset on every process number unconditionally, including ones with
+   no current owner, which is harmless.
+  </para>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-trace-ring">
+  <title>The Trace Ring and Post-Mortem Reading</title>
+
+  <para>
+   Before working through an example, the lifecycle contract for an
+   exited backend's trace ring needs to be stated up front, since it
+   changes what a query against
+   <function>pg_get_wait_event_trace()</function> can be expected to
+   return:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     On an <emphasis>orderly</emphasis> backend exit (a normal
+     disconnect, a completed background worker, a parallel worker
+     finishing its work, and so on), the ring is <emphasis>not</emphasis>
+     freed. It is marked orphaned, and stays fully readable &mdash;
+     tagged with the exited process's last-known pid via the
+     <structfield>owner_pid</structfield> column &mdash; until either a
+     successor process later reuses that same process number and itself
+     enables trace (which reclaims, i.e. frees, the orphaned ring before
+     installing its own), or an administrator explicitly calls
+     <function>pg_stat_clear_orphaned_wait_event_rings()</function>.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     This orphan preservation does <emphasis>not</emphasis> survive a
+     crash restart. If any backend anywhere in the cluster crashes,
+     the postmaster resets and recreates all of shared memory from
+     scratch as part of ordinary crash recovery, which discards every
+     ring &mdash; active or already orphaned &mdash; along with
+     everything else in shared memory. Orphan preservation only ever
+     helps across an individual process's own orderly exit, never across
+     a whole-cluster crash-and-restart cycle.
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <para>
+   With that contract in mind,
+   <function>pg_get_wait_event_trace(procnumber)</function> is the
+   general-purpose way to read any backend's ring, including one that
+   has already exited: find the process number first (for a still-live
+   backend, from <structname>pg_stat_wait_event_timing</structname>'s
+   <structfield>procnumber</structfield> column; for one that has
+   exited, from having recorded it earlier, or from the
+   <structfield>owner_pid</structfield> of an already-known orphan), then:
+<programlisting>
+SELECT * FROM pg_get_wait_event_trace(42) ORDER BY seq;
+</programlisting>
+   A backend can also read its own ring more directly through the
+   <structname>pg_backend_wait_event_trace</structname> view (equivalently,
+   <function>pg_get_backend_wait_event_trace()</function>), which needs
+   no process number argument.
+  </para>
+
+  <para>
+   <function>pg_stat_clear_orphaned_wait_event_rings()</function> exists
+   for the case where a process number is never going to be reused soon
+   enough on its own &mdash; for example, a long-lived connection pool
+   whose member connections rarely disconnect, where trace was briefly
+   enabled and then turned back off, leaving an orphan pinned
+   indefinitely.  It frees every currently orphaned ring cluster-wide and
+   returns the count freed; being both cluster-scope and destructive of
+   diagnostic data, it is superuser-only in the same way
+   <function>pg_stat_reset_wait_event_timing_all()</function> is.
+  </para>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-markers">
+  <title>Query Markers and Statement Attribution</title>
+
+  <para>
+   At the <literal>trace</literal> level, the ring buffer holds two
+   kinds of records interleaved by the order they were written: ordinary
+   completed-wait records, and query-attribution markers.  Every marker
+   is reported with <structfield>wait_event_type</structfield> =
+   <literal>Query</literal>, so <literal>WHERE wait_event_type =
+   'Query'</literal> isolates them from real waits.
+  </para>
+
+  <table id="pgwaiteventtracing-marker-table">
+   <title>Query-Attribution Markers</title>
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry><structfield>wait_event</structfield></entry>
+      <entry>Emitted from</entry>
+      <entry>Meaning</entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>QueryStart</literal></entry>
+      <entry><function>post_parse_analyze_hook</function></entry>
+      <entry>
+       A statement (including a utility statement, which is parsed the
+       same way) has just been parsed and analyzed.
+       <structfield>depth</structfield> is the executor nesting depth
+       already in effect when this fires &mdash; not always
+       <literal>0</literal>, since parsing can itself happen from inside
+       an already-open outer statement, for example a dynamically built
+       query executed via SPI from a SQL or PL function.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>ExecStart</literal></entry>
+      <entry><function>ExecutorStart_hook</function></entry>
+      <entry>
+       The executor is starting a plan, at whatever nesting depth is
+       currently in effect (<literal>0</literal> = top-level query).
+       Depth is incremented immediately afterward, so a nested
+       invocation's own <literal>ExecStart</literal>/<literal>ExecEnd</literal>
+       pair is correctly bracketed inside the outer one's.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>ExecEnd</literal></entry>
+      <entry><function>ExecutorEnd_hook</function></entry>
+      <entry>
+       The executor is finishing that plan; depth is decremented first,
+       so the record's own <structfield>depth</structfield> is the
+       nesting level <emphasis>after</emphasis> this invocation returns.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>UtilityStart</literal></entry>
+      <entry><function>ProcessUtility_hook</function> (before chaining)</entry>
+      <entry>
+       A utility statement (one that never goes through the executor) is
+       about to run.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>UtilityEnd</literal></entry>
+      <entry><function>ProcessUtility_hook</function> (after chaining returns)</entry>
+      <entry>
+       That utility statement has finished. If it raises an error
+       instead of returning normally, this marker is simply never
+       written, exactly as an executor error skips
+       <literal>ExecEnd</literal>.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>TxnCommit</literal></entry>
+      <entry>Transaction-end callback, on commit (including a two-phase <command>PREPARE TRANSACTION</command>) or parallel-worker commit</entry>
+      <entry>
+       The current transaction (or transaction block) has committed.
+       Any end-of-transaction wait, such as a WAL flush, precedes this
+       marker and is therefore attributed to the statement that
+       triggered the commit, not to whatever comes after.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>TxnAbort</literal></entry>
+      <entry>Transaction-end callback, on abort or parallel-worker abort</entry>
+      <entry>
+       The current transaction (or transaction block) has aborted. Also
+       defensively resets the nesting-depth counter to <literal>0</literal>,
+       since an error can unwind through any number of nested executor
+       invocations without each one's own <literal>ExecEnd</literal>
+       ever running.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>Idle</literal></entry>
+      <entry>The wait-begin hook itself</entry>
+      <entry>
+       Synthesized, not tied to any parse/executor/utility/transaction
+       hook, because none of those fire while a backend is simply
+       waiting for its next client message. Emitted the first time a
+       backend blocks in a <literal>ClientRead</literal> wait after a
+       statement or transaction has already closed (see the state
+       machine below); marks the unambiguous start of client think time.
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   <structfield>query_id</structfield> is whatever
+   <literal>queryId</literal> the parser or planner has already computed
+   by the time the corresponding marker fires: this module deliberately
+   never calls <function>EnableQueryId()</function> itself, so as not to
+   force query-identifier computation, and its cost, onto every server
+   that merely preloads it. Unless
+   <xref linkend="guc-compute-query-id"/> is on, or some other loaded
+   module (for example <filename>pg_stat_statements</filename>) has
+   already turned it on, every marker's <structfield>query_id</structfield>
+   reads as <literal>0</literal>; that value means "no identifier was
+   available", not "no statement was open".
+  </para>
+
+  <sect3 id="pgwaiteventtracing-marker-fsm">
+   <title>The Marker State Machine</title>
+
+   <para>
+    Each backend tracks one small piece of state, entirely separate from
+    the ring itself, that decides whether an upcoming
+    <literal>QueryStart</literal>/<literal>UtilityStart</literal>/<literal>ExecStart</literal>
+    should be preceded by a synthetic <literal>Idle</literal> marker:
+   </para>
+
+<programlisting>
+IDLE  --(QueryStart | UtilityStart | ExecStart)-->  OPEN
+OPEN  --(ExecEnd at depth 0 | UtilityEnd | TxnCommit | TxnAbort)-->  AFTER_STATEMENT
+AFTER_STATEMENT  --(first ClientRead wait)-->  IDLE   (emits Idle)
+AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
+</programlisting>
+
+   <para>
+    The last transition is what makes a pipelined batch, a
+    multi-statement simple-query string, or an already-buffered next
+    statement inside an explicit transaction read as back-to-back
+    statement intervals with no intervening <literal>Idle</literal>: the
+    backend never actually blocked waiting for the client between them,
+    so there is nothing for <literal>Idle</literal> to mark.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-attribution-rule">
+   <title>The Attribution Rule</title>
+
+   <para>
+    <function>pg_wait_event_trace_by_statement()</function> assigns
+    every ordinary wait record to exactly one bucket, using only three
+    kinds of marker as boundaries:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      A <literal>QueryStart</literal> or <literal>UtilityStart</literal>
+      at nesting depth <literal>0</literal> opens a new statement
+      bucket, labelled by that marker's own <structfield>seq</structfield>
+      and <structfield>query_id</structfield>. Gating on depth
+      <literal>0</literal> specifically keeps a nested start (SPI from a
+      SQL or PL function) from appearing to close the outer statement's
+      own bucket.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      An <literal>Idle</literal> or a <literal>TxnAbort</literal> marker
+      opens the synthetic <literal>&lt;idle&gt;</literal> bucket.
+      <literal>TxnAbort</literal> is treated the same as
+      <literal>Idle</literal> here on the reasoning that, from an
+      attribution standpoint, whatever follows an abort before the next
+      real statement is the same kind of gap as ordinary client think
+      time, rather than a third, separately named bucket.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Any wait recorded before the ring's very first boundary marker of
+      either kind &mdash; for instance, because trace was enabled
+      partway through an already-running session &mdash; falls into the
+      synthetic <literal>&lt;unattributed&gt;</literal> bucket.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-marker-timelines">
+   <title>Worked Timelines</title>
+
+   <para>
+    Every sequence below is the literal, regression-tested
+    <structfield>wait_event</structfield> array a session's own ring
+    produces for that scenario (<literal>Idle</literal> omitted, since
+    whether it appears depends on protocol-level timing, not statement
+    structure; see the note after the table).
+   </para>
+
+   <table id="pgwaiteventtracing-marker-timeline-table">
+    <title>Marker Sequences by Scenario</title>
+    <tgroup cols="2">
+     <thead>
+      <row>
+       <entry>Scenario</entry>
+       <entry>Markers</entry>
+      </row>
+     </thead>
+     <tbody>
+      <row>
+       <entry>A single autocommit statement (<literal>SELECT 1;</literal>)</entry>
+       <entry><literal>QueryStart, ExecStart, ExecEnd, TxnCommit</literal></entry>
+      </row>
+      <row>
+       <entry>
+        An explicit transaction with two statements, each on its own
+        line (<literal>BEGIN; SELECT 1; SELECT 2; COMMIT;</literal>)
+       </entry>
+       <entry>
+<literal>QueryStart, UtilityStart, UtilityEnd,
+  QueryStart, ExecStart, ExecEnd,
+  QueryStart, ExecStart, ExecEnd,
+  QueryStart, UtilityStart, UtilityEnd, TxnCommit</literal>
+       </entry>
+      </row>
+      <row>
+       <entry>
+        Two statements sent in one simple-query protocol message
+        (<literal>SELECT 1; SELECT 2;</literal> on one input line)
+       </entry>
+       <entry><literal>QueryStart, ExecStart, ExecEnd, TxnCommit,
+  QueryStart, ExecStart, ExecEnd, TxnCommit</literal></entry>
+      </row>
+      <row>
+       <entry>A utility statement (<literal>CREATE TABLE t (a int);</literal>)</entry>
+       <entry><literal>QueryStart, UtilityStart, UtilityEnd, TxnCommit</literal></entry>
+      </row>
+      <row>
+       <entry>
+        An error raised during planning, before execution ever starts
+        (<literal>SELECT 1/0;</literal>, folded and evaluated by the
+        planner's constant-folding pass)
+       </entry>
+       <entry><literal>QueryStart, TxnAbort</literal></entry>
+      </row>
+      <row>
+       <entry>
+        A nested call, one level deep (a <literal>plpgsql</literal>
+        function whose body issues <literal>PERFORM</literal>, which
+        always goes through SPI's normal execute path)
+       </entry>
+       <entry><literal>QueryStart, ExecStart, ExecStart, ExecEnd, ExecEnd,
+  TxnCommit</literal> with depths
+  <literal>0, 0, 1, 1, 0, 0</literal></entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    Two further scenarios are not exercised by the regression tests
+    (a genuinely mid-execution error is hard to construct
+    deterministically; a truly pipelined extended-protocol batch cannot
+    be sent from a plain SQL script) but follow directly from the state
+    machine and hook placements above:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      <emphasis>An error raised during execution</emphasis> (after
+      <literal>ExecutorStart</literal> has already run, unlike the
+      constant-folding case in the table) produces
+      <literal>QueryStart, ExecStart, TxnAbort</literal> &mdash; no
+      matching <literal>ExecEnd</literal>, since an error unwinds past
+      <function>ExecutorEnd_hook</function> without calling it, exactly
+      as an erroring utility statement never reaches
+      <literal>UtilityEnd</literal>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>A pipelined extended-query-protocol batch</emphasis>
+      (several <literal>Parse</literal>/<literal>Bind</literal>/<literal>Execute</literal>
+      messages queued without an intervening <literal>Sync</literal>)
+      reads exactly like the same-line multi-statement case above: each
+      queued statement gets its own complete
+      <literal>QueryStart ... TxnCommit</literal> sequence, one after
+      another, with no <literal>Idle</literal> between them. There is no
+      dedicated end-of-message marker for the extended protocol (no
+      existing core hook fires at that boundary), so a queued
+      statement's end is inferred the same way as in the multi-statement
+      case: by the appearance of the next statement's own
+      <literal>QueryStart</literal>.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-marker-limitations">
+   <title>Limitations</title>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      <emphasis>No end-of-message marker for the pipelined extended
+      protocol.</emphasis> There is no core hook that fires when one
+      pipelined <literal>Bind</literal>/<literal>Execute</literal>
+      message's processing ends and the next begins, so a queued
+      statement's boundary can only be inferred from the next
+      statement's own <literal>QueryStart</literal>, as shown above.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Parallel workers are recorded under their own
+      backend.</emphasis> A parallel worker's waits and markers go into
+      its own ring, keyed to its own process number; the query leader's
+      trace never contains them (see
+      <xref linkend="pgwaiteventtracing-semantics"/>).
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Waits before the first marker are
+      unattributed.</emphasis> If a ring is read from a point before its
+      very first boundary marker &mdash; typically because trace was
+      turned on partway through an already-open session &mdash; those
+      earlier waits have no statement to attach to and land in the
+      <literal>&lt;unattributed&gt;</literal> bucket (see
+      <xref linkend="pgwaiteventtracing-attribution-rule"/>).
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis><structfield>query_id</structfield> is
+      <literal>0</literal> unless query identifier computation is
+      enabled.</emphasis> This module never calls
+      <function>EnableQueryId()</function> on its own; see the note
+      after <xref linkend="pgwaiteventtracing-marker-table"/>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis><literal>ClientRead</literal> inside <command>COPY
+      ... FROM STDIN</command> belongs to the
+      <command>COPY</command>.</emphasis> While a
+      <command>COPY ... FROM STDIN</command> is reading its data stream,
+      the marker state machine is still <literal>OPEN</literal> (the
+      matching <literal>ExecEnd</literal> has not fired yet), so the
+      condition that would synthesize an <literal>Idle</literal> marker
+      never matches: every <literal>ClientRead</literal> wait incurred
+      while waiting for more <command>COPY</command> data is recorded as
+      an ordinary wait attributed to the <command>COPY</command>
+      statement itself, not treated as client think time between
+      statements.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </sect3>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-reading">
+  <title>Reading from Other Extensions</title>
+
+  <para>
+   Every shared data structure this module uses &mdash; the control
+   table, the per-backend statistics payloads, and the trace rings
+   themselves &mdash; is private to
+   <filename>pg_wait_event_tracing.c</filename>; none of it is exported
+   through any header another module could include. The SQL functions
+   documented in <xref linkend="pgwaiteventtracing-views"/> are the only
+   supported way to read this module's data, from SQL or from any other
+   language or extension that can issue SQL (including
+   <literal>SPI</literal> from inside a C extension). There is
+   deliberately no C-level API for reaching into this module's shared
+   memory directly.
+  </para>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-overhead">
+  <title>Overhead</title>
+
+  <!-- COST NUMBERS: filled in after the bare-metal re-measurement -->
+  <para>
+   Overhead differs by how deeply the module is engaged: the library not
+   loaded at all; loaded via
+   <xref linkend="guc-shared-preload-libraries"/> with
+   <varname>pg_wait_event_tracing.capture</varname> = <literal>off</literal>
+   (paid by every backend regardless of whether any session ever raises
+   the level, since every timed wait-reporting call site now runs one
+   extra, normally-not-taken branch); <literal>stats</literal> (two
+   timestamp reads and one small in-memory update per completed wait);
+   and <literal>trace</literal> (stats, plus one 32-byte record append
+   per completed wait and one more per query-attribution marker).
+   Concrete per-level measurements are not included in this revision of
+   the documentation; they will be re-measured on dedicated,
+   non-virtualized hardware and added here before this module is
+   proposed for inclusion.
+  </para>
+ </sect2>
+
+</sect1>

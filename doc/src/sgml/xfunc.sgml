@@ -3883,6 +3883,26 @@ uint32 WaitEventExtensionNew(const char *wait_event_name)
 (1 row)
 </screen>
     </para>
+    <para>
+     A custom wait event, like any other, is reported with
+     <function>pgstat_report_wait_start</function> and
+     <function>pgstat_report_wait_end</function> (see the injection point
+     example below).  Starting in this release, add-ins may instead use
+     <function>pgstat_report_wait_start_timed</function> and
+     <function>pgstat_report_wait_end_timed</function>, an explicitly
+     instrumented variant of the same pair with the identical calling
+     convention. The only difference is that the timed pair also invokes a
+     pair of begin/end hooks
+     (<varname>wait_event_begin_hook</varname>/<varname>wait_event_end_hook</varname>)
+     that a loaded timing consumer, such as
+     <filename>pg_wait_event_tracing</filename>, can install to observe
+     exactly when this wait started and ended. When no such consumer is
+     loaded, the hooks are null and the timed pair costs the same as the
+     ordinary one; add-ins that want their own custom wait events to be
+     visible to a timing consumer should prefer the timed pair for any new
+     code, and may convert existing call sites to it at no cost to
+     installations that do not load such a consumer.
+    </para>
    </sect2>
 
    <sect2 id="xfunc-addin-injection-points">
@@ -3951,14 +3971,23 @@ custom_injection_callback(const char *name,
 {
     uint32 wait_event_info = WaitEventInjectionPointNew(name);
 
+#if PG_VERSION_NUM >= 200000
+    pgstat_report_wait_start_timed(wait_event_info);
+    elog(NOTICE, "%s: executed custom callback", name);
+    pgstat_report_wait_end_timed();
+#else
     pgstat_report_wait_start(wait_event_info);
     elog(NOTICE, "%s: executed custom callback", name);
     pgstat_report_wait_end();
+#endif
 }
 </programlisting>
      This callback prints a message to server error log with severity
      <literal>NOTICE</literal>, but callbacks may implement more complex
-     logic.
+     logic. The timed pair is used here (with a fallback to the ordinary
+     pair for servers older than this release) so that a loaded timing
+     consumer can observe the injection point's own wait; see
+     <xref linkend="xfunc-addin-wait-events"/>.
     </para>
 
     <para>
