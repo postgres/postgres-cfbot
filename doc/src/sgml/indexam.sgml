@@ -41,6 +41,9 @@
    block number and an item number within that block (see <xref
    linkend="storage-page-layout"/>).  This is sufficient
    information to fetch a particular row version from the table.
+   What a TID identifies is up to the table's access method (see <xref
+   linkend="tableam-locator"/>); an index can be built only on a table whose
+   row locator fits in one.
    Indexes are not directly aware that under MVCC, there might be multiple
    extant versions of the same logical row; to an index, each tuple is
    an independent object that needs its own index entry.  Thus, an

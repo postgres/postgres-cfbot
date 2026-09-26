@@ -82,6 +82,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.amcaninclude = true,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,
+		.amcanvarlocator = false,
 		.amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP,
 		.amkeytype = InvalidOid,

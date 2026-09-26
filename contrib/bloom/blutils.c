@@ -125,6 +125,7 @@ blhandler(PG_FUNCTION_ARGS)
 		.amcanbuildparallel = false,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
+		.amcanvarlocator = false,
 		.amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP,
 		.amkeytype = InvalidOid,
