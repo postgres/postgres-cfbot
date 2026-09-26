@@ -433,9 +433,7 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 			if (current_lsn >= rstate->lsn)
 			{
 				char		originname[NAMEDATALEN];
-
-				rstate->state = SUBREL_STATE_READY;
-				rstate->lsn = current_lsn;
+				XLogRecPtr	statelsn;
 
 				/*
 				 * Remove the tablesync origin tracking if exists.
@@ -451,9 +449,22 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 				 * Lock the subscription and origin in the same order as we
 				 * are doing during DDL commands to avoid deadlocks. See
 				 * AlterSubscription_refresh.
+				 *
+				 * Recheck the state after acquiring the subscription lock. A
+				 * concurrent refresh may have removed the table, or removed
+				 * and re-added it with a new synchronization state, while we
+				 * waited.
 				 */
 				LockSharedObject(SubscriptionRelationId, MyLogicalRepWorker->subid,
 								 0, AccessShareLock);
+
+				if (GetSubscriptionRelState(MyLogicalRepWorker->subid,
+											rstate->relid, &statelsn) != SUBREL_STATE_SYNCDONE ||
+					current_lsn < statelsn)
+					continue;
+
+				rstate->state = SUBREL_STATE_READY;
+				rstate->lsn = current_lsn;
 
 				if (!rel)
 					rel = table_open(SubscriptionRelRelationId, RowExclusiveLock);
