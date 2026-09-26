@@ -91,10 +91,10 @@ typedef enum PgAioOp
 
 	PGAIO_OP_READV,
 	PGAIO_OP_WRITEV,
+	PGAIO_OP_FSYNC,
 
 	/**
 	 * In the near term we'll need at least:
-	 * - fsync / fdatasync
 	 * - flush_range
 	 *
 	 * Eventually we'll additionally want at least:
@@ -104,7 +104,7 @@ typedef enum PgAioOp
 	 **/
 } PgAioOp;
 
-#define PGAIO_OP_COUNT	(PGAIO_OP_WRITEV + 1)
+#define PGAIO_OP_COUNT	(PGAIO_OP_FSYNC + 1)
 
 
 /*
@@ -118,9 +118,11 @@ typedef enum PgAioTargetID
 	/* intentionally the zero value, to help catch zeroed memory etc */
 	PGAIO_TID_INVALID = 0,
 	PGAIO_TID_SMGR,
+	PGAIO_TID_SYNC,
+	PGAIO_TID_SYNC_FILETAG,
 } PgAioTargetID;
 
-#define PGAIO_TID_COUNT (PGAIO_TID_SMGR + 1)
+#define PGAIO_TID_COUNT (PGAIO_TID_SYNC_FILETAG + 1)
 
 
 /*
@@ -146,6 +148,13 @@ typedef union
 		uint16		iov_length;
 		uint64		offset;
 	}			write;
+
+	struct
+	{
+		int			fd;
+		bool		datasync;
+		uint32		wait_event_info;
+	}			fsync;
 } PgAioOpData;
 
 
@@ -160,8 +169,23 @@ struct PgAioTargetInfo
 	/*
 	 * To support executing using worker processes, the file descriptor for an
 	 * IO may need to be reopened in a different process.
+	 *
+	 * Returns 0 on success.  Callbacks can return -errno for an ordinary
+	 * failure to reopen, allowing the issuer to handle the failure without
+	 * terminating the worker.  Callbacks that raise an error instead use the
+	 * worker's exception-recovery path, which does not preserve errno.
 	 */
-	void		(*reopen) (PgAioHandle *ioh);
+	int			(*reopen) (PgAioHandle *ioh);
+
+	/*
+	 * Optional counterpart to reopen, releasing the file descriptor it
+	 * acquired.  Called in the process that reopened the IO, after the IO has
+	 * been executed.  Targets whose reopen callback reuses a cached
+	 * descriptor do not need this.
+	 *
+	 * This is called in a critical section, so it must not raise errors.
+	 */
+	void		(*close) (PgAioHandle *ioh);
 
 	/* describe the target of the IO, used for log messages and views */
 	char	   *(*describe_identity) (const PgAioTargetData *sd);
@@ -300,6 +324,9 @@ extern void pgaio_io_start_readv(PgAioHandle *ioh,
 								 int fd, int iovcnt, uint64 offset);
 extern void pgaio_io_start_writev(PgAioHandle *ioh,
 								  int fd, int iovcnt, uint64 offset);
+extern void pgaio_io_start_fsync(PgAioHandle *ioh, int fd, bool datasync,
+								 uint32 wait_event_info);
+
 
 /* functions in aio_target.c */
 extern void pgaio_io_set_target(PgAioHandle *ioh, PgAioTargetID targetid);
