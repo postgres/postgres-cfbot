@@ -84,6 +84,18 @@ PG_STAT_GET_RELENTRY_INT64(mod_since_analyze)
 /* pg_stat_get_numscans */
 PG_STAT_GET_RELENTRY_INT64(numscans)
 
+/* pg_stat_get_lock_skipped_analyze_count */
+PG_STAT_GET_RELENTRY_INT64(lock_skipped_analyze_count)
+
+/* pg_stat_get_lock_skipped_autoanalyze_count */
+PG_STAT_GET_RELENTRY_INT64(lock_skipped_autoanalyze_count)
+
+/* pg_stat_get_lock_skipped_autovacuum_count */
+PG_STAT_GET_RELENTRY_INT64(lock_skipped_autovacuum_count)
+
+/* pg_stat_get_lock_skipped_vacuum_count */
+PG_STAT_GET_RELENTRY_INT64(lock_skipped_vacuum_count)
+
 /* pg_stat_get_tuples_deleted */
 PG_STAT_GET_RELENTRY_INT64(tuples_deleted)
 
@@ -203,6 +215,18 @@ PG_STAT_GET_RELENTRY_TIMESTAMPTZ(last_vacuum_time)
 
 /* pg_stat_get_lastscan */
 PG_STAT_GET_RELENTRY_TIMESTAMPTZ(lastscan)
+
+/* pg_stat_get_last_lock_skipped_analyze_time */
+PG_STAT_GET_RELENTRY_TIMESTAMPTZ(last_lock_skipped_analyze_time)
+
+/* pg_stat_get_last_lock_skipped_autoanalyze_time */
+PG_STAT_GET_RELENTRY_TIMESTAMPTZ(last_lock_skipped_autoanalyze_time)
+
+/* pg_stat_get_last_lock_skipped_autovacuum_time */
+PG_STAT_GET_RELENTRY_TIMESTAMPTZ(last_lock_skipped_autovacuum_time)
+
+/* pg_stat_get_last_lock_skipped_vacuum_time */
+PG_STAT_GET_RELENTRY_TIMESTAMPTZ(last_lock_skipped_vacuum_time)
 
 /* pg_stat_get_stat_reset_time */
 PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat_reset_time)
