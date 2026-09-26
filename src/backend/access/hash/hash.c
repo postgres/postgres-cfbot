@@ -93,6 +93,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,
+		.amcanvarlocator = false,
 		.amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL,
 		.amkeytype = INT4OID,
