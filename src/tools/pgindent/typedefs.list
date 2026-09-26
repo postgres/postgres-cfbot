@@ -2476,6 +2476,9 @@ QTNode
 QUERYTYPE
 QualCost
 QualItem
+QualifyExtractContext
+QualifyHookState
+QualifyVarmapContext
 Query
 QueryCompletion
 QueryDesc
