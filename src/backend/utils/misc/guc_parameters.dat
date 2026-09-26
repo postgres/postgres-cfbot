@@ -569,6 +569,22 @@
   assign_hook => 'assign_createrole_self_grant',
 },
 
+{ name => 'credential_validation_enabled', type => 'bool', context => 'PGC_SUSET', group => 'CONN_AUTH_AUTH',
+  short_desc => 'Enables periodic re-validation of session credentials.',
+  long_desc => 'When enabled, each backend periodically re-checks that the authenticated role has not expired and that any method-specific credential (OAuth token, client certificate) is still valid.',
+  variable => 'credential_validation_enabled',
+  boot_val => 'false',
+},
+
+{ name => 'credential_validation_interval', type => 'int', context => 'PGC_SUSET', group => 'CONN_AUTH_AUTH',
+  short_desc => 'Sets the interval in seconds between credential re-validation checks.',
+  flags => 'GUC_UNIT_S',
+  variable => 'credential_validation_interval',
+  boot_val => '60',
+  min => '5',
+  max => '3600',
+},
+
 { name => 'cursor_tuple_fraction', type => 'real', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
   short_desc => 'Sets the planner\'s estimate of the fraction of a cursor\'s rows that will be retrieved.',
   flags => 'GUC_EXPLAIN',
