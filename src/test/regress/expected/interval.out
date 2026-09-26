@@ -2128,6 +2128,31 @@ SELECT timetz '11:27:42' - interval 'infinity';
 ERROR:  cannot subtract infinite interval from time
 SELECT timetz '11:27:42' - interval '-infinity';
 ERROR:  cannot subtract infinite interval from time
+-- time +/- interval must not overflow, however large the interval
+SELECT time '23:59:59.999999' + interval '9223372036854775807 microseconds';
+    ?column?     
+-----------------
+ 04:00:54.775806
+(1 row)
+
+SELECT time '23:59:59.999999' - interval '-9223372036854775808 microseconds';
+    ?column?     
+-----------------
+ 04:00:54.775807
+(1 row)
+
+SELECT timetz '23:59:59.999999+01' + interval '9223372036854775807 microseconds';
+      ?column?      
+--------------------
+ 04:00:54.775806+01
+(1 row)
+
+SELECT timetz '23:59:59.999999+01' - interval '-9223372036854775808 microseconds';
+      ?column?      
+--------------------
+ 04:00:54.775807+01
+(1 row)
+
 SELECT lhst.i lhs,
     rhst.i rhs,
     lhst.i < rhst.i AS lt,
