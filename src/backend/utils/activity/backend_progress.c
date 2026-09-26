@@ -35,7 +35,7 @@ pgstat_progress_start_command(ProgressCommandType cmdtype, Oid relid)
 	PGSTAT_BEGIN_WRITE_ACTIVITY(beentry);
 	beentry->st_progress_command = cmdtype;
 	beentry->st_progress_command_target = relid;
-	MemSet(&beentry->st_progress_param, 0, sizeof(beentry->st_progress_param));
+	MemSet(&unvolatize(PgBackendStatus *, beentry)->st_progress_param, 0, sizeof(beentry->st_progress_param));
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
 }
 

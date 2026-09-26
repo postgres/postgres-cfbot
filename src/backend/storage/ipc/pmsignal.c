@@ -145,7 +145,7 @@ PMSignalShmemRequest(void *arg)
 					mul_size(num_child_flags, sizeof(sig_atomic_t)));
 	ShmemRequestStruct(.name = "PMSignalState",
 					   .size = size,
-					   .ptr = (void **) &PMSignalState,
+					   .ptr = (void **) unvolatize(PMSignalData **, &PMSignalState),
 		);
 }
 
