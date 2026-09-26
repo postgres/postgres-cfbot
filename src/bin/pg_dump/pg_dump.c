@@ -315,7 +315,7 @@ static void dumpTable(Archive *fout, const TableInfo *tbinfo);
 static void dumpTableSchema(Archive *fout, const TableInfo *tbinfo);
 static void dumpTableAttach(Archive *fout, const TableAttachInfo *attachinfo);
 static void dumpAttrDef(Archive *fout, const AttrDefInfo *adinfo);
-static void collectSequences(Archive *fout);
+static void collectSequences(Archive *fout, TableInfo *tblinfo, int numTables);
 static void dumpSequence(Archive *fout, const TableInfo *tbinfo);
 static void dumpSequenceData(Archive *fout, const TableDataInfo *tdinfo);
 static void dumpIndex(Archive *fout, const IndxInfo *indxinfo);
@@ -1169,7 +1169,7 @@ main(int argc, char **argv)
 		collectBinaryUpgradeClassOids(fout);
 
 	/* Collect sequence information. */
-	collectSequences(fout);
+	collectSequences(fout, tblinfo, numTables);
 
 	/* Lastly, create dummy objects to represent the section boundaries */
 	boundaryObjs = createBoundaryObjects();
@@ -19106,10 +19106,10 @@ SequenceItemCmp(const void *p1, const void *p2)
  * speed in lookup.
  */
 static void
-collectSequences(Archive *fout)
+collectSequences(Archive *fout, TableInfo *tblinfo, int numTables)
 {
+	PQExpBuffer query = createPQExpBuffer();
 	PGresult   *res;
-	const char *query;
 
 	/*
 	 * Since version 18, we can gather the sequence data in this query with
@@ -19117,24 +19117,59 @@ collectSequences(Archive *fout)
 	 */
 	if (fout->remoteVersion < 180000 ||
 		(!fout->dopt->dumpData && !fout->dopt->sequence_data))
-		query = "SELECT seqrelid, format_type(seqtypid, NULL), "
-			"seqstart, seqincrement, "
-			"seqmax, seqmin, "
-			"seqcache, seqcycle, "
-			"NULL, 'f' "
-			"FROM pg_catalog.pg_sequence "
-			"ORDER BY seqrelid";
+		appendPQExpBufferStr(query,
+							 "SELECT seqrelid, format_type(seqtypid, NULL), "
+							 "seqstart, seqincrement, "
+							 "seqmax, seqmin, "
+							 "seqcache, seqcycle, "
+							 "NULL, 'f' "
+							 "FROM pg_catalog.pg_sequence "
+							 "ORDER BY seqrelid");
 	else
-		query = "SELECT seqrelid, format_type(seqtypid, NULL), "
-			"seqstart, seqincrement, "
-			"seqmax, seqmin, "
-			"seqcache, seqcycle, "
-			"last_value, is_called "
-			"FROM pg_catalog.pg_sequence, "
-			"pg_get_sequence_data(seqrelid) "
-			"ORDER BY seqrelid;";
+	{
+		PQExpBuffer seqoids = createPQExpBuffer();
 
-	res = ExecuteSqlQuery(fout, query, PGRES_TUPLES_OK);
+		/*
+		 * pg_get_sequence_data() has to open, lock, and read each sequence,
+		 * so call it only for the sequences whose data will be dumped, i.e.,
+		 * those that already have a TableDataInfo.  Otherwise, dumping a few
+		 * sequences from a database that has many would be slow, and it could
+		 * block on locks held on sequences we're not dumping.  We still
+		 * collect the definitions of all sequences, which is cheap.
+		 */
+		appendPQExpBufferChar(seqoids, '{');
+		for (int i = 0; i < numTables; i++)
+		{
+			TableInfo  *tbinfo = &tblinfo[i];
+
+			if (tbinfo->relkind != RELKIND_SEQUENCE || tbinfo->dataObj == NULL)
+				continue;
+
+			if (seqoids->len > 1)	/* do we have more than the '{'? */
+				appendPQExpBufferChar(seqoids, ',');
+			appendPQExpBuffer(seqoids, "%u", tbinfo->dobj.catId.oid);
+		}
+		appendPQExpBufferChar(seqoids, '}');
+
+		appendPQExpBuffer(query,
+						  "SELECT s.seqrelid, format_type(s.seqtypid, NULL), "
+						  "s.seqstart, s.seqincrement, "
+						  "s.seqmax, s.seqmin, "
+						  "s.seqcache, s.seqcycle, "
+						  "d.last_value, d.is_called "
+						  "FROM pg_catalog.pg_sequence s "
+						  "LEFT JOIN (SELECT src.seqrelid, "
+						  "sd.last_value, sd.is_called "
+						  "FROM unnest('%s'::pg_catalog.oid[]) AS src(seqrelid), "
+						  "pg_get_sequence_data(src.seqrelid) AS sd) d "
+						  "ON d.seqrelid = s.seqrelid "
+						  "ORDER BY s.seqrelid",
+						  seqoids->data);
+
+		destroyPQExpBuffer(seqoids);
+	}
+
+	res = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
 
 	nsequences = PQntuples(res);
 	sequences = pg_malloc_array(SequenceItem, nsequences);
@@ -19155,6 +19190,7 @@ collectSequences(Archive *fout)
 	}
 
 	PQclear(res);
+	destroyPQExpBuffer(query);
 }
 
 /*
