@@ -1,0 +1,4 @@
+comment = 'Demonstrates the conflict log table residual output-function size gap'
+default_version = '1.0'
+module_pathname = '$libdir/test_conflict_typeout'
+relocatable = false
