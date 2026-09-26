@@ -310,8 +310,14 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 				info->amsearchnulls = amroutine->amsearchnulls;
 				info->amcanparallel = amroutine->amcanparallel;
 				info->amhasgettuple = (amroutine->amgettuple != NULL);
+				/*
+				 * A TID bitmap cannot hold the table's locators if their
+				 * offsets exceed its bound; see max_offset in amlocator.h.
+				 */
 				info->amhasgetbitmap = amroutine->amgetbitmap != NULL &&
-					relation->rd_tableam->scan_bitmap_next_tuple != NULL;
+					relation->rd_tableam->scan_bitmap_next_tuple != NULL &&
+					RelationGetLocatorDesc(relation)->max_offset <=
+					TBM_MAX_TUPLES_PER_PAGE;
 				info->amcanmarkpos = (amroutine->ammarkpos != NULL &&
 									  amroutine->amrestrpos != NULL);
 				info->amcostestimate = amroutine->amcostestimate;
