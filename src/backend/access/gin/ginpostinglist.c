@@ -287,6 +287,9 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 	ndecoded = 0;
 	while ((char *) segment < endseg)
 	{
+		OffsetNumber firstoff;
+		uint64		prev;
+
 		/*
 		 * Reject a segment that runs past the end of the posting list.
 		 * Compare sizes rather than forming segment +
@@ -300,6 +303,23 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("corrupted GIN posting list")));
 
+		/*
+		 * The first item's offset must fit in MaxHeapTuplesPerPageBits, as
+		 * itemptr_to_uint64() below requires.  That is tighter than
+		 * OffsetNumberIsValid(), which is why the range is open-coded here.
+		 * Read it with the No-Check accessor, since the checking one would
+		 * Assert() on the corrupt value being rejected.  The last clause keeps
+		 * items ascending across segment boundaries.
+		 */
+		firstoff = GinItemPointerGetOffsetNumber(&segment->first);
+		if (firstoff == InvalidOffsetNumber ||
+			firstoff >= (1 << MaxHeapTuplesPerPageBits) ||
+			(ndecoded > 0 &&
+			 ginCompareItemPointers(&segment->first, &result[ndecoded - 1]) <= 0))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("corrupted GIN posting list")));
+
 		/* enlarge output array if needed */
 		if (ndecoded >= nallocated)
 		{
@@ -308,12 +328,11 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 		}
 
 		/* copy the first item */
-		Assert(OffsetNumberIsValid(ItemPointerGetOffsetNumber(&segment->first)));
-		Assert(ndecoded == 0 || ginCompareItemPointers(&segment->first, &result[ndecoded - 1]) > 0);
 		result[ndecoded] = segment->first;
 		ndecoded++;
 
 		val = itemptr_to_uint64(&segment->first);
+		prev = val;
 		ptr = segment->bytes;
 		endptr = segment->bytes + segment->nbytes;
 		while (ptr < endptr)
@@ -326,6 +345,18 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 			}
 
 			val += decode_varbyte(&ptr, endptr);
+
+			/*
+			 * Reject offset 0 and a non-increasing item.  Neither appears in a
+			 * valid list, and uint64_to_itemptr() below Asserts on offset 0, so
+			 * this has to run before it.
+			 */
+			if ((val & ((1 << MaxHeapTuplesPerPageBits) - 1)) == 0 ||
+				val <= prev)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("corrupted GIN posting list")));
+			prev = val;
 
 			uint64_to_itemptr(val, &result[ndecoded]);
 			ndecoded++;
