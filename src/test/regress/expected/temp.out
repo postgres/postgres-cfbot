@@ -566,3 +566,38 @@ SELECT count(*), max(a) max_a, min(a) min_a, max(cnt) max_cnt FROM test_temp;
 
 -- cleanup
 DROP FUNCTION test_temp_pin(int, int);
+-- Check that dropping the temp schema doesn't leave an inconsistent state
+\c -
+BEGIN;
+CREATE TEMP TABLE test_temp_t1(f1 int);
+SELECT pg_my_temp_schema()::regnamespace AS mytempschema \gset
+DROP SCHEMA :mytempschema CASCADE;
+NOTICE:  drop cascades to table test_temp_t1
+CREATE TEMP TABLE test_temp_t2(f1 int);
+SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE oid = pg_my_temp_schema())
+    AS temp_schema_exists;
+ temp_schema_exists 
+--------------------
+ t
+(1 row)
+
+COMMIT;
+-- the same, with the drop in a later transaction
+SELECT pg_my_temp_schema()::regnamespace AS mytempschema \gset
+DROP SCHEMA :mytempschema CASCADE;
+NOTICE:  drop cascades to table test_temp_t2
+CREATE TEMP TABLE test_temp_t3(f1 int);
+SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE oid = pg_my_temp_schema())
+    AS temp_schema_exists;
+ temp_schema_exists 
+--------------------
+ t
+(1 row)
+
+SELECT count(*) AS orphans FROM pg_class c
+    WHERE NOT EXISTS (SELECT 1 FROM pg_namespace n WHERE n.oid = c.relnamespace);
+ orphans 
+---------
+       0
+(1 row)
+
