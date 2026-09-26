@@ -149,6 +149,54 @@ INSERT INTO nocols DEFAULT VALUES;
 SELECT * FROM nocols n, LATERAL (VALUES(n.*)) v;
 
 --
+-- Test writing the clauses in the order they are evaluated: FROM first and
+-- the select list last, or left out entirely
+--
+FROM int8_tbl SELECT q1, q2 ORDER BY q1, q2;
+FROM int8_tbl ORDER BY q1, q2;
+FROM int8_tbl SELECT ALL q1 ORDER BY q1;
+FROM int8_tbl SELECT DISTINCT q1 ORDER BY q1;
+FROM int8_tbl SELECT DISTINCT ON (q1) q1, q2 ORDER BY q1, q2;
+
+-- an empty target list is as acceptable as it is in SELECT ... FROM
+FROM int8_tbl WHERE q1 = 123 SELECT;
+
+-- the other clauses keep their usual meanings, and precede the select list
+FROM int8_tbl WHERE q2 <> 456 GROUP BY q1 HAVING count(*) > 1
+  SELECT q1, count(*) ORDER BY q1;
+FROM int8_tbl WINDOW w AS (PARTITION BY q1)
+  SELECT q1, count(*) OVER w ORDER BY q1 LIMIT 3;
+FROM int8_tbl WHERE q1 <> q2 ORDER BY q1, q2 LIMIT 2 FOR UPDATE;
+FROM int8_tbl a JOIN int8_tbl b ON a.q2 = b.q1 SELECT a.q1, b.q2
+  ORDER BY a.q1, b.q2;
+FROM generate_series(1, 3) g(i), LATERAL (SELECT i * 2) s(j) SELECT i, j
+  ORDER BY i;
+
+-- and it nests like any other SELECT
+SELECT * FROM (FROM int8_tbl SELECT q1 AS x) ss ORDER BY x;
+WITH cte AS (FROM int8_tbl) FROM cte SELECT count(*);
+FROM int8_tbl SELECT q1 UNION FROM int8_tbl SELECT q2 ORDER BY 1;
+(FROM int8_tbl SELECT q1) EXCEPT (FROM int8_tbl SELECT q2) ORDER BY 1;
+
+-- works in the places a SELECT can be embedded in another statement
+CREATE TEMP TABLE fromfirst_tbl (q bigint);
+INSERT INTO fromfirst_tbl FROM int8_tbl WHERE q1 = 123 SELECT q1;
+INSERT INTO fromfirst_tbl FROM int8_tbl WHERE q2 = 456 SELECT DISTINCT q2;
+TABLE fromfirst_tbl;
+COPY (FROM fromfirst_tbl) TO stdout;
+FROM fromfirst_tbl WHERE q = 123 SELECT q INTO TEMP TABLE fromfirst_into;
+TABLE fromfirst_into;
+
+-- a stored query is deparsed as an ordinary SELECT
+CREATE TEMP VIEW fromfirst_view AS FROM int8_tbl WHERE q2 > 0 SELECT q1;
+SELECT pg_get_viewdef('fromfirst_view'::regclass);
+
+-- nothing may follow the select list, and DISTINCT still requires one
+FROM int8_tbl SELECT q1 WHERE q1 = 123;
+FROM int8_tbl SELECT DISTINCT;
+FROM;
+
+--
 -- Test ORDER BY options
 --
 
