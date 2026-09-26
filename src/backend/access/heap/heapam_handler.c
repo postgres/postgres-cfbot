@@ -20,6 +20,7 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/amlocator.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
 #include "access/multixact.h"
@@ -2649,8 +2650,29 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
  * ------------------------------------------------------------------------
  */
 
+/*
+ * A heap row is located by its TID: a fixed-width block number and line
+ * pointer offset.  A bitmap scan uses the block as the bucket and the offset
+ * as the slot.
+ */
+static const LocatorDesc heapam_locator_desc = {
+	.width = sizeof(ItemPointerData),
+	.name = "tid",
+	.stable = false,
+	.bitmap_and_inexact = NULL,
+};
+
+static const LocatorDesc *
+heapam_relation_locator(Relation rel)
+{
+	return &heapam_locator_desc;
+}
+
 static const TableAmRoutine heapam_methods = {
 	.type = T_TableAmRoutine,
+
+	/* heap identifies a row by its TID; see amlocator.h */
+	.relation_locator = heapam_relation_locator,
 
 	.slot_callbacks = heapam_slot_callbacks,
 

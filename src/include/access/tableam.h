@@ -17,6 +17,7 @@
 #ifndef TABLEAM_H
 #define TABLEAM_H
 
+#include "access/amlocator.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/xact.h"
@@ -323,6 +324,19 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+
+	/* ------------------------------------------------------------------------
+	 * Locator.
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * Return the locator descriptor for this relation, which describes the
+	 * locator this AM hands to indexes; see amlocator.h.  Must not return
+	 * NULL.  The relcache keeps the pointer for the life of the relation's
+	 * cache entry.  Callers use RelationGetLocatorDesc().
+	 */
+	const struct LocatorDesc *(*relation_locator) (Relation rel);
 
 
 	/* ------------------------------------------------------------------------
@@ -931,6 +945,39 @@ table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 		elog(ERROR, "scan started during logical decoding");
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
+}
+
+/* ----------------------------------------------------------------------------
+ * Locator inspection functions
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Return the relation's locator descriptor, fetching it from the table AM the
+ * first time and keeping it in the relcache entry after that.
+ */
+static inline const struct LocatorDesc *
+RelationGetLocatorDesc(Relation rel)
+{
+	if (rel->rd_locdesc == NULL)
+	{
+		/*
+		 * A table AM that predates the locator contract has no
+		 * relation_locator callback.  Treat it as heap does: a fixed-width
+		 * TID that serves bitmap scans and moves a row on update.
+		 */
+		static const LocatorDesc default_locdesc = {
+			.width = sizeof(ItemPointerData),
+			.name = "tid",
+			.stable = false,
+			.bitmap_and_inexact = NULL,
+			.bitmap_or_inexact = NULL,
+		};
+
+		rel->rd_locdesc = rel->rd_tableam->relation_locator ?
+			rel->rd_tableam->relation_locator(rel) : &default_locdesc;
+	}
+	return rel->rd_locdesc;
 }
 
 /*
