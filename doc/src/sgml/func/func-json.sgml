@@ -2843,6 +2843,24 @@ ERROR:  jsonpath member accessor can only be applied to an object
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <replaceable>string</replaceable> <literal>.</literal> <literal>translate(<replaceable>from</replaceable>, <replaceable>to</replaceable>)</literal>
+        <returnvalue><replaceable>string</replaceable></returnvalue>
+       </para>
+        <para>
+         String where each character that matches a character in the
+         <replaceable>from</replaceable> string is replaced with the corresponding
+         character in the <replaceable>to</replaceable> string. If <replaceable>from</replaceable>
+         is longer than <replaceable>to</replaceable>, occurrences of the extra characters in
+         <replaceable>from</replaceable> are deleted.
+        </para>
+        <para>
+         <literal>jsonb_path_query('"12345"', '$.translate("143", "ax")')</literal>
+         <returnvalue>"a2x5"</returnvalue>
+        </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <replaceable>string</replaceable> <literal>.</literal> <literal>split_part(<replaceable>delimiter</replaceable>, <replaceable>n</replaceable>)</literal>
         <returnvalue><replaceable>string</replaceable></returnvalue>
        </para>
@@ -2860,6 +2878,29 @@ ERROR:  jsonpath member accessor can only be applied to an object
         <literal>jsonb_path_query('"abc,def,ghi,jkl"', '$.split_part(",", 3)')</literal>
         <returnvalue>"ghi"</returnvalue>
        </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <replaceable>string</replaceable> <literal>.</literal> <literal>split(<replaceable>delimiter</replaceable> <optional>, <replaceable>null_string</replaceable></optional>)</literal>
+        <returnvalue><replaceable>array</replaceable></returnvalue>
+       </para>
+        <para>
+         Splits the string at occurrences of <replaceable>delimiter</replaceable> and forms
+         the resulting fields into a JSON array.
+         If <replaceable>delimiter</replaceable> is an empty string,
+         the returned array contains the original string as a single element.
+         If <replaceable>null_string</replaceable> is supplied,
+         fields matching that string are replaced by JSON null values.
+        </para>
+        <para>
+         <literal>jsonb_path_query('"a,b,c"', '$.split(",")')</literal>
+         <returnvalue>["a", "b", "c"]</returnvalue>
+        </para>
+        <para>
+         <literal>jsonb_path_query('"xx~~yy~~zz"', '$.split("~~", "yy")')</literal>
+         <returnvalue>["xx", null, "zz"]</returnvalue>
+        </para></entry>
       </row>
 
       <row>
@@ -2920,6 +2961,24 @@ ERROR:  jsonpath member accessor can only be applied to an object
         <literal>jsonb_path_query('"xyxtrimyyx"', '$.btrim("xyz")')</literal>
         <returnvalue>"trim"</returnvalue>
        </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <replaceable>array</replaceable> <literal>.</literal> <literal>join(separator [, null_string])</literal>
+        <returnvalue>string</returnvalue>
+       </para>
+        <para>
+         Concatenates the elements of an array into a single string using the
+         specified separator. If the optional <literal>null_string</literal>
+         argument is provided, it replaces JSON <literal>null</literal> values;
+         otherwise, <literal>null</literal> values are skipped. The input must
+         be an array consisting only of strings or <literal>null</literal> values.
+        </para>
+        <para>
+         <literal>jsonb_path_query('["a", null, "c"]', '$.join("-", "N/A")')</literal>
+         <returnvalue>"a-N/A-c"</returnvalue>
+        </para></entry>
       </row>
 
      </tbody>
