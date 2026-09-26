@@ -681,7 +681,9 @@ RESET enable_memoize;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
 SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
--- full outer join + WHERE clause, only matched rows
+-- full outer join + WHERE clause, only matched rows.  The ORDER BY and LIMIT
+-- are pushed down too: without remote estimates, a remote sort should be
+-- preferred over a local one.
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
@@ -1304,6 +1306,8 @@ alter extension postgres_fdw add aggregate least_agg(variadic items anyarray);
 alter server loopback options (set extensions 'postgres_fdw');
 
 -- Now aggregate will be pushed.  Aggregate will display VARIADIC argument.
+-- The ORDER BY is pushed down along with it: without remote estimates, a
+-- remote sort should be preferred over a local one.
 explain (verbose, costs off)
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
