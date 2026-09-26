@@ -515,9 +515,8 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		(io_op == IOOP_READ || io_op == IOOP_EVICT || io_op == IOOP_HIT))
 		return false;
 
-	if (bktype == B_CHECKPOINTER &&
-		((io_object != IOOBJECT_WAL && io_op == IOOP_READ) ||
-		 (io_op == IOOP_EVICT || io_op == IOOP_HIT)))
+	if (bktype == B_CHECKPOINTER && io_object != IOOBJECT_WAL &&
+		(io_op == IOOP_READ || io_op == IOOP_EVICT || io_op == IOOP_HIT))
 		return false;
 
 	if ((bktype == B_BG_WRITER || bktype == B_CHECKPOINTER) &&
@@ -525,9 +524,11 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	/*
-	 * Some BackendTypes do not perform reads with IOOBJECT_WAL.
+	 * Some BackendTypes do not read WAL, either from a file or from the WAL
+	 * buffers.
 	 */
-	if (io_object == IOOBJECT_WAL && io_op == IOOP_READ &&
+	if (io_object == IOOBJECT_WAL &&
+		(io_op == IOOP_READ || io_op == IOOP_HIT) &&
 		(bktype == B_WAL_RECEIVER || bktype == B_BG_WRITER ||
 		 bktype == B_AUTOVAC_LAUNCHER || bktype == B_AUTOVAC_WORKER ||
 		 bktype == B_DATACHECKSUMSWORKER_LAUNCHER ||
@@ -567,7 +568,8 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	if (io_object == IOOBJECT_WAL && io_context == IOCONTEXT_NORMAL &&
-		!(io_op == IOOP_WRITE || io_op == IOOP_READ || io_op == IOOP_FSYNC))
+		!(io_op == IOOP_WRITE || io_op == IOOP_READ || io_op == IOOP_FSYNC ||
+		  io_op == IOOP_HIT))
 		return false;
 
 	/*
