@@ -3660,7 +3660,9 @@ include_dir 'conf.d'
        </para>
 
        <para>
-        This parameter can only be set at server start. The default value is <literal>off</literal>.
+        This parameter can only be set in the <filename>postgresql.conf</filename>
+        file or on the server command line.
+        The default value is <literal>off</literal>.
        </para>
       </listitem>
      </varlistentry>
