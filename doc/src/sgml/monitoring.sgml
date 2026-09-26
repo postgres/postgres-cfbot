@@ -4671,6 +4671,52 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>prune_onaccess</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of pages of this table pruned opportunistically, that is, during
+       a scan rather than by <command>VACUUM</command>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>prune_onaccess_missed</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times opportunistic pruning of a page of this table was
+       abandoned because the page could not be cleanup-locked, that is,
+       another session held a pin on it.  A high value relative to
+       <structfield>prune_onaccess</structfield> means dead tuples are being
+       left for <command>VACUUM</command> that a scan could have removed.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_all_visible_onaccess</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of pages of this table newly marked all-visible in the
+       visibility map by opportunistic pruning
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vacuum_missed_dead_pages</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Cumulative number of pages of this table that a <command>VACUUM</command>
+       could not clean up because it failed to acquire a cleanup lock on them,
+       that is, another session held a pin.  This is the
+       <command>VACUUM</command> counterpart of
+       <structfield>prune_onaccess_missed</structfield>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>last_vacuum</structfield> <type>timestamp with time zone</type>
       </para>
       <para>
