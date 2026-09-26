@@ -293,6 +293,37 @@ cmp_ok(
 	$wal_restart_immediate->{reset},
 	"$sect: reset timestamp is new");
 
+
+## check that a tablespace written to by the checkpointer can be dropped
+## without breaking the shutdown.  The checkpointer keeps a reference to the
+## stats entries it flushes block write times into, and writing out the stats
+## file at shutdown expects dropped entries to be gone.
+
+$node->append_conf('postgresql.conf',
+	"track_io_timing = on\nallow_in_place_tablespaces = on");
+$node->restart;
+
+$sect = "dropped tablespace";
+$node->safe_psql($connect_db,
+	"CREATE TABLESPACE test_stats_tblspc LOCATION ''");
+my $spcoid = $node->safe_psql($connect_db,
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'test_stats_tblspc'");
+$node->safe_psql($connect_db,
+	"CREATE TABLE tab_stats_tblspc TABLESPACE test_stats_tblspc AS SELECT generate_series(1,1000) AS a"
+);
+$node->safe_psql($connect_db, "CHECKPOINT");
+$node->safe_psql($connect_db, "DROP TABLE tab_stats_tblspc");
+$node->safe_psql($connect_db, "DROP TABLESPACE test_stats_tblspc");
+
+my $log_offset = -s $node->logfile;
+$node->stop;
+ok( !$node->log_contains(qr/terminated by signal/, $log_offset),
+	"$sect: clean shutdown");
+
+$node->start;
+is(have_stats('tablespace', 0, $spcoid),
+	'f', "$sect: tablespace stats do not exist");
+
 $node->stop;
 done_testing();
 
