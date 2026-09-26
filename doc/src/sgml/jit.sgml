@@ -36,7 +36,8 @@
    <acronym>JIT</acronym> compilation using <ulink
    url="https://llvm.org/"><productname>LLVM</productname></ulink> when
    <productname>PostgreSQL</productname> is built with
-   <link linkend="configure-with-llvm"><literal>--with-llvm</literal></link>.
+   <link linkend="configure-with-llvm"><option>--with-llvm</option></link>
+   or <link linkend="configure-with-llvm-meson"><option>-Dllvm</option></link>.
   </para>
 
   <para>
@@ -76,6 +77,16 @@
     bodies of small functions into the expressions using them. That allows a
     significant percentage of the overhead to be optimized away.
    </para>
+   <note>
+    <para>
+    Inlining does not work if <productname>PostgreSQL</productname> is built using
+    <application>Meson</application> with
+    <link linkend="configure-with-llvm-meson"><option>-Dllvm</option></link>,
+    because the <productname>LLVM</productname> bitcode is not built,
+    regardless of whether <command>EXPLAIN</command> shows "Inlining true".
+    See <xref linkend="jit-extensibility-bitcode"/> for more details about bitcode.
+    </para>
+   </note>
   </sect2>
 
   <sect2 id="jit-optimization">
@@ -133,7 +144,7 @@
    <para>
     If <xref linkend="guc-jit"/> is set to <literal>off</literal>, or if no
     <acronym>JIT</acronym> implementation is available (for example because
-    the server was compiled without <literal>--with-llvm</literal>),
+    the server was compiled without <option>--with-llvm</option>),
     <acronym>JIT</acronym> will not be performed, even if it would be
     beneficial based on the above criteria.  Setting <xref linkend="guc-jit"/>
     to <literal>off</literal> has effects at both plan and execution time.
