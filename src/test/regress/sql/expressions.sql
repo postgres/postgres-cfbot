@@ -134,6 +134,119 @@ select return_text_input('a') not in ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i
 
 rollback;
 
+--
+-- Hashed ScalarArrayOpExpr when the array argument is not a Const but is fixed
+-- for the whole execution: external params, IN ($1,...,$N), stable functions.
+-- Check the hashed path returns what the linear path does, and that the planner
+-- does not hash an array that can vary per row or per group.
+--
+begin;
+
+create table saop_stab (i int, r int4range);
+insert into saop_stab
+  select g, int4range(g, g + 1) from generate_series(1, 20) g;
+
+-- a stable plpgsql function is never inlined, so the array stays non-Const
+create function saop_intarr(int[]) returns int[] as
+  $$ begin return $1; end $$ language plpgsql stable;
+
+-- just below / at / above the hashing threshold of 9
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8,9}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8,9,10,11,12}'));
+
+-- NULL array yields NULL; empty array and no-match array yield no rows
+select count(*) from saop_stab where i = any (saop_intarr(null));
+select count(*) from saop_stab where i = any (saop_intarr('{}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{5,5,5,5,5,5,5,5,5,5}'));
+
+-- NOT IN / <> ALL, with and without a NULL element (three-valued logic)
+select count(*) from saop_stab where i <> all (saop_intarr('{1,2,3,4,5,6,7,8,9,10}'));
+select count(*) from saop_stab where i <> all (saop_intarr('{1,2,3,4,5,6,7,8,9,null}'));
+
+-- bare external Param array, generic plan (stays a Param); re-EXECUTE with a
+-- different array, then NULL and empty
+set plan_cache_mode = force_generic_plan;
+prepare saop_p(int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1);
+execute saop_p('{1,2,3,4,5,6,7,8,9,10}');
+execute saop_p('{11,12,13}');
+execute saop_p(null);
+execute saop_p('{}');
+deallocate saop_p;
+
+-- IN ($1, ..., $N) is an ArrayExpr of Params
+prepare saop_in(int,int,int,int,int,int,int,int,int,int) as
+  select array_agg(i order by i) from saop_stab
+  where i in ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10);
+execute saop_in(1,2,3,4,5,6,7,8,9,10);
+deallocate saop_in;
+
+-- $1::int[] cast, and string_to_array($1, ',')
+prepare saop_cast(text) as
+  select array_agg(i order by i) from saop_stab where i = any ($1::int[]);
+execute saop_cast('{2,4,6,8,10,12,14,16,18,20}');
+deallocate saop_cast;
+prepare saop_sta(text) as
+  select array_agg(i order by i) from saop_stab
+  where i::text = any (string_to_array($1, ','));
+execute saop_sta('1,2,3,4,5,6,7,8,9,10,11,12');
+deallocate saop_sta;
+
+-- same query under a custom plan: $1 folds to a Const and the pre-existing
+-- Const path handles it -- must match the generic-plan result above
+set plan_cache_mode = force_custom_plan;
+prepare saop_c(int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1);
+execute saop_c('{1,2,3,4,5,6,7,8,9,10}');
+deallocate saop_c;
+
+-- rescan: a stable Param array on the inner side of a nestloop
+set plan_cache_mode = force_generic_plan;
+prepare saop_rs(int[]) as
+  select d.x, count(*) from (values (1),(2),(3)) d(x)
+    join saop_stab on saop_stab.i = any ($1)
+  group by d.x order by d.x;
+execute saop_rs('{1,2,3,4,5,6,7,8,9,10}');
+deallocate saop_rs;
+reset plan_cache_mode;
+
+-- two hashable ScalarArrayOpExprs in one qual: both must be applied (cf.
+-- b136db07c6) and both correct
+prepare saop_two(int[], int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1) or i = any ($2);
+execute saop_two('{1,2,3,4,5,6,7,8,9,10}', '{15,16,17,18,19,20,1,2,3,4}');
+deallocate saop_two;
+
+-- the planner must NOT hash an array that varies per row: a Var in the array
+-- keeps a plain (linear) ScalarArrayOpExpr
+explain (costs off)
+select i from saop_stab
+where i = any (array[i,i+1,i+2,i+3,i+4,i+5,i+6,i+7,i+8]);
+
+-- ... nor an array_agg() in a HAVING clause (a value per group, not per
+-- execution): must not be hashed and must not error with "Aggref found in
+-- non-Agg plan node"
+select i % 3 as g, count(*) from saop_stab
+group by i % 3
+having (i % 3) = any (array_agg(1))
+order by g;
+
+-- ... nor an array built from an outer-query reference in a correlated
+-- sub-select: it varies per rescan, so it must stay linear and give the same
+-- answer as the below-threshold (never-hashed) form.  convert_saop_to_hashed_saop
+-- runs before uplevel Vars become Params, so the check must reject Vars of any
+-- level.
+select d.k,
+       (select count(*) from saop_stab
+        where i = any (array[d.k,d.k+1,d.k+2,d.k+3,d.k+4,d.k+5,d.k+6,d.k+7,d.k+8])) as ge9,
+       (select count(*) from saop_stab
+        where i = any (array[d.k,d.k+1,d.k+2,d.k+3,d.k+4,d.k+5,d.k+6,d.k+7])) as lt9
+from (values (1),(8),(15)) d(k)
+order by d.k;
+
+rollback;
+
 -- Test with non-strict equality function.
 -- We need to create our own type for this.
 
