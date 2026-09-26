@@ -188,6 +188,12 @@ typedef struct RelationData
 	 */
 	const struct TableAmRoutine *rd_tableam;
 
+	/*
+	 * Locator descriptor from the table AM, or NULL if not yet looked up.
+	 * Filled by RelationGetLocatorDesc().
+	 */
+	const struct LocatorDesc *rd_locdesc;
+
 	/* These are non-NULL only for an index relation: */
 	Form_pg_index rd_index;		/* pg_index tuple describing this index */
 	/* use "struct" here to avoid needing to include htup.h: */
