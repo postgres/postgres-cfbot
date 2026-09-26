@@ -272,11 +272,8 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 {
 	ItemPointer result;
 	int			nallocated;
-	uint64		val;
 	char	   *endseg = ((char *) segment) + len;
 	int			ndecoded;
-	unsigned char *ptr;
-	unsigned char *endptr;
 
 	/*
 	 * Size from len, not segment->nbytes.  len can be smaller than a segment
@@ -291,7 +288,10 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 	while ((char *) segment < endseg)
 	{
 		OffsetNumber firstoff;
+		uint64		val;
 		uint64		prev;
+		unsigned char *ptr;
+		unsigned char *endptr;
 
 		/*
 		 * Reject a segment that runs past the end of the posting list.
