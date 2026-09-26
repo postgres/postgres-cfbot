@@ -18,7 +18,6 @@
 #include "common/int.h"
 #include "catalog/pg_am_d.h"
 #include "fmgr.h"
-#include "lib/rbtree.h"
 #include "nodes/tidbitmap.h"
 #include "storage/bufmgr.h"
 
@@ -420,26 +419,15 @@ extern void ginadjustmembers(Oid opfamilyoid,
 							 List *functions);
 
 /* ginbulk.c */
-typedef struct GinEntryAccumulator
-{
-	RBTNode		rbtnode;
-	Datum		key;
-	GinNullCategory category;
-	OffsetNumber attnum;
-	bool		shouldSort;
-	ItemPointerData *list;
-	uint32		maxcount;		/* allocated size of list[] */
-	uint32		count;			/* current number of list[] entries */
-} GinEntryAccumulator;
 
 typedef struct
 {
-	GinState   *ginstate;
-	Size		allocatedMemory;
-	GinEntryAccumulator *entryallocator;
-	uint32		eas_used;
-	RBTree	   *tree;
-	RBTreeIterator tree_walk;
+	GinState *				ginstate;
+	Size					allocatedMemory;
+	struct ginbuild_hash *	hash;
+	struct GinSortEntry *	sorted_entries;
+	uint32					num_entries;
+	uint32					current_pos;
 } BuildAccumulator;
 
 extern void ginInitBA(BuildAccumulator *accum);
