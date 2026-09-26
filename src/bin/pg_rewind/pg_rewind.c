@@ -783,6 +783,7 @@ perform_rewind(filemap_t *filemap, rewind_source *source,
 	ControlFile_new.minRecoveryPoint = endrec;
 	ControlFile_new.minRecoveryPointTLI = endtli;
 	ControlFile_new.state = DB_IN_ARCHIVE_RECOVERY;
+	ControlFile_new.backupLabelRequired = true;
 
 	/*
 	 * Keep the target's own data checksum state.  Most of the data directory
