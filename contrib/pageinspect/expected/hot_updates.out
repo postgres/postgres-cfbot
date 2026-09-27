@@ -493,6 +493,39 @@ SELECT * FROM get_hot_count('hot_jsonb_test');
 
 DROP TABLE hot_jsonb_test;
 -- ---------------------------------------------------------------------------
+-- A change to a GIN-indexed column is HOT-indexed
+--
+-- The read side filters a stale leaf via the crossed-attribute bitmap, which
+-- is access-method agnostic, so a GIN-covered column is HOT-indexed like any
+-- other: only the GIN index is maintained, and a GIN scan (which rechecks on
+-- the heap) returns correct results across the chain.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_gin_test (
+    id int PRIMARY KEY,
+    tags text[],
+    properties jsonb
+) WITH (fillfactor = 50);
+CREATE INDEX hot_gin_tags_idx ON hot_gin_test USING gin (tags);
+CREATE INDEX hot_gin_props_idx ON hot_gin_test USING gin (properties);
+INSERT INTO hot_gin_test VALUES
+    (1, ARRAY['tag1', 'tag2'], '{"key1":"val1","key2":"val2"}'),
+    (2, ARRAY['tag3', 'tag4'], '{"key3":"val3","key4":"val4"}');
+-- Reorder tags: a GIN-covered column changes, so this is HOT-indexed.
+UPDATE hot_gin_test SET tags = ARRAY['tag2', 'tag1'] WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_gin_test');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+DROP TABLE hot_gin_test;
+-- ---------------------------------------------------------------------------
 -- Cleanup
 -- ---------------------------------------------------------------------------
 DROP FUNCTION has_hot_chain(text, tid);

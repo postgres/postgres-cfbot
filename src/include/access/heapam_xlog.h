@@ -90,6 +90,12 @@
 #define XLH_UPDATE_CONTAINS_NEW_TUPLE			(1<<4)
 #define XLH_UPDATE_PREFIX_FROM_OLD				(1<<5)
 #define XLH_UPDATE_SUFFIX_FROM_OLD				(1<<6)
+/*
+ * The new tuple's block gained VISIBILITYMAP_LOCATOR_SPLIT (a selective-indexed
+ * update planted a fresh index entry mid-chain).  The new heap block's VM
+ * buffer is registered as HEAP_UPDATE_BLKREF_VM_NEW so redo can set the bit.
+ */
+#define XLH_UPDATE_NEW_LOCATOR_SPLIT			(1<<7)
 
 /* convenience macro for checking whether any form of old tuple was logged */
 #define XLH_UPDATE_CONTAINS_OLD						\

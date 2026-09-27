@@ -848,13 +848,33 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 	{
 		Buffer		vmbuffer_old = InvalidBuffer;
 
-		Assert(xlrec->flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED);
+		/*
+		 * VM_OLD is registered for a cleared all-visible bit and/or for a
+		 * newly-set VISIBILITYMAP_LOCATOR_SPLIT bit (a HOT-indexed update; see
+		 * heap_update).  At least one must be indicated.
+		 */
+		Assert(xlrec->flags &
+			   (XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED | XLH_UPDATE_NEW_LOCATOR_SPLIT));
 
 		if (XLogReadBufferForRedo(record, HEAP_UPDATE_BLKREF_VM_OLD,
 								  &vmbuffer_old) == BLK_NEEDS_REDO)
 		{
-			if (visibilitymap_clear(rlocator, oldblk, vmbuffer_old,
+			bool		dirtied = false;
+
+			if ((xlrec->flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) &&
+				visibilitymap_clear(rlocator, oldblk, vmbuffer_old,
 									VISIBILITYMAP_VALID_BITS))
+				dirtied = true;
+
+			/*
+			 * The split bit is set on the update's block, which is
+			 * oldblk == newblk for a HOT-indexed update.
+			 */
+			if ((xlrec->flags & XLH_UPDATE_NEW_LOCATOR_SPLIT) &&
+				visibilitymap_set_locator_split(oldblk, vmbuffer_old))
+				dirtied = true;
+
+			if (dirtied)
 				PageSetLSN(BufferGetPage(vmbuffer_old), lsn);
 		}
 		if (BufferIsValid(vmbuffer_old))

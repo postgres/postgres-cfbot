@@ -220,6 +220,18 @@ retry:
 	while (table_index_getnext_slot(scan, ForwardScanDirection, outslot))
 	{
 		/*
+		 * A HOT-indexed update can leave a stale index leaf: an entry whose
+		 * key is a pre-update value but whose TID chain-resolves to a live
+		 * tuple now carrying a different key.  Such a tuple is not the
+		 * replica-identity match we are looking for (and the PK/RI fast path
+		 * below skips the equality recheck that would otherwise catch it), so
+		 * drop it, exactly as IndexScan/IndexOnlyScan do.  The fresh leaf
+		 * for the current key, if any, is returned by a later iteration.
+		 */
+		if (scan->xs_entry_needs_recheck)
+			continue;
+
+		/*
 		 * Avoid expensive equality check if the index is primary key or
 		 * replica identity index.
 		 */
@@ -699,6 +711,10 @@ RelationFindDeletedTupleInfoByIndex(Relation rel, Oid idxoid,
 	/* Try to find the tuple */
 	while (table_index_getnext_slot(scan, ForwardScanDirection, scanslot))
 	{
+		/* Skip stale HOT-indexed leaves (see RelationFindReplTupleByIndex). */
+		if (scan->xs_entry_needs_recheck)
+			continue;
+
 		/*
 		 * Avoid expensive equality check if the index is primary key or
 		 * replica identity index.
@@ -932,7 +948,8 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 	bool		skip_tuple = false;
 	Relation	rel = resultRelInfo->ri_RelationDesc;
 	ItemPointer tid = &(searchslot->tts_tid);
-	Bitmapset  *modified_idx_attrs;
+	Bitmapset  *modified_idx_attrs = NULL;
+	bool		row_moved = false;
 
 	/*
 	 * We support only non-system tables, with
@@ -955,7 +972,6 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 	if (!skip_tuple)
 	{
 		List	   *recheckIndexes = NIL;
-		bool		row_moved;
 		List	   *conflictindexes;
 		bool		conflict = false;
 

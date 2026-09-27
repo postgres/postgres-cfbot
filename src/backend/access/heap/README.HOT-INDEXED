@@ -1,0 +1,558 @@
+HOT-indexed updates (Selective Index Update, "HOT/SIU")
+=======================================================
+
+Classic HOT (see README.HOT) keeps an UPDATE off the indexes only when no
+indexed column changed: the new tuple is a heap-only tuple appended to the
+chain, and every index entry continues to resolve, via the same-page t_ctid
+chain, to a tuple whose indexed values still equal the entry's key.
+
+HOT-indexed (Selective Index Update, SIU) relaxes that to: an UPDATE may
+change indexed columns and still be a heap-only tuple on the same page,
+provided new index entries are inserted only into the indexes whose key
+attributes actually changed.  The indexes whose attributes did not change are
+left untouched, which is where the write-amplification saving comes from.
+
+The price is that a chain may now contain tuples with different index keys, so
+an index entry for an old key can chain-resolve to a live tuple whose current
+key differs.  Such an entry is STALE.  The read side detects and drops stale
+entries by testing the heap's crossed-attribute bitmap against the index's
+key columns.
+
+This file documents the eligibility rules, the write path, the on-chain
+representation, the read-side staleness test, prune/collapse, vacuum reclamation,
+recovery, the logical-replication apply gating, and the statistics.
+
+
+The classic-HOT invariant we are relaxing
+------------------------------------------
+
+Classic HOT relies on two properties:
+
+  (a) every live index entry resolves, via a same-page t_ctid chain, to the
+      chain's root line pointer; and
+
+  (b) the indexed values of every tuple on the chain equal the key of every
+      index entry that reaches it.
+
+HOT-indexed keeps (a) but breaks (b): after a HOT-indexed update the chain
+holds tuples with different keys, and a new index entry is planted that points
+at the *specific* heap-only tuple whose key it matches, not necessarily the
+root.
+
+
+The HOT-indexed invariant (the new contract)
+--------------------------------------------
+
+  An index entry points at the heap-only tuple version whose indexed key it
+  matched at insertion time.  A chain walk that reaches a live tuple by
+  crossing a HOT-indexed hop *after* the entry's own target may be stale: if
+  the union of those crossed hops' modified attributes overlaps the index's
+  key columns, the entry is stale and the tuple is dropped from that scan.
+  The row is
+  re-supplied by the fresh entry that the same update inserted for the new
+  key.
+
+This is what makes dropping a stale entry safe: the live row is always
+reachable through exactly one non-stale entry per index.
+
+
+Eligibility: HeapUpdateHotAllowable
+-----------------------------------
+
+The executor computes modified_idx_attrs (the indexed attributes this UPDATE
+changed, attribute numbers offset by FirstLowInvalidHeapAttributeNumber) and
+passes it to heap_update via table_tuple_update.  HeapUpdateHotAllowable
+classifies the update:
+
+  HEAP_UPDATE_ALL_INDEXES
+        HOT is not permitted; the new tuple goes on a fresh TID and every
+        index gets a new entry.
+  HEAP_HEAP_ONLY_UPDATE
+        no non-summarizing indexed attribute changed, so no index needs a
+        new entry (classic HOT).
+  HEAP_SELECTIVE_INDEX_UPDATE
+        at least one non-summarizing index's attribute changed, but the
+        update may stay on the HOT chain and maintain only the changed
+        indexes selectively.
+
+A non-summarizing indexed attribute changing yields HEAP_SELECTIVE_INDEX_UPDATE
+unless one of these forces HEAP_UPDATE_ALL_INDEXES:
+
+  1. The logical-replication apply path (see "Logical replication" below).
+  2. An UPDATE touching an attribute referenced by an expression index
+     (selective maintenance of expression indexes is not implemented yet).
+  3. An UPDATE that changes *every* indexed attribute: there is no index to
+     skip, so a plain non-HOT update is cheaper.
+
+System catalogs stay classic-HOT only: a catalog UPDATE that changes a
+non-summarizing indexed attribute falls back to HEAP_UPDATE_ALL_INDEXES, because
+catalog reads go through many paths not all proven safe against stale chain
+entries.  This is the pre-HOT-indexed behaviour for such updates.
+
+INDEX_ATTR_BITMAP_INDEXED (cached in rd_indexedattr) is the set of columns
+referenced by non-summarizing indexes plus, folded in, the columns referenced
+only by summarizing indexes, so that a change to a summarizing-only column is
+seen by the modified-attribute comparison (its index is maintained via the
+classic-HOT summarizing path).  Read-side staleness is filtered by the
+crossed-attribute bitmap, which is access-method agnostic, so a change to a
+column covered by any index is HOT-indexed regardless of the index's access
+method.  Summarizing indexes (e.g. BRIN) keep no per-row leaf that can go
+stale and are maintained via the summarizing path.
+
+
+The write path
+--------------
+
+For HEAP_SELECTIVE_INDEX_UPDATE, heap_update:
+
+  - stores the new tuple as a heap-only tuple on the same page, linked into
+    the chain via t_ctid, exactly like classic HOT; and
+  - sets HEAP_INDEXED_UPDATED (t_infomask2 bit 0x0800) on the new tuple to
+    mark that the chain now carries differing keys.
+
+There is no separate on-page meta-item: the bit on the heap-only tuple is the
+entire on-disk footprint.  As for classic HOT, if the new tuple does not fit
+on the page the update falls back to a non-HOT (new-page) update.
+
+The inline modified-attrs bitmap is ceil(natts/8) bytes, sized by the tuple's
+OWN attribute count at write time (HeapTupleHeaderGetNatts), not the relation's
+current natts.  ADD COLUMN raises the relation's natts without rewriting
+existing tuples, so one chain can hold hops whose bitmaps were sized for
+different (smaller) natts; every consumer locates and sizes a hop's bitmap
+from that hop's own write-time natts (HotIndexedTupleBitmapNatts in
+access/hot_indexed.h).  A collapse-survivor stub overwrites natts with its 0
+sentinel, so it preserves its write-time natts in the unused block-number half
+of t_ctid (the offset half is the forward link).  Bit positions are attribute
+based and identical across sizes, so a smaller bitmap simply ORs into the low
+bytes of a larger crossed-attribute accumulator.  DROP COLUMN keeps the attnum
+slot (it never renumbers), so existing bitmaps stay aligned.
+
+After the update, table_tuple_update reports row_moved = false (the tuple is
+heap-only).  The executor then maintains indexes selectively:
+ExecSetIndexUnchanged marks each index whose key attributes did not change as
+unchanged, and ExecInsertIndexTuples inserts a fresh entry only into the
+indexes that did change.  Each such entry points at the new tuple's own TID.
+
+
+The chain and the two kinds of leaf entry
+------------------------------------------
+
+After a HOT-indexed update there are, for a changed index, two kinds of leaf
+entry reaching the chain:
+
+  - the pre-update entry for the OLD key, still pointing at an older chain
+    member (now stale once the walk crosses the HOT-indexed hop); and
+  - the fresh entry for the NEW key, pointing at the new heap-only tuple.
+
+Index build and REINDEX index a live HOT-indexed tuple under its OWN TID (not
+the chain root), so the freshly built entry has no hop after it and is never
+treated as stale.
+
+
+Read-side correctness: the crossed-attribute bitmap
+---------------------------------------------------
+
+heap_hot_search_buffer walks the chain from the entry's target to the live
+visible tuple.  Each hop it crosses after the entry's own target (a live
+HOT-indexed member, a collapse-survivor stub, or a collapsed (redirected)
+prefix) contributes that hop's inline modified-attrs bitmap to a running
+union.  The heap keeps that union in its own private per-scan state
+(IndexScanHeapData, reached through IndexScanDesc.xs_table_opaque) together
+with a flag recording that the walk crossed at least one such hop; neither is
+exposed on the generic scan descriptors.
+
+Heap decides inside its own getnext_slot: it tests that private crossed-attr
+union against the scanned index's key columns.  Any overlap means a crossed
+hop changed one of this index's inputs, so the entry's stored key no longer
+matches the live tuple, and heap sets the one AM-neutral boolean the generic
+scan does carry, IndexScanDesc.xs_entry_needs_recheck.  IndexScan,
+IndexOnlyScan, CLUSTER, and the logical-replication replica-identity lookups
+drop the tuple when it is set.  If the union is disjoint from the index's key
+columns, none of the index's inputs changed across the chain, so the entry is
+current and the row is returned.
+
+The union is complete: every crossed live hop and stub contributes its
+bitmap, and chain collapse only ever reclaims a member whose attributes are a
+subset of the surviving later hops (see "Prune and chain collapse"), so a
+reader crossing the survivors still sees every collapsed hop's attributes.
+Disjointness therefore reliably means the entry is current.
+
+This needs no value comparison and no leaf key, so it serves equality, range,
+and inequality scans uniformly, works for any access method whose columns are
+eligible for HOT-indexed updates, and is correct even when a key is cycled
+away and back (X -> Y -> X): the update that restored the value planted a
+fresh entry pointing at its own live tuple, whose walk crosses no later
+key-changing hop, so that entry uniquely returns the row while the stale
+ancestor entry, whose walk does cross the changing hops, is dropped.
+
+The read path is implemented against the slot-based table-AM index scan
+interface.  Per-scan HOT-indexed state (the union of crossed modified-attrs
+bitmaps and the resulting verdict) lives in heap's private IndexScanHeapData
+(reached through IndexScanDesc.xs_table_opaque), and the decision to drop a
+stale entry is made inside heap's getnext_slot implementations; the generic
+scan carries only the one boolean xs_entry_needs_recheck.  Constraint
+enforcement (_bt_check_unique,
+unique_key_recheck) holds a TID taken from an index but performs no index scan,
+so it uses the fetch_tid_check table-AM callback, which reports the same
+verdict alongside the fetched tuple.
+
+The read mechanism never reconstructs or compares an index key, so it needs no
+per-access-method support.  (nbtree keeps an internal leaf-key comparison,
+_bt_heap_keys_equal_leaf, used only by _bt_check_unique to tell a stale chain
+entry from a live duplicate during a unique insert; it is not part of the read
+path.)
+
+Unique checks.  _bt_check_unique fetches the conflicting tuple under
+SnapshotDirty and, when the chain walk crossed a HOT-indexed hop, compares the
+live tuple's current key against the arriving leaf with the index's own
+ordering procedure (_bt_heap_keys_equal_leaf, using BTORDER_PROC under each
+column's collation).  This recheck is reached only for an index receiving a
+fresh entry during a HOT-indexed update; HeapUpdateHotAllowable disqualifies
+any UPDATE that touches an expression-index attribute, so the index here never
+has an expression key column (every key column is a plain attribute), and the
+comparison reads attribute values straight from the heap slot; no expression
+evaluation or executor state is needed.  Using the opclass comparator (not a
+bitwise image comparison) means a key
+that was cycled away and back (X -> Y -> X) does not raise a spurious
+duplicate against its own stale leaf, while a genuinely live duplicate (equal
+under the opclass even if not bitwise-identical, e.g. numeric 1.0 vs 1.00) is
+still detected.  (Appendix A motivates this recheck in detail.)
+
+
+Bitmap scans: the mid-chain TID and BitmapAnd
+---------------------------------------------
+
+The crossed-attribute test above runs on the way to the heap.  A bitmap scan
+has an earlier hazard it cannot reach: BitmapAnd combines two indexes' TID
+sets in tidbitmap.c at raw block+offset granularity, before either side
+touches the heap.  A HOT-indexed fresh entry points at the mid-chain new tuple
+while an unchanged index's entry for the same row points at the chain root, so
+for "WHERE changed_col = x AND unchanged_col = y" the two bitmap index scans
+contribute different offsets for the one live row, the exact-mode
+intersection finds nothing in common, and the row is dropped, a false
+negative (bitmap scans tolerate false positives, not false negatives).
+
+The disagreement never crosses a heap block, because a HOT or HOT-indexed
+chain never leaves its page, and only BitmapAnd is affected: BitmapOr unions,
+keeping both offsets, and BitmapHeapScan resolves each through the chain and
+de-duplicates them.  So the signal BitmapAnd needs is per block, not per
+entry, and the heap records it in the visibility map as
+VISIBILITYMAP_LOCATOR_SPLIT (see visibilitymapdefs.h and amlocator.h).
+
+heap_update sets the bit on the block when it performs a HOT-indexed update
+that plants a fresh index entry: it pins the block's VM page before locking
+the heap buffer, locks it with the other VM work before the critical section,
+sets the bit inside the critical section, and logs it with
+XLH_UPDATE_NEW_LOCATOR_SPLIT on the update record, whose redo sets it too.  An
+update promoted to HOT-indexed that changes no indexed column plants no entry
+and does not set the bit.  Prune clears the bit when it sets the page
+all-visible: the carve-outs below that keep a page with a redirect into a live
+HOT-indexed member, or a stub, out of the visibility map guarantee that no
+disagreeing entry remains once the page is all-visible.  The clear rides the
+existing prune/freeze record.
+
+Heap's locator descriptor exposes the bit through bitmap_and_inexact.  The
+executor records the relation on the BitmapAnd accumulator (tbm_set_relation),
+and tbm_intersect_page asks once per block, lock-free, the way index-only
+scans read ALL_VISIBLE.  For a flagged block it unions the two
+sides' offsets and forces a recheck instead of intersecting, so
+BitmapHeapScan resolves the chain and the crossed-attribute test makes the
+final call.  The read is safe for the reason index-only scans' is: the bit is
+set before the fresh index entry is inserted and both precede commit, and a
+snapshot that can see the new version was taken after a full barrier
+(ProcArrayLock) that follows the set.  A bit set after the snapshot concerns
+only a version the snapshot cannot see, whose old entries still agree.
+
+No index entry is marked and no index access method needs HOT-indexed code:
+btree, hash, GIN, GiST, SP-GiST, contrib/bloom and out-of-tree AMs store and
+return plain TIDs, and amcheck's heapallindexed fingerprints them directly.
+The cost is precision on flagged blocks only: BitmapAnd rechecks the offsets
+either index named there until prune clears the bit.
+
+
+Prune and chain collapse
+-------------------------
+
+Because a HOT-indexed update plants an index entry pointing at a mid-chain
+heap-only tuple's own TID, classic HOT's assumption that mid-chain line
+pointers have no external references no longer holds.  Pruning therefore must
+not reclaim such a line pointer while a not-yet-swept index entry can still
+arrive at it.
+
+heap_prune_chain collapses a run of dead chain members to a single
+LP_REDIRECT that forwards to the first live tuple, and preserves the line
+pointer of a live HOT-indexed member (heap_prune_item_preserves_hot_indexed)
+so a reader arriving via a stale entry still finds a walkable hop.  More than
+one LP_REDIRECT may forward to the same live tuple.  The redirect lifecycle
+reuses the existing prune WAL records; there is no new on-disk format.
+
+
+Vacuum reclamation
+------------------
+
+VACUUM's index cleanup sweeps the stale index entries.  The collapse back to
+classic HOT is driven by prune, not by VACUUM's second pass: once a chain is
+fully dead, a later prune (heap_prune_chain / heap_prune_chain_find_live)
+reclaims its members and re-points the root redirect straight at first_live.
+Re-pointing a redirect preserves reachability (every walker still reaches
+first_live), so it is safe under the exclusive lock prune already holds.
+
+VACUUM's second pass (lazy_vacuum_heap_page) does not itself re-point
+redirects or reclaim stubs; it performs the usual LP_DEAD -> LP_UNUSED
+conversion and leaves the HOT-indexed collapse to prune.
+
+A page that still carries a preserved HOT-indexed member or a collapse-survivor
+stub is deliberately left non-all-visible, so that an index-only scan
+heap-fetches through the chain and the crossed-attribute bitmap can filter
+stale entries (enforced in heap_prune_record_redirect, the stub recorders, and
+heap_page_would_be_all_visible).
+
+
+amcheck and statistics
+----------------------
+
+verify_heapam treats the HOT-indexed artifacts as legitimate: a live
+HEAP_INDEXED_UPDATED heap-only tuple whose line pointer is preserved, and
+multiple LP_REDIRECTs forwarding to one live tuple.
+
+Statistics: pg_stat_all_tables.n_tup_hot_indexed_upd counts HOT-indexed
+updates; pg_stat_all_indexes.n_tup_hot_indexed_upd_matched / _skipped count
+per-index recheck outcomes; and pg_relation_hot_indexed_stats() reports
+per-relation HOT-indexed chain counts.
+
+
+Logical replication
+-------------------
+
+A HOT-indexed update of a replica-identity attribute on a subscriber leaves a
+stale index leaf; the apply worker's replica-identity lookups must not be
+exposed to that here.  A logical-replication apply worker therefore never takes
+the HOT-indexed path: HeapUpdateHotAllowable returns HEAP_UPDATE_ALL_INDEXES
+unconditionally when IsLogicalWorker() is true, falling back to a plain non-HOT
+update on apply.  A per-subscription option to relax this is added separately.
+
+
+Recovery
+--------
+
+HOT-indexed updates and the prune/collapse use the existing heap UPDATE and
+prune/freeze WAL records, so crash recovery replays them with no new record
+types.  src/test/recovery/t/054_hot_indexed_recovery.pl builds a chain,
+crashes without a checkpoint (forcing WAL redo), and verifies the chain walk,
+verify_heapam, and vacuum reclamation after restart, with
+wal_consistency_checking = 'all' comparing each replayed page to its FPI.
+
+
+Adversarial tests
+-----------------
+
+src/test/isolation/specs/hot_indexed_adversarial.spec exercises the cases the
+invariant must satisfy under concurrency: key cycling (X->Y->X), aborted
+HOT-indexed updates, concurrent unique inserts against a freed/taken key,
+snapshot-safe reclaim of stale leaves, and reader consistency across a
+concurrent prune/collapse.
+
+
+Appendices
+----------
+
+Appendix A: Why the unique-check path needs a value comparison at all
+---------------------------------------------------------------------
+
+This is the one place HOT-indexed does compare a key value, even though the
+read path deliberately avoids one.  The rest of this appendix explains why the
+comparison is needed, why it must use the opclass comparator rather than a
+bitwise one, and why the ABA case is what forces the issue.
+
+1. The setup: why a unique insert can even reach a stale leaf
+
+Under classic HOT, an index has exactly one leaf entry per logical row, and
+every leaf entry's key matches the live tuple it chain-resolves to.  So
+_bt_check_unique can trust: "if I find a leaf whose key equals my new key, and
+it resolves to a live tuple, that's a genuine duplicate."
+
+HOT/SIU breaks that one-to-one correspondence.  A HOT-indexed UPDATE that
+changes column a from X to Y:
+ - inserts a fresh leaf entry (Y -> new tuple) into idx_a, and
+ - leaves the old leaf entry (X -> old chain root) in place.
+
+That old (X -> root) entry is now stale: it still chain-resolves to a live
+tuple, but that live tuple's current a is Y, not X.  The read path handles this
+with the crossed-attribute bitmap (no value comparison needed): if the walk
+from the entry's target to the live tuple crosses a hop that changed a, the
+entry is stale and dropped.
+
+When you now INSERT a row with a = X, _bt_check_unique scans idx_a for key X
+and finds that stale (X -> root) leaf.  It must decide: is this a real
+conflict?
+
+2. Why the read-path bitmap is not sufficient here
+
+The read path's logic is: "this entry crossed a hop that changed a => stale =>
+drop it, the fresh entry will supply the row."  For scans that's correct and
+complete, because every live row has exactly one non-stale entry that
+re-supplies it.
+
+But a unique check is asking a different question.  It is not "should I return
+this row?"  It is "does the live tuple this entry resolves to conflict with
+the key I'm inserting?"  The bitmap can only tell you "an indexed attribute
+changed somewhere on the chain."  It cannot tell you what the live value is
+now, and that is exactly what you need to know to detect a duplicate.
+
+This is the crux of the ABA problem.  Consider:
+
+  INSERT (a=10)                  LP[1] a=10   (root)
+  UPDATE a=11   (HOT-indexed)    LP[2] a=11   bitmap {a}, leaf (11)->LP[2]
+  UPDATE a=10   (HOT-indexed)    LP[3] a=10   bitmap {a}, leaf (10)->LP[3], live
+
+idx_a now has leaves (10)->LP[1] [stale ancestor], (11)->LP[2] [stale], and
+(10)->LP[3] [fresh, live].
+
+Now INSERT (a=10), a genuine duplicate of the live row.  _bt_check_unique scans
+for key 10 and finds the (10)->LP[1] stale ancestor entry.  The chain walk from
+LP[1] to the live tuple LP[3] crosses hops that changed a (10->11, then
+11->10), so the bitmap says "stale."  If the unique check trusted the bitmap
+alone it would skip (10)->LP[1] as stale and miss the real duplicate.  The
+bitmap is fooled because a changed (so the bit is set) even though it changed
+back to the same value: "an attribute changed on the chain" is not "the live
+value differs from this leaf's key."  Under ABA they diverge.
+
+The sharper case is concurrency.  While the restoring UPDATE (a: 11 -> 10) is
+in flight, it has written its new heap tuple but not yet inserted the fresh
+(10)->LP[3] leaf.  A concurrent INSERT (a=10) running its _bt_check_unique scan
+in that window sees only the stale (10)->LP[1] ancestor.  The value recheck
+below makes that hit resolve to xwait on the in-flight updater (via
+_bt_doinsert's wait-and-recheck), so the inserter re-checks after the updater
+commits and finds the conflict.  A bitmap-only verdict would skip the ancestor
+before reaching the xwait logic and admit a duplicate, which is why the
+recheck is a correctness requirement, not merely an optimization.
+
+3. Why a value comparison fixes it, and why it must be the opclass comparator
+
+So the unique path needs to look at the actual live value, not just "did
+something change."  _bt_check_unique fetches the conflicting tuple under
+SnapshotDirty and, when hi_recheck says a HOT-indexed hop was crossed, calls
+_bt_heap_keys_equal_leaf to compare the live tuple's current key against the
+arriving leaf's stored key:
+
+ - live key equals the leaf key -> genuine duplicate (or an in-flight conflict
+   reached as xwait); correct: ABA back to X is a real conflict with a new X.
+ - live key differs -> the leaf is truly stale -> skip it (the fresh entry
+   handles the real row).
+
+Which equality?  Two candidates:
+
+Bitwise/image comparison (datum_image_eq) compares raw bytes.  That is wrong
+for unique checking in the dangerous direction.  Uniqueness in PostgreSQL is
+defined by the index opclass's equality operator, not byte identity, and many
+types have values equal under the opclass but byte-distinct:
+ - numeric: 1.0 and 1.00 are opclass-equal, different on-disk bytes.
+ - float8: -0.0 and +0.0 are equal, different bit patterns.
+ - text/citext under a nondeterministic collation: canonically-equivalent
+   strings that are not byte-identical.
+
+A bitwise comparison would conclude "not equal => stale => skip" for a live
+1.00 versus an inserted 1.0 and miss a genuine violation, a correctness hole
+as bad as the ABA one.
+
+So _bt_heap_keys_equal_leaf uses the index's own BTORDER_PROC (btree support
+function 1) under each key column's collation, the same machinery _bt_compare
+and _bt_mkscankey use to define equality for the index.  A zero result means
+"equal as the index defines equality," which is precisely the unique-violation
+condition, and the verdict agrees with the index's own notion of uniqueness in
+both directions.
+
+4. Why no expression evaluation is needed
+
+_bt_heap_keys_equal_leaf reads each key column straight from the heap slot
+(slot_getattr) and compares it to the leaf datum; it does not evaluate indexed
+expressions and needs no executor state.  That is sufficient because the
+recheck is only ever reached for an index receiving a fresh entry during a
+HOT-indexed update, and HeapUpdateHotAllowable disqualifies any UPDATE that
+touches an attribute referenced by an expression index
+(INDEX_ATTR_BITMAP_EXPRESSION captures every such attribute).  So a HOT-indexed
+chain never has a crossed hop affecting an expression index, the index reaching
+the recheck never has an expression key column (every indkey is a real
+attribute number), and there is nothing to evaluate.  If selective maintenance
+of expression indexes is implemented in the future, this is where an
+expression-evaluating comparison (e.g. FormIndexDatum) would be reintroduced.
+
+5. Why the asymmetry (bitmap on read, value recheck on unique) is intentional
+
+It looks like two different answers to the same question, but the questions
+differ:
+
+ - Read/scan path: "should this row be returned?"  A stale entry is redundant
+   (the fresh entry supplies the row), so the conservative bitmap verdict is
+   sufficient; worst case under ABA you drop a redundant entry and the fresh
+   one still returns the row.  No value comparison, so reads stay
+   access-method-agnostic and cheap.
+ - Unique-check path: "is this a conflict?"  A wrong "stale" verdict here does
+   not just drop a redundant entry; it silently admits a duplicate, corrupting
+   the constraint.  It cannot tolerate the bitmap's false "stale" under ABA and
+   must consult the live value (or wait on an in-flight updater) via the
+   opclass comparator.
+
+The bitmap is a filter (a necessary condition: "could be stale"); the opclass
+recheck is the authority (the sufficient condition: "is the live key actually
+different, or is a conflicting update in flight").  The unique path layers the
+authority on top of the filter precisely because its error mode is
+unforgiving.
+
+In one sentence: the unique check compares the live tuple's current key to the
+arriving leaf with the index's own equality (not bytes) because the
+crossed-attribute bitmap can only say "something changed", which is true under an
+X->Y->X cycle even though the value is back to X, and only an opclass-correct
+value comparison (which also routes an in-flight restoring update to xwait) can
+both recognize the cycled-back value as a genuine duplicate and catch
+duplicates that are opclass-equal but not byte-identical, either of which a
+bitmap or a bitwise comparison would get wrong.
+
+6. Why the executor's modified-attrs comparison uses datum_image_eq while the
+   heap side uses datumIsEqual
+
+The "modified indexed attributes" set (which drives the HOT vs SIU vs
+update-all-indexes decision) is computed on two different paths that are meant
+to be *functionally* equivalent: they answer the same question, "which
+indexed attributes changed value?", but deliberately use different Datum
+comparators:
+
+ - Executor path: ExecUpdateModifiedIdxAttrs -> table_modified_attrs (the
+   table-AM callback wrapper) -> heapam_modified_attrs (the heap AM's
+   implementation of that callback) compares the values of two
+   TupleTableSlots with datum_image_eq.  The comparison lives behind the
+   table-AM boundary, not in the executor.  table_modified_attrs is
+   optional: an AM that leaves the callback NULL is treated as though every
+   candidate attribute changed (the conservative "maintain all indexes"
+   answer; the wrapper returns the input set unchanged).
+ - Non-executor path: simple_heap_update -> HeapUpdateModifiedIdxAttrs ->
+   heap_attr_equals compares two HeapTuples' Datums with datumIsEqual.
+
+The difference is intentional and correct, for three reasons:
+
+ - No TOAST at the executor stage.  heapam_modified_attrs runs on slot Datums
+   that are the logical, in-memory values of the new/old tuple, before any
+   table AM's storage path has run.  TOAST (compression/externalization) is a
+   heapam storage detail applied later, inside the table AM, so the "two
+   physically different varlena encodings of the same logical value" case that
+   would make datum_image_eq and datumIsEqual disagree cannot arise here.
+ - AM-agnosticism.  The executor must not assume how any table AM stores
+   variable-length data, so the comparison now lives behind the table-AM
+   boundary in heapam_modified_attrs rather than in the executor.  Inside the
+   heap AM, datum_image_eq is the storage-neutral "are these two logical
+   values image-identical" test for slot Datums; datumIsEqual encodes a
+   byte-layout assumption that belongs on the heap-tuple side
+   (heap_attr_equals), not on the slot comparison the callback performs.
+ - Cost.  datumIsEqual on the slot path would force a slot->Datum transform
+   with heap semantics on a hot path, per attribute per updated row, for no
+   benefit.
+
+Either comparator errs only toward reporting a value "changed" when it might not
+have (the safe direction here: a redundant fresh index entry is tolerated by
+the SIU read path, a skipped one is not), so the two paths reach the same
+HOT/SIU decision for the same value transition.  This mirrors the read-vs-
+unique asymmetry above: use the cheapest correct comparison the layer's
+guarantees allow, no more.  HeapUpdateModifiedIdxAttrs/heap_attr_equals exist
+only for simple_heap_update()'s benefit (catalog and other non-executor
+updates) and are targeted for eventual removal once catalog updates track their
+own changes; nothing new should depend on them as public API.

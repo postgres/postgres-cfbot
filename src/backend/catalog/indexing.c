@@ -18,11 +18,14 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "executor/executor.h"
+#include "nodes/bitmapset.h"
 #include "utils/rel.h"
+#include "utils/relcache.h"
 
 
 /*
@@ -71,10 +74,11 @@ CatalogCloseIndexes(CatalogIndexState indstate)
  *
  * This is effectively a cut-down version of ExecInsertIndexTuples.  For
  * UPDATE paths the caller supplies update_all_indexes (from
- * simple_heap_update) so we can tell which indexes actually need a new entry:
- * update_all_indexes is true for a fresh insert or a non-HOT update (every
- * index gets an entry), false for a HOT catalog update (non-summarizing
- * indexes are skipped, since their existing entries still resolve the chain).
+ * table_tuple_update / simple_heap_update) so we can tell which indexes
+ * actually need a new entry: update_all_indexes is true for a fresh insert or
+ * a non-HOT update (every index gets an entry), false for a classic-HOT
+ * catalog update (non-summarizing indexes are skipped, since their existing
+ * entries still resolve the chain).
  */
 static void
 CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple,
@@ -132,8 +136,8 @@ CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple,
 
 		/*
 		 * Decide whether this index needs a new entry.  On INSERT or a
-		 * non-HOT update (update_all_indexes) every index gets one.  On a HOT
-		 * catalog update no non-summarizing indexed attribute changed, so the
+		 * non-HOT update (update_all_indexes) every index gets one.  On a
+		 * classic-HOT catalog update no indexed attribute changed, so the
 		 * non-summarizing indexes are skipped (summarizing indexes always get
 		 * a chance to update their block-level summaries below).
 		 */

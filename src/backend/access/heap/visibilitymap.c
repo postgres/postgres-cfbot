@@ -150,6 +150,41 @@ static Buffer vm_readbuf(Relation rel, BlockNumber blkno, bool extend);
  * after a full barrier (ProcArrayLock) that follows the set.  *vmbuf caches the
  * pinned VM page across a scan, exactly as VM_ALL_VISIBLE does.
  */
+/*
+ * visibilitymap_set_locator_split
+ *		Set VISIBILITYMAP_LOCATOR_SPLIT for heapBlk in the given VM buffer.
+ *
+ * The caller must hold the VM buffer's content lock in exclusive mode and be in
+ * a critical section (this is a page modification that must be WAL-logged by
+ * the caller, exactly as visibilitymap_set is for the visibility bits).  Unlike
+ * visibilitymap_set this touches neither PD_ALL_VISIBLE nor the visibility
+ * bits; the split bit records only that two indexes' entries for a row on this
+ * block may name different offsets (see amlocator.h).  Returns true if the bit
+ * changed (was not already set).
+ */
+bool
+visibilitymap_set_locator_split(BlockNumber heapBlk, Buffer vmBuf)
+{
+	BlockNumber mapBlock PG_USED_FOR_ASSERTS_ONLY = HEAPBLK_TO_MAPBLOCK(heapBlk);
+	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+	uint8		mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	char	   *map;
+	bool		changed = false;
+
+	Assert(InRecovery || CritSectionCount > 0);
+	Assert(BufferIsValid(vmBuf));
+	Assert(BufferGetBlockNumber(vmBuf) == mapBlock);
+
+	map = PageGetContents(BufferGetPage(vmBuf));
+	if (((map[mapByte] >> mapOffset) & VISIBILITYMAP_LOCATOR_SPLIT) == 0)
+	{
+		map[mapByte] |= (VISIBILITYMAP_LOCATOR_SPLIT << mapOffset);
+		MarkBufferDirty(vmBuf);
+		changed = true;
+	}
+	return changed;
+}
+
 bool
 visibilitymap_get_locator_split(Relation rel, BlockNumber heapBlk, Buffer *vmbuf)
 {
