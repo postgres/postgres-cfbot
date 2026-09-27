@@ -2616,6 +2616,16 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 */
 redo_act:
 		lockedtid = *tupleid;
+
+		/*
+		 * If the table's AM overwrites rows in place, oldSlot may still point
+		 * into the row's storage.  RETURNING OLD and the AFTER ROW triggers
+		 * read it after the update, so copy the old row out first.
+		 */
+		if (oldSlot != NULL && !TupIsNull(oldSlot) &&
+			RelationUpdatesInPlace(resultRelInfo->ri_RelationDesc))
+			ExecMaterializeSlot(oldSlot);
+
 		result = ExecUpdateAct(context, resultRelInfo, tupleid, oldtuple, slot,
 							   canSetTag, &updateCxt);
 
@@ -3469,6 +3479,11 @@ lmerge_matched:
 				{
 					/* checked ri_needLockTagTuple above */
 					Assert(oldtuple == NULL);
+
+					/* Keep the old row, as in ExecUpdate. */
+					if (!TupIsNull(resultRelInfo->ri_oldTupleSlot) &&
+						RelationUpdatesInPlace(resultRelInfo->ri_RelationDesc))
+						ExecMaterializeSlot(resultRelInfo->ri_oldTupleSlot);
 
 					result = ExecUpdateAct(context, resultRelInfo, tupleid,
 										   NULL, newslot, canSetTag,

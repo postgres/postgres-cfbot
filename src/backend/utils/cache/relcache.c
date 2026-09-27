@@ -2188,6 +2188,32 @@ RelationIncrementReferenceCount(Relation rel)
 }
 
 /*
+ * RelationIdUpdatesInPlace
+ *		RelationUpdatesInPlace() for a relation known only by OID.
+ *
+ * NB: the caller must hold a lock on the relation.  The planner calls this for
+ * every row mark, so use the cached entry when there is one rather than
+ * opening and closing the relation.
+ */
+bool
+RelationIdUpdatesInPlace(Oid relationId)
+{
+	Relation	rel;
+	bool		result;
+
+	RelationIdCacheLookup(relationId, rel);
+	if (rel != NULL && rel->rd_isvalid)
+		return RelationUpdatesInPlace(rel);
+
+	rel = RelationIdGetRelation(relationId);
+	if (!RelationIsValid(rel))
+		elog(ERROR, "could not open relation with OID %u", relationId);
+	result = RelationUpdatesInPlace(rel);
+	RelationClose(rel);
+	return result;
+}
+
+/*
  * RelationDecrementReferenceCount
  *		Decrements relation reference count.
  */
