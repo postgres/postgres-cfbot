@@ -2874,14 +2874,15 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 {
 	LockTupleMode lockmode;
 	TM_FailureData tmfd;
-	bool		row_moved;
 	Bitmapset  *modified_idx_attrs;
+	bool		row_moved = false;
 	TM_Result	res;
 
 	/*
 	 * Compute the set of modified indexed attributes by comparing the old
-	 * (ondisk) and new (spilled) tuples; heap_update needs it for a correct
-	 * HOT decision (a NULL set would look like "no indexed column changed").
+	 * (ondisk) and new (spilled) tuples.  heap_update needs this to make a
+	 * correct HOT decision; without it modified_idx_attrs would be NULL and
+	 * heap_update would always treat the update as HOT-eligible.
 	 */
 	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(chgcxt->cc_rri,
 													ondisk_tuple,
@@ -2911,14 +2912,15 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 		ExecInsertIndexTuples(chgcxt->cc_rri,
 							  chgcxt->cc_estate,
 							  EIIT_IS_UPDATE |
-							  (row_moved ? 0 : EIIT_PARTIAL_UPDATE),
+							  (row_moved ?
+							   0 : EIIT_PARTIAL_UPDATE),
 							  spilled_tuple,
 							  NIL, NULL);
 	}
 
-	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_UPDATED, 1);
-
 	bms_free(modified_idx_attrs);
+
+	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_UPDATED, 1);
 }
 
 static void

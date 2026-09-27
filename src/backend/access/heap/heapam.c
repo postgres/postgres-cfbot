@@ -4339,7 +4339,7 @@ l2:
 	if (have_tuple_lock)
 		UnlockTupleTuplock(relation, &(oldtup.t_self), lockmode);
 
-	pgstat_count_heap_update(relation, use_hot_update, newbuf != buffer);
+	pgstat_count_heap_update(relation, use_hot_update, false, newbuf != buffer);
 
 	/*
 	 * If heaptup is a private copy, release it.  Don't forget to copy t_self

@@ -517,6 +517,30 @@ typedef struct TableAmRoutine
 	 */
 	void		(*index_scan_end) (IndexScanDesc scan);
 
+	/*
+	 * Constraint-enforcement TID fetch that also fills a slot and reports
+	 * whether the arriving index entry may fail to exactly identify the live
+	 * tuple's current key.  Like fetch_tid, this is for unique/exclusion
+	 * enforcement code (which holds a TID taken from an index but performs no
+	 * index scan), not for true index scans.
+	 *
+	 * On a positive result the live tuple is stored into *slot.  *recheck is
+	 * set true iff reaching the live tuple crossed AM-private update-chain
+	 * state that may leave the arriving entry's stored key disagreeing with
+	 * the live tuple (for heap, a HOT-selectively-updated hop after the
+	 * arriving entry's own tuple); the caller then performs its own key
+	 * comparison.  AMs without such update chains may leave this callback
+	 * NULL, in which case table_index_fetch_tuple_check falls back to
+	 * fetch_tid and reports *recheck = false.
+	 */
+	bool		(*fetch_tid_check) (Relation rel,
+								ItemPointer tid,
+								Snapshot snapshot,
+								bool *all_dead,
+								bool *recheck,
+								TupleTableSlot *slot);
+
+
 	/* ------------------------------------------------------------------------
 	 * Callbacks for non-modifying operations on individual tuples
 	 * ------------------------------------------------------------------------
@@ -1432,6 +1456,8 @@ table_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 }
 
 
+
+
 /* ------------------------------------------------------------------------
  * Functions for non-modifying operations on individual tuples
  * ------------------------------------------------------------------------
@@ -1494,6 +1520,42 @@ table_tuple_fetch_row_version(Relation rel,
 		elog(ERROR, "unexpected table_tuple_fetch_row_version call during logical decoding");
 
 	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot);
+}
+
+/*
+ * Constraint-enforcement helper: fetch the live tuple at `tid` for a
+ * unique/exclusion check.  On a positive result the tuple is stored into
+ * `slot` and *recheck (if not NULL) reports whether reaching it crossed
+ * AM-private update-chain state that may leave the arriving index entry's
+ * stored key disagreeing with the live tuple, so the caller must recheck the
+ * key itself.  An AM that does not provide fetch_tid_check has no such chains:
+ * we fall back to fetch_tid, still fill the slot via
+ * table_tuple_fetch_row_version, and report *recheck = false.
+ *
+ * Like table_fetch_tid(), this performs no index scan and is only for
+ * constraint enforcement code holding a TID taken from an index.
+ */
+static inline bool
+table_index_fetch_tuple_check(Relation rel,
+							  ItemPointer tid,
+							  Snapshot snapshot,
+							  bool *all_dead,
+							  bool *recheck,
+							  TupleTableSlot *slot)
+{
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+		elog(ERROR, "unexpected table_index_fetch_tuple_check call during logical decoding");
+
+	if (rel->rd_tableam->fetch_tid_check != NULL)
+		return rel->rd_tableam->fetch_tid_check(rel, tid, snapshot,
+												all_dead, recheck, slot);
+
+	/* AM without update chains: plain fetch, no recheck. */
+	if (recheck != NULL)
+		*recheck = false;
+	if (!rel->rd_tableam->fetch_tid(rel, tid, snapshot, all_dead))
+		return false;
+	return table_tuple_fetch_row_version(rel, tid, snapshot, slot);
 }
 
 /*
