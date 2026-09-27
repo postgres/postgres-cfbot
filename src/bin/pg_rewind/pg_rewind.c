@@ -32,6 +32,19 @@
 #include "rewind_source.h"
 #include "storage/bufpage.h"
 
+/*
+ * Timeline histories for both clusters, populated by matchAndFetchTimelines().
+ */
+typedef struct TimeLineHistoriesData
+{
+	TimeLineHistoryEntry *source,
+			   *target;
+	int			sourceNentries,
+				targetNentries;
+}			TimeLineHistoriesData;
+
+typedef TimeLineHistoriesData * TimeLineHistories;
+
 static void usage(const char *progname);
 
 static void perform_rewind(filemap_t *filemap, rewind_source *source,
@@ -54,6 +67,9 @@ static void findCommonAncestorTimeline(TimeLineHistoryEntry *a_history,
 									   TimeLineHistoryEntry *b_history,
 									   int b_nentries,
 									   XLogRecPtr *recptr, int *tliIndex);
+static inline bool matchingTimelineUUID(TimeLineHistoryEntry *a, TimeLineHistoryEntry *b);
+static bool matchAndFetchTimelines(TimeLineID source_tli, TimeLineID target_tli,
+								   TimeLineHistories timelineHistories);
 static void ensureCleanShutdown(const char *argv0);
 static void disconnect_atexit(void);
 
@@ -142,6 +158,7 @@ main(int argc, char **argv)
 	int			c;
 	XLogRecPtr	divergerec;
 	int			lastcommontliIndex;
+	TimeLineHistoriesData timelineHistories;
 	XLogRecPtr	chkptrec;
 	TimeLineID	chkpttli;
 	XLogRecPtr	chkptredo;
@@ -376,10 +393,21 @@ main(int argc, char **argv)
 	 *
 	 * If both clusters are already on the same timeline, there's nothing to
 	 * do.
+	 *
+	 * This also handles the case when two servers independently promoted to
+	 * the same timeline ID: one crashed after writing the history file but
+	 * before its EOR WAL record was distributed, so a second standby promoted
+	 * independently.  The history files produced by those two promotions
+	 * carry different UUIDs.
+	 *
+	 * When the clusters are on different timelines we locate the fork point
+	 * via findCommonAncestorTimeline.
 	 */
-	if (target_tli == source_tli)
+	if (matchAndFetchTimelines(source_tli, target_tli, &timelineHistories))
 	{
 		pg_log_info("source and target cluster are on the same timeline");
+		pfree(timelineHistories.source);
+		pfree(timelineHistories.target);
 		rewind_needed = false;
 		target_wal_endrec = InvalidXLogRecPtr;
 	}
@@ -393,8 +421,10 @@ main(int argc, char **argv)
 		 * Retrieve timelines for both source and target, and find the point
 		 * where they diverged.
 		 */
-		sourceHistory = getTimelineHistory(source_tli, true, &sourceNentries);
-		targetHistory = getTimelineHistory(target_tli, false, &targetNentries);
+		targetHistory = timelineHistories.target;
+		targetNentries = timelineHistories.targetNentries;
+		sourceHistory = timelineHistories.source;
+		sourceNentries = timelineHistories.sourceNentries;
 
 		findCommonAncestorTimeline(sourceHistory, sourceNentries,
 								   targetHistory, targetNentries,
@@ -982,40 +1012,69 @@ MinXLogRecPtr(XLogRecPtr a, XLogRecPtr b)
 		return Min(a, b);
 }
 
+static bool
+file_exists(const char *name)
+{
+	struct stat st;
+
+	Assert(name != NULL);
+
+	if (stat(name, &st) == 0)
+		return !S_ISDIR(st.st_mode);
+	else if (!(errno == ENOENT || errno == ENOTDIR || errno == EACCES))
+		pg_fatal("could not stat file \"%s\": %m", name);
+
+	return false;
+
+}
+
 /*
  * Retrieve timeline history for the source or target system.
  */
 static TimeLineHistoryEntry *
 getTimelineHistory(TimeLineID tli, bool is_source, int *nentries)
 {
-	TimeLineHistoryEntry *history;
+	TimeLineHistoryEntry *history = NULL;
 
 	/*
 	 * Timeline 1 does not have a history file, so there is no need to check
 	 * and fake an entry with infinite start and end positions.
 	 */
-	if (tli == 1)
-	{
-		history = pg_malloc_object(TimeLineHistoryEntry);
-		history->tli = tli;
-		history->begin = history->end = InvalidXLogRecPtr;
-		*nentries = 1;
-	}
-	else
+	if (tli != 1)
 	{
 		char		path[MAXPGPATH];
-		char	   *histfile;
+		char	   *histfile = NULL;
 
 		TLHistoryFilePath(path, tli);
 
-		/* Get history file from appropriate source */
+		/* Get history file from appropriate source, tolerating its absence */
 		if (is_source)
 			histfile = source->fetch_file(source, path, NULL);
 		else
-			histfile = slurpFile(datadir_target, path, NULL);
+		{
+			char		fullpath[MAXPGPATH];
 
-		history = rewind_parseTimeLineHistory(histfile, tli, nentries);
-		pg_free(histfile);
+			snprintf(fullpath, sizeof(fullpath), "%s/%s", datadir_target, path);
+			if (file_exists(fullpath))
+				histfile = slurpFile(datadir_target, path, NULL);
+		}
+
+		if (histfile != NULL)
+		{
+			history = rewind_parseTimeLineHistory(histfile, tli, nentries);
+			pg_free(histfile);
+		}
+	}
+
+	/*
+	 * If no history file entry was created, we create a "zero" entry.
+	 */
+	if (history == NULL)
+	{
+		history = pg_malloc0_object(TimeLineHistoryEntry);
+		history->tli = tli;
+		history->begin = history->end = InvalidXLogRecPtr;
+		*nentries = 1;
 	}
 
 	/* In debugging mode, print what we read */
@@ -1043,6 +1102,56 @@ getTimelineHistory(TimeLineID tli, bool is_source, int *nentries)
 }
 
 /*
+ * Return true if two per-entry promotion UUIDs are compatible.
+ *
+ * A zero UUID means the history file predates this fix (or the entry is
+ * synthetic).  If both sides are zero we have no UUID information and fall
+ * back to TLI-number-only matching (backward compatibility with old servers).
+ * If one side carries a UUID and the other does not, they cannot originate
+ * from the same promotion and are treated as incompatible.
+ */
+static inline bool
+matchingTimelineUUID(TimeLineHistoryEntry *a, TimeLineHistoryEntry *b)
+{
+	static const pg_uuid_t zero = {{0}};
+
+	if (memcmp(&a->tluuid, &zero, UUID_LEN) == 0 && memcmp(&b->tluuid, &zero, UUID_LEN) == 0)
+		return true;
+	return memcmp(&a->tluuid, &b->tluuid, UUID_LEN) == 0;
+}
+
+/*
+ * Fetch the timeline history for both clusters, store them in tlh, and return
+ * true if the clusters are on the same timeline (no rewind needed).
+ *
+ * tlh is always fully populated on return regardless of the result, so the
+ * caller can pass tlh->source / tlh->target directly to
+ * findCommonAncestorTimeline() when the return value is false.
+ *
+ * TLI 1 always returns true: it is the original timeline and has no promotion
+ * UUID.  For TLI >= 2, the UUID in entry[Nentries - 2] identifies the
+ * promotion that created the current TLI.  Both-zero UUIDs (old history files)
+ * are treated as compatible; zero-vs-nonzero is treated as a mismatch because
+ * one side carries a promotion UUID and they cannot be the same promotion.
+ */
+static bool
+matchAndFetchTimelines(TimeLineID source_tli, TimeLineID target_tli, TimeLineHistories tlh)
+{
+	tlh->source = getTimelineHistory(source_tli, true, &tlh->sourceNentries);
+	tlh->target = getTimelineHistory(target_tli, false, &tlh->targetNentries);
+
+	if (source_tli != target_tli)
+		return false;
+
+	/* TLI 1 has no promotion UUID; always treat as the same timeline. */
+	if (tlh->sourceNentries < 2 || tlh->targetNentries < 2)
+		return true;
+
+	return matchingTimelineUUID(&tlh->source[tlh->sourceNentries - 2],
+								&tlh->target[tlh->targetNentries - 2]);
+}
+
+/*
  * Determine the TLI of the last common timeline in the timeline history of
  * two clusters. *tliIndex is set to the index of last common timeline in
  * the arrays, and *recptr is set to the position where the timeline history
@@ -1063,12 +1172,26 @@ findCommonAncestorTimeline(TimeLineHistoryEntry *a_history, int a_nentries,
 	 * depending on the history files that each node has fetched in previous
 	 * recovery processes. Hence check the start position of the new timeline
 	 * as well and move down by one extra timeline entry if they do not match.
+	 *
+	 * We also compare timeline UUIDs when both sides carry one.  Two servers
+	 * that independently promoted to the same timeline ID produce history
+	 * files with the same name (e.g. 00000003.history); in a shared WAL
+	 * archive the second file silently overwrites the first.  pg_rewind
+	 * fetches each server's history file directly from that server, so it
+	 * sees both UUIDs.
+	 *
+	 * The timeline UUID stored in history entry[i] is the UUID of the
+	 * promotion that created entry[i+1], i.e. the UUID of TLI entry[i+1].tli.
+	 * So to check whether entry[i] itself represents the same timeline on
+	 * both sides we look at entry[i-1].tluuid (for i > 0).  TLI 1 (i == 0) is
+	 * always the same: it is the original timeline and has no promotion UUID.
 	 */
 	n = Min(a_nentries, b_nentries);
 	for (i = 0; i < n; i++)
 	{
 		if (a_history[i].tli != b_history[i].tli ||
-			a_history[i].begin != b_history[i].begin)
+			a_history[i].begin != b_history[i].begin ||
+			(i > 0 && !matchingTimelineUUID(&a_history[i - 1], &b_history[i - 1])))
 			break;
 	}
 
