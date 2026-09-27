@@ -275,3 +275,32 @@ select count(*) from gist_nan_point_tbl where p <@ circle '<(50,50),50>';
 reset enable_seqscan;
 reset enable_bitmapscan;
 drop table gist_nan_point_tbl;
+
+-- KNN with a NaN in a leaf key or in the query point
+create table gist_nan_knn_tbl (b box, p polygon, pt point);
+insert into gist_nan_knn_tbl
+  select b, polygon(b), center(b)
+  from (select box(point(i, j), point(i + 1, j + 1)) as b
+        from generate_series(0, 29) i, generate_series(0, 29) j) s;
+insert into gist_nan_knn_tbl values
+  ('(NaN,NaN),(0,0)', '((NaN,NaN),(0,0),(1,1))', '(NaN,NaN)'),
+  ('(1,NaN),(0,0)', '((0,0),(NaN,1),(1,1))', '(1,NaN)');
+create index gist_nan_knn_tbl_b on gist_nan_knn_tbl using gist (b);
+create index gist_nan_knn_tbl_p on gist_nan_knn_tbl using gist (p);
+create index gist_nan_knn_tbl_pt on gist_nan_knn_tbl using gist (pt);
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+select b <-> point '(0.5,0.5)' from gist_nan_knn_tbl
+  order by b <-> point '(0.5,0.5)' limit 5;
+-- the NaN distance sorts last
+select b <-> point '(0.5,0.5)' from gist_nan_knn_tbl
+  order by b <-> point '(0.5,0.5)' offset 901;
+select p <-> point '(0.5,0.5)' from gist_nan_knn_tbl
+  order by p <-> point '(0.5,0.5)' limit 5;
+select b <-> point '(1,NaN)' from gist_nan_knn_tbl
+  order by b <-> point '(1,NaN)' limit 3;
+select pt <-> point '(1,NaN)' from gist_nan_knn_tbl
+  order by pt <-> point '(1,NaN)' limit 3;
+reset enable_seqscan;
+reset enable_bitmapscan;
+drop table gist_nan_knn_tbl;
