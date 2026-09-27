@@ -349,6 +349,7 @@ index_beginscan_internal(Relation indexRelation, Relation heapRelation,
 	{
 		scan->heapRelation = heapRelation;
 		scan->xs_want_itup = index_only_scan;
+		scan->xs_index_only = index_only_scan;
 		scan->xs_heap_continue = false;
 
 		/*
