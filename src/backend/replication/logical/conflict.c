@@ -148,20 +148,15 @@ static void get_tuple_desc(EState *estate, ResultRelInfo *relinfo,
 						   TupleTableSlot *remoteslot, char **remote_desc,
 						   TupleTableSlot *searchslot, char **search_desc,
 						   Oid indexoid);
-static void build_index_datums_from_slot(EState *estate, Relation localrel,
-										 TupleTableSlot *slot,
-										 Relation indexDesc, Datum *values,
-										 bool *isnull);
 static char *build_index_value_desc(EState *estate, Relation localrel,
 									TupleTableSlot *slot, Oid indexoid);
-static Datum build_index_key_json(EState *estate,
-								  Relation localrel,
+static Datum build_index_key_json(Relation localrel,
 								  Oid replica_index,
 								  TupleTableSlot *slot,
 								  bool *omitted);
 static TupleDesc build_local_conflicts_tupledesc(void);
 static Datum build_local_conflicts_json_array(List *conflicttuples);
-static void insert_conflict_log_tuple(EState *estate, Relation rel,
+static void insert_conflict_log_tuple(Relation rel,
 									  Relation conflictlogrel,
 									  ConflictType conflict_type,
 									  TupleTableSlot *searchslot,
@@ -444,8 +439,7 @@ ReportApplyConflict(EState *estate, ResultRelInfo *relinfo, int elevel,
 		Assert(conflictlogrel != NULL);
 		Assert(elevel < ERROR);
 
-		insert_conflict_log_tuple(estate,
-								  relinfo->ri_RelationDesc,
+		insert_conflict_log_tuple(relinfo->ri_RelationDesc,
 								  conflictlogrel,
 								  type,
 								  searchslot,
@@ -964,40 +958,6 @@ get_tuple_desc(EState *estate, ResultRelInfo *relinfo, ConflictType type,
 }
 
 /*
- * Helper function to extract the "raw" index key Datums and their null flags
- * from a TupleTableSlot, given an already open index descriptor.
- * This is the reusable core logic.
- */
-static void
-build_index_datums_from_slot(EState *estate, Relation localrel,
-							 TupleTableSlot *slot,
-							 Relation indexDesc, Datum *values,
-							 bool *isnull)
-{
-	TupleTableSlot *tableslot = slot;
-
-	/*
-	 * If the slot is a virtual slot, copy it into a heap tuple slot as
-	 * FormIndexDatum only works with heap tuple slots.
-	 */
-	if (TTS_IS_VIRTUAL(slot))
-	{
-		/* Slot is created within the EState's tuple table */
-		tableslot = table_slot_create(localrel, &estate->es_tupleTable);
-		tableslot = ExecCopySlot(tableslot, slot);
-	}
-
-	/*
-	 * Initialize ecxt_scantuple for potential use in FormIndexDatum
-	 */
-	GetPerTupleExprContext(estate)->ecxt_scantuple = tableslot;
-
-	/* Form the index datums */
-	FormIndexDatum(BuildIndexInfo(indexDesc), tableslot, estate, values,
-				   isnull);
-}
-
-/*
  * Helper functions to construct a string describing the contents of an index
  * entry. See BuildIndexValueDescription for details.
  *
@@ -1012,16 +972,37 @@ build_index_value_desc(EState *estate, Relation localrel, TupleTableSlot *slot,
 	Relation	indexDesc;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
+	TupleTableSlot *tableslot = slot;
 
-	if (!slot)
+	if (!tableslot)
 		return NULL;
 
 	Assert(CheckRelationOidLockedByMe(indexoid, RowExclusiveLock, true));
 
 	indexDesc = index_open(indexoid, NoLock);
 
-	build_index_datums_from_slot(estate, localrel, slot, indexDesc, values,
-								 isnull);
+	/*
+	 * If the slot is a virtual slot, copy it into a heap tuple slot as
+	 * FormIndexDatum only works with heap tuple slots.
+	 */
+	if (TTS_IS_VIRTUAL(slot))
+	{
+		tableslot = table_slot_create(localrel, &estate->es_tupleTable);
+		tableslot = ExecCopySlot(tableslot, slot);
+	}
+
+	/*
+	 * Initialize ecxt_scantuple for potential use in FormIndexDatum when
+	 * index expressions are present.
+	 */
+	GetPerTupleExprContext(estate)->ecxt_scantuple = tableslot;
+
+	/*
+	 * The values/nulls arrays passed to BuildIndexValueDescription should be
+	 * the results of FormIndexDatum, which are the "raw" input to the index
+	 * AM.
+	 */
+	FormIndexDatum(BuildIndexInfo(indexDesc), tableslot, estate, values, isnull);
 
 	index_value = BuildIndexValueDescription(indexDesc, values, isnull);
 
@@ -1040,27 +1021,21 @@ build_index_value_desc(EState *estate, Relation localrel, TupleTableSlot *slot,
  * that we can safely fetch and construct the replica identity key values.
  */
 static Datum
-build_index_key_json(EState *estate, Relation localrel,
-					 Oid indexid, TupleTableSlot *slot,
-					 bool *omitted)
+build_index_key_json(Relation localrel, Oid indexid,
+					 TupleTableSlot *slot, bool *omitted)
 {
 	Relation	indexDesc;
-	TupleDesc	indexTupDesc;
-	Datum		values[INDEX_MAX_KEYS];
-	bool		isnull[INDEX_MAX_KEYS];
+	TupleDesc	tupdesc = RelationGetDescr(localrel);
 	StringInfoData result;
 	int			indnkeyatts;
 	Datum		datum;
 
 	Assert(slot != NULL);
-
 	Assert(CheckRelationOidLockedByMe(indexid, RowExclusiveLock, true));
 
-	indexDesc = index_open(indexid, NoLock);
-	indexTupDesc = RelationGetDescr(indexDesc);
+	*omitted = false;
 
-	build_index_datums_from_slot(estate, localrel, slot, indexDesc, values,
-								 isnull);
+	indexDesc = index_open(indexid, NoLock);
 
 	/*
 	 * Build the JSON object here rather than handing the values to
@@ -1077,9 +1052,13 @@ build_index_key_json(EState *estate, Relation localrel,
 	 * keeps us to the same representation the publisher already produced, as
 	 * the server log does in BuildIndexValueDescription().
 	 *
-	 * Only the key attributes are recorded.  FormIndexDatum() above also
-	 * fills in any non-key (INCLUDE) columns, but those are not part of the
-	 * replica identity.
+	 * Only the key attributes are recorded; any non-key (INCLUDE) columns are
+	 * not part of the replica identity.  Because a replica identity or
+	 * primary key index cannot contain expressions or system columns, each
+	 * key attribute maps directly to a user column of localrel.  We look up
+	 * the attribute descriptor on localrel rather than indexDesc because an
+	 * index opclass may specify a storage type (opckeytype) different from
+	 * the table column's type.
 	 */
 	indnkeyatts = IndexRelationGetNumberOfKeyAttributes(indexDesc);
 
@@ -1088,7 +1067,14 @@ build_index_key_json(EState *estate, Relation localrel,
 
 	for (int i = 0; i < indnkeyatts; i++)
 	{
-		Form_pg_attribute att = TupleDescAttr(indexTupDesc, i);
+		AttrNumber	keycol = indexDesc->rd_index->indkey.values[i];
+		Form_pg_attribute att;
+		Datum		val;
+		bool		isnull;
+
+		Assert(AttributeNumberIsValid(keycol));
+		att = TupleDescAttr(tupdesc, keycol - 1);
+		val = slot_getattr(slot, keycol, &isnull);
 
 		if (i > 0)
 			appendStringInfoChar(&result, ',');
@@ -1096,7 +1082,7 @@ build_index_key_json(EState *estate, Relation localrel,
 		escape_json(&result, NameStr(att->attname));
 		appendStringInfoChar(&result, ':');
 
-		if (isnull[i])
+		if (isnull)
 			appendStringInfoString(&result, "null");
 		else
 		{
@@ -1111,11 +1097,11 @@ build_index_key_json(EState *estate, Relation localrel,
 			 * size worth testing; a fixed-length type is small by definition.
 			 *
 			 * The raw datum size is tested rather than the length of the
-			 * type's output, so that a toasted value is not detoasted merely
-			 * to find out that we are going to discard it; for a toasted
-			 * datum this only reads the pointer header.  The two differ for
-			 * types whose output is wider than their storage, but only by a
-			 * small factor, which the cap already accounts for.
+			 * type's output, so that we do not invoke the output function (or
+			 * detoast, if applicable) merely to find out that we are going to
+			 * discard the value.  The two differ for types whose output is
+			 * wider than their storage, but only by a small factor, which the
+			 * cap already accounts for.
 			 *
 			 * XXX This does not cover a user-defined type whose output
 			 * function renders far more than its input.  With a text-mode
@@ -1126,7 +1112,7 @@ build_index_key_json(EState *estate, Relation localrel,
 			 * size reveals that, so this check cannot detect it.
 			 */
 			if (att->attlen == -1)
-				rawsize = toast_raw_datum_size(values[i]) - VARHDRSZ;
+				rawsize = toast_raw_datum_size(val) - VARHDRSZ;
 
 			if (rawsize > CONFLICT_MAX_VALUE_SIZE)
 			{
@@ -1139,7 +1125,7 @@ build_index_key_json(EState *estate, Relation localrel,
 			}
 
 			getTypeOutputInfo(att->atttypid, &outfuncoid, &typisvarlena);
-			outputstr = OidOutputFunctionCall(outfuncoid, values[i]);
+			outputstr = OidOutputFunctionCall(outfuncoid, val);
 			escape_json(&result, outputstr);
 			pfree(outputstr);
 		}
@@ -1297,7 +1283,7 @@ build_local_conflicts_json_array(List *conflicttuples)
  * logical replication into the conflict log table.
  */
 static void
-insert_conflict_log_tuple(EState *estate, Relation rel,
+insert_conflict_log_tuple(Relation rel,
 						  Relation conflictlogrel,
 						  ConflictType conflict_type,
 						  TupleTableSlot *searchslot,
@@ -1367,7 +1353,7 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 		if (OidIsValid(replica_index))
 		{
 			values[attno++] = BoolGetDatum(false);
-			values[attno++] = build_index_key_json(estate, rel,
+			values[attno++] = build_index_key_json(rel,
 												   replica_index,
 												   searchslot,
 												   &omitted);
