@@ -29,7 +29,6 @@ typedef struct IndexPath IndexPath;
 /* Likewise, this file shouldn't depend on execnodes.h. */
 typedef struct IndexInfo IndexInfo;
 
-
 /*
  * Properties for amproperty API.  This list covers properties known to the
  * core code, but an index AM can define its own properties, by matching the

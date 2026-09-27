@@ -113,11 +113,13 @@
 #include "catalog/index.h"
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
+#include "pgstat.h"
 #include "storage/lmgr.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/multirangetypes.h"
 #include "utils/rangetypes.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 
 /* waitMode argument to check_exclusion_or_unique_constraint() */
@@ -274,17 +276,10 @@ ExecCloseIndices(ResultRelInfo *resultRelInfo)
  *
  *		When EIIT_IS_UPDATE is set, the executor is performing an
  *		UPDATE.  The per-index ii_IndexUnchanged flag (populated by
- *		ExecSetIndexUnchanged()) says whether that index's key values
- *		are unchanged by this update; when true we pass
- *		indexUnchanged=true to index_insert() as a hint for bottom-up
- *		deletion.
- *
- *		If EIIT_PARTIAL_UPDATE is set the row did not move (the AM used
- *		an optimization like heapam's HOT), so only a subset of the row's
- *		index entries needs refreshing.  Non-summarizing indexes keep
- *		their existing entries, which still locate the new version via the
- *		chain; summarizing indexes must still be given a chance to update
- *		their block-level summaries.
+ *		ExecSetIndexUnchanged()) indicates whether each index's key
+ *		values are unchanged by this update.  When ii_IndexUnchanged
+ *		is true, we pass indexUnchanged=true to index_insert() as a
+ *		hint for bottom-up deletion optimization.
  *
  *		Unique and exclusion constraints are enforced at the same
  *		time.  This returns a list of index OIDs for any unique or
@@ -360,12 +355,32 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 			continue;
 
 		/*
-		 * Skip processing of non-summarizing indexes when the row did not
-		 * move: their existing entries still locate the new version via the
-		 * chain, so only the summarizing indexes need a fresh entry.
+		 * UPDATE skip rule.  ExecSetIndexUnchanged populated
+		 * ii_IndexNeedsUpdate for every index: true when the table AM stored
+		 * an independent new version, or when any attribute the index
+		 * references (key, INCLUDE, expression, or partial-predicate column)
+		 * overlaps the modified-attrs bitmap.  When it is false on a
+		 * non-summarizing index we skip the insert entirely; the HOT chain
+		 * keeps existing entries pointing at the chain root.  Summarizing
+		 * indexes always get a chance to update their block-level summaries.
 		 */
-		if ((flags & EIIT_PARTIAL_UPDATE) && !indexInfo->ii_Summarizing)
+		if ((flags & EIIT_IS_UPDATE) &&
+			!indexInfo->ii_IndexNeedsUpdate &&
+			!indexInfo->ii_Summarizing)
+		{
+			/*
+			 * This index was skipped because its key attributes did not
+			 * change.  When the overall update is a partial (selective-index)
+			 * update (some other non-summarizing index did change), record
+			 * the skip on this index's pgstat entry.  A classic-HOT update
+			 * (no indexed attribute changed) does not reach this path --
+			 * ExecInsertIndexTuples is only invoked when at least one index
+			 * needs a fresh entry.
+			 */
+			if (flags & EIIT_PARTIAL_UPDATE)
+				pgstat_count_hot_indexed_upd_skipped(indexRelation);
 			continue;
+		}
 
 		/* Check for partial index */
 		if (indexInfo->ii_Predicate != NIL)
@@ -387,6 +402,17 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 			if (!ExecQual(predicate, econtext))
 				continue;
 		}
+
+		/*
+		 * Non-skipped index under a HOT-indexed update: this index is
+		 * receiving a fresh entry because one of its key attributes changed.
+		 * Summarizing indexes always insert regardless of the HOT-indexed
+		 * decision (same as classic HOT), so they are not counted here.  Count
+		 * only now that the partial-index predicate (if any) has also passed,
+		 * so a predicate-excluded partial index is not counted as matched.
+		 */
+		if ((flags & EIIT_PARTIAL_UPDATE) && !indexInfo->ii_Summarizing)
+			pgstat_count_hot_indexed_upd_matched(indexRelation);
 
 		/*
 		 * FormIndexDatum fills in its values and isnull parameters with the
@@ -428,13 +454,26 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 
 		/*
 		 * For UPDATE operations, use the per-index ii_IndexUnchanged flag
-		 * (populated by ExecSetIndexUnchanged) to hint whether the index's
-		 * key values are unchanged.  This helps the index AM optimize for
+		 * (populated by ExecSetIndexUnchanged) to hint whether the index
+		 * values are unchanged.  This helps the index AM optimize for
 		 * bottom-up deletion of duplicate index entries.
 		 */
 		indexUnchanged = (flags & EIIT_IS_UPDATE) ?
 			indexInfo->ii_IndexUnchanged : false;
 
+		/*
+		 * A fresh entry planted here under a HOT-indexed update points at the
+		 * new heap-only tuple itself (tupleid), not at the chain's root the
+		 * way every other index entry does; that positional distinction is
+		 * what lets the read side judge staleness from the crossed-attribute
+		 * bitmap without a value recheck (see hot_indexed.h).  The entry is
+		 * stored as an ordinary, exact TID; the hazard it creates for BitmapAnd
+		 * where an unrelated index's root-pointing entry for the same row
+		 * names a different offset on the same block, is signalled per block
+		 * by the heap, which sets VISIBILITYMAP_LOCATOR_SPLIT during the update
+		 * (see heap_update) and which BitmapAnd reads through the table AM's
+		 * bitmap_and_inexact hook (see tidbitmap.c).  Nothing marks the TID.
+		 */
 		satisfiesConstraint =
 			index_insert(indexRelation, /* index relation */
 						 values,	/* array of index Datums */
@@ -710,6 +749,7 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 	int			i;
 	bool		conflict;
 	bool		found_self;
+	bool		found_self_siu_hit;
 	ExprContext *econtext;
 	TupleTableSlot *existing_slot;
 	TupleTableSlot *save_scantuple;
@@ -812,6 +852,7 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 retry:
 	conflict = false;
 	found_self = false;
+	found_self_siu_hit = false;
 	index_scan = index_beginscan(heap, index, false,
 								 &DirtySnapshot, NULL, indnkeyatts, 0,
 								 SO_NONE);
@@ -828,14 +869,42 @@ retry:
 		char	   *error_existing;
 
 		/*
-		 * Ignore the entry for the tuple we're trying to check.
+		 * Ignore the entry for the tuple we're trying to check.  With HOT-
+		 * indexed (hot-indexed) updates, several index entries may chain-lead
+		 * to the same heap tuple (a stale entry for the old key and a fresh
+		 * entry for the new key).  They all resolve to the same TID here and
+		 * must all be treated as "self", not as a duplicate error.  We
+		 * tolerate the duplicate self arrival whenever *either* this
+		 * iteration or an earlier one saw xs_entry_needs_recheck; the
+		 * canonical direct entry and the stale chain-walk entries can arrive
+		 * in either order.
 		 */
 		if (ItemPointerIsValid(tupleid) &&
 			ItemPointerEquals(tupleid, &existing_slot->tts_tid))
 		{
-			if (found_self)		/* should not happen */
+			if (found_self)
+			{
+				/*
+				 * A repeat self-arrival is legitimate only in the HOT-indexed
+				 * case: the canonical direct entry plus one or more stale
+				 * chain-walk entries all resolve to this TID, and they may
+				 * arrive in either order.  Tolerate the repeat when either the
+				 * current arrival is stale, or an earlier arrival for this TID
+				 * was (covering the direct-entry-after-stale-entry order).  A
+				 * repeat that is non-stale with no stale arrival seen is a
+				 * genuine duplicate-TID corruption; keep raising on it.
+				 */
+				if (index_scan->xs_entry_needs_recheck || found_self_siu_hit)
+				{
+					if (index_scan->xs_entry_needs_recheck)
+						found_self_siu_hit = true;
+					continue;
+				}
 				elog(ERROR, "found self tuple multiple times in index \"%s\"",
 					 RelationGetRelationName(index));
+			}
+			if (index_scan->xs_entry_needs_recheck)
+				found_self_siu_hit = true;
 			found_self = true;
 			continue;
 		}
@@ -857,6 +926,31 @@ retry:
 										  values))
 				continue;		/* tuple doesn't actually match, so no
 								 * conflict */
+		}
+
+		/*
+		 * HOT-indexed chains can reach this loop via a stale btree leaf entry
+		 * whose key is different from the heap tuple's current index-form.
+		 * existing_values holds the current heap tuple's index-form
+		 * (FormIndexDatum above).  Compare it against our new tuple's values
+		 * using the same constraint operators; if they don't agree, the
+		 * chain-walked tuple is not actually in conflict with our insertion
+		 * it just shared a TID with a stale leaf entry we happened to scan
+		 * through.  Skip it.
+		 *
+		 * This mirrors _bt_check_unique's HOT-indexed recheck path; for
+		 * exclusion constraints the user-supplied operator in constr_procs
+		 * replaces the btree equality comparator, and
+		 * index_recheck_constraint does the right thing for either.
+		 */
+		if (index_scan->xs_entry_needs_recheck)
+		{
+			if (!index_recheck_constraint(index,
+										  constr_procs,
+										  existing_values,
+										  existing_isnull,
+										  values))
+				continue;		/* stale chain hit, not a real conflict */
 		}
 
 		/*
@@ -1020,18 +1114,21 @@ index_recheck_constraint(Relation index, const Oid *constr_procs,
 /*
  * ExecSetIndexUnchanged
  *
- * Populate the per-index ii_IndexUnchanged aminsert hint for an UPDATE, from
- * the set of indexed attributes the executor found to have actually changed
- * value (see ExecUpdateModifiedIdxAttrs / table_modified_attrs).
+ * Populate two per-index flags ahead of ExecInsertIndexTuples:
  *
- * Per the historical rule the hint counts only key columns: a change to an
- * INCLUDE column, or to a column referenced only by a partial-index
- * predicate, does not disqualify it.  An expression key column is treated
- * conservatively as possibly changed.
+ *   - ii_IndexNeedsUpdate (wide) drives the skip decision.  It is true when
+ *     the table AM moved the row (row_moved: it stored an independent new
+ *     version the old index entries no longer locate) or when any attribute
+ *     the index references (key, INCLUDE, expression, or partial-predicate
+ *     column, per RelationGetIndexedAttrs()) changed.  A non-summarizing
+ *     index for which this is false is skipped: its existing entry keeps
+ *     resolving the HOT chain.
  *
- * row_moved (whether the AM stored the new tuple at a new TID) does not enter
- * into this decision: the hint describes whether the index is *logically*
- * unchanged, which is a property of the key values, not of the row locator.
+ *   - ii_IndexUnchanged (narrow) is the indexUnchanged hint to aminsert,
+ *     consumed by nbtree deduplication / bottom-up deletion.  Per the
+ *     historical rule it counts only key columns; INCLUDE and predicate
+ *     columns are deliberately ignored, and an expression key is treated
+ *     conservatively as possibly changed.
  */
 void
 ExecSetIndexUnchanged(ResultRelInfo *resultRelInfo,
@@ -1042,25 +1139,51 @@ ExecSetIndexUnchanged(ResultRelInfo *resultRelInfo,
 	IndexInfo **indexInfoArray = resultRelInfo->ri_IndexRelationInfo;
 	RelationPtr indexDescs = resultRelInfo->ri_IndexRelationDescs;
 
+	if (numIndices == 0)
+		return;
+
 	for (int i = 0; i < numIndices; i++)
 	{
 		IndexInfo  *indexInfo = indexInfoArray[i];
-		bool		keychanged = false;
+		Relation	indexDesc = indexDescs[i];
+		Bitmapset  *indexedattrs;
+		bool		keychanged;
 
-		if (indexDescs[i] == NULL)
+		if (indexDesc == NULL)
 			continue;
 
+		/*
+		 * Skip decision (wide).  The index needs a new entry if the AM moved
+		 * the row, or if any attribute it references (key, INCLUDE,
+		 * expression, or partial-predicate column) changed.
+		 * RelationGetIndexedAttrs() covers all of those.  (An UPDATE that
+		 * touches an expression-index attribute never reaches the HOT-indexed
+		 * path: HeapUpdateHotAllowable disqualifies it, pending
+		 * expression-aware maintenance.)
+		 */
+		indexedattrs = RelationGetIndexedAttrs(indexDesc);
+		indexInfo->ii_IndexNeedsUpdate =
+			row_moved || bms_overlap(indexedattrs, modified_idx_attrs);
+		bms_free(indexedattrs);
+
+		/*
+		 * aminsert hint (narrow).  ii_IndexUnchanged feeds nbtree
+		 * deduplication / bottom-up deletion heuristics and, per the
+		 * historical rule, counts only key columns: a change to an INCLUDE
+		 * column or to a partial-index predicate column does not disqualify
+		 * the hint.  An expression key column is treated conservatively as
+		 * possibly changed.
+		 */
+		keychanged = false;
 		for (int k = 0; k < indexInfo->ii_NumIndexKeyAttrs; k++)
 		{
 			AttrNumber	keycol = indexInfo->ii_IndexAttrNumbers[k];
 
-			/* expression key: assume it may have changed */
-			if (keycol == 0)
+			if (keycol == 0)	/* expression key: assume it may have changed */
 			{
 				keychanged = true;
 				break;
 			}
-
 			if (bms_is_member(keycol - FirstLowInvalidHeapAttributeNumber,
 							  modified_idx_attrs))
 			{
@@ -1068,7 +1191,6 @@ ExecSetIndexUnchanged(ResultRelInfo *resultRelInfo,
 				break;
 			}
 		}
-
 		indexInfo->ii_IndexUnchanged = !keychanged;
 	}
 }
