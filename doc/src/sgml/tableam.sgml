@@ -221,7 +221,10 @@ my_tableam_handler(PG_FUNCTION_ARGS)
     <listitem>
      <para>
       Whether the version of a row that an <command>UPDATE</command> replaced
-      can still be fetched by its locator.
+      can still be fetched by its locator.  If not, the executor copies the
+      old row, and the new row for user row triggers, before they are needed,
+      and the access method must keep a deleted row fetchable by its locator
+      until the deleting transaction ends.
      </para>
     </listitem>
    </varlistentry>

@@ -106,6 +106,25 @@ typedef struct LocatorDesc
 	 * after the UPDATE that replaced it?  Heap keeps the old version on its
 	 * page until VACUUM, so it is.  An AM that overwrites rows in place says
 	 * false; see RelationUpdatesInPlace().
+	 *
+	 * For such an AM the executor copies the old row before an UPDATE writes
+	 * it, for RETURNING OLD and for the AFTER ROW triggers and transition
+	 * tables, and an after-trigger event queued for the UPDATE carries that
+	 * copy.  An INSERT or UPDATE event for a row trigger other than a foreign
+	 * key check or a unique recheck also carries a copy of the new row, so
+	 * that trigger sees OLD and NEW as of the event, as on heap.  Nothing
+	 * else is copied, and the copies lack system columns.  The AM must still
+	 * guarantee that:
+	 *
+	 * - a deleted row stays fetchable by its locator with SnapshotAny, with
+	 * the contents it had when deleted, until the deleting transaction ends.
+	 * The row has to survive an abort anyway; DELETE RETURNING, AFTER ROW
+	 * DELETE triggers, and deferred ones at COMMIT fetch it this way.
+	 *
+	 * - fetching a locator with SnapshotAny yields the row's current version.
+	 * Foreign key checks and unique rechecks fetch the new row by locator
+	 * when they fire, and their liveness tests with SnapshotSelf must see the
+	 * version current at that time, not the one the event was queued for.
 	 */
 	bool		old_version_retained;
 } LocatorDesc;
