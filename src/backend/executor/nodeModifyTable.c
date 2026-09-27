@@ -1755,7 +1755,7 @@ ldelete:
 					switch (result)
 					{
 						case TM_Ok:
-							Assert(context->tmfd.traversed);
+							Assert(context->tmfd.retargeted);
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
 												   resultRelInfo->ri_RangeTableIndex,
@@ -2517,7 +2517,7 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * Prepare for the update.  This includes BEFORE ROW triggers, so we're
 	 * done if it says we are.
 	 */
-	context->tmfd.traversed = false;
+	context->tmfd.retargeted = false;
 	if (!ExecUpdatePrologue(context, resultRelInfo, tupleid, oldtuple, slot, NULL))
 		return NULL;
 
@@ -2530,7 +2530,7 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * it seems preferable to always ensure that the contents of oldSlot are
 	 * correct.
 	 */
-	if (context->tmfd.traversed)
+	if (context->tmfd.retargeted)
 	{
 		if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
 										   tupleid,
@@ -2660,7 +2660,7 @@ redo_act:
 					switch (result)
 					{
 						case TM_Ok:
-							Assert(context->tmfd.traversed);
+							Assert(context->tmfd.retargeted);
 
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
