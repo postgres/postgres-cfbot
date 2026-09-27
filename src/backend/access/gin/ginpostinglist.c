@@ -130,51 +130,25 @@ encode_varbyte(uint64 val, unsigned char **ptr)
  * Decode varbyte-encoded integer at *ptr. *ptr is incremented to next integer.
  */
 static uint64
-decode_varbyte(unsigned char **ptr)
+decode_varbyte(unsigned char **ptr, unsigned char *endptr)
 {
-	uint64		val;
+	uint64		val = 0;
 	unsigned char *p = *ptr;
-	uint64		c;
 
-	/* 1st byte */
-	c = *(p++);
-	val = c & 0x7F;
-	if (c & 0x80)
+	for (int i = 0;; i++)
 	{
-		/* 2nd byte */
+		uint64		c;
+
+		if (p >= endptr || i >= MaxBytesPerInteger)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("corrupted GIN posting list")));
+
 		c = *(p++);
-		val |= (c & 0x7F) << 7;
-		if (c & 0x80)
-		{
-			/* 3rd byte */
-			c = *(p++);
-			val |= (c & 0x7F) << 14;
-			if (c & 0x80)
-			{
-				/* 4th byte */
-				c = *(p++);
-				val |= (c & 0x7F) << 21;
-				if (c & 0x80)
-				{
-					/* 5th byte */
-					c = *(p++);
-					val |= (c & 0x7F) << 28;
-					if (c & 0x80)
-					{
-						/* 6th byte */
-						c = *(p++);
-						val |= (c & 0x7F) << 35;
-						if (c & 0x80)
-						{
-							/* 7th byte, should not have continuation bit */
-							c = *(p++);
-							val |= c << 42;
-							Assert((c & 0x80) == 0);
-						}
-					}
-				}
-			}
-		}
+		val |= (c & 0x7F) << (7 * i);
+
+		if ((c & 0x80) == 0)
+			break;
 	}
 
 	*ptr = p;
@@ -338,7 +312,7 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 				result = repalloc_array(result, ItemPointerData, nallocated);
 			}
 
-			val += decode_varbyte(&ptr);
+			val += decode_varbyte(&ptr, endptr);
 
 			uint64_to_itemptr(val, &result[ndecoded]);
 			ndecoded++;
