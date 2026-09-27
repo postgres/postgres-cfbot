@@ -990,7 +990,8 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 	bool		skip_tuple = false;
 	Relation	rel = resultRelInfo->ri_RelationDesc;
 	ItemPointer tid = &(searchslot->tts_tid);
-	Bitmapset  *modified_idx_attrs;
+	Bitmapset  *modified_idx_attrs = NULL;
+	bool		row_moved = false;
 
 	/*
 	 * Relations that must not be a logical replication target are rejected
@@ -1013,7 +1014,6 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 	if (!skip_tuple)
 	{
 		List	   *recheckIndexes = NIL;
-		bool		row_moved;
 		List	   *conflictindexes;
 		bool		conflict = false;
 
