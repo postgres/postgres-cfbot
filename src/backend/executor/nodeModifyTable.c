@@ -108,6 +108,13 @@ typedef struct ModifyTableContext
 	TM_FailureData tmfd;
 
 	/*
+	 * True once this command has locked the row at tupleid.  The table AM is
+	 * then told that tupleid names the locked version, not the one visible to
+	 * the snapshot (see TUPLE_LOCK_FLAG_LOCKED_VERSION).
+	 */
+	bool		rowLocked;
+
+	/*
 	 * The tuple deleted when doing a cross-partition UPDATE with a RETURNING
 	 * clause that refers to OLD columns (converted to the root's tuple
 	 * descriptor).
@@ -1499,14 +1506,26 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_delete_before_row)
 	{
+		bool		ok;
+
 		/* Flush any pending inserts, so rows are visible to the triggers */
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
 
-		return ExecBRDeleteTriggers(context->estate, context->epqstate,
-									resultRelInfo, tupleid, oldtuple,
-									epqreturnslot, result, &context->tmfd,
-									context->mtstate->operation == CMD_MERGE);
+		ok = ExecBRDeleteTriggers(context->estate, context->epqstate,
+								  resultRelInfo, tupleid, oldtuple,
+								  epqreturnslot, result, &context->tmfd,
+								  context->mtstate->operation == CMD_MERGE,
+								  context->rowLocked);
+
+		/*
+		 * trigger.c has locked the row, possibly a newer version that it
+		 * hands back for the caller to retry with even though ok is false,
+		 * unless it reports the row gone, in which case the caller abandons
+		 * it.
+		 */
+		context->rowLocked = true;
+		return ok;
 	}
 
 	return true;
@@ -1528,6 +1547,8 @@ ExecDeleteAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 
 	if (changingPart)
 		options |= TABLE_DELETE_CHANGING_PARTITION;
+	if (context->rowLocked)
+		options |= TABLE_DELETE_LOCKED_VERSION;
 
 	return table_tuple_delete(resultRelInfo->ri_RelationDesc, tupleid,
 							  estate->es_output_cid,
@@ -1763,6 +1784,8 @@ ldelete:
 							if (TupIsNull(epqslot))
 								/* Tuple not passing quals anymore, exiting... */
 								return NULL;
+
+							context->rowLocked = true;
 
 							/*
 							 * If requested, skip delete and pass back the
@@ -2147,14 +2170,21 @@ ExecUpdatePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_update_before_row)
 	{
+		bool		ok;
+
 		/* Flush any pending inserts, so rows are visible to the triggers */
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
 
-		return ExecBRUpdateTriggers(context->estate, context->epqstate,
-									resultRelInfo, tupleid, oldtuple, slot,
-									result, &context->tmfd,
-									context->mtstate->operation == CMD_MERGE);
+		ok = ExecBRUpdateTriggers(context->estate, context->epqstate,
+								  resultRelInfo, tupleid, oldtuple, slot,
+								  result, &context->tmfd,
+								  context->mtstate->operation == CMD_MERGE,
+								  context->rowLocked);
+
+		/* As in ExecDeletePrologue */
+		context->rowLocked = true;
+		return ok;
 	}
 
 	return true;
@@ -2337,7 +2367,8 @@ lreplace:
 	 */
 	result = table_tuple_update(resultRelationDesc, tupleid, slot,
 								estate->es_output_cid,
-								0,
+								context->rowLocked ?
+								TABLE_UPDATE_LOCKED_VERSION : 0,
 								estate->es_snapshot,
 								estate->es_crosscheck_snapshot,
 								true /* wait for commit */ ,
@@ -2692,6 +2723,7 @@ redo_act:
 								elog(ERROR, "failed to fetch tuple being updated");
 							slot = ExecGetUpdateNewTuple(resultRelInfo,
 														 epqslot, oldSlot);
+							context->rowLocked = true;
 							goto redo_act;
 
 						case TM_Deleted:
@@ -2789,7 +2821,8 @@ ExecOnConflictLockRow(ModifyTableContext *context,
 	test = table_tuple_lock(relation, conflictTid,
 							context->estate->es_snapshot,
 							existing, context->estate->es_output_cid,
-							lockmode, LockWaitBlock, 0,
+							lockmode, LockWaitBlock,
+							TUPLE_LOCK_FLAG_LOCKED_VERSION,
 							&tmfd);
 	switch (test)
 	{
@@ -2989,6 +3022,7 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	 */
 
 	/* Execute UPDATE with projection */
+	context->rowLocked = true;
 	*returning = ExecUpdate(context, resultRelInfo,
 							conflictTid, NULL, existing,
 							resultRelInfo->ri_onConflict->oc_ProjSlot,
@@ -3705,6 +3739,7 @@ lmerge_matched:
 							 * Loop back and process the MATCHED or NOT
 							 * MATCHED BY SOURCE actions from the start.
 							 */
+							context->rowLocked = true;
 							goto lmerge_matched;
 
 						case TM_Deleted:
@@ -4480,6 +4515,7 @@ ExecModifyTable(PlanState *pstate)
 		{
 			context.planSlot = node->mt_merge_pending_not_matched;
 			context.cpDeletedSlot = NULL;
+			context.rowLocked = false;
 
 			slot = ExecMergeNotMatched(&context, node->resultRelInfo,
 									   node->canSetTag);
@@ -4500,6 +4536,7 @@ ExecModifyTable(PlanState *pstate)
 		/* Fetch the next row from subplan */
 		context.planSlot = ExecProcNode(subplanstate);
 		context.cpDeletedSlot = NULL;
+		context.rowLocked = false;
 
 		/* No more tuples to process? */
 		if (TupIsNull(context.planSlot))

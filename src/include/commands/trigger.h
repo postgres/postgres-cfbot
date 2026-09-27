@@ -216,7 +216,8 @@ extern bool ExecBRDeleteTriggers(EState *estate,
 								 TupleTableSlot **epqslot,
 								 TM_Result *tmresult,
 								 TM_FailureData *tmfd,
-								 bool is_merge_delete);
+								 bool is_merge_delete,
+								 bool row_locked);
 extern void ExecARDeleteTriggers(EState *estate,
 								 ResultRelInfo *relinfo,
 								 ItemPointer tupleid,
@@ -239,7 +240,8 @@ extern bool ExecBRUpdateTriggers(EState *estate,
 								 TupleTableSlot *newslot,
 								 TM_Result *tmresult,
 								 TM_FailureData *tmfd,
-								 bool is_merge_update);
+								 bool is_merge_update,
+								 bool row_locked);
 extern void ExecARUpdateTriggers(EState *estate,
 								 ResultRelInfo *relinfo,
 								 ResultRelInfo *src_partinfo,

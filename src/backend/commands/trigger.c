@@ -82,6 +82,7 @@ static bool GetTupleForTrigger(EState *estate,
 							   LockTupleMode lockmode,
 							   TupleTableSlot *oldslot,
 							   bool do_epq_recheck,
+							   bool row_locked,
 							   TupleTableSlot **epqslot,
 							   TM_Result *tmresultp,
 							   TM_FailureData *tmfdp);
@@ -2746,7 +2747,8 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 					 TupleTableSlot **epqslot,
 					 TM_Result *tmresult,
 					 TM_FailureData *tmfd,
-					 bool is_merge_delete)
+					 bool is_merge_delete,
+					 bool row_locked)
 {
 	TupleTableSlot *slot = ExecGetTriggerOldSlot(estate, relinfo);
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
@@ -2771,7 +2773,8 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 		 */
 		if (!GetTupleForTrigger(estate, epqstate, relinfo, tupleid,
 								LockTupleExclusive, slot, !is_merge_delete,
-								&epqslot_candidate, tmresult, tmfd))
+								row_locked, &epqslot_candidate, tmresult,
+								tmfd))
 			return false;
 
 		/*
@@ -2870,6 +2873,7 @@ ExecARDeleteTriggers(EState *estate,
 							   tupleid,
 							   LockTupleExclusive,
 							   slot,
+							   false,
 							   false,
 							   NULL,
 							   NULL,
@@ -3016,7 +3020,8 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 					 TupleTableSlot *newslot,
 					 TM_Result *tmresult,
 					 TM_FailureData *tmfd,
-					 bool is_merge_update)
+					 bool is_merge_update,
+					 bool row_locked)
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	TupleTableSlot *oldslot = ExecGetTriggerOldSlot(estate, relinfo);
@@ -3047,7 +3052,8 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 		 */
 		if (!GetTupleForTrigger(estate, epqstate, relinfo, tupleid,
 								lockmode, oldslot, !is_merge_update,
-								&epqslot_candidate, tmresult, tmfd))
+								row_locked, &epqslot_candidate, tmresult,
+								tmfd))
 			return false;		/* cancel the update action */
 
 		/*
@@ -3232,6 +3238,7 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 							   LockTupleExclusive,
 							   oldslot,
 							   false,
+							   false,
 							   NULL,
 							   NULL,
 							   NULL);
@@ -3389,6 +3396,7 @@ GetTupleForTrigger(EState *estate,
 				   LockTupleMode lockmode,
 				   TupleTableSlot *oldslot,
 				   bool do_epq_recheck,
+				   bool row_locked,
 				   TupleTableSlot **epqslot,
 				   TM_Result *tmresultp,
 				   TM_FailureData *tmfdp)
@@ -3411,6 +3419,8 @@ GetTupleForTrigger(EState *estate,
 		 */
 		if (!IsolationUsesXactSnapshot())
 			lockflags |= TUPLE_LOCK_FLAG_FIND_LAST_VERSION;
+		if (row_locked)
+			lockflags |= TUPLE_LOCK_FLAG_LOCKED_VERSION;
 		test = table_tuple_lock(relation, tid, estate->es_snapshot, oldslot,
 								estate->es_output_cid,
 								lockmode, LockWaitBlock,
