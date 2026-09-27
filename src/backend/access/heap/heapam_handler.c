@@ -2659,6 +2659,7 @@ static const LocatorDesc heapam_locator_desc = {
 	.width = sizeof(ItemPointerData),
 	.name = "tid",
 	.stable = false,
+	.old_version_retained = true,
 	.bitmap_and_inexact = NULL,
 };
 

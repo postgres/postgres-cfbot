@@ -7,9 +7,11 @@
  * the table access method to identify the row the entry describes.  Heap's
  * locator is an ItemPointerData, and several parts of the system rely on
  * properties of that particular locator.  Bitmap scans split it into a block
- * and an offset.  TID range scans expose its ordering to SQL.  A table AM
- * whose rows are located differently would break those assumptions without
- * any way to say so.
+ * and an offset.  TID range scans expose its ordering to SQL.  The
+ * after-trigger queue records a row's locator during an UPDATE and fetches the
+ * pre-update row through it later.  A table AM whose rows are located
+ * differently, or that overwrites rows in place, would break those assumptions
+ * without any way to say so.
  *
  * The locator descriptor lets a table AM state these properties, and lets the
  * code that depends on one test it.  A table AM returns a descriptor for each
@@ -55,6 +57,15 @@ typedef struct LocatorDesc
 	 * see TM_FailureData.retargeted.
 	 */
 	bool		stable;
+
+	/*
+	 * Is the pre-update version of a row still fetchable through its locator
+	 * after the UPDATE that replaced it?  Heap keeps the old version on its
+	 * page until VACUUM, so it is.  An AM that overwrites rows in place says
+	 * false, and code that needs the old image after the write must capture it
+	 * first; see RelationUpdatesInPlace().
+	 */
+	bool		old_version_retained;
 
 	/*
 	 * A bitmap scan splits every locator into a group and a slot within it;

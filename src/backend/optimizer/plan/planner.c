@@ -46,6 +46,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
+#include "access/tableam.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
@@ -2834,9 +2835,13 @@ select_rowmark_type(RangeTblEntry *rte, LockClauseStrength strength)
 			case LCS_NONE:
 
 				/*
-				 * We don't need a tuple lock, only the ability to re-fetch
-				 * the row.
+				 * We only need to be able to re-fetch the row.  An AM that
+				 * overwrites rows in place cannot re-fetch the version an
+				 * EvalPlanQual recheck first joined, so carry the whole row as
+				 * we do for a foreign table; otherwise a reference suffices.
 				 */
+				if (RelationIdUpdatesInPlace(rte->relid))
+					return ROW_MARK_COPY;
 				return ROW_MARK_REFERENCE;
 				break;
 			case LCS_FORKEYSHARE:

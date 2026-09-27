@@ -969,6 +969,14 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		if (rel->rd_rel->relispartition)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
+		/*
+		 * The conflict report and AFTER ROW triggers below read searchslot
+		 * after the update.  If the table's AM overwrites rows in place, copy
+		 * the old row out of the page first.
+		 */
+		if (RelationUpdatesInPlace(rel))
+			ExecMaterializeSlot(searchslot);
+
 		simple_table_tuple_update(rel, tid, slot, estate->es_snapshot,
 								  &update_indexes);
 
@@ -1000,7 +1008,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		/* AFTER ROW UPDATE Triggers */
 		ExecARUpdateTriggers(estate, resultRelInfo,
 							 NULL, NULL,
-							 tid, NULL, slot,
+							 tid, NULL, searchslot, slot,
 							 recheckIndexes, NULL, false);
 
 		list_free(recheckIndexes);

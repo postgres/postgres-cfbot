@@ -47,6 +47,7 @@ AssertCouldGetRelation(void)
 #endif
 extern Relation RelationIdGetRelation(Oid relationId);
 extern void RelationClose(Relation relation);
+extern bool RelationIdUpdatesInPlace(Oid relationId);
 
 /*
  * Routines to compute/retrieve additional cached information
