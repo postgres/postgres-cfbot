@@ -323,14 +323,8 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("corrupted GIN posting list")));
 
-		/* enlarge output array if needed */
-		if (ndecoded >= nallocated)
-		{
-			nallocated *= 2;
-			result = repalloc_array(result, ItemPointerData, nallocated);
-		}
-
 		/* copy the first item */
+		Assert(ndecoded < nallocated);
 		result[ndecoded] = segment->first;
 		ndecoded++;
 
@@ -340,13 +334,6 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 		endptr = segment->bytes + segment->nbytes;
 		while (ptr < endptr)
 		{
-			/* enlarge output array if needed */
-			if (ndecoded >= nallocated)
-			{
-				nallocated *= 2;
-				result = repalloc_array(result, ItemPointerData, nallocated);
-			}
-
 			val += decode_varbyte(&ptr, endptr);
 
 			/*
@@ -361,6 +348,7 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 						 errmsg("corrupted GIN posting list")));
 			prev = val;
 
+			Assert(ndecoded < nallocated);
 			uint64_to_itemptr(val, &result[ndecoded]);
 			ndecoded++;
 		}
