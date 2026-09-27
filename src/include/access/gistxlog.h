@@ -18,17 +18,24 @@
 #include "lib/stringinfo.h"
 
 #define XLOG_GIST_PAGE_UPDATE		0x00
-#define XLOG_GIST_DELETE			0x10	/* delete leaf index tuples for a
-											 * page */
+#define XLOG_GIST_DELETE			0x10	/* delete leaf index tuples marked
+											 * as LP_DEAD during normal index
+											 * tuple insertion */
 #define XLOG_GIST_PAGE_REUSE		0x20	/* old page is about to be reused
 											 * from FSM */
 #define XLOG_GIST_PAGE_SPLIT		0x30
- /* #define XLOG_GIST_INSERT_COMPLETE	 0x40 */	/* not used anymore */
+#define XLOG_GIST_PAGE_VACUUM		0x40	/* delete leaf index tuples during
+											 * VACUUM */
  /* #define XLOG_GIST_CREATE_INDEX		 0x50 */	/* not used anymore */
 #define XLOG_GIST_PAGE_DELETE		0x60
  /* #define XLOG_GIST_ASSIGN_LSN		 0x70 */	/* not used anymore */
 
 /*
+ * Used by both XLOG_GIST_PAGE_UPDATE and XLOG_GIST_PAGE_VACUUM.  VACUUM only
+ * ever deletes tuples (ntoinsert is 0, and there is no left child), but the
+ * page-level changes are otherwise the same; the records differ only in that
+ * replaying a VACUUM record takes a cleanup lock on the target page.
+ *
  * Backup Blk 0: updated page.
  * Backup Blk 1: If this operation completes a page split, by inserting a
  *				 downlink for the split page, the left half of the split
