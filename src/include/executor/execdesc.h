@@ -45,7 +45,7 @@ typedef struct QueryDesc
 	int			query_instr_options;	/* OR of InstrumentOption flags for
 										 * query_instr */
 
-	/* These fields are set by ExecutorStart */
+	/* These fields are set by ExecutorStart or ExecutorPrep */
 	TupleDesc	tupDesc;		/* descriptor for result tuples */
 	EState	   *estate;			/* executor's query-wide state */
 	PlanState  *planstate;		/* tree of per-plan-node state */
