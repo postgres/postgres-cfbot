@@ -275,7 +275,7 @@ heapam_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 	bool		follow_updates;
 
 	follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
-	tmfd->traversed = false;
+	tmfd->retargeted = false;
 
 	Assert(TTS_IS_BUFFERTUPLE(slot));
 
@@ -303,7 +303,7 @@ tuple_lock_retry:
 			priorXmax = tmfd->xmax;
 
 			/* signal that a tuple later in the chain is getting locked */
-			tmfd->traversed = true;
+			tmfd->retargeted = true;
 
 			/*
 			 * fetch target tuple

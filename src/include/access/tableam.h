@@ -148,7 +148,7 @@ typedef enum TU_UpdateIndexes
  * because the target tuple is already outdated, they fill in this struct to
  * provide information to the caller about what happened. When those functions
  * succeed, the contents of this struct should not be relied upon, except for
- * `traversed`, which may be set in both success and failure cases.
+ * `retargeted`, which may be set in both success and failure cases.
  *
  * ctid is the target's ctid link: it is the same as the target's TID if the
  * target was deleted, or the location of the replacement tuple if the target
@@ -165,15 +165,22 @@ typedef enum TU_UpdateIndexes
  * HeapTupleHeaderGetCmax doesn't work for tuples outdated in other
  * transactions.)
  *
- * traversed indicates if an update chain was followed in order to try to lock
- * the target tuple.  (This may be set in both success and failure cases.)
+ * retargeted is set when table_tuple_lock(), asked to find the last version,
+ * locks a later version of the row than the caller named, because a
+ * concurrent transaction updated the row and committed.  *tid then holds the
+ * locator of the version that was locked, and the caller must re-evaluate the
+ * row (run EvalPlanQual, or recheck the key it searched for) before acting on
+ * what it read earlier.  (This may be set in both success and failure cases.)
+ *
+ * For heap, the named version is the one at *tid, and a later version is
+ * reached by following the update chain to a different TID.
  */
 typedef struct TM_FailureData
 {
 	ItemPointerData ctid;
 	TransactionId xmax;
 	CommandId	cmax;
-	bool		traversed;
+	bool		retargeted;
 } TM_FailureData;
 
 /*
@@ -1740,9 +1747,10 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  *
  * In the failure cases other than TM_Invisible and TM_Deleted, the routine
  * fills *tmfd with the tuple's t_ctid, t_xmax, and, if possible, t_cmax.
- * Additionally, in both success and failure cases, tmfd->traversed is set if
- * an update chain was followed.  See comments for struct TM_FailureData for
- * additional info.
+ * Additionally, in both success and failure cases, tmfd->retargeted is set if
+ * TUPLE_LOCK_FLAG_FIND_LAST_VERSION led to locking a later version of the row
+ * than the caller named, which the caller must then re-evaluate; *tid holds
+ * the locator of the version that was locked.  See comments for struct TM_FailureData for additional info.
  */
 static inline TM_Result
 table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
