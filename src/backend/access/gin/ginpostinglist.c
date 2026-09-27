@@ -287,6 +287,19 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 	ndecoded = 0;
 	while ((char *) segment < endseg)
 	{
+		/*
+		 * Reject a segment that runs past the end of the posting list.
+		 * Compare sizes rather than forming segment +
+		 * SizeOfGinPostingList(segment), which would be an out-of-bounds
+		 * pointer.  The header is tested before nbytes is read, and the loop
+		 * condition keeps endseg - segment positive for the unsigned cast.
+		 */
+		if (offsetof(GinPostingList, bytes) > (Size) (endseg - (char *) segment) ||
+			SizeOfGinPostingList(segment) > (Size) (endseg - (char *) segment))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("corrupted GIN posting list")));
+
 		/* enlarge output array if needed */
 		if (ndecoded >= nallocated)
 		{
