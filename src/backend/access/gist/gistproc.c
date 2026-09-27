@@ -1356,6 +1356,17 @@ computeDistance(bool isLeaf, BOX *box, Point *point)
 	return result;
 }
 
+/*
+ * computeDistance() places the point in one of the regions around the box,
+ * which a NaN in either of them makes impossible.  Callers use 0 instead, the
+ * only lower bound that is always safe.
+ */
+static inline bool
+distance_has_nan(const BOX *box, const Point *point)
+{
+	return box_has_nan(box) || isnan(point->x) || isnan(point->y);
+}
+
 static bool
 gist_point_consistent_internal(StrategyNumber strategy,
 							   bool isLeaf, BOX *key, Point *query)
@@ -1566,8 +1577,10 @@ gist_point_distance(PG_FUNCTION_ARGS)
 	switch (strategyGroup)
 	{
 		case PointStrategyNumberGroup:
-			/* A NaN internal key tells us nothing, see box_has_nan() */
-			if (nan_internal_key(entry))
+			/* Leaf keys are points, which point_distance() handles */
+			if (!GIST_LEAF(entry) &&
+				distance_has_nan(DatumGetBoxP(entry->key),
+								 PG_GETARG_POINT_P(1)))
 				distance = 0.0;
 			else
 				distance = computeDistance(GIST_LEAF(entry),
@@ -1592,8 +1605,8 @@ gist_bbox_distance(GISTENTRY *entry, Datum query, StrategyNumber strategy)
 	switch (strategyGroup)
 	{
 		case PointStrategyNumberGroup:
-			/* A NaN internal key tells us nothing, see box_has_nan() */
-			if (nan_internal_key(entry))
+			if (distance_has_nan(DatumGetBoxP(entry->key),
+								 DatumGetPointP(query)))
 				distance = 0.0;
 			else
 				distance = computeDistance(false,
@@ -1621,6 +1634,15 @@ gist_box_distance(PG_FUNCTION_ARGS)
 	float8		distance;
 
 	distance = gist_bbox_distance(entry, query, strategy);
+
+	/*
+	 * A leaf key is the indexed box, so its distance must be exact.  0 is
+	 * not, and index-only scans cannot recheck, so ask the operator.
+	 */
+	if (GIST_LEAF(entry) &&
+		distance_has_nan(DatumGetBoxP(entry->key), DatumGetPointP(query)))
+		distance = DatumGetFloat8(DirectFunctionCall2(dist_bp,
+													  entry->key, query));
 
 	PG_RETURN_FLOAT8(distance);
 }
