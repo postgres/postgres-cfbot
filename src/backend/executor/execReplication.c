@@ -1000,7 +1000,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		/* AFTER ROW UPDATE Triggers */
 		ExecARUpdateTriggers(estate, resultRelInfo,
 							 NULL, NULL,
-							 tid, NULL, slot,
+							 tid, NULL, searchslot, slot,
 							 recheckIndexes, NULL, false);
 
 		list_free(recheckIndexes);
