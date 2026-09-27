@@ -22,30 +22,86 @@ The only in-core callers of the FileOps* API are:
   - copydir.c      (the destination tree of a directory copy)
 
 
-Two op classes: constructive (immediate) vs destructive (deferred)
-------------------------------------------------------------------
+When each operation takes effect, and what undoes it
+----------------------------------------------------
 
-CONSTRUCTIVE operations run IMMEDIATELY when the API is called, so the file
-or directory can be used within the same transaction, and each registers an
-abort-time undo action that reverses it if the transaction rolls back:
+The rule: everything that CREATES or CHANGES an object takes effect at once
+and is undone if the transaction aborts; DELETING an object is DEFERRED to
+transaction end, so nothing is ever destroyed that a rollback would need.
+
+  operation              takes effect      undone on abort by (*)
+  ---------------------  ----------------  ------------------------------
+  FileOpsCreate          now               unlink the file
+  FileOpsMkdir           now               rmdir the directory
+  FileOpsMkdirTree       now               remove the whole tree
+  FileOpsChmod / Chown   now               restore the old mode / owner
+  FileOpsTruncate        now               restore length and removed bytes
+  FileOpsWrite           now               restore the overwritten bytes
+  FileOpsSymlink / Link  now               unlink the link
+  FileOpsRename          now               rename back
+  FileOpsSetXattr /      now               restore the old value
+    FileOpsRemoveXattr
+  FileOpsDelete          at commit (**)    nothing to undo: not done yet
+  FileOpsRmdir /         at commit (**)    nothing to undo: not done yet
+    FileOpsRmdirRecursive
+
+  (*)  at wal_level >= replica, by the operation's UNDO record: on ROLLBACK,
+       ROLLBACK TO SAVEPOINT and ROLLBACK PREPARED (applied with the abort
+       record, which carries the inverses), on a standby replaying that
+       abort record, and by the startup undo phase for a transaction a crash
+       left in flight.  At wal_level = minimal, by an abort-time pending op
+       on ROLLBACK and ROLLBACK TO SAVEPOINT only (see below).
+  (**) or at abort, with at_commit = false.
+
+Each undo reverts only an object that still shows the operation's effect
+(fileops_undo_apply() in fileops_undo.c), so a name reused in the meantime is
+left alone.  Undo runs newest first, so an operation on a renamed file's new
+name is undone before the rename.
+
+
+Immediate operations
+--------------------
+
+These run when the API is called, so the file or directory can be used
+within the same transaction, and each registers an abort-time undo action
+that reverses it if the transaction rolls back:
 
   FileOpsCreate    -- create() now; UNDO/pending-delete on abort
   FileOpsMkdir     -- mkdir() now; UNDO rmdir on abort
+  FileOpsMkdirTree -- mkdir() now; UNDO removes the whole tree on abort
   FileOpsChmod     -- chmod() now; UNDO restore old mode on abort
   FileOpsChown     -- chown() now; UNDO restore old uid/gid on abort
   FileOpsTruncate  -- ftruncate() now; UNDO restore old length on abort
   FileOpsSymlink   -- symlink() now; UNDO unlink on abort
   FileOpsLink      -- link() now; UNDO unlink on abort
-  FileOpsWrite     -- pwrite() now (content, WAL-logged; no UNDO)
+  FileOpsRename    -- rename() now; UNDO rename back on abort
+  FileOpsWrite     -- pwrite() now (WAL-logged, bounded before-image UNDO)
   FileOpsSetXattr / FileOpsRemoveXattr -- now; UNDO restore old value on abort
 
-DESTRUCTIVE operations are DEFERRED: the API only records a PendingFileOp,
-and the filesystem is touched at transaction end:
+FileOpsRename(oldpath, newpath) renames a file or directory.  It never
+replaces newpath: an existing newpath is an ERROR (ERRCODE_DUPLICATE_FILE),
+as are a missing oldpath and a newpath on another filesystem, and each
+changes nothing.  Undoing a replacement would need the replaced object kept
+somewhere until the transaction ends, and no caller needs one.  The rename
+is reversed only while newpath exists and oldpath is free.  Like the undo of
+FileOpsCreate and FileOpsMkdir, that test looks at the paths alone: the
+device and inode of the object are not stable across a restore, a promoted
+standby, or redo that makes the object again, so ROLLBACK PREPARED on a
+promoted standby could not use them.
+Unlike the other immediate operations it writes and flushes its WAL and UNDO
+records BEFORE the rename() call, so a crash cannot lose the old name with
+nothing on record: a crash before the call is harmless, since redo makes the
+rename and the loser's UNDO reverses it.
 
-  FileOpsRename    -- deferred, always at_commit
+
+Deferred operations
+-------------------
+
+The deleting operations only record a PendingFileOp, and the filesystem is
+touched at transaction end:
+
   FileOpsDelete    -- deferred; at_commit chooses commit vs abort
   FileOpsRmdir / FileOpsRmdirRecursive -- deferred; at_commit
-  FileOpsRmtree    -- deferred; walked at execute time (copydir abort cleanup)
 
 FileOpsDoPendingOps(isCommit) runs the pending list at transaction end: the
 at_commit=true ops fire on commit, the at_commit=false ops fire on abort.
@@ -92,20 +148,34 @@ mechanisms, both on the COMMON WAL stream:
      fileops_undo_apply() in fileops_undo.c, registered through the UNDO rmgr
      registry (FileopsUndoRmgrInit), NOT through a WAL rm_cleanup callback.
 
-Deferred DESTRUCTIVE ops emit their forward WAL record at commit-EXECUTION
-time, inside FileOpsDoPendingOps() when the op actually happens on the
-primary, so a physical standby reproduces it by redo.  Their redo handlers
-are idempotent (delete of an already-absent file, rename whose source is
-gone, rmdir of an already-absent directory all count as success).  Only the
-commit path is logged; an at_commit=false delete/rmdir run during abort emits
-no WAL, because a standby must never apply an aborted transaction's effect.
+Deferred ops emit their forward WAL record at commit-EXECUTION time, inside
+FileOpsDoPendingOps() when the op actually happens on the primary, so a
+physical standby reproduces it by redo.  Their redo handlers are idempotent
+(delete of an already-absent file, rmdir of an already-absent directory both
+count as success).  Only the commit path is logged; an at_commit=false
+delete/rmdir run during abort emits no WAL, because a standby must never
+apply an aborted transaction's effect.
 
-Two deliberate exceptions:
+Redo replays each record onto the filesystem as it is now, which after a
+crash may already include later operations, and so it cannot tell a name
+reused later from the original.  This is a known limit of FILEOPS redo:
+making FILEOPS fully crash-atomic is future work (a resource manager that
+logs enough to replay against the state the record was made in).  Rename
+redo converges on the primary's state as far as the paths allow:
 
-  RMTREE (FileOpsRmtree) writes no WAL and has no redo.  Its only core caller
-  (copydir.c) registers it at_commit=false, so it fires only on ABORT to
-  clean up a partially-copied tree; aborts are never replayed as committed,
-  so it cannot diverge a standby.
+  - oldpath absent: the rename was made already; nothing to do.
+  - newpath absent: rename oldpath to newpath.
+  - both present: oldpath was made again by the replay of an earlier record
+    (the CREATE, MKDIR or LINK that made it since the checkpoint), or by a
+    later operation, and newpath is the later state.  Remove oldpath (a
+    directory only if it is empty) and keep newpath.  If oldpath is a
+    non-empty directory, leave both, with a WARNING.
+
+Renaming over newpath instead would lose data.  After a -> b, then b -> c,
+then a new b, with a older than the checkpoint, redo of b -> c finds the new
+b and c both present, and would put the new b in place of c.
+
+One deliberate exception:
 
   SYMLINK redo is an intentional no-op.  FileOpsSymlink is used only for
   tablespace symlinks; standby/crash-recovery replay of those is owned by
@@ -124,17 +194,15 @@ different backend after a crash between PREPARE and the final decision:
     at_commit=true op into the durable 2PC state.
 
   - The FILEOPS 2PC post-commit callback performs those deferred commit-time
-    ops (rename/delete/rmdir/rmtree), reusing the same per-op executor as
+    ops (delete/rmdir), reusing the same per-op executor as
     FileOpsDoPendingOps().  COMMIT PREPARED thus applies them; a crash before
     it re-drives them from the durable 2PC state.
 
-  - The abort-time ops (at_commit=false, the immediate constructive ops' undo)
-    are NOT serialized here.  They are reversed on ROLLBACK PREPARED by the
-    constructive op's cluster-wide UNDO record, handed to the async revert
-    machinery via ATMAddAborted() in FinishPreparedTransaction() -- the same
-    path a non-prepared abort uses.  Duplicating them in the 2PC record stream
-    would double-revert and race that async path.  The FILEOPS post-abort
-    callback is therefore effectively a no-op.
+  - The immediate ops' inverses are serialized separately, as one
+    FILEOPS_TWOPHASE_INVERSES record.  ROLLBACK PREPARED carries them in its
+    abort record and applies them before it releases the prepared
+    transaction's locks, as an ordinary abort does; COMMIT PREPARED ignores
+    them.  The FILEOPS post-abort callback is therefore effectively a no-op.
 
   - PostPrepare_FileOps() then discards this backend's in-memory list; the
     durable 2PC state (for commit-time ops) and the UNDO chain (for abort-time
@@ -155,19 +223,20 @@ transactional.
   register_delete (FileOpsCreate).  When true, the newly created file is
   registered for deletion if the transaction aborts.
 
-  at_commit (FileOpsDelete, FileOpsRmdir, FileOpsRmdirRecursive,
-  FileOpsRmtree).  at_commit = true removes on commit (dropping state the
-  transaction is logically deleting); at_commit = false removes only on abort
-  (cleaning up something the transaction just created, e.g. a copy tree).
+  at_commit (FileOpsDelete, FileOpsRmdir, FileOpsRmdirRecursive).
+  at_commit = true removes on commit (dropping state the transaction is
+  logically deleting); at_commit = false removes only on abort.
 
-FileOpsRmtree defers its tree walk to execute time (removing whatever ended
-up on disk by commit/abort), where FileOpsRmdirRecursive enumerates contents
-at registration time.
+FileOpsMkdirTree creates a directory that the transaction then fills by
+other means (smgr for CREATE DATABASE, copydir() for FILE_COPY and ALTER
+DATABASE SET TABLESPACE).  Its UNDO record and its abort-time pending op
+remove the whole tree, whatever ended up in it, where FileOpsMkdir's only
+rmdir() an empty directory.  For a database directory the UNDO first drops
+that database's shared buffers and pending fsync requests.
 
 The API hides platform differences: PG_O_DIRECT for unbuffered I/O,
-pg_fsync() for the correct per-platform flush, fsync_parent_path() for
-directory durability on Unix, and durable_rename()/durable_unlink() for
-crash-safe rename and unlink ordering.
+pg_fsync() for the correct per-platform flush, and fsync_parent_path() for
+directory durability on Unix.
 
 
 Transaction lifecycle integration
@@ -199,4 +268,5 @@ Tests: src/test/recovery/t/062_fileops_recovery.pl (crash recovery),
 063_fileops_2pc.pl (constructive-op 2PC via chmod),
 064_fileops_standby_divergence.pl (physical-standby convergence),
 061_fileops_2pc_deferred.pl (deferred commit-time ops through PREPARE +
-crash), and the test_fileops module's regression test.
+crash), and the test_fileops module's regression test and TAP tests
+(018_fileops_rename.pl covers FileOpsRename).

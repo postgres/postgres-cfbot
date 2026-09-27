@@ -275,34 +275,15 @@ $primary->stop;
 $node->stop;
 
 # ================================================================
-# Test 11/12: Crash exactly between WAL-flush and the physical syscall
-# for the write-ordering fix (FileOpsCreate, FileOpsChmod).
+# Test 11/12: Crash right after an immediate op's WAL is flushed, before
+# its transaction commits (FileOpsCreate, FileOpsChmod).
 #
-# Before the fix, these two functions ran the physical syscall (and, for
-# Create, the fsync) BEFORE the WAL record reached disk.  After the fix,
-# WAL/UNDO is durably flushed first, and only then does the physical
-# syscall run, inside a critical section.  These tests use injection
-# points to pause the backend in that exact window -- after XLogFlush(),
-# before open()/chmod() -- then hard-kill the postmaster.
-#
-# The injection point fires from inside the enclosing single-statement
-# implicit transaction, before that transaction's COMMIT record could be
-# written.  So crashing there means the transaction is, correctly,
-# recovered as never-committed: WAL redo physically replays the CREATE/
-# CHMOD unconditionally (redo does not know yet whether the surrounding
-# xact committed), and then crash recovery's abort processing applies the
-# UNDO record for that not-committed transaction, reversing the physical
-# change.  The end state must be as if the transaction never ran at all --
-# no orphaned file, no leftover mode change -- which is exactly the
-# invariant broken before this fix: with the syscall running before WAL,
-# a crash in this window used to leave a physical create()/chmod() with
-# NO corresponding WAL or UNDO record for recovery to reconcile against
-# (the syscall had already happened, but WAL/UNDO for it had not),
-# leaving a permanently orphaned file or an un-reversible mode change even
-# though the owning transaction never committed.  Now WAL/UNDO is always
-# durable before the syscall runs, so recovery always has a consistent
-# decision to make -- keep (if committed) or reverse (if not) -- no
-# matter which side of the syscall the crash lands on.
+# An immediate op makes its filesystem change first and then flushes its
+# WAL and UNDO records.  The injection points pause the backend just after
+# that flush, inside the still-open implicit transaction, and the postmaster
+# is then hard-killed.  Redo replays the change, and crash recovery applies
+# the UNDO of the never-committed transaction, so the end state must be as
+# if the transaction never ran: no orphaned file, no leftover mode change.
 # ================================================================
 
 if ($ENV{enable_injection_points} eq 'yes')
@@ -343,11 +324,9 @@ SELECT test_fileops_create('$create_path', 384);
 		$inode->wait_for_event('client backend',
 			'fileops-create-after-wal-flush');
 
-		# The WAL record is durably flushed, but the physical create() has
-		# not run yet -- the file must not exist on disk right now.
-		ok( !-e $create_path,
-			'Test 11: file does not exist yet at the injection point '
-			  . '(WAL durable, physical create() not yet run)');
+		# The file exists and its WAL is durable; the transaction is open.
+		ok(-e $create_path,
+			'Test 11: file exists at the injection point (WAL durable)');
 
 		# Hard-kill the postmaster from exactly this window.  The wrapping
 		# implicit transaction is still in progress (blocked on the
@@ -362,7 +341,7 @@ SELECT test_fileops_create('$create_path', 384);
 		# never run, with no orphaned state left behind by the crash.
 		ok( !-e $create_path,
 			'Test 11: FileOpsCreate of a not-committed transaction is '
-			  . 'cleanly reversed after a crash mid-critical-section');
+			  . 'reversed after a crash');
 
 		# Server is healthy after the reconciliation.
 		my $result11 = $inode->safe_psql('postgres', 'SELECT 1');
@@ -399,16 +378,15 @@ SELECT test_fileops_chmod('$chmod_path', 448);    -- 0700
 		$inode->wait_for_event('client backend',
 			'fileops-chmod-after-wal-flush');
 
-		# WAL is durably flushed, but chmod() has not run yet -- the mode
-		# on disk must still be the baseline 0644.
+		# chmod() has run and its WAL is durable; the transaction is open.
 		my $mode_at_injection = $inode->safe_psql('postgres',
 			qq{SELECT test_fileops_get_mode('$chmod_path')});
-		is($mode_at_injection, '420',
-				'Test 12: mode unchanged on disk at the injection point '
-			  . '(WAL durable, physical chmod() not yet run)');
+		is($mode_at_injection, '448',
+			'Test 12: mode changed on disk at the injection point (WAL durable)'
+		) if $posix_modes;
 
-		# Hard-kill mid-critical-section, same as Test 11.  The chmod's
-		# wrapping implicit transaction never committed.
+		# Hard-kill, same as Test 11.  The chmod's wrapping implicit
+		# transaction never committed.
 		$inode->stop('immediate');
 		$inode->start;
 
@@ -420,7 +398,8 @@ SELECT test_fileops_chmod('$chmod_path', 448);    -- 0700
 			qq{SELECT test_fileops_get_mode('$chmod_path')});
 		is($mode_after, '420',
 				'Test 12: FileOpsChmod of a not-committed transaction is '
-			  . 'cleanly reversed after a crash mid-critical-section');
+			  . 'reversed after a crash')
+		  if $posix_modes;
 
 		# Server is healthy after the reconciliation.
 		my $result12 = $inode->safe_psql('postgres', 'SELECT 1');

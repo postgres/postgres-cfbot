@@ -5,8 +5,9 @@
  *
  * This module provides transactional filesystem operations that are
  * WAL-logged and integrated with PostgreSQL's transaction management.
- * File operations are deferred until transaction commit/abort, ensuring
- * atomicity with the rest of the transaction.
+ * Constructive operations and renames take effect at once and are reversed
+ * if the transaction aborts; deletions are deferred to transaction end (see
+ * src/backend/storage/file/README).
  *
  * The RM_FILEOPS_ID resource manager handles WAL replay for these
  * operations, ensuring correct behavior during crash recovery and
@@ -70,19 +71,19 @@ typedef enum PendingFileOpType
 	PENDING_FILEOP_CHOWN,
 	PENDING_FILEOP_MKDIR,
 	PENDING_FILEOP_RMDIR,
-	PENDING_FILEOP_RMTREE,		/* recursive removal at execute time */
+	PENDING_FILEOP_RMTREE,		/* abort: remove a FileOpsMkdirTree() tree */
 	PENDING_FILEOP_SYMLINK,
 	PENDING_FILEOP_LINK,
 	PENDING_FILEOP_SETXATTR,
-	PENDING_FILEOP_REMOVEXATTR
+	PENDING_FILEOP_REMOVEXATTR,
+	PENDING_FILEOP_INVERSE
 } PendingFileOpType;
 
 typedef struct PendingFileOp
 {
 	PendingFileOpType type;		/* operation type */
 	char	   *path;			/* primary file path */
-	char	   *newpath;		/* new path (RENAME/SYMLINK/LINK), or xattr
-								 * name */
+	char	   *newpath;		/* old path to restore (RENAME), or xattr name */
 	off_t		length;			/* truncation length, write offset, or mode */
 	void	   *data;			/* generic data (e.g., original xattr value) */
 	size_t		data_len;		/* length of data */
@@ -100,8 +101,6 @@ typedef struct PendingFileOp
  *   - fsync: pg_fsync() (Linux fdatasync, macOS F_FULLFSYNC,
  *     BSD fsync, Windows FlushFileBuffers)
  *   - Directory sync: fsync_parent_path() (Unix only, no-op on Windows)
- *   - Durable ops: durable_rename()/durable_unlink() with proper
- *     fsync ordering for crash safety
  *
  * Operation-specific API functions are declared below their WAL
  * record structures in subsequent sections.
@@ -110,6 +109,21 @@ typedef struct PendingFileOp
 /* Utility functions */
 extern void FileOpsCancelPendingDelete(const char *path, bool at_commit);
 extern void FileOpsSync(const char *path);
+
+/* Abort WAL carries a length-prefixed sequence of inverse payloads. */
+#define FILEOPS_MAX_ABORT_BYTES (16 * 1024 * 1024)
+#define FILEOPS_MAX_DATA_BYTES (1024 * 1024)
+#define FILEOPS_TWOPHASE_INVERSES 1
+extern void FileOpsGetAbortData(char **data, uint32 *len);
+extern void FileOpsApplyAbort(const char *data, uint32 len);
+
+/* Scoped to a generic walk whose FILEOPS inverses belong to abort WAL. */
+extern PGDLLIMPORT bool FileOpsSkipUndo;
+extern void FileOpsApplyInverse(uint16 info, const char *data, uint32 len);
+extern void FileOpsReserveInverseSyncs(void);
+extern void FileOpsSyncInverses(int elevel);
+extern void FileOpsBeginAbort(void);
+extern void FileOpsEndAbort(void);
 
 /* Transaction lifecycle hooks */
 extern void FileOpsDoPendingOps(bool isCommit);
@@ -160,9 +174,9 @@ extern void FileOpsDelete(const char *path, bool at_commit);
 /*
  * xl_fileops_rename - WAL record for file rename
  *
- * Records that a file was renamed. Both old and new paths are stored
- * as variable-length data: oldpath_len bytes of old path, then the
- * new path follows.
+ * Records that a file or directory is being renamed; it is written before
+ * the rename is made.  Both old and new paths are stored as variable-length
+ * data: oldpath_len bytes of old path, then the new path follows.
  */
 typedef struct xl_fileops_rename
 {
@@ -172,7 +186,10 @@ typedef struct xl_fileops_rename
 
 #define SizeOfFileOpsRename (offsetof(xl_fileops_rename, oldpath_len) + sizeof(uint16))
 
-/* File rename API */
+/*
+ * File rename API: immediate, refuses an existing newpath, renamed back if
+ * the transaction aborts.
+ */
 extern int	FileOpsRename(const char *oldpath, const char *newpath);
 
 /*
@@ -202,12 +219,10 @@ extern int	FileOpsWrite(const char *path, off_t offset,
 typedef struct xl_fileops_truncate
 {
 	off_t		length;			/* new file length */
-	off_t		orig_length;	/* pre-truncate length (crash-revert
-								 * before-state) */
 	/* variable-length path follows */
 } xl_fileops_truncate;
 
-#define SizeOfFileOpsTruncate (offsetof(xl_fileops_truncate, orig_length) + sizeof(off_t))
+#define SizeOfFileOpsTruncate (offsetof(xl_fileops_truncate, length) + sizeof(off_t))
 
 /* File truncation API */
 extern void FileOpsTruncate(const char *path, off_t length);
@@ -248,10 +263,17 @@ extern int	FileOpsChown(const char *path, uid_t uid, gid_t gid);
 typedef struct xl_fileops_mkdir
 {
 	mode_t		mode;			/* directory permission mode */
+	uint16		flags;			/* FILEOPS_MKDIR_* */
 	/* variable-length path follows */
 } xl_fileops_mkdir;
 
-#define SizeOfFileOpsMkdir (offsetof(xl_fileops_mkdir, mode) + sizeof(mode_t))
+#define SizeOfFileOpsMkdir (offsetof(xl_fileops_mkdir, flags) + sizeof(uint16))
+
+/*
+ * The transaction fills the directory itself (with files FILEOPS does not
+ * track, e.g. through smgr), so undoing the mkdir removes the whole tree.
+ */
+#define FILEOPS_MKDIR_TREE		0x0001
 
 /*
  * xl_fileops_rmdir - WAL record for directory removal
@@ -266,20 +288,9 @@ typedef struct xl_fileops_rmdir
 
 /* Directory lifecycle API */
 extern int	FileOpsMkdir(const char *path, mode_t mode);
+extern int	FileOpsMkdirTree(const char *path, mode_t mode, Oid dboid);
 extern void FileOpsRmdir(const char *path, bool at_commit);
 extern void FileOpsRmdirRecursive(const char *path, bool at_commit);
-
-/*
- * FileOpsRmtree - schedule deferred recursive directory removal.
- *
- * Use this when the destination tree is empty (or nonexistent) at
- * registration time but is expected to contain files by the time of
- * commit or abort -- e.g., when registering the destination of an
- * in-progress copydir() for delete-on-abort.  Unlike
- * FileOpsRmdirRecursive, the tree walk is deferred to execute time,
- * so whatever ended up on disk gets removed.
- */
-extern void FileOpsRmtree(const char *path, bool at_commit);
 
 /*
  * xl_fileops_symlink - WAL record for symbolic link creation
@@ -359,8 +370,8 @@ extern void FileopsUndoRmgrInit(void);
 #define UNDO_RMID_FILEOPS	2
 
 /* FILEOPS UNDO subtypes (stored in urec_info) */
+#define FILEOPS_UNDO_WRITE           0x0002
 #define FILEOPS_UNDO_CREATE			0x0001
-#define FILEOPS_UNDO_RENAME			0x0002
 #define FILEOPS_UNDO_TRUNCATE		0x0003
 #define FILEOPS_UNDO_CHMOD			0x0004
 #define FILEOPS_UNDO_CHOWN			0x0005
@@ -369,83 +380,136 @@ extern void FileopsUndoRmgrInit(void);
 #define FILEOPS_UNDO_LINK			0x0008
 #define FILEOPS_UNDO_SETXATTR		0x0009
 #define FILEOPS_UNDO_REMOVEXATTR	0x000A
+#define FILEOPS_UNDO_RENAME			0x000B
 
 /*
  * FILEOPS UNDO payload structures
  *
  * These structs define the on-disk layout of UNDO record payloads for each
  * FILEOPS operation. Variable-length paths and data follow the fixed header.
+ *
+ * A chain can be walked more than once (an inline rollback that fails part
+ * way is handed whole to the logical revert worker, and so is a crash-recovery
+ * chain with a skipped record), and the object may have changed in between.
+ * So each payload also records what the operation left behind (its post-state),
+ * and fileops_undo_apply() reverts only an object still in that state.
  */
 
-/* CREATE undo payload: just the path to unlink */
+/* CREATE undo payload: the path to unlink, if it is still a regular file */
 typedef struct FileopsUndoCreate
 {
 	uint16		path_len;		/* including NUL */
 	/* followed by path */
 } FileopsUndoCreate;
 
-/* RENAME undo payload: oldpath and newpath for reverse rename */
-typedef struct FileopsUndoRename
+/* WRITE undo: path, before-image, then after-image. */
+typedef struct FileopsUndoWrite
 {
-	uint16		oldpath_len;
-	uint16		newpath_len;
-	/* followed by oldpath, then newpath */
-} FileopsUndoRename;
+	off_t		orig_length;
+	off_t		new_length;
+	off_t		offset;
+	uint32		before_len;
+	uint32		after_len;
+	uint16		path_len;
+}			FileopsUndoWrite;
 
-/* TRUNCATE undo payload: path + original length */
+/* TRUNCATE undo payload: path, followed by the bytes removed by a shrink. */
 typedef struct FileopsUndoTruncate
 {
 	off_t		orig_length;
+	off_t		new_length;
+	uint32		before_len;
 	uint16		path_len;
 	/* followed by path */
 } FileopsUndoTruncate;
 
-/* CHMOD undo payload: path + original mode */
+/* CHMOD undo payload: path + original and new mode */
 typedef struct FileopsUndoChmod
 {
 	mode_t		orig_mode;
+	mode_t		new_mode;
 	uint16		path_len;
 	/* followed by path */
 } FileopsUndoChmod;
 
-/* CHOWN undo payload: path + original uid/gid */
+/* CHOWN undo payload: path + original and new uid/gid */
 typedef struct FileopsUndoChown
 {
 	uid_t		orig_uid;
 	gid_t		orig_gid;
+	uid_t		new_uid;
+	gid_t		new_gid;
 	uint16		path_len;
 	/* followed by path */
 } FileopsUndoChown;
 
-/* MKDIR undo payload: just the path to rmdir */
+/*
+ * MKDIR undo payload: the path to rmdir, if it is still a directory.
+ *
+ * With FILEOPS_MKDIR_TREE the whole tree is removed instead, after dropping
+ * the shared buffers and pending fsync requests of database dboid (if valid),
+ * as a database directory's files are written through shared buffers.  Since
+ * that destroys whatever is in the tree, outside recovery it is done only
+ * while the path is still the directory created (dev, ino): a later walk of
+ * the chain must not remove a directory created again at the same path, e.g.
+ * by a retried ALTER DATABASE SET TABLESPACE.  Crash recovery cannot rely on
+ * the inode (redo on a standby or a restored backup creates the directory
+ * anew), and needs not: until the transaction's locks are gone no other
+ * transaction can have made that path.  Even so, the inode is evidence that
+ * the directory is ours, not proof.
+ */
 typedef struct FileopsUndoMkdir
 {
+	dev_t		dev;			/* the directory created */
+	ino_t		ino;
+	Oid			dboid;			/* database filling the tree, or InvalidOid */
+	uint16		flags;			/* FILEOPS_MKDIR_* */
 	uint16		path_len;
 	/* followed by path */
 } FileopsUndoMkdir;
 
-/* SYMLINK undo payload: just the linkpath to unlink */
+/* SYMLINK undo payload: the linkpath to unlink, if it still points to target */
 typedef struct FileopsUndoSymlink
 {
 	uint16		linkpath_len;
-	/* followed by linkpath */
+	uint16		target_len;
+	/* followed by linkpath, then target */
 } FileopsUndoSymlink;
 
-/* LINK undo payload: just the newpath to unlink */
+/* LINK undo payload: the newpath to unlink, if it is still the linked inode */
 typedef struct FileopsUndoLink
 {
+	dev_t		dev;			/* device and inode of the link source */
+	ino_t		ino;
 	uint16		newpath_len;
 	/* followed by newpath */
 } FileopsUndoLink;
 
-/* SETXATTR undo payload: path + name + original value (or empty if new) */
+/*
+ * RENAME undo payload: rename newpath back to oldpath, while newpath exists
+ * and oldpath does not.  Like CREATE and MKDIR, the test is the state of the
+ * two paths alone, not the device and inode of the object renamed: those are
+ * not stable across a restore, a promoted standby or redo that makes the
+ * object again, so ROLLBACK PREPARED on a promoted standby, for one, would
+ * take its own copy of the object for a different one and leave it renamed.
+ * The paths are evidence that the object is the one renamed, not proof.
+ */
+typedef struct FileopsUndoRename
+{
+	uint16		oldpath_len;	/* including NUL */
+	uint16		newpath_len;	/* including NUL */
+	/* followed by oldpath, then newpath */
+} FileopsUndoRename;
+
+/* SETXATTR undo payload: path + name + original value (if any) + new value */
 typedef struct FileopsUndoSetxattr
 {
 	uint16		path_len;
 	uint16		name_len;
 	uint32		orig_value_len; /* 0 if xattr didn't exist before */
+	uint32		new_value_len;
 	bool		had_value;		/* true if xattr existed before setxattr */
-	/* followed by path, name, original value (if had_value) */
+	/* followed by path, name, original value (if had_value), new value */
 } FileopsUndoSetxattr;
 
 /* REMOVEXATTR undo payload: path + name + removed value */

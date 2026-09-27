@@ -9,16 +9,41 @@
  * dbcommands.c, tablespace.c, and copydir.c.
  *
  * Two op classes:
- *   - CONSTRUCTIVE ops (create, mkdir, chmod, chown, truncate, symlink, link,
- *     write, setxattr) run IMMEDIATELY, and each registers an abort-time undo
- *     action (a common-WAL UNDO record plus, where relevant, a pending op)
- *     that reverses it on rollback.
- *   - DESTRUCTIVE ops (rename, delete, rmdir, rmtree) are DEFERRED: a
- *     PendingFileOp is recorded now and the filesystem is touched at
- *     transaction end by FileOpsDoPendingOps().
+ *   - IMMEDIATE ops (create, mkdir, chmod, chown, truncate, symlink, link,
+ *     rename, write, setxattr) take effect at once, and each registers an
+ *     abort-time undo action (a common-WAL UNDO record plus, where relevant,
+ *     a pending op) that reverses it on rollback.
+ *   - DESTRUCTIVE ops (delete, rmdir, rmtree) are DEFERRED: a PendingFileOp
+ *     is recorded now and the filesystem is touched at transaction end by
+ *     FileOpsDoPendingOps().
  *
  * WAL and UNDO are written only when XLogIsNeeded() (wal_level >= replica);
  * at wal_level = minimal there is no crash or 2PC safety.
+ *
+ * An immediate op performs its system call FIRST, outside any critical
+ * section, and WAL-logs itself only once the call has succeeded: the forward
+ * WAL record and its UNDO record are inserted and flushed together in a short
+ * critical section (fileops_log()).  So an ordinary filesystem error
+ * (permission denied, no space, ...) is a plain ERROR, as it is for the same
+ * call without FILEOPS, and a failed op leaves nothing in the WAL for redo or
+ * a standby to replay.
+ *
+ * This is NOT atomic.  Between the system call and the WAL flush there is a
+ * window in which the change is on disk with no record of it: a crash there
+ * leaves the change in place, unknown to redo, to a standby and to rollback,
+ * just as the bare system call would.  Nothing reverts it.  The
+ * opposite order (log, then act inside a critical section) closes that window
+ * only by turning every filesystem error into a PANIC.
+ *
+ * FileOpsRename() is the exception: there the window would lose the old name
+ * for good, so it logs first and renames after, outside the critical section.
+ * A failed rename() is still a plain ERROR, because its inverse renames back
+ * only while the new name exists and the old one does not (see there).
+ *
+ * Reverting checks the object at the recorded path before touching it (see
+ * fileops_undo.c), but a path, its type and, where recorded, its inode are
+ * evidence that the object is the one this transaction made, not proof:
+ * something else can have replaced it in between.
  *
  * The deferred-operations pattern works as follows:
  *   1. A destructive API call records a PendingFileOp entry in a linked list
@@ -40,8 +65,6 @@
  *     BSD fsync)
  *   - Directory sync: Uses fsync_fname()/fsync_parent_path() which
  *     handle directory fsync on Unix platforms (not needed on Windows)
- *   - Durable operations: Uses durable_rename()/durable_unlink() which
- *     ensure operations persist across crashes via proper fsync ordering
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -88,12 +111,14 @@
 #include "port/pg_xattr.h"
 #include "storage/fd.h"
 #include "storage/fileops.h"
+#include "storage/proc.h"
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 
 
 /* Head of the pending file operations linked list */
 static PendingFileOp *pendingFileOps = NULL;
+static Size inverseBytes = 0;
 
 static void FileOpsExecOne(PendingFileOp *pending, bool isCommit,
 						   XLogRecPtr *max_lsn);
@@ -125,6 +150,57 @@ fileops_fsync_parent(const char *fname, int elevel)
 
 		fsync_fname_ext(parentpath, true, true, elevel);
 	}
+}
+
+/*
+ * fileops_pathlen - Length of a path including its terminating NUL
+ *
+ * WAL and UNDO records store path lengths in a uint16 and the UNDO payload
+ * buffers are sized for MAXPGPATH, so refuse a longer path rather than
+ * truncate it (or overrun a buffer).  Called before the system call, so a
+ * refused path changes nothing.
+ */
+static int
+fileops_pathlen(const char *path)
+{
+	size_t		len = strlen(path) + 1;
+
+	/* Reserve room before any mutation; abort itself must never exceed WAL. */
+	if (inverseBytes + 4 * MAXPGPATH + 2 * FILEOPS_MAX_DATA_BYTES >
+		FILEOPS_MAX_ABORT_BYTES)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("too much transactional file operation undo data")));
+
+	if (len > MAXPGPATH)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("file operation path length %zu exceeds maximum %d",
+						len, MAXPGPATH)));
+	return (int) len;
+}
+
+/*
+ * fileops_log - WAL-log an immediate operation that has already succeeded
+ *
+ * The caller has made the filesystem change, prepared its UNDO record (if
+ * any, undo_ctx != NULL) with PrepareXactUndoData(), and registered the
+ * forward record's data after XLogBeginInsert().  Insert both and flush them
+ * through the end of the UNDO batch, so that a crash leaves either both or
+ * neither.  Only this is a critical section; see the file header comment.
+ */
+static void
+fileops_log(uint8 info, XactUndoContext *undo_ctx)
+{
+	START_CRIT_SECTION();
+	(void) XLogInsert(RM_FILEOPS_ID, info);
+	if (undo_ctx != NULL)
+	{
+		InsertXactUndoData(undo_ctx);
+		CleanupXactUndoInsertion(undo_ctx);
+	}
+	XLogFlush(XactLastRecEnd);
+	END_CRIT_SECTION();
 }
 
 /*
@@ -198,12 +274,96 @@ AddPendingFileOpWithData(PendingFileOpType type, const char *path,
 	MemoryContextSwitchTo(oldcxt);
 }
 
+/* Keep the same inverse for online abort, abort redo, and crash losers. */
+static void
+fileops_prepare_undo(XactUndoContext *ctx, char persistence, uint8 rmid,
+					 uint16 info, Oid reloid, const char *payload, Size len)
+{
+	AddPendingFileOpWithData(PENDING_FILEOP_INVERSE, "", NULL,
+							 info, payload, len, false);
+	inverseBytes += len + 2 * sizeof(uint32);
+	FileOpsReserveInverseSyncs();
+	PrepareXactUndoData(ctx, persistence, rmid, info, reloid, payload, len);
+}
+
+/* Serialize in execution (newest-first) order, without alignment assumptions. */
+void
+FileOpsGetAbortData(char **data, uint32 *len)
+{
+	PendingFileOp *p;
+	StringInfoData buf;
+	int			level = GetCurrentTransactionNestLevel();
+
+	*data = NULL;
+	*len = 0;
+	if (inverseBytes == 0)
+		return;
+	initStringInfo(&buf);
+	for (p = pendingFileOps; p; p = p->next)
+	{
+		uint32		info = p->length;
+		uint32		size = p->data_len;
+
+		if (p->type != PENDING_FILEOP_INVERSE || p->nestLevel < level)
+			continue;
+		appendBinaryStringInfo(&buf, &info, sizeof(info));
+		appendBinaryStringInfo(&buf, &size, sizeof(size));
+		appendBinaryStringInfo(&buf, p->data, size);
+	}
+	*data = buf.data;
+	*len = buf.len;
+}
+
+/*
+ * CreateCheckPoint waits for this flag after choosing its redo pointer.  Even
+ * though inverses ride in abort WAL, a checkpoint must not omit that record
+ * until the corresponding filesystem changes have been fsynced.  A database
+ * directory tree can make this interval long; there is no retry loop here.
+ */
+void
+FileOpsBeginAbort(void)
+{
+	MyProc->delayChkptFlags |= DELAY_CHKPT_START;
+}
+
+void
+FileOpsEndAbort(void)
+{
+	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
+}
+
+/* Apply the self-contained abort payload, also used during WAL replay. */
+void
+FileOpsApplyAbort(const char *data, uint32 len)
+{
+	while (len > 0)
+	{
+		uint32		info;
+		uint32		size;
+
+		if (len < 2 * sizeof(uint32))
+			elog(PANIC, "invalid FILEOPS abort payload");
+		memcpy(&info, data, sizeof(info));
+		memcpy(&size, data + sizeof(info), sizeof(size));
+		data += 2 * sizeof(uint32);
+		len -= 2 * sizeof(uint32);
+		if (size > len)
+			elog(PANIC, "invalid FILEOPS inverse length");
+		FileOpsApplyInverse(info, data, size);
+		data += size;
+		len -= size;
+	}
+	FileOpsSyncInverses(PANIC);
+}
+
 /*
  * FreePendingFileOp - Free a pending file operation entry
  */
 static void
 FreePendingFileOp(PendingFileOp *pending)
 {
+	if (pending->type == PENDING_FILEOP_INVERSE)
+		inverseBytes -= pending->data_len + 2 * sizeof(uint32);
 	if (pending->path)
 		pfree(pending->path);
 	if (pending->newpath)
@@ -276,100 +436,24 @@ FileOpsCancelPendingDelete(const char *path, bool at_commit)
  *   - macOS: F_NOCACHE fcntl applied after open()
  *   - Windows: FILE_FLAG_NO_BUFFERING (handled by port layer)
  *
- * Returns the file descriptor on success, or -1 on failure.
+ * Returns the file descriptor; failing to create the file is an ERROR.
  */
 int
 FileOpsCreate(const char *path, int flags, mode_t mode, bool register_delete)
 {
 	int			fd;
-	bool		need_wal = XLogIsNeeded();
-	xl_fileops_create xlrec;
-	int			pathlen = 0;
-	char		undo_payload[sizeof(FileopsUndoCreate) + MAXPGPATH];
-	XactUndoContext undo_ctx;
+	int			pathlen = fileops_pathlen(path);
 
 	Assert(!IsInParallelMode());
-
-	/*
-	 * Write-ahead ordering: the WAL record (and UNDO record) must be durably
-	 * on disk BEFORE the file is physically created.  Once that is true, the
-	 * create+fsync below is contractually obligated to happen -- a failure at
-	 * that point would leave a durable record of a creation that never
-	 * occurred, so it runs inside a critical section and any failure is
-	 * promoted to PANIC by the elog machinery (see errfinish() in elog.c).
-	 * This mirrors RelationTruncate() in catalog/storage.c and the (already
-	 * correct) FileOpsTruncate() below.
-	 */
-	if (need_wal)
-	{
-		FileopsUndoCreate *hdr = (FileopsUndoCreate *) undo_payload;
-
-		xlrec.flags = flags;
-		xlrec.mode = mode;
-		xlrec.register_delete = register_delete;
-
-		pathlen = (int) strlen(path) + 1;
-
-		/*
-		 * The path length is stored in a uint16 (hdr->path_len) and the
-		 * payload buffer is sized for MAXPGPATH.  Paths are MAXPGPATH-bounded
-		 * everywhere upstream, so this is defensive, but a
-		 * filesystem-mutation WAL record must never silently truncate an
-		 * over-long path into a uint16 -- fail loudly instead.
-		 */
-		if (pathlen > MAXPGPATH)
-			ereport(ERROR,
-					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("file operation path length %d exceeds maximum %d",
-							pathlen, MAXPGPATH)));
-
-		hdr->path_len = (uint16) pathlen;
-		memcpy(undo_payload + sizeof(FileopsUndoCreate), path, pathlen);
-
-		/*
-		 * PrepareXactUndoData() may palloc (first UNDO record of this
-		 * persistence level in the transaction allocates an UndoRecordSet),
-		 * so it must run before the critical section; palloc is forbidden
-		 * inside one.
-		 */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_CREATE,
-							InvalidOid, undo_payload,
-							sizeof(FileopsUndoCreate) + pathlen);
-
-		/*
-		 * Load the injection point cache entry before the critical section;
-		 * looking it up can palloc, which is forbidden once we
-		 * START_CRIT_SECTION.
-		 */
-		INJECTION_POINT_LOAD("fileops-create-after-wal-flush");
-	}
-
-	if (need_wal)
-		START_CRIT_SECTION();
-
-	if (need_wal)
-	{
-		XLogRecPtr	lsn;
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsCreate);
-		XLogRegisterData(path, pathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_CREATE);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		XLogFlush(lsn);
-
-		INJECTION_POINT_CACHED("fileops-create-after-wal-flush", NULL);
-	}
 
 	fd = OpenTransientFilePerm(path, flags | O_CREAT, mode);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", path)));
+
+	if (register_delete && !XLogIsNeeded())
+		AddPendingFileOp(PENDING_FILEOP_DELETE, path, NULL, 0, false);
 
 	if (enableFsync)
 	{
@@ -380,11 +464,31 @@ FileOpsCreate(const char *path, int flags, mode_t mode, bool register_delete)
 		fileops_fsync_parent(path, data_sync_elevel(ERROR));
 	}
 
-	if (need_wal)
-		END_CRIT_SECTION();
+	if (XLogIsNeeded())
+	{
+		xl_fileops_create xlrec;
+		char		undo_payload[sizeof(FileopsUndoCreate) + MAXPGPATH];
+		FileopsUndoCreate *hdr = (FileopsUndoCreate *) undo_payload;
+		XactUndoContext undo_ctx;
 
-	if (register_delete)
-		AddPendingFileOp(PENDING_FILEOP_DELETE, path, NULL, 0, false);
+		xlrec.flags = flags;
+		xlrec.mode = mode;
+		xlrec.register_delete = register_delete;
+
+		hdr->path_len = (uint16) pathlen;
+		memcpy(undo_payload + sizeof(FileopsUndoCreate), path, pathlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_CREATE,
+							 InvalidOid, undo_payload,
+							 sizeof(FileopsUndoCreate) + pathlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsCreate);
+		XLogRegisterData(path, pathlen);
+		fileops_log(XLOG_FILEOPS_CREATE, &undo_ctx);
+
+		INJECTION_POINT("fileops-create-after-wal-flush", NULL);
+	}
 
 	return fd;
 }
@@ -415,25 +519,141 @@ FileOpsDelete(const char *path, bool at_commit)
 }
 
 /*
- * FileOpsRename - Rename a file within a transaction
+ * FileOpsRename - Rename a file or directory within a transaction
  *
- * The rename is deferred to commit time. Uses durable_rename() internally
- * which handles all platform differences:
- *   - Unix: rename() with fsync of both old and new parent dirs
- *   - Windows: MoveFileEx(MOVEFILE_REPLACE_EXISTING) with retry
+ * Immediate execution: when this returns, newpath exists and oldpath does
+ * not, and the rename is reversed if the transaction or subtransaction
+ * aborts (rename back, while newpath exists and oldpath is free).  Unlike
+ * rename(2), it never replaces newpath: rolling back a
+ * replacement would need the replaced object kept somewhere, and no caller
+ * needs one.  An existing newpath, a missing oldpath and a newpath on another
+ * filesystem are each an ERROR that changes nothing.  The check that newpath
+ * is free is not atomic with the rename; callers serialize the use of a path,
+ * as they must for any FILEOPS operation.
+ *
+ * Unlike the other immediate operations, the WAL and UNDO records are
+ * written and flushed BEFORE the system call.  The other order would let a
+ * crash between rename() and the flush lose the old name for good, with
+ * nothing on record to undo it.  In this order a crash before rename() is
+ * harmless: redo performs the rename and the loser's UNDO reverses it.  If
+ * rename() fails after the WAL, it is an ERROR: the abort's inverse finds
+ * oldpath still in place and leaves it, and a standby that replayed the
+ * forward record reverses it when it replays the abort record.
+ *
+ * At wal_level = minimal nothing is logged, and an abort-time pending op
+ * renames the object back.
+ *
+ * On Windows, pgrename() retries MoveFileEx() while the file is in use.
+ *
+ * Returns 0; any failure is an ERROR.
  */
 int
 FileOpsRename(const char *oldpath, const char *newpath)
 {
+	int			oldpathlen = fileops_pathlen(oldpath);
+	int			newpathlen = fileops_pathlen(newpath);
+	struct stat st;
+	struct stat dst;
+	char		parent[MAXPGPATH];
+
 	Assert(!IsInParallelMode());
 
-	/*
-	 * WAL is emitted at commit-execution time in FileOpsDoPendingOps(), not
-	 * at registration, so the standby reproduces the rename via redo.
-	 */
-	AddPendingFileOp(PENDING_FILEOP_RENAME, oldpath, newpath, 0, true);
+	if (lstat(oldpath, &st) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", oldpath)));
+	if (lstat(newpath, &dst) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_FILE),
+				 errmsg("could not rename file \"%s\" to \"%s\": file already exists",
+						oldpath, newpath)));
+	if (errno != ENOENT)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", newpath)));
+	strlcpy(parent, newpath, sizeof(parent));
+	get_parent_directory(parent);
+	if (parent[0] == '\0')
+		strlcpy(parent, ".", sizeof(parent));
+	if (stat(parent, &dst) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat directory \"%s\": %m", parent)));
+	if (dst.st_dev != st.st_dev)
+	{
+		errno = EXDEV;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("could not rename file \"%s\" to \"%s\": %m",
+						oldpath, newpath)));
+	}
+
+	if (XLogIsNeeded())
+	{
+		xl_fileops_rename xlrec;
+		XactUndoContext undo_ctx;
+		char		payload[sizeof(FileopsUndoRename) + 2 * MAXPGPATH];
+		FileopsUndoRename *hdr = (FileopsUndoRename *) payload;
+
+		xlrec.oldpath_len = (uint16) oldpathlen;
+
+		hdr->oldpath_len = (uint16) oldpathlen;
+		hdr->newpath_len = (uint16) newpathlen;
+		memcpy(payload + sizeof(FileopsUndoRename), oldpath, oldpathlen);
+		memcpy(payload + sizeof(FileopsUndoRename) + oldpathlen, newpath,
+			   newpathlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_RENAME,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoRename) + oldpathlen +
+							 newpathlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsRename);
+		XLogRegisterData(oldpath, oldpathlen);
+		XLogRegisterData(newpath, newpathlen);
+		fileops_log(XLOG_FILEOPS_RENAME, &undo_ctx);
+
+		INJECTION_POINT("fileops-rename-after-wal-flush", NULL);
+	}
+	else
+	{
+		/* Registered first: it does nothing if the rename does not happen. */
+		AddPendingFileOp(PENDING_FILEOP_RENAME, newpath, oldpath, 0, false);
+	}
+
+	if (rename(oldpath, newpath) < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rename file \"%s\" to \"%s\": %m",
+						oldpath, newpath)));
+
+	if (enableFsync)
+	{
+		fileops_fsync_parent(newpath, data_sync_elevel(ERROR));
+		fileops_fsync_parent(oldpath, data_sync_elevel(ERROR));
+	}
 
 	return 0;
+}
+
+/* Capture a bounded range before changing it, including shrink tails. */
+static char *
+fileops_before_image(int fd, const char *path, off_t offset, Size len)
+{
+	char	   *data;
+
+	if (len > FILEOPS_MAX_DATA_BYTES)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("file operation before-image exceeds %d bytes",
+						FILEOPS_MAX_DATA_BYTES)));
+	data = palloc(len ? len : 1);
+	if (len && pg_pread(fd, data, len, offset) != len)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not read before-image of file \"%s\": %m", path)));
+	return data;
 }
 
 /*
@@ -442,14 +662,23 @@ FileOpsRename(const char *oldpath, const char *newpath)
  * Immediate execution, WAL-logged for crash recovery replay.
  * Uses pwrite() on POSIX. On Windows: SetFilePointerEx + WriteFile.
  *
- * Returns 0 on success, -1 on failure.
+ * Bounded before-images restore overwritten bytes and the original length.
+ *
+ * Returns 0; a failed write is an ERROR.
  */
 int
 FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 {
 	int			fd;
 	ssize_t		nbytes;
-	bool		need_wal = XLogIsNeeded();
+	int			pathlen = fileops_pathlen(path);
+	struct stat st;
+	char	   *before;
+	uint32		before_len;
+	char	   *payload;
+	Size		payload_len;
+	FileopsUndoWrite *hdr;
+	XactUndoContext undo_ctx;
 
 	Assert(!IsInParallelMode());
 
@@ -459,45 +688,56 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\" for writing: %m", path)));
 
-	/*
-	 * Write-ahead ordering: WAL must be durable before the physical write
-	 * that it describes.  There is no UNDO record here (unlike the other
-	 * Category-A operations) because FileOpsWrite has no "original value"
-	 * concept to restore on abort -- callers that need rollback protection
-	 * pair it with FileOpsCreate's delete-on-abort or FileOpsTruncate.  Once
-	 * the WAL record is flushed, the write+fsync below is contractually
-	 * obligated to happen; a failure at that point is escalated to PANIC by
-	 * the surrounding critical section (see errfinish() in elog.c), matching
-	 * FileOpsTruncate() below and RelationTruncate() in catalog/storage.c.
-	 */
-	if (need_wal)
+	if (offset < 0 || len > FILEOPS_MAX_DATA_BYTES ||
+		offset > PG_INT64_MAX - len)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("invalid or excessive transactional file write range")));
+	if (fstat(fd, &st) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", path)));
+	before_len = offset < st.st_size ? Min((off_t) len, st.st_size - offset) : 0;
+	before = fileops_before_image(fd, path, offset, before_len);
+	payload_len = sizeof(FileopsUndoWrite) + pathlen + before_len + len;
+	payload = palloc0(payload_len);
+	hdr = (FileopsUndoWrite *) payload;
+	hdr->orig_length = st.st_size;
+	hdr->new_length = Max(st.st_size, offset + len);
+	hdr->offset = offset;
+	hdr->before_len = before_len;
+	hdr->after_len = len;
+	hdr->path_len = pathlen;
+	memcpy(payload + sizeof(*hdr), path, pathlen);
+	memcpy(payload + sizeof(*hdr) + pathlen, before, before_len);
+	memcpy(payload + sizeof(*hdr) + pathlen + before_len, data, len);
+
+	/* Keep an inverse even if pwrite changes only part of the range. */
+	if (XLogIsNeeded())
 	{
-		xl_fileops_write xlrec;
-		int			pathlen;
-		XLogRecPtr	lsn;
-
-		pathlen = (int) strlen(path) + 1;
-
-		xlrec.offset = offset;
-		xlrec.len = len;
-		xlrec.path_len = (uint16) pathlen;
-
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsWrite);
-		XLogRegisterData(path, pathlen);
-		XLogRegisterData(data, len);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_WRITE);
-
-		XLogFlush(lsn);
+		(void) GetCurrentTransactionId();
+		AddPendingFileOpWithData(PENDING_FILEOP_INVERSE, "", NULL,
+								 FILEOPS_UNDO_WRITE, payload, payload_len, false);
+		inverseBytes += payload_len + 2 * sizeof(uint32);
 	}
 
-	nbytes = pg_pwrite(fd, data, len, offset);
+	nbytes = pg_pwrite(fd, data,
+					   IS_INJECTION_POINT_ATTACHED("fileops-write-short") ? len / 2 : len,
+					   offset);
 	if (nbytes != (ssize_t) len)
 	{
 		int			save_errno = errno;
 
+		/* Match the actual after-image, not the requested complete write. */
+		if (XLogIsNeeded())
+		{
+			FileopsUndoWrite *inverse = (FileopsUndoWrite *) pendingFileOps->data;
+
+			inverse->after_len = nbytes > 0 ? nbytes : 0;
+			inverse->new_length = nbytes > 0 ?
+				Max(st.st_size, offset + nbytes) : st.st_size;
+			pendingFileOps->data_len -= len - inverse->after_len;
+		}
 		CloseTransientFile(fd);
 		errno = save_errno;
 		ereport(ERROR,
@@ -517,14 +757,31 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
 				 errmsg("could not fsync file \"%s\" after write: %m", path)));
 	}
 
-	if (need_wal)
-		END_CRIT_SECTION();
-
 	if (CloseTransientFile(fd) != 0)
 		ereport(WARNING,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));
 
+	if (XLogIsNeeded())
+	{
+		xl_fileops_write xlrec;
+
+		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							UNDO_RMID_FILEOPS, FILEOPS_UNDO_WRITE,
+							InvalidOid, payload, payload_len);
+		xlrec.offset = offset;
+		xlrec.len = len;
+		xlrec.path_len = (uint16) pathlen;
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsWrite);
+		XLogRegisterData(path, pathlen);
+		XLogRegisterData(data, len);
+		fileops_log(XLOG_FILEOPS_WRITE, &undo_ctx);
+	}
+
+	pfree(before);
+	pfree(payload);
 	return 0;
 }
 
@@ -532,7 +789,8 @@ FileOpsWrite(const char *path, off_t offset, const void *data, uint32 len)
  * FileOpsTruncate - Truncate a file within a transaction
  *
  * Executed immediately and WAL-logged. Uses ftruncate() on POSIX,
- * SetEndOfFile() on Windows. File is fsynced after truncation.
+ * SetEndOfFile() on Windows. File is fsynced after truncation.  The
+ * original size is restored if the transaction aborts.
  */
 void
 FileOpsTruncate(const char *path, off_t length)
@@ -540,7 +798,9 @@ FileOpsTruncate(const char *path, off_t length)
 	int			fd;
 	struct stat st;
 	off_t		orig_length = 0;
-	bool		need_wal = XLogIsNeeded();
+	int			pathlen = fileops_pathlen(path);
+	char	   *before;
+	uint32		before_len;
 
 	Assert(!IsInParallelMode());
 
@@ -548,75 +808,17 @@ FileOpsTruncate(const char *path, off_t length)
 	if (stat(path, &st) == 0)
 		orig_length = st.st_size;
 
-	if (need_wal)
-	{
-		xl_fileops_truncate xlrec;
-		int			pathlen;
-		XactUndoContext undo_ctx;
-		char		payload[sizeof(FileopsUndoTruncate) + MAXPGPATH];
-		FileopsUndoTruncate *hdr = (FileopsUndoTruncate *) payload;
-		XLogRecPtr	lsn;
-
-		xlrec.length = length;
-		xlrec.orig_length = orig_length;
-		pathlen = (int) strlen(path) + 1;
-
-		hdr->orig_length = orig_length;
-		hdr->path_len = (uint16) pathlen;
-		memcpy(payload + sizeof(FileopsUndoTruncate), path, pathlen);
-
-		/*
-		 * PrepareXactUndoData() may palloc, so it must happen before the
-		 * critical section below (palloc is forbidden inside one).
-		 */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_TRUNCATE,
-							InvalidOid, payload,
-							sizeof(FileopsUndoTruncate) + pathlen);
-
-		/*
-		 * Once the WAL/UNDO record is durably flushed below, the physical
-		 * ftruncate()+fsync() is contractually obligated to happen: a
-		 * durably-recorded truncation that never occurs on disk would leave
-		 * recovery/rollback with nothing to reconcile against.  Wrap the
-		 * whole WAL-insert-through-syscall sequence in a critical section so
-		 * that any failure past this point is promoted to PANIC by the elog
-		 * machinery (errfinish() in elog.c), instead of silently diverging
-		 * via an ordinary transaction abort.  This retrofits the same
-		 * protection RelationTruncate() already has in catalog/storage.c,
-		 * which this function was previously missing.
-		 */
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsTruncate);
-		XLogRegisterData(path, pathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_TRUNCATE);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		/*
-		 * Flush the redo and UNDO records to durable storage before mutating
-		 * the file below.  ftruncate()+pg_fsync() makes the physical change
-		 * durable immediately; if we crashed after that but before the WAL
-		 * reached disk, recovery would have no record of the operation and no
-		 * UNDO batch to reverse it on rollback.  This mirrors the write-ahead
-		 * ordering in RelationTruncate() (see catalog/storage.c).  Flush the
-		 * LSN XLogInsert() itself returned, not a separately-fetched "current
-		 * insert position" -- under concurrency the latter can point into the
-		 * middle of a record another backend has reserved but not finished
-		 * copying, which makes XLogFlush() fail with "xlog flush request is
-		 * not satisfied".
-		 */
-		XLogFlush(lsn);
-	}
-
 	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\" for truncation: %m", path)));
+
+	if (length < 0)
+		ereport(ERROR, (errmsg("negative file truncation length")));
+	before_len = orig_length > length ?
+		Min(orig_length - length, (off_t) FILEOPS_MAX_DATA_BYTES + 1) : 0;
+	before = fileops_before_image(fd, path, length, before_len);
 
 	if (ftruncate(fd, length) < 0)
 	{
@@ -630,6 +832,14 @@ FileOpsTruncate(const char *path, off_t length)
 						path, (long long) length)));
 	}
 
+	/*
+	 * Register abort-time pending op to restore original size on rollback.
+	 * This provides immediate rollback without waiting for the background
+	 * UNDO worker.
+	 */
+	if (!XLogIsNeeded())
+		AddPendingFileOp(PENDING_FILEOP_TRUNCATE, path, NULL, orig_length, false);
+
 	if (enableFsync && pg_fsync(fd) != 0)
 	{
 		int			save_errno = errno;
@@ -642,20 +852,38 @@ FileOpsTruncate(const char *path, off_t length)
 						path)));
 	}
 
-	if (need_wal)
-		END_CRIT_SECTION();
-
 	if (CloseTransientFile(fd) != 0)
 		ereport(WARNING,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", path)));
 
-	/*
-	 * Register abort-time pending op to restore original size on rollback.
-	 * This provides immediate rollback without waiting for the background
-	 * UNDO worker (which is deferred due to BumpContext limitations).
-	 */
-	AddPendingFileOp(PENDING_FILEOP_TRUNCATE, path, NULL, orig_length, false);
+	if (XLogIsNeeded())
+	{
+		xl_fileops_truncate xlrec;
+		XactUndoContext undo_ctx;
+		char	   *payload = palloc0(sizeof(FileopsUndoTruncate) + pathlen + before_len);
+		FileopsUndoTruncate *hdr = (FileopsUndoTruncate *) payload;
+
+		xlrec.length = length;
+
+		hdr->before_len = before_len;
+		hdr->orig_length = orig_length;
+		hdr->new_length = length;
+		hdr->path_len = (uint16) pathlen;
+		memcpy(payload + sizeof(FileopsUndoTruncate), path, pathlen);
+		memcpy(payload + sizeof(FileopsUndoTruncate) + pathlen, before, before_len);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_TRUNCATE,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoTruncate) + pathlen + before_len);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsTruncate);
+		XLogRegisterData(path, pathlen);
+		fileops_log(XLOG_FILEOPS_TRUNCATE, &undo_ctx);
+		pfree(payload);
+	}
+	pfree(before);
 }
 
 /*
@@ -666,101 +894,61 @@ FileOpsTruncate(const char *path, off_t length)
  * (only _S_IREAD/_S_IWRITE; no group/other). Logs WARNING for
  * unsupported mode bits on Windows.
  *
- * Returns 0 on success, -1 on failure with errno left set so the caller
- * can distinguish ENOENT from other errors.  No WAL, UNDO record, or
- * pending op is registered on the failure path because the on-disk mode
- * was not changed.
- *
- * Design note (write-ordering vs. tolerable-failure contract): WAL/UNDO
- * must be durable before chmod() runs, but tablespace.c's caller relies on
- * getting a plain -1/ENOENT back (not a crash) when the target directory
- * does not exist -- a real caller-observed case, not a hypothetical one.
- * We resolve the conflict by reusing the stat() this function already
- * needs (to capture the original mode for UNDO) as a preflight: if the
- * path cannot be stat()ed, chmod() would fail the same way, so we return
- * -1 with stat()'s errno before writing anything to WAL.  This is not a
- * "trial run" of the mutating syscall itself (no double-mutation hazard),
- * and existence does not flip in the narrow window between this stat()
- * and the chmod() below for paths FileOps callers own/manage.  Once that
- * preflight passes, the WAL/UNDO record becomes durable and chmod() is
- * contractually obligated to happen: any failure past that point (a
- * genuine race, read-only remount, immutable-flag, etc.) is escalated to
- * PANIC by the surrounding critical section, per errfinish() in elog.c.
+ * Returns 0 on success, -1 on failure with errno left set, so the caller
+ * can tell ENOENT from other errors and report it as it would a plain
+ * chmod() failure (tablespace.c does).  Nothing is logged or registered
+ * when it fails, because nothing changed.
  */
 int
 FileOpsChmod(const char *path, mode_t mode)
 {
 	struct stat st;
 	mode_t		orig_mode;
-	bool		need_wal;
+	int			pathlen = fileops_pathlen(path);
 
 	Assert(!IsInParallelMode());
 
-	/* Capture original mode for UNDO before chmod, and preflight ENOENT */
+	/* Capture original mode for UNDO before chmod */
 	if (stat(path, &st) != 0)
 		return -1;				/* leave errno set by stat() for the caller */
 	orig_mode = st.st_mode & 07777;
 
-	need_wal = XLogIsNeeded();
-
-	if (need_wal)
-	{
-		xl_fileops_chmod xlrec;
-		int			pathlen;
-		XactUndoContext undo_ctx;
-		char		payload[sizeof(FileopsUndoChmod) + MAXPGPATH];
-		FileopsUndoChmod *hdr = (FileopsUndoChmod *) payload;
-		XLogRecPtr	lsn;
-
-		xlrec.mode = mode;
-		xlrec.orig_mode = orig_mode;
-		pathlen = (int) strlen(path) + 1;
-
-		hdr->orig_mode = orig_mode;
-		hdr->path_len = (uint16) pathlen;
-		memcpy(payload + sizeof(FileopsUndoChmod), path, pathlen);
-
-		/* PrepareXactUndoData() may palloc; must run before the crit section */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHMOD,
-							InvalidOid, payload,
-							sizeof(FileopsUndoChmod) + pathlen);
-
-		/*
-		 * Load the injection point cache entry before the critical section;
-		 * looking it up can palloc, which is forbidden once we
-		 * START_CRIT_SECTION.
-		 */
-		INJECTION_POINT_LOAD("fileops-chmod-after-wal-flush");
-
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsChmod);
-		XLogRegisterData(path, pathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_CHMOD);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		XLogFlush(lsn);
-
-		INJECTION_POINT_CACHED("fileops-chmod-after-wal-flush", NULL);
-	}
-
 	if (chmod(path, mode) < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not chmod file \"%s\": %m", path)));
-
-	if (need_wal)
-		END_CRIT_SECTION();
+		return -1;				/* leave errno set by chmod() for the caller */
 
 	/*
 	 * Register abort-time pending op to restore original mode on rollback.
 	 * Store mode in the length field (mode_t fits in off_t).
 	 */
-	AddPendingFileOp(PENDING_FILEOP_CHMOD, path, NULL, (off_t) orig_mode, false);
+	if (!XLogIsNeeded())
+		AddPendingFileOp(PENDING_FILEOP_CHMOD, path, NULL, (off_t) orig_mode, false);
+
+	if (XLogIsNeeded())
+	{
+		xl_fileops_chmod xlrec;
+		XactUndoContext undo_ctx;
+		char		payload[sizeof(FileopsUndoChmod) + MAXPGPATH];
+		FileopsUndoChmod *hdr = (FileopsUndoChmod *) payload;
+
+		xlrec.mode = mode;
+		xlrec.orig_mode = orig_mode;
+
+		hdr->orig_mode = orig_mode;
+		hdr->new_mode = mode & 07777;
+		hdr->path_len = (uint16) pathlen;
+		memcpy(payload + sizeof(FileopsUndoChmod), path, pathlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHMOD,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoChmod) + pathlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsChmod);
+		XLogRegisterData(path, pathlen);
+		fileops_log(XLOG_FILEOPS_CHMOD, &undo_ctx);
+
+		INJECTION_POINT("fileops-chmod-after-wal-flush", NULL);
+	}
 
 	return 0;
 }
@@ -772,7 +960,7 @@ FileOpsChmod(const char *path, mode_t mode)
  * On POSIX: chown(). On Windows: no-op with WARNING (Windows uses
  * ACLs for ownership, not uid/gid).
  *
- * Returns 0 on success.
+ * Returns 0; a failed chown() is an ERROR.
  */
 int
 FileOpsChown(const char *path, uid_t uid, gid_t gid)
@@ -780,7 +968,7 @@ FileOpsChown(const char *path, uid_t uid, gid_t gid)
 	struct stat st;
 	uid_t		orig_uid = (uid_t) -1;
 	gid_t		orig_gid = (gid_t) -1;
-	bool		need_wal = XLogIsNeeded();
+	int			pathlen = fileops_pathlen(path);
 
 	Assert(!IsInParallelMode());
 
@@ -789,52 +977,6 @@ FileOpsChown(const char *path, uid_t uid, gid_t gid)
 	{
 		orig_uid = st.st_uid;
 		orig_gid = st.st_gid;
-	}
-
-	/*
-	 * Write-ahead ordering: WAL/UNDO must be durable before the physical
-	 * chown().  Once durable, chown() is contractually obligated to happen; a
-	 * failure past that point is escalated to PANIC by the surrounding
-	 * critical section (see errfinish() in elog.c), matching
-	 * FileOpsTruncate() above and RelationTruncate() in catalog/storage.c.
-	 */
-	if (need_wal)
-	{
-		xl_fileops_chown xlrec;
-		int			pathlen;
-		XactUndoContext undo_ctx;
-		char		payload[sizeof(FileopsUndoChown) + MAXPGPATH];
-		FileopsUndoChown *hdr = (FileopsUndoChown *) payload;
-		XLogRecPtr	lsn;
-
-		xlrec.uid = uid;
-		xlrec.gid = gid;
-		xlrec.orig_uid = orig_uid;
-		xlrec.orig_gid = orig_gid;
-		pathlen = (int) strlen(path) + 1;
-
-		hdr->orig_uid = orig_uid;
-		hdr->orig_gid = orig_gid;
-		hdr->path_len = (uint16) pathlen;
-		memcpy(payload + sizeof(FileopsUndoChown), path, pathlen);
-
-		/* PrepareXactUndoData() may palloc; must run before the crit section */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHOWN,
-							InvalidOid, payload,
-							sizeof(FileopsUndoChown) + pathlen);
-
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsChown);
-		XLogRegisterData(path, pathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_CHOWN);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		XLogFlush(lsn);
 	}
 
 #ifndef WIN32
@@ -847,10 +989,38 @@ FileOpsChown(const char *path, uid_t uid, gid_t gid)
 	ereport(WARNING,
 			(errmsg("chown is not supported on Windows, skipping for \"%s\"",
 					path)));
+	return 0;					/* nothing changed, so nothing to log */
 #endif
 
-	if (need_wal)
-		END_CRIT_SECTION();
+	if (XLogIsNeeded())
+	{
+		xl_fileops_chown xlrec;
+		XactUndoContext undo_ctx;
+		char		payload[sizeof(FileopsUndoChown) + MAXPGPATH];
+		FileopsUndoChown *hdr = (FileopsUndoChown *) payload;
+
+		xlrec.uid = uid;
+		xlrec.gid = gid;
+		xlrec.orig_uid = orig_uid;
+		xlrec.orig_gid = orig_gid;
+
+		hdr->orig_uid = orig_uid;
+		hdr->orig_gid = orig_gid;
+		/* chown() leaves an id of -1 unchanged */
+		hdr->new_uid = (uid == (uid_t) -1) ? orig_uid : uid;
+		hdr->new_gid = (gid == (gid_t) -1) ? orig_gid : gid;
+		hdr->path_len = (uint16) pathlen;
+		memcpy(payload + sizeof(FileopsUndoChown), path, pathlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_CHOWN,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoChown) + pathlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsChown);
+		XLogRegisterData(path, pathlen);
+		fileops_log(XLOG_FILEOPS_CHOWN, &undo_ctx);
+	}
 
 	return 0;
 }
@@ -862,77 +1032,95 @@ FileOpsSync(const char *path)
 }
 
 /*
- * FileOpsMkdir - Create a directory within a transaction
+ * fileops_mkdir - Create a directory within a transaction
  *
- * Immediate execution. Optionally registers rmdir-on-abort.
- * Uses MakePGDirectory() pattern (mkdir with pg_dir_create_mode).
- * On Windows: _mkdir() (no mode parameter, permissions from parent).
- *
- * Returns 0 on success.
+ * Shared by FileOpsMkdir() and FileOpsMkdirTree(); see there.
  */
-int
-FileOpsMkdir(const char *path, mode_t mode)
+static int
+fileops_mkdir(const char *path, mode_t mode, uint16 flags, Oid dboid)
 {
-	bool		need_wal = XLogIsNeeded();
+	int			pathlen = fileops_pathlen(path);
 
 	Assert(!IsInParallelMode());
-
-	/*
-	 * Write-ahead ordering: WAL/UNDO must be durable before the physical
-	 * mkdir()+parent-dir-fsync.  Once durable, the mkdir is contractually
-	 * obligated to happen; a failure past that point is escalated to PANIC by
-	 * the surrounding critical section (see errfinish() in elog.c), matching
-	 * FileOpsTruncate() above and RelationTruncate() in catalog/storage.c.
-	 */
-	if (need_wal)
-	{
-		xl_fileops_mkdir xlrec;
-		int			pathlen;
-		XactUndoContext undo_ctx;
-		char		payload[sizeof(FileopsUndoMkdir) + MAXPGPATH];
-		FileopsUndoMkdir *hdr = (FileopsUndoMkdir *) payload;
-		XLogRecPtr	lsn;
-
-		xlrec.mode = mode;
-		pathlen = (int) strlen(path) + 1;
-
-		hdr->path_len = (uint16) pathlen;
-		memcpy(payload + sizeof(FileopsUndoMkdir), path, pathlen);
-
-		/* PrepareXactUndoData() may palloc; must run before the crit section */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_MKDIR,
-							InvalidOid, payload,
-							sizeof(FileopsUndoMkdir) + pathlen);
-
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsMkdir);
-		XLogRegisterData(path, pathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_MKDIR);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		XLogFlush(lsn);
-	}
 
 	if (MakePGDirectory(path) < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create directory \"%s\": %m", path)));
 
+	/* Remove the directory (or tree) if the transaction aborts */
+	if (!XLogIsNeeded())
+		AddPendingFileOp((flags & FILEOPS_MKDIR_TREE) ?
+						 PENDING_FILEOP_RMTREE : PENDING_FILEOP_RMDIR,
+						 path, NULL, 0, false);
+
 	if (enableFsync)
 		fileops_fsync_parent(path, data_sync_elevel(ERROR));
 
-	if (need_wal)
-		END_CRIT_SECTION();
+	if (XLogIsNeeded())
+	{
+		xl_fileops_mkdir xlrec;
+		XactUndoContext undo_ctx;
+		char		payload[sizeof(FileopsUndoMkdir) + MAXPGPATH];
+		FileopsUndoMkdir *hdr = (FileopsUndoMkdir *) payload;
+		struct stat st;
 
-	/* Register rmdir-on-abort so directory is cleaned up on rollback */
-	AddPendingFileOp(PENDING_FILEOP_RMDIR, path, NULL, 0, false);
+		xlrec.mode = mode;
+		xlrec.flags = flags;
+
+		if (stat(path, &st) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not stat directory \"%s\": %m", path)));
+		hdr->dev = st.st_dev;
+		hdr->ino = st.st_ino;
+		hdr->dboid = dboid;
+		hdr->flags = flags;
+		hdr->path_len = (uint16) pathlen;
+		memcpy(payload + sizeof(FileopsUndoMkdir), path, pathlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_MKDIR,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoMkdir) + pathlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsMkdir);
+		XLogRegisterData(path, pathlen);
+		fileops_log(XLOG_FILEOPS_MKDIR, &undo_ctx);
+	}
 
 	return 0;
+}
+
+/*
+ * FileOpsMkdir - Create a directory within a transaction
+ *
+ * Immediate execution; the directory is removed (rmdir) if the transaction
+ * aborts, so it must then be empty.
+ * Uses MakePGDirectory() pattern (mkdir with pg_dir_create_mode).
+ * On Windows: _mkdir() (no mode parameter, permissions from parent).
+ *
+ * Returns 0; a failed mkdir() is an ERROR.
+ */
+int
+FileOpsMkdir(const char *path, mode_t mode)
+{
+	return fileops_mkdir(path, mode, 0, InvalidOid);
+}
+
+/*
+ * FileOpsMkdirTree - Create a directory the transaction will fill
+ *
+ * Like FileOpsMkdir(), but if the transaction aborts the whole tree is
+ * removed, including files created in it by other means (smgr, copydir()).
+ * For a database directory pass its OID as dboid: before the tree is removed
+ * by the UNDO record, that database's shared buffers and pending fsync
+ * requests are dropped, as they would be by DROP DATABASE.
+ */
+int
+FileOpsMkdirTree(const char *path, mode_t mode, Oid dboid)
+{
+	return fileops_mkdir(path, mode, FILEOPS_MKDIR_TREE, dboid);
 }
 
 /*
@@ -951,27 +1139,6 @@ FileOpsRmdir(const char *path, bool at_commit)
 	 * at registration, so the standby reproduces the rmdir via redo.
 	 */
 	AddPendingFileOp(PENDING_FILEOP_RMDIR, path, NULL, 0, at_commit);
-}
-
-/*
- * FileOpsRmtree - Schedule a recursive directory removal at commit/abort time.
- *
- * Unlike FileOpsRmdirRecursive (which enumerates the tree at registration
- * time and queues per-entry FILEOPS_DELETE/RMDIR ops), this enqueues a
- * single PENDING_FILEOP_RMTREE that defers the tree walk to execute time.
- * That is the right semantic for callers that register the destination of
- * an in-progress copy: the directory is empty (or nonexistent) when the
- * registration happens, but contains files by the time of abort.
- *
- * No WAL is written because rmtree is not a directly recoverable
- * operation; the abort case relies on the surrounding DDL having already
- * recorded enough state to make the partial tree disposable.
- */
-void
-FileOpsRmtree(const char *path, bool at_commit)
-{
-	Assert(!IsInParallelMode());
-	AddPendingFileOp(PENDING_FILEOP_RMTREE, path, NULL, 0, at_commit);
 }
 
 /*
@@ -1032,58 +1199,15 @@ FileOpsRmdirRecursive(const char *path, bool at_commit)
  * junction points via DeviceIoControl(). Note: junction points only
  * work for directories on Windows.
  *
- * Returns 0 on success.
+ * Returns 0; a failed symlink() is an ERROR.
  */
 int
 FileOpsSymlink(const char *target, const char *linkpath)
 {
-	bool		need_wal = XLogIsNeeded();
+	int			targetlen = fileops_pathlen(target);
+	int			linkpathlen = fileops_pathlen(linkpath);
 
 	Assert(!IsInParallelMode());
-
-	/*
-	 * Write-ahead ordering: WAL/UNDO must be durable before the physical
-	 * symlink()+parent-dir-fsync.  Once durable, the symlink is contractually
-	 * obligated to happen; a failure past that point is escalated to PANIC by
-	 * the surrounding critical section (see errfinish() in elog.c), matching
-	 * FileOpsTruncate() above and RelationTruncate() in catalog/storage.c.
-	 */
-	if (need_wal)
-	{
-		xl_fileops_symlink xlrec;
-		int			targetlen;
-		int			linkpathlen;
-		XactUndoContext undo_ctx;
-		char		payload[sizeof(FileopsUndoSymlink) + MAXPGPATH];
-		FileopsUndoSymlink *hdr = (FileopsUndoSymlink *) payload;
-		XLogRecPtr	lsn;
-
-		targetlen = (int) strlen(target) + 1;
-		linkpathlen = (int) strlen(linkpath) + 1;
-		xlrec.target_len = (uint16) targetlen;
-
-		hdr->linkpath_len = (uint16) linkpathlen;
-		memcpy(payload + sizeof(FileopsUndoSymlink), linkpath, linkpathlen);
-
-		/* PrepareXactUndoData() may palloc; must run before the crit section */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_SYMLINK,
-							InvalidOid, payload,
-							sizeof(FileopsUndoSymlink) + linkpathlen);
-
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsSymlink);
-		XLogRegisterData(target, targetlen);
-		XLogRegisterData(linkpath, linkpathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_SYMLINK);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		XLogFlush(lsn);
-	}
 
 	if (symlink(target, linkpath) < 0)
 		ereport(ERROR,
@@ -1091,14 +1215,40 @@ FileOpsSymlink(const char *target, const char *linkpath)
 				 errmsg("could not create symbolic link \"%s\" -> \"%s\": %m",
 						linkpath, target)));
 
+	/* Register delete-on-abort to clean up the symlink on rollback */
+	if (!XLogIsNeeded())
+		AddPendingFileOp(PENDING_FILEOP_DELETE, linkpath, NULL, 0, false);
+
 	if (enableFsync)
 		fileops_fsync_parent(linkpath, data_sync_elevel(ERROR));
 
-	if (need_wal)
-		END_CRIT_SECTION();
+	if (XLogIsNeeded())
+	{
+		xl_fileops_symlink xlrec;
+		XactUndoContext undo_ctx;
+		char		payload[sizeof(FileopsUndoSymlink) + 2 * MAXPGPATH];
+		FileopsUndoSymlink *hdr = (FileopsUndoSymlink *) payload;
 
-	/* Register delete-on-abort to clean up the symlink on rollback */
-	AddPendingFileOp(PENDING_FILEOP_DELETE, linkpath, NULL, 0, false);
+		xlrec.target_len = (uint16) targetlen;
+
+		/* the target lets the UNDO recognize the link it would remove */
+		hdr->linkpath_len = (uint16) linkpathlen;
+		hdr->target_len = (uint16) targetlen;
+		memcpy(payload + sizeof(FileopsUndoSymlink), linkpath, linkpathlen);
+		memcpy(payload + sizeof(FileopsUndoSymlink) + linkpathlen, target,
+			   targetlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_SYMLINK,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoSymlink) + linkpathlen +
+							 targetlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsSymlink);
+		XLogRegisterData(target, targetlen);
+		XLogRegisterData(linkpath, linkpathlen);
+		fileops_log(XLOG_FILEOPS_SYMLINK, &undo_ctx);
+	}
 
 	return 0;
 }
@@ -1109,58 +1259,25 @@ FileOpsSymlink(const char *target, const char *linkpath)
  * Immediate execution. Registers delete-on-abort for cleanup.
  * On POSIX: link(). On Windows: CreateHardLinkA() (NTFS only).
  *
- * Returns 0 on success.
+ * Returns 0; a failed link() is an ERROR.
  */
 int
 FileOpsLink(const char *oldpath, const char *newpath)
 {
-	bool		need_wal = XLogIsNeeded();
+	int			oldpathlen = fileops_pathlen(oldpath);
+	int			newpathlen = fileops_pathlen(newpath);
+	struct stat st;
 
 	Assert(!IsInParallelMode());
 
 	/*
-	 * Write-ahead ordering: WAL/UNDO must be durable before the physical
-	 * link()+parent-dir-fsync.  Once durable, the link is contractually
-	 * obligated to happen; a failure past that point is escalated to PANIC by
-	 * the surrounding critical section (see errfinish() in elog.c), matching
-	 * FileOpsTruncate() above and RelationTruncate() in catalog/storage.c.
+	 * The new link will be this inode; the UNDO removes newpath only while it
+	 * still is.
 	 */
-	if (need_wal)
-	{
-		xl_fileops_link xlrec;
-		int			oldpathlen;
-		int			newpathlen;
-		XactUndoContext undo_ctx;
-		char		payload[sizeof(FileopsUndoLink) + MAXPGPATH];
-		FileopsUndoLink *hdr = (FileopsUndoLink *) payload;
-		XLogRecPtr	lsn;
-
-		oldpathlen = (int) strlen(oldpath) + 1;
-		newpathlen = (int) strlen(newpath) + 1;
-		xlrec.oldpath_len = (uint16) oldpathlen;
-
-		hdr->newpath_len = (uint16) newpathlen;
-		memcpy(payload + sizeof(FileopsUndoLink), newpath, newpathlen);
-
-		/* PrepareXactUndoData() may palloc; must run before the crit section */
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_LINK,
-							InvalidOid, payload,
-							sizeof(FileopsUndoLink) + newpathlen);
-
-		START_CRIT_SECTION();
-
-		XLogBeginInsert();
-		XLogRegisterData(&xlrec, SizeOfFileOpsLink);
-		XLogRegisterData(oldpath, oldpathlen);
-		XLogRegisterData(newpath, newpathlen);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_LINK);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
-
-		XLogFlush(lsn);
-	}
+	if (stat(oldpath, &st) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", oldpath)));
 
 	if (link(oldpath, newpath) < 0)
 		ereport(ERROR,
@@ -1168,14 +1285,37 @@ FileOpsLink(const char *oldpath, const char *newpath)
 				 errmsg("could not create hard link \"%s\" -> \"%s\": %m",
 						newpath, oldpath)));
 
+	/* Register delete-on-abort to clean up the link on rollback */
+	if (!XLogIsNeeded())
+		AddPendingFileOp(PENDING_FILEOP_DELETE, newpath, NULL, 0, false);
+
 	if (enableFsync)
 		fileops_fsync_parent(newpath, data_sync_elevel(ERROR));
 
-	if (need_wal)
-		END_CRIT_SECTION();
+	if (XLogIsNeeded())
+	{
+		xl_fileops_link xlrec;
+		XactUndoContext undo_ctx;
+		char		payload[sizeof(FileopsUndoLink) + MAXPGPATH];
+		FileopsUndoLink *hdr = (FileopsUndoLink *) payload;
 
-	/* Register delete-on-abort to clean up the link on rollback */
-	AddPendingFileOp(PENDING_FILEOP_DELETE, newpath, NULL, 0, false);
+		xlrec.oldpath_len = (uint16) oldpathlen;
+
+		hdr->dev = st.st_dev;
+		hdr->ino = st.st_ino;
+		hdr->newpath_len = (uint16) newpathlen;
+		memcpy(payload + sizeof(FileopsUndoLink), newpath, newpathlen);
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_LINK,
+							 InvalidOid, payload,
+							 sizeof(FileopsUndoLink) + newpathlen);
+
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, SizeOfFileOpsLink);
+		XLogRegisterData(oldpath, oldpathlen);
+		XLogRegisterData(newpath, newpathlen);
+		fileops_log(XLOG_FILEOPS_LINK, &undo_ctx);
+	}
 
 	return 0;
 }
@@ -1191,40 +1331,10 @@ FileOpsLink(const char *oldpath, const char *newpath)
  *   - Windows: NTFS Alternate Data Streams
  *   - Other: returns ENOTSUP
  *
- * Returns 0 on success, -1 if extended attributes are not supported on
- * this filesystem/platform (errno left as ENOTSUP/EOPNOTSUPP).
- *
- * Design note (write-ordering vs. tolerable-failure conflict): the analysis
- * that preceded this fix flagged that WAL-before-syscall conflicts with the
- * old "return -1 on ENOTSUP/EOPNOTSUPP/EPERM/EACCES" contract, since a
- * durable WAL/UNDO record asserting a xattr change that never happened is
- * exactly the bug being fixed.  We resolve it by splitting the old tolerable
- * set into two buckets:
- *
- *   - ENOTSUP/EOPNOTSUPP ("this filesystem doesn't implement xattrs at
- *     all") is a whole-filesystem capability question, not a per-call race:
- *     it cannot flip between a preflight check and the real syscall a few
- *     instructions later.  The pg_getxattr() probe below (already needed to
- *     capture the original value for UNDO) surfaces this same errno for the
- *     same reason before any WAL is written, so we check it there and
- *     return -1 pre-WAL -- no new syscall, no trial run of the mutating
- *     operation itself.
- *
- *   - EPERM/EACCES ("security policy denies this specific write") is a
- *     genuine permission decision that CAN legitimately differ between a
- *     read probe and a write attempt (e.g. SELinux, immutable flag), so it
- *     cannot be preflighted without attempting the mutating syscall itself
- *     (which the prior analysis correctly flagged as fragile/racy and not
- *     attempted here).  grep of the tree found zero production callers of
- *     FileOpsSetXattr; the only consumer (test_fileops) exists to probe
- *     whole-filesystem xattr support, which the ENOTSUP/EOPNOTSUPP preflight
- *     above already covers.  We therefore treat a post-WAL EPERM/EACCES the
- *     same as any other post-WAL syscall failure: it escalates to PANIC via
- *     the surrounding critical section (errfinish() in elog.c), because a
- *     durable WAL/UNDO record with no corresponding physical change is the
- *     load-bearing invariant this whole fix protects.  If a real caller ever
- *     needs graceful EPERM/EACCES handling, that is a signal this decision
- *     needs revisiting (see FILEOPS-ANALYSIS-UNIMPLEMENTED.md point 3).
+ * Returns 0 on success.  Returns -1 with errno set if the filesystem does
+ * not support extended attributes (ENOTSUP/EOPNOTSUPP) or refuses this one
+ * (EPERM/EACCES); any other failure is an ERROR.  Nothing is logged or
+ * registered when it fails, because nothing changed.
  */
 int
 FileOpsSetXattr(const char *path, const char *name,
@@ -1233,95 +1343,70 @@ FileOpsSetXattr(const char *path, const char *name,
 	bool		had_value = false;
 	char	   *orig_value = NULL;
 	ssize_t		orig_value_len = 0;
-	bool		need_wal;
-	struct stat st;
+	int			pathlen = fileops_pathlen(path);
+	ssize_t		vlen;
 
 	Assert(!IsInParallelMode());
 
 	/*
-	 * Preflight existence check: FileOpsSetXattr on a nonexistent path is a
-	 * caller error (ENOENT was never in the tolerable set below), and must be
-	 * caught here, before any WAL is written -- otherwise it would be caught
-	 * by the mutating syscall itself AFTER WAL is durable, escalating an
-	 * ordinary caller mistake to PANIC.
+	 * Capture existing xattr value before overwriting, for the abort-time
+	 * pending op and the UNDO record.  If the attribute doesn't exist,
+	 * had_value stays false.
 	 */
-	if (stat(path, &st) != 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not stat file \"%s\": %m", path)));
-
-	/*
-	 * Capture existing xattr value before overwriting.  This is needed by the
-	 * abort-time pending op (clean rollback) regardless of wal_level, so it
-	 * must run unconditionally -- not gated on XLogIsNeeded() like the
-	 * WAL/UNDO emission below.  If the attribute doesn't exist, had_value
-	 * stays false.
-	 *
-	 * This call doubles as the ENOTSUP/EOPNOTSUPP capability preflight
-	 * described above: on every supported platform, a filesystem/inode that
-	 * doesn't implement extended attributes fails an attribute-value probe
-	 * the same way it would fail a set, regardless of whether the named
-	 * attribute happens to exist.
-	 */
+	vlen = pg_getxattr(path, name, NULL, 0);
+	if (vlen > 0)
 	{
-		ssize_t		vlen;
-
-		vlen = pg_getxattr(path, name, NULL, 0);
-		if (vlen > 0)
-		{
-			orig_value = (char *) palloc(vlen);
-			orig_value_len = pg_getxattr(path, name, orig_value, vlen);
-			if (orig_value_len >= 0)
-				had_value = true;
-			else
-			{
-				pfree(orig_value);
-				orig_value = NULL;
-				orig_value_len = 0;
-			}
-		}
-		else if (vlen == 0)
-		{
-			/* Attribute exists but has zero-length value */
+		orig_value = (char *) palloc(vlen);
+		orig_value_len = pg_getxattr(path, name, orig_value, vlen);
+		if (orig_value_len >= 0)
 			had_value = true;
-		}
-		else if (errno == ENOTSUP || errno == EOPNOTSUPP)
+		else
 		{
-			/*
-			 * Whole-filesystem capability failure; safe to preflight (see
-			 * above)
-			 */
-			return -1;
+			pfree(orig_value);
+			orig_value = NULL;
+			orig_value_len = 0;
 		}
-
-		/*
-		 * else: ENODATA/PG_ENOATTR (attribute absent) or other;
-		 * had_value=false
-		 */
+	}
+	else if (vlen == 0)
+	{
+		/* Attribute exists but has zero-length value */
+		had_value = true;
 	}
 
-	need_wal = XLogIsNeeded();
+	if (pg_setxattr(path, name, value, len) < 0)
+	{
+		int			save_errno = errno;
+
+		if (orig_value)
+			pfree(orig_value);
+		errno = save_errno;
+		if (errno == ENOTSUP || errno == EOPNOTSUPP ||
+			errno == EPERM || errno == EACCES)
+			return -1;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not set extended attribute \"%s\" on \"%s\": %m",
+						name, path)));
+	}
 
 	/*
-	 * Write-ahead ordering: WAL/UNDO must be durable before the physical
-	 * setxattr().  Once durable, setxattr() is contractually obligated to
-	 * succeed; any failure past this point (including EPERM/EACCES, per the
-	 * design note above) is escalated to PANIC by the surrounding critical
-	 * section.
+	 * Register abort-time pending op to restore/remove xattr on rollback. If
+	 * had_value: restore original value.  If !had_value: remove the xattr.
 	 */
-	if (need_wal)
+	if (!XLogIsNeeded() && had_value)
+		AddPendingFileOpWithData(PENDING_FILEOP_SETXATTR, path, name,
+								 0, orig_value, (size_t) orig_value_len, false);
+	else if (!XLogIsNeeded())
+		AddPendingFileOp(PENDING_FILEOP_REMOVEXATTR, path, name, 0, false);
+
+	if (XLogIsNeeded())
 	{
 		xl_fileops_setxattr xlrec;
-		int			pathlen;
-		int			namelen;
+		int			namelen = (int) strlen(name) + 1;
 		XactUndoContext undo_ctx;
 		Size		payload_len;
 		char	   *payload;
 		FileopsUndoSetxattr *hdr;
-		XLogRecPtr	lsn;
-
-		pathlen = (int) strlen(path) + 1;
-		namelen = (int) strlen(name) + 1;
 
 		xlrec.path_len = (uint16) pathlen;
 		xlrec.name_len = (uint16) namelen;
@@ -1330,18 +1415,14 @@ FileOpsSetXattr(const char *path, const char *name,
 		xlrec.orig_value_len = (uint32) (had_value ? orig_value_len : 0);
 
 		payload_len = sizeof(FileopsUndoSetxattr) + pathlen + namelen +
-			(had_value ? orig_value_len : 0);
-
-		/*
-		 * PrepareXactUndoData() may palloc; this palloc must run before the
-		 * crit section too.
-		 */
+			(had_value ? orig_value_len : 0) + len;
 		payload = (char *) palloc(payload_len);
 		hdr = (FileopsUndoSetxattr *) payload;
 
 		hdr->path_len = (uint16) pathlen;
 		hdr->name_len = (uint16) namelen;
 		hdr->orig_value_len = (uint32) (had_value ? orig_value_len : 0);
+		hdr->new_value_len = (uint32) len;
 		hdr->had_value = had_value;
 
 		memcpy(payload + sizeof(FileopsUndoSetxattr), path, pathlen);
@@ -1349,12 +1430,13 @@ FileOpsSetXattr(const char *path, const char *name,
 		if (had_value && orig_value_len > 0)
 			memcpy(payload + sizeof(FileopsUndoSetxattr) + pathlen + namelen,
 				   orig_value, orig_value_len);
+		if (len > 0)
+			memcpy(payload + sizeof(FileopsUndoSetxattr) + pathlen + namelen +
+				   hdr->orig_value_len, value, len);
 
-		PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-							UNDO_RMID_FILEOPS, FILEOPS_UNDO_SETXATTR,
-							InvalidOid, payload, payload_len);
-
-		START_CRIT_SECTION();
+		fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+							 UNDO_RMID_FILEOPS, FILEOPS_UNDO_SETXATTR,
+							 InvalidOid, payload, payload_len);
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsSetxattr);
@@ -1363,37 +1445,9 @@ FileOpsSetXattr(const char *path, const char *name,
 		XLogRegisterData(value, (uint32) len);
 		if (had_value && orig_value_len > 0)
 			XLogRegisterData(orig_value, (uint32) orig_value_len);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_SETXATTR);
-
-		InsertXactUndoData(&undo_ctx);
-		CleanupXactUndoInsertion(&undo_ctx);
+		fileops_log(XLOG_FILEOPS_SETXATTR, &undo_ctx);
 		pfree(payload);
-
-		XLogFlush(lsn);
 	}
-
-	if (pg_setxattr(path, name, value, len) < 0)
-	{
-		if (orig_value)
-			pfree(orig_value);
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not set extended attribute \"%s\" on \"%s\": %m",
-						name, path)));
-	}
-
-	if (need_wal)
-		END_CRIT_SECTION();
-
-	/*
-	 * Register abort-time pending op to restore/remove xattr on rollback. If
-	 * had_value: restore original value.  If !had_value: remove the xattr.
-	 */
-	if (had_value)
-		AddPendingFileOpWithData(PENDING_FILEOP_SETXATTR, path, name,
-								 0, orig_value, (size_t) orig_value_len, false);
-	else
-		AddPendingFileOp(PENDING_FILEOP_REMOVEXATTR, path, name, 0, false);
 
 	if (orig_value)
 		pfree(orig_value);
@@ -1405,119 +1459,90 @@ FileOpsSetXattr(const char *path, const char *name,
  * FileOpsRemoveXattr - Remove an extended attribute from a file
  *
  * Immediate execution, WAL-logged.
- * Uses pg_removexattr() portability layer.
+ * Uses pg_removexattr() portability layer.  Removing an attribute that does
+ * not exist (PG_ENOATTR) succeeds.
  *
  * Returns 0 on success, -1 if extended attributes are not supported on
- * this filesystem/platform (errno left as ENOTSUP/EOPNOTSUPP).
- *
- * Design note: see FileOpsSetXattr's design note above for the general
- * reasoning (write-ahead ordering vs. the old tolerable-failure contract).
- * REMOVEXATTR's tolerable set is narrower than SETXATTR's: only
- * ENOTSUP/EOPNOTSUPP (whole-filesystem incapability, preflighted the same
- * way, via the pg_getxattr() probe already needed to save the original
- * value for UNDO) and "attribute does not exist" (PG_ENOATTR/ENODATA).
- * The latter is not a permission decision like SETXATTR's EPERM/EACCES --
- * it is symmetric between a read probe and the write attempt (if
- * pg_getxattr() just reported the attribute absent, pg_removexattr() will
- * fail the same way for the same reason microseconds later), and it is
- * information we already captured for the UNDO decision, not a new trial
- * run of the mutating syscall.  We therefore tolerate exactly that one
- * errno post-WAL, inside the critical section, and PANIC on anything else,
- * matching fileops_redo()'s own existing tolerance for this same errno.
+ * this filesystem/platform (errno left as ENOTSUP/EOPNOTSUPP); any other
+ * failure is an ERROR.  Nothing is logged or registered when it fails.
  */
 int
 FileOpsRemoveXattr(const char *path, const char *name)
 {
 	char	   *saved_value = NULL;
 	ssize_t		saved_value_len = 0;
-	bool		need_wal;
+	int			pathlen = fileops_pathlen(path);
+	ssize_t		vlen;
 
 	Assert(!IsInParallelMode());
 
 	/*
-	 * Capture existing xattr value before removal.  This is needed by the
-	 * abort-time pending op (clean rollback) regardless of wal_level, so it
-	 * must run unconditionally -- not gated on XLogIsNeeded() like the
-	 * WAL/UNDO emission below.  We need it to restore the attribute on
-	 * rollback.  It also doubles as the ENOTSUP/EOPNOTSUPP capability
-	 * preflight (see design note above): a filesystem/inode without xattr
-	 * support fails this probe the same way it would fail a removal.
+	 * Capture existing xattr value before removal, to restore it on rollback.
+	 * A NULL saved_value means there was none.
 	 */
+	vlen = pg_getxattr(path, name, NULL, 0);
+	if (vlen > 0)
 	{
-		ssize_t		vlen;
-
-		vlen = pg_getxattr(path, name, NULL, 0);
-		if (vlen > 0)
+		saved_value = (char *) palloc(vlen);
+		saved_value_len = pg_getxattr(path, name, saved_value, vlen);
+		if (saved_value_len < 0)
 		{
-			saved_value = (char *) palloc(vlen);
-			saved_value_len = pg_getxattr(path, name, saved_value, vlen);
-			if (saved_value_len < 0)
-			{
-				pfree(saved_value);
-				saved_value = NULL;
-				saved_value_len = 0;
-			}
-		}
-		else if (vlen == 0)
-		{
-			/* Attribute exists but has zero-length value */
+			pfree(saved_value);
+			saved_value = NULL;
 			saved_value_len = 0;
-			saved_value = (char *) palloc(1);	/* non-NULL marker */
 		}
-		else if (errno == ENOTSUP || errno == EOPNOTSUPP)
-		{
-			/*
-			 * Whole-filesystem capability failure; safe to preflight (see
-			 * above)
-			 */
-			return -1;
-		}
-
-		/*
-		 * else: ENODATA/PG_ENOATTR (attribute absent) or other;
-		 * saved_value=NULL
-		 */
+	}
+	else if (vlen == 0)
+	{
+		/* Attribute exists but has zero-length value */
+		saved_value_len = 0;
+		saved_value = (char *) palloc(1);	/* non-NULL marker */
 	}
 
-	need_wal = XLogIsNeeded();
+	if (pg_removexattr(path, name) < 0 && errno != PG_ENOATTR)
+	{
+		int			save_errno = errno;
+
+		if (saved_value)
+			pfree(saved_value);
+		errno = save_errno;
+		if (errno == ENOTSUP || errno == EOPNOTSUPP)
+			return -1;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not remove extended attribute \"%s\" from \"%s\": %m",
+						name, path)));
+	}
 
 	/*
-	 * Write-ahead ordering: WAL (and UNDO, if there was a value to restore)
-	 * must be durable before the physical removal.  Once durable,
-	 * pg_removexattr() is contractually obligated to either succeed or fail
-	 * with the already-anticipated PG_ENOATTR (see design note); any other
-	 * failure escalates to PANIC via the surrounding critical section.
+	 * Register abort-time pending op to restore the removed xattr on
+	 * rollback. Use SETXATTR type: on abort, set the xattr back to its saved
+	 * value.
 	 */
-	if (need_wal)
+	if (!XLogIsNeeded() && saved_value != NULL)
+		AddPendingFileOpWithData(PENDING_FILEOP_SETXATTR, path, name,
+								 0, saved_value, (size_t) saved_value_len, false);
+
+	if (XLogIsNeeded())
 	{
 		xl_fileops_removexattr xlrec;
-		int			pathlen;
-		int			namelen;
+		int			namelen = (int) strlen(name) + 1;
 		XactUndoContext undo_ctx;
-		Size		payload_len = 0;
 		char	   *payload = NULL;
 		bool		had_value = (saved_value != NULL);
-		XLogRecPtr	lsn;
-
-		pathlen = (int) strlen(path) + 1;
-		namelen = (int) strlen(name) + 1;
 
 		xlrec.path_len = (uint16) pathlen;
 		xlrec.name_len = (uint16) namelen;
 		xlrec.had_value = had_value;
 		xlrec.orig_value_len = (uint32) (had_value ? saved_value_len : 0);
 
-		if (saved_value != NULL)
+		if (had_value)
 		{
+			Size		payload_len;
 			FileopsUndoRemovexattr *hdr;
 
 			payload_len = sizeof(FileopsUndoRemovexattr) + pathlen + namelen +
 				saved_value_len;
-
-			/*
-			 * PrepareXactUndoData() may palloc; must run before the crit
-			 * section, so this palloc does too.
-			 */
 			payload = (char *) palloc(payload_len);
 			hdr = (FileopsUndoRemovexattr *) payload;
 
@@ -1532,12 +1557,10 @@ FileOpsRemoveXattr(const char *path, const char *name)
 				memcpy(payload + sizeof(FileopsUndoRemovexattr) + pathlen + namelen,
 					   saved_value, saved_value_len);
 
-			PrepareXactUndoData(&undo_ctx, RELPERSISTENCE_PERMANENT,
-								UNDO_RMID_FILEOPS, FILEOPS_UNDO_REMOVEXATTR,
-								InvalidOid, payload, payload_len);
+			fileops_prepare_undo(&undo_ctx, RELPERSISTENCE_PERMANENT,
+								 UNDO_RMID_FILEOPS, FILEOPS_UNDO_REMOVEXATTR,
+								 InvalidOid, payload, payload_len);
 		}
-
-		START_CRIT_SECTION();
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfFileOpsRemovexattr);
@@ -1545,39 +1568,10 @@ FileOpsRemoveXattr(const char *path, const char *name)
 		XLogRegisterData(name, namelen);
 		if (had_value && saved_value_len > 0)
 			XLogRegisterData(saved_value, (uint32) saved_value_len);
-		lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_REMOVEXATTR);
-
-		if (saved_value != NULL)
-		{
-			InsertXactUndoData(&undo_ctx);
-			CleanupXactUndoInsertion(&undo_ctx);
+		fileops_log(XLOG_FILEOPS_REMOVEXATTR, had_value ? &undo_ctx : NULL);
+		if (payload)
 			pfree(payload);
-		}
-
-		XLogFlush(lsn);
 	}
-
-	if (pg_removexattr(path, name) < 0 && errno != PG_ENOATTR)
-	{
-		if (saved_value)
-			pfree(saved_value);
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not remove extended attribute \"%s\" from \"%s\": %m",
-						name, path)));
-	}
-
-	if (need_wal)
-		END_CRIT_SECTION();
-
-	/*
-	 * Register abort-time pending op to restore the removed xattr on
-	 * rollback. Use SETXATTR type: on abort, set the xattr back to its saved
-	 * value.
-	 */
-	if (saved_value != NULL)
-		AddPendingFileOpWithData(PENDING_FILEOP_SETXATTR, path, name,
-								 0, saved_value, (size_t) saved_value_len, false);
 
 	if (saved_value)
 		pfree(saved_value);
@@ -1712,6 +1706,8 @@ FileOpsExecOne(PendingFileOp *pending, bool isCommit, XLogRecPtr *max_lsn)
 	{
 		switch (pending->type)
 		{
+			case PENDING_FILEOP_INVERSE:
+				break;
 			case PENDING_FILEOP_CREATE:
 				/* Creates are executed immediately, nothing to do */
 				break;
@@ -1719,41 +1715,29 @@ FileOpsExecOne(PendingFileOp *pending, bool isCommit, XLogRecPtr *max_lsn)
 			case PENDING_FILEOP_RENAME:
 
 				/*
-				 * log-at-commit-execution.  Emit the WAL record now, when the
-				 * rename actually happens on the primary, so a physical
-				 * standby reproduces it via redo (which is now a real,
-				 * idempotent handler).  WAL-before-op preserves write-ahead
-				 * ordering; the commit record that follows orders this after
-				 * the transaction's other WAL.  Only commit-time execution is
-				 * logged: an abort never reaches a PENDING_FILEOP_RENAME
-				 * (rename is always at_commit).
+				 * Abort-time rename back of a FileOpsRename() at wal_level =
+				 * minimal: path is the new name, newpath the old one.  Only
+				 * while the new name exists and the old one is free, as the
+				 * UNDO does at higher wal_level.
 				 */
-				if (isCommit && XLogIsNeeded())
+				Assert(!pending->at_commit);
 				{
-					xl_fileops_rename xlrec;
-					int			oldpathlen = (int) strlen(pending->path) + 1;
-					int			newpathlen = (int) strlen(pending->newpath) + 1;
+					struct stat st;
 
-					xlrec.oldpath_len = (uint16) oldpathlen;
-					XLogBeginInsert();
-					XLogRegisterData(&xlrec, SizeOfFileOpsRename);
-					XLogRegisterData(pending->path, oldpathlen);
-					XLogRegisterData(pending->newpath, newpathlen);
-					*max_lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_RENAME);
-
-					/*
-					 * WAL-before-mutation durability: flush this record
-					 * BEFORE touching the filesystem.  A crash after the
-					 * rename but before a batched flush would mutate the
-					 * primary's FS without the record ever reaching the
-					 * standby, diverging the two.  Mirrors the create/write
-					 * paths that flush inside their crit section before
-					 * mutating.
-					 */
-					XLogFlush(*max_lsn);
+					if (lstat(pending->path, &st) != 0 ||
+						lstat(pending->newpath, &st) == 0)
+						break;
 				}
-				(void) durable_rename(pending->path, pending->newpath,
-									  WARNING);
+				if (rename(pending->path, pending->newpath) < 0)
+					ereport(WARNING,
+							(errcode_for_file_access(),
+							 errmsg("could not rename file \"%s\" back to \"%s\": %m",
+									pending->path, pending->newpath)));
+				else if (enableFsync)
+				{
+					fileops_fsync_parent(pending->newpath, WARNING);
+					fileops_fsync_parent(pending->path, WARNING);
+				}
 				break;
 
 			case PENDING_FILEOP_DELETE:
@@ -1776,7 +1760,13 @@ FileOpsExecOne(PendingFileOp *pending, bool isCommit, XLogRecPtr *max_lsn)
 					XLogRegisterData(pending->path, pathlen);
 					*max_lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_DELETE);
 
-					/* WAL-before-mutation durability (see RENAME above). */
+					/*
+					 * WAL-before-mutation durability: flush this record
+					 * BEFORE touching the filesystem.  A crash after the
+					 * unlink but before a batched flush would mutate the
+					 * primary's FS without the record ever reaching the
+					 * standby, diverging the two.
+					 */
 					XLogFlush(*max_lsn);
 				}
 				if (unlink(pending->path) < 0)
@@ -1811,7 +1801,7 @@ FileOpsExecOne(PendingFileOp *pending, bool isCommit, XLogRecPtr *max_lsn)
 					XLogRegisterData(pending->path, pathlen);
 					*max_lsn = XLogInsert(RM_FILEOPS_ID, XLOG_FILEOPS_RMDIR);
 
-					/* WAL-before-mutation durability (see RENAME above). */
+					/* WAL-before-mutation durability (see DELETE above). */
 					XLogFlush(*max_lsn);
 				}
 				if (rmdir(pending->path) < 0)
@@ -1832,13 +1822,17 @@ FileOpsExecOne(PendingFileOp *pending, bool isCommit, XLogRecPtr *max_lsn)
 			case PENDING_FILEOP_RMTREE:
 
 				/*
-				 * Recursive removal.  We defer the actual tree walk to
-				 * execute time so that a copy operation that registered the
-				 * destination tree at copy-start can have the abort path
-				 * remove whatever ended up on disk by the time of abort.
-				 * Enumerating at registration time would only see the empty
-				 * destination directory created moments earlier.
+				 * Abort-time removal of a FileOpsMkdirTree() directory and
+				 * whatever ended up in it.  The UNDO record, applied earlier
+				 * in the abort, or the caller's own error cleanup has usually
+				 * removed it already.
 				 */
+				{
+					struct stat st;
+
+					if (lstat(pending->path, &st) != 0 || !S_ISDIR(st.st_mode))
+						break;
+				}
 				if (!rmtree(pending->path, true))
 					ereport(WARNING,
 							(errmsg("could not remove directory tree \"%s\"",
@@ -2028,8 +2022,8 @@ PostPrepare_FileOps(void)
 /*
  * Serialized form of a PendingFileOp for the 2PC state file.
  *
- * A fixed header followed by three variable-length blobs (path, newpath,
- * data), in that order.  Self-describing so a crash-recovered COMMIT/ROLLBACK
+ * A fixed header followed by two variable-length blobs (path, data), in that
+ * order.  Self-describing so a crash-recovered COMMIT/ROLLBACK
  * PREPARED -- run by any backend -- can rebuild an equivalent PendingFileOp
  * and hand it to FileOpsExecOne().  Only the fields FileOpsExecOne() reads
  * are carried; nestLevel is irrelevant once prepared.
@@ -2040,56 +2034,54 @@ typedef struct FileOpsTwoPhaseRecord
 	bool		at_commit;		/* run at COMMIT PREPARED vs ROLLBACK PREPARED */
 	off_t		length;			/* truncate length / write offset / mode */
 	uint32		path_len;		/* bytes, including NUL, 0 if none */
-	uint32		newpath_len;	/* bytes, including NUL, 0 if none */
 	uint32		data_len;		/* bytes, 0 if none */
-	/* followed by path, newpath, data */
+	/* followed by path, data */
 } FileOpsTwoPhaseRecord;
 
 /*
  * FileOpsAtPrepare - Serialize deferred commit-time file ops into 2PC state
  *
  * Called from EndPrepare() between StartPrepare() and the END sentinel.  Each
- * pending at_commit=true op (RENAME/DELETE/RMDIR/RMTREE) is written as one
+ * pending at_commit=true op (DELETE/RMDIR) is written as one
  * TWOPHASE_RM_FILEOPS_ID record.  This is what makes those deferred
  * commit-time ops survive PREPARE for COMMIT PREPARED across a crash between
  * PREPARE and the final decision.
  *
- * Abort-time ops (at_commit=false) are intentionally NOT serialized: they are
- * the immediate constructive ops' undo, already covered for ROLLBACK PREPARED
- * by the cluster-wide UNDO chain (ATMAddAborted() in
- * FinishPreparedTransaction()).
+ * The immediate-operation inverse list is serialized separately.  ROLLBACK
+ * PREPARED includes it in its abort record and applies it before releasing
+ * the prepared transaction's locks.
  */
 void
 FileOpsAtPrepare(void)
 {
 	PendingFileOp *pending;
+	char	   *data;
+	uint32		len;
+
+	FileOpsGetAbortData(&data, &len);
+	if (len)
+		RegisterTwoPhaseRecord(TWOPHASE_RM_FILEOPS_ID,
+							   FILEOPS_TWOPHASE_INVERSES, data, len);
+	if (data)
+		pfree(data);
+
 
 	for (pending = pendingFileOps; pending != NULL; pending = pending->next)
 	{
 		FileOpsTwoPhaseRecord rec;
 		char	   *buf;
 		uint32		path_len;
-		uint32		newpath_len;
 		uint32		data_len;
 		uint32		total;
 		char	   *p;
 
-		/*
-		 * Only the deferred commit-time ops (at_commit=true: RENAME/DELETE/
-		 * RMDIR/RMTREE) need to be carried in the 2PC state: they have no
-		 * other durable representation, so without this they were silently
-		 * lost at PREPARE.  The abort-time ops (at_commit=false, registered
-		 * by the immediate constructive ops) are ALREADY covered for ROLLBACK
-		 * PREPARED by the constructive op's cluster-wide UNDO record, handed
-		 * to the async revert machinery via ATMAddAborted() in
-		 * FinishPreparedTransaction(). Serializing them here too would
-		 * double-revert and race with that async path, so skip them.
-		 */
+		/* Immediate inverses were serialized as one blob above. */
 		if (!pending->at_commit)
 			continue;
 
 		path_len = pending->path ? (uint32) strlen(pending->path) + 1 : 0;
-		newpath_len = pending->newpath ? (uint32) strlen(pending->newpath) + 1 : 0;
+		/* No commit-time op has a newpath. */
+		Assert(pending->newpath == NULL);
 		data_len = (pending->data && pending->data_len > 0) ?
 			(uint32) pending->data_len : 0;
 
@@ -2097,10 +2089,9 @@ FileOpsAtPrepare(void)
 		rec.at_commit = pending->at_commit;
 		rec.length = pending->length;
 		rec.path_len = path_len;
-		rec.newpath_len = newpath_len;
 		rec.data_len = data_len;
 
-		total = sizeof(FileOpsTwoPhaseRecord) + path_len + newpath_len + data_len;
+		total = sizeof(FileOpsTwoPhaseRecord) + path_len + data_len;
 		buf = palloc(total);
 		memcpy(buf, &rec, sizeof(FileOpsTwoPhaseRecord));
 		p = buf + sizeof(FileOpsTwoPhaseRecord);
@@ -2108,11 +2099,6 @@ FileOpsAtPrepare(void)
 		{
 			memcpy(p, pending->path, path_len);
 			p += path_len;
-		}
-		if (newpath_len > 0)
-		{
-			memcpy(p, pending->newpath, newpath_len);
-			p += newpath_len;
 		}
 		if (data_len > 0)
 			memcpy(p, pending->data, data_len);
@@ -2160,11 +2146,6 @@ fileops_twophase_do(bool isCommit, void *recdata, uint32 len)
 		pending.path = (char *) p;
 		p += rec.path_len;
 	}
-	if (rec.newpath_len > 0)
-	{
-		pending.newpath = (char *) p;
-		p += rec.newpath_len;
-	}
 	if (rec.data_len > 0)
 	{
 		pending.data = (void *) p;
@@ -2184,21 +2165,23 @@ void
 fileops_twophase_postcommit(FullTransactionId fxid, uint16 info,
 							void *recdata, uint32 len)
 {
-	fileops_twophase_do(true, recdata, len);
+	if (info != FILEOPS_TWOPHASE_INVERSES)
+		fileops_twophase_do(true, recdata, len);
 }
 
 /*
  * fileops_twophase_postabort - ROLLBACK PREPARED callback
  *
- * A no-op in practice: only at_commit=true ops are serialized at PREPARE, and
- * those are not performed on abort.  Kept for symmetry and to defensively
- * discard any at_commit=true record on the abort path.
+ * Immediate inverses are applied with the abort decision, not here.  Deferred
+ * commit-time operations are discarded.
  */
 void
 fileops_twophase_postabort(FullTransactionId fxid, uint16 info,
 						   void *recdata, uint32 len)
 {
-	fileops_twophase_do(false, recdata, len);
+	/* Inverses were applied with the durable abort decision, before unlock. */
+	if (info != FILEOPS_TWOPHASE_INVERSES)
+		fileops_twophase_do(false, recdata, len);
 }
 
 /*
@@ -2307,39 +2290,69 @@ fileops_redo(XLogReaderState *record)
 		case XLOG_FILEOPS_RENAME:
 
 			/*
-			 * idempotent redo of a deferred rename executed at commit on the
-			 * primary.  The record carries oldpath then newpath.  A standby
-			 * (or a re-replay after a primary crash mid-commit) may find the
-			 * rename already applied: source gone.  In that case treat it as
-			 * success rather than failing on a missing source -- this is what
-			 * makes redo converge whether the crash happened before or after
-			 * the physical rename.
+			 * Redo of FileOpsRename(), logged before the rename was made.
+			 * Converge on the state the primary reached, whatever part of it
+			 * is on disk already:
+			 *
+			 * - oldpath absent: the rename was made already.
+			 *
+			 * - newpath absent: make it.
+			 *
+			 * - both present: the replay of earlier records (the CREATE,
+			 * MKDIR or LINK of oldpath since the checkpoint) has made oldpath
+			 * again, or a later operation has; newpath, which the primary
+			 * never let the rename replace, is the later state.  Remove
+			 * oldpath, a directory only if empty, and keep newpath.  Renaming
+			 * over newpath would lose data: after a -> b, b -> c and a new b,
+			 * with a older than the checkpoint, redo of b -> c finds the new
+			 * b and would put it in place of c.  A non-empty oldpath
+			 * directory is left, with a WARNING.
+			 *
+			 * Redo replays onto the current, possibly later, filesystem state
+			 * and cannot tell an object made again by redo from one made at
+			 * the same path later (see README).
 			 */
 			{
 				xl_fileops_rename *xlrec = (xl_fileops_rename *) data;
 				const char *oldpath = data + SizeOfFileOpsRename;
 				const char *newpath = oldpath + xlrec->oldpath_len;
+				struct stat st;
+				struct stat nst;
 
-				if (rename(oldpath, newpath) < 0)
+				if (lstat(oldpath, &st) != 0)
 				{
-					/*
-					 * ENOENT on the source means the rename already took
-					 * effect (or the source never existed on this standby);
-					 * either way the desired end state -- newpath present,
-					 * oldpath absent -- is what we want, so it is not an
-					 * error.
-					 */
 					if (errno != ENOENT)
+						ereport(WARNING,
+								(errcode_for_file_access(),
+								 errmsg("could not stat file \"%s\" during WAL replay: %m",
+										oldpath)));
+				}
+				else if (lstat(newpath, &nst) != 0)
+				{
+					if (errno != ENOENT)
+						ereport(WARNING,
+								(errcode_for_file_access(),
+								 errmsg("could not stat file \"%s\" during WAL replay: %m",
+										newpath)));
+					else if (rename(oldpath, newpath) < 0)
 						ereport(WARNING,
 								(errcode_for_file_access(),
 								 errmsg("could not rename file \"%s\" to \"%s\" during WAL replay: %m",
 										oldpath, newpath)));
+					else if (enableFsync)
+					{
+						fileops_fsync_parent(newpath, data_sync_elevel(ERROR));
+						fileops_fsync_parent(oldpath, data_sync_elevel(ERROR));
+					}
 				}
+				else if ((S_ISDIR(st.st_mode) ? rmdir(oldpath) :
+						  unlink(oldpath)) < 0)
+					ereport(WARNING,
+							(errcode_for_file_access(),
+							 errmsg("could not remove \"%s\", renamed to \"%s\", during WAL replay: %m",
+									oldpath, newpath)));
 				else if (enableFsync)
-				{
-					fileops_fsync_parent(newpath, data_sync_elevel(ERROR));
 					fileops_fsync_parent(oldpath, data_sync_elevel(ERROR));
-				}
 			}
 			break;
 

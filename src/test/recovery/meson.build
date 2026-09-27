@@ -75,6 +75,7 @@ tests += {
       't/063_fileops_2pc.pl',
       't/071_perbackend_undo.pl',
       't/072_perbackend_crash_undo.pl',
+      't/090_fileops_createdb_crash.pl',
     ],
   },
 }

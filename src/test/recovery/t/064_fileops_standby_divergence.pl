@@ -1,17 +1,18 @@
 # Copyright (c) 2024-2026, PostgreSQL Global Development Group
 #
-# Regression test: physical-standby reproduction of FILEOPS deferred
-# DESTRUCTIVE operations (DELETE, RENAME, RMDIR).
+# Regression test: physical-standby reproduction of FILEOPS DELETE, RENAME
+# and RMDIR.
 #
-# These three ops execute on the primary at commit inside
-# FileOpsDoPendingOps().  Each is logged at commit-EXECUTION time with a
-# real, idempotent redo handler, so a physical standby (which only replays
-# WAL, never running FileOpsDoPendingOps) reproduces them and its filesystem
-# converges with the primary's.
+# DELETE and RMDIR execute on the primary at commit inside
+# FileOpsDoPendingOps(), and are logged at commit-EXECUTION time; RENAME is
+# immediate and logged before it is made.  Each has a real, idempotent redo
+# handler, so a physical standby (which only replays WAL, never running
+# FileOpsDoPendingOps) reproduces them and its filesystem converges with the
+# primary's.
 #
 # This test sets up a streaming physical standby, performs a committed
-# deferred DELETE, RENAME, and RMDIR on the primary, waits for catchup, and
-# asserts the standby's filesystem MATCHES the primary's.  It MUST FAIL on the
+# DELETE, RENAME, and RMDIR on the primary, waits for catchup, and asserts
+# the standby's filesystem MATCHES the primary's.  It MUST FAIL on the
 # pre-fix (no-op redo) code -- see the header note in fileops.c and the
 # "prove non-vacuity" comment below.
 #
@@ -72,9 +73,9 @@ ok(-e "$standby_dir/div_delete_me.dat", 'fixture: delete target on standby');
 ok(-e "$standby_dir/div_rename_src.dat", 'fixture: rename source on standby');
 ok(-d "$standby_dir/div_rmdir_me", 'fixture: rmdir target on standby');
 
-# Perform the three deferred destructive ops in a committed transaction on the
-# primary.  Each goes through the FileOps deferred path (at_commit=true) and,
-# with the fix, is WAL-logged at commit-execution.
+# Perform the three ops in a committed transaction on the primary.  The
+# delete and rmdir go through the FileOps deferred path (at_commit=true) and
+# are WAL-logged at commit-execution; the rename is logged when it is made.
 $primary->safe_psql(
 	'postgres', qq(
 BEGIN;
@@ -84,7 +85,7 @@ SELECT test_fileops_rmdir('div_rmdir_me');
 COMMIT;
 ));
 
-# Confirm the primary applied them (the op ran in FileOpsDoPendingOps).
+# Confirm the primary applied them.
 ok(!-e "$primary_dir/div_delete_me.dat", 'primary: delete applied');
 ok(!-e "$primary_dir/div_rename_src.dat", 'primary: rename source gone');
 ok(-e "$primary_dir/div_rename_dst.dat", 'primary: rename dest present');
@@ -98,10 +99,10 @@ $primary->wait_for_catchup($standby);
 # the non-vacuity proof.  Post-fix they pass.
 ok(!-e "$standby_dir/div_delete_me.dat",
 	'deferred DELETE reproduced on standby (file gone)');
-ok(!-e "$standby_dir/div_rename_src.dat",
-	'deferred RENAME reproduced on standby (old name gone)');
+ok( !-e "$standby_dir/div_rename_src.dat",
+	'RENAME reproduced on standby (old name gone)');
 ok(-e "$standby_dir/div_rename_dst.dat",
-	'deferred RENAME reproduced on standby (new name present)');
+	'RENAME reproduced on standby (new name present)');
 ok(!-d "$standby_dir/div_rmdir_me",
 	'deferred RMDIR reproduced on standby (dir gone)');
 

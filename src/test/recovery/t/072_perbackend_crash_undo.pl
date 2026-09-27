@@ -58,10 +58,14 @@ $node->safe_psql('postgres',
 	q{SELECT test_fileops_create_tempfile('pbu_crash_chmod.dat')});
 $node->safe_psql('postgres',
 	qq{SELECT test_fileops_chmod('$chmod_path', 420)});
-is( $node->safe_psql(
-		'postgres', qq{SELECT test_fileops_get_mode('$chmod_path')}),
-	'420',
-	'baseline mode of pre-existing file is 0644');
+SKIP:
+{
+	skip 'POSIX permission semantics required', 1 if $windows_os;
+	is( $node->safe_psql(
+			'postgres', qq{SELECT test_fileops_get_mode('$chmod_path')}),
+		'420',
+		'baseline mode of pre-existing file is 0644');
+}
 
 # ---------------------------------------------------------------------------
 # Open a transaction that produces per-backend UNDO (create a new file and
@@ -81,10 +85,14 @@ SELECT test_fileops_chmod('$chmod_path', 448);      -- 0700, existing file
 # The forward ops are visible on disk while the xact is in progress.
 ok(-e $create_path,
 	'created file exists on disk before crash (in-progress xact)');
-is( $node->safe_psql(
-		'postgres', qq{SELECT test_fileops_get_mode('$chmod_path')}),
-	'448',
-	'chmod applied on disk before crash (in-progress xact)');
+SKIP:
+{
+	skip 'POSIX permission semantics required', 1 if $windows_os;
+	is( $node->safe_psql(
+			'postgres', qq{SELECT test_fileops_get_mode('$chmod_path')}),
+		'448',
+		'chmod applied on disk before crash (in-progress xact)');
+}
 
 # ---------------------------------------------------------------------------
 # Crash immediately: the transaction never commits.  The background psql
@@ -104,11 +112,15 @@ $node->start;
 ok( !-e $create_path,
 	'FILEOPS COMMON-WAL CRASH RECOVERY: created file was REVERTED (unlinked) after crash'
 );
-is( $node->safe_psql(
-		'postgres', qq{SELECT test_fileops_get_mode('$chmod_path')}),
-	'420',
-	'FILEOPS COMMON-WAL CRASH RECOVERY: chmod was REVERTED (0700 -> 0644) after crash'
-);
+SKIP:
+{
+	skip 'POSIX permission semantics required', 1 if $windows_os;
+	is( $node->safe_psql(
+			'postgres', qq{SELECT test_fileops_get_mode('$chmod_path')}),
+		'420',
+		'FILEOPS COMMON-WAL CRASH RECOVERY: chmod was REVERTED (0700 -> 0644) after crash'
+	);
+}
 
 # Recovery must be clean and must NOT have engaged the per-backend UNDO engine
 # for FILEOPS: the revert rides the cluster-wide UNDO engine on the common WAL.

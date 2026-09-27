@@ -8,6 +8,7 @@
  *   - FileOpsTruncate (with UNDO rollback of file size)
  *   - FileOpsChmod (with UNDO rollback of permissions)
  *   - FileOpsLink (with UNDO rollback of hard links)
+ *   - FileOpsRename (with UNDO rollback of the rename)
  *   - FileOpsSetXattr / FileOpsRemoveXattr (with UNDO rollback)
  *
  * Copyright (c) 2024-2026, PostgreSQL Global Development Group
@@ -24,13 +25,19 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/pg_xattr.h"
+#include "access/atm.h"
 #include "access/xlogdefs.h"
 #include "storage/fd.h"
 #include "storage/fileops.h"
+#include "storage/ipc.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/pg_lsn.h"
 
 PG_MODULE_MAGIC;
+
+void		_PG_init(void);
 
 PG_FUNCTION_INFO_V1(test_fileops_create_tempfile);
 PG_FUNCTION_INFO_V1(test_fileops_create);
@@ -44,9 +51,31 @@ PG_FUNCTION_INFO_V1(test_fileops_setxattr);
 PG_FUNCTION_INFO_V1(test_fileops_getxattr);
 PG_FUNCTION_INFO_V1(test_fileops_removexattr);
 PG_FUNCTION_INFO_V1(test_fileops_data_dir);
+PG_FUNCTION_INFO_V1(test_fileops_atm_oldest_lsn);
 PG_FUNCTION_INFO_V1(test_fileops_write);
 PG_FUNCTION_INFO_V1(test_fileops_chown);
 PG_FUNCTION_INFO_V1(test_fileops_symlink);
+
+/*
+ * test_fileops_atm_oldest_lsn - Read the oldest un-reverted ATM last_batch_lsn.
+ *
+ * This is the exact value ATMGetOldestUnrevertedLSN() feeds into
+ * UndoGetOldestBatchLSN() -> KeepLogSeg(), i.e. the LSN that pins UNDO WAL
+ * against recycling.  Returning it lets a recovery test assert, after crash +
+ * restart, that the ATM was faithfully reconstructed and still pins the WAL --
+ * NOT merely that the WAL file happens to exist on disk.  Returns NULL when no
+ * un-reverted entry exists.
+ */
+Datum
+test_fileops_atm_oldest_lsn(PG_FUNCTION_ARGS)
+{
+	XLogRecPtr	lsn = ATMGetOldestUnrevertedLSN();
+
+	if (XLogRecPtrIsInvalid(lsn))
+		PG_RETURN_NULL();
+
+	PG_RETURN_LSN(lsn);
+}
 
 PG_FUNCTION_INFO_V1(test_fileops_delete);
 PG_FUNCTION_INFO_V1(test_fileops_rename);
@@ -373,7 +402,10 @@ test_fileops_delete(PG_FUNCTION_ARGS)
 }
 
 /*
- * test_fileops_rename - Deferred rename via FileOpsRename (always at_commit).
+ * test_fileops_rename - Rename via FileOpsRename.
+ *
+ * The rename is made at once and reversed if the (sub)transaction aborts;
+ * an existing newpath is refused.
  */
 Datum
 test_fileops_rename(PG_FUNCTION_ARGS)
@@ -468,4 +500,95 @@ test_fileops_symlink(PG_FUNCTION_ARGS)
 	pfree(target);
 	pfree(linkpath);
 	PG_RETURN_VOID();
+}
+
+/*
+ * Loaded through shared_preload_libraries, test_fileops can make the
+ * "fileops-inverse-fsync" injection point raise a NOTICE in every process,
+ * the startup process included, from the moment the server starts: a test
+ * counts the fsyncs of the startup undo phase that way, which an
+ * injection_points_attach() issued after startup would miss.
+ */
+static bool notice_inverse_fsync = false;
+
+/*
+ * Loaded the same way, test_fileops can make UndoReadBatchFromWAL() fail once
+ * the server starts, through the "undo-read-batch-fail" injection point: a
+ * test uses this to make the startup undo phase leave a loser's FILEOPS
+ * chain un-applied, so the entry is deferred to the logical revert worker
+ * with ownership NOT yet taken.  The worker then applies the inverses itself,
+ * the fourth path that makes them durable.  The test turns this off and
+ * restarts before the worker runs, so the worker can read the chain.
+ */
+static bool fail_undo_batch_read = false;
+
+/*
+ * Loaded the same way, test_fileops can make the WRITE UNDO apply hit its
+ * stat-error (-1) arm through the "fileops-undo-write-lstat-error" injection
+ * point, to prove a crash loser whose WRITE inverse cannot stat its target is
+ * deferred to the logical revert worker, not silently dropped.  The point lives
+ * in shared memory, so it must be attached before the crash it affects.
+ */
+static bool write_lstat_error = false;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+
+extern PGDLLEXPORT void test_fileops_fsync_notice(const char *name,
+												  const void *private_data,
+												  void *arg);
+void
+test_fileops_fsync_notice(const char *name, const void *private_data,
+						  void *arg)
+{
+	if (arg)
+		elog(NOTICE, "notice triggered for injection point %s (%s)",
+			 name, (char *) arg);
+	else
+		elog(NOTICE, "notice triggered for injection point %s", name);
+}
+
+static void
+test_fileops_shmem_startup(void)
+{
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+#ifdef USE_INJECTION_POINTS
+	/* The points live in shared memory: attach once, from the postmaster. */
+	if (notice_inverse_fsync && !IsUnderPostmaster)
+		InjectionPointAttach("fileops-inverse-fsync", "test_fileops",
+							 "test_fileops_fsync_notice", NULL, 0);
+	/*
+	 * undo-read-batch-fail is presence-only (IS_INJECTION_POINT_ATTACHED),
+	 * so its callback never runs; InjectionPointAttach still needs a real one
+	 * in the named library, so reuse the notice callback.
+	 */
+	if (fail_undo_batch_read && !IsUnderPostmaster)
+		InjectionPointAttach("undo-read-batch-fail", "test_fileops",
+							 "test_fileops_fsync_notice", NULL, 0);
+	/* Presence-only, like undo-read-batch-fail; reuse the notice callback. */
+	if (write_lstat_error && !IsUnderPostmaster)
+		InjectionPointAttach("fileops-undo-write-lstat-error", "test_fileops",
+							 "test_fileops_fsync_notice", NULL, 0);
+#endif
+}
+
+void
+_PG_init(void)
+{
+	if (!process_shared_preload_libraries_in_progress)
+		return;
+	DefineCustomBoolVariable("test_fileops.notice_inverse_fsync",
+							 "Report each fsync of a FILEOPS inverse as a NOTICE.",
+							 NULL, &notice_inverse_fsync, false,
+							 PGC_POSTMASTER, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("test_fileops.fail_undo_batch_read",
+							 "Make UndoReadBatchFromWAL fail, to defer a loser's "
+							 "FILEOPS chain to the logical revert worker.",
+							 NULL, &fail_undo_batch_read, false,
+							 PGC_POSTMASTER, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("test_fileops.write_lstat_error",
+							 "Make the WRITE UNDO apply take its stat-error arm.",
+							 NULL, &write_lstat_error, false,
+							 PGC_POSTMASTER, 0, NULL, NULL, NULL);
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = test_fileops_shmem_startup;
 }

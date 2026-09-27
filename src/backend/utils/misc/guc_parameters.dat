@@ -1946,6 +1946,16 @@
   max => 'MAX_KILOBYTES',
 },
 
+{ name => 'logical_revert_naptime', type => 'int', context => 'PGC_SIGHUP', group => 'VACUUM_AUTOVACUUM',
+  short_desc => 'Time between ATM scan cycles in the logical revert worker.',
+  long_desc => 'The logical revert worker sleeps for this many milliseconds between scans of the ATM for unreverted aborted transactions.',
+  flags => 'GUC_UNIT_MS',
+  variable => 'logical_revert_naptime',
+  boot_val => '1000',
+  min => '100',
+  max => 'INT_MAX',
+},
+
 { name => 'maintenance_io_concurrency', type => 'int', context => 'PGC_USERSET', group => 'RESOURCES_IO',
   short_desc => 'A variant of "effective_io_concurrency" that is used for maintenance work.',
   long_desc => '0 disables simultaneous requests.',
@@ -2037,6 +2047,15 @@
   boot_val => '4',
   min => '0',
   max => 'MAX_BACKENDS',
+},
+
+{ name => 'max_logical_revert_workers', type => 'int', context => 'PGC_POSTMASTER', group => 'VACUUM_AUTOVACUUM',
+  short_desc => 'Maximum number of logical revert background workers.',
+  long_desc => 'Sets the maximum number of logical revert workers that apply UNDO chains for aborted transactions. Acts as a hard ceiling on the number of concurrently running per-database revert workers. Set to 0 to disable the logical revert launcher entirely.',
+  variable => 'max_logical_revert_workers',
+  boot_val => '2',
+  min => '0',
+  max => '64',
 },
 
 { name => 'max_notify_queue_pages', type => 'int', context => 'PGC_POSTMASTER', group => 'RESOURCES_DISK',
@@ -2759,6 +2778,15 @@
   boot_val => '""',
 },
 
+{ name => 'slog_dsa_max_size_mb', type => 'int', context => 'PGC_POSTMASTER', group => 'WAL_SETTINGS',
+  short_desc => 'Maximum shared memory for the sLog DSA area.',
+  long_desc => 'Sets the maximum size (in MB) of the DSA area used by the sLog to back its aborted-transaction radix tree. When this limit is reached, new entries cannot be stored and a WARNING is emitted.',
+  variable => 'slog_dsa_max_size_mb',
+  boot_val => '256',
+  min => '1',
+  max => '16384',
+},
+
 { name => 'ssl', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_SSL',
   short_desc => 'Enables SSL connections.',
   variable => 'EnableSSL',
@@ -3314,6 +3342,16 @@
   min => '64',
   max => '4096',
 },
+
+{ name => 'undo_instant_abort_threshold', type => 'int', context => 'PGC_USERSET', group => 'WAL_SETTINGS',
+  short_desc => 'UNDO size threshold for ATM instant abort.',
+  long_desc => 'When the UNDO a transaction wrote is at least this many bytes, abort uses ATM instant abort (O(1) with asynchronous cleanup by the logical revert worker) instead of synchronous rollback. Set to 0 to always use ATM instant abort. Applies only to transactions whose UNDO is all index UNDO; a transaction that also wrote other UNDO, such as for file operations, is always rolled back synchronously.',
+  variable => 'undo_instant_abort_threshold',
+  boot_val => '65536',
+  min => '0',
+  max => 'INT_MAX',
+},
+
 
 { name => 'undo_max_wal_retention_size', type => 'int', context => 'PGC_SIGHUP', group => 'WAL_SETTINGS',
   short_desc => 'Maximum WAL retained for UNDO rollback before warning.',

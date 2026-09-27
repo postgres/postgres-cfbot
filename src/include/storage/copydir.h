@@ -25,11 +25,11 @@ extern PGDLLIMPORT int file_copy_method;
 /*
  * copydir(): copy a directory tree.
  *
- * If register_for_abort_cleanup is true, the destination tree is registered
- * with FILEOPS for delete-on-abort.  Forward-path callers in transactional
- * commands (CREATE DATABASE STRATEGY=FILE_COPY, ALTER DATABASE SET
- * TABLESPACE) should pass true so that a transaction abort removes the
- * partial copy.  Recovery callers (XLOG_DBASE_CREATE_FILE_COPY redo) must
+ * If register_for_abort_cleanup is true, the destination is created with
+ * FileOpsMkdirTree().  Forward-path callers in transactional commands
+ * (CREATE DATABASE STRATEGY=FILE_COPY, ALTER DATABASE SET TABLESPACE) should
+ * pass true so that a transaction abort, or a crash before commit, removes
+ * the partial copy.  Recovery callers (XLOG_DBASE_CREATE_FILE_COPY redo) must
  * pass false because there is no surrounding transaction context and the
  * redo handler is itself the recovery action.
  */

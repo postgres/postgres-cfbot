@@ -50,12 +50,6 @@
 #define MakeUndoRecPtr(logno, offset) \
 	((((uint64) (logno)) << 40) | ((uint64) (offset)))
 
-/*
- * Legacy define -- no longer used (UNDO records are in WAL, not segment
- * files).  Retained for any code that still references it at compile time.
- */
-#define UNDO_LOG_SEGMENT_SIZE (1024 * 1024 * 1024)
-
 /* Maximum number of concurrent UNDO logs */
 #define MAX_UNDO_LOGS 100
 
@@ -125,6 +119,14 @@ typedef struct UndoLogSharedData
 	pg_atomic_uint64 undo_discard_horizon;
 
 	/*
+	 * Oldest first batch of the in-flight UNDO chains that redo knows of
+	 * (InvalidXLogRecPtr if none).  Set by the startup process, so that a
+	 * standby's restartpoints retain the WAL that crash recovery or promotion
+	 * will walk; no backend of the standby holds those chains.
+	 */
+	pg_atomic_uint64 recovery_undo_lsn;
+
+	/*
 	 * Per-backend first UNDO batch LSN.
 	 *
 	 * Each active backend stores the XLogRecPtr of its first XLOG_UNDO_BATCH
@@ -140,6 +142,11 @@ typedef struct UndoLogSharedData
 	 */
 	pg_atomic_uint64 backend_undo_lsns[FLEXIBLE_ARRAY_MEMBER];
 } UndoLogSharedData;
+
+#ifndef PG_HAVE_ATOMIC_U64_SIMULATION
+StaticAssertDecl(offsetof(UndoLogSharedData, recovery_undo_lsn) % 8 == 0,
+				 "UndoLogSharedData.recovery_undo_lsn must be eight-byte aligned");
+#endif
 
 #ifndef PG_HAVE_ATOMIC_U64_SIMULATION
 StaticAssertDecl(offsetof(UndoLogSharedData, logs) % 8 == 0,
@@ -161,11 +168,6 @@ StaticAssertDecl(sizeof(XLogRecPtr) == sizeof(uint64),
 extern UndoLogSharedData *UndoLogShared;
 
 /* GUC parameters */
-/*
- * Note: UNDO records are embedded in WAL (no separate segment files).
- * UNDO_LOG_SEGMENT_SIZE and MAX_UNDO_LOGS are legacy defines retained
- * for compile-time compatibility.
- */
 extern int	undo_worker_naptime;
 extern int	undo_rollback_overflow_size;
 extern int	undo_max_wal_retention_size;
@@ -194,26 +196,11 @@ extern void UndoSetDiscardHorizon(XLogRecPtr horizon);
 extern void UndoRegisterBatchLSN(XLogRecPtr batch_lsn);
 extern void UndoClearBatchLSN(void);
 extern XLogRecPtr UndoGetOldestBatchLSN(void);
+extern void UndoSetRecoveryBatchLSN(XLogRecPtr lsn);
 
 /*
  * Utility functions
  */
 extern UndoRecPtr UndoLogGetInsertPtr(uint32 log_number);
 extern UndoRecPtr UndoLogGetDiscardPtr(uint32 log_number);
-extern char *UndoLogPath(uint32 log_number, char *path);
-
-/*
- * Legacy no-op stubs -- retained for callers not yet fully updated.
- * These are all no-ops in the UNDO-in-WAL architecture.
- */
-extern void UndoLogSync(void);
-extern void UndoLogCloseFiles(void);
-extern void ExtendUndoLogFile(uint32 log_number, uint64 new_size);
-extern void ExtendUndoLogSmgrFile(uint32 log_number, uint64 logical_end);
-extern UndoRecPtr UndoFlushGetMaxWritePtr(void);
-extern void UndoFlushResetMaxWritePtr(void);
-extern void UndoLogSealAndRotate(uint8 trigger);
-extern void UndoLogDeleteSegmentFile(uint32 log_number);
-extern bool UndoLogTryPressureDiscard(void);
-
 #endif							/* UNDOLOG_H */

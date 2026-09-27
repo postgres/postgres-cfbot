@@ -31,18 +31,19 @@
 #include "access/undormgr.h"
 #include "access/undo_xlog.h"
 #include "miscadmin.h"
+#include "storage/fd.h"
+#include "storage/fileops.h"
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 
 /*
  * ApplyOneUndoRecord - Apply a single UNDO record via RM dispatch
  *
- * Checks the CLR pointer to avoid double-application, then dispatches
- * to the appropriate resource manager's rm_undo callback.
- *
- * Returns true if successfully applied, false if skipped.
+ * Dispatches to the appropriate resource manager's rm_undo callback and
+ * returns its result.  A record of an unknown resource manager is an error:
+ * it cannot be applied here.
  */
-static bool
+static UndoApplyResult
 ApplyOneUndoRecord(UndoRecordHeader *header, char *payload,
 				   UndoRecPtr urec_ptr)
 {
@@ -53,16 +54,18 @@ ApplyOneUndoRecord(UndoRecordHeader *header, char *payload,
 	 * Idempotency design note:
 	 *
 	 * UNDO records are immutable once written to WAL and carry no per-record
-	 * applied marker. Double-application is prevented by page LSN instead:
-	 * each CLR (XLOG_UNDO_APPLY_RECORD) written by rm_undo bumps the heap
-	 * page LSN to the CLR's EndRecPtr.  When the undo apply pass runs after a
-	 * crash, rm_undo reads the buffer via XLogReadBufferForRedo; if the page
-	 * LSN >= CLR LSN (meaning the CLR was already replayed by the forward
-	 * redo pass), the buffer read returns BLK_DONE or BLK_RESTORED and no
-	 * modification is made.
-	 *
-	 * This function is therefore unconditionally correct to call for every
-	 * UNDO record encountered during chain walking.
+	 * applied marker, and nothing records how far a chain walk got.  A chain
+	 * can therefore be walked again after a crash part-way through, or by the
+	 * revert worker after a partial inline apply, so every rm_undo must be
+	 * idempotent.  They are so semantically, not by page LSN: they read the
+	 * target page with ReadBuffer (not XLogReadBufferForRedo) and act only if
+	 * the page still shows the effect being undone.  nbtree and hash kill
+	 * only a slot that is still LP_NORMAL and matches the record's heap TID
+	 * and key digest, so an entry already marked dead is "not found", a
+	 * successful no-op; FILEOPS acts only on an object that still shows the
+	 * operation's effect, recorded in the payload.  A CLR
+	 * (XLOG_UNDO_APPLY_RECORD) only makes the page change itself crash-safe
+	 * through ordinary redo; it does not mark the UNDO record as applied.
 	 */
 
 	/*
@@ -75,7 +78,7 @@ ApplyOneUndoRecord(UndoRecordHeader *header, char *payload,
 				(errmsg("UNDO rollback: unknown RM ID %u for record at %llu, skipping",
 						header->urec_rmid,
 						(unsigned long long) urec_ptr)));
-		return false;
+		return UNDO_APPLY_ERROR;
 	}
 
 	/*
@@ -92,29 +95,22 @@ ApplyOneUndoRecord(UndoRecordHeader *header, char *payload,
 						   urec_ptr);
 
 	if (result == UNDO_APPLY_SUCCESS)
-	{
 		ereport(DEBUG2,
 				(errmsg("UNDO rollback: applied %s record at %llu",
 						rmgr->rm_name,
 						(unsigned long long) urec_ptr)));
-		return true;
-	}
 	else if (result == UNDO_APPLY_SKIPPED)
-	{
 		ereport(DEBUG2,
 				(errmsg("UNDO rollback: skipped %s record at %llu",
 						rmgr->rm_name,
 						(unsigned long long) urec_ptr)));
-		return false;
-	}
 	else
-	{
 		ereport(WARNING,
 				(errmsg("UNDO rollback: error applying %s record at %llu",
 						rmgr->rm_name,
 						(unsigned long long) urec_ptr)));
-		return false;
-	}
+
+	return result;
 }
 
 /*
@@ -148,17 +144,84 @@ ApplyUndoChainFromWAL(XLogRecPtr last_batch_lsn)
  *
  * Pass InvalidXLogRecPtr as stop_at_lsn to walk the entire chain (top-level
  * rollback / recovery semantics).
+ *
+ * Returns true only if the whole chain was walked and no record failed
+ * (UNDO_APPLY_ERROR, or an unknown resource manager).  A record an RM skipped
+ * because its target is gone (UNDO_APPLY_SKIPPED) counts as done.  On false
+ * the caller must hand the chain to the logical revert worker rather than
+ * treat it as applied; every rm_undo is idempotent, so re-walking the records
+ * that did apply is harmless.
  */
 bool
 ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 {
-	XLogRecPtr	batch_lsn;
-	int			records_applied = 0;
-	int			records_skipped = 0;
-	int			batches_processed = 0;
+	UndoChainWalkResult res;
 
 	if (!XLogRecPtrIsValid(last_batch_lsn))
 		return false;
+
+	return ApplyUndoChain(last_batch_lsn, stop_at_lsn, &res) == UNDO_CHAIN_DONE;
+}
+
+/*
+ * ApplyUndoChain - Apply an UNDO chain and report how it went
+ *
+ * UndoWalkChain() plus a summary log line.  Callers that must tell a chain
+ * they could not read (worth retrying) from records that failed to apply
+ * (not worth retrying) use this instead of ApplyUndoChainFromWALBounded().
+ */
+UndoChainOutcome
+ApplyUndoChain(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn,
+			   UndoChainWalkResult *res)
+{
+	UndoChainOutcome outcome;
+
+	outcome = UndoWalkChain(last_batch_lsn, stop_at_lsn, res);
+
+	if (outcome != UNDO_CHAIN_DONE)
+		ereport(WARNING,
+				(errmsg("UNDO rollback from WAL: %d batches, %d records applied, "
+						"%d skipped, %d failed%s",
+						res->batches, res->applied, res->skipped, res->failed,
+						res->complete ? "" : ", chain not fully read")));
+	else
+		ereport(DEBUG1,
+				(errmsg("UNDO rollback from WAL: %d batches, %d records applied, "
+						"%d skipped",
+						res->batches, res->applied, res->skipped)));
+
+	return outcome;
+}
+
+/*
+ * UndoWalkChain - The chain walk shared by every UNDO apply path
+ *
+ * Walks the chain backward from last_batch_lsn via chain_prev, newest batch
+ * first, stopping before any batch at or below stop_at_lsn (pass
+ * InvalidXLogRecPtr for the whole chain).  Within each batch the records are
+ * applied newest first too: they are serialized oldest first, so a forward
+ * scan collects their start offsets and the offsets are then visited in
+ * reverse.  Each record goes to its resource manager via ApplyOneUndoRecord().
+ *
+ * Online rollback (ApplyUndoChainFromWALBounded) and the crash-recovery UNDO
+ * phase (PerformUndoRecovery) both use this, so they apply in the same order.
+ *
+ * *res receives the per-result record counts and whether the whole chain
+ * could be walked: an unreadable batch, a malformed record, or a chain_prev
+ * that does not point strictly backward ends the walk with complete = false
+ * (and unread_batch set; malformed tells the last two, and a batch that is not
+ * a well-formed UNDO batch, from a read failure), after a WARNING.  Nothing
+ * is thrown for those, so a damaged chain cannot take the server down from
+ * inside an abort or from the startup process.  The return value summarizes it; see UndoChainOutcome.
+ */
+UndoChainOutcome
+UndoWalkChain(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn,
+			  UndoChainWalkResult *res)
+{
+	XLogRecPtr	batch_lsn;
+
+	memset(res, 0, sizeof(*res));
+	res->complete = true;
 
 	ereport(DEBUG1,
 			(errmsg("applying UNDO chain from WAL starting at %X/%X "
@@ -183,19 +246,31 @@ ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 		if (XLogRecPtrIsValid(stop_at_lsn) && batch_lsn <= stop_at_lsn)
 			break;
 
+		/*
+		 * A chain can take a long time to apply.  Let the logical revert
+		 * worker be terminated or canceled between batches, where this holds
+		 * no buffer or lock of its own.  The other callers walk the whole
+		 * chain: aborts hold interrupts, and the startup process has no
+		 * interrupt that ends it here.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
 		INJECTION_POINT("undo-apply-before-batch", NULL);
 
-		batch = UndoReadBatchFromWAL(batch_lsn);
+		batch = UndoReadBatchFromWAL(batch_lsn, &res->malformed);
 		if (batch == NULL)
 		{
 			ereport(WARNING,
 					(errmsg("UNDO rollback: could not read batch at %X/%X, "
 							"stopping chain walk",
 							LSN_FORMAT_ARGS(batch_lsn))));
+			res->complete = false;
+			res->unread_batch = batch_lsn;
 			break;
 		}
 
-		batches_processed++;
+		res->batches++;
+		res->oldest_batch = batch_lsn;
 
 		/*
 		 * Walk through records within this batch in reverse order.
@@ -246,6 +321,9 @@ ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 					ereport(WARNING,
 							(errmsg("UNDO rollback: truncated record in batch at %X/%X",
 									LSN_FORMAT_ARGS(batch_lsn))));
+					res->complete = false;
+					res->malformed = true;
+					res->unread_batch = batch_lsn;
 					break;
 				}
 
@@ -257,6 +335,9 @@ ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 					ereport(WARNING,
 							(errmsg("UNDO rollback: invalid record size %u in batch at %X/%X",
 									hdr.urec_len, LSN_FORMAT_ARGS(batch_lsn))));
+					res->complete = false;
+					res->malformed = true;
+					res->unread_batch = batch_lsn;
 					break;
 				}
 
@@ -283,6 +364,7 @@ ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 			for (i = nrecords_in_batch - 1; i >= 0; i--)
 			{
 				UndoRecordHeader header;
+				UndoApplyResult result;
 				char	   *payload = NULL;
 
 				memcpy(&header, record_starts[i], SizeOfUndoRecordHeader);
@@ -290,10 +372,27 @@ ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 				if (header.urec_payload_len > 0)
 					payload = record_starts[i] + SizeOfUndoRecordHeader;
 
-				if (ApplyOneUndoRecord(&header, payload, InvalidUndoRecPtr))
-					records_applied++;
-				else
-					records_skipped++;
+				result = ApplyOneUndoRecord(&header, payload, InvalidUndoRecPtr);
+				if (header.urec_rmid == UNDO_RMID_FILEOPS)
+				{
+					if (result == UNDO_APPLY_SUCCESS)
+						res->fileops_applied = true;
+					else
+						res->fileops_failed = true;
+				}
+
+				switch (result)
+				{
+					case UNDO_APPLY_SUCCESS:
+						res->applied++;
+						break;
+					case UNDO_APPLY_SKIPPED:
+						res->skipped++;
+						break;
+					case UNDO_APPLY_ERROR:
+						res->failed++;
+						break;
+				}
 			}
 
 			MemoryContextSwitchTo(oldctx);
@@ -302,26 +401,39 @@ ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn, XLogRecPtr stop_at_lsn)
 
 		INJECTION_POINT("undo-apply-after-batch", NULL);
 
-		/* Follow chain to previous batch */
-		batch_lsn = batch->header.chain_prev;
-		UndoFreeBatchData(batch);
+		/*
+		 * Follow the chain to the previous batch.  chain_prev must point
+		 * strictly backward (or be invalid, at the start of the chain);
+		 * anything else is a corrupt chain that would loop forever.
+		 */
+		{
+			XLogRecPtr	next_lsn = batch->header.chain_prev;
+
+			UndoFreeBatchData(batch);
+			if (XLogRecPtrIsValid(next_lsn) && next_lsn >= batch_lsn)
+			{
+				ereport(WARNING,
+						(errmsg("UNDO rollback: chain_prev %X/%X of batch at %X/%X "
+								"does not point backward; stopping chain walk",
+								LSN_FORMAT_ARGS(next_lsn),
+								LSN_FORMAT_ARGS(batch_lsn))));
+				res->complete = false;
+				res->malformed = true;
+				res->unread_batch = next_lsn;
+				break;
+			}
+			batch_lsn = next_lsn;
+		}
 	}
 
-	/* Report results */
-	if (records_skipped > 0)
-	{
-		ereport(WARNING,
-				(errmsg("UNDO rollback from WAL: %d batches, %d records applied, "
-						"%d skipped",
-						batches_processed, records_applied, records_skipped)));
-	}
-	else
-	{
-		ereport(DEBUG1,
-				(errmsg("UNDO rollback from WAL complete: %d batches, "
-						"%d records applied",
-						batches_processed, records_applied)));
-	}
+	/*
+	 * The caller may record the walk's result (startup in the ATM, the
+	 * logical revert worker by forgetting the entry), so make the FILEOPS
+	 * inverses it applied durable first, once per path.
+	 */
+	FileOpsSyncInverses(data_sync_elevel(ERROR));
 
-	return (batches_processed > 0);
+	if (!res->complete)
+		return res->malformed ? UNDO_CHAIN_MALFORMED : UNDO_CHAIN_INCOMPLETE;
+	return res->failed > 0 ? UNDO_CHAIN_RECORD_ERROR : UNDO_CHAIN_DONE;
 }

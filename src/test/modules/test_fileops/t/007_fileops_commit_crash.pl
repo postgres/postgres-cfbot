@@ -1,8 +1,9 @@
 # Copyright (c) 2024-2026, PostgreSQL Global Development Group
 
 # A deferred commit-time file operation must survive a crash right after
-# its transaction's commit record: the commit is durable, so the deletion,
-# rename or rmdir it implies must happen too, on restart if not before.
+# its transaction's commit record: the commit is durable, so the deletion
+# or rmdir it implies must happen too, on restart if not before.  A rename
+# is immediate and logged before it is made, so it survives the crash too.
 
 use strict;
 use warnings FATAL => 'all';
@@ -58,6 +59,8 @@ SELECT test_fileops_delete('del.dat');
 SELECT test_fileops_rename('ren.dat', 'ren2.dat');
 SELECT test_fileops_rmdir('rmd');
 COMMIT;});
+ok( !-e "$datadir/ren.dat" && -e "$datadir/ren2.dat",
+	'committed FileOpsRename happened despite the crash');
 TODO:
 {
 	# The deferred ops are WAL-logged only when executed, after the commit
@@ -67,8 +70,6 @@ TODO:
 	  'commit-time FILEOPS ops are logged after the commit record';
 	ok(!-e "$datadir/del.dat",
 		'committed FileOpsDelete happened despite the crash');
-	ok( !-e "$datadir/ren.dat" && -e "$datadir/ren2.dat",
-		'committed FileOpsRename happened despite the crash');
 	ok(!-e "$datadir/rmd",
 		'committed FileOpsRmdir happened despite the crash');
 }

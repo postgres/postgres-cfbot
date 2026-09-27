@@ -1,11 +1,11 @@
 # Copyright (c) 2024-2026, PostgreSQL Global Development Group
 #
-# Test that DEFERRED commit-time FILEOPS (delete/rename) and abort-time
-# filesystem undo survive PREPARE TRANSACTION across a crash.
+# Test that DEFERRED commit-time FILEOPS (delete) and abort-time filesystem
+# undo (of a create and a rename) survive PREPARE TRANSACTION across a crash.
 #
 # The bug: PostPrepare_FileOps() used to free the pending-op list without
-# recording it anywhere, so a transaction PREPARE'd with a deferred delete or
-# rename (at_commit=true) lost that op entirely -- COMMIT PREPARED performed
+# recording it anywhere, so a transaction PREPARE'd with a deferred delete
+# (at_commit=true) lost that op entirely -- COMMIT PREPARED performed
 # nothing -- and an immediate create's abort-time undo was lost for ROLLBACK
 # PREPARED.  The fix serializes the pending ops into the 2PC state file at
 # PREPARE (TWOPHASE_RM_FILEOPS_ID records) and performs them in the FILEOPS
@@ -14,7 +14,8 @@
 #
 # Unlike 063_fileops_2pc.pl (which only exercises chmod, a constructive op
 # reversed via the cluster-wide UNDO chain), this test drives the deferred
-# commit-time delete/rename path -- the one that was silently dropped.
+# commit-time delete path -- the one that was silently dropped -- next to an
+# immediate rename, which ROLLBACK PREPARED must rename back.
 #
 # NB: FILEOPS writes WAL/UNDO only when XLogIsNeeded() (wal_level >= replica),
 # so 2PC durability requires wal_level = replica; this test runs there.
@@ -63,7 +64,7 @@ sub wait_for_exists
 # ================================================================
 # Scenario A: COMMIT PREPARED performs the deferred commit-time ops
 #   - deferred delete of an existing file
-#   - deferred rename of an existing file
+#   - immediate rename of an existing file
 #   - immediate create of a new file (register_delete)
 # PREPARE, crash, restart, then COMMIT PREPARED.  All three must take effect.
 # ================================================================
@@ -89,11 +90,14 @@ SELECT test_fileops_create('$new_a', 384);
 PREPARE TRANSACTION 'fo2pc_commit';
 ));
 
-# While prepared, deferred ops have NOT run yet; the immediate create has.
+# While prepared, the deferred delete has NOT run yet; the immediate rename
+# and create have.
 is(file_exists($del_a), 't',
 	'A: delete deferred -- file still present while prepared');
-is(file_exists($ren_a), 't',
-	'A: rename deferred -- source still present while prepared');
+is(file_exists($ren_a), 'f',
+	'A: rename immediate -- source gone while prepared');
+is(file_exists($ren_a2), 't',
+	'A: rename immediate -- dest present while prepared');
 is(file_exists($new_a), 't', 'A: immediate create present while prepared');
 
 # Crash between PREPARE and COMMIT PREPARED.
@@ -108,15 +112,15 @@ $node->safe_psql('postgres', q{COMMIT PREPARED 'fo2pc_commit'});
 is(file_exists($del_a), 'f',
 	'A: COMMIT PREPARED performed the deferred delete');
 is(file_exists($ren_a), 'f',
-	'A: COMMIT PREPARED performed the rename (source gone)');
+	'A: COMMIT PREPARED kept the rename (source gone)');
 is(file_exists($ren_a2), 't',
-	'A: COMMIT PREPARED performed the rename (dest present)');
+	'A: COMMIT PREPARED kept the rename (dest present)');
 is(file_exists($new_a), 't',
 	'A: created file persists after COMMIT PREPARED');
 
 # ================================================================
 # Scenario B: ROLLBACK PREPARED does NOT perform the deferred commit-time
-# ops, and DOES undo the immediate create.
+# delete, and DOES undo the immediate rename and create.
 # PREPARE, crash, restart, then ROLLBACK PREPARED.
 # ================================================================
 my $del_b = "$datadir/fo2pc_del_b.dat";
@@ -138,6 +142,7 @@ SELECT test_fileops_create('$new_b', 384);
 PREPARE TRANSACTION 'fo2pc_rollback';
 ));
 
+is(file_exists($ren_b2), 't', 'B: immediate rename made while prepared');
 is(file_exists($new_b), 't', 'B: immediate create present while prepared');
 
 # Crash between PREPARE and ROLLBACK PREPARED.
@@ -152,9 +157,9 @@ $node->safe_psql('postgres', q{ROLLBACK PREPARED 'fo2pc_rollback'});
 is(file_exists($del_b), 't',
 	'B: ROLLBACK PREPARED did NOT delete (file still present)');
 is(file_exists($ren_b), 't',
-	'B: ROLLBACK PREPARED did NOT rename (source still present)');
+	'B: ROLLBACK PREPARED renamed back (source present)');
 is(file_exists($ren_b2), 'f',
-	'B: ROLLBACK PREPARED did NOT rename (dest absent)');
+	'B: ROLLBACK PREPARED renamed back (dest absent)');
 # The immediate create is undone by the constructive op's cluster-wide UNDO
 # record via the async revert worker on ROLLBACK PREPARED, so poll.
 wait_for_exists($new_b, 'f',

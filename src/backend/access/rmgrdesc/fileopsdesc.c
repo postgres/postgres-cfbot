@@ -92,8 +92,9 @@ fileops_desc(StringInfo buf, XLogReaderState *record)
 				xl_fileops_mkdir *xlrec = (xl_fileops_mkdir *) data;
 				const char *path = data + SizeOfFileOpsMkdir;
 
-				appendStringInfo(buf, "mkdir \"%s\" mode 0%o",
-								 path, (unsigned int) xlrec->mode);
+				appendStringInfo(buf, "mkdir \"%s\" mode 0%o%s",
+								 path, (unsigned int) xlrec->mode,
+								 (xlrec->flags & FILEOPS_MKDIR_TREE) ? " tree" : "");
 			}
 			break;
 

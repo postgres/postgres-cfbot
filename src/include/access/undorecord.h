@@ -215,8 +215,52 @@ extern Size UndoRecordSetGetSize(UndoRecordSet *uset);
 extern int	UndoRecordSetGetNumRecords(UndoRecordSet *uset);
 
 /* UNDO application during rollback */
+
+/*
+ * Outcome of walking an UNDO chain.
+ *
+ * UNDO_CHAIN_DONE: every batch was read and no record failed.
+ * UNDO_CHAIN_RECORD_ERROR: every batch was read, but some record returned
+ *		UNDO_APPLY_ERROR (or belongs to an unknown rmgr).  Walking the chain
+ *		again would fail the same way.
+ * UNDO_CHAIN_INCOMPLETE: a batch could not be read, so the records it and
+ *		all older batches hold were not applied at all.  The read may succeed
+ *		later.
+ * UNDO_CHAIN_MALFORMED: a batch was read but is not a well-formed part of
+ *		the chain (not an UNDO batch, a truncated record or bad record
+ *		length, or a chain_prev that does not point backward).  The older
+ *		batches were not applied, and walking the chain again cannot help.
+ */
+typedef enum UndoChainOutcome
+{
+	UNDO_CHAIN_DONE,
+	UNDO_CHAIN_RECORD_ERROR,
+	UNDO_CHAIN_INCOMPLETE,
+	UNDO_CHAIN_MALFORMED,
+} UndoChainOutcome;
+
+typedef struct UndoChainWalkResult
+{
+	int			batches;		/* batches read */
+	int			applied;		/* records returning UNDO_APPLY_SUCCESS */
+	int			skipped;		/* records returning UNDO_APPLY_SKIPPED */
+	int			failed;			/* UNDO_APPLY_ERROR, or unknown rmgr */
+	bool		fileops_failed; /* a FILEOPS inverse was not applied */
+	bool		fileops_applied;	/* at least one FILEOPS inverse succeeded */
+	bool		complete;		/* walked to the end (or stop) of the chain */
+	bool		malformed;		/* if !complete, because of a malformed batch */
+	XLogRecPtr	oldest_batch;	/* LSN of the oldest batch read */
+	XLogRecPtr	unread_batch;	/* if !complete, the batch that stopped it */
+} UndoChainWalkResult;
+
+extern UndoChainOutcome UndoWalkChain(XLogRecPtr last_batch_lsn,
+									  XLogRecPtr stop_at_lsn,
+									  UndoChainWalkResult *res);
 extern bool ApplyUndoChainFromWAL(XLogRecPtr last_batch_lsn);
 extern bool ApplyUndoChainFromWALBounded(XLogRecPtr last_batch_lsn,
 										 XLogRecPtr stop_at_lsn);
+extern UndoChainOutcome ApplyUndoChain(XLogRecPtr last_batch_lsn,
+									   XLogRecPtr stop_at_lsn,
+									   UndoChainWalkResult *res);
 
 #endif							/* UNDORECORD_H */

@@ -4,24 +4,26 @@
  *	  UNDO resource manager WAL redo routines
  *
  * This module implements the WAL redo callback for the RM_UNDO_ID resource
- * manager.  It handles replay of:
+ * manager, the recovery-time tracking of transactions that wrote UNDO, the
+ * crash-recovery UNDO phase, and the reader that fetches UNDO batches back
+ * out of WAL.  The records it replays:
  *
- *   XLOG_UNDO_ALLOCATE       - Replay UNDO log space allocation
- *   XLOG_UNDO_DISCARD        - Replay UNDO record discard
- *   XLOG_UNDO_EXTEND         - Replay UNDO log file extension
- *   XLOG_UNDO_APPLY_RECORD   - Replay CLR (Compensation Log Record)
+ *   XLOG_UNDO_INFLIGHT       - The UNDO chains in flight at a checkpoint.
+ *   XLOG_UNDO_BATCH          - A batch of UNDO records.  Redo changes no page;
+ *                              it only tracks the batch as the chain head of
+ *                              its transaction until the commit or abort.
+ *   XLOG_UNDO_APPLY_RECORD   - A CLR (Compensation Log Record): the page
+ *                              change one UNDO record made when applied.
  *
  * CLR Redo Strategy
  * -----------------
- * CLRs for UNDO application use REGBUF_FORCE_IMAGE to store a full page
- * image.  During redo, XLogReadBufferForRedo() will restore the full page
- * image automatically (returning BLK_RESTORED).  No additional replay
- * logic is needed because the page image already contains the result of
- * the UNDO application.
- *
- * This is the same strategy used by ZHeap (log_zheap_undo_actions with
- * REGBUF_FORCE_IMAGE) and is the simplest correct approach for crash
- * recovery of UNDO operations.
+ * CLRs are physiological: the rm_undo callbacks register the target buffer
+ * with REGBUF_STANDARD and describe the change (mark a line pointer LP_DEAD,
+ * or restore a before-image).  Redo goes through XLogReadBufferForRedo(), so
+ * a full-page image is restored when one was taken, and otherwise the change
+ * is replayed when the page LSN shows it is missing.  A CLR does not mark
+ * the UNDO record itself as applied; see ApplyOneUndoRecord() for why
+ * re-applying UNDO is still safe.
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -33,7 +35,9 @@
  */
 #include "postgres.h"
 
+#include "access/atm.h"
 #include "access/htup_details.h"
+#include "access/transam.h"
 #include "access/twophase.h"
 #include "access/undo_xlog.h"
 #include "access/undolog.h"
@@ -48,15 +52,16 @@
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/itemid.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
+
+static void undo_recovery_publish_retention(void);
 
 /*
  * undo_redo - Replay an UNDO WAL record during crash recovery
  *
- * This function handles all UNDO resource manager WAL record types.
- * For CLRs (XLOG_UNDO_APPLY_RECORD), the full page image is restored
- * automatically by XLogReadBufferForRedo(), so no additional replay
- * logic is needed.
+ * This function handles all UNDO resource manager WAL record types; see
+ * the file header for what each one does.
  */
 void
 undo_redo(XLogReaderState *record)
@@ -65,111 +70,8 @@ undo_redo(XLogReaderState *record)
 
 	switch (info)
 	{
-		case XLOG_UNDO_ALLOCATE:
-			{
-				xl_undo_allocate *xlrec = (xl_undo_allocate *) XLogRecGetData(record);
 
-				/*
-				 * During recovery, update the UNDO log's insert pointer to
-				 * reflect this allocation.  This ensures that after crash
-				 * recovery the UNDO log metadata is consistent.
-				 *
-				 * Note: UndoLogShared may not be initialized yet during early
-				 * recovery.  We guard against that.
-				 */
-				if (UndoLogShared != NULL)
-				{
-					UndoLogControl *log = NULL;
-					int			i;
 
-					/*
-					 * Find the log control structure. O(MAX_UNDO_LOGS) scan:
-					 * with MAX_UNDO_LOGS=64 this is acceptable at recovery
-					 * time (called once per record).
-					 */
-					for (i = 0; i < MAX_UNDO_LOGS; i++)
-					{
-						if (UndoLogShared->logs[i].in_use &&
-							UndoLogShared->logs[i].log_number == xlrec->log_number)
-						{
-							log = &UndoLogShared->logs[i];
-							break;
-						}
-					}
-
-					if (log == NULL)
-					{
-						/* Log doesn't exist yet, create it */
-						for (i = 0; i < MAX_UNDO_LOGS; i++)
-						{
-							if (!UndoLogShared->logs[i].in_use)
-							{
-								log = &UndoLogShared->logs[i];
-								log->log_number = xlrec->log_number;
-								pg_atomic_write_u64(&log->insert_ptr, xlrec->start_ptr);
-								log->discard_ptr = MakeUndoRecPtr(xlrec->log_number, 0);
-								log->oldest_xid = InvalidTransactionId;
-								log->in_use = true;
-								break;
-							}
-						}
-					}
-
-					if (log != NULL)
-					{
-						/*
-						 * Advance insert pointer past this allocation. Only
-						 * move forward, never regress -- with coalesced WAL
-						 * records from concurrent backends, a later record
-						 * may cover a range already subsumed by an earlier
-						 * one.
-						 */
-						UndoRecPtr	new_end = xlrec->start_ptr + xlrec->length;
-						UndoRecPtr	cur_ptr = pg_atomic_read_u64(&log->insert_ptr);
-
-						if (new_end > cur_ptr)
-							pg_atomic_write_u64(&log->insert_ptr, new_end);
-					}
-				}
-			}
-			break;
-
-		case XLOG_UNDO_DISCARD:
-			{
-				xl_undo_discard *xlrec = (xl_undo_discard *) XLogRecGetData(record);
-
-				if (UndoLogShared != NULL)
-				{
-					int			i;
-
-					for (i = 0; i < MAX_UNDO_LOGS; i++)
-					{
-						if (UndoLogShared->logs[i].in_use &&
-							UndoLogShared->logs[i].log_number == xlrec->log_number)
-						{
-							UndoLogShared->logs[i].discard_ptr = xlrec->discard_ptr;
-							UndoLogShared->logs[i].oldest_xid = xlrec->oldest_xid;
-							break;
-						}
-					}
-				}
-			}
-			break;
-
-		case XLOG_UNDO_EXTEND:
-			{
-				xl_undo_extend *xlrec = (xl_undo_extend *) XLogRecGetData(record);
-
-				/*
-				 * Extend the UNDO log file to the specified size.  The file
-				 * will be created if it doesn't exist.
-				 *
-				 * With append-only I/O, the smgr-managed file is no longer
-				 * used -- UNDO data is written directly to the segment file.
-				 */
-				ExtendUndoLogFile(xlrec->log_number, xlrec->new_size);
-			}
-			break;
 
 		case XLOG_UNDO_APPLY_RECORD:
 			{
@@ -225,10 +127,10 @@ undo_redo(XLogReaderState *record)
 							{
 								/*
 								 * Restore a table AM's before-image (FLUX).
-								 * The bytes are in the block data
-								 * registered with block reference 0 and are
-								 * opaque here: they are copied back into the
-								 * line pointer's storage verbatim.
+								 * The bytes are in the block data registered
+								 * with block reference 0 and are opaque here:
+								 * they are copied back into the line
+								 * pointer's storage verbatim.
 								 */
 								ItemId		lp = PageGetItemId(page,
 															   xlrec->target_offset);
@@ -267,17 +169,6 @@ undo_redo(XLogReaderState *record)
 			}
 			break;
 
-		case XLOG_UNDO_PAGE_WRITE:
-
-			/*
-			 * XLOG_UNDO_PAGE_WRITE is no longer emitted (append-only I/O
-			 * architecture writes directly via pwrite, not through
-			 * shared_buffers).  We keep this case for backward compatibility
-			 * with WAL from before the transition.  Old records are simply
-			 * ignored -- the UNDO data was already written to the segment
-			 * file by the originating backend.
-			 */
-			break;
 
 		case XLOG_UNDO_BATCH:
 			{
@@ -293,7 +184,8 @@ undo_redo(XLogReaderState *record)
 				 * WAL record and can be re-read later via XLogReadRecord()
 				 * during the undo phase.
 				 */
-				UndoRecoveryTrackBatch(xlrec->xid, record->ReadRecPtr,
+				UndoRecoveryTrackBatch(xlrec->xid, xlrec->dboid,
+									   record->ReadRecPtr,
 									   xlrec->chain_prev,
 									   xlrec->persistence);
 
@@ -306,86 +198,16 @@ undo_redo(XLogReaderState *record)
 			}
 			break;
 
-		case XLOG_UNDO_ROTATE:
+		case XLOG_UNDO_INFLIGHT:
 			{
-				xl_undo_rotate *xlrec = (xl_undo_rotate *) XLogRecGetData(record);
+				xl_undo_inflight *xlrec = (xl_undo_inflight *) XLogRecGetData(record);
 
-				/*
-				 * Replay segment rotation: mark the old log SEALED and the
-				 * new log ACTIVE.  This reconstructs the lifecycle state so
-				 * that after recovery the discard worker can clean up sealed
-				 * logs properly.
-				 */
-				if (UndoLogShared != NULL)
-				{
-					int			j;
-
-					/* Seal the old log */
-					if (xlrec->old_log_number != 0)
-					{
-						for (j = 0; j < MAX_UNDO_LOGS; j++)
-						{
-							UndoLogControl *old_log = &UndoLogShared->logs[j];
-
-							if (old_log->in_use &&
-								old_log->log_number == xlrec->old_log_number)
-							{
-								old_log->state = UNDO_LOG_SEALED;
-								pg_atomic_write_u64(&old_log->seal_ptr,
-													xlrec->old_seal_ptr);
-								break;
-							}
-						}
-					}
-
-					/* Activate the new log (find or create slot) */
-					{
-						UndoLogControl *new_log = NULL;
-						int			new_slot = -1;
-
-						/* Check if it already exists (idempotent replay) */
-						for (j = 0; j < MAX_UNDO_LOGS; j++)
-						{
-							if (UndoLogShared->logs[j].in_use &&
-								UndoLogShared->logs[j].log_number == xlrec->new_log_number)
-							{
-								new_log = &UndoLogShared->logs[j];
-								new_slot = j;
-								break;
-							}
-						}
-
-						/* If not found, allocate a free slot */
-						if (new_log == NULL)
-						{
-							for (j = 0; j < MAX_UNDO_LOGS; j++)
-							{
-								if (!UndoLogShared->logs[j].in_use)
-								{
-									new_log = &UndoLogShared->logs[j];
-									new_slot = j;
-									new_log->log_number = xlrec->new_log_number;
-									pg_atomic_write_u64(&new_log->insert_ptr,
-														MakeUndoRecPtr(xlrec->new_log_number, 0));
-									new_log->discard_ptr = MakeUndoRecPtr(xlrec->new_log_number, 0);
-									new_log->oldest_xid = InvalidTransactionId;
-									new_log->in_use = true;
-									break;
-								}
-							}
-						}
-
-						if (new_log != NULL)
-						{
-							new_log->state = UNDO_LOG_ACTIVE;
-							pg_atomic_write_u64(&new_log->seal_ptr, InvalidUndoRecPtr);
-							pg_atomic_write_u32(&UndoLogShared->active_log_idx,
-												(uint32) new_slot);
-						}
-					}
-				}
+				for (uint32 i = 0; i < xlrec->nxacts; i++)
+					UndoRecoveryTrackInflight(&xlrec->xacts[i]);
+				undo_recovery_publish_retention();
 			}
 			break;
+
 
 		default:
 			elog(PANIC, "undo_redo: unknown op code %u", info);
@@ -406,8 +228,16 @@ undo_redo(XLogReaderState *record)
 typedef struct UndoRecoveryEntry
 {
 	TransactionId xid;			/* hash key */
+	Oid			dboid;			/* database the transaction ran in */
 	XLogRecPtr	last_batch_lsn[NUndoPersistenceLevels]; /* chain heads per
 														 * persistence level */
+
+	/*
+	 * Oldest batch known to be in each chain: the chain_prev of the oldest
+	 * batch redo saw, or that batch itself if it starts the chain.  Redo
+	 * starts at the last checkpoint and so may not see the first batches.
+	 */
+	XLogRecPtr	first_batch_lsn[NUndoPersistenceLevels];
 	char		status;			/* in use */
 } UndoRecoveryEntry;
 
@@ -428,97 +258,186 @@ static int	undo_recovery_capacity = 0;
 #define UNDO_RECOVERY_MAX_ENTRIES	1048576
 
 /*
+ * undo_recovery_entry - Find or create the recovery entry for xid
+ *
+ * Returns NULL if the entry would exceed UNDO_RECOVERY_MAX_ENTRIES.
+ */
+static UndoRecoveryEntry *
+undo_recovery_entry(TransactionId xid, Oid dboid)
+{
+	int			i;
+	UndoRecoveryEntry *entry;
+
+	for (i = 0; i < undo_recovery_nentries; i++)
+	{
+		if (undo_recovery_entries[i].xid == xid)
+			return &undo_recovery_entries[i];
+	}
+
+	/* Safety cap: refuse to track more XIDs to prevent OOM */
+	if (undo_recovery_nentries >= UNDO_RECOVERY_MAX_ENTRIES)
+	{
+		static bool warned = false;
+
+		if (!warned)
+		{
+			ereport(WARNING,
+					(errmsg("UNDO recovery: reached maximum tracked transaction limit (%d)",
+							UNDO_RECOVERY_MAX_ENTRIES),
+					 errhint("Transactions beyond this limit will not be automatically rolled back. "
+							 "Manual intervention may be required after recovery completes.")));
+			warned = true;
+		}
+		return NULL;
+	}
+
+	if (undo_recovery_nentries >= undo_recovery_capacity)
+	{
+		int			new_capacity = (undo_recovery_capacity == 0) ? 64 :
+			undo_recovery_capacity * 2;
+		UndoRecoveryEntry *new_entries;
+
+		/* Clamp doubling to not exceed the safety cap */
+		if (new_capacity > UNDO_RECOVERY_MAX_ENTRIES)
+			new_capacity = UNDO_RECOVERY_MAX_ENTRIES;
+
+		if (undo_recovery_entries == NULL)
+		{
+			new_entries = (UndoRecoveryEntry *)
+				palloc0(sizeof(UndoRecoveryEntry) * new_capacity);
+		}
+		else
+		{
+			new_entries = (UndoRecoveryEntry *)
+				repalloc(undo_recovery_entries,
+						 sizeof(UndoRecoveryEntry) * new_capacity);
+			memset(&new_entries[undo_recovery_capacity], 0,
+				   sizeof(UndoRecoveryEntry) * (new_capacity - undo_recovery_capacity));
+		}
+		undo_recovery_entries = new_entries;
+		undo_recovery_capacity = new_capacity;
+	}
+
+	entry = &undo_recovery_entries[undo_recovery_nentries++];
+	entry->xid = xid;
+	entry->dboid = dboid;
+	for (i = 0; i < NUndoPersistenceLevels; i++)
+	{
+		entry->last_batch_lsn[i] = InvalidXLogRecPtr;
+		entry->first_batch_lsn[i] = InvalidXLogRecPtr;
+	}
+	return entry;
+}
+
+/*
  * UndoRecoveryTrackBatch - Record an UNDO batch during WAL redo
  *
  * Called from the XLOG_UNDO_BATCH redo handler to track which
  * transactions have UNDO data that may need rollback.
  */
 void
-UndoRecoveryTrackBatch(TransactionId xid, XLogRecPtr batch_lsn,
+UndoRecoveryTrackBatch(TransactionId xid, Oid dboid, XLogRecPtr batch_lsn,
 					   XLogRecPtr chain_prev,
 					   UndoPersistenceLevel persistence)
 {
-	int			i;
-	UndoRecoveryEntry *entry = NULL;
+	UndoRecoveryEntry *entry;
 
 	if (!TransactionIdIsValid(xid))
 		return;
 
-	/* Find existing entry for this XID */
-	for (i = 0; i < undo_recovery_nentries; i++)
-	{
-		if (undo_recovery_entries[i].xid == xid)
-		{
-			entry = &undo_recovery_entries[i];
-			break;
-		}
-	}
-
-	/* Create new entry if needed */
+	entry = undo_recovery_entry(xid, dboid);
 	if (entry == NULL)
-	{
-		/* Safety cap: refuse to track more XIDs to prevent OOM */
-		if (undo_recovery_nentries >= UNDO_RECOVERY_MAX_ENTRIES)
-		{
-			static bool warned = false;
+		return;
 
-			if (!warned)
-			{
-				ereport(WARNING,
-						(errmsg("UNDO recovery: reached maximum tracked transaction limit (%d)",
-								UNDO_RECOVERY_MAX_ENTRIES),
-						 errhint("Transactions beyond this limit will not be automatically rolled back. "
-								 "Manual intervention may be required after recovery completes.")));
-				warned = true;
-			}
-			return;
-		}
-
-		if (undo_recovery_nentries >= undo_recovery_capacity)
-		{
-			int			new_capacity = (undo_recovery_capacity == 0) ? 64 :
-				undo_recovery_capacity * 2;
-			UndoRecoveryEntry *new_entries;
-
-			/* Clamp doubling to not exceed the safety cap */
-			if (new_capacity > UNDO_RECOVERY_MAX_ENTRIES)
-				new_capacity = UNDO_RECOVERY_MAX_ENTRIES;
-
-			if (undo_recovery_entries == NULL)
-			{
-				new_entries = (UndoRecoveryEntry *)
-					palloc0(sizeof(UndoRecoveryEntry) * new_capacity);
-			}
-			else
-			{
-				new_entries = (UndoRecoveryEntry *)
-					repalloc(undo_recovery_entries,
-							 sizeof(UndoRecoveryEntry) * new_capacity);
-				memset(&new_entries[undo_recovery_capacity], 0,
-					   sizeof(UndoRecoveryEntry) * (new_capacity - undo_recovery_capacity));
-			}
-			undo_recovery_entries = new_entries;
-			undo_recovery_capacity = new_capacity;
-		}
-
-		entry = &undo_recovery_entries[undo_recovery_nentries++];
-		entry->xid = xid;
-		for (i = 0; i < NUndoPersistenceLevels; i++)
-			entry->last_batch_lsn[i] = InvalidXLogRecPtr;
-	}
-
-	/* Update the chain head for this persistence level */
+	/* Update the chain head and the oldest known batch of this level */
 	if (persistence < NUndoPersistenceLevels)
+	{
+		XLogRecPtr	first = XLogRecPtrIsValid(chain_prev) ? chain_prev :
+			batch_lsn;
+
 		entry->last_batch_lsn[persistence] = batch_lsn;
+		if (!XLogRecPtrIsValid(entry->first_batch_lsn[persistence]) ||
+			first < entry->first_batch_lsn[persistence])
+			entry->first_batch_lsn[persistence] = first;
+	}
+}
+
+/*
+ * UndoRecoveryTrackInflight - Merge a checkpoint's in-flight chain
+ *
+ * Called from the XLOG_UNDO_INFLIGHT redo handler.  The checkpointer read
+ * the chain after the redo pointer, so redo may already have seen newer
+ * batches of it: keep the newest head and the oldest first batch.  A
+ * transaction whose outcome clog already knows finished between the read and
+ * the record; it is not a loser.
+ */
+void
+UndoRecoveryTrackInflight(const xl_undo_inflight_xact *x)
+{
+	UndoRecoveryEntry *entry;
+	bool		any = false;
+
+	if (!TransactionIdIsValid(x->xid))
+		return;
+	for (int i = 0; i < NUndoPersistenceLevels; i++)
+		any |= XLogRecPtrIsValid(x->last_batch_lsn[i]);
+	if (!any || TransactionIdDidCommit(x->xid) || TransactionIdDidAbort(x->xid))
+		return;
+
+	entry = undo_recovery_entry(x->xid, x->dboid);
+	if (entry == NULL)
+		return;
+
+	for (int i = 0; i < NUndoPersistenceLevels; i++)
+	{
+		if (XLogRecPtrIsValid(x->last_batch_lsn[i]) &&
+			x->last_batch_lsn[i] > entry->last_batch_lsn[i])
+			entry->last_batch_lsn[i] = x->last_batch_lsn[i];
+		if (XLogRecPtrIsValid(x->first_batch_lsn[i]) &&
+			(!XLogRecPtrIsValid(entry->first_batch_lsn[i]) ||
+			 x->first_batch_lsn[i] < entry->first_batch_lsn[i]))
+			entry->first_batch_lsn[i] = x->first_batch_lsn[i];
+	}
+}
+
+/*
+ * undo_recovery_publish_retention - Keep the WAL of the tracked chains
+ *
+ * On a standby nothing else retains it: its restartpoints would recycle the
+ * segments that promotion's UNDO phase has to read.
+ */
+static void
+undo_recovery_publish_retention(void)
+{
+	XLogRecPtr	oldest = InvalidXLogRecPtr;
+
+	for (int i = 0; i < undo_recovery_nentries; i++)
+	{
+		UndoRecoveryEntry *e = &undo_recovery_entries[i];
+
+		if (!TransactionIdIsValid(e->xid))
+			continue;
+		for (int j = 0; j < NUndoPersistenceLevels; j++)
+		{
+			XLogRecPtr	lsn = XLogRecPtrIsValid(e->first_batch_lsn[j]) ?
+				e->first_batch_lsn[j] : e->last_batch_lsn[j];
+
+			if (XLogRecPtrIsValid(lsn) &&
+				(!XLogRecPtrIsValid(oldest) || lsn < oldest))
+				oldest = lsn;
+		}
+	}
+	UndoSetRecoveryBatchLSN(oldest);
 }
 
 /*
  * UndoRecoveryRemoveXid - Remove an XID from recovery tracking
  *
  * Called when a commit or abort record is redone during recovery.
- * Committed transactions don't need UNDO rollback.  Aborted transactions
- * that were already fully rolled back (abort record present) also don't
- * need further work.
+ * Committed transactions don't need UNDO rollback.  Before an abort record
+ * is written, generic UNDO is either applied or registered in the ATM.
+ * FILEOPS inverses are embedded in the abort record and applied by redo.
+ * The ATM retains any outstanding generic rollback independently.
  */
 void
 UndoRecoveryRemoveXid(TransactionId xid)
@@ -569,6 +488,8 @@ typedef struct DeferredUndoXact
 	TransactionId xid;
 	Oid			dboid;
 	XLogRecPtr	last_batch_lsn;
+	XLogRecPtr	first_batch_lsn;	/* oldest batch: WAL to retain */
+	bool		fileops_owned;	/* startup completed the FILEOPS inverses */
 	struct DeferredUndoXact *next;
 } DeferredUndoXact;
 
@@ -586,8 +507,12 @@ static DeferredUndoXact *deferred_undo_xacts = NULL;
  *
  * If UNDO application is skipped (e.g., due to syscache not being available),
  * the transaction is tracked for deferred processing after recovery completes.
+ *
+ * Return true if any FILEOPS inverse succeeded.  Before admitting writers,
+ * recovery must checkpoint those effects and any deferred ownership, so another
+ * crash cannot re-track the loser and undo a committed reuse of its paths.
  */
-void
+bool
 PerformUndoRecovery(void)
 {
 	int			i,
@@ -596,6 +521,7 @@ PerformUndoRecovery(void)
 	int			total_records = 0;
 	int			pending_xacts = 0;
 	int			deferred_xacts = 0;
+	bool		fileops_applied = false;
 
 	/* Count pending transactions for the opening log message. */
 	for (i = 0; i < undo_recovery_nentries; i++)
@@ -613,6 +539,8 @@ PerformUndoRecovery(void)
 	{
 		UndoRecoveryEntry *entry = &undo_recovery_entries[i];
 		bool		any_skipped = false;
+		bool		fileops_owned = true;
+		XLogRecPtr	perm_first = InvalidXLogRecPtr;
 
 		if (!TransactionIdIsValid(entry->xid))
 			continue;
@@ -658,121 +586,51 @@ PerformUndoRecovery(void)
 			if (j == UNDOPERSISTENCE_TEMP || j == UNDOPERSISTENCE_UNLOGGED)
 				continue;
 
-			while (XLogRecPtrIsValid(batch_lsn))
+			if (XLogRecPtrIsValid(batch_lsn))
 			{
-				UndoBatchData *batch;
-				char	   *pos;
-				char	   *end;
+				UndoChainWalkResult res;
 
-				batch = UndoReadBatchFromWAL(batch_lsn);
-				if (batch == NULL)
+				/*
+				 * Same walk, and so the same newest-first order, as online
+				 * rollback.  A batch that cannot be read (fsync=off, or WAL
+				 * recycled too early) ends the walk with a WARNING rather
+				 * than a PANIC, which would make the cluster unrecoverable;
+				 * whatever it covered is left for VACUUM.
+				 */
+				(void) UndoWalkChain(batch_lsn, InvalidXLogRecPtr, &res);
+				total_records += res.applied + res.skipped + res.failed;
+				fileops_owned &= res.complete && !res.fileops_failed;
+				fileops_applied |= res.fileops_applied;
+
+				/*
+				 * A record skipped here (an index AM needs the syscache,
+				 * which the startup process does not have) or one that failed
+				 * is handed to the logical revert worker, which walks the
+				 * whole chain again.  FILEOPS cannot distinguish a new file
+				 * at the same path, so the ATM must remember when startup
+				 * completed all its inverses.  Index callbacks skip their
+				 * records there too (see UndoApplyInline).
+				 */
+				if (!res.complete || res.skipped > 0 || res.failed > 0)
+					any_skipped = true;
+
+				/*
+				 * The deferred entry must retain WAL from the chain's first
+				 * batch.  A complete walk read it (oldest_batch).  One that
+				 * stopped early did not, but the batch it could not read and
+				 * the oldest batch redo knows of are no newer than the ones
+				 * it did read; take the oldest of all.
+				 */
+				if (j == UNDOPERSISTENCE_PERMANENT)
 				{
-					/*
-					 * A missing or unreadable UNDO batch during crash
-					 * recovery.  This can happen with fsync=off when WAL was
-					 * not persisted before the crash, or when WAL segments
-					 * were recycled before the UNDO chain was fully applied.
-					 *
-					 * Rather than PANIC (which makes the database permanently
-					 * unrecoverable), skip this transaction's rollback.  The
-					 * affected tuples will retain their UNCOMMITTED flag and
-					 * be invisible until VACUUM removes them.  This is a
-					 * bounded anomaly similar to the old hash-overflow
-					 * degraded mode.
-					 */
-					ereport(WARNING,
-							(errmsg("UNDO recovery: could not read batch at %X/%X "
-									"for transaction %u; skipping rollback "
-									"(affected tuples will be cleaned by VACUUM)",
-									LSN_FORMAT_ARGS(batch_lsn),
-									entry->xid)));
-					break;		/* skip remaining chain for this persistence
-								 * level */
-				}
-
-				/* Walk records within this batch */
-				pos = batch->payload;
-				end = pos + batch->payload_len;
-
-				while (pos < end)
-				{
-					UndoRecordHeader header;
-					char	   *payload = NULL;
-
-					if ((Size) (end - pos) < SizeOfUndoRecordHeader)
-						break;
-
-					memcpy(&header, pos, SizeOfUndoRecordHeader);
-
-					if (header.urec_len < SizeOfUndoRecordHeader ||
-						(Size) (end - pos) < header.urec_len)
-						break;
-
-					if (header.urec_payload_len > 0)
-						payload = pos + SizeOfUndoRecordHeader;
-
-					/*
-					 * Apply this UNDO record via the RM dispatch table.
-					 *
-					 * Idempotency note: UNDO records are immutable in WAL and
-					 * carry no per-record applied marker; the CLR is a
-					 * separate WAL record.  Double-application is prevented
-					 * by page LSN: each CLR bumps the heap page LSN to the
-					 * CLR's EndRecPtr.  When rm_undo reads the buffer,
-					 * XLogReadBufferForRedo returns BLK_DONE or BLK_RESTORED
-					 * for pages that were already restored by a CLR during
-					 * the forward redo pass, preventing re-application.
-					 */
-					{
-						const UndoRmgrData *rmgr = GetUndoRmgr(header.urec_rmid);
-
-						if (rmgr != NULL)
-						{
-							UndoApplyResult result;
-
-							result = rmgr->rm_undo(header.urec_rmid,
-												   header.urec_info,
-												   header.urec_xid,
-												   header.urec_reloid,
-												   payload,
-												   header.urec_payload_len,
-												   InvalidUndoRecPtr);
-							total_records++;
-
-							/*
-							 * If any UNDO record was skipped (e.g., due to
-							 * syscache not being initialized), mark this
-							 * transaction for deferred processing by the
-							 * logical revert worker.
-							 */
-							if (result == UNDO_APPLY_SKIPPED)
-								any_skipped = true;
-						}
-					}
-
-					pos += header.urec_len;
-				}
-
-				/* Follow chain to previous batch */
-				{
-					XLogRecPtr	next_lsn = batch->header.chain_prev;
-
-					/*
-					 * Guard against circular or forward-pointing chains:
-					 * chain_prev must be strictly older (smaller LSN) than
-					 * the current batch or invalid (end of chain).  A
-					 * forward- pointing chain_prev would cause an infinite
-					 * loop.
-					 */
-					if (XLogRecPtrIsValid(next_lsn) && next_lsn >= batch_lsn)
-						ereport(PANIC,
-								(errmsg("UNDO recovery: chain_prev %X/%X >= batch_lsn %X/%X "
-										"for transaction %u; corrupt UNDO chain",
-										LSN_FORMAT_ARGS(next_lsn),
-										LSN_FORMAT_ARGS(batch_lsn),
-										entry->xid)));
-					UndoFreeBatchData(batch);
-					batch_lsn = next_lsn;
+					perm_first = entry->first_batch_lsn[j];
+					if (XLogRecPtrIsValid(res.oldest_batch) &&
+						res.oldest_batch < perm_first)
+						perm_first = res.oldest_batch;
+					if (!res.complete &&
+						XLogRecPtrIsValid(res.unread_batch) &&
+						res.unread_batch < perm_first)
+						perm_first = res.unread_batch;
 				}
 			}
 		}
@@ -780,9 +638,14 @@ PerformUndoRecovery(void)
 		/*
 		 * If any UNDO records were skipped (e.g., due to syscache not being
 		 * initialized during early recovery), track this transaction for
-		 * deferred processing.  We cannot apply it during recovery, so we add
-		 * it to an in-memory list that will be applied after recovery
-		 * completes (when InRedo is set to false).
+		 * deferred processing.  ATMAddAborted() writes WAL, which isn't
+		 * allowed yet, so we put the entry into the shared ATM without WAL
+		 * now and remember it on an in-memory list that
+		 * FlushDeferredUndoXacts() WAL-logs once recovery is over.
+		 *
+		 * The entry has to be in the ATM now, not later: the end-of-recovery
+		 * checkpoint runs before FlushDeferredUndoXacts(), and only the ATM
+		 * keeps that checkpoint from recycling the WAL that holds this chain.
 		 *
 		 * Use the permanent persistence level's last_batch_lsn for tracking.
 		 * TEMP and UNLOGGED are skipped during crash recovery anyway.
@@ -796,11 +659,22 @@ PerformUndoRecovery(void)
 				DeferredUndoXact *deferred = (DeferredUndoXact *)
 					palloc(sizeof(DeferredUndoXact));
 
+				/*
+				 * The database comes from the WAL, not MyDatabaseId: the
+				 * startup process is connected to no database, and the revert
+				 * worker that will pick this up only serves entries of its
+				 * own database.
+				 */
 				deferred->xid = entry->xid;
-				deferred->dboid = MyDatabaseId;
+				deferred->dboid = entry->dboid;
 				deferred->last_batch_lsn = perm_lsn;
+				deferred->first_batch_lsn = perm_first;
+				deferred->fileops_owned = fileops_owned;
 				deferred->next = deferred_undo_xacts;
 				deferred_undo_xacts = deferred;
+
+				ATMAddAbortedNoWAL(deferred->xid, deferred->dboid, perm_lsn,
+								   perm_first, fileops_owned);
 
 				deferred_xacts++;
 				ereport(LOG,
@@ -834,20 +708,22 @@ PerformUndoRecovery(void)
 	}
 	undo_recovery_nentries = 0;
 	undo_recovery_capacity = 0;
+
+	return fileops_applied;
 }
 
 /*
- * FlushDeferredUndoXacts - Apply UNDO chains deferred during recovery
+ * FlushDeferredUndoXacts - WAL-log the transactions deferred to the ATM
  *
- * Called after recovery completes (when InRedo is false) for any transactions
- * that were deferred during UNDO recovery because their records could not be
- * applied inline (e.g. the syscache was not yet initialized).
+ * Called after recovery completes (when InRedo is false).  PerformUndoRecovery()
+ * already put each deferred transaction into the Aborted Transaction Map
+ * without WAL; this writes the XLOG_ATM_ABORT records, including ownership of
+ * the completed FILEOPS inverses, so standbys learn about them too.
+ * The logical revert worker of each entry's database processes them
+ * asynchronously.
  *
- * These chains cannot be applied from the startup process: applying UNDO opens
- * relations, which requires the syscache/relcache that only a database-
- * connected backend has.  Until an asynchronous applier exists, the deferred
- * chains are reported and dropped here so recovery can complete; the WAL
- * holding them is retained by UndoGetOldestBatchLSN's other checks.
+ * This must be called after InRedo is set to false because ATMAddAborted()
+ * writes WAL, which is not allowed during recovery.
  */
 void
 FlushDeferredUndoXacts(void)
@@ -858,19 +734,25 @@ FlushDeferredUndoXacts(void)
 	if (deferred_undo_xacts == NULL)
 		return;
 
-	/* Walk the list, reporting each deferred transaction. */
+	ereport(LOG,
+			(errmsg("flushing deferred UNDO transactions to ATM")));
+
+	/* Walk the list and add each transaction to the ATM */
 	while (deferred_undo_xacts != NULL)
 	{
 		deferred = deferred_undo_xacts;
 		deferred_undo_xacts = deferred->next;
+
+		ATMAddAborted(deferred->xid, deferred->dboid, deferred->last_batch_lsn,
+					  deferred->first_batch_lsn, deferred->fileops_owned);
 		count++;
+
 		pfree(deferred);
 	}
 
 	if (count > 0)
-		ereport(WARNING,
-				(errmsg("%d transaction(s) with UNDO were deferred during recovery "
-						"and could not be applied from the startup process",
+		ereport(LOG,
+				(errmsg("added %d deferred transaction(s) to ATM for async UNDO processing",
 						count)));
 }
 
@@ -886,7 +768,9 @@ FlushDeferredUndoXacts(void)
  * Returns a palloc'd UndoBatchData containing the header and a copy
  * of the payload.  The caller must pfree via UndoFreeBatchData().
  *
- * Returns NULL if the record cannot be read or is not an UNDO batch.
+ * Returns NULL if the record cannot be read or is not an UNDO batch.  In the
+ * latter case, a record that was read but is not a well-formed UNDO batch,
+ * *malformed is set: reading it again will not help.
  */
 /*
  * Module-level cached XLogReader for UndoReadBatchFromWAL.
@@ -962,7 +846,7 @@ UndoValidateBatchLSN(XLogRecPtr batch_lsn)
 }
 
 UndoBatchData *
-UndoReadBatchFromWAL(XLogRecPtr batch_lsn)
+UndoReadBatchFromWAL(XLogRecPtr batch_lsn, bool *malformed)
 {
 	XLogRecord *record_hdr;
 	char	   *errormsg = NULL;
@@ -972,8 +856,19 @@ UndoReadBatchFromWAL(XLogRecPtr batch_lsn)
 	Size		record_len;
 	Size		payload_offset;
 
+	*malformed = false;
+
 	if (!XLogRecPtrIsValid(batch_lsn))
 		return NULL;
+
+	/* Test hook: simulate a batch that cannot be read right now. */
+	if (IS_INJECTION_POINT_ATTACHED("undo-read-batch-fail"))
+	{
+		ereport(WARNING,
+				(errmsg("UNDO batch at %X/%X: read failed (injection point)",
+						LSN_FORMAT_ARGS(batch_lsn))));
+		return NULL;
+	}
 
 	/*
 	 * Safety check: verify the WAL segment containing this LSN has not been
@@ -1082,6 +977,7 @@ UndoReadBatchFromWAL(XLogRecPtr batch_lsn)
 			ereport(WARNING,
 					(errmsg("UNDO batch record at %X/%X too short: %zu bytes",
 							LSN_FORMAT_ARGS(batch_lsn), record_len)));
+			*malformed = true;
 			return NULL;
 		}
 
@@ -1095,6 +991,7 @@ UndoReadBatchFromWAL(XLogRecPtr batch_lsn)
 						LSN_FORMAT_ARGS(batch_lsn),
 						XLogRecGetRmid(undo_batch_reader),
 						XLogRecGetInfo(undo_batch_reader) & ~XLR_INFO_MASK)));
+		*malformed = true;
 		return NULL;
 	}
 
@@ -1113,6 +1010,7 @@ UndoReadBatchFromWAL(XLogRecPtr batch_lsn)
 						"record data (offset %zu, record_len %zu)",
 						LSN_FORMAT_ARGS(batch_lsn),
 						xlrec->total_len, payload_offset, record_len)));
+		*malformed = true;
 		return NULL;
 	}
 

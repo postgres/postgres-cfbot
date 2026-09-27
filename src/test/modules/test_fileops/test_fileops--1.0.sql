@@ -63,12 +63,18 @@ CREATE FUNCTION test_fileops_data_dir()
    RETURNS text
    AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- Read the oldest un-reverted ATM last_batch_lsn (the LSN that pins UNDO WAL
+-- against recycling via ATMGetOldestUnrevertedLSN -> KeepLogSeg).  NULL when
+-- no un-reverted entry exists.  Test-only, for the retention-invariant test.
+CREATE FUNCTION test_fileops_atm_oldest_lsn()
+   RETURNS pg_lsn
+   AS 'MODULE_PATHNAME' LANGUAGE C;
 -- Deferred delete at commit (uses FileOpsDelete, at_commit=true)
 CREATE FUNCTION test_fileops_delete(filepath text)
    RETURNS void
    AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- Deferred rename at commit (uses FileOpsRename)
+-- Rename, reversed on abort (uses FileOpsRename)
 CREATE FUNCTION test_fileops_rename(oldpath text, newpath text)
    RETURNS void
    AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

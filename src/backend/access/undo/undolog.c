@@ -27,6 +27,7 @@
  */
 #include "postgres.h"
 
+#include "access/atm.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/undolog.h"
@@ -73,8 +74,8 @@ UndoLogShmemSize(void)
  * UndoLogShmemRequest
  *		Request the UNDO log control area from the shared memory framework.
  *
- * Called from the UNDO subsystem's request_fn.  The framework sets UndoLogShared,
- * in the postmaster and, under EXEC_BACKEND, in every child.
+ * Called from the UNDO subsystem's request_fn.  The framework sets the module
+ * pointer, in the postmaster and, under EXEC_BACKEND, in every child.
  */
 void
 UndoLogShmemRequest(void)
@@ -89,9 +90,9 @@ UndoLogShmemRequest(void)
  *		Initialize the contents of the area requested by UndoLogShmemRequest().
  *
  * Called once, by the postmaster or a standalone backend, from the UNDO
- * subsystem's init_fn.  UndoLogShared has already been set by the shared memory
- * framework; an EXEC_BACKEND child gets the pointer from the framework's
- * attach step and never calls this.
+ * subsystem's init_fn.  UndoLogShared has already been set by the framework;
+ * an EXEC_BACKEND child gets the pointer from the framework's attach step and
+ * never calls this.
  */
 void
 UndoLogShmemInit(void)
@@ -120,6 +121,8 @@ UndoLogShmemInit(void)
 	pg_atomic_init_u64(&UndoLogShared->total_allocated, 0);
 	pg_atomic_init_u64(&UndoLogShared->total_discarded, 0);
 	pg_atomic_init_u64(&UndoLogShared->undo_discard_horizon,
+					   InvalidXLogRecPtr);
+	pg_atomic_init_u64(&UndoLogShared->recovery_undo_lsn,
 					   InvalidXLogRecPtr);
 
 	/* Initialize per-backend first UNDO batch LSN slots */
@@ -352,6 +355,19 @@ UndoClearBatchLSN(void)
 }
 
 /*
+ * UndoSetRecoveryBatchLSN
+ *		Publish the oldest first batch of the in-flight chains redo knows of.
+ *
+ * Called by the startup process.  InvalidXLogRecPtr releases the hold.
+ */
+void
+UndoSetRecoveryBatchLSN(XLogRecPtr lsn)
+{
+	if (UndoLogShared != NULL)
+		pg_atomic_write_u64(&UndoLogShared->recovery_undo_lsn, (uint64) lsn);
+}
+
+/*
  * UndoGetOldestBatchLSN
  *		Return the oldest UNDO batch LSN that must be retained in WAL.
  *
@@ -371,6 +387,7 @@ XLogRecPtr
 UndoGetOldestBatchLSN(void)
 {
 	XLogRecPtr	oldest = InvalidXLogRecPtr;
+	XLogRecPtr	atm_oldest;
 	int			i;
 
 	if (UndoLogShared == NULL)
@@ -389,11 +406,32 @@ UndoGetOldestBatchLSN(void)
 		}
 	}
 
+	/* In-flight chains known to redo (see UndoSetRecoveryBatchLSN) */
+	{
+		XLogRecPtr	lsn = (XLogRecPtr)
+			pg_atomic_read_u64(&UndoLogShared->recovery_undo_lsn);
+
+		if (XLogRecPtrIsValid(lsn) &&
+			(!XLogRecPtrIsValid(oldest) || lsn < oldest))
+			oldest = lsn;
+	}
+
+	/*
+	 * Check ATM for aborted transactions whose UNDO chains haven't been
+	 * applied yet.  Their WAL segments must not be recycled.
+	 */
+	atm_oldest = ATMGetOldestUnrevertedLSN();
+	if (XLogRecPtrIsValid(atm_oldest))
+	{
+		if (!XLogRecPtrIsValid(oldest) || atm_oldest < oldest)
+			oldest = atm_oldest;
+	}
+
 	/*
 	 * Check prepared (2PC) transactions.  A xact can sit PREPARED
 	 * indefinitely; its UNDO-batch WAL must survive until ROLLBACK PREPARED
-	 * reads it.  The per-backend slot is cleared when the preparing backend
-	 * exits, so it does not cover this.
+	 * reads it.  Neither the per-backend slot (cleared when the preparing
+	 * backend exits) nor the ATM (prepared xacts aren't in it) covers this.
 	 */
 	{
 		XLogRecPtr	prep_oldest = TwoPhaseGetOldestUndoBatchLSN();
@@ -404,88 +442,6 @@ UndoGetOldestBatchLSN(void)
 	}
 
 	return oldest;
-}
-
-/*
- * Legacy no-op stubs
- *
- * UNDO-in-WAL has no per-log segment files, no fd cache, and no
- * per-backend write-pointer tracking: UNDO data lives in the WAL stream
- * and durability/recycling are handled by WAL flush and the discard
- * worker.  The operations below are therefore inherently nothing-to-do in
- * this mode, but they still have live callers in the shared transaction
- * and discard paths (e.g. UndoLogCloseFiles / UndoFlushResetMaxWritePtr
- * from xactundo.c, UndoLogDeleteSegmentFile from the discard worker,
- * ExtendUndoLogFile from the undo_xlog.c redo path).  We keep them as
- * no-ops so those callers stay uniform across both UNDO modes rather than
- * sprinkling mode checks at every call site; the no-op is the correct
- * behaviour here, not a placeholder awaiting future work.
- */
-
-void
-UndoLogSync(void)
-{
-	/* No-op: WAL sync handles durability */
-}
-
-void
-UndoLogCloseFiles(void)
-{
-	/* No-op: no fd cache with UNDO-in-WAL */
-}
-
-void
-UndoFlushResetMaxWritePtr(void)
-{
-	/* No-op: no per-backend write pointer tracking with UNDO-in-WAL */
-}
-
-UndoRecPtr
-UndoFlushGetMaxWritePtr(void)
-{
-	/* No-op: no per-backend write pointer tracking with UNDO-in-WAL */
-	return InvalidUndoRecPtr;
-}
-
-void
-UndoLogSealAndRotate(uint8 trigger pg_attribute_unused())
-{
-	/* No-op: no segment rotation with UNDO-in-WAL */
-}
-
-void
-UndoLogDeleteSegmentFile(uint32 log_number pg_attribute_unused())
-{
-	/* No-op: no segment files with UNDO-in-WAL */
-}
-
-bool
-UndoLogTryPressureDiscard(void)
-{
-	/* No-op: no segment pressure with UNDO-in-WAL */
-	return false;
-}
-
-char *
-UndoLogPath(uint32 log_number, char *path)
-{
-	/* Legacy: construct the path even though files no longer exist */
-	snprintf(path, MAXPGPATH, "base/undo/%012u", log_number);
-	return path;
-}
-
-void
-ExtendUndoLogFile(uint32 log_number pg_attribute_unused(),
-				  uint64 logical_end pg_attribute_unused())
-{
-	/* No-op: no segment files with UNDO-in-WAL */
-}
-
-void
-ExtendUndoLogSmgrFile(uint32 log_number pg_attribute_unused(),
-					  uint64 logical_end pg_attribute_unused())
-{
-	/* No-op: no smgr-managed UNDO files with UNDO-in-WAL */
 }
 
 UndoRecPtr

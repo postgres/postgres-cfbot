@@ -917,12 +917,16 @@
 
 # - UNDO -
 
+#undo_instant_abort_threshold = 65536   # bytes; 0 = always use ATM instant abort
 #undo_max_wal_retention_size = 0        # MB; 0 = unlimited UNDO WAL retention
 #undo_worker_naptime = 10s              # time between UNDO discard worker runs
 #undo_batch_size_kb = 256               # KB per UNDO batch flush (64-4096); reload
 #undo_batch_record_limit = 1000         # records per UNDO batch flush (100-100000); reload
 #undo_rollback_overflow_size = 16MB     # rollbacks larger than this go to the
                                         # size-ordered undo worker queue
+#slog_dsa_max_size_mb = 256             # MB; max sLog DSA area size (aborted-txn tree)
+#max_logical_revert_workers = 2         # 0 disables the logical revert launcher
+#logical_revert_naptime = 1s            # time between ATM scan cycles
 
 
 #------------------------------------------------------------------------------

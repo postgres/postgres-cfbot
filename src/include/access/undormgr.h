@@ -45,7 +45,7 @@
 #define UNDO_RMID_INVALID	0
 #define UNDO_RMID_NBTREE	1
 #define UNDO_RMID_HASH		3
-/* 2, 4, and 5 are reserved by out-of-core consumers (see their own headers) */
+/* In-tree consumers define FILEOPS (2) and FLUX (5) in their own headers. */
 
 #define MAX_UNDO_RMGRS		256
 
