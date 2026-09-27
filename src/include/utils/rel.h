@@ -164,6 +164,7 @@ typedef struct RelationData
 	Bitmapset  *rd_idattr;		/* included in replica identity index */
 	Bitmapset  *rd_indexedattr; /* all cols referenced by indexes */
 	Bitmapset  *rd_summarizedattr;	/* cols indexed by summarizing indexes */
+	Bitmapset  *rd_exprindexattr;	/* cols referenced by expression indexes */
 
 	PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
 
@@ -222,6 +223,16 @@ typedef struct RelationData
 	uint16	   *rd_exclstrats;	/* exclusion ops' strategy numbers, if any */
 	Oid		   *rd_indcollation;	/* OIDs of index collations */
 	bytea	  **rd_opcoptions;	/* parsed opclass-specific options */
+
+	/*
+	 * Bitmap of heap attribute numbers referenced by this index (simple keys,
+	 * INCLUDE columns, expression columns, and partial-index predicate
+	 * columns), offset by FirstLowInvalidHeapAttributeNumber. Lazily built by
+	 * RelationGetIndexedAttrs() and cached in rd_indexcxt. Consumers must
+	 * bms_copy before relying on the pointer beyond any potential
+	 * AcceptInvalidationMessages() call.
+	 */
+	Bitmapset  *rd_indattr;
 
 	/*
 	 * rd_amcache is available for index and table AMs to cache private data
