@@ -223,9 +223,13 @@ typedef struct TransactionStateData
 	bool		chain;			/* start a new block after this one */
 	bool		topXidLogged;	/* for a subxact: is top-level XID logged? */
 	uint64		undoRecPtr;		/* most recent UNDO record in chain */
-	uint64		pbuUndoStartPtr;	/* per-backend UNDO: first record of this
-									 * xact (0 = none) */
-	uint64		pbuUndoLatestPtr;	/* per-backend UNDO: most recent record */
+	/*
+	 * Per-backend UNDO: first and most recent record of this (sub)transaction
+	 * in each persistence level's undo log (0 = none).  A transaction writing
+	 * permanent, unlogged and temporary tables has one chain in each.
+	 */
+	uint64		pbuUndoStartPtr[PBU_UNDO_PERSISTENCE_LEVELS];
+	uint64		pbuUndoLatestPtr[PBU_UNDO_PERSISTENCE_LEVELS];
 	struct TransactionStateData *parent;	/* back link to parent */
 } TransactionStateData;
 
@@ -376,6 +380,9 @@ static bool AbortCurrentTransactionInternal(void);
 static void StartSubTransaction(void);
 static void CommitSubTransaction(void);
 static void AbortSubTransaction(void);
+static void AtSubCommit_PbuUndo(void);
+static void AtSubAbort_PbuUndo(void);
+static void AtSubAbort_PbuRetryUndo(void);
 static void CleanupSubTransaction(void);
 static void PushTransaction(void);
 static void PopTransaction(void);
@@ -1201,6 +1208,161 @@ GetCurrentTransactionUndoRecPtr(void)
 	TransactionState s = CurrentTransactionState;
 
 	return s->undoRecPtr;
+}
+
+/*
+ * SetCurrentTransactionPbuUndoLocation
+ *		Record a per-backend UNDO record pointer for the current transaction.
+ *
+ * Called from the per-backend UNDO engine (SetCurrentUndoLocation) after each
+ * InsertPreparedUndo.  The first call in a transaction captures the chain
+ * start (used as the rollback request's start pointer at abort); every call
+ * updates the latest pointer.  Kept separate from undoRecPtr so the
+ * per-relation and per-backend UNDO engines coexist without stepping on each
+ * other's transaction state.
+ */
+void
+SetCurrentTransactionPbuUndoLocation(int level, uint64 urec_ptr)
+{
+	TransactionState s = CurrentTransactionState;
+
+	Assert(level >= 0 && level < PBU_UNDO_PERSISTENCE_LEVELS);
+	if (s->pbuUndoStartPtr[level] == 0)
+		s->pbuUndoStartPtr[level] = urec_ptr;
+	s->pbuUndoLatestPtr[level] = urec_ptr;
+}
+
+/*
+ * AtSubCommit_PbuUndo
+ *		Hand the committing subtransaction's per-backend UNDO to its parent.
+ *
+ * Once a subtransaction commits (RELEASE SAVEPOINT, or a PL/pgSQL exception
+ * block that completes), its changes belong to the parent: rolling back the
+ * parent, or the whole transaction, must revert them too.  The subtransaction
+ * wrote its records after any the parent wrote, so the parent keeps its own
+ * start pointer if it has one and takes the child's latest pointer.
+ */
+static void
+AtSubCommit_PbuUndo(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	Assert(s->parent != NULL);
+
+	for (int level = 0; level < PBU_UNDO_PERSISTENCE_LEVELS; level++)
+	{
+		if (s->pbuUndoStartPtr[level] == 0)
+			continue;
+
+		if (s->parent->pbuUndoStartPtr[level] == 0)
+			s->parent->pbuUndoStartPtr[level] = s->pbuUndoStartPtr[level];
+		s->parent->pbuUndoLatestPtr[level] = s->pbuUndoLatestPtr[level];
+	}
+}
+
+/*
+ * AtSubAbort_PbuUndo
+ *		Hand an aborted subtransaction's per-backend UNDO to its parent.
+ *
+ * The access methods have applied the subtransaction's records and marked
+ * them applied (PbuApplySubxactUndo), but the records stay in the chain, and
+ * the parent takes them over exactly as for a commit.  If they are the first
+ * records of the transaction in an undo log, the first one carries the
+ * transaction header, which a rollback of the whole chain needs as its 'to'
+ * pointer.  The latest pointer matters too: a record that could not be
+ * applied was left unmarked, and a rollback of the parent must still reach
+ * it; the marked records are skipped.
+ */
+static void
+AtSubAbort_PbuUndo(void)
+{
+	AtSubCommit_PbuUndo();
+}
+
+/*
+ * AtSubAbort_PbuRetryUndo
+ *		Apply the per-backend UNDO the SUBXACT_EVENT_ABORT_SUB callbacks could
+ *		not, now that the subtransaction's catalog changes are rolled back.
+ *
+ * A subtransaction that updated a table and then truncated or dropped it
+ * still sees the table empty or gone when the callbacks run.  Once its
+ * relcache and invalidations are rolled back, the parent sees the table as
+ * it was, so run the remaining records as the parent, before the
+ * subtransaction's locks are released.
+ */
+static void
+AtSubAbort_PbuRetryUndo(void)
+{
+	TransactionState s = CurrentTransactionState;
+	ResourceOwner saved_owner = CurrentResourceOwner;
+
+	if (!PbuSubxactUndoRetryPending() || s->parent->state != TRANS_INPROGRESS)
+		return;
+
+	CurrentTransactionState = s->parent;
+	CurrentResourceOwner = s->parent->curTransactionOwner;
+	PG_TRY();
+	{
+		PbuRetrySubxactUndo();
+	}
+	PG_FINALLY();
+	{
+		CurrentTransactionState = s;
+		CurrentResourceOwner = saved_owner;
+	}
+	PG_END_TRY();
+}
+
+/*
+ * GetCurrentTransactionPbuUndoStartAt / GetCurrentTransactionPbuUndoLatestAt
+ *		The current (sub)transaction's first and most recent per-backend UNDO
+ *		record in the given persistence level's undo log (0 if none there).
+ */
+uint64
+GetCurrentTransactionPbuUndoStartAt(int level)
+{
+	Assert(level >= 0 && level < PBU_UNDO_PERSISTENCE_LEVELS);
+	return CurrentTransactionState->pbuUndoStartPtr[level];
+}
+
+uint64
+GetCurrentTransactionPbuUndoLatestAt(int level)
+{
+	Assert(level >= 0 && level < PBU_UNDO_PERSISTENCE_LEVELS);
+	return CurrentTransactionState->pbuUndoLatestPtr[level];
+}
+
+/*
+ * GetCurrentTransactionPbuUndoStart / GetCurrentTransactionPbuUndoLatest
+ *		The bracket of the first persistence level, in permanent, unlogged,
+ *		temporary order, in which the current (sub)transaction wrote
+ *		per-backend UNDO (0 if none).
+ *
+ * Only tells whether the (sub)transaction wrote any per-backend UNDO.  A
+ * (sub)transaction that wrote undo of several persistence levels has a chain
+ * in each; walk them with the ...At() variants.
+ */
+static int
+PbuUndoFirstLevel(void)
+{
+	for (int level = 0; level < PBU_UNDO_PERSISTENCE_LEVELS; level++)
+	{
+		if (CurrentTransactionState->pbuUndoLatestPtr[level] != 0)
+			return level;
+	}
+	return 0;
+}
+
+uint64
+GetCurrentTransactionPbuUndoStart(void)
+{
+	return CurrentTransactionState->pbuUndoStartPtr[PbuUndoFirstLevel()];
+}
+
+uint64
+GetCurrentTransactionPbuUndoLatest(void)
+{
+	return CurrentTransactionState->pbuUndoLatestPtr[PbuUndoFirstLevel()];
 }
 
 /*
@@ -2232,8 +2394,9 @@ StartTransaction(void)
 	s->nChildXids = 0;
 	s->maxChildXids = 0;
 	s->undoRecPtr = 0;			/* no UNDO records yet */
-	s->pbuUndoStartPtr = 0;		/* no per-backend UNDO records yet */
-	s->pbuUndoLatestPtr = 0;
+	/* no per-backend UNDO records yet */
+	memset(s->pbuUndoStartPtr, 0, sizeof(s->pbuUndoStartPtr));
+	memset(s->pbuUndoLatestPtr, 0, sizeof(s->pbuUndoLatestPtr));
 
 	/*
 	 * Once the current user ID and the security context flags are fetched,
@@ -2409,6 +2572,8 @@ CommitTransaction(void)
 	 * of this stuff could still throw an error, which would switch us into
 	 * the transaction-abort path.
 	 */
+
+	PbuAtPreCommit_Undo();
 
 	CallXactCallbacks(is_parallel_worker ? XACT_EVENT_PARALLEL_PRE_COMMIT
 					  : XACT_EVENT_PRE_COMMIT);
@@ -2692,6 +2857,8 @@ PrepareTransaction(void)
 		if (!PreCommit_Portals(true))
 			break;
 	}
+
+	PbuAtPreCommit_Undo();
 
 	CallXactCallbacks(XACT_EVENT_PRE_PREPARE);
 
@@ -3128,6 +3295,28 @@ AbortTransaction(void)
 	AtAbort_XactUndo();
 
 	/*
+	 * Roll back the per-backend UNDO engine's records for this transaction,
+	 * if any.  This engine coexists with the per-relation engine handled by
+	 * AtAbort_XactUndo() above; the call is a no-op unless the per-backend
+	 * engine produced UNDO for this xact (FLUX and RECNO tables do).
+	 * UNDO appliers open relations, so present TRANS_INPROGRESS for the
+	 * duration (all backing resources are still live at this point).
+	 */
+	{
+		int			pbu_saved_state = EnterInlineUndoApplyState();
+
+		PG_TRY();
+		{
+			PbuAtAbort_ApplyUndo();
+		}
+		PG_FINALLY();
+		{
+			LeaveInlineUndoApplyState(pbu_saved_state);
+		}
+		PG_END_TRY();
+	}
+
+	/*
 	 * do abort processing
 	 */
 	AfterTriggerEndXact(false); /* 'false' means it's abort */
@@ -3297,6 +3486,7 @@ StartTransactionCommand(void)
 			 * transaction.
 			 */
 		case TBLOCK_DEFAULT:
+			PbuApplyPendingUndo();
 			StartTransaction();
 			s->blockState = TBLOCK_STARTED;
 			break;
@@ -5376,6 +5566,7 @@ CommitSubTransaction(void)
 	/* Post-commit cleanup */
 	if (FullTransactionIdIsValid(s->fullTransactionId))
 		AtSubCommit_childXids();
+	AtSubCommit_PbuUndo();
 	AfterTriggerEndSubXact(true);
 	AtSubCommit_Portals(s->subTransactionId,
 						s->parent->subTransactionId,
@@ -5573,6 +5764,9 @@ AbortSubTransaction(void)
 		CallSubXactCallbacks(SUBXACT_EVENT_ABORT_SUB, s->subTransactionId,
 							 s->parent->subTransactionId);
 
+		/* The callbacks above applied and marked its per-backend UNDO. */
+		AtSubAbort_PbuUndo();
+
 		ResourceOwnerRelease(s->curTransactionOwner,
 							 RESOURCE_RELEASE_BEFORE_LOCKS,
 							 false, false);
@@ -5582,6 +5776,7 @@ AbortSubTransaction(void)
 								  s->parent->subTransactionId);
 		AtEOSubXact_TypeCache();
 		AtEOSubXact_Inval(false);
+		AtSubAbort_PbuRetryUndo();
 		ResourceOwnerRelease(s->curTransactionOwner,
 							 RESOURCE_RELEASE_LOCKS,
 							 false, false);

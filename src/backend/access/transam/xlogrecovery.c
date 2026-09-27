@@ -76,6 +76,13 @@
 #define RECOVERY_COMMAND_DONE	"recovery.done"
 
 /*
+ * Per-backend UNDO crash-recovery apply driver (pbu_recovery.c).  Declared
+ * locally by prototype rather than via a pbu header, which would drag in the
+ * per-backend engine's conflicting type definitions.
+ */
+extern int	PbuPerformUndoRecovery(void);
+
+/*
  * GUC support
  */
 const struct config_enum_entry recovery_target_action_options[] = {
@@ -1893,6 +1900,19 @@ PerformWalRecovery(void)
 			ereport(LOG,
 					(errmsg("undo phase complete")));
 		}
+
+		/*
+		 * Reverse-apply per-backend UNDO for loser transactions.  The
+		 * per-backend engine's UndoLogControl banks were rebuilt by
+		 * StartupUndoLogs() before redo, redo advanced them and rebuilt the
+		 * xid->logno map, and the undo pages were replayed (they ride on
+		 * their producers' WAL records).  Now walk the recovered undo logs'
+		 * transaction-header chains and roll back transactions that wrote
+		 * per-backend undo but did not commit and are not prepared.  Runs
+		 * unconditionally for the same promoted-standby reason as
+		 * PerformUndoRecovery() above.
+		 */
+		PbuPerformUndoRecovery();
 
 		InRedo = false;
 	}

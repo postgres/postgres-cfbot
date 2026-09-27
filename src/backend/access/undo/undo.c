@@ -51,6 +51,23 @@
  */
 MemoryContext UndoContext = NULL;
 
+/*
+ * Per-backend UNDO engine entry points (declared locally to avoid including
+ * the colliding pbu_*.h type headers; see comment in the include block).
+ */
+extern Size PbuUndoLogShmemSize(void);
+extern void PbuUndoLogShmemInit(void);
+extern void UndoLogInit(void);
+extern int	PendingUndoShmemSize(void);
+extern void PendingUndoShmemInit(void);
+extern Size UndoLauncherShmemSize(void);
+extern void UndoLauncherShmemInit(void);
+extern void UndoLauncherRegister(void);
+extern void DiscardWorkerRegister(void);
+extern void PbuUndoLogShmemRequest(void);
+extern void PendingUndoShmemRequest(void);
+extern void UndoLauncherShmemRequest(void);
+
 static void AtProcExit_Undo(int code, Datum arg);
 static void UndoShmemRequest_internal(void *arg);
 static void UndoShmemInit_internal(void *arg);
@@ -87,6 +104,11 @@ UndoShmemSize(void)
 	size = UndoLogShmemSize();
 	size = add_size(size, XactUndoShmemSize());
 	size = add_size(size, UndoWorkerShmemSize());
+
+	/* Per-backend UNDO engine. */
+	size = add_size(size, PbuUndoLogShmemSize());
+	size = add_size(size, PendingUndoShmemSize());
+	size = add_size(size, UndoLauncherShmemSize());
 
 	return size;
 }
@@ -126,14 +148,38 @@ UndoShmemRequest_internal(void *arg)
 		{
 			UndoWorkerRegister();
 
+			/*
+			 * The per-backend UNDO engine's discard worker reclaims undo log
+			 * space, and its undo launcher applies rollbacks deferred by
+			 * crash recovery.  Neither is optional: without the discard
+			 * worker the undo segment files of any FLUX table grow
+			 * without bound. Both hibernate when there is no per-backend UNDO
+			 * to process, so a cluster that never uses those AMs pays only
+			 * for two idle processes on top of the cluster-wide UNDO worker
+			 * and logical revert launcher.  The default max_worker_processes
+			 * is sized to leave parallel query its full budget alongside
+			 * these.  Registered here (request_fn phase) for the same reason
+			 * as UndoWorkerRegister(): a static background worker cannot be
+			 * registered after BackgroundWorkerShmemInit().
+			 */
+			DiscardWorkerRegister();
+			UndoLauncherRegister();
+
 			undo_worker_registered = true;
 		}
 	}
 
 	/*
-	 * Initialize the UNDO resource manager dispatch table and register the
-	 * built-in resource managers listed in access/undormgrlist.h.
+	 * Register the per-backend UNDO engine's shmem areas so the framework
+	 * sizes the segment for them and allocates them before the init_fn phase.
+	 * The per-relation engine's structs are small enough to come from the
+	 * general shmem slop; the per-backend engine's rollback hash table and
+	 * queues are large, so they must be requested here (matching the sLog
+	 * subsystem's pattern) rather than drawn from the slop.
 	 */
+	PbuUndoLogShmemRequest();
+	PendingUndoShmemRequest();
+	UndoLauncherShmemRequest();
 }
 
 /*
@@ -167,6 +213,24 @@ UndoShmemInit(void)
 	UndoLogShmemInit();
 	XactUndoShmemInit();
 	UndoWorkerShmemInit();
+
+	/*
+	 * Per-backend UNDO engine.
+	 *
+	 * Shmem + LWLock tranches + rollback queues + worker slots are set up
+	 * here so the engine is live in shared memory.  The engine's WAL rmgrs
+	 * (RM_UNDOLOG_ID / RM_UNDOACTION_ID) redo correctly.
+	 *
+	 * Crash-recovery survival of per-backend undo logs -- CheckPointUndoLogs
+	 * writing the pg_undo/<redo> snapshot and StartupUndoLogs reading it back
+	 * to rebuild UndoLogControl banks -- is wired into the checkpoint/startup
+	 * path once a per-backend AM can produce non-empty undo-log state (create
+	 * the pg_undo dir, call CheckPointUndoLogs from CheckPointGuts, call
+	 * StartupUndoLogs from the recovery redo point).
+	 */
+	PbuUndoLogShmemInit();
+	PendingUndoShmemInit();
+	UndoLauncherShmemInit();
 
 	/*
 	 * Initialize the UNDO resource manager dispatch table and register the
@@ -206,6 +270,11 @@ UndoShmemAttach_internal(void *arg)
 {
 	UndoLogShmemInit();
 	UndoWorkerShmemInit();
+
+	/* Per-backend UNDO engine shmem (see comment above about self-attach). */
+	PbuUndoLogShmemInit();
+	PendingUndoShmemInit();
+	UndoLauncherShmemInit();
 
 	RegisterUndoRmgrs();
 }
@@ -255,6 +324,12 @@ void
 InitializeUndo(void)
 {
 	InitializeXactUndo();
+
+	/*
+	 * Per-backend UNDO engine per-backend init: registers a before_shmem_exit
+	 * callback that detaches this backend from its undo logs.
+	 */
+	UndoLogInit();
 
 	on_shmem_exit(AtProcExit_Undo, 0);
 }

@@ -98,7 +98,9 @@ Generic
 LogicalMessage
 XLOG2
 Undo
-FileOps$/,
+FileOps
+UndoLog
+UndoAction$/,
 	'rmgr list');
 
 

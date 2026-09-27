@@ -71,6 +71,8 @@
 #include "storage/ipc.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
+#include "access/perbackend/pbu_undofile.h"
+#include "access/perbackend/pbu_undolog.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 
@@ -125,9 +127,13 @@ typedef struct f_smgr
 	int			(*smgr_fd) (SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
 } f_smgr;
 
+/* Storage manager selectors (indexes into smgrsw[]). */
+#define SMGR_MD		0
+#define SMGR_UNDO	1
+
 static const f_smgr smgrsw[] = {
 	/* magnetic disk */
-	{
+	[SMGR_MD] = {
 		.smgr_init = mdinit,
 		.smgr_shutdown = NULL,
 		.smgr_open = mdopen,
@@ -148,6 +154,29 @@ static const f_smgr smgrsw[] = {
 		.smgr_immedsync = mdimmedsync,
 		.smgr_registersync = mdregistersync,
 		.smgr_fd = mdfd,
+	},
+	/* per-backend undo log segment files (base/undo) */
+	[SMGR_UNDO] = {
+		.smgr_init = undofile_init,
+		.smgr_shutdown = undofile_shutdown,
+		.smgr_open = undofile_open,
+		.smgr_close = undofile_close,
+		.smgr_create = undofile_create,
+		.smgr_exists = undofile_exists,
+		.smgr_unlink = undofile_unlink,
+		.smgr_extend = undofile_extend,
+		.smgr_zeroextend = undofile_zeroextend,
+		.smgr_prefetch = undofile_prefetch,
+		.smgr_maxcombine = undofile_maxcombine,
+		.smgr_readv = undofile_readv,
+		.smgr_startreadv = undofile_startreadv,
+		.smgr_writev = undofile_writev,
+		.smgr_writeback = undofile_writeback,
+		.smgr_nblocks = undofile_nblocks,
+		.smgr_truncate = undofile_truncate,
+		.smgr_immedsync = undofile_immedsync,
+		.smgr_registersync = undofile_registersync,
+		.smgr_fd = undofile_fd,
 	}
 };
 
@@ -273,7 +302,16 @@ smgropen(RelFileLocator rlocator, ProcNumber backend)
 		reln->smgr_targblock = InvalidBlockNumber;
 		for (int i = 0; i <= MAX_FORKNUM; ++i)
 			reln->smgr_cached_nblocks[i] = InvalidBlockNumber;
-		reln->smgr_which = 0;	/* we only have md.c at present */
+
+		/*
+		 * Route per-backend undo log segment files (identified by the
+		 * pseudo-database OID they use) to the undo smgr; everything else
+		 * uses md.c.
+		 */
+		if (rlocator.dbOid == UndoLogDatabaseOid)
+			reln->smgr_which = SMGR_UNDO;
+		else
+			reln->smgr_which = SMGR_MD;
 
 		/* it is not pinned yet */
 		reln->pincount = 0;

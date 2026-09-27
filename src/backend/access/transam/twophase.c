@@ -159,6 +159,14 @@ int			max_prepared_xacts = 0;
  */
 extern void FileOpsAtPrepare(void);
 
+/*
+ * Per-backend UNDO 2PC prepare hook (pbu_recovery.c).  Declared locally by
+ * prototype: the per-backend engine headers conflict with the cluster-wide
+ * UNDO engine headers included here.  Registers this transaction's per-backend
+ * undo chain-head into the 2PC state file at EndPrepare().
+ */
+extern void PbuAtPrepare_Undo(void);
+
 typedef struct GlobalTransactionData
 {
 	GlobalTransaction next;		/* list link for free list */
@@ -1194,6 +1202,17 @@ EndPrepare(GlobalTransaction gxact)
 	TwoPhaseFileHeader *hdr;
 	StateFileChunk *record;
 	bool		replorigin;
+
+	/*
+	 * Per-backend UNDO: persist this transaction's per-backend undo
+	 * chain-head location into the 2PC state file (as a
+	 * TWOPHASE_RM_PERBACKEND_ID record) so ROLLBACK PREPARED -- including
+	 * from a different backend after a crash -- can reverse-apply it, and
+	 * COMMIT PREPARED can discard it.  Must run before the END sentinel while
+	 * the record chain is still open.  A no-op if this transaction produced
+	 * no per-backend undo.
+	 */
+	PbuAtPrepare_Undo();
 
 	/*
 	 * FILEOPS: persist this transaction's pending file operations into the

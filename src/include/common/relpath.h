@@ -13,6 +13,8 @@
 #ifndef RELPATH_H
 #define RELPATH_H
 
+#include "storage/block.h"
+
 /*
  *	Required here; note that CppAsString2() does not throw an error if the
  *	symbol is not defined.
@@ -150,5 +152,7 @@ extern RelPathStr GetRelationPath(Oid dbOid, Oid spcOid, RelFileNumber relNumber
 /* First argument is a RelFileLocatorBackend */
 #define relpath(rlocator, forknum) \
 	relpathbackend((rlocator).locator, (rlocator).backend, forknum)
+
+extern bool ParseUndoSegmentPath(const char *path, BlockNumber *block);
 
 #endif							/* RELPATH_H */

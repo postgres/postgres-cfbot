@@ -424,6 +424,7 @@ AioUringCompletion	"Waiting for another process to complete IO via io_uring."
 ShmemIndex	"Waiting to find or allocate space in shared memory."
 UndoLog	"Waiting to access or modify UNDO log metadata."
 UndoWorker	"Waiting to access or modify UNDO worker shared memory queue."
+UndoLogPBU	"Waiting to access or modify per-backend UNDO log state."
 
 # No "ABI_compatibility" region here as WaitEventLWLock has its own C code.
 

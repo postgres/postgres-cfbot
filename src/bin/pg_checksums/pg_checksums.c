@@ -173,7 +173,7 @@ skipfile(const char *fn)
 }
 
 static void
-scan_file(const char *fn, int segmentno)
+scan_file(const char *fn, BlockNumber blockoffset)
 {
 	PGIOAlignedBlock buf;
 	PageHeader	header = (PageHeader) buf.data;
@@ -224,7 +224,7 @@ scan_file(const char *fn, int segmentno)
 		if (PageIsNew(buf.data))
 			continue;
 
-		csum = pg_checksum_page(buf.data, blockno + segmentno * RELSEG_SIZE);
+		csum = pg_checksum_page(buf.data, blockno + blockoffset);
 		if (mode == PG_MODE_CHECK)
 		{
 			if (csum != header->pd_checksum)
@@ -343,6 +343,7 @@ scan_directory(const char *basedir, const char *subdir, bool sizeonly)
 			char	   *forkpath,
 					   *segmentpath;
 			int			segmentno = 0;
+			BlockNumber blockoffset;
 
 			if (skipfile(de->d_name))
 				continue;
@@ -355,6 +356,13 @@ scan_directory(const char *basedir, const char *subdir, bool sizeonly)
 			 */
 			strlcpy(fnonly, de->d_name, sizeof(fnonly));
 			segmentpath = strchr(fnonly, '.');
+			if (ParseUndoSegmentPath(fn, &blockoffset))
+			{
+				dirsize += st.st_size;
+				if (!sizeonly && !only_filenode)
+					scan_file(fn, blockoffset);
+				continue;
+			}
 			if (segmentpath != NULL)
 			{
 				*segmentpath++ = '\0';
@@ -379,7 +387,7 @@ scan_directory(const char *basedir, const char *subdir, bool sizeonly)
 			 * the items in the data folder.
 			 */
 			if (!sizeonly)
-				scan_file(fn, segmentno);
+				scan_file(fn, segmentno * RELSEG_SIZE);
 		}
 		else if (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
 		{

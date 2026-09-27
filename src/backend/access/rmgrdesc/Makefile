@@ -30,6 +30,8 @@ OBJS = \
 	spgdesc.o \
 	standbydesc.o \
 	tblspcdesc.o \
+	pbu_undoactiondesc.o \
+	pbu_undologdesc.o \
 	undodesc.o \
 	xactdesc.o \
 	xlogdesc.o
