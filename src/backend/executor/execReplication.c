@@ -946,7 +946,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_TrigDesc->trig_update_before_row)
 	{
 		if (!ExecBRUpdateTriggers(estate, epqstate, resultRelInfo,
-								  tid, NULL, slot, NULL, NULL, false))
+								  tid, NULL, slot, NULL, NULL, false, true))
 			skip_tuple = true;	/* "do nothing" */
 	}
 
@@ -1029,7 +1029,8 @@ ExecSimpleRelationDelete(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_TrigDesc->trig_delete_before_row)
 	{
 		skip_tuple = !ExecBRDeleteTriggers(estate, epqstate, resultRelInfo,
-										   tid, NULL, NULL, NULL, NULL, false);
+										   tid, NULL, NULL, NULL, NULL, false,
+										   true);
 	}
 
 	if (!skip_tuple)
