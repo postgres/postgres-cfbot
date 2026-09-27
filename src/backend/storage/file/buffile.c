@@ -498,10 +498,16 @@ BufFileDumpBuffer(BufFile *file)
 {
 	int64		wpos = 0;
 	File		thisfile;
+	int			curFile = file->curFile;
+	pgoff_t		curOffset = file->curOffset;
 
 	/*
 	 * Unlike BufFileLoadBuffer, we must dump the whole buffer even if it
 	 * crosses a component-file boundary; so we need a loop.
+	 *
+	 * The file position is advanced only once the whole buffer is written, so
+	 * that after an error it still names the start of the buffer; see
+	 * BufFileTruncateBuffer().
 	 */
 	while (wpos < file->nbytes)
 	{
@@ -514,24 +520,24 @@ BufFileDumpBuffer(BufFile *file)
 		/*
 		 * Advance to next component file if necessary and possible.
 		 */
-		if (file->curOffset >= MAX_PHYSICAL_FILESIZE)
+		if (curOffset >= MAX_PHYSICAL_FILESIZE)
 		{
-			while (file->curFile + 1 >= file->numFiles)
+			while (curFile + 1 >= file->numFiles)
 				extendBufFile(file);
-			file->curFile++;
-			file->curOffset = 0;
+			curFile++;
+			curOffset = 0;
 		}
 
 		/*
 		 * Determine how much we need to write into this file.
 		 */
 		bytestowrite = file->nbytes - wpos;
-		availbytes = MAX_PHYSICAL_FILESIZE - file->curOffset;
+		availbytes = MAX_PHYSICAL_FILESIZE - curOffset;
 
 		if (bytestowrite > availbytes)
 			bytestowrite = availbytes;
 
-		thisfile = file->files[file->curFile];
+		thisfile = file->files[curFile];
 
 		if (track_io_timing)
 			INSTR_TIME_SET_CURRENT(io_start);
@@ -541,7 +547,7 @@ BufFileDumpBuffer(BufFile *file)
 		rc = FileWrite(thisfile,
 					   file->buffer.data + wpos,
 					   bytestowrite,
-					   file->curOffset,
+					   curOffset,
 					   WAIT_EVENT_BUFFILE_WRITE);
 		if (rc <= 0)
 			ereport(ERROR,
@@ -555,11 +561,13 @@ BufFileDumpBuffer(BufFile *file)
 			INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_write_time, io_time, io_start);
 		}
 
-		file->curOffset += rc;
+		curOffset += rc;
 		wpos += rc;
 
 		pgBufferUsage.temp_blks_written++;
 	}
+	file->curFile = curFile;
+	file->curOffset = curOffset;
 	file->dirty = false;
 
 	/*
@@ -1015,4 +1023,34 @@ BufFileTruncateFileSet(BufFile *file, int fileno, pgoff_t offset)
 		file->nbytes = 0;
 	}
 	/* Nothing to do, if the truncate point is beyond current file. */
+}
+
+/*
+ * Forget any data in the buffer, not yet written, that lies at or after
+ * the position (fileno, offset).
+ *
+ * This is for a caller rolling back, after an error, to an end position it
+ * saved earlier with BufFileTell.  Data written since then is abandoned,
+ * including a write that failed and is still waiting in the buffer, while
+ * buffered data before that position is kept and written as usual.  The
+ * caller must seek before its next read or write.
+ *
+ * NB: this relies on BufFileDumpBuffer() leaving the file position at the
+ * start of a dirty buffer when a write fails partway through.
+ */
+void
+BufFileTruncateBuffer(BufFile *file, int fileno, pgoff_t offset)
+{
+	int64		start = (int64) file->curFile * MAX_PHYSICAL_FILESIZE +
+		file->curOffset;
+	int64		target = (int64) fileno * MAX_PHYSICAL_FILESIZE + offset;
+
+	if (!file->dirty)
+		return;
+	if (target <= start)
+		file->nbytes = 0;
+	else if (target < start + file->nbytes)
+		file->nbytes = target - start;
+	file->pos = Min(file->pos, file->nbytes);
+	file->dirty = (file->nbytes > 0);
 }
