@@ -221,6 +221,15 @@ my_tableam_handler(PG_FUNCTION_ARGS)
   </variablelist>
 
   <para>
+   When the executor locks, updates or deletes a row it has already locked
+   in the same command, it passes <symbol>TUPLE_LOCK_FLAG_LOCKED_VERSION</symbol>,
+   <symbol>TABLE_UPDATE_LOCKED_VERSION</symbol> or
+   <symbol>TABLE_DELETE_LOCKED_VERSION</symbol>.  An access method whose
+   locator names a row rather than a version uses these to tell which
+   version the caller means; see <filename>src/include/access/tableam.h</filename>.
+  </para>
+
+  <para>
    <filename>src/include/access/amlocator.h</filename> describes each field
    in detail.  Core code also relies on these properties of every locator:
   </para>
