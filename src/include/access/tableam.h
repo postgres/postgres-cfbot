@@ -169,9 +169,18 @@ typedef enum TU_UpdateIndexes
  * a later version was followed, not that it was successfully locked.
  *
  * For heap, the named version is the one at *tid, and a later version is
- * reached by following the update chain to a different TID.  Other AMs need
- * not change the locator when retargeting.  retargeted is cumulative across
- * retries within one lock call, but must be reset for each new call.
+ * reached by following the update chain to a different TID.  An AM that
+ * updates rows in place keeps the latest version at the row's locator, so
+ * *tid never changes.  It takes the named version to be the one visible to
+ * the snapshot, unless the caller passes TUPLE_LOCK_FLAG_LOCKED_VERSION, and
+ * sets retargeted when the version it locked is newer.  Likewise
+ * table_tuple_update and table_tuple_delete report TM_Updated for a newer
+ * committed version unless passed TABLE_UPDATE_LOCKED_VERSION or
+ * TABLE_DELETE_LOCKED_VERSION.  Logical replication apply, which has no
+ * snapshot, passes these bits.
+ *
+ * retargeted is cumulative across retries within one lock call, but must be
+ * reset for each new call.
  */
 typedef struct TM_FailureData
 {
@@ -295,15 +304,31 @@ typedef struct TM_IndexDeleteOp
 /* "options" flag bits for table_tuple_delete */
 #define TABLE_DELETE_CHANGING_PARTITION			(1 << 0)
 #define TABLE_DELETE_NO_LOGICAL					(1 << 1)
+#define TABLE_DELETE_LOCKED_VERSION				(1 << 2)
 
 /* "options" flag bits for table_tuple_update */
 #define TABLE_UPDATE_NO_LOGICAL					(1 << 0)
+#define TABLE_UPDATE_LOCKED_VERSION				(1 << 1)
 
 /* flag bits for table_tuple_lock */
 /* Follow tuples whose update is in progress if lock modes don't conflict  */
 #define TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS	(1 << 0)
 /* Follow update chain and lock latest version of tuple */
 #define TUPLE_LOCK_FLAG_FIND_LAST_VERSION		(1 << 1)
+
+/*
+ * TUPLE_LOCK_FLAG_LOCKED_VERSION, TABLE_UPDATE_LOCKED_VERSION and
+ * TABLE_DELETE_LOCKED_VERSION: the caller names the version of the row this
+ * transaction has already locked in this command (or, for ON CONFLICT, the
+ * version it found with a dirty snapshot and is locking now), not the version
+ * visible to the snapshot.  Heap ignores this, since its locator names a
+ * version.  An AM that updates rows in place takes the named version to be
+ * the row's latest committed version when it is called.  If it then waits
+ * for a transaction that goes on to commit an update or delete of the row,
+ * it reports TM_Updated or TM_Deleted, as heap does, so that ON CONFLICT
+ * restarts its arbiter check.
+ */
+#define TUPLE_LOCK_FLAG_LOCKED_VERSION			(1 << 2)
 
 
 /* Typedef for callback function for table_index_build_scan */
@@ -1638,6 +1663,8 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  *		decoding information for the tuple.  This should solely be used
  *		during table rewrites where RelationIsLogicallyLogged(rel) is not
  *		yet accurate for the new relation.
+ *		TABLE_DELETE_LOCKED_VERSION: tid names the version this transaction
+ *		has already locked; see TUPLE_LOCK_FLAG_LOCKED_VERSION.
  *	crosscheck - if not InvalidSnapshot, also check tuple against this
  *	wait - true if should wait for any conflicting update to commit/abort
  *
@@ -1677,6 +1704,8 @@ table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
  *		decoding information for the tuple.  This should solely be used
  *		during table rewrites where RelationIsLogicallyLogged(rel) is not
  *		yet accurate for the new relation.
+ *		TABLE_UPDATE_LOCKED_VERSION: otid names the version this transaction
+ *		has already locked; see TUPLE_LOCK_FLAG_LOCKED_VERSION.
  *	crosscheck - if not InvalidSnapshot, also check old tuple against this
  *
  * Output parameters:
@@ -1728,6 +1757,8 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  *		also lock descendant tuples if lock modes don't conflict.
  *		If TUPLE_LOCK_FLAG_FIND_LAST_VERSION, follow the update chain and lock
  *		latest version.
+ *		If TUPLE_LOCK_FLAG_LOCKED_VERSION, *tid names the version this
+ *		transaction has already locked, or found with a dirty snapshot.
  *
  * Output parameters:
  *	*slot: contains the target tuple
@@ -1745,7 +1776,8 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  * success and failure cases, tmfd->retargeted records whether this call
  * followed a later version of the row.  On success the caller must then
  * re-evaluate the row, and *tid holds the locator of the locked version.
- * See TM_FailureData for details.
+ * For an AM that updates rows in place, TUPLE_LOCK_FLAG_LOCKED_VERSION
+ * decides which version the caller named.  See TM_FailureData for details.
  */
 static inline TM_Result
 table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
