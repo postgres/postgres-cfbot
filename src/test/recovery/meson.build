@@ -73,6 +73,7 @@ tests += {
       't/061_fileops_2pc_deferred.pl',
       't/062_fileops_recovery.pl',
       't/063_fileops_2pc.pl',
+      't/071_perbackend_undo.pl',
       't/072_perbackend_crash_undo.pl',
     ],
   },

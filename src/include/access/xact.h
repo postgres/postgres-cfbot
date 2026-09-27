@@ -578,5 +578,27 @@ extern bool IsInParallelMode(void);
 /* UNDO chain management */
 extern void SetCurrentTransactionUndoRecPtr(uint64 undo_ptr);
 extern uint64 GetCurrentTransactionUndoRecPtr(void);
+/*
+ * Number of per-backend UNDO persistence levels (permanent, unlogged, temp);
+ * must match UndoPersistenceLevels in access/perbackend/pbu_undolog.h, which
+ * cannot be included here.
+ */
+#define PBU_UNDO_PERSISTENCE_LEVELS 3
+
+extern void SetCurrentTransactionPbuUndoLocation(int level, uint64 urec_ptr);
+extern uint64 GetCurrentTransactionPbuUndoStartAt(int level);
+extern uint64 GetCurrentTransactionPbuUndoLatestAt(int level);
+extern uint64 GetCurrentTransactionPbuUndoStart(void);
+extern uint64 GetCurrentTransactionPbuUndoLatest(void);
+extern void PbuAtAbort_ApplyUndo(void);
+extern void PbuApplyPendingUndo(void);
+extern bool PbuTempUndoPending(void);
+extern void PbuApplySubxactUndo(uint8 rmid);
+extern void PbuApplySubxactUndoAll(void);
+extern bool PbuInSubxactApply(void);
+extern bool PbuInSubxactRetry(void);
+extern bool PbuSubxactUndoRetryPending(void);
+extern void PbuRetrySubxactUndo(void);
+extern void PbuAtPreCommit_Undo(void);
 
 #endif							/* XACT_H */

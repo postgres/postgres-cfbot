@@ -71,6 +71,71 @@ changes) writes one interleaved chain, and the single global horizon is
 the right granularity because such operations are not concentrated on
 any one relation.
 
+### The UNDO Store: Per-Backend UNDO Logs
+
+Alongside the cluster-wide store, the per-backend UNDO logs
+(access/undo/perbackend/) give each backend its own append-only log, so
+the hot path has no shared insertion-point contention, and a discard
+worker reclaims undo once no snapshot needs it.  Records go to dedicated
+segment files (base/undo, routed through the SMGR_UNDO storage manager
+and the SYNC_HANDLER_UNDO sync handler) rather than into the common WAL
+stream.  This is the store a **high-churn in-place-update table AM**
+uses, where UNDO volume is dominated by rows being updated repeatedly.
+
+The two stores share the UNDO record header format and the
+rollback-dispatch machinery (undormgr.c); their storage and discard
+paths are independent.  The per-backend engine adds two resource managers
+(UndoLog and UndoAction) and its own two-phase resource manager
+(TWOPHASE_RM_PERBACKEND_ID) so a prepared transaction's per-backend
+chain-head survives 2PC.
+
+At abort, PbuAtAbort_ApplyUndo() registers the transaction's per-backend
+chain as a rollback request.  A chain of at least
+undo_rollback_overflow_size (default 16 MB) is handed to a per-backend undo
+apply worker when the request queues have room, and ROLLBACK returns
+without applying it.  Otherwise (a smaller chain, full queues, temporary
+UNDO, or single-user mode) the backend applies the chain itself before
+ROLLBACK returns.  The ATM is not used.
+
+On crash recovery, PbuPerformUndoRecovery() walks the recovered undo logs
+after the redo pass, alongside the cluster-wide engine's
+PerformUndoRecovery().  The table and index AM UNDO callbacks cannot run in
+the startup process (they return UNDO_APPLY_SKIPPED while InRecovery is
+set), so a loser transaction with such UNDO is registered as a rollback
+request (PbuRegisterRecoveredRollbackReq) and an undo apply worker reverts
+it after the database opens.  Until then the loser's changes are still on
+the pages, but readers do not see them, because visibility is resolved
+through the writing transaction's status and that transaction did not
+commit.
+
+Known limitation: StartupUndoLogs() starts from pg_undo/<redo>, the undo
+log snapshot written by the checkpoint that redo starts from.  A file-level
+copy (pg_rewind, a base backup) can lack that snapshot.  Startup then uses
+the oldest snapshot after the redo point, or failing that the newest one
+before it, and logs "undo log checkpoint snapshot for redo point ... is
+missing".  If DROP TABLESPACE removed an undo log between the redo point
+and the snapshot used, redo of WAL that still refers to that log can fail
+with an error such as "cannot find undo log number N for xid X", and the
+server does not start.
+
+Placing a record at redo.  A producer reserves an undo record's space with
+PrepareUndoInsert() -- which advances the log's insert pointer, and for the
+first record of a transaction its last_xact_start -- before its critical
+section, and the forward WAL record that carries the undo is inserted after.
+A checkpoint can choose its redo point between the two and write its undo
+log snapshot (CheckPointUndoLogs, before CheckPointBuffers) after the
+reservation.  Recovery from that redo point starts from a snapshot that
+already includes the record, and an XLOG_UNDOLOG_META that would put the log
+back is emitted only if LogUndoMetaData() saw the new redo point, which it
+need not have.  So a producer that re-runs the undo insert in its own redo
+must not rely on the replayed undo log state: its forward record carries the
+record's placement (location, whether it carries the transaction header, the
+log's last_xact_start before it, the database), and its redo calls
+UndoLogRecoverySetPlacement() before PrepareUndoInsert().
+
+No in-tree access method writes per-backend UNDO yet; the engine compiles,
+links, and registers, and its dispatch path is ready for a future consumer.
+
 
 ## Recovery Model
 
@@ -579,6 +644,43 @@ that file's boot_val.
 For AMs that do not support UNDO, the only overhead is the
 am_supports_undo check -- a single pointer dereference and comparison.
 No UNDO allocations, writes, or locks are taken.
+
+### Fixed Startup Cost
+
+"Zero overhead when disabled" is about the hot path, not startup.  Enabling
+the UNDO subsystem in a build adds a fixed per-cluster cost that is paid even
+by a cluster that never creates a table in a UNDO-using access method:
+
+  - Two extra static background workers over the cluster-wide UNDO worker and
+    the logical revert launcher: the per-backend discard worker
+    (perbackend/pbu_discardworker.c), which reclaims undo-log segment space,
+    and the undo launcher (perbackend/pbu_undoworker.c), which applies
+    rollbacks deferred by crash recovery.  To seat them alongside parallel
+    query's full budget the default max_worker_processes is raised from 8 to
+    12.
+
+  - About 795 kB of shared memory over an upstream build at default settings
+    (measured as sum(allocated_size) from pg_shmem_allocations on a fresh
+    cluster, shared_buffers=128MB, max_connections=100): roughly 418 kB of
+    fixed UNDO control structures requested in UndoShmemRequest_internal()
+    (the per-backend rollback hash table and request queues, the undo log
+    directory and the launcher state), plus roughly 395 kB from the four
+    extra worker PGPROC slots the raised max_worker_processes adds (each
+    PGPROC and its fast-path lock and subtransaction arrays).  The sLog
+    row-lock directory and tables add nothing at startup; they are allocated
+    from DSA on first use.
+
+The workers hibernate when there is no per-backend UNDO to process, so beyond
+this fixed memory a never-UNDO cluster pays only for two idle, sleeping
+processes.  The workers are static because a static background worker must be
+registered during the request_fn phase, before BackgroundWorkerShmemInit()
+(see UndoShmemRequest_internal in undo.c), and the discard worker is required
+for correctness: without it the undo-log segment files of any UNDO-using
+table grow without bound.  Launching these workers only on first use of a
+UNDO-using access method -- and so avoiding the fixed cost on a cluster that
+never uses one -- is left as a future improvement; it would require making
+them dynamic (bgworker start requested at first undo allocation) rather than
+static.
 
 ### Overhead When Active
 

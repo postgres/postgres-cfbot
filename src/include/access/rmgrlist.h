@@ -52,3 +52,5 @@ PG_RMGR(RM_UNDO_ID, "Undo", undo_redo, undo_desc, undo_identify, NULL, NULL, NUL
 #ifdef USE_FILEOPS
 PG_RMGR(RM_FILEOPS_ID, "FileOps", fileops_redo, fileops_desc, fileops_identify, NULL, NULL, NULL, NULL)
 #endif
+PG_RMGR(RM_UNDOLOG_ID, "UndoLog", undolog_redo, undolog_desc, undolog_identify, NULL, NULL, NULL, NULL)
+PG_RMGR(RM_UNDOACTION_ID, "UndoAction", undoaction_redo, undoaction_desc, undoaction_identify, NULL, NULL, NULL, NULL)

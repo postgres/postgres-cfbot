@@ -3088,7 +3088,7 @@ include_dir 'conf.d'
         <para>
          Sets the maximum number of background processes that the cluster
          can support.  This parameter can only be set at server start.  The
-         default is 8.
+         default is 12.
         </para>
 
         <para>

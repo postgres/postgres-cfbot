@@ -29,6 +29,7 @@
 #include "storage/fd.h"
 #include "storage/latch.h"
 #include "storage/md.h"
+#include "access/perbackend/pbu_undofile.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
@@ -115,6 +116,10 @@ static const SyncOps syncsw[] = {
 	/* pg_multixact/members */
 	[SYNC_HANDLER_MULTIXACT_MEMBER] = {
 		.sync_syncfiletag = multixactmemberssyncfiletag
+	},
+	/* per-backend UNDO log segment files (base/undo) */
+	[SYNC_HANDLER_UNDO] = {
+		.sync_syncfiletag = undofile_syncfiletag
 	}
 };
 
