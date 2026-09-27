@@ -1016,3 +1016,30 @@ BufFileTruncateFileSet(BufFile *file, int fileno, pgoff_t offset)
 	}
 	/* Nothing to do, if the truncate point is beyond current file. */
 }
+
+/*
+ * Forget any data in the buffer, not yet written, that lies at or after
+ * the position (fileno, offset).
+ *
+ * This is for a caller rolling back, after an error, to an end position it
+ * saved earlier with BufFileTell.  Data written since then is abandoned,
+ * including a write that failed and is still waiting in the buffer, while
+ * buffered data before that position is kept and written as usual.  The
+ * caller must seek before its next read or write.
+ */
+void
+BufFileTruncateBuffer(BufFile *file, int fileno, pgoff_t offset)
+{
+	int64		start = (int64) file->curFile * MAX_PHYSICAL_FILESIZE +
+		file->curOffset;
+	int64		target = (int64) fileno * MAX_PHYSICAL_FILESIZE + offset;
+
+	if (!file->dirty)
+		return;
+	if (target <= start)
+		file->nbytes = 0;
+	else if (target < start + file->nbytes)
+		file->nbytes = target - start;
+	file->pos = Min(file->pos, file->nbytes);
+	file->dirty = (file->nbytes > 0);
+}
