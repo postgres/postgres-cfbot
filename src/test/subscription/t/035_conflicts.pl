@@ -540,6 +540,57 @@ $node_A->safe_psql('postgres', "DROP TABLE tab_big");
 $node_B->safe_psql('postgres', "DROP TABLE tab_big");
 
 ###############################################################################
+# Check that when an index opclass stores a type (opckeytype) different from
+# the table column's type (such as GiST multirange_ops, whose opckeytype is
+# anyrange), the table column's output function is used when recording the
+# replica identity.
+###############################################################################
+
+my $temporal_ddl = qq{
+	CREATE TABLE tab_temporal (
+		id int4range,
+		valid_at datemultirange,
+		PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+	);
+};
+
+$node_A->safe_psql('postgres', $temporal_ddl);
+$node_B->safe_psql('postgres', $temporal_ddl);
+
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A ADD TABLE tab_temporal");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_B->wait_for_subscription_sync($node_A, $subname_BA);
+
+$node_A->safe_psql('postgres',
+	"INSERT INTO tab_temporal VALUES ('[1,2)', '{[2020-01-01,2021-01-01)}')");
+$node_A->wait_for_catchup($subname_BA);
+$node_B->safe_psql('postgres', "DELETE FROM tab_temporal");
+$node_A->safe_psql('postgres', "DELETE FROM tab_temporal");
+$node_A->wait_for_catchup($subname_BA);
+
+my $clt_check_temporal = $node_B->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_BA WHERE relname = 'tab_temporal';");
+is($clt_check_temporal, 1,
+	'delete_missing on tab_temporal logged into CLT on Node B');
+
+my $clt_row_temporal = $node_B->safe_psql('postgres',
+	"SELECT replica_identity::text FROM $clt_BA WHERE relname = 'tab_temporal';");
+is($clt_row_temporal,
+	'{"id":"[1,2)","valid_at":"{[2020-01-01,2021-01-01)}"}',
+	'replica identity uses table column type rather than index opckeytype'
+);
+
+# Restore tap_pub_A to publishing only 'tab', as the later tests expect.
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A DROP TABLE tab_temporal");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_A->safe_psql('postgres', "DROP TABLE tab_temporal");
+$node_B->safe_psql('postgres', "DROP TABLE tab_temporal");
+
+###############################################################################
 # Ensure that a deferrable primary key is not used to match deleted tuples in
 # a sequential table scan. Such a key cannot serve as a replica identity, so
 # the whole tuple must be compared, and a deleted row that only shares the key

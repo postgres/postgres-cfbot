@@ -2428,7 +2428,8 @@ SELECT replica_identity FROM pg_conflict.pg_conflict_log_16392;
      identity can be used to locate the row it identifies:
 <programlisting>
 SELECT t.* FROM pg_conflict.pg_conflict_log_16392 c, t
-  WHERE t.id  = (c.replica_identity->>'id')::int
+  WHERE NOT c.has_omitted_values
+    AND t.id  = (c.replica_identity->>'id')::int
     AND t.tag =  c.replica_identity->>'tag'
     AND t.doc = (c.replica_identity->>'doc')::jsonb;
 </programlisting>
@@ -2444,7 +2445,8 @@ SELECT (replica_identity->>'doc')::jsonb->>'x' FROM ...;   -- 1
     <para>
      If a key value is larger than 1kB it is not recorded.  In its place the
      conflict log stores a small object marking it as omitted and giving its
-     size, and sets <literal>has_omitted_values</literal> for that row:
+     size in bytes, and sets <literal>has_omitted_values</literal> for that
+     row:
 <programlisting>
  {"id":"1","tag":"abc","doc":{"omitted":true,"length":4096}}
 </programlisting>
