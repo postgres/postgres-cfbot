@@ -3445,7 +3445,7 @@ GetTupleForTrigger(EState *estate,
 				return false;
 
 			case TM_Ok:
-				if (tmfd.traversed)
+				if (tmfd.retargeted)
 				{
 					/*
 					 * Recheck the tuple using EPQ, if requested.  Otherwise,
