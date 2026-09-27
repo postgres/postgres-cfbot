@@ -52,7 +52,7 @@ typedef struct LocatorDesc
 	 * Does a row keep its locator across an UPDATE?  If not, as for heap, an
 	 * update may store the new version at a different locator, and a caller
 	 * that locks the latest version of a row may be handed a different one;
-	 * see TM_FailureData.traversed.
+	 * see TM_FailureData.retargeted.
 	 */
 	bool		stable;
 

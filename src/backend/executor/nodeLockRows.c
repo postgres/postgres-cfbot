@@ -217,7 +217,7 @@ lnext:
 				 * Got the lock successfully, the locked tuple saved in
 				 * markSlot for, if needed, EvalPlanQual testing below.
 				 */
-				if (tmfd.traversed)
+				if (tmfd.retargeted)
 					epq_needed = true;
 				break;
 
