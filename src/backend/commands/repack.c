@@ -2914,14 +2914,15 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 {
 	LockTupleMode lockmode;
 	TM_FailureData tmfd;
-	bool		row_moved;
 	Bitmapset  *modified_idx_attrs;
+	bool		row_moved = false;
 	TM_Result	res;
 
 	/*
 	 * Compute the set of modified indexed attributes by comparing the old
-	 * (ondisk) and new (spilled) tuples; heap_update needs it for a correct
-	 * HOT decision (a NULL set would look like "no indexed column changed").
+	 * (ondisk) and new (spilled) tuples.  heap_update needs this to make a
+	 * correct HOT decision; without it modified_idx_attrs would be NULL and
+	 * heap_update would always treat the update as HOT-eligible.
 	 */
 	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(chgcxt->cc_rri,
 													ondisk_tuple,
@@ -2951,14 +2952,15 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 		ExecInsertIndexTuples(chgcxt->cc_rri,
 							  chgcxt->cc_estate,
 							  EIIT_IS_UPDATE |
-							  (row_moved ? 0 : EIIT_PARTIAL_UPDATE),
+							  (row_moved ?
+							   0 : EIIT_PARTIAL_UPDATE),
 							  spilled_tuple,
 							  NIL, NULL);
 	}
 
-	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_UPDATED, 1);
-
 	bms_free(modified_idx_attrs);
+
+	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_UPDATED, 1);
 }
 
 static void
@@ -3148,6 +3150,17 @@ find_target_tuple(Relation rel, ChangeContext *chgcxt, TupleTableSlot *locator,
 	index_rescan(scan, chgcxt->cc_ident_key, chgcxt->cc_ident_key_nentries, NULL, 0);
 	while (table_index_getnext_slot(scan, ForwardScanDirection, retrieved))
 	{
+		/*
+		 * The entry that led here may not hold the row's current key (see
+		 * xs_entry_needs_recheck), so skip the row: the target row is reached
+		 * through its own entry.
+		 */
+		if (scan->xs_entry_needs_recheck)
+		{
+			CHECK_FOR_INTERRUPTS();
+			continue;
+		}
+
 		/* Be wary of temporal constraints */
 		if (scan->xs_recheck && !identity_key_equal(chgcxt, locator, retrieved))
 		{

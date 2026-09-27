@@ -2958,9 +2958,17 @@ ri_FastPathProbeOne(Relation pk_rel, Relation idx_rel,
 
 	index_rescan(scandesc, skey, nkeys, NULL, 0);
 
-	if (table_index_getnext_slot(scandesc, ForwardScanDirection, slot))
+	while (table_index_getnext_slot(scandesc, ForwardScanDirection, slot))
 	{
 		bool		concurrently_updated;
+
+		/*
+		 * The table AM says the entry that led here may not hold the row's
+		 * current key (see xs_entry_needs_recheck), so skip the row: one that
+		 * does have the key is reached through its own entry.
+		 */
+		if (scandesc->xs_entry_needs_recheck)
+			continue;
 
 		if (ri_LockPKTuple(pk_rel, slot, snapshot,
 						   &concurrently_updated))
@@ -2970,6 +2978,7 @@ ri_FastPathProbeOne(Relation pk_rel, Relation idx_rel,
 			else
 				found = true;
 		}
+		break;
 	}
 
 	return found;
