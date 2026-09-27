@@ -60,23 +60,35 @@
  */
 #include "postgres.h"
 
+#include "access/atm.h"
 #include "access/undo.h"
 #include "access/undo_xlog.h"
 #include "access/xlog.h"
 #include "access/undolog.h"
+#include "access/undormgr.h"
 #include "access/undorecord.h"
 #include "access/xact.h"
 #include "access/xactundo.h"
 #include "access/xlogdefs.h"
+#include "access/xloginsert.h"
 #include "access/table.h"
 #include "catalog/pg_class.h"
 #include "miscadmin.h"
+#include "storage/aio_subsys.h"
+#include "storage/condition_variable.h"
+#include "storage/lwlock.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "utils/injection_point.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
+#include "storage/shmem.h"
+#include "storage/spin.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+
+/* GUC: UNDO bytes threshold for instant abort via ATM */
+int			undo_instant_abort_threshold = 65536;
 
 /*
  * Initial capacity for the dynamically-grown subtransaction stack.
@@ -100,12 +112,24 @@ typedef struct XactUndoSubTransactionState
 	 * batches.
 	 */
 	XLogRecPtr	last_batch_lsn[NUndoPersistenceLevels];
+
+	/* Parent's chain_bytes[] at subtransaction start, restored likewise. */
+	Size		chain_bytes[NUndoPersistenceLevels];
 } XactUndoSubTransactionState;
 
 /* Backend-private undo state. */
 typedef struct XactUndoData
 {
 	bool		has_undo;		/* has this xact generated any undo? */
+
+	/*
+	 * Has this xact written UNDO that only its own abort may apply?  Index
+	 * UNDO (nbtree, hash) just marks aborted entries dead, so it can be left
+	 * to the logical revert worker.  Anything else -- FILEOPS restoring files
+	 * -- must be undone by the time ROLLBACK returns, whatever its size; see
+	 * undo_instant_abort_threshold.
+	 */
+	bool		needs_inline_abort;
 	int			subxact_depth;	/* 0 = top-level, 1+ = savepoints */
 	int			subxact_capacity;	/* allocated slots in subxact_stack */
 
@@ -129,6 +153,21 @@ typedef struct XactUndoData
 	XLogRecPtr	last_batch_lsn[NUndoPersistenceLevels];
 
 	/*
+	 * Bytes of UNDO written to WAL per persistence level, i.e. the size of
+	 * the chain that last_batch_lsn[] heads.  The record sets themselves
+	 * cannot tell us this: every flush resets their buffer.
+	 * AtAbort_XactUndo() compares this against undo_instant_abort_threshold.
+	 */
+	Size		chain_bytes[NUndoPersistenceLevels];
+
+	/*
+	 * The first (oldest) batch of each chain.  A rollback handed to the ATM
+	 * or the 2PC state must keep WAL from here on, not only from the head:
+	 * the revert worker reads every batch back to this one.
+	 */
+	XLogRecPtr	first_batch_lsn[NUndoPersistenceLevels];
+
+	/*
 	 * Deferred-batch state (see DeferXactUndoData).  When an index AM defers
 	 * a record instead of writing it, the record sits in this UndoRecordSet's
 	 * buffer until a choke point flushes it.  NULL means nothing is pending,
@@ -140,6 +179,21 @@ typedef struct XactUndoData
 
 static XactUndoData XactUndo;
 static bool subxact_callback_registered = false;
+
+/*
+ * Per-backend copy of the current transaction's UNDO chains, for the
+ * checkpointer (see LogXactUndoInflight).  Only the owning backend writes its
+ * slot, under the slot's spinlock; xid is invalid when it has none.
+ */
+typedef struct XactUndoInflightSlot
+{
+	slock_t		mutex;
+	xl_undo_inflight_xact chain;
+} XactUndoInflightSlot;
+
+static XactUndoInflightSlot *XactUndoInflight = NULL;
+
+static void PublishXactUndoChain(TransactionId xid);
 
 /*
  * Compile-time guard: xl_xact_prepare.last_batch_lsn[3] must match
@@ -163,26 +217,112 @@ static void XactUndo_SubXactCallback(SubXactEvent event, SubTransactionId mySubi
  * XactUndoShmemSize
  *		How much shared memory do we need for transaction undo state?
  *
- * Currently no shared memory is needed -- all state is backend-private.
- * This function exists for forward compatibility with the architecture
- * where an UndoRequestManager will be added later.
+ * One XactUndoInflightSlot per backend.
  */
 Size
 XactUndoShmemSize(void)
 {
-	return 0;
+	return mul_size(MaxBackends, sizeof(XactUndoInflightSlot));
 }
 
 /*
  * XactUndoShmemInit
  *		Initialize shared memory for transaction undo state.
- *
- * Currently a no-op; provided for the unified UndoShmemInit() pattern.
  */
 void
 XactUndoShmemInit(void)
 {
-	/* Nothing to do yet. */
+	bool		found;
+
+	XactUndoInflight = (XactUndoInflightSlot *)
+		ShmemInitStruct("UNDO In-flight Chains", XactUndoShmemSize(), &found);
+	if (!found)
+	{
+		for (int i = 0; i < MaxBackends; i++)
+		{
+			SpinLockInit(&XactUndoInflight[i].mutex);
+			XactUndoInflight[i].chain.xid = InvalidTransactionId;
+		}
+	}
+}
+
+/*
+ * PublishXactUndoChain
+ *		Make this backend's chain heads visible to LogXactUndoInflight().
+ *
+ * xid invalid clears the slot.  Called in critical sections: no palloc.
+ */
+static void
+PublishXactUndoChain(TransactionId xid)
+{
+	XactUndoInflightSlot *slot;
+
+	if (XactUndoInflight == NULL || MyProcNumber < 0 ||
+		MyProcNumber >= MaxBackends)
+		return;
+	slot = &XactUndoInflight[MyProcNumber];
+	if (!TransactionIdIsValid(xid) && !TransactionIdIsValid(slot->chain.xid))
+		return;
+
+	SpinLockAcquire(&slot->mutex);
+	slot->chain.xid = xid;
+	slot->chain.dboid = MyDatabaseId;
+	for (int i = 0; i < NUndoPersistenceLevels; i++)
+	{
+		slot->chain.first_batch_lsn[i] = XactUndo.first_batch_lsn[i];
+		slot->chain.last_batch_lsn[i] = XactUndo.last_batch_lsn[i];
+	}
+	SpinLockRelease(&slot->mutex);
+}
+
+/*
+ * LogXactUndoInflight
+ *		WAL-log the UNDO chains of every transaction in flight.
+ *
+ * Called by the checkpointer after the checkpoint's redo pointer has been
+ * determined.  Redo starts at that pointer and so does not see the batches a
+ * transaction wrote before it; this record tells recovery about them.  A
+ * transaction that commits or aborts after we read its slot is still listed;
+ * redo ignores the entry if the transaction's outcome is already known, and
+ * otherwise the commit or abort record, which follows this one, removes it.
+ */
+void
+LogXactUndoInflight(void)
+{
+	xl_undo_inflight *rec;
+	uint32		n = 0;
+
+	if (XactUndoInflight == NULL)
+		return;
+
+	rec = palloc(SizeOfUndoInflight +
+				 MaxBackends * sizeof(xl_undo_inflight_xact));
+	for (int i = 0; i < MaxBackends; i++)
+	{
+		XactUndoInflightSlot *slot = &XactUndoInflight[i];
+
+		SpinLockAcquire(&slot->mutex);
+		if (TransactionIdIsValid(slot->chain.xid))
+			rec->xacts[n++] = slot->chain;
+		SpinLockRelease(&slot->mutex);
+	}
+
+	/*
+	 * With a standby, written even when empty: the standby recomputes from it
+	 * the WAL it must keep for the in-flight chains
+	 * (UndoSetRecoveryBatchLSN). Unimportant, so that an idle system still
+	 * skips checkpoints.
+	 */
+	if (n > 0 || XLogStandbyInfoActive())
+	{
+		rec->nxacts = n;
+		XLogBeginInsert();
+		XLogSetRecordFlags(XLOG_MARK_UNIMPORTANT);
+		XLogRegisterData(rec, SizeOfUndoInflight +
+						 n * sizeof(xl_undo_inflight_xact));
+		(void) XLogInsert(RM_UNDO_ID, XLOG_UNDO_INFLIGHT);
+	}
+	pfree(rec);
 }
 
 /*
@@ -256,6 +396,8 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 
 	/* Remember that we've done something undo-related. */
 	XactUndo.has_undo = true;
+	if (rmid != UNDO_RMID_NBTREE && rmid != UNDO_RMID_HASH)
+		XactUndo.needs_inline_abort = true;
 
 	/* The current (sub)transaction must have an xid; see below. */
 	(void) GetCurrentTransactionId();
@@ -291,6 +433,7 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 		{
 			cur->start_location[i] = InvalidUndoRecPtr;
 			cur->last_batch_lsn[i] = XactUndo.last_batch_lsn[i];
+			cur->chain_bytes[i] = XactUndo.chain_bytes[i];
 		}
 	}
 
@@ -302,8 +445,8 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	 * The set, and so every batch it writes, is stamped with the top-level
 	 * xid even when the first record comes from a subtransaction.  Crash
 	 * recovery tracks loser chains by that xid and forgets them at the top
-	 * level's commit or abort record; a subxid stamp would outlive the
-	 * commit and get a committed transaction's UNDO applied.
+	 * level's commit or abort record; a subxid stamp would outlive the commit
+	 * and get a committed transaction's UNDO applied.
 	 */
 	uset = XactUndo.record_set[plevel];
 	if (uset == NULL)
@@ -355,6 +498,8 @@ PrepareXactUndoDataParts(XactUndoContext *ctx, char persistence,
 
 	/* Remember that we've done something undo-related. */
 	XactUndo.has_undo = true;
+	if (rmid != UNDO_RMID_NBTREE && rmid != UNDO_RMID_HASH)
+		XactUndo.needs_inline_abort = true;
 
 	/* The current (sub)transaction must have an xid; see below. */
 	(void) GetCurrentTransactionId();
@@ -377,6 +522,7 @@ PrepareXactUndoDataParts(XactUndoContext *ctx, char persistence,
 		{
 			cur->start_location[i] = InvalidUndoRecPtr;
 			cur->last_batch_lsn[i] = XactUndo.last_batch_lsn[i];
+			cur->chain_bytes[i] = XactUndo.chain_bytes[i];
 		}
 	}
 
@@ -425,8 +571,20 @@ InsertXactUndoData(XactUndoContext *ctx)
 {
 	UndoRecordSet *uset = ctx->uset;
 	UndoRecPtr	ptr;
+	int			saved_delay = 0;
 
 	Assert(uset != NULL);
+
+	/*
+	 * Hold off a checkpoint's redo-pointer phase while the batch is inserted
+	 * and published for LogXactUndoInflight(): a batch that precedes the redo
+	 * pointer must be visible to the checkpointer when it reads the slots.
+	 */
+	if (MyProc != NULL)
+	{
+		saved_delay = MyProc->delayChkptFlags;
+		MyProc->delayChkptFlags |= DELAY_CHKPT_START;
+	}
 
 	ptr = UndoRecordSetInsert(uset);
 	if (UndoRecPtrIsValid(ptr))
@@ -434,6 +592,7 @@ InsertXactUndoData(XactUndoContext *ctx)
 		XactUndoSubTransactionState *cur = CURRENT_SUBXACT();
 
 		XactUndo.last_location[ctx->plevel] = ptr;
+		XactUndo.chain_bytes[ctx->plevel] += UndoRecordSetGetSize(uset);
 
 		/*
 		 * Track the WAL LSN of the most recent UNDO batch for this
@@ -449,6 +608,9 @@ InsertXactUndoData(XactUndoContext *ctx)
 		 */
 		Assert(XLogRecPtrIsValid(uset->last_batch_lsn));
 		XactUndo.last_batch_lsn[ctx->plevel] = uset->last_batch_lsn;
+		if (!XLogRecPtrIsValid(XactUndo.first_batch_lsn[ctx->plevel]))
+			XactUndo.first_batch_lsn[ctx->plevel] = uset->last_batch_lsn;
+		PublishXactUndoChain(uset->xid);
 
 		/* Fix up subtransaction start location if needed */
 		if (cur->start_location[ctx->plevel] == (UndoRecPtr) 1)
@@ -475,6 +637,9 @@ InsertXactUndoData(XactUndoContext *ctx)
 		if (cur->start_location[ctx->plevel] == (UndoRecPtr) 1)
 			cur->start_location[ctx->plevel] = InvalidUndoRecPtr;
 	}
+
+	if (MyProc != NULL)
+		MyProc->delayChkptFlags = saved_delay;
 }
 
 /*
@@ -621,6 +786,19 @@ GetCurrentXactLastBatchLSN(UndoPersistenceLevel plevel)
 }
 
 /*
+ * GetCurrentXactFirstBatchLSN
+ *		Get the WAL LSN of the oldest UNDO batch for a persistence level.
+ *
+ * WAL from here on must survive until the chain has been applied; PREPARE
+ * saves it so the prepared transaction keeps pinning it.
+ */
+XLogRecPtr
+GetCurrentXactFirstBatchLSN(UndoPersistenceLevel plevel)
+{
+	return XactUndo.first_batch_lsn[plevel];
+}
+
+/*
  * XActUndoUpdateLastBatchLSN
  *		Record the LSN of an UNDO batch for the current transaction.
  *
@@ -658,8 +836,8 @@ XActUndoUpdateLastBatchLSN(XLogRecPtr lsn, UndoPersistenceLevel plevel)
  *     last_batch_lsn): the permanent chain-head LSN is durably saved in
  *     xl_xact_prepare, its WAL is pinned while the xact stays prepared
  *     (undo_batch_lsn in twophase.c / UndoGetOldestBatchLSN), and
- *     FinishPreparedTransaction() applies it synchronously via
- *     ApplyUndoChainFromWAL() on ROLLBACK PREPARED.
+ *     FinishPreparedTransaction() feeds it to ATMAddAborted() on ROLLBACK
+ *     PREPARED.
  *
  * Nothing remains that PREPARE must reject on UNDO grounds, so this returns
  * false unconditionally.  Kept as a single choke point (rather than deleting
@@ -750,8 +928,8 @@ AtCommit_XactUndo(void)
  * PREPARE TRANSACTION hands ownership of this transaction's cluster-wide UNDO
  * to the 2PC state: the permanent chain-head LSN was durably saved in
  * xl_xact_prepare (twophase.c gxact->undo_batch_lsn), its WAL is pinned while
- * the xact stays prepared, and ROLLBACK PREPARED applies that LSN
- * synchronously via ApplyUndoChainFromWAL().
+ * the xact stays prepared, and ROLLBACK PREPARED feeds that LSN to
+ * ATMAddAborted() so the logical revert worker walks the chain.
  *
  * The in-memory UndoRecordSets, however, live in TopTransactionContext, which
  * PrepareTransaction() destroys (AtCommit_Memory) right after this.  We must
@@ -793,9 +971,9 @@ AtPrepare_XactUndo(void)
  * The actual undo application is triggered by xact.c before calling
  * this function.  Here we apply the transaction's UNDO and clean up the record sets.
  *
- * With append-only I/O, we sync UNDO files before UNDO replay so that
- * if we crash during rollback, recovery can re-read the UNDO records
- * from the segment file and continue the rollback.
+ * The UNDO records are already in WAL.  If we crash during rollback,
+ * before the abort record is written, recovery finds the transaction still
+ * incomplete and rolls it back from WAL again.
  */
 void
 AtAbort_XactUndo(void)
@@ -809,13 +987,12 @@ AtAbort_XactUndo(void)
 	 * deferred-batch scheme rests on.
 	 *
 	 * The has_undo test immediately below, and the last_batch_lsn[] chain
-	 * head the apply path walks, are both only set by InsertXactUndoData().
-	 * A record that is still pending has therefore published nothing, and
-	 * every one of the aborted index entries it describes would be left for
-	 * VACUUM -- the exact silent no-op this module's header warns about.
-	 * Flushing here, at the top of the abort path and before
-	 * RecordTransactionAbort() runs, makes the deferral invisible to
-	 * everything downstream.
+	 * head the apply path walks, are both only set by InsertXactUndoData(). A
+	 * record that is still pending has therefore published nothing, and every
+	 * one of the aborted index entries it describes would be left for VACUUM
+	 * -- the exact silent no-op this module's header warns about. Flushing
+	 * here, at the top of the abort path and before RecordTransactionAbort()
+	 * runs, makes the deferral invisible to everything downstream.
 	 *
 	 * This also covers an error thrown mid-statement: the error unwinds into
 	 * AbortTransaction(), which calls us, so the partial statement's records
@@ -850,8 +1027,18 @@ AtAbort_XactUndo(void)
 	CollapseXactUndoSubTransactions();
 
 	/*
-	 * UNDO application strategy: apply the transaction's cluster-wide UNDO
-	 * chain synchronously in this backend, here at abort.
+	 * UNDO application strategy: inline for small transactions, deferred for
+	 * large ones.  Controlled by undo_instant_abort_threshold GUC.
+	 *
+	 * For small transactions (< threshold bytes of UNDO): apply UNDO
+	 * synchronously in this backend.  This avoids ATM pool accumulation and
+	 * eliminates the dependency on the background logical revert worker.
+	 *
+	 * For large transactions (>= threshold): register in the ATM for deferred
+	 * asynchronous rollback by the logical revert worker.  Only a transaction
+	 * whose UNDO is all index UNDO may be deferred (needs_inline_abort): the
+	 * effects of anything else, such as FILEOPS, must be gone when ROLLBACK
+	 * returns.
 	 *
 	 * The BumpContext issue (pfree crashes during abort) is avoided by: -
 	 * Creating a temporary AllocSetContext for inline UNDO application -
@@ -864,6 +1051,13 @@ AtAbort_XactUndo(void)
 
 		if (XLogRecPtrIsValid(perm_lsn))
 		{
+			/*
+			 * Size of the chain we are about to apply or defer.  Only the
+			 * permanent chain is ever applied, so only its size counts.
+			 */
+			Size		total_undo_bytes =
+				XactUndo.chain_bytes[UNDOPERSISTENCE_PERMANENT];
+
 			/*
 			 * The UNDO batch records were inserted into the WAL buffers
 			 * during this transaction but may not yet be flushed to disk. The
@@ -883,74 +1077,51 @@ AtAbort_XactUndo(void)
 			 */
 			XLogFlush(XactLastRecEnd);
 
+			if (XactUndo.needs_inline_abort ||
+				(undo_instant_abort_threshold > 0 &&
+				 total_undo_bytes < (Size) undo_instant_abort_threshold))
 			{
 				/*
-				 * Apply UNDO inline.  Use a dedicated AllocSetContext to
-				 * avoid BumpContext pfree issues.
+				 * Small transaction: apply UNDO inline.  Use a dedicated
+				 * AllocSetContext to avoid BumpContext pfree issues.
 				 */
 				MemoryContext undo_ctx;
 				MemoryContext old_ctx;
 				int			saved_trans_state;
-				bool		undo_applied = false;
+				uint32		saved_holdoff;
 
 				undo_ctx = AllocSetContextCreate(TopMemoryContext,
 												 "Inline UNDO Apply",
 												 ALLOCSET_DEFAULT_SIZES);
 				old_ctx = MemoryContextSwitchTo(undo_ctx);
 
-				/*
-				 * Validate the batch LSN points to an actual UNDO record
-				 * before attempting inline application.  Stale LSNs from
-				 * chain_prev tracking anomalies can point to non-UNDO WAL
-				 * records, which would cause "not an UNDO batch" warnings.
-				 */
-				if (!UndoValidateBatchLSN(perm_lsn))
 				{
-					elog(DEBUG1, "inline UNDO: last_batch_lsn %X/%X is not "
-						 "a valid UNDO batch",
-						 LSN_FORMAT_ARGS(perm_lsn));
-					undo_applied = false;
-					goto inline_undo_done;
-				}
+					volatile bool undo_applied = false;
 
-				/*
-				 * AbortTransaction() has already advanced the transaction
-				 * state to TRANS_ABORT, but the relcache, locks, and resource
-				 * owner are all still live.  UNDO appliers open relations,
-				 * which asserts IsTransactionState(); temporarily present
-				 * TRANS_INPROGRESS for the duration of the inline apply and
-				 * always restore the real state afterward.
-				 */
-				saved_trans_state = EnterInlineUndoApplyState();
-				PG_TRY();
-				{
-					undo_applied = ApplyUndoChainFromWAL(perm_lsn);
-				}
-				PG_CATCH();
-				{
 					/*
-					 * If inline UNDO throws an error, release any content
-					 * locks the failed chain left held before unwinding.
+					 * Validate the batch LSN points to an actual UNDO record
+					 * before attempting inline application.  Stale LSNs from
+					 * chain_prev tracking anomalies can point to non-UNDO WAL
+					 * records, which would cause "not an UNDO batch"
+					 * warnings.
 					 */
-					BufferLockReleaseAll();
-					LeaveInlineUndoApplyState(saved_trans_state);
-					FlushErrorState();
-					undo_applied = false;
-				}
-				PG_END_TRY();
-				LeaveInlineUndoApplyState(saved_trans_state);
+					if (!UndoValidateBatchLSN(perm_lsn))
+					{
+						elog(DEBUG1, "inline UNDO: last_batch_lsn %X/%X is not "
+							 "a valid UNDO batch, deferring to ATM",
+							 LSN_FORMAT_ARGS(perm_lsn));
+						undo_applied = false;
+						goto inline_undo_done;
+					}
 
-				MemoryContextSwitchTo(old_ctx);
-				MemoryContextDelete(undo_ctx);
-
-		inline_undo_done:
-				if (!undo_applied)
-				{
 					/*
-					 * Inline UNDO failed (WAL recycled, wrong record type, or
-					 * chain walk aborted).  Retain the per-backend UNDO LSN
-					 * slot so the WAL segment holding our UNDO data is not
-					 * recycled; the slot is cleared at backend exit.
+					 * AbortTransaction() has already advanced the transaction
+					 * state to TRANS_ABORT, but the relcache, locks, and
+					 * resource owner are all still live.  UNDO appliers open
+					 * relations, which asserts IsTransactionState();
+					 * temporarily present TRANS_INPROGRESS for the duration
+					 * of the inline apply and always restore the real state
+					 * afterward.
 					 *
 					 * The error that is aborting us may have been raised
 					 * while this backend held buffer content locks, which
@@ -960,22 +1131,95 @@ AtAbort_XactUndo(void)
 					 * does).  LWLockReleaseAll does not cover them.
 					 */
 					BufferLockReleaseAll();
-					elog(WARNING, "inline UNDO failed for xid %u",
-						 GetCurrentTransactionId());
+					saved_trans_state = EnterInlineUndoApplyState();
+					saved_holdoff = InterruptHoldoffCount;
+					PG_TRY();
+					{
+						undo_applied = ApplyUndoChainFromWAL(perm_lsn);
+					}
+					PG_CATCH();
+					{
+						/*
+						 * Already inside AbortTransaction: we cannot abort
+						 * again or rethrow. Repeat its early cleanup and
+						 * fall back to ATM; its ResourceOwnerRelease will
+						 * release pins and other resources later.
+						 * Release any content locks the failed chain left
+						 * held before unwinding.  The error reset
+						 * InterruptHoldoffCount, but the abort that runs this
+						 * still holds interrupts.
+						 */
+						InterruptHoldoffCount = saved_holdoff;
+						BufferLockReleaseAll();
+						LWLockReleaseAll();
+						XLogResetInsertion();
+						ConditionVariableCancelSleep();
+						pgaio_error_cleanup();
+						FlushErrorState();
+						undo_applied = false;
+					}
+					PG_END_TRY();
+					LeaveInlineUndoApplyState(saved_trans_state);
+
+					MemoryContextSwitchTo(old_ctx);
+					MemoryContextDelete(undo_ctx);
+
+			inline_undo_done:
+					if (!undo_applied)
+					{
+						/*
+						 * Inline UNDO failed (WAL recycled, wrong record
+						 * type, a record that could not be applied, or an
+						 * error).  Register in ATM for deferred processing by
+						 * the revert worker; re-applying the records that did
+						 * apply is harmless (see ApplyOneUndoRecord).
+						 */
+						elog(DEBUG1, "inline UNDO failed for xid %u, "
+							 "deferring to ATM",
+							 GetCurrentTransactionId());
+
+						if (ATMAddAborted(GetCurrentTransactionId(),
+										  MyDatabaseId, perm_lsn,
+										  XactUndo.first_batch_lsn[UNDOPERSISTENCE_PERMANENT]))
+							lsn_safely_held = true; /* ATM holds the LSN */
+						else
+							elog(WARNING, "ATM full: could not record aborted transaction %u", GetCurrentTransactionId());
+
+
+
+
+					}
+					else
+					{
+						lsn_safely_held = true; /* UNDO fully applied, WAL can
+												 * be recycled */
+						ereport(DEBUG2,
+								(errmsg("inline UNDO applied for xid %u "
+										"(%zu bytes)",
+										GetCurrentTransactionId(),
+										total_undo_bytes)));
+					}
 				}
+			}
+			else
+			{
+				/*
+				 * Large transaction or threshold=0: register in ATM for
+				 * deferred rollback by the logical revert worker.
+				 */
+				if (ATMAddAborted(GetCurrentTransactionId(),
+								  MyDatabaseId, perm_lsn,
+								  XactUndo.first_batch_lsn[UNDOPERSISTENCE_PERMANENT]))
+					lsn_safely_held = true;
 				else
-				{
-					lsn_safely_held = true; /* UNDO fully applied, WAL can be
-											 * recycled */
-					ereport(DEBUG2,
-							(errmsg("inline UNDO applied for xid %u",
-									GetCurrentTransactionId())));
-				}
+					elog(WARNING,
+						 "ATM full: could not record aborted transaction %u",
+						 GetCurrentTransactionId());
 			}
 		}
 	}
 
-	INJECTION_POINT("undo-xact-abort-after-apply", NULL);
+	INJECTION_POINT("undo-xact-abort-after-atm", NULL);
 
 	/* Free all per-persistence-level record sets. */
 	for (i = 0; i < NUndoPersistenceLevels; i++)
@@ -1067,10 +1311,10 @@ AtSubCommit_XactUndo(int level)
  * AtSubAbort_XactUndo
  *		Subtransaction abort: apply undo for this sub-level, clean up.
  *
- * We apply the subtransaction's records synchronously
- * by queuing work for the background UNDO worker.  This ensures that tuples
- * inserted/modified by the aborting subtransaction are physically restored
- * before control returns to the caller.
+ * We apply the subtransaction's records synchronously, in this backend, so
+ * that the effects of the aborting subtransaction are reversed before control
+ * returns to the caller.  If that fails, the subtransaction's part of the
+ * chain is handed to the logical revert worker through the ATM.
  *
  * Any AM-private per-subtransaction tracking state is cleaned up by the
  * owning AM's own SubXactCallback.
@@ -1120,9 +1364,8 @@ AtSubAbort_XactUndo(int level)
 	 * after this subtransaction's start_location.
 	 *
 	 * For each persistence level where this subtransaction generated UNDO
-	 * records, queue the work for the UNDO worker to apply them
-	 * synchronously.  The parent transaction's records (before the
-	 * subtransaction's start_location) are preserved.
+	 * records, apply them synchronously.  The parent transaction's records
+	 * (before the subtransaction's start_location) are preserved.
 	 */
 	for (i = 0; i < NUndoPersistenceLevels; i++)
 	{
@@ -1160,6 +1403,7 @@ AtSubAbort_XactUndo(int level)
 		{
 			XLogRecPtr	sub_head = XactUndo.last_batch_lsn[i];
 			XLogRecPtr	parent_head = cur->last_batch_lsn[i];
+			volatile bool applied = false;
 
 			/*
 			 * Invariant: the current head must be strictly newer (larger)
@@ -1183,6 +1427,7 @@ AtSubAbort_XactUndo(int level)
 				MemoryContext undo_ctx;
 				MemoryContext old_ctx;
 				int			saved_trans_state;
+				uint32		saved_holdoff;
 
 				undo_ctx = AllocSetContextCreate(TopMemoryContext,
 												 "Subxact UNDO Apply",
@@ -1197,19 +1442,30 @@ AtSubAbort_XactUndo(int level)
 				 */
 				BufferLockReleaseAll();
 				saved_trans_state = EnterInlineUndoApplyState();
+				saved_holdoff = InterruptHoldoffCount;
 				PG_TRY();
 				{
-					ApplyUndoChainFromWALBounded(sub_head, parent_head);
+					applied = ApplyUndoChainFromWALBounded(sub_head,
+														   parent_head);
 				}
 				PG_CATCH();
 				{
 					/*
+					 * Already inside AbortSubTransaction, so do not abort
+					 * again or rethrow. Repeat its early cleanup; its
+					 * ResourceOwnerRelease will release the rest.
 					 * Release any content locks the failed subxact UNDO chain
-					 * left held before unwinding.
+					 * left held before unwinding, and hold interrupts again
+					 * as the subtransaction abort did (see AtAbort_XactUndo).
 					 */
+					InterruptHoldoffCount = saved_holdoff;
 					BufferLockReleaseAll();
-					LeaveInlineUndoApplyState(saved_trans_state);
+					LWLockReleaseAll();
+					XLogResetInsertion();
+					ConditionVariableCancelSleep();
+					pgaio_error_cleanup();
 					FlushErrorState();
+					applied = false;
 				}
 				PG_END_TRY();
 				LeaveInlineUndoApplyState(saved_trans_state);
@@ -1219,10 +1475,68 @@ AtSubAbort_XactUndo(int level)
 			}
 			else
 				elog(DEBUG1, "subxact UNDO: head %X/%X is not a valid UNDO "
-					 "batch, skipping eager rollback",
+					 "batch, deferring to ATM",
 					 LSN_FORMAT_ARGS(sub_head));
 
+			/*
+			 * If the chain could not be applied in full, hand exactly this
+			 * subtransaction's part of it to the logical revert worker.  The
+			 * parent may go on to commit, in which case nothing else would
+			 * ever revert it.  The entry is keyed by the subtransaction's own
+			 * xid, so it cannot collide with a later entry for the top-level
+			 * transaction, and bounded by parent_head, so the worker leaves
+			 * the parent's batches alone.  We cannot raise an error here (we
+			 * are already aborting), and rolling the parent back instead
+			 * would discard work the user did not roll back.
+			 *
+			 * Only the permanent chain can be handed off, as for a top-level
+			 * abort.  A revert worker cannot reach this backend's temporary
+			 * relations, and an unlogged relation's UNDO is not applied by
+			 * crash recovery either (its contents are reset), so there is no
+			 * later point at which those chains could be completed; all we
+			 * can do is report them.  (No relation that writes UNDO today is
+			 * temporary or unlogged: see RelationUsesIndexUndo().)
+			 */
+			if (!applied && i != UNDOPERSISTENCE_PERMANENT)
+				ereport(WARNING,
+						(errmsg("could not apply the %s UNDO of rolled-back subtransaction %u",
+								i == UNDOPERSISTENCE_TEMP ? "temporary" : "unlogged",
+								GetCurrentTransactionIdIfAny()),
+						 errdetail("Its effects are left in place.")));
+			else if (!applied)
+			{
+				TransactionId subxid = GetCurrentTransactionIdIfAny();
+
+				/*
+				 * Its oldest batch is the first one after parent_head; WAL
+				 * from parent_head on covers it (or from the transaction's
+				 * first batch, if the parent had written none).
+				 */
+				XLogRecPtr	first = XLogRecPtrIsValid(parent_head) ?
+					parent_head : XactUndo.first_batch_lsn[i];
+
+				Assert(TransactionIdIsValid(subxid));
+				if (!ATMAddAbortedBounded(subxid, MyDatabaseId, sub_head,
+										  parent_head, first))
+					elog(WARNING,
+						 "ATM full: could not record rolled-back subtransaction %u",
+						 subxid);
+			}
+
 			XactUndo.last_batch_lsn[i] = parent_head;
+			XactUndo.chain_bytes[i] = cur->chain_bytes[i];
+
+			/*
+			 * The next batch chains onto the record set's last batch: point
+			 * it back at the parent's, or a later walk of the chain would
+			 * reach the batches just applied and apply them again.
+			 */
+			if (XactUndo.record_set[i] != NULL)
+			{
+				XactUndo.record_set[i]->last_batch_lsn = parent_head;
+				XactUndo.record_set[i]->prev_undo_ptr = (UndoRecPtr) parent_head;
+			}
+			PublishXactUndoChain(GetTopTransactionIdIfAny());
 		}
 
 		/*
@@ -1323,6 +1637,7 @@ XactUndo_SubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 					s->start_location[i] = InvalidUndoRecPtr;
 					/* Save parent's last_batch_lsn for restore on abort */
 					s->last_batch_lsn[i] = XactUndo.last_batch_lsn[i];
+					s->chain_bytes[i] = XactUndo.chain_bytes[i];
 				}
 			}
 			break;
@@ -1395,6 +1710,7 @@ ResetXactUndo(void)
 	int			i;
 
 	XactUndo.has_undo = false;
+	XactUndo.needs_inline_abort = false;
 	XactUndo.subxact_depth = 0;
 
 	/*
@@ -1417,6 +1733,7 @@ ResetXactUndo(void)
 		{
 			XactUndo.subxact_stack[0].start_location[i] = InvalidUndoRecPtr;
 			XactUndo.subxact_stack[0].last_batch_lsn[i] = InvalidXLogRecPtr;
+			XactUndo.subxact_stack[0].chain_bytes[i] = 0;
 		}
 	}
 
@@ -1425,7 +1742,15 @@ ResetXactUndo(void)
 		XactUndo.record_set[i] = NULL;
 		XactUndo.last_location[i] = InvalidUndoRecPtr;
 		XactUndo.last_batch_lsn[i] = InvalidXLogRecPtr;
+		XactUndo.chain_bytes[i] = 0;
+		XactUndo.first_batch_lsn[i] = InvalidXLogRecPtr;
 	}
+
+	/*
+	 * The chain is now the commit's, the abort's (applied, or handed to the
+	 * ATM) or the 2PC state's; none of those needs the in-flight record.
+	 */
+	PublishXactUndoChain(InvalidTransactionId);
 }
 
 /*

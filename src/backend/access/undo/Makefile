@@ -13,6 +13,11 @@ top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = \
+	atm.o \
+	logical_revert_worker.o \
+	slog.o \
+	slog_flathash.o \
+	slog_tuple.o \
 	undo.o \
 	undo_bufmgr.o \
 	undo_xlog.o \

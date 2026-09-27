@@ -348,24 +348,32 @@ FROM pg_stat_undo;
   <itemizedlist>
    <listitem>
     <para>
+     <function>pg_stat_get_undo_retention()</function>: returns one row per
+     holder of UNDO WAL: an in-flight transaction that has written UNDO
+     (<literal>backend</literal>, with its <structfield>pid</structfield>),
+     an aborted transaction waiting for the logical revert worker
+     (<literal>aborted</literal>), or the prepared transactions
+     (<literal>prepared</literal>).  Each row gives the oldest WAL position
+     the holder needs (<structfield>oldest_lsn</structfield>) and how much
+     WAL that retains (<structfield>retained_bytes</structfield>); WAL older
+     than the minimum <structfield>oldest_lsn</structfield> can be recycled.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
      <function>pg_stat_get_undo_logs()</function>: returns one row per
-     UNDO log with its log number, insert and discard offsets, size in
-     bytes, oldest active transaction, and state.
-    </para>
-   </listitem>
-   <listitem>
-    <para>
-     <function>pg_stat_get_undo_buffers()</function>: returns a single row
-     of UNDO buffer-cache statistics (buffer count, hits, misses,
-     evictions, writes, and hit ratio).
-    </para>
-   </listitem>
-   <listitem>
-    <para>
-     <function>pg_undo_force_discard(force_rotate boolean)</function>:
-     forces an immediate discard of reclaimable UNDO records and returns
-     the number of log segments freed.  Membership in the
-     <literal>pg_maintain</literal> role is required.
+     per-backend undo log, as used by table access methods that keep their
+     undo there.  Each row gives the log number
+     (<structfield>logno</structfield>), its
+     <structfield>persistence</structfield> (<literal>permanent</literal>,
+     <literal>unlogged</literal> or <literal>temporary</literal>) and
+     <structfield>tablespace</structfield>, the
+     <structfield>discard</structfield>, <structfield>insert</structfield>
+     and <structfield>end</structfield> pointers (undo record pointers in
+     hexadecimal; the undo between <structfield>discard</structfield> and
+     <structfield>insert</structfield> is still needed), and the
+     <structfield>xid</structfield> and <structfield>pid</structfield> of
+     the transaction and process attached to the log, if any.
     </para>
    </listitem>
    <listitem>

@@ -24,6 +24,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/pg_xattr.h"
+#include "access/atm.h"
 #include "access/xlogdefs.h"
 #include "storage/fd.h"
 #include "storage/fileops.h"
@@ -44,9 +45,31 @@ PG_FUNCTION_INFO_V1(test_fileops_setxattr);
 PG_FUNCTION_INFO_V1(test_fileops_getxattr);
 PG_FUNCTION_INFO_V1(test_fileops_removexattr);
 PG_FUNCTION_INFO_V1(test_fileops_data_dir);
+PG_FUNCTION_INFO_V1(test_fileops_atm_oldest_lsn);
 PG_FUNCTION_INFO_V1(test_fileops_write);
 PG_FUNCTION_INFO_V1(test_fileops_chown);
 PG_FUNCTION_INFO_V1(test_fileops_symlink);
+
+/*
+ * test_fileops_atm_oldest_lsn - Read the oldest un-reverted ATM last_batch_lsn.
+ *
+ * This is the exact value ATMGetOldestUnrevertedLSN() feeds into
+ * UndoGetOldestBatchLSN() -> KeepLogSeg(), i.e. the LSN that pins UNDO WAL
+ * against recycling.  Returning it lets a recovery test assert, after crash +
+ * restart, that the ATM was faithfully reconstructed and still pins the WAL --
+ * NOT merely that the WAL file happens to exist on disk.  Returns NULL when no
+ * un-reverted entry exists.
+ */
+Datum
+test_fileops_atm_oldest_lsn(PG_FUNCTION_ARGS)
+{
+	XLogRecPtr	lsn = ATMGetOldestUnrevertedLSN();
+
+	if (XLogRecPtrIsInvalid(lsn))
+		PG_RETURN_NULL();
+
+	PG_RETURN_LSN(lsn);
+}
 
 PG_FUNCTION_INFO_V1(test_fileops_delete);
 PG_FUNCTION_INFO_V1(test_fileops_rename);

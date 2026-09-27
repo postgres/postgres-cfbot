@@ -43,6 +43,7 @@
 #include "access/undo_xlog.h"
 #include "access/xloginsert.h"
 #include "access/xlog.h"
+#include "miscadmin.h"
 #include "utils/injection_point.h"
 
 /*
@@ -104,6 +105,7 @@ UndoRecordSetInsert(UndoRecordSet *uset)
 
 	/* Build the batch header */
 	xlrec.xid = uset->xid;
+	xlrec.dboid = MyDatabaseId;
 	xlrec.chain_prev = uset->last_batch_lsn;
 	xlrec.nrecords = (uint32) uset->nrecords;
 	xlrec.total_len = (uint32) uset->buffer_size;

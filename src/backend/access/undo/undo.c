@@ -32,6 +32,8 @@
  */
 #include "postgres.h"
 
+#include "access/atm.h"
+#include "access/logical_revert_worker.h"
 #include "access/undo.h"
 #include "access/undolog.h"
 #include "access/undormgr.h"
@@ -104,6 +106,8 @@ UndoShmemSize(void)
 	size = UndoLogShmemSize();
 	size = add_size(size, XactUndoShmemSize());
 	size = add_size(size, UndoWorkerShmemSize());
+	size = add_size(size, LogicalRevertShmemSize());
+	size = add_size(size, ATMShmemSize());
 
 	/* Per-backend UNDO engine. */
 	size = add_size(size, PbuUndoLogShmemSize());
@@ -213,6 +217,8 @@ UndoShmemInit(void)
 	UndoLogShmemInit();
 	XactUndoShmemInit();
 	UndoWorkerShmemInit();
+	LogicalRevertShmemInit();
+	ATMShmemInit();
 
 	/*
 	 * Per-backend UNDO engine.
@@ -259,7 +265,7 @@ UndoShmemInit(void)
  *    function pointers, both rebuilt by RegisterUndoRmgrs() (idempotent:
  *    InitUndoRmgrs() zeroes the table first).
  *
- * XactUndoShmemInit() is a no-op and so omitted here.  Any
+ * ATMShmemInit() is a no-op and so omitted here.  Any
  * AM-specific shared structure with the same "no found-guard" hazard
  * handles its own EXEC_BACKEND re-attach via its own PG_SHMEM_SUBSYSTEM entry
  * (see storage/subsystemlist.h); this function is only responsible for the
@@ -269,7 +275,9 @@ static void
 UndoShmemAttach_internal(void *arg)
 {
 	UndoLogShmemInit();
+	XactUndoShmemInit();
 	UndoWorkerShmemInit();
+	LogicalRevertShmemInit();
 
 	/* Per-backend UNDO engine shmem (see comment above about self-attach). */
 	PbuUndoLogShmemInit();

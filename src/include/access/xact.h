@@ -212,6 +212,7 @@ typedef struct SavedTransactionCharacteristics
 #define XACT_XINFO_HAS_ORIGIN			(1U << 5)
 #define XACT_XINFO_HAS_AE_LOCKS			(1U << 6)
 #define XACT_XINFO_HAS_GID				(1U << 7)
+#define XACT_XINFO_HAS_FILEOPS (1U << 9)
 #define XACT_XINFO_HAS_DROPPED_STATS	(1U << 8)
 
 /*
@@ -395,6 +396,13 @@ typedef struct xl_xact_prepare
 	 * be bumped.  See StaticAssertDecl in xactundo.c for compile-time guard.
 	 */
 	XLogRecPtr	last_batch_lsn[3];
+
+	/*
+	 * Oldest batch of the permanent-level chain.  WAL from here on is
+	 * retained while the transaction stays prepared, and handed to the ATM
+	 * by ROLLBACK PREPARED, because the revert worker reads the whole chain.
+	 */
+	XLogRecPtr	undo_first_batch_lsn;
 } xl_xact_prepare;
 
 #define SizeOfXactPrepare sizeof(xl_xact_prepare)
@@ -468,6 +476,8 @@ typedef struct xl_xact_parsed_abort
 
 	XLogRecPtr	origin_lsn;
 	TimestampTz origin_timestamp;
+	uint32 fileops_len;
+	const char *fileops;
 } xl_xact_parsed_abort;
 
 
@@ -559,7 +569,8 @@ extern XLogRecPtr XactLogAbortRecord(TimestampTz abort_time,
 									 int ndroppedstats,
 									 xl_xact_stats_item *droppedstats,
 									 int xactflags, TransactionId twophase_xid,
-									 const char *twophase_gid);
+									 const char *twophase_gid,
+									 const char *fileops, uint32 fileops_len);
 extern void xact_redo(XLogReaderState *record);
 
 /* xactdesc.c */

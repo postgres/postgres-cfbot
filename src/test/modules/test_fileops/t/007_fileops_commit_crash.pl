@@ -36,19 +36,24 @@ sub commit_and_crash
 {
 	my ($sql) = @_;
 	$node->safe_psql('postgres',
-		"SELECT injection_points_attach('fileops-commit-before-pending-ops', 'wait')");
+		"SELECT injection_points_attach('fileops-commit-before-pending-ops', 'wait')"
+	);
 	my $bg = $node->background_psql('postgres', on_error_stop => 0);
 	$bg->query_until(qr/start/, "\\echo start\n$sql\n");
-	$node->wait_for_event('client backend', 'fileops-commit-before-pending-ops');
+	$node->wait_for_event('client backend',
+		'fileops-commit-before-pending-ops');
 	$node->stop('immediate');
 	$bg->{run}->finish;
 	$node->start;
 }
 
-$node->safe_psql('postgres', "SELECT test_fileops_create_tempfile('del.dat')");
-$node->safe_psql('postgres', "SELECT test_fileops_create_tempfile('ren.dat')");
+$node->safe_psql('postgres',
+	"SELECT test_fileops_create_tempfile('del.dat')");
+$node->safe_psql('postgres',
+	"SELECT test_fileops_create_tempfile('ren.dat')");
 $node->safe_psql('postgres', "SELECT test_fileops_mkdir('rmd', 448)");
-commit_and_crash(q{BEGIN;
+commit_and_crash(
+	q{BEGIN;
 SELECT test_fileops_delete('del.dat');
 SELECT test_fileops_rename('ren.dat', 'ren2.dat');
 SELECT test_fileops_rmdir('rmd');
@@ -58,23 +63,31 @@ TODO:
 	# The deferred ops are WAL-logged only when executed, after the commit
 	# record, so this crash loses them.  Their intent must be durable before
 	# the commit record and executed by commit redo.
-	local $TODO = 'commit-time FILEOPS ops are logged after the commit record';
+	local $TODO =
+	  'commit-time FILEOPS ops are logged after the commit record';
 	ok(!-e "$datadir/del.dat",
 		'committed FileOpsDelete happened despite the crash');
-	ok(!-e "$datadir/ren.dat" && -e "$datadir/ren2.dat",
+	ok( !-e "$datadir/ren.dat" && -e "$datadir/ren2.dat",
 		'committed FileOpsRename happened despite the crash');
-	ok(!-e "$datadir/rmd", 'committed FileOpsRmdir happened despite the crash');
+	ok(!-e "$datadir/rmd",
+		'committed FileOpsRmdir happened despite the crash');
 }
 
 # DROP TABLESPACE is safe: its XLOG_TBLSPC_DROP precedes the commit record
 # and its redo removes the directories.  (In-place, so they are under
 # pg_tblspc.)
-$node->safe_psql('postgres', 'SET allow_in_place_tablespaces = on; CREATE TABLESPACE ts LOCATION \'\'');
-my $tsoid = $node->safe_psql('postgres', "SELECT oid FROM pg_tablespace WHERE spcname = 'ts'");
+$node->safe_psql('postgres',
+	'SET allow_in_place_tablespaces = on; CREATE TABLESPACE ts LOCATION \'\''
+);
+my $tsoid = $node->safe_psql('postgres',
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'ts'");
 ok(-d "$datadir/pg_tblspc/$tsoid", 'tablespace directory exists');
 commit_and_crash('DROP TABLESPACE ts;');
-is($node->safe_psql('postgres', "SELECT count(*) FROM pg_tablespace WHERE spcname = 'ts'"),
-	'0', 'DROP TABLESPACE committed');
+is( $node->safe_psql(
+		'postgres', "SELECT count(*) FROM pg_tablespace WHERE spcname = 'ts'"
+	),
+	'0',
+	'DROP TABLESPACE committed');
 ok(!-e "$datadir/pg_tblspc/$tsoid",
 	'committed DROP TABLESPACE removed its directory despite the crash');
 

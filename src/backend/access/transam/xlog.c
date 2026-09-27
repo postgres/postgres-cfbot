@@ -46,6 +46,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "access/atm.h"
 #include "access/clog.h"
 #include "access/commit_ts.h"
 #include "access/heaptoast.h"
@@ -58,6 +59,7 @@
 #include "access/undolog.h"
 #include "access/undo_xlog.h"
 #include "access/xact.h"
+#include "access/xactundo.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
 #include "access/xloginsert.h"
@@ -6401,6 +6403,18 @@ StartupXLOG(void)
 	restoreTwoPhaseData();
 
 	/*
+	 * Reload the Aborted Transaction Map from its checkpoint state file
+	 * before the redo pass.  The ATM is otherwise reconstructed only by
+	 * replaying XLOG_ATM_ABORT / XLOG_ATM_FORGET, which redo cannot do for
+	 * aborts whose records precede the checkpoint redo point.  Reloading here
+	 * -- before redo, exactly like restoreTwoPhaseData() above -- lets
+	 * atm_redo's XLOG_ATM_FORGET replays correctly remove entries forgotten
+	 * after the checkpoint, and XLOG_ATM_ABORT replays re-add (idempotently)
+	 * entries aborted after it.
+	 */
+	ATMReloadFromCheckpoint();
+
+	/*
 	 * When starting with crash recovery, reset pgstat data - it might not be
 	 * valid. Otherwise restore pgstat data. It's safe to do this here,
 	 * because postmaster will not yet have started any other processes.
@@ -6869,10 +6883,19 @@ StartupXLOG(void)
 		promoted = PerformRecoveryXLogAction();
 
 	/*
-	 * Apply any UNDO transactions deferred during the UNDO phase.  During the
-	 * UNDO phase, if syscache wasn't available, we deferred applying a
-	 * transaction's UNDO chain.  Now that recovery is complete and relations
-	 * can be opened, apply each deferred chain synchronously.
+	 * Finalize ATM state after recovery.  WAL replay has reconstructed the
+	 * Aborted Transaction Map via XLOG_ATM_ABORT and XLOG_ATM_FORGET redo
+	 * handlers.  Log a summary of entries that still need Logical Revert.
+	 */
+	if (performedWalRecovery)
+		ATMRecoveryFinalize();
+
+	/*
+	 * Flush any deferred UNDO transactions to the ATM.  During the UNDO
+	 * phase, if syscache wasn't available, we deferred transaction
+	 * processing. Now that recovery is complete and WAL writes are allowed
+	 * (checkpoint/ end-of-recovery record was written above), we can add them
+	 * to the ATM for asynchronous processing by the logical revert worker.
 	 */
 	if (performedWalRecovery)
 		FlushDeferredUndoXacts();
@@ -8112,6 +8135,14 @@ CreateCheckPoint(int flags)
 	if (!shutdown && XLogStandbyInfoActive())
 		LogStandbySnapshot();
 
+	/*
+	 * Tell crash recovery, which starts at our redo pointer, about the UNDO
+	 * chains of transactions still in flight; it would not replay the batches
+	 * they wrote before the redo pointer.
+	 */
+	if (!shutdown)
+		LogXactUndoInflight();
+
 	START_CRIT_SECTION();
 
 	/*
@@ -8537,6 +8568,13 @@ CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
 	CheckPointSnapBuild();
 	CheckPointLogicalRewriteHeap();
 	CheckPointTwoPhase(checkPointRedo);
+
+	/*
+	 * Persist the Aborted Transaction Map so it survives a crash even when
+	 * this checkpoint advances the redo pointer past an un-forgotten
+	 * XLOG_ATM_ABORT record (see CheckPointATM / ATMReloadFromCheckpoint).
+	 */
+	CheckPointATM();
 }
 
 /*

@@ -31,6 +31,7 @@ abort-time undo action that reverses it if the transaction rolls back:
 
   FileOpsCreate    -- create() now; UNDO/pending-delete on abort
   FileOpsMkdir     -- mkdir() now; UNDO rmdir on abort
+  FileOpsMkdirTree -- mkdir() now; UNDO removes the whole tree on abort
   FileOpsChmod     -- chmod() now; UNDO restore old mode on abort
   FileOpsChown     -- chown() now; UNDO restore old uid/gid on abort
   FileOpsTruncate  -- ftruncate() now; UNDO restore old length on abort
@@ -45,7 +46,6 @@ and the filesystem is touched at transaction end:
   FileOpsRename    -- deferred, always at_commit
   FileOpsDelete    -- deferred; at_commit chooses commit vs abort
   FileOpsRmdir / FileOpsRmdirRecursive -- deferred; at_commit
-  FileOpsRmtree    -- deferred; walked at execute time (copydir abort cleanup)
 
 FileOpsDoPendingOps(isCommit) runs the pending list at transaction end: the
 at_commit=true ops fire on commit, the at_commit=false ops fire on abort.
@@ -100,12 +100,7 @@ gone, rmdir of an already-absent directory all count as success).  Only the
 commit path is logged; an at_commit=false delete/rmdir run during abort emits
 no WAL, because a standby must never apply an aborted transaction's effect.
 
-Two deliberate exceptions:
-
-  RMTREE (FileOpsRmtree) writes no WAL and has no redo.  Its only core caller
-  (copydir.c) registers it at_commit=false, so it fires only on ABORT to
-  clean up a partially-copied tree; aborts are never replayed as committed,
-  so it cannot diverge a standby.
+One deliberate exception:
 
   SYMLINK redo is an intentional no-op.  FileOpsSymlink is used only for
   tablespace symlinks; standby/crash-recovery replay of those is owned by
@@ -155,14 +150,16 @@ transactional.
   register_delete (FileOpsCreate).  When true, the newly created file is
   registered for deletion if the transaction aborts.
 
-  at_commit (FileOpsDelete, FileOpsRmdir, FileOpsRmdirRecursive,
-  FileOpsRmtree).  at_commit = true removes on commit (dropping state the
-  transaction is logically deleting); at_commit = false removes only on abort
-  (cleaning up something the transaction just created, e.g. a copy tree).
+  at_commit (FileOpsDelete, FileOpsRmdir, FileOpsRmdirRecursive).
+  at_commit = true removes on commit (dropping state the transaction is
+  logically deleting); at_commit = false removes only on abort.
 
-FileOpsRmtree defers its tree walk to execute time (removing whatever ended
-up on disk by commit/abort), where FileOpsRmdirRecursive enumerates contents
-at registration time.
+FileOpsMkdirTree creates a directory that the transaction then fills by
+other means (smgr for CREATE DATABASE, copydir() for FILE_COPY and ALTER
+DATABASE SET TABLESPACE).  Its UNDO record and its abort-time pending op
+remove the whole tree, whatever ended up in it, where FileOpsMkdir's only
+rmdir() an empty directory.  For a database directory the UNDO first drops
+that database's shared buffers and pending fsync requests.
 
 The API hides platform differences: PG_O_DIRECT for unbuffered I/O,
 pg_fsync() for the correct per-platform flush, fsync_parent_path() for

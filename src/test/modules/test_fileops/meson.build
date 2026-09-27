@@ -31,9 +31,21 @@ tests += {
     ],
   },
   'tap': {
+    'env': {
+       'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
+    },
     'tests': [
       't/001_fileops_apply_failure.pl',
+      't/002_fileops_large_rollback.pl',
+      't/003_fileops_atm_reapply.pl',
+      't/004_fileops_fs_errors.pl',
+      't/005_fileops_checkpoint_loser.pl',
+      't/006_fileops_rollback_prepared_crash.pl',
       't/007_fileops_commit_crash.pl',
+      't/007_fileops_abort_redo.pl',
+      't/008_fileops_standby_abort.pl',
+      't/009_fileops_reuse.pl',
+      't/016_fileops_inverse_fsync.pl',
     ],
   },
 }

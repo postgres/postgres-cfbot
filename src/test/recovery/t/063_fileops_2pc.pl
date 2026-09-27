@@ -57,20 +57,21 @@ sub wait_for_mode
 $node->safe_psql('postgres',
 	qq{SELECT test_fileops_create_tempfile('twopc.dat')});
 $node->safe_psql('postgres', qq{SELECT test_fileops_chmod('$file', 420)});
-my $baseline = $node->safe_psql('postgres',
-	qq{SELECT test_fileops_get_mode('$file')});
+my $baseline =
+  $node->safe_psql('postgres', qq{SELECT test_fileops_get_mode('$file')});
 is($baseline, '420', 'baseline mode is 0644');
 
 # ================================================================
 # Test 1: ROLLBACK PREPARED reverses the chmod
 # ================================================================
-$node->safe_psql('postgres', qq(
+$node->safe_psql(
+	'postgres', qq(
 BEGIN;
 SELECT test_fileops_chmod('$file', 448);  -- 0700
 PREPARE TRANSACTION 'fo_rb';
 ));
-my $m = $node->safe_psql('postgres',
-	qq{SELECT test_fileops_get_mode('$file')});
+my $m =
+  $node->safe_psql('postgres', qq{SELECT test_fileops_get_mode('$file')});
 is($m, '448', 'Test 1: chmod applied and still visible while prepared');
 
 $node->safe_psql('postgres', q{ROLLBACK PREPARED 'fo_rb'});
@@ -79,14 +80,14 @@ wait_for_mode(420, 'Test 1: ROLLBACK PREPARED reverses chmod (0700 -> 0644)');
 # ================================================================
 # Test 2: COMMIT PREPARED keeps the chmod
 # ================================================================
-$node->safe_psql('postgres', qq(
+$node->safe_psql(
+	'postgres', qq(
 BEGIN;
 SELECT test_fileops_chmod('$file', 448);  -- 0700
 PREPARE TRANSACTION 'fo_cp';
 ));
 $node->safe_psql('postgres', q{COMMIT PREPARED 'fo_cp'});
-$m = $node->safe_psql('postgres',
-	qq{SELECT test_fileops_get_mode('$file')});
+$m = $node->safe_psql('postgres', qq{SELECT test_fileops_get_mode('$file')});
 is($m, '448', 'Test 2: COMMIT PREPARED keeps chmod (0700)');
 
 # Reset to baseline for the crash test.
@@ -95,7 +96,8 @@ $node->safe_psql('postgres', qq{SELECT test_fileops_chmod('$file', 420)});
 # ================================================================
 # Test 3: WAL retention across checkpoints while prepared
 # ================================================================
-$node->safe_psql('postgres', qq(
+$node->safe_psql(
+	'postgres', qq(
 BEGIN;
 SELECT test_fileops_chmod('$file', 384);  -- 0600
 PREPARE TRANSACTION 'fo_ckpt';
@@ -105,7 +107,7 @@ $node->safe_psql('postgres', 'CHECKPOINT');
 for my $i (1 .. 20)
 {
 	$node->safe_psql('postgres',
-		"CREATE TABLE junk_$i(x int); "
+			"CREATE TABLE junk_$i(x int); "
 		  . "INSERT INTO junk_$i SELECT g FROM generate_series(1,5000) g; "
 		  . "DROP TABLE junk_$i;");
 }
@@ -118,7 +120,8 @@ wait_for_mode(420,
 # Test 4: crash recovery -- prepared UNDO xact survives, then reverts
 # ================================================================
 $node->safe_psql('postgres', qq{SELECT test_fileops_chmod('$file', 420)});
-$node->safe_psql('postgres', qq(
+$node->safe_psql(
+	'postgres', qq(
 BEGIN;
 SELECT test_fileops_chmod('$file', 448);  -- 0700
 PREPARE TRANSACTION 'fo_crash';
@@ -126,11 +129,9 @@ PREPARE TRANSACTION 'fo_crash';
 $node->stop('immediate');
 $node->start;
 
-my $prep = $node->safe_psql('postgres',
-	q{SELECT gid FROM pg_prepared_xacts});
+my $prep = $node->safe_psql('postgres', q{SELECT gid FROM pg_prepared_xacts});
 is($prep, 'fo_crash', 'Test 4: prepared xact survives crash recovery');
-$m = $node->safe_psql('postgres',
-	qq{SELECT test_fileops_get_mode('$file')});
+$m = $node->safe_psql('postgres', qq{SELECT test_fileops_get_mode('$file')});
 is($m, '448', 'Test 4: chmod still applied (prepared, not yet rolled back)');
 
 $node->safe_psql('postgres', q{ROLLBACK PREPARED 'fo_crash'});
@@ -138,8 +139,8 @@ wait_for_mode(420,
 	'Test 4: ROLLBACK PREPARED after crash+restart reverses chmod');
 
 # Server healthy at the end.
-is($node->safe_psql('postgres', 'SELECT 1'), '1',
-	'server operational after all 2PC UNDO scenarios');
+is($node->safe_psql('postgres', 'SELECT 1'),
+	'1', 'server operational after all 2PC UNDO scenarios');
 
 $node->stop;
 done_testing();

@@ -28,7 +28,8 @@ use Test::More;
 
 my $primary = PostgreSQL::Test::Cluster->new('fileops_div_primary');
 $primary->init(allows_streaming => 1);
-$primary->append_conf("postgresql.conf", qq(
+$primary->append_conf(
+	"postgresql.conf", qq(
 autovacuum = off
 wal_level = replica
 ));
@@ -46,7 +47,8 @@ my $primary_dir = $primary->data_dir;
 # start mutating.  Use FileOps CREATE (WAL-logged, standby-reproduced) and
 # FileOps MKDIR (WAL-logged) rather than raw open(), so the fixture itself
 # replicates.  Paths are relative to PGDATA.
-$primary->safe_psql('postgres', qq(
+$primary->safe_psql(
+	'postgres', qq(
 BEGIN;
 SELECT test_fileops_create('div_delete_me.dat', 384);   -- 0600
 SELECT test_fileops_create('div_rename_src.dat', 384);
@@ -73,7 +75,8 @@ ok(-d "$standby_dir/div_rmdir_me", 'fixture: rmdir target on standby');
 # Perform the three deferred destructive ops in a committed transaction on the
 # primary.  Each goes through the FileOps deferred path (at_commit=true) and,
 # with the fix, is WAL-logged at commit-execution.
-$primary->safe_psql('postgres', qq(
+$primary->safe_psql(
+	'postgres', qq(
 BEGIN;
 SELECT test_fileops_delete('div_delete_me.dat');
 SELECT test_fileops_rename('div_rename_src.dat', 'div_rename_dst.dat');

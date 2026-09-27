@@ -202,8 +202,6 @@ LWLock	   *RollbackRequestLock_pbu = NULL;
 LWLock	   *UndoWorkerLock_pbu = NULL;
 pg_atomic_uint64 *UndoOldestXidHavingUndo_pbu = NULL;
 
-PG_FUNCTION_INFO_V1(pbu_pg_stat_get_undo_logs);
-
 /*
  * Return the amount of traditional smhem required for undo log management.
  * Extra shared memory will be managed using DSM segments.
@@ -2651,46 +2649,24 @@ ResetNonPermanentUndoLogs(void)
 	ResetUndoLogs(UNDO_TEMP);
 }
 
+/*
+ * pg_stat_get_undo_logs
+ *		One row per per-backend undo log: its number, persistence level and
+ *		tablespace, its discard, insert and end pointers, and the transaction
+ *		and process attached to it, if any.
+ */
 Datum
-pbu_pg_stat_get_undo_logs(PG_FUNCTION_ARGS)
+pg_stat_get_undo_logs(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_UNDO_LOGS_COLS 9
+#define PG_STAT_GET_UNDO_LOGS_COLS 8
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
 	UndoLogNumber low_logno;
 	UndoLogNumber high_logno;
-	UndoLogNumber logno;
 	UndoLogSharedData *shared = MyUndoLogState.shared;
 	char	   *tablespace_name = NULL;
 	Oid			last_tablespace = InvalidOid;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not " \
-						"allowed in this context")));
-
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
+	InitMaterializedSRF(fcinfo, 0);
 
 	/* Find the range of active log numbers. */
 	LWLockAcquire(UndoLogLock, LW_SHARED);
@@ -2699,7 +2675,7 @@ pbu_pg_stat_get_undo_logs(PG_FUNCTION_ARGS)
 	LWLockRelease(UndoLogLock);
 
 	/* Scan all undo logs to build the results. */
-	for (logno = low_logno; logno < high_logno; ++logno)
+	for (UndoLogNumber logno = low_logno; logno < high_logno; ++logno)
 	{
 		UndoLogControl *log = get_undo_log_by_number(logno);
 		char		buffer[17];
@@ -2724,10 +2700,9 @@ pbu_pg_stat_get_undo_logs(PG_FUNCTION_ARGS)
 		}
 
 		values[0] = ObjectIdGetDatum((Oid) logno);
-		values[1] = CStringGetTextDatum(
-										log->meta.persistence == UNDO_PERMANENT ? "permanent" :
+		values[1] = CStringGetTextDatum(log->meta.persistence == UNDO_PERMANENT ? "permanent" :
 										log->meta.persistence == UNDO_UNLOGGED ? "unlogged" :
-										log->meta.persistence == UNDO_TEMP ? "temporary" : "<uknown>");
+										"temporary");
 		tablespace = log->meta.tablespace;
 
 		snprintf(buffer, sizeof(buffer), UndoRecPtrFormat,
@@ -2746,7 +2721,7 @@ pbu_pg_stat_get_undo_logs(PG_FUNCTION_ARGS)
 		if (log->procno == INVALID_PROC_NUMBER)
 			nulls[7] = true;
 		else
-			values[7] = Int32GetDatum((int64) log->pid);
+			values[7] = Int32GetDatum(log->pid);
 		LWLockRelease(&log->mutex);
 
 		/*
@@ -2762,14 +2737,11 @@ pbu_pg_stat_get_undo_logs(PG_FUNCTION_ARGS)
 			last_tablespace = tablespace;
 		}
 		if (tablespace_name)
-		{
 			values[2] = CStringGetTextDatum(tablespace_name);
-			nulls[2] = false;
-		}
 		else
 			nulls[2] = true;
 
-		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 	if (tablespace_name)
 		pfree(tablespace_name);

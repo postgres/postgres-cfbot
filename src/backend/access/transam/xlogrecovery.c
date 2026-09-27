@@ -1901,6 +1901,9 @@ PerformWalRecovery(void)
 					(errmsg("undo phase complete")));
 		}
 
+		/* The deferred chains are in the ATM, which retains their WAL. */
+		UndoSetRecoveryBatchLSN(InvalidXLogRecPtr);
+
 		/*
 		 * Reverse-apply per-backend UNDO for loser transactions.  The
 		 * per-backend engine's UndoLogControl banks were rebuilt by

@@ -193,20 +193,18 @@ UndoWorkerGetOldestXid(void)
 /*
  * perform_undo_discard - Main discard logic
  *
- * Two passes:
- *   First pass: Update discard pointers for all in-use logs based on
- *            the oldest active transaction ID.
- *   Second pass: Scan SEALED/DISCARDABLE logs and manage lifecycle
- *            transitions: SEALED -> DISCARDABLE -> FREE.
+ * UNDO lives in the WAL stream, so "discard" means letting WAL be recycled;
+ * KeepLogSeg() computes that horizon itself at every checkpoint
+ * (UndoGetOldestBatchLSN).  This only clears retention slots left behind by
+ * dead backends, which would otherwise pin WAL forever, records the horizon,
+ * and warns when it retains more than undo_max_wal_retention_size.
  */
 static void
 perform_undo_discard(void)
 {
 	TransactionId oldest_xid;
-	UndoRecPtr	oldest_undo_ptr;
 	TimestampTz current_time;
 	int			i;
-	int			freed_count = 0;
 
 	/* Get oldest active transaction */
 	oldest_xid = UndoWorkerGetOldestXid();
@@ -246,118 +244,6 @@ perform_undo_discard(void)
 					(errmsg("UNDO worker: cleared stale batch LSN for dead backend slot %d", i)));
 		}
 	}
-
-	/*
-	 * First pass: For each UNDO log, determine what can be discarded.  We
-	 * need to respect the retention_time setting to allow point-in-time
-	 * recovery.
-	 */
-	for (i = 0; i < MAX_UNDO_LOGS; i++)
-	{
-		UndoLogControl *log = &UndoLogShared->logs[i];
-
-		if (!log->in_use)
-			continue;
-
-		/*
-		 * Calculate the oldest UNDO pointer that must be retained. This is
-		 * based on: 1. The oldest active transaction 2. The retention time
-		 * setting
-		 */
-		LWLockAcquire(&log->lock, LW_SHARED);
-
-		if (TransactionIdIsValid(log->oldest_xid) &&
-			TransactionIdPrecedes(log->oldest_xid, oldest_xid))
-		{
-			/* This log has UNDO that can be discarded */
-			oldest_undo_ptr = pg_atomic_read_u64(&log->insert_ptr);
-
-			LWLockRelease(&log->lock);
-
-			/* Update discard pointer */
-			UndoLogDiscard(oldest_undo_ptr);
-
-			/* Update cumulative discard counter */
-			pg_atomic_fetch_add_u64(&UndoLogShared->total_discarded,
-									UndoRecPtrGetOffset(oldest_undo_ptr));
-
-			ereport(DEBUG2,
-					(errmsg("UNDO worker: discarded log %u up to %llu",
-							log->log_number,
-							(unsigned long long) oldest_undo_ptr)));
-		}
-		else
-		{
-			LWLockRelease(&log->lock);
-		}
-	}
-
-	/*
-	 * Second pass: Manage lifecycle transitions for SEALED and DISCARDABLE
-	 * logs.
-	 *
-	 * SEALED logs whose discard_ptr >= seal_ptr have had all their records
-	 * discarded and can transition to DISCARDABLE.  DISCARDABLE logs can have
-	 * their slot freed and segment file deleted.
-	 */
-	for (i = 0; i < MAX_UNDO_LOGS; i++)
-	{
-		UndoLogControl *log = &UndoLogShared->logs[i];
-
-		if (!log->in_use)
-			continue;
-
-		LWLockAcquire(&log->lock, LW_EXCLUSIVE);
-
-		if (log->state == UNDO_LOG_SEALED)
-		{
-			UndoRecPtr	seal = pg_atomic_read_u64(&log->seal_ptr);
-			UndoRecPtr	discard = log->discard_ptr;
-
-			if (UndoRecPtrIsValid(seal) &&
-				UndoRecPtrGetOffset(discard) >= UndoRecPtrGetOffset(seal))
-			{
-				/* All records discarded -- transition to DISCARDABLE */
-				log->state = UNDO_LOG_DISCARDABLE;
-				ereport(DEBUG1,
-						(errmsg("UNDO worker: log %u transitioned to DISCARDABLE",
-								log->log_number)));
-			}
-		}
-
-		if (log->state == UNDO_LOG_DISCARDABLE)
-		{
-			uint32		log_number = log->log_number;
-
-			/* Free the slot */
-			log->in_use = false;
-			log->state = UNDO_LOG_FREE;
-			log->log_number = 0;
-			pg_atomic_write_u64(&log->insert_ptr, InvalidUndoRecPtr);
-			log->discard_ptr = InvalidUndoRecPtr;
-			log->oldest_xid = InvalidTransactionId;
-			pg_atomic_write_u64(&log->seal_ptr, InvalidUndoRecPtr);
-			log->sealed_time = 0;
-
-			LWLockRelease(&log->lock);
-
-			/* Delete the segment file outside the lock */
-			UndoLogDeleteSegmentFile(log_number);
-
-			/* Decrement sealed log count */
-			pg_atomic_fetch_sub_u32(&UndoWorkerShmem->sealed_log_count, 1);
-
-			freed_count++;
-			continue;
-		}
-
-		LWLockRelease(&log->lock);
-	}
-
-	if (freed_count > 0)
-		ereport(LOG,
-				(errmsg("UNDO worker: freed %d discardable log segment(s)",
-						freed_count)));
 
 	/*
 	 * Advance the WAL discard horizon so KeepLogSeg() can allow recycling of
@@ -485,15 +371,8 @@ UndoWorkerMain(Datum main_arg)
 		/* Report the error to the server log */
 		EmitErrorReport();
 
-		/*
-		 * Abort the current transaction in order to recover, but only if one
-		 * is actually in progress.  perform_undo_discard() and the sLog
-		 * cleanup operate on shared memory and do not normally open a
-		 * transaction; guarding avoids a spurious "AbortCurrentTransaction
-		 * when not in transaction" path.
-		 */
-		if (IsTransactionState())
-			AbortCurrentTransaction();
+		/* Also clean up a failed transaction already in TRANS_ABORT. */
+		AbortOutOfAnyTransaction();
 
 		/* Release any other resources we might still be holding. */
 		LWLockReleaseAll();

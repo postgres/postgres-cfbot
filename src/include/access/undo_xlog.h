@@ -7,9 +7,6 @@
  * operations. These records are logged by the RM_UNDO_ID resource manager.
  *
  * Record types:
- *   XLOG_UNDO_ALLOCATE       - Log UNDO space allocation
- *   XLOG_UNDO_DISCARD        - Log UNDO record discard
- *   XLOG_UNDO_EXTEND         - Log UNDO log file extension
  *   XLOG_UNDO_APPLY_RECORD   - CLR: Log physical UNDO application to a page
  *
  * The XLOG_UNDO_APPLY_RECORD type is a Compensation Log Record (CLR).
@@ -46,67 +43,13 @@
 /*
  * WAL record types for UNDO operations
  *
- * These are the info codes for UNDO WAL records. The low 4 bits are used
- * for operation type, leaving the upper 4 bits for flags.
+ * These are the info codes for UNDO WAL records. The upper 4 bits identify
+ * the operation; the low 4 bits are reserved for generic WAL flags.
  */
-#define XLOG_UNDO_ALLOCATE			0x00	/* Allocate UNDO log space
-											 * (legacy) */
-#define XLOG_UNDO_DISCARD			0x10	/* Discard old UNDO records */
-#define XLOG_UNDO_EXTEND			0x20	/* Extend UNDO log file (legacy) */
 #define XLOG_UNDO_APPLY_RECORD		0x30	/* CLR: UNDO applied to page */
-#define XLOG_UNDO_ROTATE			0x40	/* Seal old log, activate new
-											 * (legacy) */
-#define XLOG_UNDO_PAGE_WRITE		0x50	/* Write UNDO data to a page
-											 * (legacy) */
 #define XLOG_UNDO_BATCH				0x60	/* Batched UNDO records in WAL */
-
-/*
- * xl_undo_allocate - WAL record for UNDO space allocation
- *
- * Logged when a backend allocates space in an UNDO log for writing
- * UNDO records. This ensures crash recovery can reconstruct the
- * insert pointer state.
- */
-typedef struct xl_undo_allocate
-{
-	UndoRecPtr	start_ptr;		/* Starting position of allocation */
-	uint32		length;			/* Length of allocation in bytes */
-	TransactionId xid;			/* Transaction that allocated this space */
-	uint32		log_number;		/* Log number (extracted from start_ptr) */
-} xl_undo_allocate;
-
-#define SizeOfUndoAllocate	(offsetof(xl_undo_allocate, log_number) + sizeof(uint32))
-
-/*
- * xl_undo_discard - WAL record for UNDO discard operation
- *
- * Logged when the UNDO worker discards old UNDO records that are no
- * longer needed by any active transaction. This allows space to be
- * reclaimed.
- */
-typedef struct xl_undo_discard
-{
-	UndoRecPtr	discard_ptr;	/* New discard pointer (oldest still needed) */
-	uint32		log_number;		/* Which log is being discarded */
-	TransactionId oldest_xid;	/* Oldest XID still needing UNDO */
-} xl_undo_discard;
-
-#define SizeOfUndoDiscard	(offsetof(xl_undo_discard, oldest_xid) + sizeof(TransactionId))
-
-/*
- * xl_undo_extend - WAL record for UNDO log file extension
- *
- * Logged when an UNDO log file is extended to accommodate more UNDO
- * records. This ensures the file size is correctly restored during
- * crash recovery.
- */
-typedef struct xl_undo_extend
-{
-	uint32		log_number;		/* Which log is being extended */
-	uint64		new_size;		/* New size of log file in bytes */
-} xl_undo_extend;
-
-#define SizeOfUndoExtend	(offsetof(xl_undo_extend, new_size) + sizeof(uint64))
+#define XLOG_UNDO_INFLIGHT			0x70	/* UNDO chains in flight at a
+											 * checkpoint */
 
 /*
  * xl_undo_apply - CLR for physical UNDO application (physiological)
@@ -153,51 +96,6 @@ typedef struct xl_undo_apply
 #define SizeOfUndoApply	(offsetof(xl_undo_apply, tuple_len) + sizeof(uint32))
 
 /*
- * xl_undo_page_write - WAL record for UNDO page data write
- *
- * Logged when UNDO data is written to a shared-buffer-managed page.
- * The actual data follows the record header and is also registered
- * via XLogRegisterBufData as buffer-specific data (block reference 0).
- *
- * During redo, the data is memcpy'd into the page at page_offset.
- * If a full page image was stored (REGBUF_STANDARD enables FPI after
- * checkpoints), XLogReadBufferForRedo restores it automatically and
- * no additional replay is needed.
- */
-typedef struct xl_undo_page_write
-{
-	uint32		page_offset;	/* Offset within the page to write at */
-	uint32		data_len;		/* Length of data written */
-} xl_undo_page_write;
-
-#define SizeOfUndoPageWrite	(offsetof(xl_undo_page_write, data_len) + sizeof(uint32))
-
-/*
- * Rotation trigger reasons for XLOG_UNDO_ROTATE records
- */
-#define UNDO_ROTATE_CAPACITY	0x01	/* Rotated due to capacity threshold */
-#define UNDO_ROTATE_CHECKPOINT	0x02	/* Rotated at checkpoint boundary */
-#define UNDO_ROTATE_PRESSURE	0x03	/* Rotated under allocation pressure */
-#define UNDO_ROTATE_MANUAL		0x04	/* Rotated on request (unused) */
-
-/*
- * xl_undo_rotate - WAL record for UNDO log segment rotation
- *
- * Logged when the active UNDO log is sealed and a new one is activated.
- * During recovery, the old log is marked SEALED and the new log is
- * marked ACTIVE, restoring the correct lifecycle state.
- */
-typedef struct xl_undo_rotate
-{
-	uint32		old_log_number; /* Log being sealed (0 if first log) */
-	UndoRecPtr	old_seal_ptr;	/* Insert pointer at seal time */
-	uint32		new_log_number; /* Newly activated log */
-	uint8		trigger;		/* UNDO_ROTATE_* reason */
-} xl_undo_rotate;
-
-#define SizeOfUndoRotate	(offsetof(xl_undo_rotate, trigger) + sizeof(uint8))
-
-/*
  * xl_undo_batch - WAL record for batched UNDO data (XLOG_UNDO_BATCH)
  *
  * This record type replaces the old pwrite()-to-segment-file path.
@@ -216,6 +114,9 @@ typedef struct xl_undo_rotate
 typedef struct xl_undo_batch
 {
 	TransactionId xid;			/* Owning transaction */
+	Oid			dboid;			/* Database the transaction runs in; recovery
+								 * hands loser chains to that database's
+								 * logical revert worker */
 	XLogRecPtr	chain_prev;		/* LSN of previous batch for this xact
 								 * (InvalidXLogRecPtr if first batch) */
 	uint32		nrecords;		/* Number of UNDO records in batch */
@@ -227,6 +128,30 @@ typedef struct xl_undo_batch
 } xl_undo_batch;
 
 #define SizeOfUndoBatch (offsetof(xl_undo_batch, persistence) + sizeof(UndoPersistenceLevel))
+
+/*
+ * xl_undo_inflight - UNDO chains of transactions in flight at a checkpoint
+ *
+ * Written by every online checkpoint after its redo pointer.  Crash recovery
+ * starts redo there and so replays none of the batches written before it; a
+ * transaction whose batches all precede the redo pointer is known to
+ * recovery only through this record.
+ */
+typedef struct xl_undo_inflight_xact
+{
+	TransactionId xid;			/* top-level transaction */
+	Oid			dboid;			/* database it runs in */
+	XLogRecPtr	first_batch_lsn[NUndoPersistenceLevels];
+	XLogRecPtr	last_batch_lsn[NUndoPersistenceLevels];
+} xl_undo_inflight_xact;
+
+typedef struct xl_undo_inflight
+{
+	uint32		nxacts;
+	xl_undo_inflight_xact xacts[FLEXIBLE_ARRAY_MEMBER];
+} xl_undo_inflight;
+
+#define SizeOfUndoInflight offsetof(xl_undo_inflight, xacts)
 
 /*
  * xl_undo_chain_state - UNDO chain state for prepared transactions
@@ -268,7 +193,8 @@ typedef struct UndoBatchData
 } UndoBatchData;
 
 extern bool UndoValidateBatchLSN(XLogRecPtr batch_lsn);
-extern UndoBatchData *UndoReadBatchFromWAL(XLogRecPtr batch_lsn);
+extern UndoBatchData *UndoReadBatchFromWAL(XLogRecPtr batch_lsn,
+										   bool *malformed);
 extern void UndoFreeBatchData(UndoBatchData *batch);
 extern void UndoResetBatchReader(void);
 
@@ -279,10 +205,12 @@ extern void UndoResetBatchReader(void);
  * redo completes, incomplete transactions can be identified and their
  * UNDO chains walked for rollback.
  */
-extern void UndoRecoveryTrackBatch(TransactionId xid, XLogRecPtr batch_lsn,
+extern void UndoRecoveryTrackBatch(TransactionId xid, Oid dboid,
+								   XLogRecPtr batch_lsn,
 								   XLogRecPtr chain_prev,
 								   UndoPersistenceLevel persistence);
 extern void UndoRecoveryRemoveXid(TransactionId xid);
+extern void UndoRecoveryTrackInflight(const xl_undo_inflight_xact *x);
 extern bool UndoRecoveryNeeded(void);
 extern void PerformUndoRecovery(void);
 extern void FlushDeferredUndoXacts(void);

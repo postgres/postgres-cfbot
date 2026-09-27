@@ -98,6 +98,7 @@ Generic
 LogicalMessage
 XLOG2
 Undo
+ATM
 FileOps
 UndoLog
 UndoAction$/,

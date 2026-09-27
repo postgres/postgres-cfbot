@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "access/xlog.h"
+#include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -48,11 +49,9 @@ static void clone_file(const char *fromfile, const char *tofile);
  * be documented in doc/src/sgml/config.sgml.
  *
  * If register_for_abort_cleanup is true and we are not in WAL replay, the
- * destination tree is registered with FILEOPS so that a transaction abort
- * recursively removes the partial copy.  This closes the long-standing
- * crash-asymmetry where CREATE DATABASE FILE_COPY and ALTER DATABASE SET
- * TABLESPACE leave orphan trees behind on rollback.  Recovery callers pass
- * false because they are themselves the recovery action.
+ * destination is created with FileOpsMkdirTree(), so that a transaction
+ * abort, or a crash before commit, removes the partial copy.  Recovery
+ * callers pass false because they are themselves the recovery action.
  */
 void
 copydir(const char *fromdir, const char *todir, bool recurse,
@@ -63,20 +62,12 @@ copydir(const char *fromdir, const char *todir, bool recurse,
 	char		fromfile[MAXPGPATH * 2];
 	char		tofile[MAXPGPATH * 2];
 
-	if (MakePGDirectory(todir) != 0)
+	if (register_for_abort_cleanup && !RecoveryInProgress())
+		FileOpsMkdirTree(todir, pg_dir_create_mode, InvalidOid);
+	else if (MakePGDirectory(todir) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create directory \"%s\": %m", todir)));
-
-	/*
-	 * Register the destination tree for delete-on-abort BEFORE we start
-	 * copying.  If the surrounding transaction aborts (or this function
-	 * itself errors out), FILEOPS will recursively unlink the partial copy.
-	 * Skip this in WAL replay: the redo handler IS the recovery action and
-	 * has no surrounding transaction context.
-	 */
-	if (register_for_abort_cleanup && !RecoveryInProgress())
-		FileOpsRmtree(todir, false /* at_commit -> at abort */ );
 
 	xldir = AllocateDir(fromdir);
 
@@ -100,11 +91,8 @@ copydir(const char *fromdir, const char *todir, bool recurse,
 		{
 			/*
 			 * Recurse to handle subdirectories.  Pass false for
-			 * register_for_abort_cleanup: the parent call (if any) already
-			 * registered the top-level destination tree, and
-			 * FileOpsRmdirRecursive walks the tree at abort time, so
-			 * registering subdirectories separately would only duplicate
-			 * work.
+			 * register_for_abort_cleanup: removing the top-level destination
+			 * tree removes them too.
 			 */
 			if (recurse)
 				copydir(fromfile, tofile, true, false);

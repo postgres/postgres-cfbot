@@ -220,6 +220,8 @@ CreateDatabaseUsingWalLog(Oid src_dboid, Oid dst_dboid,
 		/* Copy relation storage from source to the destination. */
 		CreateAndCopyRelationData(srcrlocator, dstrlocator, relinfo->permanent);
 
+		INJECTION_POINT("createdb-wal-log-after-copy-relation", NULL);
+
 		/* Release the relation locks. */
 		UnlockRelationId(&srcrelid, AccessShareLock);
 		UnlockRelationId(&dstrelid, AccessShareLock);
@@ -473,10 +475,13 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 	sprintf(buf, "%s\n", PG_MAJORVERSION);
 	nbytes = strlen(PG_MAJORVERSION) + 1;
 
-	/* Create database directory. */
+	/*
+	 * Create database directory.  The copy fills it through smgr, so an abort
+	 * or crash before commit must remove the whole tree.
+	 */
 	if (!isRedo)
 	{
-		FileOpsMkdir(dbpath, pg_dir_create_mode);
+		FileOpsMkdirTree(dbpath, pg_dir_create_mode, dbid);
 	}
 	else
 	{
@@ -675,6 +680,8 @@ CreateDatabaseUsingFileCopy(Oid src_dboid, Oid dst_dboid, Oid src_tsid,
 		 * partial copy.
 		 */
 		copydir(srcpath, dstpath, false, true);
+
+		INJECTION_POINT("createdb-file-copy-after-copydir", NULL);
 
 		/* Record the filesystem change in XLOG */
 		{
@@ -2268,10 +2275,9 @@ movedb(const char *dbname, const char *tblspcname)
 		 * row (the pg_database.dattablespace update happens later, and is
 		 * what binds dst_dbpath to the database on commit), so an abort that
 		 * leaves dst_dbpath missing does not orphan any catalog state -- the
-		 * database remains in src_tblspcoid.  copydir() below will recreate
-		 * dst_dbpath via MakePGDirectory in its first action and registers
-		 * the destination tree for delete-on-abort, so the partial-copy
-		 * window is covered.
+		 * database remains in src_tblspcoid.  copydir() below recreates
+		 * dst_dbpath with FileOpsMkdirTree(), so an abort or a crash before
+		 * commit removes the partial copy.
 		 */
 		if (rmdir(dst_dbpath) != 0)
 			elog(ERROR, "could not remove directory \"%s\": %m",

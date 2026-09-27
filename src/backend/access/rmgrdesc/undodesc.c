@@ -30,38 +30,8 @@ undo_desc(StringInfo buf, XLogReaderState *record)
 
 	switch (info)
 	{
-		case XLOG_UNDO_ALLOCATE:
-			{
-				xl_undo_allocate *xlrec = (xl_undo_allocate *) rec;
 
-				appendStringInfo(buf, "log %u, start %llu, len %u, xid %u",
-								 xlrec->log_number,
-								 (unsigned long long) xlrec->start_ptr,
-								 xlrec->length,
-								 xlrec->xid);
-			}
-			break;
 
-		case XLOG_UNDO_DISCARD:
-			{
-				xl_undo_discard *xlrec = (xl_undo_discard *) rec;
-
-				appendStringInfo(buf, "log %u, discard_ptr %llu, oldest_xid %u",
-								 xlrec->log_number,
-								 (unsigned long long) xlrec->discard_ptr,
-								 xlrec->oldest_xid);
-			}
-			break;
-
-		case XLOG_UNDO_EXTEND:
-			{
-				xl_undo_extend *xlrec = (xl_undo_extend *) rec;
-
-				appendStringInfo(buf, "log %u, new_size %llu",
-								 xlrec->log_number,
-								 (unsigned long long) xlrec->new_size);
-			}
-			break;
 
 		case XLOG_UNDO_APPLY_RECORD:
 			{
@@ -107,13 +77,23 @@ undo_desc(StringInfo buf, XLogReaderState *record)
 			}
 			break;
 
-		case XLOG_UNDO_PAGE_WRITE:
-			{
-				xl_undo_page_write *xlrec = (xl_undo_page_write *) rec;
 
-				appendStringInfo(buf, "page_offset %u, data_len %u",
-								 xlrec->page_offset,
-								 xlrec->data_len);
+		case XLOG_UNDO_INFLIGHT:
+			{
+				xl_undo_inflight *xlrec = (xl_undo_inflight *) rec;
+
+				appendStringInfo(buf, "nxacts %u", xlrec->nxacts);
+				for (uint32 i = 0; i < xlrec->nxacts; i++)
+				{
+					xl_undo_inflight_xact *x = &xlrec->xacts[i];
+
+					appendStringInfo(buf, "; xid %u db %u", x->xid, x->dboid);
+					for (int j = 0; j < NUndoPersistenceLevels; j++)
+						if (XLogRecPtrIsValid(x->last_batch_lsn[j]))
+							appendStringInfo(buf, " p%d %X/%08X..%X/%08X", j,
+											 LSN_FORMAT_ARGS(x->first_batch_lsn[j]),
+											 LSN_FORMAT_ARGS(x->last_batch_lsn[j]));
+				}
 			}
 			break;
 
@@ -122,10 +102,11 @@ undo_desc(StringInfo buf, XLogReaderState *record)
 				xl_undo_batch *xlrec = (xl_undo_batch *) rec;
 
 				appendStringInfo(buf,
-								 "undo batch: xid %u, nrecords %u, "
+								 "undo batch: xid %u, db %u, nrecords %u, "
 								 "total_len %u, chain_prev %X/%X, "
 								 "primary_reloid %u, persistence %d",
 								 xlrec->xid,
+								 xlrec->dboid,
 								 xlrec->nrecords,
 								 xlrec->total_len,
 								 LSN_FORMAT_ARGS(xlrec->chain_prev),
@@ -134,39 +115,7 @@ undo_desc(StringInfo buf, XLogReaderState *record)
 			}
 			break;
 
-		case XLOG_UNDO_ROTATE:
-			{
-				xl_undo_rotate *xlrec = (xl_undo_rotate *) rec;
-				const char *trigger_name;
 
-				switch (xlrec->trigger)
-				{
-					case UNDO_ROTATE_CAPACITY:
-						trigger_name = "capacity";
-						break;
-					case UNDO_ROTATE_CHECKPOINT:
-						trigger_name = "checkpoint";
-						break;
-					case UNDO_ROTATE_PRESSURE:
-						trigger_name = "pressure";
-						break;
-					case UNDO_ROTATE_MANUAL:
-						trigger_name = "manual";
-						break;
-					default:
-						trigger_name = "unknown";
-						break;
-				}
-
-				appendStringInfo(buf,
-								 "old_log %u, seal_ptr %llu, new_log %u, "
-								 "trigger %s",
-								 xlrec->old_log_number,
-								 (unsigned long long) xlrec->old_seal_ptr,
-								 xlrec->new_log_number,
-								 trigger_name);
-			}
-			break;
 	}
 }
 
@@ -182,26 +131,19 @@ undo_identify(uint8 info)
 
 	switch (info & ~XLR_INFO_MASK)
 	{
-		case XLOG_UNDO_ALLOCATE:
-			id = "ALLOCATE";
-			break;
-		case XLOG_UNDO_DISCARD:
-			id = "DISCARD";
-			break;
-		case XLOG_UNDO_EXTEND:
-			id = "EXTEND";
-			break;
+
+
+
 		case XLOG_UNDO_APPLY_RECORD:
 			id = "APPLY_RECORD";
 			break;
-		case XLOG_UNDO_ROTATE:
-			id = "ROTATE";
-			break;
-		case XLOG_UNDO_PAGE_WRITE:
-			id = "PAGE_WRITE";
-			break;
+
+
 		case XLOG_UNDO_BATCH:
 			id = "BATCH";
+			break;
+		case XLOG_UNDO_INFLIGHT:
+			id = "INFLIGHT";
 			break;
 	}
 

@@ -69,14 +69,6 @@
  */
 #define UndoLogForkNum	MAIN_FORKNUM
 
-/*
- * UNDO_FORKNUM is reserved for future use when the smgr layer is
- * extended to support undo-specific file management (Task #5).
- * It is defined in buf_internals.h as a constant but not currently
- * used in buffer operations.
- */
-
-
 /* ----------------------------------------------------------------
  *		Undo log to RelFileLocator mapping
  * ----------------------------------------------------------------

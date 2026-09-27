@@ -4,8 +4,8 @@
 # so the abort hands the chain to the logical revert worker instead of
 # treating it as rolled back.
 #
-# The transaction truncates a file, which is then replaced behind its back by a
-# directory of the same name, so the truncation's UNDO cannot reopen it.
+# The transaction truncates a file, which is then made read-only behind its
+# back, so the truncation's UNDO cannot reopen it for writing.
 
 use strict;
 use warnings FATAL => 'all';
@@ -31,8 +31,7 @@ my $path = $node->safe_psql('postgres',
 my $bg = $node->background_psql('postgres');
 $bg->query_safe('BEGIN');
 $bg->query_safe("SELECT test_fileops_truncate('$path', 10)");
-unlink($path) or die "unlink $path: $!";
-mkdir($path) or die "mkdir $path: $!";
+chmod(0444, $path) or die "chmod $path: $!";
 $bg->query('ROLLBACK');
 $bg->quit;
 

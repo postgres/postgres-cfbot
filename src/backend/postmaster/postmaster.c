@@ -89,6 +89,8 @@
 #include <pthread.h>
 #endif
 
+#include "access/logical_revert_worker.h"
+#include "access/undolog.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "access/xlogrecovery.h"
@@ -923,6 +925,13 @@ PostmasterMain(int argc, char *argv[])
 	 * before any modules had a chance to take the background worker slots.
 	 */
 	ApplyLauncherRegister();
+
+	/*
+	 * The Logical Revert Launcher wires up the async physical-undo-apply
+	 * path.  The launcher scans pg_database once at startup and spawns a
+	 * per-database LogicalRevertWorker which drains the ATM.
+	 */
+	LogicalRevertLauncherRegister();
 
 	/*
 	 * Register the shared memory needs of all core subsystems.

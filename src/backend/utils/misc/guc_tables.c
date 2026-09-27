@@ -31,6 +31,8 @@
 
 #include "access/commit_ts.h"
 #include "access/gin.h"
+#include "access/logical_revert_worker.h"
+#include "access/slog.h"
 #include "access/slru.h"
 #include "access/toast_compression.h"
 #include "access/twophase.h"

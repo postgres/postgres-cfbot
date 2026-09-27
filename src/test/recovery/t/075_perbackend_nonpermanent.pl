@@ -34,6 +34,15 @@ ROLLBACK;
 		"$am unlogged: rollback restored every row");
 }
 
+# pg_stat_get_undo_logs() shows the per-backend undo logs: the rollbacks
+# above wrote to an unlogged one.
+is( $node->safe_psql(
+		'postgres',
+		"SELECT count(*) > 0 FROM pg_stat_get_undo_logs()
+		  WHERE persistence = 'unlogged'"),
+	't',
+	'pg_stat_get_undo_logs shows the unlogged undo log');
+
 # The numbers of the unlogged and temporary undo logs, as a SQL list.  Their
 # pages are the undo pseudo-relations with these relfilenumbers.
 sub nonpermanent_lognos

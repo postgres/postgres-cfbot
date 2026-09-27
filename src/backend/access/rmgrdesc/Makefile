@@ -9,6 +9,7 @@ top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = \
+	atmdesc.o \
 	brindesc.o \
 	clogdesc.o \
 	committsdesc.o \
