@@ -219,6 +219,54 @@ select conname, obj_description(oid, 'pg_constraint') from pg_constraint
 
 drop type comptype cascade;
 
+-- check altering columns used by constraints of domains whose base type
+-- isn't composite (bug #19724)
+create type rt as (i int);
+create domain dt as int check ((row(value)::rt).i > 0);
+alter type rt alter attribute i type text;  -- fail
+alter type rt alter attribute i type bigint;
+select 1::dt;
+select (-1)::dt;  -- fail
+drop domain dt;
+drop type rt;
+
+-- same for a domain over float8 that uses one field of a two-field type
+create type comptype as (r float8, i float8);
+create domain silly as float8 check ((row(value, 0)::comptype).r > 0);
+alter type comptype alter attribute r type bigint;
+select 1.0::silly;
+select (-1.0)::silly;  -- fail
+drop domain silly;
+drop type comptype;
+
+-- rebuilding a constraint for one type it depends on must preserve its
+-- dependency on another
+create type r1 as (a int);
+create type r2 as (b int);
+create domain dt_multi as int
+  check ((row(value)::r1).a > 0 and (row(value)::r2).b > 0);
+alter type r1 alter attribute a type bigint;
+alter type r2 alter attribute b type text;  -- fail
+alter type r2 alter attribute b type bigint;
+select 1::dt_multi;
+select (-1)::dt_multi;  -- fail
+drop domain dt_multi;
+drop type r1;
+drop type r2;
+
+-- same via ALTER TABLE, with the constraint depending on both the parent's
+-- and the inheritance child's row types
+create table dp (a int);
+create table dc (b int) inherits (dp);
+create domain dt_inh as int
+  check ((row(value)::dp).a > 0 and (row(value, value)::dc).a > 0);
+alter table dp alter column a type bigint;
+select 1::dt_inh;
+select (-1)::dt_inh;  -- fail
+drop domain dt_inh;
+drop table dc;
+drop table dp;
+
 
 -- Test domains over arrays of composite
 
