@@ -16154,10 +16154,14 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 			relid = con->conrelid;
 		else
 		{
-			/* must be a domain constraint */
-			relid = get_typ_typrelid(getBaseType(con->contypid));
-			if (!OidIsValid(relid))
-				elog(ERROR, "could not identify relation associated with constraint %u", oldId);
+			/*
+			 * Must be a domain constraint.  The domain's base type need not
+			 * be composite, so there may be no relation associated with it.
+			 * Since the relid is only used to determine which work queue
+			 * entry the command is attached to, we can use the relation which
+			 * is being altered and which we already hold a lock on.
+			 */
+			relid = tab->relid;
 		}
 		confrelid = con->confrelid;
 		conislocal = con->conislocal;
