@@ -32,6 +32,7 @@ extern PGDLLIMPORT int wal_sync_method;
 
 extern PGDLLIMPORT XLogRecPtr ProcLastRecPtr;
 extern PGDLLIMPORT XLogRecPtr XactLastRecEnd;
+extern PGDLLIMPORT XLogRecPtr XactLastCommitStart;
 extern PGDLLIMPORT XLogRecPtr XactLastCommitEnd;
 
 /* these variables are GUC parameters related to XLOG */

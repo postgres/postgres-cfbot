@@ -546,6 +546,7 @@ bool		Debug_write_read_parse_plan_trees;
 bool		Debug_raw_expression_coverage_test;
 #endif
 
+bool		log_object_drops = false;
 bool		log_parser_stats = false;
 bool		log_planner_stats = false;
 bool		log_executor_stats = false;
