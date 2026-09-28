@@ -38,11 +38,22 @@ toast_fetch_datum(varlena *attr)
 	return toast_fetch_datum_slice(attr, 0, -1);
 }
 
+#define DIRECT_TOAST_MAX_DEPTH	16
+
+typedef struct DirectToastLevelBufState
+{
+	Buffer		bufs[MAX_IO_COMBINE_LIMIT];
+	BlockNumber first_blk;
+	int			num_bufs;
+	int			cur_idx;
+} DirectToastLevelBufState;
+
 static varlena *toast_decompress_datum_slice(varlena *attr, int32 slicelength);
 static void toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 													 varlena *result, int32 *logical_offset,
 													 int32 sliceoffset, int32 slicelength,
-													 TupleTableSlot *slot);
+													 DirectToastLevelBufState *cbufs,
+													 int depth, int max_contig_blocks);
 
 /*
  * Unpacked metadata from either plain (varatt_external_oid /
@@ -466,13 +477,22 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 		}
 		else
 		{
-			TupleTableSlot *slot = table_slot_create(toastrel, NULL);
+			DirectToastLevelBufState cbufs[DIRECT_TOAST_MAX_DEPTH] = {0};
 			int32		logical_offset = 0;
 
 			toast_fetch_datum_direct_slice_recursive(toastrel, &meta.direct_tp.va_tid,
 													 result, &logical_offset,
-													 sliceoffset, slicelength, slot);
-			ExecDropSingleTupleTableSlot(slot);
+													 sliceoffset, slicelength,
+													 cbufs, 0, 1);
+
+			for (int d = 0; d < DIRECT_TOAST_MAX_DEPTH; d++)
+			{
+				for (int b = cbufs[d].cur_idx; b < cbufs[d].num_bufs; b++)
+				{
+					if (BufferIsValid(cbufs[d].bufs[b]))
+						ReleaseBuffer(cbufs[d].bufs[b]);
+				}
+			}
 		}
 	}
 	else
@@ -675,6 +695,149 @@ toast_slice_copy_chunk(struct varlena *result, const char *chunk_data,
 }
 
 /*
+ * Release all remaining pinned buffers in a DirectToastLevelBufState.
+ */
+static inline void
+toast_direct_release_level_bufs(DirectToastLevelBufState *cbuf)
+{
+	for (int b = cbuf->cur_idx; b < cbuf->num_bufs; b++)
+	{
+		if (BufferIsValid(cbuf->bufs[b]))
+		{
+			ReleaseBuffer(cbuf->bufs[b]);
+			cbuf->bufs[b] = InvalidBuffer;
+		}
+	}
+	cbuf->num_bufs = 0;
+	cbuf->cur_idx = 0;
+}
+
+/*
+ * Fetch a Direct TOAST tuple by TID, reusing pinned buffers in *cbuf when
+ * consecutive chunks at the same tree level reside on the same block or
+ * within a contiguous multi-block batch read via StartReadBuffers().
+ *
+ * Returns true if the tuple is valid and visible under snapshot, leaving
+ * cbuf->bufs[cbuf->cur_idx] pinned so the caller can safely read tuple
+ * attributes in place without copying.
+ */
+static inline bool
+toast_direct_fetch_tuple(Relation toastrel, ItemPointer tid, Snapshot snapshot,
+						 HeapTupleData *tuple, DirectToastLevelBufState *cbuf,
+						 int max_contig_blocks)
+{
+	BlockNumber target_blk = ItemPointerGetBlockNumber(tid);
+	Buffer		cur_buf;
+	Page		page;
+	OffsetNumber offnum;
+	ItemId		lp;
+	bool		valid;
+
+	tuple->t_self = *tid;
+
+	if (cbuf->num_bufs > 0 &&
+		target_blk >= cbuf->first_blk + cbuf->cur_idx &&
+		target_blk < cbuf->first_blk + cbuf->num_bufs)
+	{
+		int			new_idx = (int) (target_blk - cbuf->first_blk);
+
+		for (int b = cbuf->cur_idx; b < new_idx; b++)
+		{
+			ReleaseBuffer(cbuf->bufs[b]);
+			cbuf->bufs[b] = InvalidBuffer;
+		}
+		cbuf->cur_idx = new_idx;
+	}
+	else
+	{
+		int			nblocks;
+
+		toast_direct_release_level_bufs(cbuf);
+
+		nblocks = Max(max_contig_blocks, 1);
+		if (nblocks > io_combine_limit)
+			nblocks = io_combine_limit;
+		if (nblocks > MAX_IO_COMBINE_LIMIT)
+			nblocks = MAX_IO_COMBINE_LIMIT;
+
+		if (nblocks == 1)
+		{
+			cbuf->bufs[0] = ReadBuffer(toastrel, target_blk);
+			cbuf->first_blk = target_blk;
+			cbuf->num_bufs = 1;
+			cbuf->cur_idx = 0;
+		}
+		else
+		{
+			ReadBuffersOperation op;
+			int			req_nblocks = nblocks;
+
+			op.rel = toastrel;
+			op.smgr = RelationGetSmgr(toastrel);
+			op.persistence = toastrel->rd_rel->relpersistence;
+			op.forknum = MAIN_FORKNUM;
+			op.strategy = NULL;
+
+			if (StartReadBuffers(&op, cbuf->bufs, target_blk, &nblocks,
+								 READ_BUFFERS_SYNCHRONOUSLY))
+				WaitReadBuffers(&op);
+
+			/*
+			 * If StartReadBuffers split the operation, release any forwarded
+			 * buffers beyond nblocks so cbuf only holds [0 .. nblocks - 1].
+			 */
+			for (int b = nblocks; b < req_nblocks; b++)
+			{
+				if (BufferIsValid(cbuf->bufs[b]))
+				{
+					ReleaseBuffer(cbuf->bufs[b]);
+					cbuf->bufs[b] = InvalidBuffer;
+				}
+			}
+
+			cbuf->first_blk = target_blk;
+			cbuf->num_bufs = nblocks;
+			cbuf->cur_idx = 0;
+		}
+	}
+
+	cur_buf = cbuf->bufs[cbuf->cur_idx];
+
+	LockBuffer(cur_buf, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(cur_buf);
+
+	offnum = ItemPointerGetOffsetNumber(tid);
+	if (offnum < FirstOffsetNumber || offnum > PageGetMaxOffsetNumber(page))
+	{
+		LockBuffer(cur_buf, BUFFER_LOCK_UNLOCK);
+		tuple->t_data = NULL;
+		return false;
+	}
+
+	lp = PageGetItemId(page, offnum);
+	if (!ItemIdIsNormal(lp))
+	{
+		LockBuffer(cur_buf, BUFFER_LOCK_UNLOCK);
+		tuple->t_data = NULL;
+		return false;
+	}
+
+	tuple->t_data = (HeapTupleHeader) PageGetItem(page, lp);
+	tuple->t_len = ItemIdGetLength(lp);
+	tuple->t_tableOid = RelationGetRelid(toastrel);
+
+	valid = HeapTupleSatisfiesVisibility(tuple, snapshot, cur_buf);
+	HeapCheckForSerializableConflictOut(valid, toastrel, tuple, cur_buf, snapshot);
+
+	LockBuffer(cur_buf, BUFFER_LOCK_UNLOCK);
+
+	if (!valid)
+		tuple->t_data = NULL;
+
+	return valid;
+}
+
+/*
  * toast_fetch_datum_direct_slice_recursive -
  *
  * Traverse a Direct TOAST tree/DAG to retrieve full datums or partial slices.
@@ -689,14 +852,24 @@ toast_slice_copy_chunk(struct varlena *result, const char *chunk_data,
  * - Interior tree chunks inspect chunk_tid_offsets to prune any subtrees that
  *   do not overlap the requested range [sliceoffset, sliceoffset + slicelength),
  *   achieving O(log N) slice fetching without consulting an index.
+ *
+ * Each tree depth maintains its own DirectToastLevelBufState in cbufs[depth]
+ * so that consecutive chunks on the same 8 KB block reuse the same buffer pin,
+ * and contiguous child blocks are read in multi-block vectored batches via
+ * StartReadBuffers() + WaitReadBuffers().
  */
 static void
 toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
-										 struct varlena *result, int32 *logical_offset,
+										 varlena *result, int32 *logical_offset,
 										 int32 sliceoffset, int32 slicelength,
-										 TupleTableSlot *slot)
+										 DirectToastLevelBufState *cbufs,
+										 int depth, int max_contig_blocks)
 {
 	Snapshot	snapshot = get_toast_snapshot();
+	TupleDesc	toasttupDesc = toastrel->rd_att;
+	HeapTupleData tup;
+	DirectToastLevelBufState local_cbuf = {0};
+	DirectToastLevelBufState *level_cbuf = (depth < DIRECT_TOAST_MAX_DEPTH) ? &cbufs[depth] : &local_cbuf;
 	Datum		data_datum;
 	Datum		tids_datum;
 	Datum		offsets_datum;
@@ -706,37 +879,57 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 
 	check_stack_depth();
 
-	if (!table_tuple_fetch_row_version(toastrel, tid, snapshot, slot))
+	if (!toast_direct_fetch_tuple(toastrel, tid, snapshot, &tup, level_cbuf,
+								  (depth < DIRECT_TOAST_MAX_DEPTH) ? max_contig_blocks : 1))
 	{
+		toast_direct_release_level_bufs(&local_cbuf);
 		elog(ERROR, "failed to fetch toast tuple by TID");
 	}
 
-	data_datum = slot_getattr(slot, 3, &is_null_data);
-	tids_datum = slot_getattr(slot, 4, &is_null_tids);
+	tids_datum = fastgetattr(&tup, 4, toasttupDesc, &is_null_tids);
 	if (is_null_tids)
 	{
-		/* Leaf chunk: copy data slice */
+		/* Leaf chunk: copy data slice directly from pinned buffer */
+		data_datum = fastgetattr(&tup, 3, toasttupDesc, &is_null_data);
 		if (!is_null_data)
 		{
-			struct varlena *data_val = PG_DETOAST_DATUM(data_datum);
-			int32		chunk_size = VARSIZE_ANY_EXHDR(data_val);
+			Pointer		chunk = DatumGetPointer(data_datum);
+			int32		chunk_size;
+			char	   *chunk_data;
 			int32		req_start = sliceoffset;
 			int32		req_end = sliceoffset + slicelength;
 
-			toast_slice_copy_chunk(result, VARDATA_ANY(data_val), chunk_size,
+			if (!VARATT_IS_EXTENDED(chunk))
+			{
+				chunk_size = VARSIZE(chunk) - VARHDRSZ;
+				chunk_data = VARDATA(chunk);
+			}
+			else if (VARATT_IS_SHORT(chunk))
+			{
+				chunk_size = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+				chunk_data = VARDATA_SHORT(chunk);
+			}
+			else
+			{
+				toast_direct_release_level_bufs(&local_cbuf);
+				elog(ERROR, "unexpected type of toast chunk");
+			}
+
+			toast_slice_copy_chunk(result, chunk_data, chunk_size,
 								   logical_offset, req_start, req_end);
 		}
-		ExecClearTuple(slot);
 	}
 	else
 	{
-		ArrayType  *arr = DatumGetArrayTypePCopy(tids_datum);
+		ArrayType  *arr = DatumGetArrayTypeP(tids_datum);
 		Datum	   *elems;
 		bool	   *nulls;
 		int			nelems;
 		int			i;
+		int			max_combine = Min(io_combine_limit, MAX_IO_COMBINE_LIMIT);
+		DirectToastLevelBufState *child_cbuf = (depth + 1 < DIRECT_TOAST_MAX_DEPTH) ? &cbufs[depth + 1] : NULL;
 
-		offsets_datum = slot_getattr(slot, 5, &is_null_offsets);
+		offsets_datum = fastgetattr(&tup, 5, toasttupDesc, &is_null_offsets);
 
 		deconstruct_array_builtin(arr, TIDOID, &elems, &nulls, &nelems);
 
@@ -746,7 +939,7 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 			 * Tree-structured interior node with chunk_tid_offsets.
 			 * Use offsets to prune subtrees that don't overlap the requested slice.
 			 */
-			ArrayType  *arr_offsets = DatumGetArrayTypePCopy(offsets_datum);
+			ArrayType  *arr_offsets = DatumGetArrayTypeP(offsets_datum);
 			Datum	   *offset_elems;
 			bool	   *offset_nulls;
 			int			noffsets;
@@ -756,12 +949,13 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 			deconstruct_array_builtin(arr_offsets, INT8OID, &offset_elems, &offset_nulls, &noffsets);
 			Assert(noffsets == nelems + 1);
 
-			ExecClearTuple(slot);
-
 			for (i = 0; i < nelems; i++)
 			{
 				int64		child_start = DatumGetInt64(offset_elems[i]);
 				int64		child_end = DatumGetInt64(offset_elems[i + 1]);
+				ItemPointer child_tid;
+				BlockNumber cur_blk;
+				int			contig_blocks = 1;
 
 				CHECK_FOR_INTERRUPTS();
 
@@ -772,18 +966,51 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 					continue;
 				}
 
+				child_tid = (ItemPointer) DatumGetPointer(elems[i]);
+				cur_blk = ItemPointerGetBlockNumber(child_tid);
+
+				if (child_cbuf != NULL &&
+					!(child_cbuf->num_bufs > 0 &&
+					  cur_blk >= child_cbuf->first_blk + child_cbuf->cur_idx &&
+					  cur_blk < child_cbuf->first_blk + child_cbuf->num_bufs))
+				{
+					BlockNumber last_blk = cur_blk;
+
+					for (int j = i + 1; j < nelems && (int) (last_blk - cur_blk + 1) < max_combine; j++)
+					{
+						int64		next_start = DatumGetInt64(offset_elems[j]);
+						ItemPointer next_tid;
+						BlockNumber next_blk;
+
+						if (next_start >= req_end)
+							break;
+
+						next_tid = (ItemPointer) DatumGetPointer(elems[j]);
+						next_blk = ItemPointerGetBlockNumber(next_tid);
+						if (next_blk == last_blk)
+							continue;
+						if (next_blk == last_blk + 1)
+							last_blk = next_blk;
+						else
+							break;
+					}
+					contig_blocks = (int) (last_blk - cur_blk + 1);
+				}
+
 				*logical_offset = (int32) child_start;
 				toast_fetch_datum_direct_slice_recursive(toastrel,
-														 (ItemPointer) DatumGetPointer(elems[i]),
+														 child_tid,
 														 result, logical_offset,
 														 sliceoffset, slicelength,
-														 slot);
+														 cbufs, depth + 1,
+														 contig_blocks);
 				*logical_offset = (int32) child_end;
 			}
 
 			pfree(offset_elems);
 			pfree(offset_nulls);
-			pfree(arr_offsets);
+			if ((Pointer) arr_offsets != DatumGetPointer(offsets_datum))
+				pfree(arr_offsets);
 		}
 		else
 		{
@@ -792,26 +1019,17 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 			 * of size TOAST_MAX_CHUNK_SIZE, and the current chunk contains the
 			 * final chunk_data (chunk nelems).
 			 */
-			int32		max_chunk_size = TOAST_MAX_CHUNK_SIZE(TupleDescAttr(toastrel->rd_att, 0)->atttypid);
-			int32		chunk_size = 0;
-			char	   *chunk_data = NULL;
-			struct varlena *data_val = NULL;
+			int32		max_chunk_size = TOAST_MAX_CHUNK_SIZE(TupleDescAttr(toasttupDesc, 0)->atttypid);
 			int64		req_start = sliceoffset;
 			int64		req_end = (slicelength < 0) ? PG_INT64_MAX : ((int64) sliceoffset + slicelength);
-
-			if (!is_null_data)
-			{
-				data_val = PG_DETOAST_DATUM_COPY(data_datum);
-				chunk_size = VARSIZE_ANY_EXHDR(data_val);
-				chunk_data = VARDATA_ANY(data_val);
-			}
-
-			ExecClearTuple(slot);
 
 			for (i = 0; i < nelems; i++)
 			{
 				int64		child_start = (int64) i * max_chunk_size;
 				int64		child_end = child_start + max_chunk_size;
+				ItemPointer child_tid;
+				BlockNumber cur_blk;
+				int			contig_blocks = 1;
 
 				CHECK_FOR_INTERRUPTS();
 
@@ -822,38 +1040,97 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 					continue;
 				}
 
+				child_tid = (ItemPointer) DatumGetPointer(elems[i]);
+				cur_blk = ItemPointerGetBlockNumber(child_tid);
+
+				if (child_cbuf != NULL &&
+					!(child_cbuf->num_bufs > 0 &&
+					  cur_blk >= child_cbuf->first_blk + child_cbuf->cur_idx &&
+					  cur_blk < child_cbuf->first_blk + child_cbuf->num_bufs))
+				{
+					BlockNumber last_blk = cur_blk;
+
+					for (int j = i + 1; j < nelems && (int) (last_blk - cur_blk + 1) < max_combine; j++)
+					{
+						int64		next_start = (int64) j * max_chunk_size;
+						ItemPointer next_tid;
+						BlockNumber next_blk;
+
+						if (next_start >= req_end)
+							break;
+
+						next_tid = (ItemPointer) DatumGetPointer(elems[j]);
+						next_blk = ItemPointerGetBlockNumber(next_tid);
+						if (next_blk == last_blk)
+							continue;
+						if (next_blk == last_blk + 1)
+							last_blk = next_blk;
+						else
+							break;
+					}
+					contig_blocks = (int) (last_blk - cur_blk + 1);
+				}
+
 				*logical_offset = (int32) child_start;
 				toast_fetch_datum_direct_slice_recursive(toastrel,
-														 (ItemPointer) DatumGetPointer(elems[i]),
+														 child_tid,
 														 result, logical_offset,
 														 sliceoffset, slicelength,
-														 slot);
+														 cbufs, depth + 1,
+														 contig_blocks);
 				*logical_offset = (int32) child_end;
 			}
 
-			if (chunk_size > 0)
+			if ((int64) nelems * max_chunk_size < req_end)
 			{
-				int64		root_start = (int64) nelems * max_chunk_size;
-				int64		root_end = root_start + chunk_size;
-
-				if (root_end > req_start && root_start < req_end)
+				data_datum = fastgetattr(&tup, 3, toasttupDesc, &is_null_data);
+				if (!is_null_data)
 				{
-					int32		copy_req_end = (slicelength < 0) ? PG_INT32_MAX : (sliceoffset + slicelength);
+					Pointer		chunk = DatumGetPointer(data_datum);
+					int32		chunk_size;
+					char	   *chunk_data;
 
-					*logical_offset = (int32) root_start;
-					toast_slice_copy_chunk(result, chunk_data, chunk_size,
-										   logical_offset, sliceoffset, copy_req_end);
+					if (!VARATT_IS_EXTENDED(chunk))
+					{
+						chunk_size = VARSIZE(chunk) - VARHDRSZ;
+						chunk_data = VARDATA(chunk);
+					}
+					else if (VARATT_IS_SHORT(chunk))
+					{
+						chunk_size = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+						chunk_data = VARDATA_SHORT(chunk);
+					}
+					else
+					{
+						toast_direct_release_level_bufs(&local_cbuf);
+						elog(ERROR, "unexpected type of toast chunk");
+					}
+
+					if (chunk_size > 0)
+					{
+						int64		root_start = (int64) nelems * max_chunk_size;
+						int64		root_end = root_start + chunk_size;
+
+						if (root_end > req_start && root_start < req_end)
+						{
+							int32		copy_req_end = (slicelength < 0) ? PG_INT32_MAX : (sliceoffset + slicelength);
+
+							*logical_offset = (int32) root_start;
+							toast_slice_copy_chunk(result, chunk_data, chunk_size,
+												   logical_offset, sliceoffset, copy_req_end);
+						}
+						else
+							*logical_offset = (int32) root_end;
+					}
 				}
-				else
-					*logical_offset = (int32) root_end;
 			}
-
-			if (data_val)
-				pfree(data_val);
 		}
 
 		pfree(elems);
 		pfree(nulls);
-		pfree(arr);
+		if ((Pointer) arr != DatumGetPointer(tids_datum))
+			pfree(arr);
 	}
+
+	toast_direct_release_level_bufs(&local_cbuf);
 }

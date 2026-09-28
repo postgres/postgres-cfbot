@@ -568,3 +568,348 @@ INSERT INTO tab_addcol_direct VALUES (1, repeat('addcol-direct-payload-', 300));
 SELECT pg_column_toast_chunk_id(val) IS NULL AS is_direct_toast, length(val) FROM tab_addcol_direct WHERE id = 1;
 
 DROP TABLE tab_addcol_direct;
+
+--
+-- Test direct_toast_self_prune GUC and reloption propagation
+--
+SHOW direct_toast_self_prune;
+
+CREATE TABLE tab_self_prune_opt(id int, val text)
+  WITH (toast_flavour = 'direct', direct_toast_self_prune = off);
+
+SELECT c1.reloptions AS heap_opts, c2.reloptions AS toast_opts
+FROM pg_class c1
+JOIN pg_class c2 ON c1.reltoastrelid = c2.oid
+WHERE c1.relname = 'tab_self_prune_opt';
+
+ALTER TABLE tab_self_prune_opt SET (direct_toast_self_prune = on);
+
+SELECT c1.reloptions AS heap_opts, c2.reloptions AS toast_opts
+FROM pg_class c1
+JOIN pg_class c2 ON c1.reltoastrelid = c2.oid
+WHERE c1.relname = 'tab_self_prune_opt';
+
+ALTER TABLE tab_self_prune_opt RESET (direct_toast_self_prune);
+DROP TABLE tab_self_prune_opt;
+
+--
+-- Performance Improvement Test 1: Write Amplification, TOAST Index Size, and WAL Volume
+-- Compare Plain (oid), Plain (oid8), and Direct TOAST on identical bulk inserts
+--
+CREATE TABLE tab_sup_oid(id int, val text)
+  WITH (toast_flavour = 'plain', toast_value_type = 'oid', autovacuum_enabled = off);
+ALTER TABLE tab_sup_oid ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TABLE tab_sup_oid8(id int, val text)
+  WITH (toast_flavour = 'plain', toast_value_type = 'oid8', autovacuum_enabled = off);
+ALTER TABLE tab_sup_oid8 ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TABLE tab_sup_direct(id int, val text)
+  WITH (toast_flavour = 'direct', autovacuum_enabled = off);
+ALTER TABLE tab_sup_direct ALTER COLUMN val SET STORAGE EXTERNAL;
+
+DO $$
+DECLARE
+    j json;
+    wal_oid bigint;
+    wal_oid8 bigint;
+    wal_direct bigint;
+    rec_oid bigint;
+    rec_oid8 bigint;
+    rec_direct bigint;
+    idx_oid_sz bigint;
+    idx_oid8_sz bigint;
+    idx_direct_sz bigint;
+BEGIN
+    -- Measure backend-local non-FPI WAL bytes and records via EXPLAIN (ANALYZE,
+    -- WAL, FORMAT JSON) so results are 100% deterministic under parallel_schedule
+    -- and across background checkpoints.
+    EXECUTE 'EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) '
+        'INSERT INTO tab_sup_oid SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 100) g'
+        INTO j;
+    rec_oid := (j->0->'Plan'->>'WAL Records')::bigint;
+    wal_oid := (j->0->'Plan'->>'WAL Bytes')::bigint - (j->0->'Plan'->>'WAL FPI Bytes')::bigint;
+
+    EXECUTE 'EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) '
+        'INSERT INTO tab_sup_oid8 SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 100) g'
+        INTO j;
+    rec_oid8 := (j->0->'Plan'->>'WAL Records')::bigint;
+    wal_oid8 := (j->0->'Plan'->>'WAL Bytes')::bigint - (j->0->'Plan'->>'WAL FPI Bytes')::bigint;
+
+    EXECUTE 'EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) '
+        'INSERT INTO tab_sup_direct SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 100) g'
+        INTO j;
+    rec_direct := (j->0->'Plan'->>'WAL Records')::bigint;
+    wal_direct := (j->0->'Plan'->>'WAL Bytes')::bigint - (j->0->'Plan'->>'WAL FPI Bytes')::bigint;
+
+    SELECT pg_relation_size(i.indexrelid) INTO idx_oid_sz
+    FROM pg_class c JOIN pg_index i ON c.reltoastrelid = i.indrelid
+    WHERE c.relname = 'tab_sup_oid';
+
+    SELECT pg_relation_size(i.indexrelid) INTO idx_oid8_sz
+    FROM pg_class c JOIN pg_index i ON c.reltoastrelid = i.indrelid
+    WHERE c.relname = 'tab_sup_oid8';
+
+    SELECT pg_relation_size(i.indexrelid) INTO idx_direct_sz
+    FROM pg_class c JOIN pg_index i ON c.reltoastrelid = i.indrelid
+    WHERE c.relname = 'tab_sup_direct';
+
+    RAISE NOTICE 'index_size_checks: direct_is_1page=%, oid_grew=%, oid8_ge_oid=%',
+        (idx_direct_sz = 8192),
+        (idx_oid_sz > 8192),
+        (idx_oid8_sz >= idx_oid_sz);
+
+    RAISE NOTICE 'wal_checks: direct_lt_oid=%, direct_lt_oid8=%, oid8_gt_oid=%',
+        (wal_direct < wal_oid AND rec_direct < rec_oid),
+        (wal_direct < wal_oid8 AND rec_direct < rec_oid8),
+        (wal_oid8 > wal_oid);
+END$$;
+
+DROP TABLE tab_sup_oid, tab_sup_oid8, tab_sup_direct;
+
+--
+-- Performance Improvement Test 2: Read & Slice Buffer Access Efficiency Across All 3 Tiers
+-- Verify 0 TOAST index buffer accesses for Direct TOAST and minimal heap block
+-- accesses when slicing flat multi-chunk (Tier 2) and tree DAG (Tier 3) values.
+--
+CREATE TABLE tab_tier_oid(id int PRIMARY KEY, pad text, val bytea)
+  WITH (toast_flavour = 'plain', toast_value_type = 'oid', toast_tuple_target = 128, autovacuum_enabled = off);
+ALTER TABLE tab_tier_oid ALTER COLUMN pad SET STORAGE PLAIN;
+ALTER TABLE tab_tier_oid ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TABLE tab_tier_oid8(id int PRIMARY KEY, pad text, val bytea)
+  WITH (toast_flavour = 'plain', toast_value_type = 'oid8', toast_tuple_target = 128, autovacuum_enabled = off);
+ALTER TABLE tab_tier_oid8 ALTER COLUMN pad SET STORAGE PLAIN;
+ALTER TABLE tab_tier_oid8 ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TABLE tab_tier_direct(id int PRIMARY KEY, pad text, val bytea)
+  WITH (toast_flavour = 'direct', toast_tuple_target = 128, autovacuum_enabled = off);
+ALTER TABLE tab_tier_direct ALTER COLUMN pad SET STORAGE PLAIN;
+ALTER TABLE tab_tier_direct ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE FUNCTION measure_toast_io(tbl regclass, query_sql text,
+                                 OUT heap_io bigint, OUT idx_io bigint)
+LANGUAGE plpgsql AS $$
+DECLARE
+    toast_rel oid;
+    toast_idx oid;
+    h0 bigint; i0 bigint;
+    h1 bigint; i1 bigint;
+    dummy text;
+BEGIN
+    SELECT c.reltoastrelid, i.indexrelid
+      INTO toast_rel, toast_idx
+      FROM pg_class c
+      JOIN pg_index i ON c.reltoastrelid = i.indrelid
+     WHERE c.oid = tbl;
+
+    h0 := pg_stat_get_xact_blocks_fetched(toast_rel);
+    i0 := pg_stat_get_xact_idx_blocks_fetched(toast_idx);
+
+    EXECUTE query_sql INTO dummy;
+
+    h1 := pg_stat_get_xact_blocks_fetched(toast_rel);
+    i1 := pg_stat_get_xact_idx_blocks_fetched(toast_idx);
+
+    heap_io := h1 - h0;
+    idx_io := i1 - i0;
+END$$;
+
+-- Run INSERTs and reads within a single transaction so pd_prune_xid set on
+-- insert is in-progress and heap_page_prune_opt never non-deterministically
+-- pins a visibility map page depending on concurrent parallel_schedule xacts.
+BEGIN;
+SET LOCAL debug_parallel_query = off;
+
+-- id=1: Tier 1 single-chunk (1600 bytes < 1996 max chunk size; 600B PLAIN pad pushes tuple > 2KB threshold)
+-- id=2: Tier 2 flat multi-chunk (22400 bytes, 11 leaf chunks + 1 root chunk)
+-- id=3: Tier 3 tree DAG (320000 bytes, 161 leaf chunks + internal/root chunks)
+INSERT INTO tab_tier_oid VALUES
+  (1, repeat('p', 600), decode(repeat(md5('tier1'), 100), 'hex')),
+  (2, repeat('p', 600), decode(repeat(md5('tier2'), 1400), 'hex')),
+  (3, repeat('p', 600), decode(repeat(md5('tier3'), 20000), 'hex'));
+
+INSERT INTO tab_tier_oid8 VALUES
+  (1, repeat('p', 600), decode(repeat(md5('tier1'), 100), 'hex')),
+  (2, repeat('p', 600), decode(repeat(md5('tier2'), 1400), 'hex')),
+  (3, repeat('p', 600), decode(repeat(md5('tier3'), 20000), 'hex'));
+
+INSERT INTO tab_tier_direct VALUES
+  (1, repeat('p', 600), decode(repeat(md5('tier1'), 100), 'hex')),
+  (2, repeat('p', 600), decode(repeat(md5('tier2'), 1400), 'hex')),
+  (3, repeat('p', 600), decode(repeat(md5('tier3'), 20000), 'hex'));
+
+-- Tier 1 (1600B single-chunk) full read:
+-- Direct pins 1 heap block + 0 index blocks; Plain pins 1 heap + >=1 index blocks
+SELECT d.heap_io AS d_h, d.idx_io AS d_i, o.heap_io AS o_h, (o.idx_io > 0) AS o_idx, o8.heap_io AS o8_h, (o8.idx_io > 0) AS o8_idx
+FROM measure_toast_io('tab_tier_direct', 'SELECT md5(val) FROM tab_tier_direct WHERE id = 1') d,
+     measure_toast_io('tab_tier_oid',    'SELECT md5(val) FROM tab_tier_oid WHERE id = 1') o,
+     measure_toast_io('tab_tier_oid8',   'SELECT md5(val) FROM tab_tier_oid8 WHERE id = 1') o8;
+
+-- Tier 2 (22.4KB flat multi-chunk) 500B prefix slice:
+-- Direct pins 1 directory chunk + 1 leaf chunk = 2 heap blocks + 0 index blocks
+SELECT d.heap_io AS d_h, d.idx_io AS d_i, o.heap_io AS o_h, (o.idx_io > 0) AS o_idx, o8.heap_io AS o8_h, (o8.idx_io > 0) AS o8_idx
+FROM measure_toast_io('tab_tier_direct', 'SELECT encode(substring(val, 1, 500), ''hex'') FROM tab_tier_direct WHERE id = 2') d,
+     measure_toast_io('tab_tier_oid',    'SELECT encode(substring(val, 1, 500), ''hex'') FROM tab_tier_oid WHERE id = 2') o,
+     measure_toast_io('tab_tier_oid8',   'SELECT encode(substring(val, 1, 500), ''hex'') FROM tab_tier_oid8 WHERE id = 2') o8;
+
+-- Tier 3 (320KB tree DAG, 161 chunks) 100B middle slice at offset 150,100:
+-- Direct traverses root -> internal -> 1 leaf chunk = 3 heap blocks + 0 index blocks
+SELECT d.heap_io AS d_h, d.idx_io AS d_i, o.heap_io AS o_h, (o.idx_io > 0) AS o_idx, o8.heap_io AS o8_h, (o8.idx_io > 0) AS o8_idx
+FROM measure_toast_io('tab_tier_direct', 'SELECT encode(substring(val, 150100, 100), ''hex'') FROM tab_tier_direct WHERE id = 3') d,
+     measure_toast_io('tab_tier_oid',    'SELECT encode(substring(val, 150100, 100), ''hex'') FROM tab_tier_oid WHERE id = 3') o,
+     measure_toast_io('tab_tier_oid8',   'SELECT encode(substring(val, 150100, 100), ''hex'') FROM tab_tier_oid8 WHERE id = 3') o8;
+
+COMMIT;
+
+DROP FUNCTION measure_toast_io(regclass, text);
+DROP TABLE tab_tier_oid, tab_tier_oid8, tab_tier_direct;
+
+--
+-- Performance Improvement Test 3: On-Access LP_UNUSED Self-Pruning Under High-Churn UPDATEs
+-- Without VACUUM (autovacuum_enabled = off), Direct TOAST with direct_toast_self_prune=on
+-- reclaims dead TOAST chunks directly to LP_UNUSED and reuses space at steady state,
+-- whereas Plain TOAST (oid/oid8) and direct_toast_self_prune=off grow linearly.
+--
+CREATE TEMP TABLE tab_churn_direct_on(id int PRIMARY KEY, val text)
+  WITH (toast_flavour = 'direct', direct_toast_self_prune = on, autovacuum_enabled = off);
+ALTER TABLE tab_churn_direct_on ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TEMP TABLE tab_churn_direct_off(id int PRIMARY KEY, val text)
+  WITH (toast_flavour = 'direct', direct_toast_self_prune = off, autovacuum_enabled = off);
+ALTER TABLE tab_churn_direct_off ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TEMP TABLE tab_churn_oid(id int PRIMARY KEY, val text)
+  WITH (toast_flavour = 'plain', toast_value_type = 'oid', autovacuum_enabled = off);
+ALTER TABLE tab_churn_oid ALTER COLUMN val SET STORAGE EXTERNAL;
+
+CREATE TEMP TABLE tab_churn_oid8(id int PRIMARY KEY, val text)
+  WITH (toast_flavour = 'plain', toast_value_type = 'oid8', autovacuum_enabled = off);
+ALTER TABLE tab_churn_oid8 ALTER COLUMN val SET STORAGE EXTERNAL;
+
+INSERT INTO tab_churn_direct_on  SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 20) g;
+INSERT INTO tab_churn_direct_off SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 20) g;
+INSERT INTO tab_churn_oid        SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 20) g;
+INSERT INTO tab_churn_oid8       SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 20) g;
+
+-- Run 10 full-table UPDATE churn passes in separate transactions (no VACUUM)
+DO $$
+DECLARE
+    iter int;
+    r int;
+BEGIN
+    FOR iter IN 1..10 LOOP
+        FOR r IN 1..20 LOOP
+            UPDATE tab_churn_direct_on  SET val = repeat(md5(iter::text || '-' || r::text), 300) WHERE id = r;
+            UPDATE tab_churn_direct_off SET val = repeat(md5(iter::text || '-' || r::text), 300) WHERE id = r;
+            UPDATE tab_churn_oid        SET val = repeat(md5(iter::text || '-' || r::text), 300) WHERE id = r;
+            UPDATE tab_churn_oid8       SET val = repeat(md5(iter::text || '-' || r::text), 300) WHERE id = r;
+            COMMIT;
+        END LOOP;
+    END LOOP;
+END$$;
+
+SELECT
+    pg_total_relation_size(c_on.reltoastrelid) < pg_total_relation_size(c_off.reltoastrelid) / 4 AS self_prune_beats_off_4x,
+    pg_total_relation_size(c_on.reltoastrelid) < pg_total_relation_size(c_oid.reltoastrelid) / 4 AS self_prune_beats_oid_4x,
+    pg_total_relation_size(c_on.reltoastrelid) < pg_total_relation_size(c_oid8.reltoastrelid) / 4 AS self_prune_beats_oid8_4x,
+    pg_relation_size(i_on.indexrelid) = 8192 AS direct_idx_still_1page,
+    pg_relation_size(i_oid.indexrelid) > 32768 AS oid_idx_bloated,
+    pg_relation_size(i_oid8.indexrelid) > pg_relation_size(i_oid.indexrelid) AS oid8_idx_larger_than_oid
+FROM pg_class c_on
+JOIN pg_index i_on ON c_on.reltoastrelid = i_on.indrelid,
+     pg_class c_off,
+     pg_class c_oid
+JOIN pg_index i_oid ON c_oid.reltoastrelid = i_oid.indrelid,
+     pg_class c_oid8
+JOIN pg_index i_oid8 ON c_oid8.reltoastrelid = i_oid8.indrelid
+WHERE c_on.relname = 'tab_churn_direct_on'
+  AND c_off.relname = 'tab_churn_direct_off'
+  AND c_oid.relname = 'tab_churn_oid'
+  AND c_oid8.relname = 'tab_churn_oid8';
+
+-- Also test multi-row single-transaction UPDATE churn with direct_toast_self_prune = on:
+-- First full-table batch UPDATE establishes the 2x MVCC working set (old + new rows in-flight),
+-- and subsequent full-table batch UPDATEs reuse those exact pages with 0 steady-state growth!
+DO $$
+DECLARE
+    sz_batch1 bigint;
+    sz_batch6 bigint;
+    iter int;
+BEGIN
+    UPDATE tab_churn_direct_on SET val = repeat(md5('batch-1-' || id::text), 300);
+    COMMIT;
+
+    SELECT pg_relation_size(reltoastrelid) INTO sz_batch1
+    FROM pg_class WHERE relname = 'tab_churn_direct_on';
+
+    FOR iter IN 2..6 LOOP
+        UPDATE tab_churn_direct_on SET val = repeat(md5('batch-' || iter::text || '-' || id::text), 300);
+        COMMIT;
+    END LOOP;
+
+    SELECT pg_relation_size(reltoastrelid) INTO sz_batch6
+    FROM pg_class WHERE relname = 'tab_churn_direct_on';
+
+    RAISE NOTICE 'batch_churn_steady_state: zero_growth=%',
+        (sz_batch6 <= sz_batch1);
+END$$;
+
+-- Verify data integrity after heavy churn
+SELECT count(*), min(length(val)), max(length(val)) FROM tab_churn_direct_on;
+
+-- Verify that Plain TOAST tables (oid and oid8) do not incur 256-block
+-- clock-hand probe amplification on extension when direct_toast_self_prune = on
+DO $$
+DECLARE
+    toast_oid oid;
+    toast_oid8 oid;
+    h0_oid bigint;
+    h1_oid bigint;
+    h0_oid8 bigint;
+    h1_oid8 bigint;
+BEGIN
+    SELECT reltoastrelid INTO toast_oid FROM pg_class WHERE relname = 'tab_churn_oid';
+    SELECT reltoastrelid INTO toast_oid8 FROM pg_class WHERE relname = 'tab_churn_oid8';
+
+    h0_oid := pg_stat_get_xact_blocks_fetched(toast_oid);
+    UPDATE tab_churn_oid SET val = repeat(md5('plain-probe-check-oid'), 300) WHERE id = 1;
+    h1_oid := pg_stat_get_xact_blocks_fetched(toast_oid);
+
+    h0_oid8 := pg_stat_get_xact_blocks_fetched(toast_oid8);
+    UPDATE tab_churn_oid8 SET val = repeat(md5('plain-probe-check-oid8'), 300) WHERE id = 1;
+    h1_oid8 := pg_stat_get_xact_blocks_fetched(toast_oid8);
+
+    RAISE NOTICE 'plain_toast_no_probe_amplification: oid_bounded=%, oid8_bounded=%',
+        ((h1_oid - h0_oid) <= 20),
+        ((h1_oid8 - h0_oid8) <= 20);
+END$$;
+
+--
+-- Performance Improvement Test 4: Single-Pass VACUUM Without Index Scans
+-- Unindexed Direct TOAST dead tuples are reclaimed directly to LP_UNUSED during
+-- the first heap pass of VACUUM, so even with INDEX_CLEANUP OFF (which skips
+-- index scans and the second heap pass), Direct TOAST reclaims all space and
+-- truncates to 0 bytes, whereas Plain TOAST (oid/oid8) can only mark chunks
+-- LP_DEAD in the first pass and cannot reclaim or truncate without index scans.
+--
+DELETE FROM tab_churn_direct_off;
+DELETE FROM tab_churn_oid;
+DELETE FROM tab_churn_oid8;
+
+VACUUM (INDEX_CLEANUP OFF) tab_churn_direct_off;
+VACUUM (INDEX_CLEANUP OFF) tab_churn_oid;
+VACUUM (INDEX_CLEANUP OFF) tab_churn_oid8;
+
+SELECT
+    pg_relation_size(c_off.reltoastrelid) = 0 AS direct_single_pass_reclaimed_all,
+    pg_relation_size(c_oid.reltoastrelid) > 500000 AS oid_needs_index_pass,
+    pg_relation_size(c_oid8.reltoastrelid) > 500000 AS oid8_needs_index_pass
+FROM pg_class c_off,
+     pg_class c_oid,
+     pg_class c_oid8
+WHERE c_off.relname = 'tab_churn_direct_off'
+  AND c_oid.relname = 'tab_churn_oid'
+  AND c_oid8.relname = 'tab_churn_oid8';
+
+DROP TABLE tab_churn_direct_on, tab_churn_direct_off, tab_churn_oid, tab_churn_oid8;
