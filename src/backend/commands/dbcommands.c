@@ -29,6 +29,7 @@
 #include "access/multixact.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
@@ -1891,6 +1892,20 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 */
 	CatalogTupleDelete(pgdbrel, &tup->t_self);
 	heap_freetuple(tup);
+
+	/* Log LSN after database drop operation completes */
+	if (log_object_drops)
+	{
+		XLogRecPtr	current_lsn = GetXLogInsertRecPtr();
+
+		ereport(LOG,
+				(errmsg("database \"%s\" (OID %u) dropped, lsn=%X/%08X",
+						dbname, db_id, LSN_FORMAT_ARGS(current_lsn)),
+				 errhint("To recover to the point before this drop, use recovery_target_lsn = '%X/%08X' "
+						 "with recovery_target_inclusive = false. See the log_object_drops "
+						 "documentation for caveats and required manual cleanup steps.",
+						 LSN_FORMAT_ARGS(current_lsn))));
+	}
 
 	/*
 	 * Drop db-specific replication slots.
