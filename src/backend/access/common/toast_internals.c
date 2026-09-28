@@ -24,12 +24,14 @@
 #include "catalog/catalog.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
+#include "storage/freespace.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/array.h"
 
 int			toast_default_flavour = TOAST_FLAVOUR_PLAIN;
+bool		direct_toast_self_prune = true;
 
 /*
  * Direct TOAST chunk organization parameters:
@@ -60,9 +62,7 @@ static bool toastid_valueid_exists(Oid toastrelid, Oid8 valueid);
 static Datum toast_save_datum_direct(Relation rel, Datum value,
 									 varlena *oldexternal, int options);
 static void toast_delete_datum_direct(Relation rel, Datum value, bool is_speculative);
-static void toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid,
-												Snapshot snapshot, TupleTableSlot *slot,
-												bool is_speculative);
+static void toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid, bool is_speculative);
 
 /* ----------
  * toast_pointer_build -
@@ -1092,6 +1092,31 @@ toast_save_datum_direct(Relation rel, Datum value,
 	return PointerGetDatum(result);
 }
 
+#define DIRECT_TOAST_PRUNE_CACHE_SIZE 32
+static DirectToastPruneState direct_toast_prune_cache[DIRECT_TOAST_PRUNE_CACHE_SIZE];
+static int	direct_toast_prune_next_slot = 0;
+
+DirectToastPruneState *
+toast_get_prune_state(Oid relid)
+{
+	int			slot;
+
+	for (int i = 0; i < DIRECT_TOAST_PRUNE_CACHE_SIZE; i++)
+	{
+		if (direct_toast_prune_cache[i].relid == relid)
+			return &direct_toast_prune_cache[i];
+	}
+
+	slot = direct_toast_prune_next_slot;
+	direct_toast_prune_next_slot = (direct_toast_prune_next_slot + 1) % DIRECT_TOAST_PRUNE_CACHE_SIZE;
+
+	memset(&direct_toast_prune_cache[slot], 0, sizeof(DirectToastPruneState));
+	direct_toast_prune_cache[slot].relid = relid;
+	direct_toast_prune_cache[slot].targblock = InvalidBlockNumber;
+
+	return &direct_toast_prune_cache[slot];
+}
+
 /*
  * Direct TOAST delete path.
  */
@@ -1101,41 +1126,51 @@ toast_delete_datum_direct(Relation rel, Datum value, bool is_speculative)
 	struct varlena *attr = (varlena *) DatumGetPointer(value);
 	struct varatt_direct toast_pointer;
 	Relation	toastrel;
-	TupleTableSlot *slot;
-	Snapshot	snapshot = get_toast_snapshot();
 
 	VARATT_EXTERNAL_GET_POINTER_DIRECT(toast_pointer, attr);
 
 	toastrel = table_open(toast_pointer.va_toastrelid, RowExclusiveLock);
-	slot = table_slot_create(toastrel, NULL);
 
-	toast_delete_datum_direct_recursive(toastrel, &toast_pointer.va_tid,
-										snapshot, slot, is_speculative);
+	toast_delete_datum_direct_recursive(toastrel, &toast_pointer.va_tid, is_speculative);
+	toast_get_prune_state(RelationGetRelid(toastrel))->delete_count++;
 
-	ExecDropSingleTupleTableSlot(slot);
 	table_close(toastrel, NoLock);
+}
+
+static inline void
+toast_direct_delete_tid(Relation toastrel, ItemPointer tid, bool is_speculative)
+{
+	if (is_speculative)
+		heap_abort_speculative(toastrel, tid);
+	else
+	{
+		simple_heap_delete(toastrel, tid);
+		if (RelationGetDirectToastSelfPrune(toastrel))
+			RecordPageWithFreeSpace(toastrel, ItemPointerGetBlockNumber(tid),
+									BLCKSZ - SizeOfPageHeaderData);
+	}
 }
 
 /*
  * Recursively delete direct TOAST tuples.
  */
 static void
-toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid,
-									Snapshot snapshot, TupleTableSlot *slot,
-									bool is_speculative)
+toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid, bool is_speculative)
 {
+	HeapTupleData tup;
+	Buffer		buffer = InvalidBuffer;
+	Snapshot	snapshot = get_toast_snapshot();
 	Datum		tids_datum;
-	Datum		offsets_datum;
 	bool		is_null_tids;
-	bool		is_null_offsets;
+	bool		is_null_offsets = true;
 
 	check_stack_depth();
 
-	if (!table_tuple_fetch_row_version(toastrel, tid, snapshot, slot))
+	tup.t_self = *tid;
+	if (!heap_fetch(toastrel, snapshot, &tup, &buffer, false))
 		return;
 
-	tids_datum = slot_getattr(slot, 4, &is_null_tids);
-	offsets_datum = slot_getattr(slot, 5, &is_null_offsets);
+	tids_datum = fastgetattr(&tup, 4, toastrel->rd_att, &is_null_tids);
 
 	if (!is_null_tids)
 	{
@@ -1144,44 +1179,24 @@ toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid,
 		bool	   *nulls;
 		int			nelems;
 		int			i;
-		bool		children_are_leaves = is_null_offsets;
+
+		(void) fastgetattr(&tup, 5, toastrel->rd_att, &is_null_offsets);
+		ReleaseBuffer(buffer);
 
 		deconstruct_array_builtin(arr, TIDOID, &elems, &nulls, &nelems);
 
-		ExecClearTuple(slot);
-
 		for (i = 0; i < nelems; i++)
 		{
-			ItemPointer elem_tid;
-
-			if (nulls[i])
-				continue;
-
-			elem_tid = (ItemPointer) DatumGetPointer(elems[i]);
+			ItemPointer elem_tid = (ItemPointer) DatumGetPointer(elems[i]);
 
 			CHECK_FOR_INTERRUPTS();
 
 			if (!ItemPointerEquals(elem_tid, tid))
 			{
-				if (children_are_leaves)
-				{
-					/*
-					 * Flat multi-chunk root (chunk_tid_offsets IS NULL):
-					 * children are guaranteed to be leaf chunks with no
-					 * further children, so delete them directly without
-					 * fetching their tuples first.
-					 */
-					if (is_speculative)
-						heap_abort_speculative(toastrel, elem_tid);
-					else
-						simple_heap_delete(toastrel, elem_tid);
-				}
+				if (is_null_offsets)
+					toast_direct_delete_tid(toastrel, elem_tid, is_speculative);
 				else
-				{
-					toast_delete_datum_direct_recursive(toastrel, elem_tid,
-														snapshot, slot,
-														is_speculative);
-				}
+					toast_delete_datum_direct_recursive(toastrel, elem_tid, is_speculative);
 			}
 		}
 		pfree(elems);
@@ -1190,11 +1205,8 @@ toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid,
 	}
 	else
 	{
-		ExecClearTuple(slot);
+		ReleaseBuffer(buffer);
 	}
 
-	if (is_speculative)
-		heap_abort_speculative(toastrel, tid);
-	else
-		simple_heap_delete(toastrel, tid);
+	toast_direct_delete_tid(toastrel, tid, is_speculative);
 }
