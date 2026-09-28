@@ -14,6 +14,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/htup_details.h"
 #include "executor/nodeSetOp.h"
 #include "foreign/fdwapi.h"
@@ -28,6 +30,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
+#include "postmaster/bgworker_internals.h"
 #include "utils/memutils.h"
 #include "utils/selfuncs.h"
 
@@ -53,6 +56,7 @@ static List *reparameterize_pathlist_by_child(PlannerInfo *root,
 											  RelOptInfo *child_rel);
 static bool pathlist_is_reparameterizable_by_child(List *pathlist,
 												   RelOptInfo *child_rel);
+static int16 subpath_adjusted_effective_workers(const Path *subpath);
 
 
 /*****************************************************************************
@@ -235,6 +239,96 @@ compare_path_costs_fuzzily(Path *path1, Path *path2, double fuzz_factor)
 	return COSTS_EQUAL;
 
 #undef CONSIDER_PATH_STARTUP_COST
+}
+
+/*
+ * subpath_adjusted_effective_workers
+ *			calculate the effective number of workers participating in a node
+ *
+ * Joins' inner plans generally only execute if the plan node produced tuples.
+ * In parallel plans, this means that if outer plans produce fewer tuples
+ * than there are workers, amortization of inner plans' costs needs to take
+ * this reduced parallelism into account.  This reduced parallelism is
+ * accounted for in Path.effective_workers, and then applied in
+ * costsize.c's get_parallel_divisor().
+ *
+ * Note that subpath can benefit from higher degrees of parallelism than
+ * the Path that'll have it as subpath, because (e.g.) removing N-1 tuples
+ * from the table with N tuples will be faster with more workers, even if
+ * it'll produce just one tuple; only the node above it will have to deal
+ * with the reduced concurrency.
+ */
+static int16
+subpath_adjusted_effective_workers(const Path *subpath)
+{
+	int			leader_factor = 0;
+	int			result;
+	double		best_row_estimate;
+
+	/* non-parallel subpaths don't have any effective worker count */
+	if (subpath->parallel_workers == 0)
+		return 0;
+
+	/*
+	 * If every effective worker of the subpath produces more than one
+	 * row, then parallelism shouldn't be reduced.
+	 */
+	if (subpath->rows > 1)
+		return subpath->effective_workers;
+
+	if (parallel_leader_participation)
+		leader_factor = 1;
+
+	/*
+	 * If we're already down to one effective process, don't further
+	 * expect parallelism to reduce.
+	 */
+	if (subpath->effective_workers + leader_factor <= 1)
+		return subpath->effective_workers;
+
+	/* If there is just,  */
+	if (Max(0, subpath->rows) == 0.0)
+		return subpath->effective_workers;
+
+	/* most basic estimate for row counts */
+	best_row_estimate = Max(0, subpath->rows) *
+		(double) (subpath->effective_workers + leader_factor);
+
+	result = subpath->effective_workers;
+
+	Assert(subpath->effective_workers + leader_factor >= 1);
+
+	/* Adjust down for parent rel rowcount */
+	if (subpath->parent->rows >= 0)
+		best_row_estimate = Min(subpath->parent->rows, best_row_estimate);
+
+	/* Adjust down for parameterization, where relevant */
+	if (subpath->param_info && subpath->param_info->ppi_rows >= 0)
+		best_row_estimate = Min(subpath->param_info->ppi_rows,
+								best_row_estimate);
+
+	/*
+	 * We'll use at most ceil(row_estimate) processes. If the leader
+	 * participates, we'll have to subtract it: we don't count its
+	 * contribution to parallelism higher up the plan tree for these
+	 * nodes.
+	 */
+	if (best_row_estimate < (double) (result + leader_factor))
+	{
+		result = (int16) (ceil(best_row_estimate) - leader_factor);
+
+		/*
+		 * If the row estimate is zero and a leader is present, the
+		 * worker count could underflow.
+		 */
+		if (result < 1 - leader_factor)
+			result = 1 - leader_factor;
+	}
+
+	Assert(result + leader_factor >= 1);
+	Assert(result <= MAX_PARALLEL_WORKER_LIMIT);
+
+	return (int16) result;
 }
 
 /*
@@ -1024,7 +1118,7 @@ add_partial_path_precheck(RelOptInfo *parent_rel, int disabled_nodes,
  */
 Path *
 create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
-					Relids required_outer, int parallel_workers)
+					Relids required_outer, int16 parallel_workers)
 {
 	Path	   *pathnode = makeNode(Path);
 
@@ -1036,6 +1130,7 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = (parallel_workers > 0);
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = parallel_workers;
+	pathnode->effective_workers = parallel_workers;
 	pathnode->pathkeys = NIL;	/* seqscan has unordered result */
 
 	cost_seqscan(pathnode, root, rel, pathnode->param_info);
@@ -1060,6 +1155,7 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = NIL;	/* samplescan has unordered result */
 
 	cost_samplescan(pathnode, root, rel, pathnode->param_info);
@@ -1112,6 +1208,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.pathkeys = pathkeys;
 
 	pathnode->indexinfo = index;
@@ -1151,7 +1248,7 @@ create_bitmap_heap_path(PlannerInfo *root,
 						Path *bitmapqual,
 						Relids required_outer,
 						double loop_count,
-						int parallel_degree)
+						int16 parallel_degree)
 {
 	BitmapHeapPath *pathnode = makeNode(BitmapHeapPath);
 
@@ -1163,6 +1260,7 @@ create_bitmap_heap_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = (parallel_degree > 0);
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = parallel_degree;
+	pathnode->path.effective_workers = parallel_degree;
 	pathnode->path.pathkeys = NIL;	/* always unordered */
 
 	pathnode->bitmapqual = bitmapqual;
@@ -1215,6 +1313,7 @@ create_bitmap_and_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 
 	pathnode->path.pathkeys = NIL;	/* always unordered */
 
@@ -1267,6 +1366,7 @@ create_bitmap_or_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 
 	pathnode->path.pathkeys = NIL;	/* always unordered */
 
@@ -1296,6 +1396,7 @@ create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.pathkeys = NIL;	/* always unordered */
 
 	pathnode->tidquals = tidquals;
@@ -1314,7 +1415,7 @@ create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
 TidRangePath *
 create_tidrangescan_path(PlannerInfo *root, RelOptInfo *rel,
 						 List *tidrangequals, Relids required_outer,
-						 int parallel_workers)
+						 int16 parallel_workers)
 {
 	TidRangePath *pathnode = makeNode(TidRangePath);
 
@@ -1326,6 +1427,7 @@ create_tidrangescan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = (parallel_workers > 0);
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = parallel_workers;
+	pathnode->path.effective_workers = parallel_workers;
 	pathnode->path.pathkeys = NIL;	/* always unordered */
 
 	pathnode->tidrangequals = tidrangequals;
@@ -1353,13 +1455,14 @@ create_append_path(PlannerInfo *root,
 				   RelOptInfo *rel,
 				   AppendPathInput input,
 				   List *pathkeys, Relids required_outer,
-				   int parallel_workers, bool parallel_aware,
-				   double rows)
+				   int16 parallel_workers, int16 effective_workers,
+				   bool parallel_aware, double rows)
 {
 	AppendPath *pathnode = makeNode(AppendPath);
 	ListCell   *l;
 
-	Assert(!parallel_aware || parallel_workers > 0);
+	Assert(!parallel_aware ||
+		   (parallel_workers > 0 && effective_workers >= 0));
 
 	pathnode->child_append_relid_sets = input.child_append_relid_sets;
 	pathnode->path.pathtype = T_Append;
@@ -1388,6 +1491,7 @@ create_append_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = parallel_aware;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = parallel_workers;
+	pathnode->path.effective_workers = effective_workers;
 	pathnode->path.pathkeys = pathkeys;
 
 	/*
@@ -1549,6 +1653,7 @@ create_merge_append_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.pathkeys = pathkeys;
 	pathnode->subpaths = subpaths;
 
@@ -1675,6 +1780,7 @@ create_group_result_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.pathkeys = NIL;
 	pathnode->quals = havingqual;
 
@@ -1725,6 +1831,8 @@ create_material_path(RelOptInfo *rel, Path *subpath, bool enabled)
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	pathnode->path.pathkeys = subpath->pathkeys;
 
 	pathnode->subpath = subpath;
@@ -1761,6 +1869,8 @@ create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	pathnode->path.pathkeys = subpath->pathkeys;
 
 	pathnode->subpath = subpath;
@@ -1879,6 +1989,7 @@ create_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = false;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.pathkeys = NIL;	/* Gather has unordered result */
 
 	pathnode->subpath = subpath;
@@ -1923,6 +2034,8 @@ create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	pathnode->path.pathkeys = pathkeys;
 	pathnode->subpath = subpath;
 
@@ -1951,6 +2064,7 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = pathkeys;
 
 	cost_functionscan(pathnode, root, rel, pathnode->param_info);
@@ -1977,6 +2091,7 @@ create_tablefuncscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
 	cost_tablefuncscan(pathnode, root, rel, pathnode->param_info);
@@ -2003,6 +2118,7 @@ create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
 	cost_valuesscan(pathnode, root, rel, pathnode->param_info);
@@ -2029,6 +2145,7 @@ create_ctescan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = pathkeys;
 
 	cost_ctescan(pathnode, root, rel, pathnode->param_info);
@@ -2055,6 +2172,7 @@ create_namedtuplestorescan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
 	cost_namedtuplestorescan(pathnode, root, rel, pathnode->param_info);
@@ -2081,6 +2199,7 @@ create_resultscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
 	cost_resultscan(pathnode, root, rel, pathnode->param_info);
@@ -2107,6 +2226,7 @@ create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_aware = false;
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
+	pathnode->effective_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
 	/* Cost is the same as for a regular CTE scan */
@@ -2150,6 +2270,7 @@ create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.rows = rows;
 	pathnode->path.disabled_nodes = disabled_nodes;
 	pathnode->path.startup_cost = startup_cost;
@@ -2204,6 +2325,7 @@ create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.rows = rows;
 	pathnode->path.disabled_nodes = disabled_nodes;
 	pathnode->path.startup_cost = startup_cost;
@@ -2253,6 +2375,7 @@ create_foreign_upper_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.rows = rows;
 	pathnode->path.disabled_nodes = disabled_nodes;
 	pathnode->path.startup_cost = startup_cost;
@@ -2419,6 +2542,8 @@ create_nestloop_path(PlannerInfo *root,
 		outer_path->parallel_safe && inner_path->parallel_safe;
 	/* This is a foolish way to estimate parallel_workers, but for now... */
 	pathnode->jpath.path.parallel_workers = outer_path->parallel_workers;
+	pathnode->jpath.path.effective_workers =
+		subpath_adjusted_effective_workers(outer_path);
 	pathnode->jpath.path.pathkeys = pathkeys;
 	pathnode->jpath.jointype = jointype;
 	pathnode->jpath.inner_unique = extra->inner_unique;
@@ -2485,6 +2610,8 @@ create_mergejoin_path(PlannerInfo *root,
 		outer_path->parallel_safe && inner_path->parallel_safe;
 	/* This is a foolish way to estimate parallel_workers, but for now... */
 	pathnode->jpath.path.parallel_workers = outer_path->parallel_workers;
+	pathnode->jpath.path.effective_workers =
+		subpath_adjusted_effective_workers(outer_path);
 	pathnode->jpath.path.pathkeys = pathkeys;
 	pathnode->jpath.jointype = jointype;
 	pathnode->jpath.inner_unique = extra->inner_unique;
@@ -2551,6 +2678,8 @@ create_hashjoin_path(PlannerInfo *root,
 		outer_path->parallel_safe && inner_path->parallel_safe;
 	/* This is a foolish way to estimate parallel_workers, but for now... */
 	pathnode->jpath.path.parallel_workers = outer_path->parallel_workers;
+	pathnode->jpath.path.effective_workers =
+		subpath_adjusted_effective_workers(outer_path);
 
 	/*
 	 * A hashjoin never has pathkeys, since its output ordering is
@@ -2619,6 +2748,8 @@ create_projection_path(PlannerInfo *root,
 		subpath->parallel_safe &&
 		is_parallel_safe(root, (Node *) target->exprs);
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	/* Projection does not change the sort order */
 	pathnode->path.pathkeys = subpath->pathkeys;
 
@@ -2803,6 +2934,8 @@ create_set_projection_path(PlannerInfo *root,
 		subpath->parallel_safe &&
 		is_parallel_safe(root, (Node *) target->exprs);
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	/* Projection does not change the sort order XXX? */
 	pathnode->path.pathkeys = subpath->pathkeys;
 
@@ -2873,6 +3006,8 @@ create_incremental_sort_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	pathnode->path.pathkeys = pathkeys;
 
 	pathnode->subpath = subpath;
@@ -2921,6 +3056,8 @@ create_sort_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	pathnode->path.pathkeys = pathkeys;
 
 	pathnode->subpath = subpath;
@@ -2967,6 +3104,8 @@ create_group_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	/* Group doesn't change sort ordering */
 	pathnode->path.pathkeys = subpath->pathkeys;
 
@@ -3022,6 +3161,8 @@ create_unique_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	/* Unique doesn't change the input ordering */
 	pathnode->path.pathkeys = subpath->pathkeys;
 
@@ -3088,6 +3229,8 @@ create_agg_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 
 	if (aggstrategy == AGG_SORTED)
 	{
@@ -3172,6 +3315,8 @@ create_groupingsets_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	pathnode->subpath = subpath;
 
 	/*
@@ -3332,6 +3477,7 @@ create_minmaxagg_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = true;	/* might change below */
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	/* Result is one unordered row */
 	pathnode->path.rows = 1;
 	pathnode->path.pathkeys = NIL;
@@ -3427,6 +3573,8 @@ create_windowagg_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(subpath);
 	/* WindowAgg preserves the input sort order */
 	pathnode->path.pathkeys = subpath->pathkeys;
 
@@ -3496,8 +3644,14 @@ create_setop_path(PlannerInfo *root,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		leftpath->parallel_safe && rightpath->parallel_safe;
+
+	/* avoid exceeding parallel worker count limits */
 	pathnode->path.parallel_workers =
-		leftpath->parallel_workers + rightpath->parallel_workers;
+		Min(leftpath->parallel_workers + rightpath->parallel_workers,
+			max_parallel_workers);
+	pathnode->path.effective_workers =
+		Min(leftpath->effective_workers + rightpath->effective_workers,
+			max_parallel_workers);
 	/* SetOp preserves the input sort order if in sort mode */
 	pathnode->path.pathkeys =
 		(strategy == SETOP_SORTED) ? leftpath->pathkeys : NIL;
@@ -3626,6 +3780,8 @@ create_recursiveunion_path(PlannerInfo *root,
 		leftpath->parallel_safe && rightpath->parallel_safe;
 	/* Foolish, but we'll do it like joins for now: */
 	pathnode->path.parallel_workers = leftpath->parallel_workers;
+	pathnode->path.effective_workers =
+		subpath_adjusted_effective_workers(leftpath);
 	/* RecursiveUnion result is always unsorted */
 	pathnode->path.pathkeys = NIL;
 
@@ -3664,6 +3820,7 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = false;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.rows = subpath->rows;
 
 	/*
@@ -3743,6 +3900,7 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = false;
 	pathnode->path.parallel_workers = 0;
+	pathnode->path.effective_workers = 0;
 	pathnode->path.pathkeys = NIL;
 
 	/*
@@ -3830,6 +3988,7 @@ create_limit_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.effective_workers = subpath->effective_workers;
 	pathnode->path.rows = subpath->rows;
 	pathnode->path.disabled_nodes = subpath->disabled_nodes;
 	pathnode->path.startup_cost = subpath->startup_cost;
@@ -4039,8 +4198,8 @@ reparameterize_path(PlannerInfo *root, Path *path,
 					create_append_path(root, rel, new_append,
 									   apath->path.pathkeys, required_outer,
 									   apath->path.parallel_workers,
-									   apath->path.parallel_aware,
-									   -1);
+									   apath->path.effective_workers,
+									   apath->path.parallel_aware, -1);
 			}
 		case T_Material:
 			{

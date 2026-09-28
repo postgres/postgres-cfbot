@@ -28,6 +28,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
+#include "postmaster/bgworker_internals.h"
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
@@ -865,7 +866,7 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 static void
 create_plain_partial_paths(PlannerInfo *root, RelOptInfo *rel)
 {
-	int			parallel_workers;
+	int16		parallel_workers;
 
 	parallel_workers = compute_parallel_worker(rel, rel->pages, -1,
 											   max_parallel_workers_per_gather);
@@ -1616,13 +1617,14 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 	 */
 	if (unparameterized_valid)
 		add_path(rel, (Path *) create_append_path(root, rel, unparameterized,
-												  NIL, NULL, 0, false,
+												  NIL, NULL, 0, 0, false,
 												  -1));
 
 	/* build an AppendPath for the cheap startup paths, if valid */
 	if (startup_valid)
 		add_path(rel, (Path *) create_append_path(root, rel, startup,
-												  NIL, NULL, 0, false, -1));
+												  NIL, NULL, 0, 0, false,
+												  -1));
 
 	/*
 	 * Consider an append of unordered, unparameterized partial paths.  Make
@@ -1633,6 +1635,7 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		AppendPath *appendpath;
 		ListCell   *lc;
 		int			parallel_workers = 0;
+		int			effective_workers = 0;
 
 		/* Find the highest number of workers requested for any subpath. */
 		foreach(lc, partial_only.partial_subpaths)
@@ -1640,7 +1643,16 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 			Path	   *path = lfirst(lc);
 
 			parallel_workers = Max(parallel_workers, path->parallel_workers);
+			effective_workers += path->effective_workers;
 		}
+
+		/*
+		 * If the parallel leader participates, include that in the effective
+		 * worker count.
+		 */
+		if (parallel_leader_participation)
+			effective_workers += list_length(partial_only.partial_subpaths);
+
 		Assert(parallel_workers > 0);
 
 		/*
@@ -1651,19 +1663,38 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		 * want to end up with a radically different answer for a table with N
 		 * partitions vs. an unpartitioned table with the same data, so the
 		 * use of some kind of log-scaling here seems to make some sense.
+		 *
+		 * If any workers are added here, we also adjust the effective_worker
+		 * count accordingly.
 		 */
 		if (enable_parallel_append)
 		{
+			int		init_parallel_workers = parallel_workers;
+
 			parallel_workers = Max(parallel_workers,
 								   pg_leftmost_one_pos32(list_length(live_childrels)) + 1);
 			parallel_workers = Min(parallel_workers,
 								   max_parallel_workers_per_gather);
+
+			/*
+			 * Distribute added workers to the effective worker count, too;
+			 * non-parallel subpaths will contribute across those workers.
+			 */
+			if (init_parallel_workers < parallel_workers)
+				effective_workers += parallel_workers - init_parallel_workers;
 		}
-		Assert(parallel_workers > 0);
+
+		effective_workers = Min(effective_workers, parallel_workers);
+
+		Assert(MAX_PARALLEL_WORKER_LIMIT >= parallel_workers &&
+			   parallel_workers > 0);
+		Assert(parallel_workers >= effective_workers &&
+			   effective_workers >= 0);
 
 		/* Generate a partial append path. */
 		appendpath = create_append_path(root, rel, partial_only,
-										NIL, NULL, parallel_workers,
+										NIL, NULL,
+										parallel_workers, effective_workers,
 										enable_parallel_append,
 										-1);
 
@@ -1687,7 +1718,9 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 	{
 		AppendPath *appendpath;
 		ListCell   *lc;
+		int			init_parallel_workers;
 		int			parallel_workers = 0;
+		int			effective_workers = 0;
 
 		/*
 		 * Find the highest number of workers requested for any partial
@@ -1698,7 +1731,13 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 			Path	   *path = lfirst(lc);
 
 			parallel_workers = Max(parallel_workers, path->parallel_workers);
+			effective_workers += path->effective_workers;
 		}
+
+		if (parallel_leader_participation)
+			effective_workers += list_length(parallel_append.partial_subpaths);
+
+		init_parallel_workers = parallel_workers;
 
 		/*
 		 * Same formula here as above.  It's even more important in this
@@ -1709,10 +1748,20 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 							   pg_leftmost_one_pos32(list_length(live_childrels)) + 1);
 		parallel_workers = Min(parallel_workers,
 							   max_parallel_workers_per_gather);
-		Assert(parallel_workers > 0);
+
+		if (parallel_workers > init_parallel_workers)
+			effective_workers += parallel_workers - init_parallel_workers;
+
+		effective_workers = Min(parallel_workers, effective_workers);
+
+		Assert(MAX_PARALLEL_WORKER_LIMIT >= parallel_workers &&
+			   parallel_workers > 0);
+		Assert(parallel_workers >= effective_workers &&
+			   effective_workers >= 0);
 
 		appendpath = create_append_path(root, rel, parallel_append,
-										NIL, NULL, parallel_workers, true,
+										NIL, NULL, parallel_workers,
+										effective_workers, true,
 										partial_rows);
 		add_partial_path(rel, (Path *) appendpath);
 	}
@@ -1774,8 +1823,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		if (parameterized_valid)
 			add_path(rel, (Path *)
 					 create_append_path(root, rel, parameterized,
-										NIL, required_outer, 0, false,
-										-1));
+										NIL, required_outer, 0, 0,
+										false, -1));
 	}
 
 	/*
@@ -1802,8 +1851,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 
 			append.partial_subpaths = list_make1(path);
 			appendpath = create_append_path(root, rel, append, NIL, NULL,
-											path->parallel_workers, true,
-											partial_rows);
+											path->parallel_workers, path->effective_workers,
+											true, partial_rows);
 			add_partial_path(rel, (Path *) appendpath);
 		}
 	}
@@ -2097,6 +2146,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 													  pathkeys,
 													  NULL,
 													  0,
+													  0,
 													  false,
 													  -1));
 			if (startup_neq_total)
@@ -2105,6 +2155,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  total,
 														  pathkeys,
 														  NULL,
+														  0,
 														  0,
 														  false,
 														  -1));
@@ -2115,6 +2166,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  fractional,
 														  pathkeys,
 														  NULL,
+														  0,
 														  0,
 														  false,
 														  -1));
@@ -2372,7 +2424,7 @@ set_dummy_rel_pathlist(RelOptInfo *rel)
 	/* Set up the dummy path */
 	add_path(rel, (Path *) create_append_path(NULL, rel, in,
 											  NIL, rel->lateral_relids,
-											  0, false, -1));
+											  0, 0, false, -1));
 
 	/*
 	 * We set the cheapest-path fields immediately, just in case they were
@@ -4959,7 +5011,7 @@ create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
  * "max_workers" is caller's limit on the number of workers.  This typically
  * comes from a GUC.
  */
-int
+int16
 compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages,
 						int max_workers)
 {
@@ -4968,6 +5020,8 @@ compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages,
 	/*
 	 * If the user has set the parallel_workers reloption, use that; otherwise
 	 * select a default number of workers.
+	 *
+	 * We do try to avoid exceeding the parallel worker limit
 	 */
 	if (rel->rel_parallel_workers != -1)
 		parallel_workers = rel->rel_parallel_workers;
@@ -5035,7 +5089,10 @@ compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages,
 	/* In no case use more than caller supplied maximum number of workers */
 	parallel_workers = Min(parallel_workers, max_workers);
 
-	return parallel_workers;
+	Assert(parallel_workers <= MAX_PARALLEL_WORKER_LIMIT);
+	Assert(parallel_workers >= 0);
+
+	return (int16) parallel_workers;
 }
 
 /*

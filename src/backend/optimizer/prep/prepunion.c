@@ -31,6 +31,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
@@ -38,6 +39,7 @@
 #include "optimizer/tlist.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bitutils.h"
+#include "postmaster/bgworker_internals.h"
 #include "utils/selfuncs.h"
 
 
@@ -860,7 +862,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	 * union child.
 	 */
 	apath = (Path *) create_append_path(root, result_rel, cheapest,
-										NIL, NULL, 0, false, -1);
+										NIL, NULL, 0, 0, false, -1);
 
 	/*
 	 * Initialize the result row estimate to the total input size.  This is
@@ -877,6 +879,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	{
 		Path	   *papath;
 		int			parallel_workers = 0;
+		int			effective_workers = 0;
 
 		/* Find the highest number of workers requested for any subpath. */
 		foreach(lc, partial.partial_subpaths)
@@ -885,8 +888,17 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 
 			parallel_workers = Max(parallel_workers,
 								   subpath->parallel_workers);
+			effective_workers += subpath->effective_workers;
 		}
-		Assert(parallel_workers > 0);
+
+		/*
+		 * If the parallel leader participates, include that in the effective
+		 * worker count.
+		 */
+		if (parallel_leader_participation)
+			effective_workers += list_length(partial.partial_subpaths);
+
+		Assert(parallel_workers > 0 && effective_workers >= 0);
 
 		/*
 		 * If the use of parallel append is permitted, always request at least
@@ -894,19 +906,34 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 		 * extra workers in this case because they will be spread out across
 		 * the children.  The precise formula is just a guess; see
 		 * add_paths_to_append_rel.
+		 *
+		 * If any workers are added here, we also adjust the effective_worker
+		 * count accordingly.
 		 */
 		if (enable_parallel_append)
 		{
+			int		init_parallel_workers = parallel_workers;
+
 			parallel_workers = Max(parallel_workers,
 								   pg_leftmost_one_pos32(list_length(partial.partial_subpaths)) + 1);
 			parallel_workers = Min(parallel_workers,
 								   max_parallel_workers_per_gather);
+
+			if (init_parallel_workers < parallel_workers)
+				effective_workers += parallel_workers - init_parallel_workers;
 		}
-		Assert(parallel_workers > 0);
+
+		effective_workers = Min(parallel_workers, effective_workers);
+
+		Assert(MAX_PARALLEL_WORKER_LIMIT >= parallel_workers &&
+			   parallel_workers > 0);
+		Assert(parallel_workers >= effective_workers &&
+			   effective_workers >= 0);
 
 		papath = (Path *)
 			create_append_path(root, result_rel, partial,
-							   NIL, NULL, parallel_workers,
+							   NIL, NULL,
+							   parallel_workers, effective_workers,
 							   enable_parallel_append, -1);
 		gpath = (Path *)
 			create_gather_path(root, result_rel, papath,
@@ -1223,7 +1250,7 @@ generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
 				 */
 				apath = (Path *) create_append_path(root, result_rel,
 													append, NIL, NULL, 0,
-													false, -1);
+													0, false, -1);
 
 				add_path(result_rel, apath);
 
