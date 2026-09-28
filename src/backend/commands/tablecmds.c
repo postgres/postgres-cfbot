@@ -5571,7 +5571,27 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 				break;
 			}
 		case AT_ReAddComment:	/* Re-add existing comment */
-			address = CommentObject((CommentStmt *) cmd->def);
+			{
+				CommentStmt *stmt = (CommentStmt *) cmd->def;
+				Relation	comrel;
+
+				/*
+				 * Don't use CommentObject(), since that requires ownership of
+				 * the constraint's table or domain, which the user altering a
+				 * column the constraint depends on need not have. We're just
+				 * restoring a comment that already existed.
+				 */
+				Assert(stmt->objtype == OBJECT_TABCONSTRAINT ||
+					   stmt->objtype == OBJECT_DOMCONSTRAINT);
+				address = get_object_address(stmt->objtype, stmt->object,
+											 &comrel,
+											 ShareUpdateExclusiveLock,
+											 false);
+				CreateComments(address.objectId, address.classId,
+							   address.objectSubId, stmt->comment);
+				if (comrel != NULL)
+					relation_close(comrel, NoLock);
+			}
 			break;
 		case AT_AddIndexConstraint: /* ADD CONSTRAINT USING INDEX */
 			address = ATExecAddIndexConstraint(tab, rel, (IndexStmt *) cmd->def,
