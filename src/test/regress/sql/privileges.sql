@@ -1287,6 +1287,35 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4_groupowned', 'UPDATE');
 REVOKE UPDATE ON atest4_groupowned FROM regress_priv_group2 RESTRICT; -- ok
 SELECT has_table_privilege('regress_priv_user1', 'atest4_groupowned', 'UPDATE'); -- false
 
+-- Same, but the intermediate grantor has become a superuser since issuing its
+-- grant (regress_priv_user1 -> regress_priv_su -> regress_priv_user2).
+RESET SESSION AUTHORIZATION;
+CREATE ROLE regress_priv_su;
+
+SET SESSION AUTHORIZATION regress_priv_user1;
+
+CREATE TABLE atest4_su (a int);
+
+GRANT SELECT ON atest4_su TO regress_priv_su WITH GRANT OPTION;
+
+SET SESSION AUTHORIZATION regress_priv_su;
+
+GRANT SELECT ON atest4_su TO regress_priv_user2;
+
+RESET SESSION AUTHORIZATION;
+ALTER ROLE regress_priv_su SUPERUSER;
+
+SET SESSION AUTHORIZATION regress_priv_user1;
+
+REVOKE GRANT OPTION FOR SELECT ON atest4_su FROM regress_priv_su; -- fail
+SELECT has_table_privilege('regress_priv_user2', 'atest4_su', 'SELECT'); -- true
+REVOKE GRANT OPTION FOR SELECT ON atest4_su FROM regress_priv_su CASCADE; -- ok
+SELECT has_table_privilege('regress_priv_user2', 'atest4_su', 'SELECT'); -- false
+
+RESET SESSION AUTHORIZATION;
+DROP TABLE atest4_su;
+DROP ROLE regress_priv_su;
+
 -- security-restricted operations
 \c -
 CREATE ROLE regress_sro_user;
