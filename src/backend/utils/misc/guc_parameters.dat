@@ -3242,6 +3242,13 @@
   boot_val => 'false',
 },
 
+{ name => 'track_log_messages', type => 'enum', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
+  short_desc => 'Sets the minimum message severity level to count in log message statistics.',
+  variable => 'pgstat_track_logmsg',
+  boot_val => 'PGSTAT_LOGMSG_TRACK_NONE',
+  options => 'track_log_messages_options',
+},
+
 { name => 'track_wal_io_timing', type => 'bool', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
   short_desc => 'Collects timing statistics for WAL I/O activity.',
   variable => 'track_wal_io_timing',

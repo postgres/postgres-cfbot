@@ -1665,6 +1665,69 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Returns cumulative log message statistics.
+ */
+Datum
+pg_stat_get_log_messages(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_GET_LOG_MESSAGES_COLS	8
+	ReturnSetInfo *rsinfo;
+	PgStat_LogMsgStats *stats;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	stats = pgstat_fetch_stat_logmsg();
+
+	for (int i = 0; i < stats->num_entries; i++)
+	{
+		PgStat_LogMsgEntry *entry = &stats->entries[i];
+		Datum		values[PG_STAT_GET_LOG_MESSAGES_COLS] = {0};
+		bool		nulls[PG_STAT_GET_LOG_MESSAGES_COLS] = {0};
+		const char *errcode_name;
+
+		values[0] = CStringGetTextDatum(GetBackendTypeDesc(entry->backend_type));
+
+		if (OidIsValid(entry->dboid))
+			values[1] = ObjectIdGetDatum(entry->dboid);
+		else
+			nulls[1] = true;
+
+		if (OidIsValid(entry->userid))
+			values[2] = ObjectIdGetDatum(entry->userid);
+		else
+			nulls[2] = true;
+
+		values[3] = CStringGetTextDatum(error_severity(entry->elevel));
+		values[4] = CStringGetTextDatum(unpack_sql_state(entry->sqlerrcode));
+
+		errcode_name = pgstat_get_logmsg_errcode_name(entry->sqlerrcode);
+		if (errcode_name)
+			values[5] = CStringGetTextDatum(errcode_name);
+		else
+			nulls[5] = true;
+
+		values[6] = Int64GetDatum(entry->count);
+		values[7] = TimestampTzGetDatum(stats->stat_reset_timestamp);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	return (Datum) 0;
+}
+
+/*
+ * Returns the number of log messages not counted in the log message
+ * statistics because the entry table was full.
+ */
+Datum
+pg_stat_get_log_messages_dropped(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_stat_logmsg()->n_dropped);
+}
+
+/*
  * Returns I/O statistics for a backend with given PID.
  */
 Datum
@@ -2096,6 +2159,7 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER);
 		pgstat_reset_of_kind(PGSTAT_KIND_IO);
 		pgstat_reset_of_kind(PGSTAT_KIND_LOCK);
+		pgstat_reset_of_kind(PGSTAT_KIND_LOGMSG);
 		XLogPrefetchResetStats();
 		pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
 		pgstat_reset_of_kind(PGSTAT_KIND_WAL);
@@ -2115,6 +2179,8 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		pgstat_reset_of_kind(PGSTAT_KIND_IO);
 	else if (strcmp(target, "lock") == 0)
 		pgstat_reset_of_kind(PGSTAT_KIND_LOCK);
+	else if (strcmp(target, "log_messages") == 0)
+		pgstat_reset_of_kind(PGSTAT_KIND_LOGMSG);
 	else if (strcmp(target, "recovery_prefetch") == 0)
 		XLogPrefetchResetStats();
 	else if (strcmp(target, "slru") == 0)
@@ -2125,7 +2191,7 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unrecognized reset target: \"%s\"", target),
-				 errhint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"lock\", \"recovery_prefetch\", \"slru\", or \"wal\".")));
+				 errhint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"lock\", \"log_messages\", \"recovery_prefetch\", \"slru\", or \"wal\".")));
 
 	PG_RETURN_VOID();
 }

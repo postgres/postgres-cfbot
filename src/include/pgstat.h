@@ -18,6 +18,9 @@
 #include "storage/locktag.h"
 #include "utils/backend_progress.h" /* for backward compatibility */	/* IWYU pragma: export */
 #include "utils/backend_status.h"	/* for backward compatibility */	/* IWYU pragma: export */
+#include "utils/errcodes_names.h"	/* for ERRCODES_NAMES_COUNT; the table
+									 * itself is only exposed under
+									 * ERRCODES_NAMES_INCLUDE_TABLE */
 #include "utils/pgstat_kind.h"
 
 
@@ -275,7 +278,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBE
 
 typedef struct PgStat_ArchiverStats
 {
@@ -420,6 +423,52 @@ typedef struct PgStat_Lock
 	TimestampTz stat_reset_timestamp;
 	PgStat_LockEntry stats[LOCKTAG_LAST_TYPE + 1];
 } PgStat_Lock;
+
+/* ----------
+ * PgStat_LogMsgStats			Log message statistics
+ *
+ * Counts of server log messages grouped by (backend_type, database, user,
+ * severity level, SQLSTATE), capped at PGSTAT_LOGMSG_MAX_ENTRIES distinct
+ * combinations.  Messages for combinations that do not fit are counted in
+ * n_dropped.
+ *
+ * The entries form an index-based separate-chaining hash table living
+ * entirely inside this struct: heads[bucket] points to the first entry of a
+ * chain and each entry's "next" links the rest (-1 terminates).  Entries are
+ * allocated sequentially (entry i is live iff i < num_entries) and never
+ * evicted.  Links are array indices rather than pointers, so the struct
+ * remains valid when copied around by the fixed-amount stats machinery
+ * (snapshots and stats file persistence are raw copies).
+ *
+ * The capacity is sized proportionally to the number of SQLSTATE error
+ * codes known to the server (ERRCODES_NAMES_COUNT, generated from
+ * errcodes.txt), leaving room for several dozen (backend type, database,
+ * user, severity) combinations per code.  Note that the shared memory
+ * block, the per-backend snapshot, and the on-disk stats file all scale
+ * with this constant.
+ * ----------
+ */
+#define PGSTAT_LOGMSG_MAX_ENTRIES	(ERRCODES_NAMES_COUNT * 64)
+
+typedef struct PgStat_LogMsgEntry
+{
+	int32		next;			/* next entry in bucket chain, or -1 */
+	BackendType backend_type;
+	Oid			dboid;
+	Oid			userid;
+	int32		elevel;
+	int32		sqlerrcode;
+	PgStat_Counter count;
+} PgStat_LogMsgEntry;
+
+typedef struct PgStat_LogMsgStats
+{
+	int32		num_entries;
+	PgStat_Counter n_dropped;
+	TimestampTz stat_reset_timestamp;
+	PgStat_LogMsgEntry entries[PGSTAT_LOGMSG_MAX_ENTRIES];
+	int32		heads[PGSTAT_LOGMSG_MAX_ENTRIES];
+} PgStat_LogMsgStats;
 
 typedef struct PgStat_StatDBEntry
 {
@@ -726,6 +775,17 @@ extern void pgstat_count_lock_waits(uint8 locktag_type,
 extern PgStat_Lock *pgstat_fetch_stat_lock(void);
 
 /*
+ * Functions in pgstat_logmsg.c
+ */
+
+/* value of pgstat_track_logmsg disabling log message tracking */
+#define PGSTAT_LOGMSG_TRACK_NONE	INT32_MAX
+
+extern void pgstat_count_logmsg(ErrorData *edata);
+extern const char *pgstat_get_logmsg_errcode_name(int sqlerrcode);
+extern PgStat_LogMsgStats *pgstat_fetch_stat_logmsg(void);
+
+/*
  * Functions in pgstat_database.c
  */
 
@@ -955,6 +1015,7 @@ extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
 /* GUC parameters */
 extern PGDLLIMPORT bool pgstat_track_counts;
 extern PGDLLIMPORT int pgstat_track_functions;
+extern PGDLLIMPORT int pgstat_track_logmsg;
 extern PGDLLIMPORT int pgstat_fetch_consistency;
 
 

@@ -84,6 +84,7 @@
  * - pgstat_function.c
  * - pgstat_io.c
  * - pgstat_lock.c
+ * - pgstat_logmsg.c
  * - pgstat_relation.c
  * - pgstat_replslot.c
  * - pgstat_slru.c
@@ -515,6 +516,22 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_wal_init_shmem_cb,
 		.reset_all_cb = pgstat_wal_reset_all_cb,
 		.snapshot_cb = pgstat_wal_snapshot_cb,
+	},
+
+	[PGSTAT_KIND_LOGMSG] = {
+		.name = "log_messages",
+
+		.fixed_amount = true,
+		.write_to_file = true,
+
+		.snapshot_ctl_off = offsetof(PgStat_Snapshot, logmsg),
+		.shared_ctl_off = offsetof(PgStat_ShmemControl, logmsg),
+		.shared_data_off = offsetof(PgStatShared_LogMsg, stats),
+		.shared_data_len = sizeof(((PgStatShared_LogMsg *) 0)->stats),
+
+		.init_shmem_cb = pgstat_logmsg_init_shmem_cb,
+		.reset_all_cb = pgstat_logmsg_reset_all_cb,
+		.snapshot_cb = pgstat_logmsg_snapshot_cb,
 	},
 };
 
