@@ -3004,8 +3004,22 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 		elog(ERROR, "cache lookup failed for type %u", domainoid);
 	typTup = (Form_pg_type) GETSTRUCT(tup);
 
-	/* Check it's a domain and check user has permission for ALTER DOMAIN */
-	checkDomainOwner(tup);
+	/*
+	 * Check it's a domain and check user has permission for ALTER DOMAIN.
+	 * When re-adding a constraint during ALTER TABLE, skip the permission
+	 * check since the constraint already existed, and the user altering a
+	 * column it depends on need not own the domain.
+	 */
+	if (is_readd)
+	{
+		if (typTup->typtype != TYPTYPE_DOMAIN)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("%s is not a domain",
+							format_type_be(typTup->oid))));
+	}
+	else
+		checkDomainOwner(tup);
 
 	if (!IsA(newConstraint, Constraint))
 		elog(ERROR, "unrecognized node type: %d",
@@ -3034,9 +3048,9 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 		 * to.
 		 *
 		 * When re-adding a constraint during ALTER TABLE, the tables using
-		 * the domain might not have been rewritten to match their new
-		 * catalog definitions yet, so the caller must do the validation after
-		 * its rewrite phase instead.
+		 * the domain might not have been rewritten to match their new catalog
+		 * definitions yet, so the caller must do the validation after its
+		 * rewrite phase instead.
 		 */
 		if (!constr->skip_validation && !is_readd)
 			validateDomainCheckConstraint(domainoid, ccbin);
