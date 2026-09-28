@@ -8138,7 +8138,6 @@ local0.*    /var/log/postgresql
       </listitem>
      </varlistentry>
 
-
      <varlistentry id="guc-log-duration" xreflabel="log_duration">
       <term><varname>log_duration</varname> (<type>boolean</type>)
       <indexterm>
@@ -8501,6 +8500,78 @@ log_line_prefix = '%m [%p] %q%u@%d/%a '
         in the <filename>postgresql.conf</filename> file or on the server
         command line.
        </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-log-object-drops" xreflabel="log_object_drops">
+      <term><varname>log_object_drops</varname> (<type>boolean</type>)
+      <indexterm>
+        <primary><varname>log_object_drops</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+      <para>
+        Causes <command>DROP TABLE</command> and <command>TRUNCATE TABLE</command>
+        operations to be logged with their commit LSN (Log Sequence Number). The commit
+        LSN represents the point in the write-ahead log where the operation becomes
+        durable and visible to other transactions. <command>DROP DATABASE</command>
+        operations are also logged, but because they are non-transactional, they log
+        an intermediate LSN rather than a commit LSN.
+      </para>
+
+      <para>
+        Each logged table entry includes the object name, OID, and the commit LSN,
+        while database entries include an intermediate LSN. For example:
+        <programlisting>
+        LOG:  table "public.employees" (OID 16384) dropped, lsn=0/015D4A48
+        LOG:  table "public.employees" (OID 16384) truncated, lsn=0/015D4A80
+        LOG:  database "testdb" (OID 16385) dropped, lsn=0/015D4B20
+        </programlisting>
+      </para>
+
+      <para>
+        Logged operations include: direct <command>DROP TABLE</command> and
+        <command>TRUNCATE TABLE</command> statements, tables dropped or
+        truncated via cascading operations (such as <command>DROP SCHEMA CASCADE</command>
+        or <command>TRUNCATE ... CASCADE</command>), and
+        <command>DROP DATABASE</command> commands. When a partitioned table
+        is dropped or truncated, both the parent partitioned table and all
+        individual child partitions are logged. Temporary and unlogged tables
+        are never logged.
+      </para>
+
+      <para>
+        Table operations that are rolled back (via <command>ROLLBACK</command> or
+        <command>ROLLBACK TO SAVEPOINT</command>) are not logged. However,
+        <command>DROP DATABASE</command> logs its LSN mid-execution, so the log
+        entry will appear even if the command subsequently fails.
+      </para>
+
+      <para>
+        This parameter is useful for tracking and auditing destructive operations,
+        and for coordinating with external systems that monitor the write-ahead log.
+        Note that enabling this option may generate substantial log volume
+        when dropping or truncating schemas, partitioned tables, or databases
+        containing many tables, as each table is logged individually.
+      </para>
+
+      <para>
+        When recovering a dropped database using <literal>recovery_target_lsn</literal>,
+        note that <command>DROP DATABASE</command> writes a non-transactional marker
+        (<literal>datconnlimit = -2</literal>) to <structname>pg_database</structname>
+        before deleting the database files.  This marker is replayed during recovery
+        even when recovery stops before the drop commits, causing the recovered
+        database to appear invalid.  After promoting the recovered cluster, reset
+        the marker with:
+        <programlisting>
+UPDATE pg_database SET datconnlimit = -1 WHERE datname = '<replaceable>dbname</replaceable>';
+        </programlisting>
+      </para>
+
+      <para>
+        The default is <literal>off</literal>. Only superusers and users with
+        the appropriate <literal>SET</literal> privilege can change this setting.
+      </para>
       </listitem>
      </varlistentry>
 
