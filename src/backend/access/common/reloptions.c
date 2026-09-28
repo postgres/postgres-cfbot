@@ -175,6 +175,14 @@ static relopt_ternary ternaryRelOpts[] =
 			ShareUpdateExclusiveLock
 		}
 	},
+	{
+		{
+			"direct_toast_self_prune",
+			"Enables on-access page pruning and FSM updates for Direct TOAST tables",
+			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,
+			ShareUpdateExclusiveLock
+		}
+	},
 	/* list terminator */
 	{
 		{
@@ -2134,6 +2142,8 @@ static const relopt_parse_elt stdRdOptionsTab[] = {
 	offsetof(StdRdOptions, vacuum_index_cleanup)},
 	{"toast_flavour", RELOPT_TYPE_ENUM,
 	offsetof(StdRdOptions, toast_flavour)},
+	{"direct_toast_self_prune", RELOPT_TYPE_TERNARY,
+	offsetof(StdRdOptions, direct_toast_self_prune)},
 	{"vacuum_truncate", RELOPT_TYPE_TERNARY,
 	offsetof(StdRdOptions, vacuum_truncate)},
 	{"vacuum_max_eager_freeze_failure_rate", RELOPT_TYPE_REAL,

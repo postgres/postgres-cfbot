@@ -17466,6 +17466,7 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 	{
 		Relation	toastrel;
 		Oid			toastid = rel->rd_rel->reltoastrelid;
+		ListCell   *lc;
 
 		toastrel = table_open(toastid, lockmode);
 
@@ -17495,6 +17496,22 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 
 		newOptions = transformRelOptions(datum, defList, "toast", validnsps,
 										 false, operation == AT_ResetRelOptions);
+
+		foreach(lc, defList)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (def->defnamespace == NULL &&
+				strcmp(def->defname, "direct_toast_self_prune") == 0)
+			{
+				DefElem    *tdef = copyObject(def);
+
+				tdef->defnamespace = pstrdup("toast");
+				newOptions = transformRelOptions(newOptions, list_make1(tdef),
+												 "toast", validnsps, false,
+												 operation == AT_ResetRelOptions);
+			}
+		}
 
 		(void) heap_reloptions(RELKIND_TOASTVALUE, newOptions, true);
 

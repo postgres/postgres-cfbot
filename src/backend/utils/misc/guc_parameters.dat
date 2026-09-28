@@ -818,6 +818,12 @@
   check_hook => 'check_default_with_oids',
 },
 
+{ name => 'direct_toast_self_prune', type => 'bool', context => 'PGC_USERSET', group => 'CLIENT_CONN_STATEMENT',
+  short_desc => 'Enables on-access page pruning and FSM updates for Direct TOAST tables.',
+  variable => 'direct_toast_self_prune',
+  boot_val => 'true',
+},
+
 { name => 'dynamic_library_path', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
   short_desc => 'Sets the path for dynamically loadable modules.',
   long_desc => 'If a dynamically loadable module needs to be opened and the specified name does not have a directory component (i.e., the name does not contain a slash), the system will search this path for the specified file.',

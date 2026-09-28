@@ -10531,6 +10531,26 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-direct-toast-self-prune" xreflabel="direct_toast_self_prune">
+      <term><varname>direct_toast_self_prune</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>direct_toast_self_prune</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls whether unindexed Direct <acronym>TOAST</acronym> chunks are
+        aggressively pruned to <literal>LP_UNUSED</literal> and recorded in the
+        Free Space Map (<acronym>FSM</acronym>) during on-access page pruning,
+        allowing dead chunk space to be reused across transactions without waiting
+        for <command>VACUUM</command>. The default is <literal>on</literal>.
+        This can be overridden for individual tables by setting the
+        <literal>direct_toast_self_prune</literal> storage parameter in
+        <command>CREATE TABLE</command> or <command>ALTER TABLE</command>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-temp-tablespaces" xreflabel="temp_tablespaces">
       <term><varname>temp_tablespaces</varname> (<type>string</type>)
       <indexterm>
