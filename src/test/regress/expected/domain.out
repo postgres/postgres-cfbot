@@ -506,6 +506,105 @@ ERROR:  value for domain dt_inh violates check constraint "dt_inh_check"
 drop domain dt_inh;
 drop table dc;
 drop table dp;
+-- A domain constraint rebuilt by ALTER COLUMN TYPE must not be validated
+-- until tables using the domain have been rewritten.  (These tests avoid
+-- ROW(value)::domrw_t, since the rebuilt expression would then contain a
+-- NULL coerced to the domain itself.)
+create function domrw_show(int) returns bool language plpgsql as
+  $$ begin raise notice 'domain check sees value %', $1; return true; end $$;
+create table domrw_t (c int);
+create domain domrw_dt as int
+  check (domrw_show(value) and (null::domrw_t).c is null);
+alter table domrw_t add column d domrw_dt;
+insert into domrw_t values (1, 5), (2, 7);
+NOTICE:  domain check sees value 5
+NOTICE:  domain check sees value 7
+alter table domrw_t alter column c type bigint;  -- should see 5 and 7
+NOTICE:  domain check sees value 5
+NOTICE:  domain check sees value 7
+select * from domrw_t;
+ c | d 
+---+---
+ 1 | 5
+ 2 | 7
+(2 rows)
+
+select convalidated from pg_constraint where contypid = 'domrw_dt'::regtype;
+ convalidated 
+--------------
+ t
+(1 row)
+
+drop domain domrw_dt cascade;
+NOTICE:  drop cascades to column d of table domrw_t
+drop table domrw_t;
+-- same, domain over composite
+create type domrw_ct as (j int);
+create table domrw_t (c int);
+create domain domrw_dt as domrw_ct
+  check (domrw_show((value).j) and (null::domrw_t).c is null);
+alter table domrw_t add column d domrw_dt;
+insert into domrw_t values (1, row(5)), (2, row(7));
+NOTICE:  domain check sees value 5
+NOTICE:  domain check sees value 7
+alter table domrw_t alter column c type bigint;  -- should see 5 and 7
+NOTICE:  domain check sees value 5
+NOTICE:  domain check sees value 7
+select * from domrw_t;
+ c |  d  
+---+-----
+ 1 | (5)
+ 2 | (7)
+(2 rows)
+
+drop domain domrw_dt cascade;
+NOTICE:  drop cascades to column d of table domrw_t
+drop table domrw_t;
+drop type domrw_ct;
+drop function domrw_show(int);
+-- domain column in an inheritance child that is rewritten by recursion
+create table domrw_p (c int);
+create domain domrw_dt as int check ((row(value)::domrw_p).c > 0);
+create table domrw_ch (d domrw_dt) inherits (domrw_p);
+insert into domrw_ch values (1, 5), (2, 7);
+alter table domrw_p alter column c type bigint;
+select * from domrw_ch;
+ c | d 
+---+---
+ 1 | 5
+ 2 | 7
+(2 rows)
+
+drop domain domrw_dt cascade;
+NOTICE:  drop cascades to column d of table domrw_ch
+drop table domrw_p cascade;
+NOTICE:  drop cascades to table domrw_ch
+-- a rebuilt constraint that rejects stored values must still be enforced,
+-- even when the altered object is a standalone composite type
+create type domrw_rt as (i int);
+create domain domrw_dt as int check ((row(value)::domrw_rt).i is not null);
+create table domrw_u (x domrw_dt);
+insert into domrw_u values (40000);
+alter type domrw_rt alter attribute i type smallint;  -- fail
+ERROR:  smallint out of range
+drop table domrw_u;
+-- a NOT VALID constraint is not validated and stays NOT VALID
+alter domain domrw_dt drop constraint domrw_dt_check;
+create table domrw_u (x domrw_dt);
+insert into domrw_u values (40000);
+alter domain domrw_dt add constraint domrw_nv
+  check ((row(value)::domrw_rt).i is not null) not valid;
+alter type domrw_rt alter attribute i type smallint;
+select pg_get_constraintdef(oid), convalidated from pg_constraint
+  where contypid = 'domrw_dt'::regtype;
+                         pg_get_constraintdef                         | convalidated 
+----------------------------------------------------------------------+--------------
+ CHECK (((ROW((VALUE)::smallint)::domrw_rt).i IS NOT NULL)) NOT VALID | f
+(1 row)
+
+drop table domrw_u;
+drop domain domrw_dt;
+drop type domrw_rt;
 -- Test domains over arrays of composite
 create type comptype as (r float8, i float8);
 create domain dcomptypea as comptype[];
