@@ -1,0 +1,45 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1b s1attach s2create s1c s2check
+step s1b: BEGIN;
+step s1attach: ALTER INDEX pia_old ATTACH PARTITION pia_1_a;
+step s2create: CREATE INDEX pia_new ON pia (a); <waiting ...>
+step s1c: COMMIT;
+step s2create: <... completed>
+step s2check: 
+  SELECT c.relname AS index, p.relname AS parent
+  FROM pg_inherits i
+    JOIN pg_class c ON c.oid = i.inhrelid
+    JOIN pg_class p ON p.oid = i.inhparent
+  WHERE p.relname IN ('pia_old', 'pia_new')
+  ORDER BY 1;
+
+index      |parent 
+-----------+-------
+pia_1_a    |pia_old
+pia_1_a_idx|pia_new
+pia_2_a    |pia_old
+pia_2_a_idx|pia_new
+(4 rows)
+
+
+starting permutation: s1b s1rename s2create s1c s2check
+step s1b: BEGIN;
+step s1rename: ALTER INDEX pia_2_a RENAME TO pia_2_renamed;
+step s2create: CREATE INDEX pia_new ON pia (a);
+step s1c: COMMIT;
+step s2check: 
+  SELECT c.relname AS index, p.relname AS parent
+  FROM pg_inherits i
+    JOIN pg_class c ON c.oid = i.inhrelid
+    JOIN pg_class p ON p.oid = i.inhparent
+  WHERE p.relname IN ('pia_old', 'pia_new')
+  ORDER BY 1;
+
+index        |parent 
+-------------+-------
+pia_1_a      |pia_new
+pia_2_a_idx  |pia_new
+pia_2_renamed|pia_old
+(3 rows)
+
