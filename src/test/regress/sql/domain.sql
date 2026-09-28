@@ -267,6 +267,69 @@ drop domain dt_inh;
 drop table dc;
 drop table dp;
 
+-- A domain constraint rebuilt by ALTER COLUMN TYPE must not be validated
+-- until tables using the domain have been rewritten.  (These tests avoid
+-- ROW(value)::domrw_t, since the rebuilt expression would then contain a
+-- NULL coerced to the domain itself.)
+create function domrw_show(int) returns bool language plpgsql as
+  $$ begin raise notice 'domain check sees value %', $1; return true; end $$;
+create table domrw_t (c int);
+create domain domrw_dt as int
+  check (domrw_show(value) and (null::domrw_t).c is null);
+alter table domrw_t add column d domrw_dt;
+insert into domrw_t values (1, 5), (2, 7);
+alter table domrw_t alter column c type bigint;  -- should see 5 and 7
+select * from domrw_t;
+select convalidated from pg_constraint where contypid = 'domrw_dt'::regtype;
+drop domain domrw_dt cascade;
+drop table domrw_t;
+
+-- same, domain over composite
+create type domrw_ct as (j int);
+create table domrw_t (c int);
+create domain domrw_dt as domrw_ct
+  check (domrw_show((value).j) and (null::domrw_t).c is null);
+alter table domrw_t add column d domrw_dt;
+insert into domrw_t values (1, row(5)), (2, row(7));
+alter table domrw_t alter column c type bigint;  -- should see 5 and 7
+select * from domrw_t;
+drop domain domrw_dt cascade;
+drop table domrw_t;
+drop type domrw_ct;
+drop function domrw_show(int);
+
+-- domain column in an inheritance child that is rewritten by recursion
+create table domrw_p (c int);
+create domain domrw_dt as int check ((row(value)::domrw_p).c > 0);
+create table domrw_ch (d domrw_dt) inherits (domrw_p);
+insert into domrw_ch values (1, 5), (2, 7);
+alter table domrw_p alter column c type bigint;
+select * from domrw_ch;
+drop domain domrw_dt cascade;
+drop table domrw_p cascade;
+
+-- a rebuilt constraint that rejects stored values must still be enforced,
+-- even when the altered object is a standalone composite type
+create type domrw_rt as (i int);
+create domain domrw_dt as int check ((row(value)::domrw_rt).i is not null);
+create table domrw_u (x domrw_dt);
+insert into domrw_u values (40000);
+alter type domrw_rt alter attribute i type smallint;  -- fail
+drop table domrw_u;
+
+-- a NOT VALID constraint is not validated and stays NOT VALID
+alter domain domrw_dt drop constraint domrw_dt_check;
+create table domrw_u (x domrw_dt);
+insert into domrw_u values (40000);
+alter domain domrw_dt add constraint domrw_nv
+  check ((row(value)::domrw_rt).i is not null) not valid;
+alter type domrw_rt alter attribute i type smallint;
+select pg_get_constraintdef(oid), convalidated from pg_constraint
+  where contypid = 'domrw_dt'::regtype;
+drop table domrw_u;
+drop domain domrw_dt;
+drop type domrw_rt;
+
 
 -- Test domains over arrays of composite
 
