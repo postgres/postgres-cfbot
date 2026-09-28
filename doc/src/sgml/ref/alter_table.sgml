@@ -1501,8 +1501,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     Adding a <literal>CHECK</literal> or <literal>NOT NULL</literal>
     constraint requires scanning the table to verify that existing rows meet the
     constraint, but does not require a table rewrite.  If a <literal>CHECK</literal>
-    constraint is added as <literal>NOT ENFORCED</literal>, no verification will
-    be performed.
+    or <literal>NOT NULL</literal> constraint is added as <literal>NOT ENFORCED</literal>,
+    no verification will be performed.
    </para>
 
    <para>
@@ -1734,7 +1734,7 @@ ALTER TABLE distributors RENAME CONSTRAINT zipchk TO zip_check;
   </para>
 
   <para>
-   To add a not-null constraint to a column:
+   To add a enforced not-null constraint to a column:
 <programlisting>
 ALTER TABLE distributors ALTER COLUMN street SET NOT NULL;
 </programlisting>
