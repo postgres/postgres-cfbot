@@ -128,7 +128,6 @@ static Oid	findTypeSubscriptingFunction(List *procname, Oid typeOid);
 static Oid	findRangeSubOpclass(List *opcname, Oid subtype);
 static Oid	findRangeCanonicalFunction(List *procname, Oid typeOid);
 static Oid	findRangeSubtypeDiffFunction(List *procname, Oid subtype);
-static void validateDomainCheckConstraint(Oid domainoid, const char *ccbin);
 static void validateDomainNotNullConstraint(Oid domainoid);
 static List *get_rels_with_domain(Oid domainOid, LOCKMODE lockmode);
 static void checkEnumOwner(HeapTuple tup);
@@ -3029,13 +3028,17 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 										 constr, NameStr(typTup->typname), constrAddr,
 										 is_readd);
 
-
 		/*
 		 * If requested to validate the constraint, test all values stored in
 		 * the attributes based on the domain the constraint is being added
 		 * to.
+		 *
+		 * When re-adding a constraint during ALTER TABLE, the tables using
+		 * the domain might not have been rewritten to match their new
+		 * catalog definitions yet, so the caller must do the validation after
+		 * its rewrite phase instead.
 		 */
-		if (!constr->skip_validation)
+		if (!constr->skip_validation && !is_readd)
 			validateDomainCheckConstraint(domainoid, ccbin);
 
 		/*
@@ -3249,7 +3252,7 @@ validateDomainNotNullConstraint(Oid domainoid)
  * Verify that all columns currently using the domain satisfy the given check
  * constraint expression.
  */
-static void
+void
 validateDomainCheckConstraint(Oid domainoid, const char *ccbin)
 {
 	Expr	   *expr = (Expr *) stringToNode(ccbin);
