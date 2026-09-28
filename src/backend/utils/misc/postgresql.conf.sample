@@ -808,6 +808,7 @@
 #default_tablespace = ''                # a tablespace name, '' uses the default
 #default_toast_compression = pglz       # pglz or lz4
 #toast_default_flavour = plain          # plain or direct
+#direct_toast_self_prune = on           # on-access pruning and FSM updates for direct TOAST
 #temp_tablespaces = ''                  # a list of tablespace names, '' uses
                                         # only default tablespace
 #check_function_bodies = on
