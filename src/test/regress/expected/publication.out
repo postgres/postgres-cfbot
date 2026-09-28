@@ -129,7 +129,7 @@ Tables from schemas:
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION testpub_forschema FOR TABLES IN SCHEMA pub_test;
 \dn pub_test
-           List of schemas
+          Schema "pub_test"
    Name   |          Owner           
 ----------+--------------------------
  pub_test | regress_publication_user
@@ -171,6 +171,123 @@ CREATE PUBLICATION testpub_parsertst FOR TABLES IN SCHEMA foo, test.foo;
 ERROR:  invalid schema name
 LINE 1: ...CATION testpub_parsertst FOR TABLES IN SCHEMA foo, test.foo;
                                                               ^
+-- should be able to publish and describe schemas and tables with embedded quotes
+CREATE SCHEMA "it's my schema";
+CREATE TABLE "it's my schema"."it's my schema table"("it's my col1" int, "it's my col2" int);
+CREATE TABLE "it's my public table"("it's my col1" int, "it's my col2" int);
+CREATE PUBLICATION regress_pub_embedded_quotes1 FOR TABLES IN SCHEMA "it's my schema";
+CREATE PUBLICATION regress_pub_embedded_quotes2 FOR TABLE "it's my schema"."it's my schema table";
+CREATE PUBLICATION regress_pub_embedded_quotes3 FOR TABLE "it's my public table"("it's my col1");
+CREATE PUBLICATION regress_pub_embedded_quotes4 FOR ALL TABLES EXCEPT (TABLE "it's my public table");
+\dn "it's my schema"
+          Schema "it's my schema"
+      Name      |          Owner           
+----------------+--------------------------
+ it's my schema | regress_publication_user
+Included in publications:
+    "regress_pub_embedded_quotes1"
+
+\d "it's my schema"."it's my schema table"
+       Table "it's my schema.it's my schema table"
+    Column    |  Type   | Collation | Nullable | Default 
+--------------+---------+-----------+----------+---------
+ it's my col1 | integer |           |          | 
+ it's my col2 | integer |           |          | 
+Included in publications:
+    "regress_pub_embedded_quotes1"
+    "regress_pub_embedded_quotes2"
+    "regress_pub_embedded_quotes4"
+    "testpub_foralltables"
+
+\d "it's my public table"
+           Table "public.it's my public table"
+    Column    |  Type   | Collation | Nullable | Default 
+--------------+---------+-----------+----------+---------
+ it's my col1 | integer |           |          | 
+ it's my col2 | integer |           |          | 
+Included in publications:
+    "regress_pub_embedded_quotes3" (it's my col1)
+    "testpub_foralltables"
+Excluded from publications:
+    "regress_pub_embedded_quotes4"
+
+\dRp+ regress_pub_embedded_quotes*
+                                                   Publication regress_pub_embedded_quotes1
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables from schemas:
+    "it's my schema"
+
+                                                   Publication regress_pub_embedded_quotes2
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables:
+    "it's my schema.it's my schema table"
+
+                                                   Publication regress_pub_embedded_quotes3
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables:
+    "public.it's my public table" (it's my col1)
+
+                                                   Publication regress_pub_embedded_quotes4
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | t          | f             | t       | t       | t       | t         | none              | f        | 
+Except tables:
+    "public.it's my public table"
+
+DROP PUBLICATION regress_pub_embedded_quotes1, regress_pub_embedded_quotes2, regress_pub_embedded_quotes3, regress_pub_embedded_quotes4;
+DROP SCHEMA "it's my schema" CASCADE;
+NOTICE:  drop cascades to table "it's my schema"."it's my schema table"
+DROP TABLE "it's my public table";
+-- \dn pattern gives footers for each matched schema
+CREATE SCHEMA "SCH_1";
+CREATE SCHEMA sch_1;
+CREATE SCHEMA sch_2;
+CREATE SCHEMA sch_3;
+CREATE PUBLICATION pub_sch_1 FOR TABLES IN SCHEMA SCH_1;
+CREATE PUBLICATION pub_sch_2 FOR TABLES IN SCHEMA sch_2;
+\dn sch??
+          Schema "sch_1"
+ Name  |          Owner           
+-------+--------------------------
+ sch_1 | regress_publication_user
+Included in publications:
+    "pub_sch_1"
+
+          Schema "sch_2"
+ Name  |          Owner           
+-------+--------------------------
+ sch_2 | regress_publication_user
+Included in publications:
+    "pub_sch_2"
+
+          Schema "sch_3"
+ Name  |          Owner           
+-------+--------------------------
+ sch_3 | regress_publication_user
+
+-- quoted names are case sensitive
+\dn "SCH_1"
+          Schema "SCH_1"
+ Name  |          Owner           
+-------+--------------------------
+ SCH_1 | regress_publication_user
+
+\dn "sch_1"
+          Schema "sch_1"
+ Name  |          Owner           
+-------+--------------------------
+ sch_1 | regress_publication_user
+Included in publications:
+    "pub_sch_1"
+
+DROP PUBLICATION pub_sch_1, pub_sch_2;
+DROP SCHEMA "SCH_1", sch_1, sch_2, sch_3;
 -- should be able to add a table of the same schema to the schema publication
 ALTER PUBLICATION testpub_forschema ADD TABLE pub_test.testpub_nopk;
 \dRp+ testpub_forschema
