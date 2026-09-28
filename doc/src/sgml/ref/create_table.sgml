@@ -1706,6 +1706,23 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     </listitem>
    </varlistentry>
 
+   <varlistentry id="reloption-direct-toast-self-prune" xreflabel="direct_toast_self_prune">
+    <term><literal>direct_toast_self_prune</literal> (<type>boolean</type>)
+    <indexterm>
+     <primary><varname>direct_toast_self_prune</varname> storage parameter</primary>
+    </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Controls whether unindexed Direct <acronym>TOAST</acronym> chunks for this
+      table's <acronym>TOAST</acronym> relation are aggressively pruned to
+      <literal>LP_UNUSED</literal> and recorded in the Free Space Map during
+      on-access page pruning. If not set, the default is determined by the
+      configuration parameter <xref linkend="guc-direct-toast-self-prune"/>.
+     </para>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="reloption-parallel-workers" xreflabel="parallel_workers">
     <term><literal>parallel_workers</literal> (<type>integer</type>)
      <indexterm>

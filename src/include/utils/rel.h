@@ -383,6 +383,7 @@ typedef struct StdRdOptions
 	 */
 	double		vacuum_max_eager_freeze_failure_rate;
 	ToastFlavour toast_flavour;
+	pg_ternary	direct_toast_self_prune;
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
