@@ -219,6 +219,74 @@ select conname, obj_description(oid, 'pg_constraint') from pg_constraint
 
 drop type comptype cascade;
 
+-- check altering columns used by constraints of domains whose base type
+-- isn't composite (bug #19724).  A direct reference to the composite type
+-- in the CHECK expression makes find_composite_type_dependencies() reject
+-- the ALTER, so reach it through a function returning the type instead;
+-- that leaves only a dependency on the referenced column.
+create type rt as (i int);
+create domain dt as int check ((row(value)::rt).i > 0);
+alter type rt alter attribute i type bigint;  -- fail
+drop domain dt;
+create function rt_mk(int) returns rt language sql as 'select row($1)::rt';
+create domain dt as int check ((rt_mk(value)).i > 0);
+alter type rt alter attribute i type text;  -- fail
+alter type rt alter attribute i type bigint;
+select 1::dt;
+select (-1)::dt;  -- fail
+drop domain dt;
+drop function rt_mk(int);
+drop type rt;
+
+-- same for a domain over float8 that uses one field of a two-field type
+create type comptype as (r float8, i float8);
+create function comptype_mk(float8) returns comptype language sql
+  as 'select row($1, 0)::comptype';
+create domain silly as float8 check ((comptype_mk(value)).r > 0);
+alter type comptype alter attribute r type bigint;
+select 1.0::silly;
+select (-1.0)::silly;  -- fail
+drop domain silly;
+drop function comptype_mk(float8);
+drop type comptype;
+
+-- rebuilding a constraint for one type it depends on must preserve its
+-- dependency on another
+create type r1 as (a int);
+create type r2 as (b int);
+create function r1_mk(int) returns r1 language sql as 'select row($1)::r1';
+create function r2_mk(int) returns r2 language sql as 'select row($1)::r2';
+create domain dt_multi as int
+  check ((r1_mk(value)).a > 0 and (r2_mk(value)).b > 0);
+alter type r1 alter attribute a type bigint;
+alter type r2 alter attribute b type text;  -- fail
+alter type r2 alter attribute b type bigint;
+select 1::dt_multi;
+select (-1)::dt_multi;  -- fail
+drop domain dt_multi;
+drop function r1_mk(int);
+drop function r2_mk(int);
+drop type r1;
+drop type r2;
+
+-- same via ALTER TABLE, with the constraint depending on both the parent's
+-- and the inheritance child's row types
+create table dp (a int);
+create table dc (b int) inherits (dp);
+create function dp_mk(int) returns dp language sql as 'select row($1)::dp';
+create function dc_mk(int) returns dc language sql
+  as 'select row($1, $1)::dc';
+create domain dt_inh as int
+  check ((dp_mk(value)).a > 0 and (dc_mk(value)).a > 0);
+alter table dp alter column a type bigint;
+select 1::dt_inh;
+select (-1)::dt_inh;  -- fail
+drop domain dt_inh;
+drop function dp_mk(int);
+drop function dc_mk(int);
+drop table dc;
+drop table dp;
+
 
 -- Test domains over arrays of composite
 
