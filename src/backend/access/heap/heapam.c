@@ -7863,8 +7863,14 @@ DoesMultiXactIdConflict(MultiXactId multi, uint16 infomask,
 
 			if (ISUPDATE_from_mxstatus(members[i].status))
 			{
-				/* ignore aborted updaters */
-				if (TransactionIdDidAbort(memxid))
+				/*
+				 * Ignore updaters that can no longer commit: not running,
+				 * and no commit record can appear afterwards, since only
+				 * the transaction itself could write one.  This covers
+				 * aborted updaters as well as crash leftovers.
+				 */
+				if (!TransactionIdIsInProgress(memxid) &&
+					!TransactionIdDidCommit(memxid))
 					continue;
 			}
 			else
@@ -7876,10 +7882,10 @@ DoesMultiXactIdConflict(MultiXactId multi, uint16 infomask,
 
 			/*
 			 * Whatever remains are either live lockers that conflict with our
-			 * wanted lock, and updaters that are not aborted.  Those conflict
-			 * with what we want.  Set up to return true, but keep going to
-			 * look for the current transaction among the multixact members,
-			 * if needed.
+			 * wanted lock, and updaters that are still running or committed.
+			 * Those conflict with what we want.  Set up to return true, but
+			 * keep going to look for the current transaction among the multixact
+			 * members, if needed.
 			 */
 			result = true;
 		}
