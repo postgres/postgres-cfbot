@@ -114,6 +114,7 @@ test: predicate-gist
 test: predicate-gin
 test: partition-concurrent-attach
 test: partition-drop-index-locking
+test: partition-index-attach
 test: partition-key-update-1
 test: partition-key-update-2
 test: partition-key-update-3
