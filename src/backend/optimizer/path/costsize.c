@@ -748,6 +748,8 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	if (partial_path)
 	{
+		int		workers;
+
 		/*
 		 * For index only scans compute workers based on number of index pages
 		 * fetched; the number of heap pages we fetch might be so small as to
@@ -762,10 +764,13 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		 * sequential as for parallel scans the pages are accessed in random
 		 * order.
 		 */
-		path->path.parallel_workers = compute_parallel_worker(baserel,
-															  rand_heap_pages,
-															  index_pages,
-															  max_parallel_workers_per_gather);
+		workers = compute_parallel_worker(baserel,
+										  rand_heap_pages,
+										  index_pages,
+										  max_parallel_workers_per_gather);
+
+		path->path.parallel_workers = workers;
+		path->path.effective_workers = workers;
 
 		/*
 		 * Fall out if workers can't be assigned for parallel scan, because in
@@ -2462,7 +2467,7 @@ cost_append(AppendPath *apath, PlannerInfo *root)
 			 */
 			if (i == 0)
 				apath->path.startup_cost = subpath->startup_cost;
-			else if (i < apath->path.parallel_workers)
+			else if (i < (int) apath->path.parallel_workers)
 				apath->path.startup_cost = Min(apath->path.startup_cost,
 											   subpath->startup_cost);
 
@@ -6731,7 +6736,10 @@ page_size(double tuples, int width)
 static double
 get_parallel_divisor(Path *path)
 {
-	double		parallel_divisor = path->parallel_workers;
+	double		parallel_divisor = path->effective_workers;
+
+	Assert(0 <= path->effective_workers &&
+		   path->effective_workers <= path->parallel_workers);
 
 	/*
 	 * Early experience with parallel query suggests that when there is only
@@ -6748,7 +6756,7 @@ get_parallel_divisor(Path *path)
 	{
 		double		leader_contribution;
 
-		leader_contribution = 1.0 - (0.3 * path->parallel_workers);
+		leader_contribution = 1.0 - (0.3 * path->effective_workers);
 		if (leader_contribution > 0)
 			parallel_divisor += leader_contribution;
 	}

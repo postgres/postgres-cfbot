@@ -2037,6 +2037,7 @@ bitmap_scan_cost_est(PlannerInfo *root, RelOptInfo *rel, Path *ipath)
 	 * Parallel bitmap heap path will be considered at later stage.
 	 */
 	bpath.path.parallel_workers = 0;
+	bpath.path.effective_workers = 0;
 
 	/* Now we can do cost_bitmap_heap_scan */
 	cost_bitmap_heap_scan(&bpath.path, root, rel,
