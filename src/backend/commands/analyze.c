@@ -357,8 +357,8 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	BufferUsage bufferusage;
-	PgStat_Counter startreadtime = 0;
-	PgStat_Counter startwritetime = 0;
+	instr_time	startreadtime;
+	instr_time	startwritetime;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -373,6 +373,9 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 				(errmsg("analyzing \"%s.%s\"",
 						get_namespace_name(RelationGetNamespace(onerel)),
 						RelationGetRelationName(onerel))));
+
+	INSTR_TIME_SET_ZERO(startreadtime);
+	INSTR_TIME_SET_ZERO(startwritetime);
 
 	/*
 	 * Set up a working context so that we can easily free whatever junk gets
@@ -852,11 +855,15 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			}
 			if (track_io_timing)
 			{
-				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
-				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
+				instr_time	read_time = pgStatBlockReadTime;
+				instr_time	write_time = pgStatBlockWriteTime;
+
+				INSTR_TIME_SUBTRACT(read_time, startreadtime);
+				INSTR_TIME_SUBTRACT(write_time, startwritetime);
 
 				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
-								 read_ms, write_ms);
+								 INSTR_TIME_GET_MILLISEC(read_time),
+								 INSTR_TIME_GET_MILLISEC(write_time));
 			}
 			appendStringInfo(&buf, _("avg read rate: %.3f MB/s, avg write rate: %.3f MB/s\n"),
 							 read_rate, write_rate);
