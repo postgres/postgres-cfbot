@@ -131,6 +131,10 @@ static Oid	findRangeSubtypeDiffFunction(List *procname, Oid subtype);
 static void validateDomainNotNullConstraint(Oid domainoid);
 static List *get_rels_with_domain(Oid domainOid, LOCKMODE lockmode);
 static void checkEnumOwner(HeapTuple tup);
+static ObjectAddress domainAddConstraintInternal(Oid domainoid,
+												 Node *newConstraint,
+												 ObjectAddress *constrAddr,
+												 bool is_readd);
 static char *domainAddCheckConstraint(Oid domainOid, Oid domainNamespace,
 									  Oid baseTypeOid,
 									  int typMod, Constraint *constr,
@@ -3009,16 +3013,44 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 {
 	TypeName   *typename;
 	Oid			domainoid;
+
+	/* Make a TypeName so we can use standard type lookup machinery */
+	typename = makeTypeNameFromNameList(names);
+	domainoid = typenameTypeId(NULL, typename);
+
+	return domainAddConstraintInternal(domainoid, newConstraint, constrAddr,
+									   is_readd);
+}
+
+/*
+ * AlterDomainReAddConstraint
+ *
+ * Re-add a domain CHECK constraint that ALTER TABLE dropped because it
+ * depends on a column being altered.  The domain is identified by OID rather
+ * than by name, since the name might have been changed to refer to a
+ * different type by the time the constraint is re-added.
+ */
+ObjectAddress
+AlterDomainReAddConstraint(Oid domainoid, Constraint *constr,
+						   ObjectAddress *constrAddr)
+{
+	return domainAddConstraintInternal(domainoid, (Node *) constr, constrAddr,
+									   true);
+}
+
+/*
+ * Workhorse for AlterDomainAddConstraint and AlterDomainReAddConstraint.
+ */
+static ObjectAddress
+domainAddConstraintInternal(Oid domainoid, Node *newConstraint,
+							ObjectAddress *constrAddr, bool is_readd)
+{
 	Relation	typrel;
 	HeapTuple	tup;
 	Form_pg_type typTup;
 	Constraint *constr;
 	char	   *ccbin;
 	ObjectAddress address = InvalidObjectAddress;
-
-	/* Make a TypeName so we can use standard type lookup machinery */
-	typename = makeTypeNameFromNameList(names);
-	domainoid = typenameTypeId(NULL, typename);
 
 	/* Look up the domain in the type table */
 	typrel = table_open(TypeRelationId, RowExclusiveLock);
@@ -3028,8 +3060,20 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 		elog(ERROR, "cache lookup failed for type %u", domainoid);
 	typTup = (Form_pg_type) GETSTRUCT(tup);
 
-	/* Check it's a domain and check user has permission for ALTER DOMAIN */
-	checkDomainOwner(tup);
+	/*
+	 * Check it's a domain and check user has permission for ALTER DOMAIN.
+	 * When re-adding a constraint during ALTER TABLE, skip the permission
+	 * check since the constraint already existed, and the user altering a
+	 * column it depends on need not own the domain.  The caller got the OID
+	 * from the old constraint, so it must be a domain.
+	 */
+	if (is_readd)
+	{
+		if (typTup->typtype != TYPTYPE_DOMAIN)
+			elog(ERROR, "type %u is not a domain", domainoid);
+	}
+	else
+		checkDomainOwner(tup);
 
 	if (!IsA(newConstraint, Constraint))
 		elog(ERROR, "unrecognized node type: %d",
@@ -3058,9 +3102,9 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 		 * to.
 		 *
 		 * When re-adding a constraint during ALTER TABLE, the tables using
-		 * the domain might not have been rewritten to match their new
-		 * catalog definitions yet, so the caller must do the validation after
-		 * its rewrite phase instead.
+		 * the domain might not have been rewritten to match their new catalog
+		 * definitions yet, so the caller must do the validation after its
+		 * rewrite phase instead.
 		 */
 		if (!constr->skip_validation && !is_readd)
 			validateDomainCheckConstraint(domainoid, ccbin);

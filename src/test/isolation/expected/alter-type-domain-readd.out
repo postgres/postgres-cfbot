@@ -1,0 +1,25 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s2_alter s3_swap s1_commit s3_check s3_cast
+step s1_begin: BEGIN; SELECT count(*) FROM t2;
+count
+-----
+    1
+(1 row)
+
+step s2_alter: ALTER TYPE ct ALTER ATTRIBUTE i TYPE bigint; <waiting ...>
+step s3_swap: ALTER DOMAIN d RENAME TO d_old; CREATE DOMAIN d AS int;
+step s1_commit: COMMIT;
+step s2_alter: <... completed>
+step s3_check: 
+	SELECT t.typname, c.conname, obj_description(c.oid, 'pg_constraint')
+	  FROM pg_constraint c JOIN pg_type t ON t.oid = c.contypid
+	 WHERE t.typname IN ('d', 'd_old');
+
+typname|conname|obj_description
+-------+-------+---------------
+d_old  |d_check|d comment      
+(1 row)
+
+step s3_cast: SELECT (-1)::d_old;
+ERROR:  value for domain d_old violates check constraint "d_check"

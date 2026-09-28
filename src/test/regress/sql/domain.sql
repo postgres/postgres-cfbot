@@ -363,6 +363,40 @@ drop domain domrw_dt;
 drop function domrw_rt_mk(int);
 drop type domrw_rt;
 
+-- Rebuilding a constraint (and its comment) owned by someone else must not
+-- require ownership of the constraint's domain or table
+create role regress_domrw_typeowner;
+create role regress_domrw_conowner;
+grant create on schema public to regress_domrw_typeowner, regress_domrw_conowner;
+set role regress_domrw_typeowner;
+create type domrw_rt as (i int);
+set role regress_domrw_conowner;
+create function domrw_rt_mk(int) returns domrw_rt language sql
+  as 'select row($1)::domrw_rt';
+create domain domrw_dt1 as int
+  constraint domrw_dt1_check check ((domrw_rt_mk(value)).i > 0);
+comment on constraint domrw_dt1_check on domain domrw_dt1 is 'domain over int';
+create domain domrw_dt2 as domrw_rt
+  constraint domrw_dt2_check check ((value).i > 0);
+comment on constraint domrw_dt2_check on domain domrw_dt2 is 'domain over composite';
+create table domrw_t (x int
+  constraint domrw_t_check check ((domrw_rt_mk(x)).i > 0));
+comment on constraint domrw_t_check on domrw_t is 'table constraint';
+set role regress_domrw_typeowner;
+alter type domrw_rt alter attribute i type bigint;
+reset role;
+select conname, pg_get_constraintdef(oid), obj_description(oid, 'pg_constraint')
+  from pg_constraint where conname like 'domrw\_%' order by conname;
+select (-1)::domrw_dt1;  -- fail
+drop table domrw_t;
+drop domain domrw_dt1;
+drop domain domrw_dt2;
+drop function domrw_rt_mk(int);
+drop type domrw_rt;
+revoke create on schema public from regress_domrw_typeowner, regress_domrw_conowner;
+drop role regress_domrw_typeowner;
+drop role regress_domrw_conowner;
+
 
 -- Test domains over arrays of composite
 
