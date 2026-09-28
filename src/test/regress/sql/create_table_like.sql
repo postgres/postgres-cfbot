@@ -102,9 +102,24 @@ ALTER TABLE test_like_6 DROP COLUMN c;
 CREATE TABLE test_like_6c (LIKE test_like_6 INCLUDING ALL);
 \d+ test_like_6c
 
+-- not null not enforced constraint
+ALTER TABLE test_like_6c ADD COLUMN x INT, ADD CONSTRAINT nn_notenforced NOT NULL x NOT ENFORCED;
+COMMENT ON CONSTRAINT nn_notenforced ON test_like_6c is 'not null not enforced constraint comment test';
+CREATE TABLE test_like_6c_copy(LIKE test_like_6c INCLUDING CONSTRAINTS INCLUDING COMMENTS);
+
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = 'test_like_6c_copy'::regclass
+AND conname = 'nn_notenforced';
+
+SELECT conname, description
+FROM  pg_description, pg_constraint c
+WHERE classoid = 'pg_constraint'::regclass
+AND   objoid = c.oid AND c.conrelid = 'test_like_6c_copy'::regclass
+ORDER BY conname COLLATE "C";
+
 DROP TABLE test_like_4, test_like_4a, test_like_4b, test_like_4c, test_like_4d;
 DROP TABLE test_like_5, test_like_5x, test_like_5c;
-DROP TABLE test_like_6, test_like_6c;
+DROP TABLE test_like_6, test_like_6c, test_like_6c_copy;
 
 CREATE TABLE inhg (x text, LIKE inhx INCLUDING INDEXES, y text); /* copies indexes */
 INSERT INTO inhg VALUES (5, 10);
