@@ -1143,6 +1143,20 @@ include_dir 'conf.d'
         <literal>off</literal>.
        </para>
        <para>
+        For client-certificate sessions, this method-specific check also
+        re-checks certificate revocation on each cycle, independently of the
+        one-time check already performed at connection time (see
+        <xref linkend="guc-ssl-crl-file"/>).  This periodic re-check has a
+        narrower scope than the connection-time check, however: it only
+        consults <xref linkend="guc-ssl-crl-file"/>, not
+        <xref linkend="guc-ssl-crl-dir"/>, and it only checks the client's
+        own certificate, not any intermediate certificate authorities in
+        its chain.  A certificate revoked only via
+        <varname>ssl_crl_dir</varname>, or an intermediate CA revoked after
+        the session was established, will therefore not cause an
+        already-open session to be terminated by this mechanism.
+       </para>
+       <para>
         The re-validation period is controlled by
         <xref linkend="guc-credential-validation-interval"/>.  Validation is
         performed at command boundaries, so a session is never interrupted in

@@ -160,9 +160,18 @@ typedef struct Port
 	char	   *application_name;
 
 	/*
-	 * Information that needs to be held during the authentication cycle.
+	 * Held during authentication only: "hba" points into a context every
+	 * backend deletes early in startup.  Anything needed later (like
+	 * hba_clientcert below) must be copied out before that happens.
 	 */
 	HbaLine    *hba;
+
+	/*
+	 * Whether this session's HBA line required a client cert, copied out
+	 * of hba->clientcert by set_authn_id() while "hba" is still valid.
+	 * Safe to read for the session's lifetime, unlike "hba" itself.
+	 */
+	ClientCertMode hba_clientcert;
 
 	/*
 	 * TCP keepalive and user timeout settings.
@@ -320,6 +329,19 @@ extern const char *be_tls_get_cipher(Port *port);
 extern void be_tls_get_peer_subject_name(Port *port, char *ptr, size_t len);
 extern void be_tls_get_peer_issuer_name(Port *port, char *ptr, size_t len);
 extern void be_tls_get_peer_serial(Port *port, char *ptr, size_t len);
+
+/*
+ * Report whether the client certificate's validity period (notAfter) has
+ * already passed.  Returns false when no peer certificate is present.
+ */
+extern bool be_tls_get_peer_cert_expired(Port *port);
+
+/*
+ * Report whether the client certificate appears on the CRL configured via
+ * ssl_crl_file.  Best-effort addition to, not a replacement for, the
+ * revocation check already done at handshake time; fails open.
+ */
+extern bool be_tls_get_peer_cert_revoked(Port *port);
 
 /*
  * Get the server certificate hash for SCRAM channel binding type
