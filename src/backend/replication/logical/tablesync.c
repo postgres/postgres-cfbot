@@ -117,6 +117,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
@@ -451,6 +452,7 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 				 * are doing during DDL commands to avoid deadlocks. See
 				 * AlterSubscription_refresh.
 				 */
+				INJECTION_POINT("tablesync-before-mark-ready", NULL);
 				LockSharedObject(SubscriptionRelationId, MyLogicalRepWorker->subid,
 								 0, AccessShareLock);
 
