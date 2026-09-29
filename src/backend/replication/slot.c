@@ -840,6 +840,7 @@ ReplicationSlotRelease(void)
 	if (MyProc->statusFlags & PROC_IN_LOGICAL_DECODING)
 	{
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		Assert(ProcArrayHasProc(MyProc));
 		MyProc->statusFlags &= ~PROC_IN_LOGICAL_DECODING;
 		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
 		LWLockRelease(ProcArrayLock);
