@@ -16,8 +16,10 @@
 
 #include "miscadmin.h"
 #include "optimizer/appendinfo.h"
+#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/joininfo.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
@@ -43,6 +45,11 @@ static void make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 static void populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 										RelOptInfo *rel2, RelOptInfo *joinrel,
 										SpecialJoinInfo *sjinfo, List *restrictlist);
+static void try_skip_join_to_empty_rel(PlannerInfo *root,
+									   RelOptInfo *joinrel,
+									   RelOptInfo *outerrel,
+									   RelOptInfo *innerrel,
+									   List *restrictlist);
 static void try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1,
 								   RelOptInfo *rel2, RelOptInfo *joinrel,
 								   SpecialJoinInfo *parent_sjinfo,
@@ -1145,6 +1152,9 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			if (restriction_is_constant_false(restrictlist, joinrel, false) &&
 				bms_is_subset(rel2->relids, sjinfo->syn_righthand))
 				mark_dummy_rel(rel2);
+			if (is_dummy_rel(rel2))
+				try_skip_join_to_empty_rel(root, joinrel, rel1, rel2,
+										   restrictlist);
 			add_paths_to_joinrel(root, joinrel, rel1, rel2,
 								 JOIN_LEFT, sjinfo,
 								 restrictlist);
@@ -1238,6 +1248,9 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			if (restriction_is_constant_false(restrictlist, joinrel, false) &&
 				bms_is_subset(rel2->relids, sjinfo->syn_righthand))
 				mark_dummy_rel(rel2);
+			if (is_dummy_rel(rel2))
+				try_skip_join_to_empty_rel(root, joinrel, rel1, rel2,
+										   restrictlist);
 			add_paths_to_joinrel(root, joinrel, rel1, rel2,
 								 JOIN_ANTI, sjinfo,
 								 restrictlist);
@@ -1611,6 +1624,63 @@ restriction_is_constant_false(List *restrictlist,
 		}
 	}
 	return false;
+}
+
+/*
+ * try_skip_join_to_empty_rel
+ *	  A LEFT or ANTI join whose inner side is proven empty returns exactly
+ *	  the outer rows, so if nothing above needs the inner side we can offer
+ *	  the outer rel's own paths instead of a join against an empty rel.
+ *
+ * Quals pushed down to this join are evaluated on the NULL-extended rows;
+ * we only accept "innervar IS NULL", which is then trivially true (this is
+ * the usual shape, e.g. WHERE inner.x IS NULL above a LEFT JOIN).
+ */
+static void
+try_skip_join_to_empty_rel(PlannerInfo *root, RelOptInfo *joinrel,
+						   RelOptInfo *outerrel, RelOptInfo *innerrel,
+						   List *restrictlist)
+{
+	foreach_node(RestrictInfo, rinfo, restrictlist)
+	{
+		Var		   *var;
+
+		/* The join's own clauses have nothing to match */
+		if (!RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
+			continue;
+
+		var = find_forced_null_var((Node *) rinfo->clause);
+		if (var == NULL || !bms_is_member(var->varno, innerrel->relids))
+			return;
+	}
+
+	/* No outer row is filtered out, whatever the inner rel's statistics say */
+	joinrel->rows = outerrel->rows;
+
+	/*
+	 * The outer rel must be able to emit the join's targetlist as is.  Since
+	 * pull_varnos() also reports nulling relids, this rejects both Vars of
+	 * the inner rel and Vars marked as nulled by this join.
+	 */
+	if (!bms_is_subset(pull_varnos(root, (Node *) joinrel->reltarget->exprs),
+					   outerrel->relids))
+		return;
+
+	foreach_ptr(Path, path, outerrel->pathlist)
+	{
+		if (path->param_info == NULL)
+			add_path(joinrel, (Path *)
+					 create_projection_path(root, joinrel, path,
+											joinrel->reltarget));
+	}
+
+	if (joinrel->consider_parallel)
+	{
+		foreach_ptr(Path, path, outerrel->partial_pathlist)
+			add_partial_path(joinrel, (Path *)
+							 create_projection_path(root, joinrel, path,
+													joinrel->reltarget));
+	}
 }
 
 /*
