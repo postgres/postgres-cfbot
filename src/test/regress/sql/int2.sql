@@ -91,6 +91,14 @@ SELECT i.f1, i.f1 / int4 '2' AS x FROM INT2_TBL i;
 SELECT (-1::int2<<15)::text;
 SELECT ((-1::int2<<15)+1::int2)::text;
 
+-- check sane handling of out-of-range shift counts
+SELECT (-1::int2) << 15;
+SELECT (-1::int2) >> 15;
+SELECT 1::int2 << 31;
+SELECT 1::int2 << 32;
+SELECT 1::int2 >> 32;
+SELECT 1::int2 << -1;
+
 -- check sane handling of INT16_MIN overflow cases
 SELECT (-32768)::int2 * (-1)::int2;
 SELECT (-32768)::int2 / (-1)::int2;
