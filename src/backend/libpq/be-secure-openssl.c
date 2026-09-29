@@ -2277,6 +2277,118 @@ be_tls_get_peer_serial(Port *port, char *ptr, size_t len)
 		ptr[0] = '\0';
 }
 
+/*
+ * Returns true if the peer cert's notAfter has already passed. An absent
+ * or unparsable notAfter is conservatively treated as not expired, so we
+ * never terminate a session over an unreadable field.
+ */
+bool
+be_tls_get_peer_cert_expired(Port *port)
+{
+	const ASN1_TIME *not_after;
+
+	if (port->peer == NULL)
+		return false;
+
+	not_after = X509_get0_notAfter(port->peer);
+	if (not_after == NULL)
+		return false;
+
+	/*
+	 * X509_cmp_current_time() returns -1 for a past time (expired), 1
+	 * for future, 0 on parse error.
+	 */
+	return (X509_cmp_current_time(not_after) < 0);
+}
+
+/*
+ * Re-checks the peer cert against ssl_crl_file on demand (cached by
+ * mtime), unlike the one-time handshake-time CRL check.  Leaf cert and
+ * ssl_crl_file only (not chain/ssl_crl_dir); fails open on any error.
+ */
+bool
+be_tls_get_peer_cert_revoked(Port *port)
+{
+	static char cached_path[MAXPGPATH] = {0};
+	static time_t cached_mtime = 0;
+	static STACK_OF(X509_CRL) * cached_crls = NULL;
+
+	struct stat st;
+	bool		revoked = false;
+	int			i;
+
+	if (port->peer == NULL)
+		return false;
+
+	if (ssl_crl_file[0] == '\0')
+		return false;
+
+	if (stat(ssl_crl_file, &st) != 0)
+		return false;
+
+	/*
+	 * Reload when the path or mtime changed.  A failed load leaves
+	 * cached_crls as an empty non-NULL stack, so a broken file is
+	 * retried only once per distinct mtime, not every call.
+	 */
+	if (cached_crls == NULL ||
+		strcmp(cached_path, ssl_crl_file) != 0 ||
+		cached_mtime != st.st_mtime)
+	{
+		X509_STORE *store;
+		STACK_OF(X509_CRL) * new_crls = NULL;
+
+		if (cached_crls != NULL)
+			sk_X509_CRL_pop_free(cached_crls, X509_CRL_free);
+
+		/*
+		 * Load into a throwaway store and fetch only the peer's issuer's
+		 * CRL(s), reusing the same OpenSSL primitives be_tls_init() uses
+		 * at handshake time instead of hand-parsing.
+		 */
+		store = X509_STORE_new();
+		if (store != NULL)
+		{
+			if (X509_STORE_load_locations(store, ssl_crl_file, NULL) == 1)
+			{
+				X509_STORE_CTX *storectx = X509_STORE_CTX_new();
+
+				if (storectx != NULL)
+				{
+					if (X509_STORE_CTX_init(storectx, store, NULL, NULL) == 1)
+						new_crls = X509_STORE_CTX_get1_crls(storectx,
+															 X509_get_issuer_name(port->peer));
+					X509_STORE_CTX_free(storectx);
+				}
+			}
+			X509_STORE_free(store);
+		}
+
+		cached_crls = new_crls != NULL ? new_crls : sk_X509_CRL_new_null();
+		cached_mtime = st.st_mtime;
+		strlcpy(cached_path, ssl_crl_file, sizeof(cached_path));
+	}
+
+	for (i = 0; i < sk_X509_CRL_num(cached_crls); i++)
+	{
+		X509_CRL   *crl = sk_X509_CRL_value(cached_crls, i);
+		X509_REVOKED *r;
+
+		/*
+		 * 1 = revoked; 2 = removeFromCRL (delta-CRL-only, shouldn't
+		 * appear in a base CRL).  Treat either as revoked -- the safer,
+		 * fail-closed reading.
+		 */
+		if (X509_CRL_get0_by_cert(crl, &r, port->peer) != 0)
+		{
+			revoked = true;
+			break;
+		}
+	}
+
+	return revoked;
+}
+
 char *
 be_tls_get_certificate_hash(Port *port, size_t *len)
 {
