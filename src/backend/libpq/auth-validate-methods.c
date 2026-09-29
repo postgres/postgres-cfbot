@@ -20,9 +20,14 @@
 #include "access/htup_details.h"
 #include "catalog/pg_authid.h"
 #include "libpq/auth-validate-methods.h"
+#include "libpq/auth-validate.h"
+#include "libpq/libpq-be.h"
 #include "miscadmin.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+
+/* Function declarations for internal use */
+static bool validate_cert_credentials(void);
 
 /*
  * Initialize validation methods
@@ -30,7 +35,11 @@
 void
 InitializeValidationMethods(void)
 {
-	/* No method-specific validators are registered yet. */
+	/*
+	 * Register method-specific validators. Password methods need none --
+	 * ValidateRoleValidity() covers every session's baseline check.
+	 */
+	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
 }
 
 /*
@@ -78,4 +87,38 @@ ValidateRoleValidity(void)
 
 	ReleaseSysCache(tuple);
 	return result;
+}
+
+/*
+ * CVT_CERT validator: the peer cert is retained on Port, so its notAfter
+ * and revocation status can be re-checked locally, no round-trip needed.
+ * No cert on the session (shouldn't happen) is treated as valid.
+ */
+static bool
+validate_cert_credentials(void)
+{
+#ifdef USE_SSL
+	Port	   *port = MyProcPort;
+
+	if (port == NULL || !port->ssl_in_use || port->peer == NULL)
+		return true;
+
+	/* The session is no longer valid once the client certificate expires */
+	if (be_tls_get_peer_cert_expired(port))
+	{
+		SetCredentialValidationFailureDetail("client certificate check failed for user \"%s\": certificate has expired",
+											  port->user_name);
+		return false;
+	}
+
+	/* Nor is it valid once the certificate has been revoked via CRL */
+	if (be_tls_get_peer_cert_revoked(port))
+	{
+		SetCredentialValidationFailureDetail("client certificate check failed for user \"%s\": certificate has been revoked",
+											  port->user_name);
+		return false;
+	}
+#endif
+
+	return true;
 }

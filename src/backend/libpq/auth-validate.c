@@ -284,5 +284,26 @@ CheckCredentialValidity(void)
 												  (int) MyClientConnectionInfo.auth_method);
 	}
 
+	/*
+	 * A client cert can be required alongside a different primary method
+	 * (clientcert=verify-full); re-check CVT_CERT here too in that case.
+	 * Reads hba_clientcert, not hba->clientcert (freed by now; see libpq-be.h).
+	 */
+	if (result &&
+		validation_type != CVT_CERT &&
+		validators[CVT_CERT] != NULL &&
+		MyProcPort != NULL &&
+		MyProcPort->hba_clientcert != clientCertOff)
+	{
+		elog(DEBUG1, "credential validation: also rechecking CVT_CERT (clientcert required alongside auth method %d)",
+			 (int) MyClientConnectionInfo.auth_method);
+		result = validators[CVT_CERT] ();
+
+		if (!result && credential_validation_detail[0] == '\0')
+			SetCredentialValidationFailureDetail("client certificate re-check failed for user \"%s\" (auth method %d)",
+												  MyProcPort->user_name,
+												  (int) MyClientConnectionInfo.auth_method);
+	}
+
 	return result;
 }
