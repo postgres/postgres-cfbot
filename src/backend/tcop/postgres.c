@@ -42,6 +42,7 @@
 #include "commands/repack.h"
 #include "common/pg_prng.h"
 #include "jit/jit.h"
+#include "libpq/auth-validate.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
@@ -528,6 +529,24 @@ ProcessClientReadInterrupt(bool blocked)
 		/* Process notify interrupts, if any */
 		if (notifyInterruptPending)
 			ProcessNotifyInterrupt(true);
+
+		/*
+		 * Run a pending validation cycle here too (idle sessions would
+		 * otherwise go unterminated until their next command).  Service a
+		 * pending config reload first, since some validators consult GUCs.
+		 */
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
+		if (CredentialValidationTimeoutPending && IsNormalProcessingMode())
+		{
+			CredentialValidationTimeoutPending = false;
+			ProcessCredentialValidation();	/* may FATAL if credentials expired */
+			EnableCredentialValidationTimeout();
+		}
 	}
 	else if (ProcDiePending)
 	{
@@ -4771,6 +4790,14 @@ PostgresMain(const char *dbname, const char *username)
 					enable_timeout_after(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 										 IdleInTransactionSessionTimeout);
 				}
+
+				/*
+				 * Re-arm if cancelled by error recovery (no fresh
+				 * interval); see RearmCredentialValidationTimeout().
+				 */
+				if (credential_validation_enabled &&
+					!get_timeout_active(CREDENTIAL_VALIDATION_TIMEOUT))
+					RearmCredentialValidationTimeout();
 			}
 			else
 			{
@@ -4823,6 +4850,14 @@ PostgresMain(const char *dbname, const char *username)
 					enable_timeout_after(IDLE_SESSION_TIMEOUT,
 										 IdleSessionTimeout);
 				}
+
+				/*
+				 * Re-arm if cancelled by error recovery (no fresh
+				 * interval); see RearmCredentialValidationTimeout().
+				 */
+				if (credential_validation_enabled &&
+					!get_timeout_active(CREDENTIAL_VALIDATION_TIMEOUT))
+					RearmCredentialValidationTimeout();
 			}
 
 			/* Report any recently-changed GUC options */
@@ -4924,6 +4959,18 @@ PostgresMain(const char *dbname, const char *username)
 		 */
 		if (ignore_till_sync && firstchar != EOF)
 			continue;
+
+		/*
+		 * Run a due validation cycle here too -- a fallback for when
+		 * ReadCommand() never blocked (so ProcessClientReadInterrupt()'s
+		 * check point above never ran), e.g. a buffered pipelined message.
+		 */
+		if (CredentialValidationTimeoutPending && IsNormalProcessingMode())
+		{
+			CredentialValidationTimeoutPending = false;
+			ProcessCredentialValidation();	/* may FATAL if credentials expired */
+			EnableCredentialValidationTimeout();
+		}
 
 		switch (firstchar)
 		{
