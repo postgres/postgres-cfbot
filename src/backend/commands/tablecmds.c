@@ -11355,16 +11355,21 @@ CloneFkReferenced(Relation parentRel, Relation partitionRel)
 	ScanKeyInit(&key[0],
 				Anum_pg_constraint_confrelid, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(RelationGetRelid(parentRel)));
-	ScanKeyInit(&key[1],
-				Anum_pg_constraint_contype, BTEqualStrategyNumber,
-				F_CHAREQ, CharGetDatum(CONSTRAINT_FOREIGN));
-	/* This is a seqscan, as we don't have a usable index ... */
-	scan = systable_beginscan(pg_constraint, InvalidOid, true,
-							  NULL, 2, key);
+	/*
+	 * Look this up through the index on confrelid rather than seqscanning all
+	 * of pg_constraint.  That scan grew expensive once not-null constraints
+	 * started to have pg_constraint rows, making its cost scale with the total
+	 * number of constraints in the database.  Only foreign keys set confrelid,
+	 * so filtering on contype in the loop is just belt-and-suspenders.
+	 */
+	scan = systable_beginscan(pg_constraint, ConstraintConfRelidIndexId, true,
+							  NULL, 1, key);
 	while ((tuple = systable_getnext(scan)) != NULL)
 	{
 		Form_pg_constraint constrForm = (Form_pg_constraint) GETSTRUCT(tuple);
 
+		if (constrForm->contype != CONSTRAINT_FOREIGN)
+			continue;
 		clone = lappend_oid(clone, constrForm->oid);
 	}
 	systable_endscan(scan);
@@ -19562,8 +19567,8 @@ ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 	pg_constraint = table_open(ConstraintRelationId, AccessShareLock);
 
 	/*
-	 * Scan conrelid if changing to permanent, else confrelid.  This also
-	 * determines whether a useful index exists.
+	 * Scan conrelid if changing to permanent, else confrelid.  Both columns
+	 * are indexed, so this also determines which index to use.
 	 */
 	ScanKeyInit(&skey[0],
 				toLogged ? Anum_pg_constraint_conrelid :
@@ -19571,7 +19576,8 @@ ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(RelationGetRelid(rel)));
 	scan = systable_beginscan(pg_constraint,
-							  toLogged ? ConstraintRelidTypidNameIndexId : InvalidOid,
+							  toLogged ? ConstraintRelidTypidNameIndexId :
+							  ConstraintConfRelidIndexId,
 							  true, NULL, 1, skey);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -22672,15 +22678,16 @@ GetParentedForeignKeyRefs(Relation partition)
 	ScanKeyInit(&key[0],
 				Anum_pg_constraint_confrelid, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(RelationGetRelid(partition)));
-	ScanKeyInit(&key[1],
-				Anum_pg_constraint_contype, BTEqualStrategyNumber,
-				F_CHAREQ, CharGetDatum(CONSTRAINT_FOREIGN));
 
-	/* XXX This is a seqscan, as we don't have a usable index */
-	scan = systable_beginscan(pg_constraint, InvalidOid, true, NULL, 2, key);
+	/* Use the index on confrelid; only FKs set it, so filter contype below */
+	scan = systable_beginscan(pg_constraint, ConstraintConfRelidIndexId, true,
+							  NULL, 1, key);
 	while ((tuple = systable_getnext(scan)) != NULL)
 	{
 		Form_pg_constraint constrForm = (Form_pg_constraint) GETSTRUCT(tuple);
+
+		if (constrForm->contype != CONSTRAINT_FOREIGN)
+			continue;
 
 		/*
 		 * We only need to process constraints that are part of larger ones.
