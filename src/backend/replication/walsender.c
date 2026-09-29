@@ -65,6 +65,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "funcapi.h"
+#include "libpq/auth-validate.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "libpq/protocol.h"
@@ -1713,6 +1714,31 @@ WalSndHandleConfigReload(void)
 }
 
 /*
+ * Services a pending credential re-validation cycle for a logical
+ * walsender, mirroring WalSndHandleConfigReload() -- once streaming
+ * starts, PostgresMain()'s dispatch loop is never revisited otherwise.
+ */
+static void
+WalSndHandleCredentialValidation(void)
+{
+	if (!am_db_walsender)
+		return;
+
+	if (!CredentialValidationTimeoutPending)
+		return;
+
+	CredentialValidationTimeoutPending = false;
+	ProcessCredentialValidation();		/* may FATAL if credentials expired */
+
+	/*
+	 * Re-arm for the next cycle (fires once per arming), mirroring
+	 * postgres.c's two call sites -- else this would validate exactly
+	 * once and never again for the rest of the stream.
+	 */
+	EnableCredentialValidationTimeout();
+}
+
+/*
  * Wait until there is no pending write. Also process replies from the other
  * side and check timeouts during that.
  */
@@ -1755,6 +1781,9 @@ ProcessPendingWrites(void)
 
 		/* Process any requests or signals received recently */
 		WalSndHandleConfigReload();
+
+		/* Terminate the session if mandatory credential re-validation is due */
+		WalSndHandleCredentialValidation();
 
 		/* Try to flush pending output to the client */
 		if (pq_flush_if_writable() != 0)
@@ -1958,6 +1987,9 @@ WalSndWaitForWal(XLogRecPtr loc)
 
 		/* Process any requests or signals received recently */
 		WalSndHandleConfigReload();
+
+		/* Terminate the session if mandatory credential re-validation is due */
+		WalSndHandleCredentialValidation();
 
 		/* Check for input from the client */
 		ProcessRepliesIfAny();
@@ -3092,6 +3124,9 @@ WalSndLoop(WalSndSendDataCallback send_data)
 
 		/* Process any requests or signals received recently */
 		WalSndHandleConfigReload();
+
+		/* Terminate the session if mandatory credential re-validation is due */
+		WalSndHandleCredentialValidation();
 
 		/* Check for input from the client */
 		ProcessRepliesIfAny();
