@@ -2078,6 +2078,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		 * xmin doesn't become visible ahead of setting the flag.)
 		 */
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		Assert(ProcArrayHasProc(MyProc));
 		MyProc->statusFlags |= PROC_IN_VACUUM;
 		if (params.is_wraparound)
 			MyProc->statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;

@@ -645,6 +645,24 @@ ProcArrayRemove(PGPROC *proc, TransactionId latestXid)
 	LWLockRelease(ProcArrayLock);
 }
 
+/*
+ * ProcArrayHasProc -- is proc in the proc array?
+ *
+ * Returns true if proc occupies the proc array entry its pgxactoff points
+ * to.
+ */
+bool
+ProcArrayHasProc(PGPROC *proc)
+{
+	int			pgxactoff = proc->pgxactoff;
+
+	Assert(LWLockHeldByMe(ProcArrayLock));
+
+	return pgxactoff >= 0 &&
+		pgxactoff < procArray->numProcs &&
+		procArray->pgprocnos[pgxactoff] == GetNumberFromPGProc(proc);
+}
+
 
 /*
  * ProcArrayEndTransaction -- mark a transaction as no longer running
@@ -2593,6 +2611,7 @@ ProcArrayInstallRestoredXmin(TransactionId xmin, PGPROC *proc)
 		 * Install xmin and propagate the statusFlags that affect how the
 		 * value is interpreted by vacuum.
 		 */
+		Assert(ProcArrayHasProc(MyProc));
 		MyProc->xmin = TransactionXmin = xmin;
 		MyProc->statusFlags = (MyProc->statusFlags & ~PROC_XMIN_FLAGS) |
 			(proc->statusFlags & PROC_XMIN_FLAGS);

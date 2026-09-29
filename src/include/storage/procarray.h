@@ -21,6 +21,7 @@
 
 extern void ProcArrayAdd(PGPROC *proc);
 extern void ProcArrayRemove(PGPROC *proc, TransactionId latestXid);
+extern bool ProcArrayHasProc(PGPROC *proc);
 
 extern void ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid);
 extern void ProcArrayClearTransaction(PGPROC *proc);

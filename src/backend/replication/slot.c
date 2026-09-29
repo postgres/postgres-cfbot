@@ -831,11 +831,20 @@ ReplicationSlotRelease(void)
 		MyReplicationSlot = NULL;
 	}
 
-	/* might not have been set when we've been a plain slot */
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags &= ~PROC_IN_LOGICAL_DECODING;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
+	/*
+	 * Only touch ProcGlobal->statusFlags[] if we set
+	 * PROC_IN_LOGICAL_DECODING.  An auxiliary process that invalidates a slot
+	 * gets here too.  It is not in the proc array, so the entry at its
+	 * pgxactoff is not its own.
+	 */
+	if (MyProc->statusFlags & PROC_IN_LOGICAL_DECODING)
+	{
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		Assert(ProcArrayHasProc(MyProc));
+		MyProc->statusFlags &= ~PROC_IN_LOGICAL_DECODING;
+		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		LWLockRelease(ProcArrayLock);
+	}
 
 	if (am_walsender)
 	{
