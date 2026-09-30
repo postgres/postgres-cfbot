@@ -76,6 +76,117 @@ FROM pg_get_wal_files(pg_current_wal_lsn(), 'FFFFFFFF/FFFFFFFF');
 SELECT * FROM pg_get_wal_files('0/0', '0/1');
 
 -- ===================================================================
+-- Tests for locating WAL by timestamps stored in WAL records
+-- ===================================================================
+
+-- Put two WAL-logged transaction commits between the requested boundaries.
+INSERT INTO sample_tbl VALUES (5, 5);
+SELECT clock_timestamp() AS wal_time_lower \gset
+INSERT INTO sample_tbl VALUES (6, 6);
+INSERT INTO sample_tbl VALUES (10, 10);
+SELECT clock_timestamp() AS wal_time_upper \gset
+INSERT INTO sample_tbl VALUES (13, 13);
+
+SELECT start_timestamp <= :'wal_time_lower'::timestamptz - interval '1 microsecond'
+         AS start_ok,
+       end_timestamp >= :'wal_time_upper'::timestamptz AS end_ok,
+       start_lsn < end_lsn AS lsn_ok
+FROM pg_get_wal_location_at_time(:'wal_time_lower',
+                                 before => interval '1 microsecond',
+                                 after => :'wal_time_upper'::timestamptz -
+                                          :'wal_time_lower'::timestamptz);
+
+-- A window containing one timestamped record is enclosed by outer anchors.
+SELECT clock_timestamp() AS single_time_lower \gset
+INSERT INTO sample_tbl VALUES (12, 12);
+SELECT clock_timestamp() AS single_time_upper \gset
+INSERT INTO sample_tbl VALUES (14, 14);
+SELECT location.start_timestamp <= :'single_time_lower'::timestamptz
+         AS start_ok,
+       location.end_timestamp >= :'single_time_upper'::timestamptz
+         AS end_ok,
+       location.start_lsn < location.end_lsn AS lsn_ok
+FROM pg_get_wal_location_at_time(:'single_time_lower',
+                                 interval '1 microsecond',
+                                 :'single_time_upper'::timestamptz -
+                                   :'single_time_lower'::timestamptz) AS location;
+
+-- Exercise a time window containing a COMMIT PREPARED record.  Concurrent
+-- activity can cause another timestamped record to be selected as the anchor.
+INSERT INTO sample_tbl VALUES (11, 11);
+BEGIN;
+INSERT INTO sample_tbl VALUES (7, 7);
+PREPARE TRANSACTION 'regress_pg_walinspect_time';
+SELECT clock_timestamp() AS prepared_time_target \gset
+COMMIT PREPARED 'regress_pg_walinspect_time';
+SELECT clock_timestamp() AS prepared_time_upper \gset
+INSERT INTO sample_tbl VALUES (15, 15);
+
+SELECT record_type IN ('COMMIT', 'COMMIT_PREPARED', 'ABORT',
+                       'ABORT_PREPARED', 'RESTORE_POINT') AS timestamped_ok
+FROM pg_get_wal_location_at_time(:'prepared_time_target',
+                                 :'prepared_time_target'::timestamptz -
+                                   :'wal_time_upper'::timestamptz,
+                                 :'prepared_time_upper'::timestamptz -
+                                   :'prepared_time_target'::timestamptz) AS location,
+     LATERAL pg_get_wal_record_info(location.end_lsn);
+
+-- Exercise a time window containing restore points, allowing for other
+-- timestamped WAL records generated concurrently.
+SELECT pg_create_restore_point('regress_wal_time_lower') AS restore_lsn \gset
+SELECT clock_timestamp() AS restore_time_target \gset
+SELECT pg_create_restore_point('regress_wal_time_upper') AS restore_lsn \gset
+SELECT clock_timestamp() AS restore_time_upper \gset
+INSERT INTO sample_tbl VALUES (8, 8);
+
+SELECT start_info.record_type IN ('COMMIT', 'COMMIT_PREPARED', 'ABORT',
+                                  'ABORT_PREPARED', 'RESTORE_POINT') AS start_ok,
+       end_info.record_type IN ('COMMIT', 'COMMIT_PREPARED', 'ABORT',
+                                'ABORT_PREPARED', 'RESTORE_POINT') AS end_ok
+FROM pg_get_wal_location_at_time(:'restore_time_target',
+                                 :'restore_time_target'::timestamptz -
+                                   :'wal_time_upper'::timestamptz,
+                                 :'restore_time_upper'::timestamptz -
+                                   :'restore_time_target'::timestamptz) AS location,
+     LATERAL pg_get_wal_record_info(location.start_lsn) AS start_info,
+     LATERAL pg_get_wal_record_info(location.end_lsn) AS end_info;
+
+-- A future upper bound falls back to the current WAL position.
+SELECT clock_timestamp() AS current_time_target \gset
+INSERT INTO sample_tbl VALUES (9, 9);
+SELECT location.start_timestamp <= :'restore_time_upper'::timestamptz
+         AS start_ok,
+       location.end_timestamp IS NULL AS current_end_ok,
+       location.end_lsn <= pg_current_wal_flush_lsn() AS end_lsn_ok,
+       location.start_lsn < location.end_lsn AS lsn_ok,
+       EXISTS (SELECT FROM pg_get_wal_records_info(location.start_lsn,
+                                                   location.end_lsn)
+               WHERE resource_manager = 'Heap' AND record_type = 'INSERT')
+         AS records_ok
+FROM pg_get_wal_location_at_time(:'current_time_target',
+                                 :'current_time_target'::timestamptz -
+                                   :'restore_time_upper'::timestamptz,
+                                 interval '1 day') AS location;
+
+SELECT pg_get_function_arguments(
+  'pg_get_wal_location_at_time(timestamptz, interval, interval)'::regprocedure)
+  LIKE '%before interval DEFAULT ''@ 1 min''::interval, after interval DEFAULT ''@ 1 min''::interval%'
+  AS defaults_ok;
+SELECT * FROM pg_get_wal_location_at_time(:'wal_time_lower',
+                                         interval '0', interval '1 second');
+SELECT * FROM pg_get_wal_location_at_time(:'wal_time_lower',
+                                         interval '1 second', interval '0');
+SELECT * FROM pg_get_wal_location_at_time(:'wal_time_lower', interval '-1 second');
+SELECT * FROM pg_get_wal_location_at_time(:'wal_time_lower',
+                                         after => interval '-1 second');
+SELECT * FROM pg_get_wal_location_at_time(:'wal_time_lower',
+                                         before => interval '1 day 1 microsecond');
+SELECT * FROM pg_get_wal_location_at_time(:'wal_time_lower',
+                                         after => interval '1 day 1 microsecond');
+SELECT * FROM pg_get_wal_location_at_time(clock_timestamp() - interval '100 years');
+SELECT * FROM pg_get_wal_location_at_time(clock_timestamp() + interval '100 years');
+
+-- ===================================================================
 -- Test for filtering out WAL records of a particular table
 -- ===================================================================
 
@@ -135,6 +246,8 @@ SELECT has_function_privilege('regress_pg_walinspect',
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_block_info(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- no
 SELECT has_function_privilege('regress_pg_walinspect',
+  'pg_get_wal_location_at_time(timestamptz, interval, interval)', 'EXECUTE'); -- no
+SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_files(pg_lsn, pg_lsn)', 'EXECUTE'); -- no
 
 -- Functions accessible by users with role pg_read_server_files.
@@ -149,6 +262,8 @@ SELECT has_function_privilege('regress_pg_walinspect',
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_block_info(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- yes
 SELECT has_function_privilege('regress_pg_walinspect',
+  'pg_get_wal_location_at_time(timestamptz, interval, interval)', 'EXECUTE'); -- yes
+SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_files(pg_lsn, pg_lsn)', 'EXECUTE'); -- yes
 
 REVOKE pg_read_server_files FROM regress_pg_walinspect;
@@ -162,6 +277,8 @@ GRANT EXECUTE ON FUNCTION pg_get_wal_stats(pg_lsn, pg_lsn, boolean)
   TO regress_pg_walinspect;
 GRANT EXECUTE ON FUNCTION pg_get_wal_block_info(pg_lsn, pg_lsn, boolean)
   TO regress_pg_walinspect;
+GRANT EXECUTE ON FUNCTION pg_get_wal_location_at_time(timestamptz, interval, interval)
+  TO regress_pg_walinspect;
 GRANT EXECUTE ON FUNCTION pg_get_wal_files(pg_lsn, pg_lsn)
   TO regress_pg_walinspect;
 
@@ -174,6 +291,8 @@ SELECT has_function_privilege('regress_pg_walinspect',
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_block_info(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- yes
 SELECT has_function_privilege('regress_pg_walinspect',
+  'pg_get_wal_location_at_time(timestamptz, interval, interval)', 'EXECUTE'); -- yes
+SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_files(pg_lsn, pg_lsn)', 'EXECUTE'); -- yes
 
 REVOKE EXECUTE ON FUNCTION pg_get_wal_record_info(pg_lsn)
@@ -183,6 +302,8 @@ REVOKE EXECUTE ON FUNCTION pg_get_wal_records_info(pg_lsn, pg_lsn)
 REVOKE EXECUTE ON FUNCTION pg_get_wal_stats(pg_lsn, pg_lsn, boolean)
   FROM regress_pg_walinspect;
 REVOKE EXECUTE ON FUNCTION pg_get_wal_block_info(pg_lsn, pg_lsn, boolean)
+  FROM regress_pg_walinspect;
+REVOKE EXECUTE ON FUNCTION pg_get_wal_location_at_time(timestamptz, interval, interval)
   FROM regress_pg_walinspect;
 REVOKE EXECUTE ON FUNCTION pg_get_wal_files(pg_lsn, pg_lsn)
   FROM regress_pg_walinspect;

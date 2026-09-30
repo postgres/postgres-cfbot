@@ -39,6 +39,7 @@
 #endif
 
 #include "access/xlogrecord.h"
+#include "datatype/timestamp.h"
 #include "storage/buf.h"
 
 /* WALOpenSegment represents a WAL segment being read. */
@@ -462,5 +463,7 @@ extern bool XLogRecGetBlockTagExtended(XLogReaderState *record, uint8 block_id,
 									   RelFileLocator *rlocator, ForkNumber *forknum,
 									   BlockNumber *blknum,
 									   Buffer *prefetch_buffer);
+extern bool GetXLogRecordTimestamp(XLogReaderState *record,
+								   TimestampTz *recordXtime);
 
 #endif							/* XLOGREADER_H */
