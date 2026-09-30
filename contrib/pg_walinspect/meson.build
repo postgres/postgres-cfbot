@@ -41,6 +41,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_timeline.pl',
+      't/002_time_search.pl',
     ],
   },
 }
