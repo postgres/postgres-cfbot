@@ -33,6 +33,7 @@
 #include "access/gin.h"
 #include "access/slru.h"
 #include "access/toast_compression.h"
+#include "access/toast_internals.h"
 #include "access/twophase.h"
 #include "access/xlog_internal.h"
 #include "access/xlogprefetcher.h"
@@ -286,6 +287,12 @@ static const struct config_enum_entry xmloption_options[] = {
 
 StaticAssertDecl(lengthof(xmloption_options) == (XMLOPTION_CONTENT + 2),
 				 "array length mismatch");
+
+static const struct config_enum_entry toast_flavour_options[] = {
+	{"plain", TOAST_FLAVOUR_PLAIN, false},
+	{"direct", TOAST_FLAVOUR_DIRECT, false},
+	{NULL, 0, false}
+};
 
 /*
  * Although only "on", "off", and "safe_encoding" are documented, we

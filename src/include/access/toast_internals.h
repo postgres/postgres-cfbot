@@ -16,6 +16,13 @@
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
+#include "utils/rel.h"
+
+#define RelationGetToastFlavour(relation) \
+	((relation)->rd_options ? \
+	 ((StdRdOptions *) (relation)->rd_options)->toast_flavour : TOAST_FLAVOUR_PLAIN)
+
+extern PGDLLIMPORT int toast_default_flavour;
 
 extern Datum toast_compress_datum(Datum value, char cmethod);
 extern Oid	toast_get_valid_index(Oid toastoid, LOCKMODE lock);
