@@ -992,9 +992,19 @@ DestroyParallelContext(ParallelContext *pcxt)
 	}
 
 	/*
+	 * We can't finish transaction commit or abort until all of the workers
+	 * have exited.  This means, in particular, that we can't respond to
+	 * interrupts at this stage.
+	 */
+	HOLD_INTERRUPTS();
+	WaitForParallelWorkersToExit(pcxt);
+	RESUME_INTERRUPTS();
+
+	/*
 	 * If we have allocated a shared memory segment, detach it.  This will
-	 * implicitly detach the error queues, and any other shared memory queues,
-	 * stored there.
+	 * implicitly detach any other shared memory queues stored there.  Wait
+	 * until the workers are gone, since a worker that is still starting up
+	 * may not have attached to the segment, or to objects in it, yet.
 	 */
 	if (pcxt->seg != NULL)
 	{
@@ -1011,15 +1021,6 @@ DestroyParallelContext(ParallelContext *pcxt)
 		pfree(pcxt->private_memory);
 		pcxt->private_memory = NULL;
 	}
-
-	/*
-	 * We can't finish transaction commit or abort until all of the workers
-	 * have exited.  This means, in particular, that we can't respond to
-	 * interrupts at this stage.
-	 */
-	HOLD_INTERRUPTS();
-	WaitForParallelWorkersToExit(pcxt);
-	RESUME_INTERRUPTS();
 
 	/* Free the worker array itself. */
 	if (pcxt->worker != NULL)
