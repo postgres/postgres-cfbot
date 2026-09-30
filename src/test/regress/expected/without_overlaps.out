@@ -1573,6 +1573,52 @@ Foreign-key constraints:
     "temporal_fk2_rng2rng_fk" FOREIGN KEY (parent_id1, parent_id2, PERIOD valid_at) REFERENCES temporal_rng2(id1, id2, PERIOD valid_at)
 
 DROP TABLE temporal_fk2_rng2rng;
+-- Referencing a non-temporal primary key should fail:
+CREATE TABLE temporal_rng3 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng3_pk PRIMARY KEY (id, valid_at)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3 (id, PERIOD valid_at)
+);
+ERROR:  foreign key using PERIOD must reference a primary key or unique constraint using WITHOUT OVERLAPS
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3
+);
+ERROR:  foreign key using PERIOD must reference a primary key or unique constraint using WITHOUT OVERLAPS
+DROP TABLE temporal_rng3;
+-- Referencing an exclusion constraint should fail:
+CREATE TABLE temporal_rng3 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng3_excl EXCLUDE USING gist (id WITH =, valid_at WITH &&)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3 (id, PERIOD valid_at)
+);
+ERROR:  there is no unique constraint matching given keys for referenced table "temporal_rng3"
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3
+);
+ERROR:  there is no primary key for referenced table "temporal_rng3"
+DROP TABLE temporal_rng3;
 --
 -- test ALTER TABLE ADD CONSTRAINT
 --

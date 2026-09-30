@@ -30,6 +30,7 @@ static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_not_null_inheritance(ClusterInfo *cluster);
 static void check_for_gist_inet_ops(ClusterInfo *cluster);
+static void check_for_temporal_fks_to_exclusion_constraints(ClusterInfo *cluster);
 static void check_for_new_tablespace_dir(void);
 static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
 static void check_for_unicode_update(ClusterInfo *cluster);
@@ -687,6 +688,15 @@ check_and_dump_old_cluster(void)
 	 */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1800)
 		check_for_gist_inet_ops(&old_cluster);
+
+	/*
+	 * PG 18 allowed a foreign key with PERIOD to reference a plain exclusion
+	 * constraint, but that is no longer allowed, so restoring such a foreign
+	 * key would fail.  Minor releases fixed this, but a cluster could still
+	 * have foreign keys created before the fix.
+	 */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) >= 1800)
+		check_for_temporal_fks_to_exclusion_constraints(&old_cluster);
 
 	/*
 	 * While not a check option, we do this now because this is the only time
@@ -1806,6 +1816,84 @@ check_for_gist_inet_ops(ClusterInfo *cluster)
 				 "binary-upgraded.  Replace them with indexes that use the built-in GiST\n"
 				 "inet_ops operator class.\n"
 				 "A list of indexes with the problem is in the file:\n"
+				 "    %s", report.path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * Callback function for processing results of query for
+ * check_for_temporal_fks_to_exclusion_constraints()'s UpgradeTask.  If the
+ * query returned any rows (i.e., the check failed), write the details to the
+ * report file.
+ */
+static void
+process_temporal_fks_to_exclusion_constraints(DbInfo *dbinfo, PGresult *res,
+											  void *arg)
+{
+	UpgradeTaskReport *report = (UpgradeTaskReport *) arg;
+	int			ntups = PQntuples(res);
+	int			i_nspname = PQfnumber(res, "nspname");
+	int			i_relname = PQfnumber(res, "relname");
+	int			i_conname = PQfnumber(res, "conname");
+
+	if (ntups == 0)
+		return;
+
+	if (report->file == NULL &&
+		(report->file = fopen_priv(report->path, "w")) == NULL)
+		pg_fatal("could not open file \"%s\": %m", report->path);
+
+	fprintf(report->file, "In database: %s\n", dbinfo->db_name);
+
+	for (int rowno = 0; rowno < ntups; rowno++)
+		fprintf(report->file, "  %s.%s.%s\n",
+				PQgetvalue(res, rowno, i_nspname),
+				PQgetvalue(res, rowno, i_relname),
+				PQgetvalue(res, rowno, i_conname));
+}
+
+/*
+ * Verify that no foreign keys with PERIOD reference a plain exclusion
+ * constraint instead of a primary key or unique constraint using WITHOUT
+ * OVERLAPS.  Such foreign keys can no longer be created, so they would fail
+ * to restore.
+ */
+static void
+check_for_temporal_fks_to_exclusion_constraints(ClusterInfo *cluster)
+{
+	UpgradeTaskReport report;
+	UpgradeTask *task = upgrade_task_create();
+	const char *query = "SELECT n.nspname, c.relname, con.conname "
+		"FROM   pg_catalog.pg_constraint con, pg_catalog.pg_index i, "
+		"       pg_catalog.pg_class c, pg_catalog.pg_namespace n "
+		"WHERE  con.contype = 'f' AND con.conperiod"
+		"       AND con.conindid = i.indexrelid AND NOT i.indisunique"
+		"       AND con.conrelid = c.oid AND c.relnamespace = n.oid";
+
+	prep_status("Checking for foreign keys referencing exclusion constraints");
+
+	report.file = NULL;
+	snprintf(report.path, sizeof(report.path), "%s/%s",
+			 log_opts.basedir,
+			 "temporal_fks_to_exclusion_constraints.txt");
+
+	upgrade_task_add_step(task, query,
+						  process_temporal_fks_to_exclusion_constraints,
+						  true, &report);
+	upgrade_task_run(task, cluster);
+	upgrade_task_free(task);
+
+	if (report.file)
+	{
+		fclose(report.file);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains foreign keys using PERIOD that reference an\n"
+				 "exclusion constraint instead of a primary key or unique constraint using\n"
+				 "WITHOUT OVERLAPS.  These are no longer allowed.  Drop them, and recreate\n"
+				 "them referencing a primary key or unique constraint using WITHOUT OVERLAPS.\n"
+				 "A list of foreign keys with the problem is in the file:\n"
 				 "    %s", report.path);
 	}
 	else
