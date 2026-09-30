@@ -231,11 +231,16 @@ REPACK [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] USING
       (<xref linkend="logicaldecoding"/>) and applied before
       the <literal>ACCESS EXCLUSIVE</literal> lock is requested. Thus the lock
       is typically held only for the time needed to swap the files, which
-      should be pretty short. However, the time might still be noticeable if
-      too many data changes have been done to the table while
-      <command>REPACK</command> was waiting for the lock: those changes must
-      be processed just before the files are swapped, while the
-      <literal>ACCESS EXCLUSIVE</literal> lock is being held.
+      should be pretty short.
+     </para>
+
+     <para>
+      <command>REPACK</command> does not queue for the <literal>ACCESS
+      EXCLUSIVE</literal> lock, because other transactions that want to use
+      the table would have to wait behind it.  Instead, it checks whether the
+      lock is available, and while it is not, it applies the data changes that
+      take place meanwhile and checks again.  <xref linkend="guc-lock-timeout"/>,
+      if set, limits how long it keeps trying.
      </para>
 
      <para>
