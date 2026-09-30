@@ -612,6 +612,8 @@ static void CloneForeignKeyConstraints(List **wqueue, Relation parentRel,
 static void CloneFkReferenced(Relation parentRel, Relation partitionRel);
 static void CloneFkReferencing(List **wqueue, Relation parentRel,
 							   Relation partRel);
+static void warnIfPeriodFkIndexNotUnique(bool with_period, Oid indexOid,
+										 const char *conname, Oid relid);
 static void createForeignKeyCheckTriggers(Oid myRelOid, Oid refRelOid,
 										  Constraint *fkconstraint, Oid constraintOid,
 										  Oid indexOid,
@@ -11514,6 +11516,9 @@ CloneFkReferenced(Relation parentRel, Relation partitionRel)
 								  conkey, conpfeqop, conppeqop, conffeqop,
 								  numfkdelsetcols, confdelsetcols, false,
 								  constrForm->conperiod);
+		warnIfPeriodFkIndexNotUnique(constrForm->conperiod, partIndexId,
+									 fkconstraint->conname,
+									 constrForm->conrelid);
 		/* ... and recurse */
 		addFkRecurseReferenced(fkconstraint,
 							   fkRel,
@@ -11759,6 +11764,9 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 								  conppeqop, conffeqop,
 								  numfkdelsetcols, confdelsetcols,
 								  false, with_period);
+		warnIfPeriodFkIndexNotUnique(with_period, indexOid,
+									 get_constraint_name(address.objectId),
+									 RelationGetRelid(partRel));
 
 		/* Done with the cloned constraint's tuple */
 		ReleaseSysCache(tuple);
@@ -11787,6 +11795,38 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 	}
 
 	table_close(trigrel, RowExclusiveLock);
+}
+
+/*
+ * warnIfPeriodFkIndexNotUnique
+ *
+ * Earlier 18.x releases let a PERIOD foreign key reference a plain exclusion
+ * constraint.  ATAddForeignKeyConstraint rejects that now, but cloning such a
+ * foreign key for a new partition copies its index without that check, so
+ * warn when it happens.
+ */
+static void
+warnIfPeriodFkIndexNotUnique(bool with_period, Oid indexOid,
+							 const char *conname, Oid relid)
+{
+	HeapTuple	indtup;
+	bool		isunique;
+
+	if (!with_period)
+		return;
+
+	indtup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexOid));
+	if (!HeapTupleIsValid(indtup))
+		elog(ERROR, "cache lookup failed for index %u", indexOid);
+	isunique = ((Form_pg_index) GETSTRUCT(indtup))->indisunique;
+	ReleaseSysCache(indtup);
+
+	if (!isunique)
+		ereport(WARNING,
+				errmsg("foreign key constraint \"%s\" on table \"%s\" references an exclusion constraint instead of a primary key or unique constraint using WITHOUT OVERLAPS",
+					   conname, get_rel_name(relid)),
+				errdetail("Such a foreign key cannot reliably enforce referential integrity."),
+				errhint("Drop the foreign key and recreate it referencing a primary key or unique constraint using WITHOUT OVERLAPS."));
 }
 
 /*
