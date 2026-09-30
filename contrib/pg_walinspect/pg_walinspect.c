@@ -12,6 +12,8 @@
  */
 #include "postgres.h"
 
+#include <sys/stat.h>
+
 #include "access/htup_details.h"
 #include "access/timeline.h"
 #include "access/xlog.h"
@@ -26,7 +28,9 @@
 #include "storage/fd.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgrprotos.h"
 #include "utils/pg_lsn.h"
+#include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 
 /*
@@ -41,6 +45,7 @@ PG_MODULE_MAGIC_EXT(
 
 PG_FUNCTION_INFO_V1(pg_get_wal_block_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_files);
+PG_FUNCTION_INFO_V1(pg_get_wal_location_at_time);
 PG_FUNCTION_INFO_V1(pg_get_wal_record_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_records_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_records_info_till_end_of_wal);
@@ -71,15 +76,52 @@ static void GetWalStats(FunctionCallInfo fcinfo,
 static void GetWALBlockInfo(FunctionCallInfo fcinfo, XLogReaderState *record,
 							bool show_data);
 
+/* Selected WAL position and timestamp for one time boundary. */
+typedef struct WalTimeBoundary
+{
+	bool		found;			/* matching record was found */
+	TimestampTz time;			/* record's local event time */
+	XLogRecPtr	lsn;			/* record's start LSN */
+	int			segment_index;	/* index of the segment containing the record */
+} WalTimeBoundary;
+
 /* Metadata for one retained segment in the current timeline's history. */
 typedef struct WalTimeSegment
 {
 	XLogSegNo	segno;			/* segment number, used for WAL ordering */
 	TimeLineID	tli;			/* timeline containing this segment */
+	bool		scanned;		/* segment has already been decoded */
+	bool		has_timestamp;	/* segment contains timestamped records */
+	TimestampTz min_time;		/* minimum record timestamp in segment */
+	TimestampTz max_time;		/* maximum record timestamp in segment */
+	WalTimeBoundary lower;		/* best lower anchor in segment */
+	WalTimeBoundary upper;		/* best upper anchor in segment */
 } WalTimeSegment;
 
 static int	wal_time_segment_cmp(const void *a, const void *b);
-static WalTimeSegment *GetWalTimeSegments(int *nsegments);
+static WalTimeSegment *GetWalTimeSegments(int *nsegments,
+										  XLogRecPtr *current_lsn_out);
+static int	FindWalTimeCandidate(WalTimeSegment *segments,
+								 int *search_segments,
+								 int *nsearch_segments,
+								 TimestampTz target_time,
+								 bool search_left,
+								 TimestampTz wanted_start,
+								 TimestampTz wanted_end,
+								 int *candidate_position,
+								 int *nscanned);
+static void ScanWalTimeSegment(WalTimeSegment *segment, int segment_index,
+							   TimestampTz wanted_start,
+							   TimestampTz wanted_end);
+static void MergeWalTimeSegment(WalTimeSegment *segment,
+								WalTimeBoundary *lower,
+								WalTimeBoundary *upper);
+static void ProbeLowerBoundary(WalTimeBoundary *boundary,
+							   TimestampTz time, XLogRecPtr lsn,
+							   int segment_index);
+static void ProbeUpperBoundary(WalTimeBoundary *boundary,
+							   TimestampTz time, XLogRecPtr lsn,
+							   int segment_index);
 
 /*
  * Return the LSN up to which the server has WAL, and optionally its timeline.
@@ -224,13 +266,53 @@ wal_time_segment_cmp(const void *a, const void *b)
 }
 
 /*
+ * Probe a timestamped record at or before a requested time boundary.  Among
+ * records examined so far, prefer the latest time, breaking ties in favor
+ * of the earlier WAL record.  The caller only passes qualifying records, so
+ * a greater timestamp is closer to the requested boundary.
+ */
+static void
+ProbeLowerBoundary(WalTimeBoundary *boundary, TimestampTz time,
+				   XLogRecPtr lsn, int segment_index)
+{
+	if (!boundary->found || time > boundary->time ||
+		(time == boundary->time && lsn < boundary->lsn))
+	{
+		boundary->found = true;
+		boundary->time = time;
+		boundary->lsn = lsn;
+		boundary->segment_index = segment_index;
+	}
+}
+
+/*
+ * Probe a timestamped record at or after a requested time boundary.  Among
+ * records examined so far, prefer the earliest time, breaking ties in favor of
+ * the later WAL record.  The caller only passes qualifying records, so a
+ * smaller timestamp is closer to the requested boundary.
+ */
+static void
+ProbeUpperBoundary(WalTimeBoundary *boundary, TimestampTz time,
+				   XLogRecPtr lsn, int segment_index)
+{
+	if (!boundary->found || time < boundary->time ||
+		(time == boundary->time && lsn > boundary->lsn))
+	{
+		boundary->found = true;
+		boundary->time = time;
+		boundary->lsn = lsn;
+		boundary->segment_index = segment_index;
+	}
+}
+
+/*
  * Get the WAL segments that form the history of the server's current
  * timeline.  Other timelines may have files with the same segment number in
  * pg_wal, so choose the timeline that is valid at the end of each segment,
  * as read_local_xlog_page_no_wait() does.  Return the segments in WAL order.
  */
 static WalTimeSegment *
-GetWalTimeSegments(int *nsegments)
+GetWalTimeSegments(int *nsegments, XLogRecPtr *current_lsn_out)
 {
 	WalTimeSegment *segments = NULL;
 	DIR		   *dir;
@@ -242,6 +324,8 @@ GetWalTimeSegments(int *nsegments)
 	int			count = 0;
 
 	current_lsn = GetCurrentLSN(&current_tli);
+	if (current_lsn_out != NULL)
+		*current_lsn_out = current_lsn;
 
 	history = readTimeLineHistory(current_tli);
 	dir = AllocateDir(XLOGDIR);
@@ -295,6 +379,140 @@ GetWalTimeSegments(int *nsegments)
 
 	*nsegments = count;
 	return segments;
+}
+
+/*
+ * Approximately locate the segment containing target_time by binary search.
+ * Record timestamps are expected to generally increase with WAL position.
+ * Remove segments without timestamped records from the search candidates,
+ * since they provide no value with which to choose either half.
+ */
+static int
+FindWalTimeCandidate(WalTimeSegment *segments, int *search_segments,
+					 int *nsearch_segments,
+					 TimestampTz target_time, bool search_left,
+					 TimestampTz wanted_start, TimestampTz wanted_end,
+					 int *candidate_position, int *nscanned)
+{
+	int			left = 0;
+	int			right = *nsearch_segments - 1;
+	int			result;
+
+	while (left <= right)
+	{
+		int			middle = left + (right - left) / 2;
+		int			segment_index = search_segments[middle];
+		WalTimeSegment *segment = &segments[segment_index];
+
+		if (!segment->scanned)
+		{
+			ScanWalTimeSegment(segment, segment_index, wanted_start, wanted_end);
+			(*nscanned)++;
+		}
+
+		if (!segment->has_timestamp)
+		{
+			memmove(&search_segments[middle], &search_segments[middle + 1],
+					(*nsearch_segments - middle - 1) * sizeof(int));
+			(*nsearch_segments)--;
+			right--;
+			continue;
+		}
+		else if (target_time < segment->min_time)
+			right = middle - 1;
+		else if (target_time > segment->max_time)
+			left = middle + 1;
+		else
+		{
+			if (candidate_position != NULL)
+				*candidate_position = middle;
+			return search_segments[middle];
+		}
+	}
+
+	if (*nsearch_segments == 0)
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("could not locate a WAL time boundary"),
+				errdetail("No retained WAL segment contains a timestamped record."));
+
+	if (search_left)
+		result = Max(right, 0);
+	else
+		result = Min(left, *nsearch_segments - 1);
+
+	if (candidate_position != NULL)
+		*candidate_position = result;
+	return search_segments[result];
+}
+
+/*
+ * Inspect timestamped records beginning in one segment and save its time
+ * range and best boundary candidates.  XLogReadRecord() may read the following
+ * segment to assemble a record crossing the boundary, but that record is
+ * attributed to the segment containing its starting LSN.
+ */
+static void
+ScanWalTimeSegment(WalTimeSegment *segment, int segment_index,
+				   TimestampTz wanted_start, TimestampTz wanted_end)
+{
+	XLogRecPtr	seg_start = segment->segno * wal_segment_size;
+	XLogRecPtr	seg_end = seg_start + wal_segment_size;
+	XLogReaderState *xlogreader;
+
+	Assert(!segment->scanned);
+	segment->scanned = true;
+	xlogreader = InitXLogReaderState(seg_start);
+
+	while (ReadNextXLogRecord(xlogreader))
+	{
+		TimestampTz record_time;
+
+		if (xlogreader->ReadRecPtr >= seg_end)
+			break;
+
+		if (!GetXLogRecordTimestamp(xlogreader, &record_time))
+			continue;
+
+		if (!segment->has_timestamp)
+		{
+			segment->has_timestamp = true;
+			segment->min_time = segment->max_time = record_time;
+		}
+		else
+		{
+			segment->min_time = Min(segment->min_time, record_time);
+			segment->max_time = Max(segment->max_time, record_time);
+		}
+
+		if (record_time <= wanted_start)
+			ProbeLowerBoundary(&segment->lower, record_time,
+							   xlogreader->ReadRecPtr, segment_index);
+
+		else if (record_time >= wanted_end)
+			ProbeUpperBoundary(&segment->upper, record_time,
+							   xlogreader->ReadRecPtr, segment_index);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	pfree(xlogreader->private_data);
+	XLogReaderFree(xlogreader);
+}
+
+/* Merge one segment's boundary candidates into the result. */
+static void
+MergeWalTimeSegment(WalTimeSegment *segment, WalTimeBoundary *lower,
+					WalTimeBoundary *upper)
+{
+	Assert(segment->scanned);
+
+	if (lower != NULL && segment->lower.found)
+		ProbeLowerBoundary(lower, segment->lower.time, segment->lower.lsn,
+						   segment->lower.segment_index);
+	if (upper != NULL && segment->upper.found)
+		ProbeUpperBoundary(upper, segment->upper.time, segment->upper.lsn,
+						   segment->upper.segment_index);
 }
 
 /*
@@ -624,6 +842,267 @@ pg_get_wal_record_info(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Locate a WAL region around a wall-clock time range using timestamped WAL
+ * records.
+ *
+ * Locate each boundary by an approximate binary search over retained WAL
+ * segments, assuming that record timestamps generally increase with WAL
+ * position.  Also examine one preceding segment for the lower boundary and
+ * one following segment for the upper boundary to allow for limited timestamp
+ * reordering.  The lower boundary uses the latest timestamped record at or
+ * before the requested start time, while the upper boundary uses the earliest
+ * one at or after the requested end time.  A future upper bound is first
+ * capped at the current time.  If no upper timestamped record is available,
+ * use the current WAL position.  On success, the boundaries form a forward
+ * WAL range, but are not necessarily the globally closest timestamped records
+ * to the requested bounds.
+ */
+Datum
+pg_get_wal_location_at_time(PG_FUNCTION_ARGS)
+{
+#define PG_GET_WAL_LOCATION_AT_TIME_COLS 4
+	TimestampTz target_time = PG_GETARG_TIMESTAMPTZ(0);
+	Interval   *before = PG_GETARG_INTERVAL_P(1);
+	Interval   *after = PG_GETARG_INTERVAL_P(2);
+	Interval	zero = {0};
+	Interval	one_day = {.day = 1};
+	TimestampTz wanted_start;
+	TimestampTz wanted_end;
+	TimestampTz current_time;
+	XLogRecPtr	current_lsn;
+	XLogSegNo	current_segno;
+	WalTimeSegment *segments;
+	WalTimeBoundary lower = {0};
+	WalTimeBoundary upper = {0};
+	Datum		values[PG_GET_WAL_LOCATION_AT_TIME_COLS];
+	bool		nulls[PG_GET_WAL_LOCATION_AT_TIME_COLS] = {0};
+	TupleDesc	tupdesc;
+	HeapTuple	tuple;
+	int			nsegments;
+	int		   *search_segments;
+	int			nsearch_segments;
+	int			lower_candidate;
+	int			upper_candidate;
+	int			lower_candidate_position;
+	int			nupper_search_segments;
+	int			lower_start;
+	int			upper_end;
+	int			upper_segment_index;
+	int			nscanned = 0;
+	bool		upper_bound_capped = false;
+	char		lower_fname[MAXFNAMELEN];
+	char		upper_fname[MAXFNAMELEN];
+
+	if (TIMESTAMP_NOT_FINITE(target_time))
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("target time must be finite"));
+	if (INTERVAL_NOT_FINITE(before) ||
+		DatumGetInt32(DirectFunctionCall2(interval_cmp,
+										  IntervalPGetDatum(before),
+										  IntervalPGetDatum(&zero))) <= 0)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("before interval must be finite and greater than zero"));
+	if (DatumGetInt32(DirectFunctionCall2(interval_cmp,
+										  IntervalPGetDatum(before),
+										  IntervalPGetDatum(&one_day))) > 0)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("before interval must not exceed one day"));
+	if (INTERVAL_NOT_FINITE(after) ||
+		DatumGetInt32(DirectFunctionCall2(interval_cmp,
+										  IntervalPGetDatum(after),
+										  IntervalPGetDatum(&zero))) <= 0)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("after interval must be finite and greater than zero"));
+	if (DatumGetInt32(DirectFunctionCall2(interval_cmp,
+										  IntervalPGetDatum(after),
+										  IntervalPGetDatum(&one_day))) > 0)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("after interval must not exceed one day"));
+
+	/* The timestamp functions provide the normal overflow checks. */
+	wanted_start = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_mi_interval,
+														   TimestampTzGetDatum(target_time),
+														   IntervalPGetDatum(before)));
+	wanted_end = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_pl_interval,
+														 TimestampTzGetDatum(target_time),
+														 IntervalPGetDatum(after)));
+	current_time = GetCurrentTimestamp();
+
+	/* Cap a future upper bound at the time currently available. */
+	if (wanted_end > current_time)
+	{
+		if (wanted_start >= current_time)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("requested time follows the available WAL range"),
+					errdetail("The requested lower bound is not earlier than the current time."));
+
+		wanted_end = current_time;
+		upper_bound_capped = true;
+	}
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	segments = GetWalTimeSegments(&nsegments, &current_lsn);
+	XLByteToPrevSeg(current_lsn, current_segno, wal_segment_size);
+
+	/*
+	 * A capped upper bound may need the current WAL position as its endpoint.
+	 * Detect a missing WAL tail before decoding any candidate segments.
+	 */
+	if (upper_bound_capped &&
+		segments[nsegments - 1].segno != current_segno)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_EXCEPTION),
+				errmsg("WAL segment needed for the time search is missing"),
+				errdetail("The current WAL LSN is %X/%08X, and segment " UINT64_FORMAT " is not present in pg_wal.",
+						  LSN_FORMAT_ARGS(current_lsn),
+						  (uint64) current_segno));
+
+	search_segments = palloc_array(int, nsegments);
+	for (int i = 0; i < nsegments; i++)
+		search_segments[i] = i;
+	nsearch_segments = nsegments;
+	lower_candidate = FindWalTimeCandidate(segments, search_segments,
+										   &nsearch_segments, wanted_start,
+										   true, wanted_start, wanted_end,
+										   &lower_candidate_position,
+										   &nscanned);
+
+	/* Search for the later upper boundary from the lower candidate onward. */
+	nupper_search_segments = nsearch_segments - lower_candidate_position;
+	upper_candidate = FindWalTimeCandidate(segments,
+										   search_segments + lower_candidate_position,
+										   &nupper_search_segments, wanted_end,
+										   false, wanted_start, wanted_end,
+										   NULL,
+										   &nscanned);
+	XLogFileName(lower_fname, segments[lower_candidate].tli,
+				 segments[lower_candidate].segno, wal_segment_size);
+	XLogFileName(upper_fname, segments[upper_candidate].tli,
+				 segments[upper_candidate].segno, wal_segment_size);
+	ereport(DEBUG1,
+			errmsg_internal("WAL time search selected lower segment %s and upper segment %s from %d retained segments",
+							lower_fname, upper_fname,
+							nsegments));
+
+	/*
+	 * Allow for limited timestamp reordering by examining one preceding
+	 * segment for the lower boundary and one following segment for the upper
+	 * boundary.  Do not extend across a missing segment.
+	 */
+	lower_start = lower_candidate;
+	if (lower_start > 0 &&
+		segments[lower_start - 1].segno + 1 == segments[lower_start].segno)
+		lower_start--;
+	upper_end = upper_candidate;
+	if (upper_end + 1 < nsegments &&
+		segments[upper_end].segno + 1 == segments[upper_end + 1].segno)
+		upper_end++;
+
+	for (int i = lower_start; i <= lower_candidate; i++)
+	{
+		if (!segments[i].scanned)
+		{
+			ScanWalTimeSegment(&segments[i], i, wanted_start, wanted_end);
+			nscanned++;
+		}
+		MergeWalTimeSegment(&segments[i], &lower, NULL);
+	}
+	for (int i = upper_candidate; i <= upper_end; i++)
+	{
+		if (!segments[i].scanned)
+		{
+			ScanWalTimeSegment(&segments[i], i, wanted_start, wanted_end);
+			nscanned++;
+		}
+		MergeWalTimeSegment(&segments[i], NULL, &upper);
+	}
+
+	ereport(DEBUG1,
+			errmsg_internal("WAL time search decoded %d of %d retained segments",
+							nscanned, nsegments));
+
+	if (!lower.found)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("could not locate a WAL time boundary"),
+				errdetail("The WAL search did not find a timestamped record at or before the requested lower bound."));
+
+	/*
+	 * There may be no timestamped record after the requested upper bound on a
+	 * quiet system.  In that case, use the current WAL position so that the
+	 * returned range still includes all WAL currently available.
+	 */
+	if (!upper.found)
+	{
+		upper.lsn = current_lsn;
+
+		/*
+		 * The last enumerated segment should contain current_lsn.  Verify
+		 * this because pg_wal can change while it is being enumerated;
+		 * otherwise the continuity check below would not cover a missing WAL
+		 * tail.
+		 */
+		upper_segment_index = nsegments - 1;
+		if (segments[upper_segment_index].segno != current_segno)
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_EXCEPTION),
+					errmsg("WAL segment needed for the time search is missing"),
+					errdetail("The start LSN is %X/%08X, the end LSN is %X/%08X, and segment " UINT64_FORMAT " is not present in pg_wal.",
+							  LSN_FORMAT_ARGS(lower.lsn),
+							  LSN_FORMAT_ARGS(upper.lsn),
+							  (uint64) current_segno));
+	}
+	else
+		upper_segment_index = upper.segment_index;
+
+	if (lower.lsn >= upper.lsn)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_EXCEPTION),
+				errmsg("could not find a valid WAL range for the requested time window"),
+				errdetail("The matching lower boundary does not precede the upper boundary in WAL."));
+
+	Assert(lower.segment_index >= 0 && lower.segment_index < nsegments);
+	Assert(upper_segment_index >= 0 && upper_segment_index < nsegments);
+	for (int i = lower.segment_index + 1; i <= upper_segment_index; i++)
+	{
+		/*
+		 * The returned LSN range must be continuously readable from pg_wal;
+		 * otherwise, functions such as pg_get_wal_records_info() would fail
+		 * when scanning the range across a missing segment.
+		 */
+		if (segments[i - 1].segno + 1 != segments[i].segno)
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_EXCEPTION),
+					errmsg("WAL segment needed for the time search is missing"),
+					errdetail("The start LSN is %X/%08X, the end LSN is %X/%08X, and segment " UINT64_FORMAT " is not present in pg_wal.",
+							  LSN_FORMAT_ARGS(lower.lsn),
+							  LSN_FORMAT_ARGS(upper.lsn),
+							  (uint64) (segments[i - 1].segno + 1)));
+	}
+
+	values[0] = TimestampTzGetDatum(lower.time);
+	values[1] = LSNGetDatum(lower.lsn);
+	if (upper.found)
+		values[2] = TimestampTzGetDatum(upper.time);
+	else
+		nulls[2] = true;
+	values[3] = LSNGetDatum(upper.lsn);
+
+	pfree(segments);
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+#undef PG_GET_WAL_LOCATION_AT_TIME_COLS
+}
+
+/*
  * List the retained WAL segment files intersecting [start_lsn, end_lsn), or
  * the segment containing start_lsn when end_lsn is omitted or equal to it.
  * Report complete segment boundaries, not the range clipped to the inputs.
@@ -676,7 +1155,7 @@ pg_get_wal_files(PG_FUNCTION_ARGS)
 		last_segno = first_segno;
 	else
 		XLByteToPrevSeg(end_lsn, last_segno, wal_segment_size);
-	segments = GetWalTimeSegments(&nsegments);
+	segments = GetWalTimeSegments(&nsegments, NULL);
 
 	for (XLogSegNo segno = first_segno;; segno++)
 	{
