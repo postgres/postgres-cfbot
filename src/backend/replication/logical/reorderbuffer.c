@@ -3158,6 +3158,88 @@ ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 }
 
 /*
+ * Remove tuplecid changes queued by subtransaction xid from its toplevel
+ * transaction's list.
+ *
+ * Unlike regular changes, tuplecid changes are always queued on the toplevel
+ * transaction (see ReorderBufferAddNewTupleCids), so they would otherwise
+ * survive the abort of the subtransaction that wrote them.  That's wrong:
+ * they describe catalog tuple versions created or killed by the aborted
+ * subtransaction, which never became visible, and keeping them can corrupt
+ * ReorderBufferBuildTupleCidHash() at commit time -- both when the toplevel
+ * transaction later reuses the same tid (the stale entry collides with the
+ * fresh one, breaking the cmin equality assumption) and when nothing touches
+ * the tid again (a stale cmax would make a still-live tuple look deleted on
+ * historic snapshots).
+ *
+ * The cleanup is pointless when the whole toplevel transaction is
+ * being aborted, since ReorderBufferCleanupTXN() frees the whole list
+ * anyway; the caller passes the abort record's primary xid and we skip
+ * the scan when it is xid's toplevel.  Note that the opposite decision
+ * -- cleaning only when the primary xid's own association is known --
+ * would be wrong: abort records are written once the subtransaction is
+ * already in TRANS_ABORT, so they carry no toplevel xid in their
+ * header, and an outer subtransaction that never wrote WAL of its own
+ * never gets an association at all.  When such an outer subtransaction
+ * rolls back, released inner subtransactions listed in its abort record
+ * do have known associations and are cleaned here.
+ *
+ * If this pass does not know the association between the aborting
+ * subtransaction and its toplevel, there is nothing we can clean up here, and
+ * that's fine: such a pass must have started after the subtransaction's first
+ * (toplevel-xid-bearing) WAL record.  A pass that will output-decode the
+ * toplevel commit cannot have started that late: a slot's restart point
+ * cannot advance past the oldest in-progress transaction
+ * (SnapBuildProcessRunningXacts()), so the commit-decoding pass has replayed
+ * the record that established the association.  Conversely, once the restart
+ * point has advanced past that record, the commit has already been consumed
+ * by an earlier pass and is skipped here via SnapBuildXactNeedsSkip(), so
+ * stale tuplecid entries left behind in that case are dropped along with the
+ * transaction state without ever reaching ReorderBufferBuildTupleCidHash().
+ */
+void
+ReorderBufferCleanupSubTxnTupleCids(ReorderBuffer *rb, TransactionId xid,
+									TransactionId primary_xid)
+{
+	ReorderBufferTXN *txn;
+	ReorderBufferTXN *toptxn;
+	dlist_mutable_iter it;
+
+	txn = ReorderBufferTXNByXid(rb, xid, false, NULL, InvalidXLogRecPtr,
+								false);
+
+	/* unknown transaction, or unknown association: nothing to remove */
+	if (txn == NULL || !rbtxn_is_known_subxact(txn))
+		return;
+
+	toptxn = rbtxn_get_toptxn(txn);
+
+	/*
+	 * The whole toplevel transaction is being aborted (the abort record's
+	 * primary xid is xid's toplevel): ReorderBufferCleanupTXN() will free
+	 * the whole list shortly, don't scan it once per aborted subxid.
+	 */
+	if (toptxn->xid == primary_xid)
+		return;
+
+	dlist_foreach_modify(it, &toptxn->tuplecids)
+	{
+		ReorderBufferChange *change;
+
+		change = dlist_container(ReorderBufferChange, node, it.cur);
+
+		Assert(change->action == REORDER_BUFFER_CHANGE_INTERNAL_TUPLECID);
+
+		if (change->data.tuplecid.subxid == xid)
+		{
+			dlist_delete(&change->node);
+			ReorderBufferFreeChange(rb, change, false);
+			toptxn->ntuplecids--;
+		}
+	}
+}
+
+/*
  * Abort all transactions that aren't actually running anymore because the
  * server restarted.
  *
@@ -3490,7 +3572,8 @@ void
 ReorderBufferAddNewTupleCids(ReorderBuffer *rb, TransactionId xid,
 							 XLogRecPtr lsn, RelFileLocator locator,
 							 ItemPointerData tid, CommandId cmin,
-							 CommandId cmax, CommandId combocid)
+							 CommandId cmax, CommandId combocid,
+							 TransactionId subxid)
 {
 	ReorderBufferChange *change = ReorderBufferAllocChange(rb);
 	ReorderBufferTXN *txn;
@@ -3502,6 +3585,7 @@ ReorderBufferAddNewTupleCids(ReorderBuffer *rb, TransactionId xid,
 	change->data.tuplecid.cmin = cmin;
 	change->data.tuplecid.cmax = cmax;
 	change->data.tuplecid.combocid = combocid;
+	change->data.tuplecid.subxid = subxid;
 	change->lsn = lsn;
 	change->txn = txn;
 	change->action = REORDER_BUFFER_CHANGE_INTERNAL_TUPLECID;
