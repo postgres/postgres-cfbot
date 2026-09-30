@@ -138,7 +138,7 @@ extern bool DecodingContextReady(LogicalDecodingContext *ctx);
 extern void FreeDecodingContext(LogicalDecodingContext *ctx);
 
 extern void LogicalIncreaseXminForSlot(XLogRecPtr current_lsn,
-									   TransactionId xmin);
+									   TransactionId xmin, bool catalog);
 extern void LogicalIncreaseRestartDecodingForSlot(XLogRecPtr current_lsn,
 												  XLogRecPtr restart_lsn);
 extern void LogicalConfirmReceivedLocation(XLogRecPtr lsn);

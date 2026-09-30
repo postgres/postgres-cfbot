@@ -44,6 +44,8 @@ typedef struct RepackDecodingState
 
 	/* Per-change memory context. */
 	MemoryContext change_cxt;
+	/* Per-snapshot memory context. */
+	MemoryContext snapshot_cxt;
 
 	/* A tuple slot used to pass tuples back and forth */
 	TupleTableSlot *slot;
@@ -67,6 +69,9 @@ typedef struct DecodingWorkerShared
 	/* Is the decoding initialized? */
 	bool		initialized;
 
+	/* Set to request a snapshot. */
+	bool		snapshot_requested;
+
 	/*
 	 * Once the worker has reached this LSN, it should close the current
 	 * output file and either create a new one or exit, according to the field
@@ -74,6 +79,8 @@ typedef struct DecodingWorkerShared
 	 * the WAL available and keep checking this field. It is ok if the worker
 	 * had already decoded records whose LSN is >= lsn_upto before this field
 	 * has been set.
+	 *
+	 * Set a valid LSN to request data changes.
 	 */
 	XLogRecPtr	lsn_upto;
 
@@ -84,7 +91,8 @@ typedef struct DecodingWorkerShared
 	SharedFileSet sfs;
 
 	/* Number of the last file exported by the worker. */
-	int			last_exported;
+	int			last_exported_snapshot;
+	int			last_exported_changes;
 
 	/* Synchronize access to the fields above. */
 	slock_t		mutex;
@@ -119,7 +127,8 @@ typedef struct DecodingWorkerShared
 	char		error_queue[FLEXIBLE_ARRAY_MEMBER];
 } DecodingWorkerShared;
 
-extern void DecodingWorkerFileName(char *fname, Oid relid, uint32 seq);
+extern void DecodingWorkerFileName(char *fname, Oid relid, uint32 seq,
+								   bool snapshot);
 
 
 #endif							/* REPACK_INTERNAL_H */

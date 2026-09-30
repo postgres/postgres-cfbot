@@ -43,12 +43,17 @@
 #include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
+static Snapshot finalize_block_range(ChangeContext *chgcxt, BlockNumber cur,
+									 BlockNumber start, BlockNumber *end_p,
+									 BlockNumber nblocks);
 static void reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
 									 RewriteState rwstate);
 
@@ -583,15 +588,14 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
-								 Snapshot snapshot,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
 								 double *tups_vacuumed,
-								 double *tups_recently_dead)
+								 double *tups_recently_dead,
+								 void *tableam_data)
 {
 	RewriteState rwstate;
-	BulkInsertState bistate;
 	IndexScanDesc indexScan;
 	TableScanDesc tableScan;
 	HeapScanDesc heapScan;
@@ -602,7 +606,12 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	TupleTableSlot *reform_slot;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
-	bool		concurrent = snapshot != NULL;
+	ChangeContext *chgcxt = (ChangeContext *) tableam_data;
+	bool		concurrent = chgcxt != NULL;
+	Snapshot	snapshot = NULL;
+	BlockNumber range_start = InvalidBlockNumber;
+	BlockNumber range_end = InvalidBlockNumber;
+	BlockNumber	nblocks = InvalidBlockNumber;
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -623,14 +632,11 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	else
 		rwstate = NULL;
 
-	/* In concurrent mode, prepare for bulk-insert operation. */
-	if (concurrent)
-		bistate = GetBulkInsertState();
-	else
-		bistate = NULL;
-
-	/* Set up sorting if wanted */
-	if (use_sort)
+	/*
+	 * Set up sorting if wanted. CONCURRENTLY effectively ignores use_sort -
+	 * it sorts the tuple w/o tuplesort, see below.
+	 */
+	if (use_sort && !concurrent)
 		tuplesort = tuplesort_begin_cluster(oldTupDesc, OldIndex,
 											maintenance_work_mem,
 											NULL, TUPLESORT_NONE);
@@ -642,20 +648,21 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * that still need to be copied, we scan with SnapshotAny and use
 	 * HeapTupleSatisfiesVacuum for the visibility test.
 	 *
-	 * In the CONCURRENTLY case, we do regular MVCC visibility tests, using
-	 * the snapshot passed by the caller.
+	 * In the CONCURRENTLY case, we change the snapshot each time we have
+	 * scanned certain range of blocks, so that we do not restrict the
+	 * progress of the xmin horizon for VACUUM too much. Index scan cannot be
+	 * used because it returns tuples in random order, which makes it
+	 * impossible to split the scan into block ranges.
 	 */
-	if (OldIndex != NULL && !use_sort)
+	if (OldIndex != NULL && !use_sort && !concurrent)
 	{
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_INDEX_SCAN_HEAP);
 
 		tableScan = NULL;
 		heapScan = NULL;
-		indexScan = index_beginscan(OldHeap, OldIndex, false,
-									snapshot ? snapshot : SnapshotAny,
-									NULL, 0, 0,
-									SO_NONE);
+		indexScan = index_beginscan(OldHeap, OldIndex, false, SnapshotAny, NULL, 0,
+									0, SO_NONE);
 		index_rescan(indexScan, NULL, 0, NULL, 0);
 	}
 	else
@@ -664,22 +671,70 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_SEQ_SCAN_HEAP);
 
-		tableScan = table_beginscan(OldHeap,
-									snapshot ? snapshot : SnapshotAny,
-									0, (ScanKey) NULL,
+		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL,
 									SO_NONE);
 		heapScan = (HeapScanDesc) tableScan;
+
+		/*
+		 * In CONCURRENTLY mode we scan the table by ranges of blocks and the
+		 * algorithm below expects forward direction. (No other direction
+		 * should be set here regardless concurrently anyway.)
+		 */
+		Assert(heapScan->rs_dir == ForwardScanDirection || !concurrent);
 		indexScan = NULL;
 
 		/* Set total heap blocks */
 		pgstat_progress_update_param(PROGRESS_REPACK_TOTAL_HEAP_BLKS,
 									 heapScan->rs_nblocks);
+
+		/* Setup the first range. */
+		if (concurrent)
+		{
+			range_start = heapScan->rs_startblock;
+			range_end = range_start + repack_pages_per_snapshot;
+		}
 	}
 
 	slot = table_slot_create(OldHeap, NULL);
 	hslot = (BufferHeapTupleTableSlot *) slot;
 	reform_slot = MakeSingleTupleTableSlot(RelationGetDescr(OldHeap),
 										   &TTSOpsVirtual);
+
+	if (concurrent)
+	{
+		/*
+		 * Do not block the progress of xmin horizons.
+		 */
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+
+		/*
+		 * As there is no snapshot, our xmin should be invalid now.
+		 *
+		 * XXX xid can still be valid. The next patches in the series fix
+		 * that.
+		 */
+		Assert(!TransactionIdIsValid(MyProc->xmin));
+
+		/*
+		 * Wait until the worker has the initial snapshot and retrieve it.
+		 */
+		snapshot = repack_get_snapshot(chgcxt);
+
+		/*
+		 * Unlike a scan during query processing, we also need to capture
+		 * changes on pages that the scan will not reach: when processing
+		 * particular range of pages, we always need to process changes on
+		 * pages beyond nblocks.
+		 *
+		 * This had to wait until logical decoding has started (i.e. until we
+		 * received the snapshot above), otherwise we could miss tuples
+		 * inserted right after the block that we consider the last one.
+		 */
+		nblocks = heapScan->rs_nblocks;
+
+		PushActiveSnapshot(snapshot);
+	}
 
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
@@ -697,8 +752,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		if (indexScan != NULL)
 		{
-			if (!table_index_getnext_slot(indexScan, ForwardScanDirection,
-										  slot))
+			/* See above. */
+			Assert(!concurrent);
+
+			if (!table_index_getnext_slot(indexScan, ForwardScanDirection, slot))
 				break;
 
 			/* Since we used no scan keys, should never need to recheck */
@@ -835,10 +892,40 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				continue;
 			}
 		}
+		else
+		{
+			BlockNumber blkno;
+			bool		visible;
+
+			/*
+			 * With CONCURRENTLY, we use each snapshot only for certain range
+			 * of pages, so that VACUUM does not get blocked for too long. So
+			 * first check if the tuple falls into the current range.
+			 */
+			blkno = BufferGetBlockNumber(buf);
+
+			Assert(BlockNumberIsValid(range_end));
+
+			/* End of the current range or a wraparound? */
+			if (!repack_block_in_range(blkno, range_start, range_end,
+									   InvalidBlockNumber))
+				snapshot = finalize_block_range(chgcxt, blkno, range_start,
+												&range_end, nblocks);
+
+			/* Finally check the tuple visibility. */
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			visible = HeapTupleSatisfiesVisibility(tuple, snapshot, buf);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (!visible)
+				continue;
+		}
 
 		*num_tuples += 1;
 		if (tuplesort != NULL)
 		{
+			Assert(!concurrent);
+
 			tuplesort_putheaptuple(tuplesort, tuple);
 
 			/*
@@ -859,7 +946,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			if (!concurrent)
 				reform_and_rewrite_tuple(slot, reform_slot, rwstate);
 			else
-				heap_insert_for_repack(NewHeap, slot, reform_slot, bistate);
+				heap_insert_for_repack(chgcxt, slot, reform_slot);
 
 			/*
 			 * In indexscan mode and also VACUUM FULL, report increase in
@@ -869,6 +956,29 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			ct_val[1] = *num_tuples;
 			pgstat_progress_update_multi_param(2, ct_index, ct_val);
 		}
+	}
+
+	if (concurrent)
+	{
+		XLogRecPtr	end_of_wal;
+
+		/*
+		 * Process the changes belonging to the last range.
+		 */
+		end_of_wal = GetFlushRecPtr(NULL);
+		repack_process_concurrent_changes(chgcxt, end_of_wal,
+										  InvalidBlockNumber,
+										  InvalidBlockNumber,
+										  InvalidBlockNumber,
+										  false, false);
+
+		/*
+		 * There was an active transaction snapshot on entry, so push one
+		 * before return.
+		 */
+		PopActiveSnapshot();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
 	}
 
 	if (indexScan != NULL)
@@ -916,10 +1026,13 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			ExecStoreHeapTuple(tuple, slot, false);
 
 			n_tuples += 1;
-			if (!concurrent)
-				reform_and_rewrite_tuple(slot, reform_slot, rwstate);
-			else
-				heap_insert_for_repack(NewHeap, slot, reform_slot, bistate);
+
+			/*
+			 * The CONCURRENTLY mode uses auxiliary tables rather than
+			 * tuplesort.
+			 */
+			Assert(!concurrent);
+			reform_and_rewrite_tuple(slot, reform_slot, rwstate);
 
 			/* Report n_tuples */
 			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED,
@@ -935,8 +1048,114 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	/* Write out any remaining tuples, and fsync if needed */
 	if (rwstate)
 		end_heap_rewrite(rwstate);
-	if (bistate)
-		FreeBulkInsertState(bistate);
+}
+
+/*
+ * Finalize processing of the current block range.
+ *
+ * 'cur' is the current block, 'start' is the first block of the current
+ * range.
+ *
+ * '*end_p': on entry, the first block beyond the current range, on exit, the
+ * first block beyond the new range.
+ *
+ * Return the snapshot for the scan of the new range.
+ */
+static Snapshot
+finalize_block_range(ChangeContext *chgcxt, BlockNumber cur,
+					 BlockNumber start, BlockNumber *end_p,
+					 BlockNumber	nblocks)
+{
+	BlockNumber end = *end_p;
+	XLogRecPtr	end_of_wal;
+	Snapshot	snapshot;
+
+	/*
+	 * Wait here when testing how snapshot is changed at page boundary.
+	 */
+	INJECTION_POINT("repack-concurrently-new-range", NULL);
+
+	/*
+	 * Decode all the concurrent data changes committed so far before
+	 * requesting the next snapshot - these changes are applicable on top of
+	 * the current snapshot. Since we only copied part of the table so far,
+	 * only changes applicable to that part can be applied.
+	 *
+	 * It's important to apply the changes before we start copying the next
+	 * range of blocks. Without that, in case of concurrent UPDATE, we could
+	 * end up with both old and new tuple present in the new table: the old
+	 * still visible in the current range and the new already visible in the
+	 * following range (for which we'll use more recent snapshot). Thus it'd
+	 * be non-trivial to apply the UPDATE later. By replaying it now, we get
+	 * rid of the old tuple in the current range.
+	 *
+	 * Before processing the data changes, handle special case of the current
+	 * block number.
+	 */
+	if (cur > end)
+	{
+		/*
+		 * If the range ends with empty blocks, make sure their data changes
+		 * are processed: the next snapshot will not be used for those blocks.
+		 */
+		end = cur;
+	}
+#ifdef USE_ASSERT_CHECKING
+	else if (cur >= start)
+		Assert(cur == end);
+#endif /* USE_ASSERT_CHECKING */
+
+	end_of_wal = GetFlushRecPtr(NULL);
+	repack_process_concurrent_changes(chgcxt, end_of_wal, start, end, nblocks,
+									  true, false);
+
+	/*
+	 * A new snapshot will be pushed below. Note that it's important to not do
+	 * this earlier, because - while processing the concurrent data changes -
+	 * we might have needed to fetch TOASTed values from the old relation -
+	 * see the UPDATE-to-INSERT conversion in apply_concurrent_changes(). As
+	 * this snapshot protects the data copied from VACUUM, it should also
+	 * protect the TOAST values referenced by the consequent UPDATE
+	 * statements.
+	 */
+	PopActiveSnapshot();
+	InvalidateCatalogSnapshot();
+
+	/* See above. */
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+
+	/*
+	 * XXX It might be worth Assert(CatalogSnapshot == NULL) here, however
+	 * that symbol is not external.
+	 */
+
+	/*
+	 * Compute the end of the new range by aligning 'cur' to a multiple of
+	 * range boundary. This accounts for the possibility that some block
+	 * numbers could have been skipped (due to pages being empty).
+	 */
+	end = cur + repack_pages_per_snapshot - (cur % repack_pages_per_snapshot);
+	/*
+	 * The scan should always end right before 'start'. If we have a
+	 * wraparound, make sure that new 'end' does not go beyond 'start'.
+	 * Otherwise the range boundaries would fail to indicate that a wraparound
+	 * took place, and repack_block_in_range() would give wrong answers.
+	 */
+	if (cur < start && end > start)
+		end = start;
+
+	*end_p = end;
+
+	/*
+	 * Get the snapshot for the next range - it should have been built at the
+	 * position right after the last change decoded. Data present in the next
+	 * range of blocks will either be visible to the snapshot or appear in the
+	 * next batch of decoded changes.
+	 */
+	snapshot = repack_get_snapshot(chgcxt);
+	PushActiveSnapshot(snapshot);
+
+	return snapshot;
 }
 
 /*
