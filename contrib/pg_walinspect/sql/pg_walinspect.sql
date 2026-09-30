@@ -51,6 +51,30 @@ SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_records_info(:'wal_lsn1', :'wal_lsn2'
 SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_stats(:'wal_lsn1', :'wal_lsn2');
 SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_block_info(:'wal_lsn1', :'wal_lsn2');
 
+-- Return the retained WAL file and its complete segment boundaries.
+SELECT wal_file = pg_walfile_name(segment_start_lsn) AS file_ok,
+       segment_start_lsn <= :'wal_lsn1'::pg_lsn AS start_ok,
+       segment_end_lsn > :'wal_lsn1'::pg_lsn AS end_ok
+FROM pg_get_wal_files(:'wal_lsn1', :'wal_lsn1'::pg_lsn + 1);
+
+-- An end LSN at a segment boundary must not include the next segment.
+WITH segment AS
+(
+  SELECT * FROM pg_get_wal_files(:'wal_lsn1', :'wal_lsn1'::pg_lsn + 1)
+)
+SELECT count(*) = 1 AS one_file
+FROM segment,
+     LATERAL pg_get_wal_files(segment_start_lsn, segment_end_lsn);
+
+SELECT count(*) = 1 AS equal_lsn_ok
+FROM pg_get_wal_files(:'wal_lsn1', :'wal_lsn1');
+SELECT count(*) = 1 AS default_end_ok
+FROM pg_get_wal_files(:'wal_lsn1');
+SELECT * FROM pg_get_wal_files(:'wal_lsn1'::pg_lsn + 1, :'wal_lsn1');
+SELECT count(*) = 1 AS future_end_ok
+FROM pg_get_wal_files(pg_current_wal_lsn(), 'FFFFFFFF/FFFFFFFF');
+SELECT * FROM pg_get_wal_files('0/0', '0/1');
+
 -- ===================================================================
 -- Test for filtering out WAL records of a particular table
 -- ===================================================================
@@ -110,6 +134,8 @@ SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_stats(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- no
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_block_info(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- no
+SELECT has_function_privilege('regress_pg_walinspect',
+  'pg_get_wal_files(pg_lsn, pg_lsn)', 'EXECUTE'); -- no
 
 -- Functions accessible by users with role pg_read_server_files.
 GRANT pg_read_server_files TO regress_pg_walinspect;
@@ -122,6 +148,8 @@ SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_stats(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- yes
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_block_info(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- yes
+SELECT has_function_privilege('regress_pg_walinspect',
+  'pg_get_wal_files(pg_lsn, pg_lsn)', 'EXECUTE'); -- yes
 
 REVOKE pg_read_server_files FROM regress_pg_walinspect;
 
@@ -134,6 +162,8 @@ GRANT EXECUTE ON FUNCTION pg_get_wal_stats(pg_lsn, pg_lsn, boolean)
   TO regress_pg_walinspect;
 GRANT EXECUTE ON FUNCTION pg_get_wal_block_info(pg_lsn, pg_lsn, boolean)
   TO regress_pg_walinspect;
+GRANT EXECUTE ON FUNCTION pg_get_wal_files(pg_lsn, pg_lsn)
+  TO regress_pg_walinspect;
 
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_record_info(pg_lsn)', 'EXECUTE'); -- yes
@@ -143,6 +173,8 @@ SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_stats(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- yes
 SELECT has_function_privilege('regress_pg_walinspect',
   'pg_get_wal_block_info(pg_lsn, pg_lsn, boolean) ', 'EXECUTE'); -- yes
+SELECT has_function_privilege('regress_pg_walinspect',
+  'pg_get_wal_files(pg_lsn, pg_lsn)', 'EXECUTE'); -- yes
 
 REVOKE EXECUTE ON FUNCTION pg_get_wal_record_info(pg_lsn)
   FROM regress_pg_walinspect;
@@ -151,6 +183,8 @@ REVOKE EXECUTE ON FUNCTION pg_get_wal_records_info(pg_lsn, pg_lsn)
 REVOKE EXECUTE ON FUNCTION pg_get_wal_stats(pg_lsn, pg_lsn, boolean)
   FROM regress_pg_walinspect;
 REVOKE EXECUTE ON FUNCTION pg_get_wal_block_info(pg_lsn, pg_lsn, boolean)
+  FROM regress_pg_walinspect;
+REVOKE EXECUTE ON FUNCTION pg_get_wal_files(pg_lsn, pg_lsn)
   FROM regress_pg_walinspect;
 
 -- ===================================================================
