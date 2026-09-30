@@ -10319,6 +10319,15 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	}
 
 	/*
+	 * If the referencing foreign key uses PERIOD, the primary key must use
+	 * WITHOUT OVERLAPS
+	 */
+	if (!pk_has_without_overlaps && with_period)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_FOREIGN_KEY),
+				errmsg("foreign key using PERIOD must reference a primary key or unique constraint using WITHOUT OVERLAPS"));
+
+	/*
 	 * If the referenced primary key has WITHOUT OVERLAPS, the foreign key
 	 * must use PERIOD.
 	 */
@@ -14022,12 +14031,11 @@ transformFkeyCheckAttrs(Relation pkrel,
 		indexStruct = (Form_pg_index) GETSTRUCT(indexTuple);
 
 		/*
-		 * Must have the right number of columns; must be unique (or if
-		 * temporal then exclusion instead) and not a partial index; forget it
-		 * if there are any expressions, too. Invalid indexes are out as well.
+		 * Must have the right number of columns; must be unique and not a
+		 * partial index; forget it if there are any expressions, too. Invalid
+		 * indexes are out as well.
 		 */
-		if (indexStruct->indnkeyatts == numattrs &&
-			(with_period ? indexStruct->indisexclusion : indexStruct->indisunique) &&
+		if (indexStruct->indnkeyatts == numattrs && indexStruct->indisunique &&
 			indexStruct->indisvalid &&
 			heap_attisnull(indexTuple, Anum_pg_index_indpred, NULL) &&
 			heap_attisnull(indexTuple, Anum_pg_index_indexprs, NULL))
@@ -14090,7 +14098,8 @@ transformFkeyCheckAttrs(Relation pkrel,
 
 			/* We need to know whether the index has WITHOUT OVERLAPS */
 			if (found)
-				*pk_has_without_overlaps = indexStruct->indisexclusion;
+				*pk_has_without_overlaps = indexStruct->indisunique &&
+					indexStruct->indisexclusion;
 		}
 		ReleaseSysCache(indexTuple);
 		if (found)
