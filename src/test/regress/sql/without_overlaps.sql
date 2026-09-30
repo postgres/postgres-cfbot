@@ -1119,6 +1119,50 @@ CREATE TABLE temporal_fk2_rng2rng (
 \d temporal_fk2_rng2rng
 DROP TABLE temporal_fk2_rng2rng;
 
+-- Referencing a non-temporal primary key should fail:
+CREATE TABLE temporal_rng3 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng3_pk PRIMARY KEY (id, valid_at)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3 (id, PERIOD valid_at)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3
+);
+DROP TABLE temporal_rng3;
+
+-- Referencing an exclusion constraint should fail:
+CREATE TABLE temporal_rng3 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng3_excl EXCLUDE USING gist (id WITH =, valid_at WITH &&)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3 (id, PERIOD valid_at)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3
+);
+DROP TABLE temporal_rng3;
+
 --
 -- test ALTER TABLE ADD CONSTRAINT
 --
