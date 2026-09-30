@@ -315,6 +315,18 @@ struct XLogReaderState
 	 * data.
 	 */
 	bool		nonblocking;
+
+#ifndef FRONTEND
+
+	/*
+	 * Reset callback on the memory context holding this reader, which closes
+	 * the open WAL segment file if that context goes away before
+	 * XLogReaderFree() is reached. Registered on the first segment_open()
+	 * call, see WALRead().
+	 */
+	MemoryContextCallback reset_cb;
+	bool		reset_cb_registered;
+#endif
 };
 
 /*
