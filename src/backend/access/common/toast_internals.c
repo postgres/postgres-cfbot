@@ -27,6 +27,8 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
+int			toast_default_flavour = TOAST_FLAVOUR_PLAIN;
+
 static bool toastrel_valueid_exists(Relation toastrel, Oid8 valueid);
 static bool toastid_valueid_exists(Oid toastrelid, Oid8 valueid);
 
