@@ -21,57 +21,56 @@ $node->stop;
 ###
 $node->start;
 
-# Check that the attach counter is incremented on a new connection
+# This first call to the function after startup loads the library
+# and initializes the shmem area.
 my $attach_count1 =
   $node->safe_psql("postgres", "SELECT get_test_shmem_attach_count();");
+
+# Check that the attach counter is incremented on a new connection
 my $attach_count2 =
   $node->safe_psql("postgres", "SELECT get_test_shmem_attach_count();");
 cmp_ok($attach_count2, '>', $attach_count1,
 	"attach callback is called in each backend");
 
-$node->stop;
+# Allocate another shmem area, after the library is loaded.
+my $stderr;
+my $res = $node->safe_psql("postgres",
+	"SELECT test_shmem_register('test_shmem after startup', 20, 1);");
+is($res, 0, 'allocate after startup');
 
-###
-# Test that trying to allocate a new shmem area with size =
-# SHMEM_ATTACH_UNKNOWN_SIZE (-1) fails.
-###
-$node->append_conf('postgresql.conf', "test_shmem.area_size = -1");
-$node->start;
+# Test attaching to it again
+$res = $node->safe_psql("postgres",
+	"SELECT test_shmem_register('test_shmem after startup', 20, 2);");
+is($res, 1, 'attach after startup');
 
-my (undef, undef, $stderr) =
-  $node->psql("postgres", "SELECT get_test_shmem_attach_count();");
+# If the size doesn't match when attaching, you get an error
+(undef, undef, $stderr) =
+  $node->psql("postgres", "SELECT test_shmem_register('test_shmem after startup', 25, 3);");
 like(
 	$stderr,
-	qr/cannot attach to shared memory struct "test_shmem area" because it does not exist/,
-	"unknown size request for a nonexistent area fails");
+	qr/ERROR:  shared memory struct "test_shmem after startup" was created with different size: existing 20, requested 25/,
+	"attaching with different size fails");
+
+# Test attaching with SHMEM_ATTACH_UNKNOWN_SIZE
+$res =
+  $node->safe_psql("postgres", "SELECT test_shmem_register('test_shmem after startup', -1, 4);");
+is($res, 2, 'attach with SHMEM_ATTACH_UNKNOWN_SIZE');
+
+(undef, undef, $stderr) = $node->psql("postgres",
+	"SELECT test_shmem_register('test_shmem missing area', -1, 3);");
+like($stderr,
+	qr/cannot attach to shared memory struct "test_shmem missing area" because it does not exist/,
+	"unknown-size request for a nonexistent area fails");
+
+(undef, undef, $stderr) = $node->psql("postgres",
+	"SELECT test_shmem_register('test_shmem too small', 1, 3);");
+like($stderr, qr/shared memory size must be at least \d+ bytes/,
+	"request smaller than an integer fails");
 
 $node->stop;
-$node->adjust_conf('postgresql.conf', 'test_shmem.area_size', undef);
 
 ###
-# Test allocating memory after startup in single-user mode
-###
-SKIP:
-{
-	# Skip the test on Windows, as single-user mode would fail on permission
-	# failure with privileged accounts.
-	skip 'single-user test is not supported by this platform', 1
-	  if $windows_os;
-	my $query = "SELECT get_test_shmem_attach_count();\n";
-	my $result = run_log(
-		[
-			'postgres', '--single', '-F',
-			'-c' => 'exit_on_error=true',
-			'-D' => $node->data_dir,
-			'postgres'
-		],
-		'<' => \$query);
-
-	ok($result, "shmem area is initialized in single-user mode");
-}
-
-###
-# Test that loading via shared_preload_libraries also works
+# Test that loading via shared_preload_libraries works
 ###
 $node->append_conf('postgresql.conf',
 	"shared_preload_libraries = 'test_shmem'");
@@ -99,9 +98,8 @@ else
 	);
 }
 
-# clean up
 $node->stop;
-$node->adjust_conf('postgresql.conf', "shared_preload_libraries", undef);
+$node->adjust_conf('postgresql.conf', 'shared_preload_libraries', undef);
 
 ###
 # Test a failure in initializing the shared memory area
@@ -150,9 +148,9 @@ my $session = $node->background_psql('postgres', on_error_stop => 0);
 
 # make the request larger than the memory reserved for after-startup
 # requests.
-$session->query(q[SET test_shmem.area_size = '128kB';]);
+$session->query(q[SET test_shmem.area_size = '128kB';], verbose => 0);
 
-$session->query("SELECT get_test_shmem_attach_count();");
+$session->query("SELECT get_test_shmem_attach_count();", verbose => 0);
 like(
 	$session->{stderr},
 	qr/not enough shared memory/,
@@ -162,9 +160,69 @@ like(
 # requested, it gets cleaned up on allocation failure.  Verify that a
 # request for a smaller area succeeds in the same session.
 $session->{stderr} = '';
-$session->query("SET test_shmem.area_size = default;");
-$session->query_safe("SELECT get_test_shmem_attach_count();");
+$session->query("SET test_shmem.area_size = default;", verbose => 0);
+$session->query_safe("SELECT get_test_shmem_attach_count();", verbose => 0);
 $session->quit;
 $node->stop;
+
+###
+# Test allocating memory after startup in single-user mode
+###
+SKIP:
+{
+	# Skip the test on Windows, as single-user mode would fail on permission
+	# failure with privileged accounts.
+	skip 'single-user test is not supported by this platform', 5
+	  if $windows_os;
+
+	my @command = (
+		'postgres', '--single', '-F',
+		'-D' => $node->data_dir);
+
+	my $queries = "SELECT get_test_shmem_attach_count();\n";
+	my $result = run_log([@command, '-c' => 'exit_on_error=true', 'postgres'],
+		'<' => \$queries);
+	ok($result, "shmem area is initialized in single-user mode");
+
+	$queries = qq{
+-- allocate
+SELECT test_shmem_register('test_shmem after startup', 25, 1);
+-- attach
+SELECT test_shmem_register('test_shmem after startup', 25, 2);
+-- attach with SHMEM_ATTACH_UNKNOWN_SIZE
+SELECT test_shmem_register('test_shmem after startup', -1, 3);
+};
+	$result = run_log([@command, '-c' => 'exit_on_error=true', 'postgres'],
+		'<' => \$queries);
+	ok($result, "allocate and attach in single-user mode");
+
+	$queries = qq{
+SELECT test_shmem_register('test_shmem missing in single user', -1, 3);
+SELECT test_shmem_register('test_shmem after error', 25, 7);
+SELECT test_shmem_register('test_shmem after error', -1, 8);
+};
+	my ($stdout, $stderr);
+	$result = run_log([@command, '-c' => 'exit_on_error=false', 'postgres'],
+		'<' => \$queries, '>' => \$stdout, '2>' => \$stderr);
+	like($stderr,
+		qr/cannot attach to shared memory struct "test_shmem missing in single user" because it does not exist/,
+		"unknown-size request for a nonexistent area fails in single-user mode");
+	ok($result && $stdout =~ /test_shmem_register = "7"/,
+		"requests succeed after a failed attachment in the same process");
+
+	my $startup_stderr;
+	$result = run_log(
+		[@command, '-c' => 'exit_on_error=true',
+			'-c' => 'shared_preload_libraries=test_shmem',
+			'-c' => 'test_shmem.area_size=-1', 'postgres'],
+		'<' => \$queries, '2>' => \$startup_stderr);
+	ok(!$result &&
+		$startup_stderr =~ /SHMEM_ATTACH_UNKNOWN_SIZE cannot be used during startup/,
+		"unknown-size requests are rejected during single-user startup");
+}
+
+# clean up
+$node->stop;
+$node->adjust_conf('postgresql.conf', "shared_preload_libraries", undef);
 
 done_testing();
