@@ -442,6 +442,12 @@ INFO:  progress: {"type": "FILE", "command": "COPY FROM", "relname": "tab_progre
 copy tab_progress_reporting from stdin(on_error ignore);
 NOTICE:  2 rows were skipped due to data type incompatibility
 INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progress_reporting", "tuples_skipped": 2, "has_bytes_total": false, "tuples_excluded": 0, "tuples_processed": 1, "has_bytes_processed": true}
+begin;
+create temp table err_tbl OF copy_error_saving;
+copy tab_progress_reporting from stdin(on_error table, error_table err_tbl);
+NOTICE:  2 rows were saved to table "err_tbl" due to data type incompatibility
+INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progress_reporting", "tuples_skipped": 2, "has_bytes_total": false, "tuples_excluded": 0, "tuples_processed": 1, "has_bytes_processed": true}
+rollback;
 drop trigger check_after_tab_progress_reporting on tab_progress_reporting;
 drop function notice_after_tab_progress_reporting();
 drop table tab_progress_reporting;
