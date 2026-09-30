@@ -15,8 +15,11 @@
 #include "port/pg_numa.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "utils/array.h"
+#include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/tuplestore.h"
+#include "utils/typcache.h"
 
 
 #define NUM_BUFFERCACHE_PAGES_MIN_ELEM	8
@@ -31,6 +34,7 @@
 #define NUM_BUFFERCACHE_MARK_DIRTY_ALL_ELEM 3
 
 #define NUM_BUFFERCACHE_OS_PAGES_ELEM	3
+#define NUM_BUFFERCACHE_PARTITIONS_ELEM	12
 
 PG_MODULE_MAGIC_EXT(
 					.name = "pg_buffercache",
@@ -77,6 +81,7 @@ PG_FUNCTION_INFO_V1(pg_buffercache_evict_all);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_relation);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_all);
+PG_FUNCTION_INFO_V1(pg_buffercache_partitions);
 
 
 /* Only need to touch memory once per backend process lifetime */
@@ -161,7 +166,7 @@ pg_buffercache_pages(PG_FUNCTION_ARGS)
 		reldatabase = bufHdr->tag.dbOid;
 		forknum = BufTagGetForkNum(&bufHdr->tag);
 		blocknum = bufHdr->tag.blockNum;
-		usagecount = BUF_STATE_GET_USAGECOUNT(buf_state);
+		usagecount = BUF_STATE_GET_COOLSTATE(buf_state);
 		pinning_backends = BUF_STATE_GET_REFCOUNT(buf_state);
 
 		if (buf_state & BM_DIRTY)
@@ -605,7 +610,7 @@ pg_buffercache_summary(PG_FUNCTION_ARGS)
 		if (buf_state & BM_VALID)
 		{
 			buffers_used++;
-			usagecount_total += BUF_STATE_GET_USAGECOUNT(buf_state);
+			usagecount_total += BUF_STATE_GET_COOLSTATE(buf_state);
 
 			if (buf_state & BM_DIRTY)
 				buffers_dirty++;
@@ -655,7 +660,7 @@ pg_buffercache_usage_counts(PG_FUNCTION_ARGS)
 
 		CHECK_FOR_INTERRUPTS();
 
-		usage_count = BUF_STATE_GET_USAGECOUNT(buf_state);
+		usage_count = BUF_STATE_GET_COOLSTATE(buf_state);
 		usage_counts[usage_count]++;
 
 		if (buf_state & BM_DIRTY)
@@ -921,4 +926,157 @@ pg_buffercache_mark_dirty_all(PG_FUNCTION_ARGS)
 	result = HeapTupleGetDatum(tuple);
 
 	PG_RETURN_DATUM(result);
+}
+
+/*
+ * Inquire about partitioning of shared buffers.
+ */
+Datum
+pg_buffercache_partitions(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	MemoryContext oldcontext;
+	TupleDesc	tupledesc;
+	TupleDesc	expected_tupledesc;
+	HeapTuple	tuple;
+	Datum		result;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TypeCacheEntry *typentry = lookup_type_cache(INT4OID, 0);
+
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Switch context when allocating stuff to be used in later calls */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (get_call_result_type(fcinfo, NULL, &expected_tupledesc) != TYPEFUNC_COMPOSITE)
+			elog(ERROR, "return type must be a row type");
+
+		if (expected_tupledesc->natts != NUM_BUFFERCACHE_PARTITIONS_ELEM)
+			elog(ERROR, "incorrect number of output arguments");
+
+		/* Construct a tuple descriptor for the result rows. */
+		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "partition",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "numa_node",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 3, "num_buffers",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 4, "first_buffer",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 5, "last_buffer",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 6, "num_passes",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 7, "next_buffer",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 8, "total_allocs",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 9, "num_allocs",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 10, "total_req_allocs",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 11, "num_req_allocs",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 12, "weigths",
+						   typentry->typarray, -1, 0);
+
+		TupleDescFinalize(tupledesc);
+
+		funcctx->user_fctx = BlessTupleDesc(tupledesc);
+
+		/* Return to original context when allocating transient memory */
+		MemoryContextSwitchTo(oldcontext);
+
+		/* Set max calls and remember the user function context. */
+		funcctx->max_calls = BufferPartitionCount();
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		uint32		i = funcctx->call_cntr;
+
+		int			numa_node,
+					num_buffers,
+					first_buffer,
+					last_buffer;
+
+		uint64		buffer_total_allocs,
+					buffer_total_req_allocs;
+
+		uint32		complete_passes,
+					next_victim_buffer,
+					buffer_allocs,
+					buffer_req_allocs;
+
+		int		   *weights;
+		Datum	   *dweights;
+		ArrayType  *array;
+
+		Datum		values[NUM_BUFFERCACHE_PARTITIONS_ELEM];
+		bool		nulls[NUM_BUFFERCACHE_PARTITIONS_ELEM];
+
+		BufferPartitionGet(i, &numa_node, &num_buffers,
+						   &first_buffer, &last_buffer);
+
+		ClockSweepPartitionGetInfo(i,
+								 &complete_passes, &next_victim_buffer,
+								 &buffer_total_allocs, &buffer_allocs,
+								 &buffer_total_req_allocs, &buffer_req_allocs,
+								 &weights);
+
+		dweights = palloc_array(Datum, funcctx->max_calls);
+		for (int i = 0; i < funcctx->max_calls; i++)
+			dweights[i] = Int32GetDatum(weights[i]);
+
+		array = construct_array_builtin(dweights, funcctx->max_calls, INT4OID);
+
+		values[0] = Int32GetDatum(i);
+		nulls[0] = false;
+
+		values[1] = Int32GetDatum(numa_node);
+		nulls[1] = false;
+
+		values[2] = Int32GetDatum(num_buffers);
+		nulls[2] = false;
+
+		values[3] = Int32GetDatum(first_buffer);
+		nulls[3] = false;
+
+		values[4] = Int32GetDatum(last_buffer);
+		nulls[4] = false;
+
+		values[5] = Int64GetDatum(complete_passes);
+		nulls[5] = false;
+
+		values[6] = Int32GetDatum(next_victim_buffer);
+		nulls[6] = false;
+
+		values[7] = Int64GetDatum(buffer_total_allocs);
+		nulls[7] = false;
+
+		values[8] = Int64GetDatum(buffer_allocs);
+		nulls[8] = false;
+
+		values[9] = Int64GetDatum(buffer_total_req_allocs);
+		nulls[9] = false;
+
+		values[10] = Int64GetDatum(buffer_req_allocs);
+		nulls[10] = false;
+
+		values[11] = PointerGetDatum(array);
+		nulls[11] = false;
+
+		/* Build and return the tuple. */
+		tuple = heap_form_tuple((TupleDesc) funcctx->user_fctx, values, nulls);
+		result = HeapTupleGetDatum(tuple);
+
+		SRF_RETURN_NEXT(funcctx, result);
+	}
+	else
+		SRF_RETURN_DONE(funcctx);
 }

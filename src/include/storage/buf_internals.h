@@ -67,6 +67,36 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 #define BUF_USAGECOUNT_ONE \
 	(UINT64CONST(1) << BUF_REFCOUNT_BITS)
 
+/*
+ * Cooling state (LeanStore / 2Q-A1 cooling-stage clock sweep).
+ *
+ * The field historically used for the 0..5 usage_count now holds a single
+ * cooling-state bit: HOT (recently accessed, not an eviction candidate) or
+ * COOL (an eviction candidate).  We reuse BUF_USAGECOUNT_ONE as the unit so
+ * the buffer-state bit geography -- refcount, flag, and lock offsets, and the
+ * 64-bit StaticAsserts -- is unchanged; only the meaning of the field and the
+ * instructions that touch it change.
+ *
+ * A demand-loaded page is admitted COOL (probation); a second access promotes
+ * it to HOT (the rescue).  The sweep reclaims an already-COOL buffer and
+ * demotes a HOT one to COOL as it passes, so a HOT buffer survives the visit
+ * that cools it and is only reclaimed if it is still COOL when the hand comes
+ * around again.  A page touched once -- a sequential scan -- therefore fills
+ * and drains the COOL stage without displacing the HOT working set: scan
+ * resistance intrinsic to the replacement algorithm.
+ */
+#define BUF_COOLSTATE_COOL	0
+#define BUF_COOLSTATE_HOT	1
+#define BUF_COOLSTATE_ONE	BUF_USAGECOUNT_ONE
+
+/*
+ * The cooling state is one bit, so the field must be at least that wide.
+ * Assert it here so a future change to BUF_USAGECOUNT_BITS cannot silently
+ * narrow the field out from under the cooling state.
+ */
+StaticAssertDecl(BUF_USAGECOUNT_BITS >= 1,
+				 "cooling state needs at least one bit in the usagecount field");
+
 /* flags related definitions */
 #define BUF_FLAG_SHIFT \
 	(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS)
@@ -91,6 +121,13 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 	((uint32)((state) & BUF_REFCOUNT_MASK))
 #define BUF_STATE_GET_USAGECOUNT(state) \
 	((uint32)(((state) & BUF_USAGECOUNT_MASK) >> BUF_USAGECOUNT_SHIFT))
+
+/*
+ * Cooling state (HOT/COOL) from buffer state.  The field holds only
+ * BUF_COOLSTATE_COOL or BUF_COOLSTATE_HOT, so this is the whole field.
+ */
+#define BUF_STATE_GET_COOLSTATE(state) \
+	((uint32) (((state) & BUF_USAGECOUNT_MASK) >> BUF_USAGECOUNT_SHIFT))
 
 /*
  * Flags for buffer descriptors
@@ -134,17 +171,15 @@ StaticAssertDecl(MAX_BACKENDS_BITS <= (BUF_LOCK_BITS - 2),
 
 
 /*
- * The maximum allowed value of usage_count represents a tradeoff between
- * accuracy and speed of the clock-sweep buffer management algorithm.  A
- * large value (comparable to NBuffers) would approximate LRU semantics.
- * But it can take as many as BM_MAX_USAGE_COUNT+1 complete cycles of the
- * clock-sweep hand to find a free buffer, so in practice we don't want the
- * value to be very large.
+ * The cooling state is a single bit (HOT/COOL); the maximum value stored in
+ * the field is therefore BUF_COOLSTATE_HOT.  Retained under the historical
+ * name BM_MAX_USAGE_COUNT so the pin fast path ("promote unless already at
+ * max") reads naturally.
  */
-#define BM_MAX_USAGE_COUNT	5
+#define BM_MAX_USAGE_COUNT	BUF_COOLSTATE_HOT
 
 StaticAssertDecl(BM_MAX_USAGE_COUNT < (UINT64CONST(1) << BUF_USAGECOUNT_BITS),
-				 "BM_MAX_USAGE_COUNT doesn't fit in BUF_USAGECOUNT_BITS bits");
+				 "cooling state doesn't fit in BUF_USAGECOUNT_BITS bits");
 
 /*
  * Buffer tag identifies which disk block the buffer contains.
@@ -365,10 +400,10 @@ typedef struct BufferDesc
  * line sized.
  *
  * XXX: As this is primarily matters in highly concurrent workloads which
- * probably all are 64bit these days, and the space wastage would be a bit
- * more noticeable on 32bit systems, we don't force the stride to be cache
- * line sized on those. If somebody does actual performance testing, we can
- * reevaluate.
+ * probably all are 64bit these days. We force the stride to be cache line
+ * sized even on 32bit systems, where the space wastage is be a bit more
+ * noticeable, to allow partitioning of shared buffers (which requires the
+ * memory page be a multiple of buffer descriptor).
  *
  * Note that local buffer descriptors aren't forced to be aligned - as there's
  * no concurrent access to those it's unlikely to be beneficial.
@@ -378,7 +413,7 @@ typedef struct BufferDesc
  * platform with either 32 or 128 byte line sizes, it's good to align to
  * boundaries and avoid false sharing.
  */
-#define BUFFERDESC_PAD_TO_SIZE	(SIZEOF_VOID_P == 8 ? 64 : 1)
+#define BUFFERDESC_PAD_TO_SIZE	64
 
 typedef union BufferDescPadded
 {
@@ -411,8 +446,17 @@ typedef struct WritebackContext
 
 /* in buf_init.c */
 extern PGDLLIMPORT BufferDescPadded *BufferDescriptors;
+extern PGDLLIMPORT BufferPartitions *BufferPartitionsRegistry;
 extern PGDLLIMPORT ConditionVariableMinimallyPadded *BufferIOCVArray;
 extern PGDLLIMPORT WritebackContext BackendWritebackContext;
+
+extern int	BufferPartitionCount(void);
+extern void BufferPartitionGet(int idx, int *node, int *num_buffers,
+							   int *first_buffer, int *last_buffer);
+extern void BufferPartitionsCalculate(int *num_nodes, int *num_partitions,
+									  int *num_partitions_per_node);
+extern void BufferPartitionsParams(int *num_nodes, int *num_partitions,
+								   int *num_partitions_per_node);
 
 /* in localbuf.c */
 extern PGDLLIMPORT BufferDesc *LocalBufferDescriptors;
@@ -591,7 +635,10 @@ extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);
 
-extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
+extern void StrategySyncBalance(void);
+extern void StrategySyncPrepare(int *num_parts, uint32 *num_buf_alloc);
+extern int	StrategySyncStart(int partition, uint32 *complete_passes,
+							  int *first_buffer, int *num_buffers);
 extern void StrategyNotifyBgWriter(int bgwprocno);
 
 /* buf_table.c */

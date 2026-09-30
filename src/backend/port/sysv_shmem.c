@@ -27,6 +27,10 @@
 #include <sys/shm.h>
 #include <sys/stat.h>
 
+#ifdef USE_LIBNUMA
+#include <numa.h>
+#endif
+
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "portability/mem.h"
@@ -97,6 +101,10 @@ void	   *UsedShmemSegAddr = NULL;
 
 static Size AnonymousShmemSize;
 static void *AnonymousShmem = NULL;
+
+/* GUCs */
+bool shmem_populate = false;	/* MAP_POPULATE */
+bool shmem_interleave = false;	/* NUMA interleaving */
 
 static void *InternalIpcMemoryCreate(IpcMemoryKey memKey, Size size);
 static void IpcMemoryDetach(int status, Datum shmaddr);
@@ -604,6 +612,21 @@ CreateAnonymousSegment(Size *size)
 	int			mmap_errno = 0;
 	int			mmap_flags = MAP_SHARED | MAP_ANONYMOUS | MAP_HASSEMAPHORE;
 
+	/* If requested, populate the shared memory by MAP_POPULATE. */
+	if (shmem_populate)
+		mmap_flags |= MAP_POPULATE;
+
+#ifdef USE_LIBNUMA
+	/*
+	 * If requested, interleave the shared memory by setting a memory policy
+	 * before the mmap() call. This really matters only with MAP_POPULATE,
+	 * because without page faults the memory does not actually get placed
+	 * to the nodes. But without MAP_POPULATE it's virtually free.
+	 */
+	if (shmem_interleave)
+		numa_set_interleave_mask(numa_all_nodes_ptr);
+#endif
+
 #ifndef MAP_HUGETLB
 	/* PGSharedMemoryCreate should have dealt with this case */
 	Assert(huge_pages != HUGE_PAGES_ON);
@@ -664,6 +687,30 @@ CreateAnonymousSegment(Size *size)
 						 "\"max_connections\".",
 						 allocsize) : 0));
 	}
+
+#ifdef USE_LIBNUMA
+	/*
+	 * If set the policy to interleaving by numa_set_membind(), undo it now by
+	 * setting the policy to localalloc. With MAP_POPULATE, all the pages were
+	 * faulted and are now interleaved on the available nodes.
+	 *
+	 * To handle the case without MAP_POPULATE, apply the interleaving policy to
+	 * the shared memory segment allocated by mmap() before touching it in any
+	 * way, so that it gets placed on the correct node on first access.
+	 *
+	 * This matters especially with huge pages, where it's possible to run out
+	 * of huge pages on some nodes and then crash. By explicitly interleaving
+	 * the whole segment, that's much less likely.
+	 */
+	if (shmem_interleave)
+	{
+		/* undo the policy set by numa_set_membind() earlier */
+		numa_set_localalloc();
+
+		/* set interleaving policy for not yet faulted memory */
+		numa_interleave_memory(ptr, allocsize, numa_all_nodes_ptr);
+	}
+#endif
 
 	*size = allocsize;
 	return ptr;

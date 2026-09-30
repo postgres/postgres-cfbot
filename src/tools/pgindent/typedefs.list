@@ -363,6 +363,8 @@ BufferHeapTupleTableSlot
 BufferLockMode
 BufferLookupEnt
 BufferManagerRelation
+BufferPartition
+BufferPartitions
 BufferStrategyControl
 BufferTag
 BufferUsage
@@ -447,6 +449,7 @@ ClientCertName
 ClientConnectionInfo
 ClientData
 ClientSocket
+ClockSweep
 ClonePtrType
 ClosePortalStmt
 ClosePtrType
