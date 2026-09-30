@@ -393,6 +393,16 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 
 	InitializeParallelDSM(pcxt);
 
+	/* If no DSM segment was available, back out (do serial vacuum) */
+	if (pcxt->seg == NULL)
+	{
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		pfree(will_parallel_vacuum);
+		pfree(pvs);
+		return NULL;
+	}
+
 	/* Prepare index vacuum stats */
 	indstats = (PVIndStats *) shm_toc_allocate(pcxt->toc, est_indstats_len);
 	MemSet(indstats, 0, est_indstats_len);
@@ -460,13 +470,9 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 
 	/*
 	 * Initialize shared cost-based vacuum delay parameters if it's for
-	 * autovacuum and the parallel context has workers. Note that the parallel
-	 * context falls back to the leader's private memory with no workers and
-	 * no segment when the maximum number of DSM segments has been reached.
-	 * There are then no workers to propagate the parameters to, and no
-	 * segment to register the detach callback on.
+	 * autovacuum.
 	 */
-	if (shared->is_autovacuum && pcxt->nworkers > 0)
+	if (shared->is_autovacuum)
 	{
 		parallel_vacuum_set_cost_parameters(&shared->cost_params);
 		pg_atomic_init_u32(&shared->cost_params.generation, 1);
