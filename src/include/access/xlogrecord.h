@@ -91,6 +91,14 @@ typedef struct XLogRecord
 #define XLR_CHECK_CONSISTENCY	0x02
 
 /*
+ * The record contains a data change that was already committed and now is
+ * being applied to a new relation due to rewriting. The original XID is
+ * needed to keep the rewriting MVCC-safe, however the transaction should be
+ * ignored by logical decoding and it should not get into KnownAssignedXids.
+ */
+#define XLR_XID_REPLAYED		0x04
+
+/*
  * Header info for block data appended to an XLOG record.
  *
  * 'data_length' is the length of the rmgr-specific payload data associated

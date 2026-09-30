@@ -176,6 +176,16 @@ extern void reindex_index(const ReindexStmt *stmt, Oid indexId,
 extern bool reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 							 const ReindexParams *params);
 
+typedef struct IndexBuildSecurity
+{
+	Oid			userid;
+	int			sec_context;
+	int			nestlevel;
+} IndexBuildSecurity;
+
+extern void enable_index_build_security(Oid userid, IndexBuildSecurity *sec);
+extern void disable_index_build_security(IndexBuildSecurity *sec);
+
 extern bool ReindexIsProcessingHeap(Oid heapOid);
 extern bool ReindexIsProcessingIndex(Oid indexOid);
 

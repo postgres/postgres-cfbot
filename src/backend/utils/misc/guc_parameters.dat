@@ -2551,6 +2551,16 @@
   boot_val => 'true',
 },
 
+# TODO Tune boot_val, 1024 is probably too low.
+{ name => 'repack_snapshot_after', type => 'int', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Number of pages REPACK (CONCURRENTLY) can read using a single snapshot.',
+  flags => 'GUC_UNIT_BLOCKS | GUC_NOT_IN_SAMPLE',
+  variable => 'repack_pages_per_snapshot',
+  boot_val => '1024',
+  min => '1',
+  max => 'INT_MAX',
+}
+
 { name => 'reserved_connections', type => 'int', context => 'PGC_POSTMASTER', group => 'CONN_AUTH_SETTINGS',
   short_desc => 'Sets the number of connection slots reserved for roles with privileges of pg_use_reserved_connections.',
   variable => 'ReservedConnections',

@@ -2166,17 +2166,19 @@ pg_stat_progress_repack| SELECT s.pid,
             WHEN 5 THEN 'catch-up'::text
             WHEN 6 THEN 'swapping relation files'::text
             WHEN 7 THEN 'rebuilding index'::text
-            WHEN 8 THEN 'performing final cleanup'::text
+            WHEN 8 THEN 'building auxiliary relation index'::text
+            WHEN 9 THEN 'performing final cleanup'::text
             ELSE NULL::text
         END AS phase,
     (s.param3)::oid AS repack_index_relid,
     s.param4 AS heap_tuples_scanned,
     s.param5 AS heap_tuples_inserted,
-    s.param6 AS heap_tuples_updated,
-    s.param7 AS heap_tuples_deleted,
-    s.param8 AS heap_blks_total,
-    s.param9 AS heap_blks_scanned,
-    s.param10 AS index_rebuild_count
+    s.param6 AS heap_tuples_inserted_aux,
+    s.param7 AS heap_tuples_updated,
+    s.param8 AS heap_tuples_deleted,
+    s.param9 AS heap_blks_total,
+    s.param10 AS heap_blks_scanned,
+    s.param11 AS index_rebuild_count
    FROM (pg_stat_get_progress_info('REPACK'::text) s(pid, datid, relid, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14, param15, param16, param17, param18, param19, param20)
      LEFT JOIN pg_database d ON ((s.datid = d.oid)));
 pg_stat_progress_vacuum| SELECT s.pid,

@@ -293,6 +293,12 @@ typedef struct TM_IndexDeleteOp
 /* "options" flag bits for table_tuple_update */
 #define TABLE_UPDATE_NO_LOGICAL					(1 << 0)
 
+/*
+ * For INSERT or UPDATE, use XID (xmin) contained the in new tuple rather than
+ * the XID of the current transaction.
+ */
+#define TABLE_REUSE_XID							(1 << 31)
+
 /* flag bits for table_tuple_lock */
 /* Follow tuples whose update is in progress if lock modes don't conflict  */
 #define TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS	(1 << 0)
@@ -568,6 +574,7 @@ typedef struct TableAmRoutine
 	/* see table_tuple_delete() for reference about parameters */
 	TM_Result	(*tuple_delete) (Relation rel,
 								 ItemPointer tid,
+								 TransactionId xid,
 								 CommandId cid,
 								 uint32 options,
 								 Snapshot snapshot,
@@ -666,12 +673,12 @@ typedef struct TableAmRoutine
 											  Relation OldIndex,
 											  bool use_sort,
 											  TransactionId OldestXmin,
-											  Snapshot snapshot,
 											  TransactionId *xid_cutoff,
 											  MultiXactId *multi_cutoff,
 											  double *num_tuples,
 											  double *tups_vacuumed,
-											  double *tups_recently_dead);
+											  double *tups_recently_dead,
+											  void *tableam_data);
 
 	/*
 	 * React to VACUUM command on the relation. The VACUUM can be triggered by
@@ -1476,6 +1483,14 @@ static inline void
 table_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
 				   uint32 options, BulkInsertStateData *bistate)
 {
+	/*
+	 * TABLE_REUSE_XID restricts the slot type because not all slots preserve
+	 * the visibility information. XXX Isn't this a reason to pass the xid as
+	 * an argument?
+	 */
+	Assert((options & TABLE_REUSE_XID) == 0 || TTS_IS_HEAPTUPLE(slot) ||
+		   TTS_IS_BUFFERTUPLE(slot));
+
 	rel->rd_tableam->tuple_insert(rel, slot, cid, options,
 								  bistate);
 }
@@ -1497,6 +1512,9 @@ table_tuple_insert_speculative(Relation rel, TupleTableSlot *slot,
 							   BulkInsertStateData *bistate,
 							   uint32 specToken)
 {
+	/* TABLE_REUSE_XID is currently not needed here. */
+	Assert((options & TABLE_REUSE_XID) == 0);
+
 	rel->rd_tableam->tuple_insert_speculative(rel, slot, cid, options,
 											  bistate, specToken);
 }
@@ -1544,6 +1562,7 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  * Input parameters:
  *	rel - table to be modified (caller must hold suitable lock)
  *	tid - TID of tuple to be deleted
+ *	xid - XID to use or InvalidTransactionId for the current transaction
  *	cid - delete command ID (used for visibility test, and stored into
  *		cmax if successful)
  *	options - bitmask of options.  Supported values:
@@ -1568,11 +1587,12 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  * TM_FailureData for additional info.
  */
 static inline TM_Result
-table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
+table_tuple_delete(Relation rel, ItemPointer tid, TransactionId xid,
+				   CommandId cid,
 				   uint32 options, Snapshot snapshot, Snapshot crosscheck,
 				   bool wait, TM_FailureData *tmfd)
 {
-	return rel->rd_tableam->tuple_delete(rel, tid, cid, options,
+	return rel->rd_tableam->tuple_delete(rel, tid, xid, cid, options,
 										 snapshot, crosscheck,
 										 wait, tmfd);
 }
@@ -1623,6 +1643,10 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
 				   bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
 				   TU_UpdateIndexes *update_indexes)
 {
+	/* See table_tuple_insert(). */
+	Assert((options & TABLE_REUSE_XID) == 0 || TTS_IS_HEAPTUPLE(slot) ||
+		   TTS_IS_BUFFERTUPLE(slot));
+
 	return rel->rd_tableam->tuple_update(rel, otid, slot,
 										 cid, options, snapshot, crosscheck,
 										 wait, tmfd,
@@ -1755,8 +1779,6 @@ table_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
  *   not needed for the relation's AM
  * - *xid_cutoff - ditto
  * - *multi_cutoff - ditto
- * - snapshot - if != NULL, ignore data changes done by transactions that this
- *	 (MVCC) snapshot considers still in-progress or in the future.
  *
  * Output parameters:
  * - *xid_cutoff - rel's new relfrozenxid value, may be invalid
@@ -1769,19 +1791,19 @@ table_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 								Relation OldIndex,
 								bool use_sort,
 								TransactionId OldestXmin,
-								Snapshot snapshot,
 								TransactionId *xid_cutoff,
 								MultiXactId *multi_cutoff,
 								double *num_tuples,
 								double *tups_vacuumed,
-								double *tups_recently_dead)
+								double *tups_recently_dead,
+								void *tableam_data)
 {
 	OldTable->rd_tableam->relation_copy_for_cluster(OldTable, NewTable, OldIndex,
 													use_sort, OldestXmin,
-													snapshot,
 													xid_cutoff, multi_cutoff,
 													num_tuples, tups_vacuumed,
-													tups_recently_dead);
+													tups_recently_dead,
+													tableam_data);
 }
 
 /*

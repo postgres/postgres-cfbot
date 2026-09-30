@@ -9,8 +9,8 @@ setup
 
 	CREATE TABLE relfilenodes(node oid);
 
-	CREATE TABLE data_s1(i int, j int);
-	CREATE TABLE data_s2(i int, j int);
+	CREATE TABLE data_s1(i int, j int, _xmin xid);
+	CREATE TABLE data_s2(i int, j int, _xmin xid);
 }
 
 teardown
@@ -39,7 +39,8 @@ step wait_before_lock
 # Besides the contents, we also check that relfilenode has changed.
 
 # Have each session write the contents into a table and use FULL JOIN to check
-# if the outputs are identical.
+# if the outputs are identical. xmin is included in order to check the MVCC
+# safety.
 step check1
 {
 	INSERT INTO relfilenodes(node)
@@ -49,11 +50,11 @@ step check1
 
 	SELECT i, j FROM repack_test ORDER BY i, j;
 
-	INSERT INTO data_s1(i, j)
-	SELECT i, j FROM repack_test;
+	INSERT INTO data_s1(i, j, _xmin)
+	SELECT i, j, xmin FROM repack_test;
 
 	SELECT count(*)
-	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j, _xmin)
 	WHERE d1.i ISNULL OR d2.i ISNULL;
 }
 teardown
@@ -85,10 +86,6 @@ step change_new
 
 # When applying concurrent data changes, we should see the effects of an
 # in-progress subtransaction.
-#
-# XXX Not sure this test is useful now - it was designed for the patch that
-# preserves tuple visibility and which therefore modifies
-# TransactionIdIsCurrentTransactionId().
 step change_subxact1
 {
 	BEGIN;
@@ -102,8 +99,6 @@ step change_subxact1
 
 # When applying concurrent data changes, we should not see the effects of a
 # rolled back subtransaction.
-#
-# XXX Is this test useful? See above.
 step change_subxact2
 {
 	BEGIN;
@@ -122,8 +117,8 @@ step check2
 
 	SELECT i, j FROM repack_test ORDER BY i, j;
 
-	INSERT INTO data_s2(i, j)
-	SELECT i, j FROM repack_test;
+	INSERT INTO data_s2(i, j, _xmin)
+	SELECT i, j, xmin FROM repack_test;
 }
 step wakeup_before_lock
 {

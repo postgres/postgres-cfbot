@@ -1748,14 +1748,17 @@ update_progress_txn_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,
 
 /*
  * Set the required catalog xmin horizon for historic snapshots in the current
- * replication slot.
+ * replication slot if catalog is TRUE, or xmin if catalog is FALSE.
  *
  * Note that in the most cases, we won't be able to immediately use the xmin
  * to increase the xmin horizon: we need to wait till the client has confirmed
- * receiving current_lsn with LogicalConfirmReceivedLocation().
+ * receiving current_lsn with LogicalConfirmReceivedLocation(). However,
+ * catalog=FALSE is only allowed for temporary replication slots, so the
+ * horizon is applied immediately.
  */
 void
-LogicalIncreaseXminForSlot(XLogRecPtr current_lsn, TransactionId xmin)
+LogicalIncreaseXminForSlot(XLogRecPtr current_lsn, TransactionId xmin,
+						   bool catalog)
 {
 	bool		updated_xmin = false;
 	ReplicationSlot *slot;
@@ -1766,6 +1769,27 @@ LogicalIncreaseXminForSlot(XLogRecPtr current_lsn, TransactionId xmin)
 	Assert(slot != NULL);
 
 	SpinLockAcquire(&slot->mutex);
+	if (!catalog)
+	{
+		/*
+		 * The non-catalog horizon can only advance in temporary slots, so
+		 * update it in the shared memory immediately (w/o requiring prior
+		 * saving to disk).
+		 */
+		Assert(slot->data.persistency == RS_TEMPORARY);
+
+		/*
+		 * The horizon must not go backwards, however it's o.k. to become
+		 * invalid.
+		 */
+		Assert(!TransactionIdIsValid(slot->effective_xmin) ||
+			   !TransactionIdIsValid(xmin) ||
+			   TransactionIdFollowsOrEquals(xmin, slot->effective_xmin));
+
+		slot->effective_xmin = xmin;
+		SpinLockRelease(&slot->mutex);
+		return;
+	}
 
 	/*
 	 * don't overwrite if we already have a newer xmin. This can happen if we

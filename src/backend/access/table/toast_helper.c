@@ -277,7 +277,7 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, uint32 options)
 
 	attr->tai_colflags |= TOASTCOL_IGNORE;
 	*value = toast_save_datum(ttc->ttc_rel, old_value, attr->tai_oldexternal,
-							  options);
+							  ttc->ttc_rwstate, ttc->ttc_tup_main, options);
 	if ((attr->tai_colflags & TOASTCOL_NEEDS_FREE) != 0)
 		pfree(DatumGetPointer(old_value));
 	attr->tai_colflags |= TOASTCOL_NEEDS_FREE;
@@ -288,7 +288,7 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, uint32 options)
  * Perform appropriate cleanup after one tuple has been subjected to TOAST.
  */
 void
-toast_tuple_cleanup(ToastTupleContext *ttc)
+toast_tuple_cleanup(ToastTupleContext *ttc, TransactionId xid)
 {
 	TupleDesc	tupleDesc = ttc->ttc_rel->rd_att;
 	int			numAttrs = tupleDesc->natts;
@@ -321,7 +321,8 @@ toast_tuple_cleanup(ToastTupleContext *ttc)
 			ToastAttrInfo *attr = &ttc->ttc_attr[i];
 
 			if ((attr->tai_colflags & TOASTCOL_NEEDS_DELETE_OLD) != 0)
-				toast_delete_datum(ttc->ttc_rel, ttc->ttc_oldvalues[i], false);
+				toast_delete_datum(ttc->ttc_rel, ttc->ttc_oldvalues[i], false,
+								   xid);
 		}
 	}
 }
@@ -332,7 +333,7 @@ toast_tuple_cleanup(ToastTupleContext *ttc)
  */
 void
 toast_delete_external(Relation rel, const Datum *values, const bool *isnull,
-					  bool is_speculative)
+					  bool is_speculative, TransactionId xid)
 {
 	TupleDesc	tupleDesc = rel->rd_att;
 	int			numAttrs = tupleDesc->natts;
@@ -347,7 +348,7 @@ toast_delete_external(Relation rel, const Datum *values, const bool *isnull,
 			if (isnull[i])
 				continue;
 			else if (VARATT_IS_EXTERNAL_ONDISK(DatumGetPointer(value)))
-				toast_delete_datum(rel, value, is_speculative);
+				toast_delete_datum(rel, value, is_speculative, xid);
 		}
 	}
 }

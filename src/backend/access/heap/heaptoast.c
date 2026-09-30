@@ -40,7 +40,8 @@
  * ----------
  */
 void
-heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
+heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative,
+				  TransactionId xid)
 {
 	TupleDesc	tupleDesc;
 	Datum		toast_values[MaxHeapAttributeNumber];
@@ -70,7 +71,8 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
 	heap_deform_tuple(oldtup, tupleDesc, toast_values, toast_isnull);
 
 	/* Do the real work. */
-	toast_delete_external(rel, toast_values, toast_isnull, is_speculative);
+	toast_delete_external(rel, toast_values, toast_isnull, is_speculative,
+						  xid);
 }
 
 
@@ -84,6 +86,7 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
  *	newtup: the candidate new tuple to be inserted
  *	oldtup: the old row version for UPDATE, or NULL for INSERT
  *	options: options to be passed to heap_insert() for toast rows
+ *	rwstate: if valid, use raw_heap_insert()
  * Result:
  *	either newtup if no toasting is needed, or a palloc'd modified tuple
  *	that is what should actually get stored
@@ -94,7 +97,7 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
  */
 HeapTuple
 heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
-							uint32 options)
+							RewriteState rwstate, uint32 options)
 {
 	HeapTuple	result_tuple;
 	TupleDesc	tupleDesc;
@@ -109,6 +112,7 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	Datum		toast_oldvalues[MaxHeapAttributeNumber];
 	ToastAttrInfo toast_attr[MaxHeapAttributeNumber];
 	ToastTupleContext ttc;
+	TransactionId xid;
 
 	/*
 	 * Ignore the INSERT_SPECULATIVE option. Speculative insertions/super
@@ -155,6 +159,13 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	}
 	ttc.ttc_attr = toast_attr;
 	toast_tuple_init(&ttc);
+
+	/*
+	 * raw_heap_insert() may be needed for insertion into the TOAST table. In
+	 * that case, visibility information will be retrieved from 'newtup'.
+	 */
+	ttc.ttc_rwstate = rwstate;
+	ttc.ttc_tup_main = newtup;
 
 	/* ----------
 	 * Compress and/or save external until data fits into target length
@@ -330,7 +341,11 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	else
 		result_tuple = newtup;
 
-	toast_tuple_cleanup(&ttc);
+	if (options & TABLE_REUSE_XID)
+		xid = HeapTupleHeaderGetXmin(newtup->t_data);
+	else
+		xid = InvalidTransactionId; /* The current transaction. */
+	toast_tuple_cleanup(&ttc, xid);
 
 	return result_tuple;
 }
