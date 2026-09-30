@@ -3433,6 +3433,7 @@ WalSndState
 WalSummarizerData
 WalSummaryFile
 WalSummaryIO
+WalTimeBoundary
 WalTimeSample
 WalTimeSegment
 WalUsage
