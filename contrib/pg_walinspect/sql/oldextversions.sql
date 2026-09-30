@@ -27,10 +27,11 @@ SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_stats_till_end_of_wal(:'wal_lsn1');
 SELECT * FROM pg_get_wal_records_info_till_end_of_wal('FFFFFFFF/FFFFFFFF');
 SELECT * FROM pg_get_wal_stats_till_end_of_wal('FFFFFFFF/FFFFFFFF');
 
--- Move to new version 1.1.
+-- Test each upgrade step through the current version.
 ALTER EXTENSION pg_walinspect UPDATE TO '1.1';
+ALTER EXTENSION pg_walinspect UPDATE TO '1.2';
 
--- List what version 1.1 contains.
+-- List what the current version contains.
 \dx+ pg_walinspect
 
 SELECT pg_drop_replication_slot('regress_pg_walinspect_slot');
