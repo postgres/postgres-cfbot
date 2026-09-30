@@ -13,6 +13,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/timeline.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
@@ -22,6 +23,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
+#include "storage/fd.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
@@ -38,6 +40,7 @@ PG_MODULE_MAGIC_EXT(
 );
 
 PG_FUNCTION_INFO_V1(pg_get_wal_block_info);
+PG_FUNCTION_INFO_V1(pg_get_wal_files);
 PG_FUNCTION_INFO_V1(pg_get_wal_record_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_records_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_records_info_till_end_of_wal);
@@ -45,7 +48,7 @@ PG_FUNCTION_INFO_V1(pg_get_wal_stats);
 PG_FUNCTION_INFO_V1(pg_get_wal_stats_till_end_of_wal);
 
 static void ValidateInputLSNs(XLogRecPtr start_lsn, XLogRecPtr *end_lsn);
-static XLogRecPtr GetCurrentLSN(void);
+static XLogRecPtr GetCurrentLSN(TimeLineID *current_tli);
 static XLogReaderState *InitXLogReaderState(XLogRecPtr lsn);
 static XLogRecord *ReadNextXLogRecord(XLogReaderState *xlogreader);
 static void GetWALRecordInfo(XLogReaderState *record, Datum *values,
@@ -68,11 +71,21 @@ static void GetWalStats(FunctionCallInfo fcinfo,
 static void GetWALBlockInfo(FunctionCallInfo fcinfo, XLogReaderState *record,
 							bool show_data);
 
+/* Metadata for one retained segment in the current timeline's history. */
+typedef struct WalTimeSegment
+{
+	XLogSegNo	segno;			/* segment number, used for WAL ordering */
+	TimeLineID	tli;			/* timeline containing this segment */
+} WalTimeSegment;
+
+static int	wal_time_segment_cmp(const void *a, const void *b);
+static WalTimeSegment *GetWalTimeSegments(int *nsegments);
+
 /*
- * Return the LSN up to which the server has WAL.
+ * Return the LSN up to which the server has WAL, and optionally its timeline.
  */
 static XLogRecPtr
-GetCurrentLSN(void)
+GetCurrentLSN(TimeLineID *current_tli)
 {
 	XLogRecPtr	curr_lsn;
 
@@ -81,9 +94,15 @@ GetCurrentLSN(void)
 	 * callback read_local_xlog_page_no_wait does.
 	 */
 	if (!RecoveryInProgress())
-		curr_lsn = GetFlushRecPtr(NULL);
+		curr_lsn = GetFlushRecPtr(current_tli);
 	else
-		curr_lsn = GetXLogReplayRecPtr(NULL);
+	{
+		curr_lsn = GetXLogReplayRecPtr(current_tli);
+		if (current_tli != NULL && *current_tli == 0)
+		{
+			*current_tli = GetWALInsertionTimeLineIfSet();
+		}
+	}
 
 	Assert(XLogRecPtrIsValid(curr_lsn));
 
@@ -188,6 +207,94 @@ ReadNextXLogRecord(XLogReaderState *xlogreader)
 	}
 
 	return record;
+}
+
+/* qsort comparator that puts segments in WAL order. */
+static int
+wal_time_segment_cmp(const void *a, const void *b)
+{
+	const WalTimeSegment *seg1 = (const WalTimeSegment *) a;
+	const WalTimeSegment *seg2 = (const WalTimeSegment *) b;
+
+	if (seg1->segno < seg2->segno)
+		return -1;
+	if (seg1->segno > seg2->segno)
+		return 1;
+	return 0;
+}
+
+/*
+ * Get the WAL segments that form the history of the server's current
+ * timeline.  Other timelines may have files with the same segment number in
+ * pg_wal, so choose the timeline that is valid at the end of each segment,
+ * as read_local_xlog_page_no_wait() does.  Return the segments in WAL order.
+ */
+static WalTimeSegment *
+GetWalTimeSegments(int *nsegments)
+{
+	WalTimeSegment *segments = NULL;
+	DIR		   *dir;
+	struct dirent *de;
+	List	   *history;
+	XLogRecPtr	current_lsn;
+	TimeLineID	current_tli;
+	int			allocated = 0;
+	int			count = 0;
+
+	current_lsn = GetCurrentLSN(&current_tli);
+
+	history = readTimeLineHistory(current_tli);
+	dir = AllocateDir(XLOGDIR);
+	while ((de = ReadDir(dir, XLOGDIR)) != NULL)
+	{
+		TimeLineID	file_tli;
+		XLogSegNo	segno;
+		XLogRecPtr	seg_start;
+		XLogRecPtr	seg_end;
+
+		if (!IsXLogFileName(de->d_name))
+			continue;
+
+		XLogFromFileName(de->d_name, &file_tli, &segno, wal_segment_size);
+		seg_start = segno * wal_segment_size;
+		seg_end = seg_start + wal_segment_size - 1;
+
+		if (seg_start >= current_lsn ||
+			file_tli != tliOfPointInHistory(seg_end, history))
+			continue;
+
+		if (count == allocated)
+		{
+			allocated = allocated ? allocated * 2 : 16;
+			if (segments == NULL)
+				segments = palloc_array(WalTimeSegment, allocated);
+			else
+				segments = repalloc_array(segments, WalTimeSegment, allocated);
+		}
+
+		MemSet(&segments[count], 0, sizeof(WalTimeSegment));
+		segments[count].segno = segno;
+		segments[count].tli = file_tli;
+		count++;
+	}
+	FreeDir(dir);
+	list_free_deep(history);
+
+	if (count == 0)
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("no retained WAL segments are available"));
+
+	qsort(segments, count, sizeof(WalTimeSegment), wal_time_segment_cmp);
+
+#ifdef USE_ASSERT_CHECKING
+	/* A segment number identifies at most one file in this timeline history. */
+	for (int i = 1; i < count; i++)
+		Assert(segments[i - 1].segno != segments[i].segno);
+#endif
+
+	*nsegments = count;
+	return segments;
 }
 
 /*
@@ -483,7 +590,7 @@ pg_get_wal_record_info(PG_FUNCTION_ARGS)
 	HeapTuple	tuple;
 
 	lsn = PG_GETARG_LSN(0);
-	curr_lsn = GetCurrentLSN();
+	curr_lsn = GetCurrentLSN(NULL);
 
 	if (lsn > curr_lsn)
 		ereport(ERROR,
@@ -517,6 +624,90 @@ pg_get_wal_record_info(PG_FUNCTION_ARGS)
 }
 
 /*
+ * List the retained WAL segment files intersecting [start_lsn, end_lsn), or
+ * the segment containing start_lsn when end_lsn is omitted or equal to it.
+ * Report complete segment boundaries, not the range clipped to the inputs.
+ */
+Datum
+pg_get_wal_files(PG_FUNCTION_ARGS)
+{
+#define PG_GET_WAL_FILES_COLS 3
+	XLogRecPtr	start_lsn;
+	XLogRecPtr	end_lsn;
+	XLogSegNo	first_segno;
+	XLogSegNo	last_segno;
+	bool		point_lookup;
+	WalTimeSegment *segments;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			nsegments;
+	int			segment_index = 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* A NULL start produces an empty set. */
+	if (PG_ARGISNULL(0))
+		PG_RETURN_VOID();
+
+	start_lsn = PG_GETARG_LSN(0);
+	end_lsn = PG_ARGISNULL(1) ? start_lsn : PG_GETARG_LSN(1);
+
+	if (start_lsn < XLOG_BLCKSZ)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("could not read WAL at LSN %X/%08X",
+					   LSN_FORMAT_ARGS(start_lsn)));
+
+	ValidateInputLSNs(start_lsn, &end_lsn);
+	point_lookup = start_lsn == end_lsn;
+
+
+	XLByteToSeg(start_lsn, first_segno, wal_segment_size);
+	if (point_lookup)
+		last_segno = first_segno;
+	else
+		XLByteToPrevSeg(end_lsn, last_segno, wal_segment_size);
+	segments = GetWalTimeSegments(&nsegments);
+
+	for (XLogSegNo segno = first_segno;; segno++)
+	{
+		Datum		values[PG_GET_WAL_FILES_COLS];
+		bool		nulls[PG_GET_WAL_FILES_COLS] = {0};
+		XLogRecPtr	segment_start_lsn = segno * wal_segment_size;
+		XLogRecPtr	segment_end_lsn = segment_start_lsn + wal_segment_size;
+		char		fname[MAXFNAMELEN];
+
+		while (segment_index < nsegments &&
+			   segments[segment_index].segno < segno)
+			segment_index++;
+
+		if (segment_index >= nsegments ||
+			segments[segment_index].segno != segno)
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_EXCEPTION),
+					errmsg("WAL segment needed for the requested range is missing"),
+					errdetail("Segment " UINT64_FORMAT " is not present in pg_wal.",
+							  (uint64) segno));
+
+		XLogFileName(fname, segments[segment_index].tli, segno,
+					 wal_segment_size);
+		values[0] = CStringGetTextDatum(fname);
+		values[1] = LSNGetDatum(segment_start_lsn);
+		values[2] = LSNGetDatum(segment_end_lsn);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+
+		if (segno == last_segno)
+			break;
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	pfree(segments);
+	PG_RETURN_VOID();
+#undef PG_GET_WAL_FILES_COLS
+}
+
+/*
  * Validate start and end LSNs coming from the function inputs.
  *
  * If end_lsn is found to be higher than the current LSN reported by the
@@ -525,7 +716,7 @@ pg_get_wal_record_info(PG_FUNCTION_ARGS)
 static void
 ValidateInputLSNs(XLogRecPtr start_lsn, XLogRecPtr *end_lsn)
 {
-	XLogRecPtr	curr_lsn = GetCurrentLSN();
+	XLogRecPtr	curr_lsn = GetCurrentLSN(NULL);
 
 	if (start_lsn > curr_lsn)
 		ereport(ERROR,
@@ -831,7 +1022,7 @@ Datum
 pg_get_wal_records_info_till_end_of_wal(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	start_lsn = PG_GETARG_LSN(0);
-	XLogRecPtr	end_lsn = GetCurrentLSN();
+	XLogRecPtr	end_lsn = GetCurrentLSN(NULL);
 
 	if (start_lsn > end_lsn)
 		ereport(ERROR,
@@ -849,7 +1040,7 @@ Datum
 pg_get_wal_stats_till_end_of_wal(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	start_lsn = PG_GETARG_LSN(0);
-	XLogRecPtr	end_lsn = GetCurrentLSN();
+	XLogRecPtr	end_lsn = GetCurrentLSN(NULL);
 	bool		stats_per_record = PG_GETARG_BOOL(1);
 
 	if (start_lsn > end_lsn)
