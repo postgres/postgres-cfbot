@@ -852,3 +852,79 @@ statatt_check_bounds_histogram(Datum arrayval)
 
 	return true;
 }
+
+/*
+ * get_max_mcv_frequency
+ *		Return the maximum frequency in an MCV statistics slot.
+ *
+ * For STATISTIC_KIND_MCV, the MCV entries are sorted by frequency,
+ * so the maximum frequency is the first entry.
+ *
+ * For STATISTIC_KIND_MCV_VALUE_SORTED, the entries are sorted by value,
+ * so find the maximum frequency by scanning numbers[].
+ *
+ * Return false if the statistics slot is not an MCV slot or contains
+ * no frequency values.
+ */
+bool
+get_max_mcv_frequency(AttStatsSlot *sslot, int statskind,
+					  double *max_frequency)
+{
+	int			i = 0;
+
+	if ((statskind != STATISTIC_KIND_MCV &&
+		 statskind != STATISTIC_KIND_MCV_VALUE_SORTED) ||
+		sslot->nnumbers == 0)
+		return false;
+
+	if (statskind == STATISTIC_KIND_MCV_VALUE_SORTED)
+	{
+		for (int j = 1; j < sslot->nnumbers; j++)
+		{
+			if (sslot->numbers[j] > sslot->numbers[i])
+				i = j;
+		}
+	}
+
+	*max_frequency = sslot->numbers[i];
+
+	return true;
+}
+
+/*
+ * get_min_mcv_frequency
+ *		Return the minimum frequency in an MCV statistics slot.
+ *
+ * For STATISTIC_KIND_MCV, the MCV entries are sorted by frequency,
+ * so the minimum frequency is the last entry.
+ *
+ * For STATISTIC_KIND_MCV_VALUE_SORTED, the entries are sorted by value,
+ * so find the minimum frequency by scanning numbers[].
+ *
+ * Return false if the statistics slot is not an MCV slot or contains
+ * no frequency values.
+ */
+bool
+get_min_mcv_frequency(AttStatsSlot *sslot, int statskind,
+					  double *min_frequency)
+{
+	int			i = sslot->nnumbers - 1;
+
+	if ((statskind != STATISTIC_KIND_MCV &&
+		 statskind != STATISTIC_KIND_MCV_VALUE_SORTED) ||
+		sslot->nnumbers == 0)
+		return false;
+
+	if (statskind == STATISTIC_KIND_MCV_VALUE_SORTED)
+	{
+		for (int j = 0; j < sslot->nnumbers - 1; j++)
+		{
+			if (sslot->numbers[j] < sslot->numbers[i])
+				i = j;
+		}
+	}
+
+	*min_frequency = sslot->numbers[i];
+
+	return true;
+}
