@@ -349,6 +349,33 @@ SELECT ((-1::int4<<31)+1)::text;
  -2147483647
 (1 row)
 
+-- check sane handling of out-of-range shift counts
+SELECT (-1::int4) << 31;
+  ?column?   
+-------------
+ -2147483648
+(1 row)
+
+SELECT (-1::int4) >> 31;
+ ?column? 
+----------
+       -1
+(1 row)
+
+SELECT 1::int4 << 31;
+  ?column?   
+-------------
+ -2147483648
+(1 row)
+
+SELECT 1::int4 << 32;
+ERROR:  integer shift count out of range
+SELECT 1::int4 >> 32;
+ERROR:  integer shift count out of range
+SELECT 1::int4 << -1;
+ERROR:  integer shift count out of range
+SELECT 1::int4 >> -1;
+ERROR:  integer shift count out of range
 -- check sane handling of INT_MIN overflow cases
 SELECT (-2147483648)::int4 * (-1)::int4;
 ERROR:  integer out of range

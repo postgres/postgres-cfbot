@@ -1451,6 +1451,11 @@ int4shl(PG_FUNCTION_ARGS)
 	int32		arg1 = PG_GETARG_INT32(0);
 	int32		arg2 = PG_GETARG_INT32(1);
 
+	if (arg2 < 0 || arg2 > 31)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer shift count out of range")));
+
 	PG_RETURN_INT32(arg1 << arg2);
 }
 
@@ -1459,6 +1464,11 @@ int4shr(PG_FUNCTION_ARGS)
 {
 	int32		arg1 = PG_GETARG_INT32(0);
 	int32		arg2 = PG_GETARG_INT32(1);
+
+	if (arg2 < 0 || arg2 > 31)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer shift count out of range")));
 
 	PG_RETURN_INT32(arg1 >> arg2);
 }
@@ -1513,6 +1523,11 @@ int2shl(PG_FUNCTION_ARGS)
 	int16		arg1 = PG_GETARG_INT16(0);
 	int32		arg2 = PG_GETARG_INT32(1);
 
+	if (arg2 < 0 || arg2 > 31)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer shift count out of range")));
+
 	PG_RETURN_INT16(arg1 << arg2);
 }
 
@@ -1521,6 +1536,11 @@ int2shr(PG_FUNCTION_ARGS)
 {
 	int16		arg1 = PG_GETARG_INT16(0);
 	int32		arg2 = PG_GETARG_INT32(1);
+
+	if (arg2 < 0 || arg2 > 31)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer shift count out of range")));
 
 	PG_RETURN_INT16(arg1 >> arg2);
 }

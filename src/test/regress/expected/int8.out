@@ -887,6 +887,31 @@ SELECT ((-1::int8<<63)+1)::text;
  -9223372036854775807
 (1 row)
 
+-- check sane handling of out-of-range shift counts
+SELECT (-1::int8) << 63;
+       ?column?       
+----------------------
+ -9223372036854775808
+(1 row)
+
+SELECT (-1::int8) >> 63;
+ ?column? 
+----------
+       -1
+(1 row)
+
+SELECT 1::int8 << 63;
+       ?column?       
+----------------------
+ -9223372036854775808
+(1 row)
+
+SELECT 1::int8 << 64;
+ERROR:  integer shift count out of range
+SELECT 1::int8 >> 64;
+ERROR:  integer shift count out of range
+SELECT 1::int8 << -1;
+ERROR:  integer shift count out of range
 -- check sane handling of INT64_MIN overflow cases
 SELECT (-9223372036854775808)::int8 * (-1)::int8;
 ERROR:  bigint out of range

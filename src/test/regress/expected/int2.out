@@ -297,6 +297,31 @@ SELECT ((-1::int2<<15)+1::int2)::text;
  -32767
 (1 row)
 
+-- check sane handling of out-of-range shift counts
+SELECT (-1::int2) << 15;
+ ?column? 
+----------
+   -32768
+(1 row)
+
+SELECT (-1::int2) >> 15;
+ ?column? 
+----------
+       -1
+(1 row)
+
+SELECT 1::int2 << 31;
+ ?column? 
+----------
+        0
+(1 row)
+
+SELECT 1::int2 << 32;
+ERROR:  integer shift count out of range
+SELECT 1::int2 >> 32;
+ERROR:  integer shift count out of range
+SELECT 1::int2 << -1;
+ERROR:  integer shift count out of range
 -- check sane handling of INT16_MIN overflow cases
 SELECT (-32768)::int2 * (-1)::int2;
 ERROR:  smallint out of range

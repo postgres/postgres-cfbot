@@ -1257,6 +1257,11 @@ int8shl(PG_FUNCTION_ARGS)
 	int64		arg1 = PG_GETARG_INT64(0);
 	int32		arg2 = PG_GETARG_INT32(1);
 
+	if (arg2 < 0 || arg2 > 63)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer shift count out of range")));
+
 	PG_RETURN_INT64(arg1 << arg2);
 }
 
@@ -1265,6 +1270,11 @@ int8shr(PG_FUNCTION_ARGS)
 {
 	int64		arg1 = PG_GETARG_INT64(0);
 	int32		arg2 = PG_GETARG_INT32(1);
+
+	if (arg2 < 0 || arg2 > 63)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer shift count out of range")));
 
 	PG_RETURN_INT64(arg1 >> arg2);
 }

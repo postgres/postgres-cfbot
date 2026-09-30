@@ -118,6 +118,15 @@ SELECT (2 + 2) / 2 AS two;
 SELECT (-1::int4<<31)::text;
 SELECT ((-1::int4<<31)+1)::text;
 
+-- check sane handling of out-of-range shift counts
+SELECT (-1::int4) << 31;
+SELECT (-1::int4) >> 31;
+SELECT 1::int4 << 31;
+SELECT 1::int4 << 32;
+SELECT 1::int4 >> 32;
+SELECT 1::int4 << -1;
+SELECT 1::int4 >> -1;
+
 -- check sane handling of INT_MIN overflow cases
 SELECT (-2147483648)::int4 * (-1)::int4;
 SELECT (-2147483648)::int4 / (-1)::int4;
