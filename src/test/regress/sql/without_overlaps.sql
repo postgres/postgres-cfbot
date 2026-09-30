@@ -1163,6 +1163,67 @@ CREATE TABLE temporal_fk_rng2rng (
 );
 DROP TABLE temporal_rng3;
 
+-- Older releases allowed referencing an exclusion constraint.  We can't
+-- create such a foreign key any more, so simulate one by pointing a valid
+-- foreign key at an exclusion constraint's index.  Checking it should warn,
+-- but only when we build the plan, not for every row.
+CREATE TABLE temporal_rng3 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng3_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS),
+  CONSTRAINT temporal_rng3_excl EXCLUDE USING gist (id WITH =, valid_at WITH &&)
+);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3 (id, PERIOD valid_at)
+);
+UPDATE pg_constraint SET conindid = 'temporal_rng3_excl'::regclass
+  WHERE conname = 'temporal_fk_rng2rng_fk';
+INSERT INTO temporal_rng3 (id, valid_at) VALUES ('[1,2)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES
+  ('[1,2)', daterange('2018-01-01', '2019-01-01'), '[1,2)'),
+  ('[2,3)', daterange('2019-01-01', '2020-01-01'), '[1,2)');
+INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES
+  ('[3,4)', daterange('2018-01-01', '2019-01-01'), '[1,2)');
+DROP TABLE temporal_fk_rng2rng;
+-- Cloning such a foreign key to a new partition should warn too.
+CREATE TABLE temporal_partitioned_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_partitioned_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng3 (id, PERIOD valid_at)
+) PARTITION BY LIST (id);
+UPDATE pg_constraint SET conindid = 'temporal_rng3_excl'::regclass
+  WHERE conname = 'temporal_partitioned_fk_rng2rng_fk';
+CREATE TABLE tfkp1 PARTITION OF temporal_partitioned_fk_rng2rng FOR VALUES IN ('[1,2)');
+CREATE TABLE tfkp2 (LIKE temporal_partitioned_fk_rng2rng);
+ALTER TABLE temporal_partitioned_fk_rng2rng ATTACH PARTITION tfkp2 FOR VALUES IN ('[2,3)');
+DROP TABLE temporal_partitioned_fk_rng2rng;
+DROP TABLE temporal_rng3;
+-- Likewise when the referenced table is partitioned.
+CREATE TABLE temporal_partitioned_rng3 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_partitioned_rng3_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS),
+  CONSTRAINT temporal_partitioned_rng3_excl EXCLUDE USING gist (id WITH =, valid_at WITH &&)
+) PARTITION BY LIST (id);
+CREATE TABLE temporal_fk_rng2rng (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_partitioned_rng3 (id, PERIOD valid_at)
+);
+UPDATE pg_constraint SET conindid = 'temporal_partitioned_rng3_excl'::regclass
+  WHERE conname = 'temporal_fk_rng2rng_fk';
+CREATE TABLE tp1 PARTITION OF temporal_partitioned_rng3 FOR VALUES IN ('[1,2)');
+DROP TABLE temporal_fk_rng2rng;
+DROP TABLE temporal_partitioned_rng3;
+
 --
 -- test ALTER TABLE ADD CONSTRAINT
 --
