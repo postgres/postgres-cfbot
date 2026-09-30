@@ -18,6 +18,7 @@
 #include "access/hio.h"
 #include "access/skey.h"
 #include "access/xlogdefs.h"
+#include "catalog/index.h"
 #include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
@@ -126,6 +127,12 @@ typedef struct ChangeContext
 	 * The index that defines ordering of the old table.
 	 */
 	Oid			cc_clustering_index;
+
+	/*
+	 * Information needed to disable / enable security restrictions on index
+	 * functions. This is needed when starting a new transaction.
+	 */
+	IndexBuildSecurity cc_ind_build_sec;
 } ChangeContext;
 
 extern PGDLLIMPORT int repack_pages_per_snapshot;
@@ -139,7 +146,8 @@ extern void check_index_is_clusterable(Relation OldHeap, Oid indexOid,
 extern void mark_index_clustered(Relation rel, Oid indexOid, bool is_internal);
 
 extern Oid	make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
-						  char relpersistence, LOCKMODE lockmode);
+						  char relpersistence, LOCKMODE lockmode,
+						  const char *suffix);
 extern void heap_insert_for_repack(ChangeContext *chgcxt, TupleTableSlot *src,
 								   TupleTableSlot *reform);
 extern bool tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc);
