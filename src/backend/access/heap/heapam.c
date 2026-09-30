@@ -64,7 +64,7 @@ static XLogRecPtr log_heap_update(Relation reln, Buffer oldbuf,
 								  Buffer vmbuffer_new, HeapTuple oldtup,
 								  HeapTuple newtup, HeapTuple old_key_tuple,
 								  bool all_visible_cleared, bool new_all_visible_cleared,
-								  bool walLogical);
+								  bool walLogical, TransactionId xid);
 #ifdef USE_ASSERT_CHECKING
 static void check_lock_if_inplace_updateable_rel(Relation relation,
 												 const ItemPointerData *otid,
@@ -2007,7 +2007,7 @@ void
 heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 			uint32 options, BulkInsertState bistate)
 {
-	TransactionId xid = GetCurrentTransactionId();
+	TransactionId xid;
 	HeapTuple	heaptup;
 	Buffer		buffer;
 	Page		page;
@@ -2020,6 +2020,13 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 		   RelationGetNumberOfAttributes(relation));
 
 	AssertHasSnapshotForToast(relation);
+
+	/* The caller might need to preserve the existing xmin. */
+	if ((options & TABLE_REUSE_XID) == 0)
+		xid = GetCurrentTransactionId();
+	else
+		xid = HeapTupleHeaderGetXmin(tup->t_data);
+	Assert(TransactionIdIsValid(xid));
 
 	/*
 	 * Fill in tuple header fields and toast the tuple if necessary.
@@ -2177,6 +2184,13 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 		if (vmbuffer_modified)
 			XLogRegisterBuffer(HEAP_INSERT_BLKREF_VM, vmbuffer, 0);
 
+		/*
+		 * Even if we don't have XID assigned, valid XID is necessary for
+		 * recovery and streaming replication to work.
+		 */
+		if (options & TABLE_REUSE_XID)
+			XLogSetRecordXid(xid);
+
 		recptr = XLogInsert(RM_HEAP_ID, info);
 
 		PageSetLSN(page, recptr);
@@ -2264,7 +2278,7 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 		return tup;
 	}
 	else if (HeapTupleHasExternal(tup) || tup->t_len > TOAST_TUPLE_THRESHOLD)
-		return heap_toast_insert_or_update(relation, tup, NULL, options);
+		return heap_toast_insert_or_update(relation, tup, NULL, NULL, options);
 	else
 		return tup;
 }
@@ -2327,6 +2341,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 	/* currently not needed (thus unsupported) for heap_multi_insert() */
 	Assert(!(options & HEAP_INSERT_NO_LOGICAL));
+	/* Likewise. */
+	Assert(!(options & TABLE_REUSE_XID));
 
 	AssertHasSnapshotForToast(relation);
 
@@ -2759,11 +2775,11 @@ xmax_infomask_changed(uint16 new_infomask, uint16 old_infomask)
  */
 TM_Result
 heap_delete(Relation relation, const ItemPointerData *tid,
-			CommandId cid, uint32 options, Snapshot crosscheck,
+			TransactionId xid, CommandId cid, uint32 options,
+			Snapshot crosscheck,
 			bool wait, TM_FailureData *tmfd)
 {
 	TM_Result	result;
-	TransactionId xid = GetCurrentTransactionId();
 	ItemId		lp;
 	HeapTupleData tp;
 	Page		page;
@@ -2781,10 +2797,13 @@ heap_delete(Relation relation, const ItemPointerData *tid,
 	bool		clear_all_visible = false;
 	HeapTuple	old_key_tuple = NULL;	/* replica identity of the tuple */
 	bool		old_key_copied = false;
+	bool		override_xid = false;
 
 	Assert(ItemPointerIsValid(tid));
 
 	AssertHasSnapshotForToast(relation);
+
+	Assert((options & TABLE_REUSE_XID) == 0);
 
 	/*
 	 * Forbid this during a parallel operation, lest it allocate a combo CID.
@@ -2795,6 +2814,12 @@ heap_delete(Relation relation, const ItemPointerData *tid,
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
 				 errmsg("cannot delete tuples during a parallel operation")));
+
+	/* Caller can override the xid. */
+	if (!TransactionIdIsValid(xid))
+		xid = GetCurrentTransactionId();
+	else
+		override_xid = true;
 
 	block = ItemPointerGetBlockNumber(tid);
 	buffer = ReadBuffer(relation, block);
@@ -3147,6 +3172,10 @@ l1:
 		if (vmbuffer_modified)
 			XLogRegisterBuffer(HEAP_DELETE_BLKREF_VM, vmbuffer, 0);
 
+		/* See heap_insert() for details. */
+		if (override_xid)
+			XLogSetRecordXid(xid);
+
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE);
 
 		PageSetLSN(page, recptr);
@@ -3183,7 +3212,7 @@ l1:
 		Assert(!HeapTupleHasExternal(&tp));
 	}
 	else if (HeapTupleHasExternal(&tp))
-		heap_toast_delete(relation, &tp, false);
+		heap_toast_delete(relation, &tp, false, xid);
 
 	/*
 	 * Mark tuple for invalidation from system caches at next command
@@ -3216,14 +3245,18 @@ l1:
  * the target tuple are not expected (for example, because we have a lock
  * on the relation associated with the tuple).  Any failure is reported
  * via ereport().
+ *
+ * XXX Add simple_heap_delete_xid() so that the signature of this function can
+ * stay intact?
  */
 void
-simple_heap_delete(Relation relation, const ItemPointerData *tid)
+simple_heap_delete(Relation relation, const ItemPointerData *tid,
+				   TransactionId xid)
 {
 	TM_Result	result;
 	TM_FailureData tmfd;
 
-	result = heap_delete(relation, tid,
+	result = heap_delete(relation, tid, xid,
 						 GetCurrentCommandId(true),
 						 0,
 						 InvalidSnapshot,
@@ -3272,7 +3305,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 			TU_UpdateIndexes *update_indexes)
 {
 	TM_Result	result;
-	TransactionId xid = GetCurrentTransactionId();
+	TransactionId xid;
 	Bitmapset  *hot_attrs;
 	Bitmapset  *sum_attrs;
 	Bitmapset  *key_attrs;
@@ -3338,6 +3371,13 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 #ifdef USE_ASSERT_CHECKING
 	check_lock_if_inplace_updateable_rel(relation, otid, newtup);
 #endif
+
+	/* The caller might need to preserve the existing xmin. */
+	if ((options & TABLE_REUSE_XID) == 0)
+		xid = GetCurrentTransactionId();
+	else
+		xid = HeapTupleHeaderGetXmin(newtup->t_data);
+	Assert(TransactionIdIsValid(xid));
 
 	/*
 	 * Fetch the list of attributes to be checked for various operations.
@@ -3963,12 +4003,16 @@ l2:
 		 */
 		if (need_toast)
 		{
+			uint32	toast_options = options;
+
 			/*
 			 * If logical decoding is not needed, suppress it for the TOAST
 			 * tuples too. We never skip the FSM here.
 			 */
+			if (!walLogical)
+				toast_options |= HEAP_INSERT_NO_LOGICAL;
 			heaptup = heap_toast_insert_or_update(relation, newtup, &oldtup,
-												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL);
+												  NULL, toast_options);
 			newtupsize = MAXALIGN(heaptup->t_len);
 		}
 		else
@@ -4284,7 +4328,9 @@ l2:
 								 old_key_tuple,
 								 clear_all_visible,
 								 clear_all_visible_new,
-								 walLogical);
+								 walLogical,
+								 options & TABLE_REUSE_XID ? xid : InvalidTransactionId);
+
 		if (newbuf != buffer)
 		{
 			PageSetLSN(newpage, recptr);
@@ -5516,7 +5562,9 @@ compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask,
 	uint16		new_infomask,
 				new_infomask2;
 
-	Assert(TransactionIdIsCurrentTransactionId(add_to_xmax));
+	/* REPACK (CONCURRENTLY) might not have XID assigned. */
+	Assert(TransactionIdIsCurrentTransactionId(add_to_xmax) ||
+		   !TransactionIdIsValid(GetTopTransactionIdIfAny()));
 
 l5:
 	new_infomask = 0;
@@ -6515,7 +6563,9 @@ heap_abort_speculative(Relation relation, const ItemPointerData *tid)
 	if (HeapTupleHasExternal(&tp))
 	{
 		Assert(!IsToastRelation(relation));
-		heap_toast_delete(relation, &tp, true);
+		/* XID overriding is not needed for speculative abort. */
+		Assert(TransactionIdIsValid(GetCurrentTransactionIdIfAny()));
+		heap_toast_delete(relation, &tp, true, GetCurrentTransactionId());
 	}
 
 	/*
@@ -9023,7 +9073,7 @@ log_heap_update(Relation reln, Buffer oldbuf, Buffer vmbuffer_old,
 				HeapTuple oldtup, HeapTuple newtup,
 				HeapTuple old_key_tuple,
 				bool all_visible_cleared, bool new_all_visible_cleared,
-				bool walLogical)
+				bool walLogical, TransactionId xid)
 {
 	xl_heap_update xlrec;
 	xl_heap_header xlhdr;
@@ -9247,6 +9297,10 @@ log_heap_update(Relation reln, Buffer oldbuf, Buffer vmbuffer_old,
 
 	/* filtering by origin on a row level is much more efficient */
 	XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
+
+	/* See heap_insert() for details. */
+	if (TransactionIdIsValid(xid))
+		XLogSetRecordXid(xid);
 
 	recptr = XLogInsert(RM_HEAP_ID, info);
 

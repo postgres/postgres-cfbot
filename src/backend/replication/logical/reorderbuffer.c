@@ -5311,6 +5311,9 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	 * Shouldn't we add a new field to ReorderBufferChange instead?
 	 */
 	tmphtup->t_data->t_ctid = newtup->t_data->t_ctid;
+	/* Likewise, preserve XID - REPACK needs it to be MVCC-safe. */
+	HeapTupleHeaderSetXmin(tmphtup->t_data,
+						   HeapTupleHeaderGetXmin(newtup->t_data));
 
 	memcpy(newtup->t_data, tmphtup->t_data, tmphtup->t_len);
 	newtup->t_len = tmphtup->t_len;

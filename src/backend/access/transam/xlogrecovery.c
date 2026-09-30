@@ -1963,10 +1963,13 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
 
 	/*
-	 * If we are attempting to enter Hot Standby mode, process XIDs we see
+	 * If we are attempting to enter Hot Standby mode, process XIDs we see.
+	 *
+	 * "replayed" changes should not get into the array again.
 	 */
 	if (standbyState >= STANDBY_INITIALIZED &&
-		TransactionIdIsValid(record->xl_xid))
+		TransactionIdIsValid(record->xl_xid) &&
+		(record->xl_info & XLR_XID_REPLAYED) == 0)
 		RecordKnownAssignedTransactionIds(record->xl_xid);
 
 	/*

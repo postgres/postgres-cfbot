@@ -52,6 +52,18 @@ extern PGDLLIMPORT SnapshotData SnapshotToastData;
 	 (snapshotdata).vistest = (vistestp))
 
 /*
+ * NewHeap snapshot needs to be used as the active snapshot at some point, so
+ * initialize the fields related to PushActiveSnapshot().
+ */
+#define InitNewHeapSnapshot(snapshotdata)  \
+	((snapshotdata).snapshot_type = SNAPSHOT_NEW_HEAP, \
+	 (snapshotdata).regd_count = 0, \
+	 (snapshotdata).active_count = 0, \
+	 (snapshotdata).copied = false, \
+	 (snapshotdata).xcnt = 0, \
+	 (snapshotdata).subxcnt = 0)
+
+/*
  * Is the snapshot implemented as an MVCC snapshot (i.e. it uses
  * SNAPSHOT_MVCC)? If so, there will be at most one visible tuple in a chain
  * of updated tuples, and each visible tuple will be seen exactly once.

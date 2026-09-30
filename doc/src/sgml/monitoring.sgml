@@ -7533,6 +7533,18 @@ FROM pg_stat_get_backend_idset() AS backendid;
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>heap_tuples_inserted_aux</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of heap tuples inserted into an auxiliary table, which is used
+       to sort if the <literal>CONCURRENTLY</literal> option was specified. the
+       tuples This counter only advances when the phase is
+       <literal>seq scanning heap</literal>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>heap_tuples_updated</structfield> <type>bigint</type>
       </para>
       <para>
@@ -7661,6 +7673,12 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <entry><literal>rebuilding index</literal></entry>
      <entry>
        The command is currently rebuilding an index.
+     </entry>
+    </row>
+    <row>
+     <entry><literal>building auxiliary relation index</literal></entry>
+     <entry>
+       The command is currently building an index on the auxiliary relation.
      </entry>
     </row>
     <row>

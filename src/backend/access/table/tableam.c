@@ -281,6 +281,7 @@ simple_table_tuple_delete(Relation rel, ItemPointer tid, Snapshot snapshot)
 	TM_FailureData tmfd;
 
 	result = table_tuple_delete(rel, tid,
+								InvalidTransactionId,
 								GetCurrentCommandId(true),
 								0, snapshot, InvalidSnapshot,
 								true /* wait for commit */ ,

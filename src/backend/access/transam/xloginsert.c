@@ -105,6 +105,9 @@ static uint64 mainrdata_len;	/* total # of bytes in chain */
 /* flags for the in-progress insertion */
 static uint8 curinsert_flags = 0;
 
+/* XID to override the XID of the current transaction. */
+static TransactionId curinsert_xid = InvalidTransactionId;
+
 /*
  * These are used to hold the record header while constructing a record.
  * 'hdr_scratch' is not a plain variable, but is palloc'd at initialization,
@@ -234,6 +237,7 @@ XLogResetInsertion(void)
 	mainrdata_len = 0;
 	mainrdata_last = (XLogRecData *) &mainrdata_head;
 	curinsert_flags = 0;
+	curinsert_xid = InvalidTransactionId;
 	begininsert_called = false;
 }
 
@@ -464,6 +468,18 @@ XLogSetRecordFlags(uint8 flags)
 {
 	Assert(begininsert_called);
 	curinsert_flags |= flags;
+}
+
+/*
+ * Set XID status flags for the upcoming WAL record.
+ *
+ * Useful when creating WAL records on behalf of another transaction.
+ */
+void
+XLogSetRecordXid(TransactionId xid)
+{
+	Assert(begininsert_called);
+	curinsert_xid = xid;
 }
 
 /*
@@ -927,6 +943,12 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	{
 		TransactionId xid = GetTopTransactionIdIfAny();
 
+		/*
+		 * On curinsert_xid: if it's set, it's only for recovery and streaming
+		 * replication to work. On the other hand, the record shouldn't be
+		 * logically decoded, so we don't care if the toplevel XID is invalid.
+		 */
+
 		/* Set the flag that the top xid is included in the WAL */
 		*topxid_included = true;
 
@@ -999,7 +1021,14 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	 * once we know where in the WAL the record will be inserted. The CRC does
 	 * not include the record header yet.
 	 */
-	rechdr->xl_xid = GetCurrentTransactionIdIfAny();
+	if (!TransactionIdIsValid(curinsert_xid))
+		rechdr->xl_xid = GetCurrentTransactionIdIfAny();
+	else
+	{
+		/* The overriding XID should be handled specially. */
+		rechdr->xl_xid = curinsert_xid;
+		info |= XLR_XID_REPLAYED;
+	}
 	rechdr->xl_tot_len = (uint32) total_len;
 	rechdr->xl_info = info;
 	rechdr->xl_rmid = rmid;

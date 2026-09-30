@@ -112,6 +112,29 @@ typedef enum SnapshotType
 	 * horizon to use.
 	 */
 	SNAPSHOT_NON_VACUUMABLE,
+
+	/*
+	 * The effects of all transactions are visible. Unlike SNAPSHOT_DIRTY,
+	 * aborted (sub)transactions are not expected.
+	 *
+	 * This is specific to applying data changes to the new heap by the REPACK
+	 * command - that replays applies changes done in the old heap by
+	 * transactions that have already committed. No other transactions can
+	 * access the new heap while this snapshot is in use.
+	 *
+	 * Therefore, whenever a transaction being applied looks for a tuple to
+	 * update or delete, it can assume that the insertion of any candidate
+	 * tuple was already committed - otherwise the inserting transaction
+	 * wouldn't have been applied.
+	 *
+	 * By considering effects of all transactions visible we also ensure that
+	 * a transaction can update / delete tuples that it inserted itself.
+	 *
+	 * TODO Consider better name. Would SNAPSHOT_BOOTSTRAP be confusing?
+	 * During cluster bootstrap we also consider all changes committed
+	 * immediately.
+	 */
+	SNAPSHOT_NEW_HEAP,
 } SnapshotType;
 
 typedef struct SnapshotData *Snapshot;
@@ -127,8 +150,8 @@ typedef struct SnapshotData *Snapshot;
  * * Historic MVCC snapshots used during logical decoding
  * * snapshots passed to HeapTupleSatisfiesDirty()
  * * snapshots passed to HeapTupleSatisfiesNonVacuumable()
- * * snapshots used for SatisfiesAny, Toast, Self where no members are
- *	 accessed.
+ * * snapshots used for SatisfiesAny, Toast, Self, NewHeap where no members
+ *	 are accessed.
  *
  * TODO: It's probably a good idea to split this struct using a NodeTag
  * similar to how parser and executor nodes are handled, with one type for
