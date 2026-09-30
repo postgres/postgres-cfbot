@@ -3432,6 +3432,7 @@ WalSummarizerData
 WalSummaryFile
 WalSummaryIO
 WalTimeSample
+WalTimeSegment
 WalUsage
 WalWriteMethod
 WalWriteMethodOps
