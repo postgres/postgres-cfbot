@@ -26,6 +26,7 @@
 #endif
 
 #include "access/transam.h"
+#include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
@@ -71,6 +72,41 @@ static void XLogReaderFreeZstdContext(void *arg);
  * to use the 'oversized' memory allocation code path.
  */
 #define DEFAULT_DECODE_BUFFER_SIZE (64 * 1024)
+
+/*
+ * Extract timestamp from WAL record.
+ *
+ * If the record contains a timestamp, returns true, and saves the timestamp
+ * in *recordXtime. If the record type has no timestamp, returns false.
+ * Currently, only transaction commit/abort records and restore points contain
+ * timestamps.
+ */
+bool
+GetXLogRecordTimestamp(XLogReaderState *record, TimestampTz *recordXtime)
+{
+	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+	uint8		xact_info = info & XLOG_XACT_OPMASK;
+	uint8		rmid = XLogRecGetRmid(record);
+
+	if (rmid == RM_XLOG_ID && info == XLOG_RESTORE_POINT)
+	{
+		*recordXtime = ((xl_restore_point *) XLogRecGetData(record))->rp_time;
+		return true;
+	}
+	if (rmid == RM_XACT_ID && (xact_info == XLOG_XACT_COMMIT ||
+							   xact_info == XLOG_XACT_COMMIT_PREPARED))
+	{
+		*recordXtime = ((xl_xact_commit *) XLogRecGetData(record))->xact_time;
+		return true;
+	}
+	if (rmid == RM_XACT_ID && (xact_info == XLOG_XACT_ABORT ||
+							   xact_info == XLOG_XACT_ABORT_PREPARED))
+	{
+		*recordXtime = ((xl_xact_abort *) XLogRecGetData(record))->xact_time;
+		return true;
+	}
+	return false;
+}
 
 /*
  * Construct a string in state->errormsg_buf explaining what's wrong with
