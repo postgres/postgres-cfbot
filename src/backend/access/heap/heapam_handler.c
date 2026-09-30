@@ -48,14 +48,13 @@
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
-static void reform_and_rewrite_tuple(HeapTuple tuple,
-									 Relation OldHeap, Relation NewHeap,
-									 Datum *values, bool *isnull, RewriteState rwstate);
-static void heap_insert_for_repack(HeapTuple tuple, Relation OldHeap,
-								   Relation NewHeap, Datum *values, bool *isnull,
-								   BulkInsertState bistate);
-static HeapTuple reform_tuple(HeapTuple tuple, Relation OldHeap,
-							  Relation NewHeap, Datum *values, bool *isnull);
+static void reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
+									 RewriteState rwstate);
+static void heap_insert_for_repack(Relation rel, TupleTableSlot *src,
+								   TupleTableSlot *reform,
+								   BulkInsertStateData *bistate);
+static bool tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc);
+static void clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform);
 
 static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
@@ -603,11 +602,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool		is_system_catalog;
 	Tuplesortstate *tuplesort;
 	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
-	TupleDesc	newTupDesc = RelationGetDescr(NewHeap);
 	TupleTableSlot *slot;
-	int			natts;
-	Datum	   *values;
-	bool	   *isnull;
+	TupleTableSlot *reform_slot;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
 	bool		concurrent = snapshot != NULL;
@@ -620,11 +616,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * This may be harmless, but this function hasn't planned for it.
 	 */
 	Assert(RelationGetTargetBlock(NewHeap) == InvalidBlockNumber);
-
-	/* Preallocate values/isnull arrays */
-	natts = newTupDesc->natts;
-	values = palloc_array(Datum, natts);
-	isnull = palloc_array(bool, natts);
 
 	/*
 	 * In non-concurrent mode, initialize the rewrite operation.  This is not
@@ -691,6 +682,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	slot = table_slot_create(OldHeap, NULL);
 	hslot = (BufferHeapTupleTableSlot *) slot;
+	reform_slot = MakeSingleTupleTableSlot(RelationGetDescr(OldHeap),
+										   &TTSOpsVirtual);
 
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
@@ -868,11 +861,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			int64		ct_val[2];
 
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
-										 values, isnull, rwstate);
+				reform_and_rewrite_tuple(slot, reform_slot, rwstate);
 			else
-				heap_insert_for_repack(tuple, OldHeap, NewHeap,
-									   values, isnull, bistate);
+				heap_insert_for_repack(NewHeap, slot, reform_slot, bistate);
 
 			/*
 			 * In indexscan mode and also VACUUM FULL, report increase in
@@ -888,8 +879,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		index_endscan(indexScan);
 	if (tableScan != NULL)
 		table_endscan(tableScan);
-	if (slot)
-		ExecDropSingleTupleTableSlot(slot);
+	ExecDropSingleTupleTableSlot(slot);
 
 	/*
 	 * In scan-and-sort mode, complete the sort, then read out all live tuples
@@ -909,6 +899,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_WRITE_NEW_HEAP);
 
+		slot = MakeSingleTupleTableSlot(RelationGetDescr(OldHeap),
+										&TTSOpsHeapTuple);
 		for (;;)
 		{
 			HeapTuple	tuple;
@@ -919,33 +911,36 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			if (tuple == NULL)
 				break;
 
+			/*
+			 * XXX Ideally we should use tuplesort_gettupleslot() above, but
+			 * it retrieves minimal tuples and tuplesort_puttupleslot() cannot
+			 * get the tuple descriptor from tuplesort created by
+			 * tuplesort_begin_cluster().
+			 */
+			ExecStoreHeapTuple(tuple, slot, false);
+
 			n_tuples += 1;
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple,
-										 OldHeap, NewHeap,
-										 values, isnull,
-										 rwstate);
+				reform_and_rewrite_tuple(slot, reform_slot, rwstate);
 			else
-				heap_insert_for_repack(tuple, OldHeap, NewHeap,
-									   values, isnull, bistate);
+				heap_insert_for_repack(NewHeap, slot, reform_slot, bistate);
 
 			/* Report n_tuples */
 			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED,
 										 n_tuples);
 		}
 
+		ExecDropSingleTupleTableSlot(slot);
 		tuplesort_end(tuplesort);
 	}
+
+	ExecDropSingleTupleTableSlot(reform_slot);
 
 	/* Write out any remaining tuples, and fsync if needed */
 	if (rwstate)
 		end_heap_rewrite(rwstate);
 	if (bistate)
 		FreeBulkInsertState(bistate);
-
-	/* Clean up */
-	pfree(values);
-	pfree(isnull);
 }
 
 /*
@@ -2333,21 +2328,45 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
  * currently only known to happen as an after-effect of ALTER TABLE
  * SET WITHOUT OIDS.
  *
- * So, we must reconstruct the tuple from component Datums.
+ * So, we must reconstruct the tuple from component Datums. 'reform' slot
+ * is a workspace for this reconstruction.
  */
 static void
-reform_and_rewrite_tuple(HeapTuple tuple,
-						 Relation OldHeap, Relation NewHeap,
-						 Datum *values, bool *isnull, RewriteState rwstate)
+reform_and_rewrite_tuple(TupleTableSlot *src, TupleTableSlot *reform,
+						 RewriteState rwstate)
 {
-	HeapTuple	newtuple;
+	HeapTuple	tuple,
+				newtuple;
+	bool		shouldFree,
+				shouldFreeNew;
 
-	newtuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+	/*
+	 * The old tuple will not be modified, so do not request materialization.
+	 * (A copy can be created for specific slot type though, e.g.
+	 * TTSOpsMinimalTuple.)
+	 */
+	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
+	if (tuple_needs_reform(tuple, src->tts_tupleDescriptor))
+	{
+		clear_dropped_attributes(tuple, reform);
+
+		/* No need to materialize, copy will be created anyway. */
+		Assert(TTS_IS_VIRTUAL(reform));
+		newtuple = ExecFetchSlotHeapTuple(reform, false, &shouldFreeNew);
+	}
+	else
+	{
+		newtuple = heap_copytuple(tuple);
+		shouldFreeNew = true;
+	}
 
 	/* The heap rewrite module does the rest */
 	rewrite_heap_tuple(rwstate, tuple, newtuple);
 
-	heap_freetuple(newtuple);
+	if (shouldFree)
+		heap_freetuple(tuple);
+	if (shouldFreeNew)
+		heap_freetuple(newtuple);
 }
 
 /*
@@ -2359,6 +2378,9 @@ reform_and_rewrite_tuple(HeapTuple tuple,
  * information). Thus we must use heap_insert() both during the
  * catch-up and here.
  *
+ * 'reform' is a slot to use for tuple "reforming", typically to get set
+ * values of dropped columns to NULL.
+ *
  * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
  * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
  * this relation, so no logical replication subscription should need the data.
@@ -2367,76 +2389,75 @@ reform_and_rewrite_tuple(HeapTuple tuple,
  * case.
  */
 static void
-heap_insert_for_repack(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
-					   Datum *values, bool *isnull, BulkInsertState bistate)
+heap_insert_for_repack(Relation rel, TupleTableSlot *src,
+					   TupleTableSlot *reform, BulkInsertStateData *bistate)
 {
-	HeapTuple	newtuple;
+	HeapTuple	tuple;
+	bool		shouldFree;
+	TupleTableSlot *slot;
 
-	newtuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+	tuple = ExecFetchSlotHeapTuple(src, false, &shouldFree);
 
-	heap_insert(NewHeap, newtuple, GetCurrentCommandId(true),
-				HEAP_INSERT_NO_LOGICAL, bistate);
+	/*
+	 * The source slot is not expected to create a copy of the tuple.
+	 */
+	Assert(TTS_IS_BUFFERTUPLE(src));
+	Assert(!shouldFree);
 
-	heap_freetuple(newtuple);
+	if (tuple_needs_reform(tuple, src->tts_tupleDescriptor))
+	{
+		clear_dropped_attributes(tuple, reform);
+		slot = reform;
+	}
+	else
+		slot = src;
+
+	table_tuple_insert(rel, slot, GetCurrentCommandId(true),
+					   TABLE_INSERT_NO_LOGICAL, bistate);
 }
 
-/*
- * Subroutine for reform_and_rewrite_tuple and heap_insert_for_repack.
- *
- * Deform the given tuple, set values of dropped columns to NULL, and fill in
- * any values from attmissingval; then form a new tuple and return it.  If no
- * attributes need to be changed, a copy of the original tuple is returned.
- * Caller is responsible for freeing the returned tuple.
- *
- * XXX this coding assumes that both relations have the same tupledesc.
- */
-static HeapTuple
-reform_tuple(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
-			 Datum *values, bool *isnull)
+static bool
+tuple_needs_reform(HeapTuple tuple, TupleDesc tupDesc)
 {
-	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
-	TupleDesc	newTupDesc = RelationGetDescr(NewHeap);
-	bool		needs_reform = false;
-
 	/*
 	 * A short tuple might require values from attmissing val, so activate the
 	 * coding unconditionally in that case.  The value might legitimally be
 	 * NULL otherwise, so this is slightly wasteful, but it probably beats
 	 * having to test each attribute for presence of attmissingval each time.
 	 */
-	if (HeapTupleHeaderGetNatts(tuple->t_data) < newTupDesc->natts)
-		needs_reform = true;
+	if (HeapTupleHeaderGetNatts(tuple->t_data) < tupDesc->natts)
+		return true;
 
-	/*
-	 * If the column has been dropped but a value is still present, we can
-	 * optimize storage now by getting rid of it.
-	 */
-	if (!needs_reform)
+	/* Does it have dropped attributes? */
+	for (int i = 0; i < tupDesc->natts; i++)
 	{
-		for (int i = 0; i < newTupDesc->natts; i++)
-		{
-			if (TupleDescCompactAttr(newTupDesc, i)->attisdropped &&
-				!heap_attisnull(tuple, i + 1, newTupDesc))
-			{
-				needs_reform = true;
-				break;
-			}
-		}
+		if (TupleDescCompactAttr(tupDesc, i)->attisdropped &&
+			!heap_attisnull(tuple, i + 1, tupDesc))
+			return true;
 	}
 
-	/* Skip work if no changes are needed */
-	if (!needs_reform)
-		return heap_copytuple(tuple);
+	return false;
+}
 
-	heap_deform_tuple(tuple, oldTupDesc, values, isnull);
+/*
+ * Subroutine for reform_and_rewrite_tuple and heap_insert_for_repack.
+ *
+ * Set values of dropped columns to NULL,
+ */
+static void
+clear_dropped_attributes(HeapTuple tuple, TupleTableSlot *reform)
+{
+	TupleDesc	tupDesc = reform->tts_tupleDescriptor;
 
-	for (int i = 0; i < newTupDesc->natts; i++)
+	/* Assuming 'reform' is virtual, this deforms the tuple. */
+	Assert(TTS_IS_VIRTUAL(reform));
+	ExecForceStoreHeapTuple(tuple, reform, false);
+
+	for (int i = 0; i < tupDesc->natts; i++)
 	{
-		if (TupleDescCompactAttr(newTupDesc, i)->attisdropped)
-			isnull[i] = true;
+		if (TupleDescCompactAttr(tupDesc, i)->attisdropped)
+			reform->tts_isnull[i] = true;
 	}
-
-	return heap_form_tuple(newTupDesc, values, isnull);
 }
 
 /*
