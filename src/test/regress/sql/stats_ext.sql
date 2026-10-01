@@ -180,6 +180,17 @@ SELECT * FROM check_estimated_rows('SELECT a, b FROM stxdinp GROUP BY 1, 2');
 SELECT * FROM check_estimated_rows('SELECT a + 1, b FROM ONLY stxdinp GROUP BY 1, 2');
 DROP TABLE stxdinp;
 
+-- a statistics expression that the planner could simplify where NULL and
+-- FALSE are equivalent must still match the same expression in a query
+CREATE TABLE stxdnull (a int, b int, c int) WITH (autovacuum_enabled = off);
+INSERT INTO stxdnull SELECT i % 100, i % 7, i % 100
+  FROM generate_series(1, 10000) i;
+CREATE STATISTICS stxdnull_s (mcv)
+  ON (CASE WHEN b NOT IN (42, NULL) THEN 1 ELSE a END), c FROM stxdnull;
+ANALYZE stxdnull;
+SELECT * FROM check_estimated_rows('SELECT * FROM stxdnull WHERE (CASE WHEN b NOT IN (42, NULL) THEN 1 ELSE a END) = 1 AND c = 1');
+DROP TABLE stxdnull;
+
 -- basic test for statistics on expressions
 CREATE TABLE ab1 (a INTEGER, b INTEGER, c TIMESTAMP, d TIMESTAMPTZ);
 

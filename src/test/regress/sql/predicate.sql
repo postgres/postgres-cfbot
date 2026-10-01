@@ -448,3 +448,186 @@ SELECT id FROM bool_tab WHERE flag_null IS UNKNOWN;
 SELECT id FROM bool_tab WHERE flag_null IS UNKNOWN;
 
 DROP TABLE bool_tab;
+
+--
+-- Test that "x op ALL (array)" with a strict operator and a NULL array
+-- element is reduced to constant-FALSE where NULL and FALSE are equivalent
+--
+CREATE TABLE null_saop_tab (a int, b int, arr int[]);
+INSERT INTO null_saop_tab VALUES (1, 1, NULL), (42, 2, '{}'), (NULL, 3, NULL);
+ANALYZE null_saop_tab;
+
+-- Ensure NOT IN and <> ALL are reduced to constant-FALSE
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL);
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL);
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a <> ALL (ARRAY[42, b, NULL]);
+SELECT * FROM null_saop_tab WHERE a <> ALL (ARRAY[42, b, NULL]);
+
+-- Ensure equivalent forms are reduced to constant-FALSE as well
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT (a IN (42, NULL));
+SELECT * FROM null_saop_tab WHERE NOT (a IN (42, NULL));
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT (a = ANY (ARRAY[42, NULL]));
+SELECT * FROM null_saop_tab WHERE NOT (a = ANY (ARRAY[42, NULL]));
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT NOT (a NOT IN (42, NULL));
+SELECT * FROM null_saop_tab WHERE NOT NOT (a NOT IN (42, NULL));
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) = true;
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) = true;
+
+CREATE FUNCTION null_saop_func(int) RETURNS bool LANGUAGE sql IMMUTABLE
+AS $$ SELECT $1 NOT IN (42, NULL) $$;
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE null_saop_func(a);
+SELECT * FROM null_saop_tab WHERE null_saop_func(a);
+DROP FUNCTION null_saop_func(int);
+
+-- Ensure it is reduced under AND and OR
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) AND b = 1;
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) AND b = 1;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) OR b = 1;
+SELECT * FROM null_saop_tab WHERE a NOT IN (42, NULL) OR b = 1;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab
+WHERE (b = 1 AND a NOT IN (42, NULL)) OR (b = 2 AND NOT (a IN (7, NULL)));
+SELECT * FROM null_saop_tab
+WHERE (b = 1 AND a NOT IN (42, NULL)) OR (b = 2 AND NOT (a IN (7, NULL)));
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (b = 1 OR a NOT IN (42, NULL)) AND a > 0;
+SELECT * FROM null_saop_tab WHERE (b = 1 OR a NOT IN (42, NULL)) AND a > 0;
+
+-- Ensure it is reduced in a join clause
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab t1 LEFT JOIN null_saop_tab t2
+  ON t1.a = t2.a AND t2.b NOT IN (42, NULL);
+SELECT * FROM null_saop_tab t1 LEFT JOIN null_saop_tab t2
+  ON t1.a = t2.a AND t2.b NOT IN (42, NULL)
+ORDER BY t1.b;
+
+-- Ensure it is reduced in FILTER clauses
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(*) FILTER (WHERE a NOT IN (42, NULL)) FROM null_saop_tab;
+SELECT count(*) FILTER (WHERE a NOT IN (42, NULL)) FROM null_saop_tab;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, count(*) FILTER (WHERE a NOT IN (42, NULL)) OVER ()
+FROM null_saop_tab;
+SELECT b, count(*) FILTER (WHERE a NOT IN (42, NULL)) OVER ()
+FROM null_saop_tab;
+
+-- Ensure it is not reduced under NOT
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE NOT (a NOT IN (42, NULL));
+SELECT * FROM null_saop_tab WHERE NOT (a NOT IN (42, NULL));
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, CASE WHEN NOT (a NOT IN (42, NULL)) THEN 1 ELSE 0 END
+FROM null_saop_tab;
+SELECT b, CASE WHEN NOT (a NOT IN (42, NULL)) THEN 1 ELSE 0 END
+FROM null_saop_tab;
+
+-- Ensure it is not reduced where NULL and FALSE are not equivalent
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, a NOT IN (42, NULL) FROM null_saop_tab;
+SELECT b, a NOT IN (42, NULL) FROM null_saop_tab;
+
+-- Ensure it is not reduced in CASE WHEN conditions or under IS [NOT] TRUE
+-- outside of a qual, so that such expressions still match equal expressions
+-- stored in the catalogs
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT b, CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE 0 END,
+  (a NOT IN (42, NULL)) IS TRUE, (a NOT IN (42, NULL)) IS NOT TRUE
+FROM null_saop_tab;
+SELECT b, CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE 0 END,
+  (a NOT IN (42, NULL)) IS TRUE, (a NOT IN (42, NULL)) IS NOT TRUE
+FROM null_saop_tab;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab
+WHERE (CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE b END) = 1;
+SELECT * FROM null_saop_tab
+WHERE (CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE b END) = 1;
+
+-- Ensure it is not reduced for a multidimensional ARRAY[]: NULL sub-arrays
+-- don't add NULL elements, and here the array is empty, so ALL is true
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE 1 <> ALL (ARRAY[NULL::int[], arr]) ORDER BY b;
+SELECT * FROM null_saop_tab WHERE 1 <> ALL (ARRAY[NULL::int[], arr]) ORDER BY b;
+
+-- Ensure IS TRUE is reduced to constant-FALSE and IS NOT TRUE to constant-TRUE,
+-- while IS FALSE is not reduced
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) IS TRUE;
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) IS TRUE;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL) AND b > 0) IS NOT TRUE
+ORDER BY b;
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL) AND b > 0) IS NOT TRUE
+ORDER BY b;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) IS FALSE;
+SELECT * FROM null_saop_tab WHERE (a NOT IN (42, NULL)) IS FALSE;
+
+-- Ensure a NULL array is reduced to constant-FALSE, for ANY as well as ALL
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a <> ALL (NULL::int[]);
+SELECT * FROM null_saop_tab WHERE a <> ALL (NULL::int[]);
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_tab WHERE a = ANY (NULL::int[]) OR b = 1;
+SELECT * FROM null_saop_tab WHERE a = ANY (NULL::int[]) OR b = 1;
+
+-- Ensure expressions checked for constness at DDL time are not reduced
+CREATE TABLE null_saop_part (a int)
+  PARTITION BY LIST ((CASE WHEN a NOT IN (42, NULL) THEN 1 ELSE 0 END));
+DROP TABLE null_saop_part;
+
+-- Ensure a partition key containing such an expression still matches the
+-- query, for partition pruning, partitionwise aggregation and constraint
+-- exclusion
+CREATE TABLE null_saop_part (a int, b int)
+  PARTITION BY LIST ((CASE WHEN b NOT IN (42, NULL) THEN 0 ELSE a END));
+CREATE TABLE null_saop_part0 PARTITION OF null_saop_part FOR VALUES IN (0);
+CREATE TABLE null_saop_part1 PARTITION OF null_saop_part FOR VALUES IN (1);
+INSERT INTO null_saop_part SELECT i % 2, i FROM generate_series(1, 10) i;
+ANALYZE null_saop_part;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_part
+WHERE (CASE WHEN b NOT IN (42, NULL) THEN 0 ELSE a END) = 1;
+SELECT * FROM null_saop_part
+WHERE (CASE WHEN b NOT IN (42, NULL) THEN 0 ELSE a END) = 1
+ORDER BY b;
+
+SET enable_partitionwise_aggregate = on;
+EXPLAIN (COSTS OFF)
+SELECT (CASE WHEN b NOT IN (42, NULL) THEN 0 ELSE a END) AS k, count(*)
+FROM null_saop_part GROUP BY 1 ORDER BY 1;
+SELECT (CASE WHEN b NOT IN (42, NULL) THEN 0 ELSE a END) AS k, count(*)
+FROM null_saop_part GROUP BY 1 ORDER BY 1;
+RESET enable_partitionwise_aggregate;
+
+SET constraint_exclusion = on;
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_saop_part1
+WHERE (CASE WHEN b NOT IN (42, NULL) THEN 0 ELSE a END) = 0;
+RESET constraint_exclusion;
+
+DROP TABLE null_saop_part;
+
+DROP TABLE null_saop_tab;
