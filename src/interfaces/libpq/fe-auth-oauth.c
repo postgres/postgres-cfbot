@@ -547,7 +547,7 @@ handle_oauth_sasl_error(PGconn *conn, const char *msg, int msglen)
 		return false;
 	}
 
-	lex = makeJsonLexContextCstringLen(NULL, msg, msglen, PG_UTF8, true);
+	lex = makeJsonLexContextCstringLen(NULL, msg, msglen, PG_UTF8, true, false);
 	setJsonLexContextOwnsTokens(lex, true); /* must not leak on error */
 
 	initPQExpBuffer(&ctx.errbuf);

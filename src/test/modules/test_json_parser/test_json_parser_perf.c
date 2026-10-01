@@ -76,7 +76,7 @@ main(int argc, char **argv)
 		else
 		{
 			lex = makeJsonLexContextCstringLen(NULL, json.data, json.len,
-											   PG_UTF8, false);
+											   PG_UTF8, false, false);
 			result = pg_parse_json(lex, &nullSemAction);
 			freeJsonLexContext(lex);
 		}
