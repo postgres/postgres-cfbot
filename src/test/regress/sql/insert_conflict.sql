@@ -251,6 +251,27 @@ insert into insertconflicttest values (23, 'Blackberry') on conflict (fruit) whe
 
 drop index partial_key_index;
 
+-- The inference WHERE clause must not be reduced to constant-FALSE even
+-- though it can never be true, else it no longer matches the index predicate
+create unique index null_saop_key_index on insertconflicttest(key) where fruit <> all (array['Apple', null]);
+
+-- Succeeds
+explain (costs off)
+insert into insertconflicttest values (1001, 'Raspberry') on conflict (key) where fruit <> all (array['Apple', null]) do nothing;
+insert into insertconflicttest values (1001, 'Raspberry') on conflict (key) where fruit <> all (array['Apple', null]) do nothing;
+insert into insertconflicttest values (1001, 'Raspberry') on conflict (key) where fruit <> all (array['Apple', null]) and fruit like '%berry' do nothing;
+
+drop index null_saop_key_index;
+delete from insertconflicttest where key = 1001;
+
+-- Nor may an expression in the inference specification be rewritten so that
+-- it no longer matches the index expression
+create unique index null_saop_expr_index on insertconflicttest
+  ((case when fruit not in ('Apple', null) then 1001 else key end));
+insert into insertconflicttest values (1002, 'Lime') on conflict ((case when fruit not in ('Apple', null) then 1001 else key end)) do nothing;
+drop index null_saop_expr_index;
+delete from insertconflicttest where key = 1002;
+
 --
 -- Test that wholerow references to ON CONFLICT's EXCLUDED work
 --

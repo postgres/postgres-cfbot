@@ -3626,16 +3626,12 @@ select * from stable_qual_pruning
 explain (analyze, costs off, summary off, timing off, buffers off)
 select * from stable_qual_pruning
   where a = any(null::timestamptz[]);
-                                       QUERY PLAN                                        
------------------------------------------------------------------------------------------
- Append (actual rows=0.00 loops=1)
-   ->  Seq Scan on stable_qual_pruning1 stable_qual_pruning_1 (actual rows=0.00 loops=1)
-         Filter: (a = ANY (NULL::timestamp with time zone[]))
-   ->  Seq Scan on stable_qual_pruning2 stable_qual_pruning_2 (actual rows=0.00 loops=1)
-         Filter: (a = ANY (NULL::timestamp with time zone[]))
-   ->  Seq Scan on stable_qual_pruning3 stable_qual_pruning_3 (actual rows=0.00 loops=1)
-         Filter: (a = ANY (NULL::timestamp with time zone[]))
-(7 rows)
+               QUERY PLAN                
+-----------------------------------------
+ Result (actual rows=0.00 loops=1)
+   Replaces: Scan on stable_qual_pruning
+   One-Time Filter: false
+(3 rows)
 
 drop table stable_qual_pruning;
 --
