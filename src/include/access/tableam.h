@@ -924,10 +924,11 @@ table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 
 	/*
 	 * We don't allow scans to be started while CheckXidAlive is set, except
-	 * via systable_beginscan() et al.  See detailed comments in xact.c where
-	 * these variables are declared.
+	 * via systable_beginscan() et al.  See comments for CheckXidAlive in
+	 * xact.c.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) &&
+		!IsSystemTableScanInProgress()))
 		elog(ERROR, "scan started during logical decoding");
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
@@ -1248,10 +1249,11 @@ table_index_scan_begin(IndexScanDesc scan, uint32 flags)
 
 	/*
 	 * We don't allow scans to be started while CheckXidAlive is set, except
-	 * via systable_beginscan() et al.  See detailed comments in xact.c where
-	 * these variables are declared.
+	 * via systable_beginscan() et al.  See comments for CheckXidAlive in
+	 * xact.c.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) &&
+		!IsSystemTableScanInProgress()))
 		elog(ERROR, "scan started during logical decoding");
 
 	scan->heapRelation->rd_tableam->index_scan_begin(scan, flags);
@@ -1341,10 +1343,11 @@ table_fetch_tid(Relation rel,
 {
 	/*
 	 * We don't expect direct calls to table_fetch_tid with valid
-	 * CheckXidAlive for catalog or regular tables.  See detailed comments in
-	 * xact.c where these variables are declared.
+	 * CheckXidAlive for catalog or regular tables.  See comments for
+	 * CheckXidAlive in xact.c.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) &&
+		!IsSystemTableScanInProgress()))
 		elog(ERROR, "unexpected table_fetch_tid call during logical decoding");
 
 	return rel->rd_tableam->fetch_tid(rel, tid, snapshot, all_dead);
@@ -1366,10 +1369,11 @@ table_tuple_fetch_row_version(Relation rel,
 {
 	/*
 	 * We don't expect direct calls to table_tuple_fetch_row_version with
-	 * valid CheckXidAlive for catalog or regular tables.  See detailed
-	 * comments in xact.c where these variables are declared.
+	 * valid CheckXidAlive for catalog or regular tables.  See comments for
+	 * CheckXidAlive in xact.c.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) &&
+		!IsSystemTableScanInProgress()))
 		elog(ERROR, "unexpected table_tuple_fetch_row_version call during logical decoding");
 
 	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot);
