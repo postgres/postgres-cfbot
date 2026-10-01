@@ -15,18 +15,66 @@
 
 #include "postgres_fe.h"
 
+#include <fcntl.h>
 #include <unistd.h>
+#ifdef USE_LIBURING
+#include <liburing.h>
+#endif
 
 #include "common/file_perm.h"
 #include "common/logging.h"
 #include "fe_utils/astreamer.h"
 
+#ifdef USE_LIBURING
+/*
+ * Parameters for the io_uring + O_DIRECT write path. Aim is to keep deep
+ * queue of the I/O devices populated by throwing large number of independent
+ * synchronous/DIRECT_IO requests, but in asynchronous way. We avoid latency
+ * of single synchronous write, and utilize the device up to the max what it
+ * allows.
+ */
+#define DIO_ALIGN		4096			/* O_DIRECT aligment */
+#define DIO_BUFSZ		(1024 * 1024)	/* size of each direct I/O write */
+#define DIO_NBUF		32				/* queue depth, XXX:expose it via getopt? */
+#define DIO_MIN_SIZE	DIO_BUFSZ		/* fsize threshold for activating O_DIRECT writes */
+#define DIO_SUBMIT_BATCH	8			/* how many SQEs to batch */
+#define DIO_PREALLOC_CHUNK	(128 * 1024 * 1024) /* grow step, unknown size */
+
+/*
+ * State for the dio/io_uring writer. Used by plain(file) and tar extractors.
+ * We buffer data as we recieve it, into the "pool" of buffers and submit them
+ * using DIO_BUFSZ sizes.
+ */
+typedef struct dio_writer
+{
+	struct io_uring ring;       /* see io_uring(7) */
+	bool		ring_ready;		/* was the ring and buffer initialized */
+	char	   *pool;			/* buffer memory, max size: DIO_NBUF * DIO_BUFSZ */
+	bool		busy[DIO_NBUF]; /* is buffer in flight? */
+	size_t		buflen[DIO_NBUF];	/* bytes submitted for in-flight buffer */
+	int			fd;				/* DIO fd: if fd > 0 then it's active, -1 otherwise */
+	const char *filename;		/* for error handling */
+	pgoff_t		offset;			/* offset of the next write */
+	pgoff_t		written;		/* bytes written */
+	pgoff_t		allocated;		/* file size space preallocated so far */
+	int			curidx;			/* buffer being filled, or -1 */
+	int			curlen;			/* bytes filled in current buffer */
+	int			inflight;		/* prepared writes not yet reaped */
+	int			unsubmitted;	/* SQEs prepared but not yet submitted */
+	bool		nofalloc;		/* fallocate unsupported */
+	bool		notified;		/* already logged a fall-back-to-buffered? */
+} dio_writer;
+#endif
+
 typedef struct astreamer_plain_writer
 {
 	astreamer	base;
 	char	   *pathname;
-	FILE	   *file;
+	FILE	   *file;			/* if NULL, then dio.fd is used */
 	bool		should_close_file;
+#ifdef USE_LIBURING
+	dio_writer	dio;
+#endif
 } astreamer_plain_writer;
 
 typedef struct astreamer_extractor
@@ -36,7 +84,12 @@ typedef struct astreamer_extractor
 	const char *(*link_map) (const char *);
 	void		(*report_output_file) (const char *);
 	char		filename[MAXPGPATH];
-	FILE	   *file;
+	int			fd;				/* if -1, then dio.fd is used */
+	bool		discard_backup;
+	bool		verbose;
+#ifdef USE_LIBURING
+	dio_writer	dio;
+#endif
 } astreamer_extractor;
 
 static void astreamer_plain_writer_content(astreamer *streamer,
@@ -60,7 +113,17 @@ static void astreamer_extractor_finalize(astreamer *streamer);
 static void astreamer_extractor_free(astreamer *streamer);
 static void extract_directory(const char *filename, mode_t mode);
 static void extract_link(const char *filename, const char *linktarget);
-static FILE *create_file_for_extract(const char *filename, mode_t mode);
+static int	create_file_for_extract(const char *filename, mode_t mode,
+									bool discard_backup, pgoff_t size);
+static void write_file_range(int fd, const char *filename,
+							 const char *data, int len);
+#ifdef USE_LIBURING
+static bool dio_writer_start(dio_writer *dw, const char *filename,
+							 pgoff_t prealloc_size, bool verbose);
+static void dio_writer_write(dio_writer *dw, const char *data, int len);
+static void dio_writer_finish(dio_writer *dw);
+static void dio_writer_destroy(dio_writer *dw);
+#endif
 
 static const astreamer_ops astreamer_extractor_ops = {
 	.content = astreamer_extractor_content,
@@ -78,7 +141,7 @@ static const astreamer_ops astreamer_extractor_ops = {
  * there.
  */
 astreamer *
-astreamer_plain_writer_new(char *pathname, FILE *file)
+astreamer_plain_writer_new(char *pathname, FILE *file, bool verbose)
 {
 	astreamer_plain_writer *streamer;
 
@@ -88,13 +151,33 @@ astreamer_plain_writer_new(char *pathname, FILE *file)
 
 	streamer->pathname = pstrdup(pathname);
 	streamer->file = file;
+#ifdef USE_LIBURING
+	streamer->dio.fd = -1;
+#endif
 
 	if (file == NULL)
 	{
-		streamer->file = fopen(pathname, "wb");
-		if (streamer->file == NULL)
-			pg_fatal("could not create file \"%s\": %m", pathname);
-		streamer->should_close_file = true;
+#ifdef USE_LIBURING
+
+		/*
+		 * Fallback to classic buffered writes in case of:
+		 * - env variable PG_BASEBACKUP_NODIO is set (debugging)
+		 * - pipe/stdout is used
+		 * - /dev/null is being used (-t client-blackhole)
+		 * - filesystems without O_DIRECT support
+		 */
+		if (getenv("PG_BASEBACKUP_NODIO") == NULL &&
+			dio_writer_start(&streamer->dio, streamer->pathname, 0, verbose) == true) {
+			/* do not use buffered writes, as the dio.fd is going to be used */
+			streamer->file = NULL;
+		} else
+#endif
+		{
+			streamer->file = fopen(pathname, "wb");
+			if (streamer->file == NULL)
+				pg_fatal("could not create file \"%s\": %m", pathname);
+			streamer->should_close_file = true;
+		}
 	}
 
 	return &streamer->base;
@@ -115,15 +198,14 @@ astreamer_plain_writer_content(astreamer *streamer,
 	if (len == 0)
 		return;
 
-	errno = 0;
-	if (fwrite(data, len, 1, mystreamer->file) != 1)
+#ifdef USE_LIBURING
+	if (mystreamer->dio.fd != -1)
 	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
-		pg_fatal("could not write to file \"%s\": %m",
-				 mystreamer->pathname);
+		dio_writer_write(&mystreamer->dio, data, len);
+		return;
 	}
+#endif
+	write_file_range(fileno(mystreamer->file), mystreamer->pathname, data, len);
 }
 
 /*
@@ -137,6 +219,13 @@ astreamer_plain_writer_finalize(astreamer *streamer)
 
 	mystreamer = (astreamer_plain_writer *) streamer;
 
+#ifdef USE_LIBURING
+	if (mystreamer->dio.fd != -1)
+	{
+		dio_writer_finish(&mystreamer->dio);
+		return;
+	}
+#endif
 	if (mystreamer->should_close_file && fclose(mystreamer->file) != 0)
 		pg_fatal("could not close file \"%s\": %m",
 				 mystreamer->pathname);
@@ -159,6 +248,9 @@ astreamer_plain_writer_free(astreamer *streamer)
 	Assert(mystreamer->base.bbs_next == NULL);
 
 	pfree(mystreamer->pathname);
+#ifdef USE_LIBURING
+	dio_writer_destroy(&mystreamer->dio);
+#endif
 	pfree(mystreamer);
 }
 
@@ -181,11 +273,15 @@ astreamer_plain_writer_free(astreamer *streamer)
  * 'report_output_file' is a function that will be called each time we open a
  * new output file. The pathname to that file is passed as an argument. If
  * NULL, the call is skipped.
+ *
+ * If 'discard_backup' is true, the extracted archive is thrown away rather
+ * than written to the filesystem.
  */
 astreamer *
 astreamer_extractor_new(const char *basepath,
 						const char *(*link_map) (const char *),
-						void (*report_output_file) (const char *))
+						void (*report_output_file) (const char *),
+						bool discard_backup, bool verbose)
 {
 	astreamer_extractor *streamer;
 
@@ -195,6 +291,12 @@ astreamer_extractor_new(const char *basepath,
 	streamer->basepath = pstrdup(basepath);
 	streamer->link_map = link_map;
 	streamer->report_output_file = report_output_file;
+	streamer->discard_backup = discard_backup;
+	streamer->verbose = verbose;
+	streamer->fd = -1;
+#ifdef USE_LIBURING
+	streamer->dio.fd = -1;
+#endif
 
 	return &streamer->base;
 }
@@ -216,7 +318,10 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 	switch (context)
 	{
 		case ASTREAMER_MEMBER_HEADER:
-			Assert(mystreamer->file == NULL);
+			Assert(mystreamer->fd == -1);
+#ifdef USE_LIBURING
+			Assert(mystreamer->dio.fd == -1);
+#endif
 
 			if (!path_is_safe_for_extraction(member->pathname))
 				pg_fatal("tar member has unsafe path name: \"%s\"",
@@ -231,13 +336,40 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 			if (mystreamer->filename[fnamelen - 1] == '/')
 				mystreamer->filename[fnamelen - 1] = '\0';
 
-			/* Dispatch based on file type. */
+			/*
+			 * Dispatch based on file type.
+			 */
 			if (member->is_regular)
-				mystreamer->file =
-					create_file_for_extract(mystreamer->filename,
-											member->mode);
+			{
+#ifdef USE_LIBURING
+				/*
+				 * Fallback to classic buffered writes in case of:
+				 * - small files
+				 * - env variable PG_BASEBACKUP_NODIO is set (debugging)
+				 * - pipe/stdout is used
+				 * - /dev/null is being used (-t client-blackhole)
+				 * - filesystems without O_DIRECT support
+				 */
+				if (member->size >= DIO_MIN_SIZE &&
+					!mystreamer->discard_backup &&
+					getenv("PG_BASEBACKUP_NODIO") == NULL &&
+					dio_writer_start(&mystreamer->dio, mystreamer->filename,
+									 member->size, mystreamer->verbose)) {
+					/* do not use buffered writes, as the dio.fd is going to be used */
+					mystreamer->fd = -1;
+				} else
+#endif
+					mystreamer->fd =
+						create_file_for_extract(mystreamer->filename,
+												member->mode,
+												mystreamer->discard_backup,
+												member->size);
+			}
 			else if (member->is_directory)
-				extract_directory(mystreamer->filename, member->mode);
+			{
+				if (!mystreamer->discard_backup)
+					extract_directory(mystreamer->filename, member->mode);
+			}
 			else if (member->is_symlink)
 			{
 				const char *linktarget = member->linktarget;
@@ -252,7 +384,8 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 							 member->linktarget);
 				}
 
-				extract_link(mystreamer->filename, linktarget);
+				if (!mystreamer->discard_backup)
+					extract_link(mystreamer->filename, linktarget);
 			}
 
 			/* Report output file change. */
@@ -261,27 +394,36 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 			break;
 
 		case ASTREAMER_MEMBER_CONTENTS:
-			if (mystreamer->file == NULL)
+#ifdef USE_LIBURING
+			if (mystreamer->dio.fd != -1)
+			{
+				if (len > 0)
+					dio_writer_write(&mystreamer->dio, data, len);
+				break;
+			}
+#endif
+			if (mystreamer->fd == -1)
 				break;
 
-			errno = 0;
-			if (len > 0 && fwrite(data, len, 1, mystreamer->file) != 1)
-			{
-				/* if write didn't set errno, assume problem is no disk space */
-				if (errno == 0)
-					errno = ENOSPC;
-				pg_fatal("could not write to file \"%s\": %m",
-						 mystreamer->filename);
-			}
+			if (len > 0)
+				write_file_range(mystreamer->fd, mystreamer->filename,
+								 data, len);
 			break;
 
 		case ASTREAMER_MEMBER_TRAILER:
-			if (mystreamer->file == NULL)
+#ifdef USE_LIBURING
+			if (mystreamer->dio.fd != -1)
+			{
+				dio_writer_finish(&mystreamer->dio);
 				break;
-			if (fclose(mystreamer->file) != 0)
+			}
+#endif
+			if (mystreamer->fd == -1)
+				break;
+			if (close(mystreamer->fd) != 0)
 				pg_fatal("could not close file \"%s\": %m",
 						 mystreamer->filename);
-			mystreamer->file = NULL;
+			mystreamer->fd = -1;
 			break;
 
 		case ASTREAMER_ARCHIVE_TRAILER:
@@ -366,15 +508,28 @@ extract_link(const char *filename, const char *linktarget)
 /*
  * Create a regular file.
  *
- * Return the resulting handle so we can write the content to the file.
+ * Return an open file descriptor so we can write the content to the file.
+ *
+ * We intentionally use a raw file descriptor to get unbuffered write()
+ * and avoid potentiall libc interference.
  */
-static FILE *
-create_file_for_extract(const char *filename, mode_t mode)
+static int
+create_file_for_extract(const char *filename, mode_t mode,
+						bool discard_backup, pgoff_t size)
 {
-	FILE	   *file;
+	int			fd;
 
-	file = fopen(filename, "wb");
-	if (file == NULL)
+	if (discard_backup)
+	{
+		fd = open(DEVNULL, O_WRONLY | PG_BINARY, 0);
+		if (fd < 0)
+			pg_fatal("could not open file \"%s\": %m", DEVNULL);
+		return fd;
+	}
+
+	fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY,
+			  pg_file_create_mode);
+	if (fd < 0)
 		pg_fatal("could not create file \"%s\": %m", filename);
 
 #ifndef WIN32
@@ -383,7 +538,54 @@ create_file_for_extract(const char *filename, mode_t mode)
 				 filename);
 #endif
 
-	return file;
+	/*
+	 * Preallocate the file to its final size.  We know the size up front
+	 * from the tar member header, so this lets the filesystem allocate all
+	 * the blocks in one go rather than growing the file on every write.
+	 */
+#ifdef HAVE_POSIX_FALLOCATE
+	if (size > 0)
+	{
+		int			rc = posix_fallocate(fd, 0, size);
+
+		/*
+		 * This is just an optimization, so we ignore failures such as
+		 * EINVAL/EOPNOTSUPP, however we need to properly fail on ENOSPC.
+		 */
+		if (rc == ENOSPC)
+		{
+			errno = rc;
+			pg_fatal("could not preallocate file \"%s\": %m", filename);
+		}
+	}
+#endif
+
+	return fd;
+}
+
+/*
+ * Wrapper for safely writing chunk of archive. Single write() is not
+ * guaranteed to consume the whole, so we loop until all is on the disk.
+ */
+static void
+write_file_range(int fd, const char *filename, const char *data, int len)
+{
+	while (len > 0)
+	{
+		ssize_t		written;
+
+		errno = 0;
+		written = write(fd, data, len);
+		if (written <= 0)
+		{
+			if (errno == 0)
+				errno = ENOSPC;
+			pg_fatal("could not write to file \"%s\": %m", filename);
+		}
+
+		data += written;
+		len -= written;
+	}
 }
 
 /*
@@ -397,7 +599,10 @@ astreamer_extractor_finalize(astreamer *streamer)
 	astreamer_extractor *mystreamer PG_USED_FOR_ASSERTS_ONLY
 	= (astreamer_extractor *) streamer;
 
-	Assert(mystreamer->file == NULL);
+	Assert(mystreamer->fd == -1);
+#ifdef USE_LIBURING
+	Assert(mystreamer->dio.fd == -1);
+#endif
 }
 
 /*
@@ -409,5 +614,373 @@ astreamer_extractor_free(astreamer *streamer)
 	astreamer_extractor *mystreamer = (astreamer_extractor *) streamer;
 
 	pfree(mystreamer->basepath);
+#ifdef USE_LIBURING
+	dio_writer_destroy(&mystreamer->dio);
+#endif
 	pfree(mystreamer);
 }
+
+#ifdef USE_LIBURING
+/*
+ * IO_uring/liburing uses concept of two rings (submissions and completion).
+ * See io_uring_queue_init(3) and io_uring(7) for more information and
+ * especially https://github.com/axboe/liburing/blob/master/examples/io_uring-cp.c
+ * for nice example on how to use it.
+ */
+
+/* Take (consume) one completion event from the ring */
+static void
+dio_wait_one(dio_writer *dw)
+{
+	int			idx;
+	int			ret;
+	struct io_uring_cqe *cqe;
+
+	ret = io_uring_wait_cqe(&dw->ring, &cqe);
+	if (ret < 0)
+	{
+		errno = -ret;
+		pg_fatal("could not wait for io_uring_wait_cqe(): %m");
+	}
+
+	idx = (int) io_uring_cqe_get_data64(cqe);
+	if (cqe->res < 0)
+	{
+		errno = -cqe->res;
+		pg_fatal("could not write to file \"%s\": %m", dw->filename);
+	}
+
+	if ((size_t) cqe->res != dw->buflen[idx])
+	{
+		/* short write? */
+		errno = ENOSPC;
+		pg_fatal("could not write to file \"%s\": %m", dw->filename);
+	}
+
+	io_uring_cqe_seen(&dw->ring, cqe);
+	dw->busy[idx] = false;
+	dw->inflight--;
+}
+
+/*
+ * Common routine for flushing (submitting) earlier prepared, but not yet
+ * submitted SQEs.
+ */
+static void
+dio_flush_sq(dio_writer *dw)
+{
+	int			ret;
+
+	if (dw->unsubmitted == 0)
+		return;
+
+	ret = io_uring_submit(&dw->ring);
+	if (ret < 0)
+	{
+		errno = -ret;
+		pg_fatal("could not submit io_uring (io_uring_enter(2) failure?): %m");
+	}
+
+	/* Everything was submitted */
+	dw->unsubmitted = 0;
+}
+
+/* Get free buffer index. If none are available, wait for some to finish */
+static int
+dio_get_free_buf(dio_writer *dw)
+{
+	for (;;)
+	{
+		for (int i = 0; i < DIO_NBUF; i++)
+		{
+			if (dw->busy[i] == false)
+			{
+				/*
+				 * Mark it busy till we finish the write (technically we need CQE for
+				 * this buffer to arrive, and then can mark it as non-busy again).
+				 * */
+				dw->busy[i] = true;
+				return i;
+			}
+		}
+		/* All buffers are busy, so we wait for writes to finish */
+		dio_flush_sq(dw);
+		dio_wait_one(dw);
+	}
+}
+
+/*
+ * Ensure the file has some space ahead allocated to avoid perofrmance issues
+ * with O_DIRECT writes. Returns false if space cannot be allocated and in such
+ * scenario DIO writes should not be used as the are *slower* than buffered
+ * writes (outcome of many performance runs). The reason is that at least on
+ * Linux, async O_DIRECT writes that extend current file size and may end up
+ * allocating space, are queued and the depth drops to 1 due to file extension
+ * /space allocation happening for 1 file.
+ *
+ * This is used from dio_writer_start() and from regular dio_submit().
+ *
+ * End-file size is known in case of plain files (tar format sends
+ * member->size), however in -Ft (tar) writing mode, we do knot know the
+ * final target tar file size, so we grow it by DIO_PREALLOC_CHUNK from time
+ * to time. In case file is overextended, we truncate it back to proper size
+ * in dio_writer_finish().
+ */
+static bool
+dio_fallocate(dio_writer *dw, pgoff_t end)
+{
+#ifdef HAVE_POSIX_FALLOCATE
+	pgoff_t		want;
+	int			rc;
+
+	if (end <= dw->allocated)
+		return true;
+	if (dw->nofalloc)
+		return false;
+
+	/* Round up to a whole chunk to reduce number of fallocate calls */
+	want = Max(end, dw->allocated + DIO_PREALLOC_CHUNK);
+
+	rc = posix_fallocate(dw->fd, dw->allocated, want - dw->allocated);
+	if (rc != 0)
+	{
+		/* posix_fallocate() does not set errno */
+		errno = rc;
+
+		if (rc == ENOSPC)
+			pg_fatal("could not preallocate file \"%s\": %m", dw->filename);
+
+		dw->nofalloc = true;
+		return false;
+	}
+
+	dw->allocated = want;
+	return true;
+#else
+	dw->nofalloc = true;
+	return false;
+#endif
+}
+
+/*
+ * Prepare the SQE from the buffer with full O_DIRECT write. We really
+ * submit the SQEs to the kernel only (flush them) only once every
+ * couple of times to avoid constant syscall tax (AKA io_uring batching).
+ *
+ * buffer's idx needs to have it's lenth aligned to DIO_ALIGN (O_DIRECT
+ * requirement).
+ */
+static void
+dio_submit(dio_writer *dw, int idx, size_t len)
+{
+	struct io_uring_sqe *sqe;
+
+	/*
+	 * Keep the allocation ahead of the write cursor.  This is no-op when the
+	 * file was already preallocated to its final size at open() time (plain format).
+	 */
+	dio_fallocate(dw, dw->offset + len);
+
+	sqe = io_uring_get_sqe(&dw->ring);
+	/* this should never happen? liburing/examples uses abort/asserts for this */
+	if (sqe == NULL)
+		pg_fatal("io_uring submission queue full: %m");
+
+	io_uring_prep_write(sqe, dw->fd,
+						dw->pool + (size_t) idx * DIO_BUFSZ,
+						len, dw->offset);
+	io_uring_sqe_set_data64(sqe, idx);
+
+	dw->buflen[idx] = len;
+	dw->offset += len;
+	dw->inflight++;
+	dw->unsubmitted++;
+
+	if (dw->unsubmitted >= DIO_SUBMIT_BATCH)
+		dio_flush_sq(dw);
+}
+
+/*
+ * Start writing to a file through the DIO+AIO path. Returns true if that is
+ * supported (dw->fd is set).
+ *
+ * If prealloc_size is known it can be used to preallocate file which helps
+ * greatly to avoid slow writes with O_DIRECT on some filesystems.
+ */
+static bool
+dio_writer_start(dio_writer *dw, const char *filename, pgoff_t prealloc_size, bool verbose)
+{
+	int			fd;
+	int			ret;
+	struct stat st;
+	/* preallocation in case of DIO also have to be aligned to DIO size */
+	pgoff_t		prealloc_size_aligned = TYPEALIGN64(DIO_ALIGN, prealloc_size);
+	pgoff_t		prealloc_len = prealloc_size > 0 ? prealloc_size_aligned : DIO_PREALLOC_CHUNK;
+
+	fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT | PG_BINARY,
+			  pg_file_create_mode);
+	if (fd < 0)
+	{
+		if (verbose && !dw->notified)
+		{
+			pg_log_info("could not open \"%s\" with O_DIRECT, using buffered I/O instead: %m",
+						filename);
+			dw->notified = true;
+		}
+		return false;
+	}
+
+	/*
+	 * Only regular files can be written with O_DIRECT. However, the /dev/null
+	 * device (used with -t client-blackhole mode) and other special files can
+	 * be still opened with O_DIRECT, but must go through the buffered path(?).
+	 * Ensure we opened regular file before setting up the io_uring, so we
+	 * don't allocate the buffer pool just to fall back.
+	 */
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
+	{
+		if (verbose && !dw->notified)
+		{
+			pg_log_info("\"%s\" is not a regular file, using buffered I/O instead",
+						filename);
+			dw->notified = true;
+		}
+		close(fd);
+		return false;
+	}
+
+	/* Lazy setup of the io_uring */
+	if (!dw->ring_ready)
+	{
+		ret = io_uring_queue_init(DIO_NBUF, &dw->ring, 0);
+		if (ret != 0)
+		{
+			errno = -ret;
+			/* XXX: shouldn't we warn about it non-verbose mode? */
+			if (verbose && !dw->notified)
+			{
+				pg_log_info("could not set up io_uring, using buffered I/O instead: %m");
+				dw->notified = true;
+			}
+			close(fd);
+			return false;
+		}
+
+		/* O_DIRECT writes require memory aligment */
+		if (posix_memalign((void **) &dw->pool, DIO_ALIGN,
+						   (size_t) DIO_NBUF * DIO_BUFSZ) != 0)
+			pg_fatal("unable to allocate aligned memory for direct I/O writes");
+
+		dw->ring_ready = true;
+		if (verbose)
+			pg_log_info("using O_DIRECT with io_uring for large file writes");
+	}
+
+	dw->fd = fd;
+	dw->filename = filename;
+	dw->offset = 0;
+	dw->written = 0;
+	dw->allocated = 0;
+	dw->curidx = -1;
+	dw->curlen = 0;
+
+	/* Preallocate file to avoid O_DIRECT performance woes */
+	if (!dio_fallocate(dw, prealloc_len))
+	{
+		if (verbose && !dw->notified)
+		{
+			pg_log_info("could not preallocate \"%s\", using buffered I/O instead: %m",
+						filename);
+			dw->notified = true;
+		}
+		dw->fd = -1;
+		close(fd);
+		return false;
+	}
+
+	Assert(dw->inflight == 0);
+	Assert(dw->unsubmitted == 0);
+	return true;
+}
+
+/*
+ * Handle buffering on DIO side (in dio->pool buffers) before submiting
+ * full (big) writes as required by O_DIRECT.
+ */
+static void
+dio_writer_write(dio_writer *dw, const char *data, int len)
+{
+	dw->written += len;
+
+	while (len > 0)
+	{
+		char	   *buf;
+		int			space;
+		int			n;
+
+		if (dw->curidx < 0)
+		{
+			dw->curidx = dio_get_free_buf(dw);
+			dw->curlen = 0;
+		}
+
+		buf = dw->pool + (size_t) dw->curidx * DIO_BUFSZ;
+		space = DIO_BUFSZ - dw->curlen;
+		n = Min(space, len);
+		/* append to the pool buffer */
+		memcpy(buf + dw->curlen, data, n);
+		dw->curlen += n;
+		data += n;
+		len -= n;
+
+		if (dw->curlen == DIO_BUFSZ)
+		{
+			dio_submit(dw, dw->curidx, DIO_BUFSZ);
+			dw->curidx = -1;
+		}
+	}
+}
+
+/* Send/wait for remaining in-flight writes, truncate and close the DIO */
+static void
+dio_writer_finish(dio_writer *dw)
+{
+	/* Flush partial buffer */
+	if (dw->curidx >= 0 && dw->curlen > 0)
+	{
+		char	   *buf = dw->pool + (size_t) dw->curidx * DIO_BUFSZ;
+		/* We need to pad stuff */
+		size_t		padded = TYPEALIGN(DIO_ALIGN, dw->curlen);
+
+		memset(buf + dw->curlen, 0, padded - dw->curlen);
+		dio_submit(dw, dw->curidx, padded);
+		dw->curidx = -1;
+	}
+
+	/* Submit any batched writes and wait for them all to finish */
+	dio_flush_sq(dw);
+	while (dw->inflight > 0)
+		dio_wait_one(dw);
+
+	/* Truncate the file to the right size (we could pre-allocate too much) */
+	if (ftruncate(dw->fd, dw->written) != 0)
+		pg_fatal("could not truncate file \"%s\": %m", dw->filename);
+
+	if (close(dw->fd) != 0)
+		pg_fatal("could not close file \"%s\": %m", dw->filename);
+	dw->fd = -1;
+}
+
+/* Free the buffers and the io_uring */
+static void
+dio_writer_destroy(dio_writer *dw)
+{
+	if (dw->ring_ready)
+	{
+		io_uring_queue_exit(&dw->ring);
+		free(dw->pool);
+		dw->ring_ready = false;
+		dw->fd = -1;
+	}
+}
+#endif /* USE_LIBURING */
