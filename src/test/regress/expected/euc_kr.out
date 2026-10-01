@@ -18,7 +18,7 @@ SELECT POSITION(
 SELECT pg_encoding_max_length(pg_char_to_encoding('EUC_KR'));
  pg_encoding_max_length 
 ------------------------
-                      3
+                      2
 (1 row)
 
 -- Code set 0 (ASCII) characters take one byte and code set 1 (KS X 1001)
@@ -48,4 +48,4 @@ SELECT regexp_replace(convert_from('\x41b0fac7d0', 'EUC_KR'), '[^A]', 'x', 'g');
 SELECT convert_from('\x8ea1', 'EUC_KR');
 ERROR:  invalid byte sequence for encoding "EUC_KR": 0x8e 0xa1
 SELECT convert_from('\x8fa1a1', 'EUC_KR');
-ERROR:  invalid byte sequence for encoding "EUC_KR": 0x8f 0xa1 0xa1
+ERROR:  invalid byte sequence for encoding "EUC_KR": 0x8f 0xa1
