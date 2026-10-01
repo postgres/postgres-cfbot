@@ -30,6 +30,17 @@ errcodes = custom_target('errcodes',
 )
 generated_headers += errcodes
 
+errcodes_names = custom_target('errcodes_names',
+  input: files('../../backend/utils/errcodes.txt'),
+  output: ['errcodes_names.h'],
+  command: [
+    perl, files('../../backend/utils/generate-errcodes-names.pl'),
+    '--outfile', '@OUTPUT@',
+    '@INPUT@',
+  ],
+)
+generated_headers += errcodes_names
+
 guc_tables = custom_target('guc_tables',
   input: files('../../backend/utils/misc/guc_parameters.dat'),
   output: ['guc_tables.inc.c'],

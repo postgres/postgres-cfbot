@@ -1981,6 +1981,19 @@ pg_stat_lock| SELECT locktype,
     fastpath_exceeded,
     stats_reset
    FROM pg_stat_get_lock() l(locktype, waits, wait_time, fastpath_exceeded, stats_reset);
+pg_stat_log_messages| SELECT s.backend_type,
+    s.database_oid,
+    d.datname AS database_name,
+    s.user_oid,
+    u.rolname AS user_name,
+    s.elevel,
+    s.sqlerrcode,
+    s.sqlerrcode_name,
+    s.count,
+    s.stats_reset
+   FROM ((pg_stat_get_log_messages() s(backend_type, database_oid, user_oid, elevel, sqlerrcode, sqlerrcode_name, count, stats_reset)
+     LEFT JOIN pg_database d ON ((d.oid = s.database_oid)))
+     LEFT JOIN pg_authid u ON ((u.oid = s.user_oid)));
 pg_stat_progress_analyze| SELECT s.pid,
     s.datid,
     d.datname,

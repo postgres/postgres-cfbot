@@ -1293,6 +1293,31 @@ CREATE VIEW pg_stat_kind_info AS
         k.entry_count
     FROM pg_stat_get_kind_info() k;
 
+CREATE VIEW pg_stat_log_messages AS
+SELECT
+       s.backend_type,
+       s.database_oid,
+       d.datname AS database_name,
+       s.user_oid,
+       u.rolname AS user_name,
+       s.elevel,
+       s.sqlerrcode,
+       s.sqlerrcode_name,
+       s.count,
+       s.stats_reset
+FROM pg_stat_get_log_messages() s
+     LEFT JOIN pg_database d ON d.oid = s.database_oid
+     LEFT JOIN pg_authid u ON u.oid = s.user_oid;
+
+REVOKE ALL ON pg_stat_log_messages FROM PUBLIC;
+GRANT SELECT ON pg_stat_log_messages TO pg_read_all_stats;
+
+REVOKE EXECUTE ON FUNCTION pg_stat_get_log_messages() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_stat_get_log_messages() TO pg_read_all_stats;
+
+REVOKE EXECUTE ON FUNCTION pg_stat_get_log_messages_dropped() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_stat_get_log_messages_dropped() TO pg_read_all_stats;
+
 CREATE VIEW pg_stat_wal AS
     SELECT
         w.wal_records,

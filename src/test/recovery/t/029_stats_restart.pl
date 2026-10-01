@@ -13,6 +13,7 @@ use File::Copy;
 my $node = PostgreSQL::Test::Cluster->new('primary');
 $node->init(allows_streaming => 1);
 $node->append_conf('postgresql.conf', "track_functions = 'all'");
+$node->append_conf('postgresql.conf', "track_log_messages = 'warning'");
 $node->start;
 
 my $connect_db = 'postgres';
@@ -293,6 +294,35 @@ cmp_ok(
 	$wal_restart_immediate->{reset},
 	"$sect: reset timestamp is new");
 
+
+## checks related to log message stats persistence around restarts
+
+# emit a log message with a distinctive SQLSTATE and check it is counted
+$node->safe_psql($connect_db,
+	q{DO $$ BEGIN RAISE WARNING 'stats restart test' USING ERRCODE = 'ZZ777'; END $$;}
+);
+
+$sect = "logmsg";
+my $logmsg = logmsg_stats();
+is($logmsg->{count}, '1', "$sect: emitted message counted");
+
+# counts survive a clean restart
+$node->restart;
+
+$sect = "logmsg post restart";
+my $logmsg_restart = logmsg_stats();
+is($logmsg_restart->{count}, '1',
+	"$sect: count persisted across clean restart");
+is($logmsg_restart->{reset}, $logmsg->{reset}, "$sect: stats_reset equal");
+
+# counts are discarded after a crash
+$node->stop('immediate');
+$node->start;
+
+$sect = "logmsg post immediate restart";
+my $logmsg_crash = logmsg_stats();
+is($logmsg_crash->{count}, '', "$sect: counts discarded after crash");
+
 $node->stop;
 done_testing();
 
@@ -371,6 +401,20 @@ sub io_stats
 		$connect_db, qq{SELECT reads FROM pg_stat_io
   WHERE context = '$context' AND object = '$object' AND
     backend_type = '$backend_type'});
+
+	return \%results;
+}
+
+sub logmsg_stats
+{
+	my %results;
+
+	$results{count} = $node->safe_psql(
+		$connect_db, q{SELECT count FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ777' AND elevel = 'WARNING'});
+	$results{reset} = $node->safe_psql(
+		$connect_db, q{SELECT stats_reset FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ777' AND elevel = 'WARNING'});
 
 	return \%results;
 }

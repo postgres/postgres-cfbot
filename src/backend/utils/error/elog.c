@@ -1921,7 +1921,12 @@ EmitErrorReport(void)
 
 	/* Send to server log, if enabled */
 	if (edata->output_to_server)
+	{
+		/* count the message in the cumulative log message statistics */
+		pgstat_count_logmsg(edata);
+
 		send_message_to_server_log(edata);
+	}
 
 	/* Send to client, if enabled */
 	if (edata->output_to_client)

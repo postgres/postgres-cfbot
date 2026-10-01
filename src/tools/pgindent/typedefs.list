@@ -756,6 +756,7 @@ EphemeralNamedRelationMetadataData
 EquivalenceClass
 EquivalenceMember
 EquivalenceMemberIterator
+ErrCodeName
 ErrorContextCallback
 ErrorData
 ErrorSaveContext
@@ -2303,6 +2304,7 @@ PgStatShared_HashEntry
 PgStatShared_Index
 PgStatShared_IO
 PgStatShared_Lock
+PgStatShared_LogMsg
 PgStatShared_Relation
 PgStatShared_ReplSlot
 PgStatShared_SLRU
@@ -2328,6 +2330,8 @@ PgStat_KindInfo
 PgStat_LocalState
 PgStat_Lock
 PgStat_LockEntry
+PgStat_LogMsgEntry
+PgStat_LogMsgStats
 PgStat_PendingDroppedStatsItem
 PgStat_PendingIO
 PgStat_PendingLock

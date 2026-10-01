@@ -259,6 +259,24 @@ static const struct config_enum_entry track_function_options[] = {
 StaticAssertDecl(lengthof(track_function_options) == (TRACK_FUNC_ALL + 2),
 				 "array length mismatch");
 
+static const struct config_enum_entry track_log_messages_options[] = {
+	{"none", PGSTAT_LOGMSG_TRACK_NONE, false},
+	{"debug5", DEBUG5, false},
+	{"debug4", DEBUG4, false},
+	{"debug3", DEBUG3, false},
+	{"debug2", DEBUG2, false},
+	{"debug1", DEBUG1, false},
+	{"debug", DEBUG2, true},
+	{"info", INFO, false},
+	{"notice", NOTICE, false},
+	{"warning", WARNING, false},
+	{"error", ERROR, false},
+	{"log", LOG, false},
+	{"fatal", FATAL, false},
+	{"panic", PANIC, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry stats_fetch_consistency[] = {
 	{"none", PGSTAT_FETCH_CONSISTENCY_NONE, false},
 	{"cache", PGSTAT_FETCH_CONSISTENCY_CACHE, false},

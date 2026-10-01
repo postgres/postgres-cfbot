@@ -581,6 +581,55 @@ SELECT stats_reset AS wal_reset_ts FROM pg_stat_wal \gset
 SELECT pg_stat_reset_shared('wal');
 SELECT stats_reset > :'wal_reset_ts'::timestamptz FROM pg_stat_wal;
 
+-- Test log message statistics
+-- Counting is disabled by default, so enable it first.
+SET track_log_messages TO warning;
+-- A message emitted to the server log must be counted, grouped by
+-- backend type, database, user, severity level, and SQLSTATE.
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'ZZ042'; END $$;
+SELECT count >= 1 AS has_count, backend_type, elevel, sqlerrcode_name
+  FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ042' AND user_name = current_user
+    AND database_name = current_database();
+
+-- Known SQLSTATEs must resolve to their condition name
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'division_by_zero'; END $$;
+SELECT count >= 1 AS has_count, sqlerrcode, sqlerrcode_name
+  FROM pg_stat_log_messages
+  WHERE sqlerrcode = '22012' AND elevel = 'WARNING'
+    AND user_name = current_user AND backend_type = 'client backend';
+
+-- track_log_messages = none disables counting
+SET track_log_messages TO none;
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'ZZ043'; END $$;
+SELECT count(*) FROM pg_stat_log_messages WHERE sqlerrcode = 'ZZ043';
+SET track_log_messages TO warning;
+
+-- Test that reset_shared with log_messages specified as the stats type
+-- works and that it reclaims entries for reuse
+SELECT stats_reset AS logmsg_reset_ts FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ042' AND user_name = current_user \gset
+SELECT pg_stat_reset_shared('log_messages');
+SELECT count(*) FROM pg_stat_log_messages WHERE sqlerrcode = 'ZZ042';
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'ZZ042'; END $$;
+SELECT count, stats_reset > :'logmsg_reset_ts'::timestamptz AS reset_ok
+  FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ042' AND user_name = current_user;
+
+-- Test log message statistics privileges: pg_read_all_stats is required
+CREATE ROLE regress_stats_logmsg;
+SET ROLE regress_stats_logmsg;
+SELECT count(*) FROM pg_stat_log_messages;
+SELECT pg_stat_get_log_messages_dropped();
+RESET ROLE;
+GRANT pg_read_all_stats TO regress_stats_logmsg;
+SET ROLE regress_stats_logmsg;
+SELECT count(*) >= 0 AS ok FROM pg_stat_log_messages;
+SELECT pg_stat_get_log_messages_dropped() >= 0 AS ok;
+RESET ROLE;
+DROP ROLE regress_stats_logmsg;
+RESET track_log_messages;
+
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 

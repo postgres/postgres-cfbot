@@ -539,6 +539,17 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_log_messages</structname><indexterm><primary>pg_stat_log_messages</primary></indexterm></entry>
+      <entry>
+       One row for each combination of backend type, database, user,
+       severity level, and SQLSTATE code, showing counts of messages
+       emitted to the server log.
+       See <link linkend="monitoring-pg-stat-log-messages-view">
+       <structname>pg_stat_log_messages</structname></link> for details.
+      </entry>
+     </row>
+
+     <row>
       <entry><structname>pg_stat_replication_slots</structname><indexterm><primary>pg_stat_replication_slots</primary></indexterm></entry>
       <entry>One row per replication slot, showing statistics about the
        replication slot's usage. See
@@ -3689,6 +3700,159 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </table>
  </sect2>
 
+ <sect2 id="monitoring-pg-stat-log-messages-view">
+  <title><structname>pg_stat_log_messages</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_log_messages</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_log_messages</structname> view has one row for
+   each distinct combination of backend type, database, user, severity
+   level, and SQLSTATE code, showing how many messages with that signature
+   have been emitted to the server log.  Message counting is disabled by
+   default and can be enabled by setting the
+   <xref linkend="guc-track-log-messages"/> parameter.
+  </para>
+
+  <para>
+   Only messages that are actually written to the server log are counted;
+   <xref linkend="guc-log-min-messages"/> therefore acts as a floor on what
+   can be tracked.  The <structfield>database_name</structfield> and
+   <structfield>user_name</structfield> columns are <literal>NULL</literal>
+   for messages emitted before a process has bound to a database or role,
+   for example authentication failures or messages from auxiliary
+   processes.
+  </para>
+
+  <para>
+   The number of distinct combinations tracked is capped at 64 times the
+   number of SQLSTATE error codes known to the server (about 16,800 in
+   total); once that limit has been reached, messages for already-tracked
+   combinations continue to be counted while messages for new combinations
+   are silently dropped.  The number of messages dropped that way is
+   reported by the
+   <function>pg_stat_get_log_messages_dropped()</function> function.
+   Resetting these statistics with
+   <literal>pg_stat_reset_shared('log_messages')</literal> reclaims all
+   entries.
+  </para>
+
+  <table id="pg-stat-log-messages-view" xreflabel="pg_stat_log_messages">
+   <title><structname>pg_stat_log_messages</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backend_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Type of backend that emitted the message (e.g.
+       <literal>client backend</literal>, <literal>autovacuum worker</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>database_oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       OID of the database the emitting process was connected to, or NULL
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>database_name</structfield> <type>name</type>
+      </para>
+      <para>
+       Name of the database the emitting process was connected to, or NULL
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>user_oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       OID of the user the emitting process was running as, or NULL
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>user_name</structfield> <type>name</type>
+      </para>
+      <para>
+       Name of the user the emitting process was running as, or NULL
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>elevel</structfield> <type>text</type>
+      </para>
+      <para>
+       Severity level of the message (e.g. <literal>WARNING</literal>,
+       <literal>ERROR</literal>, <literal>FATAL</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>sqlerrcode</structfield> <type>text</type>
+      </para>
+      <para>
+       SQLSTATE error code of the message (e.g. <literal>40P01</literal>);
+       see <xref linkend="errcodes-appendix"/>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>sqlerrcode_name</structfield> <type>text</type>
+      </para>
+      <para>
+       Condition name of the SQLSTATE error code (e.g.
+       <literal>deadlock_detected</literal>), or NULL if the code has no
+       standard name
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of messages emitted with this combination
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Time at which these statistics were last reset
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
  <sect2 id="monitoring-pg-stat-bgwriter-view">
   <title><structname>pg_stat_bgwriter</structname></title>
 
@@ -6011,6 +6175,12 @@ description | Waiting for a newly initialized WAL file to reach durable storage
          <para>
           <literal>lock</literal>: Reset all the counters shown in the
           <structname>pg_stat_lock</structname> view.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>log_messages</literal>: Reset all the counters shown in the
+          <structname>pg_stat_log_messages</structname> view.
          </para>
         </listitem>
         <listitem>

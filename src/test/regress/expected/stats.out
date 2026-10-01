@@ -128,7 +128,8 @@ SELECT id, name, fixed_amount,
  12 | lock         | t            | f         | t
  13 | slru         | t            | f         | t
  14 | wal          | t            | f         | t
-(14 rows)
+ 15 | log_messages | t            | f         | t
+(15 rows)
 
 -- ensure that both seqscan and indexscan plans are allowed
 SET enable_seqscan TO on;
@@ -1263,10 +1264,100 @@ SELECT stats_reset > :'wal_reset_ts'::timestamptz FROM pg_stat_wal;
  t
 (1 row)
 
+-- Test log message statistics
+-- Counting is disabled by default, so enable it first.
+SET track_log_messages TO warning;
+-- A message emitted to the server log must be counted, grouped by
+-- backend type, database, user, severity level, and SQLSTATE.
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'ZZ042'; END $$;
+WARNING:  logmsg stats test
+SELECT count >= 1 AS has_count, backend_type, elevel, sqlerrcode_name
+  FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ042' AND user_name = current_user
+    AND database_name = current_database();
+ has_count |  backend_type  | elevel  | sqlerrcode_name 
+-----------+----------------+---------+-----------------
+ t         | client backend | WARNING | 
+(1 row)
+
+-- Known SQLSTATEs must resolve to their condition name
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'division_by_zero'; END $$;
+WARNING:  logmsg stats test
+SELECT count >= 1 AS has_count, sqlerrcode, sqlerrcode_name
+  FROM pg_stat_log_messages
+  WHERE sqlerrcode = '22012' AND elevel = 'WARNING'
+    AND user_name = current_user AND backend_type = 'client backend';
+ has_count | sqlerrcode | sqlerrcode_name  
+-----------+------------+------------------
+ t         | 22012      | division_by_zero
+(1 row)
+
+-- track_log_messages = none disables counting
+SET track_log_messages TO none;
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'ZZ043'; END $$;
+WARNING:  logmsg stats test
+SELECT count(*) FROM pg_stat_log_messages WHERE sqlerrcode = 'ZZ043';
+ count 
+-------
+     0
+(1 row)
+
+SET track_log_messages TO warning;
+-- Test that reset_shared with log_messages specified as the stats type
+-- works and that it reclaims entries for reuse
+SELECT stats_reset AS logmsg_reset_ts FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ042' AND user_name = current_user \gset
+SELECT pg_stat_reset_shared('log_messages');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+SELECT count(*) FROM pg_stat_log_messages WHERE sqlerrcode = 'ZZ042';
+ count 
+-------
+     0
+(1 row)
+
+DO $$ BEGIN RAISE WARNING 'logmsg stats test' USING ERRCODE = 'ZZ042'; END $$;
+WARNING:  logmsg stats test
+SELECT count, stats_reset > :'logmsg_reset_ts'::timestamptz AS reset_ok
+  FROM pg_stat_log_messages
+  WHERE sqlerrcode = 'ZZ042' AND user_name = current_user;
+ count | reset_ok 
+-------+----------
+     1 | t
+(1 row)
+
+-- Test log message statistics privileges: pg_read_all_stats is required
+CREATE ROLE regress_stats_logmsg;
+SET ROLE regress_stats_logmsg;
+SELECT count(*) FROM pg_stat_log_messages;
+ERROR:  permission denied for view pg_stat_log_messages
+SELECT pg_stat_get_log_messages_dropped();
+ERROR:  permission denied for function pg_stat_get_log_messages_dropped
+RESET ROLE;
+GRANT pg_read_all_stats TO regress_stats_logmsg;
+SET ROLE regress_stats_logmsg;
+SELECT count(*) >= 0 AS ok FROM pg_stat_log_messages;
+ ok 
+----
+ t
+(1 row)
+
+SELECT pg_stat_get_log_messages_dropped() >= 0 AS ok;
+ ok 
+----
+ t
+(1 row)
+
+RESET ROLE;
+DROP ROLE regress_stats_logmsg;
+RESET track_log_messages;
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 ERROR:  unrecognized reset target: "unknown"
-HINT:  Target must be "archiver", "bgwriter", "checkpointer", "io", "lock", "recovery_prefetch", "slru", or "wal".
+HINT:  Target must be "archiver", "bgwriter", "checkpointer", "io", "lock", "log_messages", "recovery_prefetch", "slru", or "wal".
 -- Test that reset works for pg_stat_database and pg_stat_database_conflicts
 -- Since pg_stat_database stats_reset starts out as NULL, reset it once first so that we
 -- have a baseline for comparison. The same for pg_stat_database_conflicts as it shares

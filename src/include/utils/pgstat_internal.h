@@ -472,6 +472,14 @@ typedef struct PgStatShared_Lock
 	PgStat_Lock stats;
 } PgStatShared_Lock;
 
+typedef struct PgStatShared_LogMsg
+{
+	/* lock protects concurrent updates of ->stats */
+	LWLock		lock;
+	uint32		changecount;
+	PgStat_LogMsgStats stats;
+} PgStatShared_LogMsg;
+
 typedef struct PgStatShared_SLRU
 {
 	/* lock protects ->stats */
@@ -585,6 +593,7 @@ typedef struct PgStat_ShmemControl
 	PgStatShared_Checkpointer checkpointer;
 	PgStatShared_IO io;
 	PgStatShared_Lock lock;
+	PgStatShared_LogMsg logmsg;
 	PgStatShared_SLRU slru;
 	PgStatShared_Wal wal;
 
@@ -618,6 +627,8 @@ typedef struct PgStat_Snapshot
 	PgStat_IO	io;
 
 	PgStat_Lock lock;
+
+	PgStat_LogMsgStats logmsg;
 
 	PgStat_SLRUStats slru[SLRU_NUM_ELEMENTS];
 
@@ -780,6 +791,14 @@ extern bool pgstat_lock_flush_cb(bool nowait);
 extern void pgstat_lock_init_shmem_cb(void *stats);
 extern void pgstat_lock_reset_all_cb(TimestampTz ts);
 extern void pgstat_lock_snapshot_cb(void);
+
+/*
+ * Functions in pgstat_logmsg.c
+ */
+
+extern void pgstat_logmsg_init_shmem_cb(void *stats);
+extern void pgstat_logmsg_reset_all_cb(TimestampTz ts);
+extern void pgstat_logmsg_snapshot_cb(void);
 
 /*
  * Functions in pgstat_relation.c

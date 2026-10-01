@@ -9265,6 +9265,38 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-track-log-messages" xreflabel="track_log_messages">
+      <term><varname>track_log_messages</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>track_log_messages</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables counting of messages emitted to the server log, grouped by
+        backend type, database, user, severity level, and SQLSTATE code.
+        The value is the minimum message severity level to count, using the
+        same severity levels as <xref linkend="guc-log-min-messages"/>;
+        for example, <literal>warning</literal> counts all messages of
+        severity <literal>WARNING</literal> and above.  The default is
+        <literal>none</literal>, which disables counting entirely.  The
+        collected counts are shown in the
+        <link linkend="monitoring-pg-stat-log-messages-view">
+        <structname>pg_stat_log_messages</structname></link> view.
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.
+       </para>
+
+       <note>
+        <para>
+         Only messages that are actually written to the server log are
+         counted, so <xref linkend="guc-log-min-messages"/> acts as a floor
+         on what this setting can track.
+        </para>
+       </note>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-stats-fetch-consistency" xreflabel="stats_fetch_consistency">
       <term><varname>stats_fetch_consistency</varname> (<type>enum</type>)
       <indexterm>
