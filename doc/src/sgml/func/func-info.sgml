@@ -246,9 +246,17 @@
         request and is ahead of it in the wait queue (soft block).  When using
         parallel queries the result always lists client-visible process IDs
         (that is, <function>pg_backend_pid</function> results) even if the
-        actual lock is held or awaited by a child worker process.  As a result
-        of that, there may be duplicated PIDs in the result.  Also note that
-        when a prepared transaction holds a conflicting lock, it will be
+        actual lock is held or awaited by a child worker process. As a result
+        of that, there may be duplicated PIDs in the result. When members of
+        the same parallel lock group block each other on a relation extension
+        lock (shown as lock type <literal>extend</literal> in <link
+        linkend="view-pg-locks"><structname>pg_locks</structname></link>), the
+        specified process ID can also appear in the result. This does not mean
+        that a process blocks itself. Rather, a lock held by one member of its
+        parallel lock group blocks a lock request made by another member of that
+        group.
+        Also note that when a prepared transaction holds a conflicting lock,
+        it will be
         represented by a zero process ID.
        </para>
        <para>
