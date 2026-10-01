@@ -1438,6 +1438,75 @@ export PG_OOM_ADJUST_VALUE=0
 
   </sect2>
 
+  <sect2 id="linux-memory-cgroups">
+   <title>Linux Control Group Memory Limits</title>
+
+   <indexterm>
+    <primary>control group</primary>
+   </indexterm>
+
+   <indexterm>
+    <primary>cgroup</primary>
+   </indexterm>
+
+   <para>
+    On Linux, the memory used by a group of processes can be limited using
+    control groups (<firstterm>cgroups</firstterm>), a mechanism commonly
+    used to limit the memory of containers.  Such a limit is enforced
+    regardless of the amount of memory available on the host and of
+    host-wide settings such as <varname>vm.overcommit_memory</varname> (see
+    <xref linkend="linux-memory-overcommit"/>).
+   </para>
+
+   <para>
+    With cgroup version 2, the limit is set in the
+    <filename>memory.max</filename> file.  (Version 1 uses different files and
+    is not covered here.)  When memory usage reaches the limit and cannot be
+    reduced by reclaiming memory, the kernel's OOM killer is invoked within
+    the cgroup.  In this case memory allocations usually do not fail with an
+    out-of-memory error; instead, the OOM killer terminates a process of the
+    cgroup.  If that is a server process other than the postmaster, the
+    postmaster treats it as a crash and, unless
+    <xref linkend="guc-restart-after-crash"/> is turned off, restarts all
+    server processes, disconnecting all sessions.  If the server runs as a
+    <application>systemd</application> service, the service's
+    <varname>OOMPolicy</varname> setting also applies; its default,
+    <literal>stop</literal>, stops the whole service instead.
+   </para>
+
+   <para>
+    If <filename>memory.oom.group</filename> is set for the cgroup, which
+    container runtimes often do (recent versions of Kubernetes do so by
+    default), the OOM killer instead terminates all processes of the cgroup
+    except those with an <varname>oom_score_adj</varname> of -1000, so the
+    postmaster too, unless it is protected as described in
+    <xref linkend="linux-memory-overcommit"/>.  If the postmaster is
+    terminated, the server is not restarted automatically, and it does not log
+    the termination.  For details see the kernel documentation file
+    <ulink url="https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html"></ulink>.
+   </para>
+
+   <para>
+    The shared memory used by <productname>PostgreSQL</productname>
+    (including the shared buffers) and the private memory of each server
+    process count towards the memory usage of the cgroup.  Therefore,
+    <xref linkend="guc-shared-buffers"/>, plus the memory that concurrent
+    sessions might use (see <xref linkend="guc-work-mem"/>,
+    <xref linkend="guc-hash-mem-multiplier"/>,
+    <xref linkend="guc-maintenance-work-mem"/>, and
+    <xref linkend="guc-max-connections"/>), should be chosen with the limit
+    in mind.  Since the total memory used can be many times the value of
+    <varname>work_mem</varname>, it is advisable to leave a safety margin
+    below the limit.  Whether memory allocated from the huge
+    page pool (see <xref linkend="guc-huge-pages"/>) counts towards the memory
+    usage of the cgroup depends on the
+    <literal>memory_hugetlb_accounting</literal> mount option of the cgroup2
+    file system.  The kernel does not enable it by default, but recent versions
+    of <application>systemd</application> do.
+   </para>
+
+  </sect2>
+
   <sect2 id="linux-huge-pages">
    <title>Linux Huge Pages</title>
 
