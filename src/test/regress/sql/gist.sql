@@ -169,6 +169,86 @@ explain (verbose, costs off)
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 
+drop index gist_tbl_multi_index;
+
+-- Test that an ordering Index Scan returns the AM's ORDER BY values to a
+-- targetlist entry equal to the ORDER BY expression, instead of evaluating
+-- the expression again, for an opclass that passes amcanreturnorderby.
+set enable_indexonlyscan = off;
+
+-- An expression index over a counting function proves the operator is not
+-- re-evaluated: the count stays at zero for the rows returned.
+create sequence gist_cnt_seq;
+create function gist_cnt_pt(point) returns point language plpgsql immutable
+  as $$ begin perform nextval('public.gist_cnt_seq'); return $1; end $$;
+create index gist_tbl_cnt_index on gist_tbl using gist (gist_cnt_pt(p));
+
+explain (verbose, costs off)
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+
+select setval('gist_cnt_seq', 1, false);
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+select nextval('gist_cnt_seq') - 1 as calls_during_scan;
+
+-- Every copy of the ORDER BY expression is served from the index; an
+-- expression that merely contains it is not.
+explain (verbose, costs off)
+select gist_cnt_pt(p) <-> point(0,0) as d1,
+       (gist_cnt_pt(p) <-> point(0,0)) * 2 as d2,
+       gist_cnt_pt(p) <-> point(0,0) as d3
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0,0) limit 2;
+
+drop index gist_tbl_cnt_index;
+drop function gist_cnt_pt(point);
+drop sequence gist_cnt_seq;
+
+-- The box opclass computes its exact leaf distance with the operator's own
+-- code, so it qualifies too.  The values must equal the operator's.
+create index gist_tbl_box_index on gist_tbl using gist (b);
+
+explain (verbose, costs off)
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91);
+
+-- the distance numbers are not exactly the same across platforms
+set extra_float_digits = 0;
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91);
+reset extra_float_digits;
+
+select count(*) filter (where dist = b <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+          order by b <-> point(5.2, 5.91) limit 200) ss;
+
+-- Same, under row locking (the tuple is re-fetched by LockRows).
+set extra_float_digits = 0;
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91)
+  limit 3 for update;
+reset extra_float_digits;
+
+drop index gist_tbl_box_index;
+
+-- The circle opclass's distance is a lower bound that is always rechecked,
+-- and its opclass does not pass amcanreturnorderby: the targetlist is left
+-- alone and the operator is evaluated as before.
+create index gist_tbl_circle_index on gist_tbl using gist (c);
+
+explain (verbose, costs off)
+select c <-> point(5.2, 5.91) as dist from gist_tbl
+  order by c <-> point(5.2, 5.91) limit 3;
+
+select count(*) filter (where dist = c <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select c, c <-> point(5.2, 5.91) as dist from gist_tbl
+          order by c <-> point(5.2, 5.91) limit 200) ss;
+
+drop index gist_tbl_circle_index;
+reset enable_indexonlyscan;
+
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);

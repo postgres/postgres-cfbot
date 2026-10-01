@@ -134,6 +134,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
+static void replace_orderby_tlist_refs(IndexScan *splan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -704,6 +705,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				splan->indexorderbyorig =
 					fix_scan_list(root, splan->indexorderbyorig,
 								  rtoffset, NUM_EXEC_QUAL(plan));
+				/* after both are fixed, so equal() compares like with like */
+				replace_orderby_tlist_refs(splan);
 			}
 			break;
 		case T_IndexOnlyScan:
@@ -1365,6 +1368,63 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
 
 	return plan;
+}
+
+/*
+ * replace_orderby_tlist_refs
+ *		Let an ordering IndexScan hand its ORDER BY values to its targetlist.
+ *
+ * For each ORDER BY key whose index column's opclass promises that the
+ * distances it reports for an exact (non-rechecked) row are the ordering
+ * operator's own result (indexorderbyexact[i], from amcanreturnorderby),
+ * replace each top-level targetlist expression that is equal() to the i'th
+ * indexorderbyorig expression with Var(INNER_VAR, i + 1).  nodeIndexscan.c
+ * then fills a virtual slot with the ORDER BY values of every returned row --
+ * the AM's for an exact row, the recomputed ones for a rechecked row -- and
+ * installs it as the projection's inner tuple.  A scan node has no inner
+ * plan, so INNER_VAR is otherwise unused here.
+ *
+ * Only float8/float4 expressions qualify: those are the only types
+ * index_store_float8_orderby_distances() can deliver.
+ */
+static void
+replace_orderby_tlist_refs(IndexScan *splan)
+{
+	ListCell   *lc;
+	int			nrepl = 0;
+
+	if (splan->indexorderbyexact == NIL)
+		return;
+	Assert(list_length(splan->indexorderbyexact) ==
+		   list_length(splan->indexorderbyorig));
+
+	foreach(lc, splan->scan.plan.targetlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		ListCell   *lo,
+				   *le;
+		int			i = 0;
+
+		forboth(lo, splan->indexorderbyorig, le, splan->indexorderbyexact)
+		{
+			Expr	   *orig = (Expr *) lfirst(lo);
+			Oid			typ = exprType((Node *) orig);
+
+			i++;
+			if (lfirst_int(le) &&
+				(typ == FLOAT8OID || typ == FLOAT4OID) &&
+				equal(tle->expr, orig))
+			{
+				tle->expr = (Expr *) makeVar(INNER_VAR, i, typ,
+											 exprTypmod((Node *) orig),
+											 exprCollation((Node *) orig),
+											 0);
+				nrepl++;
+				break;
+			}
+		}
+	}
+	splan->indexorderbytlist = nrepl;
 }
 
 /*

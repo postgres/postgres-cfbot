@@ -157,6 +157,7 @@ typedef struct IndexAmRoutine
     ambulkdelete_function ambulkdelete;
     amvacuumcleanup_function amvacuumcleanup;
     amcanreturn_function amcanreturn;   /* can be NULL */
+    amcanreturnorderby_function amcanreturnorderby; /* can be NULL */
     amcostestimate_function amcostestimate;
     amgettreeheight_function amgettreeheight;   /* can be NULL */
     amoptions_function amoptions;
@@ -481,6 +482,25 @@ amcanreturn (Relation indexRelation, int attno);
 
   <para>
 <programlisting>
+bool
+amcanreturnorderby (Relation indexRelation, int attno);
+</programlisting>
+   Check whether, for an ordering scan on the given column, the values the
+   access method reports in <literal>scan-&gt;xs_orderbyvals</literal> with
+   <literal>xs_recheckorderby</literal> false are exactly the values the
+   ordering operator would return for the heap tuple.  If so, the executor
+   may return them for a target list entry that is the same expression as
+   the <literal>ORDER BY</literal> key, instead of evaluating the operator
+   again.  The function must answer for the operator class bound to the
+   column, not for the access method as a whole: an operator class whose
+   distances merely sort like the operator's result, or depend on anything
+   other than the indexed value, must answer false.  If the
+   <structfield>amcanreturnorderby</structfield> field is set to NULL, no
+   substitution is made.
+  </para>
+
+  <para>
+<programlisting>
 void
 amcostestimate (PlannerInfo *root,
                 IndexPath *path,
@@ -494,6 +514,7 @@ amcostestimate (PlannerInfo *root,
    Estimate the costs of an index scan.  This function is described fully
    in <xref linkend="index-cost-estimation"/>, below.
   </para>
+
 
   <para>
 <programlisting>
@@ -988,6 +1009,16 @@ amtranslatecmptype (CompareType cmptype, Oid opfamily, Oid opcintype);
        <replaceable>operator</replaceable> <replaceable>constant</replaceable>.  Scan modifiers
        of that form can be passed to <function>amrescan</function> as described
        previously.
+      </para>
+      <para>
+       Such an access method returns each entry's ordering values in
+       <literal>scan-&gt;xs_orderbyvals</literal>, and sets
+       <literal>scan-&gt;xs_recheckorderby</literal> to true when those values are
+       only lower bounds that the executor must recompute from the heap
+       tuple.  When <literal>xs_recheckorderby</literal> is false the values
+       need only sort in the same order as the ordering operator's results;
+       they need not equal them.  See <function>amcanreturnorderby</function>
+       below for how an access method can promise that they do.
       </para>
      </listitem>
     </itemizedlist>
