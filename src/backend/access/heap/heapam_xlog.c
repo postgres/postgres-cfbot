@@ -57,6 +57,10 @@ heap_xlog_vm_clear(XLogReaderState *record,
 									  RBM_ZERO_ON_ERROR, false,
 									  &vmbuffer) == BLK_NEEDS_REDO)
 	{
+		/* initialize the page if it was read as zeros */
+		if (PageIsNew(BufferGetPage(vmbuffer)))
+			PageInit(BufferGetPage(vmbuffer), BLCKSZ, 0);
+
 		if (visibilitymap_clear(target_locator, heap_blkno, vmbuffer, flags))
 			PageSetLSN(BufferGetPage(vmbuffer), lsn);
 	}
@@ -817,6 +821,10 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 										  RBM_ZERO_ON_ERROR, false,
 										  &vmbuffer_new) == BLK_NEEDS_REDO)
 		{
+			/* initialize the page if it was read as zeros */
+			if (PageIsNew(BufferGetPage(vmbuffer_new)))
+				PageInit(BufferGetPage(vmbuffer_new), BLCKSZ, 0);
+
 			/*
 			 * If both the old and new heap pages were all-visible and their
 			 * VM bits are on the same VM page, that single VM page is
@@ -856,6 +864,10 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 										  RBM_ZERO_ON_ERROR, false,
 										  &vmbuffer_old) == BLK_NEEDS_REDO)
 		{
+			/* initialize the page if it was read as zeros */
+			if (PageIsNew(BufferGetPage(vmbuffer_old)))
+				PageInit(BufferGetPage(vmbuffer_old), BLCKSZ, 0);
+
 			if (visibilitymap_clear(rlocator, oldblk, vmbuffer_old,
 									VISIBILITYMAP_VALID_BITS))
 				PageSetLSN(BufferGetPage(vmbuffer_old), lsn);
