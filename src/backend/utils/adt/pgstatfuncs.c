@@ -2415,7 +2415,7 @@ pg_stat_get_replication_slot(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_subscription_stats(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_SUBSCRIPTION_STATS_COLS	13
+#define PG_STAT_GET_SUBSCRIPTION_STATS_COLS	14
 	Oid			subid = PG_GETARG_OID(0);
 	TupleDesc	tupdesc;
 	Datum		values[PG_STAT_GET_SUBSCRIPTION_STATS_COLS] = {0};
@@ -2455,6 +2455,8 @@ pg_stat_get_subscription_stats(PG_FUNCTION_ARGS)
 					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 13, "stats_reset",
 					   TIMESTAMPTZOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 14, "worker_launch_failure_count",
+					   INT8OID, -1, 0);
 	TupleDescFinalize(tupdesc);
 	BlessTupleDesc(tupdesc);
 
@@ -2486,8 +2488,12 @@ pg_stat_get_subscription_stats(PG_FUNCTION_ARGS)
 		nulls[i] = true;
 	else
 		values[i] = TimestampTzGetDatum(subentry->stat_reset_timestamp);
+	i++;
 
-	Assert(i + 1 == PG_STAT_GET_SUBSCRIPTION_STATS_COLS);
+	/* worker_launch_failure_count */
+	values[i++] = Int64GetDatum(subentry->worker_launch_failure_count);
+
+	Assert(i == PG_STAT_GET_SUBSCRIPTION_STATS_COLS);
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
