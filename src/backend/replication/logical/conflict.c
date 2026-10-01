@@ -1297,6 +1297,7 @@ insert_conflict_log_tuple(Relation rel,
 	XLogRecPtr	remote_final_lsn;
 	TimestampTz remote_commit_ts;
 	bool		omitted = false;
+	Oid			replica_index;
 	HeapTuple	tuple;
 
 	Assert(conflictlogrel != NULL);
@@ -1339,34 +1340,32 @@ insert_conflict_log_tuple(Relation rel,
 	else
 		nulls[attno++] = true;
 
-	if (!TupIsNull(searchslot))
-	{
-		Oid			replica_index = GetRelationIdentityOrPK(rel);
+	/*
+	 * All conflicts logged to the table are LOG-level update or delete
+	 * conflicts, which always have a searchslot. Insert conflicts, which
+	 * don't, are ERROR-level and never reach here.
+	 */
+	Assert(!TupIsNull(searchslot));
 
-		/*
-		 * If the table has a valid replica identity index, build the index
-		 * JSON datum from key value. Otherwise, in REPLICA IDENTITY FULL
-		 * cases, set replica_identity_full to true and leave replica_identity
-		 * NULL to avoid serializing full tuples that could exceed memory
-		 * allocation limits.
-		 */
-		if (OidIsValid(replica_index))
-		{
-			values[attno++] = BoolGetDatum(false);
-			values[attno++] = build_index_key_json(rel,
-												   replica_index,
-												   searchslot,
-												   &omitted);
-		}
-		else
-		{
-			values[attno++] = BoolGetDatum(true);
-			nulls[attno++] = true;
-		}
+	replica_index = GetRelationIdentityOrPK(rel);
+
+	/*
+	 * If the table has a valid replica identity index, build the index JSON
+	 * datum from key value. Otherwise, in REPLICA IDENTITY FULL cases, set
+	 * replica_identity_full to true and leave replica_identity NULL to avoid
+	 * serializing full tuples that could exceed memory allocation limits.
+	 */
+	if (OidIsValid(replica_index))
+	{
+		values[attno++] = BoolGetDatum(false);
+		values[attno++] = build_index_key_json(rel,
+											   replica_index,
+											   searchslot,
+											   &omitted);
 	}
 	else
 	{
-		nulls[attno++] = true;
+		values[attno++] = BoolGetDatum(true);
 		nulls[attno++] = true;
 	}
 

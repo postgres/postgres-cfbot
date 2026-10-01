@@ -2371,7 +2371,7 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
        <row>
         <entry><literal>replica_identity_full</literal></entry>
         <entry><type>boolean</type></entry>
-        <entry>Indicates whether the conflicting relation uses <literal>REPLICA IDENTITY FULL</literal> (<literal>true</literal>) or a replica identity index (<literal>false</literal>). This is <literal>NULL</literal> when replica identity information is not applicable.</entry>
+        <entry>True if the conflicting local row was located using the full tuple, rather than the replica identity key of the local table.</entry>
        </row>
        <row>
         <entry><literal>replica_identity</literal></entry>
@@ -2379,8 +2379,7 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
         <entry>The replica identity key values identifying the conflicting row,
         as a <acronym>JSON</acronym> object keyed by column name; see below for
         how the values are represented. This is <literal>NULL</literal> when
-        <literal>replica_identity_full</literal> is <literal>true</literal> or
-        when replica identity is not applicable.</entry>
+        <literal>replica_identity_full</literal> is <literal>true</literal>.</entry>
        </row>
        <row>
         <entry><literal>local_conflicts</literal></entry>
