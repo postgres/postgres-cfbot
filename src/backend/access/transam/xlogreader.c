@@ -36,6 +36,7 @@
 #ifndef FRONTEND
 #include "pgstat.h"
 #include "storage/bufmgr.h"
+#include "utils/memutils.h"
 #include "utils/wait_event.h"
 #else
 #include "common/logging.h"
@@ -55,6 +56,9 @@ static bool ValidXLogRecord(XLogReaderState *state, XLogRecord *record,
 static void ResetDecoder(XLogReaderState *state);
 static void WALOpenSegmentInit(WALOpenSegment *seg, WALSegmentContext *segcxt,
 							   int segsize, const char *waldir);
+#ifndef FRONTEND
+static void xlogreader_close_segment(void *arg);
+#endif
 
 /* size of the buffer allocated for error message. */
 #define MAX_ERRORMSG_LEN 1000
@@ -159,9 +163,40 @@ XLogReaderAllocate(int wal_segment_size, const char *waldir,
 	return state;
 }
 
+#ifndef FRONTEND
+/*
+ * Close the WAL segment file when the memory context holding the reader is
+ * reset or deleted, usually while an error is being handled. The reader is
+ * going away with that memory, so nothing can use the descriptor anymore.
+ *
+ * Reset callbacks run before the context's memory is freed, so the reader is
+ * still valid here. segment_close must not throw an error.
+ */
+static void
+xlogreader_close_segment(void *arg)
+{
+	XLogReaderState *state = (XLogReaderState *) arg;
+
+	if (state->seg.ws_file != -1)
+		state->routine.segment_close(state);
+}
+#endif
+
 void
 XLogReaderFree(XLogReaderState *state)
 {
+#ifndef FRONTEND
+
+	/*
+	 * Unregister the reset callback, which would otherwise be left pointing
+	 * at freed memory. The context the reader was allocated in is the one it
+	 * was registered on.
+	 */
+	if (state->reset_cb_registered)
+		MemoryContextUnregisterResetCallback(GetMemoryChunkContext(state),
+											 &state->reset_cb);
+#endif
+
 	if (state->seg.ws_file != -1)
 		state->routine.segment_close(state);
 
@@ -1597,6 +1632,26 @@ WALRead(XLogReaderState *state,
 				state->routine.segment_close(state);
 
 			XLByteToSeg(recptr, nextSegNo, state->segcxt.ws_segsize);
+
+#ifndef FRONTEND
+
+			/*
+			 * The WAL segment file is opened with BasicOpenFile(), so nothing
+			 * but XLogReaderFree() ever closes it. An error thrown while
+			 * reading WAL does not get that far, and the descriptor would
+			 * then be leaked for the life of the process, so close it on a
+			 * reset of the context the reader was allocated in as well.
+			 */
+			if (!state->reset_cb_registered)
+			{
+				state->reset_cb.func = xlogreader_close_segment;
+				state->reset_cb.arg = state;
+				MemoryContextRegisterResetCallback(GetMemoryChunkContext(state),
+												   &state->reset_cb);
+				state->reset_cb_registered = true;
+			}
+#endif
+
 			state->routine.segment_open(state, nextSegNo, &tli);
 
 			/* This shouldn't happen -- indicates a bug in segment_open */
