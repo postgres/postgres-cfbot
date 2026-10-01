@@ -2030,7 +2030,7 @@ void
 ResetLogicalStreamingState(void)
 {
 	CheckXidAlive = InvalidTransactionId;
-	bsysscan = false;
+	ResetSystemTableScanState();
 }
 
 /*
