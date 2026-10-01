@@ -1,0 +1,40 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2e s1b s1u s2s s1c
+step s2e: 
+    EXPLAIN (VERBOSE, COSTS OFF)
+    SELECT id, p <-> point(0, 0) AS d FROM epq_knn
+      WHERE p <@ box(point(0, 0), point(10, 10))
+      ORDER BY p <-> point(0, 0) LIMIT 4 FOR UPDATE;
+
+QUERY PLAN                                                   
+-------------------------------------------------------------
+Limit                                                        
+  Output: id, ((p <-> '(0,0)'::point)), ctid                 
+  ->  LockRows                                               
+        Output: id, ((p <-> '(0,0)'::point)), ctid           
+        ->  Index Scan using epq_knn_p on public.epq_knn     
+              Output: id, ((p <-> '(0,0)'::point)), ctid     
+              Index Cond: (epq_knn.p <@ '(10,10),(0,0)'::box)
+              Order By: (epq_knn.p <-> '(0,0)'::point)       
+              Order By Values Used: 1                        
+(9 rows)
+
+step s1b: BEGIN;
+step s1u: UPDATE epq_knn SET p = point(3.5, 3.5) WHERE id = 3;
+step s2s: 
+    SELECT id, p <-> point(0, 0) AS d, (p <-> point(0, 0)) = d AS same
+      FROM (SELECT id, p, p <-> point(0, 0) AS d FROM epq_knn
+              WHERE p <@ box(point(0, 0), point(10, 10))
+              ORDER BY p <-> point(0, 0) LIMIT 4 FOR UPDATE) s;
+ <waiting ...>
+step s1c: COMMIT;
+step s2s: <... completed>
+id|                 d|same
+--+------------------+----
+ 1|1.4142135623730951|t   
+ 2|2.8284271247461903|t   
+ 3| 4.949747468305833|t   
+ 4| 5.656854249492381|t   
+(4 rows)
+

@@ -44,6 +44,7 @@ test: subxid-overflow
 test: eval-plan-qual
 test: eval-plan-qual-trigger
 test: eval-plan-qual-partition-prune
+test: eval-plan-qual-knn
 test: inplace-inval
 test: intra-grant-inplace
 test: intra-grant-inplace-db

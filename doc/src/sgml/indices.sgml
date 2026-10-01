@@ -290,6 +290,25 @@ SELECT * FROM places ORDER BY location <-> point '(101,456)' LIMIT 10;
    In <xref linkend="gist-builtin-opclasses-table"/>, operators that can be
    used in this way are listed in the column <quote>Ordering Operators</quote>.
   </para>
+
+  <para>
+   To order the rows, the index computes each one's distance from the target.
+   For some operator classes that distance is exactly what the ordering
+   operator returns, and when the query also selects the distance, as in
+<programlisting><![CDATA[
+SELECT id, location <-> point '(101,456)' AS dist
+  FROM places ORDER BY location <-> point '(101,456)' LIMIT 10;
+]]>
+</programlisting>
+   the index scan returns the distance it already computed instead of
+   evaluating the operator again for each row.  This applies to the
+   built-in <literal>point_ops</literal> and <literal>box_ops</literal>
+   operator classes of GiST and the <literal>quad_point_ops</literal>,
+   <literal>kd_point_ops</literal> and <literal>box_ops</literal> operator
+   classes of SP-GiST.  <command>EXPLAIN VERBOSE</command> shows it as an
+   <literal>Order By Values Used</literal> line on the index scan; see
+   <xref linkend="using-explain-basics"/>.
+  </para>
   </sect2>
 
   <sect2 id="indexes-type-spgist">
