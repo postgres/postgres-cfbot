@@ -18,6 +18,38 @@
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
+/*
+ * Type of blocker that is holding back the xid horizon.
+ *
+ * Listed in priority order from highest to lowest.  Blockers whose xid
+ * matches the horizon are listed before blockers whose xmin matches, because
+ * the latter are merely held back by the former.
+ */
+typedef enum XidHorizonBlockerType
+{
+	/* xid-match types (horizon == proc's xid) */
+	XHB_TRANSACTION,			/* backend whose xid is the horizon */
+	XHB_PREPARED_TRANSACTION,	/* prepared (two-phase) transaction */
+	/* xmin-match types (horizon == proc's xmin or slot's xmin) */
+	XHB_XMIN_TRANSACTION,		/* backend whose snapshot is at the horizon */
+	XHB_HOT_STANDBY_FEEDBACK,	/* walsender holding a standby's xmin */
+	XHB_REPLICATION_SLOT,		/* physical or logical replication slot */
+} XidHorizonBlockerType;
+
+/*
+ * Information about a blocker that is holding back the xid horizon.
+ */
+typedef struct XidHorizonBlocker
+{
+	XidHorizonBlockerType type;
+	TransactionId xid;			/* the blocked horizon, which is the blocker's
+								 * xid or xmin */
+	int			pid;			/* backend pid (0 for prepared xacts and
+								 * slots) */
+	char		name[NAMEDATALEN];	/* replication slot name; empty string for
+									 * the other blocker types */
+} XidHorizonBlocker;
+
 
 extern void ProcArrayAdd(PGPROC *proc);
 extern void ProcArrayRemove(PGPROC *proc, TransactionId latestXid);
@@ -97,5 +129,8 @@ extern void ProcArraySetReplicationSlotXmin(TransactionId xmin,
 
 extern void ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
 											TransactionId *catalog_xmin);
+
+extern bool GetXidHorizonBlocker(Relation rel, TransactionId horizon,
+								 XidHorizonBlocker *blocker);
 
 #endif							/* PROCARRAY_H */
