@@ -28,10 +28,9 @@
  *	for a CHECK_FOR_INTERRUPTS() to occur while holding a spinlock, and so
  *	it is not necessary to do HOLD/RESUME_INTERRUPTS() in these functions.
  *
- *	These functions are implemented in terms of hardware-dependent macros
- *	supplied by s_lock.h.  There is not currently any extra functionality
- *	added by this header, but there has been in the past and may someday
- *	be again.
+ *	These functions are implemented on top of the C11 <stdatomic.h> atomic
+ *	operations in port/atomics.h; the contended-acquire slow path lives in
+ *	s_lock() in s_lock.c.
  *
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
@@ -44,24 +43,70 @@
 #ifndef SPIN_H
 #define SPIN_H
 
-#include "storage/s_lock.h"
+/*
+ * Atomics-based spinlocks.
+ *
+ * Spinlocks are implemented directly on top of a plain 32-bit atomic rather
+ * than platform-specific TAS assembly.  We deliberately do NOT use
+ * pg_atomic_flag: that type uses 1==unlocked so it can offer a relaxed
+ * "unlocked test", whereas a spinlock must be usable when its memory has
+ * merely been zeroed (a great deal of shared-memory state is set up with
+ * memset(...,0,...) and then relies on embedded spinlocks reading as free).
+ * So slock_t uses the traditional convention: 0 == unlocked, 1 == locked,
+ * which makes a zero-initialized slock_t a valid, free lock.
+ */
+#include "port/atomics.h"
+
+typedef pg_atomic_uint32 slock_t;
+
+/* SpinDelayStatus and the spin-delay helpers (perform/finish_spin_delay). */
+#include "port/spin_delay_status.h"
+
+extern int s_lock(volatile slock_t *lock, const char *file, int line, const char *func);
 
 static inline void
 SpinLockInit(volatile slock_t *lock)
 {
-	S_INIT_LOCK(lock);
+	pg_atomic_init_u32(lock, 0);	/* 0 = unlocked */
 }
 
+/*
+ * SpinLockAcquire - acquire a spinlock, waiting if necessary.
+ *
+ * Fast path: a single atomic exchange (0->1).  On failure fall into s_lock(),
+ * which does the backoff/retry and the "stuck spinlock" diagnostics.
+ *
+ * This is split into an inline helper plus a wrapper macro: the macro exists
+ * only to capture the call site's __FILE__/__LINE__/__func__ for diagnostics,
+ * while the helper evaluates its lock argument exactly once (a macro doing the
+ * exchange-then-s_lock inline would evaluate the argument twice) and preserves
+ * the volatile slock_t * type check.
+ */
 static inline void
-SpinLockAcquire(volatile slock_t *lock)
+spin_lock_acquire(volatile slock_t *lock, const char *file, int line,
+				  const char *func)
 {
-	S_LOCK(lock);
+	if (pg_atomic_exchange_u32(lock, 1) != 0)
+		s_lock(lock, file, line, func);
 }
+#define SpinLockAcquire(lock) \
+	spin_lock_acquire((lock), __FILE__, __LINE__, __func__)
 
 static inline void
 SpinLockRelease(volatile slock_t *lock)
 {
-	S_UNLOCK(lock);
+	/*
+	 * Release the lock with release ordering: every load and store in the
+	 * critical section must complete before the lock is observed free.  In the
+	 * stdatomic implementation pg_write_barrier() is a release thread fence
+	 * (atomic_thread_fence with release order), which orders the prior
+	 * critical-section accesses -- loads included -- ahead of the following
+	 * store; the plain store then publishes the unlocked value.  This gives
+	 * the same release semantics as the traditional S_UNLOCK() while avoiding
+	 * the store-side serialization (STLR on ARM64) that a seq_cst store adds.
+	 */
+	pg_write_barrier();
+	pg_atomic_write_u32(lock, 0);
 }
 
 #endif							/* SPIN_H */

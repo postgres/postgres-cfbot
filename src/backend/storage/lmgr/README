@@ -47,6 +47,56 @@ when the wait time might exceed a few seconds.
 The rest of this README file discusses the regular lock manager in detail.
 
 
+Atomic Operations
+=================
+
+PostgreSQL's atomic operations (see src/include/port/atomics.h) are
+implemented on top of the standard C11 <stdatomic.h> header, which is the
+sole atomics implementation.  A working stdatomic.h is required at build
+time; the USE_STDATOMIC_H preprocessor symbol is always defined.  Available
+on:
+  - MSVC 2022+ (requires /experimental:c11atomics flag)
+  - GCC 4.9+ and Clang 3.1+ (no special flags needed)
+
+There is no build option to select the atomics implementation: stdatomic.h
+is probed unconditionally and a missing or non-working header is a hard
+configure/build error, since there is no other implementation to fall back
+to.
+
+Several internal properties of the implementation are worth noting; none of
+them affect the public API:
+
+* Memory ordering.  pg_atomic_read_u32/u64() use seq_cst ordering;
+  pg_atomic_write_u32/u64() use relaxed.  The seq_cst read is
+  required for correctness on weak-memory hardware (e.g. RISC-V), where the
+  weaker relaxed and acquire orderings let a concurrent reader miss a tuple
+  in a parallel hash join.  The write stays relaxed: a plain atomic store
+  matches the "no barrier" contract for pg_atomic_write and, on
+  ARM64, avoids the store-release (STLR) serialization that would penalize
+  contended writes to hot shared state.  The pg_atomic_unlocked_write_*
+  variant also uses relaxed ordering, consistent with its "no guarantees"
+  contract.  On x86 (TSO) a seq_cst load is still a plain mov, so there is no
+  added cost;
+  on ARM/RISC-V it adds fence instructions on these paths.
+
+* Barriers.  Each barrier pairs a compiler barrier (atomic_signal_fence) with
+  the thread fence (atomic_thread_fence), because a bare thread fence orders
+  only atomic accesses and would let the compiler reorder plain loads/stores
+  across it, whereas PostgreSQL's barrier contract must order non-atomic
+  accesses too.
+
+* Spinlock flag polarity.  The pg_atomic_flag uses 1=unlocked,
+  0=locked (fetch_and-based test-and-set).  This is an internal detail with no
+  external visibility beyond raw values seen in a debugger.
+
+* Platform reach.  64-bit atomics are available on 32-bit
+  ARM (compiler/runtime may emulate them with locks), atomics are usable from
+  frontend programs, and the headers are C++-compatible.
+
+For more information on memory barriers and atomic operations, see
+src/backend/storage/lmgr/README.barrier.
+
+
 Lock Data Structures
 --------------------
 
