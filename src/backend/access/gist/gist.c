@@ -93,6 +93,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = gistbulkdelete,
 		.amvacuumcleanup = gistvacuumcleanup,
 		.amcanreturn = gistcanreturn,
+		.amcanreturnorderby = gistcanreturnorderby,
 		.amcostestimate = gistcostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = gistoptions,

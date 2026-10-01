@@ -136,6 +136,7 @@ blhandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = blbulkdelete,
 		.amvacuumcleanup = blvacuumcleanup,
 		.amcanreturn = NULL,
+		.amcanreturnorderby = NULL,
 		.amcostestimate = blcostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = bloptions,
