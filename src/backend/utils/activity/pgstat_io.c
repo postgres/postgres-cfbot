@@ -100,6 +100,26 @@ pgstat_prepare_io_time(bool track_io_guc)
 }
 
 /*
+ * Like pgstat_count_io_op_time_end() except IO end time is not supplied, it
+ * is calculated inside of the function.
+ */
+void
+pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
+						instr_time start_time, uint32 cnt, uint64 bytes)
+{
+	if (!INSTR_TIME_IS_ZERO(start_time))
+	{
+		instr_time	cur_time;
+
+		INSTR_TIME_SET_CURRENT(cur_time);
+		pgstat_count_io_op_time_end(io_object, io_context, io_op,
+									start_time, cur_time, cnt, bytes);
+	}
+	else
+		pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
+}
+
+/*
  * Like pgstat_count_io_op() except it also accumulates time.
  *
  * The calls related to pgstat_count_buffer_*() are for pgstat_database.  As
@@ -111,42 +131,41 @@ pgstat_prepare_io_time(bool track_io_guc)
  * activity of temporary blocks, so these are ignored here.
  */
 void
-pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
-						instr_time start_time, uint32 cnt, uint64 bytes)
+pgstat_count_io_op_time_end(IOObject io_object, IOContext io_context, IOOp io_op,
+							instr_time start_time, instr_time end_time, uint32 cnt,
+							uint64 bytes)
 {
 	if (!INSTR_TIME_IS_ZERO(start_time))
 	{
-		instr_time	io_time;
-
-		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_SUBTRACT(io_time, start_time);
+		Assert(!INSTR_TIME_GT(start_time, end_time));
+		INSTR_TIME_SUBTRACT(end_time, start_time);
 
 		if (io_object != IOOBJECT_WAL)
 		{
 			if (io_op == IOOP_WRITE || io_op == IOOP_EXTEND)
 			{
-				pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+				pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(end_time));
 				if (io_object == IOOBJECT_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.shared_blk_write_time, io_time);
+					INSTR_TIME_ADD(pgBufferUsage.shared_blk_write_time, end_time);
 				else if (io_object == IOOBJECT_TEMP_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.local_blk_write_time, io_time);
+					INSTR_TIME_ADD(pgBufferUsage.local_blk_write_time, end_time);
 			}
 			else if (io_op == IOOP_READ)
 			{
-				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(end_time));
 				if (io_object == IOOBJECT_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.shared_blk_read_time, io_time);
+					INSTR_TIME_ADD(pgBufferUsage.shared_blk_read_time, end_time);
 				else if (io_object == IOOBJECT_TEMP_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.local_blk_read_time, io_time);
+					INSTR_TIME_ADD(pgBufferUsage.local_blk_read_time, end_time);
 			}
 		}
 
 		INSTR_TIME_ADD(PendingIOStats.pending_times[io_object][io_context][io_op],
-					   io_time);
+					   end_time);
 
 		/* Add the per-backend count */
 		pgstat_count_backend_io_op_time(io_object, io_context, io_op,
-										io_time);
+										end_time);
 	}
 
 	pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
