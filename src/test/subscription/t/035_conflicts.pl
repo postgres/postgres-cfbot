@@ -84,6 +84,17 @@ $node_subscriber->wait_for_log(
 .*Key already exists in unique index \"conf_tab_c_key\", modified in transaction .*: key \(c\)=\(4\), local row \(4, 4, 4\)./,
 	$log_offset);
 
+# Verify the contents of the Conflict Log Table (CLT)
+# ERROR-level conflicts halt replication and are reported only to server logs,
+# so the CLT should remain empty.
+my $subid = $node_subscriber->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = 'sub_tab';");
+my $clt = "pg_conflict.pg_conflict_log_$subid";
+
+my $conflict_count = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM $clt;");
+is($conflict_count, '0', 'Verified multiple_unique_conflicts is not logged into conflict log table');
+
 pass('multiple_unique_conflicts detected during insert');
 
 # Truncate table to get rid of the error
@@ -113,6 +124,11 @@ $node_subscriber->wait_for_log(
 .*Key already exists in unique index \"conf_tab_b_key\", modified in transaction .*: key \(b\)=\(7\), local row \(7, 7, 7\).*
 .*Key already exists in unique index \"conf_tab_c_key\", modified in transaction .*: key \(c\)=\(8\), local row \(8, 8, 8\)./,
 	$log_offset);
+
+# Verify that the CLT still does not contain ERROR-level conflicts
+$conflict_count = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM $clt;");
+is($conflict_count, '0', 'Verified multiple_unique_conflicts during UPDATE is not logged into conflict log table');
 
 pass('multiple_unique_conflicts detected during update');
 
@@ -183,7 +199,7 @@ $node_B->safe_psql(
 	CREATE SUBSCRIPTION $subname_BA
 	CONNECTION '$node_A_connstr application_name=$subname_BA'
 	PUBLICATION tap_pub_A
-	WITH (origin = none, retain_dead_tuples = true)");
+	WITH (origin = none, retain_dead_tuples = true, conflict_log_destination = 'all')");
 
 # node_B (pub) -> node_A (sub)
 my $node_B_connstr = $node_B->connstr . ' dbname=postgres';
@@ -193,7 +209,7 @@ $node_A->safe_psql(
 	CREATE SUBSCRIPTION $subname_AB
 	CONNECTION '$node_B_connstr application_name=$subname_AB'
 	PUBLICATION tap_pub_B
-	WITH (origin = none, copy_data = off)");
+	WITH (origin = none, copy_data = off, conflict_log_destination = 'all')");
 
 # Wait for initial table sync to finish
 $node_A->wait_for_subscription_sync($node_B, $subname_AB);
@@ -316,6 +332,17 @@ like(
 .*DETAIL:.* Deleting the row that was modified locally in transaction [0-9]+ at .*: local row \(1, 3\), replica identity \(a\)=\(1\)./,
 	'delete target row was modified in tab');
 
+my $subid_BA = $node_B->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = '$subname_BA';");
+my $clt_BA = "pg_conflict.pg_conflict_log_$subid_BA";
+my $clt_check_ba = $node_B->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_BA WHERE conflict_type = 'delete_origin_differs';");
+is($clt_check_ba, 1, 'delete_origin_differs logged into CLT on Node B');
+
+my $clt_row_ba = $node_B->safe_psql('postgres',
+	"SELECT replica_identity_full, replica_identity::text, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_BA WHERE conflict_type = 'delete_origin_differs';");
+is($clt_row_ba, 'f|{"a":"1"}|t', 'delete_origin_differs records RI key columns and local conflict xid');
+
 $log_location = -s $node_A->logfile;
 
 $node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
@@ -328,6 +355,17 @@ like(
 .*DETAIL:.* Could not find the row to be updated: remote row \(1, 3\), replica identity \(a\)=\(1\).
 .*The row to be updated was deleted locally in transaction [0-9]+ at .*/,
 	'update target row was deleted in tab');
+
+my $subid_AB = $node_A->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = '$subname_AB';");
+my $clt_AB = "pg_conflict.pg_conflict_log_$subid_AB";
+my $clt_check_ab = $node_A->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_AB WHERE conflict_type = 'update_deleted';");
+is($clt_check_ab, 1, 'update_deleted logged into CLT on Node A');
+
+my $clt_row_ab = $node_A->safe_psql('postgres',
+	"SELECT replica_identity_full, replica_identity::text, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_AB WHERE conflict_type = 'update_deleted';");
+is($clt_row_ab, 'f|{"a":"1"}|t', 'update_deleted records RI key columns and local conflict xid');
 
 # Remember the next transaction ID to be assigned
 my $next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
@@ -375,6 +413,131 @@ like(
 .*DETAIL:.* Could not find the row to be updated: remote row \(2, 4\), replica identity full \(2, 2\).*
 .*The row to be updated was deleted locally in transaction [0-9]+ at .*/,
 	'update target row was deleted in tab');
+
+my $clt_row_ab_full = $node_A->safe_psql('postgres',
+	"SELECT replica_identity_full, replica_identity IS NULL, (local_conflicts[1]->>'xid') IS NOT NULL FROM $clt_AB WHERE replica_identity_full = true;");
+is($clt_row_ab_full, 't|t|t', 'update_deleted with REPLICA IDENTITY FULL sets replica_identity_full=true and replica_identity=NULL');
+
+###############################################################################
+# Check that a user-defined CAST (t AS json) is not consulted when recording
+# the replica identity.
+#
+# Each key value is rendered with its type's output function, as the server log
+# does, so a cast cannot substitute its own representation. This matters because
+# such a cast is a function no other part of apply calls, and its output bears no
+# relation to the size of the value received, so a tiny key could otherwise
+# render a json value past the 1GB limit and error out the apply worker.
+###############################################################################
+
+my $cast_ddl = qq{
+	CREATE TYPE ri_color AS ENUM ('red', 'green');
+	CREATE FUNCTION ri_color_to_json(ri_color) RETURNS json
+	  AS \$\$ SELECT '"cast-was-used"'::json \$\$ LANGUAGE sql IMMUTABLE;
+	CREATE CAST (ri_color AS json) WITH FUNCTION ri_color_to_json(ri_color);
+	CREATE TABLE tab_cast (a ri_color PRIMARY KEY, b int);
+};
+
+$node_A->safe_psql('postgres', $cast_ddl);
+$node_B->safe_psql('postgres', $cast_ddl);
+
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A ADD TABLE tab_cast");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_B->wait_for_subscription_sync($node_A, $subname_BA);
+
+# Replicate a row, remove it locally, then delete it on node_A so that the
+# delete cannot find its target and the replica identity gets recorded.
+$node_A->safe_psql('postgres', "INSERT INTO tab_cast VALUES ('red', 1)");
+$node_A->wait_for_catchup($subname_BA);
+$node_B->safe_psql('postgres', "DELETE FROM tab_cast");
+$node_A->safe_psql('postgres', "DELETE FROM tab_cast WHERE a = 'red'");
+$node_A->wait_for_catchup($subname_BA);
+
+my $clt_check_cast = $node_B->poll_query_until('postgres',
+	"SELECT count(*) > 0 FROM $clt_BA WHERE relname = 'tab_cast';");
+is($clt_check_cast, 1, 'delete_missing on tab_cast logged into CLT on Node B');
+
+my $clt_row_cast = $node_B->safe_psql('postgres',
+	"SELECT replica_identity::text FROM $clt_BA WHERE relname = 'tab_cast';");
+is($clt_row_cast, '{"a":"red"}',
+	'replica identity is rendered by the type output function, not by a cast to json'
+);
+
+# Restore tap_pub_A to publishing only 'tab'. Later tests subscribe to it from
+# another database, which does not have tab_cast.
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A DROP TABLE tab_cast");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+
+my $cast_cleanup = q{
+	DROP TABLE tab_cast;
+	DROP TYPE ri_color CASCADE;
+};
+
+$node_A->safe_psql('postgres', $cast_cleanup);
+$node_B->safe_psql('postgres', $cast_cleanup);
+
+###############################################################################
+# Check that a replica identity value too large to record is replaced by a
+# marker rather than stored, and that has_omitted_values flags the row.
+#
+# A value is omitted rather than truncated, because a partial value in a
+# queryable table would silently give wrong answers to equality and join
+# conditions.
+###############################################################################
+
+$node_A->safe_psql('postgres',
+	"CREATE TABLE tab_big (a text PRIMARY KEY, b int)");
+$node_B->safe_psql('postgres',
+	"CREATE TABLE tab_big (a text PRIMARY KEY, b int)");
+
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A ADD TABLE tab_big");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_B->wait_for_subscription_sync($node_A, $subname_BA);
+
+# One key just under the cap, recorded verbatim, and one over it, omitted.
+$node_A->safe_psql(
+	'postgres', qq{
+	INSERT INTO tab_big VALUES (repeat('s', 1024), 1);
+	INSERT INTO tab_big VALUES (repeat('L', 2048), 2);
+});
+$node_A->wait_for_catchup($subname_BA);
+$node_B->safe_psql('postgres', "DELETE FROM tab_big");
+$node_A->safe_psql('postgres', "DELETE FROM tab_big");
+$node_A->wait_for_catchup($subname_BA);
+
+my $clt_check_big = $node_B->poll_query_until('postgres',
+	"SELECT count(*) = 2 FROM $clt_BA WHERE relname = 'tab_big';");
+is($clt_check_big, 1, 'both delete_missing conflicts on tab_big logged into CLT');
+
+my $clt_row_small = $node_B->safe_psql('postgres',
+	"SELECT has_omitted_values, length(replica_identity->>'a')
+	 FROM $clt_BA
+	 WHERE relname = 'tab_big' AND NOT has_omitted_values;");
+is($clt_row_small, 'f|1024',
+	'a replica identity value at the cap is recorded verbatim');
+
+my $clt_row_big = $node_B->safe_psql('postgres',
+	"SELECT has_omitted_values,
+	        replica_identity->'a'->>'omitted',
+	        replica_identity->'a'->>'length'
+	 FROM $clt_BA
+	 WHERE relname = 'tab_big' AND has_omitted_values;");
+is($clt_row_big, 't|true|2048',
+	'an oversized replica identity value is replaced by a marker recording its length'
+);
+
+# Restore tap_pub_A to publishing only 'tab', as the later tests expect.
+$node_A->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_A DROP TABLE tab_big");
+$node_B->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_BA REFRESH PUBLICATION");
+$node_A->safe_psql('postgres', "DROP TABLE tab_big");
+$node_B->safe_psql('postgres', "DROP TABLE tab_big");
 
 ###############################################################################
 # Check that the xmin value of the conflict detection slot can be advanced when
@@ -741,10 +904,6 @@ ok( $node_A->poll_query_until(
 # A conflict log table is system-managed and cannot be altered directly, so
 # moving it to another tablespace must be rejected.
 ###############################################################################
-my $subid = $node_subscriber->safe_psql('postgres',
-	"SELECT oid FROM pg_subscription WHERE subname = 'sub_tab';");
-my $clt = "pg_conflict.pg_conflict_log_$subid";
-
 (undef, undef, $stderr) = $node_subscriber->psql('postgres',
 	"ALTER TABLE $clt SET TABLESPACE pg_default");
 like(
