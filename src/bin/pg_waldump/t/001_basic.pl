@@ -612,7 +612,7 @@ my $bad_fpi_error =
   qr{BKPIMAGE_HAS_HOLE set, but hole offset 0 length \d+ block image length \d+ at \Q$bad_lsn\E};
 command_fails_like(
 	[ 'pg_waldump', '--path' => $bad_wal_dir, '--start' => $bad_prev ],
-	qr{error in WAL record at [0-9A-F]+/[0-9A-F]+: $bad_fpi_error},
+	qr{error in WAL record at \Q$bad_lsn\E: $bad_fpi_error},
 	'decoding error names the rejected record');
 command_fails_like(
 	[ 'pg_waldump', '--path' => $bad_wal_dir, '--start' => $bad_lsn ],
