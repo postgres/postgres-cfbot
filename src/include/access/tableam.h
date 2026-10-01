@@ -927,7 +927,7 @@ table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 	 * via systable_beginscan() et al.  See detailed comments in xact.c where
 	 * these variables are declared.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !sysscan_depth))
 		elog(ERROR, "scan started during logical decoding");
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
@@ -1251,7 +1251,7 @@ table_index_scan_begin(IndexScanDesc scan, uint32 flags)
 	 * via systable_beginscan() et al.  See detailed comments in xact.c where
 	 * these variables are declared.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !sysscan_depth))
 		elog(ERROR, "scan started during logical decoding");
 
 	scan->heapRelation->rd_tableam->index_scan_begin(scan, flags);
@@ -1344,7 +1344,7 @@ table_fetch_tid(Relation rel,
 	 * CheckXidAlive for catalog or regular tables.  See detailed comments in
 	 * xact.c where these variables are declared.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !sysscan_depth))
 		elog(ERROR, "unexpected table_fetch_tid call during logical decoding");
 
 	return rel->rd_tableam->fetch_tid(rel, tid, snapshot, all_dead);
@@ -1369,7 +1369,7 @@ table_tuple_fetch_row_version(Relation rel,
 	 * valid CheckXidAlive for catalog or regular tables.  See detailed
 	 * comments in xact.c where these variables are declared.
 	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !sysscan_depth))
 		elog(ERROR, "unexpected table_tuple_fetch_row_version call during logical decoding");
 
 	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot);

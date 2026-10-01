@@ -65,6 +65,38 @@ COMMIT;
 SELECT count(*) FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1', 'stream-changes', '1');
 RESET debug_logical_replication_streaming;
 
+-- Create a table with a large constraint whose conbin value is stored out of
+-- line.
+DO $$
+DECLARE
+    large_literal text;
+BEGIN
+    SELECT string_agg(md5(i::text), '') INTO large_literal FROM generate_series(1, 100) i;
+
+    EXECUTE format(
+        'CREATE TABLE nested_sys_scan_test (
+            v text,
+            pad text,
+            CONSTRAINT a_big CHECK (v <> %L),
+            CONSTRAINT z_after CHECK (true))',
+        large_literal);
+END
+$$;
+
+-- consume DDL
+SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+
+-- Verify that detoasting catalog data in a nested system table scan does not
+-- prevent the outer scan from fetching subsequent tuples.
+SET debug_logical_replication_streaming = immediate;
+BEGIN;
+INSERT INTO nested_sys_scan_test VALUES ('y', repeat('x', 200));
+CHECKPOINT;
+SELECT count(*) > 0 AS streamed FROM pg_logical_slot_peek_changes('regression_slot', NULL, NULL, 'stream-changes', '1');
+COMMIT;
+RESET debug_logical_replication_streaming;
+SELECT count(*) > 0 AS streamed FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'stream-changes', '1');
+
 -- bug #19616
 --
 -- An aborted top-level transaction that is discarded at eviction must not
@@ -82,5 +114,5 @@ ROLLBACK;
 INSERT INTO stream_test VALUES ('after-abort');
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 
-DROP TABLE stream_test;
+DROP TABLE stream_test, nested_sys_scan_test;
 SELECT pg_drop_replication_slot('regression_slot');

@@ -28,6 +28,7 @@
 
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
@@ -2030,7 +2031,7 @@ void
 ResetLogicalStreamingState(void)
 {
 	CheckXidAlive = InvalidTransactionId;
-	bsysscan = false;
+	ResetSysScanDepth();
 }
 
 /*
