@@ -100,7 +100,6 @@ int			synchronous_commit = SYNCHRONOUS_COMMIT_ON;
  * concurrent aborts only in systable_* APIs.
  */
 TransactionId CheckXidAlive = InvalidTransactionId;
-bool		bsysscan = false;
 
 /*
  * When running as a parallel worker, we place only a single
