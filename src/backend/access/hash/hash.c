@@ -104,6 +104,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = hashbulkdelete,
 		.amvacuumcleanup = hashvacuumcleanup,
 		.amcanreturn = NULL,
+		.amcanreturnorderby = NULL,
 		.amcostestimate = hashcostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = hashoptions,
