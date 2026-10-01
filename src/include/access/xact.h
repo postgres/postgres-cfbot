@@ -85,7 +85,6 @@ extern PGDLLIMPORT int synchronous_commit;
 
 /* used during logical streaming of a transaction */
 extern PGDLLIMPORT TransactionId CheckXidAlive;
-extern PGDLLIMPORT bool bsysscan;
 
 /*
  * Miscellaneous flag bits to record events which occur on the top level
@@ -534,5 +533,10 @@ extern void ParsePrepareRecord(uint8 info, xl_xact_prepare *xlrec, xl_xact_parse
 extern void EnterParallelMode(void);
 extern void ExitParallelMode(void);
 extern bool IsInParallelMode(void);
+
+extern void TrackSystemTableScanStart(void);
+extern void TrackSystemTableScanEnd(void);
+extern void ResetSystemTableScanState(void);
+extern bool IsSystemTableScanInProgress(void);
 
 #endif							/* XACT_H */
