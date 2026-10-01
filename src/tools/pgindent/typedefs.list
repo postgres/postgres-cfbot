@@ -3567,6 +3567,7 @@ ambuildempty_function
 ambuildphasename_function
 ambulkdelete_function
 amcanreturn_function
+amcanreturnorderby_function
 amcostestimate_function
 amendscan_function
 amestimateparallelscan_function

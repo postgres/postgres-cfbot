@@ -3037,6 +3037,26 @@ create_indexscan_plan(PlannerInfo *root,
 											indexorderbyops,
 											best_path->indexscandir);
 
+	if (!indexonly && indexorderbys != NIL)
+	{
+		List	   *exact = NIL;
+		ListCell   *lo,
+				   *lc;
+
+		forboth(lo, best_path->indexorderbys, lc, best_path->indexorderbycols)
+		{
+			int			indexcol = lfirst_int(lc);
+			OpExpr	   *orderby = lfirst_node(OpExpr, lo);
+
+			exact = lappend_int(exact,
+								indexinfo->amcanreturnorderby != NULL &&
+								indexinfo->amcanreturnorderby(indexinfo->opfamily[indexcol],
+															  indexinfo->opcintype[indexcol],
+															  orderby->opno));
+		}
+		((IndexScan *) scan_plan)->indexorderbyexact = exact;
+	}
+
 	copy_generic_path_info(&scan_plan->plan, &best_path->path);
 
 	return scan_plan;

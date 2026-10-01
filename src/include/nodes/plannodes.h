@@ -616,6 +616,19 @@ typedef struct IndexScan
 	List	   *indexorderbyops;
 	/* forward or backward or don't care */
 	ScanDirection indexorderdir;
+
+	/*
+	 * Per indexorderbyorig entry: may setrefs.c replace a target-list
+	 * occurrence of that expression with an INNER_VAR reference to the scan's
+	 * ORDER BY value?  True when the index column's opclass reports exact
+	 * distances that are the operator's result (amcanreturnorderby).  Only
+	 * setrefs.c reads it, so it isn't written out with the plan.
+	 * indexorderbynused counts the ORDER BY values the targetlist reads (0 if
+	 * none); the executor sets up the ORDER BY slot and projection when it's
+	 * nonzero, and EXPLAIN shows it.
+	 */
+	List	   *indexorderbyexact pg_node_attr(read_write_ignore, read_as(NIL));
+	int			indexorderbynused;
 } IndexScan;
 
 /* ----------------

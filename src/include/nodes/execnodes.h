@@ -1722,6 +1722,7 @@ typedef struct
  *		OrderByTypByVals   is the datatype of order by expression pass-by-value?
  *		OrderByTypLens	   typlens of the datatypes of order by expressions
  *		PscanLen		   size of parallel index scan descriptor
+ *		OrderBySlot		   returned row's ORDER BY values, for the targetlist
  * ----------------
  */
 typedef struct IndexScanState
@@ -1751,6 +1752,13 @@ typedef struct IndexScanState
 	bool	   *iss_OrderByTypByVals;
 	int16	   *iss_OrderByTypLens;
 	Size		iss_PscanLen;
+
+	/*
+	 * When the plan's targetlist reads the ORDER BY values (indexorderbynused
+	 * > 0), the values of the row being returned, as a virtual slot installed
+	 * as the projection's inner tuple.
+	 */
+	TupleTableSlot *iss_OrderBySlot;
 } IndexScanState;
 
 /* ----------------

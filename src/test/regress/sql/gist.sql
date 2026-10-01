@@ -169,6 +169,160 @@ explain (verbose, costs off)
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 
+drop index gist_tbl_multi_index;
+
+-- Test that an ordering Index Scan returns the AM's ORDER BY values to a
+-- targetlist entry equal to the ORDER BY expression, instead of evaluating
+-- the expression again, for an opclass that passes amcanreturnorderby.
+set enable_indexonlyscan = off;
+
+-- An expression index over a counting function proves the operator is not
+-- re-evaluated: the count stays at zero for the rows returned.
+create sequence gist_cnt_seq;
+create function gist_cnt_pt(point) returns point language plpgsql immutable
+  as $$ begin perform nextval('public.gist_cnt_seq'); return $1; end $$;
+create index gist_tbl_cnt_index on gist_tbl using gist (gist_cnt_pt(p));
+
+explain (verbose, costs off)
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+
+select setval('gist_cnt_seq', 1, false);
+-- the distance numbers are not exactly the same across platforms
+set extra_float_digits = 0;
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+reset extra_float_digits;
+select nextval('gist_cnt_seq') - 1 as calls_during_scan;
+
+-- Every copy of the ORDER BY expression is served from the index; an
+-- expression that merely contains it is not.
+explain (verbose, costs off)
+select gist_cnt_pt(p) <-> point(0,0) as d1,
+       (gist_cnt_pt(p) <-> point(0,0)) * 2 as d2,
+       gist_cnt_pt(p) <-> point(0,0) as d3
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0,0) limit 2;
+
+drop index gist_tbl_cnt_index;
+drop function gist_cnt_pt(point);
+drop sequence gist_cnt_seq;
+
+-- The values must equal the operator's, also for a row re-fetched under
+-- row locking, and for a rescan with a new ORDER BY argument (LATERAL).
+create index gist_tbl_point_index on gist_tbl using gist (p);
+
+select count(*) filter (where dist = p <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select p, p <-> point(5.2, 5.91) as dist from gist_tbl
+          order by p <-> point(5.2, 5.91) limit 200) ss;
+
+set extra_float_digits = 0;
+select p, p <-> point(5.2, 5.91) as dist from gist_tbl
+  where p <@ box(point(5,5), point(6,6)) order by p <-> point(5.2, 5.91)
+  limit 3 for update;
+reset extra_float_digits;
+
+explain (verbose, costs off)
+select v.q, n.dist
+  from (values (point(0.3, 0.3)), (point(7.1, 7.2)), (point(42, 42))) v(q),
+       lateral (select p <-> v.q as dist from gist_tbl
+                order by p <-> v.q limit 2) n;
+select count(*) filter (where n.dist = n.p <-> v.q) as same, count(*) as total
+  from (values (point(0.3, 0.3)), (point(7.1, 7.2)), (point(42, 42))) v(q),
+       lateral (select p, p <-> v.q as dist from gist_tbl
+                order by p <-> v.q limit 50) n;
+
+-- A multi-column index ordered by an exact key and a lossy one: the lossy
+-- one's distances are rechecked, rows pass through the reorder queue, and
+-- the exact key's value is still the operator's.
+create index gist_tbl_pc_index on gist_tbl using gist (p, c);
+explain (verbose, costs off)
+select p <-> point(1, 1) as dp, c <-> point(2, 2) as dc from gist_tbl
+  order by p <-> point(1, 1), c <-> point(2, 2) limit 5;
+select count(*) filter (where dp = p <-> point(1, 1)) as same_p,
+       count(*) filter (where dc = c <-> point(2, 2)) as same_c,
+       count(*) as total
+  from (select p, c, p <-> point(1, 1) as dp, c <-> point(2, 2) as dc
+          from gist_tbl
+          order by p <-> point(1, 1), c <-> point(2, 2) limit 200) ss;
+drop index gist_tbl_pc_index;
+drop index gist_tbl_point_index;
+
+-- The box opclass qualifies too: its leaf distance is the operator's.
+create index gist_tbl_box_index on gist_tbl using gist (b);
+
+explain (verbose, costs off)
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91);
+
+select count(*) filter (where dist = b <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+          order by b <-> point(5.2, 5.91) limit 300) ss;
+-- Including for a point just off an edge's line, where the operator used to
+-- be off in the last digits.
+create temp table gist_box_eps (b box);
+insert into gist_box_eps values ('((0,0),(1,1))');
+create index on gist_box_eps using gist (b);
+select count(*) filter (where dist = b <-> point(0.9999996, 2)) as same,
+       count(*) as total
+  from (select b, b <-> point(0.9999996, 2) as dist from gist_box_eps
+          order by b <-> point(0.9999996, 2) limit 1) ss;
+drop table gist_box_eps;
+
+drop index gist_tbl_box_index;
+
+-- The circle opclass's distance is a lower bound that is always rechecked,
+-- and its opclass does not pass amcanreturnorderby: the targetlist is left
+-- alone and the operator is evaluated as before.
+create index gist_tbl_circle_index on gist_tbl using gist (c);
+
+explain (verbose, costs off)
+select c <-> point(5.2, 5.91) as dist from gist_tbl
+  order by c <-> point(5.2, 5.91) limit 3;
+
+select count(*) filter (where dist = c <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select c, c <-> point(5.2, 5.91) as dist from gist_tbl
+          order by c <-> point(5.2, 5.91) limit 200) ss;
+
+drop index gist_tbl_circle_index;
+reset enable_indexonlyscan;
+
+-- SP-GiST's quad and k-d point opclasses and its box opclass qualify as well.
+create temp table spg_orderby (p point, b box);
+insert into spg_orderby
+  select point(i % 97 * 0.31, i / 97 * 0.29),
+         box(point(i % 97 * 0.31, i / 97 * 0.29),
+             point(i % 97 * 0.31 + 0.2, i / 97 * 0.29 + 0.1))
+  from generate_series(1, 5000) i;
+create index spg_orderby_quad on spg_orderby using spgist (p);
+set enable_indexonlyscan = off;
+explain (verbose, costs off)
+select p <-> point(3, 4) as dist from spg_orderby
+  order by p <-> point(3, 4) limit 3;
+select count(*) filter (where dist = p <-> point(3, 4)) as same,
+       count(*) as total
+  from (select p, p <-> point(3, 4) as dist from spg_orderby
+          order by p <-> point(3, 4) limit 300) ss;
+drop index spg_orderby_quad;
+create index spg_orderby_kd on spg_orderby using spgist (p kd_point_ops);
+select count(*) filter (where dist = p <-> point(3, 4)) as same,
+       count(*) as total
+  from (select p, p <-> point(3, 4) as dist from spg_orderby
+          order by p <-> point(3, 4) limit 300) ss;
+drop index spg_orderby_kd;
+create index spg_orderby_box on spg_orderby using spgist (b);
+explain (verbose, costs off)
+select b <-> point(3, 4) as dist from spg_orderby
+  order by b <-> point(3, 4) limit 3;
+select count(*) filter (where dist = b <-> point(3, 4)) as same,
+       count(*) as total
+  from (select b, b <-> point(3, 4) as dist from spg_orderby
+          order by b <-> point(3, 4) limit 300) ss;
+reset enable_indexonlyscan;
+drop table spg_orderby;
+
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);
