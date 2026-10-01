@@ -381,6 +381,38 @@ my %tests = (
 		},
 	},
 
+	'CREATE EXTENSION test_ext_owned_schema' => {
+		create_order => 1,
+		create_sql => 'CREATE EXTENSION test_ext_owned_schema;',
+		regexp => qr/^
+			\QCREATE EXTENSION IF NOT EXISTS test_ext_owned_schema WITH SCHEMA test_ext_owned_schema;\E
+			\n/xm,
+		like => {
+			%full_runs,
+			schema_only => 1,
+			section_pre_data => 1,
+		},
+		unlike => {
+			binary_upgrade => 1,
+			with_extension => 1,
+			without_extension => 1
+		}
+	},
+
+	'CREATE SCHEMA test_ext_owned_schema' => {
+		regexp => qr/^
+			\QCREATE SCHEMA test_ext_owned_schema;\E
+			\n/xm,
+		like => {},
+	},
+
+	'ALTER EXTENSION test_ext_owned_schema ADD SCHEMA test_ext_owned_schema' => {
+		regexp => qr/^
+			\QALTER EXTENSION test_ext_owned_schema ADD SCHEMA test_ext_owned_schema;\E
+			\n/xm,
+		like => {},
+	},
+
 	'CREATE ROLE regress_dump_test_role' => {
 		create_order => 1,
 		create_sql => 'CREATE ROLE regress_dump_test_role;',
@@ -938,13 +970,19 @@ foreach my $run (sort keys %pgdump_runs)
 		next;
 	}
 
-	$node->command_ok(\@{ $pgdump_runs{$run}->{dump_cmd} },
-		"$run: pg_dump runs");
+	$node->command_checks_all(
+		\@{ $pgdump_runs{$run}->{dump_cmd} },
+		0, [qr/^/],
+		[qr/^(?!.*pg_dump: warning:)/s],
+		"$run: pg_dump runs without warnings");
 
 	if ($pgdump_runs{$run}->{restore_cmd})
 	{
-		$node->command_ok(\@{ $pgdump_runs{$run}->{restore_cmd} },
-			"$run: pg_restore runs");
+		$node->command_checks_all(
+			\@{ $pgdump_runs{$run}->{restore_cmd} },
+			0, [qr/^/],
+			[qr/^(?!.*pg_restore: warning:)/s],
+			"$run: pg_restore runs without warnings");
 	}
 
 	if ($pgdump_runs{$run}->{test_key})

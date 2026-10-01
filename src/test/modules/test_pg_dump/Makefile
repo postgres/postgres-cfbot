@@ -9,6 +9,9 @@ DATA = test_pg_dump--1.0.sql
 REGRESS = test_pg_dump
 TAP_TESTS = 1
 
+# for test_ext_owned_schema
+EXTRA_INSTALL = src/test/modules/test_extensions
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
