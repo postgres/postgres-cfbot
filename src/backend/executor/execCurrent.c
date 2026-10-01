@@ -374,9 +374,9 @@ search_plan_tree(PlanState *node, Oid table_oid,
 				AppendState *astate = (AppendState *) node;
 				int			i;
 
-				for (i = 0; i < astate->as_nplans; i++)
+				for (i = 0; i < astate->as.nplans; i++)
 				{
-					ScanState  *elem = search_plan_tree(astate->appendplans[i],
+					ScanState  *elem = search_plan_tree(astate->as.plans[i],
 														table_oid,
 														pending_rescan);
 

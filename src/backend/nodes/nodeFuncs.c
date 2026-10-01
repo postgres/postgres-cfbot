@@ -4765,14 +4765,9 @@ planstate_tree_walker_impl(PlanState *planstate,
 	switch (nodeTag(plan))
 	{
 		case T_Append:
-			if (planstate_walk_members(((AppendState *) planstate)->appendplans,
-									   ((AppendState *) planstate)->as_nplans,
-									   walker, context))
-				return true;
-			break;
 		case T_MergeAppend:
-			if (planstate_walk_members(((MergeAppendState *) planstate)->mergeplans,
-									   ((MergeAppendState *) planstate)->ms_nplans,
+			if (planstate_walk_members(((AppendBaseState *) planstate)->plans,
+									   ((AppendBaseState *) planstate)->nplans,
 									   walker, context))
 				return true;
 			break;
