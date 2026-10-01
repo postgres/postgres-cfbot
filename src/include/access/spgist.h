@@ -210,6 +210,7 @@ extern void spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 extern int64 spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
 extern bool spggettuple(IndexScanDesc scan, ScanDirection dir);
 extern bool spgcanreturn(Relation index, int attno);
+extern bool spgcanreturnorderby(Relation index, int attno);
 
 /* spgvacuum.c */
 extern IndexBulkDeleteResult *spgbulkdelete(IndexVacuumInfo *info,

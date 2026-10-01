@@ -3033,6 +3033,20 @@ create_indexscan_plan(PlannerInfo *root,
 											indexorderbyops,
 											best_path->indexscandir);
 
+	if (!indexonly && indexorderbys != NIL)
+	{
+		List	   *exact = NIL;
+		ListCell   *lc;
+
+		foreach(lc, best_path->indexorderbycols)
+		{
+			int			indexcol = lfirst_int(lc);
+
+			exact = lappend_int(exact, indexinfo->canreturnorderby[indexcol]);
+		}
+		((IndexScan *) scan_plan)->indexorderbyexact = exact;
+	}
+
 	copy_generic_path_info(&scan_plan->plan, &best_path->path);
 
 	return scan_plan;

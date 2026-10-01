@@ -180,6 +180,8 @@ typedef struct
 	List	   *outer_tlist;	/* referent for OUTER_VAR Vars */
 	List	   *inner_tlist;	/* referent for INNER_VAR Vars */
 	List	   *index_tlist;	/* referent for INDEX_VAR Vars */
+	List	   *orderby_tlist;	/* IndexScan: referent for INNER_VAR Vars that
+								 * stand for its ORDER BY values */
 	/* Special namespace representing a function signature: */
 	char	   *funcname;
 	int			numargs;
@@ -5227,6 +5229,23 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 		dpns->index_tlist = ((CustomScan *) plan)->custom_scan_tlist;
 	else
 		dpns->index_tlist = NIL;
+
+	/*
+	 * An IndexScan whose targetlist reads its own ORDER BY values (see
+	 * replace_orderby_tlist_refs in setrefs.c) uses INNER_VAR Vars numbered
+	 * by ORDER BY key; they deparse as the ORDER BY expressions.
+	 */
+	dpns->orderby_tlist = NIL;
+	if (IsA(plan, IndexScan) && ((IndexScan *) plan)->indexorderbytlist > 0)
+	{
+		ListCell   *lc;
+		AttrNumber	i = 0;
+
+		foreach(lc, ((IndexScan *) plan)->indexorderbyorig)
+			dpns->orderby_tlist = lappend(dpns->orderby_tlist,
+										  makeTargetEntry((Expr *) lfirst(lc),
+														  ++i, NULL, false));
+	}
 }
 
 /*
@@ -7986,6 +8005,18 @@ resolve_special_varno(Node *node, deparse_context *context,
 							  callback, callback_arg);
 		pop_child_plan(dpns, &save_dpns);
 		context->appendparents = save_appendparents;
+		return;
+	}
+	else if (var->varno == INNER_VAR && dpns->orderby_tlist)
+	{
+		TargetEntry *tle;
+
+		tle = get_tle_by_resno(dpns->orderby_tlist, var->varattno);
+		if (!tle)
+			elog(ERROR, "bogus varattno for ORDER BY value var: %d", var->varattno);
+
+		resolve_special_varno((Node *) tle->expr, context,
+							  callback, callback_arg);
 		return;
 	}
 	else if (var->varno == INNER_VAR && dpns->inner_tlist)

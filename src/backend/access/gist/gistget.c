@@ -23,6 +23,7 @@
 #include "pgstat.h"
 #include "storage/predicate.h"
 #include "utils/float.h"
+#include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -812,4 +813,28 @@ gistcanreturn(Relation index, int attno)
 		return true;
 	else
 		return false;
+}
+
+/*
+ * Are the distances the given column's opclass reports for a leaf entry,
+ * when it does not set *recheck, the ordering operator's own result?
+ *
+ * The GiST contract only requires a non-rechecked distance to *sort* like
+ * the operator's result, so we cannot assume this of an arbitrary opclass.
+ * The core point and box opclasses compute the leaf distance with the same
+ * code as the operator, so the executor may return their values in place of
+ * re-evaluating the operator.  Other opclasses say no, as before.
+ */
+bool
+gistcanreturnorderby(Relation index, int attno)
+{
+	Oid			distproc;
+
+	if (attno > IndexRelationGetNumberOfKeyAttributes(index))
+		return false;
+
+	distproc = index_getprocid(index, attno, GIST_DISTANCE_PROC);
+
+	return (distproc == F_GIST_POINT_DISTANCE ||
+			distproc == F_GIST_BOX_DISTANCE);
 }

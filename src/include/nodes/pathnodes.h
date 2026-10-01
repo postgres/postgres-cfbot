@@ -1312,7 +1312,8 @@ typedef struct RelAggInfo
  * IndexOptInfo
  *		Per-index information for planning/optimization
  *
- *		indexkeys[] and canreturn[] each have ncolumns entries.
+ *		indexkeys[], canreturn[] and canreturnorderby[] each have ncolumns
+ *		entries.
  *
  *		indexcollations[], opfamily[], and opcintype[] each have nkeycolumns
  *		entries.  These don't contain any information about INCLUDE columns.
@@ -1395,6 +1396,8 @@ typedef struct IndexOptInfo
 	bytea	  **opclassoptions pg_node_attr(read_write_ignore);
 	/* which index cols can be returned in an index-only scan? */
 	bool	   *canreturn pg_node_attr(array_size(ncolumns));
+	/* which index cols' exact ORDER BY distances are the operator's result? */
+	bool	   *canreturnorderby pg_node_attr(array_size(ncolumns));
 	/* OID of the access method (in pg_am) */
 	Oid			relam;
 

@@ -594,10 +594,10 @@ SET enable_bitmapscan = OFF;
 EXPLAIN (COSTS OFF)
 SELECT rank() OVER (ORDER BY b <-> point '123,456') n, b <-> point '123,456' dist, id
 FROM quad_box_tbl;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  WindowAgg
-   Window: w1 AS (ORDER BY (b <-> '(123,456)'::point) ROWS UNBOUNDED PRECEDING)
+   Window: w1 AS (ORDER BY ((b <-> '(123,456)'::point)) ROWS UNBOUNDED PRECEDING)
    ->  Index Scan using quad_box_tbl_idx on quad_box_tbl
          Order By: (b <-> '(123,456)'::point)
 (4 rows)
@@ -617,10 +617,10 @@ WHERE seq.id IS NULL OR idx.id IS NULL;
 EXPLAIN (COSTS OFF)
 SELECT rank() OVER (ORDER BY b <-> point '123,456') n, b <-> point '123,456' dist, id
 FROM quad_box_tbl WHERE b <@ box '((200,300),(500,600))';
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  WindowAgg
-   Window: w1 AS (ORDER BY (b <-> '(123,456)'::point) ROWS UNBOUNDED PRECEDING)
+   Window: w1 AS (ORDER BY ((b <-> '(123,456)'::point)) ROWS UNBOUNDED PRECEDING)
    ->  Index Scan using quad_box_tbl_idx on quad_box_tbl
          Index Cond: (b <@ '(500,600),(200,300)'::box)
          Order By: (b <-> '(123,456)'::point)

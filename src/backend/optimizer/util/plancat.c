@@ -280,11 +280,14 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			info->opfamily = palloc_array(Oid, nkeycolumns);
 			info->opcintype = palloc_array(Oid, nkeycolumns);
 			info->canreturn = palloc_array(bool, ncolumns);
+			info->canreturnorderby = palloc_array(bool, ncolumns);
 
 			for (i = 0; i < ncolumns; i++)
 			{
 				info->indexkeys[i] = index->indkey.values[i];
 				info->canreturn[i] = index_can_return(indexRelation, i + 1);
+				info->canreturnorderby[i] =
+					index_can_return_orderby(indexRelation, i + 1);
 			}
 
 			for (i = 0; i < nkeycolumns; i++)

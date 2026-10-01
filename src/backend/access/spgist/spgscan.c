@@ -24,6 +24,7 @@
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 #include "utils/float.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -1087,4 +1088,27 @@ spgcanreturn(Relation index, int attno)
 	cache = spgGetCache(index);
 
 	return cache->config.canReturnData;
+}
+
+/*
+ * Are the distances the opclass reports for a leaf tuple, when it does not
+ * set recheckDistances, the ordering operator's own result?
+ *
+ * As for GiST, the contract only requires them to sort like the operator's
+ * result.  The core point and box opclasses compute leaf distances with the
+ * operator's own code; polygon sets recheckDistances and never qualifies.
+ */
+bool
+spgcanreturnorderby(Relation index, int attno)
+{
+	Oid			leafproc;
+
+	if (attno != 1)
+		return false;
+
+	leafproc = index_getprocid(index, attno, SPGIST_LEAF_CONSISTENT_PROC);
+
+	return (leafproc == F_SPG_QUAD_LEAF_CONSISTENT ||
+			(leafproc == F_SPG_BOX_QUAD_LEAF_CONSISTENT &&
+			 index->rd_opcintype[0] == BOXOID));
 }
