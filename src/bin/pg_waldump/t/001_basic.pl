@@ -509,4 +509,114 @@ for my $scenario (@scenarios)
 	}
 }
 
+# Check the LSN reported for a record that is rejected while it is decoded.
+# Update a row right after a checkpoint, so that the update record carries a
+# full-page image of a page with a hole.  In a copy of the WAL segment, clear
+# the image's hole offset and recompute the record's CRC, so that the record
+# passes the CRC check but fails DecodeXLogRecord()'s checks.
+$node->start;
+$node->safe_psql('postgres',
+	'CREATE TABLE t_bad_fpi (a int); INSERT INTO t_bad_fpi VALUES (1);');
+my $bad_fpi_rel = join('/',
+	$default_ts_oid, $postgres_db_oid,
+	$node->safe_psql('postgres', q{SELECT pg_relation_filenode('t_bad_fpi')}));
+my $wal_block_size = $node->safe_psql('postgres', 'SHOW wal_block_size');
+my $wal_segment_size = $node->safe_psql('postgres',
+	q{SELECT setting FROM pg_settings WHERE name = 'wal_segment_size'});
+
+# Retry until the record fits on one WAL page and doesn't start right after a
+# page header, so that it can be patched in place and starts where the
+# previous record ends.
+my ($bad_lsn, $bad_prev, $bad_len, $bad_off);
+foreach my $try (1 .. 10)
+{
+	my $from = $node->safe_psql('postgres', 'SELECT pg_current_wal_insert_lsn()');
+	$node->safe_psql('postgres', 'CHECKPOINT; UPDATE t_bad_fpi SET a = a + 1;');
+	my $to = $node->safe_psql('postgres', 'SELECT pg_current_wal_insert_lsn()');
+	my ($stdout, $stderr);
+	IPC::Run::run [
+		'pg_waldump',
+		'--path' => $node->data_dir . '/pg_wal',
+		'--start' => $from,
+		'--end' => $to,
+		'--relation' => $bad_fpi_rel,
+		'--fullpage'
+	  ],
+	  '>' => \$stdout,
+	  '2>' => \$stderr;
+	next
+	  unless $stdout =~
+	  m{len \(rec/tot\):\s*\d+/\s*(\d+), .* lsn: ([0-9A-F]+/[0-9A-F]+), prev ([0-9A-F]+/[0-9A-F]+)};
+	($bad_len, $bad_lsn, $bad_prev) = ($1, $2, $3);
+
+	# The segment and page sizes divide 2^32, so the low half is enough.
+	my $lsn_lo = hex((split m{/}, $bad_lsn)[1]);
+	my $page_off = $lsn_lo % $wal_block_size;
+	$bad_off = $lsn_lo % $wal_segment_size;
+	last if $page_off > 40 && $page_off + $bad_len <= $wal_block_size;
+	undef $bad_lsn;
+}
+ok(defined $bad_lsn, 'found a record with a full-page image to corrupt');
+
+my $bad_walfile =
+  $node->safe_psql('postgres', "SELECT pg_walfile_name('$bad_lsn')");
+my $rec;
+open(my $wal_fh, '<', $node->data_dir . "/pg_wal/$bad_walfile")
+  or BAIL_OUT("open failed: $!");
+binmode $wal_fh;
+sysseek($wal_fh, $bad_off, 0)
+  or BAIL_OUT("sysseek failed: $!");
+sysread($wal_fh, $rec, $bad_len) == $bad_len
+  or BAIL_OUT("sysread failed: $!");
+close($wal_fh);
+
+# The record's CRC covers the data after the 24-byte header, followed by the
+# header up to xl_crc.
+sub record_crc
+{
+	my ($rec) = @_;
+	my $hex = unpack('H*', substr($rec, 24) . substr($rec, 0, 20));
+	return $node->safe_psql('postgres', "SELECT crc32c('\\x$hex'::bytea)");
+}
+is(record_crc($rec), unpack('V', substr($rec, 20, 4)),
+	'CRC computed for the original record');
+
+# The first block header (id, fork_flags, data_length) is followed by the
+# image header (length, hole_offset, bimg_info).
+my ($block_id, $fork_flags, undef, undef, undef, $bimg_info) =
+  unpack('C C v v v C', substr($rec, 24, 9));
+ok( $block_id == 0
+	  && ($fork_flags & 0x10)    # BKPBLOCK_HAS_IMAGE
+	  && ($bimg_info & 0x01)     # BKPIMAGE_HAS_HOLE
+	  && !($bimg_info & 0x1C),   # not compressed
+	'block 0 carries an uncompressed full-page image with a hole');
+
+substr($rec, 30, 2) = pack('v', 0);    # hole_offset
+substr($rec, 20, 4) = pack('V', record_crc($rec));
+$node->stop;
+
+my $bad_wal_dir = PostgreSQL::Test::Utils::tempdir_short();
+copy($node->data_dir . "/pg_wal/$bad_walfile", "$bad_wal_dir/$bad_walfile")
+  || die "copying $bad_walfile $!";
+open($wal_fh, '+<', "$bad_wal_dir/$bad_walfile")
+  or BAIL_OUT("open failed: $!");
+binmode $wal_fh;
+sysseek($wal_fh, $bad_off, 0)
+  or BAIL_OUT("sysseek failed: $!");
+syswrite($wal_fh, $rec) == $bad_len
+  or BAIL_OUT("syswrite failed: $!");
+close($wal_fh)
+  or BAIL_OUT("close failed: $!");
+
+my $bad_fpi_error =
+  qr{BKPIMAGE_HAS_HOLE set, but hole offset 0 length \d+ block image length \d+ at \Q$bad_lsn\E};
+command_fails_like(
+	[ 'pg_waldump', '--path' => $bad_wal_dir, '--start' => $bad_prev ],
+	qr{error in WAL record at [0-9A-F]+/[0-9A-F]+: $bad_fpi_error},
+	'decoding error names the rejected record');
+command_fails_like(
+	[ 'pg_waldump', '--path' => $bad_wal_dir, '--start' => $bad_lsn ],
+	qr{could not find a valid record after \Q$bad_lsn\E: $bad_fpi_error},
+	'decoding error names the rejected record when starting at it');
+
 done_testing();
