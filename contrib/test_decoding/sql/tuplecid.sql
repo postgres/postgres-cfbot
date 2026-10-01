@@ -1,0 +1,76 @@
+-- Tests for decoding of transactions in which a catalog-modifying
+-- subtransaction was rolled back (BUG #19555).
+--
+-- When a subtransaction modifies catalog tuples and is then rolled back,
+-- its dead heap-only line pointers can be marked LP_UNUSED by on-access
+-- pruning and reused by later catalog inserts of the same top-level
+-- transaction.  The aborted subtransaction's xl_heap_new_cid records must
+-- not be consulted when building the historic snapshot used to decode the
+-- transaction; on unfixed builds they collide with the records of the
+-- reused line pointer and decoding dies with
+--   TRAP: failed Assert("ent->cmin == change->data.tuplecid.cmin")
+-- (or, on non-assert builds, silently uses wrong cmin/cmax mappings).
+--
+-- Whether the collision triggers depends on the physical layout of the
+-- catalog pages, so run in a fresh database where prior tests cannot have
+-- changed it, and loop enough times to leave headroom for layout
+-- differences across versions.
+CREATE DATABASE regression_tuplecid;
+-- snapshot the original database name (make and meson use different
+-- names for it) so we can switch back before dropping the test database
+\set prevdb :DBNAME
+\c regression_tuplecid
+
+-- predictability
+SET synchronous_commit = on;
+
+SELECT 'init' FROM pg_create_logical_replication_slot('regression_slot', 'test_decoding');
+
+-- Catalog churn to push the catalog pages into a state where on-access
+-- pruning frees the aborted subtransaction's line pointer and the second
+-- ALTER's catalog insert reuses it.
+CREATE TABLE tpc_filler1(f1 char(4));
+CREATE TABLE tpc_filler2(data text);
+INSERT INTO tpc_filler2 VALUES ('before-test');
+CREATE TYPE tpc_complex AS (r float8, i float8);
+CREATE TABLE tpc_filler3 (a int PRIMARY KEY, b text DEFAULT 'Unspecified');
+CREATE TABLE tpc_filler4 (id serial, t text);
+CREATE TABLE tpc_filler5(data text);
+INSERT INTO tpc_filler5 SELECT repeat('a', 2000) || g.i FROM generate_series(1, 1) g(i);
+TRUNCATE table tpc_filler5;
+CHECKPOINT;
+
+SELECT count(*) FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+
+-- Each iteration runs the trigger shape: catalog DDL inside a rolled-back
+-- subtransaction, then the same DDL again, then decode.  Unfixed builds
+-- typically die within a handful of iterations.
+-- (temporarily hide the queries, to avoid flooding the expected output)
+\set ECHO none
+SELECT format($fmt$
+CREATE TABLE tpc_cmin(data int, pad1 text, pad2 int, pad3 text);
+BEGIN;
+SAVEPOINT a;
+ALTER TABLE tpc_cmin ALTER COLUMN data TYPE text;
+ROLLBACK TO SAVEPOINT a;
+ALTER TABLE tpc_cmin ALTER COLUMN data TYPE bigint;
+COMMIT;
+SELECT count(*) FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+DROP TABLE tpc_cmin;
+$fmt$)
+FROM generate_series(1, 25) \gexec
+\set ECHO all
+
+DROP TABLE tpc_filler1;
+DROP TABLE tpc_filler2;
+DROP TYPE tpc_complex;
+DROP TABLE tpc_filler3;
+DROP TABLE tpc_filler4;
+DROP TABLE tpc_filler5;
+
+SELECT count(*) FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+
+SELECT pg_drop_replication_slot('regression_slot');
+
+\c :prevdb
+DROP DATABASE regression_tuplecid;
