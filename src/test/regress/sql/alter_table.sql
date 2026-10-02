@@ -2402,6 +2402,15 @@ ALTER TABLE partitioned ALTER COLUMN b TYPE char(5);
 -- specifying storage parameters for partitioned tables is not supported
 ALTER TABLE partitioned SET (fillfactor=100);
 
+-- If the partition expression contains a whole-row reference, altering a
+-- column’s data type or dropping the column is not allowed.
+CREATE TABLE partitioned1(a int, b int) PARTITION BY list((partitioned1));
+ALTER TABLE partitioned1 DROP COLUMN a; --error
+ALTER TABLE partitioned1 DROP COLUMN b; --error
+ALTER TABLE partitioned1 ALTER COLUMN a TYPE text; --error
+ALTER TABLE partitioned1 ALTER COLUMN b TYPE text; --error
+DROP TABLE partitioned1;
+
 -- partitioned table cannot participate in regular inheritance
 CREATE TABLE nonpartitioned (
 	a int,
