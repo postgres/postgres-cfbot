@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import shlex
 import shutil
 import subprocess
 import os
@@ -19,6 +20,9 @@ parser.add_argument('--pg-test-extra', help='extra tests', type=str)
 parser.add_argument('test_command', nargs='*')
 
 args = parser.parse_args()
+
+if args.test_command and not os.path.isabs(args.test_command[0]):
+    args.test_command[0] = os.path.join(args.basedir, args.test_command[0])
 
 testdir = '{}/testrun/{}/{}'.format(
     args.basedir, args.testgroup, args.testname)
@@ -61,7 +65,16 @@ else:
     if args.tests:
         args.test_command.extend(args.tests)
 
-sp = subprocess.Popen(args.test_command, env=env_dict, stdout=subprocess.PIPE)
+test_command = args.test_command
+exe_wrapper = env_dict.get('MESON_EXE_WRAPPER')
+if exe_wrapper:
+    if os.name == 'nt':
+        test_command = '{} {}'.format(
+            exe_wrapper, subprocess.list2cmdline(test_command))
+    else:
+        test_command = shlex.split(exe_wrapper) + test_command
+
+sp = subprocess.Popen(test_command, env=env_dict, stdout=subprocess.PIPE)
 # Meson categorizes a passing TODO test point as bad
 # (https://github.com/mesonbuild/meson/issues/13183).  Remove the TODO
 # directive, so Meson computes the file result like Perl does.  This could
