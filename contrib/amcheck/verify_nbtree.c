@@ -23,7 +23,6 @@
  */
 #include "postgres.h"
 
-#include "access/heaptoast.h"
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/table.h"
@@ -2849,115 +2848,10 @@ bt_tuple_present_callback(Relation index, ItemPointer tid, Datum *values,
 static IndexTuple
 bt_normalize_tuple(BtreeCheckState *state, IndexTuple itup)
 {
-	TupleDesc	tupleDescriptor = RelationGetDescr(state->rel);
-	Datum		normalized[INDEX_MAX_KEYS];
-	bool		isnull[INDEX_MAX_KEYS];
-	bool		need_free[INDEX_MAX_KEYS];
-	bool		formnewtup = false;
-	IndexTuple	reformed;
-	int			i;
-
 	/* Caller should only pass "logical" non-pivot tuples here */
 	Assert(!BTreeTupleIsPosting(itup) && !BTreeTupleIsPivot(itup));
 
-	/* Easy case: It's immediately clear that tuple has no varlena datums */
-	if (!IndexTupleHasVarwidths(itup))
-		return itup;
-
-	for (i = 0; i < tupleDescriptor->natts; i++)
-	{
-		Form_pg_attribute att;
-
-		att = TupleDescAttr(tupleDescriptor, i);
-
-		/* Assume untoasted/already normalized datum initially */
-		need_free[i] = false;
-		normalized[i] = index_getattr(itup, att->attnum,
-									  tupleDescriptor,
-									  &isnull[i]);
-		if (att->attbyval || att->attlen != -1 || isnull[i])
-			continue;
-
-		/*
-		 * Callers always pass a tuple that could safely be inserted into the
-		 * index without further processing, so an external varlena header
-		 * should never be encountered here
-		 */
-		if (VARATT_IS_EXTERNAL(DatumGetPointer(normalized[i])))
-			ereport(ERROR,
-					(errcode(ERRCODE_INDEX_CORRUPTED),
-					 errmsg("external varlena datum in tuple that references heap row (%u,%u) in index \"%s\"",
-							ItemPointerGetBlockNumber(&(itup->t_tid)),
-							ItemPointerGetOffsetNumber(&(itup->t_tid)),
-							RelationGetRelationName(state->rel))));
-		else if (!VARATT_IS_COMPRESSED(DatumGetPointer(normalized[i])) &&
-				 VARSIZE_ANY(DatumGetPointer(normalized[i])) > TOAST_INDEX_TARGET &&
-				 (att->attstorage == TYPSTORAGE_EXTENDED ||
-				  att->attstorage == TYPSTORAGE_MAIN))
-		{
-			/*
-			 * This value will be compressed by index_form_tuple() with the
-			 * current storage settings.  We may be here because this tuple
-			 * was formed with different storage settings.  So, force forming.
-			 */
-			formnewtup = true;
-		}
-		else if (VARATT_IS_COMPRESSED(DatumGetPointer(normalized[i])))
-		{
-			formnewtup = true;
-			normalized[i] = PointerGetDatum(PG_DETOAST_DATUM(normalized[i]));
-			need_free[i] = true;
-		}
-
-		/*
-		 * Short tuples may have 1B or 4B header. Convert 4B header of short
-		 * tuples to 1B
-		 */
-		else if (VARATT_CAN_MAKE_SHORT(DatumGetPointer(normalized[i])))
-		{
-			/* convert to short varlena */
-			Size		len = VARATT_CONVERTED_SHORT_SIZE(DatumGetPointer(normalized[i]));
-			char	   *data = palloc(len);
-
-			SET_VARSIZE_SHORT(data, len);
-			memcpy(data + 1, VARDATA(DatumGetPointer(normalized[i])), len - 1);
-
-			formnewtup = true;
-			normalized[i] = PointerGetDatum(data);
-			need_free[i] = true;
-		}
-	}
-
-	/*
-	 * Easier case: Tuple has varlena datums, none of which are compressed or
-	 * short with 4B header
-	 */
-	if (!formnewtup)
-		return itup;
-
-	/*
-	 * Hard case: Tuple had compressed varlena datums that necessitate
-	 * creating normalized version of the tuple from uncompressed input datums
-	 * (normalized input datums).  This is rather naive, but shouldn't be
-	 * necessary too often.
-	 *
-	 * In the heap, tuples may contain short varlena datums with both 1B
-	 * header and 4B headers.  But the corresponding index tuple should always
-	 * have such varlena's with 1B headers.  So, if there is a short varlena
-	 * with 4B header, we need to convert it for fingerprinting.
-	 *
-	 * Note that we rely on deterministic index_form_tuple() TOAST compression
-	 * of normalized input.
-	 */
-	reformed = index_form_tuple(tupleDescriptor, normalized, isnull);
-	reformed->t_tid = itup->t_tid;
-
-	/* Cannot leak memory here */
-	for (i = 0; i < tupleDescriptor->natts; i++)
-		if (need_free[i])
-			pfree(DatumGetPointer(normalized[i]));
-
-	return reformed;
+	return amcheck_normalize_tuple(state->rel, itup);
 }
 
 /*
