@@ -97,6 +97,10 @@ static int	wal_segsize_val;
 static bool char_signedness_given = false;
 static bool char_signedness_val;
 
+static bool cluster_state_given = false;
+static DBState cluster_state_val;
+static const char *cluster_state_name;
+
 
 static TimeLineID minXlogTli = 0;
 static XLogSegNo minXlogSegNo = 0;
@@ -135,6 +139,7 @@ main(int argc, char *argv[])
 		{"next-transaction-id", required_argument, NULL, 'x'},
 		{"wal-segsize", required_argument, NULL, 1},
 		{"char-signedness", required_argument, NULL, 2},
+		{"cluster-state", required_argument, NULL, 3},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -356,6 +361,32 @@ main(int argc, char *argv[])
 					break;
 				}
 
+			case 3:
+				{
+					/* DB_STARTUP is left out, the server rejects it */
+					if (strcmp(optarg, "shut-down") == 0)
+						cluster_state_val = DB_SHUTDOWNED;
+					else if (strcmp(optarg, "shut-down-in-recovery") == 0)
+						cluster_state_val = DB_SHUTDOWNED_IN_RECOVERY;
+					else if (strcmp(optarg, "shutting-down") == 0)
+						cluster_state_val = DB_SHUTDOWNING;
+					else if (strcmp(optarg, "in-crash-recovery") == 0)
+						cluster_state_val = DB_IN_CRASH_RECOVERY;
+					else if (strcmp(optarg, "in-archive-recovery") == 0)
+						cluster_state_val = DB_IN_ARCHIVE_RECOVERY;
+					else if (strcmp(optarg, "in-production") == 0)
+						cluster_state_val = DB_IN_PRODUCTION;
+					else
+					{
+						pg_log_error("invalid argument for option %s", "--cluster-state");
+						pg_log_error_hint("Try \"%s --help\" for more information.", progname);
+						exit(1);
+					}
+					cluster_state_name = optarg;
+					cluster_state_given = true;
+					break;
+				}
+
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -428,6 +459,25 @@ main(int argc, char *argv[])
 	{
 		pg_log_error("lock file \"%s\" exists", "postmaster.pid");
 		pg_log_error_hint("Is a server running?  If not, delete the lock file and try again.");
+		exit(1);
+	}
+
+	/*
+	 * A backup_label file means this is a base backup that needs WAL replay
+	 * to become consistent.  Resetting WAL cannot fix that, so refuse even
+	 * with -f.
+	 */
+	if ((fd = open(BACKUP_LABEL_FILE, O_RDONLY, 0)) < 0)
+	{
+		if (errno != ENOENT)
+			pg_fatal("could not open file \"%s\" for reading: %m",
+					 BACKUP_LABEL_FILE);
+	}
+	else
+	{
+		pg_log_error("backup label file \"%s\" exists", BACKUP_LABEL_FILE);
+		pg_log_error_hint("If you are restoring from a backup, configure recovery instead.  "
+						  "If you are not restoring from a backup, delete the backup label file and try again.");
 		exit(1);
 	}
 
@@ -900,6 +950,12 @@ PrintNewControlValues(void)
 		printf(_("Bytes per WAL segment:                %u\n"),
 			   ControlFile.xlog_seg_size);
 	}
+
+	if (cluster_state_given)
+	{
+		printf(_("Database cluster state:               %s\n"),
+			   cluster_state_name);
+	}
 }
 
 
@@ -917,7 +973,7 @@ RewriteControlFile(void)
 							ControlFile.checkPointCopy.redo);
 	ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);
 
-	ControlFile.state = DB_SHUTDOWNED;
+	ControlFile.state = cluster_state_given ? cluster_state_val : DB_SHUTDOWNED;
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
 	ControlFile.minRecoveryPoint = InvalidXLogRecPtr;
 	ControlFile.minRecoveryPointTLI = 0;
@@ -1250,6 +1306,7 @@ usage(void)
 	printf(_("  -u, --oldest-transaction-id=XID  set oldest transaction ID\n"));
 	printf(_("  -x, --next-transaction-id=XID    set next transaction ID\n"));
 	printf(_("      --char-signedness=OPTION     set char signedness to \"signed\" or \"unsigned\"\n"));
+	printf(_("      --cluster-state=STATE        set database cluster state\n"));
 	printf(_("      --wal-segsize=SIZE           size of WAL segments, in megabytes\n"));
 
 	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);

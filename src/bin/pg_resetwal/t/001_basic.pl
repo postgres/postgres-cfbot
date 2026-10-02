@@ -55,6 +55,29 @@ is($node->safe_psql("postgres", "SELECT 1;"),
 
 $node->stop;
 
+# A backup_label file blocks pg_resetwal, even with --force or --dry-run.
+my $backup_label = $node->data_dir . '/backup_label';
+append_to_file($backup_label, "START WAL LOCATION: 0/2000028\n");
+command_fails_like(
+	[ 'pg_resetwal', $node->data_dir ],
+	qr/backup label file "backup_label" exists/,
+	'fails with backup_label');
+command_fails_like(
+	[ 'pg_resetwal', '--force', $node->data_dir ],
+	qr/backup label file "backup_label" exists/,
+	'fails with backup_label even with force');
+command_fails_like(
+	[ 'pg_resetwal', '--dry-run', $node->data_dir ],
+	qr/backup label file "backup_label" exists/,
+	'fails with backup_label even with dry-run');
+unlink($backup_label) or die "could not remove $backup_label: $!";
+command_ok([ 'pg_resetwal', $node->data_dir ],
+	'runs after removing backup_label');
+$node->start;
+is($node->safe_psql("postgres", "SELECT 1;"),
+	1, 'server running and working after removing backup_label');
+$node->stop;
+
 # check various command-line handling
 
 # Note: This test intends to check that a nonexistent data directory
@@ -202,6 +225,12 @@ command_fails_like(
 	qr/error: invalid argument for option --char-signedness/,
 	'fails with incorrect --char-signedness option');
 
+# --cluster-state
+command_fails_like(
+	[ 'pg_resetwal', '--cluster-state', 'foo', $node->data_dir ],
+	qr/error: invalid argument for option --cluster-state/,
+	'fails with incorrect --cluster-state option');
+
 # run with control override options
 
 my $out = (run_command([ 'pg_resetwal', '--dry-run', $node->data_dir ]))[0];
@@ -281,5 +310,21 @@ is( $node->safe_psql(
 	),
 	't',
 	'new 8-byte OID reported');
+
+# With a cluster state other than "shut-down", the next start goes through
+# crash recovery, which empties unlogged tables.
+$node->safe_psql('postgres',
+	'CREATE UNLOGGED TABLE unlogged_tab AS SELECT 1 AS a');
+$node->stop;
+command_ok(
+	[ 'pg_resetwal', '--cluster-state' => 'in-production', $node->data_dir ],
+	'runs with --cluster-state');
+command_like(
+	[ 'pg_controldata', $node->data_dir ],
+	qr/^Database cluster state: *in production$/m,
+	'cluster state set in pg_control');
+$node->start;
+is($node->safe_psql('postgres', 'SELECT count(*) FROM unlogged_tab'),
+	'0', 'unlogged table reset after --cluster-state=in-production');
 
 done_testing();
