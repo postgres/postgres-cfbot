@@ -123,12 +123,16 @@ extern PGDLLIMPORT bool ssl_loaded_verify_locations;
 #endif
 
 #ifdef USE_SSL
+#if defined(USE_OPENSSL)
 #define SSL_LIBRARY "OpenSSL"
+#elif defined(USE_LIBRESSL)
+#define SSL_LIBRARY "LibreSSL"
 #else
 #define SSL_LIBRARY ""
 #endif
+#endif
 
-#ifdef USE_OPENSSL
+#ifdef USE_SSL
 #define DEFAULT_SSL_CIPHERS "HIGH:MEDIUM:+3DES:!aNULL"
 #else
 #define DEFAULT_SSL_CIPHERS "none"
