@@ -1793,6 +1793,13 @@
   assign_hook => 'assign_log_min_messages',
 },
 
+{ name => 'log_object_drops', type => 'bool', context => 'PGC_SUSET', group => 'LOGGING_WHAT',
+  short_desc => 'Logs LSN for DROP TABLE, TRUNCATE TABLE, and DROP DATABASE operations.',
+  long_desc => 'When enabled, the system will log the LSN (Log Sequence Number) whenever a DROP TABLE, TRUNCATE TABLE, or DROP DATABASE command is executed.',
+  variable => 'log_object_drops',
+  boot_val => 'false',
+},
+
 { name => 'log_parameter_max_length', type => 'int', context => 'PGC_SUSET', group => 'LOGGING_WHAT',
   short_desc => 'Sets the maximum length in bytes of data logged for bind parameter values when logging statements.',
   long_desc => '-1 means log values in full.',
