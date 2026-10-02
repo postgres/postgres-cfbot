@@ -323,6 +323,47 @@ DROP DOMAIN domain2;
 DROP DOMAIN domain3;
 DROP DOMAIN domain4;
 DROP FUNCTION foo(INT);
+-- Test changing column data type to constrained domain
+CREATE DOMAIN domain1 AS INT CHECK(VALUE > 1) NOT NULL;
+CREATE DOMAIN domain2 AS domain1 CHECK(VALUE > 1) NOT NULL;
+CREATE DOMAIN domain3 AS domain1 CHECK(VALUE > random(min=>10, max=>10)) CHECK(VALUE > 1) NOT NULL;
+CREATE DOMAIN domain4 AS TEXT COLLATE "POSIX" CHECK (value <> 'hello');
+CREATE DOMAIN domain5 AS int[] NOT NULL;
+CREATE DOMAIN domain6 AS varchar COLLATE "POSIX" CHECK (value <> 'hello');
+CREATE TABLE t22(a INT, b INT, c text COLLATE "C", col1 INT[]);
+INSERT INTO t22 VALUES(-2, -1, 'hello', NULL);
+ALTER TABLE t22 ALTER COLUMN a SET DATA TYPE domain2; -- table rewrite
+NOTICE:  rewriting table t22 for reason 4
+ERROR:  value for domain domain2 violates check constraint "domain1_check"
+ALTER TABLE t22 ALTER COLUMN a SET DATA TYPE domain3; -- table rewrite
+NOTICE:  rewriting table t22 for reason 4
+ERROR:  value for domain domain3 violates check constraint "domain1_check"
+ALTER TABLE t22 ALTER COLUMN c SET DATA TYPE domain4; -- no table rewrite
+ERROR:  value for domain domain4 violates check constraint "domain4_check"
+ALTER TABLE t22 ALTER COLUMN c SET DATA TYPE domain6; -- no table rewrite
+ERROR:  value for domain domain6 violates check constraint "domain6_check"
+ALTER TABLE t22 ALTER COLUMN col1 SET DATA TYPE domain5 USING col1::int4[]::domain5; -- no table rewrite
+ERROR:  domain domain5 does not allow null values
+UPDATE t22 set col1 = '{-2,null}';
+ALTER TABLE t22 ALTER COLUMN col1 SET DATA TYPE domain5 USING col1::int4[]::domain5; -- no table rewrite
+ALTER TABLE t22 ALTER COLUMN a SET DATA TYPE domain1; -- no table rewrite
+ERROR:  value for domain domain1 violates check constraint "domain1_check"
+ALTER TABLE t22 ALTER COLUMN b SET DATA TYPE domain2 USING 15; -- table rewrite, ok
+NOTICE:  rewriting table t22 for reason 4
+ALTER TABLE t22 DROP COLUMN a, DROP COLUMN c, ALTER COLUMN b SET DATA TYPE domain1, ADD COLUMN col2 INT DEFAULT 11; -- no table rewrite, ok
+CREATE FUNCTION domain_test() RETURNS bool language plpgsql AS $$ BEGIN DELETE FROM t22; return true; END$$;
+CREATE DOMAIN domain7 AS INT CHECK (domain_test());
+ALTER TABLE t22 ALTER COLUMN b SET DATA TYPE domain7; -- table rewrite
+NOTICE:  rewriting table t22 for reason 4
+TABLE t22;
+ b  |   col1    | col2 
+----+-----------+------
+ 15 | {-2,NULL} |   11
+(1 row)
+
+DROP TABLE t22;
+DROP DOMAIN domain1, domain2, domain3, domain4, domain5, domain6, domain7;
+DROP FUNCTION domain_test();
 -- Fall back to full rewrite for volatile expressions
 CREATE TABLE T(pk INT NOT NULL PRIMARY KEY);
 INSERT INTO T VALUES (1);
