@@ -18,6 +18,8 @@ OBJS = \
 	auth-oauth.o \
 	auth-sasl.o \
 	auth-scram.o \
+	auth-validate-methods.o \
+	auth-validate.o \
 	auth.o \
 	be-fsstubs.o \
 	be-secure-common.o \
