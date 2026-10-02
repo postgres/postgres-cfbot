@@ -245,9 +245,7 @@ shm_mq_get_receiver(shm_mq *mq)
 {
 	PGPROC	   *receiver;
 
-	SpinLockAcquire(&mq->mq_mutex);
-	receiver = mq->mq_receiver;
-	SpinLockRelease(&mq->mq_mutex);
+	receiver = slock_read_ptr(&mq->mq_mutex, &mq->mq_receiver);
 
 	return receiver;
 }
@@ -260,9 +258,7 @@ shm_mq_get_sender(shm_mq *mq)
 {
 	PGPROC	   *sender;
 
-	SpinLockAcquire(&mq->mq_mutex);
-	sender = mq->mq_sender;
-	SpinLockRelease(&mq->mq_mutex);
+	sender = slock_read_ptr(&mq->mq_mutex, &mq->mq_sender);
 
 	return sender;
 }
@@ -525,9 +521,7 @@ shm_mq_sendv(shm_mq_handle *mqh, shm_mq_iovec *iov, int iovcnt, bool nowait,
 		receiver = mq->mq_receiver;
 	else
 	{
-		SpinLockAcquire(&mq->mq_mutex);
-		receiver = mq->mq_receiver;
-		SpinLockRelease(&mq->mq_mutex);
+		receiver = slock_read_ptr(&mq->mq_mutex, &mq->mq_receiver);
 		if (receiver != NULL)
 			mqh->mqh_counterparty_attached = true;
 	}

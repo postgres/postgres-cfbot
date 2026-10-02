@@ -521,9 +521,7 @@ InitLWLockAccess(void)
 LWLockPadded *
 GetNamedLWLockTranche(const char *tranche_name)
 {
-	SpinLockAcquire(&LWLockTranches->lock);
-	LocalNumUserDefinedTranches = LWLockTranches->num_user_defined;
-	SpinLockRelease(&LWLockTranches->lock);
+	LocalNumUserDefinedTranches = slock_read_uint32(&LWLockTranches->lock, &LWLockTranches->num_user_defined);
 
 	/*
 	 * Obtain the position of base address of LWLock belonging to requested
@@ -729,9 +727,7 @@ GetLWTrancheName(uint16 trancheId)
 	 */
 	if (idx >= LocalNumUserDefinedTranches)
 	{
-		SpinLockAcquire(&LWLockTranches->lock);
-		LocalNumUserDefinedTranches = LWLockTranches->num_user_defined;
-		SpinLockRelease(&LWLockTranches->lock);
+		LocalNumUserDefinedTranches = slock_read_uint32(&LWLockTranches->lock, &LWLockTranches->num_user_defined);
 
 		if (idx >= LocalNumUserDefinedTranches)
 			elog(ERROR, "tranche %d is not registered", trancheId);

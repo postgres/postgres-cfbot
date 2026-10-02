@@ -1490,9 +1490,7 @@ collect_min_nonremovable_xid(Subscription *sub, LogicalRepWorker *worker,
 
 	if (worker)
 	{
-		SpinLockAcquire(&worker->relmutex);
-		nonremovable_xid = worker->oldest_nonremovable_xid;
-		SpinLockRelease(&worker->relmutex);
+		nonremovable_xid = slock_read_uint32(&worker->relmutex, &worker->oldest_nonremovable_xid);
 	}
 
 	/*

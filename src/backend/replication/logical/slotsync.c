@@ -205,9 +205,7 @@ update_slotsync_skip_stats(SlotSyncSkipReason skip_reason)
 	/* Update the slot sync skip reason */
 	if (slot->slotsync_skip_reason != skip_reason)
 	{
-		SpinLockAcquire(&slot->mutex);
-		slot->slotsync_skip_reason = skip_reason;
-		SpinLockRelease(&slot->mutex);
+		slock_write_uint32(&slot->mutex, &slot->slotsync_skip_reason, skip_reason);
 	}
 }
 

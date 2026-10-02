@@ -801,9 +801,7 @@ ReplicationSlotRelease(void)
 		if (!TransactionIdIsValid(slot->data.xmin) &&
 			TransactionIdIsValid(slot->effective_xmin))
 		{
-			SpinLockAcquire(&slot->mutex);
-			slot->effective_xmin = InvalidTransactionId;
-			SpinLockRelease(&slot->mutex);
+			slock_write_uint32(&slot->mutex, &slot->effective_xmin, InvalidTransactionId);
 			ReplicationSlotsComputeRequiredXmin(false);
 		}
 
@@ -1104,9 +1102,7 @@ ReplicationSlotDropPtr(ReplicationSlot *slot)
 	{
 		bool		fail_softly = slot->data.persistency != RS_PERSISTENT;
 
-		SpinLockAcquire(&slot->mutex);
-		slot->active_proc = INVALID_PROC_NUMBER;
-		SpinLockRelease(&slot->mutex);
+		slock_write_uint32(&slot->mutex, &slot->active_proc, INVALID_PROC_NUMBER);
 
 		/* wake up anyone waiting on this slot */
 		ConditionVariableBroadcast(&slot->active_cv);

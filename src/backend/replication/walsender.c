@@ -1013,9 +1013,7 @@ StartReplication(StartReplicationCmd *cmd)
 		sentPtr = cmd->startpoint;
 
 		/* Initialize shared memory status, too */
-		SpinLockAcquire(&MyWalSnd->mutex);
-		MyWalSnd->sentPtr = sentPtr;
-		SpinLockRelease(&MyWalSnd->mutex);
+		slock_write_uint64(&MyWalSnd->mutex, &MyWalSnd->sentPtr, sentPtr);
 
 		SyncRepInitConfig();
 
@@ -2773,9 +2771,7 @@ ProcessStandbyHSFeedbackMessage(void)
 	{
 		WalSnd	   *walsnd = MyWalSnd;
 
-		SpinLockAcquire(&walsnd->mutex);
-		walsnd->replyTime = replyTime;
-		SpinLockRelease(&walsnd->mutex);
+		slock_write_uint64(&walsnd->mutex, &walsnd->replyTime, replyTime);
 	}
 
 	/*
@@ -2873,9 +2869,7 @@ ProcessStandbyPSRequestMessage(void)
 	 * Update shared state for this WalSender process based on reply data from
 	 * standby.
 	 */
-	SpinLockAcquire(&walsnd->mutex);
-	walsnd->replyTime = replyTime;
-	SpinLockRelease(&walsnd->mutex);
+	slock_write_uint64(&walsnd->mutex, &walsnd->replyTime, replyTime);
 
 	/*
 	 * Consider transactions in the current database, as only these are the
@@ -3296,9 +3290,7 @@ WalSndKill(int code, Datum arg)
 
 	MyWalSnd = NULL;
 
-	SpinLockAcquire(&walsnd->mutex);
-	/* Mark WalSnd struct as no longer being in use. */
-	walsnd->pid = 0;
+	slock_write_uint32(&walsnd->mutex, &walsnd->pid, 0);
 	SpinLockRelease(&walsnd->mutex);
 }
 
@@ -3672,9 +3664,7 @@ retry:
 	{
 		WalSnd	   *walsnd = MyWalSnd;
 
-		SpinLockAcquire(&walsnd->mutex);
-		walsnd->sentPtr = sentPtr;
-		SpinLockRelease(&walsnd->mutex);
+		slock_write_uint64(&walsnd->mutex, &walsnd->sentPtr, sentPtr);
 	}
 
 	/* Report progress of XLOG streaming in PS display */
@@ -3769,9 +3759,7 @@ XLogSendLogical(void)
 	{
 		WalSnd	   *walsnd = MyWalSnd;
 
-		SpinLockAcquire(&walsnd->mutex);
-		walsnd->sentPtr = sentPtr;
-		SpinLockRelease(&walsnd->mutex);
+		slock_write_uint64(&walsnd->mutex, &walsnd->sentPtr, sentPtr);
 	}
 }
 
@@ -4160,9 +4148,7 @@ WalSndInitStopping(void)
 		WalSnd	   *walsnd = &WalSndCtl->walsnds[i];
 		pid_t		pid;
 
-		SpinLockAcquire(&walsnd->mutex);
-		pid = walsnd->pid;
-		SpinLockRelease(&walsnd->mutex);
+		pid = slock_read_uint32(&walsnd->mutex, &walsnd->pid);
 
 		if (pid == 0)
 			continue;
@@ -4224,9 +4210,7 @@ WalSndSetState(WalSndState state)
 	if (walsnd->state == state)
 		return;
 
-	SpinLockAcquire(&walsnd->mutex);
-	walsnd->state = state;
-	SpinLockRelease(&walsnd->mutex);
+	slock_write_uint32(&walsnd->mutex, &walsnd->state, state);
 }
 
 /*
