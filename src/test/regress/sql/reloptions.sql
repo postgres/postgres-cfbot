@@ -168,3 +168,8 @@ SELECT reloptions FROM pg_class WHERE oid = 'reloptions_test_idx'::regclass;
 CREATE INDEX reloptions_test_idx3 ON reloptions_test (s);
 ALTER INDEX reloptions_test_idx3 SET (fillfactor=40);
 SELECT reloptions FROM pg_class WHERE oid = 'reloptions_test_idx3'::regclass;
+
+-- Which options are standard ones
+SELECT name, pg_reloption_is_standard(name)
+  FROM unnest(ARRAY['fillfactor', 'autovacuum_enabled', 'toast_tuple_target',
+                    'fastupdate', 'no_such_option']) AS name;

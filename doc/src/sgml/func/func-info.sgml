@@ -1887,6 +1887,23 @@ SELECT currval(pg_get_serial_sequence('sometable', 'id'));
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_reloption_is_standard</primary>
+        </indexterm>
+        <function>pg_reloption_is_standard</function> ( <parameter>name</parameter> <type>text</type> )
+        <returnvalue>boolean</returnvalue>
+       </para>
+       <para>
+        Returns true if the named storage parameter is one accepted by
+        tables using the <literal>heap</literal> access method.  A table
+        access method that defines its own storage parameters can also accept
+        these ones (see <xref linkend="tableam-reloptions"/>); any other
+        storage parameter of a table is specific to its access method.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_settings_get_flags</primary>
         </indexterm>
         <function>pg_settings_get_flags</function> ( <parameter>guc</parameter> <type>text</type> )
