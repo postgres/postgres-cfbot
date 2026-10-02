@@ -1149,9 +1149,7 @@ RequestCheckpoint(int flags)
 		ConditionVariablePrepareToSleep(&CheckpointerShmem->start_cv);
 		for (;;)
 		{
-			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
-			new_started = CheckpointerShmem->ckpt_started;
-			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
+			new_started = slock_read_uint32(&CheckpointerShmem->ckpt_lck, &CheckpointerShmem->ckpt_started);
 
 			if (new_started != old_started)
 				break;
@@ -1517,9 +1515,7 @@ FirstCallSinceLastCheckpoint(void)
 	int			new_done;
 	bool		FirstCall = false;
 
-	SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
-	new_done = CheckpointerShmem->ckpt_done;
-	SpinLockRelease(&CheckpointerShmem->ckpt_lck);
+	new_done = slock_read_uint32(&CheckpointerShmem->ckpt_lck, &CheckpointerShmem->ckpt_done);
 
 	if (new_done != ckpt_done)
 		FirstCall = true;

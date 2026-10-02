@@ -1481,9 +1481,7 @@ WalRcvRequestApplyReply(void)
 
 	WalRcv->apply_reply_requested = true;
 	/* fetching the proc number is probably atomic, but don't rely on it */
-	SpinLockAcquire(&WalRcv->mutex);
-	procno = WalRcv->procno;
-	SpinLockRelease(&WalRcv->mutex);
+	procno = slock_read_uint32(&WalRcv->mutex, &WalRcv->procno);
 	if (procno != INVALID_PROC_NUMBER)
 		SetLatch(&GetPGProcByNumber(procno)->procLatch);
 }

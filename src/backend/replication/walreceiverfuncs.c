@@ -126,9 +126,7 @@ WalRcvGetState(void)
 	WalRcvData *walrcv = WalRcv;
 	WalRcvState state;
 
-	SpinLockAcquire(&walrcv->mutex);
-	state = walrcv->walRcvState;
-	SpinLockRelease(&walrcv->mutex);
+	state = slock_read_uint32(&walrcv->mutex, &walrcv->walRcvState);
 
 	return state;
 }
@@ -397,9 +395,7 @@ GetReplicationApplyDelay(void)
 	XLogRecPtr	replayPtr;
 	TimestampTz chunkReplayStartTime;
 
-	SpinLockAcquire(&walrcv->mutex);
-	receivePtr = walrcv->flushedUpto;
-	SpinLockRelease(&walrcv->mutex);
+	receivePtr = slock_read_uint64(&walrcv->mutex, &walrcv->flushedUpto);
 
 	replayPtr = GetXLogReplayRecPtr(NULL);
 

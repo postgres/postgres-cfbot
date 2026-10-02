@@ -372,9 +372,7 @@ StrategyNotifyBgWriter(int bgwprocno)
 	 * atomic to StrategyGetBuffer.  The bgwriter should call this rather
 	 * infrequently, so there's no performance penalty from being safe.
 	 */
-	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
-	StrategyControl->bgwprocno = bgwprocno;
-	SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+	slock_write_uint32(&StrategyControl->buffer_strategy_lock, &StrategyControl->bgwprocno, bgwprocno);
 }
 
 

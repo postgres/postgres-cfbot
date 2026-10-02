@@ -1327,9 +1327,7 @@ void
 pa_set_xact_state(ParallelApplyWorkerShared *wshared,
 				  ParallelTransState xact_state)
 {
-	SpinLockAcquire(&wshared->mutex);
-	wshared->xact_state = xact_state;
-	SpinLockRelease(&wshared->mutex);
+	slock_write_uint32(&wshared->mutex, &wshared->xact_state, xact_state);
 }
 
 /*
@@ -1340,9 +1338,7 @@ pa_get_xact_state(ParallelApplyWorkerShared *wshared)
 {
 	ParallelTransState xact_state;
 
-	SpinLockAcquire(&wshared->mutex);
-	xact_state = wshared->xact_state;
-	SpinLockRelease(&wshared->mutex);
+	xact_state = slock_read_uint32(&wshared->mutex, &wshared->xact_state);
 
 	return xact_state;
 }
@@ -1541,9 +1537,7 @@ pa_get_fileset_state(void)
 
 	Assert(am_parallel_apply_worker());
 
-	SpinLockAcquire(&MyParallelShared->mutex);
-	fileset_state = MyParallelShared->fileset_state;
-	SpinLockRelease(&MyParallelShared->mutex);
+	fileset_state = slock_read_uint32(&MyParallelShared->mutex, &MyParallelShared->fileset_state);
 
 	return fileset_state;
 }

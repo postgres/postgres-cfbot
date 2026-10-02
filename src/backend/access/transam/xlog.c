@@ -1620,9 +1620,7 @@ WaitXLogInsertionsToFinish(XLogRecPtr upto)
 		return inserted;
 
 	/* Read the current insert position */
-	SpinLockAcquire(&Insert->insertpos_lck);
-	bytepos = Insert->CurrBytePos;
-	SpinLockRelease(&Insert->insertpos_lck);
+	bytepos = slock_read_uint64(&Insert->insertpos_lck, &Insert->CurrBytePos);
 	reservedUpto = XLogBytePosToEndRecPtr(bytepos);
 
 	/*
@@ -2748,9 +2746,7 @@ XLogSetAsyncXactLSN(XLogRecPtr asyncXactLSN)
 void
 XLogSetReplicationSlotMinimumLSN(XLogRecPtr lsn)
 {
-	SpinLockAcquire(&XLogCtl->info_lck);
-	XLogCtl->replicationSlotMinLSN = lsn;
-	SpinLockRelease(&XLogCtl->info_lck);
+	slock_write_uint64(&XLogCtl->info_lck, &XLogCtl->replicationSlotMinLSN, lsn);
 }
 
 
@@ -2763,9 +2759,7 @@ XLogGetReplicationSlotMinimumLSN(void)
 {
 	XLogRecPtr	retval;
 
-	SpinLockAcquire(&XLogCtl->info_lck);
-	retval = XLogCtl->replicationSlotMinLSN;
-	SpinLockRelease(&XLogCtl->info_lck);
+	retval = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->replicationSlotMinLSN);
 
 	return retval;
 }
@@ -3081,7 +3075,7 @@ XLogBackgroundFlush(void)
 	 */
 	insertTLI = XLogCtl->InsertTimeLineID;
 
-	/* read updated LogwrtRqst */
+	/* read updated LogwrtRqst struct */
 	SpinLockAcquire(&XLogCtl->info_lck);
 	WriteRqst = XLogCtl->LogwrtRqst;
 	SpinLockRelease(&XLogCtl->info_lck);
@@ -3841,9 +3835,7 @@ CheckXLogRemoved(XLogSegNo segno, TimeLineID tli)
 	int			save_errno = errno;
 	XLogSegNo	lastRemovedSegNo;
 
-	SpinLockAcquire(&XLogCtl->info_lck);
-	lastRemovedSegNo = XLogCtl->lastRemovedSegNo;
-	SpinLockRelease(&XLogCtl->info_lck);
+	lastRemovedSegNo = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->lastRemovedSegNo);
 
 	if (segno <= lastRemovedSegNo)
 	{
@@ -3871,9 +3863,7 @@ XLogGetLastRemovedSegno(void)
 {
 	XLogSegNo	lastRemovedSegNo;
 
-	SpinLockAcquire(&XLogCtl->info_lck);
-	lastRemovedSegNo = XLogCtl->lastRemovedSegNo;
-	SpinLockRelease(&XLogCtl->info_lck);
+	lastRemovedSegNo = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->lastRemovedSegNo);
 
 	return lastRemovedSegNo;
 }
@@ -5109,9 +5099,7 @@ CheckReplayedDataChecksumState(uint32 replayed_state)
 	if (!reachedConsistency)
 		return;
 
-	SpinLockAcquire(&XLogCtl->info_lck);
-	local_state = XLogCtl->data_checksum_version;
-	SpinLockRelease(&XLogCtl->info_lck);
+	local_state = slock_read_uint32(&XLogCtl->info_lck, &XLogCtl->data_checksum_version);
 
 	if (replayed_state == local_state)
 	{
@@ -6994,9 +6982,7 @@ SwitchIntoArchiveRecovery(XLogRecPtr EndRecPtr, TimeLineID replayTLI)
 	 * We update SharedRecoveryState while holding the lock on ControlFileLock
 	 * so both states are consistent in shared memory.
 	 */
-	SpinLockAcquire(&XLogCtl->info_lck);
-	XLogCtl->SharedRecoveryState = RECOVERY_STATE_ARCHIVE;
-	SpinLockRelease(&XLogCtl->info_lck);
+	slock_write_uint32(&XLogCtl->info_lck, &XLogCtl->SharedRecoveryState, RECOVERY_STATE_ARCHIVE);
 
 	LWLockRelease(ControlFileLock);
 }
@@ -7057,9 +7043,7 @@ PerformRecoveryXLogAction(void)
 	 * transition are still only in the buffer pool, so take the full
 	 * checkpoint below instead of the lightweight record.
 	 */
-	SpinLockAcquire(&XLogCtl->info_lck);
-	checksum_state = XLogCtl->data_checksum_version;
-	SpinLockRelease(&XLogCtl->info_lck);
+	checksum_state = slock_read_uint32(&XLogCtl->info_lck, &XLogCtl->data_checksum_version);
 
 	flushForChecksums = (checksum_state == PG_DATA_CHECKSUM_VERSION &&
 						 ControlFile->data_checksum_version != checksum_state);
@@ -7150,9 +7134,7 @@ GetRecoveryState(void)
 {
 	RecoveryState retval;
 
-	SpinLockAcquire(&XLogCtl->info_lck);
-	retval = XLogCtl->SharedRecoveryState;
-	SpinLockRelease(&XLogCtl->info_lck);
+	retval = slock_read_uint32(&XLogCtl->info_lck, &XLogCtl->SharedRecoveryState);
 
 	return retval;
 }
@@ -7223,9 +7205,7 @@ GetRedoRecPtr(void)
 	 * Insert->RedoRecPtr, someone might update it just after we've released
 	 * the lock.
 	 */
-	SpinLockAcquire(&XLogCtl->info_lck);
-	ptr = XLogCtl->RedoRecPtr;
-	SpinLockRelease(&XLogCtl->info_lck);
+	ptr = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->RedoRecPtr);
 
 	if (RedoRecPtr < ptr)
 		RedoRecPtr = ptr;
@@ -7316,9 +7296,7 @@ GetWALInsertionTimeLineIfSet(void)
 {
 	TimeLineID	insertTLI;
 
-	SpinLockAcquire(&XLogCtl->info_lck);
-	insertTLI = XLogCtl->InsertTimeLineID;
-	SpinLockRelease(&XLogCtl->info_lck);
+	insertTLI = slock_read_uint32(&XLogCtl->info_lck, &XLogCtl->InsertTimeLineID);
 
 	return insertTLI;
 }
@@ -9697,9 +9675,7 @@ xlog2_redo(XLogReaderState *record)
 
 		memcpy(&state, XLogRecGetData(record), sizeof(xl_checksum_state));
 
-		SpinLockAcquire(&XLogCtl->info_lck);
-		watermark = XLogCtl->data_checksum_lsn;
-		SpinLockRelease(&XLogCtl->info_lck);
+		watermark = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->data_checksum_lsn);
 
 		/*
 		 * Skip records this node has already applied.  The control file
@@ -10100,9 +10076,7 @@ do_pg_backup_start(const char *backupidstr, bool fast, List **tablespaces,
 				 * (i.e., since last restartpoint used as backup starting
 				 * checkpoint) contain full-page writes.
 				 */
-				SpinLockAcquire(&XLogCtl->info_lck);
-				recptr = XLogCtl->lastFpwDisableRecPtr;
-				SpinLockRelease(&XLogCtl->info_lck);
+				recptr = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->lastFpwDisableRecPtr);
 
 				if (!checkpointfpw || state->startpoint <= recptr)
 					ereport(ERROR,
@@ -10396,9 +10370,7 @@ do_pg_backup_stop(BackupState *state, bool waitforarchive)
 		 * Check to see if all WAL replayed during online backup contain
 		 * full-page writes.
 		 */
-		SpinLockAcquire(&XLogCtl->info_lck);
-		recptr = XLogCtl->lastFpwDisableRecPtr;
-		SpinLockRelease(&XLogCtl->info_lck);
+		recptr = slock_read_uint64(&XLogCtl->info_lck, &XLogCtl->lastFpwDisableRecPtr);
 
 		if (state->startpoint <= recptr)
 			ereport(ERROR,
@@ -10613,9 +10585,7 @@ GetXLogInsertRecPtr(void)
 	XLogCtlInsert *Insert = &XLogCtl->Insert;
 	uint64		current_bytepos;
 
-	SpinLockAcquire(&Insert->insertpos_lck);
-	current_bytepos = Insert->CurrBytePos;
-	SpinLockRelease(&Insert->insertpos_lck);
+	current_bytepos = slock_read_uint64(&Insert->insertpos_lck, &Insert->CurrBytePos);
 
 	return XLogBytePosToRecPtr(current_bytepos);
 }
@@ -10629,9 +10599,7 @@ GetXLogInsertEndRecPtr(void)
 	XLogCtlInsert *Insert = &XLogCtl->Insert;
 	uint64		current_bytepos;
 
-	SpinLockAcquire(&Insert->insertpos_lck);
-	current_bytepos = Insert->CurrBytePos;
-	SpinLockRelease(&Insert->insertpos_lck);
+	current_bytepos = slock_read_uint64(&Insert->insertpos_lck, &Insert->CurrBytePos);
 
 	return XLogBytePosToEndRecPtr(current_bytepos);
 }
@@ -10706,7 +10674,5 @@ IsInstallXLogFileSegmentActive(void)
 void
 SetWalWriterSleeping(bool sleeping)
 {
-	SpinLockAcquire(&XLogCtl->info_lck);
-	XLogCtl->WalWriterSleeping = sleeping;
-	SpinLockRelease(&XLogCtl->info_lck);
+	slock_write_uint8(&XLogCtl->info_lck, &XLogCtl->WalWriterSleeping, sleeping);
 }

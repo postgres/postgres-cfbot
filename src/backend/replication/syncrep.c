@@ -463,9 +463,7 @@ SyncRepInitConfig(void)
 	priority = SyncRepGetStandbyPriority();
 	if (MyWalSnd->sync_standby_priority != priority)
 	{
-		SpinLockAcquire(&MyWalSnd->mutex);
-		MyWalSnd->sync_standby_priority = priority;
-		SpinLockRelease(&MyWalSnd->mutex);
+		slock_write_uint32(&MyWalSnd->mutex, &MyWalSnd->sync_standby_priority, priority);
 
 		ereport(DEBUG1,
 				(errmsg_internal("standby \"%s\" now has synchronous standby priority %d",

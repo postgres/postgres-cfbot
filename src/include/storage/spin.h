@@ -45,6 +45,8 @@
 #define SPIN_H
 
 #include "storage/s_lock.h"
+#include "port/atomics.h"
+#include "c.h"
 
 static inline void
 SpinLockInit(volatile slock_t *lock)
@@ -64,4 +66,108 @@ SpinLockRelease(volatile slock_t *lock)
 	S_UNLOCK(lock);
 }
 
+
+/*
+ * Load/store a field also guarded by *lock. when the platform can access *p
+ * with the correct width atomically, the lock is not used.
+ * On platforms with PG_HAVE_ATOMIC_U64_SIMULATION, 64-bit accesses use *lock.
+ */
+
+#define SLOCK_DEFINE_SCALAR_IMPL(bits) \
+static inline uint##bits \
+slock_read_uint##bits##_impl(volatile slock_t *lock, volatile uint##bits *p) \
+{ \
+	(void) lock; \
+	AssertPointerAlignment(p, alignof(uint##bits)); \
+	return pg_atomic_read_membarrier_u##bits((pg_atomic_uint##bits *) (p)); \
+} \
+static inline void \
+slock_write_uint##bits##_impl(volatile slock_t *lock, volatile uint##bits *p, uint##bits v) \
+{ \
+	(void) lock; \
+	AssertPointerAlignment(p, alignof(uint##bits)); \
+	pg_atomic_write_membarrier_u##bits((pg_atomic_uint##bits *) (p), v); \
+}
+
+#define SLOCK_DEFINE_LOCKED_IMPL(bits) \
+static inline uint##bits \
+slock_read_uint##bits##_impl(volatile slock_t *lock, volatile uint##bits *p) \
+{ \
+	uint##bits	val; \
+\
+	SpinLockAcquire(lock); \
+	val = *p; /* lock takes care of memory ordering */ \
+	SpinLockRelease(lock); \
+	return val; \
+} \
+static inline void \
+slock_write_uint##bits##_impl(volatile slock_t *lock, volatile uint##bits *p, uint##bits v) \
+{ \
+	SpinLockAcquire(lock); \
+	*p = v; /* lock takes care of memory ordering */ \
+	SpinLockRelease(lock); \
+}
+
+#define SLOCK_SCALAR_READ(type, lock, p) \
+	( \
+		StaticAssertExpr(sizeof(*(p)) == sizeof(type), \
+						 "slock_read_" #type " size mismatch"), \
+		slock_read_##type##_impl((lock), (volatile type *) (p)))
+
+#define SLOCK_SCALAR_WRITE(type, lock, p, v) \
+	((void) ( \
+		StaticAssertExpr(sizeof(*(p)) == sizeof(type), \
+						 "slock_write_" #type " size mismatch"), \
+		StaticAssertExpr(sizeof(v) == sizeof(type), \
+						 "slock_write_" #type " size mismatch"), \
+		slock_write_##type##_impl((lock), (volatile type *) (p), (type) (v))))
+
+StaticAssertDecl(sizeof(pg_atomic_uint32) == sizeof(uint32),
+				 "pg_atomic_uint32 must match uint32");
+StaticAssertDecl(sizeof(Pointer) == SIZEOF_VOID_P,
+				 "Pointer must match pointer size");
+SLOCK_DEFINE_SCALAR_IMPL(32)
+
+#ifndef PG_HAVE_ATOMIC_U64_SIMULATION
+SLOCK_DEFINE_SCALAR_IMPL(64)
+#else
+SLOCK_DEFINE_LOCKED_IMPL(64)
+#endif
+/* Not attempting atomic operations for 8-bit and 16-bit types for now */
+SLOCK_DEFINE_LOCKED_IMPL(8)
+SLOCK_DEFINE_LOCKED_IMPL(16)
+
+#define slock_read_uint8(lock, p) \
+	SLOCK_SCALAR_READ(uint8, lock, p)
+#define slock_write_uint8(lock, p, v) \
+	SLOCK_SCALAR_WRITE(uint8, lock, p, v)
+#define slock_read_uint16(lock, p) \
+	SLOCK_SCALAR_READ(uint16, lock, p)
+#define slock_write_uint16(lock, p, v) \
+	SLOCK_SCALAR_WRITE(uint16, lock, p, v)
+#define slock_read_uint32(lock, p) \
+	SLOCK_SCALAR_READ(uint32, lock, p)
+#define slock_write_uint32(lock, p, v) \
+	SLOCK_SCALAR_WRITE(uint32, lock, p, v)
+#define slock_read_uint64(lock, p) \
+	SLOCK_SCALAR_READ(uint64, lock, p)
+#define slock_write_uint64(lock, p, v) \
+	SLOCK_SCALAR_WRITE(uint64, lock, p, v)
+
+#if SIZEOF_VOID_P == 8
+#define slock_read_ptr(lock, p) \
+	((Pointer) (uintptr_t) SLOCK_SCALAR_READ(uint64, lock, (volatile uint64 *) (p)))
+#define slock_write_ptr(lock, p, v) \
+	SLOCK_SCALAR_WRITE(uint64, lock, (volatile uint64 *) (p), (uint64) (uintptr_t) (v))
+#elif SIZEOF_VOID_P == 4
+#define slock_read_ptr(lock, p) \
+	((Pointer) (uintptr_t) SLOCK_SCALAR_READ(uint32, lock, (volatile uint32 *) (p)))
+#define slock_write_ptr(lock, p, v) \
+	SLOCK_SCALAR_WRITE(uint32, lock, (volatile uint32 *) (p), (uint32) (uintptr_t) (v))
+#else
+#error unsupported pointer size for slock_*_ptr
+#endif
+
+#undef SLOCK_DEFINE_SCALAR_IMPL
+#undef SLOCK_DEFINE_LOCKED_IMPL
 #endif							/* SPIN_H */

@@ -282,9 +282,7 @@ BarrierParticipants(Barrier *barrier)
 {
 	int			participants;
 
-	SpinLockAcquire(&barrier->mutex);
-	participants = barrier->participants;
-	SpinLockRelease(&barrier->mutex);
+	participants = slock_read_uint32(&barrier->mutex, &barrier->participants);
 
 	return participants;
 }
