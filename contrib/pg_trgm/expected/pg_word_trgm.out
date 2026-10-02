@@ -1050,3 +1050,10 @@ select * from test_trgm2 where t ~ '.*$x';
 ---
 (0 rows)
 
+-- No trigrams on either side: must not read past the end of an empty array
+SELECT word_similarity('', ''), strict_word_similarity('', '');
+ word_similarity | strict_word_similarity 
+-----------------+------------------------
+               0 |                      0
+(1 row)
+
