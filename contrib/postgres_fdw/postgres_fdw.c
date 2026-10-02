@@ -68,8 +68,11 @@ PG_MODULE_MAGIC_EXT(
 /* Default CPU cost to process 1 row (above and beyond cpu_tuple_cost). */
 #define DEFAULT_FDW_TUPLE_COST		0.2
 
-/* If no remote estimates, assume a sort costs 20% extra */
-#define DEFAULT_FDW_SORT_MULTIPLIER 1.2
+/*
+ * If no remote estimates, charge this fraction of a local sort's cost for a
+ * remote sort.  See adjust_foreign_path_cost_for_sort().
+ */
+#define DEFAULT_FDW_SORT_COST_FRACTION 0.8
 
 /*
  * Indexes of FDW-private information stored in fdw_private lists.
@@ -524,12 +527,9 @@ static void get_remote_estimate(const char *sql,
 								int *width,
 								Cost *startup_cost,
 								Cost *total_cost);
-static void adjust_foreign_grouping_path_cost(PlannerInfo *root,
-											  List *pathkeys,
-											  double retrieved_rows,
-											  double width,
+static void adjust_foreign_path_cost_for_sort(PlannerInfo *root, List *pathkeys,
+											  double retrieved_rows, double width,
 											  double limit_tuples,
-											  int *p_disabled_nodes,
 											  Cost *p_startup_cost,
 											  Cost *p_run_cost);
 static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
@@ -3802,30 +3802,10 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * pushing down the ORDER BY clause when it's useful to do so.
 		 */
 		if (pathkeys != NIL)
-		{
-			if (IS_UPPER_REL(foreignrel))
-			{
-				Assert(foreignrel->reloptkind == RELOPT_UPPER_REL &&
-					   fpinfo->stage == UPPERREL_GROUP_AGG);
-
-				/*
-				 * We can only get here when this function is called from
-				 * add_foreign_ordered_paths() or add_foreign_final_paths();
-				 * in which cases, the passed-in fpextra should not be NULL.
-				 */
-				Assert(fpextra);
-				adjust_foreign_grouping_path_cost(root, pathkeys,
-												  retrieved_rows, width,
-												  fpextra->limit_tuples,
-												  &disabled_nodes,
-												  &startup_cost, &run_cost);
-			}
-			else
-			{
-				startup_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
-				run_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
-			}
-		}
+			adjust_foreign_path_cost_for_sort(root, pathkeys,
+											  retrieved_rows, width,
+											  fpextra ? fpextra->limit_tuples : -1.0,
+											  &startup_cost, &run_cost);
 
 		total_cost = startup_cost + run_cost;
 
@@ -3955,58 +3935,51 @@ get_remote_estimate(const char *sql, PGconn *conn,
 }
 
 /*
- * Adjust the cost estimates of a foreign grouping path to include the cost of
- * generating properly-sorted output.
+ * Adjust the given path costs for having the remote side sort its output,
+ * when no remote estimates are available.
+ *
+ * We can't accurately estimate a remote sort; it might even be free if the
+ * remote plan happens to produce the order (e.g. a sorted aggregate).  What we
+ * do know is that the alternative is the unsorted path plus a local Sort of
+ * the same rows, which is costed accurately. We assume that the remote can
+ * sort at least as cheaply as we can.  So charge a fraction of the cost of a
+ * local Sort: enough to beat it, not so little that the sorted path looks
+ * free.
+ *
+ * Like a local Sort, a remote sort is blocking, so all of the input cost
+ * becomes startup cost.  Besides being accurate, that also matters when the
+ * ordering is merely potentially useful (e.g. for a merge join): the sorted
+ * path then shares a pathlist with the unsorted path, and add_path() lets
+ * fuzzily equal costs be decided by pathkeys.  A surcharge on the run cost
+ * alone can be within that fuzz for a small table, so the sorted path would
+ * prune the unsorted one and force every consumer to sort remotely.  With
+ * the input cost moved to startup, the sorted path is always clearly worse
+ * on startup cost, so both survive and the consumer gets to choose.
  */
 static void
-adjust_foreign_grouping_path_cost(PlannerInfo *root,
-								  List *pathkeys,
-								  double retrieved_rows,
-								  double width,
+adjust_foreign_path_cost_for_sort(PlannerInfo *root, List *pathkeys,
+								  double retrieved_rows, double width,
 								  double limit_tuples,
-								  int *p_disabled_nodes,
-								  Cost *p_startup_cost,
-								  Cost *p_run_cost)
+								  Cost *p_startup_cost, Cost *p_run_cost)
 {
-	/*
-	 * If the GROUP BY clause isn't sort-able, the plan chosen by the remote
-	 * side is unlikely to generate properly-sorted output, so it would need
-	 * an explicit sort; adjust the given costs with cost_sort().  Likewise,
-	 * if the GROUP BY clause is sort-able but isn't a superset of the given
-	 * pathkeys, adjust the costs with that function.  Otherwise, adjust the
-	 * costs by applying the same heuristic as for the scan or join case.
-	 */
-	if (!grouping_is_sortable(root->processed_groupClause) ||
-		!pathkeys_contained_in(pathkeys, root->group_pathkeys))
-	{
-		Path		sort_path;	/* dummy for result of cost_sort */
+	Cost		input_cost = *p_startup_cost + *p_run_cost;
+	Path		sort_path;		/* dummy for result of cost_sort */
 
-		cost_sort(&sort_path,
-				  root,
-				  pathkeys,
-				  0,
-				  *p_startup_cost + *p_run_cost,
-				  retrieved_rows,
-				  width,
-				  0.0,
-				  work_mem,
-				  limit_tuples);
+	cost_sort(&sort_path,
+			  root,
+			  pathkeys,
+			  0,
+			  input_cost,
+			  retrieved_rows,
+			  width,
+			  0.0,
+			  work_mem,
+			  limit_tuples);
 
-		*p_startup_cost = sort_path.startup_cost;
-		*p_run_cost = sort_path.total_cost - sort_path.startup_cost;
-	}
-	else
-	{
-		/*
-		 * The default extra cost seems too large for foreign-grouping cases;
-		 * add 1/4th of that default.
-		 */
-		double		sort_multiplier = 1.0 + (DEFAULT_FDW_SORT_MULTIPLIER
-											 - 1.0) * 0.25;
-
-		*p_startup_cost *= sort_multiplier;
-		*p_run_cost *= sort_multiplier;
-	}
+	*p_startup_cost = input_cost +
+		(sort_path.startup_cost - input_cost) * DEFAULT_FDW_SORT_COST_FRACTION;
+	*p_run_cost = (sort_path.total_cost - sort_path.startup_cost) *
+		DEFAULT_FDW_SORT_COST_FRACTION;
 }
 
 /*
