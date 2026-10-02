@@ -487,6 +487,148 @@ CREATE FUNCTION test1 (anyelement) RETURNS anyarray LANGUAGE SQL
 SELECT test1(0);
 RESET check_function_bodies;
 
+-- unnamed parameters of an SQL-body function are printed as $N
+CREATE FUNCTION functest_unnamed(a int, int) RETURNS int
+  BEGIN ATOMIC SELECT a + $2; END;
+SELECT functest_unnamed(1, 2);
+SELECT pg_get_functiondef('functest_unnamed'::regproc);
+
+-- a parameter must not be qualified with the function name if a relation of
+-- that name is visible: a column named like the parameter, even one added
+-- after the function was created, would capture the qualified name
+CREATE TABLE functest_cap (x int);
+INSERT INTO functest_cap VALUES (5);
+CREATE FUNCTION functest_cap(a int) RETURNS int
+  BEGIN ATOMIC SELECT a + x FROM functest_cap; END;
+SELECT functest_cap(10);
+ALTER TABLE functest_cap ADD COLUMN a int DEFAULT 100;
+SELECT pg_get_functiondef('functest_cap'::regproc);
+SELECT pg_get_functiondef('functest_cap'::regproc) AS def \gset
+:def ;
+SELECT functest_cap(10);
+
+-- the same if a column is renamed to the name of a parameter that the body
+-- refers to as funcname.argname
+CREATE TABLE functest_ren (b int);
+INSERT INTO functest_ren VALUES (5);
+CREATE FUNCTION functest_ren(a int) RETURNS int
+  BEGIN ATOMIC SELECT functest_ren.a + functest_ren.b FROM functest_ren; END;
+SELECT functest_ren(10);
+ALTER TABLE functest_ren RENAME b TO a;
+SELECT pg_get_functiondef('functest_ren'::regproc);
+SELECT pg_get_functiondef('functest_ren'::regproc) AS def \gset
+:def ;
+SELECT functest_ren(10);
+
+-- the same for any name the parser can take as a qualifier: a function
+-- taking the whole row, as in num_nulls(functest_nn.*)
+CREATE TABLE functest_nn (x int);
+INSERT INTO functest_nn VALUES (1);
+CREATE FUNCTION functest_nn(num_nulls int) RETURNS int
+  BEGIN ATOMIC SELECT num_nulls + x FROM functest_nn; END;
+SELECT functest_nn(7);
+SELECT pg_get_functiondef('functest_nn'::regproc);
+SELECT pg_get_functiondef('functest_nn'::regproc) AS def \gset
+:def ;
+SELECT functest_nn(7);
+
+-- a system column
+CREATE TABLE functest_sys (x int);
+INSERT INTO functest_sys VALUES (1);
+CREATE FUNCTION functest_sys(cmin int) RETURNS int
+  BEGIN ATOMIC SELECT $1 FROM functest_sys; END;
+SELECT functest_sys(5);
+SELECT pg_get_functiondef('functest_sys'::regproc);
+SELECT pg_get_functiondef('functest_sys'::regproc) AS def \gset
+:def ;
+SELECT functest_sys(5);
+
+-- a column added later to a member of a join with that alias
+CREATE TABLE functest_j1 (b int);
+CREATE TABLE functest_j2 (c int);
+INSERT INTO functest_j1 VALUES (1);
+INSERT INTO functest_j2 VALUES (1);
+CREATE FUNCTION functest_join(a int) RETURNS int
+  BEGIN ATOMIC SELECT a FROM (functest_j1 CROSS JOIN functest_j2) AS functest_join; END;
+SELECT functest_join(5);
+ALTER TABLE functest_j1 ADD COLUMN a int DEFAULT 100;
+SELECT pg_get_functiondef('functest_join'::regproc);
+SELECT pg_get_functiondef('functest_join'::regproc) AS def \gset
+:def ;
+SELECT functest_join(5);
+
+-- a JOIN/USING alias
+CREATE TABLE functest_u1 (a int, b int);
+CREATE TABLE functest_u2 (a int, c int);
+INSERT INTO functest_u1 VALUES (100, 1);
+INSERT INTO functest_u2 VALUES (100, 1);
+CREATE FUNCTION functest_using(a int) RETURNS int
+  BEGIN ATOMIC SELECT $1 FROM functest_u1 JOIN functest_u2 USING (a) AS functest_using; END;
+SELECT functest_using(5);
+SELECT pg_get_functiondef('functest_using'::regproc);
+SELECT pg_get_functiondef('functest_using'::regproc) AS def \gset
+:def ;
+SELECT functest_using(5);
+
+-- a RETURNING alias for OLD or NEW
+CREATE TABLE functest_rt (a int, b int);
+INSERT INTO functest_rt VALUES (100, 0);
+CREATE FUNCTION functest_ret(a int) RETURNS int
+  BEGIN ATOMIC UPDATE functest_rt SET b = 1 RETURNING WITH (OLD AS functest_ret) $1; END;
+SELECT functest_ret(5);
+SELECT pg_get_functiondef('functest_ret'::regproc);
+SELECT pg_get_functiondef('functest_ret'::regproc) AS def \gset
+:def ;
+SELECT functest_ret(5);
+CREATE FUNCTION functest_retnew(a int) RETURNS int
+  BEGIN ATOMIC UPDATE functest_rt SET b = 2 RETURNING WITH (NEW AS functest_retnew) $1; END;
+SELECT functest_retnew(5);
+SELECT pg_get_functiondef('functest_retnew'::regproc);
+SELECT pg_get_functiondef('functest_retnew'::regproc) AS def \gset
+:def ;
+SELECT functest_retnew(5);
+-- the default alias of OLD
+CREATE FUNCTION old(a int) RETURNS int
+  BEGIN ATOMIC UPDATE functest_rt SET b = 3 RETURNING $1; END;
+SELECT old(5);
+SELECT pg_get_functiondef('old'::regproc);
+SELECT pg_get_functiondef('old'::regproc) AS def \gset
+:def ;
+SELECT old(5);
+
+-- without relations a parameter is printed by its bare name, but as a sort
+-- or grouping key that name would be taken as an output column
+CREATE FUNCTION functest_sort(a int) RETURNS int[]
+  RETURN ARRAY(SELECT 4 - generate_series(1, 3) AS a ORDER BY $1);
+SELECT functest_sort(5);
+SELECT pg_get_functiondef('functest_sort'::regproc);
+SELECT pg_get_functiondef('functest_sort'::regproc) AS def \gset
+:def ;
+SELECT functest_sort(5);
+CREATE FUNCTION functest_distinct(a int) RETURNS int[]
+  RETURN ARRAY(SELECT DISTINCT ON ($1) generate_series(1, 3) AS a);
+SELECT functest_distinct(5);
+SELECT pg_get_functiondef('functest_distinct'::regproc);
+SELECT pg_get_functiondef('functest_distinct'::regproc) AS def \gset
+:def ;
+SELECT functest_distinct(5);
+CREATE FUNCTION functest_group(a int) RETURNS int[]
+  RETURN ARRAY(SELECT (4 - generate_series(1, 3)) % 2 AS a GROUP BY $1);
+SELECT functest_group(5);
+SELECT pg_get_functiondef('functest_group'::regproc);
+SELECT pg_get_functiondef('functest_group'::regproc) AS def \gset
+:def ;
+SELECT functest_group(5);
+-- the output column may have no ordering operator, so the body fails to
+-- parse again
+CREATE FUNCTION functest_point(a int) RETURNS SETOF point
+  BEGIN ATOMIC SELECT point(1, 2) AS a ORDER BY $1; END;
+SELECT functest_point(5);
+SELECT pg_get_functiondef('functest_point'::regproc);
+SELECT pg_get_functiondef('functest_point'::regproc) AS def \gset
+:def ;
+SELECT functest_point(5);
+
 -- Cleanup
 DROP SCHEMA temp_func_test CASCADE;
 DROP USER regress_unpriv_user;
