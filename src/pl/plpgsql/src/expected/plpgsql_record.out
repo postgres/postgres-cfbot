@@ -885,3 +885,287 @@ table two_int8s_tab;
  (42,42)
 (1 row)
 
+-- Tests for bug #19382: server crash when ALTER TYPE is used mid-transaction
+-- in PL/pgSQL. Record variables populated before ALTER TYPE must not be
+-- returned, as the stored data no longer matches the current type definition.
+-- Case 1: Direct composite type change (INT -> TEXT)
+create type bug19382_foo as (a int, b int);
+create function bug19382_test_direct() returns record as $$
+declare r bug19382_foo := row(123, power(2, 30));
+begin
+    alter type bug19382_foo alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_direct();
+ERROR:  cannot return record variable "r" after composite type "bug19382_foo" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_direct() line 5 at RETURN
+drop function bug19382_test_direct();
+drop type bug19382_foo cascade;
+-- Case 2: Nested composite type change
+create type bug19382_inner as (x int, y int);
+create type bug19382_outer as (a int, b bug19382_inner);
+create function bug19382_test_nested() returns record as $$
+declare r bug19382_outer;
+begin
+    r := row(1, row(10, power(2, 30)::int4)::bug19382_inner)::bug19382_outer;
+    alter type bug19382_inner alter attribute y type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_nested();
+ERROR:  cannot return record variable "r" after composite type "bug19382_inner" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_nested() line 6 at RETURN
+drop function bug19382_test_nested();
+drop type bug19382_outer cascade;
+drop type bug19382_inner cascade;
+-- Case 3: OUT parameter
+create type bug19382_foo1 as (a int, b int);
+create function bug19382_test_out(out r1 bug19382_foo1) as $$
+begin
+    r1 := row(1, 2);
+    alter type bug19382_foo1 alter attribute b type text;
+    return;
+end;
+$$ language plpgsql;
+select bug19382_test_out();
+ERROR:  cannot return record variable "r1" after composite type "bug19382_foo1" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_out() line 5 at RETURN
+drop function bug19382_test_out();
+drop type bug19382_foo1 cascade;
+-- Case 4: No ALTER TYPE (baseline — must not error)
+create type bug19382_foo2 as (a int, b int);
+create function bug19382_test_baseline() returns bug19382_foo2 as $$
+declare r bug19382_foo2 := row(1, 2);
+begin
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_baseline();
+ bug19382_test_baseline 
+------------------------
+ (1,2)
+(1 row)
+
+drop function bug19382_test_baseline();
+drop type bug19382_foo2;
+-- Case 5: Field-by-field assignment (dot notation)
+create type bug19382_foo3 as (a int, b int);
+create function bug19382_test_field_assign() returns record as $$
+declare r bug19382_foo3;
+begin
+    r.a := 123;
+    r.b := power(2, 30)::int4;
+    alter type bug19382_foo3 alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_field_assign();
+ERROR:  cannot return record variable "r" after composite type "bug19382_foo3" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_field_assign() line 7 at RETURN
+drop function bug19382_test_field_assign();
+drop type bug19382_foo3 cascade;
+-- Case 6: SELECT INTO individual fields
+create type bug19382_foo4 as (a int, b int);
+create table bug19382_tbl (a int, b int);
+insert into bug19382_tbl values (123, power(2, 30)::int4);
+create function bug19382_test_select_into_field() returns record as $$
+declare r bug19382_foo4;
+begin
+    select a, b into r.a, r.b from bug19382_tbl;
+    alter type bug19382_foo4 alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_select_into_field();
+ERROR:  cannot return record variable "r" after composite type "bug19382_foo4" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_select_into_field() line 6 at RETURN
+drop function bug19382_test_select_into_field();
+drop table bug19382_tbl;
+drop type bug19382_foo4 cascade;
+-- Case 7: RAISE NOTICE with record variable (exec_eval_datum path)
+create type bug19382_foo5 as (a int, b int);
+create function bug19382_test_eval_datum() returns void as $$
+declare r bug19382_foo5;
+begin
+    r.b := power(2, 30)::int4;
+    alter type bug19382_foo5 alter attribute b type text;
+    raise notice 'r = %', r;
+end;
+$$ language plpgsql;
+select bug19382_test_eval_datum();
+ERROR:  cannot return record variable "r" after composite type "bug19382_foo5" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_eval_datum() line 6 at RAISE
+drop function bug19382_test_eval_datum();
+drop type bug19382_foo5 cascade;
+-- Case 8: Variable-to-variable copy after inner-type alter.
+-- Reading r1 as an rvalue must detect the stale nested type.
+create type bug19382_inner4 as (x int, y int);
+create type bug19382_outer4 as (a int, b bug19382_inner4);
+create function bug19382_test_var_copy() returns bug19382_outer4 as $$
+declare r1 bug19382_outer4; r2 bug19382_outer4;
+begin
+    r1 := row(1, row(10, power(2, 30)::int4)::bug19382_inner4)::bug19382_outer4;
+    alter type bug19382_inner4 alter attribute y type text;
+    r2 := r1;
+    return r2;
+end;
+$$ language plpgsql;
+select bug19382_test_var_copy();
+ERROR:  cannot return record variable "r1" after composite type "bug19382_inner4" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_var_copy() line 6 at assignment
+drop function bug19382_test_var_copy();
+drop type bug19382_outer4 cascade;
+drop type bug19382_inner4 cascade;
+-- Case 9: Whole-record reassignment after inner-type alter.
+-- The second assignment builds fresh data matching the post-ALTER type;
+-- the snapshot must refresh so the reassignment succeeds.
+create type bug19382_inner3 as (x int, y int);
+create type bug19382_outer3 as (a int, b bug19382_inner3);
+create function bug19382_test_reassign() returns bug19382_outer3 as $$
+declare r bug19382_outer3;
+begin
+    r := row(1, row(10, 20)::bug19382_inner3)::bug19382_outer3;
+    alter type bug19382_inner3 alter attribute y type text;
+    r := row(1, row(10, 'hello')::bug19382_inner3)::bug19382_outer3;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_reassign();
+ bug19382_test_reassign 
+------------------------
+ (1,"(10,hello)")
+(1 row)
+
+drop function bug19382_test_reassign();
+drop type bug19382_outer3 cascade;
+drop type bug19382_inner3 cascade;
+-- Case 9 (outer-type variant): Whole-record reassignment after ALTER TYPE on
+-- the record's own type.  The reassigned bytes match the post-ALTER definition;
+-- the outer-type identifier (er_tupdesc_id) on the ExpandedRecord must be
+-- refreshed so check_record_type_not_altered() does not falsely reject.
+create type bug19382_foo_outer_reassign as (a int, b int);
+create function bug19382_test_outer_reassign() returns bug19382_foo_outer_reassign as $$
+declare r bug19382_foo_outer_reassign;
+begin
+    r := row(1, 2)::bug19382_foo_outer_reassign;
+    alter type bug19382_foo_outer_reassign alter attribute b type text;
+    r := row(1, 'hello')::bug19382_foo_outer_reassign;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_outer_reassign();
+ bug19382_test_outer_reassign 
+------------------------------
+ (1,hello)
+(1 row)
+
+drop function bug19382_test_outer_reassign();
+drop type bug19382_foo_outer_reassign cascade;
+-- Case 10: Generic RECORD variable assigned via ROW::foo cast
+-- The declared type is RECORDOID; effective type is discovered from the
+-- assigned value's er_typeid.  Must error, not crash.
+create type bug19382_foo6 as (a int, b int);
+create function bug19382_test_generic_record() returns record as $$
+declare r record;
+begin
+    r := row(123, power(2, 30)::int4)::bug19382_foo6;
+    alter type bug19382_foo6 alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_generic_record();
+ERROR:  cannot return record variable "r" after composite type "bug19382_foo6" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_generic_record() line 6 at RETURN
+drop function bug19382_test_generic_record();
+drop type bug19382_foo6 cascade;
+-- Case 11: Generic RECORD with nested composite alter
+create type bug19382_inner2 as (x int, y int);
+create type bug19382_outer2 as (a int, b bug19382_inner2);
+create function bug19382_test_generic_nested() returns record as $$
+declare r record;
+begin
+    r := row(1, row(10, power(2, 30)::int4)::bug19382_inner2)::bug19382_outer2;
+    alter type bug19382_inner2 alter attribute y type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_generic_nested();
+ERROR:  cannot return record variable "r" after composite type "bug19382_inner2" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_generic_nested() line 6 at RETURN
+drop function bug19382_test_generic_nested();
+drop type bug19382_outer2 cascade;
+drop type bug19382_inner2 cascade;
+-- Case 12: Anonymous rowtype baseline (RECORDOID with no ::foo cast).
+-- Non-versionable rowtypes must not trigger a false positive.
+create function bug19382_test_anon_baseline() returns record as $$
+declare r record;
+begin
+    select 1 as a, 2 as b into r;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_anon_baseline();
+ bug19382_test_anon_baseline 
+-----------------------------
+ (1,2)
+(1 row)
+
+drop function bug19382_test_anon_baseline();
+-- Case 13: RAISE NOTICE with generic RECORD (RECORDOID + reader path).
+create type bug19382_foo7 as (a int, b int);
+create function bug19382_test_generic_raise() returns void as $$
+declare r record;
+begin
+    r := row(1, power(2, 30)::int4)::bug19382_foo7;
+    alter type bug19382_foo7 alter attribute b type text;
+    raise notice 'r = %', r;
+end;
+$$ language plpgsql;
+select bug19382_test_generic_raise();
+ERROR:  cannot return record variable "r" after composite type "bug19382_foo7" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_generic_raise() line 6 at RAISE
+drop function bug19382_test_generic_raise();
+drop type bug19382_foo7 cascade;
+-- Case 14: composite type reachable through an array attribute.
+-- The element composite type must be tracked even though the attribute's
+-- own type is an array; otherwise ALTER TYPE on the element goes undetected
+-- and record_out() crashes reinterpreting the stored bytes.
+create type bug19382_elem as (f1 int);
+create type bug19382_arrparent as (arr bug19382_elem[]);
+create function bug19382_test_array_elem() returns bug19382_arrparent as $$
+declare r bug19382_arrparent;
+begin
+    r := row(array[row(power(2, 30)::int4)::bug19382_elem]::bug19382_elem[])::bug19382_arrparent;
+    alter type bug19382_elem alter attribute f1 type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_array_elem();
+ERROR:  cannot return record variable "r" after composite type "bug19382_elem" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_array_elem() line 6 at RETURN
+drop function bug19382_test_array_elem();
+drop type bug19382_arrparent cascade;
+drop type bug19382_elem cascade;
+-- Case 15: array element composite, whole-record reassignment after ALTER
+-- with fresh matching data must succeed (no false positive on arrays).
+create type bug19382_elem2 as (f1 int);
+create type bug19382_arrparent2 as (arr bug19382_elem2[]);
+create function bug19382_test_array_reassign() returns bug19382_arrparent2 as $$
+declare r bug19382_arrparent2;
+begin
+    r := row(array[row(1)::bug19382_elem2]::bug19382_elem2[])::bug19382_arrparent2;
+    alter type bug19382_elem2 add attribute f2 text;
+    r := row(array[row(1, 'hi')::bug19382_elem2]::bug19382_elem2[])::bug19382_arrparent2;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_array_reassign();
+ bug19382_test_array_reassign 
+------------------------------
+ ("{""(1,hi)""}")
+(1 row)
+
+drop function bug19382_test_array_reassign();
+drop type bug19382_arrparent2 cascade;
+drop type bug19382_elem2 cascade;
