@@ -26,6 +26,7 @@
  */
 #include "postgres.h"
 
+#include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -599,7 +600,31 @@ expand_virtual_generated_columns(PlannerInfo *root, Query *parse,
 		parse = (Query *) pullup_replace_vars((Node *) parse, &rvcontext);
 
 		if (parse->onConflict)
+		{
+			if (rt_index == parse->onConflict->exclRelIndex)
+			{
+				List	   *vars;
+				ListCell   *cell;
+
+				/* EXCLUDED has no system columns for a generation expression. */
+				vars = pull_vars_of_level((Node *) parse->onConflict, 0);
+				foreach(cell, vars)
+				{
+					Var		   *var = lfirst(cell);
+
+					if (IsA(var, Var) &&
+						var->varno == rt_index &&
+						var->varattno == TableOidAttributeNumber)
+						ereport(ERROR,
+								(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+								 errmsg("cannot use system column \"%s\" in EXCLUDED",
+										"tableoid")));
+				}
+				list_free(vars);
+			}
+
 			parse->onConflict->exclRelTlist = save_exclRelTlist;
+		}
 	}
 
 	return parse;
