@@ -61,6 +61,57 @@ SELECT xmltext('< foo & bar >');
     </para>
    </sect3>
 
+   <sect3 id="functions-producing-xml-xmlcanonicalize">
+    <title><literal>xmlcanonicalize</literal></title>
+
+    <indexterm>
+     <primary>xmlcanonicalize</primary>
+    </indexterm>
+
+<synopsis>
+<function>xmlcanonicalize</function> ( <parameter>doc</parameter> <type>xml</type> [, <parameter>keep_comments</parameter> <type>boolean</type> DEFAULT <literal>true</literal>] ) <returnvalue>text</returnvalue>
+</synopsis>
+
+    <para>
+     This function transforms a given XML document into its <ulink url="https://www.w3.org/TR/xml-c14n11/#Terminology">canonical form</ulink>,
+     as defined by the <ulink url="https://www.w3.org/TR/xml-c14n11/">W3C Canonical XML 1.1 Specification</ulink>, which standardizes the document's
+     structure and syntax to facilitate comparison and digital signatures.
+     The <parameter>keep_comments</parameter> parameter controls whether XML comments from the input document are preserved or discarded.
+     If omitted, it defaults to <literal>true</literal>.
+    </para>
+
+    <para>
+     The W3C specification defines the canonical form as UTF-8, but since this
+     function returns <type>text</type> the result is converted to the database
+     encoding.  In databases that do not use UTF-8 encoding, documents
+     containing characters that cannot be represented in the database encoding
+     will produce an encoding error.
+    </para>
+
+    <para>
+     This function requires the server to be built against
+     <productname>libxml2</productname> 2.7.4 or later, with Canonical XML
+     support enabled.
+    </para>
+
+    <para>
+     Example:
+<screen><![CDATA[
+SELECT xmlcanonicalize('<foo><!-- a comment --><bar c="3" b="2" a="1">42</bar><empty/></foo>'::xml);
+                               xmlcanonicalize
+-----------------------------------------------------------------------------
+ <foo><!-- a comment --><bar a="1" b="2" c="3">42</bar><empty></empty></foo>
+(1 row)
+
+SELECT xmlcanonicalize('<foo><!-- a comment --><bar c="3" b="2" a="1">42</bar><empty/></foo>'::xml, false);
+                      xmlcanonicalize
+-----------------------------------------------------------
+ <foo><bar a="1" b="2" c="3">42</bar><empty></empty></foo>
+(1 row)
+]]></screen>
+    </para>
+   </sect3>
+
    <sect3 id="functions-producing-xml-xmlcomment">
     <title><literal>xmlcomment</literal></title>
 
