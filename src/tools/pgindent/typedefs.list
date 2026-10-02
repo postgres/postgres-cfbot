@@ -1932,6 +1932,7 @@ PGFInfoFunction
 PGFileType
 PGFunction
 PGIOAlignedBlock
+PGIOAlignedXLogBlock
 PGLZ_HistEntry
 PGLZ_Strategy
 PGLoadBalanceType
