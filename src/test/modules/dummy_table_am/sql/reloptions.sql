@@ -12,6 +12,10 @@ SELECT reloptions FROM pg_class
 CREATE TABLE dummy_oor (a int) USING dummy_table_am WITH (option_int = 9999);
 CREATE TABLE dummy_bad (a int) USING dummy_table_am WITH (no_such_option = 4);
 
+-- Inherited options are standard ones, the AM's own are not
+SELECT pg_reloption_is_standard('fillfactor'),
+       pg_reloption_is_standard('option_int');
+
 -- Defaults are not stored in pg_class
 CREATE TABLE dummy_defaults (a int) USING dummy_table_am;
 SELECT reloptions FROM pg_class WHERE oid = 'dummy_defaults'::regclass;

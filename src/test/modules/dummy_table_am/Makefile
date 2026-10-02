@@ -7,6 +7,7 @@ DATA = dummy_table_am--1.0.sql
 PGFILEDESC = "dummy_table_am - table access method template"
 
 REGRESS = reloptions custom_layout
+TAP_TESTS = 1
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

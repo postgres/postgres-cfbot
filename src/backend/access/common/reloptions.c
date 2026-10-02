@@ -2454,6 +2454,23 @@ RelationGetTableAmOptions(Relation relation)
 
 
 /*
+ * pg_reloption_is_standard
+ *		SQL-callable: is the named option one that heap accepts?
+ *
+ * A table AM that accepts such an option is expected to have inherited it
+ * with add_reloption_to_kind(), so that it has the same meaning as for heap.
+ * Any other option of a table must be specific to its AM.  pg_dump uses this
+ * to tell the two apart.
+ */
+Datum
+pg_reloption_is_standard(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	PG_RETURN_BOOL(find_reloption(name, RELOPT_KIND_HEAP) != NULL);
+}
+
+/*
  * Parse options for indexes.
  *
  *	amoptions	index AM's option parser function

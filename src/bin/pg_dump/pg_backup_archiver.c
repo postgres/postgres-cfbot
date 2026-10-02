@@ -3040,6 +3040,13 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 	if (ropt->no_comments && strcmp(te->desc, "COMMENT") == 0)
 		return 0;
 
+	/*
+	 * If the table access method isn't to be restored, ignore the options
+	 * specific to it.
+	 */
+	if (ropt->noTableAm && strcmp(te->desc, "TABLE AM OPTIONS") == 0)
+		return 0;
+
 	/* If it's a policy, maybe ignore it */
 	if (ropt->no_policies &&
 		(strcmp(te->desc, "POLICY") == 0 ||
@@ -3239,6 +3246,7 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 			}
 			else if (strcmp(te->desc, "TABLE") == 0 ||
 					 strcmp(te->desc, "TABLE DATA") == 0 ||
+					 strcmp(te->desc, "TABLE AM OPTIONS") == 0 ||
 					 strcmp(te->desc, "VIEW") == 0 ||
 					 strcmp(te->desc, "FOREIGN TABLE") == 0 ||
 					 strcmp(te->desc, "MATERIALIZED VIEW") == 0 ||
