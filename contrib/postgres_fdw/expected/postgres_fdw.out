@@ -254,6 +254,83 @@ SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
 -- and remote-estimate mode on ft2.
 ANALYZE ft1;
 ALTER FOREIGN TABLE ft2 OPTIONS (use_remote_estimate 'true');
+-- We do some work locally on each fetched row.  We check the local quals and
+-- evaluate the target list.  This work is the same whether we sort remotely
+-- or locally.  So it should not keep us from pushing down the sort or LIMIT.
+CREATE FUNCTION local_filter(int) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE COST 10000 AS $$
+BEGIN
+  RETURN $1 > 0;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Sort
+   Output: c1
+   Sort Key: ft1.c1
+   ->  Foreign Scan on public.ft1
+         Output: c1
+         Filter: local_filter(ft1.c1)
+         Remote SQL: SELECT "C 1" FROM "S 1"."T 1"
+(7 rows)
+
+-- Each of these is cheap enough that it's not postponed until after the sort.
+CREATE FUNCTION local_project(int) RETURNS int
+LANGUAGE plpgsql IMMUTABLE COST 9 AS $$
+BEGIN
+  RETURN $1;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c1), local_project(c1 + 1), local_project(c1 + 2),
+  local_project(c1 + 3)
+FROM ft1 ORDER BY c1 LIMIT 10;
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: (local_project(c1)), (local_project((c1 + 1))), (local_project((c1 + 2))), (local_project((c1 + 3))), c1
+   ->  Foreign Scan on public.ft1
+         Output: local_project(c1), local_project((c1 + 1)), local_project((c1 + 2)), local_project((c1 + 3)), c1
+         Remote SQL: SELECT "C 1" FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST
+(5 rows)
+
+-- The same is true for target list expressions that we evaluate on top of a
+-- pushed down aggregate.  Without a LIMIT the planner does not postpone even
+-- expensive ones until after the sort.
+ALTER FUNCTION local_project(int) COST 10000;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c2), count(*) FROM ft1 GROUP BY c2 ORDER BY c2;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Sort
+   Output: (local_project(c2)), (count(*)), c2
+   Sort Key: ft1.c2
+   ->  Foreign Scan
+         Output: local_project(c2), (count(*)), c2
+         Relations: Aggregate on (public.ft1)
+         Remote SQL: SELECT count(*), c2 FROM "S 1"."T 1" GROUP BY 2
+(7 rows)
+
+-- The same is true for HAVING quals that we check locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c2, count(*) FROM ft1 GROUP BY c2 HAVING local_filter(count(*)::int)
+ORDER BY c2;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Sort
+   Output: c2, (count(*))
+   Sort Key: ft1.c2
+   ->  Foreign Scan
+         Output: c2, (count(*))
+         Filter: local_filter(((count(*)))::integer)
+         Relations: Aggregate on (public.ft1)
+         Remote SQL: SELECT c2, count(*) FROM "S 1"."T 1" GROUP BY 1
+(8 rows)
+
+DROP FUNCTION local_filter(int);
+DROP FUNCTION local_project(int);
 -- ===================================================================
 -- test subscription
 -- ===================================================================
