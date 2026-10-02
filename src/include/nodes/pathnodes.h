@@ -1999,7 +1999,16 @@ typedef struct Path
 	/* OK to use as part of parallel plan? */
 	bool		parallel_safe;
 	/* desired # of workers; 0 = not parallel */
-	int			parallel_workers;
+	int16		parallel_workers;
+	/*
+	 * Effective # of workers that produce tuples
+	 *
+	 * Use this to cost partial plan nodes.  Parallel scans may produce
+	 * few tuples, and the cost of join nodes should not be amortized across
+	 * workers if just one worker will produce a tuple that participates in
+	 * the higher partial nodes.
+	 */
+	int16		effective_workers;
 
 	/* estimated size/costs for path (see costsize.c for more info) */
 	Cardinality rows;			/* estimated number of result tuples */

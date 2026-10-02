@@ -65,7 +65,7 @@ extern bool add_partial_path_precheck(RelOptInfo *parent_rel,
 									  Cost total_cost, List *pathkeys);
 
 extern Path *create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
-								 Relids required_outer, int parallel_workers);
+								 Relids required_outer, int16 parallel_workers);
 extern Path *create_samplescan_path(PlannerInfo *root, RelOptInfo *rel,
 									Relids required_outer);
 extern IndexPath *create_index_path(PlannerInfo *root,
@@ -84,7 +84,7 @@ extern BitmapHeapPath *create_bitmap_heap_path(PlannerInfo *root,
 											   Path *bitmapqual,
 											   Relids required_outer,
 											   double loop_count,
-											   int parallel_degree);
+											   int16 parallel_degree);
 extern BitmapAndPath *create_bitmap_and_path(PlannerInfo *root,
 											 RelOptInfo *rel,
 											 List *bitmapquals);
@@ -97,13 +97,13 @@ extern TidRangePath *create_tidrangescan_path(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  List *tidrangequals,
 											  Relids required_outer,
-											  int parallel_workers);
+											  int16 parallel_workers);
 
 extern AppendPath *create_append_path(PlannerInfo *root, RelOptInfo *rel,
 									  AppendPathInput input,
 									  List *pathkeys, Relids required_outer,
-									  int parallel_workers, bool parallel_aware,
-									  double rows);
+									  int16 parallel_workers, int16 effective_workers,
+									  bool parallel_aware, double rows);
 extern MergeAppendPath *create_merge_append_path(PlannerInfo *root,
 												 RelOptInfo *rel,
 												 List *subpaths,
