@@ -218,6 +218,17 @@ amoptions (Datum reloptions,
   </para>
 
   <para>
+   <application>pg_dump</application> puts the standard options of a table
+   in its <command>CREATE TABLE</command> command, and sets the ones specific
+   to its access method with a separate <command>ALTER TABLE</command>
+   command, which it leaves out if <option>--no-table-access-method</option>
+   is used.  So an access method's own options must have the same effect
+   when set by <command>ALTER TABLE</command> on an empty table as when given
+   to <command>CREATE TABLE</command>.  An option is treated as a standard
+   one if <function>pg_reloption_is_standard</function> returns true for it.
+  </para>
+
+  <para>
    Autovacuum always reads a table's <literal>autovacuum_*</literal> options
    using the standard heap parser, regardless of its access method.  So an
    access method that wants these options to affect autovacuum must accept
