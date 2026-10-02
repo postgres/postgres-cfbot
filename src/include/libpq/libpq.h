@@ -18,6 +18,7 @@
 
 #include "lib/stringinfo.h"
 #include "libpq/libpq-be.h"
+#include "common/compression.h"
 
 
 /* avoid including waiteventset.h */
@@ -174,5 +175,49 @@ extern int	run_ssl_passphrase_command(const char *cmd, const char *prompt,
 extern bool check_ssl_key_file_permissions(const char *ssl_key_file,
 										   bool isServerStart);
 extern HostsFileLoadResult load_hosts(List **hosts, char **err_msg);
+
+/*
+ * declarations for variable in pqcomm_compress.c
+ */
+
+typedef struct pqcomm_compress
+{
+	pg_compress_algorithm algorithm;
+	pg_compress_specification specification;
+
+	/* Is there a CompressedMessages to send? */
+	bool		pending_compressed_messages;
+	/* Is there an opened compression frame? */
+	bool		opened_frame;
+
+	/* Buffer containing messages before compression */
+	StringInfoData inBuf;
+	/* Track message types added to the current frame */
+	StringInfoData msgTypes;
+	/* Output buffer for compression */
+	StringInfoData outBuf;
+
+	/* Private data to be used by the compressor. */
+	void	   *private_data;
+}			pqcomm_compress;
+
+extern PGDLLIMPORT int protocol_backend_compression_number_messages;
+extern PGDLLIMPORT int protocol_backend_compression_threshold;
+extern PGDLLIMPORT bool protocol_backend_compression_transaction_frame;
+extern PGDLLIMPORT int protocol_backend_compression_allowed_algorithms;
+
+/*
+ * prototypes for functions in pqcomm_compress.c
+ */
+
+typedef struct
+{
+	int			(*flush) (pqcomm_compress * cs, bool block, bool end_frame);
+	int			(*compress_message) (pqcomm_compress * cs, bool block, bool start_frame);
+	void		(*free_compress_context) (pqcomm_compress * cs);
+}			PQcompressMethods;
+extern int	pq_send_compressed_message(bool block, bool partial);
+extern const PQcompressMethods *pq_init_compressor_zstd(pqcomm_compress * cs, pg_compress_specification *specification, void **new_private_data);
+extern const PQcompressMethods *pq_init_compressor_lz4(pqcomm_compress * cs, pg_compress_specification *specification, void **new_private_data);
 
 #endif							/* LIBPQ_H */

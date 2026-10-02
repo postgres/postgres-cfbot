@@ -808,11 +808,43 @@ retry:
 									valptr),
 							 errhint("Valid values are: \"false\", 0, \"true\", 1, \"database\".")));
 			}
+			else if (strcmp(nameptr, "_pq_.supported_compressions") == 0)
+			{
+				List	   *elemlist;
+				ListCell   *lc;
+				char	   *item;
+				char	   *rawstring;
+
+				rawstring = pstrdup(valptr);
+				SplitIdentifierString(rawstring, ',', &elemlist);
+				foreach(lc, elemlist)
+				{
+					pg_compress_algorithm algorithm = PG_COMPRESSION_NONE;
+
+					item = (char *) lfirst(lc);
+					if (parse_compress_algorithm(item, &algorithm))
+					{
+						switch (algorithm)
+						{
+							case PG_COMPRESSION_LZ4:
+								port->supported_compress_lz4 = true;
+								break;
+							case PG_COMPRESSION_ZSTD:
+								port->supported_compress_zstd = true;
+								break;
+							default:
+								break;
+						}
+					}
+				}
+				pfree(rawstring);
+				list_free(elemlist);
+			}
 			else if (strncmp(nameptr, "_pq_.", 5) == 0)
 			{
 				/*
 				 * Any option beginning with _pq_. is reserved for use as a
-				 * protocol-level option, but at present no such options are
+				 * protocol-level option, but at present only one option is
 				 * defined.
 				 */
 				unrecognized_protocol_options =

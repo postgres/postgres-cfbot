@@ -3630,7 +3630,9 @@ libpq_deps += [
   gssapi,
   ldap_r,
   libintl,
+  lz4,
   ssl,
+  zstd,
 ]
 
 libpq_oauth_deps += [
@@ -3968,7 +3970,7 @@ foreach test_dir : tests
 
     t = test_dir[kind]
 
-    if kind in ['regress', 'isolation', 'ecpg']
+    if kind in ['regress', 'isolation', 'ecpg', 'trace']
       if kind == 'regress'
         runner = pg_regress
         fallback_dbname = 'regression_@0@'
@@ -3978,6 +3980,9 @@ foreach test_dir : tests
       elif kind == 'ecpg'
         runner = pg_regress_ecpg
         fallback_dbname = 'ecpg_regression_@0@'
+      elif kind == 'trace'
+        runner = pg_trace_regress
+        fallback_dbname = 'trace_regression_@0@'
       endif
 
       test_group = test_dir['name']
