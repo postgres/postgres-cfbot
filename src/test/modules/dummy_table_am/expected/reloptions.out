@@ -17,6 +17,14 @@ ERROR:  value 9999 out of bounds for option "option_int"
 DETAIL:  Valid values are between "-10" and "100".
 CREATE TABLE dummy_bad (a int) USING dummy_table_am WITH (no_such_option = 4);
 ERROR:  unrecognized parameter "no_such_option"
+-- Inherited options are standard ones, the AM's own are not
+SELECT pg_reloption_is_standard('fillfactor'),
+       pg_reloption_is_standard('option_int');
+ pg_reloption_is_standard | pg_reloption_is_standard 
+--------------------------+--------------------------
+ t                        | f
+(1 row)
+
 -- Defaults are not stored in pg_class
 CREATE TABLE dummy_defaults (a int) USING dummy_table_am;
 SELECT reloptions FROM pg_class WHERE oid = 'dummy_defaults'::regclass;

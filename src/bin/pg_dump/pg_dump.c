@@ -7187,6 +7187,7 @@ getTables(Archive *fout, int *numTables)
 	int			i_reloptions;
 	int			i_checkoption;
 	int			i_toastreloptions;
+	int			i_amreloptions;
 	int			i_reloftype;
 	int			i_foreignserver;
 	int			i_amname;
@@ -7261,8 +7262,37 @@ getTables(Archive *fout, int *numTables)
 	appendPQExpBufferStr(query,
 						 "c.relminmxid, tc.relminmxid AS tminmxid, ");
 
+	/*
+	 * The options of a table or matview whose access method isn't heap are
+	 * split into standard ones, which go in the WITH clause, and ones
+	 * specific to the access method, which are set separately; see
+	 * dumpTableSchema().
+	 */
+	if (fout->remoteVersion >= 200000)
+		appendPQExpBufferStr(query,
+							 "CASE WHEN c.relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+							 CppAsString2(RELKIND_MATVIEW) ") AND "
+							 "c.relam <> " CppAsString2(HEAP_TABLE_AM_OID) " THEN "
+							 "ARRAY(SELECT o FROM pg_catalog.unnest(c.reloptions) "
+							 "WITH ORDINALITY AS u(o, n) "
+							 "WHERE pg_catalog.pg_reloption_is_standard(pg_catalog.split_part(o, '=', 1)) "
+							 "ORDER BY n) "
+							 "ELSE array_remove(array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') "
+							 "END AS reloptions, "
+							 "CASE WHEN c.relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+							 CppAsString2(RELKIND_MATVIEW) ") AND "
+							 "c.relam <> " CppAsString2(HEAP_TABLE_AM_OID) " THEN "
+							 "ARRAY(SELECT o FROM pg_catalog.unnest(c.reloptions) "
+							 "WITH ORDINALITY AS u(o, n) "
+							 "WHERE NOT pg_catalog.pg_reloption_is_standard(pg_catalog.split_part(o, '=', 1)) "
+							 "ORDER BY n) "
+							 "END AS amreloptions, ");
+	else
+		appendPQExpBufferStr(query,
+							 "array_remove(array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') AS reloptions, "
+							 "NULL AS amreloptions, ");
+
 	appendPQExpBufferStr(query,
-						 "array_remove(array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') AS reloptions, "
 						 "CASE WHEN 'check_option=local' = ANY (c.reloptions) THEN 'LOCAL'::text "
 						 "WHEN 'check_option=cascaded' = ANY (c.reloptions) THEN 'CASCADED'::text ELSE NULL END AS checkoption, ");
 
@@ -7377,6 +7407,7 @@ getTables(Archive *fout, int *numTables)
 	i_reloptions = PQfnumber(res, "reloptions");
 	i_checkoption = PQfnumber(res, "checkoption");
 	i_toastreloptions = PQfnumber(res, "toast_reloptions");
+	i_amreloptions = PQfnumber(res, "amreloptions");
 	i_reloftype = PQfnumber(res, "reloftype");
 	i_foreignserver = PQfnumber(res, "foreignserver");
 	i_amname = PQfnumber(res, "amname");
@@ -7458,6 +7489,7 @@ getTables(Archive *fout, int *numTables)
 		else
 			tblinfo[i].checkoption = pg_strdup(PQgetvalue(res, i, i_checkoption));
 		tblinfo[i].toast_reloptions = pg_strdup(PQgetvalue(res, i, i_toastreloptions));
+		tblinfo[i].amreloptions = pg_strdup(PQgetvalue(res, i, i_amreloptions));
 		tblinfo[i].reloftype = atooid(PQgetvalue(res, i, i_reloftype));
 		tblinfo[i].foreign_server = atooid(PQgetvalue(res, i, i_foreignserver));
 		if (PQgetisnull(res, i, i_amname))
@@ -17927,6 +17959,36 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 								  SECTION_POST_DATA : SECTION_PRE_DATA,
 								  .createStmt = q->data,
 								  .dropStmt = delq->data));
+
+		/*
+		 * Options specific to the access method are set in a separate entry,
+		 * so that if the table is restored with a different access method (as
+		 * with --no-table-access-method) they can be left out, and if they're
+		 * not, a failure to set them doesn't stop the table being created.
+		 * The entry has no drop command, since dropping the table covers it,
+		 * and its owner is set so that it is run by the correct role.
+		 */
+		if (nonemptyReloptions(tbinfo->amreloptions))
+		{
+			resetPQExpBuffer(extra);
+			appendPQExpBuffer(extra, "ALTER %s %s SET (",
+							  tbinfo->relkind == RELKIND_MATVIEW ?
+							  "MATERIALIZED VIEW" : "TABLE ONLY",
+							  qualrelname);
+			appendReloptionsArrayAH(extra, tbinfo->amreloptions, "", fout);
+			appendPQExpBufferStr(extra, ");\n");
+
+			ArchiveEntry(fout, nilCatalogId, createDumpId(),
+						 ARCHIVE_OPTS(.tag = tbinfo->dobj.name,
+									  .namespace = tbinfo->dobj.namespace->dobj.name,
+									  .owner = tbinfo->rolname,
+									  .description = "TABLE AM OPTIONS",
+									  .section = tbinfo->postponed_def ?
+									  SECTION_POST_DATA : SECTION_PRE_DATA,
+									  .createStmt = extra->data,
+									  .deps = &(tbinfo->dobj.dumpId),
+									  .nDeps = 1));
+		}
 	}
 
 	/* Dump Table Comments */
