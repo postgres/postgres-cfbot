@@ -2446,8 +2446,10 @@ typedef struct AggState
 	struct LogicalTapeSet *hash_tapeset;	/* tape set for hash spill tapes */
 	struct HashAggSpill *hash_spills;	/* HashAggSpill for each grouping set,
 										 * exists only during first pass */
-	TupleTableSlot *hash_spill_rslot;	/* for reading spill files */
-	TupleTableSlot *hash_spill_wslot;	/* for writing spill files */
+	TupleTableSlot *hash_spill_rslot;	/* input slot for spilled tuples */
+	TupleTableSlot *hash_spill_wslot;	/* spill slot, NULL if all_cols_needed */
+	int		   *hash_spill_colmap;	/* maps spill tuple columns to input
+									 * columns, NULL if all_cols_needed */
 	List	   *hash_batches;	/* hash batches remaining to be processed */
 	bool		hash_ever_spilled;	/* ever spilled during this execution? */
 	bool		hash_spill_mode;	/* we hit a limit during the current batch
