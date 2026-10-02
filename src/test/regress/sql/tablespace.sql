@@ -420,6 +420,114 @@ REINDEX (TABLESPACE regress_tblspace) TABLE tablespace_table; -- fail
 REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE tablespace_table; -- fail
 RESET ROLE;
 
+-- ALTER TABLE SET TABLESPACE moves the heap and leaves the indexes in their
+-- tablespace.  Run on its own, as here, it leaves their files alone too.
+CREATE TABLE tbspace_rollback (a int);
+INSERT INTO tbspace_rollback SELECT generate_series(1, 100);
+CREATE INDEX tbspace_rollback_idx ON tbspace_rollback (a);
+SELECT pg_relation_size('tbspace_rollback_idx') AS idx_size_before \gset
+SELECT pg_relation_filepath('tbspace_rollback_idx') AS idx_path \gset
+ALTER TABLE tbspace_rollback SET TABLESPACE regress_tblspace;
+SELECT pg_relation_filepath('tbspace_rollback_idx') = :'idx_path' AS idx_file_kept;
+-- Sent through the extended query protocol, a later statement of the same
+-- pipeline could share its transaction, so the indexes get new files.
+ALTER TABLE tbspace_rollback SET TABLESPACE pg_default \bind \g
+SELECT pg_relation_filepath('tbspace_rollback_idx') <> :'idx_path' AS idx_file_new;
+ALTER TABLE tbspace_rollback SET TABLESPACE regress_tblspace;
+SELECT pg_relation_filepath('tbspace_rollback_idx') AS idx_path \gset
+-- In a transaction block the indexes get new files, so that a rollback
+-- discards the entries added after the move together with the heap's file.
+BEGIN;
+ALTER TABLE tbspace_rollback SET TABLESPACE pg_default;
+SELECT pg_relation_filepath('tbspace_rollback_idx') <> :'idx_path' AS idx_file_new;
+INSERT INTO tbspace_rollback SELECT generate_series(101, 2000);
+SELECT pg_relation_size('tbspace_rollback_idx') > :idx_size_before AS idx_grew;
+ROLLBACK;
+SELECT pg_relation_size('tbspace_rollback_idx') = :idx_size_before AS idx_size_restored;
+-- the same for a TRUNCATE after the move, which is done in place
+BEGIN;
+ALTER TABLE tbspace_rollback SET TABLESPACE pg_default;
+TRUNCATE tbspace_rollback;
+ROLLBACK;
+SELECT pg_relation_size('tbspace_rollback_idx') = :idx_size_before AS idx_size_restored;
+SELECT count(*) FROM tbspace_rollback;
+-- An index created in the same subtransaction is discarded with the heap
+-- anyway and is not copied.  Moving the indexes first and then the table
+-- copies each index only once.
+BEGIN;
+CREATE INDEX tbspace_rollback_idx2 ON tbspace_rollback (a);
+SELECT pg_relation_filepath('tbspace_rollback_idx2') AS idx2_path \gset
+ALTER INDEX tbspace_rollback_idx SET TABLESPACE regress_tblspace;
+SELECT pg_relation_filepath('tbspace_rollback_idx') AS idx_moved_path \gset
+ALTER TABLE tbspace_rollback SET TABLESPACE pg_default;
+SELECT pg_relation_filepath('tbspace_rollback_idx2') = :'idx2_path' AS idx2_not_copied,
+  pg_relation_filepath('tbspace_rollback_idx') = :'idx_moved_path' AS idx_not_copied_again;
+ROLLBACK;
+DROP TABLE tbspace_rollback;
+-- An index file that is new in this transaction but older than a savepoint
+-- survives a rollback to it, so it must still follow a move made after the
+-- savepoint: an index created or reindexed before it, or already copied by
+-- an earlier move.  Rows inserted afterwards reuse the TIDs freed by the
+-- rollbacks; a stale index entry would match them.
+CREATE TABLE tbspace_subxact (a int);
+INSERT INTO tbspace_subxact SELECT generate_series(1, 100);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+BEGIN;
+CREATE INDEX tbspace_subxact_idx ON tbspace_subxact (a);
+SAVEPOINT s;
+ALTER TABLE tbspace_subxact SET TABLESPACE regress_tblspace;
+INSERT INTO tbspace_subxact SELECT -generate_series(1, 50);
+ROLLBACK TO s;
+COMMIT;
+BEGIN;
+REINDEX INDEX tbspace_subxact_idx;
+SAVEPOINT s;
+ALTER TABLE tbspace_subxact SET TABLESPACE regress_tblspace;
+INSERT INTO tbspace_subxact SELECT -generate_series(1, 50);
+ROLLBACK TO s;
+COMMIT;
+BEGIN;
+ALTER TABLE tbspace_subxact SET TABLESPACE regress_tblspace;
+INSERT INTO tbspace_subxact VALUES (0);
+SAVEPOINT s;
+ALTER TABLE tbspace_subxact SET TABLESPACE pg_default;
+INSERT INTO tbspace_subxact SELECT -generate_series(1, 50);
+ROLLBACK TO s;
+COMMIT;
+INSERT INTO tbspace_subxact SELECT generate_series(101, 300);
+SELECT count(*) FROM tbspace_subxact WHERE a < 0;
+SELECT count(*) FROM tbspace_subxact;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE tbspace_subxact;
+-- Combined with another subcommand, the ALTER can run user code after the
+-- move, such as a CHECK constraint validated on an inheritance child after
+-- the parent was moved, so the indexes get new files even outside a
+-- transaction block.
+CREATE TABLE tbspace_combined (a int);
+INSERT INTO tbspace_combined SELECT generate_series(1, 100);
+CREATE INDEX tbspace_combined_idx ON tbspace_combined (a);
+CREATE TABLE tbspace_combined_child () INHERITS (tbspace_combined);
+INSERT INTO tbspace_combined_child VALUES (5000);
+CREATE FUNCTION tbspace_combined_chk(v int) RETURNS bool LANGUAGE plpgsql AS $$
+BEGIN
+  IF v < 5000 THEN RETURN true; END IF;
+  INSERT INTO tbspace_combined SELECT -generate_series(1, 50);
+  RAISE EXCEPTION 'abort after writing';
+END $$;
+ALTER TABLE tbspace_combined SET TABLESPACE regress_tblspace,
+  ADD CONSTRAINT tbspace_combined_k CHECK (tbspace_combined_chk(a));
+DROP TABLE tbspace_combined_child;
+INSERT INTO tbspace_combined SELECT generate_series(101, 300);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM tbspace_combined WHERE a < 0;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE tbspace_combined;
+DROP FUNCTION tbspace_combined_chk(int);
+
 ALTER TABLESPACE regress_tblspace RENAME TO regress_tblspace_renamed;
 
 ALTER TABLE ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
