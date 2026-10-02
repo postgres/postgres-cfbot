@@ -333,6 +333,94 @@ like(
 	'updated partition constraint for default partition quuux_default1');
 run_sql_command('DROP TABLE quuux;');
 
+note "test UPDATE operation skip enforced constraint vertification";
+
+# Check whether the run_sql_command output shows that the UPDATE operation
+# skipped constraint verification.
+sub is_constraint_skipped_by_update
+{
+	my $output = shift;
+	my $constr = shift;
+	return index($output, "DEBUG:  skipping verification for constraint \"$constr\"") != -1;
+}
+
+run_sql_command(
+	'CREATE TABLE upd_check_skip (
+	i int, a int default 11,
+	b int, c int,
+	d int generated always as (b+c) STORED,
+	e int generated always as (i) VIRTUAL) partition by range (i);
+
+	CREATE TABLE upd_check_skip_1(
+	a int default 12, i int,
+	c int, b int,
+	d int generated always as (b+1) STORED,
+	e int generated always as (b - 100) VIRTUAL);
+
+	ALTER TABLE upd_check_skip ATTACH PARTITION upd_check_skip_1 FOR VALUES FROM (0) TO (10);
+	CREATE TABLE upd_check_skip_2 PARTITION OF upd_check_skip FOR VALUES FROM (10) TO (30);
+	INSERT INTO upd_check_skip SELECT g + 8, g, -g-g, g+1 FROM generate_series(0, 7) g;
+	ALTER TABLE upd_check_skip ADD COLUMN f int;
+
+	ALTER TABLE upd_check_skip ADD CONSTRAINT cc1 CHECK(a + b < 1);
+	ALTER TABLE upd_check_skip ADD CONSTRAINT cc2 CHECK(a + c < 100);
+	ALTER TABLE upd_check_skip ADD CONSTRAINT cc3 CHECK(b < 1);
+	ALTER TABLE upd_check_skip ADD CONSTRAINT cc4 CHECK(d < 2); ');
+
+$output = run_sql_command('UPDATE upd_check_skip SET b = -7 WHERE i = 11;');
+ok(is_constraint_skipped_by_update($output, 'cc2'),
+	'UPDATE skipped verification for constraint cc2');
+ok(!is_constraint_skipped_by_update($output, 'cc4'),
+	'UPDATE does not skipped verification for constraint cc4');
+
+$output = run_sql_command('UPDATE upd_check_skip SET c = 3 WHERE i = 12;');
+ok(is_constraint_skipped_by_update($output, 'cc1'),
+	'UPDATE skipped verification for constraint cc1');
+ok(is_constraint_skipped_by_update($output, 'cc3'),
+	'UPDATE skipped verification for constraint cc3');
+ok(!is_constraint_skipped_by_update($output, 'cc4'),
+	'UPDATE does not skipped verification for constraint cc4');
+
+$output = run_sql_command('UPDATE upd_check_skip SET f = 14 WHERE i = 13;');
+ok(is_constraint_skipped_by_update($output, 'cc4'),
+	'UPDATE skipped verification for constraint cc4');
+
+$output = run_sql_command('
+	MERGE INTO upd_check_skip t USING (VALUES (12, -5), (18, 0)) AS s(a, b)
+	ON t.i = s.a
+	WHEN MATCHED THEN UPDATE SET b = s.b
+	WHEN NOT MATCHED BY TARGET THEN INSERT(i, a, b, c) VALUES (12, -3, -1, 2);');
+ok(is_constraint_skipped_by_update($output, 'cc2'),
+	'UPDATE skipped verification for constraint cc2');
+
+run_sql_command(
+	'CREATE FUNCTION dummy_update_func() RETURNS trigger AS $$
+	 BEGIN
+	 RETURN NEW;
+	 END;
+	 $$ LANGUAGE plpgsql;
+
+	 CREATE TRIGGER upd_check_skip_row_trig_before
+	 BEFORE UPDATE ON upd_check_skip
+	 FOR EACH ROW
+	 EXECUTE PROCEDURE dummy_update_func(); ');
+
+$output = run_sql_command('UPDATE upd_check_skip SET f = NULL');
+
+ok(!is_constraint_skipped_by_update($output, 'cc1'),
+	'UPDATE does not skipped verification for constraint cc1');
+
+ok(!is_constraint_skipped_by_update($output, 'cc2'),
+	'UPDATE does not skipped verification for constraint cc2');
+
+ok(!is_constraint_skipped_by_update($output, 'cc3'),
+	'UPDATE does not skipped verification for constraint cc3');
+
+ok(!is_constraint_skipped_by_update($output, 'cc4'),
+	'UPDATE does not skipped verification for constraint cc4');
+
+run_sql_command('drop table upd_check_skip;');
+
 $node->stop('fast');
 
 done_testing();

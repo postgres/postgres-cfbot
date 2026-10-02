@@ -861,7 +861,7 @@ ExecSimpleRelationInsert(ResultRelInfo *resultRelInfo,
 
 		/* Check the constraints of the tuple */
 		if (rel->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate);
+			ExecConstraints(CMD_INSERT, resultRelInfo, slot, estate);
 		if (rel->rd_rel->relispartition)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
@@ -965,7 +965,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 
 		/* Check the constraints of the tuple */
 		if (rel->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate);
+			ExecConstraints(CMD_UPDATE, resultRelInfo, slot, estate);
 		if (rel->rd_rel->relispartition)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
