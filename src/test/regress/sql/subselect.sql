@@ -727,6 +727,37 @@ select sum(ss.tst::int) from
 where o.ten = 0;
 
 --
+-- Test rescan of a hashed subplan that appears in more than one qual.
+-- Here the OR clause's restriction on "c" is extracted and also applied to
+-- the scan of "c", so the same hashed SubPlan is evaluated in two places;
+-- each must rebuild its hash table when the outer parameter changes.
+--
+create temp table hsp_c (id int primary key, owner int);
+create temp table hsp_p (id int primary key, cid int, pub bool);
+create temp table hsp_f (cid int, uid int);
+create temp table hsp_s (id int primary key, pid int, uid int);
+insert into hsp_c values (1, 100), (2, 200);
+insert into hsp_p values (10, 1, true), (20, 2, true);
+insert into hsp_f values (1, 501), (2, 502);
+insert into hsp_s values (1, 10, 501), (2, 20, 502);
+analyze hsp_c, hsp_p, hsp_f, hsp_s;
+
+explain (costs off)
+select s.id, exists (select 1 from hsp_p p join hsp_c c on c.id = p.cid
+                     where p.id = s.pid
+                       and (c.owner = s.uid
+                            or (p.pub and c.id in (select cid from hsp_f
+                                                   where uid = s.uid))))
+from hsp_s s order by s.id;
+
+select s.id, exists (select 1 from hsp_p p join hsp_c c on c.id = p.cid
+                     where p.id = s.pid
+                       and (c.owner = s.uid
+                            or (p.pub and c.id in (select cid from hsp_f
+                                                   where uid = s.uid))))
+from hsp_s s order by s.id;
+
+--
 -- Test rescan of a hashed SetOp node
 --
 begin;

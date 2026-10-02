@@ -110,9 +110,15 @@ ExecHashSubPlan(SubPlanState *node,
 
 	/*
 	 * If first time through or we need to rescan the subplan, build the hash
-	 * table.
+	 * table.  planstate->chgParam alone isn't enough to detect the latter: if
+	 * the same SubPlan appears more than once in the plan tree, all its
+	 * SubPlanStates share one planstate, and building any of their hash
+	 * tables rescans it and clears its chgParam.  So we also check our own
+	 * hashtablestale flag, which is set when our parent node is rescanned
+	 * with changed parameters.
 	 */
-	if (node->hashtable == NULL || planstate->chgParam != NULL)
+	if (node->hashtable == NULL || node->hashtablestale ||
+		planstate->chgParam != NULL)
 		buildSubPlanHash(node, econtext);
 
 	/*
@@ -505,6 +511,7 @@ buildSubPlanHash(SubPlanState *node, ExprContext *econtext)
 	 */
 	node->havehashrows = false;
 	node->havenullrows = false;
+	node->hashtablestale = false;
 
 	nentries = planstate->plan->plan_rows;
 
@@ -881,6 +888,7 @@ ExecInitSubPlan(SubPlan *subplan, PlanState *parent)
 	sstate->projRight = NULL;
 	sstate->hashtable = NULL;
 	sstate->hashnulls = NULL;
+	sstate->hashtablestale = false;
 	sstate->tuplesContext = NULL;
 	sstate->innerecontext = NULL;
 	sstate->keyColIdx = NULL;
