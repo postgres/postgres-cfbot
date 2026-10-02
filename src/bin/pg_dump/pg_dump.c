@@ -60,6 +60,8 @@
 #include "common/int.h"
 #include "common/relpath.h"
 #include "common/shortest_dec.h"
+#include "common/string.h"
+#include "mb/pg_wchar.h"
 #include "compress_io.h"
 #include "dumputils.h"
 #include "fe_utils/option_utils.h"
@@ -1436,6 +1438,20 @@ setup_connection(Archive *AH, const char *dumpencoding,
 	 */
 	AH->encoding = PQclientEncoding(conn);
 	setFmtEncoding(AH->encoding);
+
+	/*
+	 * Get the server encoding so we can replicate the server's object name
+	 * truncation logic (which uses server encoding, not client encoding).
+	 */
+	{
+		const char *senc = PQparameterStatus(conn, "server_encoding");
+
+		if (senc == NULL)
+			pg_fatal("could not get server encoding");
+		AH->server_encoding = pg_char_to_encoding(senc);
+		if (AH->server_encoding < 0)
+			pg_fatal("unrecognized server encoding \"%s\"", senc);
+	}
 
 	/*
 	 * Set the role if requested.  In a parallel dump worker, we'll be passed
@@ -10020,9 +10036,14 @@ determineNotNullFlags(Archive *fout, PGresult *res, int r,
 			{
 				char	   *default_name;
 
-				/* XXX should match ChooseConstraintName better */
-				default_name = psprintf("%s_%s_not_null", tbinfo->dobj.name,
-										tbinfo->attnames[j]);
+				/*
+				 * Use makeObjectName to match ChooseConstraintName's
+				 * truncation
+				 */
+				default_name = makeObjectName(tbinfo->dobj.name,
+											  tbinfo->attnames[j],
+											  "not_null",
+											  fout->server_encoding);
 				if (strcmp(default_name,
 						   PQgetvalue(res, r, i_notnull_name)) == 0)
 					tbinfo->notnull_constrs[j] = "";
@@ -12740,8 +12761,13 @@ dumpDomain(Archive *fout, const TypeInfo *tyinfo)
 			{
 				char	   *default_name;
 
-				/* XXX should match ChooseConstraintName better */
-				default_name = psprintf("%s_not_null", tyinfo->dobj.name);
+				/*
+				 * Use makeObjectName to match ChooseConstraintName's
+				 * truncation
+				 */
+				default_name = makeObjectName(tyinfo->dobj.name, NULL,
+											  "not_null",
+											  fout->server_encoding);
 
 				if (strcmp(default_name, notnull->dobj.name) == 0)
 					appendPQExpBufferStr(q, " NOT NULL");

@@ -2022,3 +2022,56 @@ pg_encoding_max_length(int encoding)
 		pg_wchar_table[encoding].maxmblen :
 		pg_wchar_table[PG_SQL_ASCII].maxmblen;
 }
+
+/*
+ * cliplen for any single-byte encoding.
+ *
+ * Note: a copy of this function exists in mbutils.c, used by
+ * pg_mbcharcliplen().  They are kept separate because pg_mbcharcliplen
+ * is backend-only while pg_encoding_mbcliplen is in src/common.
+ */
+static int
+cliplen(const char *str, int len, int limit)
+{
+	int			l = 0;
+
+	len = Min(len, limit);
+	while (l < len && str[l])
+		l++;
+	return l;
+}
+
+/*
+ * pg_encoding_mbcliplen -- return the byte length of a multibyte string
+ * (not necessarily NULL terminated) that is no longer than limit bytes.
+ * This function does not break multibyte character boundaries.
+ *
+ * The string must be valid in the specified encoding.
+ */
+int
+pg_encoding_mbcliplen(int encoding, const char *mbstr,
+					  int len, int limit)
+{
+	mblen_converter mblen_fn;
+	int			clen = 0;
+	int			l;
+
+	/* optimization for single byte encoding */
+	if (pg_encoding_max_length(encoding) == 1)
+		return cliplen(mbstr, len, limit);
+
+	mblen_fn = pg_wchar_table[encoding].mblen;
+
+	while (len > 0 && *mbstr)
+	{
+		l = (*mblen_fn) ((const unsigned char *) mbstr);
+		if ((clen + l) > limit)
+			break;
+		clen += l;
+		if (clen == limit)
+			break;
+		len -= l;
+		mbstr += l;
+	}
+	return clen;
+}

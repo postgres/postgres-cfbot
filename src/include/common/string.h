@@ -23,6 +23,10 @@ typedef struct PromptInterruptContext
 	bool		canceled;		/* indicates whether cancellation occurred */
 } PromptInterruptContext;
 
+/* functions in src/common/objectname.c */
+extern char *makeObjectName(const char *name1, const char *name2,
+							const char *label, int encoding);
+
 /* functions in src/common/string.c */
 extern bool pg_str_endswith(const char *str, const char *end);
 extern int	strtoint(const char *pg_restrict str, char **pg_restrict endptr,

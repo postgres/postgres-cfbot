@@ -29,6 +29,8 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "common/int.h"
+#include "common/string.h"
+#include "mb/pg_wchar.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -536,7 +538,8 @@ ChooseConstraintName(const char *name1, const char *name2,
 
 	for (;;)
 	{
-		conname = makeObjectName(name1, name2, modlabel);
+		conname = makeObjectName(name1, name2, modlabel,
+								 GetDatabaseEncoding());
 
 		found = false;
 
