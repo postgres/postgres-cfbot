@@ -31,4 +31,9 @@ tests += {
       'custom_layout',
     ],
   },
+  'tap': {
+    'tests': [
+      't/001_pg_dump.pl',
+    ],
+  },
 }
