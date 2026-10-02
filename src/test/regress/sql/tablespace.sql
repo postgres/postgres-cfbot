@@ -420,6 +420,27 @@ REINDEX (TABLESPACE regress_tblspace) TABLE tablespace_table; -- fail
 REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE tablespace_table; -- fail
 RESET ROLE;
 
+-- bug #19686: rolling back ALTER TABLE SET TABLESPACE must not leave the
+-- table's indexes referencing heap TIDs that the aborted heap rewrite frees.
+-- The indexes have to share the heap's rewrite, so that a later insert cannot
+-- reuse a freed TID that a surviving index entry still points at.
+CREATE TABLE tbspace_19686 (a int);
+CREATE INDEX tbspace_19686_idx ON tbspace_19686 (a);
+BEGIN;
+ALTER TABLE tbspace_19686 SET TABLESPACE regress_tblspace;
+INSERT INTO tbspace_19686 VALUES (0);
+ROLLBACK;
+INSERT INTO tbspace_19686 VALUES (0);
+-- With seqscans disabled this count is answered from the index; it must match
+-- the single live heap row (it returns 2 against the bug, where the aborted
+-- transaction's index entry survives and aliases the reused TID).
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM tbspace_19686 WHERE a = 0;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE tbspace_19686;
+
 ALTER TABLESPACE regress_tblspace RENAME TO regress_tblspace_renamed;
 
 ALTER TABLE ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
