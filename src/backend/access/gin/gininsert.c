@@ -1777,7 +1777,10 @@ _gin_parallel_merge(GinBuildState *state)
 									 ++numtuples);
 	}
 
-	/* flush data remaining in the buffer (for the last key) */
+	/*
+	 * Flush data remaining in the buffer (for the last key).  Its tuples were
+	 * already counted in the progress report when they were read.
+	 */
 	if (!GinBufferIsEmpty(buffer))
 	{
 		AssertCheckItemPointers(buffer);
@@ -1788,10 +1791,6 @@ _gin_parallel_merge(GinBuildState *state)
 
 		/* discard the existing data */
 		GinBufferReset(buffer);
-
-		/* Report progress */
-		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
-									 ++numtuples);
 	}
 
 	/* release all the memory */
