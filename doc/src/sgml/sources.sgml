@@ -392,6 +392,31 @@ ereport(ERROR,
      too much.
     </para>
    </listitem>
+     <listitem>
+        <para>
+         <function>errabort(bool do_abort)</function> controls whether a
+         <literal>PANIC</literal> calls <function>abort()</function>, the default.
+         Passing <literal>false</literal> selects <function>_exit(2)</function>
+         instead, avoiding a core dump without running cleanup callbacks or
+         changing postmaster crash handling.  Calling
+         <function>errabort(true)</function> restores the default for the current
+         report.  This preference also applies to errors promoted to
+         <literal>PANIC</literal>, but does not change ordinary
+         <literal>ERROR</literal> or <literal>FATAL</literal> termination.
+         An outer <literal>PANIC</literal> that requests a core dump, or
+         <xref linkend="guc-force-core-dump-on-panic"/>, still overrides suppression.
+        </para>
+     </listitem>
+     <listitem>
+        <para>
+         <function>errnocoredump_on_errno(int errnum)</function> is a convenience
+         wrapper that calls <function>errabort(false)</function> when the
+         <literal>errno</literal> saved at the start of the error report matches
+         <parameter>errnum</parameter>.  A nonmatch leaves the preference unchanged,
+         so multiple calls can select more than one error number without undoing
+         an earlier match.
+        </para>
+     </listitem>
   </itemizedlist>
    </para>
 
