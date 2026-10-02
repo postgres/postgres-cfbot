@@ -3606,10 +3606,12 @@ l2:
 			 * Xmax.
 			 *
 			 * Note that there could have been another update in the
-			 * MultiXact. In that case, we need to check whether it committed
-			 * or aborted. If it aborted we are safe to update it again;
-			 * otherwise there is an update conflict, and we have to return
-			 * TableTuple{Deleted, Updated} below.
+			 * MultiXact. In that case, we need to check whether it
+			 * committed: only a committed updater means an update conflict,
+			 * and we have to return TableTuple{Deleted, Updated} below.
+			 * One that did not commit can no longer commit (reaching here
+			 * means it is no longer running), so we are safe to update it
+			 * again.
 			 *
 			 * In the LockTupleExclusive case, we still need to preserve the
 			 * surviving members: those would include the tuple locks we had
@@ -3622,12 +3624,15 @@ l2:
 				update_xact = InvalidTransactionId;
 
 			/*
-			 * There was no UPDATE in the MultiXact; or it aborted. No
-			 * TransactionIdIsInProgress() call needed here, since we called
-			 * MultiXactIdWait() above.
+			 * There was no UPDATE in the MultiXact; or it can no longer
+			 * have committed (aborted or crashed).  Reaching here means the
+			 * updater is no longer running: the wait above, or the conflict
+			 * check having skipped it, already proved that.  A not-running
+			 * xid can never become committed, so testing DidCommit is
+			 * enough -- no TransactionIdIsInProgress() call needed here.
 			 */
 			if (!TransactionIdIsValid(update_xact) ||
-				TransactionIdDidAbort(update_xact))
+				!TransactionIdDidCommit(update_xact))
 				can_continue = true;
 		}
 		else if (TransactionIdIsCurrentTransactionId(xwait))
@@ -7863,8 +7868,14 @@ DoesMultiXactIdConflict(MultiXactId multi, uint16 infomask,
 
 			if (ISUPDATE_from_mxstatus(members[i].status))
 			{
-				/* ignore aborted updaters */
-				if (TransactionIdDidAbort(memxid))
+				/*
+				 * Ignore updaters that can no longer commit: not running,
+				 * and no commit record can appear afterwards, since only
+				 * the transaction itself could write one.  This covers
+				 * aborted updaters as well as crash leftovers.
+				 */
+				if (!TransactionIdIsInProgress(memxid) &&
+					!TransactionIdDidCommit(memxid))
 					continue;
 			}
 			else
@@ -7876,10 +7887,10 @@ DoesMultiXactIdConflict(MultiXactId multi, uint16 infomask,
 
 			/*
 			 * Whatever remains are either live lockers that conflict with our
-			 * wanted lock, and updaters that are not aborted.  Those conflict
-			 * with what we want.  Set up to return true, but keep going to
-			 * look for the current transaction among the multixact members,
-			 * if needed.
+			 * wanted lock, and updaters that are still running or committed.
+			 * Those conflict with what we want.  Set up to return true, but
+			 * keep going to look for the current transaction among the multixact
+			 * members, if needed.
 			 */
 			result = true;
 		}
