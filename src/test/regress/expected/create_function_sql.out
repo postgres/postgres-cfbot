@@ -798,9 +798,444 @@ ERROR:  return type mismatch in function declared to return integer[]
 DETAIL:  Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING.
 CONTEXT:  SQL function "test1" during startup
 RESET check_function_bodies;
+-- unnamed parameters of an SQL-body function are printed as $N
+CREATE FUNCTION functest_unnamed(a int, int) RETURNS int
+  BEGIN ATOMIC SELECT a + $2; END;
+SELECT functest_unnamed(1, 2);
+ functest_unnamed 
+------------------
+                3
+(1 row)
+
+SELECT pg_get_functiondef('functest_unnamed'::regproc);
+                               pg_get_functiondef                               
+--------------------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_unnamed(a integer, integer)+
+  RETURNS integer                                                              +
+  LANGUAGE sql                                                                 +
+ BEGIN ATOMIC                                                                  +
+  SELECT (a + "");                                                             +
+ END                                                                           +
+ 
+(1 row)
+
+-- a parameter must not be qualified with the function name if a relation of
+-- that name is visible: a column named like the parameter, even one added
+-- after the function was created, would capture the qualified name
+CREATE TABLE functest_cap (x int);
+INSERT INTO functest_cap VALUES (5);
+CREATE FUNCTION functest_cap(a int) RETURNS int
+  BEGIN ATOMIC SELECT a + x FROM functest_cap; END;
+SELECT functest_cap(10);
+ functest_cap 
+--------------
+           15
+(1 row)
+
+ALTER TABLE functest_cap ADD COLUMN a int DEFAULT 100;
+SELECT pg_get_functiondef('functest_cap'::regproc);
+                        pg_get_functiondef                         
+-------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_cap(a integer)+
+  RETURNS integer                                                 +
+  LANGUAGE sql                                                    +
+ BEGIN ATOMIC                                                     +
+  SELECT (functest_cap.a + functest_cap.x)                        +
+     FROM functest_cap;                                           +
+ END                                                              +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_cap'::regproc) AS def \gset
+:def ;
+SELECT functest_cap(10);
+ functest_cap 
+--------------
+          105
+(1 row)
+
+-- the same if a column is renamed to the name of a parameter that the body
+-- refers to as funcname.argname
+CREATE TABLE functest_ren (b int);
+INSERT INTO functest_ren VALUES (5);
+CREATE FUNCTION functest_ren(a int) RETURNS int
+  BEGIN ATOMIC SELECT functest_ren.a + functest_ren.b FROM functest_ren; END;
+SELECT functest_ren(10);
+ functest_ren 
+--------------
+           15
+(1 row)
+
+ALTER TABLE functest_ren RENAME b TO a;
+SELECT pg_get_functiondef('functest_ren'::regproc);
+                        pg_get_functiondef                         
+-------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_ren(a integer)+
+  RETURNS integer                                                 +
+  LANGUAGE sql                                                    +
+ BEGIN ATOMIC                                                     +
+  SELECT (functest_ren.a + functest_ren.a)                        +
+     FROM functest_ren;                                           +
+ END                                                              +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_ren'::regproc) AS def \gset
+:def ;
+SELECT functest_ren(10);
+ functest_ren 
+--------------
+           10
+(1 row)
+
+-- the same for any name the parser can take as a qualifier: a function
+-- taking the whole row, as in num_nulls(functest_nn.*)
+CREATE TABLE functest_nn (x int);
+INSERT INTO functest_nn VALUES (1);
+CREATE FUNCTION functest_nn(num_nulls int) RETURNS int
+  BEGIN ATOMIC SELECT num_nulls + x FROM functest_nn; END;
+SELECT functest_nn(7);
+ functest_nn 
+-------------
+           8
+(1 row)
+
+SELECT pg_get_functiondef('functest_nn'::regproc);
+                            pg_get_functiondef                            
+--------------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_nn(num_nulls integer)+
+  RETURNS integer                                                        +
+  LANGUAGE sql                                                           +
+ BEGIN ATOMIC                                                            +
+  SELECT (functest_nn.num_nulls + functest_nn.x)                         +
+     FROM functest_nn;                                                   +
+ END                                                                     +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_nn'::regproc) AS def \gset
+:def ;
+SELECT functest_nn(7);
+ functest_nn 
+-------------
+           1
+(1 row)
+
+-- a system column
+CREATE TABLE functest_sys (x int);
+INSERT INTO functest_sys VALUES (1);
+CREATE FUNCTION functest_sys(cmin int) RETURNS int
+  BEGIN ATOMIC SELECT $1 FROM functest_sys; END;
+SELECT functest_sys(5);
+ functest_sys 
+--------------
+            5
+(1 row)
+
+SELECT pg_get_functiondef('functest_sys'::regproc);
+                          pg_get_functiondef                          
+----------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_sys(cmin integer)+
+  RETURNS integer                                                    +
+  LANGUAGE sql                                                       +
+ BEGIN ATOMIC                                                        +
+  SELECT functest_sys.cmin                                           +
+     FROM functest_sys;                                              +
+ END                                                                 +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_sys'::regproc) AS def \gset
+:def ;
+ERROR:  return type mismatch in function declared to return integer
+DETAIL:  Actual return type is cid.
+CONTEXT:  SQL function "functest_sys"
+SELECT functest_sys(5);
+ functest_sys 
+--------------
+            5
+(1 row)
+
+-- a column added later to a member of a join with that alias
+CREATE TABLE functest_j1 (b int);
+CREATE TABLE functest_j2 (c int);
+INSERT INTO functest_j1 VALUES (1);
+INSERT INTO functest_j2 VALUES (1);
+CREATE FUNCTION functest_join(a int) RETURNS int
+  BEGIN ATOMIC SELECT a FROM (functest_j1 CROSS JOIN functest_j2) AS functest_join; END;
+SELECT functest_join(5);
+ functest_join 
+---------------
+             5
+(1 row)
+
+ALTER TABLE functest_j1 ADD COLUMN a int DEFAULT 100;
+SELECT pg_get_functiondef('functest_join'::regproc);
+                         pg_get_functiondef                         
+--------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_join(a integer)+
+  RETURNS integer                                                  +
+  LANGUAGE sql                                                     +
+ BEGIN ATOMIC                                                      +
+  SELECT functest_join.a AS a                                      +
+     FROM (functest_j1                                             +
+       CROSS JOIN functest_j2) functest_join;                      +
+ END                                                               +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_join'::regproc) AS def \gset
+:def ;
+SELECT functest_join(5);
+ functest_join 
+---------------
+           100
+(1 row)
+
+-- a JOIN/USING alias
+CREATE TABLE functest_u1 (a int, b int);
+CREATE TABLE functest_u2 (a int, c int);
+INSERT INTO functest_u1 VALUES (100, 1);
+INSERT INTO functest_u2 VALUES (100, 1);
+CREATE FUNCTION functest_using(a int) RETURNS int
+  BEGIN ATOMIC SELECT $1 FROM functest_u1 JOIN functest_u2 USING (a) AS functest_using; END;
+SELECT functest_using(5);
+ functest_using 
+----------------
+              5
+(1 row)
+
+SELECT pg_get_functiondef('functest_using'::regproc);
+                         pg_get_functiondef                          
+---------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_using(a integer)+
+  RETURNS integer                                                   +
+  LANGUAGE sql                                                      +
+ BEGIN ATOMIC                                                       +
+  SELECT functest_using.a                                           +
+     FROM (functest_u1                                              +
+       JOIN functest_u2 USING (a) AS functest_using);               +
+ END                                                                +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_using'::regproc) AS def \gset
+:def ;
+SELECT functest_using(5);
+ functest_using 
+----------------
+            100
+(1 row)
+
+-- a RETURNING alias for OLD or NEW
+CREATE TABLE functest_rt (a int, b int);
+INSERT INTO functest_rt VALUES (100, 0);
+CREATE FUNCTION functest_ret(a int) RETURNS int
+  BEGIN ATOMIC UPDATE functest_rt SET b = 1 RETURNING WITH (OLD AS functest_ret) $1; END;
+SELECT functest_ret(5);
+ functest_ret 
+--------------
+            5
+(1 row)
+
+SELECT pg_get_functiondef('functest_ret'::regproc);
+                        pg_get_functiondef                         
+-------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_ret(a integer)+
+  RETURNS integer                                                 +
+  LANGUAGE sql                                                    +
+ BEGIN ATOMIC                                                     +
+  UPDATE functest_rt SET b = 1                                    +
+    RETURNING WITH (OLD AS functest_ret) functest_ret.a;          +
+ END                                                              +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_ret'::regproc) AS def \gset
+:def ;
+SELECT functest_ret(5);
+ functest_ret 
+--------------
+          100
+(1 row)
+
+CREATE FUNCTION functest_retnew(a int) RETURNS int
+  BEGIN ATOMIC UPDATE functest_rt SET b = 2 RETURNING WITH (NEW AS functest_retnew) $1; END;
+SELECT functest_retnew(5);
+ functest_retnew 
+-----------------
+               5
+(1 row)
+
+SELECT pg_get_functiondef('functest_retnew'::regproc);
+                          pg_get_functiondef                          
+----------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_retnew(a integer)+
+  RETURNS integer                                                    +
+  LANGUAGE sql                                                       +
+ BEGIN ATOMIC                                                        +
+  UPDATE functest_rt SET b = 2                                       +
+    RETURNING WITH (NEW AS functest_retnew) functest_retnew.a;       +
+ END                                                                 +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_retnew'::regproc) AS def \gset
+:def ;
+SELECT functest_retnew(5);
+ functest_retnew 
+-----------------
+             100
+(1 row)
+
+-- the default alias of OLD
+CREATE FUNCTION old(a int) RETURNS int
+  BEGIN ATOMIC UPDATE functest_rt SET b = 3 RETURNING $1; END;
+SELECT old(5);
+ old 
+-----
+   5
+(1 row)
+
+SELECT pg_get_functiondef('old'::regproc);
+                    pg_get_functiondef                    
+----------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.old(a integer)+
+  RETURNS integer                                        +
+  LANGUAGE sql                                           +
+ BEGIN ATOMIC                                            +
+  UPDATE functest_rt SET b = 3                           +
+    RETURNING old.a;                                     +
+ END                                                     +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('old'::regproc) AS def \gset
+:def ;
+SELECT old(5);
+ old 
+-----
+ 100
+(1 row)
+
+-- without relations a parameter is printed by its bare name, but as a sort
+-- or grouping key that name would be taken as an output column
+CREATE FUNCTION functest_sort(a int) RETURNS int[]
+  RETURN ARRAY(SELECT 4 - generate_series(1, 3) AS a ORDER BY $1);
+SELECT functest_sort(5);
+ functest_sort 
+---------------
+ {3,2,1}
+(1 row)
+
+SELECT pg_get_functiondef('functest_sort'::regproc);
+                         pg_get_functiondef                         
+--------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_sort(a integer)+
+  RETURNS integer[]                                                +
+  LANGUAGE sql                                                     +
+ RETURN ARRAY(SELECT (4 - generate_series(1, 3)) AS a ORDER BY a)  +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_sort'::regproc) AS def \gset
+:def ;
+SELECT functest_sort(5);
+ functest_sort 
+---------------
+ {1,2,3}
+(1 row)
+
+CREATE FUNCTION functest_distinct(a int) RETURNS int[]
+  RETURN ARRAY(SELECT DISTINCT ON ($1) generate_series(1, 3) AS a);
+SELECT functest_distinct(5);
+ functest_distinct 
+-------------------
+ {1}
+(1 row)
+
+SELECT pg_get_functiondef('functest_distinct'::regproc);
+                           pg_get_functiondef                           
+------------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_distinct(a integer)+
+  RETURNS integer[]                                                    +
+  LANGUAGE sql                                                         +
+ RETURN ARRAY(SELECT DISTINCT ON (a) generate_series(1, 3) AS a)       +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_distinct'::regproc) AS def \gset
+:def ;
+SELECT functest_distinct(5);
+ functest_distinct 
+-------------------
+ {1,2,3}
+(1 row)
+
+CREATE FUNCTION functest_group(a int) RETURNS int[]
+  RETURN ARRAY(SELECT (4 - generate_series(1, 3)) % 2 AS a GROUP BY $1);
+SELECT functest_group(5);
+ functest_group 
+----------------
+ {1,0,1}
+(1 row)
+
+SELECT pg_get_functiondef('functest_group'::regproc);
+                                  pg_get_functiondef                                   
+---------------------------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_group(a integer)                  +
+  RETURNS integer[]                                                                   +
+  LANGUAGE sql                                                                        +
+ RETURN ARRAY(SELECT ((4 - generate_series(1, 3)) % 2) AS a GROUP BY functest_group.a)+
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_group'::regproc) AS def \gset
+:def ;
+SELECT functest_group(5);
+ functest_group 
+----------------
+ {1,0,1}
+(1 row)
+
+-- the output column may have no ordering operator, so the body fails to
+-- parse again
+CREATE FUNCTION functest_point(a int) RETURNS SETOF point
+  BEGIN ATOMIC SELECT point(1, 2) AS a ORDER BY $1; END;
+SELECT functest_point(5);
+ functest_point 
+----------------
+ (1,2)
+(1 row)
+
+SELECT pg_get_functiondef('functest_point'::regproc);
+                         pg_get_functiondef                          
+---------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION temp_func_test.functest_point(a integer)+
+  RETURNS SETOF point                                               +
+  LANGUAGE sql                                                      +
+ BEGIN ATOMIC                                                       +
+  SELECT point((1)::double precision, (2)::double precision) AS a   +
+    ORDER BY a;                                                     +
+ END                                                                +
+ 
+(1 row)
+
+SELECT pg_get_functiondef('functest_point'::regproc) AS def \gset
+:def ;
+ERROR:  could not identify an ordering operator for type point
+LINE 6:    ORDER BY a;
+                    ^
+HINT:  Use an explicit ordering operator or modify the query.
+SELECT functest_point(5);
+ functest_point 
+----------------
+ (1,2)
+(1 row)
+
 -- Cleanup
 DROP SCHEMA temp_func_test CASCADE;
-NOTICE:  drop cascades to 38 other objects
+NOTICE:  drop cascades to 61 other objects
 DETAIL:  drop cascades to function functest_a_1(text,date)
 drop cascades to function functest_a_2(text[])
 drop cascades to function functest_a_3()
@@ -839,5 +1274,28 @@ drop cascades to function part_hashint4_error(integer,bigint)
 drop cascades to operator family part_test_int4_ops_bad for access method hash
 drop cascades to table pt
 drop cascades to function test1(anyelement)
+drop cascades to function functest_unnamed(integer,integer)
+drop cascades to table functest_cap
+drop cascades to function functest_cap(integer)
+drop cascades to table functest_ren
+drop cascades to function functest_ren(integer)
+drop cascades to table functest_nn
+drop cascades to function functest_nn(integer)
+drop cascades to table functest_sys
+drop cascades to function functest_sys(integer)
+drop cascades to table functest_j1
+drop cascades to table functest_j2
+drop cascades to function functest_join(integer)
+drop cascades to table functest_u1
+drop cascades to table functest_u2
+drop cascades to function functest_using(integer)
+drop cascades to table functest_rt
+drop cascades to function functest_ret(integer)
+drop cascades to function functest_retnew(integer)
+drop cascades to function old(integer)
+drop cascades to function functest_sort(integer)
+drop cascades to function functest_distinct(integer)
+drop cascades to function functest_group(integer)
+drop cascades to function functest_point(integer)
 DROP USER regress_unpriv_user;
 RESET search_path;
