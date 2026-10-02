@@ -95,6 +95,7 @@ static int	read_only_level = 0;
 
 /* custom wait event values, retrieved from shared memory */
 static uint32 pgfdw_we_cleanup_result = 0;
+static uint32 pgfdw_we_cancel = 0;
 static uint32 pgfdw_we_connect = 0;
 static uint32 pgfdw_we_get_result = 0;
 
@@ -1606,7 +1607,12 @@ pgfdw_cancel_query(PGconn *conn)
 static bool
 pgfdw_cancel_query_begin(PGconn *conn, TimestampTz endtime)
 {
-	const char *errormsg = libpqsrv_cancel(conn, endtime);
+	const char *errormsg;
+
+	if (pgfdw_we_cancel == 0)
+		pgfdw_we_cancel = WaitEventExtensionNew("PostgresFdwCancel");
+
+	errormsg = libpqsrv_cancel(conn, endtime, pgfdw_we_cancel);
 
 	if (errormsg != NULL)
 		ereport(WARNING,
@@ -1802,7 +1808,7 @@ pgfdw_get_cleanup_result(PGconn *conn, TimestampTz endtime,
 			if (now >= retrycanceltime)
 			{
 				/* We ignore failure to issue the repeated request. */
-				(void) libpqsrv_cancel(conn, endtime);
+				(void) libpqsrv_cancel(conn, endtime, pgfdw_we_cancel);
 
 				/* Recompute "now" in case that took measurable time. */
 				now = GetCurrentTimestamp();

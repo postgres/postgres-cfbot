@@ -20,6 +20,15 @@
 
  <variablelist>
   <varlistentry>
+   <term><literal>DblinkCancel</literal></term>
+   <listitem>
+    <para>
+     Waiting for a remote server to acknowledge a query cancellation request.
+    </para>
+   </listitem>
+  </varlistentry>
+
+  <varlistentry>
    <term><literal>DblinkConnect</literal></term>
    <listitem>
     <para>
