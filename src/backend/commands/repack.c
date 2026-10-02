@@ -82,6 +82,7 @@
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/wait_event_types.h"
 
 /*
@@ -100,6 +101,9 @@ typedef struct
  * following ones contain the data changes.
  */
 #define WORKER_FILE_SNAPSHOT	0
+
+/* How often to check for the final AccessExclusiveLock, in milliseconds. */
+#define REPACK_LOCK_WAIT_INTERVAL	50
 
 /*
  * Information needed to apply concurrent data changes.
@@ -3388,6 +3392,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	XLogRecPtr	end_of_wal;
 	List	   *indexrels;
 	ChangeContext chgcxt;
+	TimestampTz lock_wait_start;
 
 	Assert(CheckRelationLockedByMe(OldHeap, ShareUpdateExclusiveLock, false));
 	Assert(CheckRelationLockedByMe(NewHeap, AccessExclusiveLock, false));
@@ -3458,8 +3463,48 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
 	 * is one), all its indexes, so that we can swap the files.
+	 *
+	 * Do not queue for the table lock.  While we are queued, every new lock
+	 * request on the table queues behind us, so waiting behind one
+	 * long-running transaction would block all access to the table for that
+	 * long.  Instead, keep checking whether the lock is available, and apply
+	 * the changes that arrive in the meantime, so that the work left for the
+	 * time we hold the lock stays small.  lock_timeout limits how long we
+	 * keep trying.
 	 */
-	LockRelationOid(old_table_oid, AccessExclusiveLock);
+	lock_wait_start = GetCurrentTimestamp();
+	while (!ConditionalLockRelationOid(old_table_oid, AccessExclusiveLock))
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		if (LockTimeout > 0 &&
+			TimestampDifferenceExceeds(lock_wait_start, GetCurrentTimestamp(),
+									   LockTimeout))
+			ereport(ERROR,
+					errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+					errmsg("canceling statement due to lock timeout"));
+
+		XLogFlush(GetXLogInsertEndRecPtr());
+		end_of_wal = GetFlushRecPtr(NULL);
+		process_concurrent_changes(end_of_wal, &chgcxt, false);
+
+		/*
+		 * If someone is already waiting behind the lock we hold, they may
+		 * hold a lock on the table themselves, which they will never release
+		 * while waiting for us.  Wait for the lock the normal way then, so
+		 * that we either get it ahead of them or the deadlock detector
+		 * resolves the situation.
+		 */
+		if (LockHasWaitersRelation(OldHeap, ShareUpdateExclusiveLock))
+		{
+			LockRelationOid(old_table_oid, AccessExclusiveLock);
+			break;
+		}
+
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 REPACK_LOCK_WAIT_INTERVAL, WAIT_EVENT_REPACK_LOCK_WAIT);
+		ResetLatch(MyLatch);
+	}
 
 	/*
 	 * Lock all indexes now, not only the clustering one: all indexes need to
