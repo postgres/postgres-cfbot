@@ -988,6 +988,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
 						 vacrel->missed_dead_tuples,
+						 vacrel->missed_dead_pages,
 						 starttime);
 	pgstat_progress_end_command();
 
