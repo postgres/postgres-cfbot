@@ -4069,6 +4069,11 @@
   proargnames => '{options_array,option_name,option_value}',
   prosrc => 'pg_options_to_table' },
 
+{ oid => '8904', descr => 'whether a storage parameter is a standard one',
+  proname => 'pg_reloption_is_standard', provolatile => 's',
+  prorettype => 'bool', proargtypes => 'text',
+  prosrc => 'pg_reloption_is_standard' },
+
 { oid => '1619', descr => 'type of the argument',
   proname => 'pg_typeof', proisstrict => 'f', provolatile => 's',
   prorettype => 'regtype', proargtypes => 'any', prosrc => 'pg_typeof' },
