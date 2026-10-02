@@ -397,6 +397,28 @@ PostgreSQL documentation
    </varlistentry>
 
    <varlistentry>
+    <term><option>--cluster-state=<replaceable class="parameter">state</replaceable></option></term>
+    <listitem>
+     <para>
+      Manually set the database cluster state stored in
+      <filename>pg_control</filename>.  Possible values are
+      <literal>shut-down</literal> (the default),
+      <literal>shut-down-in-recovery</literal>,
+      <literal>shutting-down</literal>,
+      <literal>in-crash-recovery</literal>,
+      <literal>in-archive-recovery</literal> and
+      <literal>in-production</literal>.
+     </para>
+     <para>
+      With any state other than <literal>shut-down</literal>, the server
+      goes through crash recovery at its next start.  There is no WAL to
+      replay after a reset, but the other steps of crash recovery still
+      run.  For example, unlogged tables are emptied.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><option>--wal-segsize=<replaceable class="parameter">wal_segment_size</replaceable></option></term>
     <listitem>
      <para>
