@@ -1031,6 +1031,36 @@ ReleaseConnection(PGconn *conn)
 }
 
 /*
+ * Return the server version number of the already-cached connection for
+ * "user", if one exists, or 0 if there is none (in which case the caller
+ * must not assume anything about the remote server's version).
+ *
+ * This never establishes a new connection and never does any network I/O:
+ * it only consults the connection cache and, if a live entry is found,
+ * reads the version number libpq already recorded during that connection's
+ * startup handshake.  Planning can use this information without opening
+ * another connection.
+ */
+int
+GetCachedConnectionVersion(UserMapping *user)
+{
+	bool		found;
+	ConnCacheKey key;
+	ConnCacheEntry *entry;
+
+	if (ConnectionHash == NULL)
+		return 0;
+
+	key = user->umid;
+	entry = (ConnCacheEntry *) hash_search(ConnectionHash, &key, HASH_FIND,
+										   &found);
+	if (!found || entry->conn == NULL || entry->invalidated)
+		return 0;
+
+	return PQserverVersion(entry->conn);
+}
+
+/*
  * Assign a "unique" number for a cursor.
  *
  * These really only need to be unique per connection within a transaction.
