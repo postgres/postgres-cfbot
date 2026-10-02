@@ -2514,7 +2514,7 @@ ERROR:  function return row and query-specified return row do not match
 DETAIL:  Returned row contains 1 attribute, but query expects 2.
 -- Columns added to the composite types that functions return show up in the
 -- middle of the columns of the RTE, so the column alias list has to make room
--- for them
+-- for them; leave the objects around for the pg_upgrade test
 create type rngfunc_t0 as (a int);
 create function rngfunc_f0() returns rngfunc_t0
   language sql as 'select null::rngfunc_t0';
@@ -2526,15 +2526,13 @@ select format('create view rngfunc_one_v2 as %s',
 \gexec
 create view rngfunc_one_v2 as  SELECT a,
     ordinality
-   FROM rngfunc_f0() WITH ORDINALITY rngfunc_f0(a, ordinality)
-ERROR:  column reference "ordinality" is ambiguous
-LINE 2:     ordinality
-            ^
+   FROM rngfunc_f0() WITH ORDINALITY rngfunc_f0(a, x, ordinality)
 select * from rngfunc_one_v2;
-ERROR:  relation "rngfunc_one_v2" does not exist
-LINE 1: select * from rngfunc_one_v2;
-                      ^
-drop view rngfunc_one_v;
+ a | ordinality 
+---+------------
+   |          1
+(1 row)
+
 -- The same for a function that returns a domain over a composite type
 create type rngfunc_t1 as (a int);
 create domain rngfunc_d1 as rngfunc_t1;
@@ -2548,15 +2546,13 @@ select format('create view rngfunc_dom_v2 as %s',
 \gexec
 create view rngfunc_dom_v2 as  SELECT a,
     ordinality
-   FROM rngfunc_f1() WITH ORDINALITY rngfunc_f1(a, ordinality)
-ERROR:  column reference "ordinality" is ambiguous
-LINE 2:     ordinality
-            ^
+   FROM rngfunc_f1() WITH ORDINALITY rngfunc_f1(a, x, ordinality)
 select * from rngfunc_dom_v2;
-ERROR:  relation "rngfunc_dom_v2" does not exist
-LINE 1: select * from rngfunc_dom_v2;
-                      ^
-drop view rngfunc_dom_v;
+ a | ordinality 
+---+------------
+   |          1
+(1 row)
+
 -- Without ordinality, the aliases after the new columns of a function shift
 create type rngfunc_t2 as (a int);
 create type rngfunc_t3 as (b int);
@@ -2580,14 +2576,13 @@ select format('create view rngfunc_alias_v2 as %s',
 \gexec
 create view rngfunc_alias_v2 as  SELECT m,
     n
-   FROM ROWS FROM(rngfunc_f2(), rngfunc_f3()) r(m, n)
+   FROM ROWS FROM(rngfunc_f2(), rngfunc_f3()) r(m, c, n)
 select * from rngfunc_alias_v2;
- m | n  
----+----
- 1 | 99
+ m | n 
+---+---
+ 1 | 2
 (1 row)
 
-drop view rngfunc_alias_v;
 -- With both, for a function that had no columns and a column named ordinality
 create type rngfunc_t4 as ();
 create type rngfunc_t5 as (a int);
@@ -2624,27 +2619,25 @@ select * from rows from (rngfunc_f4(), rngfunc_f5()) with ordinality;
 (1 row)
 
 select pg_get_viewdef('rngfunc_grown_v'::regclass);
-                                      pg_get_viewdef                                      
-------------------------------------------------------------------------------------------
-  SELECT a,                                                                              +
-     ordinality                                                                          +
-    FROM ROWS FROM(rngfunc_f4(), rngfunc_f5()) WITH ORDINALITY rngfunc_f4(a, ordinality);
+                                              pg_get_viewdef                                               
+-----------------------------------------------------------------------------------------------------------
+  SELECT a,                                                                                               +
+     ordinality_1 AS ordinality                                                                           +
+    FROM ROWS FROM(rngfunc_f4(), rngfunc_f5()) WITH ORDINALITY rngfunc_f4(x, a, ordinality, ordinality_1);
 (1 row)
 
 select format('create view rngfunc_grown_v2 as %s',
               rtrim(pg_get_viewdef('rngfunc_grown_v'::regclass), ';'))
 \gexec
 create view rngfunc_grown_v2 as  SELECT a,
-    ordinality
-   FROM ROWS FROM(rngfunc_f4(), rngfunc_f5()) WITH ORDINALITY rngfunc_f4(a, ordinality)
-ERROR:  column reference "ordinality" is ambiguous
-LINE 2:     ordinality
-            ^
+    ordinality_1 AS ordinality
+   FROM ROWS FROM(rngfunc_f4(), rngfunc_f5()) WITH ORDINALITY rngfunc_f4(x, a, ordinality, ordinality_1)
 select * from rngfunc_grown_v2;
-ERROR:  relation "rngfunc_grown_v2" does not exist
-LINE 1: select * from rngfunc_grown_v2;
-                      ^
-drop view rngfunc_grown_v;
+ a | ordinality 
+---+------------
+ 1 |          1
+(1 row)
+
 -- New columns after a dropped last column, renamed away from an earlier one
 create type rngfunc_t6 as (a int, b int);
 create type rngfunc_t7 as ();
@@ -2662,12 +2655,10 @@ select format('create view rngfunc_drop_v2 as %s',
 \gexec
 create view rngfunc_drop_v2 as  SELECT a,
     ordinality
-   FROM ROWS FROM(rngfunc_f6(), rngfunc_f7()) WITH ORDINALITY rngfunc_f6(a, ordinality)
-ERROR:  column reference "ordinality" is ambiguous
-LINE 2:     ordinality
-            ^
+   FROM ROWS FROM(rngfunc_f6(), rngfunc_f7()) WITH ORDINALITY rngfunc_f6(a, a_1, ordinality)
 select * from rngfunc_drop_v2;
-ERROR:  relation "rngfunc_drop_v2" does not exist
-LINE 1: select * from rngfunc_drop_v2;
-                      ^
-drop view rngfunc_drop_v;
+ a | ordinality 
+---+------------
+   |          1
+(1 row)
+
