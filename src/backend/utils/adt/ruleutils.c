@@ -3839,13 +3839,6 @@ set_deparse_context_plan(List *dpcontext, Plan *plan, List *ancestors)
 	dpns->ancestors = ancestors;
 	set_deparse_plan(dpns, plan);
 
-	/* For ModifyTable, set aliases for OLD and NEW in RETURNING */
-	if (IsA(plan, ModifyTable))
-	{
-		dpns->ret_old_alias = ((ModifyTable *) plan)->returningOldAlias;
-		dpns->ret_new_alias = ((ModifyTable *) plan)->returningNewAlias;
-	}
-
 	return dpcontext;
 }
 
@@ -5148,15 +5141,29 @@ get_rtable_name(int rtindex, deparse_context *context)
  * of a given Plan node
  *
  * This sets the plan, outer_plan, inner_plan, outer_tlist, inner_tlist,
- * and index_tlist fields.  Caller must already have adjusted the ancestors
- * list if necessary.  Note that the rtable, subplans, and ctes fields do
- * not need to change when shifting attention to different plan nodes in a
- * single plan tree.
+ * and index_tlist fields, and also ret_old_alias and ret_new_alias if the
+ * plan is a ModifyTable (they are left unchanged for other plan types).
+ * Caller must already have adjusted the ancestors list if necessary.  Note
+ * that the rtable, subplans, and ctes fields do not need to change when
+ * shifting attention to different plan nodes in a single plan tree.
  */
 static void
 set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 {
 	dpns->plan = plan;
+
+	/*
+	 * For ModifyTable, set aliases for OLD and NEW in RETURNING.  This must
+	 * happen on every shift of attention, because the aliases in dpns are
+	 * those of the last ModifyTable visited, which need not be the ancestor
+	 * ModifyTable whose RETURNING list a SubPlan took an expression from
+	 * (say, when a data-modifying CTE was printed in between).
+	 */
+	if (IsA(plan, ModifyTable))
+	{
+		dpns->ret_old_alias = ((ModifyTable *) plan)->returningOldAlias;
+		dpns->ret_new_alias = ((ModifyTable *) plan)->returningNewAlias;
+	}
 
 	/*
 	 * We special-case Append and MergeAppend to pretend that the first child
