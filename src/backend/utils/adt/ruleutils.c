@@ -207,7 +207,9 @@ typedef struct
  * can reference the input columns instead.  That approach can fail for merged
  * JOIN USING columns, however, so when we have one of those in an unnamed
  * join, we have to make that column's alias globally unique across the whole
- * query to ensure it can be referenced unambiguously.
+ * query to ensure it can be referenced unambiguously.  The exception is the
+ * columns of an RTE that is not printed in the FROM clause: they keep their
+ * real names (see keep_real_names).
  *
  * Another problem is that a JOIN USING clause requires the columns to be
  * merged to have the same aliases in both input RTEs, and that no other
@@ -271,6 +273,14 @@ typedef struct
 
 	/* This flag tells whether we should actually print a column alias list */
 	bool		printaliases;
+
+	/*
+	 * This flag is set for an RTE that is not in the FROM clause (for
+	 * example, a DML target or rule OLD and NEW).  Such an RTE cannot have a
+	 * column alias list, so its column names must stay the real ones.  They
+	 * are therefore exempt from the global uniqueness of USING column names.
+	 */
+	bool		keep_real_names;
 
 	/* This list has all names used as USING names in joins above this RTE */
 	List	   *parentUsing;	/* names assigned to parent merged columns */
@@ -4092,7 +4102,10 @@ set_deparse_for_query(deparse_namespace *dpns, Query *query,
 		if (rte->rtekind == RTE_JOIN)
 			set_join_column_names(dpns, rte, colinfo);
 		else
+		{
+			colinfo->keep_real_names = !rte->inFromCl;
 			set_relation_column_names(dpns, rte, colinfo);
+		}
 	}
 }
 
@@ -4142,7 +4155,10 @@ set_simple_column_names(deparse_namespace *dpns)
  * since that will prevent legal references to tables below the join.)
  * To ensure that every column in the query is unambiguously referenceable,
  * we must assign such merged columns names that are globally unique across
- * the whole query, aliasing other columns out of the way as necessary.
+ * the whole query, aliasing other columns out of the way as necessary.  (An
+ * RTE that is not printed in FROM, such as a DML target, is exempt: it can't
+ * have a column alias list, and its columns are always qualified with the
+ * RTE name, so it keeps its real column names.)
  *
  * Because the ensuing re-aliasing is fairly damaging to the readability of
  * the query, we don't do this unless we have to.  So, we must pre-scan
@@ -4913,14 +4929,19 @@ colname_is_unique(const char *colname, deparse_namespace *dpns,
 
 	/*
 	 * Also check against USING-column names that must be globally unique.
-	 * These are not hashed, but there should be few of them.
+	 * These are not hashed, but there should be few of them.  Skip this check
+	 * for an RTE that is not printed in FROM: it cannot have a column alias
+	 * list, so its column names must stay the real ones.
 	 */
-	foreach(lc, dpns->using_names)
+	if (!colinfo->keep_real_names)
 	{
-		char	   *oldname = (char *) lfirst(lc);
+		foreach(lc, dpns->using_names)
+		{
+			char	   *oldname = (char *) lfirst(lc);
 
-		if (strcmp(oldname, colname) == 0)
-			return false;
+			if (strcmp(oldname, colname) == 0)
+				return false;
+		}
 	}
 
 	return true;
