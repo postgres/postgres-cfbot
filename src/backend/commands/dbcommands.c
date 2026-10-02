@@ -1578,6 +1578,8 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 	fparms.dest_dboid = dboid;
 	fparms.strategy = dbstrategy;
 
+	XLogRecoveryBoundary();
+
 	PG_ENSURE_ERROR_CLEANUP(createdb_failure_callback,
 							PointerGetDatum(&fparms));
 	{
@@ -1858,6 +1860,8 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 * Tell the cumulative stats system to forget it immediately, too.
 	 */
 	pgstat_drop_database(db_id);
+
+	XLogRecoveryBoundary();
 
 	/*
 	 * Except for the deletion of the catalog row, subsequent actions are not
@@ -2248,6 +2252,8 @@ movedb(const char *dbname, const char *tblspcname)
 		 * Copy files from the old tablespace to the new one
 		 */
 		copydir(src_dbpath, dst_dbpath, false);
+
+		XLogRecoveryBoundary();
 
 		/*
 		 * Record the filesystem change in XLOG
