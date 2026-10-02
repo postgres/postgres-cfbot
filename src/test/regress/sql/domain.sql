@@ -513,7 +513,11 @@ update domconnotnulltest set col2 = 6;
 
 alter domain connotnull add constraint constr1 not null;
 select count(*) from pg_constraint where contypid = 'connotnull'::regtype and contype = 'n';
-alter domain connotnull add constraint constr1bis not null;  -- redundant
+alter domain connotnull add constraint constr1bis not null;  -- error
+alter domain connotnull add constraint constr1 not null;  -- redundant
+alter domain connotnull add not null;  -- redundant
+alter domain connotnull set not null;  -- redundant
+alter domain connotnull add not null not valid;  -- error
 select count(*) from pg_constraint where contypid = 'connotnull'::regtype and contype = 'n';
 
 \dD connotnull
