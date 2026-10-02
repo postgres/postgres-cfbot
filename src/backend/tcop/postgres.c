@@ -2458,6 +2458,23 @@ check_log_statement(List *stmt_list)
 }
 
 /*
+ * IsExtendedQueryMessage
+ *		Is the current statement being run by an extended-query-protocol
+ *		message?
+ *
+ * Such a statement shares its implicit transaction with whatever else the
+ * client sends before the next Sync, which the backend cannot know while it
+ * runs the statement.  The first statement of a pipeline cannot be told from
+ * one followed directly by Sync: XACT_FLAGS_PIPELINING is set only once an
+ * Execute completes.
+ */
+bool
+IsExtendedQueryMessage(void)
+{
+	return doing_extended_query_message;
+}
+
+/*
  * check_log_duration
  *		Determine whether current command's duration should be logged
  *		We also check if this statement in this transaction must be logged
