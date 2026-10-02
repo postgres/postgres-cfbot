@@ -46,3 +46,6 @@ select t,word_similarity('Kabankala',t) as sml from test_trgm2 where t %> 'Kaban
 
 -- test unsatisfiable pattern
 select * from test_trgm2 where t ~ '.*$x';
+
+-- No trigrams on either side: must not read past the end of an empty array
+SELECT word_similarity('', ''), strict_word_similarity('', '');
