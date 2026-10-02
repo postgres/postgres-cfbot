@@ -833,7 +833,7 @@ select * from int8_tbl, coalesce(row(1)) as (a int, b int);  -- fail
 
 -- Columns added to the composite types that functions return show up in the
 -- middle of the columns of the RTE, so the column alias list has to make room
--- for them
+-- for them; leave the objects around for the pg_upgrade test
 create type rngfunc_t0 as (a int);
 create function rngfunc_f0() returns rngfunc_t0
   language sql as 'select null::rngfunc_t0';
@@ -844,7 +844,6 @@ select format('create view rngfunc_one_v2 as %s',
               rtrim(pg_get_viewdef('rngfunc_one_v'::regclass), ';'))
 \gexec
 select * from rngfunc_one_v2;
-drop view rngfunc_one_v;
 
 -- The same for a function that returns a domain over a composite type
 create type rngfunc_t1 as (a int);
@@ -858,7 +857,6 @@ select format('create view rngfunc_dom_v2 as %s',
               rtrim(pg_get_viewdef('rngfunc_dom_v'::regclass), ';'))
 \gexec
 select * from rngfunc_dom_v2;
-drop view rngfunc_dom_v;
 
 -- Without ordinality, the aliases after the new columns of a function shift
 create type rngfunc_t2 as (a int);
@@ -877,7 +875,6 @@ select format('create view rngfunc_alias_v2 as %s',
               rtrim(pg_get_viewdef('rngfunc_alias_v'::regclass), ';'))
 \gexec
 select * from rngfunc_alias_v2;
-drop view rngfunc_alias_v;
 
 -- With both, for a function that had no columns and a column named ordinality
 create type rngfunc_t4 as ();
@@ -904,7 +901,6 @@ select format('create view rngfunc_grown_v2 as %s',
               rtrim(pg_get_viewdef('rngfunc_grown_v'::regclass), ';'))
 \gexec
 select * from rngfunc_grown_v2;
-drop view rngfunc_grown_v;
 
 -- New columns after a dropped last column, renamed away from an earlier one
 create type rngfunc_t6 as (a int, b int);
@@ -922,4 +918,3 @@ select format('create view rngfunc_drop_v2 as %s',
               rtrim(pg_get_viewdef('rngfunc_drop_v'::regclass), ';'))
 \gexec
 select * from rngfunc_drop_v2;
-drop view rngfunc_drop_v;
