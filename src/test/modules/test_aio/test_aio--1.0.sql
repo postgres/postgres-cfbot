@@ -60,8 +60,14 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 /*
  * Read stream related functions
  */
-CREATE FUNCTION read_stream_for_blocks(rel regclass, blocks int4[], OUT blockoff int4, OUT blocknum int4, OUT buf int4)
+CREATE FUNCTION read_stream_for_blocks(rel regclass, blocks int4[], check_per_buffer_data bool DEFAULT false, OUT blockoff int4, OUT blocknum int4, OUT buf int4)
 RETURNS SETOF record STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+-- Benchmarking helper (not for committing): streams the given blocks nruns
+-- times without materializing an SRF, returning the total buffers streamed.
+CREATE FUNCTION read_stream_bench(rel regclass, blocks int4[], nruns int4 DEFAULT 1)
+RETURNS int8 STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
 
