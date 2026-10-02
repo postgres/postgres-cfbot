@@ -27,6 +27,7 @@ tests += {
       't/002_status.pl',
       't/003_promote.pl',
       't/004_logrotate.pl',
+      't/005_socket_handle_inheritance.pl',
     ],
   },
 }

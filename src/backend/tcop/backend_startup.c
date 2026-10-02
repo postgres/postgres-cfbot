@@ -177,6 +177,18 @@ BackendInitialize(ClientSocket *client_sock, CAC_state cac)
 	port = MyProcPort = pq_init(client_sock);
 	MemoryContextSwitchTo(oldcontext);
 
+#ifdef WIN32
+	/*
+	 * On Windows, the client socket inherited from the postmaster becomes
+	 * inheritable again in this process. Prevent child processes spawned
+	 * by this backend from inheriting it.
+	 */
+	if (!SetHandleInformation((HANDLE) port->sock, HANDLE_FLAG_INHERIT, 0))
+		ereport(WARNING,
+				(errmsg_internal("could not disable socket handle inheritance: error code %lu",
+								 GetLastError())));
+#endif
+
 	whereToSendOutput = DestRemote; /* now safe to ereport to client */
 
 	/* set these to empty in case they are needed before we set them up */
