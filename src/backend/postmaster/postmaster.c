@@ -113,6 +113,7 @@
 #include "storage/fd.h"
 #include "storage/io_worker.h"
 #include "storage/ipc.h"
+#include "storage/pg_job_object.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/shmem_internal.h"
@@ -1016,6 +1017,17 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	CreateSharedMemoryAndSemaphores();
 
+#ifdef WIN32
+	/*
+	* On Windows, create a job object to prevent orphaned backends.
+	* If postmaster crashes, Windows will automatically kill all
+	* child processes in the job.
+	*
+	* We do this after port binding so that if job creation fails,
+	* it's not fatal - we can still run (just without orphan protection).
+	*/
+	pg_create_job_object();
+#endif
 	/*
 	 * Estimate number of openable files.  This must happen after setting up
 	 * semaphores, because on some platforms semaphores count as open files.

@@ -278,4 +278,115 @@ is( $node->safe_psql(
 
 $node->stop();
 
+# Test Windows Job Objects orphan prevention
+if ($windows_os)
+{
+	note "testing Windows Job Object orphan prevention";
+
+	my $jobtest = PostgreSQL::Test::Cluster->new('jobtest');
+	$jobtest->init(allows_streaming => 1);
+	$jobtest->start();
+
+	my $log_contents = slurp_file($jobtest->logfile);
+	like($log_contents, qr/orphaned process prevention enabled/,
+		"Job Objects enabled on startup");
+
+	$jobtest->safe_psql('postgres',
+		q[ALTER SYSTEM SET restart_after_crash = 1;
+		  SELECT pg_reload_conf();]);
+
+	my ($backend_stdin, $backend_stdout, $backend_stderr) = ('', '', '');
+	my $backend = IPC::Run::start(
+		[
+			'psql', '--no-psqlrc', '--quiet', '--no-align', '--tuples-only',
+			'--file', '-', '--dbname' => $jobtest->connstr('postgres')
+		],
+		'<'  => \$backend_stdin,
+		'>'  => \$backend_stdout,
+		'2>' => \$backend_stderr,
+		$psql_timeout);
+
+	$backend_stdin .= q[
+BEGIN;
+CREATE TABLE jobtest(id int);
+SELECT pg_backend_pid();
+];
+	ok( pump_until(
+			$backend, $psql_timeout,
+			\$backend_stdout, qr/[[:digit:]]+[\r\n]$/m),
+		'acquired backend pid for job object test');
+	my $backend_pid = $backend_stdout;
+	chomp($backend_pid);
+	$backend_stdout = '';
+
+	note "backend PID: $backend_pid";
+
+	my $postmaster_pidfile = $jobtest->data_dir . '/postmaster.pid';
+	open(my $pidfh, '<', $postmaster_pidfile)
+		or die "cannot open postmaster.pid: $!";
+	my $postmaster_pid = <$pidfh>;
+	close($pidfh);
+	chomp($postmaster_pid);
+
+	note "postmaster PID: $postmaster_pid";
+	ok($postmaster_pid =~ /^\d+$/ && $postmaster_pid > 0,
+		"got valid postmaster PID: $postmaster_pid");
+
+	note "killing postmaster PID $postmaster_pid";
+	my $ret = PostgreSQL::Test::Utils::system_log('pg_ctl', 'kill', 'KILL',
+		$postmaster_pid);
+	is($ret, 0, "killed postmaster with pg_ctl kill KILL");
+
+	eval { $backend->finish; };
+
+	note "waiting for postmaster process to exit";
+	my $postmaster_gone = 0;
+	for (my $i = 0; $i < 30; $i++)
+	{
+		my $check = `tasklist /FI "PID eq $postmaster_pid" /NH 2>&1`;
+		if ($check !~ /postgres\.exe/)
+		{
+			$postmaster_gone = 1;
+			note "postmaster exited after " . (($i + 1) * 100) . "ms";
+			last;
+		}
+		select(undef, undef, undef, 0.1);
+	}
+
+	ok($postmaster_gone, "postmaster process exited");
+
+	$jobtest->{_pid} = undef;
+
+	unlink($postmaster_pidfile);
+
+	# THE REAL TEST: Can we restart without conflicts?
+	# If orphans exist, they'll block the port or shared memory
+	note "attempting restart (will fail if orphans present)";
+
+	my $restart_ok = 0;
+	eval {
+		$jobtest->start();
+		$restart_ok = 1;
+	};
+
+	if (!$restart_ok) {
+		fail("restart failed - orphans may be blocking resources: $@");
+	} else {
+		pass("restart succeeded - no orphans blocking port or shared memory");
+
+		eval {
+			my $result = $jobtest->safe_psql('postgres', 'SELECT 1');
+			is($result, '1', 'server functional after restart');
+		};
+		if ($@) {
+			note "query after restart failed: $@";
+			fail("query after restart failed");
+		}
+	}
+
+	note "stopping test cluster";
+	eval { $jobtest->stop('immediate'); };
+}
+
+
 done_testing();
