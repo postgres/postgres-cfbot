@@ -694,6 +694,7 @@ static void ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel,
 static void ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel,
 								const char *tablespacename, LOCKMODE lockmode);
 static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode);
+static void ATExecSetTableSpaceNewIndexRelfilenumber(Oid indexOid, LOCKMODE lockmode);
 static void ATExecSetTableSpaceNoStorage(Relation rel, Oid newTableSpace);
 static void ATExecSetRelOptions(Relation rel, List *defList,
 								AlterTableType operation,
@@ -17533,9 +17534,11 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 {
 	Relation	rel;
 	Oid			reltoastrelid;
+	char		relkind;
 	RelFileNumber newrelfilenumber;
 	RelFileLocator newrlocator;
 	List	   *reltoastidxids = NIL;
+	List	   *reltabidxids = NIL;
 	ListCell   *lc;
 
 	/*
@@ -17553,6 +17556,7 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 	}
 
 	reltoastrelid = rel->rd_rel->reltoastrelid;
+	relkind = rel->rd_rel->relkind;
 	/* Fetch the list of indexes on toast relation if necessary */
 	if (OidIsValid(reltoastrelid))
 	{
@@ -17599,6 +17603,13 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 
 	RelationAssumeNewRelfilelocator(rel);
 
+	/*
+	 * If this is a table, collect its index list now, while the relation is
+	 * still open, so we can give each index a fresh relfilenumber below.
+	 */
+	if (relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW)
+		reltabidxids = RelationGetIndexList(rel);
+
 	relation_close(rel, NoLock);
 
 	/* Make sure the reltablespace change is visible */
@@ -17612,6 +17623,81 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 
 	/* Clean up */
 	list_free(reltoastidxids);
+
+	/*
+	 * The heap now has a new relfilenode.  Give each of the table's indexes a
+	 * fresh relfilenode too, so that the indexes share the heap's rewrite fate
+	 * across commit and abort; otherwise a rolled-back insert can leave an
+	 * index entry that a later insert's reused heap TID aliases -- index
+	 * corruption (bug #19686).  See ATExecSetTableSpaceNewIndexRelfilenumber.
+	 */
+	foreach(lc, reltabidxids)
+		ATExecSetTableSpaceNewIndexRelfilenumber(lfirst_oid(lc), lockmode);
+	list_free(reltabidxids);
+}
+
+/*
+ * Give one of a table's indexes a fresh relfilenumber within its existing
+ * tablespace, copying the current index file to the new relfilenumber.
+ *
+ * ATExecSetTableSpace() calls this for each index of a table whose heap it has
+ * just rewritten to a new relfilenode.  The indexes must share that rewrite's
+ * transactional fate, otherwise an abort discards the heap's new file (freeing
+ * its TIDs) while leaving behind index entries that were written during the
+ * transaction, which a later insert can then alias -- index corruption (bug
+ * #19686).  Unlike a full reindex this merely copies the existing index file,
+ * so the added cost stays close to that of the heap move itself.
+ */
+static void
+ATExecSetTableSpaceNewIndexRelfilenumber(Oid indexOid, LOCKMODE lockmode)
+{
+	Relation	ind;
+	RelFileNumber newrelfilenumber;
+	RelFileLocator newrlocator;
+	Relation	pg_class;
+	HeapTuple	tuple;
+	ItemPointerData otid;
+	Form_pg_class rd_rel;
+
+	ind = relation_open(indexOid, lockmode);
+
+	/* Only plain indexes have storage that can hold the stale entries. */
+	if (ind->rd_rel->relkind != RELKIND_INDEX ||
+		!RELKIND_HAS_STORAGE(ind->rd_rel->relkind))
+	{
+		relation_close(ind, NoLock);
+		return;
+	}
+
+	/* Allocate a new relfilenumber in the index's current tablespace. */
+	newrelfilenumber = GetNewRelFileNumber(ind->rd_rel->reltablespace, NULL,
+										   ind->rd_rel->relpersistence);
+	newrlocator = ind->rd_locator;
+	newrlocator.relNumber = newrelfilenumber;
+
+	/* Copy the index into the new file and schedule the old one for cleanup. */
+	index_copy_data(ind, newrlocator);
+
+	/* Update the pg_class row; only the relfilenode changes. */
+	pg_class = table_open(RelationRelationId, RowExclusiveLock);
+	tuple = SearchSysCacheLockedCopy1(RELOID, ObjectIdGetDatum(indexOid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for index %u", indexOid);
+	otid = tuple->t_self;
+	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
+	rd_rel->relfilenode = newrelfilenumber;
+	CatalogTupleUpdate(pg_class, &otid, tuple);
+	UnlockTuple(pg_class, &otid, InplaceUpdateTupleLock);
+	heap_freetuple(tuple);
+	table_close(pg_class, RowExclusiveLock);
+
+	InvokeObjectPostAlterHook(RelationRelationId, indexOid, 0);
+	RelationAssumeNewRelfilelocator(ind);
+
+	relation_close(ind, NoLock);
+
+	/* Make the relfilenode change visible. */
+	CommandCounterIncrement();
 }
 
 /*
