@@ -382,11 +382,20 @@ typedef struct StdRdOptions
 #define HEAP_DEFAULT_FILLFACTOR		100
 
 /*
+ * RelationHasStdRdOptions
+ *		Returns true if rd_options can be read as StdRdOptions.  The macros
+ *		below must check this, since a table AM with its own amoptions
+ *		callback may use a different layout.  It's a function, in
+ *		reloptions.c, because it needs the TableAmRoutine definition.
+ */
+extern bool RelationHasStdRdOptions(Relation relation);
+
+/*
  * RelationGetToastTupleTarget
  *		Returns the relation's toast_tuple_target.  Note multiple eval of argument!
  */
 #define RelationGetToastTupleTarget(relation, defaulttarg) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->toast_tuple_target : (defaulttarg))
 
 /*
@@ -394,7 +403,7 @@ typedef struct StdRdOptions
  *		Returns the relation's toast_value_type.  Note multiple eval of argument!
  */
 #define RelationGetToastValueType(relation, defaulttarg) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->toast_value_type : (defaulttarg))
 
 /*
@@ -402,7 +411,7 @@ typedef struct StdRdOptions
  *		Returns the relation's fillfactor.  Note multiple eval of argument!
  */
 #define RelationGetFillFactor(relation, defaultff) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->fillfactor : (defaultff))
 
 /*
@@ -425,7 +434,7 @@ typedef struct StdRdOptions
  *		from the pov of logical decoding.  Note multiple eval of argument!
  */
 #define RelationIsUsedAsCatalogTable(relation)	\
-	((relation)->rd_options && \
+	(RelationHasStdRdOptions(relation) && \
 	 ((relation)->rd_rel->relkind == RELKIND_RELATION || \
 	  (relation)->rd_rel->relkind == RELKIND_MATVIEW) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->user_catalog_table : false)
@@ -436,7 +445,7 @@ typedef struct StdRdOptions
  *		Note multiple eval of argument!
  */
 #define RelationGetParallelWorkers(relation, defaultpw) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->parallel_workers : (defaultpw))
 
 /* ViewOptions->check_option values */
