@@ -98,6 +98,7 @@
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/evtcache.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -693,7 +694,11 @@ static void ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel,
 									bool toLogged);
 static void ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel,
 								const char *tablespacename, LOCKMODE lockmode);
-static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode);
+static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode,
+								bool copyIndexes);
+static bool ATSetTableSpaceCopyIndexes(AlterTableStmt *parsetree, List *wqueue,
+									   AlterTableUtilityContext *context);
+static void ATExecSetTableSpaceNewIndexRelfilenumber(Oid indexOid, LOCKMODE lockmode);
 static void ATExecSetTableSpaceNoStorage(Relation rel, Oid newTableSpace);
 static void ATExecSetRelOptions(Relation rel, List *defList,
 								AlterTableType operation,
@@ -6098,7 +6103,9 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			 * just do a block-by-block copy.
 			 */
 			if (tab->newTableSpace)
-				ATExecSetTableSpace(tab->relid, tab->newTableSpace, lockmode);
+				ATExecSetTableSpace(tab->relid, tab->newTableSpace, lockmode,
+									ATSetTableSpaceCopyIndexes(parsetree, *wqueue,
+															   context));
 		}
 
 		/*
@@ -17529,13 +17536,16 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
  * rewriting to be done, so we just want to copy the data as fast as possible.
  */
 static void
-ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
+ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode,
+					bool copyIndexes)
 {
 	Relation	rel;
 	Oid			reltoastrelid;
+	char		relkind;
 	RelFileNumber newrelfilenumber;
 	RelFileLocator newrlocator;
 	List	   *reltoastidxids = NIL;
+	List	   *reltabidxids = NIL;
 	ListCell   *lc;
 
 	/*
@@ -17553,6 +17563,7 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 	}
 
 	reltoastrelid = rel->rd_rel->reltoastrelid;
+	relkind = rel->rd_rel->relkind;
 	/* Fetch the list of indexes on toast relation if necessary */
 	if (OidIsValid(reltoastrelid))
 	{
@@ -17599,6 +17610,14 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 
 	RelationAssumeNewRelfilelocator(rel);
 
+	/*
+	 * If this is a table, collect its index list now, while the relation is
+	 * still open, so we can give each index a fresh relfilenumber below.
+	 */
+	if (copyIndexes &&
+		(relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW))
+		reltabidxids = RelationGetIndexList(rel);
+
 	relation_close(rel, NoLock);
 
 	/* Make sure the reltablespace change is visible */
@@ -17606,12 +17625,135 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 
 	/* Move associated toast relation and/or indexes, too */
 	if (OidIsValid(reltoastrelid))
-		ATExecSetTableSpace(reltoastrelid, newTableSpace, lockmode);
+		ATExecSetTableSpace(reltoastrelid, newTableSpace, lockmode, copyIndexes);
 	foreach(lc, reltoastidxids)
-		ATExecSetTableSpace(lfirst_oid(lc), newTableSpace, lockmode);
+		ATExecSetTableSpace(lfirst_oid(lc), newTableSpace, lockmode, copyIndexes);
 
 	/* Clean up */
 	list_free(reltoastidxids);
+
+	/*
+	 * The heap now has a new relfilenode.  Give each of the table's indexes a
+	 * fresh relfilenode too, so that the indexes share the heap's rewrite
+	 * fate across commit and abort.  See
+	 * ATExecSetTableSpaceNewIndexRelfilenumber.
+	 */
+	foreach(lc, reltabidxids)
+		ATExecSetTableSpaceNewIndexRelfilenumber(lfirst_oid(lc), lockmode);
+	list_free(reltabidxids);
+}
+
+/*
+ * Does ALTER TABLE SET TABLESPACE need to give the table's indexes new files?
+ *
+ * Only if something can still modify the table in the same transaction after
+ * the move.  Rather than listing every place where user code can run after
+ * it -- the validation of other tables in the work queue, such as an
+ * inheritance child getting a new CHECK constraint, foreign key validation,
+ * sql_drop and table_rewrite event triggers, and more -- the files are kept
+ * only for the one case where none of them exists: a plain
+ * "ALTER TABLE ... SET TABLESPACE" of a single table, with no other
+ * subcommand, sent by a client as the only statement of a simple Query
+ * message, outside any transaction block: the transaction then ends right
+ * after it.  What can still run after it is a ddl_command_end event trigger,
+ * so that case also requires that there is none.
+ *
+ * A statement sent by an extended-protocol Execute message always copies:
+ * later statements of the same pipeline share its transaction until the next
+ * Sync, and the backend cannot tell whether any will follow.  Forcing a commit
+ * after the ALTER would make it commit on its own when a later statement of
+ * the pipeline fails, which is not how ALTER TABLE behaves otherwise.
+ */
+static bool
+ATSetTableSpaceCopyIndexes(AlterTableStmt *parsetree, List *wqueue,
+						   AlterTableUtilityContext *context)
+{
+	if (context == NULL || IsInTransactionBlock(context->isTopLevel))
+		return true;
+	if (MyBackendType != B_BACKEND || IsExtendedQueryMessage())
+		return true;
+	if (parsetree == NULL || list_length(parsetree->cmds) != 1 ||
+		castNode(AlterTableCmd, linitial(parsetree->cmds))->subtype != AT_SetTableSpace ||
+		list_length(wqueue) != 1)
+		return true;
+	if (EventCacheLookup(EVT_DDLCommandEnd) != NIL)
+		return true;
+
+	return false;
+}
+
+/*
+ * Give one of a table's indexes a fresh relfilenumber within its existing
+ * tablespace, copying the current index file to the new relfilenumber.
+ *
+ * ATExecSetTableSpace() calls this for each index of a table whose heap it has
+ * just rewritten to a new relfilenode.  The indexes must share the heap's
+ * transactional fate: an abort has to discard the index entries written during
+ * the transaction together with the heap's new file, since the heap TIDs those
+ * entries point at are freed by the abort and can be reused by later inserts.
+ * Copying the existing index file keeps the added cost close to that of the
+ * heap move itself; the index stays in its own tablespace, as documented.
+ */
+static void
+ATExecSetTableSpaceNewIndexRelfilenumber(Oid indexOid, LOCKMODE lockmode)
+{
+	Relation	ind;
+	RelFileNumber newrelfilenumber;
+	RelFileLocator newrlocator;
+	Relation	pg_class;
+	HeapTuple	tuple;
+	ItemPointerData otid;
+	Form_pg_class rd_rel;
+
+	ind = relation_open(indexOid, lockmode);
+
+	/*
+	 * Only plain indexes have storage that can hold the stale entries.  An
+	 * index whose current file was created in this subtransaction (the index
+	 * itself, or a new file for it) is discarded together with the heap's new
+	 * file on abort, so it needs no copy.  rd_newRelfilelocatorSubid can be
+	 * zero after a rollback to a savepoint even though the file is new; then
+	 * this falls back to rd_createSubid, and copies if that does not match
+	 * either.
+	 */
+	if (ind->rd_rel->relkind != RELKIND_INDEX ||
+		!RELKIND_HAS_STORAGE(ind->rd_rel->relkind) ||
+		Max(ind->rd_newRelfilelocatorSubid, ind->rd_createSubid) ==
+		GetCurrentSubTransactionId())
+	{
+		relation_close(ind, NoLock);
+		return;
+	}
+
+	/* Allocate a new relfilenumber in the index's current tablespace. */
+	newrelfilenumber = GetNewRelFileNumber(ind->rd_rel->reltablespace, NULL,
+										   ind->rd_rel->relpersistence);
+	newrlocator = ind->rd_locator;
+	newrlocator.relNumber = newrelfilenumber;
+
+	/* Copy the index into the new file and schedule the old one for cleanup. */
+	index_copy_data(ind, newrlocator);
+
+	/* Update the pg_class row; only the relfilenode changes. */
+	pg_class = table_open(RelationRelationId, RowExclusiveLock);
+	tuple = SearchSysCacheLockedCopy1(RELOID, ObjectIdGetDatum(indexOid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for index %u", indexOid);
+	otid = tuple->t_self;
+	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
+	rd_rel->relfilenode = newrelfilenumber;
+	CatalogTupleUpdate(pg_class, &otid, tuple);
+	UnlockTuple(pg_class, &otid, InplaceUpdateTupleLock);
+	heap_freetuple(tuple);
+	table_close(pg_class, RowExclusiveLock);
+
+	InvokeObjectPostAlterHook(RelationRelationId, indexOid, 0);
+	RelationAssumeNewRelfilelocator(ind);
+
+	relation_close(ind, NoLock);
+
+	/* Make the relfilenode change visible. */
+	CommandCounterIncrement();
 }
 
 /*
