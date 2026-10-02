@@ -2285,6 +2285,252 @@ select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system
 (1 row)
 
 reset restrict_nonsystem_relation_kind;
+-- pretty-printed sublink test expressions must keep their parentheses where
+-- they are needed, and gain none where they are not
+create view tt28v as
+  select a, b, c, d,
+         ((a or b) in (select false)) as r1,
+         ((a and b) in (select false)) as r2,
+         ((c + d) in (select 3)) as r3,
+         ((select 1) in (select 1)) as r4,
+         ((not a) in (select true)) as r5
+  from (values (true, false, 1, 2), (false, true, 1, 2),
+               (false, false, 3, 3), (true, true, 3, 3)) t(a, b, c, d);
+select * from tt28v;
+ a | b | c | d | r1 | r2 | r3 | r4 | r5 
+---+---+---+---+----+----+----+----+----
+ t | f | 1 | 2 | f  | t  | t  | t  | f
+ f | t | 1 | 2 | f  | t  | t  | t  | t
+ f | f | 3 | 3 | t  | t  | f  | t  | t
+ t | t | 3 | 3 | f  | f  | f  | t  | f
+(4 rows)
+
+select pg_get_viewdef('tt28v'::regclass, true);
+                                             pg_get_viewdef                                              
+---------------------------------------------------------------------------------------------------------
+  SELECT a,                                                                                             +
+     b,                                                                                                 +
+     c,                                                                                                 +
+     d,                                                                                                 +
+     (a OR b IN ( SELECT false)) AS r1,                                                                 +
+     (a AND b IN ( SELECT false)) AS r2,                                                                +
+     (c + d IN ( SELECT 3)) AS r3,                                                                      +
+     (( SELECT 1) IN ( SELECT 1)) AS r4,                                                                +
+     (NOT a IN ( SELECT true)) AS r5                                                                    +
+    FROM ( VALUES (true,false,1,2), (false,true,1,2), (false,false,3,3), (true,true,3,3)) t(a, b, c, d);
+(1 row)
+
+select pg_get_viewdef('tt28v'::regclass, true) as def \gset
+create view tt28v_re as :def
+select * from tt28v_re;
+ a | b | c | d | r1 | r2 | r3 | r4 | r5 
+---+---+---+---+----+----+----+----+----
+ t | f | 1 | 2 | t  | t  | t  | t  | f
+ f | t | 1 | 2 | f  | f  | t  | t  | t
+ f | f | 3 | 3 | t  | f  | f  | t  | t
+ t | t | 3 | 3 | t  | f  | f  | t  | f
+(4 rows)
+
+create view tt28w as
+  select c, d,
+         ((c < d) in (select true)) as r1,
+         ((c < d) <> all (select false)) as r2,
+         ((c <= d) in (select true)) as r3,
+         ((c >= d) <= all (select true)) as r4,
+         ((c + d) <> all (select 0)) as r5,
+         ((c << 1) < all (select 9)) as r6,
+         (row(c < d) = (select true)) as r7,
+         ((row(c, d) is distinct from null) in (select true)) as r8
+  from (values (1, 2), (3, 3)) t(c, d);
+select * from tt28w;
+ c | d | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 
+---+---+----+----+----+----+----+----+----+----
+ 1 | 2 | t  | t  | t  | t  | t  | t  | t  | t
+ 3 | 3 | f  | f  | t  | t  | t  | t  | f  | t
+(2 rows)
+
+select pg_get_viewdef('tt28w'::regclass, true);
+                        pg_get_viewdef                         
+---------------------------------------------------------------
+  SELECT c,                                                   +
+     d,                                                       +
+     (c < d IN ( SELECT true)) AS r1,                         +
+     (c < d <> ALL ( SELECT false)) AS r2,                    +
+     (c <= d IN ( SELECT true)) AS r3,                        +
+     (c >= d <= ALL ( SELECT true)) AS r4,                    +
+     (c + d <> ALL ( SELECT 0)) AS r5,                        +
+     (c << 1 < ALL ( SELECT 9)) AS r6,                        +
+     (c < d = ( SELECT true)) AS r7,                          +
+     (ROW(c, d) IS DISTINCT FROM NULL IN ( SELECT true)) AS r8+
+    FROM ( VALUES (1,2), (3,3)) t(c, d);
+(1 row)
+
+select pg_get_viewdef('tt28w'::regclass, true) as def \gset
+create view tt28w_re as :def
+ERROR:  syntax error at or near "<>"
+LINE 4:     (c < d <> ALL ( SELECT false)) AS r2,
+                   ^
+select * from tt28w_re;
+ERROR:  relation "tt28w_re" does not exist
+LINE 1: select * from tt28w_re;
+                      ^
+-- test expressions that need no parentheses: those that bind tighter than IN
+-- or the combining operator, left-associative ones at an equal level, postfix
+-- tests and casts
+create view tt28x as
+  select c, d, x, a,
+         ((c * d) in (select 2)) as r1,
+         ((c::float8 ^ 2) in (select 1::float8)) as r2,
+         ((c << 1) in (select 2)) as r3,
+         ((- c) in (select -1)) as r4,
+         ((+ c) in (select 1)) as r5,
+         ((~ c) in (select -2)) as r6,
+         ((c is null) in (select false)) as r7,
+         ((a is true) in (select true)) as r8,
+         ((x is json) in (select true)) as r9,
+         ((x collate "C") in (select 'ab')) as r10,
+         ((c = any (array[1, 2])) in (select true)) as r11,
+         ((x || 'c') ~~ any (select 'ab%')) as r12,
+         (('10.0.0.0'::inet + c) << any (select '10.0.0.0/8'::inet)) as r13,
+         ((c + d) in (select 3::oid)) as r14,
+         ((row(c, d) < row(d, c)) in (select true)) as r15
+  from (values (1, 2, 'ab', true), (3, 3, '{}', false)) t(c, d, x, a);
+select * from tt28x;
+ c | d | x  | a | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 | r9 | r10 | r11 | r12 | r13 | r14 | r15 
+---+---+----+---+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----+-----+-----
+ 1 | 2 | ab | t | t  | t  | t  | t  | t  | t  | t  | t  | f  | t   | t   | t   | t   | t   | t
+ 3 | 3 | {} | f | f  | f  | f  | f  | f  | f  | t  | f  | t  | f   | f   | f   | t   | f   | f
+(2 rows)
+
+select pg_get_viewdef('tt28x'::regclass, true);
+                                          pg_get_viewdef                                           
+---------------------------------------------------------------------------------------------------
+  SELECT c,                                                                                       +
+     d,                                                                                           +
+     x,                                                                                           +
+     a,                                                                                           +
+     (c * d IN ( SELECT 2)) AS r1,                                                                +
+     (c::double precision ^ 2::double precision IN ( SELECT 1::double precision AS float8)) AS r2,+
+     (c << 1 IN ( SELECT 2)) AS r3,                                                               +
+     (- c IN ( SELECT '-1'::integer)) AS r4,                                                      +
+     (+ c IN ( SELECT 1)) AS r5,                                                                  +
+     (~ c IN ( SELECT '-2'::integer)) AS r6,                                                      +
+     (c IS NULL IN ( SELECT false)) AS r7,                                                        +
+     (a IS TRUE IN ( SELECT true)) AS r8,                                                         +
+     (x IS JSON IN ( SELECT true)) AS r9,                                                         +
+     (x COLLATE "C" IN ( SELECT 'ab'::text)) AS r10,                                              +
+     (c = ANY (ARRAY[1, 2]) IN ( SELECT true)) AS r11,                                            +
+     (x || 'c'::text ~~ ANY ( SELECT 'ab%'::text)) AS r12,                                        +
+     ('10.0.0.0'::inet + c::bigint << ANY ( SELECT '10.0.0.0/8'::inet AS inet)) AS r13,           +
+     ((c + d)::oid IN ( SELECT 3::oid AS oid)) AS r14,                                            +
+     ((ROW(c, d) < ROW(d, c)) IN ( SELECT true)) AS r15                                           +
+    FROM ( VALUES (1,2,'ab'::text,true), (3,3,'{}'::text,false)) t(c, d, x, a);
+(1 row)
+
+select pg_get_viewdef('tt28x'::regclass, true) as def \gset
+create view tt28x_re as :def
+select * from tt28x_re;
+ c | d | x  | a | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 | r9 | r10 | r11 | r12 | r13 | r14 | r15 
+---+---+----+---+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----+-----+-----
+ 1 | 2 | ab | t | t  | t  | t  | t  | t  | t  | t  | t  | f  | t   | t   | t   | t   | t   | t
+ 3 | 3 | {} | f | f  | f  | f  | f  | f  | f  | t  | f  | t  | f   | f   | f   | t   | f   | f
+(2 rows)
+
+-- a combining operator named like an arithmetic operator binds as tightly as
+-- that operator
+create function tt28f(int, text) returns bool language sql immutable
+  as 'select $1::text = $2';
+create operator * (leftarg = int, rightarg = text, function = tt28f);
+create function tt28h(bool, text) returns bool language sql immutable
+  as 'select $1::text = $2';
+create operator * (leftarg = bool, rightarg = text, function = tt28h);
+create view tt28y as
+  select c,
+         ((c + 1) * any (select '2'::text)) as r1,
+         ((c * 2) * any (select '2'::text)) as r2,
+         ((c << 1) * any (select '2'::text)) as r3,
+         ((- c) * any (select '-1'::text)) as r4,
+         ((c = any (array[1, 2])) * any (select 'true'::text)) as r5
+  from (values (1), (3)) t(c);
+select * from tt28y;
+ c | r1 | r2 | r3 | r4 | r5 
+---+----+----+----+----+----
+ 1 | t  | t  | t  | t  | t
+ 3 | f  | f  | f  | f  | f
+(2 rows)
+
+select pg_get_viewdef('tt28y'::regclass, true);
+                             pg_get_viewdef                             
+------------------------------------------------------------------------
+  SELECT c,                                                            +
+     (c + 1 * ANY ( SELECT '2'::text AS text)) AS r1,                  +
+     (c * 2 * ANY ( SELECT '2'::text AS text)) AS r2,                  +
+     (c << 1 * ANY ( SELECT '2'::text AS text)) AS r3,                 +
+     (- c * ANY ( SELECT '-1'::text AS text)) AS r4,                   +
+     (c = ANY (ARRAY[1, 2]) * ANY ( SELECT 'true'::text AS text)) AS r5+
+    FROM ( VALUES (1), (3)) t(c);
+(1 row)
+
+select pg_get_viewdef('tt28y'::regclass, true) as def \gset
+create view tt28y_re as :def
+ERROR:  operator does not exist: integer + boolean
+LINE 2:     (c + 1 * ANY ( SELECT '2'::text AS text)) AS r1,
+               ^
+DETAIL:  No operator of that name accepts the given argument types.
+HINT:  You might need to add explicit type casts.
+select * from tt28y_re;
+ERROR:  relation "tt28y_re" does not exist
+LINE 1: select * from tt28y_re;
+                      ^
+create function tt28g(float8, text) returns bool language sql immutable
+  as 'select $1::text = $2';
+create operator + (leftarg = float8, rightarg = text, function = tt28g);
+create operator * (leftarg = float8, rightarg = text, function = tt28g);
+create operator ^ (leftarg = float8, rightarg = text, function = tt28g);
+create view tt28z as
+  select c,
+         ((c::float8 * 2) + any (select '2'::text)) as r1,
+         ((c::float8 - 1) + any (select '0'::text)) as r2,
+         ((|/ c::float8) + any (select '1'::text)) as r3,
+         ((c::float8 ^ 2) * any (select '1'::text)) as r4,
+         ((|/ c::float8) * any (select '1'::text)) as r5,
+         ((c::float8 * 2) ^ any (select '2'::text)) as r6,
+         ((c::float8 ^ 2) ^ any (select '1'::text)) as r7,
+         ((- c::float8) ^ any (select '-1'::text)) as r8
+  from (values (1), (3)) t(c);
+select * from tt28z;
+ c | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 
+---+----+----+----+----+----+----+----+----
+ 1 | t  | t  | t  | t  | t  | t  | t  | t
+ 3 | f  | f  | f  | f  | f  | f  | f  | f
+(2 rows)
+
+select pg_get_viewdef('tt28z'::regclass, true);
+                                      pg_get_viewdef                                      
+------------------------------------------------------------------------------------------
+  SELECT c,                                                                              +
+     (c::double precision * 2::double precision + ANY ( SELECT '2'::text AS text)) AS r1,+
+     (c::double precision - 1::double precision + ANY ( SELECT '0'::text AS text)) AS r2,+
+     (|/ c::double precision + ANY ( SELECT '1'::text AS text)) AS r3,                   +
+     (c::double precision ^ 2::double precision * ANY ( SELECT '1'::text AS text)) AS r4,+
+     (|/ c::double precision * ANY ( SELECT '1'::text AS text)) AS r5,                   +
+     (c::double precision * 2::double precision ^ ANY ( SELECT '2'::text AS text)) AS r6,+
+     (c::double precision ^ 2::double precision ^ ANY ( SELECT '1'::text AS text)) AS r7,+
+     (- c::double precision ^ ANY ( SELECT '-1'::text AS text)) AS r8                    +
+    FROM ( VALUES (1), (3)) t(c);
+(1 row)
+
+select pg_get_viewdef('tt28z'::regclass, true) as def \gset
+create view tt28z_re as :def
+ERROR:  operator does not exist: |/ boolean
+LINE 4:     (|/ c::double precision + ANY ( SELECT '1'::text AS text...
+             ^
+DETAIL:  No operator of that name accepts the given argument type.
+HINT:  You might need to add an explicit type cast.
+select * from tt28z_re;
+ERROR:  relation "tt28z_re" does not exist
+LINE 1: select * from tt28z_re;
+                      ^
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 NOTICE:  drop cascades to 27 other objects
@@ -2316,7 +2562,7 @@ drop cascades to view aliased_view_2
 drop cascades to view aliased_view_3
 drop cascades to view aliased_view_4
 DROP SCHEMA testviewschm2 CASCADE;
-NOTICE:  drop cascades to 80 other objects
+NOTICE:  drop cascades to 95 other objects
 DETAIL:  drop cascades to table t1
 drop cascades to view temporal1
 drop cascades to view temporal2
@@ -2397,3 +2643,18 @@ drop cascades to view tt25v
 drop cascades to view tt26v
 drop cascades to table tt27v_tbl
 drop cascades to view tt27v
+drop cascades to view tt28v
+drop cascades to view tt28v_re
+drop cascades to view tt28w
+drop cascades to view tt28x
+drop cascades to view tt28x_re
+drop cascades to function tt28f(integer,text)
+drop cascades to operator *(integer,text)
+drop cascades to function tt28h(boolean,text)
+drop cascades to operator *(boolean,text)
+drop cascades to view tt28y
+drop cascades to function tt28g(double precision,text)
+drop cascades to operator +(double precision,text)
+drop cascades to operator *(double precision,text)
+drop cascades to operator ^(double precision,text)
+drop cascades to view tt28z

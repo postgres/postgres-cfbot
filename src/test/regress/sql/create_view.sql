@@ -838,6 +838,111 @@ insert into tt27v values (1); -- Error
 select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system view.
 reset restrict_nonsystem_relation_kind;
 
+-- pretty-printed sublink test expressions must keep their parentheses where
+-- they are needed, and gain none where they are not
+create view tt28v as
+  select a, b, c, d,
+         ((a or b) in (select false)) as r1,
+         ((a and b) in (select false)) as r2,
+         ((c + d) in (select 3)) as r3,
+         ((select 1) in (select 1)) as r4,
+         ((not a) in (select true)) as r5
+  from (values (true, false, 1, 2), (false, true, 1, 2),
+               (false, false, 3, 3), (true, true, 3, 3)) t(a, b, c, d);
+select * from tt28v;
+select pg_get_viewdef('tt28v'::regclass, true);
+select pg_get_viewdef('tt28v'::regclass, true) as def \gset
+create view tt28v_re as :def
+select * from tt28v_re;
+
+create view tt28w as
+  select c, d,
+         ((c < d) in (select true)) as r1,
+         ((c < d) <> all (select false)) as r2,
+         ((c <= d) in (select true)) as r3,
+         ((c >= d) <= all (select true)) as r4,
+         ((c + d) <> all (select 0)) as r5,
+         ((c << 1) < all (select 9)) as r6,
+         (row(c < d) = (select true)) as r7,
+         ((row(c, d) is distinct from null) in (select true)) as r8
+  from (values (1, 2), (3, 3)) t(c, d);
+select * from tt28w;
+select pg_get_viewdef('tt28w'::regclass, true);
+select pg_get_viewdef('tt28w'::regclass, true) as def \gset
+create view tt28w_re as :def
+select * from tt28w_re;
+
+-- test expressions that need no parentheses: those that bind tighter than IN
+-- or the combining operator, left-associative ones at an equal level, postfix
+-- tests and casts
+create view tt28x as
+  select c, d, x, a,
+         ((c * d) in (select 2)) as r1,
+         ((c::float8 ^ 2) in (select 1::float8)) as r2,
+         ((c << 1) in (select 2)) as r3,
+         ((- c) in (select -1)) as r4,
+         ((+ c) in (select 1)) as r5,
+         ((~ c) in (select -2)) as r6,
+         ((c is null) in (select false)) as r7,
+         ((a is true) in (select true)) as r8,
+         ((x is json) in (select true)) as r9,
+         ((x collate "C") in (select 'ab')) as r10,
+         ((c = any (array[1, 2])) in (select true)) as r11,
+         ((x || 'c') ~~ any (select 'ab%')) as r12,
+         (('10.0.0.0'::inet + c) << any (select '10.0.0.0/8'::inet)) as r13,
+         ((c + d) in (select 3::oid)) as r14,
+         ((row(c, d) < row(d, c)) in (select true)) as r15
+  from (values (1, 2, 'ab', true), (3, 3, '{}', false)) t(c, d, x, a);
+select * from tt28x;
+select pg_get_viewdef('tt28x'::regclass, true);
+select pg_get_viewdef('tt28x'::regclass, true) as def \gset
+create view tt28x_re as :def
+select * from tt28x_re;
+
+-- a combining operator named like an arithmetic operator binds as tightly as
+-- that operator
+create function tt28f(int, text) returns bool language sql immutable
+  as 'select $1::text = $2';
+create operator * (leftarg = int, rightarg = text, function = tt28f);
+create function tt28h(bool, text) returns bool language sql immutable
+  as 'select $1::text = $2';
+create operator * (leftarg = bool, rightarg = text, function = tt28h);
+create view tt28y as
+  select c,
+         ((c + 1) * any (select '2'::text)) as r1,
+         ((c * 2) * any (select '2'::text)) as r2,
+         ((c << 1) * any (select '2'::text)) as r3,
+         ((- c) * any (select '-1'::text)) as r4,
+         ((c = any (array[1, 2])) * any (select 'true'::text)) as r5
+  from (values (1), (3)) t(c);
+select * from tt28y;
+select pg_get_viewdef('tt28y'::regclass, true);
+select pg_get_viewdef('tt28y'::regclass, true) as def \gset
+create view tt28y_re as :def
+select * from tt28y_re;
+
+create function tt28g(float8, text) returns bool language sql immutable
+  as 'select $1::text = $2';
+create operator + (leftarg = float8, rightarg = text, function = tt28g);
+create operator * (leftarg = float8, rightarg = text, function = tt28g);
+create operator ^ (leftarg = float8, rightarg = text, function = tt28g);
+create view tt28z as
+  select c,
+         ((c::float8 * 2) + any (select '2'::text)) as r1,
+         ((c::float8 - 1) + any (select '0'::text)) as r2,
+         ((|/ c::float8) + any (select '1'::text)) as r3,
+         ((c::float8 ^ 2) * any (select '1'::text)) as r4,
+         ((|/ c::float8) * any (select '1'::text)) as r5,
+         ((c::float8 * 2) ^ any (select '2'::text)) as r6,
+         ((c::float8 ^ 2) ^ any (select '1'::text)) as r7,
+         ((- c::float8) ^ any (select '-1'::text)) as r8
+  from (values (1), (3)) t(c);
+select * from tt28z;
+select pg_get_viewdef('tt28z'::regclass, true);
+select pg_get_viewdef('tt28z'::regclass, true) as def \gset
+create view tt28z_re as :def
+select * from tt28z_re;
+
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 DROP SCHEMA testviewschm2 CASCADE;
