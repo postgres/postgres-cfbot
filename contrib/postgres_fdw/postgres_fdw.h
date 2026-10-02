@@ -67,9 +67,10 @@ typedef struct PgFdwRelationInfo
 	Cost		total_cost;
 
 	/*
-	 * Estimated number of rows fetched from the foreign server, and costs
-	 * excluding costs for transferring those rows from the foreign server.
-	 * These are only used by estimate_path_cost_size().
+	 * Estimated number of rows fetched from the foreign server, and costs of
+	 * the work done by the foreign server.  The costs exclude transferring
+	 * those rows from the foreign server and the local work on them.  These
+	 * are only used by estimate_path_cost_size().
 	 */
 	double		retrieved_rows;
 	Cost		rel_startup_cost;
