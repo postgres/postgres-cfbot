@@ -1047,6 +1047,7 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr, TimeLineID tli)
 			errno = save_errno;
 			ereport(PANIC,
 					(errcode_for_file_access(),
+					 errnocoredump_on_errno(ENOSPC),
 					 errmsg("could not write to WAL segment %s "
 							"at offset %d, length %d: %m",
 							xlogfname, startoff, segbytes)));
