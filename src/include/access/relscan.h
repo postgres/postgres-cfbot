@@ -88,6 +88,7 @@ typedef struct ParallelTableScanDescData
 	RelFileLocator phs_locator; /* physical relation to scan */
 	bool		phs_syncscan;	/* report location to syncscan logic? */
 	bool		phs_snapshot_any;	/* SnapshotAny, not phs_snapshot_data? */
+	bool		phs_reset_snapshot; /* use SO_RESET_SNAPSHOT? */
 	Size		phs_snapshot_off;	/* data for snapshot */
 } ParallelTableScanDescData;
 typedef struct ParallelTableScanDescData *ParallelTableScanDesc;

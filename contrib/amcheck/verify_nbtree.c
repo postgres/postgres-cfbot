@@ -559,7 +559,8 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 									 0, /* number of keys */
 									 NULL,	/* scan key */
 									 true,	/* buffer access strategy OK */
-									 true); /* syncscan OK? */
+									 true, /* syncscan OK? */
+									 false);
 
 		/*
 		 * Scan will behave as the first scan of a CREATE INDEX CONCURRENTLY

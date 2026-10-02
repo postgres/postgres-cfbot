@@ -14,6 +14,7 @@
 #ifndef INDEX_H
 #define INDEX_H
 
+#include "access/xact.h"
 #include "catalog/objectaddress.h"
 #include "nodes/execnodes.h"
 
@@ -25,6 +26,18 @@ typedef struct AttrMap AttrMap;
 
 
 #define DEFAULT_INDEX_TYPE	"btree"
+
+/*
+ * Does this concurrent index build use periodic snapshot resets?
+ *
+ * Snapshot resetting is only applicable when all of:
+ * - the build is concurrent (ii_Concurrent)
+ * - isolation level is not REPEATABLE READ/SERIALIZABLE (those keep a
+ *   registered transaction snapshot)
+ */
+#define IndexBuildResetsSnapshots(indexInfo) \
+	((indexInfo)->ii_Concurrent && \
+	 !IsolationUsesXactSnapshot())
 
 /* Action code for index_set_state_flags */
 typedef enum
