@@ -30,3 +30,33 @@ t
 (1 row)
 
 step s0_commit: COMMIT;
+
+starting permutation: s0_init s0_begin s0_get_xid s1_insert_user_catalog s1_checkpoint s1_advance_slot s1_check_fast_forward_snapshot s0_commit
+step s0_init: SELECT 'init' FROM pg_create_logical_replication_slot('isolation_slot', 'test_decoding');
+?column?
+--------
+init    
+(1 row)
+
+step s0_begin: BEGIN;
+step s0_get_xid: SELECT pg_current_xact_id() IS NOT NULL AS xid_assigned;
+xid_assigned
+------------
+t           
+(1 row)
+
+step s1_insert_user_catalog: INSERT INTO user_cat VALUES (1);
+step s1_checkpoint: CHECKPOINT;
+step s1_advance_slot: SELECT slot_name FROM pg_replication_slot_advance('isolation_slot', pg_current_wal_lsn());
+slot_name     
+--------------
+isolation_slot
+(1 row)
+
+step s1_check_fast_forward_snapshot: SELECT count(*) > 0 AS catalog_xid_tracked FROM pg_ls_logicalsnapdir() files, pg_get_logical_snapshot_info(files.name) AS info, user_cat WHERE user_cat.xmin = ANY(info.committed_xip);
+catalog_xid_tracked
+-------------------
+t                  
+(1 row)
+
+step s0_commit: COMMIT;
