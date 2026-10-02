@@ -143,6 +143,108 @@ casefold(PG_FUNCTION_ARGS)
 }
 
 
+/*
+ * Write count copies of the srclen-byte string src to dst and return a
+ * pointer past the last byte written.
+ *
+ * The first copy is written with memcpy(), then the region written so far
+ * is copied onto its own end, doubling it each time, until it is at least
+ * REPEAT_BYTES_BLOCK long.  From there on that region is copied repeatedly.
+ * The doubling keeps the number of memcpy() calls small for short strings,
+ * and the fixed block, which is a whole number of copies and stays in
+ * cache, keeps the source reads cheap for large outputs.  The caller must
+ * have checked that count * srclen bytes fit in dst.
+ */
+#define REPEAT_BYTES_BLOCK	16384
+
+static char *
+repeat_bytes(char *dst, const char *src, int srclen, int count)
+{
+	Size		total = (Size) srclen * count;
+	Size		written;
+	Size		block;
+
+	if (total == 0)
+		return dst;
+	Assert(srclen > 0 && count > 0);
+
+	memcpy(dst, src, srclen);
+	written = srclen;
+	while (written < total && written < REPEAT_BYTES_BLOCK)
+	{
+		Size		n = Min(written, total - written);
+
+		memcpy(dst + written, dst, n);
+		written += n;
+	}
+
+	block = written;
+	while (written < total)
+	{
+		Size		n = Min(block, total - written);
+
+		memcpy(dst + written, dst, n);
+		written += n;
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	return dst + total;
+}
+
+/*
+ * Append m characters of the padding string pad (padlen bytes) to dst,
+ * cycling through pad as needed, and return a pointer past the last byte
+ * written.
+ *
+ * The pad string is validated with pg_mblen_range() only as far as it is
+ * used, so an incomplete multibyte character at its end is an error only
+ * if the padding reaches it.
+ */
+static char *
+append_padding(char *dst, const char *pad, int padlen, int m)
+{
+	const char *p = pad;
+	const char *pend = pad + padlen;
+	int			nchars = 0;
+	int			nrep;
+	int			tail;
+
+	Assert(padlen > 0 || m <= 0);
+
+	if (m <= 0 || padlen <= 0)
+		return dst;
+
+	/* count the characters of one repetition, stopping at m */
+	while (p < pend && nchars < m)
+	{
+		p += pg_mblen_range(p, pend);
+		nchars++;
+	}
+
+	/* whole repetitions only if the pad string was counted to its end */
+	nrep = (p == pend) ? m / nchars : 0;
+	if (nrep == 0)
+	{
+		/* the loop above stopped after exactly m characters */
+		memcpy(dst, pad, p - pad);
+		return dst + (p - pad);
+	}
+
+	dst = repeat_bytes(dst, pad, padlen, nrep);
+
+	/*
+	 * The remaining m - nrep * nchars characters are a prefix of pad that the
+	 * loop above already checked, so measure them with the unbounded variant
+	 * and copy them as bytes.
+	 */
+	p = pad;
+	for (tail = m - nrep * nchars; tail > 0; tail--)
+		p += pg_mblen_unbounded(p);
+	memcpy(dst, pad, p - pad);
+
+	return dst + (p - pad);
+}
+
 /********************************************************************
  *
  * lpad
@@ -167,10 +269,7 @@ lpad(PG_FUNCTION_ARGS)
 	text	   *string2 = PG_GETARG_TEXT_PP(2);
 	text	   *ret;
 	char	   *ptr1,
-			   *ptr2,
-			   *ptr2start,
 			   *ptr_ret;
-	const char *ptr2end;
 	int			m,
 				s1len,
 				s2len;
@@ -209,20 +308,7 @@ lpad(PG_FUNCTION_ARGS)
 
 	m = len - s1len;
 
-	ptr2 = ptr2start = VARDATA_ANY(string2);
-	ptr2end = ptr2 + s2len;
-	ptr_ret = VARDATA(ret);
-
-	while (m--)
-	{
-		int			mlen = pg_mblen_range(ptr2, ptr2end);
-
-		memcpy(ptr_ret, ptr2, mlen);
-		ptr_ret += mlen;
-		ptr2 += mlen;
-		if (ptr2 == ptr2end)	/* wrap around at end of s2 */
-			ptr2 = ptr2start;
-	}
+	ptr_ret = append_padding(VARDATA(ret), VARDATA_ANY(string2), s2len, m);
 
 	ptr1 = VARDATA_ANY(string1);
 
@@ -265,10 +351,7 @@ rpad(PG_FUNCTION_ARGS)
 	text	   *string2 = PG_GETARG_TEXT_PP(2);
 	text	   *ret;
 	char	   *ptr1,
-			   *ptr2,
-			   *ptr2start,
 			   *ptr_ret;
-	const char *ptr2end;
 	int			m,
 				s1len,
 				s2len;
@@ -320,19 +403,7 @@ rpad(PG_FUNCTION_ARGS)
 		ptr1 += mlen;
 	}
 
-	ptr2 = ptr2start = VARDATA_ANY(string2);
-	ptr2end = ptr2 + s2len;
-
-	while (m--)
-	{
-		int			mlen = pg_mblen_range(ptr2, ptr2end);
-
-		memcpy(ptr_ret, ptr2, mlen);
-		ptr_ret += mlen;
-		ptr2 += mlen;
-		if (ptr2 == ptr2end)	/* wrap around at end of s2 */
-			ptr2 = ptr2start;
-	}
+	ptr_ret = append_padding(ptr_ret, VARDATA_ANY(string2), s2len, m);
 
 	SET_VARSIZE(ret, ptr_ret - (char *) ret);
 
@@ -1165,9 +1236,6 @@ repeat(PG_FUNCTION_ARGS)
 	text	   *result;
 	int			slen,
 				tlen;
-	int			i;
-	char	   *cp,
-			   *sp;
 
 	if (count < 0)
 		count = 0;
@@ -1184,14 +1252,7 @@ repeat(PG_FUNCTION_ARGS)
 	result = (text *) palloc(tlen);
 
 	SET_VARSIZE(result, tlen);
-	cp = VARDATA(result);
-	sp = VARDATA_ANY(string);
-	for (i = 0; i < count; i++)
-	{
-		memcpy(cp, sp, slen);
-		cp += slen;
-		CHECK_FOR_INTERRUPTS();
-	}
+	repeat_bytes(VARDATA(result), VARDATA_ANY(string), slen, count);
 
 	PG_RETURN_TEXT_P(result);
 }
