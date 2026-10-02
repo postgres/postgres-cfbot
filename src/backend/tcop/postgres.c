@@ -5407,4 +5407,14 @@ disable_statement_timeout(void)
 {
 	if (get_timeout_active(STATEMENT_TIMEOUT))
 		disable_timeout(STATEMENT_TIMEOUT, false);
+	else if (get_timeout_indicator(STATEMENT_TIMEOUT, true))
+	{
+		/*
+		 * The timeout fired after the statement's last
+		 * CHECK_FOR_INTERRUPTS(), for instance while interrupts were held
+		 * during cleanup.  The statement is over, so drop the cancel request
+		 * it queued rather than let the next statement fail on it.
+		 */
+		QueryCancelPending = false;
+	}
 }
