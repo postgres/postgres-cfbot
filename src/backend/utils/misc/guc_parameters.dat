@@ -1104,6 +1104,13 @@
   options => 'file_extend_method_options',
 },
 
+{ name => 'force_core_dump_on_panic', type => 'bool', context => 'PGC_SIGHUP', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Force core dumps for PANIC errors marked to skip them.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'force_core_dump_on_panic',
+  boot_val => 'false',
+},
+
 { name => 'from_collapse_limit', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
   short_desc => 'Sets the FROM-list size beyond which subqueries are not collapsed.',
   long_desc => 'The planner will merge subqueries into upper queries if the resulting FROM list would have no more than this many items.',
