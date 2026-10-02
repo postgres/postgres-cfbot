@@ -636,8 +636,8 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 				new_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
-	PgStat_Counter startreadtime = 0,
-				startwritetime = 0;
+	instr_time	startreadtime,
+				startwritetime;
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
@@ -647,6 +647,10 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
 							  params->log_vacuum_min_duration >= 0));
+
+	INSTR_TIME_SET_ZERO(startreadtime);
+	INSTR_TIME_SET_ZERO(startwritetime);
+
 	if (instrument)
 	{
 		pg_rusage_init(&ru0);
@@ -1176,11 +1180,15 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 			}
 			if (track_io_timing)
 			{
-				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
-				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
+				instr_time	read_time = pgStatBlockReadTime;
+				instr_time	write_time = pgStatBlockWriteTime;
+
+				INSTR_TIME_SUBTRACT(read_time, startreadtime);
+				INSTR_TIME_SUBTRACT(write_time, startwritetime);
 
 				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
-								 read_ms, write_ms);
+								 INSTR_TIME_GET_MILLISEC(read_time),
+								 INSTR_TIME_GET_MILLISEC(write_time));
 			}
 			if (secs_dur > 0 || usecs_dur > 0)
 			{
