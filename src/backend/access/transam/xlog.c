@@ -5562,14 +5562,11 @@ XLOGShmemRequest(void *arg)
 }
 
 /*
- * XLOGShmemInit - initialize the XLogCtl shared memory area.
+ * Initialize process-local state needed by wal_debug.
  */
 static void
-XLOGShmemInit(void *arg)
+InitWalDebug(void)
 {
-	char	   *allocptr;
-	int			i;
-
 #ifdef WAL_DEBUG
 
 	/*
@@ -5585,6 +5582,18 @@ XLOGShmemInit(void *arg)
 		MemoryContextAllowInCriticalSection(walDebugCxt, true);
 	}
 #endif
+}
+
+/*
+ * XLOGShmemInit - initialize the XLogCtl shared memory area.
+ */
+static void
+XLOGShmemInit(void *arg)
+{
+	char	   *allocptr;
+	int			i;
+
+	InitWalDebug();
 
 	memset(XLogCtl, 0, sizeof(XLogCtlData));
 
@@ -5667,6 +5676,8 @@ static void
 XLOGShmemAttach(void *arg)
 {
 	WALInsertLocks = XLogCtl->Insert.WALInsertLocks;
+
+	InitWalDebug();
 }
 
 /*
