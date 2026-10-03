@@ -198,6 +198,7 @@ gin_leafpage_items(PG_FUNCTION_ARGS)
 		mctx = MemoryContextSwitchTo(fctx->multi_call_memory_ctx);
 
 		page = get_page_from_raw(raw_page);
+		verify_page_header(page);
 
 		if (PageIsNew(page))
 		{
@@ -243,7 +244,7 @@ gin_leafpage_items(PG_FUNCTION_ARGS)
 	fctx = SRF_PERCALL_SETUP();
 	inter_call_data = fctx->user_fctx;
 
-	if (inter_call_data->seg != inter_call_data->lastseg)
+	if (inter_call_data->seg < inter_call_data->lastseg)
 	{
 		GinPostingList *cur = inter_call_data->seg;
 		HeapTuple	resultTuple;
@@ -254,6 +255,16 @@ gin_leafpage_items(PG_FUNCTION_ARGS)
 					i;
 		ItemPointer tids;
 		Datum	   *tids_datum;
+
+		/*
+		 * Check that the segment, and the data it claims to hold, lie within
+		 * the posting lists area.
+		 */
+		if ((char *) cur + offsetof(GinPostingList, bytes) > (char *) inter_call_data->lastseg ||
+			(char *) GinNextPostingListSegment(cur) > (char *) inter_call_data->lastseg)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid posting list in GIN data leaf page")));
 
 		memset(nulls, 0, sizeof(nulls));
 
