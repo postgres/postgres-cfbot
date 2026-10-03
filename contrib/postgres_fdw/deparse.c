@@ -3749,6 +3749,18 @@ deparseBoolExpr(BoolExpr *node, deparse_expr_cxt *context)
 			deparseExpr(linitial(node->args), context);
 			appendStringInfoChar(buf, ')');
 			return;
+		case IMPLIES_EXPR:
+
+			/*
+			 * eval_const_expressions should already have expanded this, but
+			 * if not, send the expansion, which any remote server accepts.
+			 */
+			appendStringInfoString(buf, "((NOT ");
+			deparseExpr(linitial(node->args), context);
+			appendStringInfoString(buf, ") OR ");
+			deparseExpr(lsecond(node->args), context);
+			appendStringInfoChar(buf, ')');
+			return;
 	}
 
 	appendStringInfoChar(buf, '(');
