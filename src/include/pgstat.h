@@ -739,10 +739,6 @@ extern void pgstat_report_connect(Oid dboid);
 extern void pgstat_update_parallel_workers_stats(PgStat_Counter workers_to_launch,
 												 PgStat_Counter workers_launched);
 
-#define pgstat_count_buffer_read_time(n)							\
-	(pgStatBlockReadTime += (n))
-#define pgstat_count_buffer_write_time(n)							\
-	(pgStatBlockWriteTime += (n))
 #define pgstat_count_conn_active_time(n)							\
 	(pgStatActiveTime += (n))
 #define pgstat_count_conn_txn_idle_time(n)							\
@@ -980,10 +976,6 @@ extern PGDLLIMPORT PgStat_CheckpointerStats PendingCheckpointerStats;
 /*
  * Variables in pgstat_database.c
  */
-
-/* Updated by pgstat_count_buffer_*_time macros */
-extern PGDLLIMPORT PgStat_Counter pgStatBlockReadTime;
-extern PGDLLIMPORT PgStat_Counter pgStatBlockWriteTime;
 
 /*
  * Updated by pgstat_count_conn_*_time macros, called by

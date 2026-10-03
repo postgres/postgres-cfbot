@@ -198,6 +198,12 @@ There are two mechanisms for achieving abort safety:
   even after an error, the base Instrumentation can be used with a
   PG_TRY/PG_FINALLY block that calls InstrStopFinalize().
 
+A FATAL error exits the process without unwinding the C stack, so the
+PG_FINALLY path never runs for entries still open at that point.  Since their
+stack frames are left in place, InstrStackFinalizeAll() accumulates whatever
+is still on the stack into instr_top right before the session totals are
+reported for the last time (see pgstat_shutdown_hook).
+
 Both mechanisms add overhead, so neither is suitable for high-frequency
 instrumentation like per-node measurements in the executor.  Instead,
 plan node and trigger children rely on their parent QueryInstrumentation
@@ -220,7 +226,16 @@ When per-node instrumentation is active, the worker's per-node stats are
 additionally copied into dynamic shared memory and aggregated into the
 leader's nodes through InstrAggNode(), which the leader then rolls up as
 usual.  To avoid double counting, the worker does not roll up its own nodes
-into its query entry.
+into its query entry.  Instead it adds each node's own stats directly to its
+instr_top (ExecFinalizeNodeInstrumentationFlat), so that the worker's session
+totals remain complete.
+
+As a result, a worker's instr_top accounts for everything the worker did,
+also in case of errors, since its unfinalized entries end up in its instr_top
+through the abort handling.  The leader's instr_top additionally contains
+what it imported from workers, which a session-level consumer that must count
+activity exactly once, such as the cumulative statistics system, needs to
+exclude.
 
 
 Memory Handling
