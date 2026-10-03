@@ -42,11 +42,11 @@ int
 pthread_mutex_lock(pthread_mutex_t *mp)
 {
 	/* Initialize the csection if not already done */
-	if (mp->initstate != 1)
+	if (InterlockedCompareExchange(&mp->initstate, 0, 0) != 1)
 	{
 		LONG		istate;
 
-		while ((istate = InterlockedExchange(&mp->initstate, 2)) == 2)
+		while ((istate = InterlockedCompareExchange(&mp->initstate, 2, 0)) == 2)
 			Sleep(0);			/* wait, another thread is doing this */
 		if (istate != 1)
 			InitializeCriticalSection(&mp->csection);
@@ -59,7 +59,7 @@ pthread_mutex_lock(pthread_mutex_t *mp)
 int
 pthread_mutex_unlock(pthread_mutex_t *mp)
 {
-	if (mp->initstate != 1)
+	if (InterlockedCompareExchange(&mp->initstate, 0, 0) != 1)
 		return EINVAL;
 	LeaveCriticalSection(&mp->csection);
 	return 0;
