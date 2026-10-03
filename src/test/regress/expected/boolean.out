@@ -681,16 +681,103 @@ SELECT true IMPLIES 1;                  -- error
 ERROR:  argument of IMPLIES must be type boolean, not type integer
 LINE 1: SELECT true IMPLIES 1;
                             ^
--- the construct is expanded during parse analysis, so this is what is stored
-CREATE VIEW boolview AS SELECT istrue IMPLIES isnul AS i FROM booltbl4;
+-- stored expressions keep IMPLIES, and deparse with only the parentheses
+-- that are needed
+CREATE VIEW boolview AS
+  SELECT istrue IMPLIES isnul AS i,
+         NOT istrue IMPLIES isnul AS not_antecedent,
+         istrue OR isfalse IMPLIES isnul AND istrue AS or_and,
+         (istrue IMPLIES isfalse) IMPLIES isnul AS grouped_left,
+         istrue IMPLIES (isfalse IMPLIES isnul) AS grouped_right,
+         (istrue IMPLIES isfalse) OR isnul AS under_or,
+         NOT (istrue IMPLIES isfalse) AS under_not,
+         (istrue IMPLIES isfalse) IS TRUE AS under_is
+    FROM booltbl4;
 SELECT pg_get_viewdef('boolview', true);
-          pg_get_viewdef          
-----------------------------------
-  SELECT NOT istrue OR isnul AS i+
+                        pg_get_viewdef                        
+--------------------------------------------------------------
+  SELECT istrue IMPLIES isnul AS i,                          +
+     NOT istrue IMPLIES isnul AS not_antecedent,             +
+     istrue OR isfalse IMPLIES isnul AND istrue AS or_and,   +
+     (istrue IMPLIES isfalse) IMPLIES isnul AS grouped_left, +
+     istrue IMPLIES (isfalse IMPLIES isnul) AS grouped_right,+
+     (istrue IMPLIES isfalse) OR isnul AS under_or,          +
+     NOT (istrue IMPLIES isfalse) AS under_not,              +
+     (istrue IMPLIES isfalse) IS TRUE AS under_is            +
     FROM booltbl4;
 (1 row)
 
+SELECT pg_get_viewdef('boolview', false);
+                         pg_get_viewdef                          
+-----------------------------------------------------------------
+  SELECT (istrue IMPLIES isnul) AS i,                           +
+     ((NOT istrue) IMPLIES isnul) AS not_antecedent,            +
+     ((istrue OR isfalse) IMPLIES (isnul AND istrue)) AS or_and,+
+     ((istrue IMPLIES isfalse) IMPLIES isnul) AS grouped_left,  +
+     (istrue IMPLIES (isfalse IMPLIES isnul)) AS grouped_right, +
+     ((istrue IMPLIES isfalse) OR isnul) AS under_or,           +
+     (NOT (istrue IMPLIES isfalse)) AS under_not,               +
+     ((istrue IMPLIES isfalse) IS TRUE) AS under_is             +
+    FROM booltbl4;
+(1 row)
+
+SELECT * FROM boolview;
+   i    | not_antecedent | or_and | grouped_left | grouped_right | under_or | under_not | under_is 
+--------+----------------+--------+--------------+---------------+----------+-----------+----------
+ (null) | t              | (null) | t            | t             | (null)   | t         | f
+(1 row)
+
 DROP VIEW boolview;
+CREATE TABLE implies_check (a int, b int,
+  CHECK (a > 0 IMPLIES b > 0));
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'implies_check'::regclass;
+       pg_get_constraintdef        
+-----------------------------------
+ CHECK (((a > 0) IMPLIES (b > 0)))
+(1 row)
+
+INSERT INTO implies_check VALUES (1, 1), (0, 0), (NULL, 0), (1, NULL);
+INSERT INTO implies_check VALUES (1, 0);    -- error
+ERROR:  new row for relation "implies_check" violates check constraint "implies_check_check"
+DETAIL:  Failing row contains (1, 0).
+-- the planner expands it, so EXPLAIN shows NOT a OR b, simplified
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT * FROM implies_check WHERE a > 0 IMPLIES b > 0;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Seq Scan on public.implies_check
+   Output: a, b
+   Filter: ((implies_check.a <= 0) OR (implies_check.b > 0))
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM implies_check WHERE a IS NULL IMPLIES false;
+        QUERY PLAN         
+---------------------------
+ Seq Scan on implies_check
+   Filter: (a IS NOT NULL)
+(2 rows)
+
+-- and a partial index on IMPLIES is usable for the expanded form
+CREATE INDEX implies_check_idx ON implies_check (b)
+  WHERE a IS NULL IMPLIES b > 0;
+SELECT pg_get_indexdef('implies_check_idx'::regclass);
+                                              pg_get_indexdef                                               
+------------------------------------------------------------------------------------------------------------
+ CREATE INDEX implies_check_idx ON public.implies_check USING btree (b) WHERE ((a IS NULL) IMPLIES (b > 0))
+(1 row)
+
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT b FROM implies_check WHERE a IS NOT NULL OR b > 0;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Index Only Scan using implies_check_idx on implies_check
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE implies_check;
 -- IMPLIES is unreserved, so it remains usable as an identifier
 CREATE TABLE implies (implies bool);
 INSERT INTO implies VALUES (false);
