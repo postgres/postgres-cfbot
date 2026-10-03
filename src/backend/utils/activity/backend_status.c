@@ -1095,6 +1095,63 @@ pgstat_get_crashed_backend_activity(int pid, char *buffer, int buflen)
 }
 
 /* ----------
+ * pgstat_get_xact_start_by_proc_number() -
+ *
+ *	Return the transaction start timestamp of the backend with the given
+ *	procNumber and pid, or 0 if no such transaction exists.  This looks
+ *	directly at the BackendStatusArray, and so provides current
+ *	information regardless of the age of our transaction's snapshot of
+ *	the status array.
+ *
+ *	Returns 0 for walsenders, matching pg_stat_activity, which does not
+ *	expose transaction time for them because it is not kept up to date.
+ * ----------
+ */
+TimestampTz
+pgstat_get_xact_start_by_proc_number(ProcNumber procNumber, int pid)
+{
+	volatile PgBackendStatus *vbeentry;
+	TimestampTz result;
+	bool		found;
+
+	/* pid 0 would "match" a vacated entry's cleared st_procpid */
+	if (pid <= 0)
+		return 0;
+
+	if (procNumber < 0 || procNumber >= NumBackendStatSlots)
+		return 0;
+
+	vbeentry = &BackendStatusArray[procNumber];
+
+	/*
+	 * Follow the protocol of retrying if st_changecount changes while we
+	 * examine the entry, or if it's odd.  See the PgBackendStatus comments.
+	 */
+	for (;;)
+	{
+		int			before_changecount;
+		int			after_changecount;
+
+		pgstat_begin_read_activity(vbeentry, before_changecount);
+
+		found = (vbeentry->st_procpid == pid &&
+				 vbeentry->st_backendType != B_WAL_SENDER);
+		result = vbeentry->st_xact_start_timestamp;
+
+		pgstat_end_read_activity(vbeentry, after_changecount);
+
+		if (pgstat_read_activity_complete(before_changecount,
+										  after_changecount))
+			break;
+
+		/* Make sure we can break out of loop if stuck... */
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	return found ? result : 0;
+}
+
+/* ----------
  * pgstat_get_my_query_id() -
  *
  * Return current backend's query identifier.
