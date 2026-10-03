@@ -198,6 +198,8 @@ typedef struct AlteredTableInfo
 	bool		chgPersistence; /* T if SET LOGGED/UNLOGGED is used */
 	char		newrelpersistence;	/* if above is true */
 	Expr	   *partition_constraint;	/* for attach partition validation */
+	/* OIDs of re-added domain CHECK constraints to validate in Phase 3 */
+	List	   *domain_constraints;
 	/* true, if validating default due to some other attach/detach */
 	bool		validate_default;
 	/* Objects to rebuild after completing ALTER TYPE operations */
@@ -5535,13 +5537,50 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_ReAddDomainConstraint:	/* Re-add pre-existing domain check
 										 * constraint */
-			address =
-				AlterDomainAddConstraint(((AlterDomainStmt *) cmd->def)->typeName,
-										 ((AlterDomainStmt *) cmd->def)->def,
-										 NULL, true);
-			break;
+			{
+				AlterDomainStmt *stmt = (AlterDomainStmt *) cmd->def;
+				Constraint *con = castNode(Constraint, stmt->def);
+				ObjectAddress constrAddr = InvalidObjectAddress;
+
+				/* only CHECK constraints can depend on a column */
+				Assert(con->contype == CONSTR_CHECK);
+
+				address = AlterDomainAddConstraint(stmt->typeName, stmt->def,
+												   &constrAddr, true);
+
+				/*
+				 * AlterDomainAddConstraint doesn't validate re-added
+				 * constraints, since tables using the domain may not have
+				 * been rewritten yet. Tell Phase 3 to do it.
+				 */
+				if (!con->skip_validation)
+					tab->domain_constraints =
+						lappend_oid(tab->domain_constraints,
+									constrAddr.objectId);
+				break;
+			}
 		case AT_ReAddComment:	/* Re-add existing comment */
-			address = CommentObject((CommentStmt *) cmd->def);
+			{
+				CommentStmt *stmt = (CommentStmt *) cmd->def;
+				Relation	comrel;
+
+				/*
+				 * Don't use CommentObject(), since that requires ownership of
+				 * the constraint's table or domain, which the user altering a
+				 * column the constraint depends on need not have. We're just
+				 * restoring a comment that already existed.
+				 */
+				Assert(stmt->objtype == OBJECT_TABCONSTRAINT ||
+					   stmt->objtype == OBJECT_DOMCONSTRAINT);
+				address = get_object_address(stmt->objtype, stmt->object,
+											 &comrel,
+											 ShareUpdateExclusiveLock,
+											 false);
+				CreateComments(address.objectId, address.classId,
+							   address.objectSubId, stmt->comment);
+				if (comrel != NULL)
+					relation_close(comrel, NoLock);
+			}
 			break;
 		case AT_AddIndexConstraint: /* ADD CONSTRAINT USING INDEX */
 			address = ATExecAddIndexConstraint(tab, rel, (IndexStmt *) cmd->def,
@@ -6158,6 +6197,36 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 
 		if (rel)
 			table_close(rel, NoLock);
+	}
+
+	/*
+	 * Validate re-added domain CHECK constraints.  This must wait until all
+	 * tables have been rewritten, since any of them might contain columns of
+	 * the domain. Don't skip relations without storage since the work queue
+	 * entry might be for a standalone composite type.
+	 */
+	foreach(ltab, *wqueue)
+	{
+		AlteredTableInfo *tab = (AlteredTableInfo *) lfirst(ltab);
+
+		foreach_oid(conoid, tab->domain_constraints)
+		{
+			HeapTuple	tup;
+			Form_pg_constraint con;
+			Datum		conbin;
+
+			tup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for constraint %u", conoid);
+			con = (Form_pg_constraint) GETSTRUCT(tup);
+
+			conbin = SysCacheGetAttrNotNull(CONSTROID, tup,
+											Anum_pg_constraint_conbin);
+			validateDomainCheckConstraint(con->contypid,
+										  TextDatumGetCString(conbin));
+
+			ReleaseSysCache(tup);
+		}
 	}
 
 	/* Finally, run any afterStmts that were queued up */
@@ -16141,10 +16210,14 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 			relid = con->conrelid;
 		else
 		{
-			/* must be a domain constraint */
-			relid = get_typ_typrelid(getBaseType(con->contypid));
-			if (!OidIsValid(relid))
-				elog(ERROR, "could not identify relation associated with constraint %u", oldId);
+			/*
+			 * Must be a domain constraint.  The domain's base type need not
+			 * be composite, so there may be no relation associated with it.
+			 * Since the relid is only used to determine which work queue
+			 * entry the command is attached to, we can use the relation which
+			 * is being altered and which we already hold a lock on.
+			 */
+			relid = tab->relid;
 		}
 		confrelid = con->confrelid;
 		conislocal = con->conislocal;
