@@ -1752,6 +1752,16 @@ create_memoize_plan(PlannerInfo *root, MemoizePath *best_path, int flags)
 
 	keyparamids = pull_paramids((Expr *) param_exprs);
 
+	/*
+	 * Params that appear in the key expressions but could not be made cache
+	 * keys must not be included in keyparamids.  The executor purges the
+	 * cache when such a Param changes, so that stale entries are never
+	 * reused.
+	 */
+	if (best_path->unhashable_params)
+		keyparamids = bms_del_members(keyparamids,
+									  best_path->unhashable_params);
+
 	plan = make_memoize(subplan, operators, collations, param_exprs,
 						best_path->singlerow, best_path->binary_mode,
 						best_path->est_entries, keyparamids, best_path->est_calls,

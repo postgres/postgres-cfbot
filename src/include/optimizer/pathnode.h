@@ -123,7 +123,8 @@ extern MemoizePath *create_memoize_path(PlannerInfo *root,
 										List *hash_operators,
 										bool singlerow,
 										bool binary_mode,
-										Cardinality est_calls);
+										Cardinality est_calls,
+										Bitmapset *unhashable_params);
 extern GatherPath *create_gather_path(PlannerInfo *root,
 									  RelOptInfo *rel, Path *subpath, PathTarget *target,
 									  Relids required_outer, double *rows);
