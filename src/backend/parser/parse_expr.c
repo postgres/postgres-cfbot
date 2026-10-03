@@ -1451,11 +1451,11 @@ transformBoolExpr(ParseState *pstate, BoolExpr *a)
 }
 
 /*
- * Transform "a IMPLIES b" into the equivalent "NOT a OR b".
+ * Transform "a IMPLIES b".
  *
- * We expand this here rather than in gram.y so that a non-boolean operand is
- * complained of in terms of IMPLIES, rather than in terms of the NOT or OR
- * that the construct happens to be built from.
+ * This means the same as "NOT a OR b", but we keep it as its own BoolExpr so
+ * that stored expressions deparse as written.  eval_const_expressions does the
+ * expansion, so the planner proper never sees IMPLIES.
  */
 static Node *
 transformAExprImplies(ParseState *pstate, A_Expr *a)
@@ -1469,15 +1469,7 @@ transformAExprImplies(ParseState *pstate, A_Expr *a)
 	lexpr = coerce_to_boolean(pstate, lexpr, "IMPLIES");
 	rexpr = coerce_to_boolean(pstate, rexpr, "IMPLIES");
 
-	/*
-	 * Each operand appears exactly once in the expansion, so unlike BETWEEN
-	 * this does not risk evaluating anything twice.
-	 */
-	return (Node *) makeBoolExpr(OR_EXPR,
-								 list_make2(makeBoolExpr(NOT_EXPR,
-														 list_make1(lexpr),
-														 exprLocation(lexpr)),
-											rexpr),
+	return (Node *) makeBoolExpr(IMPLIES_EXPR, list_make2(lexpr, rexpr),
 								 a->location);
 }
 
