@@ -61,7 +61,23 @@ endif
 
 # XXX: Need to determine proper version of the function cflags for clang
 bitcode_cflags = ['-fno-strict-aliasing', '-fwrapv']
-bitcode_cflags += get_option('c_args')
+
+# Sanitizer instrumentation in the JIT bitcode corrupts the JIT code
+# generator: JIT-compiled queries crash with SIGILL.  Strip sanitizer flags
+# from c_args during bitcode generation, and warn when we do, since the
+# JIT-compiled code then runs without sanitizer coverage.
+bitcode_sanitize_stripped = false
+foreach cflag : get_option('c_args')
+  if cflag.contains('sanitize')
+    bitcode_sanitize_stripped = true
+  else
+    bitcode_cflags += cflag
+  endif
+endforeach
+if bitcode_sanitize_stripped
+  warning('stripping sanitizer flags from LLVM JIT bitcode; JIT-compiled code will not be instrumented')
+endif
+
 bitcode_cflags += cppflags
 
 # XXX: Worth improving on the logic to find directories here
