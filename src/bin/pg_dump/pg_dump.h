@@ -373,9 +373,11 @@ typedef struct _tableInfo
 									 * empty string, unnamed constraint
 									 * (pre-v17) */
 	char	  **notnull_comment;	/* comment thereof */
-	bool	   *notnull_invalid;	/* true for NOT NULL NOT VALID */
+	bool	   *notnull_invalid;	/* true for NOT NULL NOT VALID. Note It's
+									 * false for NOT NULL NOT ENFORCED too. */
 	bool	   *notnull_noinh;	/* NOT NULL is NO INHERIT */
 	bool	   *notnull_islocal;	/* true if NOT NULL has local definition */
+	bool	   *notnull_enforced;	/* false for NOT NULL NOT ENFORCED */
 	struct _attrDefInfo **attrdefs; /* DEFAULT expressions */
 	struct _constraintInfo *checkexprs; /* CHECK constraints */
 	struct _relStatsInfo *stats;	/* only set for matviews */
