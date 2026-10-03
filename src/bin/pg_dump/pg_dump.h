@@ -719,6 +719,7 @@ typedef struct _SubscriptionInfo
 	bool		subrunasowner;
 	bool		subfailover;
 	bool		subretaindeadtuples;
+	bool		submessages;
 	int			submaxretention;
 	char	   *subservername;
 	char	   *subconninfo;
