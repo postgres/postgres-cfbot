@@ -4627,6 +4627,12 @@ SyncVariables(void)
 	/* send stuff to it, too */
 	PQsetErrorVerbosity(pset.db, pset.verbosity);
 	PQsetErrorContextVisibility(pset.db, pset.show_context);
+
+	/*
+	 * We should report a disconnect request for this connection when one
+	 * arrives, so clear the flag.
+	 */
+	pset.disconnect_request_reported = false;
 }
 
 /*
