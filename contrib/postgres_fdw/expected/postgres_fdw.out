@@ -9927,6 +9927,25 @@ select tableoid::regclass, * FROM remp2;
 (3 rows)
 
 delete from itrtest;
+-- The ctid returned by a routed insert must be the row's real ctid on the
+-- remote side.  A foreign-table partition uses a virtual slot, and
+-- ExecForceStoreHeapTuple() used to leave tts_tid invalid on that path, so
+-- RETURNING ctid projected (4294967295,0).  Compare against the remote table
+-- rather than printing the ctid, which depends on the remote page layout.
+create temp table itrtest_ctid (a int, c tid);
+with ins as (insert into itrtest values (1, 'foo'), (2, 'bar')
+             returning a, ctid)
+insert into itrtest_ctid select a, ctid from ins;
+select count(*) as ctid_not_found from itrtest_ctid r
+where not exists (select 1 from loct1 l where l.ctid = r.c and l.a = r.a)
+  and not exists (select 1 from loct2 l where l.ctid = r.c and l.a = r.a);
+ ctid_not_found 
+----------------
+              0
+(1 row)
+
+drop table itrtest_ctid;
+delete from itrtest;
 -- MERGE ought to fail cleanly
 merge into itrtest using (select 1, 'foo') as source on (true)
   when matched then do nothing;
