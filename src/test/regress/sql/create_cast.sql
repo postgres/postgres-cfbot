@@ -62,6 +62,9 @@ $$ SELECT ('bar'::text || $1::text); $$;
 
 CREATE CAST (int4 AS casttesttype) WITH FUNCTION bar_int4_text(int4) AS IMPLICIT;
 SELECT 1234::int4::casttesttype; -- Should work now
+SELECT CAST(1234::int4 AS casttesttype DEFAULT NULL ON CONVERSION ERROR); -- error
+ALTER FUNCTION bar_int4_text(int4) ERROR SAFE;
+SELECT CAST(1234::int4 AS casttesttype DEFAULT NULL ON CONVERSION ERROR); -- ok
 
 -- check dependencies generated for that
 SELECT pg_describe_object(classid, objid, objsubid) as obj,

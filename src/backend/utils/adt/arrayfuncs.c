@@ -3292,6 +3292,15 @@ array_map(Datum arrayd,
 		/* Apply the given expression to source element */
 		values[i] = ExecEvalExpr(exprstate, econtext, &nulls[i]);
 
+		/* Exit early if evaluation failed */
+		if (SOFT_ERROR_OCCURRED(exprstate->escontext))
+		{
+			pfree(values);
+			pfree(nulls);
+
+			return (Datum) 0;
+		}
+
 		if (nulls[i])
 			hasnulls = true;
 		else
