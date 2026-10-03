@@ -51,6 +51,7 @@ typedef enum CopyDest
 	COPY_FILE,					/* to file (or a piped program) */
 	COPY_FRONTEND,				/* to frontend */
 	COPY_CALLBACK,				/* to callback function */
+	COPY_BLACKHOLE,				/* to nowhere */
 } CopyDest;
 
 /*
@@ -88,6 +89,7 @@ typedef struct CopyToStateData
 	List	   *attnumlist;		/* integer list of attnums to copy */
 	char	   *filename;		/* filename, or NULL for STDOUT */
 	bool		is_program;		/* is 'filename' a program to popen? */
+	bool		is_blackhole;	/* is destination BLACKHOLE? */
 	bool		json_row_delim_needed;	/* need delimiter before next row */
 	StringInfo	json_buf;		/* reusable buffer for JSON output,
 								 * initialized in BeginCopyTo */
@@ -649,6 +651,8 @@ CopySendEndOfRow(CopyToState cstate)
 		case COPY_CALLBACK:
 			cstate->data_dest_cb(fe_msgbuf->data, fe_msgbuf->len);
 			break;
+		case COPY_BLACKHOLE:
+			break;
 	}
 
 	/* Update the progress */
@@ -790,6 +794,7 @@ BeginCopyTo(ParseState *pstate,
 			Oid queryRelId,
 			const char *filename,
 			bool is_program,
+			bool is_blackhole,
 			copy_data_dest_cb data_dest_cb,
 			List *attnamelist,
 			List *options)
@@ -1140,8 +1145,14 @@ BeginCopyTo(ParseState *pstate,
 	cstate->encoding_embeds_ascii = PG_ENCODING_IS_CLIENT_ONLY(cstate->file_encoding);
 
 	cstate->copy_dest = COPY_FILE;	/* default */
+	cstate->is_blackhole = is_blackhole;
 
-	if (data_dest_cb)
+	if (is_blackhole)
+	{
+		progress_vals[1] = PROGRESS_COPY_TYPE_BLACKHOLE;
+		cstate->copy_dest = COPY_BLACKHOLE;
+	}
+	else if (data_dest_cb)
 	{
 		progress_vals[1] = PROGRESS_COPY_TYPE_CALLBACK;
 		cstate->copy_dest = COPY_CALLBACK;
@@ -1262,7 +1273,7 @@ EndCopyTo(CopyToState cstate)
 uint64
 DoCopyTo(CopyToState cstate)
 {
-	bool		pipe = (cstate->filename == NULL && cstate->data_dest_cb == NULL);
+	bool		pipe = (cstate->filename == NULL && cstate->data_dest_cb == NULL && !cstate->is_blackhole);
 	bool		fe_copy = (pipe && whereToSendOutput == DestRemote);
 	TupleDesc	tupDesc;
 	int			num_phys_attrs;
@@ -1271,6 +1282,15 @@ DoCopyTo(CopyToState cstate)
 
 	if (fe_copy)
 		SendCopyBegin(cstate);
+	else if (cstate->is_blackhole && whereToSendOutput == DestRemote)
+	{
+		/*
+		 * If we are in a blackhole copy from the frontend, we don't send a
+		 * CopyBegin message, but we still need to make sure psql or other
+		 * clients don't hang waiting for it. If we don't send CopyBegin,
+		 * client will just see the CommandComplete message later.
+		 */
+	}
 
 	if (cstate->rel)
 		tupDesc = RelationGetDescr(cstate->rel);
