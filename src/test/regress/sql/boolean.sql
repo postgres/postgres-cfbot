@@ -297,10 +297,45 @@ SELECT isfalse IMPLIES isnul IS NULL FROM booltbl4;
 SELECT 1 IMPLIES true;                  -- error
 SELECT true IMPLIES 1;                  -- error
 
--- the construct is expanded during parse analysis, so this is what is stored
-CREATE VIEW boolview AS SELECT istrue IMPLIES isnul AS i FROM booltbl4;
+-- stored expressions keep IMPLIES, and deparse with only the parentheses
+-- that are needed
+CREATE VIEW boolview AS
+  SELECT istrue IMPLIES isnul AS i,
+         NOT istrue IMPLIES isnul AS not_antecedent,
+         istrue OR isfalse IMPLIES isnul AND istrue AS or_and,
+         (istrue IMPLIES isfalse) IMPLIES isnul AS grouped_left,
+         istrue IMPLIES (isfalse IMPLIES isnul) AS grouped_right,
+         (istrue IMPLIES isfalse) OR isnul AS under_or,
+         NOT (istrue IMPLIES isfalse) AS under_not,
+         (istrue IMPLIES isfalse) IS TRUE AS under_is
+    FROM booltbl4;
 SELECT pg_get_viewdef('boolview', true);
+SELECT pg_get_viewdef('boolview', false);
+SELECT * FROM boolview;
 DROP VIEW boolview;
+
+CREATE TABLE implies_check (a int, b int,
+  CHECK (a > 0 IMPLIES b > 0));
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'implies_check'::regclass;
+INSERT INTO implies_check VALUES (1, 1), (0, 0), (NULL, 0), (1, NULL);
+INSERT INTO implies_check VALUES (1, 0);    -- error
+
+-- the planner expands it, so EXPLAIN shows NOT a OR b, simplified
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT * FROM implies_check WHERE a > 0 IMPLIES b > 0;
+EXPLAIN (COSTS OFF)
+SELECT * FROM implies_check WHERE a IS NULL IMPLIES false;
+
+-- and a partial index on IMPLIES is usable for the expanded form
+CREATE INDEX implies_check_idx ON implies_check (b)
+  WHERE a IS NULL IMPLIES b > 0;
+SELECT pg_get_indexdef('implies_check_idx'::regclass);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT b FROM implies_check WHERE a IS NOT NULL OR b > 0;
+RESET enable_seqscan;
+DROP TABLE implies_check;
 
 -- IMPLIES is unreserved, so it remains usable as an identifier
 CREATE TABLE implies (implies bool);
