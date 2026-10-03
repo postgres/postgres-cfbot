@@ -43,6 +43,45 @@ static bool gist_bbox_zorder_abbrev_abort(int memtupcount, SortSupport ssup);
 /* Minimum accepted ratio of split */
 #define LIMIT_RATIO 0.3
 
+/*
+ * Does the box have a NaN coordinate?
+ *
+ * No box comparison is true against a NaN, so a union key with one would
+ * hide everything below it.  Union keys map NaNs to infinities instead (see
+ * adjustBox), but indexes built before that was done can still have NaN
+ * internal keys, and searches must descend into those.
+ */
+static inline bool
+box_has_nan(const BOX *box)
+{
+	return isnan(box->high.x) || isnan(box->high.y) ||
+		isnan(box->low.x) || isnan(box->low.y);
+}
+
+/* Is the entry an internal key with a NaN coordinate? */
+static inline bool
+nan_internal_key(const GISTENTRY *entry)
+{
+	return !GIST_LEAF(entry) && box_has_nan(DatumGetBoxP(entry->key));
+}
+
+/* float8_max() and float8_min(), but a NaN gives the matching infinity */
+static inline float8
+bound_max(float8 val1, float8 val2)
+{
+	if (isnan(val1) || isnan(val2))
+		return get_float8_infinity();
+	return float8_max(val1, val2);
+}
+
+static inline float8
+bound_min(float8 val1, float8 val2)
+{
+	if (isnan(val1) || isnan(val2))
+		return -get_float8_infinity();
+	return float8_min(val1, val2);
+}
+
 
 /**************************************************
  * Box ops
@@ -126,6 +165,10 @@ gist_box_consistent(PG_FUNCTION_ARGS)
 	if (DatumGetBoxP(entry->key) == NULL || query == NULL)
 		PG_RETURN_BOOL(false);
 
+	/* A NaN internal key tells us nothing, see box_has_nan() */
+	if (nan_internal_key(entry))
+		PG_RETURN_BOOL(true);
+
 	/*
 	 * if entry is not leaf, use rtree_internal_consistent, else use
 	 * gist_box_leaf_consistent
@@ -141,19 +184,31 @@ gist_box_consistent(PG_FUNCTION_ARGS)
 }
 
 /*
- * Increase BOX b to include addon.
+ * Increase BOX b to include addon.  A NaN in either box grows b to the
+ * matching infinity.
  */
 static void
 adjustBox(BOX *b, const BOX *addon)
 {
-	if (float8_lt(b->high.x, addon->high.x))
-		b->high.x = addon->high.x;
-	if (float8_gt(b->low.x, addon->low.x))
-		b->low.x = addon->low.x;
-	if (float8_lt(b->high.y, addon->high.y))
-		b->high.y = addon->high.y;
-	if (float8_gt(b->low.y, addon->low.y))
-		b->low.y = addon->low.y;
+	b->high.x = bound_max(b->high.x, addon->high.x);
+	b->low.x = bound_min(b->low.x, addon->low.x);
+	b->high.y = bound_max(b->high.y, addon->high.y);
+	b->low.y = bound_min(b->low.y, addon->low.y);
+}
+
+/* Copy a BOX, mapping NaNs to infinities. */
+static void
+snapBox(BOX *b, const BOX *box)
+{
+	*b = *box;
+	if (isnan(b->high.x))
+		b->high.x = get_float8_infinity();
+	if (isnan(b->high.y))
+		b->high.y = get_float8_infinity();
+	if (isnan(b->low.x))
+		b->low.x = -get_float8_infinity();
+	if (isnan(b->low.y))
+		b->low.y = -get_float8_infinity();
 }
 
 /*
@@ -174,7 +229,7 @@ gist_box_union(PG_FUNCTION_ARGS)
 	numranges = entryvec->n;
 	pageunion = palloc_object(BOX);
 	cur = DatumGetBoxP(entryvec->vector[0].key);
-	memcpy(pageunion, cur, sizeof(BOX));
+	snapBox(pageunion, cur);
 
 	for (i = 1; i < numranges; i++)
 	{
@@ -239,7 +294,7 @@ fallbackSplit(GistEntryVector *entryvec, GIST_SPLITVEC *v)
 			if (unionL == NULL)
 			{
 				unionL = palloc_object(BOX);
-				*unionL = *cur;
+				snapBox(unionL, cur);
 			}
 			else
 				adjustBox(unionL, cur);
@@ -252,7 +307,7 @@ fallbackSplit(GistEntryVector *entryvec, GIST_SPLITVEC *v)
 			if (unionR == NULL)
 			{
 				unionR = palloc_object(BOX);
-				*unionR = *cur;
+				snapBox(unionR, cur);
 			}
 			else
 				adjustBox(unionR, cur);
@@ -526,7 +581,7 @@ gist_box_picksplit(PG_FUNCTION_ARGS)
 	{
 		box = DatumGetBoxP(entryvec->vector[i].key);
 		if (i == FirstOffsetNumber)
-			context.boundingBox = *box;
+			snapBox(&context.boundingBox, box);
 		else
 			adjustBox(&context.boundingBox, box);
 	}
@@ -715,7 +770,7 @@ gist_box_picksplit(PG_FUNCTION_ARGS)
 		if (v->spl_nleft > 0)					\
 			adjustBox(leftBox, box);			\
 		else									\
-			*leftBox = *(box);					\
+			snapBox(leftBox, box);				\
 		v->spl_left[v->spl_nleft++] = off;		\
 	} while(0)
 
@@ -724,7 +779,7 @@ gist_box_picksplit(PG_FUNCTION_ARGS)
 		if (v->spl_nright > 0)					\
 			adjustBox(rightBox, box);			\
 		else									\
-			*rightBox = *(box);					\
+			snapBox(rightBox, box);				\
 		v->spl_right[v->spl_nright++] = off;	\
 	} while(0)
 
@@ -959,6 +1014,13 @@ rtree_internal_consistent(BOX *key, BOX *query, StrategyNumber strategy)
 {
 	bool		retval;
 
+	/*
+	 * A NaN query can still match with ~=, since box_same() treats NaNs as
+	 * equal, but box_contain() never matches it.
+	 */
+	if (strategy == RTSameStrategyNumber && box_has_nan(query))
+		return true;
+
 	switch (strategy)
 	{
 		case RTLeftStrategyNumber:
@@ -1077,6 +1139,10 @@ gist_poly_consistent(PG_FUNCTION_ARGS)
 	if (DatumGetBoxP(entry->key) == NULL || query == NULL)
 		PG_RETURN_BOOL(false);
 
+	/* A NaN internal key tells us nothing, see box_has_nan() */
+	if (nan_internal_key(entry))
+		PG_RETURN_BOOL(true);
+
 	/*
 	 * Since the operators require recheck anyway, we can just use
 	 * rtree_internal_consistent even at leaf nodes.  (This works in part
@@ -1146,6 +1212,10 @@ gist_circle_consistent(PG_FUNCTION_ARGS)
 
 	if (DatumGetBoxP(entry->key) == NULL || query == NULL)
 		PG_RETURN_BOOL(false);
+
+	/* A NaN internal key tells us nothing, see box_has_nan() */
+	if (nan_internal_key(entry))
+		PG_RETURN_BOOL(true);
 
 	/*
 	 * Since the operators require recheck anyway, we can just use
@@ -1286,6 +1356,17 @@ computeDistance(bool isLeaf, BOX *box, Point *point)
 	return result;
 }
 
+/*
+ * computeDistance() places the point in one of the regions around the box,
+ * which a NaN in either of them makes impossible.  Callers use 0 instead, the
+ * only lower bound that is always safe.
+ */
+static inline bool
+distance_has_nan(const BOX *box, const Point *point)
+{
+	return box_has_nan(box) || isnan(point->x) || isnan(point->y);
+}
+
 static bool
 gist_point_consistent_internal(StrategyNumber strategy,
 							   bool isLeaf, BOX *key, Point *query)
@@ -1307,7 +1388,20 @@ gist_point_consistent_internal(StrategyNumber strategy,
 			result = FPlt(key->low.y, query->y);
 			break;
 		case RTSameStrategyNumber:
-			if (isLeaf)
+
+			/*
+			 * point_eq() compares exactly when there is a NaN, so a NaN query
+			 * matches points with the same NaN coordinates.  Internal keys
+			 * cannot tell us where those are, so search everything below.
+			 */
+			if (isnan(query->x) || isnan(query->y))
+			{
+				/* key.high must equal key.low, so we can disregard it */
+				result = !isLeaf ||
+					(float8_eq(key->low.x, query->x) &&
+					 float8_eq(key->low.y, query->y));
+			}
+			else if (isLeaf)
 			{
 				/* key.high must equal key.low, so we can disregard it */
 				result = (FPeq(key->low.x, query->x) &&
@@ -1344,6 +1438,10 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
 	bool		result;
 	StrategyNumber strategyGroup;
+
+	/* A NaN internal key tells us nothing, see box_has_nan() */
+	if (nan_internal_key(entry))
+		PG_RETURN_BOOL(true);
 
 	/*
 	 * We have to remap these strategy numbers to get this klugy
@@ -1395,11 +1493,16 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 			{
 				POLYGON    *query = PG_GETARG_POLYGON_P(1);
 
-				result = DatumGetBool(DirectFunctionCall5(gist_poly_consistent,
-														  PointerGetDatum(entry),
-														  PolygonPGetDatum(query),
-														  Int16GetDatum(RTOverlapStrategyNumber),
-														  0, PointerGetDatum(recheck)));
+				/*
+				 * A NaN point fails the bounding-box prefilter, though the
+				 * exact operator below may still match it, as on the heap.
+				 */
+				result = box_has_nan(DatumGetBoxP(entry->key)) ||
+					DatumGetBool(DirectFunctionCall5(gist_poly_consistent,
+													 PointerGetDatum(entry),
+													 PolygonPGetDatum(query),
+													 Int16GetDatum(RTOverlapStrategyNumber),
+													 0, PointerGetDatum(recheck)));
 
 				if (GIST_LEAF(entry) && result)
 				{
@@ -1409,8 +1512,10 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 					 */
 					BOX		   *box = DatumGetBoxP(entry->key);
 
-					Assert(box->high.x == box->low.x
-						   && box->high.y == box->low.y);
+					Assert((box->high.x == box->low.x ||
+							(isnan(box->high.x) && isnan(box->low.x))) &&
+						   (box->high.y == box->low.y ||
+							(isnan(box->high.y) && isnan(box->low.y))));
 					result = DatumGetBool(DirectFunctionCall2(poly_contain_pt,
 															  PolygonPGetDatum(query),
 															  PointPGetDatum(&box->high)));
@@ -1422,11 +1527,16 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 			{
 				CIRCLE	   *query = PG_GETARG_CIRCLE_P(1);
 
-				result = DatumGetBool(DirectFunctionCall5(gist_circle_consistent,
-														  PointerGetDatum(entry),
-														  CirclePGetDatum(query),
-														  Int16GetDatum(RTOverlapStrategyNumber),
-														  0, PointerGetDatum(recheck)));
+				/*
+				 * A NaN point fails the bounding-box prefilter, though the
+				 * exact operator below may still match it, as on the heap.
+				 */
+				result = box_has_nan(DatumGetBoxP(entry->key)) ||
+					DatumGetBool(DirectFunctionCall5(gist_circle_consistent,
+													 PointerGetDatum(entry),
+													 CirclePGetDatum(query),
+													 Int16GetDatum(RTOverlapStrategyNumber),
+													 0, PointerGetDatum(recheck)));
 
 				if (GIST_LEAF(entry) && result)
 				{
@@ -1436,8 +1546,10 @@ gist_point_consistent(PG_FUNCTION_ARGS)
 					 */
 					BOX		   *box = DatumGetBoxP(entry->key);
 
-					Assert(box->high.x == box->low.x
-						   && box->high.y == box->low.y);
+					Assert((box->high.x == box->low.x ||
+							(isnan(box->high.x) && isnan(box->low.x))) &&
+						   (box->high.y == box->low.y ||
+							(isnan(box->high.y) && isnan(box->low.y))));
 					result = DatumGetBool(DirectFunctionCall2(circle_contain_pt,
 															  CirclePGetDatum(query),
 															  PointPGetDatum(&box->high)));
@@ -1465,9 +1577,15 @@ gist_point_distance(PG_FUNCTION_ARGS)
 	switch (strategyGroup)
 	{
 		case PointStrategyNumberGroup:
-			distance = computeDistance(GIST_LEAF(entry),
-									   DatumGetBoxP(entry->key),
-									   PG_GETARG_POINT_P(1));
+			/* Leaf keys are points, which point_distance() handles */
+			if (!GIST_LEAF(entry) &&
+				distance_has_nan(DatumGetBoxP(entry->key),
+								 PG_GETARG_POINT_P(1)))
+				distance = 0.0;
+			else
+				distance = computeDistance(GIST_LEAF(entry),
+										   DatumGetBoxP(entry->key),
+										   PG_GETARG_POINT_P(1));
 			break;
 		default:
 			elog(ERROR, "unrecognized strategy number: %d", strategy);
@@ -1487,9 +1605,13 @@ gist_bbox_distance(GISTENTRY *entry, Datum query, StrategyNumber strategy)
 	switch (strategyGroup)
 	{
 		case PointStrategyNumberGroup:
-			distance = computeDistance(false,
-									   DatumGetBoxP(entry->key),
-									   DatumGetPointP(query));
+			if (distance_has_nan(DatumGetBoxP(entry->key),
+								 DatumGetPointP(query)))
+				distance = 0.0;
+			else
+				distance = computeDistance(false,
+										   DatumGetBoxP(entry->key),
+										   DatumGetPointP(query));
 			break;
 		default:
 			elog(ERROR, "unrecognized strategy number: %d", strategy);
@@ -1512,6 +1634,15 @@ gist_box_distance(PG_FUNCTION_ARGS)
 	float8		distance;
 
 	distance = gist_bbox_distance(entry, query, strategy);
+
+	/*
+	 * A leaf key is the indexed box, so its distance must be exact.  0 is
+	 * not, and index-only scans cannot recheck, so ask the operator.
+	 */
+	if (GIST_LEAF(entry) &&
+		distance_has_nan(DatumGetBoxP(entry->key), DatumGetPointP(query)))
+		distance = DatumGetFloat8(DirectFunctionCall2(dist_bp,
+													  entry->key, query));
 
 	PG_RETURN_FLOAT8(distance);
 }

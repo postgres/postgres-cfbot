@@ -191,8 +191,19 @@ brin_inclusion_add_value(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 	}
 
+	/*
+	 * A new union is not checked for mergeability below, so check the value
+	 * against itself.  A box with a NaN coordinate fails this.
+	 */
 	if (new)
+	{
+		finfo = inclusion_get_procinfo(bdesc, attno, PROCNUM_MERGEABLE, true);
+		if (finfo != NULL &&
+			!DatumGetBool(FunctionCall2Coll(finfo, colloid, newval, newval)))
+			column->bv_values[INCLUSION_UNMERGEABLE] = BoolGetDatum(true);
+
 		PG_RETURN_BOOL(true);
+	}
 
 	/* Check if the new value is already contained. */
 	finfo = inclusion_get_procinfo(bdesc, attno, PROCNUM_CONTAINS, true);
@@ -274,6 +285,17 @@ brin_inclusion_consistent(PG_FUNCTION_ARGS)
 	subtype = key->sk_subtype;
 	query = key->sk_argument;
 	unionval = column->bv_values[INCLUSION_UNION];
+
+	/*
+	 * Likewise if the union is not mergeable even with itself.  An index
+	 * built before the opclass had a mergeable function can hold such a union
+	 * without the flag, like a box union with NaN bounds.
+	 */
+	finfo = inclusion_get_procinfo(bdesc, attno, PROCNUM_MERGEABLE, true);
+	if (finfo != NULL &&
+		!DatumGetBool(FunctionCall2Coll(finfo, colloid, unionval, unionval)))
+		PG_RETURN_BOOL(true);
+
 	switch (key->sk_strategy)
 	{
 			/*
