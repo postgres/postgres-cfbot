@@ -78,30 +78,82 @@ $node->safe_psql('postgres', q(select test_custom_stats_fixed_update()));
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_var_report('entry1')));
 is( $result,
-	"entry1|2|Test entry 1",
+	"entry1|2|2|0|0|Test entry 1",
 	"report for variable-sized data of entry1");
 
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_var_report('entry2')));
 is( $result,
-	"entry2|3|Test entry 2",
+	"entry2|3|3|0|0|Test entry 2",
 	"report for variable-sized data of entry2");
 
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_var_report('entry3')));
 is( $result,
-	"entry3|2|Test entry 3",
+	"entry3|2|2|0|0|Test entry 3",
 	"report for variable-sized data of entry3");
 
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_var_report('entry4')));
 is( $result,
-	"entry4|3|Test entry 4",
+	"entry4|3|3|0|0|Test entry 4",
 	"report for variable-sized data of entry4");
 
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_fixed_report()));
 is($result, "3|", "report for fixed-sized stats");
+
+# Repeated flushes in one transaction must not double count.
+$node->safe_psql('postgres',
+	q(select test_custom_stats_var_create('xact_entry', 'Test xact entry')));
+$node->safe_psql(
+	'postgres', q(
+	BEGIN;
+	select test_custom_stats_var_update('xact_entry');
+	select pg_stat_force_next_flush();
+	select test_custom_stats_var_update('xact_entry');
+	select pg_stat_force_next_flush();
+	select test_custom_stats_var_update('xact_entry');
+	COMMIT;));
+$result = $node->safe_psql('postgres',
+	q(select * from test_custom_stats_var_report('xact_entry')));
+is( $result,
+	"xact_entry|3|3|0|0|Test xact entry",
+	"in-transaction flush does not double-count pending stats");
+$node->safe_psql('postgres',
+	q(select * from test_custom_stats_var_drop('xact_entry')));
+
+# Transactional counters stay deferred until the transaction boundary.
+$node->safe_psql('postgres',
+	q(select test_custom_stats_var_create('txn_entry', 'Test txn entry')));
+
+my $bg = $node->background_psql('postgres');
+$bg->query_safe('BEGIN');
+$bg->query_safe(q(select test_custom_stats_var_update('txn_entry')));
+$bg->query_safe(q(select test_custom_stats_var_update_txn('txn_entry')));
+$bg->query_safe(q(select pg_stat_force_next_flush()));
+
+$result = $node->safe_psql('postgres',
+	q(select calls, calls2, calls_txn, calls_txn2
+	  from test_custom_stats_var_report('txn_entry')));
+is($result, "1|1|0|0",
+	"transactional counter deferred at an in-transaction flush");
+
+$bg->query_safe('COMMIT');
+$bg->quit;
+
+# After commit the deferred counter is flushed too.
+$node->poll_query_until('postgres',
+	q(select calls_txn = 1 and calls_txn2 = 1
+	  from test_custom_stats_var_report('txn_entry')))
+  or die "timed out waiting for transactional counter to be flushed";
+$result = $node->safe_psql('postgres',
+	q(select calls, calls2, calls_txn, calls_txn2
+	  from test_custom_stats_var_report('txn_entry')));
+is($result, "1|1|1|1",
+	"transactional counter flushed at the transaction boundary");
+$node->safe_psql('postgres',
+	q(select test_custom_stats_var_drop('txn_entry')));
 
 # Test drop of variable-sized stats.
 $node->safe_psql('postgres',
@@ -122,13 +174,13 @@ $node->start();
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_var_report('entry1')));
 is( $result,
-	"entry1|2|Test entry 1",
+	"entry1|2|2|0|0|Test entry 1",
 	"variable-sized stats persist after clean restart");
 
 $result = $node->safe_psql('postgres',
 	q(select * from test_custom_stats_var_report('entry2')));
 is( $result,
-	"entry2|3|Test entry 2",
+	"entry2|3|3|0|0|Test entry 2",
 	"variable-sized stats persist after clean restart");
 
 $result = $node->safe_psql('postgres',
