@@ -155,9 +155,10 @@ secure_open_server(Port *port)
 	}
 
 	ereport(DEBUG2,
-			(errmsg_internal("SSL connection from DN:\"%s\" CN:\"%s\"",
+			(errmsg_internal("SSL connection from DN:\"%s\" CN:\"%s\" URI:\"%s\"",
 							 port->peer_dn ? port->peer_dn : "(anonymous)",
-							 port->peer_cn ? port->peer_cn : "(anonymous)")));
+							 port->peer_cn ? port->peer_cn : "(anonymous)",
+							 port->peer_uri ? port->peer_uri : "(anonymous)")));
 	return r;
 #else
 	return 0;

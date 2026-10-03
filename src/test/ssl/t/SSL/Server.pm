@@ -134,7 +134,7 @@ sub sslkey
 
 Configure the cluster specified by B<node> or listening on SSL connections.
 The following databases will be created in the cluster: trustdb, certdb,
-certdb_dn, certdb_dn_re, certdb_cn, verifydb. The following users will be
+certdb_dn, certdb_dn_re, certdb_cn, certdb_uri, verifydb. The following users will be
 created in the cluster: ssltestuser, md5testuser, anotheruser, yetanotheruser.
 If B<< $params{password} >> is set, it will be used as password for all users
 with the password encoding B<< $params{password_enc} >> (except for md5testuser
@@ -153,7 +153,7 @@ sub configure_test_server_for_ssl
 
 	my @databases = (
 		'trustdb', 'certdb', 'certdb_dn', 'certdb_dn_re',
-		'certdb_cn', 'verifydb');
+		'certdb_cn', 'certdb_uri', 'verifydb');
 
 	# Create test users and databases
 	$node->psql('postgres', "CREATE USER ssltestuser");
@@ -366,6 +366,7 @@ hostssl certdb        all             $servercidr   cert
 hostssl certdb_dn     all             $servercidr   cert clientname=DN map=dn
 hostssl certdb_dn_re  all             $servercidr   cert clientname=DN map=dnre
 hostssl certdb_cn     all             $servercidr   cert clientname=CN map=cn
+hostssl certdb_uri    all             $servercidr   cert clientname=URI map=uri
 EOF
 	);
 
@@ -377,6 +378,7 @@ EOF
 dn        "CN=ssltestuser-dn,OU=Testing,OU=Engineering,O=PGDG"    ssltestuser
 dnre      "/^.*OU=Testing,.*\$"                                   ssltestuser
 cn        ssltestuser-dn                                          ssltestuser
+uri       spiffe://postgresql.example/ns/default/sa/ssltestuser   ssltestuser
 EOF
 	);
 	return;
