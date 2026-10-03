@@ -66,6 +66,7 @@ tests += {
       'skip_snapshot_restore',
       'invalidation_distribution',
       'parallel_session_origin',
+      'snapshot_build',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
