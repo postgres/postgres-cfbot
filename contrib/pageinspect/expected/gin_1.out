@@ -33,22 +33,22 @@ DETAIL:  Flags 0002, expected 0083
 SELECT * FROM gin_entrypage_items(get_raw_page('test1_y_idx', 1), 'test1_y_idx'::regclass);
 -[ RECORD 1 ]--------------
 itemoffset | 1
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,1)"}
 keys       | y=11
 -[ RECORD 2 ]--------------
 itemoffset | 2
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,1)"}
 keys       | y=111
 -[ RECORD 3 ]--------------
 itemoffset | 3
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,2)"}
 keys       | y=222
 -[ RECORD 4 ]--------------
 itemoffset | 4
-downlink   | (2147483666,1)
+downlink   | (2147483662,1)
 tids       | {"(0,2)"}
 keys       | y=NULL
 
@@ -70,32 +70,32 @@ tids       | {"(0,2)"}
 keys       | y=222
 -[ RECORD 4 ]--------------
 itemoffset | 4
-downlink   | (2147483672,1)
+downlink   | (2147483664,1)
 tids       | {"(0,2)"}
 keys       | y=NULL
 -[ RECORD 5 ]--------------
 itemoffset | 5
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,1)"}
 keys       | z=a
 -[ RECORD 6 ]--------------
 itemoffset | 6
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,1)"}
 keys       | z=b
 -[ RECORD 7 ]--------------
 itemoffset | 7
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,1)"}
 keys       | z=c
 -[ RECORD 8 ]--------------
 itemoffset | 8
-downlink   | (2147483664,1)
+downlink   | (2147483660,1)
 tids       | {"(0,2)"}
 keys       | z=d
 -[ RECORD 9 ]--------------
 itemoffset | 9
-downlink   | (2147483672,1)
+downlink   | (2147483664,1)
 tids       | {"(0,2)"}
 keys       | z=NULL
 
@@ -115,11 +115,11 @@ INSERT INTO test_data_page SELECT ARRAY[1] FROM generate_series(1, 10000);
 -- For this index, block 0 is metapage, block 1 is entry tree, block 2 is
 -- posting tree non-leaf page and block 3 & 4 are compressed data leaf pages.
 SELECT * FROM gin_datapage_items(get_raw_page('test_data_page_i_idx', 2));
--[ RECORD 1 ]-------
+-[ RECORD 1 ]--------
 itemoffset | 1
 downlink   | 4
-item_tid   | (44,83)
--[ RECORD 2 ]-------
+item_tid   | (41,125)
+-[ RECORD 2 ]--------
 itemoffset | 2
 downlink   | 3
 item_tid   | (0,0)
@@ -156,7 +156,7 @@ INSERT INTO test1 VALUES (1, ARRAY[11, 111], ARRAY['a', 'b', 'c']);
 SELECT * FROM gin_page_opaque_info(get_raw_page('test3_y_z_idx', 2));
 -[ RECORD 1 ]------------------
 rightlink | 3
-maxoff    | 120
+maxoff    | 136
 flags     | {list,list_fullrow}
 
 -- reject fast-list pages.
