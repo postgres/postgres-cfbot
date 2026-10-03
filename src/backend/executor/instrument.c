@@ -26,6 +26,7 @@
 
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
+Instrumentation instr_from_workers;
 InstrStackState instr_stack = {
 	.stack_space = 0,
 	.stack_size = 0,
@@ -191,6 +192,24 @@ void
 InstrStopFinalize(Instrumentation *instr)
 {
 	InstrStopFinalizeInternal(instr, false);
+}
+
+/*
+ * Finalize whatever is still on the stack into instr_top, at process exit.
+ *
+ * A FATAL error exits without unwinding the C stack, so the PG_FINALLY blocks
+ * that would normally finalize plain Instrumentation entries never run.  Such
+ * entries still live in their (abandoned) stack frames, so their activity can
+ * be accumulated before the session totals are reported for the last time.
+ * QueryInstrumentation entries have been released by the transaction abort
+ * that precedes this, and after a clean exit the stack is empty anyway.
+ */
+void
+InstrStackFinalizeAll(void)
+{
+	while (instr_stack.stack_size > 0)
+		InstrStopFinalizeInternal(instr_stack.entries[instr_stack.stack_size - 1],
+								  true);
 }
 
 /*
@@ -398,8 +417,12 @@ InstrStartParallelQuery(void)
 }
 
 /*
- * Report usage after parallel worker shutdown, to be handed to the leader
- * (which accumulates it into its own stack, see InstrAccumParallelQuery).
+ * Report usage after parallel worker shutdown.
+ *
+ * The usage is both handed to the leader (which accumulates it into its own
+ * stack, see InstrAccumParallelQuery) and, through the finalization, added to
+ * the worker's own session totals in instr_top, so that each process' instr_top
+ * fully accounts for what the process itself did.
  */
 void
 InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage)
@@ -415,6 +438,9 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
 void
 InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
 {
+	BufferUsageAdd(&instr_from_workers.bufusage, bufusage);
+	WalUsageAdd(&instr_from_workers.walusage, walusage);
+
 	WalUsageAdd(&pgWalUsage, walusage);
 }
 

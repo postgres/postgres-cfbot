@@ -468,18 +468,26 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 		 * Accumulate per-node and trigger statistics to their respective
 		 * parent instrumentation stacks.
 		 *
-		 * Parallel workers skip this: their per-node stats are reported
+		 * Parallel workers instead add each node's own stats directly to
+		 * their session totals (instr_top), without rolling them up into
+		 * parent nodes or the query entry: their per-node stats are reported
 		 * individually via ExecParallelReportInstrumentation and the leader's
 		 * own ExecFinalizeNodeInstrumentation rolls them up after aggregating
 		 * them.  If we rolled them up here, the leader would double-count,
 		 * both through the query-level stats and through worker parent nodes
 		 * already including their children's stats.
 		 */
-		if (!IsParallelWorker() && estate->es_instrument)
+		if (estate->es_instrument)
 		{
-			ExecFinalizeNodeInstrumentation(queryDesc->planstate);
+			if (!IsParallelWorker())
+			{
+				ExecFinalizeNodeInstrumentation(queryDesc->planstate);
 
-			ExecFinalizeTriggerInstrumentation(estate);
+				ExecFinalizeTriggerInstrumentation(estate);
+			}
+			else
+				ExecFinalizeNodeInstrumentationFlat(queryDesc->planstate,
+													&instr_top);
 		}
 
 		InstrQueryStopFinalize(estate->es_query_instr);

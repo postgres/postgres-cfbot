@@ -866,6 +866,55 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 	return false;
 }
 
+static bool
+ExecFinalizeNodeInstrumentationFlat_walker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	Assert(node->instrument != NULL);
+
+	InstrFinalizeChild(&node->instrument->instr, (Instrumentation *) context);
+
+	/*
+	 * IndexScan/IndexOnlyScan have a separate entry to track table access,
+	 * which also needs to be accounted for in the target.  (The leader gets
+	 * the per-worker copy of this entry via SharedIndexScanInstrumentation.)
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+
+	return planstate_tree_walker(node,
+								 ExecFinalizeNodeInstrumentationFlat_walker,
+								 context);
+}
+
+/*
+ * Like ExecFinalizeNodeInstrumentation, but accumulates each node's own stats
+ * directly to the target, without rolling them up into parent nodes.
+ *
+ * Used by parallel workers to account for their per-node activity in their
+ * session totals (instr_top), while leaving the per-node stats exclusive for
+ * the leader to aggregate and roll up.
+ */
+void
+ExecFinalizeNodeInstrumentationFlat(PlanState *node, Instrumentation *target)
+{
+	(void) ExecFinalizeNodeInstrumentationFlat_walker(node, target);
+}
+
 /*
  * ExecFinalizeWorkerInstrumentation
  *

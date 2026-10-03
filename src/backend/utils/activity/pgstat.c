@@ -104,6 +104,7 @@
 #include <unistd.h>
 
 #include "access/xact.h"
+#include "executor/instrument.h"
 #include "lib/dshash.h"
 #include "pgstat.h"
 #include "storage/fd.h"
@@ -657,6 +658,13 @@ pgstat_shutdown_hook(int code, Datum arg)
 	 */
 	if (OidIsValid(MyDatabaseId))
 		pgstat_report_disconnect(MyDatabaseId);
+
+	/*
+	 * Make sure the session totals we report from (instr_top) include what
+	 * any instrumentation stack entries still open at this point measured; a
+	 * FATAL error leaves the ones not tied to a resource owner behind.
+	 */
+	InstrStackFinalizeAll();
 
 	pgstat_report_stat(true);
 
