@@ -44,7 +44,10 @@ $node->safe_psql('postgres',
 	  . "CREATE TABLE mytab246 (f1 int, f2 text);\n"
 	  . "CREATE TABLE \"mixedName\" (f1 int, f2 text);\n"
 	  . "CREATE TYPE enum1 AS ENUM ('foo', 'bar', 'baz', 'BLACK');\n"
-	  . "CREATE PUBLICATION some_publication;\n");
+	  . "CREATE PUBLICATION some_publication;\n"
+	  . "CREATE TABLE gencol_test (a int primary key, b int);\n"
+	  . "ALTER TABLE gencol_test ADD CONSTRAINT check_gen CHECK (b IS NOT DISTINCT FROM (a + 1));\n"
+);
 
 # In a VPATH build, we'll be started in the source directory, but we want
 # to run in the build directory so that we can use relative paths to
@@ -421,6 +424,23 @@ check_completion(
 	"COPY FROM with DEFAULT completion");
 
 clear_line();
+
+check_completion("ALTER TABLE gencol_test ALTER COLUMN b A\t", qr/ADD /,
+	"complete ALTER COLUMN <col> ADD");
+
+check_completion("G\t", qr/GENERATED /,
+	"complete ALTER COLUMN <col> ADD GENERATED");
+
+check_completion("U\t", qr/USING CONSTRAINT /,
+	"complete ALTER COLUMN <col> ADD GENERATED USING CONSTRAINT");
+
+check_completion("\t", qr/check_gen /,
+	"complete ALTER COLUMN <col> ADD GENERATED USING CONSTRAINT offers check constraint names");
+
+check_completion("S\t", qr/STORED /,
+	"complete ALTER COLUMN <col> ADD GENERATED USING CONSTRAINT constr_name STORED");
+
+clear_query();
 
 # send psql an explicit \q to shut it down, else pty won't close properly
 $h->quit or die "psql returned $?";
