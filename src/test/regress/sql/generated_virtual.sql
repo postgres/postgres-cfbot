@@ -71,10 +71,8 @@ SELECT * FROM gtest1 ORDER BY a;
 SELECT a, b, b * 2 AS b2 FROM gtest1 ORDER BY a;
 SELECT a, b FROM gtest1 WHERE b = 4 ORDER BY a;
 
--- test that overflow error happens on read
+-- test that overflow error happens on write
 INSERT INTO gtest1 VALUES (2000000000);
-SELECT * FROM gtest1;
-DELETE FROM gtest1 WHERE a = 2000000000;
 
 -- test with joins
 CREATE TABLE gtestx (x int, y int);
