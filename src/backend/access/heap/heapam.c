@@ -2996,12 +2996,15 @@ l1:
 	 * We're about to do the actual delete -- check for conflict first, to
 	 * avoid possibly having to roll back work we've just done.
 	 *
-	 * This is safe without a recheck as long as there is no possibility of
+	 * For heap scans, no recheck is needed as long as there is no possibility of
 	 * another process scanning the page between this check and the delete
 	 * being visible to the scan (i.e., an exclusive buffer content lock is
 	 * continuously held from this point until the tuple delete is visible).
+	 * Index-only scans bypass this lock, so we must recheck after clearing
+	 * the VM bit.
 	 */
 	CheckForSerializableConflictIn(relation, tid, BufferGetBlockNumber(buffer));
+	INJECTION_POINT("heap-delete-before-write", NULL);
 
 	/* replace cid with a combo CID if necessary */
 	HeapTupleHeaderAdjustCmax(tp.t_data, &cid, &iscombo);
@@ -3164,6 +3167,10 @@ l1:
 	 */
 	if (clear_all_visible)
 		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+	/* Check for predicate locks acquired since our first conflict check. */
+	if (clear_all_visible)
+		CheckForSerializableConflictIn(relation, tid, BufferGetBlockNumber(buffer));
 
 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
@@ -4047,10 +4054,12 @@ l2:
 	 * We're about to do the actual update -- check for conflict first, to
 	 * avoid possibly having to roll back work we've just done.
 	 *
-	 * This is safe without a recheck as long as there is no possibility of
+	 * For heap scans, no recheck is needed as long as there is no possibility of
 	 * another process scanning the pages between this check and the update
 	 * being visible to the scan (i.e., exclusive buffer content lock(s) are
 	 * continuously held from this point until the tuple update is visible).
+	 * Index-only scans bypass these locks, so we must recheck after clearing
+	 * the old page's VM bit.
 	 *
 	 * For the new tuple the only check needed is at the relation level, but
 	 * since both tuples are in the same relation and the check for oldtup
@@ -4059,6 +4068,7 @@ l2:
 	 */
 	CheckForSerializableConflictIn(relation, &oldtup.t_self,
 								   BufferGetBlockNumber(buffer));
+	INJECTION_POINT("heap-update-before-write", NULL);
 
 	/*
 	 * At this point newbuf and buffer are both pinned and locked, and newbuf
@@ -4303,6 +4313,11 @@ l2:
 		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	if (unlock_vmbuffer_new)
 		LockBuffer(vmbuffer_new, BUFFER_LOCK_UNLOCK);
+
+	/* Check for predicate locks acquired since our first conflict check. */
+	if (clear_all_visible)
+		CheckForSerializableConflictIn(relation, &oldtup.t_self,
+									   BufferGetBlockNumber(buffer));
 
 	if (newbuf != buffer)
 		LockBuffer(newbuf, BUFFER_LOCK_UNLOCK);
