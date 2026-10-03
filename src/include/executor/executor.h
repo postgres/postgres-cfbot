@@ -304,6 +304,8 @@ extern Node *MultiExecProcNode(PlanState *node);
 extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
 extern void ExecFinalizeNodeInstrumentation(PlanState *node);
+extern void ExecFinalizeNodeInstrumentationFlat(PlanState *node,
+												Instrumentation *target);
 extern void ExecFinalizeWorkerInstrumentation(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
