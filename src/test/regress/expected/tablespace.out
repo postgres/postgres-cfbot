@@ -20,6 +20,27 @@ SELECT spcoptions FROM pg_tablespace WHERE spcname = 'regress_tblspacewith';
  {random_page_cost=3.0}
 (1 row)
 
+-- check size functions
+SELECT pg_tablespace_size('pg_default') BETWEEN 1_000_000 and 10_000_000_000, -- rough sanity check
+       pg_tablespace_size('pg_global') BETWEEN 100_000 and 10_000_000,
+       pg_tablespace_size('regress_tblspacewith'); -- empty
+ ?column? | ?column? | pg_tablespace_size 
+----------+----------+--------------------
+ t        | t        |                  0
+(1 row)
+
+SELECT pg_tablespace_size('missing');
+ERROR:  tablespace "missing" does not exist
+SELECT pg_tablespace_avail('pg_default') > 1_000_000,
+       pg_tablespace_avail('pg_global') > 1_000_000,
+       pg_tablespace_avail('regress_tblspacewith') > 1_000_000;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | t        | t
+(1 row)
+
+SELECT pg_tablespace_avail('missing');
+ERROR:  tablespace "missing" does not exist
 -- drop the tablespace so we can re-use the location
 DROP TABLESPACE regress_tblspacewith;
 -- This returns a relative path as of an effect of allow_in_place_tablespaces,
