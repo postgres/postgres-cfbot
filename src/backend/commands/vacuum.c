@@ -132,6 +132,7 @@ static bool vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 static double compute_parallel_delay(void);
 static VacOptValue get_vacoptval_from_boolean(DefElem *def);
 static bool vac_tid_reaped(ItemPointer itemptr, void *state);
+static int	vacuum_relation_skip_locked_flags(uint32 options);
 
 /*
  * GUC check function to ensure GUC value specified is within the allowable
@@ -152,6 +153,33 @@ check_vacuum_buffer_usage_limit(int *newval, void **extra,
 						MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB);
 
 	return false;
+}
+
+/*
+ * Return skipped-stats flags for a lock skip.
+ */
+static int
+vacuum_relation_skip_locked_flags(uint32 options)
+{
+	int			flags = 0;
+
+	if ((options & VACOPT_VACUUM) != 0 && (options & VACOPT_FULL) == 0)
+	{
+		if (AmAutoVacuumWorkerProcess())
+			flags |= PGSTAT_REPORT_LOCK_SKIPPED_AUTOVACUUM;
+		else
+			flags |= PGSTAT_REPORT_LOCK_SKIPPED_VACUUM;
+	}
+
+	if ((options & VACOPT_ANALYZE) != 0)
+	{
+		if (AmAutoVacuumWorkerProcess())
+			flags |= PGSTAT_REPORT_LOCK_SKIPPED_AUTOANALYZE;
+		else
+			flags |= PGSTAT_REPORT_LOCK_SKIPPED_ANALYZE;
+	}
+
+	return flags;
 }
 
 /*
@@ -815,6 +843,9 @@ vacuum_open_relation(Oid relid, RangeVar *relation, uint32 options,
 	{
 		rel = NULL;
 		rel_lock = false;
+
+		pgstat_report_skipped_vacuum_analyze(relid,
+											 vacuum_relation_skip_locked_flags(options));
 	}
 
 	/* if relation is opened, leave */
@@ -960,6 +991,20 @@ expand_vacuum_rel(VacuumRelation *vrel, MemoryContext vac_context,
 						(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
 						 errmsg("skipping analyze of \"%s\" --- lock not available",
 								vrel->relation->relname)));
+
+			/*
+			 * Get relid for statistics reporting.
+			 *
+			 * Since we failed to acquire the lock, use NoLock here.  Although
+			 * a concurrent DDL may have dropped or renamed the relation,
+			 * RangeVarGetRelid() with NoLock does not check for invalidation
+			 * messages.
+			 */
+			relid = RangeVarGetRelid(vrel->relation, NoLock, true);
+
+			pgstat_report_skipped_vacuum_analyze(relid,
+												 vacuum_relation_skip_locked_flags(options));
+
 			return vacrels;
 		}
 
