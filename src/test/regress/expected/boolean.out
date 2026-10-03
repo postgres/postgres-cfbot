@@ -566,6 +566,240 @@ SELECT isnul OR istrue OR isfalse FROM booltbl4;
  t
 (1 row)
 
+-- Implication: "a IMPLIES b" is "NOT a OR b".  It is not commutative, so all
+-- nine combinations of three-valued logic have to be checked.
+SELECT istrue IMPLIES istrue, istrue IMPLIES isfalse, istrue IMPLIES isnul
+  FROM booltbl4;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | f        | (null)
+(1 row)
+
+SELECT isfalse IMPLIES istrue, isfalse IMPLIES isfalse, isfalse IMPLIES isnul
+  FROM booltbl4;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | t        | t
+(1 row)
+
+SELECT isnul IMPLIES istrue, isnul IMPLIES isfalse, isnul IMPLIES isnul
+  FROM booltbl4;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | (null)   | (null)
+(1 row)
+
+-- the same, as constants, so that constant folding is exercised too
+SELECT true IMPLIES true, true IMPLIES false, true IMPLIES null;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | f        | (null)
+(1 row)
+
+SELECT false IMPLIES true, false IMPLIES false, false IMPLIES null;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | t        | t
+(1 row)
+
+SELECT null IMPLIES true, null IMPLIES false, null::bool IMPLIES null;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | (null)   | (null)
+(1 row)
+
+-- IMPLIES is non-associative, so a chain is refused rather than grouped
+SELECT isfalse IMPLIES istrue IMPLIES isfalse FROM booltbl4;    -- error
+ERROR:  syntax error at or near "IMPLIES"
+LINE 1: SELECT isfalse IMPLIES istrue IMPLIES isfalse FROM booltbl4;
+                                      ^
+-- and it has to be, because the two groupings are different formulas.  The
+-- first row below is the interesting one: it tells them apart.
+SELECT a, b, c,
+       (a IMPLIES b) IMPLIES c AS grouped_left,
+       a IMPLIES (b IMPLIES c) AS grouped_right,
+       (a AND b) IMPLIES c AS conj_antecedent,
+       a IMPLIES (b AND c) AS conj_consequent
+  FROM (VALUES (false, false, false),
+               (true, false, false),
+               (true, true, true)) AS t(a, b, c);
+ a | b | c | grouped_left | grouped_right | conj_antecedent | conj_consequent 
+---+---+---+--------------+---------------+-----------------+-----------------
+ f | f | f | f            | t             | t               | t
+ t | f | f | t            | t             | t               | f
+ t | t | t | t            | t             | t               | t
+(3 rows)
+
+-- grouping to the right is implication from the conjunction of the operands
+-- (exportation), which holds for all three truth values, so no rows here
+SELECT a, b, c
+  FROM (VALUES (true), (false), (null)) AS x(a),
+       (VALUES (true), (false), (null)) AS y(b),
+       (VALUES (true), (false), (null)) AS z(c)
+ WHERE (a IMPLIES (b IMPLIES c)) IS DISTINCT FROM ((a AND b) IMPLIES c);
+ a | b | c 
+---+---+---
+(0 rows)
+
+-- and binds looser than OR, AND, NOT, the comparison operators and IS
+SELECT istrue OR isfalse IMPLIES isfalse FROM booltbl4;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT isfalse IMPLIES isfalse AND isfalse FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT NOT istrue IMPLIES istrue FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 1 = 1 IMPLIES 2 = 3;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT isfalse IMPLIES isnul IS NULL FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- non-boolean operands are reported in terms of IMPLIES, not of its expansion
+SELECT 1 IMPLIES true;                  -- error
+ERROR:  argument of IMPLIES must be type boolean, not type integer
+LINE 1: SELECT 1 IMPLIES true;
+               ^
+SELECT true IMPLIES 1;                  -- error
+ERROR:  argument of IMPLIES must be type boolean, not type integer
+LINE 1: SELECT true IMPLIES 1;
+                            ^
+-- stored expressions keep IMPLIES, and deparse with only the parentheses
+-- that are needed
+CREATE VIEW boolview AS
+  SELECT istrue IMPLIES isnul AS i,
+         NOT istrue IMPLIES isnul AS not_antecedent,
+         istrue OR isfalse IMPLIES isnul AND istrue AS or_and,
+         (istrue IMPLIES isfalse) IMPLIES isnul AS grouped_left,
+         istrue IMPLIES (isfalse IMPLIES isnul) AS grouped_right,
+         (istrue IMPLIES isfalse) OR isnul AS under_or,
+         NOT (istrue IMPLIES isfalse) AS under_not,
+         (istrue IMPLIES isfalse) IS TRUE AS under_is
+    FROM booltbl4;
+SELECT pg_get_viewdef('boolview', true);
+                        pg_get_viewdef                        
+--------------------------------------------------------------
+  SELECT istrue IMPLIES isnul AS i,                          +
+     NOT istrue IMPLIES isnul AS not_antecedent,             +
+     istrue OR isfalse IMPLIES isnul AND istrue AS or_and,   +
+     (istrue IMPLIES isfalse) IMPLIES isnul AS grouped_left, +
+     istrue IMPLIES (isfalse IMPLIES isnul) AS grouped_right,+
+     (istrue IMPLIES isfalse) OR isnul AS under_or,          +
+     NOT (istrue IMPLIES isfalse) AS under_not,              +
+     (istrue IMPLIES isfalse) IS TRUE AS under_is            +
+    FROM booltbl4;
+(1 row)
+
+SELECT pg_get_viewdef('boolview', false);
+                         pg_get_viewdef                          
+-----------------------------------------------------------------
+  SELECT (istrue IMPLIES isnul) AS i,                           +
+     ((NOT istrue) IMPLIES isnul) AS not_antecedent,            +
+     ((istrue OR isfalse) IMPLIES (isnul AND istrue)) AS or_and,+
+     ((istrue IMPLIES isfalse) IMPLIES isnul) AS grouped_left,  +
+     (istrue IMPLIES (isfalse IMPLIES isnul)) AS grouped_right, +
+     ((istrue IMPLIES isfalse) OR isnul) AS under_or,           +
+     (NOT (istrue IMPLIES isfalse)) AS under_not,               +
+     ((istrue IMPLIES isfalse) IS TRUE) AS under_is             +
+    FROM booltbl4;
+(1 row)
+
+SELECT * FROM boolview;
+   i    | not_antecedent | or_and | grouped_left | grouped_right | under_or | under_not | under_is 
+--------+----------------+--------+--------------+---------------+----------+-----------+----------
+ (null) | t              | (null) | t            | t             | (null)   | t         | f
+(1 row)
+
+DROP VIEW boolview;
+CREATE TABLE implies_check (a int, b int,
+  CHECK (a > 0 IMPLIES b > 0));
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'implies_check'::regclass;
+       pg_get_constraintdef        
+-----------------------------------
+ CHECK (((a > 0) IMPLIES (b > 0)))
+(1 row)
+
+INSERT INTO implies_check VALUES (1, 1), (0, 0), (NULL, 0), (1, NULL);
+INSERT INTO implies_check VALUES (1, 0);    -- error
+ERROR:  new row for relation "implies_check" violates check constraint "implies_check_check"
+DETAIL:  Failing row contains (1, 0).
+-- the planner expands it, so EXPLAIN shows NOT a OR b, simplified
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT * FROM implies_check WHERE a > 0 IMPLIES b > 0;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Seq Scan on public.implies_check
+   Output: a, b
+   Filter: ((implies_check.a <= 0) OR (implies_check.b > 0))
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM implies_check WHERE a IS NULL IMPLIES false;
+        QUERY PLAN         
+---------------------------
+ Seq Scan on implies_check
+   Filter: (a IS NOT NULL)
+(2 rows)
+
+-- and a partial index on IMPLIES is usable for the expanded form
+CREATE INDEX implies_check_idx ON implies_check (b)
+  WHERE a IS NULL IMPLIES b > 0;
+SELECT pg_get_indexdef('implies_check_idx'::regclass);
+                                              pg_get_indexdef                                               
+------------------------------------------------------------------------------------------------------------
+ CREATE INDEX implies_check_idx ON public.implies_check USING btree (b) WHERE ((a IS NULL) IMPLIES (b > 0))
+(1 row)
+
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT b FROM implies_check WHERE a IS NOT NULL OR b > 0;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Index Only Scan using implies_check_idx on implies_check
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE implies_check;
+-- IMPLIES is unreserved, so it remains usable as an identifier
+CREATE TABLE implies (implies bool);
+INSERT INTO implies VALUES (false);
+SELECT implies IMPLIES implies FROM implies;
+ ?column? 
+----------
+ t
+(1 row)
+
+DROP TABLE implies;
+SELECT 1 AS implies;
+ implies 
+---------
+       1
+(1 row)
+
+SELECT 1 implies;
+ implies 
+---------
+       1
+(1 row)
+
 -- Casts
 SELECT 0::boolean;
  bool 

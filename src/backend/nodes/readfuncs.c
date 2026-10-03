@@ -295,6 +295,8 @@ _readBoolExpr(ReadNodeContext *ctx)
 		local_node->boolop = OR_EXPR;
 	else if (length == 3 && strncmp(token, "not", 3) == 0)
 		local_node->boolop = NOT_EXPR;
+	else if (length == 7 && strncmp(token, "implies", 7) == 0)
+		local_node->boolop = IMPLIES_EXPR;
 	else
 		elog(ERROR, "unrecognized boolop \"%.*s\"", length, token);
 
@@ -512,6 +514,11 @@ _readA_Expr(ReadNodeContext *ctx)
 	else if (length == 15 && strncmp(token, "NOT_BETWEEN_SYM", 15) == 0)
 	{
 		local_node->kind = AEXPR_NOT_BETWEEN_SYM;
+		READ_NODE_FIELD(name);
+	}
+	else if (length == 7 && strncmp(token, "IMPLIES", 7) == 0)
+	{
+		local_node->kind = AEXPR_IMPLIES;
 		READ_NODE_FIELD(name);
 	}
 	else if (length == 5 && strncmp(token, ":name", 5) == 0)
