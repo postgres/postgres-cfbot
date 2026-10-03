@@ -364,6 +364,7 @@ BufferManagerRelation
 BufferStrategyControl
 BufferTag
 BufferUsage
+BufferUsageCountChange
 BuildAccumulator
 BuiltinScript
 BulkInsertState
@@ -3468,6 +3469,7 @@ WorkerJobRestorePtrType
 WorkerNodeInstrumentation
 Working_State
 WriteBufPtrType
+WriteBuffersOperation
 WriteBytePtrType
 WriteDataCallback
 WriteDataPtrType

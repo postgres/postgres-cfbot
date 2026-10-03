@@ -33,7 +33,7 @@ pg_noreturn extern void CheckpointerMain(const void *startup_data, size_t startu
 
 extern void ExecCheckpoint(ParseState *pstate, CheckPointStmt *stmt);
 extern void RequestCheckpoint(int flags);
-extern void CheckpointWriteDelay(int flags, double progress);
+extern void CheckpointWriteDelay(int flags, double progress, int npages);
 
 extern bool ForwardSyncRequest(const FileTag *ftag, SyncRequestType type);
 
