@@ -313,6 +313,7 @@ extern bool BufferIsPermanent(Buffer buffer);
 extern XLogRecPtr BufferGetLSNAtomic(Buffer buffer);
 extern void BufferGetTag(Buffer buffer, RelFileLocator *rlocator,
 						 ForkNumber *forknum, BlockNumber *blknum);
+extern bool PinCountWaiterCheckReadyForCleanup(Buffer buffer);
 
 extern void MarkBufferDirtyHint(Buffer buffer, bool buffer_std);
 

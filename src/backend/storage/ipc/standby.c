@@ -790,22 +790,36 @@ cleanup:
  * Deadlocks are extremely rare, and relatively expensive to check for,
  * so we don't do a deadlock check right away ... only if we have had to wait
  * at least deadlock_timeout.
+ *
+ * The current process should be the waiter process and should have
+ * published the waited buffer via SetStartupBufferPinWaitBufId().
  */
 void
 ResolveRecoveryConflictWithBufferPin(void)
 {
 	TimestampTz ltime;
+	int			bufid;
 
 	Assert(InHotStandby);
 
+	bufid = GetStartupBufferPinWaitBufId();
+	Assert(bufid >= 0);
+
 	ltime = GetStandbyLimitTime();
 
-	if (GetCurrentTimestamp() >= ltime && ltime != 0)
+	if (ltime != 0 && GetCurrentTimestamp() >= ltime)
 	{
 		/*
 		 * We're already behind, so clear a path as quickly as possible.
 		 */
 		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
+
+		/*
+		 * Set delay timeout flag once the timeout is reached (the current
+		 * timestamp is greater than the standby limit time). This variable is
+		 * use by timeout handlers with the same purpose.
+		 */
+		got_standby_delay_timeout = true;
 	}
 	else
 	{
@@ -833,35 +847,53 @@ ResolveRecoveryConflictWithBufferPin(void)
 		enable_timeouts(timeouts, cnt);
 	}
 
-	/*
-	 * Wait to be signaled by UnpinBuffer() or for the wait to be interrupted
-	 * by one of the timeouts established above.
-	 *
-	 * We assume that only UnpinBuffer() and the timeout requests established
-	 * above can wake us up here. WakeupRecovery() called by walreceiver or
-	 * SIGHUP signal handler, etc cannot do that because it uses the different
-	 * latch from that ProcWaitForSignal() waits on.
-	 */
-	ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
-
-	if (got_standby_delay_timeout)
-		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
-	else if (got_standby_deadlock_timeout)
+	for (;;)
 	{
 		/*
-		 * Send out a request for hot-standby backends to check themselves for
-		 * deadlocks.
+		 * Wait to be signaled by UnpinBuffer() or for the wait to be
+		 * interrupted by one of the timeouts established above.
 		 *
-		 * XXX The subsequent ResolveRecoveryConflictWithBufferPin() will wait
-		 * to be signaled by UnpinBuffer() again and send a request for
-		 * deadlocks check if deadlock_timeout happens. This causes the
-		 * request to continue to be sent every deadlock_timeout until the
-		 * buffer is unpinned or ltime is reached. This would increase the
-		 * workload in the startup process and backends. In practice it may
-		 * not be so harmful because the period that the buffer is kept pinned
-		 * is basically no so long. But we should fix this?
+		 * ProcWaitForSignal() can also wake up for unrelated reasons, so
+		 * recheck later whether cleanup can proceed.
 		 */
-		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN_DEADLOCK);
+		ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
+
+		/*
+		 * Once the reference count is 1, the waiter process itself is the
+		 * only backend pinning the buffer at the moment. There is a chance to
+		 * lock the buffer exclusively.
+		 */
+		if (PinCountWaiterCheckReadyForCleanup(bufid + 1))
+			break;
+
+		/*
+		 * Send the recovery conflict if the standby delay timeout is activated or
+		 * standby limit time was already reached. The second condition handles the
+		 * fast path when timeouts are not activated.
+		 */
+		if (got_standby_delay_timeout)
+		{
+			SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
+			break;
+		}
+		else if (got_standby_deadlock_timeout)
+		{
+			/*
+			 * Send out a request for hot-standby backends to check themselves
+			 * for deadlocks.
+			 *
+			 * XXX The subsequent ResolveRecoveryConflictWithBufferPin() will
+			 * wait to be signaled by UnpinBuffer() again and send a request
+			 * for deadlocks check if deadlock_timeout happens. This causes
+			 * the request to continue to be sent every deadlock_timeout until
+			 * the buffer is unpinned or ltime is reached. This would increase
+			 * the workload in the startup process and backends. In practice
+			 * it may not be so harmful because the period that the buffer is
+			 * kept pinned is basically no so long. But we should fix this?
+			 */
+			SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN_DEADLOCK);
+			break;
+		}
 	}
 
 	/*
