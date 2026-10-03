@@ -1827,7 +1827,70 @@ FROM stats_import.pg_statistic_get_difference('test', 'test_clone')
 SELECT relname, (stats).*
 FROM stats_import.pg_statistic_get_difference('is_odd', 'is_odd_clone')
 \gx
-(0 rows)
+-[ RECORD 1 ]-------------
+relname     | is_odd
+attname     | comp_2_1
+stainherit  | f
+stanullfrac | 0.25
+stawidth    | 1
+stadistinct | -0.5
+stakind1    | 8
+stakind2    | 3
+stakind3    | 0
+stakind4    | 0
+stakind5    | 0
+staop1      | 91
+staop2      | 58
+staop3      | 0
+staop4      | 0
+staop5      | 0
+stacoll1    | 0
+stacoll2    | 0
+stacoll3    | 0
+stacoll4    | 0
+stacoll5    | 0
+stanumbers1 | {0.5}
+stanumbers2 | {0.5}
+stanumbers3 | 
+stanumbers4 | 
+stanumbers5 | 
+sv1         | {t}
+sv2         | 
+sv3         | 
+sv4         | 
+sv5         | 
+-[ RECORD 2 ]-------------
+relname     | is_odd_clone
+attname     | comp_2_1
+stainherit  | f
+stanullfrac | 0.25
+stawidth    | 1
+stadistinct | -0.5
+stakind1    | 1
+stakind2    | 3
+stakind3    | 0
+stakind4    | 0
+stakind5    | 0
+staop1      | 91
+staop2      | 58
+staop3      | 0
+staop4      | 0
+staop5      | 0
+stacoll1    | 0
+stacoll2    | 0
+stacoll3    | 0
+stacoll4    | 0
+stacoll5    | 0
+stanumbers1 | {0.5}
+stanumbers2 | {0.5}
+stanumbers3 | 
+stanumbers4 | 
+stanumbers5 | 
+sv1         | {t}
+sv2         | 
+sv3         | 
+sv4         | 
+sv5         | 
 
 -- attribute stats exist before a clear, but not after
 SELECT COUNT(*)
