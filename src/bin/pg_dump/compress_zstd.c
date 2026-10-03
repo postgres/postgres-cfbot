@@ -27,7 +27,8 @@ InitCompressorZstd(CompressorState *cs, const pg_compress_specification compress
 }
 
 void
-InitCompressFileHandleZstd(CompressFileHandle *CFH, const pg_compress_specification compression_spec)
+InitCompressFileHandleZstd(CompressFileHandle *CFH, const pg_compress_specification compression_spec,
+						   bool is_pipe)
 {
 	pg_fatal("this build does not support compression with %s", "ZSTD");
 }
@@ -574,8 +575,12 @@ Zstd_get_error(CompressFileHandle *CFH)
 
 void
 InitCompressFileHandleZstd(CompressFileHandle *CFH,
-						   const pg_compress_specification compression_spec)
+						   const pg_compress_specification compression_spec,
+						   bool is_pipe)
 {
+	if (is_pipe)
+		pg_fatal("Pipe command not supported for Zstd");
+
 	CFH->open_func = Zstd_open;
 	CFH->open_write_func = Zstd_open_write;
 	CFH->read_func = Zstd_read;
@@ -587,6 +592,7 @@ InitCompressFileHandleZstd(CompressFileHandle *CFH,
 	CFH->get_error_func = Zstd_get_error;
 
 	CFH->compression_spec = compression_spec;
+	CFH->is_pipe = is_pipe;
 
 	CFH->private_data = NULL;
 }
