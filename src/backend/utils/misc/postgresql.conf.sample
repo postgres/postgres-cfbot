@@ -92,6 +92,8 @@
 #client_connection_check_interval = 0   # time between checks for client
                                         # disconnection while running queries;
                                         # 0 for never
+#listen_mptcp = off                     # whether to enable Multipath TCP or not
+                                        # (change requires restart)
 
 # - Authentication -
 
