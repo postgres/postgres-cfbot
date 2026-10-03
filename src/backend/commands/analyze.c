@@ -355,8 +355,6 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	int			save_sec_context;
 	int			save_nestlevel;
 	QueryInstrumentation *instr = NULL;
-	PgStat_Counter startreadtime = 0;
-	PgStat_Counter startwritetime = 0;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -394,16 +392,11 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 
 	/*
 	 * When verbose or autovacuum logging is used, initialize a resource usage
-	 * snapshot and optionally track I/O timing.
+	 * snapshot and start instrumentation to track buffer usage (including I/O
+	 * timing, if track_io_timing is enabled) and WAL usage.
 	 */
 	if (instrument)
 	{
-		if (track_io_timing)
-		{
-			startreadtime = pgStatBlockReadTime;
-			startwritetime = pgStatBlockWriteTime;
-		}
-
 		pg_rusage_init(&ru0);
 
 		instr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
@@ -851,8 +844,10 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			}
 			if (track_io_timing)
 			{
-				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
-				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
+				double		read_ms = INSTR_TIME_GET_MILLISEC(bufusage.shared_blk_read_time) +
+					INSTR_TIME_GET_MILLISEC(bufusage.local_blk_read_time);
+				double		write_ms = INSTR_TIME_GET_MILLISEC(bufusage.shared_blk_write_time) +
+					INSTR_TIME_GET_MILLISEC(bufusage.local_blk_write_time);
 
 				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
 								 read_ms, write_ms);
