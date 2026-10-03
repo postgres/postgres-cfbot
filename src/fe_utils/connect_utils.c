@@ -27,6 +27,11 @@
  * given during previous calls to this routine.  (Callers should not pass
  * allow_password_reuse=true unless reconnecting to the same host+port+user
  * as before, else we might create password exposure hazards.)
+ *
+ * If fail_ok is true, a connection that could not be established is handed
+ * back to the caller with status CONNECTION_BAD, just as PQconnectdb would
+ * do; the caller must then report PQerrorMessage() as it sees fit and call
+ * PQfinish() on it.  Otherwise, a failure is reported and we exit.
  */
 PGconn *
 connectDatabase(const ConnParams *cparams, const char *progname,
@@ -109,10 +114,7 @@ connectDatabase(const ConnParams *cparams, const char *progname,
 	if (PQstatus(conn) == CONNECTION_BAD)
 	{
 		if (fail_ok)
-		{
-			PQfinish(conn);
-			return NULL;
-		}
+			return conn;		/* caller reports the error and closes it */
 		pg_fatal("%s", PQerrorMessage(conn));
 	}
 
@@ -143,8 +145,9 @@ connectMaintenanceDatabase(ConnParams *cparams,
 	/* Otherwise, try postgres first and then template1. */
 	cparams->dbname = "postgres";
 	conn = connectDatabase(cparams, progname, echo, true, false);
-	if (!conn)
+	if (PQstatus(conn) == CONNECTION_BAD)
 	{
+		PQfinish(conn);
 		cparams->dbname = "template1";
 		conn = connectDatabase(cparams, progname, echo, false, false);
 	}
