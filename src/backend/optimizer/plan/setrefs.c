@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/transam.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
@@ -1053,6 +1054,11 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					 * it here and keep the assertions that ROWID_VARs
 					 * shouldn't be seen by fix_scan_expr.
 					 *
+					 * The same applies to an FDW row-identity pseudo-column
+					 * (attno > MaxHeapAttributeNumber; see
+					 * add_vars_to_targetlist()): no scan node exists here to
+					 * give it a value or a name, so replace it the same way.
+					 *
 					 * We also must handle the case where set operations have
 					 * been short-circuited resulting in a dummy Result node.
 					 * prepunion.c uses varno==0 for the set op targetlist.
@@ -1069,7 +1075,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 
 						if (var && IsA(var, Var))
 						{
-							if (var->varno == ROWID_VAR)
+							if (var->varno == ROWID_VAR ||
+								var->varattno > MaxHeapAttributeNumber)
 								tle->expr = (Expr *) makeNullConst(var->vartype,
 																   var->vartypmod,
 																   var->varcollid);

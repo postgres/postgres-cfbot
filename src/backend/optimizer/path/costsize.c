@@ -6493,6 +6493,20 @@ set_rel_width(PlannerInfo *root, RelOptInfo *rel)
 			int			ndx;
 			int32		item_width;
 
+			/*
+			 * An out-of-range attno (> max_attr) is an FDW row-identity
+			 * pseudo-column (postgres_fdw's remote table OID for
+			 * UPDATE/DELETE; see add_vars_to_targetlist()) with no
+			 * attr_widths[] slot; estimate its width from the type.
+			 */
+			if (var->varattno > rel->max_attr)
+			{
+				/* Only an FDW can inject an out-of-range row-identity column */
+				Assert(rel->fdwroutine != NULL);
+				tuple_width += get_typavgwidth(var->vartype, var->vartypmod);
+				continue;
+			}
+
 			Assert(var->varattno >= rel->min_attr);
 			Assert(var->varattno <= rel->max_attr);
 
