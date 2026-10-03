@@ -261,6 +261,69 @@ explain_filter
 ]
 (1 row)
 \a
+-- Index scans track table buffer accesses separately; make sure EXPLAIN
+-- (BUFFERS) copes without ANALYZE, i.e. when the plan was never run
+select explain_filter('explain (buffers, costs off) select * from tenk1 where unique1 = 42');
+             explain_filter              
+-----------------------------------------
+ Index Scan using tenk1_unique1 on tenk1
+   Index Cond: (unique1 = N)
+(2 rows)
+
+\a
+select explain_filter('explain (buffers, costs off, format json) select * from tenk1 where unique1 = 42');
+explain_filter
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "tenk1_unique1",
+      "Relation Name": "tenk1",
+      "Alias": "tenk1",
+      "Disabled": false,
+      "Index Cond": "(unique1 = N)",
+      "Table Buffers": {
+        "Shared Hit Blocks": N,
+        "Shared Read Blocks": N,
+        "Shared Dirtied Blocks": N,
+        "Shared Written Blocks": N,
+        "Local Hit Blocks": N,
+        "Local Read Blocks": N,
+        "Local Dirtied Blocks": N,
+        "Local Written Blocks": N,
+        "Temp Read Blocks": N,
+        "Temp Written Blocks": N
+      },
+      "Shared Hit Blocks": N,
+      "Shared Read Blocks": N,
+      "Shared Dirtied Blocks": N,
+      "Shared Written Blocks": N,
+      "Local Hit Blocks": N,
+      "Local Read Blocks": N,
+      "Local Dirtied Blocks": N,
+      "Local Written Blocks": N,
+      "Temp Read Blocks": N,
+      "Temp Written Blocks": N
+    },
+    "Planning": {
+      "Shared Hit Blocks": N,
+      "Shared Read Blocks": N,
+      "Shared Dirtied Blocks": N,
+      "Shared Written Blocks": N,
+      "Local Hit Blocks": N,
+      "Local Read Blocks": N,
+      "Local Dirtied Blocks": N,
+      "Local Written Blocks": N,
+      "Temp Read Blocks": N,
+      "Temp Written Blocks": N
+    }
+  }
+]
+(1 row)
+\a
 -- Check expansion of window definitions
 select explain_filter('explain verbose select sum(unique1) over w, sum(unique2) over (w order by hundred), sum(tenthous) over (w order by hundred) from tenk1 window w as (partition by ten)');
                                             explain_filter                                             
@@ -1020,3 +1083,72 @@ DROP TRIGGER trig_test_trig ON trig_test_tab;
 DROP FUNCTION trig_test_func;
 DROP TABLE trig_test_tab;
 DROP TABLE trig_work_tab;
+-- Parallel index scan buffer usage.
+-- Table accesses of an index scan are tracked separately from the index
+-- accesses, and parallel workers report them to the leader separately as
+-- well.  Verify that the total shown for the scan node matches between a
+-- serial and a parallel execution where only workers do the scanning.
+CREATE TABLE par_idx_buf_test AS SELECT * FROM tenk1;
+CREATE INDEX ON par_idx_buf_test (unique1);
+VACUUM ANALYZE par_idx_buf_test;
+CREATE FUNCTION check_parallel_indexscan_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    serial_buf int;
+    parallel_buf int;
+BEGIN
+    -- Serial index scan: get the leaf scan node buffers as baseline
+    SET LOCAL max_parallel_workers_per_gather = 0;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(stringu1) FROM par_idx_buf_test WHERE unique1 >= 0' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+    IF node->>'Node Type' <> 'Index Scan' THEN
+        RAISE EXCEPTION 'expected Index Scan, got %', node->>'Node Type';
+    END IF;
+    serial_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+
+    -- Parallel index scan with only workers scanning
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_index_scan_size = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(stringu1) FROM par_idx_buf_test WHERE unique1 >= 0' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+    IF node->>'Node Type' <> 'Index Scan' OR NOT (node->>'Parallel Aware')::bool THEN
+        RAISE EXCEPTION 'expected Parallel Index Scan, got %', node->>'Node Type';
+    END IF;
+    parallel_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+
+    -- Workers may each fetch some heap pages the other also fetched, so
+    -- allow for a little slack, but the totals must be in the same ballpark.
+    RETURN parallel_buf >= serial_buf * 0.9 AND parallel_buf <= serial_buf * 1.5;
+END;
+$$ LANGUAGE plpgsql;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexonlyscan = off;
+SELECT check_parallel_indexscan_buffers() AS parallel_indexscan_buffers_match;
+ parallel_indexscan_buffers_match 
+----------------------------------
+ t
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+RESET enable_indexonlyscan;
+DROP FUNCTION check_parallel_indexscan_buffers;
+DROP TABLE par_idx_buf_test;
