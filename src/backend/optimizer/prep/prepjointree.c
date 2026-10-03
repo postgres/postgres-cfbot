@@ -170,7 +170,8 @@ static void remove_redundant_nullability_quals(Node *jtnode,
 static Node *strip_redundant_nullability_quals(Node *quals, Relids antijoins);
 static bool forced_null_var_is_attnotnull(PlannerInfo *root,
 										  List *forced_null_vars,
-										  reduce_outer_joins_pass1_state *state);
+										  reduce_outer_joins_pass1_state *state,
+										  Relids qual_nonnullable_rels);
 static bool forced_null_var_is_nonnullable(PlannerInfo *root,
 										   List *forced_null_vars,
 										   reduce_outer_joins_pass1_state *state,
@@ -3854,13 +3855,18 @@ report_reduced_full_join(reduce_outer_joins_pass2_state *state2,
  * to be NULL, so any NOT NULL column of the relation refutes it.
  *
  * Note that we must also consider the situation where a NOT NULL Var can be
- * nulled by lower-level outer joins.
+ * nulled by lower-level outer joins.  However, a rel listed in
+ * "qual_nonnullable_rels" is known not to be null-extended in any row of
+ * interest, because quals that hold for all such rows are strict for it; its
+ * NOT NULL constraints are therefore trustworthy even if lower-level outer
+ * joins could null it in general.
  *
  * Helper for reduce_outer_joins_pass2.
  */
 static bool
 forced_null_var_is_attnotnull(PlannerInfo *root, List *forced_null_vars,
-							  reduce_outer_joins_pass1_state *state)
+							  reduce_outer_joins_pass1_state *state,
+							  Relids qual_nonnullable_rels)
 {
 	int			varno = -1;
 
@@ -3885,9 +3891,12 @@ forced_null_var_is_attnotnull(PlannerInfo *root, List *forced_null_vars,
 		/*
 		 * Skip Vars that can be nulled by lower-level outer joins within the
 		 * given subtree.  These Vars might be NULL even if the schema defines
-		 * them as NOT NULL.
+		 * them as NOT NULL.  However, if quals holding for every row of
+		 * interest are strict for the rel, it cannot have been null-extended
+		 * in such rows, so its NOT NULL constraints apply after all.
 		 */
-		if (bms_is_member(varno, state->nullable_rels))
+		if (bms_is_member(varno, state->nullable_rels) &&
+			!bms_is_member(varno, qual_nonnullable_rels))
 			continue;
 
 		/* find the lowest member to check if system columns are present */
@@ -3959,8 +3968,11 @@ forced_null_var_is_attnotnull(PlannerInfo *root, List *forced_null_vars,
  *
  * We prove non-nullness from quals that hold for every such row: the subtree's
  * safe quals, plus any "extra_quals" the caller knows also constrain the Var,
- * or a NOT NULL table constraint (excluding Vars nullable due to lower-level
- * outer joins).
+ * or a NOT NULL table constraint.  The two proof methods combine: a NOT NULL
+ * constraint is normally unusable for a Var nullable due to lower-level outer
+ * joins, but if those same quals are strict for the Var's rel, the rel cannot
+ * have been null-extended in any row of interest, making the constraint
+ * usable again.
  *
  * A whole-row Var in "forced_null_vars" requires, in any matching row, every
  * column of its relation to be NULL, so it is refuted by proving any one of
@@ -4034,9 +4046,13 @@ forced_null_var_is_nonnullable(PlannerInfo *root, List *forced_null_vars,
 
 	/*
 	 * Otherwise, check if any forced-null var is defined NOT NULL by table
-	 * constraints.
+	 * constraints.  Rels for which the quals are strict cannot have been
+	 * null-extended by lower-level outer joins in any row of interest, so
+	 * their NOT NULL constraints hold there even if pass 1 found them
+	 * nullable within this subtree.
 	 */
-	return forced_null_var_is_attnotnull(root, forced_null_vars, state);
+	return forced_null_var_is_attnotnull(root, forced_null_vars, state,
+										 find_nonnullable_rels((Node *) all_quals));
 }
 
 
