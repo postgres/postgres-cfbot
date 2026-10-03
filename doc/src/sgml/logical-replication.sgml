@@ -2864,14 +2864,18 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
     <link linkend="catalog-pg-subscription-rel">pg_subscription_rel</link>
     system catalog and also the subscription's replication origin. This allows
     logical replication on the new subscriber to continue from where the
-    old subscriber was up to. Migration of subscription dependencies is only
-    supported when the old cluster is version 17.0 or later. Subscription
-    dependencies on clusters before version 17.0 will silently be ignored.
+    old subscriber was up to. Migration of the subscription's replication
+    origin is supported for all cluster versions. However, migration of the
+    subscription's table information in <link
+    linkend="catalog-pg-subscription-rel">pg_subscription_rel</link> is only
+    supported when the old cluster is version 17.0 or later; this information
+    will silently be ignored for clusters before version 17.0.
    </para>
 
    <note>
     <para>
-     Commit timestamps and origin data are not preserved during the upgrade.
+     Commit timestamps (which include the origin of the commit) are not
+     preserved during the upgrade.
      As a result, even if
      <link linkend="sql-createsubscription-params-with-retain-dead-tuples"><literal>retain_dead_tuples</literal></link>
      is enabled, the upgraded subscriber may be unable to detect conflicts or
@@ -2912,8 +2916,11 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
      <para>
       The new cluster must have
       <link linkend="guc-max-active-replication-origins"><varname>max_active_replication_origins</varname></link>
-      configured to a value greater than or equal to the number of
-      subscriptions present in the old cluster.
+      configured to a value greater than or equal to the number of tracked
+      replication origins present in the old cluster (reflected in
+      <link linkend="view-pg-replication-origin-status"><structname>pg_replication_origin_status</structname></link>).
+      Furthermore, the new cluster must not contain any pre-existing replication
+      origins.
      </para>
     </listitem>
     <listitem>

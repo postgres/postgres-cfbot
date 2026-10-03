@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "access/xlogdefs.h"
 #include "catalog/pg_authid_d.h"
 #include "common/connect.h"
 #include "common/file_perm.h"
@@ -67,6 +68,7 @@ static void dropDBs(PGconn *conn);
 static void dumpUserConfig(PGconn *conn, const char *username);
 static void dumpDatabases(PGconn *conn);
 static void dumpTimestamp(const char *msg);
+static void dumpReplicationOrigins(PGconn *conn);
 static int	runPgDump(const char *dbname, const char *create_opts);
 static void buildShSecLabels(PGconn *conn,
 							 const char *catalog_name, Oid objectId,
@@ -664,6 +666,10 @@ main(int argc, char *argv[])
 			if (server_version >= 150000 && !skip_acls)
 				dumpRoleGUCPrivs(conn);
 		}
+
+		/* Dump replication origins */
+		if (!tablespaces_only && !roles_only && binary_upgrade)
+			dumpReplicationOrigins(conn);
 
 		/* Dump tablespaces */
 		if (!roles_only && !no_tablespaces)
@@ -1802,6 +1808,67 @@ dumpTimestamp(const char *msg)
 
 	if (strftime(buf, sizeof(buf), PGDUMP_STRFTIME_FMT, localtime(&now)) != 0)
 		fprintf(OPF, "-- %s %s\n\n", msg, buf);
+}
+
+/*
+ * dumpReplicationOrigins
+ */
+static void
+dumpReplicationOrigins(PGconn *conn)
+{
+	PQExpBuffer buf = createPQExpBuffer();
+	PGresult   *res;
+	int			i_roident;
+	int			i_roname;
+	int			i_remotelsn;
+	int			ntups;
+
+	/* Get replication origins from catalogs */
+	appendPQExpBufferStr(buf,
+						 "SELECT o.roident, o.roname, os.remote_lsn "
+						 "FROM pg_catalog.pg_replication_origin o "
+						 "LEFT JOIN pg_catalog.pg_replication_origin_status os ON o.roident = os.local_id "
+						 "ORDER BY o.roident");
+
+	res = executeQuery(conn, buf->data);
+
+	i_roident = PQfnumber(res, "roident");
+	i_roname = PQfnumber(res, "roname");
+	i_remotelsn = PQfnumber(res, "remote_lsn");
+	ntups = PQntuples(res);
+
+	if (ntups > 0)
+		fprintf(OPF, "--\n-- Replication Origins\n--\n\n");
+
+	for (int i = 0; i < ntups; i++)
+	{
+		ReplOriginId roident = atooid(PQgetvalue(res, i, i_roident));
+		const char *roname = PQgetvalue(res, i, i_roname);
+
+		resetPQExpBuffer(buf);
+
+		appendPQExpBufferStr(buf, "\n-- For binary upgrade, must preserve pg_replication_origin roident and remote_lsn\n");
+		appendPQExpBuffer(buf,
+			"SELECT pg_catalog.binary_upgrade_create_replication_origin("
+			"'%u'::pg_catalog.oid, ", roident);
+		appendStringLiteralConn(buf, roname, conn);
+		appendPQExpBufferStr(buf, "::pg_catalog.text");
+
+		if (!PQgetisnull(res, i, i_remotelsn))
+		{
+			appendPQExpBufferStr(buf, ", ");
+			appendStringLiteralConn(buf, PQgetvalue(res, i, i_remotelsn), conn);
+			appendPQExpBufferStr(buf, "::pg_catalog.pg_lsn");
+		}
+		else
+			appendPQExpBufferStr(buf, ", NULL::pg_catalog.pg_lsn");
+
+		appendPQExpBufferStr(buf, ");\n");
+		fprintf(OPF, "%s", buf->data);
+	}
+
+	PQclear(res);
+	destroyPQExpBuffer(buf);
 }
 
 /*
