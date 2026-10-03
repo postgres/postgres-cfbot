@@ -321,7 +321,6 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 	 * VACUUM command has processed all tables and committed.
 	 */
 	pgstat_flush_io(false);
-	(void) pgstat_flush_backend(false, PGSTAT_BACKEND_FLUSH_IO);
 }
 
 /*
@@ -417,7 +416,6 @@ pgstat_report_analyze(Relation rel,
 
 	/* see pgstat_report_vacuum() */
 	pgstat_flush_io(false);
-	(void) pgstat_flush_backend(false, PGSTAT_BACKEND_FLUSH_IO);
 }
 
 /*
