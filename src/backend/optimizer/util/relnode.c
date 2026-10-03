@@ -292,6 +292,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->fdw_private = NULL;
 	rel->unique_for_rels = NIL;
 	rel->non_unique_for_rels = NIL;
+	rel->uniquekeys = NIL;
 	rel->unique_rel = NULL;
 	rel->unique_pathkeys = NIL;
 	rel->unique_groupclause = NIL;
@@ -488,6 +489,9 @@ build_simple_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->rows = agg_info->grouped_rows;
 	grouped_rel->agg_info = agg_info;
 
+	/* Deduce the grouped rel's unique keys */
+	populate_agg_rel_uniquekeys(root, grouped_rel);
+
 	rel->grouped_rel = grouped_rel;
 
 	return grouped_rel;
@@ -515,6 +519,11 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->cheapest_startup_path = NULL;
 	grouped_rel->cheapest_total_path = NULL;
 	grouped_rel->cheapest_parameterized_paths = NIL;
+
+	/*
+	 * clear unique keys
+	 */
+	grouped_rel->uniquekeys = NIL;
 
 	/*
 	 * clear partition info
@@ -906,6 +915,7 @@ build_join_rel(PlannerInfo *root,
 	joinrel->fdw_private = NULL;
 	joinrel->unique_for_rels = NIL;
 	joinrel->non_unique_for_rels = NIL;
+	joinrel->uniquekeys = NIL;
 	joinrel->unique_rel = NULL;
 	joinrel->unique_pathkeys = NIL;
 	joinrel->unique_groupclause = NIL;
@@ -1015,6 +1025,9 @@ build_join_rel(PlannerInfo *root,
 	/* Store the partition information. */
 	build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo,
 								 restrictlist);
+
+	populate_joinrel_uniquekeys(root, joinrel, outer_rel, inner_rel,
+								sjinfo, restrictlist);
 
 	/* Add the joinrel to the PlannerInfo. */
 	add_join_rel(root, joinrel);
@@ -1129,6 +1142,12 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
+
+	/*
+	 * A child joinrel emits a subset of the parent joinrel's rows, so every
+	 * key of the parent is a key of the child.
+	 */
+	joinrel->uniquekeys = parent_joinrel->uniquekeys;
 
 	/* Compute information relevant to foreign relations. */
 	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
