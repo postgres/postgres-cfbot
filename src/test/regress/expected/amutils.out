@@ -13,6 +13,7 @@ select prop,
                     'backward_scan',
                     'can_order', 'can_unique', 'can_multi_col',
                     'can_exclude', 'can_include',
+                    'can_var_locator',
                     'bogus']::text[])
          with ordinality as u(prop,ord)
  where a.amname = 'btree'
@@ -37,8 +38,9 @@ select prop,
  can_multi_col      | t  |       | 
  can_exclude        | t  |       | 
  can_include        | t  |       | 
+ can_var_locator    | f  |       | 
  bogus              |    |       | 
-(19 rows)
+(20 rows)
 
 select prop,
        pg_indexam_has_property(a.oid, prop) as "AM",
@@ -52,6 +54,7 @@ select prop,
                     'backward_scan',
                     'can_order', 'can_unique', 'can_multi_col',
                     'can_exclude', 'can_include',
+                    'can_var_locator',
                     'bogus']::text[])
          with ordinality as u(prop,ord)
  where a.amname = 'gist'
@@ -76,8 +79,9 @@ select prop,
  can_multi_col      | t  |       | 
  can_exclude        | t  |       | 
  can_include        | t  |       | 
+ can_var_locator    | f  |       | 
  bogus              |    |       | 
-(19 rows)
+(20 rows)
 
 select prop,
        pg_index_column_has_property('onek_hundred'::regclass, 1, prop) as btree,
@@ -131,49 +135,55 @@ select prop,
 select amname, prop, pg_indexam_has_property(a.oid, prop) as p
   from pg_am a,
        unnest(array['can_order', 'can_unique', 'can_multi_col',
-                    'can_exclude', 'can_include', 'bogus']::text[])
+                    'can_exclude', 'can_include', 'can_var_locator', 'bogus']::text[])
          with ordinality as u(prop,ord)
  where amtype = 'i'
  order by amname, ord;
- amname |     prop      | p 
---------+---------------+---
- brin   | can_order     | f
- brin   | can_unique    | f
- brin   | can_multi_col | t
- brin   | can_exclude   | f
- brin   | can_include   | f
- brin   | bogus         | 
- btree  | can_order     | t
- btree  | can_unique    | t
- btree  | can_multi_col | t
- btree  | can_exclude   | t
- btree  | can_include   | t
- btree  | bogus         | 
- gin    | can_order     | f
- gin    | can_unique    | f
- gin    | can_multi_col | t
- gin    | can_exclude   | f
- gin    | can_include   | f
- gin    | bogus         | 
- gist   | can_order     | f
- gist   | can_unique    | f
- gist   | can_multi_col | t
- gist   | can_exclude   | t
- gist   | can_include   | t
- gist   | bogus         | 
- hash   | can_order     | f
- hash   | can_unique    | f
- hash   | can_multi_col | f
- hash   | can_exclude   | t
- hash   | can_include   | f
- hash   | bogus         | 
- spgist | can_order     | f
- spgist | can_unique    | f
- spgist | can_multi_col | f
- spgist | can_exclude   | t
- spgist | can_include   | t
- spgist | bogus         | 
-(36 rows)
+ amname |      prop       | p 
+--------+-----------------+---
+ brin   | can_order       | f
+ brin   | can_unique      | f
+ brin   | can_multi_col   | t
+ brin   | can_exclude     | f
+ brin   | can_include     | f
+ brin   | can_var_locator | f
+ brin   | bogus           | 
+ btree  | can_order       | t
+ btree  | can_unique      | t
+ btree  | can_multi_col   | t
+ btree  | can_exclude     | t
+ btree  | can_include     | t
+ btree  | can_var_locator | f
+ btree  | bogus           | 
+ gin    | can_order       | f
+ gin    | can_unique      | f
+ gin    | can_multi_col   | t
+ gin    | can_exclude     | f
+ gin    | can_include     | f
+ gin    | can_var_locator | f
+ gin    | bogus           | 
+ gist   | can_order       | f
+ gist   | can_unique      | f
+ gist   | can_multi_col   | t
+ gist   | can_exclude     | t
+ gist   | can_include     | t
+ gist   | can_var_locator | f
+ gist   | bogus           | 
+ hash   | can_order       | f
+ hash   | can_unique      | f
+ hash   | can_multi_col   | f
+ hash   | can_exclude     | t
+ hash   | can_include     | f
+ hash   | can_var_locator | f
+ hash   | bogus           | 
+ spgist | can_order       | f
+ spgist | can_unique      | f
+ spgist | can_multi_col   | f
+ spgist | can_exclude     | t
+ spgist | can_include     | t
+ spgist | can_var_locator | f
+ spgist | bogus           | 
+(42 rows)
 
 --
 -- additional checks for pg_index_column_has_property

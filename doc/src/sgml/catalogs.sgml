@@ -8223,6 +8223,22 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>subhotindexedonapply</structfield> <type>char</type>
+      </para>
+      <para>
+       Gating mode for the HOT-indexed apply path.  Corresponds to the
+       <link linkend="sql-createsubscription-params-with-hot-indexed-on-apply"><literal>hot_indexed_on_apply</literal></link>
+       subscription option:
+       <itemizedlist>
+        <listitem><para><literal>o</literal> = off</para></listitem>
+        <listitem><para><literal>s</literal> = subset_only (default)</para></listitem>
+        <listitem><para><literal>a</literal> = always</para></listitem>
+       </itemizedlist>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>subserver</structfield> <type>oid</type>
        (references <link linkend="catalog-pg-foreign-server"><structname>pg_foreign_server</structname></link>.<structfield>oid</structfield>)
       </para>

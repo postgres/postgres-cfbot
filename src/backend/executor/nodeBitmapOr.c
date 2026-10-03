@@ -149,6 +149,8 @@ MultiExecBitmapOr(BitmapOrState *node)
 				result = tbm_create(work_mem * (Size) 1024,
 									((BitmapOr *) node->ps.plan)->isshared ?
 									node->ps.state->es_query_dsa : NULL);
+				if (node->bitmap_relation != NULL)
+					tbm_set_relation(result, node->bitmap_relation);
 			}
 
 			((BitmapIndexScanState *) subnode)->biss_result = result;
@@ -167,7 +169,11 @@ MultiExecBitmapOr(BitmapOrState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			if (result == NULL)
+			{
 				result = subresult; /* first subplan */
+				if (node->bitmap_relation != NULL)
+					tbm_set_relation(result, node->bitmap_relation);
+			}
 			else
 			{
 				tbm_union(result, subresult);

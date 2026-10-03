@@ -885,6 +885,26 @@ DefineIndex(ParseState *pstate,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("access method \"%s\" does not support unique indexes",
 						accessMethodName)));
+
+	/*
+	 * Unless the index AM can store variable-width locators, it keeps the
+	 * table AM's locator in an ItemPointerData, so the table's locator must be
+	 * fixed-width and fit in one.  A partitioned table has no table AM; the
+	 * recursive DefineIndex() call for each partition checks that partition's
+	 * AM instead.
+	 */
+	if (rel->rd_tableam != NULL && !amRoutine->amcanvarlocator)
+	{
+		const LocatorDesc *locdesc = RelationGetLocatorDesc(rel);
+
+		if (locdesc->width < 0 || locdesc->width > sizeof(ItemPointerData))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("access method \"%s\" cannot index table \"%s\"",
+							accessMethodName, RelationGetRelationName(rel)),
+					 errdetail("The table's access method identifies rows using the \"%s\" locator, which \"%s\" cannot store.",
+							   locdesc->name, accessMethodName)));
+	}
 	if (stmt->indexIncludingParams != NIL && !amRoutine->amcaninclude)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

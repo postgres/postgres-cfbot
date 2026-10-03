@@ -12,6 +12,7 @@
 #ifndef AMAPI_H
 #define AMAPI_H
 
+#include "access/amlocator.h"
 #include "access/cmptype.h"
 #include "access/genam.h"
 #include "access/stratnum.h"
@@ -28,7 +29,6 @@ typedef struct IndexPath IndexPath;
 
 /* Likewise, this file shouldn't depend on execnodes.h. */
 typedef struct IndexInfo IndexInfo;
-
 
 /*
  * Properties for amproperty API.  This list covers properties known to the
@@ -56,6 +56,7 @@ typedef enum IndexAMProperty
 	AMPROP_CAN_MULTI_COL,
 	AMPROP_CAN_EXCLUDE,
 	AMPROP_CAN_INCLUDE,
+	AMPROP_CAN_VAR_LOCATOR,
 } IndexAMProperty;
 
 /*
@@ -281,6 +282,12 @@ typedef struct IndexAmRoutine
 	bool		amusemaintenanceworkmem;
 	/* does AM store tuple information only at block granularity? */
 	bool		amsummarizing;
+	/*
+	 * Can this AM store a variable-width locator?  An AM that leaves this
+	 * false stores the table's locator in an ItemPointerData, so it can index
+	 * only a table whose locator is fixed-width and fits in one.
+	 */
+	bool		amcanvarlocator;
 	/* OR of parallel vacuum flags.  See vacuum.h for flags. */
 	uint8		amparallelvacuumoptions;
 	/* type of data stored in index, or InvalidOid if variable */

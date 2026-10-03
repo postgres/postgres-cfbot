@@ -431,6 +431,20 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	outerPlanState(scanstate) = ExecInitNode(outerPlan(node), estate, eflags);
 
 	/*
+	 * Thread the relation down to the top bitmap node so that a combining
+	 * operation can ask the table AM, per group, whether that group's slots
+	 * can be combined exactly (see tbm_set_relation and the inexact callbacks
+	 * in amlocator.h).  Only BitmapAnd and BitmapOr combine; a plain
+	 * BitmapIndexScan does not.
+	 */
+	if (IsA(outerPlan(node), BitmapAnd))
+		((BitmapAndState *) outerPlanState(scanstate))->bitmap_relation =
+			currentRelation;
+	else if (IsA(outerPlan(node), BitmapOr))
+		((BitmapOrState *) outerPlanState(scanstate))->bitmap_relation =
+			currentRelation;
+
+	/*
 	 * get the scan type from the relation descriptor.
 	 */
 	ExecInitScanTupleSlot(estate, &scanstate->ss,

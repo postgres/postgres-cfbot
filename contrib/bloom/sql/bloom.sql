@@ -93,3 +93,31 @@ SELECT reloptions FROM pg_class WHERE oid = 'bloomidx'::regclass;
 \set VERBOSITY terse
 CREATE INDEX bloomidx2 ON tst USING bloom (i, t) WITH (length=0);
 CREATE INDEX bloomidx2 ON tst USING bloom (i, t) WITH (col1=0);
+
+--
+-- HOT-indexed (SIU) BitmapAnd correctness with a bloom index.
+--
+-- A bloom index is bitmap-scan-only and non-summarizing, so it is eligible to
+-- be the "unchanged" side of a HOT-indexed update: the update changes a
+-- btree-indexed column while leaving the bloom-indexed column alone.  The
+-- btree fresh entry then points at the new heap-only tuple and the bloom entry
+-- still points at the chain root; a BitmapAnd of the two must not drop the
+-- matching row (the SIU fresh entry's TID carries an internal may-be-stale
+-- marker that tbm_add_tuples degrades to a lossy page, so the intersection
+-- keeps the row and the heap-side recheck resolves it).  This is handled
+-- centrally in tbm_add_tuples, so bloom, like every other index AM, needs
+-- no bloom-specific code for it; this test guards that.
+CREATE TABLE bloom_siu (id int PRIMARY KEY, bcol int, changed int) WITH (fillfactor = 50);
+CREATE INDEX bloom_siu_b ON bloom_siu USING bloom (bcol);
+CREATE INDEX bloom_siu_c ON bloom_siu (changed);
+INSERT INTO bloom_siu VALUES (1, 11, 21);
+UPDATE bloom_siu SET changed = 22 WHERE id = 1;   -- HOT-indexed: only "changed"
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = on;
+-- Must return the row (previously a false negative before the SIU bitmap fix).
+SELECT count(*) AS bloom_bitmapand FROM bloom_siu WHERE bcol = 11 AND changed = 22;
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE bloom_siu;

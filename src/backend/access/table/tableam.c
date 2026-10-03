@@ -222,6 +222,7 @@ table_beginscan_parallel_tidrange(Relation relation,
 }
 
 
+
 /* ------------------------------------------------------------------------
  * Functions for non-modifying operations on individual tuples
  * ------------------------------------------------------------------------
@@ -323,7 +324,8 @@ void
 simple_table_tuple_update(Relation rel, ItemPointer otid,
 						  TupleTableSlot *slot,
 						  Snapshot snapshot,
-						  TU_UpdateIndexes *update_indexes)
+						  const Bitmapset *modified_attrs,
+						  bool *row_moved)
 {
 	TM_Result	result;
 	TM_FailureData tmfd;
@@ -333,7 +335,9 @@ simple_table_tuple_update(Relation rel, ItemPointer otid,
 								GetCurrentCommandId(true),
 								0, snapshot, InvalidSnapshot,
 								true /* wait for commit */ ,
-								&tmfd, &lockmode, update_indexes);
+								&tmfd, &lockmode,
+								modified_attrs,
+								row_moved);
 
 	switch (result)
 	{

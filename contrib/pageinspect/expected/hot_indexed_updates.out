@@ -1,0 +1,2228 @@
+--
+-- HOT_INDEXED_UPDATES
+-- Test HOT-indexed update (hot-indexed), aka HOT-indexed, behaviour
+--
+-- Every UPDATE in this file modifies at least one non-summarizing
+-- indexed attribute.  On a pre-hot-indexed server all of these would be
+-- non-HOT; on the hot-indexed branch each eligible update stays on-page and
+-- inserts into only the indexes whose attributes actually changed.
+--
+-- We verify four things:
+--   (A) pg_stat counters: HOT and hot-indexed counts increment as expected
+--   (B) index lookups return the new value and not the stale value
+--       for EQUALITY queries (the read-side staleness test drops a
+--       leaf whose covered attribute changed on the way to the live tuple)
+--   (C) pg_relation_hot_indexed_stats reports the HOT-indexed versions we expect
+--   (D) **RANGE/INEQUALITY** queries return the correct number of
+--       tuples; this is the class of bugs where a stale btree
+--       entry's key is still reachable via a looser scan key; the
+--       crossed-attribute bitmap drops the stale arrival because the index's
+--       attribute changed between that leaf's target and the live tuple
+--
+CREATE EXTENSION IF NOT EXISTS pageinspect;
+NOTICE:  extension "pageinspect" already exists, skipping
+CREATE OR REPLACE FUNCTION get_hot_count(rel_name text)
+RETURNS TABLE (updates BIGINT, hot BIGINT) AS $$
+DECLARE rel_oid oid;
+BEGIN
+    rel_oid := rel_name::regclass::oid;
+    updates := COALESCE(pg_stat_get_tuples_updated(rel_oid), 0) +
+               COALESCE(pg_stat_get_xact_tuples_updated(rel_oid), 0);
+    hot := COALESCE(pg_stat_get_tuples_hot_updated(rel_oid), 0) +
+           COALESCE(pg_stat_get_xact_tuples_hot_updated(rel_oid), 0);
+    RETURN NEXT;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION get_hi_count(rel_name text)
+RETURNS TABLE (updates BIGINT, hot BIGINT, hot_idx BIGINT) AS $$
+DECLARE rel_oid oid;
+BEGIN
+    rel_oid := rel_name::regclass::oid;
+    updates := COALESCE(pg_stat_get_tuples_updated(rel_oid), 0) +
+               COALESCE(pg_stat_get_xact_tuples_updated(rel_oid), 0);
+    hot := COALESCE(pg_stat_get_tuples_hot_updated(rel_oid), 0) +
+           COALESCE(pg_stat_get_xact_tuples_hot_updated(rel_oid), 0);
+    hot_idx := COALESCE(pg_stat_get_tuples_hot_indexed_updated(rel_oid), 0) +
+           COALESCE(pg_stat_get_xact_tuples_hot_indexed_updated(rel_oid), 0);
+    RETURN NEXT;
+END;
+$$ LANGUAGE plpgsql;
+-- ---------------------------------------------------------------------------
+-- Basic hot-indexed: modifying an indexed column stays HOT and counts as hot-indexed
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_basic (
+    id int PRIMARY KEY,
+    indexed_col int,
+    non_indexed_col text
+) WITH (fillfactor = 50);
+CREATE INDEX hi_basic_idx ON hi_basic(indexed_col);
+INSERT INTO hi_basic VALUES (1, 100, 'initial');
+-- Pre-hot-indexed this would be non-HOT.  Under hot-indexed it's HOT-indexed; both the
+-- HOT counter and the hot-indexed counter advance.
+UPDATE hi_basic SET indexed_col = 150 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_basic');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+-- The new value is reachable via the index.
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id, indexed_col FROM hi_basic WHERE indexed_col = 150;
+               QUERY PLAN                
+-----------------------------------------
+ Bitmap Heap Scan on hi_basic
+   Recheck Cond: (indexed_col = 150)
+   ->  Bitmap Index Scan on hi_basic_idx
+         Index Cond: (indexed_col = 150)
+(4 rows)
+
+SELECT id, indexed_col FROM hi_basic WHERE indexed_col = 150;
+ id | indexed_col 
+----+-------------
+  1 |         150
+(1 row)
+
+-- The old value is not reachable through this index: the stale btree
+-- entry (indexed_col=100) walks to the current tuple via the hot-indexed hop,
+-- nodeIndexscan re-evaluates `indexed_col = 100` against the current
+-- tuple (indexed_col=150), and the row is correctly dropped.  This is
+-- the equality-lookup case the crossed-attribute bitmap handles.
+EXPLAIN (COSTS OFF) SELECT id FROM hi_basic WHERE indexed_col = 100;
+               QUERY PLAN                
+-----------------------------------------
+ Bitmap Heap Scan on hi_basic
+   Recheck Cond: (indexed_col = 100)
+   ->  Bitmap Index Scan on hi_basic_idx
+         Index Cond: (indexed_col = 100)
+(4 rows)
+
+SELECT id FROM hi_basic WHERE indexed_col = 100;
+ id 
+----
+(0 rows)
+
+RESET enable_seqscan;
+-- pg_relation_hot_indexed_stats sees one HOT-indexed version, zero HOT redirects (the
+-- chain has not yet been pruned so no LP_REDIRECT exists).
+SELECT n_hot_indexed, n_chains, avg_chain_len, max_chain_len
+FROM pg_relation_hot_indexed_stats('hi_basic');
+ n_hot_indexed | n_chains | avg_chain_len | max_chain_len 
+---------------+----------+---------------+---------------
+             1 |        0 |             0 |             0
+(1 row)
+
+DROP TABLE hi_basic;
+-- ---------------------------------------------------------------------------
+-- RANGE/INEQUALITY correctness after hot-indexed on an indexed column
+--
+-- This is the test class that catches the hot-indexed false-dup bug: a stale
+-- btree entry whose key value still satisfies the range predicate,
+-- reachable via the hot-indexed chain hop.
+--
+-- To exercise the bug we must force an IndexScan plan (the
+-- IndexOnlyScan path permissively drops every hot-indexed-reachable index-only
+-- hit; the BitmapHeapScan path dedups by TID).  We include a payload
+-- column not present in the PK so the planner must heap-fetch.
+--
+-- The read-side crossed-attribute bitmap makes the IndexScan return the correct
+-- count of 1: the stale entry ('1','5') chain-walks to the live tuple across
+-- the b-changing hop, and because the PK covers b the overlap is non-empty, so
+-- the stale leaf is dropped.  The fresh entry ('1','15') points directly at the
+-- live tuple (no hop after it) and is kept.  The ORDER BY likewise returns the
+-- single live row.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_range (
+    a int,
+    b int,
+    payload text,
+    PRIMARY KEY (a, b)
+) WITH (fillfactor = 50);
+INSERT INTO hi_range VALUES (1, 5, 'hi');
+-- hot-indexed update on the second PK column: stale btree entry ('1','5')
+-- remains, new entry ('1','15') inserted.  The stale entry points at
+-- the chain root; the fresh entry points directly at the new
+-- heap-only tuple.
+UPDATE hi_range SET b = 15 WHERE a = 1 AND b = 5;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+-- IndexScan: payload IS NOT NULL forces heap fetch, no IndexOnlyScan.
+-- The stale ('1','5') leaf is dropped by the crossed-attribute bitmap, so this
+-- returns 1.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100 AND payload IS NOT NULL;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Index Scan using hi_range_pkey on hi_range
+         Index Cond: ((a = 1) AND (b < 100))
+         Filter: (payload IS NOT NULL)
+(4 rows)
+
+SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100 AND payload IS NOT NULL;
+ count 
+-------
+     1
+(1 row)
+
+SELECT a, b FROM hi_range WHERE a = 1 AND payload IS NOT NULL ORDER BY b;
+ a | b  
+---+----
+ 1 | 15
+(1 row)
+
+-- IndexOnlyScan: the page holds a preserved HOT-indexed member so it is never all-visible; IOS
+-- performs the heap fetch and the crossed-attribute bitmap drops the stale ('1','5')
+-- leaf, so count = 1.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using hi_range_pkey on hi_range
+         Index Cond: ((a = 1) AND (b < 100))
+(3 rows)
+
+SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100;
+ count 
+-------
+     1
+(1 row)
+
+-- BitmapHeapScan: TID dedup collapses the stale and fresh hits.
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+RESET enable_bitmapscan;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on hi_range
+         Recheck Cond: ((a = 1) AND (b < 100))
+         ->  Bitmap Index Scan on hi_range_pkey
+               Index Cond: ((a = 1) AND (b < 100))
+(5 rows)
+
+SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100;
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+-- SeqScan: reads the heap directly, sees exactly one live tuple.
+RESET enable_seqscan;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100;
+               QUERY PLAN                
+-----------------------------------------
+ Aggregate
+   ->  Seq Scan on hi_range
+         Filter: ((b < 100) AND (a = 1))
+(3 rows)
+
+SELECT count(*) FROM hi_range WHERE a = 1 AND b < 100;
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+RESET enable_bitmapscan;
+-- Same shape on a secondary (non-PK) btree: another hot-indexed update on b.
+CREATE INDEX hi_range_b_idx ON hi_range(b);
+UPDATE hi_range SET b = 25 WHERE a = 1 AND b = 15;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+-- IndexScan path on the secondary index; same fix applies.
+SELECT count(*) FROM hi_range WHERE b BETWEEN 0 AND 100 AND payload IS NOT NULL;
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE hi_range;
+-- ---------------------------------------------------------------------------
+-- All-or-none on a multi-indexed table: hot-indexed only touches indexes
+--    whose attributes changed
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_multi (
+    id int PRIMARY KEY,
+    col_a int,
+    col_b int,
+    col_c int,
+    non_indexed text
+) WITH (fillfactor = 50);
+CREATE INDEX hi_multi_a_idx ON hi_multi(col_a);
+CREATE INDEX hi_multi_b_idx ON hi_multi(col_b);
+CREATE INDEX hi_multi_c_idx ON hi_multi(col_c);
+INSERT INTO hi_multi VALUES (1, 10, 20, 30, 'initial');
+-- col_a only: under hot-indexed this is HOT-indexed, and only hi_multi_a_idx
+-- gets a new entry.  hi_multi_b_idx / hi_multi_c_idx keep pointing
+-- at the chain root.
+UPDATE hi_multi SET col_a = 15 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_multi');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+-- Lookups on all three indexes return the row.
+SET enable_seqscan = off;
+SELECT id FROM hi_multi WHERE col_a = 15;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM hi_multi WHERE col_b = 20;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM hi_multi WHERE col_c = 30;
+ id 
+----
+  1
+(1 row)
+
+-- Old col_a value is unreachable by equality (stale entry dropped by the
+-- read-side crossed-attribute bitmap).
+SELECT id FROM hi_multi WHERE col_a = 10;
+ id 
+----
+(0 rows)
+
+RESET enable_seqscan;
+DROP TABLE hi_multi;
+-- ---------------------------------------------------------------------------
+-- Multi-column btree: hot-indexed on part of a composite key
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_composite (
+    id int PRIMARY KEY,
+    col_a int,
+    col_b int,
+    data text
+) WITH (fillfactor = 50);
+CREATE INDEX hi_composite_ab_idx ON hi_composite(col_a, col_b);
+INSERT INTO hi_composite VALUES (1, 10, 20, 'data');
+-- col_a is part of the composite key: hot-indexed.
+UPDATE hi_composite SET col_a = 15;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_composite');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+-- Reset and then update col_b (also part of the key).
+UPDATE hi_composite SET col_a = 10;
+UPDATE hi_composite SET col_b = 25;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_composite');
+ updates | hot | hot_idx 
+---------+-----+---------
+       3 |   3 |       3
+(1 row)
+
+DROP TABLE hi_composite;
+-- ---------------------------------------------------------------------------
+-- Partial index: status transition out-of-predicate
+--
+-- 'status' is a partial-index predicate column.  A change to a predicate
+-- column can flip a row in or out of the index, which the read-side key
+-- recheck cannot detect, so HeapUpdateHotAllowable conservatively disqualifies
+-- HOT-indexed for any predicate-column change (even this out-of-predicate ->
+-- out-of-predicate case).  The update is therefore non-HOT, and the partial
+-- index correctly stays empty for these non-'active' rows.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_partial (
+    id int PRIMARY KEY,
+    status text,
+    data text
+) WITH (fillfactor = 50);
+CREATE INDEX hi_partial_active_idx ON hi_partial(status) WHERE status = 'active';
+INSERT INTO hi_partial VALUES (1, 'active', 'data1');
+INSERT INTO hi_partial VALUES (2, 'inactive', 'data2');
+INSERT INTO hi_partial VALUES (3, 'deleted', 'data3');
+-- out -> out transition on the predicate column: HOT-indexed keeps it on-page,
+-- and the partial index gets no entry (the row satisfies the predicate neither
+-- before nor after the update).
+UPDATE hi_partial SET status = 'deleted' WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_partial');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+-- The partial index still correctly answers "active" queries.
+SELECT id, status FROM hi_partial WHERE status = 'active';
+ id | status 
+----+--------
+  1 | active
+(1 row)
+
+DROP TABLE hi_partial;
+-- ---------------------------------------------------------------------------
+-- Partition: hot-indexed inside one partition
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_part (
+    id int,
+    partition_key int,
+    indexed_col int,
+    data text,
+    PRIMARY KEY (id, partition_key)
+) PARTITION BY RANGE (partition_key);
+CREATE TABLE hi_part_1 PARTITION OF hi_part
+    FOR VALUES FROM (1) TO (100) WITH (fillfactor = 50);
+CREATE INDEX hi_part_idx ON hi_part(indexed_col);
+INSERT INTO hi_part VALUES (1, 50, 100, 'data');
+UPDATE hi_part SET indexed_col = 150 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_part_1');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+SET enable_seqscan = off;
+SELECT id FROM hi_part WHERE indexed_col = 150;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM hi_part WHERE indexed_col = 100;
+ id 
+----
+(0 rows)
+
+RESET enable_seqscan;
+DROP TABLE hi_part CASCADE;
+-- ---------------------------------------------------------------------------
+-- Trigger modifies indexed column: hot-indexed, not non-HOT
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_trigger (
+    id int PRIMARY KEY,
+    triggered_col int,
+    data text
+) WITH (fillfactor = 50);
+CREATE INDEX hi_trigger_idx ON hi_trigger(triggered_col);
+CREATE OR REPLACE FUNCTION hi_trigger_bump()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.triggered_col = NEW.triggered_col + 1;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER before_update_bump
+    BEFORE UPDATE ON hi_trigger
+    FOR EACH ROW
+    EXECUTE FUNCTION hi_trigger_bump();
+INSERT INTO hi_trigger VALUES (1, 100, 'initial');
+-- UPDATE's SET clause doesn't touch the indexed column, but the
+-- trigger modifies it via heap_modify_tuple.  hot-indexed must detect this
+-- and keep the tuple on-page (HEAP_INDEXED_UPDATED) plus a new btree entry.
+UPDATE hi_trigger SET data = 'updated' WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_trigger');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+SELECT triggered_col FROM hi_trigger WHERE id = 1;
+ triggered_col 
+---------------
+           101
+(1 row)
+
+-- New value reachable.
+SET enable_seqscan = off;
+SELECT id FROM hi_trigger WHERE triggered_col = 101;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM hi_trigger WHERE triggered_col = 100;
+ id 
+----
+(0 rows)
+
+RESET enable_seqscan;
+DROP TABLE hi_trigger CASCADE;
+DROP FUNCTION hi_trigger_bump();
+-- ---------------------------------------------------------------------------
+-- JSONB expression index: HOT-indexed is not yet supported on expression
+--    indexes, so the update falls back to a non-HOT update (hot_idx = 0).
+--    Reads stay correct.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_jsonb (
+    id int PRIMARY KEY,
+    data jsonb
+) WITH (fillfactor = 50);
+CREATE INDEX hi_jsonb_name_idx ON hi_jsonb ((data->>'name'));
+INSERT INTO hi_jsonb VALUES (1, '{"name":"Alice","age":30}');
+-- Changing the indexed expression's value (name): expression indexes are not
+-- yet supported, so this is a non-HOT update.
+UPDATE hi_jsonb SET data = jsonb_set(data, '{name}', '"Alice2"') WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_jsonb');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   0 |       0
+(1 row)
+
+SET enable_seqscan = off;
+SELECT id FROM hi_jsonb WHERE data->>'name' = 'Alice2';
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM hi_jsonb WHERE data->>'name' = 'Alice';
+ id 
+----
+(0 rows)
+
+RESET enable_seqscan;
+DROP TABLE hi_jsonb;
+-- ---------------------------------------------------------------------------
+-- GIN index with changed extracted keys: hot-indexed
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_gin (
+    id int PRIMARY KEY,
+    tags text[]
+) WITH (fillfactor = 50);
+CREATE INDEX hi_gin_tags_idx ON hi_gin USING gin (tags);
+INSERT INTO hi_gin VALUES (1, ARRAY['tag1', 'tag2']);
+-- Adding a tag yields a different extracted-key set: hot-indexed.
+UPDATE hi_gin SET tags = ARRAY['tag1', 'tag2', 'tag5'] WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hi_count('hi_gin');
+ updates | hot | hot_idx 
+---------+-----+---------
+       1 |   1 |       1
+(1 row)
+
+SET enable_seqscan = off;
+SELECT id FROM hi_gin WHERE tags @> ARRAY['tag5'];
+ id 
+----
+  1
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE hi_gin;
+-- ---------------------------------------------------------------------------
+-- Per-index HOT-indexed counters: skipped vs matched
+--
+-- A table with two independent secondary indexes.  An UPDATE touches a
+-- column covered by only one of them; the HOT-indexed path must insert
+-- into that one index and skip the other.  pg_stat_all_indexes reports
+-- matched>0 on the updated index and skipped>0 on the untouched index.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hotidx_perindex (
+    id int PRIMARY KEY,
+    a int,
+    b int
+) WITH (fillfactor = 50);
+CREATE INDEX hotidx_perindex_a ON hotidx_perindex(a);
+CREATE INDEX hotidx_perindex_b ON hotidx_perindex(b);
+INSERT INTO hotidx_perindex VALUES (1, 100, 200);
+-- Modify only column a.  HOT-indexed inserts into hotidx_perindex_a and
+-- skips hotidx_perindex_b (primary key indrelid is the table itself and
+-- also unchanged, so it counts as skipped too).
+UPDATE hotidx_perindex SET a = 101 WHERE id = 1;
+-- Force flush of pending stats to the shared entry.
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT indexrelname,
+       n_tup_hot_indexed_upd_matched AS matched,
+       n_tup_hot_indexed_upd_skipped AS skipped
+  FROM pg_stat_all_indexes
+ WHERE relname = 'hotidx_perindex'
+ ORDER BY indexrelname;
+     indexrelname     | matched | skipped 
+----------------------+---------+---------
+ hotidx_perindex_a    |       1 |       0
+ hotidx_perindex_b    |       0 |       1
+ hotidx_perindex_pkey |       0 |       1
+(3 rows)
+
+-- A second UPDATE touching only b inverts the assignment.
+UPDATE hotidx_perindex SET b = 201 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT indexrelname,
+       n_tup_hot_indexed_upd_matched AS matched,
+       n_tup_hot_indexed_upd_skipped AS skipped
+  FROM pg_stat_all_indexes
+ WHERE relname = 'hotidx_perindex'
+ ORDER BY indexrelname;
+     indexrelname     | matched | skipped 
+----------------------+---------+---------
+ hotidx_perindex_a    |       1 |       1
+ hotidx_perindex_b    |       1 |       1
+ hotidx_perindex_pkey |       0 |       2
+(3 rows)
+
+-- Invariant: matched + skipped == owning table's n_tup_hot_indexed_upd.
+SELECT indexrelname,
+       n_tup_hot_indexed_upd_matched + n_tup_hot_indexed_upd_skipped AS total,
+       (SELECT n_tup_hot_indexed_upd FROM pg_stat_all_tables
+         WHERE relname = 'hotidx_perindex') AS table_hot_idx_upd
+  FROM pg_stat_all_indexes
+ WHERE relname = 'hotidx_perindex'
+ ORDER BY indexrelname;
+     indexrelname     | total | table_hot_idx_upd 
+----------------------+-------+-------------------
+ hotidx_perindex_a    |     2 |                 2
+ hotidx_perindex_b    |     2 |                 2
+ hotidx_perindex_pkey |     2 |                 2
+(3 rows)
+
+-- Boolean assertion of the same invariant.  This is the canonical form
+-- reviewers asked for: every index entry is either matched (the index
+-- got a fresh insert this UPDATE) or skipped (HOT-indexed correctly
+-- avoided an insert because the index's attrs did not change).  If the
+-- two counters drift apart from the table-level n_tup_hot_indexed_upd we
+-- have either lost a per-index increment or double-counted one.
+SELECT bool_and((n_tup_hot_indexed_upd_matched + n_tup_hot_indexed_upd_skipped) =
+                (SELECT n_tup_hot_indexed_upd FROM pg_stat_all_tables
+                  WHERE relname = 'hotidx_perindex'))
+         AS perindex_invariant_holds
+  FROM pg_stat_all_indexes
+ WHERE relname = 'hotidx_perindex';
+ perindex_invariant_holds 
+--------------------------
+ t
+(1 row)
+
+DROP TABLE hotidx_perindex;
+-- ---------------------------------------------------------------------------
+-- Long hot-loop UPDATE stays compact and HOT-indexed
+--
+-- A long run of HOT-indexed UPDATEs to a single row stays compact: prune
+-- collapses each dead version to a redirect to the live tuple and reuses its
+-- slot, so the heap stays bounded and the chain does not grow unbounded.
+-- Every UPDATE that changes the indexed column (and leaves another index,
+-- here the PK, unchanged) takes the HOT-indexed path.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_chaincap (
+    id int PRIMARY KEY,
+    a int
+) WITH (fillfactor = 10);
+CREATE INDEX hi_chaincap_a_idx ON hi_chaincap(a);
+INSERT INTO hi_chaincap VALUES (1, 0);
+DO $$
+DECLARE
+    i int;
+BEGIN
+    FOR i IN 1 .. 200 LOOP
+        UPDATE hi_chaincap SET a = i WHERE id = 1;
+    END LOOP;
+END $$;
+-- After 200 UPDATEs the row's value is 200.
+SELECT a FROM hi_chaincap WHERE id = 1;
+  a  
+-----
+ 200
+(1 row)
+
+-- Every UPDATE took the HOT-indexed path (the PK index is unchanged, so it is
+-- skipped), so n_tup_hot_indexed_upd advanced.
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot_idx > 0 AS hot_indexed_fired
+  FROM get_hi_count('hi_chaincap');
+ hot_indexed_fired 
+-------------------
+ t
+(1 row)
+
+-- The heap stayed compact: prune+collapse reclaimed the dead versions, so the
+-- single live row stays within a couple of pages.  pg_relation_size reflects
+-- the table's actual current size regardless of vacuum/analyze stats, unlike
+-- pg_class.relpages (which is only updated by VACUUM/ANALYZE and would be
+-- trivially <= 1 on this never-vacuumed table even if pruning had failed and
+-- the heap had ballooned).
+SELECT pg_relation_size('hi_chaincap') <= 8192 * 2 AS heap_stayed_compact;
+ heap_stayed_compact 
+---------------------
+ t
+(1 row)
+
+DROP TABLE hi_chaincap;
+-- ---------------------------------------------------------------------------
+-- A HOT-indexed chain forms and reads through it stay correct
+--
+-- Several HOT-indexed updates of the same live row build a multi-hop chain of
+-- preserved HOT-indexed members, each carrying its own crossed-attribute
+-- bitmap.  We assert only horizon-independent facts: at least one HOT-indexed
+-- member is present (the live version always is, and cannot be pruned), a scan
+-- through the secondary index returns the one live row by its current key, and
+-- none of the superseded keys surface (the crossed-attribute bitmap filters
+-- their stale leaves).
+--
+-- We deliberately do NOT assert an exact member count or any post-VACUUM
+-- collapse/reclaim state: opportunistic HOT pruning and VACUUM collapse are
+-- both gated on the superseded versions falling below the global xmin horizon,
+-- which a snapshot held elsewhere in the running regression cluster can pin
+-- back indefinitely, so the physical layout (n_hot_indexed's exact value,
+-- whether the chain has collapsed to an LP_REDIRECT) is not deterministic
+-- here.  Prune/collapse and snapshot-gated stale-leaf reclaim are covered
+-- deterministically by the hot_indexed_adversarial isolation spec, where
+-- transaction ordering (hence the horizon) is controlled and the collapse
+-- is validated by reader consistency across it (permutation 7).
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_reclaim (
+    id int PRIMARY KEY,
+    a int
+) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_reclaim_a_idx ON hi_reclaim(a);
+INSERT INTO hi_reclaim VALUES (1, 100);
+-- Build a multi-hop chain via several HOT-indexed updates; the row stays live.
+UPDATE hi_reclaim SET a = 200 WHERE id = 1;
+UPDATE hi_reclaim SET a = 300 WHERE id = 1;
+UPDATE hi_reclaim SET a = 400 WHERE id = 1;
+-- The live version is a HOT-indexed member and cannot be pruned, so this holds
+-- regardless of how much opportunistic pruning has happened.
+SELECT n_hot_indexed >= 1 AS hot_indexed_member_present
+  FROM pg_relation_hot_indexed_stats('hi_reclaim');
+ hot_indexed_member_present 
+----------------------------
+ t
+(1 row)
+
+-- The live row resolves through the secondary index by its current key, and
+-- none of the superseded keys surface through their stale leaves.
+SELECT id, a FROM hi_reclaim WHERE a = 400;
+ id |  a  
+----+-----
+  1 | 400
+(1 row)
+
+SELECT count(*) = 0 AS no_stale_key_surfaces
+  FROM hi_reclaim WHERE a IN (100, 200, 300);
+ no_stale_key_surfaces 
+-----------------------
+ t
+(1 row)
+
+DROP TABLE hi_reclaim;
+-- ---------------------------------------------------------------------------
+-- Page with a preserved HOT-indexed member is never marked all-visible
+--
+-- pruneheap deliberately leaves PD_ALL_VISIBLE clear on any page that still
+-- carries a preserved HOT-indexed member: an index-only scan must heap-fetch
+-- through the chain so the read-side crossed-attribute bitmap can filter stale btree
+-- entries.
+--
+-- We force the freeze path with VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) and
+-- then read pd_flags via pageinspect.page_header.  The page must still carry
+-- a HOT-indexed member (n_hot_indexed > 0) AND must not have PD_ALL_VISIBLE
+-- (0x0004).
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_vm (
+    id int PRIMARY KEY,
+    a int
+) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_vm_a_idx ON hi_vm(a);
+INSERT INTO hi_vm VALUES (1, 1);
+-- Two HOT-indexed updates leave a multi-hop chain, so a preserved HOT-indexed
+-- member remains on the page after prune, which is what this test needs.
+UPDATE hi_vm SET a = 2 WHERE id = 1;
+UPDATE hi_vm SET a = 3 WHERE id = 1;
+-- Force the all-visible bit decision: VACUUM with DISABLE_PAGE_SKIPPING
+-- considers every page; FREEZE pushes hint bits hard.  After this, any
+-- page bearing a preserved HOT-indexed member must still report all_visible = 0.
+VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) hi_vm;
+SELECT n_hot_indexed >= 1 AS hot_indexed_present
+  FROM pg_relation_hot_indexed_stats('hi_vm');
+ hot_indexed_present 
+---------------------
+ t
+(1 row)
+
+-- PD_ALL_VISIBLE = 0x0004.  Must be 0 on a page with a preserved member.
+SELECT (flags & 4) = 0 AS not_marked_all_visible
+  FROM page_header(get_raw_page('hi_vm', 0));
+ not_marked_all_visible 
+------------------------
+ t
+(1 row)
+
+DROP TABLE hi_vm;
+-- ---------------------------------------------------------------------------
+-- Cycle-key dedup: column rename a -> b -> a stays correct
+--
+-- A rename does not rewrite heap or index entries; it only updates the
+-- catalog.  The relcache invalidation must trigger a fresh attribute
+-- bitmap and the HOT-indexed predicate must compare attribute *numbers*,
+-- not attribute *names*.  After two renames that net to identity, every
+-- subsequent UPDATE must continue to drive the HOT-indexed path.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_cycle (
+    id int PRIMARY KEY,
+    a int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_cycle_a_idx ON hi_cycle(a);
+INSERT INTO hi_cycle VALUES (1, 100);
+-- Cycle the column name and confirm both intermediate forms drive HOT-indexed.
+ALTER TABLE hi_cycle RENAME COLUMN a TO b;
+UPDATE hi_cycle SET b = 200 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot_idx > 0 AS hot_indexed_after_first_rename
+  FROM get_hi_count('hi_cycle');
+ hot_indexed_after_first_rename 
+--------------------------------
+ t
+(1 row)
+
+ALTER TABLE hi_cycle RENAME COLUMN b TO a;
+UPDATE hi_cycle SET a = 300 WHERE id = 1;
+-- Lookup via the index returns the current value, not any of the
+-- pre-rename values.
+SET enable_seqscan = off;
+SELECT id, a FROM hi_cycle WHERE a = 300;
+ id |  a  
+----+-----
+  1 | 300
+(1 row)
+
+SELECT id FROM hi_cycle WHERE a = 100;
+ id 
+----
+(0 rows)
+
+SELECT id FROM hi_cycle WHERE a = 200;
+ id 
+----
+(0 rows)
+
+RESET enable_seqscan;
+DROP TABLE hi_cycle;
+-- ---------------------------------------------------------------------------
+-- Summarizing-only column UPDATE produces CLASSIC, not INDEXED
+--
+-- HeapUpdateHotAllowable returns HEAP_HEAP_ONLY_UPDATE when every
+-- modified indexed attribute is covered only by summarizing indexes.
+-- A BRIN-only column is the canonical case: the BRIN index gets a
+-- new summary entry via aminsert, but no per-update btree entry is
+-- needed and HOT-indexed does not fire.  The signal is
+-- n_tup_hot_upd > 0 with n_tup_hot_indexed_upd unchanged.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_brin (
+    id int PRIMARY KEY,
+    bcol int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_brin_idx ON hi_brin USING brin(bcol);
+INSERT INTO hi_brin VALUES (1, 100);
+-- Capture the HOT-indexed counter before, drive a BRIN-only update,
+-- and assert that classic HOT advanced while HOT-indexed did not.
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot_idx AS hot_idx_before FROM get_hi_count('hi_brin') \gset
+UPDATE hi_brin SET bcol = 200 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT (hot - 0) > 0 AS classic_hot_fired,
+       hot_idx = :hot_idx_before AS hot_indexed_did_not_fire
+  FROM get_hi_count('hi_brin');
+ classic_hot_fired | hot_indexed_did_not_fire 
+-------------------+--------------------------
+ t                 | t
+(1 row)
+
+-- The BRIN index sees the new value via aminsert.
+SELECT bcol FROM hi_brin WHERE id = 1;
+ bcol 
+------
+  200
+(1 row)
+
+DROP TABLE hi_brin;
+-- ---------------------------------------------------------------------------
+-- UNIQUE index on a type where image equality != operator equality
+--
+-- numeric 1.0 and 1.00 are equal under the btree opclass but have
+-- different on-disk images.  A HOT-indexed update 1.0 -> 1.00 inserts a
+-- fresh leaf carrying the live image and leaves a stale leaf for 1.0
+-- (the hop's modified-attrs bitmap marks k changed, since modified-column
+-- detection is image-based).  A later INSERT of a value equal under the
+-- opclass must still be detected as a duplicate: the unique check reaches
+-- the live tuple through the fresh leaf, which points directly at it (no hop
+-- after it, so the overlap is empty and the leaf is a genuine conflict); the
+-- stale 1.0 leaf is skipped because the k-changing hop overlaps the unique
+-- index's attribute.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_unum (k numeric UNIQUE, j int) WITH (fillfactor = 50);
+CREATE INDEX hi_unum_j ON hi_unum(j);             -- 2nd indexed attr, kept fixed
+INSERT INTO hi_unum VALUES (1.0, 100);
+UPDATE hi_unum SET k = 1.00 WHERE j = 100;        -- HOT-indexed: 1.0 -> 1.00
+SELECT n_hot_indexed > 0 AS made_hot_indexed
+  FROM pg_relation_hot_indexed_stats('hi_unum');
+ made_hot_indexed 
+------------------
+ t
+(1 row)
+
+-- A numerically-equal insert must conflict (the fresh leaf catches it):
+INSERT INTO hi_unum VALUES (1.0, 1);              -- expect duplicate key error
+ERROR:  duplicate key value violates unique constraint "hi_unum_k_key"
+DETAIL:  Key (k)=(1.0) already exists.
+-- A genuinely different value is accepted:
+INSERT INTO hi_unum VALUES (2.0, 2);
+SELECT k, j FROM hi_unum ORDER BY j;
+  k   |  j  
+------+-----
+  2.0 |   2
+ 1.00 | 100
+(2 rows)
+
+DROP TABLE hi_unum;
+-- ---------------------------------------------------------------------------
+-- CREATE INDEX and REINDEX over live HOT-indexed chains
+--
+-- A freshly built or rebuilt index must reflect current values, never a
+-- stale chain member: the build scans live tuples only and points each
+-- HOT-indexed live tuple's entry at its own TID, so the new entries have no
+-- hop after them and the crossed-attribute bitmap keeps them.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_reindex (id int PRIMARY KEY, a int, b int) WITH (fillfactor = 50);
+CREATE INDEX hi_reindex_a ON hi_reindex(a);
+INSERT INTO hi_reindex SELECT g, g, g FROM generate_series(1, 6) g;
+UPDATE hi_reindex SET a = a + 100;                -- HOT-indexed on a
+UPDATE hi_reindex SET a = a + 100;                -- again -> longer chains
+SELECT n_hot_indexed > 0 AS made_hot_indexed
+  FROM pg_relation_hot_indexed_stats('hi_reindex');
+ made_hot_indexed 
+------------------
+ t
+(1 row)
+
+-- Build a NEW index and REINDEX the existing one over the live chains.
+CREATE INDEX hi_reindex_b ON hi_reindex(b);
+REINDEX INDEX hi_reindex_a;
+SET enable_seqscan = off;
+SELECT id, a FROM hi_reindex WHERE a = 204;       -- current value -> id 4
+ id |  a  
+----+-----
+  4 | 204
+(1 row)
+
+SELECT count(*) FROM hi_reindex WHERE a = 4;      -- obsolete value -> 0
+ count 
+-------
+     0
+(1 row)
+
+SELECT id FROM hi_reindex WHERE b = 2;            -- via freshly built index -> 2
+ id 
+----
+  2
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE hi_reindex;
+-- ---------------------------------------------------------------------------
+-- DROP every index over live HOT-indexed chains, then VACUUM
+--
+-- After all indexes are dropped, heap pages may still carry preserved
+-- HOT-indexed members left by earlier updates.  VACUUM of such a no-index
+-- relation must complete without error, and reads must stay correct via the
+-- redirect forwarders.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_dropidx (id int PRIMARY KEY, a int) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_dropidx_a ON hi_dropidx(a);
+INSERT INTO hi_dropidx SELECT g, g FROM generate_series(1, 6) g;
+UPDATE hi_dropidx SET a = a + 100;                -- HOT-indexed on a
+UPDATE hi_dropidx SET a = a + 100;                -- again -> longer chains
+SELECT n_hot_indexed > 0 AS made_hot_indexed
+  FROM pg_relation_hot_indexed_stats('hi_dropidx');
+ made_hot_indexed 
+------------------
+ t
+(1 row)
+
+-- Drop every index, leaving preserved HOT-indexed members with no index to sweep.
+DROP INDEX hi_dropidx_a;
+ALTER TABLE hi_dropidx DROP CONSTRAINT hi_dropidx_pkey;
+-- Must not crash on the no-index path; two passes exercise the second-pass
+-- reclaim guard as well.
+VACUUM hi_dropidx;
+VACUUM hi_dropidx;
+-- Reads remain correct after the indexes are gone.
+SELECT id, a FROM hi_dropidx ORDER BY id;
+ id |  a  
+----+-----
+  1 | 201
+  2 | 202
+  3 | 203
+  4 | 204
+  5 | 205
+  6 | 206
+(6 rows)
+
+DROP TABLE hi_dropidx;
+-- ---------------------------------------------------------------------------
+-- Re-collapse of a data-redirect chain across partial VACUUMs
+--
+-- A chain that collapses to a HOT-indexed data redirect, is vacuumed with
+-- INDEX_CLEANUP off (so the stale leaves and the redirect survive), then
+-- receives further HOT-indexed updates that re-collapse the chain and
+-- re-point the redirect at a new live tuple, must not leave the redirect
+-- dangling.  A subsequent full VACUUM must complete without error, leave the
+-- heap consistent (verify_heapam reports nothing), and reads must stay
+-- correct.  (Regression: an earlier revision crashed reclaiming a mid-chain
+-- member while a data redirect still pointed past it.)
+-- ---------------------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS amcheck;
+CREATE TABLE hi_recollapse (id int PRIMARY KEY, a int) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_recollapse_a ON hi_recollapse(a);
+INSERT INTO hi_recollapse VALUES (1, 1);
+-- First chain: two HOT-indexed updates, then prune to a data redirect while
+-- leaving the stale btree leaves in place (INDEX_CLEANUP off).
+UPDATE hi_recollapse SET a = 2 WHERE id = 1;
+UPDATE hi_recollapse SET a = 3 WHERE id = 1;
+VACUUM (INDEX_CLEANUP off) hi_recollapse;
+-- Re-collapse: more HOT-indexed updates extend the chain past the redirect
+-- target; the next prune re-points the data redirect at the new first live
+-- tuple and extends its union.
+UPDATE hi_recollapse SET a = 4 WHERE id = 1;
+UPDATE hi_recollapse SET a = 5 WHERE id = 1;
+VACUUM (INDEX_CLEANUP off) hi_recollapse;
+-- Full vacuum now reclaims the dead chain; the re-pointed redirect must not
+-- dangle.  Two passes also exercise the redirect re-point second pass.
+VACUUM hi_recollapse;
+VACUUM hi_recollapse;
+-- Heap must be structurally consistent (no rows == no corruption).
+SELECT * FROM verify_heapam('hi_recollapse');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+SET enable_seqscan = off;
+SELECT id, a FROM hi_recollapse WHERE a = 5;     -- current value -> id 1
+ id | a 
+----+---
+  1 | 5
+(1 row)
+
+SELECT count(*) FROM hi_recollapse WHERE a = 3;  -- obsolete value -> 0
+ count 
+-------
+     0
+(1 row)
+
+RESET enable_seqscan;
+SELECT id, a FROM hi_recollapse ORDER BY id;
+ id | a 
+----+---
+  1 | 5
+(1 row)
+
+DROP TABLE hi_recollapse;
+-- ---------------------------------------------------------------------------
+-- Index deletion over an entry that points at a data-redirect root
+--
+-- A data redirect is an LP_REDIRECT that carries a bitmap, so it reports
+-- lp_len > 0 (ItemIdHasStorage true) even though it is not a normal tuple.
+-- index_delete_check_htid must treat it as a redirect, not read its blob as a
+-- HeapTupleHeader.  Reproduce: collapse a chain root to a data redirect while
+-- keeping the stale leaf that points at it (INDEX_CLEANUP off), then insert
+-- many duplicates of the stale key so btree bottom-up deletion runs
+-- heap_index_delete_tuples over that stale entry.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_iddel (id int, a int) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_iddel_a ON hi_iddel(a);
+INSERT INTO hi_iddel VALUES (1, 1);
+UPDATE hi_iddel SET a = a + 1 WHERE id = 1;          -- HOT-indexed
+UPDATE hi_iddel SET a = a + 1 WHERE id = 1;          -- multi-hop chain
+VACUUM (INDEX_CLEANUP off) hi_iddel;                 -- root -> data redirect, keep stale a=1 leaf
+-- Many duplicates of the stale key fill the leaf and trigger bottom-up
+-- deletion, which feeds the stale a=1 entry (htid -> the data-redirect root)
+-- to heap_index_delete_tuples.  Must not crash or misread the blob.
+INSERT INTO hi_iddel SELECT g, 1 FROM generate_series(2, 3000) g;
+VACUUM hi_iddel;
+SELECT * FROM verify_heapam('hi_iddel');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+SET enable_seqscan = off;
+SELECT id, a FROM hi_iddel WHERE id = 1;             -- current value -> a = 3
+ id | a 
+----+---
+  1 | 3
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE hi_iddel;
+-- ---------------------------------------------------------------------------
+-- A change to a column covered by a non-btree index AM is HOT-indexed
+--
+-- A HOT-indexed update leaves a stale pre-update leaf that the read side
+-- filters via the crossed-attribute bitmap, which is access-method agnostic.
+-- A column covered by a non-btree index (here a GiST index on a point column)
+-- is therefore HOT-indexed like any other, and the GiST index still returns
+-- correct results across the chain.  A change to a btree-only column on the
+-- same table is likewise HOT-indexed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_nonbtree (id int PRIMARY KEY, tag int, p point)
+    WITH (fillfactor = 10);
+CREATE INDEX hi_nonbtree_tag ON hi_nonbtree (tag);          -- btree index
+CREATE INDEX hi_nonbtree_p ON hi_nonbtree USING gist (p);   -- GiST, non-btree
+INSERT INTO hi_nonbtree SELECT g, g, point(g, g)
+    FROM generate_series(1, 200) g;
+-- Change the GiST-covered column first: HOT-indexed (hot_idx = 200).
+UPDATE hi_nonbtree SET p = point(p[0] + 1000, p[1] + 1000);
+SELECT hot_idx AS gist_col_hot_indexed FROM get_hi_count('hi_nonbtree');
+ gist_col_hot_indexed 
+----------------------
+                  200
+(1 row)
+
+-- The GiST index must return correct results: the old positions are gone and
+-- every row is found at its new position (no stale leaf surfaces an old key).
+SET enable_seqscan = off;
+SELECT count(*) AS at_old_positions
+    FROM hi_nonbtree WHERE p <@ box(point(0, 0), point(300, 300));
+ at_old_positions 
+------------------
+                0
+(1 row)
+
+SELECT count(*) AS at_new_positions
+    FROM hi_nonbtree WHERE p <@ box(point(1000, 1000), point(1300, 1300));
+ at_new_positions 
+------------------
+              200
+(1 row)
+
+RESET enable_seqscan;
+-- Changing the btree-only column (p unchanged) stays HOT-indexed.
+UPDATE hi_nonbtree SET tag = tag + 1000;
+SELECT hot_idx > 0 AS btree_col_is_hot_indexed FROM get_hi_count('hi_nonbtree');
+ btree_col_is_hot_indexed 
+--------------------------
+ t
+(1 row)
+
+-- A distance-ordered (KNN) GiST scan uses the reorder scan path
+-- (IndexNextWithReorder), a different code path from the range scan above.
+-- It must also drop stale HOT-indexed leaves: after the p-update the only
+-- live positions are the new ones, so the nearest neighbours of the new
+-- origin must all be at the new positions and none at the old ones.
+SET enable_seqscan = off;
+SELECT count(*) AS knn_all_at_new_positions FROM (
+    SELECT p FROM hi_nonbtree ORDER BY p <-> point(1000, 1000) LIMIT 200
+) s WHERE p <@ box(point(1000, 1000), point(1300, 1300));
+ knn_all_at_new_positions 
+--------------------------
+                      200
+(1 row)
+
+SELECT count(*) AS knn_none_at_old_positions FROM (
+    SELECT p FROM hi_nonbtree ORDER BY p <-> point(0, 0) LIMIT 200
+) s WHERE p <@ box(point(0, 0), point(300, 300));
+ knn_none_at_old_positions 
+---------------------------
+                         0
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE hi_nonbtree;
+-- ---------------------------------------------------------------------------
+-- ABA on a unique key across two distinct live rows: a key cycled away
+-- and back must still collide with another row that holds it.  The stale
+-- leaves left by the cycle must not let a genuine duplicate slip past the
+-- uniqueness check; the read-side recheck compares the live key, not just
+-- a changed-attribute bitmap.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_aba (k int, v int) WITH (fillfactor = 50);
+CREATE UNIQUE INDEX hi_aba_k ON hi_aba (k);
+CREATE INDEX hi_aba_v ON hi_aba (v);
+INSERT INTO hi_aba VALUES (1, 10), (2, 20);
+-- Cycle row1's unique key 1 -> 3 -> 1 (v unchanged, so each step is
+-- HOT-indexed and leaves stale entries in hi_aba_k).
+UPDATE hi_aba SET k = 3 WHERE v = 10;
+UPDATE hi_aba SET k = 1 WHERE v = 10;
+SELECT hot_idx > 0 AS cycled_hot_indexed FROM get_hi_count('hi_aba');
+ cycled_hot_indexed 
+--------------------
+ t
+(1 row)
+
+-- row1 is live at k = 1 again.  Moving row2 onto k = 1 must raise a unique
+-- violation despite the stale '1' leaves from the cycle.
+UPDATE hi_aba SET k = 1 WHERE v = 20;
+ERROR:  duplicate key value violates unique constraint "hi_aba_k"
+DETAIL:  Key (k)=(1) already exists.
+DROP TABLE hi_aba;
+-- ---------------------------------------------------------------------------
+-- Partial index whose predicate references a non-key column.  Flipping the
+-- row out of the predicate while leaving the indexed key unchanged is
+-- HOT-indexed: the predicate column is part of the index's attribute set, so
+-- the crossed-attribute bitmap drops the now-stale partial-index entry on read
+-- (no value recheck is involved).
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_partpred (id int PRIMARY KEY, k int, active boolean)
+    WITH (fillfactor = 50);
+CREATE INDEX hi_partpred_k ON hi_partpred (k) WHERE active;
+INSERT INTO hi_partpred VALUES (1, 100, true);
+-- Flip the predicate column 'active' true -> false; the index key k is
+-- unchanged.  The row no longer satisfies the predicate, so its partial-index
+-- entry must be removed, not left pointing into the chain.
+UPDATE hi_partpred SET active = false WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot, hot_idx FROM get_hi_count('hi_partpred');
+ hot | hot_idx 
+-----+---------
+   1 |       1
+(1 row)
+
+-- The partial index must not surface the row now that active = false.
+-- A query whose qual exactly matches the partial predicate uses the index
+-- without re-filtering 'active' on the heap, so a stale entry would surface.
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM hi_partpred WHERE active;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Index Scan using hi_partpred_k on hi_partpred
+(1 row)
+
+SELECT id FROM hi_partpred WHERE k = 100 AND active;
+ id 
+----
+(0 rows)
+
+SELECT id FROM hi_partpred WHERE active;
+ id 
+----
+(0 rows)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+DROP TABLE hi_partpred;
+-- ---------------------------------------------------------------------------
+-- Reclaim + stub mix.  Repeated updates of column a followed by an update
+-- of column b build a chain whose prune reclaims the members whose change was
+-- superseded (a changed again) and keeps stubs for those that were not, so a
+-- root redirect ends up pointing at a stub and a later walk crosses mid-chain
+-- stubs.  Reads through each index and amcheck must stay correct across the
+-- collapse, and a second round must walk the existing stubs without severing
+-- the chain.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_stubmix (id int PRIMARY KEY, a int, b int) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_stubmix_a ON hi_stubmix (a);
+CREATE INDEX hi_stubmix_b ON hi_stubmix (b);
+INSERT INTO hi_stubmix VALUES (1, 10, 100);
+UPDATE hi_stubmix SET a = 11 WHERE id = 1;   -- changes a
+UPDATE hi_stubmix SET a = 12 WHERE id = 1;   -- changes a again (supersedes)
+UPDATE hi_stubmix SET b = 101 WHERE id = 1;  -- changes b
+VACUUM hi_stubmix;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT id, a, b FROM hi_stubmix WHERE a = 12;   -- current a
+ id | a  |  b  
+----+----+-----
+  1 | 12 | 101
+(1 row)
+
+SELECT id, a, b FROM hi_stubmix WHERE b = 101;  -- current b
+ id | a  |  b  
+----+----+-----
+  1 | 12 | 101
+(1 row)
+
+SELECT id FROM hi_stubmix WHERE a = 10;         -- stale a: 0 rows
+ id 
+----
+(0 rows)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+SELECT * FROM verify_heapam('hi_stubmix');      -- no corruption across stubs
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+-- A second round must walk the existing stubs (no priorXmax sever).
+UPDATE hi_stubmix SET a = 13 WHERE id = 1;
+VACUUM hi_stubmix;
+SELECT id, a, b FROM hi_stubmix WHERE a = 13;
+ id | a  |  b  
+----+----+-----
+  1 | 13 | 101
+(1 row)
+
+SELECT * FROM verify_heapam('hi_stubmix');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_stubmix;
+-- ---------------------------------------------------------------------------
+-- Exclusion-constraint tables are HOT-indexed-eligible.
+--
+-- An exclusion constraint is enforced by check_exclusion_or_unique_constraint,
+-- which rechecks each candidate against the live tuple's current index-form
+-- with the constraint's own operators, so a stale entry left by a HOT-indexed
+-- update is skipped while the live key always has its own entry.  Updating a
+-- non-constrained indexed column is HOT-indexed (the GiST exclusion index is
+-- skipped), and the constraint stays correct.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_excl (
+    id int PRIMARY KEY,
+    tag int,
+    during int4range,
+    EXCLUDE USING gist (during WITH &&)
+) WITH (fillfactor = 10);
+CREATE INDEX hi_excl_tag ON hi_excl(tag);
+INSERT INTO hi_excl VALUES (1, 100, int4range(1, 10)), (2, 200, int4range(20, 30));
+-- Update a non-constrained indexed column: HOT-indexed (GiST exclusion index
+-- and PK skipped), and the exclusion constraint is still enforced.
+UPDATE hi_excl SET tag = tag + 1 WHERE id = 1;
+SELECT hot_idx > 0 AS tag_update_hot_indexed FROM get_hi_count('hi_excl');
+ tag_update_hot_indexed 
+------------------------
+ t
+(1 row)
+
+INSERT INTO hi_excl VALUES (3, 300, int4range(5, 15));  -- overlaps id=1's (1,10)
+ERROR:  conflicting key value violates exclusion constraint "hi_excl_during_excl"
+DETAIL:  Key (during)=([5,15)) conflicts with existing key (during)=([1,10)).
+-- Move id=1's range away (this updates the GiST index, leaving a stale entry
+-- for the old (1,10) range).  A range overlapping only the OLD range now
+-- inserts cleanly (the stale entry is skipped); one overlapping the NEW range
+-- still conflicts.
+UPDATE hi_excl SET during = int4range(100, 110) WHERE id = 1;
+INSERT INTO hi_excl VALUES (4, 400, int4range(5, 15));   -- only overlapped old range: OK
+INSERT INTO hi_excl VALUES (5, 500, int4range(105, 115));-- overlaps new (100,110): conflict
+ERROR:  conflicting key value violates exclusion constraint "hi_excl_during_excl"
+DETAIL:  Key (during)=([105,115)) conflicts with existing key (during)=([100,110)).
+DROP TABLE hi_excl;
+-- ---------------------------------------------------------------------------
+-- TOAST interaction.  An indexed column stored out-of-line must behave
+-- correctly across HOT-indexed updates: an entry kept across an update of a
+-- different column still resolves to the (unchanged) toasted value, and after
+-- the toasted column itself is changed the stale entry is dropped by the
+-- crossed-attribute bitmap (no value comparison or detoasting is needed).
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_toast (id int PRIMARY KEY, big text, tag int) WITH (fillfactor = 50);
+ALTER TABLE hi_toast ALTER COLUMN big SET STORAGE EXTERNAL;  -- no compression
+CREATE INDEX hi_toast_big ON hi_toast (big);
+CREATE INDEX hi_toast_tag ON hi_toast (tag);
+INSERT INTO hi_toast VALUES (1, repeat('A', 2000), 10);
+-- The big value is stored out-of-line.
+SELECT pg_column_size(big) > 1500 AS big_is_external FROM hi_toast WHERE id = 1;
+ big_is_external 
+-----------------
+ t
+(1 row)
+
+-- HOT-indexed update of tag leaves big (and its index entry) unchanged.
+UPDATE hi_toast SET tag = 11 WHERE id = 1;
+SELECT hot_idx > 0 AS tag_update_hot_indexed FROM get_hi_count('hi_toast');
+ tag_update_hot_indexed 
+------------------------
+ t
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT id, tag, length(big) FROM hi_toast WHERE big = repeat('A', 2000);
+ id | tag | length 
+----+-----+--------
+  1 |  11 |   2000
+(1 row)
+
+-- HOT-indexed update of the toasted indexed column itself: the old entry is
+-- now stale because the crossed-attribute bitmap shows big changed.
+UPDATE hi_toast SET big = repeat('B', 2000) WHERE id = 1;
+SELECT id FROM hi_toast WHERE big = repeat('A', 2000);   -- stale: 0 rows
+ id 
+----
+(0 rows)
+
+SELECT id, length(big) FROM hi_toast WHERE big = repeat('B', 2000);  -- current
+ id | length 
+----+--------
+  1 |   2000
+(1 row)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+SELECT * FROM verify_heapam('hi_toast');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_toast;
+-- ---------------------------------------------------------------------------
+-- ABA on an indexed column.  A HOT-indexed update that sets an indexed
+-- column to a value an earlier chain member already held leaves two leaves
+-- with that same key, both chain-resolving to the live tuple.  A value-based
+-- recheck cannot tell them apart and would return the row twice; the
+-- crossed-attribute bitmap drops the stale ancestor leaf (its walk crosses the
+-- key-changing hops) and keeps only the fresh entry, so a forced index scan
+-- returns the row exactly once.  REINDEX must not change that.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_aba (id int PRIMARY KEY, k int, v int) WITH (fillfactor = 50);
+CREATE INDEX hi_aba_k ON hi_aba (k);
+CREATE INDEX hi_aba_v ON hi_aba (v);
+INSERT INTO hi_aba VALUES (1, 1, 100);
+UPDATE hi_aba SET k = 3 WHERE id = 1;   -- HOT-indexed: k changed, v kept
+UPDATE hi_aba SET k = 1 WHERE id = 1;   -- HOT-indexed: k cycled back (ABA)
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS k1_once FROM hi_aba WHERE k = 1;     -- exactly 1
+ k1_once 
+---------
+       1
+(1 row)
+
+SELECT count(*) AS k3_gone FROM hi_aba WHERE k = 3;     -- 0 (stale dropped)
+ k3_gone 
+---------
+       0
+(1 row)
+
+REINDEX INDEX hi_aba_k;
+SELECT count(*) AS k1_after_reindex FROM hi_aba WHERE k = 1;  -- still 1
+ k1_after_reindex 
+------------------
+                1
+(1 row)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+SELECT * FROM verify_heapam('hi_aba');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_aba;
+-- ---------------------------------------------------------------------------
+-- Partial index, predicate column changed but the row STAYS in the index
+-- (predicate still true, key unchanged).  The update is HOT-indexed; selective
+-- maintenance re-inserts a fresh entry (the predicate column changed and still
+-- holds), so the row is still returned; the bitmap drops the older entry and
+-- the fresh one re-supplies it.  Guards against a "lost row" from over-eager
+-- dropping.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_partstay (id int PRIMARY KEY, k int, n int) WITH (fillfactor = 50);
+CREATE INDEX hi_partstay_k ON hi_partstay (k) WHERE n > 0;
+CREATE INDEX hi_partstay_id2 ON hi_partstay (id);
+INSERT INTO hi_partstay VALUES (1, 5, 3);
+UPDATE hi_partstay SET n = 7 WHERE id = 1;   -- n 3->7, still > 0, k unchanged
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot_idx > 0 AS stay_is_hot_indexed FROM get_hi_count('hi_partstay');
+ stay_is_hot_indexed 
+---------------------
+ t
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS stay_rows FROM hi_partstay WHERE k = 5 AND n > 0;   -- want 1
+ stay_rows 
+-----------
+         1
+(1 row)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+DROP TABLE hi_partstay;
+-- ---------------------------------------------------------------------------
+-- Partitioned table.  A within-partition UPDATE of one indexed column is
+-- HOT-indexed on the leaf partition's heap exactly as for a non-partitioned
+-- table; a cross-partition update is a delete+insert and never HOT.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_part (id int, a int, b int) PARTITION BY RANGE (id);
+CREATE TABLE hi_part1 PARTITION OF hi_part FOR VALUES FROM (0) TO (100)
+    WITH (fillfactor = 50);
+CREATE INDEX hi_part_a ON hi_part (a);
+CREATE INDEX hi_part_b ON hi_part (b);
+INSERT INTO hi_part VALUES (1, 10, 20);
+UPDATE hi_part SET a = 11 WHERE id = 1;   -- one indexed col, within partition
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot_idx > 0 AS part_is_hot_indexed FROM get_hi_count('hi_part1');
+ part_is_hot_indexed 
+---------------------
+ t
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS a11 FROM hi_part WHERE a = 11;   -- want 1
+ a11 
+-----
+   1
+(1 row)
+
+SELECT count(*) AS a10 FROM hi_part WHERE a = 10;   -- want 0 (stale dropped)
+ a10 
+-----
+   0
+(1 row)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+SELECT * FROM verify_heapam('hi_part1');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_part;
+-- ---------------------------------------------------------------------------
+-- Non-btree access method (hash).  Read-side staleness is access-method
+-- agnostic (the crossed-attribute bitmap), so any index AM's column is
+-- HOT-indexed.  Hash is the sharpest case: its scans recheck the heap value,
+-- which alone cannot disambiguate a value cycled away and back (ABA); the
+-- bitmap drops the stale ancestor so the row is returned exactly once.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_hash (id int PRIMARY KEY, v int, w int) WITH (fillfactor = 50);
+CREATE INDEX hi_hash_v ON hi_hash USING hash (v);
+CREATE INDEX hi_hash_w ON hi_hash (w);
+INSERT INTO hi_hash VALUES (1, 10, 100);
+UPDATE hi_hash SET v = 99 WHERE id = 1;
+UPDATE hi_hash SET v = 10 WHERE id = 1;   -- ABA: 10 -> 99 -> 10, w unchanged
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT hot_idx > 0 AS hash_is_hot_indexed FROM get_hi_count('hi_hash');
+ hash_is_hot_indexed 
+---------------------
+ t
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS hash_v10 FROM hi_hash WHERE v = 10;   -- want 1 (no duplicate)
+ hash_v10 
+----------
+        1
+(1 row)
+
+SELECT count(*) AS hash_v99 FROM hi_hash WHERE v = 99;   -- want 0 (stale dropped)
+ hash_v99 
+----------
+        0
+(1 row)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+DROP TABLE hi_hash;
+-- ---------------------------------------------------------------------------
+-- DDL after a HOT-indexed chain exists.  The per-hop modified-attrs
+-- bitmap on the page is keyed by physical attribute number and sized by the
+-- relation's natts AT WRITE TIME.  Indexes added/dropped after the chain
+-- forms, and ADD/DROP COLUMN, must not corrupt the read-side staleness test.
+-- The sharp case is ADD COLUMN crossing an 8-attribute boundary, which grows
+-- ceil(natts/8): readers must locate each hop's bitmap from that hop's own
+-- write-time natts (HeapTupleHeaderGetNatts / the stub's stashed natts), not
+-- the relation's current natts.
+-- ---------------------------------------------------------------------------
+-- Exactly 8 attributes (c1..c7 + payload) so adding the 9th flips the bitmap
+-- from 1 byte to 2.  c7 is the column we churn; c2 is an unchanged indexed
+-- column whose leaf must stay current.
+CREATE TABLE hi_ddl (
+    c1 int PRIMARY KEY, c2 int, c3 int, c4 int,
+    c5 int, c6 int, c7 int, payload text
+) WITH (fillfactor = 50, autovacuum_enabled = false);
+CREATE INDEX hi_ddl_c2 ON hi_ddl(c2);
+CREATE INDEX hi_ddl_c7 ON hi_ddl(c7);
+INSERT INTO hi_ddl VALUES (1, 10, 20, 30, 40, 50, 70, 'p');
+-- Form a HOT-indexed chain on c7 BEFORE any further DDL.
+UPDATE hi_ddl SET c7 = 71 WHERE c1 = 1;
+UPDATE hi_ddl SET c7 = 72 WHERE c1 = 1;
+-- (a) CREATE INDEX after the chain exists: the new index is built against the
+-- live tuple under its own TID, so its entry is never stale.
+CREATE INDEX hi_ddl_c3 ON hi_ddl(c3);
+-- (b) ADD COLUMN crossing the 8-attribute boundary (natts 8 -> 9).  Existing
+-- hops keep their 1-byte bitmaps; the relation now wants 2.  Reads through the
+-- old chain must still be correct.
+ALTER TABLE hi_ddl ADD COLUMN c9 int;
+CREATE INDEX hi_ddl_c9 ON hi_ddl(c9);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexonlyscan = off;
+-- Live c7 is 72.  The c7 index must return the live row for 72 and drop the
+-- stale leaves for 70 and 71 (offsets misread would corrupt this).
+SELECT count(*) AS c7_eq_72 FROM hi_ddl WHERE c7 = 72 AND payload IS NOT NULL;
+ c7_eq_72 
+----------
+        1
+(1 row)
+
+SELECT count(*) AS c7_eq_70_stale FROM hi_ddl WHERE c7 = 70 AND payload IS NOT NULL;
+ c7_eq_70_stale 
+----------------
+              0
+(1 row)
+
+SELECT count(*) AS c7_eq_71_stale FROM hi_ddl WHERE c7 = 71 AND payload IS NOT NULL;
+ c7_eq_71_stale 
+----------------
+              0
+(1 row)
+
+-- c2 never changed across the chain: its leaf must NOT be judged stale even
+-- though a crossed hop changed c7.  A misread bitmap could spuriously flag it.
+SELECT count(*) AS c2_eq_10_current FROM hi_ddl WHERE c2 = 10 AND payload IS NOT NULL;
+ c2_eq_10_current 
+------------------
+                1
+(1 row)
+
+-- (c) Continue churning c7 AFTER the ADD COLUMN: the new hop's bitmap is sized
+-- for natts 9 (2 bytes); the old hops are 1 byte.  A chain with mixed-size
+-- bitmaps must still resolve correctly.
+UPDATE hi_ddl SET c7 = 73 WHERE c1 = 1;
+SELECT count(*) AS c7_eq_73 FROM hi_ddl WHERE c7 = 73 AND payload IS NOT NULL;
+ c7_eq_73 
+----------
+        1
+(1 row)
+
+SELECT count(*) AS c7_eq_72_now_stale FROM hi_ddl WHERE c7 = 72 AND payload IS NOT NULL;
+ c7_eq_72_now_stale 
+--------------------
+                  0
+(1 row)
+
+-- (d) Collapse the chain to stubs via VACUUM, then read again: the stub must
+-- preserve its write-time natts so its bitmap stays locatable post-ADD COLUMN.
+UPDATE hi_ddl SET c7 = 74 WHERE c1 = 1;
+VACUUM (INDEX_CLEANUP off) hi_ddl;
+SELECT count(*) AS c7_eq_74_after_vacuum FROM hi_ddl WHERE c7 = 74 AND payload IS NOT NULL;
+ c7_eq_74_after_vacuum 
+-----------------------
+                     1
+(1 row)
+
+SELECT count(*) AS c2_eq_10_after_vacuum FROM hi_ddl WHERE c2 = 10 AND payload IS NOT NULL;
+ c2_eq_10_after_vacuum 
+-----------------------
+                     1
+(1 row)
+
+-- (e) DROP COLUMN keeps the attnum slot (no renumber), so bitmaps stay aligned.
+ALTER TABLE hi_ddl DROP COLUMN c4;
+SELECT count(*) AS c7_after_drop FROM hi_ddl WHERE c7 = 74 AND payload IS NOT NULL;
+ c7_after_drop 
+---------------
+             1
+(1 row)
+
+SELECT count(*) AS c2_after_drop FROM hi_ddl WHERE c2 = 10 AND payload IS NOT NULL;
+ c2_after_drop 
+---------------
+             1
+(1 row)
+
+-- (f) DROP INDEX on the churned column: remaining indexes still resolve.
+DROP INDEX hi_ddl_c7;
+SELECT count(*) AS c2_after_dropidx FROM hi_ddl WHERE c2 = 10 AND payload IS NOT NULL;
+ c2_after_dropidx 
+------------------
+                1
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+RESET enable_indexonlyscan;
+-- The seqscan truth confirms the live row; the count assertions above (read
+-- through the post-DDL indexes) match it, which is what would break if a
+-- mis-sized bitmap corrupted the staleness verdict.
+SELECT c1, c2, c7 FROM hi_ddl WHERE c1 = 1;
+ c1 | c2 | c7 
+----+----+----
+  1 | 10 | 74
+(1 row)
+
+DROP TABLE hi_ddl;
+-- ---------------------------------------------------------------------------
+-- BitmapAnd/BitmapOr across a changed and an unchanged index
+--
+-- Reported by Alexander Korotkov, 2026-07-09.  A HOT-indexed update points
+-- the CHANGED index's fresh entry at the new heap-only tuple, while the
+-- UNCHANGED index's entry still points at the chain root.  BitmapAnd/BitmapOr
+-- intersect/union two indexes' raw TID sets in the TID-bitmap layer BEFORE
+-- either side touches the heap: an exact-mode intersection sees {root} on one
+-- side and {new-tuple} on the other and drops the row, even though both
+-- resolve, through the chain, to the one live tuple.  Bitmap scans tolerate
+-- false positives but not false negatives, so this was a correctness bug.
+--
+-- Fixed without marking any index entry: the fresh entry is stored as an
+-- ordinary exact TID, and heap_update sets a per-block signal,
+-- VISIBILITYMAP_LOCATOR_SPLIT (visibilitymapdefs.h), on the block instead.
+-- BitmapAnd reads that bit lock-free through the table AM's bitmap_and_inexact
+-- hook (tidbitmap.c) and, for a flagged block, unions the two indexes' offsets
+-- and forces a recheck rather than intersecting them; the existing heap-side
+-- crossed-attribute recheck then makes the final call.  BitmapOr already
+-- unioned, so it is unaffected.  Because the signal lives on the heap block and
+-- not in any index entry, NO index access method needs to know about
+-- HOT-indexed chains: btree, hash, GIN, GiST, SP-GiST, contrib/bloom, and any
+-- out-of-tree AM are all correct with no AM-specific code.  One table per non-btree access method
+-- below, each paired with a btree index on the changed column, exercises the
+-- changed+unchanged BitmapAnd/BitmapOr shape for every AM SIU uses elsewhere
+-- in this file; bloom's equivalent case lives in contrib/bloom's own test
+-- (where the extension is guaranteed present).
+-- ---------------------------------------------------------------------------
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = on;
+-- (a) btree + btree
+CREATE TABLE hi_bmand_bt (
+    id int PRIMARY KEY,
+    c1 int,
+    c2 int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_bmand_bt_c1 ON hi_bmand_bt(c1);   -- unchanged
+CREATE INDEX hi_bmand_bt_c2 ON hi_bmand_bt(c2);   -- changed
+INSERT INTO hi_bmand_bt VALUES (1, 11, 21);
+UPDATE hi_bmand_bt SET c2 = 22 WHERE id = 1;
+SELECT count(*) AS bt_bt_bitmapand FROM hi_bmand_bt WHERE c1 = 11 AND c2 = 22;
+ bt_bt_bitmapand 
+-----------------
+               1
+(1 row)
+
+-- Both index entries store ordinary, exact TIDs (no per-entry marker): the
+-- changed index's fresh entry names the new heap-only tuple, the unchanged
+-- index's entry names the chain root.  The count above proves BitmapAnd still
+-- returns the row despite the two entries naming different offsets on the one
+-- block; the block carries VISIBILITYMAP_LOCATOR_SPLIT so BitmapAnd unions
+-- rather than intersects it (see amlocator.h).  amcheck's heapallindexed
+-- verification therefore needs no marker-stripping: it fingerprints the plain
+-- stored TIDs directly.
+--
+-- (Only the changed index is checked here.  heapallindexed on an index NOT
+-- maintained by a HOT-indexed update (which by design has no entry for the
+-- new heap-only tuple) is a separate, pre-existing SIU/amcheck-integration
+-- question and out of scope for this commit.)
+SELECT bt_index_check('hi_bmand_bt_c2', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+DROP TABLE hi_bmand_bt;
+-- (b) hash (unchanged) + btree (changed)
+CREATE TABLE hi_bmand_hash (
+    id int PRIMARY KEY,
+    c1 int,
+    c2 int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_bmand_hash_c1 ON hi_bmand_hash USING hash (c1);
+CREATE INDEX hi_bmand_hash_c2 ON hi_bmand_hash(c2);
+INSERT INTO hi_bmand_hash VALUES (1, 11, 21);
+UPDATE hi_bmand_hash SET c2 = 22 WHERE id = 1;
+SELECT count(*) AS hash_bt_bitmapand FROM hi_bmand_hash WHERE c1 = 11 AND c2 = 22;
+ hash_bt_bitmapand 
+-------------------
+                 1
+(1 row)
+
+DROP TABLE hi_bmand_hash;
+-- (c) GIN (unchanged) + btree (changed)
+CREATE TABLE hi_bmand_gin (
+    id int PRIMARY KEY,
+    tags int[],
+    c2 int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_bmand_gin_tags ON hi_bmand_gin USING gin (tags);
+CREATE INDEX hi_bmand_gin_c2 ON hi_bmand_gin(c2);
+INSERT INTO hi_bmand_gin VALUES (1, ARRAY[1,2,3], 21);
+UPDATE hi_bmand_gin SET c2 = 22 WHERE id = 1;
+SELECT count(*) AS gin_bt_bitmapand
+  FROM hi_bmand_gin WHERE tags @> ARRAY[2] AND c2 = 22;
+ gin_bt_bitmapand 
+------------------
+                1
+(1 row)
+
+DROP TABLE hi_bmand_gin;
+-- (d) GiST (unchanged) + btree (changed)
+CREATE TABLE hi_bmand_gist (
+    id int PRIMARY KEY,
+    p point,
+    c2 int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_bmand_gist_p ON hi_bmand_gist USING gist (p);
+CREATE INDEX hi_bmand_gist_c2 ON hi_bmand_gist(c2);
+INSERT INTO hi_bmand_gist VALUES (1, point(5, 5), 21);
+UPDATE hi_bmand_gist SET c2 = 22 WHERE id = 1;
+SELECT count(*) AS gist_bt_bitmapand
+  FROM hi_bmand_gist WHERE p <@ box(point(0, 0), point(10, 10)) AND c2 = 22;
+ gist_bt_bitmapand 
+-------------------
+                 1
+(1 row)
+
+DROP TABLE hi_bmand_gist;
+-- (e) SP-GiST (unchanged) + btree (changed)
+CREATE TABLE hi_bmand_spgist (
+    id int PRIMARY KEY,
+    t text,
+    c2 int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_bmand_spgist_t ON hi_bmand_spgist USING spgist (t);
+CREATE INDEX hi_bmand_spgist_c2 ON hi_bmand_spgist(c2);
+INSERT INTO hi_bmand_spgist VALUES (1, 'hello', 21);
+UPDATE hi_bmand_spgist SET c2 = 22 WHERE id = 1;
+SELECT count(*) AS spgist_bt_bitmapand
+  FROM hi_bmand_spgist WHERE t = 'hello' AND c2 = 22;
+ spgist_bt_bitmapand 
+---------------------
+                   1
+(1 row)
+
+DROP TABLE hi_bmand_spgist;
+-- (f) BitmapOr: a HOT-indexed fresh entry (btree, changed) unioned with an
+-- unrelated unchanged index's entry for a DIFFERENT row must not affect that
+-- other row's count, and the SIU row itself must still be found through
+-- either arm of the OR.
+CREATE TABLE hi_bmor_bt (
+    id int PRIMARY KEY,
+    c1 int,
+    c2 int
+) WITH (fillfactor = 50);
+CREATE INDEX hi_bmor_bt_c1 ON hi_bmor_bt(c1);
+CREATE INDEX hi_bmor_bt_c2 ON hi_bmor_bt(c2);
+INSERT INTO hi_bmor_bt VALUES (1, 11, 21), (2, 12, 32);
+UPDATE hi_bmor_bt SET c2 = 22 WHERE id = 1;   -- HOT-indexed on row 1 only
+SELECT count(*) AS bt_bt_bitmapor
+  FROM hi_bmor_bt WHERE c1 = 11 OR c2 = 32;    -- row 1 via c1, row 2 via c2
+ bt_bt_bitmapor 
+----------------
+              2
+(1 row)
+
+DROP TABLE hi_bmor_bt;
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+-- ---------------------------------------------------------------------------
+-- Heap rewrite (CLUSTER / VACUUM FULL) over live HOT-indexed chains
+--
+-- CLUSTER and VACUUM FULL rewrite the heap and rebuild every index, flattening
+-- each HOT chain: each live tuple becomes a standalone tuple in the new heap
+-- with a fresh, direct index entry, so no rewritten tuple is a HOT-indexed
+-- (SIU) chain member.  The rewrite (reform_tuple) must therefore clear
+-- HEAP_INDEXED_UPDATED on the copied tuple; leaving it set would leave a
+-- standalone tuple carrying the marker (and a now-meaningless inline
+-- modified-attrs bitmap), so a reader reaching it through the rebuilt index
+-- would run the read-side staleness test against garbage and wrongly drop the
+-- row.  Regression guard: without the clear, a=203 (and, for CLUSTER over the
+-- SIU secondary index, live rows) went missing via index after the rewrite
+-- while the heap still held them.
+-- ---------------------------------------------------------------------------
+-- (a) VACUUM FULL, including the single-secondary-index case that made any
+-- SIU-updated table return wrong index results after a routine VACUUM FULL.
+CREATE TABLE hi_rewrite (id int PRIMARY KEY, a int, payload text)
+  WITH (fillfactor = 50);
+CREATE INDEX hi_rewrite_a ON hi_rewrite(a);
+INSERT INTO hi_rewrite SELECT g, g, repeat('x', 20) FROM generate_series(1, 20) g;
+UPDATE hi_rewrite SET a = a + 100 WHERE id <= 10;   -- HOT-indexed on a
+UPDATE hi_rewrite SET a = a + 100 WHERE id <= 5;     -- again -> longer chains
+-- Row id=3 has a = 203 after two HOT-indexed updates.
+SELECT count(*) AS seqcount_before FROM hi_rewrite;
+ seqcount_before 
+-----------------
+              20
+(1 row)
+
+VACUUM FULL hi_rewrite;
+SELECT count(*) AS seqcount_after_vf FROM hi_rewrite;   -- no rows lost
+ seqcount_after_vf 
+-------------------
+                20
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SET enable_bitmapscan = off;
+-- Every current value is findable through the rebuilt index...
+SELECT a AS a203_via_index_after_vf FROM hi_rewrite WHERE a = 203;
+ a203_via_index_after_vf 
+-------------------------
+                     203
+(1 row)
+
+SELECT count(*) AS all_findable_via_index_after_vf
+  FROM hi_rewrite WHERE a BETWEEN 1 AND 100000;
+ all_findable_via_index_after_vf 
+---------------------------------
+                              20
+(1 row)
+
+-- ...and no superseded (stale) value surfaces.
+SELECT count(*) AS stale_a_after_vf FROM hi_rewrite WHERE a IN (3, 103);
+ stale_a_after_vf 
+------------------
+                0
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+SELECT * FROM verify_heapam('hi_rewrite');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+SELECT bt_index_check('hi_rewrite_a', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+DROP TABLE hi_rewrite;
+-- (b) CLUSTER using the SIU-updated secondary index (the ordering scan walks
+-- the chains) and a second CLUSTER by heap order; row and value counts must be
+-- preserved and every value findable through the index afterward.
+CREATE TABLE hi_cluster (id int PRIMARY KEY, a int, b int, payload text)
+  WITH (fillfactor = 40);
+CREATE INDEX hi_cluster_a ON hi_cluster(a);
+CREATE INDEX hi_cluster_b ON hi_cluster(b);
+INSERT INTO hi_cluster
+  SELECT g, g, g * 10, repeat('x', 20) FROM generate_series(1, 30) g;
+UPDATE hi_cluster SET a = a + 100 WHERE id % 2 = 0;   -- HOT-indexed on a
+UPDATE hi_cluster SET b = b + 500 WHERE id % 3 = 0;   -- HOT-indexed on b
+UPDATE hi_cluster SET a = a - 100 WHERE id = 6;        -- cycle a back (ABA)
+-- seqscan truth (sums are invariant across any lossless rewrite).
+SELECT count(*) AS n_before, sum(a) AS suma_before, sum(b) AS sumb_before
+  FROM hi_cluster;
+ n_before | suma_before | sumb_before 
+----------+-------------+-------------
+       30 |        1865 |        9650
+(1 row)
+
+CLUSTER hi_cluster USING hi_cluster_a;
+SELECT count(*) AS n_after_cluster, sum(a) AS suma_after, sum(b) AS sumb_after
+  FROM hi_cluster;
+ n_after_cluster | suma_after | sumb_after 
+-----------------+------------+------------
+              30 |       1865 |       9650
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SET enable_bitmapscan = off;
+SELECT count(*) AS a_all_findable
+  FROM hi_cluster WHERE a BETWEEN 1 AND 100000;
+ a_all_findable 
+----------------
+             30
+(1 row)
+
+SELECT count(*) AS b_all_findable
+  FROM hi_cluster WHERE b BETWEEN 1 AND 100000;
+ b_all_findable 
+----------------
+             30
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+SELECT bt_index_check('hi_cluster_a', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_check('hi_cluster_b', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT * FROM verify_heapam('hi_cluster');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_cluster;
+-- (c) CLUSTER USING a secondary index when a row's clustering-column value was
+-- SIU-changed (or ABA-cycled) in an EARLIER hop and a DIFFERENT indexed column
+-- changed in the LAST hop, with the chain left UNCOLLAPSED (no VACUUM before
+-- the CLUSTER).  This is the shape that silently lost rows: the clustering
+-- index has no entry pointing directly at the live tuple (its entries address
+-- earlier chain members, and no fresh clustering-index entry was planted
+-- because the last hop changed a different column), so CLUSTER's index-scan
+-- copy path, running under SnapshotAny before any prune/collapse inserts a
+-- redirect/stub that would let it chain-walk to the live tuple, never
+-- reached the row and dropped it from the rewritten heap.  A lossless rewrite
+-- must preserve every live row regardless of which index it clusters by, so
+-- the fix (repack.c) forces the seqscan+sort copy path for any heap with more
+-- than one index (SIU-capable), the same path VACUUM FULL already uses.
+--
+-- NB: do NOT VACUUM before the CLUSTER here, and keep a non-roomy fillfactor:
+-- a chain collapse or a roomier page both mask the bug (they change what the
+-- index scan can reach), so this test deliberately reproduces the losing
+-- conditions.
+CREATE TABLE hi_cluster_lasthop (id int PRIMARY KEY, a int, b int)
+  WITH (fillfactor = 40, autovacuum_enabled = false);
+CREATE INDEX hi_cl_lh_a ON hi_cluster_lasthop(a);
+CREATE INDEX hi_cl_lh_b ON hi_cluster_lasthop(b);
+INSERT INTO hi_cluster_lasthop
+  SELECT g, g, g FROM generate_series(1, 20) g;
+-- ids 1..10: change the clustering column a and change it back (ABA on a)
+UPDATE hi_cluster_lasthop SET a = a + 1000 WHERE id <= 10;
+UPDATE hi_cluster_lasthop SET a = a - 1000 WHERE id <= 10;
+-- ids 5..15: LAST hop changes b (a different indexed column), a unchanged here
+UPDATE hi_cluster_lasthop SET b = b + 100 WHERE id BETWEEN 5 AND 15;
+SELECT n_hot_indexed >= 1 AS siu_chains_formed
+  FROM pg_relation_hot_indexed_stats('hi_cluster_lasthop');
+ siu_chains_formed 
+-------------------
+ t
+(1 row)
+
+-- ground truth via seqscan: 20 live rows (chains NOT collapsed).
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS n_before FROM hi_cluster_lasthop;
+ n_before 
+----------
+       20
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+CLUSTER hi_cluster_lasthop USING hi_cl_lh_a;
+-- All rows must survive (seqscan, reads the heap directly).
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS n_after_cluster_a FROM hi_cluster_lasthop;
+ n_after_cluster_a 
+-------------------
+                20
+(1 row)
+
+SELECT string_agg(id::text, ',' ORDER BY id) AS missing_ids
+  FROM generate_series(1, 20) id
+  WHERE id NOT IN (SELECT id FROM hi_cluster_lasthop);
+ missing_ids 
+-------------
+ 
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+-- ...and every row is findable through the clustering index afterward.
+SET enable_seqscan = off;
+SET enable_indexscan = on;
+SET enable_bitmapscan = off;
+SELECT count(*) AS all_findable_via_a
+  FROM hi_cluster_lasthop WHERE a BETWEEN 1 AND 100000;
+ all_findable_via_a 
+--------------------
+                 20
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+SELECT bt_index_check('hi_cl_lh_a', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+-- Same losing shape, but CLUSTER by a NON-btree clusterable index (GiST).  The
+-- fix lives in the heap AM's copy-for-cluster path and is agnostic to the
+-- clustering index's access method, so this must preserve every row too, a
+-- guard that a btree-only fix (or one that touched index AMs) would miss.  A
+-- GiST clustering index has no sort path, so the heap AM falls back to a plain
+-- seqscan copy; order is not preserved, but no live row is lost.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE TABLE hi_cluster_gist (id int PRIMARY KEY, a int, b int)
+  WITH (fillfactor = 40, autovacuum_enabled = false);
+CREATE INDEX hi_cl_g_a ON hi_cluster_gist USING gist (a);
+CREATE INDEX hi_cl_g_b ON hi_cluster_gist (b);
+INSERT INTO hi_cluster_gist
+  SELECT g, g, g FROM generate_series(1, 20) g;
+UPDATE hi_cluster_gist SET a = a + 1000 WHERE id <= 10;
+UPDATE hi_cluster_gist SET a = a - 1000 WHERE id <= 10;
+UPDATE hi_cluster_gist SET b = b + 100 WHERE id BETWEEN 5 AND 15;
+CLUSTER hi_cluster_gist USING hi_cl_g_a;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS n_after_cluster_gist FROM hi_cluster_gist;
+ n_after_cluster_gist 
+----------------------
+                   20
+(1 row)
+
+SELECT string_agg(id::text, ',' ORDER BY id) AS missing_ids_gist
+  FROM generate_series(1, 20) id
+  WHERE id NOT IN (SELECT id FROM hi_cluster_gist);
+ missing_ids_gist 
+------------------
+ 
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE hi_cluster_gist;
+SELECT * FROM verify_heapam('hi_cluster_lasthop');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_cluster_lasthop;
+-- ---------------------------------------------------------------------------
+-- bt_index_check(heapallindexed) over a HOT-indexed index whose fresh
+-- entries were merged into posting lists by nbtree deduplication.
+--
+-- A HOT-indexed (SIU) fresh entry is inserted as an ordinary exact heap TID
+-- (no marker).  When many such entries share one key, deduplication copies
+-- those TIDs verbatim into a posting list's heap-TID array.  heapallindexed
+-- fingerprints each posting element against the heap TID from the heap scan;
+-- because the stored TIDs are plain, no per-element stripping is needed and the
+-- check must simply pass.  All rows are updated to a single key value to force
+-- one large posting list of live TIDs; fillfactor=10 keeps the updates HOT.
+-- ---------------------------------------------------------------------------
+CREATE TABLE hi_posting (id int, k int, other int)
+  WITH (fillfactor = 10, autovacuum_enabled = false);
+CREATE INDEX hi_posting_k ON hi_posting (k);
+CREATE INDEX hi_posting_other ON hi_posting (other);  -- 2nd index => SIU updates
+INSERT INTO hi_posting SELECT g, 0, g FROM generate_series(1, 200) g;
+-- Two rounds of same-value-key updates: HOT-indexed fresh entries on
+-- hi_posting_k, all sharing one key, deduplicated into a posting list.
+UPDATE hi_posting SET k = 1;
+UPDATE hi_posting SET k = 2;
+SELECT n_hot_indexed >= 1 AS siu_chains_formed
+  FROM pg_relation_hot_indexed_stats('hi_posting');
+ siu_chains_formed 
+-------------------
+ t
+(1 row)
+
+-- Must NOT raise: the flag is stripped from posting-list elements too.
+SELECT bt_index_check('hi_posting_k', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT * FROM verify_heapam('hi_posting');
+ blkno | offnum | attnum | msg 
+-------+--------+--------+-----
+(0 rows)
+
+DROP TABLE hi_posting;
+-- ---------------------------------------------------------------------------
+-- Cleanup
+-- ---------------------------------------------------------------------------
+DROP FUNCTION get_hi_count(text);
+DROP FUNCTION get_hot_count(text);
+-- pageinspect and amcheck were both created above with IF NOT EXISTS and may
+-- have pre-existed this test; leave them, matching amcheck's treatment,
+-- rather than risk dropping an extension this test did not create.

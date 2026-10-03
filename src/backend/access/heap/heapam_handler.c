@@ -20,17 +20,19 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/amlocator.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/syncscan.h"
+#include "access/sysattr.h"
 #include "access/tableam.h"
 #include "access/tsmapi.h"
-#include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
+#include "catalog/pg_am.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "commands/progress.h"
@@ -45,6 +47,7 @@
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
@@ -218,12 +221,18 @@ static TM_Result
 heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					CommandId cid, uint32 options,
 					Snapshot snapshot, Snapshot crosscheck,
-					bool wait, TM_FailureData *tmfd,
-					LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
+					bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
+					const Bitmapset *modified_attrs, bool *row_moved)
 {
 	bool		shouldFree = true;
 	HeapTuple	tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFree);
+	HeapUpdateIndexMode hot_mode;
 	TM_Result	result;
+
+	Assert(ItemPointerIsValid(otid));
+
+	hot_mode = HeapUpdateHotAllowable(relation, modified_attrs);
+	*lockmode = HeapUpdateDetermineLockmode(relation, modified_attrs);
 
 	/* Update the tuple with table oid */
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -231,34 +240,108 @@ heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 
 	result = heap_update(relation, otid, tuple, cid, options,
 						 crosscheck, wait,
-						 tmfd, lockmode, update_indexes);
+						 tmfd, *lockmode, modified_attrs, hot_mode);
 	ItemPointerCopy(&tuple->t_self, &slot->tts_tid);
 
 	/*
-	 * Decide whether new index entries are needed for the tuple
-	 *
-	 * Note: heap_update returns the tid (location) of the new tuple in the
-	 * t_self field.
-	 *
-	 * If the update is not HOT, we must update all indexes. If the update is
-	 * HOT, it could be that we updated summarized columns, so we either
-	 * update only summarized indexes, or none at all.
+	 * Tell the caller whether every index needs a new entry.  If the new
+	 * tuple is not heap-only the update was not HOT: it is an independent
+	 * version at a new TID that the old version's index entries no longer
+	 * locate, so every index needs a fresh entry.  Otherwise (classic HOT or
+	 * HOT-indexed) the caller consults the per-index attributes.
 	 */
-	if (result != TM_Ok)
-	{
-		Assert(*update_indexes == TU_None);
-		*update_indexes = TU_None;
-	}
-	else if (!HeapTupleIsHeapOnly(tuple))
-		Assert(*update_indexes == TU_All);
-	else
-		Assert((*update_indexes == TU_Summarizing) ||
-			   (*update_indexes == TU_None));
+	*row_moved = (result == TM_Ok && !HeapTupleIsHeapOnly(tuple));
 
 	if (shouldFree)
 		pfree(tuple);
 
 	return result;
+}
+
+/*
+ * heapam_modified_attrs
+ *
+ * Table-AM callback (see table_modified_attrs()): given a candidate set of
+ * attribute numbers and the old/new versions of a row in two slots, return
+ * the subset whose values actually changed.  The executor uses the result to
+ * maintain only the indexes whose attributes overlap it.
+ *
+ * This is the heap AM's notion of "did this attribute change?", moved here
+ * from the executor so the executor stays agnostic of heap specifics (the
+ * system-column semantics below and the FirstLowInvalidHeapAttributeNumber
+ * offset convention are heap concepts).  The input 'attrs' bitmap is modified
+ * in place (bms_del_member may pfree it) and the surviving set is returned;
+ * the caller must use only the returned pointer.
+ */
+static Bitmapset *
+heapam_modified_attrs(Relation rel, Bitmapset *attrs,
+					  TupleTableSlot *oldslot, TupleTableSlot *newslot)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			attidx = -1;
+
+	while ((attidx = bms_next_member(attrs, attidx)) >= 0)
+	{
+		/* attidx is zero-based, attrnum is the normal attribute number */
+		AttrNumber	attrnum = attidx + FirstLowInvalidHeapAttributeNumber;
+		Datum		value1,
+					value2;
+		bool		null1,
+					null2;
+		CompactAttribute *att;
+
+		/*
+		 * If it's a whole-tuple reference, say "not equal".  It's not really
+		 * worth supporting this case, since it could only succeed after a
+		 * no-op update, which is hardly a case worth optimizing for.
+		 */
+		if (attrnum == 0)
+			continue;
+
+		/*
+		 * Likewise, automatically say "not equal" for any system attribute
+		 * other than tableOID; we cannot expect these to be consistent in a
+		 * HOT chain, or even to be set correctly yet in the new tuple.
+		 */
+		if (attrnum < 0)
+		{
+			if (attrnum == TableOidAttributeNumber)
+				attrs = bms_del_member(attrs, attidx);
+			continue;
+		}
+
+		att = TupleDescCompactAttr(tupdesc, attrnum - 1);
+		value1 = slot_getattr(oldslot, attrnum, &null1);
+		value2 = slot_getattr(newslot, attrnum, &null2);
+
+		/* A change to/from NULL, so not equal */
+		if (null1 != null2)
+			continue;
+
+		/* Both NULL, no change/unmodified */
+		if (null2)
+		{
+			attrs = bms_del_member(attrs, attidx);
+			continue;
+		}
+
+		/*
+		 * Compare with datum_image_eq, NOT datumIsEqual (the comparator
+		 * heap_attr_equals uses on the simple_heap_update path).  This runs on
+		 * TupleTableSlots whose Datums are the logical, in-memory values of the
+		 * new/old tuple, before any storage path has run, so no slot value can
+		 * be TOASTed here and the "two physically different varlena encodings
+		 * of the same value" case that would distinguish the two comparators
+		 * cannot arise.  datum_image_eq is the image-identity test appropriate
+		 * for slot Datums; erring toward "changed" is the safe direction for
+		 * this decision (a redundant fresh index entry is tolerated, a skipped
+		 * one is not).  See README.HOT-INDEXED section 6.
+		 */
+		if (datum_image_eq(value1, value2, att->attbyval, att->attlen))
+			attrs = bms_del_member(attrs, attidx);
+	}
+
+	return attrs;
 }
 
 static TM_Result
@@ -274,7 +357,7 @@ heapam_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 	bool		follow_updates;
 
 	follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
-	tmfd->traversed = false;
+	tmfd->retargeted = false;
 
 	Assert(TTS_IS_BUFFERTUPLE(slot));
 
@@ -302,7 +385,7 @@ tuple_lock_retry:
 			priorXmax = tmfd->xmax;
 
 			/* signal that a tuple later in the chain is getting locked */
-			tmfd->traversed = true;
+			tmfd->retargeted = true;
 
 			/*
 			 * fetch target tuple
@@ -642,6 +725,45 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	else
 		bistate = NULL;
 
+	/*
+	 * The index-scan copy path below trusts the clustering index to reach
+	 * every live heap tuple directly.  A HOT-indexed (SIU) chain breaks that:
+	 * an UPDATE that changes some OTHER indexed column produces a live tuple
+	 * that the clustering index has no entry pointing at (its entries still
+	 * address earlier chain members), and until a prune/VACUUM collapses the
+	 * chain the index scan cannot reach it, so it would be silently dropped
+	 * from the rewritten heap.  Any heap with more than one index is
+	 * SIU-capable (selective maintenance needs a changed and an unchanged
+	 * index).
+	 *
+	 * This is the heap AM's own invariant, so the heap AM (not the CLUSTER
+	 * command) forces a direct-scan copy here,
+	 * independently of which access method the clustering index uses.  No
+	 * index AM (core or out-of-tree) needs to know anything about SIU chains.
+	 * A btree clustering index can still preserve cluster order via the
+	 * seqscan+sort path (tuplesort_begin_cluster requires btree anyway); any
+	 * other clusterable AM has no sort path, so it falls back to a plain
+	 * seqscan copy and loses ordering, an acceptable trade, since a lossless
+	 * rewrite must never drop a live row and cluster order is not a
+	 * correctness property.  Both direct-scan paths visit every heap tuple,
+	 * the same way VACUUM FULL already does, and are therefore immune.
+	 */
+	if (OldIndex != NULL && !use_sort)
+	{
+		List	   *indexoidlist = RelationGetIndexList(OldHeap);
+		bool		siu_capable = (list_length(indexoidlist) > 1);
+
+		list_free(indexoidlist);
+
+		if (siu_capable)
+		{
+			if (OldIndex->rd_rel->relam == BTREE_AM_OID)
+				use_sort = true;	/* seqscan+sort, keeps cluster order */
+			else
+				OldIndex = NULL;	/* plain seqscan copy */
+		}
+	}
+
 	/* Set up sorting if wanted */
 	if (use_sort)
 		tuplesort = tuplesort_begin_cluster(oldTupDesc, OldIndex,
@@ -712,9 +834,33 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 										  slot))
 				break;
 
-			/* Since we used no scan keys, should never need to recheck */
+			/*
+			 * CLUSTER uses a no-key full-index scan; it cannot do any
+			 * tuple-level filtering itself.  The HOT-indexed reader path
+			 * routinely sets xs_recheck when walking chain entries whose
+			 * index key may be stale relative to the visible heap tuple.
+			 * Those entries cause the same live tuple to be visited via the
+			 * fresh hot-indexed-inserted entry too; including them would
+			 * duplicate rows in the rewritten heap.  Skip them here; the
+			 * tuple is reachable through its canonical index entry.
+			 *
+			 * If xs_recheck is set with actual scan keys, that's a real lossy
+			 * index scenario CLUSTER can't handle (historical restriction).
+			 */
 			if (indexScan->xs_recheck)
-				elog(ERROR, "CLUSTER does not support lossy index conditions");
+			{
+				if (indexScan->numberOfKeys > 0)
+					elog(ERROR, "CLUSTER does not support lossy index conditions");
+				continue;
+			}
+
+			/*
+			 * Same reasoning as for xs_recheck: a HOT-indexed stale entry
+			 * would re-emit an already-visited tuple via its canonical fresh
+			 * entry.  Skip.
+			 */
+			if (indexScan->xs_entry_needs_recheck)
+				continue;
 		}
 		else
 		{
@@ -1628,30 +1774,48 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 			offnum = ItemPointerGetOffsetNumber(&heapTuple->t_self);
 
-			/*
-			 * If a HOT tuple points to a root that we don't know about,
-			 * obtain root items afresh.  If that still fails, report it as
-			 * corruption.
-			 */
-			if (root_offsets[offnum - 1] == InvalidOffsetNumber)
+			if ((heapTuple->t_data->t_infomask2 & HEAP_INDEXED_UPDATED) != 0)
 			{
-				Page		page = BufferGetPage(hscan->rs_cbuf);
-
-				LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
-				heap_get_root_tuples(page, root_offsets);
-				LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+				/*
+				 * HOT-indexed (Selective Index Update) live tuple: index it
+				 * under its OWN TID, not the chain root.  Its indexed values
+				 * differ from earlier chain members', and the bitmap-overlap
+				 * read path keeps an entry only when no hop after the entry's
+				 * target changed the index's attributes.  That holds for an
+				 * entry pointing directly at the live tuple (no later hop);
+				 * an entry pointed at the root would be dropped as stale,
+				 * losing the row.
+				 */
+				ItemPointerSet(&tid, ItemPointerGetBlockNumber(&heapTuple->t_self),
+							   offnum);
 			}
+			else
+			{
+				/*
+				 * If a HOT tuple points to a root that we don't know about,
+				 * obtain root items afresh.  If that still fails, report it
+				 * as corruption.
+				 */
+				if (root_offsets[offnum - 1] == InvalidOffsetNumber)
+				{
+					Page		page = BufferGetPage(hscan->rs_cbuf);
 
-			if (!OffsetNumberIsValid(root_offsets[offnum - 1]))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("failed to find parent tuple for heap-only tuple at (%u,%u) in table \"%s\"",
-										 ItemPointerGetBlockNumber(&heapTuple->t_self),
-										 offnum,
-										 RelationGetRelationName(heapRelation))));
+					LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
+					heap_get_root_tuples(page, root_offsets);
+					LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+				}
 
-			ItemPointerSet(&tid, ItemPointerGetBlockNumber(&heapTuple->t_self),
-						   root_offsets[offnum - 1]);
+				if (!OffsetNumberIsValid(root_offsets[offnum - 1]))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg_internal("failed to find parent tuple for heap-only tuple at (%u,%u) in table \"%s\"",
+											 ItemPointerGetBlockNumber(&heapTuple->t_self),
+											 offnum,
+											 RelationGetRelationName(heapRelation))));
+
+				ItemPointerSet(&tid, ItemPointerGetBlockNumber(&heapTuple->t_self),
+							   root_offsets[offnum - 1]);
+			}
 
 			/* Call the AM's callback routine to process the tuple */
 			callback(indexRelation, &tid, values, isnull, tupleIsAlive,
@@ -1816,7 +1980,8 @@ heapam_index_validate_scan(Relation heapRelation,
 		rootTuple = *heapcursor;
 		root_offnum = ItemPointerGetOffsetNumber(heapcursor);
 
-		if (HeapTupleIsHeapOnly(heapTuple))
+		if (HeapTupleIsHeapOnly(heapTuple) &&
+			(heapTuple->t_data->t_infomask2 & HEAP_INDEXED_UPDATED) == 0)
 		{
 			root_offnum = root_offsets[root_offnum - 1];
 			if (!OffsetNumberIsValid(root_offnum))
@@ -2426,7 +2591,23 @@ reform_tuple(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
 
 	/* Skip work if no changes are needed */
 	if (!needs_reform)
-		return heap_copytuple(tuple);
+	{
+		HeapTuple	copy = heap_copytuple(tuple);
+
+		/*
+		 * A CLUSTER / VACUUM FULL rewrite flattens every HOT chain: each live
+		 * tuple becomes a standalone tuple in the new heap with a fresh index
+		 * entry, so no rewritten tuple is a HOT-indexed (SIU) chain member.
+		 * heap_copytuple preserves the source header verbatim, though, which
+		 * would leave HEAP_INDEXED_UPDATED (and its now-meaningless trailing
+		 * inline modified-attrs bitmap) set on the copy.  A reader reaching
+		 * such a tuple through the rebuilt index would then run the read-side
+		 * staleness test against garbage and wrongly drop the row.  Clear the
+		 * marker here.  (The fresh-form path below never sets it.)
+		 */
+		copy->t_data->t_infomask2 &= ~HEAP_INDEXED_UPDATED;
+		return copy;
+	}
 
 	heap_deform_tuple(tuple, oldTupDesc, values, isnull);
 
@@ -2573,6 +2754,7 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 		 * offset.
 		 */
 		int			curslot;
+		bool		page_had_hot_indexed = false;
 
 		/* We must have extracted the tuple offsets by now */
 		Assert(noffsets > -1);
@@ -2582,11 +2764,63 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 			OffsetNumber offnum = offsets[curslot];
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
+			bool		hot_indexed_stale = false;
 
 			ItemPointerSet(&tid, block, offnum);
 			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
-									   &heapTuple, NULL, true))
-				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
+									   &heapTuple, NULL, true,
+									   &hot_indexed_stale, NULL, NULL))
+			{
+				OffsetNumber resolved = ItemPointerGetOffsetNumber(&tid);
+				bool		already_have = false;
+
+				/*
+				 * A bitmap heap scan cannot attribute a TID to one index, so
+				 * any crossed in-chain HOT/SIU hop means the arriving entry
+				 * may be stale; recheck/dedup conservatively.
+				 */
+				if (hot_indexed_stale)
+					page_had_hot_indexed = true;
+
+				/*
+				 * With HOT-indexed updates, more than one bitmap entry on the
+				 * same block can chain-resolve to the same live tuple (a
+				 * stale old-key entry plus the fresh new-key entry, or
+				 * multiple stale entries from successive hot-indexed
+				 * updates).  Once we've seen any hot-indexed hop on this
+				 * block dedup inline so upper nodes (e.g., MERGE) don't see
+				 * the same row twice.  Preserve original insertion order:
+				 * MERGE's RETURNING ordering and test harness stability both
+				 * depend on it.  In the absence of hot-indexed on the page we
+				 * skip the linear scan entirely; the TBM's TIDs are already
+				 * distinct by construction.
+				 */
+				if (page_had_hot_indexed)
+				{
+					for (int j = 0; j < ntup; j++)
+					{
+						if (hscan->rs_vistuples[j] == resolved)
+						{
+							already_have = true;
+							break;
+						}
+					}
+				}
+
+				if (!already_have)
+					hscan->rs_vistuples[ntup++] = resolved;
+
+				/*
+				 * If we reached the visible tuple through a HOT-indexed
+				 * (hot-indexed) hop, the bitmap index entry that pointed us
+				 * at the chain root may describe key values the visible tuple
+				 * no longer has.  Force BitmapHeapScan to run its recheck
+				 * qual against these tuples even if the bitmap page was
+				 * otherwise exact.
+				 */
+				if (hot_indexed_stale)
+					*recheck = true;
+			}
 		}
 	}
 	else
@@ -2649,8 +2883,30 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
  * ------------------------------------------------------------------------
  */
 
+/*
+ * A heap row is located by its TID: a fixed-width block number and line
+ * pointer offset.  A bitmap scan uses the block as the bucket and the offset
+ * as the slot.
+ */
+static const LocatorDesc heapam_locator_desc = {
+	.width = sizeof(ItemPointerData),
+	.name = "tid",
+	.stable = false,
+	.old_version_retained = true,
+	.bitmap_and_inexact = heap_bitmap_and_inexact,
+};
+
+static const LocatorDesc *
+heapam_relation_locator(Relation rel)
+{
+	return &heapam_locator_desc;
+}
+
 static const TableAmRoutine heapam_methods = {
 	.type = T_TableAmRoutine,
+
+	/* heap identifies a row by its TID; see amlocator.h */
+	.relation_locator = heapam_relation_locator,
 
 	.slot_callbacks = heapam_slot_callbacks,
 
@@ -2676,9 +2932,11 @@ static const TableAmRoutine heapam_methods = {
 	.multi_insert = heap_multi_insert,
 	.tuple_delete = heapam_tuple_delete,
 	.tuple_update = heapam_tuple_update,
+	.modified_attrs = heapam_modified_attrs,
 	.tuple_lock = heapam_tuple_lock,
 
 	.fetch_tid = heapam_fetch_tid,
+	.fetch_tid_check = heapam_fetch_tid_check,
 	.tuple_fetch_row_version = heapam_fetch_row_version,
 	.tuple_get_latest_tid = heap_get_latest_tid,
 	.tuple_tid_valid = heapam_tuple_tid_valid,
