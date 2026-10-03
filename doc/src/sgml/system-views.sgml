@@ -246,6 +246,11 @@
       <entry>wait events</entry>
      </row>
 
+     <row>
+      <entry><link linkend="view-pg-xmin-horizon"><structname>pg_xmin_horizon</structname></link></entry>
+      <entry>sources holding back the cluster's xmin horizons</entry>
+     </row>
+
     </tbody>
    </tgroup>
   </table>
@@ -5781,6 +5786,271 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
     </tbody>
    </tgroup>
   </table>
+ </sect1>
+
+ <sect1 id="view-pg-xmin-horizon">
+  <title><structname>pg_xmin_horizon</structname></title>
+
+  <indexterm zone="view-pg-xmin-horizon">
+   <primary>pg_xmin_horizon</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_xmin_horizon</structname> view has one row per backend
+   currently holding a snapshot or transaction ID, plus one per
+   replication slot, prepared transaction, and hot standby feedback sender,
+   and, during recovery, one <literal>primary_xacts</literal> row,
+   and reports each row's
+   contributions to the cluster's xmin horizons.  A source holding back
+   a horizon prevents <command>VACUUM</command> from removing dead row
+   versions and clearing old XIDs.
+   A row whose xmin columns are all
+   null does not currently pin the horizon.
+  </para>
+
+  <table>
+   <title><structname>pg_xmin_horizon</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>kind</structfield> <type>text</type>
+      </para>
+      <para>
+       The row's kind: <literal>backend</literal>,
+       <literal>replication_slot</literal>, <literal>prepared_xact</literal>,
+       <literal>standby_feedback</literal>, or
+       <literal>primary_xacts</literal>.  A
+       <literal>standby_feedback</literal> row represents a WAL sender
+       process without a replication slot, holding the xmin horizon sent
+       by its standby through
+       <link linkend="guc-hot-standby-feedback"><varname>hot_standby_feedback</varname></link>.
+       A sender that does use a slot is reported through that slot's
+       <literal>replication_slot</literal> row instead.  A
+       <literal>primary_xacts</literal> row appears only during recovery
+       and represents the transactions running on the primary.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pid</structfield> <type>integer</type>
+      </para>
+      <para>
+       The process ID of the <literal>backend</literal> or
+       <literal>standby_feedback</literal> WAL sender that owns this row.
+       Null for <literal>replication_slot</literal>,
+       <literal>prepared_xact</literal>, and
+       <literal>primary_xacts</literal> rows.
+       Parallel workers and REPACK decoding workers have rows of their own.
+       <link linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link>
+       reports each worker's leader in <structfield>leader_pid</structfield>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>slot_name</structfield> <type>name</type>
+      </para>
+      <para>
+       The replication slot name for <literal>replication_slot</literal>
+       rows.  Null for all other kinds.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>gid</structfield> <type>text</type>
+      </para>
+      <para>
+       The global transaction identifier for <literal>prepared_xact</literal>
+       rows.  Null for all other kinds.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>datid</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-database"><structname>pg_database</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       For <literal>backend</literal> and <literal>prepared_xact</literal>
+       rows, the OID of the connected database.  For logical
+       <literal>replication_slot</literal> rows, the OID of the database
+       whose data is decoded.  Null for other rows.
+       <structfield>datid</structfield> scopes what a row pins.  A
+       <literal>backend</literal> or <literal>prepared_xact</literal> row's
+       <structfield>catalog_xmin</structfield> and
+       <structfield>data_xmin</structfield> hold back those horizons only
+       within its own database, while its
+       <structfield>shared_xmin</structfield> applies cluster-wide.
+       A <literal>backend</literal> row with a null
+       <structfield>datid</structfield> is a process not connected to any
+       database, such as the autovacuum launcher, and reports only
+       <structfield>shared_xmin</structfield>.
+       <literal>replication_slot</literal> and
+       <literal>standby_feedback</literal> rows pin the horizon
+       cluster-wide regardless of <structfield>datid</structfield>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>datname</structfield> <type>name</type>
+       (references <link linkend="catalog-pg-database"><structname>pg_database</structname></link>.<structfield>datname</structfield>)
+      </para>
+      <para>
+       The name of the database referenced by
+       <structfield>datid</structfield>.
+       Null whenever <structfield>datid</structfield> is null.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>xid</structfield> <type>xid</type>
+      </para>
+      <para>
+       Top-level transaction identifier of this row's backend or prepared
+       transaction, if any; see <xref linkend="transaction-id"/>.
+       Always null for <literal>replication_slot</literal>,
+       <literal>standby_feedback</literal>, and
+       <literal>primary_xacts</literal> rows.  A row with a null
+       <structfield>xid</structfield> can still pin the horizon through
+       <structfield>shared_xmin</structfield>,
+       <structfield>catalog_xmin</structfield>, and
+       <structfield>data_xmin</structfield>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>shared_xmin</structfield> <type>xid</type>
+      </para>
+      <para>
+       The transaction ID this row pins for the shared xmin horizon.
+       Null if it does not pin that horizon.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>catalog_xmin</structfield> <type>xid</type>
+      </para>
+      <para>
+       The transaction ID this row pins for the catalog xmin horizon.
+       Null if it does not pin that horizon.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>data_xmin</structfield> <type>xid</type>
+      </para>
+      <para>
+       The transaction ID this row pins for the data xmin horizon.
+       Null if it does not pin that horizon.  A backend running
+       <command>VACUUM</command> without <literal>FULL</literal> shows null in
+       <structfield>shared_xmin</structfield>,
+       <structfield>catalog_xmin</structfield>, and
+       <structfield>data_xmin</structfield>, except while it runs
+       <command>ANALYZE</command>.  A WAL sender streaming logical changes
+       pins through its <literal>replication_slot</literal> row.  A backend
+       decoding through
+       <function>pg_logical_slot_get_changes()</function> or another SQL
+       function pins like any other.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>xact_start</structfield> <type>timestamptz</type>
+      </para>
+      <para>
+       Time when the row's transaction was started, or, for
+       <literal>prepared_xact</literal> rows, when the transaction was
+       prepared.  Null for <literal>replication_slot</literal> rows,
+       <literal>standby_feedback</literal> rows,
+       <literal>primary_xacts</literal> rows, and
+       <literal>backend</literal> rows belonging to WAL sender processes.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   A <literal>replication_slot</literal> row's
+   <structfield>data_xmin</structfield> excludes the slot's
+   <structfield>catalog_xmin</structfield>, which does not affect user
+   tables.  A <literal>replication_slot</literal> row shows the values
+   the xmin horizons use.
+   <link linkend="view-pg-replication-slots"><structname>pg_replication_slots</structname></link>
+   can show different values for the same slot.
+   The combined slot values update only when a slot changes.  A stale
+   value that no row shows can briefly pin a horizon.  An invalidated
+   slot pins nothing and shows
+   null in all three columns.
+  </para>
+
+  <para>
+   To find the row holding back an xmin horizon, order the applicable
+   rows by descending <function>age()</function> of that horizon's column,
+   placing null values last.
+   <type>xid</type> has no ordering operators, so
+   <function>age()</function> serves as the wraparound-safe sort key.
+   Which rows are applicable depends on the horizon and on
+   <structfield>datid</structfield> scoping, as described above.
+  </para>
+
+  <para>
+   When several rows tie for the oldest value, removing one of them does not
+   advance the horizon, because every tied row must release the value before it
+   can move.  A row whose <structfield>xid</structfield> equals the tied
+   value pins the horizon because of its transaction.  If such a row
+   exists, the horizon cannot advance until its transaction completes.
+  </para>
+
+  <para>
+   When no row contributes to a horizon at all, the
+   horizon advances to an internal baseline just past the newest completed
+   transaction ID, which this view does not display.  The data is not
+   guaranteed to be entirely consistent.  Backend rows and replication slot
+   rows are gathered at slightly different times, without freezing the state
+   of the whole system, so a single query does not represent the cluster at
+   one instant.  See
+   <xref linkend="vacuum-for-wraparound"/> for steps to take when the horizon
+   is held back.
+  </para>
+
+  <para>
+   During recovery the view has one <literal>primary_xacts</literal> row,
+   which pins every horizon cluster-wide at the oldest transaction ID still
+   running on the primary at the standby's replay position, as reported by
+   <link linkend="functions-recovery-info-table"><function>pg_last_wal_replay_lsn()</function></link>.
+   Its <structfield>shared_xmin</structfield>,
+   <structfield>catalog_xmin</structfield>, and
+   <structfield>data_xmin</structfield> are equal.  They are null when the
+   standby knows of no such transaction.  To identify the transactions,
+   query the primary.
+  </para>
+
+  <para>
+   By default, the <structname>pg_xmin_horizon</structname> view can be
+   read only by superusers or roles with privileges of the
+   <literal>pg_read_all_stats</literal> role.
+  </para>
  </sect1>
 
 </chapter>
