@@ -433,11 +433,11 @@ $standby1->safe_psql('postgres', "SELECT pg_sync_replication_slots();");
 $primary->safe_psql(
 	'postgres', qq(
 		BEGIN;
-		SELECT txid_current();
+		SELECT pg_current_xact_id();
 		SELECT pg_log_standby_snapshot();
 		COMMIT;
 		BEGIN;
-		SELECT txid_current();
+		SELECT pg_current_xact_id();
 		SELECT pg_log_standby_snapshot();
 		COMMIT;
 ));
