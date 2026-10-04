@@ -402,58 +402,9 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 			case PGRES_TUPLES_OK:
 				if ((is_last && meta == META_GSET) || meta == META_ASET)
 				{
-					int			ntuples = PQntuples(res);
-					const char *context = (meta == META_ASET) ? "aset" : "gset";
-
-					if (meta == META_GSET && ntuples != 1)
-					{
-						/* under \gset, report the error */
-						pg_log_error("client %d script %d command %d query %d: expected one row, got %d",
-									 st->id, st->use_file, st->command, qrynum, PQntuples(res));
-						st->estatus = ESTATUS_META_COMMAND_ERROR;
+					if (!processGSetResult(st, sql_script[st->use_file].commands[st->command],
+										   res, is_last, qrynum))
 						goto error;
-					}
-					else if (meta == META_ASET && ntuples <= 0)
-					{
-						/* coldly skip empty result under \aset */
-						break;
-					}
-
-					/* store results into variables */
-					for (int fld = 0; fld < PQnfields(res); fld++)
-					{
-						char	   *varname = PQfname(res, fld);
-						bool		ok;
-
-						/* allocate varname only if necessary, freed below */
-						if (*varprefix != '\0')
-							varname = psprintf("%s%s", varprefix, varname);
-
-						/* store last row result */
-						if (PQgetisnull(res, ntuples - 1, fld))
-						{
-							PgBenchValue nullval;
-
-							setNullValue(&nullval);
-							ok = putVariableValue(&st->variables, context,
-												  varname, &nullval);
-						}
-						else
-							ok = putVariable(&st->variables, context, varname,
-											 PQgetvalue(res, ntuples - 1, fld));
-
-						if (!ok)
-						{
-							/* internal error */
-							pg_log_error("client %d script %d command %d query %d: error storing into variable %s",
-										 st->id, st->use_file, st->command, qrynum, varname);
-							st->estatus = ESTATUS_META_COMMAND_ERROR;
-							goto error;
-						}
-
-						if (*varprefix != '\0')
-							pfree(varname);
-					}
 				}
 				/* otherwise the result is simply thrown away by PQclear below */
 				break;
@@ -989,95 +940,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 			case CSTATE_SKIP_COMMAND:
 				Assert(!conditional_active(st->cstack));
 				/* quickly skip commands until something to do... */
-				while (true)
-				{
-					command = sql_script[st->use_file].commands[st->command];
-
-					/* cannot reach end of script in that state */
-					Assert(command != NULL);
-
-					/*
-					 * if this is conditional related, update conditional
-					 * state
-					 */
-					if (command->type == META_COMMAND &&
-						(command->meta == META_IF ||
-						 command->meta == META_ELIF ||
-						 command->meta == META_ELSE ||
-						 command->meta == META_ENDIF))
-					{
-						switch (conditional_stack_peek(st->cstack))
-						{
-							case IFSTATE_FALSE:
-								if (command->meta == META_IF)
-								{
-									/* nested if in skipped branch - ignore */
-									conditional_stack_push(st->cstack,
-														   IFSTATE_IGNORED);
-									st->command++;
-								}
-								else if (command->meta == META_ELIF)
-								{
-									/* we must evaluate the condition */
-									st->state = CSTATE_START_COMMAND;
-								}
-								else if (command->meta == META_ELSE)
-								{
-									/* we must execute next command */
-									conditional_stack_poke(st->cstack,
-														   IFSTATE_ELSE_TRUE);
-									st->state = CSTATE_START_COMMAND;
-									st->command++;
-								}
-								else if (command->meta == META_ENDIF)
-								{
-									Assert(!conditional_stack_empty(st->cstack));
-									conditional_stack_pop(st->cstack);
-									if (conditional_active(st->cstack))
-										st->state = CSTATE_START_COMMAND;
-									/* else state remains CSTATE_SKIP_COMMAND */
-									st->command++;
-								}
-								break;
-
-							case IFSTATE_IGNORED:
-							case IFSTATE_ELSE_FALSE:
-								if (command->meta == META_IF)
-									conditional_stack_push(st->cstack,
-														   IFSTATE_IGNORED);
-								else if (command->meta == META_ENDIF)
-								{
-									Assert(!conditional_stack_empty(st->cstack));
-									conditional_stack_pop(st->cstack);
-									if (conditional_active(st->cstack))
-										st->state = CSTATE_START_COMMAND;
-								}
-								/* could detect "else" & "elif" after "else" */
-								st->command++;
-								break;
-
-							case IFSTATE_NONE:
-							case IFSTATE_TRUE:
-							case IFSTATE_ELSE_TRUE:
-							default:
-
-								/*
-								 * inconsistent if inactive, unreachable dead
-								 * code
-								 */
-								Assert(false);
-						}
-					}
-					else
-					{
-						/* skip and consider next */
-						st->command++;
-					}
-
-					if (st->state != CSTATE_SKIP_COMMAND)
-						/* out of quick skip command loop */
-						break;
-				}
+				skipConditionalCommands(st);
 				break;
 
 				/*
