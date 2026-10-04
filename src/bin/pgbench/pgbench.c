@@ -775,29 +775,11 @@ main(int argc, char **argv)
 		/* copy any -D switch values to all clients */
 		for (i = 1; i < nclients; i++)
 		{
-			int			j;
-
 			state[i].id = i;
-			for (j = 0; j < state[0].variables.nvars; j++)
-			{
-				Variable   *var = &state[0].variables.vars[j];
-
-				if (var->value.type != PGBT_NO_VALUE)
-				{
-					if (!putVariableValue(&state[i].variables, "startup",
-										  var->name, &var->value))
-						exit(1);
-				}
-				else
-				{
-					if (!putVariable(&state[i].variables, "startup",
-									 var->name, var->svalue))
-						exit(1);
-				}
-			}
+			if (!copyVariables(&state[i].variables, &state[0].variables))
+				exit(1);
 		}
 	}
-
 	/* other CState initializations */
 	for (i = 0; i < nclients; i++)
 	{

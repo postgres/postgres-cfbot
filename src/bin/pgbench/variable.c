@@ -20,12 +20,14 @@
 #include "common/logging.h"
 #include "variable.h"
 
+#define VARIABLES_ALLOC_MARGIN	8
+
 /*
  * Return whether str matches "^\s*[-+]?[0-9]+$"
  *
  * This should agree with strtoint64() on what's accepted, ignoring overflows.
  */
-static bool
+bool
 is_an_int(const char *str)
 {
 	const char *ptr = str;
@@ -108,6 +110,140 @@ strtodouble(const char *str, bool errorOK, double *dv)
 	return true;
 }
 
+/*
+ * Helper to ensure variables has a valid root and current scope.
+ */
+static inline VariableScope *
+getCurrentScope(Variables *variables)
+{
+	if (unlikely(variables->root == NULL))
+	{
+		variables->root = (VariableScope *) pg_malloc0(sizeof(VariableScope));
+		variables->root->vars_sorted = true;
+		variables->current = variables->root;
+	}
+	return variables->current;
+}
+
+/*
+ * Initialize a Variables container to empty with an active root scope.
+ */
+void
+initVariables(Variables *variables)
+{
+	variables->root = (VariableScope *) pg_malloc0(sizeof(VariableScope));
+	variables->root->vars_sorted = true;
+	variables->current = variables->root;
+}
+
+/*
+ * Destroy all variables across all scopes, freeing memory.
+ */
+void
+destroyVariables(Variables *variables)
+{
+	VariableScope *scope;
+	int			i;
+
+	while (var_scope_pop(variables))
+		;
+
+	if (variables->root)
+	{
+		scope = variables->root;
+		for (i = 0; i < scope->nvars; i++)
+		{
+			free(scope->vars[i].name);
+			free(scope->vars[i].svalue);
+		}
+		if (scope->vars)
+			free(scope->vars);
+		free(scope);
+		variables->root = NULL;
+		variables->current = NULL;
+	}
+}
+
+/*
+ * Push a new child scope onto the stack.
+ */
+bool
+var_scope_push(Variables *variables)
+{
+	VariableScope *current = getCurrentScope(variables);
+	VariableScope *new_scope = (VariableScope *) pg_malloc0(sizeof(VariableScope));
+
+	new_scope->parent = current;
+	new_scope->vars_sorted = true;
+	variables->current = new_scope;
+	return true;
+}
+
+/*
+ * Pop the current scope from the stack, freeing all variables declared in it.
+ * Root scope cannot be popped; returns false if at root.
+ */
+bool
+var_scope_pop(Variables *variables)
+{
+	VariableScope *current;
+	int			i;
+
+	if (variables->root == NULL || variables->current == NULL)
+		return false;
+
+	current = variables->current;
+	if (current == variables->root || current->parent == NULL)
+		return false;
+
+	variables->current = current->parent;
+
+	for (i = 0; i < current->nvars; i++)
+	{
+		free(current->vars[i].name);
+		free(current->vars[i].svalue);
+	}
+	if (current->vars)
+		free(current->vars);
+	free(current);
+
+	return true;
+}
+
+/*
+ * Deep copy all variables from the current scope of src into dest.
+ */
+bool
+copyVariables(Variables *dest, const Variables *src)
+{
+	const VariableScope *src_scope;
+	int			j;
+
+	if (src == NULL)
+		return true;
+
+	src_scope = (src->current != NULL) ? src->current : src->root;
+	if (src_scope == NULL)
+		return true;
+
+	for (j = 0; j < src_scope->nvars; j++)
+	{
+		const Variable *var = &src_scope->vars[j];
+
+		if (var->value.type != PGBT_NO_VALUE)
+		{
+			if (!putVariableValue(dest, "startup", var->name, &var->value))
+				return false;
+		}
+		else
+		{
+			if (!putVariable(dest, "startup", var->name, var->svalue))
+				return false;
+		}
+	}
+	return true;
+}
+
 /* qsort comparator for Variable array */
 static int
 compareVariableNames(const void *v1, const void *v2)
@@ -116,36 +252,53 @@ compareVariableNames(const void *v1, const void *v2)
 				  ((const Variable *) v2)->name);
 }
 
-/* Locate a variable by name; returns NULL if unknown */
-Variable *
-lookupVariable(Variables *variables, char *name)
+/* Locate a variable by name within a single scope */
+static Variable *
+lookupVariableInScope(VariableScope *scope, const char *name)
 {
 	Variable	key;
 
 	/* On some versions of Solaris, bsearch of zero items dumps core */
-	if (variables->nvars <= 0)
+	if (scope->nvars <= 0)
 		return NULL;
 
 	/* Sort if we have to */
-	if (!variables->vars_sorted)
+	if (!scope->vars_sorted)
 	{
-		qsort(variables->vars, variables->nvars, sizeof(Variable),
+		qsort(scope->vars, scope->nvars, sizeof(Variable),
 			  compareVariableNames);
-		variables->vars_sorted = true;
+		scope->vars_sorted = true;
 	}
 
 	/* Now we can search */
-	key.name = name;
+	key.name = unconstify(char *, name);
 	return (Variable *) bsearch(&key,
-								variables->vars,
-								variables->nvars,
+								scope->vars,
+								scope->nvars,
 								sizeof(Variable),
 								compareVariableNames);
 }
 
+/* Locate a variable by name; returns NULL if unknown */
+Variable *
+lookupVariable(Variables *variables, const char *name)
+{
+	VariableScope *scope = getCurrentScope(variables);
+
+	while (scope != NULL)
+	{
+		Variable   *var = lookupVariableInScope(scope, name);
+
+		if (var != NULL)
+			return var;
+		scope = scope->parent;
+	}
+	return NULL;
+}
+
 /* Get the value of a variable, in string form; returns NULL if unknown */
 char *
-getVariable(Variables *variables, char *name)
+getVariable(Variables *variables, const char *name)
 {
 	Variable   *var;
 	char		stringform[64];
@@ -287,16 +440,16 @@ valid_variable_name(const char *name)
  * array.
  */
 static void
-enlargeVariables(Variables *variables, int needed)
+enlargeVariables(VariableScope *scope, int needed)
 {
 	/* total number of variables required now */
-	needed += variables->nvars;
+	needed += scope->nvars;
 
-	if (variables->max_vars < needed)
+	if (scope->max_vars < needed)
 	{
-		variables->max_vars = needed + VARIABLES_ALLOC_MARGIN;
-		variables->vars = (Variable *)
-			pg_realloc_array(variables->vars, Variable, variables->max_vars);
+		scope->max_vars = needed + VARIABLES_ALLOC_MARGIN;
+		scope->vars = (Variable *)
+			pg_realloc_array(scope->vars, Variable, scope->max_vars);
 	}
 }
 
@@ -305,10 +458,11 @@ enlargeVariables(Variables *variables, int needed)
  * Caller is expected to assign a value to the variable.
  * Returns NULL on failure (bad name).
  */
-static Variable *
-lookupCreateVariable(Variables *variables, const char *context, char *name)
+Variable *
+lookupCreateVariable(Variables *variables, const char *context, const char *name)
 {
 	Variable   *var;
+	VariableScope *current = getCurrentScope(variables);
 
 	var = lookupVariable(variables, name);
 	if (var == NULL)
@@ -324,17 +478,18 @@ lookupCreateVariable(Variables *variables, const char *context, char *name)
 		}
 
 		/* Create variable at the end of the array */
-		enlargeVariables(variables, 1);
+		enlargeVariables(current, 1);
 
-		var = &(variables->vars[variables->nvars]);
+		var = &(current->vars[current->nvars]);
 
 		var->name = pg_strdup(name);
 		var->svalue = NULL;
+		var->value.type = PGBT_NO_VALUE;
 		/* caller is expected to initialize remaining fields */
 
-		variables->nvars++;
+		current->nvars++;
 		/* we don't re-sort the array till we have to */
-		variables->vars_sorted = false;
+		current->vars_sorted = false;
 	}
 
 	return var;
@@ -343,7 +498,7 @@ lookupCreateVariable(Variables *variables, const char *context, char *name)
 /* Assign a string value to a variable, creating it if need be */
 /* Returns false on failure (bad name) */
 bool
-putVariable(Variables *variables, const char *context, char *name,
+putVariable(Variables *variables, const char *context, const char *name,
 			const char *value)
 {
 	Variable   *var;
@@ -366,7 +521,7 @@ putVariable(Variables *variables, const char *context, char *name,
 /* Assign a value to a variable, creating it if need be */
 /* Returns false on failure (bad name) */
 bool
-putVariableValue(Variables *variables, const char *context, char *name,
+putVariableValue(Variables *variables, const char *context, const char *name,
 				 const PgBenchValue *value)
 {
 	Variable   *var;
@@ -385,13 +540,71 @@ putVariableValue(Variables *variables, const char *context, char *name,
 /* Assign an integer value to a variable, creating it if need be */
 /* Returns false on failure (bad name) */
 bool
-putVariableInt(Variables *variables, const char *context, char *name,
+putVariableInt(Variables *variables, const char *context, const char *name,
 			   int64 value)
 {
 	PgBenchValue val;
 
 	setIntValue(&val, value);
 	return putVariableValue(variables, context, name, &val);
+}
+
+/*
+ * Scoped put: if local_only is true, variable is bound to the current
+ * innermost scope frame, shadowing outer frames.
+ */
+bool
+var_put_value(Variables *variables, const char *name, const PgBenchValue *val, bool local_only)
+{
+	VariableScope *current = getCurrentScope(variables);
+	Variable   *var;
+
+	if (local_only)
+	{
+		var = lookupVariableInScope(current, name);
+		if (var == NULL)
+		{
+			if (!valid_variable_name(name))
+			{
+				pg_log_error("invalid variable name: \"%s\"", name);
+				return false;
+			}
+			enlargeVariables(current, 1);
+			var = &(current->vars[current->nvars]);
+			var->name = pg_strdup(name);
+			var->svalue = NULL;
+			var->value.type = PGBT_NO_VALUE;
+			current->nvars++;
+			current->vars_sorted = false;
+		}
+		free(var->svalue);
+		var->svalue = NULL;
+		var->value = *val;
+		return true;
+	}
+	else
+	{
+		return putVariableValue(variables, "variable", name, val);
+	}
+}
+
+/*
+ * Scoped get: lookup variable across scopes and ensure its value is converted.
+ */
+bool
+var_get_value(Variables *variables, const char *name, PgBenchValue *val)
+{
+	Variable   *var = lookupVariable(variables, name);
+
+	if (var == NULL)
+		return false;
+
+	if (!makeVariableValue(var))
+		return false;
+
+	if (val != NULL)
+		*val = var->value;
+	return true;
 }
 
 /*
@@ -430,7 +643,7 @@ parseVariable(const char *sql, int *eaten)
 }
 
 char *
-replaceVariable(char **sql, char *param, int len, char *value)
+replaceVariable(char **sql, char *param, int len, const char *value)
 {
 	int			valueln = strlen(value);
 
@@ -485,8 +698,8 @@ assignVariables(Variables *variables, char *sql)
 	return sql;
 }
 
-static char *
-valueTypeName(PgBenchValue *pval)
+const char *
+valueTypeName(const PgBenchValue *pval)
 {
 	if (pval->type == PGBT_NO_VALUE)
 		return "none";
@@ -508,7 +721,7 @@ valueTypeName(PgBenchValue *pval)
 
 /* get a value as a boolean, or tell if there is a problem */
 bool
-coerceToBool(PgBenchValue *pval, bool *bval)
+coerceToBool(const PgBenchValue *pval, bool *bval)
 {
 	if (pval->type == PGBT_BOOLEAN)
 	{
@@ -528,7 +741,7 @@ coerceToBool(PgBenchValue *pval, bool *bval)
  * Non zero numerical values are true, zero and NULL are false.
  */
 bool
-valueTruth(PgBenchValue *pval)
+valueTruth(const PgBenchValue *pval)
 {
 	switch (pval->type)
 	{
@@ -549,7 +762,7 @@ valueTruth(PgBenchValue *pval)
 
 /* get a value as an int, tell if there is a problem */
 bool
-coerceToInt(PgBenchValue *pval, int64 *ival)
+coerceToInt(const PgBenchValue *pval, int64 *ival)
 {
 	if (pval->type == PGBT_INT)
 	{
@@ -577,7 +790,7 @@ coerceToInt(PgBenchValue *pval, int64 *ival)
 
 /* get a value as a double, or tell if there is a problem */
 bool
-coerceToDouble(PgBenchValue *pval, double *dval)
+coerceToDouble(const PgBenchValue *pval, double *dval)
 {
 	if (pval->type == PGBT_DOUBLE)
 	{
