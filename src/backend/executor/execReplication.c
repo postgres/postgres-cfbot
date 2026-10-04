@@ -876,7 +876,7 @@ CheckAndReportConflict(ResultRelInfo *resultRelInfo, EState *estate,
 	if (conflicttuples)
 		ReportApplyConflict(estate, resultRelInfo, ERROR,
 							list_length(conflicttuples) > 1 ? CT_MULTIPLE_UNIQUE_CONFLICTS : type,
-							searchslot, remoteslot, conflicttuples);
+							NULL, searchslot, remoteslot, conflicttuples);
 }
 
 /*
