@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * poller.h
- *	  Socket set polling abstraction for pgbench
+ *		Socket multiplexing and event poller abstraction for pgbench
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -10,52 +10,37 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifndef POLLER_H
-#define POLLER_H
 
-/* For testing, PGBENCH_USE_SELECT can be defined to force use of that code */
-#if defined(HAVE_PPOLL) && !defined(PGBENCH_USE_SELECT)
-#define POLL_USING_PPOLL
-#ifdef HAVE_POLL_H
-#include <poll.h>
-#endif
-#else							/* no ppoll(), so use select() */
-#define POLL_USING_SELECT
-#include <sys/select.h>
-#endif
+#ifndef PGBENCH_POLLER_H
+#define PGBENCH_POLLER_H
 
 /*
- * Multi-platform socket set implementations
+ * Opaque socket set / poller handle
  */
+typedef struct socket_set socket_set;
+typedef struct socket_set PgBenchPoller;
 
-#ifdef POLL_USING_PPOLL
-#define SOCKET_WAIT_METHOD "ppoll"
-
-typedef struct socket_set
-{
-	int			maxfds;			/* allocated length of pollfds[] array */
-	int			curfds;			/* number currently in use */
-	struct pollfd pollfds[FLEXIBLE_ARRAY_MEMBER];
-} socket_set;
-
-#endif							/* POLL_USING_PPOLL */
-
-#ifdef POLL_USING_SELECT
-#define SOCKET_WAIT_METHOD "select"
-
-typedef struct socket_set
-{
-	int			maxfd;			/* largest FD currently set in fds */
-	fd_set		fds;
-} socket_set;
-
-#endif							/* POLL_USING_SELECT */
-
+/*
+ * Lifecycle & polling operations
+ */
 extern socket_set *alloc_socket_set(int count);
 extern void free_socket_set(socket_set *sa);
 extern void clear_socket_set(socket_set *sa);
 extern void add_socket_to_set(socket_set *sa, int fd, int idx);
-extern int	wait_on_socket_set(socket_set *sa, int64 usecs);
+extern int wait_on_socket_set(socket_set *sa, int64 usecs);
 extern bool socket_has_input(socket_set *sa, int fd, int idx);
+extern const char *socket_wait_method_name(void);
 
-#endif							/* POLLER_H */
+#define SOCKET_WAIT_METHOD (socket_wait_method_name())
+
+/*
+ * Object-style aliases for PgBenchPoller
+ */
+#define poller_create(max_sockets) alloc_socket_set(max_sockets)
+#define poller_destroy(p) free_socket_set(p)
+#define poller_clear(p) clear_socket_set(p)
+#define poller_add(p, fd, idx) add_socket_to_set(p, fd, idx)
+#define poller_wait(p, usecs) wait_on_socket_set(p, usecs)
+#define poller_has_input(p, fd, idx) socket_has_input(p, fd, idx)
+
+#endif							/* PGBENCH_POLLER_H */
