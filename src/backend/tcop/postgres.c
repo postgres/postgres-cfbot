@@ -4638,7 +4638,9 @@ PostgresMain(const char *dbname, const char *username)
 		 * need to be able to start and abort transactions while having a slot
 		 * acquired. But we never need to hold them across top level errors,
 		 * so releasing here is fine. There also is a before_shmem_exit()
-		 * callback ensuring correct cleanup on FATAL errors.
+		 * callback for FATAL errors, and AtEOSubXact_ReplicationSlot() for an
+		 * error caught in a subtransaction. The latter only releases the slot
+		 * and, unlike here, does not drop the session's temporary slots.
 		 */
 		if (MyReplicationSlot != NULL)
 			ReplicationSlotRelease();
