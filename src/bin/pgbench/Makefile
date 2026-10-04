@@ -11,6 +11,7 @@ OBJS = \
 	$(WIN32RES) \
 	exprparse.o \
 	exprscan.o \
+	poller.o \
 	stats.o \
 	variable.o \
 	pgbench.o
