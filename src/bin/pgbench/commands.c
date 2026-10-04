@@ -23,11 +23,13 @@
 #include "stats.h"
 #include "variable.h"
 
+#define SHELL_COMMAND_SIZE	256 /* maximum size allowed for shell command */
+
 /*
  * Run a shell command. The result is assigned to the variable if not NULL.
  * Return true if succeeded, or false on error.
  */
-static bool
+bool
 runShellCommand(Variables *variables, char *variable, char **argv, int argc)
 {
 	char		command[SHELL_COMMAND_SIZE];
@@ -162,7 +164,7 @@ commandError(CState *st, const char *message)
  * Allocate space for CState->prepared: we need one boolean for each command
  * of each script.
  */
-static void
+void
 allocCStatePrepared(CState *st)
 {
 	Assert(st->prepared == NULL);
@@ -215,7 +217,7 @@ prepareCommand(CState *st, int command_num)
  * This sets the ->prepared flag for each relevant command as well as the
  * \startpipeline itself, but doesn't move the st->command counter.
  */
-static void
+void
 prepareCommandsInPipeline(CState *st)
 {
 	int			j;
@@ -251,7 +253,7 @@ prepareCommandsInPipeline(CState *st)
  * Parse the argument to a \sleep command, and return the requested amount
  * of delay, in microseconds.  Returns true on success, false on error.
  */
-static bool
+bool
 evaluateSleep(Variables *variables, int argc, char **argv, int *usecs)
 {
 	char	   *var;
@@ -293,11 +295,235 @@ evaluateSleep(Variables *variables, int argc, char **argv, int *usecs)
 }
 
 /*
- * Subroutine for advanceConnectionState -- initiate or execute the current
- * meta command, and return the next state to set.
- *
- * *now is updated to the current time, unless the command is expected to
- * take no time to execute.
+ * Meta-command Handlers
+ */
+
+ConnectionStateEnum
+handle_cmd_sleep(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	int			usec;
+
+	/*
+	 * A \sleep doesn't execute anything, we just get the delay from the
+	 * argument, and enter the CSTATE_SLEEP state.  (The per-command
+	 * latency will be recorded in CSTATE_SLEEP state, not here, after the
+	 * delay has elapsed.)
+	 */
+	if (!evaluateSleep(&st->variables, cmd->argc, cmd->argv, &usec))
+	{
+		commandFailed(st, "sleep", "execution of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	pg_time_now_lazy(now);
+	st->sleep_until = (*now) + usec;
+	return CSTATE_SLEEP;
+}
+
+ConnectionStateEnum
+handle_cmd_set(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchExpr *expr = cmd->expr;
+	PgBenchValue result;
+
+	if (!evaluateExpr(st, expr, &result))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	if (!putVariableValue(&st->variables, cmd->argv[0], cmd->argv[1], &result))
+	{
+		commandFailed(st, "set", "assignment of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_if(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchExpr *expr = cmd->expr;
+	PgBenchValue result;
+	bool		cond;
+
+	if (!evaluateExpr(st, expr, &result))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	cond = valueTruth(&result);
+	conditional_stack_push(st->cstack, cond ? IFSTATE_TRUE : IFSTATE_FALSE);
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_elif(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchExpr *expr = cmd->expr;
+	PgBenchValue result;
+	bool		cond;
+
+	if (conditional_stack_peek(st->cstack) == IFSTATE_TRUE)
+	{
+		/* elif after executed block, skip eval and wait for endif. */
+		conditional_stack_poke(st->cstack, IFSTATE_IGNORED);
+		return CSTATE_END_COMMAND;
+	}
+
+	if (!evaluateExpr(st, expr, &result))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	cond = valueTruth(&result);
+	Assert(conditional_stack_peek(st->cstack) == IFSTATE_FALSE);
+	conditional_stack_poke(st->cstack, cond ? IFSTATE_TRUE : IFSTATE_FALSE);
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_else(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	switch (conditional_stack_peek(st->cstack))
+	{
+		case IFSTATE_TRUE:
+			conditional_stack_poke(st->cstack, IFSTATE_ELSE_FALSE);
+			break;
+		case IFSTATE_FALSE: /* inconsistent if active */
+		case IFSTATE_IGNORED:	/* inconsistent if active */
+		case IFSTATE_NONE:	/* else without if */
+		case IFSTATE_ELSE_TRUE: /* else after else */
+		case IFSTATE_ELSE_FALSE:	/* else after else */
+		default:
+			/* dead code if conditional check is ok */
+			Assert(false);
+	}
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_endif(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	Assert(!conditional_stack_empty(st->cstack));
+	conditional_stack_pop(st->cstack);
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_setshell(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (!runShellCommand(&st->variables, cmd->argv[1], cmd->argv + 2, cmd->argc - 2))
+	{
+		commandFailed(st, "setshell", "execution of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_shell(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (!runShellCommand(&st->variables, NULL, cmd->argv + 1, cmd->argc - 1))
+	{
+		commandFailed(st, "shell", "execution of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_startpipeline(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	/*
+	 * In pipeline mode, we use a workflow based on libpq pipeline functions.
+	 */
+	if (querymode == QUERY_SIMPLE)
+	{
+		commandFailed(st, "startpipeline", "cannot use pipeline mode with the simple query protocol");
+		return CSTATE_ABORTED;
+	}
+
+	/*
+	 * If we're in prepared-query mode, we need to prepare all the
+	 * commands that are inside the pipeline before we actually start the
+	 * pipeline itself.  This solves the problem that running BEGIN
+	 * ISOLATION LEVEL SERIALIZABLE in a pipeline would fail due to a
+	 * snapshot having been acquired by the prepare within the pipeline.
+	 */
+	if (querymode == QUERY_PREPARED)
+		prepareCommandsInPipeline(st);
+
+	if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
+	{
+		commandFailed(st, "startpipeline", "already in pipeline mode");
+		return CSTATE_ABORTED;
+	}
+	if (PQenterPipelineMode(st->con) == 0)
+	{
+		commandFailed(st, "startpipeline", "failed to enter pipeline mode");
+		return CSTATE_ABORTED;
+	}
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_syncpipeline(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
+	{
+		commandFailed(st, "syncpipeline", "not in pipeline mode");
+		return CSTATE_ABORTED;
+	}
+	if (PQsendPipelineSync(st->con) == 0)
+	{
+		commandFailed(st, "syncpipeline", "failed to send a pipeline sync");
+		return CSTATE_ABORTED;
+	}
+	st->num_syncs++;
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_endpipeline(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
+	{
+		commandFailed(st, "endpipeline", "not in pipeline mode");
+		return CSTATE_ABORTED;
+	}
+	if (!PQpipelineSync(st->con))
+	{
+		commandFailed(st, "endpipeline", "failed to send a pipeline sync");
+		return CSTATE_ABORTED;
+	}
+	st->num_syncs++;
+	/* Now wait for the PGRES_PIPELINE_SYNC and exit pipeline mode there */
+	/* collect pending results before getting out of pipeline mode */
+	return CSTATE_WAIT_RESULT;
+}
+
+/* Pluggable meta-command dispatch table */
+static const CommandDescriptor command_handlers[] = {
+	{"set", META_SET, handle_cmd_set},
+	{"setshell", META_SETSHELL, handle_cmd_setshell},
+	{"shell", META_SHELL, handle_cmd_shell},
+	{"sleep", META_SLEEP, handle_cmd_sleep},
+	{"if", META_IF, handle_cmd_if},
+	{"elif", META_ELIF, handle_cmd_elif},
+	{"else", META_ELSE, handle_cmd_else},
+	{"endif", META_ENDIF, handle_cmd_endif},
+	{"startpipeline", META_STARTPIPELINE, handle_cmd_startpipeline},
+	{"syncpipeline", META_SYNCPIPELINE, handle_cmd_syncpipeline},
+	{"endpipeline", META_ENDPIPELINE, handle_cmd_endpipeline},
+	{NULL, META_NONE, NULL}
+};
+
+/*
+ * Execute a meta command and return the next connection state.
  */
 ConnectionStateEnum
 executeMetaCommand(CState *st, pg_time_usec_t *now)
@@ -305,6 +531,8 @@ executeMetaCommand(CState *st, pg_time_usec_t *now)
 	Command    *command = sql_script[st->use_file].commands[st->command];
 	int			argc;
 	char	  **argv;
+	int			i;
+	const CommandDescriptor *desc;
 
 	Assert(command != NULL && command->type == META_COMMAND);
 
@@ -318,7 +546,7 @@ executeMetaCommand(CState *st, pg_time_usec_t *now)
 		initPQExpBuffer(&buf);
 
 		printfPQExpBuffer(&buf, "client %d executing \\%s", st->id, argv[0]);
-		for (int i = 1; i < argc; i++)
+		for (i = 1; i < argc; i++)
 			appendPQExpBuffer(&buf, " %s", argv[i]);
 
 		pg_log_debug("%s", buf.data);
@@ -326,191 +554,181 @@ executeMetaCommand(CState *st, pg_time_usec_t *now)
 		termPQExpBuffer(&buf);
 	}
 
-	if (command->meta == META_SLEEP)
+	for (desc = command_handlers; desc->name != NULL; desc++)
 	{
-		int			usec;
+		if (desc->meta == command->meta)
+		{
+			ConnectionStateEnum next_state = desc->handler(st, command, now);
+
+			if (next_state == CSTATE_END_COMMAND)
+				*now = 0;
+
+			return next_state;
+		}
+	}
+
+	pg_log_error("client %d: unknown meta-command %d", st->id, (int) command->meta);
+	return CSTATE_ABORTED;
+}
+
+/*
+ * Skip commands until an active branch or matching endif is reached.
+ * Implements the skipping logic for CSTATE_SKIP_COMMAND.
+ */
+void
+skipConditionalCommands(CState *st)
+{
+	Command    *command;
+
+	Assert(!conditional_active(st->cstack));
+
+	while (true)
+	{
+		command = sql_script[st->use_file].commands[st->command];
+
+		/* cannot reach end of script in that state */
+		Assert(command != NULL);
 
 		/*
-		 * A \sleep doesn't execute anything, we just get the delay from the
-		 * argument, and enter the CSTATE_SLEEP state.  (The per-command
-		 * latency will be recorded in CSTATE_SLEEP state, not here, after the
-		 * delay has elapsed.)
+		 * if this is conditional related, update conditional
+		 * state
 		 */
-		if (!evaluateSleep(&st->variables, argc, argv, &usec))
+		if (command->type == META_COMMAND &&
+			(command->meta == META_IF ||
+			 command->meta == META_ELIF ||
+			 command->meta == META_ELSE ||
+			 command->meta == META_ENDIF))
 		{
-			commandFailed(st, "sleep", "execution of meta-command failed");
-			return CSTATE_ABORTED;
+			switch (conditional_stack_peek(st->cstack))
+			{
+				case IFSTATE_FALSE:
+					if (command->meta == META_IF)
+					{
+						/* nested if in skipped branch - ignore */
+						conditional_stack_push(st->cstack, IFSTATE_IGNORED);
+						st->command++;
+					}
+					else if (command->meta == META_ELIF)
+					{
+						/* we must evaluate the condition */
+						st->state = CSTATE_START_COMMAND;
+					}
+					else if (command->meta == META_ELSE)
+					{
+						/* we must execute next command */
+						conditional_stack_poke(st->cstack, IFSTATE_ELSE_TRUE);
+						st->state = CSTATE_START_COMMAND;
+						st->command++;
+					}
+					else if (command->meta == META_ENDIF)
+					{
+						Assert(!conditional_stack_empty(st->cstack));
+						conditional_stack_pop(st->cstack);
+						if (conditional_active(st->cstack))
+							st->state = CSTATE_START_COMMAND;
+						/* else state remains CSTATE_SKIP_COMMAND */
+						st->command++;
+					}
+					break;
+
+				case IFSTATE_IGNORED:
+				case IFSTATE_ELSE_FALSE:
+					if (command->meta == META_IF)
+						conditional_stack_push(st->cstack, IFSTATE_IGNORED);
+					else if (command->meta == META_ENDIF)
+					{
+						Assert(!conditional_stack_empty(st->cstack));
+						conditional_stack_pop(st->cstack);
+						if (conditional_active(st->cstack))
+							st->state = CSTATE_START_COMMAND;
+					}
+					/* could detect "else" & "elif" after "else" */
+					st->command++;
+					break;
+
+				case IFSTATE_NONE:
+				case IFSTATE_TRUE:
+				case IFSTATE_ELSE_TRUE:
+				default:
+					/*
+					 * inconsistent if inactive, unreachable dead code
+					 */
+					Assert(false);
+			}
+		}
+		else
+		{
+			/* skip and consider next */
+			st->command++;
 		}
 
-		pg_time_now_lazy(now);
-		st->sleep_until = (*now) + usec;
-		return CSTATE_SLEEP;
+		if (st->state != CSTATE_SKIP_COMMAND)
+			/* out of quick skip command loop */
+			break;
 	}
-	else if (command->meta == META_SET)
+}
+
+/*
+ * Process \gset and \aset variable storage from query result.
+ * Returns true if successful, false on error.
+ */
+bool
+processGSetResult(CState *st, Command *command, PGresult *res, bool is_last, int qrynum)
+{
+	MetaCommand meta = command->meta;
+	char	   *varprefix = command->varprefix;
+	int			ntuples = PQntuples(res);
+	const char *context = (meta == META_ASET) ? "aset" : "gset";
+	int			fld;
+
+	if (meta == META_GSET && ntuples != 1)
 	{
-		PgBenchExpr *expr = command->expr;
-		PgBenchValue result;
-
-		if (!evaluateExpr(st, expr, &result))
-		{
-			commandFailed(st, argv[0], "evaluation of meta-command failed");
-			return CSTATE_ABORTED;
-		}
-
-		if (!putVariableValue(&st->variables, argv[0], argv[1], &result))
-		{
-			commandFailed(st, "set", "assignment of meta-command failed");
-			return CSTATE_ABORTED;
-		}
+		pg_log_error("client %d script %d command %d query %d: expected one row, got %d",
+					 st->id, st->use_file, st->command, qrynum, ntuples);
+		st->estatus = ESTATUS_META_COMMAND_ERROR;
+		return false;
 	}
-	else if (command->meta == META_IF)
+	else if (meta == META_ASET && ntuples <= 0)
 	{
-		/* backslash commands with an expression to evaluate */
-		PgBenchExpr *expr = command->expr;
-		PgBenchValue result;
-		bool		cond;
-
-		if (!evaluateExpr(st, expr, &result))
-		{
-			commandFailed(st, argv[0], "evaluation of meta-command failed");
-			return CSTATE_ABORTED;
-		}
-
-		cond = valueTruth(&result);
-		conditional_stack_push(st->cstack, cond ? IFSTATE_TRUE : IFSTATE_FALSE);
+		/* skip empty result under \aset */
+		return true;
 	}
-	else if (command->meta == META_ELIF)
+
+	/* store results into variables */
+	for (fld = 0; fld < PQnfields(res); fld++)
 	{
-		/* backslash commands with an expression to evaluate */
-		PgBenchExpr *expr = command->expr;
-		PgBenchValue result;
-		bool		cond;
+		char	   *varname = PQfname(res, fld);
+		bool		ok;
 
-		if (conditional_stack_peek(st->cstack) == IFSTATE_TRUE)
-		{
-			/* elif after executed block, skip eval and wait for endif. */
-			conditional_stack_poke(st->cstack, IFSTATE_IGNORED);
-			return CSTATE_END_COMMAND;
-		}
+		if (*varprefix != '\0')
+			varname = psprintf("%s%s", varprefix, varname);
 
-		if (!evaluateExpr(st, expr, &result))
+		/* store last row result */
+		if (PQgetisnull(res, ntuples - 1, fld))
 		{
-			commandFailed(st, argv[0], "evaluation of meta-command failed");
-			return CSTATE_ABORTED;
-		}
+			PgBenchValue nullval;
 
-		cond = valueTruth(&result);
-		Assert(conditional_stack_peek(st->cstack) == IFSTATE_FALSE);
-		conditional_stack_poke(st->cstack, cond ? IFSTATE_TRUE : IFSTATE_FALSE);
-	}
-	else if (command->meta == META_ELSE)
-	{
-		switch (conditional_stack_peek(st->cstack))
-		{
-			case IFSTATE_TRUE:
-				conditional_stack_poke(st->cstack, IFSTATE_ELSE_FALSE);
-				break;
-			case IFSTATE_FALSE: /* inconsistent if active */
-			case IFSTATE_IGNORED:	/* inconsistent if active */
-			case IFSTATE_NONE:	/* else without if */
-			case IFSTATE_ELSE_TRUE: /* else after else */
-			case IFSTATE_ELSE_FALSE:	/* else after else */
-			default:
-				/* dead code if conditional check is ok */
-				Assert(false);
+			setNullValue(&nullval);
+			ok = putVariableValue(&st->variables, context,
+								  varname, &nullval);
 		}
-	}
-	else if (command->meta == META_ENDIF)
-	{
-		Assert(!conditional_stack_empty(st->cstack));
-		conditional_stack_pop(st->cstack);
-	}
-	else if (command->meta == META_SETSHELL)
-	{
-		if (!runShellCommand(&st->variables, argv[1], argv + 2, argc - 2))
+		else
+			ok = putVariable(&st->variables, context, varname,
+							 PQgetvalue(res, ntuples - 1, fld));
+
+		if (!ok)
 		{
-			commandFailed(st, "setshell", "execution of meta-command failed");
-			return CSTATE_ABORTED;
-		}
-	}
-	else if (command->meta == META_SHELL)
-	{
-		if (!runShellCommand(&st->variables, NULL, argv + 1, argc - 1))
-		{
-			commandFailed(st, "shell", "execution of meta-command failed");
-			return CSTATE_ABORTED;
-		}
-	}
-	else if (command->meta == META_STARTPIPELINE)
-	{
-		/*
-		 * In pipeline mode, we use a workflow based on libpq pipeline
-		 * functions.
-		 */
-		if (querymode == QUERY_SIMPLE)
-		{
-			commandFailed(st, "startpipeline", "cannot use pipeline mode with the simple query protocol");
-			return CSTATE_ABORTED;
+			pg_log_error("client %d script %d command %d query %d: error storing into variable %s",
+						 st->id, st->use_file, st->command, qrynum, varname);
+			st->estatus = ESTATUS_META_COMMAND_ERROR;
+			if (*varprefix != '\0')
+				pfree(varname);
+			return false;
 		}
 
-		/*
-		 * If we're in prepared-query mode, we need to prepare all the
-		 * commands that are inside the pipeline before we actually start the
-		 * pipeline itself.  This solves the problem that running BEGIN
-		 * ISOLATION LEVEL SERIALIZABLE in a pipeline would fail due to a
-		 * snapshot having been acquired by the prepare within the pipeline.
-		 */
-		if (querymode == QUERY_PREPARED)
-			prepareCommandsInPipeline(st);
-
-		if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
-		{
-			commandFailed(st, "startpipeline", "already in pipeline mode");
-			return CSTATE_ABORTED;
-		}
-		if (PQenterPipelineMode(st->con) == 0)
-		{
-			commandFailed(st, "startpipeline", "failed to enter pipeline mode");
-			return CSTATE_ABORTED;
-		}
-	}
-	else if (command->meta == META_SYNCPIPELINE)
-	{
-		if (PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
-		{
-			commandFailed(st, "syncpipeline", "not in pipeline mode");
-			return CSTATE_ABORTED;
-		}
-		if (PQsendPipelineSync(st->con) == 0)
-		{
-			commandFailed(st, "syncpipeline", "failed to send a pipeline sync");
-			return CSTATE_ABORTED;
-		}
-		st->num_syncs++;
-	}
-	else if (command->meta == META_ENDPIPELINE)
-	{
-		if (PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
-		{
-			commandFailed(st, "endpipeline", "not in pipeline mode");
-			return CSTATE_ABORTED;
-		}
-		if (!PQpipelineSync(st->con))
-		{
-			commandFailed(st, "endpipeline", "failed to send a pipeline sync");
-			return CSTATE_ABORTED;
-		}
-		st->num_syncs++;
-		/* Now wait for the PGRES_PIPELINE_SYNC and exit pipeline mode there */
-		/* collect pending results before getting out of pipeline mode */
-		return CSTATE_WAIT_RESULT;
+		if (*varprefix != '\0')
+			pfree(varname);
 	}
 
-	/*
-	 * executing the expression or shell command might have taken a
-	 * non-negligible amount of time, so reset 'now'
-	 */
-	*now = 0;
-
-	return CSTATE_END_COMMAND;
+	return true;
 }
