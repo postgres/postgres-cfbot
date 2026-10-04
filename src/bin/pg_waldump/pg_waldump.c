@@ -236,7 +236,7 @@ search_directory(const char *directory, const char *fname, int *WalSegSz)
 	/* set WalSegSz if file is successfully opened */
 	if (fd >= 0)
 	{
-		PGAlignedXLogBlock buf;
+		PGIOAlignedXLogBlock buf;
 		ssize_t		r;
 
 		r = read(fd, buf.data, XLOG_BLCKSZ);
