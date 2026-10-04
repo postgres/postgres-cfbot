@@ -150,17 +150,15 @@ pg_time_now_lazy(pg_time_usec_t *now)
 
 #define PG_TIME_GET_DOUBLE(t) (0.000001 * (t))
 
-extern double throttle_delay;
-extern bool failures_detailed;
-
 extern void initSimpleStats(SimpleStats *ss);
 extern void addToSimpleStats(SimpleStats *ss, double val);
-extern void mergeSimpleStats(SimpleStats *acc, SimpleStats *ss);
+extern void mergeSimpleStats(SimpleStats *acc, const SimpleStats *ss);
 extern void initStats(StatsData *sd, pg_time_usec_t start);
 extern void accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
-					   EStatus estatus, int64 tries);
+					   EStatus estatus, int64 tries, bool has_throttle_delay);
+extern void mergeStats(StatsData *acc, const StatsData *src);
 extern int64 getFailures(const StatsData *stats);
-extern const char *getResultString(bool tx_skipped, EStatus estatus);
-extern void printSimpleStats(const char *prefix, SimpleStats *ss);
+extern const char *getResultString(bool tx_skipped, EStatus estatus, bool failures_detailed);
+extern void printSimpleStats(const char *prefix, const SimpleStats *ss);
 
 #endif							/* STATS_H */
