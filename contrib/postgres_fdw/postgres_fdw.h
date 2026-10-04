@@ -73,7 +73,7 @@ typedef struct PgFdwRelationInfo
 	 */
 	double		retrieved_rows;
 	Cost		rel_startup_cost;
-	Cost		rel_total_cost;
+	Cost		rel_run_cost;
 
 	/* Options extracted from catalogs. */
 	bool		use_remote_estimate;
