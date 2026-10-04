@@ -746,7 +746,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 		{
 				/* Select transaction (script) to run.  */
 			case CSTATE_CHOOSE_SCRIPT:
-				st->use_file = chooseScript(thread);
+				st->use_file = chooseScript(&thread->ts_choose_rs);
 				Assert(conditional_stack_empty(st->cstack));
 
 				/* reset transaction variables to default values */

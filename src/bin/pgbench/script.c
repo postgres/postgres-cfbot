@@ -1141,7 +1141,7 @@ getMetaCommand(const char *cmd)
 
 /* return a script number with a weighted choice. */
 int
-chooseScript(TState *thread)
+chooseScript(pg_prng_state *random_state)
 {
 	int			i = 0;
 	int64		w;
@@ -1149,7 +1149,7 @@ chooseScript(TState *thread)
 	if (num_scripts == 1)
 		return 0;
 
-	w = getrand(&thread->ts_choose_rs, 0, total_weight - 1);
+	w = getrand(random_state, 0, total_weight - 1);
 	do
 	{
 		w -= sql_script[i++].weight;
