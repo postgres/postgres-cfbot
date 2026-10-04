@@ -14,7 +14,6 @@
 #define SCRIPT_H
 
 #include "common/pg_prng.h"
-#include "engine.h"
 #include "pgbench.h"
 #include "pqexpbuffer.h"
 #include "stats.h"
@@ -159,7 +158,7 @@ typedef struct BuiltinScript
 } BuiltinScript;
 
 extern bool evaluateExpr(CState *st, PgBenchExpr *expr, PgBenchValue *retval);
-extern int	chooseScript(TState *thread);
+extern int	chooseScript(pg_prng_state *random_state);
 
 extern void postprocess_sql_command(Command *my_command);
 extern void process_file(const char *filename, int weight);
