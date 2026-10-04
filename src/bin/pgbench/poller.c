@@ -19,6 +19,17 @@
 #include <signal.h>
 #include <sys/time.h>
 
+/* For testing, PGBENCH_USE_SELECT can be defined to force use of that code */
+#if defined(HAVE_PPOLL) && !defined(PGBENCH_USE_SELECT)
+#define POLL_USING_PPOLL
+#ifdef HAVE_POLL_H
+#include <poll.h>
+#endif
+#else							/* no ppoll(), so use select() */
+#define POLL_USING_SELECT
+#include <sys/select.h>
+#endif
+
 #include "common/logging.h"
 #include "poller.h"
 
@@ -58,6 +69,21 @@
  */
 
 #ifdef POLL_USING_PPOLL
+
+#define SOCKET_WAIT_METHOD_NAME "ppoll"
+
+struct socket_set
+{
+	int			maxfds;			/* allocated length of pollfds[] array */
+	int			curfds;			/* number currently in use */
+	struct pollfd pollfds[FLEXIBLE_ARRAY_MEMBER];
+};
+
+const char *
+socket_wait_method_name(void)
+{
+	return SOCKET_WAIT_METHOD_NAME;
+}
 
 socket_set *
 alloc_socket_set(int count)
@@ -131,6 +157,20 @@ socket_has_input(socket_set *sa, int fd, int idx)
 #endif							/* POLL_USING_PPOLL */
 
 #ifdef POLL_USING_SELECT
+
+#define SOCKET_WAIT_METHOD_NAME "select"
+
+struct socket_set
+{
+	int			maxfd;			/* largest FD currently set in fds */
+	fd_set		fds;
+};
+
+const char *
+socket_wait_method_name(void)
+{
+	return SOCKET_WAIT_METHOD_NAME;
+}
 
 socket_set *
 alloc_socket_set(int count)
