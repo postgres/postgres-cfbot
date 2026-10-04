@@ -2,6 +2,7 @@
 
 pgbench_sources = files(
   'pgbench.c',
+  'commands.c',
   'poller.c',
   'script.c',
   'stats.c',
