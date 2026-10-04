@@ -11,6 +11,8 @@
 #ifndef PGBENCH_H
 #define PGBENCH_H
 
+#include <signal.h>
+
 #include "fe_utils/psqlscan.h"
 #include "common/pg_prng.h"
 #include "fe_utils/conditional.h"
@@ -365,6 +367,8 @@ typedef struct
 	StatsData	stats;
 	int64		latency_late;	/* count executed but late transactions */
 } TState;
+
+extern volatile sig_atomic_t timer_exceeded;
 
 extern int	expr_yyparse(PgBenchExpr **expr_parse_result_p, yyscan_t yyscanner);
 extern int	expr_yylex(union YYSTYPE *yylval_param, yyscan_t yyscanner);
