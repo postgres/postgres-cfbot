@@ -180,6 +180,28 @@ select x or y or z, x or z
 from booleans
 $$);
 
+-- OR-clause => OR-clause tries the item at the same position first; check
+-- arms that correspond, arms that don't, and lists of different lengths
+select * from test_predtest($$
+select x or z, (x and y) or (z and w)
+from booleans
+$$);
+
+select * from test_predtest($$
+select z or x, (x and y) or (z and w)
+from booleans
+$$);
+
+select * from test_predtest($$
+select x or z, (x and y) or (z and w) or w
+from booleans
+$$);
+
+select * from test_predtest($$
+select w or x or z, (x and y) or z
+from booleans
+$$);
+
 select * from test_predtest($$
 select x and z, x and y and z
 from booleans
