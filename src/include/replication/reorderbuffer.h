@@ -462,6 +462,14 @@ typedef struct ReorderBufferTXN
 	Size		total_size;
 
 	/*
+	 * Tracks the snapshot generation at which this transaction last received
+	 * a catalog snapshot via lazy distribution.  Compared against
+	 * SnapBuild.snapshot_generation to decide if a new snapshot is needed
+	 * before decoding a data change.
+	 */
+	uint64		last_snapshot_generation;
+
+	/*
 	 * Private data pointer of the output plugin.
 	 */
 	void	   *output_plugin_private;
@@ -742,6 +750,10 @@ extern void ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunning
 extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 extern void ReorderBufferInvalidate(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 
+extern ReorderBufferTXN *ReorderBufferTXNByXid(ReorderBuffer *rb,
+											   TransactionId xid, bool create,
+											   bool *is_new, XLogRecPtr lsn,
+											   bool create_as_top);
 extern void ReorderBufferSetBaseSnapshot(ReorderBuffer *rb, TransactionId xid,
 										 XLogRecPtr lsn, Snapshot snap);
 extern void ReorderBufferAddSnapshot(ReorderBuffer *rb, TransactionId xid,
