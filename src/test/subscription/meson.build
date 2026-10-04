@@ -48,6 +48,7 @@ tests += {
       't/036_sequences.pl',
       't/037_except.pl',
       't/038_walsnd_shutdown_timeout.pl',
+      't/039_concurrent_dml_retry.pl',
       't/100_bugs.pl',
     ],
   },
