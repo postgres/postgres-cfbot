@@ -12,6 +12,7 @@ OBJS = \
 	exprparse.o \
 	exprscan.o \
 	poller.o \
+	script.o \
 	stats.o \
 	variable.o \
 	pgbench.o
