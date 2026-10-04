@@ -22,6 +22,8 @@
 
 
 extern void SetMatViewPopulatedState(Relation relation, bool newstate);
+extern bool MatViewPopulatedValueIsValid(int64 value);
+extern bool RelationIsPopulated(Relation relation);
 
 extern ObjectAddress ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 										QueryCompletion *qc);
