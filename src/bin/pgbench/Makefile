@@ -12,6 +12,7 @@ OBJS = \
 	exprparse.o \
 	exprscan.o \
 	commands.o \
+	init.o \
 	poller.o \
 	script.o \
 	stats.o \

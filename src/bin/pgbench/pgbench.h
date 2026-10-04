@@ -368,7 +368,10 @@ typedef struct
 	int64		latency_late;	/* count executed but late transactions */
 } TState;
 
+extern bool use_quiet;
+extern int	progress;
 extern volatile sig_atomic_t timer_exceeded;
+extern PGconn *doConnect(void);
 
 extern int	expr_yyparse(PgBenchExpr **expr_parse_result_p, yyscan_t yyscanner);
 extern int	expr_yylex(union YYSTYPE *yylval_param, yyscan_t yyscanner);
