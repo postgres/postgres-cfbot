@@ -411,6 +411,17 @@ explain (costs off)
 select * from btree_bpchar where f1::bpchar like 'foo%';
 select * from btree_bpchar where f1::bpchar like 'foo%';
 
+-- Check that the two-argument form of regexp_like() has a planner support
+-- function attached, so it gets an index condition like the ~ operator.
+create temp table btree_regexp_like (f1 text collate "C");
+create index on btree_regexp_like(f1);
+set enable_seqscan to false;
+set enable_bitmapscan to false;
+explain (costs off)
+select * from btree_regexp_like where regexp_like(f1, '^item999');
+reset enable_seqscan;
+reset enable_bitmapscan;
+
 --
 -- Perform unique checking, with and without the use of deduplication
 --
