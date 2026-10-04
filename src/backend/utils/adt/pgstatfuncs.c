@@ -2098,6 +2098,7 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		pgstat_reset_of_kind(PGSTAT_KIND_LOCK);
 		XLogPrefetchResetStats();
 		pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
+		pgstat_reset_of_kind(PGSTAT_KIND_TABLESPACE);
 		pgstat_reset_of_kind(PGSTAT_KIND_WAL);
 
 		PG_RETURN_VOID();
@@ -2119,13 +2120,15 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		XLogPrefetchResetStats();
 	else if (strcmp(target, "slru") == 0)
 		pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
+	else if (strcmp(target, "tablespace") == 0)
+		pgstat_reset_of_kind(PGSTAT_KIND_TABLESPACE);
 	else if (strcmp(target, "wal") == 0)
 		pgstat_reset_of_kind(PGSTAT_KIND_WAL);
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unrecognized reset target: \"%s\"", target),
-				 errhint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"lock\", \"recovery_prefetch\", \"slru\", or \"wal\".")));
+				 errhint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"lock\", \"recovery_prefetch\", \"slru\", \"tablespace\", or \"wal\".")));
 
 	PG_RETURN_VOID();
 }
@@ -2491,6 +2494,80 @@ pg_stat_get_subscription_stats(PG_FUNCTION_ARGS)
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * Returns statistics for the given tablespace.  If no statistics have been
+ * collected yet, all-zero stats are returned.
+ */
+Datum
+pg_stat_get_tablespace(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_GET_TABLESPACE_COLS	12
+	Oid			spcoid = PG_GETARG_OID(0);
+	TupleDesc	tupdesc;
+	Datum		values[PG_STAT_GET_TABLESPACE_COLS] = {0};
+	bool		nulls[PG_STAT_GET_TABLESPACE_COLS] = {0};
+	PgStat_StatTabspaceEntry *tsentry;
+	PgStat_StatTabspaceEntry allzero;
+	int			i = 0;
+
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_TABLESPACE_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "blks_fetched",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "blks_hit",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "blk_read_time",
+					   FLOAT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "blk_write_time",
+					   FLOAT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "temp_files",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "temp_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "tup_returned",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "tup_fetched",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "tup_inserted",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "tup_updated",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 11, "tup_deleted",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 12, "stats_reset",
+					   TIMESTAMPTZOID, -1, 0);
+	TupleDescFinalize(tupdesc);
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	tsentry = pgstat_fetch_stat_tabspaceentry(spcoid);
+	if (!tsentry)
+	{
+		memset(&allzero, 0, sizeof(PgStat_StatTabspaceEntry));
+		tsentry = &allzero;
+	}
+
+	values[i++] = Int64GetDatum(tsentry->blocks_fetched);
+	values[i++] = Int64GetDatum(tsentry->blocks_hit);
+	values[i++] = Float8GetDatum(pg_stat_us_to_ms(tsentry->blk_read_time));
+	values[i++] = Float8GetDatum(pg_stat_us_to_ms(tsentry->blk_write_time));
+	values[i++] = Int64GetDatum(tsentry->temp_files);
+	values[i++] = Int64GetDatum(tsentry->temp_bytes);
+	values[i++] = Int64GetDatum(tsentry->tuples_returned);
+	values[i++] = Int64GetDatum(tsentry->tuples_fetched);
+	values[i++] = Int64GetDatum(tsentry->tuples_inserted);
+	values[i++] = Int64GetDatum(tsentry->tuples_updated);
+	values[i++] = Int64GetDatum(tsentry->tuples_deleted);
+
+	if (tsentry->stat_reset_timestamp == 0)
+		nulls[i] = true;
+	else
+		values[i] = TimestampTzGetDatum(tsentry->stat_reset_timestamp);
+
+	Assert(i + 1 == PG_STAT_GET_TABLESPACE_COLS);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+#undef PG_STAT_GET_TABLESPACE_COLS
 }
 
 /*
