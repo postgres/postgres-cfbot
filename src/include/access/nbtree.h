@@ -712,6 +712,9 @@ BTreeTupleGetMaxHeapTID(IndexTuple itup)
  *	To facilitate more efficient B-Tree skip scans, an operator class may
  *	choose to offer a sixth amproc procedure (BTSKIPSUPPORT_PROC).  For full
  *	details, see src/include/utils/skipsupport.h.
+ *
+ *	To accelerate searches within individual index pages, an operator class
+ *	may choose to offer a seventh amproc procedure (BTBINSEARCH_PROC).
  */
 
 #define BTORDER_PROC		1
@@ -720,7 +723,8 @@ BTreeTupleGetMaxHeapTID(IndexTuple itup)
 #define BTEQUALIMAGE_PROC	4
 #define BTOPTIONS_PROC		5
 #define BTSKIPSUPPORT_PROC	6
-#define BTNProcs			6
+#define BTBINSEARCH_PROC	7
+#define BTNProcs			7
 
 /*
  *	We need to be able to tell the difference between read and write
@@ -792,6 +796,39 @@ typedef BTStackData *BTStack;
  * flexible array member, though it's sized in a way that makes it possible to
  * use stack allocations.  See nbtree/README for full details.
  */
+struct BTScanInsertData;
+
+/*
+ * Optional callbacks installed by a BTBINSEARCH_PROC support function.
+ *
+ * compare_tuple has the same result semantics as _bt_compare().  It is never
+ * asked to compare the minus-infinity tuple at the start of an internal page.
+ * binary_search searches the half-open interval [low, high), using cmpval in
+ * the same way as _bt_binsrch().  When requested, stricthigh must be set to a
+ * bound known to compare strictly greater than the insertion scankey.
+ *
+ * A callback may return false without changing its output arguments, making
+ * nbtree repeat the operation using the generic comparator.
+ */
+typedef bool (*BTCompareTupleFunction) (Relation rel,
+										struct BTScanInsertData *key,
+										Page page, OffsetNumber offnum,
+										int32 *result);
+
+typedef bool (*BTBinSearchFunction) (Relation rel,
+									 struct BTScanInsertData *key,
+									 Page page, OffsetNumber low,
+									 OffsetNumber high, int32 cmpval,
+									 OffsetNumber *result,
+									 OffsetNumber *stricthigh);
+
+typedef struct BTBinSearchSupportData
+{
+	/* Support functions set either or both callbacks. */
+	BTCompareTupleFunction compare_tuple;
+	BTBinSearchFunction binary_search;
+}			BTBinSearchSupportData;
+
 typedef struct BTScanInsertData
 {
 	bool		heapkeyspace;
@@ -801,6 +838,8 @@ typedef struct BTScanInsertData
 	bool		backward;		/* backward index scan? */
 	ItemPointer scantid;		/* tiebreaker for scankeys */
 	int			keysz;			/* Size of scankeys array */
+	BTCompareTupleFunction compare_tuple;
+	BTBinSearchFunction binary_search;
 	ScanKeyData scankeys[INDEX_MAX_KEYS];	/* Must appear last */
 } BTScanInsertData;
 
@@ -1295,6 +1334,7 @@ extern Buffer _bt_get_endpoint(Relation rel, uint32 level, bool rightmost);
  * prototypes for functions in nbtutils.c
  */
 extern BTScanInsert _bt_mkscankey(Relation rel, IndexTuple itup);
+extern void _bt_setup_binsearch(Relation rel, BTScanInsert key);
 extern void _bt_killitems(IndexScanDesc scan);
 extern BTCycleId _bt_vacuum_cycleid(Relation rel);
 extern BTCycleId _bt_start_vacuum(Relation rel);
