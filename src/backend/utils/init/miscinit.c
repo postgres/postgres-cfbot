@@ -1250,13 +1250,13 @@ CreateLockFile(const char *filename, bool amPostmaster,
 					 errmsg("could not open lock file \"%s\": %m",
 							filename)));
 		}
-		pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_READ);
+		pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_CREATE_READ);
 		if ((len = read(fd, buffer, sizeof(buffer) - 1)) < 0)
 			ereport(FATAL,
 					(errcode_for_file_access(),
 					 errmsg("could not read lock file \"%s\": %m",
 							filename)));
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		close(fd);
 
 		if (len == 0)
@@ -1398,7 +1398,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 		strlcat(buffer, "\n", sizeof(buffer));
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_CREATE_WRITE);
 	if (write(fd, buffer, strlen(buffer)) != strlen(buffer))
 	{
 		int			save_errno = errno;
@@ -1411,9 +1411,9 @@ CreateLockFile(const char *filename, bool amPostmaster,
 				(errcode_for_file_access(),
 				 errmsg("could not write lock file \"%s\": %m", filename)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_CREATE_SYNC);
 	if (pg_fsync(fd) != 0)
 	{
 		int			save_errno = errno;
@@ -1425,7 +1425,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 				(errcode_for_file_access(),
 				 errmsg("could not write lock file \"%s\": %m", filename)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (close(fd) != 0)
 	{
 		int			save_errno = errno;
@@ -1539,9 +1539,9 @@ AddToDataDirLockFile(int target_line, const char *str)
 						DIRECTORY_LOCK_FILE)));
 		return;
 	}
-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_READ);
 	nread = read(fd, srcbuffer, sizeof(srcbuffer) - 1);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (nread < 0)
 	{
 		ereport(LOG,
@@ -1601,10 +1601,10 @@ AddToDataDirLockFile(int target_line, const char *str)
 	 */
 	len = strlen(destbuffer);
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_WRITE);
 	if (pg_pwrite(fd, destbuffer, len, 0) != len)
 	{
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
 			errno = ENOSPC;
@@ -1615,8 +1615,8 @@ AddToDataDirLockFile(int target_line, const char *str)
 		close(fd);
 		return;
 	}
-	pgstat_report_wait_end();
-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_SYNC);
+	pgstat_report_wait_end_timed();
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_SYNC);
 	if (pg_fsync(fd) != 0)
 	{
 		ereport(LOG,
@@ -1624,7 +1624,7 @@ AddToDataDirLockFile(int target_line, const char *str)
 				 errmsg("could not write to file \"%s\": %m",
 						DIRECTORY_LOCK_FILE)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (close(fd) != 0)
 	{
 		ereport(LOG,
@@ -1681,9 +1681,9 @@ RecheckDataDirLockFile(void)
 				return true;
 		}
 	}
-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_RECHECKDATADIR_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_RECHECKDATADIR_READ);
 	len = read(fd, buffer, sizeof(buffer) - 1);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (len < 0)
 	{
 		ereport(LOG,

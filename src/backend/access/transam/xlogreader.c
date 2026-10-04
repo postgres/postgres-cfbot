@@ -1617,7 +1617,7 @@ WALRead(XLogReaderState *state,
 		/* Measure I/O timing when reading segment */
 		io_start = pgstat_prepare_io_time(track_wal_io_timing);
 
-		pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
+		pgstat_report_wait_start_timed(WAIT_EVENT_WAL_READ);
 #endif
 
 		/* Reset errno first; eases reporting non-errno-affecting errors */
@@ -1625,7 +1625,7 @@ WALRead(XLogReaderState *state,
 		readbytes = pg_pread(state->seg.ws_file, p, segbytes, (pgoff_t) startoff);
 
 #ifndef FRONTEND
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 #endif
 
 		if (readbytes <= 0)

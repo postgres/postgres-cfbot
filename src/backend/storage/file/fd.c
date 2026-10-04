@@ -2081,10 +2081,10 @@ FilePrefetch(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
 			return returnCode;
 
 retry:
-		pgstat_report_wait_start(wait_event_info);
+		pgstat_report_wait_start_timed(wait_event_info);
 		returnCode = posix_fadvise(VfdCache[file].fd, offset, amount,
 								   POSIX_FADV_WILLNEED);
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 		if (returnCode == EINTR)
 			goto retry;
@@ -2106,9 +2106,9 @@ retry:
 
 		ra.ra_offset = offset;
 		ra.ra_count = amount;
-		pgstat_report_wait_start(wait_event_info);
+		pgstat_report_wait_start_timed(wait_event_info);
 		returnCode = fcntl(VfdCache[file].fd, F_RDADVISE, &ra);
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		if (returnCode != -1)
 			return 0;
 		else
@@ -2140,9 +2140,9 @@ FileWriteback(File file, pgoff_t offset, pgoff_t nbytes, uint32 wait_event_info)
 	if (returnCode < 0)
 		return;
 
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	pg_flush_data(VfdCache[file].fd, offset, nbytes);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 }
 
 ssize_t
@@ -2166,9 +2166,9 @@ FileReadV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
 	vfdP = &VfdCache[file];
 
 retry:
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	returnCode = pg_preadv(vfdP->fd, iov, iovcnt, offset);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (returnCode < 0)
 	{
@@ -2276,9 +2276,9 @@ FileWriteV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
 	}
 
 retry:
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	returnCode = pg_pwritev(vfdP->fd, iov, iovcnt, offset);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (returnCode >= 0)
 	{
@@ -2346,9 +2346,9 @@ FileSync(File file, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	returnCode = pg_fsync(VfdCache[file].fd);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	return returnCode;
 }
@@ -2375,9 +2375,9 @@ FileZero(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	written = pg_pwrite_zeros(VfdCache[file].fd, amount, offset);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (written < 0)
 		return -1;
@@ -2421,9 +2421,9 @@ FileFallocate(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
 		return -1;
 
 retry:
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	returnCode = posix_fallocate(VfdCache[file].fd, offset, amount);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (returnCode == 0)
 		return 0;
@@ -2475,9 +2475,9 @@ FileTruncate(File file, pgoff_t offset, uint32 wait_event_info)
 	if (returnCode < 0)
 		return returnCode;
 
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	returnCode = pg_ftruncate(VfdCache[file].fd, offset);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (returnCode == 0 && VfdCache[file].fileSize > offset)
 	{
