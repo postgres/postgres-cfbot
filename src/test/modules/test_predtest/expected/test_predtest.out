@@ -431,6 +431,64 @@ w_i_holds         | t
 s_r_holds         | f
 w_r_holds         | f
 
+-- OR-clause => OR-clause tries the item at the same position first; check
+-- arms that correspond, arms that don't, and lists of different lengths
+select * from test_predtest($$
+select x or z, (x and y) or (z and w)
+from booleans
+$$);
+-[ RECORD 1 ]-----+--
+strong_implied_by | t
+weak_implied_by   | t
+strong_refuted_by | f
+weak_refuted_by   | f
+s_i_holds         | t
+w_i_holds         | t
+s_r_holds         | f
+w_r_holds         | f
+
+select * from test_predtest($$
+select z or x, (x and y) or (z and w)
+from booleans
+$$);
+-[ RECORD 1 ]-----+--
+strong_implied_by | t
+weak_implied_by   | t
+strong_refuted_by | f
+weak_refuted_by   | f
+s_i_holds         | t
+w_i_holds         | t
+s_r_holds         | f
+w_r_holds         | f
+
+select * from test_predtest($$
+select x or z, (x and y) or (z and w) or w
+from booleans
+$$);
+-[ RECORD 1 ]-----+--
+strong_implied_by | f
+weak_implied_by   | f
+strong_refuted_by | f
+weak_refuted_by   | f
+s_i_holds         | f
+w_i_holds         | f
+s_r_holds         | f
+w_r_holds         | f
+
+select * from test_predtest($$
+select w or x or z, (x and y) or z
+from booleans
+$$);
+-[ RECORD 1 ]-----+--
+strong_implied_by | t
+weak_implied_by   | t
+strong_refuted_by | f
+weak_refuted_by   | f
+s_i_holds         | t
+w_i_holds         | t
+s_r_holds         | f
+w_r_holds         | f
+
 select * from test_predtest($$
 select x and z, x and y and z
 from booleans
