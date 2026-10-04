@@ -45,7 +45,7 @@ addToSimpleStats(SimpleStats *ss, double val)
  * Merge two SimpleStats objects
  */
 void
-mergeSimpleStats(SimpleStats *acc, SimpleStats *ss)
+mergeSimpleStats(SimpleStats *acc, const SimpleStats *ss)
 {
 	if (acc->count == 0 || ss->min < acc->min)
 		acc->min = ss->min;
@@ -80,7 +80,7 @@ initStats(StatsData *sd, pg_time_usec_t start)
  */
 void
 accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
-		   EStatus estatus, int64 tries)
+		   EStatus estatus, int64 tries, bool has_throttle_delay)
 {
 	/* Record the skipped transaction */
 	if (tx_skipped)
@@ -109,7 +109,7 @@ accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
 			addToSimpleStats(&stats->latency, lat);
 
 			/* and possibly the same for schedule lag */
-			if (throttle_delay)
+			if (has_throttle_delay)
 				addToSimpleStats(&stats->lag, lag);
 			break;
 
@@ -130,6 +130,23 @@ accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
 }
 
 /*
+ * Merge statistics from src into acc.
+ */
+void
+mergeStats(StatsData *acc, const StatsData *src)
+{
+	mergeSimpleStats(&acc->latency, &src->latency);
+	mergeSimpleStats(&acc->lag, &src->lag);
+	acc->cnt += src->cnt;
+	acc->cnt_skipped += src->cnt_skipped;
+	acc->retries += src->retries;
+	acc->retried += src->retried;
+	acc->serialization_failures += src->serialization_failures;
+	acc->deadlock_failures += src->deadlock_failures;
+	acc->other_sql_failures += src->other_sql_failures;
+}
+
+/*
  * Return the number of failed transactions.
  */
 int64
@@ -145,7 +162,7 @@ getFailures(const StatsData *stats)
  * that is not successfully processed.
  */
 const char *
-getResultString(bool tx_skipped, EStatus estatus)
+getResultString(bool tx_skipped, EStatus estatus, bool failures_detailed)
 {
 	if (tx_skipped)
 		return "skipped";
@@ -169,7 +186,7 @@ getResultString(bool tx_skipped, EStatus estatus)
 }
 
 void
-printSimpleStats(const char *prefix, SimpleStats *ss)
+printSimpleStats(const char *prefix, const SimpleStats *ss)
 {
 	if (ss->count > 0)
 	{

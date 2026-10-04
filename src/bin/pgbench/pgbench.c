@@ -954,15 +954,7 @@ main(int argc, char **argv)
 				exit_code = 2;
 
 		/* aggregate thread level stats */
-		mergeSimpleStats(&stats.latency, &thread->stats.latency);
-		mergeSimpleStats(&stats.lag, &thread->stats.lag);
-		stats.cnt += thread->stats.cnt;
-		stats.cnt_skipped += thread->stats.cnt_skipped;
-		stats.retries += thread->stats.retries;
-		stats.retried += thread->stats.retried;
-		stats.serialization_failures += thread->stats.serialization_failures;
-		stats.deadlock_failures += thread->stats.deadlock_failures;
-		stats.other_sql_failures += thread->stats.other_sql_failures;
+		mergeStats(&stats, &thread->stats);
 		latency_late += thread->latency_late;
 		conn_total_duration += thread->conn_duration;
 

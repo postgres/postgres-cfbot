@@ -1507,7 +1507,7 @@ doLog(TState *thread, CState *st,
 		}
 
 		/* accumulate the current transaction */
-		accumStats(agg, tx_skipped, latency, lag, st->estatus, st->tries);
+		accumStats(agg, tx_skipped, latency, lag, st->estatus, st->tries, throttle_delay > 0);
 	}
 	else
 	{
@@ -1520,7 +1520,7 @@ doLog(TState *thread, CState *st,
 		else
 			fprintf(logfile, "%d " INT64_FORMAT " %s %d " INT64_FORMAT " "
 					INT64_FORMAT,
-					st->id, st->cnt, getResultString(tx_skipped, st->estatus),
+					st->id, st->cnt, getResultString(tx_skipped, st->estatus, failures_detailed),
 					st->use_file, now / 1000000, now % 1000000);
 
 		if (throttle_delay)
@@ -1557,7 +1557,7 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	}
 
 	/* keep detailed thread stats */
-	accumStats(&thread->stats, tx_skipped, latency, lag, st->estatus, st->tries);
+	accumStats(&thread->stats, tx_skipped, latency, lag, st->estatus, st->tries, throttle_delay > 0);
 
 	/* count transactions over the latency limit, if needed */
 	if (latency_limit && latency > latency_limit)
@@ -1572,7 +1572,7 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	/* XXX could use a mutex here, but we choose not to */
 	if (per_script_stats)
 		accumStats(&sql_script[st->use_file].stats, tx_skipped, latency, lag,
-				   st->estatus, st->tries);
+				   st->estatus, st->tries, throttle_delay > 0);
 }
 
 
@@ -1622,18 +1622,7 @@ printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
 	 */
 	initStats(&cur, 0);
 	for (int i = 0; i < nthreads; i++)
-	{
-		mergeSimpleStats(&cur.latency, &threads[i].stats.latency);
-		mergeSimpleStats(&cur.lag, &threads[i].stats.lag);
-		cur.cnt += threads[i].stats.cnt;
-		cur.cnt_skipped += threads[i].stats.cnt_skipped;
-		cur.retries += threads[i].stats.retries;
-		cur.retried += threads[i].stats.retried;
-		cur.serialization_failures +=
-			threads[i].stats.serialization_failures;
-		cur.deadlock_failures += threads[i].stats.deadlock_failures;
-		cur.other_sql_failures += threads[i].stats.other_sql_failures;
-	}
+		mergeStats(&cur, &threads[i].stats);
 
 	/* we count only actually executed transactions */
 	cnt = cur.cnt - last->cnt;
