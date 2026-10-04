@@ -3830,16 +3830,28 @@ heap_truncate_find_FKs(List *relationIds)
 	List	   *parent_cons;
 	ListCell   *cell;
 	ScanKeyData key;
+	ScanKeyData rangekey[2];
+	Oid			minoid;
+	Oid			maxoid;
 	Relation	fkeyRel;
 	SysScanDesc fkeyScan;
 	HeapTuple	tuple;
 	bool		restart;
 
+	if (relationIds == NIL)
+		return NIL;
+
 	oids = list_copy(relationIds);
 
 	/*
-	 * Must scan pg_constraint.  Right now, it is a seqscan because there is
-	 * no available index on confrelid.
+	 * Must scan pg_constraint.  We do a single range scan of the index on
+	 * confrelid, from the smallest to the largest OID in our list.  Only
+	 * foreign keys have a nonzero confrelid, so the rows of all other
+	 * constraints sort before the range and are never visited; foreign keys
+	 * that fall inside the range but reference a relation not in our list are
+	 * skipped below.  Each pass costs one index probe for a single relation,
+	 * and never more than visiting each foreign key once however long the
+	 * list is.
 	 */
 	fkeyRel = table_open(ConstraintRelationId, AccessShareLock);
 
@@ -3847,8 +3859,27 @@ restart:
 	restart = false;
 	parent_cons = NIL;
 
-	fkeyScan = systable_beginscan(fkeyRel, InvalidOid, false,
-								  NULL, 0, NULL);
+	minoid = maxoid = linitial_oid(oids);
+	foreach(cell, oids)
+	{
+		Oid			relid = lfirst_oid(cell);
+
+		if (relid < minoid)
+			minoid = relid;
+		if (relid > maxoid)
+			maxoid = relid;
+	}
+	ScanKeyInit(&rangekey[0],
+				Anum_pg_constraint_confrelid,
+				BTGreaterEqualStrategyNumber, F_OIDGE,
+				ObjectIdGetDatum(minoid));
+	ScanKeyInit(&rangekey[1],
+				Anum_pg_constraint_confrelid,
+				BTLessEqualStrategyNumber, F_OIDLE,
+				ObjectIdGetDatum(maxoid));
+
+	fkeyScan = systable_beginscan(fkeyRel, ConstraintConfRelidIndexId, true,
+								  NULL, 2, rangekey);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(fkeyScan)))
 	{
