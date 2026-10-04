@@ -11,6 +11,7 @@ OBJS = \
 	$(WIN32RES) \
 	exprparse.o \
 	exprscan.o \
+	stats.o \
 	pgbench.o
 
 override CPPFLAGS := -I. -I$(srcdir) -I$(libpq_srcdir) $(CPPFLAGS)
