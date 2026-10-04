@@ -845,7 +845,7 @@ postgresGetForeignRelSize(PlannerInfo *root,
 	 */
 	fpinfo->retrieved_rows = -1;
 	fpinfo->rel_startup_cost = -1;
-	fpinfo->rel_total_cost = -1;
+	fpinfo->rel_run_cost = -1;
 
 	/*
 	 * If the table or the server is configured to use remote estimates,
@@ -3414,7 +3414,7 @@ estimate_path_cost_size(PlannerInfo *root,
 	int			width;
 	int			disabled_nodes = 0;
 	Cost		startup_cost;
-	Cost		total_cost;
+	Cost		run_cost = 0;
 
 	/* Make sure the core code has set up the relation's reltarget */
 	Assert(foreignrel->reltarget);
@@ -3434,6 +3434,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		PGconn	   *conn;
 		Selectivity local_sel;
 		QualCost	local_cost;
+		Cost		total_cost;
 		List	   *fdw_scan_tlist = NIL;
 		List	   *remote_conds;
 
@@ -3479,6 +3480,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		get_remote_estimate(sql.data, conn, &rows, &width,
 							&startup_cost, &total_cost);
 		ReleaseConnection(conn);
+		run_cost = total_cost - startup_cost;
 
 		retrieved_rows = rows;
 
@@ -3494,10 +3496,10 @@ estimate_path_cost_size(PlannerInfo *root,
 
 		/* Add in the eval cost of the locally-checked quals */
 		startup_cost += fpinfo->local_conds_cost.startup;
-		total_cost += fpinfo->local_conds_cost.per_tuple * retrieved_rows;
+		run_cost += fpinfo->local_conds_cost.per_tuple * retrieved_rows;
 		cost_qual_eval(&local_cost, local_param_join_conds, root);
 		startup_cost += local_cost.startup;
-		total_cost += local_cost.per_tuple * retrieved_rows;
+		run_cost += local_cost.per_tuple * retrieved_rows;
 
 		/*
 		 * Add in tlist eval cost for each output row.  In case of an
@@ -3505,22 +3507,18 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * expressions will be evaluated remotely, so adjust the costs.
 		 */
 		startup_cost += foreignrel->reltarget->cost.startup;
-		total_cost += foreignrel->reltarget->cost.startup;
-		total_cost += foreignrel->reltarget->cost.per_tuple * rows;
+		run_cost += foreignrel->reltarget->cost.per_tuple * rows;
 		if (IS_UPPER_REL(foreignrel))
 		{
 			QualCost	tlist_cost;
 
 			cost_qual_eval(&tlist_cost, fdw_scan_tlist, root);
 			startup_cost -= tlist_cost.startup;
-			total_cost -= tlist_cost.startup;
-			total_cost -= tlist_cost.per_tuple * rows;
+			run_cost -= tlist_cost.per_tuple * rows;
 		}
 	}
 	else
 	{
-		Cost		run_cost = 0;
-
 		/*
 		 * We don't support join conditions in this mode (hence, no
 		 * parameterized paths can be made).
@@ -3534,7 +3532,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * underlying scan, join, or grouping each time.  Instead, use those
 		 * estimates if we have cached them already.
 		 */
-		if (fpinfo->rel_startup_cost >= 0 && fpinfo->rel_total_cost >= 0)
+		if (fpinfo->rel_startup_cost >= 0 && fpinfo->rel_run_cost >= 0)
 		{
 			Assert(fpinfo->retrieved_rows >= 0);
 
@@ -3542,7 +3540,7 @@ estimate_path_cost_size(PlannerInfo *root,
 			retrieved_rows = fpinfo->retrieved_rows;
 			width = fpinfo->width;
 			startup_cost = fpinfo->rel_startup_cost;
-			run_cost = fpinfo->rel_total_cost - fpinfo->rel_startup_cost;
+			run_cost = fpinfo->rel_run_cost;
 
 			/*
 			 * If we estimate the costs of a foreign scan or a foreign join
@@ -3639,8 +3637,8 @@ estimate_path_cost_size(PlannerInfo *root,
 			 * 4. Run time cost of applying nonpushable other clauses locally
 			 * on the result fetched from the foreign server.
 			 */
-			run_cost = fpinfo_i->rel_total_cost - fpinfo_i->rel_startup_cost;
-			run_cost += fpinfo_o->rel_total_cost - fpinfo_o->rel_startup_cost;
+			run_cost = fpinfo_i->rel_run_cost;
+			run_cost += fpinfo_o->rel_run_cost;
 			run_cost += nrows * join_cost.per_tuple;
 			nrows = clamp_row_est(nrows * fpinfo->joinclause_sel);
 			run_cost += nrows * remote_conds_cost.per_tuple;
@@ -3669,7 +3667,7 @@ estimate_path_cost_size(PlannerInfo *root,
 			 * hashed aggregates in cost_agg().  We are not sure which
 			 * strategy will be considered at remote side, thus for
 			 * simplicity, we put all startup related costs in startup_cost
-			 * and all finalization and run cost are added in total_cost.
+			 * and all finalization and run cost are added in run_cost.
 			 */
 
 			ofpinfo = (PgFdwRelationInfo *) outerrel->fdw_private;
@@ -3736,7 +3734,7 @@ estimate_path_cost_size(PlannerInfo *root,
 			 *	  2. Run time cost of performing aggregation, per cost_agg()
 			 *-----
 			 */
-			run_cost = ofpinfo->rel_total_cost - ofpinfo->rel_startup_cost;
+			run_cost = ofpinfo->rel_run_cost;
 			run_cost += outerrel->reltarget->cost.per_tuple * input_rows;
 			run_cost += aggcosts.finalCost.per_tuple * numGroups;
 			run_cost += cpu_tuple_cost * numGroups;
@@ -3827,13 +3825,14 @@ estimate_path_cost_size(PlannerInfo *root,
 			}
 		}
 
-		total_cost = startup_cost + run_cost;
-
 		/* Adjust the cost estimates if we have LIMIT */
 		if (fpextra && fpextra->has_limit)
 		{
+			Cost		total_cost = startup_cost + run_cost;
+
 			adjust_limit_rows_costs(&rows, &startup_cost, &total_cost,
 									fpextra->offset_est, fpextra->count_est);
+			run_cost = total_cost - startup_cost;
 			retrieved_rows = rows;
 		}
 	}
@@ -3851,8 +3850,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		QualCost	newcost = fpextra->target->cost;
 
 		startup_cost += newcost.startup - oldcost.startup;
-		total_cost += newcost.startup - oldcost.startup;
-		total_cost += (newcost.per_tuple - oldcost.per_tuple) * rows;
+		run_cost += (newcost.per_tuple - oldcost.per_tuple) * rows;
 	}
 
 	/*
@@ -3871,7 +3869,7 @@ estimate_path_cost_size(PlannerInfo *root,
 	{
 		fpinfo->retrieved_rows = retrieved_rows;
 		fpinfo->rel_startup_cost = startup_cost;
-		fpinfo->rel_total_cost = total_cost;
+		fpinfo->rel_run_cost = run_cost;
 	}
 
 	/*
@@ -3881,9 +3879,8 @@ estimate_path_cost_size(PlannerInfo *root,
 	 * (cpu_tuple_cost per retrieved row).
 	 */
 	startup_cost += fpinfo->fdw_startup_cost;
-	total_cost += fpinfo->fdw_startup_cost;
-	total_cost += fpinfo->fdw_tuple_cost * retrieved_rows;
-	total_cost += cpu_tuple_cost * retrieved_rows;
+	run_cost += fpinfo->fdw_tuple_cost * retrieved_rows;
+	run_cost += cpu_tuple_cost * retrieved_rows;
 
 	/*
 	 * If we have LIMIT, we should prefer performing the restriction remotely
@@ -3905,7 +3902,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		fpextra->limit_tuples < fpinfo->rows)
 	{
 		Assert(fpinfo->rows > 0);
-		total_cost -= (total_cost - startup_cost) * 0.05 *
+		run_cost -= run_cost * 0.05 *
 			(fpinfo->rows - fpextra->limit_tuples) / fpinfo->rows;
 	}
 
@@ -3914,7 +3911,7 @@ estimate_path_cost_size(PlannerInfo *root,
 	*p_width = width;
 	*p_disabled_nodes = disabled_nodes;
 	*p_startup_cost = startup_cost;
-	*p_total_cost = total_cost;
+	*p_total_cost = startup_cost + run_cost;
 }
 
 /*
@@ -6992,7 +6989,8 @@ init_func_stub_fpinfo(const PgFdwRelationInfo *fpinfo_foreign,
 	 * local path for the same function is our best estimate of that.
 	 */
 	stub->rel_startup_cost = funcrel->cheapest_total_path->startup_cost;
-	stub->rel_total_cost = funcrel->cheapest_total_path->total_cost;
+	stub->rel_run_cost = funcrel->cheapest_total_path->total_cost -
+		funcrel->cheapest_total_path->startup_cost;
 
 	return stub;
 }
@@ -7428,7 +7426,7 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	 */
 	fpinfo->retrieved_rows = -1;
 	fpinfo->rel_startup_cost = -1;
-	fpinfo->rel_total_cost = -1;
+	fpinfo->rel_run_cost = -1;
 
 	/*
 	 * Set the string describing this join relation to be used in EXPLAIN
@@ -8063,7 +8061,7 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 	 */
 	fpinfo->retrieved_rows = -1;
 	fpinfo->rel_startup_cost = -1;
-	fpinfo->rel_total_cost = -1;
+	fpinfo->rel_run_cost = -1;
 
 	/*
 	 * Set the string describing this grouped relation to be used in EXPLAIN
