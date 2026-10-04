@@ -2596,6 +2596,7 @@ typedef struct AggPath
 	Cardinality numGroups;		/* estimated number of groups in input */
 	uint64		transitionSpace;	/* for pass-by-ref transition data */
 	List	   *groupClause;	/* a list of SortGroupClause's */
+	List	   *distinctSortClause; /* a list of SortGroupClause's for inline DISTINCT ON ORDER BY */
 	List	   *qual;			/* quals (HAVING quals), if any */
 } AggPath;
 
@@ -2686,6 +2687,7 @@ typedef struct RecursiveUnionPath
 	Path	   *leftpath;		/* paths representing input sources */
 	Path	   *rightpath;
 	List	   *distinctList;	/* SortGroupClauses identifying target cols */
+	List	   *distinctSortClause; /* SortGroupClauses for ordering (if DISTINCT ON) */
 	int			wtParam;		/* ID of Param representing work table */
 	Cardinality numGroups;		/* estimated number of groups in input */
 } RecursiveUnionPath;

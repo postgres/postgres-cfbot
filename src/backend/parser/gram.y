@@ -13231,7 +13231,8 @@ simple_select:
 				{
 					SelectStmt *n = makeNode(SelectStmt);
 
-					n->distinctClause = $2;
+					n->distinctClause = linitial($2);
+					n->distinctSortClause = lsecond($2);
 					n->targetList = $3;
 					n->intoClause = $4;
 					n->fromClause = $5;
@@ -13262,9 +13263,31 @@ simple_select:
 					n->fromClause = list_make1($2);
 					$$ = (Node *) n;
 				}
-			| select_clause UNION set_quantifier select_clause
+			| select_clause UNION select_clause				%prec UNION
 				{
-					$$ = makeSetOp(SETOP_UNION, $3 == SET_QUANTIFIER_ALL, $1, $4);
+					$$ = makeSetOp(SETOP_UNION, false, $1, $3);
+				}
+			| select_clause UNION ALL select_clause			%prec UNION
+				{
+					$$ = makeSetOp(SETOP_UNION, true, $1, $4);
+				}
+			| select_clause UNION distinct_clause select_clause	%prec UNION
+				{
+					List *distinctClause = linitial($3);
+					List *distinctSortClause = lsecond($3);
+					Node *n = makeSetOp(SETOP_UNION, false, $1, $4);
+					SelectStmt *s = (SelectStmt *) n;
+					if (linitial(distinctClause) == NULL && distinctSortClause == NIL)
+					{
+						s->distinctClause = NIL;
+						s->distinctSortClause = NIL;
+					}
+					else
+					{
+						s->distinctClause = distinctClause;
+						s->distinctSortClause = distinctSortClause;
+					}
+					$$ = (Node *) s;
 				}
 			| select_clause INTERSECT set_quantifier select_clause
 				{
@@ -13485,8 +13508,9 @@ set_quantifier:
  * should be placed in the DISTINCT list during parsetree analysis.
  */
 distinct_clause:
-			DISTINCT								{ $$ = list_make1(NIL); }
-			| DISTINCT ON '(' expr_list ')'			{ $$ = $4; }
+			DISTINCT								{ $$ = list_make2(list_make1(NIL), NIL); }
+			| DISTINCT ON '(' expr_list ')'			{ $$ = list_make2($4, NIL); }
+			| DISTINCT ON '(' expr_list sort_clause ')' { $$ = list_make2($4, $5); }
 		;
 
 opt_all_clause:
@@ -17951,7 +17975,16 @@ PLpgSQL_Expr: opt_distinct_clause opt_target_list
 				{
 					SelectStmt *n = makeNode(SelectStmt);
 
-					n->distinctClause = $1;
+					if ($1)
+					{
+						n->distinctClause = linitial($1);
+						n->distinctSortClause = lsecond($1);
+					}
+					else
+					{
+						n->distinctClause = NIL;
+						n->distinctSortClause = NIL;
+					}
 					n->targetList = $2;
 					n->fromClause = $3;
 					n->whereClause = $4;
