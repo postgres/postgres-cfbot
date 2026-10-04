@@ -11,8 +11,6 @@
 #ifndef PGBENCH_H
 #define PGBENCH_H
 
-#include <signal.h>
-
 #include "fe_utils/psqlscan.h"
 #include "common/pg_prng.h"
 #include "fe_utils/conditional.h"
@@ -121,59 +119,6 @@ struct PgBenchExprList
 	PgBenchExprLink *tail;
 };
 
-
-/*
- * Multi-platform thread implementations
- */
-
-#ifdef WIN32
-/* Use Windows threads */
-#include <windows.h>
-#define GETERRNO() (_dosmaperr(GetLastError()), errno)
-#define THREAD_T HANDLE
-#define THREAD_FUNC_RETURN_TYPE unsigned
-#define THREAD_FUNC_RETURN return 0
-#define THREAD_FUNC_CC __stdcall
-#define THREAD_CREATE(handle, function, arg) \
-	((*(handle) = (HANDLE) _beginthreadex(NULL, 0, (function), (arg), 0, NULL)) == 0 ? errno : 0)
-#define THREAD_JOIN(handle) \
-	(WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0 ? \
-	GETERRNO() : CloseHandle(handle) ? 0 : GETERRNO())
-#define THREAD_BARRIER_T SYNCHRONIZATION_BARRIER
-#define THREAD_BARRIER_INIT(barrier, n) \
-	(InitializeSynchronizationBarrier((barrier), (n), 0) ? 0 : GETERRNO())
-#define THREAD_BARRIER_WAIT(barrier) \
-	EnterSynchronizationBarrier((barrier), \
-								SYNCHRONIZATION_BARRIER_FLAGS_BLOCK_ONLY)
-#define THREAD_BARRIER_DESTROY(barrier)
-#else
-/* Use POSIX threads */
-#include "port/pg_pthread.h"
-#define THREAD_T pthread_t
-#define THREAD_FUNC_RETURN_TYPE void *
-#define THREAD_FUNC_RETURN return NULL
-#define THREAD_FUNC_CC
-#define THREAD_CREATE(handle, function, arg) \
-	pthread_create((handle), NULL, (function), (arg))
-#define THREAD_JOIN(handle) \
-	pthread_join((handle), NULL)
-#define THREAD_BARRIER_T pthread_barrier_t
-#define THREAD_BARRIER_INIT(barrier, n) \
-	pthread_barrier_init((barrier), NULL, (n))
-#define THREAD_BARRIER_WAIT(barrier) pthread_barrier_wait((barrier))
-#define THREAD_BARRIER_DESTROY(barrier) pthread_barrier_destroy((barrier))
-#endif
-
-/*
- * Transaction status at the end of a command.
- */
-typedef enum TStatus
-{
-	TSTATUS_IDLE,
-	TSTATUS_IN_BLOCK,
-	TSTATUS_CONN_ERROR,
-	TSTATUS_OTHER_ERROR,
-} TStatus;
 
 /*
  * Connection state machine states.
@@ -334,44 +279,6 @@ typedef struct
 								 * and failed transactions are also counted
 								 * here */
 } CState;
-
-/*
- * Thread state
- */
-typedef struct
-{
-	int			tid;			/* thread id */
-	THREAD_T	thread;			/* thread handle */
-	CState	   *state;			/* array of CState */
-	int			nstate;			/* length of state[] */
-
-	/*
-	 * Separate randomness for each thread. Each thread option uses its own
-	 * random state to make all of them independent of each other and
-	 * therefore deterministic at the thread level.
-	 */
-	pg_prng_state ts_choose_rs; /* random state for selecting a script */
-	pg_prng_state ts_throttle_rs;	/* random state for transaction throttling */
-	pg_prng_state ts_sample_rs; /* random state for log sampling */
-
-	int64		throttle_trigger;	/* previous/next throttling (us) */
-	FILE	   *logfile;		/* where to log, or NULL */
-
-	/* per thread collected stats in microseconds */
-	pg_time_usec_t create_time; /* thread creation time */
-	pg_time_usec_t started_time;	/* thread is running */
-	pg_time_usec_t bench_start; /* thread is benchmarking */
-	pg_time_usec_t conn_duration;	/* cumulated connection and disconnection
-									 * delays */
-
-	StatsData	stats;
-	int64		latency_late;	/* count executed but late transactions */
-} TState;
-
-extern bool use_quiet;
-extern int	progress;
-extern volatile sig_atomic_t timer_exceeded;
-extern PGconn *doConnect(void);
 
 extern int	expr_yyparse(PgBenchExpr **expr_parse_result_p, yyscan_t yyscanner);
 extern int	expr_yylex(union YYSTYPE *yylval_param, yyscan_t yyscanner);

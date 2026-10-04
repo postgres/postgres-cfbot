@@ -14,6 +14,7 @@
 #define SCRIPT_H
 
 #include "common/pg_prng.h"
+#include "engine.h"
 #include "pgbench.h"
 #include "pqexpbuffer.h"
 #include "stats.h"
