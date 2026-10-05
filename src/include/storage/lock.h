@@ -355,10 +355,9 @@ typedef enum
 #define LockHashPartition(hashcode) \
 	((hashcode) % NUM_LOCK_PARTITIONS)
 #define LockHashPartitionLock(hashcode) \
-	(&MainLWLockArray[LOCK_MANAGER_LWLOCK_OFFSET + \
-		LockHashPartition(hashcode)].lock)
+	(&MainLWLocks->lock_manager[LockHashPartition(hashcode)].lock)
 #define LockHashPartitionLockByIndex(i) \
-	(&MainLWLockArray[LOCK_MANAGER_LWLOCK_OFFSET + (i)].lock)
+	(&MainLWLocks->lock_manager[(i)].lock)
 
 /*
  * The deadlock detector needs to be able to access lockGroupLeader and
