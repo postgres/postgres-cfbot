@@ -2945,13 +2945,12 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	econtext->ecxt_innertuple = excludedSlot;
 	econtext->ecxt_outertuple = NULL;
 
-	if (!ExecQual(onConflictSetWhere, econtext))
-	{
-		ExecClearTuple(existing);	/* see return below */
-		InstrCountFiltered1(&mtstate->ps, 1);
-		return true;			/* done with the tuple */
-	}
-
+	/*
+	 * The RLS checks below must run before the WHERE clause is evaluated.  The
+	 * WHERE clause is user-supplied and can contain leaky functions, which
+	 * must not get to see an existing row that the policies hide from the
+	 * user.
+	 */
 	if (resultRelInfo->ri_WithCheckOptions != NIL)
 	{
 		/*
@@ -2974,6 +2973,13 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 		ExecWithCheckOptions(WCO_RLS_CONFLICT_CHECK, resultRelInfo,
 							 existing,
 							 mtstate->ps.state);
+	}
+
+	if (!ExecQual(onConflictSetWhere, econtext))
+	{
+		ExecClearTuple(existing);	/* see return below */
+		InstrCountFiltered1(&mtstate->ps, 1);
+		return true;			/* done with the tuple */
 	}
 
 	/* Project the new tuple version */
@@ -3095,13 +3101,11 @@ ExecOnConflictSelect(ModifyTableContext *context,
 	econtext->ecxt_innertuple = excludedSlot;
 	econtext->ecxt_outertuple = NULL;
 
-	if (!ExecQual(onConflictSelectWhere, econtext))
-	{
-		ExecClearTuple(existing);	/* see return below */
-		InstrCountFiltered1(&mtstate->ps, 1);
-		return true;			/* done with the tuple */
-	}
-
+	/*
+	 * As in ExecOnConflictUpdate(), the RLS checks must run before the WHERE
+	 * clause is evaluated, so that user-supplied expressions never see a row
+	 * that the policies hide from the user.
+	 */
 	if (resultRelInfo->ri_WithCheckOptions != NIL)
 	{
 		/*
@@ -3118,6 +3122,13 @@ ExecOnConflictSelect(ModifyTableContext *context,
 		ExecWithCheckOptions(WCO_RLS_CONFLICT_CHECK, resultRelInfo,
 							 existing,
 							 mtstate->ps.state);
+	}
+
+	if (!ExecQual(onConflictSelectWhere, econtext))
+	{
+		ExecClearTuple(existing);	/* see return below */
+		InstrCountFiltered1(&mtstate->ps, 1);
+		return true;			/* done with the tuple */
 	}
 
 	/* RETURNING is required for DO SELECT */
