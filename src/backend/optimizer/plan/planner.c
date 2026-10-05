@@ -4308,6 +4308,7 @@ create_degenerate_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 							   NIL,
 							   NULL,
 							   0,
+							   0,
 							   false,
 							   -1);
 	}
