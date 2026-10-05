@@ -251,6 +251,15 @@ typedef enum
 	LOAD_BALANCE_RANDOM,		/* Randomly shuffle the hosts */
 } PGLoadBalanceType;
 
+/* Try address type (decoded value of try_all_addr) */
+typedef enum
+{
+	TRY_ALL_ADDRS_DISABLE = 0,	/* Do not try subsequent addresses in host
+								 * after target_session_attrs mismatch (default) */
+	TRY_ALL_ADDRS_ENABLE,		/* Try remaining addresses in host even after
+								 * target_session_attrs mismatch */
+} PGTryAddrType;
+
 /* Boolean value plus a not-known state, for GUCs we might have to fetch */
 typedef enum
 {
@@ -432,6 +441,7 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char       *try_all_addrs;  /* whether to try all ips within a host */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal
@@ -537,6 +547,8 @@ struct pg_conn
 	PGTargetServerType target_server_type;	/* desired session properties */
 	PGLoadBalanceType load_balance_type;	/* desired load balancing
 											 * algorithm */
+	PGTryAddrType try_all_addrs_type;     /* parsed representation of try_all_addrs */
+
 	bool		try_next_addr;	/* time to advance to next address/host? */
 	bool		try_next_host;	/* time to advance to next connhost[]? */
 	int			naddr;			/* number of addresses returned by getaddrinfo */
