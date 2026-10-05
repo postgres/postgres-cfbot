@@ -130,6 +130,8 @@ static void show_hash_info(HashState *hashstate, ExplainState *es);
 static void show_material_info(MaterialState *mstate, ExplainState *es);
 static void show_windowagg_info(WindowAggState *winstate, ExplainState *es);
 static void show_ctescan_info(CteScanState *ctescanstate, ExplainState *es);
+static void show_functionscan_info(FunctionScanState *fsstate,
+								   ExplainState *es);
 static void show_table_func_scan_info(TableFuncScanState *tscanstate,
 									  ExplainState *es);
 static void show_recursive_union_info(RecursiveUnionState *rstate,
@@ -2097,6 +2099,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
+			show_functionscan_info(castNode(FunctionScanState, planstate), es);
 			break;
 		case T_TableFuncScan:
 			if (es->verbose)
@@ -3541,6 +3544,71 @@ show_ctescan_info(CteScanState *ctescanstate, ExplainState *es)
 
 	tuplestore_get_stats(tupstore, &maxStorageType, &maxSpaceUsed);
 	show_storage_info(maxStorageType, maxSpaceUsed, es);
+}
+
+/*
+ * Show information on Function Scan node, storage method and maximum
+ * memory/disk space used.
+ */
+static void
+show_functionscan_info(FunctionScanState *fsstate, ExplainState *es)
+{
+	char	   *maxStorageType = NULL;
+	int64		maxSpaceUsed = -1;	/* negative so zero-sized stores count */
+	int64		totalSpaceUsed = 0;
+
+	if (!es->analyze)
+		return;
+
+	/*
+	 * A FunctionScan node uses one tuplestore per function, so there can be
+	 * more than one when ROWS FROM is used.  We employ the storage type from
+	 * whichever one consumed the most memory/disk, and the storage size is
+	 * the sum of them all, as we do for Recursive Union.
+	 */
+	for (int i = 0; i < fsstate->nfuncs; i++)
+	{
+		FunctionScanPerFuncState *fs = &fsstate->funcstates[i];
+		char	   *storageType = fs->savedStorageType;
+		int64		spaceUsed = fs->savedSpaceUsed;
+
+		/*
+		 * A rescan with changed parameters replaces the function's tuplestore
+		 * with a new one, so take the larger of the statistics of the current
+		 * one and those saved from the ones discarded earlier.
+		 */
+		if (fs->tstore != NULL)
+		{
+			char	   *curStorageType;
+			int64		curSpaceUsed;
+
+			tuplestore_get_stats(fs->tstore, &curStorageType, &curSpaceUsed);
+
+			if (curSpaceUsed > spaceUsed)
+			{
+				spaceUsed = curSpaceUsed;
+				storageType = curStorageType;
+			}
+		}
+
+		/* Execution may not have got as far as creating any tuplestore */
+		if (storageType == NULL)
+			continue;
+
+		totalSpaceUsed += spaceUsed;
+
+		if (spaceUsed > maxSpaceUsed)
+		{
+			maxSpaceUsed = spaceUsed;
+			maxStorageType = storageType;
+		}
+	}
+
+	/* Nothing to show if no tuplestore was created */
+	if (maxStorageType == NULL)
+		return;
+
+	show_storage_info(maxStorageType, totalSpaceUsed, es);
 }
 
 /*
