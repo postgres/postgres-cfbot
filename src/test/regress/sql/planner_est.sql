@@ -153,4 +153,40 @@ CREATE TEMP TABLE char_table_1 AS
 ANALYZE char_table_1;
 EXPLAIN (COSTS OFF) SELECT * FROM char_table_1 WHERE c < 'Q';
 
+--
+-- Test IS [NOT] DISTINCT FROM join estimates with NULLs on both sides.  Only
+-- the top plan line is shown, since the rest is not stable across platforms.
+--
+CREATE TEMP TABLE distinct_t1 AS
+  SELECT CASE WHEN i > 30 THEN i END AS a FROM generate_series(1, 100) i;
+CREATE TEMP TABLE distinct_t2 AS
+  SELECT CASE WHEN i > 100 THEN i - 100 END AS a FROM generate_series(1, 200) i;
+ANALYZE distinct_t1, distinct_t2;
+
+-- Ensure pairs of NULLs are counted
+SELECT * FROM explain_mask_costs($$
+SELECT * FROM distinct_t1 t1 JOIN distinct_t2 t2 ON t1.a IS NOT DISTINCT FROM t2.a;$$,
+true, true, false, true) LIMIT 1;
+
+-- The equivalent OR clause should get about the same estimate
+SELECT * FROM explain_mask_costs($$
+SELECT * FROM distinct_t1 t1 JOIN distinct_t2 t2 ON t1.a = t2.a OR (t1.a IS NULL AND t2.a IS NULL);$$,
+true, true, false, true) LIMIT 1;
+
+-- Ensure pairs of NULLs are not counted
+SELECT * FROM explain_mask_costs($$
+SELECT * FROM distinct_t1 t1 JOIN distinct_t2 t2 ON t1.a IS DISTINCT FROM t2.a;$$,
+true, true, false, true) LIMIT 1;
+
+-- Ensure NULLs are matched in semijoins and antijoins
+SELECT * FROM explain_mask_costs($$
+SELECT * FROM distinct_t2 t2 WHERE EXISTS
+  (SELECT 1 FROM distinct_t1 t1 WHERE t1.a IS NOT DISTINCT FROM t2.a);$$,
+true, true, false, true) LIMIT 1;
+
+SELECT * FROM explain_mask_costs($$
+SELECT * FROM distinct_t2 t2 WHERE NOT EXISTS
+  (SELECT 1 FROM distinct_t1 t1 WHERE t1.a IS NOT DISTINCT FROM t2.a);$$,
+true, true, false, true) LIMIT 1;
+
 DROP FUNCTION explain_mask_costs(text, bool, bool, bool, bool);
