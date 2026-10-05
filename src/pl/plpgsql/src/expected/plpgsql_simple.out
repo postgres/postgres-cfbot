@@ -118,6 +118,43 @@ select simplecaller();
            44
 (1 row)
 
+-- Same for "SELECT simple-expr INTO var": the SRF returns no rows, so
+-- FOUND must be false on the first call after the change too
+drop function simplesql();
+create function simplesql() returns int language sql
+as $$select 2 + 2$$;
+create or replace function simplecaller() returns int language plpgsql
+as $$
+declare x int;
+begin
+  select simplesql() into x;
+  raise notice 'found = %', found;
+  return x;
+end$$;
+select simplecaller();
+NOTICE:  found = t
+ simplecaller 
+--------------
+            4
+(1 row)
+
+drop function simplesql();
+create function simplesql() returns setof int language sql
+as $$select 22 + 22 where false$$;
+select simplecaller();
+NOTICE:  found = f
+ simplecaller 
+--------------
+             
+(1 row)
+
+select simplecaller();
+NOTICE:  found = f
+ simplecaller 
+--------------
+             
+(1 row)
+
 -- Check handling of simple expression in a scrollable cursor (bug #18859)
 do $$
 declare
