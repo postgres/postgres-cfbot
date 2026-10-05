@@ -4946,6 +4946,18 @@ var_is_nonnullable(PlannerInfo *root, Var *var, NotNullSource source)
 				attr = TupleDescCompactAttr(RelationGetDescr(rel),
 											var->varattno - 1);
 				result = (attr->attnullability == ATTNULLABLE_VALID);
+
+				/*
+				 * A partition can define a virtual generated column with its
+				 * own expression, and enforces NOT NULL against that one.
+				 * Reading through the parent uses the parent's expression, so
+				 * the constraint proves nothing here.
+				 */
+				if (result && rte->relkind == RELKIND_PARTITIONED_TABLE &&
+					TupleDescAttr(RelationGetDescr(rel),
+								  var->varattno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+					result = false;
+
 				table_close(rel, NoLock);
 
 				return result;
