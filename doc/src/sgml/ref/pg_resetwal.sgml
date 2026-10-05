@@ -75,6 +75,17 @@ PostgreSQL documentation
   </para>
 
   <para>
+   <command>pg_resetwal</command> refuses to run on a data directory that
+   contains a <filename>backup_label</filename> file, even with
+   <option>-f</option> or <option>-n</option>.  Such a data directory is a
+   base backup that needs WAL replay to become consistent, and resetting the
+   WAL would leave it corrupted.  To restore a backup, configure recovery as
+   described in <xref linkend="backup-pitr-recovery"/>.  Remove
+   <filename>backup_label</filename> only if you are sure the data directory
+   is not a backup that still needs recovery.
+  </para>
+
+  <para>
    After running this command on a data directory with corrupted WAL or a
    corrupted control file, it should be possible to start the server,
    but bear in mind that the database might contain inconsistent data due to
@@ -132,7 +143,8 @@ PostgreSQL documentation
       it could be dangerous, as explained above.  Specifically, this option is
       required to proceed if the server had not been cleanly shut down or if
       <command>pg_resetwal</command> cannot determine valid data for
-      <filename>pg_control</filename>.
+      <filename>pg_control</filename>.  It does not override the check for
+      a <filename>backup_label</filename> file.
      </para>
     </listitem>
    </varlistentry>
