@@ -3029,7 +3029,10 @@ apply_handle_update_internal(ApplyExecutionData *edata,
 			conflicttuple.origin != replorigin_xact_state.origin)
 			type = CT_UPDATE_DELETED;
 		else
+		{
+			INJECTION_POINT("apply_handle_update_internal_update_missing", NULL);
 			type = CT_UPDATE_MISSING;
+		}
 
 		/* Store the new tuple for conflict reporting */
 		slot_store_data(newslot, relmapentry, newtup);
@@ -5892,6 +5895,16 @@ InitializeLogRepWorker(void)
 	 */
 	SetConfigOption("default_transaction_read_only", "off", PGC_SUSET,
 					PGC_S_OVERRIDE);
+
+	/*
+	 * Likewise ignore default_transaction_isolation.  Apply looks up the rows
+	 * it changes with the latest snapshot, whatever the isolation level, and
+	 * the order of the changes is decided by the publisher; a serializable
+	 * transaction would only make apply fail on serialization conflicts with
+	 * local transactions.
+	 */
+	SetConfigOption("default_transaction_isolation", "read committed",
+					PGC_SUSET, PGC_S_OVERRIDE);
 
 	ApplyContext = AllocSetContextCreate(TopMemoryContext,
 										 "ApplyContext",
