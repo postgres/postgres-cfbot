@@ -41,9 +41,17 @@ typedef struct FunctionScanPerFuncState
 	Tuplestorestate *tstore;	/* holds the function result set */
 	int64		rowcount;		/* # of rows in result set, -1 if not known */
 	TupleTableSlot *func_slot;	/* function result slot (or NULL) */
+
+	/*
+	 * Storage statistics of the largest tuplestore discarded by a rescan so
+	 * far.
+	 */
+	char	   *savedStorageType;
+	int64		savedSpaceUsed;
 } FunctionScanPerFuncState;
 
 static TupleTableSlot *FunctionNext(FunctionScanState *node);
+static void save_tuplestore_stats(FunctionScanPerFuncState *fs);
 
 
 /* ----------------------------------------------------------------
@@ -358,6 +366,8 @@ ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)
 		 */
 		fs->tstore = NULL;
 		fs->rowcount = -1;
+		fs->savedStorageType = NULL;
+		fs->savedSpaceUsed = -1;
 
 		/*
 		 * Now build a tupdesc showing the result type we expect from the
@@ -549,6 +559,27 @@ ExecEndFunctionScan(FunctionScanState *node)
 	}
 }
 
+/*
+ * save_tuplestore_stats
+ *		Remember the storage statistics of the function's tuplestore, which is
+ *		about to be discarded, so that EXPLAIN ANALYZE can report the maximum
+ *		across all rescans.
+ */
+static void
+save_tuplestore_stats(FunctionScanPerFuncState *fs)
+{
+	char	   *storageType;
+	int64		spaceUsed;
+
+	tuplestore_get_stats(fs->tstore, &storageType, &spaceUsed);
+
+	if (spaceUsed > fs->savedSpaceUsed)
+	{
+		fs->savedSpaceUsed = spaceUsed;
+		fs->savedStorageType = storageType;
+	}
+}
+
 /* ----------------------------------------------------------------
  *		ExecReScanFunctionScan
  *
@@ -595,6 +626,13 @@ ExecReScanFunctionScan(FunctionScanState *node)
 			{
 				if (node->funcstates[i].tstore != NULL)
 				{
+					/*
+					 * We can't just tuplestore_clear() and reuse the
+					 * tuplestore, since ExecMakeTableFunctionResult() always
+					 * returns a new one.  Remember its statistics before
+					 * they're lost.
+					 */
+					save_tuplestore_stats(&node->funcstates[i]);
 					tuplestore_end(node->funcstates[i].tstore);
 					node->funcstates[i].tstore = NULL;
 				}
