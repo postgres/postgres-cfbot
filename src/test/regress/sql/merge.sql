@@ -1803,6 +1803,14 @@ CREATE VIEW bug18634v AS
 CREATE TABLE bug18634s (a int, b int, c text);
 INSERT INTO bug18634s VALUES (1, 2, 'src1');
 
+-- same with a join as the source, whose Vars must be marked as well
+BEGIN;
+MERGE INTO bug18634v t USING (bug18634s s JOIN bug18634s s2 ON s.a = s2.a) ON s.a = t.a
+  WHEN MATCHED THEN UPDATE SET b = s.b
+  WHEN NOT MATCHED BY SOURCE THEN DELETE
+  RETURNING merge_action(), s.c, s.tableoid IS NULL AS no_source, t.*;
+ROLLBACK;
+
 MERGE INTO bug18634v t USING bug18634s s ON s.a = t.a
   WHEN MATCHED THEN UPDATE SET b = s.b
   WHEN NOT MATCHED BY SOURCE THEN DELETE
