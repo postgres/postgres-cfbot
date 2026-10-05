@@ -524,6 +524,7 @@ typedef struct _constraintInfo
 	bool		condeferred;	/* true if constraint is INITIALLY DEFERRED */
 	bool		conperiod;		/* true if the constraint is WITHOUT OVERLAPS */
 	bool		conislocal;		/* true if constraint has local definition */
+	bool		childenforced;	/* true if inherited, but ENFORCED only here */
 	bool		separate;		/* true if must dump as separate item */
 } ConstraintInfo;
 

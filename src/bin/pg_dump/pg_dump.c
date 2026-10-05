@@ -9728,6 +9728,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 				constrs[j].condeferrable = false;
 				constrs[j].condeferred = false;
 				constrs[j].conislocal = (PQgetvalue(res, j, i_conislocal)[0] == 't');
+				constrs[j].childenforced = false;
 
 				/*
 				 * All invalid not-null constraints must be dumped separately,
@@ -9758,14 +9759,31 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		int			i_consrc;
 		int			i_conislocal;
 		int			i_convalidated;
+		int			i_childenforced;
 
 		pg_log_info("finding table check constraints");
 
 		resetPQExpBuffer(q);
+		appendPQExpBufferStr(q,
+							 "SELECT c.tableoid, c.oid, conrelid, conname, "
+							 "pg_catalog.pg_get_constraintdef(c.oid) AS consrc, "
+							 "conislocal, convalidated, ");
+
+		/*
+		 * An inherited constraint can be ENFORCED on a child while no parent
+		 * enforces it.
+		 */
+		if (fout->remoteVersion >= 180000)
+			appendPQExpBufferStr(q,
+								 "(c.conenforced AND NOT c.conislocal AND NOT EXISTS "
+								 "(SELECT 1 FROM pg_catalog.pg_inherits i "
+								 "JOIN pg_catalog.pg_constraint p ON (p.conrelid = i.inhparent) "
+								 "WHERE i.inhrelid = c.conrelid AND p.contype = 'c' "
+								 "AND p.conname = c.conname AND p.conenforced)) AS childenforced ");
+		else
+			appendPQExpBufferStr(q, "false AS childenforced ");
+
 		appendPQExpBuffer(q,
-						  "SELECT c.tableoid, c.oid, conrelid, conname, "
-						  "pg_catalog.pg_get_constraintdef(c.oid) AS consrc, "
-						  "conislocal, convalidated "
 						  "FROM unnest('%s'::pg_catalog.oid[]) AS src(tbloid)\n"
 						  "JOIN pg_catalog.pg_constraint c ON (src.tbloid = c.conrelid)\n"
 						  "WHERE contype = 'c' "
@@ -9784,6 +9802,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		i_consrc = PQfnumber(res, "consrc");
 		i_conislocal = PQfnumber(res, "conislocal");
 		i_convalidated = PQfnumber(res, "convalidated");
+		i_childenforced = PQfnumber(res, "childenforced");
 
 		/* As above, this loop iterates once per table, not once per row */
 		curtblindx = -1;
@@ -9844,11 +9863,20 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 				constrs[j].conislocal = (PQgetvalue(res, j, i_conislocal)[0] == 't');
 
 				/*
+				 * Partitions and binary upgrade dump inherited constraints
+				 * from the child's own definition, so this is not needed.
+				 */
+				constrs[j].childenforced =
+					(PQgetvalue(res, j, i_childenforced)[0] == 't' &&
+					 !tbinfo->ispartition && !dopt->binary_upgrade);
+
+				/*
 				 * An unvalidated constraint needs to be dumped separately, so
 				 * that potentially-violating existing data is loaded before
-				 * the constraint.
+				 * the constraint.  One that is ENFORCED only on a child is
+				 * altered after the parents' constraints are in place.
 				 */
-				constrs[j].separate = !validated;
+				constrs[j].separate = !validated || constrs[j].childenforced;
 
 				constrs[j].dobj.dump = tbinfo->dobj.dump;
 
@@ -9869,6 +9897,31 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 				 * We will detect later whether the constraint must be split
 				 * out from the table definition.
 				 */
+			}
+		}
+
+		/*
+		 * A separately dumped inherited constraint must come after the same
+		 * constraint of each parent.
+		 */
+		for (int j = 0; j < numConstrs; j++)
+		{
+			TableInfo  *tbinfo = constrs[j].contable;
+
+			if (!constrs[j].separate || constrs[j].conislocal)
+				continue;
+
+			for (int p = 0; p < tbinfo->numParents; p++)
+			{
+				TableInfo  *parent = tbinfo->parents[p];
+
+				for (int c = 0; parent->checkexprs && c < parent->ncheck; c++)
+				{
+					if (strcmp(parent->checkexprs[c].dobj.name,
+							   constrs[j].dobj.name) == 0)
+						addObjectDependency(&constrs[j].dobj,
+											parent->checkexprs[c].dobj.dumpId);
+				}
 			}
 		}
 
@@ -18977,6 +19030,25 @@ dumpConstraint(Archive *fout, const ConstraintInfo *coninfo)
 										  .section = SECTION_POST_DATA,
 										  .createStmt = q->data,
 										  .dropStmt = delq->data));
+		}
+		else if (coninfo->childenforced)
+		{
+			/* the parents' definitions created it as NOT ENFORCED */
+			appendPQExpBuffer(q, "ALTER %sTABLE %s ", foreign,
+							  fmtQualifiedDumpable(tbinfo));
+			appendPQExpBuffer(q, "ALTER CONSTRAINT %s ENFORCED;\n",
+							  fmtId(coninfo->dobj.name));
+
+			tag = psprintf("%s %s", tbinfo->dobj.name, coninfo->dobj.name);
+
+			if (coninfo->dobj.dump & DUMP_COMPONENT_DEFINITION)
+				ArchiveEntry(fout, coninfo->dobj.catId, coninfo->dobj.dumpId,
+							 ARCHIVE_OPTS(.tag = tag,
+										  .namespace = tbinfo->dobj.namespace->dobj.name,
+										  .owner = tbinfo->rolname,
+										  .description = "CHECK CONSTRAINT",
+										  .section = SECTION_POST_DATA,
+										  .createStmt = q->data));
 		}
 	}
 	else if (tbinfo == NULL)
