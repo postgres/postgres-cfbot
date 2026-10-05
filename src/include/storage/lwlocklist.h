@@ -20,7 +20,8 @@
  */
 
 /*
- * Some commonly-used locks have predefined positions within MainLWLockArray;
+ * Some commonly-used locks have predefined positions within the individual
+ * locks of MainLWLockStruct.fixed; these are defined here.
  * these are defined here.  If you add a lock, add it to the end to avoid
  * renumbering the existing locks; if you remove a lock, consider leaving a gap
  * in the numbering sequence for the benefit of DTrace and other external
