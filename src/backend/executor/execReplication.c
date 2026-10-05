@@ -192,8 +192,6 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 	ScanKeyData skey[INDEX_MAX_KEYS];
 	int			skey_attoff;
 	IndexScanDesc scan;
-	SnapshotData snap;
-	TransactionId xwait;
 	Relation	idxrel;
 	bool		found;
 	TypeCacheEntry **eq = NULL;
@@ -201,18 +199,15 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 	/* Open the index. */
 	idxrel = index_open(idxoid, RowExclusiveLock);
 
-	InitDirtySnapshot(snap);
-
 	/* Build scan key. */
 	skey_attoff = build_replindex_scan_key(skey, rel, idxrel, searchslot);
 
-	/* Start an index scan. */
-	scan = index_beginscan(rel, idxrel, false,
-						   &snap, NULL, skey_attoff, 0, SO_NONE);
-
 retry:
 	found = false;
+	PushActiveSnapshot(GetLatestSnapshot());
 
+	scan = index_beginscan(rel, idxrel, false,
+						   GetActiveSnapshot(), NULL, skey_attoff, 0, SO_NONE);
 	index_rescan(scan, skey, skey_attoff, NULL, 0);
 
 	/* Try to find the tuple */
@@ -233,31 +228,17 @@ retry:
 
 		ExecMaterializeSlot(outslot);
 
-		xwait = TransactionIdIsValid(snap.xmin) ?
-			snap.xmin : snap.xmax;
-
-		/*
-		 * If the tuple is locked, wait for locking transaction to finish and
-		 * retry.
-		 */
-		if (TransactionIdIsValid(xwait))
-		{
-			XactLockTableWait(xwait, NULL, NULL, XLTW_None);
-			goto retry;
-		}
-
-		/* Found our tuple and it's not locked */
 		found = true;
 		break;
 	}
+
+	index_endscan(scan);
 
 	/* Found tuple, try to lock it in the lockmode. */
 	if (found)
 	{
 		TM_FailureData tmfd;
 		TM_Result	res;
-
-		PushActiveSnapshot(GetLatestSnapshot());
 
 		res = table_tuple_lock(rel, &(outslot->tts_tid), GetActiveSnapshot(),
 							   outslot,
@@ -267,13 +248,14 @@ retry:
 							   0 /* don't follow updates */ ,
 							   &tmfd);
 
-		PopActiveSnapshot();
-
 		if (should_refetch_tuple(res, &tmfd))
+		{
+			PopActiveSnapshot();
 			goto retry;
+		}
 	}
 
-	index_endscan(scan);
+	PopActiveSnapshot();
 
 	/* Don't release lock until commit. */
 	index_close(idxrel, NoLock);
@@ -374,26 +356,20 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 {
 	TupleTableSlot *scanslot;
 	TableScanDesc scan;
-	SnapshotData snap;
 	TypeCacheEntry **eq;
-	TransactionId xwait;
 	bool		found;
 	TupleDesc	desc PG_USED_FOR_ASSERTS_ONLY = RelationGetDescr(rel);
 
 	Assert(equalTupleDescs(desc, outslot->tts_tupleDescriptor));
 
 	eq = palloc0_array(TypeCacheEntry *, outslot->tts_tupleDescriptor->natts);
-
-	/* Start a heap scan. */
-	InitDirtySnapshot(snap);
-	scan = table_beginscan(rel, &snap, 0, NULL,
-						   SO_NONE);
 	scanslot = table_slot_create(rel, NULL);
 
 retry:
 	found = false;
+	PushActiveSnapshot(GetLatestSnapshot());
 
-	table_rescan(scan, NULL);
+	scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, SO_NONE);
 
 	/* Try to find the tuple */
 	while (table_scan_getnextslot(scan, ForwardScanDirection, scanslot))
@@ -403,31 +379,16 @@ retry:
 
 		found = true;
 		ExecCopySlot(outslot, scanslot);
-
-		xwait = TransactionIdIsValid(snap.xmin) ?
-			snap.xmin : snap.xmax;
-
-		/*
-		 * If the tuple is locked, wait for locking transaction to finish and
-		 * retry.
-		 */
-		if (TransactionIdIsValid(xwait))
-		{
-			XactLockTableWait(xwait, NULL, NULL, XLTW_None);
-			goto retry;
-		}
-
-		/* Found our tuple and it's not locked */
 		break;
 	}
+
+	table_endscan(scan);
 
 	/* Found tuple, try to lock it in the lockmode. */
 	if (found)
 	{
 		TM_FailureData tmfd;
 		TM_Result	res;
-
-		PushActiveSnapshot(GetLatestSnapshot());
 
 		res = table_tuple_lock(rel, &(outslot->tts_tid), GetActiveSnapshot(),
 							   outslot,
@@ -437,13 +398,14 @@ retry:
 							   0 /* don't follow updates */ ,
 							   &tmfd);
 
-		PopActiveSnapshot();
-
 		if (should_refetch_tuple(res, &tmfd))
+		{
+			PopActiveSnapshot();
 			goto retry;
+		}
 	}
 
-	table_endscan(scan);
+	PopActiveSnapshot();
 	ExecDropSingleTupleTableSlot(scanslot);
 
 	return found;
