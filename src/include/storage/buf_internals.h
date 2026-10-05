@@ -253,14 +253,13 @@ BufTableHashPartition(uint32 hashcode)
 static inline LWLock *
 BufMappingPartitionLock(uint32 hashcode)
 {
-	return &MainLWLockArray[BUFFER_MAPPING_LWLOCK_OFFSET +
-							BufTableHashPartition(hashcode)].lock;
+	return &MainLWLocks->buffer_mapping[BufTableHashPartition(hashcode)].lock;
 }
 
 static inline LWLock *
 BufMappingPartitionLockByIndex(uint32 index)
 {
-	return &MainLWLockArray[BUFFER_MAPPING_LWLOCK_OFFSET + index].lock;
+	return &MainLWLocks->buffer_mapping[index].lock;
 }
 
 /*
