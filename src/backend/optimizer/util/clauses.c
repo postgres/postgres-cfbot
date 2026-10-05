@@ -3838,8 +3838,6 @@ eval_const_expressions_mutator(Node *node,
 					if (expr_is_nonnullable(context->root, (Expr *) e,
 											NOTNULL_SOURCE_HASHTABLE))
 					{
-						if (newargs == NIL)
-							return e;	/* first expr */
 						newargs = lappend(newargs, e);
 						break;
 					}
@@ -3858,10 +3856,17 @@ eval_const_expressions_mutator(Node *node,
 
 				/*
 				 * If there's exactly one surviving argument, we no longer
-				 * need COALESCE at all: the result is that argument
+				 * need COALESCE at all: the result is that argument.  Relabel
+				 * it if it lacks the COALESCE's typmod or collation.
 				 */
 				if (list_length(newargs) == 1)
-					return (Node *) linitial(newargs);
+					return applyRelabelType((Node *) linitial(newargs),
+											coalesceexpr->coalescetype,
+											exprTypmod(node),
+											coalesceexpr->coalescecollid,
+											COERCE_IMPLICIT_CAST,
+											-1,
+											false);
 
 				newcoalesce = makeNode(CoalesceExpr);
 				newcoalesce->coalescetype = coalesceexpr->coalescetype;

@@ -259,6 +259,12 @@ SELECT * FROM pred_tab WHERE COALESCE(b, a, b*a) > 1;
 EXPLAIN (COSTS OFF)
 SELECT * FROM pred_tab WHERE COALESCE(a, b) > 1;
 
+-- Ensure that the replacement keeps the typmod of the COALESCE
+CREATE TABLE pred_tab_vc (v varchar(3) NOT NULL);
+CREATE TABLE pred_tab_ctas AS SELECT COALESCE(v, 'longer') AS c FROM pred_tab_vc;
+\d pred_tab_ctas
+DROP TABLE pred_tab_vc, pred_tab_ctas;
+
 --
 -- Test detection of non-nullable expressions in predicates
 --
