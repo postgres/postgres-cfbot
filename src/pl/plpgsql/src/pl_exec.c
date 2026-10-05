@@ -4312,6 +4312,7 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 				bool		isnull;
 				Oid			valtype;
 				int32		valtypmod;
+				bool		simple;
 
 				/*
 				 * Setup error traceback support for ereport().  This is so
@@ -4327,9 +4328,13 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 				if (expr->plan == NULL)
 					exec_prepare_plan(estate, expr, 0);
 
-				/* And evaluate the expression */
-				value = exec_eval_expr(estate, expr,
-									   &isnull, &valtype, &valtypmod);
+				/*
+				 * And evaluate the expression.  This fails if the expression
+				 * is busy, or if replanning found it is no longer simple.  In
+				 * that case fall through to the SPI code below.
+				 */
+				simple = exec_eval_simple_expr(estate, expr, &value, &isnull,
+											   &valtype, &valtypmod);
 
 				/*
 				 * Pop the error context stack: the code below would not use
@@ -4337,20 +4342,23 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 				 */
 				error_context_stack = plerrcontext.previous;
 
-				/* Assign the result to the INTO target */
-				exec_assign_value(estate, estate->datums[row->varnos[0]],
-								  value, isnull, valtype, valtypmod);
-				exec_eval_cleanup(estate);
+				if (simple)
+				{
+					/* Assign the result to the INTO target */
+					exec_assign_value(estate, estate->datums[row->varnos[0]],
+									  value, isnull, valtype, valtypmod);
+					exec_eval_cleanup(estate);
 
-				/*
-				 * We must duplicate the other effects of the code below, as
-				 * well.  We know that exactly one row was returned, so it
-				 * doesn't matter whether the INTO was STRICT or not.
-				 */
-				exec_set_found(estate, true);
-				estate->eval_processed = 1;
+					/*
+					 * We must duplicate the other effects of the code below,
+					 * as well.  We know that exactly one row was returned, so
+					 * it doesn't matter whether the INTO was STRICT or not.
+					 */
+					exec_set_found(estate, true);
+					estate->eval_processed = 1;
 
-				return PLPGSQL_RC_OK;
+					return PLPGSQL_RC_OK;
+				}
 			}
 		}
 	}
