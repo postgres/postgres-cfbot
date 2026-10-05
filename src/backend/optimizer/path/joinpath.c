@@ -536,6 +536,15 @@ paraminfo_get_equal_hashops(PlannerInfo *root, ParamPathInfo *param_info,
 			}
 
 			/*
+			 * Ensure the cache key exposes the clause's input collation, so
+			 * that Memoize compares keys the same way the clause does.  See
+			 * comments for canonicalize_ec_expression.
+			 */
+			expr = (Node *) canonicalize_ec_expression((Expr *) expr,
+													   exprType(expr),
+													   opexpr->inputcollid);
+
+			/*
 			 * 'expr' may already exist as a parameter from a previous item in
 			 * ppi_clauses.  No need to include it again, however we'd better
 			 * ensure we do switch into binary mode if required.  See below.
