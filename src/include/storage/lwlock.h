@@ -71,16 +71,15 @@ typedef union LWLockPadded
 	char		pad[LWLOCK_PADDED_SIZE];
 } LWLockPadded;
 
-extern PGDLLIMPORT LWLockPadded *MainLWLockArray;
-
 /*
  * It's a bit odd to declare NUM_BUFFER_PARTITIONS and NUM_LOCK_PARTITIONS
- * here, but we need them to figure out offsets within MainLWLockArray, and
+ * here, but we need them for the definition of MainLWLockStruct, and
  * having this file include lock.h or bufmgr.h would be backwards.
  */
 
 /* Number of partitions of the shared buffer mapping hashtable */
-#define NUM_BUFFER_PARTITIONS  128
+#define LOG2_NUM_BUFFER_PARTITIONS  7
+#define NUM_BUFFER_PARTITIONS  (1 << LOG2_NUM_BUFFER_PARTITIONS)
 
 /* Number of partitions the shared lock tables are divided into */
 #define LOG2_NUM_LOCK_PARTITIONS  4
@@ -90,14 +89,27 @@ extern PGDLLIMPORT LWLockPadded *MainLWLockArray;
 #define LOG2_NUM_PREDICATELOCK_PARTITIONS  4
 #define NUM_PREDICATELOCK_PARTITIONS  (1 << LOG2_NUM_PREDICATELOCK_PARTITIONS)
 
-/* Offsets for various chunks of preallocated lwlocks. */
-#define BUFFER_MAPPING_LWLOCK_OFFSET	NUM_INDIVIDUAL_LWLOCKS
-#define LOCK_MANAGER_LWLOCK_OFFSET		\
-	(BUFFER_MAPPING_LWLOCK_OFFSET + NUM_BUFFER_PARTITIONS)
-#define PREDICATELOCK_MANAGER_LWLOCK_OFFSET \
-	(LOCK_MANAGER_LWLOCK_OFFSET + NUM_LOCK_PARTITIONS)
-#define NUM_FIXED_LWLOCKS \
-	(PREDICATELOCK_MANAGER_LWLOCK_OFFSET + NUM_PREDICATELOCK_PARTITIONS)
+/*
+ * Built-in LWLocks in shared memory.  Extension locks requested with
+ * RequestNamedLWLockTranche() are stored in extra[].
+ */
+typedef struct MainLWLockStruct
+{
+	LWLockPadded individual[NUM_INDIVIDUAL_LWLOCKS];
+	LWLockPadded buffer_mapping[NUM_BUFFER_PARTITIONS];
+	LWLockPadded lock_manager[NUM_LOCK_PARTITIONS];
+	LWLockPadded predicate_lock_manager[NUM_PREDICATELOCK_PARTITIONS];
+	LWLockPadded extra[FLEXIBLE_ARRAY_MEMBER];
+} MainLWLockStruct;
+
+extern PGDLLIMPORT MainLWLockStruct *MainLWLocks;
+
+/*
+ * Byte size of the built-in portion of MainLWLockStruct (everything before
+ * extra[]).  Used for shared-memory sizing; not a lock count, so member types
+ * can differ (e.g. mix LWLock and LWLockPadded) without changing this idiom.
+ */
+#define MAIN_LWLOCKS_BUILTIN_SIZE		offsetof(MainLWLockStruct, extra)
 
 typedef enum LWLockMode
 {

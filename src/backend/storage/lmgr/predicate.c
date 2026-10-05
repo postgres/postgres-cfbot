@@ -255,10 +255,10 @@
 #define PredicateLockHashPartition(hashcode) \
 	((hashcode) % NUM_PREDICATELOCK_PARTITIONS)
 #define PredicateLockHashPartitionLock(hashcode) \
-	(&MainLWLockArray[PREDICATELOCK_MANAGER_LWLOCK_OFFSET + \
+	(&MainLWLocks->predicate_lock_manager[ \
 		PredicateLockHashPartition(hashcode)].lock)
 #define PredicateLockHashPartitionLockByIndex(i) \
-	(&MainLWLockArray[PREDICATELOCK_MANAGER_LWLOCK_OFFSET + (i)].lock)
+	(&MainLWLocks->predicate_lock_manager[(i)].lock)
 
 #define NPREDICATELOCKTARGETENTS() \
 	mul_size(max_predicate_locks_per_xact, add_size(MaxBackends, max_prepared_xacts))
