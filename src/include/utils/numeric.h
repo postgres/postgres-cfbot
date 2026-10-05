@@ -67,6 +67,12 @@ DatumGetNumeric(Datum X)
 }
 
 static inline Numeric
+DatumGetNumericPacked(Datum X)
+{
+	return (Numeric) PG_DETOAST_DATUM_PACKED(X);
+}
+
+static inline Numeric
 DatumGetNumericCopy(Datum X)
 {
 	return (Numeric) PG_DETOAST_DATUM_COPY(X);
@@ -79,6 +85,7 @@ NumericGetDatum(Numeric X)
 }
 
 #define PG_GETARG_NUMERIC(n)	  DatumGetNumeric(PG_GETARG_DATUM(n))
+#define PG_GETARG_NUMERIC_PACKED(n)	  DatumGetNumericPacked(PG_GETARG_DATUM(n))
 #define PG_GETARG_NUMERIC_COPY(n) DatumGetNumericCopy(PG_GETARG_DATUM(n))
 #define PG_RETURN_NUMERIC(x)	  return NumericGetDatum(x)
 
