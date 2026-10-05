@@ -1,0 +1,6 @@
+# int16 extension
+comment = '128-bit signed integer data type'
+default_version = '1.0'
+module_pathname = '$libdir/int16'
+relocatable = true
+trusted = true
