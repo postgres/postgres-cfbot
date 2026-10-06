@@ -1031,6 +1031,19 @@ SELECT * FROM pg_backup_stop(wait_for_archive => true);
      vital to the backup working and must be written byte for byte without
      modification, which may require opening the file in binary mode.
     </para>
+    <para>
+     Note that a backup made with the low-level API copies
+     <filename>pg_control</filename> from the running cluster, so it does not
+     contain the flag that <xref linkend="app-pgbasebackup"/> sets to make
+     <filename>backup_label</filename> mandatory for recovery. Removing
+     <filename>backup_label</filename> from such a backup will not prevent the
+     cluster from starting; it will instead recover from the checkpoint
+     recorded in <filename>pg_control</filename>. Unless that happens to be the
+     checkpoint the backup started from, recovery will begin too late and
+     silently produce an inconsistent cluster.
+     Backup software using this API should set the flag itself if it is able to
+     modify <filename>pg_control</filename>.
+    </para>
    </listitem>
    <listitem>
     <para>
