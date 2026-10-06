@@ -116,6 +116,11 @@ static uint8 curinsert_flags = 0;
 static XLogRecData hdr_rdt;
 static char *hdr_scratch = NULL;
 
+#ifdef USE_ZSTD
+/* Reuse the compression context for the lifetime of the backend. */
+static ZSTD_CCtx *zstd_cctx = NULL;
+#endif
+
 #define SizeOfXlogOrigin	(sizeof(ReplOriginId) + sizeof(char))
 #define SizeOfXLogTransactionId	(sizeof(TransactionId) + sizeof(char))
 
@@ -1063,8 +1068,18 @@ XLogCompressBackupBlock(const PageData *page, uint16 hole_offset, uint16 hole_le
 
 		case WAL_COMPRESSION_ZSTD:
 #ifdef USE_ZSTD
-			len = ZSTD_compress(dest, COMPRESS_BUFSIZE, source, orig_len,
-								ZSTD_CLEVEL_DEFAULT);
+			if (zstd_cctx == NULL)
+				zstd_cctx = ZSTD_createCCtx();
+
+			/* Compression is optional, and we may be in a critical section. */
+			if (zstd_cctx == NULL)
+			{
+				len = -1;
+				break;
+			}
+
+			len = ZSTD_compressCCtx(zstd_cctx, dest, COMPRESS_BUFSIZE,
+									source, orig_len, ZSTD_CLEVEL_DEFAULT);
 			if (ZSTD_isError(len))
 				len = -1;		/* failure */
 #else
