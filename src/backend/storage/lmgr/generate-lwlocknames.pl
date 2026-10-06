@@ -130,7 +130,7 @@ while (<$lwlocklist>)
 		$lastlockidx = $lockidx;
 
 		# Add a "Lock" suffix to each lock name, as the C code depends on that.
-		printf $h "#define %-32s (&MainLWLockArray[$lockidx].lock)\n",
+		printf $h "#define %-32s (&MainLWLocks->individual[$lockidx].lock)\n",
 		  $lockname . "Lock";
 
 		next;
