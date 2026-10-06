@@ -35,6 +35,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/amapi.h"
 #include "access/table.h"
 #include "access/xact.h"
@@ -205,6 +207,13 @@ typedef struct PVIndStats
 	 */
 	bool		istat_updated;	/* are the stats updated? */
 	IndexBulkDeleteResult istat;
+
+	/*
+	 * Resource usage reported for all passes over this index.  Only the
+	 * process handling the index writes this; the leader reads it after
+	 * workers have finished, before destroying the parallel context.
+	 */
+	PgStat_CommonCounts extvac_usage;
 } PVIndStats;
 
 /*
@@ -518,7 +527,8 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
  * context, but that won't be safe (see ExitParallelMode).
  */
 void
-parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats)
+parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats,
+					PgStat_CommonCounts *index_usage)
 {
 	Assert(!IsParallelWorker());
 
@@ -534,6 +544,8 @@ parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats)
 		}
 		else
 			istats[i] = NULL;
+
+		extvac_accumulate_index_usage(index_usage, &indstats->extvac_usage);
 	}
 
 	TidStoreDestroy(pvs->dead_items);
@@ -1131,6 +1143,12 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		PROGRESS_SCAN_BLOCKS_DONE
 	};
 	const int64 reset_val[] = {(int64) InvalidOid, 0, 0};
+	TimestampTz istarttime = GetCurrentTimestamp();
+	double		startdelaytime = VacuumDelayTime;
+	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_deleted = 0;
+	LVExtStatCounters extVacCounters;
+	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
@@ -1139,6 +1157,17 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	if (indstats->istat_updated)
 		istat = &(indstats->istat);
 
+	/*
+	 * Snapshot the running bulkdelete totals: an index may be processed
+	 * several times per vacuum, and the report below covers this pass only.
+	 */
+	if (istat != NULL)
+	{
+		prev_tuples_removed = istat->tuples_removed;
+		prev_pages_deleted = istat->pages_deleted;
+	}
+	if (set_report_vacuum_hook)
+		extvac_stats_start(indrel, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1176,6 +1205,35 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	}
 
 	pgstat_progress_update_multi_param(3, reset_index, reset_val);
+
+	if (set_report_vacuum_hook)
+	{
+		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end(indrel, &extVacCounters, &extVacReport.common);
+		extVacReport.type = PGSTAT_EXTVAC_INDEX;
+		if (istat_res != NULL)
+		{
+			extVacReport.common.tuples_deleted =
+				istat_res->tuples_removed - prev_tuples_removed;
+			extVacReport.index.pages_deleted =
+				istat_res->pages_deleted - prev_pages_deleted;
+		}
+		extvac_accumulate_index_usage(&indstats->extvac_usage,
+									  &extVacReport.common);
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
+	}
+
+	/*
+	 * Accumulate this pass into the index's cumulative vacuum times.  Use the
+	 * leader's DSM flag to classify autovacuum: a parallel worker of an
+	 * autovacuum leader is a regular background worker.
+	 */
+	pgstat_report_index_vacuum_time(indrel,
+									TimestampDifferenceMilliseconds(istarttime,
+																	GetCurrentTimestamp()),
+									(PgStat_Counter) rint(VacuumDelayTime -
+														  startdelaytime),
+									pvs->shared->is_autovacuum);
 
 	/*
 	 * Copy the index bulk-deletion result returned from ambulkdelete and

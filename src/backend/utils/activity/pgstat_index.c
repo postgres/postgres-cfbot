@@ -96,6 +96,49 @@ pgstat_index_delete_pending_cb(PgStat_EntryRef *entry_ref)
 }
 
 /*
+ * Report the time spent vacuuming an index.
+ *
+ * Vacuum may process an index several times: a bulkdelete pass per index
+ * scan cycle plus a final cleanup pass, possibly spread across parallel
+ * workers.  Each pass adds its elapsed and delay time here, accumulating
+ * into the index's total_vacuum_time or total_autovacuum_time, mirroring
+ * the table-level counters.  The caller says whether this is autovacuum:
+ * parallel workers of an autovacuum leader are regular background workers,
+ * so AmAutoVacuumWorkerProcess() cannot be relied upon here.
+ */
+void
+pgstat_report_index_vacuum_time(Relation rel, PgStat_Counter elapsedtime,
+								PgStat_Counter delaytime, bool is_autovacuum)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Index *shidxentry;
+	PgStat_StatIdxEntry *idxentry;
+	Oid			dboid = (rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+	/* block acquiring lock for the same reason as pgstat_report_autovac() */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_INDEX, dboid,
+											RelationGetRelid(rel), false);
+	shidxentry = (PgStatShared_Index *) entry_ref->shared_stats;
+	idxentry = &shidxentry->stats;
+
+	if (is_autovacuum)
+	{
+		idxentry->total_autovacuum_time += elapsedtime;
+		idxentry->total_autovacuum_delay_time += delaytime;
+	}
+	else
+	{
+		idxentry->total_vacuum_time += elapsedtime;
+		idxentry->total_vacuum_delay_time += delaytime;
+	}
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
  * Callback to reset the timestamp on an index stats entry.
  */
 void
