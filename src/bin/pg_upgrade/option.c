@@ -249,17 +249,6 @@ parseCommandLine(int argc, char *argv[])
 	if (optind < argc)
 		pg_fatal("too many command-line arguments (first is \"%s\")", argv[optind]);
 
-	/*
-	 * -O passes options to the new cluster's postmaster, but with --initdb
-	 * the new cluster is created by initdb, which accepts a different option
-	 * set.  Rather than guess which -O options initdb also understands, reject
-	 * the combination and let the user create the cluster manually (without
-	 * --initdb) if they need postmaster-only options.
-	 */
-	if (new_cluster.pgopts && user_opts.initdb_new_cluster)
-		pg_fatal("options %s and %s cannot be used together",
-				 "-O/--new-options", "--initdb");
-
 	if (!user_opts.sync_method)
 		user_opts.sync_method = pg_strdup("fsync");
 

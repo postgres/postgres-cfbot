@@ -268,43 +268,47 @@ PostgreSQL documentation
        <para>
         Create the new cluster automatically by running
         <command>initdb</command> before upgrading, instead of requiring the
-        user to have created it manually.  The WAL segment size and data
-        checksum setting are derived from the old cluster so the new cluster
-        passes <application>pg_upgrade</application>'s control-data check; the
-        encoding and locale are matched to the old cluster's
-        <literal>template0</literal>.
+        user to have created it manually.
+        The new cluster uses the old cluster's WAL segment size and
+        data-checksum setting, and the encoding and locale of its
+        <literal>template0</literal> database.
+        On Unix systems, if the old cluster allows group read/execute access
+        to its data directory, <option>--allow-group-access</option> is passed
+        to <command>initdb</command> for the new cluster.
        </para>
        <para>
         The new cluster data directory specified with
         <option>-D</option>/<option>--new-datadir</option> must be empty or
         not yet exist; otherwise <application>pg_upgrade</application> exits
         with an error.
+        It must not overlap the <filename>pg_upgrade_output.d</filename>
+        directory in the current working directory: neither directory may
+        be equal to or contain the other.
        </para>
        <para>
         When combined with <option>-c</option>/<option>--check</option>,
-        <option>--initdb</option> performs a dry run: it reports the
-        <command>initdb</command> command it would run and verifies that the new
-        cluster could be created (the new binaries' major version matches, the
-        target directory is empty, and the old cluster is reachable), but
-        does not create the new cluster.  This is a lighter check than a plain
-        <option>--check</option>, which instead queries an already-created new
-        cluster.
+        <option>--initdb</option> runs source-cluster compatibility checks,
+        validates the new binaries and the empty or nonexistent target
+        directory, and reports the <command>initdb</command> command it would
+        run without creating the new cluster.
+        Checks requiring an initialized target cluster or a writable target
+        data directory, including loading required libraries and testing the
+        selected file transfer mode, are deferred until the real upgrade.
        </para>
        <para>
-        <option>--initdb</option> cannot be combined with
-        <option>-O</option>/<option>--new-options</option>: those options are
-        passed to the new cluster's server process, which accepts a different
-        set of options than <command>initdb</command>.  If you need to supply
-        such options, create the new cluster manually and omit
-        <option>--initdb</option>.
+        <option>-O</option>/<option>--new-options</option> continues to pass
+        options to the new cluster's server process; those options are not
+        passed to <command>initdb</command>.  To use additional
+        <command>initdb</command> options, create the new cluster manually and
+        omit <option>--initdb</option>.
        </para>
        <para>
-        To discover the old cluster's encoding and locale,
-        <option>--initdb</option> briefly starts the old server in
-        binary-upgrade mode (which disables autovacuum) and stops it again
-        before creating the new cluster.  If a compatibility check fails after
-        the new cluster has been created, its data directory is removed
-        automatically, so the upgrade can be retried without manual cleanup.
+        If <command>initdb</command> or a compatibility check fails,
+        <application>pg_upgrade</application> removes the newly created files.
+        A directory created by <application>pg_upgrade</application> is also
+        removed.
+        A pre-existing empty directory is preserved, and its original
+        permissions are restored on supported Unix systems.
        </para>
       </listitem>
      </varlistentry>
@@ -670,7 +674,9 @@ pg_upgrade.exe
      You can use the same port number for both clusters when doing an
      upgrade because the old and new clusters will not be running at the
      same time.  However, when checking an old running server, the old
-     and new port numbers must be different.
+     and new port numbers must be different unless <option>--check</option>
+     is combined with <option>--initdb</option>, which does not start a new
+     server.
     </para>
 
     <para>
@@ -1125,8 +1131,10 @@ psql --username=postgres --file=script.sql postgres
   <para>
    <application>pg_upgrade</application> creates various working files, such
    as schema dumps, stored within <filename>pg_upgrade_output.d</filename> in
-   the directory of the new cluster. Each run creates a new subdirectory named
-   with a timestamp formatted as per ISO 8601
+   the directory of the new cluster, or in the current working directory when
+   <option>--initdb</option> is used.
+   Each run creates a new subdirectory named with a timestamp formatted as per
+   ISO 8601
    (<literal>%Y%m%dT%H%M%S</literal>), where all its generated files are
    stored.
    <filename>pg_upgrade_output.d</filename> and its contained files will be

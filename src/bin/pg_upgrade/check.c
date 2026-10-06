@@ -30,7 +30,6 @@ static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_not_null_inheritance(ClusterInfo *cluster);
 static void check_for_gist_inet_ops(ClusterInfo *cluster);
-static void check_for_new_tablespace_dir(void);
 static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
 static void check_for_unicode_update(ClusterInfo *cluster);
 static void check_new_cluster_replication_slots(void);
@@ -741,7 +740,7 @@ check_new_cluster(void)
 
 	check_for_prepared_transactions(&new_cluster);
 
-	check_for_new_tablespace_dir();
+	check_new_cluster_tablespace_dirs();
 
 	check_new_cluster_replication_slots();
 
@@ -923,8 +922,8 @@ check_new_cluster_is_empty(void)
  * This allows the failure to be detected at check time, rather than
  * during schema restore.
  */
-static void
-check_for_new_tablespace_dir(void)
+void
+check_new_cluster_tablespace_dirs(void)
 {
 	int			tblnum;
 	char		new_tablespace_dir[MAXPGPATH];
