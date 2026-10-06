@@ -16,14 +16,18 @@
 
 #include "access/gist_private.h"
 #include "access/gistscan.h"
+#include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_collation.h"
+#include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/predicate.h"
 #include "utils/fmgrprotos.h"
 #include "utils/index_selfuncs.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -69,7 +73,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.amconsistentequality = false,
 		.amconsistentordering = false,
 		.amcanbackward = false,
-		.amcanunique = false,
+		.amcanunique = true,
 		.amcanmulticol = true,
 		.amoptionalkey = true,
 		.amsearcharray = false,
@@ -161,6 +165,7 @@ gistbuildempty(Relation index)
  *
  *	  This is the public interface routine for tuple insertion in GiSTs.
  *	  It doesn't do any work; just locks the relation and passes the buck.
+ *	  TODO: I don't see where it locks the relation?
  */
 bool
 gistinsert(Relation r, Datum *values, bool *isnull,
@@ -172,12 +177,15 @@ gistinsert(Relation r, Datum *values, bool *isnull,
 	GISTSTATE  *giststate = (GISTSTATE *) indexInfo->ii_AmCache;
 	IndexTuple	itup;
 	MemoryContext oldCxt;
+	bool		known_unique;
 
 	/* Initialize GISTSTATE cache if first call in this statement */
 	if (giststate == NULL)
 	{
 		oldCxt = MemoryContextSwitchTo(indexInfo->ii_Context);
 		giststate = initGISTstate(r);
+		if (checkUnique != UNIQUE_CHECK_NO)
+			initGISTstateExclude(giststate, r);
 		giststate->tempCxt = createTempGistContext();
 		indexInfo->ii_AmCache = giststate;
 		MemoryContextSwitchTo(oldCxt);
@@ -188,13 +196,13 @@ gistinsert(Relation r, Datum *values, bool *isnull,
 	itup = gistFormTuple(giststate, r, values, isnull, true);
 	itup->t_tid = *ht_ctid;
 
-	gistdoinsert(r, itup, 0, giststate, heapRel, false);
+	known_unique = gistdoinsert(r, itup, checkUnique, values, isnull, 0, giststate, heapRel, false);
 
 	/* cleanup */
 	MemoryContextSwitchTo(oldCxt);
 	MemoryContextReset(giststate->tempCxt);
 
-	return false;
+	return known_unique;
 }
 
 
@@ -631,13 +639,231 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 }
 
 /*
+ * gist_check_unique -- enforce UNIQUEness with given excludeFn.
+ *
+ * ereports if there is a definite conflict, or returns InvalidTransactionId if
+ * there is no conflict, or returns the TransactionId that must be waited on if
+ * there is a potential conflict from a not-yet-committed transaction.
+ *
+ * The giststate must already point to a leaf page.
+ *
+ * Our definition of uniqueness is based on the excludeFn, which does not
+ * necessarily check for equality. That lets you create so-called UNIQUE indexes
+ * that forbid something else, like overlaps. This is useful for indexes
+ * backing temporal constraints (i.e. WITHOUT OVERLAPS).
+ *
+ * Uniqueness can only be enforced if the GISTENTRY Datum is the same as the
+ * heap Datum---in other words there is no compress support proc.
+ */
+static TransactionId
+gist_check_unique(Relation rel, GISTSTATE *giststate, GISTInsertState *state,
+				  Relation heapRel, IndexTuple itup, Datum *newvals, bool *newnulls,
+				  IndexUniqueCheck checkUnique, bool *is_unique)
+{
+	Page		page;
+	OffsetNumber maxoff;
+	OffsetNumber i;
+	MemoryContext oldcxt;
+	bool		conflicts = false;
+	SnapshotData SnapshotDirty;
+	IndexFetchTableData *scan;
+	TupleTableSlot *slot;
+	bool		call_again = false;
+	bool		found = false;
+	bool		all_dead = false; // TODO: use this? nbtree does.
+	Datum		oldvals[INDEX_MAX_KEYS];
+	bool		oldnulls[INDEX_MAX_KEYS];
+
+	InitDirtySnapshot(SnapshotDirty);
+
+	slot = table_slot_create(heapRel, NULL);
+
+	/* Check all tuples on the page for a conflict. */
+	page = state->stack->page;
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (i = FirstOffsetNumber; i <= maxoff && !conflicts; i = OffsetNumberNext(i))
+	{
+		ItemId		iid = PageGetItemId(page, i);
+		IndexTuple	it;
+		// bool		match;
+		// bool		recheck;	// TODO
+		// bool		recheck_distances;
+		int			j;
+
+		/*
+		 * XXX: orindary scans only skip dead items if passed
+		 * ignore_killed_tuples. Do we ever want to see killed tuples?
+		 */
+		if (ItemIdIsDead(iid))
+			continue;
+
+		it = (IndexTuple) PageGetItem(page, iid);
+
+		/*
+		 * Get the original Datums from the heap.
+		 * We have to look there anyway for visibility info.
+		 * We'll pass these Datums to the excludeFn.
+		 * If the opclass has no compression function,
+		 * we could use the Datums from the index tuple instead,
+		 * but as long as we're loading the heap record
+		 * we might as well use it.
+		 */
+
+		scan = table_index_fetch_begin(heapRel);
+		do {
+			// TODO: What if t_tid gets modified?
+			found |= table_index_fetch_tuple(scan, &it->t_tid, &SnapshotDirty, slot,
+											&call_again, &all_dead);
+			/*
+			 * XXX: Is looping on call_again actually needed here?
+			 * table_index_fetch_tuple_check ignores it.
+			 * But since we use the Datums, we do need the latest values.
+			 */
+		} while (call_again);
+		if (!found)
+		{
+			table_index_fetch_end(scan);
+			continue;
+		}
+		slot_getallattrs(slot);
+
+		conflicts = true;
+
+		oldcxt = MemoryContextSwitchTo(giststate->tempCxt);
+
+		/* Check all the key elements against excludeFn */
+		for (j = 0; j < giststate->leafTupdesc->natts; j++)
+		{
+			int		heapattr;
+			Datum	oldval;
+			Datum	newval;
+			bool	oldIsNull;
+			Datum	test;
+
+			Assert(OidIsValid(giststate->excludeFn[j].fn_oid));
+
+			// TODO: If it's an expression index with a compress function,
+			// we have to give up. Unless we want to re-evaluate the expression.
+			heapattr = rel->rd_index->indkey.values[j];
+
+			// XXX: I assume the index has a null iff the heap does?
+			// XXX: What about nulls_not_distinct? Btree seems to ignore that
+			// though in access/nbtree/nbtinsert.c:_bt_doinsert
+			oldIsNull = slot->tts_isnull[heapattr - 1];
+			if (oldIsNull)
+			{
+				conflicts = false;
+				break;
+			}
+			else
+			{
+				oldval = slot->tts_values[heapattr - 1];
+			}
+			/*
+			 * Record the heap Datums in index-attribute order,
+			 * so we can build an error message below.
+			 */
+			oldnulls[j] = oldIsNull;
+			oldvals[j] = oldval;
+
+			// XXX: I assume the index has a null iff the heap does?
+			// XXX: What about nulls_not_distinct? Btree seems to ignore that
+			// though in access/nbtree/nbtinsert.c:_bt_doinsert
+			if (newnulls[j])
+			{
+				// XXX: probably a higher level prevents even checking the index here?
+				conflicts = false;
+				break;
+			}
+			else
+			{
+				// TODO: detoast the newvals up front, only once?
+				newval = newvals[j];
+			}
+
+			// TODO: If we check nulls_not_distinct here,
+			// and both new and old are null,
+			// then treat it as a conflict.
+			// Somehow nbtree doesn't do that.
+
+			test = FunctionCall2Coll(&giststate->excludeFn[j],
+									 InvalidOid,	// TODO: collation
+									 oldval,
+									 newval);
+			/*
+			 * If all attributes conflict, then we violate uniqueness.
+			 * So we can abort on the first non-conflicting attribute.
+			 */
+			conflicts &= DatumGetBool(test);
+			if (!conflicts)
+				break;
+		}
+
+		table_index_fetch_end(scan);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	*is_unique = !conflicts;
+
+	// TODO: depends on checkUnique
+	// TODO: deal with MVCC
+	if (conflicts) {
+		char *key_desc = BuildIndexValueDescription(rel, newvals, newnulls);
+
+		/* For WITHOUT OVERLAPS, match the exclusion constraint message */
+		if (rel->rd_index->indisexclusion)
+		{
+			char *old_key_desc = BuildIndexValueDescription(rel, oldvals, oldnulls);
+			if (state->is_build)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNIQUE_VIOLATION),
+						 errmsg("could not create exclusion constraint \"%s\"",
+								RelationGetRelationName(rel)),
+						 key_desc && old_key_desc ? errdetail("Key %s conflicts with key %s.",
+											  key_desc, old_key_desc) : 0,
+						 errtableconstraint(heapRel,
+											RelationGetRelationName(rel))));
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_UNIQUE_VIOLATION),
+						 errmsg("conflicting key value violates exclusion constraint \"%s\"",
+								RelationGetRelationName(rel)),
+						 key_desc && old_key_desc ? errdetail("Key %s conflicts with existing key %s.",
+											  key_desc, old_key_desc) : 0,
+						 errtableconstraint(heapRel,
+											RelationGetRelationName(rel))));
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_UNIQUE_VIOLATION),
+					 errmsg("duplicate key value violates unique constraint \"%s\"",
+							RelationGetRelationName(rel)),
+					 key_desc ? errdetail("Key %s already exists.",
+										  key_desc) : 0,
+					 errtableconstraint(heapRel,
+										RelationGetRelationName(rel))));
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+
+	// TODO: xwait when it is not unique
+	return InvalidTransactionId;
+}
+
+/*
  * Workhorse routine for doing insertion into a GiST index. Note that
  * this routine assumes it is invoked in a short-lived memory context,
  * so it does not bother releasing palloc'd allocations.
+ *
+ * The result value is only significant for UNIQUE_CHECK_PARTIAL:
+ * it must be true if the entry is known unique, else false.
+ * (In the current implementation we'll also return true after a
+ * successful UNIQUE_CHECK_YES or UNIQUE_CHECK_EXISTING call, but
+ * that's just a coding artifact.)
  */
-void
-gistdoinsert(Relation r, IndexTuple itup, Size freespace,
-			 GISTSTATE *giststate, Relation heapRel, bool is_build)
+bool
+gistdoinsert(Relation r, IndexTuple itup, IndexUniqueCheck checkUnique,
+			 Datum *values, bool *isnull,
+			 Size freespace, GISTSTATE *giststate, Relation heapRel, bool is_build)
 {
 	ItemId		iid;
 	IndexTuple	idxtuple;
@@ -645,6 +871,10 @@ gistdoinsert(Relation r, IndexTuple itup, Size freespace,
 	GISTInsertStack *stack;
 	GISTInsertState state;
 	bool		xlocked = false;
+	bool		checkingunique = (checkUnique != UNIQUE_CHECK_NO);
+	bool		is_unique = false;
+
+search:
 
 	memset(&state, 0, sizeof(GISTInsertState));
 	state.freespace = freespace;
@@ -836,6 +1066,12 @@ gistdoinsert(Relation r, IndexTuple itup, Size freespace,
 			 * Leaf page. Insert the new key. We've already updated all the
 			 * parents on the way down, but we might have to split the page if
 			 * it doesn't fit. gistinserttuple() will take care of that.
+			 * TODO: If the parents are already updated,
+			 * isn't that a problem if the uniqueness check fails??
+			 * Do we need to descend twice and keep the locks longer for unique
+			 * indexes?
+			 * If guess if the new entry *is* non-unique, the parents didn't
+			 * actually change, right?
 			 */
 
 			/*
@@ -889,16 +1125,47 @@ gistdoinsert(Relation r, IndexTuple itup, Size freespace,
 
 			/* now state.stack->(page, buffer and blkno) points to leaf page */
 
-			gistinserttuple(&state, stack, giststate, itup,
-							InvalidOffsetNumber);
+			// TODO: now that we have the lock,
+			// we can check for uniqueness and raise an error if needed.
+			if (checkingunique)
+			{
+				TransactionId xwait;
+				// If there are null values, it can't be unique
+				// TODO: but what about NULLS NOT DISTINCT? I don't see that in
+				// nbtree _bt_doinsert.
+				// For btree this seems to be handled in utils/sort/tuplesortvariants.c
+				// (which of course is outside of access/nbtree, but has btree
+				// in many function names).
+
+				xwait = gist_check_unique(r, giststate, &state, heapRel, itup,
+										  values, isnull,
+										  checkUnique, &is_unique);
+				if (unlikely(TransactionIdIsValid(xwait)))
+				{
+					// TODO: more here
+					goto search;
+				}
+			}
+
+			if (checkUnique != UNIQUE_CHECK_EXISTING)
+			{
+				// TODO: need SERIALIZABLE check like nbtree?
+
+				gistinserttuple(&state, stack, giststate, itup,
+								InvalidOffsetNumber);
+			}
+
 			LockBuffer(stack->buffer, GIST_UNLOCK);
 
 			/* Release any pins we might still hold before exiting */
 			for (; stack; stack = stack->parent)
 				ReleaseBuffer(stack->buffer);
+
 			break;
 		}
 	}
+
+	return is_unique;
 }
 
 /*
@@ -1624,6 +1891,15 @@ initGISTstate(Relation index)
 			giststate->fetchFn[i].fn_oid = InvalidOid;
 
 		/*
+		 * We only need excludeFn for UNIQUE indexes.
+		 * XXX: We could use this to enforce exclusion constraints
+		 * from the index instead of the constraint (which is how
+		 * unique constraints work at any rate). Or we could at least
+		 * enforce WITHOUT OVERLAPS semantics.
+		 */
+		giststate->excludeFn[i].fn_oid = InvalidOid;
+
+		/*
 		 * If the index column has a specified collation, we should honor that
 		 * while doing comparisons.  However, we may have a collatable storage
 		 * type for a noncollatable indexed data type.  If there's no index
@@ -1652,12 +1928,79 @@ initGISTstate(Relation index)
 		giststate->equalFn[i].fn_oid = InvalidOid;
 		giststate->distanceFn[i].fn_oid = InvalidOid;
 		giststate->fetchFn[i].fn_oid = InvalidOid;
+		giststate->excludeFn[i].fn_oid = InvalidOid;
 		giststate->supportCollation[i] = InvalidOid;
 	}
 
 	MemoryContextSwitchTo(oldCxt);
 
 	return giststate;
+}
+
+/*
+ * Initialize excludeFn (assumes this is a UNIQUE index).
+ */
+void
+initGISTstateExclude(GISTSTATE *giststate, Relation index)
+{
+	int			natts = IndexRelationGetNumberOfKeyAttributes(index);
+	int			i;
+
+	Assert(index->rd_index->indisunique);
+
+	for (i = 0; i < natts; i++)
+	{
+		/*
+		 * Set the operator (or rather its function) for the equality CompareType
+		 * (or fail).
+		 *
+		 * Even the GiST AM doesn't know the strategy numbers chosen by GiST
+		 * opfamilies. For example btree_gist uses BT*StrategyNumber even though
+		 * built-in opclasses uses RT*StrategyNumber. So we use the CompareType
+		 * infrastructure to find an operator that implements equality.
+		 *
+		 * XXX: We assume that all opclasses within an opfamily use the same
+		 * strategy numbers. This is probably a fair assumption, but it
+		 * means we disregard the index attributes' opclasses when getting
+		 * stratnums.
+		 */
+		RegProcedure proc;
+		Oid opfamily = index->rd_opfamily[i];
+		CompareType cmptype;
+		StrategyNumber strat;
+		Oid				opid;
+
+		/*
+		 * If this is a WITHOUT OVERLAPS index, we use overlaps for the last
+		 * element. Otherwise we use equality. The only time both indisunique
+		 * and indisexclusion are set is for WITHOUT OVERLAPS.
+		 *
+		 * XXX: We could do checking for all exclusion constraints here,
+		 * if we wanted to look up their operators.
+		 */
+		if (index->rd_index->indisexclusion && i == natts - 1)
+			cmptype = COMPARE_OVERLAP;
+		else
+			cmptype = COMPARE_EQ;
+
+		strat = IndexAmTranslateCompareType(cmptype, GIST_AM_OID, opfamily, false);
+
+
+		opid = get_opfamily_member(index->rd_opfamily[i],
+								   index->rd_opcintype[i],
+								   index->rd_opcintype[i], strat);
+		if (!OidIsValid(opid))
+			ereport(ERROR,
+					errmsg("could not identify equality operator for unique constraint"),
+					errdetail("Could not translate compare type %d for operator family \"%s\" of access method \"%s\".",
+							  cmptype, get_opfamily_name(opfamily, false), get_am_name(GIST_AM_OID)));
+
+		proc = get_opcode(opid);
+		if (!OidIsValid(proc))
+			elog(ERROR, "cache lookup failed for operator %u", opid);
+
+		fmgr_info_cxt(proc, &(giststate->excludeFn[i]), giststate->scanCxt);
+	}
 }
 
 void
