@@ -19,6 +19,7 @@
 #include "executor/instrument.h"
 #include "executor/nodeAppend.h"
 #include "executor/nodeForeignscan.h"
+#include "executor/nodeMergeAppend.h"
 
 /*
  * Asynchronously request a tuple from a designed async-capable node.
@@ -121,6 +122,9 @@ ExecAsyncResponse(AsyncRequest *areq)
 	{
 		case T_AppendState:
 			ExecAsyncAppendResponse(areq);
+			break;
+		case T_MergeAppendState:
+			ExecAsyncMergeAppendResponse(areq);
 			break;
 		default:
 			/* If the node doesn't support async, caller messed up. */

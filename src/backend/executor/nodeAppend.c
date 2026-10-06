@@ -58,6 +58,7 @@
 
 #include "postgres.h"
 
+#include "executor/execAppend.h"
 #include "executor/execAsync.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
@@ -84,7 +85,6 @@ struct ParallelAppendState
 };
 
 #define INVALID_SUBPLAN_INDEX		-1
-#define EVENT_BUFFER_SIZE			16
 
 static TupleTableSlot *ExecAppend(PlanState *pstate);
 static bool choose_next_subplan_locally(AppendState *node);
@@ -95,7 +95,7 @@ static void ExecAppendAsyncBegin(AppendState *node);
 static bool ExecAppendAsyncGetNext(AppendState *node, TupleTableSlot **result);
 static bool ExecAppendAsyncRequest(AppendState *node, TupleTableSlot **result);
 static void ExecAppendAsyncEventWait(AppendState *node);
-static void ExecAppendAsyncReset(AppendState *node);
+static void ExecAppendDrainAsyncRequests(AppendState *node);
 static void classify_matching_subplans(AppendState *node);
 
 /* ----------------------------------------------------------------
@@ -113,15 +113,6 @@ AppendState *
 ExecInitAppend(Append *node, EState *estate, int eflags)
 {
 	AppendState *appendstate = makeNode(AppendState);
-	PlanState **appendplanstates;
-	const TupleTableSlotOps *appendops;
-	Bitmapset  *validsubplans;
-	Bitmapset  *asyncplans;
-	int			nplans;
-	int			nasyncplans;
-	int			firstvalid;
-	int			i,
-				j;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & EXEC_FLAG_MARK));
@@ -129,164 +120,27 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	/*
 	 * create new AppendState for our append node
 	 */
-	appendstate->ps.plan = (Plan *) node;
-	appendstate->ps.state = estate;
-	appendstate->ps.ExecProcNode = ExecAppend;
+	appendstate->as.ps.plan = (Plan *) node;
+	appendstate->as.ps.state = estate;
+	appendstate->as.ps.ExecProcNode = ExecAppend;
 
 	/* Let choose_next_subplan_* function handle setting the first subplan */
 	appendstate->as_whichplan = INVALID_SUBPLAN_INDEX;
 	appendstate->as_syncdone = false;
 	appendstate->as_begun = false;
 
-	/* If run-time partition pruning is enabled, then set that up now */
-	if (node->part_prune_index >= 0)
-	{
-		PartitionPruneState *prunestate;
+	/* Initialize common fields */
+	ExecInitAppendBase(&appendstate->as,
+					   &node->ab,
+					   estate,
+					   eflags,
+					   node->first_partial_plan,
+					   &appendstate->as_first_partial_plan);
 
-		/*
-		 * Set up pruning data structure.  This also initializes the set of
-		 * subplans to initialize (validsubplans) by taking into account the
-		 * result of performing initial pruning if any.
-		 */
-		prunestate = ExecInitPartitionExecPruning(&appendstate->ps,
-												  list_length(node->appendplans),
-												  node->part_prune_index,
-												  node->apprelids,
-												  &validsubplans);
-		appendstate->as_prune_state = prunestate;
-		nplans = bms_num_members(validsubplans);
+	if (appendstate->as.nasyncplans > 0 && appendstate->as.valid_subplans_identified)
+		classify_matching_subplans(appendstate);
 
-		/*
-		 * When no run-time pruning is required and there's at least one
-		 * subplan, we can fill as_valid_subplans immediately, preventing
-		 * later calls to ExecFindMatchingSubPlans.
-		 */
-		if (!prunestate->do_exec_prune && nplans > 0)
-		{
-			appendstate->as_valid_subplans = bms_add_range(NULL, 0, nplans - 1);
-			appendstate->as_valid_subplans_identified = true;
-		}
-	}
-	else
-	{
-		nplans = list_length(node->appendplans);
-
-		/*
-		 * When run-time partition pruning is not enabled we can just mark all
-		 * subplans as valid; they must also all be initialized.
-		 */
-		Assert(nplans > 0);
-		appendstate->as_valid_subplans = validsubplans =
-			bms_add_range(NULL, 0, nplans - 1);
-		appendstate->as_valid_subplans_identified = true;
-		appendstate->as_prune_state = NULL;
-	}
-
-	appendplanstates = palloc_array(PlanState *, nplans);
-
-	/*
-	 * call ExecInitNode on each of the valid plans to be executed and save
-	 * the results into the appendplanstates array.
-	 *
-	 * While at it, find out the first valid partial plan.
-	 */
-	j = 0;
-	asyncplans = NULL;
-	nasyncplans = 0;
-	firstvalid = nplans;
-	i = -1;
-	while ((i = bms_next_member(validsubplans, i)) >= 0)
-	{
-		Plan	   *initNode = (Plan *) list_nth(node->appendplans, i);
-
-		/*
-		 * Record async subplans.  When executing EvalPlanQual, we treat them
-		 * as sync ones; don't do this when initializing an EvalPlanQual plan
-		 * tree.
-		 */
-		if (initNode->async_capable && estate->es_epq_active == NULL)
-		{
-			asyncplans = bms_add_member(asyncplans, j);
-			nasyncplans++;
-		}
-
-		/*
-		 * Record the lowest appendplans index which is a valid partial plan.
-		 */
-		if (i >= node->first_partial_plan && j < firstvalid)
-			firstvalid = j;
-
-		appendplanstates[j++] = ExecInitNode(initNode, estate, eflags);
-	}
-
-	appendstate->as_first_partial_plan = firstvalid;
-	appendstate->appendplans = appendplanstates;
-	appendstate->as_nplans = nplans;
-
-	/*
-	 * Initialize Append's result tuple type and slot.  If the child plans all
-	 * produce the same fixed slot type, we can use that slot type; otherwise
-	 * make a virtual slot.  (Note that the result slot itself is used only to
-	 * return a null tuple at end of execution; real tuples are returned to
-	 * the caller in the children's own result slots.  What we are doing here
-	 * is allowing the parent plan node to optimize if the Append will return
-	 * only one kind of slot.)
-	 */
-	appendops = ExecGetCommonSlotOps(appendplanstates, j);
-	if (appendops != NULL)
-	{
-		ExecInitResultTupleSlotTL(&appendstate->ps, appendops);
-	}
-	else
-	{
-		ExecInitResultTupleSlotTL(&appendstate->ps, &TTSOpsVirtual);
-		/* show that the output slot type is not fixed */
-		appendstate->ps.resultopsset = true;
-		appendstate->ps.resultopsfixed = false;
-	}
-
-	/* Initialize async state */
-	appendstate->as_asyncplans = asyncplans;
-	appendstate->as_nasyncplans = nasyncplans;
-	appendstate->as_asyncrequests = NULL;
-	appendstate->as_asyncresults = NULL;
-	appendstate->as_nasyncresults = 0;
 	appendstate->as_nasyncremain = 0;
-	appendstate->as_needrequest = NULL;
-	appendstate->as_eventset = NULL;
-	appendstate->as_valid_asyncplans = NULL;
-
-	if (nasyncplans > 0)
-	{
-		appendstate->as_asyncrequests = palloc0_array(AsyncRequest *, nplans);
-
-		i = -1;
-		while ((i = bms_next_member(asyncplans, i)) >= 0)
-		{
-			AsyncRequest *areq;
-
-			areq = palloc_object(AsyncRequest);
-			areq->requestor = (PlanState *) appendstate;
-			areq->requestee = appendplanstates[i];
-			areq->request_index = i;
-			areq->callback_pending = false;
-			areq->request_complete = false;
-			areq->result = NULL;
-
-			appendstate->as_asyncrequests[i] = areq;
-		}
-
-		appendstate->as_asyncresults = palloc0_array(TupleTableSlot *, nasyncplans);
-
-		if (appendstate->as_valid_subplans_identified)
-			classify_matching_subplans(appendstate);
-	}
-
-	/*
-	 * Miscellaneous initialization
-	 */
-
-	appendstate->ps.ps_ProjInfo = NULL;
 
 	/* For parallel query, this will be overridden later. */
 	appendstate->choose_next_subplan = choose_next_subplan_locally;
@@ -316,11 +170,11 @@ ExecAppend(PlanState *pstate)
 		Assert(!node->as_syncdone);
 
 		/* Nothing to do if there are no subplans */
-		if (node->as_nplans == 0)
-			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+		if (node->as.nplans == 0)
+			return ExecClearTuple(node->as.ps.ps_ResultTupleSlot);
 
 		/* If there are any async subplans, begin executing them. */
-		if (node->as_nasyncplans > 0)
+		if (node->as.nasyncplans > 0)
 			ExecAppendAsyncBegin(node);
 
 		/*
@@ -328,11 +182,11 @@ ExecAppend(PlanState *pstate)
 		 * proceeding.
 		 */
 		if (!node->choose_next_subplan(node) && node->as_nasyncremain == 0)
-			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+			return ExecClearTuple(node->as.ps.ps_ResultTupleSlot);
 
 		Assert(node->as_syncdone ||
 			   (node->as_whichplan >= 0 &&
-				node->as_whichplan < node->as_nplans));
+				node->as_whichplan < node->as.nplans));
 
 		/* And we're initialized. */
 		node->as_begun = true;
@@ -347,19 +201,19 @@ ExecAppend(PlanState *pstate)
 		/*
 		 * try to get a tuple from an async subplan if any
 		 */
-		if (node->as_syncdone || !bms_is_empty(node->as_needrequest))
+		if (node->as_syncdone || !bms_is_empty(node->as.needrequest))
 		{
 			if (ExecAppendAsyncGetNext(node, &result))
 				return result;
 			Assert(!node->as_syncdone);
-			Assert(bms_is_empty(node->as_needrequest));
+			Assert(bms_is_empty(node->as.needrequest));
 		}
 
 		/*
 		 * figure out which sync subplan we are currently processing
 		 */
-		Assert(node->as_whichplan >= 0 && node->as_whichplan < node->as_nplans);
-		subnode = node->appendplans[node->as_whichplan];
+		Assert(node->as_whichplan >= 0 && node->as_whichplan < node->as.nplans);
+		subnode = node->as.plans[node->as_whichplan];
 
 		/*
 		 * get a tuple from the subplan
@@ -386,7 +240,7 @@ ExecAppend(PlanState *pstate)
 
 		/* choose new sync subplan; if no sync/async subplans, we're done */
 		if (!node->choose_next_subplan(node) && node->as_nasyncremain == 0)
-			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+			return ExecClearTuple(node->as.ps.ps_ResultTupleSlot);
 	}
 }
 
@@ -401,67 +255,22 @@ ExecAppend(PlanState *pstate)
 void
 ExecEndAppend(AppendState *node)
 {
-	PlanState **appendplans;
-	int			nplans;
-	int			i;
-
-	/*
-	 * get information from the node
-	 */
-	appendplans = node->appendplans;
-	nplans = node->as_nplans;
-
-	/*
-	 * shut down each of the subscans
-	 */
-	for (i = 0; i < nplans; i++)
-		ExecEndNode(appendplans[i]);
+	ExecEndAppendBase(&node->as);
 }
 
 void
 ExecReScanAppend(AppendState *node)
 {
-	int			nasyncplans = node->as_nasyncplans;
-	int			i;
 
-	/* If there are any async subplans, reset async requests made for them. */
+	int			nasyncplans = node->as.nasyncplans;
+
+	/* If there are any async subplans, drain async requests made for them. */
 	if (nasyncplans > 0)
-		ExecAppendAsyncReset(node);
+		ExecAppendDrainAsyncRequests(node);
 
-	/*
-	 * If any PARAM_EXEC Params used in pruning expressions have changed, then
-	 * we'd better unset the valid subplans so that they are reselected for
-	 * the new parameter values.
-	 */
-	if (node->as_prune_state &&
-		bms_overlap(node->ps.chgParam,
-					node->as_prune_state->execparamids))
-	{
-		node->as_valid_subplans_identified = false;
-		bms_free(node->as_valid_subplans);
-		node->as_valid_subplans = NULL;
-		bms_free(node->as_valid_asyncplans);
-		node->as_valid_asyncplans = NULL;
-	}
+	ExecReScanAppendBase(&node->as);
 
-	for (i = 0; i < node->as_nplans; i++)
-	{
-		PlanState  *subnode = node->appendplans[i];
-
-		/*
-		 * ExecReScan doesn't know about my subplans, so I have to do
-		 * changed-parameter signaling myself.
-		 */
-		if (node->ps.chgParam != NULL)
-			UpdateChangedParamSet(subnode, node->ps.chgParam);
-
-		/*
-		 * If chgParam of subnode is not null then plan will be re-scanned by
-		 * first ExecProcNode or by first ExecAsyncRequest.
-		 */
-		if (subnode->chgParam == NULL)
-			ExecReScan(subnode);
-	}
+	/* Reset Append-specific state */
 
 	/* Let choose_next_subplan_* function handle setting the first subplan */
 	node->as_whichplan = INVALID_SUBPLAN_INDEX;
@@ -487,7 +296,7 @@ ExecAppendEstimate(AppendState *node,
 {
 	node->pstate_len =
 		add_size(offsetof(ParallelAppendState, pa_finished),
-				 sizeof(bool) * node->as_nplans);
+				 sizeof(bool) * node->as.nplans);
 
 	shm_toc_estimate_chunk(&pcxt->estimator, node->pstate_len);
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
@@ -509,7 +318,7 @@ ExecAppendInitializeDSM(AppendState *node,
 	pstate = shm_toc_allocate(pcxt->toc, node->pstate_len);
 	memset(pstate, 0, node->pstate_len);
 	LWLockInitialize(&pstate->pa_lock, LWTRANCHE_PARALLEL_APPEND);
-	shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, pstate);
+	shm_toc_insert(pcxt->toc, node->as.ps.plan->plan_node_id, pstate);
 
 	node->as_pstate = pstate;
 	node->choose_next_subplan = choose_next_subplan_for_leader;
@@ -527,7 +336,7 @@ ExecAppendReInitializeDSM(AppendState *node, ParallelContext *pcxt)
 	ParallelAppendState *pstate = node->as_pstate;
 
 	pstate->pa_next_plan = 0;
-	memset(pstate->pa_finished, 0, sizeof(bool) * node->as_nplans);
+	memset(pstate->pa_finished, 0, sizeof(bool) * node->as.nplans);
 }
 
 /* ----------------------------------------------------------------
@@ -540,7 +349,7 @@ ExecAppendReInitializeDSM(AppendState *node, ParallelContext *pcxt)
 void
 ExecAppendInitializeWorker(AppendState *node, ParallelWorkerContext *pwcxt)
 {
-	node->as_pstate = shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
+	node->as_pstate = shm_toc_lookup(pwcxt->toc, node->as.ps.plan->plan_node_id, false);
 	node->choose_next_subplan = choose_next_subplan_for_worker;
 }
 
@@ -558,7 +367,7 @@ choose_next_subplan_locally(AppendState *node)
 	int			nextplan;
 
 	/* We should never be called when there are no subplans */
-	Assert(node->as_nplans > 0);
+	Assert(node->as.nplans > 0);
 
 	/* Nothing to do if syncdone */
 	if (node->as_syncdone)
@@ -573,33 +382,33 @@ choose_next_subplan_locally(AppendState *node)
 	 */
 	if (whichplan == INVALID_SUBPLAN_INDEX)
 	{
-		if (node->as_nasyncplans > 0)
+		if (node->as.nasyncplans > 0)
 		{
 			/* We'd have filled as_valid_subplans already */
-			Assert(node->as_valid_subplans_identified);
+			Assert(node->as.valid_subplans_identified);
 		}
-		else if (!node->as_valid_subplans_identified)
+		else if (!node->as.valid_subplans_identified)
 		{
-			node->as_valid_subplans =
-				ExecFindMatchingSubPlans(node->as_prune_state, false, NULL);
-			node->as_valid_subplans_identified = true;
+			node->as.valid_subplans =
+				ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
+			node->as.valid_subplans_identified = true;
 		}
 
 		whichplan = -1;
 	}
 
 	/* Ensure whichplan is within the expected range */
-	Assert(whichplan >= -1 && whichplan <= node->as_nplans);
+	Assert(whichplan >= -1 && whichplan <= node->as.nplans);
 
-	if (ScanDirectionIsForward(node->ps.state->es_direction))
-		nextplan = bms_next_member(node->as_valid_subplans, whichplan);
+	if (ScanDirectionIsForward(node->as.ps.state->es_direction))
+		nextplan = bms_next_member(node->as.valid_subplans, whichplan);
 	else
-		nextplan = bms_prev_member(node->as_valid_subplans, whichplan);
+		nextplan = bms_prev_member(node->as.valid_subplans, whichplan);
 
 	if (nextplan < 0)
 	{
 		/* Set as_syncdone if in async mode */
-		if (node->as_nasyncplans > 0)
+		if (node->as.nasyncplans > 0)
 			node->as_syncdone = true;
 		return false;
 	}
@@ -623,10 +432,10 @@ choose_next_subplan_for_leader(AppendState *node)
 	ParallelAppendState *pstate = node->as_pstate;
 
 	/* Backward scan is not supported by parallel-aware plans */
-	Assert(ScanDirectionIsForward(node->ps.state->es_direction));
+	Assert(ScanDirectionIsForward(node->as.ps.state->es_direction));
 
 	/* We should never be called when there are no subplans */
-	Assert(node->as_nplans > 0);
+	Assert(node->as.nplans > 0);
 
 	LWLockAcquire(&pstate->pa_lock, LW_EXCLUSIVE);
 
@@ -638,18 +447,18 @@ choose_next_subplan_for_leader(AppendState *node)
 	else
 	{
 		/* Start with last subplan. */
-		node->as_whichplan = node->as_nplans - 1;
+		node->as_whichplan = node->as.nplans - 1;
 
 		/*
 		 * If we've yet to determine the valid subplans then do so now.  If
 		 * run-time pruning is disabled then the valid subplans will always be
 		 * set to all subplans.
 		 */
-		if (!node->as_valid_subplans_identified)
+		if (!node->as.valid_subplans_identified)
 		{
-			node->as_valid_subplans =
-				ExecFindMatchingSubPlans(node->as_prune_state, false, NULL);
-			node->as_valid_subplans_identified = true;
+			node->as.valid_subplans =
+				ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
+			node->as.valid_subplans_identified = true;
 
 			/*
 			 * Mark each invalid plan as finished to allow the loop below to
@@ -705,10 +514,10 @@ choose_next_subplan_for_worker(AppendState *node)
 	ParallelAppendState *pstate = node->as_pstate;
 
 	/* Backward scan is not supported by parallel-aware plans */
-	Assert(ScanDirectionIsForward(node->ps.state->es_direction));
+	Assert(ScanDirectionIsForward(node->as.ps.state->es_direction));
 
 	/* We should never be called when there are no subplans */
-	Assert(node->as_nplans > 0);
+	Assert(node->as.nplans > 0);
 
 	LWLockAcquire(&pstate->pa_lock, LW_EXCLUSIVE);
 
@@ -721,11 +530,11 @@ choose_next_subplan_for_worker(AppendState *node)
 	 * run-time pruning is disabled then the valid subplans will always be set
 	 * to all subplans.
 	 */
-	else if (!node->as_valid_subplans_identified)
+	else if (!node->as.valid_subplans_identified)
 	{
-		node->as_valid_subplans =
-			ExecFindMatchingSubPlans(node->as_prune_state, false, NULL);
-		node->as_valid_subplans_identified = true;
+		node->as.valid_subplans =
+			ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
+		node->as.valid_subplans_identified = true;
 
 		mark_invalid_subplans_as_finished(node);
 	}
@@ -745,7 +554,7 @@ choose_next_subplan_for_worker(AppendState *node)
 	{
 		int			nextplan;
 
-		nextplan = bms_next_member(node->as_valid_subplans,
+		nextplan = bms_next_member(node->as.valid_subplans,
 								   pstate->pa_next_plan);
 		if (nextplan >= 0)
 		{
@@ -758,7 +567,7 @@ choose_next_subplan_for_worker(AppendState *node)
 			 * Try looping back to the first valid partial plan, if there is
 			 * one.  If there isn't, arrange to bail out below.
 			 */
-			nextplan = bms_next_member(node->as_valid_subplans,
+			nextplan = bms_next_member(node->as.valid_subplans,
 									   node->as_first_partial_plan - 1);
 			pstate->pa_next_plan =
 				nextplan < 0 ? node->as_whichplan : nextplan;
@@ -783,7 +592,7 @@ choose_next_subplan_for_worker(AppendState *node)
 
 	/* Pick the plan we found, and advance pa_next_plan one more time. */
 	node->as_whichplan = pstate->pa_next_plan;
-	pstate->pa_next_plan = bms_next_member(node->as_valid_subplans,
+	pstate->pa_next_plan = bms_next_member(node->as.valid_subplans,
 										   pstate->pa_next_plan);
 
 	/*
@@ -792,7 +601,7 @@ choose_next_subplan_for_worker(AppendState *node)
 	 */
 	if (pstate->pa_next_plan < 0)
 	{
-		int			nextplan = bms_next_member(node->as_valid_subplans,
+		int			nextplan = bms_next_member(node->as.valid_subplans,
 											   node->as_first_partial_plan - 1);
 
 		if (nextplan >= 0)
@@ -834,16 +643,16 @@ mark_invalid_subplans_as_finished(AppendState *node)
 	Assert(node->as_pstate);
 
 	/* Shouldn't have been called when run-time pruning is not enabled */
-	Assert(node->as_prune_state);
+	Assert(node->as.prune_state);
 
 	/* Nothing to do if all plans are valid */
-	if (bms_num_members(node->as_valid_subplans) == node->as_nplans)
+	if (bms_num_members(node->as.valid_subplans) == node->as.nplans)
 		return;
 
 	/* Mark all non-valid plans as finished */
-	for (i = 0; i < node->as_nplans; i++)
+	for (i = 0; i < node->as.nplans; i++)
 	{
-		if (!bms_is_member(i, node->as_valid_subplans))
+		if (!bms_is_member(i, node->as.valid_subplans))
 			node->as_pstate->pa_finished[i] = true;
 	}
 }
@@ -862,47 +671,25 @@ mark_invalid_subplans_as_finished(AppendState *node)
 static void
 ExecAppendAsyncBegin(AppendState *node)
 {
-	int			i;
-
-	/* Backward scan is not supported by async-aware Appends. */
-	Assert(ScanDirectionIsForward(node->ps.state->es_direction));
-
-	/* We should never be called when there are no subplans */
-	Assert(node->as_nplans > 0);
-
-	/* We should never be called when there are no async subplans. */
-	Assert(node->as_nasyncplans > 0);
-
 	/* If we've yet to determine the valid subplans then do so now. */
-	if (!node->as_valid_subplans_identified)
+	if (!node->as.valid_subplans_identified)
 	{
-		node->as_valid_subplans =
-			ExecFindMatchingSubPlans(node->as_prune_state, false, NULL);
-		node->as_valid_subplans_identified = true;
+		node->as.valid_subplans =
+			ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
+		node->as.valid_subplans_identified = true;
 
 		classify_matching_subplans(node);
 	}
 
 	/* Initialize state variables. */
-	node->as_syncdone = bms_is_empty(node->as_valid_subplans);
-	node->as_nasyncremain = bms_num_members(node->as_valid_asyncplans);
+	node->as_syncdone = bms_is_empty(node->as.valid_subplans);
+	node->as_nasyncremain = bms_num_members(node->as.valid_asyncplans);
 
 	/* Nothing to do if there are no valid async subplans. */
 	if (node->as_nasyncremain == 0)
 		return;
 
-	/* Make a request for each of the valid async subplans. */
-	i = -1;
-	while ((i = bms_next_member(node->as_valid_asyncplans, i)) >= 0)
-	{
-		AsyncRequest *areq = node->as_asyncrequests[i];
-
-		Assert(areq->request_index == i);
-		Assert(!areq->callback_pending);
-
-		/* Do the actual work. */
-		ExecAsyncRequest(areq);
-	}
+	ExecAppendBaseAsyncBegin(&node->as);
 }
 
 /* ----------------------------------------------------------------
@@ -947,7 +734,7 @@ ExecAppendAsyncGetNext(AppendState *node, TupleTableSlot **result)
 	if (node->as_syncdone)
 	{
 		Assert(node->as_nasyncremain == 0);
-		*result = ExecClearTuple(node->ps.ps_ResultTupleSlot);
+		*result = ExecClearTuple(node->as.ps.ps_ResultTupleSlot);
 		return true;
 	}
 
@@ -967,7 +754,7 @@ ExecAppendAsyncRequest(AppendState *node, TupleTableSlot **result)
 	int			i;
 
 	/* Nothing to do if there are no async subplans needing a new request. */
-	if (bms_is_empty(node->as_needrequest))
+	if (bms_is_empty(node->as.needrequest))
 	{
 		Assert(node->as_nasyncresults == 0);
 		return false;
@@ -980,17 +767,17 @@ ExecAppendAsyncRequest(AppendState *node, TupleTableSlot **result)
 	if (node->as_nasyncresults > 0)
 	{
 		--node->as_nasyncresults;
-		*result = node->as_asyncresults[node->as_nasyncresults];
+		*result = node->as.asyncresults[node->as_nasyncresults];
 		return true;
 	}
 
 	/* Make a new request for each of the async subplans that need it. */
-	needrequest = node->as_needrequest;
-	node->as_needrequest = NULL;
+	needrequest = node->as.needrequest;
+	node->as.needrequest = NULL;
 	i = -1;
 	while ((i = bms_next_member(needrequest, i)) >= 0)
 	{
-		AsyncRequest *areq = node->as_asyncrequests[i];
+		AsyncRequest *areq = node->as.asyncrequests[i];
 
 		/* Do the actual work. */
 		ExecAsyncRequest(areq);
@@ -1001,7 +788,7 @@ ExecAppendAsyncRequest(AppendState *node, TupleTableSlot **result)
 	if (node->as_nasyncresults > 0)
 	{
 		--node->as_nasyncresults;
-		*result = node->as_asyncresults[node->as_nasyncresults];
+		*result = node->as.asyncresults[node->as_nasyncresults];
 		return true;
 	}
 
@@ -1017,120 +804,27 @@ ExecAppendAsyncRequest(AppendState *node, TupleTableSlot **result)
 static void
 ExecAppendAsyncEventWait(AppendState *node)
 {
-	int			nevents = node->as_nasyncplans + 2;
 	long		timeout = node->as_syncdone ? -1 : 0;
-	WaitEvent	occurred_event[EVENT_BUFFER_SIZE];
-	int			noccurred;
-	int			i;
 
 	/* We should never be called when there are no valid async subplans. */
 	Assert(node->as_nasyncremain > 0);
 
-	Assert(node->as_eventset == NULL);
-	node->as_eventset = CreateWaitEventSet(CurrentResourceOwner, nevents);
-	AddWaitEventToSet(node->as_eventset, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-					  NULL, NULL);
-
-	/* Give each waiting subplan a chance to add an event. */
-	i = -1;
-	while ((i = bms_next_member(node->as_asyncplans, i)) >= 0)
-	{
-		AsyncRequest *areq = node->as_asyncrequests[i];
-
-		if (areq->callback_pending)
-			ExecAsyncConfigureWait(areq);
-	}
-
-	/*
-	 * No need for further processing if none of the subplans configured any
-	 * events.
-	 */
-	if (GetNumRegisteredWaitEvents(node->as_eventset) == 1)
-	{
-		FreeWaitEventSet(node->as_eventset);
-		node->as_eventset = NULL;
-		return;
-	}
-
-	/*
-	 * Add the process latch to the set, so that we wake up to process the
-	 * standard interrupts with CHECK_FOR_INTERRUPTS().
-	 *
-	 * NOTE: For historical reasons, it's important that this is added to the
-	 * WaitEventSet after the ExecAsyncConfigureWait() calls.  Namely,
-	 * postgres_fdw calls "GetNumRegisteredWaitEvents(set) == 1" to check if
-	 * any other events are in the set.  That's a poor design, it's
-	 * questionable for postgres_fdw to be doing that in the first place, but
-	 * we cannot change it now.  The pattern has possibly been copied to other
-	 * extensions too.
-	 */
-	AddWaitEventToSet(node->as_eventset, WL_LATCH_SET, PGINVALID_SOCKET,
-					  MyLatch, NULL);
-
-	/* Return at most EVENT_BUFFER_SIZE events in one call. */
-	if (nevents > EVENT_BUFFER_SIZE)
-		nevents = EVENT_BUFFER_SIZE;
-
-	/*
-	 * If the timeout is -1, wait until at least one event occurs.  If the
-	 * timeout is 0, poll for events, but do not wait at all.
-	 */
-	noccurred = WaitEventSetWait(node->as_eventset, timeout, occurred_event,
-								 nevents, WAIT_EVENT_APPEND_READY);
-	FreeWaitEventSet(node->as_eventset);
-	node->as_eventset = NULL;
-	if (noccurred == 0)
-		return;
-
-	/* Deliver notifications. */
-	for (i = 0; i < noccurred; i++)
-	{
-		WaitEvent  *w = &occurred_event[i];
-
-		/*
-		 * Each waiting subplan should have registered its wait event with
-		 * user_data pointing back to its AsyncRequest.
-		 */
-		if ((w->events & WL_SOCKET_READABLE) != 0)
-		{
-			AsyncRequest *areq = (AsyncRequest *) w->user_data;
-
-			if (areq->callback_pending)
-			{
-				/*
-				 * Mark it as no longer needing a callback.  We must do this
-				 * before dispatching the callback in case the callback resets
-				 * the flag.
-				 */
-				areq->callback_pending = false;
-
-				/* Do the actual work. */
-				ExecAsyncNotify(areq);
-			}
-		}
-
-		/* Handle standard interrupts */
-		if ((w->events & WL_LATCH_SET) != 0)
-		{
-			ResetLatch(MyLatch);
-			CHECK_FOR_INTERRUPTS();
-		}
-	}
+	ExecAppendBaseAsyncEventWait(&node->as, timeout, WAIT_EVENT_APPEND_READY);
 }
 
 /* ----------------------------------------------------------------
- *		ExecAppendAsyncReset
+ *		ExecAppendDrainAsyncRequests
  *
- *		Reset asynchronous requests made for async-capable subplans.
+ *		Drain asynchronous requests made for async-capable subplans.
  * ----------------------------------------------------------------
  */
 static void
-ExecAppendAsyncReset(AppendState *node)
+ExecAppendDrainAsyncRequests(AppendState *node)
 {
 	int			i;
 
 	/* We should never be called when there are no async subplans. */
-	Assert(node->as_nasyncplans > 0);
+	Assert(node->as.nasyncplans > 0);
 
 	/*
 	 * Drain pending async requests if any.  We force the as_syncdone flag to
@@ -1151,13 +845,13 @@ ExecAppendAsyncReset(AppendState *node)
 		 * new results.
 		 */
 		node->as_nasyncresults = 0;
-		bms_free(node->as_needrequest);
-		node->as_needrequest = NULL;
+		bms_free(node->as.needrequest);
+		node->as.needrequest = NULL;
 
 		i = -1;
-		while ((i = bms_next_member(node->as_asyncplans, i)) >= 0)
+		while ((i = bms_next_member(node->as.asyncplans, i)) >= 0)
 		{
-			AsyncRequest *areq = node->as_asyncrequests[i];
+			AsyncRequest *areq = node->as.asyncrequests[i];
 
 			if (areq->callback_pending)
 			{
@@ -1174,20 +868,9 @@ ExecAppendAsyncReset(AppendState *node)
 		ExecAppendAsyncEventWait(node);
 	}
 
-	/* Reset async requests. */
-	i = -1;
-	while ((i = bms_next_member(node->as_asyncplans, i)) >= 0)
-	{
-		AsyncRequest *areq = node->as_asyncrequests[i];
-
-		Assert(!areq->callback_pending);
-		areq->request_complete = false;
-		areq->result = NULL;
-	}
-
 	/* Reset state variables. */
 	Assert(node->as_nasyncresults == 0);
-	Assert(node->as_needrequest == NULL);
+	Assert(node->as.needrequest == NULL);
 	node->as_nasyncremain = 0;
 }
 
@@ -1224,14 +907,14 @@ ExecAsyncAppendResponse(AsyncRequest *areq)
 	}
 
 	/* Save result so we can return it. */
-	Assert(node->as_nasyncresults < node->as_nasyncplans);
-	node->as_asyncresults[node->as_nasyncresults++] = slot;
+	Assert(node->as_nasyncresults < node->as.nasyncplans);
+	node->as.asyncresults[node->as_nasyncresults++] = slot;
 
 	/*
 	 * Mark the subplan that returned a result as ready for a new request.  We
 	 * don't launch another one here immediately because it might complete.
 	 */
-	node->as_needrequest = bms_add_member(node->as_needrequest,
+	node->as.needrequest = bms_add_member(node->as.needrequest,
 										  areq->request_index);
 }
 
@@ -1246,34 +929,19 @@ ExecAsyncAppendResponse(AsyncRequest *areq)
 static void
 classify_matching_subplans(AppendState *node)
 {
-	Bitmapset  *valid_asyncplans;
-
-	Assert(node->as_valid_subplans_identified);
-	Assert(node->as_valid_asyncplans == NULL);
+	Assert(node->as.valid_subplans_identified);
 
 	/* Nothing to do if there are no valid subplans. */
-	if (bms_is_empty(node->as_valid_subplans))
+	if (bms_is_empty(node->as.valid_subplans))
 	{
 		node->as_syncdone = true;
 		node->as_nasyncremain = 0;
 		return;
 	}
 
-	/* Nothing to do if there are no valid async subplans. */
-	if (!bms_overlap(node->as_valid_subplans, node->as_asyncplans))
-	{
+	/* No valid async subplans identified. */
+	if (!classify_matching_subplans_common(&node->as.valid_subplans,
+										   node->as.asyncplans,
+										   &node->as.valid_asyncplans))
 		node->as_nasyncremain = 0;
-		return;
-	}
-
-	/* Get valid async subplans. */
-	valid_asyncplans = bms_intersect(node->as_asyncplans,
-									 node->as_valid_subplans);
-
-	/* Adjust the valid subplans to contain sync subplans only. */
-	node->as_valid_subplans = bms_del_members(node->as_valid_subplans,
-											  valid_asyncplans);
-
-	/* Save valid async subplans. */
-	node->as_valid_asyncplans = valid_asyncplans;
 }

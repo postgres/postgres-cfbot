@@ -389,31 +389,22 @@ typedef struct ModifyTable
 struct PartitionPruneInfo;		/* forward reference to struct below */
 
 /* ----------------
- *	 Append node -
- *		Generate the concatenation of the results of sub-plans.
+ *	 AppendBase node -
+ *		Common base for Append and MergeAppend plan nodes.
+ *		Contains fields shared by both node types: the list of subplans,
+ *		appendrel identifiers, and run-time partition pruning info.
  * ----------------
  */
-typedef struct Append
+typedef struct AppendBase
 {
-	Plan		plan;
+	pg_node_attr(abstract)
 
-	/* RTIs of appendrel(s) formed by this node */
-	Bitmapset  *apprelids;
-
-	/* sets of RTIs of appendrels consolidated into this node */
-	List	   *child_append_relid_sets;
-
-	/* plans to run */
-	List	   *appendplans;
-
-	/* # of asynchronous plans */
-	int			nasyncplans;
-
-	/*
-	 * All 'appendplans' preceding this index are non-partial plans. All
-	 * 'appendplans' from this index onwards are partial plans.
-	 */
-	int			first_partial_plan;
+	Plan		plan;			/* its first field is NodeTag */
+	Bitmapset  *apprelids;		/* RTIs of appendrel(s) formed by this node */
+	List	   *child_append_relid_sets;	/* sets of RTIs of appendrels
+											 * consolidated into this node */
+	List	   *subplans;		/* List of Plans (formerly
+								 * appendplans/mergeplans) */
 
 	/*
 	 * Index into PlannedStmt.partPruneInfos and parallel lists in EState:
@@ -421,6 +412,25 @@ typedef struct Append
 	 * run-time pruning is used.
 	 */
 	int			part_prune_index;
+} AppendBase;
+
+/* ----------------
+ *	 Append node -
+ *		Generate the concatenation of the results of sub-plans.
+ * ----------------
+ */
+typedef struct Append
+{
+	AppendBase	ab;				/* its first field is NodeTag */
+
+	/* # of asynchronous plans */
+	int			nasyncplans;
+
+	/*
+	 * All 'subplans' preceding this index are non-partial plans. All
+	 * 'subplans' from this index onwards are partial plans.
+	 */
+	int			first_partial_plan;
 } Append;
 
 /* ----------------
@@ -430,16 +440,7 @@ typedef struct Append
  */
 typedef struct MergeAppend
 {
-	Plan		plan;
-
-	/* RTIs of appendrel(s) formed by this node */
-	Bitmapset  *apprelids;
-
-	/* sets of RTIs of appendrels consolidated into this node */
-	List	   *child_append_relid_sets;
-
-	/* plans to run */
-	List	   *mergeplans;
+	AppendBase	ab;				/* its first field is NodeTag */
 
 	/* these fields are just like the sort-key info in struct Sort: */
 
@@ -457,13 +458,6 @@ typedef struct MergeAppend
 
 	/* NULLS FIRST/LAST directions */
 	bool	   *nullsFirst pg_node_attr(array_size(numCols));
-
-	/*
-	 * Index into PlannedStmt.partPruneInfos and parallel lists in EState:
-	 * es_part_prune_states and es_part_prune_results. Set to -1 if no
-	 * run-time pruning is used.
-	 */
-	int			part_prune_index;
 } MergeAppend;
 
 /* ----------------

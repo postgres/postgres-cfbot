@@ -147,12 +147,9 @@ static void set_foreignscan_references(PlannerInfo *root,
 static void set_customscan_references(PlannerInfo *root,
 									  CustomScan *cscan,
 									  int rtoffset);
-static Plan *set_append_references(PlannerInfo *root,
-								   Append *aplan,
-								   int rtoffset);
-static Plan *set_mergeappend_references(PlannerInfo *root,
-										MergeAppend *mplan,
-										int rtoffset);
+static Plan *set_appendbase_references(PlannerInfo *root,
+									   AppendBase *plan,
+									   int rtoffset);
 static void set_hash_references(PlannerInfo *root, Plan *plan, int rtoffset);
 static Relids offset_relid_set(Relids relids, int rtoffset);
 static Node *fix_dummy_setop_vars_mutator(Node *node, int *first_child_relid);
@@ -1301,15 +1298,11 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			}
 			break;
 		case T_Append:
-			/* Needs special treatment, see comments below */
-			return set_append_references(root,
-										 (Append *) plan,
-										 rtoffset);
 		case T_MergeAppend:
 			/* Needs special treatment, see comments below */
-			return set_mergeappend_references(root,
-											  (MergeAppend *) plan,
-											  rtoffset);
+			return set_appendbase_references(root,
+											 (AppendBase *) plan,
+											 rtoffset);
 		case T_RecursiveUnion:
 			/* This doesn't evaluate targetlist or check quals either */
 			set_dummy_tlist_references(plan, rtoffset);
@@ -1786,7 +1779,7 @@ set_customscan_references(PlannerInfo *root,
 
 /*
  * register_partpruneinfo
- *		Subroutine for set_append_references and set_mergeappend_references
+ *		Subroutine for set_appendbase_references
  *
  * Add the PartitionPruneInfo from root->partPruneInfos at the given index
  * into PlannerGlobal->partPruneInfos and return its index there.
@@ -1853,158 +1846,84 @@ register_partpruneinfo(PlannerInfo *root, int part_prune_index, int rtoffset)
 }
 
 /*
- * set_append_references
- *		Do set_plan_references processing on an Append
+ * set_appendbase_references
+ *		Do set_plan_references processing on an Append or MergeAppend
  *
- * We try to strip out the Append entirely; if we can't, we have
- * to do the normal processing on it.
+ * We try to strip out the node entirely; if we can't, we have to do the
+ * normal processing on it.  Append and MergeAppend behave identically here
+ * (both are represented via the common AppendBase struct), so this is
+ * shared between them; the only thing that differs is which NodeTag to
+ * report as elided, and nodeTag(plan) already gives us that.
  */
 static Plan *
-set_append_references(PlannerInfo *root,
-					  Append *aplan,
-					  int rtoffset)
+set_appendbase_references(PlannerInfo *root,
+						  AppendBase *plan,
+						  int rtoffset)
 {
 	ListCell   *l;
 
 	/*
-	 * Append, like Sort et al, doesn't actually evaluate its targetlist or
-	 * check quals.  If it's got exactly one child plan, then it's not doing
-	 * anything useful at all, and we can strip it out.
+	 * Append/MergeAppend, like Sort et al, doesn't actually evaluate its
+	 * targetlist or check quals.  If it's got exactly one child plan, then
+	 * it's not doing anything useful at all, and we can strip it out.
 	 */
-	Assert(aplan->plan.qual == NIL);
+	Assert(plan->plan.qual == NIL);
 
 	/* First, we gotta recurse on the children */
-	foreach(l, aplan->appendplans)
+	foreach(l, plan->subplans)
 	{
 		lfirst(l) = set_plan_refs(root, (Plan *) lfirst(l), rtoffset);
 	}
 
 	/*
-	 * See if it's safe to get rid of the Append entirely.  For this to be
-	 * safe, there must be only one child plan and that child plan's parallel
-	 * awareness must match the Append's.  The reason for the latter is that
-	 * if the Append is parallel aware and the child is not, then the calling
-	 * plan may execute the non-parallel aware child multiple times.  (If you
-	 * change these rules, update create_append_path to match.)
+	 * See if it's safe to get rid of the node entirely.  For this to be
+	 * safe, there must be only one child plan and that child plan's
+	 * parallel awareness must match the node's.  The reason for the latter
+	 * is that if the node is parallel aware and the child is not, then the
+	 * calling plan may execute the non-parallel aware child multiple times.
+	 * (If you change these rules, update create_append_path and
+	 * create_merge_append_path to match.)
 	 */
-	if (list_length(aplan->appendplans) == 1)
+	if (list_length(plan->subplans) == 1)
 	{
-		Plan	   *p = (Plan *) linitial(aplan->appendplans);
+		Plan	   *p = (Plan *) linitial(plan->subplans);
 
-		if (p->parallel_aware == aplan->plan.parallel_aware)
+		if (p->parallel_aware == plan->plan.parallel_aware)
 		{
 			Plan	   *result;
 
-			result = clean_up_removed_plan_level((Plan *) aplan, p);
+			result = clean_up_removed_plan_level((Plan *) plan, p);
 
-			/* Remember that we removed an Append */
-			record_elided_node(root->glob, p->plan_node_id, T_Append,
-							   offset_relid_set(aplan->apprelids, rtoffset));
+			/* Remember that we removed an Append/MergeAppend */
+			record_elided_node(root->glob, p->plan_node_id, nodeTag(plan),
+							   offset_relid_set(plan->apprelids, rtoffset));
 
 			return result;
 		}
 	}
 
 	/*
-	 * Otherwise, clean up the Append as needed.  It's okay to do this after
+	 * Otherwise, clean up the node as needed.  It's okay to do this after
 	 * recursing to the children, because set_dummy_tlist_references doesn't
 	 * look at those.
 	 */
-	set_dummy_tlist_references((Plan *) aplan, rtoffset);
+	set_dummy_tlist_references((Plan *) plan, rtoffset);
 
-	aplan->apprelids = offset_relid_set(aplan->apprelids, rtoffset);
-
-	/*
-	 * Add PartitionPruneInfo, if any, to PlannerGlobal and update the index.
-	 * Also update the RT indexes present in it to add the offset.
-	 */
-	if (aplan->part_prune_index >= 0)
-		aplan->part_prune_index =
-			register_partpruneinfo(root, aplan->part_prune_index, rtoffset);
-
-	/* We don't need to recurse to lefttree or righttree ... */
-	Assert(aplan->plan.lefttree == NULL);
-	Assert(aplan->plan.righttree == NULL);
-
-	return (Plan *) aplan;
-}
-
-/*
- * set_mergeappend_references
- *		Do set_plan_references processing on a MergeAppend
- *
- * We try to strip out the MergeAppend entirely; if we can't, we have
- * to do the normal processing on it.
- */
-static Plan *
-set_mergeappend_references(PlannerInfo *root,
-						   MergeAppend *mplan,
-						   int rtoffset)
-{
-	ListCell   *l;
-
-	/*
-	 * MergeAppend, like Sort et al, doesn't actually evaluate its targetlist
-	 * or check quals.  If it's got exactly one child plan, then it's not
-	 * doing anything useful at all, and we can strip it out.
-	 */
-	Assert(mplan->plan.qual == NIL);
-
-	/* First, we gotta recurse on the children */
-	foreach(l, mplan->mergeplans)
-	{
-		lfirst(l) = set_plan_refs(root, (Plan *) lfirst(l), rtoffset);
-	}
-
-	/*
-	 * See if it's safe to get rid of the MergeAppend entirely.  For this to
-	 * be safe, there must be only one child plan and that child plan's
-	 * parallel awareness must match the MergeAppend's.  The reason for the
-	 * latter is that if the MergeAppend is parallel aware and the child is
-	 * not, then the calling plan may execute the non-parallel aware child
-	 * multiple times.  (If you change these rules, update
-	 * create_merge_append_path to match.)
-	 */
-	if (list_length(mplan->mergeplans) == 1)
-	{
-		Plan	   *p = (Plan *) linitial(mplan->mergeplans);
-
-		if (p->parallel_aware == mplan->plan.parallel_aware)
-		{
-			Plan	   *result;
-
-			result = clean_up_removed_plan_level((Plan *) mplan, p);
-
-			/* Remember that we removed a MergeAppend */
-			record_elided_node(root->glob, p->plan_node_id, T_MergeAppend,
-							   offset_relid_set(mplan->apprelids, rtoffset));
-
-			return result;
-		}
-	}
-
-	/*
-	 * Otherwise, clean up the MergeAppend as needed.  It's okay to do this
-	 * after recursing to the children, because set_dummy_tlist_references
-	 * doesn't look at those.
-	 */
-	set_dummy_tlist_references((Plan *) mplan, rtoffset);
-
-	mplan->apprelids = offset_relid_set(mplan->apprelids, rtoffset);
+	plan->apprelids = offset_relid_set(plan->apprelids, rtoffset);
 
 	/*
 	 * Add PartitionPruneInfo, if any, to PlannerGlobal and update the index.
 	 * Also update the RT indexes present in it to add the offset.
 	 */
-	if (mplan->part_prune_index >= 0)
-		mplan->part_prune_index =
-			register_partpruneinfo(root, mplan->part_prune_index, rtoffset);
+	if (plan->part_prune_index >= 0)
+		plan->part_prune_index =
+			register_partpruneinfo(root, plan->part_prune_index, rtoffset);
 
 	/* We don't need to recurse to lefttree or righttree ... */
-	Assert(mplan->plan.lefttree == NULL);
-	Assert(mplan->plan.righttree == NULL);
+	Assert(plan->plan.lefttree == NULL);
+	Assert(plan->plan.righttree == NULL);
 
-	return (Plan *) mplan;
+	return (Plan *) plan;
 }
 
 /*
