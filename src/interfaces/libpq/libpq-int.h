@@ -66,10 +66,12 @@ typedef struct
 #endif
 #endif							/* ENABLE_SSPI */
 
-#ifdef USE_OPENSSL
+#if defined(USE_OPENSSL) || defined(USE_LIBRESSL)
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#endif							/* USE_OPENSSL, USE_LIBRESSL */
 
+#ifdef USE_OPENSSL
 #ifndef OPENSSL_NO_ENGINE
 #define USE_SSL_ENGINE
 #endif
@@ -624,7 +626,7 @@ struct pg_conn
 	bool		last_read_was_eof;
 
 #ifdef USE_SSL
-#ifdef USE_OPENSSL
+#if defined(USE_OPENSSL) || defined(USE_LIBRESSL)
 	SSL		   *ssl;			/* SSL status, if have SSL connection */
 	X509	   *peer;			/* X509 cert of server */
 #ifdef USE_SSL_ENGINE
@@ -633,7 +635,7 @@ struct pg_conn
 	void	   *engine;			/* dummy field to keep struct the same if
 								 * OpenSSL version changes */
 #endif
-#endif							/* USE_OPENSSL */
+#endif							/* USE_OPENSSL, USE_LIBRESSL */
 #endif							/* USE_SSL */
 
 #ifdef ENABLE_GSS
