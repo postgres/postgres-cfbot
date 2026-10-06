@@ -61,9 +61,19 @@ typedef struct LWLock
  */
 #define LWLOCK_PADDED_SIZE	PG_CACHE_LINE_SIZE
 
+#ifdef LOCK_DEBUG
+#define LOG2_LWLOCK_ALIGNED_SIZE 5
+#else
+#define LOG2_LWLOCK_ALIGNED_SIZE 4
+#endif
+#define LWLOCK_ALIGNED_SIZE (1 << LOG2_LWLOCK_ALIGNED_SIZE)
+
 StaticAssertDecl(sizeof(LWLock) <= LWLOCK_PADDED_SIZE,
 				 "Miscalculated LWLock padding");
-
+StaticAssertDecl(sizeof(LWLock) <= LWLOCK_ALIGNED_SIZE,
+				 "Miscalculated LWLock alignment");
+StaticAssertDecl(LWLOCK_ALIGNED_SIZE < 2 * sizeof(LWLock),
+				 "Wasteful LWLock alignment");
 /* LWLock, padded to a full cache line size */
 typedef union LWLockPadded
 {
@@ -71,23 +81,38 @@ typedef union LWLockPadded
 	char		pad[LWLOCK_PADDED_SIZE];
 } LWLockPadded;
 
+typedef union LWLockAligned
+{
+	LWLock		lock;
+	char		pad[LWLOCK_ALIGNED_SIZE];
+} LWLockAligned;
+
 /*
  * It's a bit odd to declare NUM_BUFFER_PARTITIONS and NUM_LOCK_PARTITIONS
  * here, but we need them for the definition of MainLWLockStruct, and
  * having this file include lock.h or bufmgr.h would be backwards.
  */
 
+
+#define LWLOCK_NUM_PARTITIONS(group) \
+	(1 << LOG2_NUM_##group##_PARTITIONS)
+#define LWLOCK_NUM_PARTITION_BITS(group) \
+	(LOG2_NUM_##group##_CACHE_LINES + PG_LOG2_CACHE_LINE_SIZE - LOG2_LWLOCK_ALIGNED_SIZE)
+
 /* Number of partitions of the shared buffer mapping hashtable */
-#define LOG2_NUM_BUFFER_PARTITIONS  7
-#define NUM_BUFFER_PARTITIONS  (1 << LOG2_NUM_BUFFER_PARTITIONS)
+#define LOG2_NUM_BUFFER_CACHE_LINES  7
+#define LOG2_NUM_BUFFER_PARTITIONS	LWLOCK_NUM_PARTITION_BITS(BUFFER)
+#define NUM_BUFFER_PARTITIONS  		LWLOCK_NUM_PARTITIONS(BUFFER)
 
 /* Number of partitions the shared lock tables are divided into */
-#define LOG2_NUM_LOCK_PARTITIONS  4
-#define NUM_LOCK_PARTITIONS  (1 << LOG2_NUM_LOCK_PARTITIONS)
+#define LOG2_NUM_LOCK_CACHE_LINES 4
+#define LOG2_NUM_LOCK_PARTITIONS  	LWLOCK_NUM_PARTITION_BITS(LOCK)
+#define NUM_LOCK_PARTITIONS  		LWLOCK_NUM_PARTITIONS(LOCK)
 
 /* Number of partitions the shared predicate lock tables are divided into */
-#define LOG2_NUM_PREDICATELOCK_PARTITIONS  4
-#define NUM_PREDICATELOCK_PARTITIONS  (1 << LOG2_NUM_PREDICATELOCK_PARTITIONS)
+#define LOG2_NUM_PREDICATELOCK_CACHE_LINES  4
+#define LOG2_NUM_PREDICATELOCK_PARTITIONS LWLOCK_NUM_PARTITION_BITS(PREDICATELOCK)
+#define NUM_PREDICATELOCK_PARTITIONS LWLOCK_NUM_PARTITIONS(PREDICATELOCK)
 
 /*
  * Built-in LWLocks in shared memory.  Extension locks requested with
@@ -96,9 +121,9 @@ typedef union LWLockPadded
 typedef struct MainLWLockStruct
 {
 	LWLockPadded individual[NUM_INDIVIDUAL_LWLOCKS];
-	LWLockPadded buffer_mapping[NUM_BUFFER_PARTITIONS];
-	LWLockPadded lock_manager[NUM_LOCK_PARTITIONS];
-	LWLockPadded predicate_lock_manager[NUM_PREDICATELOCK_PARTITIONS];
+	LWLockAligned buffer_mapping[NUM_BUFFER_PARTITIONS];
+	LWLockAligned lock_manager[NUM_LOCK_PARTITIONS];
+	LWLockAligned predicate_lock_manager[NUM_PREDICATELOCK_PARTITIONS];
 	LWLockPadded extra[FLEXIBLE_ARRAY_MEMBER];
 } MainLWLockStruct;
 
