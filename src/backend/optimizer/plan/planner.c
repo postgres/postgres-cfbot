@@ -48,6 +48,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
+#include "optimizer/placeholder.h"
 #include "optimizer/prep.h"
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
@@ -156,6 +157,8 @@ typedef struct
 static Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
 static void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
 static Bitmapset *find_having_conflicts(Query *parse, Index group_rtindex);
+static void wrap_duplicate_group_exprs(PlannerInfo *root);
+static bool wrap_srf_argument_walker(Node *node, PlannerInfo *root);
 static Oid	having_var_grouping_eqop(Var *var, void *context);
 static Oid	group_var_eqop(Query *parse, Var *var);
 static void preprocess_subquery_phvs(PlannerInfo *root, Node *node);
@@ -1221,6 +1224,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 	 */
 	if (parse->hasGroupRTE)
 	{
+		/* With grouping sets, duplicate grouping expressions must stay apart */
+		if (parse->groupingSets)
+			wrap_duplicate_group_exprs(root);
+
 		parse->targetList = (List *)
 			flatten_group_exprs(root, root->parse, (Node *) parse->targetList);
 		parse->havingQual =
@@ -1539,6 +1546,107 @@ preprocess_qual_conditions(PlannerInfo *root, Node *jtnode)
 	else
 		elog(ERROR, "unrecognized node type: %d",
 			 (int) nodeTag(jtnode));
+}
+
+/*
+ * wrap_duplicate_group_exprs
+ *	  Wrap a grouping expression that duplicates an earlier one in a
+ *	  PlaceHolderVar.
+ *
+ * The parser gives equal grouping expressions a single entry, so duplicates
+ * only appear when preprocessing simplifies two different expressions to the
+ * same thing, such as "a" and "COALESCE(a, 0)" for a NOT NULL column.  With
+ * grouping sets the two are nulled separately, and expressions above the
+ * grouping step could not tell which one they reference.
+ *
+ * Expressions that differ only by binary relabeling count as duplicates too,
+ * since equivalence classes do not distinguish them.
+ *
+ * A set-returning function cannot go inside a PlaceHolderVar, so for such an
+ * expression we wrap one argument of the function instead.  That is enough to
+ * make the expression distinct.
+ */
+static void
+wrap_duplicate_group_exprs(PlannerInfo *root)
+{
+	RangeTblEntry *rte = rt_fetch(root->group_rtindex, root->parse->rtable);
+	Relids		phrels = NULL;
+	ListCell   *lc;
+
+	foreach(lc, rte->groupexprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		Node	   *bare = expr;
+		bool		duplicate = false;
+		ListCell   *lc2;
+
+		while (IsA(bare, RelabelType))
+			bare = (Node *) ((RelabelType *) bare)->arg;
+
+		foreach(lc2, rte->groupexprs)
+		{
+			Node	   *other = (Node *) lfirst(lc2);
+
+			if (lc2 == lc)
+				break;
+			while (IsA(other, RelabelType))
+				other = (Node *) ((RelabelType *) other)->arg;
+			if (equal(bare, other))
+			{
+				duplicate = true;
+				break;
+			}
+		}
+
+		if (!duplicate)
+			continue;
+
+		if (expression_returns_set(expr))
+		{
+			(void) wrap_srf_argument_walker(expr, root);
+			continue;
+		}
+
+		if (phrels == NULL)
+			phrels = get_relids_in_jointree((Node *) root->parse->jointree,
+											true, false);
+		lfirst(lc) = make_placeholder_expr(root, (Expr *) expr, phrels);
+	}
+}
+
+/*
+ * Wrap the first argument that does not return a set, of the first
+ * set-returning function found in the expression, in a PlaceHolderVar.
+ */
+static bool
+wrap_srf_argument_walker(Node *node, PlannerInfo *root)
+{
+	List	   *args = NIL;
+	ListCell   *lc;
+
+	if (node == NULL)
+		return false;
+	if (IsA(node, FuncExpr) && ((FuncExpr *) node)->funcretset)
+		args = ((FuncExpr *) node)->args;
+	else if (IsA(node, OpExpr) && ((OpExpr *) node)->opretset)
+		args = ((OpExpr *) node)->args;
+
+	foreach(lc, args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		if (!expression_returns_set(arg))
+		{
+			Relids		phrels;
+
+			phrels = get_relids_in_jointree((Node *) root->parse->jointree,
+											true, false);
+			lfirst(lc) = make_placeholder_expr(root, (Expr *) arg, phrels);
+			return true;
+		}
+	}
+
+	return expression_tree_walker(node, wrap_srf_argument_walker, root);
 }
 
 /*

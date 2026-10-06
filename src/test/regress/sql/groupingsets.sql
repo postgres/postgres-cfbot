@@ -803,4 +803,42 @@ from (values (1, 1), (2, 2)) as t (a, b)
 group by rollup(a, ab)
 order by 1, 2;
 
+-- test that grouping expressions simplified to the same expression are
+-- still nulled separately
+create temp table gstest_dup (a int not null);
+insert into gstest_dup values (10), (20);
+
+select a, coalesce(a, 0) as ca, coalesce(a, 0) is null as ca_is_null
+from gstest_dup
+group by grouping sets ((a), (coalesce(a, 0)))
+order by 1, 2;
+
+select a, coalesce(a, 0) as ca, count(*)
+from gstest_dup
+group by grouping sets ((a), (coalesce(a, 0)))
+having coalesce(a, 0) is null
+order by 1, 2;
+
+-- likewise for grouping expressions that differ only by a binary-compatible
+-- cast
+select v, v::text as vt
+from (values ('m'::varchar), ('c'), ('x'), ('a'), ('q'), ('f'), ('k'), ('b')) as t (v)
+group by grouping sets ((v), (v::text))
+order by 1, 2;
+
+-- and for volatile grouping expressions
+select (random() > 2) as r1, coalesce(random() > 2) as r2,
+       coalesce(random() > 2) is null as r2_is_null
+from gstest_dup
+group by grouping sets ((random() > 2), (coalesce(random() > 2)))
+order by 1, 2;
+
+-- and for set-returning ones
+select generate_series(a, a) as s1, generate_series(a, coalesce(a, 0)) as s2,
+       generate_series(a, coalesce(a, 0)) is null as s2_is_null
+from gstest_dup
+group by grouping sets ((generate_series(a, a)),
+                        (generate_series(a, coalesce(a, 0))))
+order by 1, 2;
+
 -- end
