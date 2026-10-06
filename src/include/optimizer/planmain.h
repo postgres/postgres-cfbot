@@ -37,6 +37,13 @@ extern RelOptInfo *query_planner(PlannerInfo *root,
 extern void preprocess_minmax_aggregates(PlannerInfo *root);
 
 /*
+ * prototypes for plan/planorexpand.c
+ */
+extern List *plan_or_expansion_arms(PlannerInfo *root);
+extern void add_or_expansion_paths(PlannerInfo *root, RelOptInfo *joinrel,
+								   List *or_cands);
+
+/*
  * prototypes for plan/createplan.c
  */
 extern Plan *create_plan(PlannerInfo *root, Path *best_path);

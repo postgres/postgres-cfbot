@@ -11817,14 +11817,26 @@ WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM tenk1 t1, tenk1 t2
 WHERE t2.thousand = t1.tenthous OR t2.thousand = t1.unique1 OR t2.thousand = t1.unique2;
-                                       QUERY PLAN                                        
------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
  Aggregate
-   ->  Nested Loop
-         ->  Seq Scan on tenk1 t1
-         ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2
-               Index Cond: (thousand = ANY (ARRAY[t1.tenthous, t1.unique1, t1.unique2]))
-(5 rows)
+   ->  Append
+         ->  Hash Join
+               Hash Cond: (t2.thousand = t1.tenthous)
+               ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2
+               ->  Hash
+                     ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t1
+         ->  Merge Join
+               Merge Cond: (t1.unique1 = t2.thousand)
+               Join Filter: ((t2.thousand = t1.tenthous) IS NOT TRUE)
+               ->  Index Scan using tenk1_unique1 on tenk1 t1
+               ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2
+         ->  Merge Join
+               Merge Cond: (t1.unique2 = t2.thousand)
+               Join Filter: (((t2.thousand = t1.tenthous) IS NOT TRUE) AND ((t2.thousand = t1.unique1) IS NOT TRUE))
+               ->  Index Scan using tenk1_unique2 on tenk1 t1
+               ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2
+(17 rows)
 
 SELECT COUNT(*) FROM tenk1 t1, tenk1 t2
 WHERE t2.thousand = t1.tenthous OR t2.thousand = t1.unique1 OR t2.thousand = t1.unique2;
