@@ -1697,28 +1697,50 @@ IndexSupportInitialize(oidvector *indclass, AttrNumber nKeyAtts,
 		Oid		   *opcInType;
 		RegProcedure *support;
 		FmgrInfo   *supportinfo;
+		size_t		bulkallocSize = 0;
+		char	   *bulkalloc;
 		MemoryContext shapectx;
+		int			nprocs = maxSupportNumber * nKeyAtts;
+
+		/* supportinfo */
+		bulkallocSize += sizeof(FmgrInfo) * nprocs;
+		/* support */
+		bulkallocSize += sizeof(RegProcedure) * nprocs;
+		/* opcInType */
+		bulkallocSize += sizeof(Oid) * nKeyAtts;
+		/* opFamily */
+		bulkallocSize += sizeof(Oid) * nKeyAtts;
 
 		shapectx = ProxyContextCreate(RelShapeContext, "index shape");
 
+		bulkalloc = MemoryContextAllocZero(shapectx, bulkallocSize);
+
 		if (maxSupportNumber > 0)
 		{
-			int		nprocs = maxSupportNumber * nKeyAtts;
-			supportinfo = (FmgrInfo *)
-				MemoryContextAllocZero(shapectx, nprocs * sizeof(FmgrInfo));
-			support = (RegProcedure *)
-				MemoryContextAllocZero(shapectx, nprocs * sizeof(RegProcedure));
+			supportinfo = (FmgrInfo *) bulkalloc;
+			bulkalloc += nprocs * sizeof(FmgrInfo);
+			bulkallocSize -= nprocs * sizeof(FmgrInfo);
+
+			support = (RegProcedure *) bulkalloc;
+			bulkalloc += nprocs * sizeof(RegProcedure);
+			bulkallocSize -= nprocs * sizeof(RegProcedure);
 		}
 		else
 		{
+			Assert(nprocs == 0);
 			supportinfo = NULL;
 			support = NULL;
 		}
 
-		opFamily = (Oid *)
-			MemoryContextAllocZero(shapectx, nKeyAtts * sizeof(Oid));
-		opcInType = (Oid *)
-			MemoryContextAllocZero(shapectx, nKeyAtts * sizeof(Oid));
+		opFamily = (Oid *) bulkalloc;
+		bulkalloc += nKeyAtts * sizeof(Oid);
+		bulkallocSize -= nKeyAtts * sizeof(Oid);
+
+		opcInType = (Oid *) bulkalloc;
+		bulkalloc += nKeyAtts * sizeof(Oid);
+		bulkallocSize -= nKeyAtts * sizeof(Oid);
+
+		Assert(bulkallocSize == 0);
 
 		for (int attIndex = 0; attIndex < nKeyAtts; attIndex++)
 		{
