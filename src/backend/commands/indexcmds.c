@@ -1166,11 +1166,15 @@ DefineIndex(ParseState *pstate,
 	 */
 	if (indexInfo->ii_Expressions || indexInfo->ii_Predicate)
 	{
+		TupleDesc	tupdesc = RelationGetDescr(rel);
 		Bitmapset  *indexattrs = NULL;
+		bool		has_virtual_generated_columns;
 		int			j;
 
 		pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &indexattrs);
 		pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &indexattrs);
+		has_virtual_generated_columns = tupdesc->constr &&
+			tupdesc->constr->has_generated_virtual;
 
 		for (int i = FirstLowInvalidHeapAttributeNumber + 1; i < 0; i++)
 		{
@@ -1191,8 +1195,9 @@ DefineIndex(ParseState *pstate,
 		{
 			AttrNumber	attno = j + FirstLowInvalidHeapAttributeNumber;
 
-			if (attno > 0 &&
-				TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			if ((attno == 0 && has_virtual_generated_columns) ||
+				(attno > 0 &&
+				 TupleDescAttr(tupdesc, attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL))
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 stmt->isconstraint ?
