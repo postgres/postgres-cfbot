@@ -249,6 +249,66 @@ select count(*) filter (where dist = c <-> point(5.2, 5.91)) as same,
 drop index gist_tbl_circle_index;
 reset enable_indexonlyscan;
 
+-- The planner must not charge an ordering Index Scan for evaluating a
+-- targetlist entry it takes from its ORDER BY values.  With a costly ORDER BY
+-- expression, the kNN scan should win over Seq Scan + Sort even when the
+-- filter is selective, since the Sort plan really does evaluate it per row.
+create function gist_costly_pt(point) returns point
+  language plpgsql immutable strict cost 10000
+  as $$ begin return $1; end $$;
+create temp table gist_costly (id int, p point, grp int);
+insert into gist_costly
+  select g, point(g % 101, g % 103), g % 100 from generate_series(1, 10000) g;
+create index on gist_costly using gist (gist_costly_pt(p));
+create index on gist_costly (grp);
+vacuum analyze gist_costly;
+set enable_bitmapscan = off;
+
+explain (costs off)
+select id, gist_costly_pt(p) <-> point(0,0) as dist from gist_costly
+  where grp < 5 order by gist_costly_pt(p) <-> point(0,0);
+
+-- The ORDER BY value is in every plan's target (as a sort column), so the
+-- kNN scan used to be charged rows * cost(gist_costly_pt) for it, ~2.5e5
+-- here.  It is now charged nothing for it; an expression that merely
+-- contains it is still evaluated, and charged.
+create function gist_costly_total(q text) returns float8 language plpgsql as
+$$ declare j json; begin
+     execute 'explain (format json) ' || q into j;
+     return (j->0->'Plan'->>'Total Cost')::float8;
+   end $$;
+set enable_sort = off;
+select gist_costly_total('select id, gist_costly_pt(p) <-> point(0,0)
+         from gist_costly order by gist_costly_pt(p) <-> point(0,0)') < 10000
+         as returned_is_free,
+       gist_costly_total('select id, (gist_costly_pt(p) <-> point(0,0)) * 2
+         from gist_costly order by gist_costly_pt(p) <-> point(0,0)') > 100000
+         as nested_is_charged;
+reset enable_sort;
+drop function gist_costly_total(text);
+
+reset enable_bitmapscan;
+drop table gist_costly;
+drop function gist_costly_pt(point);
+
+-- The ORDER BY expression written as "const OP key" is commuted into
+-- "key OP const" for the index; a targetlist entry in the original form is
+-- still the same value, and is still taken from the scan.
+create temp table gist_commute as
+  select g as id, point(g % 101, g % 103) as p from generate_series(1, 1000) g;
+create index on gist_commute using gist (p);
+vacuum analyze gist_commute;
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+set enable_indexonlyscan = off;
+explain (verbose, costs off)
+select point(5,5) <-> p as d from gist_commute order by point(5,5) <-> p limit 3;
+select point(5,5) <-> p as d from gist_commute order by point(5,5) <-> p limit 3;
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+drop table gist_commute;
+
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);

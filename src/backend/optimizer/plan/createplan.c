@@ -3036,14 +3036,15 @@ create_indexscan_plan(PlannerInfo *root,
 	if (!indexonly && indexorderbys != NIL)
 	{
 		List	   *exact = NIL;
-		ListCell   *lc;
+		ListCell   *lo,
+				   *lc;
 
-		foreach(lc, best_path->indexorderbycols)
-		{
-			int			indexcol = lfirst_int(lc);
-
-			exact = lappend_int(exact, indexinfo->canreturnorderby[indexcol]);
-		}
+		/* must agree with path_target_cost() in pathnode.c */
+		forboth(lo, best_path->indexorderbys, lc, best_path->indexorderbycols)
+			exact = lappend_int(exact,
+								index_orderby_returnable(indexinfo,
+														 lfirst_int(lc),
+														 (Expr *) lfirst(lo)));
 		((IndexScan *) scan_plan)->indexorderbyexact = exact;
 	}
 
