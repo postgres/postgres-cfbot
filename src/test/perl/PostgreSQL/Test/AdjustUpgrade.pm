@@ -198,6 +198,20 @@ sub adjust_database_contents
 			'drop operator if exists !=- (bigint,NONE)',
 			'drop operator if exists #@%# (bigint,NONE)');
 
+		# v13 bpchar_ops indexes claim deduplication is safe; amcheck
+		# complains about that after upgrade, so drop them
+		_add_st(
+			$result, 'regression',
+			'drop index if exists public.room_rno',
+			'drop index if exists public.wslot_name',
+			'drop index if exists public.pslot_name',
+			'drop index if exists public.pline_name',
+			'drop index if exists public.hub_name',
+			'drop index if exists public.hslot_name',
+			'drop index if exists public.hslot_hubname',
+			'drop index if exists public.iface_name',
+			'drop index if exists public.phone_name');
+
 		# get rid of dblink's dependencies on regress.so
 		if ($dbnames{'contrib_regression_dblink'})
 		{
