@@ -162,5 +162,6 @@ extern TypeName *defGetTypeName(DefElem *def);
 extern int	defGetTypeLength(DefElem *def);
 extern List *defGetStringList(DefElem *def);
 pg_noreturn extern void errorConflictingDefElem(DefElem *defel, ParseState *pstate);
+extern List *deduplicateDefElemList(List *options);
 
 #endif							/* DEFREM_H */

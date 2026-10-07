@@ -269,7 +269,7 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 	bool		concurrently = false;
 
 	/* Parse option list */
-	foreach_node(DefElem, opt, stmt->params)
+	foreach_node(DefElem, opt, deduplicateDefElemList(stmt->params))
 	{
 		if (strcmp(opt->defname, "verbose") == 0)
 			verbose = defGetBoolean(opt);
