@@ -8190,6 +8190,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 							   bool tlist_same_exprs)
 {
 	bool		rel_is_partitioned = IS_PARTITIONED_REL(rel);
+	bool		projected = false;
 	PathTarget *scanjoin_target;
 	ListCell   *lc;
 
@@ -8259,10 +8260,18 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	 * If the tlist exprs are the same, we can just inject the sortgroupref
 	 * information into the existing pathtargets.  Otherwise, replace each
 	 * path with a projection path that generates the SRF-free scan/join
-	 * target.  We modify the lists in place.  That usually adds the same cost
-	 * to every path, but a plain IndexScan doesn't pay for target entries it
-	 * takes from its ORDER BY values, so it can become cheaper relative to
-	 * the others; restore the cost ordering afterwards.
+	 * target.  We modify the lists in place.
+	 *
+	 * An index path may emit its own target, rel->reltarget plus a value it
+	 * reads from the index (see indexonly_path_target() and
+	 * index_path_orderby_target()).  Such a path needs a projection even when
+	 * the exprs are the same, since its target has more columns than
+	 * scanjoin_target's sortgrouprefs describe.
+	 *
+	 * A projection usually adds the same cost to every path, but not always:
+	 * an index path isn't charged for target entries it reads from the index,
+	 * and a path that can't project gets a Result node.  So when any path was
+	 * replaced, restore the cost ordering afterwards.
 	 */
 	foreach(lc, rel->pathlist)
 	{
@@ -8271,7 +8280,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		/* Shouldn't have any parameterized paths anymore */
 		Assert(subpath->param_info == NULL);
 
-		if (tlist_same_exprs)
+		if (tlist_same_exprs && subpath->pathtarget == rel->reltarget)
 			subpath->pathtarget->sortgrouprefs =
 				scanjoin_target->sortgrouprefs;
 		else
@@ -8281,10 +8290,12 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			newpath = (Path *) create_projection_path(root, rel, subpath,
 													  scanjoin_target);
 			lfirst(lc) = newpath;
+			projected = true;
 		}
 	}
-	if (!tlist_same_exprs)
+	if (projected)
 		sort_pathlist_by_cost(rel->pathlist);
+	projected = false;
 
 	/* Likewise adjust the targets for any partial paths. */
 	foreach(lc, rel->partial_pathlist)
@@ -8294,7 +8305,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		/* Shouldn't have any parameterized paths anymore */
 		Assert(subpath->param_info == NULL);
 
-		if (tlist_same_exprs)
+		if (tlist_same_exprs && subpath->pathtarget == rel->reltarget)
 			subpath->pathtarget->sortgrouprefs =
 				scanjoin_target->sortgrouprefs;
 		else
@@ -8304,9 +8315,10 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			newpath = (Path *) create_projection_path(root, rel, subpath,
 													  scanjoin_target);
 			lfirst(lc) = newpath;
+			projected = true;
 		}
 	}
-	if (!tlist_same_exprs)
+	if (projected)
 		sort_pathlist_by_cost(rel->partial_pathlist);
 
 	/*
