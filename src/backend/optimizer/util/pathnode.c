@@ -15,10 +15,12 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_type.h"
 #include "executor/nodeSetOp.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
@@ -28,6 +30,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/selfuncs.h"
 
@@ -2578,6 +2581,155 @@ create_hashjoin_path(PlannerInfo *root,
 }
 
 /*
+ * sort_pathlist_by_cost
+ *	  Restore the ordering add_path() and add_partial_path() maintain
+ *	  (fewest disabled nodes, then lowest total cost) after the costs of
+ *	  paths already in the list were changed in place.
+ *
+ * This is a stable insertion sort: it costs one pass when the list is still
+ * in order, which is the usual case, and keeps equal-cost paths in the order
+ * they were added.
+ */
+void
+sort_pathlist_by_cost(List *pathlist)
+{
+	for (int i = 1; i < list_length(pathlist); i++)
+	{
+		Path	   *path = list_nth(pathlist, i);
+		int			j;
+
+		for (j = i; j > 0; j--)
+		{
+			Path	   *prev = list_nth(pathlist, j - 1);
+
+			if (prev->disabled_nodes < path->disabled_nodes ||
+				(prev->disabled_nodes == path->disabled_nodes &&
+				 prev->total_cost <= path->total_cost))
+				break;
+			lfirst(list_nth_cell(pathlist, j)) = prev;
+		}
+		lfirst(list_nth_cell(pathlist, j)) = path;
+	}
+}
+
+/*
+ * index_orderby_returnable
+ *	  Will an IndexScan on 'index' hand back the value of ORDER BY expression
+ *	  'orderby', bound to index column 'indexcol', to its targetlist?
+ *
+ * create_indexscan_plan() records this per key for setrefs.c, and
+ * path_target_cost() uses it to cost the path, so that the cost we assign to
+ * a path is the cost of the plan we build from it.  The opclass must promise
+ * exact values (amcanreturnorderby), and the expression must be of a type
+ * the AM can deliver.
+ */
+bool
+index_orderby_returnable(IndexOptInfo *index, int indexcol, Expr *orderby)
+{
+	Oid			typ;
+
+	if (index->canreturnorderby == NULL || !index->canreturnorderby[indexcol])
+		return false;
+
+	typ = exprType((Node *) orderby);
+	return (typ == FLOAT8OID || typ == FLOAT4OID);
+}
+
+/*
+ * orderby_tlist_match
+ *	  Is targetlist expression 'expr' the value of ORDER BY expression
+ *	  'orderby'?
+ *
+ * 'orderby' is an IndexPath's indexorderbys entry, which has the index key
+ * on the left; match_clause_to_ordering_op() commutes "const OP key" into
+ * that form.  So a targetlist entry that the user wrote in the original
+ * "const OP key" form is the same value but not equal() to it.  Accept it
+ * if it is the commuted operator applied to the swapped arguments; an
+ * operator's commutator yields the same result by definition.
+ *
+ * Shared by path_target_cost() and setrefs.c's replace_orderby_tlist_refs()
+ * so that what is costed is what is built.
+ */
+bool
+orderby_tlist_match(Expr *expr, Expr *orderby)
+{
+	OpExpr	   *a,
+			   *b;
+
+	if (equal(expr, orderby))
+		return true;
+
+	if (!IsA(expr, OpExpr) || !IsA(orderby, OpExpr))
+		return false;
+	a = (OpExpr *) expr;
+	b = (OpExpr *) orderby;
+	if (list_length(a->args) != 2 || list_length(b->args) != 2)
+		return false;
+	if (a->opresulttype != b->opresulttype ||
+		a->opcollid != b->opcollid ||
+		a->inputcollid != b->inputcollid ||
+		get_commutator(a->opno) != b->opno)
+		return false;
+
+	return equal(linitial(a->args), lsecond(b->args)) &&
+		equal(lsecond(a->args), linitial(b->args));
+}
+
+/*
+ * path_target_cost
+ *	  Return the cost 'path' pays to evaluate 'target'.
+ *
+ * Normally that's just target->cost.  But a plain IndexScan takes any
+ * top-level target expression that is a returnable ORDER BY expression
+ * (see orderby_tlist_match()) from its ORDER BY values instead of
+ * evaluating it (setrefs.c rewrites it into a reference to them), so it
+ * doesn't pay for those.  Each target entry
+ * is counted at most once, as setrefs.c rewrites it once.
+ */
+static QualCost
+path_target_cost(PlannerInfo *root, Path *path, PathTarget *target)
+{
+	QualCost	cost = target->cost;
+	IndexPath  *ipath;
+	ListCell   *lc;
+
+	if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan)
+		return cost;
+	ipath = (IndexPath *) path;
+	if (ipath->indexorderbys == NIL)
+		return cost;
+
+	foreach(lc, target->exprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		ListCell   *lo,
+				   *lcol;
+
+		if (IsA(expr, Var))
+			continue;			/* costs nothing anyway */
+
+		forboth(lo, ipath->indexorderbys, lcol, ipath->indexorderbycols)
+		{
+			Expr	   *orderby = (Expr *) lfirst(lo);
+
+			if (index_orderby_returnable(ipath->indexinfo, lfirst_int(lcol),
+										 orderby) &&
+				orderby_tlist_match((Expr *) expr, orderby))
+			{
+				QualCost	ecost;
+
+				cost_qual_eval_node(&ecost, expr, root);
+				cost.startup -= ecost.startup;
+				cost.per_tuple -= ecost.per_tuple;
+				break;
+			}
+		}
+	}
+
+	return cost;
+}
+
+/*
  * create_projection_path
  *	  Creates a pathnode that represents performing a projection.
  *
@@ -2637,6 +2789,9 @@ create_projection_path(PlannerInfo *root,
 	if (is_projection_capable_path(subpath) ||
 		equal(oldtarget->exprs, target->exprs))
 	{
+		QualCost	oldcost = path_target_cost(root, subpath, oldtarget);
+		QualCost	newcost = path_target_cost(root, subpath, target);
+
 		/* No separate Result node needed */
 		pathnode->dummypp = true;
 
@@ -2646,10 +2801,10 @@ create_projection_path(PlannerInfo *root,
 		pathnode->path.rows = subpath->rows;
 		pathnode->path.disabled_nodes = subpath->disabled_nodes;
 		pathnode->path.startup_cost = subpath->startup_cost +
-			(target->cost.startup - oldtarget->cost.startup);
+			(newcost.startup - oldcost.startup);
 		pathnode->path.total_cost = subpath->total_cost +
-			(target->cost.startup - oldtarget->cost.startup) +
-			(target->cost.per_tuple - oldtarget->cost.per_tuple) * subpath->rows;
+			(newcost.startup - oldcost.startup) +
+			(newcost.per_tuple - oldcost.per_tuple) * subpath->rows;
 	}
 	else
 	{
@@ -2701,6 +2856,7 @@ apply_projection_to_path(PlannerInfo *root,
 						 PathTarget *target)
 {
 	QualCost	oldcost;
+	QualCost	newcost;
 
 	/*
 	 * If given path can't project, we might need a Result node, so make a
@@ -2713,12 +2869,13 @@ apply_projection_to_path(PlannerInfo *root,
 	 * We can just jam the desired tlist into the existing path, being sure to
 	 * update its cost estimates appropriately.
 	 */
-	oldcost = path->pathtarget->cost;
+	oldcost = path_target_cost(root, path, path->pathtarget);
+	newcost = path_target_cost(root, path, target);
 	path->pathtarget = target;
 
-	path->startup_cost += target->cost.startup - oldcost.startup;
-	path->total_cost += target->cost.startup - oldcost.startup +
-		(target->cost.per_tuple - oldcost.per_tuple) * path->rows;
+	path->startup_cost += newcost.startup - oldcost.startup;
+	path->total_cost += newcost.startup - oldcost.startup +
+		(newcost.per_tuple - oldcost.per_tuple) * path->rows;
 
 	/*
 	 * If the path happens to be a Gather or GatherMerge path, we'd like to
