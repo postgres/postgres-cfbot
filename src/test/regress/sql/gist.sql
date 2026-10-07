@@ -373,6 +373,20 @@ explain (verbose, costs off)
 select gist_ios_costly(i) from gist_ios_cost order by i;
 select gist_ios_total('select gist_ios_costly(i) from gist_ios_cost order by i')
   < 10000 as ios_expr_is_free;
+-- With nothing else to recommend it (no qual, no useful order), an
+-- index-only scan that reads the expression still beats a seq scan that has
+-- to compute it: add_path() keeps both, since their targets differ.
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost order by gist_ios_costly(i);
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost;
+-- Ordered by the index, the scan emits the final targetlist directly and
+-- still reads the expression from the index.
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost order by i desc limit 3;
+-- Below a join it isn't considered.
+explain (costs off)
+select gist_ios_costly(a.i) from gist_ios_cost a join gist_ios_cost b using (i);
 drop function gist_ios_total(text);
 drop table gist_ios_cost;
 drop function gist_ios_costly(int);
