@@ -1238,9 +1238,10 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 										copy_data ? SUBREL_STATE_INIT : SUBREL_STATE_READY,
 										InvalidXLogRecPtr, true);
 				ereport(DEBUG1,
-						errmsg_internal("%s \"%s.%s\" added to subscription \"%s\"",
+						errmsg_internal("%s \"%s\" added to subscription \"%s\"",
 										relkind == RELKIND_SEQUENCE ? "sequence" : "table",
-										rv->schemaname, rv->relname, sub->name));
+										MsgQualifiedRelName(rv->schemaname, rv->relname),
+										sub->name));
 			}
 		}
 
@@ -1314,9 +1315,8 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 				}
 
 				ereport(DEBUG1,
-						(errmsg_internal("table \"%s.%s\" removed from subscription \"%s\"",
-										 get_namespace_name(get_rel_namespace(relid)),
-										 get_rel_name(relid),
+						(errmsg_internal("table \"%s\" removed from subscription \"%s\"",
+										 MsgQualifiedRelNameByRelId(relid),
 										 sub->name)));
 			}
 		}
@@ -1348,9 +1348,8 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 				 * subscription and skips it, see copy_sequence().
 				 */
 				ereport(DEBUG1,
-						errmsg_internal("sequence \"%s.%s\" removed from subscription \"%s\"",
-										get_namespace_name(get_rel_namespace(relid)),
-										get_rel_name(relid),
+						errmsg_internal("sequence \"%s\" removed from subscription \"%s\"",
+										MsgQualifiedRelNameByRelId(relid),
 										sub->name));
 			}
 		}
@@ -1487,9 +1486,8 @@ AlterSubscription_refresh_seq(Subscription *sub, char *conninfo)
 		UpdateSubscriptionRelState(sub->oid, relid, SUBREL_STATE_INIT,
 								   InvalidXLogRecPtr, false);
 		ereport(DEBUG1,
-				errmsg_internal("sequence \"%s.%s\" of subscription \"%s\" set to INIT state",
-								get_namespace_name(get_rel_namespace(relid)),
-								get_rel_name(relid),
+				errmsg_internal("sequence \"%s\" of subscription \"%s\" set to INIT state",
+								MsgQualifiedRelNameByRelId(relid),
 								sub->name));
 	}
 }
@@ -2602,7 +2600,8 @@ drop_sub_conflict_log_table(Oid subid, char *subname, Oid subconflictlogrelid)
 
 		ereport(NOTICE,
 				errmsg("dropped conflict log table \"%s\" for subscription \"%s\"",
-					   get_qualified_objname(PG_CONFLICT_NAMESPACE, conflictrelname),
+					   MsgQualifiedRelName(get_namespace_name(PG_CONFLICT_NAMESPACE),
+										   conflictrelname),
 					   subname));
 	}
 }
@@ -3665,8 +3664,8 @@ fetch_relation_list(WalReceiverConn *wrconn, List *publications)
 			list_member_rangevar(relationlist, relinfo->rv))
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot use different column lists for table \"%s.%s\" in different publications",
-						   nspname, relname));
+					errmsg("cannot use different column lists for table \"%s\" in different publications",
+						   MsgQualifiedRelName(nspname, relname)));
 		else
 			relationlist = lappend(relationlist, relinfo);
 

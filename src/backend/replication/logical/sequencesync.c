@@ -159,7 +159,8 @@ get_sequences_string(List *seqindexes, StringInfo buf)
 		if (buf->len > 0)
 			appendStringInfoString(buf, ", ");
 
-		appendStringInfo(buf, "\"%s.%s\"", seqinfo->nspname, seqinfo->seqname);
+		appendStringInfo(buf, "\"%s\"",
+						 MsgQualifiedRelName(seqinfo->nspname, seqinfo->seqname));
 	}
 }
 
@@ -673,9 +674,9 @@ copy_sequences(WalReceiverConn *conn)
 			{
 				case COPYSEQ_SUCCESS:
 					elog(DEBUG1,
-						 "logical replication synchronization for subscription \"%s\", sequence \"%s.%s\" has finished",
-						 MySubscription->name, seqinfo->nspname,
-						 seqinfo->seqname);
+						 "logical replication synchronization for subscription \"%s\", sequence \"%s\" has finished",
+						 MySubscription->name,
+						 MsgQualifiedRelName(seqinfo->nspname, seqinfo->seqname));
 					batch_succeeded_count++;
 					break;
 				case COPYSEQ_MISMATCH:
@@ -727,9 +728,8 @@ copy_sequences(WalReceiverConn *conn)
 					if (seqinfo->found_on_pub)
 					{
 						ereport(LOG,
-								errmsg("skip synchronization of sequence \"%s.%s\" because it has been dropped concurrently",
-									   seqinfo->nspname,
-									   seqinfo->seqname));
+								errmsg("skip synchronization of sequence \"%s\" because it has been dropped concurrently",
+									   MsgQualifiedRelName(seqinfo->nspname, seqinfo->seqname)));
 						batch_skipped_count++;
 					}
 					break;
@@ -741,8 +741,8 @@ copy_sequences(WalReceiverConn *conn)
 					 * and it must not be treated as an error.
 					 */
 					ereport(LOG,
-							errmsg("skip synchronization of sequence \"%s.%s\" because it is no longer part of subscription \"%s\"",
-								   seqinfo->nspname, seqinfo->seqname,
+							errmsg("skip synchronization of sequence \"%s\" because it is no longer part of subscription \"%s\"",
+								   MsgQualifiedRelName(seqinfo->nspname, seqinfo->seqname),
 								   MySubscription->name));
 					batch_skipped_count++;
 					break;

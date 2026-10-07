@@ -215,7 +215,7 @@ expect_failure(
 	2,
 	11,
 	13,
-	qr/ERROR: ( [A-Z0-9]+:)? user "regress_alice" cannot replicate into relation with row-level security enabled: "unpartitioned\w*"/msi,
+	qr/ERROR: ( [A-Z0-9]+:)? user "regress_alice" cannot replicate into relation with row-level security enabled: "alice.unpartitioned\w*"/msi,
 	"replication of insert into table with forced rls fails");
 
 # Since replication acts as the table owner, replication will succeed if we don't force it.
@@ -236,7 +236,7 @@ expect_failure(
 	3,
 	11,
 	15,
-	qr/ERROR: ( [A-Z0-9]+:)? user "regress_alice" cannot replicate into relation with row-level security enabled: "unpartitioned\w*"/msi,
+	qr/ERROR: ( [A-Z0-9]+:)? user "regress_alice" cannot replicate into relation with row-level security enabled: "alice.unpartitioned\w*"/msi,
 	"replication of update into table with forced rls fails");
 $node_subscriber->safe_psql(
 	'postgres', qq(

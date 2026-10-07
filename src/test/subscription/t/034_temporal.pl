@@ -134,14 +134,14 @@ $node_publisher->safe_psql(
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"UPDATE temporal_no_key SET a = 'b' WHERE id = '[2,3)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot update table "temporal_no_key" because it does not have a replica identity and publishes updates
+	qq(psql:<stdin>:1: ERROR:  cannot update table "public.temporal_no_key" because it does not have a replica identity and publishes updates
 HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't UPDATE temporal_no_key DEFAULT");
 
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"DELETE FROM temporal_no_key WHERE id = '[3,4)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot delete from table "temporal_no_key" because it does not have a replica identity and publishes deletes
+	qq(psql:<stdin>:1: ERROR:  cannot delete from table "public.temporal_no_key" because it does not have a replica identity and publishes deletes
 HINT:  To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't DELETE temporal_no_key DEFAULT");
 
@@ -189,14 +189,14 @@ $node_publisher->safe_psql(
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"UPDATE temporal_unique SET a = 'b' WHERE id = '[2,3)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot update table "temporal_unique" because it does not have a replica identity and publishes updates
+	qq(psql:<stdin>:1: ERROR:  cannot update table "public.temporal_unique" because it does not have a replica identity and publishes updates
 HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't UPDATE temporal_unique DEFAULT");
 
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"DELETE FROM temporal_unique WHERE id = '[3,4)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot delete from table "temporal_unique" because it does not have a replica identity and publishes deletes
+	qq(psql:<stdin>:1: ERROR:  cannot delete from table "public.temporal_unique" because it does not have a replica identity and publishes deletes
 HINT:  To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't DELETE temporal_unique DEFAULT");
 
@@ -540,14 +540,14 @@ $node_publisher->safe_psql(
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"UPDATE temporal_no_key SET a = 'b' WHERE id = '[2,3)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot update table "temporal_no_key" because it does not have a replica identity and publishes updates
+	qq(psql:<stdin>:1: ERROR:  cannot update table "public.temporal_no_key" because it does not have a replica identity and publishes updates
 HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't UPDATE temporal_no_key NOTHING");
 
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"DELETE FROM temporal_no_key WHERE id = '[3,4)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot delete from table "temporal_no_key" because it does not have a replica identity and publishes deletes
+	qq(psql:<stdin>:1: ERROR:  cannot delete from table "public.temporal_no_key" because it does not have a replica identity and publishes deletes
 HINT:  To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't DELETE temporal_no_key NOTHING");
 
@@ -572,14 +572,14 @@ $node_publisher->safe_psql(
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"UPDATE temporal_pk SET a = 'b' WHERE id = '[2,3)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot update table "temporal_pk" because it does not have a replica identity and publishes updates
+	qq(psql:<stdin>:1: ERROR:  cannot update table "public.temporal_pk" because it does not have a replica identity and publishes updates
 HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't UPDATE temporal_pk NOTHING");
 
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"DELETE FROM temporal_pk WHERE id = '[3,4)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot delete from table "temporal_pk" because it does not have a replica identity and publishes deletes
+	qq(psql:<stdin>:1: ERROR:  cannot delete from table "public.temporal_pk" because it does not have a replica identity and publishes deletes
 HINT:  To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't DELETE temporal_pk NOTHING");
 
@@ -604,14 +604,14 @@ $node_publisher->safe_psql(
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"UPDATE temporal_unique SET a = 'b' WHERE id = '[2,3)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot update table "temporal_unique" because it does not have a replica identity and publishes updates
+	qq(psql:<stdin>:1: ERROR:  cannot update table "public.temporal_unique" because it does not have a replica identity and publishes updates
 HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't UPDATE temporal_unique NOTHING");
 
 ($result, $stdout, $stderr) = $node_publisher->psql('postgres',
 	"DELETE FROM temporal_unique WHERE id = '[3,4)'");
 is( $stderr,
-	qq(psql:<stdin>:1: ERROR:  cannot delete from table "temporal_unique" because it does not have a replica identity and publishes deletes
+	qq(psql:<stdin>:1: ERROR:  cannot delete from table "public.temporal_unique" because it does not have a replica identity and publishes deletes
 HINT:  To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.),
 	"can't DELETE temporal_unique NOTHING");
 

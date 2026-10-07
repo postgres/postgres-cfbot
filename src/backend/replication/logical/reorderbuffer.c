@@ -5260,7 +5260,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	toast_rel = RelationIdGetRelation(relation->rd_rel->reltoastrelid);
 	if (!RelationIsValid(toast_rel))
 		elog(ERROR, "could not open toast relation with OID %u (base relation \"%s\")",
-			 relation->rd_rel->reltoastrelid, RelationGetRelationName(relation));
+			 relation->rd_rel->reltoastrelid, MsgQualifiedRelNameByRel(relation));
 
 	toast_desc = RelationGetDescr(toast_rel);
 
