@@ -197,7 +197,7 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	ring_size = -1;
 
 	/* Parse options list */
-	foreach(lc, vacstmt->options)
+	foreach(lc, deduplicateDefElemList(vacstmt->options))
 	{
 		DefElem    *opt = (DefElem *) lfirst(lc);
 
