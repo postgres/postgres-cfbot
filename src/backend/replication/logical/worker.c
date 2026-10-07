@@ -4082,13 +4082,18 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 	pgstat_report_activity(STATE_IDLE, NULL);
 
 	/*
+	 * Save the current callbacks so that an error propagated from a parallel
+	 * apply worker does not use this leader's unrelated apply error context.
+	 */
+	apply_error_context_stack = error_context_stack;
+
+	/*
 	 * Push apply error context callback. Fields will be filled while applying
 	 * a change.
 	 */
 	errcallback.callback = apply_error_callback;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
-	apply_error_context_stack = error_context_stack;
 
 	/* This outer loop iterates once per wait. */
 	for (;;)
