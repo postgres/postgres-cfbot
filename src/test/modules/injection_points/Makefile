@@ -46,6 +46,8 @@ NO_INSTALLCHECK = 1
 
 export enable_injection_points
 
+TAP_TESTS = 1
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

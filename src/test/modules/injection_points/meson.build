@@ -78,4 +78,9 @@ tests += {
       '--temp-config', files('extra.conf'),
     ],
   },
+  'tap': {
+    'tests': [
+      't/001_repack_error_context.pl',
+    ],
+  },
 }
