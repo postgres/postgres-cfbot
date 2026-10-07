@@ -354,6 +354,29 @@ drop table gist_join_dim;
 drop function gist_join_pt(point);
 drop sequence gist_join_cnt;
 
+-- An index-only scan isn't charged for evaluating a target expression it
+-- reads from a returnable index expression column: it reads the stored
+-- value instead.  (Not GiST-specific; btree returns expression columns.)
+create function gist_ios_costly(int) returns int
+  language plpgsql immutable strict cost 100000
+  as $$ begin return $1; end $$;
+create temp table gist_ios_cost (i int);
+insert into gist_ios_cost select g from generate_series(1, 10000) g;
+create index on gist_ios_cost (i, gist_ios_costly(i));
+vacuum analyze gist_ios_cost;
+create function gist_ios_total(q text) returns float8 language plpgsql as
+$$ declare j json; begin
+     execute 'explain (format json) ' || q into j;
+     return (j->0->'Plan'->>'Total Cost')::float8;
+   end $$;
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost order by i;
+select gist_ios_total('select gist_ios_costly(i) from gist_ios_cost order by i')
+  < 10000 as ios_expr_is_free;
+drop function gist_ios_total(text);
+drop table gist_ios_cost;
+drop function gist_ios_costly(int);
+
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);
