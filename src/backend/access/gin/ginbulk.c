@@ -16,6 +16,7 @@
 
 #include <limits.h>
 
+#include "access/detoast.h"
 #include "access/gin_private.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
@@ -121,8 +122,8 @@ ginInitBA(BuildAccumulator *accum)
 }
 
 /*
- * This is basically the same as datumCopy(), but extended to count
- * palloc'd space in accum->allocatedMemory.
+ * Copy a key, fetching external values and tracking memory usage in
+ * accum->allocatedMemory.
  */
 static Datum
 getDatumCopy(BuildAccumulator *accum, OffsetNumber attnum, Datum value)
@@ -135,7 +136,16 @@ getDatumCopy(BuildAccumulator *accum, OffsetNumber attnum, Datum value)
 		res = value;
 	else
 	{
-		res = datumCopy(value, false, att->attlen);
+		/*
+		 * The accumulator keeps keys across heap pages.  Fetch external
+		 * values now, before a snapshot reset lets vacuum remove their TOAST
+		 * data.  Built-in extractValue functions already return values
+		 * without external TOAST pointers.
+		 */
+		if (att->attlen == -1 && VARATT_IS_EXTERNAL(DatumGetPointer(value)))
+			res = PointerGetDatum(detoast_external_attr(DatumGetPointer(value)));
+		else
+			res = datumCopy(value, false, att->attlen);
 		accum->allocatedMemory += GetMemoryChunkSpace(DatumGetPointer(res));
 	}
 	return res;

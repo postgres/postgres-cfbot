@@ -129,7 +129,9 @@ REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING GIN((ARRAY[i, j]));
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 -- The same in parallel mode
 ALTER TABLE cic_reset_snap.tbl SET (parallel_workers=2);
