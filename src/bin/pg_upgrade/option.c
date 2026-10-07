@@ -9,6 +9,8 @@
 
 #include "postgres_fe.h"
 
+#include <limits.h>
+
 #ifdef WIN32
 #include <io.h>
 #endif
@@ -20,6 +22,9 @@
 #include "utils/pidfile.h"
 
 static void usage(void);
+static void parse_initdb_options(const char *options);
+static void validate_initdb_options(void);
+static void check_initdb_setting(const char *setting);
 static void check_required_directory(char **dirpath,
 									 const char *envVarName, bool useCwd,
 									 const char *cmdLineOption, const char *description,
@@ -64,6 +69,7 @@ parseCommandLine(int argc, char *argv[])
 		{"set-char-signedness", required_argument, NULL, 6},
 		{"swap", no_argument, NULL, 7},
 		{"initdb", no_argument, NULL, 8},
+		{"initdb-options", required_argument, NULL, 9},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -239,6 +245,11 @@ parseCommandLine(int argc, char *argv[])
 				user_opts.initdb_new_cluster = true;
 				break;
 
+			case 9:
+				user_opts.initdb_options_given = true;
+				parse_initdb_options(optarg);
+				break;
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 						os_info.progname);
@@ -248,6 +259,13 @@ parseCommandLine(int argc, char *argv[])
 
 	if (optind < argc)
 		pg_fatal("too many command-line arguments (first is \"%s\")", argv[optind]);
+
+	if (user_opts.initdb_options_given)
+	{
+		if (!user_opts.initdb_new_cluster)
+			pg_fatal("--initdb-options requires --initdb");
+		validate_initdb_options();
+	}
 
 	if (!user_opts.sync_method)
 		user_opts.sync_method = pg_strdup("fsync");
@@ -305,6 +323,208 @@ parseCommandLine(int argc, char *argv[])
 }
 
 
+/*
+ * Split --initdb-options without invoking a shell.  Single quotes preserve
+ * every character.  Outside single quotes, backslashes escape only quotes,
+ * backslashes, spaces, and tabs, so ordinary Windows path separators survive.
+ */
+static void
+parse_initdb_options(const char *options)
+{
+	const char *p = options;
+	char	   *argument;
+
+	if (strpbrk(options, "\r\n") != NULL)
+		pg_fatal("--initdb-options must not contain a newline or carriage return");
+
+	argument = pg_malloc(strlen(options) + 1);
+	while (*p)
+	{
+		char	   *out = argument;
+		char		quote = '\0';
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == '\0')
+			break;
+
+		while (*p)
+		{
+			if (quote == '\0' && (*p == ' ' || *p == '\t'))
+				break;
+			if (*p == quote)
+			{
+				quote = '\0';
+				p++;
+			}
+			else if (quote != '\'' && *p == '\\')
+			{
+				p++;
+				if (*p == '\0')
+					pg_fatal("trailing backslash in --initdb-options");
+				if (*p == '\'' || *p == '"' || *p == '\\' ||
+					*p == ' ' || *p == '\t')
+					*out++ = *p++;
+				else
+					*out++ = '\\';
+			}
+			else if (quote == '\0' && (*p == '\'' || *p == '"'))
+				quote = *p++;
+			else
+				*out++ = *p++;
+		}
+
+		if (quote != '\0')
+			pg_fatal("unterminated quote in --initdb-options");
+		*out = '\0';
+
+		if (user_opts.num_initdb_options == INT_MAX - 1)
+			pg_fatal("too many arguments in --initdb-options");
+		user_opts.initdb_options =
+			pg_realloc_array(user_opts.initdb_options, char *,
+							 (size_t) user_opts.num_initdb_options + 1);
+		user_opts.initdb_options[user_opts.num_initdb_options++] =
+			pg_strdup(argument);
+	}
+	pg_free(argument);
+}
+
+
+/*
+ * Reject settings that redirect the new cluster's data or configuration
+ * files, which pg_upgrade expects to find in the new data directory.
+ */
+static void
+check_initdb_setting(const char *setting)
+{
+	char	   *name = pg_strdup(setting);
+	char	   *equals = strchr(name, '=');
+
+	if (equals)
+		*equals = '\0';
+
+	/* Treat hyphens as underscores, as ParseLongOption() does. */
+	for (char *p = name; *p; p++)
+		if (*p == '-')
+			*p = '_';
+
+	if (pg_strcasecmp(name, "data_directory") == 0 ||
+		pg_strcasecmp(name, "config_file") == 0 ||
+		pg_strcasecmp(name, "hba_file") == 0 ||
+		pg_strcasecmp(name, "ident_file") == 0)
+		pg_fatal("initdb setting \"%s\" cannot be used with --initdb", name);
+
+	pg_free(name);
+}
+
+
+/*
+ * Check for options that conflict with pg_upgrade, leaving other validation
+ * to initdb.  Parse after the pg_upgrade options, since getopt_long() uses
+ * global state.  Keep the option table consistent with initdb so getopt_long()
+ * knows which options take arguments.
+ */
+static void
+validate_initdb_options(void)
+{
+	static struct option long_options[] = {
+		{"pgdata", required_argument, NULL, 'D'},
+		{"encoding", required_argument, NULL, 'E'},
+		{"locale", required_argument, NULL, 1},
+		{"lc-collate", required_argument, NULL, 2},
+		{"lc-ctype", required_argument, NULL, 3},
+		{"lc-monetary", required_argument, NULL, 4},
+		{"lc-numeric", required_argument, NULL, 5},
+		{"lc-time", required_argument, NULL, 6},
+		{"lc-messages", required_argument, NULL, 7},
+		{"no-locale", no_argument, NULL, 8},
+		{"text-search-config", required_argument, NULL, 'T'},
+		{"auth", required_argument, NULL, 'A'},
+		{"auth-local", required_argument, NULL, 10},
+		{"auth-host", required_argument, NULL, 11},
+		{"pwprompt", no_argument, NULL, 'W'},
+		{"pwfile", required_argument, NULL, 9},
+		{"username", required_argument, NULL, 'U'},
+		{"help", no_argument, NULL, 22},
+		{"version", no_argument, NULL, 'V'},
+		{"debug", no_argument, NULL, 'd'},
+		{"show", no_argument, NULL, 's'},
+		{"noclean", no_argument, NULL, 'n'},
+		{"no-clean", no_argument, NULL, 'n'},
+		{"nosync", no_argument, NULL, 'N'},
+		{"no-sync", no_argument, NULL, 'N'},
+		{"no-instructions", no_argument, NULL, 13},
+		{"set", required_argument, NULL, 'c'},
+		{"sync-only", no_argument, NULL, 'S'},
+		{"waldir", required_argument, NULL, 'X'},
+		{"wal-segsize", required_argument, NULL, 12},
+		{"data-checksums", no_argument, NULL, 'k'},
+		{"allow-group-access", no_argument, NULL, 'g'},
+		{"discard-caches", no_argument, NULL, 14},
+		{"locale-provider", required_argument, NULL, 15},
+		{"builtin-locale", required_argument, NULL, 16},
+		{"icu-locale", required_argument, NULL, 17},
+		{"icu-rules", required_argument, NULL, 18},
+		{"sync-method", required_argument, NULL, 19},
+		{"no-data-checksums", no_argument, NULL, 20},
+		{"no-sync-data-files", no_argument, NULL, 21},
+		{NULL, 0, NULL, 0}
+	};
+	int			argc = user_opts.num_initdb_options + 1;
+	char	  **argv = pg_malloc_array(char *, (size_t) argc + 1);
+	int			option;
+	int			optindex;
+	int			save_opterr = opterr;
+
+	argv[0] = pg_strdup(os_info.progname);
+	for (int i = 1; i < argc; i++)
+		argv[i] = user_opts.initdb_options[i - 1];
+	argv[argc] = NULL;
+	optind = 1;
+	opterr = 0;
+#ifdef HAVE_INT_OPTRESET
+	optreset = 1;
+#endif
+	while ((option = getopt_long(argc, argv, "A:c:dD:E:gkL:nNsST:U:VWX:",
+								 long_options, &optindex)) != -1)
+	{
+		switch (option)
+		{
+			case 1:
+			case 2:
+			case 3:
+			case 8:
+			case 12:
+			case 15:
+			case 16:
+			case 17:
+			case 18:
+			case 20:
+			case 22:
+				pg_fatal("initdb option \"--%s\" cannot be used with --initdb",
+						 long_options[optindex].name);
+			case 'D':
+			case 'E':
+			case 'k':
+			case 's':
+			case 'S':
+			case 'U':
+			case 'V':
+				pg_fatal("initdb option \"-%c\" cannot be used with --initdb", option);
+			case 'g':
+				user_opts.initdb_allow_group_access = true;
+				break;
+			case 'c':
+				check_initdb_setting(optarg);
+				break;
+		}
+	}
+	opterr = save_opterr;
+	pg_free(argv[0]);
+	pg_free(argv);
+}
+
+
 static void
 usage(void)
 {
@@ -334,7 +554,8 @@ usage(void)
 	printf(_("  --copy                        copy files to new cluster (default)\n"));
 	printf(_("  --copy-file-range             copy files to new cluster with copy_file_range\n"));
 	printf(_("  --initdb                      create the new cluster with initdb before\n"
-			 "                                upgrading (settings derived from old cluster)\n"));
+			 "                                checking or upgrading, using old cluster settings\n"));
+	printf(_("  --initdb-options=OPTIONS      options to pass to initdb (requires --initdb)\n"));
 	printf(_("  --no-statistics               do not import statistics from old cluster\n"));
 	printf(_("  --set-char-signedness=OPTION  set new cluster char signedness to \"signed\" or\n"
 			 "                                \"unsigned\"\n"));

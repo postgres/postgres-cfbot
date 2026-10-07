@@ -314,7 +314,8 @@ typedef struct
  */
 typedef struct
 {
-	bool		check;			/* check clusters only, don't change any data */
+	bool		check;			/* check clusters without performing the
+								 * upgrade */
 	bool		live_check;		/* check clusters only, old server is running */
 	bool		do_sync;		/* flush changes to disk */
 	transferMode transfer_mode; /* copy files or link them? */
@@ -325,9 +326,12 @@ typedef struct
 	int			char_signedness;	/* default char signedness: -1 for initial
 									 * value, 1 for "signed" and 0 for
 									 * "unsigned" */
-	bool		initdb_new_cluster; /* run initdb to create the new cluster
-									 * before upgrading, instead of requiring
-									 * the user to have created it manually */
+	bool		initdb_new_cluster; /* run initdb before compatibility checks */
+	bool		initdb_options_given;	/* --initdb-options given, even if
+										 * empty */
+	bool		initdb_allow_group_access;	/* --allow-group-access */
+	char	  **initdb_options; /* additional arguments to initdb */
+	int			num_initdb_options;
 } UserOpts;
 
 typedef struct
@@ -368,7 +372,6 @@ extern OSInfo os_info;
 void		output_check_banner(void);
 void		check_and_dump_old_cluster(void);
 void		check_new_cluster(void);
-void		check_new_cluster_tablespace_dirs(void);
 void		report_clusters_compatible(void);
 void		issue_warnings_and_set_wal_level(void);
 void		output_completion_banner(char *deletion_script_file_name);
@@ -381,7 +384,6 @@ void		create_script_for_old_cluster_deletion(char **deletion_script_file_name);
 
 void		get_control_data(ClusterInfo *cluster);
 void		check_control_data(ControlData *oldctrl, ControlData *newctrl);
-void		check_old_control_data(ControlData *oldctrl);
 void		disable_old_cluster(transferMode transfer_mode);
 
 
@@ -397,7 +399,7 @@ void		generate_old_dump(void);
 bool		exec_prog(const char *log_filename, const char *opt_log_file,
 					  bool report_error, bool exit_on_error, const char *fmt, ...) pg_attribute_printf(5, 6);
 void		check_bin_dir(ClusterInfo *cluster, bool check_versions);
-void		verify_directories(bool check_new_data_dir);
+void		verify_directories(void);
 bool		pid_lock_file_exists(const char *datadir);
 
 

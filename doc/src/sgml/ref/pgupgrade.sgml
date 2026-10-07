@@ -106,7 +106,9 @@ PostgreSQL documentation
      <varlistentry>
       <term><option>-c</option></term>
       <term><option>--check</option></term>
-      <listitem><para>check clusters only, don't change any data</para></listitem>
+      <listitem><para>check clusters without performing the upgrade.
+      If <option>--initdb</option> is also specified, create the new cluster
+      before checking it.</para></listitem>
      </varlistentry>
 
      <varlistentry>
@@ -284,31 +286,98 @@ PostgreSQL documentation
         It must not overlap the <filename>pg_upgrade_output.d</filename>
         directory in the current working directory: neither directory may
         be equal to or contain the other.
+        The new data directory may be inside the old data directory; in that
+        case, the script to delete the old cluster is not generated.
        </para>
        <para>
         When combined with <option>-c</option>/<option>--check</option>,
-        <option>--initdb</option> runs source-cluster compatibility checks,
-        validates the new binaries and the empty or nonexistent target
-        directory, and reports the <command>initdb</command> command it would
-        run without creating the new cluster.
-        Checks requiring an initialized target cluster or a writable target
-        data directory, including loading required libraries and testing the
-        selected file transfer mode, are deferred until the real upgrade.
+        <option>--initdb</option> creates the new cluster and runs the normal
+        compatibility checks on both clusters without performing the upgrade.
+        The initialized new cluster is retained whether the checks succeed or
+        fail.  After a successful check, run <application>pg_upgrade</application>
+        without <option>--check</option>, <option>--initdb</option>, or
+        <option>--initdb-options</option> to upgrade using that cluster.
        </para>
        <para>
         <option>-O</option>/<option>--new-options</option> continues to pass
         options to the new cluster's server process; those options are not
-        passed to <command>initdb</command>.  To use additional
-        <command>initdb</command> options, create the new cluster manually and
-        omit <option>--initdb</option>.
+        passed to <command>initdb</command>.  Use
+        <option>--initdb-options</option> for additional initialization options.
        </para>
        <para>
-        If <command>initdb</command> or a compatibility check fails,
-        <application>pg_upgrade</application> removes the newly created files.
-        A directory created by <application>pg_upgrade</application> is also
-        removed.
-        A pre-existing empty directory is preserved, and its original
-        permissions are restored on supported Unix systems.
+        If initialization fails, <command>initdb</command> performs its normal
+        cleanup.  Once initialization succeeds, <application>pg_upgrade</application>
+        leaves the new data directory and any separate WAL directory in place
+        if a later step fails, just as it does without <option>--initdb</option>.
+        See <xref linkend="pgupgrade-step-revert"/> for recovery instructions.
+        To retry with <option>--initdb</option>, the new data and WAL directories
+        must again be empty or nonexistent.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--initdb-options=</option><replaceable>options</replaceable></term>
+      <listitem>
+       <para>
+        Pass additional arguments to <command>initdb</command>.  Requires
+        <option>--initdb</option>.  This option can be repeated; arguments are
+        appended in command-line order.  For example:
+<programlisting>
+pg_upgrade --initdb --initdb-options='-c huge_pages=off --waldir=/wal/new' ...
+</programlisting>
+        Settings supplied with <command>initdb</command>'s <option>-c</option>
+        are saved in the new <filename>postgresql.conf</filename> and can also
+        affect initialization itself.  In particular, a library specified in
+        <varname>shared_preload_libraries</varname> must support being loaded
+        during initialization, as well as by the new server during upgrade.
+       </para>
+       <para>
+        Within <replaceable>options</replaceable>, spaces and tabs separate
+        arguments.  Single or double quotes group text into one argument and
+        are removed; adjacent quoted and unquoted text forms one argument.
+        Single quotes preserve their contents literally.  Elsewhere, a
+        backslash escapes a following quote, backslash, space, or tab, and is
+        preserved before other characters.  Unmatched quotes, a trailing
+        unquoted backslash, and newline or carriage-return characters are
+        rejected.  No shell expansion is performed; for example,
+        <literal>$libdir</literal> is passed literally.  The caller's shell
+        quoting rules still apply to the outer command line.  Arguments can
+        appear in command output, log files, and process listings, so use
+        file-based inputs such as <option>--pwfile</option> for passwords.
+       </para>
+       <para>
+        Options that replace the data directory, bootstrap superuser,
+        checksum setting, WAL segment size, or inherited encoding and locale
+        settings are not allowed.  Configuration settings that redirect the data or
+        configuration files (<varname>data_directory</varname>,
+        <varname>config_file</varname>, <varname>hba_file</varname>, and
+        <varname>ident_file</varname>) are also rejected, as are options
+        that do not initialize a cluster, such as <option>--sync-only</option>.
+        Run <command>initdb</command> separately for setups requiring these
+        options.
+       </para>
+       <para>
+        An explicit <option>--allow-group-access</option> enables group access
+        even if the old cluster does not allow it; otherwise the old cluster's
+        access mode is used.  With <option>--link</option> or <option>--swap</option>, group
+        access cannot be enabled unless the old cluster already allows it,
+        because these transfer modes preserve the old file and directory
+        permissions.
+       </para>
+       <para>
+        Authentication options, including <option>--auth-local</option> and
+        <option>--auth-host</option>, are passed unchanged.  Provide credentials
+        accepted by both clusters, for example through a protected
+        <link linkend="libpq-pgpass">password file</link>.
+        <application>pg_upgrade</application> does not weaken authentication
+        rules to obtain access.
+       </para>
+       <para>
+        <application>pg_upgrade</application> checks argument quoting and
+        conflicts with its managed settings.  Other options, their values,
+        and paths such as <option>--waldir</option> are validated by
+        <command>initdb</command>, including with <option>--check</option>.
        </para>
       </listitem>
      </varlistentry>
@@ -674,9 +743,7 @@ pg_upgrade.exe
      You can use the same port number for both clusters when doing an
      upgrade because the old and new clusters will not be running at the
      same time.  However, when checking an old running server, the old
-     and new port numbers must be different unless <option>--check</option>
-     is combined with <option>--initdb</option>, which does not start a new
-     server.
+     and new port numbers must be different.
     </para>
 
     <para>

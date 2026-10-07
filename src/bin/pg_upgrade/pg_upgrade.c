@@ -69,24 +69,19 @@ static void create_new_objects(void);
 static void copy_xact_xlog_xid(void);
 static void set_frozenxids(void);
 static void make_outputdirs(const char *output_root);
-static void setup(char *argv0, bool check_new_data_dir);
+static void setup(char *argv0);
 static void resolve_new_bindir(const char *argv0);
 static void prepare_new_cluster_initdb(const char *argv0);
 static void check_new_cluster_initdb_target(void);
 static void get_old_cluster_initdb_info(void);
 static void build_new_cluster_initdb_cmd(PQExpBuffer cmd);
 static void create_new_cluster_via_initdb(void);
-static void check_new_cluster_via_initdb(char *argv0);
 static void create_logical_replication_slots(void);
 static void create_conflict_detection_slot(void);
 
 ClusterInfo old_cluster,
 			new_cluster;
 OSInfo		os_info;
-
-static bool new_cluster_cleanup_required = false;
-static bool new_cluster_pgdata_existed = false;
-static mode_t new_cluster_pgdata_mode;
 
 char	   *output_files[] = {
 	SERVER_LOG_FILE,
@@ -133,11 +128,24 @@ main(int argc, char **argv)
 					 old_cluster.pgdata);
 		umask(pg_mode_mask);
 
+#if !defined(WIN32) && !defined(__CYGWIN__)
+
+		/*
+		 * Link and swap preserve the old file permissions, so enabling group
+		 * access would leave transferred files unreadable by the group.
+		 * Changing permissions on hard links would also change the old
+		 * cluster.
+		 */
+		if (user_opts.initdb_allow_group_access &&
+			pg_dir_create_mode != PG_DIR_MODE_GROUP &&
+			(user_opts.transfer_mode == TRANSFER_MODE_LINK ||
+			 user_opts.transfer_mode == TRANSFER_MODE_SWAP))
+			pg_fatal("cannot enable group access with %s when the old cluster does not allow group access",
+					 user_opts.transfer_mode == TRANSFER_MODE_LINK ? "--link" : "--swap");
+#endif
+
 		/* The new cluster has not been initialized yet. */
 		make_outputdirs(".");
-
-		if (user_opts.check)
-			check_new_cluster_via_initdb(argv[0]);	/* exits, never returns */
 
 		create_new_cluster_via_initdb();
 	}
@@ -159,7 +167,7 @@ main(int argc, char **argv)
 	if (!user_opts.initdb_new_cluster)
 		make_outputdirs(new_cluster.pgdata);
 
-	setup(argv[0], true);
+	setup(argv[0]);
 
 	output_check_banner();
 
@@ -178,9 +186,6 @@ main(int argc, char **argv)
 
 	check_new_cluster();
 	report_clusters_compatible();
-
-	/* Keep the new cluster on failure after compatibility checks pass. */
-	new_cluster_cleanup_required = false;
 
 	pg_log(PG_REPORT,
 		   "\n"
@@ -420,115 +425,36 @@ resolve_new_bindir(const char *argv0)
 
 
 /*
- * new_cluster_cleanup_atexit()
- *
- * Clean up the new cluster if the run fails before compatibility checks
- * pass.  Preserve a target directory that existed before pg_upgrade.
- */
-static void
-new_cluster_cleanup_atexit(void)
-{
-	int			dir_status;
-
-	if (!new_cluster_cleanup_required)
-		return;
-
-	dir_status = pg_check_dir(new_cluster.pgdata);
-	if (dir_status == 0)
-		return;
-	if (dir_status < 0)
-	{
-		pg_log(PG_WARNING, "could not access new cluster data directory \"%s\": %m",
-			   new_cluster.pgdata);
-		return;
-	}
-
-	if (new_cluster_pgdata_existed)
-	{
-		pg_log(PG_REPORT, "removing contents of new cluster data directory \"%s\"",
-			   new_cluster.pgdata);
-		(void) rmtree(new_cluster.pgdata, false);
-
-#if !defined(WIN32) && !defined(__CYGWIN__)
-		if (chmod(new_cluster.pgdata, new_cluster_pgdata_mode) != 0)
-			pg_log(PG_WARNING, "could not restore permissions of directory \"%s\": %m",
-				   new_cluster.pgdata);
-#endif
-	}
-	else
-	{
-		pg_log(PG_REPORT, "removing new cluster data directory \"%s\"",
-			   new_cluster.pgdata);
-		(void) rmtree(new_cluster.pgdata, true);
-	}
-}
-
-
-/*
  * Validate the new binaries and target directory before creating output
  * files or starting either cluster.
  */
 static void
 prepare_new_cluster_initdb(const char *argv0)
 {
-	char		initdb_path[MAXPGPATH];
-
+	check_pghost_envvar();
 	resolve_new_bindir(argv0);
-
-	/* Verify initdb is present in the new cluster's bin directory. */
-	snprintf(initdb_path, sizeof(initdb_path), "%s/initdb", new_cluster.bindir);
-	if (validate_exec(initdb_path) != 0)
-		pg_fatal("could not find \"initdb\" in \"%s\": %m\n"
-				 "The --initdb option requires initdb to be present in the new cluster's bin directory.",
-				 new_cluster.bindir);
-
 	check_bin_dir(&new_cluster, true);
 	check_new_cluster_initdb_target();
 }
 
 
 /*
- * Refuse to overwrite an existing target and remember whether an empty target
- * directory must be preserved if a later step fails.
+ * Require an empty or nonexistent new data directory and reject overlap
+ * with pg_upgrade_output.d.
  */
 static void
 check_new_cluster_initdb_target(void)
 {
-	char		verfile[MAXPGPATH];
 	char	   *absolute_pgdata;
 	char	   *absolute_outputdir;
-	struct stat st;
-	int			dir_status;
+	int			dir_status = pg_check_dir(new_cluster.pgdata);
 
-	snprintf(verfile, sizeof(verfile), "%s/PG_VERSION", new_cluster.pgdata);
-	if (stat(verfile, &st) == 0)
-		pg_fatal("new cluster data directory \"%s\" already contains a database system; "
+	if (dir_status > 1)
+		pg_fatal("new cluster data directory \"%s\" is not empty; "
 				 "--initdb requires an empty or nonexistent directory",
 				 new_cluster.pgdata);
-
-	dir_status = pg_check_dir(new_cluster.pgdata);
-	switch (dir_status)
-	{
-		case 0:
-			new_cluster_pgdata_existed = false;
-			break;
-		case 1:
-			new_cluster_pgdata_existed = true;
-			if (stat(new_cluster.pgdata, &st) != 0)
-				pg_fatal("could not stat directory \"%s\": %m",
-						 new_cluster.pgdata);
-			new_cluster_pgdata_mode = st.st_mode;
-			break;
-		case 2:
-		case 3:
-		case 4:
-			pg_fatal("new cluster data directory \"%s\" is not empty; "
-					 "--initdb requires an empty or nonexistent directory",
-					 new_cluster.pgdata);
-		default:
-			pg_fatal("could not access directory \"%s\": %m",
-					 new_cluster.pgdata);
-	}
+	else if (dir_status < 0)
+		pg_fatal("could not access directory \"%s\": %m", new_cluster.pgdata);
 
 	absolute_pgdata = make_absolute_path(new_cluster.pgdata);
 	absolute_outputdir = make_absolute_path(BASE_OUTPUTDIR);
@@ -545,9 +471,7 @@ check_new_cluster_initdb_target(void)
 
 
 /*
- * Collect the old control and template0 settings needed by initdb.  This is
- * used only by a real upgrade.  The dry-run path obtains the same information
- * while running the normal old-cluster checks.
+ * Read the old cluster's control data and template0 settings for initdb.
  */
 static void
 get_old_cluster_initdb_info(void)
@@ -558,34 +482,34 @@ get_old_cluster_initdb_info(void)
 	if (!old_cluster.sockdir)
 		old_cluster.sockdir = user_opts.socketdir ? user_opts.socketdir : ".";
 
-	/*
-	 * The old server must be shut down.  The template0 read below starts a
-	 * postmaster on the old cluster, and get_control_data() runs pg_resetwal -n,
-	 * both of which need exclusive access to the old data directory.  A stale
-	 * lock file is tolerated as setup() does.
-	 */
+	/* Allow a running old server for --check, as setup() does. */
 	if (pid_lock_file_exists(old_cluster.pgdata))
 	{
 		if (start_postmaster(&old_cluster, false))
 			stop_postmaster(false);
-		else
+		else if (!user_opts.check)
 			pg_fatal("There seems to be a postmaster servicing the old cluster.\n"
 					 "Please shutdown that postmaster and try again.");
+		else
+			user_opts.live_check = true;
 	}
 
+	get_sock_dir(&old_cluster);
 	get_control_data(&old_cluster);
 
 	prep_status("Examining old cluster settings");
-	start_postmaster(&old_cluster, true);
+	if (!user_opts.live_check)
+		start_postmaster(&old_cluster, true);
 	get_template0_info(&old_cluster);
-	stop_postmaster(false);
+	if (!user_opts.live_check)
+		stop_postmaster(false);
 	check_ok();
 }
 
 
 /*
- * Format the initdb command from information already collected about the old
- * cluster.  Callers either execute it or report it for --check.
+ * Build the initdb command using the old cluster's settings and any
+ * arguments supplied with --initdb-options.
  */
 static void
 build_new_cluster_initdb_cmd(PQExpBuffer cmd)
@@ -652,30 +576,27 @@ build_new_cluster_initdb_cmd(PQExpBuffer cmd)
 		}
 	}
 
+	for (int i = 0; i < user_opts.num_initdb_options; i++)
+	{
+		appendPQExpBufferChar(cmd, ' ');
+		appendShellString(cmd, user_opts.initdb_options[i]);
+	}
+
 	check_ok();
 }
 
 
-/*
- * create_new_cluster_via_initdb()
- *
- * Create the new cluster with initdb.  Register cleanup before the first
- * start_postmaster() call so the server's exit handler runs before directory
- * cleanup.  Enable cleanup immediately before running initdb.
- */
+/* Initialize the new cluster before checking compatibility with the old cluster. */
 static void
 create_new_cluster_via_initdb(void)
 {
 	PQExpBufferData cmd;
-
-	atexit(new_cluster_cleanup_atexit);
 
 	get_old_cluster_initdb_info();
 	build_new_cluster_initdb_cmd(&cmd);
 
 	prep_status("Creating new cluster with initdb");
 
-	new_cluster_cleanup_required = true;
 	exec_prog(UTILITY_LOG_FILE, NULL, true, true, "%s", cmd.data);
 
 	termPQExpBuffer(&cmd);
@@ -683,41 +604,10 @@ create_new_cluster_via_initdb(void)
 }
 
 
-/*
- * check_new_cluster_via_initdb()
- *
- * Dry-run --check --initdb path: build the initdb command with
- * build_new_cluster_initdb_cmd() but do not execute it.  Run source-cluster
- * compatibility checks, report the command, and exit.
- */
-static void
-check_new_cluster_via_initdb(char *argv0)
-{
-	PQExpBufferData cmd;
-
-	setup(argv0, false);
-
-	output_check_banner();
-	check_cluster_versions();
-	get_sock_dir(&old_cluster);
-
-	get_control_data(&old_cluster);
-	check_old_control_data(&old_cluster.controldata);
-
-	check_and_dump_old_cluster();
-	check_new_cluster_tablespace_dirs();
-	build_new_cluster_initdb_cmd(&cmd);
-
-	pg_log(PG_REPORT, _("The following initdb command would be run to create the new cluster:\n  %s"), cmd.data);
-	pg_log(PG_REPORT, _("Source cluster compatibility checks passed."));
-	termPQExpBuffer(&cmd);
-	cleanup_output_dirs();
-	exit(0);
-}
 
 
 static void
-setup(char *argv0, bool check_new_data_dir)
+setup(char *argv0)
 {
 	/*
 	 * make sure the user has a clean environment, otherwise, we may confuse
@@ -732,7 +622,7 @@ setup(char *argv0, bool check_new_data_dir)
 	 */
 	resolve_new_bindir(argv0);
 
-	verify_directories(check_new_data_dir);
+	verify_directories();
 
 	/* no postmasters should be running, except for a live check */
 	if (pid_lock_file_exists(old_cluster.pgdata))

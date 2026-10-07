@@ -1,25 +1,18 @@
 # Copyright (c) 2026, PostgreSQL Global Development Group
 
-# Test the --initdb option of pg_upgrade: pg_upgrade creates the new cluster
-# itself via initdb, instead of requiring the user to have run initdb first.
+# Test pg_upgrade's --initdb and --initdb-options options.
 
 use strict;
 use warnings FATAL => 'all';
 
 use Config;
-use Cwd            qw(abs_path);
-use File::Basename qw(basename);
-use File::Copy     qw(copy);
-use File::Path     qw(rmtree);
+use Cwd qw(abs_path);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
-# Initialize and populate the old cluster.
-#
-# Use settings that --initdb must carry over to the new cluster: group access,
-# disabled data checksums (initdb enables them by default since PG18), a
-# non-default WAL segment size, and the C locale.
+# Use nondefault settings to verify that --initdb carries them over to the
+# new cluster.
 my $oldnode = PostgreSQL::Test::Cluster->new('old_node');
 $oldnode->init(
 	extra => [
@@ -36,30 +29,62 @@ $oldnode->safe_psql('postgres',
 my $rows_before = $oldnode->safe_psql('postgres', 'SELECT count(*) FROM t');
 is($rows_before, '100', 'old cluster has expected rows before upgrade');
 
-# Record the old cluster's settings so we can compare them after the upgrade.
-my $old_checksums = $oldnode->safe_psql('postgres', 'SHOW data_checksums');
-my $old_wal_segsize =
-  $oldnode->safe_psql('postgres', 'SHOW wal_segment_size');
-my $old_encoding = $oldnode->safe_psql('postgres',
-	"SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'template0'"
-);
-my $old_collate = $oldnode->safe_psql('postgres',
-	"SELECT datcollate FROM pg_database WHERE datname = 'template0'");
-my $old_ctype = $oldnode->safe_psql('postgres',
-	"SELECT datctype FROM pg_database WHERE datname = 'template0'");
-my $old_provider = $oldnode->safe_psql('postgres',
-	"SELECT datlocprovider FROM pg_database WHERE datname = 'template0'");
+# Capture the old settings for the post-upgrade comparison.
+my %setting_queries = (
+	data_checksums => 'SHOW data_checksums',
+	wal_segment_size => 'SHOW wal_segment_size',
+	encoding =>
+	  "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'template0'",
+	collation =>
+	  "SELECT datcollate FROM pg_database WHERE datname = 'template0'",
+	ctype => "SELECT datctype FROM pg_database WHERE datname = 'template0'",
+	provider =>
+	  "SELECT datlocprovider FROM pg_database WHERE datname = 'template0'",);
+my %old_settings;
+for my $setting (sort keys %setting_queries)
+{
+	$old_settings{$setting} =
+	  $oldnode->safe_psql('postgres', $setting_queries{$setting});
+}
 $oldnode->stop;
 
-# Create the new node object but do NOT init() it: pg_upgrade --initdb is
-# responsible for creating the data directory.  Only new() runs, which
-# allocates the port/host/basedir the framework needs.
+# Leave the new cluster uninitialized so pg_upgrade --initdb creates it.
 my $newnode = PostgreSQL::Test::Cluster->new('new_node');
 
 my $oldbindir = $oldnode->config_data('--bindir');
 my $newbindir = $newnode->config_data('--bindir');
 
-# Sanity: the new data directory must not exist yet.
+sub upgrade_command
+{
+	my ($old, $new, @extra) = @_;
+	return [
+		'pg_upgrade', '--no-sync', '--initdb',
+		'--old-datadir' => $old->data_dir,
+		'--new-datadir' => $new->data_dir,
+		'--old-bindir' => $oldbindir,
+		'--new-bindir' => $newbindir,
+		'--socketdir' => $new->host,
+		'--old-port' => $old->port,
+		'--new-port' => $new->port,
+		@extra,
+	];
+}
+
+# Configure the connection settings normally written by init(), without
+# changing initdb's pg_hba.conf.
+sub start_new_cluster
+{
+	my ($node) = @_;
+	my $listen = $PostgreSQL::Test::Cluster::use_tcp ? $node->host : '';
+	my $socketdir = $PostgreSQL::Test::Cluster::use_tcp ? '' : $node->host;
+	$node->append_conf('postgresql.conf',
+			'port = '
+		  . $node->port
+		  . "\nlisten_addresses = '$listen'\nunix_socket_directories = '$socketdir'"
+	);
+	$node->start;
+}
+
 ok(!-d $newnode->data_dir,
 	'new cluster data directory does not exist before --initdb');
 
@@ -67,21 +92,21 @@ ok(!-d $newnode->data_dir,
 # pg_upgrade_output.d logs.
 # Pass the server-only option -F through -O to verify that it reaches
 # the new server without being passed to initdb.
+# Repeated --initdb-options must preserve argument order and quoted values in
+# the configuration used after the upgrade.
 chdir ${PostgreSQL::Test::Utils::tmp_check};
 
 command_ok(
-	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
-		'--new-datadir' => $newnode->data_dir,
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $newbindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
+	upgrade_command(
+		$oldnode, $newnode,
 		'--new-options' => '-F',
-	],
+		'--initdb-options' =>
+		  '-c huge_pages=try -c custom.initdb_first=first',
+		'--initdb-options' =>
+		  q{-c huge_pages=off --set=custom.initdb_first=last -c "custom.initdb_text=space, apostrophe's $libdir" -c custom.initdb_path=C:\new\path -c custom.initdb_empty=""},
+		'--initdb-options' =>
+		  q{-c 'custom.initdb_single=single quoted $libdir' -c "custom.initdb_escaped=quote\" slash\\\\" -c custom.initdb_join='joined 'pieces -c custom.initdb_space=escaped\ space},
+	),
 	'run of pg_upgrade --initdb with -O creates and upgrades the new cluster'
 );
 
@@ -89,8 +114,6 @@ command_ok(
 like(slurp_file($newnode->data_dir . '/postmaster.opts'),
 	qr/(?:^|\s)"-F"(?:\s|$)/, '-O option reached the target postmaster');
 
-# pg_upgrade --initdb should have initialized the new data directory.
-# Check that PG_VERSION was created there.
 ok(-f $newnode->data_dir . '/PG_VERSION',
 	'new cluster data directory created by --initdb');
 
@@ -113,87 +136,47 @@ SKIP:
 ok(!-d $newnode->data_dir . '.initdb_log',
 	'--initdb does not leave a sibling log directory');
 
-# Configure the upgraded node to use its assigned port and host.
-# Follow PostgreSQL::Test::Cluster's TCP or Unix-domain socket settings.
-my $host = $newnode->host;
-$newnode->append_conf('postgresql.conf', "port = " . $newnode->port);
-if ($PostgreSQL::Test::Cluster::use_tcp)
+start_new_cluster($newnode);
+
+my %expected_settings = (
+	huge_pages => 'off',
+	'custom.initdb_first' => 'last',
+	'custom.initdb_text' => q{space, apostrophe's $libdir},
+	'custom.initdb_path' => q{C:\new\path},
+	'custom.initdb_empty' => '',
+	'custom.initdb_single' => q{single quoted $libdir},
+	'custom.initdb_escaped' => "quote\" slash\\",
+	'custom.initdb_join' => 'joined pieces',
+	'custom.initdb_space' => 'escaped space',);
+for my $setting (sort keys %expected_settings)
 {
-	$newnode->append_conf('postgresql.conf', "unix_socket_directories = ''");
-	$newnode->append_conf('postgresql.conf', "listen_addresses = '$host'");
-}
-else
-{
-	$newnode->append_conf('postgresql.conf',
-		"unix_socket_directories = '$host'");
-	$newnode->append_conf('postgresql.conf', "listen_addresses = ''");
+	is( $newnode->safe_psql('postgres', "SHOW $setting"),
+		$expected_settings{$setting},
+		"$setting survives initialization and upgrade");
 }
 
-$newnode->start;
-
-# Verify the user data survived the upgrade.
 my $rows_after = $newnode->safe_psql('postgres', 'SELECT count(*) FROM t');
 is($rows_after, '100', 'user data survived --initdb upgrade');
 
-# Verify the extra database carried over too.
 my $has_extra = $newnode->safe_psql('postgres',
 	"SELECT count(*) FROM pg_database WHERE datname = 'extra_db'");
 is($has_extra, '1', 'user database carried over by --initdb upgrade');
 
-# Check the checksum and WAL segment size settings required by
-# check_control_data().
-my $new_checksums = $newnode->safe_psql('postgres', 'SHOW data_checksums');
-is($new_checksums, $old_checksums,
-	"data_checksums propagated by --initdb ($new_checksums)");
-
-my $new_wal_segsize =
-  $newnode->safe_psql('postgres', 'SHOW wal_segment_size');
-is($new_wal_segsize, $old_wal_segsize,
-	"wal_segment_size propagated by --initdb ($new_wal_segsize)");
-
-# Check template0's encoding and locale settings.
-my $new_encoding = $newnode->safe_psql('postgres',
-	"SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'template0'"
-);
-is($new_encoding, $old_encoding,
-	"template0 encoding propagated by --initdb ($new_encoding)");
-
-my $new_collate = $newnode->safe_psql('postgres',
-	"SELECT datcollate FROM pg_database WHERE datname = 'template0'");
-is($new_collate, $old_collate,
-	"template0 collation propagated by --initdb ($new_collate)");
-
-my $new_ctype = $newnode->safe_psql('postgres',
-	"SELECT datctype FROM pg_database WHERE datname = 'template0'");
-is($new_ctype, $old_ctype,
-	"template0 ctype propagated by --initdb ($new_ctype)");
-
-my $new_provider = $newnode->safe_psql('postgres',
-	"SELECT datlocprovider FROM pg_database WHERE datname = 'template0'");
-is($new_provider, $old_provider,
-	"template0 locale provider propagated by --initdb ($new_provider)");
+# The new cluster must match the old checksum, WAL segment, encoding, and
+# locale settings.
+for my $setting (sort keys %setting_queries)
+{
+	is($newnode->safe_psql('postgres', $setting_queries{$setting}),
+		$old_settings{$setting}, "$setting propagated by --initdb");
+}
 
 $newnode->stop;
 
-# Check that pg_upgrade --initdb rejects an existing target cluster.
-# Match its PG_VERSION diagnostic on stdout to distinguish this failure
-# from initdb's nonempty-directory error.
-command_checks_all(
-	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
-		'--new-datadir' => $newnode->data_dir,
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $newbindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
-	],
-	1,
-	[qr/already contains a database system/],
-	[qr/^$/],
-	'--initdb refuses to overwrite an existing cluster (PG_VERSION check)');
+# Check that pg_upgrade rejects an existing cluster before invoking initdb.
+# The error is reported on stdout.
+command_checks_all(upgrade_command($oldnode, $newnode),
+	1, [qr/is not empty/], [qr/^$/],
+	'--initdb refuses to overwrite an existing cluster');
 
 # Reject overlap with the output directory before creating logs or starting
 # either server, for both a real upgrade and --check.
@@ -206,15 +189,10 @@ for my $check (0, 1)
 		chdir $overlap_cwd or die "could not change to $overlap_cwd: $!";
 		my $mode = $check ? '--check --initdb' : '--initdb';
 		command_checks_all(
-			[
-				'pg_upgrade', '--no-sync',
-				'--old-datadir' => $oldnode->data_dir,
+			upgrade_command(
+				$oldnode, $newnode,
 				'--new-datadir' => $target,
-				'--old-bindir' => $oldbindir,
-				'--new-bindir' => $newbindir,
-				'--initdb',
-				$check ? '--check' : (),
-			],
+				$check ? '--check' : ()),
 			1,
 			[qr/overlaps output directory/],
 			[qr/^$/],
@@ -225,52 +203,35 @@ for my $check (0, 1)
 	}
 }
 
-# --initdb must fail early with a clear message if initdb is not present in the
-# new cluster's bin directory.  Point --new-bindir at an empty directory and use
-# a fresh (nonexistent) new data directory so we reach the initdb-present check.
+# Validate the new binaries before initialization.
 my $empty_bindir = PostgreSQL::Test::Utils::tempdir;
 command_checks_all(
-	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
+	upgrade_command(
+		$oldnode, $newnode,
 		'--new-datadir' => $newnode->data_dir . '_nonexistent',
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $empty_bindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
-	],
+		'--new-bindir' => $empty_bindir),
 	1,
-	[qr/could not find "initdb"/],
+	[qr/check for .*postgres.* failed/],
 	[qr/^$/],
-	'--initdb fails early when initdb is missing from the new bindir');
+	'--initdb fails early when the new binaries are missing');
 
-# --check --initdb performs all source-side validation without creating a
-# target cluster.
+# --check --initdb initializes the new cluster and runs compatibility checks
+# on both clusters.
+my $checked_target = $newnode->data_dir . '_check';
 command_checks_all(
-	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
-		'--new-datadir' => $newnode->data_dir . '_dry_run',
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $newbindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
-		'--check',
-	],
+	upgrade_command(
+		$oldnode, $newnode,
+		'--new-datadir' => $checked_target,
+		'--check'),
 	0,
-	[qr/Source cluster compatibility checks passed/],
+	[qr/Clusters are compatible/],
 	[qr/^$/],
-	'--check --initdb runs source-side checks without creating the cluster');
+	'--check --initdb initializes the target and checks both clusters');
 
-# Verify that --check --initdb didn't create anything.
-ok(!-d $newnode->data_dir . '_dry_run',
-	'--check --initdb does not create the new cluster directory');
-ok( !-d $newnode->data_dir . '_dry_run.initdb_log',
-	'--check --initdb does not leave a sibling log directory');
+ok(-f "$checked_target/PG_VERSION",
+	'successful check retains the new cluster');
+ok( !-f "$checked_target/postmaster.pid",
+	'successful check stops the new server');
 
 # Without -B, --initdb must derive the new bindir from the original argv[0],
 # even when that directory is not in PATH.
@@ -293,14 +254,13 @@ SKIP:
 			'--check',
 		],
 		0,
-		[qr/Source cluster compatibility checks passed/],
+		[qr/Clusters are compatible/],
 		[qr/^$/],
 		'--initdb derives the new bindir from an absolute argv[0]');
 }
 
-# A live source is valid for --check --initdb, just as it is for ordinary
-# --check.  No target server is started, so the ports can be equal.
-# pg_upgrade must neither stop nor modify the source server.
+# --check --initdb must accept a running old server and leave it running.
+# Use a different port for the new server.
 SKIP:
 {
 	skip "Timing issues with live server detection on Windows", 4
@@ -308,142 +268,254 @@ SKIP:
 
 	$oldnode->start;
 	command_checks_all(
-		[
-			'pg_upgrade', '--no-sync',
-			'--old-datadir' => $oldnode->data_dir,
+		upgrade_command(
+			$oldnode, $newnode,
 			'--new-datadir' => $newnode->data_dir . '_live_check',
-			'--old-bindir' => $oldbindir,
-			'--new-bindir' => $newbindir,
-			'--socketdir' => $newnode->host,
-			'--old-port' => $oldnode->port,
-			'--new-port' => $oldnode->port,
-			'--initdb',
-			'--check',
-		],
+			'--check'),
 		0,
-		[qr/Source cluster compatibility checks passed/],
+		[qr/Clusters are compatible/],
 		[qr/^$/],
-		'--check --initdb accepts a live source with equal old and new ports'
-	);
+		'--check --initdb accepts a live source');
 	is($oldnode->safe_psql('postgres', 'SELECT 1'),
 		'1', 'live source remains running after --check --initdb');
 	$oldnode->stop;
 }
 
-# Force a failure while the target postmaster is running.  This verifies that
-# the exit handlers stop the postmaster before cleaning its data directory.
-my $test_library = $ENV{TEST_EXT_LIB}
-  or die "could not get the test extension library path";
-my $missing_library =
-  PostgreSQL::Test::Utils::tempdir() . '/' . basename($test_library);
-copy($test_library, $missing_library)
-  or die "could not copy $test_library to $missing_library: $!";
-my $sql_library = $missing_library =~ s/'/''/gr;
-
+# Both upgrade and --check must reject regproc columns in user tables and
+# retain the initialized new cluster.
 $oldnode->start;
-$oldnode->safe_psql('postgres',
-		"CREATE FUNCTION missing_upgrade_library() RETURNS void "
-	  . "AS '$sql_library', 'test_ext' LANGUAGE C");
+$oldnode->safe_psql('postgres', 'CREATE TABLE bad (c regproc)');
 $oldnode->stop;
-unlink($missing_library) or die "could not remove $missing_library: $!";
 
-# On failure after initdb, preserve an empty directory supplied by the
-# operator, including its original mode, but remove everything initdb added.
-my $existing_target = $newnode->data_dir . '_existing_empty';
-mkdir($existing_target, 0711) or die "could not create $existing_target: $!";
-chmod(0711, $existing_target)
-  or die "could not set mode on $existing_target: $!";
-my $existing_target_mode = (stat($existing_target))[2] & 0777;
+for my $check (0, 1)
+{
+	my $target = $newnode->data_dir . "_incompatible_$check";
+	my $mode = $check ? '--check --initdb' : '--initdb';
+	command_checks_all(
+		upgrade_command(
+			$oldnode, $newnode,
+			'--new-datadir' => $target,
+			$check ? '--check' : ()),
+		1,
+		[qr/failed check: Checking for reg\* data types in user tables/],
+		[qr/^$/],
+		"$mode rejects an incompatible old cluster");
+	ok(-f "$target/PG_VERSION", "failed $mode retains the new cluster");
+}
 
+# Require --initdb even when --initdb-options is empty.
+# Reject invalid quoting and line breaks before examining either cluster.
 command_checks_all(
+	[ 'pg_upgrade', '--initdb-options=' ],
+	1,
+	[qr/--initdb-options requires --initdb/],
+	[qr/^$/],
+	'--initdb-options requires --initdb even for an empty argument');
+
+for my $case (
 	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
-		'--new-datadir' => $existing_target,
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $newbindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
+		q{-c 'huge_pages=off}, qr/unterminated quote/,
+		'unclosed single quote'
 	],
+	[
+		q{-c "huge_pages=off}, qr/unterminated quote/,
+		'unclosed double quote'
+	],
+	[ "-c huge_pages=off\\", qr/trailing backslash/, 'trailing escape' ],
+	[ "-c huge_pages=off\n", qr/newline or carriage return/, 'newline' ])
+{
+	command_checks_all(
+		[ 'pg_upgrade', '--initdb', "--initdb-options=$case->[0]" ],
+		1, [ $case->[1] ],
+		[qr/^$/], "reject $case->[2]");
+}
+
+# Reject options that override pg_upgrade's settings or skip initialization.
+for my $options (
+	'-D/another/datadir',
+	'--username=another_user',
+	'--wal-segsize=32',
+	'--no-data-checksums',
+	'--encoding=UTF8',
+	'--locale=C',
+	'--locale-provider=builtin',
+	'--sync-only',
+	'--help',
+	'-c data_directory=/another/datadir',
+	'--set=CONFIG_FILE=/another/config',
+	'-c Hba-File=/another/hba',
+	'-cident_file=/another/ident')
+{
+	command_checks_all(
+		[ 'pg_upgrade', '--initdb', "--initdb-options=$options" ], 1,
+		[qr/cannot be used with --initdb/], [qr/^$/],
+		"reject managed or incompatible option: $options");
+}
+
+sub option_quote
+{
+	my ($value) = @_;
+	$value =~ s/'/'\\''/g;
+	return "'$value'";
+}
+
+# test_slru rejects LOAD unless preloaded.  The new cluster must preload it
+# for pg_upgrade's loadable-library check to pass.
+my $preload_old = PostgreSQL::Test::Cluster->new('preload_old');
+$preload_old->init;
+$preload_old->append_conf('postgresql.conf',
+	"shared_preload_libraries = 'test_slru'");
+$preload_old->start;
+$preload_old->safe_psql('postgres', 'CREATE EXTENSION test_slru');
+my $quoted_superuser =
+  $preload_old->safe_psql('postgres', 'SELECT quote_ident(current_user)');
+# This password is used only by the temporary test clusters.
+my $password = 'initdb-options-test-password';
+$preload_old->safe_psql('postgres',
+	"ALTER ROLE $quoted_superuser PASSWORD '$password'");
+$preload_old->stop;
+
+my $preload_missing = PostgreSQL::Test::Cluster->new('preload_missing');
+my $preload_missing_wal = $preload_missing->basedir . '/wal';
+command_checks_all(
+	upgrade_command(
+		$preload_old,
+		$preload_missing,
+		'--check',
+		'--initdb-options' => '--waldir=' . option_quote($preload_missing_wal)
+	),
 	1,
 	[qr/references loadable libraries that are missing/],
 	[qr/^$/],
-	'failed --initdb stops the target and preserves an existing directory');
+	'--check --initdb checks required libraries in the new cluster');
+ok( -f $preload_missing->data_dir . '/PG_VERSION',
+	'failed preload check retains the new cluster');
+ok(-d $preload_missing_wal, 'failed preload check retains the WAL directory');
+ok( !-f $preload_missing->data_dir . '/postmaster.pid',
+	'failed preload check stops the new server');
 
-ok(-d $existing_target, 'operator-created target directory still exists');
-opendir(my $target_dir, $existing_target)
-  or die "could not open $existing_target: $!";
-my @target_entries = grep { $_ ne '.' && $_ ne '..' } readdir($target_dir);
-closedir($target_dir);
-is_deeply(\@target_entries, [],
-	'operator-created target directory is empty after cleanup');
+my $credential_dir = PostgreSQL::Test::Utils::tempdir;
+my $pwfile = "$credential_dir/initdb.pw";
+append_to_file($pwfile, "$password\n");
+chmod(0600, $pwfile) or die "could not protect $pwfile: $!";
+my $pgpass = "$credential_dir/pgpass";
+append_to_file($pgpass, "*:*:*:*:$password\n");
+chmod(0600, $pgpass) or die "could not protect $pgpass: $!";
 
-SKIP:
+my $auth_options =
+  q{-c shared_preload_libraries=$libdir/test_slru --auth-local=scram-sha-256 --auth-host=scram-sha-256 --pwfile="}
+  . $pwfile . '"';
+
 {
-	skip "unix-style permissions not supported on Windows", 1
-	  if ($windows_os || $Config::Config{osname} eq 'cygwin');
-
-	my $mode_after_failure = (stat($existing_target))[2] & 0777;
-	is($mode_after_failure, $existing_target_mode,
-		'operator-created target directory mode is restored');
+	local $ENV{PGPASSFILE} = "$credential_dir/no-password-file";
+	delete local $ENV{PGPASSWORD};
+	my $auth_missing = PostgreSQL::Test::Cluster->new('auth_missing');
+	command_checks_all(
+		upgrade_command(
+			$preload_old, $auth_missing,
+			'--initdb-options' => $auth_options),
+		1,
+		[qr/fe_sendauth: no password supplied/],
+		[qr/^$/],
+		'password authentication is not weakened when credentials are missing'
+	);
+	ok( -f $auth_missing->data_dir . '/PG_VERSION',
+		'authentication failure retains the new cluster');
+	ok( !-f $auth_missing->data_dir . '/postmaster.pid',
+		'authentication failure stops the new server');
 }
 
-# Starting another server on the target port confirms that the failed
-# pg_upgrade did not leave its temporary target postmaster running.
-$newnode->start;
-is($newnode->safe_psql('postgres', 'SELECT 1'),
-	'1', 'target port is free after failed --initdb cleanup');
-$newnode->stop;
+{
+	local $ENV{PGPASSFILE} = $pgpass;
+	my $preload_new = PostgreSQL::Test::Cluster->new('preload_new');
+	my $wal = $preload_new->basedir . '/wal with spaces';
+	command_ok(
+		upgrade_command(
+			$preload_old,
+			$preload_new,
+			'--initdb-options' => $auth_options
+			  . ' --waldir='
+			  . option_quote($wal)),
+		'initdb options support a preload-only extension and password authentication'
+	);
+	ok(-d $wal, 'initdb uses the requested WAL directory');
 
-# Verify that the dry run executes compatibility checks rather than merely
-# printing an initdb command.
-$oldnode->start;
-$oldnode->safe_psql('postgres',
-	'DROP FUNCTION missing_upgrade_library(); CREATE TABLE bad (c regproc)');
-$oldnode->stop;
+	my $hba = slurp_file($preload_new->data_dir . '/pg_hba.conf');
+	my @rules = grep { /\S/ && !/^\s*#/ } split(/\n/, $hba);
+	ok(!(grep { !/\bscram-sha-256\s*$/ } @rules),
+		'all generated authentication rules keep the requested method');
+  SKIP:
+	{
+		skip 'unix-style permissions not supported on Windows', 1
+		  if ($windows_os || $Config::Config{osname} eq 'cygwin');
+		is((stat($preload_new->data_dir))[2] & 0777,
+			0700, 'owner-only data directory mode is inherited');
+	}
 
-my $incompatible_target = $newnode->data_dir . '_incompatible_dry_run';
-command_checks_all(
-	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
-		'--new-datadir' => $incompatible_target,
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $newbindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
-		'--check',
-	],
-	1,
-	[qr/failed check: Checking for reg\* data types in user tables/],
-	[qr/^$/],
-	'--check --initdb rejects an incompatible source cluster');
-ok(!-d $incompatible_target,
-	'failed --check --initdb does not create the target directory');
+	start_new_cluster($preload_new);
+	is( $preload_new->safe_psql('postgres', 'SHOW shared_preload_libraries'),
+		q{$libdir/test_slru},
+		'preload setting preserves literal $libdir');
+	$preload_new->safe_psql('postgres',
+		"SELECT test_slru_page_write(0, 'upgraded')");
+	is( $preload_new->safe_psql('postgres', 'SELECT test_slru_page_read(0)'),
+		'upgraded',
+		'restored preload-only extension is usable');
+	$preload_new->stop;
+}
 
-# Conversely, pg_upgrade owns a target directory that did not exist before
-# initdb and removes it completely after a later failure.
-my $created_target = $newnode->data_dir . '_created_then_failed';
-command_checks_all(
-	[
-		'pg_upgrade', '--no-sync',
-		'--old-datadir' => $oldnode->data_dir,
-		'--new-datadir' => $created_target,
-		'--old-bindir' => $oldbindir,
-		'--new-bindir' => $newbindir,
-		'--socketdir' => $newnode->host,
-		'--old-port' => $oldnode->port,
-		'--new-port' => $newnode->port,
-		'--initdb',
-	],
-	1,
-	[qr/failed check: Checking for reg\* data types in user tables/],
-	[qr/^$/],
-	'failed --initdb removes a target it created');
-ok(!-d $created_target, 'pg_upgrade-created target directory was removed');
+# Link and swap retain old file modes, so a group-access request must not
+# turn an owner-only cluster into a partly group-readable cluster.
+SKIP:
+{
+	skip 'Unix permissions are not supported on this platform', 1
+	  if $windows_os || $Config::Config{osname} eq 'cygwin';
+
+	subtest 'group access with link and swap' => sub {
+		for my $mode ('--link', '--swap')
+		{
+			for my $check (0, 1)
+			{
+				my $new = PostgreSQL::Test::Cluster->new(
+					substr($mode, 2) . "_group_rejected_$check");
+				command_checks_all(
+					upgrade_command(
+						$preload_old, $new, $mode,
+						'--initdb-options' => $check
+						? '-dg'
+						: '--allow-group-access',
+						$check ? '--check' : ()),
+					1,
+					[qr/cannot enable group access with \Q$mode\E/],
+					[qr/^$/],
+					"$mode rejects group access with check=$check");
+				ok(!-d $new->data_dir,
+					'permission mismatch leaves no new cluster');
+			}
+
+			my $name = substr($mode, 2);
+			my $old = PostgreSQL::Test::Cluster->new("old_$name");
+			my $new = PostgreSQL::Test::Cluster->new("new_$name");
+			$old->init(extra => ['--allow-group-access']);
+			$old->start;
+			$old->safe_psql('postgres',
+				'CREATE TABLE permissions (id integer); INSERT INTO permissions VALUES (1)'
+			);
+			my $relpath = $old->safe_psql('postgres',
+				"SELECT pg_relation_filepath('permissions')");
+			$old->stop;
+			command_ok(
+				upgrade_command(
+					$old, $new,
+					$mode, '--initdb-options' => '--allow-group-access'),
+				"$mode accepts matching group access settings");
+			is((stat($new->data_dir))[2] & 0777,
+				0750, "$mode preserves data directory permissions");
+			is((stat($new->data_dir . "/$relpath"))[2] & 0777,
+				0640, "$mode preserves relation permissions");
+		}
+		done_testing();
+	};
+}
 
 done_testing();

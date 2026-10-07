@@ -608,26 +608,6 @@ get_control_data(ClusterInfo *cluster)
 
 
 /*
- * check_old_control_data()
- *
- * check source control-data states that are unsafe for any upgrade
- */
-void
-check_old_control_data(ControlData *oldctrl)
-{
-	/*
-	 * If data checksums are in any in-progress state then disallow the
-	 * upgrade. The user should either let the process finish, or turn off
-	 * data checksums, before retrying.
-	 */
-	if (oldctrl->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_ON)
-		pg_fatal("data checksums are being enabled in the old cluster");
-	if (oldctrl->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_OFF)
-		pg_fatal("data checksums are being disabled in the old cluster");
-}
-
-
-/*
  * check_control_data()
  *
  * check to make sure the control data settings are compatible
@@ -673,7 +653,15 @@ check_control_data(ControlData *oldctrl,
 	 * check_for_isn_and_int8_passing_mismatch().
 	 */
 
-	check_old_control_data(oldctrl);
+	/*
+	 * If data checksums are in any in-progress state then disallow the
+	 * upgrade. The user should either let the process finish, or turn off
+	 * data checksums, before retrying.
+	 */
+	if (oldctrl->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_ON)
+		pg_fatal("data checksums are being enabled in the old cluster");
+	if (oldctrl->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_OFF)
+		pg_fatal("data checksums are being disabled in the old cluster");
 
 	/*
 	 * We might eventually allow upgrades from checksum to no-checksum

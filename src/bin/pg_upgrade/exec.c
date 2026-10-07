@@ -251,7 +251,7 @@ pid_lock_file_exists(const char *datadir)
  * NOTE: May update the values of all parameters
  */
 void
-verify_directories(bool check_new_data_dir)
+verify_directories(void)
 {
 #ifndef WIN32
 	if (access(".", R_OK | W_OK | X_OK) != 0)
@@ -265,19 +265,7 @@ verify_directories(bool check_new_data_dir)
 	/* --initdb validates the new binaries before creating the cluster. */
 	if (!user_opts.initdb_new_cluster)
 		check_bin_dir(&new_cluster, true);
-	if (check_new_data_dir)
-		check_data_dir(&new_cluster);
-	else
-	{
-		/*
-		 * --check --initdb does not initialize the new cluster.  Fill the
-		 * target fields needed by the source-cluster compatibility checks.
-		 */
-		new_cluster.major_version = new_cluster.bin_version;
-		new_cluster.major_version_str = pg_strdup(PG_MAJORVERSION);
-		new_cluster.controldata.cat_ver = CATALOG_VERSION_NO;
-		new_cluster.controldata.float8_pass_by_value = FLOAT8PASSBYVAL;
-	}
+	check_data_dir(&new_cluster);
 }
 
 
