@@ -6187,25 +6187,16 @@ StartupXLOG(void)
 		RegisterTimeout(STARTUP_PROGRESS_TIMEOUT,
 						startup_progress_timeout_handler);
 
-	/*----------
-	 * If we previously crashed, perform a couple of actions:
-	 *
-	 * - The pg_wal directory may still include some temporary WAL segments
-	 *   used when creating a new segment, so perform some clean up to not
-	 *   bloat this path.  This is done first as there is no point to sync
-	 *   this temporary data.
-	 *
-	 * - There might be data which we had written, intending to fsync it, but
-	 *   which we had not actually fsync'd yet.  Therefore, a power failure in
-	 *   the near future might cause earlier unflushed writes to be lost, even
-	 *   though more recent data written to disk from here on would be
-	 *   persisted.  To avoid that, fsync the entire data directory.
+	/*
+	 * If we previously crashed, the pg_wal directory may still include some
+	 * temporary WAL segments used when creating a new segment, so perform
+	 * some clean up to not bloat this path.  This is done first as there is
+	 * no point to sync this temporary data.
 	 */
 	if (ControlFile->state != DB_SHUTDOWNED &&
 		ControlFile->state != DB_SHUTDOWNED_IN_RECOVERY)
 	{
 		RemoveTempXlogFiles();
-		SyncDataDirectory();
 		didCrash = true;
 	}
 	else
@@ -6222,6 +6213,23 @@ StartupXLOG(void)
 	InitWalRecovery(ControlFile, &wasShutdown,
 					&haveBackupLabel, &haveTblspcMap);
 	checkPoint = ControlFile->checkPointCopy;
+
+	/*
+	 * If we previously crashed, there might be data which we had written,
+	 * intending to fsync it, but which we had not actually fsync'd yet.
+	 * Therefore, a power failure in the near future might cause earlier
+	 * unflushed writes to be lost, even though more recent data written to
+	 * disk from here on would be persisted.  To avoid that, fsync the entire
+	 * data directory, after removing unlogged relations' disposable forks.
+	 * Cleanup needs the tablespace links restored by InitWalRecovery(); the
+	 * on-disk pg_control state already requires recovery on this path.
+	 */
+	if (didCrash)
+	{
+		if (InRecovery)
+			ResetUnloggedRelations(UNLOGGED_RELATION_CLEANUP);
+		SyncDataDirectory();
+	}
 
 	/* initialize shared memory variables from the checkpoint record */
 	TransamVariables->nextXid = checkPoint.nextXid;
@@ -6468,9 +6476,11 @@ StartupXLOG(void)
 		 * We're in recovery, so unlogged relations may be trashed and must be
 		 * reset.  This should be done BEFORE allowing Hot Standby
 		 * connections, so that read-only backends don't try to read whatever
-		 * garbage is left over from before.
+		 * garbage is left over from before.  After a crash, cleanup was
+		 * already done before SyncDataDirectory().
 		 */
-		ResetUnloggedRelations(UNLOGGED_RELATION_CLEANUP);
+		if (!didCrash)
+			ResetUnloggedRelations(UNLOGGED_RELATION_CLEANUP);
 
 		/*
 		 * Likewise, delete any saved transaction snapshot files that got left
