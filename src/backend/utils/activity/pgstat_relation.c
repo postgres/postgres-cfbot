@@ -37,6 +37,7 @@ typedef struct TwoPhasePgStatRecord
 	PgStat_Counter updated_pre_truncdrop;
 	PgStat_Counter deleted_pre_truncdrop;
 	Oid			id;				/* table's OID */
+	Oid			tablespace_oid; /* table's tablespace OID */
 	bool		shared;			/* is it a shared catalog? */
 	bool		truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
@@ -44,6 +45,8 @@ typedef struct TwoPhasePgStatRecord
 
 static PgStat_RelationStatus *pgstat_prep_relation_pending(PgStat_Kind kind,
 														   Oid rel_id, bool isshared);
+static void pgstat_set_relation_tablespace(PgStat_RelationStatus *ps,
+										   Oid spcoid);
 static void add_tabstat_xact_level(PgStat_RelationStatus *pgstat_info, int nest_level);
 static void ensure_tabstat_xact_level(PgStat_RelationStatus *pgstat_info);
 static void save_truncdrop_counters(PgStat_TableXactStatus *trans, bool is_drop);
@@ -182,6 +185,14 @@ pgstat_assoc_relation(Relation rel)
 													RelationGetRelid(rel),
 													rel->rd_rel->relisshared);
 
+	/*
+	 * Remember its tablespace.  The relation is open, so the tablespace
+	 * cannot be dropped right now, and its stats entry can be created.
+	 */
+	pgstat_set_relation_tablespace(rel->pgstat_info, rel->rd_locator.spcOid);
+	if (OidIsValid(rel->rd_locator.spcOid))
+		pgstat_ensure_tablespace_entry(rel->rd_locator.spcOid);
+
 	/* don't allow link a stats to multiple relcache entries */
 	Assert(rel->pgstat_info->relation == NULL);
 
@@ -204,6 +215,105 @@ pgstat_unlink_relation(Relation rel)
 	Assert(rel->pgstat_info->relation == rel);
 	rel->pgstat_info->relation = NULL;
 	rel->pgstat_info = NULL;
+}
+
+/*
+ * Fill in the counts of a relation or index that are kept per tablespace.
+ *
+ * Rows changed by a transaction that is still open are not in here yet.  They
+ * are added when the transaction ends, see AtEOXact_PgStat_Relations().
+ */
+static void
+pgstat_relation_tablespace_counts(const PgStat_RelationStatus *ps,
+								  PgStat_StatTabspaceEntry *counts)
+{
+	memset(counts, 0, sizeof(*counts));
+
+	if (ps->kind == PGSTAT_KIND_INDEX)
+	{
+		counts->tuples_returned = ps->idx.tuples_returned;
+		counts->tuples_fetched = ps->idx.tuples_fetched;
+		counts->blocks_fetched = ps->idx.blocks_fetched;
+		counts->blocks_hit = ps->idx.blocks_hit;
+	}
+	else
+	{
+		counts->tuples_returned = ps->tab.counts.tuples_returned;
+		counts->tuples_fetched = ps->tab.counts.tuples_fetched;
+		counts->tuples_inserted = ps->tab.counts_xact.tuples_inserted;
+		counts->tuples_updated = ps->tab.counts_xact.tuples_updated;
+		counts->tuples_deleted = ps->tab.counts_xact.tuples_deleted;
+		counts->blocks_fetched = ps->tab.counts.blocks_fetched;
+		counts->blocks_hit = ps->tab.counts.blocks_hit;
+	}
+}
+
+/*
+ * Add what a relation or index has counted to the pending statistics of the
+ * tablespace it lives in.
+ *
+ * If the relation was moved here from another tablespace, tsbase has what it
+ * had counted by then, which went to the old tablespace.
+ */
+void
+pgstat_relation_flush_tablespace(PgStat_RelationStatus *ps)
+{
+	static const PgStat_StatTabspaceEntry zero = {0};
+	const PgStat_StatTabspaceEntry *base = ps->tsbase ? ps->tsbase : &zero;
+	PgStat_StatTabspaceEntry cur;
+	PgStat_StatTabspaceEntry *tsentry;
+
+	if (!OidIsValid(ps->tablespace_oid))
+		return;
+
+	pgstat_relation_tablespace_counts(ps, &cur);
+
+	tsentry = pgstat_prep_tablespace_pending(ps->tablespace_oid);
+	tsentry->tuples_returned += cur.tuples_returned - base->tuples_returned;
+	tsentry->tuples_fetched += cur.tuples_fetched - base->tuples_fetched;
+	tsentry->tuples_inserted += cur.tuples_inserted - base->tuples_inserted;
+	tsentry->tuples_updated += cur.tuples_updated - base->tuples_updated;
+	tsentry->tuples_deleted += cur.tuples_deleted - base->tuples_deleted;
+	tsentry->blocks_fetched += cur.blocks_fetched - base->blocks_fetched;
+	tsentry->blocks_hit += cur.blocks_hit - base->blocks_hit;
+}
+
+/*
+ * Record the tablespace a relation's pending statistics belong to.
+ *
+ * If that changes, what was counted so far is credited to the old tablespace.
+ */
+static void
+pgstat_set_relation_tablespace(PgStat_RelationStatus *ps, Oid spcoid)
+{
+	if (ps->tablespace_oid == spcoid)
+		return;
+
+	if (OidIsValid(ps->tablespace_oid))
+	{
+		if (ps->tsbase == NULL)
+			ps->tsbase = MemoryContextAllocZero(GetMemoryChunkContext(ps),
+												sizeof(PgStat_StatTabspaceEntry));
+		pgstat_relation_flush_tablespace(ps);
+		pgstat_relation_tablespace_counts(ps, ps->tsbase);
+	}
+	ps->tablespace_oid = spcoid;
+}
+
+/*
+ * Refresh the tablespace recorded in a relation's pending statistics.
+ *
+ * pgstat_assoc_relation() records the tablespace when the pending entry is
+ * first created, but a relation can subsequently be moved to a different
+ * tablespace.  RelationRebuildRelation() preserves pgstat_info across a rebuild,
+ * so without this the entry would keep crediting the old tablespace.
+ */
+void
+pgstat_relation_update_tablespace(Relation rel)
+{
+	if (rel->pgstat_info != NULL)
+		pgstat_set_relation_tablespace(rel->pgstat_info,
+									   rel->rd_locator.spcOid);
 }
 
 /*
@@ -780,6 +890,7 @@ AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 		record.updated_pre_truncdrop = trans->updated_pre_truncdrop;
 		record.deleted_pre_truncdrop = trans->deleted_pre_truncdrop;
 		record.id = relstat->tab.id;
+		record.tablespace_oid = relstat->tablespace_oid;
 		record.shared = relstat->tab.shared;
 		record.truncdropped = trans->truncdropped;
 
@@ -824,6 +935,7 @@ pgstat_twophase_postcommit(FullTransactionId fxid, uint16 info,
 
 	/* Find or create a relstat entry for the rel */
 	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION, rec->id, rec->shared);
+	pgstat_set_relation_tablespace(pgstat_info, rec->tablespace_oid);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
 	pgstat_info->tab.counts_xact.tuples_inserted += rec->tuples_inserted;
@@ -860,6 +972,7 @@ pgstat_twophase_postabort(FullTransactionId fxid, uint16 info,
 
 	/* Find or create a relstat entry for the rel */
 	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION, rec->id, rec->shared);
+	pgstat_set_relation_tablespace(pgstat_info, rec->tablespace_oid);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
 	if (rec->truncdropped)
@@ -975,6 +1088,9 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	dbentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
 	dbentry->blocks_hit += lstats->tab.counts.blocks_hit;
 
+	/* Likewise for the tablespace the relation lives in */
+	pgstat_relation_flush_tablespace(lstats);
+
 	return true;
 }
 
@@ -985,6 +1101,8 @@ pgstat_relation_delete_pending_cb(PgStat_EntryRef *entry_ref)
 
 	if (pending->relation)
 		pgstat_unlink_relation(pending->relation);
+	if (pending->tsbase)
+		pfree(pending->tsbase);
 }
 
 void

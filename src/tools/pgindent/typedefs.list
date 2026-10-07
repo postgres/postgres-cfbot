@@ -2305,6 +2305,7 @@ PgStatShared_Relation
 PgStatShared_ReplSlot
 PgStatShared_SLRU
 PgStatShared_Subscription
+PgStatShared_Tablespace
 PgStatShared_Wal
 PgStat_ArchiverStats
 PgStat_Backend
@@ -2329,6 +2330,7 @@ PgStat_LockEntry
 PgStat_PendingDroppedStatsItem
 PgStat_PendingIO
 PgStat_PendingLock
+PgStat_PendingTabspace
 PgStat_RelationStatus
 PgStat_SLRUStats
 PgStat_ShmemControl
@@ -2342,6 +2344,7 @@ PgStat_StatIdxEntry
 PgStat_StatReplSlotEntry
 PgStat_StatSubEntry
 PgStat_StatTabEntry
+PgStat_StatTabspaceEntry
 PgStat_StatsFileOp
 PgStat_SubXactStatus
 PgStat_TableCounts

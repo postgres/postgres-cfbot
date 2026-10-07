@@ -215,12 +215,29 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 }
 
 /*
+ * Prepare for reporting a temporary file that has just been created.
+ *
+ * The file is only reported when it is deleted.  By the time those counts are
+ * flushed its tablespace can be gone, so the stats entry of the tablespace is
+ * created now, while the file keeps the tablespace from being dropped.
+ */
+void
+pgstat_prepare_report_tempfile(const char *path)
+{
+	Oid			spcoid = pgstat_tablespace_from_tempfile_path(path);
+
+	if (OidIsValid(spcoid))
+		pgstat_ensure_tablespace_entry(spcoid);
+}
+
+/*
  * Report creation of temporary file.
  */
 void
-pgstat_report_tempfile(size_t filesize)
+pgstat_report_tempfile(size_t filesize, const char *path)
 {
 	PgStat_StatDBEntry *dbent;
+	Oid			spcoid;
 
 	if (!pgstat_track_counts)
 		return;
@@ -228,6 +245,16 @@ pgstat_report_tempfile(size_t filesize)
 	dbent = pgstat_prep_database_pending(MyDatabaseId);
 	dbent->temp_bytes += filesize;
 	dbent->temp_files++;
+
+	spcoid = pgstat_tablespace_from_tempfile_path(path);
+	if (OidIsValid(spcoid))
+	{
+		PgStat_StatTabspaceEntry *tsent;
+
+		tsent = pgstat_prep_tablespace_pending(spcoid);
+		tsent->temp_bytes += filesize;
+		tsent->temp_files++;
+	}
 }
 
 /*

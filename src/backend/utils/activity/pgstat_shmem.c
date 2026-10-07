@@ -50,8 +50,6 @@ static void pgstat_drop_database_and_contents(Oid dboid);
 static void pgstat_free_entry(PgStatShared_HashEntry *shent, dshash_seq_status *hstat);
 
 static void pgstat_release_entry_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref, bool discard_pending);
-static bool pgstat_need_entry_refs_gc(void);
-static void pgstat_gc_entry_refs(void);
 static void pgstat_release_all_entry_refs(bool discard_pending);
 typedef bool (*ReleaseMatchCB) (PgStat_EntryRefHashEntry *, Datum data);
 static void pgstat_release_matching_entry_refs(bool discard_pending, ReleaseMatchCB match, Datum match_data);
@@ -800,7 +798,7 @@ pgstat_request_entry_refs_gc(void)
 	pg_atomic_fetch_add_u64(&pgStatLocal.shmem->gc_request_count, 1);
 }
 
-static bool
+bool
 pgstat_need_entry_refs_gc(void)
 {
 	uint64		curage;
@@ -816,7 +814,7 @@ pgstat_need_entry_refs_gc(void)
 	return pgStatSharedRefAge != curage;
 }
 
-static void
+void
 pgstat_gc_entry_refs(void)
 {
 	pgstat_entry_ref_hash_iterator i;
