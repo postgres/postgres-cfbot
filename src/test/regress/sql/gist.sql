@@ -309,6 +309,51 @@ reset enable_bitmapscan;
 reset enable_indexonlyscan;
 drop table gist_commute;
 
+-- An ordering Index Scan below a join emits the ORDER BY value it returns,
+-- so the join above reads it instead of evaluating the expression again.
+-- The counting function shows the expression is evaluated zero times.
+create sequence gist_join_cnt;
+create function gist_join_pt(point) returns point
+  language plpgsql immutable strict cost 1000
+  as $$ begin perform nextval('public.gist_join_cnt'); return $1; end $$;
+create temp table gist_join_fact as
+  select g as id, point(g % 101, g % 103) as p from generate_series(1, 1000) g;
+create index on gist_join_fact using gist (gist_join_pt(p));
+create temp table gist_join_dim as select g as id from generate_series(1, 1000, 2) g;
+create index on gist_join_dim (id);
+vacuum analyze gist_join_fact;
+vacuum analyze gist_join_dim;
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+set enable_indexonlyscan = off;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+set enable_sort = off;
+explain (verbose, costs off)
+select f.id, gist_join_pt(f.p) <-> point(5,5) as d
+  from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by gist_join_pt(f.p) <-> point(5,5) limit 3;
+select setval('gist_join_cnt', 1, false);
+select f.id, gist_join_pt(f.p) <-> point(5,5) as d
+  from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by gist_join_pt(f.p) <-> point(5,5) limit 3;
+select nextval('gist_join_cnt') - 1 as calls_during_join;
+-- Nothing extra is emitted when the query doesn't need the value above the
+-- scan.
+explain (verbose, costs off)
+select f.id from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by gist_join_pt(f.p) <-> point(5,5) limit 3;
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+reset enable_hashjoin;
+reset enable_mergejoin;
+reset enable_sort;
+drop table gist_join_fact;
+drop table gist_join_dim;
+drop function gist_join_pt(point);
+drop sequence gist_join_cnt;
+
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);
