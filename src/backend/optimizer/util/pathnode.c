@@ -387,6 +387,27 @@ set_cheapest(RelOptInfo *parent_rel)
 }
 
 /*
+ * pathtargets_differ
+ *	  Do two paths of base relation 'rel' emit different targets?
+ *
+ * A base relation's paths normally all emit rel->reltarget, but an index
+ * path may also emit a value the query needs above the scan, one it has
+ * for free and other paths must compute (see indexonly_path_target() and
+ * index_path_orderby_target()).  That cost isn't in either path's cost
+ * yet; it is charged when the expression is.  So add_path() treats paths
+ * with different targets like paths with different pathkeys, and keeps
+ * both.
+ */
+static inline bool
+pathtargets_differ(RelOptInfo *rel, Path *path1, Path *path2)
+{
+	return rel->reloptkind == RELOPT_BASEREL &&
+		(IsA(path1, IndexPath) || IsA(path2, IndexPath)) &&
+		path1->pathtarget != path2->pathtarget &&
+		!equal(path1->pathtarget->exprs, path2->pathtarget->exprs);
+}
+
+/*
  * add_path
  *	  Consider a potential implementation path for the specified parent rel,
  *	  and add it to the rel's pathlist if it is worthy of consideration.
@@ -513,6 +534,8 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 			old_path_pathkeys = old_path->param_info ? NIL : old_path->pathkeys;
 			keyscmp = compare_pathkeys(new_path_pathkeys,
 									   old_path_pathkeys);
+			if (pathtargets_differ(parent_rel, new_path, old_path))
+				keyscmp = PATHKEYS_DIFFERENT;
 			if (keyscmp != PATHKEYS_DIFFERENT)
 			{
 				switch (costcmp)
@@ -818,8 +841,10 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		bool		remove_old = false; /* unless new proves superior */
 		PathKeysComparison keyscmp;
 
-		/* Compare pathkeys. */
+		/* Compare pathkeys, and targets as in add_path(). */
 		keyscmp = compare_pathkeys(new_path->pathkeys, old_path->pathkeys);
+		if (pathtargets_differ(parent_rel, new_path, old_path))
+			keyscmp = PATHKEYS_DIFFERENT;
 
 		/*
 		 * Unless pathkeys are incompatible, see if one of the paths dominates
@@ -1149,6 +1174,67 @@ index_path_orderby_target(PlannerInfo *root, IndexOptInfo *index,
 }
 
 /*
+ * indexonly_path_target
+ *	  Choose the PathTarget for an index-only scan path.
+ *
+ * An index-only scan reads a returnable index expression column instead of
+ * computing it (set_indexonlyscan_references()), and isn't charged for it
+ * (indexonly_target_cost()).  But that only helps if the path survives
+ * add_path(), and with rel->reltarget, which has only Vars, nothing
+ * distinguishes it from a seq scan that will have to compute the expression
+ * later; it loses on cost before the expression is charged to anyone.  So
+ * if the query's targetlist has a top-level entry equal() to a returnable
+ * index expression, give the path a copy of rel->reltarget with that
+ * expression appended.  add_path() keeps paths with different targets
+ * (see pathtargets_differ()), and once the scan/join target is applied, the
+ * paths that must compute the expression pay for it and this one doesn't.
+ *
+ * This is done only when the rel is the query's sole base relation, where
+ * the value goes straight to the scan/join target.  Below a join, the join
+ * would have to credit it (as join_target_cost() does for ORDER BY values)
+ * and the joinrel's add_path() would have to keep it; not attempted yet.
+ */
+static PathTarget *
+indexonly_path_target(PlannerInfo *root, IndexOptInfo *index)
+{
+	RelOptInfo *rel = index->rel;
+	PathTarget *target = NULL;
+	ListCell   *lt;
+	int			i = 0;
+
+	if (index->indexprs == NIL || rel->reloptkind != RELOPT_BASEREL ||
+		root->processed_tlist == NIL ||
+		!bms_equal(rel->relids, root->all_query_rels))
+		return rel->reltarget;
+
+	foreach(lt, index->indextlist)
+	{
+		TargetEntry *itle = lfirst_node(TargetEntry, lt);
+		ListCell   *lq;
+
+		if (!index->canreturn[i++] || IsA(itle->expr, Var))
+			continue;
+
+		foreach(lq, root->processed_tlist)
+		{
+			if (equal(lfirst_node(TargetEntry, lq)->expr, itle->expr))
+			{
+				if (target == NULL)
+					target = copy_pathtarget(rel->reltarget);
+				add_column_to_pathtarget(target, itle->expr, 0);
+				break;
+			}
+		}
+	}
+
+	if (target == NULL)
+		return rel->reltarget;
+
+	/* add_column_to_pathtarget doesn't maintain cost and width */
+	return set_pathtarget_cost_width(root, target);
+}
+
+/*
  * index_path_emits_orderby
  *	  Does this plain IndexScan path's target hold a value it takes from its
  *	  ORDER BY values?
@@ -1223,7 +1309,8 @@ create_index_path(PlannerInfo *root,
 
 	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
-	pathnode->path.pathtarget = indexonly ? rel->reltarget :
+	pathnode->path.pathtarget = indexonly ?
+		indexonly_path_target(root, index) :
 		index_path_orderby_target(root, index, indexorderbys,
 								  indexorderbycols);
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
