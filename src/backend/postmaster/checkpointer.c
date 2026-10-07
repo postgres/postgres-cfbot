@@ -1003,7 +1003,7 @@ ExecCheckpoint(ParseState *pstate, CheckPointStmt *stmt)
 	bool		fast = true;
 	bool		unlogged = false;
 
-	foreach_ptr(DefElem, opt, stmt->options)
+	foreach_ptr(DefElem, opt, deduplicateDefElemList(stmt->options))
 	{
 		if (strcmp(opt->defname, "mode") == 0)
 		{
