@@ -196,7 +196,8 @@ create_conflict_log_table(Oid subid, char *subname, Oid subowner)
 
 	ereport(NOTICE,
 			(errmsg("created conflict log table \"%s\" for subscription \"%s\"",
-					get_qualified_objname(PG_CONFLICT_NAMESPACE, relname),
+					MsgQualifiedRelName(get_namespace_name(PG_CONFLICT_NAMESPACE),
+										relname),
 					subname)));
 
 	return relid;
@@ -297,9 +298,8 @@ ReportApplyConflict(EState *estate, ResultRelInfo *relinfo, int elevel,
 
 	ereport(elevel,
 			errcode_apply_conflict(type),
-			errmsg("conflict detected on relation \"%s.%s\": conflict=%s",
-				   get_namespace_name(RelationGetNamespace(localrel)),
-				   RelationGetRelationName(localrel),
+			errmsg("conflict detected on relation \"%s\": conflict=%s",
+				   MsgQualifiedRelNameByRel(localrel),
 				   ConflictTypeNames[type]),
 			errdetail_internal("%s", err_detail.data));
 }
@@ -458,24 +458,24 @@ errdetail_apply_conflict(EState *estate, ResultRelInfo *relinfo,
 				{
 					if (tuple_buf.len)
 						appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified locally in transaction %u at %s: %s."),
-										 get_rel_name(indexoid),
+										 MsgQualifiedRelNameByRelId(indexoid),
 										 localxmin, timestamptz_to_str(localts),
 										 tuple_buf.data);
 					else
 						appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified locally in transaction %u at %s."),
-										 get_rel_name(indexoid),
+										 MsgQualifiedRelNameByRelId(indexoid),
 										 localxmin, timestamptz_to_str(localts));
 				}
 				else if (replorigin_by_oid(localorigin, true, &origin_name))
 				{
 					if (tuple_buf.len)
 						appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified by origin \"%s\" in transaction %u at %s: %s."),
-										 get_rel_name(indexoid), origin_name,
+										 MsgQualifiedRelNameByRelId(indexoid), origin_name,
 										 localxmin, timestamptz_to_str(localts),
 										 tuple_buf.data);
 					else
 						appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified by origin \"%s\" in transaction %u at %s."),
-										 get_rel_name(indexoid), origin_name,
+										 MsgQualifiedRelNameByRelId(indexoid), origin_name,
 										 localxmin, timestamptz_to_str(localts));
 				}
 
@@ -490,12 +490,12 @@ errdetail_apply_conflict(EState *estate, ResultRelInfo *relinfo,
 				{
 					if (tuple_buf.len)
 						appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified by a non-existent origin in transaction %u at %s: %s."),
-										 get_rel_name(indexoid),
+										 MsgQualifiedRelNameByRelId(indexoid),
 										 localxmin, timestamptz_to_str(localts),
 										 tuple_buf.data);
 					else
 						appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified by a non-existent origin in transaction %u at %s."),
-										 get_rel_name(indexoid),
+										 MsgQualifiedRelNameByRelId(indexoid),
 										 localxmin, timestamptz_to_str(localts));
 				}
 			}
@@ -503,11 +503,11 @@ errdetail_apply_conflict(EState *estate, ResultRelInfo *relinfo,
 			{
 				if (tuple_buf.len)
 					appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified in transaction %u: %s."),
-									 get_rel_name(indexoid), localxmin,
+									 MsgQualifiedRelNameByRelId(indexoid), localxmin,
 									 tuple_buf.data);
 				else
 					appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified in transaction %u."),
-									 get_rel_name(indexoid), localxmin);
+									 MsgQualifiedRelNameByRelId(indexoid), localxmin);
 			}
 
 			break;

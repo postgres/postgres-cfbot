@@ -1148,37 +1148,37 @@ CheckCmdReplicaIdentity(Relation rel, CmdType cmd)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("cannot update table \"%s\"",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errdetail("Column used in the publication WHERE expression is not part of the replica identity.")));
 	else if (cmd == CMD_UPDATE && !pubdesc.cols_valid_for_update)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("cannot update table \"%s\"",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errdetail("Column list used by the publication does not cover the replica identity.")));
 	else if (cmd == CMD_UPDATE && !pubdesc.gencols_valid_for_update)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("cannot update table \"%s\"",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errdetail("Replica identity must not contain unpublished generated columns.")));
 	else if (cmd == CMD_DELETE && !pubdesc.rf_valid_for_delete)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("cannot delete from table \"%s\"",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errdetail("Column used in the publication WHERE expression is not part of the replica identity.")));
 	else if (cmd == CMD_DELETE && !pubdesc.cols_valid_for_delete)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("cannot delete from table \"%s\"",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errdetail("Column list used by the publication does not cover the replica identity.")));
 	else if (cmd == CMD_DELETE && !pubdesc.gencols_valid_for_delete)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("cannot delete from table \"%s\"",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errdetail("Replica identity must not contain unpublished generated columns.")));
 
 	/* If relation has replica identity we are always good. */
@@ -1198,13 +1198,13 @@ CheckCmdReplicaIdentity(Relation rel, CmdType cmd)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot update table \"%s\" because it does not have a replica identity and publishes updates",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errhint("To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.")));
 	else if (cmd == CMD_DELETE && pubdesc.pubactions.pubdelete)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot delete from table \"%s\" because it does not have a replica identity and publishes deletes",
-						RelationGetRelationName(rel)),
+						MsgQualifiedRelNameByRel(rel)),
 				 errhint("To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.")));
 }
 
@@ -1224,8 +1224,8 @@ CheckSubscriptionRelkind(char localrelkind, char remoterelkind,
 		localrelkind != RELKIND_SEQUENCE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("cannot use relation \"%s.%s\" as logical replication target",
-						nspname, relname),
+				 errmsg("cannot use relation \"%s\" as logical replication target",
+						MsgQualifiedRelName(nspname, relname)),
 				 errdetail_relkind_not_supported(localrelkind)));
 
 	/*
@@ -1238,8 +1238,8 @@ CheckSubscriptionRelkind(char localrelkind, char remoterelkind,
 		ereport(ERROR,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		/* translator: 3rd and 4th %s are "sequence" or "table" */
-				errmsg("relation \"%s.%s\" type mismatch: source \"%s\", target \"%s\"",
-					   nspname, relname,
+				errmsg("relation \"%s\" type mismatch: source \"%s\", target \"%s\"",
+					   MsgQualifiedRelName(nspname, relname),
 					   remoterelkind == RELKIND_SEQUENCE ? "sequence" : "table",
 					   localrelkind == RELKIND_SEQUENCE ? "sequence" : "table"));
 }
