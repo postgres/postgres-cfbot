@@ -733,7 +733,7 @@ TransformPubWhereClauses(List *tables, const char *queryString,
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("cannot use publication WHERE clause for relation \"%s\"",
-							RelationGetRelationName(pri->relation)),
+							MsgQualifiedRelNameByRel(pri->relation)),
 					 errdetail("WHERE clause cannot be used for a partitioned table when %s is false.",
 							   "publish_via_partition_root")));
 
@@ -807,9 +807,9 @@ CheckPubRelationColumnList(char *pubname, List *tables,
 		if (publish_schema)
 			ereport(ERROR,
 					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("cannot use column list for relation \"%s.%s\" in publication \"%s\"",
-						   get_namespace_name(RelationGetNamespace(pri->relation)),
-						   RelationGetRelationName(pri->relation), pubname),
+					errmsg("cannot use column list for relation \"%s\" in publication \"%s\"",
+						   MsgQualifiedRelNameByRel(pri->relation),
+						   pubname),
 					errdetail("Column lists cannot be specified in publications containing FOR TABLES IN SCHEMA elements."));
 
 		/*
@@ -821,9 +821,9 @@ CheckPubRelationColumnList(char *pubname, List *tables,
 			pri->relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("cannot use column list for relation \"%s.%s\" in publication \"%s\"",
-							get_namespace_name(RelationGetNamespace(pri->relation)),
-							RelationGetRelationName(pri->relation), pubname),
+					 errmsg("cannot use column list for relation \"%s\" in publication \"%s\"",
+							MsgQualifiedRelNameByRel(pri->relation),
+							pubname),
 					 errdetail("Column lists cannot be specified for partitioned tables when %s is false.",
 							   "publish_via_partition_root")));
 	}
@@ -1093,7 +1093,7 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 				ReleaseSysCache(rftuple);
 				continue;
 			}
-			relname = get_rel_name(relid);
+			relname = MsgQualifiedRelNameByRelId(relid);
 			if (relname == NULL)	/* table concurrently dropped */
 			{
 				ReleaseSysCache(rftuple);
@@ -1879,14 +1879,14 @@ OpenTableList(List *tables)
 				ereport(ERROR,
 						(errcode(ERRCODE_DUPLICATE_OBJECT),
 						 errmsg("conflicting or redundant WHERE clauses for table \"%s\"",
-								RelationGetRelationName(rel))));
+								MsgQualifiedRelNameByRel(rel))));
 
 			/* Disallow duplicate tables if there are any with column lists. */
 			if (t->columns || list_member_oid(relids_with_collist, myrelid))
 				ereport(ERROR,
 						(errcode(ERRCODE_DUPLICATE_OBJECT),
 						 errmsg("conflicting or redundant column lists for table \"%s\"",
-								RelationGetRelationName(rel))));
+								MsgQualifiedRelNameByRel(rel))));
 
 			table_close(rel, ShareUpdateExclusiveLock);
 			continue;
@@ -1943,7 +1943,7 @@ OpenTableList(List *tables)
 						ereport(ERROR,
 								(errcode(ERRCODE_DUPLICATE_OBJECT),
 								 errmsg("conflicting or redundant WHERE clauses for table \"%s\"",
-										RelationGetRelationName(rel))));
+										MsgQualifiedRelNameByRel(rel))));
 
 					/*
 					 * We don't allow to specify column list for both parent
@@ -1955,7 +1955,7 @@ OpenTableList(List *tables)
 						ereport(ERROR,
 								(errcode(ERRCODE_DUPLICATE_OBJECT),
 								 errmsg("conflicting or redundant column lists for table \"%s\"",
-										RelationGetRelationName(rel))));
+										MsgQualifiedRelNameByRel(rel))));
 
 					continue;
 				}
@@ -2097,7 +2097,7 @@ PublicationDropTables(Oid pubid, List *rels, bool missing_ok)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("relation \"%s\" is not part of the publication",
-							RelationGetRelationName(rel))));
+							MsgQualifiedRelNameByRel(rel))));
 		}
 
 		if (pubrel->whereClause)
