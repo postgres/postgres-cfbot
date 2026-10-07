@@ -935,6 +935,15 @@ use_physical_tlist(PlannerInfo *root, Path *path, int flags)
 	}
 
 	/*
+	 * Nor if a plain index scan path was asked to emit its ORDER BY values
+	 * (see index_path_orderby_target()); a physical tlist has only Vars, so
+	 * whatever needs them would compute them again.
+	 */
+	if (path->pathtype == T_IndexScan &&
+		index_path_emits_orderby((IndexPath *) path))
+		return false;
+
+	/*
 	 * For an index-only scan, the "physical tlist" is the index's indextlist.
 	 * We can only return that without a projection if all the index's columns
 	 * are returnable.

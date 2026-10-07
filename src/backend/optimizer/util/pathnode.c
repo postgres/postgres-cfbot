@@ -1071,6 +1071,120 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
 }
 
 /*
+ * index_path_orderby_target
+ *	  Choose the PathTarget for an ordering plain IndexScan path.
+ *
+ * Normally an IndexPath emits rel->reltarget, which holds only the Vars (and
+ * PlaceHolderVars) the rest of the query needs.  An ORDER BY expression is
+ * not in it: it is computed by whatever plan node first needs it.  When the
+ * scan is the top of the scan/join tree that is the scan itself, and
+ * setrefs.c lets it take the value from its ORDER BY values.  But when the
+ * scan is below a join, the join computes the expression from the Vars,
+ * once per joined row, though the scan already had the value.
+ *
+ * So if the scan can return any of its ORDER BY values (see
+ * index_orderby_returnable()), and the query needs that expression above
+ * the scan (it is in the final targetlist, which includes sort columns),
+ * give the path a copy of rel->reltarget with those expressions appended.
+ * They cost the scan nothing (path_target_cost() exempts them), and
+ * setrefs.c's fix_join_expr() matches them in the parent join's expressions,
+ * replacing its copy with a reference to the scan's output.
+ *
+ * Restricted to plain base relations: an appendrel child's paths are wrapped
+ * by Append/MergeAppend, which build their own targetlists, and the top-level
+ * scan/join target already handles the unjoined case.  Returns
+ * rel->reltarget unchanged when there's nothing to add, which is the common
+ * case, so most paths share it as before.
+ */
+static PathTarget *
+index_path_orderby_target(PlannerInfo *root, IndexOptInfo *index,
+						  List *indexorderbys, List *indexorderbycols)
+{
+	RelOptInfo *rel = index->rel;
+	PathTarget *target = NULL;
+	ListCell   *lo,
+			   *lcol;
+
+	if (indexorderbys == NIL || rel->reloptkind != RELOPT_BASEREL ||
+		root->processed_tlist == NIL)
+		return rel->reltarget;
+
+	forboth(lo, indexorderbys, lcol, indexorderbycols)
+	{
+		Expr	   *orderby = (Expr *) lfirst(lo);
+		bool		needed = false;
+		ListCell   *lt;
+
+		if (!index_orderby_returnable(index, lfirst_int(lcol), orderby))
+			continue;
+
+		/*
+		 * Only if some top-level targetlist entry is this expression; an
+		 * expression that merely contains it would not be rewritten, and
+		 * emitting the value would just widen the tuple.
+		 */
+		foreach(lt, root->processed_tlist)
+		{
+			TargetEntry *tle = lfirst_node(TargetEntry, lt);
+
+			if (orderby_tlist_match(tle->expr, orderby))
+			{
+				needed = true;
+				break;
+			}
+		}
+		if (!needed)
+			continue;
+
+		if (target == NULL)
+			target = copy_pathtarget(rel->reltarget);
+		add_column_to_pathtarget(target, orderby, 0);
+	}
+
+	if (target == NULL)
+		return rel->reltarget;
+
+	/* add_column_to_pathtarget doesn't maintain cost and width */
+	return set_pathtarget_cost_width(root, target);
+}
+
+/*
+ * index_path_emits_orderby
+ *	  Does this plain IndexScan path's target hold a value it takes from its
+ *	  ORDER BY values?
+ *
+ * use_physical_tlist() must not replace such a target with the scan's
+ * physical tlist, which has only Vars, or whatever needs the value would
+ * compute it again.
+ */
+bool
+index_path_emits_orderby(IndexPath *ipath)
+{
+	ListCell   *lc;
+
+	if (ipath->path.pathtype != T_IndexScan || ipath->indexorderbys == NIL)
+		return false;
+
+	foreach(lc, ipath->path.pathtarget->exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		ListCell   *lo,
+				   *lcol;
+
+		if (IsA(expr, Var))
+			continue;
+		forboth(lo, ipath->indexorderbys, lcol, ipath->indexorderbycols)
+		{
+			if (index_orderby_returnable(ipath->indexinfo, lfirst_int(lcol),
+										 (Expr *) lfirst(lo)) &&
+				orderby_tlist_match(expr, (Expr *) lfirst(lo)))
+				return true;
+		}
+	}
+	return false;
+}
+
+/*
  * create_index_path
  *	  Creates a path node for an index scan.
  *
@@ -1109,7 +1223,9 @@ create_index_path(PlannerInfo *root,
 
 	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
-	pathnode->path.pathtarget = rel->reltarget;
+	pathnode->path.pathtarget = indexonly ? rel->reltarget :
+		index_path_orderby_target(root, index, indexorderbys,
+								  indexorderbycols);
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
 														  required_outer);
 	pathnode->path.parallel_aware = false;
@@ -2676,22 +2792,82 @@ orderby_tlist_match(Expr *expr, Expr *orderby)
 }
 
 /*
+ * join_target_cost
+ *	  path_target_cost() for a join path.
+ *
+ * A join takes any top-level target expression that one of its inputs
+ * already emits from that input's output instead of evaluating it again:
+ * setrefs.c's fix_join_expr() matches whole non-Var expressions against the
+ * input targetlists before descending into them.  Join inputs ordinarily
+ * emit only Vars and PlaceHolderVars, so this changes nothing; but an
+ * ordering IndexScan input may emit the ORDER BY values it returns (see
+ * index_path_orderby_target()).  Look through Material and Memoize, which
+ * pass their input's targetlist up unchanged.  We look only at the join's
+ * immediate inputs; the value can't reach a higher join without passing
+ * through this one's targetlist, which is the joinrel's and has only Vars.
+ */
+static QualCost
+join_target_cost(PlannerInfo *root, JoinPath *jpath, PathTarget *target)
+{
+	QualCost	cost = target->cost;
+	Path	   *inputs[2] = {jpath->outerjoinpath, jpath->innerjoinpath};
+	ListCell   *lc;
+
+	foreach(lc, target->exprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+
+		if (IsA(expr, Var) || IsA(expr, PlaceHolderVar))
+			continue;
+
+		for (int i = 0; i < 2; i++)
+		{
+			Path	   *input = inputs[i];
+
+			while (IsA(input, MaterialPath) || IsA(input, MemoizePath))
+				input = IsA(input, MaterialPath) ?
+					((MaterialPath *) input)->subpath :
+					((MemoizePath *) input)->subpath;
+
+			if (IsA(input, IndexPath) &&
+				index_path_emits_orderby((IndexPath *) input) &&
+				list_member(input->pathtarget->exprs, expr))
+			{
+				QualCost	ecost;
+
+				cost_qual_eval_node(&ecost, expr, root);
+				cost.startup -= ecost.startup;
+				cost.per_tuple -= ecost.per_tuple;
+				break;
+			}
+		}
+	}
+
+	return cost;
+}
+
+/*
  * path_target_cost
  *	  Return the cost 'path' pays to evaluate 'target'.
  *
- * Normally that's just target->cost.  But a plain IndexScan takes any
+ * Normally that's just target->cost.  A join path doesn't pay for entries
+ * an input already emits (see join_target_cost()).  And a plain IndexScan
+ * takes any
  * top-level target expression that is a returnable ORDER BY expression
  * (see orderby_tlist_match()) from its ORDER BY values instead of
  * evaluating it (setrefs.c rewrites it into a reference to them), so it
  * doesn't pay for those.  Each target entry
  * is counted at most once, as setrefs.c rewrites it once.
  */
-static QualCost
+QualCost
 path_target_cost(PlannerInfo *root, Path *path, PathTarget *target)
 {
 	QualCost	cost = target->cost;
 	IndexPath  *ipath;
 	ListCell   *lc;
+
+	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath))
+		return join_target_cost(root, (JoinPath *) path, target);
 
 	if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan)
 		return cost;
