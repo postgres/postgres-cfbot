@@ -13494,6 +13494,8 @@ generate_qualified_relation_name(Oid relid)
 {
 	HeapTuple	tp;
 	Form_pg_class reltup;
+	Oid			nspid;
+	char	   *nspname;
 	char	   *result;
 
 	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
@@ -13501,8 +13503,13 @@ generate_qualified_relation_name(Oid relid)
 		elog(ERROR, "cache lookup failed for relation %u", relid);
 	reltup = (Form_pg_class) GETSTRUCT(tp);
 
-	result = get_qualified_objname(reltup->relnamespace,
-								   NameStr(reltup->relname));
+	nspid = reltup->relnamespace;
+	nspname = get_namespace_name_or_temp(nspid);
+	if (!nspname)
+		elog(ERROR, "cache lookup failed for namespace %u", nspid);
+
+	result = quote_qualified_identifier(nspname, NameStr(reltup->relname));
+
 	ReleaseSysCache(tp);
 
 	return result;
