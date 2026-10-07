@@ -1046,8 +1046,8 @@ ProcessParallelApplyMessage(StringInfo msg)
 					edata.context = pstrdup(_("logical replication parallel apply worker"));
 
 				/*
-				 * Context beyond that should use the error context callbacks
-				 * that were in effect in LogicalRepApplyLoop().
+				 * Use the callbacks saved before the leader's apply error
+				 * context callback was installed.
 				 */
 				error_context_stack = apply_error_context_stack;
 
