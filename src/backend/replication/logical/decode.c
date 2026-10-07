@@ -893,32 +893,20 @@ DecodeAbort(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	else
 	{
 		/*
-		 * Remove tuplecid changes queued by the aborted (sub)transactions
-		 * from the toplevel's list, before the transactions are torn down.
-		 * The abort record's primary xid tells
-		 * ReorderBufferCleanupSubTxnTupleCids() whether the whole toplevel
-		 * is going away, in which case scanning the list is pointless.
-		 *
-		 * Note that we must not try to decide that from the primary xid's
-		 * own association instead: an abort record is written once the
-		 * subtransaction is already in TRANS_ABORT, so it never carries
-		 * the toplevel xid in its header (IsSubxactTopXidLogPending()
-		 * requires IsTransactionState()), and an outer subtransaction
-		 * that never wrote WAL of its own -- e.g. a savepoint that only
-		 * wraps other savepoints -- can therefore have no association at
-		 * all, while the released inner subtransactions it rolls back do
-		 * have one and their tuplecids still need to be removed.
+		 * Remove tuplecid changes queued by the aborted subtransactions from
+		 * the toplevel's list, before ReorderBufferAbort() tears the
+		 * transactions down.
 		 */
+		ReorderBufferCleanupAbortedSubTxnTupleCids(ctx->reorder, xid,
+												   parsed->nsubxacts,
+												   parsed->subxacts);
+
 		for (i = 0; i < parsed->nsubxacts; i++)
 		{
-			ReorderBufferCleanupSubTxnTupleCids(ctx->reorder,
-												parsed->subxacts[i],
-												xid);
 			ReorderBufferAbort(ctx->reorder, parsed->subxacts[i],
 							   buf->record->EndRecPtr, abort_time);
 		}
 
-		ReorderBufferCleanupSubTxnTupleCids(ctx->reorder, xid, xid);
 		ReorderBufferAbort(ctx->reorder, xid, buf->record->EndRecPtr,
 						   abort_time);
 	}

@@ -743,8 +743,10 @@ extern void ReorderBufferCommitChild(ReorderBuffer *rb, TransactionId xid,
 									 XLogRecPtr end_lsn);
 extern void ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 							   TimestampTz abort_time);
-extern void ReorderBufferCleanupSubTxnTupleCids(ReorderBuffer *rb, TransactionId xid,
-												TransactionId primary_xid);
+extern void ReorderBufferCleanupAbortedSubTxnTupleCids(ReorderBuffer *rb,
+													   TransactionId xid,
+													   int nsubxacts,
+													   TransactionId *subxacts);
 extern void ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid);
 extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 extern void ReorderBufferInvalidate(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
