@@ -229,6 +229,9 @@ extern void sort_pathlist_by_cost(List *pathlist);
 extern bool index_orderby_returnable(IndexOptInfo *index, int indexcol,
 									 Expr *orderby);
 extern bool orderby_tlist_match(Expr *expr, Expr *orderby);
+extern QualCost path_target_cost(PlannerInfo *root, Path *path,
+								 PathTarget *target);
+extern bool index_path_emits_orderby(IndexPath *ipath);
 extern ProjectionPath *create_projection_path(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  Path *subpath,
