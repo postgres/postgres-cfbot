@@ -564,6 +564,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	Cost		min_IO_cost,
 				max_IO_cost;
 	QualCost	qpqual_cost;
+	QualCost	tlist_cost;
 	Cost		cpu_per_tuple;
 	double		tuples_fetched;
 	double		pages_fetched;
@@ -799,9 +800,14 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	cpu_run_cost += cpu_per_tuple * tuples_fetched;
 
-	/* tlist eval costs are paid per output row, not per tuple scanned */
-	startup_cost += path->path.pathtarget->cost.startup;
-	cpu_run_cost += path->path.pathtarget->cost.per_tuple * path->path.rows;
+	/*
+	 * tlist eval costs are paid per output row, not per tuple scanned.  An
+	 * ordering IndexScan doesn't pay for target entries it takes from its
+	 * ORDER BY values.
+	 */
+	tlist_cost = path_target_cost(root, (Path *) path, path->path.pathtarget);
+	startup_cost += tlist_cost.startup;
+	cpu_run_cost += tlist_cost.per_tuple * path->path.rows;
 
 	/* Adjust costing for parallelism, if used. */
 	if (path->path.parallel_workers > 0)
