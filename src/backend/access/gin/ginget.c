@@ -26,6 +26,8 @@
 /* GUC parameter */
 int			GinFuzzySearchLimit = 0;
 
+#define GIN_TBM_BATCH_SIZE 256
+
 typedef struct pendingPosition
 {
 	Buffer		pendingBuffer;
@@ -1842,6 +1844,8 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 	Buffer		metabuffer = ReadBuffer(scan->indexRelation, GIN_METAPAGE_BLKNO);
 	Page		page;
 	BlockNumber blkno;
+	ItemPointerData tids[2][GIN_TBM_BATCH_SIZE];
+	int			ntids_batch[2] = {0, 0};
 
 	*ntids = 0;
 
@@ -1913,10 +1917,21 @@ scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)
 
 		if (match)
 		{
-			tbm_add_tuples(tbm, &pos.item, 1, recheck);
+			const int b = recheck ? 1 : 0;
+
+			if (ntids_batch[b] == GIN_TBM_BATCH_SIZE)
+			{
+				tbm_add_tuples(tbm, tids[b], ntids_batch[b], recheck);
+				ntids_batch[b] = 0;
+			}
+
+			tids[b][ntids_batch[b]++] = pos.item;
 			(*ntids)++;
 		}
 	}
+
+	for (int i = 0; i < 2; i++)
+		tbm_add_tuples(tbm, tids[i], ntids_batch[i], i == 1);
 
 	pfree(pos.hasMatchKey);
 }
@@ -1931,6 +1946,8 @@ gingetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	int64		ntids;
 	ItemPointerData iptr;
 	bool		recheck;
+	ItemPointerData tids[2][GIN_TBM_BATCH_SIZE];
+	int			ntids_batch[2] = {0, 0};
 
 	/*
 	 * Set up the scan keys, and check for unsatisfiable query.
@@ -1969,11 +1986,27 @@ gingetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 			break;
 
 		if (ItemPointerIsLossyPage(&iptr))
+		{
 			tbm_add_page(tbm, ItemPointerGetBlockNumber(&iptr));
+			ntids++;
+		}
 		else
-			tbm_add_tuples(tbm, &iptr, 1, recheck);
-		ntids++;
+		{
+			const int b = recheck ? 1 : 0;
+
+			if (ntids_batch[b] == GIN_TBM_BATCH_SIZE)
+			{
+				tbm_add_tuples(tbm, tids[b], ntids_batch[b], recheck);
+				ntids_batch[b] = 0;
+			}
+
+			tids[b][ntids_batch[b]++] = iptr;
+			ntids++;
+		}
 	}
+
+	for (int i = 0; i < 2; i++)
+		tbm_add_tuples(tbm, tids[i], ntids_batch[i], i == 1);
 
 	return ntids;
 }
