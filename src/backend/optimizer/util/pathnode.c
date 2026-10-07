@@ -2792,6 +2792,57 @@ orderby_tlist_match(Expr *expr, Expr *orderby)
 }
 
 /*
+ * indexonly_target_cost
+ *	  path_target_cost() for an index-only scan path.
+ *
+ * setrefs.c's set_indexonlyscan_references() matches target expressions
+ * against the index's returnable columns, expression columns included, and
+ * replaces a match with a reference to that column: the scan reads the
+ * value the index stored instead of computing it.  So a top-level target
+ * expression equal() to a returnable index expression costs nothing.  Only
+ * top-level entries are considered, as elsewhere; that's what's normally in
+ * a scan's target.
+ */
+static QualCost
+indexonly_target_cost(PlannerInfo *root, IndexPath *ipath, PathTarget *target)
+{
+	QualCost	cost = target->cost;
+	IndexOptInfo *index = ipath->indexinfo;
+	ListCell   *lc;
+
+	if (index->indexprs == NIL)
+		return cost;			/* only Vars, which cost nothing anyway */
+
+	foreach(lc, target->exprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		ListCell   *lt;
+		int			i = 0;
+
+		if (IsA(expr, Var))
+			continue;
+
+		foreach(lt, index->indextlist)
+		{
+			TargetEntry *tle = lfirst_node(TargetEntry, lt);
+
+			if (index->canreturn[i++] && !IsA(tle->expr, Var) &&
+				equal(expr, tle->expr))
+			{
+				QualCost	ecost;
+
+				cost_qual_eval_node(&ecost, expr, root);
+				cost.startup -= ecost.startup;
+				cost.per_tuple -= ecost.per_tuple;
+				break;
+			}
+		}
+	}
+
+	return cost;
+}
+
+/*
  * join_target_cost
  *	  path_target_cost() for a join path.
  *
@@ -2851,8 +2902,9 @@ join_target_cost(PlannerInfo *root, JoinPath *jpath, PathTarget *target)
  *	  Return the cost 'path' pays to evaluate 'target'.
  *
  * Normally that's just target->cost.  A join path doesn't pay for entries
- * an input already emits (see join_target_cost()).  And a plain IndexScan
- * takes any
+ * an input already emits (see join_target_cost()), nor an index-only scan
+ * for entries it reads from the index (see indexonly_target_cost()).  And a
+ * plain IndexScan takes any
  * top-level target expression that is a returnable ORDER BY expression
  * (see orderby_tlist_match()) from its ORDER BY values instead of
  * evaluating it (setrefs.c rewrites it into a reference to them), so it
@@ -2868,6 +2920,9 @@ path_target_cost(PlannerInfo *root, Path *path, PathTarget *target)
 
 	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath))
 		return join_target_cost(root, (JoinPath *) path, target);
+
+	if (IsA(path, IndexPath) && path->pathtype == T_IndexOnlyScan)
+		return indexonly_target_cost(root, (IndexPath *) path, target);
 
 	if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan)
 		return cost;
