@@ -2091,6 +2091,7 @@ void
 RecoverPreparedTransactions(void)
 {
 	int			i;
+	int			recovered_xacts = 0;
 
 	LWLockAcquire(TwoPhaseStateLock, LW_EXCLUSIVE);
 	for (i = 0; i < TwoPhaseState->numPrepXacts; i++)
@@ -2118,7 +2119,7 @@ RecoverPreparedTransactions(void)
 		if (buf == NULL)
 			continue;
 
-		ereport(LOG,
+		ereport(DEBUG1,
 				(errmsg("recovering prepared transaction %u of epoch %u from shared memory",
 						XidFromFullTransactionId(gxact->fxid),
 						EpochFromFullTransactionId(gxact->fxid))));
@@ -2173,11 +2174,19 @@ RecoverPreparedTransactions(void)
 		PostPrepare_Twophase();
 
 		pfree(buf);
+		recovered_xacts++;
 
 		LWLockAcquire(TwoPhaseStateLock, LW_EXCLUSIVE);
 	}
 
 	LWLockRelease(TwoPhaseStateLock);
+
+	if (recovered_xacts > 0)
+		ereport(LOG,
+				(errmsg_plural("recovered %d prepared transaction",
+							   "recovered %d prepared transactions",
+							   recovered_xacts,
+							   recovered_xacts)));
 }
 
 /*
