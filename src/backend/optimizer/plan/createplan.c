@@ -3043,17 +3043,12 @@ create_indexscan_plan(PlannerInfo *root,
 		ListCell   *lo,
 				   *lc;
 
+		/* must agree with path_target_cost() in pathnode.c */
 		forboth(lo, best_path->indexorderbys, lc, best_path->indexorderbycols)
-		{
-			int			indexcol = lfirst_int(lc);
-			OpExpr	   *orderby = lfirst_node(OpExpr, lo);
-
 			exact = lappend_int(exact,
-								indexinfo->amcanreturnorderby != NULL &&
-								indexinfo->amcanreturnorderby(indexinfo->opfamily[indexcol],
-															  indexinfo->opcintype[indexcol],
-															  orderby->opno));
-		}
+								index_orderby_returnable(indexinfo,
+														 lfirst_int(lc),
+														 (Expr *) lfirst(lo)));
 		((IndexScan *) scan_plan)->indexorderbyexact = exact;
 	}
 

@@ -225,6 +225,10 @@ extern HashPath *create_hashjoin_path(PlannerInfo *root,
 									  Relids required_outer,
 									  List *hashclauses);
 
+extern void sort_pathlist_by_cost(List *pathlist);
+extern bool index_orderby_returnable(IndexOptInfo *index, int indexcol,
+									 Expr *orderby);
+extern bool orderby_tlist_match(Expr *expr, Expr *orderby);
 extern ProjectionPath *create_projection_path(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  Path *subpath,
