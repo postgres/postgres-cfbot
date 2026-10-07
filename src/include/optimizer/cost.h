@@ -68,6 +68,7 @@ extern PGDLLIMPORT bool enable_partitionwise_join;
 extern PGDLLIMPORT bool enable_partitionwise_aggregate;
 extern PGDLLIMPORT bool enable_parallel_append;
 extern PGDLLIMPORT bool enable_parallel_hash;
+extern PGDLLIMPORT int or_expansion_limit;
 extern PGDLLIMPORT bool enable_partition_pruning;
 extern PGDLLIMPORT bool enable_presorted_aggregate;
 extern PGDLLIMPORT bool enable_async_append;

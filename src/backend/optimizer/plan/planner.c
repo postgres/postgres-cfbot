@@ -1850,6 +1850,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		List	   *activeWindows = NIL;
 		grouping_sets_data *gset_data = NULL;
 		standard_qp_extra qp_extra;
+		List	   *or_cands;
 
 		/* A recursive query should always have setOperations */
 		Assert(!root->hasRecursion);
@@ -1926,6 +1927,11 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 			preprocess_minmax_aggregates(root);
 
 		/*
+		 * Consider expanding eligible OR clauses to UNION ALL (Append) paths.
+		 */
+		or_cands = plan_or_expansion_arms(root);
+
+		/*
 		 * Figure out whether there's a hard limit on the number of rows that
 		 * query_planner's result subplan needs to return.  Even if we know a
 		 * hard limit overall, it doesn't apply if the query has any
@@ -1960,6 +1966,13 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		 * of the query's sort clause, distinct clause, etc.
 		 */
 		current_rel = query_planner(root, standard_qp_callback, &qp_extra);
+
+		/*
+		 * If we generated any OR-expansion candidates, add the resulting
+		 * Append path(s) to the topmost scan/join relation.
+		 */
+		if (or_cands != NIL)
+			add_or_expansion_paths(root, current_rel, or_cands);
 
 		/*
 		 * Convert the query's result tlist into PathTarget format.
