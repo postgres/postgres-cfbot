@@ -20,6 +20,8 @@
 #include "storage/bufmgr.h"
 #include "storage/read_stream.h"
 
+#define BLOOM_TBM_BATCH_SIZE 256
+
 /*
  * Begin scan of bloom index.
  */
@@ -153,6 +155,8 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 		{
 			OffsetNumber offset,
 						maxOffset = BloomPageGetMaxOffset(page);
+			ItemPointerData tids[BLOOM_TBM_BATCH_SIZE];
+			int			ntids_batch = 0;
 
 			for (offset = 1; offset <= maxOffset; offset++)
 			{
@@ -172,10 +176,18 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 				/* Add matching tuples to bitmap */
 				if (res)
 				{
-					tbm_add_tuples(tbm, &itup->heapPtr, 1, true);
+					if (ntids_batch == BLOOM_TBM_BATCH_SIZE)
+					{
+						tbm_add_tuples(tbm, tids, ntids_batch, true);
+						ntids_batch = 0;
+					}
+
+					tids[ntids_batch++] = itup->heapPtr;
 					ntids++;
 				}
 			}
+
+			tbm_add_tuples(tbm, tids, ntids_batch, true);
 		}
 
 		UnlockReleaseBuffer(buffer);
