@@ -891,7 +891,10 @@ typedef OpExpr NullIfExpr;
  * the result type (or the collation) because it must be boolean.
  *
  * A ScalarArrayOpExpr with a valid hashfuncid is evaluated during execution
- * by building a hash table containing the Const values from the RHS arg.
+ * by building a hash table containing the values from the RHS arg, which is
+ * either a Const or an expression the planner has proven to be fixed for one
+ * execution (see convert_saop_to_hashed_saop()).  The executor evaluates such
+ * an expression once, when it builds the hash table.
  * This table is probed during expression evaluation.  The planner will set
  * hashfuncid to the hash function which must be used to build and probe the
  * hash table.  The executor determines if it should use hash-based checks or

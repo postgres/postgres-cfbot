@@ -1460,9 +1460,9 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	}
 
 	/*
-	 * Check for ANY ScalarArrayOpExpr with Const arrays and set the
-	 * hashfuncid of any that might execute more quickly by using hash lookups
-	 * instead of a linear search.
+	 * Check for ANY ScalarArrayOpExpr whose array is fixed for one execution
+	 * and set the hashfuncid of any that might execute more quickly by using
+	 * hash lookups instead of a linear search.
 	 */
 	if (kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET)
 	{

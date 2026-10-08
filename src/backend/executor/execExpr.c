@@ -1272,6 +1272,25 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				FunctionCallInfo fcinfo;
 				AclResult	aclresult;
 				Oid			cmpfuncid;
+				bool		use_hash;
+
+				Assert(list_length(opexpr->args) == 2);
+				scalararg = (Expr *) linitial(opexpr->args);
+				arrayarg = (Expr *) lsecond(opexpr->args);
+
+				/*
+				 * Use a hash table if the planner set hashfuncid.  But a
+				 * non-Const array is only known to be fixed within one
+				 * execution of a plan, so a standalone expression (such as a
+				 * PL/pgSQL "simple expression", which is reused with
+				 * different parameter values) searches it linearly instead.
+				 * So does an expression whose errors are to be reported
+				 * softly (a JSON DEFAULT ... ON ERROR expression, say), since
+				 * the separately compiled array below would raise them.
+				 */
+				use_hash = OidIsValid(opexpr->hashfuncid) &&
+					(IsA(arrayarg, Const) ||
+					 (state->parent != NULL && state->escontext == NULL));
 
 				/*
 				 * Select the correct comparison function.  When we do hashed
@@ -1279,17 +1298,13 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				 * comparison function and negfuncid will be set to equality.
 				 * We need to use the equality function for hash probes.
 				 */
-				if (OidIsValid(opexpr->negfuncid))
+				if (use_hash && OidIsValid(opexpr->negfuncid))
 				{
 					Assert(OidIsValid(opexpr->hashfuncid));
 					cmpfuncid = opexpr->negfuncid;
 				}
 				else
 					cmpfuncid = opexpr->opfuncid;
-
-				Assert(list_length(opexpr->args) == 2);
-				scalararg = (Expr *) linitial(opexpr->args);
-				arrayarg = (Expr *) lsecond(opexpr->args);
 
 				/* Check permission to call function */
 				aclresult = object_aclcheck(ProcedureRelationId, cmpfuncid,
@@ -1300,7 +1315,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 								   get_func_name(cmpfuncid));
 				InvokeFunctionExecuteHook(cmpfuncid);
 
-				if (OidIsValid(opexpr->hashfuncid))
+				if (use_hash)
 				{
 					aclresult = object_aclcheck(ProcedureRelationId, opexpr->hashfuncid,
 												GetUserId(),
@@ -1326,20 +1341,36 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				 * when the number of items in the array is anything but very
 				 * small.
 				 */
-				if (OidIsValid(opexpr->hashfuncid))
+				if (use_hash)
 				{
 					/* Evaluate scalar directly into left function argument */
 					ExecInitExprRec(scalararg, state,
 									&fcinfo->args[0].value, &fcinfo->args[0].isnull);
 
-					/*
-					 * Evaluate array argument into our return value.  There's
-					 * no danger in that, because the return value is
-					 * guaranteed to be overwritten by
-					 * EEOP_HASHED_SCALARARRAYOP, and will not be passed to
-					 * any other expression.
-					 */
-					ExecInitExprRec(arrayarg, state, resv, resnull);
+					if (IsA(arrayarg, Const))
+					{
+						/*
+						 * Evaluate array argument into our return value.
+						 * There's no danger in that, because the return value
+						 * is guaranteed to be overwritten by
+						 * EEOP_HASHED_SCALARARRAYOP, and will not be passed
+						 * to any other expression.
+						 */
+						ExecInitExprRec(arrayarg, state, resv, resnull);
+						scratch.d.hashedscalararrayop.array_expr = NULL;
+					}
+					else
+					{
+						/*
+						 * The planner has proven that any other array is
+						 * fixed for one execution (see
+						 * convert_saop_to_hashed_saop()).  Compile it as a
+						 * separate expression, which
+						 * EEOP_HASHED_SCALARARRAYOP evaluates only once.
+						 */
+						scratch.d.hashedscalararrayop.array_expr =
+							ExecInitExpr(arrayarg, state->parent);
+					}
 
 					/* And perform the operation */
 					scratch.opcode = EEOP_HASHED_SCALARARRAYOP;

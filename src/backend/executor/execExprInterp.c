@@ -226,11 +226,21 @@ static void saop_build_hashtable(ExprEvalStep *op, ExprContext *econtext,
 /*
  * ScalarArrayOpExprHashTable
  *		Hash table for EEOP_HASHED_SCALARARRAYOP
+ *
+ * An array that is not a Const is evaluated once and kept in cached_array.
+ * An array too short to be worth hashing leaves hashtab NULL and is searched
+ * linearly.
  */
 typedef struct ScalarArrayOpExprHashTable
 {
-	saophash_hash *hashtab;		/* underlying hash table */
+	saophash_hash *hashtab;		/* underlying hash table, or NULL */
 	struct ExprEvalStep *op;
+	Datum		cached_array;	/* the array the state was built from */
+	bool		cache_isnull;	/* the array is NULL */
+	int			nitems;			/* number of elements in the array */
+	int16		typlen;			/* element type, for a linear search */
+	bool		typbyval;
+	char		typalign;
 	FmgrInfo	hash_finfo;		/* function's lookup data */
 	FunctionCallInfoBaseData hash_fcinfo_data;	/* arguments etc */
 } ScalarArrayOpExprHashTable;
@@ -4360,15 +4370,41 @@ saop_build_hashtable(ExprEvalStep *op, ExprContext *econtext, ArrayType *arr,
 }
 
 /*
- * Evaluate "scalar op ANY (const array)".
+ * Get the array for ExecEvalHashedScalarArrayOp(), setting *arr_value and
+ * *arr_isnull.  A Const array is already in the step's result area; any other
+ * array is evaluated here.
+ */
+static void
+saop_hash_eval_array(ExprEvalStep *op, ExprContext *econtext,
+					 Datum *arr_value, bool *arr_isnull)
+{
+	ExprState  *array_expr = op->d.hashedscalararrayop.array_expr;
+
+	if (array_expr == NULL)
+	{
+		*arr_value = *op->resvalue;
+		*arr_isnull = *op->resnull;
+		return;
+	}
+
+	/* Open-coded rather than ExecEvalExpr() to avoid including executor.h. */
+	*arr_value = array_expr->evalfunc(array_expr, econtext, arr_isnull);
+}
+
+/*
+ * Evaluate "scalar op ANY (array)", where the array is fixed for the whole
+ * execution.
  *
  * Similar to ExecEvalScalarArrayOp, but optimized for faster repeat lookups
  * by building a hashtable on the first lookup.  This hashtable will be reused
  * by subsequent lookups.  Unlike ExecEvalScalarArrayOp, this version only
  * supports OR semantics.
  *
- * Source array is in our result area, scalar arg is already evaluated into
- * fcinfo->args[0].
+ * A Const array is in our result area; any other array is evaluated once,
+ * using op->d.hashedscalararrayop.array_expr.  If the planner could not check
+ * the array's length and it turns out shorter than
+ * MIN_ARRAY_SIZE_FOR_HASHED_SAOP, the array is searched linearly instead.
+ * The scalar arg is already evaluated into fcinfo->args[0].
  *
  * The operator always yields boolean.
  */
@@ -4386,7 +4422,76 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 	bool		hashfound;
 
 	/* We don't setup a hashed scalar array op if the array const is null. */
-	Assert(!*op->resnull);
+	Assert(op->d.hashedscalararrayop.array_expr != NULL || !*op->resnull);
+
+	/* Build the hash table on first evaluation */
+	if (elements_tab == NULL)
+	{
+		int			nitems = 0;
+		MemoryContext oldcontext;
+		ArrayType  *arr = NULL;
+		Datum		arr_value;
+		bool		arr_isnull;
+
+		saop_hash_eval_array(op, econtext, &arr_value, &arr_isnull);
+
+		oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_query_memory);
+
+		elements_tab = (ScalarArrayOpExprHashTable *)
+			palloc0(offsetof(ScalarArrayOpExprHashTable, hash_fcinfo_data) +
+					SizeForFunctionCallInfo(1));
+		op->d.hashedscalararrayop.elements_tab = elements_tab;
+		elements_tab->op = op;
+		elements_tab->cache_isnull = arr_isnull;
+
+		if (!arr_isnull)
+		{
+			/*
+			 * An evaluated array may be short-lived or toasted, so keep a
+			 * flat copy of it for the whole execution.  A Const already lasts
+			 * that long.
+			 */
+			if (op->d.hashedscalararrayop.array_expr != NULL)
+				arr = DatumGetArrayTypePCopy(arr_value);
+			else
+				arr = DatumGetArrayTypeP(arr_value);
+			elements_tab->cached_array = PointerGetDatum(arr);
+			nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+			elements_tab->nitems = nitems;
+
+			get_typlenbyvalalign(ARR_ELEMTYPE(arr),
+								 &elements_tab->typlen,
+								 &elements_tab->typbyval,
+								 &elements_tab->typalign);
+		}
+
+		MemoryContextSwitchTo(oldcontext);
+
+		/* A shorter array is searched linearly instead, see below */
+		if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
+			saop_build_hashtable(op, econtext, arr, nitems,
+								 elements_tab->typlen,
+								 elements_tab->typbyval,
+								 elements_tab->typalign);
+	}
+
+	/*
+	 * As in ExecEvalScalarArrayOp(), a NULL array yields NULL even if the
+	 * function isn't strict, and an empty array yields false (true for NOT
+	 * IN) even if the scalar is NULL.  Only a non-Const array can be NULL or
+	 * empty here.
+	 */
+	if (elements_tab->cache_isnull)
+	{
+		*op->resnull = true;
+		return;
+	}
+	if (elements_tab->nitems == 0)
+	{
+		*op->resvalue = BoolGetDatum(!inclause);
+		*op->resnull = false;
+		return;
+	}
 
 	/*
 	 * If the scalar is NULL, and the function is strict, return NULL; no
@@ -4398,36 +4503,26 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 		return;
 	}
 
-	/* Build the hash table on first evaluation */
-	if (elements_tab == NULL)
+	/*
+	 * An array too short to be worth hashing is searched linearly, the same
+	 * way ExecEvalScalarArrayOp() does it.
+	 */
+	if (elements_tab->hashtab == NULL)
 	{
-		int16		typlen;
-		bool		typbyval;
-		char		typalign;
-		int			nitems;
-		MemoryContext oldcontext;
-		ArrayType  *arr;
+		ExecEvalArrayCompareInternal(fcinfo,
+									 DatumGetArrayTypeP(elements_tab->cached_array),
+									 elements_tab->typlen,
+									 elements_tab->typbyval,
+									 elements_tab->typalign,
+									 true, &result, &resultnull);
 
-		arr = DatumGetArrayTypeP(*op->resvalue);
-		nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+		/* invert non-NULL results for NOT IN */
+		if (!resultnull && !inclause)
+			result = BoolGetDatum(!DatumGetBool(result));
 
-		get_typlenbyvalalign(ARR_ELEMTYPE(arr),
-							 &typlen,
-							 &typbyval,
-							 &typalign);
-
-		oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_query_memory);
-
-		elements_tab = (ScalarArrayOpExprHashTable *)
-			palloc0(offsetof(ScalarArrayOpExprHashTable, hash_fcinfo_data) +
-					SizeForFunctionCallInfo(1));
-		op->d.hashedscalararrayop.elements_tab = elements_tab;
-		elements_tab->op = op;
-
-		MemoryContextSwitchTo(oldcontext);
-
-		saop_build_hashtable(op, econtext, arr, nitems,
-							 typlen, typbyval, typalign);
+		*op->resvalue = result;
+		*op->resnull = resultnull;
+		return;
 	}
 
 	/*

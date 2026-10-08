@@ -134,6 +134,175 @@ select return_text_input('a') not in ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i
 
 rollback;
 
+--
+-- Hashed ScalarArrayOpExpr when the array argument is not a Const but is fixed
+-- for the whole execution: external params, IN ($1,...,$N), stable functions.
+-- Check the hashed path returns what the linear path does, and that the planner
+-- does not hash an array that can vary per row or per group.
+--
+begin;
+
+create table saop_stab (i int);
+insert into saop_stab select g from generate_series(1, 20) g;
+
+-- a stable plpgsql function is never inlined, so the array stays non-Const
+create function saop_intarr(int[]) returns int[] as
+  $$ begin return $1; end $$ language plpgsql stable;
+
+-- just below / at / above the hashing threshold of 9
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8,9}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8,9,10,11,12}'));
+
+-- NULL array yields NULL; empty array and no-match array yield no rows
+select count(*) from saop_stab where i = any (saop_intarr(null));
+select count(*) from saop_stab where i = any (saop_intarr('{}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{5,5,5,5,5,5,5,5,5,5}'));
+-- an empty array gives false for IN and true for NOT IN, even for a NULL
+select x, x = any (saop_intarr('{}')) as "in",
+       x <> all (saop_intarr('{}')) as not_in
+from (values (1), (null)) v(x);
+
+-- NOT IN / <> ALL, with and without a NULL element (three-valued logic)
+select count(*) from saop_stab where i <> all (saop_intarr('{1,2,3,4,5,6,7,8,9,10}'));
+select count(*) from saop_stab where i <> all (saop_intarr('{1,2,3,4,5,6,7,8,9,null}'));
+
+-- bare external Param array, generic plan (stays a Param); re-EXECUTE with a
+-- different array, then NULL and empty
+set plan_cache_mode = force_generic_plan;
+prepare saop_p(int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1);
+execute saop_p('{1,2,3,4,5,6,7,8,9,10}');
+execute saop_p('{11,12,13}');
+execute saop_p(null);
+execute saop_p('{}');
+deallocate saop_p;
+
+-- IN ($1, ..., $N) is an ArrayExpr of Params
+prepare saop_in(int,int,int,int,int,int,int,int,int,int) as
+  select array_agg(i order by i) from saop_stab
+  where i in ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10);
+execute saop_in(1,2,3,4,5,6,7,8,9,10);
+deallocate saop_in;
+
+-- $1::int[] cast, and string_to_array($1, ',')
+prepare saop_cast(text) as
+  select array_agg(i order by i) from saop_stab where i = any ($1::int[]);
+execute saop_cast('{2,4,6,8,10,12,14,16,18,20}');
+deallocate saop_cast;
+prepare saop_sta(text) as
+  select array_agg(i order by i) from saop_stab
+  where i::text = any (string_to_array($1, ','));
+execute saop_sta('1,2,3,4,5,6,7,8,9,10,11,12');
+deallocate saop_sta;
+-- errors in a JSON DEFAULT ... ON ERROR expression are handled softly, so an
+-- array there is searched linearly and its error reported like any other
+prepare saop_json(text) as
+  select json_value(jsonb '"x"', '$' returning int
+                    default textcat((5 = any ($1::int[]))::text, '1')::int on error);
+savepoint saop_json_error;
+execute saop_json('not an array');
+rollback to savepoint saop_json_error;
+deallocate saop_json;
+
+-- same query under a custom plan: $1 folds to a Const and the pre-existing
+-- Const path handles it -- must match the generic-plan result above
+set plan_cache_mode = force_custom_plan;
+prepare saop_c(int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1);
+execute saop_c('{1,2,3,4,5,6,7,8,9,10}');
+deallocate saop_c;
+
+-- rescan: a stable Param array on the inner side of a nestloop
+set plan_cache_mode = force_generic_plan;
+prepare saop_rs(int[]) as
+  select d.x, count(*) from (values (1),(2),(3)) d(x)
+    join saop_stab on saop_stab.i = any ($1)
+  group by d.x order by d.x;
+execute saop_rs('{1,2,3,4,5,6,7,8,9,10}');
+deallocate saop_rs;
+reset plan_cache_mode;
+
+-- two hashable ScalarArrayOpExprs in one qual: both must be applied (cf.
+-- b136db07c6) and both correct
+prepare saop_two(int[], int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1) or i = any ($2);
+execute saop_two('{1,2,3,4,5,6,7,8,9,10}', '{15,16,17,18,19,20,1,2,3,4}');
+deallocate saop_two;
+
+-- the planner must NOT hash an array that varies per row: a Var in the array
+-- keeps a plain (linear) ScalarArrayOpExpr
+explain (costs off)
+select i from saop_stab
+where i = any (array[i,i+1,i+2,i+3,i+4,i+5,i+6,i+7,i+8]);
+
+-- ... nor an array_agg() in a HAVING clause (a value per group, not per
+-- execution): must not be hashed and must not error with "Aggref found in
+-- non-Agg plan node"
+select i % 3 as g, count(*) from saop_stab
+group by i % 3
+having (i % 3) = any (array_agg(1))
+order by g;
+
+-- ... nor an array built from an outer-query reference in a correlated
+-- sub-select: it varies per rescan, so it must stay linear and give the same
+-- answer as the below-threshold (never-hashed) form.  convert_saop_to_hashed_saop
+-- runs before uplevel Vars become Params, so the check must reject Vars of any
+-- level.
+select d.k,
+       (select count(*) from saop_stab
+        where i = any (array[d.k,d.k+1,d.k+2,d.k+3,d.k+4,d.k+5,d.k+6,d.k+7,d.k+8])) as ge9,
+       (select count(*) from saop_stab
+        where i = any (array[d.k,d.k+1,d.k+2,d.k+3,d.k+4,d.k+5,d.k+6,d.k+7])) as lt9
+from (values (1),(8),(15)) d(k)
+order by d.k;
+
+-- A PL/pgSQL "simple expression" is compiled once and reused with different
+-- parameter values, so its array is searched linearly; NOT IN must then still
+-- compare with the inequality operator, not the equality one used for hashing
+create function saop_ne_all(x int, a int[]) returns bool language plpgsql
+  as $$ begin return x <> all (a); end $$;
+create function saop_not_in(x int, a1 int, a2 int, a3 int, a4 int, a5 int,
+                            a6 int, a7 int, a8 int, a9 int, a10 int)
+  returns bool language plpgsql
+  as $$ begin return x not in (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10); end $$;
+select saop_ne_all(11, '{1,2,3,4,5,6,7,8,9,10}'),
+       saop_ne_all(5, '{1,2,3,4,5,6,7,8,9,10}'),
+       saop_ne_all(5, '{11,12,13,14,15,16,17,18,19,20}');
+select saop_not_in(11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+       saop_not_in(5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+
+-- ... and an array containing merge_action() changes from row to row, so it
+-- must not be hashed
+create table saop_merge (id int);
+insert into saop_merge values (1);
+with m as (
+  merge into saop_merge t using (values (1), (2)) s(id) on t.id = s.id
+    when matched then update set id = s.id
+    when not matched then insert values (s.id)
+    returning merge_action() as action,
+              'INSERT' = any (array[merge_action(), 'a', 'b', 'c', 'd', 'e',
+                                    'f', 'g', 'h', 'i']) as is_insert)
+select action, is_insert from m order by action;
+
+-- ... nor one containing a set-returning function, which gives a new array for
+-- each row
+select 'b' = any (regexp_matches('abcdefghijklmnopqrstuvwxyz',
+                                 '(.)(.)(.)(.)(.)(.)(.)(.)(.)', 'g')) as has_b;
+
+-- ... nor OLD/NEW of a view column that is an expression, which is NULL when
+-- that row doesn't exist
+create view saop_merge_v as
+  select id, saop_intarr('{1,2,3,4,5,6,7,8,9,10}') as arr from saop_merge;
+with m as (
+  merge into saop_merge_v t using (values (1), (3)) s(id) on t.id = s.id
+    when matched then update set id = s.id
+    when not matched then insert values (s.id)
+    returning merge_action() as action, 5 = any (old.arr) as old_has_5)
+select action, old_has_5 from m order by action;
+
+rollback;
+
 -- Test with non-strict equality function.
 -- We need to create our own type for this.
 

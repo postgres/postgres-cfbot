@@ -132,6 +132,7 @@ static Relids find_nonnullable_rels_walker(Node *node, bool top_level);
 static List *find_nonnullable_vars_walker(Node *node, bool top_level);
 static bool is_strict_saop(ScalarArrayOpExpr *expr, bool falseOK);
 static bool convert_saop_to_hashed_saop_walker(Node *node, void *context);
+static bool saop_array_may_vary_walker(Node *node, void *context);
 static bool grouping_conflict_walker(Node *node, grouping_walker_ctx *ctx);
 static bool grouping_check_operands(Oid opno, Oid inputcollid,
 									List *args, grouping_walker_ctx *ctx);
@@ -2658,13 +2659,19 @@ eval_const_expressions(PlannerInfo *root, Node *node)
  * evaluate using a hash table rather than a linear search.
  *
  * We'll use a hash table if all of the following conditions are met:
- * 1. The 2nd argument of the array contain only Consts.
+ * 1. The 2nd argument is a non-null Const array, or a non-Const expression
+ *	  whose value is fixed for the duration of one execution: one built only
+ *	  from Consts, external Params and simple expressions over them, with no
+ *	  volatile or set-returning functions (see saop_array_may_vary_walker()).
+ *	  In the latter case the executor evaluates it once and builds the hash
+ *	  table from the run-time value.
  * 2. useOr is true or there is a valid negator operator for the
  *	  ScalarArrayOpExpr's opno.
  * 3. There's valid hash function for both left and righthand operands and
  *	  these hash functions are the same.
- * 4. If the array contains enough elements for us to consider it to be
- *	  worthwhile using a hash table rather than a linear search.
+ * 4. If the array is a Const, it contains enough elements to be worth hashing
+ *	  rather than doing a linear search.  For a non-Const array the count is
+ *	  not known here, so the executor applies that cutoff at run time.
  */
 void
 convert_saop_to_hashed_saop(Node *node)
@@ -2685,9 +2692,41 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 		Node	   *arrayarg = (Node *) lsecond(saop->args);
 		Oid			lefthashfunc;
 		Oid			righthashfunc;
+		bool		try_hashing = false;
 
-		if (arrayarg && IsA(arrayarg, Const) &&
-			!((Const *) arrayarg)->constisnull)
+		/*
+		 * Hash the array when it is fixed for the whole execution and has at
+		 * least MIN_ARRAY_SIZE_FOR_HASHED_SAOP elements: a non-null Const, or
+		 * a non-Const expression that saop_array_may_vary_walker() accepts
+		 * and that has no volatile function.  The size cutoff is applied here
+		 * when the count is known now (a Const, or a 1-D ArrayExpr);
+		 * otherwise the executor applies it at run time.
+		 */
+		if (arrayarg && IsA(arrayarg, Const))
+		{
+			Const	   *arrconst = (Const *) arrayarg;
+
+			if (!arrconst->constisnull)
+			{
+				ArrayType  *arr = (ArrayType *) DatumGetPointer(arrconst->constvalue);
+
+				try_hashing = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr)) >=
+					MIN_ARRAY_SIZE_FOR_HASHED_SAOP;
+			}
+		}
+		else if (arrayarg &&
+				 !saop_array_may_vary_walker(arrayarg, NULL) &&
+				 !contain_volatile_functions(arrayarg))
+		{
+			if (IsA(arrayarg, ArrayExpr) &&
+				!((ArrayExpr *) arrayarg)->multidims)
+				try_hashing = list_length(((ArrayExpr *) arrayarg)->elements) >=
+					MIN_ARRAY_SIZE_FOR_HASHED_SAOP;
+			else
+				try_hashing = true;
+		}
+
+		if (try_hashing)
 		{
 			if (saop->useOr)
 			{
@@ -2695,23 +2734,8 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 											  &lefthashfunc, &righthashfunc) &&
 					lefthashfunc == righthashfunc)
 				{
-					Datum		arrdatum = ((Const *) arrayarg)->constvalue;
-					ArrayType  *arr = (ArrayType *) DatumGetPointer(arrdatum);
-					int			nitems;
-
-					/*
-					 * Only fill in the hash functions if the array looks
-					 * large enough for it to be worth hashing instead of
-					 * doing a linear search.
-					 */
-					nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-
-					if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
-					{
-						/* Looks good. Fill in the hash functions */
-						saop->hashfuncid = lefthashfunc;
-					}
-					return false;
+					/* Looks good. Fill in the hash functions */
+					saop->hashfuncid = lefthashfunc;
 				}
 			}
 			else				/* !saop->useOr */
@@ -2728,29 +2752,14 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 											  &lefthashfunc, &righthashfunc) &&
 					lefthashfunc == righthashfunc)
 				{
-					Datum		arrdatum = ((Const *) arrayarg)->constvalue;
-					ArrayType  *arr = (ArrayType *) DatumGetPointer(arrdatum);
-					int			nitems;
+					/* Looks good. Fill in the hash functions */
+					saop->hashfuncid = lefthashfunc;
 
 					/*
-					 * Only fill in the hash functions if the array looks
-					 * large enough for it to be worth hashing instead of
-					 * doing a linear search.
+					 * Also set the negfuncid.  The executor will need that to
+					 * perform hashtable lookups.
 					 */
-					nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-
-					if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
-					{
-						/* Looks good. Fill in the hash functions */
-						saop->hashfuncid = lefthashfunc;
-
-						/*
-						 * Also set the negfuncid.  The executor will need
-						 * that to perform hashtable lookups.
-						 */
-						saop->negfuncid = get_opcode(negator);
-					}
-					return false;
+					saop->negfuncid = get_opcode(negator);
 				}
 			}
 		}
@@ -2759,6 +2768,90 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 	return expression_tree_walker(node, convert_saop_to_hashed_saop_walker, NULL);
 }
 
+/*
+ * saop_array_may_vary_walker
+ *		True unless 'node', the array argument of a ScalarArrayOpExpr, is
+ *		certain to have the same value for every row of one execution, so that
+ *		it can be evaluated once and reused.
+ *
+ * We accept only Consts, external Params (whose values are fixed for the
+ * execution), and the node types listed below, which compute their result
+ * from their inputs alone.  Anything else may vary from row to row: a Var or
+ * PlaceHolderVar of any level (this runs before SS_replace_correlation_vars,
+ * so an outer reference is still a Var), an aggregate, grouping or window
+ * function, merge_action(), OLD/NEW in RETURNING (a ReturningExpr), a
+ * sub-select, a non-external Param, a set-returning function, or a
+ * CaseTestExpr or CoerceToDomainValue, which stands for a value supplied by
+ * an enclosing node.  Volatile functions are checked by the caller.
+ */
+static bool
+saop_array_may_vary_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_Const:
+			return false;
+
+		case T_Param:
+			return ((Param *) node)->paramkind != PARAM_EXTERN;
+
+		case T_FuncExpr:
+			if (((FuncExpr *) node)->funcretset)
+				return true;
+			break;
+
+		case T_OpExpr:
+		case T_DistinctExpr:
+		case T_NullIfExpr:
+			if (((OpExpr *) node)->opretset)
+				return true;
+			break;
+
+		case T_ArrayCoerceExpr:
+
+			/*
+			 * The per-element expression reads each element through its own
+			 * CaseTestExpr, so only the input array matters.
+			 */
+			return saop_array_may_vary_walker((Node *) ((ArrayCoerceExpr *) node)->arg,
+											  context);
+
+		case T_List:
+		case T_ScalarArrayOpExpr:
+		case T_BoolExpr:
+		case T_RelabelType:
+		case T_CoerceViaIO:
+		case T_ConvertRowtypeExpr:
+		case T_CoerceToDomain:
+		case T_ArrayExpr:
+		case T_RowExpr:
+		case T_RowCompareExpr:
+		case T_CoalesceExpr:
+		case T_MinMaxExpr:
+		case T_NullTest:
+		case T_BooleanTest:
+		case T_FieldSelect:
+		case T_SubscriptingRef:
+		case T_CaseExpr:
+		case T_SQLValueFunction:
+
+			/* These are fixed if their inputs are, which we check below. */
+			break;
+
+		default:
+
+			/*
+			 * Assume any other node type may vary, so that we stay safe if
+			 * someone adds a new one that does.
+			 */
+			return true;
+	}
+
+	return expression_tree_walker(node, saop_array_may_vary_walker, context);
+}
 
 /*--------------------
  * estimate_expression_value
