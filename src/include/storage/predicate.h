@@ -63,6 +63,10 @@ extern bool CheckForSerializableConflictOutNeeded(Relation relation, Snapshot sn
 extern void CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot snapshot);
 extern void CheckForSerializableConflictIn(Relation relation, const ItemPointerData *tid, BlockNumber blkno);
 extern void CheckTableForSerializableConflictIn(Relation relation);
+extern void CheckForSerializableKeyReuse(Relation relation,
+										 const ItemPointerData *tid);
+extern void ReportSerializableKeyReuse(void);
+extern uint64 GetSerializableConflictOutCount(void);
 
 /* final rollback checking */
 extern void PreCommit_CheckForSerializationFailure(void);
