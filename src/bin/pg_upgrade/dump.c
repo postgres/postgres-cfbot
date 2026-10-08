@@ -40,6 +40,7 @@ generate_old_dump(void)
 		DbInfo	   *old_db = &old_cluster.dbarr.dbs[dbnum];
 		PQExpBufferData connstr,
 					escaped_connstr;
+		PQExpBufferData extra_dependencies;
 
 		initPQExpBuffer(&connstr);
 		appendPQExpBufferStr(&connstr, "dbname=");
@@ -50,6 +51,10 @@ generate_old_dump(void)
 		initPQExpBuffer(&escaped_connstr);
 		appendShellString(&escaped_connstr, connstr.data);
 		termPQExpBuffer(&connstr);
+		initPQExpBuffer(&extra_dependencies);
+		if (user_opts.extra_dependencies)
+			appendPQExpBuffer(&extra_dependencies, "--extra-dependencies='%s'",
+							  user_opts.extra_dependencies);
 
 		pg_log(PG_STATUS, "%s", old_db->db_name);
 		snprintf(sql_file_name, sizeof(sql_file_name), DB_DUMP_FILE_MASK, old_db->db_oid);
@@ -57,16 +62,18 @@ generate_old_dump(void)
 
 		parallel_exec_prog(log_file_name, NULL,
 						   "\"%s/pg_dump\" %s --no-data %s %s --quote-all-identifiers "
-						   "--binary-upgrade --format=custom %s --no-sync --file=\"%s/%s\" %s",
+						   "--binary-upgrade --format=custom %s %s --no-sync --file=\"%s/%s\" %s",
 						   new_cluster.bindir, cluster_conn_opts(&old_cluster),
 						   (user_opts.transfer_mode == TRANSFER_MODE_SWAP) ?
 						   "" : "--sequence-data",
 						   log_opts.verbose ? "--verbose" : "",
 						   user_opts.do_statistics ? "--statistics" : "--no-statistics",
+						   extra_dependencies.data,
 						   log_opts.dumpdir,
 						   sql_file_name, escaped_connstr.data);
 
 		termPQExpBuffer(&escaped_connstr);
+		termPQExpBuffer(&extra_dependencies);
 	}
 
 	/* reap all children */
