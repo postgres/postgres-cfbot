@@ -76,6 +76,20 @@ getQuadrant(Point *centroid, Point *tst)
 		SPTEST(point_left, tst, centroid))
 		return 4;
 
+	/*
+	 * The fuzzy tests above can all fail on one axis, because FPeq() rounds
+	 * a difference while FPlt() and FPgt() round a sum.  Exact comparisons
+	 * always pick a quadrant; use them with the same axis tie-breaking.
+	 */
+	if (tst->y >= centroid->y && tst->x >= centroid->x)
+		return 1;
+	if (tst->y < centroid->y && tst->x >= centroid->x)
+		return 2;
+	if (tst->y <= centroid->y && tst->x < centroid->x)
+		return 3;
+	if (tst->y > centroid->y && tst->x < centroid->x)
+		return 4;
+
 	elog(ERROR, "getQuadrant: impossible case");
 	return 0;
 }
