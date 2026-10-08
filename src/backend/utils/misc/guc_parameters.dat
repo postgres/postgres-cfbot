@@ -811,6 +811,12 @@
   check_hook => 'check_default_with_oids',
 },
 
+{ name => 'direct_toast_self_prune', type => 'bool', context => 'PGC_USERSET', group => 'CLIENT_CONN_STATEMENT',
+  short_desc => 'Enables on-access page pruning and FSM updates for Direct TOAST tables.',
+  variable => 'direct_toast_self_prune',
+  boot_val => 'true',
+},
+
 { name => 'dynamic_library_path', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
   short_desc => 'Sets the path for dynamically loadable modules.',
   long_desc => 'If a dynamically loadable module needs to be opened and the specified name does not have a directory component (i.e., the name does not contain a slash), the system will search this path for the specified file.',
@@ -3111,6 +3117,13 @@
   check_hook => 'check_timing_clock_source',
   assign_hook => 'assign_timing_clock_source',
   show_hook => 'show_timing_clock_source',
+},
+
+{ name => 'toast_default_flavour', type => 'enum', context => 'PGC_USERSET', group => 'CLIENT_CONN_STATEMENT',
+  short_desc => 'Sets the default TOAST table format to use when creating new TOAST tables.',
+  variable => 'toast_default_flavour',
+  boot_val => 'TOAST_FLAVOUR_PLAIN',
+  options => 'toast_flavour_options',
 },
 
 { name => 'trace_connection_negotiation', type => 'bool', context => 'PGC_POSTMASTER', group => 'DEVELOPER_OPTIONS',

@@ -17457,11 +17457,29 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 
 	ReleaseSysCache(tuple);
 
+	/*
+	 * If toast_flavour is being set to 'direct' and the TOAST table is in the
+	 * legacy 3-column format, upgrade it in-place to the 5-column format.
+	 */
+	if (OidIsValid(rel->rd_rel->reltoastrelid) && newOptions != (Datum) 0 &&
+		(rel->rd_rel->relkind == RELKIND_RELATION || rel->rd_rel->relkind == RELKIND_MATVIEW) &&
+		!OidIsValid(get_atttype(rel->rd_rel->reltoastrelid, 5)))
+	{
+		StdRdOptions *opts = (StdRdOptions *) heap_reloptions(rel->rd_rel->relkind, newOptions, false);
+
+		if (opts && opts->toast_flavour == TOAST_FLAVOUR_DIRECT)
+			ensure_direct_toast(rel->rd_rel->reltoastrelid);
+
+		if (opts)
+			pfree(opts);
+	}
+
 	/* repeat the whole exercise for the toast table, if there's one */
 	if (OidIsValid(rel->rd_rel->reltoastrelid))
 	{
 		Relation	toastrel;
 		Oid			toastid = rel->rd_rel->reltoastrelid;
+		ListCell   *lc;
 
 		toastrel = table_open(toastid, lockmode);
 
@@ -17491,6 +17509,22 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 
 		newOptions = transformRelOptions(datum, defList, "toast", validnsps,
 										 false, operation == AT_ResetRelOptions);
+
+		foreach(lc, defList)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (def->defnamespace == NULL &&
+				strcmp(def->defname, "direct_toast_self_prune") == 0)
+			{
+				DefElem    *tdef = copyObject(def);
+
+				tdef->defnamespace = pstrdup("toast");
+				newOptions = transformRelOptions(newOptions, list_make1(tdef),
+												 "toast", validnsps, false,
+												 operation == AT_ResetRelOptions);
+			}
+		}
 
 		(void) heap_reloptions(RELKIND_TOASTVALUE, newOptions, true);
 

@@ -18,6 +18,7 @@
 #include "access/heapam_xlog.h"
 #include "access/htup_details.h"
 #include "access/multixact.h"
+#include "access/toast_internals.h"
 #include "access/transam.h"
 #include "access/visibilitymap.h"
 #include "access/xlog.h"
@@ -319,6 +320,11 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 	minfree = RelationGetTargetPageFreeSpace(relation,
 											 HEAP_DEFAULT_FILLFACTOR);
 	minfree = Max(minfree, BLCKSZ / 10);
+	if (!rel_read_only &&
+		relation->rd_rel->relkind == RELKIND_TOASTVALUE &&
+		RelationGetNumberOfAttributes(relation) >= 5 &&
+		RelationGetDirectToastSelfPrune(relation))
+		minfree = BLCKSZ;
 
 	if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 	{
@@ -336,6 +342,17 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 		/* OK, try to get exclusive buffer lock */
 		if (!ConditionalLockBufferForCleanup(buffer))
 			return;
+
+		/*
+		 * For TOAST relations with direct_toast_self_prune enabled, only
+		 * force full-page pruning above the normal minfree threshold when the
+		 * page actually contains a deleted Direct TOAST tuple (chunk_id IS
+		 * NULL).
+		 */
+		if (minfree == BLCKSZ && !toast_page_has_deleted_direct_tuple(page))
+			minfree = Max(RelationGetTargetPageFreeSpace(relation,
+														 HEAP_DEFAULT_FILLFACTOR),
+						  BLCKSZ / 10);
 
 		/*
 		 * Now that we have buffer lock, get accurate information about the
@@ -391,9 +408,15 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 			 * skip the page and not update the free space map (FSM) for it.
 			 * Keep the FSM from going stale by recording it now. We do not
 			 * want to update the freespace map otherwise, to reserve
-			 * freespace on this page for HOT updates.
+			 * freespace on this page for HOT updates (except on TOAST tables
+			 * with direct_toast_self_prune enabled, where HOT updates never
+			 * occur and unindexed Direct TOAST tuples are reclaimed directly
+			 * to LP_UNUSED).
 			 */
-			if (presult.newly_all_visible)
+			if (presult.newly_all_visible ||
+				(relation->rd_rel->relkind == RELKIND_TOASTVALUE &&
+				 presult.ndeleted > presult.nnewlpdead &&
+				 RelationGetDirectToastSelfPrune(relation)))
 			{
 				record_free_space = true;
 				freespace = PageGetHeapFreeSpace(page);
@@ -1824,22 +1847,62 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 }
 
 /*
+ * Check if a tuple header belongs to an unindexed Direct TOAST tuple.
+ * In a TOAST table, chunk_id is the first attribute (attnum 1). Direct TOAST
+ * chunks leave chunk_id NULL since they are accessed directly by TID rather
+ * than via the TOAST index.
+ */
+static inline bool
+heap_tuple_header_is_unindexed_toast(HeapTupleHeader htup)
+{
+	return (htup != NULL &&
+			(htup->t_infomask & HEAP_HASNULL) != 0 &&
+			att_isnull(0, htup->t_bits));
+}
+
+static inline bool
+heap_prune_is_unindexed_toast_tuple(PruneState *prstate, HeapTupleHeader htup)
+{
+	if (prstate->relation->rd_rel->relkind == RELKIND_TOASTVALUE &&
+		heap_tuple_header_is_unindexed_toast(htup))
+		return true;
+
+	return false;
+}
+
+/*
  * Depending on whether or not the caller set mark_unused_now to true, record that a
  * line pointer should be marked LP_DEAD or LP_UNUSED. There are other cases in
  * which we will mark line pointers LP_UNUSED, but we will not mark line
  * pointers LP_DEAD if mark_unused_now is true.
+ *
+ * For TOAST relations, tuples without an index entry (chunk_id is NULL) can also
+ * be marked LP_UNUSED immediately without waiting for index vacuuming.
  */
 static void
 heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
 								 bool was_normal)
 {
+	bool		is_unindexed_toast = false;
+
+	if (!prstate->mark_unused_now && was_normal)
+	{
+		ItemId		lp = PageGetItemId(prstate->page, offnum);
+		HeapTupleHeader htup;
+
+		Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
+		htup = (HeapTupleHeader) PageGetItem(prstate->page, lp);
+
+		is_unindexed_toast = heap_prune_is_unindexed_toast_tuple(prstate, htup);
+	}
+
 	/*
-	 * If the caller set mark_unused_now to true, we can remove dead tuples
-	 * during pruning instead of marking their line pointers dead. Set this
-	 * tuple's line pointer LP_UNUSED. We hint that this option is less
-	 * likely.
+	 * If the caller set mark_unused_now to true, or if this is an unindexed
+	 * TOAST tuple, we can remove dead tuples during pruning instead of
+	 * marking their line pointers dead. Set this tuple's line pointer
+	 * LP_UNUSED. We hint that this option is less likely.
 	 */
-	if (unlikely(prstate->mark_unused_now))
+	if (unlikely(prstate->mark_unused_now) || is_unindexed_toast)
 		heap_prune_record_unused(prstate, offnum, was_normal);
 	else
 		heap_prune_record_dead(prstate, offnum, was_normal);
@@ -1848,7 +1911,8 @@ heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
 	 * It's incorrect for the page to be set all-visible if it contains dead
 	 * items. Fix that on the heap page and check the VM for corruption as
 	 * well. Do that here rather than in heap_prune_record_dead() so we also
-	 * cover tuples that are directly marked LP_UNUSED via mark_unused_now.
+	 * cover tuples that are directly marked LP_UNUSED via mark_unused_now or
+	 * unindexed TOAST tuples.
 	 */
 	if (PageIsAllVisible(prstate->page))
 		heap_page_fix_vm_corruption(prstate, offnum, VM_CORRUPT_LPDEAD);
@@ -2246,13 +2310,15 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 			 * items to be made LP_UNUSED instead.  This is only possible if
 			 * the relation has no indexes.  If there are any dead items, then
 			 * mark_unused_now was not true and every item being marked
-			 * LP_UNUSED must refer to a heap-only tuple.
+			 * LP_UNUSED must refer to a heap-only tuple or an unindexed
+			 * TOAST tuple.
 			 */
 			if (ndead > 0)
 			{
 				Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
 				htup = (HeapTupleHeader) PageGetItem(page, lp);
-				Assert(HeapTupleHeaderIsHeapOnly(htup));
+				Assert(HeapTupleHeaderIsHeapOnly(htup) ||
+					   heap_tuple_header_is_unindexed_toast(htup));
 			}
 			else
 				Assert(ItemIdIsUsed(lp));

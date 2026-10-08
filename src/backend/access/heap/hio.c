@@ -18,7 +18,9 @@
 #include "access/heapam.h"
 #include "access/hio.h"
 #include "access/htup_details.h"
+#include "access/toast_internals.h"
 #include "access/visibilitymap.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/freespace.h"
 #include "storage/lmgr.h"
@@ -514,6 +516,12 @@ RelationGetBufferForTuple(Relation relation, Size len,
 				otherBlock;
 	bool		unlockedTargetBuffer;
 	bool		recheckVmPins;
+	bool		is_direct_toast_rel =
+		(relation->rd_rel->relkind == RELKIND_TOASTVALUE &&
+		 RelationGetNumberOfAttributes(relation) >= 5 &&
+		 RelationGetDirectToastSelfPrune(relation));
+	DirectToastPruneState *toast_state =
+		is_direct_toast_rel ? toast_get_prune_state(RelationGetRelid(relation)) : NULL;
 
 	len = MAXALIGN(len);		/* be conservative */
 
@@ -571,7 +579,18 @@ RelationGetBufferForTuple(Relation relation, Size len,
 	if (bistate && bistate->current_buf != InvalidBuffer)
 		targetBlock = BufferGetBlockNumber(bistate->current_buf);
 	else
+	{
 		targetBlock = RelationGetTargetBlock(relation);
+		if (targetBlock == InvalidBlockNumber &&
+			toast_state != NULL &&
+			toast_state->targblock != InvalidBlockNumber)
+		{
+			if (toast_state->targblock < RelationGetNumberOfBlocks(relation))
+				targetBlock = toast_state->targblock;
+			else
+				toast_state->targblock = InvalidBlockNumber;
+		}
+	}
 
 	if (targetBlock == InvalidBlockNumber && use_fsm)
 	{
@@ -615,6 +634,11 @@ loop:
 		{
 			/* easy case */
 			buffer = ReadBufferBI(relation, targetBlock, RBM_NORMAL, bistate);
+			if (is_direct_toast_rel &&
+				PageGetHeapFreeSpace(BufferGetPage(buffer)) < targetFreeSpace &&
+				TransactionIdIsValid(PageGetPruneXid(BufferGetPage(buffer))) &&
+				PageGetPruneXid(BufferGetPage(buffer)) != GetCurrentTransactionIdIfAny())
+				heap_page_prune_opt(relation, buffer, vmbuffer, false);
 			if (PageIsAllVisible(BufferGetPage(buffer)))
 				visibilitymap_pin(relation, targetBlock, vmbuffer);
 
@@ -702,8 +726,13 @@ loop:
 		{
 			/* use this page as future insert target, too */
 			RelationSetTargetBlock(relation, targetBlock);
+			if (toast_state != NULL)
+				toast_state->targblock = targetBlock;
 			return buffer;
 		}
+
+		if (toast_state != NULL && toast_state->targblock == targetBlock)
+			toast_state->targblock = InvalidBlockNumber;
 
 		/*
 		 * Not enough space, so we must give up our page locks and pin (if
@@ -759,6 +788,109 @@ loop:
 														targetBlock,
 														pageFreeSpace,
 														targetFreeSpace);
+		}
+	}
+
+	/*
+	 * Before extending a TOAST relation when direct_toast_self_prune is
+	 * enabled, probe a bounded batch of blocks from toast_state->prune_hand
+	 * to reclaim pages whose Direct TOAST deletes committed after their FSM
+	 * entries were cleared.
+	 */
+	if (use_fsm && otherBuffer == InvalidBuffer && toast_state != NULL)
+	{
+		TransactionId cur_xid = GetCurrentTransactionIdIfAny();
+		BlockNumber nblocks = RelationGetNumberOfBlocks(relation);
+
+		if (!TransactionIdIsValid(cur_xid) ||
+			cur_xid != toast_state->last_probe_xid)
+		{
+			toast_state->last_probe_xid = cur_xid;
+			if (toast_state->delete_count != toast_state->last_delete_count ||
+				toast_state->saw_inprogress_delete)
+			{
+				toast_state->last_delete_count = toast_state->delete_count;
+				toast_state->unprunable_probes = 0;
+				toast_state->prune_exhausted = false;
+				toast_state->saw_inprogress_delete = false;
+			}
+		}
+
+		if (nblocks > 0 && !toast_state->prune_exhausted)
+		{
+			BlockNumber target_unprunable =
+				(toast_state->delete_count == 0 &&
+				 !toast_state->saw_inprogress_delete) ? 1 : nblocks;
+			BlockNumber max_probes = Min(target_unprunable, (BlockNumber) 256);
+			int			pruned_count = 0;
+
+			for (BlockNumber i = 0; i < max_probes; i++)
+			{
+				BlockNumber probeBlk;
+				Buffer		probeBuf;
+				Page		probePage;
+				TransactionId prune_xid;
+				bool		has_direct_dead = false;
+
+				CHECK_FOR_INTERRUPTS();
+
+				if (toast_state->prune_hand >= nblocks)
+					toast_state->prune_hand = 0;
+				probeBlk = toast_state->prune_hand++;
+
+				probeBuf = ReadBuffer(relation, probeBlk);
+				probePage = BufferGetPage(probeBuf);
+				prune_xid = PageGetPruneXid(probePage);
+
+				if (TransactionIdIsValid(prune_xid))
+				{
+					LockBuffer(probeBuf, BUFFER_LOCK_SHARE);
+					has_direct_dead = toast_page_has_deleted_direct_tuple(probePage);
+					LockBuffer(probeBuf, BUFFER_LOCK_UNLOCK);
+				}
+
+				if (has_direct_dead)
+				{
+					target_unprunable = nblocks;
+					max_probes = Min(nblocks, (BlockNumber) 256);
+					if (prune_xid != cur_xid)
+					{
+						heap_page_prune_opt(relation, probeBuf, vmbuffer, false);
+						if (TransactionIdIsValid(PageGetPruneXid(probePage)))
+							toast_state->saw_inprogress_delete = true;
+						if (GetRecordedFreeSpace(relation, probeBlk) >= targetFreeSpace)
+						{
+							pruned_count++;
+							toast_state->unprunable_probes = 0;
+							if (targetBlock == InvalidBlockNumber)
+								targetBlock = probeBlk;
+						}
+						else
+							toast_state->unprunable_probes++;
+					}
+					else
+					{
+						toast_state->saw_inprogress_delete = true;
+						toast_state->unprunable_probes++;
+					}
+				}
+				else
+					toast_state->unprunable_probes++;
+
+				ReleaseBuffer(probeBuf);
+
+				if (pruned_count >= 8 ||
+					(pruned_count == 0 &&
+					 toast_state->unprunable_probes >= target_unprunable))
+					break;
+			}
+
+			if (targetBlock != InvalidBlockNumber)
+				goto loop;
+
+			if (toast_state->unprunable_probes >= target_unprunable &&
+				TransactionIdIsValid(cur_xid))
+				toast_state->prune_exhausted = true;
 		}
 	}
 
@@ -879,6 +1011,8 @@ loop:
 	 * good bet most of the time.  So for now, don't add it to FSM yet.
 	 */
 	RelationSetTargetBlock(relation, targetBlock);
+	if (toast_state != NULL)
+		toast_state->targblock = targetBlock;
 
 	return buffer;
 }
