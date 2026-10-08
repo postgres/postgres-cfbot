@@ -719,8 +719,26 @@ sub init
 	# TEMP_CONFIG.  Otherwise, print it before TEMP_CONFIG, thereby permitting
 	# overrides.  Settings that merely improve performance or ease debugging
 	# belong before TEMP_CONFIG.
+
 	print $conf PostgreSQL::Test::Utils::slurp_file($ENV{TEMP_CONFIG})
 	  if defined $ENV{TEMP_CONFIG};
+
+	# A test that reasons about exact WAL positions cannot tolerate
+	# whole-record compression: the record it emits would shrink by an amount
+	# it has no way to predict.  Such a test passes no_wal_compression => 1 to
+	# init(), and we put the record back beyond any possible record size.
+	#
+	# This is printed after TEMP_CONFIG on purpose.  It is a correctness
+	# requirement of the test, not a preference, so it must win over whatever
+	# the buildfarm animal supplies.
+	if ($params{no_wal_compression})
+	{
+		print $conf "wal_compression_threshold = " . (1024 * 1024 * 1024) . "\n";
+
+		# Streams ignore the threshold on purpose -- reaching small records is
+		# what they are for -- so they have to be turned off separately.
+		print $conf "wal_compression_streams = 0\n";
+	}
 
 	if ($params{allows_streaming})
 	{
@@ -3193,10 +3211,16 @@ sub emit_wal
 {
 	my ($self, $size) = @_;
 
+	# Disable whole-record WAL compression for this emission.  Tests call
+	# emit_wal() to place an exact number of bytes in WAL (e.g. to reach a
+	# specific page offset); whole-record compression would shrink the record
+	# and break those position-sensitive calculations.
 	return int(
 		$self->safe_psql(
 			'postgres',
-			"SELECT pg_logical_emit_message(true, '', repeat('a', $size)) - '0/0'"
+			"SET wal_compression_threshold = 2147483647;
+			 SELECT pg_logical_emit_message(true, '', repeat('a', $size)) - '0/0';
+			 RESET wal_compression_threshold"
 		));
 }
 
