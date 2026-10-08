@@ -46,6 +46,7 @@ extern char max_parallel_hazard(Query *parse);
 extern bool is_parallel_safe(PlannerInfo *root, Node *node);
 extern bool contain_nonstrict_functions(Node *clause);
 extern bool is_full_join_expr_null_preserving(Node *node);
+extern bool expr_contains(Node *expr, Node *sub);
 extern bool contain_exec_param(Node *clause, List *param_ids);
 extern bool contain_leaked_vars(Node *clause);
 
