@@ -387,24 +387,184 @@ set_cheapest(RelOptInfo *parent_rel)
 }
 
 /*
- * pathtargets_differ
- *	  Do two paths of base relation 'rel' emit different targets?
+ * path_extra_exprs
+ *	  The values a path emits beyond its rel's reltarget.
  *
- * A base relation's paths normally all emit rel->reltarget, but an index
- * path may also emit a value the query needs above the scan, one it has
- * for free and other paths must compute (see indexonly_path_target() and
- * index_path_orderby_target()).  That cost isn't in either path's cost
- * yet; it is charged when the expression is.  So add_path() treats paths
- * with different targets like paths with different pathkeys, and keeps
- * both.
+ * A path normally emits rel->reltarget, the Vars and PlaceHolderVars the
+ * rest of the query needs.  An index path may also emit a non-Var
+ * expression the query needs that it has for free: an index-only scan reads
+ * a returnable index expression column (see indexonly_path_target()), and an
+ * ordering IndexScan has its ORDER BY values (see
+ * index_path_orderby_target()).  A join emits whatever its inputs emit (see
+ * join_path_target()), and so may an Append whose children all emit the
+ * same values (see add_extras_append_path()).  Such a target is a copy of
+ * rel->reltarget with the extra expressions appended, so they're its tail.
+ *
+ * Sort, Material and Memoize don't project and share their input's target,
+ * so they emit what it emits.  Nothing else emits extra values: other path
+ * types build their own targets, and an upper rel's targets differ from its
+ * reltarget for reasons of their own.
  */
-static inline bool
-pathtargets_differ(RelOptInfo *rel, Path *path1, Path *path2)
+static ListCell *
+path_extras_start(Path *path, int *nextras)
 {
-	return rel->reloptkind == RELOPT_BASEREL &&
-		(IsA(path1, IndexPath) || IsA(path2, IndexPath)) &&
-		path1->pathtarget != path2->pathtarget &&
-		!equal(path1->pathtarget->exprs, path2->pathtarget->exprs);
+	/* see path_extra_exprs() */
+	RelOptInfo *rel = path->parent;
+	PathTarget *reltarget = rel->reltarget;
+	int			nrel;
+
+	*nextras = 0;
+	if (path->pathtarget == reltarget)
+		return NULL;
+
+	switch (nodeTag(path))
+	{
+		case T_SortPath:
+		case T_IncrementalSortPath:
+		case T_MaterialPath:
+		case T_MemoizePath:
+			{
+				Path	   *subpath;
+
+				if (IsA(path, MaterialPath))
+					subpath = ((MaterialPath *) path)->subpath;
+				else if (IsA(path, MemoizePath))
+					subpath = ((MemoizePath *) path)->subpath;
+				else
+					subpath = ((SortPath *) path)->subpath;
+				if (subpath->parent != rel ||
+					subpath->pathtarget != path->pathtarget)
+					return NULL;
+				return path_extras_start(subpath, nextras);
+			}
+		case T_IndexPath:
+			if (!IS_SIMPLE_REL(rel))
+				return NULL;
+			break;
+		case T_NestPath:
+		case T_MergePath:
+		case T_HashPath:
+			if (!IS_JOIN_REL(rel))
+				return NULL;
+			break;
+		case T_AppendPath:
+			/* see add_extras_append_path() */
+			if (rel->reloptkind != RELOPT_BASEREL)
+				return NULL;
+			break;
+		default:
+			return NULL;
+	}
+
+	/*
+	 * Our targets are a copy of reltarget with the values appended.  Anything
+	 * else (say, a final target that apply_projection_to_path() put into an
+	 * index path) isn't ours.
+	 */
+	nrel = list_length(reltarget->exprs);
+	if (list_length(path->pathtarget->exprs) <= nrel)
+		return NULL;
+	for (int i = 0; i < nrel; i++)
+	{
+		if (list_nth(path->pathtarget->exprs, i) !=
+			list_nth(reltarget->exprs, i))
+			return NULL;
+	}
+	*nextras = list_length(path->pathtarget->exprs) - nrel;
+	return list_nth_cell(path->pathtarget->exprs, nrel);
+}
+
+bool
+path_emits_extras(Path *path)
+{
+	int			n;
+
+	return path_extras_start(path, &n) != NULL;
+}
+
+List *
+path_extra_exprs(Path *path)
+{
+	int			n;
+	ListCell   *start = path_extras_start(path, &n);
+
+	if (start == NULL)
+		return NIL;
+	return list_copy_tail(path->pathtarget->exprs,
+						  list_length(path->pathtarget->exprs) - n);
+}
+
+/*
+ * extras_subset
+ *	  Is each of the 'n1' values from 'c1' among the 'n2' from 'c2'?
+ */
+static bool
+extras_subset(List *l1, ListCell *c1, int n1, List *l2, ListCell *c2, int n2)
+{
+	int			i1 = list_cell_number(l1, c1);
+	int			i2 = list_cell_number(l2, c2);
+
+	for (int a = 0; a < n1; a++)
+	{
+		Node	   *x = list_nth(l1, i1 + a);
+		bool		found = false;
+
+		for (int b = 0; b < n2 && !found; b++)
+			found = equal(x, list_nth(l2, i2 + b));
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * compare_path_extras
+ *	  Compare the extra values two paths emit (see path_extra_exprs()).
+ *
+ * A path that emits a superset of what the other emits is "better" in the
+ * same sense as better-sorted: whatever needs the other path's values can
+ * use this one's instead.  The result uses the PathKeysComparison codes so
+ * add_path() can combine it with the pathkeys comparison.
+ */
+static PathKeysComparison
+compare_path_extras(Path *path1, Path *path2)
+{
+	int			n1,
+				n2;
+	ListCell   *c1 = path_extras_start(path1, &n1);
+	ListCell   *c2 = path_extras_start(path2, &n2);
+	List	   *l1 = path1->pathtarget->exprs;
+	List	   *l2 = path2->pathtarget->exprs;
+	bool		sub12,
+				sub21;
+
+	if (n1 == 0 && n2 == 0)
+		return PATHKEYS_EQUAL;
+	sub12 = n1 == 0 || (n2 > 0 && extras_subset(l1, c1, n1, l2, c2, n2));
+	sub21 = n2 == 0 || (n1 > 0 && extras_subset(l2, c2, n2, l1, c1, n1));
+	if (sub12 && sub21)
+		return PATHKEYS_EQUAL;
+	if (sub21)
+		return PATHKEYS_BETTER1;
+	if (sub12)
+		return PATHKEYS_BETTER2;
+	return PATHKEYS_DIFFERENT;
+}
+
+/*
+ * combine_comparisons
+ *	  Combine two PathKeysComparison results into one.
+ *
+ * One path is better overall only if it's better or equal on both counts.
+ */
+static PathKeysComparison
+combine_comparisons(PathKeysComparison a, PathKeysComparison b)
+{
+	if (a == PATHKEYS_EQUAL)
+		return b;
+	if (b == PATHKEYS_EQUAL || a == b)
+		return a;
+	return PATHKEYS_DIFFERENT;
 }
 
 /*
@@ -415,7 +575,11 @@ pathtargets_differ(RelOptInfo *rel, Path *path1, Path *path2)
  *	  A path is worthy if it has a better sort order (better pathkeys) or
  *	  cheaper cost (as defined below), or generates fewer rows, than any
  *    existing path that has the same or superset parameterization rels.  We
- *    also consider parallel-safe paths more worthy than others.
+ *    also consider parallel-safe paths more worthy than others.  And a path
+ *    that emits extra values the query needs (see path_extra_exprs()) is
+ *    better, like a better-sorted one, than a path that emits a subset of
+ *    them: whatever would compute those values above the other path can
+ *    read them from this one.
  *
  *    Cheaper cost can mean either a cheaper total cost or a cheaper startup
  *    cost; if one path is cheaper in one of these aspects and another is
@@ -534,8 +698,8 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 			old_path_pathkeys = old_path->param_info ? NIL : old_path->pathkeys;
 			keyscmp = compare_pathkeys(new_path_pathkeys,
 									   old_path_pathkeys);
-			if (pathtargets_differ(parent_rel, new_path, old_path))
-				keyscmp = PATHKEYS_DIFFERENT;
+			keyscmp = combine_comparisons(keyscmp,
+										  compare_path_extras(new_path, old_path));
 			if (keyscmp != PATHKEYS_DIFFERENT)
 			{
 				switch (costcmp)
@@ -841,10 +1005,10 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		bool		remove_old = false; /* unless new proves superior */
 		PathKeysComparison keyscmp;
 
-		/* Compare pathkeys, and targets as in add_path(). */
+		/* Compare pathkeys, and extra values as in add_path(). */
 		keyscmp = compare_pathkeys(new_path->pathkeys, old_path->pathkeys);
-		if (pathtargets_differ(parent_rel, new_path, old_path))
-			keyscmp = PATHKEYS_DIFFERENT;
+		keyscmp = combine_comparisons(keyscmp,
+									  compare_path_extras(new_path, old_path));
 
 		/*
 		 * Unless pathkeys are incompatible, see if one of the paths dominates
@@ -1113,13 +1277,14 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
  * give the path a copy of rel->reltarget with those expressions appended.
  * They cost the scan nothing (path_target_cost() exempts them), and
  * setrefs.c's fix_join_expr() matches them in the parent join's expressions,
- * replacing its copy with a reference to the scan's output.
+ * replacing its copy with a reference to the scan's output.  A join passes
+ * them on up (see join_path_target()).
  *
- * Restricted to plain base relations: an appendrel child's paths are wrapped
- * by Append/MergeAppend, which build their own targetlists, and the top-level
- * scan/join target already handles the unjoined case.  Returns
- * rel->reltarget unchanged when there's nothing to add, which is the common
- * case, so most paths share it as before.
+ * Restricted to plain base relations: an appendrel child's ORDER BY values
+ * reach the scan/join target through the child's own projection (see
+ * apply_scanjoin_target_to_paths()).  Returns rel->reltarget unchanged when
+ * there's nothing to add, which is the common case, so most paths share it
+ * as before.
  */
 static PathTarget *
 index_path_orderby_target(PlannerInfo *root, IndexOptInfo *index,
@@ -1174,38 +1339,106 @@ index_path_orderby_target(PlannerInfo *root, IndexOptInfo *index,
 }
 
 /*
+ * expr_contains
+ *	  Is 'expr', or some subexpression of it, equal() to 'sub'?
+ */
+static bool
+expr_contains_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (equal(node, context))
+		return true;
+	return expression_tree_walker(node, expr_contains_walker, context);
+}
+
+bool
+expr_contains(Node *expr, Node *sub)
+{
+	return expr_contains_walker(expr, sub);
+}
+
+/*
+ * expr_worth_emitting
+ *	  Is 'expr' expensive enough to be worth emitting as an extra value?
+ *
+ * A path that emits an extra value makes add_path() keep it, and every join
+ * path built on it, alongside paths it would otherwise have discarded (see
+ * compare_path_extras()).  That costs planning time at every join level
+ * above.  For a cheap expression, computing it again costs less than that,
+ * so emit only values that cost more than 10 times cpu_operator_cost per
+ * evaluation, the same test make_sort_input_target() uses to decide that an
+ * expression is worth postponing past a sort.
+ */
+bool
+expr_worth_emitting(PlannerInfo *root, Node *expr)
+{
+	QualCost	cost;
+
+	cost_qual_eval_node(&cost, expr, root);
+	return cost.per_tuple > 10 * cpu_operator_cost;
+}
+
+/*
+ * query_tlist_exprs
+ *	  The query's final targetlist expressions, in terms of 'rel'.
+ *
+ * root->processed_tlist is in terms of the parent of an appendrel; translate
+ * it for a child, so it can be compared with the child's index expressions.
+ */
+static List *
+query_tlist_exprs(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *exprs = get_tlist_exprs(root->processed_tlist, true);
+
+	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+		exprs = (List *) adjust_appendrel_attrs_multilevel(root, (Node *) exprs,
+														   rel,
+														   rel->top_parent);
+	return exprs;
+}
+
+/*
  * indexonly_path_target
  *	  Choose the PathTarget for an index-only scan path.
  *
  * An index-only scan reads a returnable index expression column instead of
  * computing it (set_indexonlyscan_references()), and isn't charged for it
- * (indexonly_target_cost()).  But that only helps if the path survives
+ * (path_target_cost()).  But that only helps if the path survives
  * add_path(), and with rel->reltarget, which has only Vars, nothing
  * distinguishes it from a seq scan that will have to compute the expression
  * later; it loses on cost before the expression is charged to anyone.  So
- * if the query's targetlist has a top-level entry equal() to a returnable
- * index expression, give the path a copy of rel->reltarget with that
- * expression appended.  add_path() keeps paths with different targets
- * (see pathtargets_differ()), and once the scan/join target is applied, the
- * paths that must compute the expression pay for it and this one doesn't.
+ * if the query's targetlist contains a returnable index expression, give
+ * the path a copy of rel->reltarget with that expression appended, making
+ * it an extra value the path emits (see path_extra_exprs()).  add_path()
+ * then won't let a path that lacks it dominate this one on cost alone.
+ * The value travels up through joins (see join_path_target()), and
+ * setrefs.c's fix_join_expr() and fix_upper_expr() replace each occurrence,
+ * at any depth, with a reference to it; the paths that must compute it
+ * instead pay for it when the expression is charged.
  *
- * This is done only when the rel is the query's sole base relation, where
- * the value goes straight to the scan/join target.  Below a join, the join
- * would have to credit it (as join_target_cost() does for ORDER BY values)
- * and the joinrel's add_path() would have to keep it; not attempted yet.
+ * An expression is matched with equal(), so a Var of a rel on the nullable
+ * side of an outer join, which carries varnullingrels in the targetlist,
+ * never matches the index's own: the value read below the join isn't the
+ * one the query asks for above it.
+ *
+ * A partial path gets the extra values only if they're parallel-safe.
  */
 static PathTarget *
-indexonly_path_target(PlannerInfo *root, IndexOptInfo *index)
+indexonly_path_target(PlannerInfo *root, IndexOptInfo *index,
+					  bool partial_path)
 {
 	RelOptInfo *rel = index->rel;
 	PathTarget *target = NULL;
+	List	   *tlist_exprs;
 	ListCell   *lt;
 	int			i = 0;
 
-	if (index->indexprs == NIL || rel->reloptkind != RELOPT_BASEREL ||
-		root->processed_tlist == NIL ||
-		!bms_equal(rel->relids, root->all_query_rels))
+	if (index->indexprs == NIL || !IS_SIMPLE_REL(rel) ||
+		root->processed_tlist == NIL)
 		return rel->reltarget;
+
+	tlist_exprs = query_tlist_exprs(root, rel);
 
 	foreach(lt, index->indextlist)
 	{
@@ -1214,14 +1447,18 @@ indexonly_path_target(PlannerInfo *root, IndexOptInfo *index)
 
 		if (!index->canreturn[i++] || IsA(itle->expr, Var))
 			continue;
+		if (partial_path && !is_parallel_safe(root, (Node *) itle->expr))
+			continue;
+		if (!expr_worth_emitting(root, (Node *) itle->expr))
+			continue;
 
-		foreach(lq, root->processed_tlist)
+		foreach(lq, tlist_exprs)
 		{
-			if (equal(lfirst_node(TargetEntry, lq)->expr, itle->expr))
+			if (expr_contains(lfirst(lq), (Node *) itle->expr))
 			{
 				if (target == NULL)
 					target = copy_pathtarget(rel->reltarget);
-				add_column_to_pathtarget(target, itle->expr, 0);
+				add_new_column_to_pathtarget(target, itle->expr);
 				break;
 			}
 		}
@@ -1230,44 +1467,8 @@ indexonly_path_target(PlannerInfo *root, IndexOptInfo *index)
 	if (target == NULL)
 		return rel->reltarget;
 
-	/* add_column_to_pathtarget doesn't maintain cost and width */
+	/* add_new_column_to_pathtarget doesn't maintain cost and width */
 	return set_pathtarget_cost_width(root, target);
-}
-
-/*
- * index_path_emits_orderby
- *	  Does this plain IndexScan path's target hold a value it takes from its
- *	  ORDER BY values?
- *
- * use_physical_tlist() must not replace such a target with the scan's
- * physical tlist, which has only Vars, or whatever needs the value would
- * compute it again.
- */
-bool
-index_path_emits_orderby(IndexPath *ipath)
-{
-	ListCell   *lc;
-
-	if (ipath->path.pathtype != T_IndexScan || ipath->indexorderbys == NIL)
-		return false;
-
-	foreach(lc, ipath->path.pathtarget->exprs)
-	{
-		Expr	   *expr = (Expr *) lfirst(lc);
-		ListCell   *lo,
-				   *lcol;
-
-		if (IsA(expr, Var))
-			continue;
-		forboth(lo, ipath->indexorderbys, lcol, ipath->indexorderbycols)
-		{
-			if (index_orderby_returnable(ipath->indexinfo, lfirst_int(lcol),
-										 (Expr *) lfirst(lo)) &&
-				orderby_tlist_match(expr, (Expr *) lfirst(lo)))
-				return true;
-		}
-	}
-	return false;
 }
 
 /*
@@ -1310,7 +1511,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = indexonly ?
-		indexonly_path_target(root, index) :
+		indexonly_path_target(root, index, partial_path) :
 		index_path_orderby_target(root, index, indexorderbys,
 								  indexorderbycols);
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
@@ -1925,7 +2126,8 @@ create_material_path(RelOptInfo *rel, Path *subpath, bool enabled)
 
 	pathnode->path.pathtype = T_Material;
 	pathnode->path.parent = rel;
-	pathnode->path.pathtarget = rel->reltarget;
+	/* Material doesn't project, so use source path's pathtarget */
+	pathnode->path.pathtarget = subpath->pathtarget;
 	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
@@ -1961,7 +2163,8 @@ create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 
 	pathnode->path.pathtype = T_Memoize;
 	pathnode->path.parent = rel;
-	pathnode->path.pathtarget = rel->reltarget;
+	/* Memoize doesn't project, so use source path's pathtarget */
+	pathnode->path.pathtarget = subpath->pathtarget;
 	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
@@ -2544,6 +2747,80 @@ calc_non_nestloop_required_outer(Path *outer_path, Path *inner_path)
 }
 
 /*
+ * join_path_target
+ *	  Choose the PathTarget for a join path.
+ *
+ * A join normally emits joinrel->reltarget.  If an input emits extra values
+ * (see path_extra_exprs()), the join passes them up too, so that a higher
+ * join or the final scan/join target can use them instead of computing them
+ * (fix_join_expr() matches them in the inputs' targetlists, and
+ * join_free_exprs() credits them).  Without that, an index-only scan or
+ * ordering IndexScan below the topmost join would read the value for
+ * nothing.
+ *
+ * Only values the query still needs above this join are passed up: a
+ * value that refers to a rel on the nullable side of an outer join this
+ * join forms would be wrong above it, but those never match the query's
+ * targetlist (its Vars carry varnullingrels the index's don't), so no input
+ * emits one; and every value we emit came from the final targetlist.
+ *
+ * Values must be parallel-safe if the join is, since a partial join path's
+ * target is computed in workers.
+ *
+ * And only values worth it; see expr_worth_emitting().
+ */
+static PathTarget *
+join_path_target(PlannerInfo *root, RelOptInfo *joinrel,
+				 Path *outer_path, Path *inner_path)
+{
+	List	   *outer_extras = path_extra_exprs(outer_path);
+	List	   *inner_extras = path_extra_exprs(inner_path);
+	PathTarget *target;
+	bool		all_kept = true;
+	ListCell   *lc;
+
+	if (outer_extras == NIL && inner_extras == NIL)
+		return joinrel->reltarget;
+
+	target = copy_pathtarget(joinrel->reltarget);
+	foreach(lc, list_concat(outer_extras, inner_extras))
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+
+		if (expr_worth_emitting(root, expr) &&
+			(!joinrel->consider_parallel || is_parallel_safe(root, expr)))
+			add_new_column_to_pathtarget(target, (Expr *) expr);
+		else
+			all_kept = false;
+	}
+	if (list_length(target->exprs) == list_length(joinrel->reltarget->exprs))
+		return joinrel->reltarget;
+
+	/*
+	 * The values' cost and width are what they added to the inputs' targets,
+	 * since the two inputs' values refer to different rels and can't overlap.
+	 * Working that out is much cheaper than set_pathtarget_cost_width(),
+	 * which looks up each function's cost again.
+	 */
+	if (all_kept)
+	{
+		Path	   *inputs[2] = {outer_path, inner_path};
+
+		for (int i = 0; i < 2; i++)
+		{
+			PathTarget *pt = inputs[i]->pathtarget;
+			PathTarget *rt = inputs[i]->parent->reltarget;
+
+			target->cost.startup += pt->cost.startup - rt->cost.startup;
+			target->cost.per_tuple += pt->cost.per_tuple - rt->cost.per_tuple;
+			target->width += pt->width - rt->width;
+		}
+		return target;
+	}
+	return set_pathtarget_cost_width(root, target);
+}
+
+/*
  * create_nestloop_path
  *	  Creates a pathnode corresponding to a nestloop join between two
  *	  relations.
@@ -2611,7 +2888,9 @@ create_nestloop_path(PlannerInfo *root,
 
 	pathnode->jpath.path.pathtype = T_NestLoop;
 	pathnode->jpath.path.parent = joinrel;
-	pathnode->jpath.path.pathtarget = joinrel->reltarget;
+	pathnode->jpath.path.pathtarget = join_path_target(root, joinrel,
+													   outer_path,
+													   inner_path);
 	pathnode->jpath.path.param_info =
 		get_joinrel_parampathinfo(root,
 								  joinrel,
@@ -2677,7 +2956,9 @@ create_mergejoin_path(PlannerInfo *root,
 
 	pathnode->jpath.path.pathtype = T_MergeJoin;
 	pathnode->jpath.path.parent = joinrel;
-	pathnode->jpath.path.pathtarget = joinrel->reltarget;
+	pathnode->jpath.path.pathtarget = join_path_target(root, joinrel,
+													   outer_path,
+													   inner_path);
 	pathnode->jpath.path.param_info =
 		get_joinrel_parampathinfo(root,
 								  joinrel,
@@ -2742,7 +3023,9 @@ create_hashjoin_path(PlannerInfo *root,
 
 	pathnode->jpath.path.pathtype = T_HashJoin;
 	pathnode->jpath.path.parent = joinrel;
-	pathnode->jpath.path.pathtarget = joinrel->reltarget;
+	pathnode->jpath.path.pathtarget = join_path_target(root, joinrel,
+													   outer_path,
+													   inner_path);
 	pathnode->jpath.path.param_info =
 		get_joinrel_parampathinfo(root,
 								  joinrel,
@@ -2879,124 +3162,148 @@ orderby_tlist_match(Expr *expr, Expr *orderby)
 }
 
 /*
- * indexonly_target_cost
- *	  path_target_cost() for an index-only scan path.
+ * credit_free_exprs_walker
+ *	  Subtract from context->cost the cost of each outermost subexpression
+ *	  of 'node' equal() to one of context->free.
  *
- * setrefs.c's set_indexonlyscan_references() matches target expressions
- * against the index's returnable columns, expression columns included, and
- * replaces a match with a reference to that column: the scan reads the
- * value the index stored instead of computing it.  So a top-level target
- * expression equal() to a returnable index expression costs nothing.  Only
- * top-level entries are considered, as elsewhere; that's what's normally in
- * a scan's target.
+ * setrefs.c's fix_upper_expr() and fix_join_expr() try to match every
+ * non-Var subexpression against the input's targetlist before descending
+ * into it, and replace a match with a reference to the input's column.  So
+ * an expression costs nothing where an input emits it, wherever it appears
+ * in the expression, and its own subexpressions aren't evaluated either.
  */
-static QualCost
-indexonly_target_cost(PlannerInfo *root, IndexPath *ipath, PathTarget *target)
+typedef struct
 {
-	QualCost	cost = target->cost;
-	IndexOptInfo *index = ipath->indexinfo;
-	ListCell   *lc;
+	PlannerInfo *root;
+	List	   *free;
+	QualCost	cost;
+}			credit_free_context;
 
-	if (index->indexprs == NIL)
-		return cost;			/* only Vars, which cost nothing anyway */
-
-	foreach(lc, target->exprs)
+static bool
+credit_free_exprs_walker(Node *node, credit_free_context * context)
+{
+	if (node == NULL || IsA(node, Var) || IsA(node, Const))
+		return false;
+	if (list_member(context->free, node))
 	{
-		Node	   *expr = (Node *) lfirst(lc);
-		ListCell   *lt;
-		int			i = 0;
+		QualCost	ecost;
 
-		if (IsA(expr, Var))
-			continue;
-
-		foreach(lt, index->indextlist)
-		{
-			TargetEntry *tle = lfirst_node(TargetEntry, lt);
-
-			if (index->canreturn[i++] && !IsA(tle->expr, Var) &&
-				equal(expr, tle->expr))
-			{
-				QualCost	ecost;
-
-				cost_qual_eval_node(&ecost, expr, root);
-				cost.startup -= ecost.startup;
-				cost.per_tuple -= ecost.per_tuple;
-				break;
-			}
-		}
+		cost_qual_eval_node(&ecost, node, context->root);
+		context->cost.startup -= ecost.startup;
+		context->cost.per_tuple -= ecost.per_tuple;
+		return false;			/* don't count its subexpressions twice */
 	}
-
-	return cost;
+	return expression_tree_walker(node, credit_free_exprs_walker, context);
 }
 
 /*
- * join_target_cost
- *	  path_target_cost() for a join path.
- *
- * A join takes any top-level target expression that one of its inputs
- * already emits from that input's output instead of evaluating it again:
- * setrefs.c's fix_join_expr() matches whole non-Var expressions against the
- * input targetlists before descending into them.  Join inputs ordinarily
- * emit only Vars and PlaceHolderVars, so this changes nothing; but an
- * ordering IndexScan input may emit the ORDER BY values it returns (see
- * index_path_orderby_target()).  Look through Material and Memoize, which
- * pass their input's targetlist up unchanged.  We look only at the join's
- * immediate inputs; the value can't reach a higher join without passing
- * through this one's targetlist, which is the joinrel's and has only Vars.
+ * free_exprs_cost
+ *	  target->cost, less the cost of the values in 'free' that 'target'
+ *	  uses (see credit_free_exprs_walker()).
  */
 static QualCost
-join_target_cost(PlannerInfo *root, JoinPath *jpath, PathTarget *target)
+free_exprs_cost(PlannerInfo *root, PathTarget *target, List *free)
 {
-	QualCost	cost = target->cost;
-	Path	   *inputs[2] = {jpath->outerjoinpath, jpath->innerjoinpath};
+	credit_free_context context;
+
+	context.root = root;
+	context.free = free;
+	context.cost = target->cost;
+	if (free != NIL)
+		(void) credit_free_exprs_walker((Node *) target->exprs, &context);
+	return context.cost;
+}
+
+/*
+ * indexonly_free_exprs
+ *	  The returnable expression columns of an index-only scan's index.
+ *
+ * set_indexonlyscan_references() replaces each occurrence of one of these
+ * in the scan's targetlist and quals with a reference to the index column.
+ */
+static List *
+indexonly_free_exprs(IndexPath *ipath)
+{
+	IndexOptInfo *index = ipath->indexinfo;
+	List	   *result = NIL;
+	ListCell   *lt;
+	int			i = 0;
+
+	foreach(lt, index->indextlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lt);
+
+		if (index->canreturn[i++] && !IsA(tle->expr, Var))
+			result = lappend(result, tle->expr);
+	}
+	return result;
+}
+
+/*
+ * indexonly_qual_cost
+ *	  'cost', the cost of an index-only scan's qpquals, less the returnable
+ *	  index expressions they use.
+ *
+ * set_indexonlyscan_references() rewrites the scan's quals as it does its
+ * targetlist.
+ */
+QualCost
+indexonly_qual_cost(PlannerInfo *root, IndexPath *ipath, List *qpquals,
+					QualCost cost)
+{
+	credit_free_context context;
 	ListCell   *lc;
 
-	foreach(lc, target->exprs)
+	context.root = root;
+	context.free = indexonly_free_exprs(ipath);
+	context.cost = cost;
+	if (context.free == NIL)
+		return cost;
+	foreach(lc, qpquals)
 	{
-		Node	   *expr = (Node *) lfirst(lc);
+		Node	   *qual = (Node *) lfirst(lc);
 
-		if (IsA(expr, Var) || IsA(expr, PlaceHolderVar))
-			continue;
-
-		for (int i = 0; i < 2; i++)
-		{
-			Path	   *input = inputs[i];
-
-			while (IsA(input, MaterialPath) || IsA(input, MemoizePath))
-				input = IsA(input, MaterialPath) ?
-					((MaterialPath *) input)->subpath :
-					((MemoizePath *) input)->subpath;
-
-			if (IsA(input, IndexPath) &&
-				index_path_emits_orderby((IndexPath *) input) &&
-				list_member(input->pathtarget->exprs, expr))
-			{
-				QualCost	ecost;
-
-				cost_qual_eval_node(&ecost, expr, root);
-				cost.startup -= ecost.startup;
-				cost.per_tuple -= ecost.per_tuple;
-				break;
-			}
-		}
+		if (IsA(qual, RestrictInfo))
+			qual = (Node *) ((RestrictInfo *) qual)->clause;
+		(void) credit_free_exprs_walker(qual, &context);
 	}
+	return context.cost;
+}
 
-	return cost;
+/*
+ * join_free_exprs
+ *	  The values a join's inputs emit beyond their reltargets.
+ *
+ * fix_join_expr() replaces each occurrence of one of these in the join's
+ * targetlist with a reference to the input's output.  Material and Memoize
+ * pass their input's targetlist up unchanged; path_extra_exprs() already
+ * looks through them.
+ */
+static List *
+join_free_exprs(JoinPath *jpath)
+{
+	return list_concat_unique(path_extra_exprs(jpath->outerjoinpath),
+							  path_extra_exprs(jpath->innerjoinpath));
 }
 
 /*
  * path_target_cost
  *	  Return the cost 'path' pays to evaluate 'target'.
  *
- * Normally that's just target->cost.  A join path doesn't pay for entries
- * an input already emits (see join_target_cost()), nor an index-only scan
- * for entries it reads from the index (see indexonly_target_cost()).  And a
- * plain IndexScan takes any
- * top-level target expression that is a returnable ORDER BY expression
- * (see orderby_tlist_match()) from its ORDER BY values instead of
- * evaluating it (setrefs.c rewrites it into a reference to them), so it
- * doesn't pay for those.  Each target entry
- * is counted at most once, as setrefs.c rewrites it once.
+ * Normally that's just target->cost.  But a path doesn't pay for a value
+ * it has for free:
+ *
+ * - a join, for values one of its inputs emits (join_free_exprs());
+ * - an index-only scan, for returnable index expression columns
+ *   (indexonly_free_exprs());
+ *
+ * in either case wherever the value appears in the target, since setrefs.c
+ * replaces every occurrence (see credit_free_exprs_walker()).  And
+ *
+ * - a plain IndexScan, for a top-level target entry that is one of its
+ *   returnable ORDER BY expressions (see orderby_tlist_match()), which
+ *   setrefs.c's replace_orderby_tlist_refs() takes from its ORDER BY values.
+ *   Only top-level entries are rewritten there, so only those count.
  */
 QualCost
 path_target_cost(PlannerInfo *root, Path *path, PathTarget *target)
@@ -3006,10 +3313,12 @@ path_target_cost(PlannerInfo *root, Path *path, PathTarget *target)
 	ListCell   *lc;
 
 	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath))
-		return join_target_cost(root, (JoinPath *) path, target);
+		return free_exprs_cost(root, target,
+							   join_free_exprs((JoinPath *) path));
 
 	if (IsA(path, IndexPath) && path->pathtype == T_IndexOnlyScan)
-		return indexonly_target_cost(root, (IndexPath *) path, target);
+		return free_exprs_cost(root, target,
+							   indexonly_free_exprs((IndexPath *) path));
 
 	if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan)
 		return cost;

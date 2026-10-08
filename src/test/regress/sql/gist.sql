@@ -375,7 +375,7 @@ select gist_ios_total('select gist_ios_costly(i) from gist_ios_cost order by i')
   < 10000 as ios_expr_is_free;
 -- With nothing else to recommend it (no qual, no useful order), an
 -- index-only scan that reads the expression still beats a seq scan that has
--- to compute it: add_path() keeps both, since their targets differ.
+-- to compute it: add_path() keeps the path that emits the value.
 explain (verbose, costs off)
 select gist_ios_costly(i) from gist_ios_cost order by gist_ios_costly(i);
 explain (verbose, costs off)
@@ -384,9 +384,78 @@ select gist_ios_costly(i) from gist_ios_cost;
 -- still reads the expression from the index.
 explain (verbose, costs off)
 select gist_ios_costly(i) from gist_ios_cost order by i desc limit 3;
--- Below a join it isn't considered.
+-- The expression may be part of a larger one, or appear in a qual.
+explain (verbose, costs off)
+select gist_ios_costly(i) + 1 from gist_ios_cost
+  where gist_ios_costly(i) % 3 = 0;
+-- Below a join, the scan emits it and the join passes it up, through more
+-- than one join level.
+create temp table gist_ios_dim (i int, tag text);
+insert into gist_ios_dim select g, 't' || g from generate_series(1, 10000, 7) g;
+create index on gist_ios_dim (i);
+create temp table gist_ios_dim2 (k int, i int);
+insert into gist_ios_dim2 select g, g * 3 from generate_series(1, 3000) g;
+vacuum analyze gist_ios_dim, gist_ios_dim2;
+explain (verbose, costs off)
+select gist_ios_costly(a.i), d.tag from gist_ios_cost a
+  join gist_ios_dim d on d.i = a.i;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+explain (verbose, costs off)
+select gist_ios_costly(a.i), d.tag, n.k from gist_ios_cost a
+  join gist_ios_dim d on d.i = a.i join gist_ios_dim2 n on n.i = a.i;
+reset enable_hashjoin;
+reset enable_mergejoin;
+-- But not from the nullable side of an outer join: there the query's Var
+-- differs from the index's (it may be null), so the value read below the
+-- join isn't the one asked for.
+explain (verbose, costs off)
+select coalesce(gist_ios_costly(a.i), -1) from gist_ios_dim d
+  left join gist_ios_cost a on a.i = d.i * 2;
+-- A partitioned table whose partitions all have the index: each child reads
+-- the value and the Append passes it up, even when a partition's columns
+-- are in a different order.
+create temp table gist_ios_part (i int, pad text) partition by range (i);
+create temp table gist_ios_part1 (pad text, i int);
+alter table gist_ios_part attach partition gist_ios_part1
+  for values from (1) to (5001);
+create temp table gist_ios_part2 partition of gist_ios_part
+  for values from (5001) to (10001);
+insert into gist_ios_part select g, 'p' from generate_series(1, 10000) g;
+create index on gist_ios_part (i, gist_ios_costly(i));
+vacuum analyze gist_ios_part;
+explain (verbose, costs off)
+select gist_ios_costly(p.i), d.tag from gist_ios_part p
+  join gist_ios_dim d on d.i = p.i;
+-- An index created on only one partition doesn't count: every child must
+-- emit the value for the Append to.
+create temp table gist_ios_part_x (i int) partition by range (i);
+create temp table gist_ios_part_x1 partition of gist_ios_part_x
+  for values from (1) to (5001);
+create temp table gist_ios_part_x2 partition of gist_ios_part_x
+  for values from (5001) to (10001);
+insert into gist_ios_part_x select g from generate_series(1, 10000) g;
+create index on gist_ios_part_x1 (i, gist_ios_costly(i));
+vacuum analyze gist_ios_part_x;
 explain (costs off)
-select gist_ios_costly(a.i) from gist_ios_cost a join gist_ios_cost b using (i);
+select gist_ios_costly(p.i), d.tag from gist_ios_part_x p
+  join gist_ios_dim d on d.i = p.i;
+-- Each of these returns what the same query does without index-only scans.
+create temp table gist_ios_check as
+select gist_ios_costly(a.i) as e, d.tag from gist_ios_cost a
+  join gist_ios_dim d on d.i = a.i;
+set enable_indexonlyscan = off;
+select count(*) as mismatches from (
+  (select gist_ios_costly(a.i) as e, d.tag from gist_ios_cost a
+    join gist_ios_dim d on d.i = a.i
+   except all select * from gist_ios_check)
+  union all
+  (select * from gist_ios_check
+   except all select gist_ios_costly(a.i), d.tag from gist_ios_cost a
+    join gist_ios_dim d on d.i = a.i)) s;
+reset enable_indexonlyscan;
+drop table gist_ios_check, gist_ios_part, gist_ios_part_x, gist_ios_dim,
+  gist_ios_dim2;
 drop function gist_ios_total(text);
 drop table gist_ios_cost;
 drop function gist_ios_costly(int);

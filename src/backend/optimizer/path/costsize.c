@@ -795,6 +795,13 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	 */
 	cost_qual_eval(&qpqual_cost, qpquals, root);
 
+	/*
+	 * An index-only scan reads returnable index expressions in its quals from
+	 * the index, as it does in its targetlist; see path_target_cost().
+	 */
+	if (indexonly)
+		qpqual_cost = indexonly_qual_cost(root, path, qpquals, qpqual_cost);
+
 	startup_cost += qpqual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
 
@@ -802,8 +809,8 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	/*
 	 * tlist eval costs are paid per output row, not per tuple scanned.  An
-	 * ordering IndexScan doesn't pay for target entries it takes from its
-	 * ORDER BY values.
+	 * index path doesn't pay for target entries it reads from the index; see
+	 * path_target_cost().
 	 */
 	tlist_cost = path_target_cost(root, (Path *) path, path->path.pathtarget);
 	startup_cost += tlist_cost.startup;
@@ -3652,9 +3659,15 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	cpu_per_tuple = cpu_tuple_cost + restrict_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * ntuples;
 
-	/* tlist eval costs are paid per output row, not per tuple scanned */
-	startup_cost += path->jpath.path.pathtarget->cost.startup;
-	run_cost += path->jpath.path.pathtarget->cost.per_tuple * path->jpath.path.rows;
+	/*
+	 * tlist eval costs are paid per output row, not per tuple scanned.  The
+	 * join may also emit extra values its inputs emit (see
+	 * join_path_target()), but it doesn't evaluate those, so charge only for
+	 * the joinrel's reltarget.
+	 */
+	startup_cost += path->jpath.path.parent->reltarget->cost.startup;
+	run_cost += path->jpath.path.parent->reltarget->cost.per_tuple *
+		path->jpath.path.rows;
 
 	path->jpath.path.startup_cost = startup_cost;
 	path->jpath.path.total_cost = startup_cost + run_cost;
@@ -4242,9 +4255,15 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 	cpu_per_tuple = cpu_tuple_cost + qp_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * mergejointuples;
 
-	/* tlist eval costs are paid per output row, not per tuple scanned */
-	startup_cost += path->jpath.path.pathtarget->cost.startup;
-	run_cost += path->jpath.path.pathtarget->cost.per_tuple * path->jpath.path.rows;
+	/*
+	 * tlist eval costs are paid per output row, not per tuple scanned.  The
+	 * join may also emit extra values its inputs emit (see
+	 * join_path_target()), but it doesn't evaluate those, so charge only for
+	 * the joinrel's reltarget.
+	 */
+	startup_cost += path->jpath.path.parent->reltarget->cost.startup;
+	run_cost += path->jpath.path.parent->reltarget->cost.per_tuple *
+		path->jpath.path.rows;
 
 	path->jpath.path.startup_cost = startup_cost;
 	path->jpath.path.total_cost = startup_cost + run_cost;
@@ -4761,9 +4780,15 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 		run_cost += cpu_per_tuple * hashjointuples;
 	}
 
-	/* tlist eval costs are paid per output row, not per tuple scanned */
-	startup_cost += path->jpath.path.pathtarget->cost.startup;
-	run_cost += path->jpath.path.pathtarget->cost.per_tuple * path->jpath.path.rows;
+	/*
+	 * tlist eval costs are paid per output row, not per tuple scanned.  The
+	 * join may also emit extra values its inputs emit (see
+	 * join_path_target()), but it doesn't evaluate those, so charge only for
+	 * the joinrel's reltarget.
+	 */
+	startup_cost += path->jpath.path.parent->reltarget->cost.startup;
+	run_cost += path->jpath.path.parent->reltarget->cost.per_tuple *
+		path->jpath.path.rows;
 
 	path->jpath.path.startup_cost = startup_cost;
 	path->jpath.path.total_cost = startup_cost + run_cost;
