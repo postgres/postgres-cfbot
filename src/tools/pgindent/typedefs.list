@@ -3689,6 +3689,7 @@ count_param_references_context
 cp_hash_func
 create_upper_paths_hook_type
 createdb_failure_params
+credit_free_context
 crosstab_HashEnt
 crosstab_cat_desc
 curl_infotype

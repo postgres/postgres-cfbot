@@ -117,6 +117,7 @@ typedef struct
 static bool contain_agg_clause_walker(Node *node, void *context);
 static bool find_window_functions_walker(Node *node, WindowFuncLists *lists);
 static bool contain_subplans_walker(Node *node, void *context);
+static bool expr_contains_walker(Node *node, void *context);
 static bool contain_mutable_functions_walker(Node *node, void *context);
 static bool xmlexpr_is_immutable(XmlExpr *xexpr);
 static bool contain_volatile_functions_walker(Node *node, void *context);
@@ -376,6 +377,26 @@ contain_subplans_walker(Node *node, void *context)
 	return expression_tree_walker(node, contain_subplans_walker, context);
 }
 
+
+/*
+ * expr_contains
+ *	  Is 'expr', or some subexpression of it, equal() to 'sub'?
+ */
+bool
+expr_contains(Node *expr, Node *sub)
+{
+	return expr_contains_walker(expr, sub);
+}
+
+static bool
+expr_contains_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (equal(node, context))
+		return true;
+	return expression_tree_walker(node, expr_contains_walker, context);
+}
 
 /*****************************************************************************
  *		Check clauses for mutable functions

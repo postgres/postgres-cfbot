@@ -3641,6 +3641,9 @@ typedef struct SemiAntiJoinFactors
  *		RIGHT_ANTI/inner_unique joins)
  * param_source_rels are OK targets for parameterization of result paths
  * pgs_mask is a bitmask of PGS_* constants to limit the join strategy
+ * extras_outer and extras_inner are each input rel's cheapest unparameterized
+ *		path that emits extra values, if that isn't its cheapest path anyway
+ *		(see cheapest_extras_path() in joinpath.c), else NULL
  */
 typedef struct JoinPathExtraData
 {
@@ -3651,6 +3654,8 @@ typedef struct JoinPathExtraData
 	SemiAntiJoinFactors semifactors;
 	Relids		param_source_rels;
 	uint64		pgs_mask;
+	Path	   *extras_outer;
+	Path	   *extras_inner;
 } JoinPathExtraData;
 
 /*
