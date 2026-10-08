@@ -1,6 +1,9 @@
 # src/test/modules/test_ddl_deparse/Makefile
 
-MODULES = test_ddl_deparse
+MODULE_big = test_ddl_deparse
+OBJS = \
+	$(WIN32RES) \
+	test_ddl_deparse.o
 PGFILEDESC = "test_ddl_deparse - regression testing for DDL deparsing"
 
 EXTENSION = test_ddl_deparse
@@ -28,9 +31,17 @@ REGRESS = test_ddl_deparse \
 	opfamily \
 	defprivs \
 	textsearch \
-	matviews
+	matviews \
+	deparse_create_table \
+	deparse_alter_table
+
+TAP_TESTS = 1
 
 EXTRA_INSTALL = contrib/pg_stat_statements
+
+# needed by the TAP test to locate regress.so for the core regression run
+REGRESS_SHLIB=$(abs_top_builddir)/src/test/regress/regress$(DLSUFFIX)
+export REGRESS_SHLIB
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
