@@ -35,6 +35,10 @@ extern void pg_atomic_init_u64_impl(volatile pg_atomic_uint64 *ptr, uint64 val_)
 #define PG_HAVE_ATOMIC_COMPARE_EXCHANGE_U64
 extern bool pg_atomic_compare_exchange_u64_impl(volatile pg_atomic_uint64 *ptr,
 												uint64 *expected, uint64 newval);
+extern bool pg_atomic_compare_exchange_u64_lo_impl(volatile pg_atomic_uint64 *ptr,
+												   uint64 *expected, uint64 newval);
+extern bool pg_atomic_compare_exchange_u64_hi_impl(volatile pg_atomic_uint64 *ptr,
+												   uint64 *expected, uint64 newval);
 
 #define PG_HAVE_ATOMIC_FETCH_ADD_U64
 extern uint64 pg_atomic_fetch_add_u64_impl(volatile pg_atomic_uint64 *ptr, int64 add_);
