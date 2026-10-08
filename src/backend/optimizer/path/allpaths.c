@@ -103,6 +103,8 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static void set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel,
 							   RangeTblEntry *rte);
 static void create_plain_partial_paths(PlannerInfo *root, RelOptInfo *rel);
+static void add_extras_append_path(PlannerInfo *root, RelOptInfo *rel,
+								   List *live_childrels);
 static void set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 									  RangeTblEntry *rte);
 static void set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -1410,6 +1412,114 @@ set_grouped_rel_pathlist(PlannerInfo *root, RelOptInfo *rel)
 
 
 /*
+ * add_extras_append_path
+ *	  Build an unordered, unparameterized Append over child paths that all
+ *	  emit the same extra values, if there are any worth emitting.
+ *
+ * A partitioned table's index on an expression is an index on that
+ * expression in every partition, so each child may have an index-only scan
+ * that reads it (see indexonly_path_target()).  The Append can pass such a
+ * value up, as a join does, but only if every child emits it: they must all
+ * return the Append's targetlist.  The candidates are the parent's
+ * partitioned indexes' expressions that the query's targetlist uses; for
+ * each, translated to the child, we take the child's cheapest path that
+ * emits it.  create_append_child_plan() puts each child's values in the
+ * Append's order.
+ *
+ * Only an unordered, non-partial Append is built this way; an ordered or
+ * parallel Append still computes the expression above it.
+ */
+static void
+add_extras_append_path(PlannerInfo *root, RelOptInfo *rel,
+					   List *live_childrels)
+{
+	List	   *extras = NIL;
+	List	   *tlist_exprs;
+	AppendPathInput input = {0};
+	PathTarget *target;
+	AppendPath *apath;
+	ListCell   *lc;
+
+	if (rel->reloptkind != RELOPT_BASEREL || live_childrels == NIL ||
+		root->processed_tlist == NIL)
+		return;
+
+	tlist_exprs = query_tlist_exprs(root, rel);
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+		ListCell   *le = list_head(index->indexprs);
+
+		for (int i = 0; i < index->ncolumns; i++)
+		{
+			Node	   *expr;
+			ListCell   *lt;
+
+			if (index->indexkeys[i] != 0)
+				continue;
+			expr = (Node *) lfirst(le);
+			le = lnext(index->indexprs, le);
+
+			/*
+			 * Only a column the children's index-only scans can return (see
+			 * indexonly_path_target()), and not one the rel's target already
+			 * has: apply_scanjoin_target_to_paths() rebuilds the Appends once
+			 * the target is the final one, and its children then emit nothing
+			 * extra.
+			 */
+			if (!index->canreturn[i] ||
+				list_member(rel->reltarget->exprs, expr) ||
+				!expr_worth_emitting(root, expr))
+				continue;
+			foreach(lt, tlist_exprs)
+			{
+				if (expr_contains(lfirst(lt), expr))
+				{
+					extras = list_append_unique(extras, expr);
+					break;
+				}
+			}
+		}
+	}
+	if (extras == NIL)
+		return;
+
+	foreach(lc, live_childrels)
+	{
+		RelOptInfo *childrel = (RelOptInfo *) lfirst(lc);
+		List	   *child_extras;
+		Path	   *best = NULL;
+		ListCell   *lp;
+
+		child_extras = (List *)
+			adjust_appendrel_attrs_multilevel(root, (Node *) extras,
+											  childrel, childrel->top_parent);
+		foreach(lp, childrel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lp);
+
+			if (path->param_info == NULL &&
+				path_covers_extras(path, child_extras))
+			{
+				best = path;	/* pathlist is sorted by total cost */
+				break;
+			}
+		}
+		if (best == NULL)
+			return;
+		accumulate_append_subpath(best, &input.subpaths, NULL,
+								  &input.child_append_relid_sets);
+	}
+
+	apath = create_append_path(root, rel, input, NIL, NULL, 0, false, -1);
+	target = copy_pathtarget(rel->reltarget);
+	foreach(lc, extras)
+		add_new_column_to_pathtarget(target, (Expr *) lfirst(lc));
+	apath->path.pathtarget = set_pathtarget_cost_width(root, target);
+	add_path(rel, (Path *) apath);
+}
+
+/*
  * add_paths_to_append_rel
  *		Generate paths for the given append relation given the set of non-dummy
  *		child rels.
@@ -1632,6 +1742,14 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		add_path(rel, (Path *) create_append_path(root, rel, unparameterized,
 												  NIL, NULL, 0, false,
 												  -1));
+
+	/*
+	 * Also consider an Append that emits extra values (see
+	 * path_extra_exprs()) its children read from their indexes, so a join
+	 * above it doesn't compute them.
+	 */
+	if (unparameterized_valid)
+		add_extras_append_path(root, rel, live_childrels);
 
 	/* build an AppendPath for the cheap startup paths, if valid */
 	if (startup_valid)
