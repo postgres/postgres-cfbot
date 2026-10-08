@@ -937,6 +937,9 @@ typedef struct ScalarArrayOpExpr
 	ParseLoc	location;
 } ScalarArrayOpExpr;
 
+/* Minimum array length for which hashing a ScalarArrayOpExpr pays off */
+#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
+
 /*
  * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT
  *
