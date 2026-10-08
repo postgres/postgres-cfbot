@@ -231,7 +231,12 @@ extern bool index_orderby_returnable(IndexOptInfo *index, int indexcol,
 extern bool orderby_tlist_match(Expr *expr, Expr *orderby);
 extern QualCost path_target_cost(PlannerInfo *root, Path *path,
 								 PathTarget *target);
-extern bool index_path_emits_orderby(IndexPath *ipath);
+extern List *path_extra_exprs(Path *path);
+extern bool path_emits_extras(Path *path);
+extern bool expr_contains(Node *expr, Node *sub);
+extern bool expr_worth_emitting(PlannerInfo *root, Node *expr);
+extern QualCost indexonly_qual_cost(PlannerInfo *root, IndexPath *ipath,
+									List *qpquals, QualCost cost);
 extern ProjectionPath *create_projection_path(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  Path *subpath,
