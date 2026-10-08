@@ -19,6 +19,10 @@
 #include "postgres_fe.h"
 
 #include <sys/select.h>
+#ifdef HAVE_PSELECT
+#include <pthread.h>
+#include <signal.h>
+#endif
 
 #include "common/logging.h"
 #include "fe_utils/cancel.h"
@@ -82,26 +86,55 @@ select_loop(int maxFd, fd_set *workerset)
 	int			i;
 	fd_set		saveSet = *workerset;
 
-	if (CancelRequested)
-		return -1;
+#ifdef HAVE_PSELECT
+
+	/*
+	 * On platforms that have it, we wait with pselect() rather than select(),
+	 * so that we can react to a cancel request without polling for it.  The
+	 * problem with plain select() is a race: SIGINT can arrive after we check
+	 * CancelRequested but before select() starts waiting, in which case
+	 * select() would keep waiting until a socket happens to become readable
+	 * (which for a stuck server might be never).  We close that race by
+	 * keeping SIGINT blocked around the CancelRequested check and having
+	 * pselect() unblock it (via origmask) only for the duration of the wait:
+	 * a SIGINT delivered in the race window stays pending and then interrupts
+	 * pselect() immediately with EINTR, so we loop around and bail out.
+	 */
+	sigset_t	origmask;
+	sigset_t	blockmask;
+
+	sigemptyset(&blockmask);
+	sigaddset(&blockmask, SIGINT);
+	pthread_sigmask(SIG_BLOCK, &blockmask, &origmask);
+#endif
 
 	for (;;)
 	{
-		/*
-		 * On Windows, we need to check once in a while for cancel requests;
-		 * on other platforms we rely on select() returning when interrupted.
-		 */
-		struct timeval *tvp;
-#ifdef WIN32
-		struct timeval tv = {0, 1000000};
-
-		tvp = &tv;
-#else
-		tvp = NULL;
-#endif
+		if (CancelRequested)
+		{
+			i = -1;
+			break;
+		}
 
 		*workerset = saveSet;
-		i = select(maxFd + 1, workerset, NULL, NULL, tvp);
+#ifdef HAVE_PSELECT
+		/* NULL timeout: wait indefinitely, relying on SIGINT to wake us. */
+		i = pselect(maxFd + 1, workerset, NULL, NULL, NULL, &origmask);
+#else
+
+		/*
+		 * Without pselect() we can't wait race-free, so add a timeout of 1
+		 * second to the select() and poll CancelRequested manually as a
+		 * fallback.  This also covers Windows, where a cancel request is
+		 * signalled by a separate console-handler thread rather than by
+		 * interrupting the wait.
+		 */
+		{
+			struct timeval tv = {0, 1000000};
+
+			i = select(maxFd + 1, workerset, NULL, NULL, &tv);
+		}
+#endif
 
 #ifdef WIN32
 		if (i == SOCKET_ERROR)
@@ -114,13 +147,18 @@ select_loop(int maxFd, fd_set *workerset)
 #endif
 
 		if (i < 0 && errno == EINTR)
-			continue;			/* ignore this */
-		if (i < 0 || CancelRequested)
-			return -1;			/* but not this */
+			continue;			/* interrupted, re-check CancelRequested */
 		if (i == 0)
-			continue;			/* timeout (Win32 only) */
-		break;
+			continue;			/* timeout (only reachable via select()) */
+		break;					/* ready sockets, or a hard error */
 	}
+
+#ifdef HAVE_PSELECT
+	pthread_sigmask(SIG_SETMASK, &origmask, NULL);
+#endif
+
+	if (i < 0)
+		return -1;
 
 	return i;
 }
@@ -197,8 +235,7 @@ wait_on_slots(ParallelSlotArray *sa)
 {
 	int			i;
 	fd_set		slotset;
-	int			maxFd = 0;
-	PGconn	   *cancelconn = NULL;
+	int			maxFd = -1;
 
 	/* We must reconstruct the fd_set for each call to select_loop */
 	FD_ZERO(&slotset);
@@ -219,10 +256,6 @@ wait_on_slots(ParallelSlotArray *sa)
 		if (sock < 0)
 			continue;
 
-		/* Keep track of the first valid connection we see. */
-		if (cancelconn == NULL)
-			cancelconn = sa->slots[i].connection;
-
 		FD_SET(sock, &slotset);
 		if (sock > maxFd)
 			maxFd = sock;
@@ -232,12 +265,10 @@ wait_on_slots(ParallelSlotArray *sa)
 	 * If we get this far with no valid connections, processing cannot
 	 * continue.
 	 */
-	if (cancelconn == NULL)
+	if (maxFd < 0)
 		return false;
 
-	SetCancelConn(cancelconn);
 	i = select_loop(maxFd, &slotset);
-	ResetCancelConn();
 
 	/* failure? */
 	if (i < 0)
