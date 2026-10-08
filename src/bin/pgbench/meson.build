@@ -1,7 +1,14 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 pgbench_sources = files(
+  'commands.c',
+  'engine.c',
+  'init.c',
   'pgbench.c',
+  'poller.c',
+  'script.c',
+  'stats.c',
+  'variable.c',
 )
 
 exprscan = custom_target('exprscan',
