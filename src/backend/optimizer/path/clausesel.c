@@ -14,6 +14,8 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "catalog/pg_statistic.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
@@ -42,6 +44,9 @@ static void addRangeClause(RangeQueryClause **rqlist, Node *clause,
 						   bool varonleft, bool isLTsel, Selectivity s2);
 static RelOptInfo *find_single_rel_for_clauses(PlannerInfo *root,
 											   List *clauses);
+static double expr_nullfrac(PlannerInfo *root, Node *expr);
+static Selectivity semijoin_nulls_selectivity(PlannerInfo *root, List *args,
+											  SpecialJoinInfo *sjinfo);
 static Selectivity clauselist_selectivity_or(PlannerInfo *root,
 											 List *clauses,
 											 int varRelid,
@@ -578,6 +583,68 @@ find_single_rel_for_clauses(PlannerInfo *root, List *clauses)
 }
 
 /*
+ * expr_nullfrac -
+ *	  Return the null fraction of an expression, or zero if we have no
+ *	  statistics for it.
+ */
+static double
+expr_nullfrac(PlannerInfo *root, Node *expr)
+{
+	VariableStatData vardata;
+	double		nullfrac = 0.0;
+
+	examine_variable(root, expr, 0, &vardata);
+	if (HeapTupleIsValid(vardata.statsTuple))
+		nullfrac = ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
+	ReleaseVariableStats(vardata);
+
+	return nullfrac;
+}
+
+/*
+ * semijoin_nulls_selectivity -
+ *	  For "x IS NOT DISTINCT FROM y" as a semijoin or antijoin clause,
+ *	  estimate the fraction of outer rows whose input is null and that have
+ *	  an inner row whose input is null to match.
+ */
+static Selectivity
+semijoin_nulls_selectivity(PlannerInfo *root, List *args,
+						   SpecialJoinInfo *sjinfo)
+{
+	VariableStatData vardata1;
+	VariableStatData vardata2;
+	VariableStatData *outer;
+	VariableStatData *inner;
+	bool		join_is_reversed;
+	double		outer_nullfrac = 0.0;
+	double		inner_nulls = 0.0;
+
+	get_join_variables(root, args, sjinfo,
+					   &vardata1, &vardata2, &join_is_reversed);
+	outer = join_is_reversed ? &vardata2 : &vardata1;
+	inner = join_is_reversed ? &vardata1 : &vardata2;
+
+	if (HeapTupleIsValid(outer->statsTuple))
+		outer_nullfrac =
+			((Form_pg_statistic) GETSTRUCT(outer->statsTuple))->stanullfrac;
+
+	/*
+	 * The outer rows with a null input all have a match if there is at least
+	 * one inner row with a null input.  Assume that if we expect at least
+	 * one, and scale it down if we expect fewer.
+	 */
+	if (HeapTupleIsValid(inner->statsTuple) && inner->rel)
+		inner_nulls =
+			((Form_pg_statistic) GETSTRUCT(inner->statsTuple))->stanullfrac *
+			inner->rel->rows;
+
+	ReleaseVariableStats(vardata1);
+	ReleaseVariableStats(vardata2);
+
+	return outer_nullfrac * Min(inner_nulls, 1.0);
+}
+
+/*
  * treat_as_join_clause -
  *	  Decide whether an operator clause is to be handled by the
  *	  restriction or join estimator.  Subroutine for clause_selectivity().
@@ -797,13 +864,31 @@ clause_selectivity_ext(PlannerInfo *root,
 	}
 	else if (is_notclause(clause))
 	{
+		Node	   *arg = (Node *) get_notclausearg((Expr *) clause);
+
 		/* inverse of the selectivity of the underlying clause */
 		s1 = 1.0 - clause_selectivity_ext(root,
-										  (Node *) get_notclausearg((Expr *) clause),
+										  arg,
 										  varRelid,
 										  jointype,
 										  sjinfo,
 										  use_extended_stats);
+
+		/*
+		 * "x IS NOT DISTINCT FROM y" is NOT of a DistinctExpr.  As a semijoin
+		 * or antijoin clause, its estimate so far is that of "x = y", the
+		 * fraction of outer rows having a non-null match.  Add the outer rows
+		 * whose input is null and that can match an inner null.
+		 */
+		if (IsA(arg, DistinctExpr) &&
+			treat_as_join_clause(root, arg, rinfo, varRelid, sjinfo) &&
+			(sjinfo->jointype == JOIN_SEMI || sjinfo->jointype == JOIN_ANTI))
+		{
+			s1 += semijoin_nulls_selectivity(root,
+											 ((DistinctExpr *) arg)->args,
+											 sjinfo);
+			CLAMP_PROBABILITY(s1);
+		}
 	}
 	else if (is_andclause(clause))
 	{
@@ -854,11 +939,23 @@ clause_selectivity_ext(PlannerInfo *root,
 		/*
 		 * DistinctExpr has the same representation as OpExpr, but the
 		 * contained operator is "=" not "<>", so we must negate the result.
-		 * This estimation method doesn't give the right behavior for nulls,
-		 * but it's better than doing nothing.
+		 * First add the fraction of rows having both inputs null, which "="
+		 * does not count.  We don't do that for semijoins and antijoins,
+		 * where the "=" estimate is not a fraction of row pairs; see the NOT
+		 * case above for those.
 		 */
 		if (IsA(clause, DistinctExpr))
+		{
+			if (sjinfo == NULL ||
+				(sjinfo->jointype != JOIN_SEMI &&
+				 sjinfo->jointype != JOIN_ANTI))
+			{
+				s1 += expr_nullfrac(root, linitial(opclause->args)) *
+					expr_nullfrac(root, lsecond(opclause->args));
+				CLAMP_PROBABILITY(s1);
+			}
 			s1 = 1.0 - s1;
+		}
 	}
 	else if (is_funcclause(clause))
 	{
