@@ -1788,7 +1788,7 @@ wait_for_end_recovery(const char *conninfo, const struct CreateSubscriberOptions
 }
 
 /*
- * Create a publication that includes all tables in the database.
+ * Create a publication that includes all tables and sequences in the database.
  */
 static void
 create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo)
@@ -1840,7 +1840,7 @@ create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo)
 		pg_log_info("creating publication \"%s\" in database \"%s\"",
 					dbinfo->pubname, dbinfo->dbname);
 
-	appendPQExpBuffer(str, "CREATE PUBLICATION %s FOR ALL TABLES",
+	appendPQExpBuffer(str, "CREATE PUBLICATION %s FOR ALL TABLES, ALL SEQUENCES",
 					  ipubname_esc);
 
 	pg_log_debug("command is: %s", str->data);
