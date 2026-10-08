@@ -646,6 +646,9 @@ typedef struct ExprEvalStep
 											 * returns. */
 			bool		null_lhs_isnull;
 			struct ScalarArrayOpExprHashTable *elements_tab;
+
+			/* non-Const array, evaluated once; NULL for a Const */
+			struct ExprState *array_expr;
 			FunctionCallInfo fcinfo_data;	/* arguments etc */
 			ScalarArrayOpExpr *saop;
 		}			hashedscalararrayop;
