@@ -2449,9 +2449,9 @@ ExecHashBuildSkewHash(HashState *hashstate, HashJoinTable hashtable,
 	if (!HeapTupleIsValid(statsTuple))
 		return;
 
-	if (get_attstatsslot(&sslot, statsTuple,
-						 STATISTIC_KIND_MCV, InvalidOid,
-						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+	if (get_attstatsslot_mcv(&sslot, statsTuple,
+							 InvalidOid,
+							 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
 	{
 		double		frac;
 		int			nbuckets;

@@ -377,6 +377,7 @@ enum AttStatsColumns
 	ATTSTATS_RANGE_LENGTH_HISTOGRAM,
 	ATTSTATS_RANGE_EMPTY_FRAC,
 	ATTSTATS_RANGE_BOUNDS_HISTOGRAM,
+	ATTSTATS_MOST_COMMON_VALS_KIND,
 	ATTSTATS_NUM_FIELDS,
 };
 
@@ -6013,15 +6014,43 @@ fetch_attstats(PGconn *conn, int server_version_num,
 
 	initStringInfo(&sql);
 
+	appendStringInfoString(&sql,
+						   "SELECT s.attname,"
+						   " null_frac,"
+						   " avg_width,"
+						   " n_distinct,"
+						   " most_common_vals,"
+						   " most_common_freqs,"
+						   " histogram_bounds,"
+						   " correlation,"
+						   " most_common_elems,"
+						   " most_common_elem_freqs,"
+						   " elem_count_histogram,"
+						   " range_length_histogram,"
+						   " range_empty_frac,"
+						   " range_bounds_histogram,"
+						   " CASE WHEN sat.stakind1 in (1, 8) THEN sat.stakind1"
+						   " WHEN sat.stakind2 in (1, 8) THEN sat.stakind2"
+						   " WHEN sat.stakind3 in (1, 8) THEN sat.stakind3"
+						   " WHEN sat.stakind4 in (1, 8) THEN sat.stakind4"
+						   " WHEN sat.stakind5 in (1, 8) THEN sat.stakind5"
+						   " ELSE NULL END most_common_vals_kind"
+						   " FROM (");
+
 	/* Type name is collatable since Postgres 12 */
 	if (server_version_num >= 120000)
 		appendStringInfoString(&sql,
-							   "SELECT DISTINCT ON (attname COLLATE \"C\") attname,");
+							   "SELECT DISTINCT ON (attname COLLATE \"C\") attname,inherited,"
+							   " (tablename COLLATE \"C\") tablename,"
+							   " (schemaname COLLATE \"C\") schemaname,");
 	else
 		appendStringInfoString(&sql,
-							   "SELECT DISTINCT ON (attname::text COLLATE \"C\") attname,");
+							   "SELECT DISTINCT ON (attname::text COLLATE \"C\") attname,inherited,"
+							   " (tablename::text COLLATE \"C\") tablename,"
+							   " (schemaname::text COLLATE \"C\") schemaname,");
 
 	appendStringInfoString(&sql,
+						   " attnum,"
 						   " null_frac,"
 						   " avg_width,"
 						   " n_distinct,"
@@ -6038,7 +6067,9 @@ fetch_attstats(PGconn *conn, int server_version_num,
 							   " elem_count_histogram,");
 	else
 		appendStringInfoString(&sql,
-							   " NULL, NULL, NULL,");
+							   " NULL most_common_elems,"
+							   " NULL most_common_elem_freqs,"
+							   " NULL elem_count_histogram,");
 
 	/* Range stats are supported since Postgres 17 */
 	if (server_version_num >= 170000)
@@ -6048,7 +6079,9 @@ fetch_attstats(PGconn *conn, int server_version_num,
 							   " range_bounds_histogram");
 	else
 		appendStringInfoString(&sql,
-							   " NULL, NULL, NULL");
+							   " NULL range_length_histogram,"
+							   " NULL range_empty_frac,"
+							   " NULL range_bounds_histogram");
 
 	appendStringInfoString(&sql,
 						   " FROM pg_catalog.pg_stats"
@@ -6067,10 +6100,25 @@ fetch_attstats(PGconn *conn, int server_version_num,
 	 */
 	if (server_version_num >= 120000)
 		appendStringInfoString(&sql,
-							   " ORDER BY attname COLLATE \"C\", inherited DESC");
+							   " ORDER BY attname COLLATE \"C\",inherited DESC,"
+							   " tablename COLLATE \"C\","
+							   " schemaname COLLATE \"C\"");
 	else
 		appendStringInfoString(&sql,
-							   " ORDER BY attname::text COLLATE \"C\", inherited DESC");
+							   " ORDER BY attname::text COLLATE \"C\",inherited DESC,"
+							   " tablename::text COLLATE \"C\","
+							   " schemaname::text COLLATE \"C\",");
+
+	appendStringInfoString(&sql,
+						   " ) s"
+						   " JOIN pg_namespace n ON s.schemaname = n.nspname"
+						   " JOIN pg_class c ON n.oid = c.relnamespace AND s.tablename = c.relname"
+						   " JOIN pg_attribute a ON c.oid = a.attrelid AND s.attnum = a.attnum"
+						   " LEFT JOIN pg_statistic sat ON c.oid = sat.starelid AND s.attnum = sat.staattnum"
+						   " AND s.inherited = sat.stainherit"
+						   " AND (sat.stakind1 in (1, 8) OR sat.stakind2 in (1, 8)"
+						   " OR sat.stakind3 in (1, 8) OR sat.stakind4 in (1, 8)"
+						   " OR sat.stakind5 in (1, 8))");
 
 	res = pgfdw_exec_query(conn, sql.data, NULL);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -6373,6 +6421,8 @@ import_fetched_statistics(Relation relation,
 						  get_opt_value(res, row, ATTSTATS_RANGE_EMPTY_FRAC));
 			set_text_arg(&args[13],
 						 get_opt_value(res, row, ATTSTATS_RANGE_BOUNDS_HISTOGRAM));
+			set_int32_arg(&args[14],
+						  get_opt_value(res, row, ATTSTATS_MOST_COMMON_VALS_KIND));
 
 			/* Try to import the statistics. */
 			if (!import_attribute_statistics(relation, attnum, false,
@@ -6380,7 +6430,7 @@ import_fetched_statistics(Relation relation,
 											 &args[3], &args[4], &args[5],
 											 &args[6], &args[7], &args[8],
 											 &args[9], &args[10], &args[11],
-											 &args[12], &args[13]))
+											 &args[12], &args[13], &args[14]))
 			{
 				ereport(WARNING,
 						errmsg("could not import statistics for foreign table \"%s.%s\" --- attribute statistics import failed for column \"%s\" of this foreign table",

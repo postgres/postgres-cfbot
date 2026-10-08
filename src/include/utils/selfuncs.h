@@ -177,7 +177,7 @@ extern double get_variable_numdistinct(VariableStatData *vardata,
 extern double mcv_selectivity(VariableStatData *vardata,
 							  FmgrInfo *opproc, Oid collation,
 							  Datum constval, bool varonleft,
-							  double *sumcommonp);
+							  double *sumcommonp, Oid operator);
 extern double histogram_selectivity(VariableStatData *vardata,
 									FmgrInfo *opproc, Oid collation,
 									Datum constval, bool varonleft,
