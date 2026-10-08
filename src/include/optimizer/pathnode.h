@@ -63,6 +63,15 @@ extern void add_partial_path(RelOptInfo *parent_rel, Path *new_path);
 extern bool add_partial_path_precheck(RelOptInfo *parent_rel,
 									  int disabled_nodes, Cost startup_cost,
 									  Cost total_cost, List *pathkeys);
+extern bool add_path_precheck_extras(RelOptInfo *parent_rel,
+									 int disabled_nodes, Cost startup_cost,
+									 Cost total_cost, List *pathkeys,
+									 Relids required_outer, List *extras);
+extern bool add_partial_path_precheck_extras(RelOptInfo *parent_rel,
+											 int disabled_nodes,
+											 Cost startup_cost,
+											 Cost total_cost, List *pathkeys,
+											 List *extras);
 
 extern Path *create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 								 Relids required_outer, int parallel_workers);
@@ -231,7 +240,13 @@ extern bool index_orderby_returnable(IndexOptInfo *index, int indexcol,
 extern bool orderby_tlist_match(Expr *expr, Expr *orderby);
 extern QualCost path_target_cost(PlannerInfo *root, Path *path,
 								 PathTarget *target);
-extern bool index_path_emits_orderby(IndexPath *ipath);
+extern List *path_extra_exprs(Path *path);
+extern bool path_emits_extras(Path *path);
+extern bool expr_worth_emitting(PlannerInfo *root, Node *expr);
+extern List *query_tlist_exprs(PlannerInfo *root, RelOptInfo *rel);
+extern bool path_covers_extras(Path *path, List *extras);
+extern QualCost indexonly_qual_cost(PlannerInfo *root, IndexPath *ipath,
+									List *qpquals, QualCost cost);
 extern ProjectionPath *create_projection_path(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  Path *subpath,
