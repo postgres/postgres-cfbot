@@ -1344,7 +1344,6 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					/* And perform the operation */
 					scratch.opcode = EEOP_HASHED_SCALARARRAYOP;
 					scratch.d.hashedscalararrayop.inclause = opexpr->useOr;
-					scratch.d.hashedscalararrayop.finfo = finfo;
 					scratch.d.hashedscalararrayop.fcinfo_data = fcinfo;
 					scratch.d.hashedscalararrayop.saop = opexpr;
 
