@@ -42,6 +42,31 @@ spg_quad_config(PG_FUNCTION_ARGS)
 	DatumGetBool(DirectFunctionCall2(f, PointPGetDatum(x), PointPGetDatum(y)))
 
 /*
+ * Classify one coordinate of a point against the centroid's: 1 if greater,
+ * -1 if less, 0 if equal.  This uses the fuzzy tests of getQuadrant(), with
+ * FPeq() taking precedence as it does there, and compares exactly only when
+ * all of them fail.  That decides any finite value; a NaN fails the exact
+ * comparisons too and still reaches the error.
+ */
+static int
+getAxisSide(float8 tst, float8 centroid)
+{
+	if (FPeq(tst, centroid))
+		return 0;
+	if (FPgt(tst, centroid))
+		return 1;
+	if (FPlt(tst, centroid))
+		return -1;
+	if (tst > centroid)
+		return 1;
+	if (tst < centroid)
+		return -1;
+
+	elog(ERROR, "getQuadrant: impossible case");
+	return 0;
+}
+
+/*
  * Determine which quadrant a point falls into, relative to the centroid.
  *
  * Quadrants are identified like this:
@@ -56,6 +81,9 @@ spg_quad_config(PG_FUNCTION_ARGS)
 static int16
 getQuadrant(Point *centroid, Point *tst)
 {
+	int			xside;
+	int			yside;
+
 	if ((SPTEST(point_above, tst, centroid) ||
 		 SPTEST(point_horiz, tst, centroid)) &&
 		(SPTEST(point_right, tst, centroid) ||
@@ -77,21 +105,17 @@ getQuadrant(Point *centroid, Point *tst)
 		return 4;
 
 	/*
-	 * The fuzzy tests above can all fail on one axis, because FPeq() rounds
-	 * a difference while FPlt() and FPgt() round a sum.  Exact comparisons
-	 * always pick a quadrant; use them with the same axis tie-breaking.
+	 * The fuzzy tests above can all fail on one axis, because FPeq() rounds a
+	 * difference while FPlt() and FPgt() round a sum.  Compare exactly only
+	 * on that axis.  On the other axis, keep the result of the fuzzy tests,
+	 * because searches route by that result too.
 	 */
-	if (tst->y >= centroid->y && tst->x >= centroid->x)
-		return 1;
-	if (tst->y < centroid->y && tst->x >= centroid->x)
-		return 2;
-	if (tst->y <= centroid->y && tst->x < centroid->x)
-		return 3;
-	if (tst->y > centroid->y && tst->x < centroid->x)
-		return 4;
+	xside = getAxisSide(tst->x, centroid->x);
+	yside = getAxisSide(tst->y, centroid->y);
 
-	elog(ERROR, "getQuadrant: impossible case");
-	return 0;
+	if (xside >= 0)
+		return (yside >= 0) ? 1 : 2;
+	return (yside <= 0) ? 3 : 4;
 }
 
 /* Returns bounding box of a given quadrant inside given bounding box */
