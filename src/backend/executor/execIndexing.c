@@ -114,6 +114,7 @@
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
 #include "storage/lmgr.h"
+#include "storage/predicate.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/multirangetypes.h"
@@ -968,6 +969,56 @@ retry:
 	 * which that wouldn't be true --- for instance, if the operator is <>. So
 	 * we no longer complain if found_self is still false.
 	 */
+
+	/*
+	 * The dirty scan skipped rows it found dead, so repeat the search with the
+	 * query snapshot to see whether any of them is still ours.
+	 */
+	if (!conflict && ActiveSnapshotSet() &&
+		CheckForSerializableConflictOutNeeded(heap, GetActiveSnapshot()))
+	{
+		Datum		existing_values[INDEX_MAX_KEYS];
+		bool		existing_isnull[INDEX_MAX_KEYS];
+		uint64		conflicts;
+
+		index_scan = index_beginscan(heap, index, false,
+									 GetActiveSnapshot(), NULL, indnkeyatts, 0,
+									 SO_NONE);
+		index_rescan(index_scan, scankeys, indnkeyatts, NULL, 0);
+
+		for (;;)
+		{
+			conflicts = GetSerializableConflictOutCount();
+
+			if (!table_index_getnext_slot(index_scan, ForwardScanDirection,
+										  existing_slot))
+				break;
+
+			if (ItemPointerIsValid(tupleid) &&
+				ItemPointerEquals(tupleid, &existing_slot->tts_tid))
+				continue;
+
+			/*
+			 * A row we can still see is only in our way if a concurrent
+			 * serializable transaction is the one that deleted it.
+			 */
+			if (GetSerializableConflictOutCount() == conflicts)
+				continue;
+
+			FormIndexDatum(indexInfo, existing_slot, estate,
+						   existing_values, existing_isnull);
+
+			if (index_scan->xs_recheck &&
+				!index_recheck_constraint(index, constr_procs,
+										  existing_values, existing_isnull,
+										  values))
+				continue;
+
+			ReportSerializableKeyReuse();
+		}
+
+		index_endscan(index_scan);
+	}
 
 	econtext->ecxt_scantuple = save_scantuple;
 
