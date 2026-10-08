@@ -406,12 +406,52 @@ select gist_ios_costly(a.i), d.tag, n.k from gist_ios_cost a
   join gist_ios_dim d on d.i = a.i join gist_ios_dim2 n on n.i = a.i;
 reset enable_hashjoin;
 reset enable_mergejoin;
--- But not from the nullable side of an outer join: there the query's Var
--- differs from the index's (it may be null), so the value read below the
--- join isn't the one asked for.
+-- Also from the nullable side of an outer join, because the function is
+-- strict: a null-extended row gets NULL for the value, which is what the
+-- function returns for a NULL argument.  The value is used inside a larger,
+-- non-strict expression above the join.
 explain (verbose, costs off)
 select coalesce(gist_ios_costly(a.i), -1) from gist_ios_dim d
   left join gist_ios_cost a on a.i = d.i * 2;
+-- A function that isn't strict may return something else for NULL, so it's
+-- computed above the join.
+create function gist_ios_nonstrict(int) returns int
+  language plpgsql immutable called on null input cost 100000
+  as $$ begin return coalesce($1, -1); end $$;
+create index on gist_ios_cost (i, gist_ios_nonstrict(i));
+vacuum analyze gist_ios_cost;
+explain (verbose, costs off)
+select gist_ios_nonstrict(a.i) from gist_ios_dim d
+  left join gist_ios_cost a on a.i = d.i * 2;
+select count(*) filter (where v = -1) as null_extended
+  from (select gist_ios_nonstrict(a.i) as v from gist_ios_dim d
+        left join gist_ios_cost a on a.i = d.i * 2) s;
+drop function gist_ios_nonstrict(int) cascade;
+-- A parallel-restricted function: the value is read from the index inside
+-- the workers, not evaluated there, and passed up through the Gather.  (Not
+-- a temp table, which can't be scanned in parallel.)
+create function gist_ios_restricted(int) returns int
+  language plpgsql immutable strict parallel restricted cost 100000
+  as $$ begin return $1; end $$;
+create table gist_ios_par (i int);
+insert into gist_ios_par select g from generate_series(1, 10000) g;
+create index on gist_ios_par (i, gist_ios_restricted(i));
+vacuum analyze gist_ios_par;
+set parallel_setup_cost = 0;
+set parallel_tuple_cost = 0;
+set min_parallel_index_scan_size = 0;
+set max_parallel_workers_per_gather = 2;
+set parallel_leader_participation = off;
+explain (verbose, costs off)
+select gist_ios_restricted(i) from gist_ios_par;
+select count(*), sum(v) from (select gist_ios_restricted(i) as v from gist_ios_par) s;
+reset parallel_setup_cost;
+reset parallel_tuple_cost;
+reset min_parallel_index_scan_size;
+reset max_parallel_workers_per_gather;
+reset parallel_leader_participation;
+drop table gist_ios_par;
+drop function gist_ios_restricted(int);
 -- A partitioned table whose partitions all have the index: each child reads
 -- the value and the Append passes it up, even when a partition's columns
 -- are in a different order.
@@ -427,6 +467,10 @@ vacuum analyze gist_ios_part;
 explain (verbose, costs off)
 select gist_ios_costly(p.i), d.tag from gist_ios_part p
   join gist_ios_dim d on d.i = p.i;
+-- An ordered Append passes the value up as well, here into a merge join.
+explain (verbose, costs off)
+select gist_ios_costly(p.i), d.tag from gist_ios_part p
+  join gist_ios_dim d on d.i = p.i order by p.i;
 -- An index created on only one partition doesn't count: every child must
 -- emit the value for the Append to.
 create temp table gist_ios_part_x (i int) partition by range (i);

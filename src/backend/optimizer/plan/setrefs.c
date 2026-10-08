@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -180,6 +181,10 @@ static Var *search_indexed_tlist_for_phv(PlaceHolderVar *phv,
 static Var *search_indexed_tlist_for_non_var(Expr *node,
 											 indexed_tlist *itlist,
 											 int newvarno);
+static Var *search_indexed_tlist_for_nulled_expr(PlannerInfo *root,
+												 Expr *node,
+												 indexed_tlist *itlist,
+												 int newvarno);
 static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
 												  Index sortgroupref,
 												  indexed_tlist *itlist,
@@ -3178,6 +3183,57 @@ search_indexed_tlist_for_non_var(Expr *node,
 }
 
 /*
+ * search_indexed_tlist_for_nulled_expr
+ *	  Like search_indexed_tlist_for_non_var(), for an expression above an
+ *	  outer join whose Vars may carry nullingrels the input's don't.
+ *
+ * An input of an outer join may emit a non-Var expression it read from an
+ * index (see path_extra_exprs()).  Above the join, the query's copy of that
+ * expression has the join's bit added to its Vars' nullingrels, so equal()
+ * won't match it; the join adds the bit because it null-extends those Vars.
+ * It null-extends the input's copy of the expression too, so the two agree
+ * on every row if the expression yields NULL when its Vars are NULL, that
+ * is if it is strict.  Then match it ignoring nullingrels, as we match Vars
+ * here (NRM_SUPERSET).  The planner relies on this when it carries such a
+ * value up through an outer join (see join_path_target()).
+ */
+static Var *
+search_indexed_tlist_for_nulled_expr(PlannerInfo *root, Expr *node,
+									 indexed_tlist *itlist, int newvarno)
+{
+	Node	   *stripped = NULL;
+	ListCell   *lc;
+
+	if (IsA(node, Const) || IsA(node, Param) ||
+		bms_is_empty(root->outer_join_rels))
+		return NULL;
+
+	foreach(lc, itlist->tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Var) || IsA(tle->expr, PlaceHolderVar))
+			continue;
+		if (stripped == NULL)
+		{
+			if (contain_nonstrict_functions((Node *) node) ||
+				!contain_var_clause((Node *) node))
+				return NULL;
+			stripped = strip_nullingrels((Node *) node);
+		}
+		if (equal(stripped, strip_nullingrels((Node *) tle->expr)))
+		{
+			Var		   *newvar = makeVarFromTargetEntry(newvarno, tle);
+
+			newvar->varnosyn = 0;	/* wasn't ever a plain Var */
+			newvar->varattnosyn = 0;
+			return newvar;
+		}
+	}
+	return NULL;
+}
+
+/*
  * search_indexed_tlist_for_sortgroupref --- find a sort/group expression
  *
  * If a match is found, return a Var constructed to reference the tlist item.
@@ -3384,6 +3440,11 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->outer_itlist,
 												  OUTER_VAR);
+		if (newvar == NULL && context->nrm_match == NRM_SUPERSET)
+			newvar = search_indexed_tlist_for_nulled_expr(context->root,
+														  (Expr *) node,
+														  context->outer_itlist,
+														  OUTER_VAR);
 		if (newvar)
 			return (Node *) newvar;
 	}
@@ -3392,6 +3453,11 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->inner_itlist,
 												  INNER_VAR);
+		if (newvar == NULL && context->nrm_match == NRM_SUPERSET)
+			newvar = search_indexed_tlist_for_nulled_expr(context->root,
+														  (Expr *) node,
+														  context->inner_itlist,
+														  INNER_VAR);
 		if (newvar)
 			return (Node *) newvar;
 	}

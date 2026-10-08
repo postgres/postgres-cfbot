@@ -234,6 +234,7 @@ extern QualCost path_target_cost(PlannerInfo *root, Path *path,
 extern List *path_extra_exprs(Path *path);
 extern bool path_emits_extras(Path *path);
 extern bool expr_contains(Node *expr, Node *sub);
+extern Node *strip_nullingrels(Node *node);
 extern bool expr_worth_emitting(PlannerInfo *root, Node *expr);
 extern QualCost indexonly_qual_cost(PlannerInfo *root, IndexPath *ipath,
 									List *qpquals, QualCost cost);
