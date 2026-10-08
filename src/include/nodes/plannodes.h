@@ -1008,6 +1008,8 @@ typedef struct NestLoop
 	Join		join;
 	/* list of NestLoopParam nodes */
 	List	   *nestParams;
+	/* keep inner side rewindable: gate is the sole source of nestloop params */
+	bool		keep_inner_rewind;
 } NestLoop;
 
 typedef struct NestLoopParam
