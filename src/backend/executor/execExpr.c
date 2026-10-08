@@ -1272,24 +1272,38 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				FunctionCallInfo fcinfo;
 				AclResult	aclresult;
 				Oid			cmpfuncid;
+				bool		use_hashed_step;
+
+				Assert(list_length(opexpr->args) == 2);
+				scalararg = (Expr *) linitial(opexpr->args);
+				arrayarg = (Expr *) lsecond(opexpr->args);
+
+				/*
+				 * The hashed step reads a non-Const array only once.  That is
+				 * wrong where the expression is reused with new parameter
+				 * values (no parent, as in PL/pgSQL) or must catch errors
+				 * (escontext, as in JSON ON ERROR).
+				 */
+				use_hashed_step = OidIsValid(opexpr->hashfuncid) &&
+					(IsA(arrayarg, Const) ||
+					 (state->parent != NULL && state->escontext == NULL));
 
 				/*
 				 * Select the correct comparison function.  When we do hashed
 				 * NOT IN clauses, the opfuncid will be the inequality
 				 * comparison function and negfuncid will be set to equality.
 				 * We need to use the equality function for hash probes.
+				 *
+				 * Only the hashed step may use negfuncid; the plain step must
+				 * use the operator itself ("<>").
 				 */
-				if (OidIsValid(opexpr->negfuncid))
+				if (use_hashed_step && OidIsValid(opexpr->negfuncid))
 				{
 					Assert(OidIsValid(opexpr->hashfuncid));
 					cmpfuncid = opexpr->negfuncid;
 				}
 				else
 					cmpfuncid = opexpr->opfuncid;
-
-				Assert(list_length(opexpr->args) == 2);
-				scalararg = (Expr *) linitial(opexpr->args);
-				arrayarg = (Expr *) lsecond(opexpr->args);
 
 				/* Check permission to call function */
 				aclresult = object_aclcheck(ProcedureRelationId, cmpfuncid,
@@ -1300,7 +1314,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 								   get_func_name(cmpfuncid));
 				InvokeFunctionExecuteHook(cmpfuncid);
 
-				if (OidIsValid(opexpr->hashfuncid))
+				if (use_hashed_step)
 				{
 					aclresult = object_aclcheck(ProcedureRelationId, opexpr->hashfuncid,
 												GetUserId(),
@@ -1320,13 +1334,13 @@ ExecInitExprRec(Expr *node, ExprState *state,
 										 opexpr->inputcollid, NULL, NULL);
 
 				/*
-				 * If hashfuncid is set, we create a EEOP_HASHED_SCALARARRAYOP
+				 * If use_hashed_step, we create a EEOP_HASHED_SCALARARRAYOP
 				 * step instead of a EEOP_SCALARARRAYOP.  This provides much
 				 * faster lookup performance than the normal linear search
 				 * when the number of items in the array is anything but very
 				 * small.
 				 */
-				if (OidIsValid(opexpr->hashfuncid))
+				if (use_hashed_step)
 				{
 					/* Evaluate scalar directly into left function argument */
 					ExecInitExprRec(scalararg, state,
@@ -1339,7 +1353,17 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					 * EEOP_HASHED_SCALARARRAYOP, and will not be passed to
 					 * any other expression.
 					 */
-					ExecInitExprRec(arrayarg, state, resv, resnull);
+					if (IsA(arrayarg, Const))
+					{
+						ExecInitExprRec(arrayarg, state, resv, resnull);
+						scratch.d.hashedscalararrayop.array_expr = NULL;
+					}
+					else
+					{
+						/* evaluated once, by EEOP_HASHED_SCALARARRAYOP */
+						scratch.d.hashedscalararrayop.array_expr =
+							ExecInitExpr(arrayarg, state->parent);
+					}
 
 					/* And perform the operation */
 					scratch.opcode = EEOP_HASHED_SCALARARRAYOP;
