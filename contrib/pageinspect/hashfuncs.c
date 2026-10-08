@@ -28,8 +28,7 @@ PG_FUNCTION_INFO_V1(hash_page_items);
 PG_FUNCTION_INFO_V1(hash_bitmap_info);
 PG_FUNCTION_INFO_V1(hash_metapage_info);
 
-#define IS_INDEX(r) ((r)->rd_rel->relkind == RELKIND_INDEX)
-#define IS_HASH(r) ((r)->rd_rel->relam == HASH_AM_OID)
+#define IS_HASH(r) (IS_INDEX(r) && (r)->rd_rel->relam == HASH_AM_OID)
 
 /* ------------------------------------------------
  * structure for single hash page statistics
@@ -420,7 +419,7 @@ hash_bitmap_info(PG_FUNCTION_ARGS)
 	 */
 	indexRel = relation_open(indexRelid, AccessShareLock);
 
-	if (!IS_INDEX(indexRel) || !IS_HASH(indexRel))
+	if (!IS_HASH(indexRel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a %s index",
