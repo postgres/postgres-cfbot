@@ -524,7 +524,8 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 						 errmsg("WAL summaries are required on timeline %u from %X/%08X to %X/%08X, but no summaries for that timeline and LSN range exist",
 								tle->tli,
 								LSN_FORMAT_ARGS(tli_start_lsn),
-								LSN_FORMAT_ARGS(tli_end_lsn))));
+								LSN_FORMAT_ARGS(tli_end_lsn)),
+						 errhint("Consider taking a new full backup to use as the basis for future incremental backups.")));
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -533,7 +534,8 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 								LSN_FORMAT_ARGS(tli_start_lsn),
 								LSN_FORMAT_ARGS(tli_end_lsn)),
 						 errdetail("The first unsummarized LSN in this range is %X/%08X.",
-								   LSN_FORMAT_ARGS(tli_missing_lsn))));
+								   LSN_FORMAT_ARGS(tli_missing_lsn)),
+						 errhint("Consider taking a new full backup to use as the basis for future incremental backups.")));
 		}
 
 		/*
