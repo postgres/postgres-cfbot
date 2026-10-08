@@ -377,6 +377,26 @@ contain_subplans_walker(Node *node, void *context)
 }
 
 
+/*
+ * expr_contains
+ *	  Is 'expr', or some subexpression of it, equal() to 'sub'?
+ */
+static bool
+expr_contains_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (equal(node, context))
+		return true;
+	return expression_tree_walker(node, expr_contains_walker, context);
+}
+
+bool
+expr_contains(Node *expr, Node *sub)
+{
+	return expr_contains_walker(expr, sub);
+}
+
 /*****************************************************************************
  *		Check clauses for mutable functions
  *****************************************************************************/
