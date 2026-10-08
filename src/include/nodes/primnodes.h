@@ -938,6 +938,12 @@ typedef struct ScalarArrayOpExpr
 } ScalarArrayOpExpr;
 
 /*
+ * Minimum array length for which hashing a ScalarArrayOpExpr beats a linear
+ * search
+ */
+#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
+
+/*
  * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT
  *
  * Notice the arguments are given as a List.  For NOT, of course the list
