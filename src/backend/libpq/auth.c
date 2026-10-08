@@ -356,6 +356,13 @@ set_authn_id(Port *port, const char *id)
 	MyClientConnectionInfo.authn_id = MemoryContextStrdup(TopMemoryContext, id);
 	MyClientConnectionInfo.auth_method = port->hba->auth_method;
 
+	/*
+	 * Copy out what we need from "hba" while valid -- it's freed early in
+	 * this backend's startup, well before the session ends (see
+	 * hba_clientcert's comment in libpq-be.h).
+	 */
+	port->hba_clientcert = port->hba->clientcert;
+
 	if (log_connections & LOG_CONNECTION_AUTHENTICATION)
 	{
 		ereport(LOG,
