@@ -20,6 +20,8 @@
 extern PGDLLIMPORT bool Trace_connection_negotiation;
 extern PGDLLIMPORT uint32 log_connections;
 extern PGDLLIMPORT char *log_connections_string;
+extern PGDLLIMPORT uint32 expose_information;
+extern PGDLLIMPORT char *expose_information_string;
 
 /* Other globals */
 extern PGDLLIMPORT struct ConnectionTiming conn_timing;
