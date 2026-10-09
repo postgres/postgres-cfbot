@@ -616,6 +616,17 @@ typedef struct IndexScan
 	List	   *indexorderbyops;
 	/* forward or backward or don't care */
 	ScanDirection indexorderdir;
+
+	/*
+	 * Per indexorderbyorig entry: may setrefs.c replace a target-list
+	 * occurrence of that expression with an INNER_VAR reference to the scan's
+	 * ORDER BY value?  True when the index column's opclass reports exact
+	 * distances that are the operator's result (amcanreturnorderby).
+	 * indexorderbytlist counts the replacements actually made (0 if none),
+	 * for EXPLAIN.
+	 */
+	List	   *indexorderbyexact;
+	int			indexorderbytlist;
 } IndexScan;
 
 /* ----------------

@@ -8259,8 +8259,15 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	 * If the tlist exprs are the same, we can just inject the sortgroupref
 	 * information into the existing pathtargets.  Otherwise, replace each
 	 * path with a projection path that generates the SRF-free scan/join
-	 * target.  This can't change the ordering of paths within rel->pathlist,
-	 * so we just modify the list in place.
+	 * target.  We modify the lists in place.  That usually adds the same cost
+	 * to every path, but a plain IndexScan doesn't pay for target entries it
+	 * takes from its ORDER BY values, so it can become cheaper relative to
+	 * the others; restore the cost ordering afterwards.
+	 *
+	 * A path may emit extra values beyond rel->reltarget (see
+	 * path_extra_exprs()).  Such a path needs a projection even when the
+	 * exprs are the same, since its target has more columns than
+	 * scanjoin_target's sortgrouprefs describe.
 	 */
 	foreach(lc, rel->pathlist)
 	{
@@ -8269,7 +8276,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		/* Shouldn't have any parameterized paths anymore */
 		Assert(subpath->param_info == NULL);
 
-		if (tlist_same_exprs)
+		if (tlist_same_exprs && !path_emits_extras(subpath))
 			subpath->pathtarget->sortgrouprefs =
 				scanjoin_target->sortgrouprefs;
 		else
@@ -8281,6 +8288,8 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			lfirst(lc) = newpath;
 		}
 	}
+	if (!tlist_same_exprs)
+		sort_pathlist_by_cost(rel->pathlist);
 
 	/* Likewise adjust the targets for any partial paths. */
 	foreach(lc, rel->partial_pathlist)
@@ -8290,7 +8299,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		/* Shouldn't have any parameterized paths anymore */
 		Assert(subpath->param_info == NULL);
 
-		if (tlist_same_exprs)
+		if (tlist_same_exprs && !path_emits_extras(subpath))
 			subpath->pathtarget->sortgrouprefs =
 				scanjoin_target->sortgrouprefs;
 		else
@@ -8302,6 +8311,8 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			lfirst(lc) = newpath;
 		}
 	}
+	if (!tlist_same_exprs)
+		sort_pathlist_by_cost(rel->partial_pathlist);
 
 	/*
 	 * Now, if final scan/join target contains SRFs, insert ProjectSetPath(s)

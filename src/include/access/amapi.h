@@ -144,6 +144,13 @@ typedef IndexBulkDeleteResult *(*amvacuumcleanup_function) (IndexVacuumInfo *inf
 /* can indexscan return IndexTuples? */
 typedef bool (*amcanreturn_function) (Relation indexRelation, int attno);
 
+/*
+ * Are the ORDER BY distances this column's opclass reports for an exact
+ * (xs_recheckorderby = false) leaf entry the ordering operator's own result?
+ */
+typedef bool (*amcanreturnorderby_function) (Relation indexRelation,
+											 int attno);
+
 /* estimate cost of an indexscan */
 typedef void (*amcostestimate_function) (PlannerInfo *root,
 										 IndexPath *path,
@@ -300,6 +307,7 @@ typedef struct IndexAmRoutine
 	ambulkdelete_function ambulkdelete;
 	amvacuumcleanup_function amvacuumcleanup;
 	amcanreturn_function amcanreturn;	/* can be NULL */
+	amcanreturnorderby_function amcanreturnorderby; /* can be NULL */
 	amcostestimate_function amcostestimate;
 	amgettreeheight_function amgettreeheight;	/* can be NULL */
 	amoptions_function amoptions;

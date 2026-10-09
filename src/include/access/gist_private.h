@@ -462,6 +462,7 @@ extern void gistkillitems(IndexScanDesc scan);
 extern bool gistgettuple(IndexScanDesc scan, ScanDirection dir);
 extern int64 gistgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
 extern bool gistcanreturn(Relation index, int attno);
+extern bool gistcanreturnorderby(Relation index, int attno);
 
 /* gistvalidate.c */
 extern bool gistvalidate(Oid opclassoid);

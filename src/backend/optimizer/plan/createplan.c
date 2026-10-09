@@ -24,6 +24,7 @@
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
@@ -83,6 +84,8 @@ static Plan *create_gating_plan(PlannerInfo *root, Path *path, Plan *plan,
 								List *gating_quals);
 static Plan *create_join_plan(PlannerInfo *root, JoinPath *best_path);
 static bool mark_async_capable_plan(Plan *plan, Path *path);
+static Plan *create_append_child_plan(PlannerInfo *root, Path *apath,
+									  Path *subpath);
 static Plan *create_append_plan(PlannerInfo *root, AppendPath *best_path,
 								int flags);
 static Plan *create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
@@ -935,6 +938,15 @@ use_physical_tlist(PlannerInfo *root, Path *path, int flags)
 	}
 
 	/*
+	 * Nor if the path emits extra values (see path_extra_exprs()), such as an
+	 * index scan's ORDER BY values or an index-only scan's expression
+	 * columns; a physical tlist wouldn't put them where whatever needs them
+	 * expects.
+	 */
+	if (path_emits_extras(path))
+		return false;
+
+	/*
 	 * For an index-only scan, the "physical tlist" is the index's indextlist.
 	 * We can only return that without a projection if all the index's columns
 	 * are returnable.
@@ -1205,6 +1217,59 @@ mark_async_capable_plan(Plan *plan, Path *path)
 }
 
 /*
+ * create_append_child_plan
+ *	  Build the plan for a child of an Append or MergeAppend.
+ *
+ * Every child must return the Append's tlist: its rel's reltarget, plus any
+ * extra values the Append emits (see add_extras_append_path()), translated
+ * to the child.  A child path may emit extra values of its own beyond its
+ * reltarget (see path_extra_exprs()), in some order; keep those the Append
+ * emits, in the Append's order, and drop the rest.
+ */
+static Plan *
+create_append_child_plan(PlannerInfo *root, Path *apath, Path *subpath)
+{
+	Plan	   *subplan = create_plan_recurse(root, subpath, CP_EXACT_TLIST);
+	List	   *append_extras = path_extra_exprs(apath);
+	List	   *child_extras;
+	List	   *tlist;
+	int			nrel;
+	ListCell   *lc;
+
+	if (!path_emits_extras(subpath))
+	{
+		Assert(append_extras == NIL);
+		return subplan;
+	}
+
+	nrel = list_length(subpath->parent->reltarget->exprs);
+	tlist = list_copy_head(subplan->targetlist, nrel);
+	child_extras = (List *)
+		adjust_appendrel_attrs_multilevel(root, (Node *) append_extras,
+										  subpath->parent,
+										  apath->parent);
+	foreach(lc, child_extras)
+	{
+		TargetEntry *tle = tlist_member((Expr *) lfirst(lc),
+										subplan->targetlist);
+
+		if (tle == NULL)
+			elog(ERROR, "Append child doesn't emit an Append's extra value");
+		tlist = lappend(tlist, makeTargetEntry(tle->expr,
+											   list_length(tlist) + 1,
+											   NULL, false));
+	}
+	if (tlist_same_exprs(tlist, subplan->targetlist))
+		return subplan;
+	if (is_projection_capable_plan(subplan))
+	{
+		subplan->targetlist = tlist;
+		return subplan;
+	}
+	return inject_projection_plan(subplan, tlist, subplan->parallel_safe);
+}
+
+/*
  * create_append_plan
  *	  Create an Append plan for 'best_path' and (recursively) plans
  *	  for its subpaths.
@@ -1305,7 +1370,7 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 		Plan	   *subplan;
 
 		/* Must insist that all children return the same tlist */
-		subplan = create_plan_recurse(root, subpath, CP_EXACT_TLIST);
+		subplan = create_append_child_plan(root, (Path *) best_path, subpath);
 
 		/*
 		 * For ordered Appends, we must insert a Sort node if subplan isn't
@@ -1521,7 +1586,7 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 
 		/* Build the child plan */
 		/* Must insist that all children return the same tlist */
-		subplan = create_plan_recurse(root, subpath, CP_EXACT_TLIST);
+		subplan = create_append_child_plan(root, (Path *) best_path, subpath);
 
 		/* Compute sort column info, and adjust subplan's tlist as needed */
 		subplan = prepare_sort_from_pathkeys(subplan, pathkeys,
@@ -3032,6 +3097,21 @@ create_indexscan_plan(PlannerInfo *root,
 											indexorderbys,
 											indexorderbyops,
 											best_path->indexscandir);
+
+	if (!indexonly && indexorderbys != NIL)
+	{
+		List	   *exact = NIL;
+		ListCell   *lo,
+				   *lc;
+
+		/* must agree with path_target_cost() in pathnode.c */
+		forboth(lo, best_path->indexorderbys, lc, best_path->indexorderbycols)
+			exact = lappend_int(exact,
+								index_orderby_returnable(indexinfo,
+														 lfirst_int(lc),
+														 (Expr *) lfirst(lo)));
+		((IndexScan *) scan_plan)->indexorderbyexact = exact;
+	}
 
 	copy_generic_path_info(&scan_plan->plan, &best_path->path);
 
