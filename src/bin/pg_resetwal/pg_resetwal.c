@@ -97,6 +97,25 @@ static int	wal_segsize_val;
 static bool char_signedness_given = false;
 static bool char_signedness_val;
 
+static bool cluster_state_given = false;
+static DBState cluster_state_val;
+
+/* DB_STARTUP is left out, the server rejects it */
+struct cluster_state_opt
+{
+	const char *name;
+	DBState		state;
+};
+
+static const struct cluster_state_opt cluster_states[] = {
+	{"shut-down", DB_SHUTDOWNED},
+	{"shut-down-in-recovery", DB_SHUTDOWNED_IN_RECOVERY},
+	{"shutting-down", DB_SHUTDOWNING},
+	{"in-crash-recovery", DB_IN_CRASH_RECOVERY},
+	{"in-archive-recovery", DB_IN_ARCHIVE_RECOVERY},
+	{"in-production", DB_IN_PRODUCTION},
+};
+
 
 static TimeLineID minXlogTli = 0;
 static XLogSegNo minXlogSegNo = 0;
@@ -105,6 +124,7 @@ static int	WalSegSz;
 static void CheckDataVersion(void);
 static bool read_controlfile(void);
 static void GuessControlValues(void);
+static const char *cluster_state_name(DBState state);
 static void PrintControlValues(bool guessed);
 static void PrintNewControlValues(void);
 static void RewriteControlFile(void);
@@ -135,6 +155,7 @@ main(int argc, char *argv[])
 		{"next-transaction-id", required_argument, NULL, 'x'},
 		{"wal-segsize", required_argument, NULL, 1},
 		{"char-signedness", required_argument, NULL, 2},
+		{"cluster-state", required_argument, NULL, 3},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -353,6 +374,26 @@ main(int argc, char *argv[])
 						exit(1);
 					}
 					char_signedness_given = true;
+					break;
+				}
+
+			case 3:
+				{
+					for (int i = 0; i < lengthof(cluster_states); i++)
+					{
+						if (strcmp(optarg, cluster_states[i].name) == 0)
+						{
+							cluster_state_val = cluster_states[i].state;
+							cluster_state_given = true;
+							break;
+						}
+					}
+					if (!cluster_state_given)
+					{
+						pg_log_error("invalid argument for option %s", "--cluster-state");
+						pg_log_error_hint("Try \"%s --help\" for more information.", progname);
+						exit(1);
+					}
 					break;
 				}
 
@@ -751,10 +792,25 @@ GuessControlValues(void)
 
 
 /*
+ * Return the --cluster-state spelling of a cluster state.
+ */
+static const char *
+cluster_state_name(DBState state)
+{
+	for (int i = 0; i < lengthof(cluster_states); i++)
+	{
+		if (cluster_states[i].state == state)
+			return cluster_states[i].name;
+	}
+	return (state == DB_STARTUP) ? "starting-up" : _("unrecognized");
+}
+
+
+/*
  * Print the guessed pg_control values when we had to guess.
  *
  * NB: this display should be just those fields that will not be
- * reset by RewriteControlFile().
+ * reset by RewriteControlFile(), plus the cluster state.
  */
 static void
 PrintControlValues(bool guessed)
@@ -770,6 +826,8 @@ PrintControlValues(bool guessed)
 		   ControlFile.catalog_version_no);
 	printf(_("Database system identifier:           %" PRIu64 "\n"),
 		   ControlFile.system_identifier);
+	printf(_("Database cluster state:               %s\n"),
+		   cluster_state_name(ControlFile.state));
 	printf(_("Latest checkpoint's TimeLineID:       %u\n"),
 		   ControlFile.checkPointCopy.ThisTimeLineID);
 	printf(_("Latest checkpoint's full_page_writes: %s\n"),
@@ -900,6 +958,12 @@ PrintNewControlValues(void)
 		printf(_("Bytes per WAL segment:                %u\n"),
 			   ControlFile.xlog_seg_size);
 	}
+
+	if (cluster_state_given)
+	{
+		printf(_("Database cluster state:               %s\n"),
+			   cluster_state_name(cluster_state_val));
+	}
 }
 
 
@@ -917,7 +981,7 @@ RewriteControlFile(void)
 							ControlFile.checkPointCopy.redo);
 	ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);
 
-	ControlFile.state = DB_SHUTDOWNED;
+	ControlFile.state = cluster_state_given ? cluster_state_val : DB_SHUTDOWNED;
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
 	ControlFile.minRecoveryPoint = InvalidXLogRecPtr;
 	ControlFile.minRecoveryPointTLI = 0;
@@ -1250,6 +1314,10 @@ usage(void)
 	printf(_("  -u, --oldest-transaction-id=XID  set oldest transaction ID\n"));
 	printf(_("  -x, --next-transaction-id=XID    set next transaction ID\n"));
 	printf(_("      --char-signedness=OPTION     set char signedness to \"signed\" or \"unsigned\"\n"));
+	printf(_("      --cluster-state=STATE        set database cluster state to \"shut-down\",\n"
+			 "                                   \"shut-down-in-recovery\", \"shutting-down\",\n"
+			 "                                   \"in-crash-recovery\", \"in-archive-recovery\"\n"
+			 "                                   or \"in-production\"\n"));
 	printf(_("      --wal-segsize=SIZE           size of WAL segments, in megabytes\n"));
 
 	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
