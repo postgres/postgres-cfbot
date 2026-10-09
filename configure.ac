@@ -443,6 +443,13 @@ choke me
 PGAC_ARG_BOOL(with, llvm, no, [build with LLVM based JIT support],
               [AC_DEFINE([USE_LLVM], 1, [Define to 1 to build with LLVM based JIT support. (--with-llvm)])])
 AC_SUBST(with_llvm)
+
+#
+# C11 stdatomic.h
+#
+# stdatomic.h is the sole atomics implementation.  The actual detection runs
+# later, after the compiler and 64-bit integer handling have been configured;
+# a missing or broken header is a hard error there.
 dnl must use AS_IF here, else AC_REQUIRES inside PGAC_LLVM_SUPPORT malfunctions
 AS_IF([test "$with_llvm" = yes], [
   PGAC_LLVM_SUPPORT()
@@ -2110,6 +2117,48 @@ PGAC_HAVE_GCC__SYNC_INT32_CAS
 PGAC_HAVE_GCC__SYNC_INT64_CAS
 PGAC_HAVE_GCC__ATOMIC_INT32_CAS
 PGAC_HAVE_GCC__ATOMIC_INT64_CAS
+
+
+# Require a working C11 stdatomic.h: it is the sole atomics implementation,
+# so a missing or broken header is a hard error.  Use a link test, not a
+# compile test: 64-bit atomic_compare_exchange_strong() can lower to a
+# libatomic call (__atomic_compare_exchange_8) on some 32-bit or
+# weakly-aligned targets, where a compile-only check would pass and then fail
+# at final link.  Retry with -latomic if the bare link fails.
+AC_CACHE_CHECK([for working C11 stdatomic.h], [pgac_cv_stdatomic],
+[pgac_cv_stdatomic=no
+ AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <stdatomic.h>],
+  [[_Atomic int x = 0;
+    atomic_fetch_add(&x, 1);
+    atomic_thread_fence(memory_order_seq_cst);
+    _Atomic(unsigned long long) y = 0;
+    unsigned long long expected = 0;
+    atomic_compare_exchange_strong(&y, &expected, 42);
+  ]])],
+  [pgac_cv_stdatomic=yes],
+  [pgac_save_LIBS=$LIBS
+   LIBS="$LIBS -latomic"
+   AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <stdatomic.h>],
+    [[_Atomic int x = 0;
+      atomic_fetch_add(&x, 1);
+      atomic_thread_fence(memory_order_seq_cst);
+      _Atomic(unsigned long long) y = 0;
+      unsigned long long expected = 0;
+      atomic_compare_exchange_strong(&y, &expected, 42);
+    ]])],
+    [pgac_cv_stdatomic='yes, with -latomic'],
+    [pgac_cv_stdatomic=no])
+   LIBS=$pgac_save_LIBS])])
+
+if test "$pgac_cv_stdatomic" = no; then
+  AC_MSG_ERROR([a working C11 stdatomic.h is required (it is the only atomics implementation)])
+fi
+
+AC_DEFINE([USE_STDATOMIC_H], 1,
+          [Define to 1 to use C11 stdatomic.h for atomic operations.])
+if test "$pgac_cv_stdatomic" = 'yes, with -latomic'; then
+  LIBS="$LIBS -latomic"
+fi
 
 
 # Check for __get_cpuid() and __cpuid()
