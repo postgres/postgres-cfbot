@@ -3838,8 +3838,6 @@ eval_const_expressions_mutator(Node *node,
 					if (expr_is_nonnullable(context->root, (Expr *) e,
 											NOTNULL_SOURCE_HASHTABLE))
 					{
-						if (newargs == NIL)
-							return e;	/* first expr */
 						newargs = lappend(newargs, e);
 						break;
 					}
@@ -3858,10 +3856,17 @@ eval_const_expressions_mutator(Node *node,
 
 				/*
 				 * If there's exactly one surviving argument, we no longer
-				 * need COALESCE at all: the result is that argument
+				 * need COALESCE at all: the result is that argument.  Relabel
+				 * it if it lacks the COALESCE's typmod or collation.
 				 */
 				if (list_length(newargs) == 1)
-					return (Node *) linitial(newargs);
+					return applyRelabelType((Node *) linitial(newargs),
+											coalesceexpr->coalescetype,
+											exprTypmod(node),
+											coalesceexpr->coalescecollid,
+											COERCE_IMPLICIT_CAST,
+											-1,
+											false);
 
 				newcoalesce = makeNode(CoalesceExpr);
 				newcoalesce->coalescetype = coalesceexpr->coalescetype;
@@ -4941,6 +4946,18 @@ var_is_nonnullable(PlannerInfo *root, Var *var, NotNullSource source)
 				attr = TupleDescCompactAttr(RelationGetDescr(rel),
 											var->varattno - 1);
 				result = (attr->attnullability == ATTNULLABLE_VALID);
+
+				/*
+				 * A partition can define a virtual generated column with its
+				 * own expression, and enforces NOT NULL against that one.
+				 * Reading through the parent uses the parent's expression, so
+				 * the constraint proves nothing here.
+				 */
+				if (result && rte->relkind == RELKIND_PARTITIONED_TABLE &&
+					TupleDescAttr(RelationGetDescr(rel),
+								  var->varattno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+					result = false;
+
 				table_close(rel, NoLock);
 
 				return result;

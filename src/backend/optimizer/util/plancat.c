@@ -940,6 +940,8 @@ infer_arbiter_indexes(PlannerInfo *root)
 		Form_pg_index idxForm;
 		Bitmapset  *indexedAttrs;
 		List	   *idxExprs;
+		List	   *idxOtherExprs;
+		ListCell   *idxExprCell;
 		List	   *predExprs;
 		AttrNumber	natt;
 		bool		match;
@@ -1044,22 +1046,7 @@ infer_arbiter_indexes(PlannerInfo *root)
 		if (idxForm->indisexclusion)
 			continue;
 
-		/* Build BMS representation of plain (non expression) index attrs */
-		indexedAttrs = NULL;
-		for (natt = 0; natt < idxForm->indnkeyatts; natt++)
-		{
-			int			attno = idxRel->rd_index->indkey.values[natt];
-
-			if (attno != 0)
-				indexedAttrs = bms_add_member(indexedAttrs,
-											  attno - FirstLowInvalidHeapAttributeNumber);
-		}
-
-		/* Non-expression attributes (if any) must match */
-		if (!bms_equal(indexedAttrs, inferAttrs))
-			continue;
-
-		/* Expression attributes (if any) must match */
+		/* Const-simplify index expressions the way arbiterElems were */
 		idxExprs = RelationGetIndexExpressions(idxRel);
 		if (idxExprs)
 		{
@@ -1068,6 +1055,39 @@ infer_arbiter_indexes(PlannerInfo *root)
 
 			idxExprs = (List *) eval_const_expressions(root, (Node *) idxExprs);
 		}
+
+		/*
+		 * Build BMS representation of plain index attrs.  An expression that
+		 * was simplified to a plain Var counts as one, since the same thing
+		 * happened to the matching arbiterElem.
+		 */
+		indexedAttrs = NULL;
+		idxOtherExprs = NIL;
+		idxExprCell = list_head(idxExprs);
+		for (natt = 0; natt < idxForm->indnkeyatts; natt++)
+		{
+			int			attno = idxRel->rd_index->indkey.values[natt];
+
+			if (attno == 0)
+			{
+				Node	   *expr = (Node *) lfirst(idxExprCell);
+
+				idxExprCell = lnext(idxExprs, idxExprCell);
+				if (!IsA(expr, Var) || ((Var *) expr)->varattno == 0)
+				{
+					idxOtherExprs = lappend(idxOtherExprs, expr);
+					continue;
+				}
+				attno = ((Var *) expr)->varattno;
+			}
+
+			indexedAttrs = bms_add_member(indexedAttrs,
+										  attno - FirstLowInvalidHeapAttributeNumber);
+		}
+
+		/* Plain attributes (if any) must match */
+		if (!bms_equal(indexedAttrs, inferAttrs))
+			continue;
 
 		/* Check the arbiterElems against this index. */
 		match = true;
@@ -1118,7 +1138,7 @@ infer_arbiter_indexes(PlannerInfo *root)
 		 * indexes redundantly repeat the same attribute, or if attributes
 		 * redundantly appear multiple times within an inference clause.
 		 */
-		if (list_difference(idxExprs, inferElems) != NIL)
+		if (list_difference(idxOtherExprs, inferElems) != NIL)
 			continue;
 
 		predExprs = RelationGetIndexPredicate(idxRel);
@@ -1244,12 +1264,13 @@ infer_collation_opclass_match(InferenceElem *elem, Relation idxRel,
 		}
 
 		/* If one matching index att found, good enough -- return true */
-		if (IsA(elem->expr, Var))
+		if (attno != 0)
 		{
-			if (((Var *) elem->expr)->varattno == attno)
+			if (IsA(elem->expr, Var) &&
+				((Var *) elem->expr)->varattno == attno)
 				return true;
 		}
-		else if (attno == 0)
+		else
 		{
 			Node	   *nattExpr = list_nth(idxExprs, (natt - 1) - nplain);
 

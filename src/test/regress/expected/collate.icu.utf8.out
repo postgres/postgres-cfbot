@@ -3860,6 +3860,20 @@ SELECT a, b FROM groupby_collation_t GROUP BY a, b ORDER BY a, b;
 (2 rows)
 
 DROP TABLE groupby_collation_t;
+--
+-- A COALESCE that is simplified to one of its arguments must keep its own
+-- collation.
+--
+CREATE TABLE coalesce_collation_t (a text COLLATE "C" NOT NULL, b text);
+INSERT INTO coalesce_collation_t VALUES ('foo'), ('FOO'), ('bar');
+SELECT count(*) FROM
+  (SELECT COALESCE(a, b COLLATE case_insensitive) FROM coalesce_collation_t GROUP BY 1) s;
+ count 
+-------
+     2
+(1 row)
+
+DROP TABLE coalesce_collation_t;
 -- virtual generated columns
 CREATE TABLE t5 (
     a int,

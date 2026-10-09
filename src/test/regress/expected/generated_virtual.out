@@ -812,6 +812,19 @@ ERROR:  column "c" of relation "gtestnn_childdef" contains null values
 ALTER TABLE gtestnn_parent ADD COLUMN c int NOT NULL GENERATED ALWAYS AS (nullif(f1, 13) + nullif(f2, 5)) VIRTUAL;  -- error
 ERROR:  column "c" of relation "gtestnn_child" contains null values
 ALTER TABLE gtestnn_parent ADD COLUMN c int NOT NULL GENERATED ALWAYS AS (nullif(f1, 4) + nullif(f2, 6)) VIRTUAL;  -- ok
+-- NOT NULL is checked with each partition's own expression, so NOT IN must
+-- not rely on it when reading through the parent
+CREATE TABLE gtestnn_notin (id int NOT NULL);
+INSERT INTO gtestnn_notin VALUES (1), (2), (3);
+CREATE TABLE gtestnn_parent2 (a int, b int GENERATED ALWAYS AS (nullif(a, 0)) VIRTUAL NOT NULL) PARTITION BY LIST (a);
+CREATE TABLE gtestnn_child2 PARTITION OF gtestnn_parent2 (b GENERATED ALWAYS AS (a + 100) VIRTUAL) FOR VALUES IN (0, 1);
+INSERT INTO gtestnn_parent2 VALUES (0), (1);
+SELECT id FROM gtestnn_notin WHERE id NOT IN (SELECT b FROM gtestnn_parent2);  -- no rows
+ id 
+----
+(0 rows)
+
+DROP TABLE gtestnn_notin, gtestnn_parent2;
 -- index constraints
 CREATE TABLE gtest22a (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a / 2) VIRTUAL UNIQUE);
 ERROR:  unique constraints on virtual generated columns are not supported

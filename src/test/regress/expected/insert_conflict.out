@@ -181,6 +181,32 @@ explain (costs off) insert into insertconflicttest values(0, 'Crowberry') on con
 
 drop index cross_match;
 --
+-- An index expression that is simplified to a plain column, because the
+-- column is NOT NULL, must still be matched
+--
+create table insertconflict_nn (a int not null, b text not null, v int);
+create unique index on insertconflict_nn (a, coalesce(b, '') collate "C" text_pattern_ops);
+insert into insertconflict_nn values (1, 'x', 0);
+insert into insertconflict_nn values (1, 'x', 1)
+  on conflict (a, coalesce(b, '')) do update set v = 10 returning v;
+ v  
+----
+ 10
+(1 row)
+
+insert into insertconflict_nn values (1, 'x', 1)
+  on conflict (a, coalesce(b, '') collate "C" text_pattern_ops) do update set v = 20 returning v;
+ v  
+----
+ 20
+(1 row)
+
+-- fails
+insert into insertconflict_nn values (1, 'x', 1)
+  on conflict (a, coalesce(b, '') text_ops) do nothing;
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+drop table insertconflict_nn;
+--
 -- Single key tests
 --
 create unique index key_index on insertconflicttest(key);
