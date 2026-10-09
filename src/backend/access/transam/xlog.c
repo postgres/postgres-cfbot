@@ -55,6 +55,7 @@
 #include "access/timeline.h"
 #include "access/transam.h"
 #include "access/twophase.h"
+#include "access/varsup.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
