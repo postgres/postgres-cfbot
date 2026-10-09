@@ -892,6 +892,15 @@ DecodeAbort(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	}
 	else
 	{
+		/*
+		 * Remove tuplecid changes queued by the aborted subtransactions from
+		 * the toplevel's list, before ReorderBufferAbort() tears the
+		 * transactions down.
+		 */
+		ReorderBufferCleanupAbortedSubTxnTupleCids(ctx->reorder, xid,
+												   parsed->nsubxacts,
+												   parsed->subxacts);
+
 		for (i = 0; i < parsed->nsubxacts; i++)
 		{
 			ReorderBufferAbort(ctx->reorder, parsed->subxacts[i],

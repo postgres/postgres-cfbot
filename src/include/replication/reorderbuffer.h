@@ -146,6 +146,11 @@ typedef struct ReorderBufferChange
 			CommandId	cmin;
 			CommandId	cmax;
 			CommandId	combocid;
+			TransactionId subxid;	/* xid that wrote the tuplecid record;
+									 * differs from the xid of the txn this
+									 * change is queued on (always the
+									 * toplevel xid) when a subtransaction
+									 * modified the catalog */
 		}			tuplecid;
 
 		/* Invalidation. */
@@ -738,6 +743,10 @@ extern void ReorderBufferCommitChild(ReorderBuffer *rb, TransactionId xid,
 									 XLogRecPtr end_lsn);
 extern void ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 							   TimestampTz abort_time);
+extern void ReorderBufferCleanupAbortedSubTxnTupleCids(ReorderBuffer *rb,
+													   TransactionId xid,
+													   int nsubxacts,
+													   TransactionId *subxacts);
 extern void ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid);
 extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 extern void ReorderBufferInvalidate(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
@@ -751,7 +760,9 @@ extern void ReorderBufferAddNewCommandId(ReorderBuffer *rb, TransactionId xid,
 extern void ReorderBufferAddNewTupleCids(ReorderBuffer *rb, TransactionId xid,
 										 XLogRecPtr lsn, RelFileLocator locator,
 										 ItemPointerData tid,
-										 CommandId cmin, CommandId cmax, CommandId combocid);
+										 CommandId cmin, CommandId cmax,
+										 CommandId combocid,
+										 TransactionId subxid);
 extern void ReorderBufferAddInvalidations(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 										  Size nmsgs, SharedInvalidationMessage *msgs);
 extern void ReorderBufferAddDistributedInvalidations(ReorderBuffer *rb, TransactionId xid,

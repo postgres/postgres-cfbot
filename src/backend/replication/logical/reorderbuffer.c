@@ -240,6 +240,9 @@ static ReorderBufferTXN *ReorderBufferTXNByXid(ReorderBuffer *rb,
 											   XLogRecPtr lsn, bool create_as_top);
 static void ReorderBufferTransferSnapToParent(ReorderBufferTXN *txn,
 											  ReorderBufferTXN *subtxn);
+static bool TransactionIdInSubxactArray(TransactionId xid,
+										TransactionId *subxacts,
+										int nsubxacts);
 
 static void AssertTXNLsnOrder(ReorderBuffer *rb);
 
@@ -3158,6 +3161,110 @@ ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 }
 
 /*
+ * Remove tuplecid changes queued by aborted subtransactions from their
+ * toplevel transaction's list.
+ *
+ * Unlike regular changes, tuplecid changes are always queued on the toplevel
+ * transaction (see ReorderBufferAddNewTupleCids), so they would otherwise
+ * survive the abort of the subtransaction that wrote them.  That's wrong: they
+ * describe catalog tuple versions created or killed by the aborted
+ * subtransaction, which never became visible, and keeping them can corrupt
+ * ReorderBufferBuildTupleCidHash() at commit time -- both when the toplevel
+ * transaction later reuses the same tid (the stale entry collides with the
+ * fresh one, breaking the cmin equality assumption) and when nothing touches
+ * the tid again (a stale cmax would make a still-live tuple look deleted on
+ * historic snapshots).
+ *
+ * To reach the toplevel, we need one of the abort set's xids to be a known
+ * subtransaction.  The primary xid may have no entry at all: an abort record
+ * never carries the toplevel xid, so an outer subtransaction that wrote no WAL
+ * of its own (a savepoint that only wraps other savepoints) is never assigned
+ * to its toplevel, while a subcommitted child that did write WAL is.  Hence we
+ * search the subxacts too, rather than testing the primary xid alone.
+ *
+ * The cleanup is pointless either when the whole toplevel transaction is
+ * being aborted, since ReorderBufferCleanupTXN() frees the whole list
+ * anyway, or when the aborting transaction is a subtransaction that has no
+ * association with its toplevel.  The latter can happen if the transaction
+ * was already consumed by an earlier decoding pass, so the restart point
+ * has advanced past the subtransaction's first (toplevel-xid-bearing) WAL
+ * record.  Since the transaction is skipped, its tuplecid entries will
+ * never be referenced again, so no cleanup is needed.
+ */
+void
+ReorderBufferCleanupAbortedSubTxnTupleCids(ReorderBuffer *rb,
+										   TransactionId xid,
+										   int nsubxacts,
+										   TransactionId *subxacts)
+{
+	ReorderBufferTXN *txn;
+	ReorderBufferTXN *toptxn;
+	dlist_mutable_iter it;
+
+	/*
+	 * Search the passed-in xids for a known subtransaction, and use it to
+	 * find the toplevel transaction.
+	 */
+	txn = ReorderBufferTXNByXid(rb, xid, false, NULL, InvalidXLogRecPtr,
+								false);
+
+	for (int i = 0; txn == NULL && i < nsubxacts; i++)
+		txn = ReorderBufferTXNByXid(rb, subxacts[i], false, NULL,
+									InvalidXLogRecPtr, false);
+
+	/*
+	 * Skip when nothing usable was found.  No entry at all means no NEW_CID
+	 * record from these xids was decoded in this pass, so nothing was queued.
+	 * An entry that is not a known subtransaction means either the toplevel
+	 * is being aborted or this pass started after the assigning WAL record,
+	 * so the commit is skipped here anyway.
+	 */
+	if (txn == NULL || !rbtxn_is_known_subxact(txn))
+		return;
+
+	/* Get the top-level transaction to clean up its tuplecid list */
+	toptxn = rbtxn_get_toptxn(txn);
+
+	dlist_foreach_modify(it, &toptxn->tuplecids)
+	{
+		ReorderBufferChange *change;
+
+		change = dlist_container(ReorderBufferChange, node, it.cur);
+
+		Assert(change->action == REORDER_BUFFER_CHANGE_INTERNAL_TUPLECID);
+
+		/*
+		 * Remove the entry if it's part of the aborting subtransaction or one
+		 * of its children.
+		 *
+		 * The abort record's subxacts are preserved in logical order (see
+		 * AtSubCommit_childXids), so we can use binary search to look up the
+		 * xid.
+		 */
+		if (change->data.tuplecid.subxid == xid ||
+			TransactionIdInSubxactArray(change->data.tuplecid.subxid,
+										subxacts, nsubxacts))
+		{
+			dlist_delete(&change->node);
+			ReorderBufferFreeChange(rb, change, false);
+			Assert(toptxn->ntuplecids > 0);
+			toptxn->ntuplecids--;
+		}
+	}
+}
+
+/*
+ * Check whether xid is in an array sorted in logical XID order.
+ */
+static bool
+TransactionIdInSubxactArray(TransactionId xid, TransactionId *subxacts,
+							int nsubxacts)
+{
+	return bsearch(&xid, subxacts, nsubxacts,
+				   sizeof(TransactionId), xidLogicalComparator) != NULL;
+}
+
+/*
  * Abort all transactions that aren't actually running anymore because the
  * server restarted.
  *
@@ -3490,7 +3597,8 @@ void
 ReorderBufferAddNewTupleCids(ReorderBuffer *rb, TransactionId xid,
 							 XLogRecPtr lsn, RelFileLocator locator,
 							 ItemPointerData tid, CommandId cmin,
-							 CommandId cmax, CommandId combocid)
+							 CommandId cmax, CommandId combocid,
+							 TransactionId subxid)
 {
 	ReorderBufferChange *change = ReorderBufferAllocChange(rb);
 	ReorderBufferTXN *txn;
@@ -3502,6 +3610,7 @@ ReorderBufferAddNewTupleCids(ReorderBuffer *rb, TransactionId xid,
 	change->data.tuplecid.cmin = cmin;
 	change->data.tuplecid.cmax = cmax;
 	change->data.tuplecid.combocid = combocid;
+	change->data.tuplecid.subxid = subxid;
 	change->lsn = lsn;
 	change->txn = txn;
 	change->action = REORDER_BUFFER_CHANGE_INTERNAL_TUPLECID;
