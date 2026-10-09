@@ -455,6 +455,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				vacuum_relation_list opt_vacuum_relation_list
 				drop_option_list pub_obj_list pub_all_obj_type_list
 				pub_except_obj_list opt_pub_except_clause
+				exclude_list opt_replace replace_list opt_rename rename_list
+
+%type <node>	exclude_item replace_item rename_item opt_star_options star_options
 
 %type <retclause> returning_clause
 %type <node>	returning_option
@@ -12654,6 +12657,27 @@ returning_clause:
 			RETURNING returning_with_clause target_list
 				{
 					ReturningClause *n = makeNode(ReturningClause);
+					ListCell   *lc;
+
+					/* Check for RETURNING with star options, which is not supported */
+					foreach(lc, $3)
+					{
+						ResTarget *res = (ResTarget *) lfirst(lc);
+						if (IsA(res->val, ColumnRef))
+						{
+							ColumnRef *cref = (ColumnRef *) res->val;
+
+							if (IsA(llast(cref->fields), A_Star))
+							{
+								A_Star	   *star = (A_Star *) llast(cref->fields);
+								if (star->staroptions != NULL)
+									ereport(ERROR,
+										(errcode(ERRCODE_SYNTAX_ERROR),
+										 errmsg("RETURNING with star options is not supported"),
+										 parser_errposition(cref->location)));
+							}
+						}
+					}
 
 					n->options = $2;
 					n->exprs = $3;
@@ -17331,6 +17355,13 @@ indirection_el:
 				{
 					$$ = (Node *) makeNode(A_Star);
 				}
+			| '.' '*' star_options
+				{
+					A_Star *s = makeNode(A_Star);
+
+					s->staroptions = (StarOptions *) $3;
+					$$ = (Node *) s;
+				}
 			| '[' a_expr ']'
 				{
 					A_Indices *ai = makeNode(A_Indices);
@@ -17659,11 +17690,13 @@ target_el:	a_expr AS ColLabel
 					$$->val = (Node *) $1;
 					$$->location = @1;
 				}
-			| '*'
+			| '*' opt_star_options
 				{
 					ColumnRef  *n = makeNode(ColumnRef);
+					A_Star *s = makeNode(A_Star);
+					s->staroptions = (StarOptions *) $2;
 
-					n->fields = list_make1(makeNode(A_Star));
+					n->fields = list_make1(s);
 					n->location = @1;
 
 					$$ = makeNode(ResTarget);
@@ -17674,6 +17707,128 @@ target_el:	a_expr AS ColLabel
 				}
 		;
 
+star_options:
+			'(' EXCLUDE '(' exclude_list ')' opt_replace opt_rename ')'
+				{
+					StarOptions *n = makeNode(StarOptions);
+
+					n->exclude_list = $4;
+					n->replace_list = $6;
+					n->rename_list = $7;
+
+					$$ = (Node *) n;
+				}
+			| '(' REPLACE '(' replace_list ')' opt_rename ')'
+				{
+					StarOptions *n = makeNode(StarOptions);
+
+					n->exclude_list = NIL;
+					n->replace_list = $4;
+					n->rename_list = $6;
+
+					$$ = (Node *) n;
+				}
+			| '(' RENAME '(' rename_list ')' ')'
+				{
+					StarOptions *n = makeNode(StarOptions);
+
+					n->exclude_list = NIL;
+					n->replace_list = NIL;
+					n->rename_list = $4;
+
+					$$ = (Node *) n;
+				}
+		;
+
+opt_star_options:
+			star_options		{ $$ = $1; }
+			| /* EMPTY */		{ $$ = NULL; }
+		;
+
+exclude_list:
+			exclude_item
+				{ $$ = list_make1($1); }
+			| exclude_list ',' exclude_item
+				{ $$ = lappend($1, $3); }
+		;
+
+exclude_item:
+			columnref
+				{
+					StarExcludeItem *n = makeNode(StarExcludeItem);
+					ColumnRef  *c = (ColumnRef *) $1;
+					c->staroptcol_match = false;
+
+					check_qualified_name(c->fields, yyscanner);
+
+					n->name = c;
+					n->location = @1;
+
+					$$ = (Node *) n;
+				}
+		;
+
+replace_list:
+			replace_item
+				{ $$ = list_make1($1); }
+			| replace_list ',' replace_item
+				{ $$ = lappend($1, $3); }
+		;
+
+replace_item:
+			columnref WITH a_expr
+				{
+					StarReplaceItem *n = makeNode(StarReplaceItem);
+					ColumnRef  *c = (ColumnRef *) $1;
+					c->staroptcol_match = false;
+
+					check_qualified_name(c->fields, yyscanner);
+
+					n->name = c;
+					n->expr = (Node *) $3;
+					n->location = @1;
+
+					$$ = (Node *) n;
+				}
+		;
+
+opt_replace:
+			REPLACE '(' replace_list ')'
+				{ $$ = $3; }
+			| /* EMPTY */
+				{ $$ = NIL; }
+		;
+
+rename_list:
+			rename_item
+				{ $$ = list_make1($1); }
+			| rename_list ',' rename_item
+				{ $$ = lappend($1, $3); }
+		;
+
+rename_item:
+			columnref AS ColId
+				{
+					StarRenameItem *n = makeNode(StarRenameItem);
+					ColumnRef  *c = (ColumnRef *) $1;
+					c->staroptcol_match = false;
+
+					check_qualified_name(c->fields, yyscanner);
+
+					n->name = c;
+					n->aliasname = $3;
+					n->location = @1;
+
+					$$ = (Node *) n;
+				}
+		;
+
+opt_rename:
+			RENAME '(' rename_list ')'
+				{ $$ = $3; }
+			| /* EMPTY */
+				{ $$ = NIL; }
+		;
 
 /*****************************************************************************
  *
