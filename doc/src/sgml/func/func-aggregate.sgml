@@ -539,6 +539,40 @@
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>product</primary>
+        </indexterm>
+        <function>product</function> ( <type>smallint</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>integer</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>bigint</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>numeric</type> )
+        <returnvalue>numeric</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>real</type> )
+        <returnvalue>double precision</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>product</function> ( <type>double precision</type> )
+        <returnvalue>double precision</returnvalue>
+       </para>
+       <para>
+        Computes the product of the non-null input values.
+       </para></entry>
+       <entry>Yes</entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>range_agg</primary>
         </indexterm>
         <function>range_agg</function> ( <parameter>value</parameter>
@@ -667,6 +701,23 @@
    returns null rather than an empty array when there are no input
    rows.  The <function>coalesce</function> function can be used to
    substitute zero or an empty array for null when necessary.
+  </para>
+
+  <para>
+   For <type>smallint</type>, <type>integer</type>, <type>bigint</type>,
+   and <type>numeric</type> input, the <function>product</function>
+   aggregate returns <type>numeric</type> and accumulates its running
+   product as <type>numeric</type> to avoid intermediate overflow.  A
+   sufficiently large product can still overflow the
+   <type>numeric</type> type and raise an error.  For <type>real</type>
+   and <type>double precision</type> input, <function>product</function>
+   returns <type>double precision</type> and accumulates natively in
+   that type, so, like <function>sum</function>, a product of finite
+   values that would exceed the range of <type>double precision</type>
+   raises an error rather than silently becoming
+   <literal>Infinity</literal>; <literal>Infinity</literal> is only
+   produced (and propagated) when it is already present among the
+   input values.
   </para>
 
   <para>
