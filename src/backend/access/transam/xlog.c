@@ -4658,6 +4658,24 @@ ReadControlFile(void)
 
 	wal_segment_size = ControlFile->xlog_seg_size;
 
+	snprintf(wal_segsz_str, sizeof(wal_segsz_str), "%d", wal_segment_size);
+	SetConfigOption("wal_segment_size", wal_segsz_str, PGC_INTERNAL,
+					PGC_S_DYNAMIC_DEFAULT);
+
+	ApplyWalSegSizeSettings();
+}
+
+/*
+ * Validate wal_segment_size and (re)compute derived settings that aren't
+ * propagated through GUC variables.
+ *
+ * This is called by ReadControlFile() in the postmaster after reading
+ * pg_control, and by EXEC_BACKEND child startup after wal_segment_size
+ * has been restored via the GUC propagation mechanism.
+ */
+void
+ApplyWalSegSizeSettings(void)
+{
 	if (!IsValidWalSegSize(wal_segment_size))
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						errmsg_plural("invalid WAL segment size in control file (%d byte)",
@@ -4665,10 +4683,6 @@ ReadControlFile(void)
 									  wal_segment_size,
 									  wal_segment_size),
 						errdetail("The WAL segment size must be a power of two between 1 MB and 1 GB.")));
-
-	snprintf(wal_segsz_str, sizeof(wal_segsz_str), "%d", wal_segment_size);
-	SetConfigOption("wal_segment_size", wal_segsz_str, PGC_INTERNAL,
-					PGC_S_DYNAMIC_DEFAULT);
 
 	/* check and update variables dependent on wal_segment_size */
 	if (ConvertToXSegs(min_wal_size_mb, wal_segment_size) < 2)
