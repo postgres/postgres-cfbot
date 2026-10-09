@@ -27,6 +27,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "storage/lock.h"
 #include "utils/array.h"
@@ -929,6 +930,34 @@ allocate_reloption(uint32 kinds, int type, const char *name, const char *desc,
 	MemoryContext oldcxt;
 	size_t		size;
 	relopt_gen *newoption;
+
+	/*
+	 * Tablespaces are shared by all databases, so their options must be known
+	 * to every backend.  All extensions share one namespace for them with the
+	 * built-in options, so insist on qualified names like custom GUCs have.
+	 * These errors are FATAL because the calling module may be partly
+	 * initialized already.
+	 */
+	if (kinds & RELOPT_KIND_TABLESPACE)
+	{
+		if (!process_shared_preload_libraries_in_progress)
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("could not register tablespace option \"%s\"", name),
+					 errdetail("Tablespace options must be registered while initializing modules in \"shared_preload_libraries\".")));
+		if (!valid_custom_variable_name(name))
+			ereport(FATAL,
+					(errcode(ERRCODE_INVALID_NAME),
+					 errmsg("invalid tablespace option name \"%s\"", name),
+					 errdetail("Tablespace option names must be two or more simple identifiers separated by dots.")));
+		/* longer names would be truncated when dumped as one identifier */
+		if (strlen(name) >= NAMEDATALEN)
+			ereport(FATAL,
+					(errcode(ERRCODE_NAME_TOO_LONG),
+					 errmsg("tablespace option name \"%s\" is too long", name),
+					 errdetail("Tablespace option names must be shorter than %d bytes.",
+							   NAMEDATALEN)));
+	}
 
 	if (kinds != RELOPT_KIND_LOCAL)
 		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
@@ -2429,6 +2458,13 @@ attribute_reloptions(Datum reloptions, bool validate)
 
 /*
  * Option parser for tablespace reloptions
+ *
+ * Extensions loaded via shared_preload_libraries may register additional
+ * tablespace options with add_*_reloption(RELOPT_KIND_TABLESPACE, ...).
+ * parseRelOptions validates those exactly like the built-in ones, but
+ * TableSpaceOpts has no slot to put them in, so we run fillRelOptions
+ * without its parse-table check instead of going through build_reloptions.
+ * Readers of such options fetch them from pg_tablespace.spcoptions directly.
  */
 bytea *
 tablespace_reloptions(Datum reloptions, bool validate)
@@ -2439,11 +2475,26 @@ tablespace_reloptions(Datum reloptions, bool validate)
 		{"effective_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, effective_io_concurrency)},
 		{"maintenance_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, maintenance_io_concurrency)}
 	};
+	int			numoptions;
+	relopt_value *options;
+	void	   *rdopts;
 
-	return (bytea *) build_reloptions(reloptions, validate,
-									  RELOPT_KIND_TABLESPACE,
-									  sizeof(TableSpaceOpts),
-									  tab, lengthof(tab));
+	options = parseRelOptions(reloptions, validate, RELOPT_KIND_TABLESPACE,
+							  &numoptions);
+
+	if (numoptions == 0)
+	{
+		Assert(options == NULL);
+		return NULL;
+	}
+
+	rdopts = allocateReloptStruct(sizeof(TableSpaceOpts), options, numoptions);
+	fillRelOptions(rdopts, sizeof(TableSpaceOpts), options, numoptions,
+				   false, tab, lengthof(tab));
+
+	pfree(options);
+
+	return (bytea *) rdopts;
 }
 
 /*

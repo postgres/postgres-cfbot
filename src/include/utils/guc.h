@@ -422,6 +422,8 @@ extern void MarkGUCPrefixReserved(const char *className);
 /* old name for MarkGUCPrefixReserved, for backwards compatibility: */
 #define EmitWarningsOnPlaceholders(className) MarkGUCPrefixReserved(className)
 
+extern bool valid_custom_variable_name(const char *name);
+
 extern const char *GetConfigOption(const char *name, bool missing_ok,
 								   bool restrict_privileged);
 extern const char *GetConfigOptionResetString(const char *name);
