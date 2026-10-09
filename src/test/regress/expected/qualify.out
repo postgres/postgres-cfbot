@@ -1,0 +1,1122 @@
+--
+-- QUALIFY clause tests
+--
+CREATE TEMPORARY TABLE empsalary (
+    depname varchar,
+    empno bigint,
+    salary int,
+    enroll_date date
+);
+INSERT INTO empsalary VALUES
+('develop', 10, 5200, '2007-08-01'),
+('sales', 1, 5000, '2006-10-01'),
+('personnel', 5, 3500, '2007-12-10'),
+('sales', 4, 4800, '2007-08-08'),
+('personnel', 2, 3900, '2006-12-23'),
+('develop', 7, 4200, '2008-01-01'),
+('develop', 9, 4500, '2008-01-01'),
+('sales', 3, 4800, '2007-08-01'),
+('develop', 8, 6000, '2006-10-01'),
+('develop', 11, 5200, '2007-08-15');
+--
+-- Basic QUALIFY functionality
+--
+-- Simple QUALIFY with inline window function
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC)
+FROM empsalary
+QUALIFY rank() OVER (PARTITION BY depname ORDER BY salary DESC) <= 2;
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 2)
+   ->  Sort
+         Sort Key: empsalary.depname, empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC)
+FROM empsalary
+QUALIFY rank() OVER (PARTITION BY depname ORDER BY salary DESC) <= 2
+ORDER BY depname, salary DESC, empno;
+  depname  | empno | salary | rank 
+-----------+-------+--------+------
+ develop   |     8 |   6000 |    1
+ develop   |    10 |   5200 |    2
+ develop   |    11 |   5200 |    2
+ personnel |     2 |   3900 |    1
+ personnel |     5 |   3500 |    2
+ sales     |     1 |   5000 |    1
+ sales     |     3 |   4800 |    2
+ sales     |     4 |   4800 |    2
+(8 rows)
+
+-- QUALIFY with named window
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       rank() OVER w
+FROM empsalary
+WINDOW w AS (PARTITION BY depname ORDER BY salary DESC)
+QUALIFY rank() OVER w <= 2;
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ WindowAgg
+   Window: w AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w <= 2)
+   ->  Sort
+         Sort Key: empsalary.depname, empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT depname, empno, salary,
+       rank() OVER w
+FROM empsalary
+WINDOW w AS (PARTITION BY depname ORDER BY salary DESC)
+QUALIFY rank() OVER w <= 2
+ORDER BY depname, salary DESC, empno;
+  depname  | empno | salary | rank 
+-----------+-------+--------+------
+ develop   |     8 |   6000 |    1
+ develop   |    10 |   5200 |    2
+ develop   |    11 |   5200 |    2
+ personnel |     2 |   3900 |    1
+ personnel |     5 |   3500 |    2
+ sales     |     1 |   5000 |    1
+ sales     |     3 |   4800 |    2
+ sales     |     4 |   4800 |    2
+(8 rows)
+
+--
+-- Alias resolution tests
+--
+-- Reference alias defined in SELECT
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rnk <= 2;
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 2)
+   ->  Sort
+         Sort Key: empsalary.depname, empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rnk <= 2
+ORDER BY depname, salary DESC, empno;
+  depname  | empno | salary | rnk 
+-----------+-------+--------+-----
+ develop   |     8 |   6000 |   1
+ develop   |    10 |   5200 |   2
+ develop   |    11 |   5200 |   2
+ personnel |     2 |   3900 |   1
+ personnel |     5 |   3500 |   2
+ sales     |     1 |   5000 |   1
+ sales     |     3 |   4800 |   2
+ sales     |     4 |   4800 |   2
+(8 rows)
+
+-- Reference alias with row_number
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn < 3;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+   Run Condition: (row_number() OVER w1 < 3)
+   ->  Sort
+         Sort Key: empsalary.empno
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn < 3;
+ empno | rn 
+-------+----
+     1 |  1
+     2 |  2
+(2 rows)
+
+-- Multiple aliases
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       row_number() OVER (PARTITION BY depname ORDER BY salary DESC) AS rn,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rn = 1 OR rnk <= 2;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: ((pg_qualify.rn = 1) OR (pg_qualify.rnk <= 2))
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         ->  Sort
+               Sort Key: empsalary.depname, empsalary.salary DESC
+               ->  Seq Scan on empsalary
+(7 rows)
+
+SELECT depname, empno, salary,
+       row_number() OVER (PARTITION BY depname ORDER BY salary DESC) AS rn,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rn = 1 OR rnk <= 2
+ORDER BY depname, salary DESC;
+  depname  | empno | salary | rn | rnk 
+-----------+-------+--------+----+-----
+ develop   |     8 |   6000 |  1 |   1
+ develop   |    10 |   5200 |  2 |   2
+ develop   |    11 |   5200 |  3 |   2
+ personnel |     2 |   3900 |  1 |   1
+ personnel |     5 |   3500 |  2 |   2
+ sales     |     1 |   5000 |  1 |   1
+ sales     |     4 |   4800 |  2 |   2
+ sales     |     3 |   4800 |  3 |   2
+(8 rows)
+
+--
+-- Run condition optimization tests
+--
+-- row_number with < operator (should use run condition)
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn < 3;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+   Run Condition: (row_number() OVER w1 < 3)
+   ->  Sort
+         Sort Key: empsalary.empno
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn < 3;
+ empno | rn 
+-------+----
+     1 |  1
+     2 |  2
+(2 rows)
+
+-- row_number with <= operator
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn <= 2;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+   Run Condition: (row_number() OVER w1 <= 2)
+   ->  Sort
+         Sort Key: empsalary.empno
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn <= 2;
+ empno | rn 
+-------+----
+     1 |  1
+     2 |  2
+(2 rows)
+
+-- rank with <= operator
+EXPLAIN (COSTS OFF)
+SELECT empno, salary, rank() OVER (ORDER BY salary DESC) AS r
+FROM empsalary
+QUALIFY r <= 3;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 3)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, salary, rank() OVER (ORDER BY salary DESC) AS r
+FROM empsalary
+QUALIFY r <= 3;
+ empno | salary | r 
+-------+--------+---
+     8 |   6000 | 1
+    10 |   5200 | 2
+    11 |   5200 | 2
+(3 rows)
+
+-- dense_rank with = operator (should convert to <= for run condition)
+EXPLAIN (COSTS OFF)
+SELECT empno, salary, dense_rank() OVER (ORDER BY salary DESC) AS dr
+FROM empsalary
+QUALIFY dr = 1;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.dr = 1)
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         Run Condition: (dense_rank() OVER w1 <= 1)
+         ->  Sort
+               Sort Key: empsalary.salary DESC
+               ->  Seq Scan on empsalary
+(8 rows)
+
+SELECT empno, salary, dense_rank() OVER (ORDER BY salary DESC) AS dr
+FROM empsalary
+QUALIFY dr = 1;
+ empno | salary | dr 
+-------+--------+----
+     8 |   6000 |  1
+(1 row)
+
+-- count(*) with <= operator
+EXPLAIN (COSTS OFF)
+SELECT empno, salary, count(*) OVER (ORDER BY salary DESC) AS c
+FROM empsalary
+QUALIFY c <= 3;
+                 QUERY PLAN                  
+---------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary)
+   Run Condition: (count(*) OVER w1 <= 3)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, salary, count(*) OVER (ORDER BY salary DESC) AS c
+FROM empsalary
+QUALIFY c <= 3;
+ empno | salary | c 
+-------+--------+---
+     8 |   6000 | 1
+    10 |   5200 | 3
+    11 |   5200 | 3
+(3 rows)
+
+--
+-- WHERE pushdown tests
+-- Quals on PARTITION BY columns without window functions can be pushed to WHERE
+--
+-- depname is in PARTITION BY, should be pushed to WHERE (SeqScan filter)
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rnk <= 2 AND depname = 'develop';
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 2)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+               Filter: ((depname)::text = 'develop'::text)
+(7 rows)
+
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rnk <= 2 AND depname = 'develop'
+ORDER BY salary DESC;
+ depname | empno | salary | rnk 
+---------+-------+--------+-----
+ develop |     8 |   6000 |   1
+ develop |    10 |   5200 |   2
+ develop |    11 |   5200 |   2
+(3 rows)
+
+-- Mixed: depname pushed to WHERE, rank condition stays as run condition
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY depname = 'sales' AND rnk = 1;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.rnk = 1)
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         Run Condition: (rank() OVER w1 <= 1)
+         ->  Sort
+               Sort Key: empsalary.salary DESC
+               ->  Seq Scan on empsalary
+                     Filter: ((depname)::text = 'sales'::text)
+(9 rows)
+
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY depname = 'sales' AND rnk = 1;
+ depname | empno | salary | rnk 
+---------+-------+--------+-----
+ sales   |     1 |   5000 |   1
+(1 row)
+
+--
+-- QUALIFY without window function in SELECT list
+-- The window function appears only in QUALIFY
+--
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary
+FROM empsalary
+QUALIFY row_number() OVER (PARTITION BY depname ORDER BY salary DESC) = 1;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.qualify4 = 1)
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w1 <= 1)
+         ->  Sort
+               Sort Key: empsalary.depname, empsalary.salary DESC
+               ->  Seq Scan on empsalary
+(8 rows)
+
+SELECT depname, empno, salary
+FROM empsalary
+QUALIFY row_number() OVER (PARTITION BY depname ORDER BY salary DESC) = 1
+ORDER BY depname;
+  depname  | empno | salary 
+-----------+-------+--------
+ develop   |     8 |   6000
+ personnel |     2 |   3900
+ sales     |     1 |   5000
+(3 rows)
+
+-- With PARTITION BY column filter pushed down
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary
+FROM empsalary
+QUALIFY row_number() OVER (PARTITION BY depname ORDER BY salary DESC) = 1
+        AND depname = 'develop';
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.qualify4 = 1)
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w1 <= 1)
+         ->  Sort
+               Sort Key: empsalary.salary DESC
+               ->  Seq Scan on empsalary
+                     Filter: ((depname)::text = 'develop'::text)
+(9 rows)
+
+SELECT depname, empno, salary
+FROM empsalary
+QUALIFY row_number() OVER (PARTITION BY depname ORDER BY salary DESC) = 1
+        AND depname = 'develop';
+ depname | empno | salary 
+---------+-------+--------
+ develop |     8 |   6000
+(1 row)
+
+--
+-- Multiple window functions with different windows
+--
+EXPLAIN (COSTS OFF)
+SELECT depname, empno, salary,
+       row_number() OVER (PARTITION BY depname ORDER BY salary) AS rn_asc,
+       row_number() OVER (PARTITION BY depname ORDER BY salary DESC) AS rn_desc
+FROM empsalary
+QUALIFY rn_asc = 1 OR rn_desc = 1;
+                                                      QUERY PLAN                                                       
+-----------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: ((pg_qualify.rn_asc = 1) OR (pg_qualify.rn_desc = 1))
+   ->  WindowAgg
+         Window: w2 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         ->  Incremental Sort
+               Sort Key: empsalary.depname, empsalary.salary
+               Presorted Key: empsalary.depname
+               ->  WindowAgg
+                     Window: w1 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+                     ->  Sort
+                           Sort Key: empsalary.depname, empsalary.salary DESC
+                           ->  Seq Scan on empsalary
+(12 rows)
+
+SELECT depname, empno, salary,
+       row_number() OVER (PARTITION BY depname ORDER BY salary) AS rn_asc,
+       row_number() OVER (PARTITION BY depname ORDER BY salary DESC) AS rn_desc
+FROM empsalary
+QUALIFY rn_asc = 1 OR rn_desc = 1
+ORDER BY depname, empno;
+  depname  | empno | salary | rn_asc | rn_desc 
+-----------+-------+--------+--------+---------
+ develop   |     7 |   4200 |      1 |       5
+ develop   |     8 |   6000 |      5 |       1
+ personnel |     2 |   3900 |      2 |       1
+ personnel |     5 |   3500 |      1 |       2
+ sales     |     1 |   5000 |      3 |       1
+ sales     |     4 |   4800 |      1 |       2
+(6 rows)
+
+--
+-- QUALIFY with aggregate and window functions
+--
+EXPLAIN (COSTS OFF)
+SELECT depname, sum(salary) AS total,
+       rank() OVER (ORDER BY sum(salary) DESC) AS rnk
+FROM empsalary
+GROUP BY depname
+QUALIFY rnk <= 2;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY (sum(empsalary.salary)) ROWS UNBOUNDED PRECEDING)
+         Run Condition: (rank() OVER w1 <= 2)
+         ->  Sort
+               Sort Key: (sum(empsalary.salary)) DESC
+               ->  HashAggregate
+                     Group Key: empsalary.depname
+                     ->  Seq Scan on empsalary
+(9 rows)
+
+SELECT depname, sum(salary) AS total,
+       rank() OVER (ORDER BY sum(salary) DESC) AS rnk
+FROM empsalary
+GROUP BY depname
+QUALIFY rnk <= 2;
+ depname | total | rnk 
+---------+-------+-----
+ develop | 25100 |   1
+ sales   | 14600 |   2
+(2 rows)
+
+--
+-- QUALIFY in a grouped query without window functions.
+-- The condition is validated like a SELECT-list item, so aggregates and
+-- grouping columns are allowed (and behave as HAVING would).
+--
+-- Aggregate used directly in QUALIFY filters groups like HAVING
+SELECT depname, count(*) AS c
+FROM empsalary
+GROUP BY depname
+QUALIFY count(*) > 2
+ORDER BY depname;
+ depname | c 
+---------+---
+ develop | 5
+ sales   | 3
+(2 rows)
+
+-- A grouping column may be referenced directly in QUALIFY
+SELECT depname, count(*) AS c
+FROM empsalary
+GROUP BY depname
+QUALIFY depname <> 'sales'
+ORDER BY depname;
+  depname  | c 
+-----------+---
+ develop   | 5
+ personnel | 2
+(2 rows)
+
+--
+-- Comparison with equivalent subquery (results should match)
+--
+-- Subquery version
+EXPLAIN (COSTS OFF)
+SELECT * FROM
+  (SELECT empno, salary, rank() OVER (ORDER BY salary DESC) AS r
+   FROM empsalary) emp
+WHERE r <= 3;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 3)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT * FROM
+  (SELECT empno, salary, rank() OVER (ORDER BY salary DESC) AS r
+   FROM empsalary) emp
+WHERE r <= 3
+ORDER BY salary DESC, empno;
+ empno | salary | r 
+-------+--------+---
+     8 |   6000 | 1
+    10 |   5200 | 2
+    11 |   5200 | 2
+(3 rows)
+
+-- QUALIFY version (should produce same results)
+EXPLAIN (COSTS OFF)
+SELECT empno, salary, rank() OVER (ORDER BY salary DESC) AS r
+FROM empsalary
+QUALIFY r <= 3;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 3)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, salary, rank() OVER (ORDER BY salary DESC) AS r
+FROM empsalary
+QUALIFY r <= 3
+ORDER BY salary DESC, empno;
+ empno | salary | r 
+-------+--------+---
+     8 |   6000 | 1
+    10 |   5200 | 2
+    11 |   5200 | 2
+(3 rows)
+
+--
+-- QUALIFY with different comparison operators
+--
+-- Greater than (no run condition optimization for increasing functions)
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn > 7;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.rn > 7)
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+         ->  Sort
+               Sort Key: empsalary.empno
+               ->  Seq Scan on empsalary
+(7 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn > 7
+ORDER BY empno;
+ empno | rn 
+-------+----
+     9 |  8
+    10 |  9
+    11 | 10
+(3 rows)
+
+-- Equality
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn = 5;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.rn = 5)
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w1 <= 5)
+         ->  Sort
+               Sort Key: empsalary.empno
+               ->  Seq Scan on empsalary
+(8 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn = 5;
+ empno | rn 
+-------+----
+     5 |  5
+(1 row)
+
+-- BETWEEN (should keep as filter)
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn BETWEEN 3 AND 5;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.rn >= 3)
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w1 <= 5)
+         ->  Sort
+               Sort Key: empsalary.empno
+               ->  Seq Scan on empsalary
+(8 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn BETWEEN 3 AND 5
+ORDER BY empno;
+ empno | rn 
+-------+----
+     3 |  3
+     4 |  4
+     5 |  5
+(3 rows)
+
+-- IN list
+EXPLAIN (COSTS OFF)
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn IN (1, 3, 5);
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.rn = ANY ('{1,3,5}'::bigint[]))
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.empno ROWS UNBOUNDED PRECEDING)
+         ->  Sort
+               Sort Key: empsalary.empno
+               ->  Seq Scan on empsalary
+(7 rows)
+
+SELECT empno, row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY rn IN (1, 3, 5)
+ORDER BY empno;
+ empno | rn 
+-------+----
+     1 |  1
+     3 |  3
+     5 |  5
+(3 rows)
+
+--
+-- QUALIFY with expressions
+--
+EXPLAIN (COSTS OFF)
+SELECT empno, salary,
+       row_number() OVER (ORDER BY salary DESC) AS rn
+FROM empsalary
+QUALIFY rn <= 10 / 2;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (row_number() OVER w1 <= 5)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, salary,
+       row_number() OVER (ORDER BY salary DESC) AS rn
+FROM empsalary
+QUALIFY rn <= 10 / 2;
+ empno | salary | rn 
+-------+--------+----
+     8 |   6000 |  1
+    10 |   5200 |  2
+    11 |   5200 |  3
+     1 |   5000 |  4
+     4 |   4800 |  5
+(5 rows)
+
+--
+-- Error cases
+--
+-- Aggregate in QUALIFY without GROUP BY: just as in the SELECT list, the
+-- non-aggregated output columns make this an error (must appear in GROUP BY).
+SELECT depname, empno, salary
+FROM empsalary
+QUALIFY sum(salary) > 5000;
+ERROR:  column "empsalary.depname" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 1: SELECT depname, empno, salary
+               ^
+-- QUALIFY in a grouped query referencing an ungrouped column (should error,
+-- just as such a reference would in the SELECT list)
+SELECT depname, count(*) AS c
+FROM empsalary
+GROUP BY depname
+QUALIFY salary > 100;
+ERROR:  column "empsalary.salary" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 4: QUALIFY salary > 100;
+                ^
+-- QUALIFY with set-returning function (should error)
+SELECT empno, salary
+FROM empsalary
+QUALIFY generate_series(1, 3) > 1;
+ERROR:  set-returning functions are not allowed in QUALIFY
+LINE 3: QUALIFY generate_series(1, 3) > 1;
+                ^
+--
+-- QUALIFY in different query structures
+--
+-- With DISTINCT
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT depname,
+       first_value(empno) OVER (PARTITION BY depname ORDER BY salary DESC) AS top_emp
+FROM empsalary
+QUALIFY row_number() OVER (PARTITION BY depname ORDER BY salary DESC) = 1;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Unique
+   ->  Incremental Sort
+         Sort Key: pg_qualify.depname, pg_qualify.top_emp
+         Presorted Key: pg_qualify.depname
+         ->  Subquery Scan on pg_qualify
+               Filter: (pg_qualify.qualify3 = 1)
+               ->  WindowAgg
+                     Window: w1 AS (PARTITION BY empsalary.depname ORDER BY empsalary.salary)
+                     Run Condition: (row_number() OVER w1 <= 1)
+                     ->  Sort
+                           Sort Key: empsalary.depname, empsalary.salary DESC
+                           ->  Seq Scan on empsalary
+(12 rows)
+
+SELECT DISTINCT depname,
+       first_value(empno) OVER (PARTITION BY depname ORDER BY salary DESC) AS top_emp
+FROM empsalary
+QUALIFY row_number() OVER (PARTITION BY depname ORDER BY salary DESC) = 1
+ORDER BY depname;
+  depname  | top_emp 
+-----------+---------
+ develop   |       8
+ personnel |       2
+ sales     |       1
+(3 rows)
+
+-- With ORDER BY
+EXPLAIN (COSTS OFF)
+SELECT empno, salary,
+       rank() OVER (ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rnk <= 3;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+   Run Condition: (rank() OVER w1 <= 3)
+   ->  Sort
+         Sort Key: empsalary.salary DESC
+         ->  Seq Scan on empsalary
+(6 rows)
+
+SELECT empno, salary,
+       rank() OVER (ORDER BY salary DESC) AS rnk
+FROM empsalary
+QUALIFY rnk <= 3
+ORDER BY salary DESC, empno;
+ empno | salary | rnk 
+-------+--------+-----
+     8 |   6000 |   1
+    10 |   5200 |   2
+    11 |   5200 |   2
+(3 rows)
+
+-- With LIMIT (QUALIFY is evaluated before LIMIT)
+EXPLAIN (COSTS OFF)
+SELECT empno, salary,
+       row_number() OVER (ORDER BY salary DESC) AS rn
+FROM empsalary
+QUALIFY rn <= 5
+LIMIT 3;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Limit
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w1 <= 5)
+         ->  Sort
+               Sort Key: empsalary.salary DESC
+               ->  Seq Scan on empsalary
+(7 rows)
+
+SELECT empno, salary,
+       row_number() OVER (ORDER BY salary DESC) AS rn
+FROM empsalary
+QUALIFY rn <= 5
+ORDER BY salary DESC
+LIMIT 3;
+ empno | salary | rn 
+-------+--------+----
+     8 |   6000 |  1
+    10 |   5200 |  2
+    11 |   5200 |  3
+(3 rows)
+
+--
+-- Verify evaluation order: QUALIFY happens after window functions, before DISTINCT
+--
+-- This should first compute row_number, then filter, then apply DISTINCT
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT salary,
+       row_number() OVER (ORDER BY salary DESC) AS rn
+FROM empsalary
+QUALIFY rn <= 3;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ HashAggregate
+   Group Key: empsalary.salary, row_number() OVER w1
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY empsalary.salary ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w1 <= 3)
+         ->  Sort
+               Sort Key: empsalary.salary DESC
+               ->  Seq Scan on empsalary
+(8 rows)
+
+SELECT DISTINCT salary,
+       row_number() OVER (ORDER BY salary DESC) AS rn
+FROM empsalary
+QUALIFY rn <= 3;
+ salary | rn 
+--------+----
+   5200 |  2
+   5200 |  3
+   6000 |  1
+(3 rows)
+
+-- QUALIFY with FILTERS over window function
+EXPLAIN(COSTS OFF) SELECT sum(salary), row_number() OVER (ORDER BY depname) as rank, sum(
+    sum(salary) FILTER (WHERE enroll_date > '2007-01-01')
+) FILTER (WHERE depname <> 'sales') OVER (ORDER BY depname DESC) AS "filtered_sum",
+    depname
+FROM empsalary GROUP BY depname QUALIFY rank = 1;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Subquery Scan on pg_qualify
+   Filter: (pg_qualify.rank = 1)
+   ->  WindowAgg
+         Window: w2 AS (ORDER BY empsalary.depname ROWS UNBOUNDED PRECEDING)
+         Run Condition: (row_number() OVER w2 <= 1)
+         ->  Sort
+               Sort Key: empsalary.depname
+               ->  WindowAgg
+                     Window: w1 AS (ORDER BY empsalary.depname)
+                     ->  Sort
+                           Sort Key: empsalary.depname DESC
+                           ->  HashAggregate
+                                 Group Key: empsalary.depname
+                                 ->  Seq Scan on empsalary
+(14 rows)
+
+SELECT sum(salary), row_number() OVER (ORDER BY depname) as rank, sum(
+    sum(salary) FILTER (WHERE enroll_date > '2007-01-01')
+) FILTER (WHERE depname <> 'sales') OVER (ORDER BY depname DESC) AS "filtered_sum",
+    depname
+FROM empsalary GROUP BY depname QUALIFY rank = 1;
+  sum  | rank | filtered_sum | depname 
+-------+------+--------------+---------
+ 25100 |    1 |        22600 | develop
+(1 row)
+
+--
+-- Aggregate functions directly in QUALIFY
+-- (allowed in a grouped query, the same as in the SELECT list / HAVING)
+--
+-- Aggregate condition over the group
+EXPLAIN (COSTS OFF)
+SELECT depname, sum(salary) AS total
+FROM empsalary
+GROUP BY depname
+QUALIFY sum(salary) > 15000;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Subquery Scan on pg_qualify
+   ->  HashAggregate
+         Group Key: empsalary.depname
+         Filter: (sum(empsalary.salary) > 15000)
+         ->  Seq Scan on empsalary
+(5 rows)
+
+SELECT depname, sum(salary) AS total
+FROM empsalary
+GROUP BY depname
+QUALIFY sum(salary) > 15000
+ORDER BY depname;
+ depname | total 
+---------+-------
+ develop | 25100
+(1 row)
+
+-- Aggregate and window function combined in QUALIFY
+SELECT depname, sum(salary) AS total
+FROM empsalary
+GROUP BY depname
+QUALIFY rank() OVER (ORDER BY sum(salary) DESC) = 1
+ORDER BY depname;
+ depname | total 
+---------+-------
+ develop | 25100
+(1 row)
+
+-- Whole-table aggregate (single group)
+SELECT sum(salary) AS s
+FROM empsalary
+QUALIFY sum(salary) > 1000;
+   s   
+-------
+ 47100
+(1 row)
+
+--
+-- Name resolution tests
+--
+-- An input column takes precedence over a same-named select-list alias
+-- "salary" in QUALIFY is the input column (> 4000 keeps most rows), not the
+-- alias (which is 0 and would keep none)
+SELECT empno, (empno * 0) AS salary
+FROM empsalary
+QUALIFY salary > 4000
+ORDER BY empno;
+ empno | salary 
+-------+--------
+     1 |      0
+     3 |      0
+     4 |      0
+     7 |      0
+     8 |      0
+     9 |      0
+    10 |      0
+    11 |      0
+(8 rows)
+
+-- QUALIFY referecing columns that not on output result
+-- Same column
+SELECT depname FROM empsalary QUALIFY salary > 0 ORDER BY salary;
+  depname  
+-----------
+ personnel
+ personnel
+ develop
+ develop
+ sales
+ sales
+ sales
+ develop
+ develop
+ develop
+(10 rows)
+
+-- Different column
+SELECT depname FROM empsalary QUALIFY salary > 0 ORDER BY enroll_date;
+  depname  
+-----------
+ sales
+ develop
+ personnel
+ sales
+ develop
+ sales
+ develop
+ personnel
+ develop
+ develop
+(10 rows)
+
+--
+-- Name resolution error cases
+--
+-- A non-deterministic alias expression cannot be referenced from QUALIFY
+SELECT empno, (random() < 2)::int AS r
+FROM empsalary
+QUALIFY r = 1;
+ERROR:  QUALIFY cannot reference output column "r" whose expression is non-deterministic
+LINE 3: QUALIFY r = 1;
+                ^
+-- An ambiguous alias reference is rejected
+SELECT empno AS x, salary AS x,
+       row_number() OVER (ORDER BY empno) AS rn
+FROM empsalary
+QUALIFY x > 0;
+ERROR:  column reference "x" is ambiguous
+LINE 4: QUALIFY x > 0;
+                ^
+-- A name that is neither an input column nor a select-list alias
+SELECT empno
+FROM empsalary
+QUALIFY nosuchcol > row_number() OVER (ORDER BY empno);
+ERROR:  column "nosuchcol" does not exist
+LINE 3: QUALIFY nosuchcol > row_number() OVER (ORDER BY empno);
+                ^
+--
+-- QUALIFY without any window function: a general post-SELECT filter
+--
+EXPLAIN (COSTS OFF)
+SELECT empno, salary, salary * 2 as new_salary
+FROM empsalary
+QUALIFY new_salary > 10000;
+            QUERY PLAN            
+----------------------------------
+ Seq Scan on empsalary
+   Filter: ((salary * 2) > 10000)
+(2 rows)
+
+SELECT empno, salary, salary * 2 as new_salary
+FROM empsalary
+QUALIFY new_salary > 10000
+ORDER BY empno;
+ empno | salary | new_salary 
+-------+--------+------------
+     8 |   6000 |      12000
+    10 |   5200 |      10400
+    11 |   5200 |      10400
+(3 rows)
+
+--
+-- QUALIFY in other query structures
+--
+-- In the arms of a set operation
+SELECT empno FROM empsalary
+QUALIFY row_number() OVER (ORDER BY salary) = 1
+UNION ALL
+SELECT empno FROM empsalary
+QUALIFY row_number() OVER (ORDER BY salary DESC) = 1
+ORDER BY empno;
+ empno 
+-------
+     5
+     8
+(2 rows)
+
+-- In a subquery that carries an outer reference
+SELECT depname,
+       (SELECT empno FROM empsalary e2
+        WHERE e2.depname = e1.depname
+        QUALIFY row_number() OVER (ORDER BY salary DESC) = 1) AS top_emp
+FROM (SELECT DISTINCT depname FROM empsalary) e1
+ORDER BY depname;
+  depname  | top_emp 
+-----------+---------
+ develop   |       8
+ personnel |       2
+ sales     |       1
+(3 rows)
+
+-- Combined with row-level locking (the lock applies to the base table)
+SELECT empno FROM empsalary
+QUALIFY salary > 5000
+ORDER BY empno
+FOR UPDATE;
+ empno 
+-------
+     8
+    10
+    11
+(3 rows)
+
+--
+-- Cleanup
+--
+DROP TABLE empsalary;
