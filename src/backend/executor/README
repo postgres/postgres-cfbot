@@ -267,6 +267,82 @@ executed for that row.  Statement triggers are fired always, regardless of
 whether any rows match the corresponding clauses.
 
 
+Detoasting a Column Once Per Row
+--------------------------------
+
+A TOASTed value is normally fetched and decompressed by every function that
+receives it, so a query mentioning the same large column in several
+expressions of one plan node pays for it several times.  The executor can
+instead detoast such a column once per row and hand the same plain value to
+every reference in that node.
+
+The value is kept beside the slot, in TupleTableSlot.tts_detoasted, for as
+long as the slot holds the tuple.  tts_values is never modified: it keeps the
+stored datum, out of line or compressed as it was.  That is the invariant the
+whole mechanism rests on, and it is what makes the rest of the executor need
+no changes.  Every other consumer reads tts_values and is therefore
+unaffected, whether it copies a slot, stores it in a tuple, a tuplestore, a
+hash table or a batch file, projects the column onward, or inspects its stored
+form.
+
+Only argument positions read the copy.  An argument position is a place where
+a construct consumes a value and does not return it: the arguments of a
+function or operator call, the two sides of a scalar array operation, the
+input of an I/O or array coercion, a field or subscript extraction, the
+elements of an array construction, the sides of a row comparison, the sides
+of a merge clause, the arguments of a set-returning function call and the
+argument of a hash function built for a hash join or hashed grouping.  A Var
+anywhere else, in particular a bare targetlist entry or an input of CASE,
+COALESCE, GREATEST, LEAST or NULLIF, all of which can return their input
+unchanged, compiles as it always did and yields the stored datum.  This is
+why a detoasted copy can never become the result of an expression and never
+reaches code that must see the stored form.
+
+Three lists decide where the copy goes.  The first two implement the rule
+above and must be kept consistent with it; the third only decides where a
+copy pays.
+
+- The argument positions themselves.  ExecInitDetoastArg() is called at each
+  one in execExpr.c, and pull_multi_detoast_walker() in clauses.c counts
+  references at the same places when the planner decides.  Only the
+  executor's list carries the rule above: a position wrongly listed there
+  could return a copy as an expression result.  The planner's list decides
+  where a copy pays, so if the two drift apart an attribute is marked and
+  unused, or a sharing opportunity is missed.
+- Functions that must receive the stored representation because their result
+depends on it: ExecFuncReadsStoredForm() in execExpr.c.
+- Functions that read only a slice or the size of their argument, which the
+  planner does not count as references worth sharing:
+  ExecFuncReadsSliceOrSize() in execExpr.c.  A column shared for other
+  reasons is still handed to one of these, since by then the copy exists and
+  using it is cheaper than fetching a slice as well.
+
+Lifetime.  A copy belongs to the tuple the slot holds.  A slot implementation
+promises, through TupleTableSlotOps.resets_detoasted, to release the copies
+whenever it invalidates tts_values, in its store, clear and materialize paths;
+an implementation that leaves the field false keeps no copies at all and
+simply detoasts per reference.  A projection of a marked column carries the
+copy into the result slot alongside the stored datum, so a parent node reading
+that column as an argument finds it.  The copy and the stored datum are both
+borrowed from the source slot and so share its lifetime; materializing the
+result slot therefore drops the copy rather than taking ownership of it, since
+a materialized slot may outlive its source.  A PARAM_EXEC parameter carries a
+reference to the slot and attribute its value came from rather than a pointer
+to the copy, and that reference is followed only while the slot still holds
+the same datum.
+
+The planner decides only where this pays, in set_plan_detoast_reuse() in
+setrefs.c, which records per node the attributes two or more argument
+positions read, and marks a single reference where the node re-evaluates its
+expressions against an unchanging tuple, such as the outer side of a join.
+References are counted across one node boundary as well as within a node: if a
+scan reads a column once and the node directly above it reads that column once
+as well, the column is marked on both.  The counting reaches no further, so a
+reference above an intervening join is neither counted nor shared; reaching
+further would mean marking the column on every node in between and carrying
+the copy up through each of their projections.  Nothing about those sets
+affects results: a wrong decision costs a detoast, never correctness.
+
 Memory Management
 -----------------
 

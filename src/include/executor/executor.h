@@ -91,6 +91,14 @@ extern PGDLLIMPORT ExecutorFinish_hook_type ExecutorFinish_hook;
 typedef void (*ExecutorEnd_hook_type) (QueryDesc *queryDesc);
 extern PGDLLIMPORT ExecutorEnd_hook_type ExecutorEnd_hook;
 
+/* GUC parameter */
+extern PGDLLIMPORT bool detoast_reuse;
+
+extern ExprState *ExecInitExprArg(Expr *node, PlanState *parent);
+extern List *ExecInitExprArgList(List *nodes, PlanState *parent);
+extern bool ExecFuncReadsStoredForm(Oid funcid);
+extern bool ExecFuncReadsSliceOrSize(Oid funcid);
+
 /* Hook for plugins to get control in ExecCheckPermissions() */
 typedef bool (*ExecutorCheckPerms_hook_type) (List *rangeTable,
 											  List *rtePermInfos,

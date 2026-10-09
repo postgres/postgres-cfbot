@@ -48,6 +48,7 @@
 #include "commands/trigger.h"
 #include "commands/user.h"
 #include "commands/vacuum.h"
+#include "executor/executor.h"
 #include "common/file_utils.h"
 #include "common/scram-common.h"
 #include "jit/jit.h"

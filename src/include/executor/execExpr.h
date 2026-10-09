@@ -85,6 +85,16 @@ typedef enum ExprEvalOp
 	EEOP_OLD_VAR,
 	EEOP_NEW_VAR,
 
+	/*
+	 * Same, but detoasting the value once per row and keeping the copy beside
+	 * the slot.  There are no OLD/NEW variants: the planner marks attributes
+	 * of a node's scan, outer and inner inputs only, so a Var of the old or
+	 * new tuple is never compiled to one of these.
+	 */
+	EEOP_INNER_VAR_DETOAST,
+	EEOP_OUTER_VAR_DETOAST,
+	EEOP_SCAN_VAR_DETOAST,
+
 	/* compute system Var value */
 	EEOP_INNER_SYSVAR,
 	EEOP_OUTER_SYSVAR,
@@ -105,6 +115,11 @@ typedef enum ExprEvalOp
 	EEOP_ASSIGN_SCAN_VAR,
 	EEOP_ASSIGN_OLD_VAR,
 	EEOP_ASSIGN_NEW_VAR,
+
+	/* same, carrying a detoasted copy of the column into the result slot */
+	EEOP_ASSIGN_INNER_VAR_DETOAST,
+	EEOP_ASSIGN_OUTER_VAR_DETOAST,
+	EEOP_ASSIGN_SCAN_VAR_DETOAST,
 
 	/* assign ExprState's resvalue/resnull to a column of its resultslot */
 	EEOP_ASSIGN_TMP,
@@ -171,6 +186,7 @@ typedef enum ExprEvalOp
 
 	/* evaluate PARAM_EXEC/EXTERN parameters */
 	EEOP_PARAM_EXEC,
+	EEOP_PARAM_EXEC_DETOAST,	/* same, preferring the detoasted copy */
 	EEOP_PARAM_EXTERN,
 	EEOP_PARAM_CALLBACK,
 	/* set PARAM_EXEC value */
@@ -424,6 +440,9 @@ typedef struct ExprEvalStep
 		{
 			int			paramid;	/* numeric ID for parameter */
 			Oid			paramtype;	/* OID of parameter's datatype */
+			/* EEOP_PARAM_SET: the Var the value comes from, if a plain one */
+			int			srcattnum;	/* attribute number, or 0 */
+			Index		srcvarno;	/* INNER_VAR, OUTER_VAR or a scan varno */
 		}			param;
 
 		/* for EEOP_PARAM_CALLBACK */
@@ -906,6 +925,13 @@ extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op,
+							   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
+									 ExprContext *econtext,
+									 TupleTableSlot *slot);
+extern void ExecEvalParamExecDetoast(ExprState *state, ExprEvalStep *op,
+									 ExprContext *econtext);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);

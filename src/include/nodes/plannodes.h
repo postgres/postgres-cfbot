@@ -83,6 +83,15 @@ typedef struct PlannedStmt
 	/* do I set the command result tag? */
 	bool		canSetTag;
 
+	/*
+	 * Was this plan built with detoasting a column once per row enabled? The
+	 * per-node decisions are in the Plan nodes; expression initialization
+	 * consults this where there is no node to ask, namely for the parameters
+	 * a subplan or a nestloop inner plan receives, whose copy was made
+	 * elsewhere (see ExecInitDetoastArg).
+	 */
+	bool		detoastReuse;
+
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
 
@@ -225,6 +234,17 @@ typedef struct Plan
 	 */
 	/* engage asynchronous-capable logic? */
 	bool		async_capable;
+
+	/*
+	 * Attributes of the scan tuple, the outer input and the inner input that
+	 * this node's expressions may detoast once per row, keeping the copy
+	 * beside the slot (see set_plan_detoast_reuse in setrefs.c).  The
+	 * executor compiles argument positions reading them to EEOP_*_VAR_DETOAST
+	 * steps.
+	 */
+	Bitmapset  *detoast_reuse_scan;
+	Bitmapset  *detoast_reuse_outer;
+	Bitmapset  *detoast_reuse_inner;
 
 	/*
 	 * Common structural data for all Plan types.
@@ -541,6 +561,38 @@ typedef struct Scan
 	/* relid is index into the range table */
 	Index		scanrelid;
 } Scan;
+
+/*
+ * Is this plan node a Scan (or a type derived from Scan)?  Executor states
+ * of several non-scan nodes (Agg, Sort, Material, ...) embed a ScanState, so
+ * code reached through one cannot assume the plan is a Scan without asking.
+ */
+static inline bool
+IsScanPlan(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+		case T_SubqueryScan:
+		case T_FunctionScan:
+		case T_TableFuncScan:
+		case T_ValuesScan:
+		case T_CteScan:
+		case T_NamedTuplestoreScan:
+		case T_WorkTableScan:
+		case T_ForeignScan:
+		case T_CustomScan:
+			return true;
+		default:
+			return false;
+	}
+}
 
 /* ----------------
  *		sequential scan node
@@ -950,6 +1002,31 @@ typedef struct CustomScan
 	 */
 	const struct CustomScanMethods *methods;
 } CustomScan;
+
+/*
+ * Does this scan's targetlist refer to the scan tuple through INDEX_VAR?
+ * That is the case when the scan tuple has a shape of its own rather than
+ * the table's: index-only scans, and foreign or custom scans with a scan
+ * targetlist (always so when scanrelid is 0, since there is no table).  The
+ * executor picks the projection varno by the same rule.
+ */
+static inline bool
+ScanUsesIndexVar(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_IndexOnlyScan:
+			return true;
+		case T_ForeignScan:
+			return ((const ForeignScan *) plan)->fdw_scan_tlist != NIL ||
+				((const Scan *) plan)->scanrelid == 0;
+		case T_CustomScan:
+			return ((const CustomScan *) plan)->custom_scan_tlist != NIL ||
+				((const Scan *) plan)->scanrelid == 0;
+		default:
+			return false;
+	}
+}
 
 /*
  * ==========
