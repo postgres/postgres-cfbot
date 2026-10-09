@@ -2662,6 +2662,33 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
   </para>
 
   <para>
+   Logical decoding messages are an exception to the user switching described
+   above. If the subscription has <link linkend="sql-createsubscription-params-with-messages"><literal>messages</literal></link>
+   enabled, the handler registered for them runs with the privileges of the
+   subscription owner. Messages are not restricted to the tables or schemas
+   of the subscribed publications either, and by default any role may call
+   <link linkend="pg-logical-emit-message"><function>pg_logcal_emit_message()</function></link>.
+   Any role that can connect to the publisher database can therefore choose
+   what the handler is given, and a handler that acts on what it receives does
+   so with the subscription owner's privileges. Restrict who can emit messages
+   on the publisher. Revoke the default privilege and grant it to a role created
+   for this purpose:
+<programlisting>
+REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, bytea, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text, boolean) TO message_emitter;
+GRANT EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, bytea, boolean) TO message_emitter;
+</programlisting>
+   Function privileges are per database, so this has to be done in each database
+   that such a subscription replicates from. No role that is not trusted to drive
+   the handler should be a member of the new role, since a role that can
+   <literal>SET ROLE</literal> to it can emit whatever it likes. Where a message
+   has to be emitted on behalf of an ordinary user, for example from an event
+   trigger that captures that user's DDL, use a <literal>SECURITY DEFINER</literal>
+   function owned by that role rather than granting the privilege more widely.
+  </para>
+
+  <para>
    On the publisher, privileges are only checked once at the start of a
    replication connection and are not re-checked as each change record is read.
   </para>

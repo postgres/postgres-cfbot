@@ -96,6 +96,9 @@ CATALOG(pg_subscription,6100,SubscriptionRelationId) BKI_SHARED_RELATION BKI_ROW
 																 * server */
 
 	Oid			subconflictlogrelid;	/* Relid of the conflict log table. */
+
+	bool		submessages;	/* True if the subscription wants to receive
+								 * logical messages. */
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
 
 	/*
@@ -173,6 +176,9 @@ typedef struct Subscription
 									 * exceeded max_retention_duration, when
 									 * defined */
 	Oid			conflictlogrelid;	/* conflict log table Oid */
+	bool		messages;		/* True if the subscription wants to receive
+								 * logical messages */
+	char	   *conninfo;		/* Connection string to the publisher */
 	char	   *slotname;		/* Name of the replication slot */
 	char	   *synccommit;		/* Synchronous commit setting for worker */
 	char	   *walrcvtimeout;	/* wal_receiver_timeout setting for worker */
