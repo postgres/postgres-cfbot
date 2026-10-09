@@ -1933,6 +1933,7 @@ PGIOAlignedBlock
 PGLZ_HistEntry
 PGLZ_Strategy
 PGLoadBalanceType
+PGLockFile
 PGMessageField
 PGModuleMagicFunction
 PGNoticeHooks
