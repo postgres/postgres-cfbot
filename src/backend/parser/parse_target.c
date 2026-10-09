@@ -44,14 +44,14 @@ static Node *transformAssignmentSubscripts(ParseState *pstate,
 										   Node *rhs,
 										   CoercionContext ccontext,
 										   int location);
-static List *ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
+static List *ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref, StarOptions *staroptions,
 								 bool make_target_entry);
-static List *ExpandAllTables(ParseState *pstate, int location);
+static List *ExpandAllTables(ParseState *pstate, int location, StarOptions *staroptions);
 static List *ExpandIndirectionStar(ParseState *pstate, A_Indirection *ind,
 								   bool make_target_entry, ParseExprKind exprKind);
 static List *ExpandSingleTable(ParseState *pstate, ParseNamespaceItem *nsitem,
 							   int sublevels_up, int location,
-							   bool make_target_entry);
+							   bool make_target_entry, StarOptions *staroptions);
 static List *ExpandRowReference(ParseState *pstate, Node *expr,
 								bool make_target_entry);
 static int	FigureColnameInternal(Node *node, char **name);
@@ -107,6 +107,80 @@ transformTargetEntry(ParseState *pstate,
 						   resjunk);
 }
 
+/*
+ * check_star_options()
+ *		Check that all columns mentioned in the star options actually exist.
+ *
+ * Extract the relation and column names from the ColumnRef.
+ * We do not care about other qualification errors here,
+ * since they were already checked during column matching.
+ */
+static void
+check_star_options(ParseState *pstate, StarOptions *staroptions)
+{
+	List	   *exclude_list = staroptions->exclude_list;
+	List	   *replace_list = staroptions->replace_list;
+	List	   *rename_list = staroptions->rename_list;
+
+	if (exclude_list)
+	{
+		ListCell   *elc;
+
+		foreach(elc, exclude_list)
+		{
+			StarExcludeItem *item = (StarExcludeItem *) lfirst(elc);
+			ColumnRef  *cref = item->name;
+			char	   *relname = NULL;
+			char	   *colname = NULL;
+
+			colname = strVal(llast(cref->fields));
+			if (list_length(cref->fields) > 1)
+				relname = strVal(list_nth(cref->fields, list_length(cref->fields) - 2));
+
+			if (!cref->staroptcol_match)
+				errorMissingColumn(pstate, relname, colname, cref->location);
+		}
+	}
+	if (replace_list)
+	{
+		ListCell   *rlc;
+
+		foreach(rlc, replace_list)
+		{
+			StarReplaceItem *item = (StarReplaceItem *) lfirst(rlc);
+			ColumnRef  *cref = item->name;
+			char	   *relname = NULL;
+			char	   *colname = NULL;
+
+			colname = strVal(llast(cref->fields));
+			if (list_length(cref->fields) > 1)
+				relname = strVal(list_nth(cref->fields, list_length(cref->fields) - 2));
+
+			if (!cref->staroptcol_match)
+				errorMissingColumn(pstate, relname, colname, cref->location);
+		}
+	}
+	if (rename_list)
+	{
+		ListCell   *rlc;
+
+		foreach(rlc, rename_list)
+		{
+			StarRenameItem *item = (StarRenameItem *) lfirst(rlc);
+			ColumnRef  *cref = item->name;
+			char	   *relname = NULL;
+			char	   *colname = NULL;
+
+			colname = strVal(llast(cref->fields));
+			if (list_length(cref->fields) > 1)
+				relname = strVal(list_nth(cref->fields, list_length(cref->fields) - 2));
+
+			if (!cref->staroptcol_match)
+				errorMissingColumn(pstate, relname, colname, cref->location);
+		}
+	}
+}
+
 
 /*
  * transformTargetList()
@@ -147,11 +221,16 @@ transformTargetList(ParseState *pstate, List *targetlist,
 
 				if (IsA(llast(cref->fields), A_Star))
 				{
+					A_Star	   *star = (A_Star *) llast(cref->fields);
+
 					/* It is something.*, expand into multiple items */
 					p_target = list_concat(p_target,
 										   ExpandColumnRefStar(pstate,
 															   cref,
+															   star->staroptions,
 															   true));
+					if (star->staroptions)
+						check_star_options(pstate, star->staroptions);
 					continue;
 				}
 			}
@@ -239,7 +318,7 @@ transformExpressionList(ParseState *pstate, List *exprlist,
 			{
 				/* It is something.*, expand into multiple items */
 				result = list_concat(result,
-									 ExpandColumnRefStar(pstate, cref,
+									 ExpandColumnRefStar(pstate, cref, NULL,
 														 false));
 				continue;
 			}
@@ -1121,7 +1200,7 @@ checkInsertTargets(ParseState *pstate, List *cols, List **attrnos)
  * The referenced columns are marked as requiring SELECT access.
  */
 static List *
-ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
+ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref, StarOptions *staroptions,
 					bool make_target_entry)
 {
 	List	   *fields = cref->fields;
@@ -1138,7 +1217,7 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 		 * need not handle the make_target_entry==false case here.
 		 */
 		Assert(make_target_entry);
-		return ExpandAllTables(pstate, cref->location);
+		return ExpandAllTables(pstate, cref->location, staroptions);
 	}
 	else
 	{
@@ -1278,7 +1357,7 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 		 * OK, expand the nsitem into fields.
 		 */
 		return ExpandSingleTable(pstate, nsitem, levels_up, cref->location,
-								 make_target_entry);
+								 make_target_entry, staroptions);
 	}
 }
 
@@ -1294,7 +1373,7 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
  * The referenced relations/columns are marked as requiring SELECT access.
  */
 static List *
-ExpandAllTables(ParseState *pstate, int location)
+ExpandAllTables(ParseState *pstate, int location, StarOptions *staroptions)
 {
 	List	   *target = NIL;
 	bool		found_table = false;
@@ -1317,7 +1396,8 @@ ExpandAllTables(ParseState *pstate, int location)
 											   nsitem,
 											   0,
 											   true,
-											   location));
+											   location,
+											   staroptions));
 	}
 
 	/*
@@ -1374,12 +1454,12 @@ ExpandIndirectionStar(ParseState *pstate, A_Indirection *ind,
  */
 static List *
 ExpandSingleTable(ParseState *pstate, ParseNamespaceItem *nsitem,
-				  int sublevels_up, int location, bool make_target_entry)
+				  int sublevels_up, int location, bool make_target_entry, StarOptions *staroptions)
 {
 	if (make_target_entry)
 	{
 		/* expandNSItemAttrs handles permissions marking */
-		return expandNSItemAttrs(pstate, nsitem, sublevels_up, true, location);
+		return expandNSItemAttrs(pstate, nsitem, sublevels_up, true, location, staroptions);
 	}
 	else
 	{
@@ -1448,7 +1528,7 @@ ExpandRowReference(ParseState *pstate, Node *expr,
 		ParseNamespaceItem *nsitem;
 
 		nsitem = GetNSItemByVar(pstate, var);
-		return ExpandSingleTable(pstate, nsitem, var->varlevelsup, var->location, make_target_entry);
+		return ExpandSingleTable(pstate, nsitem, var->varlevelsup, var->location, make_target_entry, NULL);
 	}
 
 	/*

@@ -22,9 +22,11 @@
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_enr.h"
+#include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_type.h"
 #include "parser/parsetree.h"
@@ -3300,6 +3302,239 @@ expandNSItemVars(ParseState *pstate, ParseNamespaceItem *nsitem,
 }
 
 /*
+ * Check whether a column name matches any column in the
+ * EXCLUDE, REPLACE, or RENAME lists.
+ *
+ * For unqualified column names, match by column name regardless
+ * of which relation the column comes from.
+ *
+ * For qualified column names, resolve the relation qualifier using
+ * PostgreSQL's namespace lookup rules and compare the resulting RTE
+ * with the syntactic RTE of the current column (varnosyn). This avoids
+ * scanning the namespace item's columns and also handles aliases and
+ * join RTEs correctly.
+ */
+static bool
+starOptionMatchesColumn(ParseState *pstate,
+						ColumnRef *cref,
+						Var *varnode,
+						char *label)
+{
+	ParseNamespaceItem *refnsitem = NULL;
+	char	   *schemaname = NULL;
+	char	   *relname = NULL;
+	char	   *colname = NULL;
+
+	switch (list_length(cref->fields))
+	{
+		case 1:
+			/* unqualified column name */
+			colname = strVal(linitial(cref->fields));
+			break;
+		case 2:
+			/* relation.column */
+			relname = strVal(linitial(cref->fields));
+			colname = strVal(lsecond(cref->fields));
+			break;
+		case 3:
+			/* schema.relation.column */
+			schemaname = strVal(linitial(cref->fields));
+			relname = strVal(lsecond(cref->fields));
+			colname = strVal(lthird(cref->fields));
+			break;
+		case 4:
+			{
+				/* catalog.schema.relation.column */
+				char	   *catalogname = strVal(linitial(cref->fields));
+
+				schemaname = strVal(lsecond(cref->fields));
+				relname = strVal(lthird(cref->fields));
+				colname = strVal(lfourth(cref->fields));
+
+				if (strcmp(catalogname, get_database_name(MyDatabaseId)) != 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cross-database references are not implemented: %s",
+									NameListToString(cref->fields)),
+							 parser_errposition(pstate, cref->location)));
+				break;
+			}
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("improper qualified name (too many dotted names): %s",
+							NameListToString(cref->fields)),
+					 parser_errposition(pstate, cref->location)));
+	}
+
+	/*
+	 * Match the column name first.
+	 */
+	if (strcmp(colname, label) != 0)
+		return false;
+
+	/*
+	 * Unqualified column name matches regardless of which RTE it came from.
+	 */
+	if (relname == NULL)
+		return true;
+
+	/* Locate the referenced nsitem */
+	refnsitem = refnameNamespaceItem(pstate, schemaname, relname,
+									 cref->location,
+									 0);
+
+	if (refnsitem == NULL)
+		errorMissingRTE(pstate, makeRangeVar(schemaname, relname,
+											 cref->location));
+
+	/*
+	 * For a qualified name, make sure the column belongs to the RTE
+	 * identified by the qualifier. Compare the RTE identified by the
+	 * qualifier with the RTE from which the current expanded column
+	 * originated.
+	 */
+	return refnsitem->p_rtindex == varnode->varnosyn;
+}
+
+/*
+ * Apply the EXCLUDE, REPLACE, and RENAME options from staroptions to a
+ * column being expanded.  The expression and output name are updated as
+ * appropriate. Also, check for conflicts between the options.
+ *
+ * Returns true if the column is excluded, false otherwise.
+ */
+static bool
+applyStarOptions(ParseState *pstate,
+				 Var *varnode,
+				 char *label,
+				 Node **expr,
+				 char **output_name,
+				 StarOptions *staroptions)
+{
+	List	   *exclude_list = staroptions->exclude_list;
+	List	   *replace_list = staroptions->replace_list;
+	List	   *rename_list = staroptions->rename_list;
+	ListCell   *lc;
+	bool		excluded = false;
+
+	/* EXCLUDE */
+	if (exclude_list)
+	{
+		bool		exclude_col_seen = false;
+
+		foreach(lc, exclude_list)
+		{
+			StarExcludeItem *item = (StarExcludeItem *) lfirst(lc);
+			ColumnRef  *cref = item->name;
+
+			if (starOptionMatchesColumn(pstate, cref, varnode, label))
+			{
+				if (exclude_col_seen)
+					ereport(ERROR,
+							(errcode(ERRCODE_DUPLICATE_COLUMN),
+							 errmsg("duplicate column \"%s\" in EXCLUDE list",
+									NameListToString(cref->fields))));
+
+				exclude_col_seen = true;
+				excluded = true;
+				cref->staroptcol_match = true;
+			}
+		}
+	}
+
+	/* An excluded column cannot also occur in REPLACE or RENAME lists */
+	if (excluded)
+	{
+		if (replace_list)
+		{
+			foreach(lc, replace_list)
+			{
+				StarReplaceItem *item = (StarReplaceItem *) lfirst(lc);
+				ColumnRef  *cref = item->name;
+
+				if (starOptionMatchesColumn(pstate, cref, varnode, label))
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("column \"%s\" cannot occur in both EXCLUDE and REPLACE list",
+									NameListToString(cref->fields))));
+			}
+		}
+
+		if (rename_list)
+		{
+			foreach(lc, rename_list)
+			{
+				StarRenameItem *item = (StarRenameItem *) lfirst(lc);
+				ColumnRef  *cref = item->name;
+
+				if (starOptionMatchesColumn(pstate, cref, varnode, label))
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("column \"%s\" cannot occur in both EXCLUDE and RENAME list",
+									NameListToString(cref->fields))));
+			}
+		}
+
+		return true;
+	}
+
+	/* REPLACE */
+	if (replace_list)
+	{
+		bool		replace_col_seen = false;
+
+		foreach(lc, replace_list)
+		{
+			StarReplaceItem *item = (StarReplaceItem *) lfirst(lc);
+			ColumnRef  *cref = (ColumnRef *) item->name;
+
+			if (starOptionMatchesColumn(pstate, cref, varnode, label))
+			{
+				if (replace_col_seen)
+					ereport(ERROR,
+							(errcode(ERRCODE_DUPLICATE_COLUMN),
+							 errmsg("duplicate column \"%s\" in REPLACE list",
+									NameListToString(cref->fields))));
+
+				*expr = transformExpr(pstate,
+									  (Node *) item->expr,
+									  EXPR_KIND_SELECT_TARGET);
+				cref->staroptcol_match = true;
+				replace_col_seen = true;
+			}
+		}
+	}
+
+	/* RENAME */
+	if (rename_list)
+	{
+		bool		rename_col_seen = false;
+
+		foreach(lc, rename_list)
+		{
+			StarRenameItem *item = (StarRenameItem *) lfirst(lc);
+			ColumnRef  *cref = (ColumnRef *) item->name;
+
+			if (starOptionMatchesColumn(pstate, cref, varnode, label))
+			{
+				if (rename_col_seen)
+					ereport(ERROR,
+							(errcode(ERRCODE_DUPLICATE_COLUMN),
+							 errmsg("duplicate column \"%s\" in RENAME list",
+									NameListToString(cref->fields))));
+
+				*output_name = item->aliasname;
+				cref->staroptcol_match = true;
+				rename_col_seen = true;
+			}
+		}
+	}
+
+	return false;
+}
+
+/*
  * expandNSItemAttrs -
  *	  Workhorse for "*" expansion: produce a list of targetentries
  *	  for the attributes of the nsitem
@@ -3310,7 +3545,8 @@ expandNSItemVars(ParseState *pstate, ParseNamespaceItem *nsitem,
  */
 List *
 expandNSItemAttrs(ParseState *pstate, ParseNamespaceItem *nsitem,
-				  int sublevels_up, bool require_col_privs, int location)
+				  int sublevels_up, bool require_col_privs, int location,
+				  StarOptions *staroptions)
 {
 	RangeTblEntry *rte = nsitem->p_rte;
 	RTEPermissionInfo *perminfo = nsitem->p_perminfo;
@@ -3340,11 +3576,22 @@ expandNSItemAttrs(ParseState *pstate, ParseNamespaceItem *nsitem,
 	{
 		char	   *label = strVal(lfirst(name));
 		Var		   *varnode = (Var *) lfirst(var);
+		char	   *output_name = label;
+		Node	   *output_expr = (Node *) varnode;
 		TargetEntry *te;
 
-		te = makeTargetEntry((Expr *) varnode,
+		/* Handle EXCLUDE, REPLACE, and RENAME lists */
+		if (staroptions && applyStarOptions(pstate, varnode, label,
+											&output_expr, &output_name,
+											staroptions))
+		{
+			/* column is excluded, so skip it */
+			continue;
+		}
+
+		te = makeTargetEntry((Expr *) output_expr,
 							 (AttrNumber) pstate->p_next_resno++,
-							 label,
+							 output_name,
 							 false);
 		te_list = lappend(te_list, te);
 
