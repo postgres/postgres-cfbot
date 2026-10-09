@@ -85,7 +85,7 @@ extern PGDLLIMPORT int synchronous_commit;
 
 /* used during logical streaming of a transaction */
 extern PGDLLIMPORT TransactionId CheckXidAlive;
-extern PGDLLIMPORT bool bsysscan;
+extern PGDLLIMPORT int sysscan_depth;
 
 /*
  * Miscellaneous flag bits to record events which occur on the top level
