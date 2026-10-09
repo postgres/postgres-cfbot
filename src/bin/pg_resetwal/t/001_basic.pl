@@ -202,6 +202,12 @@ command_fails_like(
 	qr/error: invalid argument for option --char-signedness/,
 	'fails with incorrect --char-signedness option');
 
+# --cluster-state
+command_fails_like(
+	[ 'pg_resetwal', '--cluster-state', 'foo', $node->data_dir ],
+	qr/error: invalid argument for option --cluster-state/,
+	'fails with incorrect --cluster-state option');
+
 # run with control override options
 
 my $out = (run_command([ 'pg_resetwal', '--dry-run', $node->data_dir ]))[0];
@@ -281,5 +287,29 @@ is( $node->safe_psql(
 	),
 	't',
 	'new 8-byte OID reported');
+
+# With a cluster state other than "shut-down", the next start goes through
+# crash recovery, which empties unlogged tables.
+$node->safe_psql('postgres',
+	'CREATE UNLOGGED TABLE unlogged_tab AS SELECT 1 AS a');
+$node->stop;
+command_like(
+	[
+		'pg_resetwal', '--dry-run',
+		'--cluster-state' => 'in-production',
+		$node->data_dir
+	],
+	qr/^Database cluster state: *shut-down\n.*^Values to be changed:\n.*^Database cluster state: *in-production\n/ms,
+	'dry run shows current and new cluster state');
+command_ok(
+	[ 'pg_resetwal', '--cluster-state' => 'in-production', $node->data_dir ],
+	'runs with --cluster-state');
+command_like(
+	[ 'pg_controldata', $node->data_dir ],
+	qr/^Database cluster state: *in production$/m,
+	'cluster state set in pg_control');
+$node->start;
+is($node->safe_psql('postgres', 'SELECT count(*) FROM unlogged_tab'),
+	'0', 'unlogged table reset after --cluster-state=in-production');
 
 done_testing();
