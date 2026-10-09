@@ -16154,6 +16154,7 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		Oid			relid;
 		Oid			confrelid;
 		bool		conislocal;
+		bool		enforced_check;
 
 		tup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(oldId));
 		if (!HeapTupleIsValid(tup)) /* should not happen */
@@ -16170,6 +16171,7 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		}
 		confrelid = con->confrelid;
 		conislocal = con->conislocal;
+		enforced_check = (con->contype == CONSTRAINT_CHECK && con->conenforced);
 		ReleaseSysCache(tup);
 
 		ObjectAddressSet(obj, ConstraintRelationId, oldId);
@@ -16181,9 +16183,29 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		 * ATAddCheckNNConstraint recurses from adding the parent table's
 		 * constraint.  But we had to carry the info this far so that we can
 		 * drop the constraint below.
+		 *
+		 * The parent's constraint might be NOT ENFORCED while this one is
+		 * ENFORCED, so enforce it again once all tables' constraints have
+		 * been recreated.
 		 */
 		if (!conislocal)
+		{
+			if (enforced_check && relid == tab->relid)
+			{
+				AlterTableCmd *cmd = makeNode(AlterTableCmd);
+				ATAlterConstraint *altercon = makeNode(ATAlterConstraint);
+
+				altercon->conname = get_constraint_name(oldId);
+				altercon->alterEnforceability = true;
+				altercon->is_enforced = true;
+				cmd->subtype = AT_AlterConstraint;
+				cmd->def = (Node *) altercon;
+				cmd->recurse = true;
+				tab->subcmds[AT_PASS_ADD_OTHERCONSTR] =
+					lappend(tab->subcmds[AT_PASS_ADD_OTHERCONSTR], cmd);
+			}
 			continue;
+		}
 
 		/*
 		 * When rebuilding another table's constraint that references the

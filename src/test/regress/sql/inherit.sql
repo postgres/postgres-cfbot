@@ -550,6 +550,18 @@ from pg_constraint where conname = 'inh_check_constraint'
 order by conrelid::regclass::text collate "C";
 drop table p1 cascade;
 
+-- ALTER COLUMN TYPE on a parent must not reset a child's constraint that is
+-- enforced while the parent's is NOT ENFORCED
+create table p1(f1 int constraint inh_check_constraint check (f1 > 0) not enforced);
+create table p1_c1() inherits(p1);
+alter table p1_c1 alter constraint inh_check_constraint enforced;
+alter table p1 alter column f1 type bigint;
+insert into p1_c1 values(-1); --error
+select conrelid::regclass, conislocal, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1 cascade;
+
 -- an inherited CHECK constraint cannot be NOT ENFORCED under an ENFORCED parent
 create table p1(f1 int constraint p1_a_check check (f1 > 0) enforced);
 create table p1_c1() inherits(p1);
