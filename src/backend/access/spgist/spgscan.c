@@ -928,8 +928,17 @@ storeBitmap(SpGistScanOpaque so, ItemPointer heapPtr,
 			SpGistLeafTuple leafTuple, bool recheck,
 			bool recheckDistances, double *distances)
 {
+	const int b = recheck ? 1 : 0;
+
 	Assert(!recheckDistances && !distances);
-	tbm_add_tuples(so->tbm, heapPtr, 1, recheck);
+
+	if (so->ntbmTids[b] == SPGIST_TBM_BATCH_SIZE)
+	{
+		tbm_add_tuples(so->tbm, so->tbmTids[b], so->ntbmTids[b], recheck);
+		so->ntbmTids[b] = 0;
+	}
+
+	so->tbmTids[b][so->ntbmTids[b]++] = *heapPtr;
 	so->ntids++;
 }
 
@@ -943,8 +952,13 @@ spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
 	so->tbm = tbm;
 	so->ntids = 0;
+	so->ntbmTids[0] = 0;
+    so->ntbmTids[1] = 0;
 
 	spgWalk(scan->indexRelation, so, true, storeBitmap);
+
+	for (int i = 0; i < 2; i++)
+		tbm_add_tuples(so->tbm, so->tbmTids[i], so->ntbmTids[i], i == 1);
 
 	return so->ntids;
 }
