@@ -744,7 +744,9 @@ CheckArchiveTimeout(void)
 
 			/*
 			 * If the returned pointer points exactly to a segment boundary,
-			 * assume nothing happened.
+			 * assume nothing happened.  This is also what we get when a
+			 * switch record happens to end exactly on the boundary, but it
+			 * only costs us the debug message.
 			 */
 			if (XLogSegmentOffset(switchpoint, wal_segment_size) != 0)
 				elog(DEBUG1, "write-ahead log switch forced (\"archive_timeout\"=%d)",
