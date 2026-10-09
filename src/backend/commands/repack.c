@@ -212,6 +212,8 @@ static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHea
 											   Oid identIdx,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti);
+static void lock_relation_with_timeout(Oid relid, int timeout,
+									   ChangeContext *chgcxt);
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
 static void copy_index_constraints(Relation old_index, Oid new_index_id,
 								   Oid new_heap_id);
@@ -3471,8 +3473,12 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
 	 * is one), all its indexes, so that we can swap the files.
+	 *
+	 * TODO Tune the timeout - the longer we wait, the more concurrent changes
+	 * we need to process while holding the lock. Does it deserve a new GUC
+	 * parameter?
 	 */
-	LockRelationOid(old_table_oid, AccessExclusiveLock);
+	lock_relation_with_timeout(old_table_oid, 3000, &chgcxt);
 
 	/*
 	 * Lock all indexes now, not only the clustering one: all indexes need to
@@ -3588,6 +3594,70 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 					 false,		/* reindex */
 					 frozenXid, cutoffMulti,
 					 relpersistence);
+}
+
+/*
+ * Lock relation with AccessExclusiveLock, but never wait longer than
+ * 'timeout' milliseconds.
+ */
+static void
+lock_relation_with_timeout(Oid relid, int timeout, ChangeContext *chgcxt)
+{
+	int	LockTimeout_save;
+	MemoryContext	edata_context, oldcxt;
+	XLogRecPtr	end_of_wal;
+
+	edata_context = AllocSetContextCreate(TopTransactionContext,
+										  "RepackLockError",
+										  ALLOCSET_DEFAULT_SIZES);
+	oldcxt = CurrentMemoryContext;
+	while (true)
+	{
+		bool	acquired = false;
+
+		LockTimeout_save = LockTimeout;
+		LockTimeout = timeout;
+
+		PG_TRY();
+		{
+			LockRelationOid(relid, AccessExclusiveLock);
+
+			acquired = true;
+		}
+		PG_CATCH();
+		{
+			ErrorData  *edata;
+
+			LockTimeout = LockTimeout_save;
+
+			/* Save error info in caller's context */
+			MemoryContextSwitchTo(edata_context);
+			edata = CopyErrorData();
+			FlushErrorState();
+			MemoryContextSwitchTo(oldcxt);
+
+			/*
+			 * LOCK_NOT_AVAILABLE is what we expect on timeout, anything else
+			 * is worth re-throwing.
+			 */
+			if (edata->sqlerrcode != ERRCODE_LOCK_NOT_AVAILABLE)
+				ReThrowError(edata);
+			MemoryContextReset(edata_context);
+		}
+		PG_END_TRY();
+		LockTimeout = LockTimeout_save;
+
+		if (acquired)
+			goto out;
+
+		/* Process the data changes that appeared during the waiting. */
+		XLogFlush(GetXLogInsertEndRecPtr());
+		end_of_wal = GetFlushRecPtr(NULL);
+		process_concurrent_changes(end_of_wal, chgcxt, false);
+	}
+
+out:
+	MemoryContextDelete(edata_context);
 }
 
 /*
