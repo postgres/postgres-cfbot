@@ -1359,9 +1359,17 @@ Out of Memory: Killed process 12345 (postgres).
 </programlisting>
     This indicates that the <filename>postgres</filename> process
     has been terminated due to memory pressure.
-    Although existing database connections will continue to function
-    normally, no new connections will be accepted.  To recover,
-    <productname>PostgreSQL</productname> will need to be restarted.
+    If the postmaster is terminated, all connections will eventually be
+    terminated.  To recover, <productname>PostgreSQL</productname> will
+    need to be restarted.  To reduce this risk, the OOM score adjustment of the
+    postmaster can be set lower than that of its child processes, as described
+    later in this section.
+    If a child process is terminated, all connections
+    will be terminated and <productname>PostgreSQL</productname> will
+    automatically restart when
+    <link linkend="guc-restart-after-crash"><varname>restart_after_crash</varname></link>
+    is on.  If it is off, <productname>PostgreSQL</productname> will stop and
+    must be restarted manually.
    </para>
 
    <para>
