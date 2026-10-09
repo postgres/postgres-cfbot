@@ -34,6 +34,7 @@
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "storage/lmgr.h"
+#include "storage/sinval.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
@@ -116,6 +117,10 @@ static void plan_recursive_revoke(CatCList *memlist,
 								  bool revoke_admin_option_only,
 								  DropBehavior behavior);
 static void InitGrantRoleOptions(GrantRoleOptions *popt);
+static void RoleNameCallbackForDropRole(const char *rolename, Oid roleid,
+										Oid oldroleid, void *callback_arg);
+static void RoleNameCallbackForGrantRole(const char *rolename, Oid roleid,
+										 Oid oldroleid, void *callback_arg);
 
 
 /* Check if current user has createrole privileges */
@@ -123,6 +128,94 @@ static bool
 have_createrole_privilege(void)
 {
 	return has_createrole_privilege(GetUserId());
+}
+
+
+/*
+ * RoleNameGetOid
+ *		Given a role name, look up its OID, lock it, and return the OID.
+ *
+ * This follows the same pattern as RangeVarGetRelidExtended():
+ * name resolution, permission check (via callback), and lock acquisition are
+ * performed inside a retry loop. If invalidation messages arrive during the
+ * process (indicating concurrent DDL), we retry to ensure the name still
+ * resolves to the same OID.
+ *
+ * The callback is invoked before locking, giving callers a chance to check
+ * permissions. It receives the current rolename, the resolved OID, the
+ * previous OID (InvalidOid on first iteration), and a caller-supplied arg.
+ * If the callback raises an error, the function aborts without locking.
+ *
+ * If missing_ok is true and the role does not exist, returns InvalidOid.
+ * Otherwise, raises an error.
+ */
+Oid
+RoleNameGetOid(const char *rolename, LOCKMODE lockmode, bool missing_ok,
+			   RoleNameGetOidCallback callback, void *callback_arg)
+{
+	uint64		inval_count;
+	Oid			roleid;
+	Oid			oldroleid = InvalidOid;
+	bool		retry = false;
+
+	for (;;)
+	{
+		/*
+		 * Remember the current invalidation count so we can detect concurrent
+		 * DDL after locking.
+		 */
+		inval_count = SharedInvalidMessageCounter;
+
+		/* Look up the role name */
+		roleid = get_role_oid(rolename, true);
+
+		if (!OidIsValid(roleid))
+		{
+			if (retry)
+				UnlockSharedObject(AuthIdRelationId, oldroleid, 0, lockmode);
+			if (!missing_ok)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("role \"%s\" does not exist", rolename)));
+			return InvalidOid;
+		}
+
+		/*
+		 * Invoke caller-supplied callback before locking. This is a good
+		 * place to check permissions: we haven't taken the lock yet, but we
+		 * know the OID we intend to lock. If concurrent DDL changes things,
+		 * the callback will be invoked again on the next iteration.
+		 */
+		if (callback)
+			callback(rolename, roleid, oldroleid, callback_arg);
+
+		/*
+		 * If upon retry we get back the same OID, the invalidation messages
+		 * did not change the final answer. So we're done.
+		 *
+		 * If we got a different OID, we've locked the role that used to have
+		 * this name rather than the one that does now. Release the old lock.
+		 */
+		if (retry)
+		{
+			if (roleid == oldroleid)
+				break;
+			UnlockSharedObject(AuthIdRelationId, oldroleid, 0, lockmode);
+		}
+
+		/* Lock the role */
+		LockSharedObject(AuthIdRelationId, roleid, 0, lockmode);
+
+		/* If no invalidation messages were processed, we're done */
+		if (inval_count == SharedInvalidMessageCounter)
+			break;
+
+		/* Something may have changed, retry */
+		retry = true;
+		oldroleid = roleid;
+	}
+
+	return roleid;
 }
 
 
@@ -1091,6 +1184,59 @@ AlterRoleSet(AlterRoleSetStmt *stmt)
 
 
 /*
+ * Before acquiring a role lock for DROP ROLE, check that the role is not the
+ * current/session user and that the caller has sufficient privileges to drop it.
+ */
+static void
+RoleNameCallbackForDropRole(const char *rolename, Oid roleid,
+							Oid oldroleid, void *callback_arg)
+{
+	HeapTuple	tuple;
+	Form_pg_authid roleform;
+
+	if (roleid == GetUserId())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("current user cannot be dropped")));
+	if (roleid == GetOuterUserId())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("current user cannot be dropped")));
+	if (roleid == GetSessionUserId())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("session user cannot be dropped")));
+
+	tuple = SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid));
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("role \"%s\" does not exist", rolename)));
+
+	roleform = (Form_pg_authid) GETSTRUCT(tuple);
+
+	/*
+	 * For safety's sake, we allow createrole holders to drop ordinary roles
+	 * but not superuser roles, and only if they also have ADMIN OPTION.
+	 */
+	if (roleform->rolsuper && !superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to drop role"),
+				 errdetail("Only roles with the %s attribute may drop roles with the %s attribute.",
+						   "SUPERUSER", "SUPERUSER")));
+	if (!is_admin_of_role(GetUserId(), roleid))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to drop role"),
+				 errdetail("Only roles with the %s attribute and the %s option on role \"%s\" may drop this role.",
+						   "CREATEROLE", "ADMIN", NameStr(roleform->rolname))));
+
+	ReleaseSysCache(tuple);
+}
+
+
+/*
  * DROP ROLE
  */
 void
@@ -1119,9 +1265,7 @@ DropRole(DropRoleStmt *stmt)
 	{
 		RoleSpec   *rolspec = lfirst(item);
 		char	   *role;
-		HeapTuple	tuple,
-					tmp_tuple;
-		Form_pg_authid roleform;
+		HeapTuple	tmp_tuple;
 		ScanKeyData scankey;
 		SysScanDesc sscan;
 		Oid			roleid;
@@ -1132,70 +1276,26 @@ DropRole(DropRoleStmt *stmt)
 					 errmsg("cannot use special role specifier in DROP ROLE")));
 		role = rolspec->rolename;
 
-		tuple = SearchSysCache1(AUTHNAME, PointerGetDatum(role));
-		if (!HeapTupleIsValid(tuple))
-		{
-			if (!stmt->missing_ok)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("role \"%s\" does not exist", role)));
-			}
-			else
-			{
-				ereport(NOTICE,
-						(errmsg("role \"%s\" does not exist, skipping",
-								role)));
-			}
+		/*
+		 * Use RoleNameGetOid to resolve the name, check permissions, and lock
+		 * the role atomically with a retry loop. This prevents race
+		 * conditions where a concurrent DROP or ALTER commits between name
+		 * resolution and lock acquisition.
+		 */
+		roleid = RoleNameGetOid(role, AccessExclusiveLock, stmt->missing_ok,
+								RoleNameCallbackForDropRole, NULL);
 
+		if (!OidIsValid(roleid))
+		{
+			/* missing_ok case: role doesn't exist */
+			ereport(NOTICE,
+					(errmsg("role \"%s\" does not exist, skipping",
+							role)));
 			continue;
 		}
 
-		roleform = (Form_pg_authid) GETSTRUCT(tuple);
-		roleid = roleform->oid;
-
-		if (roleid == GetUserId())
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_IN_USE),
-					 errmsg("current user cannot be dropped")));
-		if (roleid == GetOuterUserId())
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_IN_USE),
-					 errmsg("current user cannot be dropped")));
-		if (roleid == GetSessionUserId())
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_IN_USE),
-					 errmsg("session user cannot be dropped")));
-
-		/*
-		 * For safety's sake, we allow createrole holders to drop ordinary
-		 * roles but not superuser roles, and only if they also have ADMIN
-		 * OPTION.
-		 */
-		if (roleform->rolsuper && !superuser())
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("permission denied to drop role"),
-					 errdetail("Only roles with the %s attribute may drop roles with the %s attribute.",
-							   "SUPERUSER", "SUPERUSER")));
-		if (!is_admin_of_role(GetUserId(), roleid))
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("permission denied to drop role"),
-					 errdetail("Only roles with the %s attribute and the %s option on role \"%s\" may drop this role.",
-							   "CREATEROLE", "ADMIN", NameStr(roleform->rolname))));
-
 		/* DROP hook for the role being removed */
 		InvokeObjectDropHook(AuthIdRelationId, roleid, 0);
-
-		/* Don't leak the syscache tuple */
-		ReleaseSysCache(tuple);
-
-		/*
-		 * Lock the role, so nobody can add dependencies to her while we drop
-		 * her.  We keep the lock until the end of transaction.
-		 */
-		LockSharedObject(AuthIdRelationId, roleid, 0, AccessExclusiveLock);
 
 		/*
 		 * If there is a pg_auth_members entry that has one of the roles to be
@@ -1485,6 +1585,21 @@ RenameRole(const char *oldname, const char *newname)
 }
 
 /*
+ * Before acquiring a role lock for GRANT/REVOKE, check that the current user
+ * has authorization to grant/revoke membership in the specified role.
+ */
+static void
+RoleNameCallbackForGrantRole(const char *rolename, Oid roleid,
+							 Oid oldroleid, void *callback_arg)
+{
+	bool		is_grant = *((bool *) callback_arg);
+	Oid			currentUserId = GetUserId();
+
+	check_role_membership_authorization(currentUserId, roleid, is_grant);
+}
+
+
+/*
  * GrantRoleStmt
  *
  * Grant/Revoke roles to/from roles
@@ -1568,9 +1683,14 @@ GrantRole(ParseState *pstate, GrantRoleStmt *stmt)
 					(errcode(ERRCODE_INVALID_GRANT_OPERATION),
 					 errmsg("column names cannot be included in GRANT/REVOKE ROLE")));
 
-		roleid = get_role_oid(rolename, false);
-		check_role_membership_authorization(currentUserId,
-											roleid, stmt->is_grant);
+		/*
+		 * Use RoleNameGetOid to resolve the name, check permissions, and lock
+		 * the role atomically with a retry loop. This prevents race
+		 * conditions where a concurrent DROP commits between name resolution
+		 * and lock acquisition.
+		 */
+		roleid = RoleNameGetOid(rolename, ShareUpdateExclusiveLock, false,
+								RoleNameCallbackForGrantRole, &stmt->is_grant);
 		if (stmt->is_grant)
 			AddRoleMems(currentUserId, rolename, roleid,
 						stmt->grantee_roles, grantee_ids,
@@ -1658,6 +1778,8 @@ ReassignOwnedObjects(ReassignOwnedStmt *stmt)
  * roleSpecsToIds
  *
  * Given a list of RoleSpecs, generate a list of role OIDs in the same order.
+ * Each role is locked with AccessShareLock to prevent concurrent DROP ROLE
+ * from removing it between resolution and the caller's catalog update.
  *
  * ROLESPEC_PUBLIC is not allowed.
  */
@@ -1672,7 +1794,23 @@ roleSpecsToIds(List *memberNames)
 		RoleSpec   *rolespec = lfirst_node(RoleSpec, l);
 		Oid			roleid;
 
-		roleid = get_rolespec_oid(rolespec, false);
+		if (rolespec->roletype == ROLESPEC_CSTRING)
+			roleid = RoleNameGetOid(rolespec->rolename,
+									AccessShareLock, false,
+									NULL, NULL);
+		else
+		{
+			roleid = get_rolespec_oid(rolespec, false);
+			LockSharedObject(AuthIdRelationId, roleid, 0,
+							 AccessShareLock);
+
+			/* Recheck that the role still exists after locking. */
+			if (!SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid)))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("role with OID %u does not exist", roleid)));
+		}
+
 		result = lappend_oid(result, roleid);
 	}
 	return result;
