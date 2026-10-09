@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "executor/executor.h"
@@ -20,14 +21,24 @@
 #include "executor/tuptable.h"
 #include "nodes/execnodes.h"
 #include "portability/instr_time.h"
+#include "storage/aio_subsys.h"
 #include "utils/guc_hooks.h"
 
 BufferUsage pgBufferUsage;
 static BufferUsage save_pgBufferUsage;
+
+/*
+ * Accumulates the I/O usage sent by parallel workers to the main
+ * process. This does not contain the I/O from the main backend process
+ * itself because the kernel tracks that instead of us.
+ */
+StorageIOUsage pgStorageIOUsageParallel;
+
 WalUsage	pgWalUsage;
 static WalUsage save_pgWalUsage;
 
 static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
+void		StorageIOUsageAdd(StorageIOUsage *dst, const StorageIOUsage *add);
 static void WalUsageAdd(WalUsage *dst, WalUsage *add);
 
 
@@ -276,27 +287,43 @@ InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings)
 
 /* note current values during parallel executor startup */
 void
-InstrStartParallelQuery(void)
+InstrStartParallelQuery(StorageIOUsage *storageiousage)
 {
 	save_pgBufferUsage = pgBufferUsage;
 	save_pgWalUsage = pgWalUsage;
+
+	if (storageiousage != NULL)
+		GetStorageIOUsage(storageiousage);
 }
 
 /* report usage after parallel executor shutdown */
 void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrEndParallelQuery(BufferUsage *bufusage, StorageIOUsage *storageiousage, WalUsage *walusage, StorageIOUsage *storageiousage_start)
 {
 	memset(bufusage, 0, sizeof(BufferUsage));
 	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
+
+	if (storageiousage != NULL && storageiousage_start != NULL)
+	{
+		struct StorageIOUsage storageiousage_end;
+
+		GetStorageIOUsage(&storageiousage_end);
+
+		memset(storageiousage, 0, sizeof(StorageIOUsage));
+		StorageIOUsageAccumDiff(storageiousage, &storageiousage_end, storageiousage_start);
+	}
 	memset(walusage, 0, sizeof(WalUsage));
 	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
 }
 
 /* accumulate work done by workers in leader's stats */
 void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrAccumParallelQuery(BufferUsage *bufusage, StorageIOUsage *storageiousage, WalUsage *walusage)
 {
 	BufferUsageAdd(&pgBufferUsage, bufusage);
+
+	if (storageiousage != NULL)
+		StorageIOUsageAdd(&pgStorageIOUsageParallel, storageiousage);
 	WalUsageAdd(&pgWalUsage, walusage);
 }
 
@@ -350,6 +377,57 @@ BufferUsageAccumDiff(BufferUsage *dst,
 						  add->temp_blk_read_time, sub->temp_blk_read_time);
 	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
 						  add->temp_blk_write_time, sub->temp_blk_write_time);
+}
+
+/* helper functions for StorageIOUsage usage accumulation */
+void
+StorageIOUsageAdd(StorageIOUsage *dst, const StorageIOUsage *add)
+{
+	dst->inblock += add->inblock;
+	dst->outblock += add->outblock;
+}
+
+/* dst += add - sub */
+void
+StorageIOUsageAccumDiff(StorageIOUsage *dst, const StorageIOUsage *add, const StorageIOUsage *sub)
+{
+	dst->inblock += add->inblock - sub->inblock;
+	dst->outblock += add->outblock - sub->outblock;
+}
+
+/* dst -= sub */
+void
+StorageIOUsageDiff(StorageIOUsage *dst, const StorageIOUsage *sub)
+{
+	dst->inblock -= sub->inblock;
+	dst->outblock -= sub->outblock;
+}
+
+/* Captures the current storage I/O usage statistics */
+void
+GetStorageIOUsage(StorageIOUsage *usage)
+{
+	struct rusage rusage;
+
+	/*
+	 * Since getting the I/O excluding AIO workers underestimates the total
+	 * I/O, don't get the I/O usage statistics when AIO worker is enabled.
+	 */
+	if (pgaio_workers_enabled())
+	{
+		usage->inblock = 0;
+		usage->outblock = 0;
+		return;
+	}
+
+	if (getrusage(RUSAGE_SELF, &rusage))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_SYSTEM_ERROR),
+				 errmsg("getrusage() failed: %m")));
+	}
+	usage->inblock = rusage.ru_inblock;
+	usage->outblock = rusage.ru_oublock;
 }
 
 /* helper functions for WAL usage accumulation */
