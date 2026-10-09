@@ -3,7 +3,7 @@
 PGFILEDESC = "pg_upgrade - an in-place binary upgrade utility"
 PGAPPICON = win32
 
-EXTRA_INSTALL=contrib/test_decoding src/test/modules/dummy_seclabel src/test/modules/test_extensions
+EXTRA_INSTALL=contrib/test_decoding src/test/modules/dummy_seclabel src/test/modules/test_extensions src/test/modules/test_slru
 
 subdir = src/bin/pg_upgrade
 top_builddir = ../../..
