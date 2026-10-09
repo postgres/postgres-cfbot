@@ -313,6 +313,7 @@ dihandler(PG_FUNCTION_ARGS)
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = false,
+		.amcanresetsnapshot = false,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,

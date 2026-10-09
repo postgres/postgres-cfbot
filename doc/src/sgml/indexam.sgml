@@ -137,6 +137,8 @@ typedef struct IndexAmRoutine
     bool        amcanparallel;
     /* does AM support parallel build? */
     bool        amcanbuildparallel;
+    /* does AM support snapshot resets during concurrent builds? */
+    bool        amcanresetsnapshot;
     /* does AM support columns included with clause INCLUDE? */
     bool        amcaninclude;
     /* does AM use maintenance_work_mem? */
@@ -310,6 +312,16 @@ ambuild (Relation heapRelation,
    the system will attempt to allocate parallel workers for the build.
    Access methods supporting only non-parallel index builds should leave
    this flag set to <literal>false</literal>.
+  </para>
+
+  <para>
+   Set <structfield>amcanresetsnapshot</structfield> to <literal>true</literal>
+   if <structfield>ambuild</structfield> supports periodic snapshot resets
+   during concurrent builds.  The table scan may switch to a newer MVCC
+   snapshot between pages so that xmin can advance.  Copy any values retained
+   after the build callback returns, fetching external TOAST data rather than
+   retaining pointers to it.  The access method must not hold an additional
+   snapshot across the scan.
   </para>
 
   <para>

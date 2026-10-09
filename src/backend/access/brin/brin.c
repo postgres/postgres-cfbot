@@ -274,6 +274,8 @@ brinhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = true,
+		/* not yet: a range summary keeps values across many heap pages */
+		.amcanresetsnapshot = false,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = true,
