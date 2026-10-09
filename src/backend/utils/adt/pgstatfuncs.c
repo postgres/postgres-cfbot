@@ -1785,6 +1785,66 @@ pg_stat_get_backend_wal(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Returns AIO statistics for a backend with given PID.
+ */
+Datum
+pg_stat_get_backend_aio(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_BACKEND_AIO_COLS	8
+	TupleDesc	tupdesc;
+	Datum		values[PG_STAT_BACKEND_AIO_COLS] = {0};
+	bool		nulls[PG_STAT_BACKEND_AIO_COLS] = {0};
+	int			pid;
+	PgStat_Backend *backend_stats;
+	PgStat_AioCounters aio_counters;
+
+	pid = PG_GETARG_INT32(0);
+	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
+
+	if (!backend_stats)
+		PG_RETURN_NULL();
+
+	aio_counters = backend_stats->aio_counters;
+
+	/* Initialise attributes information in the tuple descriptor */
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_BACKEND_AIO_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "started",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "executed_sync",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "executed_async",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "completed_self",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "completed_other",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "handle_waits",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "submitted",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "stats_reset",
+					   TIMESTAMPTZOID, -1, 0);
+	TupleDescFinalize(tupdesc);
+	BlessTupleDesc(tupdesc);
+
+	/* Fill values */
+	values[0] = Int64GetDatum(aio_counters.started);
+	values[1] = Int64GetDatum(aio_counters.executed_sync);
+	values[2] = Int64GetDatum(aio_counters.executed_async);
+	values[3] = Int64GetDatum(aio_counters.completed_self);
+	values[4] = Int64GetDatum(aio_counters.completed_other);
+	values[5] = Int64GetDatum(aio_counters.handle_waits);
+	values[6] = Int64GetDatum(aio_counters.submitted);
+
+	if (backend_stats->stat_reset_timestamp != 0)
+		values[7] = TimestampTzGetDatum(backend_stats->stat_reset_timestamp);
+	else
+		nulls[7] = true;
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
  * Returns statistics of WAL activity
  */
 Datum

@@ -5803,6 +5803,76 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </row>
 
       <row>
+       <entry id="pg-stat-get-backend-aio" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_get_backend_aio</primary>
+        </indexterm>
+        <function>pg_stat_get_backend_aio</function> ( <type>integer</type> )
+        <returnvalue>record</returnvalue>
+       </para>
+       <para>
+        Returns <acronym>AIO</acronym> (Asynchronous I/O) statistics about the
+        backend with the specified process ID. The returned values are:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>started</literal>: Total IOs initiated.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+           <literal>executed_sync</literal>: IOs executed synchronously.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>executed_async</literal>: IOs submitted asynchronously.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>completed_self</literal>: IO completions processed by this
+          backend.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>completed_other</literal>: IO completions processed on
+          behalf of other backends.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>handle_waits</literal>: Times waited for a free AIO handle.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>submitted</literal>: Number of submit calls to the IO
+          method. Compare with <literal>executed_async</literal> to determine
+          average batch size.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>stats_reset</literal>: Timestamp of last stats reset.
+         </para>
+        </listitem>
+       </itemizedlist>
+       </para>
+       <para>
+        The <literal>completed_other</literal> column is only meaningful
+        when <varname>io_method</varname> is set to <literal>io_uring</literal>;
+        with <literal>worker</literal> mode, IO completions are processed by
+        IO worker processes which do not track these statistics.
+       </para>
+       <para>
+        The function does not return AIO statistics for the checkpointer,
+        the background writer, the startup process and the autovacuum launcher.
+       </para></entry>
+      </row>
+
+      <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
          <primary>pg_stat_get_activity</primary>
