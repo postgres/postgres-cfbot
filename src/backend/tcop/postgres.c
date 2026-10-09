@@ -37,6 +37,7 @@
 #include "catalog/pg_type.h"
 #include "commands/async.h"
 #include "commands/event_trigger.h"
+#include "commands/explain_running.h"
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
 #include "commands/repack.h"
@@ -3698,6 +3699,9 @@ ProcessInterrupts(void)
 
 	if (LogMemoryContextPending)
 		ProcessLogMemoryContextInterrupt();
+
+	if (LogQueryPlanPending)
+		ProcessLogQueryPlanInterrupt();
 
 	if (ParallelApplyMessagePending)
 		ProcessParallelApplyMessages();
