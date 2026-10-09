@@ -1077,21 +1077,14 @@ XLogInsertRecord(XLogRecData *rdata,
 		/*
 		 * Even though we reserved the rest of the segment for us, which is
 		 * reflected in EndPos, we return a pointer to just the end of the
-		 * xlog-switch record.
+		 * xlog-switch record. When the record falls right on the segment
+		 * boundary, EndPos is adjusted to the start of the segment (before
+		 * the page header), so that it doesn't go past the end of reserved
+		 * WAL.
 		 */
 		if (inserted)
-		{
-			EndPos = StartPos + SizeOfXLogRecord;
-			if (StartPos / XLOG_BLCKSZ != EndPos / XLOG_BLCKSZ)
-			{
-				uint64		offset = XLogSegmentOffset(EndPos, wal_segment_size);
-
-				if (offset == EndPos % XLOG_BLCKSZ)
-					EndPos += SizeOfXLogLongPHD;
-				else
-					EndPos += SizeOfXLogShortPHD;
-			}
-		}
+			EndPos = XLogBytePosToEndRecPtr(XLogRecPtrToBytePos(StartPos) +
+											MAXALIGN(SizeOfXLogRecord));
 	}
 
 	/* Process any flush progress published while making room for the record. */
