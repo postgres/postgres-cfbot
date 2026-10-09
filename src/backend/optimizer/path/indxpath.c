@@ -74,7 +74,6 @@ typedef struct
 	int			indexcol;		/* index column we want to match to */
 } ec_member_matches_arg;
 
-
 static void consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 										IndexOptInfo *index,
 										IndexClauseSet *rclauseset,
@@ -4280,6 +4279,133 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 				*extra_clauses = exprs;
 			return true;
 		}
+	}
+
+	return false;
+}
+
+/*
+ * unique_index_keys_match_groupby_cols
+ *	  Test whether an immediate unique index proves uniqueness under the
+ *	  equality semantics of the given GROUP BY columns.
+ *
+ * The caller passes simple GROUP BY Vars belonging to rel.  For each index key
+ * column, there must be a GROUP BY Var on the same column whose mergejoin
+ * opfamilies include the index opfamily and whose collation agrees on
+ * equality.  A NULLS DISTINCT index additionally requires every key column to
+ * be NOT NULL.
+ *
+ * If index_attnos isn't NULL, it is set to the heap attribute numbers of the
+ * matched index key columns.  This allows callers to compare the key against a
+ * set of grouping columns.
+ */
+bool
+unique_index_keys_match_groupby_cols(IndexOptInfo *index, RelOptInfo *rel,
+									 List *groupbycols,
+									 Bitmapset **index_attnos)
+{
+	if (index_attnos)
+		*index_attnos = NULL;
+
+	/*
+	 * Only an immediate, unconditional unique index proves that the input is
+	 * unique.  Expression and partial indexes cannot prove whole-relation
+	 * uniqueness.  Skip hypothetical indexes because they do not prove a
+	 * property of the physical relation.
+	 */
+	if (!index->unique || !index->immediate || index->indpred != NIL ||
+		index->indexprs != NIL || index->hypothetical)
+		return false;
+
+	for (int i = 0; i < index->nkeycolumns; i++)
+	{
+		AttrNumber	indkey = index->indexkeys[i];
+		ListCell   *lc;
+
+		if (indkey <= 0 ||
+			(!index->nullsnotdistinct &&
+			 !bms_is_member(indkey, rel->notnullattnums)))
+			return false;
+
+		foreach(lc, groupbycols)
+		{
+			GroupByColInfo *info = (GroupByColInfo *) lfirst(lc);
+
+			if (info->attno == indkey &&
+				list_member_oid(info->eq_opfamilies, index->opfamily[i]) &&
+				collations_agree_on_equality(index->indexcollations[i],
+											 info->coll))
+				break;
+		}
+		if (lc == NULL)
+			return false;
+
+		if (index_attnos)
+			*index_attnos = bms_add_member(*index_attnos,
+										   indkey -
+										   FirstLowInvalidHeapAttributeNumber);
+	}
+
+	return true;
+}
+
+/*
+ * relation_has_unique_index_covered_by_group_keys
+ *		Determine whether every input row is its own group under the given
+ *		plain GROUP BY keys.
+ *
+ * The caller has already restricted this to a single base relation and a plain
+ * GROUP BY list.  Only simple Vars from that relation can cover index keys;
+ * other grouping items are additional keys and cannot invalidate the proof.
+ * Index keys may be a subset of the grouping keys, just as an immediate PK
+ * makes every row its own group regardless of what else is listed in GROUP BY.
+ */
+bool
+relation_has_unique_index_covered_by_group_keys(RelOptInfo *rel,
+												List *groupClause,
+												List *targetList)
+{
+	List       *group_keys = NIL;
+	ListCell   *lc;
+
+	if (groupClause == NIL)
+		return false;
+
+	Assert(bms_membership(rel->relids) == BMS_SINGLETON);
+
+	foreach(lc, groupClause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle = get_sortgroupclause_tle(sgc, targetList);
+		Var            *var;
+		GroupByColInfo *key;
+
+		if (tle == NULL)
+			return false;
+
+		/* Extra grouping expressions do not affect the singleton proof. */
+		if (!IsA(tle->expr, Var))
+			continue;
+
+		var = (Var *) tle->expr;
+		if (var->varlevelsup != 0 || var->varattno <= 0 ||
+			var->varno != rel->relid)
+			continue;
+
+		key = palloc_object(GroupByColInfo);
+		key->attno = var->varattno;
+		key->eq_opfamilies = get_mergejoin_opfamilies(sgc->eqop);
+		key->coll = var->varcollid;
+		group_keys = lappend(group_keys, key);
+	}
+
+	if (group_keys == NIL)
+		return false;
+
+	foreach_node(IndexOptInfo, index, rel->indexlist)
+	{
+		if (unique_index_keys_match_groupby_cols(index, rel, group_keys, NULL))
+			return true;
 	}
 
 	return false;

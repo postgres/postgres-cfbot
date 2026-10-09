@@ -1079,7 +1079,7 @@ typedef struct RelOptInfo
 	Relids	   *attr_needed pg_node_attr(read_write_ignore);
 	/* array indexed [min_attr .. max_attr] */
 	int32	   *attr_widths pg_node_attr(read_write_ignore);
-	/* zero-based set containing attnums of NOT NULL columns */
+	/* set of heap attnums for columns with valid NOT NULL constraints */
 	Bitmapset  *notnullattnums;
 	/* relids of outer joins that can null this baserel */
 	Relids		nulling_relids;

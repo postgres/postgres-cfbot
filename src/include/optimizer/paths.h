@@ -79,10 +79,28 @@ extern void generate_partitionwise_join_paths(PlannerInfo *root,
  * indxpath.c
  *	  routines to generate index paths
  */
+/*
+ * Compatibility info for one GROUP BY item, used when matching unique-index
+ * columns against GROUP BY items.
+ */
+typedef struct GroupByColInfo
+{
+	AttrNumber	attno;			/* var->varattno */
+	List	   *eq_opfamilies;	/* mergejoin opfamilies of sgc->eqop */
+	Oid			coll;			/* var->varcollid */
+} GroupByColInfo;
+
 extern void create_index_paths(PlannerInfo *root, RelOptInfo *rel);
 extern bool relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 										  List *restrictlist,
 										  List **extra_clauses);
+extern bool unique_index_keys_match_groupby_cols(IndexOptInfo *index,
+												 RelOptInfo *rel,
+												 List *groupbycols,
+												 Bitmapset **index_attnos);
+extern bool relation_has_unique_index_covered_by_group_keys(RelOptInfo *rel,
+															List *groupClause,
+															List *targetList);
 extern bool indexcol_is_bool_constant_for_query(PlannerInfo *root,
 												IndexOptInfo *index,
 												int indexcol);

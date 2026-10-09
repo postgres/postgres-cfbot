@@ -81,19 +81,6 @@ typedef struct JoinTreeItem
 									 * lateral references */
 } JoinTreeItem;
 
-/*
- * Compatibility info for one GROUP BY item, precomputed for use by
- * remove_useless_groupby_columns() when matching unique-index columns against
- * GROUP BY items.
- */
-typedef struct GroupByColInfo
-{
-	AttrNumber	attno;			/* var->varattno */
-	List	   *eq_opfamilies;	/* mergejoin opfamilies of sgc->eqop */
-	Oid			coll;			/* var->varcollid */
-} GroupByColInfo;
-
-
 static bool is_partial_agg_memory_risky(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
 static void create_grouping_expr_infos(PlannerInfo *root);
@@ -488,73 +475,14 @@ remove_useless_groupby_columns(PlannerInfo *root)
 		foreach_node(IndexOptInfo, index, rel->indexlist)
 		{
 			Bitmapset  *ind_attnos;
-			bool		index_check_ok;
 
 			/*
-			 * Skip any non-unique and deferrable indexes.  Predicate indexes
-			 * have not been checked yet, so we must skip those too as the
-			 * predOK check that's done later might fail.
+			 * Check that this is a usable unique index and that each key
+			 * column agrees with a GROUP BY column's equality semantics.
 			 */
-			if (!index->unique || !index->immediate || index->indpred != NIL)
-				continue;
-
-			/* For simplicity, we currently don't support expression indexes */
-			if (index->indexprs != NIL)
-				continue;
-
-			ind_attnos = NULL;
-			index_check_ok = true;
-			for (int i = 0; i < index->nkeycolumns; i++)
-			{
-				AttrNumber	indkey_attno = index->indexkeys[i];
-				Oid			indkey_opfamily = index->opfamily[i];
-				Oid			indkey_coll = index->indexcollations[i];
-				ListCell   *lc2;
-
-				/*
-				 * We must insist that the index columns are all defined NOT
-				 * NULL otherwise duplicate NULLs could exist.  However, we
-				 * can relax this check when the index is defined with NULLS
-				 * NOT DISTINCT as there can only be 1 NULL row, therefore
-				 * functional dependency on the unique columns is maintained,
-				 * despite the NULL.
-				 */
-				if (!index->nullsnotdistinct &&
-					!bms_is_member(indkey_attno, rel->notnullattnums))
-				{
-					index_check_ok = false;
-					break;
-				}
-
-				/*
-				 * The index proves uniqueness only under its own opfamily and
-				 * collation.  Require some GROUP BY item on this column to
-				 * use a compatible eqop and collation, the same check
-				 * relation_has_unique_index_for() applies to join clauses.
-				 */
-				foreach(lc2, groupbycols[relid])
-				{
-					GroupByColInfo *info = (GroupByColInfo *) lfirst(lc2);
-
-					if (info->attno != indkey_attno)
-						continue;
-					if (list_member_oid(info->eq_opfamilies, indkey_opfamily) &&
-						collations_agree_on_equality(indkey_coll, info->coll))
-						break;
-				}
-				if (lc2 == NULL)
-				{
-					index_check_ok = false;
-					break;
-				}
-
-				ind_attnos =
-					bms_add_member(ind_attnos,
-								   indkey_attno -
-								   FirstLowInvalidHeapAttributeNumber);
-			}
-
-			if (!index_check_ok)
+			if (!unique_index_keys_match_groupby_cols(index, rel,
+													  groupbycols[relid],
+													  &ind_attnos))
 				continue;
 
 			/*
