@@ -2264,7 +2264,7 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 		return tup;
 	}
 	else if (HeapTupleHasExternal(tup) || tup->t_len > TOAST_TUPLE_THRESHOLD)
-		return heap_toast_insert_or_update(relation, tup, NULL, options);
+		return heap_toast_insert_or_update(relation, tup, NULL, options, 0);
 	else
 		return tup;
 }
@@ -3968,7 +3968,7 @@ l2:
 			 * tuples too. We never skip the FSM here.
 			 */
 			heaptup = heap_toast_insert_or_update(relation, newtup, &oldtup,
-												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL);
+												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL, 0);
 			newtupsize = MAXALIGN(heaptup->t_len);
 		}
 		else
