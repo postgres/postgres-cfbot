@@ -1786,3 +1786,257 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+
+
+-- Test ON EMPTY clause for aggregates
+
+-- create a test table for ON EMPTY tests
+CREATE TABLE agg_on_empty(id int, val int, grpid int);
+
+-- with empty table
+SELECT sum(val, -1 ON EMPTY) FROM agg_on_empty;
+
+INSERT INTO agg_on_empty VALUES (1, 10, 10), (2, 20, 10), (3, 30, 20), (4, NULL, 20), (5, 50, 30);
+
+-- basic ON EMPTY tests with numeric default
+SELECT sum(val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT sum(val, -1 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT avg(val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT max(val, 999 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT min(val, -999 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT count(val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with non-empty result set (should use actual aggregate result)
+SELECT sum(val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+SELECT avg(val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+SELECT max(val, 999 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+SELECT min(val, -999 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+
+-- with string default
+SELECT string_agg(grpid::text, ',', 'NONE' ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT string_agg(grpid::text, ',', 'NONE' ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+
+-- with NULL default
+SELECT sum(val, NULL ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT avg(val, NULL ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT string_agg(grpid::text, ',', NULL ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with type coercion (integer to numeric)
+SELECT sum(val::numeric, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT sum(val, 0.5 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- Multiple aggregate calls in one query that share the same transition
+-- function, arguments and filter (so the planner may compute them via a
+-- single shared transition state) must still each get their own ON EMPTY
+-- default: sharing the transition state must not mean sharing (or losing)
+-- the per-aggregate ON EMPTY expression.
+SELECT sum(val), sum(val, 10 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT sum(val, 10 ON EMPTY), sum(val) FROM agg_on_empty WHERE grpid = 40;
+SELECT sum(val, 10 ON EMPTY), sum(val, 20 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT max(val, 1 ON EMPTY), max(val, 2 ON EMPTY), max(val) FROM agg_on_empty WHERE grpid = 40;
+-- two references to the exact same ON EMPTY aggregate call may still share
+-- everything, including the result
+SELECT sum(val, 10 ON EMPTY), sum(val, 10 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+-- and the same, but over non-empty input, where ON EMPTY does not fire for
+-- any of them
+SELECT sum(val), sum(val, 10 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+SELECT sum(val, 10 ON EMPTY), sum(val, 20 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+
+-- with GROUP BY
+SELECT grpid, sum(val, 0 ON EMPTY) FROM agg_on_empty GROUP BY grpid ORDER BY grpid;
+
+-- with GROUP BY and empty groups: a LEFT JOIN with no match produces one
+-- row with a NULL value, not zero rows, but sum's result is NULL either
+-- way, so groups 100 and 200 get the ON EMPTY value here too
+SELECT g, sum(val, -1 ON EMPTY) FROM (VALUES (100), (200), (10), (20)) AS groups(g)
+  LEFT JOIN agg_on_empty ON groups.g = agg_on_empty.grpid
+  GROUP BY g ORDER BY g;
+
+-- with grouping sets: per-group state is reset across grouping-set phases, so
+-- ON EMPTY must not fire spuriously for groups that do have rows
+SELECT grpid, sum(val, -1 ON EMPTY) FROM agg_on_empty
+  GROUP BY ROLLUP(grpid) ORDER BY grpid;
+
+-- with grouping sets where a FILTER empties one group: ON EMPTY fires only for
+-- that group (checked under both sorted and hashed grouping-set execution)
+SELECT grpid, sum(val, -1 ON EMPTY) FILTER (WHERE val > 25) FROM agg_on_empty
+  GROUP BY GROUPING SETS ((grpid), ()) ORDER BY grpid;
+SET enable_sort = off;
+SELECT grpid, sum(val, -1 ON EMPTY) FILTER (WHERE val > 25) FROM agg_on_empty
+  GROUP BY GROUPING SETS ((grpid), ()) ORDER BY grpid;
+RESET enable_sort;
+
+-- multi-dimensional CUBE with a FILTER: ON EMPTY fires independently for each
+-- empty cell (including sub-aggregates), while populated cells return real sums
+SELECT grpid, id % 2 AS parity, sum(val, -1 ON EMPTY) FILTER (WHERE val > 25) AS s
+  FROM agg_on_empty GROUP BY CUBE(grpid, id % 2) ORDER BY grpid, parity;
+
+-- with FILTER clause
+SELECT sum(val, 100 ON EMPTY) FILTER (WHERE val > 100) FROM agg_on_empty;
+SELECT count(val, 0 ON EMPTY) FILTER (WHERE val > 100) FROM agg_on_empty;
+
+-- with ORDER BY in aggregate
+SELECT avg(val, -999 ON EMPTY ORDER BY val) FROM agg_on_empty WHERE grpid = 40;
+SELECT avg(val, -999 ON EMPTY ORDER BY val) FROM agg_on_empty WHERE grpid = 10;
+
+-- under a forced parallel plan: ON EMPTY must give the same answer whether
+-- or not the aggregate ends up partially/parallel aggregated, since the
+-- COALESCE-equivalent check happens once, centrally, at finalization.
+SET max_parallel_workers_per_gather = 4;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SELECT sum(val, -1 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;	-- default
+SELECT sum(val, -1 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;	-- real result
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+
+-- MIN/MAX over an indexed column can be rewritten by the planner into an
+-- index-scan-based plan (see planagg.c) that bypasses the normal Agg node,
+-- and hence finalize_aggregate(), entirely.  An aggregate carrying an ON
+-- EMPTY default must be excluded from that rewrite so its default still
+-- applies; verify both the plan shape and the result.  Needs enough rows
+-- (and a matching index) for the planner to actually prefer that rewrite.
+CREATE TABLE agg_on_empty_mm(a int);
+INSERT INTO agg_on_empty_mm SELECT g FROM generate_series(1, 10000) g;
+CREATE INDEX ON agg_on_empty_mm (a);
+ANALYZE agg_on_empty_mm;
+
+-- plain max/min (no ON EMPTY): uses the index-scan/Limit rewrite
+EXPLAIN (COSTS OFF)
+  SELECT max(a) FROM agg_on_empty_mm WHERE a > 100000;
+SELECT max(a) FROM agg_on_empty_mm WHERE a > 100000;
+
+-- with ON EMPTY: must not use that rewrite, so the default still applies
+EXPLAIN (COSTS OFF)
+  SELECT max(a, -1 ON EMPTY) FROM agg_on_empty_mm WHERE a > 100000;
+SELECT max(a, -1 ON EMPTY) FROM agg_on_empty_mm WHERE a > 100000;
+SELECT min(a, -1 ON EMPTY) FROM agg_on_empty_mm WHERE a > 100000;
+
+DROP TABLE agg_on_empty_mm;
+
+-- Error cases for ON EMPTY
+
+-- with complex expressions (should fail - must be constant)
+SELECT sum(val, val ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with type mismatch (should fail)
+SELECT sum(val, 'invalid' ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with non-aggregate function (should fail)
+SELECT length('test', 'default' ON EMPTY);
+
+-- with a subquery (should fail)
+SELECT sum(val, (SELECT 1) ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with a volatile function (should fail)
+SELECT sum(val, random()::int ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with a set-returning function (should fail)
+SELECT sum(val, generate_series(1, 2) ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with a nested aggregate (should fail)
+SELECT sum(val, sum(val) ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- with a window function (should fail)
+SELECT sum(val, row_number() OVER () ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+
+-- combined with DISTINCT: dedup happens upstream of finalization, entirely
+-- independent of ON EMPTY, so both work together with no special-casing
+SELECT sum(DISTINCT val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;	-- empty -> 0
+SELECT sum(DISTINCT val, 0 ON EMPTY) FROM (VALUES (5), (5), (10)) v(val);	-- 15, not 20
+
+-- ALL is fine with ON EMPTY (it is the default quantifier anyway)
+SELECT sum(ALL val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 40;
+SELECT sum(ALL val, 0 ON EMPTY) FROM agg_on_empty WHERE grpid = 10;
+
+-- combined with an ordered-set aggregate (WITHIN GROUP): the ON EMPTY value
+-- is written before WITHIN GROUP and is returned for an empty input set
+SELECT percentile_cont(0.5, -7 ON EMPTY) WITHIN GROUP (ORDER BY val)
+  FROM agg_on_empty WHERE grpid = 40;	-- empty -> default
+SELECT percentile_cont(0.5, -7 ON EMPTY) WITHIN GROUP (ORDER BY val)
+  FROM agg_on_empty WHERE grpid = 10;	-- real result
+
+-- and it round-trips through view deparsing
+CREATE VIEW agg_on_empty_os_vw AS
+  SELECT percentile_cont(0.5, -7 ON EMPTY) WITHIN GROUP (ORDER BY val) AS p
+  FROM agg_on_empty;
+SELECT pg_get_viewdef('agg_on_empty_os_vw');
+DROP VIEW agg_on_empty_os_vw;
+
+-- deparsing of ON EMPTY in views
+CREATE VIEW agg_on_empty_vw AS
+  SELECT grpid, sum(val, 0 ON EMPTY ORDER BY val) AS total,
+    avg(val, 0 ON EMPTY) AS average, count(val, 0 ON EMPTY) AS cnt
+  FROM agg_on_empty GROUP BY grpid;
+
+\d+ agg_on_empty_vw
+
+SELECT * FROM agg_on_empty_vw ORDER BY grpid;
+
+-- with prepared statements (must use literal constants)
+PREPARE on_empty_test(int) AS
+  SELECT sum(val, 42 ON EMPTY) FROM agg_on_empty WHERE grpid = $1;
+
+EXECUTE on_empty_test(40);
+EXECUTE on_empty_test(10);
+
+DEALLOCATE on_empty_test;
+
+-- with HAVING clause
+SELECT grpid, sum(val, 0 ON EMPTY) AS total FROM agg_on_empty
+  GROUP BY grpid HAVING sum(val, 0 ON EMPTY) > 20 ORDER BY grpid;
+
+-- ON EMPTY is exactly COALESCE(normal_result, default_expression): it fires
+-- whenever the aggregate's ordinary result is NULL, for whatever reason --
+-- not only for a truly empty input.  In particular, a non-empty group whose
+-- rows are all NULL also gets the ON EMPTY value here, because max/min's
+-- ordinary result for such a group is NULL anyway.  This is exercised across
+-- the sorted, hashed and grouping-set execution paths.
+INSERT INTO agg_on_empty VALUES (6, NULL, 50), (7, NULL, 50);
+
+SELECT max(val, -1 ON EMPTY) FROM agg_on_empty WHERE grpid = 50;	-- -1, same as COALESCE(max(val), -1)
+SELECT min(val, -1 ON EMPTY) FROM agg_on_empty WHERE grpid = 50;	-- -1, same as COALESCE(min(val), -1)
+
+-- and per group, under both sorted and hashed aggregation
+SELECT grpid, max(val, -1 ON EMPTY) FROM agg_on_empty
+  GROUP BY grpid ORDER BY grpid;
+SET enable_sort = off; SET enable_hashagg = on;
+SELECT grpid, max(val, -1 ON EMPTY) FROM agg_on_empty
+  GROUP BY grpid ORDER BY grpid;
+RESET enable_sort; RESET enable_hashagg;
+
+-- and under grouping sets
+SELECT grpid, max(val, -1 ON EMPTY) FROM agg_on_empty
+  GROUP BY ROLLUP(grpid) ORDER BY grpid;
+
+-- Since ON EMPTY cannot distinguish "no rows at all" from "rows that
+-- happen to compute to NULL", an aggregate whose final function can
+-- legitimately return NULL from non-empty input is indistinguishable from
+-- COALESCE here too: percentile_cont's own final function returns NULL for
+-- an all-NULL, non-empty ordered set, so ON EMPTY fires for that case just
+-- as it would for a truly empty input.
+SELECT percentile_cont(0.5, -7 ON EMPTY) WITHIN GROUP (ORDER BY val)
+  FROM agg_on_empty WHERE grpid = 50;	-- -7, same as COALESCE(percentile_cont(...), -7)
+SELECT percentile_cont(0.5, -7 ON EMPTY) WITHIN GROUP (ORDER BY val)
+  FROM agg_on_empty WHERE grpid = 60;	-- empty -> -7
+
+-- the same COALESCE-equivalence holds for a window aggregate: ON EMPTY
+-- fires for any row whose ordinary windowed result is NULL, all-NULL frames
+-- included
+SELECT val, max(val, -1 ON EMPTY) OVER () AS m
+  FROM agg_on_empty WHERE grpid = 50 ORDER BY id;
+
+-- ON EMPTY must be a constant with respect to the aggregate's own query
+-- level, but a reference to an outer query's column is fine: it cannot vary
+-- across the rows being aggregated at the current level, exactly like a
+-- Param.  It is re-evaluated (and can differ) once per outer row.
+SELECT id, val, (SELECT max(inner_t.val, agg_on_empty.val ON EMPTY)
+                 FROM agg_on_empty inner_t WHERE false)
+  FROM agg_on_empty WHERE grpid = 10 ORDER BY id;
+
+-- clean up
+DROP VIEW agg_on_empty_vw;
+DROP TABLE agg_on_empty;
