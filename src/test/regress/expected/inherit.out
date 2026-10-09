@@ -1479,6 +1479,28 @@ NOTICE:  drop cascades to 3 other objects
 DETAIL:  drop cascades to table p1_c1
 drop cascades to table p1_c2
 drop cascades to table p1_c3
+-- ALTER CONSTRAINT ... ENFORCED on a parent must also validate a child whose
+-- constraint is already enforced but NOT VALID
+create table p1(f1 int constraint inh_check_constraint check (f1 > 0) not enforced);
+create table p1_c1(f1 int);
+insert into p1_c1 values(-1);
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0) not valid;
+alter table p1_c1 inherit p1;
+alter table p1 alter constraint inh_check_constraint enforced; --error
+ERROR:  check constraint "inh_check_constraint" of relation "p1_c1" is violated by some row
+delete from p1_c1;
+alter table p1 alter constraint inh_check_constraint enforced; --ok
+select conrelid::regclass, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+ conrelid | conenforced | convalidated 
+----------+-------------+--------------
+ p1       | t           | t
+ p1_c1    | t           | t
+(2 rows)
+
+drop table p1 cascade;
+NOTICE:  drop cascades to table p1_c1
 -- an inherited CHECK constraint cannot be NOT ENFORCED under an ENFORCED parent
 create table p1(f1 int constraint p1_a_check check (f1 > 0) enforced);
 create table p1_c1() inherits(p1);

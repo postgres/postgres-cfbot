@@ -12676,6 +12676,7 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	Form_pg_constraint currcon;
 	Relation	rel;
 	bool		changed = false;
+	bool		validate;
 	List	   *children = NIL;
 	bool		target_enforced = cmdcon->is_enforced;
 	Oid			enforced_parentoid = InvalidOid;
@@ -12728,11 +12729,19 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	}
 
 	/*
+	 * A constraint that becomes enforced is also marked validated, so a
+	 * descendant that is already enforced but not yet valid must be validated
+	 * too.
+	 */
+	validate = recursing && cmdcon->is_enforced &&
+		currcon->conenforced && !currcon->convalidated;
+
+	/*
 	 * Update to the merged enforceability if needed. This may differ from the
 	 * requested enforceability when another matching parent constraint
 	 * remains enforced.
 	 */
-	if (currcon->conenforced != target_enforced)
+	if (currcon->conenforced != target_enforced || validate)
 	{
 		ATAlterConstraint updatecon = *cmdcon;
 
@@ -12825,10 +12834,10 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	/*
 	 * Tell Phase 3 to check that the constraint is satisfied by existing
 	 * rows. We only need do this when altering the constraint from NOT
-	 * ENFORCED to ENFORCED.
+	 * ENFORCED to ENFORCED, or when validating a descendant as above.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_RELATION &&
-		!currcon->conenforced &&
+		(!currcon->conenforced || validate) &&
 		target_enforced)
 	{
 		AlteredTableInfo *tab;
