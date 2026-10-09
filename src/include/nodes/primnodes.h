@@ -938,15 +938,20 @@ typedef struct ScalarArrayOpExpr
 } ScalarArrayOpExpr;
 
 /*
- * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT
+ * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT,
+ * and IMPLIES
  *
  * Notice the arguments are given as a List.  For NOT, of course the list
  * must always have exactly one element.  For AND and OR, there can be two
- * or more arguments.
+ * or more arguments.  IMPLIES is not associative and always has exactly two.
+ *
+ * IMPLIES is kept only so that stored expressions can be deparsed as the user
+ * wrote them; eval_const_expressions expands it to NOT a OR b, so the rest of
+ * the planner never sees it.
  */
 typedef enum BoolExprType
 {
-	AND_EXPR, OR_EXPR, NOT_EXPR
+	AND_EXPR, OR_EXPR, NOT_EXPR, IMPLIES_EXPR
 } BoolExprType;
 
 typedef struct BoolExpr
