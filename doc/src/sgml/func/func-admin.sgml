@@ -1051,7 +1051,9 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         parameter, <parameter>temporary</parameter>, when set to true, specifies that
         the slot should not be permanently stored to disk and is only meant
         for use by the current session. Temporary slots are also
-        released upon any error. This function corresponds
+        dropped when an error is reported. An error caught inside a
+        subtransaction, for example by a <application>PL/pgSQL</application>
+        exception block, does not drop them. This function corresponds
         to the replication protocol command <literal>CREATE_REPLICATION_SLOT
         ... PHYSICAL</literal>.
        </para></entry>
@@ -1091,7 +1093,9 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         parameter, <parameter>temporary</parameter>, when set to true, specifies that
         the slot should not be permanently stored to disk and is only meant
         for use by the current session. Temporary slots are also
-        released upon any error. The optional fourth parameter,
+        dropped when an error is reported. An error caught inside a
+        subtransaction, for example by a <application>PL/pgSQL</application>
+        exception block, does not drop them. The optional fourth parameter,
         <parameter>twophase</parameter>, when set to true, specifies
         that the decoding of prepared transactions is enabled for this
         slot. The optional fifth parameter,
