@@ -67,7 +67,9 @@ PostgreSQL documentation
    If <command>pg_resetwal</command> is used on a data directory where the
    server has been cleanly shut down and the control file is sound, then it
    will have no effect on the contents of the database system, except that no
-   longer used WAL files are cleared away.  Any other use is potentially
+   longer used WAL files are cleared away.  This does not hold when
+   <option>--cluster-state</option> is used to set a state other than
+   <literal>shut-down</literal>, see below.  Any other use is potentially
    dangerous and must be done with great care.  <command>pg_resetwal</command>
    will require the <option>-f</option> (force) option to be specified before
    working on a data directory in an unclean shutdown state or with a
@@ -380,6 +382,29 @@ PostgreSQL documentation
       clusters, <literal>signed</literal> would be the safe value. However,
       this option is exclusively for use with <command>pg_upgrade</command>
       and should not normally be used manually.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><option>--cluster-state=<replaceable class="parameter">state</replaceable></option></term>
+    <listitem>
+     <para>
+      Manually set the database cluster state stored in
+      <filename>pg_control</filename>.  Possible values are
+      <literal>shut-down</literal> (the default),
+      <literal>shut-down-in-recovery</literal>,
+      <literal>shutting-down</literal>,
+      <literal>in-crash-recovery</literal>,
+      <literal>in-archive-recovery</literal> and
+      <literal>in-production</literal>.  The state currently stored is
+      shown by <option>--dry-run</option>.
+     </para>
+     <para>
+      With any state other than <literal>shut-down</literal>, the server
+      goes through crash recovery at its next start.  There is no WAL to
+      replay after a reset, but the other steps of crash recovery still
+      run.  For example, unlogged tables are emptied.
      </para>
     </listitem>
    </varlistentry>
