@@ -2432,7 +2432,27 @@ get_tables_to_repack_partitioned(RepackStmt *stmt, Relation rel,
 	 * Do not lock the children until they're processed.  Note that we do hold
 	 * a lock on the parent partitioned table.
 	 */
-	inhoids = find_all_inheritors(relid, NoLock, NULL);
+	inhoids = find_all_inheritors(RelationGetRelid(rel), NoLock, NULL);
+
+	/*
+	 * Warn about foreign-table partitions, which have no local storage and
+	 * would otherwise be skipped silently.  This has to look at the table's
+	 * partition tree: when an index is specified, the walk below covers the
+	 * index's partition tree, which cannot contain foreign tables.
+	 */
+	foreach_oid(tableoid, inhoids)
+	{
+		if (get_rel_relkind(tableoid) == RELKIND_FOREIGN_TABLE)
+			ereport(WARNING,
+			/*- translator: second %s is the name of a SQL command, eg. REPACK */
+					errmsg("skipping \"%s\" --- cannot execute %s on foreign tables",
+						   get_rel_name(tableoid),
+						   RepackCommandAsString(stmt->command)));
+	}
+
+	if (rel_is_index)
+		inhoids = find_all_inheritors(relid, NoLock, NULL);
+
 	foreach_oid(child_oid, inhoids)
 	{
 		Oid			table_oid,
