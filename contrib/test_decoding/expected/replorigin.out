@@ -39,8 +39,9 @@ SELECT pg_replication_origin_create('regress_test_decoding: regression_slot');
 
 -- ensure duplicate creations fail
 SELECT pg_replication_origin_create('regress_test_decoding: regression_slot');
-ERROR:  duplicate key value violates unique constraint "pg_replication_origin_roname_index"
-DETAIL:  Key (roname)=(regress_test_decoding: regression_slot) already exists.
+ERROR:  could not create object because a conflicting object already exists
+DETAIL:  Key (roname)=(regress_test_decoding: regression_slot) conflicts with existing entry in unique index pg_replication_origin_roname_index.
+HINT:  Another session might have created an object with the same key concurrently.
 -- ensure inactive origin cannot be set as session one if pid is specified
 SELECT pg_replication_origin_session_setup('regress_test_decoding: regression_slot', -1);
 ERROR:  cannot use PID -1 for inactive replication origin with ID 1
