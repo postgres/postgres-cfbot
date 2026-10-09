@@ -5911,10 +5911,14 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
       </varlistentry>
 
       <varlistentry>
-       <term>Int32(5)</term>
+       <term>Int32</term>
        <listitem>
         <para>
          Length of message contents in bytes, including self.
+         Standard messages have a length of 5. When extended
+         (such as when <varname>ready_for_query_message</varname> is set to
+         <literal>rich</literal>), the length is 5 plus the length of any
+         additional payload.
         </para>
        </listitem>
       </varlistentry>
@@ -5931,7 +5935,52 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         </para>
        </listitem>
       </varlistentry>
+
+      <varlistentry>
+       <term>Byte1</term>
+       <listitem>
+        <para>
+         Length of key in bytes. Only present in extended messages.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Byte<replaceable>n</replaceable></term>
+       <listitem>
+        <para>
+         Key bytes. Only present in extended messages.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Byte1</term>
+       <listitem>
+        <para>
+         Length of value in bytes. Only present in extended messages.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Byte<replaceable>n</replaceable></term>
+       <listitem>
+        <para>
+         Value bytes. Only present in extended messages.
+        </para>
+       </listitem>
+      </varlistentry>
      </variablelist>
+     <para>
+      When <varname>ready_for_query_message</varname> is set to <literal>rich</literal>,
+      the server includes built-in session state indicators:
+      <literal>T</literal> indicates whether temporary tables are present in the session (<literal>1</literal> for yes, <literal>0</literal> for no);
+      <literal>H</literal> indicates whether active cursors declared <literal>WITH HOLD</literal> are present (<literal>1</literal> for yes, <literal>0</literal> for no);
+      <literal>P</literal> indicates whether active prepared statements are present in the session (<literal>1</literal> for yes, <literal>0</literal> for no);
+      and <literal>l</literal> contains the last transaction commit LSN as an 8-byte unsigned integer in network byte order (big-endian).
+      Extensions can register <literal>ready_for_query_hook</literal> to append further key-value pairs.
+     </para>
     </listitem>
    </varlistentry>
 

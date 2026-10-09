@@ -2360,6 +2360,7 @@ CommitTransaction(void)
 	 * cursors, to avoid dangling-reference problems)
 	 */
 	PreCommit_on_commit_actions();
+	PreCommit_Namespace();
 
 	/*
 	 * Synchronize files that are created and not WAL-logged during this

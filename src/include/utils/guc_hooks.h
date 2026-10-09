@@ -114,6 +114,7 @@ extern void assign_recovery_target_timeline(const char *newval, void *extra);
 extern bool check_recovery_target_xid(char **newval, void **extra,
 									  GucSource source);
 extern void assign_recovery_target_xid(const char *newval, void *extra);
+extern void assign_ready_for_query_message(int newval, void *extra);
 extern bool check_role(char **newval, void **extra, GucSource source);
 extern void assign_role(const char *newval, void *extra);
 extern const char *show_role(void);

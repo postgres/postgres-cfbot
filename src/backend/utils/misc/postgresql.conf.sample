@@ -869,6 +869,7 @@
 #extension_control_path = '$system'
 #gin_fuzzy_search_limit = 0
 #output_plugin_libraries = 'pgoutput, test_decoding'  # approved plugins for logical decoding
+#ready_for_query_message = plain        # plain or rich
 
 
 #------------------------------------------------------------------------------
