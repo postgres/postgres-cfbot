@@ -16,8 +16,12 @@
 
 #include "postgres.h"
 
+#include "access/xlog.h"
 #include "executor/instrument.h"
+#include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
+#include "storage/shmem.h"
+#include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 
 static PgStat_PendingIO PendingIOStats;
@@ -54,6 +58,27 @@ pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 	}
 
 	return true;
+}
+
+int
+pgstat_bktype_count_potentially_used(BackendType bktype)
+{
+	int			cnt = 0;
+
+	for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+	{
+		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		{
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				/* we do track it */
+				if (pgstat_tracks_io_op(bktype, io_object, io_context, io_op))
+					cnt++;
+			}
+		}
+	}
+
+	return cnt;
 }
 
 void
@@ -100,6 +125,40 @@ pgstat_prepare_io_time(bool track_io_guc)
 }
 
 /*
+ * Bitmask of latencies: below this many nanoseconds all land in bucket 0.
+ * Each subsequent bucket covers the next power of two.
+ */
+#define MIN_PG_STAT_IO_HIST_LATENCY 8191
+
+static inline int
+get_bucket_index(uint64 ns)
+{
+	const uint32 max_index = PGSTAT_IO_HIST_BUCKETS - 1;
+
+	/*
+	 * hopefully pre-calculated by the compiler: clzl(8191) =
+	 * clz(01111111111111b on uint64)
+	 */
+	const uint32 min_latency_leading_zeros =
+		pg_leading_zero_bits64(MIN_PG_STAT_IO_HIST_LATENCY);
+
+	/*
+	 * make sure the tmp value has at least 8191 (our minimum bucket size) as
+	 * __builtin_clzl might return undefined behavior when operating on 0
+	 */
+	uint64		tmp = ns | MIN_PG_STAT_IO_HIST_LATENCY;
+
+	/* count leading zeros */
+	int			leading_zeros = pg_leading_zero_bits64(tmp);
+
+	/* normalize the index */
+	uint32		index = min_latency_leading_zeros - leading_zeros;
+
+	/* clamp it to the maximum */
+	return (index > max_index) ? max_index : index;
+}
+
+/*
  * Like pgstat_count_io_op() except it also accumulates time.
  *
  * The calls related to pgstat_count_buffer_*() are for pgstat_database.  As
@@ -117,6 +176,7 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 	if (!INSTR_TIME_IS_ZERO(start_time))
 	{
 		instr_time	io_time;
+		int			bucket_index;
 
 		INSTR_TIME_SET_CURRENT(io_time);
 		INSTR_TIME_SUBTRACT(io_time, start_time);
@@ -144,6 +204,34 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 		INSTR_TIME_ADD(PendingIOStats.pending_times[io_object][io_context][io_op],
 					   io_time);
 
+		if (PendingIOStats.pending_hist_time_buckets != NULL)
+		{
+			int			offset;
+
+			Assert(track_io_timing || track_wal_io_timing);
+
+			/*
+			 * calculate the bucket_index based on latency in nanoseconds
+			 * (uint64)
+			 */
+			bucket_index = get_bucket_index(INSTR_TIME_GET_NANOSEC(io_time));
+
+			offset = PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op];
+
+			/*
+			 * An untracked combination (see pgstat_tracks_io_op()) has no
+			 * slot and is mapped to -1.  pgstat_count_io_op() already asserts
+			 * that such combinations are never counted, but in non-assert
+			 * builds that would otherwise turn into an out-of-bounds write,
+			 * so check at runtime as pgstat_io_flush_cb() does.
+			 */
+			if (offset >= 0)
+			{
+				Assert(offset < PendingIOStats.pending_hist_time_buckets_size);
+				PendingIOStats.pending_hist_time_buckets[offset][bucket_index]++;
+			}
+		}
+
 		/* Add the per-backend count */
 		pgstat_count_backend_io_op_time(io_object, io_context, io_op,
 										io_time);
@@ -157,7 +245,7 @@ pgstat_fetch_stat_io(void)
 {
 	pgstat_snapshot_fixed(PGSTAT_KIND_IO);
 
-	return &pgStatLocal.snapshot.io;
+	return pgStatLocal.snapshot.io;
 }
 
 /*
@@ -182,6 +270,7 @@ pgstat_io_flush_cb(bool nowait)
 {
 	LWLock	   *bktype_lock;
 	PgStat_BktypeIO *bktype_shstats;
+	PgStat_IO  *bk_io;
 
 	if (!have_iostats)
 		return false;
@@ -189,6 +278,7 @@ pgstat_io_flush_cb(bool nowait)
 	bktype_lock = &pgStatLocal.shmem->io.locks[MyBackendType];
 	bktype_shstats =
 		&pgStatLocal.shmem->io.stats.stats[MyBackendType];
+	bk_io = &pgStatLocal.shmem->io.stats;
 
 	if (!nowait)
 		LWLockAcquire(bktype_lock, LW_EXCLUSIVE);
@@ -213,6 +303,32 @@ pgstat_io_flush_cb(bool nowait)
 
 				bktype_shstats->times[io_object][io_context][io_op] +=
 					INSTR_TIME_GET_MICROSEC(time);
+
+				/*
+				 * If tracking I/O stats, save I/O histograms from backend
+				 * local's PendingIOStats by using indirect offsets from the
+				 * pending_hist_time_buckets dynamic array (accessed with
+				 * offsets to save memory) into shared memory.
+				 */
+				if (PendingIOStats.pending_hist_time_buckets != NULL)
+				{
+					int			bktype_shstats_off = bktype_shstats->hist_time_buckets_offsets[io_object][io_context][io_op];
+					int			pending_off = PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op];
+
+					/*
+					 * -1 means here that such mapping doesn't have a slot
+					 * (based on pgstat_track_io_*()).
+					 */
+					if (bktype_shstats_off == -1 || pending_off == -1)
+						continue;
+
+					Assert(bktype_shstats_off < bk_io->hist_time_buckets_slot_count);
+					Assert(pending_off < PendingIOStats.pending_hist_time_buckets_size);
+
+					for (int b = 0; b < PGSTAT_IO_HIST_BUCKETS; b++)
+						bk_io->hist_time_buckets_slots[bktype_shstats_off][b] +=
+							PendingIOStats.pending_hist_time_buckets[pending_off][b];
+				}
 			}
 		}
 	}
@@ -221,7 +337,14 @@ pgstat_io_flush_cb(bool nowait)
 
 	LWLockRelease(bktype_lock);
 
-	memset(&PendingIOStats, 0, sizeof(PendingIOStats));
+	/*
+	 * Avoid overwriting histogram latency array (with offsets) and pointer to
+	 * dynamically allocated memory
+	 */
+	memset(&PendingIOStats, 0, offsetof(PgStat_PendingIO, pending_hist_time_buckets));
+	if (PendingIOStats.pending_hist_time_buckets != NULL)
+		memset(PendingIOStats.pending_hist_time_buckets, 0,
+			   PendingIOStats.pending_hist_time_buckets_size * sizeof(*PendingIOStats.pending_hist_time_buckets));
 
 	have_iostats = false;
 
@@ -266,33 +389,176 @@ pgstat_get_io_object_name(IOObject io_object)
 	pg_unreachable();
 }
 
+const char *
+pgstat_get_io_op_name(IOOp io_op)
+{
+	switch (io_op)
+	{
+		case IOOP_EVICT:
+			return "evict";
+		case IOOP_FSYNC:
+			return "fsync";
+		case IOOP_HIT:
+			return "hit";
+		case IOOP_REUSE:
+			return "reuse";
+		case IOOP_WRITEBACK:
+			return "writeback";
+		case IOOP_EXTEND:
+			return "extend";
+		case IOOP_READ:
+			return "read";
+		case IOOP_WRITE:
+			return "write";
+	}
+
+	elog(ERROR, "unrecognized IOOp value: %d", io_op);
+	pg_unreachable();
+}
+
+void
+pgstat_io_init_backend_cb(void)
+{
+	/* Allocate I/O latency buckets only if we are going to populate it */
+	if (track_io_timing || track_wal_io_timing)
+	{
+		int			alloc_sz,
+					io_histograms_used = 0;
+
+		PendingIOStats.pending_hist_time_buckets_size = pgstat_bktype_count_potentially_used(MyBackendType);
+		alloc_sz = PendingIOStats.pending_hist_time_buckets_size * sizeof(*PendingIOStats.pending_hist_time_buckets);
+		PendingIOStats.pending_hist_time_buckets = MemoryContextAllocZero(TopMemoryContext, alloc_sz);
+
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+			{
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					if (pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op))
+					{
+						Assert(io_histograms_used < PendingIOStats.pending_hist_time_buckets_size);
+
+						PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op] =
+							io_histograms_used++;
+					}
+					else
+						PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op] = -1;
+				}
+			}
+		}
+	}
+	else
+		PendingIOStats.pending_hist_time_buckets = NULL;
+}
+
+/*
+ * Establish the indirect mapping from
+ * PgStat_BktypeIO.hist_time_buckets_offsets[][][] to
+ * PgStat_IO.hist_time_buckets_slots[x], for all backend types.
+ *
+ * The mapping is a pure function of the pgstat_tracks_io_*() rules. It
+ * is recomputed rather than ever trusted from the PGSTAT file.  Returns
+ * the number of slots used.
+ */
+int
+pgstat_io_init_hist_offsets(PgStat_IO *io)
+{
+	int			histogram_slots = 0;
+
+	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
+	{
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+			{
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					if (pgstat_tracks_io_op(i, io_object, io_context, io_op))
+						io->stats[i].hist_time_buckets_offsets[io_object][io_context][io_op] =
+							histogram_slots++;
+					else
+						io->stats[i].hist_time_buckets_offsets[io_object][io_context][io_op] =
+							-1;
+				}
+			}
+		}
+	}
+
+	return histogram_slots;
+}
+
 void
 pgstat_io_init_shmem_cb(void *stats)
 {
 	PgStatShared_IO *stat_shmem = (PgStatShared_IO *) stats;
+	int			histogram_slots PG_USED_FOR_ASSERTS_ONLY;
 
 	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
 		LWLockInitialize(&stat_shmem->locks[i], LWTRANCHE_PGSTATS_DATA);
+
+	histogram_slots = pgstat_io_init_hist_offsets(&stat_shmem->stats);
+
+	/*
+	 * Sanity check: the offset table we just produced must use exactly the
+	 * number of slots StatsShmemInit() reserved.  Both come from the same
+	 * pgstat_tracks_io_*() rules, so mismatch would indicate some bug.
+	 */
+	Assert(histogram_slots == stat_shmem->stats.hist_time_buckets_slot_count);
 }
 
 void
 pgstat_io_reset_all_cb(TimestampTz ts)
 {
+	PgStat_IO  *io_stats = &pgStatLocal.shmem->io.stats;
+	int			histogram_slots PG_USED_FOR_ASSERTS_ONLY;
+
+	/*
+	 * Never trust the offset tables currently in shared memory.  This is also
+	 * called via pgstat_reset_after_failure() when pgstat_read_statsfile()
+	 * failed part-way through reading the PGSTAT_KIND_IO chunk, in which case
+	 * hist_time_buckets_offsets may contain garbage from the file that would
+	 * make the memset() below write outside of hist_time_buckets_slots.  The
+	 * mapping is a pure function of the pgstat_tracks_io_*() rules, so
+	 * recomputing it here is cheap and yields the same values any concurrent
+	 * reader already sees.
+	 */
+	histogram_slots = pgstat_io_init_hist_offsets(io_stats);
+	Assert(histogram_slots == io_stats->hist_time_buckets_slot_count);
+
 	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
 	{
 		LWLock	   *bktype_lock = &pgStatLocal.shmem->io.locks[i];
-		PgStat_BktypeIO *bktype_shstats = &pgStatLocal.shmem->io.stats.stats[i];
+		PgStat_BktypeIO *bktype_shstats = &io_stats->stats[i];
 
 		LWLockAcquire(bktype_lock, LW_EXCLUSIVE);
 
 		/*
 		 * Use the lock in the first BackendType's PgStat_BktypeIO to protect
-		 * the reset timestamp as well.
+		 * the reset timestamp.
 		 */
 		if (i == 0)
-			pgStatLocal.shmem->io.stats.stat_reset_timestamp = ts;
+			io_stats->stat_reset_timestamp = ts;
 
-		memset(bktype_shstats, 0, sizeof(*bktype_shstats));
+		/* Reset this BackendType's histogram slots */
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+			{
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					int			off = bktype_shstats->hist_time_buckets_offsets[io_object][io_context][io_op];
+
+					if (off == -1)
+						continue;
+					memset(io_stats->hist_time_buckets_slots[off], 0,
+						   sizeof(io_stats->hist_time_buckets_slots[off]));
+				}
+			}
+		}
+
+		/* Avoid resetting our indirect mapping offsets */
+		memset(bktype_shstats, 0, offsetof(PgStat_BktypeIO, hist_time_buckets_offsets));
 		LWLockRelease(bktype_lock);
 	}
 }
@@ -300,11 +566,31 @@ pgstat_io_reset_all_cb(TimestampTz ts)
 void
 pgstat_io_snapshot_cb(void)
 {
+	PgStat_IO  *shmem_io = &pgStatLocal.shmem->io.stats;
+
+	if (unlikely(pgStatLocal.snapshot.io == NULL))
+	{
+		int			n = shmem_io->hist_time_buckets_slot_count;
+
+		pgStatLocal.snapshot.io = MemoryContextAllocZero(TopMemoryContext,
+														 sizeof(PgStat_IO));
+
+		/*
+		 * Allocated on demand in private (TopMemoryContext) memory and points
+		 * to the same indirect offsets.
+		 */
+		pgStatLocal.snapshot.io->hist_time_buckets_slot_count = n;
+		pgStatLocal.snapshot.io->hist_time_buckets_slots =
+			MemoryContextAllocZero(TopMemoryContext,
+								   (size_t) n * PGSTAT_IO_HIST_BUCKETS *
+								   sizeof(uint64));
+	}
+
 	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
 	{
 		LWLock	   *bktype_lock = &pgStatLocal.shmem->io.locks[i];
-		PgStat_BktypeIO *bktype_shstats = &pgStatLocal.shmem->io.stats.stats[i];
-		PgStat_BktypeIO *bktype_snap = &pgStatLocal.snapshot.io.stats[i];
+		PgStat_BktypeIO *bktype_shstats = &shmem_io->stats[i];
+		PgStat_BktypeIO *bktype_snap = &pgStatLocal.snapshot.io->stats[i];
 
 		LWLockAcquire(bktype_lock, LW_SHARED);
 
@@ -313,11 +599,30 @@ pgstat_io_snapshot_cb(void)
 		 * the reset timestamp as well.
 		 */
 		if (i == 0)
-			pgStatLocal.snapshot.io.stat_reset_timestamp =
-				pgStatLocal.shmem->io.stats.stat_reset_timestamp;
+			pgStatLocal.snapshot.io->stat_reset_timestamp =
+				shmem_io->stat_reset_timestamp;
 
 		/* using struct assignment due to better type safety */
 		*bktype_snap = *bktype_shstats;
+
+		/* Copy this BackendType's histogram slots */
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+			{
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					int			off = bktype_shstats->hist_time_buckets_offsets[io_object][io_context][io_op];
+
+					if (off == -1)
+						continue;
+					memcpy(pgStatLocal.snapshot.io->hist_time_buckets_slots[off],
+						   shmem_io->hist_time_buckets_slots[off],
+						   sizeof(shmem_io->hist_time_buckets_slots[off]));
+				}
+			}
+		}
+
 		LWLockRelease(bktype_lock);
 	}
 }
@@ -580,4 +885,30 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 
 
 	return true;
+}
+
+/*
+ * Total number of tuple of really usable combinations (BackendType, IOObject,
+ * IOContext, IOOp) that we consider trackable.
+ */
+int
+pgstat_io_get_sum_tracked(void)
+{
+	int			sum = 0;
+
+	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
+		sum += pgstat_bktype_count_potentially_used(i);
+
+	return sum;
+}
+
+/*
+ * Returns number of bytes for shared memory required by
+ * PgStat_IO.hist_time_buckets_slots,
+ */
+Size
+pgstat_io_histogram_shmem_size(void)
+{
+	return mul_size(pgstat_io_get_sum_tracked(),
+					PGSTAT_IO_HIST_BUCKETS * sizeof(uint64));
 }
