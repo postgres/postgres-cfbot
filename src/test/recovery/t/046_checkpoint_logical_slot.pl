@@ -55,10 +55,11 @@ $node->safe_psql('postgres', q{checkpoint});
 my $xacts = $node->background_psql('postgres');
 $xacts->query_until(
 	qr/run_xacts/,
-	q(\echo run_xacts
-SELECT 1 \watch 0.1
+	sprintf(
+		q(\echo run_xacts
+SELECT 1 \watch %s
 \q
-));
+), $node->format_locale_number(0.1)));
 
 $node->advance_wal(20);
 
