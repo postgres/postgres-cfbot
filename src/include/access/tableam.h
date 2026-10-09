@@ -73,6 +73,17 @@ typedef enum ScanOptions
 
 	/* collect scan instrumentation */
 	SO_SCAN_INSTRUMENT = 1 << 11,
+	/*
+	 * Allow periodic snapshot resets so xmin can advance during the scan.
+	 * concurrent_index_reset_snapshot_interval controls the interval; each
+	 * reset also invalidates the catalog snapshot.  Scans skip resets when
+	 * the transaction snapshot pins xmin.  Table AMs that do not implement
+	 * this flag keep the original snapshot.
+	 *
+	 * The scan uses the active snapshot without registering another copy and
+	 * leaves its last snapshot active for the caller.
+	 */
+	SO_RESET_SNAPSHOT = 1 << 12,
 }			ScanOptions;
 
 /*
@@ -86,7 +97,7 @@ typedef enum ScanOptions
 	(SO_TYPE_SEQSCAN | SO_TYPE_BITMAPSCAN | SO_TYPE_SAMPLESCAN | \
 	 SO_TYPE_TIDSCAN | SO_TYPE_TIDRANGESCAN | SO_TYPE_ANALYZE | \
 	 SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | \
-	 SO_TEMP_SNAPSHOT)
+	 SO_TEMP_SNAPSHOT | SO_RESET_SNAPSHOT)
 
 /*
  * Result codes for table_{update,delete,lock_tuple}, and for visibility
@@ -967,7 +978,8 @@ extern TableScanDesc table_beginscan_catalog(Relation relation, int nkeys,
 static inline TableScanDesc
 table_beginscan_strat(Relation rel, Snapshot snapshot,
 					  int nkeys, ScanKeyData *key,
-					  bool allow_strat, bool allow_sync)
+					  bool allow_strat, bool allow_sync,
+					  bool reset_snapshot)
 {
 	uint32		flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
 
@@ -975,6 +987,8 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 		flags |= SO_ALLOW_STRAT;
 	if (allow_sync)
 		flags |= SO_ALLOW_SYNC;
+	if (reset_snapshot)
+		flags |= SO_RESET_SNAPSHOT;
 
 	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
 								  flags, SO_NONE);
@@ -1862,6 +1876,10 @@ table_scan_analyze_next_tuple(TableScanDesc scan,
  * very hard to detect whether they're really incompatible with the chain tip.
  * This only really makes sense for heap AM, it might need to be generalized
  * for other AMs later.
+ *
+ * With ii_ResetSnapshot, the scan can replace its snapshot at page
+ * boundaries according to concurrent_index_reset_snapshot_interval.
+ * The last snapshot remains active for the caller.
  */
 static inline double
 table_index_build_scan(Relation table_rel,

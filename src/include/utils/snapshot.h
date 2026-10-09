@@ -14,6 +14,7 @@
 #define SNAPSHOT_H
 
 #include "lib/pairingheap.h"
+#include "portability/instr_time.h"
 
 
 /*
@@ -208,5 +209,16 @@ typedef struct SnapshotData
 	 */
 	uint64		snapXactCompletionCount;
 } SnapshotData;
+
+
+/*
+ * State for periodically replacing an operation's active snapshot.  See
+ * StartSnapshotRotation().
+ */
+typedef struct SnapshotRotation
+{
+	Snapshot	snapshot;		/* current active snapshot */
+	instr_time	last_reset;		/* when it was last replaced */
+} SnapshotRotation;
 
 #endif							/* SNAPSHOT_H */

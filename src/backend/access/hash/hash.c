@@ -90,6 +90,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = true,
 		.amcanparallel = false,
 		.amcanbuildparallel = false,
+		.amcanresetsnapshot = true,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,

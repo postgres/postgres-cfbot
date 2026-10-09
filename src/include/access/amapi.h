@@ -275,6 +275,12 @@ typedef struct IndexAmRoutine
 	bool		amcanparallel;
 	/* does AM support parallel build? */
 	bool		amcanbuildparallel;
+	/*
+	 * Does the AM support snapshot resets during concurrent builds?  Retained
+	 * values must be copied, including external TOAST data.  See indexam.sgml
+	 * for the full requirements.
+	 */
+	bool		amcanresetsnapshot;
 	/* does AM support columns included with clause INCLUDE? */
 	bool		amcaninclude;
 	/* does AM use maintenance_work_mem? */

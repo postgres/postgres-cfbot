@@ -79,6 +79,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.ampredlocks = true,
 		.amcanparallel = false,
 		.amcanbuildparallel = false,
+		.amcanresetsnapshot = true,
 		.amcaninclude = true,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,

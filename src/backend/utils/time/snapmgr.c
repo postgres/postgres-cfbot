@@ -377,6 +377,90 @@ GetLatestSnapshot(void)
 }
 
 /*
+ * StartSnapshotRotation
+ *		Initialize rotation state with the active snapshot and current time.
+ *
+ * The operation must not hold another reference to the snapshot, so
+ * RotateSnapshot() can release it.  The caller remains responsible for
+ * popping the active snapshot when the operation ends.
+ */
+void
+StartSnapshotRotation(SnapshotRotation *rotation)
+{
+	rotation->snapshot = GetActiveSnapshot();
+	INSTR_TIME_SET_CURRENT_FAST(rotation->last_reset);
+}
+
+/*
+ * SnapshotRotationDue
+ *		Check whether the reset interval has elapsed, and restart the timer.
+ *
+ * Resets are disabled at REPEATABLE READ and above, where the transaction
+ * snapshot pins xmin regardless of the active snapshot.
+ */
+bool
+SnapshotRotationDue(SnapshotRotation *rotation)
+{
+	instr_time	now,
+				elapsed;
+
+	if (concurrent_index_reset_snapshot_interval < 0 ||
+		IsolationUsesXactSnapshot())
+		return false;
+
+	INSTR_TIME_SET_CURRENT_FAST(now);
+	elapsed = now;
+	INSTR_TIME_SUBTRACT(elapsed, rotation->last_reset);
+	if (INSTR_TIME_GET_MILLISEC(elapsed) < concurrent_index_reset_snapshot_interval)
+		return false;
+
+	rotation->last_reset = now;
+	return true;
+}
+
+/*
+ * RotateSnapshot
+ *		Replace the active snapshot while keeping xmin valid throughout.
+ *
+ * Register the new snapshot before popping the old one.  With the active
+ * stack empty, SnapshotResetXmin() can advance xmin to the oldest registered
+ * snapshot.  An older snapshot held by another caller, such as a cursor, can
+ * still hold back xmin.
+ *
+ * Push the new snapshot and unregister it, leaving the active-stack entry as
+ * the operation's only reference for the next reset.
+ */
+void
+RotateSnapshot(SnapshotRotation *rotation)
+{
+	Snapshot	newsnap;
+
+	/*
+	 * The snapshot must be the only active-stack entry.  A nested snapshot
+	 * cannot be replaced here, and an older entry would keep xmin pinned.
+	 */
+	Assert(ActiveSnapshot != NULL &&
+		   ActiveSnapshot->as_snap == rotation->snapshot &&
+		   ActiveSnapshot->as_next == NULL);
+	Assert(!HistoricSnapshotActive());
+	/* The operation is running, so the transaction snapshot was taken. */
+	Assert(FirstSnapshotSet);
+	/* Not in parallel mode yet; see index_build_resets_snapshots(). */
+	Assert(!IsInParallelMode());
+
+	newsnap = RegisterSnapshot(GetSnapshotData(&SecondarySnapshotData));
+
+	/* The catalog snapshot is registered too and would hold back xmin. */
+	InvalidateCatalogSnapshot();
+
+	PopActiveSnapshot();
+	PushActiveSnapshot(newsnap);
+	UnregisterSnapshot(newsnap);
+
+	rotation->snapshot = GetActiveSnapshot();
+}
+
+/*
  * GetCatalogSnapshot
  *		Get a snapshot that is sufficiently up-to-date for scan of the
  *		system catalog with the specified OID.

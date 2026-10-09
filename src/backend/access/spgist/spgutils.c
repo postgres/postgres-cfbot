@@ -64,6 +64,7 @@ spghandler(PG_FUNCTION_ARGS)
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = false,
+		.amcanresetsnapshot = true,
 		.amcaninclude = true,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,

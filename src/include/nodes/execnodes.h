@@ -168,8 +168,9 @@ typedef struct ExprState
  *		entries for a particular index.  Used for both index_build and
  *		retail creation of index entries.
  *
- * ii_Concurrent, ii_BrokenHotChain, and ii_ParallelWorkers are used only
- * during index build; they're conventionally zeroed otherwise.
+ * ii_Concurrent, ii_ResetSnapshot, ii_BrokenHotChain, and
+ * ii_ParallelWorkers are used only during index build; they're
+ * conventionally zeroed otherwise.
  * ----------------
  */
 typedef struct IndexInfo
@@ -221,6 +222,8 @@ typedef struct IndexInfo
 	bool		ii_IndexUnchanged;
 	/* are we doing a concurrent index build? */
 	bool		ii_Concurrent;
+	/* does this concurrent build use periodic snapshot resets? */
+	bool		ii_ResetSnapshot;
 	/* did we detect any broken HOT chains? */
 	bool		ii_BrokenHotChain;
 	/* is it a summarizing index? */
