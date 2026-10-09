@@ -495,6 +495,10 @@ allocator types also exist which are special-purpose:
   allocations.  Blocks are only free'd back to the operating system when the
   context is reset or deleted.
 
+* proxy.c (ProxyContext) is best suited for those use cases that require
+  long-lived allocations, with minimal allocation traffic, and generally
+  very few allocations; such as relcache's 'index info' contexts.
+
 For further details, please read the header comment in the corresponding .c
 file.
 
