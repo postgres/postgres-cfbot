@@ -27,6 +27,7 @@
 #include "postgres.h"
 
 #include "access/transam.h"
+#include "access/varsup.h"
 #include "access/xact.h"
 #include "funcapi.h"
 #include "lib/qunique.h"

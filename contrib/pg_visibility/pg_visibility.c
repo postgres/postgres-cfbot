@@ -12,6 +12,7 @@
 
 #include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/varsup.h"
 #include "access/visibilitymap.h"
 #include "access/xloginsert.h"
 #include "catalog/pg_type.h"
