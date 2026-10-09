@@ -1850,9 +1850,20 @@ WALReadFromBuffers(char *dstbuf, XLogRecPtr startptr, Size count,
 	XLogRecPtr	recptr = startptr;
 	XLogRecPtr	inserted;
 	Size		nbytes = count;
+	Size		nread;
 
 	if (RecoveryInProgress() || tli != GetWALInsertionTimeLine())
 		return 0;
+
+	/*
+	 * Force a buffer miss for reads not starting at a segment boundary. See
+	 * logical_read_xlog_page() for details.
+	 */
+#ifdef USE_INJECTION_POINTS
+	if (XLogSegmentOffset(startptr, wal_segment_size) != 0 &&
+		IS_INJECTION_POINT_ATTACHED("wal-read-from-buffers-force-miss"))
+		return 0;
+#endif
 
 	Assert(XLogRecPtrIsValid(startptr));
 
@@ -1942,9 +1953,20 @@ WALReadFromBuffers(char *dstbuf, XLogRecPtr startptr, Size count,
 		nbytes -= npagebytes;
 	}
 
-	Assert(pdst - dstbuf <= count);
+	nread = pdst - dstbuf;
 
-	return pdst - dstbuf;
+	Assert(nread <= count);
+
+	/*
+	 * Report the read as a hit on the WAL buffers, so that it can be
+	 * distinguished from a read from a file. A read that finds only part of
+	 * the requested WAL here is also reported by the file read that the
+	 * caller then does, for the rest of it.
+	 */
+	if (nread > 0)
+		pgstat_count_io_op(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_HIT, 1, 0);
+
+	return nread;
 }
 
 /*
