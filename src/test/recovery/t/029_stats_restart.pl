@@ -293,6 +293,83 @@ cmp_ok(
 	$wal_restart_immediate->{reset},
 	"$sect: reset timestamp is new");
 
+
+## check that a tablespace written to by the checkpointer can be dropped
+## without breaking the shutdown.  The checkpointer keeps a reference to the
+## stats entries it flushes block write times into, and writing out the stats
+## file at shutdown expects dropped entries to be gone.
+
+$node->append_conf('postgresql.conf',
+	"track_io_timing = on\nallow_in_place_tablespaces = on");
+$node->restart;
+
+$sect = "dropped tablespace";
+$node->safe_psql($connect_db,
+	"CREATE TABLESPACE test_stats_tblspc LOCATION ''");
+my $spcoid = $node->safe_psql($connect_db,
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'test_stats_tblspc'");
+$node->safe_psql($connect_db,
+	"CREATE TABLE tab_stats_tblspc TABLESPACE test_stats_tblspc AS SELECT generate_series(1,1000) AS a"
+);
+$node->safe_psql($connect_db, "CHECKPOINT");
+$node->safe_psql($connect_db, "DROP TABLE tab_stats_tblspc");
+$node->safe_psql($connect_db, "DROP TABLESPACE test_stats_tblspc");
+
+my $log_offset = -s $node->logfile;
+$node->stop;
+ok( !$node->log_contains(qr/terminated by signal/, $log_offset),
+	"$sect: clean shutdown");
+
+$node->start;
+is(have_stats('tablespace', 0, $spcoid),
+	'f', "$sect: tablespace stats do not exist");
+
+## check that temporary files are counted for a tablespace without relations
+## after a crash has discarded its stats entry.  Flushing pending stats does
+## not create the entry, so creating the temporary file has to.
+
+$sect = "tablespace after crash";
+$node->safe_psql($connect_db,
+	"CREATE TABLESPACE test_stats_tblspc_temp LOCATION ''");
+my $spcoid_temp = $node->safe_psql($connect_db,
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'test_stats_tblspc_temp'");
+
+$node->stop('immediate');
+$node->start;
+
+is(have_stats('tablespace', 0, $spcoid_temp),
+	'f', "$sect: no stats for unused tablespace");
+
+$node->safe_psql(
+	$connect_db, q[
+	SET temp_tablespaces = test_stats_tblspc_temp;
+	SET work_mem = '64kB';
+	SELECT count(*) FROM (SELECT * FROM generate_series(1, 10000) g ORDER BY g DESC) s;
+	SELECT pg_stat_force_next_flush();]);
+is( $node->safe_psql(
+		$connect_db,
+		"SELECT temp_files > 0 FROM pg_stat_tablespace WHERE tablespace_name = 'test_stats_tblspc_temp'"
+	),
+	't',
+	"$sect: temporary files counted for tablespace without relations");
+
+## check that block I/O times are counted for a tablespace after a crash,
+## before any backend has opened a relation in it.  Nothing else has created
+## the stats entry at that point, so counting the I/O time has to.
+
+$sect = "tablespace I/O after crash";
+$node->safe_psql($connect_db,
+	"CREATE TABLE tab_stats_tblspc_io (a int) TABLESPACE test_stats_tblspc_temp"
+);
+$node->safe_psql($connect_db,
+	"INSERT INTO tab_stats_tblspc_io SELECT generate_series(1,1000)");
+
+$node->stop('immediate');
+$node->start;
+
+is(have_stats('tablespace', 0, $spcoid_temp),
+	't', "$sect: tablespace stats created by recovery");
+
 $node->stop;
 done_testing();
 
