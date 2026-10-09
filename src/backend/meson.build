@@ -7,6 +7,9 @@ backend_link_with = [pgport_srv, common_srv]
 generated_backend_sources = []
 post_export_backend_sources = []
 
+var_bitcode_cflags = []
+var_bitcode_cxxflags = []
+
 subdir('access')
 subdir('archive')
 subdir('backup')
@@ -165,6 +168,12 @@ postgres = executable('postgres',
 
 backend_targets += postgres
 
+bitcode_modules += {
+  'name': 'postgres',
+  'target': postgres_lib,
+  'srcfiles': backend_sources,
+}
+
 pg_mod_c_args = cflags_mod
 pg_mod_cxx_args = cxxflags_mod
 pg_mod_link_args = ldflags_sl + ldflags_mod
@@ -211,6 +220,135 @@ pg_test_mod_args = pg_mod_args + {
   'install': false
 }
 
+
+
+###############################################################
+# Define a .pc file for building extensions (also used
+# internally when emitting LLVM JIT bitcode)
+###############################################################
+
+# Versioned name, so extensions can build against a specific major version.
+pg_ext_pc_name = 'postgresql-@0@-extension'.format(pg_version_major)
+
+pg_ext_vars = []
+pg_ext_vars_inst = []
+pg_ext_vars_uninst = []
+
+pg_ext_cflags = pg_mod_c_args + cppflags
+pg_ext_libs = [backend_mod_deps, thread_dep, ldflags, ldflags_mod]
+pg_ext_subdirs = ['']
+
+# Compute directories to add include directories to the .pc files for.
+# This is a bit more complicated due to port/win32 etc.
+i = 0
+foreach incdir : postgres_inc_d
+  if fs.is_absolute(incdir)
+    # an absolute path from -Dextra_include_dirs
+    pg_ext_cflags += '-I@0@'.format(incdir)
+    continue
+  elif incdir.startswith('src/include')
+    subincdir = dir_include_pkg_rel / 'server' / incdir.split('src/include/').get(1, '')
+  else
+    subincdir = ''
+  endif
+  pg_ext_subdirs += subincdir
+
+  # Add directories in source / build dir containing headers to cflags for the
+  # -uninstalled.pc. Older versions of pkg-config complain if a referenced
+  # variable is not defined, so we emit an empty one for the installed .pc
+  # file.
+  pg_ext_vars += [
+    'build_inc@0@=""'.format(i),
+    'src_inc@0@=""'.format(i),
+  ]
+  pg_ext_vars_uninst += [
+    'build_inc@0@=-I${prefix}/@1@'.format(i, incdir),
+    'src_inc@0@=-I${srcdir}/@1@'.format(i, incdir),
+  ]
+  pg_ext_cflags += [
+    '${build_inc@0@}'.format(i),
+    '${src_inc@0@}'.format(i)
+  ]
+
+  i += 1
+endforeach
+
+
+# We need to have these flags inside the .pc file but it is not very nice
+# since these flags (-fwrapv for example) change the behavior.
+pg_ext_cflags_warn = pg_ext_cflags + cflags_warn
+pg_ext_cflags += cflags
+
+# Directories for extensions to install into
+# TODO: more might be needed
+#
+# These directories can be configured as absolute paths (e.g. Debian sets
+# bindir/libdir/etc. to absolute paths). In that case they must not be
+# prefixed with ${prefix}, or we would end up with doubled paths.
+foreach var : [
+  ['pkglibdir', dir_lib_pkg],
+  ['dir_data', dir_data_extension],
+  ['dir_include', dir_include_extension],
+  ['dir_doc', dir_doc_extension],
+  ['dir_bitcode', dir_bitcode],
+  # referenced on some platforms, via mod_link_with_dir
+  ['bindir', dir_bin],
+]
+  if fs.is_absolute(var[1])
+    pg_ext_vars += '@0@=@1@'.format(var[0], var[1])
+  else
+    pg_ext_vars += '@0@=${prefix}/@1@'.format(var[0], var[1])
+  endif
+endforeach
+pg_ext_vars += 'dir_mod=${pkglibdir}'
+
+# TODO: Define variables making it easy to define tests, too
+
+# Some platforms need linker flags to link with binary, they are the same
+# between building with meson and .pc file, except that we have have to
+# reference a variable to make it work for both normal and -uninstalled .pc
+# files.
+if mod_link_args_fmt.length() != 0
+  assert(link_with_inst != '')
+  assert(link_with_uninst != '')
+
+  # We define mod_link_with_dir as bindir in MacOS but there is already bindir
+  # variable in pg_ext_vars, meson gives warning if we define it again.
+  if not link_with_inst.startswith('${bindir}')
+    pg_ext_vars_inst += 'mod_link_with=@0@'.format(link_with_inst)
+  endif
+  pg_ext_vars_uninst += 'mod_link_with=@0@'.format(link_with_uninst)
+
+  foreach el : mod_link_args_fmt
+    pg_ext_libs += el.format('${mod_link_with}')
+  endforeach
+endif
+
+# main .pc used to build extensions (and internally to emit LLVM JIT bitcode)
+pkgconfig.generate(
+  name: pg_ext_pc_name,
+  description: 'PostgreSQL Extension Build Support',
+  url: pg_url,
+
+  subdirs: pg_ext_subdirs,
+  libraries: pg_ext_libs,
+  extra_cflags: pg_ext_cflags,
+
+  variables: pg_ext_vars + pg_ext_vars_inst,
+  uninstalled_variables: pg_ext_vars + pg_ext_vars_uninst,
+)
+
+# a .pc depending on the above, but with all our warnings enabled
+pkgconfig.generate(
+  name: pg_ext_pc_name + '-warnings',
+  description: 'PostgreSQL Extension Build Support with compiler warnings the same as core code',
+  requires: pg_ext_pc_name,
+  url: pg_url,
+  extra_cflags: pg_ext_cflags_warn,
+
+  variables: pg_ext_vars + pg_ext_vars_inst,
+  uninstalled_variables: pg_ext_vars + pg_ext_vars_uninst,
+)
 
 
 # Shared modules that, on some system, link against the server binary. Only
