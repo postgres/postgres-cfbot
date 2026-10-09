@@ -1752,6 +1752,8 @@ ExecForceStoreHeapTuple(HeapTuple tuple,
 						TupleTableSlot *slot,
 						bool shouldFree)
 {
+	ItemPointerData tid = tuple->t_self;
+
 	if (TTS_IS_HEAPTUPLE(slot))
 	{
 		ExecStoreHeapTuple(tuple, slot, shouldFree);
@@ -1784,6 +1786,12 @@ ExecForceStoreHeapTuple(HeapTuple tuple,
 			pfree(tuple);
 		}
 	}
+
+	/*
+	 * Store the TID from the local copy taken on entry since the stores above
+	 * may have freed the tuple.
+	 */
+	slot->tts_tid = tid;
 }
 
 /*
