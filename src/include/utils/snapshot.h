@@ -53,6 +53,13 @@ typedef enum SnapshotType
 	 * - previous commands of this transaction
 	 * - changes made by the current command
 	 *
+	 * Note: such a snapshot may miss an existing logical tuple in case of
+	 * parallel update.
+	 * If a new version of a tuple is inserted into an already processed page
+	 * but the old one marked with committed xmax - snapshot will skip the old
+	 * one and never meet the new one during that scan - resulting in skipping
+	 * that tuple at all.
+	 *
 	 * Does _not_ include:
 	 * - in-progress transactions (as of the current instant)
 	 * -------------------------------------------------------------------------
@@ -81,6 +88,13 @@ typedef enum SnapshotType
 	 * This is essentially like SNAPSHOT_SELF as far as effects of the current
 	 * transaction and committed/aborted xacts are concerned.  However, it
 	 * also includes the effects of other xacts still in progress.
+	 *
+	 * Note: such a snapshot may miss an existing logical tuple in case of
+	 * parallel update.
+	 * If a new version of a tuple is inserted into an already processed page but the
+	 * old one marked with committed/in-progress xmax - snapshot will skip the old one
+	 * and never meet the new one during that scan - resulting in skipping that tuple
+	 * at all.
 	 *
 	 * A special hack is that when a snapshot of this type is used to
 	 * determine tuple visibility, the passed-in snapshot struct is used as an

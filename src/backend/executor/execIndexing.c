@@ -788,6 +788,8 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 	/*
 	 * Search the tuples that are in the index for any violations, including
 	 * tuples that aren't visible yet.
+	 * Snapshot dirty may miss some tuples in the case of parallel updates,
+	 * but it is acceptable here.
 	 */
 	InitDirtySnapshot(DirtySnapshot);
 
