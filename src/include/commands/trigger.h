@@ -146,7 +146,8 @@ extern PGDLLIMPORT int SessionReplicationRole;
 
 /*
  * States at which a trigger can be fired. These are the
- * possible values for pg_trigger.tgenabled.
+ * possible values for pg_trigger.tgenabled and
+ * pg_event_trigger.evtenabled.
  */
 #define TRIGGER_FIRES_ON_ORIGIN				'O'
 #define TRIGGER_FIRES_ALWAYS				'A'
