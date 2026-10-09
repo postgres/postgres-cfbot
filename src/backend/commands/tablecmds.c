@@ -368,9 +368,6 @@ typedef enum addFkConstraintSides
 #define child_dependency_type(child_is_partition)	\
 	((child_is_partition) ? DEPENDENCY_AUTO : DEPENDENCY_NORMAL)
 
-static void truncate_check_rel(Oid relid, Form_pg_class reltuple);
-static void truncate_check_perms(Oid relid, Form_pg_class reltuple);
-static void truncate_check_activity(Relation rel);
 static void RangeVarCallbackForTruncate(const RangeVar *relation,
 										Oid relId, Oid oldRelId, void *arg);
 static List *MergeAttributes(List *columns, const List *supers, char relpersistence,
@@ -2397,7 +2394,7 @@ ExecuteTruncateGuts(List *explicit_rels,
  * Check that a given relation is safe to truncate.  Subroutine for
  * ExecuteTruncate() and RangeVarCallbackForTruncate().
  */
-static void
+void
 truncate_check_rel(Oid relid, Form_pg_class reltuple)
 {
 	char	   *relname = NameStr(reltuple->relname);
@@ -2450,7 +2447,7 @@ truncate_check_rel(Oid relid, Form_pg_class reltuple)
 /*
  * Check that current user has the permission to truncate given relation.
  */
-static void
+void
 truncate_check_perms(Oid relid, Form_pg_class reltuple)
 {
 	char	   *relname = NameStr(reltuple->relname);
@@ -2468,7 +2465,7 @@ truncate_check_perms(Oid relid, Form_pg_class reltuple)
  * truncate.  This is split with truncate_check_rel() as
  * RangeVarCallbackForTruncate() cannot open a Relation yet.
  */
-static void
+void
 truncate_check_activity(Relation rel)
 {
 	/*
