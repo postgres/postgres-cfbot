@@ -76,6 +76,10 @@ extern PGDLLIMPORT SnapshotData SnapshotToastData;
 
 extern Snapshot GetTransactionSnapshot(void);
 extern Snapshot GetLatestSnapshot(void);
+
+extern void StartSnapshotRotation(SnapshotRotation *rotation);
+extern bool SnapshotRotationDue(SnapshotRotation *rotation);
+extern void RotateSnapshot(SnapshotRotation *rotation);
 extern void SnapshotSetCommandId(CommandId curcid);
 
 extern Snapshot GetCatalogSnapshot(Oid relid);

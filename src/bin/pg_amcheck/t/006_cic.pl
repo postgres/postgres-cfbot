@@ -63,6 +63,9 @@ $node->append_conf('postgresql.conf', 'debug_parallel_query = off');
 # Run autovacuum often enough to remove dead heap and TOAST tuples
 # while index builds are in progress.
 $node->append_conf('postgresql.conf', 'autovacuum_naptime = 1s');
+# Reset the snapshot of a concurrent build at every page boundary.
+$node->append_conf('postgresql.conf',
+	'concurrent_index_reset_snapshot_interval = 0');
 $node->start;
 $node->safe_psql('postgres', q(CREATE EXTENSION amcheck));
 $node->safe_psql(

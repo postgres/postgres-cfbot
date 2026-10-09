@@ -59,6 +59,8 @@ ginhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = true,
 		.amcanparallel = false,
 		.amcanbuildparallel = true,
+		/* not yet: the build accumulator keeps keys across heap pages */
+		.amcanresetsnapshot = false,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = true,
 		.amsummarizing = false,
