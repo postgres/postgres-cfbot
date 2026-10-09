@@ -67,6 +67,7 @@ tests += {
       'stats',
       'twophase',
       'twophase_stream',
+      'tuplecid',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
