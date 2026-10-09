@@ -2022,62 +2022,33 @@ GetMaxSnapshotSubxidCount(void)
 	return TOTAL_MAX_CACHED_SUBXIDS;
 }
 
-static inline bool
-GetSnapshotDataReuseUnlocked(Snapshot snapshot, bool *try_reuse)
-{
-	uint64		curXactCompletionCount;
-
-	if (!TransactionIdIsValid(MyProc->xmin))
-	{
-		*try_reuse = true;
-		return false;
-	}
-
-	if (unlikely(snapshot->snapXactCompletionCount == 0))
-	{
-		*try_reuse = false;
-		return false;
-	}
-
-	curXactCompletionCount =
-		pg_atomic_read_u64(&TransamVariables->xactCompletionCount);
-
-	if (curXactCompletionCount != snapshot->snapXactCompletionCount)
-	{
-		*try_reuse = false;
-		return false;
-	}
-
-	RecentXmin = snapshot->xmin;
-	Assert(TransactionIdPrecedesOrEquals(TransactionXmin, RecentXmin));
-	snapshot->curcid = GetCurrentCommandId(false);
-	snapshot->active_count = 0;
-	snapshot->regd_count = 0;
-	snapshot->copied = false;
-
-	return true;
-}
 /*
  * Helper function for GetSnapshotData() that checks if the bulk of the
  * visibility information in the snapshot is still valid. If so, it updates
  * the fields that need to change and returns true. Otherwise it returns
  * false.
- *
- * This very likely can be evolved to not need ProcArrayLock held (at very
- * least in the case we already hold a snapshot), but that's for another day.
  */
-static bool
+static inline bool
 GetSnapshotDataReuse(Snapshot snapshot)
 {
 	uint64		curXactCompletionCount;
-
-	Assert(LWLockHeldByMe(ProcArrayLock));
+	TransactionId	prevProcXmin;
 
 	if (unlikely(snapshot->snapXactCompletionCount == 0))
 		return false;
 
-	curXactCompletionCount =
-		pg_atomic_read_u64(&TransamVariables->xactCompletionCount);
+	prevProcXmin = UINT32_ACCESS_ONCE(MyProc->xmin);
+
+	/*
+	 * If we already had installed an xmin, then we can reuse the
+	 * snapshot immediately after validating the completion count.
+	 */
+	if (TransactionIdIsValid(prevProcXmin))
+		goto xmin_installed;
+
+	curXactCompletionCount = pg_atomic_read_membarrier_u64(
+		&TransamVariables->xactCompletionCount
+	);
 
 	if (curXactCompletionCount != snapshot->snapXactCompletionCount)
 		return false;
@@ -2101,9 +2072,42 @@ GetSnapshotDataReuse(Snapshot snapshot)
 	 * require the set of running transactions to change) and it fulfills the
 	 * requirement that concurrent GetSnapshotData() calls yield the same
 	 * xmin.
+	 *
+	 * However, we must make sure that a concurrent commit doesn't happen
+	 * while we're installing our xmin, so we have to make sure the
+	 * completion count doesn't change under our feet, or roll back our
+	 * changes and stop reusing this snapshot.
+	 *
+	 * We *must* do the validation check, because the data contained in the
+	 * reused snapshot could be cleaned up with a visibility horizon
+	 * constructed between the completion count test and us publishing the
+	 * reused snapshot's xmin.
+	 *
+	 * It is safe to install and later remove the xmin: visibility horizons
+	 * are only approximate, and are known to move backwards in some cases.
 	 */
-	if (!TransactionIdIsValid(MyProc->xmin))
-		MyProc->xmin = TransactionXmin = snapshot->xmin;
+	MyProc->xmin = snapshot->xmin;
+
+xmin_installed:
+	curXactCompletionCount = pg_atomic_read_membarrier_u64(
+		&TransamVariables->xactCompletionCount
+	);
+
+	if (curXactCompletionCount != snapshot->snapXactCompletionCount)
+	{
+		/*
+		 * We published a new xmin, but a transaction completed concurrently,
+		 * so the snapshot's data may now possibly be cleaned up.  Better
+		 * undo our changes to shmem, and get new snapshot data.
+		 */
+		if (!TransactionIdIsValid(prevProcXmin))
+			*((volatile TransactionId *) &MyProc->xmin) = prevProcXmin;
+
+		return false;
+	}
+
+	if (!TransactionIdIsValid(prevProcXmin))
+		TransactionXmin = snapshot->xmin;
 
 	RecentXmin = snapshot->xmin;
 	Assert(TransactionIdPrecedesOrEquals(TransactionXmin, RecentXmin));
@@ -2163,7 +2167,6 @@ GetSnapshotData(Snapshot snapshot)
 	int			mypgxactoff;
 	TransactionId myxid;
 	uint64		curXactCompletionCount;
-	bool		retry_reuse;
 
 	TransactionId replication_slot_xmin = InvalidTransactionId;
 	TransactionId replication_slot_catalog_xmin = InvalidTransactionId;
@@ -2210,20 +2213,17 @@ GetSnapshotData(Snapshot snapshot)
 		}
 	}
 
-	if (GetSnapshotDataReuseUnlocked(snapshot, &retry_reuse))
+	/* try to reuse the snapshot data */
+	if (GetSnapshotDataReuse(snapshot))
 		return snapshot;
 
 	/*
 	 * It is sufficient to get shared lock on ProcArrayLock, even if we are
 	 * going to set MyProc->xmin.
+	 *
+	 * GetSnapshotDataReuse guarant
 	 */
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
-
-	if (retry_reuse && GetSnapshotDataReuse(snapshot))
-	{
-		LWLockRelease(ProcArrayLock);
-		return snapshot;
-	}
 
 	latest_completed = TransamVariables->latestCompletedXid;
 	mypgxactoff = MyProc->pgxactoff;
