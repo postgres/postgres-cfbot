@@ -1520,6 +1520,27 @@ $ <userinput>cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages</userinp
    </para>
 
   </sect2>
+
+  <sect2 id="windows-process-management">
+   <title>Process Management on <systemitem class="osname">Windows</systemitem></title>
+
+   <para>
+    On <systemitem class="osname">Windows</systemitem>,
+    <productname>PostgreSQL</productname> uses Job Objects to
+    manage child processes. If the postmaster exits unexpectedly
+    (due to a crash or external termination), the operating system
+    automatically terminates all backend processes. This prevents
+    orphaned backends that could hold locks or corrupt shared memory.
+   </para>
+
+   <para>
+    In some cases, Job Object creation may fail (for example, when
+    <productname>PostgreSQL</productname> is already running under a
+    job-aware service manager). The server will log a message and continue
+    to run without orphan protection. This is safe but means that backends
+    may need to be manually terminated if the postmaster crashes.
+   </para>
+  </sect2>
  </sect1>
 
 
