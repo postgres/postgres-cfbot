@@ -17,12 +17,16 @@
 /* uuid size in bytes */
 #define UUID_LEN 16
 
+/* length of a UUID string (without null terminator): xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx */
+#define UUID_STR_LEN 36
+
 typedef struct pg_uuid_t
 {
 	unsigned char data[UUID_LEN];
 } pg_uuid_t;
 
-/* fmgr interface macros */
+/* fmgr interface macros (backend only) */
+#ifndef FRONTEND
 static inline Datum
 UUIDPGetDatum(const pg_uuid_t *X)
 {
@@ -39,4 +43,8 @@ DatumGetUUIDP(Datum X)
 
 #define PG_GETARG_UUID_P(X)		DatumGetUUIDP(PG_GETARG_DATUM(X))
 
+extern pg_uuid_t *generate_uuidv7(uint64 unix_ts_ms, uint32 sub_ms);
+extern pg_uuid_t *generate_uuidv7_r(pg_uuid_t *uuid, uint64 unix_ts_ms, uint32 sub_ms);
+
+#endif							/* !FRONTEND */
 #endif							/* UUID_H */
