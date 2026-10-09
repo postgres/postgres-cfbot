@@ -432,10 +432,13 @@ pgstat_reset_database_timestamp(Oid dboid, TimestampTz ts)
  * Flush out pending stats for the entry
  *
  * If nowait is true and the lock could not be immediately acquired, returns
- * false without flushing the entry.  Otherwise returns true.
+ * PGSTAT_FLUSH_LOCK_CONFLICT without flushing the entry.  Database stats are
+ * not transactional, so xact_boundary is unused and this always returns
+ * PGSTAT_FLUSH_DONE once flushed.
  */
-bool
-pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
+PgStat_FlushResult
+pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait,
+						 bool xact_boundary)
 {
 	PgStatShared_Database *sharedent;
 	PgStat_StatDBEntry *pendingent;
@@ -444,7 +447,7 @@ pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	sharedent = (PgStatShared_Database *) entry_ref->shared_stats;
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
+		return PGSTAT_FLUSH_LOCK_CONFLICT;
 
 #define PGSTAT_ACCUM_DBCOUNT(item)		\
 	(sharedent)->stats.item += (pendingent)->item
@@ -496,7 +499,7 @@ pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	memset(pendingent, 0, sizeof(*pendingent));
 
-	return true;
+	return PGSTAT_FLUSH_DONE;
 }
 
 void

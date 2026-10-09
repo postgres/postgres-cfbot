@@ -274,12 +274,12 @@ pgstat_attach_shmem(void)
 }
 
 void
-pgstat_detach_shmem(void)
+pgstat_detach_shmem(bool discard_pending)
 {
 	Assert(pgStatLocal.dsa);
 
 	/* we shouldn't leave references to shared stats */
-	pgstat_release_all_entry_refs(false);
+	pgstat_release_all_entry_refs(discard_pending);
 
 	dshash_detach(pgStatLocal.shared_hash);
 	pgStatLocal.shared_hash = NULL;
