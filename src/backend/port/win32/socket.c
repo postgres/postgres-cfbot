@@ -516,9 +516,10 @@ pgwin32_send(SOCKET s, const void *buf, int len, int flags)
 int
 pgwin32_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timeval *timeout)
 {
-	WSAEVENT	events[FD_SETSIZE * 2]; /* worst case is readfds totally
-										 * different from writefds, so
-										 * 2*FD_SETSIZE sockets */
+	WSAEVENT	events[FD_SETSIZE * 2 + 1]; /* worst case is readfds totally
+											 * different from writefds, so
+											 * 2*FD_SETSIZE sockets, plus one
+											 * for the signal event */
 	SOCKET		sockets[FD_SETSIZE * 2];
 	int			numevents = 0;
 	int			r;
