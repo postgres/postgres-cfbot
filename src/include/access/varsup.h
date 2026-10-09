@@ -14,6 +14,10 @@
 #define VARSUP_H
 
 #include "access/transam.h"
+#include "port/atomics.h"
+#ifdef USE_ASSERT_CHECKING
+#include "storage/lwlock.h"
+#endif
 
 
 /*
@@ -65,7 +69,7 @@ typedef struct TransamVariablesData
 	 * GetSnapshotData() needs to recompute the contents of the snapshot, or
 	 * not. There are likely other users of this.  Always above 1.
 	 */
-	uint64		xactCompletionCount;
+	pg_atomic_uint64 xactCompletionCount;
 
 	/*
 	 * These fields are protected by XactTruncationLock
@@ -76,5 +80,17 @@ typedef struct TransamVariablesData
 
 
 extern PGDLLIMPORT TransamVariablesData *TransamVariables;
+
+static inline void
+IncrementXactCompletionCount(void)
+{
+	uint64	xcc;
+
+	Assert(LWLockHeldByMeInMode(ProcArrayLock, LW_EXCLUSIVE));
+
+	xcc = pg_atomic_read_u64(&TransamVariables->xactCompletionCount);
+	xcc += 1;
+	pg_atomic_write_u64(&TransamVariables->xactCompletionCount, xcc);
+}
 
 #endif /* VARSUP_H */
