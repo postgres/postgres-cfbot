@@ -3051,6 +3051,31 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 		/* Is the domain already set NOT NULL? */
 		if (typTup->typnotnull)
 		{
+			if (constr->conname)
+			{
+				Form_pg_constraint conform;
+
+				HeapTuple	conTup = findDomainNotNullConstraint(domainoid);
+
+				if (conTup == NULL)
+					elog(ERROR, "could not find not-null constraint on domain \"%s\"", NameStr(typTup->typname));
+
+				conform = (Form_pg_constraint) GETSTRUCT(conTup);
+
+				/*
+				 * If a name was specified, for the new NOT NULL constraint,
+				 * ensure that the existing NOT NULL constraint uses the same
+				 * name; otherwise, throw an error.
+				 */
+				if (strcmp(constr->conname, NameStr(conform->conname)) != 0)
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("cannot create not-null constraint \"%s\" for domain \"%s\"",
+								   constr->conname, NameStr(typTup->typname)),
+							errdetail("A not-null constraint named \"%s\" already exists for domain \"%s\".",
+									  NameStr(conform->conname), NameStr(typTup->typname)));
+			}
+
 			table_close(typrel, RowExclusiveLock);
 			return address;
 		}
