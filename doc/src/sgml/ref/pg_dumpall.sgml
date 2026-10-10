@@ -531,7 +531,9 @@ exclude database <replaceable class="parameter">PATTERN</replaceable>
        <para>
         Do not output commands to select table access methods.
         With this option, all objects will be created with whichever
-        table access method is the default during restore.
+        table access method is the default during restore.  Storage
+        parameters specific to a table's access method are not output
+        either (see <xref linkend="tableam-reloptions"/>).
        </para>
       </listitem>
      </varlistentry>
