@@ -98,6 +98,7 @@ enum extended_stats_exprs_element
 	RANGE_LENGTH_HISTOGRAM_ELEM,
 	RANGE_EMPTY_FRAC_ELEM,
 	RANGE_BOUNDS_HISTOGRAM_ELEM,
+	MOST_COMMON_VALS_KIND_ELEM,
 	NUM_ATTRIBUTE_STATS_ELEMS
 };
 
@@ -118,7 +119,8 @@ static const char *extexprargname[NUM_ATTRIBUTE_STATS_ELEMS] =
 	"elem_count_histogram",
 	"range_length_histogram",
 	"range_empty_frac",
-	"range_bounds_histogram"
+	"range_bounds_histogram",
+	"most_common_vals_kind"
 };
 
 static bool extended_statistics_update(FunctionCallInfo fcinfo);
@@ -1356,6 +1358,7 @@ import_pg_statistic(Relation pgsd, JsonbContainer *cont,
 			ArrayType  *nums_arr = DatumGetArrayTypeP(stanumbers);
 			int			nvals = ARR_DIMS(vals_arr)[0];
 			int			nnums = ARR_DIMS(nums_arr)[0];
+			int			most_common_vals_kind = STATISTIC_KIND_MCV;
 
 			if (nvals != nnums)
 			{
@@ -1367,8 +1370,28 @@ import_pg_statistic(Relation pgsd, JsonbContainer *cont,
 				goto pg_statistic_error;
 			}
 
+			if (found[MOST_COMMON_VALS_KIND_ELEM])
+			{
+				s = jbv_string_get_cstr(&val[MOST_COMMON_VALS_KIND_ELEM]);
+				most_common_vals_kind = atoi(s);
+
+				pfree(s);
+			}
+
+			if (most_common_vals_kind != STATISTIC_KIND_MCV &&
+				most_common_vals_kind != STATISTIC_KIND_MCV_VALUE_SORTED)
+			{
+				ereport(WARNING,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("could not parse \"%s\": it should be %d or %d",
+								"most_common_vals_kind",
+								STATISTIC_KIND_MCV,
+								STATISTIC_KIND_MCV_VALUE_SORTED)));
+				goto pg_statistic_error;
+			}
+
 			statatt_set_slot(values, nulls, replaces,
-							 STATISTIC_KIND_MCV,
+							 most_common_vals_kind,
 							 basetypcache->eq_opr, typcoll,
 							 stanumbers, false, stavalues, false);
 		}
