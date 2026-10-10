@@ -4,6 +4,7 @@ backend_sources += files(
   'clog.c',
   'commit_ts.c',
   'generic_xlog.c',
+  'lsn_indexer.c',
   'multixact.c',
   'parallel.c',
   'rmgr.c',

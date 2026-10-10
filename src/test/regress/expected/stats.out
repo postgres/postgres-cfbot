@@ -60,6 +60,9 @@ datachecksums worker|relation|normal
 datachecksums worker|relation|vacuum
 datachecksums worker|wal|init
 datachecksums worker|wal|normal
+fast recovery worker|relation|normal
+fast recovery worker|temp relation|normal
+fast recovery worker|wal|normal
 io worker|relation|bulkread
 io worker|relation|bulkwrite
 io worker|relation|init
@@ -104,7 +107,7 @@ walsummarizer|wal|init
 walsummarizer|wal|normal
 walwriter|wal|init
 walwriter|wal|normal
-(88 rows)
+(91 rows)
 \a
 -- List of registered statistics kinds.
 SELECT id, name, fixed_amount,

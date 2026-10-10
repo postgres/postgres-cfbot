@@ -47,6 +47,8 @@ typedef struct
 	dlist_node	elem;			/* list link in ActiveChildList */
 } PMChild;
 
+extern PMChild *FastRecoveryWorkerPMChild;
+
 #ifdef EXEC_BACKEND
 extern PGDLLIMPORT int num_pmchild_slots;
 #endif

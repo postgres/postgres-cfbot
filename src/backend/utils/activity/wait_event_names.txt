@@ -119,6 +119,7 @@ CHECKPOINT_START	"Waiting for a checkpoint to start."
 CHECKSUM_ENABLE_STARTCONDITION	"Waiting for data checksums enabling to start."
 CHECKSUM_ENABLE_TEMPTABLE_WAIT	"Waiting for temporary tables to be dropped for data checksums to be enabled."
 EXECUTE_GATHER	"Waiting for activity from a child process while executing a <literal>Gather</literal> plan node."
+FAST_RECOVERY_DRAIN	"Waiting for on-demand WAL replays still in progress to finish before fast crash recovery completes."
 HASH_BATCH_ALLOCATE	"Waiting for an elected Parallel Hash participant to allocate a hash table."
 HASH_BATCH_ELECT	"Waiting to elect a Parallel Hash participant to allocate a hash table."
 HASH_BATCH_LOAD	"Waiting for other Parallel Hash participants to finish loading a hash table."
@@ -372,6 +373,7 @@ LogicalDecodingControl	"Waiting to read or update logical decoding status inform
 DataChecksumsWorker	"Waiting for data checksums worker."
 AioWorkerControl	"Waiting to update AIO worker information."
 DataChecksumTransition	"Waiting for a data checksum state transition to be written to WAL."
+LSNIndex	"Waiting to create or attach the fast-recovery LSN index."
 
 #
 # END OF PREDEFINED LWLOCKS (DO NOT CHANGE THIS LINE)
@@ -419,6 +421,8 @@ XactSLRU	"Waiting to access the transaction status SLRU cache."
 ParallelVacuumDSA	"Waiting for parallel vacuum dynamic shared memory allocation."
 AioUringCompletion	"Waiting for another process to complete IO via io_uring."
 ShmemIndex	"Waiting to find or allocate space in shared memory."
+LSNIndexDSA	"Waiting for fast recovery LSN index dynamic shared memory allocation."
+LSNIndexHash	"Waiting to access the fast recovery LSN index hash table."
 
 # No "ABI_compatibility" region here as WaitEventLWLock has its own C code.
 

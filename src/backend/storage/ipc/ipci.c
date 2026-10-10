@@ -24,6 +24,7 @@
 #include "storage/shmem_internal.h"
 #include "storage/subsystems.h"
 #include "utils/guc.h"
+#include "access/lsn_indexer.h"
 
 /* GUCs */
 int			shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE;

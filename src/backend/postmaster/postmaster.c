@@ -123,6 +123,7 @@
 #include "utils/pidfile.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
+#include "access/lsn_indexer.h"
 
 #ifdef EXEC_BACKEND
 #include "common/file_utils.h"
@@ -268,6 +269,9 @@ static PMChild *StartupPMChild = NULL,
 		   *PgArchPMChild = NULL,
 		   *SysLoggerPMChild = NULL,
 		   *SlotSyncWorkerPMChild = NULL;
+
+PMChild    *FastRecoveryWorkerPMChild = NULL;
+
 
 /* Startup process's status */
 typedef enum
@@ -2362,6 +2366,8 @@ process_pm_child_exit(void)
 			AbortStartTime = 0;
 			UpdatePMState(PM_RUN);
 			connsAllowed = true;
+			if (fast_crash_recovery && LSNIndexIsActive())
+				FastRecoveryWorkerPMChild = StartChildProcess(B_FAST_RECOVERY_WORKER);
 
 			/*
 			 * At the next iteration of the postmaster's main loop, we will
@@ -2380,6 +2386,16 @@ process_pm_child_exit(void)
 			sd_notify(0, "READY=1");
 #endif
 
+			continue;
+		}
+
+		if (FastRecoveryWorkerPMChild && pid == FastRecoveryWorkerPMChild->pid)
+		{
+			ReleasePostmasterChildSlot(FastRecoveryWorkerPMChild);
+			FastRecoveryWorkerPMChild = NULL;
+			if (!EXIT_STATUS_0(exitstatus))
+				HandleChildCrash(pid, exitstatus,
+								 _("Fast Recovery Worker process"));
 			continue;
 		}
 
@@ -2977,6 +2993,14 @@ PostmasterStateMachine(void)
 								B_WAL_RECEIVER);
 
 		/*
+		 * Also wait for the fast recovery worker.  It ignores SIGTERM: the
+		 * shutdown checkpoint must not be written while pages are still
+		 * unrecovered, so a smart or fast shutdown lets it finish first.
+		 */
+		targetMask = btmask_add(targetMask,
+								B_FAST_RECOVERY_WORKER);
+
+		/*
 		 * If we are doing crash recovery or an immediate shutdown then we
 		 * expect archiver, checkpointer, io workers and walsender to exit as
 		 * well, otherwise not.
@@ -3051,6 +3075,16 @@ PostmasterStateMachine(void)
 			else
 			{
 				SignalChildren(SIGTERM, targetMask);
+
+				/*
+				 * The fast recovery worker ignores SIGTERM too, on purpose: a
+				 * shutdown checkpoint must not be written while pages are
+				 * still unrecovered, so we wait for it like a backend.
+				 */
+				if (FastRecoveryWorkerPMChild != NULL &&
+					Shutdown < ImmediateShutdown)
+					ereport(LOG,
+							(errmsg("waiting for fast crash recovery to finish before shutting down")));
 
 				UpdatePMState(PM_WAIT_BACKENDS);
 			}

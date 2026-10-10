@@ -54,6 +54,7 @@
 #include "storage/shmem_internal.h"
 #include "tcop/backend_startup.h"
 #include "utils/memutils.h"
+#include "postmaster/fast_recovery_worker.h"
 
 #ifdef EXEC_BACKEND
 #include "nodes/queryjumble.h"

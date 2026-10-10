@@ -1083,6 +1083,13 @@
   max => '3',
 },
 
+{ name => 'fast_crash_recovery', type => 'bool', context => 'PGC_POSTMASTER', group => 'WAL_RECOVERY',
+  short_desc => 'Defers WAL replay in crash recovery until pages are first read.',
+  long_desc => 'The server accepts connections once the WAL has been scanned; each page is recovered when it is first read, and a background worker recovers the rest.',
+  variable => 'fast_crash_recovery',
+  boot_val => 'false',
+},
+
 { name => 'file_copy_method', type => 'enum', context => 'PGC_USERSET', group => 'RESOURCES_DISK',
   short_desc => 'Selects the file copy method.',
   variable => 'file_copy_method',

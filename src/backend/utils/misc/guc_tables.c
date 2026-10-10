@@ -105,6 +105,7 @@
 #include "utils/ps_status.h"
 #include "utils/rls.h"
 #include "utils/xml.h"
+#include "access/lsn_indexer.h"
 
 #ifdef TRACE_SYNCSCAN
 #include "access/syncscan.h"

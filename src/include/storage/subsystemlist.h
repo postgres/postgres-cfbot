@@ -88,3 +88,4 @@ PG_SHMEM_SUBSYSTEM(DataChecksumsShmemCallbacks)
 
 /* AIO subsystem. This delegates to the method-specific callbacks */
 PG_SHMEM_SUBSYSTEM(AioShmemCallbacks)
+PG_SHMEM_SUBSYSTEM(LsnIndexerShmemCallbacks)

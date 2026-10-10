@@ -7,6 +7,7 @@ backend_sources += files(
   'bgwriter.c',
   'checkpointer.c',
   'datachecksum_state.c',
+  'fast_recovery_worker.c',
   'fork_process.c',
   'interrupt.c',
   'launch_backend.c',
