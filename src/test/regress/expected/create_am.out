@@ -574,3 +574,91 @@ table tableam_parted_b_heap2 depends on access method heap2
 table tableam_parted_d_heap2 depends on access method heap2
 HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 -- we intentionally leave the objects created above alive, to verify pg_dump support
+-- Check table AM failure facts directly, including clearing stale output.
+-- Output is result, same command, current transaction, moved, retargeted.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set regresslib :libdir '/regress' :dlsuffix
+CREATE FUNCTION test_table_lock(regclass, tid, integer, boolean) RETURNS text
+  AS :'regresslib' LANGUAGE C STRICT;
+CREATE TEMP TABLE tableam_failure (a int);
+INSERT INTO tableam_failure VALUES (1);
+SELECT test_table_lock('tableam_failure', ctid, 0, false) FROM tableam_failure;
+ test_table_lock 
+-----------------
+ Ok 0 0 0 0
+(1 row)
+
+-- An insertion in this command is invisible to the lock operation.
+WITH inserted AS (INSERT INTO tableam_failure VALUES (2) RETURNING ctid)
+SELECT test_table_lock('tableam_failure', ctid, 0, false) FROM inserted;
+  test_table_lock  
+-------------------
+ Invisible 0 0 0 0
+(1 row)
+
+-- Reject modification by the same command, including a child transaction.
+BEGIN;
+SELECT pg_current_xact_id() IS NOT NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+SAVEPOINT child;
+WITH deleted AS (DELETE FROM tableam_failure WHERE a = 1 RETURNING ctid)
+SELECT test_table_lock('tableam_failure', ctid, 0, false) FROM deleted;
+   test_table_lock    
+----------------------
+ SelfModified 1 1 0 0
+(1 row)
+
+ROLLBACK TO child;
+-- Reject a modification later than the supplied command ID.
+WITH deleted AS (DELETE FROM tableam_failure WHERE a = 1 RETURNING ctid)
+SELECT test_table_lock('tableam_failure', ctid, 1, false) FROM deleted;
+   test_table_lock    
+----------------------
+ SelfModified 0 1 0 0
+(1 row)
+
+ROLLBACK;
+-- Retarget to a committed successor, then stop at a deleted successor.
+-- Temporary tables keep autovacuum from pruning the saved TIDs.
+CREATE TEMP TABLE tableam_failure_tid AS SELECT ctid AS tid FROM tableam_failure WHERE a = 1;
+UPDATE tableam_failure SET a = 3 WHERE a = 1;
+SELECT test_table_lock('tableam_failure', tid, 0, false) FROM tableam_failure_tid;
+ test_table_lock 
+-----------------
+ Updated 0 0 0 0
+(1 row)
+
+SELECT test_table_lock('tableam_failure', tid, 0, true) FROM tableam_failure_tid;
+ test_table_lock 
+-----------------
+ Ok 0 0 0 1
+(1 row)
+
+DELETE FROM tableam_failure WHERE a = 3;
+SELECT test_table_lock('tableam_failure', tid, 0, true) FROM tableam_failure_tid;
+ test_table_lock 
+-----------------
+ Deleted 0 0 0 1
+(1 row)
+
+DROP TABLE tableam_failure_tid, tableam_failure;
+-- A committed partition move is a failure fact, not an output TID contract.
+CREATE TEMP TABLE tableam_failure (a int) PARTITION BY LIST (a);
+CREATE TEMP TABLE tableam_failure1 PARTITION OF tableam_failure FOR VALUES IN (1);
+CREATE TEMP TABLE tableam_failure2 PARTITION OF tableam_failure FOR VALUES IN (2);
+INSERT INTO tableam_failure VALUES (1);
+CREATE TEMP TABLE tableam_failure_tid AS SELECT ctid AS tid FROM tableam_failure1;
+UPDATE tableam_failure SET a = 2;
+SELECT test_table_lock('tableam_failure1', tid, 0, false) FROM tableam_failure_tid;
+ test_table_lock 
+-----------------
+ Updated 0 0 1 0
+(1 row)
+
+DROP TABLE tableam_failure_tid, tableam_failure;
+DROP FUNCTION test_table_lock(regclass, tid, integer, boolean);
