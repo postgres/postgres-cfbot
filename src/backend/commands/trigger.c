@@ -3435,7 +3435,7 @@ GetTupleForTrigger(EState *estate,
 				 * enumerated in ExecUpdate and ExecDelete in
 				 * nodeModifyTable.c.
 				 */
-				if (tmfd.cmax != estate->es_output_cid)
+				if (!tmfd.modified_by_same_command)
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
