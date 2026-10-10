@@ -85,7 +85,8 @@ extern void SnapBuildSetTwoPhaseAt(SnapBuild *builder, XLogRecPtr ptr);
 
 extern void SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn,
 							   TransactionId xid, int nsubxacts,
-							   TransactionId *subxacts, uint32 xinfo);
+							   TransactionId *subxacts, uint32 xinfo,
+							   bool distribute);
 extern bool SnapBuildProcessChange(SnapBuild *builder, TransactionId xid,
 								   XLogRecPtr lsn);
 extern void SnapBuildProcessNewCid(SnapBuild *builder, TransactionId xid,
