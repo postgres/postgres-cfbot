@@ -688,6 +688,23 @@ SELECT t1.c1 FROM ft1 t1 WHERE EXISTS (SELECT 1 FROM ft2 t2 WHERE t1.c1 = t2.c1)
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1 FROM ft1 t1 WHERE NOT EXISTS (SELECT 1 FROM ft2 t2 WHERE t1.c1 = t2.c2) ORDER BY t1.c1 OFFSET 100 LIMIT 10;
 SELECT t1.c1 FROM ft1 t1 WHERE NOT EXISTS (SELECT 1 FROM ft2 t2 WHERE t1.c1 = t2.c2) ORDER BY t1.c1 OFFSET 100 LIMIT 10;
+-- semi join pushdown must also win the cost comparison when there are
+-- enough other pushed-down quals
+CREATE TABLE "S 1".semi_cost_t1 (a int, b int);
+INSERT INTO "S 1".semi_cost_t1 SELECT i, i % 100 FROM generate_series(1, 200) i;
+CREATE TABLE "S 1".semi_cost_t2 (b int);
+INSERT INTO "S 1".semi_cost_t2 SELECT i FROM generate_series(0, 99) i;
+CREATE FOREIGN TABLE ft_semi_cost_t1 (a int, b int) SERVER loopback OPTIONS (schema_name 'S 1', table_name 'semi_cost_t1');
+CREATE FOREIGN TABLE ft_semi_cost_t2 (b int) SERVER loopback OPTIONS (schema_name 'S 1', table_name 'semi_cost_t2');
+ANALYZE ft_semi_cost_t1;
+ANALYZE ft_semi_cost_t2;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.a FROM ft_semi_cost_t1 t1 WHERE t1.a >= 0 AND t1.a >= -1 AND t1.a >= -2 AND t1.a >= -3 AND t1.a >= -4 AND EXISTS (SELECT 1 FROM ft_semi_cost_t2 t2 WHERE t2.b = t1.b) ORDER BY t1.a OFFSET 190 LIMIT 10;
+SELECT t1.a FROM ft_semi_cost_t1 t1 WHERE t1.a >= 0 AND t1.a >= -1 AND t1.a >= -2 AND t1.a >= -3 AND t1.a >= -4 AND EXISTS (SELECT 1 FROM ft_semi_cost_t2 t2 WHERE t2.b = t1.b) ORDER BY t1.a OFFSET 190 LIMIT 10;
+DROP FOREIGN TABLE ft_semi_cost_t1;
+DROP FOREIGN TABLE ft_semi_cost_t2;
+DROP TABLE "S 1".semi_cost_t1;
+DROP TABLE "S 1".semi_cost_t2;
 -- CROSS JOIN can be pushed down
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft1 t1 CROSS JOIN ft2 t2 ORDER BY t1.c1, t2.c1 OFFSET 100 LIMIT 10;
