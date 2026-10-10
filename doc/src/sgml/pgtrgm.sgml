@@ -425,6 +425,14 @@
   </para>
 
   <para>
+   The <literal>gist_trgm_ops_noeq</literal> operator class is identical to
+   <literal>gist_trgm_ops</literal>, except that it does not support
+   <literal>=</literal>.  It is meant for cases where a table already has a
+   B-tree index for equality lookups, and the trigram index is only needed
+   for the other operators above.
+  </para>
+
+  <para>
    Example:
 
 <programlisting>
