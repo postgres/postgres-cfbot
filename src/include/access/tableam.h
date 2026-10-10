@@ -144,42 +144,40 @@ typedef enum TU_UpdateIndexes
 } TU_UpdateIndexes;
 
 /*
- * When table_tuple_update, table_tuple_delete, or table_tuple_lock fail
- * because the target tuple is already outdated, they fill in this struct to
- * provide information to the caller about what happened. When those functions
- * succeed, the contents of this struct should not be relied upon, except for
- * `retargeted`, which may be set in both success and failure cases.
+ * Additional results from table_tuple_update, table_tuple_delete, and
+ * table_tuple_lock.  The AM must initialize all fields on every call.  The
+ * first three fields describe the returned failure, not an intermediate
+ * result from a retry, and are false unless specified below.
  *
- * ctid is the target's ctid link: it is the same as the target's TID if the
- * target was deleted, or the location of the replacement tuple if the target
- * was updated.
+ * For TM_SelfModified, modified_by_same_command indicates that the modification
+ * responsible for the failure was made by the command identified by the cid
+ * argument.  When locking a later version, this can instead be the command
+ * that created that version.  A later command in the same transaction (for
+ * example, in a BEFORE trigger) must not be reported as the same command.
+ * modified_by_current_transaction indicates that the responsible transaction
+ * is our own, including its subtransactions.
  *
- * xmax is the outdating transaction's XID.  If the caller wants to visit the
- * replacement tuple, it must check that this matches before believing the
- * replacement is really a match.  This is InvalidTransactionId if the target
- * was !LP_NORMAL (expected only for a TID retrieved from syscache).
- *
- * cmax is the outdating command's CID, but only when the failure code is
- * TM_SelfModified (i.e., something in the current transaction outdated the
- * tuple); otherwise cmax is zero.  (We make this restriction because
- * HeapTupleHeaderGetCmax doesn't work for tuples outdated in other
- * transactions.)
+ * For TM_Updated, moved_partitions indicates that the row was moved to another
+ * partition, rather than updated within this relation.  It does not describe
+ * a successful operation that moves a row.
  *
  * retargeted is set when table_tuple_lock(), asked to find the last version,
- * locks a later version of the row than the caller named, because a
- * concurrent transaction updated the row and committed.  *tid then holds the
- * locator of the version that was locked, and the caller must re-evaluate the
- * row (run EvalPlanQual, or recheck the key it searched for) before acting on
- * what it read earlier.  (This may be set in both success and failure cases.)
+ * follows a later version of the row than the caller named.  On success, *tid
+ * holds the locator of the version that was locked, and the caller must
+ * re-evaluate the row (run EvalPlanQual, or recheck the key it searched for)
+ * before acting on what it read earlier.  On failure, retargeted records that
+ * a later version was followed, not that it was successfully locked.
  *
  * For heap, the named version is the one at *tid, and a later version is
- * reached by following the update chain to a different TID.
+ * reached by following the update chain to a different TID.  Other AMs need
+ * not change the locator when retargeting.  retargeted is cumulative across
+ * retries within one lock call, but must be reset for each new call.
  */
 typedef struct TM_FailureData
 {
-	ItemPointerData ctid;
-	TransactionId xmax;
-	CommandId	cmax;
+	bool		modified_by_same_command;
+	bool		modified_by_current_transaction;
+	bool		moved_partitions;
 	bool		retargeted;
 } TM_FailureData;
 
@@ -1650,9 +1648,8 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  * delete it.  Failure return codes are TM_SelfModified, TM_Updated, and
  * TM_BeingModified (the last only possible if wait == false).
  *
- * In the failure cases, the routine fills *tmfd with the tuple's t_ctid,
- * t_xmax, and, if possible, t_cmax.  See comments for struct
- * TM_FailureData for additional info.
+ * The routine fills *tmfd with semantic failure information.  See
+ * TM_FailureData for details.
  */
 static inline TM_Result
 table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
@@ -1699,9 +1696,8 @@ table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
  * update was done.  However, any TOAST changes in the new tuple's
  * data are not reflected into *newtup.
  *
- * In the failure cases, the routine fills *tmfd with the tuple's t_ctid,
- * t_xmax, and, if possible, t_cmax.  See comments for struct TM_FailureData
- * for additional info.
+ * The routine fills *tmfd with semantic failure information.  See
+ * TM_FailureData for details.
  */
 static inline TM_Result
 table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
@@ -1745,12 +1741,11 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  *	TM_Deleted: lock failed because tuple deleted by other xact
  *	TM_WouldBlock: lock couldn't be acquired and wait_policy is skip
  *
- * In the failure cases other than TM_Invisible and TM_Deleted, the routine
- * fills *tmfd with the tuple's t_ctid, t_xmax, and, if possible, t_cmax.
- * Additionally, in both success and failure cases, tmfd->retargeted is set if
- * TUPLE_LOCK_FLAG_FIND_LAST_VERSION led to locking a later version of the row
- * than the caller named, which the caller must then re-evaluate; *tid holds
- * the locator of the version that was locked.  See comments for struct TM_FailureData for additional info.
+ * The routine fills *tmfd with semantic failure information.  In both
+ * success and failure cases, tmfd->retargeted records whether this call
+ * followed a later version of the row.  On success the caller must then
+ * re-evaluate the row, and *tid holds the locator of the locked version.
+ * See TM_FailureData for details.
  */
 static inline TM_Result
 table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
