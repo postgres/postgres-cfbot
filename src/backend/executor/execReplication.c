@@ -144,7 +144,7 @@ should_refetch_tuple(TM_Result res, TM_FailureData *tmfd)
 			break;
 		case TM_Updated:
 			/* XXX: Improve handling here */
-			if (ItemPointerIndicatesMovedPartitions(&tmfd->ctid))
+			if (tmfd->moved_partitions)
 				ereport(LOG,
 						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 						 errmsg("tuple to be locked was already moved to another partition due to concurrent update, retrying")));

@@ -1715,7 +1715,7 @@ ldelete:
 				 * can re-execute the DELETE and then return NULL to cancel
 				 * the outer delete.
 				 */
-				if (context->tmfd.cmax != estate->es_output_cid)
+				if (!context->tmfd.modified_by_same_command)
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
@@ -1789,7 +1789,7 @@ ldelete:
 							 * See also TM_SelfModified response to
 							 * table_tuple_delete() above.
 							 */
-							if (context->tmfd.cmax != estate->es_output_cid)
+							if (!context->tmfd.modified_by_same_command)
 								ereport(ERROR,
 										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 										 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
@@ -2621,7 +2621,7 @@ redo_act:
 				 * can re-execute the UPDATE (assuming it can figure out how)
 				 * and then return NULL to cancel the outer update.
 				 */
-				if (context->tmfd.cmax != estate->es_output_cid)
+				if (!context->tmfd.modified_by_same_command)
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
@@ -2711,7 +2711,7 @@ redo_act:
 							 * See also TM_SelfModified response to
 							 * table_tuple_update() above.
 							 */
-							if (context->tmfd.cmax != estate->es_output_cid)
+							if (!context->tmfd.modified_by_same_command)
 								ereport(ERROR,
 										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 										 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
@@ -3537,13 +3537,13 @@ lmerge_matched:
 				 * action while discarding the updates that it triggered.  So
 				 * throwing an error is the only safe course.
 				 */
-				if (context->tmfd.cmax != estate->es_output_cid)
+				if (!context->tmfd.modified_by_same_command)
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be updated or deleted was already modified by an operation triggered by the current command"),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
-				if (TransactionIdIsCurrentTransactionId(context->tmfd.xmax))
+				if (context->tmfd.modified_by_current_transaction)
 					ereport(ERROR,
 							(errcode(ERRCODE_CARDINALITY_VIOLATION),
 					/* translator: %s is a SQL command name */
@@ -3616,20 +3616,6 @@ lmerge_matched:
 					switch (result)
 					{
 						case TM_Ok:
-
-							/*
-							 * If the tuple was updated and migrated to
-							 * another partition concurrently, the current
-							 * MERGE implementation can't follow.  There's
-							 * probably a better way to handle this case, but
-							 * it'd require recognizing the relation to which
-							 * the tuple moved, and setting our current
-							 * resultRelInfo to that.
-							 */
-							if (ItemPointerIndicatesMovedPartitions(tupleid))
-								ereport(ERROR,
-										(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-										 errmsg("tuple to be merged was already moved to another partition due to concurrent update")));
 
 							/*
 							 * If this was a MATCHED case, use EvalPlanQual()
@@ -3748,13 +3734,13 @@ lmerge_matched:
 							 * command in the current transaction. As above,
 							 * this should always be treated as an error.
 							 */
-							if (context->tmfd.cmax != estate->es_output_cid)
+							if (!context->tmfd.modified_by_same_command)
 								ereport(ERROR,
 										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 										 errmsg("tuple to be updated or deleted was already modified by an operation triggered by the current command"),
 										 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
-							if (TransactionIdIsCurrentTransactionId(context->tmfd.xmax))
+							if (context->tmfd.modified_by_current_transaction)
 								ereport(ERROR,
 										(errcode(ERRCODE_CARDINALITY_VIOLATION),
 								/* translator: %s is a SQL command name */
@@ -3765,6 +3751,24 @@ lmerge_matched:
 							/* This shouldn't happen */
 							elog(ERROR, "attempted to update or delete invisible tuple");
 							goto out;
+
+						case TM_Updated:
+
+							/*
+							 * If the tuple was updated and migrated to
+							 * another partition concurrently, the current
+							 * MERGE implementation can't follow.  There's
+							 * probably a better way to handle this case, but
+							 * it'd require recognizing the relation to which
+							 * the tuple moved, and setting our current
+							 * resultRelInfo to that.
+							 */
+							if (context->tmfd.moved_partitions)
+								ereport(ERROR,
+										(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+										 errmsg("tuple to be merged was already moved to another partition due to concurrent update")));
+
+							pg_fallthrough;
 
 						default:
 							/* see table_tuple_lock call in ExecDelete() */

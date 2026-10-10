@@ -314,11 +314,16 @@ INSERT INTO source VALUES (2, 5);
 SELECT * FROM source ORDER BY sid;
 SELECT * FROM target ORDER BY tid;
 BEGIN;
+-- Assign a parent XID before the MERGE writes in a child transaction.
+SELECT pg_current_xact_id() IS NOT NULL;
+SAVEPOINT child;
 MERGE INTO target t
 USING source AS s
 ON t.tid = s.sid
 WHEN MATCHED THEN
 	UPDATE SET balance = 0;
+ROLLBACK TO child;
+SELECT * FROM target ORDER BY tid;
 ROLLBACK;
 
 BEGIN;

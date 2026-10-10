@@ -200,18 +200,44 @@ heapam_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 		heap_abort_speculative(relation, &slot->tts_tid);
 }
 
+/* Translate only the heap fields defined for the returned result. */
+static void
+heapam_set_failure_data(TM_FailureData *tmfd, TM_Result result,
+						const HeapTupleFailureData *hfd, CommandId cid)
+{
+	tmfd->modified_by_same_command = false;
+	tmfd->modified_by_current_transaction = false;
+	tmfd->moved_partitions = false;
+	/* Do not reset retargeted: it survives retries within a lock call. */
+
+	if (result == TM_SelfModified)
+	{
+		tmfd->modified_by_same_command = hfd->cmax == cid;
+		tmfd->modified_by_current_transaction =
+			TransactionIdIsCurrentTransactionId(hfd->xmax);
+	}
+	else if (result == TM_Updated)
+		tmfd->moved_partitions = ItemPointerIndicatesMovedPartitions(&hfd->ctid);
+}
+
 static TM_Result
 heapam_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 					uint32 options, Snapshot snapshot, Snapshot crosscheck,
 					bool wait, TM_FailureData *tmfd)
 {
+	HeapTupleFailureData hfd;
+	TM_Result	result;
+
+	tmfd->retargeted = false;
+
 	/*
 	 * Currently Deleting of index tuples are handled at vacuum, in case if
 	 * the storage itself is cleaning the dead tuples by itself, it is the
 	 * time to call the index tuple deletion also.
 	 */
-	return heap_delete(relation, tid, cid, options, crosscheck, wait,
-					   tmfd);
+	result = heap_delete(relation, tid, cid, options, crosscheck, wait, &hfd);
+	heapam_set_failure_data(tmfd, result, &hfd, cid);
+	return result;
 }
 
 
@@ -225,6 +251,9 @@ heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	bool		shouldFree = true;
 	HeapTuple	tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFree);
 	TM_Result	result;
+	HeapTupleFailureData hfd;
+
+	tmfd->retargeted = false;
 
 	/* Update the tuple with table oid */
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -232,7 +261,8 @@ heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 
 	result = heap_update(relation, otid, tuple, cid, options,
 						 crosscheck, wait,
-						 tmfd, lockmode, update_indexes);
+						 &hfd, lockmode, update_indexes);
+	heapam_set_failure_data(tmfd, result, &hfd, cid);
 	ItemPointerCopy(&tuple->t_self, &slot->tts_tid);
 
 	/*
@@ -270,19 +300,20 @@ heapam_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 	TM_Result	result;
+	HeapTupleFailureData hfd;
 	Buffer		buffer;
 	HeapTuple	tuple = &bslot->base.tupdata;
 	bool		follow_updates;
 
 	follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
-	tmfd->retargeted = false;
+	memset(tmfd, 0, sizeof(*tmfd));
 
 	Assert(TTS_IS_BUFFERTUPLE(slot));
 
 tuple_lock_retry:
 	tuple->t_self = *tid;
 	result = heap_lock_tuple(relation, tuple, cid, mode, wait_policy,
-							 follow_updates, &buffer, tmfd);
+							 follow_updates, &buffer, &hfd);
 
 	if (result == TM_Updated &&
 		(flags & TUPLE_LOCK_FLAG_FIND_LAST_VERSION))
@@ -292,15 +323,15 @@ tuple_lock_retry:
 
 		ReleaseBuffer(buffer);
 
-		if (!ItemPointerEquals(&tmfd->ctid, &tuple->t_self))
+		if (!ItemPointerEquals(&hfd.ctid, &tuple->t_self))
 		{
 			SnapshotData SnapshotDirty;
 			TransactionId priorXmax;
 
 			/* it was updated, so look at the updated version */
-			*tid = tmfd->ctid;
+			*tid = hfd.ctid;
 			/* updated row should have xmin matching this xmax */
-			priorXmax = tmfd->xmax;
+			priorXmax = hfd.xmax;
 
 			/* signal that a tuple later in the chain is getting locked */
 			tmfd->retargeted = true;
@@ -393,13 +424,10 @@ tuple_lock_retry:
 					if (TransactionIdIsCurrentTransactionId(priorXmax) &&
 						HeapTupleHeaderGetCmin(tuple->t_data) >= cid)
 					{
-						tmfd->xmax = priorXmax;
-
-						/*
-						 * Cmin is the problematic value, so store that. See
-						 * above.
-						 */
-						tmfd->cmax = HeapTupleHeaderGetCmin(tuple->t_data);
+						/* The rejecting command created this version. */
+						tmfd->modified_by_same_command =
+							HeapTupleHeaderGetCmin(tuple->t_data) == cid;
+						tmfd->modified_by_current_transaction = true;
 						ReleaseBuffer(buffer);
 						return TM_SelfModified;
 					}
@@ -467,6 +495,8 @@ tuple_lock_retry:
 			return TM_Deleted;
 		}
 	}
+
+	heapam_set_failure_data(tmfd, result, &hfd, cid);
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	tuple->t_tableOid = slot->tts_tableOid;

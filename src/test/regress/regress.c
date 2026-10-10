@@ -21,6 +21,9 @@
 
 #include "access/detoast.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "access/tableam.h"
+#include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_operator.h"
@@ -50,6 +53,7 @@
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/typcache.h"
 
 /* define our text domain for translations */
@@ -1631,4 +1635,43 @@ test_pg_locale_apis(PG_FUNCTION_ARGS)
 	test_case_mapping(locale);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * Expose the real table AM's lock result, starting with poisoned output flags
+ * to check that every call supplies fresh semantic facts.  cid_delta lets the
+ * caller simulate an outer command whose command counter has since advanced.
+ */
+PG_FUNCTION_INFO_V1(test_table_lock);
+Datum
+test_table_lock(PG_FUNCTION_ARGS)
+{
+	static const char *const result_names[] = {
+		"Ok", "Invisible", "SelfModified", "Updated", "Deleted",
+		"BeingModified", "WouldBlock"
+	};
+	Relation	rel = table_open(PG_GETARG_OID(0), RowShareLock);
+	ItemPointerData tid = *((ItemPointer) PG_GETARG_POINTER(1));
+	CommandId	cid = GetCurrentCommandId(false) - PG_GETARG_INT32(2);
+	TupleTableSlot *slot = table_slot_create(rel, NULL);
+	TM_FailureData tmfd;
+	TM_Result	result;
+	char	   *output;
+
+	tmfd.modified_by_same_command = true;
+	tmfd.modified_by_current_transaction = true;
+	tmfd.moved_partitions = true;
+	tmfd.retargeted = true;
+	result = table_tuple_lock(rel, &tid, GetActiveSnapshot(), slot, cid,
+							  LockTupleExclusive, LockWaitSkip,
+							  PG_GETARG_BOOL(3) ? TUPLE_LOCK_FLAG_FIND_LAST_VERSION : 0,
+							  &tmfd);
+	EXPECT_TRUE(result >= TM_Ok && result <= TM_WouldBlock);
+	output = psprintf("%s %d %d %d %d", result_names[result],
+					  tmfd.modified_by_same_command,
+					  tmfd.modified_by_current_transaction,
+					  tmfd.moved_partitions, tmfd.retargeted);
+	ExecDropSingleTupleTableSlot(slot);
+	table_close(rel, RowShareLock);
+	PG_RETURN_TEXT_P(cstring_to_text(output));
 }
