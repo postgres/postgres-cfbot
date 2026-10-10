@@ -358,6 +358,9 @@ extern bool EvictUnpinnedBuffer(Buffer buf, bool *buffer_flushed);
 extern void EvictAllUnpinnedBuffers(int32 *buffers_evicted,
 									int32 *buffers_flushed,
 									int32 *buffers_skipped);
+
+/* fast crash recovery: clean a buffer whose on-demand replay failed */
+extern void AbortPendingBufferReplay(Buffer buffer);
 extern void EvictRelUnpinnedBuffers(Relation rel,
 									int32 *buffers_evicted,
 									int32 *buffers_flushed,

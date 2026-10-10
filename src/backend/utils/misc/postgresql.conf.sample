@@ -344,6 +344,11 @@
 #summarize_wal = off            # run WAL summarizer process?
 #wal_summary_keep_time = '10d'  # when to remove old summary files, 0 = never
 
+# - Fast Recovery -
+
+#fast_crash_recovery = off      # replay WAL on demand after a crash,
+                                # instead of before accepting connections
+                                # (change requires restart)
 
 #------------------------------------------------------------------------------
 # REPLICATION

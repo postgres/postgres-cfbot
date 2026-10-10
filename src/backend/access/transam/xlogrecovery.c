@@ -27,6 +27,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -68,6 +69,7 @@
 #include "utils/ps_status.h"
 #include "utils/pg_rusage.h"
 #include "utils/wait_event.h"
+#include "access/lsn_indexer.h"
 
 /* Unsupported old recovery command file names (relative to $PGDATA) */
 #define RECOVERY_COMMAND_FILE	"recovery.conf"
@@ -350,6 +352,7 @@ static bool read_tablespace_map(List **tablespaces);
 static void xlogrecovery_redo(XLogReaderState *record, TimeLineID replayTLI);
 static void CheckRecoveryConsistency(void);
 static void rm_redo_error_callback(void *arg);
+static void MaybeStartFastRecovery(void);
 #ifdef WAL_DEBUG
 static void xlog_outrec(StringInfo buf, XLogReaderState *record);
 #endif
@@ -415,6 +418,31 @@ XLogRecoveryShmemInit(void *arg)
 	SpinLockInit(&XLogRecoveryCtl->info_lck);
 	InitSharedLatch(&XLogRecoveryCtl->recoveryWakeupLatch);
 	ConditionVariableInit(&XLogRecoveryCtl->recoveryNotPausedCV);
+}
+
+/*
+ * Start fast crash recovery, if it's enabled and applies.
+ *
+ * It applies to crash recovery under the postmaster only.  Archive recovery
+ * and standby mode replay WAL that has no end, so the index would never be
+ * drained and restartpoints never allowed; single-user mode has no worker to
+ * drain it either.  Those replay WAL the usual way.
+ */
+static void
+MaybeStartFastRecovery(void)
+{
+	if (!fast_crash_recovery)
+		return;
+
+	if (ArchiveRecoveryRequested || !IsUnderPostmaster)
+	{
+		ereport(LOG,
+				(errmsg("fast crash recovery is not used in %s; replaying WAL normally",
+						ArchiveRecoveryRequested ? "archive recovery or standby mode" : "single-user mode")));
+		return;
+	}
+
+	LSNIndexInit();
 }
 
 /*
@@ -876,9 +904,13 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 			ereport(PANIC,
 					(errmsg("invalid redo record in shutdown checkpoint")));
 		InRecovery = true;
+		MaybeStartFastRecovery();
 	}
 	else if (ControlFile->state != DB_SHUTDOWNED)
+	{
 		InRecovery = true;
+		MaybeStartFastRecovery();
+	}
 	else if (ArchiveRecoveryRequested)
 	{
 		/* force recovery due to presence of recovery signal file */
@@ -1869,6 +1901,9 @@ PerformWalRecovery(void)
 					(errmsg("last completed transaction was at log time %s",
 							timestamptz_to_str(xtime))));
 
+		if (LSNIndexIsActive())
+			LSNIndexLogScanSummary();
+
 		InRedo = false;
 	}
 	else
@@ -1898,6 +1933,7 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 {
 	ErrorContextCallback errcallback;
 	bool		switchedTLI = false;
+	bool		deferred = false;
 
 	/* Setup error traceback support for ereport() */
 	errcallback.callback = rm_redo_error_callback;
@@ -1970,21 +2006,42 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 		RecordKnownAssignedTransactionIds(record->xl_xid);
 
 	/*
-	 * Some XLOG record types that are related to recovery are processed
-	 * directly here, rather than in xlog_redo()
+	 * Fast crash recovery defers only the redo of relation pages.  A record
+	 * that references blocks is indexed by page and replayed when the page is
+	 * first read.  Every other record is replayed now: it reads no relation
+	 * pages, so it is cheap, and its effect is global (transaction status,
+	 * SLRUs, which files exist, where the catalogs live), so no later event
+	 * could trigger its replay.  A page that such a record read into shared
+	 * buffers is evicted before a record for it is indexed; see
+	 * LSNIndexPrepareToDefer().
 	 */
-	if (record->xl_rmid == RM_XLOG_ID)
-		xlogrecovery_redo(xlogreader, *replayTLI);
+	if (LSNIndexIsActive() && XLogRecHasAnyBlockRefs(xlogreader) &&
+		LSNIndexPrepareToDefer(xlogreader))
+	{
+		LSNIndexAddEntry(xlogreader);
+		deferred = true;
+	}
+	else
+	{
+		/*
+		 * Some XLOG record types that are related to recovery are processed
+		 * directly here, rather than in xlog_redo()
+		 */
+		if (record->xl_rmid == RM_XLOG_ID)
+			xlogrecovery_redo(xlogreader, *replayTLI);
 
-	/* Now apply the WAL record itself */
-	GetRmgr(record->xl_rmid).rm_redo(xlogreader);
+		/* Now apply the WAL record itself */
+		GetRmgr(record->xl_rmid).rm_redo(xlogreader);
+	}
 
 	/*
 	 * After redo, check whether the backup pages associated with the WAL
 	 * record are consistent with the existing pages. This check is done only
-	 * if consistency check is enabled for this record.
+	 * if consistency check is enabled for this record, and only for records
+	 * applied here: a deferred record's pages are replayed later, by whoever
+	 * reads them, and reading them now would replay them past this record.
 	 */
-	if ((record->xl_info & XLR_CHECK_CONSISTENCY) != 0)
+	if (!deferred && (record->xl_info & XLR_CHECK_CONSISTENCY) != 0)
 		verifyBackupPageConsistency(xlogreader);
 
 	/* Pop the error context stack */
@@ -4269,6 +4326,18 @@ XLogFileRead(XLogSegNo segno, TimeLineID tli,
 	{
 		/* Success! */
 		curFileTLI = tli;
+
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+
+		/*
+		 * Fast crash recovery decodes WAL faster than the kernel grows its
+		 * readahead window for 8 kB reads, and then waits at nearly every
+		 * window.  Ask for the whole segment at once; the kernel reads it in
+		 * the background while we decode what has already arrived.
+		 */
+		if (LSNIndexIsActive())
+			(void) posix_fadvise(fd, 0, 0, POSIX_FADV_WILLNEED);
+#endif
 
 		/* Report recovery progress in PS display */
 		snprintf(activitymsg, sizeof(activitymsg), "recovering %s",

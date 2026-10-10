@@ -70,6 +70,7 @@
 #include "utils/resowner.h"
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
+#include "access/lsn_indexer.h"
 
 
 /* Note: these two macros only work on shared buffers, not local ones! */
@@ -1201,7 +1202,16 @@ ZeroAndLockBuffer(Buffer buffer, ReadBufferMode mode, bool already_valid)
 		if (isLocalBuf)
 			TerminateLocalBufferIO(bufHdr, false, BM_VALID, false);
 		else
+		{
 			TerminateBufferIO(bufHdr, false, BM_VALID, true, false);
+
+			/*
+			 * Fast crash recovery: WAL still pending for this page no longer
+			 * applies, now that the caller initializes it from scratch.
+			 */
+			if (unlikely(LSNIndexIsActive()))
+				LSNIndexForgetPage(&bufHdr->tag);
+		}
 	}
 	else if (!isLocalBuf)
 	{
@@ -1369,6 +1379,100 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 	return buffer;
 }
 
+/*
+ * Fast crash recovery: read a block that still has pending WAL records, and
+ * replay them before anyone else can see the page.
+ *
+ * The whole job is done under the buffer's I/O-in-progress flag, the same
+ * protocol a read uses, so a backend that wants the page meanwhile waits in
+ * WaitIO() until it's valid.  The page is thus private to us while redo runs:
+ * redo needs no lock to keep readers out, no reader can be holding a pointer
+ * into the page (which is what cleanup locks guarantee), and every way of
+ * reading pages (ReadBuffer, read streams, hits) only ever sees recovered
+ * ones.  With AIO a read completes inside a critical section, possibly in
+ * another process, where redo can't run; so pages with pending records are
+ * read synchronously here instead.
+ *
+ * Returns false if the block has nothing pending, in which case the caller
+ * reads it as usual; true once the buffer is valid.
+ *
+ * If anything in here fails, the error paths (transaction abort, or process
+ * exit) call LSNIndexErrorCleanup(), which cleans the buffer through
+ * AbortPendingBufferReplay() below and resets the replay state; the resource
+ * owner then ends the I/O as for any failed read.
+ */
+static bool
+ReadAndReplayPendingBuffer(Buffer buffer, SMgrRelation smgr,
+						   ForkNumber forknum, BlockNumber blocknum,
+						   IOObject io_object, IOContext io_context)
+{
+	BufferDesc *bufHdr = GetBufferDescriptor(buffer - 1);
+
+	if (!LSNIndexBeginPageReplay(&bufHdr->tag))
+		return false;
+
+	/*
+	 * A read stream may call us in AIO batch mode, with IOs staged but not
+	 * submitted.  We're about to wait for other backends and to read other
+	 * pages, so submit them first; see pgaio_enter_batchmode().
+	 */
+	pgaio_submit_staged();
+
+	if (StartSharedBufferIO(bufHdr, true, true, NULL) == BUFFER_IO_READY_FOR_IO)
+	{
+		Block		bufBlock = BufHdrGetBlock(bufHdr);
+		instr_time	io_start;
+
+		io_start = pgstat_prepare_io_time(track_io_timing);
+		smgrread(smgr, forknum, blocknum, bufBlock);
+		pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
+								io_start, 1, BLCKSZ);
+		pgBufferUsage.shared_blks_read++;
+
+		if (!PageIsVerified((Page) bufBlock, blocknum, PIV_LOG_WARNING, NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("invalid page in block %u of relation \"%s\"",
+							blocknum,
+							relpathperm(smgr->smgr_rlocator.locator,
+										forknum).str)));
+
+		LSNIndexReplayIntoBuffer(buffer);
+
+		TerminateBufferIO(bufHdr, false, BM_VALID, true, false);
+
+		/* Valid means current: never replay it again. */
+		LSNIndexForgetPage(&bufHdr->tag);
+	}
+	/* else someone else replayed it while we waited */
+
+	LSNIndexEndPageReplay();
+
+	return true;
+}
+
+/*
+ * Fast crash recovery: the on-demand replay into 'buffer' failed.
+ *
+ * Called by LSNIndexErrorCleanup() before the resource owner that started
+ * the I/O gets to AbortBufferIO(), which ends it as for any failed read.
+ * Redo dirtied the buffer before it was valid, which nothing else ever does,
+ * and AbortBufferIO() rightly insists that an invalid buffer is clean; so
+ * clean it, and leave the rest to the usual path.  The page was never valid
+ * and its entry is still in the index: the next reader starts over.
+ */
+void
+AbortPendingBufferReplay(Buffer buffer)
+{
+	BufferDesc *bufHdr = GetBufferDescriptor(buffer - 1);
+	uint64		buf_state;
+
+	buf_state = LockBufHdr(bufHdr);
+	Assert(buf_state & BM_IO_IN_PROGRESS);
+	Assert(!(buf_state & BM_VALID));
+	UnlockBufHdrExt(bufHdr, buf_state, 0, BM_DIRTY | BM_CHECKPOINT_NEEDED, 0);
+}
+
 static pg_always_inline bool
 StartReadBuffersImpl(ReadBuffersOperation *operation,
 					 Buffer *buffers,
@@ -1455,6 +1559,17 @@ StartReadBuffersImpl(ReadBuffersOperation *operation,
 										   io_object, io_context,
 										   &found);
 		}
+
+		/*
+		 * Fast crash recovery: a page with pending WAL records must not
+		 * become valid before they're applied.  Read and replay it right
+		 * here; then it's a hit like any other.
+		 */
+		if (!found && unlikely(LSNIndexIsActive()) &&
+			operation->persistence == RELPERSISTENCE_PERMANENT)
+			found = ReadAndReplayPendingBuffer(buffers[i], operation->smgr,
+											   operation->forknum, blockNum + i,
+											   io_object, io_context);
 
 		if (found)
 		{
