@@ -816,15 +816,18 @@ help(const char *progname)
 static bool
 parse_oid(char *s, Oid *result)
 {
-	Oid			oid;
+	unsigned long oid;
 	char	   *ep;
+
+	if (s[0] < '1' || s[0] > '9')
+		return false;
 
 	errno = 0;
 	oid = strtoul(s, &ep, 10);
 	if (errno != 0 || *ep != '\0' || oid < 1 || oid > PG_UINT32_MAX)
 		return false;
 
-	*result = oid;
+	*result = (Oid) oid;
 	return true;
 }
 
