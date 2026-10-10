@@ -423,6 +423,16 @@ include_dir         <replaceable>directory</replaceable>
 
       <note>
        <para>
+        When a connection arrives through a connection-forwarding proxy and a
+        PROXY protocol header is accepted, the address matched against this
+        field is the client address declared in that header, not the proxy's
+        own address.  See <xref linkend="guc-proxy-networks"/> for
+        details.
+       </para>
+      </note>
+
+      <note>
+       <para>
         Users sometimes wonder why host names are handled
         in this seemingly complicated way, with two name resolutions
         including a reverse lookup of the client's IP address.  This
@@ -1707,6 +1717,17 @@ omicron         bryanh                  guest1
     used when using the ident server with <productname>PostgreSQL</productname>,
     since <productname>PostgreSQL</productname> does not have any way to decrypt the
     returned string to determine the actual user name.
+   </para>
+
+   <para>
+    Ident authentication is rejected for connections received through
+    the <link linkend="protocol-flow-proxy">PROXY protocol</link>. A client
+    connected to the proxy rather than to the server. The port pair
+    <replaceable>X</replaceable> and <replaceable>Y</replaceable> known to the
+    server does not describe any connection that the client's ident server has
+    a record of, and the query would reach the ident server from the server's
+    address rather than the proxy's. Any answer would therefore be
+    meaningless.
    </para>
   </sect1>
 

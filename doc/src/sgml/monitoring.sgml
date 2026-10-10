@@ -863,6 +863,10 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        If this field is null, it indicates either that the client is
        connected via a Unix socket on the server machine or that this is an
        internal process such as autovacuum.
+       When the connection was made through a trusted proxy using the PROXY
+       protocol, this is the client address sent by the proxy, not the address
+       of the proxy itself (which is shown in <structfield>proxy_addr</structfield>
+       instead).
       </para></entry>
      </row>
 
@@ -885,6 +889,46 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        TCP port number that the client is using for communication
        with this backend, or <literal>-1</literal> if a Unix socket is used.
        If this field is null, it indicates that this is an internal server process.
+       When the connection was made through a trusted proxy using the PROXY
+       protocol, this is the client port sent by the proxy, not the port of the
+       proxy itself (which is shown in <structfield>proxy_port</structfield>
+       instead).
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>proxy_addr</structfield> <type>inet</type>
+      </para>
+      <para>
+       IP address of the trusted proxy that forwarded this connection.
+       If this field is null, it indicates either that the PROXY protocol has
+       not been used, or the proxy forwarded the connection over a Unix socket,
+       or the proxy used a <literal>LOCAL</literal> command.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>proxy_hostname</structfield> <type>text</type>
+      </para>
+      <para>
+       Host name of the proxy that forwarded this connection, as reported by a
+       reverse DNS lookup of <structfield>proxy_addr</structfield>. This field
+       will only be non-null when the client connected through a trusted proxy
+       using the PROXY protocol, and only when <xref linkend="guc-log-hostname"/>
+       is enabled.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>proxy_port</structfield> <type>integer</type>
+      </para>
+      <para>
+       TCP port number of the trusted proxy that forwarded this connection, or
+       <literal>-1</literal> if the proxy forwarded it over a Unix socket.
+       This field is null when the PROXY protocol was not used.
       </para></entry>
      </row>
 
