@@ -17,6 +17,9 @@
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/supportnodes.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/json.h"
@@ -1813,6 +1816,432 @@ cannotCastJsonbValue(enum jbvType type, const char *sqltype, Node *escontext)
 	/* should be unreachable */
 	elog(ERROR, "unknown jsonb type: %d", (int) type);
 	return (Datum) 0;
+}
+
+/*
+ * jsonb_cast_support()
+ *
+ * Planner support function for jsonb-to-scalar cast functions, attached via
+ * prosupport on the jsonb_numeric, jsonb_bool, jsonb_int4, jsonb_int8, and
+ * jsonb_float8 catalog entries.
+ *
+ * When the sole argument to the cast is a jsonb extraction call, we replace
+ * the two-step cast(extract(...)) expression with a single typed extractor
+ * that reads the scalar directly from the in-memory JsonbValue, avoiding a
+ * round-trip through JsonbValueToJsonb.
+ *
+ * Supported extraction families:
+ *   - jsonb_object_field(j, 'key')  /  j -> 'key'  /  j['key']
+ *   - jsonb_array_element(j, idx)   /  j -> idx    /  j[idx]
+ *   - jsonb_extract_path(j, ...)    /  j #> '{a,b}'
+ *   - multi-subscript chains         j['a']['b'], j['a'][0], etc.
+ *   - jsonb_path_query_first(j, path [, vars [, silent]])
+ *   - jsonb_path_query_first_tz(j, path [, vars [, silent]])
+ */
+Datum
+jsonb_cast_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestSimplify))
+	{
+		SupportRequestSimplify *req = (SupportRequestSimplify *) rawreq;
+		FuncExpr   *fexpr = req->fcall;
+		Node	   *arg;
+		Oid			inner_funcid;
+		List	   *inner_args;
+		int			location;
+		Oid			replacement_funcid;
+		Oid			replacement_rettype;
+		FuncExpr   *newfexpr;
+
+		/* The cast function must have exactly one argument */
+		if (list_length(fexpr->args) != 1)
+			PG_RETURN_POINTER(NULL);
+
+		arg = (Node *) linitial(fexpr->args);
+
+		/*
+		 * Identify the inner extraction expression.  It may appear as a
+		 * FuncExpr, an OpExpr, or a SubscriptingRef, depending on how the
+		 * expression is represented at this point.  Accept the supported
+		 * forms.
+		 */
+		if (IsA(arg, FuncExpr))
+		{
+			FuncExpr   *inner = (FuncExpr *) arg;
+
+			inner_funcid = inner->funcid;
+			inner_args = inner->args;
+			location = inner->location;
+		}
+		else if (IsA(arg, OpExpr))
+		{
+			OpExpr	   *inner = (OpExpr *) arg;
+
+			inner_funcid = inner->opfuncid;
+			inner_args = inner->args;
+			location = inner->location;
+		}
+		else if (IsA(arg, SubscriptingRef))
+		{
+			SubscriptingRef *sbsref = (SubscriptingRef *) arg;
+			int			nsubscripts;
+
+			/*
+			 * Handle jsonb subscript access with no slice and no assignment.
+			 * Single subscripts map to object-field or array-element
+			 * extraction; multi-subscript chains lower to the extract-path
+			 * family.
+			 */
+			if (sbsref->refcontainertype != JSONBOID)
+				PG_RETURN_POINTER(NULL);
+			if (sbsref->reflowerindexpr != NIL)
+				PG_RETURN_POINTER(NULL);
+			if (sbsref->refassgnexpr != NULL)
+				PG_RETURN_POINTER(NULL);
+
+			nsubscripts = list_length(sbsref->refupperindexpr);
+
+			if (nsubscripts == 1)
+			{
+				/*
+				 * Single subscript: text maps to object-field, int4 maps to
+				 * array-element.
+				 */
+				Node	   *subscript;
+				Oid			subscript_type;
+
+				subscript = (Node *) linitial(sbsref->refupperindexpr);
+				subscript_type = exprType(subscript);
+
+				if (subscript_type == TEXTOID)
+				{
+					inner_funcid = F_JSONB_OBJECT_FIELD;
+					inner_args = list_make2(sbsref->refexpr, subscript);
+				}
+				else if (subscript_type == INT4OID)
+				{
+					inner_funcid = F_JSONB_ARRAY_ELEMENT;
+					inner_args = list_make2(sbsref->refexpr, subscript);
+				}
+				else
+					PG_RETURN_POINTER(NULL);
+			}
+			else if (nsubscripts >= 2)
+			{
+				/*
+				 * Multi-subscript chain: build a text[] path and lower to
+				 * the extract-path family.  Each subscript must be text or
+				 * a constant int4; non-constant integer subscripts cause
+				 * the entire chain to be left unoptimized.
+				 */
+				List	   *path_elems = NIL;
+				ListCell   *lc;
+				ArrayExpr  *aexpr;
+
+				foreach(lc, sbsref->refupperindexpr)
+				{
+					Node	   *subscript = (Node *) lfirst(lc);
+					Oid			subscript_type = exprType(subscript);
+
+					if (subscript_type == TEXTOID)
+					{
+						path_elems = lappend(path_elems, subscript);
+					}
+					else if (subscript_type == INT4OID)
+					{
+						Const	   *con;
+
+						/*
+						 * Only constant integer subscripts can be safely
+						 * converted to text at plan time.  Non-constant
+						 * ones would require a runtime CoerceViaIO node;
+						 * decline the rewrite for the entire chain.
+						 */
+						if (!IsA(subscript, Const))
+							PG_RETURN_POINTER(NULL);
+
+						con = (Const *) subscript;
+
+						if (con->constisnull)
+						{
+							path_elems = lappend(path_elems,
+												 makeNullConst(TEXTOID,
+															   -1,
+															   InvalidOid));
+						}
+						else
+						{
+							char	   *str;
+
+							str = DatumGetCString(
+								DirectFunctionCall1(int4out,
+													con->constvalue));
+							path_elems = lappend(path_elems,
+								makeConst(TEXTOID, -1, InvalidOid, -1,
+										  CStringGetTextDatum(str),
+										  false, false));
+						}
+					}
+					else
+						PG_RETURN_POINTER(NULL);
+				}
+
+				aexpr = makeNode(ArrayExpr);
+				aexpr->array_typeid = TEXTARRAYOID;
+				aexpr->array_collid = InvalidOid;
+				aexpr->element_typeid = TEXTOID;
+				aexpr->elements = path_elems;
+				aexpr->multidims = false;
+				aexpr->list_start = -1;
+				aexpr->list_end = -1;
+				aexpr->location = -1;
+
+				inner_funcid = F_JSONB_EXTRACT_PATH;
+				inner_args = list_make2(sbsref->refexpr, aexpr);
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+
+			location = exprLocation(arg);
+		}
+		else
+			PG_RETURN_POINTER(NULL);
+
+		/*
+		 * Verify the inner extraction function and map the outer cast to the
+		 * corresponding typed extractor.  Each supported extraction family
+		 * has its own set of typed rewrite targets and expected arg count.
+		 */
+		if (inner_funcid == F_JSONB_OBJECT_FIELD)
+		{
+			if (list_length(inner_args) != 2)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_ARRAY_ELEMENT)
+		{
+			if (list_length(inner_args) != 2)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_EXTRACT_PATH)
+		{
+			if (list_length(inner_args) != 2)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_PATH_QUERY_FIRST)
+		{
+			if (list_length(inner_args) != 4)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_PATH_QUERY_FIRST_TZ)
+		{
+			if (list_length(inner_args) != 4)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else
+			PG_RETURN_POINTER(NULL);
+
+		/* Build the replacement function call */
+		newfexpr = makeFuncExpr(replacement_funcid, replacement_rettype,
+								inner_args, InvalidOid, InvalidOid,
+								COERCE_EXPLICIT_CALL);
+		newfexpr->location = location;
+		ret = (Node *) newfexpr;
+	}
+
+	PG_RETURN_POINTER(ret);
 }
 
 Datum
