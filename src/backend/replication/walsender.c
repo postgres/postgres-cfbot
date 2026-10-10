@@ -1286,7 +1286,7 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 	{
 		ReplicationSlotCreate(cmd->slotname, false,
 							  cmd->temporary ? RS_TEMPORARY : RS_PERSISTENT,
-							  false, false, false, false);
+							  false, false, false, false, true);
 
 		if (reserve_wal)
 		{
@@ -1317,7 +1317,7 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 		 */
 		ReplicationSlotCreate(cmd->slotname, true,
 							  cmd->temporary ? RS_TEMPORARY : RS_EPHEMERAL,
-							  two_phase, false, failover, false);
+							  two_phase, false, failover, false, true);
 
 		/*
 		 * Do options check early so that we can bail before calling the
@@ -2826,18 +2826,33 @@ ProcessStandbyHSFeedbackMessage(void)
 	 * obviously safe, and if we're moving it backwards, well, the data is at
 	 * risk already since a VACUUM could already have determined the horizon.)
 	 *
-	 * If we're using a replication slot we reserve the xmin via that,
-	 * otherwise via the walsender's PGPROC entry. We can only track the
-	 * catalog xmin separately when using a slot, so we store the least of the
-	 * two provided when not using a slot.
-	 *
-	 * XXX: It might make sense to generalize the ephemeral slot concept and
-	 * always use the slot mechanism to handle the feedback xmin.
+	 * If we're using a replication slot we reserve the xmin via that.  When the
+	 * standby connected without one, lazily create an ephemeral physical slot
+	 * here, so that we can still track xmin and catalog_xmin separately (and
+	 * atomically, under the slot mutex).  The ephemeral slot is dropped
+	 * automatically when this walsender exits.
 	 */
-	if (MyReplicationSlot != NULL)	/* XXX: persistency configurable? */
+	if (MyReplicationSlot == NULL)
+	{
+		char		slotname[NAMEDATALEN];
+
+		snprintf(slotname, sizeof(slotname), "pg_walsender_%d", MyProcPid);
+		ReplicationSlotCreate(slotname, false, RS_EPHEMERAL,
+							  false, false, false, false, false);
+	}
+
+	if (MyReplicationSlot != NULL)
 		PhysicalReplicationSlotNewXmin(feedbackXmin, feedbackCatalogXmin);
 	else
 	{
+		/*
+		 * The slot pool is exhausted, so we cannot track the two horizons
+		 * separately.  Degrade gracefully to the pre-existing behavior of
+		 * holding back both via the walsender's PGPROC entry, using the
+		 * older of the two values.  This loses the catalog/data separation
+		 * for this standby until a slot frees up, but never breaks the
+		 * connection.
+		 */
 		if (TransactionIdIsNormal(feedbackCatalogXmin)
 			&& TransactionIdPrecedes(feedbackCatalogXmin, feedbackXmin))
 			MyProc->xmin = feedbackCatalogXmin;
