@@ -16,6 +16,7 @@
 #include "lib/ilist.h"
 #include "nodes/nodes.h"
 #include "nodes/replnodes.h"
+#include "port/atomics.h"
 #include "replication/syncrep.h"
 #include "storage/condition_variable.h"
 #include "storage/shmem.h"
@@ -91,9 +92,17 @@ typedef struct
 
 	/*
 	 * Current location of the head of the queue. All waiters should have a
-	 * waitLSN that follows this value. Protected by SyncRepLock.
+	 * waitLSN that follows this value.  Writers hold SyncRepLock, since
+	 * moving it forward is what releases the waiters it passes, and it is
+	 * only ever moved forward.
+	 *
+	 * It is atomic so that a committer can read it without the lock: one
+	 * whose LSN this value already covers was acknowledged by a valid quorum
+	 * and has nothing to wait for.  On platforms where a 64-bit atomic read
+	 * is not a plain load, that read is itself a compare-and-exchange, or a
+	 * spinlock acquisition where 64-bit atomics are emulated.
 	 */
-	XLogRecPtr	lsn[NUM_SYNC_REP_WAIT_MODE];
+	pg_atomic_uint64 lsn[NUM_SYNC_REP_WAIT_MODE];
 
 	/*
 	 * Status of data related to the synchronous standbys.  Waiting backends
