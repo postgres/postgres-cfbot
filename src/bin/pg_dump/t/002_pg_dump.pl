@@ -1120,6 +1120,30 @@ my %tests = (
 		},
 	},
 
+	# The child sorts before the parent, but must be altered after it.
+	'CONSTRAINT CHECK / ENFORCED only on child' => {
+		create_sql => 'CREATE TABLE dump_test.test_table_ne_parent (
+							col1 int,
+							CONSTRAINT ck CHECK (col1 > 0) NOT ENFORCED);
+							CREATE TABLE dump_test.test_table_ne_child (
+							) INHERITS (dump_test.test_table_ne_parent);
+			ALTER TABLE dump_test.test_table_ne_child ALTER CONSTRAINT ck ENFORCED;',
+		regexp => qr/^
+			\QALTER TABLE dump_test.test_table_ne_parent\E \n^\s+
+			\QADD CONSTRAINT ck CHECK ((col1 > 0)) NOT ENFORCED;\E
+			.*^
+			\QALTER TABLE dump_test.test_table_ne_child ALTER CONSTRAINT ck ENFORCED;\E
+			/xms,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_post_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+			binary_upgrade => 1,
+		},
+	},
+
 	'CONSTRAINT NOT NULL / NO INHERIT' => {
 		create_sql => 'CREATE TABLE dump_test.test_table_nonn (
 		col1 int NOT NULL NO INHERIT,

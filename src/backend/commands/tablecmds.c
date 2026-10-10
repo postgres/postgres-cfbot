@@ -12676,6 +12676,7 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	Form_pg_constraint currcon;
 	Relation	rel;
 	bool		changed = false;
+	bool		validate;
 	List	   *children = NIL;
 	bool		target_enforced = cmdcon->is_enforced;
 	Oid			enforced_parentoid = InvalidOid;
@@ -12728,11 +12729,19 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	}
 
 	/*
+	 * A constraint that becomes enforced is also marked validated, so a
+	 * descendant that is already enforced but not yet valid must be validated
+	 * too.
+	 */
+	validate = recursing && cmdcon->is_enforced &&
+		currcon->conenforced && !currcon->convalidated;
+
+	/*
 	 * Update to the merged enforceability if needed. This may differ from the
 	 * requested enforceability when another matching parent constraint
 	 * remains enforced.
 	 */
-	if (currcon->conenforced != target_enforced)
+	if (currcon->conenforced != target_enforced || validate)
 	{
 		ATAlterConstraint updatecon = *cmdcon;
 
@@ -12825,10 +12834,10 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	/*
 	 * Tell Phase 3 to check that the constraint is satisfied by existing
 	 * rows. We only need do this when altering the constraint from NOT
-	 * ENFORCED to ENFORCED.
+	 * ENFORCED to ENFORCED, or when validating a descendant as above.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_RELATION &&
-		!currcon->conenforced &&
+		(!currcon->conenforced || validate) &&
 		target_enforced)
 	{
 		AlteredTableInfo *tab;
@@ -16145,6 +16154,7 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		Oid			relid;
 		Oid			confrelid;
 		bool		conislocal;
+		bool		enforced_check;
 
 		tup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(oldId));
 		if (!HeapTupleIsValid(tup)) /* should not happen */
@@ -16161,6 +16171,7 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		}
 		confrelid = con->confrelid;
 		conislocal = con->conislocal;
+		enforced_check = (con->contype == CONSTRAINT_CHECK && con->conenforced);
 		ReleaseSysCache(tup);
 
 		ObjectAddressSet(obj, ConstraintRelationId, oldId);
@@ -16172,9 +16183,29 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		 * ATAddCheckNNConstraint recurses from adding the parent table's
 		 * constraint.  But we had to carry the info this far so that we can
 		 * drop the constraint below.
+		 *
+		 * The parent's constraint might be NOT ENFORCED while this one is
+		 * ENFORCED, so enforce it again once all tables' constraints have
+		 * been recreated.
 		 */
 		if (!conislocal)
+		{
+			if (enforced_check && relid == tab->relid)
+			{
+				AlterTableCmd *cmd = makeNode(AlterTableCmd);
+				ATAlterConstraint *altercon = makeNode(ATAlterConstraint);
+
+				altercon->conname = get_constraint_name(oldId);
+				altercon->alterEnforceability = true;
+				altercon->is_enforced = true;
+				cmd->subtype = AT_AlterConstraint;
+				cmd->def = (Node *) altercon;
+				cmd->recurse = true;
+				tab->subcmds[AT_PASS_ADD_OTHERCONSTR] =
+					lappend(tab->subcmds[AT_PASS_ADD_OTHERCONSTR], cmd);
+			}
 			continue;
+		}
 
 		/*
 		 * When rebuilding another table's constraint that references the
