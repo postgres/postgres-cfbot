@@ -2301,3 +2301,150 @@ SELECT last_value FROM null_treatment_seq;
 
 --cleanup
 DROP TABLE planets CASCADE;
+
+--
+-- Test DISTINCT in window aggregates
+--
+
+-- Should parse successfully and round-trip through a view definition
+CREATE TEMP VIEW window_distinct_view AS
+SELECT count(DISTINCT four) OVER (PARTITION BY ten) AS cnt
+FROM tenk1;
+SELECT pg_get_viewdef('window_distinct_view') LIKE '%DISTINCT%' AS has_distinct;
+DROP VIEW window_distinct_view;
+
+-- DISTINCT on a non-aggregate window function is still a parse error
+SELECT ntile(DISTINCT 4) OVER () FROM tenk1; -- error
+
+-- Basic DISTINCT whole-partition cases (should succeed)
+SELECT count(DISTINCT four) OVER (PARTITION BY ten)
+FROM tenk1 LIMIT 20;
+
+-- DISTINCT with no PARTITION BY (whole single partition)
+SELECT x, sum(DISTINCT x % 3) OVER ()
+FROM generate_series(1, 9) g(x);
+
+-- DISTINCT with explicit UNBOUNDED PRECEDING to UNBOUNDED FOLLOWING
+SELECT x, avg(DISTINCT x % 4) OVER (PARTITION BY x > 5
+  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+FROM generate_series(1, 10) g(x);
+
+-- DISTINCT with FILTER
+SELECT x,
+       count(DISTINCT x % 3) FILTER (WHERE x > 3) OVER (PARTITION BY x > 5)
+FROM generate_series(1, 10) g(x);
+
+-- NULL handling
+SELECT x,
+       count(DISTINCT x) OVER ()
+FROM (VALUES (1),(2),(NULL),(2),(NULL),(1),(3)) v(x);
+
+-- Pass-by-reference argument type (text) over the whole partition.
+-- array_agg is order-sensitive, but the sort-based dedup emits the distinct
+-- values in sorted order, so the result is deterministic.
+SELECT array_agg(DISTINCT v) OVER ()
+FROM (VALUES ('pear'),('apple'),('pear'),('banana'),('apple')) s(v)
+LIMIT 1;
+
+-- Strict transition function with a pass-by-reference type: the first
+-- non-NULL distinct value is copied into the aggregate's context and NULLs
+-- are skipped.
+SELECT max(DISTINCT v) OVER (), min(DISTINCT v) OVER ()
+FROM (VALUES ('pear'),('apple'),(NULL),('banana'),('apple')) s(v)
+LIMIT 1;
+
+-- Mixed DISTINCT and non-DISTINCT aggregates in same window
+SELECT x,
+       count(DISTINCT x % 3) OVER w,
+       sum(x) OVER w
+FROM generate_series(1, 9) g(x)
+WINDOW w AS (PARTITION BY x > 5);
+
+-- Multiple DISTINCT aggregates in same query
+SELECT x,
+       count(DISTINCT x % 2) OVER (PARTITION BY x > 5),
+       sum(DISTINCT x % 3) OVER (PARTITION BY x > 5)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: ORDER BY produces RANGE UNBOUNDED PRECEDING to CURRENT ROW
+SELECT count(DISTINCT x) OVER (PARTITION BY x > 5 ORDER BY x)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: running count with ORDER BY (default RANGE frame)
+SELECT x, count(DISTINCT x % 3) OVER (ORDER BY x)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: explicit ROWS UNBOUNDED PRECEDING to CURRENT ROW
+SELECT x, count(DISTINCT x % 3) OVER (
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: PARTITION BY and ORDER BY
+SELECT x, sum(DISTINCT x % 3) OVER (PARTITION BY x > 5 ORDER BY x)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: FILTER with ORDER BY
+SELECT x, count(DISTINCT x % 3) FILTER (WHERE x > 2) OVER (ORDER BY x)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: mixed DISTINCT + non-DISTINCT with ORDER BY
+SELECT x,
+       count(DISTINCT x % 3) OVER w,
+       sum(x) OVER w
+FROM generate_series(1, 9) g(x)
+WINDOW w AS (ORDER BY x);
+
+-- Grow-only frame with a pass-by-reference type (text).  The hash-based
+-- incremental path adds each newly seen distinct value in arrival order,
+-- which ORDER BY rn makes deterministic, so array_agg yields a stable,
+-- growing list in insertion (not sorted) order.
+SELECT rn, v, array_agg(DISTINCT v) OVER (ORDER BY rn ROWS UNBOUNDED PRECEDING)
+FROM (VALUES (1,'pear'),(2,'apple'),(3,'pear'),(4,'banana'),(5,'apple')) s(rn, v)
+ORDER BY rn;
+
+-- Non-shrinking frame: verify monotonically increasing running count
+SELECT x, count(DISTINCT x) OVER (ORDER BY x)
+FROM generate_series(1, 5) g(x);
+
+-- Non-shrinking frame: ROWS UNBOUNDED PRECEDING to CURRENT ROW without ORDER BY
+SELECT x,
+       count(DISTINCT x % 3) OVER (
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       )
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: FOLLOWING bound (not just CURRENT ROW)
+SELECT x,
+       count(DISTINCT x % 3) OVER (
+           ORDER BY x
+           ROWS BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING
+       )
+FROM generate_series(1, 10) g(x);
+
+-- Error: sliding frame (start is not UNBOUNDED PRECEDING)
+SELECT count(DISTINCT x) OVER (ROWS 3 PRECEDING)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: sliding frame with explicit bounds
+SELECT count(DISTINCT x) OVER (ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: EXCLUDE clause with ORDER BY
+SELECT count(DISTINCT x) OVER (
+    ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    EXCLUDE CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: EXCLUDE clause with UNBOUNDED frame
+SELECT count(DISTINCT x) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: non-hashable type with non-shrinking frame (money has btree but no hash).
+-- Whole-partition DISTINCT uses sort-based dedup so money works there,
+-- but the incremental non-shrinking path requires hash support.
+SELECT count(DISTINCT x::money) OVER (ORDER BY x)
+FROM generate_series(1, 5) g(x); -- error
+
+-- Error: multi-argument DISTINCT window aggregate (not yet supported)
+SELECT string_agg(DISTINCT four::text, ',') OVER (PARTITION BY ten)
+FROM tenk1; -- error
