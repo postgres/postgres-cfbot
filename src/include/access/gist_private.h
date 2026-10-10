@@ -92,6 +92,7 @@ typedef struct GISTSTATE
 	FmgrInfo	equalFn[INDEX_MAX_KEYS];
 	FmgrInfo	distanceFn[INDEX_MAX_KEYS];
 	FmgrInfo	fetchFn[INDEX_MAX_KEYS];
+	FmgrInfo	excludeFn[INDEX_MAX_KEYS];
 
 	/* Collations to pass to the support functions */
 	Oid			supportCollation[INDEX_MAX_KEYS];
@@ -407,9 +408,13 @@ extern bool gistinsert(Relation r, Datum *values, bool *isnull,
 					   struct IndexInfo *indexInfo);
 extern MemoryContext createTempGistContext(void);
 extern GISTSTATE *initGISTstate(Relation index);
+extern void initGISTstateExclude(GISTSTATE *giststate, Relation index);
 extern void freeGISTstate(GISTSTATE *giststate);
-extern void gistdoinsert(Relation r,
+extern bool gistdoinsert(Relation r,
 						 IndexTuple itup,
+						 IndexUniqueCheck checkUnique,
+						 Datum *values,
+						 bool *isnull,
 						 Size freespace,
 						 GISTSTATE *giststate,
 						 Relation heapRel,
