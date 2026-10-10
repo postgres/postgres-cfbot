@@ -1037,6 +1037,43 @@ FROM tenk1 WHERE unique1 < 10;
           7 |       7 |    3
 (10 rows)
 
+-- first_value/last_value with EXCLUDE TIES when the frame edge is a peer
+SELECT k, first_value(k) OVER w
+FROM (VALUES (0), (0), (1)) t(k)
+WINDOW w AS (ORDER BY k ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING
+	EXCLUDE TIES);
+ k | first_value 
+---+-------------
+ 0 |           1
+ 0 |           1
+ 1 |            
+(3 rows)
+
+SELECT k, last_value(k) OVER w
+FROM (VALUES (0), (1), (1)) t(k)
+WINDOW w AS (ORDER BY k ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+	EXCLUDE TIES);
+ k | last_value 
+---+------------
+ 0 |           
+ 1 |          0
+ 1 |          0
+(3 rows)
+
+-- first_value with EXCLUDE TIES when peers lie before the frame head
+SELECT k, first_value(k) OVER w
+FROM (VALUES (0), (1), (1), (1), (2)) t(k)
+WINDOW w AS (ORDER BY k ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING
+	EXCLUDE TIES);
+ k | first_value 
+---+-------------
+ 0 |           1
+ 1 |           2
+ 1 |           2
+ 1 |            
+ 2 |            
+(5 rows)
+
 SELECT sum(unique1) over (rows between 2 preceding and 1 preceding),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;

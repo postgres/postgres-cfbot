@@ -235,6 +235,23 @@ SELECT last_value(unique1) over (ORDER BY four rows between current row and 2 fo
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
 
+-- first_value/last_value with EXCLUDE TIES when the frame edge is a peer
+SELECT k, first_value(k) OVER w
+FROM (VALUES (0), (0), (1)) t(k)
+WINDOW w AS (ORDER BY k ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING
+	EXCLUDE TIES);
+
+SELECT k, last_value(k) OVER w
+FROM (VALUES (0), (1), (1)) t(k)
+WINDOW w AS (ORDER BY k ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+	EXCLUDE TIES);
+
+-- first_value with EXCLUDE TIES when peers lie before the frame head
+SELECT k, first_value(k) OVER w
+FROM (VALUES (0), (1), (1), (1), (2)) t(k)
+WINDOW w AS (ORDER BY k ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING
+	EXCLUDE TIES);
+
 SELECT sum(unique1) over (rows between 2 preceding and 1 preceding),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
