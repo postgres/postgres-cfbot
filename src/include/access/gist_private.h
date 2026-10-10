@@ -433,7 +433,8 @@ extern bool gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 							bool is_build);
 
 extern SplitPageLayout *gistSplit(Relation r, Page page, IndexTuple *itup,
-								  int len, GISTSTATE *giststate);
+								  int len, GISTSTATE *giststate,
+								  Size freespace);
 
 /* gistxlog.c */
 extern XLogRecPtr gistXLogPageDelete(Buffer buffer,
@@ -482,7 +483,7 @@ extern bytea *gistoptions(Datum reloptions, bool validate);
 extern bool gistproperty(Oid index_oid, int attno,
 						 IndexAMProperty prop, const char *propname,
 						 bool *res, bool *isnull);
-extern bool gistfitpage(IndexTuple *itvec, int len);
+extern bool gistfitpage(IndexTuple *itvec, int len, Size freespace);
 extern bool gistnospace(Page page, IndexTuple *itvec, int len, OffsetNumber todelete, Size freespace);
 extern void gistcheckpage(Relation rel, Buffer buf);
 extern Buffer gistNewBuffer(Relation r, Relation heaprel);
