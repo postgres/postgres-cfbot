@@ -213,6 +213,8 @@ sub get_library
 {
 	my ($self) = @_;
 
+	# XXX: Temporary hack during initial discussions of the patch
+	return 'LibreSSL' if (library_is_libressl());
 	return $self->{_library};
 }
 
@@ -230,7 +232,7 @@ sub library_is_libressl
 
 	# The HAVE_SSL_CTX_SET_CERT_CB macro isn't defined for LibreSSL.
 	# We may eventually need a less-bogus heuristic.
-	return not check_pg_config("#define HAVE_SSL_CTX_SET_CERT_CB 1");
+	return check_pg_config("#define HAVE_SSL_CTX_USE_CERTIFICATE_CHAIN_MEM 1");
 }
 
 # Internal method for copying a set of files, taking into account wildcards

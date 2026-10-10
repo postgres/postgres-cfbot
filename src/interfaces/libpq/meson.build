@@ -28,7 +28,11 @@ endif
 
 if ssl.found()
   libpq_sources += files('fe-secure-common.c')
-  libpq_sources += files('fe-secure-openssl.c')
+  if ssl_library == 'openssl'
+    libpq_sources += files('fe-secure-openssl.c')
+  else
+    libpq_sources += files('fe-secure-libressl.c')
+  endif
 endif
 
 if gssapi.found()
