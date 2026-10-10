@@ -53,6 +53,31 @@ typedef struct VacuumParams VacuumParams;
 #define MaxLockTupleMode	LockTupleExclusive
 
 /*
+ * Physical failure information from heap_delete, heap_update and heap_lock_tuple.
+ * ctid and xmax are valid for TM_SelfModified, TM_Updated, TM_Deleted and
+ * TM_BeingModified (delete/update) or TM_WouldBlock (lock).  No fields are
+ * defined for TM_Ok or TM_Invisible.
+ *
+ * ctid is the target's t_ctid: its own TID after deletion, its replacement's
+ * TID after update, or the moved-partitions marker.  For an outdated tuple,
+ * xmax identifies its updater, resolving a MultiXact if necessary.  Lock-only
+ * tuples can instead supply a locker XID or a MultiXactId, and a crosscheck
+ * failure need not identify an updater.  A pruned catalog tuple supplies
+ * InvalidTransactionId.  Do not interpret these cases as an outdating XID.
+ *
+ * In the populated failure cases, cmax is meaningful only for TM_SelfModified;
+ * otherwise it is InvalidCommandId.  We cannot decode a combo CID from another
+ * transaction.  The table AM handler translates these heap details into
+ * TM_FailureData.
+ */
+typedef struct HeapTupleFailureData
+{
+	ItemPointerData ctid;
+	TransactionId xmax;
+	CommandId	cmax;
+} HeapTupleFailureData;
+
+/*
  * Descriptor for heap table scans.
  */
 typedef struct HeapScanDescData
@@ -382,19 +407,19 @@ extern void heap_multi_insert(Relation relation, TupleTableSlot **slots,
 							  BulkInsertState bistate);
 extern TM_Result heap_delete(Relation relation, const ItemPointerData *tid,
 							 CommandId cid, uint32 options, Snapshot crosscheck,
-							 bool wait, TM_FailureData *tmfd);
+							 bool wait, HeapTupleFailureData *tmfd);
 extern void heap_finish_speculative(Relation relation, const ItemPointerData *tid);
 extern void heap_abort_speculative(Relation relation, const ItemPointerData *tid);
 extern TM_Result heap_update(Relation relation, const ItemPointerData *otid,
 							 HeapTuple newtup,
 							 CommandId cid, uint32 options,
 							 Snapshot crosscheck, bool wait,
-							 TM_FailureData *tmfd, LockTupleMode *lockmode,
+							 HeapTupleFailureData *tmfd, LockTupleMode *lockmode,
 							 TU_UpdateIndexes *update_indexes);
 extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 								 CommandId cid, LockTupleMode mode, LockWaitPolicy wait_policy,
 								 bool follow_updates,
-								 Buffer *buffer, TM_FailureData *tmfd);
+								 Buffer *buffer, HeapTupleFailureData *tmfd);
 
 extern bool heap_inplace_lock(Relation relation,
 							  HeapTuple oldtup_ptr, Buffer buffer,
