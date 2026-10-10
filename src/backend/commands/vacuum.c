@@ -2720,6 +2720,9 @@ IndexBulkDeleteResult *
 vac_bulkdel_one_index(IndexVacuumInfo *ivinfo, IndexBulkDeleteResult *istat,
 					  TidStore *dead_items, VacDeadItemsInfo *dead_items_info)
 {
+	/* Tests stop here to look at a VACUUM between its phases. */
+	INJECTION_POINT("vacuum-bulkdel-one-index", NULL);
+
 	/* Do bulk deletion */
 	istat = index_bulk_delete(ivinfo, istat, vac_tid_reaped,
 							  dead_items);

@@ -563,6 +563,30 @@ parallel_vacuum_dsm_detach(dsm_segment *seg, Datum arg)
 }
 
 /*
+ * Load index statistics from earlier passes into the shared state.
+ *
+ * For a table AM that creates a parallel vacuum context per index pass
+ * rather than one for the whole VACUUM: istats[i] (may be NULL) is what
+ * parallel_vacuum_end of the previous pass returned for index i, and is
+ * handed back to the index AM as the input statistics of this pass.
+ */
+void
+parallel_vacuum_set_index_stats(ParallelVacuumState *pvs,
+								IndexBulkDeleteResult **istats)
+{
+	Assert(!IsParallelWorker());
+
+	for (int i = 0; i < pvs->nindexes; i++)
+	{
+		PVIndStats *indstats = &(pvs->indstats[i]);
+
+		indstats->istat_updated = (istats[i] != NULL);
+		if (istats[i] != NULL)
+			memcpy(&indstats->istat, istats[i], sizeof(IndexBulkDeleteResult));
+	}
+}
+
+/*
  * Returns the dead items space and dead items information.
  */
 TidStore *

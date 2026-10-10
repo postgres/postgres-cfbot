@@ -418,6 +418,8 @@ extern ParallelVacuumState *parallel_vacuum_init(Relation rel, Relation *indrels
 												 int vac_work_mem, int elevel,
 												 BufferAccessStrategy bstrategy);
 extern void parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats);
+extern void parallel_vacuum_set_index_stats(ParallelVacuumState *pvs,
+											IndexBulkDeleteResult **istats);
 extern TidStore *parallel_vacuum_get_dead_items(ParallelVacuumState *pvs,
 												VacDeadItemsInfo **dead_items_info_p);
 extern void parallel_vacuum_reset_dead_items(ParallelVacuumState *pvs);
