@@ -88,12 +88,14 @@
 #include "access/amapi.h"
 #include "access/htup_details.h"
 #include "access/tsmapi.h"
+#include "catalog/pg_statistic.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeMemoize.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/multibitmapset.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/tidbitmap.h"
 #include "optimizer/clauses.h"
@@ -108,6 +110,7 @@
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
+#include "utils/syscache.h"
 #include "utils/tuplesort.h"
 
 
@@ -198,6 +201,8 @@ static Selectivity get_foreign_key_join_selectivity(PlannerInfo *root,
 													Relids inner_relids,
 													SpecialJoinInfo *sjinfo,
 													List **restrictlist);
+static Selectivity fkey_referencing_nullfrac(PlannerInfo *root,
+											 ForeignKeyOptInfo *fkinfo);
 static Cost append_nonpartial_cost(List *subpaths, int numpaths,
 								   int parallel_workers);
 static void set_rel_width(PlannerInfo *root, RelOptInfo *rel);
@@ -4057,8 +4062,20 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 	/*
 	 * Get approx # tuples passing the mergequals.  We use approx_tuple_count
 	 * here because we need an estimate done with JOIN_INNER semantics.
+	 * However, for a plain inner join with no restriction clauses beyond the
+	 * mergeclauses, path->jpath.path.rows already gives an equally (or more)
+	 * accurate figure computed with JOIN_INNER semantics, so we reuse it and
+	 * skip the extra call.  (The mergeclauses are a subset of
+	 * joinrestrictinfo, so equal list lengths mean they are the same
+	 * clauses.)  For any other jointype, path->jpath.path.rows reflects that
+	 * jointype's own semantics (e.g. clamped to the outer/inner size for
+	 * LEFT/FULL joins), not JOIN_INNER, so it can't be substituted.
 	 */
-	mergejointuples = approx_tuple_count(root, &path->jpath, mergeclauses);
+	if (path->jpath.jointype == JOIN_INNER &&
+		list_length(path->jpath.joinrestrictinfo) == list_length(mergeclauses))
+		mergejointuples = path->jpath.path.rows;
+	else
+		mergejointuples = approx_tuple_count(root, &path->jpath, mergeclauses);
 
 	/*
 	 * When there are equal merge keys in the outer relation, the mergejoin
@@ -4699,7 +4716,12 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	 * inner_unique joins that is the matched outer rows, and for ANTI the
 	 * unmatched ones, both available from outer_matched_rows computed above.
 	 * For plain joins, use approx_tuple_count(), which gives an estimate done
-	 * with JOIN_INNER semantics.
+	 * with JOIN_INNER semantics -- except for a plain inner join with no
+	 * restriction clauses beyond the hashclauses, where path->jpath.path.rows
+	 * already gives an equally (or more) accurate JOIN_INNER-semantics figure
+	 * for free, and calling approx_tuple_count() again would be redundant.
+	 * (As in final_cost_mergejoin(), the hashclauses are a subset of
+	 * joinrestrictinfo, so equal list lengths mean they are the same.)
 	 */
 	if (path->jpath.jointype == JOIN_RIGHT_SEMI)
 		hashjointuples = clamp_row_est(inner_path_rows *
@@ -4711,6 +4733,9 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 		hashjointuples = outer_path_rows - outer_matched_rows;
 	else if (path->jpath.jointype == JOIN_SEMI || extra->inner_unique)
 		hashjointuples = outer_matched_rows;
+	else if (path->jpath.jointype == JOIN_INNER &&
+			 list_length(path->jpath.joinrestrictinfo) == list_length(hashclauses))
+		hashjointuples = path->jpath.path.rows;
 	else
 		hashjointuples = approx_tuple_count(root, &path->jpath, hashclauses);
 
@@ -6051,15 +6076,9 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		/*
 		 * Finally we get to the payoff: estimate selectivity using the
 		 * knowledge that each referencing row will match exactly one row in
-		 * the referenced table.
-		 *
-		 * XXX that's not true in the presence of nulls in the referencing
-		 * column(s), so in principle we should derate the estimate for those.
-		 * However (1) if there are any strict restriction clauses for the
-		 * referencing column(s) elsewhere in the query, derating here would
-		 * be double-counting the null fraction, and (2) it's not very clear
-		 * how to combine null fractions for multiple referencing columns. So
-		 * we do nothing for now about correcting for nulls.
+		 * the referenced table.  That's not true for referencing rows with
+		 * nulls in the FK columns, which match nothing; we derate the
+		 * estimate for those below.
 		 *
 		 * XXX another point here is that if either side of an FK constraint
 		 * is an inheritance parent, we estimate as though the constraint
@@ -6101,6 +6120,9 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 
 			fkselec *= 1.0 / ref_tuples;
 		}
+
+		/* Referencing rows with nulls in the FK columns have no match */
+		fkselec *= 1.0 - fkey_referencing_nullfrac(root, fkinfo);
 
 		/*
 		 * If any of the FK columns participated in ec_has_const ECs, then
@@ -6145,6 +6167,56 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 	*restrictlist = worklist;
 	CLAMP_PROBABILITY(fkselec);
 	return fkselec;
+}
+
+/*
+ * fkey_referencing_nullfrac
+ *		Estimate the fraction of the referencing rel's rows that have a null
+ *		in at least one of the FK columns.
+ *
+ * Columns constrained by a strict restriction clause of the referencing rel
+ * are skipped: their nulls are already excluded from the rel's row count, so
+ * counting them again here would underestimate the join size.  For the
+ * remaining columns we take the largest null fraction.  That's exact when
+ * the columns are null together, as is typical for multi-column FKs, and
+ * otherwise it's a lower bound.
+ */
+static Selectivity
+fkey_referencing_nullfrac(PlannerInfo *root, ForeignKeyOptInfo *fkinfo)
+{
+	RelOptInfo *con_rel = find_base_rel(root, fkinfo->con_relid);
+	RangeTblEntry *rte = planner_rt_fetch(fkinfo->con_relid, root);
+	List	   *nonnullable_vars = NIL;
+	Selectivity nullfrac = 0.0;
+
+	foreach_node(RestrictInfo, rinfo, con_rel->baserestrictinfo)
+		nonnullable_vars =
+			mbms_add_members(nonnullable_vars,
+							 find_nonnullable_vars((Node *) rinfo->clause));
+
+	for (int i = 0; i < fkinfo->nkeys; i++)
+	{
+		AttrNumber	attno = fkinfo->conkey[i];
+		HeapTuple	tup;
+
+		if (mbms_is_member(fkinfo->con_relid,
+						   attno - FirstLowInvalidHeapAttributeNumber,
+						   nonnullable_vars))
+			continue;
+
+		tup = SearchSysCache3(STATRELATTINH,
+							  ObjectIdGetDatum(rte->relid),
+							  Int16GetDatum(attno),
+							  BoolGetDatum(rte->inh));
+		if (HeapTupleIsValid(tup))
+		{
+			nullfrac = Max(nullfrac,
+						   ((Form_pg_statistic) GETSTRUCT(tup))->stanullfrac);
+			ReleaseSysCache(tup);
+		}
+	}
+
+	return nullfrac;
 }
 
 /*
