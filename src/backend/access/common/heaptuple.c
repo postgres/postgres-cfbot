@@ -267,21 +267,30 @@ heap_compute_data_size(TupleDesc tupleDesc,
 }
 
 /*
- * Per-attribute helper for heap_fill_tuple and other routines building tuples.
+ * Per-attribute helper for heap_fill_tuple_attr.
  *
- * Fill in either a data value or a bit in the null bitmask
+ * Fill in either a data value or a bit in the null bitmask.
+ *
+ * When skip_copy is true the data pointer is advanced without writing
+ * anything.  If attr_data_out is non-NULL, it receives the aligned position
+ * where the attribute's payload starts (NULL for null attrs).
  */
 static inline void
-fill_val(CompactAttribute *att,
-		 uint8 **bit,
-		 int *bitmask,
-		 char **dataP,
-		 uint16 *infomask,
-		 Datum datum,
-		 bool isnull)
+fill_val_attr(CompactAttribute *att,
+			  uint8 **bit,
+			  int *bitmask,
+			  char **dataP,
+			  uint16 *infomask,
+			  Datum datum,
+			  bool isnull,
+			  bool skip_copy,
+			  char **attr_data_out)
 {
 	Size		data_length;
 	char	   *data = *dataP;
+
+	if (attr_data_out)
+		*attr_data_out = NULL;
 
 	/*
 	 * If we're building a null bitmap, set the appropriate bit for the
@@ -315,7 +324,10 @@ fill_val(CompactAttribute *att,
 	{
 		/* pass-by-value */
 		data = (char *) att_nominal_alignby(data, att->attalignby);
-		store_att_byval(data, datum, att->attlen);
+		if (attr_data_out)
+			*attr_data_out = data;
+		if (!skip_copy)
+			store_att_byval(data, datum, att->attlen);
 		data_length = att->attlen;
 	}
 	else if (att->attlen == -1)
@@ -335,36 +347,53 @@ fill_val(CompactAttribute *att,
 				ExpandedObjectHeader *eoh = DatumGetEOHP(datum);
 
 				data = (char *) att_nominal_alignby(data, att->attalignby);
+				if (attr_data_out)
+					*attr_data_out = data;
 				data_length = EOH_get_flat_size(eoh);
-				EOH_flatten_into(eoh, data, data_length);
+				if (!skip_copy)
+					EOH_flatten_into(eoh, data, data_length);
 			}
 			else
 			{
+				if (attr_data_out)
+					*attr_data_out = data;
 				*infomask |= HEAP_HASEXTERNAL;
 				/* no alignment, since it's short by definition */
 				data_length = VARSIZE_EXTERNAL(val);
-				memcpy(data, val, data_length);
+				if (!skip_copy)
+					memcpy(data, val, data_length);
 			}
 		}
 		else if (VARATT_IS_SHORT(val))
 		{
 			/* no alignment for short varlenas */
+			if (attr_data_out)
+				*attr_data_out = data;
 			data_length = VARSIZE_SHORT(val);
-			memcpy(data, val, data_length);
+			if (!skip_copy)
+				memcpy(data, val, data_length);
 		}
 		else if (att->attispackable && VARATT_CAN_MAKE_SHORT(val))
 		{
 			/* convert to short varlena -- no alignment */
+			if (attr_data_out)
+				*attr_data_out = data;
 			data_length = VARATT_CONVERTED_SHORT_SIZE(val);
-			SET_VARSIZE_SHORT(data, data_length);
-			memcpy(data + 1, VARDATA(val), data_length - 1);
+			if (!skip_copy)
+			{
+				SET_VARSIZE_SHORT(data, data_length);
+				memcpy(data + 1, VARDATA(val), data_length - 1);
+			}
 		}
 		else
 		{
 			/* full 4-byte header varlena */
 			data = (char *) att_nominal_alignby(data, att->attalignby);
+			if (attr_data_out)
+				*attr_data_out = data;
 			data_length = VARSIZE(val);
-			memcpy(data, val, data_length);
+			if (!skip_copy)
+				memcpy(data, val, data_length);
 		}
 	}
 	else if (att->attlen == -2)
@@ -372,20 +401,44 @@ fill_val(CompactAttribute *att,
 		/* cstring ... never needs alignment */
 		*infomask |= HEAP_HASVARWIDTH;
 		Assert(att->attalignby == sizeof(char));
+		if (attr_data_out)
+			*attr_data_out = data;
 		data_length = strlen(DatumGetCString(datum)) + 1;
-		memcpy(data, DatumGetPointer(datum), data_length);
+		if (!skip_copy)
+			memcpy(data, DatumGetPointer(datum), data_length);
 	}
 	else
 	{
 		/* fixed-length pass-by-reference */
 		data = (char *) att_nominal_alignby(data, att->attalignby);
+		if (attr_data_out)
+			*attr_data_out = data;
 		Assert(att->attlen > 0);
 		data_length = att->attlen;
-		memcpy(data, DatumGetPointer(datum), data_length);
+		if (!skip_copy)
+			memcpy(data, DatumGetPointer(datum), data_length);
 	}
 
 	data += data_length;
 	*dataP = data;
+}
+
+/*
+ * Per-attribute helper for heap_fill_tuple and other routines building tuples.
+ *
+ * Fill in either a data value or a bit in the null bitmask
+ */
+static inline void
+fill_val(CompactAttribute *att,
+		 uint8 **bit,
+		 int *bitmask,
+		 char **dataP,
+		 uint16 *infomask,
+		 Datum datum,
+		 bool isnull)
+{
+	fill_val_attr(att, bit, bitmask, dataP, infomask, datum, isnull,
+				  false, NULL);
 }
 
 /*
@@ -402,6 +455,28 @@ heap_fill_tuple(TupleDesc tupleDesc,
 				const Datum *values, const bool *isnull,
 				char *data, Size data_size,
 				uint16 *infomask, uint8 *bit)
+{
+	heap_fill_tuple_attr(tupleDesc, values, isnull,
+						 data, data_size, infomask, bit,
+						 NULL, NULL);
+}
+
+/*
+ * heap_fill_tuple_attr
+ *		Like heap_fill_tuple, but with per-attribute skip and position output.
+ *
+ * skip_copy: when entry is true, advance past the attribute without copying.
+ * attr_data: receives the aligned data position of each non-null attribute.
+ *
+ * Either pointer may be NULL, giving the same behavior as heap_fill_tuple.
+ */
+void
+heap_fill_tuple_attr(TupleDesc tupleDesc,
+					 const Datum *values, const bool *isnull,
+					 char *data, Size data_size,
+					 uint16 *infomask, uint8 *bit,
+					 const bool *skip_copy,
+					 char **attr_data)
 {
 	uint8	   *bitP;
 	int			bitmask;
@@ -430,13 +505,15 @@ heap_fill_tuple(TupleDesc tupleDesc,
 	{
 		CompactAttribute *attr = TupleDescCompactAttr(tupleDesc, i);
 
-		fill_val(attr,
-				 bitP ? &bitP : NULL,
-				 &bitmask,
-				 &data,
-				 infomask,
-				 values ? values[i] : PointerGetDatum(NULL),
-				 isnull ? isnull[i] : true);
+		fill_val_attr(attr,
+					  bitP ? &bitP : NULL,
+					  &bitmask,
+					  &data,
+					  infomask,
+					  values ? values[i] : PointerGetDatum(NULL),
+					  isnull ? isnull[i] : true,
+					  skip_copy ? skip_copy[i] : false,
+					  attr_data ? &attr_data[i] : NULL);
 	}
 
 	Assert((data - start) == data_size);
