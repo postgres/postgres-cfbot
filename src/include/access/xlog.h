@@ -174,6 +174,18 @@ extern PGDLLIMPORT bool XLOG_DEBUG;
 #define CHECKPOINT_CAUSE_XLOG	0x0080	/* XLOG consumption */
 #define CHECKPOINT_CAUSE_TIME	0x0100	/* Elapsed time */
 
+/* Checkpoint state version.
+ *
+ * These bits are atomically rotated by the checkpointer when resetting
+ * the flags stored by the checkpoint requests.
+ */
+#define CHECKPOINT_NUM_FLAGS	9		/* number of bits used for flags */
+#define CHECKPOINT_VERSION_LSB  (1 << CHECKPOINT_NUM_FLAGS)
+#define CHECKPOINT_FLAGS_MASK (CHECKPOINT_VERSION_LSB - 1)
+/* Clear flags and advance one version */
+#define CHECKPOINT_ROTATE_STATE(state) \
+	(((state) + CHECKPOINT_VERSION_LSB) & ~CHECKPOINT_FLAGS_MASK)
+
 /*
  * Flag bits for the record being inserted, set using XLogSetRecordFlags().
  */
