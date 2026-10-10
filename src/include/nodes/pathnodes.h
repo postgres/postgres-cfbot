@@ -534,6 +534,14 @@ struct PlannerInfo
 	/* set operator pathkeys, if any */
 	List	   *setop_pathkeys;
 
+	/*
+	 * Indexes in PlannerInfo's eq_classes list of ECs that are worth tracking
+	 * in UniqueKeys.
+	 */
+	Bitmapset  *interesting_unique_ecs;
+	/* true once interesting_unique_ecs has been computed */
+	bool		interesting_unique_ecs_valid;
+
 	/* Canonicalised partition schemes used in the query. */
 	List	   *part_schemes pg_node_attr(read_write_ignore);
 
@@ -875,6 +883,10 @@ typedef struct PartitionSchemeData *PartitionScheme;
  *					other rels for which we have tried and failed to prove
  *					this one unique
  *
+ * In addition, uniquekeys is a list of UniqueKey nodes describing expression
+ * sets over which this relation is known to be distinct.  It is populated
+ * bottom-up, for base rels and join rels alike; see uniquekeys.c.
+ *
  * Three fields are used to cache information about unique-ification of this
  * relation.  This is used to support semijoins where the relation appears on
  * the RHS: the relation is first unique-ified, and then a regular join is
@@ -1124,6 +1136,9 @@ typedef struct RelOptInfo
 	List	   *unique_for_rels;
 	/* known not unique for these set(s) */
 	List	   *non_unique_for_rels;
+
+	/* list of UniqueKey: expression sets this rel is distinct over */
+	List	   *uniquekeys;
 
 	/*
 	 * information about unique-ification of this relation
@@ -1674,6 +1689,7 @@ typedef struct EquivalenceClass
 	Index		ec_sortref;		/* originating sortclause label, or 0 */
 	Index		ec_min_security;	/* minimum security_level in ec_sources */
 	Index		ec_max_security;	/* maximum security_level in ec_sources */
+	int			ec_index;		/* position of this EC in root->eq_classes */
 	struct EquivalenceClass *ec_merged; /* set if merged into another EC */
 } EquivalenceClass;
 
@@ -1815,6 +1831,32 @@ typedef struct PathKey
 	CompareType pk_cmptype;		/* sort direction (ASC or DESC) */
 	bool		pk_nulls_first; /* do NULLs come before normal values? */
 } PathKey;
+
+/*
+ * UniqueKeys
+ *
+ * Asserts that a relation cannot emit two rows that are equal on the
+ * values of one expression from each of the EquivalenceClasses identified
+ * by eclass_indexes (indexes into root->eq_classes).  An empty set means
+ * the relation emits at most one row.
+ *
+ * If "null_aware" is true, the proof holds even treating NULLs as equal,
+ * so the key can justify removing a DISTINCT or GROUP BY step.  If it is
+ * false, uniqueness is only guaranteed among rows whose key expressions
+ * are all non-NULL, which still suffices for proofs based on strict join
+ * clauses, such as inner_unique detection.
+ */
+typedef struct UniqueKey
+{
+	pg_node_attr(no_copy_equal, no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/* indexes into root->eq_classes of the key's expressions */
+	Bitmapset  *eclass_indexes;
+	/* does uniqueness hold even treating NULLs as equal? */
+	bool		null_aware;
+} UniqueKey;
 
 /*
  * Contains an order of group-by clauses and the corresponding list of
