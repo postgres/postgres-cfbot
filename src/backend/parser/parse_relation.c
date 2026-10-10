@@ -254,7 +254,7 @@ scanNameSpaceForRelid(ParseState *pstate, Oid relid, int location)
 		/* If not inside LATERAL, ignore lateral-only items */
 		if (nsitem->p_lateral_only && !pstate->p_lateral_active)
 			continue;
-		/* Ignore OLD/NEW namespace items that can appear in RETURNING */
+		/* Ignore OLD/NEW/EXCLUDED namespace items in RETURNING */
 		if (nsitem->p_returning_type != VAR_RETURNING_DEFAULT)
 			continue;
 
@@ -803,7 +803,7 @@ scanNSItemForColumn(ParseState *pstate, ParseNamespaceItem *nsitem,
 	}
 	var->location = location;
 
-	/* Mark Var for RETURNING OLD/NEW, as necessary */
+	/* Mark Var for RETURNING OLD/NEW/EXCLUDED, as necessary */
 	var->varreturningtype = nsitem->p_returning_type;
 
 	/* Mark Var if it's nulled by any outer joins */
