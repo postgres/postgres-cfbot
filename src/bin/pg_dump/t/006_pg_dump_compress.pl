@@ -471,6 +471,17 @@ my %tests = (
 			\QSELECT pg_catalog.lo_close(0);\E
 			/xm,
 		like => { %full_runs, },
+	},
+
+	# An empty large object leaves an empty data file in directory format
+	'LO create (empty)' => {
+		create_order => 51,
+		create_sql => 'SELECT pg_catalog.lo_create(0);',
+		regexp => qr/^
+			\QSELECT pg_catalog.lo_open\E \('\d+',\ \d+\);\n
+			\QSELECT pg_catalog.lo_close(0);\E
+			/xm,
+		like => { %full_runs, },
 	},);
 
 #########################################
@@ -710,13 +721,22 @@ for my $method (qw(lz4 zstd))
 	  : pack('H*', '28b52ffd');
 	my $custom_path = "$tempdir/compression_${method}_custom.dump";
 	my $custom_bad_path = "$tempdir/${method}_custom_bad.dump";
-	my ($directory_path) =
+	my ($directory_path) = grep { -s $_ }
 	  glob("$tempdir/compression_${method}_dir/*.dat.$extension");
 
   SKIP:
 	{
-		skip "$method compression not supported by this build", 2
+		skip "$method compression not supported by this build", 3
 		  if !$supported;
+
+		# The empty large object is stored as an empty data file
+		$node->command_ok(
+			[
+				'pg_restore',
+				'--file' => "$tempdir/${method}_directory_good.sql",
+				"$tempdir/compression_${method}_dir"
+			],
+			"$method directory archive with empty data file restores");
 
 		copy($custom_path, $custom_bad_path)
 		  or die "could not copy $custom_path: $!";

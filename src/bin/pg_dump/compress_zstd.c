@@ -310,6 +310,12 @@ Zstd_read_internal(void *ptr, size_t size, CompressFileHandle *CFH, bool exit_on
 				pg_fatal("could not initialize compression library");
 			return -1;
 		}
+
+		/*
+		 * An empty file is a valid empty stream: the writer creates one when
+		 * nothing is written, e.g. for an empty large object.
+		 */
+		zstdcs->frame_finished = true;
 	}
 
 	output->size = size;

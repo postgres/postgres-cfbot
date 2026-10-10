@@ -401,6 +401,12 @@ LZ4Stream_init(LZ4State *state, bool compressing)
 		state->buffer = pg_malloc(state->buflen);
 		state->outbuflen = DEFAULT_IO_BUFFER_SIZE;
 		state->outbuf = pg_malloc(state->outbuflen);
+
+		/*
+		 * An empty file is a valid empty stream: the writer creates one when
+		 * nothing is written, e.g. for an empty large object.
+		 */
+		state->frame_finished = true;
 	}
 
 	state->inited = true;
