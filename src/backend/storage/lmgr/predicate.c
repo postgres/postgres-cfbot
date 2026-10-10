@@ -195,6 +195,7 @@
 
 #include "access/parallel.h"
 #include "access/slru.h"
+#include "access/tableam.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/twophase_rmgr.h"
@@ -4417,6 +4418,47 @@ CheckTableForSerializableConflictIn(Relation relation)
 	for (i = NUM_PREDICATELOCK_PARTITIONS - 1; i >= 0; i--)
 		LWLockRelease(PredicateLockHashPartitionLockByIndex(i));
 	LWLockRelease(SerializablePredicateListLock);
+}
+
+/*
+ * Refuse to let a uniqueness check conclude that a key is unused when our own
+ * snapshot says otherwise.
+ */
+void
+CheckForSerializableKeyReuse(Relation relation, const ItemPointerData *tid)
+{
+	SnapshotData snap;
+	ItemPointerData htid;
+	Snapshot	snapshot;
+
+	if (!ActiveSnapshotSet())
+		return;
+	snapshot = GetActiveSnapshot();
+
+	if (!CheckForSerializableConflictOutNeeded(relation, snapshot))
+		return;
+
+	htid = *tid;
+
+	/*
+	 * Consider all changes within the transaction and the current
+	 * command visible.
+	 */
+	snap = *snapshot;
+	snap.curcid = InvalidCommandId;
+
+	if (!table_fetch_tid(relation, &htid, &snap, NULL))
+		return;
+
+	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
+	MySerializableXact->flags |= SXACT_FLAG_DOOMED;
+	LWLockRelease(SerializableXactHashLock);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+			 errmsg("could not serialize access due to read/write dependencies among transactions"),
+			 errdetail_internal("Reason code: Canceled on reuse of a key which a concurrent transaction deleted."),
+			 errhint("The transaction might succeed if retried.")));
 }
 
 

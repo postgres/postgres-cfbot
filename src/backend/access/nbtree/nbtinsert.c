@@ -27,6 +27,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "utils/injection_point.h"
+#include "utils/snapmgr.h"
 
 /* Minimum tree height for application of fastpath optimization */
 #define BTREE_FASTPATH_MIN_LEVEL	2
@@ -674,36 +675,45 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 													RelationGetRelationName(rel))));
 					}
 				}
-				else if (all_dead && (!inposting ||
-									  (prevalldead &&
-									   curposti == BTreeTupleGetNPosting(curitup) - 1)))
+				else
 				{
 					/*
-					 * The conflicting tuple (or all HOT chains pointed to by
-					 * all posting list TIDs) is dead to everyone, so try to
-					 * mark the index entry killed. It's ok if we're not
-					 * allowed to, this isn't required for correctness.
+					 * The dirty snapshot found nothing, so the key looks
+					 * unused.  Make sure our own snapshot agrees.
 					 */
-					Buffer		buf;
+					CheckForSerializableKeyReuse(heapRel, &htid);
 
-					/* Be sure to operate on the proper buffer */
-					if (nbuf != InvalidBuffer)
-						buf = nbuf;
-					else
-						buf = insertstate->buf;
-
-					/*
-					 * Use the hint bit infrastructure to check if we can
-					 * update the page while just holding a share lock.
-					 *
-					 * Can't use BufferSetHintBits16() here as we update two
-					 * different locations.
-					 */
-					if (BufferBeginSetHintBits(buf))
+					if (all_dead && (!inposting ||
+									 (prevalldead &&
+									  curposti == BTreeTupleGetNPosting(curitup) - 1)))
 					{
-						ItemIdMarkDead(curitemid);
-						opaque->btpo_flags |= BTP_HAS_GARBAGE;
-						BufferFinishSetHintBits(buf, true, true);
+						/*
+						 * The conflicting tuple (or all HOT chains pointed to
+						 * by all posting list TIDs) is dead to everyone, so try
+						 * to mark the index entry killed. It's ok if we're not
+						 * allowed to, this isn't required for correctness.
+						 */
+						Buffer		buf;
+
+						/* Be sure to operate on the proper buffer */
+						if (nbuf != InvalidBuffer)
+							buf = nbuf;
+						else
+							buf = insertstate->buf;
+
+						/*
+						 * Use the hint bit infrastructure to check if we can
+						 * update the page while just holding a share lock.
+						 *
+						 * Can't use BufferSetHintBits16() here as we update two
+						 * different locations.
+						 */
+						if (BufferBeginSetHintBits(buf))
+						{
+							ItemIdMarkDead(curitemid);
+							opaque->btpo_flags |= BTP_HAS_GARBAGE;
+							BufferFinishSetHintBits(buf, true, true);
+						}
 					}
 				}
 

@@ -114,6 +114,7 @@
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
 #include "storage/lmgr.h"
+#include "storage/predicate.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/multirangetypes.h"
@@ -968,6 +969,43 @@ retry:
 	 * which that wouldn't be true --- for instance, if the operator is <>. So
 	 * we no longer complain if found_self is still false.
 	 */
+
+	/*
+	 * The dirty scan skipped rows it found dead, so repeat the search with the
+	 * query snapshot and let CheckForSerializableKeyReuse() judge the outcome.
+	 */
+	if (!conflict && ActiveSnapshotSet() &&
+		CheckForSerializableConflictOutNeeded(heap, GetActiveSnapshot()))
+	{
+		Datum		existing_values[INDEX_MAX_KEYS];
+		bool		existing_isnull[INDEX_MAX_KEYS];
+
+		index_scan = index_beginscan(heap, index, false,
+									 GetActiveSnapshot(), NULL, indnkeyatts, 0,
+									 SO_NONE);
+		index_rescan(index_scan, scankeys, indnkeyatts, NULL, 0);
+
+		while (table_index_getnext_slot(index_scan, ForwardScanDirection,
+										existing_slot))
+		{
+			if (ItemPointerIsValid(tupleid) &&
+				ItemPointerEquals(tupleid, &existing_slot->tts_tid))
+				continue;
+
+			FormIndexDatum(indexInfo, existing_slot, estate,
+						   existing_values, existing_isnull);
+
+			if (index_scan->xs_recheck &&
+				!index_recheck_constraint(index, constr_procs,
+										  existing_values, existing_isnull,
+										  values))
+				continue;
+
+			CheckForSerializableKeyReuse(heap, &existing_slot->tts_tid);
+		}
+
+		index_endscan(index_scan);
+	}
 
 	econtext->ecxt_scantuple = save_scantuple;
 
