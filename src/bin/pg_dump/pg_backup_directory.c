@@ -39,7 +39,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#include "common/file_utils.h"
+/* #include "common/file_utils.h" */
+#include "common/percentrepl.h"
 #include "compress_io.h"
 #include "dumputils.h"
 #include "parallel.h"
@@ -157,8 +158,11 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 
 	if (AH->mode == archModeWrite)
 	{
-		/* we accept an empty existing directory */
-		create_or_open_dir(ctx->directory);
+		if (!AH->is_pipe)		/* no checks for pipe */
+		{
+			/* we accept an empty existing directory */
+			create_or_open_dir(ctx->directory);
+		}
 	}
 	else
 	{							/* Read Mode */
@@ -167,7 +171,7 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 
 		setFilePath(AH, fname, "toc.dat");
 
-		tocFH = InitDiscoverCompressFileHandle(fname, PG_BINARY_R);
+		tocFH = InitDiscoverCompressFileHandle(fname, PG_BINARY_R, AH->is_pipe);
 		if (tocFH == NULL)
 			pg_fatal("could not open input file \"%s\": %m", fname);
 
@@ -295,7 +299,7 @@ _StartData(ArchiveHandle *AH, TocEntry *te)
 
 	setFilePath(AH, fname, tctx->filename);
 
-	ctx->dataFH = InitCompressFileHandle(AH->compression_spec);
+	ctx->dataFH = InitCompressFileHandle(AH->compression_spec, AH->is_pipe);
 
 	if (!ctx->dataFH->open_write_func(fname, PG_BINARY_W, ctx->dataFH))
 		pg_fatal("could not open output file \"%s\": %m", fname);
@@ -353,7 +357,7 @@ _PrintFileData(ArchiveHandle *AH, char *filename)
 	if (!filename)
 		return;
 
-	CFH = InitDiscoverCompressFileHandle(filename, PG_BINARY_R);
+	CFH = InitDiscoverCompressFileHandle(filename, PG_BINARY_R, AH->is_pipe);
 	if (!CFH)
 		pg_fatal("could not open input file \"%s\": %m", filename);
 
@@ -416,7 +420,7 @@ _LoadLOs(ArchiveHandle *AH, TocEntry *te)
 	else
 		setFilePath(AH, tocfname, tctx->filename);
 
-	CFH = ctx->LOsTocFH = InitDiscoverCompressFileHandle(tocfname, PG_BINARY_R);
+	CFH = ctx->LOsTocFH = InitDiscoverCompressFileHandle(tocfname, PG_BINARY_R, AH->is_pipe);
 
 	if (ctx->LOsTocFH == NULL)
 		pg_fatal("could not open large object TOC file \"%s\" for input: %m",
@@ -434,7 +438,9 @@ _LoadLOs(ArchiveHandle *AH, TocEntry *te)
 					 tocfname, line);
 
 		StartRestoreLO(AH, oid, AH->public.ropt->dropSchema);
-		snprintf(path, MAXPGPATH, "%s/%s", ctx->directory, lofname);
+
+		setFilePath(AH, path, lofname);
+
 		_PrintFileData(AH, path);
 		EndRestoreLO(AH, oid);
 	}
@@ -545,7 +551,7 @@ _CloseArchive(ArchiveHandle *AH)
 
 		/* The TOC is always created uncompressed */
 		compression_spec.algorithm = PG_COMPRESSION_NONE;
-		tocFH = InitCompressFileHandle(compression_spec);
+		tocFH = InitCompressFileHandle(compression_spec, AH->is_pipe);
 		if (!tocFH->open_write_func(fname, PG_BINARY_W, tocFH))
 			pg_fatal("could not open output file \"%s\": %m", fname);
 		ctx->dataFH = tocFH;
@@ -606,13 +612,34 @@ _StartLOs(ArchiveHandle *AH, TocEntry *te)
 	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
 	pg_compress_specification compression_spec = {0};
 	char		fname[MAXPGPATH];
+	const char *mode;
 
 	setFilePath(AH, fname, tctx->filename);
 
 	/* The LO TOC file is never compressed */
 	compression_spec.algorithm = PG_COMPRESSION_NONE;
-	ctx->LOsTocFH = InitCompressFileHandle(compression_spec);
-	if (!ctx->LOsTocFH->open_write_func(fname, "ab", ctx->LOsTocFH))
+	ctx->LOsTocFH = InitCompressFileHandle(compression_spec, AH->is_pipe);
+
+	/*
+	 * We use 'w' (PG_BINARY_W) mode for the LOs TOC file in all cases.
+	 * Historically, the mode for this file was "ab". However, append mode is
+	 * entirely redundant due to how large objects are partitioned.
+	 *
+	 * pg_dump splits large objects into chunks of up to 1000 blobs per
+	 * archive entry. Each chunk receives a completely unique dumpId, and the
+	 * TOC file is named using that ID (e.g., blobs_123.toc). Furthermore,
+	 * WriteDataChunksForTocEntry ensures a strict sequential lifecycle for
+	 * each entry: it calls _StartLOs (opens the file), then the dumper
+	 * function (writes the chunk), and finally _EndLOs (closes the file).
+	 *
+	 * Because a blobs_NNN.toc file is guaranteed to be unique and is only
+	 * opened exactly once, written to sequentially, and then closed forever,
+	 * there is no scenario where "ab" is required. This change to "w" is
+	 * necessary because popen() for pipe-commands only supports "r" and "w".
+	 */
+	mode = PG_BINARY_W;
+
+	if (!ctx->LOsTocFH->open_write_func(fname, mode, ctx->LOsTocFH))
 		pg_fatal("could not open output file \"%s\": %m", fname);
 }
 
@@ -626,10 +653,12 @@ _StartLO(ArchiveHandle *AH, TocEntry *te, Oid oid)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 	char		fname[MAXPGPATH];
+	char		blob_name[MAXPGPATH];
 
-	snprintf(fname, MAXPGPATH, "%s/blob_%u.dat", ctx->directory, oid);
+	snprintf(blob_name, MAXPGPATH, "blob_%u.dat", oid);
+	setFilePath(AH, fname, blob_name);
 
-	ctx->dataFH = InitCompressFileHandle(AH->compression_spec);
+	ctx->dataFH = InitCompressFileHandle(AH->compression_spec, AH->is_pipe);
 	if (!ctx->dataFH->open_write_func(fname, PG_BINARY_W, ctx->dataFH))
 		pg_fatal("could not open output file \"%s\": %m", fname);
 }
@@ -683,15 +712,40 @@ setFilePath(ArchiveHandle *AH, char *buf, const char *relativeFilename)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 	char	   *dname;
+	char	   *pipe;
 
 	dname = ctx->directory;
 
-	if (strlen(dname) + 1 + strlen(relativeFilename) + 1 > MAXPGPATH)
-		pg_fatal("file name too long: \"%s\"", dname);
 
-	strcpy(buf, dname);
-	strcat(buf, "/");
-	strcat(buf, relativeFilename);
+	if (AH->is_pipe)
+	{
+		/*
+		 * Unlike commands synthesized by the backend, this is a user-provided
+		 * template running client-side. We perform literal substitution
+		 * rather than using appendShellString() to avoid interfering with the
+		 * user's intentional shell quoting (e.g., for Windows vs Unix
+		 * differences). Since this is a client-side execution, there are no
+		 * privilege escalation concerns.
+		 */
+		pipe = replace_percent_placeholders(dname, "pipe", "f", relativeFilename);
+
+		if (strlen(pipe) >= MAXPGPATH)
+			pg_fatal("pipe command too long: \"%s\"", pipe);
+
+		strcpy(buf, pipe);
+
+		pfree(pipe);
+	}
+	else						/* replace all ocurrences of %f in dname with
+								 * relativeFilename */
+	{
+		if (strlen(dname) + 1 + strlen(relativeFilename) + 1 > MAXPGPATH)
+			pg_fatal("file name too long: \"%s\"", dname);
+
+		strcpy(buf, dname);
+		strcat(buf, "/");
+		strcat(buf, relativeFilename);
+	}
 }
 
 /*
@@ -743,7 +797,9 @@ _PrepParallelRestore(ArchiveHandle *AH)
 			else if (AH->compression_spec.algorithm == PG_COMPRESSION_LZ4)
 				strlcat(fname, ".lz4", sizeof(fname));
 			else if (AH->compression_spec.algorithm == PG_COMPRESSION_ZSTD)
+			{
 				strlcat(fname, ".zst", sizeof(fname));
+			}
 
 			if (stat(fname, &st) == 0)
 				te->dataLength = st.st_size;
