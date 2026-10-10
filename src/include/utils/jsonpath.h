@@ -104,6 +104,7 @@ typedef enum JsonPathItemType
 	jpiLast,					/* LAST array subscript */
 	jpiStartsWith,				/* STARTS WITH predicate */
 	jpiLikeRegex,				/* LIKE_REGEX predicate */
+	jpiTsMatch,					/* TSMATCH predicate */
 	jpiBigint,					/* .bigint() item method */
 	jpiBoolean,					/* .boolean() item method */
 	jpiDate,					/* .date() item method */
@@ -196,6 +197,15 @@ typedef struct JsonPathItem
 			int32		patternlen;
 			uint32		flags;
 		}			like_regex;
+		struct
+		{
+			int32		doc;
+			char	   *tsquery;
+			uint32		tsquery_len;
+			int32		tsconfig;
+			char	   *tsqparser;
+			uint32		tsqparser_len;
+		}			tsmatch;
 	}			content;
 } JsonPathItem;
 
@@ -274,6 +284,15 @@ struct JsonPathParseItem
 			uint32		len;
 			char	   *val;	/* could not be not null-terminated */
 		}			string;
+		struct
+		{
+			JsonPathParseItem *doc;
+			char	   *tsquery;
+			uint32		tsquery_len;
+			JsonPathParseItem *tsconfig;
+			char	   *tsqparser;
+			uint32		tsqparser_len;
+		}			tsmatch;
 	}			value;
 };
 
