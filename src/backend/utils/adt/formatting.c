@@ -3518,13 +3518,29 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 				break;
 			case DCH_Y_YYY:
 				{
-					int			matched,
-								years,
+					char	   *endp;
+					int			years,
 								millennia,
 								nch;
+					long		lval;
 
-					matched = sscanf(s, "%d,%03d%n", &millennia, &years, &nch);
-					if (matched < 2)
+					errno = 0;
+					lval = strtol(s, &endp, 10);
+					if (endp == s || *endp != ',')
+						ereturn(escontext,,
+								(errcode(ERRCODE_INVALID_DATETIME_FORMAT),
+								 errmsg("invalid value \"%s\" for \"%s\"", s, "Y,YYY")));
+					if (errno == ERANGE || lval < INT_MIN || lval > INT_MAX)
+						ereturn(escontext,,
+								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+								 errmsg("value for \"%s\" in source string is out of range",
+										"Y,YYY"),
+								 errdetail("Value must be in the range %d to %d.",
+										   INT_MIN, INT_MAX)));
+					millennia = (int) lval;
+
+					/* %03d: width limits conversion to 3 chars, fits in int */
+					if (sscanf(endp + 1, "%03d%n", &years, &nch) < 1)
 						ereturn(escontext,,
 								(errcode(ERRCODE_INVALID_DATETIME_FORMAT),
 								 errmsg("invalid value \"%s\" for \"%s\"", s, "Y,YYY")));
@@ -3539,7 +3555,7 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 					if (!from_char_set_int(&out->year, years, n, escontext))
 						return;
 					out->yysz = 4;
-					s += nch;
+					s = endp + 1 + nch;
 					SKIP_THth(s, n->suffix);
 				}
 				break;
