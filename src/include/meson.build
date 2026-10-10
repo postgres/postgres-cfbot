@@ -47,7 +47,30 @@ else
   var_cxx = 'g++'
   var_cxxflags = ''
 endif
-var_cppflags = ' '.join(cppflags)
+
+pkg_config = find_program('pkg-config', required: false)
+
+# PGXS extensions that include libpq-be.h also pull in <openssl/ssl.h>, so they
+# need OpenSSL's compiler flags on the search path.
+openssl_cppflags = []
+if ssl.found()
+  if ssl.type_name() == 'pkgconfig' and pkg_config.found()
+    openssl_cflags = run_command(pkg_config, '--cflags', 'openssl',
+                                 check: false).stdout().strip()
+    if openssl_cflags != ''
+      openssl_cppflags += openssl_cflags.split()
+    endif
+  elif ssl.type_name() == 'cmake'
+    foreach d : ssl.get_variable(cmake: 'OPENSSL_INCLUDE_DIR',
+                                 default_value: '').split(';')
+      if d.strip() != ''
+        openssl_cppflags += '-I' + d.strip()
+      endif
+    endforeach
+  endif
+endif
+
+var_cppflags = ' '.join(cppflags + openssl_cppflags)
 var_cflags_sl = ' '.join(cc.get_supported_arguments('-fPIC'))
 # explicitly add -Wl,--as-needed, normally added by meson, but we want it for
 # PGXS compatibility
