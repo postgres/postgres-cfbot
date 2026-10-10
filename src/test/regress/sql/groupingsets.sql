@@ -803,4 +803,56 @@ from (values (1, 1), (2, 2)) as t (a, b)
 group by rollup(a, ab)
 order by 1, 2;
 
+-- test that all references to a variable-free grouping expression that is
+-- nullable by grouping sets are recognized as the same grouping column
+create temp table gs_nn (id int primary key, a int not null, b int);
+insert into gs_nn values (1, 1, null), (2, 2, 2);
+
+-- "a is not null" is reduced to constant true
+explain (verbose, costs off)
+select case when a is not null then 'has a' else 'no a' end as label,
+       grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null);
+
+select case when a is not null then 'has a' else 'no a' end as label,
+       grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null) order by g;
+
+set enable_hashagg = false;
+select case when a is not null then 'has a' else 'no a' end as label,
+       grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null) order by g;
+reset enable_hashagg;
+
+select grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null)
+having (a is not null) is null;
+
+-- "(b is null) is unknown" is reduced to constant false
+select ((b is null) is unknown)::int as x,
+       grouping((b is null) is unknown) as g, count(*)
+from gs_nn group by rollup((b is null) is unknown) order by g;
+
+-- distinct grouping expressions that are reduced to equal constants
+select (a is not null)::int as xa, (id is not null)::int as xid,
+       grouping(a is not null, id is not null) as g
+from gs_nn
+group by grouping sets ((a is not null), (id is not null), ())
+order by g;
+
+-- constant grouping expression, referenced in ORDER BY and in a subquery
+select (1 + 1) * 10 as x, grouping(1 + 1) as g,
+       (select count(*) from gs_nn where a * 10 < (1 + 1) * 10) as c
+from gs_nn group by cube(1 + 1)
+order by (1 + 1) * 10 nulls first;
+
+-- grouping expression containing a LATERAL reference
+select t1.a, ss.x, ss.count
+from gs_nn t1,
+     lateral (select (t1.a + 1) * 10 as x, count(*)
+              from gs_nn t2 group by rollup(t1.a + 1)) ss
+order by t1.a, ss.x;
+
+drop table gs_nn;
+
 -- end
