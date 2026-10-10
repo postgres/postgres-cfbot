@@ -728,6 +728,12 @@ SELECT timetz '11:27:42' + interval '-infinity';
 SELECT timetz '11:27:42' - interval 'infinity';
 SELECT timetz '11:27:42' - interval '-infinity';
 
+-- time +/- interval must not overflow, however large the interval
+SELECT time '23:59:59.999999' + interval '9223372036854775807 microseconds';
+SELECT time '23:59:59.999999' - interval '-9223372036854775808 microseconds';
+SELECT timetz '23:59:59.999999+01' + interval '9223372036854775807 microseconds';
+SELECT timetz '23:59:59.999999+01' - interval '-9223372036854775808 microseconds';
+
 SELECT lhst.i lhs,
     rhst.i rhs,
     lhst.i < rhst.i AS lt,
