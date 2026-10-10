@@ -62,6 +62,12 @@ SELECT * FROM heap_tuple_infomask_flags(0, 0);
 -- no combined flags
 SELECT * FROM heap_tuple_infomask_flags(x'0010'::int, 0);
 
+-- A corrupt page header must be rejected, rather than being used to walk off
+-- the end of the page.  pd_lower is at offset 12.
+\set VERBOSITY terse
+SELECT heap_page_items(set_byte(set_byte(get_raw_page('test1', 0), 12, 255), 13, 255));
+\set VERBOSITY default
+
 DROP TABLE test1;
 
 -- check that using any of these functions with a partitioned table or index
