@@ -73,6 +73,44 @@ in the tuple itself.  We do this by storing the locker's Xid in XMAX, and
 setting infomask bits specifying the locking strength.  See "Infomask Bits"
 below for details on the bit patterns we use.
 
+Carrying locks across UPDATE
+----------------------------
+
+When UPDATE creates a new tuple version, it normally carries pre-existing
+lockers from the old tuple to the new tuple.  That is necessary when another
+transaction has locked the old tuple, since the lock must continue to protect
+the updated version.  This is essential for referential-integrity checks that
+use FOR KEY SHARE locks.
+
+There is a narrow exception when the old tuple's XMAX is a single XID that is
+LOCK_ONLY, and that XID is the same XID that is now updating the tuple.  In
+that case, there is no independent locker to carry forward.
+
+For a single-XID XMAX carried to the new tuple, heap_update() does not preserve
+the old tuple lock's original strength.  The carried state is encoded as
+HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_LOCK_ONLY, with no HEAP_KEYS_UPDATED bit.
+That representation is enough for the case that needs carrying: a different
+transaction's FOR KEY SHARE lock, such as one taken by a referential-integrity
+check.  It is not a mechanism for preserving a self-held FOR UPDATE or FOR NO
+KEY UPDATE lock on the new tuple version.
+
+The same-XID case is redundant for a simpler reason.  The new tuple's XMIN is
+the updating XID, so other transactions cannot treat the new version as a
+visible committed tuple while the update is in progress.  Once the updating
+transaction ends, any self-owned tuple lock ends with it.  A self-owned
+KEYSHR_LOCK | LOCK_ONLY marker carried to the new tuple therefore has no
+remaining concurrency or referential-integrity role.
+
+The old tuple still records the update in its XMAX.  If the old locker and the
+updater are the same XID, compute_new_xmax_infomask() can fold those states
+while preparing the old tuple's XMAX, but the safety of dropping the carried
+new-tuple XMAX does not depend on comparing the old lock strength with the
+UPDATE lock strength.
+
+This exception does not apply when the old locker is another transaction, a
+different subtransaction of the current transaction, or a MultiXact.  Those
+cases still need to preserve the lock information on the new tuple.
+
 MultiXacts
 ----------
 
