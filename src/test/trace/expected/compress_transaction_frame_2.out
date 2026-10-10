@@ -1,0 +1,3 @@
+ERROR:  invalid value for parameter "protocol_backend_compression_allowed_algorithms": "zstd,lz4"
+DETAIL:  zstd compression is not supported by this build
+*** skipping compress transaction frame tests with zstd (not supported) ***

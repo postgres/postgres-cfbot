@@ -1,0 +1,9 @@
+-- Allow all available compression algorithms
+SET protocol_backend_compression_allowed_algorithms = 'zstd,lz4';
+ERROR:  invalid value for parameter "protocol_backend_compression_allowed_algorithms": "zstd,lz4"
+DETAIL:  zstd compression is not supported by this build
+SELECT current_setting('protocol_backend_compression_allowed_algorithms')!='zstd,lz4' AS skip_test \gset
+\if :skip_test
+   \echo '*** skipping protocol compression tests with lz4 and zstd (not supported) ***'
+*** skipping protocol compression tests with lz4 and zstd (not supported) ***
+   \quit

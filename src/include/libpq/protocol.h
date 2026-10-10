@@ -61,8 +61,9 @@
 
 /* These are the codes sent by both the frontend and backend. */
 
-#define PqMsg_CopyDone				'c'
-#define PqMsg_CopyData				'd'
+#define PqMsg_CopyDone						'c'
+#define PqMsg_CopyData						'd'
+#define PqMsg_CompressedMessages	'z'
 
 
 /* Additional codes sent by parallel workers to leader processes. */

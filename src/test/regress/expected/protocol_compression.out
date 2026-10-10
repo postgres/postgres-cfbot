@@ -1,0 +1,325 @@
+-- Allow all available compression algorithms
+SET protocol_backend_compression_allowed_algorithms = 'zstd,lz4';
+SELECT current_setting('protocol_backend_compression_allowed_algorithms')!='zstd,lz4' AS skip_test \gset
+\if :skip_test
+   \echo '*** skipping protocol compression tests with lz4 and zstd (not supported) ***'
+   \quit
+\endif
+SHOW protocol_backend_compression_allowed_algorithms;
+ protocol_backend_compression_allowed_algorithms 
+-------------------------------------------------
+ zstd,lz4
+(1 row)
+
+-- Directory paths are passed to us in environment variables
+\getenv abs_srcdir PG_ABS_SRCDIR
+\getenv abs_builddir PG_ABS_BUILDDIR
+-----------
+-- Test protocol_backend_compression GUC
+-----------
+-- Force threshold to 0 to compress every message
+SET protocol_backend_compression_threshold=0;
+-- Disable compression without active compression
+SET protocol_backend_compression = 'none';
+-- Test lz4 -> none -> lz4
+SET protocol_backend_compression = 'lz4';
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'lz4';
+-- Test lz4 -> none -> lz4 + using compressor
+SET protocol_backend_compression = 'lz4';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'lz4';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test zstd -> none -> zstd
+SET protocol_backend_compression = 'zstd';
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'zstd';
+-- Test zstd -> none -> zstd + using compressor
+SET protocol_backend_compression = 'zstd';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test none -> zstd -> none
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'zstd';
+SET protocol_backend_compression = 'none';
+-- Test none -> zstd -> none + using compressor
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test none -> lz4 -> none
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'lz4';
+SET protocol_backend_compression = 'none';
+-- Test none -> lz4 -> none + using compressor
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'lz4';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Disabling compression
+SET protocol_backend_compression = 'none';
+-- Test unsupported algorithm
+SET protocol_backend_compression = 'gzip';
+ERROR:  gzip compression is not permitted by "protocol_backend_compression_allowed_algorithms"
+-- Test unrecognized algorithm
+SET protocol_backend_compression = 'bogus';
+ERROR:  invalid value for parameter "protocol_backend_compression": "bogus"
+-- Test none -> unsupported -> bogus
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'gzip';
+ERROR:  gzip compression is not permitted by "protocol_backend_compression_allowed_algorithms"
+SET protocol_backend_compression = 'bogus';
+ERROR:  invalid value for parameter "protocol_backend_compression": "bogus"
+-- Test supported specifications
+SET protocol_backend_compression = 'zstd';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd:5';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd:-10';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd:level=-10';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd:level=-10,workers=0';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd:level=-10,workers=0,long=1';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'lz4';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'lz4:5';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'none';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'none:0';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test incorrect specifications
+SET protocol_backend_compression = 'zstd:999';
+ERROR:  invalid compression specification: compression algorithm "zstd" expects a compression level between -131072 and 22 (default at 3)
+SET protocol_backend_compression = 'lz4:999';
+ERROR:  invalid compression specification: compression algorithm "lz4" expects a compression level between 1 and 12 (default at 0)
+SET protocol_backend_compression = 'zstd:lvel=1';
+ERROR:  invalid compression specification: unrecognized compression option: "lvel"
+SET protocol_backend_compression = 'zstd:workers=4';
+ERROR:  protocol compression does not support compression workers
+SET protocol_backend_compression = 'zstd:long=3';
+ERROR:  invalid compression specification: value for compression option "long" must be a Boolean value
+SET protocol_backend_compression = 'lz4:long=1';
+ERROR:  invalid compression specification: compression algorithm "lz4" does not support long-distance mode
+SET protocol_backend_compression = 'lz4:workers=1';
+ERROR:  invalid compression specification: compression algorithm "lz4" does not accept a worker count
+SET protocol_backend_compression = 'none:long=1';
+ERROR:  invalid compression specification: compression algorithm "none" does not support long-distance mode
+SET protocol_backend_compression = 'none:workers=1';
+ERROR:  invalid compression specification: compression algorithm "none" does not accept a worker count
+SET protocol_backend_compression = 'none:2';
+ERROR:  invalid compression specification: compression algorithm "none" does not accept a compression level
+-- Test compressor context teardown/setup
+SET protocol_backend_compression = 'zstd';
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'lz4';
+SET protocol_backend_compression = 'none';
+SET protocol_backend_compression = 'zstd';
+SET protocol_backend_compression = 'lz4';
+-- Test enabling/disabling long distance
+SET protocol_backend_compression = 'zstd:level=19,long=1';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'zstd:level=19,long=0';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test changing lz4 compression level
+SET protocol_backend_compression = 'lz4:level=12';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SET protocol_backend_compression = 'lz4:level=2';
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-----------
+-- Test protocol_backend_compression_allowed_algorithms GUC
+-----------
+-- With only lz4 allowed, switching to zstd should fail
+SET protocol_backend_compression_allowed_algorithms = 'lz4';
+SHOW protocol_backend_compression_allowed_algorithms;
+ protocol_backend_compression_allowed_algorithms 
+-------------------------------------------------
+ lz4
+(1 row)
+
+SET protocol_backend_compression = 'zstd';
+ERROR:  zstd compression is not permitted by "protocol_backend_compression_allowed_algorithms"
+-- Unsupported and unrecognized algorithms are rejected, without changing
+-- the previous valid setting.
+SET protocol_backend_compression_allowed_algorithms = 'gzip';
+ERROR:  invalid value for parameter "protocol_backend_compression_allowed_algorithms": "gzip"
+DETAIL:  gzip compression is not supported
+SET protocol_backend_compression_allowed_algorithms = 'bogus';
+ERROR:  invalid value for parameter "protocol_backend_compression_allowed_algorithms": "bogus"
+DETAIL:  Invalid compression algorithm "bogus".
+SHOW protocol_backend_compression_allowed_algorithms;
+ protocol_backend_compression_allowed_algorithms 
+-------------------------------------------------
+ lz4
+(1 row)
+
+-- Disabling compression is always allowed
+SET protocol_backend_compression_allowed_algorithms = 'none';
+SET protocol_backend_compression_allowed_algorithms = '';
+SHOW protocol_backend_compression_allowed_algorithms;
+ protocol_backend_compression_allowed_algorithms 
+-------------------------------------------------
+ 
+(1 row)
+
+SET protocol_backend_compression = 'none';
+-- With every algorithm forbidden, enabling compression should fail
+SET protocol_backend_compression = 'zstd';
+ERROR:  zstd compression is not permitted by "protocol_backend_compression_allowed_algorithms"
+SET protocol_backend_compression = 'lz4';
+ERROR:  lz4 compression is not permitted by "protocol_backend_compression_allowed_algorithms"
+-----------
+-- Test large object with compression
+-----------
+SET protocol_backend_compression_allowed_algorithms = 'zstd,lz4';
+SET protocol_backend_compression_threshold=0;
+SET protocol_backend_compression='zstd';
+\set filename :abs_srcdir '/data/tenk.data'
+\lo_import :filename
+\set newloid :LASTOID
+-- just make sure \lo_export does not barf
+\set filename :abs_builddir '/results/lotest_compression.txt'
+\lo_export :newloid :filename
+\lo_unlink :newloid

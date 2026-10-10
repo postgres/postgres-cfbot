@@ -40,6 +40,7 @@
 
 /* include stuff common to fe and be */
 #include "libpq/pqcomm.h"
+#include "common/compression.h"
 /* include stuff found in fe only */
 #include "fe-auth-sasl.h"
 #include "pqexpbuffer.h"
@@ -366,6 +367,21 @@ typedef struct pg_conn_host
 								 * found in password file. */
 } pg_conn_host;
 
+typedef struct msg_buffer
+{
+	char	   *buffer;			/* currently allocated buffer */
+	int			bufSize;		/* allocated size of buffer */
+	int			start;			/* offset to first unconsumed data in buffer */
+	int			cursor;			/* next byte to tentatively consume */
+	int			end;			/* offset to first position after avail data */
+}			msg_buffer;
+
+typedef struct pqDecompressor
+{
+	int			(*decompress_payload) (PGconn *conn);
+	void		(*free_context) (PGconn *conn);
+}			pqDecompressor;
+
 /*
  * PGconn stores all the state data associated with a single connection
  * to a backend.
@@ -432,6 +448,8 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char	   *supported_compressions; /* supported compressions to send to
+										 * the server */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal
@@ -448,6 +466,10 @@ struct pg_conn
 	char	   *oauth_token;	/* access token */
 	char	   *oauth_ca_file;	/* CA file path */
 	bool		oauth_want_retry;	/* should we retry on failure? */
+
+	FILE	   *trace_file;
+	char	   *trace_file_str;
+	char	   *trace_flags_str;
 
 	/* Optional file to write trace info to */
 	FILE	   *Pfdebug;
@@ -574,11 +596,20 @@ struct pg_conn
 	 * pqCheck{In,Out}BufferSpace(), but also a careful audit of all libpq
 	 * code that uses ints during size calculations.
 	 */
-	char	   *inBuffer;		/* currently allocated buffer */
-	int			inBufSize;		/* allocated size of buffer */
-	int			inStart;		/* offset to first unconsumed data in buffer */
-	int			inCursor;		/* next byte to tentatively consume */
-	int			inEnd;			/* offset to first position after avail data */
+	msg_buffer	inBuffer;
+	int			compress_cursor;	/* Location of currently processed
+									 * compressed bytes, relative to
+									 * inBuffer's start */
+	int			compress_end;	/* Location of end of CompressedMessages,
+								 * relative to inBuffer's start */
+
+	msg_buffer	decompressBuffer;	/* Buffer for the decompressed messages */
+
+	pg_compress_algorithm compress_algorithm;	/* Compression used */
+	pqDecompressor decompressor;
+	int			decompress_chunk_size;
+	void	   *compress_state; /* private state for compression */
+
 
 	/* Buffer for data not yet sent to backend */
 	char	   *outBuffer;		/* currently allocated buffer */
@@ -771,10 +802,10 @@ extern PGresult *PQnfn(PGconn *conn, int fnid, int *result_buf, int buf_size,
 extern char *pqBuildStartupPacket3(PGconn *conn, int *packetlen,
 								   const PQEnvironmentOption *options);
 extern void pqParseInput3(PGconn *conn);
-extern int	pqGetErrorNotice3(PGconn *conn, bool isError);
+extern int	pqGetErrorNotice3(PGconn *conn, bool isError, msg_buffer * msgBuf);
 extern void pqBuildErrorMessage3(PQExpBuffer msg, const PGresult *res,
 								 PGVerbosity verbosity, PGContextVisibility show_context);
-extern int	pqGetNegotiateProtocolVersion3(PGconn *conn);
+extern int	pqGetNegotiateProtocolVersion3(PGconn *conn, msg_buffer * msgBuf);
 extern int	pqGetCopyData3(PGconn *conn, char **buffer, int async);
 extern int	pqGetline3(PGconn *conn, char *s, int maxlen);
 extern int	pqGetlineAsync3(PGconn *conn, char *buffer, int bufsize);
@@ -789,6 +820,19 @@ extern PGresult *pqFunctionCall3(PGconn *conn, Oid fnid,
 
 extern int	PQsendCancelRequest(PGconn *cancelConn);
 
+/* === in fe-compress.c === */
+
+extern int	pqReadCompressedMessage(PGconn *conn, int msgLength);
+extern int	pqDecompressPayload(PGconn *conn);
+
+/* === in fe-compress-zstd.c === */
+
+extern int	pqInitDecompressorZstd(PGconn *conn);
+
+/* === in fe-compress-lz4.c === */
+
+extern int	pqInitDecompressorLz4(PGconn *conn);
+
 /* === in fe-misc.c === */
 
  /*
@@ -797,17 +841,17 @@ extern int	PQsendCancelRequest(PGconn *cancelConn);
   * necessarily any error.
   */
 extern int	pqCheckOutBufferSpace(size_t bytes_needed, PGconn *conn);
-extern int	pqCheckInBufferSpace(size_t bytes_needed, PGconn *conn);
-extern void pqParseDone(PGconn *conn, int newInStart);
-extern int	pqGetc(char *result, PGconn *conn);
+extern int	pqCheckMsgBufferSpace(size_t bytes_needed, msg_buffer * msgBuffer, PGconn *conn);
+extern void pqParseDone(PGconn *conn, msg_buffer * msgBuf, int newInStart);
+extern int	pqGetc(char *result, PGconn *conn, msg_buffer * msgBuf);
 extern int	pqPutc(char c, PGconn *conn);
-extern int	pqGets(PQExpBuffer buf, PGconn *conn);
-extern int	pqGets_append(PQExpBuffer buf, PGconn *conn);
+extern int	pqGets(PQExpBuffer buf, PGconn *conn, msg_buffer * inBuf);
+extern int	pqGets_append(PQExpBuffer buf, PGconn *conn, msg_buffer * inBuf);
 extern int	pqPuts(const char *s, PGconn *conn);
-extern int	pqGetnchar(void *s, size_t len, PGconn *conn);
-extern int	pqSkipnchar(size_t len, PGconn *conn);
+extern int	pqGetnchar(void *s, size_t len, PGconn *conn, msg_buffer * msgBuf);
+extern int	pqSkipnchar(size_t len, PGconn *conn, msg_buffer * msgBuf);
 extern int	pqPutnchar(const void *s, size_t len, PGconn *conn);
-extern int	pqGetInt(int *result, size_t bytes, PGconn *conn);
+extern int	pqGetInt(int *result, size_t bytes, PGconn *conn, msg_buffer * msgBuf);
 extern int	pqPutInt(int value, size_t bytes, PGconn *conn);
 extern int	pqPutMsgStart(char msg_type, PGconn *conn);
 extern int	pqPutMsgEnd(PGconn *conn);
@@ -917,7 +961,7 @@ extern ssize_t pg_GSS_bytes_pending(PGconn *conn);
 /* === in fe-trace.c === */
 
 extern void pqTraceOutputMessage(PGconn *conn, const char *message,
-								 bool toServer);
+								 bool toServer, bool compressed);
 extern void pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message);
 extern void pqTraceOutputCharResponse(PGconn *conn, const char *responseType,
 									  char response);
