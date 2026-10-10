@@ -432,6 +432,25 @@ main(int argc, char *argv[])
 	}
 
 	/*
+	 * A backup_label file means this is a base backup that needs WAL replay
+	 * to become consistent.  Resetting WAL cannot fix that, so refuse even
+	 * with -f.
+	 */
+	if ((fd = open(BACKUP_LABEL_FILE, O_RDONLY, 0)) < 0)
+	{
+		if (errno != ENOENT)
+			pg_fatal("could not open file \"%s\" for reading: %m",
+					 BACKUP_LABEL_FILE);
+	}
+	else
+	{
+		pg_log_error("backup label file \"%s\" exists", BACKUP_LABEL_FILE);
+		pg_log_error_hint("If you are restoring from a backup, configure recovery instead.  "
+						  "If you are not restoring from a backup, delete the backup label file and try again.");
+		exit(1);
+	}
+
+	/*
 	 * Attempt to read the existing pg_control file
 	 */
 	if (!read_controlfile())
