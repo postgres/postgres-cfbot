@@ -523,6 +523,9 @@ gistvacuum_delete_empty_pages(IndexVacuumInfo *info, GistVacState *vstate)
 		int			ntodelete;
 		int			deleted;
 
+		/* call vacuum_delay_point while not holding any buffer lock */
+		vacuum_delay_point(false);
+
 		buffer = ReadBufferExtended(rel, MAIN_FORKNUM, (BlockNumber) blkno,
 									RBM_NORMAL, info->strategy);
 
