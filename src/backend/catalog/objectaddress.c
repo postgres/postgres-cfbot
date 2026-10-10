@@ -4381,15 +4381,17 @@ pg_identify_object(PG_FUNCTION_ARGS)
 	objidentity = getObjectIdentity(&address, true);
 
 	/* schema name */
+	nulls[1] = true;
 	if (OidIsValid(schema_oid) && objidentity)
 	{
-		const char *schema = quote_identifier(get_namespace_name(schema_oid));
+		char	   *nspname = get_namespace_name(schema_oid);
 
-		values[1] = CStringGetTextDatum(schema);
-		nulls[1] = false;
+		if (nspname != NULL)
+		{
+			values[1] = CStringGetTextDatum(quote_identifier(nspname));
+			nulls[1] = false;
+		}
 	}
-	else
-		nulls[1] = true;
 
 	/* object name */
 	if (objname && objidentity)
@@ -6250,11 +6252,15 @@ strlist_to_textarray(List *list)
 
 		if (name)
 		{
+			datums[j] = CStringGetTextDatum(name);
 			nulls[j] = false;
-			datums[j++] = CStringGetTextDatum(name);
 		}
 		else
+		{
+			datums[j] = (Datum) 0;
 			nulls[j] = true;
+		}
+		j++;
 	}
 
 	MemoryContextSwitchTo(oldcxt);
