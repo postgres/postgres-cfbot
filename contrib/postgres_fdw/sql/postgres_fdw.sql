@@ -244,6 +244,41 @@ SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
 ANALYZE ft1;
 ALTER FOREIGN TABLE ft2 OPTIONS (use_remote_estimate 'true');
 
+-- We do some work locally on each fetched row.  We check the local quals and
+-- evaluate the target list.  This work is the same whether we sort remotely
+-- or locally.  So it should not keep us from pushing down the sort or LIMIT.
+CREATE FUNCTION local_filter(int) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE COST 10000 AS $$
+BEGIN
+  RETURN $1 > 0;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+-- Each of these is cheap enough that it's not postponed until after the sort.
+CREATE FUNCTION local_project(int) RETURNS int
+LANGUAGE plpgsql IMMUTABLE COST 9 AS $$
+BEGIN
+  RETURN $1;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c1), local_project(c1 + 1), local_project(c1 + 2),
+  local_project(c1 + 3)
+FROM ft1 ORDER BY c1 LIMIT 10;
+-- The same is true for target list expressions that we evaluate on top of a
+-- pushed down aggregate.  Without a LIMIT the planner does not postpone even
+-- expensive ones until after the sort.
+ALTER FUNCTION local_project(int) COST 10000;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c2), count(*) FROM ft1 GROUP BY c2 ORDER BY c2;
+-- The same is true for HAVING quals that we check locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c2, count(*) FROM ft1 GROUP BY c2 HAVING local_filter(count(*)::int)
+ORDER BY c2;
+DROP FUNCTION local_filter(int);
+DROP FUNCTION local_project(int);
+
 -- ===================================================================
 -- test subscription
 -- ===================================================================
@@ -646,7 +681,9 @@ RESET enable_memoize;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
 SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
--- full outer join + WHERE clause, only matched rows
+-- full outer join + WHERE clause, only matched rows.  The ORDER BY and LIMIT
+-- are pushed down too: without remote estimates, a remote sort should be
+-- preferred over a local one.
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
@@ -1269,6 +1306,8 @@ alter extension postgres_fdw add aggregate least_agg(variadic items anyarray);
 alter server loopback options (set extensions 'postgres_fdw');
 
 -- Now aggregate will be pushed.  Aggregate will display VARIADIC argument.
+-- The ORDER BY is pushed down along with it: without remote estimates, a
+-- remote sort should be preferred over a local one.
 explain (verbose, costs off)
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
