@@ -65,6 +65,22 @@ CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING BRIN(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 
+-- Check TOAST handling when an opclass's STORAGE type differs from its
+-- input type.  The build must use the input type to identify varlena values.
+CREATE OPERATOR CLASS cic_reset_snap.int4_bloom_storage_ops FOR TYPE int4
+    USING brin AS
+    OPERATOR 1 =(int4, int4),
+    FUNCTION 1 brin_bloom_opcinfo(internal),
+    FUNCTION 2 brin_bloom_add_value(internal, internal, internal, internal),
+    FUNCTION 3 brin_bloom_consistent(internal, internal, internal, int4),
+    FUNCTION 4 brin_bloom_union(internal, internal, internal),
+    FUNCTION 5 brin_bloom_options(internal),
+    FUNCTION 11 hashint4(int4),
+    STORAGE pg_brin_bloom_summary;
+CREATE INDEX CONCURRENTLY idx
+    ON cic_reset_snap.tbl USING BRIN(i cic_reset_snap.int4_bloom_storage_ops);
+DROP INDEX CONCURRENTLY cic_reset_snap.idx;
+
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING HASH(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;

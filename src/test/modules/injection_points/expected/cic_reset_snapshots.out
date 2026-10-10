@@ -111,7 +111,25 @@ NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_xid_assig
 NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_xid_assigned
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING BRIN(i);
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
+DROP INDEX CONCURRENTLY cic_reset_snap.idx;
+-- Check TOAST handling when an opclass's STORAGE type differs from its
+-- input type.  The build must use the input type to identify varlena values.
+CREATE OPERATOR CLASS cic_reset_snap.int4_bloom_storage_ops FOR TYPE int4
+    USING brin AS
+    OPERATOR 1 =(int4, int4),
+    FUNCTION 1 brin_bloom_opcinfo(internal),
+    FUNCTION 2 brin_bloom_add_value(internal, internal, internal, internal),
+    FUNCTION 3 brin_bloom_consistent(internal, internal, internal, int4),
+    FUNCTION 4 brin_bloom_union(internal, internal, internal),
+    FUNCTION 5 brin_bloom_options(internal),
+    FUNCTION 11 hashint4(int4),
+    STORAGE pg_brin_bloom_summary;
+CREATE INDEX CONCURRENTLY idx
+    ON cic_reset_snap.tbl USING BRIN(i cic_reset_snap.int4_bloom_storage_ops);
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING HASH(i);
 NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
@@ -202,10 +220,11 @@ SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
 (1 row)
 
 DROP SCHEMA cic_reset_snap CASCADE;
-NOTICE:  drop cascades to 3 other objects
+NOTICE:  drop cascades to 4 other objects
 DETAIL:  drop cascades to table cic_reset_snap.tbl
 drop cascades to function cic_reset_snap.predicate_stable(integer)
 drop cascades to function cic_reset_snap.predicate_stable_no_param()
+drop cascades to operator family cic_reset_snap.int4_bloom_storage_ops for access method brin
 SELECT injection_points_detach('heap_beginscan_reset_snapshot');
  injection_points_detach 
 -------------------------

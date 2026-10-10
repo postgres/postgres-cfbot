@@ -19,6 +19,7 @@
 #include "access/brin_page.h"
 #include "access/brin_pageops.h"
 #include "access/brin_xlog.h"
+#include "access/detoast.h"
 #include "access/relation.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
@@ -30,6 +31,7 @@
 #include "commands/vacuum.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "storage/bufmgr.h"
@@ -39,6 +41,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/fmgrprotos.h"
 #include "utils/guc.h"
 #include "utils/index_selfuncs.h"
@@ -169,6 +172,9 @@ typedef struct BrinBuildState
 	BrinDesc   *bs_bdesc;
 	BrinMemTuple *bs_dtuple;
 
+	/* does each indexed column or expression return a varlena? */
+	bool	   *bs_attvarlena;
+
 	BrinTuple  *bs_emptyTuple;
 	Size		bs_emptyTupleLen;
 	MemoryContext bs_context;
@@ -274,8 +280,7 @@ brinhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = true,
-		/* not yet: a range summary keeps values across many heap pages */
-		.amcanresetsnapshot = false,
+		.amcanresetsnapshot = true,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = true,
@@ -992,6 +997,82 @@ brinendscan(IndexScanDesc scan)
 }
 
 /*
+ * Identify varlena inputs to the BRIN opclass.
+ *
+ * Use the heap column or index expression type.  The index descriptor may
+ * show the opclass's STORAGE type instead of its input type.
+ */
+static bool *
+brin_build_attvarlena(Relation heap, IndexInfo *indexInfo)
+{
+	int			natts = indexInfo->ii_NumIndexAttrs;
+	bool	   *attvarlena = palloc_array(bool, natts);
+	ListCell   *expr = list_head(indexInfo->ii_Expressions);
+
+	for (int i = 0; i < natts; i++)
+	{
+		AttrNumber	attnum = indexInfo->ii_IndexAttrNumbers[i];
+
+		if (attnum != 0)
+			attvarlena[i] =
+				(TupleDescAttr(RelationGetDescr(heap), attnum - 1)->attlen == -1);
+		else
+		{
+			attvarlena[i] = (get_typlen(exprType((Node *) lfirst(expr))) == -1);
+			expr = lnext(indexInfo->ii_Expressions, expr);
+		}
+	}
+
+	return attvarlena;
+}
+
+/*
+ * Add one heap tuple to the range summary.
+ *
+ * Fetch external values before the opclass copies them.  Retaining a TOAST
+ * pointer until brin_form_tuple() is too late: after a snapshot reset, vacuum
+ * may remove the referenced data while the range is still being summarized.
+ */
+static void
+brin_add_values(BrinBuildState *state, Relation index, Datum *values,
+				bool *isnull)
+{
+	int			natts = state->bs_bdesc->bd_tupdesc->natts;
+	Datum		fetched[INDEX_MAX_KEYS];
+	int			fetchedatts[INDEX_MAX_KEYS];
+	int			nfetched = 0;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < natts; i++)
+	{
+		if (isnull[i] || !state->bs_attvarlena[i] ||
+			!VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
+			continue;
+
+		if (nfetched == 0)
+		{
+			memcpy(fetched, values, natts * sizeof(Datum));
+			values = fetched;
+		}
+
+		values[i] = PointerGetDatum(detoast_external_attr(DatumGetPointer(values[i])));
+		fetchedatts[nfetched++] = i;
+	}
+
+	/*
+	 * Allocate retained values in the context that brin_memtuple_initialize()
+	 * resets for each range.
+	 */
+	oldcxt = MemoryContextSwitchTo(state->bs_dtuple->bt_context);
+	(void) add_values_to_range(index, state->bs_bdesc, state->bs_dtuple,
+							   values, isnull);
+	MemoryContextSwitchTo(oldcxt);
+
+	for (int i = 0; i < nfetched; i++)
+		pfree(DatumGetPointer(values[fetchedatts[i]]));
+}
+
+/*
  * Per-heap-tuple callback for table_index_build_scan.
  *
  * Note we don't worry about the page range at the end of the table here; it is
@@ -1036,8 +1117,7 @@ brinbuildCallback(Relation index,
 	}
 
 	/* Accumulate the current tuple into the running state */
-	(void) add_values_to_range(index, state->bs_bdesc, state->bs_dtuple,
-							   values, isnull);
+	brin_add_values(state, index, values, isnull);
 }
 
 /*
@@ -1101,8 +1181,7 @@ brinbuildCallbackParallel(Relation index,
 	}
 
 	/* Accumulate the current tuple into the running state */
-	(void) add_values_to_range(index, state->bs_bdesc, state->bs_dtuple,
-							   values, isnull);
+	brin_add_values(state, index, values, isnull);
 }
 
 /*
@@ -1166,6 +1245,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	revmap = brinRevmapInitialize(index, &pagesPerRange);
 	state = initialize_brin_buildstate(index, revmap, pagesPerRange,
 									   RelationGetNumberOfBlocks(heap));
+	state->bs_attvarlena = brin_build_attvarlena(heap, indexInfo);
 
 	/*
 	 * Attempt to launch parallel worker scan when required
@@ -1696,6 +1776,7 @@ initialize_brin_buildstate(Relation idxRel, BrinRevmap *revmap,
 
 	/* Remember the memory context to use for an empty tuple, if needed. */
 	state->bs_context = CurrentMemoryContext;
+	state->bs_attvarlena = NULL;
 	state->bs_emptyTuple = NULL;
 	state->bs_emptyTupleLen = 0;
 
@@ -1952,6 +2033,7 @@ brinsummarize(Relation index, Relation heapRel, BlockNumber pageRange,
 												   pagesPerRange,
 												   InvalidBlockNumber);
 				indexInfo = BuildIndexInfo(index);
+				state->bs_attvarlena = brin_build_attvarlena(heapRel, indexInfo);
 			}
 			summarize_range(indexInfo, state, heapRel, startBlk, heapNumBlocks);
 
@@ -2844,6 +2926,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 	/* Join parallel scan */
 	indexInfo = BuildIndexInfo(index);
 	indexInfo->ii_Concurrent = brinshared->isconcurrent;
+	state->bs_attvarlena = brin_build_attvarlena(heap, indexInfo);
 
 	scan = table_beginscan_parallel(heap,
 									ParallelTableScanFromBrinShared(brinshared),
