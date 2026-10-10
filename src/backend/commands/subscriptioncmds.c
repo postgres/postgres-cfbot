@@ -2425,7 +2425,7 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 					if (XLogRecPtrIsValid(remote_lsn) && opts.lsn < remote_lsn)
 						ereport(ERROR,
 								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-								 errmsg("skip WAL location (LSN %X/%08X) must be greater than origin LSN %X/%08X",
+								 errmsg("skip WAL location (LSN %X/%08X) must be greater than or equal to origin LSN %X/%08X",
 										LSN_FORMAT_ARGS(opts.lsn),
 										LSN_FORMAT_ARGS(remote_lsn))));
 				}

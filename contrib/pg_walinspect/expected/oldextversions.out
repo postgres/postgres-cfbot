@@ -43,9 +43,9 @@ SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_stats_till_end_of_wal(:'wal_lsn1');
 
 -- Failures with start LSNs.
 SELECT * FROM pg_get_wal_records_info_till_end_of_wal('FFFFFFFF/FFFFFFFF');
-ERROR:  WAL start LSN must be less than current LSN
+ERROR:  WAL start LSN must be less than or equal to current LSN
 SELECT * FROM pg_get_wal_stats_till_end_of_wal('FFFFFFFF/FFFFFFFF');
-ERROR:  WAL start LSN must be less than current LSN
+ERROR:  WAL start LSN must be less than or equal to current LSN
 -- Move to new version 1.1.
 ALTER EXTENSION pg_walinspect UPDATE TO '1.1';
 -- List what version 1.1 contains.
