@@ -13,6 +13,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/hot_indexed.h"
 #include "access/relation.h"
 #include "access/visibilitymap.h"
 #include "access/xloginsert.h"
@@ -225,6 +226,21 @@ heap_force_common(FunctionCallInfo fcinfo, HeapTupleForceOption heap_force_opt)
 			{
 				ereport(NOTICE,
 						(errmsg("skipping tid (%u, %u) for relation \"%s\" because it is marked unused",
+								blkno, offno, RelationGetRelationName(rel))));
+				continue;
+			}
+			else if (HotIndexedHeaderIsStub((HeapTupleHeader) PageGetItem(page, itemid)))
+			{
+				/*
+				 * A HOT-indexed collapse-survivor stub is an xid-free
+				 * forwarding node, not a real tuple: its t_ctid carries the
+				 * chain forward link and the write-time natts, and it has no
+				 * attribute data.  Forcing a kill or freeze would overwrite
+				 * t_ctid and clear its xact bits, breaking the chain walk and
+				 * corrupting the heap.  Skip it, as we do for redirects.
+				 */
+				ereport(NOTICE,
+						(errmsg("skipping tid (%u, %u) for relation \"%s\" because it is a HOT-indexed collapse stub",
 								blkno, offno, RelationGetRelationName(rel))));
 				continue;
 			}

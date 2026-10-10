@@ -215,10 +215,18 @@ typedef struct IndexInfo
 	bool		ii_NullsNotDistinct;
 	/* is it valid for inserts? */
 	bool		ii_ReadyForInserts;
-	/* IndexUnchanged status determined yet? */
-	bool		ii_CheckedUnchanged;
-	/* aminsert hint, cached for retail inserts */
+	/*
+	 * aminsert hint: index logically unchanged by UPDATE?  Narrow rule: key
+	 * columns only; INCLUDE columns and the partial-index predicate are not
+	 * considered (expression indexes are treated conservatively).
+	 */
 	bool		ii_IndexUnchanged;
+	/*
+	 * selective UPDATE: does this index need a new entry?  Wide rule: true if
+	 * any key, INCLUDE, expression, or predicate column it references changed
+	 * (or the AM stored an independent new version).
+	 */
+	bool		ii_IndexNeedsUpdate;
 	/* are we doing a concurrent index build? */
 	bool		ii_Concurrent;
 	/* did we detect any broken HOT chains? */

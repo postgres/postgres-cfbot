@@ -24,6 +24,7 @@
 
 #include "storage/itemptr.h"
 #include "utils/dsa.h"
+#include "utils/relcache.h"
 
 /*
  * The maximum number of tuples per page is not large (typically 256 with
@@ -81,6 +82,8 @@ typedef struct TBMIterateResult
 /* function prototypes in nodes/tidbitmap.c */
 
 extern TIDBitmap *tbm_create(Size maxbytes, dsa_area *dsa);
+extern void tbm_set_relation(TIDBitmap *tbm, Relation relation);
+extern void tbm_recheck_inexact_unions(TIDBitmap *tbm);
 extern void tbm_free(TIDBitmap *tbm);
 extern void tbm_free_shared_area(dsa_area *dsa, dsa_pointer dp);
 

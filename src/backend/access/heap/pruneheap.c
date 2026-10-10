@@ -16,6 +16,7 @@
 
 #include "access/heapam.h"
 #include "access/heapam_xlog.h"
+#include "access/hot_indexed.h"
 #include "access/htup_details.h"
 #include "access/multixact.h"
 #include "access/transam.h"
@@ -68,11 +69,20 @@ typedef struct
 	int			nredirected;	/* numbers of entries in arrays below */
 	int			ndead;
 	int			nunused;
+	int			nstubs;
 	int			nfrozen;
 	/* arrays that accumulate indexes of items to be changed */
 	OffsetNumber redirected[MaxHeapTuplesPerPage * 2];
 	OffsetNumber nowdead[MaxHeapTuplesPerPage];
 	OffsetNumber nowunused[MaxHeapTuplesPerPage];
+
+	/*
+	 * HOT-selectively-updated collapse-survivor stubs: (offset, forward)
+	 * pairs of line pointers rewritten in place into xid-free forwarding
+	 * stubs that preserve their segment's modified-attrs bitmap.
+	 */
+	OffsetNumber stubs[MaxHeapTuplesPerPage * 2];
+
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 
 	/*
@@ -221,6 +231,10 @@ static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid,
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum,
 									   bool was_normal);
+static void heap_prune_record_stub(PruneState *prstate,
+								   OffsetNumber offnum, OffsetNumber forward);
+static void heap_prune_record_unchanged_lp_stub(PruneState *prstate,
+												OffsetNumber offnum);
 static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 								   bool was_normal);
 static void heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
@@ -231,6 +245,7 @@ static void heap_prune_record_unchanged_lp_unused(PruneState *prstate, OffsetNum
 static void heap_prune_record_unchanged_lp_normal(PruneState *prstate, OffsetNumber offnum);
 static void heap_prune_record_unchanged_lp_dead(PruneState *prstate, OffsetNumber offnum);
 static void heap_prune_record_unchanged_lp_redirect(PruneState *prstate, OffsetNumber offnum);
+static bool heap_prune_item_preserves_hot_indexed(Page page, OffsetNumber offnum);
 
 static void page_verify_redirects(Page page);
 
@@ -470,6 +485,7 @@ prune_freeze_setup(PruneFreezeParams *params,
 	prstate->new_prune_xid = InvalidTransactionId;
 	prstate->latest_xid_removed = InvalidTransactionId;
 	prstate->nredirected = prstate->ndead = prstate->nunused = 0;
+	prstate->nstubs = 0;
 	prstate->nfrozen = 0;
 	prstate->nroot_items = 0;
 	prstate->nheaponly_items = 0;
@@ -638,6 +654,23 @@ prune_freeze_plan(PruneState *prstate, OffsetNumber *off_loc)
 		 * Get the tuple's visibility status and queue it up for processing.
 		 */
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+		/*
+		 * A collapse-survivor stub is an LP_NORMAL item that is not a real
+		 * tuple: HEAP_INDEXED_UPDATED with natts == 0, permanently invisible
+		 * (HEAP_XMIN_INVALID), carrying a forward link and the modified-attrs
+		 * bitmap for the chain segment it stands in for.
+		 * heap_prune_satisfies_vacuum() would classify it HEAPTUPLE_DEAD and
+		 * pruning would reclaim it, destroying the bitmap a read needs.
+		 * Record it as an unchanged item so it is preserved; the HOT chain
+		 * walk steps through it transparently to reach the live tuple.
+		 */
+		if (HotIndexedHeaderIsStub(htup))
+		{
+			heap_prune_record_unchanged_lp_stub(prstate, offnum);
+			continue;
+		}
+
 		tup.t_data = htup;
 		tup.t_len = ItemIdGetLength(itemid);
 		ItemPointerSet(&tup.t_self, blockno, offnum);
@@ -708,18 +741,38 @@ prune_freeze_plan(PruneState *prstate, OffsetNumber *off_loc)
 			ItemId		itemid = PageGetItemId(page, offnum);
 			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
-			if (likely(!HeapTupleHeaderIsHotUpdated(htup)))
-			{
-				HeapTupleHeaderAdvanceConflictHorizon(htup,
-													  &prstate->latest_xid_removed);
+			/*
+			 * A dead heap-only tuple that carries a stale btree leaf of its
+			 * own (HEAP_INDEXED_UPDATED, natts > 0) is a HOT-indexed chain
+			 * member not reached by any chain walk (an aborted
+			 * HOT-selectively-updated sub-chain, or a member whose live root
+			 * stopped the walk).  Mark it LP_DEAD instead of reclaiming it
+			 * outright: that pins the slot against reuse and adds it to the
+			 * dead-items array so ambulkdelete sweeps the stale leaf and a
+			 * later vacuum reclaims the LP.
+			 *
+			 * Otherwise, this is the classic-HOT case upstream has always
+			 * handled here: a dead heap-only tuple with no leaf of its own
+			 * should have been reached and removed as part of pruning its
+			 * HOT chain.  If it is not HotUpdated, it is a legitimate
+			 * standalone dead heap-only tuple (e.g. an aborted update) and
+			 * can be reclaimed; if it *is* HotUpdated, something is wrong --
+			 * preserve it and error out rather than silently destroy the
+			 * evidence.
+			 */
+			HeapTupleHeaderAdvanceConflictHorizon(htup,
+												  &prstate->latest_xid_removed);
+			if ((htup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0 &&
+				HeapTupleHeaderGetNatts(htup) > 0)
+				heap_prune_record_dead_or_unused(prstate, offnum, true);
+			else if (likely(!HeapTupleHeaderIsHotUpdated(htup)))
 				heap_prune_record_unused(prstate, offnum, true);
-			}
 			else
 			{
 				/*
-				 * This tuple should've been processed and removed as part of
-				 * a HOT chain, so something's wrong.  To preserve evidence,
-				 * we don't dare to remove it.  We cannot leave behind a DEAD
+				 * This tuple should've been processed and removed as part of a
+				 * HOT chain, so something's wrong.  To preserve evidence, we
+				 * don't dare to remove it.  We cannot leave behind a DEAD
 				 * tuple either, because that will cause VACUUM to error out.
 				 * Throwing an error with a distinct error message seems like
 				 * the least bad option.
@@ -1220,7 +1273,8 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 
 	do_prune = prstate.nredirected > 0 ||
 		prstate.ndead > 0 ||
-		prstate.nunused > 0;
+		prstate.nunused > 0 ||
+		prstate.nstubs > 0;
 
 	/*
 	 * Even if we don't prune anything, if we found a new value for the
@@ -1321,7 +1375,8 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 			heap_page_prune_execute(prstate.buffer, false,
 									prstate.redirected, prstate.nredirected,
 									prstate.nowdead, prstate.ndead,
-									prstate.nowunused, prstate.nunused);
+									prstate.nowunused, prstate.nunused,
+									prstate.stubs, prstate.nstubs);
 		}
 
 		if (do_freeze)
@@ -1347,6 +1402,15 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 			(void) visibilitymap_set(prstate.block, prstate.vmbuffer,
 									 prstate.new_vmbits,
 									 prstate.relation->rd_locator);
+			/*
+			 * A page becoming all-visible has, by the carve-outs in
+			 * heap_page_would_be_all_visible, no live selective-indexed row
+			 * whose fresh entry disagrees with an unchanged index, so any
+			 * VISIBILITYMAP_LOCATOR_SPLIT left over from an earlier update is
+			 * stale; drop it (see amlocator.h).
+			 */
+			(void) visibilitymap_clear_locator_split(prstate.block,
+													 prstate.vmbuffer);
 		}
 
 		MarkBufferDirty(prstate.buffer);
@@ -1365,7 +1429,8 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 									  prstate.frozen, prstate.nfrozen,
 									  prstate.redirected, prstate.nredirected,
 									  prstate.nowdead, prstate.ndead,
-									  prstate.nowunused, prstate.nunused);
+									  prstate.nowunused, prstate.nunused,
+									  prstate.stubs, prstate.nstubs);
 		}
 	}
 
@@ -1507,6 +1572,101 @@ htsv_get_valid_status(int status)
 }
 
 /*
+ * heap_prune_chain_find_live
+ *		Follow a HOT chain from 'start' to its first surviving member.
+ *
+ * Used when re-pruning a HOT/SIU chain that was collapsed by an earlier prune:
+ * the root and any entry-bearing dead members were turned into LP_REDIRECTs to
+ * what was then the first live tuple.  If that tuple has since been HOT-updated
+ * again and died, the redirects must be re-pointed to the current first live
+ * tuple, or several redirects forwarding to one live tuple must agree on it.
+ * Both cases need the chain's current first surviving member.
+ *
+ * Walks t_ctid on this page starting at 'start', skipping DEAD members, and
+ * returns the offset of the first non-DEAD (surviving) member.  Returns
+ * InvalidOffsetNumber if the chain dead-ends with no survivor or runs off the
+ * page.  Reads only the page's pre-execute state, so it is correct regardless
+ * of the order in which sibling redirects are processed.
+ */
+static OffsetNumber
+heap_prune_chain_find_live(PruneState *prstate, OffsetNumber start)
+{
+	Page		page = prstate->page;
+	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+	OffsetNumber offnum = start;
+	OffsetNumber survivor = start;	/* successor of the last DEAD member */
+	int			loops = 0;
+
+	while (offnum >= FirstOffsetNumber && offnum <= maxoff)
+	{
+		ItemId		lp = PageGetItemId(page, offnum);
+		HTSV_Result status;
+		HeapTupleHeader htup;
+
+		/* A redirect/dead/unused item cannot be a surviving chain member. */
+		if (!ItemIdIsNormal(lp))
+			return InvalidOffsetNumber;
+
+		htup = (HeapTupleHeader) PageGetItem(page, lp);
+
+		/*
+		 * A collapse-survivor stub is an xid-free forwarding node, not a
+		 * chain member; the page scan records it unchanged without computing
+		 * visibility, so its htsv slot is unset.  Step through it to its
+		 * forward link rather than reading htsv, which would trip the
+		 * validity assert.
+		 */
+		if (HotIndexedHeaderIsStub(htup))
+		{
+			offnum = HotIndexedStubGetForward(htup);
+			if (++loops > maxoff)
+				return InvalidOffsetNumber;
+			continue;
+		}
+
+		status = htsv_get_valid_status(prstate->htsv[offnum]);
+		htup = (HeapTupleHeader) PageGetItem(page, lp);
+
+		if (status == HEAPTUPLE_DEAD)
+		{
+			/*
+			 * A DEAD member is reclaimed/redirected, so the surviving tail
+			 * starts at its successor.  A DEAD member with no live successor
+			 * means the whole chain is dead.
+			 */
+			if (!HeapTupleHeaderIsHotUpdated(htup) ||
+				ItemPointerGetBlockNumber(&htup->t_ctid) != prstate->block)
+				return InvalidOffsetNumber;
+			offnum = ItemPointerGetOffsetNumber(&htup->t_ctid);
+			survivor = offnum;
+		}
+		else if (status == HEAPTUPLE_RECENTLY_DEAD)
+		{
+			/*
+			 * RECENTLY_DEAD members belong to the surviving tail unless a
+			 * DEAD member follows them (which would make them part of the
+			 * dead prefix).  Keep walking to find out, but do not advance the
+			 * survivor; it stays at the successor of the last DEAD member.
+			 */
+			if (!HeapTupleHeaderIsHotUpdated(htup) ||
+				ItemPointerGetBlockNumber(&htup->t_ctid) != prstate->block)
+				return survivor;
+			offnum = ItemPointerGetOffsetNumber(&htup->t_ctid);
+		}
+		else
+		{
+			/* LIVE (or in-progress): the surviving tail is settled. */
+			return survivor;
+		}
+
+		if (++loops > maxoff)
+			return InvalidOffsetNumber; /* defend against a corrupt cycle */
+	}
+
+	return InvalidOffsetNumber;
+}
+
+/*
  * Prune specified line pointer or a HOT chain originating at line pointer.
  *
  * Tuple visibility information is provided in prstate->htsv.
@@ -1553,6 +1713,7 @@ heap_prune_chain(OffsetNumber maxoff, OffsetNumber rootoffnum,
 	 */
 	int			ndeadchain = 0,
 				nchain = 0;
+	int			nstubhops = 0;
 
 	rootlp = PageGetItemId(page, rootoffnum);
 
@@ -1575,6 +1736,38 @@ heap_prune_chain(OffsetNumber maxoff, OffsetNumber rootoffnum,
 		 */
 		if (offnum > maxoff)
 			break;
+
+		/*
+		 * Step transparently through a collapse-survivor stub.  A redirect or
+		 * an earlier stub may forward into a stub that replaced a dead
+		 * mid-chain member; the stub was already recorded (as unchanged) by
+		 * the page scan and is not itself a chain member, so follow its
+		 * forward link rather than stopping at the processed check below.
+		 */
+		{
+			ItemId		slp = PageGetItemId(page, offnum);
+
+			if (ItemIdIsNormal(slp))
+			{
+				HeapTupleHeader shtup = (HeapTupleHeader) PageGetItem(page, slp);
+
+				if (HotIndexedHeaderIsStub(shtup))
+				{
+					/*
+					 * A stub is xid-free, so the xmin/xmax linkage cannot be
+					 * verified across it.  Trust the stub's forward link and
+					 * skip the prior-xmax check for the first member past it
+					 * (otherwise the chain would be severed there, dropping
+					 * its tail).
+					 */
+					offnum = HotIndexedStubGetForward(shtup);
+					priorXmax = InvalidTransactionId;
+					if (++nstubhops > maxoff)
+						break;	/* defend against a corrupt stub-forward cycle */
+					continue;
+				}
+			}
+		}
 
 		/* If item is already processed, stop --- it must not be same chain */
 		if (prstate->processed[offnum])
@@ -1682,13 +1875,27 @@ heap_prune_chain(OffsetNumber maxoff, OffsetNumber rootoffnum,
 	if (ItemIdIsRedirected(rootlp) && nchain < 2)
 	{
 		/*
-		 * We found a redirect item that doesn't point to a valid follow-on
-		 * item.  This can happen if the loop in heap_page_prune_and_freeze()
-		 * caused us to visit the dead successor of a redirect item before
-		 * visiting the redirect item.  We can clean up by setting the
-		 * redirect item to LP_DEAD state or LP_UNUSED if the caller
-		 * indicated.
+		 * The walk could not get past the redirect: its target was either
+		 * already processed by a sibling redirect's walk (several redirects
+		 * of a collapsed HOT/SIU chain forward to the same live tuple) or has
+		 * since died and been collapsed further.  Re-point this redirect at
+		 * the chain's current first surviving member so every entry that
+		 * resolves through it still reaches the live tuple.  If no survivor
+		 * remains, the redirect is dangling and is reclaimed (LP_DEAD, or
+		 * LP_UNUSED if the caller allows it).
 		 */
+		OffsetNumber target = ItemIdGetRedirect(rootlp);
+		OffsetNumber live = heap_prune_chain_find_live(prstate, target);
+
+		if (OffsetNumberIsValid(live))
+		{
+			if (live == target)
+				heap_prune_record_unchanged_lp_redirect(prstate, rootoffnum);
+			else
+				heap_prune_record_redirect(prstate, rootoffnum, live, false);
+			return;
+		}
+
 		heap_prune_record_dead_or_unused(prstate, rootoffnum, false);
 		return;
 	}
@@ -1714,24 +1921,143 @@ process_chain:
 	else if (ndeadchain == nchain)
 	{
 		/*
-		 * The entire chain is dead.  Mark the root line pointer LP_DEAD, and
-		 * fully remove the other tuples in the chain.
+		 * The entire chain is dead.  No live tuple remains to forward to, so
+		 * mark the root LP_DEAD (or LP_UNUSED if the caller allows it) and
+		 * reclaim each member.  A dead HOT-selectively-updated member may
+		 * still have a stale btree leaf pointing at it: mark it LP_DEAD so
+		 * the slot is pinned against reuse and added to the dead-items array,
+		 * letting ambulkdelete sweep the leaf and a later vacuum reclaim the
+		 * line pointer.  Classic-HOT members carry no leaf of their own and
+		 * go straight to LP_UNUSED.
 		 */
 		heap_prune_record_dead_or_unused(prstate, rootoffnum, ItemIdIsNormal(rootlp));
 		for (int i = 1; i < nchain; i++)
-			heap_prune_record_unused(prstate, chainitems[i], true);
+		{
+			if (heap_prune_item_preserves_hot_indexed(page, chainitems[i]))
+				heap_prune_record_dead_or_unused(prstate, chainitems[i], true);
+			else
+				heap_prune_record_unused(prstate, chainitems[i], true);
+		}
 	}
 	else
 	{
 		/*
-		 * We found a DEAD tuple in the chain.  Redirect the root line pointer
-		 * to the first non-DEAD tuple, and mark as unused each intermediate
-		 * item that we are able to remove from the chain.
+		 * The chain has a dead prefix followed by a live remainder.  Collapse
+		 * it with PHOT-style key tuples so that the per-hop modified-attrs
+		 * bitmaps survive for the bitmap-overlap read path.
+		 *
+		 * Walk the dead members from the live end backwards, accumulating in
+		 * laterattrs the union of the modified-attrs bitmaps of the members
+		 * that follow (the "later hops").  A dead key tuple (one that
+		 * carried its own index entries because it changed an indexed
+		 * attribute at its hop, heap_prune_item_preserves_hot_indexed) is
+		 * disposed of as follows:
+		 *
+		 * - If every attribute it changed was changed again by a later hop
+		 * (its bitmap is a subset of laterattrs), every index entry pointing
+		 * at it is superseded, so no live entry references it: reclaim it
+		 * (LP_DEAD), which lets this vacuum's index pass sweep its now-stale
+		 * leaves and a later pass free the line pointer.  This loses no
+		 * per-hop information for readers; its attributes are already
+		 * carried by the surviving later members the reader still crosses.
+		 *
+		 * - Otherwise it introduced an attribute not changed again, so a live
+		 * entry still points at it: keep it as an xid-free stub forwarding to
+		 * the next survivor, preserving its inline bitmap for the read path.
+		 *
+		 * Classic-HOT members carry no entry of their own and are reclaimed
+		 * to LP_UNUSED; survivors forward past them.  The root is redirected
+		 * to the first survivor.  Stubs carry no XIDs, so the page stays
+		 * freeze-safe; because each forwards to the next survivor (not the
+		 * live tuple), a reader crossing the collapsed prefix sees every
+		 * surviving hop's bitmap, and stub->stub forwarding lets a later
+		 * collapse extend the chain without re-pointing existing stubs.
 		 */
-		heap_prune_record_redirect(prstate, rootoffnum, chainitems[ndeadchain],
-								   ItemIdIsNormal(rootlp));
-		for (int i = 1; i < ndeadchain; i++)
-			heap_prune_record_unused(prstate, chainitems[i], true);
+		OffsetNumber first_live = chainitems[ndeadchain];
+		OffsetNumber next_survivor = first_live;
+		OffsetNumber root_target;
+		int			relnatts = RelationGetNumberOfAttributes(prstate->relation);
+		uint8		laterattrs[(MaxHeapAttributeNumber + 7) / 8];
+
+		/*
+		 * laterattrs accumulates every surviving hop's modified attributes.
+		 * Size it for the relation's current natts (the maximum); each
+		 * contributing tuple's bitmap is located and OR-ed using that tuple's
+		 * write-time natts (HotIndexedTupleBitmapNatts), since ADD COLUMN may
+		 * have grown the relation since some hops were written.
+		 */
+		memset(laterattrs, 0, HotIndexedBitmapBytes(relnatts));
+		for (int i = ndeadchain; i < nchain; i++)
+		{
+			ItemId		lp = PageGetItemId(page, chainitems[i]);
+			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, lp);
+
+			if ((htup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0)
+			{
+				int			bmnatts = HotIndexedTupleBitmapNatts(htup);
+
+				/*
+				 * A hop's write-time natts can never legitimately exceed the
+				 * relation's current natts (natts only grows via ADD COLUMN).
+				 * On a corrupt page a stub's unbounded stashed natts (or a
+				 * corrupt live tuple's natts field) could otherwise overflow
+				 * laterattrs, which is sized for relnatts; clamp defensively.
+				 */
+				Assert(bmnatts <= relnatts);
+				if (bmnatts > relnatts)
+					bmnatts = relnatts;
+
+				HotIndexedBitmapUnion(laterattrs,
+									  HotIndexedGetModifiedBitmap(htup,
+															  ItemIdGetLength(lp),
+															  bmnatts),
+									  bmnatts);
+			}
+		}
+
+		/* dead prefix: reclaim superseded members, stub the rest */
+		for (int i = ndeadchain - 1; i >= 1; i--)
+		{
+			if (heap_prune_item_preserves_hot_indexed(page, chainitems[i]))
+			{
+				ItemId		lp = PageGetItemId(page, chainitems[i]);
+				HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, lp);
+				int			bmnatts = HotIndexedTupleBitmapNatts(htup);
+				const uint8 *attrs;
+
+				/* See the comment above laterattrs' first use. */
+				Assert(bmnatts <= relnatts);
+				if (bmnatts > relnatts)
+					bmnatts = relnatts;
+				attrs = HotIndexedGetModifiedBitmap(htup,
+													 ItemIdGetLength(lp),
+													 bmnatts);
+
+				if (HotIndexedBitmapIsSubset(attrs, laterattrs, bmnatts))
+					heap_prune_record_dead_or_unused(prstate, chainitems[i], true);
+				else
+				{
+					heap_prune_record_stub(prstate, chainitems[i], next_survivor);
+					next_survivor = chainitems[i];
+				}
+				HotIndexedBitmapUnion(laterattrs, attrs, bmnatts);
+			}
+			else
+				heap_prune_record_unused(prstate, chainitems[i], true);
+		}
+
+		root_target = next_survivor;
+
+		/*
+		 * root -> first survivor (skip a redundant no-op redirect on
+		 * re-prune)
+		 */
+		if (ItemIdIsRedirected(rootlp) &&
+			ItemIdGetRedirect(rootlp) == root_target)
+			heap_prune_record_unchanged_lp_redirect(prstate, rootoffnum);
+		else
+			heap_prune_record_redirect(prstate, rootoffnum, root_target,
+									   ItemIdIsNormal(rootlp));
 
 		/* the rest of tuples in the chain are normal, unchanged tuples */
 		for (int i = ndeadchain; i < nchain; i++)
@@ -1776,6 +2102,34 @@ heap_prune_record_redirect(PruneState *prstate,
 	 * separately as an unchanged tuple.
 	 */
 
+	/*
+	 * If the redirect points at a HOT-selectively-updated live tuple, the
+	 * page may still carry stale btree entries that resolve through this
+	 * redirect to a tuple with a different key.  Such entries are filtered by
+	 * the read path's crossed-attribute bitmap, which requires fetching the
+	 * heap tuple, but an index-only scan trusts the visibility map and skips
+	 * that fetch.  So
+	 * the page must not be reported all-visible/all-frozen while such a
+	 * redirect exists; it becomes eligible again only once vacuum has swept
+	 * the stale leaves and reclaimed the redirect.
+	 */
+	if (rdoffnum >= FirstOffsetNumber &&
+		rdoffnum <= PageGetMaxOffsetNumber(prstate->page))
+	{
+		ItemId		tlp = PageGetItemId(prstate->page, rdoffnum);
+
+		if (ItemIdIsNormal(tlp))
+		{
+			HeapTupleHeader thtup = (HeapTupleHeader) PageGetItem(prstate->page, tlp);
+
+			if ((thtup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0)
+			{
+				prstate->set_all_visible = false;
+				prstate->set_all_frozen = false;
+			}
+		}
+	}
+
 	Assert(prstate->nredirected < MaxHeapTuplesPerPage);
 	prstate->redirected[prstate->nredirected * 2] = offnum;
 	prstate->redirected[prstate->nredirected * 2 + 1] = rdoffnum;
@@ -1791,6 +2145,65 @@ heap_prune_record_redirect(PruneState *prstate,
 		prstate->ndeleted++;
 
 	prstate->hastup = true;
+}
+
+/*
+ * Record a line pointer to be rewritten in place as a HOT-selectively-updated
+ * collapse-survivor stub forwarding to 'forward'.
+ *
+ * The source must be a dead heap-only tuple that carried its own btree
+ * entries (a key tuple) and so cannot be reclaimed outright: a stale entry may
+ * still resolve through it.  Rewriting it into an xid-free stub keeps the
+ * forward link and the tuple's inline modified-attrs bitmap (so the read path
+ * can judge staleness) while dropping its XIDs, which keeps the page
+ * freeze-safe.
+ */
+static void
+heap_prune_record_stub(PruneState *prstate,
+					   OffsetNumber offnum, OffsetNumber forward)
+{
+	Assert(!prstate->processed[offnum]);
+	prstate->processed[offnum] = true;
+
+	/*
+	 * As with a redirect to a HOT-selectively-updated tuple, the page must
+	 * not be reported all-visible/all-frozen while a stub exists: an
+	 * index-only scan would otherwise trust the VM and skip the recheck that
+	 * filters a now-stale entry resolving through the stub.  A stub's
+	 * HEAP_XMIN_INVALID also makes it invisible to every snapshot, which an
+	 * all-visible page must never contain.  Eligibility returns once vacuum
+	 * reclaims the stub.
+	 */
+	prstate->set_all_visible = false;
+	prstate->set_all_frozen = false;
+
+	Assert(prstate->nstubs < MaxHeapTuplesPerPage);
+	prstate->stubs[prstate->nstubs * 2] = offnum;
+	prstate->stubs[prstate->nstubs * 2 + 1] = forward;
+	prstate->nstubs++;
+
+	/* The dead key tuple's storage is being discarded; count it removed. */
+	prstate->ndeleted++;
+
+	prstate->hastup = true;
+}
+
+/*
+ * Record an existing collapse-survivor stub that is to be left unchanged.
+ *
+ * Encountered when re-pruning a page that already holds stubs from an earlier
+ * collapse.  The stub is preserved (its bitmap is still needed) and counts as
+ * a reason the page cannot be reported all-visible/all-frozen.
+ */
+static void
+heap_prune_record_unchanged_lp_stub(PruneState *prstate, OffsetNumber offnum)
+{
+	Assert(!prstate->processed[offnum]);
+	prstate->processed[offnum] = true;
+	prstate->hastup = true;
+
+	prstate->set_all_visible = false;
+	prstate->set_all_frozen = false;
 }
 
 /* Record line pointer to be marked dead */
@@ -1873,6 +2286,52 @@ heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum, bool was_norm
 	if (was_normal)
 		prstate->ndeleted++;
 }
+
+
+/*
+ * heap_prune_item_preserves_hot_indexed
+ *		True iff the LP at `offnum` on `page` is a live HOT-indexed (HOT/SIU)
+ *		heap-only tuple whose LP must be preserved rather than reclaimed to
+ *		LP_UNUSED, because a not-yet-swept index entry may still point at it.
+ *
+ * A HOT-indexed update plants a new index entry pointing at the heap-only
+ * tuple's own TID.  Classic HOT's invariant that mid-chain LPs have no
+ * external references therefore does not hold for such tuples: until
+ * ambulkdelete sweeps any stale index entry, a reader arriving via it must
+ * still find a walkable hop at the LP.  Chain collapse converts dead members
+ * to LP_REDIRECT forwarders for exactly this reason; a live member like this
+ * one must simply not be reclaimed out from under such a reader.
+ *
+ * Excluded from preservation:
+ *   - items that are not LP_NORMAL (REDIRECT, DEAD, UNUSED);
+ *   - tuples without HEAP_INDEXED_UPDATED (classic HOT chain members never
+ *     had a per-tuple index entry planted);
+ *   - tuples with no attributes (defensive: not a real chain member);
+ *   - aborted heap-only tuples (HEAP_XMIN_INVALID): never visible through any
+ *     index entry, so reclaiming them is safe.
+ */
+static bool
+heap_prune_item_preserves_hot_indexed(Page page, OffsetNumber offnum)
+{
+	ItemId		lp = PageGetItemId(page, offnum);
+	HeapTupleHeader htup;
+
+	if (!ItemIdIsNormal(lp))
+		return false;
+
+	htup = (HeapTupleHeader) PageGetItem(page, lp);
+
+	if ((htup->t_infomask2 & HEAP_INDEXED_UPDATED) == 0)
+		return false;
+	if (HeapTupleHeaderGetNatts(htup) == 0)
+		return false;
+	if ((htup->t_infomask & HEAP_XMIN_INVALID) != 0)
+		return false;
+
+	return true;
+}
+
+
 
 /*
  * Record an unused line pointer that is left unchanged.
@@ -2107,7 +2566,43 @@ heap_prune_record_unchanged_lp_redirect(PruneState *prstate, OffsetNumber offnum
 	 */
 	Assert(!prstate->processed[offnum]);
 	prstate->processed[offnum] = true;
+
+	/*
+	 * As in heap_prune_record_redirect: if this redirect forwards to a
+	 * HOT-selectively-updated live tuple, the page may carry stale btree
+	 * entries that resolve through it, so it must not be reported
+	 * all-visible/all-frozen (an index-only scan would otherwise skip the
+	 * crossed-attribute bitmap check).  This must happen here too, not only when the
+	 * redirect is first created, because a re-prune records an existing SIU
+	 * redirect as unchanged.
+	 */
+	{
+		ItemId		lp = PageGetItemId(prstate->page, offnum);
+
+		if (ItemIdIsRedirected(lp))
+		{
+			OffsetNumber rdoffnum = ItemIdGetRedirect(lp);
+
+			if (rdoffnum >= FirstOffsetNumber &&
+				rdoffnum <= PageGetMaxOffsetNumber(prstate->page))
+			{
+				ItemId		tlp = PageGetItemId(prstate->page, rdoffnum);
+
+				if (ItemIdIsNormal(tlp))
+				{
+					HeapTupleHeader thtup = (HeapTupleHeader) PageGetItem(prstate->page, tlp);
+
+					if ((thtup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0)
+					{
+						prstate->set_all_visible = false;
+						prstate->set_all_frozen = false;
+					}
+				}
+			}
+		}
+	}
 }
+
 
 /*
  * Perform the actual page changes needed by heap_page_prune_and_freeze().
@@ -2123,16 +2618,27 @@ void
 heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 						OffsetNumber *redirected, int nredirected,
 						OffsetNumber *nowdead, int ndead,
-						OffsetNumber *nowunused, int nunused)
+						OffsetNumber *nowunused, int nunused,
+						OffsetNumber *stubs, int nstubs)
 {
 	Page		page = BufferGetPage(buffer);
 	OffsetNumber *offnum;
 	HeapTupleHeader htup PG_USED_FOR_ASSERTS_ONLY;
 
 	/* Shouldn't be called unless there's something to do */
-	Assert(nredirected > 0 || ndead > 0 || nunused > 0);
+	Assert(nredirected > 0 || ndead > 0 || nunused > 0 || nstubs > 0);
 
-	/* If 'lp_truncate_only', we can only remove already-dead line pointers */
+	/*
+	 * If 'lp_truncate_only', we can only remove already-dead line pointers
+	 * and cannot re-point redirects: repointing moves the tuple an index-only
+	 * scan or a concurrent chain walk expects to find, which needs a cleanup
+	 * lock (see the file header comment).  No producer in this series calls
+	 * with lp_truncate_only set and a nonzero nredirected; vacuum's second
+	 * pass (the lp_truncate_only caller) never re-points a redirect itself,
+	 * leaving that to a later prune that holds a cleanup lock, so keep
+	 * upstream's stricter assertion rather than the weaker one this would
+	 * otherwise need to justify.
+	 */
 	Assert(!lp_truncate_only || (nredirected == 0 && ndead == 0));
 
 	/* Update all redirected line pointers */
@@ -2143,6 +2649,16 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 		OffsetNumber tooff = *offnum++;
 		ItemId		fromlp = PageGetItemId(page, fromoff);
 		ItemId		tolp PG_USED_FOR_ASSERTS_ONLY;
+
+		/*
+		 * A redundant redirect (the LP already redirects to tooff) is a
+		 * harmless no-op.  This arises when a HOT-indexed chain that was
+		 * already collapsed is re-pruned and the root still resolves to the
+		 * same target; skip it so the apply stays idempotent on both primary
+		 * and replay.
+		 */
+		if (ItemIdIsRedirected(fromlp) && ItemIdGetRedirect(fromlp) == tooff)
+			continue;
 
 #ifdef USE_ASSERT_CHECKING
 
@@ -2158,7 +2674,16 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 			Assert(ItemIdHasStorage(fromlp) && ItemIdIsNormal(fromlp));
 
 			htup = (HeapTupleHeader) PageGetItem(page, fromlp);
-			Assert(!HeapTupleHeaderIsHeapOnly(htup));
+
+			/*
+			 * The redirect source is normally the non-heap-only chain root. A
+			 * HOT/SIU chain collapse additionally redirects dead heap-only
+			 * members that carried their own btree entry to the live tuple,
+			 * so a heap-only redirect source is allowed when it is
+			 * HOT-selectively-updated (HEAP_INDEXED_UPDATED).
+			 */
+			Assert(!HeapTupleHeaderIsHeapOnly(htup) ||
+				   (htup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0);
 		}
 		else
 		{
@@ -2186,10 +2711,53 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 		tolp = PageGetItemId(page, tooff);
 		Assert(ItemIdHasStorage(tolp) && ItemIdIsNormal(tolp));
 		htup = (HeapTupleHeader) PageGetItem(page, tolp);
+		/* A redirect targets the first surviving member: a heap-only tuple. */
 		Assert(HeapTupleHeaderIsHeapOnly(htup));
 #endif
 
 		ItemIdSetRedirect(fromlp, tooff);
+	}
+
+	/*
+	 * Rewrite collapse-survivor stubs in place.  Each (offset, forward) pair
+	 * names a dead key tuple to be turned into an xid-free forwarding stub:
+	 * permanently invisible (HEAP_XMIN_INVALID|HEAP_XMAX_INVALID), flagged
+	 * HEAP_INDEXED_UPDATED with natts == 0 so consumers recognise it as a
+	 * stub rather than a tuple, heap-only preserved so it remains a valid
+	 * redirect/forward target, and t_ctid.offnum set to the forward offset.
+	 * The item's storage (including its inline modified-attrs bitmap in the
+	 * final bytes) is left undisturbed, so the bitmap survives and need not
+	 * be carried in WAL.
+	 */
+	offnum = stubs;
+	for (int i = 0; i < nstubs; i++)
+	{
+		OffsetNumber off = *offnum++;
+		OffsetNumber forward = *offnum++;
+		ItemId		lp = PageGetItemId(page, off);
+		HeapTupleHeader tup;
+		int			bitmap_natts;
+
+		Assert(ItemIdIsNormal(lp));
+		tup = (HeapTupleHeader) PageGetItem(page, lp);
+
+		/*
+		 * Preserve the tuple's write-time natts before we overwrite the natts
+		 * field with the stub sentinel (0): the trailing modified-attrs bitmap
+		 * was sized with it, and readers need it to locate the bitmap when the
+		 * relation's current natts has since grown (ADD COLUMN).  The stub's
+		 * t_ctid offset half holds the forward link; the block half is unused
+		 * for a stub, so stash the natts there.  This runs identically on the
+		 * primary and in redo (the pre-stub tuple is on both pages), so no WAL
+		 * change is needed.
+		 */
+		bitmap_natts = HeapTupleHeaderGetNatts(tup);
+
+		tup->t_infomask = HEAP_XMIN_INVALID | HEAP_XMAX_INVALID;
+		tup->t_infomask2 = HEAP_ONLY_TUPLE | HEAP_INDEXED_UPDATED;
+		HeapTupleHeaderSetNatts(tup, 0);
+		ItemPointerSetOffsetNumber(&tup->t_ctid, forward);
+		HotIndexedStubSetBitmapNatts(tup, bitmap_natts);
 	}
 
 	/* Update all now-dead line pointers */
@@ -2207,12 +2775,23 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 		 * an index.  This should never be necessary with any individual
 		 * heap-only tuple item, though. (It's not clear how much of a problem
 		 * that would be, but there is no reason to allow it.)
+		 *
+		 * Exception: a HOT-indexed aborted orphan whose chain root is
+		 * unreachable on this page is intentionally marked LP_DEAD by the
+		 * heap-only-tuples loop in heap_page_prune_and_freeze (see the
+		 * heap_prune_record_dead call there).  The tuple is heap-only (it was
+		 * created by an UPDATE) and carries HEAP_INDEXED_UPDATED; the
+		 * adjacent btree leaf is still live, so we keep the slot pinned via
+		 * LP_DEAD until ambulkdelete sweeps it.  A subsequent vacuum reclaims
+		 * the LP to LP_UNUSED.
 		 */
 		if (ItemIdHasStorage(lp))
 		{
 			Assert(ItemIdIsNormal(lp));
 			htup = (HeapTupleHeader) PageGetItem(page, lp);
-			Assert(!HeapTupleHeaderIsHeapOnly(htup));
+			Assert(!HeapTupleHeaderIsHeapOnly(htup) ||
+				   ((htup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0 &&
+					HeapTupleHeaderGetNatts(htup) > 0));
 		}
 		else
 		{
@@ -2235,7 +2814,7 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 
 		if (lp_truncate_only)
 		{
-			/* Setting LP_DEAD to LP_UNUSED in vacuum's second pass */
+			/* Setting LP_DEAD to LP_UNUSED in vacuum's second pass. */
 			Assert(ItemIdIsDead(lp) && !ItemIdHasStorage(lp));
 		}
 		else
@@ -2246,7 +2825,8 @@ heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 			 * items to be made LP_UNUSED instead.  This is only possible if
 			 * the relation has no indexes.  If there are any dead items, then
 			 * mark_unused_now was not true and every item being marked
-			 * LP_UNUSED must refer to a heap-only tuple.
+			 * LP_UNUSED must refer to a heap-only tuple whose chain has been
+			 * pruned.
 			 */
 			if (ndead > 0)
 			{
@@ -2322,6 +2902,8 @@ page_verify_redirects(Page page)
 		Assert(ItemIdIsNormal(targitem));
 		Assert(ItemIdHasStorage(targitem));
 		htup = (HeapTupleHeader) PageGetItem(page, targitem);
+
+		/* A redirect targets the first surviving chain member: heap-only. */
 		Assert(HeapTupleHeaderIsHeapOnly(htup));
 	}
 #endif
@@ -2624,7 +3206,8 @@ log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 						  HeapTupleFreeze *frozen, int nfrozen,
 						  OffsetNumber *redirected, int nredirected,
 						  OffsetNumber *dead, int ndead,
-						  OffsetNumber *unused, int nunused)
+						  OffsetNumber *unused, int nunused,
+						  OffsetNumber *stubs, int nstubs)
 {
 	xl_heap_prune xlrec;
 	XLogRecPtr	recptr;
@@ -2639,8 +3222,10 @@ log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 	xlhp_prune_items redirect_items;
 	xlhp_prune_items dead_items;
 	xlhp_prune_items unused_items;
+	xlhp_prune_items stub_items;
 	OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
-	bool		do_prune = nredirected > 0 || ndead > 0 || nunused > 0;
+	bool		do_prune = nredirected > 0 || ndead > 0 || nunused > 0 ||
+		nstubs > 0;
 	bool		do_set_vm = vmflags & VISIBILITYMAP_VALID_BITS;
 	bool		heap_fpi_allowed = true;
 
@@ -2728,6 +3313,16 @@ log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 		XLogRegisterBufData(0, unused,
 							sizeof(OffsetNumber) * nunused);
 	}
+	if (nstubs > 0)
+	{
+		xlrec.flags |= XLHP_HAS_HOT_INDEXED_STUBS;
+
+		stub_items.ntargets = nstubs;
+		XLogRegisterBufData(0, &stub_items,
+							offsetof(xlhp_prune_items, data));
+		XLogRegisterBufData(0, stubs,
+							sizeof(OffsetNumber[2]) * nstubs);
+	}
 	if (nfrozen > 0)
 		XLogRegisterBufData(0, frz_offsets,
 							sizeof(OffsetNumber) * nfrozen);
@@ -2750,8 +3345,17 @@ log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 		xlrec.flags |= XLHP_CLEANUP_LOCK;
 	else
 	{
-		Assert(nredirected == 0 && ndead == 0);
-		/* also, any items in 'unused' must've been LP_DEAD previously */
+		/*
+		 * Without a cleanup lock we can only remove already-dead line
+		 * pointers and re-point redirects.  The latter happens when vacuum's
+		 * second pass reclaims a collapsed HOT-indexed chain and re-points
+		 * the root redirect at first_live: that change is made under an
+		 * exclusive lock and preserves the chain's reachability (every walker
+		 * still reaches first_live), so no cleanup lock is needed; the same
+		 * basis on which this pass already reclaims dead line pointers to
+		 * LP_UNUSED.
+		 */
+		Assert(ndead == 0);
 	}
 	XLogRegisterData(&xlrec, SizeOfHeapPrune);
 	if (TransactionIdIsValid(conflict_xid))

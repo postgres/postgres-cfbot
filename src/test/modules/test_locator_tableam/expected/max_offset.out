@@ -1,0 +1,65 @@
+CREATE EXTENSION IF NOT EXISTS test_locator_tableam;
+NOTICE:  extension "test_locator_tableam" already exists, skipping
+--
+-- A TID bitmap holds offsets only up to MaxHeapTuplesPerPage.  heap_bigoffset
+-- is heap with a LocatorDesc that declares max_offset = MaxOffsetNumber, so
+-- the planner must not consider bitmap scans of it, and GIN, which is scanned
+-- only through bitmaps, must refuse to index it.
+--
+-- The error details name block-size-dependent limits, so they are not
+-- shown.
+--
+\set VERBOSITY terse
+CREATE TABLE bigoff_t (a int, b int, t int[]) USING heap_bigoffset;
+INSERT INTO bigoff_t SELECT g, g % 10, ARRAY[g] FROM generate_series(1, 1000) g;
+CREATE INDEX bigoff_t_a ON bigoff_t (a);
+CREATE INDEX bigoff_t_b ON bigoff_t USING hash (b);
+CREATE INDEX bigoff_t_t ON bigoff_t USING gin (t);
+ERROR:  access method "gin" cannot index table "bigoff_t"
+VACUUM ANALYZE bigoff_t;
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+-- no bitmap scan: the planner falls back to a disabled scan type
+EXPLAIN (COSTS OFF) SELECT * FROM bigoff_t WHERE a = 1 OR a = 2;
+                  QUERY PLAN                  
+----------------------------------------------
+ Index Scan using bigoff_t_a on bigoff_t
+   Disabled: true
+   Index Cond: (a = ANY ('{1,2}'::integer[]))
+(3 rows)
+
+SELECT a FROM bigoff_t WHERE a = 1 OR a = 2 ORDER BY a;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM bigoff_t WHERE a < 10 AND b = 3;
+               QUERY PLAN                
+-----------------------------------------
+ Index Scan using bigoff_t_a on bigoff_t
+   Disabled: true
+   Index Cond: (a < 10)
+   Filter: (b = 3)
+(4 rows)
+
+-- the same table under heap does use one
+ALTER TABLE bigoff_t SET ACCESS METHOD heap;
+EXPLAIN (COSTS OFF) SELECT * FROM bigoff_t WHERE a = 1 OR a = 2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Bitmap Heap Scan on bigoff_t
+   Recheck Cond: ((a = 1) OR (a = 2))
+   ->  Bitmap Index Scan on bigoff_t_a
+         Index Cond: (a = ANY ('{1,2}'::integer[]))
+(4 rows)
+
+CREATE INDEX bigoff_t_t ON bigoff_t USING gin (t);
+-- and GIN prevents switching back
+ALTER TABLE bigoff_t SET ACCESS METHOD heap_bigoffset;
+ERROR:  access method "gin" cannot index table "bigoff_t"
+RESET enable_seqscan;
+RESET enable_indexscan;
+DROP TABLE bigoff_t;
+\set VERBOSITY default

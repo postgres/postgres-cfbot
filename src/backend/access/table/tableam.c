@@ -222,6 +222,7 @@ table_beginscan_parallel_tidrange(Relation relation,
 }
 
 
+
 /* ------------------------------------------------------------------------
  * Functions for non-modifying operations on individual tuples
  * ------------------------------------------------------------------------
@@ -272,7 +273,7 @@ simple_table_tuple_insert(Relation rel, TupleTableSlot *slot)
  * This routine may be used to delete a tuple when concurrent updates of
  * the target tuple are not expected (for example, because we have a lock
  * on the relation associated with the tuple).  Any failure is reported
- * via ereport().
+ * via ereport().  tid is taken to name the latest version of the row.
  */
 void
 simple_table_tuple_delete(Relation rel, ItemPointer tid, Snapshot snapshot)
@@ -282,7 +283,8 @@ simple_table_tuple_delete(Relation rel, ItemPointer tid, Snapshot snapshot)
 
 	result = table_tuple_delete(rel, tid,
 								GetCurrentCommandId(true),
-								0, snapshot, InvalidSnapshot,
+								TABLE_DELETE_LOCKED_VERSION,
+								snapshot, InvalidSnapshot,
 								true /* wait for commit */ ,
 								&tmfd);
 
@@ -317,13 +319,14 @@ simple_table_tuple_delete(Relation rel, ItemPointer tid, Snapshot snapshot)
  * This routine may be used to update a tuple when concurrent updates of
  * the target tuple are not expected (for example, because we have a lock
  * on the relation associated with the tuple).  Any failure is reported
- * via ereport().
+ * via ereport().  otid is taken to name the latest version of the row.
  */
 void
 simple_table_tuple_update(Relation rel, ItemPointer otid,
 						  TupleTableSlot *slot,
 						  Snapshot snapshot,
-						  TU_UpdateIndexes *update_indexes)
+						  const Bitmapset *modified_attrs,
+						  bool *row_moved)
 {
 	TM_Result	result;
 	TM_FailureData tmfd;
@@ -331,9 +334,12 @@ simple_table_tuple_update(Relation rel, ItemPointer otid,
 
 	result = table_tuple_update(rel, otid, slot,
 								GetCurrentCommandId(true),
-								0, snapshot, InvalidSnapshot,
+								TABLE_UPDATE_LOCKED_VERSION,
+								snapshot, InvalidSnapshot,
 								true /* wait for commit */ ,
-								&tmfd, &lockmode, update_indexes);
+								&tmfd, &lockmode,
+								modified_attrs,
+								row_moved);
 
 	switch (result)
 	{

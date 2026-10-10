@@ -152,4 +152,138 @@ my_tableam_handler(PG_FUNCTION_ARGS)
   its implementation.
  </para>
 
+ <sect1 id="tableam-locator">
+  <title>Row Locators</title>
+
+  <para>
+   The value an index stores to identify a row, and hands back to the table
+   access method to fetch it, is the row's <firstterm>locator</firstterm>.
+   For <literal>heap</literal> it is the <acronym>TID</acronym>.  An access
+   method describes its locator with a <structname>LocatorDesc</structname>,
+   returned by the <function>relation_locator</function> callback for each
+   relation.  An access method that leaves the callback
+   <literal>NULL</literal> is treated as having a locator like
+   <literal>heap</literal>'s.  The fields are:
+  </para>
+
+  <variablelist>
+   <varlistentry>
+    <term><structfield>width</structfield></term>
+    <listitem>
+     <para>
+      The locator's size in bytes; a negative value is the largest size of a
+      variable-width locator.  An index access method stores a locator as a
+      <acronym>TID</acronym> unless it sets
+      <structfield>amcanvarlocator</structfield> (reported by
+      <function>pg_indexam_has_property</function> as
+      <literal>can_var_locator</literal>), so it can be used only on a table
+      whose locator is fixed-width and no wider than 6 bytes; otherwise
+      <command>CREATE INDEX</command>, and any command that rebuilds the
+      table's indexes, fails.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>max_offset</structfield></term>
+    <listitem>
+     <para>
+      The largest item number any locator carries.  If it exceeds what a
+      bitmap can hold (<symbol>MaxHeapTuplesPerPage</symbol>), the planner
+      does not consider bitmap scans of the table, and
+      <acronym>GIN</acronym> indexes cannot be built on it.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>name</structfield></term>
+    <listitem>
+     <para>
+      A name for the locator, used in error messages.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>stable</structfield></term>
+    <listitem>
+     <para>
+      Whether a row keeps its locator for its whole life.  For
+      <literal>heap</literal> it does not: an update stores the new version
+      at a new <acronym>TID</acronym>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>old_version_retained</structfield></term>
+    <listitem>
+     <para>
+      Whether the version of a row that an <command>UPDATE</command> replaced
+      can still be fetched by its locator.  If not, the executor copies the
+      old row, and the new row for user row triggers, before they are needed,
+      and the access method must keep a deleted row fetchable by its locator
+      until the deleting transaction ends.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>bitmap_and_inexact</structfield>, <structfield>bitmap_or_inexact</structfield></term>
+    <listitem>
+     <para>
+      Optional per-block callbacks that let the access method tell a
+      <literal>BitmapAnd</literal> or <literal>BitmapOr</literal> that a
+      block's item numbers cannot be combined exactly; the block is then
+      combined conservatively and rechecked.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+
+  <para>
+   When the executor locks, updates or deletes a row it has already locked
+   in the same command, it passes <symbol>TUPLE_LOCK_FLAG_LOCKED_VERSION</symbol>,
+   <symbol>TABLE_UPDATE_LOCKED_VERSION</symbol> or
+   <symbol>TABLE_DELETE_LOCKED_VERSION</symbol>.  An access method whose
+   locator names a row rather than a version uses these to tell which
+   version the caller means; see <filename>src/include/access/tableam.h</filename>.
+  </para>
+
+  <para>
+   <filename>src/include/access/amlocator.h</filename> describes each field
+   in detail.  Core code also relies on these properties of every locator:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     The locator is the row's <structfield>ctid</structfield>.  It identifies
+     the target row of <command>UPDATE</command>, <command>DELETE</command>,
+     <command>MERGE</command>, <literal>SELECT FOR UPDATE</literal> and
+     <literal>WHERE CURRENT OF</literal>, and is what <acronym>TID</acronym>
+     scans look up.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     An item number of zero or greater than <symbol>MaxOffsetNumber</symbol>,
+     and the block number <symbol>InvalidBlockNumber</symbol>, are reserved
+     for other uses and must not appear in a locator.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     Locators are ordered by block number, then item number, and rows that
+     are close in that order should be close in storage.
+     <acronym>B-tree</acronym> indexes order duplicate keys by locator,
+     <command>ANALYZE</command> sorts its sample by it, <acronym>TID</acronym>
+     range scans return rows in that order, and <acronym>BRIN</acronym>
+     indexes summarize ranges of block numbers.
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect1>
+
 </chapter>

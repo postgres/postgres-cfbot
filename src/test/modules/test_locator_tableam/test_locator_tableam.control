@@ -1,0 +1,4 @@
+comment = 'Test table access methods for the locator contract'
+default_version = '1.0'
+module_pathname = '$libdir/test_locator_tableam'
+relocatable = true

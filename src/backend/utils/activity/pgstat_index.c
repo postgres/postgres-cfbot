@@ -70,6 +70,8 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	idxentry->tuples_fetched += lstats->idx.tuples_fetched;
 	idxentry->blocks_fetched += lstats->idx.blocks_fetched;
 	idxentry->blocks_hit += lstats->idx.blocks_hit;
+	idxentry->tuples_hot_indexed_upd_skipped += lstats->idx.tuples_hot_indexed_upd_skipped;
+	idxentry->tuples_hot_indexed_upd_matched += lstats->idx.tuples_hot_indexed_upd_matched;
 
 	pgstat_unlock_entry(entry_ref);
 

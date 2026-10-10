@@ -17,8 +17,10 @@
 #ifndef TABLEAM_H
 #define TABLEAM_H
 
+#include "access/amlocator.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
+#include "access/sysattr.h"
 #include "access/xact.h"
 #include "executor/tuptable.h"
 #include "storage/read_stream.h"
@@ -127,27 +129,11 @@ typedef enum TM_Result
 } TM_Result;
 
 /*
- * Result codes for table_update(..., update_indexes*..).
- * Used to determine which indexes to update.
- */
-typedef enum TU_UpdateIndexes
-{
-	/* No indexed columns were updated (incl. TID addressing of tuple) */
-	TU_None,
-
-	/* A non-summarizing indexed column was updated, or the TID has changed */
-	TU_All,
-
-	/* Only summarized columns were updated, TID is unchanged */
-	TU_Summarizing,
-} TU_UpdateIndexes;
-
-/*
  * When table_tuple_update, table_tuple_delete, or table_tuple_lock fail
  * because the target tuple is already outdated, they fill in this struct to
  * provide information to the caller about what happened. When those functions
  * succeed, the contents of this struct should not be relied upon, except for
- * `traversed`, which may be set in both success and failure cases.
+ * `retargeted`, which may be set in both success and failure cases.
  *
  * ctid is the target's ctid link: it is the same as the target's TID if the
  * target was deleted, or the location of the replacement tuple if the target
@@ -164,15 +150,30 @@ typedef enum TU_UpdateIndexes
  * HeapTupleHeaderGetCmax doesn't work for tuples outdated in other
  * transactions.)
  *
- * traversed indicates if an update chain was followed in order to try to lock
- * the target tuple.  (This may be set in both success and failure cases.)
+ * retargeted is set when table_tuple_lock(), asked to find the last version,
+ * locks a later version of the row than the caller named, because a
+ * concurrent transaction updated the row and committed.  *tid then holds the
+ * locator of the version that was locked, and the caller must re-evaluate the
+ * row (run EvalPlanQual, or recheck the key it searched for) before acting on
+ * what it read earlier.  (This may be set in both success and failure cases.)
+ *
+ * For heap, the named version is the one at *tid, and a later version is
+ * reached by following the update chain to a different TID.  An AM that
+ * updates rows in place keeps the latest version at the row's locator, so
+ * *tid never changes.  It takes the named version to be the one visible to
+ * the snapshot, unless the caller passes TUPLE_LOCK_FLAG_LOCKED_VERSION, and
+ * sets retargeted when the version it locked is newer.  Likewise
+ * table_tuple_update and table_tuple_delete report TM_Updated for a newer
+ * committed version unless passed TABLE_UPDATE_LOCKED_VERSION or
+ * TABLE_DELETE_LOCKED_VERSION.  Logical replication apply, which has no
+ * snapshot, passes these bits.
  */
 typedef struct TM_FailureData
 {
 	ItemPointerData ctid;
 	TransactionId xmax;
 	CommandId	cmax;
-	bool		traversed;
+	bool		retargeted;
 } TM_FailureData;
 
 /*
@@ -289,15 +290,31 @@ typedef struct TM_IndexDeleteOp
 /* "options" flag bits for table_tuple_delete */
 #define TABLE_DELETE_CHANGING_PARTITION			(1 << 0)
 #define TABLE_DELETE_NO_LOGICAL					(1 << 1)
+#define TABLE_DELETE_LOCKED_VERSION				(1 << 2)
 
 /* "options" flag bits for table_tuple_update */
 #define TABLE_UPDATE_NO_LOGICAL					(1 << 0)
+#define TABLE_UPDATE_LOCKED_VERSION				(1 << 1)
 
 /* flag bits for table_tuple_lock */
 /* Follow tuples whose update is in progress if lock modes don't conflict  */
 #define TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS	(1 << 0)
 /* Follow update chain and lock latest version of tuple */
 #define TUPLE_LOCK_FLAG_FIND_LAST_VERSION		(1 << 1)
+
+/*
+ * TUPLE_LOCK_FLAG_LOCKED_VERSION, TABLE_UPDATE_LOCKED_VERSION and
+ * TABLE_DELETE_LOCKED_VERSION: the caller names the version of the row this
+ * transaction has already locked in this command (or, for ON CONFLICT, the
+ * version it found with a dirty snapshot and is locking now), not the version
+ * visible to the snapshot.  Heap ignores this, since its locator names a
+ * version.  An AM that updates rows in place takes the named version to be
+ * the row's latest committed version when it is called.  If it then waits
+ * for a transaction that goes on to commit an update or delete of the row,
+ * it reports TM_Updated or TM_Deleted, as heap does, so that ON CONFLICT
+ * restarts its arbiter check.
+ */
+#define TUPLE_LOCK_FLAG_LOCKED_VERSION			(1 << 2)
 
 
 /* Typedef for callback function for table_index_build_scan */
@@ -323,6 +340,19 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+
+	/* ------------------------------------------------------------------------
+	 * Locator.
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * Return the locator descriptor for this relation, which describes the
+	 * locator this AM hands to indexes; see amlocator.h.  Must not return
+	 * NULL.  The relcache keeps the pointer for the life of the relation's
+	 * cache entry.  Callers use RelationGetLocatorDesc().
+	 */
+	const struct LocatorDesc *(*relation_locator) (Relation rel);
 
 
 	/* ------------------------------------------------------------------------
@@ -487,6 +517,30 @@ typedef struct TableAmRoutine
 	 */
 	void		(*index_scan_end) (IndexScanDesc scan);
 
+	/*
+	 * Constraint-enforcement TID fetch that also fills a slot and reports
+	 * whether the arriving index entry may fail to exactly identify the live
+	 * tuple's current key.  Like fetch_tid, this is for unique/exclusion
+	 * enforcement code (which holds a TID taken from an index but performs no
+	 * index scan), not for true index scans.
+	 *
+	 * On a positive result the live tuple is stored into *slot.  *recheck is
+	 * set true iff reaching the live tuple crossed AM-private update-chain
+	 * state that may leave the arriving entry's stored key disagreeing with
+	 * the live tuple (for heap, a HOT-selectively-updated hop after the
+	 * arriving entry's own tuple); the caller then performs its own key
+	 * comparison.  AMs without such update chains may leave this callback
+	 * NULL, in which case table_index_fetch_tuple_check falls back to
+	 * fetch_tid and reports *recheck = false.
+	 */
+	bool		(*fetch_tid_check) (Relation rel,
+								ItemPointer tid,
+								Snapshot snapshot,
+								bool *all_dead,
+								bool *recheck,
+								TupleTableSlot *slot);
+
+
 	/* ------------------------------------------------------------------------
 	 * Callbacks for non-modifying operations on individual tuples
 	 * ------------------------------------------------------------------------
@@ -586,7 +640,30 @@ typedef struct TableAmRoutine
 								 bool wait,
 								 TM_FailureData *tmfd,
 								 LockTupleMode *lockmode,
-								 TU_UpdateIndexes *update_indexes);
+								 const Bitmapset *modified_attrs,
+								 bool *row_moved);
+
+	/*
+	 * Given a candidate set of attribute numbers (in the
+	 * FirstLowInvalidHeapAttributeNumber-offset bitmap convention) and two
+	 * versions of a row, return the subset that actually changed value
+	 * between oldslot and newslot.  See table_modified_attrs().
+	 *
+	 * This lets the executor decide, in an access-method-agnostic way, which
+	 * indexes an UPDATE must maintain (those whose attributes overlap the
+	 * returned set) while leaving the mechanics of "did this attribute
+	 * change?": value comparison, and the meaning of any system columns,
+	 * to the AM.  The AM may modify and return the passed-in set, or return a
+	 * new one; the caller must use only the returned pointer.
+	 *
+	 * Optional callback: an AM that leaves it NULL is treated as though every
+	 * candidate attribute changed (the conservative "maintain all indexes"
+	 * answer).
+	 */
+	Bitmapset  *(*modified_attrs) (Relation rel,
+								   Bitmapset *attrs,
+								   TupleTableSlot *oldslot,
+								   TupleTableSlot *newslot);
 
 	/* see table_tuple_lock() for reference about parameters */
 	TM_Result	(*tuple_lock) (Relation rel,
@@ -931,6 +1008,74 @@ table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 		elog(ERROR, "scan started during logical decoding");
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
+}
+
+/* ----------------------------------------------------------------------------
+ * Locator inspection functions
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Return the relation's locator descriptor, fetching it from the table AM the
+ * first time and keeping it in the relcache entry after that.
+ */
+static inline const struct LocatorDesc *
+RelationGetLocatorDesc(Relation rel)
+{
+	if (rel->rd_locdesc == NULL)
+	{
+		/*
+		 * A table AM that predates the locator contract has no
+		 * relation_locator callback.  Treat it as heap does: a fixed-width
+		 * TID that serves bitmap scans and moves a row on update.
+		 */
+		static const LocatorDesc default_locdesc = {
+			.width = sizeof(ItemPointerData),
+			.max_offset = MaxHeapTuplesPerPage,
+			.name = "tid",
+			.stable = false,
+			.old_version_retained = true,
+			.bitmap_and_inexact = NULL,
+			.bitmap_or_inexact = NULL,
+		};
+
+		rel->rd_locdesc = rel->rd_tableam->relation_locator ?
+			rel->rd_tableam->relation_locator(rel) : &default_locdesc;
+		Assert(OffsetNumberIsValid(rel->rd_locdesc->max_offset));
+	}
+	return rel->rd_locdesc;
+}
+
+/*
+ * Does a row of this relation keep its locator for its whole life?  See the
+ * stable field in amlocator.h.
+ */
+static inline bool
+table_locator_is_stable(Relation rel)
+{
+	return RelationGetLocatorDesc(rel)->stable;
+}
+
+/*
+ * Is a row's pre-update version still fetchable by locator after the UPDATE
+ * that replaced it?  See the old_version_retained field in amlocator.h.
+ */
+static inline bool
+table_locator_old_version_retained(Relation rel)
+{
+	return RelationGetLocatorDesc(rel)->old_version_retained;
+}
+
+/*
+ * Does this relation's table AM overwrite a row's storage on UPDATE?  If so,
+ * code that needs the pre-update image after the write must capture it first.
+ * False for a relation without a table AM, such as a foreign table.
+ */
+static inline bool
+RelationUpdatesInPlace(Relation rel)
+{
+	return rel->rd_tableam != NULL &&
+		!table_locator_old_version_retained(rel);
 }
 
 /*
@@ -1311,6 +1456,8 @@ table_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 }
 
 
+
+
 /* ------------------------------------------------------------------------
  * Functions for non-modifying operations on individual tuples
  * ------------------------------------------------------------------------
@@ -1373,6 +1520,42 @@ table_tuple_fetch_row_version(Relation rel,
 		elog(ERROR, "unexpected table_tuple_fetch_row_version call during logical decoding");
 
 	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot);
+}
+
+/*
+ * Constraint-enforcement helper: fetch the live tuple at `tid` for a
+ * unique/exclusion check.  On a positive result the tuple is stored into
+ * `slot` and *recheck (if not NULL) reports whether reaching it crossed
+ * AM-private update-chain state that may leave the arriving index entry's
+ * stored key disagreeing with the live tuple, so the caller must recheck the
+ * key itself.  An AM that does not provide fetch_tid_check has no such chains:
+ * we fall back to fetch_tid, still fill the slot via
+ * table_tuple_fetch_row_version, and report *recheck = false.
+ *
+ * Like table_fetch_tid(), this performs no index scan and is only for
+ * constraint enforcement code holding a TID taken from an index.
+ */
+static inline bool
+table_index_fetch_tuple_check(Relation rel,
+							  ItemPointer tid,
+							  Snapshot snapshot,
+							  bool *all_dead,
+							  bool *recheck,
+							  TupleTableSlot *slot)
+{
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+		elog(ERROR, "unexpected table_index_fetch_tuple_check call during logical decoding");
+
+	if (rel->rd_tableam->fetch_tid_check != NULL)
+		return rel->rd_tableam->fetch_tid_check(rel, tid, snapshot,
+												all_dead, recheck, slot);
+
+	/* AM without update chains: plain fetch, no recheck. */
+	if (recheck != NULL)
+		*recheck = false;
+	if (!rel->rd_tableam->fetch_tid(rel, tid, snapshot, all_dead))
+		return false;
+	return table_tuple_fetch_row_version(rel, tid, snapshot, slot);
 }
 
 /*
@@ -1553,6 +1736,8 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  *		decoding information for the tuple.  This should solely be used
  *		during table rewrites where RelationIsLogicallyLogged(rel) is not
  *		yet accurate for the new relation.
+ *		TABLE_DELETE_LOCKED_VERSION: tid names the version this transaction
+ *		has already locked; see TUPLE_LOCK_FLAG_LOCKED_VERSION.
  *	crosscheck - if not InvalidSnapshot, also check tuple against this
  *	wait - true if should wait for any conflicting update to commit/abort
  *
@@ -1593,14 +1778,26 @@ table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
  *		decoding information for the tuple.  This should solely be used
  *		during table rewrites where RelationIsLogicallyLogged(rel) is not
  *		yet accurate for the new relation.
+ *		TABLE_UPDATE_LOCKED_VERSION: otid names the version this transaction
+ *		has already locked; see TUPLE_LOCK_FLAG_LOCKED_VERSION.
  *	crosscheck - if not InvalidSnapshot, also check old tuple against this
+ *
+ * In parameters:
+ *	modified_attrs - input only; the set of indexed attributes whose values
+ *		changed (FirstLowInvalidHeapAttributeNumber convention).  Caller-owned;
+ *		the table AM must not modify it.  A table AM may use it to choose
+ *		between HOT and non-HOT storage of the new tuple.
  *
  * Output parameters:
  *	slot - newly constructed tuple data to store
  *	tmfd - filled in failure cases (see below)
  *	lockmode - filled with lock mode acquired on tuple
- *	update_indexes - in success cases this is set if new index entries
- *		are required for this tuple; see TU_UpdateIndexes
+ *	row_moved - set true iff the AM stored the new tuple such that index
+ *		entries referencing the old version no longer locate it (for heap, a
+ *		non-HOT update at a new TID), meaning every index needs a fresh entry.
+ *		When false, the caller consults each index's own attributes against
+ *		modified_attrs to decide per index (the HOT / selective-index-update
+ *		cases).
  *
  * Normal, successful return value is TM_Ok, which means we did actually
  * update it.  Failure return codes are TM_SelfModified, TM_Updated, and
@@ -1621,12 +1818,43 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
 				   CommandId cid, uint32 options,
 				   Snapshot snapshot, Snapshot crosscheck,
 				   bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
-				   TU_UpdateIndexes *update_indexes)
+				   const Bitmapset *modified_attrs, bool *row_moved)
 {
 	return rel->rd_tableam->tuple_update(rel, otid, slot,
 										 cid, options, snapshot, crosscheck,
-										 wait, tmfd,
-										 lockmode, update_indexes);
+										 wait, tmfd, lockmode,
+										 modified_attrs, row_moved);
+}
+
+/*
+ * Determine which of a candidate set of attributes actually changed value
+ * between two versions of a row.
+ *
+ * 'attrs' is a candidate set of attribute numbers using the
+ * FirstLowInvalidHeapAttributeNumber-offset bitmap convention (typically the
+ * relation's full indexed-attribute set); oldslot and newslot hold the old
+ * and new versions of the row.  Returns the subset of 'attrs' whose values
+ * differ between the two, so the executor can maintain only the indexes whose
+ * attributes overlap that subset.
+ *
+ * The AM owns the mechanics: how two values of one of its attributes compare,
+ * and what a system column means.  The executor owns the policy that consumes
+ * the result.  The AM may mutate and return 'attrs' (e.g. via bms_del_member,
+ * which can pfree it) or return a fresh set; callers must use only the
+ * returned pointer, not their original 'attrs'.
+ *
+ * If the AM does not provide the callback, treat every candidate attribute as
+ * changed (the conservative answer: maintain all candidate indexes) by
+ * returning 'attrs' unmodified.
+ */
+static inline Bitmapset *
+table_modified_attrs(Relation rel, Bitmapset *attrs,
+					 TupleTableSlot *oldslot, TupleTableSlot *newslot)
+{
+	if (rel->rd_tableam->modified_attrs == NULL)
+		return attrs;
+
+	return rel->rd_tableam->modified_attrs(rel, attrs, oldslot, newslot);
 }
 
 /*
@@ -1645,6 +1873,8 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  *		also lock descendant tuples if lock modes don't conflict.
  *		If TUPLE_LOCK_FLAG_FIND_LAST_VERSION, follow the update chain and lock
  *		latest version.
+ *		If TUPLE_LOCK_FLAG_LOCKED_VERSION, *tid names the version this
+ *		transaction has already locked, or found with a dirty snapshot.
  *
  * Output parameters:
  *	*slot: contains the target tuple
@@ -1660,9 +1890,12 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  *
  * In the failure cases other than TM_Invisible and TM_Deleted, the routine
  * fills *tmfd with the tuple's t_ctid, t_xmax, and, if possible, t_cmax.
- * Additionally, in both success and failure cases, tmfd->traversed is set if
- * an update chain was followed.  See comments for struct TM_FailureData for
- * additional info.
+ * Additionally, in both success and failure cases, tmfd->retargeted is set if
+ * TUPLE_LOCK_FLAG_FIND_LAST_VERSION led to locking a later version of the row
+ * than the caller named, which the caller must then re-evaluate; *tid holds
+ * the locator of the version that was locked.  For an AM that updates rows in
+ * place, TUPLE_LOCK_FLAG_LOCKED_VERSION decides which version the caller
+ * named.  See comments for struct TM_FailureData for additional info.
  */
 static inline TM_Result
 table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
@@ -2111,7 +2344,8 @@ extern void simple_table_tuple_delete(Relation rel, ItemPointer tid,
 									  Snapshot snapshot);
 extern void simple_table_tuple_update(Relation rel, ItemPointer otid,
 									  TupleTableSlot *slot, Snapshot snapshot,
-									  TU_UpdateIndexes *update_indexes);
+									  const Bitmapset *modified_attrs,
+									  bool *row_moved);
 
 
 /* ----------------------------------------------------------------------------

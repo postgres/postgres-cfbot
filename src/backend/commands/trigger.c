@@ -46,6 +46,7 @@
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
+#include "storage/buffile.h"
 #include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -82,6 +83,7 @@ static bool GetTupleForTrigger(EState *estate,
 							   LockTupleMode lockmode,
 							   TupleTableSlot *oldslot,
 							   bool do_epq_recheck,
+							   bool row_locked,
 							   TupleTableSlot **epqslot,
 							   TM_Result *tmresultp,
 							   TM_FailureData *tmfdp);
@@ -2746,7 +2748,8 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 					 TupleTableSlot **epqslot,
 					 TM_Result *tmresult,
 					 TM_FailureData *tmfd,
-					 bool is_merge_delete)
+					 bool is_merge_delete,
+					 bool row_locked)
 {
 	TupleTableSlot *slot = ExecGetTriggerOldSlot(estate, relinfo);
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
@@ -2771,7 +2774,8 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 		 */
 		if (!GetTupleForTrigger(estate, epqstate, relinfo, tupleid,
 								LockTupleExclusive, slot, !is_merge_delete,
-								&epqslot_candidate, tmresult, tmfd))
+								row_locked, &epqslot_candidate, tmresult,
+								tmfd))
 			return false;
 
 		/*
@@ -2870,6 +2874,7 @@ ExecARDeleteTriggers(EState *estate,
 							   tupleid,
 							   LockTupleExclusive,
 							   slot,
+							   false,
 							   false,
 							   NULL,
 							   NULL,
@@ -3016,7 +3021,8 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 					 TupleTableSlot *newslot,
 					 TM_Result *tmresult,
 					 TM_FailureData *tmfd,
-					 bool is_merge_update)
+					 bool is_merge_update,
+					 bool row_locked)
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	TupleTableSlot *oldslot = ExecGetTriggerOldSlot(estate, relinfo);
@@ -3047,7 +3053,8 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 		 */
 		if (!GetTupleForTrigger(estate, epqstate, relinfo, tupleid,
 								lockmode, oldslot, !is_merge_update,
-								&epqslot_candidate, tmresult, tmfd))
+								row_locked, &epqslot_candidate, tmresult,
+								tmfd))
 			return false;		/* cancel the update action */
 
 		/*
@@ -3187,6 +3194,7 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 					 ResultRelInfo *dst_partinfo,
 					 ItemPointer tupleid,
 					 HeapTuple fdw_trigtuple,
+					 TupleTableSlot *old_image,
 					 TupleTableSlot *newslot,
 					 List *recheckIndexes,
 					 TransitionCaptureState *transition_capture,
@@ -3224,13 +3232,27 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 		tupsrc = src_partinfo ? src_partinfo : relinfo;
 		oldslot = ExecGetTriggerOldSlot(estate, tupsrc);
 
-		if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
+		/*
+		 * If the AM updated the row in place, its TID now yields the new
+		 * version, so use the pre-update row the caller kept instead of
+		 * fetching it again.
+		 */
+		if (old_image != NULL && !TupIsNull(old_image) &&
+			RelationUpdatesInPlace(tupsrc->ri_RelationDesc))
+		{
+			if (old_image != oldslot)
+				ExecCopySlot(oldslot, old_image);
+			if (tupleid != NULL && ItemPointerIsValid(tupleid))
+				oldslot->tts_tid = *tupleid;
+		}
+		else if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
 			GetTupleForTrigger(estate,
 							   NULL,
 							   tupsrc,
 							   tupleid,
 							   LockTupleExclusive,
 							   oldslot,
+							   false,
 							   false,
 							   NULL,
 							   NULL,
@@ -3389,6 +3411,7 @@ GetTupleForTrigger(EState *estate,
 				   LockTupleMode lockmode,
 				   TupleTableSlot *oldslot,
 				   bool do_epq_recheck,
+				   bool row_locked,
 				   TupleTableSlot **epqslot,
 				   TM_Result *tmresultp,
 				   TM_FailureData *tmfdp)
@@ -3411,6 +3434,8 @@ GetTupleForTrigger(EState *estate,
 		 */
 		if (!IsolationUsesXactSnapshot())
 			lockflags |= TUPLE_LOCK_FLAG_FIND_LAST_VERSION;
+		if (row_locked)
+			lockflags |= TUPLE_LOCK_FLAG_LOCKED_VERSION;
 		test = table_tuple_lock(relation, tid, estate->es_snapshot, oldslot,
 								estate->es_output_cid,
 								lockmode, LockWaitBlock,
@@ -3445,7 +3470,7 @@ GetTupleForTrigger(EState *estate,
 				return false;
 
 			case TM_Ok:
-				if (tmfd.traversed)
+				if (tmfd.retargeted)
 				{
 					/*
 					 * Recheck the tuple using EPQ, if requested.  Otherwise,
@@ -3728,6 +3753,14 @@ typedef uint32 TriggerFlags;
 #define AFTER_TRIGGER_1CTID				0x10000000
 #define AFTER_TRIGGER_2CTID				0x30000000
 #define AFTER_TRIGGER_CP_UPDATE			0x08000000
+/*
+ * A row event on a table whose AM updates rows in place carries copies of
+ * its rows as of the event, because by the time the trigger fires the row's
+ * TID yields a later version.  Every unused TUP_BITS value includes the
+ * CP_UPDATE bit, so the event kind must always be tested against the whole
+ * TUP_BITS field.
+ */
+#define AFTER_TRIGGER_IMAGES			0x18000000
 #define AFTER_TRIGGER_TUP_BITS			0x38000000
 typedef struct AfterTriggerSharedData *AfterTriggerShared;
 
@@ -3774,6 +3807,21 @@ typedef struct AfterTriggerEventDataOneCtid
 	ItemPointerData ate_ctid1;	/* inserted, deleted, or old updated tuple */
 }			AfterTriggerEventDataOneCtid;
 
+/*
+ * AFTER_TRIGGER_IMAGES: the ctids plus, for each, the index of its row's copy
+ * in images, or AFTER_TRIGGER_NO_IMAGE to fetch the row by ctid instead
+ */
+typedef struct AfterTriggerEventDataImages
+{
+	TriggerFlags ate_flags;
+	ItemPointerData ate_ctid1;
+	ItemPointerData ate_ctid2;
+	uint32		ate_image1;
+	uint32		ate_image2;
+}			AfterTriggerEventDataImages;
+
+#define AFTER_TRIGGER_NO_IMAGE			PG_UINT32_MAX
+
 /* AfterTriggerEventData, minus ate_*_part, ate_ctid1 and ate_ctid2 */
 typedef struct AfterTriggerEventDataZeroCtids
 {
@@ -3783,6 +3831,8 @@ typedef struct AfterTriggerEventDataZeroCtids
 #define SizeofTriggerEvent(evt) \
 	(((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_CP_UPDATE ? \
 	 sizeof(AfterTriggerEventData) : \
+	 ((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_IMAGES ? \
+	 sizeof(AfterTriggerEventDataImages) : \
 	 (((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_2CTID ? \
 	  sizeof(AfterTriggerEventDataNoOids) : \
 	  (((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_1CTID ? \
@@ -3917,12 +3967,38 @@ typedef struct AfterTriggersQueryData AfterTriggersQueryData;
 typedef struct AfterTriggersTransData AfterTriggersTransData;
 typedef struct AfterTriggersTableData AfterTriggersTableData;
 
+/*
+ * A row of an AFTER_TRIGGER_IMAGES event: in memory, or, if tuple is NULL,
+ * at a position in afterTriggers.image_file.
+ */
+typedef struct AfterTriggerImage
+{
+	MinimalTuple tuple;
+	int			fileno;
+	pgoff_t		offset;
+} AfterTriggerImage;
+
 typedef struct AfterTriggersData
 {
 	CommandId	firing_counter; /* next firing ID to assign */
 	SetConstraintState state;	/* the active S C state */
 	AfterTriggerEventList events;	/* deferred-event list */
 	MemoryContext event_cxt;	/* memory context for events, if any */
+
+	/*
+	 * Rows for AFTER_TRIGGER_IMAGES events.  They must live as long as the
+	 * events, deferred ones included, so they belong to the transaction. They
+	 * are kept in event_cxt until they would exceed work_mem; later ones are
+	 * written to image_file and read back when their trigger fires.
+	 */
+	AfterTriggerImage *images;
+	uint32		nimages;
+	uint32		maximages;
+	Size		image_mem;		/* bytes of in-memory image tuples */
+	BufFile    *image_file;		/* spilled images, or NULL */
+	ResourceOwner image_owner;	/* owns image_file */
+	int			image_fileno;	/* end of image_file, for appending */
+	pgoff_t		image_offset;
 
 	/* per-query-level data: */
 	AfterTriggersQueryData *query_stack;	/* array of structs shown below */
@@ -3948,6 +4024,10 @@ struct AfterTriggersTransData
 	AfterTriggerEventList events;	/* saved list pointer */
 	int			query_depth;	/* saved query_depth */
 	CommandId	firing_counter; /* saved firing_counter */
+	uint32		nimages;		/* saved image count */
+	int			image_fileno;	/* saved image_file end */
+	pgoff_t		image_offset;
+	bool		image_file_existed; /* image_file was open at subxact start */
 };
 
 struct AfterTriggersTableData
@@ -4334,6 +4414,145 @@ afterTriggerDeleteHeadEventChunk(AfterTriggersQueryData *qs)
 }
 
 
+/*
+ * AfterTriggerSaveImage
+ *		Record a row of an AFTER_TRIGGER_IMAGES event, returning its index
+ *		in afterTriggers.images.
+ *
+ * Images are copied into event_cxt until they would exceed work_mem, and
+ * appended to a temporary file after that, as a tuplestore does, so that a
+ * large bulk update does not hold every row in memory.
+ */
+static uint32
+AfterTriggerSaveImage(TupleTableSlot *slot)
+{
+	AfterTriggerImage *img;
+	MemoryContext oldcxt;
+	MinimalTuple tuple;
+
+	if (afterTriggers.event_cxt == NULL)
+		afterTriggers.event_cxt =
+			AllocSetContextCreate(TopTransactionContext,
+								  "AfterTriggerEvents",
+								  ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(afterTriggers.event_cxt);
+
+	if (afterTriggers.nimages >= afterTriggers.maximages)
+	{
+		afterTriggers.maximages = Max(64, afterTriggers.maximages * 2);
+		afterTriggers.images = afterTriggers.images ?
+			repalloc_huge(afterTriggers.images,
+						  afterTriggers.maximages * sizeof(AfterTriggerImage)) :
+			MemoryContextAllocHuge(afterTriggers.event_cxt,
+								   afterTriggers.maximages * sizeof(AfterTriggerImage));
+	}
+	img = &afterTriggers.images[afterTriggers.nimages];
+	img->tuple = NULL;
+	img->fileno = -1;
+	img->offset = 0;
+
+	/* Once the file exists we no longer grow the in-memory set. */
+	tuple = ExecCopySlotMinimalTuple(slot);
+	if (afterTriggers.image_file == NULL &&
+		afterTriggers.image_mem + tuple->t_len <= (Size) work_mem * 1024L)
+	{
+		img->tuple = tuple;
+		afterTriggers.image_mem += tuple->t_len;
+		MemoryContextSwitchTo(oldcxt);
+		return afterTriggers.nimages++;
+	}
+
+	/*
+	 * The file must survive until the events fire, which for deferred
+	 * triggers is the end of the transaction, so its resource owner is a
+	 * child of the top transaction's rather than of the current portal's.
+	 */
+	if (afterTriggers.image_file == NULL)
+	{
+		ResourceOwner saveowner = CurrentResourceOwner;
+
+		afterTriggers.image_owner =
+			ResourceOwnerCreate(TopTransactionResourceOwner,
+								"AfterTriggerImages");
+		CurrentResourceOwner = afterTriggers.image_owner;
+		afterTriggers.image_file = BufFileCreateTemp(false);
+		CurrentResourceOwner = saveowner;
+		afterTriggers.image_fileno = 0;
+		afterTriggers.image_offset = 0;
+	}
+
+	/* Reads move the file position, so always seek to the end first. */
+	if (BufFileSeek(afterTriggers.image_file, afterTriggers.image_fileno,
+					afterTriggers.image_offset, SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in trigger image temporary file")));
+
+	img->fileno = afterTriggers.image_fileno;
+	img->offset = afterTriggers.image_offset;
+	BufFileWrite(afterTriggers.image_file, &tuple->t_len, sizeof(tuple->t_len));
+	BufFileWrite(afterTriggers.image_file, tuple, tuple->t_len);
+	BufFileTell(afterTriggers.image_file, &afterTriggers.image_fileno,
+				&afterTriggers.image_offset);
+	pfree(tuple);
+
+	MemoryContextSwitchTo(oldcxt);
+	return afterTriggers.nimages++;
+}
+
+/*
+ * AfterTriggerDropImageFile
+ *		Close and delete the image file, if any.
+ *
+ * This releases the file's resource owner rather than calling BufFileClose,
+ * because closing flushes the write buffer, and on an error path that buffer
+ * may hold the write that failed.
+ */
+static void
+AfterTriggerDropImageFile(void)
+{
+	ResourceOwner owner = afterTriggers.image_owner;
+
+	afterTriggers.image_file = NULL;
+	afterTriggers.image_owner = NULL;
+	afterTriggers.image_fileno = 0;
+	afterTriggers.image_offset = 0;
+	if (owner == NULL)
+		return;
+	ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+	ResourceOwnerRelease(owner, RESOURCE_RELEASE_LOCKS, false, false);
+	ResourceOwnerRelease(owner, RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+	ResourceOwnerDelete(owner);
+}
+
+/*
+ * AfterTriggerLoadImage
+ *		Store the row recorded at "index" in "slot".
+ */
+static void
+AfterTriggerLoadImage(uint32 index, TupleTableSlot *slot)
+{
+	AfterTriggerImage *img = &afterTriggers.images[index];
+	uint32		len;
+	MinimalTuple tuple;
+
+	if (img->tuple != NULL)
+	{
+		ExecForceStoreMinimalTuple(img->tuple, slot, false);
+		return;
+	}
+
+	if (BufFileSeek(afterTriggers.image_file, img->fileno, img->offset,
+					SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in trigger image temporary file")));
+	BufFileReadExact(afterTriggers.image_file, &len, sizeof(len));
+	tuple = (MinimalTuple) palloc(len);
+	BufFileReadExact(afterTriggers.image_file, tuple, len);
+	ExecForceStoreMinimalTuple(tuple, slot, true);
+}
+
 /* ----------
  * AfterTriggerExecute()
  *
@@ -4468,10 +4687,20 @@ AfterTriggerExecute(EState *estate,
 				TupleTableSlot *src_slot = ExecGetTriggerOldSlot(estate,
 																 src_relInfo);
 
-				if (!table_tuple_fetch_row_version(src_rel,
-												   &(event->ate_ctid1),
-												   SnapshotAny,
-												   src_slot))
+				if ((event->ate_flags & AFTER_TRIGGER_TUP_BITS) ==
+					AFTER_TRIGGER_IMAGES &&
+					((AfterTriggerEventDataImages *) event)->ate_image1 !=
+					AFTER_TRIGGER_NO_IMAGE)
+				{
+					AfterTriggerLoadImage(((AfterTriggerEventDataImages *) event)->ate_image1,
+										  src_slot);
+					src_slot->tts_tid = event->ate_ctid1;
+					src_slot->tts_tableOid = RelationGetRelid(src_rel);
+				}
+				else if (!table_tuple_fetch_row_version(src_rel,
+														&(event->ate_ctid1),
+														SnapshotAny,
+														src_slot))
 					elog(ERROR, "failed to fetch tuple1 for AFTER trigger");
 
 				/*
@@ -4504,16 +4733,27 @@ AfterTriggerExecute(EState *estate,
 
 			/* don't touch ctid2 if not there */
 			if (((event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_2CTID ||
-				 (event->ate_flags & AFTER_TRIGGER_CP_UPDATE)) &&
+				 (event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_CP_UPDATE ||
+				 (event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_IMAGES) &&
 				ItemPointerIsValid(&(event->ate_ctid2)))
 			{
 				TupleTableSlot *dst_slot = ExecGetTriggerNewSlot(estate,
 																 dst_relInfo);
 
-				if (!table_tuple_fetch_row_version(dst_rel,
-												   &(event->ate_ctid2),
-												   SnapshotAny,
-												   dst_slot))
+				if ((event->ate_flags & AFTER_TRIGGER_TUP_BITS) ==
+					AFTER_TRIGGER_IMAGES &&
+					((AfterTriggerEventDataImages *) event)->ate_image2 !=
+					AFTER_TRIGGER_NO_IMAGE)
+				{
+					AfterTriggerLoadImage(((AfterTriggerEventDataImages *) event)->ate_image2,
+										  dst_slot);
+					dst_slot->tts_tid = event->ate_ctid2;
+					dst_slot->tts_tableOid = RelationGetRelid(dst_rel);
+				}
+				else if (!table_tuple_fetch_row_version(dst_rel,
+														&(event->ate_ctid2),
+														SnapshotAny,
+														dst_slot))
 					elog(ERROR, "failed to fetch tuple2 for AFTER trigger");
 
 				/*
@@ -5253,6 +5493,37 @@ AfterTriggerEndQuery(EState *estate)
 	AfterTriggerFreeQuery(&afterTriggers.query_stack[afterTriggers.query_depth]);
 
 	afterTriggers.query_depth--;
+
+	/*
+	 * Once a top-level query has fired its events and none are deferred, no
+	 * event refers to a row image any more, so release them all rather than
+	 * let a long transaction accumulate them.  Saved subtransaction state is
+	 * clamped to match, so a later rollback does not rewind past the start.
+	 */
+	if (afterTriggers.query_depth == -1 &&
+		afterTriggers.events.head == NULL &&
+		(afterTriggers.nimages > 0 || afterTriggers.image_file != NULL))
+	{
+		int			nlevels = Min(afterTriggers.maxtransdepth,
+								  GetCurrentTransactionNestLevel() + 1);
+
+		for (uint32 i = 0; i < afterTriggers.nimages; i++)
+		{
+			if (afterTriggers.images[i].tuple != NULL)
+				pfree(afterTriggers.images[i].tuple);
+		}
+		afterTriggers.nimages = 0;
+		afterTriggers.image_mem = 0;
+		AfterTriggerDropImageFile();
+
+		for (int i = 0; i < nlevels; i++)
+		{
+			afterTriggers.trans_stack[i].nimages = 0;
+			afterTriggers.trans_stack[i].image_fileno = 0;
+			afterTriggers.trans_stack[i].image_offset = 0;
+			afterTriggers.trans_stack[i].image_file_existed = false;
+		}
+	}
 }
 
 
@@ -5393,8 +5664,12 @@ AfterTriggerEndXact(bool isCommit)
 	 */
 	if (afterTriggers.event_cxt)
 	{
+		AfterTriggerDropImageFile();
 		MemoryContextDelete(afterTriggers.event_cxt);
 		afterTriggers.event_cxt = NULL;
+		afterTriggers.images = NULL;	/* lived in event_cxt */
+		afterTriggers.nimages = afterTriggers.maximages = 0;
+		afterTriggers.image_mem = 0;
 		afterTriggers.events.head = NULL;
 		afterTriggers.events.tail = NULL;
 		afterTriggers.events.tailfree = NULL;
@@ -5467,6 +5742,11 @@ AfterTriggerBeginSubXact(void)
 	afterTriggers.trans_stack[my_level].events = afterTriggers.events;
 	afterTriggers.trans_stack[my_level].query_depth = afterTriggers.query_depth;
 	afterTriggers.trans_stack[my_level].firing_counter = afterTriggers.firing_counter;
+	afterTriggers.trans_stack[my_level].nimages = afterTriggers.nimages;
+	afterTriggers.trans_stack[my_level].image_fileno = afterTriggers.image_fileno;
+	afterTriggers.trans_stack[my_level].image_offset = afterTriggers.image_offset;
+	afterTriggers.trans_stack[my_level].image_file_existed =
+		afterTriggers.image_file != NULL;
 }
 
 /*
@@ -5529,6 +5809,48 @@ AfterTriggerEndSubXact(bool isCommit)
 		 */
 		afterTriggerRestoreEventList(&afterTriggers.events,
 									 &afterTriggers.trans_stack[my_level].events);
+
+		/*
+		 * Discard any row images the aborted subtransaction queued, freeing
+		 * the in-memory ones and rewinding the temporary file, so a savepoint
+		 * loop cannot grow either without bound.
+		 */
+		while (afterTriggers.nimages >
+			   afterTriggers.trans_stack[my_level].nimages)
+		{
+			AfterTriggerImage *img =
+				&afterTriggers.images[--afterTriggers.nimages];
+
+			if (img->tuple != NULL)
+			{
+				afterTriggers.image_mem -= img->tuple->t_len;
+				pfree(img->tuple);
+			}
+		}
+		afterTriggers.image_fileno =
+			afterTriggers.trans_stack[my_level].image_fileno;
+		afterTriggers.image_offset =
+			afterTriggers.trans_stack[my_level].image_offset;
+
+		/*
+		 * A file the subtransaction created holds only its images, so drop
+		 * it, and later images start in memory again.  The BufFile itself
+		 * stays in event_cxt until transaction end.
+		 */
+		if (!afterTriggers.trans_stack[my_level].image_file_existed)
+			AfterTriggerDropImageFile();
+		else if (afterTriggers.image_file != NULL)
+		{
+			/*
+			 * The file predates the subtransaction, so keep it, but forget
+			 * buffered data past the restored end.  It may hold the write
+			 * whose failure caused this abort, which the next seek would
+			 * otherwise retry, and fail again.
+			 */
+			BufFileTruncateBuffer(afterTriggers.image_file,
+								  afterTriggers.image_fileno,
+								  afterTriggers.image_offset);
+		}
 
 		/*
 		 * Restore the trigger state.  If the saved state is NULL, then this
@@ -6222,6 +6544,10 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 	int			tgtype_level;
 	int			i;
 	Tuplestorestate *fdw_tuplestore = NULL;
+	bool		in_place = false;
+	uint32		old_image = AFTER_TRIGGER_NO_IMAGE;
+	uint32		new_image = AFTER_TRIGGER_NO_IMAGE;
+	AfterTriggerEventDataImages img_event;
 
 	/*
 	 * Check state.  We use a normal test not Assert because it is possible to
@@ -6400,13 +6726,24 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 			break;
 	}
 
-	/* Determine flags */
+	/*
+	 * Determine flags.  A row event normally records TIDs and fetches the
+	 * rows again when the trigger fires.  If the table's AM updates rows in
+	 * place, a TID yields the row's current version by then, so INSERT and
+	 * UPDATE events may also carry copies of their rows; see amlocator.h and
+	 * the loop below.
+	 */
 	if (!(relkind == RELKIND_FOREIGN_TABLE && row_trigger))
 	{
+		in_place = row_trigger && event != TRIGGER_EVENT_DELETE &&
+			relkind != RELKIND_PARTITIONED_TABLE &&
+			RelationUpdatesInPlace(rel);
 		if (row_trigger && event == TRIGGER_EVENT_UPDATE)
 		{
 			if (relkind == RELKIND_PARTITIONED_TABLE)
 				new_event.ate_flags = AFTER_TRIGGER_CP_UPDATE;
+			else if (in_place)
+				new_event.ate_flags = AFTER_TRIGGER_IMAGES;
 			else
 				new_event.ate_flags = AFTER_TRIGGER_2CTID;
 		}
@@ -6596,8 +6933,45 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 			new_shared.ats_table = NULL;
 		new_shared.ats_modifiedcols = modifiedCols;
 
-		afterTriggerAddEvent(&afterTriggers.query_stack[afterTriggers.query_depth].events,
-							 &new_event, &new_shared);
+		/*
+		 * Foreign key checks and unique rechecks test whether the new row is
+		 * still live, so they fetch its current version by TID.  Other
+		 * triggers get the new row as of the event.  The old row of an UPDATE
+		 * is always copied, since its TID no longer yields it.  All the
+		 * events for this row share each copy.
+		 */
+		if (in_place)
+		{
+			uint32		image = AFTER_TRIGGER_NO_IMAGE;
+
+			if (RI_FKey_trigger_type(trigger->tgfoid) != RI_TRIGGER_FK &&
+				trigger->tgfoid != F_UNIQUE_KEY_RECHECK)
+			{
+				if (new_image == AFTER_TRIGGER_NO_IMAGE)
+					new_image = AfterTriggerSaveImage(newslot);
+				image = new_image;
+			}
+			if (event == TRIGGER_EVENT_UPDATE)
+			{
+				if (old_image == AFTER_TRIGGER_NO_IMAGE)
+					old_image = AfterTriggerSaveImage(oldslot);
+				img_event.ate_image1 = old_image;
+				img_event.ate_image2 = image;
+			}
+			else
+			{
+				img_event.ate_image1 = image;
+				img_event.ate_image2 = AFTER_TRIGGER_NO_IMAGE;
+			}
+			img_event.ate_flags = AFTER_TRIGGER_IMAGES;
+			img_event.ate_ctid1 = new_event.ate_ctid1;
+			img_event.ate_ctid2 = new_event.ate_ctid2;
+			afterTriggerAddEvent(&afterTriggers.query_stack[afterTriggers.query_depth].events,
+								 (AfterTriggerEvent) &img_event, &new_shared);
+		}
+		else
+			afterTriggerAddEvent(&afterTriggers.query_stack[afterTriggers.query_depth].events,
+								 &new_event, &new_shared);
 	}
 
 	/*

@@ -92,6 +92,10 @@ CATALOG(pg_subscription,6100,SubscriptionRelationId) BKI_SHARED_RELATION BKI_ROW
 									 * exceeded max_retention_duration, when
 									 * defined */
 
+	char		subhotindexedonapply;	/* Per-subscription gating of the HOT-
+										 * indexed apply path.  See
+										 * LOGICALREP_HOT_INDEXED_* constants. */
+
 	Oid			subserver BKI_LOOKUP_OPT(pg_foreign_server);	/* If connection uses
 																 * server */
 
@@ -173,6 +177,9 @@ typedef struct Subscription
 									 * exceeded max_retention_duration, when
 									 * defined */
 	Oid			conflictlogrelid;	/* conflict log table Oid */
+	char		hotindexedonapply; /* Per-subscription gating of the
+									 * HOT-indexed apply path.  See
+									 * LOGICALREP_HOT_INDEXED_* constants. */
 	char	   *slotname;		/* Name of the replication slot */
 	char	   *synccommit;		/* Synchronous commit setting for worker */
 	char	   *walrcvtimeout;	/* wal_receiver_timeout setting for worker */
@@ -218,6 +225,26 @@ typedef struct Subscription
  * apply worker.
  */
 #define LOGICALREP_STREAM_PARALLEL 'p'
+
+/*
+ * Per-subscription gating of the HOT-indexed apply path.  Recorded as a
+ * single-character code in pg_subscription.subhotindexedonapply.
+ *
+ *   'o' is OFF: force non-HOT on apply whenever the subscriber carries any
+ *		  indexed attribute beyond the primary key.  Matches the conservative
+ *		  behaviour before this option was introduced.
+ *   's' is SUBSET_ONLY (default for freshly created subscriptions): allow the
+ *		  HOT-indexed apply path when the subscriber's full indexed-attr set is
+ *		  a subset of its primary-key attrs (which covers the no-secondary-
+ *		  index case as well).  Safe on matching schemas; falls back to non-HOT
+ *		  when the subscriber adds indexes beyond the primary key.
+ *   'a' is ALWAYS: unconditional HOT-indexed eligibility on apply.  The
+ *		  operator accepts responsibility for keeping subscriber and publisher
+ *		  indexed-attr sets compatible.
+ */
+#define LOGICALREP_HOT_INDEXED_OFF			'o'
+#define LOGICALREP_HOT_INDEXED_SUBSET_ONLY	's'
+#define LOGICALREP_HOT_INDEXED_ALWAYS		'a'
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 

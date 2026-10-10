@@ -152,6 +152,20 @@ IndexNext(IndexScanState *node)
 			}
 		}
 
+		/*
+		 * HOT-indexed stale entry: the chain we walked to reach this tuple
+		 * crossed a hot-indexed hop that changed an attribute this index
+		 * covers, so the leaf entry we arrived through is stale.  Drop it;
+		 * the fresh entry inserted for the new value returns the row through
+		 * its own path.  Staleness was decided by the heap AM via per-hop
+		 * modified-attrs bitmaps (see heap_hot_search_buffer).
+		 */
+		if (scandesc->xs_entry_needs_recheck)
+		{
+			InstrCountFiltered2(node, 1);
+			continue;
+		}
+
 		return slot;
 	}
 
@@ -276,6 +290,19 @@ next_indextuple:
 			 */
 			node->iss_ReachedEnd = true;
 			continue;
+		}
+
+		/*
+		 * Drop a HOT-indexed stale leaf entry, exactly as IndexNext does.  The
+		 * staleness signal is access-method agnostic (indexam.c sets it from
+		 * per-hop modified-attrs overlap, with no btree gating), so a
+		 * distance-ordered GiST/SP-GiST scan that reaches this path can see it
+		 * too; the fresh entry inserted for the new value returns the row.
+		 */
+		if (scandesc->xs_entry_needs_recheck)
+		{
+			InstrCountFiltered2(node, 1);
+			goto next_indextuple;
 		}
 
 		/*

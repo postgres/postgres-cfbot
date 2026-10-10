@@ -680,6 +680,61 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
          </para>
         </listitem>
        </varlistentry>
+
+      <varlistentry id="sql-createsubscription-params-with-hot-indexed-on-apply">
+        <term><literal>hot_indexed_on_apply</literal> (<type>text</type>)</term>
+        <listitem>
+         <para>
+          Controls whether the subscription's apply worker may take the
+          HOT-indexed update path when an <command>UPDATE</command> replicated
+          from the publisher touches an indexed attribute.  Because the
+          subscriber's index set may differ from the publisher's, an
+          unconstrained HOT-indexed decision on the apply path can produce a
+          heap chain whose index state disagrees with the upstream row.  The
+          option restricts when the apply worker is allowed to take that path.
+         </para>
+         <para>
+          Accepted values are:
+          <variablelist>
+           <varlistentry>
+            <term><literal>off</literal></term>
+            <listitem>
+             <para>
+              Force non-HOT on apply whenever the subscriber has any indexed
+              attribute beyond the primary key.  This matches the conservative
+              pre-existing behaviour.
+             </para>
+            </listitem>
+           </varlistentry>
+           <varlistentry>
+            <term><literal>subset_only</literal></term>
+            <listitem>
+             <para>
+              Allow the HOT-indexed apply path when the subscriber's
+              indexed-attr set is a subset of its primary-key attrs (which
+              includes the no-secondary-index case).  This is the default and
+              captures the common replication-ready schema shape while staying
+              safe when the subscriber adds indexes the publisher does not
+              have.
+             </para>
+            </listitem>
+           </varlistentry>
+           <varlistentry>
+            <term><literal>always</literal></term>
+            <listitem>
+             <para>
+              Unconditional HOT-indexed eligibility on apply.  The operator
+              takes responsibility for keeping the subscriber's indexed-attr
+              set compatible with the publisher's; divergent schemas can
+              produce spurious duplicate-key conflicts for subsequent
+              inserts on the subscriber.
+             </para>
+            </listitem>
+           </varlistentry>
+          </variablelist>
+         </para>
+        </listitem>
+       </varlistentry>
       </variablelist></para>
     </listitem>
    </varlistentry>

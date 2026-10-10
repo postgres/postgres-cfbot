@@ -2938,9 +2938,9 @@ ri_FastPathProbeOne(Relation pk_rel, Relation idx_rel,
  * Calls table_tuple_lock() directly with handling specific to RI checks.
  * Returns true if the tuple was successfully locked.
  *
- * Sets *concurrently_updated to true if the locked tuple was reached
- * by following an update chain (tmfd.traversed), indicating the caller
- * should recheck the key.
+ * Sets *concurrently_updated to true if a concurrent update means the
+ * version locked is a later one than the scan found (tmfd.retargeted),
+ * indicating the caller should recheck the key.
  */
 static bool
 ri_LockPKTuple(Relation pk_rel, TupleTableSlot *slot, Snapshot snap,
@@ -2971,7 +2971,7 @@ ri_LockPKTuple(Relation pk_rel, TupleTableSlot *slot, Snapshot snap,
 	switch (result)
 	{
 		case TM_Ok:
-			if (tmfd.traversed)
+			if (tmfd.retargeted)
 				*concurrently_updated = true;
 			return true;
 
@@ -3174,8 +3174,8 @@ ri_CheckPermissions(const RI_ConstraintInfo *riinfo, Relation query_rel)
 
 /*
  * recheck_matched_pk_tuple
- *		After following an update chain (tmfd.traversed), verify that
- *		the locked PK tuple still matches the original search keys.
+ *		After locking a later version of the row (tmfd.retargeted), verify
+ *		that the locked PK tuple still matches the original search keys.
  *
  * A non-key update (e.g. changing a non-PK column) creates a new tuple version
  * that we've now locked, but the key is unchanged -- that's fine.  A key
@@ -3188,7 +3188,7 @@ recheck_matched_pk_tuple(Relation idxrel, ScanKeyData *skeys, int nkeys,
 {
 	/*
 	 * TODO: BuildIndexInfo does a syscache lookup + palloc on every call.
-	 * This only fires on the concurrent-update path (tmfd.traversed), which
+	 * This only fires on the concurrent-update path (tmfd.retargeted), which
 	 * should be rare, so the cost is acceptable for now.  If profiling shows
 	 * otherwise, cache the IndexInfo in FastPathMeta.
 	 */

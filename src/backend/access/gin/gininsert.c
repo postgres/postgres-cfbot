@@ -629,10 +629,27 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	uint32		nlist;
 	MemoryContext oldCtx;
 	OffsetNumber attnum;
+	const LocatorDesc *locdesc;
 
 	if (RelationGetNumberOfBlocks(index) != 0)
 		elog(ERROR, "index \"%s\" already contains data",
 			 RelationGetRelationName(index));
+
+	/*
+	 * GIN's posting lists keep an offset in 11 bits (ginpostinglist.c), and
+	 * a partial-match scan collects offsets in an array of
+	 * TBM_MAX_TUPLES_PER_PAGE (ginget.c).  The latter is the smaller bound,
+	 * so a table whose locators exceed it cannot be indexed correctly.
+	 */
+	locdesc = RelationGetLocatorDesc(heap);
+	if (locdesc->max_offset > TBM_MAX_TUPLES_PER_PAGE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("access method \"%s\" cannot index table \"%s\"",
+						"gin", RelationGetRelationName(heap)),
+				 errdetail("The table's \"%s\" locator uses offsets up to %u, but \"%s\" can store offsets only up to %u.",
+						   locdesc->name, (unsigned int) locdesc->max_offset,
+						   "gin", (unsigned int) TBM_MAX_TUPLES_PER_PAGE)));
 
 	initGinState(&buildstate.ginstate, index);
 	buildstate.indtuples = 0;
