@@ -242,6 +242,7 @@ static double convert_timevalue_to_scalar(Datum value, Oid typid,
 										  bool *failure);
 static Node *strip_all_phvs_deep(PlannerInfo *root, Node *node);
 static bool contain_placeholder_walker(Node *node, void *context);
+static Node *strip_all_adjacency_relabeltypes(Node *node);
 static Node *strip_all_phvs_mutator(Node *node, void *context);
 static void examine_simple_variable(PlannerInfo *root, Var *var,
 									VariableStatData *vardata);
@@ -5622,8 +5623,10 @@ ReleaseDummy(HeapTuple tuple)
  *	varRelid: see specs for restriction selectivity functions
  *
  * Outputs: *vardata is filled as follows:
- *	var: the input expression (with any phvs or binary relabeling stripped,
- *		if it is or contains a variable; but otherwise unchanged)
+ *	var: the input expression (with PHVs stripped and adjacent
+ *		RelabelTypes normalized if it is or contains a variable.
+ *		The topmost RelabelType may also be stripped on retry.
+ *		Otherwise, the expression is unchanged.)
  *	rel: RelOptInfo for relation containing variable; NULL if expression
  *		contains no Vars (NOTE this could point to a RelOptInfo of a
  *		subquery, not one in the current query).
@@ -5654,6 +5657,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	Relids		varnos;
 	Relids		basevarnos;
 	RelOptInfo *onerel;
+	bool		try_again = false;
 
 	/* Make sure we don't return dangling pointers in vardata */
 	MemSet(vardata, 0, sizeof(VariableStatData));
@@ -5670,13 +5674,17 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	 */
 	basenode = strip_all_phvs_deep(root, node);
 
-	/*
-	 * Look inside any binary-compatible relabeling.  We need to handle nested
-	 * RelabelType nodes here, because the prior stripping of PlaceHolderVars
-	 * may have brought separate RelabelTypes into adjacency.
-	 */
-	while (IsA(basenode, RelabelType))
+retry:
+	if (try_again && IsA(basenode, RelabelType))
+	{
+		Oid			vartype = vardata->vartype;
+
+		MemSet(vardata, 0, sizeof(VariableStatData));
+		vardata->vartype = vartype;
+
+		/* Strip the topmost RelabelType before comparing when retrying. */
 		basenode = (Node *) ((RelabelType *) basenode)->arg;
+	}
 
 	/* Fast path for a simple Var */
 	if (IsA(basenode, Var) &&
@@ -5685,7 +5693,12 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		Var		   *var = (Var *) basenode;
 
 		/* Set up result fields other than the stats tuple */
-		vardata->var = basenode;	/* return Var without phvs or relabeling */
+
+		/*
+		 * return Var without phvs or adjacent relabeling, or strip the
+		 * topmost RelabelType when retrying.
+		 */
+		vardata->var = basenode;
 		vardata->rel = find_base_rel(root, var->varno);
 		vardata->atttype = var->vartype;
 		vardata->atttypmod = var->vartypmod;
@@ -5722,7 +5735,12 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 			{
 				onerel = find_base_rel(root, relid);
 				vardata->rel = onerel;
-				node = basenode;	/* strip any phvs or relabeling */
+
+				/*
+				 * strip any phvs or adjacent relabeling, or strip the topmost
+				 * RelabelType when retrying.
+				 */
+				node = basenode;
 			}
 			/* else treat it as a constant */
 		}
@@ -5733,13 +5751,23 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 			{
 				/* treat it as a variable of a join relation */
 				vardata->rel = find_join_rel(root, varnos);
-				node = basenode;	/* strip any phvs or relabeling */
+
+				/*
+				 * strip any phvs or adjacent relabeling, or strip the topmost
+				 * RelabelType when retrying.
+				 */
+				node = basenode;
 			}
 			else if (bms_is_member(varRelid, varnos))
 			{
 				/* ignore the vars belonging to other relations */
 				vardata->rel = find_base_rel(root, varRelid);
-				node = basenode;	/* strip any phvs or relabeling */
+
+				/*
+				 * strip any phvs or adjacent relabeling, or strip the topmost
+				 * RelabelType when retrying.
+				 */
+				node = basenode;
 				/* note: no point in expressional-index search here */
 			}
 			/* else treat it as a constant */
@@ -5776,7 +5804,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		 * extended statistics.  So strip them out first.
 		 */
 		if (bms_overlap(varnos, root->outer_join_rels))
-			node = remove_nulling_relids(node, root->outer_join_rels, NULL);
+			basenode = remove_nulling_relids(basenode, root->outer_join_rels, NULL);
 
 		foreach(ilist, onerel->indexlist)
 		{
@@ -5797,9 +5825,16 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 					if (indexpr_item == NULL)
 						elog(ERROR, "too few entries in indexprs list");
 					indexkey = (Node *) lfirst(indexpr_item);
-					if (indexkey && IsA(indexkey, RelabelType))
+					if (try_again && indexkey && IsA(indexkey, RelabelType))
+					{
+						/*
+						 * Strip the topmost RelabelType before comparing when
+						 * retrying.
+						 */
 						indexkey = (Node *) ((RelabelType *) indexkey)->arg;
-					if (equal(node, indexkey))
+					}
+
+					if (equal(basenode, indexkey))
 					{
 						/*
 						 * Found a match ... is it a unique index? Tests here
@@ -5923,12 +5958,17 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 
 				Assert(expr);
 
-				/* strip RelabelType before comparing it */
-				if (expr && IsA(expr, RelabelType))
+				if (try_again && expr && IsA(expr, RelabelType))
+				{
+					/*
+					 * Strip the topmost RelabelType before comparing when
+					 * retrying.
+					 */
 					expr = (Node *) ((RelabelType *) expr)->arg;
+				}
 
 				/* found a match, see if we can extract pg_statistic row */
-				if (equal(node, expr))
+				if (equal(basenode, expr))
 				{
 					/*
 					 * XXX Not sure if we should cache the tuple somewhere.
@@ -5974,6 +6014,17 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	}
 
 	bms_free(varnos);
+
+	/*
+	 * If the initial lookup did not find statistics, retry without the
+	 * topmost RelabelType to preserve the previous lookup behavior.
+	 */
+	if (!vardata->statsTuple && !try_again &&
+		IsA(basenode, RelabelType) && onerel != NULL)
+	{
+		try_again = true;
+		goto retry;
+	}
 }
 
 /*
@@ -6014,6 +6065,52 @@ contain_placeholder_walker(Node *node, void *context)
 }
 
 /*
+ * strip_all_adjacency_relabeltypes
+ *		deeply strip all adjacent RelabelTypes.
+ *
+ * Borrow the relevant logic from applyRelabelType().  Remove
+ * stacked inner RelabelTypes, retaining the outer one unless
+ * the underlying expression already has the same result type,
+ * typmod, and collation.  This ensures that redundant relabeling
+ * is removed while preserving the outer expression's semantics.
+ */
+static Node *
+strip_all_adjacency_relabeltypes(Node *node)
+{
+	if (IsA(node, RelabelType))
+	{
+		RelabelType *relabel = (RelabelType *) node;
+		Node	   *arg = (Node *) relabel->arg;
+		bool		strip_adjacent_relabeltypes = false;
+
+		/*
+		 * If we find stacked RelabelTypes (eg, from foo::int::oid) we can
+		 * discard all but the top one, and must do so to ensure that
+		 * semantically equivalent expressions are equal().
+		 */
+		while (arg && IsA(arg, RelabelType))
+		{
+			strip_adjacent_relabeltypes = true;
+			arg = (Node *) ((RelabelType *) arg)->arg;
+		}
+
+		if (strip_adjacent_relabeltypes)
+		{
+			if (exprType(arg) == relabel->resulttype &&
+				exprTypmod(arg) == relabel->resulttypmod &&
+				exprCollation(arg) == relabel->resultcollid)
+			{
+				node = arg;
+			}
+			else
+				relabel->arg = (Expr *) arg;
+		}
+	}
+
+	return node;
+}
+
+/*
  * strip_all_phvs_mutator
  *		Mutator to deeply strip all PlaceHolderVars
  */
@@ -6027,10 +6124,20 @@ strip_all_phvs_mutator(Node *node, void *context)
 		/* Strip it and recurse into its contained expression */
 		PlaceHolderVar *phv = (PlaceHolderVar *) node;
 
-		return strip_all_phvs_mutator((Node *) phv->phexpr, context);
+		node = strip_all_phvs_mutator((Node *) phv->phexpr, context);
 	}
+	else
+		node = expression_tree_mutator(node, strip_all_phvs_mutator, context);
 
-	return expression_tree_mutator(node, strip_all_phvs_mutator, context);
+	/*
+	 * Look inside binary-compatible relabeling.  Stripping PlaceHolderVars
+	 * above may have brought previously separated RelabelType nodes into
+	 * adjacency, either at the top level or deeper in the expression tree.
+	 * Normalize these cases before statistics lookup so that equal() and
+	 * other structural comparisons can match semantically equivalent
+	 * expressions.
+	 */
+	return strip_all_adjacency_relabeltypes(node);
 }
 
 /*
