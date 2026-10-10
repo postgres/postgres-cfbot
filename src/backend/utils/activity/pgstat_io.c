@@ -16,6 +16,7 @@
 
 #include "postgres.h"
 
+#include "access/lsn_indexer.h"
 #include "executor/instrument.h"
 #include "storage/bufmgr.h"
 #include "utils/pgstat_internal.h"
@@ -370,6 +371,7 @@ pgstat_tracks_io_bktype(BackendType bktype)
 		case B_WAL_SENDER:
 		case B_WAL_SUMMARIZER:
 		case B_WAL_WRITER:
+		case B_FAST_RECOVERY_WORKER:
 			return true;
 	}
 
@@ -487,6 +489,23 @@ pgstat_tracks_io_object(BackendType bktype, IOObject io_object,
 		return false;
 	}
 
+	/*
+	 * The fast recovery worker reads relation pages into shared buffers,
+	 * evicting dirty ones as needed, and reads WAL to replay them on demand.
+	 * Replaying a record can hand its other pages scratch local buffers.  It
+	 * never uses a buffer access strategy and never initializes WAL segments.
+	 */
+	if (bktype == B_FAST_RECOVERY_WORKER)
+	{
+		if (io_context == IOCONTEXT_NORMAL &&
+			(io_object == IOOBJECT_RELATION ||
+			 io_object == IOOBJECT_TEMP_RELATION ||
+			 io_object == IOOBJECT_WAL))
+			return true;
+
+		return false;
+	}
+
 	return true;
 }
 
@@ -525,9 +544,12 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	/*
-	 * Some BackendTypes do not perform reads with IOOBJECT_WAL.
+	 * Some BackendTypes do not perform reads with IOOBJECT_WAL - except when
+	 * fast crash recovery is on, in which case any backend that hits a cold
+	 * page may have to read WAL to replay it on demand.
 	 */
 	if (io_object == IOOBJECT_WAL && io_op == IOOP_READ &&
+		!fast_crash_recovery &&
 		(bktype == B_WAL_RECEIVER || bktype == B_BG_WRITER ||
 		 bktype == B_AUTOVAC_LAUNCHER || bktype == B_AUTOVAC_WORKER ||
 		 bktype == B_DATACHECKSUMSWORKER_LAUNCHER ||

@@ -4246,6 +4246,35 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-fast-crash-recovery" xreflabel="fast_crash_recovery">
+      <term><varname>fast_crash_recovery</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>fast_crash_recovery</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Replay WAL on demand after a crash, instead of before accepting
+        connections.  When enabled, crash recovery scans the WAL written since
+        the last checkpoint, replays only the records that do not modify
+        relation pages, and remembers which records apply to each page.  The
+        server then accepts connections, and a page is recovered the first
+        time it is read from disk, before any process can see it.  A
+        background worker recovers the remaining pages; until it has finished,
+        checkpoints are postponed and a clean shutdown waits for it.
+        The default is <literal>off</literal>.
+        This parameter can only be set at server start.
+       </para>
+       <para>
+        This shortens the time until the server accepts connections after a
+        crash, in exchange for slower first reads of pages that still need
+        recovery, and for dynamic shared memory proportional to the amount of
+        WAL to recover.  It applies to crash recovery only: archive recovery,
+        standby mode and single-user mode replay WAL as usual.
+       </para>
+      </listitem>
+     </varlistentry>
+
     </variablelist>
    </sect2>
 
@@ -7513,6 +7542,7 @@ local0.*    /var/log/postgresql
          <member><literal>bgwriter</literal></member>
          <member><literal>checkpointer</literal></member>
          <member><literal>checksums</literal></member>
+         <member><literal>fastrecoveryworker</literal></member>
          <member><literal>ioworker</literal></member>
          <member><literal>postmaster</literal></member>
          <member><literal>slotsyncworker</literal></member>

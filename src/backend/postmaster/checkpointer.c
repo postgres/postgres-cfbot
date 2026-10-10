@@ -39,6 +39,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "access/lsn_indexer.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "access/xlogrecovery.h"
@@ -182,6 +183,13 @@ static double ckpt_cached_elapsed;
 
 static pg_time_t last_checkpoint_time;
 static pg_time_t last_xlog_switch_time;
+
+/*
+ * Flags of checkpoint requests postponed while fast crash recovery was in
+ * progress, and whether we have said so in the log yet.
+ */
+static int	postponed_ckpt_flags = 0;
+static bool postponed_ckpt_logged = false;
 
 /* Prototypes for private functions */
 
@@ -413,6 +421,49 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 		}
 
 		/*
+		 * No checkpoint or restartpoint may complete while fast crash
+		 * recovery may still replay pre-crash WAL onto some page; see
+		 * FastRecoveryInProgress().  A request nobody waits for is postponed:
+		 * we move it out of shared memory, so that the loop below doesn't
+		 * spin on it, and remember it for when fast recovery is over.  A
+		 * request somebody waits for goes ahead, and CreateCheckPoint() fails
+		 * it with an error, which our error handling reports to the waiter.
+		 */
+		if (do_checkpoint && FastRecoveryInProgress())
+		{
+			bool		waited;
+
+			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
+			waited = (CheckpointerShmem->ckpt_flags & CHECKPOINT_WAIT) != 0;
+			if (!waited)
+			{
+				postponed_ckpt_flags |= CheckpointerShmem->ckpt_flags | flags;
+				CheckpointerShmem->ckpt_flags = 0;
+			}
+			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
+
+			if (!waited)
+			{
+				if (!postponed_ckpt_logged)
+				{
+					ereport(LOG,
+							(errmsg("checkpoint postponed until fast crash recovery completes")));
+					postponed_ckpt_logged = true;
+				}
+				do_checkpoint = false;
+				/* next time-driven attempt is one checkpoint_timeout away */
+				last_checkpoint_time = now;
+			}
+		}
+		else if (!do_checkpoint && postponed_ckpt_flags != 0 &&
+				 !FastRecoveryInProgress())
+		{
+			/* fast crash recovery is over; run what we postponed */
+			do_checkpoint = true;
+			chkpt_or_rstpt_requested = true;
+		}
+
+		/*
 		 * Do a checkpoint if requested.
 		 */
 		if (do_checkpoint)
@@ -433,6 +484,9 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 			CheckpointerShmem->ckpt_flags = 0;
 			CheckpointerShmem->ckpt_started++;
 			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
+
+			/* include requests postponed during fast crash recovery */
+			flags |= postponed_ckpt_flags;
 
 			ConditionVariableBroadcast(&CheckpointerShmem->start_cv);
 
@@ -497,6 +551,13 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 				ckpt_performed = CreateCheckPoint(flags);
 			else
 				ckpt_performed = CreateRestartPoint(flags);
+
+			/*
+			 * The postponed requests are covered now.  (If the checkpoint
+			 * failed with an error, we never get here and keep them.)
+			 */
+			postponed_ckpt_flags = 0;
+			postponed_ckpt_logged = false;
 
 			/*
 			 * After any checkpoint, free all smgr objects.  Otherwise we

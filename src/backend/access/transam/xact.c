@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "access/commit_ts.h"
+#include "access/lsn_indexer.h"
 #include "access/multixact.h"
 #include "access/parallel.h"
 #include "access/subtrans.h"
@@ -2896,6 +2897,7 @@ AbortTransaction(void)
 	pgstat_progress_end_command();
 
 	pgaio_error_cleanup();
+	LSNIndexErrorCleanup();
 
 	/* Clean up buffer content locks, too */
 	UnlockBuffers();
@@ -5322,6 +5324,7 @@ AbortSubTransaction(void)
 	pgstat_progress_end_command();
 
 	pgaio_error_cleanup();
+	LSNIndexErrorCleanup();
 
 	UnlockBuffers();
 
