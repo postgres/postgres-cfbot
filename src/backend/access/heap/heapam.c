@@ -535,7 +535,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 			 * ---
 			 */
 			scan->rs_read_stream =
-				read_stream_begin_relation(READ_STREAM_SEQUENTIAL |
+				read_stream_begin_relation(READ_STREAM_NO_ADVICE |
 										   READ_STREAM_USE_BATCHING,
 										   scan->rs_strategy,
 										   scan->rs_base.rs_rd,
