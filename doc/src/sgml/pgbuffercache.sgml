@@ -99,7 +99,9 @@
  <para>
   The <function>pg_buffercache_usage_counts()</function> function returns a set
   of records, each row describing the number of buffers with a given usage
-  count.
+  count.  The clock sweep tracks one access per buffer, so there are two rows:
+  usage count 0 for buffers that are candidates for replacement, and 1 for
+  those that will be passed over once more.
  </para>
 
  <para>
@@ -240,7 +242,9 @@
        <structfield>usagecount</structfield> <type>smallint</type>
       </para>
       <para>
-       Clock-sweep access count
+       Clock-sweep access count: 1 if the buffer has been accessed since the
+       clock hand last passed it, and so will be passed over once more, or 0
+       if it is a candidate for replacement
       </para></entry>
      </row>
 

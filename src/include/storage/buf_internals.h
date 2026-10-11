@@ -35,7 +35,6 @@
  *
  * State of the buffer itself (in order):
  * - 18 bits refcount
- * - 4 bits usage count
  * - 12 bits of flags
  * - 18 bits share-lock count
  * - 1 bit share-exclusive locked
@@ -47,11 +46,10 @@
  * The definition of buffer state components is below.
  */
 #define BUF_REFCOUNT_BITS 18
-#define BUF_USAGECOUNT_BITS 4
 #define BUF_FLAG_BITS 12
 #define BUF_LOCK_BITS (18+2)
 
-StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_LOCK_BITS <= 64,
+StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_FLAG_BITS + BUF_LOCK_BITS <= 64,
 				 "parts of buffer state space need to be <= 64");
 
 /* refcount related definitions */
@@ -59,17 +57,9 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 #define BUF_REFCOUNT_MASK \
 	((UINT64CONST(1) << BUF_REFCOUNT_BITS) - 1)
 
-/* usage count related definitions */
-#define BUF_USAGECOUNT_SHIFT \
-	BUF_REFCOUNT_BITS
-#define BUF_USAGECOUNT_MASK \
-	(((UINT64CONST(1) << BUF_USAGECOUNT_BITS) - 1) << (BUF_USAGECOUNT_SHIFT))
-#define BUF_USAGECOUNT_ONE \
-	(UINT64CONST(1) << BUF_REFCOUNT_BITS)
-
 /* flags related definitions */
 #define BUF_FLAG_SHIFT \
-	(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS)
+	BUF_REFCOUNT_BITS
 #define BUF_FLAG_MASK \
 	(((UINT64CONST(1) << BUF_FLAG_BITS) - 1) << BUF_FLAG_SHIFT)
 
@@ -86,11 +76,19 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 	((((uint64) MAX_BACKENDS) << BM_LOCK_SHIFT) | BM_LOCK_VAL_SHARE_EXCLUSIVE | BM_LOCK_VAL_EXCLUSIVE)
 
 
-/* Get refcount and usagecount from buffer state */
+/* Get refcount from buffer state */
 #define BUF_STATE_GET_REFCOUNT(state) \
 	((uint32)((state) & BUF_REFCOUNT_MASK))
-#define BUF_STATE_GET_USAGECOUNT(state) \
-	((uint32)(((state) & BUF_USAGECOUNT_MASK) >> BUF_USAGECOUNT_SHIFT))
+
+/*
+ * Does this buffer still have its second chance?
+ *
+ * The clock sweep reclaims a buffer only on a visit that finds the bit
+ * already clear, so a buffer that is accessed between two visits is always
+ * passed over once.  See BM_SECOND_CHANCE.
+ */
+#define BUF_STATE_HAS_SECOND_CHANCE(state) \
+	(((state) & BM_SECOND_CHANCE) != 0)
 
 /*
  * Flags for buffer descriptors
@@ -114,7 +112,19 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 #define BM_IO_IN_PROGRESS			BUF_DEFINE_FLAG( 4)
 /* previous I/O failed */
 #define BM_IO_ERROR					BUF_DEFINE_FLAG( 5)
-/* flag bit 6 is not used anymore */
+/*
+ * Set when a buffer is pinned, cleared by the clock sweep as the hand passes.
+ * The sweep reclaims a buffer only if it finds this bit already clear, so any
+ * buffer touched since the hand last passed it survives one more revolution:
+ * the classic second chance.
+ *
+ * This occupies the bit position of the 0..5 usage counter it replaces.  The
+ * counter let a buffer accumulate up to five chances, which cost a full
+ * revolution each to spend; one chance is enough to protect a working set and
+ * makes the work the sweep must do to find a victim independent of how hot the
+ * pool has been.
+ */
+#define BM_SECOND_CHANCE			BUF_DEFINE_FLAG( 6)
 /* have waiter for sole pin */
 #define BM_PIN_COUNT_WAITER			BUF_DEFINE_FLAG( 7)
 /* must write for checkpoint */
@@ -133,18 +143,6 @@ StaticAssertDecl(MAX_BACKENDS_BITS <= (BUF_LOCK_BITS - 2),
 				 "MAX_BACKENDS_BITS needs to be <= BUF_LOCK_BITS - 2");
 
 
-/*
- * The maximum allowed value of usage_count represents a tradeoff between
- * accuracy and speed of the clock-sweep buffer management algorithm.  A
- * large value (comparable to NBuffers) would approximate LRU semantics.
- * But it can take as many as BM_MAX_USAGE_COUNT+1 complete cycles of the
- * clock-sweep hand to find a free buffer, so in practice we don't want the
- * value to be very large.
- */
-#define BM_MAX_USAGE_COUNT	5
-
-StaticAssertDecl(BM_MAX_USAGE_COUNT < (UINT64CONST(1) << BUF_USAGECOUNT_BITS),
-				 "BM_MAX_USAGE_COUNT doesn't fit in BUF_USAGECOUNT_BITS bits");
 
 /*
  * Buffer tag identifies which disk block the buffer contains.
@@ -477,9 +475,6 @@ UnlockBufHdr(BufferDesc *desc)
  * unset_bits, adding the flags in set_bits, and changing the refcount by
  * refcount_change. If a flag is both cleared and added, it will end up being
  * set.
- *
- * Note that this approach would not trivially work for usagecount, since we
- * need to cap the usagecount at BM_MAX_USAGE_COUNT.
  */
 static inline uint64
 UnlockBufHdrExt(BufferDesc *desc, uint64 old_buf_state,
