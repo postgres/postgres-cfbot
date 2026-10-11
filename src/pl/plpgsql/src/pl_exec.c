@@ -2258,9 +2258,15 @@ exec_stmt_call(PLpgSQL_execstate *estate, PLpgSQL_stmt_call *stmt)
 	before_lxid = MyProc->vxid.lxid;
 
 	/*
-	 * If we have a procedure-lifespan resowner, use that to hold the refcount
-	 * for the plan.  This avoids refcount leakage complaints if the called
-	 * procedure ends the current transaction.
+	 * If the called procedure could end the current transaction, hold the
+	 * refcount for the plan in the procedure-lifespan resowner, which avoids
+	 * refcount leakage complaints if it does.  That can happen only when SPI
+	 * executes the CALL non-atomically, which requires a non-atomic context
+	 * and no active subtransaction (see _SPI_execute_plan).  In other cases
+	 * let SPI use the current resowner.  That matters when the CALL fails
+	 * with an error that an exception block catches: aborting the block's
+	 * subtransaction then releases the refcount, which the procedure-lifespan
+	 * resowner would otherwise keep until we exit.
 	 *
 	 * Also, tell SPI to allow non-atomic execution.
 	 */
@@ -2268,7 +2274,8 @@ exec_stmt_call(PLpgSQL_execstate *estate, PLpgSQL_stmt_call *stmt)
 	options.params = paramLI;
 	options.read_only = estate->readonly_func;
 	options.allow_nonatomic = true;
-	options.owner = estate->procedure_resowner;
+	if (SPI_inside_nonatomic_context())
+		options.owner = estate->procedure_resowner;
 
 	rc = SPI_execute_plan_extended(expr->plan, &options);
 
