@@ -636,7 +636,7 @@ static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf);
 static void UnpinBufferNoOwner(BufferDesc *buf);
 static void BufferSync(int flags);
-static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
+static int	SyncOneBuffer(int buf_id, bool skip_recently_used, bool spend_chance,
 						  WritebackContext *wb_context);
 static void WaitIO(BufferDesc *buf);
 static void AbortBufferIO(Buffer buffer);
@@ -3795,7 +3795,7 @@ BufferSync(int flags)
 		 */
 		if (pg_atomic_read_u64(&bufHdr->state) & BM_CHECKPOINT_NEEDED)
 		{
-			if (SyncOneBuffer(buf_id, false, &wb_context) & BUF_WRITTEN)
+			if (SyncOneBuffer(buf_id, false, false, &wb_context) & BUF_WRITTEN)
 			{
 				TRACE_POSTGRESQL_BUFFER_SYNC_WRITTEN(buf_id);
 				PendingCheckpointerStats.buffers_written++;
@@ -3899,6 +3899,11 @@ BgBufferSync(WritebackContext *wb_context)
 	int			num_to_scan;
 	int			num_written;
 	int			reusable_buffers;
+	bool		spend_chance;
+	uint64		sweep_claims;
+
+	/* Claim count as of our previous cycle, to get a rate rather than a total */
+	static uint64 prev_sweep_claims = 0;
 
 	/* Variables for final smoothed_density update */
 	long		new_strategy_delta;
@@ -4080,11 +4085,23 @@ BgBufferSync(WritebackContext *wb_context)
 	num_written = 0;
 	reusable_buffers = reusable_buffers_est;
 
+	/*
+	 * Decide whether to spend second chances as we scan.  StrategySweepClaims()
+	 * counts allocations that gave up on the second-chance rule because the
+	 * sweep could not find a candidate; while that count is rising the sweep is
+	 * starving and the cheapest help we can give is to make candidates ahead of
+	 * the hand.  While it is flat we leave the rule alone, so this costs
+	 * nothing on a workload that does not need it.
+	 */
+	sweep_claims = StrategySweepClaims();
+	spend_chance = (sweep_claims > prev_sweep_claims);
+	prev_sweep_claims = sweep_claims;
+
 	/* Execute the LRU scan */
 	while (num_to_scan > 0 && reusable_buffers < upcoming_alloc_est)
 	{
 		int			sync_state = SyncOneBuffer(next_to_clean, true,
-											   wb_context);
+											   spend_chance, wb_context);
 
 		if (++next_to_clean >= NBuffers)
 		{
@@ -4147,6 +4164,11 @@ BgBufferSync(WritebackContext *wb_context)
 /*
  * SyncOneBuffer -- process a single buffer during syncing.
  *
+ * If spend_chance is true, an unpinned buffer that still has its second
+ * chance has it spent here, which makes it reclaimable by the next pass of
+ * the clock hand.  The caller sets this only while the sweep is starving for
+ * candidates; see BgBufferSync().
+ *
  * If skip_recently_used is true, we don't write currently-pinned buffers, nor
  * buffers marked recently used, as these are not replacement candidates.
  *
@@ -4159,7 +4181,8 @@ BgBufferSync(WritebackContext *wb_context)
  * after locking it, but we don't care all that much.)
  */
 static int
-SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
+SyncOneBuffer(int buf_id, bool skip_recently_used, bool spend_chance,
+			  WritebackContext *wb_context)
 {
 	BufferDesc *bufHdr = GetBufferDescriptor(buf_id);
 	int			result = 0;
@@ -4185,6 +4208,20 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 		!BUF_STATE_HAS_SECOND_CHANCE(buf_state))
 	{
 		result |= BUF_REUSABLE;
+	}
+	else if (spend_chance &&
+			 BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
+			 BUF_STATE_HAS_SECOND_CHANCE(buf_state))
+	{
+		/*
+		 * Unpinned, but it still has its chance.  Spend it here so the next
+		 * pass of the hand can reclaim the buffer, and count it toward our
+		 * target: we have made a candidate, which is what the caller is short
+		 * of.  The buffer survives this cycle either way, exactly as it would
+		 * have if the hand had passed it.
+		 */
+		UnlockBufHdrExt(bufHdr, buf_state, 0, BM_SECOND_CHANCE, 0);
+		return result | BUF_REUSABLE;
 	}
 	else if (skip_recently_used)
 	{
