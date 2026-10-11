@@ -23,6 +23,12 @@
 #define NUM_BUFFERCACHE_PAGES_ELEM	9
 #define NUM_BUFFERCACHE_SUMMARY_ELEM 5
 #define NUM_BUFFERCACHE_USAGE_COUNTS_ELEM 4
+
+/*
+ * Highest value the usagecount columns can report.  The clock sweep tracks one
+ * second chance per buffer, so the reported count is 0 or 1.
+ */
+#define PGBUFFERCACHE_MAX_USAGE_COUNT	1
 #define NUM_BUFFERCACHE_EVICT_ELEM 2
 #define NUM_BUFFERCACHE_EVICT_RELATION_ELEM 3
 #define NUM_BUFFERCACHE_EVICT_ALL_ELEM 3
@@ -163,7 +169,7 @@ pg_buffercache_pages(PG_FUNCTION_ARGS)
 		reldatabase = bufHdr->tag.dbOid;
 		forknum = BufTagGetForkNum(&bufHdr->tag);
 		blocknum = bufHdr->tag.blockNum;
-		usagecount = BUF_STATE_GET_USAGECOUNT(buf_state);
+		usagecount = (BUF_STATE_HAS_SECOND_CHANCE(buf_state) ? 1 : 0);
 		pinning_backends = BUF_STATE_GET_REFCOUNT(buf_state);
 
 		if (buf_state & BM_DIRTY)
@@ -607,7 +613,7 @@ pg_buffercache_summary(PG_FUNCTION_ARGS)
 		if (buf_state & BM_VALID)
 		{
 			buffers_used++;
-			usagecount_total += BUF_STATE_GET_USAGECOUNT(buf_state);
+			usagecount_total += (BUF_STATE_HAS_SECOND_CHANCE(buf_state) ? 1 : 0);
 
 			if (buf_state & BM_DIRTY)
 				buffers_dirty++;
@@ -641,9 +647,9 @@ Datum
 pg_buffercache_usage_counts(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	int			usage_counts[BM_MAX_USAGE_COUNT + 1] = {0};
-	int			dirty[BM_MAX_USAGE_COUNT + 1] = {0};
-	int			pinned[BM_MAX_USAGE_COUNT + 1] = {0};
+	int			usage_counts[PGBUFFERCACHE_MAX_USAGE_COUNT + 1] = {0};
+	int			dirty[PGBUFFERCACHE_MAX_USAGE_COUNT + 1] = {0};
+	int			pinned[PGBUFFERCACHE_MAX_USAGE_COUNT + 1] = {0};
 	Datum		values[NUM_BUFFERCACHE_USAGE_COUNTS_ELEM];
 	bool		nulls[NUM_BUFFERCACHE_USAGE_COUNTS_ELEM] = {0};
 
@@ -657,7 +663,7 @@ pg_buffercache_usage_counts(PG_FUNCTION_ARGS)
 
 		CHECK_FOR_INTERRUPTS();
 
-		usage_count = BUF_STATE_GET_USAGECOUNT(buf_state);
+		usage_count = (BUF_STATE_HAS_SECOND_CHANCE(buf_state) ? 1 : 0);
 		usage_counts[usage_count]++;
 
 		if (buf_state & BM_DIRTY)
@@ -667,7 +673,7 @@ pg_buffercache_usage_counts(PG_FUNCTION_ARGS)
 			pinned[usage_count]++;
 	}
 
-	for (int i = 0; i < BM_MAX_USAGE_COUNT + 1; i++)
+	for (int i = 0; i < PGBUFFERCACHE_MAX_USAGE_COUNT + 1; i++)
 	{
 		values[0] = Int32GetDatum(i);
 		values[1] = Int32GetDatum(usage_counts[i]);
