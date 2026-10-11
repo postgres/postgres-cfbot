@@ -11,6 +11,7 @@ LANGUAGE C PARALLEL SAFE;
 CREATE VIEW pg_buffercache_partitions AS
 	SELECT P.* FROM pg_buffercache_partitions() AS P
 	(partition integer,			-- partition index
+	 numa_node integer,			-- NUMA node of the partitioon
 	 num_buffers integer,		-- number of buffers in the partition
 	 first_buffer integer,		-- first buffer of partition
 	 last_buffer integer);		-- last buffer of partition
