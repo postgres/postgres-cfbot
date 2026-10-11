@@ -635,3 +635,67 @@ NOTICE:  f_print_x(1)
 NOTICE:  f_get_x(2)
 NOTICE:  f_print_x(2)
 ROLLBACK;
+-- A CALL whose error is caught by an exception block must not leave its
+-- plan pinned until the calling procedure or DO block exits.  Count the
+-- session's cached plans before and after ten caught failures, in a second
+-- round, so that the first round has created every plan the loop needs.
+CREATE PROCEDURE test_proc_error(x int)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'error %', x;
+END;
+$$;
+CREATE PROCEDURE test_proc_catch()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  before_count int;
+  after_count int;
+BEGIN
+  FOR round IN 1..2 LOOP
+    before_count := (SELECT count(*) FROM pg_backend_memory_contexts
+                     WHERE name = 'CachedPlan');
+    FOR i IN 1..10 LOOP
+      BEGIN
+        CALL test_proc_error(i);
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END;
+    END LOOP;
+    after_count := (SELECT count(*) FROM pg_backend_memory_contexts
+                    WHERE name = 'CachedPlan');
+  END LOOP;
+  RAISE NOTICE 'cached plans kept: %', after_count - before_count;
+END;
+$$;
+CALL test_proc_catch();
+NOTICE:  cached plans kept: 0
+-- Likewise in a DO block, which has a long-lived resowner of its own even
+-- in an atomic context
+BEGIN;
+DO $$
+DECLARE
+  before_count int;
+  after_count int;
+BEGIN
+  FOR round IN 1..2 LOOP
+    before_count := (SELECT count(*) FROM pg_backend_memory_contexts
+                     WHERE name = 'CachedPlan');
+    FOR i IN 1..10 LOOP
+      BEGIN
+        CALL test_proc_error(i);
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END;
+    END LOOP;
+    after_count := (SELECT count(*) FROM pg_backend_memory_contexts
+                    WHERE name = 'CachedPlan');
+  END LOOP;
+  RAISE NOTICE 'cached plans kept: %', after_count - before_count;
+END
+$$;
+NOTICE:  cached plans kept: 0
+COMMIT;
+DROP PROCEDURE test_proc_catch;
+DROP PROCEDURE test_proc_error;
