@@ -136,8 +136,12 @@ typedef struct ReorderBufferChange
 		CommandId	command_id;
 
 		/*
-		 * New cid mapping for catalog changing transaction, set when action
-		 * == *_INTERNAL_TUPLECID.
+		 * tuplecid changes are used to follow catalog tuple movements (i.e.,
+		 * DDL changes); we need them to create the HistoricTupleCidHash table
+		 * used with historical snapshots.  For historical reasons we store
+		 * these with the toplevel txn, not each subtxn; and yet we need to
+		 * remove them on subxact aborts, so we record the subxid separately.
+		 * Set when action == *_INTERNAL_TUPLECID.
 		 */
 		struct
 		{
@@ -146,6 +150,7 @@ typedef struct ReorderBufferChange
 			CommandId	cmin;
 			CommandId	cmax;
 			CommandId	combocid;
+			TransactionId subxid;
 		}			tuplecid;
 
 		/* Invalidation. */
@@ -738,6 +743,10 @@ extern void ReorderBufferCommitChild(ReorderBuffer *rb, TransactionId xid,
 									 XLogRecPtr end_lsn);
 extern void ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 							   TimestampTz abort_time);
+extern void ReorderBufferCleanupAbortedTupleCids(ReorderBuffer *rb,
+												 TransactionId xid,
+												 int nsubxacts,
+												 TransactionId *subxacts);
 extern void ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid);
 extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 extern void ReorderBufferInvalidate(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
@@ -750,8 +759,9 @@ extern void ReorderBufferAddNewCommandId(ReorderBuffer *rb, TransactionId xid,
 										 XLogRecPtr lsn, CommandId cid);
 extern void ReorderBufferAddNewTupleCids(ReorderBuffer *rb, TransactionId xid,
 										 XLogRecPtr lsn, RelFileLocator locator,
-										 ItemPointerData tid,
-										 CommandId cmin, CommandId cmax, CommandId combocid);
+										 ItemPointerData tid, TransactionId subxid,
+										 CommandId cmin, CommandId cmax,
+										 CommandId combocid);
 extern void ReorderBufferAddInvalidations(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 										  Size nmsgs, SharedInvalidationMessage *msgs);
 extern void ReorderBufferAddDistributedInvalidations(ReorderBuffer *rb, TransactionId xid,
