@@ -264,11 +264,8 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 			local_buf_state = old_buf_state;
 
 			/*
-			 * If the buffer is pinned or has a nonzero usage_count, we cannot
-			 * use it; decrement the usage_count (unless pinned) and keep
-			 * scanning.
+			 * If the buffer is pinned we cannot use it; keep scanning.
 			 */
-
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0)
 			{
 				if (--trycounter == 0)
@@ -292,9 +289,17 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 				continue;
 			}
 
-			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			if (BUF_STATE_HAS_SECOND_CHANCE(local_buf_state))
 			{
-				local_buf_state -= BUF_USAGECOUNT_ONE;
+				/*
+				 * The buffer has been used since the hand last passed it.
+				 * Spend its second chance and keep scanning: it becomes a
+				 * candidate only if it is still untouched when the hand comes
+				 * back around, which gives it a full revolution of grace.
+				 * Spending a chance is progress toward finding a victim, so
+				 * reset trycounter.
+				 */
+				local_buf_state &= ~BM_SECOND_CHANCE;
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 												   local_buf_state))
@@ -664,14 +669,19 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 		/*
 		 * If the buffer is pinned we cannot use it under any circumstances.
 		 *
-		 * If usage_count is 0 or 1 then the buffer is fair game (we expect 1,
-		 * since our own previous usage of the ring element would have left it
-		 * there, but it might've been decremented by clock-sweep since then).
-		 * A higher usage_count indicates someone else has touched the buffer,
-		 * so we shouldn't re-use it.
+		 * The buffer is fair game only if nothing has touched it since we
+		 * last cycled past this ring slot.  If it still has its second
+		 * chance, an access from outside the ring has claimed it for the
+		 * working set and we must not recycle it.
+		 *
+		 * This replaces the stock "usage_count > 1 means somebody else
+		 * touched it" test.  That needed a count only because a pin taken
+		 * from inside the ring was indistinguishable from one taken outside
+		 * it; now the ring does not grant the bit at all, so its own pins
+		 * leave no trace and a single bit is enough.
 		 */
 		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0
-			|| BUF_STATE_GET_USAGECOUNT(local_buf_state) > 1)
+			|| BUF_STATE_HAS_SECOND_CHANCE(local_buf_state))
 			break;
 
 		/* See equivalent code in PinBuffer() */
