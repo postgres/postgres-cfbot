@@ -2335,7 +2335,11 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * checkpoints, except for their "init" forks, which need to be treated
 	 * just like permanent relations.
 	 */
-	set_bits |= BM_TAG_VALID | BM_SECOND_CHANCE;
+	/*
+	 * Admit the page on probation: no second chance yet, so the next pass of
+	 * the hand may reclaim it.  A further access promotes it (see PinBuffer).
+	 */
+	set_bits |= BM_TAG_VALID;
 	if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 		set_bits |= BM_PERMANENT;
 
@@ -3004,7 +3008,8 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			set_bits |= BM_TAG_VALID | BM_SECOND_CHANCE;
+			/* Admit on probation; see the comment at the other admission site. */
+			set_bits |= BM_TAG_VALID;
 			if (bmr.relpersistence == RELPERSISTENCE_PERMANENT || fork == INIT_FORKNUM)
 				set_bits |= BM_PERMANENT;
 
