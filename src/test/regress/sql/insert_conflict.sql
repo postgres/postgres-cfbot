@@ -92,6 +92,36 @@ explain (costs off) insert into insertconflict_nn values(1, 'x') on conflict (a)
 drop table insertconflict_nn;
 
 --
+-- Index expressions whose typmod changes when simplified can be inferred
+--
+create table insertconflict_typmod (a varchar(20) not null, b varchar(20));
+create unique index typmod_coalesce_key on insertconflict_typmod(coalesce(null::varchar, a, b));
+create unique index typmod_case_key on insertconflict_typmod((case when false then null::varchar when a is not null then a else b end));
+create unique index typmod_null_key on insertconflict_typmod(coalesce((case when a is not null then null::varchar(5) else b end)::varchar(20)));
+
+explain (costs off) insert into insertconflict_typmod values('x', 'y') on conflict (coalesce(null::varchar, a, b)) do nothing;
+explain (costs off) insert into insertconflict_typmod values('x', 'y') on conflict ((case when false then null::varchar when a is not null then a else b end)) do nothing;
+explain (costs off) insert into insertconflict_typmod values('x', 'y') on conflict (coalesce((case when a is not null then null::varchar(5) else b end)::varchar(20))) do nothing;
+
+drop table insertconflict_typmod;
+
+create function insertconflict_typmod_f(numeric) returns numeric language sql immutable as 'select $1';
+create table insertconflict_typmod_num (a numeric(10) not null);
+create unique index typmod_nullif_key on insertconflict_typmod_num(nullif(insertconflict_typmod_f(a), case when a is null then a end));
+
+explain (costs off) insert into insertconflict_typmod_num values(1) on conflict (nullif(insertconflict_typmod_f(a), case when a is null then a end)) do nothing;
+
+-- NULLIF folded to a constant
+create function insertconflict_typmod_sf(numeric) returns numeric language sql stable as 'select $1';
+create unique index typmod_nullif_const_key on insertconflict_typmod_num(nullif(insertconflict_typmod_sf(case when a is null then 3::numeric(10) else 2::numeric(10) end), 3));
+
+explain (costs off) insert into insertconflict_typmod_num values(1) on conflict (nullif(insertconflict_typmod_sf(case when a is null then 3::numeric(10) else 2::numeric(10) end), 3)) do nothing;
+
+drop table insertconflict_typmod_num;
+drop function insertconflict_typmod_f(numeric);
+drop function insertconflict_typmod_sf(numeric);
+
+--
 -- Single key tests
 --
 create unique index key_index on insertconflicttest(key);
