@@ -14,6 +14,7 @@
 #include "access/htup_details.h"
 #include "access/visibilitymap.h"
 #include "access/xloginsert.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage_xlog.h"
 #include "funcapi.h"
@@ -710,6 +711,16 @@ collect_corrupt_items(Oid relid, bool all_visible, bool all_frozen)
 
 	/* Only some relkinds have a visibility map */
 	check_relation_relkind(rel);
+
+	/*
+	 * The checks below read each item as a heap tuple.  The visibility map
+	 * functions read only the map and the page header, and work for any table
+	 * AM.
+	 */
+	if (rel->rd_rel->relam != HEAP_TABLE_AM_OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("only heap AM is supported")));
 
 	if (all_visible)
 		OldestXmin = GetStrictOldestNonRemovableTransactionId(rel);
