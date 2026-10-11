@@ -74,6 +74,7 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -3133,6 +3134,30 @@ index_build_resets_snapshots(Relation indexRelation, IndexInfo *indexInfo)
 }
 
 /*
+ * index_build_rotate_snapshot -- reset the snapshot after the heap scan
+ *
+ * Call between tuples in later build phases.  Do not call while the heap
+ * scan is open: it still holds a pointer to the active snapshot.
+ */
+void
+index_build_rotate_snapshot(IndexInfo *indexInfo)
+{
+	SnapshotRotation *rotation = &indexInfo->ii_SnapshotRotation;
+
+	if (!indexInfo->ii_ResetSnapshot)
+		return;
+
+	if (rotation->snapshot == NULL)
+		StartSnapshotRotation(rotation);
+
+	if (!SnapshotRotationDue(rotation))
+		return;
+
+	RotateSnapshot(rotation);
+	INJECTION_POINT("index_build_rotate_snapshot", NULL);
+}
+
+/*
  * index_build - invoke access-method-specific index build procedure
  *
  * On entry, the index's catalog entries are valid, and its physical disk
@@ -3350,7 +3375,10 @@ index_build(Relation heapRelation,
 		IndexCheckExclusion(heapRelation, indexRelation, indexInfo);
 
 	if (indexInfo->ii_Concurrent)
+	{
 		PopActiveSnapshot();
+		indexInfo->ii_SnapshotRotation.snapshot = NULL;
+	}
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);

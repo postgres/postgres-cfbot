@@ -231,7 +231,7 @@ static void brin_vacuum_scan(Relation idxrel, BufferAccessStrategy strategy);
 static bool add_values_to_range(Relation idxRel, BrinDesc *bdesc,
 								BrinMemTuple *dtup, const Datum *values, const bool *nulls);
 static bool check_null_keys(BrinValues *bval, ScanKey *nullkeys, int nnullkeys);
-static void brin_fill_empty_ranges(BrinBuildState *state,
+static void brin_fill_empty_ranges(BrinBuildState *state, IndexInfo *indexInfo,
 								   BlockNumber prevRange, BlockNumber nextRange);
 
 /* parallel index builds */
@@ -240,7 +240,7 @@ static void _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Rela
 static void _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state);
 static Size _brin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
 static double _brin_parallel_heapscan(BrinBuildState *state);
-static double _brin_parallel_merge(BrinBuildState *state);
+static double _brin_parallel_merge(BrinBuildState *state, IndexInfo *indexInfo);
 static void _brin_leader_participate_as_worker(BrinBuildState *buildstate,
 											   Relation heap, Relation index);
 static void _brin_parallel_scan_and_build(BrinBuildState *state,
@@ -1304,7 +1304,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 									   TUPLESORT_NONE);
 
 		/* scan the relation and merge per-worker results */
-		reltuples = _brin_parallel_merge(state);
+		reltuples = _brin_parallel_merge(state, indexInfo);
 
 		_brin_end_parallel(state->bs_leader, state);
 	}
@@ -1335,7 +1335,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 * index with a predicate like WHERE (nonnull_column IS NULL), or
 		 * other very selective predicates.
 		 */
-		brin_fill_empty_ranges(state,
+		brin_fill_empty_ranges(state, indexInfo,
 							   state->bs_currRangeStart,
 							   state->bs_maxRangeStart);
 	}
@@ -2715,7 +2715,7 @@ _brin_parallel_heapscan(BrinBuildState *state)
  * Returns the total number of heap tuples scanned.
  */
 static double
-_brin_parallel_merge(BrinBuildState *state)
+_brin_parallel_merge(BrinBuildState *state, IndexInfo *indexInfo)
 {
 	BrinTuple  *btup;
 	BrinMemTuple *memtuple = NULL;
@@ -2757,6 +2757,8 @@ _brin_parallel_merge(BrinBuildState *state)
 	 */
 	while ((btup = tuplesort_getbrintuple(state->bs_sortstate, &tuplen, true)) != NULL)
 	{
+		index_build_rotate_snapshot(indexInfo);
+
 		/* Ranges should be multiples of pages_per_range for the index. */
 		Assert(btup->bt_blkno % state->bs_leader->brinshared->pagesPerRange == 0);
 
@@ -2822,7 +2824,7 @@ _brin_parallel_merge(BrinBuildState *state)
 		}
 
 		/* Fill empty ranges for all ranges missing in the tuplesort. */
-		brin_fill_empty_ranges(state, prevblkno, btup->bt_blkno);
+		brin_fill_empty_ranges(state, indexInfo, prevblkno, btup->bt_blkno);
 
 		prevblkno = btup->bt_blkno;
 	}
@@ -2845,7 +2847,7 @@ _brin_parallel_merge(BrinBuildState *state)
 	}
 
 	/* Fill empty ranges at the end, for all ranges missing in the tuplesort. */
-	brin_fill_empty_ranges(state, prevblkno, state->bs_maxRangeStart);
+	brin_fill_empty_ranges(state, indexInfo, prevblkno, state->bs_maxRangeStart);
 
 	/*
 	 * Switch back to the original memory context, and destroy the one we
@@ -3093,7 +3095,7 @@ brin_build_empty_tuple(BrinBuildState *state, BlockNumber blkno)
  * The empty tuple is built only once, and then reused for all future calls.
  */
 static void
-brin_fill_empty_ranges(BrinBuildState *state,
+brin_fill_empty_ranges(BrinBuildState *state, IndexInfo *indexInfo,
 					   BlockNumber prevRange, BlockNumber nextRange)
 {
 	BlockNumber blkno;
@@ -3107,6 +3109,8 @@ brin_fill_empty_ranges(BrinBuildState *state,
 	/* Generate empty ranges until we hit the next non-empty range. */
 	while (blkno < nextRange)
 	{
+		index_build_rotate_snapshot(indexInfo);
+
 		/* Did we already build the empty tuple? If not, do it now. */
 		brin_build_empty_tuple(state, blkno);
 

@@ -27,6 +27,16 @@ CREATE INDEX CONCURRENTLY rotation_probe ON cic_reset_snap.tbl(i);
 SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
 DROP INDEX CONCURRENTLY cic_reset_snap.rotation_probe;
 
+-- After the scan, reset between tuples written to the index.  A zero
+-- interval makes the count deterministic.
+CREATE TABLE cic_reset_snap.phase_probe(i int);
+ALTER TABLE cic_reset_snap.phase_probe SET (parallel_workers=0);
+INSERT INTO cic_reset_snap.phase_probe SELECT g FROM generate_series(1, 3) g;
+SELECT injection_points_attach('index_build_rotate_snapshot', 'notice');
+CREATE INDEX CONCURRENTLY phase_probe_idx ON cic_reset_snap.phase_probe(i);
+SELECT injection_points_detach('index_build_rotate_snapshot');
+DROP TABLE cic_reset_snap.phase_probe;
+
 CREATE FUNCTION cic_reset_snap.predicate_stable(integer) RETURNS bool IMMUTABLE
 									  LANGUAGE plpgsql AS $$
 BEGIN
@@ -95,6 +105,12 @@ DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING SPGIST(point(i, j));
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
+
+-- Check resets while GiST empties node buffers after the scan.  A low
+-- fill factor gives the index enough levels to use buffering.
+CREATE TABLE cic_reset_snap.gist_buf AS SELECT g AS i FROM generate_series(1, 20000) g;
+CREATE INDEX CONCURRENTLY gist_buf_idx ON cic_reset_snap.gist_buf USING GIST(point(i, i)) WITH (buffering = on, fillfactor = 10);
+DROP TABLE cic_reset_snap.gist_buf;
 
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING GIN((ARRAY[i, j]));
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
@@ -251,6 +267,85 @@ SET debug_discard_caches = 1;
 CREATE INDEX CONCURRENTLY enum_idx ON cic_reset_snap.enum_tbl(c);
 RESET debug_discard_caches;
 DROP TABLE cic_reset_snap.enum_tbl;
+
+-- Support functions may execute SQL after the heap scan.  Verify that an
+-- active snapshot is available, including in parallel workers.
+CREATE FUNCTION cic_reset_snap.cmp_sql(int, int) RETURNS int IMMUTABLE
+LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE 'SELECT 1';
+    RETURN CASE WHEN $1 < $2 THEN -1 WHEN $1 > $2 THEN 1 ELSE 0 END;
+END; $$;
+CREATE OPERATOR CLASS cic_reset_snap.int4_sql_ops FOR TYPE int4 USING btree AS
+    OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+    FUNCTION 1 cic_reset_snap.cmp_sql(int, int);
+
+CREATE TABLE cic_reset_snap.opclass_tbl(i int);
+ALTER TABLE cic_reset_snap.opclass_tbl SET (parallel_workers=0);
+INSERT INTO cic_reset_snap.opclass_tbl SELECT g FROM generate_series(1, 200) g;
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_sql_ops);
+REINDEX INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+DROP INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+
+ALTER TABLE cic_reset_snap.opclass_tbl SET (parallel_workers=2);
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_sql_ops);
+DROP INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+ALTER TABLE cic_reset_snap.opclass_tbl SET (parallel_workers=0);
+
+-- A support function in SQL does not go through SPI.
+CREATE FUNCTION cic_reset_snap.cmp_sqllang(int, int) RETURNS int IMMUTABLE
+LANGUAGE sql AS $$
+    SELECT CASE WHEN $1 < $2 THEN -1 WHEN $1 > $2 THEN 1 ELSE 0 END
+$$;
+CREATE OPERATOR CLASS cic_reset_snap.int4_sqllang_ops FOR TYPE int4 USING btree AS
+    OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+    FUNCTION 1 cic_reset_snap.cmp_sqllang(int, int);
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_sqllang_ops);
+DROP INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+
+-- Committing or aborting a subtransaction in a support function must
+-- preserve the build's snapshot.
+CREATE FUNCTION cic_reset_snap.cmp_catch(int, int) RETURNS int IMMUTABLE
+LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        EXECUTE 'SELECT 1';
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+    BEGIN
+        EXECUTE 'SELECT 1';
+        RAISE EXCEPTION 'caught';
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+    RETURN CASE WHEN $1 < $2 THEN -1 WHEN $1 > $2 THEN 1 ELSE 0 END;
+END; $$;
+CREATE OPERATOR CLASS cic_reset_snap.int4_catch_ops FOR TYPE int4 USING btree AS
+    OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+    FUNCTION 1 cic_reset_snap.cmp_catch(int, int);
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_catch_ops);
+DROP INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+
+-- Closing a cursor in a support function must preserve the build's snapshot.
+CREATE FUNCTION cic_reset_snap.cmp_cursor(int, int) RETURNS int IMMUTABLE
+LANGUAGE plpgsql AS $$
+DECLARE c refcursor;
+BEGIN
+    OPEN c FOR SELECT 1;
+    CLOSE c;
+    RETURN CASE WHEN $1 < $2 THEN -1 WHEN $1 > $2 THEN 1 ELSE 0 END;
+END; $$;
+CREATE OPERATOR CLASS cic_reset_snap.int4_cursor_ops FOR TYPE int4 USING btree AS
+    OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+    FUNCTION 1 cic_reset_snap.cmp_cursor(int, int);
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_cursor_ops);
+DROP TABLE cic_reset_snap.opclass_tbl;
 
 -- A cursor left open by a support function retains the scan snapshot.
 -- The build must tolerate this, even though it keeps xmin pinned.

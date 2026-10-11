@@ -186,7 +186,7 @@ static void _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relati
 static void _gin_end_parallel(GinLeader *ginleader, GinBuildState *state);
 static Size _gin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
 static double _gin_parallel_heapscan(GinBuildState *state);
-static double _gin_parallel_merge(GinBuildState *state);
+static double _gin_parallel_merge(GinBuildState *state, IndexInfo *indexInfo);
 static void _gin_leader_participate_as_worker(GinBuildState *buildstate,
 											  Relation heap, Relation index);
 static void _gin_parallel_scan_and_build(GinBuildState *state,
@@ -497,9 +497,12 @@ ginBuildCallback(Relation index, ItemPointer tid, Datum *values,
  * We don't need to worry about overflowing maintenance_work_mem. We can't
  * build chunks larger than work_mem, and that limit was set so that workers
  * produce sufficiently small chunks.
+ *
+ * Pass NULL for indexInfo while the heap scan is open.
  */
 static void
-ginFlushBuildState(GinBuildState *buildstate, Relation index)
+ginFlushBuildState(GinBuildState *buildstate, Relation index,
+				   IndexInfo *indexInfo)
 {
 	ItemPointerData *list;
 	Datum		key;
@@ -522,6 +525,9 @@ ginFlushBuildState(GinBuildState *buildstate, Relation index)
 
 		/* start of the chunk */
 		uint32		offset = 0;
+
+		if (indexInfo)
+			index_build_rotate_snapshot(indexInfo);
 
 		/* split the entry into smaller chunk with up to maxlen items */
 		while (offset < nlist)
@@ -591,7 +597,7 @@ ginBuildCallbackParallel(Relation index, ItemPointer tid, Datum *values,
 	 * must have wrapped around.
 	 */
 	if (ItemPointerCompare(tid, &buildstate->tid) < 0)
-		ginFlushBuildState(buildstate, index);
+		ginFlushBuildState(buildstate, index, NULL);
 
 	/* remember the TID we're about to process */
 	buildstate->tid = *tid;
@@ -606,7 +612,7 @@ ginBuildCallbackParallel(Relation index, ItemPointer tid, Datum *values,
 	 * the other half is used for the tuplesort.
 	 */
 	if (buildstate->accum.allocatedMemory >= buildstate->work_mem * (Size) 1024)
-		ginFlushBuildState(buildstate, index);
+		ginFlushBuildState(buildstate, index, NULL);
 
 	MemoryContextSwitchTo(oldCtx);
 }
@@ -746,7 +752,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 									  TUPLESORT_NONE);
 
 		/* scan the relation in parallel and merge per-worker results */
-		reltuples = _gin_parallel_merge(state);
+		reltuples = _gin_parallel_merge(state, indexInfo);
 
 		_gin_end_parallel(state->bs_leader, state);
 	}
@@ -767,6 +773,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		{
 			/* there could be many entries, so be willing to abort here */
 			CHECK_FOR_INTERRUPTS();
+			index_build_rotate_snapshot(indexInfo);
 			ginEntryInsert(&buildstate.ginstate, attnum, key, category,
 						   list, nlist, &buildstate.buildStats);
 		}
@@ -1643,7 +1650,7 @@ GinBufferCanAddKey(GinBuffer *buffer, GinTuple *tup)
  * Returns the total number of heap tuples scanned.
  */
 static double
-_gin_parallel_merge(GinBuildState *state)
+_gin_parallel_merge(GinBuildState *state, IndexInfo *indexInfo)
 {
 	GinTuple   *tup;
 	Size		tuplen;
@@ -1703,6 +1710,8 @@ _gin_parallel_merge(GinBuildState *state)
 	while ((tup = tuplesort_getgintuple(state->bs_sortstate, &tuplen, true)) != NULL)
 	{
 		MemoryContext oldCtx;
+
+		index_build_rotate_snapshot(indexInfo);
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -1846,7 +1855,7 @@ _gin_leader_participate_as_worker(GinBuildState *buildstate, Relation heap, Rela
  */
 static void
 _gin_process_worker_data(GinBuildState *state, Tuplesortstate *worker_sort,
-						 bool progress)
+						 IndexInfo *indexInfo, bool progress)
 {
 	GinTuple   *tup;
 	Size		tuplen;
@@ -1881,6 +1890,7 @@ _gin_process_worker_data(GinBuildState *state, Tuplesortstate *worker_sort,
 	{
 
 		CHECK_FOR_INTERRUPTS();
+		index_build_rotate_snapshot(indexInfo);
 
 		/*
 		 * If the buffer can accept the new GIN tuple, just store it there and
@@ -2070,14 +2080,14 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 									   ginBuildCallbackParallel, state, scan);
 
 	/* write remaining accumulated entries */
-	ginFlushBuildState(state, index);
+	ginFlushBuildState(state, index, indexInfo);
 
 	/*
 	 * Do the first phase of in-worker processing - sort the data produced by
 	 * the callback, and combine them into much larger chunks and place that
 	 * into the shared tuplestore for leader to process.
 	 */
-	_gin_process_worker_data(state, state->bs_worker_sort, progress);
+	_gin_process_worker_data(state, state->bs_worker_sort, indexInfo, progress);
 
 	/* sort the GIN tuples built by this worker */
 	tuplesort_performsort(state->bs_sortstate);

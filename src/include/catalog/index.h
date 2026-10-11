@@ -149,6 +149,7 @@ extern void FormIndexDatum(IndexInfo *indexInfo,
 						   Datum *values,
 						   bool *isnull);
 
+extern void index_build_rotate_snapshot(IndexInfo *indexInfo);
 extern void index_build(Relation heapRelation,
 						Relation indexRelation,
 						IndexInfo *indexInfo,
