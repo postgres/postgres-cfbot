@@ -893,12 +893,11 @@ read_stream_begin_impl(int flags,
 	/*
 	 * Read-ahead advice simulating asynchronous I/O with synchronous calls.
 	 * Issue advice only if AIO is not used, direct I/O isn't enabled, the
-	 * caller hasn't promised sequential access (overriding our detection
-	 * heuristics), and max_ios hasn't been set to zero.
+	 * caller hasn't disabled advice, and max_ios hasn't been set to zero.
 	 */
 	if (stream->sync_mode &&
 		(io_direct_flags & IO_DIRECT_DATA) == 0 &&
-		(flags & READ_STREAM_SEQUENTIAL) == 0 &&
+		(flags & READ_STREAM_NO_ADVICE) == 0 &&
 		max_ios > 0)
 		stream->advice_enabled = true;
 #endif

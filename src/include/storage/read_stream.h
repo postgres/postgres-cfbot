@@ -28,12 +28,15 @@
 #define READ_STREAM_MAINTENANCE 0x01
 
 /*
- * We usually avoid issuing prefetch advice automatically when sequential
- * access is detected, but this flag explicitly disables it, for cases that
- * might not be correctly detected.  Explicit advice is known to perform worse
- * than letting the kernel (at least Linux) detect sequential access.
+ * Don't issue read-ahead advice (posix_fadvise) to simulate asynchronous I/O
+ * under io_method=sync.  We usually avoid issuing advice automatically when
+ * sequential access is detected, but this flag disables it entirely, for
+ * sequential cases that might not be correctly detected, as well as for
+ * callers that are better off without advice for other reasons.  Explicit
+ * advice is known to perform worse than letting the kernel (at least Linux)
+ * detect sequential access.
  */
-#define READ_STREAM_SEQUENTIAL 0x02
+#define READ_STREAM_NO_ADVICE 0x02
 
 /*
  * We usually ramp up from smaller reads to larger ones, to support users who
