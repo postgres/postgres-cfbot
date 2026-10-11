@@ -511,7 +511,7 @@
 
 { name => 'concurrent_index_reset_snapshot_interval', type => 'int', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Sets the minimum time between snapshot resets during concurrent index builds.',
-  long_desc => 'The first heap scan resets its snapshot at the next page boundary after this interval. 0 resets on every page. -1 disables resets.',
+  long_desc => 'Resets occur at page boundaries during the first heap scan and between tuples in later build phases. 0 resets at every opportunity. -1 disables resets.',
   flags => 'GUC_NOT_IN_SAMPLE | GUC_UNIT_MS',
   variable => 'concurrent_index_reset_snapshot_interval',
   boot_val => '100',

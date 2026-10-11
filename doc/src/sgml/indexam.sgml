@@ -327,6 +327,12 @@ ambuild (Relation heapRelation,
   </para>
 
   <para>
+   After the scan, call <function>index_build_rotate_snapshot</function>
+   between tuples to continue resets at the same interval.  Do not call it
+   while the table scan is open, since the scan still uses the active snapshot.
+  </para>
+
+  <para>
 <programlisting>
 void
 ambuildempty (Relation indexRelation);

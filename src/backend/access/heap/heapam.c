@@ -709,9 +709,6 @@ heap_prepare_pagescan(TableScanDesc sscan)
  *
  * The scan uses the active snapshot without registering another copy,
  * allowing RotateSnapshot() to release it and advance xmin.
- *
- * The caller leaves it active for the rest of the build and pops it when the
- * build ends.
  */
 static inline void
 heap_reset_scan_snapshot(HeapScanDesc scan)
@@ -1494,10 +1491,7 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
 	{
-		/*
-		 * Leave the snapshot active for the rest of the build.  The caller is
-		 * responsible for popping it.
-		 */
+		/* The caller owns the active snapshot. */
 		Assert(!(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT));
 		Assert(GetActiveSnapshot() == sscan->rs_snapshot);
 	}

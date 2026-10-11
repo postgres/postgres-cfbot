@@ -262,6 +262,7 @@ typedef struct BTWriteState
 	BulkWriteState *bulkstate;
 	BTScanInsert inskey;		/* generic insertion scankey */
 	BlockNumber btws_pages_alloced; /* # pages allocated */
+	IndexInfo  *indexInfo;
 } BTWriteState;
 
 
@@ -270,7 +271,8 @@ static double _bt_spools_heapscan(Relation heap, Relation index,
 static void _bt_spooldestroy(BTSpool *btspool);
 static void _bt_spool(BTSpool *btspool, const ItemPointerData *self,
 					  const Datum *values, const bool *isnull);
-static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2);
+static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2,
+						  IndexInfo *indexInfo);
 static void _bt_build_callback(Relation index, ItemPointer tid, Datum *values,
 							   bool *isnull, bool tupleIsAlive, void *state);
 static BulkWriteBuffer _bt_blnewpage(BTWriteState *wstate, uint32 level);
@@ -337,7 +339,7 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * inserting the sorted tuples into btree pages and (3) building the upper
 	 * levels.  Finally, it may also be necessary to end use of parallelism.
 	 */
-	_bt_leafbuild(buildstate.spool, buildstate.spool2);
+	_bt_leafbuild(buildstate.spool, buildstate.spool2, indexInfo);
 	_bt_spooldestroy(buildstate.spool);
 	if (buildstate.spool2)
 		_bt_spooldestroy(buildstate.spool2);
@@ -558,7 +560,7 @@ _bt_spool(BTSpool *btspool, const ItemPointerData *self, const Datum *values, co
  * create an entire btree.
  */
 static void
-_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
+_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, IndexInfo *indexInfo)
 {
 	BTWriteState wstate;
 
@@ -583,6 +585,7 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
 
 	wstate.heap = btspool->heap;
 	wstate.index = btspool->index;
+	wstate.indexInfo = indexInfo;
 	wstate.inskey = _bt_mkscankey(wstate.index, NULL);
 	/* _bt_mkscankey() won't set allequalimage without metapage */
 	wstate.inskey->allequalimage = _bt_allequalimage(wstate.index, true);
@@ -822,6 +825,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	 * load phase of index creation.
 	 */
 	CHECK_FOR_INTERRUPTS();
+	index_build_rotate_snapshot(wstate->indexInfo);
 
 	nbuf = state->btps_buf;
 	npage = (Page) nbuf;
@@ -1279,6 +1283,7 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 				 * interrupts and snapshot resets here too.
 				 */
 				CHECK_FOR_INTERRUPTS();
+				index_build_rotate_snapshot(wstate->indexInfo);
 			}
 
 			/*

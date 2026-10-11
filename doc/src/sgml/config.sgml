@@ -12788,11 +12788,13 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </term>
       <listitem>
        <para>
-        Sets the minimum time between snapshot resets during the first heap
-        scan of <command>CREATE INDEX CONCURRENTLY</command> and
-        <command>REINDEX CONCURRENTLY</command>.  The scan resets its snapshot
-        at the next page boundary after this interval, allowing the xmin
-        horizon to advance.
+        Sets the minimum time between snapshot resets during
+        <command>CREATE INDEX CONCURRENTLY</command> and
+        <command>REINDEX CONCURRENTLY</command>, allowing the xmin horizon to
+        advance.  The first heap scan resets its snapshot at page boundaries.
+        Later build phases check for resets between tuples.  Sorting and
+        intermediate merges inside tuplesort do not reset the snapshot, and
+        the validation scan keeps a fixed snapshot.
         If no unit is specified, the value is in milliseconds.  The default
         is <literal>100ms</literal>.  A value of <literal>0</literal> resets at
         every opportunity, including the start of the scan, and is useful

@@ -39,6 +39,7 @@
 #include "partitioning/partdefs.h"
 #include "storage/buf.h"
 #include "utils/reltrigger.h"
+#include "utils/snapmgr.h"
 
 
 /*
@@ -168,8 +169,8 @@ typedef struct ExprState
  *		entries for a particular index.  Used for both index_build and
  *		retail creation of index entries.
  *
- * ii_Concurrent, ii_ResetSnapshot, ii_BrokenHotChain, and
- * ii_ParallelWorkers are used only during index build; they're
+ * ii_Concurrent, ii_ResetSnapshot, ii_BrokenHotChain, ii_ParallelWorkers
+ * and ii_SnapshotRotation are used only during index build; they're
  * conventionally zeroed otherwise.
  * ----------------
  */
@@ -240,6 +241,9 @@ typedef struct IndexInfo
 
 	/* memory context holding this IndexInfo */
 	MemoryContext ii_Context;
+
+	/* snapshot resets after the heap scan */
+	SnapshotRotation ii_SnapshotRotation;
 } IndexInfo;
 
 /* ----------------
