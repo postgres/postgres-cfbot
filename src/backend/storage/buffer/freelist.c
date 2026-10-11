@@ -15,6 +15,15 @@
  */
 #include "postgres.h"
 
+#ifdef USE_LIBNUMA
+#include <sched.h>
+#endif
+
+#ifdef USE_LIBNUMA
+#include <numa.h>
+#include <numaif.h>
+#endif
+
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/buf_internals.h"

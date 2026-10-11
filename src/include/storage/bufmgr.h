@@ -158,10 +158,12 @@ typedef struct ReadBuffersOperation ReadBuffersOperation;
 /*
  * information about one partition of shared buffers
  *
+ * numa_nod specifies node for this partition (-1 means allocated on any node)
  * first/last buffer - the values are inclusive
  */
 typedef struct BufferPartition
 {
+	int			numa_node;		/* NUMA node (-1 no node) */
 	int			num_buffers;	/* number of buffers */
 	int			first_buffer;	/* first buffer of partition */
 	int			last_buffer;	/* last buffer of partition */
@@ -170,7 +172,9 @@ typedef struct BufferPartition
 /* an array of information about all partitions */
 typedef struct BufferPartitions
 {
+	int			nnodes;			/* number of NUMA nodes */
 	int			npartitions;	/* number of partitions */
+	int			npartitions_per_node;	/* for convenience */
 	BufferPartition partitions[FLEXIBLE_ARRAY_MEMBER];
 } BufferPartitions;
 
@@ -206,6 +210,7 @@ extern PGDLLIMPORT const PgAioHandleCallbacks aio_local_buffer_readv_cb;
 
 /* in buf_init.c */
 extern PGDLLIMPORT char *BufferBlocks;
+extern PGDLLIMPORT bool shared_buffers_numa;
 
 /* in localbuf.c */
 extern PGDLLIMPORT int NLocBuffer;
@@ -389,6 +394,9 @@ extern void MarkDirtyRelUnpinnedBuffers(Relation rel,
 extern void MarkDirtyAllUnpinnedBuffers(int32 *buffers_dirtied,
 										int32 *buffers_already_dirty,
 										int32 *buffers_skipped);
+
+/* in buf_init.c */
+extern int	BufferGetNode(Buffer buffer);
 
 /* in localbuf.c */
 extern void AtProcExit_LocalBuffers(void);
