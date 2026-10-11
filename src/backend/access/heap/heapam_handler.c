@@ -2652,6 +2652,8 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 static const TableAmRoutine heapam_methods = {
 	.type = T_TableAmRoutine,
 
+	.am_logical_decoding = true,
+
 	.slot_callbacks = heapam_slot_callbacks,
 
 	.scan_begin = heap_beginscan,

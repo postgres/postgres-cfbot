@@ -435,6 +435,18 @@ typedef struct TableAmRoutine
 	 */
 	bool		am_index_delete_marking;
 
+	/*
+	 * am_logical_decoding: every committed change of a row in a logically
+	 * logged relation of this AM is decoded by logical decoding as an INSERT,
+	 * UPDATE or DELETE carrying the tuple images output plugins expect, and
+	 * an aborted change is not.  REPACK (CONCURRENTLY) replays the changes
+	 * made during the rewrite from that stream, so it refuses a table whose
+	 * AM leaves this false; it would lose changes silently.  The rewrite
+	 * itself goes through relation_copy_for_cluster with the decoding's
+	 * initial snapshot.
+	 */
+	bool		am_logical_decoding;
+
 
 	/* ------------------------------------------------------------------------
 	 * Slot related callbacks.
