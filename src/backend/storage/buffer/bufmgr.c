@@ -2335,7 +2335,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * checkpoints, except for their "init" forks, which need to be treated
 	 * just like permanent relations.
 	 */
-	set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+	set_bits |= BM_TAG_VALID | BM_SECOND_CHANCE;
 	if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 		set_bits |= BM_PERMANENT;
 
@@ -2445,7 +2445,7 @@ retry:
 
 	UnlockBufHdrExt(buf, buf_state,
 					0,
-					BUF_FLAG_MASK | BUF_USAGECOUNT_MASK,
+					BUF_FLAG_MASK,
 					0);
 
 	/*
@@ -2528,7 +2528,7 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 	ClearBufferTag(&buf_hdr->tag);
 	UnlockBufHdrExt(buf_hdr, buf_state,
 					0,
-					BUF_FLAG_MASK | BUF_USAGECOUNT_MASK,
+					BUF_FLAG_MASK,
 					0);
 
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
@@ -3004,7 +3004,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+			set_bits |= BM_TAG_VALID | BM_SECOND_CHANCE;
 			if (bmr.relpersistence == RELPERSISTENCE_PERMANENT || fork == INIT_FORKNUM)
 				set_bits |= BM_PERMANENT;
 
@@ -3336,18 +3336,21 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
 
 			if (strategy == NULL)
 			{
-				/* Default case: increase usagecount unless already max. */
-				if (BUF_STATE_GET_USAGECOUNT(buf_state) < BM_MAX_USAGE_COUNT)
-					buf_state += BUF_USAGECOUNT_ONE;
+				/* Default case: grant the buffer its second chance. */
+				buf_state |= BM_SECOND_CHANCE;
 			}
 			else
 			{
 				/*
-				 * Ring buffers shouldn't evict others from pool.  Thus we
-				 * don't make usagecount more than 1.
+				 * Ring buffers: a page is pinned once per cycle through the
+				 * ring by the scan that owns it, and those pins must not keep
+				 * it resident -- otherwise a sequential scan would protect its
+				 * own pages and evict the working set.  With a single bit
+				 * there is nothing to cap: leave the bit alone and let the
+				 * ring recycle the page, while an access from outside the ring
+				 * (which takes the default path above) grants the chance and
+				 * so removes the page from the ring's reach.
 				 */
-				if (BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
-					buf_state += BUF_USAGECOUNT_ONE;
 			}
 
 			if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
@@ -4174,7 +4177,7 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 	buf_state = LockBufHdr(bufHdr);
 
 	if (BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
-		BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
+		!BUF_STATE_HAS_SECOND_CHANCE(buf_state))
 	{
 		result |= BUF_REUSABLE;
 	}
