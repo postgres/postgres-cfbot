@@ -31,6 +31,28 @@
 #include "utils/resowner.h"
 
 /*
+ * How many second chances a single StrategyGetBuffer() call will spend before
+ * it stops looking for a buffer that has none left and takes the next unpinned
+ * buffer it sees.
+ *
+ * Spending a chance is progress -- the buffer becomes reclaimable on the next
+ * pass -- so the sweep treats it as a reason to keep scanning.  When the pool
+ * is re-touched faster than the hand can traverse it, chances are granted
+ * again before the hand returns, and a single allocation can spend them
+ * indefinitely without ever finding a victim.  Giving up after a fixed number
+ * makes the work one allocation can do a constant instead.
+ *
+ * The value trades that bound against replacement quality, and both sides have
+ * been measured.  The worst case an allocation reaches is almost exactly this
+ * threshold plus two, so the bound is a direct function of it.  The cost is
+ * taking a buffer that still had a chance left: on a workload whose hot set
+ * most queries re-read, a threshold of 4 leaves 4,519 hot pages non-resident
+ * and costs 1.8 points of hot-set hit ratio, 32 leaves 11 pages and costs 0.03
+ * points, and at 128 nothing hot is displaced and the cost is not measurable.
+ */
+#define BUF_SWEEP_CLAIM_THRESHOLD	128
+
+/*
  * Buffer state is a single 64-bit variable where following data is combined.
  *
  * State of the buffer itself (in order):
@@ -595,6 +617,7 @@ extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);
 
 extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
+extern uint64 StrategySweepClaims(void);
 extern void StrategyNotifyBgWriter(int bgwprocno);
 
 /* buf_table.c */
