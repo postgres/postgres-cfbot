@@ -167,7 +167,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 
 		buf_state = pg_atomic_read_u64(&bufHdr->state);
 		buf_state &= ~BUF_FLAG_MASK;
-		buf_state |= BM_TAG_VALID | BM_SECOND_CHANCE;
+		buf_state |= BM_TAG_VALID;	/* admit on probation */
 		pg_atomic_unlocked_write_u64(&bufHdr->state, buf_state);
 
 		*foundPtr = false;
@@ -454,7 +454,7 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			buf_state |= BM_TAG_VALID | BM_SECOND_CHANCE;
+			buf_state |= BM_TAG_VALID;	/* admit on probation */
 
 			pg_atomic_unlocked_write_u64(&victim_buf_hdr->state, buf_state);
 
