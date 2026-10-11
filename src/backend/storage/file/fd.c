@@ -1518,7 +1518,7 @@ FileAccess(File file)
 static void
 ReportTemporaryFileUsage(const char *path, pgoff_t size)
 {
-	pgstat_report_tempfile(size);
+	pgstat_report_tempfile(size, path);
 
 	if (log_temp_files >= 0)
 	{
@@ -1760,6 +1760,9 @@ OpenTemporaryFile(bool interXact)
 	if (!interXact)
 		RegisterTemporaryFile(file);
 
+	/* Its usage is reported when it is deleted, get ready for that */
+	pgstat_prepare_report_tempfile(VfdCache[file].fileName);
+
 	return file;
 }
 
@@ -1878,6 +1881,9 @@ PathNameCreateTemporaryFile(const char *path, bool error_on_failure)
 
 	/* Register it for automatic close. */
 	RegisterTemporaryFile(file);
+
+	/* Its usage is reported when it is deleted, get ready for that */
+	pgstat_prepare_report_tempfile(path);
 
 	return file;
 }
