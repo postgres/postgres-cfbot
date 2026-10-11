@@ -58,6 +58,13 @@ typedef struct
 	pg_atomic_uint32 numBufferAllocs;	/* Buffers allocated since last reset */
 
 	/*
+	 * Allocations that gave up on the second-chance rule and took a buffer
+	 * that still had its chance (see StrategyGetBuffer).  A rising value means
+	 * the pool is being re-touched faster than the hand can traverse it.
+	 */
+	pg_atomic_uint64 numSweepClaims;
+
+	/*
 	 * Bgworker process to be notified upon activity or -1 if none. See
 	 * StrategyNotifyBgWriter.
 	 */
@@ -195,6 +202,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 	BufferDesc *buf;
 	int			bgwprocno;
 	int			trycounter;
+	int			spent = 0;		/* chances spent by this call */
 
 	*from_ring = false;
 
@@ -295,19 +303,61 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 			{
 				/*
 				 * The buffer has been used since the hand last passed it.
-				 * Spend its second chance and keep scanning: it becomes a
-				 * candidate only if it is still untouched when the hand comes
-				 * back around, which gives it a full revolution of grace.
-				 * Spending a chance is progress toward finding a victim, so
-				 * reset trycounter.
+				 * Normally we spend its second chance and keep scanning: it
+				 * becomes a candidate only if it is still untouched when the
+				 * hand comes back around, which gives it a full revolution of
+				 * grace.  Spending a chance is progress toward a victim, so it
+				 * resets trycounter.
+				 *
+				 * That is the right default, but it is not free.  A chance is
+				 * granted again by any access, and the hand needs a full
+				 * revolution to come back; on a large pool re-touched faster
+				 * than that, chances are replenished faster than the hand
+				 * spends them.  Since each one resets trycounter, this loop
+				 * can then spend chances indefinitely without finding a
+				 * victim: unbounded work for one allocation.
+				 *
+				 * So give up the rule once the evidence says it is
+				 * unaffordable.  Having spent BUF_SWEEP_CLAIM_THRESHOLD
+				 * chances without finding a single buffer that had none left,
+				 * take the next unpinned buffer instead.  Under no pressure
+				 * the counter never reaches the threshold and behaviour is
+				 * unchanged.
 				 */
-				local_buf_state &= ~BM_SECOND_CHANCE;
+				if (spent < BUF_SWEEP_CLAIM_THRESHOLD)
+				{
+					local_buf_state &= ~BM_SECOND_CHANCE;
+
+					if (pg_atomic_compare_exchange_u64(&buf->state,
+													   &old_buf_state,
+													   local_buf_state))
+					{
+						spent++;
+						trycounter = NBuffers;
+						break;
+					}
+					continue;
+				}
+
+				/*
+				 * Take this buffer even though it still had a chance.  The bit
+				 * is cleared when the victim is reused, so there is no need to
+				 * spend the chance first.
+				 */
+				pg_atomic_fetch_add_u64(&StrategyControl->numSweepClaims, 1);
+				local_buf_state += BUF_REFCOUNT_ONE;
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 												   local_buf_state))
 				{
-					trycounter = NBuffers;
-					break;
+					/* Found a usable buffer */
+					if (strategy != NULL)
+						AddBufferToRing(strategy, buf);
+					*buf_state = local_buf_state;
+
+					TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
+
+					return buf;
 				}
 			}
 			else
@@ -421,6 +471,7 @@ StrategyCtlShmemInit(void *arg)
 	/* Clear statistics */
 	StrategyControl->completePasses = 0;
 	pg_atomic_init_u32(&StrategyControl->numBufferAllocs, 0);
+	pg_atomic_init_u64(&StrategyControl->numSweepClaims, 0);
 
 	/* No pending notification */
 	StrategyControl->bgwprocno = -1;
@@ -788,4 +839,18 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, bool from_r
 	strategy->buffers[strategy->current] = InvalidBuffer;
 
 	return true;
+}
+
+/*
+ * StrategySweepClaims -- allocations that took a buffer that had a chance left
+ *
+ * Returns a monotonically increasing count of allocations that gave up on the
+ * second-chance rule because the sweep could not find a buffer without one.
+ * The background writer compares successive readings: a rising count means the
+ * foreground sweep is starving for candidates.
+ */
+uint64
+StrategySweepClaims(void)
+{
+	return pg_atomic_read_u64(&StrategyControl->numSweepClaims);
 }
