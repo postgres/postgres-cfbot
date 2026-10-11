@@ -1296,7 +1296,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 		 * - in the parallel case, only spinlocks and atomics are used
 		 * ---
 		 */
-		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_SEQUENTIAL |
+		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_NO_ADVICE |
 														  READ_STREAM_USE_BATCHING,
 														  scan->rs_strategy,
 														  scan->rs_base.rs_rd,
