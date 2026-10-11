@@ -26,6 +26,7 @@
 #include "postgres.h"
 
 #include "access/hash.h"
+#include "catalog/index.h"
 #include "commands/progress.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -117,7 +118,7 @@ _h_spool(HSpool *hspool, const ItemPointerData *self, const Datum *values, const
  * create an entire index.
  */
 void
-_h_indexbuild(HSpool *hspool, Relation heapRel)
+_h_indexbuild(HSpool *hspool, Relation heapRel, IndexInfo *indexInfo)
 {
 	IndexTuple	itup;
 	int64		tups_done = 0;
@@ -150,6 +151,7 @@ _h_indexbuild(HSpool *hspool, Relation heapRel)
 
 		/* allow insertion phase to be interrupted, and track progress */
 		CHECK_FOR_INTERRUPTS();
+		index_build_rotate_snapshot(indexInfo);
 
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
 									 ++tups_done);

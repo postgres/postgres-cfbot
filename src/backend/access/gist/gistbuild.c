@@ -38,6 +38,7 @@
 #include "access/gist_private.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "optimizer/optimizer.h"
@@ -108,6 +109,9 @@ typedef struct
 	BlockNumber pages_allocated;
 
 	BulkWriteState *bulkstate;
+
+	IndexInfo  *indexInfo;
+	bool		scan_done;
 } GISTBuildState;
 
 #define GIST_SORTED_BUILD_PAGE_NUM 4
@@ -196,6 +200,8 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	buildstate.indexrel = index;
 	buildstate.heaprel = heap;
+	buildstate.indexInfo = indexInfo;
+	buildstate.scan_done = false;
 	buildstate.sortstate = NULL;
 	buildstate.giststate = initGISTstate(index);
 
@@ -321,6 +327,7 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		if (buildstate.buildMode == GIST_BUFFERING_ACTIVE)
 		{
 			elog(DEBUG1, "all tuples processed, emptying buffers");
+			buildstate.scan_done = true;
 			gistEmptyAllBuffers(&buildstate);
 			gistFreeBuildBuffers(buildstate.gfbb);
 		}
@@ -419,6 +426,7 @@ gist_indexsortbuild(GISTBuildState *state)
 	 */
 	while ((itup = tuplesort_getindextuple(state->sortstate, true)) != NULL)
 	{
+		index_build_rotate_snapshot(state->indexInfo);
 		gist_indexsortbuild_levelstate_add(state, levelstate, itup);
 		MemoryContextReset(state->giststate->tempCxt);
 	}
@@ -1335,6 +1343,9 @@ gistProcessEmptyingQueue(GISTBuildState *buildstate)
 			/* Get next index tuple from the buffer */
 			if (!gistPopItupFromNodeBuffer(gfbb, emptyingNodeBuffer, &itup))
 				break;
+
+			if (buildstate->scan_done)
+				index_build_rotate_snapshot(buildstate->indexInfo);
 
 			/*
 			 * Run it down to the underlying node buffer or leaf page.
