@@ -27,10 +27,12 @@
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/nodeModifyTable.h"
+#include "optimizer/optimizer.h"
 #include "replication/conflict.h"
 #include "replication/logicalrelation.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -842,6 +844,52 @@ retry:
 }
 
 /*
+ * Can the update from 'oldslot' to 'newslot' give this index a key it did not
+ * have?  Only then can the new version collide with another row in a unique
+ * index.  Compare the columns the index refers to: its key columns and those
+ * its expressions and predicate use.  A value stored differently but equal
+ * counts as changed, which costs only a needless check.
+ */
+static bool
+index_key_may_change(IndexInfo *indexInfo, TupleTableSlot *oldslot,
+					 TupleTableSlot *newslot)
+{
+	TupleDesc	desc = oldslot->tts_tupleDescriptor;
+	Bitmapset  *attrs = NULL;
+	int			member = -1;
+
+	for (int i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+	{
+		if (indexInfo->ii_IndexAttrNumbers[i] != 0)
+			attrs = bms_add_member(attrs, indexInfo->ii_IndexAttrNumbers[i] -
+								   FirstLowInvalidHeapAttributeNumber);
+	}
+	pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &attrs);
+	pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &attrs);
+
+	slot_getallattrs(oldslot);
+	slot_getallattrs(newslot);
+
+	while ((member = bms_next_member(attrs, member)) >= 0)
+	{
+		AttrNumber	attnum = member + FirstLowInvalidHeapAttributeNumber;
+		Form_pg_attribute att;
+
+		if (attnum <= 0)
+			return true;
+		att = TupleDescAttr(desc, attnum - 1);
+		if (oldslot->tts_isnull[attnum - 1] != newslot->tts_isnull[attnum - 1])
+			return true;
+		if (!oldslot->tts_isnull[attnum - 1] &&
+			!datumIsEqual(oldslot->tts_values[attnum - 1],
+						  newslot->tts_values[attnum - 1],
+						  att->attbyval, att->attlen))
+			return true;
+	}
+	return false;
+}
+
+/*
  * Check all the unique indexes in 'recheckIndexes' for conflict with the
  * tuple in 'remoteslot' and report if found.
  */
@@ -1026,6 +1074,42 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 			ExecConstraints(resultRelInfo, slot, estate);
 		if (rel->rd_rel->relispartition)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
+
+		/*
+		 * An AM that updates in place may maintain the indexes of a key
+		 * change inside table_tuple_update, where a duplicate key raises a
+		 * plain unique violation rather than the conflict reported below.  So
+		 * look for the conflict before the update, in the unique indexes
+		 * whose key the update changes.  The row's own index entries are at
+		 * its TID, which the update keeps, so they do not count.  A
+		 * conflicting row committed between this check and the update still
+		 * fails the update, with a unique violation; the retried transaction
+		 * then reports the conflict here.
+		 */
+		if (RelationUpdatesInPlace(rel) &&
+			resultRelInfo->ri_onConflictArbiterIndexes != NIL)
+		{
+			List	   *changed = NIL;
+
+			for (int i = 0; i < resultRelInfo->ri_NumIndices; i++)
+			{
+				Relation	index = resultRelInfo->ri_IndexRelationDescs[i];
+
+				if (index != NULL &&
+					list_member_oid(resultRelInfo->ri_onConflictArbiterIndexes,
+									RelationGetRelid(index)) &&
+					index_key_may_change(resultRelInfo->ri_IndexRelationInfo[i],
+										 searchslot, slot))
+					changed = lappend_oid(changed, RelationGetRelid(index));
+			}
+			if (changed != NIL)
+			{
+				slot->tts_tid = *tid;
+				CheckAndReportConflict(resultRelInfo, estate, CT_UPDATE_EXISTS,
+									   changed, searchslot, slot);
+				list_free(changed);
+			}
+		}
 
 		/*
 		 * searchslot is read again below (conflict report, AFTER ROW

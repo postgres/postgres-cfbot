@@ -377,6 +377,12 @@ typedef struct TableAmRoutine
 	 * SnapshotAny that would be the newest version, possibly one the query's
 	 * snapshot does not see, so the row is fetched with that snapshot.
 	 *
+	 * Logical replication apply reports a unique-key conflict of an UPDATE
+	 * after inserting its index entries.  This AM may maintain the indexes of
+	 * a key change inside tuple_update, where a duplicate fails as a plain
+	 * unique violation, so apply checks the unique indexes whose key the
+	 * UPDATE changes beforehand.
+	 *
 	 * AFTER row triggers do not re-fetch their rows by TID either: the
 	 * trigger queue stores each event's rows as heap-format copies, made by
 	 * the AM slot's copy_heap_tuple callback, and fires the trigger with
