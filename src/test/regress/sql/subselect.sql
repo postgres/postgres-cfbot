@@ -807,8 +807,8 @@ SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
     (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x)
 ORDER BY 1, 2;
 
--- No pull-up: the moved qual also references the preserved side of the
--- parent LEFT JOIN, which is not included in available_rels
+-- Pull-up using a LEFT JOIN and CASE: both sides of the parent join are
+-- referenced; the new join is attached to the nullable input
 EXPLAIN (COSTS OFF)
 SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
   ON o.x = a.x AND EXISTS
@@ -817,6 +817,228 @@ SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
   ON o.x = a.x AND EXISTS
     (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x)
 ORDER BY 1, 2;
+
+-- Duplicate subquery rows must not multiply either side of the parent join.
+-- Include an a row which satisfies the original ON qual but fails EXISTS.
+INSERT INTO ex_b VALUES (7, 70);
+INSERT INTO ex_c VALUES (100, 1), (200, 2), (300, NULL);
+INSERT INTO ex_a VALUES (1, 11), (2, 20), (3, 30), (NULL, 99);
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON a.x <= o.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x
+     WHERE b.x > 0)
+ORDER BY 1, 2, 3;
+
+-- Compare bags of rows against a SubPlan reference, including duplicates.
+WITH pulled AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON a.x <= o.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x
+       WHERE b.x > 0)
+), reference AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON a.x <= o.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x
+       WHERE b.x > 0 OFFSET 0)
+)
+(SELECT * FROM pulled EXCEPT ALL SELECT * FROM reference)
+UNION ALL
+(SELECT * FROM reference EXCEPT ALL SELECT * FROM pulled);
+
+-- NOT EXISTS must return TRUE, not NULL, when a correlation key is NULL.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON (o.x = a.x OR (o.x IS NULL AND a.x IS NULL)) AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x);
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON (o.x = a.x OR (o.x IS NULL AND a.x IS NULL)) AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x)
+ORDER BY 1, 2, 3;
+
+-- Check NOT EXISTS with both matching and null nullable-side keys.
+-- NOT EXISTS must still accept such an a row.
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = 1 AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x)
+ORDER BY 1, 2, 3;
+
+-- The same transformation applies to a RIGHT JOIN.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_a a RIGHT JOIN ex_o o
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON o.x = c.y AND a.x = c.y);
+SELECT o.x, a.x AS ax FROM ex_a a RIGHT JOIN ex_o o
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON o.x = c.y AND a.x = c.y)
+ORDER BY 1, 2;
+
+-- A key in the preserved input can itself have been null-extended earlier.
+SELECT o.x, d.x AS dx, a.x AS ax FROM
+  (ex_o o LEFT JOIN ex_a d ON o.x = d.x AND d.x <> 2)
+  LEFT JOIN ex_a a ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = d.x)
+ORDER BY 1, 2, 3;
+
+-- Multiple conjuncts can each add a LEFT JOIN to the nullable input.
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x)
+  AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x
+     WHERE c.y = 2)
+ORDER BY 1, 2;
+
+-- Independent correlation keys are grouped together.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+-- Off-diagonal keys and duplicates must not create extra parent rows.
+INSERT INTO ex_c VALUES (1, 1), (1, 1), (1, 2), (2, 2), (3, 9);
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+ORDER BY 1, 2, 3;
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON a.x = o.x AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+ORDER BY 1, 2, 3;
+WITH pulled AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON o.x = a.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+), reference AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON o.x = a.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x OFFSET 0)
+)
+(SELECT * FROM pulled EXCEPT ALL SELECT * FROM reference)
+UNION ALL
+(SELECT * FROM reference EXCEPT ALL SELECT * FROM pulled);
+WITH pulled AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON a.x = o.x AND NOT EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+), reference AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON a.x = o.x AND NOT EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x OFFSET 0)
+)
+(SELECT * FROM pulled EXCEPT ALL SELECT * FROM reference)
+UNION ALL
+(SELECT * FROM reference EXCEPT ALL SELECT * FROM pulled);
+-- Several key groups per a are safe for EXISTS, even without o.x = a.x.
+WITH pulled AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON o.x >= a.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+), reference AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON o.x >= a.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x OFFSET 0)
+)
+(SELECT * FROM pulled EXCEPT ALL SELECT * FROM reference)
+UNION ALL
+(SELECT * FROM reference EXCEPT ALL SELECT * FROM pulled);
+-- NOT EXISTS must retain its SubPlan when a can match several key groups.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+-- An EXISTS under OR cannot use the remaining correlations to filter groups.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x OR EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+-- Do not multiply evaluations of volatile parent quals.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x FROM ex_o o LEFT JOIN ex_a a
+  ON random() > 0.5 AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+DELETE FROM ex_c WHERE x < 100;
+-- Pull-up does not require an equality in the parent ON.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x >= a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+-- Other parent conjuncts can contain OR.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON (o.x = a.x OR o.y = 1) AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+-- No pull-up for a volatile correlated qual.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c
+     ON c.y = a.x AND c.y = o.x AND random() > 0.5);
+
+-- Multiple preserved-side keys, with correlations in WHERE rather than ON.
+INSERT INTO ex_o VALUES (1, 10);
+INSERT INTO ex_c VALUES (1, 10), (1, 10), (1, 11);
+SELECT o.x, o.y, a.x AS ax, a.y AS ay FROM ex_o o LEFT JOIN ex_a a
+  ON EXISTS (SELECT 1 FROM ex_b b, ex_c c
+             WHERE c.x = o.x AND c.y = o.y AND c.x = a.x AND c.y = a.y)
+ORDER BY 1, 2, 3, 4;
+-- Check NOT EXISTS against a SubPlan for keys fixed by the nullable side.
+WITH pulled AS (
+  SELECT o.x, o.y, a.x AS ax, a.y AS ay FROM ex_o o LEFT JOIN ex_a a
+    ON NOT EXISTS (SELECT 1 FROM ex_b b, ex_c c
+                   WHERE c.x = o.x AND c.y = o.y AND c.x = a.x AND c.y = a.y)
+), reference AS (
+  SELECT o.x, o.y, a.x AS ax, a.y AS ay FROM ex_o o LEFT JOIN ex_a a
+    ON NOT EXISTS (SELECT 1 FROM ex_b b, ex_c c
+                   WHERE c.x = o.x AND c.y = o.y AND c.x = a.x AND c.y = a.y
+                   OFFSET 0)
+)
+(SELECT * FROM pulled EXCEPT ALL SELECT * FROM reference)
+UNION ALL
+(SELECT * FROM reference EXCEPT ALL SELECT * FROM pulled);
+
+-- Ordinary semijoin pull-up and LEFT JOIN fallback share the ON traversal.
+-- Put the fallback first so the later semijoin is attached above it.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+  AND EXISTS (SELECT 1 FROM ex_c c WHERE c.y = a.x);
+WITH pulled AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON o.x = a.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+    AND EXISTS (SELECT 1 FROM ex_c c WHERE c.y = a.x)
+), reference AS (
+  SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+    ON o.x = a.x AND EXISTS
+      (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.x = o.x OFFSET 0)
+    AND EXISTS (SELECT 1 FROM ex_c c WHERE c.y = a.x OFFSET 0)
+)
+(SELECT * FROM pulled EXCEPT ALL SELECT * FROM reference)
+UNION ALL
+(SELECT * FROM reference EXCEPT ALL SELECT * FROM pulled);
+
+-- A correlation in an inner outer-join ON is a hard failure, even when
+-- the parent ON provides both preserved and nullable inputs for a fallback.
+-- Since b is nonempty, the subquery has rows regardless of its ON result.
+EXPLAIN (COSTS OFF)
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b LEFT JOIN ex_c c ON c.y = a.x AND c.x = o.x);
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b LEFT JOIN ex_c c ON c.y = a.x AND c.x = o.x)
+ORDER BY 1, 2;
+
+-- Empty inner input must preserve every o row, with a null-extended a.
+DELETE FROM ex_b;
+SELECT o.x, a.x AS ax FROM ex_o o LEFT JOIN ex_a a
+  ON o.x = a.x AND EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x)
+ORDER BY 1, 2;
+SELECT o.x, a.x AS ax, a.y FROM ex_o o LEFT JOIN ex_a a
+  ON (o.x = a.x OR (o.x IS NULL AND a.x IS NULL)) AND NOT EXISTS
+    (SELECT 1 FROM ex_b b JOIN ex_c c ON c.y = a.x AND c.y = o.x)
+ORDER BY 1, 2, 3;
 
 DROP TABLE ex_o, ex_a, ex_b, ex_c;
 
