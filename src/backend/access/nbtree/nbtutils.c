@@ -20,6 +20,7 @@
 #include "access/nbtree.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
+#include "access/tableam.h"
 #include "commands/progress.h"
 #include "common/int.h"
 #include "lib/qunique.h"
@@ -29,6 +30,7 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 
 
 static int	_bt_compare_int(const void *va, const void *vb);
@@ -1100,6 +1102,108 @@ _bt_check_natts(Relation rel, bool heapkeyspace, Page page, OffsetNumber offnum)
 	 * exceeds pg_index.indnkeyatts for the index.
 	 */
 	return tupnatts > 0 && tupnatts <= nkeyatts;
+}
+
+/*
+ * _bt_heap_tuple_status() -- check a tuple's current state for uniqueness
+ *
+ * Equal keys collected under different snapshots may not have been live at
+ * the same time.  Use a dirty snapshot, as _bt_check_unique() does, to check
+ * their current state.  Report in-progress inserts and deletes separately so
+ * _bt_load() can defer the conflict to validation.
+ *
+ * Return HeapTupleSatisfiesVacuum() status codes, but treat all dead tuples
+ * as HEAPTUPLE_DEAD regardless of whether they can be removed.  Check the HOT
+ * chain and update *tid to the matching version, if any.
+ */
+HTSV_Result
+_bt_heap_tuple_status(Relation heapRel, ItemPointer tid)
+{
+	SnapshotData snapshot;
+
+	InitDirtySnapshot(snapshot);
+
+	if (!table_fetch_tid(heapRel, tid, &snapshot, NULL))
+		return HEAPTUPLE_DEAD;
+
+	if (TransactionIdIsValid(snapshot.xmin))
+		return HEAPTUPLE_INSERT_IN_PROGRESS;
+	if (TransactionIdIsValid(snapshot.xmax))
+		return HEAPTUPLE_DELETE_IN_PROGRESS;
+
+	return HEAPTUPLE_LIVE;
+}
+
+/*
+ * _bt_tuples_equal() -- compare index keys for a uniqueness check
+ *
+ * Use the same comparisons as suffix truncation.  NULL key values are
+ * distinct unless the index specifies NULLS NOT DISTINCT.
+ */
+bool
+_bt_tuples_equal(Relation rel, BTScanInsert itup_key,
+				 IndexTuple itup1, IndexTuple itup2, bool nulls_not_distinct)
+{
+	int			keysz = IndexRelationGetNumberOfKeyAttributes(rel);
+
+	/* only a build calls this, and builds write version 4 indexes */
+	Assert(itup_key->heapkeyspace);
+
+	/*
+	 * The tuple header bit accounts for all columns, so with INCLUDE columns
+	 * present the key columns have to be checked explicitly.
+	 */
+	if (!nulls_not_distinct &&
+		(IndexTupleHasNulls(itup1) || IndexTupleHasNulls(itup2)))
+	{
+		TupleDesc	itupdesc = RelationGetDescr(rel);
+
+		if (keysz == IndexRelationGetNumberOfAttributes(rel))
+			return false;
+
+		for (int attnum = 1; attnum <= keysz; attnum++)
+		{
+			bool		isNull;
+
+			(void) index_getattr(itup1, attnum, itupdesc, &isNull);
+			if (isNull)
+				return false;
+			(void) index_getattr(itup2, attnum, itupdesc, &isNull);
+			if (isNull)
+				return false;
+		}
+	}
+
+	if (itup_key->allequalimage)
+		return _bt_keep_natts_fast(rel, itup1, itup2) > keysz;
+	else
+		return _bt_keep_natts(rel, itup1, itup2, itup_key) > keysz;
+}
+
+/*
+ * _bt_report_duplicate() -- report a duplicate found during index build
+ *
+ * Shared by _bt_load() and the tuplesort comparator's early check.
+ */
+void
+_bt_report_duplicate(Relation indexRel, Relation heapRel, IndexTuple itup)
+{
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	char	   *key_desc;
+
+	index_deform_tuple(itup, RelationGetDescr(indexRel), values, isnull);
+
+	key_desc = BuildIndexValueDescription(indexRel, values, isnull);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_UNIQUE_VIOLATION),
+			 errmsg("could not create unique index \"%s\"",
+					RelationGetRelationName(indexRel)),
+			 key_desc ? errdetail("Key %s is duplicated.", key_desc) :
+			 errdetail("Duplicate keys exist."),
+			 errtableconstraint(heapRel,
+								RelationGetRelationName(indexRel))));
 }
 
 /*

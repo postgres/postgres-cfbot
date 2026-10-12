@@ -15,6 +15,7 @@
 #define NBTREE_H
 
 #include "access/amapi.h"
+#include "access/heapam.h"
 #include "access/itup.h"
 #include "access/sdir.h"
 #include "catalog/pg_am_d.h"
@@ -1314,6 +1315,13 @@ extern bool _bt_check_natts(Relation rel, bool heapkeyspace, Page page,
 extern void _bt_check_third_page(Relation rel, Relation heap,
 								 bool needheaptidspace, Page page, IndexTuple newtup);
 extern bool _bt_allequalimage(Relation rel, bool debugmessage);
+extern HTSV_Result _bt_heap_tuple_status(Relation heapRel,
+										 ItemPointer tid);
+extern bool _bt_tuples_equal(Relation rel, BTScanInsert itup_key,
+							 IndexTuple itup1, IndexTuple itup2,
+							 bool nulls_not_distinct);
+extern void _bt_report_duplicate(Relation indexRel, Relation heapRel,
+								 IndexTuple itup);
 
 /*
  * prototypes for functions in nbtvalidate.c

@@ -13031,6 +13031,32 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-index-build-duplicate-check-scale-factor" xreflabel="index_build_duplicate_check_scale_factor">
+      <term><varname>index_build_duplicate_check_scale_factor</varname> (<type>floating point</type>)
+      <indexterm>
+        <primary><varname>index_build_duplicate_check_scale_factor</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Limits heap fetches for early duplicate checks while sorting and
+        loading a concurrent unique index build.  Sorting and loading have
+        separate budgets.  Each sort uses a fraction of the tuples received
+        so far; loading uses a fraction of the total tuples collected by the
+        scan, including all parallel workers.  The default fraction is
+        <literal>0.05</literal>.  For a nonzero fraction, each budget allows at
+        least 1000 heap fetches, so small builds can detect duplicates early.
+       </para>
+       <para>
+        After the load budget is exhausted, further entries with equal keys
+        are omitted from the index.  Validation inserts any surviving tuples
+        with a full uniqueness check.  A value of <literal>0</literal> leaves
+        duplicate checks to validation.  This limit does not apply to heap
+        fetches during validation.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-post-auth-delay" xreflabel="post_auth_delay">
       <term><varname>post_auth_delay</varname> (<type>integer</type>)
       <indexterm>
