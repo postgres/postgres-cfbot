@@ -6,7 +6,7 @@ SET concurrent_index_reset_snapshot_interval = 0;
 SELECT injection_points_attach('heap_reset_scan_snapshot_xmin_pinned', 'error');
 SELECT injection_points_attach('heap_reset_scan_snapshot_xid_assigned', 'notice');
 SELECT injection_points_attach('heap_beginscan_reset_snapshot', 'notice');
-
+SELECT injection_points_attach('table_parallelscan_initialize_reset_snapshot', 'notice');
 
 CREATE SCHEMA cic_reset_snap;
 -- Pad rows to fit exactly seven per page at any block size.  A scan of
@@ -116,9 +116,14 @@ CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i, j) WHERE cic_reset_snap.p
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 
+-- Constant folding of the predicate assigns an xid before the build.
+-- Parallel work distribution makes the leader's reset count variable,
+-- so do not check the count.
+SELECT injection_points_detach('heap_reset_scan_snapshot_xid_assigned');
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i, j) WHERE cic_reset_snap.predicate_stable_no_param();
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
+SELECT injection_points_attach('heap_reset_scan_snapshot_xid_assigned', 'notice');
 
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i DESC NULLS LAST);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
@@ -155,5 +160,6 @@ SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
 DROP SCHEMA cic_reset_snap CASCADE;
 
 SELECT injection_points_detach('heap_beginscan_reset_snapshot');
+SELECT injection_points_detach('table_parallelscan_initialize_reset_snapshot');
 
 DROP EXTENSION injection_points;

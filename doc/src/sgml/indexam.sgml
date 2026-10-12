@@ -322,6 +322,8 @@ ambuild (Relation heapRelation,
    after the build callback returns, fetching external TOAST data rather than
    retaining pointers to it.  The access method must not hold an additional
    snapshot across the scan.
+   Access methods with parallel builds must also follow the parallel table
+   scan's snapshot reset protocol.
   </para>
 
   <para>

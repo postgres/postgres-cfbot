@@ -429,6 +429,9 @@ SnapshotRotationDue(SnapshotRotation *rotation)
  *
  * Push the new snapshot and unregister it, leaving the active-stack entry as
  * the operation's only reference for the next reset.
+ *
+ * Parallel builds allow participants to replace their snapshots
+ * independently; see table_parallelscan_initialize().
  */
 void
 RotateSnapshot(SnapshotRotation *rotation)
@@ -445,8 +448,6 @@ RotateSnapshot(SnapshotRotation *rotation)
 	Assert(!HistoricSnapshotActive());
 	/* The operation is running, so the transaction snapshot was taken. */
 	Assert(FirstSnapshotSet);
-	/* Not in parallel mode yet; see index_build_resets_snapshots(). */
-	Assert(!IsInParallelMode());
 
 	newsnap = RegisterSnapshot(GetSnapshotData(&SecondarySnapshotData));
 
