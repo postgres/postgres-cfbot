@@ -37,6 +37,8 @@ DROP TABLE rpk_missing;
 CREATE TABLE repack_conc_invidx (i int PRIMARY KEY, j int);
 INSERT INTO repack_conc_invidx VALUES (1, 0), (2, 0);
 CREATE UNIQUE INDEX CONCURRENTLY repack_conc_invidx_uq ON repack_conc_invidx (j);
+SELECT indisready FROM pg_index
+WHERE indexrelid = 'repack_conc_invidx_uq'::regclass;
 CREATE INDEX CONCURRENTLY repack_conc_invalid_expr ON repack_conc_invidx ((1/j));
 REPACK repack_conc_invidx;
 REPACK (CONCURRENTLY) repack_conc_invidx;
