@@ -1255,6 +1255,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
 		snapshot = scan->rs_snapshot;
+		/* Workers copied the flag from the shared scan descriptor. */
+		Assert(indexInfo->ii_ResetSnapshot ==
+			   ((scan->rs_flags & SO_RESET_SNAPSHOT) != 0));
 	}
 
 	hscan = (HeapScanDesc) scan;

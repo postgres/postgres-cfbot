@@ -25,6 +25,12 @@ SELECT injection_points_attach('heap_beginscan_reset_snapshot', 'notice');
  
 (1 row)
 
+SELECT injection_points_attach('table_parallelscan_initialize_reset_snapshot', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
 CREATE SCHEMA cic_reset_snap;
 -- Pad rows to fit exactly seven per page at any block size.  A scan of
 -- 35 rows then resets its snapshot five times with a zero interval.
@@ -157,10 +163,14 @@ CREATE UNIQUE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(MOD(i, 2), j) WHERE MOD(i, 2) = 0;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i, j) WHERE cic_reset_snap.predicate_stable(i);
 NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
@@ -175,17 +185,40 @@ NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_xid_assig
 NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_xid_assigned
 NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_xid_assigned
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
+-- Constant folding of the predicate assigns an xid before the build.
+-- Parallel work distribution makes the leader's reset count variable,
+-- so do not check the count.
+SELECT injection_points_detach('heap_reset_scan_snapshot_xid_assigned');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i, j) WHERE cic_reset_snap.predicate_stable_no_param();
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
+SELECT injection_points_attach('heap_reset_scan_snapshot_xid_assigned', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i DESC NULLS LAST);
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING BRIN(i);
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING GIN((ARRAY[i, j]));
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 BEGIN TRANSACTION;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
@@ -226,6 +259,12 @@ drop cascades to function cic_reset_snap.predicate_stable(integer)
 drop cascades to function cic_reset_snap.predicate_stable_no_param()
 drop cascades to operator family cic_reset_snap.int4_bloom_storage_ops for access method brin
 SELECT injection_points_detach('heap_beginscan_reset_snapshot');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_detach('table_parallelscan_initialize_reset_snapshot');
  injection_points_detach 
 -------------------------
  

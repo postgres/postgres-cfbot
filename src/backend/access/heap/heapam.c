@@ -1220,13 +1220,17 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 
 	if (flags & SO_RESET_SNAPSHOT)
 	{
-		/* Not for parallel scans yet; see index_build_resets_snapshots(). */
-		Assert(parallel_scan == NULL);
-
 		/* The scan snapshot is required to be the active one. */
 		Assert(GetActiveSnapshot() == snapshot);
 		Assert(!(flags & SO_TEMP_SNAPSHOT));
-		INJECTION_POINT("heap_beginscan_reset_snapshot", NULL);
+#ifdef USE_INJECTION_POINTS
+		/*
+		 * Parallel scans fire table_parallelscan_initialize_reset_snapshot
+		 * once during initialization, rather than once per participant here.
+		 */
+		if (parallel_scan == NULL)
+			INJECTION_POINT("heap_beginscan_reset_snapshot", NULL);
+#endif
 	}
 
 	/*

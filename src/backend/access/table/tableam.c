@@ -30,6 +30,8 @@
 #include "storage/bufmgr.h"
 #include "storage/shmem.h"
 #include "storage/smgr.h"
+#include "utils/injection_point.h"
+#include "utils/wait_event.h"
 
 /*
  * Constants to control the behavior of block allocation to parallel workers
@@ -132,10 +134,10 @@ table_parallelscan_estimate(Relation rel, Snapshot snapshot)
 {
 	Size		sz = 0;
 
-	if (IsMVCCSnapshot(snapshot))
+	if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 		sz = add_size(sz, EstimateSnapshotSpace(snapshot));
 	else
-		Assert(snapshot == SnapshotAny);
+		Assert(snapshot == SnapshotAny || snapshot == InvalidSnapshot);
 
 	sz = add_size(sz, rel->rd_tableam->parallelscan_estimate(rel));
 
@@ -144,22 +146,58 @@ table_parallelscan_estimate(Relation rel, Snapshot snapshot)
 
 void
 table_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan,
-							  Snapshot snapshot)
+							  Snapshot snapshot, bool reset_snapshot)
 {
 	Size		snapshot_off = rel->rd_tableam->parallelscan_initialize(rel, pscan);
 
 	pscan->phs_snapshot_off = snapshot_off;
 
-	if (IsMVCCSnapshot(snapshot))
+	/*
+	 * Serialize a fixed MVCC snapshot for ordinary scans.  Scans that reset
+	 * snapshots use each participant's active snapshot instead.
+	 */
+	if (reset_snapshot)
+	{
+		Assert(snapshot == InvalidSnapshot);
+		pscan->phs_snapshot_any = false;
+		pscan->phs_reset_snapshot = true;
+		pg_atomic_init_u32(&pscan->phs_nrestored, 0);
+		ConditionVariableInit(&pscan->phs_restored_cv);
+		INJECTION_POINT("table_parallelscan_initialize_reset_snapshot", NULL);
+	}
+	else if (IsMVCCSnapshot(snapshot))
 	{
 		SerializeSnapshot(snapshot, (char *) pscan + pscan->phs_snapshot_off);
 		pscan->phs_snapshot_any = false;
+		pscan->phs_reset_snapshot = false;
 	}
 	else
 	{
 		Assert(snapshot == SnapshotAny);
+		Assert(!reset_snapshot);
 		pscan->phs_snapshot_any = true;
+		pscan->phs_reset_snapshot = false;
 	}
+}
+
+/*
+ * Wait until nparticipants have joined the scan with their own snapshots.
+ * Until then, the leader must retain the snapshot serialized for workers.
+ *
+ * Call WaitForParallelWorkersToAttach() first so a worker startup failure
+ * reports an error instead of leaving this wait blocked.
+ */
+void
+table_parallelscan_wait_restored(ParallelTableScanDesc pscan,
+								 int nparticipants)
+{
+	Assert(pscan->phs_reset_snapshot);
+
+	ConditionVariablePrepareToSleep(&pscan->phs_restored_cv);
+	while (pg_atomic_read_u32(&pscan->phs_nrestored) < (uint32) nparticipants)
+		ConditionVariableSleep(&pscan->phs_restored_cv,
+							   WAIT_EVENT_PARALLEL_CREATE_INDEX_SNAPSHOT);
+	ConditionVariableCancelSleep();
 }
 
 TableScanDesc
@@ -172,7 +210,20 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan,
 
 	Assert(RelFileLocatorEquals(relation->rd_locator, pscan->phs_locator));
 
-	if (!pscan->phs_snapshot_any)
+	/*
+	 * Scans that reset snapshots start with the active snapshot.
+	 */
+	if (pscan->phs_reset_snapshot)
+	{
+		Assert(ActiveSnapshotSet());
+		internal_flags |= SO_RESET_SNAPSHOT;
+		snapshot = GetActiveSnapshot();
+
+		/* Tell table_parallelscan_wait_restored() we joined the scan. */
+		pg_atomic_add_fetch_u32(&pscan->phs_nrestored, 1);
+		ConditionVariableBroadcast(&pscan->phs_restored_cv);
+	}
+	else if (!pscan->phs_snapshot_any)
 	{
 		/* Snapshot was serialized -- restore it */
 		snapshot = RestoreSnapshot((char *) pscan + pscan->phs_snapshot_off);
@@ -203,6 +254,7 @@ table_beginscan_parallel_tidrange(Relation relation,
 	/* disable syncscan in parallel tid range scan. */
 	pscan->phs_syncscan = false;
 
+	Assert(!pscan->phs_reset_snapshot);
 	if (!pscan->phs_snapshot_any)
 	{
 		/* Snapshot was serialized -- restore it */

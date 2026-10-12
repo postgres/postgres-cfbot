@@ -145,12 +145,9 @@ typedef struct BrinLeader
 	 *
 	 * brinshared is the shared state for entire build.  sharedsort is the
 	 * shared, tuplesort-managed state passed to each process tuplesort.
-	 * snapshot is the snapshot used by the scan iff an MVCC snapshot is
-	 * required.
 	 */
 	BrinShared *brinshared;
 	Sharedsort *sharedsort;
-	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 } BrinLeader;
@@ -1255,6 +1252,8 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * for btree, but not for BRIN, which can do with much less memory. So
 	 * maybe make that somehow less strict, optionally?
 	 */
+	/* Concurrent builds support snapshot resets. */
+	Assert(indexInfo->ii_ResetSnapshot == indexInfo->ii_Concurrent);
 	if (indexInfo->ii_ParallelWorkers > 0)
 		_brin_begin_parallel(state, heap, index, indexInfo->ii_Concurrent,
 							 indexInfo->ii_ParallelWorkers);
@@ -2492,16 +2491,16 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
 
 	/*
-	 * Prepare for scan of the base relation.  In a normal index build, we use
-	 * SnapshotAny because we must retrieve all tuples and do our own time
-	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
-	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
+	 * Use SnapshotAny for non-concurrent builds so the scan can include
+	 * RECENTLY_DEAD tuples.  Concurrent builds use the active snapshot from
+	 * index_build(), which parallel initialization serializes for the
+	 * workers.  Do not register another copy, as it would pin xmin across
+	 * snapshot resets.
 	 */
 	if (!isconcurrent)
 		snapshot = SnapshotAny;
 	else
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		snapshot = InvalidSnapshot;
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BRIN_SHARED workspace.
@@ -2544,8 +2543,6 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
-			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
 		return;
@@ -2570,7 +2567,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 
 	table_parallelscan_initialize(heap,
 								  ParallelTableScanFromBrinShared(brinshared),
-								  snapshot);
+								  snapshot,
+								  isconcurrent);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -2616,7 +2614,6 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 		brinleader->nparticipanttuplesorts++;
 	brinleader->brinshared = brinshared;
 	brinleader->sharedsort = sharedsort;
-	brinleader->snapshot = snapshot;
 	brinleader->walusage = walusage;
 	brinleader->bufferusage = bufferusage;
 
@@ -2630,15 +2627,19 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->bs_leader = brinleader;
 
+	/*
+	 * Wait for workers to attach before joining the scan, so startup failures
+	 * are reported before we wait for their snapshots.  The leader must keep
+	 * its initial snapshot until every worker has restored it.
+	 */
+	WaitForParallelWorkersToAttach(pcxt);
+	if (isconcurrent)
+		table_parallelscan_wait_restored(ParallelTableScanFromBrinShared(brinshared),
+										 pcxt->nworkers_launched);
+
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
 		_brin_leader_participate_as_worker(buildstate, heap, index);
-
-	/*
-	 * Caller needs to wait for all launched workers when we return.  Make
-	 * sure that the failure-to-start case will not hang forever.
-	 */
-	WaitForParallelWorkersToAttach(pcxt);
 }
 
 /*
@@ -2659,9 +2660,6 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 	for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
-	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(brinleader->snapshot))
-		UnregisterSnapshot(brinleader->snapshot);
 	DestroyParallelContext(brinleader->pcxt);
 	ExitParallelMode();
 }
@@ -2861,7 +2859,7 @@ _brin_parallel_merge(BrinBuildState *state)
 
 /*
  * Returns size of shared memory required to store state for a parallel
- * brin index build based on the snapshot its parallel scan will use.
+ * brin index build.
  */
 static Size
 _brin_parallel_estimate_shared(Relation heap, Snapshot snapshot)
@@ -2910,6 +2908,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 {
 	SortCoordinate coordinate;
 	TableScanDesc scan;
+	ParallelTableScanDesc pscan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
 
@@ -2924,12 +2923,14 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 													 TUPLESORT_NONE);
 
 	/* Join parallel scan */
+	pscan = ParallelTableScanFromBrinShared(brinshared);
 	indexInfo = BuildIndexInfo(index);
 	indexInfo->ii_Concurrent = brinshared->isconcurrent;
+	indexInfo->ii_ResetSnapshot = pscan->phs_reset_snapshot;
 	state->bs_attvarlena = brin_build_attvarlena(heap, indexInfo);
 
 	scan = table_beginscan_parallel(heap,
-									ParallelTableScanFromBrinShared(brinshared),
+									pscan,
 									SO_NONE);
 
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,

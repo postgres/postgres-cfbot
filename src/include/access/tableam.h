@@ -1200,10 +1200,23 @@ extern Size table_parallelscan_estimate(Relation rel, Snapshot snapshot);
  * relation. `pscan` needs to be sized according to parallelscan_estimate()
  * for the same relation.  Call this just once in the leader process; then,
  * individual workers attach via table_beginscan_parallel.
+ *
+ * `reset_snapshot` indicates that the scan resets its snapshot periodically;
+ * `snapshot` must then be InvalidSnapshot, and every participant starts with
+ * its active snapshot instead.
  */
 extern void table_parallelscan_initialize(Relation rel,
 										  ParallelTableScanDesc pscan,
-										  Snapshot snapshot);
+										  Snapshot snapshot,
+										  bool reset_snapshot);
+
+/*
+ * Wait for nparticipants to join a scan with their own snapshots before the
+ * leader releases the snapshot serialized for workers.  Call
+ * WaitForParallelWorkersToAttach() first.
+ */
+extern void table_parallelscan_wait_restored(ParallelTableScanDesc pscan,
+											 int nparticipants);
 
 /*
  * Begin a parallel scan. `pscan` needs to have been initialized with
