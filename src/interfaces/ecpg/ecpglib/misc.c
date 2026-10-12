@@ -436,16 +436,22 @@ pthread_mutex_init(pthread_mutex_t *mp, void *attr)
 int
 pthread_mutex_lock(pthread_mutex_t *mp)
 {
-	/* Initialize the csection if not already done */
-	if (mp->initstate != 1)
+	/* Acquire the initialization state without a read-modify-write. */
+#ifdef _MSC_VER
+	if (ReadAcquire(&mp->initstate) != 1)
+#else
+	if (__atomic_load_n(&mp->initstate, __ATOMIC_ACQUIRE) != 1)
+#endif
 	{
 		LONG		istate;
 
-		while ((istate = InterlockedExchange(&mp->initstate, 2)) == 2)
+		while ((istate = InterlockedCompareExchange(&mp->initstate, 2, 0)) == 2)
 			Sleep(0);			/* wait, another thread is doing this */
-		if (istate != 1)
+		if (istate == 0)
+		{
 			InitializeCriticalSection(&mp->csection);
-		InterlockedExchange(&mp->initstate, 1);
+			InterlockedExchange(&mp->initstate, 1);
+		}
 	}
 	EnterCriticalSection(&mp->csection);
 	return 0;
@@ -454,7 +460,12 @@ pthread_mutex_lock(pthread_mutex_t *mp)
 int
 pthread_mutex_unlock(pthread_mutex_t *mp)
 {
-	if (mp->initstate != 1)
+	/* The successful lock already acquired the initialized critical section. */
+#ifdef _MSC_VER
+	if (ReadNoFence(&mp->initstate) != 1)
+#else
+	if (__atomic_load_n(&mp->initstate, __ATOMIC_RELAXED) != 1)
+#endif
 		return EINVAL;
 	LeaveCriticalSection(&mp->csection);
 	return 0;
