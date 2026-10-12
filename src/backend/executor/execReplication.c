@@ -969,6 +969,13 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		if (rel->rd_rel->relispartition)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
+		/*
+		 * searchslot is read again below (conflict report, AFTER ROW
+		 * triggers); an in-place AM is about to overwrite what it points at.
+		 */
+		if (RelationUpdatesInPlace(rel))
+			ExecMaterializeSlot(searchslot);
+
 		simple_table_tuple_update(rel, tid, slot, estate->es_snapshot,
 								  &update_indexes);
 
@@ -1000,7 +1007,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		/* AFTER ROW UPDATE Triggers */
 		ExecARUpdateTriggers(estate, resultRelInfo,
 							 NULL, NULL,
-							 tid, NULL, slot,
+							 tid, NULL, searchslot, slot,
 							 recheckIndexes, NULL, false);
 
 		list_free(recheckIndexes);

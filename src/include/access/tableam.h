@@ -367,6 +367,12 @@ typedef struct TableAmRoutine
 	 * version without moving, so it correctly reports traversed = false, and
 	 * ExecUpdate and ExecDelete accept that.
 	 *
+	 * The update overwrites the storage the pre-update row was read from, and
+	 * the row's TID yields the new version afterwards.  So ExecUpdate, MERGE
+	 * and logical replication apply copy the old row out of its slot before
+	 * updating, and hand that copy to RETURNING OLD and the AFTER ROW UPDATE
+	 * triggers instead of re-fetching it by TID.
+	 *
 	 * The heap AM leaves this false.
 	 */
 	bool		am_inplace_update_keeps_tid;
