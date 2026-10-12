@@ -3124,14 +3124,11 @@ index_update_stats(Relation rel,
  *
  * The index AM must opt in with amcanresetsnapshot.  The scan decides whether
  * to perform resets; see SO_RESET_SNAPSHOT.
- *
- * Unique builds do not support resets yet.
  */
 static bool
 index_build_resets_snapshots(Relation indexRelation, IndexInfo *indexInfo)
 {
 	return indexInfo->ii_Concurrent &&
-		!indexInfo->ii_Unique &&
 		indexRelation->rd_indam->amcanresetsnapshot;
 }
 
@@ -3489,11 +3486,9 @@ IndexCheckExclusion(Relation heapRelation,
  * if we used HeapTupleSatisfiesVacuum).  The build can still miss tuples
  * added while it is running.
  *
- * That snapshot is not held for the whole scan: a non-unique build replaces
- * it with a fresh one every so often (SO_RESET_SNAPSHOT), so that the xmin
- * horizon can advance while a large table is scanned.  Each page is still
- * read under one snapshot, and whatever a later snapshot shows that an
- * earlier one did not is picked up by the validation described next.
+ * With SO_RESET_SNAPSHOT, the build can replace the snapshot between
+ * pages to let xmin advance.  Each page is read under one snapshot; the
+ * validation phase below finds any live tuples missed by the build.
  *
  * Next, we mark the index "indisready" (but still not "indisvalid") and
  * commit the second transaction and start a third.  Again we wait for all

@@ -216,6 +216,8 @@ typedef struct
 
 	bool		tuples;			/* Can SortTuple.tuple ever be set? */
 
+	int64		ntuples;		/* total tuples inserted into sort */
+
 	void	   *arg;			/* Specific information for the sort variant */
 } TuplesortPublic;
 
@@ -396,6 +398,7 @@ extern Tuplesortstate *tuplesort_begin_index_btree(Relation heapRel,
 												   Relation indexRel,
 												   bool enforceUnique,
 												   bool uniqueNullsNotDistinct,
+												   bool	uniqueDeadIgnored,
 												   int workMem, SortCoordinate coordinate,
 												   int sortopt);
 extern Tuplesortstate *tuplesort_begin_index_hash(Relation heapRel,

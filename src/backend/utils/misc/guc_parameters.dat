@@ -1356,6 +1356,16 @@
   show_hook => 'show_in_hot_standby',
 },
 
+{ name => 'index_build_duplicate_check_scale_factor', type => 'real', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Limits heap fetches for early duplicate checks in concurrent unique index builds.',
+  long_desc => 'Sorting and loading have separate heap-fetch budgets, each a fraction of their input tuple count. Zero leaves duplicate checks to validation.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'index_build_duplicate_check_scale_factor',
+  boot_val => '0.05',
+  min => '0.0',
+  max => '1.0',
+},
+
 { name => 'integer_datetimes', type => 'bool', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
   short_desc => 'Shows whether datetimes are integer based.',
   flags => 'GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',
