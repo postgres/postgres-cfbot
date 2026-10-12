@@ -2357,6 +2357,14 @@ extern void table_block_relation_estimate_size(Relation rel,
 											   double *allvisfrac,
 											   Size overhead_bytes_per_tuple,
 											   Size usable_bytes_per_page);
+extern void table_block_relation_estimate_size_extended(Relation rel,
+														int32 *attr_widths,
+														BlockNumber *pages,
+														double *tuples,
+														double *allvisfrac,
+														Size overhead_bytes_per_tuple,
+														Size usable_bytes_per_page,
+														int default_fillfactor);
 
 /* ----------------------------------------------------------------------------
  * Functions in tableamapi.c

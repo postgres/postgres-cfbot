@@ -672,6 +672,10 @@ table_block_relation_size(Relation rel, ForkNumber forkNumber)
  * usable_bytes_per_page should contain the approximate number of bytes per
  * page usable for tuple data, excluding the page header and any anticipated
  * special space.
+ *
+ * A relation without a fillfactor reloption is assumed to be filled to
+ * HEAP_DEFAULT_FILLFACTOR; an AM that fills its pages to a different default
+ * should use table_block_relation_estimate_size_extended() instead.
  */
 void
 table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
@@ -679,6 +683,28 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
 								   double *allvisfrac,
 								   Size overhead_bytes_per_tuple,
 								   Size usable_bytes_per_page)
+{
+	table_block_relation_estimate_size_extended(rel, attr_widths, pages,
+												tuples, allvisfrac,
+												overhead_bytes_per_tuple,
+												usable_bytes_per_page,
+												HEAP_DEFAULT_FILLFACTOR);
+}
+
+/*
+ * table_block_relation_estimate_size_extended
+ *
+ * As table_block_relation_estimate_size(), but default_fillfactor is the
+ * fillfactor the AM fills its pages to when the relation does not set one;
+ * it should be the same default the AM's insert path uses.
+ */
+void
+table_block_relation_estimate_size_extended(Relation rel, int32 *attr_widths,
+											BlockNumber *pages, double *tuples,
+											double *allvisfrac,
+											Size overhead_bytes_per_tuple,
+											Size usable_bytes_per_page,
+											int default_fillfactor)
 {
 	BlockNumber curpages;
 	BlockNumber relpages;
@@ -758,7 +784,7 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
 		 * The other branch considers it implicitly by calculating density
 		 * from actual relpages/reltuples statistics.
 		 */
-		fillfactor = RelationGetFillFactor(rel, HEAP_DEFAULT_FILLFACTOR);
+		fillfactor = RelationGetFillFactor(rel, default_fillfactor);
 
 		tuple_width = get_rel_data_width(rel, attr_widths);
 		tuple_width += overhead_bytes_per_tuple;
