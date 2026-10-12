@@ -334,6 +334,116 @@ format_type_extended(Oid type_oid, int32 typemod, uint16 flags)
 }
 
 /*
+ * format_type_detailed
+ *		Returns detailed information about a type: separate namespace, name,
+ *		typemod string and array-ness.
+ *
+ * Arguments:
+ *	type_oid, typemod: same as format_type_extended
+ *
+ * Return values:
+ * - nspid is the schema OID.  For certain SQL-standard types which have weird
+ *	 typmod rules, we return InvalidOid; the caller is expected to not schema-
+ *	 qualify the name nor add quotes to the type name in this case.
+ *
+ * - typname is set to the type name, without quotes
+ *
+ * - typemodstr is set to the typemod, if any, as a string with parentheses
+ *
+ * - typearray indicates whether []s must be added
+ *
+ * We don't try to decode type names to their standard-mandated names, except
+ * in the cases of types with unusual typmod rules.
+ */
+void
+format_type_detailed(Oid type_oid, int32 typemod,
+					 Oid *nspid, char **typname, char **typemodstr,
+					 bool *typearray)
+{
+	HeapTuple	tuple;
+	Form_pg_type typeform;
+	Oid			array_base_type;
+
+	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for type with OID %u", type_oid);
+
+	typeform = (Form_pg_type) GETSTRUCT(tuple);
+
+	/*
+	 * We switch our attention to the array element type for certain cases.
+	 * Check if it's a "true" array type.  Pseudo-array types such as "name"
+	 * shouldn't get deconstructed.  Also check the toast property, and don't
+	 * deconstruct "plain storage" array types --- this is because we don't
+	 * want to show oidvector as oid[].
+	 */
+	array_base_type = typeform->typelem;
+
+	*typearray = (IsTrueArrayType(typeform) &&
+				  typeform->typstorage != TYPSTORAGE_PLAIN);
+
+	if (*typearray)
+	{
+		ReleaseSysCache(tuple);
+		tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(array_base_type));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for type with OID %u", type_oid);
+
+		typeform = (Form_pg_type) GETSTRUCT(tuple);
+		type_oid = array_base_type;
+	}
+
+	/*
+	 * Special-case crock for types with strange typmod rules where we put
+	 * typemod at the middle of name (e.g. TIME(6) with time zone). We cannot
+	 * schema-qualify nor add quotes to the type name in these cases.
+	 */
+	*nspid = InvalidOid;
+
+	switch (type_oid)
+	{
+		case TIMEOID:
+			*typname = pstrdup("TIME");
+			break;
+		case TIMESTAMPOID:
+			*typname = pstrdup("TIMESTAMP");
+			break;
+		case TIMESTAMPTZOID:
+			if (typemod < 0)
+				*typname = pstrdup("TIMESTAMP WITH TIME ZONE");
+			else
+				/* otherwise, WITH TZ is added by typmod. */
+				*typname = pstrdup("TIMESTAMP");
+			break;
+		case INTERVALOID:
+			*typname = pstrdup("INTERVAL");
+			break;
+		case TIMETZOID:
+			if (typemod < 0)
+				*typname = pstrdup("TIME WITH TIME ZONE");
+			else
+				/* otherwise, WITH TZ is added by typmod. */
+				*typname = pstrdup("TIME");
+			break;
+		default:
+
+			/*
+			 * No additional processing is required for other types, so get
+			 * the type name and schema directly from the catalog.
+			 */
+			*nspid = typeform->typnamespace;
+			*typname = pstrdup(NameStr(typeform->typname));
+	}
+
+	if (typemod >= 0)
+		*typemodstr = printTypmod("", typemod, typeform->typmodout);
+	else
+		*typemodstr = pstrdup("");
+
+	ReleaseSysCache(tuple);
+}
+
+/*
  * This version is for use within the backend in error messages, etc.
  * One difference is that it will fail for an invalid type.
  *
