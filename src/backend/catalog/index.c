@@ -3125,14 +3125,13 @@ index_update_stats(Relation rel,
  * The index AM must opt in with amcanresetsnapshot.  The scan decides whether
  * to perform resets; see SO_RESET_SNAPSHOT.
  *
- * Only serial, non-unique builds support resets at this point.
+ * Unique builds do not support resets yet.
  */
 static bool
 index_build_resets_snapshots(Relation indexRelation, IndexInfo *indexInfo)
 {
 	return indexInfo->ii_Concurrent &&
 		!indexInfo->ii_Unique &&
-		indexInfo->ii_ParallelWorkers == 0 &&
 		indexRelation->rd_indam->amcanresetsnapshot;
 }
 
