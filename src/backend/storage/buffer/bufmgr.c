@@ -65,6 +65,7 @@
 #include "storage/smgr.h"
 #include "storage/standby.h"
 #include "utils/memdebug.h"
+#include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
@@ -5460,9 +5461,24 @@ RelationCopyStorageUsingBuffer(RelFileLocator srclocator,
 		memcpy(dstPage, srcPage, BLCKSZ);
 		MarkBufferDirty(dstBuf);
 
-		/* WAL-log the copied page. */
+		/*
+		 * WAL-log the copied page. It is safe to omit the apparent free space
+		 * even if this is not a standard page, provided that the range
+		 * contains only zeroes.
+		 */
 		if (use_wal)
-			log_newpage_buffer(dstBuf, true);
+		{
+			bool		allow_page_std = false;
+
+			if (PageFreeSpaceBoundsAreValid(dstPage))
+			{
+				PageHeader	phdr = (PageHeader) dstPage;
+
+				allow_page_std = pg_memory_is_all_zeros(dstPage + phdr->pd_lower,
+														phdr->pd_upper - phdr->pd_lower);
+			}
+			log_newpage_buffer(dstBuf, allow_page_std);
+		}
 
 		END_CRIT_SECTION();
 
