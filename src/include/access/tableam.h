@@ -377,6 +377,15 @@ typedef struct TableAmRoutine
 	 * SnapshotAny that would be the newest version, possibly one the query's
 	 * snapshot does not see, so the row is fetched with that snapshot.
 	 *
+	 * AFTER row triggers do not re-fetch their rows by TID either: the
+	 * trigger queue stores each event's rows as heap-format copies, made by
+	 * the AM slot's copy_heap_tuple callback, and fires the trigger with
+	 * slots of the AM's own type loaded from them by its copyslot callback.
+	 * The RI triggers ask tuple_satisfies_snapshot of such a slot whether
+	 * that exact row version is still live, which heap answers for the
+	 * version its TID names; to answer it, the AM must carry what identifies
+	 * the version through that copy and back.
+	 *
 	 * The heap AM leaves this false.
 	 */
 	bool		am_inplace_update_keeps_tid;
