@@ -373,6 +373,10 @@ typedef struct TableAmRoutine
 	 * updating, and hand that copy to RETURNING OLD and the AFTER ROW UPDATE
 	 * triggers instead of re-fetching it by TID.
 	 *
+	 * An EvalPlanQual recheck fetches a ROW_MARK_REFERENCE row by TID.  With
+	 * SnapshotAny that would be the newest version, possibly one the query's
+	 * snapshot does not see, so the row is fetched with that snapshot.
+	 *
 	 * The heap AM leaves this false.
 	 */
 	bool		am_inplace_update_keeps_tid;

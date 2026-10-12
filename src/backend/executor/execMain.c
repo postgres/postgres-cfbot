@@ -2940,10 +2940,22 @@ EvalPlanQualFetchRowMark(EPQState *epqstate, Index rti, TupleTableSlot *slot)
 		}
 		else
 		{
-			/* ordinary table, fetch the tuple */
+			/*
+			 * An AM that updates rows in place keeps a row's newest version
+			 * at its TID, so unlike heap's, the TID does not name the version
+			 * the query saw: SnapshotAny could return one written by a
+			 * transaction that committed after the statement's snapshot, and
+			 * the recheck would join the locked row with values the query
+			 * never saw.  Ask for the version that snapshot sees, as the scan
+			 * did.  The row came from a scan under that snapshot, so it must
+			 * see one; failing to is a bug, as for heap.
+			 */
 			if (!table_tuple_fetch_row_version(erm->relation,
 											   (ItemPointer) DatumGetPointer(datum),
-											   SnapshotAny, slot))
+											   RelationUpdatesInPlace(erm->relation) ?
+											   epqstate->recheckestate->es_snapshot :
+											   SnapshotAny,
+											   slot))
 				elog(ERROR, "failed to fetch tuple for EvalPlanQual recheck");
 			return true;
 		}
