@@ -11,6 +11,25 @@ SELECT getdatabaseencoding() <> 'UTF8' OR
 SET client_encoding TO UTF8;
 CREATE SCHEMA collate_tests;
 SET search_path = collate_tests;
+create function check_estimated_rows(text) returns table (estimated int, actual int)
+language plpgsql as
+$$
+declare
+    ln text;
+    tmp text[];
+    first_row bool := true;
+begin
+    for ln in
+        execute format('explain analyze %s', $1)
+    loop
+        if first_row then
+            first_row := false;
+            tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+            return query select tmp[1]::int, tmp[2]::int;
+        end if;
+    end loop;
+end;
+$$;
 CREATE TABLE collate_test1 (
     a int,
     b text COLLATE "en-x-icu" NOT NULL
@@ -1469,6 +1488,35 @@ CREATE COLLATION case_sensitive (provider = icu, locale = '');
 NOTICE:  using standard form "und" for ICU locale ""
 CREATE COLLATION case_insensitive (provider = icu, locale = '@colStrength=secondary', deterministic = false);
 NOTICE:  using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+CREATE TABLE test_stats_ext_coll (a text, b text, c int);
+INSERT INTO test_stats_ext_coll SELECT chr(65 + g % 52) FROM generate_series(1, 500) g;
+CREATE STATISTICS test_stats_ext_coll_stx ON (a COLLATE case_insensitive) FROM test_stats_ext_coll;
+ANALYZE test_stats_ext_coll;
+SELECT * FROM check_estimated_rows($$SELECT count(*) FROM test_stats_ext_coll GROUP BY a COLLATE "C" $$);
+ estimated | actual 
+-----------+--------
+        52 |     52
+(1 row)
+
+SELECT * FROM check_estimated_rows($$SELECT count(*) FROM test_stats_ext_coll GROUP BY a COLLATE "POSIX" $$);
+ estimated | actual 
+-----------+--------
+        52 |     52
+(1 row)
+
+SELECT * FROM check_estimated_rows($$SELECT count(*) FROM test_stats_ext_coll GROUP BY a COLLATE case_insensitive $$);
+ estimated | actual 
+-----------+--------
+        32 |     32
+(1 row)
+
+SELECT * FROM check_estimated_rows($$SELECT count(*) FROM test_stats_ext_coll GROUP BY a $$);
+ estimated | actual 
+-----------+--------
+        52 |     52
+(1 row)
+
+DROP TABLE test_stats_ext_coll;
 SELECT 'abc' <= 'ABC' COLLATE case_sensitive, 'abc' >= 'ABC' COLLATE case_sensitive;
  ?column? | ?column? 
 ----------+----------
@@ -3954,6 +4002,144 @@ LINE 1: ...ON_VALUE('{"a": "A"}', '$.c' RETURNING d1 DEFAULT 'A' COLLAT...
                                                              ^
 DETAIL:  "C" versus "case_insensitive"
 DROP DOMAIN d1, d2;
+-- Checks the estimated and actual row counts for the specified pattern
+-- in the EXPLAIN ANALYZE output of the given SQL query.
+CREATE FUNCTION check_estimated_rows_by_pattern(in_pattern text, in_sql text) RETURNS TABLE (estimated text, actual text)
+LANGUAGE PLPGSQL AS
+$$
+DECLARE
+    ln text;
+    tmp text[];
+    tmp_pattern text;
+BEGIN
+    FOR ln IN execute FORMAT('EXPLAIN ANALYZE %s', in_sql)
+    LOOP
+        tmp_pattern := FORMAT('(%s)', in_pattern);
+        tmp := REGEXP_MATCH(ln, tmp_pattern);
+        IF tmp IS NOT NULL THEN
+            tmp := REGEXP_MATCH(ln, 'rows=(\d*) .* rows=([0-9.]+)');
+            RETURN QUERY SELECT tmp[1]::text, tmp[2]::text;
+        END IF;
+    END LOOP;
+END;
+$$;
+-- Verify that statistics can be found on retry when the initial
+-- lookup fails due to a collation mismatch.
+-- Strips the topmost RelabelType from the WHERE expression  on retry.
+CREATE TABLE t_node_try_again(a text);
+INSERT INTO t_node_try_again SELECT chr(65 + g % 52)	FROM generate_series(1, 5200) g;
+ANALYZE t_node_try_again;
+SELECT * FROM check_estimated_rows($$SELECT * FROM t_node_try_again WHERE a COLLATE "C" = 'A'$$);
+ estimated | actual 
+-----------+--------
+       100 |    100
+(1 row)
+
+DROP TABLE t_node_try_again;
+-- Strips the topmost RelabelType from the extended statistics expression  on retry.
+CREATE TABLE t_statexpr_try_again (a text);
+INSERT INTO t_statexpr_try_again SELECT chr(65 + g % 52) || g FROM generate_series(1, 5200) g;
+CREATE STATISTICS t_statexpr_try_again_stats_1 ON (left(a, 1) COLLATE "C") FROM t_statexpr_try_again;
+ANALYZE t_statexpr_try_again;
+SELECT * FROM check_estimated_rows($$SELECT * FROM t_statexpr_try_again WHERE left(a, 1) = 'A'$$);
+ estimated | actual 
+-----------+--------
+       100 |    100
+(1 row)
+
+DROP STATISTICS t_statexpr_try_again_stats_1;
+DROP TABLE t_statexpr_try_again;
+CREATE TABLE phv_left(id int );
+CREATE TABLE phv_right(id int, name text COLLATE "C");
+INSERT INTO phv_left SELECT g FROM generate_series(1, 1100) AS g;
+INSERT INTO phv_right SELECT g,
+  CASE WHEN g % 17 = 0 THEN NULL
+  ELSE chr(65 + (g % 26))
+  END
+FROM generate_series(1, 1000) AS g;
+analyze phv_left, phv_right;
+-- Strips the topmost RelabelType from the WHERE expression  on retry.
+\set in_pattern '''Seq Scan on phv_right'''
+\set in_sql '''SELECT id,(COALESCE(name COLLATE "C", ''''''''::text COLLATE "C") COLLATE case_insensitive) AS x FROM phv_right WHERE (COALESCE(name COLLATE "C", ''''''''::text COLLATE "C") COLLATE case_insensitive) = ''''A'''' '''
+-- No matching statistics found.
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 5         | 36.00
+(1 row)
+
+-- Matches the statistics for index phv_right_index_5 on retry.
+CREATE INDEX phv_right_index_5 ON phv_right(COALESCE(name COLLATE "C", ''::text COLLATE "C"));
+analyze phv_right;
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 36        | 36.00
+(1 row)
+
+DROP INDEX phv_right_index_5;
+-- Matches the statistics for extended statistics object phv_right_expr_stats_5 on retry.
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 5         | 36.00
+(1 row)
+
+CREATE STATISTICS phv_right_expr_stats_5 ON (COALESCE(name COLLATE "C", ''::text COLLATE "C")) FROM phv_right;
+ANALYZE phv_right;
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 36        | 36.00
+(1 row)
+
+DROP STATISTICS phv_right_expr_stats_5;
+-- Verify that stripping PlaceHolderVars and normalizing adjacent
+-- RelabelTypes allows the planner to find statistics for index
+-- expressions and extended statistics expressions.
+\set in_sql '''SELECT l.id, r.id FROM phv_left AS l LEFT JOIN (SELECT id, (COALESCE(name COLLATE "C", ''''''''::text COLLATE "C") COLLATE case_insensitive) AS x FROM phv_right) AS r ON r.id = l.id WHERE r.x COLLATE "C" = ''''A'''' '''
+-- No matching statistics found.
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 5         | 36.00
+(1 row)
+
+-- Matches the statistics for index phv_right_index_5.
+CREATE INDEX phv_right_index_5 ON phv_right(COALESCE(name COLLATE "C", ''::text COLLATE "C"));
+analyze phv_right;
+\set in_pattern_1 '''Bitmap Heap Scan on phv_right'''
+\set in_pattern_2 '''Bitmap Index Scan on phv_right_index_5'''
+SELECT :in_pattern_1 as SCAN,* FROM check_estimated_rows_by_pattern(:in_pattern_1, :in_sql)
+UNION ALL
+SELECT :in_pattern_2 as SCAN,* FROM check_estimated_rows_by_pattern(:in_pattern_2, :in_sql);
+                  scan                  | estimated | actual 
+----------------------------------------+-----------+--------
+ Bitmap Heap Scan on phv_right          | 36        | 36.00
+ Bitmap Index Scan on phv_right_index_5 | 36        | 36.00
+(2 rows)
+
+DROP INDEX phv_right_index_5;
+-- Matches the statistics for extended statistics object phv_right_expr_stats_5.
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 5         | 36.00
+(1 row)
+
+CREATE STATISTICS phv_right_expr_stats_5 ON (COALESCE(name COLLATE "C", ''::text COLLATE "C")) FROM phv_right;
+ANALYZE phv_right;
+SELECT :in_pattern as action,* FROM check_estimated_rows_by_pattern(:in_pattern, :in_sql);
+        action         | estimated | actual 
+-----------------------+-----------+--------
+ Seq Scan on phv_right | 36        | 36.00
+(1 row)
+
+DROP STATISTICS phv_right_expr_stats_5;
+DROP TABLE phv_left;
+DROP TABLE phv_right;
+DROP FUNCTION check_estimated_rows_by_pattern;
+DROP FUNCTION check_estimated_rows;
 -- cleanup
 RESET search_path;
 SET client_min_messages TO warning;
