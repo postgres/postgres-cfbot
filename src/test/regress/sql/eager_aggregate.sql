@@ -465,3 +465,31 @@ RESET geqo;
 RESET geqo_threshold;
 
 DROP TABLE eager_agg_tab_ml;
+
+--
+-- Test that a volatile clause above the aggregate prevents eager aggregation
+--
+CREATE TABLE eager_agg_vf (k int, c int);
+CREATE TABLE eager_agg_vd (k int, g int);
+INSERT INTO eager_agg_vf SELECT i % 10, 1 FROM generate_series(1, 2000) i;
+INSERT INTO eager_agg_vd SELECT i % 10, i % 3 FROM generate_series(1, 30) i;
+ANALYZE eager_agg_vf;
+ANALYZE eager_agg_vd;
+CREATE SEQUENCE eager_agg_vseq;
+
+EXPLAIN (COSTS OFF)
+SELECT d.g, sum(f.c)
+  FROM eager_agg_vf f
+  JOIN eager_agg_vd d ON f.k = d.k AND nextval('eager_agg_vseq') > 0
+GROUP BY d.g ORDER BY d.g;
+
+SELECT d.g, sum(f.c)
+  FROM eager_agg_vf f
+  JOIN eager_agg_vd d ON f.k = d.k AND nextval('eager_agg_vseq') > 0
+GROUP BY d.g ORDER BY d.g;
+
+-- the clause must have been evaluated once per joined row, 6000 in all
+SELECT last_value FROM eager_agg_vseq;
+
+DROP SEQUENCE eager_agg_vseq;
+DROP TABLE eager_agg_vf, eager_agg_vd;
