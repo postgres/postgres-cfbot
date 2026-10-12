@@ -3187,6 +3187,7 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 					 ResultRelInfo *dst_partinfo,
 					 ItemPointer tupleid,
 					 HeapTuple fdw_trigtuple,
+					 TupleTableSlot *old_image,
 					 TupleTableSlot *newslot,
 					 List *recheckIndexes,
 					 TransitionCaptureState *transition_capture,
@@ -3224,7 +3225,21 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 		tupsrc = src_partinfo ? src_partinfo : relinfo;
 		oldslot = ExecGetTriggerOldSlot(estate, tupsrc);
 
-		if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
+		/*
+		 * The caller may already hold the pre-update image.  It must when the
+		 * AM updated the row in place: by now the row's TID yields the new
+		 * version, so re-fetching it would hand the trigger NEW as OLD.
+		 */
+		if (old_image != NULL && !TupIsNull(old_image) &&
+			RelationUpdatesInPlace(tupsrc->ri_RelationDesc))
+		{
+			if (old_image != oldslot)
+				ExecCopySlot(oldslot, old_image);
+			oldslot->tts_tableOid = RelationGetRelid(tupsrc->ri_RelationDesc);
+			if (tupleid != NULL && ItemPointerIsValid(tupleid))
+				oldslot->tts_tid = *tupleid;
+		}
+		else if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
 			GetTupleForTrigger(estate,
 							   NULL,
 							   tupsrc,

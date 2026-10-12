@@ -1292,6 +1292,7 @@ ExecInsert(ModifyTableContext *context,
 							 NULL, NULL,
 							 NULL,
 							 NULL,
+							 NULL,
 							 slot,
 							 NULL,
 							 mtstate->mt_transition_capture,
@@ -1566,7 +1567,7 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		ExecARUpdateTriggers(estate, resultRelInfo,
 							 NULL, NULL,
 							 tupleid, oldtuple,
-							 NULL, NULL, mtstate->mt_transition_capture,
+							 NULL, NULL, NULL, mtstate->mt_transition_capture,
 							 false);
 
 		/*
@@ -2366,7 +2367,8 @@ lreplace:
 static void
 ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 				   ResultRelInfo *resultRelInfo, ItemPointer tupleid,
-				   HeapTuple oldtuple, TupleTableSlot *slot)
+				   HeapTuple oldtuple, TupleTableSlot *oldSlot,
+				   TupleTableSlot *slot)
 {
 	ModifyTableState *mtstate = context->mtstate;
 	List	   *recheckIndexes = NIL;
@@ -2386,7 +2388,7 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 	/* AFTER ROW UPDATE Triggers */
 	ExecARUpdateTriggers(context->estate, resultRelInfo,
 						 NULL, NULL,
-						 tupleid, oldtuple, slot,
+						 tupleid, oldtuple, oldSlot, slot,
 						 recheckIndexes,
 						 mtstate->operation == CMD_INSERT ?
 						 mtstate->mt_oc_transition_capture :
@@ -2475,7 +2477,7 @@ ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
 	/* Perform the root table's triggers. */
 	ExecARUpdateTriggers(context->estate,
 						 rootRelInfo, sourcePartInfo, destPartInfo,
-						 tupleid, NULL, newslot, NIL, NULL, true);
+						 tupleid, NULL, NULL, newslot, NIL, NULL, true);
 }
 
 /* ----------------------------------------------------------------
@@ -2593,6 +2595,16 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 */
 redo_act:
 		lockedtid = *tupleid;
+
+		/*
+		 * An AM that updates in place overwrites the old row's storage, and
+		 * oldSlot may still point into it.  Copy the pre-update image out
+		 * while it is intact, for RETURNING OLD and the AFTER ROW triggers.
+		 */
+		if (!TupIsNull(oldSlot) &&
+			RelationUpdatesInPlace(resultRelInfo->ri_RelationDesc))
+			ExecMaterializeSlot(oldSlot);
+
 		result = ExecUpdateAct(context, resultRelInfo, tupleid, oldtuple, slot,
 							   canSetTag, &updateCxt);
 
@@ -2767,7 +2779,7 @@ redo_act:
 		(estate->es_processed)++;
 
 	ExecUpdateEpilogue(context, &updateCxt, resultRelInfo, tupleid, oldtuple,
-					   slot);
+					   oldSlot, slot);
 
 	/* Process RETURNING if present */
 	if (resultRelInfo->ri_projectReturning)
@@ -3454,6 +3466,11 @@ lmerge_matched:
 					/* checked ri_needLockTagTuple above */
 					Assert(oldtuple == NULL);
 
+					/* as in ExecUpdate: keep the pre-update image */
+					if (!TupIsNull(resultRelInfo->ri_oldTupleSlot) &&
+						RelationUpdatesInPlace(resultRelInfo->ri_RelationDesc))
+						ExecMaterializeSlot(resultRelInfo->ri_oldTupleSlot);
+
 					result = ExecUpdateAct(context, resultRelInfo, tupleid,
 										   NULL, newslot, canSetTag,
 										   &updateCxt);
@@ -3478,7 +3495,9 @@ lmerge_matched:
 				if (result == TM_Ok)
 				{
 					ExecUpdateEpilogue(context, &updateCxt, resultRelInfo,
-									   tupleid, NULL, newslot);
+									   tupleid, NULL,
+									   resultRelInfo->ri_oldTupleSlot,
+									   newslot);
 					mtstate->mt_merge_updated += 1;
 				}
 				break;
