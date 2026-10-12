@@ -1755,7 +1755,17 @@ ldelete:
 					switch (result)
 					{
 						case TM_Ok:
-							Assert(context->tmfd.traversed);
+
+							/*
+							 * We asked for the latest version of a row we
+							 * found outdated.  An AM that moves a row on
+							 * update must have followed the chain to a
+							 * different TID to get there. An AM that updates
+							 * in place reaches the latest version without
+							 * moving, and correctly reports no traversal.
+							 */
+							Assert(context->tmfd.traversed ||
+								   RelationUpdatesInPlace(resultRelationDesc));
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
 												   resultRelInfo->ri_RangeTableIndex,
@@ -2660,7 +2670,17 @@ redo_act:
 					switch (result)
 					{
 						case TM_Ok:
-							Assert(context->tmfd.traversed);
+
+							/*
+							 * We asked for the latest version of a row we
+							 * found outdated.  An AM that moves a row on
+							 * update must have followed the chain to a
+							 * different TID to get there. An AM that updates
+							 * in place reaches the latest version without
+							 * moving, and correctly reports no traversal.
+							 */
+							Assert(context->tmfd.traversed ||
+								   RelationUpdatesInPlace(resultRelationDesc));
 
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
