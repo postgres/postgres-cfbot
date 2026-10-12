@@ -513,6 +513,15 @@ cvt_timestamptz_timestamp(Datum input)
 
 	result = timestamptz2timestamp_safe(val, (Node *) &escontext);
 	/* We can ignore errors, since result is useful as-is */
+
+	/*
+	 * In the repeated hour at the end of DST, the result can compare as later
+	 * than val, and the scan would then start past matching entries. Back up
+	 * until it does not.
+	 */
+	while (!TIMESTAMP_NOT_FINITE(result) &&
+		   timestamp_cmp_timestamptz_internal(result, val) > 0)
+		result -= USECS_PER_HOUR;
 	return TimestampGetDatum(result);
 }
 
