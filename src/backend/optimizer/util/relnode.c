@@ -2997,6 +2997,18 @@ eager_aggregation_possible_for_relation(PlannerInfo *root, RelOptInfo *rel)
 		   rel->reloptkind == RELOPT_JOINREL);
 
 	/*
+	 * Volatile clauses above the aggregate must see every joined row, so
+	 * grouping below them is not allowed.
+	 */
+	foreach(lc, rel->joininfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (contain_volatile_functions((Node *) rinfo))
+			return false;
+	}
+
+	/*
 	 * Check if all aggregate expressions can be evaluated on this relation
 	 * level.
 	 */
