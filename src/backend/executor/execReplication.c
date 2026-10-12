@@ -31,6 +31,7 @@
 #include "replication/conflict.h"
 #include "replication/logicalrelation.h"
 #include "storage/lmgr.h"
+#include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -480,6 +481,10 @@ BuildConflictIndexInfo(ResultRelInfo *resultRelInfo, Oid conflictindex)
  * commit timestamp than previously recorded, update the associated transaction
  * ID, commit time, and origin. This helps ensure that conflict detection uses
  * the most recent and relevant deletion metadata.
+ *
+ * A heap tuple is judged by HeapTupleSatisfiesVacuum.  A tuple of another
+ * table AM, found by a scan begun with SO_RETURN_DELETED, is judged by its
+ * xmax system column, the transaction that deleted it.
  */
 static void
 update_most_recent_deletion_info(TupleTableSlot *scanslot,
@@ -488,39 +493,64 @@ update_most_recent_deletion_info(TupleTableSlot *scanslot,
 								 TimestampTz *delete_time,
 								 ReplOriginId *delete_origin)
 {
-	BufferHeapTupleTableSlot *hslot;
-	HeapTuple	tuple;
-	Buffer		buf;
-	bool		recently_dead = false;
 	TransactionId xmax;
 	TimestampTz localts;
 	ReplOriginId localorigin;
 
-	hslot = (BufferHeapTupleTableSlot *) scanslot;
+	if (TTS_IS_BUFFERTUPLE(scanslot))
+	{
+		BufferHeapTupleTableSlot *hslot;
+		HeapTuple	tuple;
+		Buffer		buf;
+		bool		recently_dead = false;
 
-	tuple = ExecFetchSlotHeapTuple(scanslot, false, NULL);
-	buf = hslot->buffer;
+		hslot = (BufferHeapTupleTableSlot *) scanslot;
 
-	LockBuffer(buf, BUFFER_LOCK_SHARE);
+		tuple = ExecFetchSlotHeapTuple(scanslot, false, NULL);
+		buf = hslot->buffer;
 
-	/*
-	 * We do not consider HEAPTUPLE_DEAD status because it indicates either
-	 * tuples whose inserting transaction was aborted (meaning there is no
-	 * commit timestamp or origin), or tuples deleted by a transaction older
-	 * than oldestxmin, making it safe to ignore them during conflict
-	 * detection (See comments atop worker.c for details).
-	 */
-	if (HeapTupleSatisfiesVacuum(tuple, oldestxmin, buf) == HEAPTUPLE_RECENTLY_DEAD)
-		recently_dead = true;
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
 
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+		/*
+		 * We do not consider HEAPTUPLE_DEAD status because it indicates
+		 * either tuples whose inserting transaction was aborted (meaning
+		 * there is no commit timestamp or origin), or tuples deleted by a
+		 * transaction older than oldestxmin, making it safe to ignore them
+		 * during conflict detection (See comments atop worker.c for details).
+		 */
+		if (HeapTupleSatisfiesVacuum(tuple, oldestxmin, buf) == HEAPTUPLE_RECENTLY_DEAD)
+			recently_dead = true;
 
-	if (!recently_dead)
-		return;
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
-	xmax = HeapTupleHeaderGetUpdateXid(tuple->t_data);
-	if (!TransactionIdIsValid(xmax))
-		return;
+		if (!recently_dead)
+			return;
+
+		xmax = HeapTupleHeaderGetUpdateXid(tuple->t_data);
+		if (!TransactionIdIsValid(xmax))
+			return;
+	}
+	else
+	{
+		bool		isnull;
+
+		/*
+		 * Accept what heap reports as HEAPTUPLE_RECENTLY_DEAD: the deleter
+		 * committed, and not before oldestxmin.  A tuple nobody deleted is
+		 * live; one deleted before oldestxmin is HEAPTUPLE_DEAD, ignored as
+		 * above; and one whose deleter is still running, or aborted, is not
+		 * deleted.  As in HeapTupleSatisfiesVacuum, check that the deleter is
+		 * no longer running before asking whether it committed.
+		 */
+		xmax = DatumGetTransactionId(slot_getsysattr(scanslot,
+													 MaxTransactionIdAttributeNumber,
+													 &isnull));
+		if (isnull || !TransactionIdIsValid(xmax) ||
+			TransactionIdPrecedes(xmax, oldestxmin) ||
+			TransactionIdIsInProgress(xmax) ||
+			!TransactionIdDidCommit(xmax))
+			return;
+	}
 
 	/* Select the dead tuple with the most recent commit timestamp */
 	if (TransactionIdGetCommitTsData(xmax, &localts, &localorigin) &&
@@ -625,10 +655,11 @@ RelationFindDeletedTupleInfoSeq(Relation rel, Oid identidxoid,
 	 * Start a heap scan using SnapshotAny to identify dead tuples that are
 	 * not visible under a standard MVCC snapshot. Tuples from transactions
 	 * not yet committed or those just committed prior to the scan are
-	 * excluded in update_most_recent_deletion_info().
+	 * excluded in update_most_recent_deletion_info().  SO_RETURN_DELETED asks
+	 * a table AM whose SnapshotAny hides deleted tuples for them.
 	 */
 	scan = table_beginscan(rel, SnapshotAny, 0, NULL,
-						   SO_NONE);
+						   SO_RETURN_DELETED);
 	scanslot = table_slot_create(rel, NULL);
 
 	table_rescan(scan, NULL);
@@ -690,10 +721,12 @@ RelationFindDeletedTupleInfoByIndex(Relation rel, Oid idxoid,
 	 * Start an index scan using SnapshotAny to identify dead tuples that are
 	 * not visible under a standard MVCC snapshot. Tuples from transactions
 	 * not yet committed or those just committed prior to the scan are
-	 * excluded in update_most_recent_deletion_info().
+	 * excluded in update_most_recent_deletion_info().  SO_RETURN_DELETED asks
+	 * a table AM whose SnapshotAny hides deleted tuples for them.
 	 */
 	scan = index_beginscan(rel, idxrel, false,
-						   SnapshotAny, NULL, skey_attoff, 0, SO_NONE);
+						   SnapshotAny, NULL, skey_attoff, 0,
+						   SO_RETURN_DELETED);
 
 	index_rescan(scan, skey, skey_attoff, NULL, 0);
 

@@ -73,6 +73,14 @@ typedef enum ScanOptions
 
 	/* collect scan instrumentation */
 	SO_SCAN_INSTRUMENT = 1 << 11,
+
+	/*
+	 * With SnapshotAny, also return row versions that a committed or
+	 * in-progress DELETE removed, for a caller that judges them itself.
+	 * Heap's SnapshotAny always returns them; an AM whose SnapshotAny hides
+	 * deleted versions returns them only when asked.
+	 */
+	SO_RETURN_DELETED = 1 << 12,
 }			ScanOptions;
 
 /*
