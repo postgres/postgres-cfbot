@@ -4011,7 +4011,7 @@ foreach test_dir : tests
         fallback_dbname.format(test_dir['name']))
 
       test_command_base = [
-        runner.full_path(),
+        runner,
         '--inputdir', t.get('inputdir', test_dir['sd']),
         '--expecteddir', t.get('expecteddir', test_dir['sd']),
         '--bindir', '',
