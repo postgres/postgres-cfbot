@@ -24,10 +24,20 @@ typedef enum
 	PGBT_INT,
 	PGBT_DOUBLE,
 	PGBT_BOOLEAN,
-	/* add other types here */
+	PGBT_TEXT,
+	PGBT_TIMESTAMP,
+	PGBT_ARRAY
 } PgBenchValueType;
 
-typedef struct
+struct PgBenchValue;
+
+typedef struct PgBenchArray
+{
+	int			nelems;
+	struct PgBenchValue *elems;
+} PgBenchArray;
+
+typedef struct PgBenchValue
 {
 	PgBenchValueType type;
 	union
@@ -35,7 +45,9 @@ typedef struct
 		int64		ival;
 		double		dval;
 		bool		bval;
-		/* add other types here */
+		char	   *sval;		/* PGBT_TEXT: heap-allocated string */
+		int64		tval;		/* PGBT_TIMESTAMP: usec since 2000-01-01 */
+		PgBenchArray aval;		/* PGBT_ARRAY: dynamic array of PgBenchValue */
 	}			u;
 } PgBenchValue;
 
@@ -87,10 +99,21 @@ extern bool coerceToBool(const PgBenchValue *pval, bool *bval);
 extern bool valueTruth(const PgBenchValue *pval);
 extern bool coerceToInt(const PgBenchValue *pval, int64 *ival);
 extern bool coerceToDouble(const PgBenchValue *pval, double *dval);
+extern bool coerceToText(const PgBenchValue *pval, char **sval);
+extern bool coerceToTimestamp(const PgBenchValue *pval, int64 *tval);
 extern void setNullValue(PgBenchValue *pv);
 extern void setBoolValue(PgBenchValue *pv, bool bval);
 extern void setIntValue(PgBenchValue *pv, int64 ival);
 extern void setDoubleValue(PgBenchValue *pv, double dval);
+extern void setTextValue(PgBenchValue *pv, const char *sval);
+extern void setTimestampValue(PgBenchValue *pv, int64 tval);
+extern void setArrayValue(PgBenchValue *pv, const PgBenchValue *elems, int nelems);
+extern void freeValue(PgBenchValue *pv);
+extern void copyValue(PgBenchValue *dest, const PgBenchValue *src);
+extern char *formatValue(const PgBenchValue *pv);
+extern bool parseTimestampString(const char *str, bool errorOK, int64 *tval);
+extern void formatTimestampValue(int64 tval, char *buf, size_t buflen);
+extern bool parseArrayLiteral(const char *str, PgBenchValue *aval);
 
 /* Parsing numbers */
 extern bool is_an_int(const char *str);
@@ -115,6 +138,9 @@ extern bool putVariableValue(Variables *variables, const char *context, const ch
 							 const PgBenchValue *value);
 extern bool putVariableInt(Variables *variables, const char *context, const char *name,
 						   int64 value);
+extern bool putVariableArrayElement(Variables *variables, const char *context,
+									const char *name, int64 index,
+									const PgBenchValue *value);
 
 /* High-level scoped get/put */
 extern bool var_put_value(Variables *variables, const char *name, const PgBenchValue *val, bool local_only);

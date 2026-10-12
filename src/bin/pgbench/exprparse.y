@@ -26,6 +26,7 @@ static PgBenchExpr *make_null_constant(void);
 static PgBenchExpr *make_boolean_constant(bool bval);
 static PgBenchExpr *make_integer_constant(int64 ival);
 static PgBenchExpr *make_double_constant(double dval);
+static PgBenchExpr *make_string_constant(char *sval);
 static PgBenchExpr *make_variable(char *varname);
 static PgBenchExpr *make_op(yyscan_t yyscanner, const char *operator,
 							PgBenchExpr *lexpr, PgBenchExpr *rexpr);
@@ -59,10 +60,10 @@ static PgBenchExpr *make_case(yyscan_t yyscanner, PgBenchExprList *when_then_lis
 %type <ival> INTEGER_CONST function
 %type <dval> DOUBLE_CONST
 %type <bval> BOOLEAN_CONST
-%type <str> VARIABLE FUNCTION
+%type <str> STRING_CONST VARIABLE FUNCTION
 
 %token NULL_CONST INTEGER_CONST MAXINT_PLUS_ONE_CONST DOUBLE_CONST
-%token BOOLEAN_CONST VARIABLE FUNCTION
+%token BOOLEAN_CONST STRING_CONST VARIABLE FUNCTION
 %token AND_OP OR_OP NOT_OP NE_OP LE_OP GE_OP LS_OP RS_OP IS_OP
 %token CASE_KW WHEN_KW THEN_KW ELSE_KW END_KW
 
@@ -76,6 +77,7 @@ static PgBenchExpr *make_case(yyscan_t yyscanner, PgBenchExprList *when_then_lis
 %left	'+' '-'
 %left	'*' '/' '%'
 %right	UNARY
+%left	'[' ']'
 
 %%
 
@@ -145,8 +147,10 @@ expr: '(' expr ')'			{ $$ = $2; }
 	| BOOLEAN_CONST			{ $$ = make_boolean_constant($1); }
 	| INTEGER_CONST			{ $$ = make_integer_constant($1); }
 	| DOUBLE_CONST			{ $$ = make_double_constant($1); }
+	| STRING_CONST			{ $$ = make_string_constant($1); }
 	/* misc */
 	| VARIABLE				{ $$ = make_variable($1); }
+	| expr '[' expr ']'		{ $$ = make_op(yyscanner, "!subscript", $1, $3); }
 	| function '(' elist ')' { $$ = make_func(yyscanner, $1, $3); }
 	| case_control			{ $$ = $1; }
 	;
@@ -205,6 +209,17 @@ make_boolean_constant(bool bval)
 	expr->etype = ENODE_CONSTANT;
 	expr->u.constant.type = PGBT_BOOLEAN;
 	expr->u.constant.u.bval = bval;
+	return expr;
+}
+
+static PgBenchExpr *
+make_string_constant(char *sval)
+{
+	PgBenchExpr *expr = pg_malloc_object(PgBenchExpr);
+
+	expr->etype = ENODE_CONSTANT;
+	expr->u.constant.type = PGBT_TEXT;
+	expr->u.constant.u.sval = sval;
 	return expr;
 }
 
@@ -376,6 +391,9 @@ static const struct
 	},
 	{
 		"permute", PGBENCH_NARGS_PERMUTE, PGBENCH_PERMUTE
+	},
+	{
+		"!subscript", 2, PGBENCH_SUBSCRIPT
 	},
 	/* keep as last array element */
 	{

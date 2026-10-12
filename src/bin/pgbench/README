@@ -1,0 +1,56 @@
+src/bin/pgbench/README
+
+pgbench Architecture and Developer Guide
+========================================
+
+Overview
+--------
+pgbench is PostgreSQL's built-in benchmarking driver.  Its source code is
+organized into modular subsystems with clear ownership boundaries:
+
+  - pgbench.c / pgbench.h
+      CLI argument parsing, global configuration, and top-level orchestration.
+  - stats.c / stats.h
+      Statistical accumulators (SimpleStats, StatsData), latency tracking,
+      and interval/summary reporting primitives.
+  - variable.c / variable.h
+      Scoped variable store (Variables, VariableScope, Variable) and typed
+      runtime value system (PgBenchValue).
+  - poller.c / poller.h
+      Cross-platform non-blocking socket multiplexing (ppoll() or select()).
+  - script.c / script.h, exprscan.l, exprparse.y
+      Custom and built-in script parsing, flex/bison expression compilation,
+      and runtime expression evaluation (evaluateExpr()).
+  - commands.c / commands.h
+      Pluggable backslash meta-command handler registry (CommandDescriptor)
+      and execution routines.
+  - init.c / init.h
+      Database schema initialization (-i / --init-steps) and data population.
+  - engine.c / engine.h
+      Non-blocking client state machine (advanceConnectionState()), worker
+      thread runner (threadRun()), and result/log output.
+  - src/common/pgbench_funcs.c / src/include/common/pgbench_funcs.h
+      Frontend/backend-agnostic random distributions, hashes, permutations,
+      and data generators shared between pgbench and contrib/pgbench.
+
+Value Type System (variable.c / variable.h)
+-------------------------------------------
+Runtime values in expressions and variables are represented by PgBenchValue,
+a tagged union supporting:
+
+  - PGBT_NO_VALUE : unparsed raw string in Variable.svalue
+  - PGBT_NULL     : SQL/expression NULL
+  - PGBT_INT      : 64-bit signed integer (int64)
+  - PGBT_DOUBLE   : IEEE 754 double precision float (double)
+  - PGBT_BOOLEAN  : boolean (bool)
+  - PGBT_TEXT     : heap-allocated NUL-terminated string (char *)
+  - PGBT_TIMESTAMP: microseconds since 2000-01-01 00:00:00 UTC (int64)
+  - PGBT_ARRAY    : 1D dynamic array of PgBenchValue (PgBenchArray)
+
+Memory Ownership Invariants:
+  - PGBT_TEXT (u.sval) and PGBT_ARRAY (u.aval.elems) own heap allocations.
+  - Always use copyValue(dest, src) to duplicate a PgBenchValue and
+    freeValue(pv) before overwriting or discarding an owned PgBenchValue.
+  - Variable.svalue caches the formatted string representation for SQL
+    interpolation (:var and :var[idx]) and is invalidated whenever the
+    underlying Variable.value is updated.

@@ -167,6 +167,8 @@ notnull			[Nn][Oo][Tt][Nn][Uu][Ll][Ll]
 
 "("				{ return '('; }
 ")"				{ return ')'; }
+"["				{ return '['; }
+"]"				{ return ']'; }
 ","				{ return ','; }
 
 {and}			{ return AND_OP; }
@@ -185,6 +187,22 @@ notnull			[Nn][Oo][Tt][Nn][Uu][Ll][Ll]
 :{alnum}+		{
 					yylval->str = pg_strdup(yytext + 1);
 					return VARIABLE;
+				}
+
+'([^'\n]|'')*'	{
+					char   *res = pg_malloc(yyleng - 1);
+					int		i,
+							j = 0;
+
+					for (i = 1; i < yyleng - 1; i++)
+					{
+						if (yytext[i] == '\'' && yytext[i + 1] == '\'')
+							i++;
+						res[j++] = yytext[i];
+					}
+					res[j] = '\0';
+					yylval->str = res;
+					return STRING_CONST;
 				}
 
 {null}			{ return NULL_CONST; }

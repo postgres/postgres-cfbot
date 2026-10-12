@@ -119,6 +119,7 @@ typedef struct Command
 	char	   *prepname;
 	char	   *varprefix;
 	PgBenchExpr *expr;
+	PgBenchExpr *index_expr;
 	SimpleStats stats;
 	int64		retries;
 	int64		failures;

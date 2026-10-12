@@ -325,6 +325,7 @@ handle_cmd_set(CState *st, Command *cmd, pg_time_usec_t *now)
 {
 	PgBenchExpr *expr = cmd->expr;
 	PgBenchValue result;
+	bool		ok;
 
 	if (!evaluateExpr(st, expr, &result))
 	{
@@ -332,7 +333,38 @@ handle_cmd_set(CState *st, Command *cmd, pg_time_usec_t *now)
 		return CSTATE_ABORTED;
 	}
 
-	if (!putVariableValue(&st->variables, cmd->argv[0], cmd->argv[1], &result))
+	if (cmd->index_expr != NULL)
+	{
+		PgBenchValue idx_val;
+		int64		idx;
+
+		if (!evaluateExpr(st, cmd->index_expr, &idx_val))
+		{
+			freeValue(&result);
+			commandFailed(st, cmd->argv[0], "evaluation of array index failed");
+			return CSTATE_ABORTED;
+		}
+
+		if (!coerceToInt(&idx_val, &idx))
+		{
+			freeValue(&idx_val);
+			freeValue(&result);
+			commandFailed(st, cmd->argv[0], "array index is not an integer");
+			return CSTATE_ABORTED;
+		}
+		freeValue(&idx_val);
+
+		ok = putVariableArrayElement(&st->variables, cmd->argv[0],
+									 cmd->argv[1], idx, &result);
+	}
+	else
+	{
+		ok = putVariableValue(&st->variables, cmd->argv[0], cmd->argv[1], &result);
+	}
+
+	freeValue(&result);
+
+	if (!ok)
 	{
 		commandFailed(st, "set", "assignment of meta-command failed");
 		return CSTATE_ABORTED;
@@ -355,6 +387,7 @@ handle_cmd_if(CState *st, Command *cmd, pg_time_usec_t *now)
 	}
 
 	cond = valueTruth(&result);
+	freeValue(&result);
 	conditional_stack_push(st->cstack, cond ? IFSTATE_TRUE : IFSTATE_FALSE);
 	return CSTATE_END_COMMAND;
 }
@@ -380,6 +413,7 @@ handle_cmd_elif(CState *st, Command *cmd, pg_time_usec_t *now)
 	}
 
 	cond = valueTruth(&result);
+	freeValue(&result);
 	Assert(conditional_stack_peek(st->cstack) == IFSTATE_FALSE);
 	conditional_stack_poke(st->cstack, cond ? IFSTATE_TRUE : IFSTATE_FALSE);
 	return CSTATE_END_COMMAND;

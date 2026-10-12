@@ -83,6 +83,13 @@ isLazyFunc(PgBenchFunction func)
 	return func == PGBENCH_AND || func == PGBENCH_OR || func == PGBENCH_CASE;
 }
 
+static void
+freeValues(PgBenchValue *vargs, int nargs)
+{
+	for (int i = 0; i < nargs; i++)
+		freeValue(&vargs[i]);
+}
+
 /* lazy evaluation of some functions */
 static bool
 evalLazyFunc(CState *st,
@@ -107,12 +114,17 @@ evalLazyFunc(CState *st,
 		case PGBENCH_AND:
 			if (a1.type == PGBT_NULL)
 			{
+				freeValue(&a1);
 				setNullValue(retval);
 				return true;
 			}
 
 			if (!coerceToBool(&a1, &ba1))
+			{
+				freeValue(&a1);
 				return false;
+			}
+			freeValue(&a1);
 
 			if (!ba1)
 			{
@@ -125,29 +137,37 @@ evalLazyFunc(CState *st,
 
 			if (a2.type == PGBT_NULL)
 			{
+				freeValue(&a2);
 				setNullValue(retval);
 				return true;
 			}
 			else if (!coerceToBool(&a2, &ba2))
+			{
+				freeValue(&a2);
 				return false;
+			}
 			else
 			{
+				freeValue(&a2);
 				setBoolValue(retval, ba2);
 				return true;
 			}
-
-			return true;
 
 		case PGBENCH_OR:
 
 			if (a1.type == PGBT_NULL)
 			{
+				freeValue(&a1);
 				setNullValue(retval);
 				return true;
 			}
 
 			if (!coerceToBool(&a1, &ba1))
+			{
+				freeValue(&a1);
 				return false;
+			}
+			freeValue(&a1);
 
 			if (ba1)
 			{
@@ -160,13 +180,18 @@ evalLazyFunc(CState *st,
 
 			if (a2.type == PGBT_NULL)
 			{
+				freeValue(&a2);
 				setNullValue(retval);
 				return true;
 			}
 			else if (!coerceToBool(&a2, &ba2))
+			{
+				freeValue(&a2);
 				return false;
+			}
 			else
 			{
+				freeValue(&a2);
 				setBoolValue(retval, ba2);
 				return true;
 			}
@@ -174,7 +199,11 @@ evalLazyFunc(CState *st,
 		case PGBENCH_CASE:
 			/* when true, execute branch */
 			if (valueTruth(&a1))
+			{
+				freeValue(&a1);
 				return evaluateExpr(st, args->expr, retval);
+			}
+			freeValue(&a1);
 
 			/* now args contains next condition or final else expression */
 			args = args->next;
@@ -188,6 +217,7 @@ evalLazyFunc(CState *st,
 
 		default:
 			/* internal error, cannot get here */
+			freeValue(&a1);
 			Assert(0);
 			break;
 	}
@@ -211,17 +241,22 @@ evalStandardFunc(CState *st,
 	PgBenchValue vargs[MAX_FARGS] = {0};
 	PgBenchExprLink *l = args;
 	bool		has_null = false;
+	bool		ok = false;
 
 	for (nargs = 0; nargs < MAX_FARGS && l != NULL; nargs++, l = l->next)
 	{
 		if (!evaluateExpr(st, l->expr, &vargs[nargs]))
+		{
+			freeValues(vargs, nargs);
 			return false;
+		}
 		has_null |= vargs[nargs].type == PGBT_NULL;
 	}
 
 	if (l != NULL)
 	{
 		pg_log_error("too many function arguments, maximum is %d", MAX_FARGS);
+		freeValues(vargs, nargs);
 		return false;
 	}
 
@@ -229,6 +264,7 @@ evalStandardFunc(CState *st,
 	if (has_null && func != PGBENCH_IS && func != PGBENCH_DEBUG)
 	{
 		setNullValue(retval);
+		freeValues(vargs, nargs);
 		return true;
 	}
 
@@ -251,6 +287,67 @@ evalStandardFunc(CState *st,
 
 				Assert(nargs == 2);
 
+				/* timestamp comparisons */
+				if ((lval->type == PGBT_TIMESTAMP ||
+					 rval->type == PGBT_TIMESTAMP) &&
+					(func == PGBENCH_EQ || func == PGBENCH_NE ||
+					 func == PGBENCH_LE || func == PGBENCH_LT))
+				{
+					int64		lt,
+								rt;
+
+					if (!coerceToTimestamp(lval, &lt) ||
+						!coerceToTimestamp(rval, &rt))
+						goto cleanup;
+
+					if (func == PGBENCH_EQ)
+						setBoolValue(retval, lt == rt);
+					else if (func == PGBENCH_NE)
+						setBoolValue(retval, lt != rt);
+					else if (func == PGBENCH_LE)
+						setBoolValue(retval, lt <= rt);
+					else
+						setBoolValue(retval, lt < rt);
+
+					ok = true;
+					goto cleanup;
+				}
+
+				/* text comparisons */
+				if ((lval->type == PGBT_TEXT ||
+					 rval->type == PGBT_TEXT) &&
+					(func == PGBENCH_EQ || func == PGBENCH_NE ||
+					 func == PGBENCH_LE || func == PGBENCH_LT))
+				{
+					char	   *ls = NULL,
+							   *rs = NULL;
+					int			cmp;
+
+					if (!coerceToText(lval, &ls) ||
+						!coerceToText(rval, &rs))
+					{
+						pg_free(ls);
+						pg_free(rs);
+						goto cleanup;
+					}
+
+					cmp = strcmp(ls, rs);
+					pg_free(ls);
+					pg_free(rs);
+
+					if (func == PGBENCH_EQ)
+						setBoolValue(retval, cmp == 0);
+					else if (func == PGBENCH_NE)
+						setBoolValue(retval, cmp != 0);
+					else if (func == PGBENCH_LE)
+						setBoolValue(retval, cmp <= 0);
+					else
+						setBoolValue(retval, cmp < 0);
+
+					ok = true;
+					goto cleanup;
+				}
+
 				/* overloaded type management, double if some double */
 				if ((lval->type == PGBT_DOUBLE ||
 					 rval->type == PGBT_DOUBLE) && func != PGBENCH_MOD)
@@ -260,41 +357,49 @@ evalStandardFunc(CState *st,
 
 					if (!coerceToDouble(lval, &ld) ||
 						!coerceToDouble(rval, &rd))
-						return false;
+						goto cleanup;
 
 					switch (func)
 					{
 						case PGBENCH_ADD:
 							setDoubleValue(retval, ld + rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_SUB:
 							setDoubleValue(retval, ld - rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_MUL:
 							setDoubleValue(retval, ld * rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_DIV:
 							setDoubleValue(retval, ld / rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_EQ:
 							setBoolValue(retval, ld == rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_NE:
 							setBoolValue(retval, ld != rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_LE:
 							setBoolValue(retval, ld <= rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_LT:
 							setBoolValue(retval, ld < rd);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						default:
 							/* cannot get here */
@@ -309,7 +414,7 @@ evalStandardFunc(CState *st,
 
 					if (!coerceToInt(lval, &li) ||
 						!coerceToInt(rval, &ri))
-						return false;
+						goto cleanup;
 
 					switch (func)
 					{
@@ -317,51 +422,58 @@ evalStandardFunc(CState *st,
 							if (pg_add_s64_overflow(li, ri, &res))
 							{
 								pg_log_error("bigint add out of range");
-								return false;
+								goto cleanup;
 							}
 							setIntValue(retval, res);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_SUB:
 							if (pg_sub_s64_overflow(li, ri, &res))
 							{
 								pg_log_error("bigint sub out of range");
-								return false;
+								goto cleanup;
 							}
 							setIntValue(retval, res);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_MUL:
 							if (pg_mul_s64_overflow(li, ri, &res))
 							{
 								pg_log_error("bigint mul out of range");
-								return false;
+								goto cleanup;
 							}
 							setIntValue(retval, res);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_EQ:
 							setBoolValue(retval, li == ri);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_NE:
 							setBoolValue(retval, li != ri);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_LE:
 							setBoolValue(retval, li <= ri);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_LT:
 							setBoolValue(retval, li < ri);
-							return true;
+							ok = true;
+							goto cleanup;
 
 						case PGBENCH_DIV:
 						case PGBENCH_MOD:
 							if (ri == 0)
 							{
 								pg_log_error("division by zero");
-								return false;
+								goto cleanup;
 							}
 							/* special handling of -1 divisor */
 							if (ri == -1)
@@ -372,14 +484,15 @@ evalStandardFunc(CState *st,
 									if (li == PG_INT64_MIN)
 									{
 										pg_log_error("bigint div out of range");
-										return false;
+										goto cleanup;
 									}
 									else
 										setIntValue(retval, -li);
 								}
 								else
 									setIntValue(retval, 0);
-								return true;
+								ok = true;
+								goto cleanup;
 							}
 							/* else divisor is not -1 */
 							if (func == PGBENCH_DIV)
@@ -387,7 +500,8 @@ evalStandardFunc(CState *st,
 							else	/* func == PGBENCH_MOD */
 								setIntValue(retval, li % ri);
 
-							return true;
+							ok = true;
+							goto cleanup;
 
 						default:
 							/* cannot get here */
@@ -396,7 +510,7 @@ evalStandardFunc(CState *st,
 				}
 
 				Assert(0);
-				return false;	/* NOTREACHED */
+				goto cleanup;	/* NOTREACHED */
 			}
 
 			/* integer bitwise operators */
@@ -410,7 +524,7 @@ evalStandardFunc(CState *st,
 							ri;
 
 				if (!coerceToInt(&vargs[0], &li) || !coerceToInt(&vargs[1], &ri))
-					return false;
+					goto cleanup;
 
 				if (func == PGBENCH_BITAND)
 					setIntValue(retval, li & ri);
@@ -425,7 +539,8 @@ evalStandardFunc(CState *st,
 				else			/* cannot get here */
 					Assert(0);
 
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* logical operators */
@@ -434,16 +549,18 @@ evalStandardFunc(CState *st,
 				bool		b;
 
 				if (!coerceToBool(&vargs[0], &b))
-					return false;
+					goto cleanup;
 
 				setBoolValue(retval, !b);
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* no arguments */
 		case PGBENCH_PI:
 			setDoubleValue(retval, M_PI);
-			return true;
+			ok = true;
+			goto cleanup;
 
 			/* 1 overloaded argument */
 		case PGBENCH_ABS:
@@ -466,7 +583,8 @@ evalStandardFunc(CState *st,
 					setDoubleValue(retval, d < 0.0 ? -d : d);
 				}
 
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 		case PGBENCH_DEBUG:
@@ -486,12 +604,29 @@ evalStandardFunc(CState *st,
 					fprintf(stderr, "int " INT64_FORMAT "\n", varg->u.ival);
 				else if (varg->type == PGBT_DOUBLE)
 					fprintf(stderr, "double %.*g\n", DBL_DIG, varg->u.dval);
+				else if (varg->type == PGBT_TEXT)
+					fprintf(stderr, "text '%s'\n", varg->u.sval ? varg->u.sval : "");
+				else if (varg->type == PGBT_TIMESTAMP)
+				{
+					char	   *s = formatValue(varg);
+
+					fprintf(stderr, "timestamp %s\n", s);
+					pg_free(s);
+				}
+				else if (varg->type == PGBT_ARRAY)
+				{
+					char	   *s = formatValue(varg);
+
+					fprintf(stderr, "array %s\n", s);
+					pg_free(s);
+				}
 				else			/* internal error, unexpected type */
 					Assert(0);
 
-				*retval = *varg;
+				copyValue(retval, varg);
 
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* 1 double argument */
@@ -505,7 +640,7 @@ evalStandardFunc(CState *st,
 				Assert(nargs == 1);
 
 				if (!coerceToDouble(&vargs[0], &dval))
-					return false;
+					goto cleanup;
 
 				if (func == PGBENCH_SQRT)
 					dval = sqrt(dval);
@@ -516,7 +651,8 @@ evalStandardFunc(CState *st,
 				/* else is cast: do nothing */
 
 				setDoubleValue(retval, dval);
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* 1 int argument */
@@ -527,10 +663,11 @@ evalStandardFunc(CState *st,
 				Assert(nargs == 1);
 
 				if (!coerceToInt(&vargs[0], &ival))
-					return false;
+					goto cleanup;
 
 				setIntValue(retval, ival);
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* variable number of arguments */
@@ -557,13 +694,13 @@ evalStandardFunc(CState *st,
 					double		extremum;
 
 					if (!coerceToDouble(&vargs[0], &extremum))
-						return false;
+						goto cleanup;
 					for (i = 1; i < nargs; i++)
 					{
 						double		dval;
 
 						if (!coerceToDouble(&vargs[i], &dval))
-							return false;
+							goto cleanup;
 						if (func == PGBENCH_LEAST)
 							extremum = Min(extremum, dval);
 						else
@@ -576,13 +713,13 @@ evalStandardFunc(CState *st,
 					int64		extremum;
 
 					if (!coerceToInt(&vargs[0], &extremum))
-						return false;
+						goto cleanup;
 					for (i = 1; i < nargs; i++)
 					{
 						int64		ival;
 
 						if (!coerceToInt(&vargs[i], &ival))
-							return false;
+							goto cleanup;
 						if (func == PGBENCH_LEAST)
 							extremum = Min(extremum, ival);
 						else
@@ -590,7 +727,8 @@ evalStandardFunc(CState *st,
 					}
 					setIntValue(retval, extremum);
 				}
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* random functions */
@@ -607,20 +745,20 @@ evalStandardFunc(CState *st,
 
 				if (!coerceToInt(&vargs[0], &imin) ||
 					!coerceToInt(&vargs[1], &imax))
-					return false;
+					goto cleanup;
 
 				/* check random range */
 				if (unlikely(imin > imax))
 				{
 					pg_log_error("empty range given to random");
-					return false;
+					goto cleanup;
 				}
 				else if (unlikely(pg_sub_s64_overflow(imax, imin, &delta) ||
 								  pg_add_s64_overflow(delta, 1, &delta)))
 				{
 					/* prevent int overflows in random functions */
 					pg_log_error("random range is too large");
-					return false;
+					goto cleanup;
 				}
 
 				if (func == PGBENCH_RANDOM)
@@ -635,7 +773,7 @@ evalStandardFunc(CState *st,
 					Assert(nargs == 3);
 
 					if (!coerceToDouble(&vargs[2], &param))
-						return false;
+						goto cleanup;
 
 					if (func == PGBENCH_RANDOM_GAUSSIAN)
 					{
@@ -643,7 +781,7 @@ evalStandardFunc(CState *st,
 						{
 							pg_log_error("gaussian parameter must be at least %f (not %f)",
 										 PGBENCH_MIN_GAUSSIAN_PARAM, param);
-							return false;
+							goto cleanup;
 						}
 
 						setIntValue(retval,
@@ -656,7 +794,7 @@ evalStandardFunc(CState *st,
 						{
 							pg_log_error("zipfian parameter must be in range [%.3f, %.0f] (not %f)",
 										 PGBENCH_MIN_ZIPFIAN_PARAM, PGBENCH_MAX_ZIPFIAN_PARAM, param);
-							return false;
+							goto cleanup;
 						}
 
 						setIntValue(retval,
@@ -668,7 +806,7 @@ evalStandardFunc(CState *st,
 						{
 							pg_log_error("exponential parameter must be greater than zero (not %f)",
 										 param);
-							return false;
+							goto cleanup;
 						}
 
 						setIntValue(retval,
@@ -677,7 +815,8 @@ evalStandardFunc(CState *st,
 					}
 				}
 
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 		case PGBENCH_POW:
@@ -691,11 +830,12 @@ evalStandardFunc(CState *st,
 
 				if (!coerceToDouble(lval, &ld) ||
 					!coerceToDouble(rval, &rd))
-					return false;
+					goto cleanup;
 
 				setDoubleValue(retval, pow(ld, rd));
 
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 		case PGBENCH_IS:
@@ -709,7 +849,8 @@ evalStandardFunc(CState *st,
 				setBoolValue(retval,
 							 vargs[0].type == vargs[1].type &&
 							 vargs[0].u.bval == vargs[1].u.bval);
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 			/* hashing */
@@ -723,7 +864,7 @@ evalStandardFunc(CState *st,
 
 				if (!coerceToInt(&vargs[0], &val) ||
 					!coerceToInt(&vargs[1], &seed))
-					return false;
+					goto cleanup;
 
 				if (func == PGBENCH_HASH_MURMUR2)
 					setIntValue(retval, pgbench_hash_murmur2(val, seed));
@@ -733,7 +874,8 @@ evalStandardFunc(CState *st,
 					/* cannot get here */
 					Assert(0);
 
-				return true;
+				ok = true;
+				goto cleanup;
 			}
 
 		case PGBENCH_PERMUTE:
@@ -747,24 +889,64 @@ evalStandardFunc(CState *st,
 				if (!coerceToInt(&vargs[0], &val) ||
 					!coerceToInt(&vargs[1], &size) ||
 					!coerceToInt(&vargs[2], &seed))
-					return false;
+					goto cleanup;
 
 				if (size <= 0)
 				{
 					pg_log_error("permute size parameter must be greater than zero");
-					return false;
+					goto cleanup;
 				}
 
 				setIntValue(retval, pgbench_permute(val, size, seed));
-				return true;
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_SUBSCRIPT:
+			{
+				int64		idx;
+
+				Assert(nargs == 2);
+
+				if (vargs[0].type == PGBT_NULL || vargs[1].type == PGBT_NULL)
+				{
+					setNullValue(retval);
+					ok = true;
+					goto cleanup;
+				}
+
+				if (vargs[0].type != PGBT_ARRAY)
+				{
+					pg_log_error("cannot subscript non-array value (type %s)",
+								 valueTypeName(&vargs[0]));
+					goto cleanup;
+				}
+
+				if (!coerceToInt(&vargs[1], &idx))
+					goto cleanup;
+
+				if (idx < 0 || idx >= vargs[0].u.aval.nelems)
+				{
+					pg_log_error("array index " INT64_FORMAT " out of bounds (0 .. %d)",
+								 idx, vargs[0].u.aval.nelems - 1);
+					goto cleanup;
+				}
+
+				copyValue(retval, &vargs[0].u.aval.elems[idx]);
+				ok = true;
+				goto cleanup;
 			}
 
 		default:
 			/* cannot get here */
 			Assert(0);
 			/* dead code to avoid a compiler warning */
-			return false;
+			goto cleanup;
 	}
+
+cleanup:
+	freeValues(vargs, nargs);
+	return ok;
 }
 
 /* evaluate some function */
@@ -791,7 +973,7 @@ evaluateExpr(CState *st, PgBenchExpr *expr, PgBenchValue *retval)
 	{
 		case ENODE_CONSTANT:
 			{
-				*retval = expr->u.constant;
+				copyValue(retval, &expr->u.constant);
 				return true;
 			}
 
@@ -808,7 +990,7 @@ evaluateExpr(CState *st, PgBenchExpr *expr, PgBenchValue *retval)
 				if (!makeVariableValue(var))
 					return false;
 
-				*retval = var->value;
+				copyValue(retval, &var->value);
 				return true;
 			}
 
@@ -1146,16 +1328,87 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 	{
 		yyscan_t	yyscanner;
 
-		/* For \set, collect var name */
+		/* For \set, collect var name (or var[index_expr]) */
 		if (my_command->meta == META_SET)
 		{
+			char	   *lb;
+
 			if (!expr_lex_one_word(sstate, &word_buf, &word_offset))
 				syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
 							 "missing argument", NULL, -1);
 
 			offsets[j] = word_offset;
-			my_command->argv[j++] = pg_strdup(word_buf.data);
-			my_command->argc++;
+
+			if (strchr(word_buf.data, '[') != NULL)
+			{
+				PQExpBufferData target_buf;
+				int			depth = 0;
+
+				initPQExpBuffer(&target_buf);
+				appendPQExpBufferStr(&target_buf, word_buf.data);
+
+				for (const char *c = target_buf.data; *c != '\0'; c++)
+				{
+					if (*c == '[')
+						depth++;
+					else if (*c == ']')
+						depth--;
+				}
+
+				while (depth > 0)
+				{
+					int			next_offset;
+
+					if (!expr_lex_one_word(sstate, &word_buf, &next_offset))
+						syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+									 "unterminated array subscript in \\set target", NULL, -1);
+					appendPQExpBuffer(&target_buf, " %s", word_buf.data);
+					for (const char *c = word_buf.data; *c != '\0'; c++)
+					{
+						if (*c == '[')
+							depth++;
+						else if (*c == ']')
+							depth--;
+					}
+				}
+
+				lb = strchr(target_buf.data, '[');
+				if (lb == NULL || target_buf.data[target_buf.len - 1] != ']')
+					syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+								 "invalid array subscript in \\set target",
+								 target_buf.data, -1);
+
+				*lb = '\0';
+				target_buf.data[target_buf.len - 1] = '\0';
+
+				my_command->argv[j++] = pg_strdup(target_buf.data);
+				my_command->argc++;
+
+				/* Parse the index expression inside [...] */
+				{
+					PsqlScanState idx_sstate;
+					yyscan_t	idx_yyscanner;
+					char	   *idx_str = psprintf("%s\n", lb + 1);
+
+					idx_sstate = psql_scan_create(&pgbench_callbacks);
+					psql_scan_setup(idx_sstate, idx_str, strlen(idx_str), 0, true);
+					idx_yyscanner = expr_scanner_init(idx_sstate, source, lineno, 0,
+													  my_command->argv[0]);
+					if (expr_yyparse(&my_command->index_expr, idx_yyscanner) != 0)
+						exit(1);
+					expr_scanner_finish(idx_yyscanner);
+					psql_scan_finish(idx_sstate);
+					psql_scan_destroy(idx_sstate);
+					pg_free(idx_str);
+				}
+
+				termPQExpBuffer(&target_buf);
+			}
+			else
+			{
+				my_command->argv[j++] = pg_strdup(word_buf.data);
+				my_command->argc++;
+			}
 		}
 
 		/* then for all parse the expression */

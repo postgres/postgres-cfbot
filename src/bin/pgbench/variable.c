@@ -18,6 +18,7 @@
 
 #include "common/int.h"
 #include "common/logging.h"
+#include "pqexpbuffer.h"
 #include "variable.h"
 
 #define VARIABLES_ALLOC_MARGIN	8
@@ -155,6 +156,7 @@ destroyVariables(Variables *variables)
 		{
 			free(scope->vars[i].name);
 			free(scope->vars[i].svalue);
+			freeValue(&scope->vars[i].value);
 		}
 		if (scope->vars)
 			free(scope->vars);
@@ -202,6 +204,7 @@ var_scope_pop(Variables *variables)
 	{
 		free(current->vars[i].name);
 		free(current->vars[i].svalue);
+		freeValue(&current->vars[i].value);
 	}
 	if (current->vars)
 		free(current->vars);
@@ -301,7 +304,6 @@ char *
 getVariable(Variables *variables, const char *name)
 {
 	Variable   *var;
-	char		stringform[64];
 
 	var = lookupVariable(variables, name);
 	if (var == NULL)
@@ -312,20 +314,7 @@ getVariable(Variables *variables, const char *name)
 
 	/* We need to produce a string equivalent of the value */
 	Assert(var->value.type != PGBT_NO_VALUE);
-	if (var->value.type == PGBT_NULL)
-		snprintf(stringform, sizeof(stringform), "NULL");
-	else if (var->value.type == PGBT_BOOLEAN)
-		snprintf(stringform, sizeof(stringform),
-				 "%s", var->value.u.bval ? "true" : "false");
-	else if (var->value.type == PGBT_INT)
-		snprintf(stringform, sizeof(stringform),
-				 INT64_FORMAT, var->value.u.ival);
-	else if (var->value.type == PGBT_DOUBLE)
-		snprintf(stringform, sizeof(stringform),
-				 "%.*g", DBL_DIG, var->value.u.dval);
-	else						/* internal error, unexpected type */
-		Assert(0);
-	var->svalue = pg_strdup(stringform);
+	var->svalue = formatValue(&var->value);
 	return var->svalue;
 }
 
@@ -375,6 +364,15 @@ makeVariableValue(Variable *var)
 			return false;
 
 		setIntValue(&var->value, iv);
+	}
+	else if (slen >= 2 && var->svalue[0] == '{' && var->svalue[slen - 1] == '}')
+	{
+		if (!parseArrayLiteral(var->svalue, &var->value))
+		{
+			pg_log_error("malformed variable \"%s\" value: \"%s\"",
+						 var->name, var->svalue);
+			return false;
+		}
 	}
 	else						/* type should be double */
 	{
@@ -513,7 +511,7 @@ putVariable(Variables *variables, const char *context, const char *name,
 
 	free(var->svalue);
 	var->svalue = val;
-	var->value.type = PGBT_NO_VALUE;
+	freeValue(&var->value);
 
 	return true;
 }
@@ -525,14 +523,17 @@ putVariableValue(Variables *variables, const char *context, const char *name,
 				 const PgBenchValue *value)
 {
 	Variable   *var;
+	PgBenchValue copy;
 
 	var = lookupCreateVariable(variables, context, name);
 	if (!var)
 		return false;
 
+	copyValue(&copy, value);
 	free(var->svalue);
 	var->svalue = NULL;
-	var->value = *value;
+	freeValue(&var->value);
+	var->value = copy;
 
 	return true;
 }
@@ -550,6 +551,52 @@ putVariableInt(Variables *variables, const char *context, const char *name,
 }
 
 /*
+ * Assign a value to an element of an array variable at 0-based index.
+ * Returns false on failure (undefined variable, not an array, or out of bounds).
+ */
+bool
+putVariableArrayElement(Variables *variables, const char *context,
+						const char *name, int64 index,
+						const PgBenchValue *value)
+{
+	Variable   *var;
+	PgBenchValue copy;
+
+	var = lookupVariable(variables, name);
+	if (var == NULL)
+	{
+		pg_log_error("%s: undefined variable \"%s\"", context, name);
+		return false;
+	}
+
+	if (!makeVariableValue(var))
+		return false;
+
+	if (var->value.type != PGBT_ARRAY)
+	{
+		pg_log_error("%s: variable \"%s\" is not an array", context, name);
+		return false;
+	}
+
+	if (index < 0 || index >= var->value.u.aval.nelems)
+	{
+		pg_log_error("%s: array index " INT64_FORMAT " out of bounds for variable \"%s\" (length %d)",
+					 context, index, name, var->value.u.aval.nelems);
+		return false;
+	}
+
+	copyValue(&copy, value);
+	freeValue(&var->value.u.aval.elems[index]);
+	var->value.u.aval.elems[index] = copy;
+
+	/* Invalidate cached string representation */
+	free(var->svalue);
+	var->svalue = NULL;
+
+	return true;
+}
+
+/*
  * Scoped put: if local_only is true, variable is bound to the current
  * innermost scope frame, shadowing outer frames.
  */
@@ -561,6 +608,8 @@ var_put_value(Variables *variables, const char *name, const PgBenchValue *val, b
 
 	if (local_only)
 	{
+		PgBenchValue copy;
+
 		var = lookupVariableInScope(current, name);
 		if (var == NULL)
 		{
@@ -577,9 +626,11 @@ var_put_value(Variables *variables, const char *name, const PgBenchValue *val, b
 			current->nvars++;
 			current->vars_sorted = false;
 		}
+		copyValue(&copy, val);
 		free(var->svalue);
 		var->svalue = NULL;
-		var->value = *val;
+		freeValue(&var->value);
+		var->value = copy;
 		return true;
 	}
 	else
@@ -603,7 +654,7 @@ var_get_value(Variables *variables, const char *name, PgBenchValue *val)
 		return false;
 
 	if (val != NULL)
-		*val = var->value;
+		copyValue(val, &var->value);
 	return true;
 }
 
@@ -665,14 +716,28 @@ replaceVariable(char **sql, char *param, int len, const char *value)
 char *
 assignVariables(Variables *variables, char *sql)
 {
-	char	   *p,
-			   *name,
-			   *val;
+	char	   *p;
+	bool		in_quote = false;
 
 	p = sql;
-	while ((p = strchr(p, ':')) != NULL)
+	while (*p != '\0')
 	{
 		int			eaten;
+		char	   *name;
+		Variable   *var;
+		char	   *val;
+
+		if (*p == '\'')
+		{
+			in_quote = !in_quote;
+			p++;
+			continue;
+		}
+		if (*p != ':')
+		{
+			p++;
+			continue;
+		}
 
 		name = parseVariable(p, &eaten);
 		if (name == NULL)
@@ -684,6 +749,14 @@ assignVariables(Variables *variables, char *sql)
 			continue;
 		}
 
+		var = lookupVariable(variables, name);
+		if (var != NULL && var->value.type == PGBT_NO_VALUE && var->svalue != NULL)
+		{
+			size_t		slen = strlen(var->svalue);
+
+			if (slen >= 2 && var->svalue[0] == '{' && var->svalue[slen - 1] == '}')
+				(void) makeVariableValue(var);
+		}
 		val = getVariable(variables, name);
 		free(name);
 		if (val == NULL)
@@ -692,7 +765,32 @@ assignVariables(Variables *variables, char *sql)
 			continue;
 		}
 
-		p = replaceVariable(&sql, p, eaten, val);
+		if (var != NULL &&
+			(var->value.type == PGBT_TEXT ||
+			 var->value.type == PGBT_TIMESTAMP ||
+			 var->value.type == PGBT_ARRAY))
+		{
+			PQExpBufferData qbuf;
+
+			initPQExpBuffer(&qbuf);
+			if (!in_quote)
+				appendPQExpBufferChar(&qbuf, '\'');
+			for (const char *c = val; *c != '\0'; c++)
+			{
+				if (*c == '\'')
+					appendPQExpBufferChar(&qbuf, '\'');
+				appendPQExpBufferChar(&qbuf, *c);
+			}
+			if (!in_quote)
+				appendPQExpBufferChar(&qbuf, '\'');
+
+			p = replaceVariable(&sql, p, eaten, qbuf.data);
+			termPQExpBuffer(&qbuf);
+		}
+		else
+		{
+			p = replaceVariable(&sql, p, eaten, val);
+		}
 	}
 
 	return sql;
@@ -711,6 +809,12 @@ valueTypeName(const PgBenchValue *pval)
 		return "double";
 	else if (pval->type == PGBT_BOOLEAN)
 		return "boolean";
+	else if (pval->type == PGBT_TEXT)
+		return "text";
+	else if (pval->type == PGBT_TIMESTAMP)
+		return "timestamp";
+	else if (pval->type == PGBT_ARRAY)
+		return "array";
 	else
 	{
 		/* internal error, should never get there */
@@ -728,7 +832,7 @@ coerceToBool(const PgBenchValue *pval, bool *bval)
 		*bval = pval->u.bval;
 		return true;
 	}
-	else						/* NULL, INT or DOUBLE */
+	else						/* NULL, INT, DOUBLE, TEXT, etc. */
 	{
 		pg_log_error("cannot coerce %s to boolean", valueTypeName(pval));
 		*bval = false;			/* suppress uninitialized-variable warnings */
@@ -739,6 +843,7 @@ coerceToBool(const PgBenchValue *pval, bool *bval)
 /*
  * Return true or false from an expression for conditional purposes.
  * Non zero numerical values are true, zero and NULL are false.
+ * Non-empty text and non-empty arrays are true.
  */
 bool
 valueTruth(const PgBenchValue *pval)
@@ -753,6 +858,12 @@ valueTruth(const PgBenchValue *pval)
 			return pval->u.ival != 0;
 		case PGBT_DOUBLE:
 			return pval->u.dval != 0.0;
+		case PGBT_TEXT:
+			return pval->u.sval != NULL && pval->u.sval[0] != '\0';
+		case PGBT_TIMESTAMP:
+			return pval->u.tval != 0;
+		case PGBT_ARRAY:
+			return pval->u.aval.nelems > 0;
 		default:
 			/* internal error, unexpected type */
 			Assert(0);
@@ -781,7 +892,15 @@ coerceToInt(const PgBenchValue *pval, int64 *ival)
 		*ival = (int64) dval;
 		return true;
 	}
-	else						/* BOOLEAN or NULL */
+	else if (pval->type == PGBT_TEXT)
+	{
+		if (pval->u.sval != NULL && is_an_int(pval->u.sval) &&
+			strtoint64(pval->u.sval, true, ival))
+			return true;
+		pg_log_error("cannot coerce %s to int", valueTypeName(pval));
+		return false;
+	}
+	else						/* BOOLEAN, NULL, TIMESTAMP, ARRAY */
 	{
 		pg_log_error("cannot coerce %s to int", valueTypeName(pval));
 		return false;
@@ -802,9 +921,56 @@ coerceToDouble(const PgBenchValue *pval, double *dval)
 		*dval = (double) pval->u.ival;
 		return true;
 	}
-	else						/* BOOLEAN or NULL */
+	else if (pval->type == PGBT_TEXT)
+	{
+		if (pval->u.sval != NULL && strtodouble(pval->u.sval, true, dval))
+			return true;
+		pg_log_error("cannot coerce %s to double", valueTypeName(pval));
+		return false;
+	}
+	else						/* BOOLEAN, NULL, TIMESTAMP, ARRAY */
 	{
 		pg_log_error("cannot coerce %s to double", valueTypeName(pval));
+		return false;
+	}
+}
+
+/* get a value as a newly-allocated string, or tell if there is a problem */
+bool
+coerceToText(const PgBenchValue *pval, char **sval)
+{
+	if (pval->type == PGBT_NO_VALUE)
+	{
+		pg_log_error("cannot coerce %s to text", valueTypeName(pval));
+		*sval = NULL;
+		return false;
+	}
+	*sval = formatValue(pval);
+	return true;
+}
+
+/* get a value as a timestamp (microseconds since 2000-01-01), or report error */
+bool
+coerceToTimestamp(const PgBenchValue *pval, int64 *tval)
+{
+	if (pval->type == PGBT_TIMESTAMP)
+	{
+		*tval = pval->u.tval;
+		return true;
+	}
+	else if (pval->type == PGBT_TEXT)
+	{
+		return parseTimestampString(pval->u.sval, false, tval);
+	}
+	else if (pval->type == PGBT_INT)
+	{
+		*tval = pval->u.ival;
+		return true;
+	}
+	else
+	{
+		pg_log_error("cannot coerce %s to timestamp", valueTypeName(pval));
+		*tval = 0;
 		return false;
 	}
 }
@@ -839,4 +1005,664 @@ setDoubleValue(PgBenchValue *pv, double dval)
 {
 	pv->type = PGBT_DOUBLE;
 	pv->u.dval = dval;
+}
+
+/* assign a text value (makes a heap copy of sval) */
+void
+setTextValue(PgBenchValue *pv, const char *sval)
+{
+	pv->type = PGBT_TEXT;
+	pv->u.sval = pg_strdup(sval != NULL ? sval : "");
+}
+
+/* assign a timestamp value (microseconds since 2000-01-01 00:00:00) */
+void
+setTimestampValue(PgBenchValue *pv, int64 tval)
+{
+	pv->type = PGBT_TIMESTAMP;
+	pv->u.tval = tval;
+}
+
+/* assign an array value (deep-copies elements) */
+void
+setArrayValue(PgBenchValue *pv, const PgBenchValue *elems, int nelems)
+{
+	pv->type = PGBT_ARRAY;
+	pv->u.aval.nelems = nelems;
+	if (nelems > 0)
+	{
+		pv->u.aval.elems = pg_malloc_array(PgBenchValue, nelems);
+		for (int i = 0; i < nelems; i++)
+			copyValue(&pv->u.aval.elems[i], &elems[i]);
+	}
+	else
+	{
+		pv->u.aval.elems = NULL;
+	}
+}
+
+/* free any heap storage owned by a PgBenchValue and reset to PGBT_NO_VALUE */
+void
+freeValue(PgBenchValue *pv)
+{
+	if (pv == NULL)
+		return;
+
+	if (pv->type == PGBT_TEXT)
+	{
+		pg_free(pv->u.sval);
+		pv->u.sval = NULL;
+	}
+	else if (pv->type == PGBT_ARRAY)
+	{
+		for (int i = 0; i < pv->u.aval.nelems; i++)
+			freeValue(&pv->u.aval.elems[i]);
+		pg_free(pv->u.aval.elems);
+		pv->u.aval.elems = NULL;
+		pv->u.aval.nelems = 0;
+	}
+	pv->type = PGBT_NO_VALUE;
+}
+
+/* deep-copy src into dest (dest is assumed uninitialized or already freed) */
+void
+copyValue(PgBenchValue *dest, const PgBenchValue *src)
+{
+	if (src->type == PGBT_TEXT)
+		setTextValue(dest, src->u.sval);
+	else if (src->type == PGBT_ARRAY)
+		setArrayValue(dest, src->u.aval.elems, src->u.aval.nelems);
+	else
+		*dest = *src;
+}
+
+/*
+ * Calendar conversion helpers for PGBT_TIMESTAMP (microseconds since 2000-01-01).
+ */
+#define PGBENCH_EPOCH_JDATE		2451545 /* 2000-01-01 */
+#define PGBENCH_USECS_PER_SEC	INT64CONST(1000000)
+#define PGBENCH_USECS_PER_MIN	(INT64CONST(60) * PGBENCH_USECS_PER_SEC)
+#define PGBENCH_USECS_PER_HOUR	(INT64CONST(3600) * PGBENCH_USECS_PER_SEC)
+#define PGBENCH_USECS_PER_DAY	(INT64CONST(86400) * PGBENCH_USECS_PER_SEC)
+
+static int
+pgbench_date2j(int y, int m, int d)
+{
+	int			julian;
+	int			century;
+
+	if (m > 2)
+	{
+		m += 1;
+		y += 4800;
+	}
+	else
+	{
+		m += 13;
+		y += 4799;
+	}
+
+	century = y / 100;
+	julian = y * 365 - 32167;
+	julian += y / 4 - century + century / 4;
+	julian += 7834 * m / 256 + d;
+
+	return julian;
+}
+
+static void
+pgbench_j2date(int jd, int *year, int *month, int *day)
+{
+	unsigned int julian;
+	unsigned int quad;
+	unsigned int extra;
+	int			y;
+
+	julian = jd;
+	julian += 32044;
+	quad = julian / 146097;
+	extra = (julian - quad * 146097) * 4 + 3;
+	julian += 60 + quad * 3 + extra / 146097;
+	quad = julian / 1461;
+	julian -= quad * 1461;
+	y = julian * 4 / 1461;
+	julian = ((y != 0) ? ((julian + 305) % 365) : ((julian + 306) % 366))
+		+ 123;
+	y += quad * 4;
+	*year = y - 4800;
+	quad = julian * 2141 / 65536;
+	*day = julian - 7834 * quad / 256;
+	*month = (quad + 10) % 12 + 1;
+}
+
+static int
+pgbench_days_in_month(int year, int month)
+{
+	static const int days[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+	bool		leap;
+
+	if (month < 1 || month > 12)
+		return 0;
+	if (month != 2)
+		return days[month - 1];
+	leap = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
+	return leap ? 29 : 28;
+}
+
+/*
+ * Parse an ISO-8601 date/timestamp string ("YYYY-MM-DD[ HH:MI:SS[.ffffff]]")
+ * into microseconds since 2000-01-01 00:00:00.
+ */
+bool
+parseTimestampString(const char *str, bool errorOK, int64 *tval)
+{
+	const char *p = str;
+	char	   *endp;
+	long		year,
+				month,
+				day,
+				hour = 0,
+				min = 0,
+				sec = 0,
+				usec = 0;
+	int			jd;
+	int64		days;
+
+	if (str == NULL)
+	{
+		if (!errorOK)
+			pg_log_error("invalid input syntax for type timestamp: \"\"");
+		return false;
+	}
+
+	while (*p && isspace((unsigned char) *p))
+		p++;
+
+	year = strtol(p, &endp, 10);
+	if (endp == p || *endp != '-' || year < 1 || year > 9999)
+		goto bad_syntax;
+	p = endp + 1;
+
+	month = strtol(p, &endp, 10);
+	if (endp == p || *endp != '-' || month < 1 || month > 12)
+		goto bad_syntax;
+	p = endp + 1;
+
+	day = strtol(p, &endp, 10);
+	if (endp == p || day < 1 || day > pgbench_days_in_month((int) year, (int) month))
+		goto bad_syntax;
+	p = endp;
+
+	if (*p == ' ' || *p == 'T' || *p == 't')
+	{
+		p++;
+		hour = strtol(p, &endp, 10);
+		if (endp == p || *endp != ':' || hour < 0 || hour > 23)
+			goto bad_syntax;
+		p = endp + 1;
+
+		min = strtol(p, &endp, 10);
+		if (endp == p || min < 0 || min > 59)
+			goto bad_syntax;
+		p = endp;
+
+		if (*p == ':')
+		{
+			p++;
+			sec = strtol(p, &endp, 10);
+			if (endp == p || sec < 0 || sec > 60)
+				goto bad_syntax;
+			p = endp;
+
+			if (*p == '.')
+			{
+				int			digits = 0;
+
+				p++;
+				if (!isdigit((unsigned char) *p))
+					goto bad_syntax;
+				while (isdigit((unsigned char) *p))
+				{
+					if (digits < 6)
+					{
+						usec = usec * 10 + (*p - '0');
+						digits++;
+					}
+					p++;
+				}
+				while (digits < 6)
+				{
+					usec *= 10;
+					digits++;
+				}
+			}
+		}
+	}
+
+	/* Allow optional UTC suffix 'Z' or '+00' / '+00:00' and trailing spaces */
+	if (*p == 'Z' || *p == 'z')
+		p++;
+	else if ((*p == '+' || *p == '-') && p[1] == '0' && p[2] == '0')
+	{
+		p += 3;
+		if (*p == ':' && p[1] == '0' && p[2] == '0')
+			p += 3;
+	}
+
+	while (*p && isspace((unsigned char) *p))
+		p++;
+
+	if (*p != '\0')
+		goto bad_syntax;
+
+	jd = pgbench_date2j((int) year, (int) month, (int) day);
+	days = (int64) (jd - PGBENCH_EPOCH_JDATE);
+	*tval = days * PGBENCH_USECS_PER_DAY
+		+ (int64) hour * PGBENCH_USECS_PER_HOUR
+		+ (int64) min * PGBENCH_USECS_PER_MIN
+		+ (int64) sec * PGBENCH_USECS_PER_SEC
+		+ (int64) usec;
+	return true;
+
+bad_syntax:
+	if (!errorOK)
+		pg_log_error("invalid input syntax for type timestamp: \"%s\"", str);
+	return false;
+}
+
+/*
+ * Format microseconds since 2000-01-01 00:00:00 into ISO-8601 string
+ * "YYYY-MM-DD" (if midnight) or "YYYY-MM-DD HH:MI:SS[.ffffff]".
+ */
+void
+formatTimestampValue(int64 tval, char *buf, size_t buflen)
+{
+	int64		days;
+	int64		rem;
+	int			year,
+				month,
+				day,
+				hour,
+				min,
+				sec,
+				usec;
+
+	days = tval / PGBENCH_USECS_PER_DAY;
+	rem = tval % PGBENCH_USECS_PER_DAY;
+	if (rem < 0)
+	{
+		days -= 1;
+		rem += PGBENCH_USECS_PER_DAY;
+	}
+
+	pgbench_j2date((int) days + PGBENCH_EPOCH_JDATE, &year, &month, &day);
+
+	if (rem == 0)
+	{
+		snprintf(buf, buflen, "%04d-%02d-%02d", year, month, day);
+		return;
+	}
+
+	hour = (int) (rem / PGBENCH_USECS_PER_HOUR);
+	rem %= PGBENCH_USECS_PER_HOUR;
+	min = (int) (rem / PGBENCH_USECS_PER_MIN);
+	rem %= PGBENCH_USECS_PER_MIN;
+	sec = (int) (rem / PGBENCH_USECS_PER_SEC);
+	usec = (int) (rem % PGBENCH_USECS_PER_SEC);
+
+	if (usec != 0)
+	{
+		snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+				 year, month, day, hour, min, sec, usec);
+		/* Trim trailing fractional zeros */
+		for (size_t len = strlen(buf); len > 0 && buf[len - 1] == '0'; len--)
+			buf[len - 1] = '\0';
+	}
+	else
+	{
+		snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d",
+				 year, month, day, hour, min, sec);
+	}
+}
+
+/*
+ * Check whether an array element string needs double-quoting in a PostgreSQL
+ * array literal "{...}".
+ */
+static bool
+arrayElemNeedsQuotes(const char *s)
+{
+	if (s == NULL || *s == '\0')
+		return true;
+	if (pg_strcasecmp(s, "null") == 0)
+		return true;
+	for (const char *p = s; *p != '\0'; p++)
+	{
+		if (isspace((unsigned char) *p) || *p == ',' || *p == '{' ||
+			*p == '}' || *p == '"' || *p == '\\')
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Format any PgBenchValue into a newly pg_malloc'd string.
+ */
+char *
+formatValue(const PgBenchValue *pv)
+{
+	char		stringform[64];
+
+	switch (pv->type)
+	{
+		case PGBT_NULL:
+			return pg_strdup("NULL");
+
+		case PGBT_BOOLEAN:
+			return pg_strdup(pv->u.bval ? "true" : "false");
+
+		case PGBT_INT:
+			snprintf(stringform, sizeof(stringform), INT64_FORMAT, pv->u.ival);
+			return pg_strdup(stringform);
+
+		case PGBT_DOUBLE:
+			snprintf(stringform, sizeof(stringform), "%.*g", DBL_DIG, pv->u.dval);
+			return pg_strdup(stringform);
+
+		case PGBT_TEXT:
+			return pg_strdup(pv->u.sval != NULL ? pv->u.sval : "");
+
+		case PGBT_TIMESTAMP:
+			formatTimestampValue(pv->u.tval, stringform, sizeof(stringform));
+			return pg_strdup(stringform);
+
+		case PGBT_ARRAY:
+			{
+				PQExpBufferData buf;
+
+				initPQExpBuffer(&buf);
+				appendPQExpBufferChar(&buf, '{');
+				for (int i = 0; i < pv->u.aval.nelems; i++)
+				{
+					const PgBenchValue *elem = &pv->u.aval.elems[i];
+
+					if (i > 0)
+						appendPQExpBufferChar(&buf, ',');
+
+					if (elem->type == PGBT_NULL)
+					{
+						appendPQExpBufferStr(&buf, "NULL");
+					}
+					else if (elem->type == PGBT_ARRAY)
+					{
+						char	   *sub = formatValue(elem);
+
+						appendPQExpBufferStr(&buf, sub);
+						pg_free(sub);
+					}
+					else
+					{
+						char	   *s = formatValue(elem);
+
+						if ((elem->type == PGBT_TEXT || elem->type == PGBT_TIMESTAMP) &&
+							arrayElemNeedsQuotes(s))
+						{
+							appendPQExpBufferChar(&buf, '"');
+							for (const char *p = s; *p != '\0'; p++)
+							{
+								if (*p == '"' || *p == '\\')
+									appendPQExpBufferChar(&buf, '\\');
+								appendPQExpBufferChar(&buf, *p);
+							}
+							appendPQExpBufferChar(&buf, '"');
+						}
+						else
+						{
+							appendPQExpBufferStr(&buf, s);
+						}
+						pg_free(s);
+					}
+				}
+				appendPQExpBufferChar(&buf, '}');
+				return buf.data;
+			}
+
+		default:
+			Assert(false);
+			return pg_strdup("");
+	}
+}
+
+/*
+ * Parse a single scalar element from a PostgreSQL array literal into a PgBenchValue.
+ */
+static void
+parseArrayScalarElement(const char *token, bool was_quoted, PgBenchValue *elem)
+{
+	int64		ival;
+	double		dval;
+
+	if (!was_quoted && pg_strcasecmp(token, "NULL") == 0)
+	{
+		setNullValue(elem);
+	}
+	else if (!was_quoted &&
+			 (pg_strcasecmp(token, "true") == 0 || pg_strcasecmp(token, "t") == 0))
+	{
+		setBoolValue(elem, true);
+	}
+	else if (!was_quoted &&
+			 (pg_strcasecmp(token, "false") == 0 || pg_strcasecmp(token, "f") == 0))
+	{
+		setBoolValue(elem, false);
+	}
+	else if (!was_quoted && is_an_int(token) && strtoint64(token, true, &ival))
+	{
+		setIntValue(elem, ival);
+	}
+	else if (!was_quoted && strtodouble(token, true, &dval))
+	{
+		setDoubleValue(elem, dval);
+	}
+	else
+	{
+		setTextValue(elem, token);
+	}
+}
+
+/*
+ * Parse a PostgreSQL array literal "{elem1,elem2,...}" into a PGBT_ARRAY value.
+ */
+bool
+parseArrayLiteral(const char *str, PgBenchValue *aval)
+{
+	const char *p = str;
+	size_t		len;
+	PgBenchValue *elems = NULL;
+	int			nelems = 0;
+	int			capacity = 0;
+
+	if (str == NULL)
+		return false;
+
+	while (*p && isspace((unsigned char) *p))
+		p++;
+
+	len = strlen(p);
+	while (len > 0 && isspace((unsigned char) p[len - 1]))
+		len--;
+
+	if (len < 2 || p[0] != '{' || p[len - 1] != '}')
+		return false;
+
+	/* Advance past '{' */
+	p++;
+	len -= 2;
+
+	/* Empty array "{}" */
+	{
+		size_t		i = 0;
+
+		while (i < len && isspace((unsigned char) p[i]))
+			i++;
+		if (i == len)
+		{
+			setArrayValue(aval, NULL, 0);
+			return true;
+		}
+	}
+
+	{
+		const char *end = p + len;
+
+		while (p < end)
+		{
+			PgBenchValue elem;
+
+			while (p < end && isspace((unsigned char) *p))
+				p++;
+
+			if (p < end && *p == '{')
+			{
+				/* Nested array */
+				int			depth = 0;
+				const char *sub_start = p;
+				bool		in_quotes = false;
+				char	   *sub_str;
+
+				while (p < end)
+				{
+					if (in_quotes)
+					{
+						if (*p == '\\' && (p + 1) < end)
+							p++;
+						else if (*p == '"')
+							in_quotes = false;
+					}
+					else
+					{
+						if (*p == '"')
+							in_quotes = true;
+						else if (*p == '{')
+							depth++;
+						else if (*p == '}')
+						{
+							depth--;
+							if (depth == 0)
+							{
+								p++;
+								break;
+							}
+						}
+					}
+					p++;
+				}
+				if (depth != 0)
+					goto fail;
+
+				sub_str = pg_malloc((p - sub_start) + 1);
+				memcpy(sub_str, sub_start, p - sub_start);
+				sub_str[p - sub_start] = '\0';
+				if (!parseArrayLiteral(sub_str, &elem))
+				{
+					pg_free(sub_str);
+					goto fail;
+				}
+				pg_free(sub_str);
+
+				while (p < end && isspace((unsigned char) *p))
+					p++;
+				if (p < end)
+				{
+					if (*p != ',')
+					{
+						freeValue(&elem);
+						goto fail;
+					}
+					p++;
+				}
+			}
+			else if (p < end && *p == '"')
+			{
+				/* Quoted element */
+				PQExpBufferData tok;
+
+				initPQExpBuffer(&tok);
+				p++;			/* skip opening '"' */
+				while (p < end && *p != '"')
+				{
+					if (*p == '\\' && (p + 1) < end)
+						p++;
+					appendPQExpBufferChar(&tok, *p);
+					p++;
+				}
+				if (p >= end || *p != '"')
+				{
+					termPQExpBuffer(&tok);
+					goto fail;
+				}
+				p++;			/* skip closing '"' */
+
+				parseArrayScalarElement(tok.data, true, &elem);
+				termPQExpBuffer(&tok);
+
+				while (p < end && isspace((unsigned char) *p))
+					p++;
+				if (p < end)
+				{
+					if (*p != ',')
+					{
+						freeValue(&elem);
+						goto fail;
+					}
+					p++;
+				}
+			}
+			else
+			{
+				/* Unquoted element up to ',' or end */
+				const char *tok_start = p;
+				const char *tok_end;
+				char	   *tok;
+
+				while (p < end && *p != ',')
+				{
+					if (*p == '{' || *p == '}' || *p == '"')
+						goto fail;
+					p++;
+				}
+				tok_end = p;
+				while (tok_end > tok_start && isspace((unsigned char) tok_end[-1]))
+					tok_end--;
+
+				tok = pg_malloc((tok_end - tok_start) + 1);
+				memcpy(tok, tok_start, tok_end - tok_start);
+				tok[tok_end - tok_start] = '\0';
+
+				parseArrayScalarElement(tok, false, &elem);
+				pg_free(tok);
+
+				if (p < end && *p == ',')
+					p++;
+			}
+
+			if (nelems >= capacity)
+			{
+				capacity = (capacity == 0) ? 8 : capacity * 2;
+				elems = pg_realloc_array(elems, PgBenchValue, capacity);
+			}
+			elems[nelems++] = elem;
+		}
+	}
+
+	aval->type = PGBT_ARRAY;
+	aval->u.aval.nelems = nelems;
+	aval->u.aval.elems = elems;
+	return true;
+
+fail:
+	for (int i = 0; i < nelems; i++)
+		freeValue(&elems[i]);
+	pg_free(elems);
+	return false;
 }

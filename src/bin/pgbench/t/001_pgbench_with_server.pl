@@ -1866,6 +1866,35 @@ $node->pgbench(
 # Clean up
 $node->safe_psql('postgres', 'DROP TABLE unique_table;');
 
+# Test extended PgBenchValue types (text, timestamp, array, subscripting)
+$node->pgbench(
+	'-n -t 1 -Darr={10,20,30}',
+	0,
+	[qr{processed: 1/1}],
+	[
+		qr{command=2.: text 'hello'world'},
+		qr{command=4.: boolean true\b},
+		qr{command=6.: int 20\b},
+		qr{command=9.: int 99\b},
+		qr{command=10.: array \{10,99,30\}}
+	],
+	'pgbench extended value types (text, array, subscripting)',
+	{
+		'001_pgbench_extended_types' => q{
+\set s 'hello''world'
+\set d debug(:s)
+\set cmp ('abc' < 'def' and :s = 'hello''world')
+\set d debug(:cmp)
+\set elem :arr[1]
+\set d debug(:elem)
+\set idx 2
+\set arr[:idx - 1] 99
+\set d debug(:arr[1])
+\set d debug(:arr)
+SELECT :s, ':s', :arr::int[];
+}
+	});
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;

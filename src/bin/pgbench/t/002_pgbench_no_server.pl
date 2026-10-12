@@ -362,6 +362,11 @@ my @script_tests = (
 		'too many arguments to permute',
 		[qr{unexpected number of arguments \(permute\)}],
 		{ 'bad-permute-2.sql' => "\\set i permute(1, 2, 3, 4)\n" }
+	],
+	[
+		'unterminated array subscript in set',
+		[qr{unterminated array subscript in \\set target}],
+		{ 'bad-set-sub.sql' => "\\set arr[1 42\n" }
 	],);
 
 for my $t (@script_tests)
