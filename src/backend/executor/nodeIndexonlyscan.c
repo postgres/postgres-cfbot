@@ -33,6 +33,7 @@
 #include "access/genam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "executor/execScan.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeIndexonlyscan.h"
@@ -50,7 +51,7 @@ static TupleTableSlot *IndexOnlyNext(IndexOnlyScanState *node);
  *		Retrieve a tuple from the IndexOnlyScan node's index.
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+static pg_always_inline TupleTableSlot *
 IndexOnlyNext(IndexOnlyScanState *node)
 {
 	EState	   *estate;
@@ -164,8 +165,28 @@ IndexOnlyRecheck(IndexOnlyScanState *node, TupleTableSlot *slot)
 	return false;				/* keep compiler quiet */
 }
 
+/*
+ * IndexOnlyScanSetupRuntimeKeys -- compute runtime keys if not done yet
+ */
+static pg_always_inline void
+IndexOnlyScanSetupRuntimeKeys(IndexOnlyScanState *node)
+{
+	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
+}
+
 /* ----------------------------------------------------------------
  *		ExecIndexOnlyScan(node)
+ *
+ *		Returns the next qualifying tuple from the index-only scan.  This
+ *		variant is used when there is no es_epq_active, no qual and no
+ *		projection.  As with the ExecSeqScan() variants, passing const-NULLs
+ *		for these to ExecScanExtended() allows the compiler to eliminate the
+ *		additional code that would ordinarily be required for the evaluation
+ *		of these, and to inline IndexOnlyNext().
  * ----------------------------------------------------------------
  */
 static TupleTableSlot *
@@ -173,11 +194,104 @@ ExecIndexOnlyScan(PlanState *pstate)
 {
 	IndexOnlyScanState *node = castNode(IndexOnlyScanState, pstate);
 
+	IndexOnlyScanSetupRuntimeKeys(node);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) IndexOnlyNext,
+							(ExecScanRecheckMtd) IndexOnlyRecheck,
+							NULL,
+							NULL,
+							NULL);
+}
+
+/*
+ * Variant of ExecIndexOnlyScan() but when qual evaluation is required.
+ */
+static TupleTableSlot *
+ExecIndexOnlyScanWithQual(PlanState *pstate)
+{
+	IndexOnlyScanState *node = castNode(IndexOnlyScanState, pstate);
+
+	IndexOnlyScanSetupRuntimeKeys(node);
+
 	/*
-	 * If we have runtime keys and they've not already been set up, do it now.
+	 * Use pg_assume() for != NULL tests to make the compiler realize no
+	 * runtime check for the field is needed in ExecScanExtended().  This has
+	 * to come after IndexOnlyScanSetupRuntimeKeys(), as the compiler can't
+	 * know that ExecReScan() leaves the field alone.
 	 */
-	if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
-		ExecReScan((PlanState *) node);
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) IndexOnlyNext,
+							(ExecScanRecheckMtd) IndexOnlyRecheck,
+							NULL,
+							pstate->qual,
+							NULL);
+}
+
+/*
+ * Variant of ExecIndexOnlyScan() but when projection is required.
+ */
+static TupleTableSlot *
+ExecIndexOnlyScanWithProject(PlanState *pstate)
+{
+	IndexOnlyScanState *node = castNode(IndexOnlyScanState, pstate);
+
+	IndexOnlyScanSetupRuntimeKeys(node);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) IndexOnlyNext,
+							(ExecScanRecheckMtd) IndexOnlyRecheck,
+							NULL,
+							NULL,
+							pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecIndexOnlyScan() but when qual evaluation and projection are
+ * required.
+ */
+static TupleTableSlot *
+ExecIndexOnlyScanWithQualProject(PlanState *pstate)
+{
+	IndexOnlyScanState *node = castNode(IndexOnlyScanState, pstate);
+
+	IndexOnlyScanSetupRuntimeKeys(node);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) IndexOnlyNext,
+							(ExecScanRecheckMtd) IndexOnlyRecheck,
+							NULL,
+							pstate->qual,
+							pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecIndexOnlyScan() for when EPQ evaluation is required.  As
+ * with ExecSeqScanEPQ(), we don't bother adding variants of this for
+ * with/without qual and projection, and just use the out-of-line ExecScan().
+ */
+static TupleTableSlot *
+ExecIndexOnlyScanEPQ(PlanState *pstate)
+{
+	IndexOnlyScanState *node = castNode(IndexOnlyScanState, pstate);
+
+	IndexOnlyScanSetupRuntimeKeys(node);
 
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) IndexOnlyNext,
@@ -368,7 +482,6 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	indexstate = makeNode(IndexOnlyScanState);
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
-	indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -415,6 +528,28 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 		ExecInitQual(node->scan.plan.qual, (PlanState *) indexstate);
 	indexstate->recheckqual =
 		ExecInitQual(node->recheckqual, (PlanState *) indexstate);
+
+	/*
+	 * Assign ExecProcNode based on whether EvalPlanQual is in use, and on the
+	 * presence of qual and projection.  Each ExecIndexOnlyScan*() variant is
+	 * optimized for the specific combination of these conditions.
+	 */
+	if (estate->es_epq_active != NULL)
+		indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScanEPQ;
+	else if (indexstate->ss.ps.qual == NULL)
+	{
+		if (indexstate->ss.ps.ps_ProjInfo == NULL)
+			indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
+		else
+			indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScanWithProject;
+	}
+	else
+	{
+		if (indexstate->ss.ps.ps_ProjInfo == NULL)
+			indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScanWithQual;
+		else
+			indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScanWithQualProject;
+	}
 
 	/*
 	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
