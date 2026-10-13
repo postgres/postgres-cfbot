@@ -270,6 +270,8 @@ $node->safe_psql(
 	CREATE INDEX i2 ON s2.t2(id);
 	-- empty schema
 	CREATE SCHEMA s3;
+	CREATE SCHEMA "S1x";
+	CREATE TABLE "S1x".t1x(id integer);
 |);
 
 $node->command_fails(
@@ -309,12 +311,12 @@ $node->issues_sql_like(
 	[
 		'reindexdb',
 		'--jobs' => '2',
-		'--schema' => 's1',
+		'--schema' => 'S1',
 		'--schema' => 's2',
 		'postgres',
 	],
 	qr/statement:\ REINDEX TABLE s1.t1;/,
-	'parallel reindexdb for schemas does a per-table REINDEX');
+	'parallel reindexdb folds unquoted schema names to lower case');
 $node->command_fails(
 	[
 		'reindexdb',
@@ -327,6 +329,27 @@ $node->command_fails(
 	'parallel reindexdb for indices concurrently');
 $node->command_ok([ 'reindexdb', '--jobs' => '2', '--schema' => 's3' ],
 	'parallel reindexdb with empty schema');
+
+$node->issues_sql_like(
+	[
+		'reindexdb',
+		'--jobs' => '2',
+		'--schema' => '"S1x"',
+		'postgres',
+	],
+	qr/statement:\ REINDEX TABLE "S1x".t1x;/,
+	'parallel reindexdb with quoted schema name');
+$node->command_fails_like(
+	[
+		'reindexdb',
+		'--jobs' => '2',
+		'--schema' => 's3',
+		'--schema' => 'missing_schema',
+		'postgres',
+	],
+	qr/schema "missing_schema" does not exist/,
+	'parallel reindexdb with empty and nonexistent schemas');
+
 $node->command_ok(
 	[
 		'reindexdb',
