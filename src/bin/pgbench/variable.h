@@ -147,6 +147,7 @@ extern bool var_put_value(Variables *variables, const char *name, const PgBenchV
 extern bool var_get_value(Variables *variables, const char *name, PgBenchValue *val);
 
 /* String substitution helpers */
+extern bool valid_variable_name(const char *name);
 extern char *parseVariable(const char *sql, int *eaten);
 extern char *replaceVariable(char **sql, char *param, int len, const char *value);
 extern char *assignVariables(Variables *variables, char *sql);

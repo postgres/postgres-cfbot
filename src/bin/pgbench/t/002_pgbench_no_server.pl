@@ -397,6 +397,16 @@ my @script_tests = (
 		'catch without try',
 		[qr{\\catch without matching \\try}],
 		{ 'catch-no-try.sql' => "\\catch\n" }
+	],
+	[
+		'gset_meta alone',
+		[qr{\\gset_meta must follow an SQL command}],
+		{ 'gset-meta-alone.sql' => "\\gset_meta\n" }
+	],
+	[
+		'gset_meta too many arguments',
+		[qr{too many arguments}],
+		{ 'gset-meta-args.sql' => "SELECT 1 \\gset_meta a b\n" }
 	],);
 
 for my $t (@script_tests)

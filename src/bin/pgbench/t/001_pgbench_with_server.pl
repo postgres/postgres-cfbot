@@ -2020,6 +2020,56 @@ SELECT 1;
 }
 	});
 
+# Test \gset_meta and array column parsing in \gset / \aset
+$node->pgbench(
+	'-n -t 1',
+	0,
+	[
+		qr{processed: 1/1},
+		qr{number of expected rollbacks: 2\b}
+	],
+	[
+		qr{command=2.: array \{10,20,30\}},
+		qr{command=3.: int 20\b},
+		qr{command=4.: text 'hello'},
+		qr{command=6.: text 'OK'},
+		qr{command=7.: text '00000'},
+		qr{command=8.: int 2\b},
+		qr{command=11.: text 'ERROR'},
+		qr{command=12.: text '22012'},
+		qr{command=13.: int 0\b},
+		qr{command=20.: text 'ROLLBACK'},
+		qr{command=21.: text '22012'},
+		qr{command=22.: int 0\b}
+	],
+	'pgbench gset_meta and array column parsing in gset',
+	{
+		'001_pgbench_gset_meta' => q{
+SELECT ARRAY[10, 20, 30] AS arr, 'hello'::text AS msg \gset p
+\set d debug(:p_arr)
+\set d debug(:p_arr[1])
+\set d debug(:p_msg)
+SELECT 1 AS a UNION ALL SELECT 2 AS a \gset_meta q
+\set d debug(:q_status)
+\set d debug(:q_sqlstate)
+\set d debug(:q_nrows)
+\expect_error '22012'
+SELECT 1/0 \gset_meta err
+\set d debug(:err_status)
+\set d debug(:err_sqlstate)
+\set d debug(:err_nrows)
+BEGIN;
+\try
+SELECT 1/0;
+\catch '22012'
+\gset_meta rb_
+\endtry
+\set d debug(:rb_status)
+\set d debug(:rb_sqlstate)
+\set d debug(:rb_nrows)
+}
+	});
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;

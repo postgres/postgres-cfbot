@@ -42,6 +42,8 @@ extern ConnectionStateEnum executeMetaCommand(CState *st, pg_time_usec_t *now);
 extern void skipConditionalCommands(CState *st);
 extern bool processGSetResult(CState *st, Command *command, PGresult *res,
 							  bool is_last, int qrynum);
+extern bool populateGSetMeta(CState *st, const char *prefix);
+extern bool processGSetMetaResult(CState *st, Command *command, PGresult *res);
 
 /* Helper APIs for commands */
 extern void commandFailed(CState *st, const char *cmd, const char *message);
@@ -64,6 +66,7 @@ extern ConnectionStateEnum handle_cmd_try(CState *st, Command *cmd, pg_time_usec
 extern ConnectionStateEnum handle_cmd_catch(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_endtry(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_expect_error(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_gset_meta(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_setshell(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_shell(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_startpipeline(CState *st, Command *cmd, pg_time_usec_t *now);

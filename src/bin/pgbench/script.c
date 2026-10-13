@@ -1468,6 +1468,8 @@ getMetaCommand(const char *cmd)
 		mc = META_GSET;
 	else if (pg_strcasecmp(cmd, "aset") == 0)
 		mc = META_ASET;
+	else if (pg_strcasecmp(cmd, "gset_meta") == 0)
+		mc = META_GSET_META;
 	else if (pg_strcasecmp(cmd, "startpipeline") == 0)
 		mc = META_STARTPIPELINE;
 	else if (pg_strcasecmp(cmd, "syncpipeline") == 0)
@@ -1655,6 +1657,7 @@ create_sql_command(PQExpBuffer buf)
 	my_command->failures = 0;
 	memset(my_command->argv, 0, sizeof(my_command->argv));
 	my_command->varprefix = NULL;	/* allocated later, if needed */
+	my_command->meta_varprefix = NULL;	/* allocated later, if needed */
 	my_command->expr = NULL;
 	initSimpleStats(&my_command->stats);
 	my_command->prepname = NULL;	/* set later, if needed */
@@ -1671,6 +1674,7 @@ free_command(Command *command)
 	for (int i = 0; i < command->argc; i++)
 		pg_free(command->argv[i]);
 	pg_free(command->varprefix);
+	pg_free(command->meta_varprefix);
 
 	/*
 	 * It should also free expr recursively, but this is currently not needed
@@ -2077,7 +2081,8 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 			}
 		}
 	}
-	else if (my_command->meta == META_GSET || my_command->meta == META_ASET)
+	else if (my_command->meta == META_GSET || my_command->meta == META_ASET ||
+			 my_command->meta == META_GSET_META)
 	{
 		if (my_command->argc > 2)
 			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
@@ -2371,6 +2376,36 @@ ParseScript(const char *script, const char *desc, int weight)
 					free_command(command);
 
 					continue;
+				}
+
+				if (command->meta == META_GSET_META)
+				{
+					if (index == 0)
+						syntax_error(desc, lineno, NULL, NULL,
+									 "\\gset_meta must follow an SQL command",
+									 NULL, -1);
+
+					if (ps.commands[index - 1]->type == SQL_COMMAND)
+					{
+						Command    *cmd = ps.commands[index - 1];
+
+						if (cmd->meta_varprefix != NULL)
+							syntax_error(desc, lineno, NULL, NULL,
+										 "\\gset_meta must follow an SQL command",
+										 cmd->first_line, -1);
+
+						if (command->argc <= 1 || command->argv[1][0] == '\0')
+							cmd->meta_varprefix = pg_strdup("");
+						else
+							cmd->meta_varprefix = pg_strdup(command->argv[1]);
+
+						free_command(command);
+						continue;
+					}
+					else if (ps.commands[index - 1]->meta != META_CATCH)
+						syntax_error(desc, lineno, NULL, NULL,
+									 "\\gset_meta must follow an SQL command",
+									 ps.commands[index - 1]->first_line, -1);
 				}
 
 				/*

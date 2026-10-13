@@ -1255,6 +1255,18 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
      </para>
 
      <para>
+      In both <literal>\gset</literal> and <literal>\aset</literal>, if a
+      non-null column value begins with <literal>{</literal> and ends with
+      <literal>}</literal> and parses as a valid one-dimensional
+      <productname>PostgreSQL</productname> array literal (for example, the
+      result of <function>array_agg()</function>), it is automatically stored as
+      a <type>PGBT_ARRAY</type> variable whose elements can be accessed with
+      0-based subscripting <literal>:<replaceable>col</replaceable>[<replaceable>i</replaceable>]</literal>,
+      and its element count is stored in the integer variable
+      <literal>:<replaceable>prefix</replaceable><replaceable>col</replaceable>_count</literal>.
+     </para>
+
+     <para>
       <literal>\gset</literal> and <literal>\aset</literal> cannot be used in
       pipeline mode, since the query results are not yet available by the time
       the commands would need them.
@@ -1278,6 +1290,31 @@ SELECT 1 \;
 SELECT 2 AS two, 3 AS three \gset p_
 SELECT 4 AS four \; SELECT 5 AS five \aset
 </programlisting></para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-gset-meta">
+    <term><literal>\gset_meta [<replaceable>prefix</replaceable>]</literal></term>
+    <listitem>
+     <para>
+      Captures execution metadata from an SQL command into client variables.
+      <literal>\gset_meta</literal> may be used either at the end of an SQL
+      query (in place of a semicolon, optionally storing 1-row result columns
+      like <literal>\gset</literal>) or as a standalone meta-command line
+      immediately following an SQL command.
+     </para>
+     <para>
+      Using <replaceable>prefix</replaceable> (which defaults to empty), it
+      populates:
+      <itemizedlist>
+       <listitem><para><literal>:<replaceable>prefix</replaceable>_rowcount</literal> &mdash; number of rows affected or returned (<type>integer</type>)</para></listitem>
+       <listitem><para><literal>:<replaceable>prefix</replaceable>_ntuples</literal> &mdash; number of tuples in the result set (<type>integer</type>)</para></listitem>
+       <listitem><para><literal>:<replaceable>prefix</replaceable>_nfields</literal> &mdash; number of columns in the result set (<type>integer</type>)</para></listitem>
+       <listitem><para><literal>:<replaceable>prefix</replaceable>_sqlstate</literal> &mdash; five-character SQLSTATE code, e.g. <literal>'00000'</literal> (<type>text</type>)</para></listitem>
+       <listitem><para><literal>:<replaceable>prefix</replaceable>_status</literal> &mdash; <application>libpq</application> result status string, e.g. <literal>'PGRES_TUPLES_OK'</literal> (<type>text</type>)</para></listitem>
+       <listitem><para><literal>:<replaceable>prefix</replaceable>_elapsed_us</literal> &mdash; statement execution time in microseconds (<type>integer</type>)</para></listitem>
+      </itemizedlist>
+     </para>
     </listitem>
    </varlistentry>
 

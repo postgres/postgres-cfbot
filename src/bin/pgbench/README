@@ -104,3 +104,14 @@ extracts `PQresultErrorField(res, PG_DIAG_SQLSTATE)` and checks:
 If matched, `:sqlstate` and `:error_message` are stored in `st->variables`,
 inner conditional/loop frames are unwound, `expected_rollbacks` is incremented,
 and `CSTATE_END_COMMAND` transitions directly to `caught_jump_target`.
+
+Result Set Inspection & Array Binding (commands.c, variable.c)
+--------------------------------------------------------------
+- `processGSetResult()` inspects each column value returned by `\gset` or
+  `set`.  When a value starts with `{` and ends with `}`,
+  `parseArrayLiteral()` parses the 1D PostgreSQL array representation into a
+  `PGBT_ARRAY` value (coercing unquoted elements to `NULL`, `int64`, `double`,
+  `bool`, or `text`) and binds `<prefix><colname>_count` to the array length.
+- `processGSetMetaResult()` / `populateGSetMeta()` record result metadata
+  (`_rowcount`, `_ntuples`, `_nfields`, `_sqlstate`, `_status`, `_elapsed_us`)
+  for both trailing `\gset_meta` and standalone `\gset_meta` commands.

@@ -670,6 +670,26 @@ handle_cmd_expect_error(CState *st, Command *cmd, pg_time_usec_t *now)
 }
 
 ConnectionStateEnum
+handle_cmd_gset_meta(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	const char *prefix = (cmd->argc > 1) ? cmd->argv[1] : "";
+
+	if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
+	{
+		commandFailed(st, "gset_meta", "\\gset_meta is not allowed in pipeline mode");
+		return CSTATE_ABORTED;
+	}
+
+	if (!populateGSetMeta(st, prefix))
+	{
+		commandFailed(st, "gset_meta", "execution of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
 handle_cmd_setshell(CState *st, Command *cmd, pg_time_usec_t *now)
 {
 	if (!runShellCommand(&st->variables, cmd->argv[1], cmd->argv + 2, cmd->argc - 2))
@@ -780,6 +800,7 @@ static const CommandDescriptor command_handlers[] = {
 	{"catch", META_CATCH, handle_cmd_catch},
 	{"endtry", META_ENDTRY, handle_cmd_endtry},
 	{"expect_error", META_EXPECT_ERROR, handle_cmd_expect_error},
+	{"gset_meta", META_GSET_META, handle_cmd_gset_meta},
 	{"startpipeline", META_STARTPIPELINE, handle_cmd_startpipeline},
 	{"syncpipeline", META_SYNCPIPELINE, handle_cmd_syncpipeline},
 	{"endpipeline", META_ENDPIPELINE, handle_cmd_endpipeline},
@@ -933,6 +954,60 @@ skipConditionalCommands(CState *st)
 }
 
 /*
+ * Store a non-NULL column value from \gset, \aset, or \gset_meta into a
+ * variable, converting PostgreSQL array literals "{...}" directly into
+ * PGBT_ARRAY values and non-numeric/non-boolean text values into PGBT_TEXT.
+ */
+static bool
+storeGSetColumnValue(Variables *variables, const char *context,
+					 const char *varname, const char *valstr)
+{
+	size_t		vlen = strlen(valstr);
+	PgBenchValue val;
+
+	if (vlen >= 2 && valstr[0] == '{' && valstr[vlen - 1] == '}' &&
+		parseArrayLiteral(valstr, &val))
+	{
+		bool		ok = putVariableValue(variables, context, varname, &val);
+
+		freeValue(&val);
+		return ok;
+	}
+
+	if (!putVariable(variables, context, varname, valstr))
+		return false;
+
+	{
+		Variable   *var = lookupVariable(variables, varname);
+
+		if (var != NULL && var->value.type == PGBT_NO_VALUE)
+		{
+			double		dv;
+
+			if (vlen == 0)
+			{
+				setTextValue(&var->value, "");
+			}
+			else if (pg_strcasecmp(valstr, "null") != 0 &&
+					 pg_strncasecmp(valstr, "true", vlen) != 0 &&
+					 pg_strncasecmp(valstr, "yes", vlen) != 0 &&
+					 pg_strcasecmp(valstr, "on") != 0 &&
+					 pg_strncasecmp(valstr, "false", vlen) != 0 &&
+					 pg_strncasecmp(valstr, "no", vlen) != 0 &&
+					 pg_strcasecmp(valstr, "off") != 0 &&
+					 pg_strcasecmp(valstr, "of") != 0 &&
+					 !is_an_int(valstr) &&
+					 !strtodouble(valstr, true, &dv))
+			{
+				setTextValue(&var->value, valstr);
+			}
+		}
+	}
+
+	return true;
+}
+
+/*
  * Process \gset and \aset variable storage from query result.
  * Returns true if successful, false on error.
  */
@@ -961,11 +1036,12 @@ processGSetResult(CState *st, Command *command, PGresult *res, bool is_last, int
 	/* store results into variables */
 	for (fld = 0; fld < PQnfields(res); fld++)
 	{
-		char	   *varname = PQfname(res, fld);
+		char	   *colname = PQfname(res, fld);
+		char	   *varname = colname;
 		bool		ok;
 
 		if (*varprefix != '\0')
-			varname = psprintf("%s%s", varprefix, varname);
+			varname = psprintf("%s%s", varprefix, colname);
 
 		/* store last row result */
 		if (PQgetisnull(res, ntuples - 1, fld))
@@ -975,10 +1051,29 @@ processGSetResult(CState *st, Command *command, PGresult *res, bool is_last, int
 			setNullValue(&nullval);
 			ok = putVariableValue(&st->variables, context,
 								  varname, &nullval);
+			if (ok && *varprefix != '\0' && varprefix[strlen(varprefix) - 1] != '_' &&
+				valid_variable_name(colname))
+			{
+				char	   *alt_varname = psprintf("%s_%s", varprefix, colname);
+
+				(void) putVariableValue(&st->variables, context, alt_varname, &nullval);
+				pfree(alt_varname);
+			}
 		}
 		else
-			ok = putVariable(&st->variables, context, varname,
-							 PQgetvalue(res, ntuples - 1, fld));
+		{
+			const char *valstr = PQgetvalue(res, ntuples - 1, fld);
+
+			ok = storeGSetColumnValue(&st->variables, context, varname, valstr);
+			if (ok && *varprefix != '\0' && varprefix[strlen(varprefix) - 1] != '_' &&
+				valid_variable_name(colname))
+			{
+				char	   *alt_varname = psprintf("%s_%s", varprefix, colname);
+
+				(void) storeGSetColumnValue(&st->variables, context, alt_varname, valstr);
+				pfree(alt_varname);
+			}
+		}
 
 		if (!ok)
 		{
@@ -995,4 +1090,101 @@ processGSetResult(CState *st, Command *command, PGresult *res, bool is_last, int
 	}
 
 	return true;
+}
+
+/*
+ * Populate :prefix_status, :prefix_sqlstate, and :prefix_nrows for \gset_meta.
+ */
+bool
+populateGSetMeta(CState *st, const char *prefix)
+{
+	const char *p = (prefix != NULL) ? prefix : "";
+	size_t		plen = strlen(p);
+	const char *sep = (plen > 0 && p[plen - 1] != '_') ? "_" : "";
+	char	   *status_var = psprintf("%s%sstatus", p, sep);
+	char	   *sqlstate_var = psprintf("%s%ssqlstate", p, sep);
+	char	   *nrows_var = psprintf("%s%snrows", p, sep);
+	const char *status_str = (st->last_status != NULL) ? st->last_status : "OK";
+	const char *sqlstate_str = (st->last_sqlstate[0] != '\0') ? st->last_sqlstate : "00000";
+	PgBenchValue v;
+	bool		ok = true;
+
+	setTextValue(&v, status_str);
+	if (!putVariableValue(&st->variables, "gset_meta", status_var, &v))
+		ok = false;
+	freeValue(&v);
+
+	if (ok)
+	{
+		setTextValue(&v, sqlstate_str);
+		if (!putVariableValue(&st->variables, "gset_meta", sqlstate_var, &v))
+			ok = false;
+		freeValue(&v);
+	}
+
+	if (ok)
+	{
+		if (!putVariableInt(&st->variables, "gset_meta", nrows_var, st->last_nrows))
+			ok = false;
+	}
+
+	if (!ok)
+		st->estatus = ESTATUS_META_COMMAND_ERROR;
+
+	pfree(status_var);
+	pfree(sqlstate_var);
+	pfree(nrows_var);
+
+	return ok;
+}
+
+/*
+ * Process \gset_meta when attached to a query returning tuples.
+ * If \gset / \aset was not also specified on the same command, any columns
+ * with valid identifier names from the last row are also captured into
+ * :prefix_<colname> before populating :prefix_status, :prefix_sqlstate, and
+ * :prefix_nrows.
+ */
+bool
+processGSetMetaResult(CState *st, Command *command, PGresult *res)
+{
+	const char *p = (command->meta_varprefix != NULL) ? command->meta_varprefix : "";
+	size_t		plen = strlen(p);
+	const char *sep = (plen > 0 && p[plen - 1] != '_') ? "_" : "";
+	int			ntuples = PQntuples(res);
+
+	if (command->meta == META_NONE && ntuples >= 1)
+	{
+		for (int fld = 0; fld < PQnfields(res); fld++)
+		{
+			char	   *colname = PQfname(res, fld);
+			char	   *varname;
+
+			if (!valid_variable_name(colname))
+				continue;
+
+			varname = psprintf("%s%s%s", p, sep, colname);
+			if (!valid_variable_name(varname))
+			{
+				pfree(varname);
+				continue;
+			}
+
+			if (PQgetisnull(res, ntuples - 1, fld))
+			{
+				PgBenchValue nullval;
+
+				setNullValue(&nullval);
+				(void) putVariableValue(&st->variables, "gset_meta", varname, &nullval);
+			}
+			else
+			{
+				(void) storeGSetColumnValue(&st->variables, "gset_meta", varname,
+											PQgetvalue(res, ntuples - 1, fld));
+			}
+			pfree(varname);
+		}
+	}
+
+	return populateGSetMeta(st, p);
 }

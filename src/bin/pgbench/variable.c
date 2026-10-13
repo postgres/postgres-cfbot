@@ -403,7 +403,7 @@ makeVariableValue(Variable *var)
  * Note: this static function is copied from "src/bin/psql/variables.c"
  * but changed to disallow variable names starting with a digit.
  */
-static bool
+bool
 valid_variable_name(const char *name)
 {
 	const unsigned char *ptr = (const unsigned char *) name;

@@ -297,7 +297,9 @@ typedef struct
 	int			caught_jump_target;
 	int			caught_cstack_depth;
 	int			caught_loop_depth;
+	const char *last_status;
 	char		last_sqlstate[6];
+	int64		last_nrows;
 
 	/* client variables */
 	Variables	variables;

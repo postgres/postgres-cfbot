@@ -64,6 +64,7 @@ typedef enum MetaCommand
 	META_SLEEP,					/* \sleep */
 	META_GSET,					/* \gset */
 	META_ASET,					/* \aset */
+	META_GSET_META,				/* \gset_meta */
 	META_IF,					/* \if */
 	META_ELIF,					/* \elif */
 	META_ELSE,					/* \else */
@@ -126,6 +127,7 @@ typedef struct Command
 	char	   *argv[MAX_ARGS];
 	char	   *prepname;
 	char	   *varprefix;
+	char	   *meta_varprefix;
 	PgBenchExpr *expr;
 	PgBenchExpr *index_expr;
 	PgBenchExpr *end_expr;

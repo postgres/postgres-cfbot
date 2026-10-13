@@ -447,6 +447,26 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 		{
 			case PGRES_COMMAND_OK:	/* non-SELECT commands */
 			case PGRES_EMPTY_QUERY: /* may be used for testing no-op overhead */
+				if (PQresultStatus(res) == PGRES_COMMAND_OK)
+				{
+					const char *cmdtuples = PQcmdTuples(res);
+					const char *cmdstatus = PQcmdStatus(res);
+
+					st->last_nrows = (cmdtuples != NULL && *cmdtuples != '\0') ?
+						strtoi64(cmdtuples, NULL, 10) : 0;
+					if (cmdstatus != NULL &&
+						pg_strncasecmp(cmdstatus, "ROLLBACK", 8) == 0)
+						st->last_status = "ROLLBACK";
+					else
+						st->last_status = "OK";
+				}
+				else
+				{
+					st->last_nrows = 0;
+					st->last_status = "OK";
+				}
+				strlcpy(st->last_sqlstate, "00000", sizeof(st->last_sqlstate));
+
 				if (is_last && meta == META_GSET)
 				{
 					pg_log_error("client %d script %d command %d query %d: expected one row, got %d",
@@ -454,13 +474,32 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 					st->estatus = ESTATUS_META_COMMAND_ERROR;
 					goto error;
 				}
+				if (is_last &&
+					sql_script[st->use_file].commands[st->command]->meta_varprefix != NULL)
+				{
+					if (!populateGSetMeta(st,
+										  sql_script[st->use_file].commands[st->command]->meta_varprefix))
+						goto error;
+				}
 				break;
 
 			case PGRES_TUPLES_OK:
+				st->last_nrows = PQntuples(res);
+				st->last_status = "OK";
+				strlcpy(st->last_sqlstate, "00000", sizeof(st->last_sqlstate));
+
 				if ((is_last && meta == META_GSET) || meta == META_ASET)
 				{
 					if (!processGSetResult(st, sql_script[st->use_file].commands[st->command],
 										   res, is_last, qrynum))
+						goto error;
+				}
+				if (is_last &&
+					sql_script[st->use_file].commands[st->command]->meta_varprefix != NULL)
+				{
+					if (!processGSetMetaResult(st,
+											   sql_script[st->use_file].commands[st->command],
+											   res))
 						goto error;
 				}
 				/* otherwise the result is simply thrown away by PQclear below */
@@ -494,7 +533,10 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 				{
 					const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
 
-					strlcpy(st->last_sqlstate, sqlstate ? sqlstate : "",
+					st->last_status = "ERROR";
+					st->last_nrows = 0;
+					strlcpy(st->last_sqlstate,
+							(sqlstate && *sqlstate) ? sqlstate : "XX000",
 							sizeof(st->last_sqlstate));
 					st->estatus = getSQLErrorStatus(st, sqlstate);
 					if (st->estatus != ESTATUS_CONN_ERROR &&
@@ -756,9 +798,20 @@ isStandaloneRollback(const char *sql)
 static void
 finishCaughtError(TState *thread, CState *st)
 {
+	Command    *cmd = sql_script[st->use_file].commands[st->command];
+
 	thread->stats.expected_rollbacks++;
 	if (per_script_stats)
 		sql_script[st->use_file].stats.expected_rollbacks++;
+
+	if (cmd->meta_varprefix != NULL)
+	{
+		if (!populateGSetMeta(st, cmd->meta_varprefix))
+		{
+			st->state = CSTATE_ABORTED;
+			return;
+		}
+	}
 
 	st->error_caught = false;
 	st->estatus = ESTATUS_NO_ERROR;
@@ -1001,11 +1054,20 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 						getTransactionStatus(st->con) == TSTATUS_IDLE &&
 						isStandaloneRollback(command->argv[0]))
 					{
+						st->last_status = "ROLLBACK";
+						if (command->meta_varprefix != NULL)
+						{
+							if (!populateGSetMeta(st, command->meta_varprefix))
+							{
+								st->state = CSTATE_ABORTED;
+								break;
+							}
+						}
 						st->state = CSTATE_END_COMMAND;
 						break;
 					}
 
-					/* disallow \aset and \gset in pipeline mode */
+					/* disallow \aset, \gset, and \gset_meta in pipeline mode */
 					if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
 					{
 						if (command->meta == META_GSET)
@@ -1017,6 +1079,12 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 						else if (command->meta == META_ASET)
 						{
 							commandFailed(st, "aset", "\\aset is not allowed in pipeline mode");
+							st->state = CSTATE_ABORTED;
+							break;
+						}
+						else if (command->meta_varprefix != NULL)
+						{
+							commandFailed(st, "gset_meta", "\\gset_meta is not allowed in pipeline mode");
 							st->state = CSTATE_ABORTED;
 							break;
 						}
@@ -1219,6 +1287,8 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					tstatus = getTransactionStatus(st->con);
 					if (tstatus == TSTATUS_IN_BLOCK)
 					{
+						st->last_status = "ROLLBACK";
+
 						/* Try to rollback a (failed) transaction block. */
 						if (!PQsendQuery(st->con, "ROLLBACK"))
 						{
