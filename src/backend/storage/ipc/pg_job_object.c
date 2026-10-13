@@ -50,25 +50,21 @@ void
 pg_create_job_object(void)
 {
 	JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit_info;
-	char		job_name[128];
 	DWORD		error;
 
-	snprintf(job_name, sizeof(job_name), "PostgreSQL_Port_%d_PID_%lu",
-			 PostPortNumber, GetCurrentProcessId());
-
-	pg_job_object = CreateJobObjectA(NULL, job_name);
+	/* Keep cleanup independent of other processes opening a named job. */
+	pg_job_object = CreateJobObjectA(NULL, NULL);
 
 	if (pg_job_object == NULL)
 	{
 		error = GetLastError();
 		ereport(LOG,
-				(errmsg("could not create job object \"%s\": error code %lu",
-						job_name, error),
+				(errmsg("could not create job object: error code %lu", error),
 				 errdetail("Orphaned process cleanup will not be available.")));
 		return;
 	}
 
-	elog(DEBUG1, "created job object \"%s\"", job_name);
+	elog(DEBUG1, "created job object");
 
 	/*
 	 * Set KILL_ON_JOB_CLOSE. When the job handle closes (either explicit
