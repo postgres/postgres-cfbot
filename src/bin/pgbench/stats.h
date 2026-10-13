@@ -116,6 +116,8 @@ typedef struct StatsData
 									 * that were rolled back gracefully */
 	SimpleStats latency;
 	SimpleStats lag;
+	SimpleStats keying_time;
+	SimpleStats think_time;
 } StatsData;
 
 /*

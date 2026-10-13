@@ -307,6 +307,12 @@ typedef struct
 	/* various times about current transaction in microseconds */
 	pg_time_usec_t txn_scheduled;	/* scheduled start time of transaction */
 	pg_time_usec_t sleep_until; /* scheduled start time of next cmd */
+	pg_time_usec_t sleep_begin; /* start time of current sleep/keying/think */
+	int			sleep_type;		/* MetaCommand of active sleep */
+	pg_time_usec_t txn_keying_time; /* cumulated keying time in current tx */
+	pg_time_usec_t txn_think_time;	/* cumulated think time in current tx */
+	bool		has_keying_time;
+	bool		has_think_time;
 	pg_time_usec_t txn_begin;	/* used for measuring schedule lag times */
 	pg_time_usec_t stmt_begin;	/* used for measuring statement latencies */
 

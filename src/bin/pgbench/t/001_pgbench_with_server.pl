@@ -2070,6 +2070,26 @@ SELECT 1/0;
 }
 	});
 
+$node->pgbench(
+	'-n -t 1',
+	0,
+	[
+		qr{processed: 1/1},
+		qr{latency average = \d+\.\d+ ms},
+		qr{keying time average = \d+\.\d+ ms},
+		qr{think time average = \d+\.\d+ ms}
+	],
+	[qr{^$}],
+	'pgbench dynamic sleep, keying_time, and think_time',
+	{
+		'001_pgbench_pacing' => q{
+\keying_time 2 ms
+\sleep random_exponential(100, 500, 2.0) us
+SELECT 1;
+\think_time (1 + 2) ms
+}
+	});
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;

@@ -13,6 +13,7 @@
 #include "postgres_fe.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <signal.h>
 
 #include "commands.h"
@@ -255,41 +256,67 @@ prepareCommandsInPipeline(CState *st)
  * of delay, in microseconds.  Returns true on success, false on error.
  */
 bool
-evaluateSleep(Variables *variables, int argc, char **argv, int *usecs)
+evaluateSleep(Variables *variables, int argc, char **argv, int64 *usecs)
 {
 	char	   *var;
-	int			usec;
+	int64		usec;
+	double		dval = 0.0;
+	bool		is_float = false;
 
 	if (*argv[1] == ':')
 	{
+		char	   *endptr = NULL;
+
 		if ((var = getVariable(variables, argv[1] + 1)) == NULL)
 		{
 			pg_log_error("%s: undefined variable \"%s\"", argv[0], argv[1] + 1);
 			return false;
 		}
 
-		usec = atoi(var);
-
-		/* Raise an error if the value of a variable is not a number */
-		if (usec == 0 && !isdigit((unsigned char) *var))
+		dval = strtod(var, &endptr);
+		while (endptr != NULL && *endptr != '\0' && isspace((unsigned char) *endptr))
+			endptr++;
+		if (*var == '\0' || endptr == var || (endptr != NULL && *endptr != '\0'))
 		{
 			pg_log_error("%s: invalid sleep time \"%s\" for variable \"%s\"",
 						 argv[0], var, argv[1] + 1);
 			return false;
 		}
+		is_float = true;
 	}
 	else
-		usec = atoi(argv[1]);
+		usec = atoll(argv[1]);
 
-	if (argc > 2)
+	if (is_float)
 	{
-		if (pg_strcasecmp(argv[2], "ms") == 0)
-			usec *= 1000;
-		else if (pg_strcasecmp(argv[2], "s") == 0)
-			usec *= 1000000;
+		double		mult = 1000000.0;
+
+		if (argc > 2)
+		{
+			if (pg_strcasecmp(argv[2], "us") == 0)
+				mult = 1.0;
+			else if (pg_strcasecmp(argv[2], "ms") == 0)
+				mult = 1000.0;
+			else if (pg_strcasecmp(argv[2], "s") == 0)
+				mult = 1000000.0;
+		}
+		usec = (int64) llround(dval * mult);
 	}
 	else
-		usec *= 1000000;
+	{
+		if (argc > 2)
+		{
+			if (pg_strcasecmp(argv[2], "ms") == 0)
+				usec *= INT64CONST(1000);
+			else if (pg_strcasecmp(argv[2], "s") == 0)
+				usec *= INT64CONST(1000000);
+		}
+		else
+			usec *= INT64CONST(1000000);
+	}
+
+	if (usec < 0)
+		usec = 0;
 
 	*usecs = usec;
 	return true;
@@ -302,21 +329,69 @@ evaluateSleep(Variables *variables, int argc, char **argv, int *usecs)
 ConnectionStateEnum
 handle_cmd_sleep(CState *st, Command *cmd, pg_time_usec_t *now)
 {
-	int			usec;
+	int64		usec = 0;
 
 	/*
-	 * A \sleep doesn't execute anything, we just get the delay from the
-	 * argument, and enter the CSTATE_SLEEP state.  (The per-command
-	 * latency will be recorded in CSTATE_SLEEP state, not here, after the
-	 * delay has elapsed.)
+	 * A \sleep, \keying_time, or \think_time gets the delay from the argument
+	 * or expression and enters the CSTATE_SLEEP state.  (The per-command
+	 * latency and keying/think time will be recorded in CSTATE_SLEEP state
+	 * after the delay has elapsed.)
 	 */
-	if (!evaluateSleep(&st->variables, cmd->argc, cmd->argv, &usec))
+	if (cmd->expr != NULL)
 	{
-		commandFailed(st, "sleep", "execution of meta-command failed");
-		return CSTATE_ABORTED;
+		PgBenchValue val;
+		double		dval;
+		double		mult = 1000000.0;
+
+		if (!evaluateExpr(st, cmd->expr, &val))
+		{
+			commandFailed(st, cmd->argv[0], "evaluation of meta-command failed");
+			return CSTATE_ABORTED;
+		}
+
+		if (!coerceToDouble(&val, &dval))
+		{
+			freeValue(&val);
+			commandFailed(st, cmd->argv[0], "invalid sleep time, must be a number");
+			return CSTATE_ABORTED;
+		}
+		freeValue(&val);
+
+		if (cmd->argc > 2 && cmd->argv[2] != NULL)
+		{
+			if (pg_strcasecmp(cmd->argv[2], "us") == 0)
+				mult = 1.0;
+			else if (pg_strcasecmp(cmd->argv[2], "ms") == 0)
+				mult = 1000.0;
+			else if (pg_strcasecmp(cmd->argv[2], "s") == 0)
+				mult = 1000000.0;
+		}
+
+		usec = (int64) llround(dval * mult);
+		if (usec < 0)
+			usec = 0;
+	}
+	else
+	{
+		if (!evaluateSleep(&st->variables, cmd->argc, cmd->argv, &usec))
+		{
+			commandFailed(st, cmd->argv[0], "execution of meta-command failed");
+			return CSTATE_ABORTED;
+		}
 	}
 
+	/*
+	 * Reset *now if cmd->expr was evaluated, then capture start of sleep.
+	 */
+	if (cmd->expr != NULL)
+		*now = 0;
 	pg_time_now_lazy(now);
+	st->sleep_begin = *now;
+	st->sleep_type = (int) cmd->meta;
+	if (cmd->meta == META_KEYING_TIME)
+		st->has_keying_time = true;
+	else if (cmd->meta == META_THINK_TIME)
+		st->has_think_time = true;
 	st->sleep_until = (*now) + usec;
 	return CSTATE_SLEEP;
 }
@@ -788,6 +863,8 @@ static const CommandDescriptor command_handlers[] = {
 	{"setshell", META_SETSHELL, handle_cmd_setshell},
 	{"shell", META_SHELL, handle_cmd_shell},
 	{"sleep", META_SLEEP, handle_cmd_sleep},
+	{"keying_time", META_KEYING_TIME, handle_cmd_sleep},
+	{"think_time", META_THINK_TIME, handle_cmd_sleep},
 	{"if", META_IF, handle_cmd_if},
 	{"elif", META_ELIF, handle_cmd_elif},
 	{"else", META_ELSE, handle_cmd_else},

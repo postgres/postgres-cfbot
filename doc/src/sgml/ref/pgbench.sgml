@@ -1480,7 +1480,7 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
    <varlistentry id="pgbench-metacommand-sleep">
     <term>
-     <literal>\sleep <replaceable>number</replaceable> [ us | ms | s ]</literal>
+     <literal>\sleep <replaceable>expression</replaceable> [ us | ms | s ]</literal>
     </term>
 
     <listitem>
@@ -1488,16 +1488,44 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
       Causes script execution to sleep for the specified duration in
       microseconds (<literal>us</literal>), milliseconds (<literal>ms</literal>) or seconds
       (<literal>s</literal>).  If the unit is omitted then seconds are the default.
-      <replaceable>number</replaceable> can be either an integer constant or a
-      <literal>:</literal><replaceable>variablename</replaceable> reference to a variable
-      having an integer value.
+      <replaceable>expression</replaceable> can be an integer or floating-point
+      constant, a <literal>:</literal><replaceable>variablename</replaceable>
+      reference, or any general <application>pgbench</application> expression
+      evaluating to an integer or double value.
      </para>
 
      <para>
-      Example:
+      Examples:
 <programlisting>
 \sleep 10 ms
+\sleep random(5, 25) ms
 </programlisting></para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-keying-think-time">
+    <term><literal>\keying_time <replaceable>expression</replaceable> [ us | ms | s ]</literal></term>
+    <term><literal>\think_time <replaceable>expression</replaceable> [ us | ms | s ]</literal></term>
+
+    <listitem>
+     <para>
+      Pauses script execution for the duration evaluated from
+      <replaceable>expression</replaceable> (with optional unit
+      <literal>us</literal>, <literal>ms</literal>, or <literal>s</literal>;
+      default <literal>s</literal>) to model pre-transaction terminal keying
+      delay (<literal>\keying_time</literal>) or post-transaction user think
+      time (<literal>\think_time</literal>), as required by benchmarks such as
+      TPC-C.
+     </para>
+     <para>
+      Unlike <literal>\sleep</literal>, durations spent in
+      <literal>\keying_time</literal> and <literal>\think_time</literal> are
+      tracked in separate statistical accumulators (<literal>keying time
+      average</literal> and <literal>think time average</literal>), and
+      <application>pgbench</application> additionally reports <literal>response
+      time average</literal> (the database execution latency excluding keying
+      and think time).
+     </para>
     </listitem>
    </varlistentry>
 

@@ -115,3 +115,16 @@ Result Set Inspection & Array Binding (commands.c, variable.c)
 - `processGSetMetaResult()` / `populateGSetMeta()` record result metadata
   (`_rowcount`, `_ntuples`, `_nfields`, `_sqlstate`, `_status`, `_elapsed_us`)
   for both trailing `\gset_meta` and standalone `\gset_meta` commands.
+
+Pacing: Dynamic \sleep, \keying_time, and \think_time (script.c, commands.c, engine.c)
+--------------------------------------------------------------------------------------
+`parseSleepCommand()` parses the optional trailing unit (`us`, `ms`, `s`) and
+compiles the preceding tokens into `cmd->expr` using the full expression parser.
+At runtime, `handle_cmd_sleep()` evaluates `cmd->expr` (supporting both integer
+and floating-point results), scales by the unit multiplier into microseconds,
+records `st->sleep_begin` and `st->sleep_type`, and transitions the client to
+`CSTATE_SLEEP` (monitored non-blockingly by `poller.c`).
+When `CSTATE_SLEEP` finishes, `META_KEYING_TIME` and `META_THINK_TIME`
+accumulate elapsed microseconds into `st->txn_keying_time` and
+`st->txn_think_time`, allowing `StatsData` to report both total cycle latency
+and database `response time average` (latency minus keying and think time).

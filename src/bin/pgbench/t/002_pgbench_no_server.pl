@@ -407,6 +407,16 @@ my @script_tests = (
 		'gset_meta too many arguments',
 		[qr{too many arguments}],
 		{ 'gset-meta-args.sql' => "SELECT 1 \\gset_meta a b\n" }
+	],
+	[
+		'keying_time missing argument',
+		[qr{missing argument.*keying_time}],
+		{ 'keying-missing.sql' => "\\keying_time\n" }
+	],
+	[
+		'think_time invalid unit',
+		[qr{unrecognized time unit}],
+		{ 'think-bad-unit.sql' => "\\think_time 10 hours\n" }
 	],);
 
 for my $t (@script_tests)

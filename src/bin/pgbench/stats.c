@@ -74,6 +74,8 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	sd->expected_rollbacks = 0;
 	initSimpleStats(&sd->latency);
 	initSimpleStats(&sd->lag);
+	initSimpleStats(&sd->keying_time);
+	initSimpleStats(&sd->think_time);
 }
 
 /*
@@ -138,6 +140,8 @@ mergeStats(StatsData *acc, const StatsData *src)
 {
 	mergeSimpleStats(&acc->latency, &src->latency);
 	mergeSimpleStats(&acc->lag, &src->lag);
+	mergeSimpleStats(&acc->keying_time, &src->keying_time);
+	mergeSimpleStats(&acc->think_time, &src->think_time);
 	acc->cnt += src->cnt;
 	acc->cnt_skipped += src->cnt_skipped;
 	acc->retries += src->retries;

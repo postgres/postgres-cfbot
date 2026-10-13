@@ -48,7 +48,7 @@ extern bool processGSetMetaResult(CState *st, Command *command, PGresult *res);
 /* Helper APIs for commands */
 extern void commandFailed(CState *st, const char *cmd, const char *message);
 extern void commandError(CState *st, const char *message);
-extern bool evaluateSleep(Variables *variables, int argc, char **argv, int *usecs);
+extern bool evaluateSleep(Variables *variables, int argc, char **argv, int64 *usecs);
 extern bool runShellCommand(Variables *variables, char *variable, char **argv, int argc);
 
 /* Handler declarations */

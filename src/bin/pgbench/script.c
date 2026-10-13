@@ -1440,6 +1440,10 @@ getMetaCommand(const char *cmd)
 		mc = META_SHELL;
 	else if (pg_strcasecmp(cmd, "sleep") == 0)
 		mc = META_SLEEP;
+	else if (pg_strcasecmp(cmd, "keying_time") == 0)
+		mc = META_KEYING_TIME;
+	else if (pg_strcasecmp(cmd, "think_time") == 0)
+		mc = META_THINK_TIME;
 	else if (pg_strcasecmp(cmd, "if") == 0)
 		mc = META_IF;
 	else if (pg_strcasecmp(cmd, "elif") == 0)
@@ -1972,69 +1976,197 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 		pg_free(start_str);
 		pg_free(end_str);
 	}
-	else if (my_command->meta == META_SLEEP)
+	else if (my_command->meta == META_SLEEP ||
+			 my_command->meta == META_KEYING_TIME ||
+			 my_command->meta == META_THINK_TIME)
 	{
+		bool		is_simple_var = false;
+		bool		is_simple_int = false;
+		bool		has_expr_syntax = false;
+
 		if (my_command->argc < 2)
 			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
 						 "missing argument", NULL, -1);
 
-		if (my_command->argc > 3)
-			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
-						 "too many arguments", NULL,
-						 offsets[3] - start_offset);
-
 		/*
-		 * Split argument into number and unit to allow "sleep 1ms" etc. We
-		 * don't have to terminate the number argument with null because it
-		 * will be parsed with atoi, which ignores trailing non-digit
-		 * characters.
+		 * Check if argv[1] is a simple variable reference (:varname) or
+		 * simple integer with optional attached unit (e.g. 100, 2ms).
 		 */
-		if (my_command->argv[1][0] != ':')
+		if (my_command->argv[1][0] == ':' &&
+			valid_variable_name(my_command->argv[1] + 1))
+			is_simple_var = true;
+		else if (my_command->argv[1][0] != ':')
 		{
-			char	   *c = my_command->argv[1];
+			const char *c = my_command->argv[1];
 			bool		have_digit = false;
 
-			/* Skip sign */
 			if (*c == '+' || *c == '-')
 				c++;
-
-			/* Require at least one digit */
-			if (*c && isdigit((unsigned char) *c))
-				have_digit = true;
-
-			/* Eat all digits */
 			while (*c && isdigit((unsigned char) *c))
-				c++;
-
-			if (*c)
 			{
-				if (my_command->argc == 2 && have_digit)
+				have_digit = true;
+				c++;
+			}
+			if (have_digit)
+			{
+				const char *u = c;
+
+				while (*u && isalpha((unsigned char) *u))
+					u++;
+				if (*u == '\0' && (*c == '\0' || my_command->argc == 2))
+					is_simple_int = true;
+			}
+		}
+
+		for (int k = 1; k < my_command->argc; k++)
+		{
+			if (strpbrk(my_command->argv[k], "()[]+-*/%&|#<>!=~.") != NULL ||
+				pg_strcasecmp(my_command->argv[k], "case") == 0)
+			{
+				has_expr_syntax = true;
+				break;
+			}
+		}
+
+		if ((is_simple_var || is_simple_int) &&
+			(my_command->argc == 2 ||
+			 (my_command->argc == 3 &&
+			  strpbrk(my_command->argv[2], "()[]+-*/%&|#<>!=~.") == NULL)))
+		{
+			/*
+			 * Split argument into number and unit to allow "sleep 1ms" etc.
+			 * We don't have to terminate the number argument with null
+			 * because it will be parsed with atoi, which ignores trailing
+			 * non-digit characters.
+			 */
+			if (my_command->argv[1][0] != ':')
+			{
+				char	   *c = my_command->argv[1];
+
+				if (*c == '+' || *c == '-')
+					c++;
+				while (*c && isdigit((unsigned char) *c))
+					c++;
+				if (*c)
 				{
 					my_command->argv[2] = c;
 					offsets[2] = offsets[1] + (c - my_command->argv[1]);
 					my_command->argc = 3;
 				}
-				else
-				{
-					/*
-					 * Raise an error if argument starts with non-digit
-					 * character (after sign).
-					 */
+			}
+
+			if (my_command->argc == 3)
+			{
+				if (pg_strcasecmp(my_command->argv[2], "us") != 0 &&
+					pg_strcasecmp(my_command->argv[2], "ms") != 0 &&
+					pg_strcasecmp(my_command->argv[2], "s") != 0)
 					syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
-								 "invalid sleep time, must be an integer",
-								 my_command->argv[1], offsets[1] - start_offset);
-				}
+								 "unrecognized time unit, must be us, ms or s",
+								 my_command->argv[2], offsets[2] - start_offset);
 			}
 		}
-
-		if (my_command->argc == 3)
+		else if (!has_expr_syntax && my_command->argc > 3)
 		{
-			if (pg_strcasecmp(my_command->argv[2], "us") != 0 &&
-				pg_strcasecmp(my_command->argv[2], "ms") != 0 &&
-				pg_strcasecmp(my_command->argv[2], "s") != 0)
-				syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
-							 "unrecognized time unit, must be us, ms or s",
-							 my_command->argv[2], offsets[2] - start_offset);
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "too many arguments", NULL,
+						 offsets[3] - start_offset);
+		}
+		else if (!has_expr_syntax)
+		{
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "invalid sleep time, must be an integer",
+						 my_command->argv[1], offsets[1] - start_offset);
+		}
+		else
+		{
+			/*
+			 * General expression form: \sleep <expr> [us|ms|s]
+			 */
+			int			last_idx = my_command->argc - 1;
+			const char *last_word = my_command->argv[last_idx];
+			bool		last_is_unit_word = (last_idx >= 2);
+			char	   *unit_str = NULL;
+			char	   *expr_str = NULL;
+
+			for (const char *p = last_word; *p != '\0'; p++)
+			{
+				if (!isalpha((unsigned char) *p))
+				{
+					last_is_unit_word = false;
+					break;
+				}
+			}
+			if (last_is_unit_word &&
+				(pg_strcasecmp(last_word, "end") == 0 ||
+				 pg_strcasecmp(last_word, "null") == 0 ||
+				 pg_strcasecmp(last_word, "true") == 0 ||
+				 pg_strcasecmp(last_word, "false") == 0))
+				last_is_unit_word = false;
+
+			if (last_is_unit_word)
+			{
+				if (pg_strcasecmp(last_word, "us") != 0 &&
+					pg_strcasecmp(last_word, "ms") != 0 &&
+					pg_strcasecmp(last_word, "s") != 0)
+					syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+								 "unrecognized time unit, must be us, ms or s",
+								 last_word, offsets[last_idx] - start_offset);
+
+				unit_str = pg_strdup(last_word);
+				expr_str = pnstrdup(my_command->first_line + (offsets[1] - start_offset),
+									offsets[last_idx] - offsets[1]);
+			}
+			else
+			{
+				size_t		elen;
+
+				expr_str = pg_strdup(my_command->first_line + (offsets[1] - start_offset));
+				elen = strlen(expr_str);
+				while (elen > 0 && isspace((unsigned char) expr_str[elen - 1]))
+					expr_str[--elen] = '\0';
+
+				/*
+				 * Check for attached trailing unit after number, ')' or ']',
+				 * e.g. "1.5ms" or "random(1, 10)ms".
+				 */
+				if (elen >= 3 &&
+					(pg_strcasecmp(expr_str + elen - 2, "us") == 0 ||
+					 pg_strcasecmp(expr_str + elen - 2, "ms") == 0) &&
+					(isdigit((unsigned char) expr_str[elen - 3]) ||
+					 expr_str[elen - 3] == ')' || expr_str[elen - 3] == ']'))
+				{
+					unit_str = pg_strdup(expr_str + elen - 2);
+					expr_str[elen - 2] = '\0';
+				}
+				else if (elen >= 2 &&
+						 pg_strcasecmp(expr_str + elen - 1, "s") == 0 &&
+						 (isdigit((unsigned char) expr_str[elen - 2]) ||
+						  expr_str[elen - 2] == ')' || expr_str[elen - 2] == ']'))
+				{
+					unit_str = pg_strdup(expr_str + elen - 1);
+					expr_str[elen - 1] = '\0';
+				}
+			}
+
+			my_command->expr = parse_sub_expr(expr_str, source, lineno,
+											  my_command->argv[0]);
+			pg_free(expr_str);
+
+			for (int k = 2; k < my_command->argc; k++)
+			{
+				pg_free(my_command->argv[k]);
+				my_command->argv[k] = NULL;
+			}
+
+			if (unit_str != NULL)
+			{
+				my_command->argv[2] = unit_str;
+				my_command->argc = 3;
+			}
+			else
+			{
+				my_command->argc = 2;
+			}
 		}
 	}
 	else if (my_command->meta == META_SETSHELL)

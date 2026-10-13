@@ -927,6 +927,11 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				st->expect_error = false;
 				st->expect_sqlstate = NULL;
 				st->error_caught = false;
+				st->txn_keying_time = 0;
+				st->txn_think_time = 0;
+				st->has_keying_time = false;
+				st->has_think_time = false;
+				st->sleep_type = META_NONE;
 				break;
 
 				/*
@@ -1182,15 +1187,20 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 
 				/*
 				 * Wait until sleep is done. This state is entered after a
-				 * \sleep metacommand. The behavior is similar to
-				 * CSTATE_THROTTLE, but proceeds to CSTATE_START_COMMAND
-				 * instead of CSTATE_START_TX.
+				 * \sleep, \keying_time, or \think_time metacommand. The
+				 * behavior is similar to CSTATE_THROTTLE, but proceeds to
+				 * CSTATE_START_COMMAND instead of CSTATE_START_TX.
 				 */
 			case CSTATE_SLEEP:
 				pg_time_now_lazy(&now);
 				if (now < st->sleep_until)
 					return;		/* still sleeping, nothing to do here */
 				/* Else done sleeping. */
+				if (st->sleep_type == META_KEYING_TIME)
+					st->txn_keying_time += (now - st->sleep_begin);
+				else if (st->sleep_type == META_THINK_TIME)
+					st->txn_think_time += (now - st->sleep_begin);
+				st->sleep_type = META_NONE;
 				st->state = CSTATE_END_COMMAND;
 				break;
 
@@ -1408,6 +1418,11 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				st->expect_error = false;
 				st->expect_sqlstate = NULL;
 				st->error_caught = false;
+				st->txn_keying_time = 0;
+				st->txn_think_time = 0;
+				st->has_keying_time = false;
+				st->has_think_time = false;
+				st->sleep_type = META_NONE;
 				st->estatus = ESTATUS_NO_ERROR;
 				st->state = CSTATE_START_COMMAND;
 				break;
@@ -1659,20 +1674,34 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 {
 	double		latency = 0.0,
 				lag = 0.0;
+	bool		has_pacing = (st->has_keying_time || st->has_think_time);
 	bool		detailed = progress || throttle_delay || latency_limit ||
-		use_log || per_script_stats;
+		use_log || per_script_stats || has_pacing;
 
 	if (detailed && !tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
 		pg_time_now_lazy(now);
 
-		/* compute latency & lag */
-		latency = (*now) - st->txn_scheduled;
+		/*
+		 * Compute latency & lag; exclude explicit keying_time and think_time
+		 * so transaction latency measures server turnaround time.
+		 */
+		latency = (*now) - st->txn_scheduled -
+			(st->txn_keying_time + st->txn_think_time);
+		if (latency < 0.0)
+			latency = 0.0;
 		lag = st->txn_begin - st->txn_scheduled;
 	}
 
 	/* keep detailed thread stats */
 	accumStats(&thread->stats, tx_skipped, latency, lag, st->estatus, st->tries, throttle_delay > 0);
+	if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
+	{
+		if (st->has_keying_time)
+			addToSimpleStats(&thread->stats.keying_time, (double) st->txn_keying_time);
+		if (st->has_think_time)
+			addToSimpleStats(&thread->stats.think_time, (double) st->txn_think_time);
+	}
 
 	/* count transactions over the latency limit, if needed */
 	if (latency_limit && latency > latency_limit)
@@ -1686,8 +1715,19 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 
 	/* XXX could use a mutex here, but we choose not to */
 	if (per_script_stats)
+	{
 		accumStats(&sql_script[st->use_file].stats, tx_skipped, latency, lag,
 				   st->estatus, st->tries, throttle_delay > 0);
+		if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
+		{
+			if (st->has_keying_time)
+				addToSimpleStats(&sql_script[st->use_file].stats.keying_time,
+								 (double) st->txn_keying_time);
+			if (st->has_think_time)
+				addToSimpleStats(&sql_script[st->use_file].stats.think_time,
+								 (double) st->txn_think_time);
+		}
+	}
 }
 
 
@@ -1910,7 +1950,8 @@ printResults(StatsData *total,
 			   latency_limit / 1000.0, latency_late, total->cnt,
 			   (total->cnt > 0) ? 100.0 * latency_late / total->cnt : 0.0);
 
-	if (throttle_delay || progress || latency_limit)
+	if (throttle_delay || progress || latency_limit ||
+		total->keying_time.count > 0 || total->think_time.count > 0)
 		printSimpleStats("latency", &total->latency);
 	else
 	{
@@ -1919,6 +1960,11 @@ printResults(StatsData *total,
 			   0.001 * total_duration * nclients / total_cnt,
 			   failures > 0 ? " (including failures)" : "");
 	}
+
+	if (total->keying_time.count > 0)
+		printSimpleStats("keying time", &total->keying_time);
+	if (total->think_time.count > 0)
+		printSimpleStats("think time", &total->think_time);
 
 	if (throttle_delay)
 	{
@@ -2025,6 +2071,10 @@ printResults(StatsData *total,
 
 				}
 				printSimpleStats(" - latency", &sstats->latency);
+				if (sstats->keying_time.count > 0)
+					printSimpleStats(" - keying time", &sstats->keying_time);
+				if (sstats->think_time.count > 0)
+					printSimpleStats(" - think time", &sstats->think_time);
 			}
 
 			/*

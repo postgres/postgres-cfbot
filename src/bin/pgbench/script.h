@@ -62,6 +62,8 @@ typedef enum MetaCommand
 	META_SETSHELL,				/* \setshell */
 	META_SHELL,					/* \shell */
 	META_SLEEP,					/* \sleep */
+	META_KEYING_TIME,			/* \keying_time */
+	META_THINK_TIME,			/* \think_time */
 	META_GSET,					/* \gset */
 	META_ASET,					/* \aset */
 	META_GSET_META,				/* \gset_meta */
