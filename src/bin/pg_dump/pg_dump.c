@@ -18509,6 +18509,26 @@ dumpStatisticsExtStats(Archive *fout, const StatsExtInfo *statsextinfo)
 		else
 			appendPQExpBufferStr(pq, "false AS inherited, ");
 
+		/*
+		 * The column names of the statistics object, in stxkeys order.
+		 * Restore uses them to check that the columns are numbered the same
+		 * way in the restored table.
+		 */
+		appendPQExpBufferStr(pq,
+							 "( "
+							 "SELECT pg_catalog.array_agg(a.attname::pg_catalog.text "
+							 "ORDER BY k.ord)::pg_catalog.text "
+							 "FROM pg_catalog.pg_statistic_ext AS s "
+							 "JOIN pg_catalog.pg_namespace AS n "
+							 "ON n.oid = s.stxnamespace "
+							 "CROSS JOIN LATERAL pg_catalog.unnest("
+							 "s.stxkeys::pg_catalog.int2[]) "
+							 "WITH ORDINALITY AS k(attnum, ord) "
+							 "JOIN pg_catalog.pg_attribute AS a "
+							 "ON a.attrelid = s.stxrelid AND a.attnum = k.attnum "
+							 "WHERE n.nspname = $1 AND s.stxname = $2 "
+							 ") AS attnames, ");
+
 		/*--------
 		 * The ndistinct and dependencies formats changed in v19, so
 		 * everything before that needs to be translated.
@@ -18666,6 +18686,7 @@ dumpStatisticsExtStats(Archive *fout, const StatsExtInfo *statsextinfo)
 		PQExpBuffer out = createPQExpBuffer();
 
 		int			i_inherited = PQfnumber(res, "inherited");
+		int			i_attnames = PQfnumber(res, "attnames");
 		int			i_ndistinct = PQfnumber(res, "n_distinct");
 		int			i_dependencies = PQfnumber(res, "dependencies");
 		int			i_mcv = PQfnumber(res, "most_common_vals");
@@ -18698,6 +18719,10 @@ dumpStatisticsExtStats(Archive *fout, const StatsExtInfo *statsextinfo)
 			appendStringLiteralAH(out, statsextinfo->dobj.name, fout);
 			appendNamedArgument(out, fout, "inherited", "boolean",
 								PQgetvalue(res, i, i_inherited));
+
+			if (!PQgetisnull(res, i, i_attnames))
+				appendNamedArgument(out, fout, "attnames", "text[]",
+									PQgetvalue(res, i, i_attnames));
 
 			if (!PQgetisnull(res, i, i_ndistinct))
 				appendNamedArgument(out, fout, "n_distinct", "pg_ndistinct",
