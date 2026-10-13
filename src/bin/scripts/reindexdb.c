@@ -681,14 +681,21 @@ get_parallel_tables_list(PGconn *conn, ReindexType type,
 									 CppAsString2(RELKIND_MATVIEW) ")\n"
 									 "   AND c.relpersistence != "
 									 CppAsString2(RELPERSISTENCE_TEMP) "\n"
-									 " AND ns.nspname IN (");
+									 " AND ns.oid IN (");
 
+				/*
+				 * Resolve each schema name as an identifier, rather than
+				 * comparing it literally with nspname.  This also makes a
+				 * nonexistent schema an error, even if there are no tables.
+				 */
 				for (cell = user_list->head; cell; cell = cell->next)
 				{
 					if (cell != user_list->head)
 						appendPQExpBufferChar(&catalog_query, ',');
 
 					appendStringLiteralConn(&catalog_query, cell->val, conn);
+					appendPQExpBufferStr(&catalog_query,
+										 "::pg_catalog.regnamespace");
 				}
 
 				appendPQExpBufferStr(&catalog_query, ")\n"
