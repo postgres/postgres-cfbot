@@ -2275,6 +2275,14 @@ SELECT pg_restore_extended_stats(
          versions of <productname>PostgreSQL</productname>.
         </para>
         <para>
+         The argument <literal>attnames</literal> of type
+         <type>text[]</type> gives the names of the columns of the
+         statistics object the data was taken from.  If they are not the
+         names of the columns of this statistics object, in the same order,
+         <literal>n_distinct</literal>, <literal>dependencies</literal> and
+         the most-common-values data are not restored.
+        </para>
+        <para>
          Minor errors are reported as a <literal>WARNING</literal> and
          ignored, and remaining statistics will still be restored. If all
          specified statistics are successfully restored, returns
