@@ -1944,6 +1944,82 @@ $node->pgbench(
 }
 	});
 
+# Test control flow (\for, \while, \try, \catch, \expect_error, expected_rollbacks)
+$node->pgbench(
+	'-n -t 1',
+	0,
+	[
+		qr{processed: 1/1},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{number of expected rollbacks: 3\b}
+	],
+	[
+		qr{command=8.: int 15\b},
+		qr{command=15.: int 6\b},
+		qr{command=24.: int 1\b},
+		qr{command=34.: int 2\b}
+	],
+	'pgbench loops (\for, \while) and exception handling (\try, \catch, \expect_error)',
+	{
+		'001_pgbench_control_flow' => q{
+\set sum 0
+\for i 1 .. 5 BY 1
+\set sum :sum + :i
+\endfor
+\for k 5 .. 1 BY 1
+\set sum :sum + 100
+\endfor
+\set d debug(:sum)
+\set wsum 0
+\set j 3
+\while :j > 0
+\set wsum :wsum + :j
+\set j :j - 1
+\endwhile
+\set d debug(:wsum)
+\set caught 0
+\try
+SELECT 1/0;
+\set caught -1
+\catch '22012'
+\set caught :caught + 1
+ROLLBACK;
+\endtry
+\set d debug(:caught)
+BEGIN;
+\try
+SELECT 1/0;
+\catch
+\set caught :caught + 1
+ROLLBACK;
+\endtry
+\expect_error '22012'
+SELECT 1/0;
+\set d debug(:caught)
+SELECT 1;
+}
+	});
+
+$node->pgbench(
+	'-n -t 1 -M extended',
+	0,
+	[
+		qr{processed: 1/1},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{number of expected rollbacks: 1\b}
+	],
+	[qr{^$}],
+	'pgbench \expect_error inside pipeline',
+	{
+		'001_pgbench_pipeline_expect_error' => q{
+\startpipeline
+\expect_error '22012'
+SELECT 1/0;
+\endpipeline
+SELECT 1;
+}
+	});
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;

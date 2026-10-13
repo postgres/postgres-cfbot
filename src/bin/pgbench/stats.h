@@ -112,6 +112,8 @@ typedef struct StatsData
 									 * serialization/deadlock failure, which
 									 * is counted if --continue-on-error is
 									 * specified */
+	int64		expected_rollbacks; /* number of caught/expected SQL errors
+									 * that were rolled back gracefully */
 	SimpleStats latency;
 	SimpleStats lag;
 } StatsData;

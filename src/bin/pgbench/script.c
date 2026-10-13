@@ -1448,6 +1448,22 @@ getMetaCommand(const char *cmd)
 		mc = META_ELSE;
 	else if (pg_strcasecmp(cmd, "endif") == 0)
 		mc = META_ENDIF;
+	else if (pg_strcasecmp(cmd, "for") == 0)
+		mc = META_FOR;
+	else if (pg_strcasecmp(cmd, "endfor") == 0)
+		mc = META_ENDFOR;
+	else if (pg_strcasecmp(cmd, "while") == 0)
+		mc = META_WHILE;
+	else if (pg_strcasecmp(cmd, "endwhile") == 0)
+		mc = META_ENDWHILE;
+	else if (pg_strcasecmp(cmd, "try") == 0)
+		mc = META_TRY;
+	else if (pg_strcasecmp(cmd, "catch") == 0)
+		mc = META_CATCH;
+	else if (pg_strcasecmp(cmd, "endtry") == 0)
+		mc = META_ENDTRY;
+	else if (pg_strcasecmp(cmd, "expect_error") == 0)
+		mc = META_EXPECT_ERROR;
 	else if (pg_strcasecmp(cmd, "gset") == 0)
 		mc = META_GSET;
 	else if (pg_strcasecmp(cmd, "aset") == 0)
@@ -1700,6 +1716,30 @@ postprocess_sql_command(Command *my_command)
 }
 
 /*
+ * Helper to parse a standalone expression string using a sub-scanner.
+ */
+static PgBenchExpr *
+parse_sub_expr(const char *str, const char *source, int lineno, const char *cmdname)
+{
+	PsqlScanState sub_sstate;
+	yyscan_t	sub_yyscanner;
+	PgBenchExpr *expr = NULL;
+	char	   *expr_str = psprintf("%s\n", str);
+
+	sub_sstate = psql_scan_create(&pgbench_callbacks);
+	psql_scan_setup(sub_sstate, expr_str, strlen(expr_str), 0, true);
+	sub_yyscanner = expr_scanner_init(sub_sstate, source, lineno, 0, cmdname);
+	if (expr_yyparse(&expr, sub_yyscanner) != 0)
+		exit(1);
+	expr_scanner_finish(sub_yyscanner);
+	psql_scan_finish(sub_sstate);
+	psql_scan_destroy(sub_sstate);
+	pg_free(expr_str);
+
+	return expr;
+}
+
+/*
  * Parse a backslash command; return a Command struct, or NULL if comment
  *
  * At call, we have scanned only the initial backslash.
@@ -1727,6 +1767,8 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 	my_command = pg_malloc0_object(Command);
 	my_command->type = META_COMMAND;
 	my_command->argc = 0;
+	my_command->jump_target = -1;
+	my_command->endtry_target = -1;
 	initSimpleStats(&my_command->stats);
 
 	/* Save first word (command name) */
@@ -1740,7 +1782,8 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 
 	if (my_command->meta == META_SET ||
 		my_command->meta == META_IF ||
-		my_command->meta == META_ELIF)
+		my_command->meta == META_ELIF ||
+		my_command->meta == META_WHILE)
 	{
 		yyscan_t	yyscanner;
 
@@ -1801,22 +1844,8 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 				my_command->argc++;
 
 				/* Parse the index expression inside [...] */
-				{
-					PsqlScanState idx_sstate;
-					yyscan_t	idx_yyscanner;
-					char	   *idx_str = psprintf("%s\n", lb + 1);
-
-					idx_sstate = psql_scan_create(&pgbench_callbacks);
-					psql_scan_setup(idx_sstate, idx_str, strlen(idx_str), 0, true);
-					idx_yyscanner = expr_scanner_init(idx_sstate, source, lineno, 0,
-													  my_command->argv[0]);
-					if (expr_yyparse(&my_command->index_expr, idx_yyscanner) != 0)
-						exit(1);
-					expr_scanner_finish(idx_yyscanner);
-					psql_scan_finish(idx_sstate);
-					psql_scan_destroy(idx_sstate);
-					pg_free(idx_str);
-				}
+				my_command->index_expr = parse_sub_expr(lb + 1, source, lineno,
+														my_command->argv[0]);
 
 				termPQExpBuffer(&target_buf);
 			}
@@ -1872,7 +1901,74 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 								   start_offset,
 								   true);
 
-	if (my_command->meta == META_SLEEP)
+	if (my_command->meta == META_FOR)
+	{
+		const char *rest;
+		const char *dots = NULL;
+		const char *by_kw = NULL;
+		const char *p;
+		int			depth = 0;
+		bool		in_quotes = false;
+		char	   *start_str;
+		char	   *end_str;
+
+		if (my_command->argc < 3)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "missing argument", NULL, -1);
+
+		rest = my_command->first_line + (offsets[2] - start_offset);
+
+		/* Scan for top-level ".." and optional top-level "BY" */
+		for (p = rest; *p != '\0'; p++)
+		{
+			if (*p == '\'')
+			{
+				in_quotes = !in_quotes;
+				continue;
+			}
+			if (in_quotes)
+				continue;
+			if (*p == '(' || *p == '[')
+				depth++;
+			else if (*p == ')' || *p == ']')
+				depth--;
+			else if (depth == 0)
+			{
+				if (dots == NULL && p[0] == '.' && p[1] == '.')
+				{
+					dots = p;
+					p++;
+				}
+				else if (dots != NULL && by_kw == NULL &&
+						 p > dots + 2 && isspace((unsigned char) p[-1]) &&
+						 pg_strncasecmp(p, "by", 2) == 0 &&
+						 isspace((unsigned char) p[2]))
+				{
+					by_kw = p;
+					break;
+				}
+			}
+		}
+
+		if (dots == NULL)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "missing \"..\" in \\for command", NULL, -1);
+
+		start_str = pnstrdup(rest, dots - rest);
+		if (by_kw != NULL)
+			end_str = pnstrdup(dots + 2, by_kw - (dots + 2));
+		else
+			end_str = pg_strdup(dots + 2);
+
+		my_command->expr = parse_sub_expr(start_str, source, lineno, my_command->argv[0]);
+		my_command->end_expr = parse_sub_expr(end_str, source, lineno, my_command->argv[0]);
+		if (by_kw != NULL)
+			my_command->step_expr = parse_sub_expr(by_kw + 2, source, lineno, my_command->argv[0]);
+
+		pg_free(start_str);
+		pg_free(end_str);
+	}
+	else if (my_command->meta == META_SLEEP)
 	{
 		if (my_command->argc < 2)
 			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
@@ -1950,6 +2046,8 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 						 "missing command", NULL, -1);
 	}
 	else if (my_command->meta == META_ELSE || my_command->meta == META_ENDIF ||
+			 my_command->meta == META_ENDFOR || my_command->meta == META_ENDWHILE ||
+			 my_command->meta == META_TRY || my_command->meta == META_ENDTRY ||
 			 my_command->meta == META_STARTPIPELINE ||
 			 my_command->meta == META_ENDPIPELINE ||
 			 my_command->meta == META_SYNCPIPELINE)
@@ -1957,6 +2055,27 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 		if (my_command->argc != 1)
 			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
 						 "unexpected argument", NULL, -1);
+	}
+	else if (my_command->meta == META_CATCH || my_command->meta == META_EXPECT_ERROR)
+	{
+		if (my_command->argc > 2)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "too many arguments", NULL, -1);
+		if (my_command->argc == 2)
+		{
+			size_t		len = strlen(my_command->argv[1]);
+
+			/* Strip surrounding single quotes if present, e.g. 'P0001' */
+			if (len >= 2 &&
+				my_command->argv[1][0] == '\'' &&
+				my_command->argv[1][len - 1] == '\'')
+			{
+				char	   *unquoted = pnstrdup(my_command->argv[1] + 1, len - 2);
+
+				pg_free(my_command->argv[1]);
+				my_command->argv[1] = unquoted;
+			}
+		}
 	}
 	else if (my_command->meta == META_GSET || my_command->meta == META_ASET)
 	{
@@ -1984,42 +2103,137 @@ ConditionError(const char *desc, int cmdn, const char *msg)
 }
 
 /*
- * Partial evaluation of conditionals before recording and running the script.
+ * Static validation and jump target resolution for conditionals, loops, and
+ * try/catch blocks before recording and running the script.
  */
 static void
 CheckConditional(const ParsedScript *ps)
 {
-	/* statically check conditional structure */
-	ConditionalStack cs = conditional_stack_create();
+	typedef enum
+	{
+		CF_IF,
+		CF_FOR,
+		CF_WHILE,
+		CF_TRY
+	} CFType;
+
+	typedef struct
+	{
+		CFType		type;
+		int			start_idx;
+		int			catch_idx;
+		bool		seen_else;
+	} CFStackElem;
+
+	CFStackElem stack[128];
+	int			depth = 0;
 	int			i;
 
 	for (i = 0; ps->commands[i] != NULL; i++)
 	{
 		Command    *cmd = ps->commands[i];
 
+		cmd->jump_target = -1;
+		cmd->endtry_target = -1;
+
 		if (cmd->type == META_COMMAND)
 		{
 			switch (cmd->meta)
 			{
 				case META_IF:
-					conditional_stack_push(cs, IFSTATE_FALSE);
+					if (depth >= 128)
+						ConditionError(ps->desc, i + 1, "control flow nesting too deep");
+					stack[depth].type = CF_IF;
+					stack[depth].start_idx = i;
+					stack[depth].catch_idx = -1;
+					stack[depth].seen_else = false;
+					depth++;
 					break;
 				case META_ELIF:
-					if (conditional_stack_empty(cs))
+					if (depth == 0 || stack[depth - 1].type != CF_IF)
 						ConditionError(ps->desc, i + 1, "\\elif without matching \\if");
-					if (conditional_stack_peek(cs) == IFSTATE_ELSE_FALSE)
+					if (stack[depth - 1].seen_else)
 						ConditionError(ps->desc, i + 1, "\\elif after \\else");
 					break;
 				case META_ELSE:
-					if (conditional_stack_empty(cs))
+					if (depth == 0 || stack[depth - 1].type != CF_IF)
 						ConditionError(ps->desc, i + 1, "\\else without matching \\if");
-					if (conditional_stack_peek(cs) == IFSTATE_ELSE_FALSE)
+					if (stack[depth - 1].seen_else)
 						ConditionError(ps->desc, i + 1, "\\else after \\else");
-					conditional_stack_poke(cs, IFSTATE_ELSE_FALSE);
+					stack[depth - 1].seen_else = true;
 					break;
 				case META_ENDIF:
-					if (!conditional_stack_pop(cs))
+					if (depth == 0 || stack[depth - 1].type != CF_IF)
 						ConditionError(ps->desc, i + 1, "\\endif without matching \\if");
+					depth--;
+					break;
+				case META_FOR:
+					if (depth >= 128)
+						ConditionError(ps->desc, i + 1, "control flow nesting too deep");
+					stack[depth].type = CF_FOR;
+					stack[depth].start_idx = i;
+					stack[depth].catch_idx = -1;
+					stack[depth].seen_else = false;
+					depth++;
+					break;
+				case META_ENDFOR:
+					if (depth == 0 || stack[depth - 1].type != CF_FOR)
+						ConditionError(ps->desc, i + 1, "\\endfor without matching \\for");
+					ps->commands[stack[depth - 1].start_idx]->jump_target = i;
+					cmd->jump_target = stack[depth - 1].start_idx;
+					depth--;
+					break;
+				case META_WHILE:
+					if (depth >= 128)
+						ConditionError(ps->desc, i + 1, "control flow nesting too deep");
+					stack[depth].type = CF_WHILE;
+					stack[depth].start_idx = i;
+					stack[depth].catch_idx = -1;
+					stack[depth].seen_else = false;
+					depth++;
+					break;
+				case META_ENDWHILE:
+					if (depth == 0 || stack[depth - 1].type != CF_WHILE)
+						ConditionError(ps->desc, i + 1, "\\endwhile without matching \\while");
+					ps->commands[stack[depth - 1].start_idx]->jump_target = i;
+					cmd->jump_target = stack[depth - 1].start_idx;
+					depth--;
+					break;
+				case META_TRY:
+					if (depth >= 128)
+						ConditionError(ps->desc, i + 1, "control flow nesting too deep");
+					stack[depth].type = CF_TRY;
+					stack[depth].start_idx = i;
+					stack[depth].catch_idx = -1;
+					stack[depth].seen_else = false;
+					depth++;
+					break;
+				case META_CATCH:
+					if (depth == 0 || stack[depth - 1].type != CF_TRY)
+						ConditionError(ps->desc, i + 1, "\\catch without matching \\try");
+					if (stack[depth - 1].catch_idx != -1)
+						ConditionError(ps->desc, i + 1, "multiple \\catch blocks in \\try");
+					stack[depth - 1].catch_idx = i;
+					break;
+				case META_ENDTRY:
+					if (depth == 0 || stack[depth - 1].type != CF_TRY)
+						ConditionError(ps->desc, i + 1, "\\endtry without matching \\try");
+					ps->commands[stack[depth - 1].start_idx]->endtry_target = i;
+					if (stack[depth - 1].catch_idx != -1)
+					{
+						ps->commands[stack[depth - 1].start_idx]->jump_target =
+							stack[depth - 1].catch_idx;
+						ps->commands[stack[depth - 1].catch_idx]->jump_target = i;
+					}
+					else
+					{
+						ps->commands[stack[depth - 1].start_idx]->jump_target = i;
+					}
+					depth--;
+					break;
+				case META_EXPECT_ERROR:
+					if (ps->commands[i + 1] == NULL)
+						ConditionError(ps->desc, i + 1, "\\expect_error must be followed by an SQL command");
 					break;
 				default:
 					/* ignore anything else... */
@@ -2027,9 +2241,24 @@ CheckConditional(const ParsedScript *ps)
 			}
 		}
 	}
-	if (!conditional_stack_empty(cs))
-		ConditionError(ps->desc, i + 1, "\\if without matching \\endif");
-	conditional_stack_destroy(cs);
+	if (depth > 0)
+	{
+		switch (stack[depth - 1].type)
+		{
+			case CF_IF:
+				ConditionError(ps->desc, i + 1, "\\if without matching \\endif");
+				break;
+			case CF_FOR:
+				ConditionError(ps->desc, i + 1, "\\for without matching \\endfor");
+				break;
+			case CF_WHILE:
+				ConditionError(ps->desc, i + 1, "\\while without matching \\endwhile");
+				break;
+			case CF_TRY:
+				ConditionError(ps->desc, i + 1, "\\try without matching \\endtry");
+				break;
+		}
+	}
 }
 
 /*
@@ -2077,6 +2306,7 @@ ParseScript(const char *script, const char *desc, int weight)
 		PsqlScanResult sr;
 		promptStatus_t prompt;
 		Command    *command = NULL;
+		bool		had_sql = false;
 
 		resetPQExpBuffer(&line_buf);
 
@@ -2087,7 +2317,10 @@ ParseScript(const char *script, const char *desc, int weight)
 
 		/* store new command */
 		if (command)
+		{
 			ps.commands[index++] = command;
+			had_sql = true;
+		}
 
 		/* If we reached a backslash, process that */
 		if (sr == PSCAN_BACKSLASH)
@@ -2140,17 +2373,31 @@ ParseScript(const char *script, const char *desc, int weight)
 					continue;
 				}
 
-				/* Attach any other backslash command as a new command */
-				ps.commands[index++] = command;
+				/*
+				 * If \expect_error terminated an SQL command on the same
+				 * line, insert it right before that SQL command so both
+				 * prefix and suffix styles work identically.
+				 */
+				if (command->meta == META_EXPECT_ERROR && had_sql && index > 0)
+				{
+					ps.commands[index] = ps.commands[index - 1];
+					ps.commands[index - 1] = command;
+					index++;
+				}
+				else
+				{
+					/* Attach any other backslash command as a new command */
+					ps.commands[index++] = command;
+				}
 			}
 		}
 
 		/*
-		 * Since we used a command slot, allocate more if needed.  Note we
-		 * always allocate one more in order to accommodate the NULL
+		 * Since we used up to two command slots, allocate more if needed.
+		 * Note we always keep at least two slots plus one for the NULL
 		 * terminator below.
 		 */
-		if (index >= alloc_num)
+		if (index >= alloc_num - 2)
 		{
 			alloc_num += COMMANDS_ALLOC_NUM;
 			ps.commands = (Command **)

@@ -332,6 +332,82 @@ canContinueOnError(EStatus estatus)
 }
 
 /*
+ * Check if a 5-character SQLSTATE matches a pattern from \catch or
+ * \expect_error.  NULL or "*" matches any error; a 2-character pattern
+ * matches the SQLSTATE class prefix; otherwise case-insensitive exact match.
+ */
+static bool
+sqlstateMatches(const char *pattern, const char *sqlstate)
+{
+	size_t		plen;
+
+	if (pattern == NULL || pattern[0] == '\0' || strcmp(pattern, "*") == 0)
+		return true;
+	if (sqlstate == NULL || sqlstate[0] == '\0')
+		return false;
+
+	plen = strlen(pattern);
+	if (plen == 2)
+		return (pg_strncasecmp(pattern, sqlstate, 2) == 0);
+
+	return (pg_strcasecmp(pattern, sqlstate) == 0);
+}
+
+/*
+ * Check if the current SQL error is expected/caught by \expect_error or an
+ * active \try block.  If so, populate caught-error recovery targets on st and
+ * return true.
+ */
+static bool
+checkCaughtError(CState *st, const char *sqlstate)
+{
+	int			d;
+
+	if (st->expect_error)
+	{
+		const char *pat = st->expect_sqlstate;
+
+		st->expect_error = false;
+		st->expect_sqlstate = NULL;
+		if (sqlstateMatches(pat, sqlstate))
+		{
+			st->error_caught = true;
+			st->caught_jump_target = st->command + 1;
+			st->caught_cstack_depth = conditional_stack_depth(st->cstack);
+			st->caught_loop_depth = st->loop_depth;
+			return true;
+		}
+	}
+
+	for (d = st->try_depth - 1; d >= 0; d--)
+	{
+		TryState   *ts = &st->try_stack[d];
+
+		if (!ts->in_catch && sqlstateMatches(ts->sqlstate_pat, sqlstate))
+		{
+			st->error_caught = true;
+			st->caught_cstack_depth = ts->cstack_depth;
+			st->caught_loop_depth = ts->loop_depth;
+			if (ts->catch_cmd != ts->endtry_cmd)
+			{
+				ts->in_catch = true;
+				st->try_depth = d + 1;
+				st->caught_jump_target = ts->catch_cmd + 1;
+			}
+			else
+			{
+				/* \try without \catch: jump directly past \endtry */
+				st->try_depth = d;
+				st->caught_jump_target = ts->endtry_cmd + 1;
+			}
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
  * Process query response from the backend.
  *
  * If varprefix is not NULL, it's the variable name prefix where to store
@@ -354,6 +430,8 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 	Assert((meta == META_NONE && varprefix == NULL) ||
 		   ((meta == META_ENDPIPELINE) && varprefix == NULL) ||
 		   ((meta == META_GSET || meta == META_ASET) && varprefix != NULL));
+
+	st->last_sqlstate[0] = '\0';
 
 	res = PQgetResult(st->con);
 
@@ -413,13 +491,25 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 
 			case PGRES_NONFATAL_ERROR:
 			case PGRES_FATAL_ERROR:
-				st->estatus = getSQLErrorStatus(st, PQresultErrorField(res,
-																	   PG_DIAG_SQLSTATE));
-				if (canRetryError(st->estatus) || canContinueOnError(st->estatus))
 				{
-					if (verbose_errors)
-						commandError(st, PQresultErrorMessage(res));
-					goto error;
+					const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+
+					strlcpy(st->last_sqlstate, sqlstate ? sqlstate : "",
+							sizeof(st->last_sqlstate));
+					st->estatus = getSQLErrorStatus(st, sqlstate);
+					if (st->estatus != ESTATUS_CONN_ERROR &&
+						checkCaughtError(st, st->last_sqlstate))
+					{
+						if (verbose_errors)
+							commandError(st, PQresultErrorMessage(res));
+						goto error;
+					}
+					if (canRetryError(st->estatus) || canContinueOnError(st->estatus))
+					{
+						if (verbose_errors)
+							commandError(st, PQresultErrorMessage(res));
+						goto error;
+					}
 				}
 				pg_fallthrough;
 
@@ -643,6 +733,40 @@ printVerboseErrorMessages(CState *st, pg_time_usec_t *now, bool is_retry)
 }
 
 /*
+ * Check if an SQL command string is a standalone ROLLBACK statement.
+ */
+static bool
+isStandaloneRollback(const char *sql)
+{
+	const char *p = sql;
+
+	while (isspace((unsigned char) *p))
+		p++;
+	if (pg_strncasecmp(p, "rollback", 8) != 0)
+		return false;
+	p += 8;
+	while (isspace((unsigned char) *p) || *p == ';')
+		p++;
+	return (*p == '\0');
+}
+
+/*
+ * Complete recovery from an error caught by \try ... \catch or \expect_error.
+ */
+static void
+finishCaughtError(TState *thread, CState *st)
+{
+	thread->stats.expected_rollbacks++;
+	if (per_script_stats)
+		sql_script[st->use_file].stats.expected_rollbacks++;
+
+	st->error_caught = false;
+	st->estatus = ESTATUS_NO_ERROR;
+	st->next_command = st->caught_jump_target;
+	st->state = CSTATE_END_COMMAND;
+}
+
+/*
  * Advance the state machine of a connection.
  */
 static void
@@ -744,6 +868,12 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				/* Begin with the first command */
 				st->state = CSTATE_START_COMMAND;
 				st->command = 0;
+				st->next_command = -1;
+				st->loop_depth = 0;
+				st->try_depth = 0;
+				st->expect_error = false;
+				st->expect_sqlstate = NULL;
+				st->error_caught = false;
 				break;
 
 				/*
@@ -858,6 +988,23 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				/* Execute the command */
 				if (command->type == SQL_COMMAND)
 				{
+					/*
+					 * If we are inside a \catch block and the connection was
+					 * already rolled back to idle by pgbench's automatic
+					 * rollback recovery, treat an explicit ROLLBACK statement
+					 * as a no-op so the backend doesn't emit a "there is no
+					 * transaction in progress" warning.
+					 */
+					if (st->try_depth > 0 &&
+						st->try_stack[st->try_depth - 1].in_catch &&
+						PQpipelineStatus(st->con) == PQ_PIPELINE_OFF &&
+						getTransactionStatus(st->con) == TSTATUS_IDLE &&
+						isStandaloneRollback(command->argv[0]))
+					{
+						st->state = CSTATE_END_COMMAND;
+						break;
+					}
+
 					/* disallow \aset and \gset in pipeline mode */
 					if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
 					{
@@ -957,7 +1104,9 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					if (PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
 						st->state = CSTATE_END_COMMAND;
 				}
-				else if (canRetryError(st->estatus) || canContinueOnError(st->estatus))
+				else if (st->error_caught ||
+						 canRetryError(st->estatus) ||
+						 canContinueOnError(st->estatus))
 					st->state = CSTATE_ERROR;
 				else
 					st->state = CSTATE_ABORTED;
@@ -982,6 +1131,25 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 			case CSTATE_END_COMMAND:
 
+				command = sql_script[st->use_file].commands[st->command];
+
+				/*
+				 * If a SQL command (or pipeline) succeeded, clear any one-shot
+				 * \expect_error flag that was set before it.  In pipeline mode,
+				 * SQL results are read at \endpipeline, so keep expect_error
+				 * armed until the pipeline finishes.
+				 */
+				if (st->expect_error &&
+					((command->type == SQL_COMMAND &&
+					  PQpipelineStatus(st->con) == PQ_PIPELINE_OFF) ||
+					 (command->type == META_COMMAND &&
+					  (command->meta == META_ENDPIPELINE ||
+					   command->meta == META_SYNCPIPELINE))))
+				{
+					st->expect_error = false;
+					st->expect_sqlstate = NULL;
+				}
+
 				/*
 				 * command completed: accumulate per-command execution times
 				 * in thread-local data structure, if per-command latencies
@@ -991,14 +1159,20 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				{
 					pg_time_now_lazy(&now);
 
-					command = sql_script[st->use_file].commands[st->command];
 					/* XXX could use a mutex here, but we choose not to */
 					addToSimpleStats(&command->stats,
 									 PG_TIME_GET_DOUBLE(now - st->stmt_begin));
 				}
 
 				/* Go ahead with next command, to be executed or skipped */
-				st->command++;
+				if (st->next_command >= 0)
+				{
+					st->command = st->next_command;
+					st->next_command = -1;
+				}
+				else
+					st->command++;
+
 				st->state = conditional_active(st->cstack) ?
 					CSTATE_START_COMMAND : CSTATE_SKIP_COMMAND;
 				break;
@@ -1012,8 +1186,21 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 
 					Assert(st->estatus != ESTATUS_NO_ERROR);
 
-					/* Clear the conditional stack */
-					conditional_stack_reset(st->cstack);
+					if (st->error_caught)
+					{
+						while (conditional_stack_depth(st->cstack) > st->caught_cstack_depth)
+							conditional_stack_pop(st->cstack);
+						st->loop_depth = st->caught_loop_depth;
+					}
+					else
+					{
+						/* Clear the conditional and control flow stacks */
+						conditional_stack_reset(st->cstack);
+						st->loop_depth = 0;
+						st->try_depth = 0;
+						st->expect_error = false;
+						st->expect_sqlstate = NULL;
+					}
 
 					/* Read and discard until a sync point in pipeline mode */
 					if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
@@ -1044,12 +1231,17 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					}
 					else if (tstatus == TSTATUS_IDLE)
 					{
-						/*
-						 * If time is over, we're done; otherwise, check if we
-						 * can retry the error.
-						 */
-						st->state = timer_exceeded ? CSTATE_FINISHED :
-							doRetry(st, &now) ? CSTATE_RETRY : CSTATE_FAILURE;
+						if (st->error_caught)
+							finishCaughtError(thread, st);
+						else
+						{
+							/*
+							 * If time is over, we're done; otherwise, check
+							 * if we can retry the error.
+							 */
+							st->state = timer_exceeded ? CSTATE_FINISHED :
+								doRetry(st, &now) ? CSTATE_RETRY : CSTATE_FAILURE;
+						}
 					}
 					else
 					{
@@ -1093,12 +1285,17 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 							res = PQgetResult(st->con);
 							Assert(res == NULL);
 
-							/*
-							 * If time is over, we're done; otherwise, check
-							 * if we can retry the error.
-							 */
-							st->state = timer_exceeded ? CSTATE_FINISHED :
-								doRetry(st, &now) ? CSTATE_RETRY : CSTATE_FAILURE;
+							if (st->error_caught)
+								finishCaughtError(thread, st);
+							else
+							{
+								/*
+								 * If time is over, we're done; otherwise,
+								 * check if we can retry the error.
+								 */
+								st->state = timer_exceeded ? CSTATE_FINISHED :
+									doRetry(st, &now) ? CSTATE_RETRY : CSTATE_FAILURE;
+							}
 							break;
 						default:
 							pg_log_error("client %d aborted while rolling back the transaction after an error; %s",
@@ -1135,6 +1332,12 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 
 				/* Process the first transaction command. */
 				st->command = 0;
+				st->next_command = -1;
+				st->loop_depth = 0;
+				st->try_depth = 0;
+				st->expect_error = false;
+				st->expect_sqlstate = NULL;
+				st->error_caught = false;
 				st->estatus = ESTATUS_NO_ERROR;
 				st->state = CSTATE_START_COMMAND;
 				break;
@@ -1602,6 +1805,11 @@ printResults(StatsData *total,
 	printf("number of failed transactions: " INT64_FORMAT " (%.3f%%)\n",
 		   failures, 100.0 * failures / total_cnt);
 
+	if (total->expected_rollbacks > 0)
+		printf("number of expected rollbacks: " INT64_FORMAT " (%.3f%%)\n",
+			   total->expected_rollbacks,
+			   100.0 * total->expected_rollbacks / total_cnt);
+
 	if (failures_detailed)
 	{
 		printf("number of serialization failures: " INT64_FORMAT " (%.3f%%)\n",
@@ -1705,6 +1913,11 @@ printResults(StatsData *total,
 					printf(" - number of failed transactions: " INT64_FORMAT " (%.3f%%)\n",
 						   script_failures,
 						   100.0 * script_failures / script_total_cnt);
+
+					if (sstats->expected_rollbacks > 0)
+						printf(" - number of expected rollbacks: " INT64_FORMAT " (%.3f%%)\n",
+							   sstats->expected_rollbacks,
+							   100.0 * sstats->expected_rollbacks / script_total_cnt);
 
 					if (failures_detailed)
 					{

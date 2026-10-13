@@ -56,6 +56,14 @@ extern ConnectionStateEnum handle_cmd_if(CState *st, Command *cmd, pg_time_usec_
 extern ConnectionStateEnum handle_cmd_elif(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_else(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_endif(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_for(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_endfor(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_while(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_endwhile(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_try(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_catch(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_endtry(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_expect_error(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_setshell(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_shell(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_startpipeline(CState *st, Command *cmd, pg_time_usec_t *now);

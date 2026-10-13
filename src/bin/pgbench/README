@@ -76,3 +76,31 @@ contrib/pgbench extension:
 All PRNG-dependent routines take an explicit `pg_prng_state *state` pointer.
 In src/bin/pgbench, each client passes `&st->cs_func_rs`; in contrib/pgbench,
 the backend passes its session-local `&pgbench_ext_prng_state`.
+
+Script Control Flow & Structured Exception Handling (script.c, commands.c, engine.c)
+------------------------------------------------------------------------------------
+During script parsing (`parseScript()` in `script.c`), a static linking pass
+validates and resolves jump targets (`jump_target` and `endtry_target` on
+`Command` structs) for all block-structured meta-commands:
+
+  - `or var start .. end [BY s]` ... `\endfor`:
+      `META_FOR.jump_target` points to `META_ENDFOR + 1`;
+      `META_ENDFOR.jump_target` points back to `META_FOR`.
+      Runtime state is tracked on `st->loop_stack[MAX_LOOP_DEPTH]`.
+  - `\while expr` ... `\endwhile`:
+      `META_WHILE.jump_target` points to `META_ENDWHILE + 1`;
+      `META_ENDWHILE.jump_target` points back to `META_WHILE`.
+  - `	ry` ... `[\catch ['SQLSTATE']]` ... `\endtry`:
+      `META_TRY.jump_target` points to `META_CATCH` (or `META_ENDTRY` if no
+      `\catch` is present); `META_TRY.endtry_target` and `META_CATCH.jump_target`
+      point to `META_ENDTRY`.
+      Runtime state is tracked on `st->try_stack[MAX_TRY_DEPTH]`, saving the
+      enclosing `cstack_depth` and `loop_depth`.
+
+When `readCommandResponse()` in `engine.c` encounters `PGRES_FATAL_ERROR`, it
+extracts `PQresultErrorField(res, PG_DIAG_SQLSTATE)` and checks:
+  1. `st->expect_error` (set by `\expect_error ['SQLSTATE']`), or
+  2. The innermost active `st->try_stack` frame not yet in its `\catch` block.
+If matched, `:sqlstate` and `:error_message` are stored in `st->variables`,
+inner conditional/loop frames are unwound, `expected_rollbacks` is incremented,
+and `CSTATE_END_COMMAND` transitions directly to `caught_jump_target`.

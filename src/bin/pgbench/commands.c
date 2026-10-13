@@ -16,6 +16,7 @@
 #include <signal.h>
 
 #include "commands.h"
+#include "common/int.h"
 #include "common/logging.h"
 #include "engine.h"
 #include "fe_utils/conditional.h"
@@ -448,6 +449,227 @@ handle_cmd_endif(CState *st, Command *cmd, pg_time_usec_t *now)
 }
 
 ConnectionStateEnum
+handle_cmd_for(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchValue start_v,
+				end_v;
+	int64		start_val,
+				end_val,
+				step_val = 1;
+	bool		enter_loop;
+
+	if (!evaluateExpr(st, cmd->expr, &start_v))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of start expression failed");
+		return CSTATE_ABORTED;
+	}
+	if (!coerceToInt(&start_v, &start_val))
+	{
+		freeValue(&start_v);
+		commandFailed(st, cmd->argv[0], "start expression is not an integer");
+		return CSTATE_ABORTED;
+	}
+	freeValue(&start_v);
+
+	if (!evaluateExpr(st, cmd->end_expr, &end_v))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of end expression failed");
+		return CSTATE_ABORTED;
+	}
+	if (!coerceToInt(&end_v, &end_val))
+	{
+		freeValue(&end_v);
+		commandFailed(st, cmd->argv[0], "end expression is not an integer");
+		return CSTATE_ABORTED;
+	}
+	freeValue(&end_v);
+
+	if (cmd->step_expr != NULL)
+	{
+		PgBenchValue step_v;
+
+		if (!evaluateExpr(st, cmd->step_expr, &step_v))
+		{
+			commandFailed(st, cmd->argv[0], "evaluation of step expression failed");
+			return CSTATE_ABORTED;
+		}
+		if (!coerceToInt(&step_v, &step_val))
+		{
+			freeValue(&step_v);
+			commandFailed(st, cmd->argv[0], "step expression is not an integer");
+			return CSTATE_ABORTED;
+		}
+		freeValue(&step_v);
+
+		if (step_val == 0)
+		{
+			pg_log_error("\\for step cannot be zero");
+			commandFailed(st, cmd->argv[0], "step cannot be zero");
+			return CSTATE_ABORTED;
+		}
+	}
+
+	enter_loop = (step_val > 0) ? (start_val <= end_val) : (start_val >= end_val);
+	if (enter_loop)
+	{
+		ForLoopState *loop;
+
+		if (st->loop_depth >= MAX_LOOP_DEPTH)
+		{
+			commandFailed(st, cmd->argv[0], "maximum loop nesting depth exceeded");
+			return CSTATE_ABORTED;
+		}
+
+		if (!putVariableInt(&st->variables, "for", cmd->argv[1], start_val))
+		{
+			commandFailed(st, cmd->argv[0], "assignment of loop variable failed");
+			return CSTATE_ABORTED;
+		}
+
+		loop = &st->loop_stack[st->loop_depth++];
+		loop->for_cmd = st->command;
+		loop->varname = cmd->argv[1];
+		loop->current = start_val;
+		loop->end = end_val;
+		loop->step = step_val;
+	}
+	else
+	{
+		/* Skip the loop body: jump past matching \endfor */
+		st->next_command = cmd->jump_target + 1;
+	}
+
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_endfor(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	ForLoopState *loop;
+	int64		next_val;
+	bool		cont = false;
+
+	Assert(st->loop_depth > 0);
+	loop = &st->loop_stack[st->loop_depth - 1];
+
+	if (!pg_add_s64_overflow(loop->current, loop->step, &next_val))
+	{
+		cont = (loop->step > 0) ? (next_val <= loop->end) : (next_val >= loop->end);
+	}
+
+	if (cont)
+	{
+		loop->current = next_val;
+		if (!putVariableInt(&st->variables, "for", loop->varname, next_val))
+		{
+			commandFailed(st, cmd->argv[0], "assignment of loop variable failed");
+			return CSTATE_ABORTED;
+		}
+		st->next_command = cmd->jump_target + 1;
+	}
+	else
+	{
+		st->loop_depth--;
+	}
+
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_while(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchValue result;
+	bool		cond;
+
+	if (!evaluateExpr(st, cmd->expr, &result))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of meta-command failed");
+		return CSTATE_ABORTED;
+	}
+
+	cond = valueTruth(&result);
+	freeValue(&result);
+
+	if (!cond)
+	{
+		/* Skip the loop body: jump past matching \endwhile */
+		st->next_command = cmd->jump_target + 1;
+	}
+
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_endwhile(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	/* Jump back to matching \while to re-evaluate the condition */
+	st->next_command = cmd->jump_target;
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_try(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	TryState   *ts;
+	const char *sqlstate_pat = NULL;
+
+	if (st->try_depth >= MAX_TRY_DEPTH)
+	{
+		commandFailed(st, cmd->argv[0], "maximum \\try nesting depth exceeded");
+		return CSTATE_ABORTED;
+	}
+
+	if (cmd->jump_target != cmd->endtry_target)
+	{
+		Command    *catch_cmd = sql_script[st->use_file].commands[cmd->jump_target];
+
+		if (catch_cmd->argc > 1)
+			sqlstate_pat = catch_cmd->argv[1];
+	}
+
+	ts = &st->try_stack[st->try_depth++];
+	ts->try_cmd = st->command;
+	ts->catch_cmd = cmd->jump_target;
+	ts->endtry_cmd = cmd->endtry_target;
+	ts->sqlstate_pat = sqlstate_pat;
+	ts->cstack_depth = conditional_stack_depth(st->cstack);
+	ts->loop_depth = st->loop_depth;
+	ts->in_catch = false;
+
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_catch(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	/*
+	 * Reaching \catch during normal execution means the \try block completed
+	 * without error: pop the try frame and jump past \endtry.
+	 */
+	if (st->try_depth > 0)
+		st->try_depth--;
+	st->next_command = cmd->jump_target + 1;
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_endtry(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (st->try_depth > 0 &&
+		st->try_stack[st->try_depth - 1].endtry_cmd == st->command)
+		st->try_depth--;
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_expect_error(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	st->expect_error = true;
+	st->expect_sqlstate = (cmd->argc > 1) ? cmd->argv[1] : NULL;
+	return CSTATE_END_COMMAND;
+}
+
+ConnectionStateEnum
 handle_cmd_setshell(CState *st, Command *cmd, pg_time_usec_t *now)
 {
 	if (!runShellCommand(&st->variables, cmd->argv[1], cmd->argv + 2, cmd->argc - 2))
@@ -550,6 +772,14 @@ static const CommandDescriptor command_handlers[] = {
 	{"elif", META_ELIF, handle_cmd_elif},
 	{"else", META_ELSE, handle_cmd_else},
 	{"endif", META_ENDIF, handle_cmd_endif},
+	{"for", META_FOR, handle_cmd_for},
+	{"endfor", META_ENDFOR, handle_cmd_endfor},
+	{"while", META_WHILE, handle_cmd_while},
+	{"endwhile", META_ENDWHILE, handle_cmd_endwhile},
+	{"try", META_TRY, handle_cmd_try},
+	{"catch", META_CATCH, handle_cmd_catch},
+	{"endtry", META_ENDTRY, handle_cmd_endtry},
+	{"expect_error", META_EXPECT_ERROR, handle_cmd_expect_error},
 	{"startpipeline", META_STARTPIPELINE, handle_cmd_startpipeline},
 	{"syncpipeline", META_SYNCPIPELINE, handle_cmd_syncpipeline},
 	{"endpipeline", META_ENDPIPELINE, handle_cmd_endpipeline},

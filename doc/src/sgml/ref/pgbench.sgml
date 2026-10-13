@@ -1201,8 +1201,18 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       </row>
 
       <row>
+       <entry> <literal>error_message</literal> </entry>
+       <entry>primary error message of the most recent SQL error caught by <literal>\try</literal> or <literal>\expect_error</literal></entry>
+      </row>
+
+      <row>
        <entry> <literal>scale</literal> </entry>
        <entry>current scale factor</entry>
+      </row>
+
+      <row>
+       <entry> <literal>sqlstate</literal> </entry>
+       <entry>five-character SQLSTATE code of the most recent SQL error caught by <literal>\try</literal> or <literal>\expect_error</literal></entry>
       </row>
      </tbody>
     </tgroup>
@@ -1282,6 +1292,75 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
       similarly to <literal>psql</literal>'s <xref linkend="psql-metacommand-if"/>.
       Conditional expressions are identical to those with <literal>\set</literal>,
       with non-zero values interpreted as true.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-for">
+    <term><literal>\for <replaceable>varname</replaceable> <replaceable>start_expr</replaceable> .. <replaceable>end_expr</replaceable> [ BY <replaceable>step_expr</replaceable> ]</literal></term>
+    <term><literal>\endfor</literal></term>
+    <listitem>
+     <para>
+      Implements a bounded, nestable loop (up to 32 levels deep).  At loop
+      entry, <replaceable>start_expr</replaceable>,
+      <replaceable>end_expr</replaceable>, and optional
+      <replaceable>step_expr</replaceable> (default <literal>1</literal>, must
+      be non-zero) are evaluated as integers.  If the initial value is already
+      past <replaceable>end_expr</replaceable> in the direction of
+      <replaceable>step_expr</replaceable>, the loop body is skipped.
+      Otherwise <replaceable>varname</replaceable> is set to the current counter
+      on each iteration and incremented by <replaceable>step_expr</replaceable>
+      at <literal>\endfor</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-while">
+    <term><literal>\while <replaceable>expression</replaceable></literal></term>
+    <term><literal>\endwhile</literal></term>
+    <listitem>
+     <para>
+      Implements a condition-controlled, nestable loop (up to 32 levels deep).
+      Before each iteration, <replaceable>expression</replaceable> is evaluated;
+      while true, the commands between <literal>\while</literal> and
+      <literal>\endwhile</literal> are executed.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-try">
+    <term><literal>\try</literal></term>
+    <term><literal>\catch [ '<replaceable>sqlstate_pattern</replaceable>' ]</literal></term>
+    <term><literal>\endtry</literal></term>
+    <listitem>
+     <para>
+      Implements structured exception handling for SQL commands.  If an SQL
+      command inside the <literal>\try</literal> block fails with an error
+      matching <replaceable>sqlstate_pattern</replaceable> (either a 5-character
+      exact SQLSTATE such as <literal>'23505'</literal>, a 2-character class
+      prefix such as <literal>'23'</literal>, or any SQLSTATE when omitted),
+      <application>pgbench</application> sets <literal>:sqlstate</literal> and
+      <literal>:error_message</literal>, unwinds any inner conditionals or loops
+      opened within the <literal>\try</literal> block, increments the
+      <literal>expected_rollbacks</literal> counter, and transfers control to
+      the <literal>\catch</literal> block (or <literal>\endtry</literal> if no
+      <literal>\catch</literal> is present) without aborting the client or
+      counting the transaction as failed.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-expect-error">
+    <term><literal>\expect_error [ '<replaceable>sqlstate_pattern</replaceable>' ]</literal></term>
+    <listitem>
+     <para>
+      Declares that the immediately following SQL command is expected to fail
+      with an SQLSTATE matching <replaceable>sqlstate_pattern</replaceable> (or
+      any SQL error if omitted).  When the expected error occurs,
+      <literal>:sqlstate</literal> and <literal>:error_message</literal> are
+      populated, <literal>expected_rollbacks</literal> is incremented, and script
+      execution continues normally.  If the following SQL command succeeds or
+      fails with a non-matching SQLSTATE, it is treated as a command error.
      </para>
     </listitem>
    </varlistentry>
@@ -3178,6 +3257,15 @@ statement latencies in milliseconds, failures and retries:
    transactions and total number of retries. The per-script report inherits all
    these fields from the main report. The per-statement report displays retry
    statistics only if the <option>--max-tries</option> option is not equal to 1.
+  </para>
+
+  <para>
+   SQL errors that are explicitly caught by a <literal>\try</literal> /
+   <literal>\catch</literal> block or matched by <literal>\expect_error</literal>
+   (such as TPC-C's simulated 1% New-Order item rollback) do not abort the
+   client and are not counted as failed transactions.  Instead, they are
+   counted and reported separately under <literal>number of expected
+   rollbacks</literal>.
   </para>
 
   <para>

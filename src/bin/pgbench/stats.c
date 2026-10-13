@@ -71,6 +71,7 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	sd->serialization_failures = 0;
 	sd->deadlock_failures = 0;
 	sd->other_sql_failures = 0;
+	sd->expected_rollbacks = 0;
 	initSimpleStats(&sd->latency);
 	initSimpleStats(&sd->lag);
 }
@@ -144,6 +145,7 @@ mergeStats(StatsData *acc, const StatsData *src)
 	acc->serialization_failures += src->serialization_failures;
 	acc->deadlock_failures += src->deadlock_failures;
 	acc->other_sql_failures += src->other_sql_failures;
+	acc->expected_rollbacks += src->expected_rollbacks;
 }
 
 /*

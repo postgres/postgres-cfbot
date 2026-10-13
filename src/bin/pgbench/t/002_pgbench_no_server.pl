@@ -367,6 +367,36 @@ my @script_tests = (
 		'unterminated array subscript in set',
 		[qr{unterminated array subscript in \\set target}],
 		{ 'bad-set-sub.sql' => "\\set arr[1 42\n" }
+	],
+	[
+		'for without endfor',
+		[qr{\\for without matching \\endfor}],
+		{ 'for-no-endfor.sql' => "\\for i 1 .. 5\n\\set x :i\n" }
+	],
+	[
+		'endfor without for',
+		[qr{\\endfor without matching \\for}],
+		{ 'endfor-no-for.sql' => "\\endfor\n" }
+	],
+	[
+		'for missing dots',
+		[qr{missing "\.\." in \\for command}],
+		{ 'for-no-dots.sql' => "\\for i 1 5\n\\endfor\n" }
+	],
+	[
+		'while without endwhile',
+		[qr{\\while without matching \\endwhile}],
+		{ 'while-no-endwhile.sql' => "\\while 1 = 1\n\\set x 1\n" }
+	],
+	[
+		'try without endtry',
+		[qr{\\try without matching \\endtry}],
+		{ 'try-no-endtry.sql' => "\\try\nSELECT 1;\n" }
+	],
+	[
+		'catch without try',
+		[qr{\\catch without matching \\try}],
+		{ 'catch-no-try.sql' => "\\catch\n" }
 	],);
 
 for my $t (@script_tests)

@@ -68,6 +68,14 @@ typedef enum MetaCommand
 	META_ELIF,					/* \elif */
 	META_ELSE,					/* \else */
 	META_ENDIF,					/* \endif */
+	META_FOR,					/* \for */
+	META_ENDFOR,				/* \endfor */
+	META_WHILE,					/* \while */
+	META_ENDWHILE,				/* \endwhile */
+	META_TRY,					/* \try */
+	META_CATCH,					/* \catch */
+	META_ENDTRY,				/* \endtry */
+	META_EXPECT_ERROR,			/* \expect_error */
 	META_STARTPIPELINE,			/* \startpipeline */
 	META_SYNCPIPELINE,			/* \syncpipeline */
 	META_ENDPIPELINE,			/* \endpipeline */
@@ -120,6 +128,10 @@ typedef struct Command
 	char	   *varprefix;
 	PgBenchExpr *expr;
 	PgBenchExpr *index_expr;
+	PgBenchExpr *end_expr;
+	PgBenchExpr *step_expr;
+	int			jump_target;
+	int			endtry_target;
 	SimpleStats stats;
 	int64		retries;
 	int64		failures;

@@ -242,6 +242,29 @@ typedef enum
 	CSTATE_FINISHED,
 } ConnectionStateEnum;
 
+#define MAX_LOOP_DEPTH	32
+#define MAX_TRY_DEPTH	32
+
+typedef struct ForLoopState
+{
+	int			for_cmd;		/* command index of \for */
+	char	   *varname;		/* loop variable name */
+	int64		current;		/* current loop counter value */
+	int64		end;			/* loop bound value */
+	int64		step;			/* loop step value */
+} ForLoopState;
+
+typedef struct TryState
+{
+	int			try_cmd;		/* command index of \try */
+	int			catch_cmd;		/* command index of \catch, or endtry_cmd */
+	int			endtry_cmd;		/* command index of \endtry */
+	const char *sqlstate_pat;	/* expected SQLSTATE pattern, or NULL */
+	int			cstack_depth;	/* conditional stack depth at \try entry */
+	int			loop_depth;		/* loop stack depth at \try entry */
+	bool		in_catch;		/* true once execution enters \catch */
+} TryState;
+
 /*
  * Connection state.
  */
@@ -260,7 +283,21 @@ typedef struct
 
 	int			use_file;		/* index in sql_script for this client */
 	int			command;		/* command number in script */
+	int			next_command;	/* explicit jump target, or -1 */
 	int			num_syncs;		/* number of ongoing sync commands */
+
+	/* loop and exception handling state */
+	ForLoopState loop_stack[MAX_LOOP_DEPTH];
+	int			loop_depth;
+	TryState	try_stack[MAX_TRY_DEPTH];
+	int			try_depth;
+	bool		expect_error;
+	const char *expect_sqlstate;
+	bool		error_caught;
+	int			caught_jump_target;
+	int			caught_cstack_depth;
+	int			caught_loop_depth;
+	char		last_sqlstate[6];
 
 	/* client variables */
 	Variables	variables;
