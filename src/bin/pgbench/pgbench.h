@@ -83,6 +83,16 @@ typedef enum PgBenchFunction
 	PGBENCH_HASH_MURMUR2,
 	PGBENCH_PERMUTE,
 	PGBENCH_SUBSCRIPT,
+	PGBENCH_NURAND,
+	PGBENCH_C_LAST,
+	PGBENCH_RANDOM_ASTRING,
+	PGBENCH_RANDOM_NSTRING,
+	PGBENCH_FORMAT_STRING,
+	PGBENCH_TO_TIMESTAMP,
+	PGBENCH_DATE_ADD,
+	PGBENCH_INT_TO_DATE,
+	PGBENCH_ARRAY,
+	PGBENCH_ARRAY_GENERATE,
 } PgBenchFunction;
 
 typedef struct PgBenchExpr PgBenchExpr;
@@ -279,6 +289,13 @@ typedef struct
 	int64		cnt;			/* client transaction count, for -t; skipped
 								 * and failed transactions are also counted
 								 * here */
+
+	/* persistent per-client NURand C constants (TPC-C) */
+	bool		nurand_c_initialized;
+	int64		nurand_c_last;
+	int64		nurand_c_id;
+	int64		nurand_c_ol;
+	int64		nurand_c_other;
 } CState;
 
 extern int	expr_yyparse(PgBenchExpr **expr_parse_result_p, yyscan_t yyscanner);

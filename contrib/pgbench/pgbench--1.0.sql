@@ -67,3 +67,75 @@ CREATE FUNCTION permute(val bigint, size bigint, seed bigint DEFAULT 0)
 RETURNS bigint
 AS 'MODULE_PATHNAME', 'pgbench_permute_int64'
 LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+-- TPC-C Non-Uniform Random (NURand)
+CREATE FUNCTION nurand(a bigint, min bigint, max bigint)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'pgbench_nurand_int64'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION nurand(a bigint, min bigint, max bigint, c bigint)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'pgbench_nurand_int64'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+-- TPC-C Customer Last Name Syllable Generator
+CREATE FUNCTION c_last(val bigint)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_c_last_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+-- Random Alphanumeric and Numeric String Generators
+CREATE FUNCTION random_astring(min_len bigint, max_len bigint)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_astring_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION random_nstring(min_len bigint, max_len bigint)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_nstring_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+-- Date / Timestamp Arithmetic and Window Scaling
+CREATE FUNCTION date_add(base_date text, offset_val bigint, unit text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_date_add_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION int_to_date(base_date text, val bigint, unit text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_date_add_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION int_to_date(base_date text, val bigint, max_val bigint, interval_str text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_int_to_date_window_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION to_timestamp(str text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_to_timestamp_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+-- Printf-style String Formatting
+CREATE FUNCTION format_string(fmt text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_format_string_text'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION format_string(fmt text, VARIADIC args "any")
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_format_string_text'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- Dynamic Array Generation
+CREATE FUNCTION array_generate(len bigint, val bigint)
+RETURNS bigint[]
+AS 'MODULE_PATHNAME', 'pgbench_array_generate_const'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION array_generate(len bigint, min_val bigint, max_val bigint)
+RETURNS bigint[]
+AS 'MODULE_PATHNAME', 'pgbench_array_generate_random'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+

@@ -1895,7 +1895,57 @@ SELECT :s, ':s', :arr::int[];
 }
 	});
 
+# Test TPC, string, date/timestamp, and array functions
+$node->pgbench(
+	'-n -t 1',
+	0,
+	[qr{processed: 1/1}],
+	[
+		qr{command=2.: boolean true\b},
+		qr{command=4.: text 'BARPRESATION'},
+		qr{command=6.: text 'CUST_000042_BAR'},
+		qr{command=8.: timestamp 1998-09-02\b},
+		qr{command=10.: timestamp 1999-01-01\b},
+		qr{command=12.: array \{1,2,3\}},
+		qr{command=14.: int 7\b}
+	],
+	'pgbench TPC/string/date/array functions',
+	{
+		'001_pgbench_tpc_funcs' => q{
+\set nu (nurand(255, 0, 999) >= 0 and nurand(255, 0, 999, 42) <= 999)
+\set d debug(:nu)
+\set cl c_last(48)
+\set d debug(:cl)
+\set fs format_string('CUST_%06d_%s', 42, 'BAR')
+\set d debug(:fs)
+\set q1d int_to_date('1998-12-01', -90, 'day')
+\set d debug(:q1d)
+\set wind int_to_date(to_timestamp('1992-01-01'), 10000, 10000, '7 years')
+\set d debug(:wind)
+\set a array(1, 2, 3)
+\set d debug(:a)
+\set ag array_generate(4, 7)
+\set d debug(:ag[3])
+\set as random_astring(5, 10)
+\set ns random_nstring(4, 4)
+SELECT :cl, :fs, :q1d::date, :a::int[];
+}
+	});
+
+$node->pgbench(
+	'-n -t 1',
+	2,
+	[qr{processed: 0/1}],
+	[qr{invalid input syntax for type timestamp: "2026-02-30"}],
+	'pgbench invalid calendar date in to_timestamp',
+	{
+		'001_pgbench_bad_date' => q{
+\set bad to_timestamp('2026-02-30')
+}
+	});
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;
 done_testing();
+

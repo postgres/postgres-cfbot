@@ -80,7 +80,8 @@ static const PsqlScanCallbacks pgbench_callbacks = {
 static bool
 isLazyFunc(PgBenchFunction func)
 {
-	return func == PGBENCH_AND || func == PGBENCH_OR || func == PGBENCH_CASE;
+	return func == PGBENCH_AND || func == PGBENCH_OR ||
+		func == PGBENCH_CASE || func == PGBENCH_ARRAY_GENERATE;
 }
 
 static void
@@ -215,6 +216,52 @@ evalLazyFunc(CState *st,
 			/* no, another when, proceed */
 			return evalLazyFunc(st, PGBENCH_CASE, args, retval);
 
+		case PGBENCH_ARRAY_GENERATE:
+			{
+				int64		len;
+				PgBenchValue *elems = NULL;
+
+				if (a1.type == PGBT_NULL)
+				{
+					freeValue(&a1);
+					setNullValue(retval);
+					return true;
+				}
+				if (!coerceToInt(&a1, &len))
+				{
+					freeValue(&a1);
+					return false;
+				}
+				freeValue(&a1);
+
+				if (len < 0 || len > 100000)
+				{
+					pg_log_error("array_generate length " INT64_FORMAT " out of range [0, 100000]",
+								 len);
+					return false;
+				}
+
+				if (len > 0)
+				{
+					elems = pg_malloc0_array(PgBenchValue, (int) len);
+					for (int64 i = 0; i < len; i++)
+					{
+						if (!evaluateExpr(st, args->expr, &elems[i]))
+						{
+							for (int64 j = 0; j < i; j++)
+								freeValue(&elems[j]);
+							pg_free(elems);
+							return false;
+						}
+					}
+				}
+
+				retval->type = PGBT_ARRAY;
+				retval->u.aval.nelems = (int) len;
+				retval->u.aval.elems = elems;
+				return true;
+			}
+
 		default:
 			/* internal error, cannot get here */
 			freeValue(&a1);
@@ -261,7 +308,8 @@ evalStandardFunc(CState *st,
 	}
 
 	/* NULL arguments */
-	if (has_null && func != PGBENCH_IS && func != PGBENCH_DEBUG)
+	if (has_null && func != PGBENCH_IS && func != PGBENCH_DEBUG &&
+		func != PGBENCH_ARRAY)
 	{
 		setNullValue(retval);
 		freeValues(vargs, nargs);
@@ -933,6 +981,374 @@ evalStandardFunc(CState *st,
 				}
 
 				copyValue(retval, &vargs[0].u.aval.elems[idx]);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_NURAND:
+			{
+				int64		A,
+							imin,
+							imax,
+							C = 0,
+							delta;
+
+				Assert(nargs == 3 || nargs == 4);
+
+				if (!coerceToInt(&vargs[0], &A) ||
+					!coerceToInt(&vargs[1], &imin) ||
+					!coerceToInt(&vargs[2], &imax))
+					goto cleanup;
+
+				if (A < 0)
+				{
+					pg_log_error("nurand A parameter must be non-negative (not " INT64_FORMAT ")", A);
+					goto cleanup;
+				}
+
+				if (unlikely(imin > imax))
+				{
+					pg_log_error("empty range given to nurand");
+					goto cleanup;
+				}
+				else if (unlikely(pg_sub_s64_overflow(imax, imin, &delta) ||
+								  pg_add_s64_overflow(delta, 1, &delta)))
+				{
+					pg_log_error("nurand range is too large");
+					goto cleanup;
+				}
+
+				if (nargs == 4)
+				{
+					if (!coerceToInt(&vargs[3], &C))
+						goto cleanup;
+				}
+				else
+				{
+					if (!st->nurand_c_initialized)
+					{
+						st->nurand_c_last = pgbench_random(&st->cs_func_rs, 0, 255);
+						st->nurand_c_id = pgbench_random(&st->cs_func_rs, 0, 1023);
+						st->nurand_c_ol = pgbench_random(&st->cs_func_rs, 0, 8191);
+						st->nurand_c_other = pgbench_random(&st->cs_func_rs, 0, Max(A, 1));
+						st->nurand_c_initialized = true;
+					}
+
+					if (A == 255)
+						C = st->nurand_c_last;
+					else if (A == 1023)
+						C = st->nurand_c_id;
+					else if (A == 8191)
+						C = st->nurand_c_ol;
+					else
+						C = st->nurand_c_other % (A + 1);
+				}
+
+				setIntValue(retval, pgbench_nurand(&st->cs_func_rs, A, imin, imax, C));
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_C_LAST:
+			{
+				int64		num;
+				char		buf[32];
+
+				Assert(nargs == 1);
+
+				if (!coerceToInt(&vargs[0], &num))
+					goto cleanup;
+
+				if (!pgbench_c_last(num, buf, sizeof(buf)))
+				{
+					pg_log_error("c_last parameter must be in range [0, 999] (not " INT64_FORMAT ")",
+								 num);
+					goto cleanup;
+				}
+
+				setTextValue(retval, buf);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_RANDOM_ASTRING:
+		case PGBENCH_RANDOM_NSTRING:
+			{
+				int64		min_len,
+							max_len;
+				char	   *buf;
+
+				Assert(nargs == 2);
+
+				if (!coerceToInt(&vargs[0], &min_len) ||
+					!coerceToInt(&vargs[1], &max_len))
+					goto cleanup;
+
+				if (min_len < 0 || min_len > max_len || max_len > 1048576)
+				{
+					pg_log_error("invalid string length range [" INT64_FORMAT ", " INT64_FORMAT "]",
+								 min_len, max_len);
+					goto cleanup;
+				}
+
+				buf = pg_malloc((size_t) max_len + 1);
+				if (func == PGBENCH_RANDOM_ASTRING)
+					pgbench_random_astring(&st->cs_func_rs, min_len, max_len, buf);
+				else
+					pgbench_random_nstring(&st->cs_func_rs, min_len, max_len, buf);
+
+				retval->type = PGBT_TEXT;
+				retval->u.sval = buf;
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_FORMAT_STRING:
+			{
+				char	   *fmt = NULL;
+				const char *p;
+				PQExpBufferData buf;
+				int			arg_idx = 1;
+
+				Assert(nargs >= 1);
+
+				if (!coerceToText(&vargs[0], &fmt))
+					goto cleanup;
+
+				initPQExpBuffer(&buf);
+				p = fmt;
+				while (*p != '\0')
+				{
+					if (*p != '%')
+					{
+						appendPQExpBufferChar(&buf, *p++);
+						continue;
+					}
+					if (p[1] == '%')
+					{
+						appendPQExpBufferChar(&buf, '%');
+						p += 2;
+						continue;
+					}
+
+					/* Parse format specifier: %[flags][width][.prec][len]conv */
+					{
+						char		spec[64];
+						size_t		slen = 0;
+						char		conv;
+
+						spec[slen++] = *p++;	/* '%' */
+
+						/* flags */
+						while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0')
+						{
+							if (slen < sizeof(spec) - 8)
+								spec[slen++] = *p;
+							p++;
+						}
+						/* width */
+						while (*p >= '0' && *p <= '9')
+						{
+							if (slen < sizeof(spec) - 8)
+								spec[slen++] = *p;
+							p++;
+						}
+						/* precision */
+						if (*p == '.')
+						{
+							if (slen < sizeof(spec) - 8)
+								spec[slen++] = *p;
+							p++;
+							while (*p >= '0' && *p <= '9')
+							{
+								if (slen < sizeof(spec) - 8)
+									spec[slen++] = *p;
+								p++;
+							}
+						}
+						/* skip any user length modifiers (we supply our own) */
+						while (*p == 'l' || *p == 'h' || *p == 'z' || *p == 'j' || *p == 't')
+							p++;
+
+						conv = *p;
+						if (conv == '\0')
+						{
+							pg_log_error("unterminated format specifier in format_string");
+							termPQExpBuffer(&buf);
+							pg_free(fmt);
+							goto cleanup;
+						}
+						p++;
+
+						if (arg_idx >= nargs)
+						{
+							pg_log_error("not enough arguments for format_string");
+							termPQExpBuffer(&buf);
+							pg_free(fmt);
+							goto cleanup;
+						}
+
+						if (conv == 'd' || conv == 'i' || conv == 'u' ||
+							conv == 'x' || conv == 'X' || conv == 'o')
+						{
+							int64		ival;
+
+							if (!coerceToInt(&vargs[arg_idx++], &ival))
+							{
+								termPQExpBuffer(&buf);
+								pg_free(fmt);
+								goto cleanup;
+							}
+							spec[slen++] = 'l';
+							spec[slen++] = 'l';
+							spec[slen++] = (conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o') ? conv : 'd';
+							spec[slen] = '\0';
+							appendPQExpBuffer(&buf, spec, (long long) ival);
+						}
+						else if (conv == 'f' || conv == 'F' || conv == 'e' ||
+								 conv == 'E' || conv == 'g' || conv == 'G')
+						{
+							double		dval;
+
+							if (!coerceToDouble(&vargs[arg_idx++], &dval))
+							{
+								termPQExpBuffer(&buf);
+								pg_free(fmt);
+								goto cleanup;
+							}
+							spec[slen++] = conv;
+							spec[slen] = '\0';
+							appendPQExpBuffer(&buf, spec, dval);
+						}
+						else if (conv == 's')
+						{
+							char	   *sval = NULL;
+
+							if (!coerceToText(&vargs[arg_idx++], &sval))
+							{
+								termPQExpBuffer(&buf);
+								pg_free(fmt);
+								goto cleanup;
+							}
+							spec[slen++] = 's';
+							spec[slen] = '\0';
+							appendPQExpBuffer(&buf, spec, sval);
+							pg_free(sval);
+						}
+						else
+						{
+							pg_log_error("unsupported format specifier \"%%%c\" in format_string",
+										 conv);
+							termPQExpBuffer(&buf);
+							pg_free(fmt);
+							goto cleanup;
+						}
+					}
+				}
+
+				pg_free(fmt);
+				setTextValue(retval, buf.data);
+				termPQExpBuffer(&buf);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_TO_TIMESTAMP:
+			{
+				int64		usec;
+
+				Assert(nargs == 1);
+
+				if (!coerceToTimestamp(&vargs[0], &usec))
+					goto cleanup;
+
+				setTimestampValue(retval, usec);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_DATE_ADD:
+			{
+				int64		base_usec,
+							offset,
+							res_usec;
+				char	   *unit = NULL;
+
+				Assert(nargs == 3);
+
+				if (!coerceToTimestamp(&vargs[0], &base_usec) ||
+					!coerceToInt(&vargs[1], &offset) ||
+					!coerceToText(&vargs[2], &unit))
+					goto cleanup;
+
+				if (!pgbench_date_add(base_usec, offset, unit, &res_usec))
+				{
+					pg_log_error("invalid unit \"%s\" for date_add", unit);
+					pg_free(unit);
+					goto cleanup;
+				}
+				pg_free(unit);
+
+				setTimestampValue(retval, res_usec);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_INT_TO_DATE:
+			{
+				int64		base_usec,
+							val,
+							res_usec;
+
+				Assert(nargs == 3 || nargs == 4);
+
+				if (!coerceToTimestamp(&vargs[0], &base_usec) ||
+					!coerceToInt(&vargs[1], &val))
+					goto cleanup;
+
+				if (nargs == 3)
+				{
+					char	   *unit = NULL;
+
+					if (!coerceToText(&vargs[2], &unit))
+						goto cleanup;
+
+					if (!pgbench_date_add(base_usec, val, unit, &res_usec))
+					{
+						pg_log_error("invalid unit \"%s\" for int_to_date", unit);
+						pg_free(unit);
+						goto cleanup;
+					}
+					pg_free(unit);
+				}
+				else
+				{
+					int64		max_val;
+					char	   *interval_str = NULL;
+
+					if (!coerceToInt(&vargs[2], &max_val) ||
+						!coerceToText(&vargs[3], &interval_str))
+						goto cleanup;
+
+					if (!pgbench_int_to_date_window(base_usec, val, max_val,
+													interval_str, &res_usec))
+					{
+						pg_log_error("invalid parameters (max_val=" INT64_FORMAT ", interval=\"%s\") for int_to_date",
+									 max_val, interval_str);
+						pg_free(interval_str);
+						goto cleanup;
+					}
+					pg_free(interval_str);
+				}
+
+				setTimestampValue(retval, res_usec);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_ARRAY:
+			{
+				setArrayValue(retval, vargs, nargs);
 				ok = true;
 				goto cleanup;
 			}

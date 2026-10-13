@@ -36,6 +36,22 @@ SELECT pgbench.random(1, 100);
 SELECT pgbench.setseed(123456789::bigint);
 SELECT pgbench.random(1, 100);
 
+-- Test TPC-C NURand, c_last, random strings, and date functions
+SELECT pgbench.setseed(42::bigint);
+SELECT pgbench.nurand(255, 0, 999) BETWEEN 0 AND 999 AS nurand_in_range,
+       pgbench.nurand(255, 0, 999, 100) BETWEEN 0 AND 999 AS nurand_c_in_range;
+SELECT pgbench.c_last(0), pgbench.c_last(48), pgbench.c_last(999);
+SELECT length(pgbench.random_astring(8, 8)) = 8 AS astring_len_ok,
+       pgbench.random_nstring(6, 6) ~ '^[0-9]{6}$' AS nstring_digits_ok;
+SELECT pgbench.date_add('1998-12-01', -90, 'day') AS q1_date,
+       pgbench.int_to_date('1998-12-01', -90, 'day') AS q1_int_to_date,
+       pgbench.int_to_date('1992-01-01', 0, 10000, '7 years') AS win_start,
+       pgbench.int_to_date('1992-01-01', 10000, 10000, '7 years') AS win_end,
+       pgbench.to_timestamp('2026-02-28 14:30:00') AS ts_val;
+SELECT pgbench.format_string('ORD_%04d_%s_%.2f%%', 42, 'ABC', 12.345) AS fmt_str;
+SELECT pgbench.array_generate(4, 7) AS const_arr,
+       cardinality(pgbench.array_generate(5, 1, 100)) = 5 AS rand_arr_len_ok;
+
 -- Error cases: parameter boundaries
 SELECT pgbench.random(10, 5);
 SELECT pgbench.random_gaussian(1, 10, 1.5);
@@ -45,5 +61,7 @@ SELECT pgbench.random_zipfian(1, 10, 1001.0);
 SELECT pgbench.random_poisson(0.0);
 SELECT pgbench.permute(5, 0, 42);
 SELECT pgbench.setseed(1.5);
+SELECT pgbench.c_last(1000);
+SELECT pgbench.to_timestamp('2026-02-30');
 
 DROP EXTENSION pgbench;

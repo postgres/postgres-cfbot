@@ -18,6 +18,7 @@
 
 #include "common/int.h"
 #include "common/logging.h"
+#include "common/pgbench_funcs.h"
 #include "pqexpbuffer.h"
 #include "variable.h"
 
@@ -1077,197 +1078,20 @@ copyValue(PgBenchValue *dest, const PgBenchValue *src)
 }
 
 /*
- * Calendar conversion helpers for PGBT_TIMESTAMP (microseconds since 2000-01-01).
- */
-#define PGBENCH_EPOCH_JDATE		2451545 /* 2000-01-01 */
-#define PGBENCH_USECS_PER_SEC	INT64CONST(1000000)
-#define PGBENCH_USECS_PER_MIN	(INT64CONST(60) * PGBENCH_USECS_PER_SEC)
-#define PGBENCH_USECS_PER_HOUR	(INT64CONST(3600) * PGBENCH_USECS_PER_SEC)
-#define PGBENCH_USECS_PER_DAY	(INT64CONST(86400) * PGBENCH_USECS_PER_SEC)
-
-static int
-pgbench_date2j(int y, int m, int d)
-{
-	int			julian;
-	int			century;
-
-	if (m > 2)
-	{
-		m += 1;
-		y += 4800;
-	}
-	else
-	{
-		m += 13;
-		y += 4799;
-	}
-
-	century = y / 100;
-	julian = y * 365 - 32167;
-	julian += y / 4 - century + century / 4;
-	julian += 7834 * m / 256 + d;
-
-	return julian;
-}
-
-static void
-pgbench_j2date(int jd, int *year, int *month, int *day)
-{
-	unsigned int julian;
-	unsigned int quad;
-	unsigned int extra;
-	int			y;
-
-	julian = jd;
-	julian += 32044;
-	quad = julian / 146097;
-	extra = (julian - quad * 146097) * 4 + 3;
-	julian += 60 + quad * 3 + extra / 146097;
-	quad = julian / 1461;
-	julian -= quad * 1461;
-	y = julian * 4 / 1461;
-	julian = ((y != 0) ? ((julian + 305) % 365) : ((julian + 306) % 366))
-		+ 123;
-	y += quad * 4;
-	*year = y - 4800;
-	quad = julian * 2141 / 65536;
-	*day = julian - 7834 * quad / 256;
-	*month = (quad + 10) % 12 + 1;
-}
-
-static int
-pgbench_days_in_month(int year, int month)
-{
-	static const int days[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-	bool		leap;
-
-	if (month < 1 || month > 12)
-		return 0;
-	if (month != 2)
-		return days[month - 1];
-	leap = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
-	return leap ? 29 : 28;
-}
-
-/*
  * Parse an ISO-8601 date/timestamp string ("YYYY-MM-DD[ HH:MI:SS[.ffffff]]")
  * into microseconds since 2000-01-01 00:00:00.
  */
 bool
 parseTimestampString(const char *str, bool errorOK, int64 *tval)
 {
-	const char *p = str;
-	char	   *endp;
-	long		year,
-				month,
-				day,
-				hour = 0,
-				min = 0,
-				sec = 0,
-				usec = 0;
-	int			jd;
-	int64		days;
-
-	if (str == NULL)
+	if (!pgbench_parse_timestamp(str, tval))
 	{
 		if (!errorOK)
-			pg_log_error("invalid input syntax for type timestamp: \"\"");
+			pg_log_error("invalid input syntax for type timestamp: \"%s\"",
+						 str != NULL ? str : "");
 		return false;
 	}
-
-	while (*p && isspace((unsigned char) *p))
-		p++;
-
-	year = strtol(p, &endp, 10);
-	if (endp == p || *endp != '-' || year < 1 || year > 9999)
-		goto bad_syntax;
-	p = endp + 1;
-
-	month = strtol(p, &endp, 10);
-	if (endp == p || *endp != '-' || month < 1 || month > 12)
-		goto bad_syntax;
-	p = endp + 1;
-
-	day = strtol(p, &endp, 10);
-	if (endp == p || day < 1 || day > pgbench_days_in_month((int) year, (int) month))
-		goto bad_syntax;
-	p = endp;
-
-	if (*p == ' ' || *p == 'T' || *p == 't')
-	{
-		p++;
-		hour = strtol(p, &endp, 10);
-		if (endp == p || *endp != ':' || hour < 0 || hour > 23)
-			goto bad_syntax;
-		p = endp + 1;
-
-		min = strtol(p, &endp, 10);
-		if (endp == p || min < 0 || min > 59)
-			goto bad_syntax;
-		p = endp;
-
-		if (*p == ':')
-		{
-			p++;
-			sec = strtol(p, &endp, 10);
-			if (endp == p || sec < 0 || sec > 60)
-				goto bad_syntax;
-			p = endp;
-
-			if (*p == '.')
-			{
-				int			digits = 0;
-
-				p++;
-				if (!isdigit((unsigned char) *p))
-					goto bad_syntax;
-				while (isdigit((unsigned char) *p))
-				{
-					if (digits < 6)
-					{
-						usec = usec * 10 + (*p - '0');
-						digits++;
-					}
-					p++;
-				}
-				while (digits < 6)
-				{
-					usec *= 10;
-					digits++;
-				}
-			}
-		}
-	}
-
-	/* Allow optional UTC suffix 'Z' or '+00' / '+00:00' and trailing spaces */
-	if (*p == 'Z' || *p == 'z')
-		p++;
-	else if ((*p == '+' || *p == '-') && p[1] == '0' && p[2] == '0')
-	{
-		p += 3;
-		if (*p == ':' && p[1] == '0' && p[2] == '0')
-			p += 3;
-	}
-
-	while (*p && isspace((unsigned char) *p))
-		p++;
-
-	if (*p != '\0')
-		goto bad_syntax;
-
-	jd = pgbench_date2j((int) year, (int) month, (int) day);
-	days = (int64) (jd - PGBENCH_EPOCH_JDATE);
-	*tval = days * PGBENCH_USECS_PER_DAY
-		+ (int64) hour * PGBENCH_USECS_PER_HOUR
-		+ (int64) min * PGBENCH_USECS_PER_MIN
-		+ (int64) sec * PGBENCH_USECS_PER_SEC
-		+ (int64) usec;
 	return true;
-
-bad_syntax:
-	if (!errorOK)
-		pg_log_error("invalid input syntax for type timestamp: \"%s\"", str);
-	return false;
 }
 
 /*
@@ -1277,52 +1101,7 @@ bad_syntax:
 void
 formatTimestampValue(int64 tval, char *buf, size_t buflen)
 {
-	int64		days;
-	int64		rem;
-	int			year,
-				month,
-				day,
-				hour,
-				min,
-				sec,
-				usec;
-
-	days = tval / PGBENCH_USECS_PER_DAY;
-	rem = tval % PGBENCH_USECS_PER_DAY;
-	if (rem < 0)
-	{
-		days -= 1;
-		rem += PGBENCH_USECS_PER_DAY;
-	}
-
-	pgbench_j2date((int) days + PGBENCH_EPOCH_JDATE, &year, &month, &day);
-
-	if (rem == 0)
-	{
-		snprintf(buf, buflen, "%04d-%02d-%02d", year, month, day);
-		return;
-	}
-
-	hour = (int) (rem / PGBENCH_USECS_PER_HOUR);
-	rem %= PGBENCH_USECS_PER_HOUR;
-	min = (int) (rem / PGBENCH_USECS_PER_MIN);
-	rem %= PGBENCH_USECS_PER_MIN;
-	sec = (int) (rem / PGBENCH_USECS_PER_SEC);
-	usec = (int) (rem % PGBENCH_USECS_PER_SEC);
-
-	if (usec != 0)
-	{
-		snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-				 year, month, day, hour, min, sec, usec);
-		/* Trim trailing fractional zeros */
-		for (size_t len = strlen(buf); len > 0 && buf[len - 1] == '0'; len--)
-			buf[len - 1] = '\0';
-	}
-	else
-	{
-		snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d",
-				 year, month, day, hour, min, sec);
-	}
+	pgbench_format_timestamp(tval, buf, buflen);
 }
 
 /*

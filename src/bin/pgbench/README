@@ -54,3 +54,25 @@ Memory Ownership Invariants:
   - Variable.svalue caches the formatted string representation for SQL
     interpolation (:var and :var[idx]) and is invalidated whenever the
     underlying Variable.value is updated.
+
+Shared Benchmark Functions (src/common/pgbench_funcs.c)
+-------------------------------------------------------
+Low-level mathematical, statistical, string, and calendar functions live in
+src/common/pgbench_funcs.c (declared in src/include/common/pgbench_funcs.h)
+so they can be linked into both the frontend pgbench binary and the backend
+contrib/pgbench extension:
+
+  - Random distributions: pgbench_random(), pgbench_random_gaussian(),
+    pgbench_random_exponential(), pgbench_random_zipfian(),
+    pgbench_random_poisson()
+  - Hashes & permutations: pgbench_hash_fnv1a(), pgbench_hash_murmur2(),
+    pgbench_permute()
+  - TPC-C generators: pgbench_nurand(), pgbench_c_last(),
+    pgbench_random_astring(), pgbench_random_nstring()
+  - Calendar & timestamp arithmetic: pgbench_parse_timestamp(),
+    pgbench_format_timestamp(), pgbench_date_add(),
+    pgbench_int_to_date_window()
+
+All PRNG-dependent routines take an explicit `pg_prng_state *state` pointer.
+In src/bin/pgbench, each client passes `&st->cs_func_rs`; in contrib/pgbench,
+the backend passes its session-local `&pgbench_ext_prng_state`.

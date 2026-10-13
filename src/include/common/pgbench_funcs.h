@@ -45,4 +45,19 @@ extern int64 pgbench_hash_murmur2(int64 val, uint64 seed);
 /* Permutation Function */
 extern int64 pgbench_permute(int64 val, int64 isize, int64 seed);
 
+/* TPC-C Non-Uniform Random (NURand) and Syllable Generation */
+extern int64 pgbench_nurand(pg_prng_state *state, int64 A, int64 min, int64 max, int64 C);
+extern bool pgbench_c_last(int64 num, char *buf, size_t buflen);
+
+/* Random Alphanumeric and Numeric String Generation */
+extern void pgbench_random_astring(pg_prng_state *state, int64 min_len, int64 max_len, char *buf);
+extern void pgbench_random_nstring(pg_prng_state *state, int64 min_len, int64 max_len, char *buf);
+
+/* Timestamp / Date Parsing, Formatting, and Arithmetic (microseconds since 2000-01-01) */
+extern bool pgbench_parse_timestamp(const char *str, int64 *usec_out);
+extern void pgbench_format_timestamp(int64 usec, char *buf, size_t buflen);
+extern bool pgbench_date_add(int64 base_usec, int64 offset, const char *unit, int64 *result_usec);
+extern bool pgbench_int_to_date_window(int64 base_usec, int64 val, int64 max_val,
+									   const char *interval_str, int64 *result_usec);
+
 #endif							/* PGBENCH_FUNCS_H */

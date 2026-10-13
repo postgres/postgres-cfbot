@@ -16,10 +16,13 @@
 
 #include "pgbench.h"
 
-#define PGBENCH_NARGS_VARIABLE	(-1)
-#define PGBENCH_NARGS_CASE		(-2)
-#define PGBENCH_NARGS_HASH		(-3)
-#define PGBENCH_NARGS_PERMUTE	(-4)
+#define PGBENCH_NARGS_VARIABLE		(-1)
+#define PGBENCH_NARGS_CASE			(-2)
+#define PGBENCH_NARGS_HASH			(-3)
+#define PGBENCH_NARGS_PERMUTE		(-4)
+#define PGBENCH_NARGS_NURAND		(-5)
+#define PGBENCH_NARGS_INT_TO_DATE	(-6)
+#define PGBENCH_NARGS_VARIADIC_ANY	(-7)
 
 static PgBenchExprList *make_elist(PgBenchExpr *expr, PgBenchExprList *list);
 static PgBenchExpr *make_null_constant(void);
@@ -395,6 +398,36 @@ static const struct
 	{
 		"!subscript", 2, PGBENCH_SUBSCRIPT
 	},
+	{
+		"nurand", PGBENCH_NARGS_NURAND, PGBENCH_NURAND
+	},
+	{
+		"c_last", 1, PGBENCH_C_LAST
+	},
+	{
+		"random_astring", 2, PGBENCH_RANDOM_ASTRING
+	},
+	{
+		"random_nstring", 2, PGBENCH_RANDOM_NSTRING
+	},
+	{
+		"format_string", PGBENCH_NARGS_VARIABLE, PGBENCH_FORMAT_STRING
+	},
+	{
+		"to_timestamp", 1, PGBENCH_TO_TIMESTAMP
+	},
+	{
+		"date_add", 3, PGBENCH_DATE_ADD
+	},
+	{
+		"int_to_date", PGBENCH_NARGS_INT_TO_DATE, PGBENCH_INT_TO_DATE
+	},
+	{
+		"array", PGBENCH_NARGS_VARIADIC_ANY, PGBENCH_ARRAY
+	},
+	{
+		"array_generate", 2, PGBENCH_ARRAY_GENERATE
+	},
 	/* keep as last array element */
 	{
 		NULL, 0, 0
@@ -478,7 +511,7 @@ make_func(yyscan_t yyscanner, int fnumber, PgBenchExprList *args)
 	/* validate arguments number including few special cases */
 	switch (PGBENCH_FUNCTIONS[fnumber].nargs)
 	{
-			/* check at least one arg for least & greatest */
+			/* check at least one arg for least, greatest, format_string */
 		case PGBENCH_NARGS_VARIABLE:
 			if (len == 0)
 				expr_yyerror_more(yyscanner, "at least one argument expected",
@@ -520,6 +553,18 @@ make_func(yyscan_t yyscanner, int fnumber, PgBenchExprList *args)
 
 				args = make_elist(var, args);
 			}
+			break;
+
+			/* nurand(A, min, max [, C]) */
+		case PGBENCH_NARGS_NURAND:
+		case PGBENCH_NARGS_INT_TO_DATE:
+			if (len < 3 || len > 4)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+			/* array(...) takes 0 or more arguments */
+		case PGBENCH_NARGS_VARIADIC_ANY:
 			break;
 
 			/* common case: positive arguments number */

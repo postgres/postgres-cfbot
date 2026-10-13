@@ -1892,7 +1892,77 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
-        <function>debug</function> ( <replaceable>number</replaceable> )
+        <function>array</function> ( <replaceable>value</replaceable> <optional>, <literal>...</literal> </optional> )
+        <returnvalue>array</returnvalue>
+       </para>
+       <para>
+        Constructs a one-dimensional array from its arguments.
+       </para>
+       <para>
+        <literal>array(10, 20, 30)</literal>
+        <returnvalue>{10,20,30}</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>array_generate</function> ( <parameter>len</parameter>, <parameter>val</parameter> )
+        <returnvalue>array</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>array_generate</function> ( <parameter>len</parameter>, <parameter>min</parameter>, <parameter>max</parameter> )
+        <returnvalue>array</returnvalue>
+       </para>
+       <para>
+        Generates an array of <parameter>len</parameter> elements filled either
+        with <parameter>val</parameter> (2-argument form) or with uniformly
+        distributed random integers in <literal>[min, max]</literal>
+        (3-argument form).
+       </para>
+       <para>
+        <literal>array_generate(3, 1, 10)</literal>
+        <returnvalue>a 3-element integer array</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>c_last</function> ( <parameter>num</parameter> )
+        <returnvalue>text</returnvalue>
+       </para>
+       <para>
+        Generates a TPC-C customer last name by concatenating three syllables
+        corresponding to the digits of <parameter>num</parameter> in the range
+        <literal>[0, 999]</literal>.
+       </para>
+       <para>
+        <literal>c_last(123)</literal>
+        <returnvalue>oughtableese</returnvalue> (uppercase <literal>OUGHTABLEESE</literal>)
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>date_add</function> ( <parameter>base_date</parameter>, <parameter>offset</parameter>, <parameter>unit</parameter> )
+        <returnvalue>timestamp</returnvalue>
+       </para>
+       <para>
+        Adds <parameter>offset</parameter> calendar or time units
+        (<literal>'years'</literal>, <literal>'months'</literal>,
+        <literal>'days'</literal>, <literal>'hours'</literal>,
+        <literal>'minutes'</literal>, or <literal>'seconds'</literal>) to
+        <parameter>base_date</parameter>, clamping end-of-month dates to valid
+        calendar days.
+       </para>
+       <para>
+        <literal>date_add('1998-12-01', -90, 'days')</literal>
+        <returnvalue>1998-09-02</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>debug</function> ( <replaceable>value</replaceable> )
         <returnvalue></returnvalue> same type as input
        </para>
        <para>
@@ -1935,7 +2005,25 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
-        <function>greatest</function> ( <replaceable>number</replaceable> <optional>, <literal>...</literal> </optional> )
+        <function>format_string</function> ( <parameter>fmt</parameter> <optional>, <replaceable>arg</replaceable> <literal>...</literal> </optional> )
+        <returnvalue>text</returnvalue>
+       </para>
+       <para>
+        Formats arguments according to a <function>printf</function>-style
+        format string supporting <literal>%d</literal>, <literal>%i</literal>,
+        <literal>%u</literal>, <literal>%x</literal>, <literal>%X</literal>,
+        <literal>%o</literal>, <literal>%f</literal>, <literal>%e</literal>,
+        <literal>%g</literal>, <literal>%s</literal>, and <literal>%%</literal>.
+       </para>
+       <para>
+        <literal>format_string('Brand#%d%d', 1, 2)</literal>
+        <returnvalue>Brand#12</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>greatest</function> ( <replaceable>value</replaceable> <optional>, <literal>...</literal> </optional> )
         <returnvalue></returnvalue> <type>double</type> if any argument is double, else <type>integer</type>
        </para>
        <para>
@@ -2005,7 +2093,29 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
-        <function>least</function> ( <replaceable>number</replaceable> <optional>, <literal>...</literal> </optional> )
+        <function>int_to_date</function> ( <parameter>base_date</parameter>, <parameter>val</parameter>, <parameter>unit</parameter> )
+        <returnvalue>timestamp</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>int_to_date</function> ( <parameter>base_date</parameter>, <parameter>val</parameter>, <parameter>max_val</parameter>, <parameter>interval_str</parameter> )
+        <returnvalue>timestamp</returnvalue>
+       </para>
+       <para>
+        Maps an integer <parameter>val</parameter> to a date/timestamp offset
+        from <parameter>base_date</parameter>, either directly in
+        <parameter>unit</parameter> (3-argument form) or scaled linearly across
+        <literal>[0, max_val]</literal> over <parameter>interval_str</parameter>
+        such as <literal>'7 years'</literal> (4-argument form).
+       </para>
+       <para>
+        <literal>int_to_date('1992-01-01', 365, 'days')</literal>
+        <returnvalue>1992-12-31</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>least</function> ( <replaceable>value</replaceable> <optional>, <literal>...</literal> </optional> )
         <returnvalue></returnvalue> <type>double</type> if any argument is double, else <type>integer</type>
        </para>
        <para>
@@ -2042,6 +2152,25 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
        <para>
         <literal>mod(54, 32)</literal>
         <returnvalue>22</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>nurand</function> ( <parameter>A</parameter>, <parameter>min</parameter>, <parameter>max</parameter> <optional>, <parameter>C</parameter> </optional> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Computes the TPC-C non-uniform random integer
+        <literal>(((random(0, A) | random(min, max)) + C) % (max - min + 1)) + min</literal>.
+        If <parameter>C</parameter> is omitted, a session-sticky constant in
+        <literal>[0, A]</literal> is automatically maintained per
+        <parameter>A</parameter> domain (<literal>255</literal>,
+        <literal>1023</literal>, <literal>8191</literal>).
+       </para>
+       <para>
+        <literal>nurand(255, 0, 999)</literal>
+        <returnvalue>an integer between 0 and 999</returnvalue>
        </para></entry>
       </row>
 
@@ -2112,6 +2241,21 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <function>random_astring</function> ( <parameter>min_len</parameter>, <parameter>max_len</parameter> )
+        <returnvalue>text</returnvalue>
+       </para>
+       <para>
+        Generates a random ASCII alphanumeric string of length uniformly chosen
+        in <literal>[min_len, max_len]</literal>.
+       </para>
+       <para>
+        <literal>random_astring(10, 20)</literal>
+        <returnvalue>a 10-to-20 character alphanumeric string</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <function>random_exponential</function> ( <parameter>lb</parameter>, <parameter>ub</parameter>, <parameter>parameter</parameter> )
         <returnvalue>integer</returnvalue>
        </para>
@@ -2142,6 +2286,21 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <function>random_nstring</function> ( <parameter>min_len</parameter>, <parameter>max_len</parameter> )
+        <returnvalue>text</returnvalue>
+       </para>
+       <para>
+        Generates a random numeric digit string (<literal>0</literal>&ndash;<literal>9</literal>)
+        of length uniformly chosen in <literal>[min_len, max_len]</literal>.
+       </para>
+       <para>
+        <literal>random_nstring(9, 9)</literal>
+        <returnvalue>a 9-digit numeric string</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <function>random_zipfian</function> ( <parameter>lb</parameter>, <parameter>ub</parameter>, <parameter>parameter</parameter> )
         <returnvalue>integer</returnvalue>
        </para>
@@ -2166,6 +2325,23 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
        <para>
         <literal>sqrt(2.0)</literal>
         <returnvalue>1.414213562</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>to_timestamp</function> ( <parameter>str</parameter> )
+        <returnvalue>timestamp</returnvalue>
+       </para>
+       <para>
+        Parses an ISO-8601 date or timestamp string
+        (<literal>YYYY-MM-DD</literal> or
+        <literal>YYYY-MM-DD HH:MI:SS[.uuuuuu]</literal>) into a
+        <type>timestamp</type> value.
+       </para>
+       <para>
+        <literal>to_timestamp('1998-12-01')</literal>
+        <returnvalue>1998-12-01</returnvalue>
        </para></entry>
       </row>
      </tbody>
