@@ -29,6 +29,7 @@ GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    ../../common/fe_memutils.c \
                    ../../common/file_utils.c \
                    ../../common/wait_error.c \
+                   ../../fe_utils/gzip.c \
                    ../../fe_utils/option_utils.c \
                    ../../fe_utils/string_utils.c
 GETTEXT_TRIGGERS = $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \

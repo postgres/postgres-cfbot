@@ -746,6 +746,27 @@ for my $method (qw(lz4 zstd))
 
 SKIP:
 {
+	my ($directory_path) = grep { -s $_ }
+	  glob("$tempdir/compression_gzip_dir/*.dat.gz");
+
+	skip "gzip compression not supported by this build", 2 if !$supports_gzip;
+	die "could not find compressed data file for gzip"
+	  if !defined($directory_path);
+	my $directory_size = -s $directory_path;
+	truncate($directory_path, $directory_size - 1)
+	  or die "could not truncate $directory_path: $!";
+	$node->command_fails_like(
+		[
+			'pg_restore',
+			'--file' => "$tempdir/gzip_directory_bad.sql",
+			"$tempdir/compression_gzip_dir"
+		],
+		qr/could not decompress data: compressed stream is incomplete/,
+		"gzip directory archive with truncated compressed data fails");
+}
+
+SKIP:
+{
 	# Zstd needs empty-input processing at end-of-input to flush buffered
 	# output.  LZ4 has no equivalent processing; its completion state remains
 	# false for an empty stream.
