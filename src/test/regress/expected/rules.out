@@ -4164,13 +4164,13 @@ create rule ruletest_setalias_r2 as on insert to ruletest_setalias
   do also delete from ruletest_setalias "set" where "set".a = 1;
 select rulename, pg_get_ruledef(oid) from pg_rewrite
   where rulename like 'ruletest_setalias_r%' order by rulename;
-       rulename       |                                    pg_get_ruledef                                    
-----------------------+--------------------------------------------------------------------------------------
- ruletest_setalias_r1 | CREATE RULE ruletest_setalias_r1 AS                                                 +
-                      |     ON INSERT TO public.ruletest_setalias DO  UPDATE ruletest_setalias set SET b = 1+
+       rulename       |                                     pg_get_ruledef                                      
+----------------------+-----------------------------------------------------------------------------------------
+ ruletest_setalias_r1 | CREATE RULE ruletest_setalias_r1 AS                                                    +
+                      |     ON INSERT TO public.ruletest_setalias DO  UPDATE ruletest_setalias AS set SET b = 1+
                       |   WHERE (set.a = 2);
- ruletest_setalias_r2 | CREATE RULE ruletest_setalias_r2 AS                                                 +
-                      |     ON INSERT TO public.ruletest_setalias DO  DELETE FROM ruletest_setalias set     +
+ ruletest_setalias_r2 | CREATE RULE ruletest_setalias_r2 AS                                                    +
+                      |     ON INSERT TO public.ruletest_setalias DO  DELETE FROM ruletest_setalias AS set     +
                       |   WHERE (set.a = 1);
 (2 rows)
 
@@ -4178,27 +4178,27 @@ select pg_get_ruledef(oid) as def from pg_rewrite
   where rulename = 'ruletest_setalias_r1' \gset
 drop rule ruletest_setalias_r1 on ruletest_setalias;
 :def
-ERROR:  syntax error at or near "b"
-LINE 2: ...ruletest_setalias DO  UPDATE ruletest_setalias set SET b = 1
-                                                                  ^
 select pg_get_ruledef(oid) from pg_rewrite
   where rulename = 'ruletest_setalias_r1';
- pg_get_ruledef 
-----------------
-(0 rows)
+                                     pg_get_ruledef                                      
+-----------------------------------------------------------------------------------------
+ CREATE RULE ruletest_setalias_r1 AS                                                    +
+     ON INSERT TO public.ruletest_setalias DO  UPDATE ruletest_setalias AS set SET b = 1+
+   WHERE (set.a = 2);
+(1 row)
 
 select pg_get_ruledef(oid) as def from pg_rewrite
   where rulename = 'ruletest_setalias_r2' \gset
 drop rule ruletest_setalias_r2 on ruletest_setalias;
 :def
-ERROR:  syntax error at or near "set"
-LINE 2: ...blic.ruletest_setalias DO  DELETE FROM ruletest_setalias set
-                                                                    ^
 select pg_get_ruledef(oid) from pg_rewrite
   where rulename = 'ruletest_setalias_r2';
- pg_get_ruledef 
-----------------
-(0 rows)
+                                   pg_get_ruledef                                   
+------------------------------------------------------------------------------------
+ CREATE RULE ruletest_setalias_r2 AS                                               +
+     ON INSERT TO public.ruletest_setalias DO  DELETE FROM ruletest_setalias AS set+
+   WHERE (set.a = 1);
+(1 row)
 
 create table ruletest_setalias_m (a int, b int);
 create table ruletest_setalias_src (a int);
@@ -4215,7 +4215,7 @@ select pg_get_functiondef('ruletest_setalias_f'::regproc);
   RETURNS void                                          +
   LANGUAGE sql                                          +
  BEGIN ATOMIC                                           +
-  MERGE INTO ruletest_setalias_m set                    +
+  MERGE INTO ruletest_setalias_m AS set                 +
      USING ruletest_setalias_src s                      +
      ON (set.a = s.a)                                   +
      WHEN MATCHED                                       +
@@ -4227,14 +4227,22 @@ select pg_get_functiondef('ruletest_setalias_f'::regproc);
 select pg_get_functiondef('ruletest_setalias_f'::regproc) as def \gset
 drop function ruletest_setalias_f();
 :def;
-ERROR:  syntax error at or near "set"
-LINE 5:  MERGE INTO ruletest_setalias_m set
-                                        ^
 select pg_get_functiondef(oid) from pg_proc
   where proname = 'ruletest_setalias_f';
- pg_get_functiondef 
---------------------
-(0 rows)
+                   pg_get_functiondef                    
+---------------------------------------------------------
+ CREATE OR REPLACE FUNCTION public.ruletest_setalias_f()+
+  RETURNS void                                          +
+  LANGUAGE sql                                          +
+ BEGIN ATOMIC                                           +
+  MERGE INTO ruletest_setalias_m AS set                 +
+     USING ruletest_setalias_src s                      +
+     ON (set.a = s.a)                                   +
+     WHEN MATCHED                                       +
+      THEN UPDATE SET b = 1;                            +
+ END                                                    +
+ 
+(1 row)
 
 -- A FROM-clause alias named "set" does not need AS
 create view ruletest_setalias_v as
@@ -4251,7 +4259,6 @@ select pg_get_viewdef('ruletest_setalias_v'::regclass);
 
 drop view ruletest_setalias_v;
 drop function ruletest_setalias_f();
-ERROR:  function ruletest_setalias_f() does not exist
 drop table ruletest_setalias_src;
 drop table ruletest_setalias_m;
 drop table ruletest_setalias;
