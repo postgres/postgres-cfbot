@@ -57,12 +57,13 @@ end_progress_output(void)
 }
 
 /*
- * Remove any logs generated internally.  To be used once when exiting.
+ * Close the internal log and remove output directories unless --retain is set.
  */
 void
 cleanup_output_dirs(void)
 {
 	fclose(log_opts.internal);
+	log_opts.internal = NULL;
 
 	/* Remove dump and log files? */
 	if (log_opts.retain)

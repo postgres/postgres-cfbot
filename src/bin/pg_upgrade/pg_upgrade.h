@@ -329,7 +329,6 @@ typedef struct
 	bool		initdb_new_cluster; /* run initdb before compatibility checks */
 	bool		initdb_options_given;	/* --initdb-options given, even if
 										 * empty */
-	bool		initdb_allow_group_access;	/* --allow-group-access */
 	char	  **initdb_options; /* additional arguments to initdb */
 	int			num_initdb_options;
 } UserOpts;
@@ -440,6 +439,10 @@ void		get_subscription_info(ClusterInfo *cluster);
 void		parseCommandLine(int argc, char *argv[]);
 void		adjust_data_dir(ClusterInfo *cluster);
 void		get_sock_dir(ClusterInfo *cluster);
+
+/* pg_upgrade.c */
+
+void		sync_new_cluster(bool sync_data_files);
 
 /* relfilenumber.c */
 

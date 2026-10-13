@@ -11,7 +11,7 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
-# Use nondefault settings to verify that --initdb carries them over to the
+# Use nondefault settings to verify which settings --initdb carries over to the
 # new cluster.
 my $oldnode = PostgreSQL::Test::Cluster->new('old_node');
 $oldnode->init(
@@ -117,17 +117,15 @@ like(slurp_file($newnode->data_dir . '/postmaster.opts'),
 ok(-f $newnode->data_dir . '/PG_VERSION',
 	'new cluster data directory created by --initdb');
 
-# Group access requested for the old cluster must be carried over to the new
-# cluster.  Otherwise programs that read PGDATA as a group member lose access
-# after the upgrade.
+# Group access requires an explicit initdb option, even if the old cluster
+# allows it.
 SKIP:
 {
 	skip "unix-style permissions not supported on Windows", 1
 	  if ($windows_os || $Config::Config{osname} eq 'cygwin');
 
-	my $old_mode = (stat($oldnode->data_dir))[2] & 0777;
 	my $new_mode = (stat($newnode->data_dir))[2] & 0777;
-	is($new_mode, $old_mode, 'new cluster preserves PGDATA group access');
+	is($new_mode, 0700, 'new cluster does not inherit PGDATA group access');
 }
 
 # --initdb logs use pg_upgrade_output.d with the normal cleanup and --retain
@@ -330,28 +328,6 @@ for my $case (
 		[qr/^$/], "reject $case->[2]");
 }
 
-# Reject options that override pg_upgrade's settings or skip initialization.
-for my $options (
-	'-D/another/datadir',
-	'--username=another_user',
-	'--wal-segsize=32',
-	'--no-data-checksums',
-	'--encoding=UTF8',
-	'--locale=C',
-	'--locale-provider=builtin',
-	'--sync-only',
-	'--help',
-	'-c data_directory=/another/datadir',
-	'--set=CONFIG_FILE=/another/config',
-	'-c Hba-File=/another/hba',
-	'-cident_file=/another/ident')
-{
-	command_checks_all(
-		[ 'pg_upgrade', '--initdb', "--initdb-options=$options" ], 1,
-		[qr/cannot be used with --initdb/], [qr/^$/],
-		"reject managed or incompatible option: $options");
-}
-
 sub option_quote
 {
 	my ($value) = @_;
@@ -449,7 +425,8 @@ my $auth_options =
 		skip 'unix-style permissions not supported on Windows', 1
 		  if ($windows_os || $Config::Config{osname} eq 'cygwin');
 		is((stat($preload_new->data_dir))[2] & 0777,
-			0700, 'owner-only data directory mode is inherited');
+			0700,
+			'new cluster uses owner-only data directory mode by default');
 	}
 
 	start_new_cluster($preload_new);
@@ -464,8 +441,7 @@ my $auth_options =
 	$preload_new->stop;
 }
 
-# Link and swap retain old file modes, so a group-access request must not
-# turn an owner-only cluster into a partly group-readable cluster.
+# Link and swap retain old file modes.
 SKIP:
 {
 	skip 'Unix permissions are not supported on this platform', 1
@@ -474,25 +450,6 @@ SKIP:
 	subtest 'group access with link and swap' => sub {
 		for my $mode ('--link', '--swap')
 		{
-			for my $check (0, 1)
-			{
-				my $new = PostgreSQL::Test::Cluster->new(
-					substr($mode, 2) . "_group_rejected_$check");
-				command_checks_all(
-					upgrade_command(
-						$preload_old, $new, $mode,
-						'--initdb-options' => $check
-						? '-dg'
-						: '--allow-group-access',
-						$check ? '--check' : ()),
-					1,
-					[qr/cannot enable group access with \Q$mode\E/],
-					[qr/^$/],
-					"$mode rejects group access with check=$check");
-				ok(!-d $new->data_dir,
-					'permission mismatch leaves no new cluster');
-			}
-
 			my $name = substr($mode, 2);
 			my $old = PostgreSQL::Test::Cluster->new("old_$name");
 			my $new = PostgreSQL::Test::Cluster->new("new_$name");

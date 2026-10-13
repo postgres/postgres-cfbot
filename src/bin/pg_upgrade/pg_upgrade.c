@@ -71,8 +71,8 @@ static void set_frozenxids(void);
 static void make_outputdirs(const char *output_root);
 static void setup(char *argv0);
 static void resolve_new_bindir(const char *argv0);
-static void prepare_new_cluster_initdb(const char *argv0);
-static void check_new_cluster_initdb_target(void);
+static bool prepare_new_cluster_initdb(const char *argv0);
+static bool check_new_cluster_initdb_target(void);
 static void get_old_cluster_initdb_info(void);
 static void build_new_cluster_initdb_cmd(PQExpBuffer cmd);
 static void create_new_cluster_via_initdb(void);
@@ -118,36 +118,23 @@ main(int argc, char **argv)
 	adjust_data_dir(&old_cluster);
 	adjust_data_dir(&new_cluster);
 
-	if (user_opts.initdb_new_cluster)
+	if (user_opts.initdb_new_cluster &&
+		prepare_new_cluster_initdb(argv[0]))
 	{
-		prepare_new_cluster_initdb(argv[0]);
-
 		/* Match output-file permissions to the cluster being inspected. */
 		if (!GetDataDirectoryCreatePerm(old_cluster.pgdata))
 			pg_fatal("could not read permissions of directory \"%s\": %m",
 					 old_cluster.pgdata);
 		umask(pg_mode_mask);
 
-#if !defined(WIN32) && !defined(__CYGWIN__)
-
 		/*
-		 * Link and swap preserve the old file permissions, so enabling group
-		 * access would leave transferred files unreadable by the group.
-		 * Changing permissions on hard links would also change the old
-		 * cluster.
+		 * Keep early logs in a temporary directory because initdb requires an
+		 * empty target directory.
 		 */
-		if (user_opts.initdb_allow_group_access &&
-			pg_dir_create_mode != PG_DIR_MODE_GROUP &&
-			(user_opts.transfer_mode == TRANSFER_MODE_LINK ||
-			 user_opts.transfer_mode == TRANSFER_MODE_SWAP))
-			pg_fatal("cannot enable group access with %s when the old cluster does not allow group access",
-					 user_opts.transfer_mode == TRANSFER_MODE_LINK ? "--link" : "--swap");
-#endif
-
-		/* The new cluster has not been initialized yet. */
 		make_outputdirs(".");
 
 		create_new_cluster_via_initdb();
+		cleanup_output_dirs();
 	}
 
 	/*
@@ -164,8 +151,7 @@ main(int argc, char **argv)
 	 * This needs to happen after adjusting the data directory of the new
 	 * cluster in adjust_data_dir().
 	 */
-	if (!user_opts.initdb_new_cluster)
-		make_outputdirs(new_cluster.pgdata);
+	make_outputdirs(new_cluster.pgdata);
 
 	setup(argv[0]);
 
@@ -279,18 +265,7 @@ main(int argc, char **argv)
 		stop_postmaster(false);
 	}
 
-	if (user_opts.do_sync)
-	{
-		prep_status("Sync data directory to disk");
-		exec_prog(UTILITY_LOG_FILE, NULL, true, true,
-				  "\"%s/initdb\" --sync-only %s \"%s\" --sync-method %s",
-				  new_cluster.bindir,
-				  (user_opts.transfer_mode == TRANSFER_MODE_SWAP) ?
-				  "--no-sync-data-files" : "",
-				  new_cluster.pgdata,
-				  user_opts.sync_method);
-		check_ok();
-	}
+	sync_new_cluster(user_opts.transfer_mode != TRANSFER_MODE_SWAP);
 
 	create_script_for_old_cluster_deletion(&deletion_script_file_name);
 
@@ -311,6 +286,28 @@ main(int argc, char **argv)
 }
 
 /*
+ * Sync the new cluster after shutdown, unless --no-sync is specified.
+ * --check --initdb needs a full sync.  A completed --swap upgrade can skip
+ * syncing data files here because they have already been synced.
+ */
+void
+sync_new_cluster(bool sync_data_files)
+{
+	if (!user_opts.do_sync)
+		return;
+
+	prep_status("Sync data directory to disk");
+	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
+			  "\"%s/initdb\" --sync-only %s \"%s\" --sync-method %s",
+			  new_cluster.bindir,
+			  sync_data_files ? "" : "--no-sync-data-files",
+			  new_cluster.pgdata,
+			  user_opts.sync_method);
+	check_ok();
+}
+
+
+/*
  * Create and assign proper permissions to the set of output directories
  * used to store any data generated internally, filling in log_opts in
  * the process.
@@ -327,6 +324,7 @@ make_outputdirs(const char *output_root)
 	time_t		tt;
 	int			len;
 
+	pg_free(log_opts.rootdir);
 	log_opts.rootdir = (char *) pg_malloc0(MAXPGPATH);
 	len = snprintf(log_opts.rootdir, MAXPGPATH, "%s/%s", output_root, BASE_OUTPUTDIR);
 	if (len >= MAXPGPATH)
@@ -339,6 +337,7 @@ make_outputdirs(const char *output_root)
 	/* append milliseconds */
 	snprintf(timebuf + strlen(timebuf), sizeof(timebuf) - strlen(timebuf),
 			 ".%03d", (int) (time.tv_usec / 1000));
+	pg_free(log_opts.basedir);
 	log_opts.basedir = (char *) pg_malloc0(MAXPGPATH);
 	len = snprintf(log_opts.basedir, MAXPGPATH, "%s/%s", log_opts.rootdir,
 				   timebuf);
@@ -346,6 +345,7 @@ make_outputdirs(const char *output_root)
 		pg_fatal("directory path for new cluster is too long");
 
 	/* BASE_OUTPUTDIR/$timestamp/dump/ */
+	pg_free(log_opts.dumpdir);
 	log_opts.dumpdir = (char *) pg_malloc0(MAXPGPATH);
 	len = snprintf(log_opts.dumpdir, MAXPGPATH, "%s/%s/%s", log_opts.rootdir,
 				   timebuf, DUMP_OUTPUTDIR);
@@ -353,6 +353,7 @@ make_outputdirs(const char *output_root)
 		pg_fatal("directory path for new cluster is too long");
 
 	/* BASE_OUTPUTDIR/$timestamp/log/ */
+	pg_free(log_opts.logdir);
 	log_opts.logdir = (char *) pg_malloc0(MAXPGPATH);
 	len = snprintf(log_opts.logdir, MAXPGPATH, "%s/%s/%s", log_opts.rootdir,
 				   timebuf, LOG_OUTPUTDIR);
@@ -425,24 +426,25 @@ resolve_new_bindir(const char *argv0)
 
 
 /*
- * Validate the new binaries and target directory before creating output
- * files or starting either cluster.
+ * Validate the new binaries and decide whether initdb is needed before
+ * creating output files or starting either cluster.
  */
-static void
+static bool
 prepare_new_cluster_initdb(const char *argv0)
 {
 	check_pghost_envvar();
 	resolve_new_bindir(argv0);
 	check_bin_dir(&new_cluster, true);
-	check_new_cluster_initdb_target();
+	return check_new_cluster_initdb_target();
 }
 
 
 /*
- * Require an empty or nonexistent new data directory and reject overlap
- * with pg_upgrade_output.d.
+ * For --check, reuse a nonempty target and let the normal cluster checks
+ * validate it.  Otherwise, require an empty or nonexistent directory that
+ * does not overlap pg_upgrade_output.d.
  */
-static void
+static bool
 check_new_cluster_initdb_target(void)
 {
 	char	   *absolute_pgdata;
@@ -450,9 +452,19 @@ check_new_cluster_initdb_target(void)
 	int			dir_status = pg_check_dir(new_cluster.pgdata);
 
 	if (dir_status > 1)
+	{
+		if (user_opts.check)
+		{
+			pg_log(PG_REPORT,
+				   "Using existing new cluster data directory \"%s\"; "
+				   "skipping initdb and --initdb-options.",
+				   new_cluster.pgdata);
+			return false;
+		}
 		pg_fatal("new cluster data directory \"%s\" is not empty; "
 				 "--initdb requires an empty or nonexistent directory",
 				 new_cluster.pgdata);
+	}
 	else if (dir_status < 0)
 		pg_fatal("could not access directory \"%s\": %m", new_cluster.pgdata);
 
@@ -467,6 +479,7 @@ check_new_cluster_initdb_target(void)
 				 absolute_pgdata, absolute_outputdir);
 	free(absolute_pgdata);
 	free(absolute_outputdir);
+	return true;
 }
 
 
@@ -537,8 +550,6 @@ build_new_cluster_initdb_cmd(PQExpBuffer cmd)
 	appendShellString(cmd, new_cluster.pgdata);
 	appendPQExpBufferStr(cmd, " -U ");
 	appendShellString(cmd, os_info.user);
-	if (pg_dir_create_mode == PG_DIR_MODE_GROUP)
-		appendPQExpBufferStr(cmd, " --allow-group-access");
 	appendPQExpBuffer(cmd, " --wal-segsize=%u",
 					  old_cluster.controldata.walseg / (1024 * 1024));
 
