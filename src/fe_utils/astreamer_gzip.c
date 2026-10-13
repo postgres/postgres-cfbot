@@ -34,6 +34,7 @@
 
 #include "common/logging.h"
 #include "fe_utils/astreamer.h"
+#include "fe_utils/gzip.h"
 
 #ifdef HAVE_LIBZ
 typedef struct astreamer_gzip_writer
@@ -46,9 +47,8 @@ typedef struct astreamer_gzip_writer
 typedef struct astreamer_gzip_decompressor
 {
 	astreamer	base;
-	z_stream	zstream;
+	GzipDecompressor decoder;
 	size_t		bytes_written;
-	astreamer_decompression_state state;
 } astreamer_gzip_decompressor;
 
 static void astreamer_gzip_writer_content(astreamer *streamer,
@@ -71,8 +71,6 @@ static void astreamer_gzip_decompressor_content(astreamer *streamer,
 												astreamer_archive_context context);
 static void astreamer_gzip_decompressor_finalize(astreamer *streamer);
 static void astreamer_gzip_decompressor_free(astreamer *streamer);
-static void *gzip_palloc(void *opaque, unsigned items, unsigned size);
-static void gzip_pfree(void *opaque, void *address);
 
 static const astreamer_ops astreamer_gzip_decompressor_ops = {
 	.content = astreamer_gzip_decompressor_content,
@@ -238,7 +236,6 @@ astreamer_gzip_decompressor_new(astreamer *next)
 {
 #ifdef HAVE_LIBZ
 	astreamer_gzip_decompressor *streamer;
-	z_stream   *zs;
 
 	Assert(next != NULL);
 
@@ -251,27 +248,9 @@ astreamer_gzip_decompressor_new(astreamer *next)
 	/* Use a buffer size comparable to the other decompressors */
 	enlargeStringInfo(&streamer->base.bbs_buffer, 256 * 1024 - 1);
 
-	/* Initialize internal stream state for decompression */
-	zs = &streamer->zstream;
-	zs->zalloc = gzip_palloc;
-	zs->zfree = gzip_pfree;
-	zs->next_out = (uint8 *) streamer->base.bbs_buffer.data;
-	zs->avail_out = streamer->base.bbs_buffer.maxlen;
-
-	/*
-	 * Data compression was initialized using deflateInit2 to request a gzip
-	 * header. Similarly, we are using inflateInit2 to initialize data
-	 * decompression.
-	 *
-	 * Per the documentation for inflateInit2, the second argument is
-	 * "windowBits" and its value must be greater than or equal to the value
-	 * provided while compressing the data, so we are using the maximum
-	 * possible value for safety.
-	 */
-	if (inflateInit2(zs, 15 + 16) != Z_OK)
-		pg_fatal("could not initialize compression library");
-
-	streamer->state = ASTREAMER_STREAM_NEW;
+	if (!gzip_decompressor_init(&streamer->decoder))
+		pg_fatal("could not initialize compression library: %s",
+				 streamer->decoder.error);
 	return &streamer->base;
 #else
 	pg_fatal("this build does not support compression with %s", "gzip");
@@ -292,90 +271,72 @@ astreamer_gzip_decompressor_content(astreamer *streamer,
 									astreamer_archive_context context)
 {
 	astreamer_gzip_decompressor *mystreamer;
-	z_stream   *zs;
 
 	mystreamer = (astreamer_gzip_decompressor *) streamer;
 
-	zs = &mystreamer->zstream;
-	zs->next_in = (const uint8 *) data;
-	zs->avail_in = len;
-
-	/* Process the current chunk */
-	while (zs->avail_in > 0)
+	for (;;)
 	{
-		int			res;
+		size_t		consumed;
+		size_t		produced;
+		GzipDecompressResult result;
 
-		Assert(mystreamer->bytes_written < mystreamer->base.bbs_buffer.maxlen);
+		result = gzip_decompressor_read(&mystreamer->decoder, data, len,
+										streamer->bbs_buffer.data + mystreamer->bytes_written,
+										streamer->bbs_buffer.maxlen - mystreamer->bytes_written,
+										false, &consumed, &produced);
+		if (result == GZIP_DECOMPRESS_ERROR)
+			pg_fatal("could not decompress data: %s", mystreamer->decoder.error);
 
-		zs->next_out = (uint8 *)
-			mystreamer->base.bbs_buffer.data + mystreamer->bytes_written;
-		zs->avail_out =
-			mystreamer->base.bbs_buffer.maxlen - mystreamer->bytes_written;
+		data += consumed;
+		len -= consumed;
+		mystreamer->bytes_written += produced;
 
-		/*
-		 * This call decompresses data starting at zs->next_in and updates
-		 * zs->next_in * and zs->avail_in. It generates output data starting
-		 * at zs->next_out and updates zs->next_out and zs->avail_out
-		 * accordingly.
-		 */
-		res = inflate(zs, Z_NO_FLUSH);
-
-		if (res == Z_STREAM_END)
-			mystreamer->state = ASTREAMER_FRAME_COMPLETE;
-		else if (res == Z_OK || res == Z_BUF_ERROR)
-			mystreamer->state = ASTREAMER_FRAME_INCOMPLETE;
-		else
-			pg_fatal("could not decompress data: %s",
-					 zs->msg ? zs->msg : "unknown error");
-
-		mystreamer->bytes_written =
-			mystreamer->base.bbs_buffer.maxlen - zs->avail_out;
-
-		/* If output buffer is full then pass data to next streamer */
-		if (mystreamer->bytes_written >= mystreamer->base.bbs_buffer.maxlen)
+		if (mystreamer->bytes_written == streamer->bbs_buffer.maxlen)
 		{
-			astreamer_content(mystreamer->base.bbs_next, member,
-							  mystreamer->base.bbs_buffer.data,
-							  mystreamer->base.bbs_buffer.maxlen, context);
+			astreamer_content(streamer->bbs_next, member,
+							  streamer->bbs_buffer.data,
+							  streamer->bbs_buffer.maxlen, context);
 			mystreamer->bytes_written = 0;
 		}
-
-		/*
-		 * The input can be several gzip members one after another, which is
-		 * what pg_basebackup writes for pg_wal.tar.gz.  Get ready for the
-		 * next one.
-		 */
-		if (res == Z_STREAM_END && inflateReset(zs) != Z_OK)
-			pg_fatal("could not reset compression stream");
+		else if (len == 0)
+			/* Output is not full and no more input, we're done */
+			break;
 	}
 }
 
 /*
- * End-of-stream processing.
+ * End-of-stream processing, including output still pending in the decoder.
  */
 static void
 astreamer_gzip_decompressor_finalize(astreamer *streamer)
 {
 	astreamer_gzip_decompressor *mystreamer;
+	GzipDecompressResult result;
 
 	mystreamer = (astreamer_gzip_decompressor *) streamer;
 
-	if (unlikely(mystreamer->state == ASTREAMER_STREAM_NEW))
-		pg_fatal("could not decompress data: compressed stream is empty");
-	else if (mystreamer->state != ASTREAMER_FRAME_COMPLETE)
-		pg_fatal("could not decompress data: compressed stream is incomplete");
+	do
+	{
+		size_t		consumed;
+		size_t		produced;
 
-	/*
-	 * End of the stream, if there is some pending data in output buffers then
-	 * we must forward it to next streamer.
-	 */
-	if (mystreamer->bytes_written > 0)
-		astreamer_content(mystreamer->base.bbs_next, NULL,
-						  mystreamer->base.bbs_buffer.data,
-						  mystreamer->bytes_written,
-						  ASTREAMER_UNKNOWN);
+		result = gzip_decompressor_read(&mystreamer->decoder, NULL, 0,
+										streamer->bbs_buffer.data + mystreamer->bytes_written,
+										streamer->bbs_buffer.maxlen - mystreamer->bytes_written,
+										true, &consumed, &produced);
+		if (result == GZIP_DECOMPRESS_ERROR)
+			pg_fatal("could not decompress data: %s", mystreamer->decoder.error);
+		mystreamer->bytes_written += produced;
+		if (mystreamer->bytes_written > 0)
+		{
+			astreamer_content(streamer->bbs_next, NULL,
+							  streamer->bbs_buffer.data,
+							  mystreamer->bytes_written, ASTREAMER_UNKNOWN);
+			mystreamer->bytes_written = 0;
+		}
+	} while (result != GZIP_DECOMPRESS_DONE);
 
-	astreamer_finalize(mystreamer->base.bbs_next);
+	astreamer_finalize(streamer->bbs_next);
 }
 
 /*
@@ -389,28 +350,10 @@ astreamer_gzip_decompressor_free(astreamer *streamer)
 	mystreamer = (astreamer_gzip_decompressor *) streamer;
 
 	astreamer_free(streamer->bbs_next);
-	inflateEnd(&mystreamer->zstream);
+	if (!gzip_decompressor_end(&mystreamer->decoder))
+		pg_fatal("could not decompress data: %s", mystreamer->decoder.error);
 	pfree(streamer->bbs_buffer.data);
 	pfree(streamer);
 }
 
-/*
- * Wrapper function to adjust the signature of palloc to match what libz
- * expects.
- */
-static void *
-gzip_palloc(void *opaque, unsigned items, unsigned size)
-{
-	return palloc(items * size);
-}
-
-/*
- * Wrapper function to adjust the signature of pfree to match what libz
- * expects.
- */
-static void
-gzip_pfree(void *opaque, void *address)
-{
-	pfree(address);
-}
 #endif
