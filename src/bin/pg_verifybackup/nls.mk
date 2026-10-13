@@ -12,7 +12,8 @@ GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    ../../fe_utils/astreamer_gzip.c \
                    ../../fe_utils/astreamer_lz4.c \
                    ../../fe_utils/astreamer_tar.c \
-                   ../../fe_utils/astreamer_zstd.c
+                   ../../fe_utils/astreamer_zstd.c \
+                   ../../fe_utils/gzip.c
 GETTEXT_TRIGGERS = $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \
                    json_token_error:2 \
                    json_manifest_parse_failure:2 \

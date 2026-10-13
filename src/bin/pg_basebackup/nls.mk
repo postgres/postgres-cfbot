@@ -19,6 +19,7 @@ GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    ../../fe_utils/astreamer_lz4.c \
                    ../../fe_utils/astreamer_tar.c \
                    ../../fe_utils/astreamer_zstd.c \
+                   ../../fe_utils/gzip.c \
                    ../../fe_utils/option_utils.c \
                    ../../fe_utils/recovery_gen.c \
                    ../../fe_utils/string_utils.c \

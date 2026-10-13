@@ -10,6 +10,7 @@ fe_utils_sources = files(
   'cancel.c',
   'conditional.c',
   'connect_utils.c',
+  'gzip.c',
   'mbprint.c',
   'option_utils.c',
   'parallel_slot.c',
