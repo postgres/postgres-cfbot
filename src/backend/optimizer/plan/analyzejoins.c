@@ -1279,6 +1279,13 @@ remove_self_join_rel(PlannerInfo *root,
 	 */
 	root->simple_rte_array[toRemove->relid]->securityQuals = NIL;
 
+	/*
+	 * As in remove_useless_outer_joins, discard the securityQuals of the
+	 * removed rel, so that later passes don't visit them.  The kept rel has
+	 * the same ones.
+	 */
+	root->simple_rte_array[toRemove->relid]->securityQuals = NIL;
+
 	/* Clean up the quals that the substitution has messed with */
 	fixup_selfjoin_jointree(root, (Node *) root->parse->jointree,
 							toKeep->relid,
