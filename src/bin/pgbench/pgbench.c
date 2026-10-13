@@ -129,6 +129,7 @@ usage(void)
 		   "  --failures-detailed      report the failures grouped by basic types\n"
 		   "  --group=SPEC             define a client group (name=...,clients=...,threads=...,\n"
 		   "                           file=...,builtin=...,sequential=...,rate=...)\n"
+		   "  --json-report=FILENAME   write structured JSON benchmark report to FILENAME\n"
 		   "  --log-prefix=PREFIX      prefix for transaction time log file\n"
 		   "                           (default: \"pgbench_log\")\n"
 		   "  --max-tries=NUM          max number of tries to run transaction (default: 1)\n"
@@ -136,6 +137,7 @@ usage(void)
 		   "  --random-seed=SEED       set random seed (\"time\", \"rand\", integer)\n"
 		   "  --sampling-rate=NUM      fraction of transactions to log (e.g., 0.01 for 1%%)\n"
 		   "  --show-script=NAME       show builtin script code, then exit\n"
+		   "  --sla=SPEC               define SLA latency threshold (<target>:p<pct><=<val>[us|ms|s])\n"
 		   "  --verbose-errors         print messages of all errors\n"
 		   "\nCommon options:\n"
 		   "  --debug                  print debugging output\n"
@@ -284,6 +286,66 @@ parseGroupSpec(const char *spec, bool *internal_script_used)
 	num_groups++;
 }
 
+/*
+ * Parse an SLA specification of the form:
+ *   <target>:p<pct><=<val>[us|ms|s]
+ */
+static void
+parseSlaSpec(const char *spec)
+{
+	SlaRule    *rule;
+	const char *colon;
+	const char *le;
+	char	   *endp;
+	double		pct;
+	double		val;
+	double		mult = 1000.0;
+
+	if (num_slas >= MAX_SLAS)
+		pg_fatal("at most %d SLA rules are allowed", MAX_SLAS);
+
+	colon = strrchr(spec, ':');
+	if (colon == NULL || colon == spec || (colon[1] != 'p' && colon[1] != 'P'))
+		pg_fatal("invalid --sla specification: \"%s\" (expected <target>:p<pct><=<val>[us|ms|s])",
+				 spec);
+
+	le = strstr(colon + 2, "<=");
+	if (le == NULL || le == colon + 2 || *(le + 2) == '\0')
+		pg_fatal("invalid --sla specification: \"%s\" (expected <target>:p<pct><=<val>[us|ms|s])",
+				 spec);
+
+	errno = 0;
+	pct = strtod(colon + 2, &endp);
+	if (errno != 0 || endp != le || pct <= 0.0 || pct > 100.0)
+		pg_fatal("invalid percentile in --sla specification: \"%s\"", spec);
+
+	errno = 0;
+	val = strtod(le + 2, &endp);
+	if (errno != 0 || endp == le + 2 || val <= 0.0)
+		pg_fatal("invalid threshold value in --sla specification: \"%s\"", spec);
+
+	while (isspace((unsigned char) *endp))
+		endp++;
+
+	if (*endp == '\0' || pg_strcasecmp(endp, "ms") == 0)
+		mult = 1000.0;
+	else if (pg_strcasecmp(endp, "us") == 0)
+		mult = 1.0;
+	else if (pg_strcasecmp(endp, "s") == 0)
+		mult = 1000000.0;
+	else
+		pg_fatal("invalid unit \"%s\" in --sla specification: \"%s\"",
+				 endp, spec);
+
+	rule = &sla_rules[num_slas++];
+	rule->target = pnstrdup(spec, colon - spec);
+	rule->percentile = pct;
+	rule->threshold_usec = val * mult;
+	rule->actual_usec = 0.0;
+	rule->evaluated = false;
+	rule->passed = false;
+}
+
 
 /*
  * Set up a random seed according to seed parameter (NULL means default),
@@ -383,6 +445,8 @@ main(int argc, char **argv)
 		{"debug", no_argument, NULL, 17},
 		{"continue-on-error", no_argument, NULL, 18},
 		{"group", required_argument, NULL, 19},
+		{"sla", required_argument, NULL, 20},
+		{"json-report", required_argument, NULL, 21},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -747,6 +811,15 @@ main(int argc, char **argv)
 				benchmarking_option_set = true;
 				parseGroupSpec(optarg, &internal_script_used);
 				break;
+			case 20:			/* sla */
+				benchmarking_option_set = true;
+				parseSlaSpec(optarg);
+				break;
+			case 21:			/* json-report */
+				benchmarking_option_set = true;
+				pg_free(json_report_file);
+				json_report_file = pg_strdup(optarg);
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -813,8 +886,8 @@ main(int argc, char **argv)
 	if (total_weight == 0 && !is_init_mode)
 		pg_fatal("total script weight must not be zero");
 
-	/* show per script stats if several scripts or client groups are used */
-	if (num_scripts > 1 || num_groups > 0)
+	/* show per script stats if several scripts, groups, SLAs, or JSON report are used */
+	if (num_scripts > 1 || num_groups > 0 || num_slas > 0 || json_report_file != NULL)
 		per_script_stats = true;
 
 	/*
@@ -1229,6 +1302,11 @@ main(int argc, char **argv)
 
 	if (exit_code != 0)
 		pg_log_error("Run was aborted; the above results are incomplete.");
+	else if (sla_failed)
+	{
+		pg_log_error("One or more SLA compliance checks failed.");
+		exit_code = 1;
+	}
 
 	return exit_code;
 }

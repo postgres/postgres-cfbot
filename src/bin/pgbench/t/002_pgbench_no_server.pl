@@ -249,6 +249,21 @@ my @options = (
 		'--group bad rate',
 		'--group name=g1,builtin=select-only,rate=0',
 		[qr{invalid rate limit in --group}]
+	],
+	[
+		'bad --sla format',
+		'--sla bad_spec',
+		[qr{invalid --sla specification}]
+	],
+	[
+		'bad --sla percentile',
+		'--sla total:p105<=5s',
+		[qr{invalid percentile in --sla specification}]
+	],
+	[
+		'bad --sla unit',
+		'--sla total:p90<=5minutes',
+		[qr{invalid unit "minutes" in --sla specification}]
 	],);
 
 for my $o (@options)

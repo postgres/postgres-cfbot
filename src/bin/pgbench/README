@@ -141,3 +141,44 @@ Heterogeneous Client Groups & Sequential Streams (pgbench.c, engine.c)
   - `chooseScriptForClient()` restricts script selection to the group's
     `script_indices[]`.  When `sequential=true`, scripts are chosen via
     `pgbench_permute(st->seq_counter++, grp->num_scripts, st->stream_id + 1)`.
+
+HDR Latency Histogram, SLA Validation & JSON Reporting (stats.c, engine.c)
+--------------------------------------------------------------------------
+- `StatsData` embeds a 3,968-bucket sub-bucketed base-2 HDR latency histogram
+  (`HDR_SUB_BITS = 7`, 128 sub-buckets per power-of-2 octave across 31 octaves).
+  Recording a sample (`accumStats()`) uses `pg_leftmost_one_pos64()` in O(1)
+  time with zero heap allocations, and `mergeStats()` sums bucket counts across
+  threads, client groups, and scripts.
+- `getLatencyPercentile()` interpolates within the target sub-bucket to bounded
+  ~0.78% relative error for `p50`, `p90`, `p95`, `p99`, `p99.9`, or arbitrary
+  `--sla` percentiles.
+- `printResults()` evaluates all `sla_rules[]`, derives `tpmC` and `QphH@SF`,
+  and optionally writes the structured JSON report via `writeJsonReport()`.
+
+How to Add a New Built-in Function or Meta-Command
+--------------------------------------------------
+To add a new built-in script function:
+  1. If backend-reusable, implement the core routine in
+     `src/common/pgbench_funcs.c` and `src/include/common/pgbench_funcs.h`.
+  2. Add a `PGBENCH_*` enum value to `PgBenchFunction` in `src/bin/pgbench/pgbench.h`.
+  3. Register the function name and arity in `PGBENCH_FUNCTIONS[]` in `script.c`.
+  4. Implement its evaluation case in `evalStandardFunc()` in `script.c`.
+  5. Document it in `doc/src/sgml/ref/pgbench.sgml` and add TAP tests in
+     `src/bin/pgbench/t/001_pgbench_with_server.pl`.
+
+To add a new backslash meta-command:
+  1. Add a `META_*` enum value to `MetaCommand` in `src/bin/pgbench/script.h`.
+  2. Parse its syntax in `process_backslash_command()` in `script.c` (and link
+     any control-flow targets in `parseScript()`).
+  3. Implement `handle_cmd_<name>()` and register it in `command_descriptors[]`
+     in `src/bin/pgbench/commands.c`.
+  4. Document it in `doc/src/sgml/ref/pgbench.sgml` and add tests in `t/`.
+
+Running the Test Suites
+-----------------------
+- TAP tests for `src/bin/pgbench`:
+    make -C src/bin/pgbench check
+- SQL regression tests for `contrib/pgbench`:
+    make -C contrib/pgbench check
+- SGML documentation validation:
+    make -C doc/src/sgml check

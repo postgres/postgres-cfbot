@@ -118,6 +118,12 @@ typedef struct StatsData
 	SimpleStats lag;
 	SimpleStats keying_time;
 	SimpleStats think_time;
+#define HDR_SUB_BITS		7
+#define HDR_SUB_COUNT		(1 << HDR_SUB_BITS)
+#define HDR_MAX_OCTAVE		29
+#define HDR_TOTAL_BUCKETS	((HDR_MAX_OCTAVE + 2) * HDR_SUB_COUNT)
+	int64		hist_count;
+	int64		hist_buckets[HDR_TOTAL_BUCKETS];
 } StatsData;
 
 /*
@@ -164,5 +170,7 @@ extern void mergeStats(StatsData *acc, const StatsData *src);
 extern int64 getFailures(const StatsData *stats);
 extern const char *getResultString(bool tx_skipped, EStatus estatus, bool failures_detailed);
 extern void printSimpleStats(const char *prefix, const SimpleStats *ss);
+extern double getLatencyPercentile(const StatsData *stats, double pct);
+extern void printLatencyPercentiles(const char *prefix, const StatsData *stats);
 
 #endif							/* STATS_H */

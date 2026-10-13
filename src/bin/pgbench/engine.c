@@ -31,6 +31,10 @@
 
 ClientGroup client_groups[MAX_GROUPS];
 int	num_groups = 0;
+SlaRule sla_rules[MAX_SLAS];
+int	num_slas = 0;
+bool sla_failed = false;
+char *json_report_file = NULL;
 
 int	nxacts = 0;			/* number of transactions per client */
 int	duration = 0;		/* duration in seconds */
@@ -1727,7 +1731,8 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	double		eff_throttle_delay = getThreadThrottleDelay(thread);
 	bool		has_pacing = (st->has_keying_time || st->has_think_time);
 	bool		detailed = progress || eff_throttle_delay > 0 || latency_limit ||
-		use_log || per_script_stats || num_groups > 0 || has_pacing;
+		use_log || per_script_stats || num_groups > 0 || num_slas > 0 ||
+		json_report_file != NULL || has_pacing;
 
 	if (detailed && !tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
@@ -1913,6 +1918,52 @@ printVersion(PGconn *con)
 	fflush(stdout);
 }
 
+/*
+ * Print a JSON-escaped double-quoted string to fp.
+ */
+static void
+fprintJsonString(FILE *fp, const char *str)
+{
+	fputc('"', fp);
+	if (str != NULL)
+	{
+		for (const unsigned char *p = (const unsigned char *) str; *p != '\0'; p++)
+		{
+			switch (*p)
+			{
+				case '"':
+					fputs("\\\"", fp);
+					break;
+				case '\\':
+					fputs("\\\\", fp);
+					break;
+				case '\b':
+					fputs("\\b", fp);
+					break;
+				case '\f':
+					fputs("\\f", fp);
+					break;
+				case '\n':
+					fputs("\\n", fp);
+					break;
+				case '\r':
+					fputs("\\r", fp);
+					break;
+				case '\t':
+					fputs("\\t", fp);
+					break;
+				default:
+					if (*p < 0x20)
+						fprintf(fp, "\\u%04x", (unsigned int) *p);
+					else
+						fputc(*p, fp);
+					break;
+			}
+		}
+	}
+	fputc('"', fp);
+}
+
 /* print out results */
 void
 printResults(StatsData *total,
@@ -2002,8 +2053,12 @@ printResults(StatsData *total,
 			   (total->cnt > 0) ? 100.0 * latency_late / total->cnt : 0.0);
 
 	if (throttle_delay || progress || latency_limit || num_groups > 0 ||
+		num_slas > 0 || json_report_file != NULL ||
 		total->keying_time.count > 0 || total->think_time.count > 0)
+	{
 		printSimpleStats("latency", &total->latency);
+		printLatencyPercentiles("latency percentiles", total);
+	}
 	else
 	{
 		/* no measurement, show average latency computed from run time */
@@ -2075,6 +2130,7 @@ printResults(StatsData *total,
 						   gstats->expected_rollbacks,
 						   100.0 * gstats->expected_rollbacks / g_total_cnt);
 				printSimpleStats(" - latency", &gstats->latency);
+				printLatencyPercentiles(" - latency percentiles", gstats);
 				if (gstats->keying_time.count > 0)
 					printSimpleStats(" - keying time", &gstats->keying_time);
 				if (gstats->think_time.count > 0)
@@ -2156,6 +2212,7 @@ printResults(StatsData *total,
 
 				}
 				printSimpleStats(" - latency", &sstats->latency);
+				printLatencyPercentiles(" - latency percentiles", sstats);
 				if (sstats->keying_time.count > 0)
 					printSimpleStats(" - keying time", &sstats->keying_time);
 				if (sstats->think_time.count > 0)
@@ -2197,6 +2254,251 @@ printResults(StatsData *total,
 							   (*commands)->first_line);
 				}
 			}
+		}
+	}
+
+	/*
+	 * Compute and report standard composite metrics (tpmC and QphH@SF) when
+	 * matching scripts or sequential OLAP streams are present.
+	 */
+	{
+		int64		new_order_cnt = 0;
+		bool		has_tpmc = false;
+		double		tpmc = 0.0;
+		int64		tpch_query_cnt = 0;
+		bool		has_qphh = false;
+		double		qphh = 0.0;
+
+		for (int i = 0; i < num_scripts; i++)
+		{
+			const char *desc = sql_script[i].desc;
+
+			if (strstr(desc, "new_order") != NULL ||
+				strstr(desc, "new-order") != NULL ||
+				strstr(desc, "NewOrder") != NULL)
+			{
+				has_tpmc = true;
+				new_order_cnt += (per_script_stats ? sql_script[i].stats.cnt : total->cnt);
+			}
+		}
+
+		for (int g = 0; g < num_groups; g++)
+		{
+			if (client_groups[g].sequential)
+			{
+				has_qphh = true;
+				tpch_query_cnt += client_groups[g].stats.cnt;
+			}
+		}
+		if (!has_qphh)
+		{
+			for (int i = 0; i < num_scripts; i++)
+			{
+				const char *desc = sql_script[i].desc;
+
+				if (strstr(desc, "tpch") != NULL || strstr(desc, "qphh") != NULL)
+				{
+					has_qphh = true;
+					tpch_query_cnt += (per_script_stats ? sql_script[i].stats.cnt : total->cnt);
+				}
+			}
+		}
+
+		if (has_tpmc && bench_duration > 0.0)
+		{
+			tpmc = (new_order_cnt * 60.0) / bench_duration;
+			printf("tpmC = %.2f (New-Order transactions: " INT64_FORMAT ")\n",
+				   tpmc, new_order_cnt);
+		}
+		if (has_qphh && bench_duration > 0.0)
+		{
+			qphh = (tpch_query_cnt * 3600.0) / bench_duration;
+			printf("QphH@SF%d = %.2f (queries: " INT64_FORMAT ")\n",
+				   scale, qphh, tpch_query_cnt);
+		}
+
+		/* Evaluate and report SLA compliance rules */
+		if (num_slas > 0)
+		{
+			printf("SLA compliance:\n");
+			for (int k = 0; k < num_slas; k++)
+			{
+				SlaRule    *rule = &sla_rules[k];
+				StatsData	matched;
+				bool		found = false;
+
+				initStats(&matched, 0);
+
+				if (pg_strcasecmp(rule->target, "total") == 0 ||
+					pg_strcasecmp(rule->target, "all") == 0 ||
+					strcmp(rule->target, "*") == 0)
+				{
+					mergeStats(&matched, total);
+					found = true;
+				}
+				else
+				{
+					for (int g = 0; g < num_groups; g++)
+					{
+						if (strcmp(client_groups[g].name, rule->target) == 0)
+						{
+							mergeStats(&matched, &client_groups[g].stats);
+							found = true;
+						}
+					}
+					if (!found)
+					{
+						for (int i = 0; i < num_scripts; i++)
+						{
+							if (strcmp(sql_script[i].desc, rule->target) == 0 ||
+								strstr(sql_script[i].desc, rule->target) != NULL)
+							{
+								mergeStats(&matched,
+										   per_script_stats ? &sql_script[i].stats : total);
+								found = true;
+							}
+						}
+					}
+				}
+
+				rule->evaluated = (found && matched.hist_count > 0);
+				rule->actual_usec = rule->evaluated ?
+					getLatencyPercentile(&matched, rule->percentile) : 0.0;
+				rule->passed = (rule->evaluated &&
+								rule->actual_usec <= rule->threshold_usec);
+				if (!rule->passed)
+					sla_failed = true;
+
+				printf(" - SLA %s:p%g <= %.3f ms: actual = %.3f ms [%s]\n",
+					   rule->target,
+					   rule->percentile,
+					   0.001 * rule->threshold_usec,
+					   0.001 * rule->actual_usec,
+					   rule->passed ? "PASS" : "FAIL");
+			}
+		}
+
+		/* Export structured JSON telemetry report if requested */
+		if (json_report_file != NULL)
+		{
+			FILE	   *jfp = fopen(json_report_file, "w");
+
+			if (jfp == NULL)
+				pg_fatal("could not open JSON report file \"%s\": %m",
+						 json_report_file);
+
+			fprintf(jfp, "{\n");
+			fprintf(jfp, "  \"configuration\": {\n");
+			fprintf(jfp, "    \"scale\": %d,\n", scale);
+			fprintf(jfp, "    \"clients\": %d,\n", nclients);
+			fprintf(jfp, "    \"threads\": %d,\n", nthreads);
+			fprintf(jfp, "    \"duration_sec\": %d,\n", duration);
+			fprintf(jfp, "    \"transactions_per_client\": %d,\n", nxacts);
+			fprintf(jfp, "    \"query_mode\": \"%s\"\n", QUERYMODE[querymode]);
+			fprintf(jfp, "  },\n");
+
+			fprintf(jfp, "  \"overall\": {\n");
+			fprintf(jfp, "    \"transactions_processed\": " INT64_FORMAT ",\n", total->cnt);
+			fprintf(jfp, "    \"transactions_failed\": " INT64_FORMAT ",\n", failures);
+			fprintf(jfp, "    \"expected_rollbacks\": " INT64_FORMAT ",\n", total->expected_rollbacks);
+			fprintf(jfp, "    \"transactions_skipped\": " INT64_FORMAT ",\n", total->cnt_skipped);
+			fprintf(jfp, "    \"duration_sec\": %.6f,\n", bench_duration);
+			fprintf(jfp, "    \"tps\": %.6f,\n", tps);
+			fprintf(jfp, "    \"latency_ms\": {\n");
+			fprintf(jfp, "      \"avg\": %.3f,\n",
+					total->latency.count > 0 ? 0.001 * total->latency.sum / total->latency.count : 0.0);
+			fprintf(jfp, "      \"min\": %.3f,\n", 0.001 * total->latency.min);
+			fprintf(jfp, "      \"max\": %.3f,\n", 0.001 * total->latency.max);
+			fprintf(jfp, "      \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(total, 50.0));
+			fprintf(jfp, "      \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(total, 90.0));
+			fprintf(jfp, "      \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(total, 95.0));
+			fprintf(jfp, "      \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(total, 99.0));
+			fprintf(jfp, "      \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(total, 99.9));
+			fprintf(jfp, "    }\n");
+			fprintf(jfp, "  },\n");
+
+			fprintf(jfp, "  \"composite_metrics\": {\n");
+			fprintf(jfp, "    \"tpmC\": %.2f,\n", tpmc);
+			fprintf(jfp, "    \"QphH\": %.2f\n", qphh);
+			fprintf(jfp, "  },\n");
+
+			fprintf(jfp, "  \"groups\": [\n");
+			for (int g = 0; g < num_groups; g++)
+			{
+				ClientGroup *grp = &client_groups[g];
+				StatsData  *gs = &grp->stats;
+
+				fprintf(jfp, "    {\n");
+				fprintf(jfp, "      \"name\": ");
+				fprintJsonString(jfp, grp->name);
+				fprintf(jfp, ",\n");
+				fprintf(jfp, "      \"clients\": %d,\n", grp->nclients);
+				fprintf(jfp, "      \"threads\": %d,\n", grp->nthreads);
+				fprintf(jfp, "      \"sequential\": %s,\n", grp->sequential ? "true" : "false");
+				fprintf(jfp, "      \"transactions_processed\": " INT64_FORMAT ",\n", gs->cnt);
+				fprintf(jfp, "      \"transactions_failed\": " INT64_FORMAT ",\n", getFailures(gs));
+				fprintf(jfp, "      \"expected_rollbacks\": " INT64_FORMAT ",\n", gs->expected_rollbacks);
+				fprintf(jfp, "      \"tps\": %.6f,\n", bench_duration > 0 ? gs->cnt / bench_duration : 0.0);
+				fprintf(jfp, "      \"latency_ms\": {\n");
+				fprintf(jfp, "        \"avg\": %.3f,\n",
+						gs->latency.count > 0 ? 0.001 * gs->latency.sum / gs->latency.count : 0.0);
+				fprintf(jfp, "        \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 50.0));
+				fprintf(jfp, "        \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 90.0));
+				fprintf(jfp, "        \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 95.0));
+				fprintf(jfp, "        \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 99.0));
+				fprintf(jfp, "        \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(gs, 99.9));
+				fprintf(jfp, "      }\n");
+				fprintf(jfp, "    }%s\n", (g + 1 < num_groups) ? "," : "");
+			}
+			fprintf(jfp, "  ],\n");
+
+			fprintf(jfp, "  \"scripts\": [\n");
+			for (int i = 0; i < num_scripts; i++)
+			{
+				StatsData  *ss = per_script_stats ? &sql_script[i].stats : total;
+
+				fprintf(jfp, "    {\n");
+				fprintf(jfp, "      \"index\": %d,\n", i + 1);
+				fprintf(jfp, "      \"name\": ");
+				fprintJsonString(jfp, sql_script[i].desc);
+				fprintf(jfp, ",\n");
+				fprintf(jfp, "      \"weight\": %d,\n", sql_script[i].weight);
+				fprintf(jfp, "      \"transactions_processed\": " INT64_FORMAT ",\n", ss->cnt);
+				fprintf(jfp, "      \"transactions_failed\": " INT64_FORMAT ",\n", getFailures(ss));
+				fprintf(jfp, "      \"expected_rollbacks\": " INT64_FORMAT ",\n", ss->expected_rollbacks);
+				fprintf(jfp, "      \"tps\": %.6f,\n", bench_duration > 0 ? ss->cnt / bench_duration : 0.0);
+				fprintf(jfp, "      \"latency_ms\": {\n");
+				fprintf(jfp, "        \"avg\": %.3f,\n",
+						ss->latency.count > 0 ? 0.001 * ss->latency.sum / ss->latency.count : 0.0);
+				fprintf(jfp, "        \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 50.0));
+				fprintf(jfp, "        \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 90.0));
+				fprintf(jfp, "        \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 95.0));
+				fprintf(jfp, "        \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 99.0));
+				fprintf(jfp, "        \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(ss, 99.9));
+				fprintf(jfp, "      }\n");
+				fprintf(jfp, "    }%s\n", (i + 1 < num_scripts) ? "," : "");
+			}
+			fprintf(jfp, "  ],\n");
+
+			fprintf(jfp, "  \"sla_verifications\": [\n");
+			for (int k = 0; k < num_slas; k++)
+			{
+				SlaRule    *rule = &sla_rules[k];
+
+				fprintf(jfp, "    {\n");
+				fprintf(jfp, "      \"target\": ");
+				fprintJsonString(jfp, rule->target);
+				fprintf(jfp, ",\n");
+				fprintf(jfp, "      \"percentile\": %g,\n", rule->percentile);
+				fprintf(jfp, "      \"threshold_ms\": %.3f,\n", 0.001 * rule->threshold_usec);
+				fprintf(jfp, "      \"actual_ms\": %.3f,\n", 0.001 * rule->actual_usec);
+				fprintf(jfp, "      \"passed\": %s\n", rule->passed ? "true" : "false");
+				fprintf(jfp, "    }%s\n", (k + 1 < num_slas) ? "," : "");
+			}
+			fprintf(jfp, "  ],\n");
+			fprintf(jfp, "  \"sla_all_passed\": %s\n", sla_failed ? "false" : "true");
+			fprintf(jfp, "}\n");
+			fclose(jfp);
 		}
 	}
 }

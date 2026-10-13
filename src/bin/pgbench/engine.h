@@ -132,8 +132,27 @@ typedef struct
 	int64		latency_late;	/* count executed but late transactions */
 } TState;
 
+#define MAX_SLAS		64		/* max number of SLA rules */
+
+/*
+ * SLA compliance rule (--sla <target>:p<pct><=<val>[us|ms|s]).
+ */
+typedef struct SlaRule
+{
+	char	   *target;			/* script name/substring, group name, or "total" */
+	double		percentile;		/* e.g. 50.0, 90.0, 95.0, 99.0, 99.9 */
+	double		threshold_usec; /* max allowed latency in microseconds */
+	double		actual_usec;	/* measured latency in microseconds */
+	bool		evaluated;		/* true if target matched at least 1 xact */
+	bool		passed;			/* true if evaluated and actual <= threshold */
+} SlaRule;
+
 extern ClientGroup client_groups[MAX_GROUPS];
 extern int	num_groups;
+extern SlaRule sla_rules[MAX_SLAS];
+extern int	num_slas;
+extern bool sla_failed;
+extern char *json_report_file;
 
 extern int	nxacts;
 extern int	duration;

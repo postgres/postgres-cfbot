@@ -888,6 +888,23 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
        </listitem>
      </varlistentry>
 
+     <varlistentry id="pgbench-option-json-report">
+       <term><option>--json-report=<replaceable>filename</replaceable></option></term>
+       <listitem>
+        <para>
+         Write a structured JSON benchmark report to
+         <replaceable>filename</replaceable> upon completion.  The JSON report
+         includes benchmark configuration, overall summary statistics, HDR
+         latency percentiles (<literal>p50</literal>, <literal>p90</literal>,
+         <literal>p95</literal>, <literal>p99</literal>, <literal>p99.9</literal>),
+         composite metrics (<literal>tpmC</literal>, <literal>QphH</literal>),
+         per-group statistics, per-script statistics, and SLA compliance
+         results.  See <xref linkend="pgbench-percentiles-sla-and-reporting"/>
+         for details.
+        </para>
+       </listitem>
+     </varlistentry>
+
      <varlistentry id="pgbench-option-log-prefix">
       <term><option>--log-prefix=<replaceable>prefix</replaceable></option></term>
       <listitem>
@@ -993,6 +1010,31 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       </listitem>
      </varlistentry>
 
+     <varlistentry id="pgbench-option-sla">
+       <term><option>--sla=<replaceable>spec</replaceable></option></term>
+       <listitem>
+        <para>
+         Specify a latency Service Level Agreement (SLA) threshold to verify at
+         the end of the benchmark run.  This option may be repeated to enforce
+         multiple SLA rules.  <replaceable>spec</replaceable> has the form
+         <literal><replaceable>target</replaceable>:p<replaceable>percentile</replaceable>&lt;=<replaceable>value</replaceable>[us|ms|s]</literal>,
+         where <replaceable>target</replaceable> is <literal>total</literal>
+         (or <literal>overall</literal> / <literal>*</literal>), a client group
+         name, or a script name (or unambiguous substring),
+         <replaceable>percentile</replaceable> is a percentile in
+         <literal>(0, 100]</literal> (such as <literal>90</literal>,
+         <literal>95</literal>, <literal>99</literal>, or
+         <literal>99.9</literal>), and <replaceable>value</replaceable> is the
+         maximum allowed latency (default unit <literal>ms</literal>).
+        </para>
+        <para>
+         If any evaluated SLA rule is violated, <application>pgbench</application>
+         reports <literal>FAIL</literal> in the SLA compliance summary and exits
+         with status 1.
+        </para>
+       </listitem>
+     </varlistentry>
+
      <varlistentry id="pgbench-option-verbose-errors">
       <term><option>--verbose-errors</option></term>
       <listitem>
@@ -1089,9 +1131,10 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
 
   <para>
    A successful run will exit with status 0.  Exit status 1 indicates static
-   problems such as invalid command-line options or internal errors which
-   are supposed to never occur.  Early errors that occur when starting
-   benchmark such as initial connection failures also exit with status 1.
+   problems such as invalid command-line options, internal errors which
+   are supposed to never occur, early errors when starting the benchmark such
+   as initial connection failures, or violation of one or more latency
+   thresholds specified with <option>--sla</option>.
    Errors during the run such as database errors or problems in the script
    will result in exit status 2. In the latter case,
    <application>pgbench</application> will print partial results if
@@ -3253,6 +3296,58 @@ statement latencies in milliseconds, failures and retries:
    of slowdown varies significantly depending on platform and hardware.
    Comparing average TPS values with and without latency reporting enabled
    is a good way to measure if the timing overhead is significant.
+  </para>
+ </refsect2>
+
+ <refsect2 id="pgbench-percentiles-sla-and-reporting">
+  <title>Latency Percentiles, Composite Metrics, and JSON Reporting</title>
+
+  <para>
+   <application>pgbench</application> records transaction latencies in a
+   fixed-memory, sub-bucketed base-2 High Dynamic Range (HDR) histogram with
+   128 linear sub-buckets per power-of-2 octave (~0.78% relative resolution
+   from 0 microseconds up to 38 hours).  At the end of a benchmark run, the
+   50th, 90th, 95th, 99th, and 99.9th latency percentiles are printed for the
+   overall run, for each client group (<option>--group</option>), and for each
+   script:
+<screen>
+latency percentiles (ms): p50 = 1.240, p90 = 2.810, p95 = 3.650, p99 = 6.120, p99.9 = 14.300
+</screen>
+  </para>
+
+  <para>
+   In addition to transactions per second (<literal>tps</literal>),
+   <application>pgbench</application> computes and displays standard composite
+   throughput metrics:
+   <itemizedlist>
+    <listitem>
+     <para>
+      <literal>tpmC</literal> (Transactions Per Minute C): computed from the
+      throughput of scripts whose name contains <literal>new_order</literal> or
+      <literal>new-order</literal> (or from total transactions if no script is
+      specifically named after New-Order).
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <literal>QphH@SF</literal> (Queries Per Hour H at Scale Factor): computed
+      when sequential client groups (<literal>sequential=true</literal>) or
+      TPC-H scripts (<literal>tpch</literal> / <literal>qphh</literal>) are
+      executed, scaled by the active <option>-s</option> scale factor.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </para>
+
+  <para>
+   When one or more <option>--sla</option> options are supplied,
+   <application>pgbench</application> prints an SLA compliance summary table
+   comparing each target's measured latency percentile against its configured
+   threshold, and exits with status 1 if any rule failed.  When
+   <option>--json-report=<replaceable>filename</replaceable></option> is
+   specified, all configuration parameters, overall/group/script statistics,
+   HDR latency percentiles, composite metrics, and SLA evaluations are exported
+   as a machine-readable JSON document.
   </para>
  </refsect2>
 

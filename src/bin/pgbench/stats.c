@@ -15,6 +15,7 @@
 #include <math.h>
 
 #include "common/logging.h"
+#include "port/pg_bitutils.h"
 #include "stats.h"
 
 /*
@@ -57,6 +58,36 @@ mergeSimpleStats(SimpleStats *acc, const SimpleStats *ss)
 }
 
 /*
+ * Record a latency sample (in microseconds) into the HDR histogram of StatsData.
+ */
+static void
+addToLatencyHist(StatsData *sd, double lat_usec)
+{
+	uint64		u = (lat_usec > 0.0) ? (uint64) llround(lat_usec) : 0;
+	int			idx;
+
+	if (u < HDR_SUB_COUNT)
+		idx = (int) u;
+	else
+	{
+		int			msb = pg_leftmost_one_pos64(u);
+		int			octave = msb - HDR_SUB_BITS;
+
+		if (octave > HDR_MAX_OCTAVE)
+			idx = HDR_TOTAL_BUCKETS - 1;
+		else
+		{
+			int			sub = (int) ((u >> octave) & (HDR_SUB_COUNT - 1));
+
+			idx = ((octave + 1) << HDR_SUB_BITS) | sub;
+		}
+	}
+
+	sd->hist_buckets[idx]++;
+	sd->hist_count++;
+}
+
+/*
  * Initialize a StatsData struct to mostly zeroes, with its start time set to
  * the given value.
  */
@@ -76,6 +107,8 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	initSimpleStats(&sd->lag);
 	initSimpleStats(&sd->keying_time);
 	initSimpleStats(&sd->think_time);
+	sd->hist_count = 0;
+	memset(sd->hist_buckets, 0, sizeof(sd->hist_buckets));
 }
 
 /*
@@ -110,6 +143,7 @@ accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
 			stats->cnt++;
 
 			addToSimpleStats(&stats->latency, lat);
+			addToLatencyHist(stats, lat);
 
 			/* and possibly the same for schedule lag */
 			if (has_throttle_delay)
@@ -150,6 +184,9 @@ mergeStats(StatsData *acc, const StatsData *src)
 	acc->deadlock_failures += src->deadlock_failures;
 	acc->other_sql_failures += src->other_sql_failures;
 	acc->expected_rollbacks += src->expected_rollbacks;
+	acc->hist_count += src->hist_count;
+	for (int b = 0; b < HDR_TOTAL_BUCKETS; b++)
+		acc->hist_buckets[b] += src->hist_buckets[b];
 }
 
 /*
@@ -201,5 +238,76 @@ printSimpleStats(const char *prefix, const SimpleStats *ss)
 
 		printf("%s average = %.3f ms\n", prefix, 0.001 * latency);
 		printf("%s stddev = %.3f ms\n", prefix, 0.001 * stddev);
+	}
+}
+
+/*
+ * Compute the given latency percentile (0.0 .. 100.0) in microseconds from
+ * the HDR histogram in StatsData.
+ */
+double
+getLatencyPercentile(const StatsData *stats, double pct)
+{
+	int64		target;
+	int64		cum = 0;
+
+	if (stats->hist_count <= 0)
+		return 0.0;
+
+	if (pct < 0.0)
+		pct = 0.0;
+	if (pct > 100.0)
+		pct = 100.0;
+
+	target = (int64) ceil((pct / 100.0) * (double) stats->hist_count);
+	if (target < 1)
+		target = 1;
+	if (target > stats->hist_count)
+		target = stats->hist_count;
+
+	for (int b = 0; b < HDR_TOTAL_BUCKETS; b++)
+	{
+		if (stats->hist_buckets[b] <= 0)
+			continue;
+		cum += stats->hist_buckets[b];
+		if (cum >= target)
+		{
+			if (b < HDR_SUB_COUNT)
+				return (double) b;
+			else
+			{
+				int			octave = (b >> HDR_SUB_BITS) - 1;
+				int			sub = b & (HDR_SUB_COUNT - 1);
+				uint64		low = ((UINT64CONST(1) << HDR_SUB_BITS) | (uint64) sub) << octave;
+				uint64		width = UINT64CONST(1) << octave;
+
+				if (width <= 1)
+					return (double) low;
+				else
+				{
+					int64		prev_cum = cum - stats->hist_buckets[b];
+					double		frac = (double) (target - prev_cum) / (double) stats->hist_buckets[b];
+
+					return (double) low + frac * (double) width;
+				}
+			}
+		}
+	}
+
+	return stats->latency.max;
+}
+
+void
+printLatencyPercentiles(const char *prefix, const StatsData *stats)
+{
+	if (stats->hist_count > 0)
+	{
+		printf("%s: p50 = %.3f ms, p90 = %.3f ms, p95 = %.3f ms, p99 = %.3f ms, p99.9 = %.3f ms\n",
+			   prefix,
+			   0.001 * getLatencyPercentile(stats, 50.0),
+			   0.001 * getLatencyPercentile(stats, 90.0),
+			   0.001 * getLatencyPercentile(stats, 95.0),
+			   0.001 * getLatencyPercentile(stats, 99.0),
+			   0.001 * getLatencyPercentile(stats, 99.9));
 	}
 }
