@@ -1162,7 +1162,19 @@ ExecEndMemoize(MemoizeState *node)
 
 		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
 		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
-		memcpy(si, &node->stats, sizeof(MemoizeInstrumentation));
+
+		/*
+		 * Here we accumulate the stats rather than performing memcpy on
+		 * node->stats into si.  When a Gather/GatherMerge node finishes it
+		 * will perform planner shutdown on the workers.  On rescan it will
+		 * spin up new workers which will have a new MemoizeState and zeroed
+		 * stats.
+		 */
+		si->cache_hits += node->stats.cache_hits;
+		si->cache_misses += node->stats.cache_misses;
+		si->cache_evictions += node->stats.cache_evictions;
+		si->cache_overflows += node->stats.cache_overflows;
+		si->mem_peak = Max(si->mem_peak, node->stats.mem_peak);
 	}
 
 	/* Remove the cache context */
