@@ -127,6 +127,8 @@ usage(void)
 		   "  --continue-on-error      continue running after an SQL error\n"
 		   "  --exit-on-abort          exit when any client is aborted\n"
 		   "  --failures-detailed      report the failures grouped by basic types\n"
+		   "  --group=SPEC             define a client group (name=...,clients=...,threads=...,\n"
+		   "                           file=...,builtin=...,sequential=...,rate=...)\n"
 		   "  --log-prefix=PREFIX      prefix for transaction time log file\n"
 		   "                           (default: \"pgbench_log\")\n"
 		   "  --max-tries=NUM          max number of tries to run transaction (default: 1)\n"
@@ -147,6 +149,139 @@ usage(void)
 		   "Report bugs to <%s>.\n"
 		   "%s home page: <%s>\n",
 		   progname, progname, PACKAGE_BUGREPORT, PACKAGE_NAME, PACKAGE_URL);
+}
+
+
+/*
+ * Parse a --group specification of the form:
+ *   name=<name>,clients=<N>,threads=<M>,file=<path>[@W],builtin=<name>[@W],sequential=true|false,rate=<R>
+ */
+static void
+parseGroupSpec(const char *spec, bool *internal_script_used)
+{
+	ClientGroup *grp;
+	char	   *copy;
+	char	   *token;
+	char	   *next;
+
+	if (num_groups >= MAX_GROUPS)
+		pg_fatal("at most %d client groups are allowed", MAX_GROUPS);
+
+	grp = &client_groups[num_groups];
+	memset(grp, 0, sizeof(ClientGroup));
+	grp->nclients = 1;
+	grp->nthreads = 1;
+	grp->sequential = false;
+	grp->rate = 0.0;
+	grp->throttle_delay = 0.0;
+	initStats(&grp->stats, 0);
+
+	copy = pg_strdup(spec);
+	token = copy;
+	while (token != NULL && *token != '\0')
+	{
+		char	   *eq;
+		char	   *key;
+		char	   *val;
+
+		next = strchr(token, ',');
+		if (next != NULL)
+			*next++ = '\0';
+
+		eq = strchr(token, '=');
+		if (eq == NULL || eq == token || *(eq + 1) == '\0')
+			pg_fatal("invalid --group specification: \"%s\"", spec);
+
+		*eq = '\0';
+		key = token;
+		val = eq + 1;
+
+		if (strcmp(key, "name") == 0)
+		{
+			pg_free(grp->name);
+			grp->name = pg_strdup(val);
+		}
+		else if (strcmp(key, "clients") == 0)
+		{
+			if (!option_parse_int(val, "--group clients", 1, INT_MAX,
+								  &grp->nclients))
+				exit(1);
+		}
+		else if (strcmp(key, "threads") == 0)
+		{
+			if (!option_parse_int(val, "--group threads", 1, INT_MAX,
+								  &grp->nthreads))
+				exit(1);
+		}
+		else if (strcmp(key, "file") == 0)
+		{
+			char	   *script = NULL;
+			int			weight = parseScriptWeight(val, &script);
+			int			idx = num_scripts;
+
+			if (grp->num_scripts >= 128)
+				pg_fatal("at most 128 scripts are allowed per group");
+			process_file(script, weight);
+			grp->script_indices[grp->num_scripts++] = idx;
+			grp->total_weight += weight;
+		}
+		else if (strcmp(key, "builtin") == 0)
+		{
+			char	   *script = NULL;
+			int			weight = parseScriptWeight(val, &script);
+			int			idx = num_scripts;
+
+			if (grp->num_scripts >= 128)
+				pg_fatal("at most 128 scripts are allowed per group");
+			process_builtin(findBuiltin(script), weight);
+			pg_free(script);
+			grp->script_indices[grp->num_scripts++] = idx;
+			grp->total_weight += weight;
+			*internal_script_used = true;
+		}
+		else if (strcmp(key, "sequential") == 0)
+		{
+			if (pg_strcasecmp(val, "true") == 0 ||
+				strcmp(val, "1") == 0 ||
+				pg_strcasecmp(val, "on") == 0)
+				grp->sequential = true;
+			else if (pg_strcasecmp(val, "false") == 0 ||
+					 strcmp(val, "0") == 0 ||
+					 pg_strcasecmp(val, "off") == 0)
+				grp->sequential = false;
+			else
+				pg_fatal("invalid sequential value in --group: \"%s\"", val);
+		}
+		else if (strcmp(key, "rate") == 0)
+		{
+			double		r = atof(val);
+
+			if (r <= 0.0)
+				pg_fatal("invalid rate limit in --group: \"%s\"", val);
+			grp->rate = r;
+		}
+		else
+			pg_fatal("unrecognized key \"%s\" in --group specification", key);
+
+		token = next;
+	}
+
+	pg_free(copy);
+
+	if (grp->name == NULL)
+		grp->name = psprintf("group_%d", num_groups + 1);
+	if (grp->num_scripts == 0)
+		pg_fatal("--group \"%s\" must specify at least one script (file=... or builtin=...)",
+				 grp->name);
+	if (!grp->sequential && grp->total_weight == 0)
+		pg_fatal("--group \"%s\" total script weight must not be zero",
+				 grp->name);
+	if (grp->nthreads > grp->nclients)
+		grp->nthreads = grp->nclients;
+	if (grp->rate > 0.0)
+		grp->throttle_delay = (1000000.0 / grp->rate) * grp->nthreads;
+
+	num_groups++;
 }
 
 
@@ -247,6 +382,7 @@ main(int argc, char **argv)
 		{"exit-on-abort", no_argument, NULL, 16},
 		{"debug", no_argument, NULL, 17},
 		{"continue-on-error", no_argument, NULL, 18},
+		{"group", required_argument, NULL, 19},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -607,11 +743,50 @@ main(int argc, char **argv)
 				benchmarking_option_set = true;
 				continue_on_error = true;
 				break;
+			case 19:			/* group */
+				benchmarking_option_set = true;
+				parseGroupSpec(optarg, &internal_script_used);
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 				exit(1);
 		}
+	}
+
+	if (num_groups > 0)
+	{
+		nclients = 0;
+		nthreads = 0;
+		for (i = 0; i < num_groups; i++)
+		{
+			nclients += client_groups[i].nclients;
+			nthreads += client_groups[i].nthreads;
+		}
+#ifdef HAVE_GETRLIMIT
+		if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
+			pg_fatal("getrlimit failed: %m");
+
+		if (rlim.rlim_max < nclients + 3)
+		{
+			pg_log_error("need at least %d open files, but system limit is %ld",
+						 nclients + 3, (long) rlim.rlim_max);
+			pg_log_error_hint("Reduce number of clients, or use limit/ulimit to increase the system limit.");
+			exit(1);
+		}
+
+		if (rlim.rlim_cur < nclients + 3)
+		{
+			rlim.rlim_cur = nclients + 3;
+			if (setrlimit(RLIMIT_NOFILE, &rlim) == -1)
+			{
+				pg_log_error("need at least %d open files, but couldn't raise the limit: %m",
+							 nclients + 3);
+				pg_log_error_hint("Reduce number of clients, or use limit/ulimit to increase the system limit.");
+				exit(1);
+			}
+		}
+#endif							/* HAVE_GETRLIMIT */
 	}
 
 	/* set default script if none */
@@ -638,8 +813,8 @@ main(int argc, char **argv)
 	if (total_weight == 0 && !is_init_mode)
 		pg_fatal("total script weight must not be zero");
 
-	/* show per script stats if several scripts are used */
-	if (num_scripts > 1)
+	/* show per script stats if several scripts or client groups are used */
+	if (num_scripts > 1 || num_groups > 0)
 		per_script_stats = true;
 
 	/*
@@ -781,6 +956,31 @@ main(int argc, char **argv)
 		}
 	}
 	/* other CState initializations */
+	if (num_groups > 0)
+	{
+		int			c_idx = 0;
+
+		for (int g = 0; g < num_groups; g++)
+		{
+			for (int k = 0; k < client_groups[g].nclients; k++)
+			{
+				state[c_idx].group_id = g;
+				state[c_idx].stream_id = k;
+				state[c_idx].seq_counter = 0;
+				c_idx++;
+			}
+		}
+	}
+	else
+	{
+		for (i = 0; i < nclients; i++)
+		{
+			state[i].group_id = -1;
+			state[i].stream_id = i;
+			state[i].seq_counter = 0;
+		}
+	}
+
 	for (i = 0; i < nclients; i++)
 	{
 		state[i].cstack = conditional_stack_create();
@@ -827,6 +1027,31 @@ main(int argc, char **argv)
 				exit(1);
 	}
 
+	/*
+	 * Define :stream_id and :group_name variables for each client unless
+	 * overridden via -D.
+	 */
+	if (lookupVariable(&state[0].variables, "stream_id") == NULL)
+	{
+		for (i = 0; i < nclients; i++)
+			if (!putVariableInt(&state[i].variables, "startup", "stream_id",
+								state[i].stream_id))
+				exit(1);
+	}
+	if (num_groups > 0 && lookupVariable(&state[0].variables, "group_name") == NULL)
+	{
+		for (i = 0; i < nclients; i++)
+		{
+			PgBenchValue gval;
+
+			setTextValue(&gval, client_groups[state[i].group_id].name);
+			if (!putVariableValue(&state[i].variables, "startup", "group_name",
+								  &gval))
+				exit(1);
+			freeValue(&gval);
+		}
+	}
+
 	/* set default seed for hash functions */
 	if (lookupVariable(&state[0].variables, "default_seed") == NULL)
 	{
@@ -868,22 +1093,58 @@ main(int argc, char **argv)
 	threads = pg_malloc_array(TState, nthreads);
 	nclients_dealt = 0;
 
-	for (i = 0; i < nthreads; i++)
+	if (num_groups > 0)
 	{
-		TState	   *thread = &threads[i];
+		int			t_idx = 0;
 
-		thread->tid = i;
-		thread->state = &state[nclients_dealt];
-		thread->nstate =
-			(nclients - nclients_dealt + nthreads - i - 1) / (nthreads - i);
-		initRandomState(&thread->ts_choose_rs);
-		initRandomState(&thread->ts_throttle_rs);
-		initRandomState(&thread->ts_sample_rs);
-		thread->logfile = NULL; /* filled in later */
-		thread->latency_late = 0;
-		initStats(&thread->stats, 0);
+		for (int g = 0; g < num_groups; g++)
+		{
+			ClientGroup *grp = &client_groups[g];
+			int			grp_clients_dealt = 0;
 
-		nclients_dealt += thread->nstate;
+			for (int k = 0; k < grp->nthreads; k++)
+			{
+				TState	   *thread = &threads[t_idx];
+
+				thread->tid = t_idx;
+				thread->group_id = g;
+				thread->state = &state[nclients_dealt + grp_clients_dealt];
+				thread->nstate =
+					(grp->nclients - grp_clients_dealt + grp->nthreads - k - 1) /
+					(grp->nthreads - k);
+				initRandomState(&thread->ts_choose_rs);
+				initRandomState(&thread->ts_throttle_rs);
+				initRandomState(&thread->ts_sample_rs);
+				thread->logfile = NULL;
+				thread->latency_late = 0;
+				initStats(&thread->stats, 0);
+
+				grp_clients_dealt += thread->nstate;
+				t_idx++;
+			}
+			nclients_dealt += grp_clients_dealt;
+		}
+	}
+	else
+	{
+		for (i = 0; i < nthreads; i++)
+		{
+			TState	   *thread = &threads[i];
+
+			thread->tid = i;
+			thread->group_id = -1;
+			thread->state = &state[nclients_dealt];
+			thread->nstate =
+				(nclients - nclients_dealt + nthreads - i - 1) / (nthreads - i);
+			initRandomState(&thread->ts_choose_rs);
+			initRandomState(&thread->ts_throttle_rs);
+			initRandomState(&thread->ts_sample_rs);
+			thread->logfile = NULL; /* filled in later */
+			thread->latency_late = 0;
+			initStats(&thread->stats, 0);
+
+			nclients_dealt += thread->nstate;
+		}
 	}
 
 	/* all clients must be assigned to a thread */
@@ -937,6 +1198,8 @@ main(int argc, char **argv)
 
 		/* aggregate thread level stats */
 		mergeStats(&stats, &thread->stats);
+		if (thread->group_id >= 0)
+			mergeStats(&client_groups[thread->group_id].stats, &thread->stats);
 		latency_late += thread->latency_late;
 		conn_total_duration += thread->conn_duration;
 

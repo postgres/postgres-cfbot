@@ -823,6 +823,71 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       </listitem>
      </varlistentry>
 
+     <varlistentry id="pgbench-option-group">
+       <term><option>--group=<replaceable>spec</replaceable></option></term>
+       <listitem>
+        <para>
+         Define a heterogeneous client group with its own client pool, worker
+         threads, scripts, execution mode, and optional target rate.  This
+         option may be specified multiple times to run concurrent workloads
+         (for example, mixed OLTP and OLAP / HTAP benchmarks) within a single
+         <application>pgbench</application> invocation.
+        </para>
+        <para>
+         <replaceable>spec</replaceable> is a comma-separated list of
+         <literal><replaceable>key</replaceable>=<replaceable>value</replaceable></literal>
+         pairs:
+         <itemizedlist>
+          <listitem>
+           <para><literal>name=<replaceable>name</replaceable></literal>:
+            unique identifier for the client group (exposed to scripts as
+            <literal>:group_name</literal>).
+           </para>
+          </listitem>
+          <listitem>
+           <para><literal>clients=<replaceable>N</replaceable></literal>:
+            number of concurrent database sessions in this group (default 1).
+            Each client within the group receives a 0-based
+            <literal>:stream_id</literal> in <literal>[0, N-1]</literal>.
+           </para>
+          </listitem>
+          <listitem>
+           <para><literal>threads=<replaceable>M</replaceable></literal>:
+            number of worker threads dedicated to this group (default 1).
+           </para>
+          </listitem>
+          <listitem>
+           <para><literal>file=<replaceable>filename</replaceable>[@<replaceable>weight</replaceable>]</literal>:
+            add a custom script file to this group (may be repeated within
+            <replaceable>spec</replaceable>).
+           </para>
+          </listitem>
+          <listitem>
+           <para><literal>builtin=<replaceable>scriptname</replaceable>[@<replaceable>weight</replaceable>]</literal>:
+            add a built-in script to this group (may be repeated within
+            <replaceable>spec</replaceable>).
+           </para>
+          </listitem>
+          <listitem>
+           <para><literal>sequential=true|false</literal>:
+            when <literal>true</literal>, each client stream in the group
+            executes the group's scripts in a deterministic permuted sequence
+            (using <literal>permute(seq_counter, num_scripts, stream_id + 1)</literal>)
+            rather than choosing scripts at random by weight.  This is useful
+            for TPC-H and TPC-DS throughput query streams.
+           </para>
+          </listitem>
+          <listitem>
+           <para><literal>rate=<replaceable>R</replaceable></literal>:
+            optional target transaction rate (in transactions per second) for
+            this group, independent of other groups.
+           </para>
+          </listitem>
+         </itemizedlist>
+        </para>
+       </listitem>
+     </varlistentry>
+
      <varlistentry id="pgbench-option-log-prefix">
       <term><option>--log-prefix=<replaceable>prefix</replaceable></option></term>
       <listitem>
@@ -1206,6 +1271,11 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       </row>
 
       <row>
+       <entry> <literal>group_name</literal> </entry>
+       <entry>name of the client group to which this session belongs (when <option>--group</option> is used)</entry>
+      </row>
+
+      <row>
        <entry> <literal>scale</literal> </entry>
        <entry>current scale factor</entry>
       </row>
@@ -1213,6 +1283,11 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       <row>
        <entry> <literal>sqlstate</literal> </entry>
        <entry>five-character SQLSTATE code of the most recent SQL error caught by <literal>\try</literal> or <literal>\expect_error</literal></entry>
+      </row>
+
+      <row>
+       <entry> <literal>stream_id</literal> </entry>
+       <entry>zero-based index of the client session within its <option>--group</option> (or equal to <literal>client_id</literal> when no groups are defined)</entry>
       </row>
      </tbody>
     </tgroup>

@@ -29,6 +29,9 @@
 #include "stats.h"
 #include "variable.h"
 
+ClientGroup client_groups[MAX_GROUPS];
+int	num_groups = 0;
+
 int	nxacts = 0;			/* number of transactions per client */
 int	duration = 0;		/* duration in seconds */
 int64 end_time = 0;		/* when to stop in micro seconds, under -T */
@@ -820,6 +823,47 @@ finishCaughtError(TState *thread, CState *st)
 }
 
 /*
+ * Return the effective per-thread throttle delay in microseconds.
+ */
+static inline double
+getThreadThrottleDelay(const TState *thread)
+{
+	if (thread->group_id >= 0 &&
+		client_groups[thread->group_id].throttle_delay > 0)
+		return client_groups[thread->group_id].throttle_delay;
+	return throttle_delay;
+}
+
+/*
+ * Choose a script index from a client group's script list.
+ */
+static int
+chooseGroupScript(const ClientGroup *grp, CState *st, pg_prng_state *random_state)
+{
+	int			i = 0;
+	int64		w;
+
+	if (grp->sequential)
+	{
+		int			idx = grp->script_indices[st->seq_counter % grp->num_scripts];
+
+		st->seq_counter++;
+		return idx;
+	}
+
+	if (grp->num_scripts == 1)
+		return grp->script_indices[0];
+
+	w = pgbench_random(random_state, 0, grp->total_weight - 1);
+	do
+	{
+		w -= sql_script[grp->script_indices[i++]].weight;
+	} while (w >= 0);
+
+	return grp->script_indices[i - 1];
+}
+
+/*
  * Advance the state machine of a connection.
  */
 static void
@@ -835,6 +879,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 	 * expressions, which might take a non-negligible amount of time, though.
 	 */
 	pg_time_usec_t now = 0;
+	double		eff_throttle_delay = getThreadThrottleDelay(thread);
 
 	/*
 	 * Loop in the state machine, until we have to wait for a result from the
@@ -853,7 +898,11 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 		{
 				/* Select transaction (script) to run.  */
 			case CSTATE_CHOOSE_SCRIPT:
-				st->use_file = chooseScript(&thread->ts_choose_rs);
+				if (st->group_id >= 0)
+					st->use_file = chooseGroupScript(&client_groups[st->group_id],
+													 st, &thread->ts_choose_rs);
+				else
+					st->use_file = chooseScript(&thread->ts_choose_rs);
 				Assert(conditional_stack_empty(st->cstack));
 
 				/* reset transaction variables to default values */
@@ -868,7 +917,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * a new transaction, or to get throttled if that's requested.
 				 */
 				st->state = timer_exceeded ? CSTATE_FINISHED :
-					throttle_delay > 0 ? CSTATE_PREPARE_THROTTLE : CSTATE_START_TX;
+					eff_throttle_delay > 0 ? CSTATE_PREPARE_THROTTLE : CSTATE_START_TX;
 				break;
 
 				/* Start new transaction (script) */
@@ -915,7 +964,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * When not throttling, this is also the transaction's
 				 * scheduled start time.
 				 */
-				if (!throttle_delay)
+				if (!eff_throttle_delay)
 					st->txn_scheduled = now;
 
 				/* Begin with the first command */
@@ -948,10 +997,10 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * than a transaction, the next transaction will start right
 				 * away.
 				 */
-				Assert(throttle_delay > 0);
+				Assert(eff_throttle_delay > 0);
 
 				thread->throttle_trigger +=
-					pgbench_random_poisson(&thread->ts_throttle_rs, throttle_delay);
+					pgbench_random_poisson(&thread->ts_throttle_rs, eff_throttle_delay);
 				st->txn_scheduled = thread->throttle_trigger;
 
 				/*
@@ -1551,6 +1600,7 @@ doLog(TState *thread, CState *st,
 {
 	FILE	   *logfile = thread->logfile;
 	pg_time_usec_t now = pg_time_now() + epoch_shift;
+	bool		has_throttle = (getThreadThrottleDelay(thread) > 0);
 
 	Assert(use_log);
 
@@ -1595,7 +1645,7 @@ doLog(TState *thread, CState *st,
 					agg->latency.min,
 					agg->latency.max);
 
-			if (throttle_delay)
+			if (has_throttle)
 			{
 				lag_sum = agg->lag.sum;
 				lag_sum2 = agg->lag.sum2;
@@ -1637,7 +1687,7 @@ doLog(TState *thread, CState *st,
 		}
 
 		/* accumulate the current transaction */
-		accumStats(agg, tx_skipped, latency, lag, st->estatus, st->tries, throttle_delay > 0);
+		accumStats(agg, tx_skipped, latency, lag, st->estatus, st->tries, has_throttle);
 	}
 	else
 	{
@@ -1653,7 +1703,7 @@ doLog(TState *thread, CState *st,
 					st->id, st->cnt, getResultString(tx_skipped, st->estatus, failures_detailed),
 					st->use_file, now / 1000000, now % 1000000);
 
-		if (throttle_delay)
+		if (has_throttle)
 			fprintf(logfile, " %.0f", lag);
 		if (max_tries != 1)
 			fprintf(logfile, " %u", st->tries - 1);
@@ -1674,9 +1724,10 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 {
 	double		latency = 0.0,
 				lag = 0.0;
+	double		eff_throttle_delay = getThreadThrottleDelay(thread);
 	bool		has_pacing = (st->has_keying_time || st->has_think_time);
-	bool		detailed = progress || throttle_delay || latency_limit ||
-		use_log || per_script_stats || has_pacing;
+	bool		detailed = progress || eff_throttle_delay > 0 || latency_limit ||
+		use_log || per_script_stats || num_groups > 0 || has_pacing;
 
 	if (detailed && !tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
@@ -1694,7 +1745,7 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	}
 
 	/* keep detailed thread stats */
-	accumStats(&thread->stats, tx_skipped, latency, lag, st->estatus, st->tries, throttle_delay > 0);
+	accumStats(&thread->stats, tx_skipped, latency, lag, st->estatus, st->tries, eff_throttle_delay > 0);
 	if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
 		if (st->has_keying_time)
@@ -1717,7 +1768,7 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	if (per_script_stats)
 	{
 		accumStats(&sql_script[st->use_file].stats, tx_skipped, latency, lag,
-				   st->estatus, st->tries, throttle_delay > 0);
+				   st->estatus, st->tries, eff_throttle_delay > 0);
 		if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 		{
 			if (st->has_keying_time)
@@ -1950,7 +2001,7 @@ printResults(StatsData *total,
 			   latency_limit / 1000.0, latency_late, total->cnt,
 			   (total->cnt > 0) ? 100.0 * latency_late / total->cnt : 0.0);
 
-	if (throttle_delay || progress || latency_limit ||
+	if (throttle_delay || progress || latency_limit || num_groups > 0 ||
 		total->keying_time.count > 0 || total->think_time.count > 0)
 		printSimpleStats("latency", &total->latency);
 	else
@@ -1996,6 +2047,40 @@ printResults(StatsData *total,
 	{
 		printf("initial connection time = %.3f ms\n", 0.001 * conn_elapsed_duration);
 		printf("tps = %f (without initial connection time)\n", tps);
+	}
+
+	/* Report per-group statistics if client groups were configured */
+	if (num_groups > 0)
+	{
+		for (int g = 0; g < num_groups; g++)
+		{
+			ClientGroup *grp = &client_groups[g];
+			StatsData  *gstats = &grp->stats;
+			int64		g_failures = getFailures(gstats);
+			int64		g_total_cnt =
+				gstats->cnt + gstats->cnt_skipped + g_failures;
+
+			printf("client group %d: %s (clients: %d, threads: %d%s)\n",
+				   g + 1, grp->name, grp->nclients, grp->nthreads,
+				   grp->sequential ? ", sequential" : "");
+
+			if (g_total_cnt > 0)
+			{
+				printf(" - number of transactions actually processed: " INT64_FORMAT " (tps = %f)\n",
+					   gstats->cnt, gstats->cnt / bench_duration);
+				printf(" - number of failed transactions: " INT64_FORMAT " (%.3f%%)\n",
+					   g_failures, 100.0 * g_failures / g_total_cnt);
+				if (gstats->expected_rollbacks > 0)
+					printf(" - number of expected rollbacks: " INT64_FORMAT " (%.3f%%)\n",
+						   gstats->expected_rollbacks,
+						   100.0 * gstats->expected_rollbacks / g_total_cnt);
+				printSimpleStats(" - latency", &gstats->latency);
+				if (gstats->keying_time.count > 0)
+					printSimpleStats(" - keying time", &gstats->keying_time);
+				if (gstats->think_time.count > 0)
+					printSimpleStats(" - think time", &gstats->think_time);
+			}
+		}
 	}
 
 	/* Report per-script/command statistics */

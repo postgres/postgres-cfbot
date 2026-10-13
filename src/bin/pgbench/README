@@ -128,3 +128,16 @@ When `CSTATE_SLEEP` finishes, `META_KEYING_TIME` and `META_THINK_TIME`
 accumulate elapsed microseconds into `st->txn_keying_time` and
 `st->txn_think_time`, allowing `StatsData` to report both total cycle latency
 and database `response time average` (latency minus keying and think time).
+
+Heterogeneous Client Groups & Sequential Streams (pgbench.c, engine.c)
+----------------------------------------------------------------------
+`parseClientGroup()` parses repeatable `--group` specifications into
+`client_groups[MAX_GROUPS]`.  When groups are active:
+  - Total `nclients` and `nthreads` are the sums of per-group `nclients` and
+    `nthreads`.
+  - Each `TState` and `CState` is assigned a `group_id` and a 0-based
+    group-local `stream_id` (exposed in client variables `:group_name` and
+    `:stream_id`).
+  - `chooseScriptForClient()` restricts script selection to the group's
+    `script_indices[]`.  When `sequential=true`, scripts are chosen via
+    `pgbench_permute(st->seq_counter++, grp->num_scripts, st->stream_id + 1)`.

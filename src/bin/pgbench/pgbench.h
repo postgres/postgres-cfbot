@@ -282,6 +282,9 @@ typedef struct
 	pg_prng_state cs_func_rs;
 
 	int			use_file;		/* index in sql_script for this client */
+	int			group_id;		/* client group index, or -1 */
+	int			stream_id;		/* 0-based stream index within group */
+	int64		seq_counter;	/* sequential script counter */
 	int			command;		/* command number in script */
 	int			next_command;	/* explicit jump target, or -1 */
 	int			num_syncs;		/* number of ongoing sync commands */

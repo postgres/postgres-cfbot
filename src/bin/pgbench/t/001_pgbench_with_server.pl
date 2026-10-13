@@ -2090,6 +2090,29 @@ SELECT 1;
 }
 	});
 
+# Test heterogeneous client groups (--group), sequential stream execution, and rate limiting
+my $grp_s1 = $node->basedir . '/001_pgbench_grp_s1.sql';
+my $grp_s2 = $node->basedir . '/001_pgbench_grp_s2.sql';
+my $grp_oltp = $node->basedir . '/001_pgbench_grp_oltp.sql';
+append_to_file($grp_s1, "\\set d debug(format_string('%s:%d:s1', :group_name, :stream_id))\nSELECT 1;\n");
+append_to_file($grp_s2, "\\set d debug(format_string('%s:%d:s2', :group_name, :stream_id))\nSELECT 2;\n");
+append_to_file($grp_oltp, "\\set d debug(format_string('%s:%d:oltp', :group_name, :stream_id))\nSELECT 3;\n");
+
+$node->pgbench(
+	"-n -t 2 --group name=oltp,clients=2,threads=1,file=$grp_oltp,rate=1000 --group name=olap,clients=1,threads=1,file=$grp_s1,file=$grp_s2,sequential=true",
+	0,
+	[
+		qr{processed: 6/6},
+		qr{client group 1: oltp \(clients: 2, threads: 1\)},
+		qr{client group 2: olap \(clients: 1, threads: 1, sequential\)},
+	],
+	[
+		qr{text 'oltp:0:oltp'},
+		qr{text 'oltp:1:oltp'},
+		qr{text 'olap:0:s1'.*text 'olap:0:s2'}s,
+	],
+	'pgbench heterogeneous client groups and sequential streams');
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;

@@ -224,6 +224,31 @@ my @options = (
 		'duration % aggregation',
 		'-l -T 5 --aggregate-interval=3',
 		[qr{multiple}]
+	],
+	[
+		'bad --group spec',
+		'--group invalid',
+		[qr{invalid --group specification}]
+	],
+	[
+		'unknown --group key',
+		'--group foo=bar',
+		[qr{unrecognized key "foo" in --group specification}]
+	],
+	[
+		'--group without script',
+		'--group name=g1,clients=2',
+		[qr{--group "g1" must specify at least one script}]
+	],
+	[
+		'--group bad sequential',
+		'--group name=g1,builtin=select-only,sequential=maybe',
+		[qr{invalid sequential value in --group}]
+	],
+	[
+		'--group bad rate',
+		'--group name=g1,builtin=select-only,rate=0',
+		[qr{invalid rate limit in --group}]
 	],);
 
 for my $o (@options)

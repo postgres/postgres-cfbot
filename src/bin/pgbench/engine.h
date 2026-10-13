@@ -79,12 +79,32 @@ typedef enum TStatus
 	TSTATUS_OTHER_ERROR,
 } TStatus;
 
+#define MAX_GROUPS		32		/* max number of client groups */
+
+/*
+ * Heterogeneous client group configuration and statistics (--group).
+ */
+typedef struct ClientGroup
+{
+	char	   *name;			/* group name */
+	int			nclients;		/* number of clients in group */
+	int			nthreads;		/* number of threads in group */
+	bool		sequential;		/* sequential script selection */
+	double		rate;			/* target TPS rate for group (0 = none) */
+	double		throttle_delay; /* per-thread throttle delay in usec */
+	int			script_indices[128];	/* indices into sql_script[] */
+	int			num_scripts;	/* number of scripts in this group */
+	int64		total_weight;	/* sum of weights of group's scripts */
+	StatsData	stats;			/* aggregated stats for this group */
+} ClientGroup;
+
 /*
  * Thread state
  */
 typedef struct
 {
 	int			tid;			/* thread id */
+	int			group_id;		/* client group index, or -1 */
 	THREAD_T	thread;			/* thread handle */
 	CState	   *state;			/* array of CState */
 	int			nstate;			/* length of state[] */
@@ -111,6 +131,9 @@ typedef struct
 	StatsData	stats;
 	int64		latency_late;	/* count executed but late transactions */
 } TState;
+
+extern ClientGroup client_groups[MAX_GROUPS];
+extern int	num_groups;
 
 extern int	nxacts;
 extern int	duration;
