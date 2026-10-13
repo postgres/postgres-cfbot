@@ -30,6 +30,14 @@ $node->safe_psql('postgres', q{
 	INSERT INTO gzip_boundary_test VALUES (0, '');
 });
 
+# Store a long comment in the table of contents (TOC). The compressed TOC test
+# below will read this string across several decompressor output buffers.
+$node->safe_psql('postgres', q{
+	DO $$ BEGIN
+		EXECUTE format('COMMENT ON TABLE gzip_boundary_test IS %L', repeat('z', 300000));
+	END $$;
+});
+
 # Make an initial dump to find the uncompressed size of the table data.
 my $dumpdir = "$tempdir/gzip_boundary_dump";
 my $restore_file = "$tempdir/gzip_boundary_restore.sql";
@@ -111,17 +119,94 @@ my @rows = $restored =~ /^\d+\t/gm;
 is(scalar(@rows), 20001, 'all table rows were decompressed');
 
 # Cut the file in half, as in the bug report. Some data can still be read, but
-# pg_restore must fail because the gzip stream is incomplete.
+# pg_restore must report that the gzip stream is incomplete.
 my $truncated_size = int(length($gzip_data) / 2);
 open $fh, '+<:raw', $datafile or die "could not open $datafile: $!";
 truncate($fh, $truncated_size) or die "could not truncate $datafile: $!";
 close $fh or die "could not close $datafile: $!";
 
-$node->command_fails(
+$node->command_fails_like(
 	[
 		'pg_restore', '--file' => "$tempdir/gzip_boundary_truncated.sql",
 		$dumpdir
 	],
+	qr/could not decompress data: compressed stream is incomplete/,
 	'fail to restore the truncated gzip data file');
+
+# Put back the complete file, then remove its last byte. All table data is
+# still present, but the incomplete gzip trailer must cause an error.
+open $fh, '>:raw', $datafile or die "could not open $datafile: $!";
+print {$fh} $gzip_data or die "could not write $datafile: $!";
+close $fh or die "could not close $datafile: $!";
+truncate($datafile, length($gzip_data) - 1)
+	or die "could not truncate $datafile: $!";
+
+$node->command_fails_like(
+	[
+		'pg_restore', '--file' => "$tempdir/gzip_boundary_no_trailer.sql",
+		$dumpdir
+	],
+	qr/could not decompress data: compressed stream is incomplete/,
+	'reject gzip data missing its final trailer byte');
+
+# A gzip file can contain several members. Put an empty member before and after
+# the table data. The reader must continue after each member to read all rows.
+# This hex string is a complete gzip member with no uncompressed data.
+my $empty_member = pack('H*', '1f8b08000000000002ff03000000000000000000');
+open $fh, '>:raw', $datafile or die "could not open $datafile: $!";
+print {$fh} $empty_member . $gzip_data . $empty_member
+	or die "could not write $datafile: $!";
+close $fh or die "could not close $datafile: $!";
+$node->command_ok(
+	['pg_restore', '--file' => "$tempdir/gzip_members.sql", $dumpdir],
+	'restore concatenated gzip members including empty members');
+
+my $members_sql = slurp_file("$tempdir/gzip_members.sql");
+my @member_rows = $members_sql =~ /^\d+\t/gm;
+is(scalar(@member_rows), 20001,
+	'all table rows were decompressed across gzip member boundaries');
+
+# Reject a zero-byte file, plain text, and extra bytes that are not another gzip
+# member. A zero-byte file differs from the valid empty member tested above.
+for my $case (
+	['empty', '', qr/compressed stream is empty/],
+	['plain', "1\tvalue\n\\.\n", qr/incorrect header check/],
+	['trailing', $gzip_data . ("\0" x 100), qr/incorrect header check/])
+{
+	my ($name, $data, $error) = @$case;
+	open $fh, '>:raw', $datafile or die "could not open $datafile: $!";
+	print {$fh} $data or die "could not write $datafile: $!";
+	close $fh or die "could not close $datafile: $!";
+	$node->command_fails_like(
+		['pg_restore', '--file' => "$tempdir/gzip_${name}.sql", $dumpdir],
+		$error,
+		"reject $name gzip input");
+}
+
+SKIP:
+{
+	# These TOC tests need an external gzip program to compress toc.dat.
+	my $gzip = $ENV{'GZIP_PROGRAM'};
+	skip 'GZIP_PROGRAM is not configured', 4 if !defined($gzip) || $gzip eq '';
+
+	# Reading the TOC uses both single-byte reads and buffer reads. The long
+	# comment requires a buffer read across several decompressor output buffers.
+	# Add data after the TOC entries that the TOC parser will not read. Closing
+	# the file must finish reading the gzip stream and check its trailer.
+	my $tocfile = "$dumpdir/toc.dat";
+	open $fh, '>>:raw', $tocfile or die "could not open $tocfile: $!";
+	print {$fh} 'x' x (512 * 1024) or die "could not write $tocfile: $!";
+	close $fh or die "could not close $tocfile: $!";
+	command_ok([$gzip, '-f', $tocfile], 'compress the padded TOC');
+	$node->command_ok(['pg_restore', '--list', $dumpdir],
+		'read a compressed TOC across output-buffer boundaries');
+	# Remove only the last byte of the gzip trailer. The TOC entries can still
+	# be read, but closing the file must detect the incomplete stream.
+	truncate("$tocfile.gz", (-s "$tocfile.gz") - 1)
+		or die "could not truncate $tocfile.gz: $!";
+	$node->command_fails_like(['pg_restore', '--list', $dumpdir],
+		qr/could not decompress data: compressed stream is incomplete/,
+		'validate unread compressed input when closing the TOC');
+}
 
 done_testing();
