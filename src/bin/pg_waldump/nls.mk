@@ -6,7 +6,8 @@ GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    xlogreader.c \
                    xlogstats.c \
                    ../../common/fe_memutils.c \
-                   ../../common/file_utils.c
+                   ../../common/file_utils.c \
+                   ../../fe_utils/gzip.c
 GETTEXT_TRIGGERS = $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \
                    report_invalid_record:2
 GETTEXT_FLAGS    = $(FRONTEND_COMMON_GETTEXT_FLAGS) \

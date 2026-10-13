@@ -29,6 +29,7 @@ OBJS = \
 	cancel.o \
 	conditional.o \
 	connect_utils.o \
+	gzip.o \
 	mbprint.o \
 	option_utils.o \
 	parallel_slot.o \
