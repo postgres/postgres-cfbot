@@ -43,7 +43,7 @@ static int	DecodeTimeCommon(char *str, int fmask, int range,
 							 int *tmask, struct pg_itm *itm);
 static int	DecodeTime(char *str, int fmask, int range,
 					   int *tmask, struct pg_tm *tm, fsec_t *fsec);
-static int	DecodeTimeForInterval(char *str, int fmask, int range,
+static int	DecodeTimeForInterval(char *str, int fmask, int range, bool negative,
 								  int *tmask, struct pg_itm_in *itm_in);
 static const datetkn *datebsearch(const char *key, const datetkn *base, int nel);
 static int	DecodeDate(char *str, int fmask, int *tmask, bool *is2digits,
@@ -643,12 +643,14 @@ AdjustMicroseconds(int64 val, double fval, int64 scale,
 static bool
 AdjustDays(int64 val, int scale, struct pg_itm_in *itm_in)
 {
-	int			days;
+	int64		days;
 
-	if (val < INT_MIN || val > INT_MAX)
+	if (pg_mul_s64_overflow(val, scale, &days) ||
+		pg_add_s64_overflow(itm_in->tm_mday, days, &days) ||
+		days < INT_MIN || days > INT_MAX)
 		return false;
-	return !pg_mul_s32_overflow((int32) val, scale, &days) &&
-		!pg_add_s32_overflow(itm_in->tm_mday, days, &itm_in->tm_mday);
+	itm_in->tm_mday = (int) days;
+	return true;
 }
 
 /*
@@ -2766,7 +2768,7 @@ DecodeTime(char *str, int fmask, int range,
  * itm_in->tm_usec.
  */
 static int
-DecodeTimeForInterval(char *str, int fmask, int range,
+DecodeTimeForInterval(char *str, int fmask, int range, bool negative,
 					  int *tmask, struct pg_itm_in *itm_in)
 {
 	struct pg_itm itm;
@@ -2776,6 +2778,19 @@ DecodeTimeForInterval(char *str, int fmask, int range,
 							 tmask, &itm);
 	if (dterr)
 		return dterr;
+
+	/*
+	 * Apply the sign before accumulating, since the magnitude of PG_INT64_MIN
+	 * cannot be represented as a positive int64.  DecodeTimeCommon() has
+	 * checked that all these fields are nonnegative.
+	 */
+	if (negative)
+	{
+		itm.tm_hour = -itm.tm_hour;
+		itm.tm_min = -itm.tm_min;
+		itm.tm_sec = -itm.tm_sec;
+		itm.tm_usec = -itm.tm_usec;
+	}
 
 	itm_in->tm_usec = itm.tm_usec;
 	if (!int64_multiply_add(itm.tm_hour, USECS_PER_HOUR, &itm_in->tm_usec) ||
@@ -3514,6 +3529,7 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 	bool		force_negative = false;
 	bool		is_before = false;
 	bool		parsing_unit_val = false;
+	bool		negative;
 	char	   *cp;
 	int			fmask = 0,
 				tmask,
@@ -3564,13 +3580,14 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 		switch (ftype[i])
 		{
 			case DTK_TIME:
+				negative = force_negative;
+				if (is_before)
+					negative = !negative;
 				dterr = DecodeTimeForInterval(field[i], fmask, range,
+											  negative,
 											  &tmask, itm_in);
 				if (dterr)
 					return dterr;
-				if (force_negative &&
-					itm_in->tm_usec > 0)
-					itm_in->tm_usec = -itm_in->tm_usec;
 				type = DTK_DAY;
 				parsing_unit_val = false;
 				break;
@@ -3583,6 +3600,9 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 				 * it as well.
 				 */
 				Assert(*field[i] == '-' || *field[i] == '+');
+				negative = *field[i] == '-' || force_negative;
+				if (is_before)
+					negative = !negative;
 
 				/*
 				 * Check for signed hh:mm or hh:mm:ss.  If so, process exactly
@@ -3590,20 +3610,9 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 				 */
 				if (strchr(field[i] + 1, ':') != NULL &&
 					DecodeTimeForInterval(field[i] + 1, fmask, range,
+										  negative,
 										  &tmask, itm_in) == 0)
 				{
-					if (*field[i] == '-')
-					{
-						/* flip the sign on time field */
-						if (itm_in->tm_usec == PG_INT64_MIN)
-							return DTERR_FIELD_OVERFLOW;
-						itm_in->tm_usec = -itm_in->tm_usec;
-					}
-
-					if (force_negative &&
-						itm_in->tm_usec > 0)
-						itm_in->tm_usec = -itm_in->tm_usec;
-
 					/*
 					 * Set the next type to be a day, if units are not
 					 * specified. This handles the case of '1 +02:03' since we
@@ -3707,10 +3716,35 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 						fval = -fval;
 				}
 
+				/*
+				 * Apply "ago" before accumulating, so that minimum negative
+				 * field values need not fit in their positive form first.
+				 */
+				if (is_before)
+				{
+					if (val == PG_INT64_MIN)
+					{
+						/* Handle this without negating val in DTK_MICROSEC. */
+						if (type != DTK_MICROSEC)
+							return DTERR_FIELD_OVERFLOW;
+					}
+					else
+						val = -val;
+					fval = -fval;
+				}
+
 				switch (type)
 				{
 					case DTK_MICROSEC:
-						if (!AdjustMicroseconds(val, fval, 1, itm_in))
+						if (is_before && val == PG_INT64_MIN)
+						{
+							/* A previous field may offset this magnitude. */
+							if (pg_sub_s64_overflow(itm_in->tm_usec, val,
+													&itm_in->tm_usec) ||
+								!AdjustFractMicroseconds(fval, 1, itm_in))
+								return DTERR_FIELD_OVERFLOW;
+						}
+						else if (!AdjustMicroseconds(val, fval, 1, itm_in))
 							return DTERR_FIELD_OVERFLOW;
 						tmask = DTK_M(MICROSECOND);
 						break;
@@ -3876,21 +3910,6 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 	/* reject if unit appeared and was never handled */
 	if (parsing_unit_val)
 		return DTERR_BAD_FORMAT;
-
-	/* finally, AGO negates everything */
-	if (is_before)
-	{
-		if (itm_in->tm_usec == PG_INT64_MIN ||
-			itm_in->tm_mday == INT_MIN ||
-			itm_in->tm_mon == INT_MIN ||
-			itm_in->tm_year == INT_MIN)
-			return DTERR_FIELD_OVERFLOW;
-
-		itm_in->tm_usec = -itm_in->tm_usec;
-		itm_in->tm_mday = -itm_in->tm_mday;
-		itm_in->tm_mon = -itm_in->tm_mon;
-		itm_in->tm_year = -itm_in->tm_year;
-	}
 
 	return 0;
 }

@@ -824,3 +824,62 @@ SELECT INTERVAL 'yesterday';
 SELECT INTERVAL 'infinity years';
 SELECT INTERVAL 'infinity ago';
 SELECT INTERVAL '+infinity -infinity';
+
+-- Minimum fields must survive output/input without overflowing their magnitude.
+CREATE TEMP TABLE interval_roundtrip (i interval);
+INSERT INTO interval_roundtrip VALUES
+  ('-9223372036854775808 microseconds'),
+  ('9223372036854775807 microseconds'),
+  ('-2147483648 days'),
+  ('-2147483648 months'),
+  ('-2147483648 months -2147483648 days -9223372036854775807 microseconds'),
+  ('2147483647 months -2147483648 days -9223372036854775808 microseconds'),
+  ('-1 month 2 days -03:04:05.678901'),
+  ('1 month -2 days 03:04:05.678901');
+
+-- Compare the binary representations, not just the normalized interval values.
+SET intervalstyle = postgres;
+SELECT bool_and(interval_send(i) = interval_send(i::text::interval)) AS roundtrip
+  FROM interval_roundtrip;
+SET intervalstyle = postgres_verbose;
+SELECT bool_and(interval_send(i) = interval_send(i::text::interval)) AS roundtrip
+  FROM interval_roundtrip;
+SET intervalstyle = sql_standard;
+SELECT bool_and(interval_send(i) = interval_send(i::text::interval)) AS roundtrip
+  FROM interval_roundtrip;
+SET intervalstyle = iso_8601;
+SELECT bool_and(interval_send(i) = interval_send(i::text::interval)) AS roundtrip
+  FROM interval_roundtrip;
+SET intervalstyle = postgres;
+DROP TABLE interval_roundtrip;
+
+-- Preserve cancellation between fields when applying "ago" near the limits.
+SELECT interval_send('-9223372036854775808 us 1 millisecond ago'::interval) =
+       interval_send('9223372036854774808 us'::interval) AS microsecond_cancellation;
+SELECT interval_send('-2147483648 days 1 week ago'::interval) =
+       interval_send('2147483641 days'::interval) AS day_cancellation;
+SELECT interval_send('-2147483647 months 1 year ago'::interval) =
+       interval_send('2147483635 months'::interval) AS month_cancellation;
+
+-- Applying the sign early must not allow values outside the signed range.
+SELECT s, pg_input_is_valid(s, 'interval') AS valid
+FROM (VALUES
+  ('-2562047788:00:54.775808'),
+  ('-2562047788:00:54.775809'),
+  ('2562047788:00:54.775807'),
+  ('2562047788:00:54.775808'),
+  ('2562047788:00:54.775808 ago'),
+  ('-2562047788:00:54.775808 ago'),
+  ('2147483648 days ago'),
+  ('2147483649 days ago'),
+  ('-2147483648 days ago'),
+  ('2147483648 months ago'),
+  ('2147483649 months ago'),
+  ('-2147483648 months ago')) AS v(s);
+
+-- A leading SQL-standard sign applies to an unsigned time field too.
+SET intervalstyle = sql_standard;
+SELECT interval_send('-1 2562047788:00:54.775808'::interval) =
+       interval_send('-1 days -9223372036854775808 microseconds'::interval)
+       AS same_fields;
+SET intervalstyle = postgres;
