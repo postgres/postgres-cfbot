@@ -1,0 +1,14 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_upd s2_upd s1_commit s2_commit s3_read
+step s1_upd: UPDATE flux_lu SET v = v + 1 WHERE id = 1;
+step s2_upd: UPDATE flux_lu SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1_commit: COMMIT;
+step s2_upd: <... completed>
+step s2_commit: COMMIT;
+step s3_read: SELECT v FROM flux_lu WHERE id = 1;
+v
+-
+2
+(1 row)
+

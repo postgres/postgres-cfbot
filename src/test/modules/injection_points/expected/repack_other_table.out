@@ -1,0 +1,131 @@
+Parsed test spec with 2 sessions
+
+starting permutation: pick_fx rp w_dml wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: ALTER TABLE ofx RENAME TO o;
+step rp: REPACK (CONCURRENTLY) r; <waiting ...>
+step w_dml: 
+  INSERT INTO o VALUES (1001, 1001, 'other');
+  UPDATE o SET k = 2222, v = 'other' WHERE id = 2;
+  UPDATE o SET id = 1003 WHERE id = 3;
+  DELETE FROM o WHERE id = 4;
+  INSERT INTO o SELECT g, g, 'other' FROM generate_series(1010, 1019) g;
+  INSERT INTO o VALUES (5, 0, 'other') ON CONFLICT (id) DO UPDATE SET k = 5555;
+  INSERT INTO o VALUES (1020, 0, 'other') ON CONFLICT (id) DO NOTHING;
+  UPDATE o SET v = repeat('x', 2000) WHERE id = 6;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM o WHERE id = 6;
+  DO $$ BEGIN
+    EXECUTE format('COPY o FROM %L',
+                   current_setting('data_directory') || '/repack_other_table.dat');
+  END $$;
+
+moved
+-----
+t    
+(1 row)
+
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: 
+  SELECT count(*), sum(id), sum(k), string_agg(DISTINCT v, ',') AS v FROM r;
+  SELECT bt_index_check(indexrelid, true) FROM pg_index
+	WHERE indrelid = 'r'::regclass;
+  SELECT count(*), sum(id), sum(k) FROM o;
+
+count|sum|sum|v
+-----+---+---+-
+   20|210|210|r
+(1 row)
+
+bt_index_check
+--------------
+              
+              
+(2 rows)
+
+count|  sum|   sum
+-----+-----+------
+  141|30767|754168
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp w_dml wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: ALTER TABLE ohp RENAME TO o;
+step rp: REPACK (CONCURRENTLY) r; <waiting ...>
+step w_dml: 
+  INSERT INTO o VALUES (1001, 1001, 'other');
+  UPDATE o SET k = 2222, v = 'other' WHERE id = 2;
+  UPDATE o SET id = 1003 WHERE id = 3;
+  DELETE FROM o WHERE id = 4;
+  INSERT INTO o SELECT g, g, 'other' FROM generate_series(1010, 1019) g;
+  INSERT INTO o VALUES (5, 0, 'other') ON CONFLICT (id) DO UPDATE SET k = 5555;
+  INSERT INTO o VALUES (1020, 0, 'other') ON CONFLICT (id) DO NOTHING;
+  UPDATE o SET v = repeat('x', 2000) WHERE id = 6;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM o WHERE id = 6;
+  DO $$ BEGIN
+    EXECUTE format('COPY o FROM %L',
+                   current_setting('data_directory') || '/repack_other_table.dat');
+  END $$;
+
+moved
+-----
+t    
+(1 row)
+
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: 
+  SELECT count(*), sum(id), sum(k), string_agg(DISTINCT v, ',') AS v FROM r;
+  SELECT bt_index_check(indexrelid, true) FROM pg_index
+	WHERE indrelid = 'r'::regclass;
+  SELECT count(*), sum(id), sum(k) FROM o;
+
+count|sum|sum|v
+-----+---+---+-
+   20|210|210|r
+(1 row)
+
+bt_index_check
+--------------
+              
+              
+(2 rows)
+
+count|  sum|   sum
+-----+-----+------
+  141|30767|754168
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

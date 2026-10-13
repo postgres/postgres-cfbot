@@ -1,0 +1,197 @@
+--
+-- FLUX: a transaction updates rows in place, then replaces or drops storage
+-- the update touched (DROP INDEX, REINDEX, ALTER COLUMN TYPE, TRUNCATE,
+-- CLUSTER), then rolls back, entirely or to a savepoint.
+--
+-- The update's undo names the files it changed.  While the transaction is
+-- aborting, its catalog changes are not rolled back yet, so the relcache
+-- maps the new files (or no index at all).  The rollback must still leave
+-- the table and its indexes as they were, so that the same update applied
+-- again gives the same rows and index entries as on heap.  Each case runs on
+-- a heap twin and on FLUX, permanent and temporary; the two columns of the
+-- result must agree.
+--
+CREATE SCHEMA ad_amcheck;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'amcheck') THEN
+    CREATE EXTENSION amcheck SCHEMA ad_amcheck;
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+-- ad_h (heap) and ad_f (FLUX), 200 rows with k = id, an index on k.
+CREATE PROCEDURE ad_setup(temp bool) LANGUAGE plpgsql AS $$
+DECLARE
+  t text;
+BEGIN
+  DROP TABLE IF EXISTS pg_temp.ad_h, pg_temp.ad_f, public.ad_h, public.ad_f;
+  FOREACH t IN ARRAY ARRAY['ad_h', 'ad_f'] LOOP
+    EXECUTE format('CREATE %s TABLE %I (id int PRIMARY KEY, k int) USING %s',
+                   CASE WHEN temp THEN 'TEMP' ELSE '' END, t,
+                   CASE WHEN t = 'ad_h' THEN 'heap' ELSE 'flux' END);
+    EXECUTE format('CREATE INDEX %1$I_k ON %1$I (k)', t);
+    EXECUTE format('INSERT INTO %I SELECT g, g FROM generate_series(1, 200) g', t);
+  END LOOP;
+END $$;
+
+-- The update: move the first 50 rows' keys, in place on FLUX.
+CREATE PROCEDURE ad_upd() LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE ad_h SET k = k + 1000 WHERE id <= 50;
+  UPDATE ad_f SET k = k + 1000 WHERE id <= 50;
+END $$;
+
+-- The DDL, on both tables; %1$I is the table.
+CREATE PROCEDURE ad_ddl(ddl text) LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE format(ddl, 'ad_h');
+  EXECUTE format(ddl, 'ad_f');
+END $$;
+
+-- Rows and sum of k, then index scans of the moved and the old keys, then
+-- amcheck of every index.
+CREATE FUNCTION ad_check1(t text) RETURNS text LANGUAGE plpgsql
+  SET enable_seqscan = off SET enable_bitmapscan = off AS $$
+DECLARE
+  chk text := (SELECT format('%I.bt_index_check', n.nspname)
+                FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+                WHERE e.extname = 'amcheck');
+  n bigint; s bigint; moved bigint; old bigint; idx regclass; problems text := '';
+BEGIN
+  EXECUTE format('SELECT count(*), sum(k) FROM %I', t) INTO n, s;
+  EXECUTE format('SELECT count(*) FROM %I WHERE k > 1000', t) INTO moved;
+  EXECUTE format('SELECT count(*) FROM %I WHERE k BETWEEN 1 AND 50', t) INTO old;
+  IF chk IS NOT NULL THEN
+    FOR idx IN SELECT indexrelid FROM pg_index WHERE indrelid = t::regclass ORDER BY 1 LOOP
+      BEGIN
+        EXECUTE format('SELECT %s($1, true)', chk) USING idx;
+      EXCEPTION WHEN OTHERS THEN
+        problems := problems || ' ' || split_part(SQLERRM, ' for index', 1);
+      END;
+    END LOOP;
+  END IF;
+  RETURN format('%s|%s idx %s/%s%s', n, s, moved, old,
+                CASE WHEN problems = '' THEN '' ELSE ' amcheck:' || problems END);
+END $$;
+
+CREATE FUNCTION ad_check(OUT heap text, OUT flux text) LANGUAGE sql
+  RETURN (ad_check1('ad_h'), ad_check1('ad_f'));
+
+-- Top-level ROLLBACK, then the update again in a new transaction.
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('REINDEX INDEX %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('ALTER TABLE %1$I ALTER COLUMN k TYPE bigint'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('CLUSTER %1$I USING %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+
+-- The same with temporary tables.
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('REINDEX INDEX %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('ALTER TABLE %1$I ALTER COLUMN k TYPE bigint'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('CLUSTER %1$I USING %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+
+-- ROLLBACK TO SAVEPOINT, then the update again in the same transaction.
+CALL ad_setup(false);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('REINDEX INDEX %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('ALTER TABLE %1$I ALTER COLUMN k TYPE bigint'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('CLUSTER %1$I USING %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+
+CALL ad_setup(true);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('REINDEX INDEX %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('ALTER TABLE %1$I ALTER COLUMN k TYPE bigint'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('CLUSTER %1$I USING %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+
+-- An error aborts the transaction the same way, in a transaction block or
+-- in a single statement.
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); SELECT 1 / 0; ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); SELECT 1 / 0; ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+DO $$ BEGIN CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); PERFORM 1 / 0; END $$;
+CALL ad_upd(); SELECT * FROM ad_check();
+
+-- ROLLBACK in a procedure, and ROLLBACK AND CHAIN: the next transaction
+-- starts right away.
+CREATE PROCEDURE ad_txn(ddl text) LANGUAGE plpgsql AS $$
+BEGIN
+  CALL ad_upd(); CALL ad_ddl(ddl); ROLLBACK;
+  CALL ad_upd();
+END $$;
+CALL ad_setup(false);
+CALL ad_txn('DROP INDEX %1$I_k'); SELECT * FROM ad_check();
+CALL ad_setup(true);
+CALL ad_txn('TRUNCATE %1$I'); SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK AND CHAIN;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); ROLLBACK AND CHAIN;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+
+-- Each row updated twice before the DDL: the rollback applies its two
+-- records newest first.
+CALL ad_setup(false);
+BEGIN; CALL ad_upd(); CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); CALL ad_upd(); CALL ad_ddl('TRUNCATE %1$I'); ROLLBACK;
+CALL ad_upd(); SELECT * FROM ad_check();
+CALL ad_setup(false);
+BEGIN; SAVEPOINT s; CALL ad_upd(); CALL ad_upd(); CALL ad_ddl('DROP INDEX %1$I_k'); ROLLBACK TO s;
+CALL ad_upd(); COMMIT; SELECT * FROM ad_check();
+CALL ad_setup(true);
+BEGIN; CALL ad_upd(); SAVEPOINT s; CALL ad_upd(); CALL ad_ddl('REINDEX INDEX %1$I_k'); ROLLBACK TO s;
+ROLLBACK; CALL ad_upd(); SELECT * FROM ad_check();
+
+DROP TABLE ad_h, ad_f;
+DROP FUNCTION ad_check, ad_check1;
+DROP PROCEDURE ad_setup, ad_upd, ad_ddl, ad_txn;
+DROP SCHEMA ad_amcheck CASCADE;

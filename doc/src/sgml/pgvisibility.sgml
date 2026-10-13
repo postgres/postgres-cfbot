@@ -106,7 +106,8 @@
      <para>
       Returns the TIDs of non-frozen tuples stored in pages marked all-frozen
       in the visibility map.  If this function returns a non-empty set of
-      TIDs, the visibility map is corrupt.
+      TIDs, the visibility map is corrupt.  Only tables of the
+      <literal>heap</literal> access method are supported.
      </para>
     </listitem>
    </varlistentry>
@@ -118,7 +119,8 @@
      <para>
       Returns the TIDs of non-all-visible tuples stored in pages marked
       all-visible in the visibility map.  If this function returns a non-empty
-      set of TIDs, the visibility map is corrupt.
+      set of TIDs, the visibility map is corrupt.  Only tables of the
+      <literal>heap</literal> access method are supported.
      </para>
     </listitem>
    </varlistentry>

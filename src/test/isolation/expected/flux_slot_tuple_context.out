@@ -1,0 +1,18 @@
+Parsed test spec with 2 sessions
+
+starting permutation: upd validate check abort
+step upd: BEGIN; UPDATE fv SET v = v + 100, pad = pad || 'x' WHERE id IN (3, 17);
+step validate: ALTER TABLE fv VALIDATE CONSTRAINT fv_v;
+step check: SELECT convalidated FROM pg_constraint WHERE conname = 'fv_v';
+		  SELECT count(*), sum(v) FROM fv;
+convalidated
+------------
+t           
+(1 row)
+
+count|sum
+-----+---
+   30|465
+(1 row)
+
+step abort: ROLLBACK;

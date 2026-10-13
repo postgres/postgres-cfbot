@@ -1,0 +1,242 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_dml s2_vacuum_heap s2_vacuum_flux s2_reltuples s1_commit s2_pgstat
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s1_dml: 
+  BEGIN;
+  DELETE FROM st_heap WHERE a <= 1000;
+  DELETE FROM st_flux WHERE a <= 1000;
+  INSERT INTO st_heap SELECT g, g, g FROM generate_series(20001, 22000) g;
+  INSERT INTO st_flux SELECT g, g, g FROM generate_series(20001, 22000) g;
+
+step s2_vacuum_heap: VACUUM st_heap;
+step s2_vacuum_flux: VACUUM st_flux;
+step s2_reltuples: 
+  SELECT relname, abs(reltuples - 10000) <= 500 AS committed_rows_only
+  FROM pg_class WHERE relname IN ('st_heap', 'st_flux') ORDER BY relname;
+
+relname|committed_rows_only
+-------+-------------------
+st_flux|t                  
+st_heap|t                  
+(2 rows)
+
+step s1_commit: COMMIT; SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_pgstat: 
+  SELECT pg_stat_clear_snapshot();
+  SELECT relname, abs(n_live_tup - st_count(relid)) <= 500 AS live_ok,
+         n_dead_tup = 1000 AS dead_ok
+  FROM pg_stat_user_tables WHERE relname IN ('st_heap', 'st_flux')
+  ORDER BY relname;
+
+pg_stat_clear_snapshot
+----------------------
+                      
+(1 row)
+
+relname|live_ok|dead_ok
+-------+-------+-------
+st_flux|t      |t      
+st_heap|t      |t      
+(2 rows)
+
+
+starting permutation: s1_dml s2_analyze s2_reltuples s1_commit s2_pgstat
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s1_dml: 
+  BEGIN;
+  DELETE FROM st_heap WHERE a <= 1000;
+  DELETE FROM st_flux WHERE a <= 1000;
+  INSERT INTO st_heap SELECT g, g, g FROM generate_series(20001, 22000) g;
+  INSERT INTO st_flux SELECT g, g, g FROM generate_series(20001, 22000) g;
+
+step s2_analyze: ANALYZE st_heap, st_flux;
+step s2_reltuples: 
+  SELECT relname, abs(reltuples - 10000) <= 500 AS committed_rows_only
+  FROM pg_class WHERE relname IN ('st_heap', 'st_flux') ORDER BY relname;
+
+relname|committed_rows_only
+-------+-------------------
+st_flux|t                  
+st_heap|t                  
+(2 rows)
+
+step s1_commit: COMMIT; SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_pgstat: 
+  SELECT pg_stat_clear_snapshot();
+  SELECT relname, abs(n_live_tup - st_count(relid)) <= 500 AS live_ok,
+         n_dead_tup = 1000 AS dead_ok
+  FROM pg_stat_user_tables WHERE relname IN ('st_heap', 'st_flux')
+  ORDER BY relname;
+
+pg_stat_clear_snapshot
+----------------------
+                      
+(1 row)
+
+relname|live_ok|dead_ok
+-------+-------+-------
+st_flux|t      |t      
+st_heap|t      |t      
+(2 rows)
+
+
+starting permutation: s2_update_nonkey s2_update_counts s2_analyze s2_dead
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_update_nonkey: 
+  UPDATE st_heap SET c = c + 1;
+  UPDATE st_flux SET c = c + 1;
+  SELECT pg_stat_force_next_flush();
+
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_update_counts: 
+  SELECT pg_stat_clear_snapshot();
+  SELECT relname, n_tup_upd = 10000 AS upd_ok,
+         n_tup_ins = 10000 AND n_tup_del = 0 AS not_ins_del,
+         n_mod_since_analyze = 10000 AS mod_ok,
+         n_tup_hot_upd = n_tup_upd AS all_hot,
+         CASE n_dead_tup WHEN 0 THEN 'none' WHEN 10000 THEN 'all'
+              ELSE 'some' END AS dead
+  FROM pg_stat_user_tables
+  WHERE relname IN ('st_heap', 'st_flux', 'sh_heap', 'sh_flux')
+    AND n_tup_upd + n_tup_del > 0
+  ORDER BY relname;
+
+pg_stat_clear_snapshot
+----------------------
+                      
+(1 row)
+
+relname|upd_ok|not_ins_del|mod_ok|all_hot|dead
+-------+------+-----------+------+-------+----
+st_flux|t     |t          |t     |t      |none
+st_heap|t     |t          |t     |f      |all 
+(2 rows)
+
+step s2_analyze: ANALYZE st_heap, st_flux;
+step s2_dead: 
+  SELECT pg_stat_clear_snapshot();
+  SELECT relname, CASE n_dead_tup WHEN 0 THEN 'none' WHEN 10000 THEN 'all'
+                  ELSE 'some' END AS dead
+  FROM pg_stat_user_tables WHERE relname IN ('st_heap', 'st_flux')
+  ORDER BY relname;
+
+pg_stat_clear_snapshot
+----------------------
+                      
+(1 row)
+
+relname|dead
+-------+----
+st_flux|none
+st_heap|all 
+(2 rows)
+
+
+starting permutation: s2_update_key s2_update_counts
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_update_key: 
+  UPDATE st_heap SET a = a + 100000;
+  UPDATE st_flux SET a = a + 100000;
+  SELECT pg_stat_force_next_flush();
+
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_update_counts: 
+  SELECT pg_stat_clear_snapshot();
+  SELECT relname, n_tup_upd = 10000 AS upd_ok,
+         n_tup_ins = 10000 AND n_tup_del = 0 AS not_ins_del,
+         n_mod_since_analyze = 10000 AS mod_ok,
+         n_tup_hot_upd = n_tup_upd AS all_hot,
+         CASE n_dead_tup WHEN 0 THEN 'none' WHEN 10000 THEN 'all'
+              ELSE 'some' END AS dead
+  FROM pg_stat_user_tables
+  WHERE relname IN ('st_heap', 'st_flux', 'sh_heap', 'sh_flux')
+    AND n_tup_upd + n_tup_del > 0
+  ORDER BY relname;
+
+pg_stat_clear_snapshot
+----------------------
+                      
+(1 row)
+
+relname|upd_ok|not_ins_del|mod_ok|all_hot|dead
+-------+------+-----------+------+-------+----
+st_flux|t     |t          |t     |f      |all 
+st_heap|t     |t          |t     |f      |all 
+(2 rows)
+
+
+starting permutation: s2_update_hashkey s2_update_counts
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_update_hashkey: 
+  UPDATE sh_heap SET a = a + 100000;
+  UPDATE sh_flux SET a = a + 100000;
+  SELECT pg_stat_force_next_flush();
+
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_update_counts: 
+  SELECT pg_stat_clear_snapshot();
+  SELECT relname, n_tup_upd = 10000 AS upd_ok,
+         n_tup_ins = 10000 AND n_tup_del = 0 AS not_ins_del,
+         n_mod_since_analyze = 10000 AS mod_ok,
+         n_tup_hot_upd = n_tup_upd AS all_hot,
+         CASE n_dead_tup WHEN 0 THEN 'none' WHEN 10000 THEN 'all'
+              ELSE 'some' END AS dead
+  FROM pg_stat_user_tables
+  WHERE relname IN ('st_heap', 'st_flux', 'sh_heap', 'sh_flux')
+    AND n_tup_upd + n_tup_del > 0
+  ORDER BY relname;
+
+pg_stat_clear_snapshot
+----------------------
+                      
+(1 row)
+
+relname|upd_ok|not_ins_del|mod_ok|all_hot|dead
+-------+------+-----------+------+-------+----
+sh_flux|t     |t          |t     |f      |all 
+sh_heap|t     |t          |t     |f      |all 
+(2 rows)
+

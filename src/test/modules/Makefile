@@ -4,7 +4,9 @@ subdir = src/test/modules
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
-SUBDIRS = \
+SUBDIRS = test_deletemark \
+		  test_idxundo \
+		\
 		  brin \
 		  commit_ts \
 		  delay_execution \
@@ -32,6 +34,7 @@ SUBDIRS = \
 		  test_escape \
 		  test_extensible \
 		  test_extensions \
+		  test_fileops \
 		  test_ginpostinglist \
 		  test_int128 \
 		  test_integerset \

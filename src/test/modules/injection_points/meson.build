@@ -43,6 +43,14 @@ injection_points_isolation = [
   'syscache-update-pruned',
   'heap_lock_update',
   'on_conflict_probe_window',
+  'repack_other_table',
+  'vacuum_progress',
+  'flux_commit_window',
+  'flux_cic',
+  'flux_update_cas_race',
+  'flux_update_redecide_queue',
+  'flux_repack',
+  'flux_repack_decode',
 ]
 
 # wait_cleanup terminates another backend, whose FATAL message can be lost

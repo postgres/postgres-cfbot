@@ -1,0 +1,55 @@
+Parsed test spec with 1 sessions
+
+starting permutation: s1stats s1scan s1ff s1stats s1where s1ff s1stats
+step s1stats: 
+  SELECT pg_stat_get_numscans('ss'::regclass) AS seq_scan,
+         pg_stat_get_tuples_returned('ss'::regclass) AS seq_tup_read;
+
+seq_scan|seq_tup_read
+--------+------------
+       0|           0
+(1 row)
+
+step s1scan: SELECT count(*) FROM ss;
+count
+-----
+    5
+(1 row)
+
+step s1ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s1stats: 
+  SELECT pg_stat_get_numscans('ss'::regclass) AS seq_scan,
+         pg_stat_get_tuples_returned('ss'::regclass) AS seq_tup_read;
+
+seq_scan|seq_tup_read
+--------+------------
+       1|           5
+(1 row)
+
+step s1where: SELECT k FROM ss WHERE v > 3 ORDER BY k;
+k
+-
+4
+5
+(2 rows)
+
+step s1ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s1stats: 
+  SELECT pg_stat_get_numscans('ss'::regclass) AS seq_scan,
+         pg_stat_get_tuples_returned('ss'::regclass) AS seq_tup_read;
+
+seq_scan|seq_tup_read
+--------+------------
+       2|          10
+(1 row)
+

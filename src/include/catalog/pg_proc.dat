@@ -912,6 +912,10 @@
   proname => 'heap_tableam_handler', provolatile => 'v',
   prorettype => 'table_am_handler', proargtypes => 'internal',
   prosrc => 'heap_tableam_handler' },
+{ oid => '9402', descr => 'flux table access method handler',
+  proname => 'flux_tableam_handler', provolatile => 'v',
+  prorettype => 'table_am_handler', proargtypes => 'internal',
+  prosrc => 'flux_tableam_handler' },
 
 # Index access method handlers
 { oid => '330', descr => 'btree index access method handler',
@@ -12778,5 +12782,23 @@
 { oid => '6462', descr => 'hash',
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
+
+# UNDO subsystem statistics
+{ oid => '9410', descr => 'statistics: what is retaining UNDO WAL',
+  proname => 'pg_stat_get_undo_retention', prorows => '16', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => '',
+  proallargtypes => '{text,int4,xid,oid,pg_lsn,int8}',
+  proargmodes => '{o,o,o,o,o,o}',
+  proargnames => '{holder,pid,xid,dboid,oldest_lsn,retained_bytes}',
+  prosrc => 'pg_stat_get_undo_retention' },
+{ oid => '9411', descr => 'statistics: per-backend undo logs',
+  proname => 'pg_stat_get_undo_logs', prorows => '16', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => '',
+  proallargtypes => '{oid,text,text,text,text,text,xid,int4}',
+  proargmodes => '{o,o,o,o,o,o,o,o}',
+  proargnames => '{logno,persistence,tablespace,discard,insert,end,xid,pid}',
+  prosrc => 'pg_stat_get_undo_logs' },
 
 ]

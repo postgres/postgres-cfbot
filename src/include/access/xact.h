@@ -138,6 +138,24 @@ typedef enum
 
 typedef void (*XactCallback) (XactEvent event, void *arg);
 
+/*
+ * PendingPhysOps{Do,PostPrepare,AtSubCommit,AtSubAbort}_hook: mirror the
+ * matching core smgr{DoPendingDeletes,PostPrepare,AtSubCommit,AtSubAbort}
+ * calls in xact.c.  A subsystem that manages pending structural filesystem
+ * operations needs the SAME commit/abort-sequencing position
+ * as smgr's own pending-deletes housekeeping -- e.g.
+ * PendingPhysOpsDo_hook(true) is placed immediately after
+ * smgrDoPendingDeletes(true), which core's own comment there documents as
+ * "best done after releasing relcache and buffer pins... this ordering is
+ * definitely critical during abort" -- a physical-file-cleanup ordering
+ * requirement no ordinary XactCallback/SubXactCallback event exposes.  NULL
+ * is a valid no-op for a build with no such subsystem compiled in.
+ */
+extern void (*PendingPhysOpsDo_hook) (bool isCommit);
+extern void (*PendingPhysOpsPostPrepare_hook) (void);
+extern void (*PendingPhysOpsAtSubCommit_hook) (void);
+extern void (*PendingPhysOpsAtSubAbort_hook) (void);
+
 typedef enum
 {
 	SUBXACT_EVENT_START_SUB,
@@ -194,6 +212,7 @@ typedef struct SavedTransactionCharacteristics
 #define XACT_XINFO_HAS_ORIGIN			(1U << 5)
 #define XACT_XINFO_HAS_AE_LOCKS			(1U << 6)
 #define XACT_XINFO_HAS_GID				(1U << 7)
+#define XACT_XINFO_HAS_FILEOPS (1U << 9)
 #define XACT_XINFO_HAS_DROPPED_STATS	(1U << 8)
 
 /*
@@ -368,7 +387,34 @@ typedef struct xl_xact_prepare
 	uint16		gidlen;			/* length of the GID - GID follows the header */
 	XLogRecPtr	origin_lsn;		/* lsn of this record at origin node */
 	TimestampTz origin_timestamp;	/* time of prepare at origin node */
+
+	/*
+	 * UNDO chain head LSN per persistence level (3 == NUndoPersistenceLevels
+	 * from undodefs.h; hardcoded here to keep xact.h free of UNDO headers).
+	 * If NUndoPersistenceLevels changes, this array must be updated and both
+	 * XLOG_PAGE_MAGIC (xlog_internal.h) and TWOPHASE_MAGIC (twophase.c) must
+	 * be bumped.  See StaticAssertDecl in xactundo.c for compile-time guard.
+	 */
+	XLogRecPtr	last_batch_lsn[3];
+
+	/*
+	 * Oldest batch of the permanent-level chain.  WAL from here on is
+	 * retained while the transaction stays prepared, and handed to the ATM by
+	 * ROLLBACK PREPARED, because the revert worker reads the whole chain.
+	 */
+	XLogRecPtr	undo_first_batch_lsn;
 } xl_xact_prepare;
+
+#define SizeOfXactPrepare sizeof(xl_xact_prepare)
+
+/*
+ * Verify xl_xact_prepare contains the UNDO last_batch_lsn field.  This struct
+ * is written into WAL as part of XLOG_XACT_PREPARE records, and into 2PC
+ * state files via TwoPhaseFileHeader.  Any layout change requires bumping both
+ * XLOG_PAGE_MAGIC (xlog_internal.h) and TWOPHASE_MAGIC (twophase.c).
+ */
+StaticAssertDecl(offsetof(xl_xact_prepare, last_batch_lsn) > 0,
+				 "xl_xact_prepare must contain last_batch_lsn for UNDO WAL compat");
 
 /*
  * Commit/Abort records in the above form are a bit verbose to parse, so
@@ -430,6 +476,8 @@ typedef struct xl_xact_parsed_abort
 
 	XLogRecPtr	origin_lsn;
 	TimestampTz origin_timestamp;
+	uint32		fileops_len;
+	const char *fileops;
 } xl_xact_parsed_abort;
 
 
@@ -439,6 +487,8 @@ typedef struct xl_xact_parsed_abort
  */
 extern bool IsTransactionState(void);
 extern bool IsAbortedTransactionBlockState(void);
+extern int	EnterInlineUndoApplyState(void);
+extern void LeaveInlineUndoApplyState(int saved);
 extern TransactionId GetTopTransactionId(void);
 extern TransactionId GetTopTransactionIdIfAny(void);
 extern TransactionId GetCurrentTransactionId(void);
@@ -519,7 +569,8 @@ extern XLogRecPtr XactLogAbortRecord(TimestampTz abort_time,
 									 int ndroppedstats,
 									 xl_xact_stats_item *droppedstats,
 									 int xactflags, TransactionId twophase_xid,
-									 const char *twophase_gid);
+									 const char *twophase_gid,
+									 const char *fileops, uint32 fileops_len);
 extern void xact_redo(XLogReaderState *record);
 
 /* xactdesc.c */
@@ -534,5 +585,32 @@ extern void ParsePrepareRecord(uint8 info, xl_xact_prepare *xlrec, xl_xact_parse
 extern void EnterParallelMode(void);
 extern void ExitParallelMode(void);
 extern bool IsInParallelMode(void);
+
+/* UNDO chain management */
+extern void SetCurrentTransactionUndoRecPtr(uint64 undo_ptr);
+extern uint64 GetCurrentTransactionUndoRecPtr(void);
+
+/*
+ * Number of per-backend UNDO persistence levels (permanent, unlogged, temp);
+ * must match UndoPersistenceLevels in access/perbackend/pbu_undolog.h, which
+ * cannot be included here.
+ */
+#define PBU_UNDO_PERSISTENCE_LEVELS 3
+
+extern void SetCurrentTransactionPbuUndoLocation(int level, uint64 urec_ptr);
+extern uint64 GetCurrentTransactionPbuUndoStartAt(int level);
+extern uint64 GetCurrentTransactionPbuUndoLatestAt(int level);
+extern uint64 GetCurrentTransactionPbuUndoStart(void);
+extern uint64 GetCurrentTransactionPbuUndoLatest(void);
+extern void PbuAtAbort_ApplyUndo(void);
+extern void PbuApplyPendingUndo(void);
+extern bool PbuTempUndoPending(void);
+extern void PbuApplySubxactUndo(uint8 rmid);
+extern void PbuApplySubxactUndoAll(void);
+extern bool PbuInSubxactApply(void);
+extern bool PbuInSubxactRetry(void);
+extern bool PbuSubxactUndoRetryPending(void);
+extern void PbuRetrySubxactUndo(void);
+extern void PbuAtPreCommit_Undo(void);
 
 #endif							/* XACT_H */

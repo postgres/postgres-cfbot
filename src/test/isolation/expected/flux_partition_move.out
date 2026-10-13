@@ -1,0 +1,172 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2b s1u s2d s1c s2sel s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2d: DELETE FROM pm WHERE a = 1; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+step s2sel: SELECT * FROM pm ORDER BY a;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2u s1c s2sel s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2u: UPDATE pm SET b = 'EFG' WHERE a = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+step s2sel: SELECT * FROM pm ORDER BY a;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2l s1c s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2l: SELECT * FROM pm WHERE a = 1 FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2l: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2ks s1c s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2ks: SELECT * FROM pm WHERE a = 1 FOR KEY SHARE; <waiting ...>
+step s1c: COMMIT;
+step s2ks: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2m s1c s2sel s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2m: MERGE INTO pm t USING (SELECT 1 AS a) s ON t.a = s.a
+			  WHEN MATCHED THEN UPDATE SET b = 'merged'; <waiting ...>
+step s1c: COMMIT;
+step s2m: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+step s2sel: SELECT * FROM pm ORDER BY a;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+step s2c: COMMIT;
+
+starting permutation: s2b s1upr s2i s1c s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1upr: UPDATE pr SET a = 11 WHERE a = 7;
+step s2i: INSERT INTO prc VALUES (7); <waiting ...>
+step s1c: COMMIT;
+step s2i: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+step s2c: COMMIT;
+
+starting permutation: s2brr s2sel s1u s1c s2d s2c
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2sel: SELECT * FROM pm ORDER BY a;
+a|b  
+-+---
+1|ABC
+(1 row)
+
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s1c: COMMIT;
+step s2d: DELETE FROM pm WHERE a = 1;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+
+starting permutation: s2brr s2sel s1u s1c s2l s2c
+step s2brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2sel: SELECT * FROM pm ORDER BY a;
+a|b  
+-+---
+1|ABC
+(1 row)
+
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s1c: COMMIT;
+step s2l: SELECT * FROM pm WHERE a = 1 FOR UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2u s1r s2sel s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2u: UPDATE pm SET b = 'EFG' WHERE a = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+step s2sel: SELECT * FROM pm ORDER BY a;
+a|b  
+-+---
+1|EFG
+(1 row)
+
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2d s1r s2sel s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2d: DELETE FROM pm WHERE a = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2d: <... completed>
+step s2sel: SELECT * FROM pm ORDER BY a;
+a|b
+-+-
+(0 rows)
+
+step s2c: COMMIT;
+
+starting permutation: s2b s1u s2l s1r s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s2l: SELECT * FROM pm WHERE a = 1 FOR UPDATE; <waiting ...>
+step s1r: ROLLBACK;
+step s2l: <... completed>
+a|b  
+-+---
+1|ABC
+(1 row)
+
+step s2c: COMMIT;
+
+starting permutation: s2b s1upr s2i s1r s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1upr: UPDATE pr SET a = 11 WHERE a = 7;
+step s2i: INSERT INTO prc VALUES (7); <waiting ...>
+step s1r: ROLLBACK;
+step s2i: <... completed>
+step s2c: COMMIT;
+
+starting permutation: s1sp s1u s1rs s2b s2u s2sel s2c s1c
+step s1sp: SAVEPOINT sp;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s1rs: ROLLBACK TO sp;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2u: UPDATE pm SET b = 'EFG' WHERE a = 1;
+step s2sel: SELECT * FROM pm ORDER BY a;
+a|b  
+-+---
+1|EFG
+(1 row)
+
+step s2c: COMMIT;
+step s1c: COMMIT;
+
+starting permutation: s2b s1u s1r s2l s2u s2sel s2c
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE pm SET a = 2 WHERE a = 1;
+step s1r: ROLLBACK;
+step s2l: SELECT * FROM pm WHERE a = 1 FOR UPDATE;
+a|b  
+-+---
+1|ABC
+(1 row)
+
+step s2u: UPDATE pm SET b = 'EFG' WHERE a = 1;
+step s2sel: SELECT * FROM pm ORDER BY a;
+a|b  
+-+---
+1|EFG
+(1 row)
+
+step s2c: COMMIT;

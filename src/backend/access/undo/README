@@ -1,0 +1,1061 @@
+UNDO Log Management for PostgreSQL
+===================================
+
+This directory contains the implementation of the generic UNDO log system
+for PostgreSQL, providing transactional UNDO logging for in-place-update
+table operations, transactional rollback, and crash recovery of incomplete
+transactions.
+
+## 1. Architecture Overview
+
+The UNDO system adds a separate, append-only log that records the inverse
+of each data modification. Every INSERT, DELETE, UPDATE, and PRUNE
+operation on an UNDO-enabled table writes a record to the UNDO log
+before (or just after, for INSERT) the actual modification. This
+enables two key capabilities:
+
+  1. **Transaction rollback**: On ABORT, the UNDO chain is walked backward
+     and each operation is reversed (delete the inserted row, re-insert
+     the deleted row, etc.).
+
+  2. **Crash recovery**: After ordinary WAL redo, the UNDO of the
+     transactions that were in progress at the crash is applied, so their
+     changes are rolled back.  See "Recovery Model" below.
+
+### UNDO Chain Model
+
+Each transaction that modifies an UNDO-enabled table builds a backward
+chain of UNDO *batches*:
+
+    newest batch --> ... --> oldest batch
+       (last_batch_lsn)         (first batch)
+
+Records accumulate in an UndoRecordSet buffer and are written as one
+`XLOG_UNDO_BATCH` WAL record per batch (UndoRecordSetInsert).  A batch is
+flushed when it crosses `undo_batch_size_kb` / `undo_batch_record_limit`, and
+at every point that can consume the chain -- transaction commit/abort,
+subtransaction commit/abort, and PREPARE.
+
+The chain is linked at BATCH granularity, through the `chain_prev` field of
+the batch's `xl_undo_batch` header, which is set from the writing backend's
+`last_batch_lsn` for that persistence level.  Rollback therefore walks WAL:
+it reads the batch at `last_batch_lsn`, applies that batch's records, then
+follows `chain_prev` to the preceding batch's LSN and repeats.
+
+Within one batch, records are applied in REVERSE of serialization order, as
+ARIES requires.  Order is established positionally -- the applier scans the
+batch forward collecting record offsets, then walks them backwards -- not by
+a per-record link.  The `urec_prev` field in the record header is written but
+is not read by the apply path; see the note on it in undorecord.h.
+
+Subtransaction commit merges the child's chain into the parent.
+Subtransaction abort applies the child's chain immediately, bounded to the
+range of batches the subtransaction produced.
+
+### Opt-In Model
+
+UNDO is always-on infrastructure.  Table access methods opt in by
+implementing the am_supports_undo callback.
+
+### The UNDO Store: Cluster-Wide UndoLog
+
+The cluster-wide UndoLog (undolog.c, undorecord.c, undoapply.c) is one
+logical, append-only UNDO stream shared by all consumers, embedded in the
+WAL (XLOG_UNDO_BATCH).  Discard is governed globally by a single
+cluster-wide horizon (undo_discard_horizon): a batch's WAL is retained
+until every transaction that could still need it has resolved, then the
+WAL segment is recycled normally.  This suits **sparse, cross-object**
+UNDO -- a transaction that touches a handful of unrelated objects (for
+example filesystem operations, or an index AM logging a few structural
+changes) writes one interleaved chain, and the single global horizon is
+the right granularity because such operations are not concentrated on
+any one relation.
+
+### The UNDO Store: Per-Backend UNDO Logs
+
+Alongside the cluster-wide store, the per-backend UNDO logs
+(access/undo/perbackend/) give each backend its own append-only log, so
+the hot path has no shared insertion-point contention, and a discard
+worker reclaims undo once no snapshot needs it.  Records go to dedicated
+segment files (base/undo, routed through the SMGR_UNDO storage manager
+and the SYNC_HANDLER_UNDO sync handler) rather than into the common WAL
+stream.  This is the store a **high-churn in-place-update table AM**
+uses, where UNDO volume is dominated by rows being updated repeatedly.
+
+The two stores share the UNDO record header format and the
+rollback-dispatch machinery (undormgr.c); their storage and discard
+paths are independent.  The per-backend engine adds two resource managers
+(UndoLog and UndoAction) and its own two-phase resource manager
+(TWOPHASE_RM_PERBACKEND_ID) so a prepared transaction's per-backend
+chain-head survives 2PC.
+
+At abort, PbuAtAbort_ApplyUndo() registers the transaction's per-backend
+chain as a rollback request.  A chain of at least
+undo_rollback_overflow_size (default 16 MB) is handed to a per-backend undo
+apply worker when the request queues have room, and ROLLBACK returns
+without applying it.  Otherwise (a smaller chain, full queues, temporary
+UNDO, or single-user mode) the backend applies the chain itself before
+ROLLBACK returns.  The ATM is not used.
+
+On crash recovery, PbuPerformUndoRecovery() walks the recovered undo logs
+after the redo pass, alongside the cluster-wide engine's
+PerformUndoRecovery().  The table and index AM UNDO callbacks cannot run in
+the startup process (they return UNDO_APPLY_SKIPPED while InRecovery is
+set), so a loser transaction with such UNDO is registered as a rollback
+request (PbuRegisterRecoveredRollbackReq) and an undo apply worker reverts
+it after the database opens.  Until then the loser's changes are still on
+the pages, but readers do not see them, because visibility is resolved
+through the writing transaction's status and that transaction did not
+commit.
+
+Known limitation: StartupUndoLogs() starts from pg_undo/<redo>, the undo
+log snapshot written by the checkpoint that redo starts from.  A file-level
+copy (pg_rewind, a base backup) can lack that snapshot.  Startup then uses
+the oldest snapshot after the redo point, or failing that the newest one
+before it, and logs "undo log checkpoint snapshot for redo point ... is
+missing".  If DROP TABLESPACE removed an undo log between the redo point
+and the snapshot used, redo of WAL that still refers to that log can fail
+with an error such as "cannot find undo log number N for xid X", and the
+server does not start.
+
+The FLUX table access method (src/backend/access/flux) writes its table
+UNDO to the per-backend engine.
+
+
+## Recovery Model
+
+Rollback of a live transaction and crash recovery work as follows.
+
+**Rollback:** At ABORT time, xactundo.c's AtAbort_XactUndo() applies the
+transaction's UNDO chain inline in the aborting backend before ROLLBACK
+returns, so the time ROLLBACK takes grows with the amount of UNDO the
+transaction wrote.  The sparse, cross-object UNDO the cluster-wide store is
+built for (a handful of filesystem or structural operations per
+transaction) keeps that chain short.  Physical application walks the chain
+backward via ApplyUndoChainFromWAL(), generating a CLR
+(XLOG_UNDO_APPLY_RECORD) per page it restores for crash-safety.
+
+**Redo:** Crash recovery first runs PostgreSQL's ordinary WAL replay
+forward from the checkpoint redo point, including XLOG_UNDO_BATCH records
+(which contain UNDO payload data, not a rollback action) and any
+XLOG_UNDO_APPLY_RECORD CLRs already generated before the crash.  There is
+no separate analysis pass building a dirty-page table.
+
+**Undo of loser transactions:** During redo, each XLOG_UNDO_BATCH record
+is registered in an in-memory table keyed by XID, and removed when a
+commit or abort record for that XID is replayed.  After redo,
+PerformUndoRecovery() (undo_xlog.c) walks and applies the UNDO chains of
+the remaining entries -- transactions that wrote UNDO but reached neither
+COMMIT nor ABORT before the crash, other than prepared transactions.  This
+runs in the startup process before the database accepts connections, so
+recovery time grows with the amount of UNDO the loser transactions wrote.
+
+**Inter-transaction UNDO ordering:** Records are applied per-transaction in
+newest-batch-first order within each transaction.  No global LSN ordering across
+concurrent aborted transactions is enforced.  This is safe because PostgreSQL's
+locking model prevents two concurrent transactions from holding conflicting physical
+locks on the same tuple -- there can be no conflicting physical UNDO operations
+between concurrent transactions.
+
+**Idempotency (crash-during-rollback safety):** Redo of a CLR is idempotent
+through full-page-image + page-LSN comparison during ordinary WAL replay.
+See "CLR idempotency" below.
+
+**TEMP and UNLOGGED skip:** During crash recovery, UNDOPERSISTENCE_TEMP records
+are skipped (temporary tables do not survive server restart) and
+UNDOPERSISTENCE_UNLOGGED records are skipped (unlogged table data forks are reset
+to their empty init fork on crash recovery).  This mirrors the behavior of the
+standard heap AM for these persistence levels.
+
+## Deferred Abort: ATM, sLog, and the Logical Revert Worker
+
+The cluster-wide engine applies a transaction's UNDO chain inline at
+abort.  On top of that, three cooperating components let ROLLBACK of a
+large transaction return without applying its UNDO ("instant abort"),
+deferring the physical undo to the background:
+
+  - **ATM (Aborted Transaction Map, atm.c).**  AtAbort_XactUndo()
+    classifies the transaction by UNDO volume
+    (undo_instant_abort_threshold, default 64 KB).  Small transactions
+    apply their UNDO chain inline before ROLLBACK returns, and so does a
+    transaction with any UNDO other than index UNDO (for example
+    FILEOPS), whose effects must be gone when ROLLBACK returns.  Other
+    large transactions take the instant-abort path: ATMAddAborted()
+    records the xid in the shared-memory ATM (WAL-logged via RM_ATM_ID:
+    XLOG_ATM_ABORT / XLOG_ATM_FORGET, so the map is reconstructed during
+    redo) and ROLLBACK returns without applying the UNDO, so its latency
+    does not depend on how much UNDO the transaction wrote.
+
+  - **sLog (slog.c, slog_tuple.c).**  The transaction sLog (slog.c) is
+    the ATM above, kept in shared memory.  The tuple sLog (slog_tuple.c)
+    is per-tuple state for UNDO-based table AMs, keyed by (relation OID,
+    relation storage, TID) and independent of any AM's page format.  Such
+    an AM records no row locker in the tuple (no locker xmax, no
+    MultiXact), so SLogTupleLock* keeps the holder, strength and locking
+    subtransaction of each row lock, in per-backend records and hash
+    tables in shared memory created on the first row lock, with a holder
+    index that lets a conflict probe visit only the backends that may hold
+    a lock on its tuple; PREPARE hands them to the prepared transaction.  It also tracks, backend-locally, the tuples the current
+    transaction inserted.  The commit oracle remains CLOG and the writer
+    xids in the tuple header.
+
+  - **Logical Revert worker (logical_revert_worker.c).**  A background
+    worker that scans the ATM for entries not yet reverted and calls
+    ApplyUndoChainFromWAL() to physically walk and apply each one's UNDO
+    chain, generating a CLR (XLOG_UNDO_APPLY_RECORD) per page it
+    restores.  This work is fully decoupled from ROLLBACK's return to the
+    client; a loser transaction found unresolved at end of crash recovery
+    is queued to the ATM and reverted here too.
+
+During crash recovery, PerformUndoRecovery() applies the chains of
+transactions that were in progress at the crash before the database
+accepts connections.  A record it cannot apply in the startup process (an
+index AM's UNDO callback needs the syscache) is skipped, and the
+transaction is entered in the ATM, so that the logical revert worker walks
+the whole chain again after the database opens.  Transactions already in
+the ATM before the crash are back in it after redo and are reverted by the
+logical revert worker as during normal operation.
+
+Index UNDO (nbtree, hash) is applied only inline, by the aborting backend
+(UndoApplyInline, set by AtAbort_XactUndo() and AtSubAbort_XactUndo()).
+Its records find their entry by heap TID, which is unique only while the
+aborted heap tuple holds that TID.  Every deferred apply above runs after
+the abort is visible, when VACUUM may already have freed the TID for a
+committed row with the same key, so there the index callbacks return
+UNDO_APPLY_SKIPPED (which counts as done) and leave the entries for
+VACUUM.  An instant abort of index-only UNDO therefore does no index
+work at all.
+
+These components serve the cluster-wide engine only.  The per-backend
+engine's rollback requests go to its own undo apply workers (see "The UNDO
+Store: Per-Backend UNDO Logs" above).
+
+## 2. UndoRecPtr Format
+
+UndoRecPtr is a 64-bit pointer encoding both log identity and position:
+
+    Bits 63-40:  Log number   (24 bits = up to 16M logs)
+    Bits 39-0:   Byte offset  (40 bits = up to 1TB per log)
+
+    #define MakeUndoRecPtr(logno, offset)  (((uint64)(logno) << 40) | (uint64)(offset))
+    #define UndoRecPtrGetLogNo(ptr)        ((uint32)(((uint64)(ptr)) >> 40))
+    #define UndoRecPtrGetOffset(ptr)       (((uint64)(ptr)) & 0xFFFFFFFFFFULL)
+
+InvalidUndoRecPtr is defined as 0. Log number 0 is never allocated
+(next_log_number starts at 1), so offset 0 in log 0 is always invalid.
+
+## 3. UNDO Record Format
+
+Every UNDO record starts with a fixed UndoRecordHeader (see undorecord.h).
+The serialized size is given by SizeOfUndoRecordHeader:
+
+    Offset  Size  Field             Description
+    ------  ----  -----             -----------
+    0       1     urec_rmid         UNDO resource manager ID (dispatches apply)
+    1       1     urec_flags        Generic flags (UNDO_INFO_HAS_PAYLOAD, etc.)
+    2       2     urec_info         RM-specific subtype and flags
+    4       4     urec_len          Total record length including header + payload
+    8       4     urec_xid          Transaction ID
+    12      4     (padding)         Alignment for 8-byte urec_prev
+    16      8     urec_prev         Previous UNDO record in chain (UndoRecPtr)
+    24      4     urec_reloid       Relation OID (InvalidOid if N/A)
+    28      4     urec_payload_len  Length of RM-specific payload that follows
+
+Each record is padded at its tail so that urec_len (the stride to the next
+record) is a multiple of MAXIMUM_ALIGNOF.  This keeps every record header in a
+packed stream at a MAXALIGN'd address, which the writers require because they
+build the header in place through an (UndoRecordHeader *) cast and the header
+has 8-byte members.  The padding bytes are zeroed and are not part of the
+payload: readers advance by urec_len and read urec_payload_len payload bytes,
+so urec_len - SizeOfUndoRecordHeader may exceed urec_payload_len by up to
+MAXIMUM_ALIGNOF - 1 bytes of padding.
+
+The header is AM-agnostic.  The urec_rmid field identifies the resource manager
+that owns the record.  Block number, offset, and tuple data are part of the
+RM-specific opaque payload, not the generic header.
+
+The header carries no per-record "already applied" marker.  Idempotency of
+rollback under crash-during-rollback is achieved through full-page-image +
+page-LSN comparison during ordinary WAL redo; see "CLR idempotency" below for
+the mechanism.
+
+### Record Types (example: an in-place-update table AM's resource manager)
+
+The engine treats urec_info record types as opaque and RM-specific: it does
+not interpret them.  During rollback it dispatches each record to the owning
+resource manager's rm_undo callback (selected by urec_rmid), and that RM
+defines and interprets its own record types in its own urec_info space.
+
+The types below are an example set that a consumer providing an
+in-place-update table AM defines for its own resource manager.  They belong
+to that consumer, not to the engine, and the reversal semantics operate on
+that consumer's page format (the engine is page-format-agnostic):
+
+    UNDO_INSERT  (0x0001)  Marks an INSERT; no tuple payload needed.
+                           Rollback: ItemId marked dead (indexed) or unused.
+
+    UNDO_DELETE  (0x0002)  Stores the full old tuple.
+                           Rollback: restore the old tuple bytes to the page.
+
+    UNDO_UPDATE  (0x0003)  Stores the old tuple version.
+                           Rollback: restore the old tuple bytes to the
+                           original location.
+
+    UNDO_PRUNE   (0x0004)  Stores a pruned tuple (LP_DEAD or LP_UNUSED).
+                           Not rolled back; retained for diagnostics.
+
+    UNDO_INPLACE (0x0005)  Stores old data from in-place update.
+                           Rollback: restore the old tuple bytes in place.
+
+Other resource managers define their own record types in their own
+urec_info space.
+
+### Payload
+
+The payload is an opaque byte sequence whose interpretation is entirely
+RM-specific.  For the example in-place-update AM above, DELETE/UPDATE/PRUNE/INPLACE
+payloads contain a small RM-specific header (block number, offset, tuple
+length) followed by the consumer's raw tuple data.  INSERT records have no
+payload (urec_payload_len = 0).
+
+## 4. Storage Architecture (UNDO-in-WAL)
+
+UNDO records are embedded directly in the standard WAL stream as
+XLOG_UNDO_BATCH records.  There are NO separate UNDO segment files or
+directories.  Embedding UNDO in the WAL eliminates a separate storage
+tier and leverages existing WAL infrastructure for durability, replication,
+and archival.
+
+WAL retention of UNDO batches is governed by undo_discard_horizon, which
+is the oldest XLogRecPtr still needed by an in-flight transaction that
+may abort (always retained).
+
+UNDO records for unresolved (uncommitted/unaborted) transactions are
+NEVER discarded regardless of any retention timer.
+
+## 5. Module Organization
+
+The undo subsystem is split into several modules with clean separation
+of concerns, following the architecture of the EDB undo-record-set branch:
+
+    undo.c          - Central coordination: UndoShmemSize/UndoShmemInit
+                      aggregates all subsystem shared memory needs.
+                      UndoContext memory context management.
+
+    undolog.c       - UNDO log control structures and WAL batch coordination.
+                      UndoLogControl/UndoLogSharedData structures.
+
+    undorecord.c    - UndoRecordSet and UndoRecordHeader: record format,
+                      serialization, deserialization, and batch buffering.
+
+    xactundo.c      - Per-transaction undo management. Maintains up to 3
+                      UndoRecordSets per transaction (one per persistence
+                      level: permanent, unlogged, temporary). Hooks into
+                      xact.c via AtCommit/AtAbort_XactUndo.
+
+    undoapply.c     - Physical undo application during rollback. Walks the
+                      undo chain backward and applies page-level restores
+                      via memcpy. Generates CLRs for crash safety.
+
+    undoinsert.c    - Batch insertion of accumulated records into undo log.
+
+    undo_xlog.c     - WAL redo routines for the RM_UNDO_ID resource manager.
+                      Handles CLR replay (XLOG_UNDO_APPLY_RECORD) using
+                      full page images via XLogReadBufferForRedo.
+
+    undo_bufmgr.c   - Buffer management mapping undo logs into shared_buffers.
+                      Virtual RelFileLocator: spcOid=1663, dbOid=9,
+                      relNumber=log_number.
+
+    undostats.c     - Statistics and monitoring functions.
+
+    undoworker.c    - Background worker for undo record discard.
+
+    undormgr.c      - UNDO resource manager registry. RegisterUndoRmgr()
+                      allows any AM to register an rm_undo callback keyed
+                      by urec_rmid. undoapply.c dispatches to these callbacks.
+
+### Key Types (from undodefs.h)
+
+    UndoRecPtr              - 64-bit pointer to an undo record
+    UndoPersistenceLevel    - Enum: PERMANENT, UNLOGGED, TEMP
+    NUndoPersistenceLevels  - 3 (array index bound)
+    UndoRecordSet           - Opaque batch container for undo records
+    UndoRecordSetType       - URST_TRANSACTION, URST_MULTI, URST_EPHEMERAL
+    UndoRecordSetChunkHeader - On-disk chunk header for multi-chunk sets
+
+### Initialization Flow
+
+    The UNDO subsystem registers ShmemCallbacks via
+    PG_SHMEM_SUBSYSTEM(UndoShmemCallbacks) in storage/subsystemlist.h; the
+    generic shmem machinery calls its request/init/attach hooks, which reach
+    UndoShmemSize() and UndoShmemInit() in undo.c:
+
+        UndoShmemSize()  = UndoLogShmemSize()
+                         + XactUndoShmemSize()
+                         + UndoWorkerShmemSize()
+
+        UndoShmemInit()  -> UndoLogShmemInit()
+                         -> XactUndoShmemInit()
+                         -> UndoWorkerShmemInit()
+                         -> RegisterUndoRmgrs()
+
+    Per-backend initialization is done by InitializeUndo() which calls
+    InitializeXactUndo() and registers the exit callback.
+
+## 6. Shared Memory Structures (detail)
+
+### UndoLogSharedData
+
+Global control structure in shared memory:
+
+    - logs[MAX_UNDO_LOGS]   Array of UndoLogControl (one per active log)
+    - next_log_number       Counter for allocating new log numbers
+    - allocation_lock       LWLock protecting log allocation
+
+### UndoLogControl
+
+Per-log metadata (one per active log slot):
+
+    - log_number    Log file identity
+    - insert_ptr    UndoRecPtr of next insertion position
+    - discard_ptr   UndoRecPtr; data before this has been discarded
+    - oldest_xid    Oldest transaction still referencing this log
+    - lock          LWLock protecting concurrent access
+    - in_use        Whether this slot is active
+
+### UNDO Buffer Manager (undo_bufmgr.c)
+
+UNDO log blocks are managed through PostgreSQL's standard shared_buffers
+pool via undo_bufmgr.c.  Each undo log is mapped to a virtual
+RelFileLocator (spcOid=1663, dbOid=UNDO_DB_OID=9, relNumber=log_number)
+and accessed via ReadBufferWithoutRelcache().  This provides:
+
+    - Unified buffer management (no separate cache to tune)
+    - Automatic clock-sweep eviction via shared_buffers
+    - Built-in dirty buffer tracking and checkpoint support
+    - Standard buffer locking and pin semantics
+
+## 7. Physical UNDO Application (undoapply.c)
+
+The core design decision is **physical** UNDO application: during rollback,
+stored tuple data is copied directly back to heap pages via memcpy, rather
+than using logical operations (simple_heap_delete, simple_heap_insert).
+
+### Why Physical Over Logical
+
+Physical application stores the complete before-image and restores it with a
+direct page copy, so it cannot fail: there is no executor path, no index
+maintenance, no page-full or TOAST complication, and no visibility check to
+fail during rollback.  Logical application, which would reconstruct the
+inverse operation through table-AM logic, can fail on exactly those
+conditions and therefore is not used on the rollback path.
+
+    Physical (used here):
+    - Stores: Complete tuple data (HeapTupleHeaderData + payload)
+    - Apply:  Direct memcpy to restore exact page state
+    - Safety: Cannot fail (no page-full, no toast, no index conflicts)
+    - WAL:    CLR with full page image (~8 KB per record)
+
+    Logical (not used on the rollback path):
+    - Stores: Operation metadata (INSERT/DELETE/UPDATE type + TID)
+    - Apply:  Reconstruct operation using table AM logic
+    - Safety: Can fail on page-full, toast complications, visibility checks
+    - WAL:    Standard heap WAL records (~50-100 bytes per record)
+
+### Critical Section Pattern
+
+Each UNDO application follows this pattern (from ApplyOneUndoRecord):
+
+    1. Open relation with RowExclusiveLock
+    2. ReadBuffer to get the target page
+    3. LockBuffer(BUFFER_LOCK_EXCLUSIVE)
+    4. START_CRIT_SECTION
+    5. Physical modification (memcpy / ItemId manipulation)
+    6. MarkBufferDirty
+    7. Generate CLR via XLogInsert(RM_UNDO_ID, XLOG_UNDO_APPLY_RECORD)
+       with REGBUF_FORCE_IMAGE for full page image
+    8. PageSetLSN(page, lsn)
+    9. END_CRIT_SECTION
+    10. UnlockReleaseBuffer
+
+There is no "write a CLR pointer back into the UNDO record" step: an UNDO
+record is never updated after it is written.  Step 8 (PageSetLSN) is what makes
+step 9 onward idempotent -- see "CLR idempotency" below.
+
+Key principle: **UNDO record I/O (reading) occurs BEFORE the critical
+section.  Only the page modification and WAL write occur inside the
+critical section.**
+
+### CLR idempotency
+
+The UNDO record header carries no per-record "already applied" marker.
+Idempotency comes from full-page-image (FPI) + page-LSN comparison,
+the same mechanism ordinary WAL redo uses everywhere else in PostgreSQL:
+
+    1. Every CLR (XLOG_UNDO_APPLY_RECORD) is written with
+       REGBUF_FORCE_IMAGE, so it always carries a full-page image of the
+       page it restores.
+    2. After the physical page modification, PageSetLSN(page, lsn) sets
+       the page's LSN to the CLR's own LSN.
+    3. If a crash happens and recovery replays this CLR again (because
+       redo starts from a checkpoint before the CLR), the standard
+       XLogReadBufferForRedo() call used by the CLR's own redo handler
+       compares the on-disk page's LSN to the record being replayed: if
+       the page's LSN is already >= the record's LSN, it returns
+       BLK_DONE (page already reflects this change or a later one) or
+       BLK_RESTORED (an FPI was applied) rather than BLK_NEEDS_REDO, and
+       no further modification happens.
+    4. If instead a NEW rollback attempt (not a WAL replay) re-walks the
+       same UNDO chain -- e.g. ApplyUndoChainFromWAL() called again after
+       an interrupted first attempt -- there is no per-record "already
+       applied" flag to check at all; the record's rm_undo callback is
+       simply re-invoked.  This is safe because the callbacks are
+       themselves idempotent: restoring the same before-image bytes twice
+       produces the same final page state (memcpy is idempotent), and any
+       second CLR this produces is itself subject to the same page-LSN
+       redo-skip logic in step 3.
+
+This prevents double-application and enables idempotent crash recovery
+without ever needing to mutate an already-written UNDO record.
+
+## 8. WAL Integration
+
+### Resource Managers and the RM-ID Namespaces
+
+The UNDO subsystem introduces new WAL resource-manager IDs (in
+access/rmgrlist.h) and, separately, a set of UNDO-record dispatch IDs (in
+access/undormgr.h).  These are two different namespaces and both are shared,
+finite resources, so each new ID must be justified and, once shipped, kept
+stable.
+
+**WAL resource-manager IDs (rmgrlist.h).**  A WAL RM ID is stamped into
+every WAL record and is limited to a one-byte field (RM_MAX_ID = 255, with
+128..255 reserved for custom/extension RMs).  A facility needs its own WAL
+RM only when it emits WAL records with a redo/desc/identify behavior distinct
+from every existing RM; sharing another RM's opcode space would force that
+RM's redo routine to understand records it does not own.  The UNDO stack adds
+these, each because it replays a distinct on-disk change:
+
+    RM_UNDO_ID     "Undo"     Cluster-wide UndoLog: batch allocation, discard,
+                             log extension, and physical CLRs
+                             (XLOG_UNDO_APPLY_RECORD).  Its own RM because
+                             none of these map onto any table/index RM's redo.
+
+  A consumer that writes UNDO through one of these facilities does NOT get
+  its own WAL RM for that purpose; it reuses the facility's RM.  A consumer
+  adds a WAL RM only for WAL it emits itself that no existing RM can redo
+  (for example a table AM's own heap-change records).  Those consumer WAL RMs
+  are added in the consumer's own commit, at the end of rmgrlist.h, so
+  existing IDs never shift (IDs are position-defined and WAL-durable).
+
+**UNDO-record dispatch IDs (undormgr.h, UNDO_RMID_*).**  Independently of WAL
+RM IDs, every UNDO record header carries a urec_rmid that selects which
+registered rm_undo callback reverses it during rollback (see
+access/undormgr.h and access/undormgrlist.h).  This namespace is also finite
+(MAX_UNDO_RMGRS = 256) and stamped into WAL-durable UNDO records, so IDs must
+be unique and stable.  The core header defines only UNDO_RMID_INVALID and the
+built-in index-AM IDs; every other consumer defines its own UNDO_RMID_*
+constant in its own header, in the same commit that registers it via
+access/undormgrlist.h, so the core names no specific consumer.  A new consumer
+takes the next free value and never reuses a retired one.
+
+A resource manager is registered for UNDO-related WAL:
+
+    RM_UNDO_ID    (23)  - UNDO log management operations
+
+### UNDO WAL Record Types
+
+    XLOG_UNDO_APPLY_RECORD  (0x30)  CLR: Physical UNDO applied to page.
+        Fields: urec_ptr, xid, target_locator, target_block,
+                target_offset, operation_type
+        Always includes REGBUF_FORCE_IMAGE (full page image).
+
+### WAL Replay
+
+During crash recovery:
+
+    undo_redo() replays UNDO WAL records:
+    - APPLY_RECORD: CLR -- restores full page image via XLogReadBufferForRedo.
+                     Since CLRs use REGBUF_FORCE_IMAGE, the page is restored
+                     directly from the WAL record without re-reading UNDO data.
+
+## 9. Recovery Process
+
+Crash recovery has two steps (see "Recovery Model" above):
+
+    Redo:  Ordinary WAL replay forward (includes UNDO batches and any
+           CLRs generated before the crash) -- PostgreSQL's normal single
+           forward pass, with no separate analysis pass.
+    Undo:  Transactions that were in progress at crash time (neither
+           committed, aborted, nor prepared) are rolled back by
+           PerformUndoRecovery() after redo, before the database
+           accepts connections.
+
+During normal operation, UNDO rollback is handled in-process by
+ApplyUndoChainFromWAL() called from AtAbort_XactUndo() (xactundo.c) on
+abort.
+
+During crash recovery, the UNDO log state is reconstructed by
+redo (including replaying any CLRs generated before the crash),
+and any transactions that were in progress at crash time will be
+rolled back as part of normal recovery.
+
+### ApplyUndoChainFromWAL() -- Physical Application
+
+Walks the UNDO chain backward from the most recent WAL batch,
+applying each record using
+physical page modifications (memcpy, ItemId manipulation):
+
+    INSERT  -> ItemIdSetDead (if indexed) or ItemIdSetUnused
+    DELETE  -> memcpy(page_htup, tuple_data, tuple_len) to restore old tuple
+    UPDATE  -> memcpy(page_htup, tuple_data, tuple_len) to restore old version
+    PRUNE   -> skipped (informational only)
+    INPLACE -> memcpy(page_htup, tuple_data, tuple_len) to restore old data
+
+For each applied record, a CLR is generated via XLogInsert with
+REGBUF_FORCE_IMAGE.  An UNDO record is never rewritten after it is applied --
+see "CLR idempotency" above for the mechanism actually in use
+(full-page image + page-LSN comparison during redo).
+
+Physical application restores the exact before-image bytes with a direct
+page copy, so it cannot fail during rollback: it does not go through the
+executor path, does not maintain indexes, and does not run visibility
+checks.  This is why the rollback path stores and restores complete tuple
+bytes rather than reconstructing the inverse operation logically.
+
+Error handling on the rollback path treats a concurrently dropped relation
+as the one legitimate skip: if the relation an UNDO record targets has been
+dropped, its storage is gone and its UNDO is moot, so a WARNING is emitted
+and processing continues to the next record.  This is not a general
+tolerance for un-appliable records: a live relation whose before-image
+cannot be restored during rollback is a corruption condition, not a
+warn-and-continue case.
+
+### Crash During Rollback
+
+If a crash occurs during rollback:
+
+    1. Recovery replays WAL forward, including any CLRs already generated.
+    2. Pages modified by already-applied UNDO records are restored via
+       the full page images in the CLRs, via the ordinary redo path's
+       page-LSN check (XLogReadBufferForRedo returning BLK_DONE /
+       BLK_RESTORED for a page already at or past the CLR's LSN).
+    3. Any UNDO record whose page-level change was already durable is
+       therefore a no-op if its rm_undo callback runs again; this is decided
+       by the page LSN, not by any per-record applied marker.
+    4. Remaining UNDO records are applied normally, generating new CLRs.
+
+Result: Rollback always completes, even after repeated crashes.
+
+## 10. UNDO Discard Worker
+
+The undoworker background process (undoworker.c) periodically scans
+active transactions and advances discard pointers:
+
+    1. Queries ProcArray for the oldest active transaction
+    2. Identifies UNDO records older than oldest_xid
+    3. Advances the WAL retention horizon
+
+Because the cluster-wide engine stores UNDO records in the normal WAL
+stream rather than in separate segment files, advancing discard_ptr is all
+that is required to reclaim UNDO: the underlying storage is freed when the
+containing WAL segments are recycled at the next checkpoint.  There are no
+UNDO log files to truncate or delete.  (The per-backend UNDO logs, added in
+a later patch, do keep their own segment files and recycle them physically
+when their discard pointer crosses a segment boundary.)
+
+### GUC Parameters
+
+Defined in src/backend/utils/misc/guc_parameters.dat; the defaults below are
+that file's boot_val.
+
+    undo_worker_naptime     Sleep interval between discard cycles (ms)
+                            Default: 10000 (10 seconds)
+
+## 11. Performance Characteristics
+
+### Zero Overhead When Disabled
+
+For AMs that do not support UNDO, the only overhead is the
+am_supports_undo check -- a single pointer dereference and comparison.
+No UNDO allocations, writes, or locks are taken.
+
+### Fixed Startup Cost
+
+"Zero overhead when disabled" is about the hot path, not startup.  Enabling
+the UNDO subsystem in a build adds a fixed per-cluster cost that is paid even
+by a cluster that never creates a table in a UNDO-using access method:
+
+  - Two extra static background workers over the cluster-wide UNDO worker and
+    the logical revert launcher: the per-backend discard worker
+    (perbackend/pbu_discardworker.c), which reclaims undo-log segment space,
+    and the undo launcher (perbackend/pbu_undoworker.c), which applies
+    rollbacks deferred by crash recovery.  To seat them alongside parallel
+    query's full budget the default max_worker_processes is raised from 8 to
+    12.
+
+  - About 795 kB of shared memory over an upstream build at default settings
+    (measured as sum(allocated_size) from pg_shmem_allocations on a fresh
+    cluster, shared_buffers=128MB, max_connections=100): roughly 418 kB of
+    fixed UNDO control structures requested in UndoShmemRequest_internal()
+    (the per-backend rollback hash table and request queues, the undo log
+    directory and the launcher state), plus roughly 395 kB from the four
+    extra worker PGPROC slots the raised max_worker_processes adds (each
+    PGPROC and its fast-path lock and subtransaction arrays).  The sLog
+    row-lock directory and tables add nothing at startup; they are allocated
+    from DSA on first use.
+
+The workers hibernate when there is no per-backend UNDO to process, so beyond
+this fixed memory a never-UNDO cluster pays only for two idle, sleeping
+processes.  The workers are static because a static background worker must be
+registered during the request_fn phase, before BackgroundWorkerShmemInit()
+(see UndoShmemRequest_internal in undo.c), and the discard worker is required
+for correctness: without it the undo-log segment files of any UNDO-using
+table grow without bound.  Launching these workers only on first use of a
+UNDO-using access method -- and so avoiding the fixed cost on a cluster that
+never uses one -- is left as a future improvement; it would require making
+them dynamic (bgworker start requested at first undo allocation) rather than
+static.
+
+### Overhead When Active
+
+    INSERT:  One UNDO record (header only, no payload). ~40 bytes
+             (SizeOfUndoRecordHeader).
+    DELETE:  One UNDO record + full tuple copy. 40-byte header + t_len bytes.
+    UPDATE:  One UNDO record + old tuple copy. 40-byte header + t_len bytes.
+    PRUNE:   One UNDO record per pruned tuple. Batched via UndoRecordSet.
+
+UNDO I/O occurs outside critical sections to avoid holding buffer locks
+during writes. For INSERT, UNDO is generated after END_CRIT_SECTION.
+For DELETE/UPDATE/PRUNE, UNDO is generated before START_CRIT_SECTION.
+
+### Abort Overhead
+
+    ABORT:   Each UNDO record applied during rollback generates a CLR
+             WAL record with a full page image (~8 KB per record).
+             Abort latency increases approximately 20-50% compared to
+             PostgreSQL's default rollback, which generates no WAL.
+             WAL volume per abort increases significantly due to CLRs.
+
+    RECOVERY: Checkpoint time increases 7-15% due to more dirty buffers.
+              Recovery time increases 10-20% due to CLR replay.
+
+Trade-off: Higher abort overhead in exchange for crash safety and
+standby support.  For workloads where aborts are rare, the overhead
+is negligible.
+
+### Buffer Cache
+
+UNDO blocks share the standard shared_buffers pool with heap and index
+data.  No separate cache tuning is needed; the standard shared_buffers
+setting controls memory available for all buffer types including UNDO.
+
+## 13. Monitoring and Troubleshooting
+
+### Monitoring Functions
+
+The following SQL function is implemented (undostats.c):
+
+    pg_stat_get_undo_retention()  What retains UNDO WAL: in-flight backends,
+                                  ATM entries, prepared transactions
+Wiring them into the catalog is outstanding work.
+
+### Key Log Messages
+
+    DEBUG1  "created UNDO log file: ..."
+    DEBUG1  "applying UNDO chain starting at ..."
+    DEBUG2  "transaction %u committed with UNDO chain starting at %llu"
+    DEBUG2  "UNDO log %u: discard pointer updated to offset %llu"
+    WARNING "UNDO rollback: relation %u no longer exists, skipping"
+
+### Common Issues
+
+    "too many UNDO logs active"
+        The compile-time limit MAX_UNDO_LOGS (100) was reached. Each
+        concurrent writer to an UNDO-enabled table needs an active log.
+
+    Growing WAL retention from UNDO
+        Check that the UNDO worker is running (pg_stat_activity).
+        Long-running transactions prevent discard.
+
+## 14. File Structure
+
+### Backend Implementation (src/backend/access/undo/)
+
+    undo.c         Central coordination, shared memory aggregation
+    undolog.c      Core log file management, allocation, I/O, segment rotation
+    undorecord.c   Record format, serialization, UndoRecordSet
+    undoinsert.c   Batch insertion of accumulated records
+    undoapply.c    Physical rollback: ApplyUndoChainFromWAL(), memcpy-based restore, CLRs
+    xactundo.c     Per-transaction undo management, per-persistence-level sets
+    undo_xlog.c    WAL redo routines, CLR replay, segment rotation WAL
+    undo_bufmgr.c  shared_buffers integration, virtual RelFileLocator mapping
+    undoworker.c   Background discard worker, rotation checks
+    undostats.c    Statistics collection, segment state tracking
+    undormgr.c     UNDO resource manager dispatch (RegisterUndoRmgr, per-AM callbacks)
+
+### Header Files (src/include/access/)
+
+    undodefs.h      Core type definitions (UndoRecPtr, UndoPersistenceLevel)
+    undo.h          Central coordination API
+    undolog.h       UndoLogControl, UndoLogSharedData, log management API
+    undorecord.h    UndoRecordHeader, record types, UndoRecordSet
+    undo_xlog.h     WAL record structures (xl_undo_batch, xl_undo_apply, etc.)
+    xactundo.h      Per-transaction undo API (PrepareXactUndoData, etc.)
+    undoworker.h    Worker shared memory and GUC declarations
+    undo_bufmgr.h   shared_buffers wrapper API for UNDO log blocks
+    undostats.h     Statistics structures and functions
+    undormgr.h      UNDO resource manager registration API (per-AM dispatch)
+
+### Modified Core Files
+
+    src/backend/access/transam/xact.c         Transaction UNDO chain tracking
+    src/backend/access/transam/rmgr.c         Resource manager registration
+    src/include/storage/subsystemlist.h       Shared memory subsystem registration
+    src/include/access/rmgrlist.h             RM_UNDO_ID
+    src/include/access/xact.h                 UNDO chain accessors
+
+The heap AM is NOT modified for UNDO: heapam.c, heapam_handler.c and
+pruneheap.c contain no UNDO code, and heap leaves am_supports_undo false.
+
+## 15. Limitations and Future Work
+
+### Current Limitations
+
+    - TOAST tables are ordinary heap relations and are not UNDO-protected;
+      wide-value rollback is handled by the base-table UNDO plus ordinary
+      VACUUM of the dead TOAST chunks (see Section 15's TOAST notes below)
+    - No delta compression for UPDATE records (full old tuple stored)
+    - ProcArray integration for oldest XID is simplified
+
+### Planned Future Work
+
+    - Delta compression for UPDATE records
+    - Parallel UNDO application for faster rollback
+    - Online UNDO log compaction
+
+## Known Performance Gaps and Future Work
+
+**Rollback complexity:**
+
+On abort the backend walks the UNDO chain and restores the target pages
+before ROLLBACK returns.  Complexity is O(N) in the number of UNDO records
+the transaction wrote.  Each record requires:
+
+  - 1 WAL batch record read (amortized: N/``undo_batch_record_limit`` reads,
+    default 1000 records per batch)
+  - 1 buffer write (cache hit if the target fits in ``shared_buffers``;
+    otherwise a cold I/O read + write)
+  - 1 CLR WAL record written per batch (~8 KB each)
+
+For the sparse, cross-object UNDO the cluster-wide store is built for, N is
+usually small.
+
+Tuning: increase ``undo_batch_size_kb`` (default 256 KB) and
+``undo_batch_record_limit`` (default 1000 records) to reduce the number of
+WAL reads during UNDO application.
+
+**TOAST:** An UNDO-based table AM's TOAST table is an ordinary heap
+relation and is not enrolled in any UNDO log.  UNDO does not apply to the
+TOAST table itself.  Rollback correctness for wide values comes the
+ordinary way: rolling back the base-table UPDATE (via UNDO) restores the
+base tuple, which references the OLD TOAST pointer.  The NEW TOAST chunks
+written during the update become dead heap tuples and are reclaimed by
+ordinary VACUUM, exactly as heap-on-heap TOAST behaves.  No UNDO is applied
+to the TOAST chunks; the base tuple simply points at the old chunks again
+once its UPDATE is reversed.
+
+**Autovacuum interaction:** This engine itself creates no relations that
+autovacuum scans; the consideration below applies to a future table access
+method built on it.  Such an AM reverses a rolled-back tuple in place
+rather than leaving a dead tuple, so ``pg_stat_user_tables.n_dead_tup``
+stays near zero under active DML and the standard dead-tuple trigger
+(``autovacuum_vacuum_threshold`` + ``autovacuum_vacuum_scale_factor``) does
+not fire on dead-tuple count alone.
+
+An UNDO-based table AM that wants autovacuum coverage should drive it from a
+modification count rather than a dead-tuple count.  Two mechanisms already
+exist and need no core change:
+
+  * ``n_mod_since_analyze`` counts every modification regardless of outcome,
+    so ``autovacuum_analyze_scale_factor`` still triggers ANALYZE, and
+
+  * setting ``autovacuum_vacuum_threshold = 0`` (and a small
+    ``autovacuum_vacuum_scale_factor``) at the table level makes autovacuum
+    fire on modification volume even with zero dead tuples:
+
+    .. code-block:: sql
+
+        ALTER TABLE my_table
+            SET (autovacuum_vacuum_threshold = 0,
+                 autovacuum_vacuum_scale_factor = 0.05);
+
+A dedicated autovacuum trigger keyed on in-place modification volume would
+belong with that AM, not with this engine.
+
+## 16. References
+
+    Antonopoulos et al., "Constant Time Recovery in Azure SQL Database"
+        Proceedings of the VLDB Endowment, Vol. 12, No. 12, August 2019.
+        Related work; this engine does not implement that recovery
+        model.  Here UNDO records are embedded in the WAL stream rather
+        than kept in a separate version store, an aborting transaction
+        applies its UNDO chain physically with CLRs, and the UNDO of
+        loser transactions is applied during crash recovery.
+
+## 17. Known Limitations
+
+The current implementation has the following known limitations:
+
+### WAL Retention for UNDO
+- UNDO batches in WAL are retained until undo_discard_horizon advances
+- Horizon is gated by oldest in-flight transaction (never discards unresolved)
+- WAL segment recycling respects undo_discard_horizon automatically
+
+### WAL Level
+UNDO-enabled tables require ``wal_level = replica`` or higher for
+streaming standbys to receive CLR records written during UNDO application.
+At ``wal_level = minimal``, single-row DML UNDO records are still written
+and crash recovery works correctly, but standbys will not receive them.
+
+### Logical Decoding
+``XLOG_UNDO_BATCH`` records use a custom resource manager.  The UNDO RM's
+``rm_decode`` callback is a no-op: logical decoding filters these records and
+they do not appear as change events.  Logical replication of UNDO-enabled
+tables works correctly -- the logical decoder sees heap INSERT/UPDATE/DELETE
+changes normally.
+
+### AM Compatibility
+UNDO is always-on infrastructure.  Only in-place-update table AMs benefit
+from it; they opt in via the am_supports_undo callback.  The default heap AM
+sets am_supports_undo = false and does not use UNDO -- heap operates without
+UNDO overhead and reclaims dead tuples through ordinary MVCC/VACUUM.
+
+### TOAST
+TOAST tables are ordinary heap relations and are not UNDO-protected.  An
+UNDO-based table AM that stores wide values does so in a standard heap TOAST
+table; that table writes normal heap WAL and is reclaimed by ordinary
+MVCC/VACUUM.  Rolling back an UPDATE that touched a wide value restores the
+base tuple via UNDO, and the base tuple again references the OLD TOAST
+pointer; the NEW TOAST chunks written during the update become dead heap
+tuples reclaimed by VACUUM (see Section 15).  UNDO is not applied to the
+TOAST table itself.
+
+### Delta Compression
+Not implemented.  The cluster-wide record format stores whatever payload a
+producer hands it; a producer that passes a full old tuple gets no
+compression.  The engine does not impose a delta format on its consumers.
+
+### ProcArray Integration
+- The discard worker uses GetOldestActiveTransactionId(), which scans the
+  ProcArray under ProcArrayLock and returns the oldest transaction still
+  active anywhere in the cluster.  UNDO records from transactions older than
+  this may be discarded.
+- This is a correct but conservative horizon: it holds UNDO behind any
+  long-running transaction, even one that produced no UNDO.  A dedicated
+  UNDO-specific horizon (advanced only as logs are fully discarded) would
+  permit more aggressive discard.  It is not implemented.
+
+### UNDO-Based MVCC
+- The heap AM does not use UNDO; it leaves am_supports_undo false and its
+  code paths are unchanged.
+- The cluster-wide engine records and applies UNDO, but does not by itself
+  provide multi-version visibility.  An access method that updates a tuple
+  in place, destroying the prior version, must supply its own mechanism to
+  reconstruct earlier versions for concurrent readers; that machinery lives
+  in the consumer, not in this engine.
+
+### Platform Support
+- Tested on: Linux (primary), FreeBSD, Windows, macOS
+- Full platform matrix testing pending
+- Extended file attributes (xattr) support varies by platform
+
+### Parallel UNDO Apply
+- Transaction rollback applies the UNDO chain sequentially in one backend.
+- A large abort is therefore proportional to the volume of UNDO it wrote.
+- Applying a chain across several workers is possible but not implemented.
+
+## 18. Upgrade Guide
+
+### Prerequisites
+- PostgreSQL 17+ (uses current rmgrlist.h structure)
+- Sufficient WAL disk space (UNDO batches share WAL retention)
+
+### Enabling UNDO
+
+UNDO is not a switch.  It is always-on infrastructure, and a table gets UNDO by
+being created with an AM that opts in (am_supports_undo):
+
+    CREATE TABLE important_data (id int, data text) USING <undo_am>;
+
+### Monitoring UNDO
+
+UNDO batches share the WAL stream. Monitor WAL retention:
+
+    SELECT slot_name, restart_lsn, confirmed_flush_lsn
+    FROM pg_replication_slots;
+
+pg_stat_get_undo_retention() shows what holds UNDO WAL back.
+
+### Rollback Plan
+
+If issues arise:
+
+1. UNDO is integral to AMs that use it -- it cannot be
+   disabled per-table.  To stop UNDO activity, convert the table to
+   a different AM (e.g., heap).
+
+2. Existing UNDO batches in WAL are retained until retention expires.
+
+3. Stop UNDO worker if needed:
+   SELECT pg_terminate_backend(pid)
+   FROM pg_stat_activity
+   WHERE backend_type = 'undo worker';
+
+### Performance Tuning
+
+Recommended initial settings:
+
+    # UNDO worker wakes every second
+    undo_worker_naptime = 1000
+
+    # Up to MAX_UNDO_LOGS (100) concurrent UNDO logs supported
+
+    # WAL retention handles UNDO storage automatically
+    # Ensure max_wal_size accommodates UNDO batch retention
+    max_wal_size = 4GB
+
+Monitor and adjust based on:
+- Long-running transaction frequency
+- Update-heavy workload patterns
+- Disk space availability
+
+## Lock Ordering
+
+All UNDO LWLocks must be acquired in the order listed below to
+prevent deadlocks.  An agent holding lock N must never acquire lock M
+where M < N.  Standard PostgreSQL buffer-content locks and heavyweight
+locks sit outside this hierarchy; they must be acquired before any
+UNDO LWLock.  A consumer AM's own locks (for example an optional
+per-tuple tracking structure, or an AM-private dirty-page map) extend this
+hierarchy at higher-numbered levels and are documented with that consumer,
+not here.
+
+    Level  Lock                            Holder(s)
+    -----  ----                            ---------
+    1      Buffer content locks            All backends (standard PG)
+    2      LWTRANCHE_UNDO_LOG              Per-log lock (undolog.c)
+           (per-log instance)              Protects log metadata and append
+    3      LWTRANCHE_UNDO_LOG              Allocation lock (undolog.c)
+           (allocation instance)           Serializes log space allocation
+    4      LWTRANCHE_UNDO_LOG              Discard-worker state (undoworker.c)
+           (worker instance)               Protects discard worker state
+    5      LWTRANCHE_UNDO_WORKER           Revert worker state
+                                           (logical_revert_worker.c)
+                                           Protects revert queue and worker state
+
+Rules:
+- Never acquire a buffer content lock while holding any UNDO LWLock.
+- The revert worker acquires locks 2->5 in sequence during UNDO apply;
+  backends acquiring lock 5 (to enqueue work) must not already hold 2-4.

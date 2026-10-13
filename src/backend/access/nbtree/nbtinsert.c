@@ -54,14 +54,14 @@ static void _bt_insertonpg(Relation rel, Relation heaprel, BTScanInsert itup_key
 						   Size itemsz,
 						   OffsetNumber newitemoff,
 						   int postingoff,
-						   bool split_only_page);
+						   bool split_only_page,
+						   bool replace);
 static Buffer _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key,
 						Buffer buf, Buffer cbuf, OffsetNumber newitemoff,
 						Size newitemsz, IndexTuple newitem, IndexTuple orignewitem,
-						IndexTuple nposting, uint16 postingoff);
+						IndexTuple nposting, uint16 postingoff, bool replace);
 static void _bt_insert_parent(Relation rel, Relation heaprel, Buffer buf,
 							  Buffer rbuf, BTStack stack, bool isroot, bool isonly);
-static void _bt_freestack(BTStack stack);
 static Buffer _bt_newlevel(Relation rel, Relation heaprel, Buffer lbuf, Buffer rbuf);
 static inline bool _bt_pgaddtup(Page page, Size itemsize, const IndexTupleData *itup,
 								OffsetNumber itup_off, bool newfirstdataitem);
@@ -159,6 +159,8 @@ _bt_doinsert(Relation rel, IndexTuple itup,
 	insertstate.bounds_valid = false;
 	insertstate.buf = InvalidBuffer;
 	insertstate.postingoff = 0;
+	/* delete-marking indexes never posting-split on insert */
+	insertstate.nopostingsplit = (heapRel != NULL && RelationSupportsDeleteMarking(heapRel));
 
 search:
 
@@ -260,9 +262,10 @@ search:
 		 */
 		newitemoff = _bt_findinsertloc(rel, &insertstate, checkingunique,
 									   indexUnchanged, stack, heapRel);
+
 		_bt_insertonpg(rel, heapRel, itup_key, insertstate.buf, InvalidBuffer,
 					   stack, itup, insertstate.itemsz, newitemoff,
-					   insertstate.postingoff, false);
+					   insertstate.postingoff, false, false);
 	}
 	else
 	{
@@ -519,10 +522,31 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					/* Advanced curitup */
 					curitup = (IndexTuple) PageGetItem(page, curitemid);
 					Assert(!BTreeTupleIsPivot(curitup));
+
+					/*
+					 * A delete-marked entry is a tombstone: an in-place
+					 * UPDATE moved the row at its TID off this key. The key
+					 * is still taken while that UPDATE is running (wait for
+					 * it) or after it aborted (its rollback may not have been
+					 * applied yet), and free once it committed. Only the
+					 * table AM knows which: table_index_fetch_tid() below.
+					 * The tombstone is removed by VACUUM
+					 * (table_index_tombstone_removable), never here.  An AM
+					 * that cannot judge it has the tombstone skipped, the
+					 * live (k_new, T) entry being the authority.
+					 */
+					if (BTreeTupleIsDeleteMarked(curitup) &&
+						heapRel->rd_tableam->index_fetch_tid == NULL)
+						goto next_uniqueness_offset;
 				}
 
 				/* okay, we gotta fetch the heap tuple using htid ... */
-				if (!BTreeTupleIsPosting(curitup))
+				if (BTreeTupleIsDeleteMarked(curitup))
+				{
+					Assert(!inposting);
+					htid = *BTreeTupleGetHeapTID(curitup);
+				}
+				else if (!BTreeTupleIsPosting(curitup))
 				{
 					/* ... htid is from simple non-pivot tuple */
 					Assert(!inposting);
@@ -558,10 +582,11 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				 * Check if there's any table tuples for this index entry
 				 * satisfying SnapshotDirty. This is necessary because for AMs
 				 * with optimizations like heap's HOT, we have just a single
-				 * index entry for the entire chain.
+				 * index entry for the entire chain.  A delete-marking AM
+				 * judges the version that carries this entry's key.
 				 */
-				else if (table_fetch_tid(heapRel, &htid, &SnapshotDirty,
-										 &all_dead))
+				else if (table_index_fetch_tid(heapRel, rel, curitup, &htid,
+											   &SnapshotDirty, &all_dead))
 				{
 					TransactionId xwait;
 
@@ -617,7 +642,8 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 * entry.
 					 */
 					htid = itup->t_tid;
-					if (table_fetch_tid(heapRel, &htid, SnapshotSelf, NULL))
+					if (table_index_fetch_tid(heapRel, rel, itup, &htid,
+											  SnapshotSelf, NULL))
 					{
 						/* Normal case --- it's still live */
 					}
@@ -674,9 +700,10 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 													RelationGetRelationName(rel))));
 					}
 				}
-				else if (all_dead && (!inposting ||
-									  (prevalldead &&
-									   curposti == BTreeTupleGetNPosting(curitup) - 1)))
+				else if (all_dead && !BTreeTupleIsDeleteMarked(curitup) &&
+						 (!inposting ||
+						  (prevalldead &&
+						   curposti == BTreeTupleGetNPosting(curitup) - 1)))
 				{
 					/*
 					 * The conflicting tuple (or all HOT chains pointed to by
@@ -716,6 +743,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 			}
 		}
 
+next_uniqueness_offset:
 		if (inposting && curposti < BTreeTupleGetNPosting(curitup) - 1)
 		{
 			/* Advance to next TID in same posting list */
@@ -839,7 +867,7 @@ _bt_findinsertloc(Relation rel,
 	opaque = BTPageGetOpaque(page);
 
 	/* Check 1/3 of a page restriction */
-	if (unlikely(insertstate->itemsz > BTMaxItemSize))
+	if (unlikely(insertstate->itemsz > BTMaxItemSizeDeleteMarking))
 		_bt_check_third_page(rel, heapRel, itup_key->heapkeyspace, page,
 							 insertstate->itup);
 
@@ -1083,6 +1111,43 @@ _bt_stepright(Relation rel, Relation heaprel, BTInsertState insertstate,
 	insertstate->bounds_valid = false;
 }
 
+/*
+ *	_bt_replace_split() -- replace a leaf item by a larger tuple that does not
+ *	fit on the page, splitting the page.
+ *
+ * btdeletemark grows a plain leaf entry by a heap TID trailer to delete-mark
+ * it.  When the page has no room for that, the delete-marked tuple replaces
+ * the plain entry as part of a page split: one atomic action and one WAL
+ * record, so a concurrent scan never finds the page with neither tuple, and
+ * an error leaves the page as it was.
+ *
+ * The caller holds a write lock on the leaf page buf, which it reached with
+ * _bt_search and the returned stack, and has found that itup does not fit in
+ * place of the item at offnum.  itup must sort exactly where that item does.
+ * buf is released.
+ */
+void
+_bt_replace_split(Relation rel, Relation heaprel, BTScanInsert itup_key,
+				  Buffer buf, BTStack stack, IndexTuple itup,
+				  OffsetNumber offnum)
+{
+	Size		itemsz = MAXALIGN(IndexTupleSize(itup));
+
+	/* Check 1/3 of a page restriction, as _bt_findinsertloc does */
+	if (unlikely(itemsz > BTMaxItemSize))
+		_bt_check_third_page(rel, heaprel, itup_key->heapkeyspace,
+							 BufferGetPage(buf), itup);
+
+	/*
+	 * This insert never takes the fastpath, so forget the cached target
+	 * block, as _bt_search_insert does when that page has no room
+	 */
+	RelationSetTargetBlock(rel, InvalidBlockNumber);
+
+	_bt_insertonpg(rel, heaprel, itup_key, buf, InvalidBuffer, stack, itup,
+				   itemsz, offnum, 0, false, true);
+}
+
 /*----------
  *	_bt_insertonpg() -- Insert a tuple on a particular page in the index.
  *
@@ -1111,6 +1176,10 @@ _bt_stepright(Relation rel, Relation heaprel, BTInsertState insertstate,
  *		inserting to a non-leaf page, 'cbuf' is the left-sibling of the page
  *		we're inserting the downlink for.  This function will clear the
  *		INCOMPLETE_SPLIT flag on it, and release the buffer.
+ *
+ *		With replace, 'itup' takes the place of the leaf item at newitemoff
+ *		instead of going in front of it, and the page is always split; see
+ *		_bt_replace_split().
  *----------
  */
 static void
@@ -1124,7 +1193,8 @@ _bt_insertonpg(Relation rel,
 			   Size itemsz,
 			   OffsetNumber newitemoff,
 			   int postingoff,
-			   bool split_only_page)
+			   bool split_only_page,
+			   bool replace)
 {
 	Page		page;
 	BTPageOpaque opaque;
@@ -1157,6 +1227,9 @@ _bt_insertonpg(Relation rel,
 	Assert(MAXALIGN(IndexTupleSize(itup)) == itemsz);
 	/* Caller must always finish incomplete split for us */
 	Assert(!P_INCOMPLETE_SPLIT(opaque));
+	/* Only a plain leaf item is ever replaced */
+	Assert(!replace || (isleaf && postingoff == 0 &&
+						newitemoff <= PageGetMaxOffsetNumber(page)));
 
 	/*
 	 * Every internal page should have exactly one negative infinity item at
@@ -1219,8 +1292,11 @@ _bt_insertonpg(Relation rel,
 	 * Note: PageGetFreeSpace() subtracts sizeof(ItemIdData) from its result,
 	 * so this comparison is correct even though we appear to be accounting
 	 * only for the item and not for its line pointer.
+	 *
+	 * A replacing item is only passed here when it does not fit in place of
+	 * the item it replaces, so it always splits the page.
 	 */
-	if (PageGetFreeSpace(page) < itemsz)
+	if (replace || PageGetFreeSpace(page) < itemsz)
 	{
 		Buffer		rbuf;
 
@@ -1228,10 +1304,21 @@ _bt_insertonpg(Relation rel,
 
 		/* split the buffer into left and right halves */
 		rbuf = _bt_split(rel, heaprel, itup_key, buf, cbuf, newitemoff, itemsz,
-						 itup, origitup, nposting, postingoff);
+						 itup, origitup, nposting, postingoff, replace);
 		PredicateLockPageSplit(rel,
 							   BufferGetBlockNumber(buf),
 							   BufferGetBlockNumber(rbuf));
+
+		/*
+		 * Write the nbtree UNDO record for the insertion, as the no-split
+		 * path below does.  The new item is now on the left or the right
+		 * half; record the left half's block, which is where the item would
+		 * have gone.  The apply searches that page and then moves right, the
+		 * same way it finds an entry a later split moved.
+		 */
+		if (RelationUsesIndexUndo(rel, heaprel))
+			NbtreeUndoLogInsert(rel, heaprel, buf, itup, itemsz, newitemoff,
+								isleaf);
 
 		/*----------
 		 * By here,
@@ -1418,6 +1505,23 @@ _bt_insertonpg(Relation rel,
 
 		END_CRIT_SECTION();
 
+		/*
+		 * Write an nbtree UNDO record for this insertion, so an abort can
+		 * reverse the provisionally-inserted entry without waiting for
+		 * VACUUM.  Done after the critical section (UNDO insertion does I/O)
+		 * but while the buffer lock is still held.
+		 *
+		 * Only when the parent table asks for it via the index_undo
+		 * reloption.  RelationUsesIndexUndo() applies every other condition
+		 * too; non-WAL relations and indexes built in this transaction, for
+		 * example, are excluded there.
+		 */
+		if (RelationUsesIndexUndo(rel, heaprel))
+		{
+			NbtreeUndoLogInsert(rel, heaprel, buf, itup,
+								itemsz, newitemoff, isleaf);
+		}
+
 		/* Release subsidiary buffers */
 		if (BufferIsValid(metabuf))
 			_bt_relbuf(rel, metabuf);
@@ -1480,20 +1584,28 @@ _bt_insertonpg(Relation rel,
  *		into parent page will still be a separate operation).  See
  *		nbtree/README for details on the design of posting list splits.
  *
+ *		With replace, newitem takes the place of the leaf item at newitemoff
+ *		rather than going in front of it.  The split is then worked out on an
+ *		image of the page without that item, which is what REDO rebuilds the
+ *		left page from, too.
+ *
  *		Returns the new right sibling of buf, pinned and write-locked.
  *		The pin and lock on buf are maintained.
  */
 static Buffer
 _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		  Buffer cbuf, OffsetNumber newitemoff, Size newitemsz, IndexTuple newitem,
-		  IndexTuple orignewitem, IndexTuple nposting, uint16 postingoff)
+		  IndexTuple orignewitem, IndexTuple nposting, uint16 postingoff,
+		  bool replace)
 {
 	Buffer		rbuf;
+	Page		bufpage;
 	Page		origpage;
 	Page		leftpage,
 				rightpage;
 	PGAlignedBlock leftpage_buf,
-				rightpage_buf;
+				rightpage_buf,
+				origpage_buf;
 	BlockNumber origpagenumber,
 				rightpagenumber;
 	BTPageOpaque ropaque,
@@ -1530,8 +1642,20 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * corruption).  Failing before acquiring new buffer won't have lasting
 	 * consequences, since origpage won't have been modified and leftpage is
 	 * only workspace.
+	 *
+	 * With replace, origpage is a copy of the page without the item that
+	 * newitem replaces, so that everything below sees newitem as an ordinary
+	 * insertion at newitemoff.  bufpage is the page in buf.
 	 */
-	origpage = BufferGetPage(buf);
+	bufpage = BufferGetPage(buf);
+	origpage = bufpage;
+	if (replace)
+	{
+		Assert(postingoff == 0);
+		memcpy(origpage_buf.data, bufpage, BLCKSZ);
+		origpage = origpage_buf.data;
+		PageIndexTupleDelete(origpage, newitemoff);
+	}
 	oopaque = BTPageGetOpaque(origpage);
 	isleaf = P_ISLEAF(oopaque);
 	isrightmost = P_RIGHTMOST(oopaque);
@@ -1956,7 +2080,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * original.  We need to do this before writing the WAL record, so that
 	 * XLogInsert can WAL log an image of the page if necessary.
 	 */
-	memcpy(origpage, leftpage, BLCKSZ);
+	memcpy(bufpage, leftpage, BLCKSZ);
 	/* leftpage, lopaque must not be used below here */
 
 	/*
@@ -2004,6 +2128,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		xlrec.postingoff = 0;
 		if (postingoff != 0 && origpagepostingoff < firstrightoff)
 			xlrec.postingoff = postingoff;
+		xlrec.replace = replace;
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfBtreeSplit);
@@ -2057,8 +2182,8 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		if (!isleaf)
 		{
 			/* lefthighkey isn't local copy, get current pointer */
-			itemid = PageGetItemId(origpage, P_HIKEY);
-			lefthighkey = (IndexTuple) PageGetItem(origpage, itemid);
+			itemid = PageGetItemId(bufpage, P_HIKEY);
+			lefthighkey = (IndexTuple) PageGetItem(bufpage, itemid);
 		}
 		XLogRegisterBufData(0, lefthighkey,
 							MAXALIGN(IndexTupleSize(lefthighkey)));
@@ -2083,7 +2208,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	else
 		recptr = XLogGetFakeLSN(rel);
 
-	PageSetLSN(origpage, recptr);
+	PageSetLSN(bufpage, recptr);
 	PageSetLSN(rightpage, recptr);
 	if (!isrightmost)
 		PageSetLSN(spage, recptr);
@@ -2246,7 +2371,7 @@ _bt_insert_parent(Relation rel,
 		/* Recursively insert into the parent */
 		_bt_insertonpg(rel, heaprel, NULL, pbuf, buf, stack->bts_parent,
 					   new_item, MAXALIGN(IndexTupleSize(new_item)),
-					   stack->bts_offset + 1, 0, isonly);
+					   stack->bts_offset + 1, 0, isonly, false);
 
 		/* be tidy */
 		pfree(new_item);
@@ -2455,7 +2580,7 @@ _bt_getstackbuf(Relation rel, Relation heaprel, BTStack stack, BlockNumber child
 /*
  * _bt_freestack() -- free a retracement stack made by _bt_search_insert.
  */
-static void
+void
 _bt_freestack(BTStack stack)
 {
 	BTStack		ostack;
@@ -2820,8 +2945,21 @@ _bt_delete_or_dedup_one_page(Relation rel, Relation heapRel,
 		_bt_bottomupdel_pass(rel, buffer, heapRel, insertstate->itemsz))
 		return;
 
-	/* Perform deduplication pass (when enabled and index-is-allequalimage) */
-	if (BTGetDeduplicateItems(rel) && itup_key->allequalimage)
+	/*
+	 * Perform deduplication pass (when enabled and index-is-allequalimage).
+	 *
+	 * Deduplication is disabled for a delete-marking table's index. A
+	 * delete-marked tombstone is an alt-TID leaf tuple whose t_tid holds
+	 * status metadata (not a heap TID) and which must linger until VACUUM;
+	 * folding equal-key entries into posting lists around such tombstones
+	 * (and around the revive/re-insert an in-place key UPDATE produces)
+	 * breaks nbtree's posting-list TID-ordering invariants.  Dedup is only a
+	 * space optimization, so we simply skip it here.  Restoring dedup on
+	 * these indexes would require teaching _bt_dedup to fully respect
+	 * tombstones: never use one as a posting base and never merge across one.
+	 */
+	if (BTGetDeduplicateItems(rel) && itup_key->allequalimage &&
+		!(heapRel != NULL && RelationSupportsDeleteMarking(heapRel)))
 		_bt_dedup_pass(rel, buffer, insertstate->itup, insertstate->itemsz,
 					   (indexUnchanged || uniquedup));
 }
@@ -2887,6 +3025,17 @@ _bt_simpledel_pass(Relation rel, Buffer buffer, Relation heapRel,
 		TM_IndexStatus *ostatus = &delstate.status[delstate.ndeltids];
 		BlockNumber tidblock;
 		void	   *match;
+
+		/*
+		 * A delete-marked tombstone is never LP_DEAD and its t_tid holds
+		 * alt-TID metadata rather than a heap TID; skip it so we never feed a
+		 * bogus TID into the table AM's index-deletion call.
+		 */
+		if (BTreeTupleIsDeleteMarked(itup))
+		{
+			Assert(!ItemIdIsDead(itemid));
+			continue;
+		}
 
 		if (!BTreeTupleIsPosting(itup))
 		{

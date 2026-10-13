@@ -1,0 +1,2626 @@
+Parsed test spec with 5 sessions
+
+starting permutation: s1b s1u s2rc s2fu s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2fu: <... completed>
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2fnk s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fnk: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR NO KEY UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2fnk: <... completed>
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2fs s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fs: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR SHARE; <waiting ...>
+step s1c: COMMIT;
+step s2fs: <... completed>
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2fks s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1k s2rc s2fks s1c s2c s3r
+step s1b: BEGIN;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE; <waiting ...>
+step s1c: COMMIT;
+step s2fks: <... completed>
+id|v|w
+--+-+-
+10|1|0
+ 2|1|0
+(2 rows)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2sl s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2sl: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE SKIP LOCKED;
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2nw s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2nw: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE NOWAIT;
+ERROR:  could not obtain lock on row in relation "lr"
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2upd s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2upd: UPDATE lr SET w = w + 1 WHERE v = 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2upd: <... completed>
+id|v|w
+--+-+-
+ 2|1|1
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|1
+(2 rows)
+
+
+starting permutation: s1b s1d s2rc s2fu s1c s2c s3r
+step s1b: BEGIN;
+step s1d: DELETE FROM lr WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2fu: <... completed>
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+
+starting permutation: s1b s1u s2rc s2fu s1a s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE; <waiting ...>
+step s1a: ROLLBACK;
+step s2fu: <... completed>
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2upd s1a s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2upd: UPDATE lr SET w = w + 1 WHERE v = 1 RETURNING *; <waiting ...>
+step s1a: ROLLBACK;
+step s2upd: <... completed>
+id|v|w
+--+-+-
+ 1|1|1
+ 2|1|1
+(2 rows)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|1
+ 2|1|1
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s2fu s1c s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2fu: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2fu s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2fnk s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2fnk: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2fs s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2fs: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2sl s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2sl: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE SKIP LOCKED;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2nw s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2nw: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE NOWAIT;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2upd s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2upd: UPDATE lr SET w = w + 1 WHERE v = 1 RETURNING *;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2fks s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1k s1c s2fks s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1;
+step s1c: COMMIT;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s2fu s1a s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE; <waiting ...>
+step s1a: ROLLBACK;
+step s2fu: <... completed>
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1d s2fu s1c s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1d: DELETE FROM lr WHERE id = 1;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2fu: <... completed>
+ERROR:  could not serialize access due to concurrent delete
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+
+starting permutation: s1b s1pk s2rc s2ci s1c s2c s3c
+step s1b: BEGIN;
+step s1pk: UPDATE lrp SET id = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1); <waiting ...>
+step s1c: COMMIT;
+step s2ci: <... completed>
+ERROR:  insert or update on table "lrc" violates foreign key constraint "lrc_pid_fkey"
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s1b s1pfu s2rc s2ci s1pn s1c s2c s3c
+step s1b: BEGIN;
+step s1pfu: SELECT id FROM lrp WHERE id = 1 FOR UPDATE;
+id
+--
+ 1
+(1 row)
+
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1); <waiting ...>
+step s1pn: UPDATE lrp SET note = 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2ci: <... completed>
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s1b s1pk s2rc s2ci s1a s2c s3c
+step s1b: BEGIN;
+step s1pk: UPDATE lrp SET id = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1); <waiting ...>
+step s1a: ROLLBACK;
+step s2ci: <... completed>
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s1b s1tu s2rc s2tu s1c s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2tu: UPDATE lrt SET w = w + 1 WHERE v = 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2tu: <... completed>
+id|v|w
+--+-+-
+(0 rows)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+(1 row)
+
+
+starting permutation: s1b s1tu s2rc s2tu s1a s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2tu: UPDATE lrt SET w = w + 1 WHERE v = 1 RETURNING *; <waiting ...>
+step s1a: ROLLBACK;
+s2: NOTICE:  lrt_bu: OLD.v=1 NEW.v=1
+step s2tu: <... completed>
+id|v|w
+--+-+-
+ 1|1|1
+(1 row)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|1
+(1 row)
+
+
+starting permutation: s2rr s2snap s1b s1tu s2tu s1c s2c s3t
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2tu: UPDATE lrt SET w = w + 1 WHERE v = 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2tu: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+(1 row)
+
+
+starting permutation: s1b s1u s2rc s2jfu s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2jfu: SELECT lr.* FROM lr JOIN (VALUES (1), (1), (2)) s(id) USING (id) WHERE lr.v = 1 ORDER BY lr.id FOR UPDATE OF lr; <waiting ...>
+step s1c: COMMIT;
+step s2jfu: <... completed>
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1tu s2rc s2mq s1c s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mq: MERGE INTO lrt USING (VALUES (1)) s(id) ON lrt.id = s.id AND lrt.v = 1 WHEN MATCHED THEN UPDATE SET w = lrt.w + 1; <waiting ...>
+step s1c: COMMIT;
+step s2mq: <... completed>
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+(1 row)
+
+
+starting permutation: s1b s1tu s2rc s2mu s1c s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mu: MERGE INTO lrt USING (VALUES (1)) s(id) ON lrt.id = s.id WHEN MATCHED THEN UPDATE SET w = lrt.w + 1; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lrt_bu: OLD.v=2 NEW.v=2
+step s2mu: <... completed>
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+
+starting permutation: s2rr s2snap s1b s1tu s2mu s1c s2c s3t
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2mu: MERGE INTO lrt USING (VALUES (1)) s(id) ON lrt.id = s.id WHEN MATCHED THEN UPDATE SET w = lrt.w + 1; <waiting ...>
+step s1c: COMMIT;
+step s2mu: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+(1 row)
+
+
+starting permutation: s1b s1u s2rc s2oc s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2oc: <... completed>
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|1
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s2oc s1c s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2oc: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1u s1c s2oc s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s4pkk s4pn101 s2pks s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s4pn101 s2ci s2c s3c
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s2rr s2snap s4pkk s4pn101 s2pnk s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rc s2dks s4pkk s4pn101 s2fc s2ci s2c s3c
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dks: DECLARE c CURSOR FOR SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+(0 rows)
+
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+ERROR:  insert or update on table "lrc" violates foreign key constraint "lrc_pid_fkey"
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s2rc s2dka s4pkk s4pn101 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2fc: FETCH ALL FROM c;
+ id|note
+---+----
+101|  11
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rc s2dnk s4pkk s4pn101 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dnk: DECLARE c CURSOR FOR SELECT * FROM lrp FOR NO KEY UPDATE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2fc: FETCH ALL FROM c;
+ id|note
+---+----
+101|  11
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rc s4pkk s4pn101 s2ci s2c s3c
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+ERROR:  insert or update on table "lrc" violates foreign key constraint "lrc_pid_fkey"
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s2rr s2snap s4pn1 s4pkk s2pks s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pn1 s4pkk s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+ id|note
+---+----
+101|  11
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s4pn1 s2pks s2ci s2c s3c
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pn1 s4pn1 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  20
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s4pkb s4pn1 s2pks s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pkb: UPDATE lrp SET id = id - 100, note = note + 1 WHERE id = 101;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  12
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s4pkb s4pn1 s2ci s2c s3c
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pkb: UPDATE lrp SET id = id - 100, note = note + 1 WHERE id = 101;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s2rc s2dka s4pkk s4pkb s4pn1 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pkb: UPDATE lrp SET id = id - 100, note = note + 1 WHERE id = 101;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+ 1|  12
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  12
+(1 row)
+
+
+starting permutation: s2rc s2dks s4pkk s4pkb s4pn1 s2fc s2ci s2c s3c
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dks: DECLARE c CURSOR FOR SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pkb: UPDATE lrp SET id = id - 100, note = note + 1 WHERE id = 101;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+ 1|  12
+(1 row)
+
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s4pn101 s4pn101 s2pks s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  21
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pkk s4pn101 s4pn101 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2fc: FETCH ALL FROM c;
+ id|note
+---+----
+101|  21
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  21
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s5b s5pn101 s2pks s5c s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+ERROR:  could not serialize access due to concurrent update
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101| 101
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s5b s5pn101 s2ci s5c s2c s3c
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+ERROR:  could not serialize access due to concurrent update
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s2rr s2snap s4pkk s5b s5pn101 s2pnk s5c s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101| 101
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pkk s5b s5pn101 s2fc s5c s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2fc: FETCH ALL FROM c; <waiting ...>
+step s5c: COMMIT;
+step s2fc: <... completed>
+ id|note
+---+----
+101| 101
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101| 101
+(1 row)
+
+
+starting permutation: s2rc s2dnk s4pkk s5b s5pn101 s2fc s5c s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dnk: DECLARE c CURSOR FOR SELECT * FROM lrp FOR NO KEY UPDATE;
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2fc: FETCH ALL FROM c; <waiting ...>
+step s5c: COMMIT;
+step s2fc: <... completed>
+ id|note
+---+----
+101| 101
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101| 101
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s5b s5pkk s2pks s5c s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE; <waiting ...>
+step s5c: COMMIT;
+step s2pks: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s5b s5pkk s2pks s5a s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE; <waiting ...>
+step s5a: ROLLBACK;
+step s2pks: <... completed>
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  10
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pn1 s5b s5pkk s2fc s5c s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2fc: FETCH ALL FROM c; <waiting ...>
+step s5c: COMMIT;
+step s2fc: <... completed>
+ id|note
+---+----
+101|  11
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pn1 s5b s5pkk s2fc s5a s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2fc: FETCH ALL FROM c; <waiting ...>
+step s5a: ROLLBACK;
+step s2fc: <... completed>
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  10
+(1 row)
+
+
+starting permutation: s5b s5pkk s5pn101 s2rc s2ci s5c s2c s3c
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1); <waiting ...>
+step s5c: COMMIT;
+step s2ci: <... completed>
+ERROR:  insert or update on table "lrc" violates foreign key constraint "lrc_pid_fkey"
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+
+starting permutation: s5b s5pkk s5pn101 s2rc s2ci s5a s2c s3c
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1); <waiting ...>
+step s5a: ROLLBACK;
+step s2ci: <... completed>
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s5b s5pkk s5pn101 s2rr s2snap s2pks s5c s2c s3p
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE; <waiting ...>
+step s5c: COMMIT;
+step s2pks: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101| 101
+(1 row)
+
+
+starting permutation: s5b s5pkk s5pn101 s2rr s2snap s2pks s5a s2c s3p
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE; <waiting ...>
+step s5a: ROLLBACK;
+step s2pks: <... completed>
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s5b s5pn1 s2pks s2ci s5c s2c s3c
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn1: UPDATE lrp SET note = note + 100 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s2rc s2dka s4pn1 s5b s5pn1 s2fc s5c s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pn1: UPDATE lrp SET note = note + 100 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1| 110
+(1 row)
+
+
+starting permutation: s4pkk s2rr s2snap s4pn101 s2pks101 s2ci101 s2c s3c
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn101: UPDATE lrp SET note = note + 10 WHERE id = 101;
+step s2pks101: SELECT * FROM lrp WHERE id = 101 FOR KEY SHARE;
+ id|note
+---+----
+101|   1
+(1 row)
+
+step s2ci101: INSERT INTO lrc VALUES (2, 101);
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 2|101
+(1 row)
+
+
+starting permutation: s4pkk s2rr s2snap s5b s5pn101 s2pks101 s2ci101 s5c s2c s3c
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s5b: BEGIN;
+step s5pn101: UPDATE lrp SET note = note + 100 WHERE id = 101;
+step s2pks101: SELECT * FROM lrp WHERE id = 101 FOR KEY SHARE;
+ id|note
+---+----
+101|   1
+(1 row)
+
+step s2ci101: INSERT INTO lrc VALUES (2, 101);
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 2|101
+(1 row)
+
+
+starting permutation: s2rr s2snap s5b s5pkk s5a s4pn1 s2pks s2ci s2c s3c
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5a: ROLLBACK;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2pks: SELECT * FROM lrp WHERE id = 1 FOR KEY SHARE;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+step s2c: COMMIT;
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+
+starting permutation: s2rc s2dka s5b s5pkk s5a s4pn1 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dka: DECLARE c CURSOR FOR SELECT * FROM lrp FOR KEY SHARE;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5a: ROLLBACK;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  10
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s4pn1 s2pnk s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  20
+(1 row)
+
+
+starting permutation: s2rc s2dnk s4pn1 s4pn1 s2fc s2c s3p
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2dnk: DECLARE c CURSOR FOR SELECT * FROM lrp FOR NO KEY UPDATE;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2fc: FETCH ALL FROM c;
+id|note
+--+----
+ 1|  20
+(1 row)
+
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  20
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s5b s5pkk s2pnk s5c s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s5c: COMMIT;
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+ id|note
+---+----
+101|  11
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pn1 s5b s5pkk s2pnk s5a s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s5a: ROLLBACK;
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  10
+(1 row)
+
+
+starting permutation: s2rr s2snap s5b s5pkk s5a s4pn1 s2pnk s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s5b: BEGIN;
+step s5pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s5a: ROLLBACK;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  10
+(1 row)
+
+
+starting permutation: s2rr s2snap s4pkk s4pkb s4pn1 s2pnk s2c s3p
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s4pkk: UPDATE lrp SET id = id + 100, note = note + 1 WHERE id = 1;
+step s4pkb: UPDATE lrp SET id = id - 100, note = note + 1 WHERE id = 101;
+step s4pn1: UPDATE lrp SET note = note + 10 WHERE id = 1;
+step s2pnk: SELECT * FROM lrp WHERE id = 1 FOR NO KEY UPDATE;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|  12
+(1 row)
+
+
+starting permutation: s1b s1tu s2rc s2toc s1c s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2toc: INSERT INTO lrt VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrt.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lrt_bu: OLD.v=2 NEW.v=2
+step s2toc: <... completed>
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+
+starting permutation: s1b s1tu s1tu2 s2rc s2toc s1c s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+s1: NOTICE:  lrt_bu: OLD.v=2 NEW.v=3
+step s1tu2: UPDATE lrt SET v = v + 1, w = w + 10 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2toc: INSERT INTO lrt VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrt.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lrt_bu: OLD.v=3 NEW.v=3
+step s2toc: <... completed>
+id|v| w
+--+-+--
+ 1|3|11
+(1 row)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v| w
+--+-+--
+ 1|3|11
+(1 row)
+
+
+starting permutation: s1b s1tu s2rc s2toc s1a s2c s3t
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2toc: INSERT INTO lrt VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrt.w + 1 RETURNING *; <waiting ...>
+step s1a: ROLLBACK;
+s2: NOTICE:  lrt_bu: OLD.v=1 NEW.v=1
+step s2toc: <... completed>
+id|v|w
+--+-+-
+ 1|1|1
+(1 row)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|1
+(1 row)
+
+
+starting permutation: s2rr s2snap s1b s1tu s2toc s1c s2c s3t
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s2toc: INSERT INTO lrt VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrt.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2toc: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+(1 row)
+
+
+starting permutation: s1b s1nu s2rc s2noc s1c s2c s3n
+step s1b: BEGIN;
+s1: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,2,0)
+step s1nu: UPDATE lrn SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2noc: INSERT INTO lrn VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrn.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lrn_bu UPDATE: OLD=(1,2,100) NEW=(1,2,101)
+step s2noc: <... completed>
+id|v|  w
+--+-+---
+ 1|2|201
+(1 row)
+
+step s2c: COMMIT;
+step s3n: SELECT * FROM lrn ORDER BY id;
+id|v|  w
+--+-+---
+ 1|2|201
+(1 row)
+
+
+starting permutation: s1b s1nu s2rc s2noc s1a s2c s3n
+step s1b: BEGIN;
+s1: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,2,0)
+step s1nu: UPDATE lrn SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2noc: INSERT INTO lrn VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrn.w + 1 RETURNING *; <waiting ...>
+step s1a: ROLLBACK;
+s2: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,1,1)
+step s2noc: <... completed>
+id|v|  w
+--+-+---
+ 1|1|101
+(1 row)
+
+step s2c: COMMIT;
+step s3n: SELECT * FROM lrn ORDER BY id;
+id|v|  w
+--+-+---
+ 1|1|101
+(1 row)
+
+
+starting permutation: s1b s1lfu s2rc s2oc s1k s1c s2c s3r
+step s1b: BEGIN;
+step s1lfu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *; <waiting ...>
+step s1k: UPDATE lr SET id = 10 WHERE id = 1;
+step s1c: COMMIT;
+step s2oc: <... completed>
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+10|1|0
+(3 rows)
+
+
+starting permutation: s1b s1tfu s2rc s2toc s1tk s1c s2c s3t
+step s1b: BEGIN;
+step s1tfu: SELECT * FROM lrt WHERE id = 1 FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2toc: INSERT INTO lrt VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrt.w + 1 RETURNING *; <waiting ...>
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=1
+step s1tk: UPDATE lrt SET id = 10 WHERE id = 1;
+step s1c: COMMIT;
+step s2toc: <... completed>
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s1b s1lfu s2rc s2oc s1u s1c s2c s3r
+step s1b: BEGIN;
+step s1lfu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *; <waiting ...>
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2oc: <... completed>
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|1
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1tfu s2rc s2toc s1tu s1c s2c s3t
+step s1b: BEGIN;
+step s1tfu: SELECT * FROM lrt WHERE id = 1 FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2toc: INSERT INTO lrt VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lrt.w + 1 RETURNING *; <waiting ...>
+s1: NOTICE:  lrt_bu: OLD.v=1 NEW.v=2
+step s1tu: UPDATE lrt SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+s2: NOTICE:  lrt_bu: OLD.v=2 NEW.v=2
+step s2toc: <... completed>
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+step s2c: COMMIT;
+step s3t: SELECT * FROM lrt ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|1
+(1 row)
+
+
+starting permutation: s1b s1lfu s2rc s2oc s1c s2c s3r
+step s1b: BEGIN;
+step s1lfu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *; <waiting ...>
+step s1c: COMMIT;
+step s2oc: <... completed>
+id|v|w
+--+-+-
+ 1|1|1
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|1
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1lfu s2oc s1u s1c s2c s3r
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+step s1lfu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+(1 row)
+
+step s2oc: INSERT INTO lr VALUES (1, 1, 0) ON CONFLICT (id) DO UPDATE SET w = lr.w + 1 RETURNING *; <waiting ...>
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2oc: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2mlu s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mlu: MERGE INTO lr USING (VALUES (1)) s(id) ON lr.id = s.id WHEN MATCHED THEN UPDATE SET w = lr.w + 1 RETURNING merge_action(), lr.*; <waiting ...>
+step s1c: COMMIT;
+step s2mlu: <... completed>
+merge_action|id|v|w
+------------+--+-+-
+UPDATE      | 1|2|1
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|1
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2mlq s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mlq: MERGE INTO lr USING (VALUES (1)) s(id) ON lr.id = s.id AND lr.v = 1 WHEN MATCHED THEN UPDATE SET w = lr.w + 1 RETURNING merge_action(), lr.*; <waiting ...>
+step s1c: COMMIT;
+step s2mlq: <... completed>
+merge_action|id|v|w
+------------+--+-+-
+(0 rows)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1u s2rc s2mld s1c s2c s3r
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mld: MERGE INTO lr USING (VALUES (1)) s(id) ON lr.id = s.id WHEN MATCHED THEN DELETE RETURNING merge_action(), lr.*; <waiting ...>
+step s1c: COMMIT;
+step s2mld: <... completed>
+merge_action|id|v|w
+------------+--+-+-
+DELETE      | 1|2|0
+(1 row)
+
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+(1 row)
+
+
+starting permutation: s1b s1nu s2rc s2mnu s1c s2c s3n
+step s1b: BEGIN;
+s1: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,2,0)
+step s1nu: UPDATE lrn SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mnu: MERGE INTO lrn USING (VALUES (1)) s(id) ON lrn.id = s.id WHEN MATCHED THEN UPDATE SET w = lrn.w + 1 RETURNING merge_action(), lrn.*; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lrn_bu UPDATE: OLD=(1,2,100) NEW=(1,2,101)
+step s2mnu: <... completed>
+merge_action|id|v|  w
+------------+--+-+---
+UPDATE      | 1|2|201
+(1 row)
+
+step s2c: COMMIT;
+step s3n: SELECT * FROM lrn ORDER BY id;
+id|v|  w
+--+-+---
+ 1|2|201
+(1 row)
+
+
+starting permutation: s1b s1nu s2rc s2mnq s1c s2c s3n
+step s1b: BEGIN;
+s1: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,2,0)
+step s1nu: UPDATE lrn SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mnq: MERGE INTO lrn USING (VALUES (1)) s(id) ON lrn.id = s.id AND lrn.v = 1 WHEN MATCHED THEN UPDATE SET w = lrn.w + 1 RETURNING merge_action(), lrn.*; <waiting ...>
+step s1c: COMMIT;
+step s2mnq: <... completed>
+merge_action|id|v|w
+------------+--+-+-
+(0 rows)
+
+step s2c: COMMIT;
+step s3n: SELECT * FROM lrn ORDER BY id;
+id|v|  w
+--+-+---
+ 1|2|100
+(1 row)
+
+
+starting permutation: s1b s1nu s2rc s2mnd s1c s2c s3n
+step s1b: BEGIN;
+s1: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,2,0)
+step s1nu: UPDATE lrn SET v = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mnd: MERGE INTO lrn USING (VALUES (1)) s(id) ON lrn.id = s.id WHEN MATCHED THEN DELETE RETURNING merge_action(), lrn.*; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lrn_bu DELETE: OLD=(1,2,100) NEW=<NULL>
+step s2mnd: <... completed>
+merge_action|id|v|  w
+------------+--+-+---
+DELETE      | 1|2|100
+(1 row)
+
+step s2c: COMMIT;
+step s3n: SELECT * FROM lrn ORDER BY id;
+id|v|w
+--+-+-
+(0 rows)
+
+
+starting permutation: s2rr s2snap s1b s1nu s2mnu s1c s2c s3n
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+s1: NOTICE:  lrn_bu UPDATE: OLD=(1,1,0) NEW=(1,2,0)
+step s1nu: UPDATE lrn SET v = 2 WHERE id = 1;
+step s2mnu: MERGE INTO lrn USING (VALUES (1)) s(id) ON lrn.id = s.id WHEN MATCHED THEN UPDATE SET w = lrn.w + 1 RETURNING merge_action(), lrn.*; <waiting ...>
+step s1c: COMMIT;
+step s2mnu: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3n: SELECT * FROM lrn ORDER BY id;
+id|v|  w
+--+-+---
+ 1|2|100
+(1 row)
+
+
+starting permutation: s1b s1pu s2rc s2pm s1c s2c s3pt
+step s1b: BEGIN;
+step s1pu: UPDATE lpt SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2pm: UPDATE lpt SET v = 2 WHERE id = 1 RETURNING tableoid::regclass, *; <waiting ...>
+step s1c: COMMIT;
+step s2pm: <... completed>
+tableoid|id|v|w
+--------+--+-+-
+lpt2    | 1|2|5
+(1 row)
+
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt2    | 1|2|5
+lptt1   | 1|1|0
+(2 rows)
+
+
+starting permutation: s1b s1pu s2rc s2pmq s1c s2c s3pt
+step s1b: BEGIN;
+step s1pu: UPDATE lpt SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2pmq: UPDATE lpt SET v = 2 WHERE id = 1 AND w = 0 RETURNING tableoid::regclass, *; <waiting ...>
+step s1c: COMMIT;
+step s2pmq: <... completed>
+tableoid|id|v|w
+--------+--+-+-
+(0 rows)
+
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt1    | 1|1|5
+lptt1   | 1|1|0
+(2 rows)
+
+
+starting permutation: s1b s1ptu s2rc s2ptm s1c s2c s3pt
+step s1b: BEGIN;
+s1: NOTICE:  lptt1 BEFORE UPDATE: OLD=(1,1,0) NEW=(1,1,5)
+step s1ptu: UPDATE lptt SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ptm: UPDATE lptt SET v = 2 WHERE id = 1 RETURNING tableoid::regclass, *; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lptt1 BEFORE UPDATE: OLD=(1,1,5) NEW=(1,2,5)
+s2: NOTICE:  lptt1 BEFORE DELETE: OLD=(1,1,5) NEW=<NULL>
+step s2ptm: <... completed>
+tableoid|id|v|w
+--------+--+-+-
+lptt2   | 1|2|5
+(1 row)
+
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt1    | 1|1|0
+lptt2   | 1|2|5
+(2 rows)
+
+
+starting permutation: s1b s1ptu s2rc s2ptmq s1c s2c s3pt
+step s1b: BEGIN;
+s1: NOTICE:  lptt1 BEFORE UPDATE: OLD=(1,1,0) NEW=(1,1,5)
+step s1ptu: UPDATE lptt SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ptmq: UPDATE lptt SET v = 2 WHERE id = 1 AND w = 0 RETURNING tableoid::regclass, *; <waiting ...>
+step s1c: COMMIT;
+step s2ptmq: <... completed>
+tableoid|id|v|w
+--------+--+-+-
+(0 rows)
+
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt1    | 1|1|0
+lptt1   | 1|1|5
+(2 rows)
+
+
+starting permutation: s1b s1pu s2rc s2mpm s1c s2c s3pt
+step s1b: BEGIN;
+step s1pu: UPDATE lpt SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mpm: MERGE INTO lpt USING (VALUES (1)) s(id) ON lpt.id = s.id WHEN MATCHED THEN UPDATE SET v = 2 RETURNING merge_action(), lpt.*; <waiting ...>
+step s1c: COMMIT;
+step s2mpm: <... completed>
+merge_action|id|v|w
+------------+--+-+-
+UPDATE      | 1|2|5
+(1 row)
+
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt2    | 1|2|5
+lptt1   | 1|1|0
+(2 rows)
+
+
+starting permutation: s1b s1ptu s2rc s2mptm s1c s2c s3pt
+step s1b: BEGIN;
+s1: NOTICE:  lptt1 BEFORE UPDATE: OLD=(1,1,0) NEW=(1,1,5)
+step s1ptu: UPDATE lptt SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mptm: MERGE INTO lptt USING (VALUES (1)) s(id) ON lptt.id = s.id WHEN MATCHED THEN UPDATE SET v = 2 RETURNING merge_action(), lptt.*; <waiting ...>
+step s1c: COMMIT;
+s2: NOTICE:  lptt1 BEFORE UPDATE: OLD=(1,1,5) NEW=(1,2,5)
+s2: NOTICE:  lptt1 BEFORE DELETE: OLD=(1,1,5) NEW=<NULL>
+step s2mptm: <... completed>
+merge_action|id|v|w
+------------+--+-+-
+UPDATE      | 1|2|5
+(1 row)
+
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt1    | 1|1|0
+lptt2   | 1|2|5
+(2 rows)
+
+
+starting permutation: s2rr s2snap s1b s1ptu s2ptm s1c s2c s3pt
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT count(*) FROM lr;
+count
+-----
+    2
+(1 row)
+
+step s1b: BEGIN;
+s1: NOTICE:  lptt1 BEFORE UPDATE: OLD=(1,1,0) NEW=(1,1,5)
+step s1ptu: UPDATE lptt SET w = 5 WHERE id = 1;
+step s2ptm: UPDATE lptt SET v = 2 WHERE id = 1 RETURNING tableoid::regclass, *; <waiting ...>
+step s1c: COMMIT;
+step s2ptm: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3pt: SELECT tableoid::regclass, * FROM lpt UNION ALL SELECT tableoid::regclass, * FROM lptt ORDER BY 1;
+tableoid|id|v|w
+--------+--+-+-
+lpt1    | 1|1|0
+lptt1   | 1|1|5
+(2 rows)
+
+
+starting permutation: s1b s1qcu s2rc s2qd s1c s2c s3q
+step s1b: BEGIN;
+step s1qcu: SET LOCAL session_replication_role = replica; UPDATE lrqc SET w = 5 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2qd: DELETE FROM lrq WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2qd: <... completed>
+step s2c: COMMIT;
+step s3q: SELECT * FROM lrq ORDER BY id; SELECT * FROM lrqc ORDER BY id;
+id|note
+--+----
+(0 rows)
+
+id|pid|w
+--+---+-
+(0 rows)
+
+
+starting permutation: s2rc s2fks s1b s1k s2c s1c s3r
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1b: BEGIN;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1k: <... completed>
+step s1c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s2rc s2fks s1b s1u s1c s2c s3r
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = 2 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|2|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s2rc s2fs s1b s1k s2c s1c s3r
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fs: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR SHARE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1b: BEGIN;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1k: <... completed>
+step s1c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s2rc s2fnk s1b s1k s2c s1c s3r
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fnk: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR NO KEY UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1b: BEGIN;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1k: <... completed>
+step s1c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s2rc s2fu s1b s1k s2c s1c s3r
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fu: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR UPDATE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1b: BEGIN;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1k: <... completed>
+step s1c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 2|1|0
+10|1|0
+(2 rows)
+
+
+starting permutation: s2rc s2ci s1b s1pk s2c s1c s3p s3c s3orphans
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+step s1b: BEGIN;
+step s1pk: UPDATE lrp SET id = 2 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1pk: <... completed>
+ERROR:  update or delete on table "lrp" violates foreign key constraint "lrc_pid_fkey" on table "lrc"
+step s1c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+step s3orphans: SELECT count(*) AS orphans FROM lrc c WHERE NOT EXISTS (SELECT FROM lrp p WHERE p.id = c.pid);
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2ci s1b s1pk s2a s1c s3p s3c s3orphans
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1);
+step s1b: BEGIN;
+step s1pk: UPDATE lrp SET id = 2 WHERE id = 1; <waiting ...>
+step s2a: ROLLBACK;
+step s1pk: <... completed>
+step s1c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 2|   0
+(1 row)
+
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+(0 rows)
+
+step s3orphans: SELECT count(*) AS orphans FROM lrc c WHERE NOT EXISTS (SELECT FROM lrp p WHERE p.id = c.pid);
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2uci s1b s1uk s2c s1c s3u
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2uci: INSERT INTO lruc VALUES (1);
+step s1b: BEGIN;
+step s1uk: UPDATE lrup SET id = 2 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1uk: <... completed>
+step s1c: COMMIT;
+step s3u: SELECT * FROM lrup; SELECT * FROM lruc; SELECT count(*) AS orphans FROM lruc c WHERE NOT EXISTS (SELECT FROM lrup p WHERE p.id = c.pid);
+id
+--
+ 2
+(1 row)
+
+pid
+---
+  2
+(1 row)
+
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2rci s1b s1rk s2c s1c s3restrict
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rci: INSERT INTO lrrc VALUES (1);
+step s1b: BEGIN;
+step s1rk: UPDATE lrrp SET id = 2 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1rk: <... completed>
+ERROR:  update or delete on table "lrrp" violates RESTRICT setting of foreign key constraint "lrrc_pid_fkey" on table "lrrc"
+step s1c: COMMIT;
+step s3restrict: SELECT * FROM lrrp; SELECT * FROM lrrc; SELECT count(*) AS orphans FROM lrrc c WHERE NOT EXISTS (SELECT FROM lrrp p WHERE p.id = c.pid);
+id
+--
+ 1
+(1 row)
+
+pid
+---
+  1
+(1 row)
+
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2fks s1b s1sp s1k s2c s1rb s1c s3r
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2fks: SELECT * FROM lr WHERE v = 1 ORDER BY id FOR KEY SHARE;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+step s1b: BEGIN;
+step s1sp: SAVEPOINT key_update;
+step s1k: UPDATE lr SET id = 10 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1k: <... completed>
+step s1rb: ROLLBACK TO key_update;
+step s1c: COMMIT;
+step s3r: SELECT * FROM lr ORDER BY id;
+id|v|w
+--+-+-
+ 1|1|0
+ 2|1|0
+(2 rows)
+
+
+starting permutation: s1b s1sp s1pk s2rc s2ci s1rb s2c s1c s3p s3c s3orphans
+step s1b: BEGIN;
+step s1sp: SAVEPOINT key_update;
+step s1pk: UPDATE lrp SET id = 2 WHERE id = 1;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2ci: INSERT INTO lrc VALUES (1, 1); <waiting ...>
+step s1rb: ROLLBACK TO key_update;
+step s2ci: <... completed>
+step s2c: COMMIT;
+step s1c: COMMIT;
+step s3p: SELECT * FROM lrp ORDER BY id;
+id|note
+--+----
+ 1|   0
+(1 row)
+
+step s3c: SELECT * FROM lrc ORDER BY id;
+id|pid
+--+---
+ 1|  1
+(1 row)
+
+step s3orphans: SELECT count(*) AS orphans FROM lrc c WHERE NOT EXISTS (SELECT FROM lrp p WHERE p.id = c.pid);
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2mci s1b s1mk s2c s1c s3multi
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2mci: INSERT INTO lrmc VALUES (1, 1);
+step s1b: BEGIN;
+step s1mk: UPDATE lrmp SET b = 2 WHERE a = 1 AND b = 1; <waiting ...>
+step s2c: COMMIT;
+step s1mk: <... completed>
+ERROR:  update or delete on table "lrmp" violates foreign key constraint "lrmc_a_b_fkey" on table "lrmc"
+step s1c: COMMIT;
+step s3multi: SELECT * FROM lrmp; SELECT * FROM lrmc; SELECT count(*) AS orphans FROM lrmc c WHERE NOT EXISTS (SELECT FROM lrmp p WHERE p.a = c.a AND p.b = c.b);
+a|b
+-+-
+1|1
+(1 row)
+
+a|b
+-+-
+1|1
+(1 row)
+
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2vci s1b s1vk s2c s1c s3unique
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2vci: INSERT INTO lrvc VALUES (1);
+step s1b: BEGIN;
+step s1vk: UPDATE lrvp SET id = 2 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1vk: <... completed>
+ERROR:  update or delete on table "lrvp" violates foreign key constraint "lrvc_pid_fkey" on table "lrvc"
+step s1c: COMMIT;
+step s3unique: SELECT * FROM lrvp; SELECT * FROM lrvc; SELECT count(*) AS orphans FROM lrvc c WHERE NOT EXISTS (SELECT FROM lrvp p WHERE p.id = c.pid);
+id|note
+--+----
+ 1|   0
+(1 row)
+
+pid
+---
+  1
+(1 row)
+
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2vci s1b s1vn s1c s2c s3unique
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2vci: INSERT INTO lrvc VALUES (1);
+step s1b: BEGIN;
+step s1vn: UPDATE lrvp SET note = note + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3unique: SELECT * FROM lrvp; SELECT * FROM lrvc; SELECT count(*) AS orphans FROM lrvc c WHERE NOT EXISTS (SELECT FROM lrvp p WHERE p.id = c.pid);
+id|note
+--+----
+ 1|   1
+(1 row)
+
+pid
+---
+  1
+(1 row)
+
+orphans
+-------
+      0
+(1 row)
+
+
+starting permutation: s2rc s2vci s4vn s1b s1vk s2c s1c s3unique
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2vci: INSERT INTO lrvc VALUES (1);
+step s4vn: UPDATE lrvp SET note = note + 1 WHERE id = 1;
+step s1b: BEGIN;
+step s1vk: UPDATE lrvp SET id = 2 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1vk: <... completed>
+ERROR:  update or delete on table "lrvp" violates foreign key constraint "lrvc_pid_fkey" on table "lrvc"
+step s1c: COMMIT;
+step s3unique: SELECT * FROM lrvp; SELECT * FROM lrvc; SELECT count(*) AS orphans FROM lrvc c WHERE NOT EXISTS (SELECT FROM lrvp p WHERE p.id = c.pid);
+id|note
+--+----
+ 1|   1
+(1 row)
+
+pid
+---
+  1
+(1 row)
+
+orphans
+-------
+      0
+(1 row)
+

@@ -204,6 +204,8 @@
  */
 #include "postgres.h"
 
+#include "access/perbackend/pbu_undolog.h"
+
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
@@ -1349,6 +1351,9 @@ again:
 		 * Data checksums have been set on all pages, set the state to on in
 		 * order to instruct backends to validate checksums on reading.
 		 */
+		StartTransactionCommand();
+		UndoLogEnableChecksums();
+		CommitTransactionCommand();
 		SetDataChecksumsOn();
 
 		ereport(LOG,

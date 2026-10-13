@@ -1,0 +1,101 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1ks s3fu s2ks s1sp s1sh s2nk s1rs s1r s2c s3c
+step s1ks: SELECT id FROM luq FOR KEY SHARE;
+id
+--
+ 1
+(1 row)
+
+step s3fu: SELECT id FROM luq FOR UPDATE; <waiting ...>
+step s2ks: SELECT id FROM luq FOR KEY SHARE;
+id
+--
+ 1
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1sh: SELECT id FROM luq FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2nk: SELECT id FROM luq FOR NO KEY UPDATE; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s2nk: <... completed>
+id
+--
+ 1
+(1 row)
+
+step s1r: ROLLBACK;
+step s2c: COMMIT;
+step s3fu: <... completed>
+id
+--
+ 1
+(1 row)
+
+step s3c: COMMIT;
+
+starting permutation: s1sh s2fu s3sh s3fu s1r s3c s2c
+step s1sh: SELECT id FROM luq FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2fu: SELECT id FROM luq FOR UPDATE; <waiting ...>
+step s3sh: SELECT id FROM luq FOR SHARE;
+id
+--
+ 1
+(1 row)
+
+step s3fu: SELECT id FROM luq FOR UPDATE; <waiting ...>
+step s1r: ROLLBACK;
+step s3fu: <... completed>
+id
+--
+ 1
+(1 row)
+
+step s3c: COMMIT;
+step s2fu: <... completed>
+id
+--
+ 1
+(1 row)
+
+step s2c: COMMIT;
+
+starting permutation: s1ks s2fu s3ks s3d s1r s3c s2c
+step s1ks: SELECT id FROM luq FOR KEY SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2fu: SELECT id FROM luq FOR UPDATE; <waiting ...>
+step s3ks: SELECT id FROM luq FOR KEY SHARE;
+id
+--
+ 1
+(1 row)
+
+step s3d: DELETE FROM luq RETURNING id; <waiting ...>
+step s1r: ROLLBACK;
+step s3d: <... completed>
+id
+--
+ 1
+(1 row)
+
+step s3c: COMMIT;
+step s2fu: <... completed>
+id
+--
+(0 rows)
+
+step s2c: COMMIT;

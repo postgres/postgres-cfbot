@@ -1,0 +1,382 @@
+-- ---------------------------------------------------------------------------
+-- Index UNDO, end to end through the real abort path.
+--
+-- A table created WITH (index_undo = on) makes its btree and hash indexes
+-- write UNDO into the cluster-wide UNDO-in-WAL stream.  On ROLLBACK,
+-- AtAbort_XactUndo() walks the chain and the apply callbacks mark the
+-- provisionally-inserted entries LP_DEAD -- no VACUUM required.
+-- ---------------------------------------------------------------------------
+CREATE EXTENSION test_idxundo;
+CREATE EXTENSION amcheck;
+
+-- ===========================================================================
+-- Reloption plumbing
+-- ===========================================================================
+
+CREATE TABLE iu_opt (id int, val text) WITH (index_undo = on);
+SELECT reloptions FROM pg_class WHERE relname = 'iu_opt';
+
+-- round-trips through ALTER ... SET / RESET
+ALTER TABLE iu_opt SET (index_undo = off);
+SELECT reloptions FROM pg_class WHERE relname = 'iu_opt';
+ALTER TABLE iu_opt SET (index_undo = on);
+SELECT reloptions FROM pg_class WHERE relname = 'iu_opt';
+ALTER TABLE iu_opt RESET (index_undo);
+SELECT reloptions FROM pg_class WHERE relname = 'iu_opt';
+
+-- rejected where it has no meaning
+CREATE INDEX iu_opt_idx ON iu_opt (id);
+ALTER INDEX iu_opt_idx SET (index_undo = on);
+DROP TABLE iu_opt;
+
+-- ===========================================================================
+-- The core promise: ROLLBACK reverses provisional entries, COMMIT keeps them
+-- ===========================================================================
+
+CREATE TABLE iu_btree (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_btree_idx ON iu_btree (id);
+
+-- committed baseline
+INSERT INTO iu_btree SELECT g, 'committed' FROM generate_series(1, 200) g;
+
+-- Nothing is dead yet.
+SELECT idxundo_count_dead_all('iu_btree_idx') AS dead_before;
+
+-- An aborted insert.  Inside the transaction the chain head must be published,
+-- or AtAbort_XactUndo() would have nothing to walk (the defect that made this
+-- feature a silent no-op).
+BEGIN;
+INSERT INTO iu_btree SELECT g, 'aborted' FROM generate_series(1001, 1100) g;
+SELECT idxundo_undo_chain_published() AS chain_published;
+ROLLBACK;
+
+-- The 100 aborted entries are now LP_DEAD, without any VACUUM.
+SELECT idxundo_count_dead_all('iu_btree_idx') AS dead_after_rollback;
+
+-- Every committed row is still reachable THROUGH THE INDEX.  This is the
+-- assertion that fails if apply killed the wrong slot.
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_btree WHERE id BETWEEN 1 AND 200;
+SELECT count(*) AS aborted_via_index FROM iu_btree WHERE id BETWEEN 1001 AND 1100;
+RESET enable_seqscan;
+
+-- Index and heap agree, and the index is structurally sound.
+SELECT count(*) AS heap_rows FROM iu_btree;
+SELECT bt_index_check('iu_btree_idx', heapallindexed => true);
+
+-- A committed insert is untouched by the same machinery.
+BEGIN;
+INSERT INTO iu_btree SELECT g, 'committed2' FROM generate_series(2001, 2050) g;
+COMMIT;
+SELECT idxundo_count_dead_all('iu_btree_idx') AS dead_after_commit;
+SET enable_seqscan = off;
+SELECT count(*) AS committed2_via_index FROM iu_btree WHERE id BETWEEN 2001 AND 2050;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_btree_idx', heapallindexed => true);
+
+-- ===========================================================================
+-- Opting out must leave the old behaviour exactly as it was
+--
+-- index_undo defaults to ON, so opting out takes an EXPLICIT off.  (A table with
+-- no reloptions at all is covered by the default-ON cases below; that is the
+-- common configuration, not this one.)
+-- ===========================================================================
+
+CREATE TABLE iu_off (id int, val text) WITH (index_undo = off);
+CREATE INDEX iu_off_idx ON iu_off (id);
+BEGIN;
+INSERT INTO iu_off SELECT g, 'aborted' FROM generate_series(1, 100) g;
+SELECT idxundo_undo_chain_published() AS chain_published_when_off;
+ROLLBACK;
+-- No index UNDO was written, so the entries are left for VACUUM: not dead.
+SELECT idxundo_count_dead_all('iu_off_idx') AS dead_when_off;
+SELECT bt_index_check('iu_off_idx', heapallindexed => true);
+
+-- ===========================================================================
+-- Subtransactions: only the aborted subxact's entries are reversed
+-- ===========================================================================
+
+CREATE TABLE iu_sub (id int) WITH (index_undo = on);
+CREATE INDEX iu_sub_idx ON iu_sub (id);
+BEGIN;
+  INSERT INTO iu_sub SELECT g FROM generate_series(1, 50) g;      -- keep
+  SAVEPOINT s1;
+    INSERT INTO iu_sub SELECT g FROM generate_series(501, 550) g; -- discard
+  ROLLBACK TO SAVEPOINT s1;
+  INSERT INTO iu_sub SELECT g FROM generate_series(101, 150) g;   -- keep
+COMMIT;
+SET enable_seqscan = off;
+SELECT count(*) AS kept_via_index FROM iu_sub WHERE id BETWEEN 1 AND 150;
+SELECT count(*) AS discarded_via_index FROM iu_sub WHERE id BETWEEN 501 AND 550;
+RESET enable_seqscan;
+SELECT count(*) AS heap_rows FROM iu_sub;
+SELECT bt_index_check('iu_sub_idx', heapallindexed => true);
+
+-- ===========================================================================
+-- Page splits during an aborted transaction: splits are not reversed, the
+-- aborted leaf entries are killed wherever the split moved them, and the tree
+-- must stay consistent.
+-- ===========================================================================
+
+CREATE TABLE iu_split (id int, pad text) WITH (index_undo = on);
+CREATE INDEX iu_split_idx ON iu_split (id);
+INSERT INTO iu_split SELECT g, repeat('c', 50) FROM generate_series(1, 500) g;
+BEGIN;
+-- Roll back inline rather than handing the batch to the revert worker, so the
+-- dead count below is deterministic.
+SET LOCAL undo_instant_abort_threshold = 2147483647;
+-- Enough rows, interleaved with the committed keys, to force many leaf splits.
+INSERT INTO iu_split SELECT g, repeat('a', 50) FROM generate_series(501, 5000) g;
+-- Keep any rollback diagnostics, whose detail depends on page geometry, out of
+-- the expected output.
+SET client_min_messages = error;
+ROLLBACK;
+RESET client_min_messages;
+-- Every aborted entry is dead, including those whose insert split its leaf.
+SELECT idxundo_count_dead_all('iu_split_idx') AS dead_after_split_rollback;
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_split WHERE id BETWEEN 1 AND 500;
+RESET enable_seqscan;
+SELECT count(*) AS heap_rows FROM iu_split;
+SELECT bt_index_check('iu_split_idx', heapallindexed => true);
+
+-- ===========================================================================
+-- hash indexes
+-- ===========================================================================
+
+CREATE TABLE iu_hash (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_hash_idx ON iu_hash USING hash (id);
+INSERT INTO iu_hash SELECT g, 'committed' FROM generate_series(1, 200) g;
+SELECT idxundo_count_dead_all('iu_hash_idx') AS dead_before;
+BEGIN;
+INSERT INTO iu_hash SELECT g, 'aborted' FROM generate_series(1001, 1100) g;
+SELECT idxundo_undo_chain_published() AS chain_published;
+ROLLBACK;
+SELECT idxundo_count_dead_all('iu_hash_idx') AS dead_after_rollback;
+-- The pages holding them carry the dead-tuples hint, so an insert that finds
+-- the page full reclaims them (_hash_vacuum_one_page) instead of waiting for
+-- VACUUM.
+SELECT bool_or((s.hasho_flag & 128) <> 0) AS has_dead_hint
+  FROM generate_series(1, pg_relation_size('iu_hash_idx') /
+                          current_setting('block_size')::int - 1) b,
+       LATERAL hash_page_stats(get_raw_page('iu_hash_idx', b::int)) s
+ WHERE hash_page_type(get_raw_page('iu_hash_idx', b::int)) IN ('bucket', 'overflow');
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_hash WHERE id BETWEEN 1 AND 200;
+SELECT count(*) AS aborted_via_index FROM iu_hash WHERE id BETWEEN 1001 AND 1100;
+RESET enable_seqscan;
+SELECT count(*) AS heap_rows FROM iu_hash;
+
+-- ===========================================================================
+-- Turning the option on AFTER rows already exist.
+--
+-- The option only governs whether NEW inserts write UNDO; pre-existing entries
+-- have no UNDO record and are therefore unaffected by a later rollback.  That
+-- is the documented behaviour, and it is safe: an entry with no UNDO record is
+-- simply left to VACUUM, exactly as today.
+-- ===========================================================================
+
+CREATE TABLE iu_late (id int);
+CREATE INDEX iu_late_idx ON iu_late (id);
+INSERT INTO iu_late SELECT g FROM generate_series(1, 100) g;   -- no UNDO written
+ALTER TABLE iu_late SET (index_undo = on);
+BEGIN;
+INSERT INTO iu_late SELECT g FROM generate_series(201, 250) g; -- UNDO written
+ROLLBACK;
+-- Only the 50 post-ALTER entries are reversed; the 100 earlier ones are intact.
+SELECT idxundo_count_dead_all('iu_late_idx') AS dead_after_rollback;
+SET enable_seqscan = off;
+SELECT count(*) AS preexisting_via_index FROM iu_late WHERE id BETWEEN 1 AND 100;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_late_idx', heapallindexed => true);
+
+-- ===========================================================================
+-- Mutual exclusion with delete-marking.
+--
+-- A delete-marking table AM drives index cleanup from its own table UNDO, so
+-- RelationUsesIndexUndo() must refuse index UNDO for it no matter what the
+-- reloption says -- otherwise the same entry would be reverted twice.
+-- ===========================================================================
+
+CREATE TABLE iu_flux (id int, val text) USING flux;
+CREATE INDEX iu_flux_idx ON iu_flux (id);
+BEGIN;
+INSERT INTO iu_flux SELECT g, 'x' FROM generate_series(1, 50) g;
+-- FLUX writes its own table UNDO, so a chain exists -- but no INDEX undo is in
+-- it.  The check that matters is that rollback leaves a consistent index.
+ROLLBACK;
+SELECT bt_index_check('iu_flux_idx', heapallindexed => true);
+SELECT count(*) AS heap_rows FROM iu_flux;
+
+DROP TABLE iu_btree, iu_off, iu_sub, iu_split, iu_hash, iu_late, iu_flux;
+
+-- ===========================================================================
+-- DEFERRED BATCHING SAFETY
+--
+-- Index UNDO records are DEFERRED, not written per record: they accumulate in
+-- one UndoRecordSet and a single XLOG_UNDO_BATCH carries a whole statement's
+-- entries.  That is the whole performance win, and it is only sound because
+-- every path that can consume the chain flushes the pending batch first.
+--
+-- A missed flush does not corrupt anything -- it makes ROLLBACK a SILENT NO-OP,
+-- which is far worse, because it looks like success.  So each case below aborts
+-- work and asserts the entries were actually reversed, i.e. that the flush
+-- happened at that choke point.  A regression here shows up as
+-- dead_after_rollback = 0.
+-- ===========================================================================
+
+CREATE TABLE iu_def (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_def_idx ON iu_def (id);
+INSERT INTO iu_def SELECT g, 'committed' FROM generate_series(1, 200) g;
+
+-- --- 1. error mid-statement -------------------------------------------------
+-- The error unwinds into AbortTransaction() -> AtAbort_XactUndo().  A partial
+-- statement's deferred records must be flushed and applied exactly like a
+-- completed statement's.
+BEGIN;
+INSERT INTO iu_def SELECT g, 'x' FROM generate_series(1001, 1100) g;
+-- now fail, mid-transaction, with records pending
+SELECT 1 / 0;
+ROLLBACK;
+SELECT idxundo_count_dead_all('iu_def_idx') AS dead_after_error;
+
+-- --- 2. subxact abort whose parent COMMITS ----------------------------------
+-- The one case that loses data permanently rather than deferring it: an aborted
+-- subtransaction under a committing parent produces no top-level ATM entry, so
+-- if its records never reached WAL nothing would ever revert them and the
+-- entries would persist as though committed.  AtSubAbort_XactUndo() must flush.
+CREATE TABLE iu_sub2 (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_sub2_idx ON iu_sub2 (id);
+INSERT INTO iu_sub2 SELECT g, 'committed' FROM generate_series(1, 100) g;
+BEGIN;
+  SAVEPOINT s1;
+    INSERT INTO iu_sub2 SELECT g, 'rolled back' FROM generate_series(501, 560) g;
+  ROLLBACK TO SAVEPOINT s1;
+  INSERT INTO iu_sub2 SELECT g, 'kept' FROM generate_series(601, 620) g;
+COMMIT;
+-- The 60 subxact entries are reversed even though the top-level txn committed.
+SELECT idxundo_count_dead_all('iu_sub2_idx') AS dead_after_subabort;
+SET enable_seqscan = off;
+-- Committed rows, both pre-savepoint and post-rollback-to-savepoint, survive.
+SELECT count(*) AS committed_via_index FROM iu_sub2 WHERE id BETWEEN 1 AND 100;
+SELECT count(*) AS kept_via_index FROM iu_sub2 WHERE id BETWEEN 601 AND 620;
+SELECT count(*) AS rolledback_via_index FROM iu_sub2 WHERE id BETWEEN 501 AND 560;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_sub2_idx', heapallindexed => true);
+
+-- --- 3. ROLLBACK TO SAVEPOINT must not over-revert ---------------------------
+-- A pending batch must never span a subtransaction boundary.  If the flush
+-- happened after the boundary was saved, the OUTER level's records would land
+-- above it and be reverted along with the inner subtransaction's -- discarding
+-- work that was never rolled back.  Hence the flush at SUBXACT_EVENT_START_SUB.
+CREATE TABLE iu_sub3 (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_sub3_idx ON iu_sub3 (id);
+BEGIN;
+  -- outer-level work, deferred and still pending when the savepoint opens
+  INSERT INTO iu_sub3 SELECT g, 'outer' FROM generate_series(1, 40) g;
+  SAVEPOINT s2;
+    INSERT INTO iu_sub3 SELECT g, 'inner' FROM generate_series(101, 140) g;
+  ROLLBACK TO SAVEPOINT s2;
+COMMIT;
+-- Exactly the 40 inner entries died; the 40 outer ones committed.
+SELECT idxundo_count_dead_all('iu_sub3_idx') AS dead_after_rollback_to_sp;
+SET enable_seqscan = off;
+SELECT count(*) AS outer_via_index FROM iu_sub3 WHERE id BETWEEN 1 AND 40;
+SELECT count(*) AS inner_via_index FROM iu_sub3 WHERE id BETWEEN 101 AND 140;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_sub3_idx', heapallindexed => true);
+
+-- --- 4. nested subxacts -----------------------------------------------------
+CREATE TABLE iu_nest (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_nest_idx ON iu_nest (id);
+BEGIN;
+  INSERT INTO iu_nest SELECT g, 'L0' FROM generate_series(1, 20) g;
+  SAVEPOINT a;
+    INSERT INTO iu_nest SELECT g, 'L1' FROM generate_series(101, 120) g;
+    SAVEPOINT b;
+      INSERT INTO iu_nest SELECT g, 'L2' FROM generate_series(201, 220) g;
+    RELEASE SAVEPOINT b;          -- L2 merges into L1, still live
+    SAVEPOINT c;
+      INSERT INTO iu_nest SELECT g, 'L2c' FROM generate_series(301, 320) g;
+    ROLLBACK TO SAVEPOINT c;      -- only L2c dies
+  RELEASE SAVEPOINT a;
+COMMIT;
+-- 20 dead (L2c only); L0, L1 and the released L2 all committed.
+SELECT idxundo_count_dead_all('iu_nest_idx') AS dead_after_nested;
+SET enable_seqscan = off;
+SELECT count(*) AS live_via_index FROM iu_nest WHERE id < 300;
+SELECT count(*) AS dead_via_index FROM iu_nest WHERE id BETWEEN 301 AND 320;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_nest_idx', heapallindexed => true);
+
+-- --- 5. the memory bound: an intermediate flush must still publish the chain -
+-- A statement bigger than undo_batch_record_limit (1000) / undo_batch_size_kb
+-- flushes mid-statement.  Each intermediate flush is a complete batch chained
+-- onto the previous one, so rollback must walk EVERY chained batch, not just the
+-- final partial one.  If chaining were broken the count would collapse to
+-- roughly one batch worth (<=1000), which is what this guards.
+CREATE TABLE iu_big (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_big_idx ON iu_big (id);
+BEGIN;
+-- This much UNDO is over undo_instant_abort_threshold, which would hand the
+-- abort to the logical revert worker; keep it inline so the walk is observable.
+SET LOCAL undo_instant_abort_threshold = 2147483647;
+INSERT INTO iu_big SELECT g, 'big' FROM generate_series(1, 5000) g;
+SELECT idxundo_undo_chain_published() AS chain_published;
+ROLLBACK;
+-- All 5000 reversed, i.e. every chained batch was walked.
+SELECT idxundo_count_dead_all('iu_big_idx') AS dead_after_big_rollback;
+SET enable_seqscan = off;
+SELECT count(*) AS survivors_via_index FROM iu_big;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_big_idx', heapallindexed => true);
+
+-- --- 6. 2PC: PREPARE must not lose the deferred batch ------------------------
+-- PrepareTransaction() captures GetCurrentXactLastBatchLSN() into the 2PC state
+-- before AtPrepare_XactUndo() runs, and that snapshot is the only chain head
+-- ROLLBACK PREPARED will ever get.  A record still pending at that moment would
+-- be dropped from the prepared transaction's chain with no later chance to
+-- notice -- so XactUndoFlushPending() is called before the capture, and
+-- AtPrepare_XactUndo() asserts nothing is left pending.
+--
+-- ROLLBACK PREPARED hands the chain to the logical revert worker through the
+-- ATM rather than applying it inline.  The worker is off for this test (see
+-- test_idxundo.conf), so the entries are still live afterwards and the ATM
+-- holds the transaction; t/007 shows the worker reverting it.  This case also
+-- proves PREPARE itself is safe: it does not error, lose the chain, or trip
+-- the AtPrepare_XactUndo() assertion, and the committed rows stay
+-- index-reachable.
+CREATE TABLE iu_2pc (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_2pc_idx ON iu_2pc (id);
+INSERT INTO iu_2pc SELECT g, 'committed' FROM generate_series(1, 100) g;
+BEGIN;
+INSERT INTO iu_2pc SELECT g, 'prepared' FROM generate_series(501, 560) g;
+SELECT pg_current_xact_id()::xid AS iu_p1_xid \gset
+PREPARE TRANSACTION 'iu_p1';
+ROLLBACK PREPARED 'iu_p1';
+SELECT count(*) AS queued_for_revert FROM idxundo_atm_entries()
+ WHERE xid = :'iu_p1_xid' AND NOT revert_complete;
+SELECT idxundo_count_dead_all('iu_2pc_idx') AS dead_after_rollback_prepared;
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_2pc WHERE id BETWEEN 1 AND 100;
+SELECT count(*) AS prepared_via_index FROM iu_2pc WHERE id BETWEEN 501 AND 560;
+RESET enable_seqscan;
+SELECT bt_index_check('iu_2pc_idx', heapallindexed => true);
+
+-- --- 7. hash AM, same deferral path -----------------------------------------
+CREATE TABLE iu_hash2 (id int, val text) WITH (index_undo = on);
+CREATE INDEX iu_hash2_idx ON iu_hash2 USING hash (id);
+INSERT INTO iu_hash2 SELECT g, 'committed' FROM generate_series(1, 200) g;
+BEGIN;
+INSERT INTO iu_hash2 SELECT g, 'aborted' FROM generate_series(1001, 1100) g;
+ROLLBACK;
+SELECT idxundo_count_dead_all('iu_hash2_idx') AS dead_after_rollback;
+SET enable_seqscan = off;
+SELECT count(*) AS committed_via_index FROM iu_hash2 WHERE id BETWEEN 1 AND 200;
+SELECT count(*) AS aborted_via_index FROM iu_hash2 WHERE id BETWEEN 1001 AND 1100;
+RESET enable_seqscan;
+
+DROP TABLE iu_def, iu_sub2, iu_sub3, iu_nest, iu_big, iu_2pc, iu_hash2;
+
+DROP EXTENSION amcheck;
+DROP EXTENSION test_idxundo;

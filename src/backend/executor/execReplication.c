@@ -27,10 +27,13 @@
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/nodeModifyTable.h"
+#include "optimizer/optimizer.h"
 #include "replication/conflict.h"
 #include "replication/logicalrelation.h"
 #include "storage/lmgr.h"
+#include "storage/procarray.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -478,6 +481,10 @@ BuildConflictIndexInfo(ResultRelInfo *resultRelInfo, Oid conflictindex)
  * commit timestamp than previously recorded, update the associated transaction
  * ID, commit time, and origin. This helps ensure that conflict detection uses
  * the most recent and relevant deletion metadata.
+ *
+ * A heap tuple is judged by HeapTupleSatisfiesVacuum.  A tuple of another
+ * table AM, found by a scan begun with SO_RETURN_DELETED, is judged by its
+ * xmax system column, the transaction that deleted it.
  */
 static void
 update_most_recent_deletion_info(TupleTableSlot *scanslot,
@@ -486,39 +493,64 @@ update_most_recent_deletion_info(TupleTableSlot *scanslot,
 								 TimestampTz *delete_time,
 								 ReplOriginId *delete_origin)
 {
-	BufferHeapTupleTableSlot *hslot;
-	HeapTuple	tuple;
-	Buffer		buf;
-	bool		recently_dead = false;
 	TransactionId xmax;
 	TimestampTz localts;
 	ReplOriginId localorigin;
 
-	hslot = (BufferHeapTupleTableSlot *) scanslot;
+	if (TTS_IS_BUFFERTUPLE(scanslot))
+	{
+		BufferHeapTupleTableSlot *hslot;
+		HeapTuple	tuple;
+		Buffer		buf;
+		bool		recently_dead = false;
 
-	tuple = ExecFetchSlotHeapTuple(scanslot, false, NULL);
-	buf = hslot->buffer;
+		hslot = (BufferHeapTupleTableSlot *) scanslot;
 
-	LockBuffer(buf, BUFFER_LOCK_SHARE);
+		tuple = ExecFetchSlotHeapTuple(scanslot, false, NULL);
+		buf = hslot->buffer;
 
-	/*
-	 * We do not consider HEAPTUPLE_DEAD status because it indicates either
-	 * tuples whose inserting transaction was aborted (meaning there is no
-	 * commit timestamp or origin), or tuples deleted by a transaction older
-	 * than oldestxmin, making it safe to ignore them during conflict
-	 * detection (See comments atop worker.c for details).
-	 */
-	if (HeapTupleSatisfiesVacuum(tuple, oldestxmin, buf) == HEAPTUPLE_RECENTLY_DEAD)
-		recently_dead = true;
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
 
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+		/*
+		 * We do not consider HEAPTUPLE_DEAD status because it indicates
+		 * either tuples whose inserting transaction was aborted (meaning
+		 * there is no commit timestamp or origin), or tuples deleted by a
+		 * transaction older than oldestxmin, making it safe to ignore them
+		 * during conflict detection (See comments atop worker.c for details).
+		 */
+		if (HeapTupleSatisfiesVacuum(tuple, oldestxmin, buf) == HEAPTUPLE_RECENTLY_DEAD)
+			recently_dead = true;
 
-	if (!recently_dead)
-		return;
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
-	xmax = HeapTupleHeaderGetUpdateXid(tuple->t_data);
-	if (!TransactionIdIsValid(xmax))
-		return;
+		if (!recently_dead)
+			return;
+
+		xmax = HeapTupleHeaderGetUpdateXid(tuple->t_data);
+		if (!TransactionIdIsValid(xmax))
+			return;
+	}
+	else
+	{
+		bool		isnull;
+
+		/*
+		 * Accept what heap reports as HEAPTUPLE_RECENTLY_DEAD: the deleter
+		 * committed, and not before oldestxmin.  A tuple nobody deleted is
+		 * live; one deleted before oldestxmin is HEAPTUPLE_DEAD, ignored as
+		 * above; and one whose deleter is still running, or aborted, is not
+		 * deleted.  As in HeapTupleSatisfiesVacuum, check that the deleter is
+		 * no longer running before asking whether it committed.
+		 */
+		xmax = DatumGetTransactionId(slot_getsysattr(scanslot,
+													 MaxTransactionIdAttributeNumber,
+													 &isnull));
+		if (isnull || !TransactionIdIsValid(xmax) ||
+			TransactionIdPrecedes(xmax, oldestxmin) ||
+			TransactionIdIsInProgress(xmax) ||
+			!TransactionIdDidCommit(xmax))
+			return;
+	}
 
 	/* Select the dead tuple with the most recent commit timestamp */
 	if (TransactionIdGetCommitTsData(xmax, &localts, &localorigin) &&
@@ -623,10 +655,11 @@ RelationFindDeletedTupleInfoSeq(Relation rel, Oid identidxoid,
 	 * Start a heap scan using SnapshotAny to identify dead tuples that are
 	 * not visible under a standard MVCC snapshot. Tuples from transactions
 	 * not yet committed or those just committed prior to the scan are
-	 * excluded in update_most_recent_deletion_info().
+	 * excluded in update_most_recent_deletion_info().  SO_RETURN_DELETED asks
+	 * a table AM whose SnapshotAny hides deleted tuples for them.
 	 */
 	scan = table_beginscan(rel, SnapshotAny, 0, NULL,
-						   SO_NONE);
+						   SO_RETURN_DELETED);
 	scanslot = table_slot_create(rel, NULL);
 
 	table_rescan(scan, NULL);
@@ -688,10 +721,12 @@ RelationFindDeletedTupleInfoByIndex(Relation rel, Oid idxoid,
 	 * Start an index scan using SnapshotAny to identify dead tuples that are
 	 * not visible under a standard MVCC snapshot. Tuples from transactions
 	 * not yet committed or those just committed prior to the scan are
-	 * excluded in update_most_recent_deletion_info().
+	 * excluded in update_most_recent_deletion_info().  SO_RETURN_DELETED asks
+	 * a table AM whose SnapshotAny hides deleted tuples for them.
 	 */
 	scan = index_beginscan(rel, idxrel, false,
-						   SnapshotAny, NULL, skey_attoff, 0, SO_NONE);
+						   SnapshotAny, NULL, skey_attoff, 0,
+						   SO_RETURN_DELETED);
 
 	index_rescan(scan, skey, skey_attoff, NULL, 0);
 
@@ -781,6 +816,52 @@ retry:
 		goto retry;
 
 	return true;
+}
+
+/*
+ * Can the update from 'oldslot' to 'newslot' give this index a key it did not
+ * have?  Only then can the new version collide with another row in a unique
+ * index.  Compare the columns the index refers to: its key columns and those
+ * its expressions and predicate use.  A value stored differently but equal
+ * counts as changed, which costs only a needless check.
+ */
+static bool
+index_key_may_change(IndexInfo *indexInfo, TupleTableSlot *oldslot,
+					 TupleTableSlot *newslot)
+{
+	TupleDesc	desc = oldslot->tts_tupleDescriptor;
+	Bitmapset  *attrs = NULL;
+	int			member = -1;
+
+	for (int i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+	{
+		if (indexInfo->ii_IndexAttrNumbers[i] != 0)
+			attrs = bms_add_member(attrs, indexInfo->ii_IndexAttrNumbers[i] -
+								   FirstLowInvalidHeapAttributeNumber);
+	}
+	pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &attrs);
+	pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &attrs);
+
+	slot_getallattrs(oldslot);
+	slot_getallattrs(newslot);
+
+	while ((member = bms_next_member(attrs, member)) >= 0)
+	{
+		AttrNumber	attnum = member + FirstLowInvalidHeapAttributeNumber;
+		Form_pg_attribute att;
+
+		if (attnum <= 0)
+			return true;
+		att = TupleDescAttr(desc, attnum - 1);
+		if (oldslot->tts_isnull[attnum - 1] != newslot->tts_isnull[attnum - 1])
+			return true;
+		if (!oldslot->tts_isnull[attnum - 1] &&
+			!datumIsEqual(oldslot->tts_values[attnum - 1],
+						  newslot->tts_values[attnum - 1],
+						  att->attbyval, att->attlen))
+			return true;
+	}
+	return false;
 }
 
 /*
@@ -969,6 +1050,49 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		if (rel->rd_rel->relispartition)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
+		/*
+		 * An AM that updates in place may maintain the indexes of a key
+		 * change inside table_tuple_update, where a duplicate key raises a
+		 * plain unique violation rather than the conflict reported below.  So
+		 * look for the conflict before the update, in the unique indexes
+		 * whose key the update changes.  The row's own index entries are at
+		 * its TID, which the update keeps, so they do not count.  A
+		 * conflicting row committed between this check and the update still
+		 * fails the update, with a unique violation; the retried transaction
+		 * then reports the conflict here.
+		 */
+		if (RelationUpdatesInPlace(rel) &&
+			resultRelInfo->ri_onConflictArbiterIndexes != NIL)
+		{
+			List	   *changed = NIL;
+
+			for (int i = 0; i < resultRelInfo->ri_NumIndices; i++)
+			{
+				Relation	index = resultRelInfo->ri_IndexRelationDescs[i];
+
+				if (index != NULL &&
+					list_member_oid(resultRelInfo->ri_onConflictArbiterIndexes,
+									RelationGetRelid(index)) &&
+					index_key_may_change(resultRelInfo->ri_IndexRelationInfo[i],
+										 searchslot, slot))
+					changed = lappend_oid(changed, RelationGetRelid(index));
+			}
+			if (changed != NIL)
+			{
+				slot->tts_tid = *tid;
+				CheckAndReportConflict(resultRelInfo, estate, CT_UPDATE_EXISTS,
+									   changed, searchslot, slot);
+				list_free(changed);
+			}
+		}
+
+		/*
+		 * searchslot is read again below (conflict report, AFTER ROW
+		 * triggers); an in-place AM is about to overwrite what it points at.
+		 */
+		if (RelationUpdatesInPlace(rel))
+			ExecMaterializeSlot(searchslot);
+
 		simple_table_tuple_update(rel, tid, slot, estate->es_snapshot,
 								  &update_indexes);
 
@@ -1000,7 +1124,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 		/* AFTER ROW UPDATE Triggers */
 		ExecARUpdateTriggers(estate, resultRelInfo,
 							 NULL, NULL,
-							 tid, NULL, slot,
+							 tid, NULL, searchslot, slot,
 							 recheckIndexes, NULL, false);
 
 		list_free(recheckIndexes);

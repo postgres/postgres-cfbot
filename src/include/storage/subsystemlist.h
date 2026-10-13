@@ -88,3 +88,18 @@ PG_SHMEM_SUBSYSTEM(DataChecksumsShmemCallbacks)
 
 /* AIO subsystem. This delegates to the method-specific callbacks */
 PG_SHMEM_SUBSYSTEM(AioShmemCallbacks)
+
+/* UNDO subsystem */
+PG_SHMEM_SUBSYSTEM(UndoShmemCallbacks)
+
+/*
+ * sLog: the UNDO subsystem's shared-memory Aborted Transaction Map (and an
+ * optional per-tuple tracking hash a consumer AM may extend it with).
+ * Registered as its own subsystem (not nested inside UndoShmemCallbacks) so
+ * the generic UNDO subsystem has no compile-time or link-time dependency on
+ * any consumer.  See slog.c's SLogShmemCallbacks for details.
+ */
+PG_SHMEM_SUBSYSTEM(SLogShmemCallbacks)
+
+/* FLUX table access method subsystems */
+PG_SHMEM_SUBSYSTEM(FluxMvccShmemCallbacks)

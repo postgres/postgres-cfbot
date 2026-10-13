@@ -1,0 +1,264 @@
+Parsed test spec with 5 sessions
+
+starting permutation: seq_plan w_lock seq_f w_upd w_unlock seq_unlock
+step seq_plan: EXPLAIN (COSTS OFF) SELECT v FROM ft;
+QUERY PLAN    
+--------------
+Seq Scan on ft
+(1 row)
+
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step seq_f: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ft; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step seq_f: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step seq_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: w_lock seq_h w_upd w_unlock seq_unlock
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step seq_h: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ht; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step seq_h: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step seq_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: bmp_plan w_lock bmp_f w_upd w_unlock bmp_unlock
+step bmp_plan: EXPLAIN (COSTS OFF) SELECT v FROM ft WHERE id = 1;
+QUERY PLAN                      
+--------------------------------
+Bitmap Heap Scan on ft          
+  Recheck Cond: (id = 1)        
+  ->  Bitmap Index Scan on ft_id
+        Index Cond: (id = 1)    
+(4 rows)
+
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step bmp_f: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ft WHERE id = 1; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step bmp_f: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step bmp_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: w_lock bmp_h w_upd w_unlock bmp_unlock
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step bmp_h: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ht WHERE id = 1; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step bmp_h: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step bmp_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: tid_plan w_lock tid_f w_upd w_unlock tid_unlock
+step tid_plan: EXPLAIN (COSTS OFF) SELECT v FROM ft WHERE ctid >= '(0,1)';
+QUERY PLAN                        
+----------------------------------
+Tid Range Scan on ft              
+  TID Cond: (ctid >= '(0,1)'::tid)
+(2 rows)
+
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step tid_f: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ft
+                WHERE ctid >= '(0,1)'; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step tid_f: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step tid_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: w_lock tid_h w_upd w_unlock tid_unlock
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step tid_h: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ht
+                WHERE ctid >= '(0,1)'; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step tid_h: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step tid_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: idx_plan w_lock idx_f w_upd w_unlock idx_unlock
+step idx_plan: EXPLAIN (COSTS OFF) SELECT v FROM ft WHERE id = 1;
+QUERY PLAN                  
+----------------------------
+Index Scan using ft_id on ft
+  Index Cond: (id = 1)      
+(2 rows)
+
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step idx_f: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ft WHERE id = 1; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step idx_f: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step idx_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+
+starting permutation: w_lock idx_h w_upd w_unlock idx_unlock
+step w_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step idx_h: SELECT v, pg_advisory_lock(1) IS NOT NULL AS waited FROM ht WHERE id = 1; <waiting ...>
+step w_upd: UPDATE ft SET v = 'bbbb' WHERE id = 1;
+                UPDATE ht SET v = 'bbbb' WHERE id = 1;
+step w_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step idx_h: <... completed>
+v   |waited
+----+------
+aaaa|t     
+(1 row)
+
+step idx_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+

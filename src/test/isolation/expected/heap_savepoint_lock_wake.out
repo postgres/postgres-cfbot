@@ -1,0 +1,173 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1ks s1sp s1nk s2nk s1rs s1c s2c
+step s1ks: SELECT * FROM lw FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1nk: SELECT * FROM lw FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2nk: SELECT * FROM lw FOR NO KEY UPDATE; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s2nk: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+
+starting permutation: s1ks s1sp s1nk s2u s1rs s1c s2c
+step s1ks: SELECT * FROM lw FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1nk: SELECT * FROM lw FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2u: UPDATE lw SET v = v + 1 RETURNING *; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s2u: <... completed>
+id|v
+--+-
+ 1|1
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+
+starting permutation: s1ks s1sp s1fu s2fs s1rs s1c s2c
+step s1ks: SELECT * FROM lw FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lw FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2fs: SELECT * FROM lw FOR SHARE; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s2fs: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+
+starting permutation: s1sp s1fu s2u s1rs s1c s2c
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lw FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2u: UPDATE lw SET v = v + 1 RETURNING *; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s2u: <... completed>
+id|v
+--+-
+ 1|1
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+
+starting permutation: s1ks s1sp s1sp2 s1nk s1rel2 s2nk s1rs s1c s2c
+step s1ks: SELECT * FROM lw FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1sp2: SAVEPOINT b;
+step s1nk: SELECT * FROM lw FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rel2: RELEASE b;
+step s2nk: SELECT * FROM lw FOR NO KEY UPDATE; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s2nk: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2c: COMMIT;
+
+starting permutation: s1ks s1sp s1sp2 s1nk s2nk s1rs2 s1c s2c
+step s1ks: SELECT * FROM lw FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1sp2: SAVEPOINT b;
+step s1nk: SELECT * FROM lw FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2nk: SELECT * FROM lw FOR NO KEY UPDATE; <waiting ...>
+step s1rs2: ROLLBACK TO b;
+step s2nk: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1c: COMMIT;
+step s2c: COMMIT;
+
+starting permutation: s1ks s1sp s1nk s2d s1rs s1c s2c
+step s1ks: SELECT * FROM lw FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1nk: SELECT * FROM lw FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2d: DELETE FROM lw RETURNING *; <waiting ...>
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s2d: <... completed>
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2c: COMMIT;

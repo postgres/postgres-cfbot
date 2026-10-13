@@ -16,6 +16,8 @@ OBJS = \
 	buffile.o \
 	copydir.o \
 	fd.o \
+	fileops.o \
+	fileops_undo.o \
 	fileset.o \
 	reinit.o \
 	sharedfileset.o

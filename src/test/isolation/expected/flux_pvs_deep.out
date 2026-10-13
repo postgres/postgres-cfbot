@@ -1,0 +1,35 @@
+Parsed test spec with 2 sessions
+
+starting permutation: snap upd read done now
+step snap: SELECT 'heap' AS am, * FROM pvs_h UNION ALL
+              SELECT 'flux', * FROM pvs_f ORDER BY 1, 2;
+am  |id|v
+----+--+-
+flux| 1|0
+flux| 2|0
+heap| 1|0
+heap| 2|0
+(4 rows)
+
+step upd: CALL pvs_churn(10010);
+step read: SELECT 'heap' AS am, * FROM pvs_h UNION ALL
+              SELECT 'flux', * FROM pvs_f ORDER BY 1, 2;
+am  |id|v
+----+--+-
+flux| 1|0
+flux| 2|0
+heap| 1|0
+heap| 2|0
+(4 rows)
+
+step done: COMMIT;
+step now: SELECT 'heap' AS am, * FROM pvs_h UNION ALL
+              SELECT 'flux', * FROM pvs_f ORDER BY 1, 2;
+am  |id|    v
+----+--+-----
+flux| 1|10010
+flux| 2|    0
+heap| 1|10010
+heap| 2|    0
+(4 rows)
+

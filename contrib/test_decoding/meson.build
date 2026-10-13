@@ -65,6 +65,7 @@ tests += {
       'stats',
       'twophase',
       'twophase_stream',
+      'flux_outofplace',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
@@ -84,6 +85,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_repl_stats.pl',
+      't/002_inplace_replica_identity.pl',
     ],
   },
 }

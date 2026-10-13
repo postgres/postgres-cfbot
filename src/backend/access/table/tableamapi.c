@@ -37,6 +37,15 @@ GetTableAmRoutine(Oid amhandler)
 			 amhandler);
 
 	/*
+	 * Any AM that uses UNDO must write it to the per-backend engine, so
+	 * reject an AM that declares UNDO support with any other engine.
+	 */
+	if (routine->am_supports_undo &&
+		routine->am_undo_engine != UNDO_ENGINE_PERBACKEND)
+		elog(ERROR, "table access method handler %u declares UNDO support but not the per-backend UNDO engine",
+			 amhandler);
+
+	/*
 	 * Assert that all required callbacks are present. That makes it a bit
 	 * easier to keep AMs up to date, e.g. when forward porting them to a new
 	 * major version.
@@ -55,6 +64,8 @@ GetTableAmRoutine(Oid amhandler)
 	Assert(routine->index_scan_end != NULL);
 
 	Assert(routine->fetch_tid != NULL);
+	Assert(routine->index_fetch_tid == NULL ||
+		   routine->am_index_delete_marking);
 	Assert(routine->tuple_fetch_row_version != NULL);
 	Assert(routine->tuple_tid_valid != NULL);
 	Assert(routine->tuple_get_latest_tid != NULL);

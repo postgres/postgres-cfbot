@@ -986,16 +986,13 @@ check_concurrent_repack_requirements(Relation rel, Oid *ident_idx_p)
 	/*
 	 * A table AM that doesn't support logical decoding would cause REPACK
 	 * (CONCURRENTLY) to silently lose the changes made during the rewrite.
-	 * Nothing in TableAmRoutine tells us whether it does, so for now restrict
-	 * to heap. Check the routine rather than the AM OID, so that an AM
-	 * reusing the heap handler still works.
 	 */
-	if (rel->rd_tableam != GetHeapamTableAmRoutine())
+	if (!rel->rd_tableam->am_logical_decoding)
 		ereport(ERROR,
 				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				errmsg("cannot execute %s on relation \"%s\"",
 					   "REPACK (CONCURRENTLY)", RelationGetRelationName(rel)),
-				errdetail("This operation is only supported for the \"heap\" access method."));
+				errdetail("This operation is not supported for the access method of this table."));
 
 	/* Data changes in system relations are not logically decoded. */
 	if (IsCatalogRelation(rel))

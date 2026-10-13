@@ -2,7 +2,9 @@
 
 EXTRA_INSTALL = contrib/pageinspect contrib/pg_walinspect
 
-ISOLATION = summarization-and-inprogress-insertion
+REGRESS = flux_summarize
+ISOLATION = summarization-and-inprogress-insertion \
+	flux-summarization-and-inprogress-insertion
 TAP_TESTS = 1
 
 ifdef USE_PGXS

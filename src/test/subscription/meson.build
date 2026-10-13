@@ -49,6 +49,13 @@ tests += {
       't/037_except.pl',
       't/038_walsnd_shutdown_timeout.pl',
       't/100_bugs.pl',
+      't/101_inplace_am_logicalrep.pl',
+      't/102_inplace_am_apply_locks.pl',
+      't/103_inplace_am_replica_identity.pl',
+      't/104_inplace_am_update_conflict.pl',
+      't/105_inplace_am_update_deleted.pl',
+      't/106_inplace_am_key_update_wait.pl',
+      't/107_inplace_am_outofplace_update.pl',
     ],
   },
 }

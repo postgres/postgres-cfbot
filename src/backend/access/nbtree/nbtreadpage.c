@@ -1036,7 +1036,23 @@ _bt_saveitem(BTScanOpaque so, int itemIndex,
 
 	Assert(!BTreeTupleIsPivot(itup) && !BTreeTupleIsPosting(itup));
 
-	currItem->heapTid = itup->t_tid;
+	/*
+	 * A delete-marked leaf tuple stores its heap TID in a trailer, not in
+	 * t_tid (which holds alt-TID metadata).  Use BTreeTupleGetHeapTID() to
+	 * fetch the real TID, and flag the item so the caller rechecks the qual
+	 * against the visible heap version: the delete-marked entry's key may
+	 * describe an older version of the row.
+	 */
+	if (BTreeTupleIsDeleteMarked(itup))
+	{
+		currItem->heapTid = *BTreeTupleGetHeapTID(itup);
+		currItem->recheck = true;
+	}
+	else
+	{
+		currItem->heapTid = itup->t_tid;
+		currItem->recheck = false;
+	}
 	currItem->indexOffset = offnum;
 	if (so->currTuples)
 	{
@@ -1068,6 +1084,7 @@ _bt_setuppostingitems(BTScanOpaque so, int itemIndex, OffsetNumber offnum,
 
 	currItem->heapTid = *heapTid;
 	currItem->indexOffset = offnum;
+	currItem->recheck = false;	/* posting tuples are never delete-marked */
 	if (so->currTuples)
 	{
 		/* Save base IndexTuple (truncate posting list) */
@@ -1104,6 +1121,7 @@ _bt_savepostingitem(BTScanOpaque so, int itemIndex, OffsetNumber offnum,
 
 	currItem->heapTid = *heapTid;
 	currItem->indexOffset = offnum;
+	currItem->recheck = false;	/* posting tuples are never delete-marked */
 
 	/*
 	 * Have index-only scans return the same base IndexTuple for every TID

@@ -1,0 +1,42 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_upd1 s2_upd1 s1_commit s2_commit
+step s1_upd1: UPDATE flux_cc SET v = 1 WHERE id = 1;
+step s2_upd1: UPDATE flux_cc SET v = 2 WHERE id = 1; <waiting ...>
+step s1_commit: COMMIT;
+step s2_upd1: <... completed>
+step s2_commit: COMMIT;
+
+starting permutation: s1_upd1 s2_upd2 s1_commit s2_commit
+step s1_upd1: UPDATE flux_cc SET v = 1 WHERE id = 1;
+step s2_upd2: UPDATE flux_cc SET v = 2 WHERE id = 2;
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+
+starting permutation: s1_del1 s2_upd1 s1_commit s2_commit
+step s1_del1: DELETE FROM flux_cc WHERE id = 1;
+step s2_upd1: UPDATE flux_cc SET v = 2 WHERE id = 1; <waiting ...>
+step s1_commit: COMMIT;
+step s2_upd1: <... completed>
+step s2_commit: COMMIT;
+
+starting permutation: s1_del1 s2_upd1 s1_abort s2_commit
+step s1_del1: DELETE FROM flux_cc WHERE id = 1;
+step s2_upd1: UPDATE flux_cc SET v = 2 WHERE id = 1; <waiting ...>
+step s1_abort: ROLLBACK;
+step s2_upd1: <... completed>
+step s2_commit: COMMIT;
+
+starting permutation: s1_upd1 s2_upd1 s1_abort s2_commit
+step s1_upd1: UPDATE flux_cc SET v = 1 WHERE id = 1;
+step s2_upd1: UPDATE flux_cc SET v = 2 WHERE id = 1; <waiting ...>
+step s1_abort: ROLLBACK;
+step s2_upd1: <... completed>
+step s2_commit: COMMIT;
+
+starting permutation: s1_upd1 s2_del1 s1_commit s2_commit
+step s1_upd1: UPDATE flux_cc SET v = 1 WHERE id = 1;
+step s2_del1: DELETE FROM flux_cc WHERE id = 1; <waiting ...>
+step s1_commit: COMMIT;
+step s2_del1: <... completed>
+step s2_commit: COMMIT;
