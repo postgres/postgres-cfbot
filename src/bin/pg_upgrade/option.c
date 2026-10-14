@@ -9,6 +9,8 @@
 
 #include "postgres_fe.h"
 
+#include <limits.h>
+
 #ifdef WIN32
 #include <io.h>
 #endif
@@ -20,6 +22,7 @@
 #include "utils/pidfile.h"
 
 static void usage(void);
+static void parse_initdb_options(const char *options);
 static void check_required_directory(char **dirpath,
 									 const char *envVarName, bool useCwd,
 									 const char *cmdLineOption, const char *description,
@@ -63,6 +66,8 @@ parseCommandLine(int argc, char *argv[])
 		{"no-statistics", no_argument, NULL, 5},
 		{"set-char-signedness", required_argument, NULL, 6},
 		{"swap", no_argument, NULL, 7},
+		{"initdb", no_argument, NULL, 8},
+		{"initdb-options", required_argument, NULL, 9},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -234,6 +239,15 @@ parseCommandLine(int argc, char *argv[])
 				user_opts.transfer_mode = TRANSFER_MODE_SWAP;
 				break;
 
+			case 8:
+				user_opts.initdb_new_cluster = true;
+				break;
+
+			case 9:
+				user_opts.initdb_options_given = true;
+				parse_initdb_options(optarg);
+				break;
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 						os_info.progname);
@@ -243,6 +257,9 @@ parseCommandLine(int argc, char *argv[])
 
 	if (optind < argc)
 		pg_fatal("too many command-line arguments (first is \"%s\")", argv[optind]);
+
+	if (user_opts.initdb_options_given && !user_opts.initdb_new_cluster)
+		pg_fatal("--initdb-options requires --initdb");
 
 	if (!user_opts.sync_method)
 		user_opts.sync_method = pg_strdup("fsync");
@@ -300,6 +317,73 @@ parseCommandLine(int argc, char *argv[])
 }
 
 
+/*
+ * Split --initdb-options without invoking a shell.  Single quotes preserve
+ * every character.  Outside single quotes, backslashes escape only quotes,
+ * backslashes, spaces, and tabs, so ordinary Windows path separators survive.
+ */
+static void
+parse_initdb_options(const char *options)
+{
+	const char *p = options;
+	char	   *argument;
+
+	if (strpbrk(options, "\r\n") != NULL)
+		pg_fatal("--initdb-options must not contain a newline or carriage return");
+
+	argument = pg_malloc(strlen(options) + 1);
+	while (*p)
+	{
+		char	   *out = argument;
+		char		quote = '\0';
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == '\0')
+			break;
+
+		while (*p)
+		{
+			if (quote == '\0' && (*p == ' ' || *p == '\t'))
+				break;
+			if (*p == quote)
+			{
+				quote = '\0';
+				p++;
+			}
+			else if (quote != '\'' && *p == '\\')
+			{
+				p++;
+				if (*p == '\0')
+					pg_fatal("trailing backslash in --initdb-options");
+				if (*p == '\'' || *p == '"' || *p == '\\' ||
+					*p == ' ' || *p == '\t')
+					*out++ = *p++;
+				else
+					*out++ = '\\';
+			}
+			else if (quote == '\0' && (*p == '\'' || *p == '"'))
+				quote = *p++;
+			else
+				*out++ = *p++;
+		}
+
+		if (quote != '\0')
+			pg_fatal("unterminated quote in --initdb-options");
+		*out = '\0';
+
+		if (user_opts.num_initdb_options == INT_MAX - 1)
+			pg_fatal("too many arguments in --initdb-options");
+		user_opts.initdb_options =
+			pg_realloc_array(user_opts.initdb_options, char *,
+							 (size_t) user_opts.num_initdb_options + 1);
+		user_opts.initdb_options[user_opts.num_initdb_options++] =
+			pg_strdup(argument);
+	}
+	pg_free(argument);
+}
+
+
 static void
 usage(void)
 {
@@ -328,6 +412,9 @@ usage(void)
 	printf(_("  --clone                       clone instead of copying files to new cluster\n"));
 	printf(_("  --copy                        copy files to new cluster (default)\n"));
 	printf(_("  --copy-file-range             copy files to new cluster with copy_file_range\n"));
+	printf(_("  --initdb                      create the new cluster with initdb before\n"
+			 "                                checking or upgrading, using old cluster settings\n"));
+	printf(_("  --initdb-options=OPTIONS      options to pass to initdb (requires --initdb)\n"));
 	printf(_("  --no-statistics               do not import statistics from old cluster\n"));
 	printf(_("  --set-char-signedness=OPTION  set new cluster char signedness to \"signed\" or\n"
 			 "                                \"unsigned\"\n"));
@@ -336,7 +423,9 @@ usage(void)
 	printf(_("  -?, --help                    show this help, then exit\n"));
 	printf(_("\n"
 			 "Before running pg_upgrade you must:\n"
-			 "  create a new database cluster (using the new version of initdb)\n"
+			 "  create a new database cluster (using the new version of initdb),\n"
+			 "    unless the --initdb option is given, in which case pg_upgrade\n"
+			 "    creates the new cluster for you\n"
 			 "  shutdown the postmaster servicing the old cluster\n"
 			 "  shutdown the postmaster servicing the new cluster\n"));
 	printf(_("\n"
