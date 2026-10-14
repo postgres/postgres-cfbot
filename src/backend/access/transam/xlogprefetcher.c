@@ -187,6 +187,9 @@ typedef struct XLogPrefetchStats
 	int			io_depth;		/* Number of I/Os in progress. */
 } XLogPrefetchStats;
 
+static inline void XLogPrefetcherAddRecent(XLogPrefetcher *prefetcher,
+										   RelFileLocator rlocator,
+										   BlockNumber blockno);
 static inline void XLogPrefetcherAddFilter(XLogPrefetcher *prefetcher,
 										   RelFileLocator rlocator,
 										   BlockNumber blockno,
@@ -674,17 +677,24 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 
 			/*
 			 * If there is a full page image attached, we won't be reading the
-			 * page, so don't bother trying to prefetch.
+			 * page, so don't bother trying to prefetch.  Record this block
+			 * in the recent window so that later references to the same
+			 * block are also skipped.
 			 */
 			if (block->has_image)
 			{
+				XLogPrefetcherAddRecent(prefetcher, block->rlocator, block->blkno);
 				XLogPrefetchIncrement(&SharedStats->skip_fpw);
 				return LRQ_NEXT_NO_IO;
 			}
 
-			/* There is no point in reading a page that will be zeroed. */
+			/*
+			 * There is no point in reading a page that will be zeroed.
+			 * Record in the recent window like FPW above.
+			 */
 			if (block->flags & BKPBLOCK_WILL_INIT)
 			{
+				XLogPrefetcherAddRecent(prefetcher, block->rlocator, block->blkno);
 				XLogPrefetchIncrement(&SharedStats->skip_init);
 				return LRQ_NEXT_NO_IO;
 			}
@@ -711,10 +721,7 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 					return LRQ_NEXT_NO_IO;
 				}
 			}
-			prefetcher->recent_rlocator[prefetcher->recent_idx] = block->rlocator;
-			prefetcher->recent_block[prefetcher->recent_idx] = block->blkno;
-			prefetcher->recent_idx =
-				(prefetcher->recent_idx + 1) % XLOGPREFETCHER_SEQ_WINDOW_SIZE;
+			XLogPrefetcherAddRecent(prefetcher, block->rlocator, block->blkno);
 
 			/*
 			 * We could try to have a fast path for repeated references to the
@@ -852,6 +859,20 @@ pg_stat_get_recovery_prefetch(PG_FUNCTION_ARGS)
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
 	return (Datum) 0;
+}
+
+/*
+ * Record a block in the recently seen blocks, so that the duplicate-check loop
+ * can suppress a later prefetch of the same block.
+ */
+static inline void
+XLogPrefetcherAddRecent(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+						BlockNumber blockno)
+{
+	prefetcher->recent_rlocator[prefetcher->recent_idx] = rlocator;
+	prefetcher->recent_block[prefetcher->recent_idx] = blockno;
+	prefetcher->recent_idx =
+		(prefetcher->recent_idx + 1) % XLOGPREFETCHER_SEQ_WINDOW_SIZE;
 }
 
 /*
