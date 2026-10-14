@@ -1,0 +1,4 @@
+comment = 'Test code for planner extension state'
+default_version = '1.0'
+module_pathname = '$libdir/test_extendplan'
+relocatable = false
