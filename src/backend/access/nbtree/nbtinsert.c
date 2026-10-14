@@ -586,7 +586,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				 */
 				else if ((chain_walk_slot != NULL ||
 						  (chain_walk_slot = table_slot_create(heapRel, NULL))) &&
-						 table_index_fetch_tuple_check(heapRel, &htid,
+						 table_index_fetch_tuple_check(heapRel, rel, &htid,
 													   &SnapshotDirty,
 													   &all_dead,
 													   &entry_needs_recheck,
@@ -899,17 +899,15 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
  *
  *	This is called from _bt_check_unique while the leaf buffer is locked, so it
  *	deliberately avoids executor machinery: it fetches each key attribute
- *	straight from the slot.  It is only ever reached for an index receiving a
- *	fresh entry during a partial (selective-index) update, and
- *	HeapUpdateHotAllowable disqualifies any UPDATE that touches an
- *	expression-index attribute, so the index here has no expression key column
- *	(every indkey is a real attribute number).  We assert that rather than
- *	handle a keycol == 0 case that cannot occur; if expression-index selective
- *	maintenance is implemented in the future, this is where an
- *	expression-evaluating comparison would be added.
+ *	straight from the slot.  Heap reports a recheck only when a crossed hop
+ *	changed attributes of this index.  HeapUpdateHotAllowable disqualifies
+ *	updates of any attribute referenced by an expression index (including
+ *	its INCLUDE columns and predicate), so a heap chain cannot leave an
+ *	expression index entry stale.  An unrelated index's changed attributes
+ *	do not require a recheck here.  Do not evaluate expressions while holding
+ *	the leaf lock.
  *
- *	heapSlot must already be populated by the caller (via
- *	table_index_fetch_tuple / table_index_fetch_tuple_check).
+ *	heapSlot must already be populated by table_index_fetch_tuple_check.
  */
 static bool
 _bt_heap_keys_equal_leaf(Relation rel, IndexTuple leaftup,

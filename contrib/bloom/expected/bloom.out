@@ -228,3 +228,35 @@ CREATE INDEX bloomidx2 ON tst USING bloom (i, t) WITH (length=0);
 ERROR:  value 0 out of bounds for option "length"
 CREATE INDEX bloomidx2 ON tst USING bloom (i, t) WITH (col1=0);
 ERROR:  value 0 out of bounds for option "col1"
+--
+-- HOT with selective index updates: BitmapAnd correctness with a bloom index.
+--
+-- A bloom index is bitmap-scan-only and non-summarizing, so it is eligible to
+-- be the "unchanged" side of a HOT-indexed update: the update changes a
+-- btree-indexed column while leaving the bloom-indexed column alone.  The
+-- btree fresh entry then points at the new heap-only tuple and the bloom entry
+-- still points at the chain root, so the two name different line pointers on
+-- one block.  The update sets VISIBILITYMAP_LOCATOR_SPLIT on that block, and
+-- BitmapAnd, reading it through the table AM's bitmap_and_inexact hook, unions
+-- the block's offsets and rechecks instead of intersecting them, so the row is
+-- kept.  Nothing in the index entry changes, so bloom, like every other index
+-- AM, needs no code for this; this test guards that.
+CREATE TABLE bloom_hot_indexed (id int PRIMARY KEY, bcol int, changed int) WITH (fillfactor = 50);
+CREATE INDEX bloom_hot_indexed_b ON bloom_hot_indexed USING bloom (bcol);
+CREATE INDEX bloom_hot_indexed_c ON bloom_hot_indexed (changed);
+INSERT INTO bloom_hot_indexed VALUES (1, 11, 21);
+UPDATE bloom_hot_indexed SET changed = 22 WHERE id = 1;   -- HOT-indexed: only "changed"
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = on;
+-- Must return the row.
+SELECT count(*) AS bloom_bitmapand FROM bloom_hot_indexed WHERE bcol = 11 AND changed = 22;
+ bloom_bitmapand 
+-----------------
+               1
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE bloom_hot_indexed;

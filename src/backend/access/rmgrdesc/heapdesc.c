@@ -108,7 +108,8 @@ heap_xlog_deserialize_prune_and_freeze(char *cursor, uint16 flags,
 									   OffsetNumber **frz_offsets,
 									   int *nredirected, OffsetNumber **redirected,
 									   int *ndead, OffsetNumber **nowdead,
-									   int *nunused, OffsetNumber **nowunused)
+									   int *nunused, OffsetNumber **nowunused,
+									   int *nstubs, OffsetNumber **stubs)
 {
 	if (flags & XLHP_HAS_FREEZE_PLANS)
 	{
@@ -176,6 +177,23 @@ heap_xlog_deserialize_prune_and_freeze(char *cursor, uint16 flags,
 	{
 		*nunused = 0;
 		*nowunused = NULL;
+	}
+
+	if (flags & XLHP_HAS_HOT_INDEXED_STUBS)
+	{
+		xlhp_prune_items *subrecord = (xlhp_prune_items *) cursor;
+
+		*nstubs = subrecord->ntargets;
+		Assert(*nstubs > 0);
+		*stubs = &subrecord->data[0];
+
+		cursor += offsetof(xlhp_prune_items, data);
+		cursor += sizeof(OffsetNumber[2]) * *nstubs;
+	}
+	else
+	{
+		*nstubs = 0;
+		*stubs = NULL;
 	}
 
 	*frz_offsets = (OffsetNumber *) cursor;
@@ -305,6 +323,8 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 			int			nredirected;
 			int			nunused;
 			int			ndead;
+			int			nstubs;
+			OffsetNumber *stubs;
 			int			nplans;
 			xlhp_freeze_plan *plans;
 			OffsetNumber *frz_offsets;
@@ -315,10 +335,11 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 												   &nplans, &plans, &frz_offsets,
 												   &nredirected, &redirected,
 												   &ndead, &nowdead,
-												   &nunused, &nowunused);
+												   &nunused, &nowunused,
+												   &nstubs, &stubs);
 
-			appendStringInfo(buf, ", nplans: %u, nredirected: %u, ndead: %u, nunused: %u",
-							 nplans, nredirected, ndead, nunused);
+			appendStringInfo(buf, ", nplans: %u, nredirected: %u, ndead: %u, nunused: %u, nstubs: %u",
+							 nplans, nredirected, ndead, nunused, nstubs);
 
 			if (nplans > 0)
 			{
@@ -346,6 +367,13 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 				appendStringInfoString(buf, ", unused:");
 				array_desc(buf, nowunused, sizeof(OffsetNumber), nunused,
 						   &offset_elem_desc, NULL);
+			}
+
+			if (nstubs > 0)
+			{
+				appendStringInfoString(buf, ", stubs:");
+				array_desc(buf, stubs, sizeof(OffsetNumber) * 2,
+						   nstubs, &redirect_elem_desc, NULL);
 			}
 		}
 	}

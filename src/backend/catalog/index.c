@@ -75,6 +75,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
@@ -1598,6 +1599,8 @@ index_concurrently_build(Oid heapRelationId,
 
 	/* Now build the index */
 	index_build(heapRel, indexRelation, indexInfo, false, true, true);
+
+	INJECTION_POINT("index-concurrently-built", NULL);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
