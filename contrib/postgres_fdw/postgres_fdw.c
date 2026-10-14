@@ -3720,7 +3720,18 @@ estimate_path_cost_size(PlannerInfo *root,
 				run_cost += remote_cost.per_tuple * numGroups;
 			}
 
-			/* Add in eval cost of the remotely computed tlist expressions */
+			/*
+			 * Add in eval cost of the remotely computed tlist expressions.
+			 *
+			 * The foreign server computes them for all retrieved rows, so
+			 * using retrieved_rows here would be more accurate.  But the
+			 * planner only charges the target list of a local Agg for the
+			 * rows that pass its HAVING quals (see create_agg_path()), and
+			 * that's what this path competes with.  So we mimic the planner's
+			 * costing here, even though it's not completely accurate.
+			 * Otherwise we can end up fetching all input rows and aggregating
+			 * them locally, which is usually much slower.
+			 */
 			startup_cost += remote_tlist_cost.startup;
 			run_cost += remote_tlist_cost.per_tuple * rows;
 		}
@@ -3838,7 +3849,12 @@ estimate_path_cost_size(PlannerInfo *root,
 	 * only fetch their values.  Their cost is already part of the remote
 	 * cost.  It is either included in the EXPLAIN result (when using remote
 	 * estimates) or it was added by the heuristic upper relation costing
-	 * above.  So we subtract it here to avoid counting it twice.
+	 * above.  So we subtract it here to avoid counting it twice.  If the
+	 * target references such an expression more than once, e.g. inside a
+	 * locally computed expression, it's still counted more than once.  The
+	 * planner costs the target list of a local Agg the same way (see
+	 * create_agg_path()), so we mimic that here, even though it's not
+	 * completely accurate.
 	 */
 	if (IS_UPPER_REL(foreignrel))
 	{
