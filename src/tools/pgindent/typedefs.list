@@ -1701,6 +1701,8 @@ LogicalSlotInfoArr
 LogicalTape
 LogicalTapeSet
 LookupSet
+LSNIndexControl
+LSNNode
 LsnReadQueue
 LsnReadQueueNextFun
 LsnReadQueueNextStatus
@@ -1906,6 +1908,7 @@ OutputPluginOutputType
 OverridingKind
 PACE_HEADER
 PACL
+PageLSNEntry
 PATH
 PCtxtHandle
 PERL_CONTEXT

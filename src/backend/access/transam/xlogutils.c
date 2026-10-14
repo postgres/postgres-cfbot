@@ -28,6 +28,7 @@
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
 #include "utils/rel.h"
+#include "access/lsn_indexer.h"
 
 
 /* GUC variable */
@@ -36,8 +37,10 @@ bool		ignore_invalid_pages = false;
 /*
  * Are we doing recovery from XLOG?
  *
- * This is only ever true in the startup process; it should be read as meaning
- * "this process is replaying WAL records", rather than "the system is in
+ * This is true in the startup process during recovery, and in any process
+ * while it replays a page's WAL on demand after a fast crash recovery (see
+ * LSNIndexReplayIntoBuffer()); it should be read as meaning "this process is
+ * replaying WAL records", rather than "the system is in
  * recovery mode".  It should be examined primarily by functions that need
  * to act differently when called from a WAL redo function (e.g., to skip WAL
  * logging).  To check whether the system is in recovery regardless of which
@@ -382,6 +385,44 @@ XLogReadBufferForRedoExtended(XLogReaderState *record,
 	}
 
 	/*
+	 * During on-demand replay of one page, skip the record's other pages:
+	 * their own replay applies the record to them.  Callers that initialize a
+	 * page use the buffer whatever we return, so they get a scratch one.  A
+	 * block with an image to apply is always BLK_RESTORED in normal recovery,
+	 * and some redo routines rely on that (the FPI loop in xlog_redo(), hash
+	 * and gin page initialization), so restore the image into a scratch
+	 * buffer for them; the page's own replay restores it for real.
+	 */
+	if (inReplayPageWals)
+	{
+		BufferTag	recordTag;
+
+		InitBufferTag(&recordTag, &rlocator, forknum, blkno);
+
+		if (!BufferTagsEqual(&targetTag, &recordTag))
+		{
+			if (XLogRecBlockImageApply(record, block_id))
+			{
+				*buf = LSNIndexScratchBuffer(rlocator, forknum, blkno);
+				page = BufferGetPage(*buf);
+				if (!RestoreBlockImage(record, block_id, page))
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg_internal("%s", record->errormsg_buf)));
+				if (!PageIsNew(page))
+					PageSetLSN(page, lsn);
+				MarkBufferDirty(*buf);
+				return BLK_RESTORED;
+			}
+			if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
+				*buf = LSNIndexScratchBuffer(rlocator, forknum, blkno);
+			else
+				*buf = InvalidBuffer;
+			return BLK_DONE;
+		}
+	}
+
+	/*
 	 * Make sure that if the block is marked with WILL_INIT, the caller is
 	 * going to initialize it. And vice versa.
 	 */
@@ -436,7 +477,15 @@ XLogReadBufferForRedoExtended(XLogReaderState *record,
 		{
 			if (mode != RBM_ZERO_AND_LOCK && mode != RBM_ZERO_AND_CLEANUP_LOCK)
 			{
-				if (get_cleanup_lock)
+				/*
+				 * A page being replayed on demand isn't valid yet, so no one
+				 * else can be looking at it, and an exclusive lock is as good
+				 * as a cleanup lock (cf. ZeroAndLockBuffer()).  A real
+				 * cleanup lock would also wait for the pins of backends that
+				 * are waiting for this very page's I/O to finish.
+				 */
+				if (get_cleanup_lock &&
+					!(inReplayPageWals && *buf == targetBuffer))
 					LockBufferForCleanup(*buf);
 				else
 					LockBuffer(*buf, BUFFER_LOCK_EXCLUSIVE);
@@ -491,6 +540,31 @@ XLogReadBufferExtended(RelFileLocator rlocator, ForkNumber forknum,
 
 	Assert(blkno != P_NEW);
 
+	/*
+	 * During on-demand replay of a page, redo reaches that page here.  Hand
+	 * it the buffer the page is being replayed into, rather than reading the
+	 * page again, which would wait for the I/O our caller holds.  Pin it once
+	 * more, because redo releases what it gets.  For the zeroing modes, zero
+	 * and lock it as the buffer manager would; an exclusive lock serves for
+	 * RBM_ZERO_AND_CLEANUP_LOCK too, because no one else can see the page.
+	 */
+	if (inReplayPageWals)
+	{
+		BufferTag	tag;
+
+		InitBufferTag(&tag, &rlocator, forknum, blkno);
+		if (BufferTagsEqual(&tag, &targetTag))
+		{
+			IncrBufferRefCount(targetBuffer);
+			if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
+			{
+				memset(BufferGetPage(targetBuffer), 0, BLCKSZ);
+				LockBuffer(targetBuffer, BUFFER_LOCK_EXCLUSIVE);
+			}
+			return targetBuffer;
+		}
+	}
+
 	/* Do we have a clue where the buffer might be already? */
 	if (BufferIsValid(recent_buffer) &&
 		mode == RBM_NORMAL &&
@@ -544,7 +618,7 @@ XLogReadBufferExtended(RelFileLocator rlocator, ForkNumber forknum,
 	}
 
 recent_buffer_fast_path:
-	if (mode == RBM_NORMAL)
+	if (mode == RBM_NORMAL && !inReplayPageWals)
 	{
 		/* check that page has been initialized */
 		Page		page = BufferGetPage(buffer);
@@ -648,12 +722,14 @@ FreeFakeRelcacheEntry(Relation fakerel)
  * Drop a relation during XLOG replay
  *
  * This is called when the relation is about to be deleted; we need to remove
- * any open "invalid-page" records for the relation.
+ * any open "invalid-page" records for the relation, and during fast crash
+ * recovery its pending records in the LSN index.
  */
 void
 XLogDropRelation(RelFileLocator rlocator, ForkNumber forknum)
 {
 	forget_invalid_pages(rlocator, forknum, 0);
+	LSNIndexForgetRelation(rlocator, forknum, 0);
 }
 
 /*
@@ -673,6 +749,7 @@ XLogDropDatabase(Oid dbid)
 	smgrdestroyall();
 
 	forget_invalid_pages_db(dbid);
+	LSNIndexForgetDatabase(dbid);
 }
 
 /*
@@ -685,6 +762,7 @@ XLogTruncateRelation(RelFileLocator rlocator, ForkNumber forkNum,
 					 BlockNumber nblocks)
 {
 	forget_invalid_pages(rlocator, forkNum, nblocks);
+	LSNIndexForgetRelation(rlocator, forkNum, nblocks);
 }
 
 /*

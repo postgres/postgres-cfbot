@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "access/lsn_indexer.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -1055,6 +1056,8 @@ smgr_redo(XLogReaderState *record)
 			{
 				forks[nforks] = FSM_FORKNUM;
 				old_blocks[nforks] = smgrnblocks(reln, FSM_FORKNUM);
+				/* fast crash recovery: forget the FSM pages being removed */
+				LSNIndexForgetRelation(xlrec->rlocator, FSM_FORKNUM, blocks[nforks]);
 				nforks++;
 				need_fsm_vacuum = true;
 			}
@@ -1067,6 +1070,9 @@ smgr_redo(XLogReaderState *record)
 			{
 				forks[nforks] = VISIBILITYMAP_FORKNUM;
 				old_blocks[nforks] = smgrnblocks(reln, VISIBILITYMAP_FORKNUM);
+				/* fast crash recovery: forget the VM pages being removed */
+				LSNIndexForgetRelation(xlrec->rlocator, VISIBILITYMAP_FORKNUM,
+									   blocks[nforks]);
 				nforks++;
 			}
 		}

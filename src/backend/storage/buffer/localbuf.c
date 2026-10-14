@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "access/lsn_indexer.h"
 #include "access/parallel.h"
 #include "executor/instrument.h"
 #include "pgstat.h"
@@ -762,8 +763,13 @@ InitLocalBuffers(void)
 	 * that we don't wish to prevent a parallel worker from accessing catalog
 	 * metadata about a temp table, so checks at higher levels would be
 	 * inappropriate.
+	 *
+	 * Fast crash recovery is the exception: replaying a page on demand, which
+	 * a parallel worker does when it reads one, uses local buffers as private
+	 * scratch space for the record's other pages (see
+	 * LSNIndexScratchBuffer()), never for a temporary table.
 	 */
-	if (IsParallelWorker())
+	if (IsParallelWorker() && !inReplayPageWals)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
 				 errmsg("cannot access temporary tables during a parallel operation")));

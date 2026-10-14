@@ -37,7 +37,8 @@ OBJS = \
 	xlogrecovery.o \
 	xlogstats.o \
 	xlogutils.o \
-	xlogwait.o
+	xlogwait.o \
+	lsn_indexer.o
 
 include $(top_srcdir)/src/backend/common.mk
 

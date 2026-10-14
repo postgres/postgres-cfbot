@@ -369,6 +369,7 @@ typedef enum BackendType
 	B_WAL_RECEIVER,
 	B_WAL_SUMMARIZER,
 	B_WAL_WRITER,
+	B_FAST_RECOVERY_WORKER,
 
 	/*
 	 * Data checksums processes are dynamic background workers, but they use

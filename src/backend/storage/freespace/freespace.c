@@ -24,6 +24,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/lsn_indexer.h"
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
@@ -217,6 +218,17 @@ XLogRecordPageWithFreeSpace(RelFileLocator rlocator, BlockNumber heapBlk,
 	BlockNumber blkno;
 	Buffer		buf;
 	Page		page;
+
+	/*
+	 * During on-demand replay of a heap page, leave the free space map alone.
+	 * Reading the map page here could find it with pending records of its own
+	 * (full-page images for hints), and replaying that page inside this one's
+	 * redo is the kind of nesting on-demand replay doesn't do.  The map is
+	 * advisory: an insert that finds less space than recorded corrects the
+	 * entry, and VACUUM rebuilds it.
+	 */
+	if (inReplayPageWals)
+		return;
 
 	/* Get the location of the FSM byte representing the heap block */
 	addr = fsm_get_location(heapBlk, &slot);
