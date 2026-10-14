@@ -15,6 +15,8 @@ ltree_sources = files(
 # .. so that includes of ltree/ltree.h work
 ltree_inc = include_directories('.', '../')
 
+ltree_bitcode_sources = ltree_sources
+
 if host_system == 'windows'
   ltree_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'ltree',
@@ -44,7 +46,7 @@ install_headers(
 ltree_dir = meson.current_source_dir()
 bitcode_modules += {
   'target': ltree,
-  'srcfiles': ltree_sources,
+  'srcfiles': ltree_bitcode_sources,
   'additional_flags': [
     '-I@0@'.format(ltree_dir)
   ]
