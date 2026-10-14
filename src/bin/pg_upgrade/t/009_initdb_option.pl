@@ -335,6 +335,22 @@ sub option_quote
 	return "'$value'";
 }
 
+# Detach test-owned WAL junctions before native Perl recursively removes
+# the node. rmdir removes the junction itself, leaving its target intact.
+my @test_wal_junctions;
+
+sub detach_test_wal_junction
+{
+	my ($node, $wal) = @_;
+	return unless $windows_os;
+	return if defined $ENV{PG_TEST_NOCLEAN};
+	return unless PostgreSQL::Test::Utils::all_tests_passing();
+	BAIL_OUT 'WAL junction cleanup requires a stopped node'
+	  if -f $node->data_dir . '/postmaster.pid';
+	ok(rmdir($node->data_dir . '/pg_wal'), 'detach test-owned WAL junction');
+	ok(-d $wal, 'detaching WAL junction preserves its target');
+}
+
 # test_slru rejects LOAD unless preloaded.  The new cluster must preload it
 # for pg_upgrade's loadable-library check to pass.
 my $preload_old = PostgreSQL::Test::Cluster->new('preload_old');
@@ -369,6 +385,7 @@ ok( -f $preload_missing->data_dir . '/PG_VERSION',
 ok(-d $preload_missing_wal, 'failed preload check retains the WAL directory');
 ok( !-f $preload_missing->data_dir . '/postmaster.pid',
 	'failed preload check stops the new server');
+push @test_wal_junctions, [ $preload_missing, $preload_missing_wal ];
 
 my $credential_dir = PostgreSQL::Test::Utils::tempdir;
 my $pwfile = "$credential_dir/initdb.pw";
@@ -439,6 +456,7 @@ my $auth_options =
 		'upgraded',
 		'restored preload-only extension is usable');
 	$preload_new->stop;
+	push @test_wal_junctions, [ $preload_new, $wal ];
 }
 
 # Link and swap retain old file modes.
@@ -473,6 +491,12 @@ SKIP:
 		}
 		done_testing();
 	};
+}
+
+# Match Cluster.pm: preserve the original cluster layout on a failed test.
+foreach my $junction (@test_wal_junctions)
+{
+	detach_test_wal_junction(@{$junction});
 }
 
 done_testing();
