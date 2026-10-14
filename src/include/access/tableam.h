@@ -526,12 +526,15 @@ typedef struct TableAmRoutine
 	 * set true iff reaching the live tuple crossed AM-private update-chain
 	 * state that may leave the arriving entry's stored key disagreeing with
 	 * the live tuple (for heap, a HOT-selectively-updated hop after the
-	 * arriving entry's own tuple); the caller then performs its own key
-	 * comparison.  AMs without such update chains may leave this callback
-	 * NULL, in which case table_index_fetch_tuple_check falls back to
-	 * fetch_tid and reports *recheck = false.
+	 * arriving entry's own tuple that changed attributes of indexRelation).
+	 * indexRelation may be NULL, requesting a conservative result without
+	 * per-index knowledge.  The caller performs its own key comparison when a
+	 * recheck is needed.  AMs whose entries cannot become stale may leave
+	 * this callback NULL, in which case table_index_fetch_tuple_check falls
+	 * back to fetch_tid and reports *recheck = false.
 	 */
 	bool		(*fetch_tid_check) (Relation rel,
+									Relation indexRelation,
 									ItemPointer tid,
 									Snapshot snapshot,
 									bool *all_dead,
@@ -1523,15 +1526,19 @@ table_tuple_fetch_row_version(Relation rel,
  * `slot` and *recheck (if not NULL) reports whether reaching it crossed
  * AM-private update-chain state that may leave the arriving index entry's
  * stored key disagreeing with the live tuple, so the caller must recheck the
- * key itself.  An AM that does not provide fetch_tid_check has no such chains:
- * we fall back to fetch_tid, still fill the slot via
- * table_tuple_fetch_row_version, and report *recheck = false.
+ * key itself.  When indexRelation is provided, the AM can limit rechecks to
+ * changes affecting that index; NULL requests a conservative result without
+ * per-index knowledge.  An AM that does not provide fetch_tid_check must
+ * guarantee that its entries cannot become stale: we fall back to fetch_tid,
+ * still fill the slot via table_tuple_fetch_row_version, and report
+ * *recheck = false.
  *
  * Like table_fetch_tid(), this performs no index scan and is only for
  * constraint enforcement code holding a TID taken from an index.
  */
 static inline bool
 table_index_fetch_tuple_check(Relation rel,
+							  Relation indexRelation,
 							  ItemPointer tid,
 							  Snapshot snapshot,
 							  bool *all_dead,
@@ -1542,10 +1549,11 @@ table_index_fetch_tuple_check(Relation rel,
 		elog(ERROR, "unexpected table_index_fetch_tuple_check call during logical decoding");
 
 	if (rel->rd_tableam->fetch_tid_check != NULL)
-		return rel->rd_tableam->fetch_tid_check(rel, tid, snapshot,
+		return rel->rd_tableam->fetch_tid_check(rel, indexRelation,
+												tid, snapshot,
 												all_dead, recheck, slot);
 
-	/* AM without update chains: plain fetch, no recheck. */
+	/* AM whose entries cannot become stale: plain fetch, no recheck. */
 	if (recheck != NULL)
 		*recheck = false;
 	if (!rel->rd_tableam->fetch_tid(rel, tid, snapshot, all_dead))
