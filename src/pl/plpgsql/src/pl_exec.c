@@ -6570,7 +6570,14 @@ plpgsql_param_compile(ParamListInfo params, Param *param,
 	 * then it's possible we will be able to optimize handling of R/W expanded
 	 * datums.  We don't want to do the work needed to determine that unless
 	 * we actually see a R/W expanded datum at runtime, so install a checking
-	 * function that will figure that out when needed.
+	 * function that will figure that out when needed.  Do that only while
+	 * compiling the simple expression's own tree, though.  If the simple
+	 * expression is busy (we are in a recursive call, or an earlier
+	 * evaluation in this transaction was abandoned by an error),
+	 * exec_eval_expr runs the expression through SPI instead, and SPI's plan
+	 * might have been rebuilt since, so its Params need not be the ones
+	 * exec_check_rw_parameter examines.  The optimization would be pointless
+	 * in that code path anyway, since it flattens the result.
 	 *
 	 * Otherwise, it seems worth special-casing DTYPE_VAR and DTYPE_RECFIELD
 	 * for performance.  Also, we can determine in advance whether
@@ -6581,7 +6588,9 @@ plpgsql_param_compile(ParamListInfo params, Param *param,
 	{
 		bool		isvarlena = (((PLpgSQL_var *) datum)->datatype->typlen == -1);
 
-		if (isvarlena && dno == expr->target_param && expr->expr_simple_expr)
+		if (isvarlena && dno == expr->target_param &&
+			expr->expr_simple_expr != NULL &&
+			state->expr == expr->expr_simple_expr)
 			scratch.d.cparam.paramfunc = plpgsql_param_eval_var_check;
 		else if (isvarlena)
 			scratch.d.cparam.paramfunc = plpgsql_param_eval_var_ro;
