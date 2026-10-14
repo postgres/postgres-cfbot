@@ -36,6 +36,9 @@ static int	PlannerExtensionNamesAllocated = 0;
  * to the same ID every time. IDs are not stable across backends. Use the ID
  * that you get from this function to call the remaining functions in this
  * file.
+ *
+ * extension_name is assumed to be a constant string or allocated in storage
+ * that will never be freed.
  */
 int
 GetPlannerExtensionId(const char *extension_name)
