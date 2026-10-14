@@ -23,9 +23,13 @@
  */
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/heaptoast.h"
+#include "access/hot_indexed.h"
 #include "access/htup_details.h"
 #include "access/nbtree.h"
+#include "access/relscan.h"
+#include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/transam.h"
@@ -129,6 +133,10 @@ typedef struct BtreeCheckState
 
 	/* Bloom filter fingerprints B-Tree index */
 	bloom_filter *filter;
+	/* Heap-specific state for fingerprinting visible versions, not anchors */
+	HeapScanDesc heapscan;
+	Bitmapset  *indexedattrs;
+	uint8	   *crossed;
 	/* Debug counter */
 	int64		heaptuplespresent;
 } BtreeCheckState;
@@ -211,6 +219,7 @@ static void bt_downlink_missing_check(BtreeCheckState *state, bool rightsplit,
 static void bt_tuple_present_callback(Relation index, ItemPointer tid,
 									  Datum *values, bool *isnull,
 									  bool tupleIsAlive, void *checkstate);
+static void bt_fingerprint_tuple(BtreeCheckState *state, IndexTuple itup);
 static IndexTuple bt_normalize_tuple(BtreeCheckState *state,
 									 IndexTuple itup);
 static inline IndexTuple bt_posting_plain_tuple(IndexTuple itup, int n);
@@ -419,6 +428,12 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 		/* Create Bloom filter to fingerprint index */
 		state->filter = bloom_create(total_elems, maintenance_work_mem, seed);
 		state->heaptuplespresent = 0;
+		if (heaprel->rd_tableam == GetHeapamTableAmRoutine())
+		{
+			state->indexedattrs = RelationGetIndexedAttrs(rel);
+			state->crossed = palloc0(HotIndexedBitmapBytes(
+														   RelationGetNumberOfAttributes(heaprel)));
+		}
 
 		/*
 		 * Register our own snapshot for heapallindexed, rather than asking
@@ -572,6 +587,9 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 			 RelationGetRelationName(state->rel),
 			 RelationGetRelationName(state->heaprel));
 
+		if (state->crossed != NULL)
+			state->heapscan = (HeapScanDesc) scan;
+
 		table_index_build_scan(state->heaprel, state->rel, indexinfo, true, false,
 							   bt_tuple_present_callback, state, scan);
 
@@ -581,6 +599,9 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 								 100.0 * bloom_prop_bits_set(state->filter))));
 
 		bloom_free(state->filter);
+		bms_free(state->indexedattrs);
+		if (state->crossed != NULL)
+			pfree(state->crossed);
 	}
 
 	/* Be tidy: */
@@ -1473,8 +1494,6 @@ bt_target_page_check(BtreeCheckState *state)
 		/* Fingerprint leaf page tuples (those that point to the heap) */
 		if (state->heapallindexed && P_ISLEAF(topaque) && !ItemIdIsDead(itemid))
 		{
-			IndexTuple	norm;
-
 			if (BTreeTupleIsPosting(itup))
 			{
 				/* Fingerprint all elements as distinct "plain" tuples */
@@ -1483,24 +1502,12 @@ bt_target_page_check(BtreeCheckState *state)
 					IndexTuple	logtuple;
 
 					logtuple = bt_posting_plain_tuple(itup, i);
-					norm = bt_normalize_tuple(state, logtuple);
-					bloom_add_element(state->filter, (unsigned char *) norm,
-									  IndexTupleSize(norm));
-					/* Be tidy */
-					if (norm != logtuple)
-						pfree(norm);
+					bt_fingerprint_tuple(state, logtuple);
 					pfree(logtuple);
 				}
 			}
 			else
-			{
-				norm = bt_normalize_tuple(state, itup);
-				bloom_add_element(state->filter, (unsigned char *) norm,
-								  IndexTupleSize(norm));
-				/* Be tidy */
-				if (norm != itup)
-					pfree(norm);
-			}
+				bt_fingerprint_tuple(state, itup);
 		}
 
 		/*
@@ -2711,6 +2718,206 @@ bt_downlink_missing_check(BtreeCheckState *state, bool rightsplit,
 }
 
 /*
+ * Check the physical chain before handing untrusted heap headers to the normal
+ * visibility walker.  Keep the buffer share-locked through both walks: a pin
+ * alone would allow pruning to invalidate these checks.  This does not check
+ * attribute data or replace verify_heapam's full heap verification.
+ */
+static void
+bt_check_heap_chain(BtreeCheckState *state, Buffer buffer, OffsetNumber offnum)
+{
+	Page		page = BufferGetPage(buffer);
+	PageHeader	phdr = (PageHeader) page;
+	BlockNumber blkno = BufferGetBlockNumber(buffer);
+	OffsetNumber maxoff;
+	bool		visited[MaxHeapTuplesPerPage + 1] = {false};
+	bool		at_start = true;
+	const char *problem;
+
+	problem = "invalid page header";
+	if (phdr->pd_lower < SizeOfPageHeaderData ||
+		phdr->pd_lower > phdr->pd_upper ||
+		phdr->pd_upper > phdr->pd_special ||
+		phdr->pd_special != BLCKSZ ||
+		(phdr->pd_lower - SizeOfPageHeaderData) % sizeof(ItemIdData) != 0)
+		goto corrupt;
+	maxoff = PageGetMaxOffsetNumber(page);
+	if (maxoff > MaxHeapTuplesPerPage)
+		goto corrupt;
+
+	for (;;)
+	{
+		ItemId		lp;
+		HeapTupleHeader htup;
+		unsigned	len;
+		unsigned	offset;
+		unsigned	natts;
+		unsigned	hoff;
+		int			bmnatts;
+		bool		stub;
+
+		CHECK_FOR_INTERRUPTS();
+		problem = "offset number out of range";
+		if (offnum < FirstOffsetNumber || offnum > maxoff)
+			goto corrupt;
+		problem = "cycle in tuple chain";
+		if (visited[offnum])
+			goto corrupt;
+		visited[offnum] = true;
+
+		lp = PageGetItemId(page, offnum);
+		if (ItemIdIsRedirected(lp) && at_start)
+		{
+			offnum = ItemIdGetRedirect(lp);
+			at_start = false;
+			continue;
+		}
+		/* Match the runtime walk's stop at dead or relocated members. */
+		if (!ItemIdIsNormal(lp))
+			return;
+
+		offset = ItemIdGetOffset(lp);
+		len = ItemIdGetLength(lp);
+		problem = "invalid tuple storage";
+		if (offset != MAXALIGN(offset) || offset < phdr->pd_upper ||
+			len < MAXALIGN(SizeofHeapTupleHeader) || offset + len > BLCKSZ)
+			goto corrupt;
+
+		htup = (HeapTupleHeader) PageGetItem(page, lp);
+		stub = HotIndexedHeaderIsStub(htup);
+		natts = HeapTupleHeaderGetNatts(htup);
+		hoff = htup->t_hoff;
+		problem = "invalid tuple header";
+		if (natts > MaxHeapAttributeNumber ||
+			hoff < MAXALIGN(SizeofHeapTupleHeader) || hoff > len ||
+			hoff != MAXALIGN(hoff))
+			goto corrupt;
+		/* Stubs retain t_hoff, but no longer retain the old null bitmap flag. */
+		if (!stub && hoff != MAXALIGN(SizeofHeapTupleHeader +
+									  ((htup->t_infomask & HEAP_HASNULL) ?
+									   BITMAPLEN(natts) : 0)))
+			goto corrupt;
+
+		if (htup->t_infomask2 & HEAP_INDEXED_UPDATED)
+		{
+			bmnatts = HotIndexedTupleBitmapNatts(htup);
+			problem = "invalid modified-attributes bitmap";
+			if (bmnatts < 0 || bmnatts > MaxHeapAttributeNumber ||
+				bmnatts > RelationGetNumberOfAttributes(state->heaprel) ||
+				HotIndexedBitmapBytes(bmnatts) > len - hoff)
+				goto corrupt;
+		}
+
+		if (stub)
+			offnum = HotIndexedStubGetForward(htup);
+		else if (HeapTupleHeaderIsHotUpdated(htup))
+		{
+			problem = "HOT link crosses page boundary";
+			if (ItemPointerGetBlockNumberNoCheck(&htup->t_ctid) != blkno)
+				goto corrupt;
+			offnum = ItemPointerGetOffsetNumberNoCheck(&htup->t_ctid);
+		}
+		else
+			return;
+		at_start = false;
+	}
+
+corrupt:
+	ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("invalid HOT chain in heap relation \"%s\"",
+					RelationGetRelationName(state->heaprel)),
+			 errdetail_internal("Block=%u offset=%u: %s.",
+								blkno, offnum, problem)));
+}
+
+/*
+ * Fingerprint a leaf entry's stored values and the visible version it reaches.
+ * Selective index updates allow different indexes to use different anchors for
+ * the same version.  An anchor is usable only if no crossed hop changed this
+ * index's inputs, even when its stored values happen to match again (ABA).
+ *
+ * The index page is a private copy: no index buffer lock or pin is held here.
+ * The heap lookup takes only a share lock and does not prune.  The registered
+ * MVCC snapshot keeps the visible version from being removed or its TID reused
+ * before the heap pass.  Invisible and stale entries cannot supply coverage.
+ */
+static void
+bt_fingerprint_tuple(BtreeCheckState *state, IndexTuple itup)
+{
+	ItemPointerData tid = itup->t_tid;
+	IndexTuple	norm;
+
+	if (state->crossed != NULL)
+	{
+		HeapTupleData tuple;
+		BlockNumber blkno = ItemPointerGetBlockNumberNoCheck(&tid);
+		OffsetNumber offnum = ItemPointerGetOffsetNumberNoCheck(&tid);
+		Buffer		buffer;
+		bool		found;
+		bool		recheck;
+
+		/*
+		 * Validate raw fields before using assertion-bearing TID accessors or
+		 * reading the heap.  InvalidBlockNumber is also P_NEW, which would
+		 * extend the relation instead of reporting corruption.  Use the current
+		 * size, not the size at snapshot acquisition: the leaf walk can see
+		 * entries inserted by concurrent extensions.  Our relation lock
+		 * prevents truncation while we check and read the block.
+		 */
+		if (blkno == InvalidBlockNumber ||
+			offnum < FirstOffsetNumber || offnum > MaxHeapTuplesPerPage ||
+			blkno >= RelationGetNumberOfBlocks(state->heaprel))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("invalid heap TID (%u,%u) in index \"%s\"",
+							blkno, offnum, RelationGetRelationName(state->rel))));
+
+		buffer = ReadBufferExtended(state->heaprel, MAIN_FORKNUM, blkno,
+									RBM_NORMAL, state->checkstrategy);
+		LockBuffer(buffer, BUFFER_LOCK_SHARE);
+		bt_check_heap_chain(state, buffer, offnum);
+		found = heap_hot_search_buffer(&tid, state->heaprel, buffer,
+									   state->snapshot, &tuple, NULL, true,
+									   &recheck, state->crossed, NULL);
+		UnlockReleaseBuffer(buffer);
+
+		if (found && recheck)
+		{
+			int			x = -1;
+
+			while ((x = bms_next_member(state->indexedattrs, x)) >= 0)
+			{
+				AttrNumber	attnum = x + FirstLowInvalidHeapAttributeNumber;
+
+				if (attnum >= 1 &&
+					HotIndexedAttrIsModified(state->crossed, attnum))
+				{
+					found = false;
+					break;
+				}
+			}
+		}
+		if (!found)
+			return;
+	}
+
+	/* Keep the leaf values, not the values found in the heap. */
+	norm = bt_normalize_tuple(state, itup);
+	if (!ItemPointerEquals(&tid, &itup->t_tid))
+	{
+		/* The original TID is still needed by the structural checks. */
+		if (norm == itup)
+			norm = CopyIndexTuple(itup);
+		norm->t_tid = tid;
+	}
+	bloom_add_element(state->filter, (unsigned char *) norm,
+					  IndexTupleSize(norm));
+	if (norm != itup)
+		pfree(norm);
+}
+
+/*
  * Per-tuple callback from table_index_build_scan, used to determine if index has
  * all the entries that definitely should have been observed in leaf pages of
  * the target index (that is, all IndexTuples that were fingerprinted by our
@@ -2721,7 +2928,9 @@ bt_downlink_missing_check(BtreeCheckState *state, bool rightsplit,
  * The high level principle behind the verification performed here is that any
  * IndexTuple that should be in an index following a fresh CREATE INDEX (based
  * on the same index definition) should also have been in the original,
- * existing index, which should have used exactly the same representation
+ * existing index.  For heap tables we compare visible version TIDs rather than
+ * index anchors: selective updates can leave different valid anchors in each
+ * index, and a rebuild can choose yet another anchor.
  *
  * Since the overall structure of the index has already been verified, the most
  * likely explanation for error here is a corrupt heap page (could be logical
@@ -2737,10 +2946,10 @@ bt_downlink_missing_check(BtreeCheckState *state, bool rightsplit,
  * isn't particularly likely.
  *
  * table_index_build_scan() expects to be able to find the root tuple when a
- * heap-only tuple (the live tuple at the end of some HOT chain) needs to be
- * indexed, in order to replace the actual tuple's TID with the root tuple's
- * TID (which is what we're actually passed back here).  The index build heap
- * scan code will raise an error when a tuple that claims to be the root of the
+ * classic heap-only tuple needs to be indexed, in order to replace the actual
+ * tuple's TID with an index anchor.  We use the scanned version's TID instead,
+ * matching the fingerprints collected from reachable index anchors.  The
+ * index build heap scan code will raise an error when the root of the
  * heap-only tuple's HOT chain cannot be located.  This catches cases where the
  * original root item offset/root tuple for a HOT chain indicates (for whatever
  * reason) that the entire HOT chain is dead, despite the fact that the latest
@@ -2756,9 +2965,9 @@ bt_downlink_missing_check(BtreeCheckState *state, bool rightsplit,
  * helps us to detect index tuples that contain the wrong values (values that
  * don't match the latest tuple in the HOT chain).  This can happen when there
  * is no superseding index tuple due to a faulty assessment of HOT safety,
- * perhaps during the original CREATE INDEX.  Because the latest tuple's
- * contents are used with the root TID, an error will be raised when a tuple
- * with the same TID but non-matching attribute values is passed back to us.
+ * perhaps during the original CREATE INDEX.  Because leaf values are retained
+ * when fingerprinting reachable anchors, an error will be raised when a tuple
+ * with the same visible TID but non-matching attribute values is passed back.
  * Faulty assessment of HOT-safety was behind at least two distinct CREATE
  * INDEX CONCURRENTLY bugs that made it into stable releases, one of which was
  * undetected for many years.  In short, the same principle that allows a
@@ -2778,6 +2987,15 @@ bt_tuple_present_callback(Relation index, ItemPointer tid, Datum *values,
 	/* Generate a normalized index tuple for fingerprinting */
 	itup = index_form_tuple(RelationGetDescr(index), values, isnull);
 	itup->t_tid = *tid;
+	if (state->heapscan != NULL)
+	{
+		/*
+		 * Use the scanned version itself, not the build callback's anchor.
+		 * Resolving that anchor again could hide a broken chain that reaches
+		 * a different tuple with the same indexed values.
+		 */
+		itup->t_tid = state->heapscan->rs_ctup.t_self;
+	}
 	norm = bt_normalize_tuple(state, itup);
 
 	/* Probe Bloom filter -- tuple should be present */
