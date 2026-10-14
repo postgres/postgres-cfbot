@@ -8757,6 +8757,12 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	unique_rel->cheapest_parameterized_paths = NIL;
 
 	/*
+	 * clear extension state; the array belongs to the input rel
+	 */
+	unique_rel->extension_state = NULL;
+	unique_rel->extension_state_allocated = 0;
+
+	/*
 	 * Build the target list for the unique rel.  We also build the pathkeys
 	 * that represent the ordering requirements for the sort-based
 	 * implementation, and the list of SortGroupClause nodes that represent
@@ -9129,6 +9135,12 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	partial_unique_rel->cheapest_startup_path = NULL;
 	partial_unique_rel->cheapest_total_path = NULL;
 	partial_unique_rel->cheapest_parameterized_paths = NIL;
+
+	/*
+	 * clear extension state; the array belongs to the input rel
+	 */
+	partial_unique_rel->extension_state = NULL;
+	partial_unique_rel->extension_state_allocated = 0;
 
 	/* Estimate number of output rows */
 	partial_unique_rel->rows = estimate_num_groups(root,
