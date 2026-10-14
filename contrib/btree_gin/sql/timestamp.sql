@@ -71,3 +71,16 @@ SELECT * FROM test_timestamp WHERE i>'infinity'::timestamptz ORDER BY i;
 -- This PST timestamptz will underflow if converted to timestamp
 SELECT * FROM test_timestamp WHERE i<='4714-11-23 17:00 BC'::timestamptz ORDER BY i;
 SELECT * FROM test_timestamp WHERE i>'4714-11-23 17:00 BC'::timestamptz ORDER BY i;
+
+-- Repeated hour at the end of DST must not hide rows from the index scan
+SET TimeZone = 'America/New_York';
+CREATE TABLE test_timestamp_dst (i timestamp);
+INSERT INTO test_timestamp_dst VALUES
+  ('2026-11-01 00:50'), ('2026-11-01 01:10'), ('2026-11-01 01:20'),
+  ('2026-11-01 01:40'), ('2026-11-01 02:10');
+CREATE INDEX idx_timestamp_dst ON test_timestamp_dst USING gin (i);
+SELECT * FROM test_timestamp_dst
+  WHERE i >= '2026-11-01 01:30-04'::timestamptz ORDER BY i;
+SELECT * FROM test_timestamp_dst
+  WHERE i > '2026-11-01 01:30-04'::timestamptz ORDER BY i;
+RESET TimeZone;
