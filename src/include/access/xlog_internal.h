@@ -149,6 +149,14 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
 #define XLOG_CONTROL_FILE	"global/pg_control"
 
 /*
+ * pg_upgrade creates this file in the new cluster's data directory while an
+ * upgrade is in progress.  The server refuses to start while it exists,
+ * except in binary-upgrade mode.  Path is relative to $PGDATA.
+ */
+#define PG_UPGRADE_IN_PROGRESS_FILE	"pg_upgrade_in_progress"
+
+
+/*
  * These macros encapsulate knowledge about the exact layout of XLog file
  * names, timeline history file names, and archive-status file names.
  */

@@ -41,11 +41,15 @@
 
 #include "postgres_fe.h"
 
+#include <fcntl.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "access/multixact.h"
+#include "access/xlog_internal.h"
 #include "catalog/pg_class_d.h"
 #include "common/file_perm.h"
+#include "common/file_utils.h"
 #include "common/logging.h"
 #include "common/restricted_token.h"
 #include "fe_utils/string_utils.h"
@@ -67,6 +71,8 @@ static void copy_xact_xlog_xid(void);
 static void set_frozenxids(void);
 static void make_outputdirs(char *pgdata);
 static void setup(char *argv0);
+static void create_upgrade_in_progress_file(void);
+static void remove_upgrade_in_progress_file(void);
 static void create_logical_replication_slots(void);
 static void create_conflict_detection_slot(void);
 
@@ -149,6 +155,12 @@ main(int argc, char **argv)
 		   "\n"
 		   "Performing Upgrade\n"
 		   "------------------");
+
+	/*
+	 * From here on, the new cluster gets modified.  Prevent it from being
+	 * started by anything other than pg_upgrade until the upgrade completes.
+	 */
+	create_upgrade_in_progress_file();
 
 	set_locale_and_encoding();
 
@@ -254,6 +266,9 @@ main(int argc, char **argv)
 
 	issue_warnings_and_set_wal_level();
 
+	/* The new cluster is now safe to start. */
+	remove_upgrade_in_progress_file();
+
 	pg_log(PG_REPORT,
 		   "\n"
 		   "Upgrade Complete\n"
@@ -266,6 +281,79 @@ main(int argc, char **argv)
 	cleanup_output_dirs();
 
 	return 0;
+}
+
+/*
+ * create_upgrade_in_progress_file()
+ *
+ * Create a marker file in the new cluster's data directory.  While it exists,
+ * the server refuses to start unless it runs in binary-upgrade mode, as the
+ * servers started by pg_upgrade do (see checkDataDir()).  The file and its
+ * directory entry are synced to disk, so the protection survives a crash.
+ */
+static void
+create_upgrade_in_progress_file(void)
+{
+	char		path[MAXPGPATH];
+	int			fd;
+
+	/* translator: %s is the name of a file */
+	prep_status("Creating \"%s\" in new cluster", PG_UPGRADE_IN_PROGRESS_FILE);
+
+	snprintf(path, sizeof(path), "%s/%s", new_cluster.pgdata,
+			 PG_UPGRADE_IN_PROGRESS_FILE);
+
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | PG_BINARY,
+			  pg_file_create_mode);
+	if (fd < 0)
+	{
+		if (errno == EEXIST)
+			pg_fatal("file \"%s\" already exists\n"
+					 "A previous run of pg_upgrade on the new cluster might have failed.\n"
+					 "Re-create the new cluster with initdb and try again.",
+					 path);
+		pg_fatal("could not create file \"%s\": %m", path);
+	}
+	if (close(fd) != 0)
+		pg_fatal("could not close file \"%s\": %m", path);
+
+	/* Ensure the file and its directory entry are persisted to disk. */
+	if (fsync_fname(path, false) != 0)
+		pg_fatal("could not synchronize file \"%s\": %m", path);
+	if (fsync_fname(new_cluster.pgdata, true) != 0)
+		pg_fatal("could not synchronize directory \"%s\": %m",
+				 new_cluster.pgdata);
+
+	check_ok();
+}
+
+/*
+ * remove_upgrade_in_progress_file()
+ *
+ * Remove the marker file created by create_upgrade_in_progress_file(), once
+ * the new cluster is safe to start.  The removal is synced to disk, so the
+ * file does not reappear after a crash.
+ */
+static void
+remove_upgrade_in_progress_file(void)
+{
+	char		path[MAXPGPATH];
+
+	/* translator: %s is the name of a file */
+	prep_status("Removing \"%s\" from new cluster", PG_UPGRADE_IN_PROGRESS_FILE);
+
+	snprintf(path, sizeof(path), "%s/%s", new_cluster.pgdata,
+			 PG_UPGRADE_IN_PROGRESS_FILE);
+
+	if (unlink(path) != 0)
+		pg_fatal("could not remove file \"%s\": %m", path);
+
+	/* Ensure the removal is persisted to disk. */
+	if (fsync_fname(new_cluster.pgdata, true) != 0)
+		pg_fatal("could not synchronize directory \"%s\": %m",
+				 new_cluster.pgdata);
+
+	check_ok();
 }
 
 /*

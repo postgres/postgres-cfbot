@@ -632,6 +632,8 @@ command_ok(
 	'run of pg_upgrade --check for new instance');
 ok(!-d $newnode->data_dir . "/pg_upgrade_output.d",
 	"pg_upgrade_output.d/ removed after pg_upgrade --check success");
+ok(!-e $newnode->data_dir . "/pg_upgrade_in_progress",
+	"pg_upgrade_in_progress not created by pg_upgrade --check");
 
 # Actual run, pg_upgrade_output.d is removed at the end.
 command_ok(
@@ -649,6 +651,19 @@ command_ok(
 	'run of pg_upgrade for new instance');
 ok( !-d $newnode->data_dir . "/pg_upgrade_output.d",
 	"pg_upgrade_output.d/ removed after pg_upgrade success");
+ok(!-e $newnode->data_dir . "/pg_upgrade_in_progress",
+	"pg_upgrade_in_progress removed after pg_upgrade success");
+
+# The server must refuse to start while pg_upgrade_in_progress exists.
+my $upgrade_marker = $newnode->data_dir . "/pg_upgrade_in_progress";
+append_to_file($upgrade_marker, "");
+ok(!$newnode->start(fail_ok => 1),
+	'server does not start while pg_upgrade_in_progress exists');
+ok( $newnode->log_contains(
+		qr/data directory ".*" is being upgraded by pg_upgrade/),
+	'server log reports that pg_upgrade is in progress');
+unlink($upgrade_marker)
+  or die "could not remove \"$upgrade_marker\": $!";
 
 $newnode->start;
 

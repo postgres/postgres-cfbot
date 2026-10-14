@@ -30,6 +30,7 @@
 
 #include "access/htup_details.h"
 #include "access/parallel.h"
+#include "access/xlog_internal.h"
 #include "catalog/pg_authid.h"
 #include "common/file_perm.h"
 #include "libpq/libpq.h"
@@ -297,6 +298,7 @@ void
 checkDataDir(void)
 {
 	struct stat stat_buf;
+	char		upgrade_file[MAXPGPATH];
 
 	Assert(DataDir);
 
@@ -380,6 +382,32 @@ checkDataDir(void)
 
 	/* Check for PG_VERSION */
 	ValidatePgVersion(DataDir);
+
+	/*
+	 * Refuse to start if pg_upgrade is in the middle of upgrading this data
+	 * directory.  pg_upgrade creates this file before it starts modifying the
+	 * new cluster and removes it only once the cluster is safe to start.  A
+	 * server started in the meantime could write WAL, consume transaction IDs
+	 * and modify files that pg_upgrade is still transferring, which can lead
+	 * to silent corruption.  pg_upgrade starts its own servers in
+	 * binary-upgrade mode, so allow those.
+	 */
+	snprintf(upgrade_file, sizeof(upgrade_file), "%s/%s",
+			 DataDir, PG_UPGRADE_IN_PROGRESS_FILE);
+	if (stat(upgrade_file, &stat_buf) == 0)
+	{
+		if (!IsBinaryUpgrade)
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("data directory \"%s\" is being upgraded by pg_upgrade",
+							DataDir),
+					 errdetail("File \"%s\" exists.", upgrade_file),
+					 errhint("Wait for pg_upgrade to complete.  If pg_upgrade failed, the new cluster must be re-created with initdb.")));
+	}
+	else if (errno != ENOENT)
+		ereport(FATAL,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", upgrade_file)));
 }
 
 /*

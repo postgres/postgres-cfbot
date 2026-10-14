@@ -957,6 +957,18 @@ psql --username=postgres --file=script.sql postgres
        </para>
       </listitem>
      </itemizedlist></para>
+    <para>
+     Once <application>pg_upgrade</application> starts modifying the new
+     cluster, it creates the file <filename>pg_upgrade_in_progress</filename>
+     in the new cluster's data directory, and removes it only after the
+     upgrade has completed successfully.  While this file exists, the new
+     cluster cannot be started, which prevents an accidental startup from
+     modifying the new cluster while <application>pg_upgrade</application>
+     is still working on it.  If <application>pg_upgrade</application> fails
+     or is interrupted, the file is left in place, and the new cluster must
+     be re-created with <application>initdb</application> before the upgrade
+     is attempted again.
+    </para>
    </step>
   </procedure>
 
