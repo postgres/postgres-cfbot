@@ -1,0 +1,185 @@
+Parsed test spec with 6 sessions
+
+starting permutation: s2_noseq s1_cycle s2_eq10 s2_eq20
+step s2_noseq: SET enable_seqscan = off;
+step s1_cycle: UPDATE hia SET k = 20 WHERE id = 1; UPDATE hia SET k = 10 WHERE id = 1;
+step s2_eq10: SELECT id, k FROM hia WHERE k = 10;
+id| k
+--+--
+ 1|10
+(1 row)
+
+step s2_eq20: SELECT id, k FROM hia WHERE k = 20;
+id|k
+--+-
+(0 rows)
+
+
+starting permutation: s2_noseq s1_cycle s2_range
+step s2_noseq: SET enable_seqscan = off;
+step s1_cycle: UPDATE hia SET k = 20 WHERE id = 1; UPDATE hia SET k = 10 WHERE id = 1;
+step s2_range: SELECT id, k FROM hia WHERE k >= 5 ORDER BY k;
+id| k
+--+--
+ 1|10
+(1 row)
+
+
+starting permutation: s2_noseq s1_begin s1_upd20 s1_abort s2_eq20 s2_eq10
+step s2_noseq: SET enable_seqscan = off;
+step s1_begin: BEGIN;
+step s1_upd20: UPDATE hia SET k = 20 WHERE id = 1;
+step s1_abort: ROLLBACK;
+step s2_eq20: SELECT id, k FROM hia WHERE k = 20;
+id|k
+--+-
+(0 rows)
+
+step s2_eq10: SELECT id, k FROM hia WHERE k = 10;
+id| k
+--+--
+ 1|10
+(1 row)
+
+
+starting permutation: s1_begin s1_uupd20 s2_ins10 s1_commit
+step s1_begin: BEGIN;
+step s1_uupd20: UPDATE hiu SET k = 20 WHERE id = 1;
+step s2_ins10: INSERT INTO hiu VALUES (2, 10, repeat('y', 40)); <waiting ...>
+step s1_commit: COMMIT;
+step s2_ins10: <... completed>
+
+starting permutation: s1_begin s1_uupd20 s1_commit s2_ins10
+step s1_begin: BEGIN;
+step s1_uupd20: UPDATE hiu SET k = 20 WHERE id = 1;
+step s1_commit: COMMIT;
+step s2_ins10: INSERT INTO hiu VALUES (2, 10, repeat('y', 40));
+
+starting permutation: s1_begin s1_uupd20 s1_commit s2_ins20
+step s1_begin: BEGIN;
+step s1_uupd20: UPDATE hiu SET k = 20 WHERE id = 1;
+step s1_commit: COMMIT;
+step s2_ins20: INSERT INTO hiu VALUES (3, 20, repeat('z', 40));
+ERROR:  duplicate key value violates unique constraint "hiu_k"
+
+starting permutation: s3_begin s3_eq10 s2_to30 s2_scan30 s3_eq10 s3_commit
+step s3_begin: BEGIN ISOLATION LEVEL REPEATABLE READ; SET enable_seqscan = off;
+step s3_eq10: SELECT id, k FROM hia WHERE k = 10;
+id| k
+--+--
+ 1|10
+(1 row)
+
+step s2_to30: UPDATE hia SET k = 20 WHERE id = 1; UPDATE hia SET k = 30 WHERE id = 1;
+step s2_scan30: SET enable_seqscan = off; SELECT id, k FROM hia WHERE k = 30;
+id| k
+--+--
+ 1|30
+(1 row)
+
+step s3_eq10: SELECT id, k FROM hia WHERE k = 10;
+id| k
+--+--
+ 1|10
+(1 row)
+
+step s3_commit: COMMIT;
+
+starting permutation: b1_begin b1_snap b2_update b2_vacuum b1_snap b1_commit b3_seq
+step b1_begin: BEGIN;
+step b1_snap: SELECT id, v FROM hib WHERE v = 400;
+id|  v
+--+---
+ 1|400
+(1 row)
+
+step b2_update: UPDATE hib SET v = 500 WHERE id = 1;
+step b2_vacuum: VACUUM (INDEX_CLEANUP off) hib;
+step b1_snap: SELECT id, v FROM hib WHERE v = 400;
+id|v
+--+-
+(0 rows)
+
+step b1_commit: COMMIT;
+step b3_seq: SELECT id, v FROM hib ORDER BY id;
+id|  v
+--+---
+ 1|500
+ 2| 20
+ 3| 30
+ 4| 40
+ 5| 50
+(5 rows)
+
+
+starting permutation: b1_begin b2_update b1_snap b2_vacuum b1_snap b1_commit b3_seq
+step b1_begin: BEGIN;
+step b2_update: UPDATE hib SET v = 500 WHERE id = 1;
+step b1_snap: SELECT id, v FROM hib WHERE v = 400;
+id|v
+--+-
+(0 rows)
+
+step b2_vacuum: VACUUM (INDEX_CLEANUP off) hib;
+step b1_snap: SELECT id, v FROM hib WHERE v = 400;
+id|v
+--+-
+(0 rows)
+
+step b1_commit: COMMIT;
+step b3_seq: SELECT id, v FROM hib ORDER BY id;
+id|  v
+--+---
+ 1|500
+ 2| 20
+ 3| 30
+ 4| 40
+ 5| 50
+(5 rows)
+
+
+starting permutation: s2_bnoseq s1_bupd s2_band_new s2_band_old
+step s2_bnoseq: SET enable_seqscan = off; SET enable_indexscan = off; SET enable_bitmapscan = on;
+step s1_bupd: UPDATE hband SET c2 = 22 WHERE id = 1;
+step s2_band_new: SELECT count(*) AS band FROM hband WHERE c1 = 11 AND c2 = 22;
+band
+----
+   1
+(1 row)
+
+step s2_band_old: SELECT count(*) AS band FROM hband WHERE c1 = 11 AND c2 = 21;
+band
+----
+   0
+(1 row)
+
+
+starting permutation: s2_bnoseq s1_begin s1_bupd s2_band_new s2_band_old s1_commit s2_band_new s2_band_old
+step s2_bnoseq: SET enable_seqscan = off; SET enable_indexscan = off; SET enable_bitmapscan = on;
+step s1_begin: BEGIN;
+step s1_bupd: UPDATE hband SET c2 = 22 WHERE id = 1;
+step s2_band_new: SELECT count(*) AS band FROM hband WHERE c1 = 11 AND c2 = 22;
+band
+----
+   0
+(1 row)
+
+step s2_band_old: SELECT count(*) AS band FROM hband WHERE c1 = 11 AND c2 = 21;
+band
+----
+   1
+(1 row)
+
+step s1_commit: COMMIT;
+step s2_band_new: SELECT count(*) AS band FROM hband WHERE c1 = 11 AND c2 = 22;
+band
+----
+   1
+(1 row)
+
+step s2_band_old: SELECT count(*) AS band FROM hband WHERE c1 = 11 AND c2 = 21;
+band
+----
+   0
+(1 row)
+
