@@ -730,6 +730,7 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_tuples_updated(C.oid) AS n_tup_upd,
             pg_stat_get_tuples_deleted(C.oid) AS n_tup_del,
             pg_stat_get_tuples_hot_updated(C.oid) AS n_tup_hot_upd,
+            pg_stat_get_tuples_hot_indexed_updated(C.oid) AS n_tup_hot_indexed_upd,
             pg_stat_get_tuples_newpage_updated(C.oid) AS n_tup_newpage_upd,
             pg_stat_get_live_tuples(C.oid) AS n_live_tup,
             pg_stat_get_dead_tuples(C.oid) AS n_dead_tup,
@@ -768,6 +769,7 @@ CREATE VIEW pg_stat_xact_all_tables AS
             pg_stat_get_xact_tuples_updated(C.oid) AS n_tup_upd,
             pg_stat_get_xact_tuples_deleted(C.oid) AS n_tup_del,
             pg_stat_get_xact_tuples_hot_updated(C.oid) AS n_tup_hot_upd,
+            pg_stat_get_xact_tuples_hot_indexed_updated(C.oid) AS n_tup_hot_indexed_upd,
             pg_stat_get_xact_tuples_newpage_updated(C.oid) AS n_tup_newpage_upd
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
@@ -869,6 +871,8 @@ CREATE VIEW pg_stat_all_indexes AS
             pg_stat_get_idx_lastscan(I.oid) AS last_idx_scan,
             pg_stat_get_idx_tuples_returned(I.oid) AS idx_tup_read,
             pg_stat_get_idx_tuples_fetched(I.oid) AS idx_tup_fetch,
+            pg_stat_get_tuples_hot_indexed_updated_skipped(I.oid) AS n_tup_hot_indexed_upd_skipped,
+            pg_stat_get_tuples_hot_indexed_updated_matched(I.oid) AS n_tup_hot_indexed_upd_matched,
             pg_stat_get_idx_stat_reset_time(I.oid) AS stats_reset
     FROM pg_class C JOIN
             pg_index X ON C.oid = X.indrelid JOIN
