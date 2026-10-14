@@ -45,3 +45,37 @@ SELECT * FROM index_scan_tids('hot_chain_idx', 'nonvacuumable');
 
 DROP TABLE hot_chain_tab;
 DROP EXTENSION test_indexscan;
+
+-- Re-pruning must retain every producing hop between an index anchor and
+-- the visible tuple, including hops in stubs left by an earlier prune.
+CREATE TABLE hot_prune (id int PRIMARY KEY, k int, v int, u int, payload text)
+  WITH (fillfactor = 40, autovacuum_enabled = false);
+INSERT INTO hot_prune SELECT g, g % 101, (g * 17) % 103, g, repeat('x', 256)
+  FROM generate_series(1, 20) g;
+CREATE INDEX hot_prune_k ON hot_prune(k);
+CREATE INDEX hot_prune_v ON hot_prune(v);
+CREATE UNIQUE INDEX hot_prune_u ON hot_prune(u);
+ANALYZE hot_prune;
+VACUUM (FREEZE) hot_prune;
+UPDATE hot_prune SET u = -u WHERE id BETWEEN 1 AND 10;
+UPDATE hot_prune SET v = v + 1 WHERE id BETWEEN 1 AND 10;
+VACUUM (INDEX_CLEANUP OFF) hot_prune;
+VACUUM (INDEX_CLEANUP OFF) hot_prune;
+UPDATE hot_prune SET k = k + 1;
+UPDATE hot_prune SET v = v + 1;
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL enable_seqscan = off;
+SET LOCAL enable_bitmapscan = off;
+SET LOCAL enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id, u FROM hot_prune WHERE u BETWEEN -250 AND 250 ORDER BY u;
+-- Check scan order and multiplicity directly, without aggregate reordering.
+SELECT id, u FROM hot_prune WHERE u BETWEEN -250 AND 250 ORDER BY u;
+SELECT id, u FROM hot_prune WHERE u = 1;
+-- A direct mid-chain anchor excludes its own producing u hop.
+SELECT id, u FROM hot_prune WHERE u = -1;
+COMMIT;
+-- The old key can be reused, but the current key remains unique.
+INSERT INTO hot_prune VALUES (21, 0, 0, 1, 'old key');
+INSERT INTO hot_prune VALUES (22, 0, 0, -1, 'duplicate');
+DROP TABLE hot_prune;

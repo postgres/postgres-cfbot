@@ -30,6 +30,12 @@ tests += {
       'hot_chain',
     ],
   },
+  'tap': {
+    'env': {
+      'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
+    },
+    'tests': ['t/001_concurrent_hot.pl', 't/002_unique_hot.pl'],
+  },
   'isolation': {
     'specs': [
       'killtuples',
