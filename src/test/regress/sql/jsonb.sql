@@ -408,6 +408,17 @@ SELECT jsonb_object_agg_unique(i, null) OVER (ORDER BY i)
 SELECT jsonb_object_agg_unique_strict(i, null) OVER (ORDER BY i)
   FROM generate_series(1, 10) g(i);
 
+-- the final function runs once per row, so later pairs must still win
+SELECT g, jsonb_object_agg(k, v) OVER (ORDER BY g)
+  FROM (VALUES (1,'a',1),(1,'a',2),(1,'a',3),(1,'b',5),(2,'b',6),(3,'a',7)) t(g,k,v);
+SELECT count(*) FILTER (WHERE w IS DISTINCT FROM
+  (SELECT jsonb_object_agg('k' || (j % 8), j ORDER BY j) FROM generate_series(1, i) j))
+  FROM (SELECT i, jsonb_object_agg('k' || (i % 8), i) OVER (ORDER BY i) AS w
+        FROM generate_series(1, 120) i) s;
+-- and a null pair must still count as a duplicate key
+SELECT g, jsonb_object_agg_unique_strict(k, v) OVER (ORDER BY g)
+  FROM (VALUES (1, 'a', null::int), (2, 'a', 1)) t(g, k, v);
+
 CREATE TEMP TABLE foo (serial_num int, name text, type text);
 INSERT INTO foo VALUES (847001,'t15','GE1043');
 INSERT INTO foo VALUES (847002,'t16','GE1043');
