@@ -23,6 +23,11 @@ DATA =  pageinspect--1.12--1.13.sql \
 	pageinspect--1.0--1.1.sql
 PGFILEDESC = "pageinspect - functions to inspect contents of database pages"
 
+# hot_updates / hot_indexed_updates verify HOT and HOT-indexed (SIU) heap
+# behaviour using pageinspect, amcheck and btree_gist together, so they live
+# here (where pageinspect is built) and pull in the other two extensions.
+EXTRA_INSTALL = contrib/amcheck contrib/btree_gist
+
 # "page" is first because it creates the extension.
 REGRESS = \
 	page \
@@ -33,7 +38,8 @@ REGRESS = \
 	gist \
 	hash \
 	oldextversions \
-	hot_updates
+	hot_updates \
+	hot_indexed_updates
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
