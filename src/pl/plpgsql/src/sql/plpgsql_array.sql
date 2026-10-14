@@ -58,6 +58,35 @@ begin
   raise notice 'a = %', a;
 end$$;
 
+-- "transfer" assignment whose plan is rebuilt while an outer evaluation of
+-- it is in progress: the new plan's references to the target must not
+-- take its value
+set plan_cache_mode = force_generic_plan;
+create function rw_g(a text[], x text) returns text[] language sql
+as 'select array_append(a, x)';
+create function rw_f(d int) returns text language plpgsql as $$
+declare a text[] := '{x,y}';
+begin
+  if d = 0 then return ''; end if;
+  if d = 1 then
+    -- invalidates the plan of the assignment below, whose new plan
+    -- refers to "a" twice
+    create or replace function rw_g(a text[], x text) returns text[]
+    language sql as 'select a || a';
+  end if;
+  a[1] := 'z';
+  a := rw_g(a, rw_f(d - 1));
+  return d || ':' || array_to_string(a, ',');
+end $$;
+select rw_f(3);
+-- likewise when the outer evaluation's plan does not refer to "a" at all
+create or replace function rw_g(a text[], x text) returns text[]
+language sql as 'select array[x]';
+select rw_f(3);
+reset plan_cache_mode;
+drop function rw_f(int);
+drop function rw_g(text[], text);
+
 create temp table onecol as select array[1,2] as f1;
 
 do $$ declare a int[];
