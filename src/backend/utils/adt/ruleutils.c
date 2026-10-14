@@ -10794,13 +10794,37 @@ get_oper_expr(OpExpr *expr, deparse_context *context)
 		/* binary operator */
 		Node	   *arg1 = (Node *) linitial(args);
 		Node	   *arg2 = (Node *) lsecond(args);
+		bool		bare1 = IsA(arg1, RowExpr) &&
+			((RowExpr *) arg1)->row_format != COERCE_EXPLICIT_CAST;
+		bool		bare2 = IsA(arg2, RowExpr) &&
+			((RowExpr *) arg2)->row_format != COERCE_EXPLICIT_CAST;
+		bool		castrows;
+
+		/*
+		 * The parser reads "ROW() op ROW()" as a column-by-column row
+		 * comparison, and "ROW() op (SELECT ...)" as a row comparison
+		 * sublink, rather than as an operator on record values (see
+		 * transformAExprOp).  If the operands would print that way, print an
+		 * explicit cast after each bare ROW(), so that the raw parse tree has
+		 * a TypeCast there instead.
+		 */
+		castrows = bare1 &&
+			(bare2 ||
+			 (IsA(arg2, SubLink) &&
+			  ((SubLink *) arg2)->subLinkType == EXPR_SUBLINK));
 
 		get_rule_expr_paren(arg1, context, true, (Node *) expr);
+		if (castrows)
+			appendStringInfo(buf, "::%s",
+							 format_type_with_typemod(((RowExpr *) arg1)->row_typeid, -1));
 		appendStringInfo(buf, " %s ",
 						 generate_operator_name(opno,
 												exprType(arg1),
 												exprType(arg2)));
 		get_rule_expr_paren(arg2, context, true, (Node *) expr);
+		if (castrows && bare2)
+			appendStringInfo(buf, "::%s",
+							 format_type_with_typemod(((RowExpr *) arg2)->row_typeid, -1));
 	}
 	else
 	{

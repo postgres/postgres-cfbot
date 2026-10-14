@@ -652,7 +652,4 @@ SELECT (ROW(1, 2)::rowtypes_cmp_t = ROW(1, 2)) AS named,
        (ROW(1, 2) = '(1,2)'::rowtypes_cmp_t) AS one;
 SELECT pg_get_viewdef('rowtypes_cmp_v8'::regclass);
 
--- leave the views around for the pg_upgrade test, except the ones that do
--- not survive dump and restore yet
-DROP VIEW rowtypes_cmp_v, rowtypes_cmp_v2, rowtypes_cmp_v4, rowtypes_cmp_v5,
-  rowtypes_cmp_v6, rowtypes_cmp_v7;
+-- leave the views around for the pg_upgrade test

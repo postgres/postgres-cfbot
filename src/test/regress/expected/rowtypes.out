@@ -1419,9 +1419,9 @@ SELECT * FROM rowtypes_cmp_v;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v'::regclass);
-                        pg_get_viewdef                         
----------------------------------------------------------------
-  SELECT (ROW(1, NULL::integer) = ROW(1, NULL::integer)) AS r;
+                                pg_get_viewdef                                 
+-------------------------------------------------------------------------------
+  SELECT (ROW(1, NULL::integer)::record = ROW(1, NULL::integer)::record) AS r;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v'::regclass) AS def \gset
@@ -1429,7 +1429,7 @@ CREATE VIEW rowtypes_cmp_v_re AS :def
 SELECT * FROM rowtypes_cmp_v_re;
  r 
 ---
- 
+ t
 (1 row)
 
 -- The other operators of a record comparison need the casts as well
@@ -1443,10 +1443,10 @@ SELECT * FROM rowtypes_cmp_v2;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v2'::regclass);
-                         pg_get_viewdef                          
------------------------------------------------------------------
-  SELECT (ROW(1, NULL::integer) <= ROW(1, NULL::integer)) AS le,+
-     (ROW(1, NULL::integer) <> ROW(1, NULL::integer)) AS ne;
+                                 pg_get_viewdef                                  
+---------------------------------------------------------------------------------
+  SELECT (ROW(1, NULL::integer)::record <= ROW(1, NULL::integer)::record) AS le,+
+     (ROW(1, NULL::integer)::record <> ROW(1, NULL::integer)::record) AS ne;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v2'::regclass) AS def \gset
@@ -1454,7 +1454,7 @@ CREATE VIEW rowtypes_cmp_v2_re AS :def
 SELECT * FROM rowtypes_cmp_v2_re;
  le | ne 
 ----+----
-    | 
+ t  | f
 (1 row)
 
 -- A row comparison is split by the parser into column-by-column operators,
@@ -1491,23 +1491,20 @@ CREATE VIEW rowtypes_cmp_v4 AS
 SELECT (ROW(1, 2)::record *= ROW(1, 2)::record) AS img,
        (ROW(1)::record = ROW(1, 2)::record) AS len;
 SELECT pg_get_viewdef('rowtypes_cmp_v4'::regclass);
-              pg_get_viewdef              
-------------------------------------------
-  SELECT (ROW(1, 2) *= ROW(1, 2)) AS img,+
-     (ROW(1) = ROW(1, 2)) AS len;
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT (ROW(1, 2)::record *= ROW(1, 2)::record) AS img,+
+     (ROW(1)::record = ROW(1, 2)::record) AS len;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v4'::regclass) AS def \gset
 CREATE VIEW rowtypes_cmp_v4_re AS :def
-ERROR:  operator does not exist: integer *= integer
-LINE 1: ...ATE VIEW rowtypes_cmp_v4_re AS  SELECT (ROW(1, 2) *= ROW(1, ...
-                                                             ^
-DETAIL:  No operator of that name accepts the given argument types.
-HINT:  You might need to add explicit type casts.
 SELECT img FROM rowtypes_cmp_v4_re;
-ERROR:  relation "rowtypes_cmp_v4_re" does not exist
-LINE 1: SELECT img FROM rowtypes_cmp_v4_re;
-                        ^
+ img 
+-----
+ t
+(1 row)
+
 -- A ROW() compared with a scalar subquery would be read back as a row
 -- comparison with the subquery's columns
 CREATE VIEW rowtypes_cmp_v5 AS
@@ -1519,20 +1516,19 @@ SELECT * FROM rowtypes_cmp_v5;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v5'::regclass);
-                                  pg_get_viewdef                                  
-----------------------------------------------------------------------------------
-  SELECT (ROW(1, NULL::integer) = ( SELECT ROW(1, NULL::integer) AS "row")) AS r;
+                                      pg_get_viewdef                                      
+------------------------------------------------------------------------------------------
+  SELECT (ROW(1, NULL::integer)::record = ( SELECT ROW(1, NULL::integer) AS "row")) AS r;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v5'::regclass) AS def \gset
 CREATE VIEW rowtypes_cmp_v5_re AS :def
-ERROR:  subquery has too few columns
-LINE 1: ...types_cmp_v5_re AS  SELECT (ROW(1, NULL::integer) = ( SELECT...
-                                                             ^
 SELECT * FROM rowtypes_cmp_v5_re;
-ERROR:  relation "rowtypes_cmp_v5_re" does not exist
-LINE 1: SELECT * FROM rowtypes_cmp_v5_re;
-                      ^
+ r 
+---
+ t
+(1 row)
+
 -- So would a whole-row reference to a join alias, which is expanded into a
 -- ROW()
 CREATE TABLE rowtypes_cmp_a (x int);
@@ -1550,25 +1546,23 @@ SELECT * FROM rowtypes_cmp_v6 ORDER BY x;
 (2 rows)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v6'::regclass);
-                        pg_get_viewdef                        
---------------------------------------------------------------
-  SELECT rowtypes_cmp_a.x,                                   +
-     (ROW(rowtypes_cmp_a.x) = ( SELECT ROW(1) AS "row")) AS r+
-    FROM (rowtypes_cmp_a                                     +
+                            pg_get_viewdef                            
+----------------------------------------------------------------------
+  SELECT rowtypes_cmp_a.x,                                           +
+     (ROW(rowtypes_cmp_a.x)::record = ( SELECT ROW(1) AS "row")) AS r+
+    FROM (rowtypes_cmp_a                                             +
       JOIN rowtypes_cmp_b USING (x) AS j);
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v6'::regclass) AS def \gset
 CREATE VIEW rowtypes_cmp_v6_re AS :def
-ERROR:  operator does not exist: integer = record
-LINE 2:     (ROW(rowtypes_cmp_a.x) = ( SELECT ROW(1) AS "row")) AS r
-                                   ^
-DETAIL:  No operator of that name accepts the given argument types.
-HINT:  You might need to add explicit type casts.
 SELECT * FROM rowtypes_cmp_v6_re ORDER BY x;
-ERROR:  relation "rowtypes_cmp_v6_re" does not exist
-LINE 1: SELECT * FROM rowtypes_cmp_v6_re ORDER BY x;
-                      ^
+ x | r 
+---+---
+ 1 | t
+ 2 | f
+(2 rows)
+
 -- A whole-row reference to a subquery is coerced to a named composite type
 -- by expanding it into a ROW(), which needs the type's name to be read back
 CREATE TYPE rowtypes_cmp_t AS (a int, b int);
@@ -1587,26 +1581,23 @@ SELECT * FROM rowtypes_cmp_v7;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v7'::regclass);
-                         pg_get_viewdef                         
-----------------------------------------------------------------
-  SELECT (ROW(s1.a, s1.b) =#= ROW(s2."?column?", s2.int4)) AS r+
-    FROM ( SELECT 1 AS a,                                      +
-             NULL::integer AS b) s1,                           +
-     ( SELECT 1 AS "?column?",                                 +
+                                         pg_get_viewdef                                         
+------------------------------------------------------------------------------------------------
+  SELECT (ROW(s1.a, s1.b)::rowtypes_cmp_t =#= ROW(s2."?column?", s2.int4)::rowtypes_cmp_t) AS r+
+    FROM ( SELECT 1 AS a,                                                                      +
+             NULL::integer AS b) s1,                                                           +
+     ( SELECT 1 AS "?column?",                                                                 +
              NULL::integer AS int4) s2;
 (1 row)
 
 SELECT pg_get_viewdef('rowtypes_cmp_v7'::regclass) AS def \gset
 CREATE VIEW rowtypes_cmp_v7_re AS :def
-ERROR:  operator does not exist: integer =#= integer
-LINE 1: ...EW rowtypes_cmp_v7_re AS  SELECT (ROW(s1.a, s1.b) =#= ROW(s2...
-                                                             ^
-DETAIL:  No operator of that name accepts the given argument types.
-HINT:  You might need to add explicit type casts.
 SELECT * FROM rowtypes_cmp_v7_re;
-ERROR:  relation "rowtypes_cmp_v7_re" does not exist
-LINE 1: SELECT * FROM rowtypes_cmp_v7_re;
-                      ^
+ r 
+---
+ t
+(1 row)
+
 -- An explicit cast to a named type is printed once, and needs no cast on the
 -- other operand; nor does a ROW() whose other operand is not a ROW()
 CREATE VIEW rowtypes_cmp_v8 AS
@@ -1619,7 +1610,4 @@ SELECT pg_get_viewdef('rowtypes_cmp_v8'::regclass);
      (ROW(1, 2) = '(1,2)'::rowtypes_cmp_t) AS one;
 (1 row)
 
--- leave the views around for the pg_upgrade test, except the ones that do
--- not survive dump and restore yet
-DROP VIEW rowtypes_cmp_v, rowtypes_cmp_v2, rowtypes_cmp_v4, rowtypes_cmp_v5,
-  rowtypes_cmp_v6, rowtypes_cmp_v7;
+-- leave the views around for the pg_upgrade test
