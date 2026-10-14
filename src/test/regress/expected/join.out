@@ -12344,3 +12344,38 @@ WHERE s.x = s.c;
 (1 row)
 
 ROLLBACK;
+-- A removed rel must not keep its TABLESAMPLE arguments.
+CREATE TABLE jr_t (id int PRIMARY KEY, x int, y int);
+CREATE TABLE jr_o (k int PRIMARY KEY, v int);
+EXPLAIN (COSTS OFF)
+SELECT a.id
+FROM jr_t a
+  LEFT JOIN jr_o b2 ON b2.k = a.y
+  LEFT JOIN LATERAL (SELECT * FROM jr_o c
+                     TABLESAMPLE BERNOULLI (coalesce(b2.v, 0) + 100)) s
+    ON s.k = a.x;
+     QUERY PLAN     
+--------------------
+ Seq Scan on jr_t a
+(1 row)
+
+DROP TABLE jr_t, jr_o;
+-- A rel removed by self-join elimination must not keep its securityQuals.
+CREATE TABLE sj_rls (k int PRIMARY KEY, v int);
+ALTER TABLE sj_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY sj_rls_p ON sj_rls USING (v > 0);
+CREATE TABLE sj_x (k int PRIMARY KEY);
+CREATE ROLE regress_sj_rls_user;
+GRANT SELECT ON sj_rls, sj_x TO regress_sj_rls_user;
+SET ROLE regress_sj_rls_user;
+EXPLAIN (COSTS OFF)
+SELECT sj_x.k
+FROM sj_x LEFT JOIN (sj_rls a JOIN sj_rls b ON a.k = b.k) ON sj_x.k = a.k;
+    QUERY PLAN    
+------------------
+ Seq Scan on sj_x
+(1 row)
+
+RESET ROLE;
+DROP TABLE sj_rls, sj_x;
+DROP ROLE regress_sj_rls_user;
