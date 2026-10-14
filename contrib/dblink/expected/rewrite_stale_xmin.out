@@ -1,0 +1,237 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_hold_xmin s2_begin s3_delete s3_vacuum_main_only s2_commit s3_vacuum_toast s3_cluster s1_release
+step s1_hold_xmin: 
+    SELECT dblink_connect('holder',
+        'dbname=regress_other_db port=' || current_setting('port'));
+    SELECT dblink_exec('holder', 'BEGIN');
+    SELECT dblink_exec('holder', 'CREATE TEMP TABLE xid_holder(x int)');
+
+dblink_connect
+--------------
+OK            
+(1 row)
+
+dblink_exec
+-----------
+BEGIN      
+(1 row)
+
+dblink_exec 
+------------
+CREATE TABLE
+(1 row)
+
+step s2_begin: 
+    BEGIN ISOLATION LEVEL REPEATABLE READ;
+    SELECT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step s3_delete: 
+    DELETE FROM rewrite_test WHERE id = 1;
+
+step s3_vacuum_main_only: 
+    VACUUM (PROCESS_TOAST false) rewrite_test;
+
+step s2_commit: COMMIT;
+step s3_vacuum_toast: 
+    VACUUM pg_toast.rewrite_test_toast;
+
+step s3_cluster: 
+    CLUSTER rewrite_test USING rewrite_test_pkey;
+
+step s1_release: 
+    SELECT dblink_exec('holder', 'COMMIT');
+    SELECT dblink_disconnect('holder');
+
+dblink_exec
+-----------
+COMMIT     
+(1 row)
+
+dblink_disconnect
+-----------------
+OK               
+(1 row)
+
+
+starting permutation: s1_hold_xmin s2_begin s3_delete s3_vacuum_main_only s2_commit s3_vacuum_toast s3_vacuum_full s1_release
+step s1_hold_xmin: 
+    SELECT dblink_connect('holder',
+        'dbname=regress_other_db port=' || current_setting('port'));
+    SELECT dblink_exec('holder', 'BEGIN');
+    SELECT dblink_exec('holder', 'CREATE TEMP TABLE xid_holder(x int)');
+
+dblink_connect
+--------------
+OK            
+(1 row)
+
+dblink_exec
+-----------
+BEGIN      
+(1 row)
+
+dblink_exec 
+------------
+CREATE TABLE
+(1 row)
+
+step s2_begin: 
+    BEGIN ISOLATION LEVEL REPEATABLE READ;
+    SELECT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step s3_delete: 
+    DELETE FROM rewrite_test WHERE id = 1;
+
+step s3_vacuum_main_only: 
+    VACUUM (PROCESS_TOAST false) rewrite_test;
+
+step s2_commit: COMMIT;
+step s3_vacuum_toast: 
+    VACUUM pg_toast.rewrite_test_toast;
+
+step s3_vacuum_full: 
+    VACUUM FULL rewrite_test;
+
+step s1_release: 
+    SELECT dblink_exec('holder', 'COMMIT');
+    SELECT dblink_disconnect('holder');
+
+dblink_exec
+-----------
+COMMIT     
+(1 row)
+
+dblink_disconnect
+-----------------
+OK               
+(1 row)
+
+
+starting permutation: s1_hold_xmin s2_begin s3_delete s3_vacuum_main_only s2_commit s3_vacuum_toast s3_repack s1_release
+step s1_hold_xmin: 
+    SELECT dblink_connect('holder',
+        'dbname=regress_other_db port=' || current_setting('port'));
+    SELECT dblink_exec('holder', 'BEGIN');
+    SELECT dblink_exec('holder', 'CREATE TEMP TABLE xid_holder(x int)');
+
+dblink_connect
+--------------
+OK            
+(1 row)
+
+dblink_exec
+-----------
+BEGIN      
+(1 row)
+
+dblink_exec 
+------------
+CREATE TABLE
+(1 row)
+
+step s2_begin: 
+    BEGIN ISOLATION LEVEL REPEATABLE READ;
+    SELECT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step s3_delete: 
+    DELETE FROM rewrite_test WHERE id = 1;
+
+step s3_vacuum_main_only: 
+    VACUUM (PROCESS_TOAST false) rewrite_test;
+
+step s2_commit: COMMIT;
+step s3_vacuum_toast: 
+    VACUUM pg_toast.rewrite_test_toast;
+
+step s3_repack: 
+    REPACK rewrite_test;
+
+step s1_release: 
+    SELECT dblink_exec('holder', 'COMMIT');
+    SELECT dblink_disconnect('holder');
+
+dblink_exec
+-----------
+COMMIT     
+(1 row)
+
+dblink_disconnect
+-----------------
+OK               
+(1 row)
+
+
+starting permutation: s1_hold_xmin s2_begin s3_delete s3_vacuum_main_only s2_commit s3_vacuum_toast s3_create_index s1_release
+step s1_hold_xmin: 
+    SELECT dblink_connect('holder',
+        'dbname=regress_other_db port=' || current_setting('port'));
+    SELECT dblink_exec('holder', 'BEGIN');
+    SELECT dblink_exec('holder', 'CREATE TEMP TABLE xid_holder(x int)');
+
+dblink_connect
+--------------
+OK            
+(1 row)
+
+dblink_exec
+-----------
+BEGIN      
+(1 row)
+
+dblink_exec 
+------------
+CREATE TABLE
+(1 row)
+
+step s2_begin: 
+    BEGIN ISOLATION LEVEL REPEATABLE READ;
+    SELECT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step s3_delete: 
+    DELETE FROM rewrite_test WHERE id = 1;
+
+step s3_vacuum_main_only: 
+    VACUUM (PROCESS_TOAST false) rewrite_test;
+
+step s2_commit: COMMIT;
+step s3_vacuum_toast: 
+    VACUUM pg_toast.rewrite_test_toast;
+
+step s3_create_index: 
+    CREATE INDEX rewrite_test_data_idx ON rewrite_test (data);
+
+step s1_release: 
+    SELECT dblink_exec('holder', 'COMMIT');
+    SELECT dblink_disconnect('holder');
+
+dblink_exec
+-----------
+COMMIT     
+(1 row)
+
+dblink_disconnect
+-----------------
+OK               
+(1 row)
+
