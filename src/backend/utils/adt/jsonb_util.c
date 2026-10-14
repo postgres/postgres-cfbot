@@ -2103,6 +2103,12 @@ uniqueifyJsonbObject(JsonbValue *object, bool unique_keys, bool skip_nulls)
 			/* Emit this pair, but avoid no-op copy */
 			if (i > nNewPairs)
 				pairs[nNewPairs] = *ptr;
+
+			/*
+			 * Renumber so the orders stay below nPairs.  Pairs appended later
+			 * must still win if we are called again.
+			 */
+			pairs[nNewPairs].order = nNewPairs;
 			nNewPairs++;
 		}
 		object->val.object.nPairs = nNewPairs;
