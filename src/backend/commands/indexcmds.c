@@ -1650,7 +1650,7 @@ DefineIndex(ParseState *pstate,
 	}
 
 	/* save lockrelid and locktag for below, then close rel */
-	heaprelid = rel->rd_lockInfo.lockRelId;
+	heaprelid = RelationGetLockRelId(rel);
 	SET_LOCKTAG_RELATION(heaplocktag, heaprelid.dbId, heaprelid.relId);
 	table_close(rel, NoLock);
 
@@ -4177,10 +4177,10 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 * parentRelationIds built earlier.
 		 */
 		lockrelid = palloc_object(LockRelId);
-		*lockrelid = indexRel->rd_lockInfo.lockRelId;
+		*lockrelid = RelationGetLockRelId(indexRel);
 		relationLocks = lappend(relationLocks, lockrelid);
 		lockrelid = palloc_object(LockRelId);
-		*lockrelid = newIndexRel->rd_lockInfo.lockRelId;
+		*lockrelid = RelationGetLockRelId(newIndexRel);
 		relationLocks = lappend(relationLocks, lockrelid);
 
 		MemoryContextSwitchTo(oldcontext);
@@ -4226,7 +4226,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		/* Add lockrelid of heap relation to the list of locked relations */
 		lockrelid = palloc_object(LockRelId);
-		*lockrelid = heapRelation->rd_lockInfo.lockRelId;
+		*lockrelid = RelationGetLockRelId(heapRelation);
 		relationLocks = lappend(relationLocks, lockrelid);
 
 		heaplocktag = palloc_object(LOCKTAG);
