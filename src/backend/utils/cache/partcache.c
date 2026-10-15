@@ -53,10 +53,10 @@ RelationGetPartitionKey(Relation rel)
 	if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		return NULL;
 
-	if (unlikely(rel->rd_partkey == NULL))
+	if (unlikely(rel->rd_partinfo == NULL || rel->rd_partinfo->partkey == NULL))
 		RelationBuildPartitionKey(rel);
 
-	return rel->rd_partkey;
+	return rel->rd_partinfo->partkey;
 }
 
 /*
@@ -90,6 +90,7 @@ RelationBuildPartitionKey(Relation relation)
 	MemoryContext partkeycxt,
 				oldcxt;
 	int16		procnum;
+	RelationPartitionInfo *partinfo;
 
 	tuple = SearchSysCache1(PARTRELID,
 							ObjectIdGetDatum(RelationGetRelid(relation)));
@@ -255,17 +256,23 @@ RelationBuildPartitionKey(Relation relation)
 
 	ReleaseSysCache(tuple);
 
+	partinfo = relation->rd_partinfo;
+
 	/* Assert that we're not leaking any old data during assignments below */
-	Assert(relation->rd_partkeycxt == NULL);
-	Assert(relation->rd_partkey == NULL);
+	Assert(partinfo == NULL || partinfo->partkeycxt == NULL);
+	Assert(partinfo == NULL || partinfo->partkey == NULL);
 
 	/*
 	 * Success --- reparent our context and make the relcache point to the
 	 * newly constructed key
 	 */
+	if (partinfo == NULL)
+		relation->rd_partinfo = partinfo =
+			MemoryContextAllocZero(CacheMemoryContext,
+								   sizeof(RelationPartitionInfo));
 	MemoryContextSetParent(partkeycxt, CacheMemoryContext);
-	relation->rd_partkeycxt = partkeycxt;
-	relation->rd_partkey = key;
+	partinfo->partkeycxt = partkeycxt;
+	partinfo->partkey = key;
 }
 
 /*
@@ -344,13 +351,14 @@ generate_partition_qual(Relation rel)
 			   *result = NIL;
 	Oid			parentrelid;
 	Relation	parent;
+	RelationPartitionInfo *partinfo;
 
 	/* Guard against stack overflow due to overly deep partition tree */
 	check_stack_depth();
 
 	/* If we already cached the result, just return a copy */
-	if (rel->rd_partcheckvalid)
-		return copyObject(rel->rd_partcheck);
+	if (rel->rd_partinfo && rel->rd_partinfo->partcheckvalid)
+		return copyObject(rel->rd_partinfo->partcheck);
 
 	/*
 	 * Grab at least an AccessShareLock on the parent table.  Must do this
@@ -397,9 +405,16 @@ generate_partition_qual(Relation rel)
 	 */
 	result = map_partition_varattnos(result, 1, rel, parent);
 
+	partinfo = rel->rd_partinfo;
+
 	/* Assert that we're not leaking any old data during assignments below */
-	Assert(rel->rd_partcheckcxt == NULL);
-	Assert(rel->rd_partcheck == NIL);
+	Assert(partinfo == NULL || partinfo->partcheckcxt == NULL);
+	Assert(partinfo == NULL || partinfo->partcheck == NIL);
+
+	if (partinfo == NULL)
+		rel->rd_partinfo = partinfo =
+			MemoryContextAllocZero(CacheMemoryContext,
+								   sizeof(RelationPartitionInfo));
 
 	/*
 	 * Save a copy in the relcache.  The order of these operations is fairly
@@ -434,12 +449,12 @@ generate_partition_qual(Relation rel)
 		/* finally, link the allocations and memctx into the right places */
 		MemoryContextSetParent(partctx, CacheMemoryContext);
 
-		rel->rd_partcheckcxt = partctx;
-		rel->rd_partcheck = partcheck;
+		partinfo->partcheckcxt = partctx;
+		partinfo->partcheck = partcheck;
 	}
 	else
-		rel->rd_partcheck = NIL;
-	rel->rd_partcheckvalid = true;
+		partinfo->partcheck = NIL;
+	partinfo->partcheckvalid = true;
 
 	/* Keep the parent locked until commit */
 	relation_close(parent, NoLock);
