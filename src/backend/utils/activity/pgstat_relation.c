@@ -279,6 +279,11 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 	 * stats have not been flushed yet.  Forget the pending deltas for those
 	 * counters, else they would be added on top of the new values at the
 	 * next flush.  A pending truncation reset is superseded as well.
+	 *
+	 * Likewise, the pending inserts must not count towards ins_since_vacuum,
+	 * which is reset below.  We can't just zero tuples_inserted, which also
+	 * feeds the cumulative tuples_inserted counter, so remember how many of
+	 * them the flush has to skip.
 	 */
 	if (pgstat_should_count_relation(rel))
 	{
@@ -288,6 +293,8 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 		pending->tab.counts_xact.delta_live_tuples = 0;
 		pending->tab.counts_xact.delta_dead_tuples = 0;
 		pending->tab.truncdropped = false;
+		pending->tab.ins_before_vacuum =
+			pending->tab.counts_xact.tuples_inserted;
 	}
 
 	/* Store the data in the table's hash table entry. */
@@ -993,7 +1000,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	 * triggering for inserts more often than they maybe should, which is
 	 * probably not going to be common enough to be too concerned about here.
 	 */
-	tabentry->ins_since_vacuum += lstats->tab.counts_xact.tuples_inserted;
+	tabentry->ins_since_vacuum += lstats->tab.counts_xact.tuples_inserted -
+		lstats->tab.ins_before_vacuum;
 
 	tabentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
 	tabentry->blocks_hit += lstats->tab.counts.blocks_hit;
