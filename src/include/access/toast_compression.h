@@ -52,6 +52,7 @@ typedef enum ToastCompressionId
 	TOAST_LZ4_COMPRESSION_ID = 1,
 	TOAST_ZSTD_COMPRESSION_ID = 2,
 	TOAST_INVALID_COMPRESSION_ID = 3,
+	TOAST_ZSTD_DICT_COMPRESSION_ID = 4,
 } ToastCompressionId;
 
 StaticAssertDecl(TOAST_INVALID_COMPRESSION_ID == VARLENA_COMPRESS_METHOD_LONG,
@@ -74,6 +75,20 @@ toast_compression_id_needs_cmid_byte(ToastCompressionId cmid)
 }
 
 /*
+ * Is this a compressed-in-line datum that needs a compression dictionary to
+ * be read?  Such a datum depends on catalog state of the column it belongs
+ * to, so code that makes values self-contained treats it like a TOAST
+ * pointer (see toast_dictionary.c).
+ */
+static inline bool
+VARATT_IS_COMPRESSED_DICT(const void *PTR)
+{
+	return VARATT_IS_COMPRESSED(PTR) &&
+		VARDATA_COMPRESSED_GET_COMPRESS_METHOD(PTR) ==
+		TOAST_ZSTD_DICT_COMPRESSION_ID;
+}
+
+/*
  * Built-in compression methods.  pg_attribute will store these in the
  * attcompression column.  In attcompression, InvalidCompressionMethod
  * denotes the default behavior.
@@ -81,6 +96,7 @@ toast_compression_id_needs_cmid_byte(ToastCompressionId cmid)
 #define TOAST_PGLZ_COMPRESSION			'p'
 #define TOAST_LZ4_COMPRESSION			'l'
 #define TOAST_ZSTD_COMPRESSION			'z'
+#define TOAST_ZSTD_DICT_COMPRESSION		'd'
 #define InvalidCompressionMethod		'\0'
 
 #define CompressionMethodIsValid(cm)  ((cm) != InvalidCompressionMethod)

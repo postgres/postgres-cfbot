@@ -326,6 +326,11 @@
      </row>
 
      <row>
+      <entry><link linkend="catalog-pg-toast-dictionary"><structname>pg_toast_dictionary</structname></link></entry>
+      <entry>compression dictionaries for TOAST</entry>
+     </row>
+
+     <row>
       <entry><link linkend="catalog-pg-transform"><structname>pg_transform</structname></link></entry>
       <entry>transforms (data type to procedural language conversions)</entry>
      </row>
@@ -8486,6 +8491,96 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
   </table>
  </sect1>
 
+
+ <sect1 id="catalog-pg-toast-dictionary">
+  <title><structname>pg_toast_dictionary</structname></title>
+
+  <indexterm zone="catalog-pg-toast-dictionary">
+   <primary>pg_toast_dictionary</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_toast_dictionary</structname> stores the
+   compression dictionaries used by the <literal>zstd_dict</literal> TOAST
+   compression method.  Each dictionary belongs to one column of one table;
+   it is created by <function>pg_train_toast_dictionary</function> and
+   removed when its column or table is dropped, or when a rewrite of the
+   table has recompressed every value that used it.  Values compressed with
+   a dictionary are never stored outside the column that owns it.
+  </para>
+
+  <para>
+   Since dictionaries are built from the contents of the column, this
+   catalog is not readable by the public.
+  </para>
+
+  <table>
+   <title><structname>pg_toast_dictionary</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       Dictionary identifier, as recorded in each value compressed with it
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tdrelid</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       The table owning the dictionary
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tdattnum</structfield> <type>int2</type>
+       (references <link linkend="catalog-pg-attribute"><structname>pg_attribute</structname></link>.<structfield>attnum</structfield>)
+      </para>
+      <para>
+       The column owning the dictionary
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tdcurrent</structfield> <type>bool</type>
+      </para>
+      <para>
+       True for the dictionary used to compress new values; a column has at
+       most one.  Other dictionaries of the column are kept only until the
+       next rewrite of the table.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tddict</structfield> <type>bytea</type>
+      </para>
+      <para>
+       Dictionary content, in the format of the zstd library
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect1>
 
  <sect1 id="catalog-pg-transform">
   <title><structname>pg_transform</structname></title>
