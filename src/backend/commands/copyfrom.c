@@ -44,6 +44,7 @@
 #include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
 #include "utils/lsyscache.h"
@@ -81,6 +82,7 @@ typedef struct CopyMultiInsertBuffer
 {
 	TupleTableSlot *slots[MAX_BUFFERED_TUPLES]; /* Array to store tuples */
 	ResultRelInfo *resultRelInfo;	/* ResultRelInfo for 'relid' */
+	BufferAccessStrategy strategy;	/* bulk-write buffer strategy */
 	BulkInsertState bistate;	/* BulkInsertState for this rel if plain
 								 * table; NULL if foreign table */
 	int			nused;			/* number of 'slots' containing tuples */
@@ -369,7 +371,16 @@ CopyMultiInsertBufferInit(ResultRelInfo *rri)
 	buffer = palloc_object(CopyMultiInsertBuffer);
 	memset(buffer->slots, 0, sizeof(TupleTableSlot *) * MAX_BUFFERED_TUPLES);
 	buffer->resultRelInfo = rri;
-	buffer->bistate = (rri->ri_FdwRoutine == NULL) ? GetBulkInsertState() : NULL;
+	if (rri->ri_FdwRoutine == NULL)
+	{
+		buffer->strategy = GetAccessStrategy(BAS_BULKWRITE);
+		buffer->bistate = GetBulkInsertState(buffer->strategy);
+	}
+	else
+	{
+		buffer->strategy = NULL;
+		buffer->bistate = NULL;
+	}
 	buffer->nused = 0;
 
 	return buffer;
@@ -635,9 +646,13 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
 	{
 		Assert(buffer->bistate != NULL);
 		FreeBulkInsertState(buffer->bistate);
+		FreeAccessStrategy(buffer->strategy);
 	}
 	else
+	{
 		Assert(buffer->bistate == NULL);
+		Assert(buffer->strategy == NULL);
+	}
 
 	/* Since we only create slots on demand, just drop the non-null ones. */
 	for (i = 0; i < MAX_BUFFERED_TUPLES && buffer->slots[i] != NULL; i++)
@@ -793,6 +808,7 @@ CopyFrom(CopyFromState cstate)
 	ErrorContextCallback errcallback;
 	CommandId	mycid = GetCurrentCommandId(true);
 	uint32		ti_options = 0; /* start with default options for insert */
+	BufferAccessStrategy strategy = NULL;
 	BulkInsertState bistate = NULL;
 	CopyInsertMethod insertMethod;
 	CopyMultiInsertInfo multiInsertInfo = {0};	/* pacify compiler */
@@ -1086,7 +1102,8 @@ CopyFrom(CopyFromState cstate)
 	{
 		singleslot = table_slot_create(resultRelInfo->ri_RelationDesc,
 									   &estate->es_tupleTable);
-		bistate = GetBulkInsertState();
+		strategy = GetAccessStrategy(BAS_BULKWRITE);
+		bistate = GetBulkInsertState(strategy);
 	}
 
 	has_before_insert_row_trig = (resultRelInfo->ri_TrigDesc &&
@@ -1484,6 +1501,8 @@ CopyFrom(CopyFromState cstate)
 
 	if (bistate != NULL)
 		FreeBulkInsertState(bistate);
+	if (strategy != NULL)
+		FreeAccessStrategy(strategy);
 
 	MemoryContextSwitchTo(oldcontext);
 

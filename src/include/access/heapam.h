@@ -371,7 +371,7 @@ extern bool heap_fetch(Relation relation, Snapshot snapshot,
 
 extern void heap_get_latest_tid(TableScanDesc sscan, ItemPointer tid);
 
-extern BulkInsertState GetBulkInsertState(void);
+extern BulkInsertState GetBulkInsertState(BufferAccessStrategy strategy);
 extern void FreeBulkInsertState(BulkInsertState);
 extern void ReleaseBulkInsertStatePin(BulkInsertState bistate);
 
