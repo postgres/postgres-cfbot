@@ -1460,3 +1460,51 @@ DROP TABLE ruletest_t2;
 DROP TABLE ruletest_t1;
 
 DROP USER regress_rule_user1;
+
+--
+-- An UPDATE, DELETE or MERGE target alias named "set" must be printed with
+-- AS, since a bare "set" would be taken as the SET keyword
+--
+create table ruletest_setalias (a int, b int);
+create rule ruletest_setalias_r1 as on insert to ruletest_setalias
+  do also update ruletest_setalias "set" set b = 1 where "set".a = 2;
+create rule ruletest_setalias_r2 as on insert to ruletest_setalias
+  do also delete from ruletest_setalias "set" where "set".a = 1;
+select rulename, pg_get_ruledef(oid) from pg_rewrite
+  where rulename like 'ruletest_setalias_r%' order by rulename;
+select pg_get_ruledef(oid) as def from pg_rewrite
+  where rulename = 'ruletest_setalias_r1' \gset
+drop rule ruletest_setalias_r1 on ruletest_setalias;
+:def
+select pg_get_ruledef(oid) from pg_rewrite
+  where rulename = 'ruletest_setalias_r1';
+select pg_get_ruledef(oid) as def from pg_rewrite
+  where rulename = 'ruletest_setalias_r2' \gset
+drop rule ruletest_setalias_r2 on ruletest_setalias;
+:def
+select pg_get_ruledef(oid) from pg_rewrite
+  where rulename = 'ruletest_setalias_r2';
+create table ruletest_setalias_m (a int, b int);
+create table ruletest_setalias_src (a int);
+create function ruletest_setalias_f() returns void language sql
+begin atomic
+  merge into ruletest_setalias_m "set"
+    using ruletest_setalias_src s on "set".a = s.a
+    when matched then update set b = 1;
+end;
+select pg_get_functiondef('ruletest_setalias_f'::regproc);
+select pg_get_functiondef('ruletest_setalias_f'::regproc) as def \gset
+drop function ruletest_setalias_f();
+:def;
+select pg_get_functiondef(oid) from pg_proc
+  where proname = 'ruletest_setalias_f';
+-- A FROM-clause alias named "set" does not need AS
+create view ruletest_setalias_v as
+  select "set".a from ruletest_setalias_m "set", ruletest_setalias_src s
+  where "set".a = s.a;
+select pg_get_viewdef('ruletest_setalias_v'::regclass);
+drop view ruletest_setalias_v;
+drop function ruletest_setalias_f();
+drop table ruletest_setalias_src;
+drop table ruletest_setalias_m;
+drop table ruletest_setalias;

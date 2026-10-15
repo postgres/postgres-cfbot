@@ -515,7 +515,7 @@ static void get_from_clause(Query *query, const char *prefix,
 static void get_from_clause_item(Node *jtnode, Query *query,
 								 deparse_context *context);
 static void get_rte_alias(RangeTblEntry *rte, int varno, bool use_as,
-						  deparse_context *context);
+						  bool dml_target, deparse_context *context);
 static void get_column_alias_list(deparse_columns *colinfo,
 								  deparse_context *context);
 static void get_from_clause_coldeflist(RangeTblFunction *rtfunc,
@@ -6998,7 +6998,7 @@ get_insert_query_def(Query *query, deparse_context *context)
 					 generate_relation_name(rte->relid, NIL));
 
 	/* Print the relation alias, if needed; INSERT requires explicit AS */
-	get_rte_alias(rte, query->resultRelation, true, context);
+	get_rte_alias(rte, query->resultRelation, true, false, context);
 
 	/* always want a space here */
 	appendStringInfoChar(buf, ' ');
@@ -7197,7 +7197,7 @@ get_update_query_def(Query *query, deparse_context *context)
 					 generate_relation_name(rte->relid, NIL));
 
 	/* Print the relation alias, if needed */
-	get_rte_alias(rte, query->resultRelation, false, context);
+	get_rte_alias(rte, query->resultRelation, false, true, context);
 
 	appendStringInfoString(buf, " SET ");
 
@@ -7401,7 +7401,7 @@ get_delete_query_def(Query *query, deparse_context *context)
 					 generate_relation_name(rte->relid, NIL));
 
 	/* Print the relation alias, if needed */
-	get_rte_alias(rte, query->resultRelation, false, context);
+	get_rte_alias(rte, query->resultRelation, false, true, context);
 
 	/* Add the USING clause if given */
 	get_from_clause(query, " USING ", context);
@@ -7450,7 +7450,7 @@ get_merge_query_def(Query *query, deparse_context *context)
 					 generate_relation_name(rte->relid, NIL));
 
 	/* Print the relation alias, if needed */
-	get_rte_alias(rte, query->resultRelation, false, context);
+	get_rte_alias(rte, query->resultRelation, false, true, context);
 
 	/* Print the source relation and join clause */
 	get_from_clause(query, " USING ", context);
@@ -12703,7 +12703,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 		}
 
 		/* Print the relation alias, if needed */
-		get_rte_alias(rte, varno, false, context);
+		get_rte_alias(rte, varno, false, false, context);
 
 		/* Print the column definitions or aliases, if needed */
 		if (rtfunc1 && rtfunc1->funccolnames != NIL)
@@ -12844,10 +12844,12 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 /*
  * get_rte_alias - print the relation's alias, if needed
  *
- * If printed, the alias is preceded by a space, or by " AS " if use_as is true.
+ * If printed, the alias is preceded by a space, or by " AS " if use_as is
+ * true.  " AS " is also used if dml_target is true and the alias is "set",
+ * which would otherwise be read as the SET keyword.
  */
 static void
-get_rte_alias(RangeTblEntry *rte, int varno, bool use_as,
+get_rte_alias(RangeTblEntry *rte, int varno, bool use_as, bool dml_target,
 			  deparse_context *context)
 {
 	deparse_namespace *dpns = (deparse_namespace *) linitial(context->namespaces);
@@ -12906,9 +12908,16 @@ get_rte_alias(RangeTblEntry *rte, int varno, bool use_as,
 			printalias = true;
 	}
 
+	/*
+	 * The target of UPDATE, DELETE and MERGE is parsed by
+	 * relation_expr_opt_alias, which gives the SET keyword precedence over a
+	 * bare alias named "set" (an unreserved keyword, so quote_identifier
+	 * leaves it bare).  Write AS in that case; elsewhere "set" is fine.
+	 */
 	if (printalias)
 		appendStringInfo(context->buf, "%s%s",
-						 use_as ? " AS " : " ",
+						 (use_as || (dml_target && strcmp(refname, "set") == 0)) ?
+						 " AS " : " ",
 						 quote_identifier(refname));
 }
 

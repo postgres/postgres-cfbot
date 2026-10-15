@@ -4153,3 +4153,112 @@ DROP TABLE ruletest_t3;
 DROP TABLE ruletest_t2;
 DROP TABLE ruletest_t1;
 DROP USER regress_rule_user1;
+--
+-- An UPDATE, DELETE or MERGE target alias named "set" must be printed with
+-- AS, since a bare "set" would be taken as the SET keyword
+--
+create table ruletest_setalias (a int, b int);
+create rule ruletest_setalias_r1 as on insert to ruletest_setalias
+  do also update ruletest_setalias "set" set b = 1 where "set".a = 2;
+create rule ruletest_setalias_r2 as on insert to ruletest_setalias
+  do also delete from ruletest_setalias "set" where "set".a = 1;
+select rulename, pg_get_ruledef(oid) from pg_rewrite
+  where rulename like 'ruletest_setalias_r%' order by rulename;
+       rulename       |                                     pg_get_ruledef                                      
+----------------------+-----------------------------------------------------------------------------------------
+ ruletest_setalias_r1 | CREATE RULE ruletest_setalias_r1 AS                                                    +
+                      |     ON INSERT TO public.ruletest_setalias DO  UPDATE ruletest_setalias AS set SET b = 1+
+                      |   WHERE (set.a = 2);
+ ruletest_setalias_r2 | CREATE RULE ruletest_setalias_r2 AS                                                    +
+                      |     ON INSERT TO public.ruletest_setalias DO  DELETE FROM ruletest_setalias AS set     +
+                      |   WHERE (set.a = 1);
+(2 rows)
+
+select pg_get_ruledef(oid) as def from pg_rewrite
+  where rulename = 'ruletest_setalias_r1' \gset
+drop rule ruletest_setalias_r1 on ruletest_setalias;
+:def
+select pg_get_ruledef(oid) from pg_rewrite
+  where rulename = 'ruletest_setalias_r1';
+                                     pg_get_ruledef                                      
+-----------------------------------------------------------------------------------------
+ CREATE RULE ruletest_setalias_r1 AS                                                    +
+     ON INSERT TO public.ruletest_setalias DO  UPDATE ruletest_setalias AS set SET b = 1+
+   WHERE (set.a = 2);
+(1 row)
+
+select pg_get_ruledef(oid) as def from pg_rewrite
+  where rulename = 'ruletest_setalias_r2' \gset
+drop rule ruletest_setalias_r2 on ruletest_setalias;
+:def
+select pg_get_ruledef(oid) from pg_rewrite
+  where rulename = 'ruletest_setalias_r2';
+                                   pg_get_ruledef                                   
+------------------------------------------------------------------------------------
+ CREATE RULE ruletest_setalias_r2 AS                                               +
+     ON INSERT TO public.ruletest_setalias DO  DELETE FROM ruletest_setalias AS set+
+   WHERE (set.a = 1);
+(1 row)
+
+create table ruletest_setalias_m (a int, b int);
+create table ruletest_setalias_src (a int);
+create function ruletest_setalias_f() returns void language sql
+begin atomic
+  merge into ruletest_setalias_m "set"
+    using ruletest_setalias_src s on "set".a = s.a
+    when matched then update set b = 1;
+end;
+select pg_get_functiondef('ruletest_setalias_f'::regproc);
+                   pg_get_functiondef                    
+---------------------------------------------------------
+ CREATE OR REPLACE FUNCTION public.ruletest_setalias_f()+
+  RETURNS void                                          +
+  LANGUAGE sql                                          +
+ BEGIN ATOMIC                                           +
+  MERGE INTO ruletest_setalias_m AS set                 +
+     USING ruletest_setalias_src s                      +
+     ON (set.a = s.a)                                   +
+     WHEN MATCHED                                       +
+      THEN UPDATE SET b = 1;                            +
+ END                                                    +
+ 
+(1 row)
+
+select pg_get_functiondef('ruletest_setalias_f'::regproc) as def \gset
+drop function ruletest_setalias_f();
+:def;
+select pg_get_functiondef(oid) from pg_proc
+  where proname = 'ruletest_setalias_f';
+                   pg_get_functiondef                    
+---------------------------------------------------------
+ CREATE OR REPLACE FUNCTION public.ruletest_setalias_f()+
+  RETURNS void                                          +
+  LANGUAGE sql                                          +
+ BEGIN ATOMIC                                           +
+  MERGE INTO ruletest_setalias_m AS set                 +
+     USING ruletest_setalias_src s                      +
+     ON (set.a = s.a)                                   +
+     WHEN MATCHED                                       +
+      THEN UPDATE SET b = 1;                            +
+ END                                                    +
+ 
+(1 row)
+
+-- A FROM-clause alias named "set" does not need AS
+create view ruletest_setalias_v as
+  select "set".a from ruletest_setalias_m "set", ruletest_setalias_src s
+  where "set".a = s.a;
+select pg_get_viewdef('ruletest_setalias_v'::regclass);
+          pg_get_viewdef          
+----------------------------------
+  SELECT set.a                   +
+    FROM ruletest_setalias_m set,+
+     ruletest_setalias_src s     +
+   WHERE (set.a = s.a);
+(1 row)
+
+drop view ruletest_setalias_v;
+drop function ruletest_setalias_f();
+drop table ruletest_setalias_src;
+drop table ruletest_setalias_m;
+drop table ruletest_setalias;
