@@ -20,6 +20,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_publication.h"
+#include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "partitioning/partdefs.h"
 #include "rewrite/prs2lock.h"
@@ -315,6 +316,28 @@ typedef struct ViewOptions
 #define RelationIsIndex(relation) \
 	((relation)->rd_rel->relkind == RELKIND_INDEX || \
 	 (relation)->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+
+/*
+ * RelationGetLockRelId
+ *		Returns the LockRelId to use for locking the relation.
+ *
+ * This used to be a field cached in the relation descriptor
+ * (rd_lockInfo.lockRelId), populated once by RelationInitLockInfo().  It's
+ * cheap enough to compute on the fly instead, which lets us avoid storing
+ * it.  Note that we can't derive dbId from rd_locator.dbOid: relation kinds
+ * without storage (e.g. partitioned tables/indexes, views) never have
+ * rd_locator populated, so we replicate the original relisshared-based
+ * computation instead.
+ */
+static inline LockRelId
+RelationGetLockRelId(Relation relation)
+{
+	LockRelId	lockRelId;
+
+	lockRelId.relId = RelationGetRelid(relation);
+	lockRelId.dbId = relation->rd_rel->relisshared ? InvalidOid : MyDatabaseId;
+	return lockRelId;
+}
 
 /*
  * RelationGetNumberOfAttributes

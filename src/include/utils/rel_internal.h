@@ -19,6 +19,8 @@
 /*
  * LockRelId and LockInfo really belong to lmgr.h, but it's more convenient
  * to declare them here so we can have a LockInfoData field in a Relation.
+ * Moving them to lmgr.h would require including rel.h in lmgr.h, which creates
+ * a circular dependency.
  */
 
 typedef struct LockRelId
@@ -26,13 +28,6 @@ typedef struct LockRelId
 	Oid			relId;			/* a relation identifier */
 	Oid			dbId;			/* a database identifier */
 } LockRelId;
-
-typedef struct LockInfoData
-{
-	LockRelId	lockRelId;
-} LockInfoData;
-
-typedef LockInfoData *LockInfo;
 
 /*
  * RelationPartitionInfo
@@ -250,8 +245,6 @@ typedef struct RelationData
 	 * need to be able to initialize rd_tableam without syscache lookups.
 	 */
 	Oid			rd_amhandler;	/* OID of index AM's handler function */
-
-	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
 
 	/*
 	 * Data managed by RelationGetPartitionKey(), RelationGetPartitionDesc(),
