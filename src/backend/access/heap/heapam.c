@@ -58,7 +58,8 @@
 
 
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
-									 TransactionId xid, CommandId cid, uint32 options);
+									 TransactionId xid, CommandId cid, uint32 options,
+									 BulkInsertState bistate);
 static XLogRecPtr log_heap_update(Relation reln, Buffer oldbuf,
 								  Buffer vmbuffer_old, Buffer newbuf,
 								  Buffer vmbuffer_new, HeapTuple oldtup,
@@ -1960,6 +1961,7 @@ GetBulkInsertState(Relation relation, BufferAccessStrategy strategy)
 	bistate = (BulkInsertState) palloc_object(BulkInsertStateData);
 	bistate->strategy = strategy;
 	bistate->relation_id = RelationGetRelid(relation);
+	bistate->toast_state = NULL;
 	bistate->current_buf = InvalidBuffer;
 	bistate->next_free = InvalidBlockNumber;
 	bistate->last_free = InvalidBlockNumber;
@@ -1973,6 +1975,8 @@ GetBulkInsertState(Relation relation, BufferAccessStrategy strategy)
 void
 FreeBulkInsertState(BulkInsertState bistate)
 {
+	if (bistate->toast_state != NULL)
+		FreeBulkInsertState(bistate->toast_state);
 	if (bistate->current_buf != InvalidBuffer)
 		ReleaseBuffer(bistate->current_buf);
 	pfree(bistate);
@@ -1986,6 +1990,9 @@ FreeBulkInsertState(BulkInsertState bistate)
 void
 ReleaseBulkInsertStatePin(BulkInsertState bistate)
 {
+	if (bistate->toast_state != NULL)
+		ReleaseBulkInsertStatePin(bistate->toast_state);
+
 	if (bistate->current_buf != InvalidBuffer)
 		ReleaseBuffer(bistate->current_buf);
 	bistate->current_buf = InvalidBuffer;
@@ -2039,7 +2046,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	 * Note: below this point, heaptup is the data we actually intend to store
 	 * into the relation; tup is the caller's original untoasted data.
 	 */
-	heaptup = heap_prepare_insert(relation, tup, xid, cid, options);
+	heaptup = heap_prepare_insert(relation, tup, xid, cid, options, bistate);
 
 	/*
 	 * Find buffer to insert this tuple into.  If the page is all visible,
@@ -2240,7 +2247,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
  */
 static HeapTuple
 heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
-					CommandId cid, uint32 options)
+					CommandId cid, uint32 options, BulkInsertState bistate)
 {
 	/*
 	 * To allow parallel inserts, we need to ensure that they are safe to be
@@ -2276,7 +2283,7 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 		return tup;
 	}
 	else if (HeapTupleHasExternal(tup) || tup->t_len > TOAST_TUPLE_THRESHOLD)
-		return heap_toast_insert_or_update(relation, tup, NULL, options);
+		return heap_toast_insert_or_update(relation, tup, NULL, options, bistate);
 	else
 		return tup;
 }
@@ -2358,7 +2365,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		slots[i]->tts_tableOid = RelationGetRelid(relation);
 		tuple->t_tableOid = slots[i]->tts_tableOid;
 		heaptuples[i] = heap_prepare_insert(relation, tuple, xid, cid,
-											options);
+											options, bistate);
 	}
 
 	/*
@@ -3993,7 +4000,8 @@ l2:
 			 * tuples too. We never skip the FSM here.
 			 */
 			heaptup = heap_toast_insert_or_update(relation, newtup, &oldtup,
-												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL);
+												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL,
+												  NULL);
 			newtupsize = MAXALIGN(heaptup->t_len);
 		}
 		else
