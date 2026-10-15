@@ -1466,7 +1466,9 @@ table_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
  *
  * A BulkInsertState object (if any; bistate can be NULL for default behavior)
  * belongs to one relation and allows the AM to optimize a series of inserts.
- * If `bistate` is provided, table_finish_bulk_insert() needs to be called.
+ * The heap AM creates a related state for the TOAST relation that shares the
+ * same buffer access strategy. If `bistate` is provided,
+ * table_finish_bulk_insert() needs to be called.
  *
  * On return the slot's tts_tid and tts_tableOid are updated to reflect the
  * insertion. But note that any toasting of fields within the slot is NOT
