@@ -631,6 +631,10 @@ libpqrcv_startstreaming(WalReceiverConn *conn,
 			appendQuotedLiteral(&cmd, options->proto.logical.origin);
 		}
 
+		if (options->proto.logical.messages &&
+			PQserverVersion(conn->streamConn) >= 140000)
+			appendStringInfo(&cmd, ", messages 'on'");
+
 		pubnames = options->proto.logical.publication_names;
 		pubnames_str = stringlist_to_identifierstr(pubnames);
 		appendStringInfoString(&cmd, ", publication_names ");
