@@ -7736,7 +7736,9 @@ local0.*    /var/log/postgresql
          operation. The default is 10 seconds. A setting of <literal>0</literal>
          disables the feature.  If this value is specified without units,
          it is taken as milliseconds.  This setting is applied separately to
-         each operation.
+         each operation, such as WAL replay, syncing the data
+         directory, and resetting unlogged relations.  On a standby server,
+         however, it does not apply during WAL replay.
          This parameter can only be set in the <filename>postgresql.conf</filename>
          file or on the server command line.
         </para>
