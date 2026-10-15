@@ -5510,30 +5510,28 @@ select * from
          join (select 3 as y) on i is not null
      ),
      lateral (select k as kl limit 1);
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Nested Loop
-   Output: COALESCE(t.i, (1)), ((COALESCE(t.i, (1))))
-   ->  Limit
-         Output: 1
-         ->  Result
-               Output: 1
+   Output: (COALESCE(t.i, (1))), ((COALESCE(t.i, (1))))
    ->  Nested Loop
-         Output: t.i, ((COALESCE(t.i, (1))))
-         ->  Result
-               Output: t.i, COALESCE(t.i, (1))
-               ->  Append
-                     ->  Index Only Scan using t_pkey on pg_temp.t
-                           Output: t.i
-                           Index Cond: (t.i = (1))
-                     ->  Result
-                           Output: 0
-                           One-Time Filter: ((1) = 0)
+         Output: COALESCE(t.i, (1))
          ->  Limit
-               Output: ((COALESCE(t.i, (1))))
+               Output: 1
                ->  Result
-                     Output: (COALESCE(t.i, (1)))
-(21 rows)
+                     Output: 1
+         ->  Append
+               ->  Index Only Scan using t_pkey on pg_temp.t
+                     Output: t.i
+                     Index Cond: (t.i = (1))
+               ->  Result
+                     Output: 0
+                     One-Time Filter: ((1) = 0)
+   ->  Limit
+         Output: ((COALESCE(t.i, (1))))
+         ->  Result
+               Output: (COALESCE(t.i, (1)))
+(19 rows)
 
 rollback;
 -- PHVs containing SubLinks are quite tricky to get right
