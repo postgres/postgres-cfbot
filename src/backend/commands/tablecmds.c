@@ -6207,6 +6207,7 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 	ListCell   *l;
 	EState	   *estate;
 	CommandId	mycid;
+	BufferAccessStrategy strategy;
 	BulkInsertState bistate;
 	uint32		ti_options;
 	ExprState  *partqualstate = NULL;
@@ -6235,13 +6236,15 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 	if (newrel)
 	{
 		mycid = GetCurrentCommandId(true);
-		bistate = GetBulkInsertState();
+		strategy = GetAccessStrategy(BAS_BULKWRITE);
+		bistate = GetBulkInsertState(strategy);
 		ti_options = TABLE_INSERT_SKIP_FSM;
 	}
 	else
 	{
 		/* keep compiler quiet about using these uninitialized */
 		mycid = 0;
+		strategy = NULL;
 		bistate = NULL;
 		ti_options = 0;
 	}
@@ -6620,6 +6623,7 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 	if (newrel)
 	{
 		FreeBulkInsertState(bistate);
+		FreeAccessStrategy(strategy);
 
 		table_finish_bulk_insert(newrel, ti_options);
 

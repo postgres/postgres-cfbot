@@ -21,8 +21,8 @@
 /*
  * state for bulk inserts --- private to heapam.c and hio.c
  *
- * If current_buf isn't InvalidBuffer, then we are holding an extra pin
- * on that buffer.
+ * The caller owns the buffer access strategy. If current_buf isn't
+ * InvalidBuffer, then we are holding an extra pin on that buffer.
  *
  * "typedef struct BulkInsertStateData *BulkInsertState" is in heapam.h
  */

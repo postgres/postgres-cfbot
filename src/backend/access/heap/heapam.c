@@ -1935,14 +1935,18 @@ UpdateXmaxHintBits(HeapTupleHeader tuple, Buffer buffer, TransactionId xid)
 
 /*
  * GetBulkInsertState - prepare status object for a bulk insert
+ *
+ * The caller owns strategy and may share it with other bulk insert states.
  */
 BulkInsertState
-GetBulkInsertState(void)
+GetBulkInsertState(BufferAccessStrategy strategy)
 {
 	BulkInsertState bistate;
 
+	Assert(strategy != NULL);
+
 	bistate = (BulkInsertState) palloc_object(BulkInsertStateData);
-	bistate->strategy = GetAccessStrategy(BAS_BULKWRITE);
+	bistate->strategy = strategy;
 	bistate->current_buf = InvalidBuffer;
 	bistate->next_free = InvalidBlockNumber;
 	bistate->last_free = InvalidBlockNumber;
@@ -1958,7 +1962,6 @@ FreeBulkInsertState(BulkInsertState bistate)
 {
 	if (bistate->current_buf != InvalidBuffer)
 		ReleaseBuffer(bistate->current_buf);
-	FreeAccessStrategy(bistate->strategy);
 	pfree(bistate);
 }
 

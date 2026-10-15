@@ -42,6 +42,7 @@
 #include "nodes/queryjumble.h"
 #include "parser/analyze.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/bufmgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -57,6 +58,7 @@ typedef struct
 	ObjectAddress reladdr;		/* address of rel, for ExecCreateTableAs */
 	CommandId	output_cid;		/* cmin to insert in output tuples */
 	uint32		ti_options;		/* table_tuple_insert performance options */
+	BufferAccessStrategy strategy;	/* bulk-write buffer strategy */
 	BulkInsertState bistate;	/* bulk insert state */
 } DR_intorel;
 
@@ -565,9 +567,15 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	 * bulk inserts as there are no tuples to insert.
 	 */
 	if (!into->skipData)
-		myState->bistate = GetBulkInsertState();
+	{
+		myState->strategy = GetAccessStrategy(BAS_BULKWRITE);
+		myState->bistate = GetBulkInsertState(myState->strategy);
+	}
 	else
+	{
+		myState->strategy = NULL;
 		myState->bistate = NULL;
+	}
 
 	/*
 	 * Valid smgr_targblock implies something already wrote to the relation.
@@ -619,6 +627,7 @@ intorel_shutdown(DestReceiver *self)
 	if (!into->skipData)
 	{
 		FreeBulkInsertState(myState->bistate);
+		FreeAccessStrategy(myState->strategy);
 		table_finish_bulk_insert(myState->rel, myState->ti_options);
 	}
 

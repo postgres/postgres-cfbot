@@ -33,6 +33,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
@@ -50,6 +51,7 @@ typedef struct
 	Relation	transientrel;	/* relation to write to */
 	CommandId	output_cid;		/* cmin to insert in output tuples */
 	uint32		ti_options;		/* table_tuple_insert performance options */
+	BufferAccessStrategy strategy;	/* bulk-write buffer strategy */
 	BulkInsertState bistate;	/* bulk insert state */
 } DR_transientrel;
 
@@ -493,7 +495,8 @@ transientrel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	myState->transientrel = transientrel;
 	myState->output_cid = GetCurrentCommandId(true);
 	myState->ti_options = TABLE_INSERT_SKIP_FSM | TABLE_INSERT_FROZEN;
-	myState->bistate = GetBulkInsertState();
+	myState->strategy = GetAccessStrategy(BAS_BULKWRITE);
+	myState->bistate = GetBulkInsertState(myState->strategy);
 
 	/*
 	 * Valid smgr_targblock implies something already wrote to the relation.
@@ -539,6 +542,7 @@ transientrel_shutdown(DestReceiver *self)
 	DR_transientrel *myState = (DR_transientrel *) self;
 
 	FreeBulkInsertState(myState->bistate);
+	FreeAccessStrategy(myState->strategy);
 
 	table_finish_bulk_insert(myState->transientrel, myState->ti_options);
 
