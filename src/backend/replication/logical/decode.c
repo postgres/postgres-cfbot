@@ -68,6 +68,8 @@ static inline bool FilterPrepare(LogicalDecodingContext *ctx,
 static bool DecodeTXNNeedSkip(LogicalDecodingContext *ctx,
 							  XLogRecordBuffer *buf, Oid txn_dbid,
 							  ReplOriginId origin_id);
+static bool InvalidationsTouchSharedCatalog(uint32 nmsgs,
+											SharedInvalidationMessage *msgs);
 
 /*
  * Take every XLogReadRecord()ed record and perform the actions required to
@@ -692,6 +694,7 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	XLogRecPtr	origin_lsn = InvalidXLogRecPtr;
 	TimestampTz commit_time = parsed->xact_time;
 	ReplOriginId origin_id = XLogRecGetOrigin(buf->record);
+	bool		catalog_changes_relevant = true;
 	int			i;
 
 	if (parsed->xinfo & XACT_XINFO_HAS_ORIGIN)
@@ -700,9 +703,25 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 		commit_time = parsed->origin_timestamp;
 	}
 
+	/*
+	 * Catalog changes committed in another database cannot influence the
+	 * decoding of this slot, unless shared catalogs were touched.  All
+	 * changes to shared catalogs produce invalidation messages, so we can
+	 * use the presence of such messages to determine that.
+	 */
+	if (parsed->dbId != InvalidOid &&
+		parsed->dbId != ctx->slot->data.database &&
+		!InvalidationsTouchSharedCatalog(parsed->nmsgs, parsed->msgs))
+		catalog_changes_relevant = false;
+
+	elog(DEBUG1,
+		 "transaction %u committed in database %u %s catalog changes relevant",
+		 xid, parsed->dbId,
+		 catalog_changes_relevant ? "has" : "does not have");
+
 	SnapBuildCommitTxn(ctx->snapshot_builder, buf->origptr, xid,
 					   parsed->nsubxacts, parsed->subxacts,
-					   parsed->xinfo);
+					   parsed->xinfo, catalog_changes_relevant);
 
 	/* ----
 	 * Check whether we are interested in this specific transaction, and tell
@@ -1356,6 +1375,64 @@ DecodeTXNNeedSkip(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	{
 		ctx->processing_required = true;
 		return true;
+	}
+
+	return false;
+}
+
+/*
+ * Check whether any of the given invalidation messages concerns a shared
+ * catalog.
+ */
+static bool
+InvalidationsTouchSharedCatalog(uint32 nmsgs, SharedInvalidationMessage *msgs)
+{
+	uint32		i;
+
+	for (i = 0; i < nmsgs; i++)
+	{
+		SharedInvalidationMessage *msg = &msgs[i];
+
+		if (msg->id >= 0)
+		{
+			/* catcache message; dbId is 0 for a shared catalog */
+			if (msg->cc.dbId == InvalidOid)
+				return true;
+		}
+		else if (msg->id == SHAREDINVALCATALOG_ID)
+		{
+			if (msg->cat.dbId == InvalidOid)
+				return true;
+		}
+		else if (msg->id == SHAREDINVALRELCACHE_ID)
+		{
+			/*
+			 * Be conservative as shared, although this does not mean a
+			 * shared catalog changed if relId is also InvalidOid, such as
+			 * in publication DDL
+			 */
+			if (msg->rc.dbId == InvalidOid)
+				return true;
+		}
+		else if (msg->id == SHAREDINVALSNAPSHOT_ID)
+		{
+			if (msg->sn.dbId == InvalidOid)
+				return true;
+		}
+		else if (msg->id == SHAREDINVALRELSYNC_ID)
+		{
+			if (msg->rs.dbId == InvalidOid)
+				return true;
+		}
+		else
+		{
+			/*
+			 * smgr and relmap invalidations are non-transactional,
+			 * so they cannot show up in a commit record.
+			 */
+			elog(ERROR, "unrecognized invalidation message ID %d",
+				 msg->id);
+		}
 	}
 
 	return false;
