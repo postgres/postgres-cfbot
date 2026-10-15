@@ -145,7 +145,7 @@ static void pgwin32_SetServiceStatus(DWORD);
 static void WINAPI pgwin32_ServiceHandler(DWORD);
 static void WINAPI pgwin32_ServiceMain(DWORD, LPTSTR *);
 static void pgwin32_doRunAsService(void);
-static int	CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_service);
+static int	CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_service, bool direct_start);
 static PTOKEN_PRIVILEGES GetPrivilegesToDelete(HANDLE hToken);
 #endif
 
@@ -435,12 +435,7 @@ free_readfile(char **optlines)
 /*
  * Start the postmaster and return its PID.
  *
- * Currently, on Windows what we return is the PID of the shell process
- * that launched the postmaster (and, we trust, is waiting for it to exit).
- * So the PID is usable for "is the postmaster still running" checks,
- * but cannot be compared directly to postmaster.pid.
- *
- * On Windows, we also save aside a handle to the shell process in
+ * On Windows, we also save aside a handle to the postmaster process in
  * "postmasterProcess", which the caller should close when done with it.
  */
 static pid_t
@@ -512,71 +507,21 @@ start_postmaster(void)
 
 #else							/* WIN32 */
 
-	/*
-	 * As with the Unix case, it's easiest to use the shell (CMD.EXE) to
-	 * handle redirection etc.  Unfortunately CMD.EXE lacks any equivalent of
-	 * "exec", so we don't get to find out the postmaster's PID immediately.
-	 */
 	PROCESS_INFORMATION pi;
-	const char *comspec;
 
-	/* Find CMD.EXE location using COMSPEC, if it's set */
-	comspec = getenv("COMSPEC");
-	if (comspec == NULL)
-		comspec = "CMD";
-
-	if (log_file != NULL)
-	{
-		/*
-		 * First, open the log file if it exists.  The idea is that if the
-		 * file is still locked by a previous postmaster run, we'll wait until
-		 * it comes free, instead of failing with ERROR_SHARING_VIOLATION.
-		 * (It'd be better to open the file in a sharing-friendly mode, but we
-		 * can't use CMD.EXE to do that, so work around it.  Note that the
-		 * previous postmaster will still have the file open for a short time
-		 * after removing postmaster.pid.)
-		 *
-		 * If the log file doesn't exist, we *must not* create it here.  If we
-		 * were launched with higher privileges than the restricted process
-		 * will have, the log file might end up with permissions settings that
-		 * prevent the postmaster from writing on it.
-		 */
-		int			fd = open(log_file, O_RDWR, 0);
-
-		if (fd == -1)
-		{
-			/*
-			 * ENOENT is expectable since we didn't use O_CREAT.  Otherwise
-			 * complain.  We could just fall through and let CMD.EXE report
-			 * the problem, but its error reporting is pretty miserable.
-			 */
-			if (errno != ENOENT)
-			{
-				write_stderr(_("%s: could not open log file \"%s\": %m\n"),
-							 progname, log_file);
-				exit(1);
-			}
-		}
-		else
-			close(fd);
-
-		cmd = psprintf("\"%s\" /C \"\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1\"",
-					   comspec, exec_path, pgdata_opt, post_opts, DEVNULL, log_file);
-	}
-	else
-		cmd = psprintf("\"%s\" /C \"\"%s\" %s%s < \"%s\" 2>&1\"",
-					   comspec, exec_path, pgdata_opt, post_opts, DEVNULL);
-
-	if (!CreateRestrictedProcess(cmd, &pi, false))
+	/* Launch postgres directly so the returned PID identifies the postmaster. */
+	cmd = psprintf("\"%s\" %s%s", exec_path, pgdata_opt, post_opts);
+	if (!CreateRestrictedProcess(cmd, &pi, false, true))
 	{
 		write_stderr(_("%s: could not start server: error code %lu\n"),
 					 progname, GetLastError());
 		exit(1);
 	}
-	/* Don't close command process handle here; caller must do so */
+	free(cmd);
 	postmasterProcess = pi.hProcess;
 	CloseHandle(pi.hThread);
-	return pi.dwProcessId;		/* Shell's PID, not postmaster's! */
+	return pi.dwProcessId;
+
 #endif							/* WIN32 */
 }
 
@@ -585,13 +530,8 @@ start_postmaster(void)
 /*
  * Wait for the postmaster to become ready.
  *
- * On Unix, pm_pid is the PID of the just-launched postmaster.  On Windows,
- * it may be the PID of an ancestor shell process, so we can't check the
- * contents of postmaster.pid quite as carefully.
- *
- * On Windows, the static variable postmasterProcess is an implicit argument
- * to this routine; it contains a handle to the postmaster process or an
- * ancestor shell process thereof.
+ * pm_pid is the PID of the just-launched postmaster on both platforms.
+ * On Windows, postmasterProcess holds its process handle.
  *
  * Note that the checkpoint parameter enables a Windows service control
  * manager checkpoint, it's got nothing to do with database checkpoints!!
@@ -627,12 +567,7 @@ wait_for_postmaster_start(pid_t pm_pid, bool do_checkpoint)
 			pmpid = atol(optlines[LOCK_FILE_LINE_PID - 1]);
 			pmstart = atoll(optlines[LOCK_FILE_LINE_START_TIME - 1]);
 			if (pmstart >= start_time - 2 &&
-#ifndef WIN32
 				pmpid == pm_pid
-#else
-			/* Windows can only reject standalone-backend PIDs */
-				pmpid > 0
-#endif
 				)
 			{
 				/*
@@ -661,9 +596,6 @@ wait_for_postmaster_start(pid_t pm_pid, bool do_checkpoint)
 		/*
 		 * Check whether the child postmaster process is still alive.  This
 		 * lets us exit early if the postmaster fails during startup.
-		 *
-		 * On Windows, we may be checking the postmaster's parent shell, but
-		 * that's fine for this purpose.
 		 */
 		{
 			bool		pm_died;
@@ -1023,7 +955,7 @@ do_start(void)
 		print_msg(_("server starting\n"));
 
 #ifdef WIN32
-	/* Now we don't need the handle to the shell process anymore */
+	/* Now we don't need the handle to the postmaster process anymore */
 	CloseHandle(postmasterProcess);
 	postmasterProcess = INVALID_HANDLE_VALUE;
 #endif
@@ -1656,7 +1588,7 @@ pgwin32_ServiceMain(DWORD argc, LPTSTR *argv)
 
 	/* Start the postmaster */
 	pgwin32_SetServiceStatus(SERVICE_START_PENDING);
-	if (!CreateRestrictedProcess(pgwin32_CommandLine(false), &pi, true))
+	if (!CreateRestrictedProcess(pgwin32_CommandLine(false), &pi, true, false))
 	{
 		pgwin32_SetServiceStatus(SERVICE_STOPPED);
 		return;
@@ -1772,7 +1704,7 @@ InheritStdHandles(STARTUPINFO *si)
  * automatically destroyed when pg_ctl exits.
  */
 static int
-CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_service)
+CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_service, bool direct_start)
 {
 	int			r;
 	BOOL		b;
@@ -1783,6 +1715,10 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 	SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
 	SID_AND_ATTRIBUTES dropSids[2];
 	PTOKEN_PRIVILEGES delPrivs;
+
+	HANDLE		input = INVALID_HANDLE_VALUE;
+	HANDLE		output = INVALID_HANDLE_VALUE;
+	DWORD		launch_error;
 
 	ZeroMemory(&si, sizeof(si));
 	si.cb = sizeof(si);
@@ -1848,7 +1784,78 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 	}
 
 	AddUserToTokenDacl(restrictedToken);
+	if (direct_start)
+	{
+		SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+
+		/* Create redirection files with the child's restricted identity. */
+		if (!ImpersonateLoggedOnUser(restrictedToken))
+		{
+			launch_error = GetLastError();
+			CloseHandle(restrictedToken);
+			SetLastError(launch_error);
+			return 0;
+		}
+		input = CreateFile(DEVNULL, GENERIC_READ,
+						   FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+						   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (input != INVALID_HANDLE_VALUE && log_file != NULL)
+		{
+			int loops = 0;
+
+			/* Retain pgwin32_open's bounded sharing/locking retry policy. */
+			for (;;)
+			{
+				DWORD error;
+
+				output = CreateFile(log_file, FILE_APPEND_DATA,
+								FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+								OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+				if (output != INVALID_HANDLE_VALUE)
+					break;
+				error = GetLastError();
+				if ((error != ERROR_SHARING_VIOLATION &&
+					 error != ERROR_LOCK_VIOLATION) || loops++ >= 300)
+					break;
+				pg_usleep(100000);
+			}
+		}
+		launch_error = GetLastError();
+		/* Never continue under an unexpected impersonation context. */
+		if (!RevertToSelf())
+		{
+			write_stderr(_("%s: could not revert restricted token: error code %lu\n"),
+						 progname, GetLastError());
+			exit(1);
+		}
+		if (input == INVALID_HANDLE_VALUE ||
+			(log_file != NULL && output == INVALID_HANDLE_VALUE))
+		{
+			if (input != INVALID_HANDLE_VALUE)
+				CloseHandle(input);
+			CloseHandle(restrictedToken);
+			SetLastError(launch_error);
+			return 0;
+		}
+		si.hStdInput = input;
+		if (log_file != NULL)
+			si.hStdOutput = output;
+		si.hStdError = si.hStdOutput;
+	}
+
 	r = CreateProcessAsUser(restrictedToken, NULL, cmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, processInfo);
+
+	launch_error = GetLastError();
+	if (input != INVALID_HANDLE_VALUE)
+		CloseHandle(input);
+	if (output != INVALID_HANDLE_VALUE)
+		CloseHandle(output);
+	if (!r)
+	{
+		CloseHandle(restrictedToken);
+		SetLastError(launch_error);
+		return 0;
+	}
 
 	if (IsProcessInJob(processInfo->hProcess, NULL, &inJob))
 	{
