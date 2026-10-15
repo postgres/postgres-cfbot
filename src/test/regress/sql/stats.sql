@@ -185,7 +185,7 @@ CALL stats_pending_proc();
 INSERT INTO stats_pending_vacuum SELECT generate_series(1, 10);
 VACUUM stats_pending_vacuum;
 SELECT pg_stat_force_next_flush();
-SELECT relname, n_live_tup, n_dead_tup, n_mod_since_analyze
+SELECT relname, n_live_tup, n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum
   FROM pg_stat_user_tables
  WHERE relname LIKE 'stats_pending_%' ORDER BY relname;
 DROP PROCEDURE stats_pending_proc();
