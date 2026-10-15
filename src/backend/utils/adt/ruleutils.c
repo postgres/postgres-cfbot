@@ -102,6 +102,18 @@
 #define PRETTY_INDENT(context)	((context)->prettyFlags & PRETTYFLAG_INDENT)
 #define PRETTY_SCHEMA(context)	((context)->prettyFlags & PRETTYFLAG_SCHEMA)
 
+/*
+ * Precedence levels for parenthesizing the test expression of a sublink,
+ * after the precedence declarations in gram.y, loosest first
+ */
+#define SUBLINK_PREC_CMP	1	/* < > = <= >= <> */
+#define SUBLINK_PREC_IN		2	/* IN */
+#define SUBLINK_PREC_OP		3	/* any other operator, and qualified ones */
+#define SUBLINK_PREC_ADD	4	/* additive operators: + - */
+#define SUBLINK_PREC_MUL	5	/* multiplicative operators: * / % */
+#define SUBLINK_PREC_EXP	6	/* ^ */
+#define SUBLINK_PREC_TOP	7	/* unary + -, tighter than any of the above */
+
 
 /* ----------
  * Local data types
@@ -8875,6 +8887,133 @@ get_simple_binary_op_name(OpExpr *expr)
 
 
 /*
+ * Binary operator names that have a precedence of their own in gram.y.  Any
+ * other operator, including a schema-qualified one, has the precedence of Op.
+ */
+static const struct
+{
+	const char *name;
+	int			prec;
+}			sublink_binop_precs[] =
+
+{
+	{"<", SUBLINK_PREC_CMP},
+	{">", SUBLINK_PREC_CMP},
+	{"=", SUBLINK_PREC_CMP},
+	{"<=", SUBLINK_PREC_CMP},
+	{">=", SUBLINK_PREC_CMP},
+	{"<>", SUBLINK_PREC_CMP},
+	{"+", SUBLINK_PREC_ADD},
+	{"-", SUBLINK_PREC_ADD},
+	{"*", SUBLINK_PREC_MUL},
+	{"/", SUBLINK_PREC_MUL},
+	{"%", SUBLINK_PREC_MUL},
+	{"^", SUBLINK_PREC_EXP},
+};
+
+/*
+ * The precedence level of a binary operator, by the name that is printed
+ * for it.
+ */
+static int
+sublink_binop_prec(const char *opname)
+{
+	for (int i = 0; i < lengthof(sublink_binop_precs); i++)
+	{
+		if (strcmp(opname, sublink_binop_precs[i].name) == 0)
+			return sublink_binop_precs[i].prec;
+	}
+	return SUBLINK_PREC_OP;
+}
+
+/*
+ * Decide whether the test expression of a sublink can be printed without
+ * parentheses before IN or the combining operator.  If this can tell, set
+ * *simple and return true; otherwise return false, leaving the decision to
+ * the general rules of isSimpleNode().
+ */
+static bool
+sublink_testexpr_is_simple(Node *node, SubLink *sublink, bool *simple)
+{
+	OpExpr	   *combop;
+	char	   *opname;
+	int			combprec;
+	int			prec;
+
+	/* only get_sublink_expr() passes a sublink, for a single OpExpr */
+	Assert(sublink->testexpr && IsA(sublink->testexpr, OpExpr));
+	combop = (OpExpr *) sublink->testexpr;
+	opname = generate_operator_name(combop->opno,
+									exprType(linitial(combop->args)),
+									exprType(lsecond(combop->args)));
+	if (sublink->subLinkType == ANY_SUBLINK && strcmp(opname, "=") == 0)
+		combprec = SUBLINK_PREC_IN; /* printed as IN */
+	else
+		combprec = sublink_binop_prec(opname);
+
+	switch (nodeTag(node))
+	{
+		case T_SubLink:			/* own parentheses */
+		case T_RowCompareExpr:	/* own parentheses */
+		case T_ScalarArrayOpExpr:	/* x op ANY (array), ends in ")" */
+		case T_BooleanTest:		/* IS TRUE and the like, postfix */
+		case T_JsonIsPredicate: /* IS JSON, postfix */
+		case T_CollateExpr:		/* COLLATE name, postfix */
+		case T_RelabelType:		/* ::type, implicit casts shown too */
+		case T_CoerceViaIO:		/* ::type */
+		case T_ArrayCoerceExpr: /* ::type */
+		case T_ConvertRowtypeExpr:	/* ::type */
+		case T_CoerceToDomain:	/* ::type */
+			*simple = true;
+			return true;
+
+		case T_NullTest:
+			{
+				NullTest   *ntest = (NullTest *) node;
+
+				/* IS NULL is postfix, but IS DISTINCT FROM NULL is not */
+				*simple = ntest->argisrow ||
+					!type_is_rowtype(exprType((Node *) ntest->arg));
+				return true;
+			}
+
+		case T_OpExpr:
+			{
+				OpExpr	   *op = (OpExpr *) node;
+
+				if (list_length(op->args) == 2)
+					prec = sublink_binop_prec(generate_operator_name(op->opno,
+																	 exprType(linitial(op->args)),
+																	 exprType(lsecond(op->args))));
+				else
+				{
+					char	   *name;
+
+					name = generate_operator_name(op->opno, InvalidOid,
+												  exprType(linitial(op->args)));
+					/* unary + and - have their own precedence, others are Op */
+					if (strcmp(name, "-") == 0 || strcmp(name, "+") == 0)
+						prec = SUBLINK_PREC_TOP;
+					else
+						prec = SUBLINK_PREC_OP;
+				}
+			}
+			break;
+
+		default:
+			return false;
+	}
+
+	/*
+	 * The test expression is the left operand, so an equal level suffices for
+	 * the left-associative levels; comparisons and IN do not associate.
+	 */
+	*simple = prec > combprec ||
+		(prec == combprec && combprec >= SUBLINK_PREC_OP);
+	return true;
+}
+
+/*
  * isSimpleNode - check if given node is simple (doesn't need parenthesizing)
  *
  *	true   : simple in the context of parent node's type
@@ -8885,6 +9024,27 @@ isSimpleNode(Node *node, Node *parentNode, int prettyFlags)
 {
 	if (!node)
 		return false;
+
+	/* some parent node types have rules of their own */
+	if (parentNode)
+	{
+		switch (nodeTag(parentNode))
+		{
+			case T_SubLink:
+				{
+					bool		simple;
+
+					/* the test expression of a sublink */
+					if (sublink_testexpr_is_simple(node, (SubLink *) parentNode,
+												   &simple))
+						return simple;
+				}
+				break;
+
+			default:
+				break;
+		}
+	}
 
 	switch (nodeTag(node))
 	{
@@ -11942,7 +12102,13 @@ get_sublink_expr(SubLink *sublink, deparse_context *context)
 			/* single combining operator */
 			OpExpr	   *opexpr = (OpExpr *) sublink->testexpr;
 
-			get_rule_expr(linitial(opexpr->args), context, true);
+			/*
+			 * The test expression is the left operand of the combining
+			 * operator, so it needs the same parenthesization as any other
+			 * operator operand (we print IN / op ANY after it).
+			 */
+			get_rule_expr_paren(linitial(opexpr->args), context, true,
+								(Node *) sublink);
 			opname = generate_operator_name(opexpr->opno,
 											exprType(linitial(opexpr->args)),
 											exprType(lsecond(opexpr->args)));
