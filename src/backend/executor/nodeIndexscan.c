@@ -820,7 +820,7 @@ ExecEndIndexScan(IndexScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
-		Assert(node->iss_Instrument->ntabletuplefetches == 0);
+		Assert(node->iss_Instrument->ntableblockfetches == 0);
 	}
 
 	/*
