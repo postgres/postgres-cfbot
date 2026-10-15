@@ -750,6 +750,44 @@ is_catalog_text_unique_index_oid(PG_FUNCTION_ARGS)
 	return BoolGetDatum(IsCatalogTextUniqueIndexOid(PG_GETARG_OID(0)));
 }
 
+/*
+ * test_subattr_support: SupportRequestSubattr for a function of
+ * (jsonb, text, text) that reads the two top-level keys its constant
+ * arguments name, and returns something that is not a part of the document
+ * (so subvalue is false).
+ */
+PG_FUNCTION_INFO_V1(test_subattr_support);
+Datum
+test_subattr_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	SupportRequestSubattr *req;
+	List	   *paths = NIL;
+
+	if (!IsA(rawreq, SupportRequestSubattr))
+		PG_RETURN_POINTER(NULL);
+	req = (SupportRequestSubattr *) rawreq;
+	if (req->kind != SUBATTR_READ || list_length(req->args) != 3)
+		PG_RETURN_POINTER(NULL);
+
+	for (int i = 1; i <= 2; i++)
+	{
+		Const	   *c = (Const *) list_nth(req->args, i);
+		SubattrPathElem *e;
+
+		if (!IsA(c, Const) || c->constisnull || c->consttype != TEXTOID)
+			PG_RETURN_POINTER(NULL);
+		e = palloc0_object(SubattrPathElem);
+		e->kind = SUBATTR_ELEM_KEY;
+		e->key = TextDatumGetCString(c->constvalue);
+		paths = lappend(paths, list_make1(e));
+	}
+	req->source = 0;
+	req->paths = paths;
+	req->subvalue = false;
+	PG_RETURN_POINTER(req);
+}
+
 PG_FUNCTION_INFO_V1(test_support_func);
 Datum
 test_support_func(PG_FUNCTION_ARGS)

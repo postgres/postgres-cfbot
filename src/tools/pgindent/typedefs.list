@@ -3021,6 +3021,10 @@ SubXactCallback
 SubXactCallbackItem
 SubXactEvent
 SubXactInfo
+SubattrPathElem
+SubattrPathElemKind
+SubattrRequestKind
+SubattrWalk
 SubqueryScan
 SubqueryScanPath
 SubqueryScanState
@@ -3044,6 +3048,7 @@ SupportRequestRows
 SupportRequestSelectivity
 SupportRequestSimplify
 SupportRequestSimplifyAggref
+SupportRequestSubattr
 SupportRequestWFuncMonotonic
 Syn
 SyncOps

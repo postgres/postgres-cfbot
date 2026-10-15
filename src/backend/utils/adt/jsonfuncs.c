@@ -29,6 +29,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
+#include "nodes/supportnodes.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -6187,4 +6188,278 @@ json_check_mutability(Oid typoid, bool is_jsonb, bool *has_mutable)
 				*has_mutable = true;
 			break;
 	}
+}
+
+/*
+ * Turn a text[] Const into a SubattrPathElem path, or return false.
+ */
+static bool
+jsonb_subattr_text_path(Node *arg, List **path)
+{
+	Const	   *c = (Const *) arg;
+	Datum	   *elems;
+	bool	   *nulls;
+	int			nelems;
+	List	   *result = NIL;
+
+	if (!arg || !IsA(arg, Const) || c->constisnull ||
+		c->consttype != TEXTARRAYOID)
+		return false;
+
+	deconstruct_array_builtin(DatumGetArrayTypeP(c->constvalue), TEXTOID,
+							  &elems, &nulls, &nelems);
+	for (int i = 0; i < nelems; i++)
+	{
+		SubattrPathElem *e;
+
+		if (nulls[i])
+			return false;		/* an error at run time; claim nothing */
+		e = palloc0_object(SubattrPathElem);
+		e->kind = SUBATTR_ELEM_KEY;
+		e->key = TextDatumGetCString(elems[i]);
+		result = lappend(result, e);
+	}
+	*path = result;
+	return true;
+}
+
+/* A one-key path from a text Const, or an int4 Const in text form. */
+static bool
+jsonb_subattr_one_elem(Node *arg, List **path)
+{
+	Const	   *c = (Const *) arg;
+	SubattrPathElem *e;
+
+	if (!arg || !IsA(arg, Const) || c->constisnull)
+		return false;
+	e = palloc0_object(SubattrPathElem);
+	e->kind = SUBATTR_ELEM_KEY;
+	if (c->consttype == TEXTOID)
+		e->key = TextDatumGetCString(c->constvalue);
+	else if (c->consttype == INT4OID)
+		e->key = psprintf("%d", DatumGetInt32(c->constvalue));
+	else
+		return false;
+	*path = list_make1(e);
+	return true;
+}
+
+/* path || [any position] */
+static List *
+jsonb_subattr_any_position(List *prefix)
+{
+	SubattrPathElem *e = palloc0_object(SubattrPathElem);
+
+	e->kind = SUBATTR_ELEM_ANY_POSITION;
+	return lappend(prefix, e);
+}
+
+/*
+ * jsonb_subattr_support
+ *		Support function for the jsonb accessors and modifiers: tells the
+ *		executor which parts of the document a call reads or may change.
+ *		See SupportRequestSubattr.
+ *
+ * Paths are reported as keys throughout, also where a function takes an
+ * integer: jsonb reads every path element as an object key or, inside an
+ * array, as a position, and the executor treats any key that reads as an
+ * integer as possibly every position.
+ *
+ * Every path an accessor reads includes the containers on the way to it:
+ * "a"->"b" reads "a" too, and so overlaps a change to "a", as a prefix.
+ */
+Datum
+jsonb_subattr_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	SupportRequestSubattr *req;
+	List	   *args;
+	List	   *path;
+
+	if (!IsA(rawreq, SupportRequestSubattr))
+		PG_RETURN_POINTER(NULL);
+	req = (SupportRequestSubattr *) rawreq;
+	args = req->args;
+
+	if (req->kind == SUBATTR_READ)
+	{
+		switch (req->funcid)
+		{
+			case F_JSONB_OBJECT_FIELD:
+			case F_JSONB_ARRAY_ELEMENT:
+				if (!jsonb_subattr_one_elem(lsecond(args), &path))
+					PG_RETURN_POINTER(NULL);
+				req->subvalue = true;
+				break;
+			case F_JSONB_OBJECT_FIELD_TEXT:
+			case F_JSONB_ARRAY_ELEMENT_TEXT:
+				if (!jsonb_subattr_one_elem(lsecond(args), &path))
+					PG_RETURN_POINTER(NULL);
+				req->subvalue = false;
+				break;
+			case F_JSONB_EXTRACT_PATH:
+				if (!jsonb_subattr_text_path(lsecond(args), &path))
+					PG_RETURN_POINTER(NULL);
+				req->subvalue = true;
+				break;
+			case F_JSONB_EXTRACT_PATH_TEXT:
+				if (!jsonb_subattr_text_path(lsecond(args), &path))
+					PG_RETURN_POINTER(NULL);
+				req->subvalue = false;
+				break;
+			default:
+				PG_RETURN_POINTER(NULL);
+		}
+		req->source = 0;
+		req->paths = list_make1(path);
+		PG_RETURN_POINTER(req);
+	}
+
+	Assert(req->kind == SUBATTR_MODIFY);
+	req->source = 0;
+	switch (req->funcid)
+	{
+		case F_JSONB_SET:
+		case F_JSONB_SET_LAX:
+
+			/*
+			 * jsonb_set(target, path, new, create_if_missing) replaces or
+			 * creates the part at path.  In an array it may instead add an
+			 * element at either end, and jsonb_set_lax() with a null new
+			 * value may delete the part, moving later elements; but an array
+			 * position is named by a key that reads as an integer, which the
+			 * executor takes to overlap every position.
+			 */
+			if (!jsonb_subattr_text_path(lsecond(args), &path))
+				PG_RETURN_POINTER(NULL);
+			req->paths = list_make1(path);
+			break;
+
+		case F_JSONB_DELETE_PATH:
+			/* jsonb #- path deletes the part at path; as above */
+			if (!jsonb_subattr_text_path(lsecond(args), &path))
+				PG_RETURN_POINTER(NULL);
+			req->paths = list_make1(path);
+			break;
+
+		case F_JSONB_INSERT:
+
+			/*
+			 * jsonb_insert(target, path, new, after) adds a member at path to
+			 * an object, or an element next to the one at path in an array,
+			 * moving the later elements: the container may change in a key at
+			 * path or in any of its positions.
+			 */
+			if (!jsonb_subattr_text_path(lsecond(args), &path) ||
+				path == NIL)
+				PG_RETURN_POINTER(NULL);
+			req->paths = list_make2(path,
+									jsonb_subattr_any_position(list_copy_head(path,
+																			  list_length(path) - 1)));
+			break;
+
+		case F_JSONB_DELETE_JSONB_TEXT:
+		case F_JSONB_DELETE_JSONB__TEXT:
+			{
+				/*
+				 * jsonb - key and jsonb - keys[] delete top-level members of
+				 * an object, or matching string elements of an array, moving
+				 * the others.
+				 */
+				Const	   *c = (Const *) lsecond(args);
+				Datum	   *elems;
+				bool	   *nulls;
+				int			nelems;
+
+				if (!c || !IsA(c, Const) || c->constisnull)
+					PG_RETURN_POINTER(NULL);
+				if (req->funcid == F_JSONB_DELETE_JSONB_TEXT)
+				{
+					/* a one-element array of keys */
+					elems = palloc_object(Datum);
+					nulls = palloc0_object(bool);
+					elems[0] = c->constvalue;
+					nelems = 1;
+				}
+				else
+					deconstruct_array_builtin(DatumGetArrayTypeP(c->constvalue),
+											  TEXTOID, &elems, &nulls,
+											  &nelems);
+				req->paths = list_make1(jsonb_subattr_any_position(NIL));
+				for (int i = 0; i < nelems; i++)
+				{
+					SubattrPathElem *e;
+
+					if (nulls[i])
+						continue;	/* deletes nothing */
+					e = palloc0_object(SubattrPathElem);
+					e->kind = SUBATTR_ELEM_KEY;
+					e->key = TextDatumGetCString(elems[i]);
+					req->paths = lappend(req->paths, list_make1(e));
+				}
+				break;
+			}
+
+		case F_JSONB_DELETE_JSONB_INT4:
+			/* jsonb - int deletes an array element, moving later ones */
+			req->paths = list_make1(jsonb_subattr_any_position(NIL));
+			break;
+
+		case F_JSONB_CONCAT:
+			{
+				/*
+				 * doc || '{"k": v, ...}' with a constant object, or the other
+				 * way around.  For an object doc, only the constant's
+				 * top-level keys change.  For an array or scalar doc, the
+				 * result is an array of its elements (or the scalar) and the
+				 * object, in some order: positions change, and no key that
+				 * does not read as an integer reads anything before or after.
+				 * Any other constant (an array, a scalar) turns an object doc
+				 * into an array, which changes every key; give up.
+				 */
+				Const	   *c;
+				Jsonb	   *jb;
+				JsonbIterator *it;
+				JsonbValue	v;
+				JsonbIteratorToken r;
+
+				if (IsA(lsecond(args), Const))
+				{
+					c = (Const *) lsecond(args);
+					req->source = 0;
+				}
+				else if (IsA(linitial(args), Const))
+				{
+					c = (Const *) linitial(args);
+					req->source = 1;
+				}
+				else
+					PG_RETURN_POINTER(NULL);
+				if (c->constisnull)
+					PG_RETURN_POINTER(NULL);
+				jb = DatumGetJsonbP(c->constvalue);
+				if (!JB_ROOT_IS_OBJECT(jb))
+					PG_RETURN_POINTER(NULL);
+
+				req->paths = list_make1(jsonb_subattr_any_position(NIL));
+				it = JsonbIteratorInit(&jb->root);
+				while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
+				{
+					if (r == WJB_KEY)
+					{
+						SubattrPathElem *e = palloc0_object(SubattrPathElem);
+
+						e->kind = SUBATTR_ELEM_KEY;
+						e->key = pnstrdup(v.val.string.val, v.val.string.len);
+						req->paths = lappend(req->paths, list_make1(e));
+					}
+				}
+				break;
+			}
+
+		default:
+			PG_RETURN_POINTER(NULL);
+	}
+
+	PG_RETURN_POINTER(req);
 }

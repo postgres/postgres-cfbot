@@ -511,6 +511,18 @@ typedef struct ResultRelInfo
 	Bitmapset **ri_IndexExprAttrs;
 
 	/*
+	 * For UPDATE, per index, the table attributes (offset as above) that the
+	 * statement's SET expressions provably cannot change any part of that the
+	 * index reads, as long as the attribute is not null before or after.
+	 * Worked out when ri_UpdateCount, which counts updated rows up to then,
+	 * reaches 2; NULL if nothing was proven.  It holds for the whole
+	 * statement, across rescans: it depends only on the plan and on Params
+	 * whose values are fixed for the execution.
+	 */
+	Bitmapset **ri_IndexUntouchedAttrs;
+	int			ri_UpdateCount;
+
+	/*
 	 * For UPDATE/DELETE/MERGE result relations, the attribute number of the
 	 * row identity junk attribute in the source plan's output tuples
 	 */

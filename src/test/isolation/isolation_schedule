@@ -44,6 +44,7 @@ test: subxid-overflow
 test: eval-plan-qual
 test: eval-plan-qual-trigger
 test: update-epq-indexes
+test: update-subattr-epq
 test: eval-plan-qual-partition-prune
 test: inplace-inval
 test: intra-grant-inplace
