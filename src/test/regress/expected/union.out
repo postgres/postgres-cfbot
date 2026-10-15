@@ -1604,22 +1604,24 @@ select distinct q1 from
    union all
    select distinct * from int8_tbl i82) ss
 where q2 = q2;
-                     QUERY PLAN                     
-----------------------------------------------------
- HashAggregate
-   Group Key: unnamed_subquery.q1
-   ->  Append
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Unique
+   ->  Merge Append
+         Sort Key: unnamed_subquery.q1
          ->  Subquery Scan on unnamed_subquery
-               ->  HashAggregate
-                     Group Key: i81.q1, i81.q2
-                     ->  Seq Scan on int8_tbl i81
-                           Filter: (q2 IS NOT NULL)
+               ->  Unique
+                     ->  Sort
+                           Sort Key: i81.q1, i81.q2
+                           ->  Seq Scan on int8_tbl i81
+                                 Filter: (q2 IS NOT NULL)
          ->  Subquery Scan on unnamed_subquery_1
-               ->  HashAggregate
-                     Group Key: i82.q1, i82.q2
-                     ->  Seq Scan on int8_tbl i82
-                           Filter: (q2 IS NOT NULL)
-(13 rows)
+               ->  Unique
+                     ->  Sort
+                           Sort Key: i82.q1, i82.q2
+                           ->  Seq Scan on int8_tbl i82
+                                 Filter: (q2 IS NOT NULL)
+(15 rows)
 
 select distinct q1 from
   (select distinct * from int8_tbl i81
@@ -1840,18 +1842,18 @@ select count(*) from ud
   join (select distinct id from
           (select id from ua1 union all select id from ua2) x) y
     on ud.id = y.id;
-                  QUERY PLAN                   
------------------------------------------------
+               QUERY PLAN                
+-----------------------------------------
  Aggregate
    ->  Hash Join
-         Hash Cond: (ud.id = ua1.id)
-         ->  Seq Scan on ud
+         Hash Cond: (ua1.id = ud.id)
+         ->  HashAggregate
+               Group Key: ua1.id
+               ->  Append
+                     ->  Seq Scan on ua1
+                     ->  Seq Scan on ua2
          ->  Hash
-               ->  HashAggregate
-                     Group Key: ua1.id
-                     ->  Append
-                           ->  Seq Scan on ua1
-                           ->  Seq Scan on ua2
+               ->  Seq Scan on ud
 (10 rows)
 
 -- A member with no statistics cannot contribute to the sum, so the union has
