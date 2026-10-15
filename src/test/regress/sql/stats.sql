@@ -950,6 +950,26 @@ SELECT sum(extends) AS io_sum_bulkwrite_toast_multi_extends_after
   WHERE context = 'bulkwrite' \gset
 SELECT :io_sum_bulkwrite_toast_multi_extends_after >
   :io_sum_bulkwrite_toast_multi_extends_before;
+
+-- Check that a TOAST bulk insertion state survives per-tuple context resets
+-- during a table rewrite.
+ALTER TABLE test_io_bulkwrite_toast
+  ADD COLUMN rewrite_id int GENERATED ALWAYS AS (id) STORED;
+SELECT count(*), bool_and(rewrite_id = id) AS rewrite_ok
+  FROM test_io_bulkwrite_toast;
+
+-- Test that TOAST writes performed during a heap rewrite use the
+-- BAS_BULKWRITE strategy.
+SELECT sum(extends) AS io_sum_rewrite_toast_extends_before
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+VACUUM FULL test_io_bulkwrite_toast;
+SELECT pg_stat_force_next_flush();
+SELECT sum(extends) AS io_sum_rewrite_toast_extends_after
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+SELECT :io_sum_rewrite_toast_extends_after >
+  :io_sum_rewrite_toast_extends_before;
 DROP TABLE test_io_bulkwrite_toast;
 
 -- Test IO stats reset
