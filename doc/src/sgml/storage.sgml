@@ -1116,7 +1116,11 @@ data. Empty in ordinary tables.</entry>
      expressions nor whether the row satisfies its predicate.  The values are
      compared as stored, so equal values with different representations, such
      as <literal>1.0</literal> and <literal>1.00</literal> of type
-     <type>numeric</type>, count as different.
+     <type>numeric</type>, count as different.  When the update's
+     <literal>SET</literal> clause changes only parts of the column that the
+     indexes do not read, for example through <function>jsonb_set</function>
+     or array subscripting, this is known without evaluating the indexes'
+     expressions.
      </para>
    </listitem>
    <listitem>
