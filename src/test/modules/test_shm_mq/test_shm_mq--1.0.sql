@@ -17,3 +17,7 @@ CREATE FUNCTION test_shm_mq_pipelined(queue_size pg_catalog.int8,
 					   verify pg_catalog.bool default true)
     RETURNS pg_catalog.void STRICT
 	AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION test_shm_mq_worker_stats()
+    RETURNS pg_catalog.bool
+	AS 'MODULE_PATHNAME' LANGUAGE C;
