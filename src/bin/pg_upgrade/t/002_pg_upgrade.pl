@@ -551,55 +551,59 @@ SKIP:
 		'run of pg_upgrade --check with old instance running');
 }
 
-# Create an invalid database, will be deleted below
+# Create an invalid database, it must not be upgraded
 $oldnode->safe_psql(
 	'postgres', qq(
   CREATE DATABASE regression_invalid;
   UPDATE pg_database SET datconnlimit = -2 WHERE datname = 'regression_invalid';
 ));
+my $invalid_db_oid = $oldnode->safe_psql('postgres',
+	"SELECT oid FROM pg_database WHERE datname = 'regression_invalid'");
+
+# Create a database that does not allow connections, which blocks the
+# upgrade, and is dropped below so that the upgrade can proceed.
+$oldnode->safe_psql(
+	'postgres', qq(
+  CREATE DATABASE regression_noconn;
+  UPDATE pg_database SET datallowconn = false WHERE datname = 'regression_noconn';
+));
 
 # Upgrade the instance.
 $oldnode->stop;
 
-# Check that pg_upgrade aborts when encountering an invalid database
-# (However, versions that were out of support by commit c66a7d75e652 don't
-# know how to do this, so skip this test there.)
-SKIP:
-{
-	skip "database invalidation not implemented", 4
-	  if $oldnode->pg_version < 11;
+# Check that pg_upgrade aborts when a database does not allow connections.
+# This also creates the logging directory pg_upgrade_output.d and leaves it
+# around, as happens for any failure.
+command_checks_all(
+	[
+		'pg_upgrade', '--no-sync',
+		'--old-datadir' => $oldnode->data_dir,
+		'--new-datadir' => $newnode->data_dir,
+		'--old-bindir' => $oldbindir,
+		'--new-bindir' => $newbindir,
+		'--socketdir' => $newnode->host,
+		'--old-port' => $oldnode->port,
+		'--new-port' => $newnode->port,
+		$mode, '--check',
+	],
+	1,
+	[qr/All non-template0 databases must allow connections/],
+	[qr/^$/],
+	'database that does not allow connections causes failure');
 
-	command_checks_all(
-		[
-			'pg_upgrade', '--no-sync',
-			'--old-datadir' => $oldnode->data_dir,
-			'--new-datadir' => $newnode->data_dir,
-			'--old-bindir' => $oldbindir,
-			'--new-bindir' => $newbindir,
-			'--socketdir' => $newnode->host,
-			'--old-port' => $oldnode->port,
-			'--new-port' => $newnode->port,
-			$mode, '--check',
-		],
-		1,
-		[qr/datconnlimit/],
-		[qr/^$/],
-		'invalid database causes failure');
+ok(-d $newnode->data_dir . "/pg_upgrade_output.d",
+	"pg_upgrade_output.d/ not removed after pg_upgrade failure");
 
-	# Check that the failure creates the logging directory pg_upgrade_output.d
-	# and leaves it around
-	ok(-d $newnode->data_dir . "/pg_upgrade_output.d",
-		"pg_upgrade_output.d/ not removed after pg_upgrade failure");
+rmtree($newnode->data_dir . "/pg_upgrade_output.d");
 
-	rmtree($newnode->data_dir . "/pg_upgrade_output.d");
-}
-
-# And drop it, so we can continue
+# And drop the database that does not allow connections, so we can continue
 $oldnode->start;
-$oldnode->safe_psql('postgres', 'DROP DATABASE regression_invalid');
+$oldnode->safe_psql('postgres', 'DROP DATABASE regression_noconn');
 $oldnode->stop;
 
-# --check command works here, cleans up pg_upgrade_output.d.
+# --check command works here, cleans up pg_upgrade_output.d. The invalid
+# database is left in place, so this also checks that the upgrade is not
+# aborted because of it.
 command_ok(
 	[
 		'pg_upgrade', '--no-sync',
@@ -634,6 +638,18 @@ ok( !-d $newnode->data_dir . "/pg_upgrade_output.d",
 	"pg_upgrade_output.d/ removed after pg_upgrade success");
 
 $newnode->start;
+
+# The invalid database must not have made it into the new cluster.
+is( $newnode->safe_psql(
+		'postgres',
+		"SELECT count(*) FROM pg_database WHERE datname = 'regression_invalid'"
+	),
+	'0',
+	'invalid database is not present in the new cluster');
+ok(!-d $newnode->data_dir . "/base/$invalid_db_oid",
+	"invalid database is not transferred to the new cluster");
+ok(-d $oldnode->data_dir . "/base/$invalid_db_oid",
+	"invalid database is left behind in the old cluster");
 
 # The 8-byte OID has been carried.
 if (!defined($ENV{oldinstall}))
