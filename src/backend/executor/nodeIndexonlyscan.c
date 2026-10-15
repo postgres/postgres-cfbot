@@ -261,7 +261,7 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
-		winstrument->ntabletuplefetches += node->ioss_Instrument->ntabletuplefetches;
+		winstrument->ntableblockfetches += node->ioss_Instrument->ntableblockfetches;
 	}
 
 	/*
