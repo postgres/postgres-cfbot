@@ -17,6 +17,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_internals.h"
 #include "common/int.h"
 #include "common/pg_lzcompress.h"
@@ -62,6 +63,15 @@ detoast_external_attr(varlena *attr)
 		 * This is an external stored plain value
 		 */
 		result = toast_fetch_datum(attr);
+
+		/* see below about values compressed with a dictionary */
+		if (VARATT_IS_COMPRESSED_DICT(result))
+		{
+			varlena    *tmp = result;
+
+			result = toast_dict_decompress_datum(tmp);
+			pfree(tmp);
+		}
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
@@ -79,6 +89,16 @@ detoast_external_attr(varlena *attr)
 		/* recurse if value is still external in some other way */
 		if (VARATT_IS_EXTERNAL(attr))
 			return detoast_external_attr(attr);
+
+		/*
+		 * The indirect pointer may reference an inline dictionary-compressed
+		 * datum, which is not VARATT_IS_EXTERNAL but still depends on a
+		 * catalog row of its owning column, so it must be decompressed here
+		 * too; otherwise a still-compressed datum would be returned and read
+		 * after its dictionary could be retired.
+		 */
+		if (VARATT_IS_COMPRESSED_DICT(attr))
+			return toast_dict_decompress_datum(attr);
 
 		/*
 		 * Copy into the caller's memory context, in case caller tries to
@@ -99,6 +119,16 @@ detoast_external_attr(varlena *attr)
 		resultsize = EOH_get_flat_size(eoh);
 		result = (varlena *) palloc(resultsize);
 		EOH_flatten_into(eoh, result, resultsize);
+	}
+	else if (VARATT_IS_COMPRESSED_DICT(attr))
+	{
+		/*
+		 * A value compressed with a dictionary depends on a catalog row of
+		 * the column it came from, so for anything that wants a value
+		 * independent of its source it counts as external; see
+		 * toast_dictionary.c.
+		 */
+		result = toast_dict_decompress_datum(attr);
 	}
 	else
 	{
@@ -516,6 +546,9 @@ toast_decompress_datum(varlena *attr)
 			return lz4_decompress_datum(attr);
 		case TOAST_ZSTD_COMPRESSION_ID:
 			return zstd_decompress_datum(attr);
+		case TOAST_ZSTD_DICT_COMPRESSION_ID:
+		case TOAST_LZ4_DICT_COMPRESSION_ID:
+			return toast_dict_decompress_datum(attr);
 		default:
 			elog(ERROR, "invalid compression method id %d", cmid);
 			return NULL;		/* keep compiler quiet */
@@ -570,6 +603,9 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 			return lz4_decompress_datum_slice(attr, slicelength);
 		case TOAST_ZSTD_COMPRESSION_ID:
 			return zstd_decompress_datum_slice(attr, slicelength);
+		case TOAST_ZSTD_DICT_COMPRESSION_ID:
+		case TOAST_LZ4_DICT_COMPRESSION_ID:
+			return toast_dict_decompress_datum_slice(attr, slicelength);
 		default:
 			elog(ERROR, "invalid compression method id %d", cmid);
 			return NULL;		/* keep compiler quiet */

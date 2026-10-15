@@ -2875,6 +2875,17 @@ pg_timezone_names| SELECT name,
     utc_offset,
     is_dst
    FROM pg_timezone_names() pg_timezone_names(name, abbrev, utc_offset, is_dst);
+pg_toast_dictionaries| SELECT d.oid AS dictid,
+    n.nspname AS schemaname,
+    c.relname AS tablename,
+    a.attname,
+    d.tdcurrent AS is_current,
+    octet_length(d.tddict) AS dict_size
+   FROM (((pg_toast_dictionary d
+     JOIN pg_class c ON ((c.oid = d.tdrelid)))
+     JOIN pg_attribute a ON (((c.oid = a.attrelid) AND (a.attnum = d.tdattnum))))
+     LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
+  WHERE ((NOT a.attisdropped) AND has_column_privilege(c.oid, a.attnum, 'select'::text));
 pg_user| SELECT usename,
     usesysid,
     usecreatedb,

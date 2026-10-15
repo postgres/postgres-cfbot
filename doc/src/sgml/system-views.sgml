@@ -217,6 +217,11 @@
      </row>
 
      <row>
+      <entry><link linkend="view-pg-toast-dictionaries"><structname>pg_toast_dictionaries</structname></link></entry>
+      <entry>TOAST compression dictionaries</entry>
+     </row>
+
+     <row>
       <entry><link linkend="view-pg-timezone-abbrevs"><structname>pg_timezone_abbrevs</structname></link></entry>
       <entry>time zone abbreviations</entry>
      </row>
@@ -5262,6 +5267,104 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
       </para>
       <para>
        True if row security is enabled on the table
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+ </sect1>
+
+ <sect1 id="view-pg-toast-dictionaries">
+  <title><structname>pg_toast_dictionaries</structname></title>
+
+  <indexterm zone="view-pg-toast-dictionaries">
+   <primary>pg_toast_dictionaries</primary>
+  </indexterm>
+
+  <para>
+   The view <structname>pg_toast_dictionaries</structname> provides access to
+   information about the compression dictionaries stored in
+   <link linkend="catalog-pg-toast-dictionary"><structname>pg_toast_dictionary</structname></link>,
+   without the dictionaries themselves.  That catalog is restricted to
+   superusers, since dictionaries are built from the contents of their
+   columns; this view shows only the dictionaries of columns that the
+   current user has permission to read.  Dictionaries of dropped columns
+   are not shown.
+  </para>
+
+  <table>
+   <title><structname>pg_toast_dictionaries</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>dictid</structfield> <type>oid</type>
+      </para>
+      <para>
+       OID of the dictionary
+       (references <link linkend="catalog-pg-toast-dictionary"><structname>pg_toast_dictionary</structname></link>.<structfield>oid</structfield>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>schemaname</structfield> <type>name</type>
+       (references <link linkend="catalog-pg-namespace"><structname>pg_namespace</structname></link>.<structfield>nspname</structfield>)
+      </para>
+      <para>
+       Name of schema containing table
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tablename</structfield> <type>name</type>
+       (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>relname</structfield>)
+      </para>
+      <para>
+       Name of table
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>attname</structfield> <type>name</type>
+       (references <link linkend="catalog-pg-attribute"><structname>pg_attribute</structname></link>.<structfield>attname</structfield>)
+      </para>
+      <para>
+       Name of the column the dictionary belongs to
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>is_current</structfield> <type>bool</type>
+      </para>
+      <para>
+       True if this is the dictionary new values of the column are
+       compressed with; the others are kept until the next rewrite of the
+       table for the values that still use them
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>dict_size</structfield> <type>integer</type>
+      </para>
+      <para>
+       Size of the dictionary in bytes
       </para></entry>
      </row>
     </tbody>

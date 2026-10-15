@@ -9380,15 +9380,22 @@ ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 	{
 		/*
 		 * When logging the entire old tuple, it very well could contain
-		 * toasted columns. If so, force them to be inlined.
+		 * toasted columns. If so, force them to be inlined.  Columns
+		 * compressed with a dictionary can stay as they are; see
+		 * toast_flatten_tuple_for_wal().
 		 */
 		if (HeapTupleHasExternal(tp))
 		{
-			*copy = true;
-			tp = toast_flatten_tuple(tp, desc);
+			HeapTuple	flat = toast_flatten_tuple_for_wal(tp, desc);
 
-			/* see below */
-			Assert(!HeapTupleHeaderIsDatum(tp->t_data));
+			if (flat != NULL)
+			{
+				*copy = true;
+				tp = flat;
+
+				/* see below */
+				Assert(!HeapTupleHeaderIsDatum(tp->t_data));
+			}
 		}
 		return tp;
 	}
@@ -9440,10 +9447,13 @@ ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 	 */
 	if (HeapTupleHasExternal(key_tuple))
 	{
-		HeapTuple	oldtup = key_tuple;
+		HeapTuple	flat = toast_flatten_tuple_for_wal(key_tuple, desc);
 
-		key_tuple = toast_flatten_tuple(oldtup, desc);
-		heap_freetuple(oldtup);
+		if (flat != NULL)
+		{
+			heap_freetuple(key_tuple);
+			key_tuple = flat;
+		}
 	}
 
 	/*

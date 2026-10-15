@@ -1,0 +1,10 @@
+-- Tests for zstd TOAST compression with dictionaries, and their lifecycle:
+-- dictionaries belong to one column, values compressed with them never leave
+-- that column in compressed form, a rewrite retires old dictionaries, and
+-- dropping the column or table drops them.
+SELECT NOT(enumvals @> '{zstd}') AS skip_test FROM pg_settings WHERE
+  name = 'default_toast_compression' \gset
+\if :skip_test
+   \echo '*** skipping TOAST tests with zstd dictionaries (not supported) ***'
+*** skipping TOAST tests with zstd dictionaries (not supported) ***
+   \quit
