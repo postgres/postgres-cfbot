@@ -1710,6 +1710,86 @@ createdb_failure_callback(int code, Datum arg)
 	remove_dbtablespaces(fparms->dest_dboid);
 }
 
+typedef struct PendingDropdbLog
+{
+	Oid			db_id;
+	char		dbname[NAMEDATALEN];
+	XLogRecPtr	drop_lsn;
+	bool		already_invalid;
+	bool		registered;
+} PendingDropdbLog;
+
+static PendingDropdbLog pending_dropdb_log = {0};
+static bool dropdb_callback_registered = false;
+
+/* Transaction callback that logs the result of a DROP DATABASE */
+static void
+DropDbXactCallback(XactEvent event, void *arg)
+{
+	if (!pending_dropdb_log.registered)
+		return;
+
+	if (event == XACT_EVENT_COMMIT)
+	{
+		if (pending_dropdb_log.already_invalid)
+			ereport(LOG,
+					(errmsg("database \"%s\" (OID %u) dropped",
+							pending_dropdb_log.dbname, pending_dropdb_log.db_id),
+					 errdetail("This database was already left invalid by an "
+							   "earlier failed attempt before this drop began; "
+							   "the original recovery point is not known to "
+							   "this session.")));
+		else
+			ereport(LOG,
+					(errmsg("database \"%s\" (OID %u) dropped, lsn=%X/%08X",
+							pending_dropdb_log.dbname, pending_dropdb_log.db_id,
+							LSN_FORMAT_ARGS(pending_dropdb_log.drop_lsn)),
+					 errhint("To recover to the point before this drop, use "
+							 "recovery_target_lsn = '%X/%08X' with "
+							 "recovery_target_inclusive = false.",
+							 LSN_FORMAT_ARGS(pending_dropdb_log.drop_lsn))));
+		pending_dropdb_log.registered = false;
+	}
+	else if (event == XACT_EVENT_ABORT)
+	{
+		if (pending_dropdb_log.already_invalid)
+			ereport(WARNING,
+					(errmsg("DROP DATABASE \"%s\" (OID %u) did not complete",
+							pending_dropdb_log.dbname, pending_dropdb_log.db_id),
+					 errdetail("This database was already invalid before this "
+							   "attempt; the original recovery point is not "
+							   "known to this session.")));
+		else
+			ereport(WARNING,
+					(errmsg("DROP DATABASE \"%s\" (OID %u) did not complete; "
+							"the database may be left invalid and require "
+							"DROP DATABASE to be run again",
+							pending_dropdb_log.dbname, pending_dropdb_log.db_id),
+					 errhint("Files belonging to this database may already have "
+							 "been removed. To recover data from before this "
+							 "attempt, use recovery_target_lsn = '%X/%08X' with "
+							 "recovery_target_inclusive = false.",
+							 LSN_FORMAT_ARGS(pending_dropdb_log.drop_lsn))));
+		pending_dropdb_log.registered = false;
+	}
+}
+
+/* Remember a pending DROP DATABASE for DropDbXactCallback to log */
+static void
+RegisterDropDatabaseLog(Oid db_id, const char *dbname, XLogRecPtr drop_lsn, bool already_invalid)
+{
+	if (!dropdb_callback_registered)
+	{
+		RegisterXactCallback(DropDbXactCallback, NULL);
+		dropdb_callback_registered = true;
+	}
+
+	pending_dropdb_log.db_id = db_id;
+	strlcpy(pending_dropdb_log.dbname, dbname, NAMEDATALEN);
+	pending_dropdb_log.drop_lsn = drop_lsn;
+	pending_dropdb_log.registered = true;
+	pending_dropdb_log.already_invalid = already_invalid;
+}
 
 /*
  * DROP DATABASE
@@ -1730,6 +1810,7 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 				nslots_active;
 	int			nsubscriptions;
 	XLogRecPtr	drop_lsn = InvalidXLogRecPtr;
+	bool		already_invalid = false;
 
 	/*
 	 * Look up the target database's OID, and get exclusive lock on it. We
@@ -1759,6 +1840,9 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 			return;
 		}
 	}
+
+	if (log_object_drops)
+		already_invalid = database_is_invalid_oid(db_id);
 
 	/*
 	 * Permission checks
@@ -1869,8 +1953,10 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 * invalid marker set below.
 	 */
 	if (log_object_drops)
+	{
 		drop_lsn = GetXLogInsertRecPtr();
-
+		RegisterDropDatabaseLog(db_id, dbname, drop_lsn, already_invalid);
+	}
 	/*
 	 * Except for the deletion of the catalog row, subsequent actions are not
 	 * transactional (consider DropDatabaseBuffers() discarding modified
@@ -1937,15 +2023,6 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 * Remove all tablespace subdirs belonging to the database.
 	 */
 	remove_dbtablespaces(db_id);
-
-	/* Log the LSN captured before the database was marked invalid */
-	if (log_object_drops)
-		ereport(LOG,
-				(errmsg("database \"%s\" (OID %u) dropped, lsn=%X/%08X",
-						dbname, db_id, LSN_FORMAT_ARGS(drop_lsn)),
-				 errhint("To recover to the point before this drop, use recovery_target_lsn = '%X/%08X' "
-						 "with recovery_target_inclusive = false.",
-						 LSN_FORMAT_ARGS(drop_lsn))));
 
 	/*
 	 * Close pg_database, but keep lock till commit.
