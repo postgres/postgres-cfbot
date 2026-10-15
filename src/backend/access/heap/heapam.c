@@ -1934,12 +1934,24 @@ UpdateXmaxHintBits(HeapTupleHeader tuple, Buffer buffer, TransactionId xid)
 
 
 /*
- * GetBulkInsertState - prepare status object for a bulk insert
+ * Verify that bulk insert state is used only with its assigned relation.
+ */
+static inline void
+CheckBulkInsertState(Relation relation, BulkInsertState bistate)
+{
+	if (unlikely(bistate != NULL &&
+				 bistate->relation_id != RelationGetRelid(relation)))
+		elog(ERROR, "bulk insert state for relation %u used for relation %u",
+			 bistate->relation_id, RelationGetRelid(relation));
+}
+
+/*
+ * GetBulkInsertState - prepare bulk insert state for the given relation
  *
- * The caller owns strategy and may share it with other bulk insert states.
+ * The caller owns strategy and may share it with states for other relations.
  */
 BulkInsertState
-GetBulkInsertState(BufferAccessStrategy strategy)
+GetBulkInsertState(Relation relation, BufferAccessStrategy strategy)
 {
 	BulkInsertState bistate;
 
@@ -1947,6 +1959,7 @@ GetBulkInsertState(BufferAccessStrategy strategy)
 
 	bistate = (BulkInsertState) palloc_object(BulkInsertStateData);
 	bistate->strategy = strategy;
+	bistate->relation_id = RelationGetRelid(relation);
 	bistate->current_buf = InvalidBuffer;
 	bistate->next_free = InvalidBlockNumber;
 	bistate->last_free = InvalidBlockNumber;
@@ -1967,6 +1980,8 @@ FreeBulkInsertState(BulkInsertState bistate)
 
 /*
  * ReleaseBulkInsertStatePin - release a buffer currently held in bistate
+ *
+ * Also abandon unused pages from the state's most recent bulk extension.
  */
 void
 ReleaseBulkInsertStatePin(BulkInsertState bistate)
@@ -1975,14 +1990,6 @@ ReleaseBulkInsertStatePin(BulkInsertState bistate)
 		ReleaseBuffer(bistate->current_buf);
 	bistate->current_buf = InvalidBuffer;
 
-	/*
-	 * Despite the name, we also reset bulk relation extension state.
-	 * Otherwise we can end up erroring out due to looking for free space in
-	 * ->next_free of one partition, even though ->next_free was set when
-	 * extending another partition. It could obviously also be bad for
-	 * efficiency to look at existing blocks at offsets from another
-	 * partition, even if we don't error out.
-	 */
 	bistate->next_free = InvalidBlockNumber;
 	bistate->last_free = InvalidBlockNumber;
 }
@@ -2017,6 +2024,8 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	Buffer		vmbuffer = InvalidBuffer;
 	bool		clear_all_visible = false;
 	bool		vmbuffer_modified = false;
+
+	CheckBulkInsertState(relation, bistate);
 
 	/* Cheap, simplistic check that the tuple matches the rel's rowtype. */
 	Assert(HeapTupleHeaderGetNatts(tup->t_data) <=
@@ -2327,6 +2336,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	bool		starting_with_empty_page = false;
 	int			npages = 0;
 	int			npages_used = 0;
+
+	CheckBulkInsertState(relation, bistate);
 
 	/* currently not needed (thus unsupported) for heap_multi_insert() */
 	Assert(!(options & HEAP_INSERT_NO_LOGICAL));

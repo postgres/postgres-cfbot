@@ -641,7 +641,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	if (concurrent)
 	{
 		strategy = GetAccessStrategy(BAS_BULKWRITE);
-		bistate = GetBulkInsertState(strategy);
+		bistate = GetBulkInsertState(NewHeap, strategy);
 	}
 	else
 	{
