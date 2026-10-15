@@ -1380,6 +1380,134 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
+ * set_append_rel_ndistinct
+ *		Compute per-column distinct-value estimates for an appendrel parent
+ *		synthesized by flattening a UNION ALL.
+ *
+ * Such a parent has no relation of its own, so it has no pg_statistic entry and
+ * no route to one; without this, most distinct-value questions about its output
+ * columns would fall back to DEFAULT_NUM_DISTINCT (200), however much data the
+ * union actually covers.
+ *
+ * The true count depends on how much the members' value sets overlap.  We
+ * therefore derive two planning ends: the largest member estimate and, when
+ * every non-dummy member is estimable, the sum of all member estimates.  The
+ * ends inherit the members' estimation errors, so they are not mathematical
+ * bounds; consumers choose whichever end is conservative for their use.
+ *
+ * We compute the whole rel on first request and cache it on the RelOptInfo,
+ * rather than doing it for every appendrel in set_append_rel_size, so that we
+ * do not pay for columns nobody asks about.  Callers must therefore check for
+ * NULL before assuming the arrays exist.
+ */
+void
+set_append_rel_ndistinct(PlannerInfo *root, RelOptInfo *rel)
+{
+	RangeTblEntry *rte = root->simple_rte_array[rel->relid];
+	int			nattrs = rel->max_attr - rel->min_attr + 1;
+	MemoryContext oldcontext;
+	AttrNumber	attno;
+
+	Assert(rel->attr_ndistinct_lo == NULL && rel->attr_ndistinct_hi == NULL);
+
+	oldcontext = MemoryContextSwitchTo(root->planner_cxt);
+	rel->attr_ndistinct_lo = palloc0_array(double, nattrs);
+	rel->attr_ndistinct_hi = palloc0_array(double, nattrs);
+	MemoryContextSwitchTo(oldcontext);
+
+	/*
+	 * RTE_SUBQUERY + inh identifies an appendrel parent synthesized from a
+	 * UNION ALL.  Relation parents use inherited statistics instead.  As with
+	 * an ordinary subquery, do not look through a security barrier.
+	 */
+	if (rte->rtekind != RTE_SUBQUERY || !rte->inh || rte->security_barrier)
+		return;
+
+	for (attno = rel->min_attr; attno <= rel->max_attr; attno++)
+	{
+		int			pndx = attno - rel->min_attr;
+		List	   *childexprs = list_make1(NULL);
+		ListCell   *lc;
+		double		total = 0.0;
+		double		largest = 0.0;
+		bool		complete = true;
+
+		if (attno <= 0)
+			continue;			/* no members for system columns */
+
+		foreach(lc, root->append_rel_list)
+		{
+			AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(lc);
+			RelOptInfo *childrel;
+			Node	   *childexpr;
+			EstimationInfo estinfo;
+			double		childgroups;
+
+			if (appinfo->parent_relid != rel->relid)
+				continue;
+
+			childrel = root->simple_rel_array[appinfo->child_relid];
+			if (childrel == NULL)
+			{
+				/* Lazy estimation can run before this member rel is built. */
+				complete = false;
+				continue;
+			}
+
+			/* Dummy members cannot contribute values to the union. */
+			if (IS_DUMMY_REL(childrel))
+				continue;
+
+			/*
+			 * Map the parent output column directly to the member expression.
+			 * Do not use adjust_appendrel_attrs() here: for a non-Var member
+			 * expression, it cannot propagate the parent's nullingrels, and
+			 * those relids do not affect the set of output values.
+			 */
+			childexpr = (Node *) list_nth(appinfo->translated_vars, attno - 1);
+
+			/* estimate_num_groups() expects Vars to identify an RTE */
+			if (IsA(childexpr, Var) && ((Var *) childexpr)->varno == 0)
+			{
+				complete = false;
+				continue;
+			}
+
+			/*
+			 * Pass the member's post-qualification row count: the count we
+			 * want is the distinct values this member contributes to the
+			 * union's output, not the raw table's.
+			 */
+			linitial(childexprs) = childexpr;
+			childgroups = estimate_num_groups(root, childexprs,
+											  childrel->rows,
+											  NULL, &estinfo);
+
+			/*
+			 * A missing member estimate makes the sum incomplete.  Continue
+			 * scanning so that the low end can still use every estimable
+			 * member, independent of member order.
+			 */
+			if (estinfo.flags & SELFLAG_USED_DEFAULT)
+			{
+				complete = false;
+				continue;
+			}
+
+			total += childgroups;
+			largest = Max(largest, childgroups);
+		}
+
+		/*
+		 * The largest successful member estimate remains useful without the
+		 * high end.  Leave the high end zero to mark it unavailable.
+		 */
+		rel->attr_ndistinct_lo[pndx] = largest;
+		rel->attr_ndistinct_hi[pndx] = complete ? total : 0.0;
+	}
+}
+
+/*
  * set_grouped_rel_pathlist
  *	  If a grouped relation for the given 'rel' exists, build partial
  *	  aggregation paths for it.

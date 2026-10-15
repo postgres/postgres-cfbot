@@ -6301,6 +6301,27 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 				adjust_statstuple_for_grouping(subroot, var, vardata);
 		}
 	}
+	else if (rte->rtekind == RTE_SUBQUERY && rte->inh)
+	{
+		/*
+		 * A flattened UNION ALL parent has no relation of its own and no
+		 * pg_statistic entry.  Lazily derive distinct-value ends from its
+		 * members; zero means that the requested end is unavailable.
+		 */
+		RelOptInfo *rel = vardata->rel;
+		int			pndx;
+
+		if (rel->attr_ndistinct_lo == NULL)
+			set_append_rel_ndistinct(root, rel);
+
+		if (var->varattno <= 0 ||
+			var->varattno > rel->max_attr)
+			return;
+
+		pndx = var->varattno - rel->min_attr;
+		vardata->ndistinct_lo = rel->attr_ndistinct_lo[pndx];
+		vardata->ndistinct_hi = rel->attr_ndistinct_hi[pndx];
+	}
 	else
 	{
 		/*
@@ -6716,6 +6737,15 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 	double		ntuples;
 
 	*isdefault = false;
+
+	/*
+	 * This is currently used for flattened UNION ALL parents.  The low end is
+	 * conservative for callers that use a distinct count as a divisor;
+	 * callers that need a numerator or a group count override it with the
+	 * high end. Proven uniqueness still takes precedence.
+	 */
+	if (vardata->ndistinct_lo > 0.0 && !vardata->isunique)
+		return clamp_row_est(vardata->ndistinct_lo);
 
 	/*
 	 * Determine the stadistinct value to use.  There are cases where we can
