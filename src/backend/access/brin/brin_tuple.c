@@ -206,7 +206,7 @@ brin_form_tuple(BrinDesc *brdesc, BlockNumber blkno, BrinMemTuple *tuple,
 			 * even for range with non-NULL data? E.g. degenerate bloom filter
 			 * may be thrown away, etc.
 			 */
-			if (VARATT_IS_EXTERNAL(DatumGetPointer(value)))
+			if (VARATT_IS_EXTERNAL_OR_DICT(DatumGetPointer(value)))
 			{
 				value = PointerGetDatum(detoast_external_attr((varlena *)
 															  DatumGetPointer(value)));

@@ -20,6 +20,7 @@
 #include "access/heaptoast.h"
 #include "access/htup_details.h"
 #include "access/itup.h"
+#include "access/toast_compression.h"
 #include "access/toast_internals.h"
 
 /*
@@ -105,7 +106,7 @@ index_form_tuple_context(TupleDesc tupleDescriptor,
 		 * If value is stored EXTERNAL, must fetch it so we are not depending
 		 * on outside storage.  This should be improved someday.
 		 */
-		if (VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
+		if (VARATT_IS_EXTERNAL_OR_DICT(DatumGetPointer(values[i])))
 		{
 			untoasted_values[i] =
 				PointerGetDatum(detoast_external_attr((varlena *)

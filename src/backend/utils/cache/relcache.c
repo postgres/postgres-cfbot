@@ -2517,6 +2517,9 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 	bms_free(relation->rd_idattr);
 	bms_free(relation->rd_hotblockingattr);
 	bms_free(relation->rd_summarizedattr);
+	if (relation->rd_toastdictoids)
+		pfree(relation->rd_toastdictoids);
+	bms_free(relation->rd_toastdictvalid);
 	if (relation->rd_pubdesc)
 		pfree(relation->rd_pubdesc);
 	if (relation->rd_options)
@@ -2565,6 +2568,17 @@ RelationInvalidateRelation(Relation relation)
 	if (relation->rd_amcache)
 		pfree(relation->rd_amcache);
 	relation->rd_amcache = NULL;
+
+	/*
+	 * Likewise the cached current compression dictionaries: a holder of this
+	 * entry keeps using it until it is rebuilt, and must not compress with a
+	 * dictionary whose installation was just rolled back.
+	 */
+	if (relation->rd_toastdictoids)
+		pfree(relation->rd_toastdictoids);
+	relation->rd_toastdictoids = NULL;
+	bms_free(relation->rd_toastdictvalid);
+	relation->rd_toastdictvalid = NULL;
 
 	relation->rd_isvalid = false;
 }
@@ -6606,6 +6620,8 @@ load_relcache_init_file(bool shared)
 		rel->rd_statlist = NIL;
 		rel->rd_fkeyvalid = false;
 		rel->rd_fkeylist = NIL;
+		rel->rd_toastdictoids = NULL;
+		rel->rd_toastdictvalid = NULL;
 		rel->rd_createSubid = InvalidSubTransactionId;
 		rel->rd_newRelfilelocatorSubid = InvalidSubTransactionId;
 		rel->rd_firstRelfilelocatorSubid = InvalidSubTransactionId;

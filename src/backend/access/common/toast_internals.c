@@ -19,6 +19,7 @@
 #include "access/heaptoast.h"
 #include "access/table.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_internals.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -82,6 +83,20 @@ toast_pointer_build(vartag_external tag, const void *ptr,
 Datum
 toast_compress_datum(Datum value, char cmethod)
 {
+	return toast_compress_datum_rel(value, cmethod, NULL, 0);
+}
+
+/*
+ * Same, for a value about to be stored in column attnum of rel.  Only this
+ * variant can use a column's dictionary: zstd_dict and lz4_dict need to know
+ * which column owns the dictionary, and fall back to plain zstd or lz4
+ * without one (no dictionary trained yet, or a caller such as an index that
+ * passes no rel).
+ */
+Datum
+toast_compress_datum_rel(Datum value, char cmethod, Relation rel,
+						 AttrNumber attnum)
+{
 	varlena    *tmp = NULL;
 	int32		valsize;
 	ToastCompressionId cmid = TOAST_INVALID_COMPRESSION_ID;
@@ -111,6 +126,33 @@ toast_compress_datum(Datum value, char cmethod)
 		case TOAST_ZSTD_COMPRESSION:
 			tmp = zstd_compress_datum((const varlena *) DatumGetPointer(value));
 			cmid = TOAST_ZSTD_COMPRESSION_ID;
+			break;
+		case TOAST_ZSTD_DICT_COMPRESSION:
+		case TOAST_LZ4_DICT_COMPRESSION:
+			{
+				Oid			dictid = InvalidOid;
+				bool		zstd = (cmethod == TOAST_ZSTD_DICT_COMPRESSION);
+
+				if (rel != NULL)
+					dictid = toast_dictionary_current(rel, attnum);
+				if (OidIsValid(dictid))
+				{
+					tmp = toast_dict_compress_datum((const varlena *) DatumGetPointer(value),
+													cmethod, dictid);
+					cmid = zstd ? TOAST_ZSTD_DICT_COMPRESSION_ID :
+						TOAST_LZ4_DICT_COMPRESSION_ID;
+				}
+				else if (zstd)
+				{
+					tmp = zstd_compress_datum((const varlena *) DatumGetPointer(value));
+					cmid = TOAST_ZSTD_COMPRESSION_ID;
+				}
+				else
+				{
+					tmp = lz4_compress_datum((const varlena *) DatumGetPointer(value));
+					cmid = TOAST_LZ4_COMPRESSION_ID;
+				}
+			}
 			break;
 		default:
 			elog(ERROR, "invalid compression method %c", cmethod);

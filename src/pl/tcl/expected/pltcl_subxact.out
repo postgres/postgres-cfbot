@@ -141,3 +141,45 @@ SELECT * FROM subtransaction_tbl;
 (2 rows)
 
 TRUNCATE subtransaction_tbl;
+-- A value compressed with a TOAST dictionary that a rolled-back
+-- subtransaction trained must still read back afterwards.  The
+-- language copies values out of SPI results into its own type (a
+-- Tcl string here), which decompresses them, so unlike a PL/pgSQL record
+-- this does not depend on toast_flatten_tuple_dict(); the test guards
+-- that the copy keeps happening before the dictionary row goes away.
+SELECT NOT (enumvals @> '{zstd}') AS skip_zstd FROM pg_settings
+  WHERE name = 'default_toast_compression' \gset
+\if :skip_zstd
+\else
+CREATE TABLE subxact_dict (id int, f text COMPRESSION zstd_dict);
+INSERT INTO subxact_dict
+  SELECT g, repeat('{"id": ' || g || ', "status": "active"} ', 80)
+  FROM generate_series(1, 300) g;
+CREATE FUNCTION subxact_dict_rollback() RETURNS boolean AS $$
+set v ""
+catch {
+    subtransaction {
+        spi_exec "SELECT pg_train_toast_dictionary('subxact_dict', 'f', 4096)"
+        spi_exec "UPDATE subxact_dict SET f = f || '' WHERE id = 6"
+        spi_exec "SELECT f AS v FROM subxact_dict WHERE id = 6"
+        elog ERROR "roll back"
+    }
+}
+spi_exec "SELECT repeat('{\"id\": 6, \"status\": \"active\"} ', 80) AS want"
+return [expr {$v eq $want}]
+$$ LANGUAGE pltcl;
+SELECT subxact_dict_rollback();
+ subxact_dict_rollback 
+-----------------------
+ t
+(1 row)
+
+SELECT count(*) FROM pg_toast_dictionary
+  WHERE tdrelid = 'subxact_dict'::regclass;
+ count 
+-------
+     0
+(1 row)
+
+DROP TABLE subxact_dict;
+\endif

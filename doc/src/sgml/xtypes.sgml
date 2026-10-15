@@ -288,6 +288,18 @@ CREATE TYPE complex (
   must go through the regular <function>PG_DETOAST_DATUM</function> interface.
  </para>
 
+ <para>
+  A data type whose values contain values of other varlena types, the way an
+  array or a composite does, must likewise detoast each value before it
+  copies the value into its own: a value it is handed may be compressed
+  with a column's compression dictionary (<literal>zstd_dict</literal> or
+  <literal>lz4_dict</literal>), and is then readable only while that column's
+  dictionary exists.  <function>PG_DETOAST_DATUM</function> and
+  <function>PG_DETOAST_DATUM_PACKED</function> decompress such a value, as
+  does converting the value to text with its output function; copying its
+  bytes as handed over does not.
+ </para>
+
  <note>
   <para>
    Older code frequently declares <structfield>vl_len_</structfield> as an
