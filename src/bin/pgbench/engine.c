@@ -2296,7 +2296,8 @@ printResults(StatsData *total,
 			{
 				const char *desc = sql_script[i].desc;
 
-				if (strstr(desc, "tpch") != NULL || strstr(desc, "qphh") != NULL)
+				if (strstr(desc, "tpch") != NULL || strstr(desc, "qphh") != NULL ||
+					strstr(desc, "pgbench-h") != NULL || strstr(desc, "pgbench_h") != NULL)
 				{
 					has_qphh = true;
 					tpch_query_cnt += (per_script_stats ? sql_script[i].stats.cnt : total->cnt);

@@ -48,13 +48,16 @@
     <term>
      <function>pgbench.setseed(seed bigint) returns void</function>
     </term>
+    <term>
+     <function>pgbench.setseed(seed integer) returns void</function>
+    </term>
     <listitem>
      <para>
       Sets the seed for the backend's internal pseudorandom number generator used
       by the <literal>pgbench</literal> random functions.  When passed a
       <type>double precision</type> value, it must be in the range
-      <literal>[-1.0, 1.0]</literal>.  When passed a <type>bigint</type> value,
-      it initializes the full 64-bit state directly.
+      <literal>[-1.0, 1.0]</literal>.  When passed a <type>bigint</type> or
+      <type>integer</type> value, it initializes the full 64-bit state directly.
      </para>
     </listitem>
    </varlistentry>

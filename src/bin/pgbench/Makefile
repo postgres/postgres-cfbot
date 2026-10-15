@@ -3,6 +3,8 @@
 PGFILEDESC = "pgbench - a simple program for running benchmark tests"
 PGAPPICON = win32
 
+EXTRA_INSTALL = contrib/pgbench
+
 subdir = src/bin/pgbench
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

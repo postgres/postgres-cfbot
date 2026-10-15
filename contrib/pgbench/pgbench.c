@@ -110,6 +110,19 @@ pgbench_setseed_int64(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(pgbench_setseed_int32);
+Datum
+pgbench_setseed_int32(PG_FUNCTION_ARGS)
+{
+	int32		seed = PG_GETARG_INT32(0);
+
+	pg_prng_seed(&pgbench_prng_state, (uint64) seed);
+	pgbench_prng_seed_set = true;
+	pgbench_nurand_c_initialized = false;
+
+	PG_RETURN_VOID();
+}
+
 PG_FUNCTION_INFO_V1(pgbench_random_int64);
 Datum
 pgbench_random_int64(PG_FUNCTION_ARGS)

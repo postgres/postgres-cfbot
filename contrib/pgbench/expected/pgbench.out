@@ -115,6 +115,31 @@ SELECT pgbench.random(1, 100);
      41
 (1 row)
 
+-- Test integer setseed
+SELECT pgbench.setseed(42);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     53
+(1 row)
+
+SELECT pgbench.setseed(42);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     53
+(1 row)
+
 -- Test TPC-C NURand, c_last, random strings, and date functions
 SELECT pgbench.setseed(42::bigint);
  setseed 

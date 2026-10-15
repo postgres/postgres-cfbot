@@ -36,6 +36,12 @@ SELECT pgbench.random(1, 100);
 SELECT pgbench.setseed(123456789::bigint);
 SELECT pgbench.random(1, 100);
 
+-- Test integer setseed
+SELECT pgbench.setseed(42);
+SELECT pgbench.random(1, 100);
+SELECT pgbench.setseed(42);
+SELECT pgbench.random(1, 100);
+
 -- Test TPC-C NURand, c_last, random strings, and date functions
 SELECT pgbench.setseed(42::bigint);
 SELECT pgbench.nurand(255, 0, 999) BETWEEN 0 AND 999 AS nurand_in_range,

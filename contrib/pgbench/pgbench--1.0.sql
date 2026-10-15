@@ -14,6 +14,11 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'pgbench_setseed_int64'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
 
+CREATE FUNCTION setseed(seed integer)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgbench_setseed_int32'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
 -- Uniform Random
 CREATE FUNCTION random(min bigint, max bigint)
 RETURNS bigint
