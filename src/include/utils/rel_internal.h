@@ -92,7 +92,6 @@ typedef struct RelationData
 
 			/* data managed by RelationGetFKeyList: */
 			List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
-			bool		rd_fkeyvalid;	/* true if rd_fkeylist has been computed */
 
 			/* data managed by RelationGetIndexList: */
 			List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
@@ -100,11 +99,13 @@ typedef struct RelationData
 			bool		rd_ispkdeferrable;	/* is rd_pkindex a deferrable PK? */
 			bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
 									 * rd_replidindex) */
+			bool		rd_fkeyvalid;	/* true if rd_fkeylist has been computed */
+			bool		rd_attrsvalid;	/* are bitmaps of attrs valid? (see
+									 * RelationGetIndexAttrBitmap) */
+			bool		rd_statvalid;	/* is rd_statlist valid? */
 			Oid			rd_replidindex; /* OID of replica identity index, if any */
 
 			/* data managed by RelationGetIndexAttrBitmap: */
-			bool		rd_attrsvalid;	/* are bitmaps of attrs valid? (see
-									 * RelationGetIndexAttrBitmap) */
 			Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
 			Bitmapset  *rd_pkattr;		/* cols included in primary key */
 			Bitmapset  *rd_idattr;		/* included in replica identity index */
@@ -113,7 +114,6 @@ typedef struct RelationData
 
 			/* data managed by RelationGetStatExtList: */
 			List	   *rd_statlist;	/* list of OIDs of extended stats */
-			bool		rd_statvalid;	/* is rd_statlist valid? */
 
 			/*
 			 * Table access method.
@@ -186,13 +186,14 @@ typedef struct RelationData
 		};
 	};
 
-	RelFileLocator rd_locator;	/* relation physical identifier */
 	SMgrRelation rd_smgr;		/* cached file handle, or NULL */
+	RelFileLocator rd_locator;	/* relation physical identifier */
 	int			rd_refcnt;		/* reference count */
 	ProcNumber	rd_backend;		/* owning backend's proc number, if temp rel */
 	bool		rd_islocaltemp; /* rel is a temp rel of this session */
 	bool		rd_isnailed;	/* rel is nailed in cache */
 	bool		rd_isvalid;		/* relcache entry is valid */
+	bool		pgstat_enabled; /* should relation stats be counted */
 
 	/*----------
 	 * rd_createSubid is the ID of the highest subtransaction the rel has
@@ -240,6 +241,16 @@ typedef struct RelationData
 	Form_pg_class rd_rel;		/* RELATION tuple */
 	TupleDesc	rd_att;			/* tuple descriptor */
 	Oid			rd_id;			/* relation's object id */
+
+	/*
+	 * Oid of the handler for this relation. For an index this is a function
+	 * returning IndexAmRoutine, for table like relations a function returning
+	 * TableAmRoutine.  This is stored separately from rd_indam, rd_tableam as
+	 * its lookup requires syscache access, but during relcache bootstrap we
+	 * need to be able to initialize rd_tableam without syscache lookups.
+	 */
+	Oid			rd_amhandler;	/* OID of index AM's handler function */
+
 	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
 
 	/*
@@ -257,15 +268,6 @@ typedef struct RelationData
 	bytea	   *rd_options;		/* parsed pg_class.reloptions */
 
 	/*
-	 * Oid of the handler for this relation. For an index this is a function
-	 * returning IndexAmRoutine, for table like relations a function returning
-	 * TableAmRoutine.  This is stored separately from rd_indam, rd_tableam as
-	 * its lookup requires syscache access, but during relcache bootstrap we
-	 * need to be able to initialize rd_tableam without syscache lookups.
-	 */
-	Oid			rd_amhandler;	/* OID of index AM's handler function */
-
-	/*
 	 * rd_amcache is available for index and table AMs to cache private data
 	 * about the relation.  This must be just a cache since it may get reset
 	 * at any time (in particular, it will get reset by a relcache inval
@@ -276,7 +278,6 @@ typedef struct RelationData
 	 */
 	void	   *rd_amcache;		/* available for use by index/table AM */
 
-	bool		pgstat_enabled; /* should relation stats be counted */
 	/* use "struct" here to avoid needing to include pgstat.h: */
 	struct PgStat_RelationStatus *pgstat_info;	/* statistics collection area */
 } RelationData;
