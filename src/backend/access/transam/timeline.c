@@ -42,6 +42,8 @@
 #include "pgstat.h"
 #include "storage/fd.h"
 #include "utils/wait_event.h"
+#include "utils/fmgrprotos.h"
+#include "utils/uuid.h"
 
 /*
  * Copies all timeline history files with id's between 'begin' and 'end'
@@ -110,8 +112,12 @@ readTimeLineHistory(TimeLineID targetTLI)
 			ereport(FATAL,
 					(errcode_for_file_access(),
 					 errmsg("could not open file \"%s\": %m", path)));
-		/* Not there, so assume no parents */
-		entry = palloc_object(TimeLineHistoryEntry);
+
+		/*
+		 * Not there, so assume no parents. We use palloc0_object to ensure
+		 * that tluuid is all-zero.
+		 */
+		entry = palloc0_object(TimeLineHistoryEntry);
 		entry->tli = targetTLI;
 		entry->begin = entry->end = InvalidXLogRecPtr;
 		return list_make1(entry);
@@ -125,6 +131,7 @@ readTimeLineHistory(TimeLineID targetTLI)
 	prevend = InvalidXLogRecPtr;
 	for (;;)
 	{
+		char		uuid_str[UUID_STR_LEN + 1] = {0};
 		char		fline[MAXPGPATH];
 		char	   *res;
 		char	   *ptr;
@@ -155,7 +162,8 @@ readTimeLineHistory(TimeLineID targetTLI)
 		if (*ptr == '\0' || *ptr == '#')
 			continue;
 
-		nfields = sscanf(fline, "%u\t%X/%08X", &tli, &switchpoint_hi, &switchpoint_lo);
+		nfields =
+			sscanf(fline, "%u\t%X/%08X\t%36s", &tli, &switchpoint_hi, &switchpoint_lo, uuid_str);
 
 		if (nfields < 1)
 		{
@@ -164,7 +172,7 @@ readTimeLineHistory(TimeLineID targetTLI)
 					(errmsg("syntax error in history file: %s", fline),
 					 errhint("Expected a numeric timeline ID.")));
 		}
-		if (nfields != 3)
+		if (nfields < 3)
 			ereport(FATAL,
 					(errmsg("syntax error in history file: %s", fline),
 					 errhint("Expected a write-ahead log switchpoint location.")));
@@ -176,11 +184,49 @@ readTimeLineHistory(TimeLineID targetTLI)
 
 		lasttli = tli;
 
-		entry = palloc_object(TimeLineHistoryEntry);
+		/*
+		 * We use palloc0_object to ensure that tluuid is all-zero, which is
+		 * important for pg_rewind to detect whether the history file is
+		 * missing or not.
+		 */
+		entry = palloc0_object(TimeLineHistoryEntry);
 		entry->tli = tli;
 		entry->begin = prevend;
 		entry->end = ((uint64) (switchpoint_hi)) << 32 | (uint64) switchpoint_lo;
 		prevend = entry->end;
+
+		/*
+		 * Parse the optional UUID field. Old history files have the reason
+		 * string in field 4. It is in theory possible that the reason string
+		 * starts with a UUID, but the current usage do not store a UUID. This
+		 * allows us to support both old and new formats of history files
+		 * without breaking compatibility by checking if the field contains a
+		 * valid UUID.
+		 */
+		if (nfields == 4 && strlen(uuid_str) == UUID_STR_LEN)
+		{
+			MemoryContext oldcontext = CurrentMemoryContext;
+
+			PG_TRY();
+			{
+				Datum		datum = DirectFunctionCall1(uuid_in, CStringGetDatum(uuid_str));
+
+				memcpy(&entry->tluuid, DatumGetUUIDP(datum), sizeof(pg_uuid_t));
+			}
+			PG_CATCH();
+			{
+				ErrorData  *edata;
+
+				MemoryContextSwitchTo(oldcontext);
+				edata = CopyErrorData();
+				FlushErrorState();
+
+				ereport(FATAL,
+						errmsg("invalid UUID in history file \"%s\"", path),
+						errdetail("%s", edata->message));
+			}
+			PG_END_TRY();
+		}
 
 		/* Build list with newest item first */
 		result = lcons(entry, result);
@@ -197,9 +243,11 @@ readTimeLineHistory(TimeLineID targetTLI)
 
 	/*
 	 * Create one more entry for the "tip" of the timeline, which has no entry
-	 * in the history file.
+	 * in the history file. We use palloc0_object to ensure that tluuid is
+	 * all-zero, which is important for pg_rewind to detect whether the
+	 * history file is missing or not.
 	 */
-	entry = palloc_object(TimeLineHistoryEntry);
+	entry = palloc0_object(TimeLineHistoryEntry);
 	entry->tli = targetTLI;
 	entry->begin = prevend;
 	entry->end = InvalidXLogRecPtr;
@@ -294,21 +342,33 @@ findNewestTimeLine(TimeLineID startTLI)
  *
  *	newTLI: ID of the new timeline
  *	parentTLI: ID of its immediate parent
+ *	newTLUUID: UUID uniquely identifying this promotion instance
  *	switchpoint: WAL location where the system switched to the new timeline
  *	reason: human-readable explanation of why the timeline was switched
  *
- * Currently this is only used at the end recovery, and so there are no locking
+ * The output file is named <newTLI>.history (e.g. 00000003.history).  If two
+ * servers independently promote to the same timeline ID, their history files
+ * share the same name. In a shared WAL archive the second file to arrive
+ * silently overwrites the first.  The newTLUUID written into the file content
+ * lets pg_rewind detect this collision: it fetches each server's history file
+ * directly from that server, compares the UUIDs for every shared TLI, and
+ * treats a UUID mismatch as evidence of independent promotion even when the
+ * TLI numbers agree.
+ *
+ * Currently this is only used at end of recovery, and so there are no locking
  * considerations.  But we should be just as tense as XLogFileInit to avoid
  * emplacing a bogus file.
  */
 void
 writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+					 const pg_uuid_t *newTLUUID,
 					 XLogRecPtr switchpoint, const char *reason)
 {
 	char		path[MAXPGPATH];
 	char		tmppath[MAXPGPATH];
 	char		histfname[MAXFNAMELEN];
 	char		buffer[BLCKSZ];
+	char	   *uuid_str;
 	int			srcfd;
 	int			fd;
 	ssize_t		nbytes;
@@ -398,13 +458,19 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	 *
 	 * If we did have a parent file, insert an extra newline just in case the
 	 * parent file failed to end with one.
+	 *
+	 * Format: <parentTLI>\t<switchpoint>\t<ThisTimeLineUUID>\t<reason>\n
 	 */
+	uuid_str = DatumGetCString(DirectFunctionCall1(uuid_out, UUIDPGetDatum(newTLUUID)));
+
 	snprintf(buffer, sizeof(buffer),
-			 "%s%u\t%X/%08X\t%s\n",
+			 "%s%u\t%X/%08X\t%s\t%s\n",
 			 (srcfd < 0) ? "" : "\n",
 			 parentTLI,
 			 LSN_FORMAT_ARGS(switchpoint),
+			 uuid_str,
 			 reason);
+	pfree(uuid_str);
 
 	nbytes = strlen(buffer);
 	errno = 0;
