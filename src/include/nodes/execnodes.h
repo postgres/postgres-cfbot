@@ -634,6 +634,8 @@ typedef struct ResultRelInfo
 
 	/* for use by copyfrom.c when performing multi-inserts */
 	struct CopyMultiInsertBuffer *ri_CopyMultiInsertBuffer;
+	/* for use by copyfrom.c when performing partitioned single inserts */
+	struct CopySingleInsertState *ri_CopySingleInsertState;
 
 	/*
 	 * Used when a leaf partition is involved in a cross-partition update of

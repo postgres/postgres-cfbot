@@ -496,7 +496,7 @@ transientrel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	myState->output_cid = GetCurrentCommandId(true);
 	myState->ti_options = TABLE_INSERT_SKIP_FSM | TABLE_INSERT_FROZEN;
 	myState->strategy = GetAccessStrategy(BAS_BULKWRITE);
-	myState->bistate = GetBulkInsertState(myState->strategy);
+	myState->bistate = GetBulkInsertState(transientrel, myState->strategy);
 
 	/*
 	 * Valid smgr_targblock implies something already wrote to the relation.
