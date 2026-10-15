@@ -205,6 +205,7 @@ ExecEndBitmapIndexScan(BitmapIndexScanState *node)
 		 */
 		winstrument->nsearches += node->biss_Instrument->nsearches;
 		Assert(node->biss_Instrument->ntabletuplefetches == 0);
+		Assert(node->biss_Instrument->ntableblockfetches == 0);
 	}
 
 	/*

@@ -566,7 +566,7 @@ create table ab_a3_b2 partition of ab_a3 for values in (2);
 create table ab_a3_b3 partition of ab_a3 for values in (3);
 
 -- Disallow index only scans as concurrent transactions may stop visibility
--- bits being set causing "Heap Fetches" to be unstable in the EXPLAIN ANALYZE
+-- bits being set causing "Table Fetches" to be unstable in the EXPLAIN ANALYZE
 -- output.
 set enable_indexonlyscan = off;
 

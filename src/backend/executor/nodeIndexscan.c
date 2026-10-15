@@ -821,6 +821,7 @@ ExecEndIndexScan(IndexScanState *node)
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
 		Assert(node->iss_Instrument->ntabletuplefetches == 0);
+		Assert(node->iss_Instrument->ntableblockfetches == 0);
 	}
 
 	/*

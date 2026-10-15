@@ -463,6 +463,8 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 
 		/* We're switching to a new heap block, so count it */
 		hscan->xs_blkswitch_count++;
+		if (index_only && scan->instrument)
+			scan->instrument->ntableblockfetches++;
 
 		if (BufferIsValid(hscan->xs_cbuf))
 			ReleaseBuffer(hscan->xs_cbuf);

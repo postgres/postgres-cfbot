@@ -262,6 +262,7 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
 		winstrument->ntabletuplefetches += node->ioss_Instrument->ntabletuplefetches;
+		winstrument->ntableblockfetches += node->ioss_Instrument->ntableblockfetches;
 	}
 
 	/*
