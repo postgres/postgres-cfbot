@@ -965,6 +965,12 @@ extern void heap_fill_tuple(TupleDesc tupleDesc,
 							const Datum *values, const bool *isnull,
 							char *data, Size data_size,
 							uint16 *infomask, uint8 *bit);
+extern void heap_fill_tuple_attr(TupleDesc tupleDesc,
+								 const Datum *values, const bool *isnull,
+								 char *data, Size data_size,
+								 uint16 *infomask, uint8 *bit,
+								 const bool *skip_copy,
+								 char **attr_data);
 extern void heap_tuple_set_datum(HeapTupleHeader tup, TupleDesc tupleDesc, uint32 len);
 extern void heap_datum_update_type(HeapTupleHeader tup, TupleDesc tupleDesc);
 extern bool heap_attisnull(HeapTuple tup, int attnum, TupleDesc tupleDesc);
@@ -979,6 +985,10 @@ extern void heap_copytuple_with_tuple(HeapTuple src, HeapTuple dest);
 extern Datum heap_copy_tuple_as_datum(HeapTuple tuple, TupleDesc tupleDesc);
 extern HeapTuple heap_form_tuple(TupleDesc tupleDescriptor,
 								 const Datum *values, const bool *isnull);
+extern HeapTuple heap_form_tuple_attr(TupleDesc tupleDescriptor,
+									  const Datum *values, const bool *isnull,
+									  const bool *skip_copy,
+									  char **attr_data);
 extern HeapTuple heap_modify_tuple(HeapTuple tuple,
 								   TupleDesc tupleDesc,
 								   const Datum *replValues,
