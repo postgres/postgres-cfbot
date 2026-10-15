@@ -536,6 +536,20 @@ CompressionNameToMethod(const char *compression)
 #endif
 		return TOAST_ZSTD_COMPRESSION;
 	}
+	else if (strcmp(compression, "zstd_dict") == 0)
+	{
+#ifndef USE_ZSTD
+		NO_COMPRESSION_SUPPORT("zstd");
+#endif
+		return TOAST_ZSTD_DICT_COMPRESSION;
+	}
+	else if (strcmp(compression, "lz4_dict") == 0)
+	{
+#ifndef USE_LZ4
+		NO_COMPRESSION_SUPPORT("lz4");
+#endif
+		return TOAST_LZ4_DICT_COMPRESSION;
+	}
 
 	return InvalidCompressionMethod;
 }
@@ -554,6 +568,10 @@ GetCompressionMethodName(char method)
 			return "lz4";
 		case TOAST_ZSTD_COMPRESSION:
 			return "zstd";
+		case TOAST_ZSTD_DICT_COMPRESSION:
+			return "zstd_dict";
+		case TOAST_LZ4_DICT_COMPRESSION:
+			return "lz4_dict";
 		default:
 			elog(ERROR, "invalid compression method %c", method);
 			return NULL;		/* keep compiler quiet */

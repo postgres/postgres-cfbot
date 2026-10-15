@@ -671,6 +671,7 @@ DependencyGeneratorData
 DependencyType
 DeserialIOData
 DestReceiver
+DictCompressRoutine
 DictISpell
 DictInt
 DictSimple
@@ -943,6 +944,7 @@ FormData_pg_statistic_ext_data
 FormData_pg_subscription
 FormData_pg_subscription_rel
 FormData_pg_tablespace
+FormData_pg_toast_dictionary
 FormData_pg_transform
 FormData_pg_trigger
 FormData_pg_ts_config
@@ -1003,6 +1005,7 @@ Form_pg_statistic_ext_data
 Form_pg_subscription
 Form_pg_subscription_rel
 Form_pg_tablespace
+Form_pg_toast_dictionary
 Form_pg_transform
 Form_pg_trigger
 Form_pg_ts_config
@@ -3537,8 +3540,10 @@ YYLTYPE
 YYSTYPE
 YY_BUFFER_STATE
 ZSTD_CCtx
+ZSTD_CDict
 ZSTD_CStream
 ZSTD_DCtx
+ZSTD_DDict
 ZSTD_DStream
 ZSTD_cParameter
 ZSTD_inBuffer

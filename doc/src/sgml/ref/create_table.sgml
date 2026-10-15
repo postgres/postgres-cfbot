@@ -375,6 +375,22 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <xref linkend="guc-default-toast-compression"/> setting at the time of
       data insertion to determine the method to use.
      </para>
+     <para>
+      <literal>zstd_dict</literal> is <literal>zstd</literal> with a
+      compression dictionary trained for the column by
+      <function>pg_train_toast_dictionary</function>; until one is trained it
+      behaves like <literal>zstd</literal>.  Values compressed with a
+      dictionary are decompressed when copied to any other column or table.
+      See <link linkend="catalog-pg-toast-dictionary"><structname>pg_toast_dictionary</structname></link>.
+     </para>
+     <para>
+      <literal>lz4_dict</literal> is the same arrangement for
+      <literal>lz4</literal>: it uses a compression dictionary trained by
+      <function>pg_train_toast_dictionary</function> (the trainer is zstd's,
+      so the server must be built with both <literal>lz4</literal> and
+      <literal>zstd</literal>), and behaves like <literal>lz4</literal> until
+      one is trained.
+     </para>
     </listitem>
    </varlistentry>
 

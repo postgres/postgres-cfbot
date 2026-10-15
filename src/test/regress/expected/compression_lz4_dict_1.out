@@ -1,0 +1,12 @@
+-- Tests for lz4 TOAST compression with dictionaries.  The dictionary
+-- lifecycle (ownership, containment, retirement) is codec-independent and is
+-- covered in compression_zstd_dict; this file checks the lz4 codec path:
+-- values compress with the dictionary, read back whole and sliced, beat plain
+-- lz4, and stay inside their column.  Training a dictionary uses zstd's
+-- builder (lz4 has none), so the suite needs both lz4 and zstd.
+SELECT NOT(enumvals @> '{lz4}' AND enumvals @> '{zstd}') AS skip_test
+  FROM pg_settings WHERE name = 'default_toast_compression' \gset
+\if :skip_test
+   \echo '*** skipping TOAST tests with lz4 dictionaries (lz4 and zstd both required) ***'
+*** skipping TOAST tests with lz4 dictionaries (lz4 and zstd both required) ***
+   \quit
