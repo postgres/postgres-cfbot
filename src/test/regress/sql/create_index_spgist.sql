@@ -234,6 +234,31 @@ SELECT p, dist FROM quad_point_tbl_ord_seq1 ORDER BY p <-> '0,0' LIMIT 10;
 SELECT p, dist FROM quad_point_tbl_ord_seq1 ORDER BY p <-> '0,0' LIMIT 10;
 RESET extra_float_digits;
 
+-- test an index-only scan that returns only an included column
+CREATE TEMP TABLE spgist_poly_include (id int, p polygon);
+-- make a stored BOX look like a large varlena value if treated as a POLYGON
+INSERT INTO spgist_poly_include VALUES
+  (7, polygon(box(point(0,0), point(1.0000000009313226,1))));
+CREATE INDEX spgist_poly_include_idx ON spgist_poly_include
+  USING spgist (p) INCLUDE (id);
+VACUUM (FREEZE, ANALYZE) spgist_poly_include;
+EXPLAIN (COSTS OFF)
+SELECT id FROM spgist_poly_include;
+SELECT id FROM spgist_poly_include;
+
+-- the same with integral coordinates, where the stored box would be read
+-- as a zero-length polygon if it were returned as the key
+CREATE TEMP TABLE spgist_poly_include2 (id int, p polygon);
+INSERT INTO spgist_poly_include2
+  SELECT i, polygon(box(point(i, i), point(i + 1, i + 1)))
+  FROM generate_series(1, 10) i;
+CREATE INDEX spgist_poly_include2_idx ON spgist_poly_include2
+  USING spgist (p) INCLUDE (id);
+VACUUM (FREEZE, ANALYZE) spgist_poly_include2;
+EXPLAIN (COSTS OFF)
+SELECT id FROM spgist_poly_include2 ORDER BY id;
+SELECT id FROM spgist_poly_include2 ORDER BY id;
+
 -- check ORDER BY distance to NULL
 SELECT (SELECT p FROM kd_point_tbl ORDER BY p <-> pt, p <-> '0,0' LIMIT 1)
 FROM (VALUES (point '1,2'), (NULL), ('1234,5678')) pts(pt);
