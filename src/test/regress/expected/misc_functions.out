@@ -632,6 +632,74 @@ SELECT * FROM tenk1 a JOIN my_gen_series(1,10) g ON a.unique1 = g;
 (4 rows)
 
 --
+-- Test SupportRequestSubattr with a function that reads two parts of a
+-- document.  An UPDATE that changes neither need not evaluate an index on
+-- it; one that changes either must, and must give the index a new entry.
+-- Only assert-enabled builds check that no index skipped this way changes;
+-- amcheck's check_subattr test shows the skips, at DEBUG1.
+--
+CREATE FUNCTION test_subattr_support(internal)
+    RETURNS internal
+    AS :'regresslib', 'test_subattr_support'
+    LANGUAGE C STRICT;
+-- (plpgsql, so that it is not inlined and the support function is asked)
+CREATE FUNCTION two_keys(jsonb, text, text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE STRICT
+    AS $$ BEGIN RETURN ($1->>$2) || '/' || ($1->>$3); END $$
+    SUPPORT test_subattr_support;
+CREATE TABLE subattr_two (id int, d jsonb) WITH (fillfactor = 50);
+CREATE INDEX subattr_two_idx ON subattr_two (two_keys(d, 'a', 'b'));
+INSERT INTO subattr_two SELECT g, jsonb_build_object('a', g, 'b', g, 'c', g)
+  FROM generate_series(1, 2) g;
+BEGIN;
+UPDATE subattr_two SET d = jsonb_set(d, '{c}', '0');
+-- both rows HOT: the index's value didn't change
+SELECT pg_stat_get_xact_tuples_hot_updated('subattr_two'::regclass) AS hot;
+ hot 
+-----
+   2
+(1 row)
+
+UPDATE subattr_two SET d = jsonb_set(d, '{b}', '0');
+-- still 2: neither row HOT, the index needs new entries
+SELECT pg_stat_get_xact_tuples_hot_updated('subattr_two'::regclass) AS hot;
+ hot 
+-----
+   2
+(1 row)
+
+COMMIT;
+-- through the index, which has no entry for '2/0' unless the second
+-- update made one
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM subattr_two WHERE two_keys(d, 'a', 'b') = '2/0';
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Index Scan using subattr_two_idx on subattr_two
+   Index Cond: (two_keys(d, 'a'::text, 'b'::text) = '2/0'::text)
+(2 rows)
+
+SELECT id FROM subattr_two WHERE two_keys(d, 'a', 'b') = '2/0';
+ id 
+----
+  2
+(1 row)
+
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+SELECT id, two_keys(d, 'a', 'b') FROM subattr_two ORDER BY id;
+ id | two_keys 
+----+----------
+  1 | 1/0
+  2 | 2/0
+(2 rows)
+
+DROP TABLE subattr_two;
+DROP FUNCTION two_keys;
+DROP FUNCTION test_subattr_support;
+--
 -- Test SupportRequestInlineInFrom request
 --
 CREATE FUNCTION test_inline_in_from_support_func(internal)
