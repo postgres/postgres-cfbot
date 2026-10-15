@@ -90,6 +90,13 @@ typedef struct CopyMultiInsertBuffer
 												 * stream */
 } CopyMultiInsertBuffer;
 
+/* Stores single-insert state for one partition. */
+typedef struct CopySingleInsertState
+{
+	ResultRelInfo *resultRelInfo;
+	BulkInsertState bistate;
+} CopySingleInsertState;
+
 /*
  * Stores one or many CopyMultiInsertBuffers and details about the size and
  * number of tuples which are stored in them.  This allows multiple buffers to
@@ -374,7 +381,7 @@ CopyMultiInsertBufferInit(ResultRelInfo *rri)
 	if (rri->ri_FdwRoutine == NULL)
 	{
 		buffer->strategy = GetAccessStrategy(BAS_BULKWRITE);
-		buffer->bistate = GetBulkInsertState(buffer->strategy);
+		buffer->bistate = GetBulkInsertState(rri->ri_RelationDesc, buffer->strategy);
 	}
 	else
 	{
@@ -666,6 +673,44 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
 }
 
 /*
+ * Create state for single inserts into one partition.
+ */
+static CopySingleInsertState *
+CopySingleInsertStateInit(ResultRelInfo *rri, BufferAccessStrategy strategy)
+{
+	CopySingleInsertState *state;
+
+	Assert(rri->ri_CopySingleInsertState == NULL);
+
+	state = palloc_object(CopySingleInsertState);
+	state->resultRelInfo = rri;
+	state->bistate = GetBulkInsertState(rri->ri_RelationDesc, strategy);
+	rri->ri_CopySingleInsertState = state;
+
+	return state;
+}
+
+/*
+ * Release all states used for partitioned single inserts.
+ */
+static void
+CopySingleInsertStatesCleanup(List *states)
+{
+	ListCell   *lc;
+
+	foreach(lc, states)
+	{
+		CopySingleInsertState *state = lfirst(lc);
+
+		state->resultRelInfo->ri_CopySingleInsertState = NULL;
+		FreeBulkInsertState(state->bistate);
+		pfree(state);
+	}
+
+	list_free(states);
+}
+
+/*
  * Write out all stored tuples in all buffers out to the tables.
  *
  * Once flushed we also trim the tracked buffers list down to size by removing
@@ -810,6 +855,7 @@ CopyFrom(CopyFromState cstate)
 	uint32		ti_options = 0; /* start with default options for insert */
 	BufferAccessStrategy strategy = NULL;
 	BulkInsertState bistate = NULL;
+	List	   *singleInsertStates = NIL;
 	CopyInsertMethod insertMethod;
 	CopyMultiInsertInfo multiInsertInfo = {0};	/* pacify compiler */
 	int64		processed = 0;
@@ -1103,7 +1149,8 @@ CopyFrom(CopyFromState cstate)
 		singleslot = table_slot_create(resultRelInfo->ri_RelationDesc,
 									   &estate->es_tupleTable);
 		strategy = GetAccessStrategy(BAS_BULKWRITE);
-		bistate = GetBulkInsertState(strategy);
+		if (proute == NULL)
+			bistate = GetBulkInsertState(resultRelInfo->ri_RelationDesc, strategy);
 	}
 
 	has_before_insert_row_trig = (resultRelInfo->ri_TrigDesc &&
@@ -1273,8 +1320,25 @@ CopyFrom(CopyFromState cstate)
 											 &processed);
 				}
 
-				if (bistate != NULL)
-					ReleaseBulkInsertStatePin(bistate);
+				if (prevResultRelInfo != NULL &&
+					prevResultRelInfo->ri_CopySingleInsertState != NULL)
+					ReleaseBulkInsertStatePin(prevResultRelInfo->ri_CopySingleInsertState->bistate);
+
+				if (!leafpart_use_multi_insert && resultRelInfo->ri_FdwRoutine == NULL)
+				{
+					CopySingleInsertState *state = resultRelInfo->ri_CopySingleInsertState;
+
+					if (state == NULL)
+					{
+						state = CopySingleInsertStateInit(resultRelInfo, strategy);
+						singleInsertStates = lappend(singleInsertStates, state);
+					}
+
+					bistate = state->bistate;
+				}
+				else
+					bistate = NULL;
+
 				prevResultRelInfo = resultRelInfo;
 			}
 
@@ -1499,7 +1563,9 @@ CopyFrom(CopyFromState cstate)
 								  cstate->num_errors));
 	}
 
-	if (bistate != NULL)
+	if (proute != NULL)
+		CopySingleInsertStatesCleanup(singleInsertStates);
+	else if (bistate != NULL)
 		FreeBulkInsertState(bistate);
 	if (strategy != NULL)
 		FreeAccessStrategy(strategy);

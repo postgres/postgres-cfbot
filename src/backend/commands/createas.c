@@ -569,7 +569,7 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	if (!into->skipData)
 	{
 		myState->strategy = GetAccessStrategy(BAS_BULKWRITE);
-		myState->bistate = GetBulkInsertState(myState->strategy);
+		myState->bistate = GetBulkInsertState(intoRelationDesc, myState->strategy);
 	}
 	else
 	{

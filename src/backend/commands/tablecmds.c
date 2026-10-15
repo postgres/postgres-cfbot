@@ -6237,7 +6237,7 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 	{
 		mycid = GetCurrentCommandId(true);
 		strategy = GetAccessStrategy(BAS_BULKWRITE);
-		bistate = GetBulkInsertState(strategy);
+		bistate = GetBulkInsertState(newrel, strategy);
 		ti_options = TABLE_INSERT_SKIP_FSM;
 	}
 	else

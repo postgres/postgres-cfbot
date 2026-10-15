@@ -1464,9 +1464,9 @@ table_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
  * Note that most of these options will be applied when inserting into the
  * heap's TOAST table, too, if the tuple requires any out-of-line data.
  *
- * The BulkInsertState object (if any; bistate can be NULL for default
- * behavior) is also just passed through to RelationGetBufferForTuple. If
- * `bistate` is provided, table_finish_bulk_insert() needs to be called.
+ * A BulkInsertState object (if any; bistate can be NULL for default behavior)
+ * belongs to one relation and allows the AM to optimize a series of inserts.
+ * If `bistate` is provided, table_finish_bulk_insert() needs to be called.
  *
  * On return the slot's tts_tid and tts_tableOid are updated to reflect the
  * insertion. But note that any toasting of fields within the slot is NOT
