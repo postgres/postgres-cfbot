@@ -86,6 +86,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_repl_stats.pl',
+      't/002_two_databases.pl',
     ],
   },
 }
