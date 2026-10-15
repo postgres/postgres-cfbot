@@ -93,7 +93,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#define RELCACHE_INIT_FILEMAGIC		0x573268	/* version ID value */
+#define RELCACHE_INIT_FILEMAGIC		0x573269	/* version ID value */
 
 /*
  * Whether to bother checking if relation cache memory needs to be freed
