@@ -10144,6 +10144,14 @@ void PQinitSSL(int do_ssl);
    running a client via <acronym>SSH</acronym>.
   </para>
   <para>
+   Bearer tokens must be protected in transit
+   (<ulink url="https://datatracker.ietf.org/doc/html/rfc7628">RFC 7628</ulink>).
+   <application>libpq</application> refuses to perform OAuth authentication
+   unless the connection to the server is encrypted with
+   <acronym>SSL</acronym>/<acronym>TLS</acronym> or <acronym>GSSAPI</acronym>,
+   or uses a Unix-domain socket.
+  </para>
+  <para>
    The builtin flow will, by default, print a URL to visit and a user code to
    enter there:
 <programlisting>
@@ -10568,6 +10576,19 @@ PGOAUTHDEBUG=UNSAFE                      <lineannotation>legacy format; enables 
      </varlistentry>
 
      <varlistentry>
+      <term><literal>plaintext-server</literal> (unsafe)</term>
+      <listitem>
+       <para>
+        Permits sending the OAuth bearer token to the
+        <productname>PostgreSQL</productname> server over an unencrypted
+        connection. Without this option, OAUTHBEARER authentication requires
+        a connection encrypted with <acronym>SSL</acronym>/<acronym>TLS</acronym>
+        or <acronym>GSSAPI</acronym>, or a Unix-domain socket.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><literal>call-count</literal> (safe)</term>
       <listitem>
        <para>
@@ -10592,7 +10613,8 @@ PGOAUTHDEBUG=UNSAFE                      <lineannotation>legacy format; enables 
 
    <para>
     Unsafe options (<literal>http</literal>, <literal>trace</literal>,
-    <literal>dos-endpoint</literal>) require the <literal>UNSAFE:</literal> prefix.
+    <literal>dos-endpoint</literal>, <literal>plaintext-server</literal>)
+    require the <literal>UNSAFE:</literal> prefix.
     If unsafe options are specified without this prefix, or if an option name is
     unrecognized, a warning is printed to standard error and that option is
     ignored. Other valid options in the list continue to work. Safe options

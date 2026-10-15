@@ -1209,6 +1209,30 @@ oauth_exchange(void *opaq, bool final,
 			/* We begin in the initial response phase. */
 			Assert(inputlen == -1);
 
+			/*
+			 * Bearer tokens must be protected in transit (RFC 7628, Sec. 5;
+			 * RFC 6750, Sec. 5.2). Refuse to continue the exchange if the
+			 * connection to the server is neither encrypted (via TLS or GSS)
+			 * nor local, unless the user has explicitly opted into unsafe
+			 * behavior.
+			 */
+			{
+				bool		encrypted = conn->ssl_in_use;
+
+#ifdef ENABLE_GSS
+				encrypted = encrypted || conn->gssenc;
+#endif
+
+				if (!encrypted &&
+					conn->raddr.addr.ss_family != AF_UNIX &&
+					!(oauth_parse_debug_flags() & OAUTHDEBUG_UNSAFE_PLAINTEXT_SERVER))
+				{
+					libpq_append_conn_error(conn,
+											"OAuth bearer authentication requires an encrypted connection (consider sslmode=require or gssencmode=require)");
+					return SASL_FAILED;
+				}
+			}
+
 			if (!setup_oauth_parameters(conn))
 				return SASL_FAILED;
 
