@@ -43,6 +43,7 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "access/toast_compression.h"
 #include "common/hashfn.h"
 #include "fmgr.h"
 #include "utils/datum.h"
@@ -196,6 +197,19 @@ datumTransfer(Datum value, bool typByVal, int typLen)
 	if (!typByVal && typLen == -1 &&
 		VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(value)))
 		value = TransferExpandedObject(value, CurrentMemoryContext);
+	else if (!typByVal && typLen == -1 &&
+			 VARATT_IS_COMPRESSED_DICT(DatumGetPointer(value)))
+
+		/*
+		 * An inline dictionary-compressed datum depends on a catalog row of
+		 * the column it came from.  Transferring it verbatim to an outer
+		 * context (as SPI_datumTransfer() does across SPI_commit()) could
+		 * leave it readable after a concurrent rewrite retires its
+		 * dictionary, so decompress it here, the way a self-contained copy of
+		 * an external value is detoasted.
+		 */
+		value = PointerGetDatum(detoast_external_attr((varlena *)
+													  DatumGetPointer(value)));
 	else
 		value = datumCopy(value, typByVal, typLen);
 	return value;

@@ -17,6 +17,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_internals.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
@@ -1672,11 +1673,12 @@ check_toast_tuple(HeapTuple toasttup, HeapCheckContext *ctx,
 	 * The data of a compressed value starts with its compressed header, whose
 	 * method must be the one the pointer names: readers take the method from
 	 * the header, not from the pointer.  The header's va_tcinfo is the first
-	 * 4 bytes of the data, followed in the long form by the method byte.  A
-	 * chunk 0 too short to hold the header the method implies passes none of
-	 * these tests, yet detoasting it fails; report that truncation here, and
-	 * otherwise report a mismatched or invalid method as for the pointer: the
-	 * method byte if the header says it has one, otherwise the method bits.
+	 * 4 bytes of the data, followed in the long form by the method byte, and
+	 * for a dictionary method by the 4-byte dictionary OID.  A chunk 0 too
+	 * short to hold the header the method implies passes none of these tests,
+	 * yet detoasting it fails; report that truncation here, and otherwise
+	 * report a mismatched or invalid method as for the pointer: the method
+	 * byte if the header says it has one, otherwise the method bits.
 	 */
 	if (chunk_seq == 0 && ta->cmid != TOAST_INVALID_COMPRESSION_ID)
 	{
@@ -1724,10 +1726,15 @@ check_toast_tuple(HeapTuple toasttup, HeapCheckContext *ctx,
 		}
 
 		/*
-		 * The method is the one the pointer names, but the header may still be
-		 * truncated short of the method byte.  detoasting fails in that case.
+		 * The method is the one the pointer names, but the header may still
+		 * be truncated short of the method byte or, for a dictionary method,
+		 * the dictionary OID that follows it.  detoasting fails in either
+		 * case.
 		 */
-		if (method_bits == VARLENA_COMPRESS_METHOD_LONG)
+		if (cmid == TOAST_ZSTD_DICT_COMPRESSION_ID ||
+			cmid == TOAST_LZ4_DICT_COMPRESSION_ID)
+			header_size = VARHDRSZ_COMPRESSED_DICT - VARHDRSZ;
+		else if (method_bits == VARLENA_COMPRESS_METHOD_LONG)
 			header_size = VARHDRSZ_COMPRESSED_LONG - VARHDRSZ;
 		else
 			header_size = VARHDRSZ_COMPRESSED - VARHDRSZ;

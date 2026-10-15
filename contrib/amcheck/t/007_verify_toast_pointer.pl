@@ -217,8 +217,9 @@ set_method_byte($extinfo_off{4}, 3);
 # Case 5: long pointer to a value it says is not compressed
 set_uncompressed($extinfo_off{5});
 
-# Case 6: long pointer whose method byte is the first ID after the last
-# method
+# Case 6: long pointer naming another long-form method (zstd_dict) than the
+# one in the compressed header stored with the data (zstd).  Readers go by
+# the header, so only amcheck sees this.
 set_method_byte($extinfo_off{6}, 4);
 
 # Row 7 is left alone.
@@ -250,8 +251,8 @@ like(
 	'long pointer to an uncompressed value is reported');
 like(
 	$result,
-	qr/^6\|toast value \d+ has a long TOAST pointer with invalid compression method id 4$/m,
-	'long pointer with the first unused method ID is reported');
+	qr/^6\|toast value \d+ has compression method id 4 in its TOAST pointer, but 2 in its data$/m,
+	'long pointer naming another method than its data is reported');
 unlike($result, qr/^7\|/m, 'well-formed long pointer is not reported');
 
 for my $id (1, 2, 3, 4)

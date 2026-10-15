@@ -52,13 +52,15 @@ typedef enum ToastCompressionId
 	TOAST_LZ4_COMPRESSION_ID = 1,
 	TOAST_ZSTD_COMPRESSION_ID = 2,
 	TOAST_INVALID_COMPRESSION_ID = 3,
+	TOAST_ZSTD_DICT_COMPRESSION_ID = 4,
+	TOAST_LZ4_DICT_COMPRESSION_ID = 5,
 } ToastCompressionId;
 
 StaticAssertDecl(TOAST_INVALID_COMPRESSION_ID == VARLENA_COMPRESS_METHOD_LONG,
 				 "TOAST_INVALID_COMPRESSION_ID must match VARLENA_COMPRESS_METHOD_LONG");
 
 /* Largest compression method ID in use; IDs above it are not methods. */
-#define TOAST_LAST_COMPRESSION_ID	TOAST_ZSTD_COMPRESSION_ID
+#define TOAST_LAST_COMPRESSION_ID	TOAST_LZ4_DICT_COMPRESSION_ID
 
 /*
  * Does this compression method ID need a byte of its own?
@@ -135,6 +137,24 @@ toast_inline_compression_id(const void *PTR)
 }
 
 /*
+ * Is this a compressed-in-line datum that needs a compression dictionary to
+ * be read?  Such a datum depends on catalog state of the column it belongs
+ * to, so code that makes values self-contained treats it like a TOAST
+ * pointer (see toast_dictionary.c).  True for every dictionary-aware codec.
+ */
+static inline bool
+VARATT_IS_COMPRESSED_DICT(const void *PTR)
+{
+	ToastCompressionId cmid;
+
+	if (!VARATT_IS_COMPRESSED(PTR))
+		return false;
+	cmid = toast_inline_compression_id(PTR);
+	return (cmid == TOAST_ZSTD_DICT_COMPRESSION_ID ||
+			cmid == TOAST_LZ4_DICT_COMPRESSION_ID);
+}
+
+/*
  * Built-in compression methods.  pg_attribute will store these in the
  * attcompression column.  In attcompression, InvalidCompressionMethod
  * denotes the default behavior.
@@ -142,6 +162,8 @@ toast_inline_compression_id(const void *PTR)
 #define TOAST_PGLZ_COMPRESSION			'p'
 #define TOAST_LZ4_COMPRESSION			'l'
 #define TOAST_ZSTD_COMPRESSION			'z'
+#define TOAST_ZSTD_DICT_COMPRESSION		'd'
+#define TOAST_LZ4_DICT_COMPRESSION		'e'
 #define InvalidCompressionMethod		'\0'
 
 #define CompressionMethodIsValid(cm)  ((cm) != InvalidCompressionMethod)
