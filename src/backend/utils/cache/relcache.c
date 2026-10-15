@@ -93,7 +93,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#define RELCACHE_INIT_FILEMAGIC		0x573267	/* version ID value */
+#define RELCACHE_INIT_FILEMAGIC		0x573268	/* version ID value */
 
 /*
  * Whether to bother checking if relation cache memory needs to be freed
@@ -1214,9 +1214,7 @@ retry:
 	 */
 	RelationBuildTupleDesc(relation);
 
-	relation->rd_partcheck = NIL;
-	relation->rd_partcheckvalid = false;
-	relation->rd_partcheckcxt = NULL;
+	relation->rd_partinfo = NULL;
 
 	/*
 	 * initialize the relation lock manager information
@@ -1240,15 +1238,6 @@ retry:
 	}
 	else
 	{
-		/* partitioning data is not loaded till asked for */
-		relation->rd_partkey = NULL;
-		relation->rd_partkeycxt = NULL;
-		relation->rd_partdesc = NULL;
-		relation->rd_partdesc_nodetached = NULL;
-		relation->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-		relation->rd_pdcxt = NULL;
-		relation->rd_pddcxt = NULL;
-
 		/*
 		 * initialize access method information
 		 */
@@ -2248,15 +2237,16 @@ RelationCloseCleanup(Relation relation)
 	 * stale partition descriptors it has.  This is unlikely, so check to see
 	 * if there are child contexts before expending a call to mcxt.c.
 	 */
-	if (RelationHasReferenceCountZero(relation) && !RelationIsIndex(relation))
+	if (RelationHasReferenceCountZero(relation) &&
+	    !RelationIsIndex(relation) && relation->rd_partinfo != NULL)
 	{
-		if (relation->rd_pdcxt != NULL &&
-			relation->rd_pdcxt->firstchild != NULL)
-			MemoryContextDeleteChildren(relation->rd_pdcxt);
+		RelationPartitionInfo *partinfo = relation->rd_partinfo;
 
-		if (relation->rd_pddcxt != NULL &&
-			relation->rd_pddcxt->firstchild != NULL)
-			MemoryContextDeleteChildren(relation->rd_pddcxt);
+		if (partinfo->pdcxt != NULL && partinfo->pdcxt->firstchild != NULL)
+			MemoryContextDeleteChildren(partinfo->pdcxt);
+
+		if (partinfo->pddcxt != NULL && partinfo->pddcxt->firstchild != NULL)
+			MemoryContextDeleteChildren(partinfo->pddcxt);
 	}
 
 #ifdef RELCACHE_FORCE_RELEASE
@@ -2492,8 +2482,20 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 		pfree(relation->rd_options);
 	if (relation->rd_amcache)
 		pfree(relation->rd_amcache);
-	if (relation->rd_partcheckcxt)
-		MemoryContextDelete(relation->rd_partcheckcxt);
+	if (relation->rd_partinfo)
+	{
+		RelationPartitionInfo *partinfo = relation->rd_partinfo;
+
+		if (partinfo->partkeycxt)
+			MemoryContextDelete(partinfo->partkeycxt);
+		if (partinfo->pdcxt)
+			MemoryContextDelete(partinfo->pdcxt);
+		if (partinfo->pddcxt)
+			MemoryContextDelete(partinfo->pddcxt);
+		if (partinfo->partcheckcxt)
+			MemoryContextDelete(partinfo->partcheckcxt);
+		pfree(partinfo);
+	}
 	if (!is_index)
 	{
 		list_free(relation->rd_indexlist);
@@ -2513,12 +2515,6 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 			MemoryContextDelete(relation->rd_rulescxt);
 		if (relation->rd_rsdesc)
 			MemoryContextDelete(relation->rd_rsdesc->rscxt);
-		if (relation->rd_partkeycxt)
-			MemoryContextDelete(relation->rd_partkeycxt);
-		if (relation->rd_pdcxt)
-			MemoryContextDelete(relation->rd_pdcxt);
-		if (relation->rd_pddcxt)
-			MemoryContextDelete(relation->rd_pddcxt);
 	}
 	else
 	{
@@ -2723,8 +2719,22 @@ RelationRebuildRelation(Relation relation)
 			keep_rules = equalRuleLocks(relation->rd_rules, newrel->rd_rules);
 			keep_policies = equalRSDesc(relation->rd_rsdesc, newrel->rd_rsdesc);
 			/* partkey is immutable once set up, so we can always keep it */
-			keep_partkey = (relation->rd_partkey != NULL);
+			keep_partkey = (relation->rd_partinfo != NULL &&
+							relation->rd_partinfo->partkey != NULL);
 		}
+
+		/*
+		 * Ensure that the destination has storage for partition metadata
+		 * before starting the descriptor swap.  Nothing in the swap region
+		 * may fail, because relation is transiently inconsistent there.
+		 */
+		if (!is_index && newrel->rd_partinfo == NULL &&
+			(keep_partkey ||
+			 (relation->rd_partinfo != NULL &&
+			  (relation->rd_partinfo->pdcxt != NULL ||
+			   relation->rd_partinfo->pddcxt != NULL))))
+			newrel->rd_partinfo = MemoryContextAllocZero(CacheMemoryContext,
+														 sizeof(RelationPartitionInfo));
 
 		/*
 		 * Perform swapping of the relcache entry contents.  Within this
@@ -2788,27 +2798,36 @@ RelationRebuildRelation(Relation relation)
 			/* toast OID override must be preserved */
 			SWAPFIELD(Oid, rd_toastoid);
 
-			/* preserve old partition key if we have one */
+			/*
+			 * preserve old partition key if we have one; rd_partinfo as a whole
+			 * has already been swapped above along with the rest of the struct,
+			 * so at this point "relation" holds the freshly-built (usually NULL)
+			 * rd_partinfo and "newrel" holds the old one.
+			 */
 			if (keep_partkey)
 			{
-				SWAPFIELD(PartitionKey, rd_partkey);
-				SWAPFIELD(MemoryContext, rd_partkeycxt);
+				SWAPFIELD(PartitionKey, rd_partinfo->partkey);
+				SWAPFIELD(MemoryContext, rd_partinfo->partkeycxt);
 			}
-			if (newrel->rd_pdcxt != NULL || newrel->rd_pddcxt != NULL)
+			if (newrel->rd_partinfo != NULL &&
+				(newrel->rd_partinfo->pdcxt != NULL || newrel->rd_partinfo->pddcxt != NULL))
 			{
+				RelationPartitionInfo *old_partinfo = newrel->rd_partinfo;
+				RelationPartitionInfo *partinfo = relation->rd_partinfo;
+
 				/*
 				 * We are rebuilding a partitioned relation with a non-zero
 				 * reference count, so we must keep the old partition descriptor
 				 * around, in case there's a PartitionDirectory with a pointer to
-				 * it.  This means we can't free the old rd_pdcxt yet.  (This is
+				 * it.  This means we can't free the old pdcxt yet.  (This is
 				 * necessary because RelationGetPartitionDesc hands out direct
 				 * pointers to the relcache's data structure, unlike our usual
 				 * practice which is to hand out copies.  We'd have the same
-				 * problem with rd_partkey, except that we always preserve that
+				 * problem with partkey, except that we always preserve that
 				 * once created.)
 				 *
 				 * To ensure that it's not leaked completely, re-attach it to the
-				 * new reldesc, or make it a child of the new reldesc's rd_pdcxt
+				 * new reldesc, or make it a child of the new reldesc's pdcxt
 				 * in the unlikely event that there is one already.  (Compare hack
 				 * in RelationBuildPartitionDesc.)  RelationClose will clean up
 				 * any such contexts once the reference count reaches zero.
@@ -2821,23 +2840,24 @@ RelationRebuildRelation(Relation relation)
 				 * "old" partition descriptor is actually the one hanging off of
 				 * newrel.
 				 */
-				relation->rd_partdesc = NULL;	/* ensure rd_partdesc is invalid */
-				relation->rd_partdesc_nodetached = NULL;
-				relation->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-				if (relation->rd_pdcxt != NULL) /* probably never happens */
-					MemoryContextSetParent(newrel->rd_pdcxt, relation->rd_pdcxt);
+				Assert(partinfo != NULL);
+				partinfo->partdesc = NULL;	/* ensure partdesc is invalid */
+				partinfo->partdesc_nodetached = NULL;
+				partinfo->partdesc_nodetached_xmin = InvalidTransactionId;
+				if (partinfo->pdcxt != NULL)	/* probably never happens */
+					MemoryContextSetParent(old_partinfo->pdcxt, partinfo->pdcxt);
 				else
-					relation->rd_pdcxt = newrel->rd_pdcxt;
-				if (relation->rd_pddcxt != NULL)
-					MemoryContextSetParent(newrel->rd_pddcxt, relation->rd_pddcxt);
+					partinfo->pdcxt = old_partinfo->pdcxt;
+				if (partinfo->pddcxt != NULL)
+					MemoryContextSetParent(old_partinfo->pddcxt, partinfo->pddcxt);
 				else
-					relation->rd_pddcxt = newrel->rd_pddcxt;
+					partinfo->pddcxt = old_partinfo->pddcxt;
 				/* drop newrel's pointers so we don't destroy it below */
-				newrel->rd_partdesc = NULL;
-				newrel->rd_partdesc_nodetached = NULL;
-				newrel->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-				newrel->rd_pdcxt = NULL;
-				newrel->rd_pddcxt = NULL;
+				old_partinfo->partdesc = NULL;
+				old_partinfo->partdesc_nodetached = NULL;
+				old_partinfo->partdesc_nodetached_xmin = InvalidTransactionId;
+				old_partinfo->pdcxt = NULL;
+				old_partinfo->pddcxt = NULL;
 			}
 		}
 
@@ -6575,13 +6595,6 @@ load_relcache_init_file(bool shared)
 			rel->rd_rulescxt = NULL;
 			rel->trigdesc = NULL;
 			rel->rd_rsdesc = NULL;
-			rel->rd_partkey = NULL;
-			rel->rd_partkeycxt = NULL;
-			rel->rd_partdesc = NULL;
-			rel->rd_partdesc_nodetached = NULL;
-			rel->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-			rel->rd_pdcxt = NULL;
-			rel->rd_pddcxt = NULL;
 			rel->rd_keyattr = NULL;
 			rel->rd_pkattr = NULL;
 			rel->rd_idattr = NULL;
@@ -6614,9 +6627,7 @@ load_relcache_init_file(bool shared)
 		 * Reset transient-state fields in the relcache entry
 		 */
 		rel->rd_smgr = NULL;
-		rel->rd_partcheck = NIL;
-		rel->rd_partcheckvalid = false;
-		rel->rd_partcheckcxt = NULL;
+		rel->rd_partinfo = NULL;
 		if (rel->rd_isnailed)
 			rel->rd_refcnt = 1;
 		else
