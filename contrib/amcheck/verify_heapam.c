@@ -13,6 +13,7 @@
 #include "access/detoast.h"
 #include "access/genam.h"
 #include "access/heaptoast.h"
+#include "access/hot_indexed.h"
 #include "access/multixact.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -542,8 +543,11 @@ verify_heapam(PG_FUNCTION_ARGS)
 			 */
 			if (ItemIdIsRedirected(ctx.itemid))
 			{
-				OffsetNumber rdoffnum = ItemIdGetRedirect(ctx.itemid);
+				OffsetNumber rdoffnum;
 				ItemId		rditem;
+
+				/* Resolve the redirect's target offset. */
+				rdoffnum = ItemIdGetRedirect(ctx.itemid);
 
 				if (rdoffnum < FirstOffsetNumber)
 				{
@@ -635,18 +639,47 @@ verify_heapam(PG_FUNCTION_ARGS)
 			ctx.tuphdr = (HeapTupleHeader) PageGetItem(ctx.page, ctx.itemid);
 			ctx.natts = HeapTupleHeaderGetNatts(ctx.tuphdr);
 
-			/* Ok, ready to check this next tuple */
-			check_tuple(&ctx,
-						&xmin_commit_status_ok[ctx.offnum],
-						&xmin_commit_status[ctx.offnum]);
+			/*
+			 * A HOT-selectively-updated collapse-survivor stub is an
+			 * LP_NORMAL item that is not a real tuple: HEAP_INDEXED_UPDATED
+			 * with natts == 0, permanently invisible (HEAP_XMIN_INVALID),
+			 * carrying a forward link and a modified-attrs bitmap.  The
+			 * per-tuple checks assume a real tuple and would misreport it, so
+			 * skip them; the update-chain pass below still records its
+			 * forward edge and treats it like a redirect (a forwarding node).
+			 */
+			if (!HotIndexedHeaderIsStub(ctx.tuphdr))
+				check_tuple(&ctx,
+							&xmin_commit_status_ok[ctx.offnum],
+							&xmin_commit_status[ctx.offnum]);
 
 			/*
 			 * If the CTID field of this tuple seems to point to another tuple
 			 * on the same page, record that tuple as the successor of this
-			 * one.
+			 * one.  A collapse-survivor stub stores its forward link in the
+			 * t_ctid offset only (the block half is repurposed to hold the
+			 * stub's write-time natts), so resolve its successor via the stub
+			 * accessor; the forward target is always on the same page.
 			 */
-			nextblkno = ItemPointerGetBlockNumber(&(ctx.tuphdr)->t_ctid);
-			nextoffnum = ItemPointerGetOffsetNumber(&(ctx.tuphdr)->t_ctid);
+			if (HotIndexedHeaderIsStub(ctx.tuphdr))
+			{
+				nextblkno = ctx.blkno;
+				nextoffnum = HotIndexedStubGetForward(ctx.tuphdr);
+				if (nextoffnum == ctx.offnum ||
+					nextoffnum < FirstOffsetNumber || nextoffnum > maxoff)
+				{
+					report_corruption(&ctx,
+									  psprintf("HOT-indexed stub forward link to item at offset %d is out of range or self-referential (valid range %d..%d)",
+											   nextoffnum,
+											   FirstOffsetNumber, maxoff));
+					continue;
+				}
+			}
+			else
+			{
+				nextblkno = ItemPointerGetBlockNumber(&(ctx.tuphdr)->t_ctid);
+				nextoffnum = ItemPointerGetOffsetNumber(&(ctx.tuphdr)->t_ctid);
+			}
 			if (nextblkno == ctx.blkno && nextoffnum != ctx.offnum &&
 				nextoffnum >= FirstOffsetNumber && nextoffnum <= maxoff)
 				successor[ctx.offnum] = nextoffnum;
@@ -695,7 +728,7 @@ verify_heapam(PG_FUNCTION_ARGS)
 				 */
 				Assert(ItemIdIsNormal(next_lp));
 
-				/* Can only redirect to a HOT tuple. */
+				/* A redirect targets the first surviving chain member. */
 				next_htup = (HeapTupleHeader) PageGetItem(ctx.page, next_lp);
 				if (!HeapTupleHeaderIsHeapOnly(next_htup))
 				{
@@ -707,6 +740,32 @@ verify_heapam(PG_FUNCTION_ARGS)
 				/* HOT chains should not intersect. */
 				if (predecessor[nextoffnum] != InvalidOffsetNumber)
 				{
+					ItemId		prev_lp = PageGetItemId(ctx.page,
+														predecessor[nextoffnum]);
+
+					/*
+					 * In the HOT/SIU model several redirects legitimately
+					 * forward to the same live tuple: when a chain collapses,
+					 * the root and each entry-bearing dead member become a
+					 * redirect to first_live so every stale btree entry still
+					 * resolves there (the read path then rechecks the leaf
+					 * key).  Multiple predecessors are therefore expected, but
+					 * only in that specific shape: the target is a heap-only
+					 * HOT-indexed survivor (verified heap-only above), and every
+					 * predecessor forwarding to it is itself a redirect (this
+					 * branch) or a collapse stub.  Exempt only that shape; if the
+					 * other predecessor is an ordinary tuple, or the target is
+					 * not HOT-indexed, this is a genuine chain intersection and
+					 * must still be reported; do not weaken corruption
+					 * detection to the mere presence of HEAP_INDEXED_UPDATED.
+					 */
+					if ((next_htup->t_infomask2 & HEAP_INDEXED_UPDATED) != 0 &&
+						(ItemIdIsRedirected(prev_lp) ||
+						 (ItemIdIsNormal(prev_lp) &&
+						  HotIndexedHeaderIsStub((HeapTupleHeader)
+												 PageGetItem(ctx.page, prev_lp)))))
+						continue;
+
 					report_corruption(&ctx,
 									  psprintf("redirect line pointer points to offset %d, but offset %d also points there",
 											   nextoffnum, predecessor[nextoffnum]));
@@ -722,6 +781,30 @@ verify_heapam(PG_FUNCTION_ARGS)
 			}
 
 			/*
+			 * A collapse-survivor stub forwards like a redirect: it is not a
+			 * real tuple, so don't apply the tuple-to-tuple update-chain
+			 * checks, but do record the predecessor edge to its target so the
+			 * live tuple it ultimately forwards to is not mistaken for a
+			 * chain root.  Its target must be heap-only (another stub or the
+			 * live heap-only tuple).
+			 */
+			curr_htup = (HeapTupleHeader) PageGetItem(ctx.page, curr_lp);
+			if (HotIndexedHeaderIsStub(curr_htup))
+			{
+				if (ItemIdIsNormal(next_lp))
+				{
+					next_htup = (HeapTupleHeader) PageGetItem(ctx.page, next_lp);
+					if (!HeapTupleHeaderIsHeapOnly(next_htup))
+						report_corruption(&ctx,
+										  psprintf("HOT-indexed stub forwards to a non-heap-only tuple at offset %d",
+												   nextoffnum));
+					else if (predecessor[nextoffnum] == InvalidOffsetNumber)
+						predecessor[nextoffnum] = ctx.offnum;
+				}
+				continue;
+			}
+
+			/*
 			 * If the next line pointer is a redirect, or if it's a tuple but
 			 * the XMAX of this tuple doesn't match the XMIN of the next
 			 * tuple, then the two aren't part of the same update chain and
@@ -729,7 +812,6 @@ verify_heapam(PG_FUNCTION_ARGS)
 			 */
 			if (ItemIdIsRedirected(next_lp))
 				continue;
-			curr_htup = (HeapTupleHeader) PageGetItem(ctx.page, curr_lp);
 			curr_xmax = HeapTupleHeaderGetUpdateXid(curr_htup);
 			next_htup = (HeapTupleHeader) PageGetItem(ctx.page, next_lp);
 			next_xmin = HeapTupleHeaderGetXmin(next_htup);

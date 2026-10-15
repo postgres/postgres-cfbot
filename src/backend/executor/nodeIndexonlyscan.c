@@ -128,6 +128,16 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		}
 
 		/*
+		 * No HOT-indexed staleness check is needed on the VM-all-visible path
+		 * (where we skipped the heap fetch).  Prune keeps any page that could
+		 * carry a stale leaf (one with a redirect to a live
+		 * HEAP_INDEXED_UPDATED tuple) out of the visibility map, so an
+		 * all-visible entry never crossed a HOT/SIU hop.  (index_getnext_tid
+		 * also resets xs_entry_needs_recheck per entry, and only the heap fetch
+		 * in index_fetch_heap ever sets it, so it cannot be set here anyway.)
+		 */
+
+		/*
 		 * We don't currently support rechecking ORDER BY distances.  (In
 		 * principle, if the index can support retrieval of the originally
 		 * indexed value, it should be able to produce an exact distance

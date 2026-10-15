@@ -180,6 +180,9 @@ MultiExecBitmapOr(BitmapOrState *node)
 	if (result == NULL)
 		elog(ERROR, "BitmapOr doesn't support zero inputs");
 
+	/* Let the table AM flag groups whose union is not exact. */
+	tbm_recheck_inexact_unions(result);
+
 	/* must provide our own instrumentation support */
 	if (node->ps.instrument)
 		InstrStopNode(node->ps.instrument, 0 /* XXX */ );

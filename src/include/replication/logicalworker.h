@@ -24,6 +24,14 @@ extern void SequenceSyncWorkerMain(Datum main_arg);
 extern bool IsLogicalWorker(void);
 extern bool IsLogicalParallelApplyWorker(void);
 
+/*
+ * Accessor for the cached hot_indexed_on_apply mode of the current apply
+ * worker's subscription.  Returns a LOGICALREP_HOT_INDEXED_* code (see
+ * catalog/pg_subscription.h).  Non-apply processes always see
+ * LOGICALREP_HOT_INDEXED_OFF.
+ */
+extern char GetHotIndexedApplyMode(void);
+
 extern void HandleParallelApplyMessageInterrupt(void);
 extern void ProcessParallelApplyMessages(void);
 

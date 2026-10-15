@@ -35,6 +35,9 @@ extern uint8 visibilitymap_set(BlockNumber heapBlk,
 							   Buffer vmBuf, uint8 flags,
 							   RelFileLocator rlocator);
 extern uint8 visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf);
+extern bool visibilitymap_set_locator_split(BlockNumber heapBlk, Buffer vmBuf);
+extern bool visibilitymap_clear_locator_split(BlockNumber heapBlk, Buffer vmBuf);
+extern bool visibilitymap_get_locator_split(Relation rel, BlockNumber heapBlk, Buffer *vmbuf);
 extern void visibilitymap_count(Relation rel, BlockNumber *all_visible, BlockNumber *all_frozen);
 extern BlockNumber visibilitymap_prepare_truncate(Relation rel,
 												  BlockNumber nheapblocks);

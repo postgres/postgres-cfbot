@@ -2874,8 +2874,19 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 {
 	LockTupleMode lockmode;
 	TM_FailureData tmfd;
-	TU_UpdateIndexes update_indexes;
+	Bitmapset  *modified_idx_attrs;
+	bool		row_moved = false;
 	TM_Result	res;
+
+	/*
+	 * Compute the set of modified indexed attributes by comparing the old
+	 * (ondisk) and new (spilled) tuples.  heap_update needs this to make a
+	 * correct HOT decision; without it modified_idx_attrs would be NULL and
+	 * heap_update would always treat the update as HOT-eligible.
+	 */
+	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(chgcxt->cc_rri,
+													ondisk_tuple,
+													spilled_tuple);
 
 	/*
 	 * Carry out the update, skipping logical decoding for it.
@@ -2886,25 +2897,28 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 							 InvalidSnapshot,
 							 InvalidSnapshot,
 							 false,
-							 &tmfd, &lockmode, &update_indexes);
+							 &tmfd, &lockmode,
+							 modified_idx_attrs, &row_moved);
 	if (res != TM_Ok)
 		ereport(ERROR,
 				errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 				errmsg("could not apply concurrent %s on relation \"%s\"",
 					   "UPDATE", RelationGetRelationName(rel)));
 
-	if (update_indexes != TU_None)
+	if (chgcxt->cc_rri->ri_NumIndices > 0 &&
+		(row_moved || !bms_is_empty(modified_idx_attrs)))
 	{
-		uint32		flags = EIIT_IS_UPDATE;
-
-		if (update_indexes == TU_Summarizing)
-			flags |= EIIT_ONLY_SUMMARIZING;
+		ExecSetIndexUnchanged(chgcxt->cc_rri, modified_idx_attrs, row_moved);
 		ExecInsertIndexTuples(chgcxt->cc_rri,
 							  chgcxt->cc_estate,
-							  flags,
+							  EIIT_IS_UPDATE |
+							  (row_moved ?
+							   0 : EIIT_PARTIAL_UPDATE),
 							  spilled_tuple,
 							  NIL, NULL);
 	}
+
+	bms_free(modified_idx_attrs);
 
 	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_UPDATED, 1);
 }
