@@ -63,6 +63,7 @@
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
+#include "executor/execSubattr.h"
 #include "executor/instrument.h"
 #include "executor/nodeModifyTable.h"
 #include "foreign/fdwapi.h"
@@ -339,6 +340,58 @@ IndexExprAttrs(ResultRelInfo *resultRelInfo, int i, EState *estate)
 }
 
 /*
+ * Is the i'th index unaffected by the update from old_tts to new_tts, where
+ * "mine" are the changed attributes it uses?  Use the statement-level proof
+ * (ri_IndexUntouchedAttrs) when it covers them all and none is null in
+ * either row; otherwise evaluate.  Assert builds evaluate anyway and check
+ * that the proof agrees.
+ */
+static bool
+IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
+				TupleTableSlot *old_tts, TupleTableSlot *new_tts,
+				EState *estate)
+{
+	IndexInfo  *indexInfo = resultRelInfo->ri_IndexRelationInfo[i];
+	bool		proven = false;
+
+	if (resultRelInfo->ri_IndexUntouchedAttrs != NULL &&
+		bms_is_subset(mine, resultRelInfo->ri_IndexUntouchedAttrs[i]))
+	{
+		int			attidx = -1;
+
+		proven = true;
+		while ((attidx = bms_next_member(mine, attidx)) >= 0)
+		{
+			AttrNumber	attnum = attidx + FirstLowInvalidHeapAttributeNumber;
+
+			if (slot_attisnull(old_tts, attnum) ||
+				slot_attisnull(new_tts, attnum))
+			{
+				proven = false;
+				break;
+			}
+		}
+	}
+
+#ifdef USE_ASSERT_CHECKING
+	if (proven)
+	{
+		if (IndexEntryChanges(resultRelInfo, indexInfo, old_tts, new_tts,
+							  estate))
+			elog(ERROR, "index \"%s\" proven unaffected by UPDATE, but its entry changed",
+				 RelationGetRelationName(resultRelInfo->ri_IndexRelationDescs[i]));
+		return true;
+	}
+#else
+	if (proven)
+		return true;
+#endif
+
+	return !IndexEntryChanges(resultRelInfo, indexInfo, old_tts, new_tts,
+							  estate);
+}
+
+/*
  * ExecUpdateModifiedIdxAttrs
  *
  * Return the set of indexed attributes whose values differ between old_tts
@@ -455,8 +508,8 @@ ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
 
 			if (!indexInfo->ii_ReadyForInserts ||
 				!resultRelInfo->ri_IndexRelationDescs[i]->rd_index->indisvalid ||
-				IndexEntryChanges(resultRelInfo, indexInfo,
-								  old_tts, new_tts, estate))
+				!IndexUnaffected(resultRelInfo, i, mine, old_tts, new_tts,
+								 estate))
 			{
 				keep = bms_add_members(keep, mine);
 				if (bms_is_subset(candidates, keep))
@@ -1000,6 +1053,136 @@ ExecInitInsertProjection(ModifyTableState *mtstate,
 	}
 
 	resultRelInfo->ri_projectNewInfoValid = true;
+}
+
+/*
+ * ExecInitUpdateUntouched
+ *		Work out, per index, which SET target columns the statement cannot
+ *		change in any part the index reads.  See execSubattr.c.
+ *
+ * Only for a plain UPDATE whose subplan is a scan of the result relation
+ * itself, so that its target list computes each new value from Vars of the
+ * row being updated.  (MERGE keeps its SET expressions elsewhere.)  Joins,
+ * subqueries and the like bring other rows' values, and are left to
+ * ExecUpdateModifiedIdxAttrs() to evaluate.
+ */
+static void
+ExecInitUpdateUntouched(ModifyTableState *mtstate,
+						ResultRelInfo *resultRelInfo)
+{
+	EState	   *estate = mtstate->ps.state;
+	Plan	   *subplan = outerPlan(mtstate->ps.plan);
+	int			whichrel = resultRelInfo - mtstate->resultRelInfo;
+	List	   *updateColnos;
+	Relation	rel = resultRelInfo->ri_RelationDesc;
+	Index		rti = resultRelInfo->ri_RangeTableIndex;
+	Bitmapset  *exprattrs;
+	ListCell   *lt,
+			   *lc;
+	MemoryContext tmpcxt;
+	MemoryContext oldcxt;
+
+	Assert(whichrel >= 0 && whichrel < mtstate->mt_nrels);
+	updateColnos = (List *) list_nth(mtstate->mt_updateColnosLists, whichrel);
+
+	resultRelInfo->ri_IndexUntouchedAttrs = NULL;
+	if (resultRelInfo->ri_NumIndices == 0 || rti == 0)
+		return;
+
+	/*
+	 * For an inheritance tree or partitioned table, each child's rows come
+	 * from its own scan under an Append, laid out the same way.
+	 */
+	if (IsA(subplan, Append))
+	{
+		Plan	   *found = NULL;
+
+		foreach(lc, ((Append *) subplan)->appendplans)
+		{
+			Plan	   *child = lfirst(lc);
+
+			if (IsA(child, SeqScan) || IsA(child, IndexScan) ||
+				IsA(child, BitmapHeapScan) || IsA(child, TidScan) ||
+				IsA(child, TidRangeScan))
+			{
+				if (((Scan *) child)->scanrelid == rti)
+				{
+					/* a relation is scanned once per Append */
+					if (found != NULL)
+						return;
+					found = child;
+				}
+			}
+		}
+		if (found == NULL)
+			return;
+		subplan = found;
+	}
+
+	if (!(IsA(subplan, SeqScan) || IsA(subplan, IndexScan) ||
+		  IsA(subplan, BitmapHeapScan) || IsA(subplan, TidScan) ||
+		  IsA(subplan, TidRangeScan)) ||
+		((Scan *) subplan)->scanrelid != rti)
+		return;
+
+	/*
+	 * A BEFORE ROW trigger may change any column of the new row, which the
+	 * SET expressions do not show.
+	 */
+	if (resultRelInfo->ri_TrigDesc &&
+		resultRelInfo->ri_TrigDesc->trig_update_before_row)
+		return;
+
+	exprattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_EXPRESSION);
+	if (bms_is_empty(exprattrs))
+		return;
+
+	/* the analysis is thrown away; only the bitmaps are kept */
+	tmpcxt = AllocSetContextCreate(CurrentMemoryContext, "subattr proof",
+								   ALLOCSET_SMALL_SIZES);
+	oldcxt = MemoryContextSwitchTo(tmpcxt);
+
+	/*
+	 * ExecBuildUpdateProjection() has checked that updateColnos pairs with
+	 * the target list's non-junk entries, which come first.
+	 */
+	forboth(lt, subplan->targetlist, lc, updateColnos)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lt);
+		AttrNumber	attnum = lfirst_int(lc);
+		Bitmapset  *untouched;
+		int			i;
+
+		Assert(!tle->resjunk);
+		if (!bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
+						   exprattrs))
+			continue;
+
+		untouched = ExecSubattrProveUntouched(resultRelInfo,
+											  (Node *) tle->expr,
+											  rti, attnum,
+											  estate->es_param_list_info);
+		i = -1;
+		while ((i = bms_next_member(untouched, i)) >= 0)
+		{
+			ereport(DEBUG1,
+					errmsg_internal("UPDATE of column \"%s\" cannot change index \"%s\"",
+									NameStr(TupleDescAttr(RelationGetDescr(rel),
+														  attnum - 1)->attname),
+									RelationGetRelationName(resultRelInfo->ri_IndexRelationDescs[i])));
+			MemoryContextSwitchTo(estate->es_query_cxt);
+			if (resultRelInfo->ri_IndexUntouchedAttrs == NULL)
+				resultRelInfo->ri_IndexUntouchedAttrs =
+					palloc0_array(Bitmapset *, resultRelInfo->ri_NumIndices);
+			resultRelInfo->ri_IndexUntouchedAttrs[i] =
+				bms_add_member(resultRelInfo->ri_IndexUntouchedAttrs[i],
+							   attnum - FirstLowInvalidHeapAttributeNumber);
+			MemoryContextSwitchTo(tmpcxt);
+		}
+	}
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(tmpcxt);
+	bms_free(exprattrs);
 }
 
 /*
@@ -2627,6 +2810,16 @@ lreplace:
 	 */
 	if (resultRelationDesc->rd_att->constr)
 		ExecConstraints(resultRelInfo, slot, estate);
+
+	/*
+	 * From the second row on, use what the SET clause shows about which
+	 * indexes it cannot affect.  For a single row, working that out costs
+	 * more than evaluating the indexes it would save.
+	 */
+	if (unlikely(resultRelInfo->ri_UpdateCount < 2) &&
+		++resultRelInfo->ri_UpdateCount == 2 &&
+		context->mtstate->operation == CMD_UPDATE)
+		ExecInitUpdateUntouched(context->mtstate, resultRelInfo);
 
 	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(resultRelInfo, oldSlot, slot,
 													estate);

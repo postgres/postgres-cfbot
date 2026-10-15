@@ -40,6 +40,7 @@ tests += {
       'check_btree',
       'check_gin',
       'check_heap',
+      'check_subattr',
     ],
   },
   'tap': {
@@ -50,6 +51,7 @@ tests += {
       't/004_verify_nbtree_unique.pl',
       't/005_pitr.pl',
       't/006_verify_gin.pl',
+      't/007_subattr_proof.pl',
     ],
   },
 }
