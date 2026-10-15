@@ -1,0 +1,65 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin s2_status s1_n s2_commit s1_check
+step s2_begin: BEGIN;
+step s2_status: UPDATE subattr_epq SET doc = jsonb_set(doc, ARRAY['status'], to_jsonb('b'::text)) WHERE id = 2;
+step s1_n: UPDATE subattr_epq SET doc = jsonb_set(doc, ARRAY['n'], '1'); <waiting ...>
+step s2_commit: COMMIT;
+step s1_n: <... completed>
+step s1_check: 
+	SET enable_seqscan = off;
+	SET enable_bitmapscan = off;
+	SELECT id FROM subattr_epq WHERE doc->>'status' = 'b';
+	SELECT id FROM subattr_epq WHERE (doc->>'vip') = 'yes' AND id IN (1, 2);
+	RESET enable_seqscan;
+	RESET enable_bitmapscan;
+	SELECT id, doc FROM subattr_epq ORDER BY id;
+
+id
+--
+ 2
+(1 row)
+
+id
+--
+ 1
+ 2
+(2 rows)
+
+id|doc                                  
+--+-------------------------------------
+ 1|{"n": 1, "vip": "yes", "status": "a"}
+ 2|{"n": 1, "vip": "yes", "status": "b"}
+(2 rows)
+
+
+starting permutation: s2_begin s2_vip s1_n s2_commit s1_check
+step s2_begin: BEGIN;
+step s2_vip: UPDATE subattr_epq SET doc = jsonb_set(doc, ARRAY['vip'], to_jsonb('no'::text)) WHERE id = 2;
+step s1_n: UPDATE subattr_epq SET doc = jsonb_set(doc, ARRAY['n'], '1'); <waiting ...>
+step s2_commit: COMMIT;
+step s1_n: <... completed>
+step s1_check: 
+	SET enable_seqscan = off;
+	SET enable_bitmapscan = off;
+	SELECT id FROM subattr_epq WHERE doc->>'status' = 'b';
+	SELECT id FROM subattr_epq WHERE (doc->>'vip') = 'yes' AND id IN (1, 2);
+	RESET enable_seqscan;
+	RESET enable_bitmapscan;
+	SELECT id, doc FROM subattr_epq ORDER BY id;
+
+id
+--
+(0 rows)
+
+id
+--
+ 1
+(1 row)
+
+id|doc                                  
+--+-------------------------------------
+ 1|{"n": 1, "vip": "yes", "status": "a"}
+ 2|{"n": 1, "vip": "no", "status": "a"} 
+(2 rows)
+
