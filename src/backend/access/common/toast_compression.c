@@ -73,7 +73,8 @@ zstd_get_dctx(void)
  * A backend-lifetime ZSTD_CCtx for plain (non-dictionary) compression, kept
  * for the same reason as the decompression context above: a one-shot
  * ZSTD_compress() allocates and frees a compression context of over a
- * megabyte for every value, which dominates a bulk load.
+ * megabyte for every value, which dominates a bulk load.  The dictionary
+ * path keeps its own context (dict_cctx in toast_dictionary.c).
  */
 static ZSTD_CCtx *zstd_cctx = NULL;
 
@@ -574,6 +575,20 @@ CompressionNameToMethod(const char *compression)
 #endif
 		return TOAST_ZSTD_COMPRESSION;
 	}
+	else if (strcmp(compression, "zstd_dict") == 0)
+	{
+#ifndef USE_ZSTD
+		NO_COMPRESSION_SUPPORT("zstd");
+#endif
+		return TOAST_ZSTD_DICT_COMPRESSION;
+	}
+	else if (strcmp(compression, "lz4_dict") == 0)
+	{
+#ifndef USE_LZ4
+		NO_COMPRESSION_SUPPORT("lz4");
+#endif
+		return TOAST_LZ4_DICT_COMPRESSION;
+	}
 
 	return InvalidCompressionMethod;
 }
@@ -592,6 +607,10 @@ GetCompressionMethodName(char method)
 			return "lz4";
 		case TOAST_ZSTD_COMPRESSION:
 			return "zstd";
+		case TOAST_ZSTD_DICT_COMPRESSION:
+			return "zstd_dict";
+		case TOAST_LZ4_DICT_COMPRESSION:
+			return "lz4_dict";
 		default:
 			elog(ERROR, "invalid compression method %c", method);
 			return NULL;		/* keep compiler quiet */

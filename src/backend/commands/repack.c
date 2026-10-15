@@ -37,6 +37,7 @@
 #include "access/multixact.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_internals.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -2151,6 +2152,13 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 
 		table_close(relRelation, RowExclusiveLock);
 	}
+
+	/*
+	 * Every value has been rewritten, and toast_tuple_init() recompressed any
+	 * that used a non-current compression dictionary, so those dictionaries
+	 * are no longer referenced and can go.
+	 */
+	toast_dictionary_retire(OIDOldHeap);
 
 	/* Destroy new heap with old filenumber */
 	object.classId = RelationRelationId;

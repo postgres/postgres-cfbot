@@ -105,7 +105,8 @@ index_form_tuple_context(TupleDesc tupleDescriptor,
 		 * If value is stored EXTERNAL, must fetch it so we are not depending
 		 * on outside storage.  This should be improved someday.
 		 */
-		if (VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
+		if (VARATT_IS_EXTERNAL(DatumGetPointer(values[i])) ||
+			VARATT_IS_COMPRESSED_DICT(DatumGetPointer(values[i])))
 		{
 			untoasted_values[i] =
 				PointerGetDatum(detoast_external_attr((varlena *)
