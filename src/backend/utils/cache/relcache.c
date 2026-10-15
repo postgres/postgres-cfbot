@@ -94,7 +94,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#define RELCACHE_INIT_FILEMAGIC		0x573269	/* version ID value */
+#define RELCACHE_INIT_FILEMAGIC		0x57326A	/* version ID value */
 
 /*
  * Whether to bother checking if relation cache memory needs to be freed
@@ -1256,11 +1256,6 @@ retry:
 	relation->rd_partinfo = NULL;
 
 	/*
-	 * initialize the relation lock manager information
-	 */
-	RelationInitLockInfo(relation); /* see lmgr.c */
-
-	/*
 	 * initialize physical addressing information for the relation
 	 */
 	RelationInitPhysicalAddr(relation);
@@ -2059,11 +2054,6 @@ formrdesc(const char *relationName, Oid relationReltype,
 		RelationMapUpdateMap(RelationGetRelid(relation),
 							 RelationGetRelid(relation),
 							 isshared, true);
-
-	/*
-	 * initialize the relation lock manager information
-	 */
-	RelationInitLockInfo(relation); /* see lmgr.c */
 
 	/*
 	 * initialize physical addressing information for the relation
@@ -3794,8 +3784,6 @@ RelationBuildLocalRelation(const char *relname,
 	}
 	else
 		rel->rd_rel->relfilenode = relfilenumber;
-
-	RelationInitLockInfo(rel);	/* see lmgr.c */
 
 	RelationInitPhysicalAddr(rel);
 
@@ -6680,11 +6668,10 @@ load_relcache_init_file(bool shared)
 		rel->pgstat_info = NULL;
 
 		/*
-		 * Recompute lock and physical addressing info.  This is needed in
-		 * case the pg_internal.init file was copied from some other database
-		 * by CREATE DATABASE.
+		 * Recompute physical addressing info.  This is needed in case the
+		 * pg_internal.init file was copied from some other database by
+		 * CREATE DATABASE.
 		 */
-		RelationInitLockInfo(rel);
 		RelationInitPhysicalAddr(rel);
 
 		/* system catalogs are not versioned */
