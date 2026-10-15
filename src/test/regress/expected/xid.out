@@ -175,6 +175,79 @@ select min(x), max(x) from xid8_t1;
 create index on xid8_t1 using btree(x);
 create index on xid8_t1 using hash(x);
 drop table xid8_t1;
+-- xid8 arithmetic operators
+select '42'::xid8 + 3::bigint;
+ ?column? 
+----------
+       45
+(1 row)
+
+select 3::bigint + '42'::xid8;
+ ?column? 
+----------
+       45
+(1 row)
+
+select '42'::xid8 - 3::bigint;
+ ?column? 
+----------
+       39
+(1 row)
+
+select '100'::xid8 - '42'::xid8;
+ ?column? 
+----------
+       58
+(1 row)
+
+select '42'::xid8 + (-3)::bigint;
+ ?column? 
+----------
+       39
+(1 row)
+
+select '42'::xid8 - (-3)::bigint;
+ ?column? 
+----------
+       45
+(1 row)
+
+-- xid8 arithmetic overflow/underflow
+select '0'::xid8 - 1::bigint;
+ERROR:  xid8 out of range
+select '18446744073709551615'::xid8 + 1::bigint;
+ERROR:  xid8 out of range
+select '18446744073709551615'::xid8 - '0'::xid8;
+ERROR:  bigint out of range
+select '0'::xid8 - '18446744073709551615'::xid8;
+ERROR:  bigint out of range
+-- xid8 arithmetic at int8 boundaries
+select '0'::xid8 + 9223372036854775807::bigint;
+      ?column?       
+---------------------
+ 9223372036854775807
+(1 row)
+
+select '0'::xid8 - (-9223372036854775807 - 1)::bigint;
+      ?column?       
+---------------------
+ 9223372036854775808
+(1 row)
+
+select '9223372036854775807'::xid8 - (-9223372036854775807 - 1)::bigint;
+       ?column?       
+----------------------
+ 18446744073709551615
+(1 row)
+
+select '0'::xid8 - '9223372036854775808'::xid8;
+       ?column?       
+----------------------
+ -9223372036854775808
+(1 row)
+
+select '0'::xid8 - '9223372036854775809'::xid8;
+ERROR:  bigint out of range
 -- pg_snapshot data type and related functions
 -- Note: another set of tests similar to this exists in txid.sql, for a limited
 -- time (the relevant functions share C code)
