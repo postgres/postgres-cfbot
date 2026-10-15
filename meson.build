@@ -674,6 +674,91 @@ if have_cxx and not cxx.compiles(cxx11_test, name: 'C++11')
 endif
 
 
+###############################################################
+# Check for C11 stdatomic.h support
+###############################################################
+
+stdatomic_test_code = '''
+#include <stdatomic.h>
+int main(void) {
+    _Atomic int x = 0;
+    atomic_fetch_add(&x, 1);
+    atomic_thread_fence(memory_order_seq_cst);
+    _Atomic(unsigned long long) y = 0;
+    unsigned long long expected = 0;
+    atomic_compare_exchange_strong(&y, &expected, 42);
+    return 0;
+}
+'''
+
+has_stdatomic = false
+atomic_link_args = []
+
+# The stdatomic probe below is a *link* test, not just a compile test: 64-bit
+# atomic_compare_exchange_strong() can lower to a libatomic call
+# (__atomic_compare_exchange_8) on some 32-bit or weakly-aligned targets.  A
+# compile-only check would pass there and then fail at final link, so we
+# require the probe to link, retrying with -latomic if the bare link fails.
+
+if cc.get_id() == 'msvc'
+  msvc_ver = cc.version()
+  if msvc_ver.version_compare('>=19.30')  # Visual Studio 2022+
+    message('MSVC version @0@ detected (>= 19.30), checking for stdatomic.h support'.format(msvc_ver))
+    # MSVC's <stdatomic.h> requires C11 mode (/std:c11) in addition to
+    # /experimental:c11atomics; without /std:c11 the header errors out with
+    # "C atomics require C11 or later".  The probe must pass both, since
+    # test_c_args is not yet populated with the C11 flag at this point.
+    if cc.links(stdatomic_test_code,
+                name: 'MSVC stdatomic.h with /experimental:c11atomics',
+                args: test_c_args + ['/std:c11', '/experimental:c11atomics'])
+      has_stdatomic = true
+      message('MSVC stdatomic.h is available with /experimental:c11atomics')
+    else
+      message('MSVC stdatomic.h test compilation failed')
+    endif
+  else
+    message('MSVC version @0@ is too old for stdatomic.h (requires >= 19.30)'.format(msvc_ver))
+  endif
+else
+  # GCC/Clang and other compilers
+  if cc.has_header('stdatomic.h', args: test_c_args)
+    message('stdatomic.h header found, testing that it links...')
+    if cc.links(stdatomic_test_code,
+                name: 'stdatomic.h works',
+                args: test_c_args)
+      has_stdatomic = true
+      message('stdatomic.h is available and working')
+    elif cc.links(stdatomic_test_code,
+                  name: 'stdatomic.h works with -latomic',
+                  args: test_c_args + ['-latomic'])
+      # Some targets need libatomic for the wider (e.g. 64-bit) operations.
+      has_stdatomic = true
+      atomic_link_args = ['-latomic']
+      message('stdatomic.h is available and working (requires -latomic)')
+    else
+      message('stdatomic.h found but test link failed')
+    endif
+  else
+    message('stdatomic.h header not found')
+  endif
+endif
+
+# stdatomic.h is the sole atomics implementation, so a missing or broken
+# header is a hard error.
+if not has_stdatomic
+  error('a working C11 stdatomic.h is required (it is the only atomics implementation)')
+endif
+cdata.set('USE_STDATOMIC_H', 1)
+message('Using C11 stdatomic.h for atomic operations')
+if atomic_link_args.length() > 0
+  # libatomic is needed for atomics the compiler cannot inline on this target.
+  os_deps += cc.find_library('atomic')
+endif
+if cc.get_id() == 'msvc'
+  # MSVC needs C11 mode plus the experimental atomics switch for <stdatomic.h>.
+  cflags += ['/std:c11', '/experimental:c11atomics']
+endif
+
 postgres_inc = [include_directories(postgres_inc_d)]
 test_lib_d = postgres_lib_d
 test_c_args = cppflags + cflags
