@@ -524,6 +524,59 @@ SELECT tableoid::regclass, id % 2 = 0 is_even, count(*) from parted_si GROUP BY 
 
 DROP TABLE parted_si;
 
+-- Test partition switching with toasted rows in COPY's single-insert path
+CREATE TABLE parted_si_toast (
+  id int not null,
+  payload text GENERATED ALWAYS AS (repeat(id::text, 10000)) STORED,
+  -- Force COPY's single-insert path with a volatile default
+  rand float8 not null default random()
+)
+PARTITION BY LIST((id % 2));
+
+-- Ensure that generated payloads are stored in the TOAST relations
+ALTER TABLE parted_si_toast ALTER COLUMN payload SET STORAGE EXTERNAL;
+CREATE TABLE parted_si_toast_even PARTITION OF parted_si_toast FOR VALUES IN (0);
+CREATE TABLE parted_si_toast_odd PARTITION OF parted_si_toast FOR VALUES IN (1);
+
+COPY parted_si_toast(id) FROM stdin;
+0
+1
+2
+3
+\.
+
+SELECT tableoid::regclass, count(*),
+       bool_and(payload = repeat(id::text, 10000)) AS payload_ok
+  FROM parted_si_toast GROUP BY 1 ORDER BY 1;
+
+DROP TABLE parted_si_toast;
+
+-- Check that a TOAST bulk insertion state survives a per-tuple context reset
+-- between multi-insert flushes.
+CREATE TABLE parted_mi_toast (
+  id int not null,
+  payload text GENERATED ALWAYS AS (repeat(id::text, 10000)) STORED
+)
+PARTITION BY LIST((id % 2));
+
+ALTER TABLE parted_mi_toast ALTER COLUMN payload SET STORAGE EXTERNAL;
+CREATE TABLE parted_mi_toast_even PARTITION OF parted_mi_toast FOR VALUES IN (0);
+CREATE TABLE parted_mi_toast_odd PARTITION OF parted_mi_toast FOR VALUES IN (1);
+CREATE TRIGGER part_ins_trig
+  BEFORE INSERT ON parted_mi_toast_odd
+  FOR EACH ROW EXECUTE FUNCTION part_ins_func();
+
+COPY parted_mi_toast(id) FROM stdin;
+0
+1
+2
+\.
+
+SELECT count(*), bool_and(payload = repeat(id::text, 10000)) AS payload_ok
+  FROM parted_mi_toast;
+
+DROP TABLE parted_mi_toast;
+
 -- ensure COPY FREEZE errors for foreign tables
 begin;
 create foreign data wrapper copytest_wrapper;
