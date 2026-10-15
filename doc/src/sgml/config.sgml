@@ -11776,6 +11776,35 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-ready-for-query-message" xreflabel="ready_for_query_message">
+      <term><varname>ready_for_query_message</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>ready_for_query_message</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls the format of the frontend/backend protocol <literal>ReadyForQuery</literal>
+        (<literal>'Z'</literal>) message. When set to <literal>plain</literal> (the default),
+        the standard 5-byte message containing only the transaction status indicator is sent.
+        When set to <literal>rich</literal>, the message length is extended to append
+        a sequence of length-prefixed key-value pairs carrying session state indicators:
+        <literal>T</literal> (whether temporary tables are present in the session, <literal>1</literal> or <literal>0</literal>),
+        <literal>H</literal> (whether active cursors declared <literal>WITH HOLD</literal> are present, <literal>1</literal> or <literal>0</literal>),
+        <literal>P</literal> (whether active prepared statements are present, <literal>1</literal> or <literal>0</literal>),
+        and <literal>l</literal> (the last transaction commit LSN as an 8-byte unsigned integer in network byte order),
+        along with any additional key-value pairs supplied by extensions using <literal>ready_for_query_hook</literal>.
+       </para>
+       <para>
+        This parameter can be changed at any time by any user. However, client libraries
+        that do not support extended ReadyForQuery messages will fail with a message length
+        mismatch error if this parameter is enabled. It should therefore only be enabled
+        in sessions connecting through clients or connection poolers that support the
+        extended ReadyForQuery format.
+       </para>
+      </listitem>
+     </varlistentry>
+
      </variablelist>
     </sect2>
    </sect1>
