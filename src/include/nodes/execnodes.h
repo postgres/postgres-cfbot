@@ -1924,6 +1924,8 @@ typedef struct SubqueryScanState
  *		funcstates			per-function execution states (private in
  *							nodeFunctionscan.c)
  *		argcontext			memory context to evaluate function arguments in
+ *		stats				storage statistics to report in EXPLAIN ANALYZE
+ *		shared_info			statistics for parallel workers
  * ----------------
  */
 struct FunctionScanPerFuncState;
@@ -1938,6 +1940,8 @@ typedef struct FunctionScanState
 	int			nfuncs;
 	struct FunctionScanPerFuncState *funcstates;	/* array of length nfuncs */
 	MemoryContext argcontext;
+	FunctionScanInstrumentation stats;
+	SharedFunctionScanInfo *shared_info;
 } FunctionScanState;
 
 /* ----------------
