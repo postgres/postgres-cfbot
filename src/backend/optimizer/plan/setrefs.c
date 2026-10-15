@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -134,6 +135,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
+static void replace_orderby_tlist_refs(IndexScan *splan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -179,6 +181,10 @@ static Var *search_indexed_tlist_for_phv(PlaceHolderVar *phv,
 static Var *search_indexed_tlist_for_non_var(Expr *node,
 											 indexed_tlist *itlist,
 											 int newvarno);
+static Var *search_indexed_tlist_for_nulled_expr(PlannerInfo *root,
+												 Expr *node,
+												 indexed_tlist *itlist,
+												 int newvarno);
 static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
 												  Index sortgroupref,
 												  indexed_tlist *itlist,
@@ -704,6 +710,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				splan->indexorderbyorig =
 					fix_scan_list(root, splan->indexorderbyorig,
 								  rtoffset, NUM_EXEC_QUAL(plan));
+				/* after both are fixed, so equal() compares like with like */
+				replace_orderby_tlist_refs(splan);
 			}
 			break;
 		case T_IndexOnlyScan:
@@ -1365,6 +1373,65 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
 
 	return plan;
+}
+
+/*
+ * replace_orderby_tlist_refs
+ *		Let an ordering IndexScan hand its ORDER BY values to its targetlist.
+ *
+ * For each ORDER BY key whose index column's opclass promises that the
+ * distances it reports for an exact (non-rechecked) row are the ordering
+ * operator's own result (indexorderbyexact[i], from amcanreturnorderby),
+ * replace each top-level targetlist expression that is the i'th
+ * indexorderbyorig expression (equal() to it, or its commuted form; see
+ * orderby_tlist_match()) with Var(INNER_VAR, i + 1).  nodeIndexscan.c
+ * then fills a virtual slot with the ORDER BY values of every returned row --
+ * the AM's for an exact row, the recomputed ones for a rechecked row -- and
+ * installs it as the projection's inner tuple.  A scan node has no inner
+ * plan, so INNER_VAR is otherwise unused here.
+ *
+ * indexorderbyexact[i] comes from index_orderby_returnable(), which also
+ * limits this to float8/float4, the only types
+ * index_store_float8_orderby_distances() can deliver.  The planner costs
+ * the scan with the same test (path_target_cost() in pathnode.c), so what
+ * is costed is what is built.
+ */
+static void
+replace_orderby_tlist_refs(IndexScan *splan)
+{
+	ListCell   *lc;
+	int			nrepl = 0;
+
+	if (splan->indexorderbyexact == NIL)
+		return;
+	Assert(list_length(splan->indexorderbyexact) ==
+		   list_length(splan->indexorderbyorig));
+
+	foreach(lc, splan->scan.plan.targetlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		ListCell   *lo,
+				   *le;
+		int			i = 0;
+
+		forboth(lo, splan->indexorderbyorig, le, splan->indexorderbyexact)
+		{
+			Expr	   *orig = (Expr *) lfirst(lo);
+			Oid			typ = exprType((Node *) orig);
+
+			i++;
+			if (lfirst_int(le) && orderby_tlist_match(tle->expr, orig))
+			{
+				tle->expr = (Expr *) makeVar(INNER_VAR, i, typ,
+											 exprTypmod((Node *) orig),
+											 exprCollation((Node *) orig),
+											 0);
+				nrepl++;
+				break;
+			}
+		}
+	}
+	splan->indexorderbytlist = nrepl;
 }
 
 /*
@@ -3116,6 +3183,57 @@ search_indexed_tlist_for_non_var(Expr *node,
 }
 
 /*
+ * search_indexed_tlist_for_nulled_expr
+ *	  Like search_indexed_tlist_for_non_var(), for an expression above an
+ *	  outer join whose Vars may carry nullingrels the input's don't.
+ *
+ * An input of an outer join may emit a non-Var expression it read from an
+ * index (see path_extra_exprs()).  Above the join, the query's copy of that
+ * expression has the join's bit added to its Vars' nullingrels, so equal()
+ * won't match it; the join adds the bit because it null-extends those Vars.
+ * It null-extends the input's copy of the expression too, so the two agree
+ * on every row if the expression yields NULL when its Vars are NULL, that
+ * is if it is strict.  Then match it ignoring nullingrels, as we match Vars
+ * here (NRM_SUPERSET).  The planner relies on this when it carries such a
+ * value up through an outer join (see join_path_target()).
+ */
+static Var *
+search_indexed_tlist_for_nulled_expr(PlannerInfo *root, Expr *node,
+									 indexed_tlist *itlist, int newvarno)
+{
+	Node	   *stripped = NULL;
+	ListCell   *lc;
+
+	if (IsA(node, Const) || IsA(node, Param) ||
+		bms_is_empty(root->outer_join_rels))
+		return NULL;
+
+	foreach(lc, itlist->tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Var) || IsA(tle->expr, PlaceHolderVar))
+			continue;
+		if (stripped == NULL)
+		{
+			if (contain_nonstrict_functions((Node *) node) ||
+				!contain_var_clause((Node *) node))
+				return NULL;
+			stripped = strip_nullingrels((Node *) node);
+		}
+		if (equal(stripped, strip_nullingrels((Node *) tle->expr)))
+		{
+			Var		   *newvar = makeVarFromTargetEntry(newvarno, tle);
+
+			newvar->varnosyn = 0;	/* wasn't ever a plain Var */
+			newvar->varattnosyn = 0;
+			return newvar;
+		}
+	}
+	return NULL;
+}
+
+/*
  * search_indexed_tlist_for_sortgroupref --- find a sort/group expression
  *
  * If a match is found, return a Var constructed to reference the tlist item.
@@ -3322,6 +3440,11 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->outer_itlist,
 												  OUTER_VAR);
+		if (newvar == NULL && context->nrm_match == NRM_SUPERSET)
+			newvar = search_indexed_tlist_for_nulled_expr(context->root,
+														  (Expr *) node,
+														  context->outer_itlist,
+														  OUTER_VAR);
 		if (newvar)
 			return (Node *) newvar;
 	}
@@ -3330,6 +3453,11 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->inner_itlist,
 												  INNER_VAR);
+		if (newvar == NULL && context->nrm_match == NRM_SUPERSET)
+			newvar = search_indexed_tlist_for_nulled_expr(context->root,
+														  (Expr *) node,
+														  context->inner_itlist,
+														  INNER_VAR);
 		if (newvar)
 			return (Node *) newvar;
 	}

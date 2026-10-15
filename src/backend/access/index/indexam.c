@@ -717,6 +717,28 @@ index_can_return(Relation indexRelation, int attno)
 }
 
 /* ----------------
+ *		index_can_return_orderby
+ *
+ *		For an ordering scan on the given column, are the distances the AM
+ *		reports with xs_recheckorderby = false the ordering operator's own
+ *		result, so that the executor may return them in place of
+ *		re-evaluating the operator?  (xs_recheckorderby = false alone only
+ *		promises that they sort the same way.)
+ * ----------------
+ */
+bool
+index_can_return_orderby(Relation indexRelation, int attno)
+{
+	RELATION_CHECKS;
+
+	/* amcanreturnorderby is optional; assume false if not provided by AM */
+	if (indexRelation->rd_indam->amcanreturnorderby == NULL)
+		return false;
+
+	return indexRelation->rd_indam->amcanreturnorderby(indexRelation, attno);
+}
+
+/* ----------------
  *		index_getprocid
  *
  *		Index access methods typically require support routines that are

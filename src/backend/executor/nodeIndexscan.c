@@ -163,6 +163,33 @@ IndexNext(IndexScanState *node)
 	return ExecClearTuple(slot);
 }
 
+/*
+ * Hand the ORDER BY values of the row about to be returned to the projection,
+ * when the targetlist asks for them (indexorderbytlist > 0, set by setrefs.c
+ * only for keys whose opclass passes amcanreturnorderby).  vals and nulls
+ * are what the caller established as this row's ordering values: the AM's
+ * when it reported them exact, the recomputed ones when it asked for a
+ * recheck, or a reorder queue entry's copy.  Never a lossy AM's lower bound.
+ */
+static inline void
+IndexStoreOrderByValues(IndexScanState *node, const Datum *vals,
+						const bool *nulls)
+{
+	TupleTableSlot *oslot = node->iss_OrderBySlot;
+	int			i;
+
+	if (oslot == NULL)
+		return;
+	ExecClearTuple(oslot);
+	for (i = 0; i < node->iss_NumOrderByKeys; i++)
+	{
+		oslot->tts_values[i] = vals[i];
+		oslot->tts_isnull[i] = nulls[i];
+	}
+	ExecStoreVirtualTuple(oslot);
+	node->ss.ps.ps_ExprContext->ecxt_innertuple = oslot;
+}
+
 /* ----------------------------------------------------------------
  *		IndexNextWithReorder
  *
@@ -251,6 +278,9 @@ IndexNextWithReorder(IndexScanState *node)
 			{
 				HeapTuple	tuple;
 
+				/* before the pop frees the entry's copies */
+				IndexStoreOrderByValues(node, topmost->orderbyvals,
+										topmost->orderbynulls);
 				tuple = reorderqueue_pop(node);
 
 				/* Pass 'true', as the tuple in the queue is a palloc'd copy */
@@ -352,6 +382,7 @@ next_indextuple:
 		else
 		{
 			/* Can return this tuple immediately. */
+			IndexStoreOrderByValues(node, lastfetched_vals, lastfetched_nulls);
 			return slot;
 		}
 	}
@@ -404,7 +435,22 @@ IndexRecheck(IndexScanState *node, TupleTableSlot *slot)
 
 	/* Does the tuple meet the indexqual condition? */
 	econtext->ecxt_scantuple = slot;
-	return ExecQualAndReset(node->indexqualorig, econtext);
+	if (!ExecQualAndReset(node->indexqualorig, econtext))
+		return false;
+
+	/*
+	 * The EPQ test tuple never went through IndexNext, so the ORDER BY values
+	 * the targetlist reads (if any) are not those of this row.  Recompute
+	 * them from the tuple, as we would for a rechecked row.
+	 */
+	if (node->iss_OrderBySlot != NULL)
+	{
+		EvalOrderByExpressions(node, econtext);
+		IndexStoreOrderByValues(node, node->iss_OrderByValues,
+								node->iss_OrderByNulls);
+	}
+
+	return true;
 }
 
 
@@ -954,7 +1000,24 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	 * Initialize result type and projection.
 	 */
 	ExecInitResultTypeTL(&indexstate->ss.ps);
-	ExecAssignScanProjectionInfo(&indexstate->ss);
+
+	/*
+	 * A targetlist that reads the ORDER BY values (INNER_VAR Vars, see
+	 * setrefs.c) is never the scan tuple's physical layout, so it always
+	 * projects; ExecConditionalAssignProjectionInfo would assert on the
+	 * INNER_VAR while testing whether it can skip projection.
+	 */
+	if (node->indexorderbytlist > 0)
+	{
+		ExecInitResultSlot(&indexstate->ss.ps, &TTSOpsVirtual);
+		indexstate->ss.ps.resultops = &TTSOpsVirtual;
+		indexstate->ss.ps.resultopsfixed = true;
+		indexstate->ss.ps.resultopsset = true;
+		ExecAssignProjectionInfo(&indexstate->ss.ps,
+								 indexstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor);
+	}
+	else
+		ExecAssignScanProjectionInfo(&indexstate->ss);
 
 	/*
 	 * initialize child expressions
@@ -1023,6 +1086,30 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 						   &indexstate->iss_NumRuntimeKeys,
 						   NULL,	/* no ArrayKeys */
 						   NULL);
+
+	/*
+	 * A targetlist that reads the ORDER BY values needs a slot to read them
+	 * from, typed as the ORDER BY expressions (setrefs.c built it so).
+	 */
+	if (node->indexorderbytlist > 0)
+	{
+		TupleDesc	odesc;
+		ListCell   *lc;
+		AttrNumber	attno = 0;
+
+		odesc = CreateTemplateTupleDesc(list_length(node->indexorderbyorig));
+		foreach(lc, node->indexorderbyorig)
+		{
+			Node	   *expr = (Node *) lfirst(lc);
+
+			attno++;
+			TupleDescInitEntry(odesc, attno, NULL, exprType(expr),
+							   exprTypmod(expr), 0);
+		}
+		TupleDescFinalize(odesc);
+		indexstate->iss_OrderBySlot =
+			ExecAllocTableSlot(&estate->es_tupleTable, odesc, &TTSOpsVirtual, 0);
+	}
 
 	/* Initialize sort support, if we need to re-check ORDER BY exprs */
 	if (indexstate->iss_NumOrderByKeys > 0)

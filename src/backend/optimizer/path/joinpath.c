@@ -45,6 +45,7 @@ join_path_setup_hook_type join_path_setup_hook = NULL;
 #define PATH_PARAM_BY_REL(path, rel)	\
 	(PATH_PARAM_BY_REL_SELF(path, rel) || PATH_PARAM_BY_PARENT(path, rel))
 
+static Path *cheapest_extras_path(RelOptInfo *rel);
 static void try_partial_mergejoin_path(PlannerInfo *root,
 									   RelOptInfo *joinrel,
 									   Path *outer_path,
@@ -149,6 +150,8 @@ add_paths_to_joinrel(PlannerInfo *root,
 	extra.restrictlist = restrictlist;
 	extra.mergeclause_list = NIL;
 	extra.sjinfo = sjinfo;
+	extra.extras_outer = cheapest_extras_path(outerrel);
+	extra.extras_inner = cheapest_extras_path(innerrel);
 	extra.param_source_rels = NULL;
 	extra.pgs_mask = joinrel->pgs_mask;
 
@@ -873,6 +876,51 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 }
 
 /*
+ * inputs_emit_extras
+ *	  Does either input path emit values beyond its reltarget?
+ *
+ * A join over such an input emits them too (see join_path_target()), which
+ * add_path() counts in its favor like better pathkeys.  add_path_precheck()
+ * can't know that before the path exists, so skip the precheck for it.
+ */
+static inline bool
+inputs_emit_extras(Path *outer_path, Path *inner_path)
+{
+	/* cheap test first: most paths share their rel's reltarget */
+	return (outer_path->pathtarget != outer_path->parent->reltarget &&
+			path_emits_extras(outer_path)) ||
+		(inner_path->pathtarget != inner_path->parent->reltarget &&
+		 path_emits_extras(inner_path));
+}
+
+/*
+ * cheapest_extras_path
+ *	  The cheapest unparameterized path of 'rel' that emits values beyond its
+ *	  reltarget (see path_extra_exprs()), or NULL.
+ *
+ * Such a path is kept by add_path() but is rarely the rel's cheapest, and
+ * hash and sort-merge joins look only at the cheapest.  It is worth trying
+ * as well: a join over it doesn't pay for evaluating those values.
+ * pathlist is sorted by total cost, so the first one found is the cheapest.
+ */
+static Path *
+cheapest_extras_path(RelOptInfo *rel)
+{
+	ListCell   *lc;
+
+	foreach(lc, rel->pathlist)
+	{
+		Path	   *path = (Path *) lfirst(lc);
+
+		if (path->param_info == NULL && path != rel->cheapest_total_path &&
+			path->pathtarget != rel->reltarget &&
+			path_emits_extras(path))
+			return path;
+	}
+	return NULL;
+}
+
+/*
  * try_nestloop_path
  *	  Consider a nestloop join path; if it appears useful, push it into
  *	  the joinrel's pathlist via add_path().
@@ -970,7 +1018,8 @@ try_nestloop_path(PlannerInfo *root,
 						  nestloop_subtype | PGS_CONSIDER_NONPARTIAL,
 						  outer_path, inner_path, extra);
 
-	if (add_path_precheck(joinrel, workspace.disabled_nodes,
+	if (inputs_emit_extras(outer_path, inner_path) ||
+		add_path_precheck(joinrel, workspace.disabled_nodes,
 						  workspace.startup_cost, workspace.total_cost,
 						  pathkeys, required_outer))
 	{
@@ -1055,7 +1104,8 @@ try_partial_nestloop_path(PlannerInfo *root,
 	 */
 	initial_cost_nestloop(root, &workspace, jointype, nestloop_subtype,
 						  outer_path, inner_path, extra);
-	if (!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
+	if (!inputs_emit_extras(outer_path, inner_path) &&
+		!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
 								   workspace.startup_cost,
 								   workspace.total_cost, pathkeys))
 		return;
@@ -1163,7 +1213,8 @@ try_mergejoin_path(PlannerInfo *root,
 						   outer_presorted_keys,
 						   extra);
 
-	if (add_path_precheck(joinrel, workspace.disabled_nodes,
+	if (inputs_emit_extras(outer_path, inner_path) ||
+		add_path_precheck(joinrel, workspace.disabled_nodes,
 						  workspace.startup_cost, workspace.total_cost,
 						  pathkeys, required_outer))
 	{
@@ -1245,7 +1296,8 @@ try_partial_mergejoin_path(PlannerInfo *root,
 						   outer_presorted_keys,
 						   extra);
 
-	if (!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
+	if (!inputs_emit_extras(outer_path, inner_path) &&
+		!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
 								   workspace.startup_cost,
 								   workspace.total_cost, pathkeys))
 		return;
@@ -1317,7 +1369,8 @@ try_hashjoin_path(PlannerInfo *root,
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, false);
 
-	if (add_path_precheck(joinrel, workspace.disabled_nodes,
+	if (inputs_emit_extras(outer_path, inner_path) ||
+		add_path_precheck(joinrel, workspace.disabled_nodes,
 						  workspace.startup_cost, workspace.total_cost,
 						  NIL, required_outer))
 	{
@@ -1378,7 +1431,8 @@ try_partial_hashjoin_path(PlannerInfo *root,
 	 */
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, parallel_hash);
-	if (!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
+	if (!inputs_emit_extras(outer_path, inner_path) &&
+		!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
 								   workspace.startup_cost,
 								   workspace.total_cost, NIL))
 		return;
@@ -1419,6 +1473,8 @@ sort_inner_and_outer(PlannerInfo *root,
 {
 	Path	   *outer_path;
 	Path	   *inner_path;
+	Path	   *extras_outer;
+	Path	   *extras_inner;
 	Path	   *cheapest_partial_outer = NULL;
 	Path	   *cheapest_safe_inner = NULL;
 	List	   *all_pathkeys;
@@ -1453,6 +1509,8 @@ sort_inner_and_outer(PlannerInfo *root,
 	if (PATH_PARAM_BY_REL(outer_path, innerrel) ||
 		PATH_PARAM_BY_REL(inner_path, outerrel))
 		return;
+	extras_outer = extra->extras_outer;
+	extras_inner = extra->extras_inner;
 
 	/*
 	 * If the joinrel is parallel-safe, we may be able to consider a partial
@@ -1560,6 +1618,16 @@ sort_inner_and_outer(PlannerInfo *root,
 						   jointype,
 						   extra,
 						   false);
+
+		/* Likewise with inputs that emit extra values; see hash join */
+		if (extras_outer != NULL)
+			try_mergejoin_path(root, joinrel, extras_outer, inner_path,
+							   merge_pathkeys, cur_mergeclauses,
+							   outerkeys, innerkeys, jointype, extra, false);
+		if (extras_inner != NULL)
+			try_mergejoin_path(root, joinrel, outer_path, extras_inner,
+							   merge_pathkeys, cur_mergeclauses,
+							   outerkeys, innerkeys, jointype, extra, false);
 
 		/*
 		 * If we have partial outer and parallel safe inner path then try
@@ -1845,6 +1913,7 @@ match_unsorted_outer(PlannerInfo *root,
 	bool		useallclauses;
 	Path	   *inner_cheapest_total = innerrel->cheapest_total_path;
 	Path	   *matpath = NULL;
+	Path	   *extras_matpath = NULL;
 	ListCell   *lc1;
 
 	/*
@@ -1921,6 +1990,20 @@ match_unsorted_outer(PlannerInfo *root,
 			!ExecMaterializesOutput(inner_cheapest_total->pathtype))
 			matpath = (Path *)
 				create_material_path(innerrel, inner_cheapest_total, true);
+
+		if ((extra->pgs_mask &
+			 (PGS_NESTLOOP_MATERIALIZE | PGS_CONSIDER_NONPARTIAL)) ==
+			(PGS_NESTLOOP_MATERIALIZE | PGS_CONSIDER_NONPARTIAL) &&
+			inner_cheapest_total != NULL)
+		{
+			Path	   *extras_inner = extra->extras_inner;
+
+			if (extras_inner != NULL &&
+				!PATH_PARAM_BY_REL(extras_inner, outerrel) &&
+				!ExecMaterializesOutput(extras_inner->pathtype))
+				extras_matpath = (Path *)
+					create_material_path(innerrel, extras_inner, true);
+		}
 	}
 
 	foreach(lc1, outerrel->pathlist)
@@ -1990,6 +2073,17 @@ match_unsorted_outer(PlannerInfo *root,
 								  joinrel,
 								  outerpath,
 								  matpath,
+								  merge_pathkeys,
+								  jointype,
+								  PGS_NESTLOOP_MATERIALIZE,
+								  extra);
+
+			/* And of an inner path that emits extra values; see hash join */
+			if (extras_matpath != NULL)
+				try_nestloop_path(root,
+								  joinrel,
+								  outerpath,
+								  extras_matpath,
 								  merge_pathkeys,
 								  jointype,
 								  PGS_NESTLOOP_MATERIALIZE,
@@ -2282,6 +2376,24 @@ hash_inner_and_outer(PlannerInfo *root,
 							  hashclauses,
 							  jointype,
 							  extra);
+
+		/*
+		 * Also try an input that emits values the query needs above the join,
+		 * on either side; see cheapest_extras_path().
+		 */
+		{
+			Path	   *extras_outer = extra->extras_outer;
+			Path	   *extras_inner = extra->extras_inner;
+
+			if (extras_outer != NULL)
+				try_hashjoin_path(root, joinrel,
+								  extras_outer, cheapest_total_inner,
+								  hashclauses, jointype, extra);
+			if (extras_inner != NULL)
+				try_hashjoin_path(root, joinrel,
+								  cheapest_total_outer, extras_inner,
+								  hashclauses, jointype, extra);
+		}
 
 		foreach(lc1, outerrel->cheapest_parameterized_paths)
 		{
