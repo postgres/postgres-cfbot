@@ -2763,6 +2763,27 @@ eqjoinsel_semi(FmgrInfo *eqproc, Oid collation,
 	double		selec;
 
 	/*
+	 * The inner-side distinct count is a numerator.  Prefer the high end when
+	 * available, so a disjoint UNION ALL does not look like a small domain. A
+	 * low end from partial information is useful only when it is at least
+	 * nd1: the semi-join ratio is then saturated, so missing members cannot
+	 * reduce it further.  Otherwise leave the estimate marked as a default.
+	 */
+	if (vardata2->ndistinct_hi > 0.0)
+	{
+		nd2 = clamp_row_est(vardata2->ndistinct_hi);
+		isdefault2 = false;
+	}
+	else if (vardata2->ndistinct_lo > 0.0 &&
+			 clamp_row_est(vardata2->ndistinct_lo) >= nd1)
+	{
+		nd2 = clamp_row_est(vardata2->ndistinct_lo);
+		isdefault2 = false;
+	}
+	else if (vardata2->ndistinct_lo > 0.0)
+		isdefault2 = true;
+
+	/*
 	 * We clamp nd2 to be not more than what we estimate the inner relation's
 	 * size to be.  This is intuitively somewhat reasonable since obviously
 	 * there can't be more than that many distinct values coming from the
@@ -3679,6 +3700,28 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 	ListCell   *lc;
 
 	ndistinct = get_variable_numdistinct(vardata, &isdefault);
+
+	/*
+	 * A group count is a row count.  Prefer the high end over the
+	 * divisor-safe low end returned by get_variable_numdistinct().
+	 */
+	if (vardata->ndistinct_hi > 0.0)
+	{
+		ndistinct = vardata->ndistinct_hi;
+		isdefault = false;
+	}
+	else if (vardata->ndistinct_lo > 0.0)
+	{
+		/*
+		 * No high end is available because some member lacked an estimate.
+		 * Use the low end as a floor, but never below the historical default.
+		 *
+		 * Keep the default flag set: without a high end, Memoize must not
+		 * treat a low-end count as evidence of a high cache hit rate.
+		 */
+		ndistinct = Max(vardata->ndistinct_lo, (double) DEFAULT_NUM_DISTINCT);
+		isdefault = true;
+	}
 
 	/*
 	 * The nullingrels bits within the var could cause the same var to be
@@ -6314,8 +6357,7 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 		if (rel->attr_ndistinct_lo == NULL)
 			set_append_rel_ndistinct(root, rel);
 
-		if (var->varattno <= 0 ||
-			var->varattno > rel->max_attr)
+		if (var->varattno <= 0)
 			return;
 
 		pndx = var->varattno - rel->min_attr;
