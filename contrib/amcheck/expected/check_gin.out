@@ -88,3 +88,128 @@ SELECT gin_index_check('gin_check_multicolumn_idx');
 
 -- cleanup
 DROP TABLE gin_check_multicolumn;
+-- An UPDATE that leaves a GIN index's keys for the row as they are is HOT:
+-- reordering or repeating array elements, or changing the positions in a
+-- tsvector but not its lexemes.  Scans through the index must still find
+-- exactly the rows a sequential scan finds.
+CREATE TABLE gin_hot (id int, tags int[], tsv tsvector, body text)
+  WITH (fillfactor = 10);
+CREATE INDEX gin_hot_tags ON gin_hot USING gin (tags);
+CREATE INDEX gin_hot_tsv ON gin_hot USING gin (tsv);
+CREATE INDEX gin_hot_body ON gin_hot USING gin (to_tsvector('simple', body));
+INSERT INTO gin_hot
+  SELECT g, ARRAY[g % 7, g % 11, g % 13], to_tsvector('simple', 'a b c ' || g),
+         'one two ' || g
+    FROM generate_series(1, 100) g;
+CREATE FUNCTION gin_hot_count(OUT updated bigint, OUT hot bigint)
+LANGUAGE sql AS $$
+  SELECT pg_stat_get_xact_tuples_updated('gin_hot'::regclass),
+         pg_stat_get_xact_tuples_hot_updated('gin_hot'::regclass) $$;
+-- How many rows each tag, lexeme and word matches through the index (a
+-- bitmap scan, as GIN has no other) and not (a sequential scan), and the
+-- number of mismatches.
+CREATE FUNCTION gin_hot_count_via(via_index bool, q text) RETURNS bigint
+LANGUAGE plpgsql AS $$
+DECLARE c bigint;
+BEGIN
+  PERFORM set_config('enable_seqscan', CASE WHEN via_index THEN 'off' ELSE 'on' END, true);
+  PERFORM set_config('enable_bitmapscan', CASE WHEN via_index THEN 'on' ELSE 'off' END, true);
+  PERFORM set_config('enable_indexscan', 'off', true);
+  EXECUTE 'SELECT count(*) FROM gin_hot WHERE ' || q INTO c;
+  RETURN c;
+END $$;
+CREATE FUNCTION gin_hot_mismatches() RETURNS bigint LANGUAGE sql AS $$
+  SELECT count(*) FROM
+    (SELECT format('tags @> ARRAY[%s]', k) FROM generate_series(0, 13) k
+     UNION ALL
+     SELECT format('tsv @@ to_tsquery(''simple'', %L)', w)
+       FROM unnest(ARRAY['a', 'b', 'c', 'd', 'one', 'two', 'three', '7']) w
+     UNION ALL
+     SELECT format('to_tsvector(''simple'', body) @@ to_tsquery(''simple'', %L)', w)
+       FROM unnest(ARRAY['a', 'b', 'c', 'd', 'one', 'two', 'three', '7']) w) q(q)
+  WHERE gin_hot_count_via(true, q) <> gin_hot_count_via(false, q)
+$$;
+BEGIN;
+-- same keys: HOT
+UPDATE gin_hot SET tags = ARRAY[tags[3], tags[1], tags[2], tags[1]];
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     100 | 100
+(1 row)
+
+UPDATE gin_hot SET tsv = to_tsvector('simple', 'c b a a ' || id);
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     200 | 200
+(1 row)
+
+UPDATE gin_hot SET body = id || ' two one one';
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     300 | 300
+(1 row)
+
+-- different keys: not HOT
+UPDATE gin_hot SET tags = tags || 0 WHERE id <= 10;
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     310 | 301
+(1 row)
+
+UPDATE gin_hot SET tsv = to_tsvector('simple', 'a b d ' || id) WHERE id <= 10;
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     320 | 301
+(1 row)
+
+UPDATE gin_hot SET body = 'three ' || body WHERE id <= 10;
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     330 | 301
+(1 row)
+
+-- to and from no keys, and null
+UPDATE gin_hot SET tags = '{}' WHERE id = 11;
+UPDATE gin_hot SET tags = NULL WHERE id = 11;
+UPDATE gin_hot SET tags = '{1}' WHERE id = 11;
+SELECT * FROM gin_hot_count();
+ updated | hot 
+---------+-----
+     333 | 301
+(1 row)
+
+COMMIT;
+SELECT gin_hot_mismatches();
+ gin_hot_mismatches 
+--------------------
+                  0
+(1 row)
+
+SELECT gin_index_check('gin_hot_tags');
+ gin_index_check 
+-----------------
+ 
+(1 row)
+
+SELECT gin_index_check('gin_hot_tsv');
+ gin_index_check 
+-----------------
+ 
+(1 row)
+
+SELECT gin_index_check('gin_hot_body');
+ gin_index_check 
+-----------------
+ 
+(1 row)
+
+DROP TABLE gin_hot;
+DROP FUNCTION gin_hot_count;
+DROP FUNCTION gin_hot_mismatches;
+DROP FUNCTION gin_hot_count_via;
