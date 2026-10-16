@@ -277,6 +277,9 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
 
 REVOKE ALL ON pg_statistic FROM public;
 
+-- dictionaries are built from column contents, so protect them as such
+REVOKE ALL ON pg_toast_dictionary FROM public;
+
 CREATE VIEW pg_stats_ext WITH (security_barrier) AS
     SELECT cn.nspname AS schemaname,
            c.relname AS tablename,

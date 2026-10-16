@@ -1,0 +1,669 @@
+/*-------------------------------------------------------------------------
+ *
+ * toast_dictionary.c
+ *	  Lifecycle of zstd compression dictionaries for TOAST.
+ *
+ * A dictionary-compressed datum cannot be read without its dictionary, so the
+ * hard part of dictionary support is knowing when a dictionary may be
+ * dropped.  Designs discussed on pgsql-hackers either kept every dictionary
+ * forever or tracked, through pg_depend, every table a compressed value might
+ * have been copied into; both were rejected.  This file keeps
+ * dictionary-compressed values inside the column that owns their dictionary
+ * instead, which makes the lifecycle local to that column:
+ *
+ * Ownership.  A pg_toast_dictionary row belongs to one (relid, attnum), like
+ * a pg_statistic row.  DROP TABLE and DROP COLUMN delete it through
+ * RemoveToastDictionaries(); nothing else ever references it.
+ *
+ * Containment.  heap_fill_tuple() sets HEAP_HASEXTERNAL for a tuple holding
+ * a zstd_dict datum, as it does for TOAST pointers, so every path that
+ * already makes a tuple self-contained before it outlives its source
+ * (composite datums, tuplestores, holdable cursors, syscache entries,
+ * PL/pgSQL records) also reaches the datum.  detoast_external_attr() then
+ * decompresses it, exactly as it fetches a TOAST pointer.  When a datum is
+ * stored into a heap table, toast_tuple_init() keeps it compressed only if
+ * the target column owns its dictionary (toast_dictionary_keep()), and
+ * decompresses it otherwise, so it is recompressed, if at all, with the
+ * target column's own method.  The same applies to index and BRIN tuples,
+ * which inline external values already.
+ *
+ * Retirement.  Training a dictionary marks the previous one of the column
+ * non-current.  A non-current dictionary stays readable until the table is
+ * rewritten (VACUUM FULL, CLUSTER, REPACK, rewriting ALTER TABLE): during the
+ * rewrite toast_dictionary_keep() rejects it, so every value using it is
+ * recompressed with the current one, and finish_heap_swap() then deletes it
+ * with toast_dictionary_retire().
+ *
+ * The cost is only paid when a dictionary-compressed value crosses a column
+ * boundary.  Copies of values compressed with any other method are unchanged.
+ *
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+ *
+ * IDENTIFICATION
+ *	  src/backend/access/common/toast_dictionary.c
+ *
+ *-------------------------------------------------------------------------
+ */
+#include "postgres.h"
+
+#ifdef USE_ZSTD
+#include <zstd.h>
+#include <zdict.h>
+#endif
+
+#include "access/detoast.h"
+#include "access/genam.h"
+#include "access/htup_details.h"
+#include "access/table.h"
+#include "access/tableam.h"
+#include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
+#include "catalog/catalog.h"
+#include "catalog/indexing.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_toast_dictionary.h"
+#include "executor/tuptable.h"
+#include "fmgr.h"
+#include "lib/stringinfo.h"
+#include "miscadmin.h"
+#include "utils/acl.h"
+#include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/inval.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+#include "utils/syscache.h"
+
+#define NO_ZSTD_SUPPORT() \
+	ereport(ERROR, \
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED), \
+			 errmsg("compression method %s not supported", "zstd_dict"), \
+			 errdetail("This functionality requires the server to be built with %s support.", "zstd")))
+
+#define DICT_MIN_SIZE		256
+#define DICT_MAX_SIZE		(1024 * 1024)
+#define DICT_MAX_SAMPLES	10000
+#define DICT_SAMPLE_LIMIT	(128 * 1024)
+/* zstd recommends samples totalling about 100 times the dictionary size */
+#define DICT_SAMPLE_FACTOR	100
+
+/*
+ * The relation owning the dictionaries of rel's columns.  During a table
+ * rewrite, values are written into a transient heap that stands for the
+ * table being rewritten.
+ */
+static Oid
+dict_owner_relid(Relation rel)
+{
+	if (OidIsValid(rel->rd_rel->relrewrite))
+		return rel->rd_rel->relrewrite;
+	return RelationGetRelid(rel);
+}
+
+/*
+ * Does relid.attnum (still) use zstd_dict?  A dropped column does not: a
+ * rewrite has replaced its values with nulls.
+ */
+static bool
+dict_column_uses_dict(Oid relid, AttrNumber attnum)
+{
+	HeapTuple	tp;
+	Form_pg_attribute att;
+	bool		result;
+
+	tp = SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid),
+						 Int16GetDatum(attnum));
+	if (!HeapTupleIsValid(tp))
+		return false;
+	att = (Form_pg_attribute) GETSTRUCT(tp);
+	result = !att->attisdropped &&
+		att->attcompression == TOAST_ZSTD_DICT_COMPRESSION;
+	ReleaseSysCache(tp);
+	return result;
+}
+
+/* Look up one dictionary row of rel.attnum; current_only selects tdcurrent */
+static HeapTuple
+dict_lookup(Oid relid, AttrNumber attnum, bool current_only, Relation drel,
+			SysScanDesc *scanp)
+{
+	ScanKeyData key[2];
+	HeapTuple	tup;
+
+	ScanKeyInit(&key[0], Anum_pg_toast_dictionary_tdrelid,
+				BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(relid));
+	ScanKeyInit(&key[1], Anum_pg_toast_dictionary_tdattnum,
+				BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(attnum));
+	*scanp = systable_beginscan(drel, ToastDictionaryRelidAttnumIndexId, true,
+								NULL, attnum != 0 ? 2 : 1, key);
+	while (HeapTupleIsValid(tup = systable_getnext(*scanp)))
+	{
+		if (!current_only ||
+			((Form_pg_toast_dictionary) GETSTRUCT(tup))->tdcurrent)
+			return tup;
+	}
+	return NULL;
+}
+
+/*
+ * Current dictionary of a column, or InvalidOid.
+ * ponytail: catalog index probe per compressed value; cache the OID in the
+ * relcache entry if it ever shows in a profile.
+ */
+Oid
+toast_dictionary_current(Relation rel, AttrNumber attnum)
+{
+	Relation	drel;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	Oid			result = InvalidOid;
+
+	drel = table_open(ToastDictionaryRelationId, AccessShareLock);
+	tup = dict_lookup(dict_owner_relid(rel), attnum, true, drel, &scan);
+	if (tup)
+		result = ((Form_pg_toast_dictionary) GETSTRUCT(tup))->oid;
+	systable_endscan(scan);
+	table_close(drel, AccessShareLock);
+	return result;
+}
+
+/* Dictionary OID of a compressed-in-line zstd_dict datum */
+static Oid
+dict_datum_get_id(const varlena *value)
+{
+	Oid			dictid;
+
+	if (VARSIZE(value) < VARHDRSZ_COMPRESSED_DICT)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed zstd data is corrupt")));
+	memcpy(&dictid, (const char *) value + VARHDRSZ_COMPRESSED_LONG,
+		   sizeof(dictid));
+	return dictid;
+}
+
+/*
+ * May this compressed-in-line zstd_dict datum be stored as-is into
+ * rel.attnum?  Only if that column owns the dictionary, the dictionary is
+ * still current, and the column still uses zstd_dict.  Anything else is
+ * recompressed whenever it is written, which is what lets a table rewrite
+ * retire dictionaries.
+ */
+bool
+toast_dictionary_keep(Relation rel, AttrNumber attnum, const varlena *value)
+{
+	HeapTuple	tup;
+	bool		result = false;
+	Oid			relid = dict_owner_relid(rel);
+
+	if (TupleDescAttr(RelationGetDescr(rel), attnum - 1)->attcompression !=
+		TOAST_ZSTD_DICT_COMPRESSION)
+		return false;
+
+	tup = SearchSysCache1(TOASTDICTOID,
+						  ObjectIdGetDatum(dict_datum_get_id(value)));
+	if (HeapTupleIsValid(tup))
+	{
+		Form_pg_toast_dictionary d = (Form_pg_toast_dictionary) GETSTRUCT(tup);
+
+		result = (d->tdrelid == relid && d->tdattnum == attnum &&
+				  d->tdcurrent);
+		ReleaseSysCache(tup);
+	}
+	return result;
+}
+
+#ifdef USE_ZSTD
+/*
+ * Per-backend cache of digested dictionaries.  Digesting builds the entropy
+ * tables and costs far more than one small value's compression, so the
+ * ZSTD_CDict/ZSTD_DDict objects are kept and dropped on invalidation of
+ * pg_toast_dictionary.
+ * ponytail: one entry per direction, enough for a scan of one column; a small
+ * hash table if workloads mixing many dictionaries thrash it.
+ */
+static Oid	cdict_id = InvalidOid;
+static ZSTD_CDict *cdict = NULL;
+static Oid	ddict_id = InvalidOid;
+static ZSTD_DDict *ddict = NULL;
+static ZSTD_CCtx *dict_cctx = NULL;
+static ZSTD_DCtx *dict_dctx = NULL;
+
+static void
+dict_cache_invalidate(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
+{
+	if (cdict)
+		ZSTD_freeCDict(cdict);
+	if (ddict)
+		ZSTD_freeDDict(ddict);
+	cdict = NULL;
+	ddict = NULL;
+	cdict_id = ddict_id = InvalidOid;
+}
+
+static bytea *
+dict_fetch(Oid dictid)
+{
+	static bool registered = false;
+	HeapTuple	tup;
+	bytea	   *result;
+
+	if (!registered)
+	{
+		CacheRegisterSyscacheCallback(TOASTDICTOID, dict_cache_invalidate,
+									  (Datum) 0);
+		registered = true;
+	}
+
+	tup = SearchSysCache1(TOASTDICTOID, ObjectIdGetDatum(dictid));
+	if (!HeapTupleIsValid(tup))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("compression dictionary %u does not exist", dictid)));
+	result = DatumGetByteaPCopy(SysCacheGetAttrNotNull(TOASTDICTOID, tup,
+													   Anum_pg_toast_dictionary_tddict));
+	ReleaseSysCache(tup);
+	return result;
+}
+
+static ZSTD_CDict *
+dict_get_cdict(Oid dictid)
+{
+	if (cdict_id != dictid)
+	{
+		bytea	   *d = dict_fetch(dictid);
+
+		if (cdict)
+			ZSTD_freeCDict(cdict);
+		cdict_id = InvalidOid;
+		cdict = ZSTD_createCDict(VARDATA_ANY(d), VARSIZE_ANY_EXHDR(d),
+								 ZSTD_CLEVEL_DEFAULT);
+		pfree(d);
+		if (cdict == NULL)
+			elog(ERROR, "could not load compression dictionary %u", dictid);
+		cdict_id = dictid;
+	}
+	if (dict_cctx == NULL && (dict_cctx = ZSTD_createCCtx()) == NULL)
+		elog(ERROR, "could not create zstd compression context");
+	return cdict;
+}
+
+static ZSTD_DDict *
+dict_get_ddict(Oid dictid)
+{
+	if (ddict_id != dictid)
+	{
+		bytea	   *d = dict_fetch(dictid);
+
+		if (ddict)
+			ZSTD_freeDDict(ddict);
+		ddict_id = InvalidOid;
+		ddict = ZSTD_createDDict(VARDATA_ANY(d), VARSIZE_ANY_EXHDR(d));
+		pfree(d);
+		if (ddict == NULL)
+			elog(ERROR, "could not load compression dictionary %u", dictid);
+		ddict_id = dictid;
+	}
+	if (dict_dctx == NULL && (dict_dctx = ZSTD_createDCtx()) == NULL)
+		elog(ERROR, "could not create zstd decompression context");
+	return ddict;
+}
+#endif							/* USE_ZSTD */
+
+/*
+ * Compress with the given dictionary.  The datum is laid out with
+ * VARHDRSZ_COMPRESSED_DICT bytes of header; toast_compress_datum() fills in
+ * va_tcinfo and the method byte.
+ */
+varlena *
+zstd_dict_compress_datum(const varlena *value, Oid dictid)
+{
+#ifndef USE_ZSTD
+	NO_ZSTD_SUPPORT();
+	return NULL;
+#else
+	int32		valsize = VARSIZE_ANY_EXHDR(value);
+	size_t		max_size = ZSTD_compressBound(valsize);
+	ZSTD_CDict *cd = dict_get_cdict(dictid);
+	varlena    *tmp;
+	size_t		len;
+
+	tmp = (varlena *) palloc(max_size + VARHDRSZ_COMPRESSED_DICT);
+	len = ZSTD_compress_usingCDict(dict_cctx,
+								   (char *) tmp + VARHDRSZ_COMPRESSED_DICT,
+								   max_size, VARDATA_ANY(value), valsize, cd);
+	if (ZSTD_isError(len))
+		elog(ERROR, "zstd compression failed: %s", ZSTD_getErrorName(len));
+	if (len > (size_t) valsize)
+	{
+		pfree(tmp);
+		return NULL;
+	}
+	memcpy((char *) tmp + VARHDRSZ_COMPRESSED_LONG, &dictid, sizeof(dictid));
+	SET_VARSIZE_COMPRESSED(tmp, len + VARHDRSZ_COMPRESSED_DICT);
+	return tmp;
+#endif
+}
+
+varlena *
+zstd_dict_decompress_datum(const varlena *value)
+{
+#ifndef USE_ZSTD
+	NO_ZSTD_SUPPORT();
+	return NULL;
+#else
+	Oid			dictid = dict_datum_get_id(value);
+	uint32		extsize = VARDATA_COMPRESSED_GET_EXTSIZE(value);
+	ZSTD_DDict *dd = dict_get_ddict(dictid);
+	varlena    *result;
+	size_t		rawsize;
+
+	result = (varlena *) palloc(extsize + VARHDRSZ);
+	rawsize = ZSTD_decompress_usingDDict(dict_dctx, VARDATA(result), extsize,
+										 (const char *) value + VARHDRSZ_COMPRESSED_DICT,
+										 VARSIZE(value) - VARHDRSZ_COMPRESSED_DICT,
+										 dd);
+	if (ZSTD_isError(rawsize) || rawsize != extsize)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed zstd data is corrupt")));
+	SET_VARSIZE(result, rawsize + VARHDRSZ);
+	return result;
+#endif
+}
+
+/*
+ * Prefix decompression.  For values below zstd's 128kB block size a prefix
+ * costs a full decode anyway (see zstd_decompress_datum_slice).
+ * ponytail: full decode for larger values too; use the streaming loop of
+ * zstd_decompress_datum_slice() with ZSTD_DCtx_refDDict() if prefixes of
+ * large dictionary-compressed values matter.
+ */
+varlena *
+zstd_dict_decompress_datum_slice(const varlena *value, int32 slicelength)
+{
+	varlena    *result = zstd_dict_decompress_datum(value);
+
+	if (VARSIZE(result) - VARHDRSZ > slicelength)
+		SET_VARSIZE(result, slicelength + VARHDRSZ);
+	return result;
+}
+
+/*
+ * Delete the dictionaries of a relation (attnum == 0) or of one column, next
+ * to RemoveStatistics().  The values that used them go away at the same time.
+ */
+void
+RemoveToastDictionaries(Oid relid, AttrNumber attnum)
+{
+	Relation	drel;
+	SysScanDesc scan;
+	HeapTuple	tup;
+
+	drel = table_open(ToastDictionaryRelationId, RowExclusiveLock);
+	tup = dict_lookup(relid, attnum, false, drel, &scan);
+	for (; HeapTupleIsValid(tup); tup = systable_getnext(scan))
+		CatalogTupleDelete(drel, &tup->t_self);
+	systable_endscan(scan);
+	table_close(drel, RowExclusiveLock);
+}
+
+/*
+ * After relid has been rewritten, no stored value references a dictionary
+ * that toast_dictionary_keep() rejects: non-current ones, and all of those
+ * of a column that no longer uses zstd_dict.  The rewrite recompressed those
+ * values, so delete such dictionaries.  Caller holds AccessExclusiveLock on
+ * relid.
+ */
+void
+toast_dictionary_retire(Oid relid)
+{
+	Relation	drel;
+	SysScanDesc scan;
+	HeapTuple	tup;
+
+	drel = table_open(ToastDictionaryRelationId, RowExclusiveLock);
+	tup = dict_lookup(relid, 0, false, drel, &scan);
+	for (; HeapTupleIsValid(tup); tup = systable_getnext(scan))
+	{
+		Form_pg_toast_dictionary d = (Form_pg_toast_dictionary) GETSTRUCT(tup);
+
+		if (!d->tdcurrent || !dict_column_uses_dict(relid, d->tdattnum))
+			CatalogTupleDelete(drel, &tup->t_self);
+	}
+	systable_endscan(scan);
+	table_close(drel, RowExclusiveLock);
+}
+
+/*
+ * Insert a dictionary for rel.attnum and make it current, retiring the
+ * previous current one.  dictid may be given (binary upgrade) or chosen here.
+ */
+static Oid
+dict_install(Relation rel, AttrNumber attnum, Oid dictid, bool current,
+			 const void *dict, size_t dictlen)
+{
+	Relation	drel;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	Datum		values[Natts_pg_toast_dictionary];
+	bool		nulls[Natts_pg_toast_dictionary] = {0};
+	bytea	   *dictval;
+
+	drel = table_open(ToastDictionaryRelationId, RowExclusiveLock);
+
+	if (current)
+	{
+		tup = dict_lookup(RelationGetRelid(rel), attnum, true, drel, &scan);
+		if (tup)
+		{
+			HeapTuple	newtup = heap_copytuple(tup);
+
+			((Form_pg_toast_dictionary) GETSTRUCT(newtup))->tdcurrent = false;
+			CatalogTupleUpdate(drel, &newtup->t_self, newtup);
+			heap_freetuple(newtup);
+		}
+		systable_endscan(scan);
+	}
+
+	if (!OidIsValid(dictid))
+		dictid = GetNewOidWithIndex(drel, ToastDictionaryOidIndexId,
+									Anum_pg_toast_dictionary_oid);
+	dictval = (bytea *) palloc(dictlen + VARHDRSZ);
+	SET_VARSIZE(dictval, dictlen + VARHDRSZ);
+	memcpy(VARDATA(dictval), dict, dictlen);
+
+	values[Anum_pg_toast_dictionary_oid - 1] = ObjectIdGetDatum(dictid);
+	values[Anum_pg_toast_dictionary_tdrelid - 1] =
+		ObjectIdGetDatum(RelationGetRelid(rel));
+	values[Anum_pg_toast_dictionary_tdattnum - 1] = Int16GetDatum(attnum);
+	values[Anum_pg_toast_dictionary_tdcurrent - 1] = BoolGetDatum(current);
+	values[Anum_pg_toast_dictionary_tddict - 1] = PointerGetDatum(dictval);
+	tup = heap_form_tuple(RelationGetDescr(drel), values, nulls);
+	CatalogTupleInsert(drel, tup);
+	heap_freetuple(tup);
+	table_close(drel, RowExclusiveLock);
+
+	/* let a later call in the same command see this one's changes */
+	CommandCounterIncrement();
+
+	return dictid;
+}
+
+#ifdef USE_ZSTD
+/* Checks for pg_train_toast_dictionary(); returns attnum */
+static AttrNumber
+dict_check_column(Relation rel, const char *colname)
+{
+	AttrNumber	attnum;
+	Form_pg_attribute att;
+
+	if (!object_ownercheck(RelationRelationId, RelationGetRelid(rel),
+						   GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER,
+					   get_relkind_objtype(rel->rd_rel->relkind),
+					   RelationGetRelationName(rel));
+	if (rel->rd_rel->relkind != RELKIND_RELATION &&
+		rel->rd_rel->relkind != RELKIND_MATVIEW)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a table or materialized view",
+						RelationGetRelationName(rel))));
+	if (IsCatalogRelation(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot use compression dictionaries on a system catalog")));
+
+	attnum = get_attnum(RelationGetRelid(rel), colname);
+	if (attnum <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("column \"%s\" of relation \"%s\" does not exist",
+						colname, RelationGetRelationName(rel))));
+	att = TupleDescAttr(RelationGetDescr(rel), attnum - 1);
+	if (att->attcompression != TOAST_ZSTD_DICT_COMPRESSION)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("column \"%s\" does not use compression method %s",
+						colname, "zstd_dict")));
+	return attnum;
+}
+#endif							/* USE_ZSTD */
+
+/*
+ * pg_train_toast_dictionary(rel regclass, col name, dict_size int4)
+ *
+ * Train a zstd dictionary from the column's current values and make it the
+ * column's current dictionary.  The previous one stays readable until the
+ * next rewrite of the table retires it.  Returns the new dictionary's OID, or
+ * NULL if zstd could not train one from the values found.
+ *
+ * Takes ShareUpdateExclusiveLock, like ANALYZE: DML continues, concurrent
+ * training and DDL wait.
+ *
+ * ponytail: explicit call, first DICT_MAX_SAMPLES rows of a seqscan.
+ * Training from ANALYZE's block sample is the natural follow-up once the
+ * lifecycle is agreed on.
+ */
+Datum
+pg_train_toast_dictionary(PG_FUNCTION_ARGS)
+{
+#ifndef USE_ZSTD
+	NO_ZSTD_SUPPORT();
+	PG_RETURN_NULL();
+#else
+	Oid			relid = PG_GETARG_OID(0);
+	char	   *colname = NameStr(*PG_GETARG_NAME(1));
+	int32		dict_size = PG_GETARG_INT32(2);
+	Relation	rel;
+	AttrNumber	attnum;
+	TableScanDesc scan;
+	TupleTableSlot *slot;
+	StringInfoData samples;
+	size_t	   *sizes;
+	int			nsamples = 0;
+	void	   *dictbuf;
+	size_t		dictlen;
+	Oid			dictid;
+
+	if (dict_size < DICT_MIN_SIZE || dict_size > DICT_MAX_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("dictionary size must be between %d and %d bytes",
+						DICT_MIN_SIZE, DICT_MAX_SIZE)));
+
+	rel = table_open(relid, ShareUpdateExclusiveLock);
+	attnum = dict_check_column(rel, colname);
+
+	initStringInfo(&samples);
+	sizes = palloc_array(size_t, DICT_MAX_SAMPLES);
+	slot = table_slot_create(rel, NULL);
+	scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
+	while (nsamples < DICT_MAX_SAMPLES &&
+		   table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	{
+		bool		isnull;
+		Datum		d = slot_getattr(slot, attnum, &isnull);
+		varlena    *v;
+		size_t		len;
+
+		CHECK_FOR_INTERRUPTS();
+		if (isnull)
+			continue;
+		v = detoast_attr_slice((varlena *) DatumGetPointer(d), 0,
+							   DICT_SAMPLE_LIMIT);
+		len = VARSIZE_ANY_EXHDR(v);
+		if (samples.len + len > (size_t) dict_size * DICT_SAMPLE_FACTOR)
+		{
+			pfree(v);
+			break;
+		}
+		if (len >= 8)
+		{
+			appendBinaryStringInfo(&samples, VARDATA_ANY(v), len);
+			sizes[nsamples++] = len;
+		}
+		pfree(v);
+	}
+	table_endscan(scan);
+	ExecDropSingleTupleTableSlot(slot);
+
+	dictbuf = palloc(dict_size);
+	dictlen = nsamples == 0 ? 0 :
+		ZDICT_trainFromBuffer(dictbuf, dict_size, samples.data, sizes,
+							  nsamples);
+	if (nsamples == 0 || ZDICT_isError(dictlen))
+	{
+		ereport(NOTICE,
+				(errmsg("could not train a compression dictionary for column \"%s\" from %d values",
+						colname, nsamples)));
+		table_close(rel, NoLock);
+		PG_RETURN_NULL();
+	}
+
+	dictid = dict_install(rel, attnum, InvalidOid, true, dictbuf, dictlen);
+	table_close(rel, NoLock);
+
+	PG_RETURN_OID(dictid);
+#endif
+}
+
+/*
+ * binary_upgrade_add_toast_dictionary(rel regclass, attnum int2, dictid oid,
+ *									   current bool, dict bytea)
+ *
+ * pg_upgrade copies the heap files as they are, and with them the dictionary
+ * OIDs embedded in each datum, so dictionaries are restored with their OIDs.
+ */
+Datum
+binary_upgrade_add_toast_dictionary(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	AttrNumber	attnum = PG_GETARG_INT16(1);
+	Oid			dictid = PG_GETARG_OID(2);
+	bool		current = PG_GETARG_BOOL(3);
+	bytea	   *dict = PG_GETARG_BYTEA_PP(4);
+	Relation	rel;
+
+	if (!IsBinaryUpgrade)
+		ereport(ERROR,
+				(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+				 errmsg("function can only be called when server is in binary upgrade mode")));
+
+	/*
+	 * No dict_check_column() here: the column may have been switched to
+	 * another compression method, or dropped, with old values still using
+	 * these dictionaries until the table is rewritten.  pg_dump restores
+	 * physical column numbers, so attnum is stable.
+	 */
+	rel = table_open(relid, AccessExclusiveLock);
+	if (attnum <= 0 || attnum > RelationGetNumberOfAttributes(rel))
+		elog(ERROR, "invalid attribute number %d for relation %u",
+			 attnum, relid);
+	dict_install(rel, attnum, dictid, current, VARDATA_ANY(dict),
+				 VARSIZE_ANY_EXHDR(dict));
+	table_close(rel, NoLock);
+
+	PG_RETURN_VOID();
+}

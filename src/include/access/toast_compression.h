@@ -13,6 +13,8 @@
 #ifndef TOAST_COMPRESSION_H
 #define TOAST_COMPRESSION_H
 
+#include "varatt.h"
+
 /*
  * GUC support.
  *
@@ -23,23 +25,68 @@
 extern PGDLLIMPORT int default_toast_compression;
 
 /*
- * Built-in compression method ID.  The toast compression header will store
- * this in the first 2 bits of the raw length.  These built-in compression
- * method IDs are directly mapped to the built-in compression methods.
+ * Built-in compression method ID.  These built-in compression method IDs are
+ * directly mapped to the built-in compression methods.
+ *
+ * A compressed varlena identifies its method in the two high-order bits of
+ * its tcinfo/extinfo word.  Only pglz and lz4 are stored there directly; all
+ * other methods use the long form of the header, flagged by
+ * VARLENA_COMPRESS_METHOD_LONG in those bits, which stores the ID in a byte
+ * of its own (see varatt.h) and so leaves room for IDs up to 255.
+ * toast_compression_id_needs_cmid_byte() tells which form a given ID uses.
+ *
+ * TOAST_INVALID_COMPRESSION_ID is not a real compression method and is never
+ * stored on disk; it only serves to report "this value is not compressed".
+ * It is deliberately equal to VARLENA_COMPRESS_METHOD_LONG, so that code
+ * that mistakenly interprets the raw two-bit field of a long-form value as a
+ * method ID ends up with an invalid ID rather than a real method.
  *
  * Don't use these values for anything other than understanding the meaning
  * of the raw bits from a varlena; in particular, if the goal is to identify
  * a compression method, use the constants TOAST_PGLZ_COMPRESSION, etc.
- * below. We might someday support more than 4 compression methods, but
- * we can never have more than 4 values in this enum, because there are
- * only 2 bits available in the places where this is stored.
+ * below.
  */
 typedef enum ToastCompressionId
 {
 	TOAST_PGLZ_COMPRESSION_ID = 0,
 	TOAST_LZ4_COMPRESSION_ID = 1,
-	TOAST_INVALID_COMPRESSION_ID = 2,
+	TOAST_ZSTD_COMPRESSION_ID = 2,
+	TOAST_INVALID_COMPRESSION_ID = 3,
+	TOAST_ZSTD_DICT_COMPRESSION_ID = 4,
 } ToastCompressionId;
+
+StaticAssertDecl(TOAST_INVALID_COMPRESSION_ID == VARLENA_COMPRESS_METHOD_LONG,
+				 "TOAST_INVALID_COMPRESSION_ID must match VARLENA_COMPRESS_METHOD_LONG");
+
+/*
+ * Does this compression method ID need a byte of its own?
+ *
+ * Only the two original methods fit in the two method bits of the header;
+ * every other method needs the long form of the compressed-in-line header
+ * and of the TOAST pointer, which carry the ID in a separate byte.  Not
+ * meaningful for TOAST_INVALID_COMPRESSION_ID.
+ */
+static inline bool
+toast_compression_id_needs_cmid_byte(ToastCompressionId cmid)
+{
+	Assert(cmid != TOAST_INVALID_COMPRESSION_ID);
+	return (cmid != TOAST_PGLZ_COMPRESSION_ID &&
+			cmid != TOAST_LZ4_COMPRESSION_ID);
+}
+
+/*
+ * Is this a compressed-in-line datum that needs a compression dictionary to
+ * be read?  Such a datum depends on catalog state of the column it belongs
+ * to, so code that makes values self-contained treats it like a TOAST
+ * pointer (see toast_dictionary.c).
+ */
+static inline bool
+VARATT_IS_COMPRESSED_DICT(const void *PTR)
+{
+	return VARATT_IS_COMPRESSED(PTR) &&
+		VARDATA_COMPRESSED_GET_COMPRESS_METHOD(PTR) ==
+		TOAST_ZSTD_DICT_COMPRESSION_ID;
+}
 
 /*
  * Built-in compression methods.  pg_attribute will store these in the
@@ -48,6 +95,8 @@ typedef enum ToastCompressionId
  */
 #define TOAST_PGLZ_COMPRESSION			'p'
 #define TOAST_LZ4_COMPRESSION			'l'
+#define TOAST_ZSTD_COMPRESSION			'z'
+#define TOAST_ZSTD_DICT_COMPRESSION		'd'
 #define InvalidCompressionMethod		'\0'
 
 #define CompressionMethodIsValid(cm)  ((cm) != InvalidCompressionMethod)
@@ -73,6 +122,12 @@ extern varlena *lz4_compress_datum(const varlena *value);
 extern varlena *lz4_decompress_datum(const varlena *value);
 extern varlena *lz4_decompress_datum_slice(const varlena *value,
 										   int32 slicelength);
+
+/* zstd compression/decompression routines */
+extern varlena *zstd_compress_datum(const varlena *value);
+extern varlena *zstd_decompress_datum(const varlena *value);
+extern varlena *zstd_decompress_datum_slice(const varlena *value,
+											int32 slicelength);
 
 /* other stuff */
 extern ToastCompressionId toast_get_compression_id(varlena *attr);

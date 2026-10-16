@@ -17,6 +17,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_internals.h"
 #include "common/int.h"
 #include "common/pg_lzcompress.h"
@@ -53,6 +54,15 @@ detoast_external_attr(varlena *attr)
 		 * This is an external stored plain value
 		 */
 		result = toast_fetch_datum(attr);
+
+		/* see below about values compressed with a dictionary */
+		if (VARATT_IS_COMPRESSED_DICT(result))
+		{
+			varlena    *tmp = result;
+
+			result = zstd_dict_decompress_datum(tmp);
+			pfree(tmp);
+		}
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
@@ -90,6 +100,16 @@ detoast_external_attr(varlena *attr)
 		resultsize = EOH_get_flat_size(eoh);
 		result = (varlena *) palloc(resultsize);
 		EOH_flatten_into(eoh, result, resultsize);
+	}
+	else if (VARATT_IS_COMPRESSED_DICT(attr))
+	{
+		/*
+		 * A value compressed with a dictionary depends on a catalog row of
+		 * the column it came from, so for anything that wants a value
+		 * independent of its source it counts as external; see
+		 * toast_dictionary.c.
+		 */
+		result = zstd_dict_decompress_datum(attr);
 	}
 	else
 	{
@@ -228,12 +248,12 @@ detoast_attr_slice(varlena *attr,
 	{
 		toast_external_data toast_ext_data;
 		int32		extsize;
-		uint32		compress_method;
+		ToastCompressionId compress_method;
 		bool		is_compressed;
 
 		toast_external_info_get(attr, &toast_ext_data);
 		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-		compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
+		compress_method = toast_ext_data.compress_method;
 		is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
 
 		/* fast path for non-compressed external datums */
@@ -253,10 +273,10 @@ detoast_attr_slice(varlena *attr,
 			 * Determine maximum amount of compressed data needed for a prefix
 			 * of a given length (after decompression).
 			 *
-			 * At least for now, if it's LZ4 data, we'll have to fetch the
-			 * whole thing, because there doesn't seem to be an API call to
-			 * determine how much compressed data we need to be sure of being
-			 * able to decompress the required slice.
+			 * At least for now, if it's LZ4 or zstd data, we'll have to fetch
+			 * the whole thing, because there doesn't seem to be an API call
+			 * to determine how much compressed data we need to be sure of
+			 * being able to decompress the required slice.
 			 */
 			if (compress_method == TOAST_PGLZ_COMPRESSION_ID)
 				max_size = pglz_maximum_compressed_size(slicelimit, max_size);
@@ -436,11 +456,13 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 
 	/*
 	 * When fetching a prefix of a compressed external datum, account for the
-	 * space required by va_tcinfo, which is stored at the beginning as an
-	 * int32 value.
+	 * compressed header stored at its beginning: va_tcinfo, followed in the
+	 * long form by the compression method ID byte.
 	 */
 	if (is_compressed && slicelength > 0)
-		slicelength = slicelength + sizeof(int32);
+		slicelength += (VARTAG_IS_ONDISK_LONG(toast_ext_data.tag) ?
+						VARHDRSZ_COMPRESSED_LONG : VARHDRSZ_COMPRESSED) -
+			VARHDRSZ;
 
 	/*
 	 * Adjust length request if needed.  (Note: our sole caller,
@@ -497,6 +519,10 @@ toast_decompress_datum(varlena *attr)
 			return pglz_decompress_datum(attr);
 		case TOAST_LZ4_COMPRESSION_ID:
 			return lz4_decompress_datum(attr);
+		case TOAST_ZSTD_COMPRESSION_ID:
+			return zstd_decompress_datum(attr);
+		case TOAST_ZSTD_DICT_COMPRESSION_ID:
+			return zstd_dict_decompress_datum(attr);
 		default:
 			elog(ERROR, "invalid compression method id %d", cmid);
 			return NULL;		/* keep compiler quiet */
@@ -540,6 +566,10 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 			return pglz_decompress_datum_slice(attr, slicelength);
 		case TOAST_LZ4_COMPRESSION_ID:
 			return lz4_decompress_datum_slice(attr, slicelength);
+		case TOAST_ZSTD_COMPRESSION_ID:
+			return zstd_decompress_datum_slice(attr, slicelength);
+		case TOAST_ZSTD_DICT_COMPRESSION_ID:
+			return zstd_dict_decompress_datum_slice(attr, slicelength);
 		default:
 			elog(ERROR, "invalid compression method id %d", cmid);
 			return NULL;		/* keep compiler quiet */
