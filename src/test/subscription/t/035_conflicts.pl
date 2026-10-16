@@ -167,6 +167,115 @@ $node_subscriber->wait_for_log(
 pass('multiple_unique_conflicts detected on a leaf partition during insert');
 
 ###############################################################################
+# Verify that the JSON stored in the conflict log table uses a consistent,
+# standard format, independent of the apply worker's DateStyle / IntervalStyle /
+# extra_float_digits settings, so that the stored key values always convert
+# back to the original ones.
+###############################################################################
+
+# Clear the error state left by the leaf partition test.
+$node_subscriber->safe_psql('postgres', "TRUNCATE conf_tab_2;");
+$node_publisher->wait_for_catchup($appname);
+
+# Non-default output-related GUCs for sessions of the test database; the apply
+# worker picks them up when it (re)connects.
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres SET IntervalStyle = 'sql_standard'");
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres SET extra_float_digits = -2");
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres SET DateStyle = 'SQL, MDY'");
+
+# Table with interval/float8/timestamptz replica identity key columns.
+my $guc_ddl = qq(
+	CREATE TABLE conf_guc (a int, i interval NOT NULL, f float8 NOT NULL,
+						   ts timestamptz NOT NULL);
+	CREATE UNIQUE INDEX conf_guc_ri ON conf_guc (i, f, ts);
+	ALTER TABLE conf_guc REPLICA IDENTITY USING INDEX conf_guc_ri;
+);
+$node_publisher->safe_psql('postgres', $guc_ddl);
+$node_subscriber->safe_psql('postgres', $guc_ddl);
+
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION pub_tab ADD TABLE conf_guc");
+$node_publisher->safe_psql(
+	'postgres',
+	"INSERT INTO conf_guc VALUES (1, '-1 day -11:22:33', 1.23456789012345,
+								  '2026-03-04 10:11:12.123456+05:30')");
+
+# Pick up the new table, and restart the apply worker so that it picks up the
+# new database settings.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION sub_tab REFRESH PUBLICATION");
+$node_subscriber->safe_psql('postgres', "ALTER SUBSCRIPTION sub_tab DISABLE");
+
+# Wait for the apply worker to stop
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_activity WHERE backend_type = 'logical replication apply worker'"
+);
+
+$node_subscriber->safe_psql('postgres', "ALTER SUBSCRIPTION sub_tab ENABLE");
+$node_subscriber->wait_for_subscription_sync($node_publisher, $appname);
+
+# Generate an update_missing conflict; its replica_identity JSON in the
+# conflict log table contains the key values.
+$node_subscriber->safe_psql('postgres', "DELETE FROM conf_guc");
+$node_publisher->safe_psql('postgres',
+	"UPDATE conf_guc SET a = 2 WHERE a = 1");
+
+$node_subscriber->poll_query_until(
+	'postgres',
+	"SELECT count(*) > 0 FROM $clt WHERE relname = 'conf_guc'
+	  AND conflict_type = 'update_missing'"
+) or die "timed out waiting for conf_guc conflict row";
+
+# The stored interval and float formats must be the standard ones, so they
+# can be converted back to the original values even when the apply worker
+# ran with IntervalStyle = sql_standard and extra_float_digits = -2.
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT replica_identity->>'i', replica_identity->>'f'
+		 FROM $clt WHERE relname = 'conf_guc'"),
+	'-1 days -11:22:33|1.23456789012345',
+	'CLT JSON stores canonical interval and lossless float format');
+
+# The timestamp format is ISO (DateStyle-independent) even with
+# DateStyle = 'SQL, MDY'.
+like(
+	$node_subscriber->safe_psql(
+		'postgres',
+		"SELECT replica_identity->>'ts' FROM $clt WHERE relname = 'conf_guc'"
+	),
+	qr/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?[+-]\d{2}(:\d{2}){0,2}$/,
+	'CLT JSON stores timestamp in ISO format');
+
+# A reader with default settings must get the original key values back.
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SET IntervalStyle = 'postgres'; SET extra_float_digits = 1;
+		 SET DateStyle = 'SQL, DMY';
+		 SELECT (replica_identity->>'i')::interval
+		        = interval '-1 day -11:22:33',
+		        (replica_identity->>'f')::float8
+		        = 1.23456789012345::float8,
+		        (replica_identity->>'ts')::timestamptz
+		        = timestamptz '2026-03-04 10:11:12.123456+05:30'
+		 FROM $clt WHERE relname = 'conf_guc'"),
+	't|t|t',
+	'CLT JSON values convert back to the original key values');
+
+# Restore the defaults for any later tests.
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres RESET IntervalStyle");
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres RESET extra_float_digits");
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres RESET DateStyle");
+
+# Disable it so that later waits for all apply workers to stop don't hang.
+$node_subscriber->safe_psql('postgres', "ALTER SUBSCRIPTION sub_tab DISABLE");
+
+###############################################################################
 # Setup a bidirectional logical replication between node_A & node_B
 ###############################################################################
 
