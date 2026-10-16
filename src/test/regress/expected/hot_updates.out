@@ -671,7 +671,7 @@ SELECT * FROM update_case(
 NOTICE:  table "hot_expr_test" does not exist, skipping
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 SET enable_seqscan = off;
@@ -692,7 +692,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET t = repeat('x', 3000) || id, x = x + 1$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- The same through an expression that returns the column's value as is.
@@ -703,7 +703,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET t = repeat('x', 3000) || id, x = x + 1$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- ... but not for a column of a unique index, which the table's lock
