@@ -890,6 +890,10 @@ INSERT INTO document VALUES (2, (SELECT cid from category WHERE cname = 'novel')
 INSERT INTO document VALUES (33, 22, 1, 'regress_rls_bob', 'okay science fiction'); -- preparation for next statement
 INSERT INTO document VALUES (33, (SELECT cid from category WHERE cname = 'novel'), 1, 'regress_rls_bob', 'Some novel, replaces sci-fi') -- takes UPDATE path
     ON CONFLICT (did) DO UPDATE SET dtitle = EXCLUDED.dtitle;
+-- The WHERE clause must not see the existing row before the UPDATE policy has
+-- been checked against it (no f_leak() notice expected):
+INSERT INTO document VALUES (33, (SELECT cid from category WHERE cname = 'novel'), 1, 'regress_rls_bob', 'Some novel, replaces sci-fi')
+    ON CONFLICT (did) DO UPDATE SET dtitle = EXCLUDED.dtitle WHERE f_leak(document.dtitle);
 -- Fine (we UPDATE, since INSERT WCOs and UPDATE security barrier quals + WCOs
 -- not violated):
 INSERT INTO document VALUES (2, (SELECT cid from category WHERE cname = 'novel'), 1, 'regress_rls_bob', 'my first novel')
@@ -995,6 +999,11 @@ INSERT INTO document VALUES (1, (SELECT cid from category WHERE cname = 'novel')
 -- DO SELECT requires SELECT rights, should fail for non-novel
 INSERT INTO document VALUES (33, (SELECT cid from category WHERE cname = 'science fiction'), 1, 'regress_rls_bob', 'another sci-fi')
     ON CONFLICT (did) DO SELECT RETURNING did, dauthor, dtitle;
+
+-- Likewise, the WHERE clause must not be evaluated against a row that the
+-- SELECT policy hides (no f_leak() notice expected)
+INSERT INTO document VALUES (33, (SELECT cid from category WHERE cname = 'novel'), 1, 'regress_rls_bob', 'a novel')
+    ON CONFLICT (did) DO SELECT WHERE f_leak(document.dtitle) RETURNING did, dauthor, dtitle;
 
 -- DO SELECT with WHERE and EXCLUDED reference
 INSERT INTO document VALUES (1, (SELECT cid from category WHERE cname = 'novel'), 1, 'regress_rls_bob', 'another novel')
