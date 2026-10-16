@@ -205,4 +205,32 @@ my $temp_slot_name = $node_standby_4->safe_psql('postgres',
 like($temp_slot_name, qr/^pg_walreceiver_[0-9]+$/,
 	'pg_stat_wal_receiver.slot_name remains set across timeline jumps');
 
+# Check that a history file with a bogus switchpoint is rejected.
+my $node_bad_history = PostgreSQL::Test::Cluster->new('bad_history');
+$node_bad_history->init(allows_streaming => 1);
+# Start and stop the node once before switching it to standby mode. This is
+# required so that the control file records the test settings.
+$node_bad_history->start;
+$node_bad_history->stop;
+$node_bad_history->set_standby_mode;
+$node_bad_history->append_conf('postgresql.conf',
+	"recovery_target_timeline = '2'");
+
+for my $switchpoint ('123456789/0', '0/123456789', '0/1x')
+{
+	my $history_file =
+	  $node_bad_history->data_dir . '/pg_wal/00000002.history';
+	my $log_offset = -s $node_bad_history->logfile;
+
+	unlink $history_file;
+	append_to_file($history_file, "1\t$switchpoint\tbogus switchpoint\n");
+
+	ok(!$node_bad_history->start(fail_ok => 1),
+		"server fails to start with history switchpoint $switchpoint");
+	ok( $node_bad_history->log_contains(
+			qr/FATAL: .*syntax error in history file: 1\t\Q$switchpoint\E/,
+			$log_offset),
+		"history switchpoint $switchpoint is rejected");
+}
+
 done_testing();
