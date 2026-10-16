@@ -106,6 +106,9 @@ extern OffsetNumber gintuple_get_attrnum(GinState *ginstate, IndexTuple tuple);
 extern Datum gintuple_get_key(GinState *ginstate, IndexTuple tuple,
 							  GinNullCategory *category);
 extern char *ginbuildphasename(int64 phasenum);
+extern bool gincomparedatums(Relation index, struct IndexInfo *indexInfo,
+							 int attnum, Oid typid, int16 typlen,
+							 bool typbyval, Datum oldValue, Datum newValue);
 
 /* gininsert.c */
 extern IndexBuildResult *ginbuild(Relation heap, Relation index,
