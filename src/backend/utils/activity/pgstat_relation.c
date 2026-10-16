@@ -261,7 +261,8 @@ pgstat_drop_relation(Relation rel)
  */
 void
 pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
-					 PgStat_Counter deadtuples, TimestampTz starttime)
+					 PgStat_Counter deadtuples, TimestampTz starttime,
+					 PgStat_Counter delaytime, bool failsafe)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -304,15 +305,44 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 		tabentry->last_autovacuum_time = ts;
 		tabentry->autovacuum_count++;
 		tabentry->total_autovacuum_time += elapsedtime;
+		tabentry->total_autovacuum_delay_time += delaytime;
 	}
 	else
 	{
 		tabentry->last_vacuum_time = ts;
 		tabentry->vacuum_count++;
 		tabentry->total_vacuum_time += elapsedtime;
+		tabentry->total_vacuum_delay_time += delaytime;
 	}
 
+	if (failsafe)
+		tabentry->vacuum_failsafe_count++;
+
 	pgstat_unlock_entry(entry_ref);
+
+	/*
+	 * Accumulate the same times into the database-wide totals.  Index
+	 * processing happens inside the table's run, so per-index times reported
+	 * via pgstat_report_index_vacuum_time() are not added here again.  The
+	 * database entry is stored in microseconds, as its other time counters.
+	 */
+	{
+		PgStat_StatDBEntry *dbentry = pgstat_prep_database_pending(dboid);
+
+		if (AmAutoVacuumWorkerProcess())
+		{
+			dbentry->total_autovacuum_time += elapsedtime * 1000;
+			dbentry->total_autovacuum_delay_time += delaytime * 1000;
+		}
+		else
+		{
+			dbentry->total_vacuum_time += elapsedtime * 1000;
+			dbentry->total_vacuum_delay_time += delaytime * 1000;
+		}
+
+		if (failsafe)
+			dbentry->vacuum_failsafe_count++;
+	}
 
 	/*
 	 * Flush IO statistics now. pgstat_report_stat() will flush IO stats,
@@ -323,6 +353,35 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 	pgstat_flush_io(false);
 	(void) pgstat_flush_backend(false, PGSTAT_BACKEND_FLUSH_IO);
 }
+
+/*
+ * Hook for extensions to receive extended vacuum statistics.
+ * NULL when no extension has registered.
+ */
+set_report_vacuum_hook_type set_report_vacuum_hook = NULL;
+
+/*
+ * Report extended vacuum statistics to extensions via set_report_vacuum_hook.
+ * When livetuples/deadtuples/starttime are provided (heap case), also calls
+ * pgstat_report_vacuum. For indexes, pass -1, -1, 0, 0 to skip pgstat_report_vacuum.
+ */
+void
+pgstat_report_vacuum_ext(Relation rel, PgStat_Counter livetuples,
+						 PgStat_Counter deadtuples, TimestampTz starttime,
+						 PgStat_Counter delaytime, bool failsafe,
+						 PgStat_VacuumRelationCounts * extstats)
+{
+	/* Index reports pass starttime = 0: no per-vacuum pgstat side-effects */
+	if (starttime != 0)
+		pgstat_report_vacuum(rel, livetuples, deadtuples, starttime, delaytime,
+							 failsafe);
+
+	if (extstats != NULL && set_report_vacuum_hook)
+		(*set_report_vacuum_hook) (RelationGetRelid(rel),
+								   rel->rd_rel->relisshared,
+								   extstats);
+}
+
 
 /*
  * Report that the table was just analyzed and flush IO statistics.
@@ -957,6 +1016,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	tabentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
 	tabentry->blocks_hit += lstats->tab.counts.blocks_hit;
+	tabentry->visible_page_marks_cleared += lstats->tab.counts.visible_page_marks_cleared;
+	tabentry->frozen_page_marks_cleared += lstats->tab.counts.frozen_page_marks_cleared;
 
 	/* Clamp live_tuples in case of negative delta_live_tuples */
 	tabentry->live_tuples = Max(tabentry->live_tuples, 0);
