@@ -2361,7 +2361,7 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
        <row>
         <entry><literal>remote_commit_ts</literal></entry>
         <entry><type>timestamptz</type></entry>
-        <entry>The remote commit timestamp of the remote transaction. This is <literal>NULL</literal> if the conflict is handled by a parallel apply worker, because in-progress transactions are streamed and applied before the remote commit timestamp is known.</entry>
+        <entry>The remote commit timestamp of the remote transaction. This is <literal>NULL</literal> if the conflict is handled by a parallel apply worker, because in-progress transactions are streamed and applied before the remote commit timestamp is known. It is also <literal>NULL</literal> if the conflict occurs in a transaction that is prepared on the subscriber (see <link linkend="sql-createsubscription-params-with-two-phase"><literal>two_phase</literal></link>), because the commit timestamp is known only when <command>COMMIT PREPARED</command> arrives.</entry>
        </row>
        <row>
         <entry><literal>remote_origin</literal></entry>
@@ -2379,8 +2379,7 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
         <entry>The replica identity key values identifying the conflicting row,
         as a <acronym>JSON</acronym> object keyed by column name; see below for
         how the values are represented. This is <literal>NULL</literal> when
-        <literal>replica_identity_full</literal> is <literal>true</literal> or
-        when replica identity is not applicable.</entry>
+        <literal>replica_identity_full</literal> is <literal>true</literal>.</entry>
        </row>
        <row>
         <entry><literal>local_conflicts</literal></entry>
@@ -2389,9 +2388,13 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
          An array of JSON objects representing the state of existing local
          row(s) that caused the conflict. Each object includes the local
          transaction ID (<literal>xid</literal>), commit timestamp
-         (<literal>commit_ts</literal>), and origin (<literal>origin</literal>).
-         This is <literal>NULL</literal> if there are no local conflicting rows
-         (e.g., in <literal>update_missing</literal> and
+         (<literal>commit_ts</literal>), and the name of the replication
+         origin that last modified the row (<literal>origin</literal>).
+         The <literal>origin</literal> field is <literal>NULL</literal> if
+         the transaction had no replication origin set or if that origin has
+         since been dropped. The column itself is <literal>NULL</literal>
+         if there are no local conflicting rows (e.g., in
+         <literal>update_missing</literal> and
          <literal>delete_missing</literal> conflicts).
         </entry>
        </row>
@@ -2438,6 +2441,23 @@ SELECT t.* FROM pg_conflict.pg_conflict_log_16392 c, t
 <programlisting>
 SELECT replica_identity->'doc'->>'x'           FROM ...;   -- NULL
 SELECT (replica_identity->>'doc')::jsonb->>'x' FROM ...;   -- 1
+</programlisting>
+    </para>
+
+    <para>
+     The apply worker's <xref linkend="guc-bytea-output"/> and
+     <xref linkend="guc-quote-all-identifiers"/> settings change how a value
+     is written without changing the value itself.  If these settings differ
+     between conflicts, the same key can be recorded in different but
+     equivalent forms, and comparing the recorded text may miss some of them.
+     To match conflicts on the same key, cast the value back to the column's
+     type instead, here for a <type>bytea</type> key column <literal>b</literal>
+     and a <type>regclass[]</type> key column <literal>r</literal>:
+<programlisting>
+SELECT * FROM ... WHERE replica_identity->>'b' = '\x0102';                   -- may miss rows
+SELECT * FROM ... WHERE (replica_identity->>'b')::bytea = '\x0102';          -- matches all
+SELECT * FROM ... WHERE replica_identity->>'r' = '{t}';                      -- may miss rows
+SELECT * FROM ... WHERE (replica_identity->>'r')::regclass[] = '{t}';        -- matches all
 </programlisting>
     </para>
 
