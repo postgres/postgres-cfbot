@@ -151,6 +151,10 @@ typedef struct PVShared
 	/* Counter for vacuuming and cleanup */
 	pg_atomic_uint32 idx;
 
+	/* For the failsafe check between indexes, the flag never goes back to 0 */
+	struct VacuumCutoffs cutoffs;
+	pg_atomic_uint32 failsafe_triggered;
+
 	/* DSA handle where the TidStore lives */
 	dsa_handle	dead_items_dsa_handle;
 
@@ -302,12 +306,15 @@ static void parallel_vacuum_dsm_detach(dsm_segment *seg, Datum arg);
  * Try to enter parallel mode and create a parallel context.  Then initialize
  * shared memory state.
  *
+ * cutoffs are shared with the workers for the failsafe check between indexes.
+ *
  * On success, return parallel vacuum state.  Otherwise return NULL.
  */
 ParallelVacuumState *
 parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 					 int nrequested_workers, int vac_work_mem,
-					 int elevel, BufferAccessStrategy bstrategy)
+					 int elevel, BufferAccessStrategy bstrategy,
+					 const struct VacuumCutoffs *cutoffs)
 {
 	ParallelVacuumState *pvs;
 	ParallelContext *pcxt;
@@ -457,6 +464,9 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	pg_atomic_init_u32(&(shared->active_nworkers), 0);
 	pg_atomic_init_u32(&(shared->idx), 0);
 
+	memcpy(&(shared->cutoffs), cutoffs, sizeof(struct VacuumCutoffs));
+	pg_atomic_init_u32(&(shared->failsafe_triggered), 0);
+
 	shared->is_autovacuum = AmAutoVacuumWorkerProcess();
 
 	/*
@@ -593,6 +603,13 @@ parallel_vacuum_reset_dead_items(ParallelVacuumState *pvs)
 
 	/* Reset the counter */
 	dead_items_info->num_items = 0;
+}
+
+/* Has one of the processes triggered the wraparound failsafe? */
+bool
+parallel_vacuum_failsafe_triggered(ParallelVacuumState *pvs)
+{
+	return pg_atomic_read_u32(&(pvs->shared->failsafe_triggered)) != 0;
 }
 
 /*
@@ -858,6 +875,7 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 {
 	int			nworkers;
 	PVIndVacStatus new_status;
+	bool		failsafe;
 
 	Assert(!IsParallelWorker());
 
@@ -952,6 +970,9 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 			VacuumSharedCostBalance = &(pvs->shared->cost_balance);
 			VacuumActiveNWorkers = &(pvs->shared->active_nworkers);
 
+			/* The leader's own delay stops via this flag too */
+			VacuumSharedFailsafe = &(pvs->shared->failsafe_triggered);
+
 			/* Update the statistics, if we asked to */
 			if (wstats != NULL)
 				wstats->nlaunched += pvs->pcxt->nworkers_launched;
@@ -995,13 +1016,18 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 
 	/*
 	 * Reset all index status back to initial (while checking that we have
-	 * vacuumed all indexes).
+	 * vacuumed all indexes). Indexes not yet started when the failsafe
+	 * triggered are skipped, so those are still NEED_BULKDELETE here and that
+	 * is expected.
 	 */
+	failsafe = parallel_vacuum_failsafe_triggered(pvs);
 	for (int i = 0; i < pvs->nindexes; i++)
 	{
 		PVIndStats *indstats = &(pvs->indstats[i]);
 
-		if (indstats->status != PARALLEL_INDVAC_STATUS_COMPLETED)
+		if (indstats->status != PARALLEL_INDVAC_STATUS_COMPLETED &&
+			!(failsafe &&
+			  indstats->status == PARALLEL_INDVAC_STATUS_NEED_BULKDELETE))
 			elog(ERROR, "parallel index vacuum on index \"%s\" is not completed",
 				 RelationGetRelationName(pvs->indrels[i]));
 
@@ -1016,6 +1042,7 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 		VacuumCostBalance = pg_atomic_read_u32(VacuumSharedCostBalance);
 		VacuumSharedCostBalance = NULL;
 		VacuumActiveNWorkers = NULL;
+		VacuumSharedFailsafe = NULL;
 	}
 }
 
@@ -1133,6 +1160,17 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	};
 	const int64 reset_val[] = {(int64) InvalidOid, 0, 0};
 
+	/* Don't start another index once the failsafe has triggered */
+	if (indstats->status == PARALLEL_INDVAC_STATUS_NEED_BULKDELETE &&
+		parallel_vacuum_failsafe_triggered(pvs))
+	{
+		/* Show failsafe mode in the leader's row, workers just exit */
+		if (!IsParallelWorker())
+			pgstat_progress_update_param(PROGRESS_VACUUM_MODE,
+										 PROGRESS_VACUUM_MODE_FAILSAFE);
+		return;
+	}
+
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
 	 * has already updated it
@@ -1166,6 +1204,11 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		case PARALLEL_INDVAC_STATUS_NEED_BULKDELETE:
 			istat_res = vac_bulkdel_one_index(&ivinfo, istat, pvs->dead_items,
 											  &pvs->shared->dead_items_info);
+
+			/* Check the failsafe as a non-parallel vacuum does */
+			INJECTION_POINT("parallel-vacuum-failsafe-check", NULL);
+			if (vacuum_xid_failsafe_check(&(pvs->shared->cutoffs)))
+				pg_atomic_write_u32(&(pvs->shared->failsafe_triggered), 1);
 			break;
 		case PARALLEL_INDVAC_STATUS_NEED_CLEANUP:
 			istat_res = vac_cleanup_one_index(&ivinfo, istat);
@@ -1356,6 +1399,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	VacuumCostBalanceLocal = 0;
 	VacuumSharedCostBalance = &(shared->cost_balance);
 	VacuumActiveNWorkers = &(shared->active_nworkers);
+	VacuumSharedFailsafe = &(shared->failsafe_triggered);
 
 	/* Set parallel vacuum state */
 	pvs.indrels = indrels;
