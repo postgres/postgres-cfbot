@@ -81,6 +81,18 @@ PG_STAT_GET_RELENTRY_INT64(live_tuples)
 /* pg_stat_get_mod_since_analyze */
 PG_STAT_GET_RELENTRY_INT64(mod_since_analyze)
 
+/* pg_stat_get_pages_all_visible_onaccess */
+PG_STAT_GET_RELENTRY_INT64(pages_all_visible_onaccess)
+
+/* pg_stat_get_prune_onaccess */
+PG_STAT_GET_RELENTRY_INT64(prune_onaccess)
+
+/* pg_stat_get_prune_onaccess_missed */
+PG_STAT_GET_RELENTRY_INT64(prune_onaccess_missed)
+
+/* pg_stat_get_vacuum_missed_dead_pages */
+PG_STAT_GET_RELENTRY_INT64(vacuum_missed_dead_pages)
+
 /* pg_stat_get_numscans */
 PG_STAT_GET_RELENTRY_INT64(numscans)
 
