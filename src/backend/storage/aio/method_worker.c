@@ -889,16 +889,18 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 			error_ioh = ioh;
 			errcallback.arg = ioh;
 
-			pgaio_debug_io(DEBUG4, ioh,
-						   "worker %d processing IO",
-						   MyIoWorkerId);
-
 			/*
 			 * Prevent interrupts between pgaio_io_reopen() and
 			 * pgaio_io_perform_synchronously() that otherwise could lead to
-			 * the FD getting closed in that window.
+			 * the FD getting closed in that window.  Also hold them while
+			 * logging, as ereport() can process a die interrupt and exit
+			 * without completing the IO.
 			 */
 			HOLD_INTERRUPTS();
+
+			pgaio_debug_io(DEBUG4, ioh,
+						   "worker %d processing IO",
+						   MyIoWorkerId);
 
 			/*
 			 * It's very unlikely, but possible, that reopen fails. E.g. due
