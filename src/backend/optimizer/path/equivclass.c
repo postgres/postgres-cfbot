@@ -2497,13 +2497,21 @@ reconsider_full_join_clause(PlannerInfo *root, OuterJoinClauseInfo *ojcinfo)
 		match = false;
 		foreach(lc2, cur_ec->ec_members)
 		{
+			Expr	   *em_expr;
+
 			coal_em = (EquivalenceMember *) lfirst(lc2);
 
 			/* Child members should not exist in ec_members */
 			Assert(!coal_em->em_is_child);
-			if (IsA(coal_em->em_expr, CoalesceExpr))
+
+			/* Look through a RelabelType, which doesn't change the value. */
+			em_expr = coal_em->em_expr;
+			if (IsA(em_expr, RelabelType))
+				em_expr = ((RelabelType *) em_expr)->arg;
+
+			if (IsA(em_expr, CoalesceExpr))
 			{
-				CoalesceExpr *cexpr = (CoalesceExpr *) coal_em->em_expr;
+				CoalesceExpr *cexpr = (CoalesceExpr *) em_expr;
 				Node	   *cfirst;
 				Node	   *csecond;
 
