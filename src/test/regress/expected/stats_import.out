@@ -4149,8 +4149,70 @@ SELECT COUNT(*) FROM stats_import.test_range_expr_null
     19
 (1 row)
 
+-- attnames must match the columns of the statistics object, in order
+CREATE TABLE stats_import.test_attnames (a int, b int, c int);
+CREATE STATISTICS stats_import.stat_attnames (ndistinct)
+  ON a, b, c FROM stats_import.test_attnames;
+-- ok: same names, same order
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_attnames',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'stat_attnames',
+  'inherited', false,
+  'attnames', '{a,b,c}'::text[],
+  'n_distinct', '[{"attributes": [1, 2], "ndistinct": 4},
+                  {"attributes": [1, 3], "ndistinct": 5},
+                  {"attributes": [2, 3], "ndistinct": 6},
+                  {"attributes": [1, 2, 3], "ndistinct": 7}]'::pg_ndistinct);
+ pg_restore_extended_stats 
+---------------------------
+ t
+(1 row)
+
+SELECT n_distinct IS NOT NULL AS restored FROM pg_stats_ext
+  WHERE statistics_schemaname = 'stats_import'
+    AND statistics_name = 'stat_attnames';
+ restored 
+----------
+ t
+(1 row)
+
+SELECT pg_catalog.pg_clear_extended_stats('stats_import', 'test_attnames',
+  'stats_import', 'stat_attnames', false);
+ pg_clear_extended_stats 
+-------------------------
+ 
+(1 row)
+
+-- warn: the source had the columns in another order, nothing is restored
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_attnames',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'stat_attnames',
+  'inherited', false,
+  'attnames', '{c,b,a}'::text[],
+  'n_distinct', '[{"attributes": [1, 2], "ndistinct": 4},
+                  {"attributes": [1, 3], "ndistinct": 5},
+                  {"attributes": [2, 3], "ndistinct": 6},
+                  {"attributes": [1, 2, 3], "ndistinct": 7}]'::pg_ndistinct);
+WARNING:  could not restore extended statistics object "stats_import.stat_attnames": its columns do not match "attnames"
+ pg_restore_extended_stats 
+---------------------------
+ f
+(1 row)
+
+SELECT n_distinct IS NOT NULL AS restored FROM pg_stats_ext
+  WHERE statistics_schemaname = 'stats_import'
+    AND statistics_name = 'stat_attnames';
+ restored 
+----------
+ f
+(1 row)
+
 DROP SCHEMA stats_import CASCADE;
-NOTICE:  drop cascades to 27 other objects
+NOTICE:  drop cascades to 28 other objects
 DETAIL:  drop cascades to view stats_import.pg_stats_stable
 drop cascades to view stats_import.pg_statistic_flat_t
 drop cascades to function stats_import.pg_statistic_flat(text)
@@ -4178,3 +4240,4 @@ drop cascades to table stats_import.test_dom_ts_clone
 drop cascades to table stats_import.test_clone
 drop cascades to table stats_import.test_mr_clone
 drop cascades to table stats_import.test_range_expr_null
+drop cascades to table stats_import.test_attnames
