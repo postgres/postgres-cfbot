@@ -82,6 +82,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "varatt.h"
 
 
 typedef struct MTTargetRelLookup
@@ -200,10 +201,93 @@ static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
 										   bool canSetTag);
 
 /*
+ * Are two varlena values that differ as stored the same value?  They can
+ * only be if one of them is compressed or stored out of line; otherwise the
+ * stored bytes are the value.  datum_image_eq() then compares them
+ * detoasted, which it skips when their sizes differ.  Any index makes the
+ * same entries for the same value, so for HOT the two are the same.
+ */
+static bool
+VarlenaImageEqual(Datum value1, Datum value2)
+{
+	varlena    *v1 = (varlena *) DatumGetPointer(value1);
+	varlena    *v2 = (varlena *) DatumGetPointer(value2);
+
+	if (!VARATT_IS_EXTERNAL(v1) && !VARATT_IS_COMPRESSED(v1) &&
+		!VARATT_IS_EXTERNAL(v2) && !VARATT_IS_COMPRESSED(v2))
+		return false;
+	return datum_image_eq(value1, value2, false, -1);
+}
+
+/*
+ * Remove from attrs, the indexed attributes whose values differ as stored
+ * between old_tts and new_tts, those that are the same value stored
+ * differently: the old one compressed or out of line, say, and the new one
+ * not yet, as when an UPDATE writes back the value a row has.  No index needs
+ * a new entry for them.  Attributes of candidate keys and the replica
+ * identity stay, as the table AM decides its lock strength and what it logs
+ * from the values as stored.
+ */
+static Bitmapset *
+DropRestoredAttrs(Relation relation, Bitmapset *attrs,
+				  TupleTableSlot *old_tts, TupleTableSlot *new_tts,
+				  EState *estate)
+{
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	Bitmapset  *keepattrs = NULL;
+	bool		fetched = false;
+	MemoryContext oldcxt;
+	int			attidx = -1;
+
+	oldcxt = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+	while ((attidx = bms_next_member(attrs, attidx)) >= 0)
+	{
+		AttrNumber	attrnum = attidx + FirstLowInvalidHeapAttributeNumber;
+		Datum		value1,
+					value2;
+		bool		null1,
+					null2;
+
+		if (attrnum <= 0 ||
+			TupleDescCompactAttr(tupdesc, attrnum - 1)->attlen != -1)
+			continue;
+		value1 = slot_getattr(old_tts, attrnum, &null1);
+		value2 = slot_getattr(new_tts, attrnum, &null2);
+		if (null1 || null2 || !VarlenaImageEqual(value1, value2))
+			continue;
+
+		if (!fetched)
+		{
+			Bitmapset  *idattrs;
+
+			MemoryContextSwitchTo(oldcxt);
+			keepattrs = RelationGetIndexAttrBitmap(relation,
+												   INDEX_ATTR_BITMAP_KEY);
+			idattrs = RelationGetIndexAttrBitmap(relation,
+												 INDEX_ATTR_BITMAP_IDENTITY_KEY);
+			keepattrs = bms_add_members(keepattrs, idattrs);
+			bms_free(idattrs);
+			MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+			fetched = true;
+		}
+		if (!bms_is_member(attidx, keepattrs))
+			attrs = bms_del_member(attrs, attidx);
+	}
+	MemoryContextSwitchTo(oldcxt);
+	bms_free(keepattrs);
+
+	return attrs;
+}
+
+/*
  * Do the old and new index datums differ?  Compare each column as the type
  * FormIndexDatum() produced it in: the table column's type or the
- * expression's, which need not be the type the index stores.  Datums that
- * differ byte for byte may still give the index the same entries; if its
+ * expression's, which need not be the type the index stores.  A table column
+ * is not compared again: "changed" says which of the index's columns the
+ * update changed, both as stored and once detoasted, and the others give the
+ * same entries.  An expression's datums that differ byte for byte may be the
+ * same value stored differently, which gives any index the same entries.
+ * Other datums that differ may still give the index the same entries; if its
  * access method can tell (amcomparedatums), ask it, but not for a column the
  * index can return in index-only scans, where only the same value will do.
  *
@@ -214,6 +298,7 @@ static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
  */
 static bool
 IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
+				  const Bitmapset *changed,
 				  const Datum *old_values, const bool *old_isnull,
 				  const Datum *new_values, const bool *new_isnull)
 {
@@ -230,9 +315,12 @@ IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
 
 		if (attnum != 0)
 		{
-			Form_pg_attribute att = TupleDescAttr(RelationGetDescr(heapRel),
-												  attnum - 1);
+			Form_pg_attribute att;
 
+			if (!bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
+							   changed))
+				continue;
+			att = TupleDescAttr(RelationGetDescr(heapRel), attnum - 1);
 			typid = att->atttypid;
 			typlen = att->attlen;
 			typbyval = att->attbyval;
@@ -246,8 +334,12 @@ IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
 
 		if (old_isnull[i] != new_isnull[i])
 			return true;
-		if (old_isnull[i] ||
-			datumIsEqual(old_values[i], new_values[i], typbyval, typlen))
+		if (old_isnull[i])
+			continue;
+		if (attnum == 0 &&
+			(datumIsEqual(old_values[i], new_values[i], typbyval, typlen) ||
+			 (typlen == -1 &&
+			  VarlenaImageEqual(old_values[i], new_values[i]))))
 			continue;
 		if (cmp == NULL || index_can_return(indexRel, i + 1) ||
 			!cmp(indexRel, indexInfo, i + 1, typid, typlen, typbyval,
@@ -259,7 +351,8 @@ IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
 
 /*
  * Would the update from old_tts to new_tts give this index a new entry, or
- * take one away?
+ * take one away?  "changed" are the attributes the update changed that the
+ * index uses, as for IndexDatumsDiffer().
  *
  * The index datums are formed in the per-tuple memory context, which
  * callers reset for each row.  The predicate's ExprState is kept in the
@@ -268,8 +361,9 @@ IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
  */
 static bool
 IndexEntryChanges(ResultRelInfo *resultRelInfo, Relation indexRel,
-				  IndexInfo *indexInfo, TupleTableSlot *old_tts,
-				  TupleTableSlot *new_tts, EState *estate)
+				  IndexInfo *indexInfo, const Bitmapset *changed,
+				  TupleTableSlot *old_tts, TupleTableSlot *new_tts,
+				  EState *estate)
 {
 	ExprContext *econtext = GetPerTupleExprContext(estate);
 	TupleTableSlot *save_scantuple = econtext->ecxt_scantuple;
@@ -314,7 +408,7 @@ IndexEntryChanges(ResultRelInfo *resultRelInfo, Relation indexRel,
 	econtext->ecxt_scantuple = save_scantuple;
 
 	result = IndexDatumsDiffer(resultRelInfo->ri_RelationDesc, indexRel,
-							   indexInfo, old_values, old_isnull,
+							   indexInfo, changed, old_values, old_isnull,
 							   new_values, new_isnull);
 	MemoryContextSwitchTo(oldcxt);
 	return result;
@@ -402,7 +496,7 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
 	{
 		if (IndexEntryChanges(resultRelInfo,
 							  resultRelInfo->ri_IndexRelationDescs[i],
-							  indexInfo, old_tts, new_tts,
+							  indexInfo, mine, old_tts, new_tts,
 							  estate))
 			elog(ERROR, "index \"%s\" proven unaffected by UPDATE, but its entry changed",
 				 RelationGetRelationName(resultRelInfo->ri_IndexRelationDescs[i]));
@@ -415,7 +509,7 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
 
 	return !IndexEntryChanges(resultRelInfo,
 							  resultRelInfo->ri_IndexRelationDescs[i],
-							  indexInfo, old_tts, new_tts,
+							  indexInfo, mine, old_tts, new_tts,
 							  estate);
 }
 
@@ -484,6 +578,10 @@ ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
 
 	attrs = table_slot_modified_idx_attrs(relation, old_tts, new_tts);
 
+	if (bms_is_empty(attrs))
+		return attrs;
+
+	attrs = DropRestoredAttrs(relation, attrs, old_tts, new_tts, estate);
 	if (bms_is_empty(attrs))
 		return attrs;
 

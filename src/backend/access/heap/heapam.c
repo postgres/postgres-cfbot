@@ -3317,6 +3317,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 #ifdef USE_ASSERT_CHECKING
 	Bitmapset  *check_attrs;
 	Bitmapset  *narrowable_attrs;
+	Bitmapset  *key_attrs;
 #endif
 	TransactionId xmax_new_tuple,
 				xmax_old_tuple;
@@ -3360,6 +3361,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	id_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_IDENTITY_KEY);
 #ifdef USE_ASSERT_CHECKING
 	check_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_INDEXED);
+	key_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_KEY);
 	narrowable_attrs = RelationGetIndexAttrBitmap(relation,
 												  INDEX_ATTR_BITMAP_EXPRESSION);
 	{
@@ -3428,6 +3430,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 #ifdef USE_ASSERT_CHECKING
 		bms_free(check_attrs);
 		bms_free(narrowable_attrs);
+		bms_free(key_attrs);
 #endif
 		/* modified_idx_attrs is owned by the caller, don't free it */
 
@@ -3777,6 +3780,7 @@ l2:
 #ifdef USE_ASSERT_CHECKING
 		bms_free(check_attrs);
 		bms_free(narrowable_attrs);
+		bms_free(key_attrs);
 #endif
 		/* modified_idx_attrs is owned by the caller, don't free it */
 
@@ -3810,19 +3814,42 @@ l2:
 	 * wrong tuples, is caught.  The caller may leave out an attribute that
 	 * indexes use only through expressions or as partial indexes, or only in
 	 * indexes that can compare entries, having found that no index's entry
-	 * changes (see ExecUpdateModifiedIdxAttrs()), and may report more:
-	 * comparing slots, it cannot always tell that two values will be stored
-	 * alike.
+	 * changes (see ExecUpdateModifiedIdxAttrs()), or one whose value is the
+	 * same, stored compressed or out of line in one of the tuples, unless it
+	 * is in a candidate key or the replica identity.  It may also report
+	 * more: comparing slots, it cannot always tell that two values will be
+	 * stored alike.
 	 */
 	{
 		Bitmapset  *changed = HeapUpdateModifiedIdxAttrs(relation, check_attrs,
 														 &oldtup, newtup);
+		TupleDesc	tupdesc = RelationGetDescr(relation);
+		int			attidx = -1;
 
 		changed = bms_del_members(changed, narrowable_attrs);
-		Assert(bms_is_subset(changed, modified_idx_attrs));
+		changed = bms_del_members(changed, modified_idx_attrs);
+		while ((attidx = bms_next_member(changed, attidx)) >= 0)
+		{
+			AttrNumber	attrnum = attidx + FirstLowInvalidHeapAttributeNumber;
+			Datum		value1,
+						value2;
+			bool		isnull1,
+						isnull2;
+
+			Assert(attrnum > 0);
+			Assert(!bms_is_member(attidx, id_attrs));
+			Assert(!bms_is_member(attidx, key_attrs));
+			Assert(TupleDescCompactAttr(tupdesc, attrnum - 1)->attlen == -1);
+			value1 = heap_getattr(&oldtup, attrnum, tupdesc, &isnull1);
+			value2 = heap_getattr(newtup, attrnum, tupdesc, &isnull2);
+			Assert(!isnull1 && !isnull2);
+			Assert(VARATT_IS_EXTENDED(DatumGetPointer(value1)) ||
+				   VARATT_IS_EXTENDED(DatumGetPointer(value2)));
+		}
 		bms_free(changed);
 		bms_free(check_attrs);
 		bms_free(narrowable_attrs);
+		bms_free(key_attrs);
 	}
 #endif
 
