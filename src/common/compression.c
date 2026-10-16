@@ -456,11 +456,9 @@ validate_compress_specification(pg_compress_specification *spec)
 	return NULL;
 }
 
-#ifdef FRONTEND
-
 /*
- * Basic parsing of a value specified through a command-line option, commonly
- * -Z/--compress.
+ * Basic parsing of a value specified through a command-line option or
+ * GUC value.
  *
  * The parsing consists of a METHOD:DETAIL string fed later to
  * parse_compress_specification().  This only extracts METHOD and DETAIL.
@@ -517,4 +515,3 @@ parse_compress_options(const char *option, char **algorithm, char **detail)
 		*detail = pstrdup(sep + 1);
 	}
 }
-#endif							/* FRONTEND */

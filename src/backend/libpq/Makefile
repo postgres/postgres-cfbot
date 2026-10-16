@@ -26,6 +26,9 @@ OBJS = \
 	hba.o \
 	ifaddr.o \
 	pqcomm.o \
+	pqcomm_compress.o \
+	pqcomm_compress_lz4.o \
+	pqcomm_compress_zstd.o \
 	pqformat.o \
 	pqmq.o \
 	pqsignal.o

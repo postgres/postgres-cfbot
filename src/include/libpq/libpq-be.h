@@ -160,6 +160,12 @@ typedef struct Port
 	char	   *application_name;
 
 	/*
+	 * Supported compression algorithms
+	 */
+	bool		supported_compress_zstd;
+	bool		supported_compress_lz4;
+
+	/*
 	 * Information that needs to be held during the authentication cycle.
 	 */
 	HbaLine    *hba;

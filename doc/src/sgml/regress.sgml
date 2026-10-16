@@ -228,6 +228,12 @@ make check-world -j8 >/dev/null
    </listitem>
    <listitem>
     <para>
+     Protocol trace regression tests,
+     located in <filename>src/test/trace</filename>.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
      Tests for crash recovery and physical replication,
      located in <filename>src/test/recovery</filename>.
     </para>

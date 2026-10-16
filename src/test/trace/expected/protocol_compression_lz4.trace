@@ -1,0 +1,341 @@
+F	NN	StartupMessage	 3 0 "user" "SSSS" "database" "SSSS" "options" "SSSS" "application_name" "SSSS" "_pq_.supported_compressions" "SSSS" "datestyle" "SSSS" "timezone" "SSSS"
+B	NN	ParameterStatus	 "IntervalStyle" "SSSS"
+B	NN	ParameterStatus	 "search_path" "SSSS"
+B	NN	ParameterStatus	 "is_superuser" "SSSS"
+B	NN	ParameterStatus	 "standard_conforming_strings" "SSSS"
+B	NN	ParameterStatus	 "session_authorization" "SSSS"
+B	NN	ParameterStatus	 "client_encoding" "SSSS"
+B	NN	ParameterStatus	 "server_version" "SSSS"
+B	NN	ParameterStatus	 "server_encoding" "SSSS"
+B	NN	ParameterStatus	 "in_hot_standby" "SSSS"
+B	NN	ParameterStatus	 "integer_datetimes" "SSSS"
+B	NN	ParameterStatus	 "TimeZone" "SSSS"
+B	NN	ParameterStatus	 "application_name" "SSSS"
+B	NN	ParameterStatus	 "default_transaction_read_only" "SSSS"
+B	NN	ParameterStatus	 "scram_iterations" "SSSS"
+B	NN	ParameterStatus	 "DateStyle" "SSSS"
+B	12	BackendKeyData	 NNNN 'BBBB'
+B	5	ReadyForQuery	 I
+F	65	Query	 "SET protocol_backend_compression_allowed_algorithms = 'lz4';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	99	Query	 "SELECT current_setting('protocol_backend_compression_allowed_algorithms')!='lz4' AS skip_test "
+B	34	RowDescription	 1 "skip_test" NNNN 0 NNNN 1 -1 0
+B	11	DataRow	 1 1 'f'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	44	Query	 "SET protocol_backend_compression='lz4';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	52	Query	 "SET protocol_backend_compression_threshold=100;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	20	Parse	 "one" "SELECT 1 " 0
+F	48	Parse	 "" "SET protocol_backend_compression='none';" 0
+F	14	Bind	 "" "" 0 0 1 0
+F	6	Describe	 P ""
+F	9	Execute	 "" 0
+F	4	Sync
+B	4	ParseComplete
+B	4	ParseComplete
+B	4	BindComplete
+B	4	NoData
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	50	Query	 "SET protocol_backend_compression_threshold=0;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	11	Query	 "BEGIN;"
+B	10	CommandComplete	 "BEGIN"
+B	5	ReadyForQuery	 T
+F	50	Query	 "SET LOCAL protocol_backend_compression='lz4';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 T
+F	14	Query	 "SELECT 1;"
+B*	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '1'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 T
+F	12	Query	 "COMMIT;"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	11	CommandComplete	 "COMMIT"
+B	5	ReadyForQuery	 I
+F	53	Parse	 "" "SET LOCAL protocol_backend_compression='lz4';" 0
+F	14	Bind	 "" "" 0 0 1 0
+F	6	Describe	 P ""
+F	9	Execute	 "" 0
+F	17	Parse	 "" "SELECT 1;" 0
+F	14	Bind	 "" "" 0 0 1 0
+F	6	Describe	 P ""
+F	9	Execute	 "" 0
+F	4	Sync
+B	4	ParseComplete
+B	4	BindComplete
+B	4	NoData
+B	NN	NoticeResponse	 S "WARNING" V "WARNING" C "25P01" M "SET LOCAL can only be used in transaction blocks" F "SSSS" L "SSSS" R "SSSS" \x00
+B	8	CommandComplete	 "SET"
+B*	4	ParseComplete
+B*	4	BindComplete
+B*	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '1'
+B	NN	CompressedMessages	 \x02 "12TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	5	ReadyForQuery	 I
+F	44	Query	 "SET protocol_backend_compression='lz4';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	50	Query	 "SET protocol_backend_compression_threshold=0;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	14	Query	 "SELECT 1;"
+B*	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '1'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	61	Parse	 "" "SELECT $1::text, '42', $1::numeric, interval '1 sec' " 0
+F	19	Bind	 "" "" 0 1 1 '1' 1 0
+F	6	Describe	 P ""
+F	9	Execute	 "" 0
+F	4	Sync
+B*	4	ParseComplete
+B*	4	BindComplete
+B*	109	RowDescription	 4 "text" NNNN 0 NNNN 65535 -1 0 "?column?" NNNN 0 NNNN 65535 -1 0 "numeric" NNNN 0 NNNN 65535 -1 0 "interval" NNNN 0 NNNN 16 -1 0
+B*	33	DataRow	 4 1 '1' 2 '42' 1 '1' 7 '@ 1 sec'
+B	NN	CompressedMessages	 \x02 "12TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	86	Query	 "COPY  ( SELECT *, repeat ( ' ' , 80 ) FROM generate_series ( 1, 3 ) ) TO STDOUT ;"
+B*	11	CopyOutResponse	 \x00 2 0 0
+B*	87	CopyData	 'BBBB'
+B*	87	CopyData	 'BBBB'
+B*	87	CopyData	 'BBBB'
+B*	4	CopyDone
+B	NN	CompressedMessages	 \x02 "Hdddc" 'BBBB'
+B	11	CommandComplete	 "COPY 3"
+B	5	ReadyForQuery	 I
+F	21	Query	 "LISTEN test_lz4;"
+B	11	CommandComplete	 "LISTEN"
+B	5	ReadyForQuery	 I
+F	29	Query	 "NOTIFY test_lz4, 'test';"
+B	11	CommandComplete	 "NOTIFY"
+B*	22	NotificationResponse	 NNNN "test_lz4" "test"
+B	NN	CompressedMessages	 \x02 "A" 'BBBB'
+B	5	ReadyForQuery	 I
+F	23	Query	 "UNLISTEN test_lz4;"
+B	13	CommandComplete	 "UNLISTEN"
+B	5	ReadyForQuery	 I
+F	62	Query	 "SET protocol_backend_compression_allowed_algorithms = '';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	14	Query	 "SELECT 1;"
+B*	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '1'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	65	Query	 "SET protocol_backend_compression_allowed_algorithms = 'lz4';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	21	Parse	 "test" "SELECT 1 " 0
+F	4	Flush
+B*	4	ParseComplete
+B	NN	CompressedMessages	 \x02 "1" 'BBBB'
+F	32	Parse	 "" "SELECT repeat('a', 100);" 0
+F	14	Bind	 "" "" 0 0 1 0
+F	6	Describe	 P ""
+F	9	Execute	 "" 0
+F	4	Sync
+B*	4	ParseComplete
+B*	4	BindComplete
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	110	DataRow	 1 100 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "12TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	36	Query	 "SET debug_parallel_query=false;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	53	Query	 "SET protocol_backend_compression_threshold=1000;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	57	Query	 "select 1 / i FROM generate_series(2, 0, -1) AS a(i);"
+B	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B	11	DataRow	 1 1 '0'
+B	11	DataRow	 1 1 '1'
+B	NN	ErrorResponse	 S "ERROR" V "ERROR" C "22012" M "division by zero" F "SSSS" L "SSSS" R "SSSS" \x00
+B	5	ReadyForQuery	 I
+F	50	Query	 "SET protocol_backend_compression_threshold=5;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	57	Query	 "select 1 / i FROM generate_series(2, 0, -1) AS a(i);"
+B*	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '0'
+B*	11	DataRow	 1 1 '1'
+B	NN	CompressedMessages	 \x02 "TDD" 'BBBB'
+B	NN	ErrorResponse	 S "ERROR" V "ERROR" C "22012" M "division by zero" F "SSSS" L "SSSS" R "SSSS" \x00
+B	5	ReadyForQuery	 I
+F	32	Query	 "RESET debug_parallel_query;"
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	45	Query	 "SET protocol_backend_compression='none';"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	14	Query	 "SELECT 1;"
+B	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B	11	DataRow	 1 1 '1'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	44	Query	 "SET protocol_backend_compression='lz4';"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	56	Query	 "SET protocol_backend_compression_number_messages=5;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	42	Query	 "SELECT * FROM generate_series(1, 10);"
+B*	40	RowDescription	 1 "generate_series" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '1'
+B*	11	DataRow	 1 1 '2'
+B*	11	DataRow	 1 1 '3'
+B*	11	DataRow	 1 1 '4'
+B*	11	DataRow	 1 1 '5'
+B	NN	CompressedMessages	 \x02 "TDDDDD" 'BBBB'
+B*	11	DataRow	 1 1 '6'
+B*	11	DataRow	 1 1 '7'
+B*	11	DataRow	 1 1 '8'
+B*	11	DataRow	 1 1 '9'
+B*	12	DataRow	 1 2 '10'
+B	NN	CompressedMessages	 \x02 "DDDDD" 'BBBB'
+B	14	CommandComplete	 "SELECT 10"
+B	5	ReadyForQuery	 I
+F	56	Query	 "RESET protocol_backend_compression_number_messages;"
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	61	Query	 "SET protocol_backend_compression_transaction_frame=true;"
+B	8	CommandComplete	 "SET"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	5	ReadyForQuery	 I
+F	51	Query	 "SET protocol_backend_compression_threshold=50;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	14	Query	 "SELECT 1;"
+B	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B	11	DataRow	 1 1 '1'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	11	Query	 "BEGIN;"
+B	10	CommandComplete	 "BEGIN"
+B	5	ReadyForQuery	 T
+F	28	Query	 "SELECT repeat('a', 40);"
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	50	DataRow	 1 40 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 T
+F	12	Query	 "COMMIT;"
+B	11	CommandComplete	 "COMMIT"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	5	ReadyForQuery	 I
+F	11	Query	 "BEGIN;"
+B	10	CommandComplete	 "BEGIN"
+B	5	ReadyForQuery	 T
+F	28	Query	 "SELECT repeat('a', 40);"
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	50	DataRow	 1 40 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 T
+F	14	Query	 "ROLLBACK;"
+B	13	CommandComplete	 "ROLLBACK"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	5	ReadyForQuery	 I
+F	28	Query	 "SELECT repeat('a', 40);"
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	50	DataRow	 1 40 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	5	ReadyForQuery	 I
+F	14	Query	 "SELECT 1;"
+B	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B	11	DataRow	 1 1 '1'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	56	Query	 "SET protocol_backend_compression_number_messages=5;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	42	Query	 "SELECT * FROM generate_series(1, 10);"
+B*	40	RowDescription	 1 "generate_series" NNNN 0 NNNN 4 -1 0
+B*	11	DataRow	 1 1 '1'
+B*	11	DataRow	 1 1 '2'
+B*	11	DataRow	 1 1 '3'
+B*	11	DataRow	 1 1 '4'
+B*	11	DataRow	 1 1 '5'
+B	NN	CompressedMessages	 \x02 "TDDDDD" 'BBBB'
+B*	11	DataRow	 1 1 '6'
+B*	11	DataRow	 1 1 '7'
+B*	11	DataRow	 1 1 '8'
+B*	11	DataRow	 1 1 '9'
+B*	12	DataRow	 1 2 '10'
+B	NN	CompressedMessages	 \x02 "DDDDD" 'BBBB'
+B	14	CommandComplete	 "SELECT 10"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	5	ReadyForQuery	 I
+F	56	Query	 "RESET protocol_backend_compression_number_messages;"
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	62	Query	 "SET protocol_backend_compression_transaction_frame=false;"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	14	Query	 "SELECT 1;"
+B	33	RowDescription	 1 "?column?" NNNN 0 NNNN 4 -1 0
+B	11	DataRow	 1 1 '1'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	11	Query	 "BEGIN;"
+B	10	CommandComplete	 "BEGIN"
+B	5	ReadyForQuery	 T
+F	28	Query	 "SELECT repeat('a', 40);"
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	50	DataRow	 1 40 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 T
+F	12	Query	 "COMMIT;"
+B	11	CommandComplete	 "COMMIT"
+B	5	ReadyForQuery	 I
+F	11	Query	 "BEGIN;"
+B	10	CommandComplete	 "BEGIN"
+B	5	ReadyForQuery	 T
+F	28	Query	 "SELECT repeat('a', 40);"
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	50	DataRow	 1 40 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 T
+F	14	Query	 "ROLLBACK;"
+B	13	CommandComplete	 "ROLLBACK"
+B	5	ReadyForQuery	 I
+F	28	Query	 "SELECT repeat('a', 40);"
+B*	31	RowDescription	 1 "repeat" NNNN 0 NNNN 65535 -1 0
+B*	50	DataRow	 1 40 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+B	NN	CompressedMessages	 \x02 "TD" 'BBBB'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	50	Query	 "RESET protocol_backend_compression_threshold;"
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	56	Query	 "RESET protocol_backend_compression_number_messages;"
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	58	Query	 "RESET protocol_backend_compression_transaction_frame;"
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	40	Query	 "RESET protocol_backend_compression;"
+B	NN	CompressedMessages	 \x02 "" 'BBBB'
+B	10	CommandComplete	 "RESET"
+B	5	ReadyForQuery	 I
+F	4	Terminate

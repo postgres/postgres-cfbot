@@ -140,6 +140,7 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #else
 #define DefaultGSSMode "disable"
 #endif
+#define DefaultSupportedCompressions	"auto"
 
 /* ----------
  * Definition of the conninfo parameters and their fallback resources.
@@ -384,6 +385,15 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"Target-Session-Attrs", "", 15, /* sizeof("prefer-standby") = 15 */
 	offsetof(struct pg_conn, target_session_attrs)},
 
+	{"trace_file", "PQTRACE",
+		NULL, NULL,
+		"Trace-File", "D", 64,
+	offsetof(struct pg_conn, trace_file_str)},
+
+	{"trace_flags", "PQTRACEFLAGS", NULL, NULL,
+		"Trace-Flags", "D", 1,
+	offsetof(struct pg_conn, trace_flags_str)},
+
 	{"load_balance_hosts", "PGLOADBALANCEHOSTS",
 		DefaultLoadBalanceHosts, NULL,
 		"Load-Balance-Hosts", "", 8,	/* sizeof("disable") = 8 */
@@ -419,6 +429,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	{"sslkeylogfile", NULL, NULL, NULL,
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
+
+	{"supported_compressions", NULL, DefaultSupportedCompressions, NULL,
+		"Supported-Compressions", "D", 64,
+	offsetof(struct pg_conn, supported_compressions)},
 
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
@@ -545,7 +559,11 @@ pqDropConnection(PGconn *conn, bool flushInput)
 
 	/* Optionally discard any unread data */
 	if (flushInput)
-		conn->inStart = conn->inCursor = conn->inEnd = 0;
+	{
+		conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
+		if (conn->decompressBuffer.buffer)
+			conn->decompressBuffer.start = conn->decompressBuffer.cursor = conn->decompressBuffer.end = 0;
+	}
 
 	/* Always discard any unsent data */
 	conn->outCount = 0;
@@ -2060,6 +2078,45 @@ pqConnectOptions2(PGconn *conn)
 		}
 	}
 
+	/*
+	 * If a trace file was provided and there's no active Pfdebug, enable
+	 * PQtrace
+	 */
+	if (conn->trace_file_str && !conn->Pfdebug)
+	{
+		int			trace_flags = 0;
+
+		if (conn->trace_flags_str)
+		{
+			if (!pqParseIntParam(conn->trace_flags_str, &trace_flags, conn,
+								 "trace_flags"))
+				return false;
+		}
+
+		if (strcmp(conn->trace_file_str, "-") == 0)
+			conn->trace_file = stdout;
+
+		/*
+		 * If the connection is created for a cancel request, and trace_file
+		 * is not stdout, don't try to trace it as the source connection
+		 * already has an open fd on this trace file.
+		 */
+		else if (!conn->cancelRequest)
+		{
+			conn->trace_file = fopen(conn->trace_file_str, "w");
+			if (conn->trace_file == NULL)
+			{
+				libpq_append_conn_error(conn, "could not open trace file \"%s\": %m", conn->trace_file_str);
+				return false;
+			}
+			/* Make it line-buffered */
+			setvbuf(conn->trace_file, NULL, PG_IOLBF, 0);
+		}
+
+		PQtrace(conn, conn->trace_file);
+		PQsetTraceFlags(conn, trace_flags);
+	}
+
 	if (conn->scram_server_key)
 	{
 		int			len;
@@ -2178,6 +2235,36 @@ pqConnectOptions2(PGconn *conn)
 		if (!conn->client_encoding_initial)
 			goto oom_error;
 	}
+
+	/*
+	 * Resolve supported compressions
+	 */
+	if (conn->supported_compressions && strcmp(conn->supported_compressions, "auto") == 0)
+	{
+		PQExpBufferData buf;
+
+		free(conn->supported_compressions);
+		initPQExpBuffer(&buf);
+
+#ifdef USE_LZ4
+		appendPQExpBuffer(&buf, "lz4");
+#endif
+
+#ifdef USE_ZSTD
+		if (buf.len > 0)
+			appendPQExpBufferChar(&buf, ',');
+		appendPQExpBuffer(&buf, "zstd");
+#endif
+
+		if (PQExpBufferDataBroken(buf))
+			goto oom_error;
+		conn->supported_compressions = strdup(buf.data);
+		if (!conn->supported_compressions)
+			goto oom_error;
+
+		termPQExpBuffer(&buf);
+	}
+
 
 	/*
 	 * Only if we get this far is it appropriate to try to connect. (We need a
@@ -2744,7 +2831,11 @@ pqConnectDBStart(PGconn *conn)
 	}
 
 	/* Ensure our buffers are empty */
-	conn->inStart = conn->inCursor = conn->inEnd = 0;
+	conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
+	if (conn->decompressBuffer.buffer)
+		conn->decompressBuffer.start = conn->decompressBuffer.cursor = conn->decompressBuffer.end = 0;
+	if (conn->inBuffer.buffer)
+		conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
 	conn->outCount = 0;
 
 	/*
@@ -3803,7 +3894,7 @@ keep_going:						/* We will come back to here until there is
 						/* caller failed to wait for data */
 						return PGRES_POLLING_READING;
 					}
-					if (pqGetc(&SSLok, conn) < 0)
+					if (pqGetc(&SSLok, conn, &conn->inBuffer) < 0)
 					{
 						/* should not happen really */
 						return PGRES_POLLING_READING;
@@ -3814,7 +3905,7 @@ keep_going:						/* We will come back to here until there is
 							pqTraceOutputCharResponse(conn, "SSLResponse",
 													  SSLok);
 						/* mark byte consumed */
-						conn->inStart = conn->inCursor;
+						conn->inBuffer.start = conn->inBuffer.cursor;
 					}
 					else if (SSLok == 'N')
 					{
@@ -3822,7 +3913,7 @@ keep_going:						/* We will come back to here until there is
 							pqTraceOutputCharResponse(conn, "SSLResponse",
 													  SSLok);
 						/* mark byte consumed */
-						conn->inStart = conn->inCursor;
+						conn->inBuffer.start = conn->inBuffer.cursor;
 
 						/*
 						 * The connection is still valid, so if it's OK to
@@ -3862,7 +3953,7 @@ keep_going:						/* We will come back to here until there is
 					 * handshake, so it wasn't encrypted and indeed may have
 					 * been injected by a man-in-the-middle.
 					 */
-					if (conn->inCursor != conn->inEnd)
+					if (conn->inBuffer.cursor != conn->inBuffer.end)
 					{
 						libpq_append_conn_error(conn, "received unencrypted data after SSL response");
 						goto error_return;
@@ -3908,7 +3999,7 @@ keep_going:						/* We will come back to here until there is
 					else if (rdresult == 0)
 						/* caller failed to wait for data */
 						return PGRES_POLLING_READING;
-					if (pqGetc(&gss_ok, conn) < 0)
+					if (pqGetc(&gss_ok, conn, &conn->inBuffer) < 0)
 						/* shouldn't happen... */
 						return PGRES_POLLING_READING;
 
@@ -3932,7 +4023,7 @@ keep_going:						/* We will come back to here until there is
 					}
 
 					/* mark byte consumed */
-					conn->inStart = conn->inCursor;
+					conn->inBuffer.start = conn->inBuffer.cursor;
 
 					if (gss_ok == 'N')
 					{
@@ -3969,7 +4060,7 @@ keep_going:						/* We will come back to here until there is
 					 * handshake, so it wasn't encrypted and indeed may have
 					 * been injected by a man-in-the-middle.
 					 */
-					if (conn->inCursor != conn->inEnd)
+					if (conn->inBuffer.cursor != conn->inBuffer.end)
 					{
 						libpq_append_conn_error(conn, "received unencrypted data after GSSAPI encryption response");
 						goto error_return;
@@ -4013,10 +4104,10 @@ keep_going:						/* We will come back to here until there is
 				 * the message is incomplete, we will return without advancing
 				 * inStart, and resume here next time).
 				 */
-				conn->inCursor = conn->inStart;
+				conn->inBuffer.cursor = conn->inBuffer.start;
 
 				/* Read type byte */
-				if (pqGetc(&beresp, conn))
+				if (pqGetc(&beresp, conn, &conn->inBuffer))
 				{
 					/* We'll come back when there is more data */
 					return PGRES_POLLING_READING;
@@ -4038,7 +4129,7 @@ keep_going:						/* We will come back to here until there is
 				}
 
 				/* Read message length word */
-				if (pqGetInt(&msgLength, 4, conn))
+				if (pqGetInt(&msgLength, 4, conn, &conn->inBuffer))
 				{
 					/* We'll come back when there is more data */
 					return PGRES_POLLING_READING;
@@ -4075,14 +4166,14 @@ keep_going:						/* We will come back to here until there is
 					(msgLength < 8 || msgLength > MAX_ERRLEN))
 				{
 					/* Handle error from a pre-3.0 server */
-					conn->inCursor = conn->inStart + 1; /* reread data */
-					if (pqGets_append(&conn->errorMessage, conn))
+					conn->inBuffer.cursor = conn->inBuffer.start + 1;	/* reread data */
+					if (pqGets_append(&conn->errorMessage, conn, &conn->inBuffer))
 					{
 						/*
 						 * We may not have authenticated the server yet, so
 						 * don't let the buffer grow forever.
 						 */
-						avail = conn->inEnd - conn->inCursor;
+						avail = conn->inBuffer.end - conn->inBuffer.cursor;
 						if (avail > MAX_ERRLEN)
 						{
 							libpq_append_conn_error(conn, "received invalid error message");
@@ -4093,7 +4184,7 @@ keep_going:						/* We will come back to here until there is
 						return PGRES_POLLING_READING;
 					}
 					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+					pqParseDone(conn, &conn->inBuffer, conn->inBuffer.cursor);
 
 					/*
 					 * Before 7.2, the postmaster didn't always end its
@@ -4119,7 +4210,7 @@ keep_going:						/* We will come back to here until there is
 				 * PGRES_POLLING_READING after this point.
 				 */
 				msgLength -= 4;
-				avail = conn->inEnd - conn->inCursor;
+				avail = conn->inBuffer.end - conn->inBuffer.cursor;
 				if (avail < msgLength)
 				{
 					/*
@@ -4127,8 +4218,7 @@ keep_going:						/* We will come back to here until there is
 					 * needed to hold the whole message; see notes in
 					 * pqParseInput3.
 					 */
-					if (pqCheckInBufferSpace(conn->inCursor + (size_t) msgLength,
-											 conn))
+					if (pqCheckMsgBufferSpace(conn->inBuffer.cursor + (size_t) msgLength, &conn->inBuffer, conn))
 						goto error_return;
 					/* We'll come back when there is more data */
 					return PGRES_POLLING_READING;
@@ -4137,13 +4227,13 @@ keep_going:						/* We will come back to here until there is
 				/* Handle errors. */
 				if (beresp == PqMsg_ErrorResponse)
 				{
-					if (pqGetErrorNotice3(conn, true))
+					if (pqGetErrorNotice3(conn, true, &conn->inBuffer))
 					{
 						libpq_append_conn_error(conn, "received invalid error message");
 						goto error_return;
 					}
 					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+					pqParseDone(conn, &conn->inBuffer, conn->inBuffer.cursor);
 
 					/*
 					 * If error is "cannot connect now", try the next host if
@@ -4172,7 +4262,7 @@ keep_going:						/* We will come back to here until there is
 						libpq_append_conn_error(conn, "received duplicate protocol negotiation message");
 						goto error_return;
 					}
-					if (pqGetNegotiateProtocolVersion3(conn))
+					if (pqGetNegotiateProtocolVersion3(conn, &conn->inBuffer))
 					{
 						/* pqGetNegotiateProtocolVersion3 set error already */
 						goto error_return;
@@ -4180,7 +4270,7 @@ keep_going:						/* We will come back to here until there is
 					conn->pversion_negotiated = true;
 
 					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+					pqParseDone(conn, &conn->inBuffer, conn->inBuffer.cursor);
 
 					goto keep_going;
 				}
@@ -4189,7 +4279,7 @@ keep_going:						/* We will come back to here until there is
 				conn->auth_req_received = true;
 
 				/* Get the type of request. */
-				if (pqGetInt((int *) &areq, 4, conn))
+				if (pqGetInt((int *) &areq, 4, conn, &conn->inBuffer))
 				{
 					/* can't happen because we checked the length already */
 					libpq_append_conn_error(conn, "received invalid authentication request");
@@ -4221,7 +4311,7 @@ keep_going:						/* We will come back to here until there is
 				 * don't call pqParseDone here because we already traced this
 				 * message inside pg_fe_sendauth.
 				 */
-				conn->inStart = conn->inCursor;
+				conn->inBuffer.start = conn->inBuffer.cursor;
 
 				if (res != STATUS_OK)
 				{
@@ -5023,6 +5113,7 @@ pqMakeEmptyPGconn(void)
 	conn->sock = PGINVALID_SOCKET;
 	conn->altsock = PGINVALID_SOCKET;
 	conn->Pfdebug = NULL;
+	conn->trace_file = NULL;
 
 	/*
 	 * We try to send at least 8K at a time, which is the usual size of pipe
@@ -5035,8 +5126,8 @@ pqMakeEmptyPGconn(void)
 	 * be enlarged anytime it has less than 8K free, so we initially allocate
 	 * twice that.
 	 */
-	conn->inBufSize = 16 * 1024;
-	conn->inBuffer = (char *) malloc(conn->inBufSize);
+	conn->inBuffer.bufSize = 16 * 1024;
+	conn->inBuffer.buffer = (char *) malloc(conn->inBuffer.bufSize);
 	conn->outBufSize = 16 * 1024;
 	conn->outBuffer = (char *) malloc(conn->outBufSize);
 	conn->rowBufLen = 32;
@@ -5044,7 +5135,7 @@ pqMakeEmptyPGconn(void)
 	initPQExpBuffer(&conn->errorMessage);
 	initPQExpBuffer(&conn->workBuffer);
 
-	if (conn->inBuffer == NULL ||
+	if (conn->inBuffer.buffer == NULL ||
 		conn->outBuffer == NULL ||
 		conn->rowBuf == NULL ||
 		PQExpBufferBroken(&conn->errorMessage) ||
@@ -5137,6 +5228,7 @@ freePGconn(PGconn *conn)
 	free(conn->scram_client_key);
 	free(conn->scram_server_key);
 	free(conn->sslkeylogfile);
+	free(conn->supported_compressions);
 	free(conn->oauth_issuer);
 	free(conn->oauth_issuer_id);
 	free(conn->oauth_discovery_uri);
@@ -5144,7 +5236,21 @@ freePGconn(PGconn *conn)
 	free(conn->oauth_client_secret);
 	free(conn->oauth_ca_file);
 	free(conn->oauth_scope);
-	/* Note that conn->Pfdebug is not ours to close or free */
+	free(conn->trace_file_str);
+	free(conn->trace_flags_str);
+
+	/* Untrace the connection to flush Pfdebug */
+	PQuntrace(conn);
+
+	/*
+	 * Note that conn->Pfdebug is not ours to close or free if provided
+	 * externally. However, if tracing was enabled through PQTRACE, we need to
+	 * close conn->trace_file.
+	 */
+	if (conn->trace_file && conn->trace_file != stdout)
+	{
+		fclose(conn->trace_file);
+	}
 	free(conn->events);
 	pqReleaseConnHosts(conn);
 	free(conn->connip);
@@ -5153,9 +5259,12 @@ freePGconn(PGconn *conn)
 	free(conn->scram_server_key_binary);
 	/* if this is a cancel connection, be_cancel_key may still be allocated */
 	free(conn->be_cancel_key);
-	free(conn->inBuffer);
+	free(conn->inBuffer.buffer);
 	free(conn->outBuffer);
 	free(conn->rowBuf);
+	if (conn->decompressor.free_context)
+		conn->decompressor.free_context(conn);
+	free(conn->decompressBuffer.buffer);
 	termPQExpBuffer(&conn->errorMessage);
 	termPQExpBuffer(&conn->workBuffer);
 
