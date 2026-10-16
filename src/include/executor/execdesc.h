@@ -45,6 +45,20 @@ typedef struct QueryDesc
 	int			query_instr_options;	/* OR of InstrumentOption flags for
 										 * query_instr */
 
+	/*
+	 * Nesting level at which this query started, or -1 if not set.  An
+	 * extension may set this from its ExecutorStart hook and read it back at
+	 * ExecutorEnd, which can run at a different level.  For example, a
+	 * cursor's query starts inside DECLARE but may end at COMMIT.
+	 *
+	 * The level counts as pg_stat_statements does: 0 for a statement sent by
+	 * the client, including EXECUTE of a prepared statement; one deeper for
+	 * each query run by another statement or by a function.  All extensions
+	 * that set this field must use that definition; one that counts
+	 * differently must leave it alone.
+	 */
+	int			start_nesting_level;
+
 	/* These fields are set by ExecutorStart */
 	TupleDesc	tupDesc;		/* descriptor for result tuples */
 	EState	   *estate;			/* executor's query-wide state */

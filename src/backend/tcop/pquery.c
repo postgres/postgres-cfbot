@@ -87,6 +87,7 @@ CreateQueryDesc(PlannedStmt *plannedstmt,
 	qd->queryEnv = queryEnv;
 	qd->instrument_options = instrument_options;	/* instrumentation wanted? */
 	qd->query_instr_options = 0;
+	qd->start_nesting_level = -1;
 
 	/* null these fields until set by ExecutorStart */
 	qd->tupDesc = NULL;
