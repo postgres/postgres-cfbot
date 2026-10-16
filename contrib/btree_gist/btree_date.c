@@ -91,12 +91,14 @@ gbt_datekey_cmp(const void *a, const void *b, FmgrInfo *flinfo)
 static float8
 gdb_date_dist(const void *a, const void *b, FmgrInfo *flinfo)
 {
-	/* we assume the difference can't overflow */
-	Datum		diff = DirectFunctionCall2(date_mi,
-										   DateADTGetDatum(*((const DateADT *) a)),
-										   DateADTGetDatum(*((const DateADT *) b)));
+	DateADT		da = *((const DateADT *) a);
+	DateADT		db = *((const DateADT *) b);
 
-	return (float8) abs(DatumGetInt32(diff));
+	if (DATE_NOT_FINITE(da) || DATE_NOT_FINITE(db))
+		return get_float8_infinity();
+
+	/* the difference of two finite dates always fits in int32 */
+	return (float8) abs(da - db);
 }
 
 
@@ -119,12 +121,20 @@ PG_FUNCTION_INFO_V1(date_dist);
 Datum
 date_dist(PG_FUNCTION_ARGS)
 {
-	/* we assume the difference can't overflow */
-	Datum		diff = DirectFunctionCall2(date_mi,
-										   PG_GETARG_DATUM(0),
-										   PG_GETARG_DATUM(1));
+	DateADT		a = PG_GETARG_DATEADT(0);
+	DateADT		b = PG_GETARG_DATEADT(1);
 
-	PG_RETURN_INT32(abs(DatumGetInt32(diff)));
+	/*
+	 * int4 has no infinity, so saturate for infinite inputs, as ts_dist does
+	 * for timestamps.  This is consistent with the ordering produced by
+	 * gdb_date_dist, since no difference of two finite dates reaches
+	 * PG_INT32_MAX.
+	 */
+	if (DATE_NOT_FINITE(a) || DATE_NOT_FINITE(b))
+		PG_RETURN_INT32(PG_INT32_MAX);
+
+	/* the difference of two finite dates always fits in int32 */
+	PG_RETURN_INT32(abs(a - b));
 }
 
 
@@ -206,32 +216,15 @@ gbt_date_penalty(PG_FUNCTION_ARGS)
 	dateKEY    *origentry = (dateKEY *) DatumGetPointer(((GISTENTRY *) PG_GETARG_POINTER(0))->key);
 	dateKEY    *newentry = (dateKEY *) DatumGetPointer(((GISTENTRY *) PG_GETARG_POINTER(1))->key);
 	float	   *result = (float *) PG_GETARG_POINTER(2);
-	int32		diff,
-				res;
 
-	diff = DatumGetInt32(DirectFunctionCall2(date_mi,
-											 DateADTGetDatum(newentry->upper),
-											 DateADTGetDatum(origentry->upper)));
-
-	res = Max(diff, 0);
-
-	diff = DatumGetInt32(DirectFunctionCall2(date_mi,
-											 DateADTGetDatum(origentry->lower),
-											 DateADTGetDatum(newentry->lower)));
-
-	res += Max(diff, 0);
-
-	*result = 0.0;
-
-	if (res > 0)
-	{
-		diff = DatumGetInt32(DirectFunctionCall2(date_mi,
-												 DateADTGetDatum(origentry->upper),
-												 DateADTGetDatum(origentry->lower)));
-		*result += FLT_MIN;
-		*result += (float) (res / ((double) (res + diff)));
-		*result *= (FLT_MAX / (((GISTENTRY *) PG_GETARG_POINTER(0))->rel->rd_att->natts + 1));
-	}
+	/*
+	 * Don't use date_mi here: it rejects infinite dates, and plain int32
+	 * subtraction could overflow for them (DATEVAL_NOBEGIN/NOEND are
+	 * INT32_MIN/INT32_MAX).  penalty_num computes in double, where every
+	 * int32 and every difference of two int32s is exact.
+	 */
+	penalty_num(result, origentry->lower, origentry->upper,
+				newentry->lower, newentry->upper);
 
 	PG_RETURN_POINTER(result);
 }
