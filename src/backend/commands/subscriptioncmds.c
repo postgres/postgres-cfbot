@@ -1504,13 +1504,16 @@ CheckAlterSubOption(Subscription *sub, const char *option,
 {
 	Assert(strcmp(option, "failover") == 0 ||
 		   strcmp(option, "two_phase") == 0 ||
-		   strcmp(option, "retain_dead_tuples") == 0);
+		   strcmp(option, "retain_dead_tuples") == 0 ||
+		   strcmp(option, "conflict_log_destination") == 0);
 
 	/*
-	 * Altering the retain_dead_tuples option does not update the slot on the
-	 * publisher.
+	 * Altering the retain_dead_tuples or conflict_log_destination option does
+	 * not update the slot on the publisher.
 	 */
-	Assert(!slot_needs_update || strcmp(option, "retain_dead_tuples") != 0);
+	Assert(!slot_needs_update ||
+		   (strcmp(option, "retain_dead_tuples") != 0 &&
+			strcmp(option, "conflict_log_destination") != 0));
 
 	/*
 	 * Do not allow changing the option if the subscription is enabled. This
@@ -1555,6 +1558,13 @@ CheckAlterSubOption(Subscription *sub, const char *option,
 	 * avoid the race conditions described above, but we maintain the
 	 * restriction for both enable and disable operations for the sake of
 	 * consistency.
+	 *
+	 * Also, do not allow changing the conflict_log_destination option to
+	 * 'log' when the subscription is enabled. This drops the conflict log
+	 * table, which has to wait for any prepared transaction holding a lock on
+	 * it. Only the apply worker can finish such a transaction, but the apply
+	 * worker itself would be blocked if it tries to insert into the table
+	 * while the drop is waiting, so neither could proceed.
 	 */
 	if (sub->enabled)
 		ereport(ERROR,
@@ -2103,6 +2113,55 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 						bool		update_relid;
 						Oid			relid = InvalidOid;
 
+						/*
+						 * Changing to 'log' drops the conflict log table,
+						 * which has to wait for any prepared transaction
+						 * holding a lock on it. If the apply worker, which is
+						 * the only one that can finish such a transaction, is
+						 * blocked by that drop, neither can proceed. So allow
+						 * it only when the subscription is disabled, no
+						 * worker is running and there are no prepared
+						 * transactions.
+						 */
+						if (CONFLICTS_LOGGED_TO_TABLE(old_dest) &&
+							!CONFLICTS_LOGGED_TO_TABLE(opts.conflictlogdest))
+						{
+							CheckAlterSubOption(sub, "conflict_log_destination",
+												false, isTopLevel);
+
+							/*
+							 * Note that workers may still survive even if the
+							 * subscription has been disabled.
+							 *
+							 * Ensure workers have already been exited to
+							 * avoid getting prepared transactions while we
+							 * are dropping the conflict log table.
+							 */
+							if (logicalrep_workers_find(subid, true, true))
+								ereport(ERROR,
+										(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+										 errmsg("cannot alter option \"%s\" when logical replication worker is still running",
+												"conflict_log_destination"),
+										 errhint("Try again after some time.")));
+
+							/*
+							 * The conflict log table cannot be dropped if
+							 * there are any uncommitted prepared transactions
+							 * present otherwise it can wait forever for a
+							 * lock held by them. Prepared transactions can
+							 * exist only when two_phase is enabled, as it
+							 * cannot be disabled while they exist.
+							 */
+							if (sub->twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED &&
+								LookupGXactBySubid(subid))
+								ereport(ERROR,
+										(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+										 errmsg("cannot alter option \"%s\" when prepared transactions exist",
+												"conflict_log_destination"),
+										 errdetail("Prepared transactions of the subscription may hold a lock on its conflict log table."),
+										 errhint("Resolve these transactions and try again.")));
+						}
+
 						values[Anum_pg_subscription_subconflictlogdest - 1] =
 							CStringGetTextDatum(ConflictLogDestNames[opts.conflictlogdest]);
 						replaces[Anum_pg_subscription_subconflictlogdest - 1] = true;
@@ -2613,6 +2672,7 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	Oid			subowner;
 	Oid			subserver;
 	Oid			subconflictlogrelid;
+	char		subtwophasestate;
 	char	   *subconninfo = NULL;
 	Datum		datum;
 	bool		isnull;
@@ -2666,6 +2726,7 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	subowner = form->subowner;
 	subserver = form->subserver;
 	subconflictlogrelid = form->subconflictlogrelid;
+	subtwophasestate = form->subtwophasestate;
 	must_use_password = !superuser_arg(subowner) && form->subpasswordrequired;
 
 	/* must be owner */
@@ -2741,6 +2802,25 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 		logicalrep_worker_stop(w->type, w->subid, w->relid);
 	}
 	list_free(subworkers);
+
+	/*
+	 * The subscription cannot be dropped if there are any uncommitted
+	 * prepared transactions present, otherwise dropping the conflict log
+	 * table can wait forever for a lock held by them, as the apply worker
+	 * that would resolve them has been stopped above.
+	 *
+	 * Prepared transactions can exist only when two_phase is enabled, as it
+	 * cannot be disabled while they exist.
+	 */
+	if (OidIsValid(subconflictlogrelid) &&
+		subtwophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED &&
+		LookupGXactBySubid(subid))
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("cannot drop subscription \"%s\" when prepared transactions exist",
+					   subname),
+				errdetail("Prepared transactions of the subscription may hold a lock on its conflict log table."),
+				errhint("Resolve these transactions and try again."));
 
 	/*
 	 * Remove the no-longer-useful entry in the launcher's table of apply

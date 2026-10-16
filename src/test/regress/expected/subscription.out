@@ -775,6 +775,12 @@ FROM pg_subscription WHERE subname = 'regress_conflict_test2';
  table              | t
 (1 row)
 
+-- fail - transition from 'table' to 'log' requires a disabled subscription
+BEGIN;
+ALTER SUBSCRIPTION regress_conflict_test2 ENABLE;
+ALTER SUBSCRIPTION regress_conflict_test2 SET (conflict_log_destination = 'log');
+ERROR:  cannot set option "conflict_log_destination" for enabled subscription
+ROLLBACK;
 -- transition from 'table' to 'log'
 -- should drop the table and clear subconflictlogrelid
 ALTER SUBSCRIPTION regress_conflict_test2 SET (conflict_log_destination = 'log');
