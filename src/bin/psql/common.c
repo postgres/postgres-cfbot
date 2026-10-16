@@ -28,6 +28,7 @@
 #include "fe_utils/mbprint.h"
 #include "fe_utils/string_utils.h"
 #include "mainloop.h"
+#include "mb/pg_wchar.h"
 #include "portability/instr_time.h"
 #include "settings.h"
 
@@ -2631,8 +2632,25 @@ void
 addQueryComment(PQExpBuffer buf, const char *label)
 {
 #if defined(ENABLE_NLS)
-	/* This will become conditional once we've settled on the tests to use */
-	label = _(label);
+	const char *server_enc = PQparameterStatus(pset.db, "server_encoding");
+	int			client_enc = PQclientEncoding(pset.db);
+
+	/*
+	 * Use the translation only if the server will accept its bytes.  With
+	 * equal client and server encodings, the server just verifies the string
+	 * in that encoding, so we can run the same check here.  We don't try to
+	 * guess which encoding gettext used, so the result may look like junk if
+	 * that doesn't match, but it can't cause an error.
+	 */
+	if (server_enc != NULL &&
+		pg_char_to_encoding(server_enc) == client_enc)
+	{
+		const char *translated = _(label);
+		int			len = strlen(translated);
+
+		if (pg_encoding_verifymbstr(client_enc, translated, len) == len)
+			label = translated;
+	}
 #endif
 
 	printfPQExpBuffer(buf, "/* %s */\n", label);
