@@ -155,6 +155,29 @@ struct ReadBuffersOperation
 
 typedef struct ReadBuffersOperation ReadBuffersOperation;
 
+/*
+ * information about one partition of shared buffers
+ *
+ * numa_nod specifies node for this partition (-1 means allocated on any node)
+ * first/last buffer - the values are inclusive
+ */
+typedef struct BufferPartition
+{
+	int			numa_node;		/* NUMA node (-1 no node) */
+	int			num_buffers;	/* number of buffers */
+	int			first_buffer;	/* first buffer of partition */
+	int			last_buffer;	/* last buffer of partition */
+} BufferPartition;
+
+/* an array of information about all partitions */
+typedef struct BufferPartitions
+{
+	int			nnodes;			/* number of NUMA nodes */
+	int			npartitions;	/* number of partitions */
+	int			npartitions_per_node;	/* for convenience */
+	BufferPartition partitions[FLEXIBLE_ARRAY_MEMBER];
+} BufferPartitions;
+
 /* to avoid having to expose buf_internals.h here */
 typedef struct WritebackContext WritebackContext;
 
@@ -166,6 +189,11 @@ extern PGDLLIMPORT bool zero_damaged_pages;
 extern PGDLLIMPORT int bgwriter_lru_maxpages;
 extern PGDLLIMPORT double bgwriter_lru_multiplier;
 extern PGDLLIMPORT bool track_io_timing;
+
+/* in freelist.c */
+extern PGDLLIMPORT bool clocksweep_balance;
+extern PGDLLIMPORT bool clocksweep_balance_recalc;
+extern PGDLLIMPORT bool clocksweep_scan_all_partitions;
 
 #define DEFAULT_EFFECTIVE_IO_CONCURRENCY 16
 #define DEFAULT_MAINTENANCE_IO_CONCURRENCY 16
@@ -187,6 +215,7 @@ extern PGDLLIMPORT const PgAioHandleCallbacks aio_local_buffer_readv_cb;
 
 /* in buf_init.c */
 extern PGDLLIMPORT char *BufferBlocks;
+extern PGDLLIMPORT bool shared_buffers_numa;
 
 /* in localbuf.c */
 extern PGDLLIMPORT int NLocBuffer;
@@ -371,6 +400,9 @@ extern void MarkDirtyAllUnpinnedBuffers(int32 *buffers_dirtied,
 										int32 *buffers_already_dirty,
 										int32 *buffers_skipped);
 
+/* in buf_init.c */
+extern int	BufferGetNode(Buffer buffer);
+
 /* in localbuf.c */
 extern void AtProcExit_LocalBuffers(void);
 
@@ -383,7 +415,15 @@ extern int	GetAccessStrategyBufferCount(BufferAccessStrategy strategy);
 extern int	GetAccessStrategyPinLimit(BufferAccessStrategy strategy);
 
 extern void FreeAccessStrategy(BufferAccessStrategy strategy);
-
+extern void ClockSweepPartitionGetInfo(int idx,
+									 uint32 *complete_passes,
+									 uint32 *next_victim_buffer,
+									 uint64 *buffer_total_allocs,
+									 uint32 *buffer_allocs,
+									 uint64 *buffer_total_req_allocs,
+									 uint32 *buffer_req_allocs,
+									 int **weights);
+extern void ClockSweepSetWeights(int partition, int *weights, int nweights);
 
 /* inline functions */
 
