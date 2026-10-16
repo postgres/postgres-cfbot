@@ -610,6 +610,8 @@ typedef struct WindowFunc
 	bool		winstar pg_node_attr(query_jumble_ignore);
 	/* is function a simple aggregate? */
 	bool		winagg pg_node_attr(query_jumble_ignore);
+	/* true if aggregate arguments were marked DISTINCT */
+	bool		windistinct;
 	/* ignore nulls. One of the Null Treatment options */
 	int			ignore_nulls;
 	/* token location, or -1 if unknown */
