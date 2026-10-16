@@ -18,6 +18,7 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/tableam.h"
+#include "access/twophase.h"
 #include "catalog/heap.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_namespace.h"
@@ -28,8 +29,10 @@
 #include "replication/conflict.h"
 #include "replication/worker_internal.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/json.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_lsn.h"
@@ -164,6 +167,7 @@ static void insert_conflict_log_tuple(EState *estate, Relation rel,
 									  ConflictType conflict_type,
 									  TupleTableSlot *searchslot,
 									  List *conflicttuples);
+static void lock_conflictlog_relation(Oid relid);
 
 /*
  * Builds the TupleDesc for the conflict log table.
@@ -449,6 +453,9 @@ InitConflictIndexes(ResultRelInfo *relInfo)
  * continues) are recorded in the conflict log table.  ERROR-level conflicts
  * halt replication and abort the transaction, so they are always reported
  * exclusively to the server log.
+ *
+ * With two_phase enabled, errors out if the lock on the conflict log table or
+ * its TOAST table cannot be obtained, see lock_conflictlog_relation().
  */
 static Relation
 get_conflictlog_dest_and_table(int elevel, ConflictLogDest *log_dest)
@@ -476,18 +483,90 @@ get_conflictlog_dest_and_table(int elevel, ConflictLogDest *log_dest)
 
 	Assert(OidIsValid(conflictlogrelid));
 
+	lock_conflictlog_relation(conflictlogrelid);
+
 	/*
 	 * Use try_table_open() because the table may have been dropped
 	 * concurrently by an ALTER SUBSCRIPTION that changed
 	 * conflict_log_destination.  In that case, fall back to the server log
 	 * instead of failing.
 	 */
-	conflictlogrel = try_table_open(conflictlogrelid, RowExclusiveLock);
-
-	if (!conflictlogrel)
+	conflictlogrel = try_table_open(conflictlogrelid, NoLock);
+	if (conflictlogrel == NULL)
+	{
+		UnlockRelationOid(conflictlogrelid, RowExclusiveLock);
 		*log_dest = CONFLICT_LOG_DEST_LOG;
+		return NULL;
+	}
+
+	/*
+	 * Also lock the TOAST table now. Inserting a toasted value locks it
+	 * separately, and a command run directly on it, such as REINDEX TABLE, is
+	 * not noticed by the lock on the conflict log table above.
+	 */
+	if (OidIsValid(conflictlogrel->rd_rel->reltoastrelid))
+		lock_conflictlog_relation(conflictlogrel->rd_rel->reltoastrelid);
 
 	return conflictlogrel;
+}
+
+/*
+ * Lock the conflict log table or its TOAST table in RowExclusiveLock mode.
+ *
+ * With two_phase enabled, a prepared transaction of this subscription that
+ * recorded a conflict holds a lock on the relation until we apply its COMMIT
+ * PREPARED or ROLLBACK PREPARED. A command that needs a stronger lock, such
+ * as TRUNCATE, waits for that transaction, and if we waited indefinitely
+ * behind the command we could never apply the COMMIT PREPARED or ROLLBACK
+ * PREPARED that releases the lock.
+ *
+ * Therefore, if the lock is not immediately available with two_phase enabled
+ * (and lock_timeout is not already configured), error out if any prepared
+ * transactions exist for this subscription. Otherwise, wait for the lock with
+ * lock_timeout set to DeadlockTimeout + 5s so that ProcSleep() can run
+ * DeadLockCheck() and interrupt a blocking autovacuum truncation, while still
+ * breaking out if a parallel apply worker of this subscription prepares a
+ * transaction while we wait.
+ *
+ * Without two_phase, no prepared transaction of this subscription can exist
+ * or appear while we run, as two_phase only takes effect after the workers
+ * restart, so wait for the lock as usual.
+ */
+static void
+lock_conflictlog_relation(Oid relid)
+{
+	int			save_nestlevel;
+	char		buf[32];
+
+	if (ConditionalLockRelationOid(relid, RowExclusiveLock))
+		return;
+
+	if (MySubscription->twophasestate != LOGICALREP_TWOPHASE_STATE_ENABLED ||
+		LockTimeout > 0)
+	{
+		LockRelationOid(relid, RowExclusiveLock);
+		return;
+	}
+
+	if (LookupGXactBySubid(MySubscription->oid))
+		ereport(ERROR,
+				errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+				errmsg("could not obtain lock on conflict log table of subscription \"%s\"",
+					   MySubscription->name),
+				errdetail("Another session holds or is waiting for a conflicting lock on the conflict log table or its TOAST table."),
+				errhint("The apply worker will retry. If that session is waiting for a prepared transaction of this subscription, cancel it, as only the apply worker can finish that transaction."));
+
+	save_nestlevel = NewGUCNestLevel();
+
+	snprintf(buf, sizeof(buf), "%d",
+			 Min(DeadlockTimeout, INT_MAX - 5000) + 5000);
+	(void) set_config_option("lock_timeout", buf,
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
+
+	LockRelationOid(relid, RowExclusiveLock);
+
+	AtEOXact_GUC(true, save_nestlevel);
 }
 
 /*
@@ -1015,6 +1094,7 @@ build_index_key_json(EState *estate, Relation localrel,
 	StringInfoData result;
 	int			indnkeyatts;
 	Datum		datum;
+	int			save_nestlevel;
 
 	Assert(slot != NULL);
 
@@ -1025,6 +1105,11 @@ build_index_key_json(EState *estate, Relation localrel,
 
 	build_index_datums_from_slot(estate, localrel, slot, indexDesc, values,
 								 isnull);
+
+	save_nestlevel = NewGUCNestLevel();
+	(void) set_config_option("datestyle", "ISO",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
 
 	/*
 	 * Build the JSON object here rather than handing the values to
@@ -1099,6 +1184,7 @@ build_index_key_json(EState *estate, Relation localrel,
 
 	appendStringInfoChar(&result, '}');
 
+	AtEOXact_GUC(true, save_nestlevel);
 	index_close(indexDesc, NoLock);
 
 	datum = PointerGetDatum(cstring_to_text_with_len(result.data, result.len));
