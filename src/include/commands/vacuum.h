@@ -362,6 +362,9 @@ extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedCostBalance;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumActiveNWorkers;
 extern PGDLLIMPORT int VacuumCostBalanceLocal;
 
+/* Shared wraparound failsafe flag, set while vacuuming indexes in parallel */
+extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedFailsafe;
+
 extern PGDLLIMPORT bool VacuumFailsafeActive;
 extern PGDLLIMPORT double vacuum_cost_delay;
 extern PGDLLIMPORT int vacuum_cost_limit;
@@ -416,11 +419,13 @@ extern void VacuumUpdateCosts(void);
 extern ParallelVacuumState *parallel_vacuum_init(Relation rel, Relation *indrels,
 												 int nindexes, int nrequested_workers,
 												 int vac_work_mem, int elevel,
-												 BufferAccessStrategy bstrategy);
+												 BufferAccessStrategy bstrategy,
+												 const struct VacuumCutoffs *cutoffs);
 extern void parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats);
 extern TidStore *parallel_vacuum_get_dead_items(ParallelVacuumState *pvs,
 												VacDeadItemsInfo **dead_items_info_p);
 extern void parallel_vacuum_reset_dead_items(ParallelVacuumState *pvs);
+extern bool parallel_vacuum_failsafe_triggered(ParallelVacuumState *pvs);
 extern void parallel_vacuum_bulkdel_all_indexes(ParallelVacuumState *pvs,
 												long num_table_tuples,
 												int num_index_scans,

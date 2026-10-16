@@ -119,6 +119,9 @@ pg_atomic_uint32 *VacuumSharedCostBalance = NULL;
 pg_atomic_uint32 *VacuumActiveNWorkers = NULL;
 int			VacuumCostBalanceLocal = 0;
 
+/* Shared wraparound failsafe flag, set while vacuuming indexes in parallel */
+pg_atomic_uint32 *VacuumSharedFailsafe = NULL;
+
 /* non-export function prototypes */
 static List *expand_vacuum_rel(VacuumRelation *vrel,
 							   MemoryContext vac_context, int options);
@@ -687,6 +690,7 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 		VacuumCostBalanceLocal = 0;
 		VacuumSharedCostBalance = NULL;
 		VacuumActiveNWorkers = NULL;
+		VacuumSharedFailsafe = NULL;
 	}
 	PG_END_TRY();
 
@@ -2529,6 +2533,18 @@ vacuum_delay_point(bool is_analyze)
 		 * any of them have changed during the config reload.
 		 */
 		parallel_vacuum_propagate_shared_delay_params();
+	}
+
+	/*
+	 * Stop the delay if a process of a parallel vacuum hit the wraparound
+	 * failsafe, so that the index this process is vacuuming finishes sooner.
+	 * This comes after the reload above, which can turn the delay back on.
+	 */
+	if (VacuumSharedFailsafe != NULL &&
+		pg_atomic_read_u32(VacuumSharedFailsafe) != 0)
+	{
+		VacuumCostActive = false;
+		VacuumCostBalance = 0;
 	}
 
 	/*
