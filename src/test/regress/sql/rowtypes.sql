@@ -562,3 +562,94 @@ SELECT (NULL::compositetable).a;
 SELECT (NULL::compositetable).oid;
 
 DROP TABLE compositetable;
+
+-- A comparison of two ROW() constructors that is a record comparison, not a
+-- row comparison, needs its ::record casts to survive deparsing
+CREATE VIEW rowtypes_cmp_v AS
+SELECT (ROW(1, NULL::int)::record = ROW(1, NULL::int)::record) AS r;
+SELECT * FROM rowtypes_cmp_v;
+SELECT pg_get_viewdef('rowtypes_cmp_v'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v_re AS :def
+SELECT * FROM rowtypes_cmp_v_re;
+-- The other operators of a record comparison need the casts as well
+CREATE VIEW rowtypes_cmp_v2 AS
+SELECT (ROW(1, NULL::int)::record <= ROW(1, NULL::int)::record) AS le,
+       (ROW(1, NULL::int)::record <> ROW(1, NULL::int)::record) AS ne;
+SELECT * FROM rowtypes_cmp_v2;
+SELECT pg_get_viewdef('rowtypes_cmp_v2'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v2'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v2_re AS :def
+SELECT * FROM rowtypes_cmp_v2_re;
+
+-- A row comparison is split by the parser into column-by-column operators,
+-- so there is no record operator to cast
+CREATE VIEW rowtypes_cmp_v3 AS
+SELECT (ROW(1, NULL::int) = ROW(1, NULL::int)) AS eq,
+       (ROW(1, NULL::int) <> ROW(1, NULL::int)) AS ne,
+       (ROW(1, 2) < ROW(1, 3)) AS lt;
+SELECT * FROM rowtypes_cmp_v3;
+SELECT pg_get_viewdef('rowtypes_cmp_v3'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v3'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v3_re AS :def
+SELECT * FROM rowtypes_cmp_v3_re;
+
+-- A record operator with no column-by-column form, and rows of different
+-- lengths, could not be read back at all without the casts
+CREATE VIEW rowtypes_cmp_v4 AS
+SELECT (ROW(1, 2)::record *= ROW(1, 2)::record) AS img,
+       (ROW(1)::record = ROW(1, 2)::record) AS len;
+SELECT pg_get_viewdef('rowtypes_cmp_v4'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v4'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v4_re AS :def
+SELECT img FROM rowtypes_cmp_v4_re;
+
+-- A ROW() compared with a scalar subquery would be read back as a row
+-- comparison with the subquery's columns
+CREATE VIEW rowtypes_cmp_v5 AS
+SELECT (ROW(1, NULL::int)::record = (SELECT ROW(1, NULL::int)::record)) AS r;
+SELECT * FROM rowtypes_cmp_v5;
+SELECT pg_get_viewdef('rowtypes_cmp_v5'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v5'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v5_re AS :def
+SELECT * FROM rowtypes_cmp_v5_re;
+-- So would a whole-row reference to a join alias, which is expanded into a
+-- ROW()
+CREATE TABLE rowtypes_cmp_a (x int);
+CREATE TABLE rowtypes_cmp_b (x int);
+INSERT INTO rowtypes_cmp_a VALUES (1), (2);
+INSERT INTO rowtypes_cmp_b VALUES (1), (2);
+CREATE VIEW rowtypes_cmp_v6 AS
+SELECT x, (j.* = (SELECT ROW(1))) AS r
+  FROM rowtypes_cmp_a JOIN rowtypes_cmp_b USING (x) AS j;
+SELECT * FROM rowtypes_cmp_v6 ORDER BY x;
+SELECT pg_get_viewdef('rowtypes_cmp_v6'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v6'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v6_re AS :def
+SELECT * FROM rowtypes_cmp_v6_re ORDER BY x;
+
+-- A whole-row reference to a subquery is coerced to a named composite type
+-- by expanding it into a ROW(), which needs the type's name to be read back
+CREATE TYPE rowtypes_cmp_t AS (a int, b int);
+CREATE FUNCTION rowtypes_cmp_eq(rowtypes_cmp_t, rowtypes_cmp_t) RETURNS bool
+  LANGUAGE sql IMMUTABLE
+  AS 'SELECT $1.a IS NOT DISTINCT FROM $2.a AND $1.b IS NOT DISTINCT FROM $2.b';
+CREATE OPERATOR =#= (LEFTARG = rowtypes_cmp_t, RIGHTARG = rowtypes_cmp_t,
+  FUNCTION = rowtypes_cmp_eq);
+CREATE VIEW rowtypes_cmp_v7 AS
+SELECT (s1 =#= s2) AS r
+  FROM (SELECT 1 AS a, NULL::int AS b) s1, (SELECT 1, NULL::int) s2;
+SELECT * FROM rowtypes_cmp_v7;
+SELECT pg_get_viewdef('rowtypes_cmp_v7'::regclass);
+SELECT pg_get_viewdef('rowtypes_cmp_v7'::regclass) AS def \gset
+CREATE VIEW rowtypes_cmp_v7_re AS :def
+SELECT * FROM rowtypes_cmp_v7_re;
+
+-- An explicit cast to a named type is printed once, and needs no cast on the
+-- other operand; nor does a ROW() whose other operand is not a ROW()
+CREATE VIEW rowtypes_cmp_v8 AS
+SELECT (ROW(1, 2)::rowtypes_cmp_t = ROW(1, 2)) AS named,
+       (ROW(1, 2) = '(1,2)'::rowtypes_cmp_t) AS one;
+SELECT pg_get_viewdef('rowtypes_cmp_v8'::regclass);
+
+-- leave the views around for the pg_upgrade test

@@ -3756,12 +3756,12 @@ select * from uv_iocu_view;
 explain (costs off)
 insert into uv_iocu_view (aa,bb) values (1,'Rejected: (y,1,"(1,y)")')
    on conflict (aa) do select where uv_iocu_view.* = excluded.* returning *;
-                                                           QUERY PLAN                                                            
----------------------------------------------------------------------------------------------------------------------------------
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
  Insert on uv_iocu_tab
    Conflict Resolution: SELECT
    Conflict Arbiter Indexes: uv_iocu_tab_a_key
-   Conflict Filter: (ROW(uv_iocu_tab.b, uv_iocu_tab.a, (uv_iocu_tab.*)::text) = ROW(excluded.b, excluded.a, (excluded.*)::text))
+   Conflict Filter: (ROW(uv_iocu_tab.b, uv_iocu_tab.a, (uv_iocu_tab.*)::text)::uv_iocu_view = ROW(excluded.b, excluded.a, (excluded.*)::text)::uv_iocu_view)
    ->  Result
 (5 rows)
 
