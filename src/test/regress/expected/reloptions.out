@@ -288,3 +288,16 @@ SELECT reloptions FROM pg_class WHERE oid = 'reloptions_test_idx3'::regclass;
  {fillfactor=40}
 (1 row)
 
+-- Which options are standard ones
+SELECT name, pg_reloption_is_standard(name)
+  FROM unnest(ARRAY['fillfactor', 'autovacuum_enabled', 'toast_tuple_target',
+                    'fastupdate', 'no_such_option']) AS name;
+        name        | pg_reloption_is_standard 
+--------------------+--------------------------
+ fillfactor         | t
+ autovacuum_enabled | t
+ toast_tuple_target | t
+ fastupdate         | f
+ no_such_option     | f
+(5 rows)
+

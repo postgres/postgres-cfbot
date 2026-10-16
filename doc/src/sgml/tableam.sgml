@@ -152,4 +152,101 @@ my_tableam_handler(PG_FUNCTION_ARGS)
   its implementation.
  </para>
 
+ <sect1 id="tableam-reloptions">
+  <title>Table Access Method Options</title>
+
+  <para>
+   A table access method can define its own options, also called
+   <firstterm>reloptions</firstterm>, which users set as storage parameters
+   (see <xref linkend="sql-createtable-storage-parameters"/>), with the
+   <literal>WITH</literal> clause of <command>CREATE TABLE</command> and with
+   <command>ALTER TABLE ... SET</command>.  To do so it supplies an
+   <structfield>amoptions</structfield> callback in its
+   <structname>TableAmRoutine</structname>:
+<programlisting>
+bytea *
+amoptions (Datum reloptions,
+           bool validate);
+</programlisting>
+   <parameter>reloptions</parameter> is a <type>text</type> array containing
+   entries of the form
+   <replaceable>name</replaceable><literal>=</literal><replaceable>value</replaceable>;
+   the callback is not called if the relation has no options.
+   The function should construct a <type>bytea</type> value, which will be
+   copied into the <structfield>rd_options</structfield> field of the
+   relation's relcache entry.  The contents of the <type>bytea</type> value
+   are up to the access method.  It is OK to return NULL if default behavior
+   is wanted.
+  </para>
+
+  <para>
+   <parameter>validate</parameter> is true when the options are being set by
+   <command>CREATE TABLE</command> or <command>ALTER TABLE</command>.  The
+   function must then raise an error if any option is unrecognized or has an
+   invalid value.  It must not accept such a value and use something else in
+   its place, for example by substituting a default for an out-of-range
+   value, since the stored options would then not be the ones in effect.
+   <parameter>validate</parameter> is false when building the relcache entry
+   from options already stored in <structname>pg_class</structname>; the
+   function must then ignore invalid entries without raising an error.
+  </para>
+
+  <para>
+   An access method that does not supply <structfield>amoptions</structfield>
+   accepts the same options as <literal>heap</literal>, and
+   <structfield>rd_options</structfield> holds a
+   <structname>StdRdOptions</structname> struct.  Some core code, such as the
+   code that determines a table's fill factor, reads
+   <structname>StdRdOptions</structname> fields directly.  For a relation
+   whose access method supplies <structfield>amoptions</structfield>, that
+   code assumes the options are not set, unless the access method also sets
+   <structfield>has_std_options_prefix</structfield> to declare that the
+   struct its callback returns begins with a
+   <structname>StdRdOptions</structname>.  In that case every field of the
+   embedded <structname>StdRdOptions</structname> must be filled in.
+  </para>
+
+  <para>
+   An access method that uses the reloption functions in
+   <filename>src/include/access/reloptions.h</filename> registers its own
+   options for a kind it obtains from
+   <function>add_reloption_kind()</function>.  To accept a standard option
+   such as <literal>fillfactor</literal> as well, it calls
+   <function>add_reloption_to_kind()</function> to make the existing
+   definition valid for its kind, rather than defining an option with the
+   same name.
+  </para>
+
+  <para>
+   <application>pg_dump</application> puts the standard options of a table
+   in its <command>CREATE TABLE</command> command, and sets the ones specific
+   to its access method with a separate <command>ALTER TABLE</command>
+   command, which it leaves out if <option>--no-table-access-method</option>
+   is used.  So an access method's own options must have the same effect
+   when set by <command>ALTER TABLE</command> on an empty table as when given
+   to <command>CREATE TABLE</command>.  An option is treated as a standard
+   one if <function>pg_reloption_is_standard</function> returns true for it.
+  </para>
+
+  <para>
+   Autovacuum always reads a table's <literal>autovacuum_*</literal> options
+   using the standard heap parser, regardless of its access method.  So an
+   access method that wants these options to affect autovacuum must accept
+   them under their standard names, using
+   <function>add_reloption_to_kind()</function>.
+  </para>
+
+  <para>
+   <command>ALTER TABLE ... SET ACCESS METHOD</command> checks the table's
+   options against the new access method, after applying any
+   <literal>SET</literal> or <literal>RESET</literal> of options in the same
+   command.
+  </para>
+
+  <para>
+   <filename>src/test/modules/dummy_table_am</filename> contains two example
+   access methods that define their own options.
+  </para>
+ </sect1>
+
 </chapter>
