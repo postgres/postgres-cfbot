@@ -313,7 +313,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 				memmove(itvec + pos, itvec + pos + 1, sizeof(IndexTuple) * (tlen - pos));
 		}
 		itvec = gistjoinvector(itvec, &tlen, itup, ntup);
-		dist = gistSplit(rel, page, itvec, tlen, giststate);
+		dist = gistSplit(rel, page, itvec, tlen, giststate, 0);
 
 		/*
 		 * Check that split didn't produce too many pages.
@@ -1441,29 +1441,56 @@ gistfinishsplit(GISTInsertState *state, GISTInsertStack *stack,
 	stack->retry_from_parent = true;
 }
 
+/* Form a one-page layout without splitting the tuple vector. */
+static SplitPageLayout *
+gistnosplit(Relation r, IndexTuple *itup, int len, GISTSTATE *giststate)
+{
+	SplitPageLayout *res = palloc0_object(SplitPageLayout);
+
+	res->block.num = len;
+	res->list = gistfillitupvec(itup, len, &res->lenlist);
+	res->itup = gistunion(r, itup, len, giststate);
+
+	return res;
+}
+
 /*
  * gistSplit -- split a page in the tree and fill struct
  * used for XLOG and real writes buffers. Function is recursive, ie
  * it will split page until keys will fit in every page.
+ *
+ * If freespace is nonzero, it is a soft target for unused space on each
+ * resulting page.  In that case this can return a single-page layout when
+ * satisfying the target would create a singleton page.
  */
 SplitPageLayout *
 gistSplit(Relation r,
 		  Page page,
 		  IndexTuple *itup,		/* contains compressed entry */
 		  int len,
-		  GISTSTATE *giststate)
+		  GISTSTATE *giststate,
+		  Size freespace)
 {
 	IndexTuple *lvectup,
 			   *rvectup;
 	GistSplitVector v;
 	int			i;
 	SplitPageLayout *res = NULL;
+	bool		physical_fit;
 
 	/* this should never recurse very deeply, but better safe than sorry */
 	check_stack_depth();
 
-	/* there's no point in splitting an empty page */
+	/* There's no point in splitting an empty page. */
 	Assert(len > 0);
+	physical_fit = gistfitpage(itup, len, 0);
+
+	/*
+	 * Fillfactor is a soft limit.  Allow a physically valid page to exceed it
+	 * when splitting would necessarily produce a singleton page.
+	 */
+	if (freespace > 0 && physical_fit && len < 4)
+		return gistnosplit(r, itup, len, giststate);
 
 	/*
 	 * If a single tuple doesn't fit on a page, no amount of splitting will
@@ -1482,6 +1509,11 @@ gistSplit(Relation r,
 		   sizeof(bool) * giststate->nonLeafTupdesc->natts);
 	gistSplitByKey(r, page, itup, len, giststate, &v, 0);
 
+	/* Do not create a singleton page solely to satisfy fillfactor. */
+	if (freespace > 0 && physical_fit &&
+		(v.splitVector.spl_nleft < 2 || v.splitVector.spl_nright < 2))
+		return gistnosplit(r, itup, len, giststate);
+
 	/* form left and right vector */
 	lvectup = palloc_array(IndexTuple, len + 1);
 	rvectup = palloc_array(IndexTuple, len + 1);
@@ -1493,9 +1525,10 @@ gistSplit(Relation r,
 		rvectup[i] = itup[v.splitVector.spl_right[i] - 1];
 
 	/* finalize splitting (may need another split) */
-	if (!gistfitpage(rvectup, v.splitVector.spl_nright))
+	if (!gistfitpage(rvectup, v.splitVector.spl_nright, freespace))
 	{
-		res = gistSplit(r, page, rvectup, v.splitVector.spl_nright, giststate);
+		res = gistSplit(r, page, rvectup, v.splitVector.spl_nright,
+						giststate, freespace);
 	}
 	else
 	{
@@ -1505,12 +1538,14 @@ gistSplit(Relation r,
 		res->itup = gistFormTuple(giststate, r, v.spl_rattr, v.spl_risnull, false);
 	}
 
-	if (!gistfitpage(lvectup, v.splitVector.spl_nleft))
+	if (!gistfitpage(lvectup, v.splitVector.spl_nleft, freespace))
 	{
 		SplitPageLayout *resptr,
 				   *subres;
 
-		resptr = subres = gistSplit(r, page, lvectup, v.splitVector.spl_nleft, giststate);
+		resptr = subres = gistSplit(r, page, lvectup,
+									v.splitVector.spl_nleft,
+									giststate, freespace);
 
 		/* install on list's tail */
 		while (resptr->next)
