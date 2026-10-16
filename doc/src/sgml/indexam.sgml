@@ -937,7 +937,9 @@ amcomparedatums (Relation indexRelation,
    type of the table column or index expression, which need not be the type
    the index stores), whose length and by-value property are
    <parameter>typlen</parameter> and <parameter>typbyval</parameter>, and
-   are not equal byte for byte.  The function is
+   are not equal byte for byte, nor once detoasted: the executor itself
+   treats two values that are the same, but stored differently, as giving
+   the same entries in any index.  The function is
    called during <command>UPDATE</command>, before the table access method
    is, for every index that uses a column whose value changed; if every such
    index answers <literal>true</literal> for every changed column, the update

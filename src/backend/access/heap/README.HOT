@@ -45,8 +45,11 @@ The same holds for a column that indexes also store directly, if every
 index that does so has an access method that can tell, from the old and
 new values, that it would store the same entries (amcomparedatums), and
 the column is in no candidate key, replica identity or exclusion
-constraint.  The executor works that out before calling the table AM,
-and passes on only the indexed columns whose change matters.  An index
+constraint.  And a column of no candidate key or replica identity is not
+changed if its value is the same, only stored differently: compressed or
+out of line in the old tuple, say, and not yet in the new one.  The
+executor works that out before calling the table AM, and passes on only
+the indexed columns whose change matters.  An index
 that is not yet ready for inserts, or whose build failed, counts as
 changed whenever a column it references does; see "CREATE INDEX
 CONCURRENTLY" below.
