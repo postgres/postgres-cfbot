@@ -183,8 +183,8 @@ typedef struct PlannerGlobal
 	/* PlannerInfos for SubPlan nodes */
 	List	   *subroots pg_node_attr(read_write_ignore);
 
-	/* names already used for subplans (list of C strings) */
-	List	   *subplanNames pg_node_attr(read_write_ignore);
+	/* names already used for subplans; see choose_plan_name() */
+	struct HTAB *subplanNames pg_node_attr(read_write_ignore);
 
 	/* indices of subplans that require REWIND */
 	Bitmapset  *rewindPlanIDs;
