@@ -161,6 +161,7 @@ remove_useless_outer_joins(PlannerInfo *root)
 			rte->subquery = NULL;
 		rte->tablesample = NULL;
 		rte->securityQuals = NIL;
+		rte->tablesample = NULL;
 
 		/*
 		 * It's okay to keep scanning join_info_list for more removable joins,
@@ -1275,6 +1276,13 @@ remove_self_join_rel(PlannerInfo *root,
 	 * As in remove_useless_outer_joins, discard the securityQuals of the
 	 * removed rel, so that later passes don't visit them.  We know the kept
 	 * rel has the same quals.  (tablesample is already known NULL.)
+	 */
+	root->simple_rte_array[toRemove->relid]->securityQuals = NIL;
+
+	/*
+	 * As in remove_useless_outer_joins, discard the securityQuals of the
+	 * removed rel, so that later passes don't visit them.  The kept rel has
+	 * the same ones.
 	 */
 	root->simple_rte_array[toRemove->relid]->securityQuals = NIL;
 
