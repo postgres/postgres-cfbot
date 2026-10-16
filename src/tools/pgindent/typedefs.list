@@ -551,6 +551,7 @@ CopyMethod
 CopyMultiInsertBuffer
 CopyMultiInsertInfo
 CopyOnErrorChoice
+CopySingleInsertState
 CopySeqResult
 CopySource
 CopyStmt

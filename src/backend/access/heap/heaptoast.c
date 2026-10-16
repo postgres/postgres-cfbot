@@ -84,6 +84,7 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
  *	newtup: the candidate new tuple to be inserted
  *	oldtup: the old row version for UPDATE, or NULL for INSERT
  *	options: options to be passed to heap_insert() for toast rows
+ *	bistate: bulk insert state for INSERT, or NULL for UPDATE
  * Result:
  *	either newtup if no toasting is needed, or a palloc'd modified tuple
  *	that is what should actually get stored
@@ -94,7 +95,7 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
  */
 HeapTuple
 heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
-							uint32 options)
+							uint32 options, BulkInsertState bistate)
 {
 	HeapTuple	result_tuple;
 	TupleDesc	tupleDesc;
@@ -124,6 +125,7 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	 */
 	Assert(rel->rd_rel->relkind == RELKIND_RELATION ||
 		   rel->rd_rel->relkind == RELKIND_MATVIEW);
+	Assert(bistate == NULL || oldtup == NULL);
 
 	/*
 	 * Get the tuple descriptor and break down the tuple(s) into fields.
@@ -214,7 +216,7 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 		 */
 		if (toast_attr[biggest_attno].tai_size > maxDataLen &&
 			rel->rd_rel->reltoastrelid != InvalidOid)
-			toast_tuple_externalize(&ttc, biggest_attno, options);
+			toast_tuple_externalize(&ttc, biggest_attno, options, bistate);
 	}
 
 	/*
@@ -231,7 +233,7 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 		biggest_attno = toast_tuple_find_biggest_attribute(&ttc, false, false);
 		if (biggest_attno < 0)
 			break;
-		toast_tuple_externalize(&ttc, biggest_attno, options);
+		toast_tuple_externalize(&ttc, biggest_attno, options, bistate);
 	}
 
 	/*
@@ -267,7 +269,7 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 		if (biggest_attno < 0)
 			break;
 
-		toast_tuple_externalize(&ttc, biggest_attno, options);
+		toast_tuple_externalize(&ttc, biggest_attno, options, bistate);
 	}
 
 	/*

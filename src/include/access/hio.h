@@ -19,16 +19,20 @@
 #include "utils/relcache.h"
 
 /*
- * state for bulk inserts --- private to heapam.c and hio.c
+ * state for bulk inserts into one relation
  *
- * If current_buf isn't InvalidBuffer, then we are holding an extra pin
- * on that buffer.
+ * The caller owns the buffer access strategy and may share it with states for
+ * related relations in the same bulk operation. The heap AM can create a child
+ * state for the the relation's TOAST table. If current_buf isn't
+ * InvalidBuffer, then we are holding an extra pin on that buffer.
  *
  * "typedef struct BulkInsertStateData *BulkInsertState" is in heapam.h
  */
 typedef struct BulkInsertStateData
 {
 	BufferAccessStrategy strategy;	/* our BULKWRITE strategy object */
+	Oid			relation_id;	/* relation this state belongs to */
+	struct BulkInsertStateData *toast_state;	/* state for TOAST relation */
 	Buffer		current_buf;	/* current insertion target page */
 
 	/*
