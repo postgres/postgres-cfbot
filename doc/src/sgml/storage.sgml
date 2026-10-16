@@ -1126,7 +1126,12 @@ data. Empty in ordinary tables.</entry>
      methods, that depends on the method and on the change (see
      <xref linkend="indexam"/>).  This does not apply to the columns of
      unique indexes that a foreign key can reference, of the replica
-     identity index, or of exclusion constraints.
+     identity index, or of exclusion constraints.  Nor is a column changed
+     whose new value is the same as the old one, only stored differently, as
+     when the old value is compressed or stored out of line
+     (see <xref linkend="storage-toast"/>) and an update writes it back;
+     except for the columns of those unique and replica identity indexes,
+     this holds for every kind of index.
      </para>
    </listitem>
    <listitem>

@@ -233,6 +233,52 @@ SELECT bt_index_check('hot_expr_multi_status', heapallindexed => true);
 SELECT bt_index_check('hot_expr_multi_vip', heapallindexed => true);
 DROP TABLE hot_expr_multi;
 
+-- An UPDATE that writes back the value a row has, when the old value is
+-- stored compressed or out of line and the new one is not yet, is HOT: the
+-- index would store the same bytes.  Index-only scans must return the new
+-- row's value.
+CREATE TABLE hot_bt_image (id int, t text, e text) WITH (fillfactor = 50);
+ALTER TABLE hot_bt_image ALTER COLUMN e SET STORAGE EXTERNAL;
+CREATE INDEX hot_bt_image_t ON hot_bt_image (t);
+CREATE INDEX hot_bt_image_e ON hot_bt_image (e) INCLUDE (id);
+INSERT INTO hot_bt_image
+  SELECT g, repeat('x', 3000) || g, repeat('y', 2500) || g
+    FROM generate_series(1, 20) g;
+SELECT pg_column_compression(t) IS NOT NULL AS t_compressed,
+       pg_column_size(e) > 2500 AS e_out_of_line
+  FROM hot_bt_image WHERE id = 1;
+CREATE FUNCTION hot_bt_image_count(OUT updated bigint, OUT hot bigint)
+LANGUAGE sql AS $$
+  SELECT pg_stat_get_xact_tuples_updated('hot_bt_image'::regclass),
+         pg_stat_get_xact_tuples_hot_updated('hot_bt_image'::regclass) $$;
+BEGIN;
+UPDATE hot_bt_image SET t = repeat('x', 3000) || id;
+SELECT * FROM hot_bt_image_count();
+UPDATE hot_bt_image SET e = e || '';
+SELECT * FROM hot_bt_image_count();
+UPDATE hot_bt_image SET t = repeat('x', 3000) || (id + 100) WHERE id <= 5;
+SELECT * FROM hot_bt_image_count();
+COMMIT;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE FUNCTION hot_bt_image_plan() RETURNS SETOF text LANGUAGE plpgsql AS
+$$ DECLARE l text; BEGIN
+  FOR l IN EXPLAIN (COSTS OFF)
+    SELECT right(t, 3) FROM hot_bt_image WHERE t > repeat('x', 3000)
+  LOOP RETURN NEXT left(l, 40); END LOOP; END $$;
+SELECT * FROM hot_bt_image_plan();
+SELECT right(t, 3) FROM hot_bt_image WHERE t > repeat('x', 3000)
+  ORDER BY t COLLATE "C" LIMIT 3;
+SELECT count(*) FROM hot_bt_image WHERE t > repeat('x', 3000);
+SELECT count(*) FROM hot_bt_image WHERE e > repeat('y', 2500);
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SELECT bt_index_check('hot_bt_image_t', heapallindexed => true);
+SELECT bt_index_check('hot_bt_image_e', heapallindexed => true);
+DROP TABLE hot_bt_image;
+DROP FUNCTION hot_bt_image_count;
+DROP FUNCTION hot_bt_image_plan;
+
 -- cleanup
 DROP TABLE bttest_a;
 DROP TABLE bttest_b;
