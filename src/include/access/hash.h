@@ -389,6 +389,9 @@ extern void hashadjustmembers(Oid opfamilyoid,
 
 extern CompareType hashtranslatestrategy(StrategyNumber strategy, Oid opfamily);
 extern StrategyNumber hashtranslatecmptype(CompareType cmptype, Oid opfamily);
+extern bool hashcomparedatums(Relation index, struct IndexInfo *indexInfo,
+							  int attnum, Oid typid, int16 typlen,
+							  bool typbyval, Datum oldValue, Datum newValue);
 
 /* private routines */
 
