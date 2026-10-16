@@ -71,8 +71,9 @@ sub drop_logical_slots
 }
 
 # Acquire one of the standby logical slots created by create_logical_slots().
-# In case wait is true we are waiting for an active pid on the 'activeslot' slot.
-# If wait is not true it means we are testing a known failure scenario.
+# If wait is true, wait until pg_recvlogical has completed START_REPLICATION
+# and entered streaming mode.  If wait is not true, it means we are testing a
+# known failure scenario.
 sub make_slot_active
 {
 	my ($node, $slot_prefix, $wait, $to_stdout, $to_stderr) = @_;
@@ -87,6 +88,7 @@ sub make_slot_active
 			'--option' => 'include-xids=0',
 			'--option' => 'skip-empty-xacts=1',
 			'--file' => '-',
+			'--verbose',
 			'--no-loop',
 			'--start',
 		],
@@ -96,10 +98,14 @@ sub make_slot_active
 
 	if ($wait)
 	{
-		# make sure activeslot is in use
-		$node->poll_query_until('testdb',
-			qq[SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '$active_slot' AND active_pid IS NOT NULL)]
-		) or die "slot never became active";
+		my $pump_timeout =
+		  IPC::Run::timer($PostgreSQL::Test::Utils::timeout_default);
+
+		# Make sure that pg_recvlogical has finished START_REPLICATION
+		# and entered the COPY BOTH receive loop.
+		ok(pump_until($slot_user_handle, $pump_timeout, $to_stderr,
+					  qr/streaming initiated/),
+		   "pg_recvlogical started streaming");
 	}
 	return $slot_user_handle;
 }
