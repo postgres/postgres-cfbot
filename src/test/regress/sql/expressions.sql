@@ -131,7 +131,42 @@ select return_int_input(1) not in (null, null, null, null, null, null, null, nul
 select return_int_input(null::int) not in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1);
 select return_int_input(null::int) not in (10, 9, 2, 8, 3, 7, 4, 6, 5, null);
 select return_text_input('a') not in ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');
+-- Check that EXPLAIN marks the hashed decision.
+explain (verbose, costs off)
+select return_int_input(1) in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1);
 
+-- A cross-type "=" is legal and hash-registered (int4 = int8), but the two input
+-- types have different hash functions, so it cannot be hashed
+explain (verbose, costs off)
+select return_int_input(1) = any (array[1, 2, 3, 4, 5, 6, 7, 8, 9]::int8[]);
+
+-- The marker is type-agnostic: a hashable range or multirange SAOP prints it too.
+explain (verbose, costs off)
+select int4range(return_int_input(1), return_int_input(10)) = any (array[
+  int4range(1,2),int4range(2,3),int4range(3,4),int4range(4,5),int4range(5,6),
+  int4range(6,7),int4range(7,8),int4range(8,9),int4range(9,10)
+]);
+explain (verbose, costs off)
+select int4multirange(int4range(return_int_input(1), return_int_input(10))) = any (array[
+  int4multirange(int4range(1,2)),int4multirange(int4range(2,3)),
+  int4multirange(int4range(3,4)),int4multirange(int4range(4,5)),
+  int4multirange(int4range(5,6)),int4multirange(int4range(6,7)),
+  int4multirange(int4range(7,8)),int4multirange(int4range(8,9)),
+  int4multirange(int4range(9,10))
+]);
+
+rollback;
+
+-- The hashed marker is planner-only; hashfuncid is never set in a stored
+-- rule or view, so it must not leak into a deparsed view definition even when
+-- the SAOP has enough constant elements to be hashed once planned.
+begin;
+create table hash_saop_leak (x int);
+create view hash_saop_leak_v as
+  select * from hash_saop_leak where x = any (array[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+select pg_get_viewdef('hash_saop_leak_v'::regclass);
+-- Check that 'hashed' is actually bubbles up in the explain
+explain (costs off) select * FROM hash_saop_leak_v;
 rollback;
 
 -- Test with non-strict equality function.
