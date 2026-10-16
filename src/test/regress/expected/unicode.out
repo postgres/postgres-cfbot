@@ -26,6 +26,12 @@ SELECT unicode_assigned(U&'abc\+10FFFF');
  f
 (1 row)
 
+SELECT unicode_assigned('abc');
+ unicode_assigned 
+------------------
+ t
+(1 row)
+
 SELECT normalize('');
  normalize 
 -----------
@@ -68,8 +74,35 @@ SELECT normalize(U&'\00E4\24D1c', NFKD) = U&'\0061\0308bc' COLLATE "C" AS test_n
  t
 (1 row)
 
+SELECT normalize('abc') = 'abc' COLLATE "C" AS test_ascii_idem;
+ test_ascii_idem 
+-----------------
+ t
+(1 row)
+
+-- Use stored values so this check is not folded to a constant.
+CREATE TABLE unicode_ascii_input (val text);
+INSERT INTO unicode_ascii_input VALUES
+    (''), ('abc'), (repeat('a', 64)), (repeat('b', 5000));
+SELECT bool_and(normalize(val) = val COLLATE "C") AS test_ascii_idem_column,
+    count(pg_column_compression(val)) AS num_compressed
+FROM unicode_ascii_input;
+ test_ascii_idem_column | num_compressed 
+------------------------+----------------
+ t                      |              1
+(1 row)
+
+DROP TABLE unicode_ascii_input;
 SELECT "normalize"('abc', 'def');  -- run-time error
 ERROR:  invalid normalization form: def
+SELECT "normalize"('abc', 'NFCx');  -- run-time error
+ERROR:  invalid normalization form: NFCx
+SELECT "normalize"(U&'\0061\0308', 'nFc') = U&'\00E4' COLLATE "C" AS test_form_case;
+ test_form_case 
+----------------
+ t
+(1 row)
+
 SELECT U&'\00E4\24D1c' IS NORMALIZED AS test_default;
  test_default 
 --------------
@@ -79,6 +112,12 @@ SELECT U&'\00E4\24D1c' IS NORMALIZED AS test_default;
 SELECT U&'\00E4\24D1c' IS NFC NORMALIZED AS test_nfc;
  test_nfc 
 ----------
+ t
+(1 row)
+
+SELECT 'abc' IS NORMALIZED AS test_ascii;
+ test_ascii 
+------------
  t
 (1 row)
 
@@ -105,6 +144,79 @@ ORDER BY num;
 
 SELECT is_normalized('abc', 'def');  -- run-time error
 ERROR:  invalid normalization form: def
+SELECT is_normalized('abc', 'NFKCx');  -- run-time error
+ERROR:  invalid normalization form: NFKCx
+-- Exercise the ASCII fast-path's chunk/remainder boundary handling: a
+-- non-NFC-normalized codepoint sequence must still be detected as such
+-- regardless of how much pure-ASCII padding surrounds it.
+SELECT len,
+    (repeat('a', len) || U&'\0061\0308') IS NORMALIZED AS non_nfc_at_end,
+    (U&'\0061\0308' || repeat('a', len)) IS NORMALIZED AS non_nfc_at_start
+FROM generate_series(0, 40) AS len
+ORDER BY len;
+ len | non_nfc_at_end | non_nfc_at_start 
+-----+----------------+------------------
+   0 | f              | f
+   1 | f              | f
+   2 | f              | f
+   3 | f              | f
+   4 | f              | f
+   5 | f              | f
+   6 | f              | f
+   7 | f              | f
+   8 | f              | f
+   9 | f              | f
+  10 | f              | f
+  11 | f              | f
+  12 | f              | f
+  13 | f              | f
+  14 | f              | f
+  15 | f              | f
+  16 | f              | f
+  17 | f              | f
+  18 | f              | f
+  19 | f              | f
+  20 | f              | f
+  21 | f              | f
+  22 | f              | f
+  23 | f              | f
+  24 | f              | f
+  25 | f              | f
+  26 | f              | f
+  27 | f              | f
+  28 | f              | f
+  29 | f              | f
+  30 | f              | f
+  31 | f              | f
+  32 | f              | f
+  33 | f              | f
+  34 | f              | f
+  35 | f              | f
+  36 | f              | f
+  37 | f              | f
+  38 | f              | f
+  39 | f              | f
+  40 | f              | f
+(41 rows)
+
+-- normalize() and unicode_assigned() skip leading ASCII too, so check that
+-- they give the right answer whatever its length.  A combining mark right
+-- after the ASCII must still compose with its last character.  This lists
+-- only the lengths that give a wrong answer.
+SELECT len
+FROM generate_series(0, 40) AS len
+WHERE normalize(repeat('a', len) || U&'\0061\0308', NFC)
+        <> (repeat('a', len) || U&'\00E4') COLLATE "C"
+   OR normalize(repeat('a', len) || U&'\00E4' || repeat('b', len), NFD)
+        <> (repeat('a', len) || U&'\0061\0308' || repeat('b', len)) COLLATE "C"
+   OR normalize(repeat('a', len) || U&'\00E4' || repeat('b', len), NFC)
+        <> (repeat('a', len) || U&'\00E4' || repeat('b', len)) COLLATE "C"
+   OR unicode_assigned(repeat('a', len) || U&'\+10FFFF')
+   OR NOT unicode_assigned(repeat('a', len) || U&'\00E4' || repeat('b', len));
+ len 
+-----
+(0 rows)
+
 -- Hangul NFC recomposition tests
 -- L+V -> LV composition (first and last)
 SELECT normalize(U&'\1100\1161', NFC) = U&'\AC00' COLLATE "C" AS hangul_lv_first;
