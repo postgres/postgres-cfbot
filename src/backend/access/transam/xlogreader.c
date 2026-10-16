@@ -26,6 +26,11 @@
 #endif
 
 #include "access/transam.h"
+
+#ifndef FRONTEND
+#include "access/varsup.h"
+#endif
+
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
