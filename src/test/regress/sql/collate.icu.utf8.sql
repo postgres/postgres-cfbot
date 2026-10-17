@@ -15,6 +15,25 @@ SET client_encoding TO UTF8;
 CREATE SCHEMA collate_tests;
 SET search_path = collate_tests;
 
+create function check_estimated_rows(text) returns table (estimated int, actual int)
+language plpgsql as
+$$
+declare
+    ln text;
+    tmp text[];
+    first_row bool := true;
+begin
+    for ln in
+        execute format('explain analyze %s', $1)
+    loop
+        if first_row then
+            first_row := false;
+            tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+            return query select tmp[1]::int, tmp[2]::int;
+        end if;
+    end loop;
+end;
+$$;
 
 CREATE TABLE collate_test1 (
     a int,
@@ -1532,6 +1551,23 @@ SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING d1 DEFAULT 'A' COLLATE case_inse
 SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING d1 DEFAULT 'A'::d2 ON EMPTY) = 'a'; -- error
 SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING d1 DEFAULT 'A' COLLATE "C" ON EMPTY) = 'a'; -- error
 DROP DOMAIN d1, d2;
+
+-- Test whether scanning the entire MCV array is needed.
+-- This depends on whether the comparison collation is nondeterministic
+-- and differs from the statistics collation.
+CREATE TABLE t_scan_entire_mcv (a text, b text, c int);
+INSERT INTO t_scan_entire_mcv SELECT chr(65 + g % 52) FROM generate_series(1, 500) g;
+ANALYZE t_scan_entire_mcv;
+-- Scanning the entire MCV array is needed when the collation
+-- used for the comparison is nondeterministic and differs
+-- from the statistics collation.
+SELECT * FROM check_estimated_rows($$SELECT * FROM t_scan_entire_mcv where a = 'b' COLLATE "case_insensitive"$$);
+-- Otherwise, scanning stops after finding the first matching MCV value.
+SELECT * FROM check_estimated_rows($$SELECT * FROM t_scan_entire_mcv where a = 'b'$$);
+
+DROP TABLE t_scan_entire_mcv;
+
+drop function check_estimated_rows;
 
 -- cleanup
 RESET search_path;
