@@ -238,6 +238,12 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 
 	/* Use the "clock sweep" algorithm to find a free buffer */
 	trycounter = NBuffers;
+	/* This loop only considers the low-half of the state */
+	Assert(((
+		BM_LOCKED |
+		BUF_REFCOUNT_MASK |
+		BUF_USAGECOUNT_MASK
+	) & 0xffffffff00000000) == 0);
 	for (;;)
 	{
 		uint64		old_buf_state;
@@ -287,7 +293,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 			{
 				local_buf_state -= BUF_USAGECOUNT_ONE;
 
-				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
+				if (pg_atomic_compare_exchange_u64_lo(&buf->state, &old_buf_state,
 												   local_buf_state))
 				{
 					trycounter = NBuffers;
@@ -299,7 +305,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 				/* pin the buffer if the CAS succeeds */
 				local_buf_state += BUF_REFCOUNT_ONE;
 
-				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
+				if (pg_atomic_compare_exchange_u64_lo(&buf->state, &old_buf_state,
 												   local_buf_state))
 				{
 					/* Found a usable buffer */
@@ -645,8 +651,14 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 
 	/*
 	 * Check whether the buffer can be used and pin it if so. Do this using a
-	 * CAS loop, to avoid having to lock the buffer header.
+	 * CAS loop on the low-half of the state, to avoid having to lock the
+	 * buffer header.
 	 */
+	Assert(((
+		BM_LOCKED |
+		BUF_REFCOUNT_MASK |
+		BUF_USAGECOUNT_MASK
+	) & 0xffffffff00000000) == 0);
 	old_buf_state = pg_atomic_read_u64(&buf->state);
 	for (;;)
 	{
@@ -675,7 +687,7 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 		/* pin the buffer if the CAS succeeds */
 		local_buf_state += BUF_REFCOUNT_ONE;
 
-		if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
+		if (pg_atomic_compare_exchange_u64_lo(&buf->state, &old_buf_state,
 										   local_buf_state))
 		{
 			*buf_state = local_buf_state;
