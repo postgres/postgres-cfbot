@@ -310,8 +310,47 @@ typedef struct ColumnRef
 {
 	NodeTag		type;
 	List	   *fields;			/* field names (String nodes) or A_Star */
+
+	/*
+	 * These fields are only used with star option columns. It would be
+	 * redundant to store them in each Star*Item, so we store them here
+	 * instead.
+	 */
+	bool		staroptcol_match;	/* true if this star option column is
+									 * matched; for reporting errors */
 	ParseLoc	location;		/* token location, or -1 if unknown */
 } ColumnRef;
+
+typedef struct StarExcludeItem
+{
+	NodeTag		type;
+	ColumnRef  *name;			/* possibly qualified column name */
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} StarExcludeItem;
+
+typedef struct StarReplaceItem
+{
+	NodeTag		type;
+	ColumnRef  *name;			/* possibly qualified column name */
+	Node	   *expr;			/* expression to replace the column with */
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} StarReplaceItem;
+
+typedef struct StarRenameItem
+{
+	NodeTag		type;
+	ColumnRef  *name;			/* possibly qualified column name */
+	char	   *aliasname;		/* new output name for the column */
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} StarRenameItem;
+
+typedef struct StarOptions
+{
+	NodeTag		type;
+	List	   *exclude_list;	/* List of StarExcludeItem */
+	List	   *replace_list;	/* List of StarReplaceItem */
+	List	   *rename_list;	/* List of StarRenameItem */
+} StarOptions;
 
 /*
  * ParamRef - specifies a $n parameter reference
@@ -472,6 +511,7 @@ typedef struct FuncCall
 typedef struct A_Star
 {
 	NodeTag		type;
+	StarOptions *staroptions;	/* options for '*' in fields, or NULL if none */
 } A_Star;
 
 /*
