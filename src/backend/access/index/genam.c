@@ -37,6 +37,38 @@
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 
+/* Number of nested systable scans while decoding in-progress transactions. */
+int sysscan_depth = 0;
+
+/*
+ * System table scans can be nested while CheckXidAlive is valid. A simple
+ * boolean is insufficient because ending an inner scan must not clear the flag
+ * while an outer scan is still active.
+ */
+static inline void
+IncrementSysScanDepth(void)
+{
+	if (!TransactionIdIsValid(CheckXidAlive))
+		return;
+
+	sysscan_depth++;
+}
+
+static inline void
+DecrementSysScanDepth(void)
+{
+	if (!TransactionIdIsValid(CheckXidAlive))
+		return;
+
+	Assert(sysscan_depth > 0);
+	sysscan_depth--;
+}
+
+void
+ResetSysScanDepth(void)
+{
+	sysscan_depth = 0;
+}
 
 /* ----------------------------------------------------------------
  *		general access method routines
@@ -432,13 +464,7 @@ systable_beginscan(Relation heapRelation,
 		sysscan->snapshot = NULL;
 	}
 
-	/*
-	 * If CheckXidAlive is set then set a flag to indicate that system table
-	 * scan is in-progress.  See detailed comments in xact.c where these
-	 * variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = true;
+	IncrementSysScanDepth();
 
 	if (irel)
 	{
@@ -633,12 +659,7 @@ systable_endscan(SysScanDesc sysscan)
 	if (sysscan->snapshot)
 		UnregisterSnapshot(sysscan->snapshot);
 
-	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
-	 * comments in xact.c where these variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = false;
+	DecrementSysScanDepth();
 
 	pfree(sysscan);
 }
@@ -721,13 +742,7 @@ systable_beginscan_ordered(Relation heapRelation,
 			elog(ERROR, "column is not in index");
 	}
 
-	/*
-	 * If CheckXidAlive is set then set a flag to indicate that system table
-	 * scan is in-progress.  See detailed comments in xact.c where these
-	 * variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = true;
+	IncrementSysScanDepth();
 
 	sysscan->iscan = index_beginscan(heapRelation, indexRelation, false,
 									 snapshot, NULL, nkeys, 0,
@@ -782,12 +797,7 @@ systable_endscan_ordered(SysScanDesc sysscan)
 	if (sysscan->snapshot)
 		UnregisterSnapshot(sysscan->snapshot);
 
-	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
-	 * comments in xact.c where these variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = false;
+	DecrementSysScanDepth();
 
 	pfree(sysscan);
 }
