@@ -697,6 +697,7 @@ DomainConstraintState
 DomainConstraintType
 DomainIOData
 DropBehavior
+DropOrTruncateTableInfo
 DropOwnedStmt
 DropReplicationSlotCmd
 DropRoleStmt
@@ -1910,6 +1911,7 @@ PATH
 PCtxtHandle
 PERL_CONTEXT
 PERL_SI
+PendingDropdbLog
 PFN
 PGAlignedBlock
 PGAlignedXLogBlock

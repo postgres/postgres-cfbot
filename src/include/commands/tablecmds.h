@@ -32,6 +32,9 @@ extern TupleDesc BuildDescForRelation(const List *columns);
 
 extern void RemoveRelations(DropStmt *drop);
 
+extern void RegisterDropOrTruncateTable(Oid reloid, const char *relname,
+										const char *schemaname, bool is_truncate);
+
 extern Oid	AlterTableLookupRelation(AlterTableStmt *stmt, LOCKMODE lockmode);
 
 extern void AlterTable(AlterTableStmt *stmt, LOCKMODE lockmode,
