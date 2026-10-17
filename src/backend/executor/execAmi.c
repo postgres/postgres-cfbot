@@ -116,6 +116,15 @@ ExecReScan(PlanState *node)
 
 			if (splan->plan->extParam != NULL)
 				UpdateChangedParamSet(splan, node->chgParam);
+
+			/*
+			 * Also mark this SubPlanState's hash table, if any, as stale. The
+			 * subplan's chgParam isn't enough, since the subplan may be
+			 * shared with other SubPlanStates, and building one of their hash
+			 * tables rescans the subplan and clears its chgParam.
+			 */
+			if (splan->chgParam != NULL)
+				sstate->hashtablestale = true;
 		}
 		/* Well. Now set chgParam for child trees. */
 		if (outerPlanState(node) != NULL)
