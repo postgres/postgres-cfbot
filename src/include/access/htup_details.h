@@ -806,7 +806,6 @@ extern Datum heap_getsysattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
 extern Datum getmissingattr(TupleDesc tupleDesc,
 							int attnum, bool *isnull);
 extern HeapTuple heap_copytuple(HeapTuple tuple);
-extern void heap_copytuple_with_tuple(HeapTuple src, HeapTuple dest);
 extern Datum heap_copy_tuple_as_datum(HeapTuple tuple, TupleDesc tupleDesc);
 extern HeapTuple heap_form_tuple(TupleDesc tupleDescriptor,
 								 const Datum *values, const bool *isnull);
@@ -832,8 +831,6 @@ extern MinimalTuple heap_copy_minimal_tuple(MinimalTuple mtup, Size extra);
 extern HeapTuple heap_tuple_from_minimal_tuple(MinimalTuple mtup);
 extern MinimalTuple minimal_tuple_from_heap_tuple(HeapTuple htup, Size extra);
 extern size_t varsize_any(void *p);
-extern HeapTuple heap_expand_tuple(HeapTuple sourceTuple, TupleDesc tupleDesc);
-extern MinimalTuple minimal_expand_tuple(HeapTuple sourceTuple, TupleDesc tupleDesc);
 
 #ifndef FRONTEND
 /*
