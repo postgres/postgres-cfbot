@@ -5413,7 +5413,21 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 	switch (variable->varno)
 	{
 		case INNER_VAR:
-			/* get the tuple from the inner node */
+
+			/*
+			 * Get the tuple from the inner node.
+			 *
+			 * In a RETURNING expression, this is used for EXCLUDED values in
+			 * an INSERT ... ON CONFLICT DO SELECT/UPDATE.  If the
+			 * non-conflicting branch is taken, the EXCLUDED row is NULL, and
+			 * we return NULL rather than an all-NULL record.
+			 */
+			if (state->flags & EEO_FLAG_INNER_IS_NULL)
+			{
+				*op->resvalue = (Datum) 0;
+				*op->resnull = true;
+				return;
+			}
 			slot = econtext->ecxt_innertuple;
 			break;
 
@@ -5457,6 +5471,11 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 						return;
 					}
 					slot = econtext->ecxt_newtuple;
+					break;
+
+				case VAR_RETURNING_EXCLUDED:
+					elog(ERROR, "wrong varno %d (expected %d) for variable returning excluded",
+						 variable->varno, INNER_VAR);
 					break;
 			}
 			break;
