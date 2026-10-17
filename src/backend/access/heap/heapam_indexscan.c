@@ -19,8 +19,11 @@
 #include "access/relscan.h"
 #include "access/tableam_indexscan.h"
 #include "access/visibilitymap.h"
+#include "catalog/catalog.h"
 #include "pgstat.h"
+#include "replication/logicalworker.h"
 #include "storage/predicate.h"
+#include "utils/injection_point.h"
 
 
 static bool heapam_index_plain_tuple_getnext_slot(IndexScanDesc scan,
@@ -345,6 +348,13 @@ heapam_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 
 		/* The scan's next TID was set in scan->xs_heaptid for us */
 		Assert(ItemPointerIsValid(&scan->xs_heaptid));
+
+#ifdef USE_INJECTION_POINTS
+		if (!IsCatalogRelation(scan->heapRelation) && IsLogicalWorker())
+		{
+			INJECTION_POINT("index_getnext_slot_before_fetch_apply_dirty", NULL);
+		}
+#endif
 
 		hscan = (IndexScanHeapData *) scan->xs_table_opaque;
 
