@@ -61,7 +61,7 @@ static void finishInput(void);
  *
  * The result is a malloc'd string.
  *
- * Caller *must* have set up sigint_interrupt_jmp before calling.
+ * Caller *must* have set up PG_exception_stack before calling.
  */
 char *
 gets_interactive(const char *prompt, PQExpBuffer query_buf)
@@ -85,7 +85,7 @@ gets_interactive(const char *prompt, PQExpBuffer query_buf)
 		/* Make current query_buf available to tab completion callback */
 		tab_completion_query_buf = query_buf;
 
-		/* Enable SIGINT to longjmp to sigint_interrupt_jmp */
+		/* Enable SIGINT to longjmp through PG_exception_stack */
 		sigint_interrupt_enabled = true;
 
 		result = readline(prompt);
@@ -177,7 +177,7 @@ pg_send_history(PQExpBuffer history_buf)
  * Gets a line of noninteractive input from a file (which could be stdin).
  * The result is a malloc'd string, or NULL on EOF or input error.
  *
- * Caller *must* have set up sigint_interrupt_jmp before calling.
+ * Caller *must* have set up PG_exception_stack before calling.
  *
  * Note: we re-use a static PQExpBuffer for each call.  This is to avoid
  * leaking memory if interrupted by SIGINT.
@@ -198,7 +198,7 @@ gets_fromFile(FILE *source)
 	{
 		char	   *result;
 
-		/* Enable SIGINT to longjmp to sigint_interrupt_jmp */
+		/* Enable SIGINT to longjmp through PG_exception_stack */
 		sigint_interrupt_enabled = true;
 
 		/* Get some data */

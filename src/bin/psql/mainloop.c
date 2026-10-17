@@ -32,6 +32,8 @@ const PsqlScanCallbacks psqlscan_callbacks = {
 int
 MainLoop(FILE *source)
 {
+	sigjmp_buf	local_sigjmp_buf;
+	sigjmp_buf *save_exception_stack = PG_exception_stack;
 	PsqlScanState scan_state;	/* lexer working state */
 	ConditionalStack cond_stack;	/* \if status stack */
 	volatile PQExpBuffer query_buf; /* buffer for query being accumulated */
@@ -100,11 +102,9 @@ MainLoop(FILE *source)
 		}
 
 		/*
-		 * Establish longjmp destination for exiting from wait-for-input. We
-		 * must re-do this each time through the loop for safety, since the
-		 * jmpbuf might get changed during command execution.
+		 * Establish longjmp destination for exiting from wait-for-input.
 		 */
-		if (sigsetjmp(sigint_interrupt_jmp, 1) != 0)
+		if (sigsetjmp(local_sigjmp_buf, 1) != 0)
 		{
 			/* got here with longjmp */
 
@@ -140,6 +140,8 @@ MainLoop(FILE *source)
 				break;
 			}
 		}
+
+		PG_exception_stack = &local_sigjmp_buf;
 
 		fflush(stdout);
 
@@ -641,14 +643,9 @@ MainLoop(FILE *source)
 			successResult = EXIT_USER;
 	}
 
-	/*
-	 * Let's just make real sure the SIGINT handler won't try to use
-	 * sigint_interrupt_jmp after we exit this routine.  If there is an outer
-	 * MainLoop instance, it will reset sigint_interrupt_jmp to point to
-	 * itself at the top of its loop, before any further interactive input
-	 * happens.
-	 */
+	/* Restore the caller's PG_exception_stack before returning. */
 	sigint_interrupt_enabled = false;
+	PG_exception_stack = save_exception_stack;
 
 	destroyPQExpBuffer(query_buf);
 	destroyPQExpBuffer(previous_buf);

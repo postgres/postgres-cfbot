@@ -297,7 +297,7 @@ NoticeProcessor(void *arg, const char *message)
  * cancel_pressed during long-running loops.  However, that won't work when
  * blocked on user input (in readline() or fgets()).  In those places, we
  * set sigint_interrupt_enabled true while blocked, instructing the signal
- * catcher to longjmp through sigint_interrupt_jmp.  We assume readline and
+ * catcher to longjmp through PG_exception_stack.  We assume readline and
  * fgets are coded to handle possible interruption.
  *
  * On Windows, currently this does not work, so control-C is less useful
@@ -305,7 +305,14 @@ NoticeProcessor(void *arg, const char *message)
  */
 volatile sig_atomic_t sigint_interrupt_enabled = false;
 
-sigjmp_buf	sigint_interrupt_jmp;
+/*
+ * The SIGINT callback passes *PG_exception_stack to siglongjmp().  Functions
+ * that use sigsetjmp() must use a local sigjmp_buf, save the previous pointer,
+ * and restore it before returning.  Otherwise, siglongjmp() could use the
+ * context of a function that has already returned.  Call sigsetjmp() before
+ * setting sigint_interrupt_enabled to true.
+ */
+sigjmp_buf *PG_exception_stack = NULL;
 
 static void
 psql_cancel_callback(void)
@@ -315,7 +322,8 @@ psql_cancel_callback(void)
 	if (sigint_interrupt_enabled)
 	{
 		sigint_interrupt_enabled = false;
-		siglongjmp(sigint_interrupt_jmp, 1);
+		Assert(PG_exception_stack != NULL);
+		siglongjmp(*PG_exception_stack, 1);
 	}
 #endif
 
