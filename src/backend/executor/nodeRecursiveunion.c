@@ -45,6 +45,7 @@ build_hash_table(RecursiveUnionState *rustate)
 	 */
 	rustate->hashtable = BuildTupleHashTable(&rustate->ps,
 											 desc,
+											 node->numSortCols > 0 ? NULL :
 											 ExecGetCommonChildSlotOps(&rustate->ps),
 											 node->numCols,
 											 node->dupColIdx,
@@ -78,21 +79,46 @@ build_hash_table(RecursiveUnionState *rustate)
  * 2.6 go back to 2.2
  * ----------------------------------------------------------------
  */
-static void
-populate_result_table_from_hash(RecursiveUnionState *rustate)
+static bool
+tuple_is_superseded(RecursiveUnionState *node, TupleHashEntry entry,
+					TupleTableSlot *slot)
 {
-	TupleHashTable hashtable = rustate->hashtable;
-	tuplehash_iterator iter;
-	TupleHashEntry entry;
-	TupleTableSlot *slot = rustate->ps.ps_ResultTupleSlot;
+	RecursiveUnion *plan = (RecursiveUnion *) node->ps.plan;
+	TupleTableSlot *firstslot = node->sort_firstTupleSlot;
+	MemoryContext oldContext;
+	bool		superseded = false;
 
-	tuplehash_start_iterate(hashtable->hashtab, &iter);
-	while ((entry = tuplehash_iterate(hashtable->hashtab, &iter)) != NULL)
+	ExecStoreMinimalTuple(entry->firstTuple, firstslot, false);
+	oldContext = MemoryContextSwitchTo(node->hashtable->tempcxt);
+
+	for (int i = 0; i < plan->numSortCols; i++)
 	{
-		ExecStoreMinimalTuple(entry->firstTuple, slot, false);
-		tuplestore_puttupleslot(rustate->result_table, slot);
-		ExecClearTuple(slot);
+		SortSupport skey = &node->sortKeys[i];
+		AttrNumber	attno = skey->ssup_attno;
+		Datum		datum1,
+					datum2;
+		bool		isnull1,
+					isnull2;
+		int			compare;
+
+		datum1 = slot_getattr(firstslot, attno, &isnull1);
+		datum2 = slot_getattr(slot, attno, &isnull2);
+
+		compare = ApplySortComparator(datum1, isnull1,
+									  datum2, isnull2,
+									  skey);
+		if (compare != 0)
+		{
+			if (compare < 0)
+				superseded = true;
+			break;
+		}
 	}
+
+	MemoryContextSwitchTo(oldContext);
+	ExecClearTuple(firstslot);
+
+	return superseded;
 }
 
 static TupleTableSlot *
@@ -107,56 +133,105 @@ ExecRecursiveUnion(PlanState *pstate)
 
 	CHECK_FOR_INTERRUPTS();
 
-	/* If we need sorting, we must buffer and return from result_table */
+	/*
+	 * If we have tie-breaker sort keys, run the recursion to fixpoint and
+	 * then scan the final hash table directly.
+	 */
 	if (plan->numSortCols > 0)
 	{
-		if (node->result_table == NULL)
+		TupleHashEntry entry;
+
+		if (!node->recursion_done)
 		{
-			/* Run the entire recursion loop and buffer results */
-			node->result_table = tuplestore_begin_heap(false, false, work_mem);
+			bool		wave_had_replacements = false;
 
 			/* 1. Process non-recursive term */
 			for (;;)
 			{
+				CHECK_FOR_INTERRUPTS();
+
 				slot = ExecProcNode(outerPlan);
 				if (TupIsNull(slot))
 					break;
 
 				if (plan->numCols > 0)
 				{
-					TupleHashEntry entry;
 					entry = LookupTupleHashEntry(node->hashtable, slot, &isnew, NULL);
 					if (!isnew)
-					{
 						ReplaceTupleHashEntryIfBetter(node->hashtable,
 													  entry,
 													  slot,
 													  node->sort_firstTupleSlot,
 													  node->sortKeys,
 													  plan->numSortCols);
-						continue;
-					}
+					MemoryContextReset(node->tempContext);
 				}
-				tuplestore_puttupleslot(node->working_table, slot);
+				else
+					tuplestore_puttupleslot(node->working_table, slot);
+			}
+
+			/*
+			 * Populate working_table from hashtable so that only the best
+			 * non-recursive seed tuple per group key is expanded in wave 1.
+			 */
+			if (plan->numCols > 0)
+			{
+				TupleHashIterator seed_iter;
+				TupleTableSlot *res_slot = node->ps.ps_ResultTupleSlot;
+
+				InitTupleHashIterator(node->hashtable, &seed_iter);
+				while ((entry = ScanTupleHashTable(node->hashtable, &seed_iter)) != NULL)
+				{
+					CHECK_FOR_INTERRUPTS();
+					ExecStoreMinimalTuple(entry->firstTuple, res_slot, false);
+					tuplestore_puttupleslot(node->working_table, res_slot);
+					ExecClearTuple(res_slot);
+				}
 			}
 
 			/* 2. Process recursive term */
 			node->recursing = true;
 			for (;;)
 			{
+				CHECK_FOR_INTERRUPTS();
+
 				slot = ExecProcNode(innerPlan);
 				if (TupIsNull(slot))
 				{
-					Tuplestorestate *swaptemp;
-
 					if (node->intermediate_empty)
-						break; /* End of recursion */
+						break;	/* End of recursion */
 
 					tuplestore_clear(node->working_table);
-					swaptemp = node->working_table;
-					node->working_table = node->intermediate_table;
-					node->intermediate_table = swaptemp;
+
+					if (wave_had_replacements && plan->numCols > 0)
+					{
+						TupleTableSlot *res_slot = node->ps.ps_ResultTupleSlot;
+
+						while (tuplestore_gettupleslot(node->intermediate_table,
+													   true, false, res_slot))
+						{
+							CHECK_FOR_INTERRUPTS();
+							entry = LookupTupleHashEntry(node->hashtable,
+														 res_slot, NULL, NULL);
+							if (entry != NULL &&
+								!tuple_is_superseded(node, entry, res_slot))
+								tuplestore_puttupleslot(node->working_table,
+														res_slot);
+							MemoryContextReset(node->tempContext);
+						}
+						ExecClearTuple(res_slot);
+						tuplestore_clear(node->intermediate_table);
+					}
+					else
+					{
+						Tuplestorestate *swaptemp = node->working_table;
+
+						node->working_table = node->intermediate_table;
+						node->intermediate_table = swaptemp;
+					}
+
 					node->intermediate_empty = true;
+					wave_had_replacements = false;
 					innerPlan->chgParam = bms_add_member(innerPlan->chgParam,
 														 plan->wtParam);
 					continue;
@@ -164,38 +239,42 @@ ExecRecursiveUnion(PlanState *pstate)
 
 				if (plan->numCols > 0)
 				{
-					TupleHashEntry entry;
 					entry = LookupTupleHashEntry(node->hashtable, slot, &isnew, NULL);
 					if (!isnew)
 					{
-						bool replaced = ReplaceTupleHashEntryIfBetter(node->hashtable,
-																	  entry,
-																	  slot,
-																	  node->sort_firstTupleSlot,
-																	  node->sortKeys,
-																	  plan->numSortCols);
+						bool		replaced = ReplaceTupleHashEntryIfBetter(node->hashtable,
+																			  entry,
+																			  slot,
+																			  node->sort_firstTupleSlot,
+																			  node->sortKeys,
+																			  plan->numSortCols);
+
+						MemoryContextReset(node->tempContext);
 						if (replaced)
 						{
 							/* Replaced! Explore this better path */
+							wave_had_replacements = true;
 							node->intermediate_empty = false;
 							tuplestore_puttupleslot(node->intermediate_table, slot);
 						}
 						continue;
 					}
+					MemoryContextReset(node->tempContext);
 				}
 
 				node->intermediate_empty = false;
 				tuplestore_puttupleslot(node->intermediate_table, slot);
 			}
 
-			/* Populate result_table from hashtable */
-			populate_result_table_from_hash(node);
+			node->recursion_done = true;
+			InitTupleHashIterator(node->hashtable, &node->hash_iter);
 		}
 
-		/* Read from result_table */
+		/* Read directly from hashtable */
 		slot = node->ps.ps_ResultTupleSlot;
-		if (tuplestore_gettupleslot(node->result_table, true, false, slot))
-			return slot;
+		entry = ScanTupleHashTable(node->hashtable, &node->hash_iter);
+		if (entry != NULL)
+			return ExecStoreMinimalTuple(entry->firstTuple, slot, false);
 
 		return NULL;
 	}
@@ -310,9 +389,9 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 	rustate->hashtable = NULL;
 	rustate->tempContext = NULL;
 	rustate->tuplesContext = NULL;
-	rustate->result_table = NULL;
 	rustate->sortKeys = NULL;
 	rustate->sort_firstTupleSlot = NULL;
+	rustate->recursion_done = false;
 
 	/* initialize processing state */
 	rustate->recursing = false;
@@ -324,8 +403,9 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 	 * If hashing, we need a per-tuple memory context for comparisons, and a
 	 * longer-lived context to store the hash table.  The table can't just be
 	 * kept in the per-query context because we want to be able to throw it
-	 * away when rescanning.  We can use a BumpContext to save storage,
-	 * because we will have no need to delete individual table entries.
+	 * away when rescanning.  We can use a BumpContext to save storage when
+	 * individual entries are never replaced, or an AllocSetContext when
+	 * tie-breaking replacements may free superseded tuples.
 	 */
 	if (node->numCols > 0)
 	{
@@ -403,21 +483,15 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 	if (node->numSortCols > 0)
 	{
 		TupleDesc	desc = ExecGetResultType(outerPlanState(rustate));
-		int			i;
 
-		rustate->sortKeys = (SortSupportData *) palloc0(node->numSortCols * sizeof(SortSupportData));
-		rustate->sort_firstTupleSlot = ExecInitExtraTupleSlot(estate, desc, &TTSOpsMinimalTuple);
-
-		for (i = 0; i < node->numSortCols; i++)
-		{
-			SortSupport skey = &rustate->sortKeys[i];
-
-			skey->ssup_cxt = CurrentMemoryContext;
-			skey->ssup_collation = node->sortCollations[i];
-			skey->ssup_nulls_first = node->sortNullsFirst[i];
-			skey->ssup_attno = node->sortColIdx[i];
-			PrepareSortSupportFromOrderingOp(node->sortOperators[i], skey);
-		}
+		rustate->sort_firstTupleSlot =
+			ExecInitExtraTupleSlot(estate, desc, &TTSOpsMinimalTuple);
+		rustate->sortKeys =
+			ExecPrepareTupleSortSupport(node->numSortCols,
+										node->sortColIdx,
+										node->sortOperators,
+										node->sortCollations,
+										node->sortNullsFirst);
 	}
 
 	return rustate;
@@ -441,8 +515,6 @@ ExecEndRecursiveUnion(RecursiveUnionState *node)
 		MemoryContextDelete(node->tempContext);
 	if (node->tuplesContext)
 		MemoryContextDelete(node->tuplesContext);
-	if (node->result_table)
-		tuplestore_end(node->result_table);
 
 	/*
 	 * close down subplans
@@ -484,12 +556,8 @@ ExecReScanRecursiveUnion(RecursiveUnionState *node)
 
 	/* reset processing state */
 	node->recursing = false;
+	node->recursion_done = false;
 	node->intermediate_empty = true;
 	tuplestore_clear(node->working_table);
 	tuplestore_clear(node->intermediate_table);
-	if (node->result_table)
-	{
-		tuplestore_end(node->result_table);
-		node->result_table = NULL;
-	}
 }
