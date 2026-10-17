@@ -4062,11 +4062,8 @@ WinGetFuncArgInFrame(WindowObject winobj, int argno,
 			 * row's peer group from resulting in trying to fetch a row before
 			 * some previous mark position.
 			 *
-			 * Note that in some corner cases such as current row being
-			 * outside frame, these calculations are theoretically too simple,
-			 * but it doesn't matter because we'll end up deciding the row is
-			 * out of frame.  We do not attempt to avoid fetching rows past
-			 * end of frame; that would happen in some cases anyway.
+			 * We do not attempt to avoid fetching rows past end of frame.
+			 * That would happen in some cases anyway.
 			 */
 			switch (winstate->frameOptions & FRAMEOPTION_EXCLUSION)
 			{
@@ -4097,10 +4094,15 @@ WinGetFuncArgInFrame(WindowObject winobj, int argno,
 						int64		overlapstart = Max(winstate->groupheadpos,
 													   winstate->frameheadpos);
 
-						if (abs_pos == overlapstart)
-							abs_pos = winstate->currentpos;
+						if (winstate->currentpos >= winstate->frameheadpos)
+						{
+							if (abs_pos == overlapstart)
+								abs_pos = winstate->currentpos;
+							else
+								abs_pos += winstate->grouptailpos - overlapstart - 1;
+						}
 						else
-							abs_pos += winstate->grouptailpos - overlapstart - 1;
+							abs_pos += winstate->grouptailpos - overlapstart;
 					}
 					break;
 				default:
@@ -4163,10 +4165,15 @@ WinGetFuncArgInFrame(WindowObject winobj, int argno,
 						int64		overlapend = Min(winstate->grouptailpos,
 													 winstate->frametailpos);
 
-						if (abs_pos == overlapend - 1)
-							abs_pos = winstate->currentpos;
+						if (winstate->currentpos < winstate->frametailpos)
+						{
+							if (abs_pos == overlapend - 1)
+								abs_pos = winstate->currentpos;
+							else
+								abs_pos -= overlapend - 1 - winstate->groupheadpos;
+						}
 						else
-							abs_pos -= overlapend - 1 - winstate->groupheadpos;
+							abs_pos -= overlapend - winstate->groupheadpos;
 					}
 					update_frameheadpos(winstate);
 					if (abs_pos < winstate->frameheadpos)
