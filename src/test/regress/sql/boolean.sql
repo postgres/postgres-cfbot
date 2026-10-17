@@ -250,6 +250,101 @@ SELECT isfalse OR isnul OR istrue FROM booltbl4;
 SELECT istrue OR isfalse OR isnul FROM booltbl4;
 SELECT isnul OR istrue OR isfalse FROM booltbl4;
 
+-- Implication: "a IMPLIES b" is "NOT a OR b".  It is not commutative, so all
+-- nine combinations of three-valued logic have to be checked.
+SELECT istrue IMPLIES istrue, istrue IMPLIES isfalse, istrue IMPLIES isnul
+  FROM booltbl4;
+SELECT isfalse IMPLIES istrue, isfalse IMPLIES isfalse, isfalse IMPLIES isnul
+  FROM booltbl4;
+SELECT isnul IMPLIES istrue, isnul IMPLIES isfalse, isnul IMPLIES isnul
+  FROM booltbl4;
+
+-- the same, as constants, so that constant folding is exercised too
+SELECT true IMPLIES true, true IMPLIES false, true IMPLIES null;
+SELECT false IMPLIES true, false IMPLIES false, false IMPLIES null;
+SELECT null IMPLIES true, null IMPLIES false, null::bool IMPLIES null;
+
+-- IMPLIES is non-associative, so a chain is refused rather than grouped
+SELECT isfalse IMPLIES istrue IMPLIES isfalse FROM booltbl4;    -- error
+
+-- and it has to be, because the two groupings are different formulas.  The
+-- first row below is the interesting one: it tells them apart.
+SELECT a, b, c,
+       (a IMPLIES b) IMPLIES c AS grouped_left,
+       a IMPLIES (b IMPLIES c) AS grouped_right,
+       (a AND b) IMPLIES c AS conj_antecedent,
+       a IMPLIES (b AND c) AS conj_consequent
+  FROM (VALUES (false, false, false),
+               (true, false, false),
+               (true, true, true)) AS t(a, b, c);
+
+-- grouping to the right is implication from the conjunction of the operands
+-- (exportation), which holds for all three truth values, so no rows here
+SELECT a, b, c
+  FROM (VALUES (true), (false), (null)) AS x(a),
+       (VALUES (true), (false), (null)) AS y(b),
+       (VALUES (true), (false), (null)) AS z(c)
+ WHERE (a IMPLIES (b IMPLIES c)) IS DISTINCT FROM ((a AND b) IMPLIES c);
+
+-- and binds looser than OR, AND, NOT, the comparison operators and IS
+SELECT istrue OR isfalse IMPLIES isfalse FROM booltbl4;
+SELECT isfalse IMPLIES isfalse AND isfalse FROM booltbl4;
+SELECT NOT istrue IMPLIES istrue FROM booltbl4;
+SELECT 1 = 1 IMPLIES 2 = 3;
+SELECT isfalse IMPLIES isnul IS NULL FROM booltbl4;
+
+-- non-boolean operands are reported in terms of IMPLIES, not of its expansion
+SELECT 1 IMPLIES true;                  -- error
+SELECT true IMPLIES 1;                  -- error
+
+-- stored expressions keep IMPLIES, and deparse with only the parentheses
+-- that are needed
+CREATE VIEW boolview AS
+  SELECT istrue IMPLIES isnul AS i,
+         NOT istrue IMPLIES isnul AS not_antecedent,
+         istrue OR isfalse IMPLIES isnul AND istrue AS or_and,
+         (istrue IMPLIES isfalse) IMPLIES isnul AS grouped_left,
+         istrue IMPLIES (isfalse IMPLIES isnul) AS grouped_right,
+         (istrue IMPLIES isfalse) OR isnul AS under_or,
+         NOT (istrue IMPLIES isfalse) AS under_not,
+         (istrue IMPLIES isfalse) IS TRUE AS under_is
+    FROM booltbl4;
+SELECT pg_get_viewdef('boolview', true);
+SELECT pg_get_viewdef('boolview', false);
+SELECT * FROM boolview;
+DROP VIEW boolview;
+
+CREATE TABLE implies_check (a int, b int,
+  CHECK (a > 0 IMPLIES b > 0));
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'implies_check'::regclass;
+INSERT INTO implies_check VALUES (1, 1), (0, 0), (NULL, 0), (1, NULL);
+INSERT INTO implies_check VALUES (1, 0);    -- error
+
+-- the planner expands it, so EXPLAIN shows NOT a OR b, simplified
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT * FROM implies_check WHERE a > 0 IMPLIES b > 0;
+EXPLAIN (COSTS OFF)
+SELECT * FROM implies_check WHERE a IS NULL IMPLIES false;
+
+-- and a partial index on IMPLIES is usable for the expanded form
+CREATE INDEX implies_check_idx ON implies_check (b)
+  WHERE a IS NULL IMPLIES b > 0;
+SELECT pg_get_indexdef('implies_check_idx'::regclass);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT b FROM implies_check WHERE a IS NOT NULL OR b > 0;
+RESET enable_seqscan;
+DROP TABLE implies_check;
+
+-- IMPLIES is unreserved, so it remains usable as an identifier
+CREATE TABLE implies (implies bool);
+INSERT INTO implies VALUES (false);
+SELECT implies IMPLIES implies FROM implies;
+DROP TABLE implies;
+SELECT 1 AS implies;
+SELECT 1 implies;
+
 -- Casts
 SELECT 0::boolean;
 SELECT 1::boolean;

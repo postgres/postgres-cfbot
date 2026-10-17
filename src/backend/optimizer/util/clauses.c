@@ -1142,7 +1142,8 @@ contain_nonstrict_functions_walker(Node *node, void *context)
 		{
 			case AND_EXPR:
 			case OR_EXPR:
-				/* AND, OR are inherently non-strict */
+			case IMPLIES_EXPR:
+				/* AND, OR, IMPLIES are inherently non-strict */
 				return true;
 			default:
 				break;
@@ -3387,6 +3388,26 @@ eval_const_expressions_mutator(Node *node,
 							 * away the NOT.
 							 */
 							return negate_clause(arg);
+						}
+					case IMPLIES_EXPR:
+						{
+							Node	   *newexpr;
+
+							/*
+							 * Expand a IMPLIES b into NOT a OR b and simplify
+							 * that, so that nothing downstream need know
+							 * about IMPLIES.
+							 */
+							Assert(list_length(expr->args) == 2);
+							newexpr = (Node *)
+								makeBoolExpr(OR_EXPR,
+											 list_make2(makeBoolExpr(NOT_EXPR,
+																	 list_make1(linitial(expr->args)),
+																	 expr->location),
+														lsecond(expr->args)),
+											 expr->location);
+							return eval_const_expressions_mutator(newexpr,
+																  context);
 						}
 					default:
 						elog(ERROR, "unrecognized boolop: %d",

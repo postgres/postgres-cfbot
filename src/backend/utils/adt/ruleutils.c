@@ -9055,12 +9055,18 @@ isSimpleNode(Node *node, Node *parentNode, int prettyFlags)
 						{
 							case NOT_EXPR:
 							case AND_EXPR:
-								if (parentType == AND_EXPR || parentType == OR_EXPR)
+								if (parentType == AND_EXPR ||
+									parentType == OR_EXPR ||
+									parentType == IMPLIES_EXPR)
 									return true;
 								break;
 							case OR_EXPR:
-								if (parentType == OR_EXPR)
+								if (parentType == OR_EXPR ||
+									parentType == IMPLIES_EXPR)
 									return true;
+								break;
+							case IMPLIES_EXPR:
+								/* lowest precedence, and not associative */
 								break;
 						}
 					}
@@ -9531,6 +9537,18 @@ get_rule_expr(Node *node, deparse_context *context,
 							appendStringInfoChar(buf, '(');
 						appendStringInfoString(buf, "NOT ");
 						get_rule_expr_paren(first_arg, context,
+											false, node);
+						if (!PRETTY_PAREN(context))
+							appendStringInfoChar(buf, ')');
+						break;
+
+					case IMPLIES_EXPR:
+						if (!PRETTY_PAREN(context))
+							appendStringInfoChar(buf, '(');
+						get_rule_expr_paren(first_arg, context,
+											false, node);
+						appendStringInfoString(buf, " IMPLIES ");
+						get_rule_expr_paren(lsecond(expr->args), context,
 											false, node);
 						if (!PRETTY_PAREN(context))
 							appendStringInfoChar(buf, ')');
