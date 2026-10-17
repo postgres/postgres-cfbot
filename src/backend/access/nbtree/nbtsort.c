@@ -55,6 +55,7 @@
 #include "storage/condition_variable.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplesort.h"
@@ -68,6 +69,14 @@
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xA000000000000004)
 #define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xA000000000000005)
 #define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xA000000000000006)
+
+/*
+ * Only non-concurrent unique builds need a separate spool to exclude dead
+ * tuples from uniqueness checks.  Concurrent scans collect live tuples, and
+ * their checks account for tuples that die during the build.
+ */
+#define BTBuildNeedsSpool2(isunique, isconcurrent) \
+	((isunique) && !(isconcurrent))
 
 /*
  * DISABLE_LEADER_PARTICIPATION disables the leader's participation in
@@ -87,6 +96,8 @@ typedef struct BTSpool
 	Relation	index;
 	bool		isunique;
 	bool		nulls_not_distinct;
+	bool		unique_dead_ignored;
+	int64		heap_fetch_limit; /* heap fetches allowed during loading */
 } BTSpool;
 
 /*
@@ -105,6 +116,7 @@ typedef struct BTShared
 	Oid			indexrelid;
 	bool		isunique;
 	bool		nulls_not_distinct;
+	bool		unique_dead_ignored;
 	bool		isconcurrent;
 	int			scantuplesortstates;
 
@@ -188,13 +200,11 @@ typedef struct BTLeader
 	 * btshared is the shared state for entire build.  sharedsort is the
 	 * shared, tuplesort-managed state passed to each process tuplesort.
 	 * sharedsort2 is the corresponding btspool2 shared state, used only when
-	 * building unique indexes.  snapshot is the snapshot used by the scan iff
-	 * an MVCC snapshot is required.
+	 * a build spools dead tuples separately (see BTBuildNeedsSpool2()).
 	 */
 	BTShared   *btshared;
 	Sharedsort *sharedsort;
 	Sharedsort *sharedsort2;
-	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 } BTLeader;
@@ -207,15 +217,13 @@ typedef struct BTLeader
  */
 typedef struct BTBuildState
 {
-	bool		isunique;
-	bool		nulls_not_distinct;
 	bool		havedead;
 	Relation	heap;
 	BTSpool    *spool;
 
 	/*
-	 * spool2 is needed only when the index is a unique index. Dead tuples are
-	 * put into spool2 instead of spool in order to avoid uniqueness check.
+	 * Non-concurrent unique builds put dead tuples in spool2 to exclude them
+	 * from uniqueness checks.
 	 */
 	BTSpool    *spool2;
 	double		indtuples;
@@ -254,6 +262,7 @@ typedef struct BTWriteState
 	BulkWriteState *bulkstate;
 	BTScanInsert inskey;		/* generic insertion scankey */
 	BlockNumber btws_pages_alloced; /* # pages allocated */
+	IndexInfo  *indexInfo;
 } BTWriteState;
 
 
@@ -262,7 +271,8 @@ static double _bt_spools_heapscan(Relation heap, Relation index,
 static void _bt_spooldestroy(BTSpool *btspool);
 static void _bt_spool(BTSpool *btspool, const ItemPointerData *self,
 					  const Datum *values, const bool *isnull);
-static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2);
+static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2,
+						  IndexInfo *indexInfo);
 static void _bt_build_callback(Relation index, ItemPointer tid, Datum *values,
 							   bool *isnull, bool tupleIsAlive, void *state);
 static BulkWriteBuffer _bt_blnewpage(BTWriteState *wstate, uint32 level);
@@ -307,8 +317,6 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		ResetUsage();
 #endif							/* BTREE_BUILD_STATS */
 
-	buildstate.isunique = indexInfo->ii_Unique;
-	buildstate.nulls_not_distinct = indexInfo->ii_NullsNotDistinct;
 	buildstate.havedead = false;
 	buildstate.heap = heap;
 	buildstate.spool = NULL;
@@ -331,7 +339,7 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * inserting the sorted tuples into btree pages and (3) building the upper
 	 * levels.  Finally, it may also be necessary to end use of parallelism.
 	 */
-	_bt_leafbuild(buildstate.spool, buildstate.spool2);
+	_bt_leafbuild(buildstate.spool, buildstate.spool2, indexInfo);
 	_bt_spooldestroy(buildstate.spool);
 	if (buildstate.spool2)
 		_bt_spooldestroy(buildstate.spool2);
@@ -384,6 +392,14 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	btspool->isunique = indexInfo->ii_Unique;
 	btspool->nulls_not_distinct = indexInfo->ii_NullsNotDistinct;
 
+	/*
+	 * Concurrent scans can replace their snapshots, so uniqueness checks must
+	 * account for tuples that die after the scan collects them.
+	 */
+	Assert(indexInfo->ii_ResetSnapshot == indexInfo->ii_Concurrent);
+	btspool->unique_dead_ignored = indexInfo->ii_Concurrent &&
+		indexInfo->ii_Unique;
+
 	/* Save as primary spool */
 	buildstate->spool = btspool;
 
@@ -431,17 +447,18 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	 * the use of parallelism or any other factor.
 	 */
 	buildstate->spool->sortstate =
-		tuplesort_begin_index_btree(heap, index, buildstate->isunique,
-									buildstate->nulls_not_distinct,
+		tuplesort_begin_index_btree(heap, index, btspool->isunique,
+									btspool->nulls_not_distinct,
+									btspool->unique_dead_ignored,
 									maintenance_work_mem, coordinate,
 									TUPLESORT_NONE);
 
 	/*
-	 * If building a unique index, put dead tuples in a second spool to keep
-	 * them out of the uniqueness check.  We expect that the second spool (for
-	 * dead tuples) won't get very full, so we give it only work_mem.
+	 * Non-concurrent unique builds need a second spool for dead tuples.  It
+	 * is usually small, so allow it only work_mem.  Concurrent builds use
+	 * MVCC snapshots and collect only tuples visible to the scan.
 	 */
-	if (indexInfo->ii_Unique)
+	if (BTBuildNeedsSpool2(indexInfo->ii_Unique, indexInfo->ii_Concurrent))
 	{
 		BTSpool    *btspool2 = palloc0_object(BTSpool);
 		SortCoordinate coordinate2 = NULL;
@@ -472,7 +489,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 		 * full, so we give it only work_mem
 		 */
 		buildstate->spool2->sortstate =
-			tuplesort_begin_index_btree(heap, index, false, false, work_mem,
+			tuplesort_begin_index_btree(heap, index, false, false, false, work_mem,
 										coordinate2, TUPLESORT_NONE);
 	}
 
@@ -484,6 +501,10 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	else
 		reltuples = _bt_parallel_heapscan(buildstate,
 										  &indexInfo->ii_BrokenHotChain);
+
+	/* The load budget uses the total from all scan participants. */
+	btspool->heap_fetch_limit = (int64)
+		(buildstate->indtuples * index_build_duplicate_check_scale_factor);
 
 	/*
 	 * Set the progress target for the next phase.  Reset the block number
@@ -539,7 +560,7 @@ _bt_spool(BTSpool *btspool, const ItemPointerData *self, const Datum *values, co
  * create an entire btree.
  */
 static void
-_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
+_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, IndexInfo *indexInfo)
 {
 	BTWriteState wstate;
 
@@ -564,6 +585,7 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
 
 	wstate.heap = btspool->heap;
 	wstate.index = btspool->index;
+	wstate.indexInfo = indexInfo;
 	wstate.inskey = _bt_mkscankey(wstate.index, NULL);
 	/* _bt_mkscankey() won't set allequalimage without metapage */
 	wstate.inskey->allequalimage = _bt_allequalimage(wstate.index, true);
@@ -803,6 +825,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	 * load phase of index creation.
 	 */
 	CHECK_FOR_INTERRUPTS();
+	index_build_rotate_snapshot(wstate->indexInfo);
 
 	nbuf = state->btps_buf;
 	npage = (Page) nbuf;
@@ -1155,7 +1178,135 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	deduplicate = wstate->inskey->allequalimage && !btspool->isunique &&
 		BTGetDeduplicateItems(wstate->index);
 
-	if (merge)
+	if (btspool->unique_dead_ignored)
+	{
+		/*
+		 * Check duplicates within the load budget, then leave unchecked
+		 * entries for validation.  Equal keys collected under different
+		 * snapshots need not conflict.
+		 */
+		HTSV_Result seen_status = HEAPTUPLE_DEAD;	/* group status */
+		bool	in_group = false;	/* is prev in a group of equal keys? */
+		IndexTuple prev = NULL;	/* copy of the previous tuple */
+		Size	prevbufsize = 0;	/* size of the buffer holding it */
+		int64	heap_fetches_left = btspool->heap_fetch_limit;
+
+		Assert(btspool->isunique);
+		Assert(!btspool2);
+
+		while ((itup = tuplesort_getindextuple(btspool->sortstate, true)) != NULL)
+		{
+			bool	defer_to_validation = false;
+
+			/* When we see first tuple, create first index page */
+			if (state == NULL)
+				state = _bt_pagestate(wstate, 0);
+
+			if (prev != NULL) /* if this is not the first tuple */
+			{
+				/* is this tuple a duplicate of the previous one? */
+				if (_bt_tuples_equal(wstate->index, wstate->inskey, prev, itup,
+									 btspool->nulls_not_distinct))
+				{
+					ItemPointerData tid;
+
+					/* a group starts: look at the tuple that opened it */
+					if (!in_group && heap_fetches_left > 0)
+					{
+						tid = prev->t_tid;
+						seen_status = _bt_heap_tuple_status(wstate->heap, &tid);
+						heap_fetches_left--;
+
+						/*
+						 * The scan saw committed inserts.  HOT updates report
+						 * deletes, and the build lock prevents root TID reuse.
+						 */
+						Assert(seen_status != HEAPTUPLE_INSERT_IN_PROGRESS);
+						in_group = true;
+					}
+
+					/*
+					 * Defer this entry if the budget is exhausted or a
+					 * conflicting tuple is being deleted or updated.
+					 * Validation waits for the writers and inserts surviving
+					 * tuples with a full uniqueness check against entries
+					 * already written.
+					 */
+					if (heap_fetches_left == 0 ||
+						seen_status == HEAPTUPLE_DELETE_IN_PROGRESS)
+						defer_to_validation = true;
+					else
+					{
+						HTSV_Result now_status;
+
+						tid = itup->t_tid;
+						now_status = _bt_heap_tuple_status(wstate->heap, &tid);
+						heap_fetches_left--;
+						Assert(now_status != HEAPTUPLE_INSERT_IN_PROGRESS);
+
+						if (seen_status == HEAPTUPLE_LIVE &&
+							now_status == HEAPTUPLE_LIVE)
+							_bt_report_duplicate(wstate->index, wstate->heap, itup);
+						else if (now_status == HEAPTUPLE_DELETE_IN_PROGRESS)
+							defer_to_validation = true;
+
+						/*
+						 * Keep a live or unresolved member as the reference
+						 * for the group; replace it if it is dead.
+						 */
+						if (seen_status == HEAPTUPLE_DEAD)
+							seen_status = now_status;
+					}
+
+					if (defer_to_validation)
+					{
+						INJECTION_POINT("bt_load_defer_unique_check", NULL);
+
+						/*
+						 * Validation must scan the whole heap to find entries
+						 * skipped here.  Any scheme that scans only part of
+						 * the heap would need to track these entries
+						 * separately.
+						 */
+					}
+				}
+				else
+					in_group = false;
+			}
+
+			if (!defer_to_validation)
+				_bt_buildadd(wstate, state, itup, 0);
+			else
+			{
+				/*
+				 * Deferred entries bypass _bt_buildadd(), so check for
+				 * interrupts and snapshot resets here too.
+				 */
+				CHECK_FOR_INTERRUPTS();
+				index_build_rotate_snapshot(wstate->indexInfo);
+			}
+
+			/*
+			 * The tuple is only valid until the next fetch.  Keep a copy for
+			 * comparison, reusing the buffer when it is large enough.
+			 */
+			if (IndexTupleSize(itup) > prevbufsize)
+			{
+				if (prev)
+					pfree(prev);
+				prevbufsize = IndexTupleSize(itup);
+				prev = (IndexTuple) palloc(prevbufsize);
+			}
+			memcpy(prev, itup, IndexTupleSize(itup));
+
+			/* Report progress */
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
+										 ++tuples_done);
+		}
+		if (prev)
+			pfree(prev);
+	}
+	else if (merge)
 	{
 		/*
 		 * Another BTSpool for dead tuples exists. Now we have to merge
@@ -1429,16 +1580,16 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
 
 	/*
-	 * Prepare for scan of the base relation.  In a normal index build, we use
-	 * SnapshotAny because we must retrieve all tuples and do our own time
-	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
-	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
+	 * Use SnapshotAny for non-concurrent builds so the scan can include
+	 * RECENTLY_DEAD tuples.  Concurrent builds use the active snapshot from
+	 * index_build(), which parallel initialization serializes for the
+	 * workers.  Do not register another copy, as it would pin xmin across
+	 * snapshot resets.
 	 */
 	if (!isconcurrent)
 		snapshot = SnapshotAny;
 	else
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		snapshot = InvalidSnapshot;
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
@@ -1450,16 +1601,15 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
 
 	/*
-	 * Unique case requires a second spool, and so we may have to account for
-	 * another shared workspace for that -- PARALLEL_KEY_TUPLESORT_SPOOL2
+	 * Account for PARALLEL_KEY_TUPLESORT_SPOOL2 if a second spool is needed.
 	 */
-	if (!btspool->isunique)
-		shm_toc_estimate_keys(&pcxt->estimator, 2);
-	else
+	if (BTBuildNeedsSpool2(btspool->isunique, isconcurrent))
 	{
 		shm_toc_estimate_chunk(&pcxt->estimator, estsort);
 		shm_toc_estimate_keys(&pcxt->estimator, 3);
 	}
+	else
+		shm_toc_estimate_keys(&pcxt->estimator, 2);
 
 	/*
 	 * Estimate space for WalUsage and BufferUsage -- PARALLEL_KEY_WAL_USAGE
@@ -1492,8 +1642,6 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
-			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
 		return;
@@ -1506,6 +1654,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	btshared->indexrelid = RelationGetRelid(btspool->index);
 	btshared->isunique = btspool->isunique;
 	btshared->nulls_not_distinct = btspool->nulls_not_distinct;
+	btshared->unique_dead_ignored = btspool->unique_dead_ignored;
 	btshared->isconcurrent = isconcurrent;
 	btshared->scantuplesortstates = scantuplesortstates;
 	btshared->queryid = pgstat_get_my_query_id();
@@ -1519,7 +1668,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	btshared->brokenhotchain = false;
 	table_parallelscan_initialize(btspool->heap,
 								  ParallelTableScanFromBTShared(btshared),
-								  snapshot);
+								  snapshot,
+								  isconcurrent);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1532,10 +1682,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BTREE_SHARED, btshared);
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT, sharedsort);
 
-	/* Unique case requires a second spool, and associated shared state */
-	if (!btspool->isunique)
-		sharedsort2 = NULL;
-	else
+	if (BTBuildNeedsSpool2(btspool->isunique, isconcurrent))
 	{
 		/*
 		 * Store additional shared tuplesort-private state, for which we
@@ -1548,6 +1695,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT_SPOOL2, sharedsort2);
 	}
+	else
+		sharedsort2 = NULL;
 
 	/* Store query string for workers */
 	if (debug_query_string)
@@ -1579,7 +1728,6 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	btleader->btshared = btshared;
 	btleader->sharedsort = sharedsort;
 	btleader->sharedsort2 = sharedsort2;
-	btleader->snapshot = snapshot;
 	btleader->walusage = walusage;
 	btleader->bufferusage = bufferusage;
 
@@ -1593,15 +1741,19 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->btleader = btleader;
 
+	/*
+	 * Wait for workers to attach before joining the scan, so startup failures
+	 * are reported before we wait for their snapshots.  The leader must keep
+	 * its initial snapshot until every worker has restored it.
+	 */
+	WaitForParallelWorkersToAttach(pcxt);
+	if (isconcurrent)
+		table_parallelscan_wait_restored(ParallelTableScanFromBTShared(btshared),
+										 pcxt->nworkers_launched);
+
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
 		_bt_leader_participate_as_worker(buildstate);
-
-	/*
-	 * Caller needs to wait for all launched workers when we return.  Make
-	 * sure that the failure-to-start case will not hang forever.
-	 */
-	WaitForParallelWorkersToAttach(pcxt);
 }
 
 /*
@@ -1622,16 +1774,14 @@ _bt_end_parallel(BTLeader *btleader)
 	for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
 
-	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(btleader->snapshot))
-		UnregisterSnapshot(btleader->snapshot);
 	DestroyParallelContext(btleader->pcxt);
 	ExitParallelMode();
 }
 
 /*
- * Returns size of shared memory required to store state for a parallel
- * btree index build based on the snapshot its parallel scan will use.
+ * Estimate shared memory for a parallel btree build.  Pass InvalidSnapshot
+ * for scans that reset snapshots, since they use the snapshot serialized by
+ * parallel initialization.
  */
 static Size
 _bt_parallel_estimate_shared(Relation heap, Snapshot snapshot)
@@ -1701,9 +1851,11 @@ _bt_leader_participate_as_worker(BTBuildState *buildstate)
 	leaderworker->index = buildstate->spool->index;
 	leaderworker->isunique = buildstate->spool->isunique;
 	leaderworker->nulls_not_distinct = buildstate->spool->nulls_not_distinct;
+	leaderworker->unique_dead_ignored = buildstate->spool->unique_dead_ignored;
 
 	/* Initialize second spool, if required */
-	if (!btleader->btshared->isunique)
+	if (!BTBuildNeedsSpool2(btleader->btshared->isunique,
+							btleader->btshared->isconcurrent))
 		leaderworker2 = NULL;
 	else
 	{
@@ -1804,11 +1956,12 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	btspool->index = indexRel;
 	btspool->isunique = btshared->isunique;
 	btspool->nulls_not_distinct = btshared->nulls_not_distinct;
+	btspool->unique_dead_ignored = btshared->unique_dead_ignored;
 
 	/* Look up shared state private to tuplesort.c */
 	sharedsort = shm_toc_lookup(toc, PARALLEL_KEY_TUPLESORT, false);
 	tuplesort_attach_shared(sharedsort, seg);
-	if (!btshared->isunique)
+	if (!BTBuildNeedsSpool2(btshared->isunique, btshared->isconcurrent))
 	{
 		btspool2 = NULL;
 		sharedsort2 = NULL;
@@ -1873,6 +2026,7 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	SortCoordinate coordinate;
 	BTBuildState buildstate;
 	TableScanDesc scan;
+	ParallelTableScanDesc pscan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
 
@@ -1887,6 +2041,7 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 													 btspool->index,
 													 btspool->isunique,
 													 btspool->nulls_not_distinct,
+													 btspool->unique_dead_ignored,
 													 sortmem, coordinate,
 													 TUPLESORT_NONE);
 
@@ -1909,14 +2064,12 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 		coordinate2->nParticipants = -1;
 		coordinate2->sharedsort = sharedsort2;
 		btspool2->sortstate =
-			tuplesort_begin_index_btree(btspool->heap, btspool->index, false, false,
+			tuplesort_begin_index_btree(btspool->heap, btspool->index, false, false, false,
 										Min(sortmem, work_mem), coordinate2,
 										false);
 	}
 
 	/* Fill in buildstate for _bt_build_callback() */
-	buildstate.isunique = btshared->isunique;
-	buildstate.nulls_not_distinct = btshared->nulls_not_distinct;
 	buildstate.havedead = false;
 	buildstate.heap = btspool->heap;
 	buildstate.spool = btspool;
@@ -1925,10 +2078,12 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	buildstate.btleader = NULL;
 
 	/* Join parallel scan */
+	pscan = ParallelTableScanFromBTShared(btshared);
 	indexInfo = BuildIndexInfo(btspool->index);
 	indexInfo->ii_Concurrent = btshared->isconcurrent;
+	indexInfo->ii_ResetSnapshot = pscan->phs_reset_snapshot;
 	scan = table_beginscan_parallel(btspool->heap,
-									ParallelTableScanFromBTShared(btshared),
+									pscan,
 									SO_NONE);
 	reltuples = table_index_build_scan(btspool->heap, btspool->index, indexInfo,
 									   true, progress, _bt_build_callback,

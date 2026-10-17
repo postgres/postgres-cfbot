@@ -12780,6 +12780,29 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-concurrent-index-reset-snapshot-interval" xreflabel="concurrent_index_reset_snapshot_interval">
+      <term><varname>concurrent_index_reset_snapshot_interval</varname> (<type>integer</type>)
+      <indexterm>
+        <primary><varname>concurrent_index_reset_snapshot_interval</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the minimum time between snapshot resets during
+        <command>CREATE INDEX CONCURRENTLY</command> and
+        <command>REINDEX CONCURRENTLY</command>, allowing the xmin horizon to
+        advance.  The first heap scan resets its snapshot at page boundaries.
+        Later build phases check for resets between tuples.  Sorting and
+        intermediate merges inside tuplesort do not reset the snapshot, and
+        the validation scan keeps a fixed snapshot.
+        If no unit is specified, the value is in milliseconds.  The default
+        is <literal>100ms</literal>.  A value of <literal>0</literal> resets at
+        every opportunity, including the start of the scan, and is useful
+        for testing.  <literal>-1</literal> disables resets.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-backtrace-functions" xreflabel="backtrace_functions">
       <term><varname>backtrace_functions</varname> (<type>string</type>)
       <indexterm>
@@ -13006,6 +13029,31 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
         update the indexes when modifying the tables).  This is useful
         when recovering from damaged system indexes.
         This parameter cannot be changed after session start.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-index-build-duplicate-check-scale-factor" xreflabel="index_build_duplicate_check_scale_factor">
+      <term><varname>index_build_duplicate_check_scale_factor</varname> (<type>floating point</type>)
+      <indexterm>
+        <primary><varname>index_build_duplicate_check_scale_factor</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Limits heap fetches for early duplicate checks while sorting and
+        loading a concurrent unique index build.  Sorting and loading have
+        separate budgets.  Each sort uses a fraction of the tuples received
+        so far; loading uses a fraction of the total tuples collected by the
+        scan, including all parallel workers.  The default fraction is
+        <literal>0.05</literal>.
+       </para>
+       <para>
+        After the load budget is exhausted, further entries with equal keys
+        are omitted from the index.  Validation inserts any surviving tuples
+        with a full uniqueness check.  A value of <literal>0</literal> leaves
+        duplicate checks to validation.  This limit does not apply to heap
+        fetches during validation.
        </para>
       </listitem>
      </varlistentry>

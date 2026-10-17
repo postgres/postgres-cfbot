@@ -335,7 +335,7 @@ pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 				 errmsg("only heap AM is supported")));
 
 	/* Disable syncscan because we assume we scan from block zero upwards */
-	scan = table_beginscan_strat(rel, SnapshotAny, 0, NULL, true, false);
+	scan = table_beginscan_strat(rel, SnapshotAny, 0, NULL, true, false, false);
 	hscan = (HeapScanDesc) scan;
 
 	InitDirtySnapshot(SnapshotDirty);

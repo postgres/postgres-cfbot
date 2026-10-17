@@ -1,0 +1,381 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s3_vacuum build s3_wake s2_begin s2_delete s3_insert s3_scan_end s3_await_defer s2_commit s3_build_end
+step s3_vacuum: VACUUM cic_uniq;
+step build: CREATE UNIQUE INDEX CONCURRENTLY cic_uniq_idx ON cic_uniq(k); <waiting ...>
+step s3_wake: SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_begin: BEGIN;
+step s2_delete: DELETE FROM cic_uniq WHERE k = 1;
+step s3_insert: INSERT INTO cic_uniq VALUES (1, 'y');
+step s3_scan_end: 
+    SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+    SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s3_await_defer: 
+    DO $$
+    DECLARE tries int := 0;
+    BEGIN
+        LOOP
+            PERFORM 1 FROM pg_stat_activity
+             WHERE wait_event = 'bt_load_defer_unique_check';
+            EXIT WHEN FOUND;
+            IF tries >= 1200 THEN
+                RAISE 'the build did not reach the deferral point';
+            END IF;
+            PERFORM pg_sleep(0.05);
+            tries := tries + 1;
+        END LOOP;
+    END $$;
+
+step s2_commit: COMMIT;
+step s3_build_end: 
+    SELECT injection_points_detach('bt_load_defer_unique_check');
+    SELECT injection_points_wakeup('bt_load_defer_unique_check');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step build: <... completed>
+
+starting permutation: s3_vacuum build s3_wake s2_begin s2_delete s3_insert s3_scan_end s3_await_defer s2_rollback s3_build_end
+step s3_vacuum: VACUUM cic_uniq;
+step build: CREATE UNIQUE INDEX CONCURRENTLY cic_uniq_idx ON cic_uniq(k); <waiting ...>
+step s3_wake: SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_begin: BEGIN;
+step s2_delete: DELETE FROM cic_uniq WHERE k = 1;
+step s3_insert: INSERT INTO cic_uniq VALUES (1, 'y');
+step s3_scan_end: 
+    SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+    SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s3_await_defer: 
+    DO $$
+    DECLARE tries int := 0;
+    BEGIN
+        LOOP
+            PERFORM 1 FROM pg_stat_activity
+             WHERE wait_event = 'bt_load_defer_unique_check';
+            EXIT WHEN FOUND;
+            IF tries >= 1200 THEN
+                RAISE 'the build did not reach the deferral point';
+            END IF;
+            PERFORM pg_sleep(0.05);
+            tries := tries + 1;
+        END LOOP;
+    END $$;
+
+step s2_rollback: ROLLBACK;
+step s3_build_end: 
+    SELECT injection_points_detach('bt_load_defer_unique_check');
+    SELECT injection_points_wakeup('bt_load_defer_unique_check');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step build: <... completed>
+ERROR:  duplicate key value violates unique constraint "cic_uniq_idx"
+
+starting permutation: s3_free_hot_slot s3_vacuum build s3_wake s2_begin s2_hot_update s3_insert s3_scan_end s3_await_defer s2_commit s3_build_end
+step s3_free_hot_slot: DELETE FROM cic_uniq WHERE k = 2;
+step s3_vacuum: VACUUM cic_uniq;
+step build: CREATE UNIQUE INDEX CONCURRENTLY cic_uniq_idx ON cic_uniq(k); <waiting ...>
+step s3_wake: SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_begin: BEGIN;
+step s2_hot_update: 
+    UPDATE cic_uniq SET pad = overlay(pad placing 'y' from 1 for 1) WHERE k = 1;
+    SELECT n_tup_upd, n_tup_hot_upd FROM pg_stat_xact_user_tables
+        WHERE relid = 'cic_uniq'::regclass;
+
+n_tup_upd|n_tup_hot_upd
+---------+-------------
+        1|            1
+(1 row)
+
+step s3_insert: INSERT INTO cic_uniq VALUES (1, 'y');
+step s3_scan_end: 
+    SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+    SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s3_await_defer: 
+    DO $$
+    DECLARE tries int := 0;
+    BEGIN
+        LOOP
+            PERFORM 1 FROM pg_stat_activity
+             WHERE wait_event = 'bt_load_defer_unique_check';
+            EXIT WHEN FOUND;
+            IF tries >= 1200 THEN
+                RAISE 'the build did not reach the deferral point';
+            END IF;
+            PERFORM pg_sleep(0.05);
+            tries := tries + 1;
+        END LOOP;
+    END $$;
+
+step s2_commit: COMMIT;
+step s3_build_end: 
+    SELECT injection_points_detach('bt_load_defer_unique_check');
+    SELECT injection_points_wakeup('bt_load_defer_unique_check');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step build: <... completed>
+ERROR:  duplicate key value violates unique constraint "cic_uniq_idx"
+
+starting permutation: s3_free_hot_slot s3_vacuum build s3_wake s2_begin s2_hot_update s3_insert s3_scan_end s3_await_defer s2_rollback s3_build_end
+step s3_free_hot_slot: DELETE FROM cic_uniq WHERE k = 2;
+step s3_vacuum: VACUUM cic_uniq;
+step build: CREATE UNIQUE INDEX CONCURRENTLY cic_uniq_idx ON cic_uniq(k); <waiting ...>
+step s3_wake: SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_begin: BEGIN;
+step s2_hot_update: 
+    UPDATE cic_uniq SET pad = overlay(pad placing 'y' from 1 for 1) WHERE k = 1;
+    SELECT n_tup_upd, n_tup_hot_upd FROM pg_stat_xact_user_tables
+        WHERE relid = 'cic_uniq'::regclass;
+
+n_tup_upd|n_tup_hot_upd
+---------+-------------
+        1|            1
+(1 row)
+
+step s3_insert: INSERT INTO cic_uniq VALUES (1, 'y');
+step s3_scan_end: 
+    SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+    SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s3_await_defer: 
+    DO $$
+    DECLARE tries int := 0;
+    BEGIN
+        LOOP
+            PERFORM 1 FROM pg_stat_activity
+             WHERE wait_event = 'bt_load_defer_unique_check';
+            EXIT WHEN FOUND;
+            IF tries >= 1200 THEN
+                RAISE 'the build did not reach the deferral point';
+            END IF;
+            PERFORM pg_sleep(0.05);
+            tries := tries + 1;
+        END LOOP;
+    END $$;
+
+step s2_rollback: ROLLBACK;
+step s3_build_end: 
+    SELECT injection_points_detach('bt_load_defer_unique_check');
+    SELECT injection_points_wakeup('bt_load_defer_unique_check');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step build: <... completed>
+ERROR:  duplicate key value violates unique constraint "cic_uniq_idx"
+
+starting permutation: zero_budget s3_vacuum build s3_wake s2_begin s2_delete s3_insert s3_scan_end s3_await_defer s2_commit s3_build_end
+step zero_budget: SET index_build_duplicate_check_scale_factor = 0;
+step s3_vacuum: VACUUM cic_uniq;
+step build: CREATE UNIQUE INDEX CONCURRENTLY cic_uniq_idx ON cic_uniq(k); <waiting ...>
+step s3_wake: SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_begin: BEGIN;
+step s2_delete: DELETE FROM cic_uniq WHERE k = 1;
+step s3_insert: INSERT INTO cic_uniq VALUES (1, 'y');
+step s3_scan_end: 
+    SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+    SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s3_await_defer: 
+    DO $$
+    DECLARE tries int := 0;
+    BEGIN
+        LOOP
+            PERFORM 1 FROM pg_stat_activity
+             WHERE wait_event = 'bt_load_defer_unique_check';
+            EXIT WHEN FOUND;
+            IF tries >= 1200 THEN
+                RAISE 'the build did not reach the deferral point';
+            END IF;
+            PERFORM pg_sleep(0.05);
+            tries := tries + 1;
+        END LOOP;
+    END $$;
+
+step s2_commit: COMMIT;
+step s3_build_end: 
+    SELECT injection_points_detach('bt_load_defer_unique_check');
+    SELECT injection_points_wakeup('bt_load_defer_unique_check');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step build: <... completed>
+
+starting permutation: zero_budget s3_vacuum build s3_wake s2_begin s2_delete s3_insert s3_scan_end s3_await_defer s2_rollback s3_build_end
+step zero_budget: SET index_build_duplicate_check_scale_factor = 0;
+step s3_vacuum: VACUUM cic_uniq;
+step build: CREATE UNIQUE INDEX CONCURRENTLY cic_uniq_idx ON cic_uniq(k); <waiting ...>
+step s3_wake: SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_begin: BEGIN;
+step s2_delete: DELETE FROM cic_uniq WHERE k = 1;
+step s3_insert: INSERT INTO cic_uniq VALUES (1, 'y');
+step s3_scan_end: 
+    SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+    SELECT injection_points_wakeup('heap_reset_scan_snapshot_swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s3_await_defer: 
+    DO $$
+    DECLARE tries int := 0;
+    BEGIN
+        LOOP
+            PERFORM 1 FROM pg_stat_activity
+             WHERE wait_event = 'bt_load_defer_unique_check';
+            EXIT WHEN FOUND;
+            IF tries >= 1200 THEN
+                RAISE 'the build did not reach the deferral point';
+            END IF;
+            PERFORM pg_sleep(0.05);
+            tries := tries + 1;
+        END LOOP;
+    END $$;
+
+step s2_rollback: ROLLBACK;
+step s3_build_end: 
+    SELECT injection_points_detach('bt_load_defer_unique_check');
+    SELECT injection_points_wakeup('bt_load_defer_unique_check');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step build: <... completed>
+ERROR:  duplicate key value violates unique constraint "cic_uniq_idx"

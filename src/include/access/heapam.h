@@ -69,6 +69,7 @@ typedef struct HeapScanDescData
 	bool		rs_inited;		/* false = scan not init'd yet */
 	OffsetNumber rs_coffset;	/* current offset # in non-page-at-a-time mode */
 	BlockNumber rs_cblock;		/* current block # in scan, if any */
+	SnapshotRotation rs_rotation;	/* snapshot resets (SO_RESET_SNAPSHOT) */
 	Buffer		rs_cbuf;		/* current buffer in scan, if any */
 	/* NB: if rs_cbuf is not InvalidBuffer, we hold a pin on that buffer */
 
