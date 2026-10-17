@@ -652,7 +652,7 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 		sos->colTypes = lappend_oid(sos->colTypes, search_seq_type);
 		sos->colTypmods = lappend_int(sos->colTypmods, -1);
 		sos->colCollations = lappend_oid(sos->colCollations, InvalidOid);
-		if (!sos->all)
+		if (!sos->all && !ctequery->hasDistinctOn)
 		{
 			SortGroupClause *sgc = makeSortGroupClauseForSetOp(search_seq_type, true);
 			sgc->tleSortGroupRef = list_length(sos->colTypes);
@@ -664,7 +664,7 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 		sos->colTypes = lappend_oid(sos->colTypes, cte->cycle_clause->cycle_mark_type);
 		sos->colTypmods = lappend_int(sos->colTypmods, cte->cycle_clause->cycle_mark_typmod);
 		sos->colCollations = lappend_oid(sos->colCollations, cte->cycle_clause->cycle_mark_collation);
-		if (!sos->all)
+		if (!sos->all && !ctequery->hasDistinctOn)
 		{
 			SortGroupClause *sgc = makeSortGroupClauseForSetOp(cte->cycle_clause->cycle_mark_type, true);
 			sgc->tleSortGroupRef = list_length(sos->colTypes);
@@ -674,7 +674,7 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 		sos->colTypes = lappend_oid(sos->colTypes, RECORDARRAYOID);
 		sos->colTypmods = lappend_int(sos->colTypmods, -1);
 		sos->colCollations = lappend_oid(sos->colCollations, InvalidOid);
-		if (!sos->all)
+		if (!sos->all && !ctequery->hasDistinctOn)
 		{
 			SortGroupClause *sgc = makeSortGroupClauseForSetOp(RECORDARRAYOID, true);
 			sgc->tleSortGroupRef = list_length(sos->colTypes);
