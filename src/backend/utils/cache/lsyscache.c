@@ -3651,6 +3651,28 @@ get_attstatsslot(AttStatsSlot *sslot, HeapTuple statstuple,
 }
 
 /*
+ * Try to fetch the value-sorted MCV statistics first, and fall back
+ * to the traditional MCV statistics for compatibility with statistics
+ * generated without STATISTIC_KIND_MCV_VALUE_SORTED.
+ */
+int
+get_attstatsslot_mcv(AttStatsSlot *sslot, HeapTuple statstuple,
+					 Oid reqop, int flags)
+{
+	if (get_attstatsslot(sslot, statstuple,
+						 STATISTIC_KIND_MCV_VALUE_SORTED, reqop,
+						 flags))
+		return STATISTIC_KIND_MCV_VALUE_SORTED;
+
+	if (get_attstatsslot(sslot, statstuple,
+						 STATISTIC_KIND_MCV, reqop,
+						 flags))
+		return STATISTIC_KIND_MCV;
+
+	return 0;
+}
+
+/*
  * free_attstatsslot
  *		Free data allocated by get_attstatsslot
  */
