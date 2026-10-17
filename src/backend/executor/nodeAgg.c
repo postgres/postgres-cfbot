@@ -4405,9 +4405,14 @@ ExecEndAgg(AggState *node)
 
 		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
 		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
-		si->hash_batches_used = node->hash_batches_used;
-		si->hash_disk_used = node->hash_disk_used;
-		si->hash_mem_peak = node->hash_mem_peak;
+
+		/* Workers restart on rescan; count the initial batch only once. */
+		if (si->hash_batches_used == 0)
+			si->hash_batches_used = node->hash_batches_used;
+		else
+			si->hash_batches_used += node->hash_batches_used - 1;
+		si->hash_disk_used = Max(si->hash_disk_used, node->hash_disk_used);
+		si->hash_mem_peak = Max(si->hash_mem_peak, node->hash_mem_peak);
 	}
 
 	/* Make sure we have closed any open tuplesorts */
