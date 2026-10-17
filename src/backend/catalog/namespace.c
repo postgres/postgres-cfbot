@@ -204,6 +204,9 @@ static Oid	myTempToastNamespace = InvalidOid;
 
 static SubTransactionId myTempNamespaceSubID = InvalidSubTransactionId;
 
+/* Have we registered RemoveTempRelationsCallback for this session yet? */
+static bool myTempNamespaceCleanupRegistered = false;
+
 /*
  * This is the user's textual search path specification --- it's the value
  * of the GUC variable 'search_path'.
@@ -4440,6 +4443,26 @@ AccessTempTableNamespace(bool force)
 	MyXactFlags |= XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
 
 	/*
+	 * Nothing stops this session, or any superuser, from dropping pg_temp_N
+	 * while the session is still using it, so reset myTempNamespace in case
+	 * it no longer exists.
+	 */
+	if (OidIsValid(myTempNamespace) &&
+		!SearchSysCacheExists1(NAMESPACEOID,
+							   ObjectIdGetDatum(myTempNamespace)))
+	{
+		myTempNamespace = InvalidOid;
+		myTempToastNamespace = InvalidOid;
+		myTempNamespaceSubID = InvalidSubTransactionId;
+
+		/* Reset the temporary namespace flag in MyProc. */
+		MyProc->tempNamespaceId = InvalidOid;
+
+		baseSearchPathValid = false;	/* need to rebuild list */
+		searchPathCacheValid = false;
+	}
+
+	/*
 	 * If the caller attempting to access a temporary schema expects the
 	 * creation of the namespace to be pending and should be enforced, then go
 	 * through the creation.
@@ -4594,7 +4617,14 @@ AtEOXact_Namespace(bool isCommit, bool parallel)
 	if (myTempNamespaceSubID != InvalidSubTransactionId && !parallel)
 	{
 		if (isCommit)
-			before_shmem_exit(RemoveTempRelationsCallback, 0);
+		{
+			/* register the callback only once per session */
+			if (!myTempNamespaceCleanupRegistered)
+			{
+				before_shmem_exit(RemoveTempRelationsCallback, 0);
+				myTempNamespaceCleanupRegistered = true;
+			}
+		}
 		else
 		{
 			myTempNamespace = InvalidOid;
