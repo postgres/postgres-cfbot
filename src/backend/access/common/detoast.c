@@ -14,21 +14,94 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "access/heapam.h"
+#include "access/heaptoast.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
 #include "access/toast_internals.h"
+#include "catalog/pg_type.h"
 #include "common/int.h"
 #include "common/pg_lzcompress.h"
+#include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "utils/expandeddatum.h"
 #include "utils/rel.h"
+#include "utils/array.h"
 
-static varlena *toast_fetch_datum(varlena *attr);
 static varlena *toast_fetch_datum_slice(varlena *attr,
 										int32 sliceoffset,
 										int32 slicelength);
-static varlena *toast_decompress_datum(varlena *attr);
+static inline varlena *
+toast_fetch_datum(varlena *attr)
+{
+	return toast_fetch_datum_slice(attr, 0, -1);
+}
+
+#define DIRECT_TOAST_MAX_DEPTH	16
+
+typedef struct DirectToastLevelBufState
+{
+	Buffer		bufs[MAX_IO_COMBINE_LIMIT];
+	BlockNumber first_blk;
+	int			num_bufs;
+	int			cur_idx;
+} DirectToastLevelBufState;
+
 static varlena *toast_decompress_datum_slice(varlena *attr, int32 slicelength);
+static void toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
+													 varlena *result, int32 *logical_offset,
+													 int32 sliceoffset, int32 slicelength,
+													 DirectToastLevelBufState *cbufs,
+													 int depth, int max_contig_blocks);
+
+/*
+ * Unpacked metadata from either plain (varatt_external_oid /
+ * varatt_external_oid8) or direct (varatt_direct) on-disk TOAST pointers.
+ */
+typedef struct ToastExternalMetadata
+{
+	int32		extsize;
+	uint32		compress_method;
+	bool		is_compressed;
+	Oid			toastrelid;
+	bool		is_direct;
+	union
+	{
+		Oid8		valueid;
+		struct varatt_direct direct_tp;
+	};
+} ToastExternalMetadata;
+
+static inline void
+toast_get_external_metadata(varlena *attr, ToastExternalMetadata *meta)
+{
+	if (VARATT_IS_EXTERNAL_DIRECT(attr))
+	{
+		VARATT_EXTERNAL_GET_POINTER_DIRECT(meta->direct_tp, attr);
+		meta->extsize = VARATT_DIRECT_GET_EXTSIZE(meta->direct_tp);
+		meta->compress_method = VARATT_DIRECT_GET_COMPRESS_METHOD(meta->direct_tp);
+		meta->is_compressed = VARATT_DIRECT_IS_COMPRESSED(meta->direct_tp);
+		meta->toastrelid = meta->direct_tp.va_toastrelid;
+		meta->is_direct = true;
+	}
+	else if (VARATT_IS_EXTERNAL_ONDISK(attr))
+	{
+		toast_external_data toast_ext_data;
+
+		toast_external_info_get(attr, &toast_ext_data);
+		meta->extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+		meta->compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
+		meta->is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+		meta->toastrelid = toast_ext_data.toastrelid;
+		meta->is_direct = false;
+		meta->valueid = toast_ext_data.valueid;
+	}
+	else
+	{
+		elog(ERROR, "toast_get_external_metadata called for unsupported datum");
+	}
+}
 
 /* ----------
  * detoast_external_attr -
@@ -47,10 +120,10 @@ detoast_external_attr(varlena *attr)
 {
 	varlena    *result;
 
-	if (VARATT_IS_EXTERNAL_ONDISK(attr))
+	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_EXTERNAL_DIRECT(attr))
 	{
 		/*
-		 * This is an external stored plain value
+		 * This is an external stored plain or direct value
 		 */
 		result = toast_fetch_datum(attr);
 	}
@@ -116,79 +189,7 @@ detoast_external_attr(varlena *attr)
 varlena *
 detoast_attr(varlena *attr)
 {
-	if (VARATT_IS_EXTERNAL_ONDISK(attr))
-	{
-		/*
-		 * This is an externally stored datum --- fetch it back from there
-		 */
-		attr = toast_fetch_datum(attr);
-		/* If it's compressed, decompress it */
-		if (VARATT_IS_COMPRESSED(attr))
-		{
-			varlena    *tmp = attr;
-
-			attr = toast_decompress_datum(tmp);
-			pfree(tmp);
-		}
-	}
-	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
-	{
-		/*
-		 * This is an indirect pointer --- dereference it
-		 */
-		varatt_indirect redirect;
-
-		VARATT_EXTERNAL_GET_POINTER(redirect, attr);
-		attr = (varlena *) redirect.pointer;
-
-		/* nested indirect Datums aren't allowed */
-		Assert(!VARATT_IS_EXTERNAL_INDIRECT(attr));
-
-		/* recurse in case value is still extended in some other way */
-		attr = detoast_attr(attr);
-
-		/* if it isn't, we'd better copy it */
-		if (attr == (varlena *) redirect.pointer)
-		{
-			varlena    *result;
-
-			result = (varlena *) palloc(VARSIZE_ANY(attr));
-			memcpy(result, attr, VARSIZE_ANY(attr));
-			attr = result;
-		}
-	}
-	else if (VARATT_IS_EXTERNAL_EXPANDED(attr))
-	{
-		/*
-		 * This is an expanded-object pointer --- get flat format
-		 */
-		attr = detoast_external_attr(attr);
-		/* flatteners are not allowed to produce compressed/short output */
-		Assert(!VARATT_IS_EXTENDED(attr));
-	}
-	else if (VARATT_IS_COMPRESSED(attr))
-	{
-		/*
-		 * This is a compressed value inside of the main tuple
-		 */
-		attr = toast_decompress_datum(attr);
-	}
-	else if (VARATT_IS_SHORT(attr))
-	{
-		/*
-		 * This is a short-header varlena --- convert to 4-byte header format
-		 */
-		Size		data_size = VARSIZE_SHORT(attr) - VARHDRSZ_SHORT;
-		Size		new_size = data_size + VARHDRSZ;
-		varlena    *new_attr;
-
-		new_attr = (varlena *) palloc(new_size);
-		SET_VARSIZE(new_attr, new_size);
-		memcpy(VARDATA(new_attr), VARDATA_SHORT(attr), data_size);
-		attr = new_attr;
-	}
-
-	return attr;
+	return detoast_attr_slice(attr, 0, -1);
 }
 
 
@@ -224,30 +225,25 @@ detoast_attr_slice(varlena *attr,
 	else if (pg_add_s32_overflow(sliceoffset, slicelength, &slicelimit))
 		slicelength = slicelimit = -1;
 
-	if (VARATT_IS_EXTERNAL_ONDISK(attr))
+	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_EXTERNAL_DIRECT(attr))
 	{
-		toast_external_data toast_ext_data;
-		int32		extsize;
-		uint32		compress_method;
-		bool		is_compressed;
+		ToastExternalMetadata meta;
+		int32		max_size = -1;
 
-		toast_external_info_get(attr, &toast_ext_data);
-		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-		compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
-		is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+		toast_get_external_metadata(attr, &meta);
 
 		/* fast path for non-compressed external datums */
-		if (!is_compressed)
+		if (!meta.is_compressed)
 			return toast_fetch_datum_slice(attr, sliceoffset, slicelength);
 
 		/*
 		 * For compressed values, we need to fetch enough slices to decompress
 		 * at least the requested part (when a prefix is requested).
-		 * Otherwise, just fetch all slices.
+		 * Otherwise, just fetch all slices (max_size = -1).
 		 */
 		if (slicelimit >= 0)
 		{
-			int32		max_size = extsize;
+			max_size = meta.extsize;
 
 			/*
 			 * Determine maximum amount of compressed data needed for a prefix
@@ -258,34 +254,48 @@ detoast_attr_slice(varlena *attr,
 			 * determine how much compressed data we need to be sure of being
 			 * able to decompress the required slice.
 			 */
-			if (compress_method == TOAST_PGLZ_COMPRESSION_ID)
+			if (meta.compress_method == TOAST_PGLZ_COMPRESSION_ID)
 				max_size = pglz_maximum_compressed_size(slicelimit, max_size);
-
-			/*
-			 * Fetch enough compressed slices (compressed marker will get set
-			 * automatically).
-			 */
-			preslice = toast_fetch_datum_slice(attr, 0, max_size);
 		}
-		else
-			preslice = toast_fetch_datum(attr);
+
+		/*
+		 * Fetch enough compressed slices (compressed marker will get set
+		 * automatically).
+		 */
+		preslice = toast_fetch_datum_slice(attr, 0, max_size);
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
 		varatt_indirect redirect;
+		varlena    *res;
 
 		VARATT_EXTERNAL_GET_POINTER(redirect, attr);
 
 		/* nested indirect Datums aren't allowed */
 		Assert(!VARATT_IS_EXTERNAL_INDIRECT(redirect.pointer));
 
-		return detoast_attr_slice(redirect.pointer,
-								  sliceoffset, slicelength);
+		res = detoast_attr_slice(redirect.pointer, sliceoffset, slicelength);
+
+		/*
+		 * If result points directly into redirect target, make a copy in the
+		 * caller's memory context.
+		 */
+		if (res == (varlena *) redirect.pointer)
+		{
+			varlena    *copy = (varlena *) palloc(VARSIZE_ANY(res));
+
+			memcpy(copy, res, VARSIZE_ANY(res));
+			res = copy;
+		}
+
+		return res;
 	}
 	else if (VARATT_IS_EXTERNAL_EXPANDED(attr))
 	{
 		/* pass it off to detoast_external_attr to flatten */
 		preslice = detoast_external_attr(attr);
+		/* flatteners are not allowed to produce compressed/short output */
+		Assert(!VARATT_IS_EXTENDED(preslice));
 	}
 	else
 		preslice = attr;
@@ -296,15 +306,21 @@ detoast_attr_slice(varlena *attr,
 	{
 		varlena    *tmp = preslice;
 
-		/* Decompress enough to encompass the slice and the offset */
-		if (slicelimit >= 0)
-			preslice = toast_decompress_datum_slice(tmp, slicelimit);
-		else
-			preslice = toast_decompress_datum(tmp);
+		/* Decompress enough to encompass the slice and the offset (or all if slicelimit < 0) */
+		preslice = toast_decompress_datum_slice(tmp, slicelimit);
 
 		if (tmp != attr)
 			pfree(tmp);
 	}
+
+	/*
+	 * If the entire datum was requested from offset 0, and the datum is in
+	 * standard 4-byte uncompressed format (not extended/short), return it directly.
+	 * This avoids a redundant copy for inline uncompressed datums, freshly
+	 * decompressed datums, and uncompressed external fetches.
+	 */
+	if (sliceoffset == 0 && slicelength < 0 && !VARATT_IS_EXTENDED(preslice))
+		return preslice;
 
 	if (VARATT_IS_SHORT(preslice))
 	{
@@ -339,61 +355,10 @@ detoast_attr_slice(varlena *attr,
 }
 
 /* ----------
- * toast_fetch_datum -
- *
- *	Reconstruct an in memory Datum from the chunks saved
- *	in the toast relation
- * ----------
- */
-static varlena *
-toast_fetch_datum(varlena *attr)
-{
-	Relation	toastrel;
-	varlena    *result;
-	toast_external_data toast_ext_data;
-	int32		attrsize;
-	Oid			toastrelid;
-	Oid8		valueid;
-
-	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
-		elog(ERROR, "toast_fetch_datum shouldn't be called for non-ondisk datums");
-
-	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-	toastrelid = toast_ext_data.toastrelid;
-	valueid = toast_ext_data.valueid;
-
-	result = (varlena *) palloc(attrsize + VARHDRSZ);
-
-	if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
-		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
-	else
-		SET_VARSIZE(result, attrsize + VARHDRSZ);
-
-	if (attrsize == 0)
-		return result;			/* Probably shouldn't happen, but just in
-								 * case. */
-
-	/*
-	 * Open the toast relation and its indexes
-	 */
-	toastrel = table_open(toastrelid, AccessShareLock);
-
-	/* Fetch all chunks */
-	table_relation_fetch_toast_slice(toastrel, valueid,
-									 attrsize, 0, attrsize, result);
-
-	/* Close toast table */
-	table_close(toastrel, AccessShareLock);
-
-	return result;
-}
-
-/* ----------
  * toast_fetch_datum_slice -
  *
  *	Reconstruct a segment of a Datum from the chunks saved
- *	in the toast relation
+ *	in the toast relation (supports both plain index-based and direct TOAST).
  *
  *	Note that this function supports non-compressed external datums
  *	and compressed external datums (in which case the requested slice
@@ -406,27 +371,19 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 {
 	Relation	toastrel;
 	varlena    *result;
-	toast_external_data toast_ext_data;
 	int32		attrsize;
-	Oid			toastrelid;
-	Oid8		valueid;
-	bool		is_compressed;
+	ToastExternalMetadata meta;
 
-	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
-		elog(ERROR, "toast_fetch_datum_slice shouldn't be called for non-ondisk datums");
-
-	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-	toastrelid = toast_ext_data.toastrelid;
-	valueid = toast_ext_data.valueid;
-	is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+	toast_get_external_metadata(attr, &meta);
 
 	/*
 	 * It's nonsense to fetch slices of a compressed datum unless when it's a
 	 * prefix -- this isn't lo_* we can't return a compressed datum which is
 	 * meaningful to toast later.
 	 */
-	Assert(!is_compressed || 0 == sliceoffset);
+	Assert(!meta.is_compressed || 0 == sliceoffset);
+
+	attrsize = meta.extsize;
 
 	if (sliceoffset >= attrsize)
 	{
@@ -439,7 +396,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 	 * space required by va_tcinfo, which is stored at the beginning as an
 	 * int32 value.
 	 */
-	if (is_compressed && slicelength > 0)
+	if (meta.is_compressed && slicelength > 0)
 		slicelength = slicelength + sizeof(int32);
 
 	/*
@@ -452,7 +409,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 
 	result = (varlena *) palloc(slicelength + VARHDRSZ);
 
-	if (is_compressed)
+	if (meta.is_compressed)
 		SET_VARSIZE_COMPRESSED(result, slicelength + VARHDRSZ);
 	else
 		SET_VARSIZE(result, slicelength + VARHDRSZ);
@@ -461,12 +418,90 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 		return result;			/* Can save a lot of work at this point! */
 
 	/* Open the toast relation */
-	toastrel = table_open(toastrelid, AccessShareLock);
+	toastrel = table_open(meta.toastrelid, AccessShareLock);
 
-	/* Fetch all chunks */
-	table_relation_fetch_toast_slice(toastrel, valueid,
-									 attrsize, sliceoffset, slicelength,
-									 result);
+	if (meta.is_direct)
+	{
+		/*
+		 * Fast path for single-chunk direct TOAST: fetch directly via
+		 * heap_fetch without allocating/dropping a TupleTableSlot.
+		 */
+		if (attrsize <= TOAST_MAX_CHUNK_SIZE(TupleDescAttr(toastrel->rd_att, 0)->atttypid))
+		{
+			HeapTupleData tup;
+			Buffer		buffer = InvalidBuffer;
+			bool		isnull;
+			Pointer		chunk;
+			int32		chunk_size;
+			char	   *chunk_data;
+
+			tup.t_self = meta.direct_tp.va_tid;
+			if (!heap_fetch(toastrel, get_toast_snapshot(), &tup, &buffer, false))
+				elog(ERROR, "failed to fetch toast tuple by TID");
+
+			chunk = DatumGetPointer(fastgetattr(&tup, 3, toastrel->rd_att, &isnull));
+			if (isnull)
+			{
+				ReleaseBuffer(buffer);
+				elog(ERROR, "unexpected NULL chunk_data in direct toast chunk");
+			}
+
+			if (!VARATT_IS_EXTENDED(chunk))
+			{
+				chunk_size = VARSIZE(chunk) - VARHDRSZ;
+				chunk_data = VARDATA(chunk);
+			}
+			else if (VARATT_IS_SHORT(chunk))
+			{
+				chunk_size = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+				chunk_data = VARDATA_SHORT(chunk);
+			}
+			else
+			{
+				ReleaseBuffer(buffer);
+				elog(ERROR, "unexpected type of toast chunk");
+			}
+
+			if (sliceoffset >= chunk_size)
+			{
+				slicelength = 0;
+				sliceoffset = 0;
+			}
+			else if (sliceoffset + slicelength > chunk_size || slicelength < 0)
+				slicelength = chunk_size - sliceoffset;
+
+			if (slicelength > 0)
+				memcpy(VARDATA(result), chunk_data + sliceoffset, slicelength);
+
+			ReleaseBuffer(buffer);
+		}
+		else
+		{
+			DirectToastLevelBufState cbufs[DIRECT_TOAST_MAX_DEPTH] = {0};
+			int32		logical_offset = 0;
+
+			toast_fetch_datum_direct_slice_recursive(toastrel, &meta.direct_tp.va_tid,
+													 result, &logical_offset,
+													 sliceoffset, slicelength,
+													 cbufs, 0, 1);
+
+			for (int d = 0; d < DIRECT_TOAST_MAX_DEPTH; d++)
+			{
+				for (int b = cbufs[d].cur_idx; b < cbufs[d].num_bufs; b++)
+				{
+					if (BufferIsValid(cbufs[d].bufs[b]))
+						ReleaseBuffer(cbufs[d].bufs[b]);
+				}
+			}
+		}
+	}
+	else
+	{
+		/* Fetch all chunks via Table AM index scan */
+		table_relation_fetch_toast_slice(toastrel, meta.valueid,
+										 attrsize, sliceoffset, slicelength,
+										 result);
+	}
 
 	/* Close toast table */
 	table_close(toastrel, AccessShareLock);
@@ -475,41 +510,11 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 }
 
 /* ----------
- * toast_decompress_datum -
- *
- * Decompress a compressed version of a varlena datum
- */
-static varlena *
-toast_decompress_datum(varlena *attr)
-{
-	ToastCompressionId cmid;
-
-	Assert(VARATT_IS_COMPRESSED(attr));
-
-	/*
-	 * Fetch the compression method id stored in the compression header and
-	 * decompress the data using the appropriate decompression routine.
-	 */
-	cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
-	switch (cmid)
-	{
-		case TOAST_PGLZ_COMPRESSION_ID:
-			return pglz_decompress_datum(attr);
-		case TOAST_LZ4_COMPRESSION_ID:
-			return lz4_decompress_datum(attr);
-		default:
-			elog(ERROR, "invalid compression method id %d", cmid);
-			return NULL;		/* keep compiler quiet */
-	}
-}
-
-
-/* ----------
  * toast_decompress_datum_slice -
  *
- * Decompress the front of a compressed version of a varlena datum.
+ * Decompress a compressed version of a varlena datum (or a slice from the front).
  * offset handling happens in detoast_attr_slice.
- * Here we just decompress a slice from the front.
+ * If slicelength < 0 or >= decompressed size, decompress the full datum.
  */
 static varlena *
 toast_decompress_datum_slice(varlena *attr, int32 slicelength)
@@ -519,19 +524,8 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 	Assert(VARATT_IS_COMPRESSED(attr));
 
 	/*
-	 * Some callers may pass a slicelength that's more than the actual
-	 * decompressed size.  If so, just decompress normally.  This avoids
-	 * possibly allocating a larger-than-necessary result object, and may be
-	 * faster and/or more robust as well.  Notably, some versions of liblz4
-	 * have been seen to give wrong results if passed an output size that is
-	 * more than the data's true decompressed size.
-	 */
-	if ((uint32) slicelength >= VARDATA_COMPRESSED_GET_EXTSIZE(attr))
-		return toast_decompress_datum(attr);
-
-	/*
 	 * Fetch the compression method id stored in the compression header and
-	 * decompress the data slice using the appropriate decompression routine.
+	 * decompress the data (slice or full) using the appropriate decompression routine.
 	 */
 	cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
 	switch (cmid)
@@ -566,6 +560,13 @@ toast_raw_datum_size(Datum value)
 
 		toast_external_info_get(attr, &toast_ext_data);
 		result = toast_ext_data.rawsize;
+	}
+	else if (VARATT_IS_EXTERNAL_DIRECT(attr))
+	{
+		struct varatt_direct toast_pointer;
+
+		VARATT_EXTERNAL_GET_POINTER_DIRECT(toast_pointer, attr);
+		result = toast_pointer.va_rawsize;
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
@@ -627,6 +628,13 @@ toast_datum_size(Datum value)
 		toast_external_info_get(attr, &toast_ext_data);
 		result = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
 	}
+	else if (VARATT_IS_EXTERNAL_DIRECT(attr))
+	{
+		struct varatt_direct toast_pointer;
+
+		VARATT_EXTERNAL_GET_POINTER_DIRECT(toast_pointer, attr);
+		result = VARATT_DIRECT_GET_EXTSIZE(toast_pointer);
+	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
 		varatt_indirect toast_pointer;
@@ -655,4 +663,474 @@ toast_datum_size(Datum value)
 		result = VARSIZE(attr);
 	}
 	return result;
+}
+
+/*
+ * Helper to copy overlapping chunk slice into detoasted result varlena.
+ */
+static inline void
+toast_slice_copy_chunk(struct varlena *result, const char *chunk_data,
+					   int32 chunk_size, int32 *logical_offset,
+					   int32 req_start, int32 req_end)
+{
+	int32		chunk_start = *logical_offset;
+	int32		chunk_end = chunk_start + chunk_size;
+
+	*logical_offset = chunk_end;
+
+	if (chunk_end > req_start && chunk_start < req_end)
+	{
+		int32		copy_start = Max(chunk_start, req_start);
+		int32		copy_end = Min(chunk_end, req_end);
+		int32		copy_len = copy_end - copy_start;
+
+		if (copy_len > 0)
+		{
+			int32		src_offset = copy_start - chunk_start;
+			int32		dest_offset = copy_start - req_start;
+
+			memcpy(VARDATA(result) + dest_offset, chunk_data + src_offset, copy_len);
+		}
+	}
+}
+
+/*
+ * Release all remaining pinned buffers in a DirectToastLevelBufState.
+ */
+static inline void
+toast_direct_release_level_bufs(DirectToastLevelBufState *cbuf)
+{
+	for (int b = cbuf->cur_idx; b < cbuf->num_bufs; b++)
+	{
+		if (BufferIsValid(cbuf->bufs[b]))
+		{
+			ReleaseBuffer(cbuf->bufs[b]);
+			cbuf->bufs[b] = InvalidBuffer;
+		}
+	}
+	cbuf->num_bufs = 0;
+	cbuf->cur_idx = 0;
+}
+
+/*
+ * Fetch a Direct TOAST tuple by TID, reusing pinned buffers in *cbuf when
+ * consecutive chunks at the same tree level reside on the same block or
+ * within a contiguous multi-block batch read via StartReadBuffers().
+ *
+ * Returns true if the tuple is valid and visible under snapshot, leaving
+ * cbuf->bufs[cbuf->cur_idx] pinned so the caller can safely read tuple
+ * attributes in place without copying.
+ */
+static inline bool
+toast_direct_fetch_tuple(Relation toastrel, ItemPointer tid, Snapshot snapshot,
+						 HeapTupleData *tuple, DirectToastLevelBufState *cbuf,
+						 int max_contig_blocks)
+{
+	BlockNumber target_blk = ItemPointerGetBlockNumber(tid);
+	Buffer		cur_buf;
+	Page		page;
+	OffsetNumber offnum;
+	ItemId		lp;
+	bool		valid;
+
+	tuple->t_self = *tid;
+
+	if (cbuf->num_bufs > 0 &&
+		target_blk >= cbuf->first_blk + cbuf->cur_idx &&
+		target_blk < cbuf->first_blk + cbuf->num_bufs)
+	{
+		int			new_idx = (int) (target_blk - cbuf->first_blk);
+
+		for (int b = cbuf->cur_idx; b < new_idx; b++)
+		{
+			ReleaseBuffer(cbuf->bufs[b]);
+			cbuf->bufs[b] = InvalidBuffer;
+		}
+		cbuf->cur_idx = new_idx;
+	}
+	else
+	{
+		int			nblocks;
+
+		toast_direct_release_level_bufs(cbuf);
+
+		nblocks = Max(max_contig_blocks, 1);
+		if (nblocks > io_combine_limit)
+			nblocks = io_combine_limit;
+		if (nblocks > MAX_IO_COMBINE_LIMIT)
+			nblocks = MAX_IO_COMBINE_LIMIT;
+
+		if (nblocks == 1)
+		{
+			cbuf->bufs[0] = ReadBuffer(toastrel, target_blk);
+			cbuf->first_blk = target_blk;
+			cbuf->num_bufs = 1;
+			cbuf->cur_idx = 0;
+		}
+		else
+		{
+			ReadBuffersOperation op;
+			int			req_nblocks = nblocks;
+
+			op.rel = toastrel;
+			op.smgr = RelationGetSmgr(toastrel);
+			op.persistence = toastrel->rd_rel->relpersistence;
+			op.forknum = MAIN_FORKNUM;
+			op.strategy = NULL;
+
+			if (StartReadBuffers(&op, cbuf->bufs, target_blk, &nblocks,
+								 READ_BUFFERS_SYNCHRONOUSLY))
+				WaitReadBuffers(&op);
+
+			/*
+			 * If StartReadBuffers split the operation, release any forwarded
+			 * buffers beyond nblocks so cbuf only holds [0 .. nblocks - 1].
+			 */
+			for (int b = nblocks; b < req_nblocks; b++)
+			{
+				if (BufferIsValid(cbuf->bufs[b]))
+				{
+					ReleaseBuffer(cbuf->bufs[b]);
+					cbuf->bufs[b] = InvalidBuffer;
+				}
+			}
+
+			cbuf->first_blk = target_blk;
+			cbuf->num_bufs = nblocks;
+			cbuf->cur_idx = 0;
+		}
+	}
+
+	cur_buf = cbuf->bufs[cbuf->cur_idx];
+
+	LockBuffer(cur_buf, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(cur_buf);
+
+	offnum = ItemPointerGetOffsetNumber(tid);
+	if (offnum < FirstOffsetNumber || offnum > PageGetMaxOffsetNumber(page))
+	{
+		LockBuffer(cur_buf, BUFFER_LOCK_UNLOCK);
+		tuple->t_data = NULL;
+		return false;
+	}
+
+	lp = PageGetItemId(page, offnum);
+	if (!ItemIdIsNormal(lp))
+	{
+		LockBuffer(cur_buf, BUFFER_LOCK_UNLOCK);
+		tuple->t_data = NULL;
+		return false;
+	}
+
+	tuple->t_data = (HeapTupleHeader) PageGetItem(page, lp);
+	tuple->t_len = ItemIdGetLength(lp);
+	tuple->t_tableOid = RelationGetRelid(toastrel);
+
+	valid = HeapTupleSatisfiesVisibility(tuple, snapshot, cur_buf);
+	HeapCheckForSerializableConflictOut(valid, toastrel, tuple, cur_buf, snapshot);
+
+	LockBuffer(cur_buf, BUFFER_LOCK_UNLOCK);
+
+	if (!valid)
+		tuple->t_data = NULL;
+
+	return valid;
+}
+
+/*
+ * toast_fetch_datum_direct_slice_recursive -
+ *
+ * Traverse a Direct TOAST tree/DAG to retrieve full datums or partial slices.
+ *
+ * Direct TOAST organizes chunks either as a single chunk, a flat multi-chunk
+ * list (chunk_tids populated, chunk_tid_offsets NULL), or a multi-level tree
+ * (both chunk_tids and chunk_tid_offsets populated).
+ *
+ * - Leaf chunks (chunk_tids IS NULL) copy their slice payload directly into
+ *   the result buffer at *logical_offset.
+ * - Flat multi-chunk roots iterate through all child TIDs in chunk_tids.
+ * - Interior tree chunks inspect chunk_tid_offsets to prune any subtrees that
+ *   do not overlap the requested range [sliceoffset, sliceoffset + slicelength),
+ *   achieving O(log N) slice fetching without consulting an index.
+ *
+ * Each tree depth maintains its own DirectToastLevelBufState in cbufs[depth]
+ * so that consecutive chunks on the same 8 KB block reuse the same buffer pin,
+ * and contiguous child blocks are read in multi-block vectored batches via
+ * StartReadBuffers() + WaitReadBuffers().
+ */
+static void
+toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
+										 varlena *result, int32 *logical_offset,
+										 int32 sliceoffset, int32 slicelength,
+										 DirectToastLevelBufState *cbufs,
+										 int depth, int max_contig_blocks)
+{
+	Snapshot	snapshot = get_toast_snapshot();
+	TupleDesc	toasttupDesc = toastrel->rd_att;
+	HeapTupleData tup;
+	DirectToastLevelBufState local_cbuf = {0};
+	DirectToastLevelBufState *level_cbuf = (depth < DIRECT_TOAST_MAX_DEPTH) ? &cbufs[depth] : &local_cbuf;
+	Datum		data_datum;
+	Datum		tids_datum;
+	Datum		offsets_datum;
+	bool		is_null_data;
+	bool		is_null_tids;
+	bool		is_null_offsets = true;
+
+	check_stack_depth();
+
+	if (!toast_direct_fetch_tuple(toastrel, tid, snapshot, &tup, level_cbuf,
+								  (depth < DIRECT_TOAST_MAX_DEPTH) ? max_contig_blocks : 1))
+	{
+		toast_direct_release_level_bufs(&local_cbuf);
+		elog(ERROR, "failed to fetch toast tuple by TID");
+	}
+
+	tids_datum = fastgetattr(&tup, 4, toasttupDesc, &is_null_tids);
+	if (is_null_tids)
+	{
+		/* Leaf chunk: copy data slice directly from pinned buffer */
+		data_datum = fastgetattr(&tup, 3, toasttupDesc, &is_null_data);
+		if (!is_null_data)
+		{
+			Pointer		chunk = DatumGetPointer(data_datum);
+			int32		chunk_size;
+			char	   *chunk_data;
+			int32		req_start = sliceoffset;
+			int32		req_end = sliceoffset + slicelength;
+
+			if (!VARATT_IS_EXTENDED(chunk))
+			{
+				chunk_size = VARSIZE(chunk) - VARHDRSZ;
+				chunk_data = VARDATA(chunk);
+			}
+			else if (VARATT_IS_SHORT(chunk))
+			{
+				chunk_size = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+				chunk_data = VARDATA_SHORT(chunk);
+			}
+			else
+			{
+				toast_direct_release_level_bufs(&local_cbuf);
+				elog(ERROR, "unexpected type of toast chunk");
+			}
+
+			toast_slice_copy_chunk(result, chunk_data, chunk_size,
+								   logical_offset, req_start, req_end);
+		}
+	}
+	else
+	{
+		ArrayType  *arr = DatumGetArrayTypeP(tids_datum);
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+		int			i;
+		int			max_combine = Min(io_combine_limit, MAX_IO_COMBINE_LIMIT);
+		DirectToastLevelBufState *child_cbuf = (depth + 1 < DIRECT_TOAST_MAX_DEPTH) ? &cbufs[depth + 1] : NULL;
+
+		offsets_datum = fastgetattr(&tup, 5, toasttupDesc, &is_null_offsets);
+
+		deconstruct_array_builtin(arr, TIDOID, &elems, &nulls, &nelems);
+
+		if (!is_null_offsets)
+		{
+			/*
+			 * Tree-structured interior node with chunk_tid_offsets.
+			 * Use offsets to prune subtrees that don't overlap the requested slice.
+			 */
+			ArrayType  *arr_offsets = DatumGetArrayTypeP(offsets_datum);
+			Datum	   *offset_elems;
+			bool	   *offset_nulls;
+			int			noffsets;
+			int64		req_start = sliceoffset;
+			int64		req_end = (slicelength < 0) ? PG_INT64_MAX : ((int64) sliceoffset + slicelength);
+
+			deconstruct_array_builtin(arr_offsets, INT8OID, &offset_elems, &offset_nulls, &noffsets);
+			Assert(noffsets == nelems + 1);
+
+			for (i = 0; i < nelems; i++)
+			{
+				int64		child_start = DatumGetInt64(offset_elems[i]);
+				int64		child_end = DatumGetInt64(offset_elems[i + 1]);
+				ItemPointer child_tid;
+				BlockNumber cur_blk;
+				int			contig_blocks = 1;
+
+				CHECK_FOR_INTERRUPTS();
+
+				if (child_end <= req_start || child_start >= req_end)
+				{
+					/* Subtree does not intersect slice range; skip it */
+					*logical_offset = (int32) child_end;
+					continue;
+				}
+
+				child_tid = (ItemPointer) DatumGetPointer(elems[i]);
+				cur_blk = ItemPointerGetBlockNumber(child_tid);
+
+				if (child_cbuf != NULL &&
+					!(child_cbuf->num_bufs > 0 &&
+					  cur_blk >= child_cbuf->first_blk + child_cbuf->cur_idx &&
+					  cur_blk < child_cbuf->first_blk + child_cbuf->num_bufs))
+				{
+					BlockNumber last_blk = cur_blk;
+
+					for (int j = i + 1; j < nelems && (int) (last_blk - cur_blk + 1) < max_combine; j++)
+					{
+						int64		next_start = DatumGetInt64(offset_elems[j]);
+						ItemPointer next_tid;
+						BlockNumber next_blk;
+
+						if (next_start >= req_end)
+							break;
+
+						next_tid = (ItemPointer) DatumGetPointer(elems[j]);
+						next_blk = ItemPointerGetBlockNumber(next_tid);
+						if (next_blk == last_blk)
+							continue;
+						if (next_blk == last_blk + 1)
+							last_blk = next_blk;
+						else
+							break;
+					}
+					contig_blocks = (int) (last_blk - cur_blk + 1);
+				}
+
+				*logical_offset = (int32) child_start;
+				toast_fetch_datum_direct_slice_recursive(toastrel,
+														 child_tid,
+														 result, logical_offset,
+														 sliceoffset, slicelength,
+														 cbufs, depth + 1,
+														 contig_blocks);
+				*logical_offset = (int32) child_end;
+			}
+
+			pfree(offset_elems);
+			pfree(offset_nulls);
+			if ((Pointer) arr_offsets != DatumGetPointer(offsets_datum))
+				pfree(arr_offsets);
+		}
+		else
+		{
+			/*
+			 * Flat direct TOAST: chunks 0 to nelems-1 are leaf data chunks
+			 * of size TOAST_MAX_CHUNK_SIZE, and the current chunk contains the
+			 * final chunk_data (chunk nelems).
+			 */
+			int32		max_chunk_size = TOAST_MAX_CHUNK_SIZE(TupleDescAttr(toasttupDesc, 0)->atttypid);
+			int64		req_start = sliceoffset;
+			int64		req_end = (slicelength < 0) ? PG_INT64_MAX : ((int64) sliceoffset + slicelength);
+
+			for (i = 0; i < nelems; i++)
+			{
+				int64		child_start = (int64) i * max_chunk_size;
+				int64		child_end = child_start + max_chunk_size;
+				ItemPointer child_tid;
+				BlockNumber cur_blk;
+				int			contig_blocks = 1;
+
+				CHECK_FOR_INTERRUPTS();
+
+				if (child_end <= req_start || child_start >= req_end)
+				{
+					/* Chunk does not intersect requested slice */
+					*logical_offset = (int32) child_end;
+					continue;
+				}
+
+				child_tid = (ItemPointer) DatumGetPointer(elems[i]);
+				cur_blk = ItemPointerGetBlockNumber(child_tid);
+
+				if (child_cbuf != NULL &&
+					!(child_cbuf->num_bufs > 0 &&
+					  cur_blk >= child_cbuf->first_blk + child_cbuf->cur_idx &&
+					  cur_blk < child_cbuf->first_blk + child_cbuf->num_bufs))
+				{
+					BlockNumber last_blk = cur_blk;
+
+					for (int j = i + 1; j < nelems && (int) (last_blk - cur_blk + 1) < max_combine; j++)
+					{
+						int64		next_start = (int64) j * max_chunk_size;
+						ItemPointer next_tid;
+						BlockNumber next_blk;
+
+						if (next_start >= req_end)
+							break;
+
+						next_tid = (ItemPointer) DatumGetPointer(elems[j]);
+						next_blk = ItemPointerGetBlockNumber(next_tid);
+						if (next_blk == last_blk)
+							continue;
+						if (next_blk == last_blk + 1)
+							last_blk = next_blk;
+						else
+							break;
+					}
+					contig_blocks = (int) (last_blk - cur_blk + 1);
+				}
+
+				*logical_offset = (int32) child_start;
+				toast_fetch_datum_direct_slice_recursive(toastrel,
+														 child_tid,
+														 result, logical_offset,
+														 sliceoffset, slicelength,
+														 cbufs, depth + 1,
+														 contig_blocks);
+				*logical_offset = (int32) child_end;
+			}
+
+			if ((int64) nelems * max_chunk_size < req_end)
+			{
+				data_datum = fastgetattr(&tup, 3, toasttupDesc, &is_null_data);
+				if (!is_null_data)
+				{
+					Pointer		chunk = DatumGetPointer(data_datum);
+					int32		chunk_size;
+					char	   *chunk_data;
+
+					if (!VARATT_IS_EXTENDED(chunk))
+					{
+						chunk_size = VARSIZE(chunk) - VARHDRSZ;
+						chunk_data = VARDATA(chunk);
+					}
+					else if (VARATT_IS_SHORT(chunk))
+					{
+						chunk_size = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+						chunk_data = VARDATA_SHORT(chunk);
+					}
+					else
+					{
+						toast_direct_release_level_bufs(&local_cbuf);
+						elog(ERROR, "unexpected type of toast chunk");
+					}
+
+					if (chunk_size > 0)
+					{
+						int64		root_start = (int64) nelems * max_chunk_size;
+						int64		root_end = root_start + chunk_size;
+
+						if (root_end > req_start && root_start < req_end)
+						{
+							int32		copy_req_end = (slicelength < 0) ? PG_INT32_MAX : (sliceoffset + slicelength);
+
+							*logical_offset = (int32) root_start;
+							toast_slice_copy_chunk(result, chunk_data, chunk_size,
+												   logical_offset, sliceoffset, copy_req_end);
+						}
+						else
+							*logical_offset = (int32) root_end;
+					}
+				}
+			}
+		}
+
+		pfree(elems);
+		pfree(nulls);
+		if ((Pointer) arr != DatumGetPointer(tids_datum))
+			pfree(arr);
+	}
+
+	toast_direct_release_level_bufs(&local_cbuf);
 }

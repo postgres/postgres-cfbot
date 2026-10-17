@@ -16,7 +16,9 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/reloptions.h"
 #include "access/toast_compression.h"
+#include "access/toast_internals.h"
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
@@ -27,10 +29,14 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
+#include "catalog/pg_type.h"
 #include "catalog/toasting.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/inval.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -135,6 +141,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	TupleDesc	tupdesc;
 	bool		shared_relation;
 	bool		mapped_relation;
+	bool		is_direct;
 	Relation	toast_rel;
 	Relation	class_rel;
 	Oid			toast_relid;
@@ -242,19 +249,28 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 
 	/*
 	 * Special case here.  If OIDOldToast is defined, rely on the existing
-	 * TOAST table and its chunk_id type, not the reloption value.  This
-	 * guarantees that the same TOAST table is kept across rewrites of the
-	 * parent.
+	 * TOAST table and its chunk_id type and column format, not the reloption
+	 * or GUC value.  This guarantees that the same TOAST table format is kept
+	 * across rewrites of the parent (where TOAST tables are swapped by
+	 * content).
 	 */
 	if (OidIsValid(OIDOldToast))
 	{
 		toast_chunkid_typid = get_atttype(OIDOldToast, 1);
 		if (!OidIsValid(toast_chunkid_typid))
 			elog(ERROR, "cache lookup failed for relation %u", OIDOldToast);
+
+		is_direct = OidIsValid(get_atttype(OIDOldToast, 5));
+	}
+	else
+	{
+		is_direct = !IsBootstrapProcessingMode() &&
+			(toast_default_flavour == TOAST_FLAVOUR_DIRECT ||
+			 RelationGetToastFlavour(rel) == TOAST_FLAVOUR_DIRECT);
 	}
 
 	/* this is pretty painful...  need a tuple descriptor */
-	tupdesc = CreateTemplateTupleDesc(3);
+	tupdesc = CreateTemplateTupleDesc(is_direct ? 5 : 3);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1,
 					   "chunk_id",
 					   toast_chunkid_typid,
@@ -267,6 +283,23 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 					   "chunk_data",
 					   BYTEAOID,
 					   -1, 0);
+	/*
+	 * Direct TOAST columns:
+	 * chunk_tids stores child chunk TIDs for flat multi-chunk roots and interior DAG nodes.
+	 * chunk_tid_offsets stores byte offsets within chunk_tids for binary-search slicing.
+	 * Both columns are NULL for simple leaf chunks or plain TOAST rows.
+	 */
+	if (is_direct)
+	{
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4,
+						   "chunk_tids",
+						   TIDARRAYOID,
+						   -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5,
+						   "chunk_tid_offsets",
+						   INT8ARRAYOID,
+						   -1, 0);
+	}
 
 	/*
 	 * Ensure that the toast table doesn't itself get toasted, or we'll be
@@ -276,15 +309,30 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	TupleDescAttr(tupdesc, 0)->attstorage = TYPSTORAGE_PLAIN;
 	TupleDescAttr(tupdesc, 1)->attstorage = TYPSTORAGE_PLAIN;
 	TupleDescAttr(tupdesc, 2)->attstorage = TYPSTORAGE_PLAIN;
+	if (is_direct)
+	{
+		TupleDescAttr(tupdesc, 3)->attstorage = TYPSTORAGE_PLAIN;
+		TupleDescAttr(tupdesc, 4)->attstorage = TYPSTORAGE_PLAIN;
+	}
 
 	/* Toast field should not be compressed */
 	TupleDescAttr(tupdesc, 0)->attcompression = InvalidCompressionMethod;
 	TupleDescAttr(tupdesc, 1)->attcompression = InvalidCompressionMethod;
 	TupleDescAttr(tupdesc, 2)->attcompression = InvalidCompressionMethod;
+	if (is_direct)
+	{
+		TupleDescAttr(tupdesc, 3)->attcompression = InvalidCompressionMethod;
+		TupleDescAttr(tupdesc, 4)->attcompression = InvalidCompressionMethod;
+	}
 
 	populate_compact_attribute(tupdesc, 0);
 	populate_compact_attribute(tupdesc, 1);
 	populate_compact_attribute(tupdesc, 2);
+	if (is_direct)
+	{
+		populate_compact_attribute(tupdesc, 3);
+		populate_compact_attribute(tupdesc, 4);
+	}
 
 	TupleDescFinalize(tupdesc);
 
@@ -302,6 +350,31 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 
 	/* It's mapped if and only if its parent is, too */
 	mapped_relation = RelationIsMapped(rel);
+
+	/*
+	 * If direct_toast_self_prune was set on the main table and not overridden
+	 * with a toast. prefix, propagate it to the TOAST table's reloptions so
+	 * RelationGetDirectToastSelfPrune(toastrel) sees it directly.
+	 */
+	if (rel->rd_options &&
+		((StdRdOptions *) rel->rd_options)->direct_toast_self_prune != PG_TERNARY_UNSET)
+	{
+		StdRdOptions *topts = (StdRdOptions *) heap_reloptions(RELKIND_TOASTVALUE, reloptions, false);
+
+		if (topts == NULL || topts->direct_toast_self_prune == PG_TERNARY_UNSET)
+		{
+			const char *const validnsps[] = HEAP_RELOPT_NAMESPACES;
+			bool		val = (((StdRdOptions *) rel->rd_options)->direct_toast_self_prune == PG_TERNARY_TRUE);
+			DefElem    *def = makeDefElem("direct_toast_self_prune",
+										  (Node *) makeBoolean(val), -1);
+
+			def->defnamespace = pstrdup("toast");
+			reloptions = transformRelOptions(reloptions, list_make1(def),
+											 "toast", validnsps, false, false);
+		}
+		if (topts)
+			pfree(topts);
+	}
 
 	toast_relid = heap_create_with_catalog(toast_relname,
 										   namespaceid,
@@ -342,6 +415,11 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 * duplicate TOAST chunk OIDs. The index might also be a little more
 	 * efficient this way, since btree isn't all that happy with large numbers
 	 * of equal keys.
+	 *
+	 * When Direct TOAST format is used (which fetches chunks directly by TID
+	 * with chunk_id IS NULL), this index is created as a partial unique index
+	 * (WHERE chunk_id IS NOT NULL) so that Plain TOAST tuples can coexist in
+	 * the same TOAST table without indexing Direct TOAST chunks.
 	 */
 
 	indexInfo = makeNode(IndexInfo);
@@ -351,7 +429,18 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	indexInfo->ii_IndexAttrNumbers[1] = 2;
 	indexInfo->ii_Expressions = NIL;
 	indexInfo->ii_ExpressionsState = NIL;
-	indexInfo->ii_Predicate = NIL;
+	if (is_direct)
+	{
+		NullTest   *ntest = makeNode(NullTest);
+
+		ntest->arg = (Expr *) makeVar(1, 1, toast_chunkid_typid, -1, InvalidOid, 0);
+		ntest->nulltesttype = IS_NOT_NULL;
+		ntest->argisrow = false;
+		ntest->location = -1;
+		indexInfo->ii_Predicate = list_make1(ntest);
+	}
+	else
+		indexInfo->ii_Predicate = NIL;
 	indexInfo->ii_PredicateState = NULL;
 	indexInfo->ii_ExclusionOps = NULL;
 	indexInfo->ii_ExclusionProcs = NULL;
@@ -391,7 +480,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 				 BTREE_AM_OID,
 				 rel->rd_rel->reltablespace,
 				 collationIds, opclassIds, NULL, coloptions, NULL, (Datum) 0,
-				 INDEX_CREATE_IS_PRIMARY | INDEX_CREATE_SUPPRESS_PROGRESS,
+				 (is_direct ? 0 : INDEX_CREATE_IS_PRIMARY) | INDEX_CREATE_SUPPRESS_PROGRESS,
 				 0, true, true, NULL);
 
 	table_close(toast_rel, NoLock);
@@ -491,4 +580,190 @@ needs_toast_table(Relation rel)
 
 	/* Otherwise, let the AM decide. */
 	return table_relation_needs_toast_table(rel);
+}
+
+/*
+ * ensure_direct_toast
+ *
+ * Upgrades a legacy (3-column, full index) TOAST table in-place to support
+ * the Direct TOAST format.
+ * Accepts either the parent table's OID or the TOAST table's OID.
+ */
+void
+ensure_direct_toast(Oid relid)
+{
+	Relation	targetrel;
+	Relation	toastrel;
+	Oid			toastrelid;
+	Relation	pg_class_rel;
+	Relation	pg_attribute_rel;
+	Relation	pg_index_rel;
+	HeapTuple	tuple;
+	HeapTuple	newtuple;
+	TupleDesc	td;
+	Oid			toastIndexOid = InvalidOid;
+	List	   *indexoids;
+	bool		changed = false;
+
+	targetrel = table_open(relid, ShareUpdateExclusiveLock);
+
+	if (targetrel->rd_rel->relkind == RELKIND_TOASTVALUE)
+	{
+		toastrelid = relid;
+		table_close(targetrel, NoLock);
+	}
+	else if (targetrel->rd_rel->relkind == RELKIND_RELATION ||
+			 targetrel->rd_rel->relkind == RELKIND_MATVIEW)
+	{
+		toastrelid = targetrel->rd_rel->reltoastrelid;
+		table_close(targetrel, NoLock);
+
+		if (!OidIsValid(toastrelid))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("table \"%s\" does not have a TOAST table",
+							get_rel_name(relid))));
+	}
+	else
+	{
+		table_close(targetrel, NoLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a table or TOAST table",
+						get_rel_name(relid))));
+	}
+
+	/* Open the toast relation with exclusive lock */
+	toastrel = table_open(toastrelid, AccessExclusiveLock);
+
+	if (toastrel->rd_rel->relkind != RELKIND_TOASTVALUE)
+		elog(ERROR, "relation %u is not a TOAST table", toastrelid);
+
+	/*
+	 * Step 1: Add missing columns chunk_tids and chunk_tid_offsets if needed.
+	 */
+	if (toastrel->rd_att->natts < 5)
+	{
+		td = CreateTemplateTupleDesc(2);
+		TupleDescInitEntry(td, (AttrNumber) 1,
+						   "chunk_tids",
+						   TIDARRAYOID,
+						   -1, 0);
+		TupleDescInitEntry(td, (AttrNumber) 2,
+						   "chunk_tid_offsets",
+						   INT8ARRAYOID,
+						   -1, 0);
+		TupleDescAttr(td, 0)->attnum = 4;
+		TupleDescAttr(td, 0)->attstorage = TYPSTORAGE_PLAIN;
+		TupleDescAttr(td, 0)->attcompression = InvalidCompressionMethod;
+		TupleDescAttr(td, 1)->attnum = 5;
+		TupleDescAttr(td, 1)->attstorage = TYPSTORAGE_PLAIN;
+		TupleDescAttr(td, 1)->attcompression = InvalidCompressionMethod;
+
+		populate_compact_attribute(td, 0);
+		populate_compact_attribute(td, 1);
+		TupleDescFinalize(td);
+
+		pg_attribute_rel = table_open(AttributeRelationId, RowExclusiveLock);
+		InsertPgAttributeTuples(pg_attribute_rel, td, toastrelid, NULL, NULL);
+		table_close(pg_attribute_rel, RowExclusiveLock);
+		FreeTupleDesc(td);
+
+		/* Update pg_class.relnatts = 5 */
+		pg_class_rel = table_open(RelationRelationId, RowExclusiveLock);
+		tuple = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(toastrelid));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for relation %u", toastrelid);
+		((Form_pg_class) GETSTRUCT(tuple))->relnatts = 5;
+		CatalogTupleUpdate(pg_class_rel, &tuple->t_self, tuple);
+		heap_freetuple(tuple);
+		table_close(pg_class_rel, RowExclusiveLock);
+
+		changed = true;
+	}
+
+	/*
+	 * Step 2: Ensure the TOAST unique index is partial (WHERE chunk_id IS NOT NULL).
+	 */
+	indexoids = RelationGetIndexList(toastrel);
+	if (indexoids != NIL)
+		toastIndexOid = linitial_oid(indexoids);
+	list_free(indexoids);
+
+	if (OidIsValid(toastIndexOid))
+	{
+		pg_index_rel = table_open(IndexRelationId, RowExclusiveLock);
+		tuple = SearchSysCacheCopy1(INDEXRELID, ObjectIdGetDatum(toastIndexOid));
+		if (HeapTupleIsValid(tuple))
+		{
+			bool		isnull;
+
+			(void) SysCacheGetAttr(INDEXRELID, tuple, Anum_pg_index_indpred, &isnull);
+
+			if (isnull)
+			{
+				Datum		values[Natts_pg_index];
+				bool		nulls[Natts_pg_index];
+				bool		replaces[Natts_pg_index];
+				NullTest   *ntest;
+				char	   *pred_str;
+				Oid			chunkid_typid = TupleDescAttr(toastrel->rd_att, 0)->atttypid;
+
+				memset(values, 0, sizeof(values));
+				memset(nulls, 0, sizeof(nulls));
+				memset(replaces, 0, sizeof(replaces));
+
+				ntest = makeNode(NullTest);
+				ntest->arg = (Expr *) makeVar(1, 1, chunkid_typid, -1, InvalidOid, 0);
+				ntest->nulltesttype = IS_NOT_NULL;
+				ntest->argisrow = false;
+				ntest->location = -1;
+
+				pred_str = nodeToString(list_make1(ntest));
+
+				values[Anum_pg_index_indisprimary - 1] = BoolGetDatum(false);
+				replaces[Anum_pg_index_indisprimary - 1] = true;
+
+				values[Anum_pg_index_indpred - 1] = CStringGetTextDatum(pred_str);
+				replaces[Anum_pg_index_indpred - 1] = true;
+				nulls[Anum_pg_index_indpred - 1] = false;
+
+				newtuple = heap_modify_tuple(tuple, RelationGetDescr(pg_index_rel),
+											 values, nulls, replaces);
+				CatalogTupleUpdate(pg_index_rel, &tuple->t_self, newtuple);
+				heap_freetuple(newtuple);
+				pfree(pred_str);
+
+				CacheInvalidateRelcacheByRelid(toastIndexOid);
+				changed = true;
+			}
+			heap_freetuple(tuple);
+		}
+		table_close(pg_index_rel, RowExclusiveLock);
+	}
+
+	if (changed)
+	{
+		CacheInvalidateRelcacheByRelid(toastrelid);
+		CommandCounterIncrement();
+	}
+
+	table_close(toastrel, NoLock);
+}
+
+/*
+ * SQL-callable function
+ */
+Datum
+pg_ensure_direct_toast(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to upgrade TOAST table format")));
+
+	ensure_direct_toast(relid);
+	PG_RETURN_VOID();
 }
