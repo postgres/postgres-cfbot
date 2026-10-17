@@ -624,6 +624,39 @@ TupleHashTableMatch(struct tuplehash_hash *tb, MinimalTuple tuple1, MinimalTuple
 }
 
 /*
+ * ExecPrepareTupleSortSupport
+ *		Initialize SortSupport array for tie-breaking tuple comparisons.
+ */
+SortSupport
+ExecPrepareTupleSortSupport(int numSortCols,
+							const AttrNumber *sortColIdx,
+							const Oid *sortOperators,
+							const Oid *sortCollations,
+							const bool *sortNullsFirst)
+{
+	SortSupport sortKeys;
+
+	Assert(numSortCols >= 0);
+	if (numSortCols == 0)
+		return NULL;
+
+	sortKeys = palloc0_array(SortSupportData, numSortCols);
+	for (int i = 0; i < numSortCols; i++)
+	{
+		SortSupport skey = &sortKeys[i];
+
+		Assert(sortColIdx[i] > 0);
+		skey->ssup_cxt = CurrentMemoryContext;
+		skey->ssup_collation = sortCollations[i];
+		skey->ssup_nulls_first = sortNullsFirst[i];
+		skey->ssup_attno = sortColIdx[i];
+		PrepareSortSupportFromOrderingOp(sortOperators[i], skey);
+	}
+
+	return sortKeys;
+}
+
+/*
  * ReplaceTupleHashEntryIfBetter
  *
  * Compare the new slot with the stored tuple in the entry using the sort keys.
@@ -632,6 +665,7 @@ TupleHashTableMatch(struct tuplehash_hash *tb, MinimalTuple tuple1, MinimalTuple
  *
  * Returns true if replaced, false otherwise.
  */
+
 bool
 ReplaceTupleHashEntryIfBetter(TupleHashTable hashtable,
 							  TupleHashEntry entry,
@@ -642,13 +676,19 @@ ReplaceTupleHashEntryIfBetter(TupleHashTable hashtable,
 {
 	int			i;
 	bool		replace = false;
+	MemoryContext oldContext;
 
 	/* If no sort keys, we shouldn't be here */
 	if (numSortCols == 0)
 		return false;
 
+	Assert(hashtable->additionalsize == 0);
+
 	/* Retrieve stored tuple and store it in firstslot */
 	ExecStoreMinimalTuple(entry->firstTuple, firstslot, false);
+
+	/* Run comparison functions in short-lived context */
+	oldContext = MemoryContextSwitchTo(hashtable->tempcxt);
 
 	/* Compare sort keys one by one */
 	for (i = 0; i < numSortCols; i++)
@@ -681,20 +721,36 @@ ReplaceTupleHashEntryIfBetter(TupleHashTable hashtable,
 	if (replace)
 	{
 		MinimalTuple oldtuple = entry->firstTuple;
-		MinimalTuple newtuple;
-		MemoryContext oldcxt;
+		bool		shouldFree;
+		MinimalTuple newtuple = ExecFetchSlotMinimalTuple(newslot, &shouldFree);
 
-		/* Copy new tuple into the long-lived context */
-		oldcxt = MemoryContextSwitchTo(hashtable->tuplescxt);
-		newtuple = ExecCopySlotMinimalTuple(newslot);
-		MemoryContextSwitchTo(oldcxt);
+		if (newtuple->t_len <= oldtuple->t_len)
+		{
+			/* Overwrite existing tuple in-place to avoid AllocSet churn */
+			memcpy(oldtuple, newtuple, newtuple->t_len);
+			if (shouldFree)
+				pfree(newtuple);
+		}
+		else
+		{
+			MinimalTuple copiedtuple;
 
-		/* Replace in entry */
-		entry->firstTuple = newtuple;
+			MemoryContextSwitchTo(hashtable->tuplescxt);
+			if (shouldFree)
+			{
+				copiedtuple = palloc(newtuple->t_len);
+				memcpy(copiedtuple, newtuple, newtuple->t_len);
+				pfree(newtuple);
+			}
+			else
+				copiedtuple = ExecCopySlotMinimalTuple(newslot);
 
-		/* Free old tuple */
-		pfree(oldtuple);
+			entry->firstTuple = copiedtuple;
+			pfree(oldtuple);
+		}
 	}
+
+	MemoryContextSwitchTo(oldContext);
 
 	/* Clear the comparison slot to avoid holding references */
 	ExecClearTuple(firstslot);

@@ -1595,7 +1595,8 @@ typedef struct RecursiveUnionState
 	/* Sort keys for replacement (for subset DISTINCT ON with ORDER BY) */
 	SortSupport sortKeys;
 	TupleTableSlot *sort_firstTupleSlot;
-	Tuplestorestate *result_table; /* buffered results for UNION DISTINCT ON */
+	bool		recursion_done;
+	TupleHashIterator hash_iter;
 } RecursiveUnionState;
 
 /* ----------------

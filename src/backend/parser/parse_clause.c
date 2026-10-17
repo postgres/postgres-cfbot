@@ -3068,7 +3068,8 @@ transformDistinctClause(ParseState *pstate,
  */
 List *
 transformDistinctOnClause(ParseState *pstate, List *distinctlist,
-						  List **targetlist, List *sortClause)
+						  List **targetlist, List *sortClause,
+						  bool is_inline_sort)
 {
 	List	   *result = NIL;
 	List	   *sortgrouprefs = NIL;
@@ -3099,10 +3100,13 @@ transformDistinctOnClause(ParseState *pstate, List *distinctlist,
 	/*
 	 * If the user writes both DISTINCT ON and ORDER BY, adopt the sorting
 	 * semantics from ORDER BY items that match DISTINCT ON items, and also
-	 * adopt their column sort order.  We insist that the distinctClause and
-	 * sortClause match, so throw error if we find the need to add any more
-	 * distinctClause items after we've skipped an ORDER BY item that wasn't
-	 * in DISTINCT ON.
+	 * adopt their column sort order.  For an outer ORDER BY (!is_inline_sort),
+	 * we insist that the distinctClause and sortClause match, so throw error
+	 * if we find the need to add any more distinctClause items after we've
+	 * skipped an ORDER BY item that wasn't in DISTINCT ON.  For an inline
+	 * DISTINCT ON (... ORDER BY ...), the DISTINCT ON keys are automatically
+	 * placed at the front of distinctSortClause, so non-key tie-breaker
+	 * columns may appear in any order in the inline ORDER BY list.
 	 */
 	skipped_sortitem = false;
 	foreach(lc, sortClause)
@@ -3111,7 +3115,7 @@ transformDistinctOnClause(ParseState *pstate, List *distinctlist,
 
 		if (list_member_int(sortgrouprefs, scl->tleSortGroupRef))
 		{
-			if (skipped_sortitem)
+			if (skipped_sortitem && !is_inline_sort)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 						 errmsg("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
@@ -3120,7 +3124,13 @@ transformDistinctOnClause(ParseState *pstate, List *distinctlist,
 																  sortgrouprefs,
 																  distinctlist))));
 			else
-				result = lappend(result, copyObject(scl));
+			{
+				TargetEntry *tle = get_sortgroupref_tle(scl->tleSortGroupRef,
+														*targetlist);
+
+				if (!targetIsInSortList(tle, InvalidOid, result))
+					result = lappend(result, copyObject(scl));
+			}
 		}
 		else
 			skipped_sortitem = true;
@@ -3129,10 +3139,10 @@ transformDistinctOnClause(ParseState *pstate, List *distinctlist,
 	/*
 	 * Now add any remaining DISTINCT ON items, using default sort/group
 	 * semantics for their data types.  (Note: this is pretty questionable; if
-	 * the ORDER BY list doesn't include all the DISTINCT ON items and more
-	 * besides, you certainly aren't using DISTINCT ON in the intended way,
-	 * and you probably aren't going to get consistent results.  It might be
-	 * better to throw an error or warning here.  But historically we've
+	 * the outer ORDER BY list doesn't include all the DISTINCT ON items and
+	 * more besides, you certainly aren't using DISTINCT ON in the intended
+	 * way, and you probably aren't going to get consistent results.  It might
+	 * be better to throw an error or warning here.  But historically we've
 	 * allowed it, so keep doing so.)
 	 */
 	forboth(lc, distinctlist, lc2, sortgrouprefs)
@@ -3143,7 +3153,7 @@ transformDistinctOnClause(ParseState *pstate, List *distinctlist,
 
 		if (targetIsInSortList(tle, InvalidOid, result))
 			continue;			/* already in list (with some semantics) */
-		if (skipped_sortitem)
+		if (skipped_sortitem && !is_inline_sort)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 					 errmsg("SELECT DISTINCT ON expressions must match initial ORDER BY expressions"),
