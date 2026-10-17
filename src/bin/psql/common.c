@@ -1159,9 +1159,15 @@ SendQuery(const char *query, int num_copy_from_stdin)
 				 "/**(press return to proceed or enter x and return to cancel)*******************/\n"),
 			   query);
 		fflush(stdout);
-		if (fgets(buf, sizeof(buf), stdin) != NULL)
-			if (buf[0] == 'x')
-				goto sendquery_cleanup;
+		if (fgets(buf, sizeof(buf), stdin) == NULL)
+		{
+			/* Cancel the script, but allow subsequent input from stdin. */
+			clearerr(stdin);
+			cancel_pressed = true;
+			goto sendquery_cleanup;
+		}
+		if (buf[0] == 'x')
+			goto sendquery_cleanup;
 		if (cancel_pressed)
 			goto sendquery_cleanup;
 	}

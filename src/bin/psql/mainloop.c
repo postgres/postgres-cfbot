@@ -385,7 +385,8 @@ MainLoop(FILE *source)
 		success = true;
 		line_saved_in_history = false;
 
-		while (success || !die_on_error)
+		/* Do not process the rest of the line after cancellation. */
+		while (!cancel_pressed && (success || !die_on_error))
 		{
 			PsqlScanResult scan_result;
 			promptStatus_t prompt_tmp = prompt_status;
