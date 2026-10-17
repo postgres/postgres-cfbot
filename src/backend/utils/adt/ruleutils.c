@@ -6163,6 +6163,12 @@ get_basic_select_query(Query *query, deparse_context *context)
 										 false, context);
 				sep = ", ";
 			}
+			if (query->distinctSortClause != NIL)
+			{
+				appendStringInfoString(buf, " ORDER BY ");
+				get_rule_orderby(query->distinctSortClause, query->targetList,
+								 false, context);
+			}
 			appendStringInfoChar(buf, ')');
 		}
 		else
@@ -6479,7 +6485,9 @@ get_setop_query(Node *setOp, Query *query, deparse_context *context)
 		{
 			SetOperationStmt *lop = (SetOperationStmt *) op->larg;
 
-			if (op->op == lop->op && op->all == lop->all)
+			if (op->op == lop->op && op->all == lop->all &&
+				op->sortClauses == NIL && lop->sortClauses == NIL &&
+				equal(op->groupClauses, lop->groupClauses))
 				need_paren = false;
 			else
 				need_paren = true;
@@ -6522,6 +6530,30 @@ get_setop_query(Node *setOp, Query *query, deparse_context *context)
 		}
 		if (op->all)
 			appendStringInfoString(buf, "ALL ");
+		else if (op == (SetOperationStmt *) query->setOperations &&
+				 query->hasDistinctOn)
+		{
+			const char *sep = "";
+			ListCell   *l;
+
+			appendStringInfoString(buf, "DISTINCT ON (");
+			foreach(l, query->distinctClause)
+			{
+				SortGroupClause *srt = (SortGroupClause *) lfirst(l);
+
+				appendStringInfoString(buf, sep);
+				get_rule_sortgroupclause(srt->tleSortGroupRef, query->targetList,
+										 true, context);
+				sep = ", ";
+			}
+			if (query->distinctSortClause != NIL)
+			{
+				appendStringInfoString(buf, " ORDER BY ");
+				get_rule_orderby(query->distinctSortClause, query->targetList,
+								 true, context);
+			}
+			appendStringInfoString(buf, ") ");
+		}
 
 		/* Always parenthesize if RHS is another setop */
 		need_paren = IsA(op->rarg, SetOperationStmt);

@@ -78,10 +78,12 @@ static Query *transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 static Query *transformValuesClause(ParseState *pstate, SelectStmt *stmt);
 static Query *transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt);
 static Node *transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
-									   bool isTopLevel, List **targetlist);
+									   bool isTopLevel, List **targetlist,
+									   bool hasDistinctOn);
 static void constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 									 const List *ltargetlist, const List *rtargetlist,
-									 List **targetlist, const char *context, bool recursive);
+									 List **targetlist, const char *context,
+									 bool recursive, bool hasDistinctOn);
 static void determineRecursiveColTypes(ParseState *pstate,
 									   Node *larg, List *nrtargetlist);
 static Query *transformReturnStmt(ParseState *pstate, ReturnStmt *stmt);
@@ -1418,6 +1420,41 @@ count_rowexpr_columns(ParseState *pstate, Node *expr)
  * Note: this covers only cases with no set operations and no VALUES lists;
  * see below for the other cases.
  */
+/*
+ * build_distinct_sort_clause
+ *		Ensure that all transformed DISTINCT ON SortGroupClauses appear as the
+ *		initial prefix of the transformed inline DISTINCT ON ORDER BY clause,
+ *		followed by any remaining tie-breaker SortGroupClauses.
+ *
+ * Because this operates on resolved SortGroupClauses (after targetlist lookup
+ * and assignSortGroupRef), it handles positional references ("DISTINCT ON (1
+ * ORDER BY a DESC)"), table-qualified references ("DISTINCT ON (t.a ORDER BY
+ * a DESC)"), and non-initial key orderings ("DISTINCT ON (a ORDER BY b DESC,
+ * a DESC)") without depending on raw AST equality.
+ */
+static List *
+build_distinct_sort_clause(List *distinctClause, List *rawSortClause,
+						   List *targetList)
+{
+	List	   *result;
+	ListCell   *lc;
+
+	if (rawSortClause == NIL)
+		return NIL;
+
+	result = copyObject(distinctClause);
+	foreach(lc, rawSortClause)
+	{
+		SortGroupClause *scl = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle = get_sortgroupref_tle(scl->tleSortGroupRef,
+												targetList);
+
+		if (!targetIsInSortList(tle, scl->sortop, result))
+			result = lappend(result, copyObject(scl));
+	}
+	return result;
+}
+
 static Query *
 transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 					SelectStmtPassthrough *passthru)
@@ -1425,6 +1462,7 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	Query	   *qry = makeNode(Query);
 	Node	   *qual;
 	ListCell   *l;
+	List	   *distinctSortClause = NIL;
 
 	qry->commandType = CMD_SELECT;
 
@@ -1497,6 +1535,16 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 											false /* allow SQL92 rules */ );
 	qry->groupDistinct = stmt->groupDistinct;
 
+	if (stmt->distinctSortClause)
+	{
+		distinctSortClause = transformSortClause(pstate,
+												 stmt->distinctSortClause,
+												 &qry->targetList,
+												 EXPR_KIND_ORDER_BY,
+												 false /* allow SQL92 rules */ );
+	}
+	qry->distinctSortClause = NIL;
+
 	if (stmt->distinctClause == NIL)
 	{
 		qry->distinctClause = NIL;
@@ -1517,7 +1565,11 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 		qry->distinctClause = transformDistinctOnClause(pstate,
 														stmt->distinctClause,
 														&qry->targetList,
-														qry->sortClause);
+														distinctSortClause ? distinctSortClause : qry->sortClause,
+														stmt->distinctSortClause != NIL);
+		qry->distinctSortClause = build_distinct_sort_clause(qry->distinctClause,
+															 distinctSortClause,
+															 qry->targetList);
 		qry->hasDistinctOn = true;
 	}
 
@@ -1816,6 +1868,9 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	ParseNamespaceColumn *sortnscolumns;
 	int			sortcolindex;
 	int			tllen;
+	List	   *distinctClause = stmt->distinctClause;
+	List	   *distinctSortClause = stmt->distinctSortClause;
+	List	   *transformed_distinctSortClause = NIL;
 
 	qry->commandType = CMD_SELECT;
 
@@ -1851,6 +1906,8 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	withClause = stmt->withClause;
 
 	stmt->sortClause = NIL;
+	stmt->distinctClause = NIL;
+	stmt->distinctSortClause = NIL;
 	stmt->limitOffset = NULL;
 	stmt->limitCount = NULL;
 	stmt->lockingClause = NIL;
@@ -1878,7 +1935,8 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	 * Recursively transform the components of the tree.
 	 */
 	sostmt = castNode(SetOperationStmt,
-					  transformSetOperationTree(pstate, stmt, true, NULL));
+					  transformSetOperationTree(pstate, stmt, true, NULL,
+												distinctClause != NIL));
 	Assert(sostmt);
 	qry->setOperations = (Node *) sostmt;
 
@@ -1980,11 +2038,12 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	addNSItemToQuery(pstate, jnsitem, false, false, true);
 
 	/*
-	 * For now, we don't support resjunk sort clauses on the output of a
-	 * setOperation tree --- you can only use the SQL92-spec options of
-	 * selecting an output column by name or number.  Enforce by checking that
-	 * transformSortClause doesn't add any items to tlist.  Note, if changing
-	 * this, add_setop_child_rel_equivalences() will need to be updated.
+	 * For now, we don't support resjunk sort or DISTINCT ON clauses on the
+	 * output of a setOperation tree --- you can only use the SQL92-spec
+	 * options of selecting an output column by name or number.  Enforce by
+	 * checking that transformSortClause and transformDistinctOnClause don't
+	 * add any items to tlist.  Note, if changing this,
+	 * add_setop_child_rel_equivalences() will need to be updated.
 	 */
 	tllen = list_length(qry->targetList);
 
@@ -1993,11 +2052,6 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
-
-	/* restore namespace, remove join RTE from rtable */
-	pstate->p_namespace = sv_namespace;
-	pstate->p_rtable = list_truncate(pstate->p_rtable, sv_rtable_length);
-
 	if (tllen != list_length(qry->targetList))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -2006,6 +2060,86 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 				 errhint("Add the expression/function to every SELECT, or move the UNION into a FROM clause."),
 				 parser_errposition(pstate,
 									exprLocation(list_nth(qry->targetList, tllen)))));
+
+	if (distinctSortClause)
+	{
+		transformed_distinctSortClause = transformSortClause(pstate,
+															 distinctSortClause,
+															 &qry->targetList,
+															 EXPR_KIND_ORDER_BY,
+															 false /* allow SQL92 rules */ );
+		if (tllen != list_length(qry->targetList))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("invalid UNION/INTERSECT/EXCEPT DISTINCT ON ORDER BY clause"),
+					 errdetail("Only result column names can be used, not expressions or functions."),
+					 errhint("Add the expression/function to every SELECT, or move the UNION into a FROM clause."),
+					 parser_errposition(pstate,
+										exprLocation(list_nth(qry->targetList, tllen)))));
+	}
+	qry->distinctSortClause = NIL;
+
+	if (distinctClause)
+	{
+		bool		recursive = (pstate->p_parent_cte &&
+								 pstate->p_parent_cte->cterecursive);
+
+		qry->distinctClause = transformDistinctOnClause(pstate,
+														distinctClause,
+														&qry->targetList,
+														transformed_distinctSortClause,
+														distinctSortClause != NIL);
+		if (tllen != list_length(qry->targetList))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("invalid UNION/INTERSECT/EXCEPT DISTINCT ON clause"),
+					 errdetail("Only result column names can be used, not expressions or functions."),
+					 errhint("Add the expression/function to every SELECT, or move the UNION into a FROM clause."),
+					 parser_errposition(pstate,
+										exprLocation(list_nth(qry->targetList, tllen)))));
+		qry->distinctSortClause = build_distinct_sort_clause(qry->distinctClause,
+															 transformed_distinctSortClause,
+															 qry->targetList);
+		qry->hasDistinctOn = true;
+
+		/*
+		 * Build sostmt->groupClauses and sostmt->sortClauses from the
+		 * transformed DISTINCT ON and inline ORDER BY clauses, using 1-based
+		 * output column numbers (tle->resno) as tleSortGroupRef as expected
+		 * by the set-operation planner.
+		 */
+		sostmt->groupClauses = NIL;
+		foreach(l, qry->distinctClause)
+		{
+			SortGroupClause *scl = lfirst_node(SortGroupClause, l);
+			SortGroupClause *grpcl = copyObject(scl);
+			TargetEntry *tle = get_sortgroupref_tle(scl->tleSortGroupRef,
+													qry->targetList);
+			Oid			rescoltype = exprType((Node *) tle->expr);
+
+			if (recursive &&
+				(rescoltype == RECORDOID || rescoltype == RECORDARRAYOID))
+				grpcl->hashable = true;
+			grpcl->tleSortGroupRef = tle->resno;
+			sostmt->groupClauses = lappend(sostmt->groupClauses, grpcl);
+		}
+
+		sostmt->sortClauses = NIL;
+		foreach(l, qry->distinctSortClause)
+		{
+			SortGroupClause *scl = lfirst_node(SortGroupClause, l);
+			SortGroupClause *sortcl = copyObject(scl);
+			TargetEntry *tle = get_sortgroupref_tle(scl->tleSortGroupRef,
+													qry->targetList);
+
+			sortcl->tleSortGroupRef = tle->resno;
+			sostmt->sortClauses = lappend(sostmt->sortClauses, sortcl);
+		}
+	}
+
+	/* restore namespace, remove join RTE from rtable */
+	pstate->p_namespace = sv_namespace;
+	pstate->p_rtable = list_truncate(pstate->p_rtable, sv_rtable_length);
 
 	qry->limitOffset = transformLimitClause(pstate, limitOffset,
 											EXPR_KIND_OFFSET, "OFFSET",
@@ -2095,7 +2229,8 @@ makeSortGroupClauseForSetOp(Oid rescoltype, bool require_hash)
  */
 static Node *
 transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
-						  bool isTopLevel, List **targetlist)
+						  bool isTopLevel, List **targetlist,
+						  bool hasDistinctOn)
 {
 	bool		isLeaf;
 
@@ -2126,8 +2261,8 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 
 	/*
 	 * If an internal node of a set-op tree has ORDER BY, LIMIT, FOR UPDATE,
-	 * or WITH clauses attached, we need to treat it like a leaf node to
-	 * generate an independent sub-Query tree.  Otherwise, it can be
+	 * WITH, or DISTINCT ON clauses attached, we need to treat it like a leaf
+	 * node to generate an independent sub-Query tree.  Otherwise, it can be
 	 * represented by a SetOperationStmt node underneath the parent Query.
 	 */
 	if (stmt->op == SETOP_NONE)
@@ -2139,7 +2274,8 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 	{
 		Assert(stmt->larg != NULL && stmt->rarg != NULL);
 		if (stmt->sortClause || stmt->limitOffset || stmt->limitCount ||
-			stmt->lockingClause || stmt->withClause)
+			stmt->lockingClause || stmt->withClause ||
+			stmt->distinctClause || stmt->distinctSortClause)
 			isLeaf = true;
 		else
 			isLeaf = false;
@@ -2240,7 +2376,8 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 		 */
 		op->larg = transformSetOperationTree(pstate, stmt->larg,
 											 false,
-											 &ltargetlist);
+											 &ltargetlist,
+											 false);
 
 		/*
 		 * If we are processing a recursive union query, now is the time to
@@ -2256,10 +2393,11 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 		 */
 		op->rarg = transformSetOperationTree(pstate, stmt->rarg,
 											 false,
-											 &rtargetlist);
+											 &rtargetlist,
+											 false);
 
 		constructSetOpTargetlist(pstate, op, ltargetlist, rtargetlist, targetlist,
-								 context, recursive);
+								 context, recursive, isTopLevel && hasDistinctOn);
 
 		return (Node *) op;
 	}
@@ -2280,10 +2418,12 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 static void
 constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 						 const List *ltargetlist, const List *rtargetlist,
-						 List **targetlist, const char *context, bool recursive)
+						 List **targetlist, const char *context,
+						 bool recursive, bool hasDistinctOn)
 {
 	ListCell   *ltl;
 	ListCell   *rtl;
+	int			resno = 1;
 
 	/*
 	 * Verify that the two children have the same number of non-junk columns,
@@ -2396,20 +2536,24 @@ constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 		op->colCollations = lappend_oid(op->colCollations, rescolcoll);
 
 		/*
-		 * For all cases except UNION ALL, identify the grouping operators
-		 * (and, if available, sorting operators) that will be used to
-		 * eliminate duplicates.
+		 * For all cases except UNION ALL (and top-level UNION DISTINCT ON,
+		 * whose groupClauses are built from qry->distinctClause in
+		 * transformSetOperationStmt), identify the grouping operators (and,
+		 * if available, sorting operators) that will be used to eliminate
+		 * duplicates.
 		 */
-		if (op->op != SETOP_UNION || !op->all)
+		if ((op->op != SETOP_UNION || !op->all) && !hasDistinctOn)
 		{
 			ParseCallbackState pcbstate;
+			SortGroupClause *grpcl;
 
 			setup_parser_errposition_callback(&pcbstate, pstate,
 											  bestlocation);
 
 			/* If it's a recursive union, we need to require hashing support. */
-			op->groupClauses = lappend(op->groupClauses,
-									   makeSortGroupClauseForSetOp(rescoltype, recursive));
+			grpcl = makeSortGroupClauseForSetOp(rescoltype, recursive);
+			grpcl->tleSortGroupRef = resno;
+			op->groupClauses = lappend(op->groupClauses, grpcl);
 
 			cancel_parser_errposition_callback(&pcbstate);
 		}
@@ -2430,10 +2574,12 @@ constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 			rescolnode->location = bestlocation;
 			restle = makeTargetEntry((Expr *) rescolnode,
 									 0, /* no need to set resno */
-									 NULL,
+									 ltle->resname,
 									 false);
 			*targetlist = lappend(*targetlist, restle);
 		}
+
+		resno++;
 	}
 }
 

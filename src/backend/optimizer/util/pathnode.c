@@ -3065,6 +3065,7 @@ create_unique_path(PlannerInfo *root,
  * 'qual' is the HAVING quals if any
  * 'aggcosts' contains cost info about the aggregate functions to be computed
  * 'numGroups' is the estimated number of groups (1 if not grouping)
+ * 'distinctSortClause' is the inline DISTINCT ON ORDER BY clause, if any
  */
 AggPath *
 create_agg_path(PlannerInfo *root,
@@ -3076,7 +3077,8 @@ create_agg_path(PlannerInfo *root,
 				List *groupClause,
 				List *qual,
 				const AggClauseCosts *aggcosts,
-				double numGroups)
+				double numGroups,
+				List *distinctSortClause)
 {
 	AggPath    *pathnode = makeNode(AggPath);
 
@@ -3115,6 +3117,7 @@ create_agg_path(PlannerInfo *root,
 	pathnode->numGroups = numGroups;
 	pathnode->transitionSpace = aggcosts ? aggcosts->transitionSpace : 0;
 	pathnode->groupClause = groupClause;
+	pathnode->distinctSortClause = distinctSortClause;
 	pathnode->qual = qual;
 
 	cost_agg(&pathnode->path, root,
@@ -3611,6 +3614,7 @@ create_recursiveunion_path(PlannerInfo *root,
 						   Path *rightpath,
 						   PathTarget *target,
 						   List *distinctList,
+						   List *distinctSortClause,
 						   int wtParam,
 						   double numGroups)
 {
@@ -3632,6 +3636,7 @@ create_recursiveunion_path(PlannerInfo *root,
 	pathnode->leftpath = leftpath;
 	pathnode->rightpath = rightpath;
 	pathnode->distinctList = distinctList;
+	pathnode->distinctSortClause = distinctSortClause;
 	pathnode->wtParam = wtParam;
 	pathnode->numGroups = numGroups;
 
