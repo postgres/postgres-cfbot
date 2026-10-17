@@ -55,6 +55,7 @@ enum attribute_stats_argnum
 	RANGE_LENGTH_HISTOGRAM_ARG,
 	RANGE_EMPTY_FRAC_ARG,
 	RANGE_BOUNDS_HISTOGRAM_ARG,
+	MOST_COMMON_VALS_KIND_ARG,
 	NUM_ATTRIBUTE_STATS_ARGS
 };
 
@@ -78,6 +79,7 @@ static struct StatsArgInfo attarginfo[] =
 	[RANGE_LENGTH_HISTOGRAM_ARG] = {"range_length_histogram", TEXTOID},
 	[RANGE_EMPTY_FRAC_ARG] = {"range_empty_frac", FLOAT4OID},
 	[RANGE_BOUNDS_HISTOGRAM_ARG] = {"range_bounds_histogram", TEXTOID},
+	[MOST_COMMON_VALS_KIND_ARG] = {"most_common_vals_kind", INT2OID},
 	[NUM_ATTRIBUTE_STATS_ARGS] = {0}
 };
 
@@ -407,10 +409,31 @@ attribute_statistics_update_internal(Oid reloid,
 			}
 			else
 			{
-				statatt_set_slot(values, nulls, replaces,
-								 STATISTIC_KIND_MCV,
-								 eq_opr, atttypcoll,
-								 stanumbers, false, stavalues, false);
+				int			most_common_vals_kind = STATISTIC_KIND_MCV;
+
+				if (!PG_ARGISNULL(MOST_COMMON_VALS_KIND_ARG))
+				{
+					most_common_vals_kind = PG_GETARG_INT16(MOST_COMMON_VALS_KIND_ARG);
+
+					if (most_common_vals_kind != STATISTIC_KIND_MCV &&
+						most_common_vals_kind != STATISTIC_KIND_MCV_VALUE_SORTED)
+					{
+						ereport(WARNING,
+								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+								 errmsg("could not parse \"%s\": it should be %d or %d",
+										"most_common_vals_kind",
+										STATISTIC_KIND_MCV,
+										STATISTIC_KIND_MCV_VALUE_SORTED)));
+						result = false;
+					}
+				}
+
+				if (most_common_vals_kind == STATISTIC_KIND_MCV ||
+					most_common_vals_kind == STATISTIC_KIND_MCV_VALUE_SORTED)
+					statatt_set_slot(values, nulls, replaces,
+									 most_common_vals_kind,
+									 eq_opr, atttypcoll,
+									 stanumbers, false, stavalues, false);
 			}
 		}
 		else
@@ -732,7 +755,8 @@ import_attribute_statistics(Relation rel, AttrNumber attnum, bool inherited,
 							const NullableDatum *elem_count_histogram,
 							const NullableDatum *range_length_histogram,
 							const NullableDatum *range_empty_frac,
-							const NullableDatum *range_bounds_histogram)
+							const NullableDatum *range_bounds_histogram,
+							const NullableDatum *most_common_vals_kind)
 {
 	LOCAL_FCINFO(newfcinfo, NUM_ATTRIBUTE_STATS_ARGS);
 	Oid			reloid = RelationGetRelid(rel);
@@ -752,6 +776,7 @@ import_attribute_statistics(Relation rel, AttrNumber attnum, bool inherited,
 	Assert(range_length_histogram);
 	Assert(range_empty_frac);
 	Assert(range_bounds_histogram);
+	Assert(most_common_vals_kind);
 
 	/* annoyingly, get_attname doesn't check attisdropped */
 	if (attname == NULL ||
@@ -789,6 +814,7 @@ import_attribute_statistics(Relation rel, AttrNumber attnum, bool inherited,
 	newfcinfo->args[RANGE_LENGTH_HISTOGRAM_ARG] = *range_length_histogram;
 	newfcinfo->args[RANGE_EMPTY_FRAC_ARG] = *range_empty_frac;
 	newfcinfo->args[RANGE_BOUNDS_HISTOGRAM_ARG] = *range_bounds_histogram;
+	newfcinfo->args[MOST_COMMON_VALS_KIND_ARG] = *most_common_vals_kind;
 
 	return attribute_statistics_update_internal(reloid, attname, attnum,
 												inherited, newfcinfo);
