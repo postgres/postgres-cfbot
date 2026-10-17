@@ -3067,6 +3067,7 @@ create_unique_path(PlannerInfo *root,
  * 'qual' is the HAVING quals if any
  * 'aggcosts' contains cost info about the aggregate functions to be computed
  * 'numGroups' is the estimated number of groups (1 if not grouping)
+ * 'distinctSortClause' is the inline DISTINCT ON ORDER BY clause, if any
  */
 AggPath *
 create_agg_path(PlannerInfo *root,
@@ -3078,25 +3079,8 @@ create_agg_path(PlannerInfo *root,
 				List *groupClause,
 				List *qual,
 				const AggClauseCosts *aggcosts,
-				double numGroups)
-{
-	return create_agg_path_ext(root, rel, subpath, target,
-							   aggstrategy, aggsplit, groupClause,
-							   qual, aggcosts, numGroups, NIL);
-}
-
-AggPath *
-create_agg_path_ext(PlannerInfo *root,
-					RelOptInfo *rel,
-					Path *subpath,
-					PathTarget *target,
-					AggStrategy aggstrategy,
-					AggSplit aggsplit,
-					List *groupClause,
-					List *qual,
-					const AggClauseCosts *aggcosts,
-					double numGroups,
-					List *distinctSortClause)
+				double numGroups,
+				List *distinctSortClause)
 {
 	AggPath    *pathnode = makeNode(AggPath);
 
