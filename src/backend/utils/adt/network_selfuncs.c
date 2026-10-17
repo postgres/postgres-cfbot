@@ -148,7 +148,7 @@ networksel(PG_FUNCTION_ARGS)
 	fmgr_info(get_opcode(operator), &proc);
 	mcv_selec = mcv_selectivity(&vardata, &proc, InvalidOid,
 								constvalue, varonleft,
-								&sumcommon);
+								&sumcommon, operator);
 
 	/*
 	 * If we have a histogram, use it to estimate the proportion of the
@@ -305,9 +305,9 @@ networkjoinsel_inner(Oid operator, int opr_codenum,
 		stats = (Form_pg_statistic) GETSTRUCT(vardata1->statsTuple);
 		nullfrac1 = stats->stanullfrac;
 
-		mcv1_exists = get_attstatsslot(&mcv1_slot, vardata1->statsTuple,
-									   STATISTIC_KIND_MCV, InvalidOid,
-									   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+		mcv1_exists = get_attstatsslot_mcv(&mcv1_slot, vardata1->statsTuple,
+										   InvalidOid,
+										   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
 		hist1_exists = get_attstatsslot(&hist1_slot, vardata1->statsTuple,
 										STATISTIC_KIND_HISTOGRAM, InvalidOid,
 										ATTSTATSSLOT_VALUES);
@@ -327,9 +327,9 @@ networkjoinsel_inner(Oid operator, int opr_codenum,
 		stats = (Form_pg_statistic) GETSTRUCT(vardata2->statsTuple);
 		nullfrac2 = stats->stanullfrac;
 
-		mcv2_exists = get_attstatsslot(&mcv2_slot, vardata2->statsTuple,
-									   STATISTIC_KIND_MCV, InvalidOid,
-									   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+		mcv2_exists = get_attstatsslot_mcv(&mcv2_slot, vardata2->statsTuple,
+										   InvalidOid,
+										   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
 		hist2_exists = get_attstatsslot(&hist2_slot, vardata2->statsTuple,
 										STATISTIC_KIND_HISTOGRAM, InvalidOid,
 										ATTSTATSSLOT_VALUES);
@@ -432,9 +432,9 @@ networkjoinsel_semi(Oid operator, int opr_codenum,
 		stats = (Form_pg_statistic) GETSTRUCT(vardata1->statsTuple);
 		nullfrac1 = stats->stanullfrac;
 
-		mcv1_exists = get_attstatsslot(&mcv1_slot, vardata1->statsTuple,
-									   STATISTIC_KIND_MCV, InvalidOid,
-									   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+		mcv1_exists = get_attstatsslot_mcv(&mcv1_slot, vardata1->statsTuple,
+										   InvalidOid,
+										   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
 		hist1_exists = get_attstatsslot(&hist1_slot, vardata1->statsTuple,
 										STATISTIC_KIND_HISTOGRAM, InvalidOid,
 										ATTSTATSSLOT_VALUES);
@@ -454,9 +454,9 @@ networkjoinsel_semi(Oid operator, int opr_codenum,
 		stats = (Form_pg_statistic) GETSTRUCT(vardata2->statsTuple);
 		nullfrac2 = stats->stanullfrac;
 
-		mcv2_exists = get_attstatsslot(&mcv2_slot, vardata2->statsTuple,
-									   STATISTIC_KIND_MCV, InvalidOid,
-									   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+		mcv2_exists = get_attstatsslot_mcv(&mcv2_slot, vardata2->statsTuple,
+										   InvalidOid,
+										   ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
 		hist2_exists = get_attstatsslot(&hist2_slot, vardata2->statsTuple,
 										STATISTIC_KIND_HISTOGRAM, InvalidOid,
 										ATTSTATSSLOT_VALUES);
