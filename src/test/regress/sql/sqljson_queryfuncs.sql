@@ -509,6 +509,13 @@ SELECT JSON_EXISTS(jsonb '1', '$' DEFAULT 1 ON ERROR);
 SELECT JSON_VALUE(jsonb '1', '$' EMPTY ON ERROR);
 SELECT JSON_QUERY(jsonb '1', '$' TRUE ON ERROR);
 
+-- DEFAULT expression ON ERROR / EMPTY soft error should rethrow unconditionally
+SELECT JSON_VALUE('"a"', '$' RETURNING sqljsonb_int_not_null DEFAULT NULL ON ERROR);
+SELECT JSON_VALUE('"a"', '$' RETURNING int DEFAULT (NULL::sqljsonb_int_not_null + 0) ON ERROR);
+SELECT JSON_QUERY('"a"', '$' RETURNING int DEFAULT (NULL::sqljsonb_int_not_null + 0) ON ERROR);
+SELECT JSON_VALUE('"a"', '$' RETURNING int DEFAULT (('a' || (random() * 0)::int)::int + 0) ON ERROR);
+SELECT JSON_QUERY('"a"', '$' RETURNING int DEFAULT (('a' || (random() * 0)::int)::int + 0) ON ERROR);
+
 -- Test implicit coercion to a domain over fixed-length type specified in
 -- RETURNING
 CREATE DOMAIN queryfuncs_char2 AS char(2);
