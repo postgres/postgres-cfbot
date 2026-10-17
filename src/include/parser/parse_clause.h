@@ -40,7 +40,8 @@ extern List *transformWindowDefinitions(ParseState *pstate,
 extern List *transformDistinctClause(ParseState *pstate,
 									 List **targetlist, List *sortClause, bool is_agg);
 extern List *transformDistinctOnClause(ParseState *pstate, List *distinctlist,
-									   List **targetlist, List *sortClause);
+									   List **targetlist, List *sortClause,
+									   bool is_inline_sort);
 extern void transformOnConflictArbiter(ParseState *pstate,
 									   OnConflictClause *onConflictClause,
 									   List **arbiterExpr, Node **arbiterWhere,
