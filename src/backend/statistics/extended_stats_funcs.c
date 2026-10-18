@@ -50,6 +50,7 @@ enum extended_stats_argnum
 	STATSCHEMA_ARG,
 	STATNAME_ARG,
 	INHERITED_ARG,
+	ATTNAMES_ARG,
 	NDISTINCT_ARG,
 	DEPENDENCIES_ARG,
 	MOST_COMMON_VALS_ARG,
@@ -70,6 +71,7 @@ static struct StatsArgInfo extarginfo[] =
 	[STATSCHEMA_ARG] = {"statistics_schemaname", TEXTOID},
 	[STATNAME_ARG] = {"statistics_name", TEXTOID},
 	[INHERITED_ARG] = {"inherited", BOOLOID},
+	[ATTNAMES_ARG] = {"attnames", TEXTARRAYOID},
 	[NDISTINCT_ARG] = {"n_distinct", PG_NDISTINCTOID},
 	[DEPENDENCIES_ARG] = {"dependencies", PG_DEPENDENCIESOID},
 	[MOST_COMMON_VALS_ARG] = {"most_common_vals", TEXTARRAYOID},
@@ -567,6 +569,50 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 
 		has.expressions = false;
 		success = false;
+	}
+
+	/*
+	 * If the caller gave the column names of the statistics object the data
+	 * was taken from, they must be the names of our columns, in the same
+	 * order.  n_distinct and dependencies refer to columns by number and the
+	 * MCV list by position, so none of them can be used otherwise.
+	 */
+	if (!PG_ARGISNULL(ATTNAMES_ARG))
+	{
+		ArrayType  *arr = PG_GETARG_ARRAYTYPE_P(ATTNAMES_ARG);
+		bool		match;
+
+		match = ARR_NDIM(arr) <= 1 && !array_contains_nulls(arr) &&
+			ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr)) == numattnums;
+
+		if (match)
+		{
+			Datum	   *names;
+			int			nnames;
+
+			deconstruct_array_builtin(arr, TEXTOID, &names, NULL, &nnames);
+			for (int i = 0; i < numattnums && match; i++)
+			{
+				char	   *attname = get_attname(relid,
+												  stxform->stxkeys.values[i],
+												  false);
+
+				match = strcmp(attname, TextDatumGetCString(names[i])) == 0;
+			}
+		}
+
+		if (!match)
+		{
+			ereport(WARNING,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("could not restore extended statistics object \"%s.%s\": its columns do not match \"%s\"",
+						   nspname, stxname,
+						   extarginfo[ATTNAMES_ARG].argname));
+			has.ndistinct = false;
+			has.dependencies = false;
+			has.mcv = false;
+			success = false;
+		}
 	}
 
 	/*

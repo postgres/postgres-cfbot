@@ -2898,4 +2898,41 @@ SELECT * FROM stats_import.test_range_expr_null
 SELECT COUNT(*) FROM stats_import.test_range_expr_null
   WHERE (rng * int4range(50, 150)) && '[60,70)'::int4range;
 
+-- attnames must match the columns of the statistics object, in order
+CREATE TABLE stats_import.test_attnames (a int, b int, c int);
+CREATE STATISTICS stats_import.stat_attnames (ndistinct)
+  ON a, b, c FROM stats_import.test_attnames;
+-- ok: same names, same order
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_attnames',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'stat_attnames',
+  'inherited', false,
+  'attnames', '{a,b,c}'::text[],
+  'n_distinct', '[{"attributes": [1, 2], "ndistinct": 4},
+                  {"attributes": [1, 3], "ndistinct": 5},
+                  {"attributes": [2, 3], "ndistinct": 6},
+                  {"attributes": [1, 2, 3], "ndistinct": 7}]'::pg_ndistinct);
+SELECT n_distinct IS NOT NULL AS restored FROM pg_stats_ext
+  WHERE statistics_schemaname = 'stats_import'
+    AND statistics_name = 'stat_attnames';
+SELECT pg_catalog.pg_clear_extended_stats('stats_import', 'test_attnames',
+  'stats_import', 'stat_attnames', false);
+-- warn: the source had the columns in another order, nothing is restored
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_attnames',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'stat_attnames',
+  'inherited', false,
+  'attnames', '{c,b,a}'::text[],
+  'n_distinct', '[{"attributes": [1, 2], "ndistinct": 4},
+                  {"attributes": [1, 3], "ndistinct": 5},
+                  {"attributes": [2, 3], "ndistinct": 6},
+                  {"attributes": [1, 2, 3], "ndistinct": 7}]'::pg_ndistinct);
+SELECT n_distinct IS NOT NULL AS restored FROM pg_stats_ext
+  WHERE statistics_schemaname = 'stats_import'
+    AND statistics_name = 'stat_attnames';
+
 DROP SCHEMA stats_import CASCADE;
