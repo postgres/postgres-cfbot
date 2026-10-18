@@ -145,6 +145,8 @@ extern LLVMTypeRef LLVMGetFunctionType(LLVMValueRef r);
 extern LLVMOrcObjectLayerRef LLVMOrcCreateRTDyldObjectLinkingLayerWithSafeSectionMemoryManager(LLVMOrcExecutionSessionRef ES);
 #endif
 
+extern const char* llvm_version(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

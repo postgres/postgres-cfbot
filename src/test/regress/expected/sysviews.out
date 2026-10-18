@@ -241,3 +241,13 @@ select * from pg_timezone_abbrevs where abbrev = 'LMT';
  LMT    | @ 7 hours 52 mins 58 secs ago | f
 (1 row)
 
+-- Check that the pg_system_versions contains something. Three core versions
+-- should be present: architecture, core and compiler and glibc. More records
+-- may be present depending on the build configuration (e.g. with ICU, GlibC or
+-- JIT support).
+select exists (table pg_system_versions);
+ exists 
+--------
+ t
+(1 row)
+
