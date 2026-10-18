@@ -141,9 +141,9 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
 
          <para>
           Since no connection is made when this option is
-          <literal>false</literal>, no tables and sequences are subscribed. To
-          initiate replication, you must manually create the replication slot,
-          enable the failover if required, enable the subscription, and refresh
+          <literal>false</literal>, tables and sequences are not yet subscribed.
+          To initiate replication, you must manually create the replication slot,
+          enable failover if required, enable the subscription, and refresh
           the subscription. See
           <xref linkend="logical-replication-subscription-examples-deferred-slot"/>
           for examples.
@@ -184,7 +184,7 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
          <para>
           Name of the publisher's replication slot to use.  The default is
           to use the name of the subscription for the slot name. The name cannot
-          be <literal>pg_conflict_detection</literal> as it is reserved for the
+          be <literal>pg_conflict_detection</literal> as it is reserved for
           conflict detection.
          </para>
 
@@ -555,7 +555,7 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
            Additionally when enabling <literal>retain_dead_tuples</literal> for
            conflict detection in logical replication, it is important to design the
            replication topology to balance data retention requirements with
-           overall system performance. This option provides minimal performance
+           overall system performance. This option incurs minimal performance
            overhead when applied appropriately. The following scenarios illustrate
            effective usage patterns when enabling this option.
           </para>
@@ -581,9 +581,9 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
            c. Read-Only Subscribers:
            In configurations involving single or multiple publisher nodes
            performing concurrent write operations, read-only subscriber nodes may
-           replicate changes without seeing a performance impact if it does index
-           scan. However, if the subscriber is impacted due to replication lag or
-           scan performance (say due to sequential scans), it needs to follow one
+           replicate changes without performance degradation when performing index
+           scans. However, if the subscriber is affected due to replication lag or
+           scan performance (e.g. due to sequential scans), it needs to follow one
            of the two previous strategies to distribute the workload on the
            subscriber.
           </para>
@@ -636,9 +636,10 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
           can be manually resumed by re-enabling <literal>retain_dead_tuples</literal>.
          </para>
          <para>
-          Note that overall retention will not stop if other subscriptions that
-          have a value greater than 0 for this parameter have not exceeded it,
-          or if they set this option to 0.
+          Note that overall retention will not stop while any other subscription
+          with <literal>retain_dead_tuples</literal> enabled either has this
+          option set to <literal>0</literal> or has not yet exceeded its nonzero
+          limit.
          </para>
          <para>
           This option is effective only when
@@ -769,7 +770,7 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
    originated from further upstream. This scenario is detected and a WARNING is
    logged to the user, but the warning is only an indication of a potential
    problem; it is the user's responsibility to make the necessary checks to
-   ensure the copied data origins are really as wanted or not.
+   ensure the origins of the copied data are as intended.
   </para>
 
   <para>
