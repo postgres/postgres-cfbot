@@ -1106,4 +1106,78 @@ $standby2->wait_for_log(
 
 $h->quit;
 
+# Test that promotion interrupts SQL slot synchronization waiting for WAL.
+# Stop at a recovery target so promotion cannot satisfy the wait by replaying
+# more WAL before shutting down slot synchronization.
+$subscriber1->safe_psql('postgres',
+	"ALTER SUBSCRIPTION regress_mysub1 DISABLE");
+$primary->poll_query_until('postgres',
+	"SELECT NOT active FROM pg_replication_slots WHERE slot_name = 'lsub1_slot'")
+  or die "subscription did not stop";
+$primary->wait_for_replay_catchup($standby2);
+
+$standby2->append_conf(
+	'postgresql.conf', qq(
+recovery_target_name = 'slotsync_shutdown'
+recovery_target_action = 'pause'
+));
+$standby2->restart;
+$primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('slotsync_shutdown');");
+$standby2->poll_query_until('postgres',
+	"SELECT pg_get_wal_replay_pause_state() = 'paused'")
+  or die "standby did not pause at the recovery target";
+
+# The new slot requires WAL beyond the final replay position.  Receive and
+# flush it so synchronization attempts to decode it rather than skipping it.
+my $shutdown_slot_lsn = $primary->safe_psql(
+	'postgres',
+	"SELECT lsn FROM pg_create_logical_replication_slot('shutdown_wait_slot', 'test_decoding', false, false, true);"
+);
+$primary->wait_for_catchup($standby2, 'flush', $shutdown_slot_lsn);
+
+my $sync_session =
+  $standby2->background_psql('postgres', on_error_stop => 0);
+$sync_session->set_query_timer_restart;
+my $sync_pid = $sync_session->query_safe('SELECT pg_backend_pid()');
+$sync_session->query_until(
+	qr/slot_sync_started/, q[
+	\echo slot_sync_started
+	SELECT pg_sync_replication_slots();
+]);
+$standby2->poll_query_until(
+	'postgres', qq[
+	SELECT wait_event = 'WaitForWalReplay'
+	FROM pg_stat_activity WHERE pid = $sync_pid;
+]) or die "slot synchronization did not wait for WAL replay";
+
+# The waiting backend must be the one holding the new temporary synced slot.
+is( $standby2->safe_psql(
+		'postgres', qq[
+	SELECT temporary AND synced AND active_pid = $sync_pid
+	FROM pg_replication_slots
+	WHERE slot_name = 'shutdown_wait_slot';
+]),
+	't',
+	'SQL synchronization holds the temporary synced slot while waiting for WAL'
+);
+
+$log_offset = -s $standby2->logfile;
+$standby2->promote;
+$standby2->wait_for_log(
+	qr/replication slot synchronization will stop because promotion is triggered/,
+	$log_offset);
+
+# Check cleanup before closing the session, which also drops temporary slots.
+is( $standby2->safe_psql(
+		'postgres',
+		"SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'shutdown_wait_slot'"
+	),
+	'0',
+	'promotion cleans up the temporary slot of interrupted SQL synchronization'
+);
+$sync_session->quit;
+$primary->safe_psql('postgres',
+	"SELECT pg_drop_replication_slot('shutdown_wait_slot');");
+
 done_testing();
