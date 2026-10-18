@@ -32,6 +32,7 @@
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
 #include "funcapi.h"
@@ -237,6 +238,12 @@ pgstatindex_impl(Relation rel, FunctionCallInfo fcinfo)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	/*
 	 * A !indisready index could lead to ERRCODE_DATA_CORRUPTED later, so exit
@@ -482,6 +489,12 @@ pg_relpages_impl(Relation rel)
 						RelationGetRelationName(rel)),
 				 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
+
 	/* note: this will work OK on non-local temp tables */
 
 	relpages = RelationGetNumberOfBlocks(rel);
@@ -556,6 +569,12 @@ pgstatginindex_internal(Oid relid, FunctionCallInfo fcinfo)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary indexes of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	/* see pgstatindex_impl */
 	if (!rel->rd_index->indisvalid)
@@ -646,6 +665,12 @@ pgstathashindex(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary indexes of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	/* see pgstatindex_impl */
 	if (!rel->rd_index->indisvalid)
