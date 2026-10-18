@@ -50,7 +50,7 @@
 
 
 
-#ifdef USE_OPENSSL
+#if defined(USE_OPENSSL) || defined(USE_LIBRESSL)
 
 #include <openssl/rand.h>
 
@@ -134,7 +134,7 @@ pg_strong_random(void *buf, size_t len)
 	return false;
 }
 
-#else							/* not USE_OPENSSL or WIN32 */
+#else							/* not USE_OPENSSL, USE_LIBRESSL or WIN32 */
 
 /*
  * Without OpenSSL or Win32 support, just read /dev/urandom ourselves.
