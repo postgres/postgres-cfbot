@@ -152,8 +152,10 @@ static xmlChar *xml_text2xmlChar(text *in);
 static int	parse_xml_decl(const xmlChar *str, size_t *lenp,
 						   xmlChar **version, xmlChar **encoding, int *standalone);
 static bool print_xml_decl(StringInfo buf, const xmlChar *version,
-						   pg_enc encoding, int standalone);
+						   pg_enc encoding, int standalone,
+						   bool force_xmldeclaration);
 static bool xml_doctype_in_content(const xmlChar *str);
+static void xmlserialize_check_version(const char *version);
 static xmlDocPtr xml_parse(text *data, XmlOptionType xmloption_arg,
 						   bool preserve_whitespace, int encoding,
 						   XmlOptionType *parsed_xmloptiontype,
@@ -324,7 +326,7 @@ xml_out_internal(xmltype *x, pg_enc target_encoding)
 
 		initStringInfo(&buf);
 
-		if (!print_xml_decl(&buf, version, target_encoding, standalone))
+		if (!print_xml_decl(&buf, version, target_encoding, standalone, false))
 		{
 			/*
 			 * If we are not going to produce an XML declaration, eat a single
@@ -619,7 +621,8 @@ xmlconcat(List *args)
 		print_xml_decl(&buf2,
 					   (!global_version_no_value) ? global_version : NULL,
 					   0,
-					   global_standalone);
+					   global_standalone,
+					   false);
 
 		appendBinaryStringInfo(&buf2, buf.data, buf.len);
 		buf = buf2;
@@ -674,7 +677,8 @@ xmltotext(PG_FUNCTION_ARGS)
 
 
 text *
-xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
+xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent,
+						XmlSerializeDeclarationOption xmldeclaration, const char *xmlserialize_version)
 {
 #ifdef USE_LIBXML
 	text	   *volatile result;
@@ -684,9 +688,12 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 	volatile xmlSaveCtxtPtr ctxt = NULL;
 	ErrorSaveContext escontext = {T_ErrorSaveContext};
 	PgXmlErrorContext *volatile xmlerrcxt = NULL;
+	StringInfoData xmldecl;
 #endif
 
-	if (xmloption_arg != XMLOPTION_DOCUMENT && !indent)
+	if (xmloption_arg != XMLOPTION_DOCUMENT &&
+		xmldeclaration == XMLSERIALIZE_NO_XMLDECLARATION_OPTION &&
+		!indent && !xmlserialize_version)
 	{
 		/*
 		 * We don't actually need to do anything, so just return the
@@ -697,6 +704,10 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 	}
 
 #ifdef USE_LIBXML
+
+	/* Make sure that libxml2 accepts the version given with VERSION. */
+	if (xmlserialize_version != NULL)
+		xmlserialize_check_version(xmlserialize_version);
 
 	/*
 	 * Parse the input according to the xmloption.
@@ -717,11 +728,52 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 				 errmsg("not an XML document")));
 	}
 
-	/* If we weren't asked to indent, we're done. */
-	if (!indent)
+	/*
+	 * If we weren't asked to indent or to explicitly hide / show the
+	 * XML declaration, we're done.
+	 */
+	if (!indent && !xmlserialize_version &&
+		xmldeclaration == XMLSERIALIZE_NO_XMLDECLARATION_OPTION)
 	{
 		xmlFreeDoc(doc);
 		return (text *) data;
+	}
+
+	/*
+	 * Without INDENT there is no need to reserialize the value, so just
+	 * replace the input's XML declaration, if any, with the requested one.
+	 */
+	if (!indent)
+	{
+		char	   *str;
+		size_t		decl_len = 0;
+		xmlChar    *version;
+		int			standalone;
+
+		xmlFreeDoc(doc);
+
+		str = text_to_cstring((text *) data);
+		parse_xml_decl((xmlChar *) str, &decl_len, &version, NULL, &standalone);
+
+		initStringInfo(&xmldecl);
+
+		if (xmldeclaration == XMLSERIALIZE_INCLUDING_XMLDECLARATION ||
+			(decl_len != 0 && xmldeclaration == XMLSERIALIZE_NO_XMLDECLARATION_OPTION &&
+			 xmlserialize_version))
+			print_xml_decl(&xmldecl,
+						   xmlserialize_version != NULL ?
+						   (const xmlChar *) xmlserialize_version : version,
+						   0, standalone, true);
+		else if (decl_len != 0 && str[decl_len] == '\n')
+		{
+			/* Don't leave an empty first line where the declaration was. */
+			decl_len++;
+		}
+
+		appendStringInfoString(&xmldecl, str + decl_len);
+		result = cstring_to_text_with_len(xmldecl.data, xmldecl.len);
+
+		return result;
 	}
 
 	/*
@@ -747,17 +799,20 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 		parse_xml_decl(xml_text2xmlChar(data), &decl_len, NULL, NULL, NULL);
 
 		/*
-		 * Emit declaration only if the input had one.  Note: some versions of
-		 * xmlSaveToBuffer leak memory if a non-null encoding argument is
-		 * passed, so don't do that.  We don't want any encoding conversion
-		 * anyway.
+		 * Indent the buffer content if the flag INDENT was used.
+		 * Note: some versions of xmlSaveToBuffer leak memory if a
+		 * non-null encoding argument is passed, so don't do that.
+		 * We don't want any encoding conversion anyway. Without any
+		 * XML declaration option, libxml2 emits the declaration only
+		 * if the input had one.  Otherwise the flag XML_SAVE_NO_DECL
+		 * is used, as we manually add the XML declaration later on
+		 * with xmlBufferAddHead(), if applicable.
 		 */
-		if (decl_len == 0)
-			ctxt = xmlSaveToBuffer(buf, NULL,
-								   XML_SAVE_NO_DECL | XML_SAVE_FORMAT);
+		if (xmldeclaration == XMLSERIALIZE_NO_XMLDECLARATION_OPTION &&
+			!xmlserialize_version && decl_len != 0)
+			ctxt = xmlSaveToBuffer(buf, NULL, XML_SAVE_FORMAT);
 		else
-			ctxt = xmlSaveToBuffer(buf, NULL,
-								   XML_SAVE_FORMAT);
+			ctxt = xmlSaveToBuffer(buf, NULL, XML_SAVE_NO_DECL | (indent ? XML_SAVE_FORMAT : 0));
 
 		if (ctxt == NULL || xmlerrcxt->err_occurred)
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
@@ -777,7 +832,7 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 			 * between the content nodes, else the output is ugly.
 			 */
 			xmlNodePtr	root = xmlDocGetRootElement(doc);
-			xmlNodePtr	newline;
+			xmlNodePtr	newline = NULL;
 
 			Assert(root != NULL);
 
@@ -788,19 +843,24 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 			 * freeing of this node manually, and pass NULL here to make sure
 			 * there's not a dangling link.
 			 */
-			newline = xmlNewDocText(NULL, (const xmlChar *) "\n");
-			if (newline == NULL || xmlerrcxt->err_occurred)
-				xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
-							"could not allocate xml node");
+			if (indent)
+			{
+				newline = xmlNewDocText(NULL, (const xmlChar *)"\n");
+
+				if (newline == NULL || xmlerrcxt->err_occurred)
+					xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
+								"could not allocate xml node");
+			}
 
 			for (xmlNodePtr node = root->children; node; node = node->next)
 			{
 				/* insert newlines between nodes */
-				if (node->type != XML_TEXT_NODE && node->prev != NULL)
+				if (node->type != XML_TEXT_NODE && node->prev != NULL && newline != NULL)
 				{
 					if (xmlSaveTree(ctxt, newline) == -1 || xmlerrcxt->err_occurred)
 					{
-						xmlFreeNode(newline);
+						if (newline != NULL)
+							xmlFreeNode(newline);
 						xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
 									"could not save newline to xmlBuffer");
 					}
@@ -814,7 +874,54 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 				}
 			}
 
-			xmlFreeNode(newline);
+			if (newline != NULL)
+				xmlFreeNode(newline);
+		}
+
+		/*
+		 * Emit declaration if it was explicitly requested via INCLUDING
+		 * XMLDECLARATION (X078, SQL/XML:2023), or if the input had one and
+		 * VERSION was used.  Without any of these options, libxml2 has
+		 * already emitted the input's declaration, if any.
+		 */
+		if (xmldeclaration == XMLSERIALIZE_INCLUDING_XMLDECLARATION ||
+			(decl_len != 0 && xmldeclaration == XMLSERIALIZE_NO_XMLDECLARATION_OPTION &&
+			 xmlserialize_version))
+		{
+			initStringInfo(&xmldecl);
+
+			/*
+			 * No need to check the return value of print_xml_decl
+			 * because we are forcing the XML declaration to be included
+			 * by setting 'force_xmldeclaration' to true.
+			 * Therefore, print_xml_decl will always succeed and produce output.
+			 */
+			print_xml_decl(
+				&xmldecl,
+				/*
+				 * Use version from VERSION option (X076, SQL/XML:2023)
+				 * if specified; otherwise use the document's version.
+				 */
+				xmlserialize_version != NULL ? (const xmlChar *)xmlserialize_version : doc->version,
+				/*
+				 * No encoding declaration, since the result is subject to
+				 * encoding conversion.
+				 */
+				0,
+				doc->standalone,
+				true);
+			/*
+			 * We add a trailing newline if the flag INDENT was used,
+			 * otherwise XML declaration and root element will be
+			 * serialized in the same line.
+			 */
+			if (indent)
+				appendStringInfoString(&xmldecl, "\n");
+
+			if (xmlBufferAddHead(buf, (const xmlChar *)xmldecl.data, xmldecl.len) < 0 ||
+				xmlerrcxt->err_occurred)
+				xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
+							"could not add XML declaration");
 		}
 
 		if (xmlSaveClose(ctxt) == -1 || xmlerrcxt->err_occurred)
@@ -867,6 +974,43 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 	return NULL;
 #endif
 }
+
+#ifdef USE_LIBXML
+/*
+ * Check the version given with XMLSERIALIZE's VERSION option by letting
+ * libxml2 parse a minimal document that declares it.  libxml2 decides whether
+ * an unexpected version deserves an error or just a warning.  It must also
+ * read back exactly the given string, so that the version cannot carry other
+ * pseudo-attributes into the XML declaration.
+ */
+static void
+xmlserialize_check_version(const char *version)
+{
+	StringInfoData buf;
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	xmlDocPtr	doc;
+	bool		valid;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "<?xml version=\"%s\"?><x/>", version);
+
+	doc = xml_parse(cstring_to_text_with_len(buf.data, buf.len),
+					XMLOPTION_DOCUMENT, true, GetDatabaseEncoding(),
+					NULL, (Node *) &escontext);
+
+	valid = (doc != NULL && !escontext.error_occurred &&
+			 doc->version != NULL &&
+			 strcmp((const char *) doc->version, version) == 0);
+
+	if (doc)
+		xmlFreeDoc(doc);
+
+	if (!valid)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid XML version \"%s\"", version)));
+}
+#endif
 
 
 xmltype *
@@ -1118,7 +1262,7 @@ xmlroot(xmltype *data, text *version, int standalone)
 	}
 
 	initStringInfo(&buf);
-	print_xml_decl(&buf, orig_version, 0, orig_standalone);
+	print_xml_decl(&buf, orig_version, 0, orig_standalone, false);
 	appendStringInfoString(&buf, str + len);
 
 	return stringinfo_to_xmltype(&buf);
@@ -1623,14 +1767,17 @@ finished:
  * declaration, we must specify a version (XML requires this).
  * Otherwise we only make a declaration if the version is not "1.0",
  * which is the default version specified in SQL:2003.
+ *
+ * If force_xmldeclaration is true, we always make a declaration.
  */
 static bool
 print_xml_decl(StringInfo buf, const xmlChar *version,
-			   pg_enc encoding, int standalone)
+			   pg_enc encoding, int standalone,
+			   bool force_xmldeclaration)
 {
 	if ((version && strcmp((const char *) version, PG_XML_DEFAULT_VERSION) != 0)
 		|| (encoding && encoding != PG_UTF8)
-		|| standalone != -1)
+		|| standalone != -1 || force_xmldeclaration)
 	{
 		appendStringInfoString(buf, "<?xml");
 
