@@ -4537,7 +4537,10 @@ xml '<foo>bar</foo>'
     <type>xml</type>, uses the function
     <function>xmlserialize</function>:<indexterm><primary>xmlserialize</primary></indexterm>
 <synopsis>
-XMLSERIALIZE ( { DOCUMENT | CONTENT } <replaceable>value</replaceable> AS <replaceable>type</replaceable> [ [ NO ] INDENT ] )
+XMLSERIALIZE ( { DOCUMENT | CONTENT } <replaceable>value</replaceable> AS <replaceable>type</replaceable>
+     [ VERSION <replaceable>xmlversion</replaceable> ]
+     [ INCLUDING XMLDECLARATION | EXCLUDING XMLDECLARATION ]
+     [ [ NO ] INDENT ] )
 </synopsis>
     <replaceable>type</replaceable> can be
     <type>character</type>, <type>character varying</type>, or
@@ -4548,11 +4551,73 @@ XMLSERIALIZE ( { DOCUMENT | CONTENT } <replaceable>value</replaceable> AS <repla
    </para>
 
    <para>
+    The <literal>VERSION</literal> option sets the version string
+    used in the XML declaration. If the <literal>VERSION</literal>
+    option is omitted, the version
+    of the input <replaceable>value</replaceable>'s XML declaration is kept,
+    or <literal>1.0</literal> is used if it has none.
+    <literal>VERSION</literal> does not by itself add an XML declaration to
+    the output.  If the version string is
+    not accepted as a valid XML version by the XML parser (e.g.,
+    <literal>'2.0'</literal>), an error is raised; versions that the parser
+    does not fully support, such as <literal>'1.1'</literal>, only raise a
+    warning.
+   </para>
+
+   <para>
+    The <literal>INCLUDING XMLDECLARATION</literal> and
+    <literal>EXCLUDING XMLDECLARATION</literal> options control
+    whether the serialized output includes an XML declaration such as
+    <literal>&lt;?xml version="1.0"?&gt;</literal>.
+    If neither option is specified, the presence of the declaration in
+    the output depends on whether the input <replaceable>value</replaceable>
+    originally contained one.  A declaration written by these options or by
+    <literal>VERSION</literal> does not have an encoding declaration (see
+    <xref linkend="datatype-xml-encoding-handling"/>).
+
+    The <literal>INCLUDING XMLDECLARATION</literal> option is allowed in both
+    <literal>DOCUMENT</literal> and <literal>CONTENT</literal> modes. In
+    <literal>CONTENT</literal> mode, no structural validation is performed,
+    and the declaration is emitted according to the specified options,
+    even if it would not normally be considered valid by the XML specification.
+   </para>
+
+   <para>
     The <literal>INDENT</literal> option causes the result to be
     pretty-printed, while <literal>NO INDENT</literal> (which is the
     default) just emits the original input string.  Casting to a character
     type likewise produces the original string.
    </para>
+
+   <para>
+Examples:
+   </para>
+<screen><![CDATA[
+SELECT
+  xmlserialize(
+    DOCUMENT xmlelement(name foo, xmlelement(name bar,42)) AS text
+    VERSION '1.0'
+    INCLUDING XMLDECLARATION
+    INDENT);
+
+     xmlserialize
+-----------------------
+ <?xml version="1.0"?>+
+ <foo>                +
+   <bar>42</bar>      +
+ </foo>
+(1 row)
+
+SELECT
+  xmlserialize(
+    DOCUMENT '<?xml version="1.0" encoding="UTF-8"?><foo><bar>42</bar></foo>' AS text
+    EXCLUDING XMLDECLARATION);
+
+       xmlserialize
+--------------------------
+ <foo><bar>42</bar></foo>
+(1 row)
+]]></screen>
 
    <para>
     When a character string value is cast to or from type
