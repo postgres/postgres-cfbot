@@ -838,6 +838,32 @@ insert into tt27v values (1); -- Error
 select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system view.
 reset restrict_nonsystem_relation_kind;
 
+-- IS DOCUMENT is a postfix test, so it needs parentheses as an operand
+create table tt29v_tbl (f bool, x xml);
+create view tt29v as
+  select f = (x is document) as r1,
+         (f >= (x is document)) and (f <= true) as r2
+  from tt29v_tbl;
+select pg_get_viewdef('tt29v'::regclass, false);
+select pg_get_viewdef('tt29v'::regclass, true);
+select pg_get_viewdef('tt29v'::regclass, false) as def \gset
+create view tt29v_re as :def
+
+-- IS DOCUMENT also needs parentheses as an index or statistics expression,
+-- where only a function-like expression can be written without them
+create statistics tt29v_st on (x is document), f from tt29v_tbl;
+select pg_get_statisticsobjdef(oid) as def from pg_statistic_ext
+  where stxname = 'tt29v_st' \gset
+drop statistics tt29v_st;
+:def ;
+select pg_get_statisticsobjdef(oid) from pg_statistic_ext
+  where stxname = 'tt29v_st';
+create index tt29v_idx on tt29v_tbl using btree ((x is document));
+select pg_get_indexdef('tt29v_idx'::regclass, 0, true);
+select pg_get_indexdef('tt29v_idx'::regclass, 0, true) as def \gset
+drop index tt29v_idx;
+:def ;
+
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 DROP SCHEMA testviewschm2 CASCADE;

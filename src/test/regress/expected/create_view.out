@@ -2285,6 +2285,54 @@ select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system
 (1 row)
 
 reset restrict_nonsystem_relation_kind;
+-- IS DOCUMENT is a postfix test, so it needs parentheses as an operand
+create table tt29v_tbl (f bool, x xml);
+create view tt29v as
+  select f = (x is document) as r1,
+         (f >= (x is document)) and (f <= true) as r2
+  from tt29v_tbl;
+select pg_get_viewdef('tt29v'::regclass, false);
+                   pg_get_viewdef                   
+----------------------------------------------------
+  SELECT (f = (x IS DOCUMENT)) AS r1,              +
+     ((f >= (x IS DOCUMENT)) AND (f <= true)) AS r2+
+    FROM tt29v_tbl;
+(1 row)
+
+select pg_get_viewdef('tt29v'::regclass, true);
+                pg_get_viewdef                
+----------------------------------------------
+  SELECT f = (x IS DOCUMENT) AS r1,          +
+     f >= (x IS DOCUMENT) AND f <= true AS r2+
+    FROM tt29v_tbl;
+(1 row)
+
+select pg_get_viewdef('tt29v'::regclass, false) as def \gset
+create view tt29v_re as :def
+-- IS DOCUMENT also needs parentheses as an index or statistics expression,
+-- where only a function-like expression can be written without them
+create statistics tt29v_st on (x is document), f from tt29v_tbl;
+select pg_get_statisticsobjdef(oid) as def from pg_statistic_ext
+  where stxname = 'tt29v_st' \gset
+drop statistics tt29v_st;
+:def ;
+select pg_get_statisticsobjdef(oid) from pg_statistic_ext
+  where stxname = 'tt29v_st';
+                            pg_get_statisticsobjdef                            
+-------------------------------------------------------------------------------
+ CREATE STATISTICS testviewschm2.tt29v_st ON f, (x IS DOCUMENT) FROM tt29v_tbl
+(1 row)
+
+create index tt29v_idx on tt29v_tbl using btree ((x is document));
+select pg_get_indexdef('tt29v_idx'::regclass, 0, true);
+                          pg_get_indexdef                          
+-------------------------------------------------------------------
+ CREATE INDEX tt29v_idx ON tt29v_tbl USING btree ((x IS DOCUMENT))
+(1 row)
+
+select pg_get_indexdef('tt29v_idx'::regclass, 0, true) as def \gset
+drop index tt29v_idx;
+:def ;
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 NOTICE:  drop cascades to 27 other objects
@@ -2316,7 +2364,7 @@ drop cascades to view aliased_view_2
 drop cascades to view aliased_view_3
 drop cascades to view aliased_view_4
 DROP SCHEMA testviewschm2 CASCADE;
-NOTICE:  drop cascades to 80 other objects
+NOTICE:  drop cascades to 83 other objects
 DETAIL:  drop cascades to table t1
 drop cascades to view temporal1
 drop cascades to view temporal2
@@ -2397,3 +2445,6 @@ drop cascades to view tt25v
 drop cascades to view tt26v
 drop cascades to table tt27v_tbl
 drop cascades to view tt27v
+drop cascades to table tt29v_tbl
+drop cascades to view tt29v
+drop cascades to view tt29v_re
