@@ -100,6 +100,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
    <member><xref linkend="lo"/></member>
    <member><xref linkend="ltree"/></member>
    <member><xref linkend="pgcrypto"/></member>
+   <member><xref linkend="pgbench-ext"/></member>
    <member><xref linkend="pgtrgm"/></member>
    <member><xref linkend="seg"/></member>
    <member><xref linkend="tablefunc"/></member>
@@ -166,6 +167,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
  &pgtrgm;
  &pgvisibility;
  &pgwalinspect;
+ &pgbench-ext;
  &postgres-fdw;
  &seg;
  &sepgsql;
