@@ -1000,8 +1000,49 @@ $node_primary->wait_for_replay_catchup($node_standby);
 $node_standby->wait_for_replay_catchup($node_cascading_standby,
 	$node_primary);
 
-# promote
+# Stop WAL production and replay through the shutdown checkpoint, so slot
+# creation cannot finish using old-timeline WAL.
+$node_primary->stop;
+my $old_end = $node_standby->lsn('receive');
+$node_standby->poll_query_until('postgres',
+	"SELECT pg_last_wal_replay_lsn() >= '$old_end'::pg_lsn")
+  or die "standby did not replay the primary's final WAL";
+$node_standby->wait_for_catchup($node_cascading_standby, 'replay', $old_end);
+
+# Exercise read_local_xlog_page() by starting SQL slot creation before promotion.
+my $upstream_decode_session =
+  $node_cascading_standby->background_psql('testdb');
+$upstream_decode_session->set_query_timer_restart;
+my $upstream_decode_pid =
+  $upstream_decode_session->query_safe('SELECT pg_backend_pid()');
+$upstream_decode_session->query_until(
+	qr/upstream_slot_creation_started/, q[
+	\echo upstream_slot_creation_started
+	SELECT lsn FROM pg_create_logical_replication_slot('upstream_promotion_wait_slot', 'test_decoding');
+]);
+$node_cascading_standby->poll_query_until(
+	'testdb', qq[
+	SELECT wait_event = 'WaitForWalReplay'
+	FROM pg_stat_activity WHERE pid = $upstream_decode_pid;
+]) or die "slot creation did not wait for WAL replay before upstream promotion";
+
+# Promote the upstream while the decoding node remains in recovery.
 $node_standby->promote;
+
+# Supply a running-xacts record so slot creation can finish.
+$node_standby->safe_psql('testdb',
+	'SELECT pg_log_standby_snapshot();');
+my $upstream_slot_lsn = $upstream_decode_session->query_safe('');
+is( $node_cascading_standby->safe_psql('testdb',
+		"SELECT '$upstream_slot_lsn'::pg_lsn > '$old_end'::pg_lsn"),
+	't',
+	'SQL slot creation completes beyond the upstream timeline fork'
+);
+is($node_cascading_standby->safe_psql('testdb', 'SELECT pg_is_in_recovery()'),
+	't', 'decoding node remains in recovery after upstream promotion');
+$upstream_decode_session->quit;
+$node_cascading_standby->safe_psql('testdb',
+	"SELECT pg_drop_replication_slot('upstream_promotion_wait_slot');");
 
 # insert some rows on promoted standby
 $node_standby->safe_psql('testdb',
@@ -1094,6 +1135,7 @@ $node_standby->wait_for_replay_catchup($node_cascading_standby);
 # Open a background psql session BEFORE promotion for the SQL decoding
 # test.
 my $decode_session = $node_cascading_standby->background_psql('testdb');
+$decode_session->set_query_timer_restart;
 
 # Attach injection point to pause startup after WAL segment cleanup
 # but before RecoveryInProgress() flips to false.
@@ -1140,8 +1182,36 @@ my $sql_out = $decode_session->query_safe(
 is($sql_out, $expected,
 	'pg_logical_slot_peek_changes works during promotion timeline switch');
 
+# Start SQL slot creation beyond the final replay position.  Promotion must
+# release its replay wait so read_local_xlog_page() can use the flush position.
+my $decode_pid = $decode_session->query_safe('SELECT pg_backend_pid()');
+$decode_session->query_until(
+	qr/slot_creation_started/, q[
+	\echo slot_creation_started
+	SELECT slot_name FROM pg_create_logical_replication_slot('promotion_wait_slot', 'test_decoding');
+]);
+$node_cascading_standby->poll_query_until(
+	'testdb', qq[
+	SELECT wait_event = 'WaitForWalReplay'
+	FROM pg_stat_activity WHERE pid = $decode_pid;
+]) or die "slot creation did not wait for WAL replay";
+
 # Resume promotion.
 $node_cascading_standby->safe_psql('testdb',
 	"SELECT injection_points_wakeup('promotion-after-wal-segment-cleanup');");
+
+$node_cascading_standby->poll_query_until('testdb',
+	'SELECT NOT pg_is_in_recovery()')
+  or die "promotion did not finish";
+
+# Supply a running-xacts record so slot creation can finish.
+$node_cascading_standby->safe_psql('testdb',
+	'SELECT pg_log_standby_snapshot();');
+is($decode_session->query_safe(''),
+	'promotion_wait_slot',
+	'SQL slot creation waiting for WAL completes after promotion');
+$decode_session->quit;
+$node_cascading_standby->safe_psql('testdb',
+	"SELECT pg_drop_replication_slot('promotion_wait_slot');");
 
 done_testing();
