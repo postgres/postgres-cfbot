@@ -140,6 +140,29 @@ like(
 is($node_standby_1->safe_psql('postgres', 'COPY lpart TO STDOUT'),
 	'1', 'COPY TO of partitioned table on standby 1');
 
+# Check that currtid2() rejects unlogged tables on standby, including when
+# reached through a view, but still works on permanent ones
+$node_primary->safe_psql('postgres',
+	'CREATE VIEW ultab_view AS SELECT ctid, a FROM ultab');
+$node_primary->wait_for_replay_catchup($node_standby_1);
+my ($tid_ret, $tid_stdout, $tid_stderr) =
+  $node_standby_1->psql('postgres', q{SELECT currtid2('ultab', '(0,1)')});
+like(
+	$tid_stderr,
+	qr/cannot access temporary or unlogged relations during recovery/,
+	'currtid2() on unlogged table on standby 1');
+($tid_ret, $tid_stdout, $tid_stderr) =
+  $node_standby_1->psql('postgres',
+	q{SELECT currtid2('ultab_view', '(0,1)')});
+like(
+	$tid_stderr,
+	qr/cannot access temporary or unlogged relations during recovery/,
+	'currtid2() on view over unlogged table on standby 1');
+is( $node_standby_1->safe_psql(
+		'postgres', q{SELECT currtid2('tab_int', '(0,1)')}),
+	'(0,1)',
+	'currtid2() on permanent table on standby 1');
+
 # Check that only READ-only queries can run on standbys
 is($node_standby_1->psql('postgres', 'INSERT INTO tab_int VALUES (1)'),
 	3, 'read-only queries on standby 1');
