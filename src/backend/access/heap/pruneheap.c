@@ -960,9 +960,9 @@ heap_page_fix_vm_corruption(PruneState *prstate, OffsetNumber offnum,
 	{
 		LockBuffer(prstate->vmbuffer, BUFFER_LOCK_EXCLUSIVE);
 		/* This VM clear is not WAL-logged, so its return value is not needed. */
-		(void) visibilitymap_clear(prstate->relation->rd_locator,
-								   prstate->block, prstate->vmbuffer,
-								   VISIBILITYMAP_VALID_BITS);
+		(void) visibilitymap_clear_rel(prstate->relation,
+									   prstate->block, prstate->vmbuffer,
+									   VISIBILITYMAP_VALID_BITS);
 		LockBuffer(prstate->vmbuffer, BUFFER_LOCK_UNLOCK);
 		prstate->old_vmbits = 0;
 	}
