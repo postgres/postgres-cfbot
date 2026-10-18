@@ -193,6 +193,9 @@ foreach my $infile (@ARGV)
 	my %my_field_types;
 	my %my_field_attrs;
 
+	# nesting depth of an anonymous union/struct; the outermost level is 1
+	my $anon_nest = 0;
+
 	# open file with name from command line, which may have a path prefix
 	open my $ifh, '<', $infile or die "could not open \"$infile\": $!";
 
@@ -228,6 +231,34 @@ foreach my $infile (@ARGV)
 		$line =~ s/\s*$//;
 		next if $line eq '';
 		next if $line =~ /^#(define|ifdef|endif)/;
+
+		# Skip anonymous union/struct blocks. These are only allowed in
+		# non-node structs, whose fields we do not process.  Anonymous unions
+		# are not supported in node structs because their copy, equal, and
+		# serialization functions cannot be generated automatically.
+		if ($in_struct)
+		{
+			if ($anon_nest > 0)
+			{
+				$anon_nest += ($line =~ tr/{//) - ($line =~ tr/}//);
+				next;
+			}
+			elsif ($anon_nest == -1)
+			{
+				die "$infile:$lineno: expected '{' after anonymous union/struct\n"
+				  unless $line =~ /^\s*\{\s*$/;
+				$anon_nest = 1;
+				next;
+			}
+			elsif ($line =~ /^\s*(?:union|struct)(?:\s*\{)?\s*$/)
+			{
+				die
+				  "$infile:$lineno: anonymous union/struct not supported in node struct \"$in_struct\"\n"
+				  if $is_node_struct;
+				$anon_nest = ($line =~ /\{/) ? 1 : -1;
+				next;
+			}
+		}
 
 		# within a struct, don't process until we have whole logical line
 		if ($in_struct && $subline > 0)
@@ -421,6 +452,7 @@ foreach my $infile (@ARGV)
 				@my_fields = ();
 				%my_field_types = ();
 				%my_field_attrs = ();
+				$anon_nest = 0;
 			}
 			# normal struct field
 			elsif ($line =~
@@ -532,6 +564,7 @@ foreach my $infile (@ARGV)
 				$in_struct = $1;
 				$in_struct_lineno = $lineno;
 				$subline = 0;
+				$anon_nest = 0;
 			}
 			# one node type typedef'ed directly from another
 			elsif ($line =~ /^typedef (\w+) (\w+);$/ and elem $1, @node_types)
