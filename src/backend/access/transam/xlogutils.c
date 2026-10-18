@@ -23,6 +23,7 @@
 #include "access/xlogrecovery.h"
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
+#include "access/xlogwait.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"
@@ -907,12 +908,7 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 	loc = targetPagePtr + reqLen;
 
 	/*
-	 * Loop waiting for xlog to be available if necessary
-	 *
-	 * TODO: The walsender has its own version of this function, which uses a
-	 * condition variable to wake up whenever WAL is flushed. We could use the
-	 * same infrastructure here, instead of the check/sleep/repeat style of
-	 * loop.
+	 * Loop waiting for xlog to be available if necessary.
 	 */
 	while (1)
 	{
@@ -985,8 +981,22 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 				break;
 			}
 
-			CHECK_FOR_INTERRUPTS();
-			pg_usleep(1000L);
+			/*
+			 * Wait for the flush or replay position to reach loc, then
+			 * recheck the timeline and read limit above.  Ignore the result:
+			 * success still requires those checks, and if recovery has ended,
+			 * the next iteration uses the flush position instead.
+			 *
+			 * An upstream promotion can change our timeline without ending
+			 * recovery.  No separate timeline-change wakeup is needed: before
+			 * the requested segment can be read as historical WAL, replay must
+			 * pass that segment, satisfying this wait.  Requests in the segment
+			 * containing the switch or later still require replay to reach loc.
+			 */
+			(void) WaitForLSN(RecoveryInProgress() ?
+							 WAIT_LSN_TYPE_STANDBY_REPLAY :
+							 WAIT_LSN_TYPE_PRIMARY_FLUSH,
+							 loc, -1);
 		}
 		else
 		{
