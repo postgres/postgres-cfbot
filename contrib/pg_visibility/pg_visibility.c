@@ -13,6 +13,7 @@
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/visibilitymap.h"
+#include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage_xlog.h"
@@ -137,6 +138,12 @@ pg_visibility(PG_FUNCTION_ARGS)
 
 	/* Only some relkinds have a visibility map */
 	check_relation_relkind(rel);
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	if (blkno < 0 || blkno > MaxBlockNumber)
 		ereport(ERROR,
@@ -497,6 +504,12 @@ collect_visibility_data(Oid relid, bool include_pd)
 	/* Only some relkinds have a visibility map */
 	check_relation_relkind(rel);
 
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
+
 	nblocks = RelationGetNumberOfBlocks(rel);
 	info = palloc0(offsetof(vbits, bits) + nblocks);
 	info->next = 0;
@@ -710,6 +723,12 @@ collect_corrupt_items(Oid relid, bool all_visible, bool all_frozen)
 
 	/* Only some relkinds have a visibility map */
 	check_relation_relkind(rel);
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	if (all_visible)
 		OldestXmin = GetStrictOldestNonRemovableTransactionId(rel);
