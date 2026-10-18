@@ -17,6 +17,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -174,6 +175,16 @@ get_raw_page_internal(text *relname, ForkNumber forknum, BlockNumber blkno)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
+
+	/*
+	 * Temporary and unlogged relations are inaccessible during recovery,
+	 * except for the init fork of an unlogged relation, which does exist.
+	 */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress() &&
+		forknum != INIT_FORKNUM)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	if (blkno >= RelationGetNumberOfBlocksInFork(rel, forknum))
 		ereport(ERROR,
