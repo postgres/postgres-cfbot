@@ -2919,7 +2919,8 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 
 	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(chgcxt->cc_rri,
 													ondisk_tuple,
-													spilled_tuple);
+													spilled_tuple,
+													chgcxt->cc_estate);
 
 	/*
 	 * Carry out the update, skipping logical decoding for it.

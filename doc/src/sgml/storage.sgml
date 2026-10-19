@@ -1109,7 +1109,14 @@ data. Empty in ordinary tables.</entry>
      The update does not modify any columns referenced by the table's indexes,
      not including summarizing indexes.  The only summarizing index method in
      the core <productname>PostgreSQL</productname> distribution is <link
-     linkend="brin">BRIN</link>.
+     linkend="brin">BRIN</link>.  A column that indexes reference only through
+     <link linkend="indexes-expressional">expressions</link>, or only as
+     <link linkend="indexes-partial">partial indexes</link>, does not count as
+     modified if the update changes neither the value of any such index's
+     expressions nor whether the row satisfies its predicate.  The values are
+     compared as stored, so equal values with different representations, such
+     as <literal>1.0</literal> and <literal>1.00</literal> of type
+     <type>numeric</type>, count as different.
      </para>
    </listitem>
    <listitem>
