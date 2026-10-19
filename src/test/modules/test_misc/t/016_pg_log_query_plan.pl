@@ -71,8 +71,11 @@ $psql_session1->query_until(
 # Confirm that session1 is actually waiting on the advisory lock.
 $node->wait_for_event('client backend', 'advisory');
 
-# Run pg_log_query_plan().
-$psql_session2->query_safe("SELECT pg_log_query_plan($session1_pid);");
+# Run pg_log_query_plan() and save the request ID for the log check.
+my $request_id =
+  $psql_session2->query_safe("SELECT pg_log_query_plan($session1_pid);");
+like($request_id, qr/^[1-9][0-9]*$/,
+	'pg_log_query_plan returns a positive request ID');
 
 # Ensure that the signal of pg_log_query_plan() is actually
 # received by confirming session1 is waiting on the injection point.
@@ -91,7 +94,7 @@ $psql_session2->query_safe(
 ]);
 
 $node->wait_for_log(
-	"running on backend with PID $session1_pid ",
+	qr/request ID $request_id running on backend with PID $session1_pid /,
 	$log_offset);
 
 $psql_session1->query_safe("COMMIT;");

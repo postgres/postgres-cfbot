@@ -33,6 +33,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
 #include "catalog/pg_tablespace.h"
+#include "commands/explain_running.h"
 #include "libpq/auth.h"
 #include "libpq/libpq-be.h"
 #include "mb/pg_wchar.h"
@@ -732,6 +733,13 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	int			nfree = 0;
 
 	elog(DEBUG3, "InitPostgres");
+
+	/*
+	 * Initialize the query plan request slot before InitProcessPhase2()
+	 * exposes me to other backends that can install requests.
+	 */
+	if (MyBackendType == B_BACKEND)
+		LogQueryPlanRequestSlotInit();
 
 	/*
 	 * Add my PGPROC struct to the ProcArray.
