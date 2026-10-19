@@ -355,6 +355,9 @@ static void getTableData(DumpOptions *dopt, TableInfo *tblinfo, int numTables, c
 static void makeTableDataInfo(DumpOptions *dopt, TableInfo *tbinfo);
 static void buildMatViewRefreshDependencies(Archive *fout);
 static void getTableDataFKConstraints(void);
+static ConstraintInfo *findParentCheck(TableInfo *tbinfo, const char *conname);
+static void addAncestorCheckDependencies(TableInfo *tbinfo,
+										 ConstraintInfo *con);
 static void determineNotNullFlags(Archive *fout, PGresult *res, int r,
 								  TableInfo *tbinfo, int j,
 								  int i_notnull_name,
@@ -9767,14 +9770,20 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		int			i_consrc;
 		int			i_conislocal;
 		int			i_convalidated;
+		int			i_conenforced;
 
 		pg_log_info("finding table check constraints");
 
 		resetPQExpBuffer(q);
+		appendPQExpBufferStr(q,
+							 "SELECT c.tableoid, c.oid, conrelid, conname, "
+							 "pg_catalog.pg_get_constraintdef(c.oid) AS consrc, "
+							 "conislocal, convalidated, ");
+		if (fout->remoteVersion >= 180000)
+			appendPQExpBufferStr(q, "conenforced ");
+		else
+			appendPQExpBufferStr(q, "true AS conenforced ");
 		appendPQExpBuffer(q,
-						  "SELECT c.tableoid, c.oid, conrelid, conname, "
-						  "pg_catalog.pg_get_constraintdef(c.oid) AS consrc, "
-						  "conislocal, convalidated "
 						  "FROM unnest('%s'::pg_catalog.oid[]) AS src(tbloid)\n"
 						  "JOIN pg_catalog.pg_constraint c ON (src.tbloid = c.conrelid)\n"
 						  "WHERE contype = 'c' "
@@ -9793,6 +9802,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		i_consrc = PQfnumber(res, "consrc");
 		i_conislocal = PQfnumber(res, "conislocal");
 		i_convalidated = PQfnumber(res, "convalidated");
+		i_conenforced = PQfnumber(res, "conenforced");
 
 		/* As above, this loop iterates once per table, not once per row */
 		curtblindx = -1;
@@ -9851,6 +9861,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 				constrs[j].condeferrable = false;
 				constrs[j].condeferred = false;
 				constrs[j].conislocal = (PQgetvalue(res, j, i_conislocal)[0] == 't');
+				constrs[j].conenforced = (PQgetvalue(res, j, i_conenforced)[0] == 't');
 
 				/*
 				 * An unvalidated constraint needs to be dumped separately, so
@@ -9881,12 +9892,102 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 			}
 		}
 
+		/*
+		 * A separately dumped CHECK constraint of an inheritance child or
+		 * partition must be restored before the same constraint of its
+		 * ancestors.  Otherwise the ancestor's ADD CONSTRAINT recurses and
+		 * creates the child's copy first, so the child's own ADD CONSTRAINT
+		 * then fails (for a partition) or merges into that copy (for an
+		 * inheritance child) instead of creating the constraint.
+		 */
+		for (int j = 0; j < numConstrs; j++)
+		{
+			ConstraintInfo *con = &constrs[j];
+			TableInfo  *tbinfo = con->contable;
+
+			if (!con->separate)
+				continue;
+
+			/*
+			 * A partition's inherited constraint is normally not dumped on
+			 * its own, because the parent's ADD CONSTRAINT recreates it.  But
+			 * if the partition's is ENFORCED and the parent's is NOT
+			 * ENFORCED, the recreated one would be NOT ENFORCED, so dump the
+			 * partition's with its own definition, as if it were local.
+			 */
+			if (tbinfo->ispartition && !con->conislocal && con->conenforced)
+			{
+				ConstraintInfo *pcon = findParentCheck(tbinfo, con->dobj.name);
+
+				if (pcon != NULL && !pcon->conenforced)
+					con->conislocal = true;
+			}
+
+			addAncestorCheckDependencies(tbinfo, con);
+		}
+
 		PQclear(res);
 	}
 
 	destroyPQExpBuffer(q);
 	destroyPQExpBuffer(tbloids);
 	destroyPQExpBuffer(checkoids);
+}
+
+/*
+ * findParentCheck
+ *
+ * Return the CHECK constraint named conname of partition tbinfo's parent, or
+ * NULL if there is none.
+ */
+static ConstraintInfo *
+findParentCheck(TableInfo *tbinfo, const char *conname)
+{
+	TableInfo  *parent;
+
+	Assert(tbinfo->ispartition && tbinfo->numParents == 1);
+
+	parent = tbinfo->parents[0];
+	for (int c = 0; parent->checkexprs && c < parent->ncheck; c++)
+	{
+		if (strcmp(parent->checkexprs[c].dobj.name, conname) == 0)
+			return &parent->checkexprs[c];
+	}
+
+	return NULL;
+}
+
+/*
+ * addAncestorCheckDependencies
+ *
+ * con is a separately dumped CHECK constraint of table tbinfo.  Make the
+ * same-named CHECK constraint of every ancestor of tbinfo depend on con, so
+ * that con is restored first.  All ancestors are visited, not only the direct
+ * parents, because each ancestor's ADD CONSTRAINT recurses all the way down.
+ *
+ * Only ancestors' separately dumped constraints are considered.  One that is
+ * part of the ancestor's CREATE TABLE is necessarily restored before con, and
+ * making it depend on con would create a dependency loop.
+ */
+static void
+addAncestorCheckDependencies(TableInfo *tbinfo, ConstraintInfo *con)
+{
+	for (int p = 0; p < tbinfo->numParents; p++)
+	{
+		TableInfo  *parent = tbinfo->parents[p];
+
+		for (int c = 0; parent->checkexprs && c < parent->ncheck; c++)
+		{
+			ConstraintInfo *pcon = &parent->checkexprs[c];
+
+			if (pcon->separate &&
+				strcmp(pcon->dobj.name, con->dobj.name) == 0)
+				addObjectDependency(&pcon->dobj, con->dobj.dumpId);
+		}
+
+		/* check further up, in case of multiple levels of inheritance */
+		addAncestorCheckDependencies(parent, con);
+	}
 }
 
 /*
