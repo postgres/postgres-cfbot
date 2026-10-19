@@ -1120,6 +1120,43 @@ my %tests = (
 		},
 	},
 
+	'CONSTRAINT CHECK / ENFORCED only on child' => {
+		create_sql => 'CREATE TABLE dump_test.test_table_ne (col1 int CONSTRAINT ck CHECK (col1 > 0) NOT ENFORCED);
+			CREATE TABLE dump_test.test_table_ne_c () INHERITS (dump_test.test_table_ne);
+			ALTER TABLE dump_test.test_table_ne_c ALTER CONSTRAINT ck ENFORCED;',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_ne_c (\E\n
+			\s+\QCONSTRAINT ck CHECK ((col1 > 0))\E\n
+			/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+			binary_upgrade => 1,
+		},
+	},
+
+	'CONSTRAINT CHECK / NOT VALID only on partition' => {
+		create_sql => 'CREATE TABLE dump_test.test_table_nv (col1 int CONSTRAINT ck CHECK (col1 > 0) NOT ENFORCED) PARTITION BY LIST (col1);
+			CREATE TABLE dump_test.test_table_nv_1 (col1 int);
+			ALTER TABLE dump_test.test_table_nv_1 ADD CONSTRAINT ck CHECK (col1 > 0) NOT VALID;
+			ALTER TABLE dump_test.test_table_nv ATTACH PARTITION dump_test.test_table_nv_1 FOR VALUES IN (1);',
+		regexp => qr/^
+			\QALTER TABLE dump_test.test_table_nv_1\E\n
+			.*^
+			\QALTER TABLE dump_test.test_table_nv\E\n
+			/xms,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_post_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CONSTRAINT NOT NULL / NO INHERIT' => {
 		create_sql => 'CREATE TABLE dump_test.test_table_nonn (
 		col1 int NOT NULL NO INHERIT,
