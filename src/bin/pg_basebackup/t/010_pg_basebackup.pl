@@ -829,9 +829,51 @@ $node->command_fails_like(
 	qr/replication slot "slot0" already exists/,
 	'pg_basebackup fails with --create-slot --slot and a previously existing slot'
 );
+is( $node->safe_psql(
+		'postgres',
+		q{SELECT slot_name FROM pg_replication_slots WHERE slot_name = 'slot0'}
+	),
+	'slot0',
+	'previously existing slot is not dropped when --create-slot fails');
+
+# The slot is created before BASE_BACKUP is sent, so a failure of
+# BASE_BACKUP itself must not leave a slot created by --create-slot behind.
+$node->command_fails_like(
+	[
+		@pg_basebackup_defs,
+		'--pgdata' => "$tempdir/backupxs_slot2",
+		'--create-slot',
+		'--slot' => 'slot2',
+		'--manifest-checksums' => 'bogus'
+	],
+	qr/unrecognized checksum algorithm/,
+	'pg_basebackup --create-slot fails when BASE_BACKUP fails');
+is( $node->safe_psql(
+		'postgres',
+		q{SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'slot2'}
+	),
+	'0',
+	'slot created by failed pg_basebackup --create-slot is dropped');
 
 $node->safe_psql('postgres',
 	q{SELECT * FROM pg_create_physical_replication_slot('slot1')});
+
+# Without --create-slot, a failed backup must leave the given slot alone.
+$node->command_fails_like(
+	[
+		@pg_basebackup_defs,
+		'--pgdata' => "$tempdir/backupxs_slot1_fail",
+		'--slot' => 'slot1',
+		'--manifest-checksums' => 'bogus'
+	],
+	qr/unrecognized checksum algorithm/,
+	'pg_basebackup --slot fails when BASE_BACKUP fails');
+is( $node->safe_psql(
+		'postgres',
+		q{SELECT slot_name FROM pg_replication_slots WHERE slot_name = 'slot1'}
+	),
+	'slot1',
+	'existing slot is not dropped when pg_basebackup --slot fails');
 my $lsn = $node->safe_psql('postgres',
 	q{SELECT restart_lsn FROM pg_replication_slots WHERE slot_name = 'slot1'}
 );
