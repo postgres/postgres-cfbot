@@ -190,7 +190,7 @@
          <primary>pg_log_query_plan</primary>
         </indexterm>
         <function>pg_log_query_plan</function> ( <parameter>pid</parameter> <type>integer</type> )
-        <returnvalue>boolean</returnvalue>
+        <returnvalue>bigint</returnvalue>
        </para>
        <para>
         Requests to log the plan of the query currently running on the
@@ -200,6 +200,10 @@
         configuration set (See <xref linkend="runtime-config-logging"/>
         for more information), but will not be sent to the client
         regardless of <xref linkend="guc-client-min-messages"/>.
+       </para>
+       <para>
+        Each accepted request is assigned a positive request identifier, which
+        is returned by the function and is included in the server log message.
        </para>
        <para>
         The plan is logged when the target backend next reaches a

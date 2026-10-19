@@ -37,6 +37,7 @@
 #include "catalog/pg_enum.h"
 #include "catalog/storage.h"
 #include "commands/async.h"
+#include "commands/explain_running.h"
 #include "commands/tablecmds.h"
 #include "commands/trigger.h"
 #include "common/pg_prng.h"
@@ -2993,8 +2994,9 @@ AbortTransaction(void)
 	/* Reset snapshot export state. */
 	SnapBuildResetExportedSnapshotState();
 
-	/* Reset current QueryDesc. */
+	/* Discard the current QueryDesc and any unfinished plan logging request. */
 	SetCurrentQueryDesc(NULL);
+	AbortLogQueryPlanRequest();
 
 	/*
 	 * If this xact has started any unfinished parallel operation, clean up
@@ -5412,8 +5414,10 @@ AbortSubTransaction(void)
 	 * Reset current QueryDesc. Note that even after this reset, it's still
 	 * possible to obtain the parent transaction's query plans, since they are
 	 * preserved in standard_ExecutorRun().
+	 * Discard any unfinished plan logging request as well.
 	 */
 	SetCurrentQueryDesc(NULL);
+	AbortLogQueryPlanRequest();
 
 	/*
 	 * No need for SnapBuildResetExportedSnapshotState() here, snapshot

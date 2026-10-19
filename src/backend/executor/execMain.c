@@ -414,12 +414,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	 * execution on the same session.
 	 */
 	if (LogQueryPlanPending)
-	{
-		ereport(LOG_SERVER_ONLY,
-				(errmsg("query plan logging was requested but there was no opportunity to do it for queryid " INT64_FORMAT,
-						queryDesc->plannedstmt->queryId)));
-		LogQueryPlanPending = false;
-	}
+		FinishLogQueryPlanRequestWithoutPlan(queryDesc->plannedstmt->queryId);
 }
 
 /* ----------------------------------------------------------------
