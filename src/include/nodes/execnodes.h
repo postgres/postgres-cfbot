@@ -503,6 +503,14 @@ typedef struct ResultRelInfo
 	IndexInfo **ri_IndexRelationInfo;
 
 	/*
+	 * For UPDATE, the table attributes each index references through
+	 * expressions or its predicate, offset by
+	 * FirstLowInvalidHeapAttributeNumber.  Built on first use; NULL until
+	 * then.
+	 */
+	Bitmapset **ri_IndexExprAttrs;
+
+	/*
 	 * For UPDATE/DELETE/MERGE result relations, the attribute number of the
 	 * row identity junk attribute in the source plan's output tuples
 	 */
