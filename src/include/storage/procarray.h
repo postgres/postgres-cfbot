@@ -65,6 +65,21 @@ extern PGPROC *ProcNumberGetProc(int procNumber);
 extern void ProcNumberGetTransactionIds(int procNumber, TransactionId *xid,
 										TransactionId *xmin, int *nsubxid,
 										bool *overflowed);
+
+typedef struct XidHorizonProc
+{
+	int			pid;			/* Backend's process ID; 0 if prepared xact */
+	int			procNumber;		/* ProcNumber, which is also the
+								 * BackendStatusArray index; not valid for
+								 * prepared-xact dummy procs */
+	Oid			databaseId;
+	uint8		statusFlags;
+	TransactionId xid;
+	TransactionId xmin;
+} XidHorizonProc;
+
+extern XidHorizonProc *GetXidHorizonProcs(int *n, bool *in_recovery,
+										  TransactionId *known_assigned_xmin);
 extern PGPROC *BackendPidGetProc(int pid);
 extern PGPROC *BackendPidGetProcWithLock(int pid);
 extern int	BackendXidGetPid(TransactionId xid);

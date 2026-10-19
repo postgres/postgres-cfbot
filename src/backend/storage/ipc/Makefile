@@ -18,6 +18,7 @@ OBJS = \
 	latch.o \
 	pmsignal.o \
 	procarray.o \
+	procarrayfuncs.o \
 	procsignal.o \
 	shm_mq.o \
 	shm_toc.o \
