@@ -1,0 +1,9 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1begin s1lock s2attach s1alter s1commit
+step s1begin: BEGIN;
+step s1lock: LOCK TABLE ONLY attach_lock_root IN ACCESS EXCLUSIVE MODE;
+step s2attach: ALTER TABLE attach_lock_mid2 ATTACH PARTITION attach_lock_new FOR VALUES FROM (0) TO (100); <waiting ...>
+step s1alter: ALTER TABLE attach_lock_root ALTER COLUMN id SET DEFAULT 0;
+step s1commit: COMMIT;
+step s2attach: <... completed>

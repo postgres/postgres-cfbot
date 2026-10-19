@@ -1,0 +1,41 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1begin s1lock s2attach s1alter s1commit s2check
+step s1begin: BEGIN;
+step s1lock: LOCK TABLE ONLY index_attach_root IN ACCESS EXCLUSIVE MODE;
+step s2attach: ALTER INDEX index_attach_mid2_idx ATTACH PARTITION index_attach_leaf_idx; <waiting ...>
+step s1alter: ALTER TABLE index_attach_root ALTER COLUMN id SET DEFAULT 0;
+step s1commit: COMMIT;
+step s2attach: <... completed>
+step s2check: 
+  SELECT bool_and(indisvalid) AS all_valid FROM pg_index
+    WHERE indexrelid IN ('index_attach_root_idx'::regclass,
+                        'index_attach_mid1_idx'::regclass,
+                        'index_attach_mid2_idx'::regclass,
+                        'index_attach_leaf_idx'::regclass);
+
+all_valid
+---------
+t        
+(1 row)
+
+
+starting permutation: s1begin s1attachroot s2attach s1attachmid s1commit s2check
+step s1begin: BEGIN;
+step s1attachroot: ALTER INDEX index_attach_root_idx ATTACH PARTITION index_attach_mid1_idx;
+step s2attach: ALTER INDEX index_attach_mid2_idx ATTACH PARTITION index_attach_leaf_idx; <waiting ...>
+step s1attachmid: ALTER INDEX index_attach_mid1_idx ATTACH PARTITION index_attach_mid2_idx;
+step s1commit: COMMIT;
+step s2attach: <... completed>
+step s2check: 
+  SELECT bool_and(indisvalid) AS all_valid FROM pg_index
+    WHERE indexrelid IN ('index_attach_root_idx'::regclass,
+                        'index_attach_mid1_idx'::regclass,
+                        'index_attach_mid2_idx'::regclass,
+                        'index_attach_leaf_idx'::regclass);
+
+all_valid
+---------
+t        
+(1 row)
+
