@@ -504,7 +504,8 @@ typedef struct ResultRelInfo
 
 	/*
 	 * For UPDATE, the table attributes each index references through
-	 * expressions or its predicate, offset by
+	 * expressions or its predicate, and directly if the index is partial or
+	 * its access method has amcomparedatums, offset by
 	 * FirstLowInvalidHeapAttributeNumber.  Built on first use; NULL until
 	 * then.
 	 */

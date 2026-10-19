@@ -41,10 +41,15 @@ A column that indexes reference only through expressions, or only as
 partial indexes, may change if the update changes nothing those indexes
 store: not the value of any of their expressions or columns, as compared
 byte for byte, and not whether the tuple satisfies their predicates.
-The executor works that out before calling the table AM, and passes on
-only the indexed columns whose change matters.  An index that is not yet
-ready for inserts, or whose build failed, counts as changed whenever a
-column it references does; see "CREATE INDEX CONCURRENTLY" below.
+The same holds for a column that indexes also store directly, if every
+index that does so has an access method that can tell, from the old and
+new values, that it would store the same entries (amcomparedatums), and
+the column is in no candidate key, replica identity or exclusion
+constraint.  The executor works that out before calling the table AM,
+and passes on only the indexed columns whose change matters.  An index
+that is not yet ready for inserts, or whose build failed, counts as
+changed whenever a column it references does; see "CREATE INDEX
+CONCURRENTLY" below.
 
 Second, where the modified columns are only used in indexes that do not
 contain tuple IDs, but maintain summaries of the indexed data by block.
@@ -506,7 +511,8 @@ Indexed column
 	actually be stored in the index --- it could be used in a
 	functional index's expression, or used in a partial index
 	predicate.  A change to a column that indexes use only in these
-	ways blocks HOT only if it changes what those indexes store.
+	ways, or whose indexes can compare entries, blocks HOT only if it
+	changes what those indexes store.
 
 Redirecting line pointer
 

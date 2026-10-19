@@ -180,6 +180,9 @@ typedef struct IndexAmRoutine
     /* interface functions to support planning */
     amtranslate_strategy_function amtranslatestrategy;  /* can be NULL */
     amtranslate_cmptype_function amtranslatecmptype;    /* can be NULL */
+
+    /* interface function to support HOT updates */
+    amcomparedatums_function amcomparedatums;    /* can be NULL */
 } IndexAmRoutine;
 </programlisting>
   </para>
@@ -913,6 +916,54 @@ amtranslatecmptype (CompareType cmptype, Oid opfamily, Oid opcintype);
    implemented.  If the functions are not implemented, the access method will
    be ignored for certain planner and executor decisions, but is otherwise
    fully functional.
+  </para>
+
+  <para>
+<programlisting>
+bool
+amcomparedatums (Relation indexRelation,
+                 IndexInfo *indexInfo,
+                 int attnum,
+                 Oid typid,
+                 int16 typlen,
+                 bool typbyval,
+                 Datum oldValue,
+                 Datum newValue);
+</programlisting>
+   Would inserting a row whose index column <parameter>attnum</parameter>
+   (counting from 1) has the value <parameter>newValue</parameter> make
+   exactly the same index entries as <parameter>oldValue</parameter> made?
+   The values are not null, are of type <parameter>typid</parameter> (the
+   type of the table column or index expression, which need not be the type
+   the index stores), whose length and by-value property are
+   <parameter>typlen</parameter> and <parameter>typbyval</parameter>, and
+   are not equal byte for byte.  The function is
+   called during <command>UPDATE</command>, before the table access method
+   is, for every index that uses a column whose value changed; if every such
+   index answers <literal>true</literal> for every changed column, the update
+   can be a heap-only tuple (<acronym>HOT</acronym>) update, which makes no new
+   index entries at all (see <xref linkend="storage-hot"/>).  The index then
+   keeps the entries it made for the old value, and reaches the new row
+   through them.  <parameter>indexInfo</parameter> is the one
+   <function>aminsert</function> would get for the new row, so the function
+   may use <literal>ii_AmCache</literal> in the same way.
+  </para>
+
+  <para>
+   So <literal>true</literal> is only correct if no scan can tell the old
+   entries from the ones the new value would make: they must have the same
+   keys, compared as the index compares them, and anything a scan returns
+   from them must be the same.  The function is not called for a column the
+   index can return in index-only scans (see <function>amcanreturn</function>):
+   the index stores the value itself there, so only the same value gives the
+   same entries.  If the function cannot be sure, it must return <literal>false</literal>, which
+   is always correct.  It must not modify the index, and it may be called for
+   an index that is not yet valid.  Columns of unique indexes that can be
+   referenced by a foreign key, and of the replica identity index, are not
+   compared this way, and the function is not called for the index of an
+   exclusion constraint, whose check needs the values themselves.  If <structfield>amcomparedatums</structfield> is
+   <literal>NULL</literal>, a change to a column that the index stores
+   always needs new index entries.
   </para>
 
  </sect1>
