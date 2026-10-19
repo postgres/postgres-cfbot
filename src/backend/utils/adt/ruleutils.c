@@ -10889,7 +10889,18 @@ get_oper_expr(OpExpr *expr, deparse_context *context)
 						 generate_operator_name(opno,
 												InvalidOid,
 												exprType(arg)));
-		get_rule_expr_paren(arg, context, true, (Node *) expr);
+
+		/*
+		 * If the argument is a Const, force it to be labeled with its type.
+		 * Otherwise, something like "- 3" would be folded by the grammar into
+		 * a negative constant when re-parsed, which is not the same thing;
+		 * notably, in ORDER BY or GROUP BY it would be taken as a column
+		 * number.
+		 */
+		if (arg && IsA(arg, Const))
+			get_const_expr((Const *) arg, context, 1);
+		else
+			get_rule_expr_paren(arg, context, true, (Node *) expr);
 	}
 	if (!PRETTY_PAREN(context))
 		appendStringInfoChar(buf, ')');
