@@ -104,6 +104,11 @@ typedef void (*WriteDataCallback) (size_t nbytes, char *buf,
 #define MINIMUM_VERSION_FOR_TERMINATED_TARFILE 150000
 
 /*
+ * READ_REPLICATION_SLOT supported from version 15
+ */
+#define MINIMUM_VERSION_FOR_READ_REPLICATION_SLOT 150000
+
+/*
  * pg_wal/summaries exists beginning with version 17.
  */
 #define MINIMUM_VERSION_FOR_WAL_SUMMARIES 170000
@@ -164,6 +169,12 @@ static bool made_new_xlogdir = false;
 static bool found_existing_xlogdir = false;
 static bool made_tablespace_dirs = false;
 static bool found_tablespace_dirs = false;
+
+/* Connection for the background WAL receiver, see PrepareLogStreamer() */
+static PGconn *bgconn = NULL;
+
+/* Has the background WAL receiver been started? */
+static bool log_streamer_started = false;
 
 /* Progress indicators */
 static uint64 totalsize_kb;
@@ -608,48 +619,30 @@ LogStreamerMain(logstreamer_param *param)
 }
 
 /*
- * Initiate background process for receiving xlog during the backup.
- * The background stream will use its own database connection so we can
- * stream the logfile in parallel with the backups.
+ * Open the connection for the background WAL receiver and create its
+ * replication slot, if one is needed.
+ *
+ * This is done before BASE_BACKUP, so that the slot reserves all the WAL the
+ * backup needs before the backup's checkpoint removes any of it.
+ *
+ * The slot must then not sit idle during that checkpoint, which can be long
+ * with --checkpoint=spread, or idle_replication_slot_timeout (version 18+)
+ * may invalidate it.  So if the slot's restart position can be read
+ * (version 15 and later), return true with it in *startptr and *starttli,
+ * and the caller starts the receiver there right away.  Otherwise return
+ * false, and the receiver is started after BASE_BACKUP.
  */
-static void
-StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
-				 pg_compress_algorithm wal_compress_algorithm,
-				 int wal_compress_level)
+static bool
+PrepareLogStreamer(XLogRecPtr *startptr, TimeLineID *starttli)
 {
-	logstreamer_param *param;
-	char		statusdir[MAXPGPATH];
+	XLogRecPtr	restart_lsn;
+	TimeLineID	restart_tli;
 
-	param = pg_malloc0_object(logstreamer_param);
-	param->timeline = timeline;
-	param->sysidentifier = sysidentifier;
-	param->wal_compress_algorithm = wal_compress_algorithm;
-	param->wal_compress_level = wal_compress_level;
-
-	/* Convert the starting position */
-	if (!pg_parse_lsn(startpos, &param->startptr))
-		pg_fatal("could not parse write-ahead log location \"%s\"",
-				 startpos);
-	/* Round off to even segment position */
-	param->startptr -= XLogSegmentOffset(param->startptr, WalSegSz);
-
-#ifndef WIN32
-	/* Create our background pipe */
-	if (pipe(bgpipe) < 0)
-		pg_fatal("could not create pipe for background process: %m");
-#endif
-
-	/* Get a second connection */
-	param->bgconn = GetConnection();
-	if (!param->bgconn)
+	/* Get a WAL serving connection */
+	bgconn = GetConnection();
+	if (!bgconn)
 		/* Error message already written in GetConnection() */
 		exit(1);
-
-	/* In post-10 cluster, pg_xlog has been renamed to pg_wal */
-	snprintf(param->xlog, sizeof(param->xlog), "%s/%s",
-			 basedir,
-			 PQserverVersion(conn) < MINIMUM_VERSION_FOR_PG_WAL ?
-			 "pg_xlog" : "pg_wal");
 
 	/* Temporary replication slots are only supported in 10 and newer */
 	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
@@ -660,10 +653,10 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	 */
 	if (temp_replication_slot && !replication_slot)
 		replication_slot = psprintf("pg_basebackup_%u",
-									(unsigned int) PQbackendPID(param->bgconn));
+									(unsigned int) PQbackendPID(bgconn));
 	if (temp_replication_slot || create_slot)
 	{
-		if (!CreateReplicationSlot(param->bgconn, replication_slot, NULL,
+		if (!CreateReplicationSlot(bgconn, replication_slot, NULL,
 								   temp_replication_slot, true, true, false,
 								   false, false))
 			exit(1);
@@ -678,6 +671,65 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 							replication_slot);
 		}
 	}
+
+	/* if --no-slot is used */
+	if (replication_slot == NULL)
+		return false;
+
+	/* GetSlotInformation doesn't exist pre version 15 */
+	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_READ_REPLICATION_SLOT)
+		return false;
+
+	if (!GetSlotInformation(bgconn, replication_slot,
+							&restart_lsn, &restart_tli))
+		exit(1);
+
+	/* Check invalid xlog */
+	if (!XLogRecPtrIsValid(restart_lsn) || restart_tli == 0)
+		return false;
+
+	*startptr = restart_lsn;
+	*starttli = restart_tli;
+
+	return true;
+}
+
+/*
+ * Initiate background process for receiving xlog during the backup.
+ * The background stream will use its own database connection so we can
+ * stream the logfile in parallel with the backups.
+ */
+static void
+StartLogStreamer(XLogRecPtr startpos, uint32 timeline, char *sysidentifier,
+				 pg_compress_algorithm wal_compress_algorithm,
+				 int wal_compress_level)
+{
+	logstreamer_param *param;
+	char		statusdir[MAXPGPATH];
+
+	Assert(bgconn != NULL);
+
+	param = pg_malloc0_object(logstreamer_param);
+	param->bgconn = bgconn;
+	param->timeline = timeline;
+	param->sysidentifier = sysidentifier;
+	param->wal_compress_algorithm = wal_compress_algorithm;
+	param->wal_compress_level = wal_compress_level;
+
+	/* Round off to even segment */
+	param->startptr = startpos - XLogSegmentOffset(startpos, WalSegSz);
+
+#ifndef WIN32
+	/* Create our background pipe */
+	if (pipe(bgpipe) < 0)
+		pg_fatal("could not create pipe for background process: %m");
+#endif
+
+	/* In post-10 cluster, pg_xlog has been renamed to pg_wal */
+	snprintf(param->xlog, sizeof(param->xlog), "%s/%s",
+			 basedir,
+			 PQserverVersion(conn) < MINIMUM_VERSION_FOR_PG_WAL ?
+			 "pg_xlog" : "pg_wal");
 
 	if (format == 'p')
 	{
@@ -734,6 +786,9 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	if (bgchild == 0)
 		pg_fatal("could not create background thread: %m");
 #endif
+
+	/* Mark streaming as started */
+	log_streamer_started = true;
 }
 
 /*
@@ -1747,6 +1802,11 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	int			i;
 	char		xlogstart[64];
 	char		xlogend[64] = {0};
+	XLogRecPtr	xlogstartptr = InvalidXLogRecPtr;
+	XLogRecPtr	streamstartptr = InvalidXLogRecPtr;
+	TimeLineID	streamstarttli = 0;
+	pg_compress_algorithm wal_compress_algorithm = PG_COMPRESSION_NONE;
+	int			wal_compress_level = 0;
 	int			minServerMajor,
 				maxServerMajor;
 	int			serverVersion,
@@ -1970,6 +2030,37 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 									  compression_detail);
 	}
 
+	/*
+	 * If streaming WAL, create the replication slot before starting the
+	 * backup, so that it protects all the WAL the backup needs.  Start the
+	 * receiver right away if possible, so that the slot is in use, and so
+	 * cannot be invalidated as idle, while the server performs the
+	 * checkpoint.  See PrepareLogStreamer().
+	 */
+	if (includewal == STREAM_WAL)
+	{
+		if (client_compress->algorithm == PG_COMPRESSION_GZIP)
+		{
+			wal_compress_algorithm = PG_COMPRESSION_GZIP;
+			wal_compress_level = client_compress->level;
+		}
+		else
+		{
+			wal_compress_algorithm = PG_COMPRESSION_NONE;
+			wal_compress_level = 0;
+		}
+
+		if (PrepareLogStreamer(&streamstartptr, &streamstarttli))
+		{
+			if (verbose)
+				pg_log_info("starting background WAL receiver");
+
+			StartLogStreamer(streamstartptr, streamstarttli, sysidentifier,
+							 wal_compress_algorithm,
+							 wal_compress_level);
+		}
+	}
+
 	if (verbose)
 		pg_log_info("initiating base backup, waiting for checkpoint to complete");
 
@@ -2022,6 +2113,26 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	if (verbose && includewal != NO_WAL)
 		pg_log_info("write-ahead log start point: %s on timeline %u",
 					xlogstart, starttli);
+
+	if (includewal == STREAM_WAL)
+	{
+		if (!pg_parse_lsn(xlogstart, &xlogstartptr))
+			pg_fatal("could not parse write-ahead log location \"%s\"",
+					 xlogstart);
+
+		/*
+		 * If the WAL receiver is running, make sure the stream start is older
+		 * than the basebackup start, in WAL and in timeline. An older stream
+		 * timeline is fine, the receiver should follow any timeline switches.
+		 */
+		if (log_streamer_started && xlogstartptr < streamstartptr)
+			pg_fatal("backup start point %s is older than the start of the WAL stream at %X/%08X",
+					 xlogstart, LSN_FORMAT_ARGS(streamstartptr));
+
+		if (log_streamer_started && streamstarttli > starttli)
+			pg_fatal("backup start timeline %u is older than the WAL stream's start timeline %u",
+					 starttli, streamstarttli);
+	}
 
 	/*
 	 * Get the header
@@ -2078,31 +2189,21 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 				 PQntuples(res));
 
 	/*
-	 * If we're streaming WAL, start the streaming session before we start
-	 * receiving the actual data chunks.
+	 * If the receiver could not be started before BASE_BACKUP (no slot, a
+	 * server older than version 15, or a slot without a restart position),
+	 * start it now, at the backup's start position.
 	 */
 	if (includewal == STREAM_WAL)
 	{
-		pg_compress_algorithm wal_compress_algorithm;
-		int			wal_compress_level;
-
-		if (verbose)
-			pg_log_info("starting background WAL receiver");
-
-		if (client_compress->algorithm == PG_COMPRESSION_GZIP)
+		if (!log_streamer_started)
 		{
-			wal_compress_algorithm = PG_COMPRESSION_GZIP;
-			wal_compress_level = client_compress->level;
-		}
-		else
-		{
-			wal_compress_algorithm = PG_COMPRESSION_NONE;
-			wal_compress_level = 0;
-		}
+			if (verbose)
+				pg_log_info("starting background WAL receiver");
 
-		StartLogStreamer(xlogstart, starttli, sysidentifier,
-						 wal_compress_algorithm,
-						 wal_compress_level);
+			StartLogStreamer(xlogstartptr, starttli, sysidentifier,
+							 wal_compress_algorithm,
+							 wal_compress_level);
+		}
 	}
 
 	if (serverMajor >= 1500)
