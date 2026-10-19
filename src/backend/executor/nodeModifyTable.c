@@ -54,6 +54,8 @@
 
 #include "postgres.h"
 
+#include "access/amapi.h"
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
@@ -198,41 +200,58 @@ static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
 										   bool canSetTag);
 
 /*
- * Do the old and new index datums differ, byte for byte?  Compare each
- * column as the type FormIndexDatum() produced it in: the table column's
- * type or the expression's, which need not be the type the index stores.
+ * Do the old and new index datums differ?  Compare each column as the type
+ * FormIndexDatum() produced it in: the table column's type or the
+ * expression's, which need not be the type the index stores.  Datums that
+ * differ byte for byte may still give the index the same entries; if its
+ * access method can tell (amcomparedatums), ask it, but not for a column the
+ * index can return in index-only scans, where only the same value will do.
+ *
+ * Not for an exclusion constraint's index, though: the constraint is checked
+ * when an entry is inserted, with its operators, against the values, and two
+ * values that give the same entries need not have the same conflicts.  (A
+ * value that is the same byte for byte has, so the check is not needed.)
  */
 static bool
-IndexDatumsDiffer(Relation heapRel, IndexInfo *indexInfo,
+IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
 				  const Datum *old_values, const bool *old_isnull,
 				  const Datum *new_values, const bool *new_isnull)
 {
 	ListCell   *expr = list_head(indexInfo->ii_Expressions);
+	amcomparedatums_function cmp = indexRel->rd_index->indisexclusion ? NULL :
+		indexRel->rd_indam->amcomparedatums;
 
 	for (int i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
 	{
 		AttrNumber	attnum = indexInfo->ii_IndexAttrNumbers[i];
+		Oid			typid;
 		int16		typlen;
 		bool		typbyval;
 
 		if (attnum != 0)
 		{
-			CompactAttribute *att = TupleDescCompactAttr(RelationGetDescr(heapRel),
-														 attnum - 1);
+			Form_pg_attribute att = TupleDescAttr(RelationGetDescr(heapRel),
+												  attnum - 1);
 
+			typid = att->atttypid;
 			typlen = att->attlen;
 			typbyval = att->attbyval;
 		}
 		else
 		{
-			get_typlenbyval(exprType(lfirst(expr)), &typlen, &typbyval);
+			typid = exprType(lfirst(expr));
+			get_typlenbyval(typid, &typlen, &typbyval);
 			expr = lnext(indexInfo->ii_Expressions, expr);
 		}
 
 		if (old_isnull[i] != new_isnull[i])
 			return true;
-		if (!old_isnull[i] &&
-			!datumIsEqual(old_values[i], new_values[i], typbyval, typlen))
+		if (old_isnull[i] ||
+			datumIsEqual(old_values[i], new_values[i], typbyval, typlen))
+			continue;
+		if (cmp == NULL || index_can_return(indexRel, i + 1) ||
+			!cmp(indexRel, indexInfo, i + 1, typid, typlen, typbyval,
+				 old_values[i], new_values[i]))
 			return true;
 	}
 	return false;
@@ -248,9 +267,9 @@ IndexDatumsDiffer(Relation heapRel, IndexInfo *indexInfo,
  * it in the query context.
  */
 static bool
-IndexEntryChanges(ResultRelInfo *resultRelInfo, IndexInfo *indexInfo,
-				  TupleTableSlot *old_tts, TupleTableSlot *new_tts,
-				  EState *estate)
+IndexEntryChanges(ResultRelInfo *resultRelInfo, Relation indexRel,
+				  IndexInfo *indexInfo, TupleTableSlot *old_tts,
+				  TupleTableSlot *new_tts, EState *estate)
 {
 	ExprContext *econtext = GetPerTupleExprContext(estate);
 	TupleTableSlot *save_scantuple = econtext->ecxt_scantuple;
@@ -294,16 +313,18 @@ IndexEntryChanges(ResultRelInfo *resultRelInfo, IndexInfo *indexInfo,
 	FormIndexDatum(indexInfo, new_tts, estate, new_values, new_isnull);
 	econtext->ecxt_scantuple = save_scantuple;
 
-	result = IndexDatumsDiffer(resultRelInfo->ri_RelationDesc, indexInfo,
-							   old_values, old_isnull, new_values, new_isnull);
+	result = IndexDatumsDiffer(resultRelInfo->ri_RelationDesc, indexRel,
+							   indexInfo, old_values, old_isnull,
+							   new_values, new_isnull);
 	MemoryContextSwitchTo(oldcxt);
 	return result;
 }
 
 /*
  * Return the attributes of the i'th index that INDEX_ATTR_BITMAP_EXPRESSION
- * can contain: those it references through its expressions, and for a
- * partial index all those it references.  Builds the per-index cache on
+ * or INDEX_ATTR_BITMAP_COMPARABLE can contain: those it references through
+ * its expressions, and all those it references if it is a partial index or
+ * its access method can compare entries.  Builds the per-index cache on
  * first use.
  */
 static Bitmapset *
@@ -321,9 +342,12 @@ IndexExprAttrs(ResultRelInfo *resultRelInfo, int i, EState *estate)
 			Bitmapset  *attrs = NULL;
 
 			pull_varattnos((Node *) ii->ii_Expressions, 1, &attrs);
-			if (ii->ii_Predicate != NIL)
+			pull_varattnos((Node *) ii->ii_Predicate, 1, &attrs);
+			if (ii->ii_Predicate != NIL ||
+				(resultRelInfo->ri_IndexRelationDescs[j] != NULL &&
+				 resultRelInfo->ri_IndexRelationDescs[j]->rd_indam->amcomparedatums != NULL &&
+				 !resultRelInfo->ri_IndexRelationDescs[j]->rd_index->indisexclusion))
 			{
-				pull_varattnos((Node *) ii->ii_Predicate, 1, &attrs);
 				for (int k = 0; k < ii->ii_NumIndexAttrs; k++)
 				{
 					if (ii->ii_IndexAttrNumbers[k] != 0)
@@ -376,7 +400,9 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
 #ifdef USE_ASSERT_CHECKING
 	if (proven)
 	{
-		if (IndexEntryChanges(resultRelInfo, indexInfo, old_tts, new_tts,
+		if (IndexEntryChanges(resultRelInfo,
+							  resultRelInfo->ri_IndexRelationDescs[i],
+							  indexInfo, old_tts, new_tts,
 							  estate))
 			elog(ERROR, "index \"%s\" proven unaffected by UPDATE, but its entry changed",
 				 RelationGetRelationName(resultRelInfo->ri_IndexRelationDescs[i]));
@@ -387,7 +413,9 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
 		return true;
 #endif
 
-	return !IndexEntryChanges(resultRelInfo, indexInfo, old_tts, new_tts,
+	return !IndexEntryChanges(resultRelInfo,
+							  resultRelInfo->ri_IndexRelationDescs[i],
+							  indexInfo, old_tts, new_tts,
 							  estate);
 }
 
@@ -422,6 +450,12 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
  * update as if it had not changed the attribute: no index needs a new
  * entry because of it.
  *
+ * An attribute that non-summarizing indexes also reference directly, as key
+ * or included columns, is a candidate too if all of those indexes' access
+ * methods can compare entries (INDEX_ATTR_BITMAP_COMPARABLE): such an index
+ * is unaffected when, column by column, its datums are equal or its access
+ * method's amcomparedatums says they give the same entries.
+ *
  * An index that is not ready for inserts or not valid counts as affected by
  * any change to an attribute it references, without evaluating anything.
  * Such an index is being built, or its build failed, so the old row may be
@@ -429,9 +463,10 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
  * would make the UPDATE fail.  It still constrains HOT, as README.HOT
  * requires.
  *
- * Narrowing never removes an attribute of a key or replica identity index,
- * as those have neither expressions nor predicates, so the table AM may
- * also take its lock mode and replica identity decisions from the result.
+ * Narrowing never removes an attribute of a key or replica identity index:
+ * those have neither expressions nor predicates, and their columns are left
+ * out of INDEX_ATTR_BITMAP_COMPARABLE.  So the table AM may also take its
+ * lock mode and replica identity decisions from the result.
  */
 Bitmapset *
 ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
@@ -460,6 +495,13 @@ ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
 	 */
 	exprattrs = RelationGetIndexAttrBitmap(relation,
 										   INDEX_ATTR_BITMAP_EXPRESSION);
+	{
+		Bitmapset  *cmpattrs = RelationGetIndexAttrBitmap(relation,
+														  INDEX_ATTR_BITMAP_COMPARABLE);
+
+		exprattrs = bms_add_members(exprattrs, cmpattrs);
+		bms_free(cmpattrs);
+	}
 	candidates = bms_intersect(attrs, exprattrs);
 	if (bms_is_empty(candidates))
 	{

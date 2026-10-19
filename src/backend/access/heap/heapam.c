@@ -3362,6 +3362,13 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	check_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_INDEXED);
 	narrowable_attrs = RelationGetIndexAttrBitmap(relation,
 												  INDEX_ATTR_BITMAP_EXPRESSION);
+	{
+		Bitmapset  *cmp_attrs = RelationGetIndexAttrBitmap(relation,
+														   INDEX_ATTR_BITMAP_COMPARABLE);
+
+		narrowable_attrs = bms_add_members(narrowable_attrs, cmp_attrs);
+		bms_free(cmp_attrs);
+	}
 #endif
 
 	block = ItemPointerGetBlockNumber(otid);
@@ -3801,10 +3808,11 @@ l2:
 	 * attribute comparing the two tuples here finds changed is in the
 	 * caller's set, so that a caller that misses a change, or compares the
 	 * wrong tuples, is caught.  The caller may leave out an attribute that
-	 * indexes use only through expressions or as partial indexes, having
-	 * found that no index's entry changes (see ExecUpdateModifiedIdxAttrs()),
-	 * and may report more: comparing slots, it cannot always tell that two
-	 * values will be stored alike.
+	 * indexes use only through expressions or as partial indexes, or only in
+	 * indexes that can compare entries, having found that no index's entry
+	 * changes (see ExecUpdateModifiedIdxAttrs()), and may report more:
+	 * comparing slots, it cannot always tell that two values will be stored
+	 * alike.
 	 */
 	{
 		Bitmapset  *changed = HeapUpdateModifiedIdxAttrs(relation, check_attrs,
