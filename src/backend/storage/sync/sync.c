@@ -313,9 +313,10 @@ ProcessSyncRequests(void)
 	 * requests that were queued by backends up to this point.  The tightest
 	 * race condition that could occur is that a buffer that must be written
 	 * and fsync'd for the checkpoint could have been dumped by a backend just
-	 * before it was visited by BufferSync().  We know the backend will have
-	 * queued an fsync request before clearing the buffer's dirtybit, so we
-	 * are safe as long as we do an Absorb after completing BufferSync().
+	 * before it was visited by CheckPointBuffers().  We know the backend will
+	 * have queued an fsync request before clearing the buffer's dirtybit, so
+	 * we are safe as long as we do an Absorb after completing
+	 * CheckPointBuffers().
 	 */
 	AbsorbSyncRequests();
 
