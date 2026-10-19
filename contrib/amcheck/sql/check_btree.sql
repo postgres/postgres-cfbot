@@ -183,6 +183,56 @@ INSERT INTO varlena_bug VALUES (repeat('Test', 250));
 ALTER TABLE varlena_bug ALTER COLUMN v SET STORAGE extended;
 SELECT bt_index_check('varlena_bug_idx', true);
 
+-- HOT updates of rows indexed by expression and partial indexes must leave
+-- every index entry consistent with the heap.
+CREATE TABLE hot_expr (id int PRIMARY KEY, s text, d jsonb,
+                       status text, v int, n numeric) WITH (fillfactor = 50);
+CREATE INDEX hot_expr_lower ON hot_expr (lower(s));
+CREATE INDEX hot_expr_name ON hot_expr ((d->>'name'));
+CREATE INDEX hot_expr_partial ON hot_expr (v) WHERE status = 'active';
+CREATE INDEX hot_expr_numeric ON hot_expr ((n + 0));
+INSERT INTO hot_expr
+  SELECT g, 'abc' || g, jsonb_build_object('name', 'n' || g, 'age', g),
+         CASE WHEN g % 2 = 0 THEN 'active' ELSE 'done' END, g, 3
+    FROM generate_series(1, 200) g;
+UPDATE hot_expr SET s = upper(s);
+UPDATE hot_expr SET d = jsonb_set(d, '{age}', '0');
+UPDATE hot_expr SET v = v + 1000 WHERE status = 'done';
+UPDATE hot_expr SET status = 'done' WHERE id % 4 = 0;
+UPDATE hot_expr SET status = 'active' WHERE id % 3 = 0;
+UPDATE hot_expr SET n = 3.0 WHERE id % 5 = 0;
+UPDATE hot_expr SET d = jsonb_set(d, '{name}', '"x"') WHERE id % 7 = 0;
+SELECT bt_index_check('hot_expr_lower', heapallindexed => true);
+SELECT bt_index_check('hot_expr_name', heapallindexed => true);
+SELECT bt_index_check('hot_expr_partial', heapallindexed => true);
+SELECT bt_index_check('hot_expr_numeric', heapallindexed => true);
+SELECT bt_index_parent_check('hot_expr_partial', heapallindexed => true);
+DROP TABLE hot_expr;
+
+-- One UPDATE in which different rows are decided by different indexes: an
+-- expression index created first, a partial index created after it.
+CREATE TABLE hot_expr_multi (id int PRIMARY KEY, doc jsonb) WITH (fillfactor = 30);
+CREATE INDEX hot_expr_multi_status ON hot_expr_multi ((doc->>'status'));
+CREATE INDEX hot_expr_multi_vip ON hot_expr_multi ((doc->>'email'))
+  WHERE (doc->>'vip')::bool;
+INSERT INTO hot_expr_multi
+  SELECT g, jsonb_build_object('status', 'a', 'email', 'e' || g,
+                               'vip', g % 2 = 0, 'n', 0)
+    FROM generate_series(1, 3000) g;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 4 = 0 THEN jsonb_set(doc, '{status}', '"b"')
+    WHEN id % 4 = 1 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 4 = 2 THEN jsonb_set(jsonb_set(doc, '{status}', '"c"'),
+                                   '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    ELSE jsonb_set(doc, '{n}', '1') END;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 3 = 0 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 3 = 1 THEN jsonb_set(doc, '{status}', '"d"')
+    ELSE jsonb_set(doc, '{n}', '2') END;
+SELECT bt_index_check('hot_expr_multi_status', heapallindexed => true);
+SELECT bt_index_check('hot_expr_multi_vip', heapallindexed => true);
+DROP TABLE hot_expr_multi;
+
 -- cleanup
 DROP TABLE bttest_a;
 DROP TABLE bttest_b;

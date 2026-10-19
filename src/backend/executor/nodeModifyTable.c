@@ -59,6 +59,7 @@
 #include "access/tupconvert.h"
 #include "access/tupdesc.h"
 #include "access/xact.h"
+#include "catalog/index.h"
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
@@ -75,6 +76,7 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/injection_point.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -195,6 +197,148 @@ static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
 										   bool canSetTag);
 
 /*
+ * Do the old and new index datums differ, byte for byte?  Compare each
+ * column as the type FormIndexDatum() produced it in: the table column's
+ * type or the expression's, which need not be the type the index stores.
+ */
+static bool
+IndexDatumsDiffer(Relation heapRel, IndexInfo *indexInfo,
+				  const Datum *old_values, const bool *old_isnull,
+				  const Datum *new_values, const bool *new_isnull)
+{
+	ListCell   *expr = list_head(indexInfo->ii_Expressions);
+
+	for (int i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+	{
+		AttrNumber	attnum = indexInfo->ii_IndexAttrNumbers[i];
+		int16		typlen;
+		bool		typbyval;
+
+		if (attnum != 0)
+		{
+			CompactAttribute *att = TupleDescCompactAttr(RelationGetDescr(heapRel),
+														 attnum - 1);
+
+			typlen = att->attlen;
+			typbyval = att->attbyval;
+		}
+		else
+		{
+			get_typlenbyval(exprType(lfirst(expr)), &typlen, &typbyval);
+			expr = lnext(indexInfo->ii_Expressions, expr);
+		}
+
+		if (old_isnull[i] != new_isnull[i])
+			return true;
+		if (!old_isnull[i] &&
+			!datumIsEqual(old_values[i], new_values[i], typbyval, typlen))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Would the update from old_tts to new_tts give this index a new entry, or
+ * take one away?
+ *
+ * The index datums are formed in the per-tuple memory context, which
+ * callers reset for each row.  The predicate's ExprState is kept in the
+ * IndexInfo, as ExecInsertIndexTuples() keeps it; ExecPrepareQual() builds
+ * it in the query context.
+ */
+static bool
+IndexEntryChanges(ResultRelInfo *resultRelInfo, IndexInfo *indexInfo,
+				  TupleTableSlot *old_tts, TupleTableSlot *new_tts,
+				  EState *estate)
+{
+	ExprContext *econtext = GetPerTupleExprContext(estate);
+	TupleTableSlot *save_scantuple = econtext->ecxt_scantuple;
+	MemoryContext oldcxt;
+	Datum		old_values[INDEX_MAX_KEYS];
+	bool		old_isnull[INDEX_MAX_KEYS];
+	Datum		new_values[INDEX_MAX_KEYS];
+	bool		new_isnull[INDEX_MAX_KEYS];
+	bool		result;
+
+	if (indexInfo->ii_Predicate != NIL)
+	{
+		bool		old_member;
+		bool		new_member;
+
+		if (indexInfo->ii_PredicateState == NULL)
+			indexInfo->ii_PredicateState =
+				ExecPrepareQual(indexInfo->ii_Predicate, estate);
+
+		econtext->ecxt_scantuple = old_tts;
+		old_member = ExecQual(indexInfo->ii_PredicateState, econtext);
+		econtext->ecxt_scantuple = new_tts;
+		new_member = ExecQual(indexInfo->ii_PredicateState, econtext);
+		econtext->ecxt_scantuple = save_scantuple;
+
+		/*
+		 * A row that leaves or enters the index's predicate changes which
+		 * rows the index holds.  A row outside it on both sides is none of
+		 * the index's business.
+		 */
+		if (old_member != new_member)
+			return true;
+		if (!old_member)
+			return false;
+	}
+
+	oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+	econtext->ecxt_scantuple = old_tts;
+	FormIndexDatum(indexInfo, old_tts, estate, old_values, old_isnull);
+	econtext->ecxt_scantuple = new_tts;
+	FormIndexDatum(indexInfo, new_tts, estate, new_values, new_isnull);
+	econtext->ecxt_scantuple = save_scantuple;
+
+	result = IndexDatumsDiffer(resultRelInfo->ri_RelationDesc, indexInfo,
+							   old_values, old_isnull, new_values, new_isnull);
+	MemoryContextSwitchTo(oldcxt);
+	return result;
+}
+
+/*
+ * Return the attributes of the i'th index that INDEX_ATTR_BITMAP_EXPRESSION
+ * can contain: those it references through its expressions, and for a
+ * partial index all those it references.  Builds the per-index cache on
+ * first use.
+ */
+static Bitmapset *
+IndexExprAttrs(ResultRelInfo *resultRelInfo, int i, EState *estate)
+{
+	if (resultRelInfo->ri_IndexExprAttrs == NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+		resultRelInfo->ri_IndexExprAttrs =
+			palloc0_array(Bitmapset *, resultRelInfo->ri_NumIndices);
+		for (int j = 0; j < resultRelInfo->ri_NumIndices; j++)
+		{
+			IndexInfo  *ii = resultRelInfo->ri_IndexRelationInfo[j];
+			Bitmapset  *attrs = NULL;
+
+			pull_varattnos((Node *) ii->ii_Expressions, 1, &attrs);
+			if (ii->ii_Predicate != NIL)
+			{
+				pull_varattnos((Node *) ii->ii_Predicate, 1, &attrs);
+				for (int k = 0; k < ii->ii_NumIndexAttrs; k++)
+				{
+					if (ii->ii_IndexAttrNumbers[k] != 0)
+						attrs = bms_add_member(attrs,
+											   ii->ii_IndexAttrNumbers[k] -
+											   FirstLowInvalidHeapAttributeNumber);
+				}
+			}
+			resultRelInfo->ri_IndexExprAttrs[j] = attrs;
+		}
+		MemoryContextSwitchTo(oldcxt);
+	}
+	return resultRelInfo->ri_IndexExprAttrs[i];
+}
+
+/*
  * ExecUpdateModifiedIdxAttrs
  *
  * Return the set of indexed attributes whose values differ between old_tts
@@ -215,17 +359,137 @@ static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
  *
  * simple_heap_update() and simple_table_tuple_update() make the same
  * determination with table_slot_modified_idx_attrs().
+ *
+ * The set is then narrowed to what the indexes see, using estate.  An
+ * attribute that non-summarizing indexes reference only through expressions
+ * or as partial indexes (INDEX_ATTR_BITMAP_EXPRESSION) is dropped from the
+ * set if, for every such index that references it, the update moves the row
+ * neither into nor out of the index's predicate and, if the row is in it,
+ * changes none of the index's datums.  The table AM can then treat the
+ * update as if it had not changed the attribute: no index needs a new
+ * entry because of it.
+ *
+ * An index that is not ready for inserts or not valid counts as affected by
+ * any change to an attribute it references, without evaluating anything.
+ * Such an index is being built, or its build failed, so the old row may be
+ * one its expressions or predicate cannot be evaluated for; evaluating them
+ * would make the UPDATE fail.  It still constrains HOT, as README.HOT
+ * requires.
+ *
+ * Narrowing never removes an attribute of a key or replica identity index,
+ * as those have neither expressions nor predicates, so the table AM may
+ * also take its lock mode and replica identity decisions from the result.
  */
 Bitmapset *
 ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
 						   TupleTableSlot *old_tts,
-						   TupleTableSlot *new_tts)
+						   TupleTableSlot *new_tts,
+						   EState *estate)
 {
+	Relation	relation = resultRelInfo->ri_RelationDesc;
+	Bitmapset  *attrs;
+	Bitmapset  *exprattrs;
+	Bitmapset  *candidates;
+
 	if (resultRelInfo->ri_NumIndices == 0)
 		return NULL;
 
-	return table_slot_modified_idx_attrs(resultRelInfo->ri_RelationDesc,
-										 old_tts, new_tts);
+	attrs = table_slot_modified_idx_attrs(relation, old_tts, new_tts);
+
+	if (bms_is_empty(attrs))
+		return attrs;
+
+	/*
+	 * Narrowing can only make the update HOT if every changed attribute is
+	 * either a candidate or referenced only by summarizing indexes. Otherwise
+	 * some index needs a new entry anyway, and evaluating expressions would
+	 * be wasted work.
+	 */
+	exprattrs = RelationGetIndexAttrBitmap(relation,
+										   INDEX_ATTR_BITMAP_EXPRESSION);
+	candidates = bms_intersect(attrs, exprattrs);
+	if (bms_is_empty(candidates))
+	{
+		bms_free(exprattrs);
+		return attrs;
+	}
+	{
+		Bitmapset  *rest = bms_difference(attrs, exprattrs);
+		Bitmapset  *hotattrs = RelationGetIndexAttrBitmap(relation,
+														  INDEX_ATTR_BITMAP_HOT_BLOCKING);
+		bool		hopeless = bms_overlap(rest, hotattrs);
+
+		bms_free(rest);
+		bms_free(hotattrs);
+		bms_free(exprattrs);
+		if (hopeless)
+		{
+			bms_free(candidates);
+			return attrs;
+		}
+	}
+
+	/*
+	 * Keep each candidate that some index sees change.  An index whose
+	 * candidates are all kept already need not be asked.
+	 */
+	{
+		Bitmapset  *keep = NULL;
+
+		for (int i = 0; i < resultRelInfo->ri_NumIndices; i++)
+		{
+			IndexInfo  *indexInfo = resultRelInfo->ri_IndexRelationInfo[i];
+			Bitmapset  *mine;
+
+			if (resultRelInfo->ri_IndexRelationDescs[i] == NULL ||
+				indexInfo->ii_Summarizing)
+				continue;
+
+			mine = bms_intersect(IndexExprAttrs(resultRelInfo, i, estate),
+								 candidates);
+			if (bms_is_empty(mine) || bms_is_subset(mine, keep))
+			{
+				bms_free(mine);
+				continue;
+			}
+
+			if (!indexInfo->ii_ReadyForInserts ||
+				!resultRelInfo->ri_IndexRelationDescs[i]->rd_index->indisvalid ||
+				IndexEntryChanges(resultRelInfo, indexInfo,
+								  old_tts, new_tts, estate))
+			{
+				keep = bms_add_members(keep, mine);
+				if (bms_is_subset(candidates, keep))
+				{
+					bms_free(mine);
+					break;
+				}
+			}
+			bms_free(mine);
+		}
+
+		candidates = bms_del_members(candidates, keep);
+		bms_free(keep);
+	}
+
+#ifdef USE_ASSERT_CHECKING
+	{
+		Bitmapset  *keyattrs = RelationGetIndexAttrBitmap(relation,
+														  INDEX_ATTR_BITMAP_KEY);
+		Bitmapset  *idattrs = RelationGetIndexAttrBitmap(relation,
+														 INDEX_ATTR_BITMAP_IDENTITY_KEY);
+
+		Assert(!bms_overlap(candidates, keyattrs));
+		Assert(!bms_overlap(candidates, idattrs));
+		bms_free(keyattrs);
+		bms_free(idattrs);
+	}
+#endif
+
+	attrs = bms_del_members(attrs, candidates);
+	bms_free(candidates);
+
+	return attrs;
 }
 
 /*
@@ -2364,7 +2628,8 @@ lreplace:
 	if (resultRelationDesc->rd_att->constr)
 		ExecConstraints(resultRelInfo, slot, estate);
 
-	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(resultRelInfo, oldSlot, slot);
+	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(resultRelInfo, oldSlot, slot,
+													estate);
 
 	/*
 	 * Call into the table AM to update the heap tuple.

@@ -321,7 +321,7 @@ SELECT pg_stat_force_next_flush();
 SELECT * FROM get_hot_count('hot_jsonb_test');
  updates | hot 
 ---------+-----
-       1 |   0
+       1 |   1
 (1 row)
 
 UPDATE hot_jsonb_test SET data = data - 'city' WHERE id = 2;
@@ -334,7 +334,7 @@ SELECT pg_stat_force_next_flush();
 SELECT * FROM get_hot_count('hot_jsonb_test');
  updates | hot 
 ---------+-----
-       2 |   0
+       2 |   2
 (1 row)
 
 UPDATE hot_jsonb_test SET data = jsonb_insert(data, '{country}', '"USA"') WHERE id = 2;
@@ -347,7 +347,7 @@ SELECT pg_stat_force_next_flush();
 SELECT * FROM get_hot_count('hot_jsonb_test');
  updates | hot 
 ---------+-----
-       3 |   0
+       3 |   3
 (1 row)
 
 DROP TABLE hot_jsonb_test;
@@ -379,7 +379,7 @@ SELECT * FROM update_case(
 NOTICE:  table "hot_expr_test" does not exist, skipping
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 SELECT * FROM update_case(
@@ -389,7 +389,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET a = a - 1, b = b + 1$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- Expression value changed.
@@ -424,7 +424,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET s = upper(s)$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 SELECT * FROM update_case(
@@ -434,7 +434,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET p = point(p[0], p[1] + 1)$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- An expression that is a point, stored by the gist index as a box.
@@ -447,7 +447,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET d = d + 7$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- A plain index on the same column as an expression index.
@@ -472,7 +472,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET s = upper(s), b = b + 1$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- A BEFORE ROW trigger that changes the expression's value.
@@ -501,7 +501,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET v = v + 1$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 SELECT * FROM update_case(
@@ -511,7 +511,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET status = 'archived'$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- Both versions inside the predicate with the key unchanged.
@@ -522,7 +522,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET status = 'b'$$);
  updated | hot 
 ---------+-----
-      10 |   0
+      10 |  10
 (1 row)
 
 -- Entering or leaving the predicate, or changing the key inside it.
@@ -565,7 +565,7 @@ SELECT * FROM update_case(
   $$UPDATE hot_expr_test SET v = v + 100 WHERE status = 'done'$$);
  updated | hot 
 ---------+-----
-       5 |   0
+       5 |   5
 (1 row)
 
 SET enable_seqscan = off;

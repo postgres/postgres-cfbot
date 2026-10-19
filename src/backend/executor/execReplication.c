@@ -1029,7 +1029,8 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
 		modified_idx_attrs = ExecUpdateModifiedIdxAttrs(resultRelInfo,
-														searchslot, slot);
+														searchslot, slot,
+														estate);
 
 		simple_table_tuple_update_ext(rel, tid, slot, estate->es_snapshot,
 									  modified_idx_attrs, &update_indexes);
