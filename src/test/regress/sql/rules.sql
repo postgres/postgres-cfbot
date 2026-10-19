@@ -1460,3 +1460,35 @@ DROP TABLE ruletest_t2;
 DROP TABLE ruletest_t1;
 
 DROP USER regress_rule_user1;
+
+--
+-- A target alias named "set" must not be read back as the SET keyword
+--
+create table ruletest_setalias (a int, b int);
+create rule ruletest_setalias_r1 as on insert to ruletest_setalias
+  do also update ruletest_setalias "set" set b = 1 where "set".a = 2;
+create rule ruletest_setalias_r2 as on insert to ruletest_setalias
+  do also delete from ruletest_setalias "set" where "set".a = 1;
+create table ruletest_setalias_m (a int, b int);
+create function ruletest_setalias_f() returns void language sql
+begin atomic
+  merge into ruletest_setalias_m "set" using (values (1)) s(a)
+    on "set".a = s.a when matched then update set b = 1;
+end;
+select pg_get_ruledef(oid) as def1 from pg_rewrite
+  where rulename = 'ruletest_setalias_r1' \gset
+select pg_get_ruledef(oid) as def2 from pg_rewrite
+  where rulename = 'ruletest_setalias_r2' \gset
+select pg_get_functiondef('ruletest_setalias_f'::regproc) as def3 \gset
+drop rule ruletest_setalias_r1 on ruletest_setalias;
+drop rule ruletest_setalias_r2 on ruletest_setalias;
+drop function ruletest_setalias_f();
+:def1
+:def2
+:def3;
+select pg_get_ruledef(oid) from pg_rewrite
+  where rulename like 'ruletest_setalias_r%' order by rulename;
+select pg_get_functiondef(oid) from pg_proc
+  where proname = 'ruletest_setalias_f';
+drop function ruletest_setalias_f();
+drop table ruletest_setalias, ruletest_setalias_m;
