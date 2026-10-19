@@ -2294,7 +2294,7 @@ select pg_get_viewdef('tt28v'::regclass, true);
 -------------------------------------------------------
   SELECT a,                                           +
      b,                                               +
-     (a OR b IN ( SELECT false)) AS r                 +
+     ((a OR b) IN ( SELECT false)) AS r               +
     FROM ( VALUES (true,false), (false,true)) t(a, b);
 (1 row)
 
@@ -2303,8 +2303,7 @@ create view tt28v_re as :def
 select * from tt28v except select * from tt28v_re;
  a | b | r 
 ---+---+---
- t | f | f
-(1 row)
+(0 rows)
 
 create view tt28w as
   select c, d,
@@ -2312,24 +2311,23 @@ create view tt28w as
          (row(c < d) = (select true)) as r2
   from (values (1, 2)) t(c, d);
 select pg_get_viewdef('tt28w'::regclass, true);
-              pg_get_viewdef               
--------------------------------------------
-  SELECT c,                               +
-     d,                                   +
-     (c < d <> ALL ( SELECT false)) AS r1,+
-     (c < d = ( SELECT true)) AS r2       +
+               pg_get_viewdef                
+---------------------------------------------
+  SELECT c,                                 +
+     d,                                     +
+     ((c < d) <> ALL ( SELECT false)) AS r1,+
+     ((c < d) = ( SELECT true)) AS r2       +
     FROM ( VALUES (1,2)) t(c, d);
 (1 row)
 
 select pg_get_viewdef('tt28w'::regclass, true) as def \gset
 create view tt28w_re as :def
-ERROR:  syntax error at or near "<>"
-LINE 3:     (c < d <> ALL ( SELECT false)) AS r1,
-                   ^
 select * from tt28w_re;
-ERROR:  relation "tt28w_re" does not exist
-LINE 1: select * from tt28w_re;
-                      ^
+ c | d | r1 | r2 
+---+---+----+----
+ 1 | 2 | t  | t
+(1 row)
+
 -- test expressions that need no parentheses keep none
 create view tt28x as
   select c, x,
@@ -2387,7 +2385,7 @@ drop cascades to view aliased_view_2
 drop cascades to view aliased_view_3
 drop cascades to view aliased_view_4
 DROP SCHEMA testviewschm2 CASCADE;
-NOTICE:  drop cascades to 84 other objects
+NOTICE:  drop cascades to 85 other objects
 DETAIL:  drop cascades to table t1
 drop cascades to view temporal1
 drop cascades to view temporal2
@@ -2471,4 +2469,5 @@ drop cascades to view tt27v
 drop cascades to view tt28v
 drop cascades to view tt28v_re
 drop cascades to view tt28w
+drop cascades to view tt28w_re
 drop cascades to view tt28x
