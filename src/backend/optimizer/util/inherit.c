@@ -863,7 +863,7 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
 		childqual = adjust_appendrel_attrs(root,
 										   (Node *) rinfo->clause,
 										   1, &appinfo);
-		childqual = eval_const_expressions(root, childqual);
+		childqual = eval_const_expressions_qual(root, childqual);
 		/* check for flat-out constant */
 		if (childqual && IsA(childqual, Const))
 		{
