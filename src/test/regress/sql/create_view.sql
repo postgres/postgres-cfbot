@@ -838,6 +838,36 @@ insert into tt27v values (1); -- Error
 select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system view.
 reset restrict_nonsystem_relation_kind;
 
+-- pretty-printed sublink test expressions must keep their parentheses
+create view tt28v as
+  select a, b, ((a or b) in (select false)) as r
+  from (values (true, false), (false, true)) t(a, b);
+select pg_get_viewdef('tt28v'::regclass, true);
+select pg_get_viewdef('tt28v'::regclass, true) as def \gset
+create view tt28v_re as :def
+select * from tt28v except select * from tt28v_re;
+
+create view tt28w as
+  select c, d,
+         ((c < d) <> all (select false)) as r1,
+         (row(c < d) = (select true)) as r2
+  from (values (1, 2)) t(c, d);
+select pg_get_viewdef('tt28w'::regclass, true);
+select pg_get_viewdef('tt28w'::regclass, true) as def \gset
+create view tt28w_re as :def
+select * from tt28w_re;
+
+-- test expressions that need no parentheses keep none
+create view tt28x as
+  select c, x,
+         (c in (select 1)) as r1,
+         (lower(x) in (select 'a')) as r2,
+         (case when c > 0 then 1 end in (select 1)) as r3,
+         ((row(c, x)).f1 in (select 1)) as r4,
+         (c::text in (select '1')) as r5
+  from (values (1, 'A')) t(c, x);
+select pg_get_viewdef('tt28x'::regclass, true);
+
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 DROP SCHEMA testviewschm2 CASCADE;

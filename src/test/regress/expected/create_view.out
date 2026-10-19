@@ -2285,6 +2285,77 @@ select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system
 (1 row)
 
 reset restrict_nonsystem_relation_kind;
+-- pretty-printed sublink test expressions must keep their parentheses
+create view tt28v as
+  select a, b, ((a or b) in (select false)) as r
+  from (values (true, false), (false, true)) t(a, b);
+select pg_get_viewdef('tt28v'::regclass, true);
+                    pg_get_viewdef                     
+-------------------------------------------------------
+  SELECT a,                                           +
+     b,                                               +
+     (a OR b IN ( SELECT false)) AS r                 +
+    FROM ( VALUES (true,false), (false,true)) t(a, b);
+(1 row)
+
+select pg_get_viewdef('tt28v'::regclass, true) as def \gset
+create view tt28v_re as :def
+select * from tt28v except select * from tt28v_re;
+ a | b | r 
+---+---+---
+ t | f | f
+(1 row)
+
+create view tt28w as
+  select c, d,
+         ((c < d) <> all (select false)) as r1,
+         (row(c < d) = (select true)) as r2
+  from (values (1, 2)) t(c, d);
+select pg_get_viewdef('tt28w'::regclass, true);
+              pg_get_viewdef               
+-------------------------------------------
+  SELECT c,                               +
+     d,                                   +
+     (c < d <> ALL ( SELECT false)) AS r1,+
+     (c < d = ( SELECT true)) AS r2       +
+    FROM ( VALUES (1,2)) t(c, d);
+(1 row)
+
+select pg_get_viewdef('tt28w'::regclass, true) as def \gset
+create view tt28w_re as :def
+ERROR:  syntax error at or near "<>"
+LINE 3:     (c < d <> ALL ( SELECT false)) AS r1,
+                   ^
+select * from tt28w_re;
+ERROR:  relation "tt28w_re" does not exist
+LINE 1: select * from tt28w_re;
+                      ^
+-- test expressions that need no parentheses keep none
+create view tt28x as
+  select c, x,
+         (c in (select 1)) as r1,
+         (lower(x) in (select 'a')) as r2,
+         (case when c > 0 then 1 end in (select 1)) as r3,
+         ((row(c, x)).f1 in (select 1)) as r4,
+         (c::text in (select '1')) as r5
+  from (values (1, 'A')) t(c, x);
+select pg_get_viewdef('tt28x'::regclass, true);
+                pg_get_viewdef                
+----------------------------------------------
+  SELECT c,                                  +
+     x,                                      +
+     (c IN ( SELECT 1)) AS r1,               +
+     (lower(x) IN ( SELECT 'a'::text)) AS r2,+
+     (                                       +
+         CASE                                +
+             WHEN c > 0 THEN 1               +
+             ELSE NULL::integer              +
+         END IN ( SELECT 1)) AS r3,          +
+     ((ROW(c, x)).f1 IN ( SELECT 1)) AS r4,  +
+     (c::text IN ( SELECT '1'::text)) AS r5  +
+    FROM ( VALUES (1,'A'::text)) t(c, x);
+(1 row)
+
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 NOTICE:  drop cascades to 27 other objects
@@ -2316,7 +2387,7 @@ drop cascades to view aliased_view_2
 drop cascades to view aliased_view_3
 drop cascades to view aliased_view_4
 DROP SCHEMA testviewschm2 CASCADE;
-NOTICE:  drop cascades to 80 other objects
+NOTICE:  drop cascades to 84 other objects
 DETAIL:  drop cascades to table t1
 drop cascades to view temporal1
 drop cascades to view temporal2
@@ -2397,3 +2468,7 @@ drop cascades to view tt25v
 drop cascades to view tt26v
 drop cascades to table tt27v_tbl
 drop cascades to view tt27v
+drop cascades to view tt28v
+drop cascades to view tt28v_re
+drop cascades to view tt28w
+drop cascades to view tt28x
