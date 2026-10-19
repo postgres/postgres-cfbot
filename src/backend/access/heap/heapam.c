@@ -3316,6 +3316,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	bool		rep_id_key_required = false;
 #ifdef USE_ASSERT_CHECKING
 	Bitmapset  *check_attrs;
+	Bitmapset  *narrowable_attrs;
 #endif
 	TransactionId xmax_new_tuple,
 				xmax_old_tuple;
@@ -3359,6 +3360,8 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	id_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_IDENTITY_KEY);
 #ifdef USE_ASSERT_CHECKING
 	check_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_INDEXED);
+	narrowable_attrs = RelationGetIndexAttrBitmap(relation,
+												  INDEX_ATTR_BITMAP_EXPRESSION);
 #endif
 
 	block = ItemPointerGetBlockNumber(otid);
@@ -3417,6 +3420,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 		bms_free(id_attrs);
 #ifdef USE_ASSERT_CHECKING
 		bms_free(check_attrs);
+		bms_free(narrowable_attrs);
 #endif
 		/* modified_idx_attrs is owned by the caller, don't free it */
 
@@ -3765,6 +3769,7 @@ l2:
 		bms_free(id_attrs);
 #ifdef USE_ASSERT_CHECKING
 		bms_free(check_attrs);
+		bms_free(narrowable_attrs);
 #endif
 		/* modified_idx_attrs is owned by the caller, don't free it */
 
@@ -3795,16 +3800,21 @@ l2:
 	 * updated, and no one else can have changed it.  Check that every
 	 * attribute comparing the two tuples here finds changed is in the
 	 * caller's set, so that a caller that misses a change, or compares the
-	 * wrong tuples, is caught.  The caller may report more: comparing slots,
-	 * it cannot always tell that two values will be stored alike.
+	 * wrong tuples, is caught.  The caller may leave out an attribute that
+	 * indexes use only through expressions or as partial indexes, having
+	 * found that no index's entry changes (see ExecUpdateModifiedIdxAttrs()),
+	 * and may report more: comparing slots, it cannot always tell that two
+	 * values will be stored alike.
 	 */
 	{
 		Bitmapset  *changed = HeapUpdateModifiedIdxAttrs(relation, check_attrs,
 														 &oldtup, newtup);
 
+		changed = bms_del_members(changed, narrowable_attrs);
 		Assert(bms_is_subset(changed, modified_idx_attrs));
 		bms_free(changed);
 		bms_free(check_attrs);
+		bms_free(narrowable_attrs);
 	}
 #endif
 
