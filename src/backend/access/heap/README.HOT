@@ -37,6 +37,14 @@ First, where a tuple is repeatedly updated in ways that do not change
 its indexed columns.  (Here, "indexed column" means any column referenced
 at all in an index definition, including for example columns that are
 tested in a partial-index predicate but are not stored in the index.)
+A column that indexes reference only through expressions, or only as
+partial indexes, may change if the update changes nothing those indexes
+store: not the value of any of their expressions or columns, as compared
+byte for byte, and not whether the tuple satisfies their predicates.
+The executor works that out before calling the table AM, and passes on
+only the indexed columns whose change matters.  An index that is not yet
+ready for inserts, or whose build failed, counts as changed whenever a
+column it references does; see "CREATE INDEX CONCURRENTLY" below.
 
 Second, where the modified columns are only used in indexes that do not
 contain tuple IDs, but maintain summaries of the indexed data by block.
@@ -477,9 +485,10 @@ Heap-only tuple
 HOT-safe
 
 	A proposed tuple update is said to be HOT-safe if it changes
-	none of the tuple's indexed columns.  It will only become an
-	actual HOT update if we can find room on the same page for
-	the new tuple version.
+	none of the tuple's indexed columns, other than in ways the
+	indexes that use them cannot see (see above).  It will only
+	become an actual HOT update if we can find room on the same page
+	for the new tuple version.
 
 HOT update
 
@@ -496,7 +505,8 @@ Indexed column
 	A column used in an index definition.  The column might not
 	actually be stored in the index --- it could be used in a
 	functional index's expression, or used in a partial index
-	predicate.  HOT treats all these cases alike.
+	predicate.  A change to a column that indexes use only in these
+	ways blocks HOT only if it changes what those indexes store.
 
 Redirecting line pointer
 
