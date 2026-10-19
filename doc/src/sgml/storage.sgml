@@ -1120,7 +1120,13 @@ data. Empty in ordinary tables.</entry>
      <literal>SET</literal> clause changes only parts of the column that the
      indexes do not read, for example through <function>jsonb_set</function>
      or array subscripting, this is known without evaluating the indexes'
-     expressions.
+     expressions.  A column that indexes store directly is treated the same
+     way if the access method of each such index can tell whether the new
+     value gives the same index entries as the old one; among the built-in
+     methods, that depends on the method and on the change (see
+     <xref linkend="indexam"/>).  This does not apply to the columns of
+     unique indexes that a foreign key can reference, of the replica
+     identity index, or of exclusion constraints.
      </para>
    </listitem>
    <listitem>

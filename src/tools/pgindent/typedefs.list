@@ -3572,6 +3572,7 @@ ambuildempty_function
 ambuildphasename_function
 ambulkdelete_function
 amcanreturn_function
+amcomparedatums_function
 amcostestimate_function
 amendscan_function
 amestimateparallelscan_function
