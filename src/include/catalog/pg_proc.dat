@@ -8799,7 +8799,7 @@
 # logging plan of the running query on the specified backend
 { oid => '8000', descr => 'log plan of the running query on the specified backend',
   proname => 'pg_log_query_plan',
-  provolatile => 'v', prorettype => 'bool',
+  provolatile => 'v', prorettype => 'int8',
   proargtypes => 'int4', prosrc => 'pg_log_query_plan',
   proacl => '{POSTGRES=X}' },
 
