@@ -44,6 +44,7 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/partition.h"
+#include "commands/explain_running.h"
 #include "commands/matview.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
@@ -323,6 +324,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	DestReceiver *dest;
 	bool		sendTuples;
 	MemoryContext oldcontext;
+	QueryDesc  *oldQueryDesc;
 
 	/* sanity checks */
 	Assert(queryDesc != NULL);
@@ -334,6 +336,13 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 
 	/* caller must ensure the query's snapshot is active */
 	Assert(GetActiveSnapshot() == estate->es_snapshot);
+
+	/*
+	 * Save current QueryDesc here to enable retrieval of the currently
+	 * running queryDesc for nested queries.
+	 */
+	oldQueryDesc = GetCurrentQueryDesc();
+	SetCurrentQueryDesc(queryDesc);
 
 	/*
 	 * Switch into per-query memory context
@@ -397,6 +406,20 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		InstrStop(queryDesc->query_instr);
 
 	MemoryContextSwitchTo(oldcontext);
+	SetCurrentQueryDesc(oldQueryDesc);
+
+	/*
+	 * Ensure LogQueryPlanPending is initialized in case there was no time for
+	 * logging the plan. Otherwise plan will be logged at the next query
+	 * execution on the same session.
+	 */
+	if (LogQueryPlanPending)
+	{
+		ereport(LOG_SERVER_ONLY,
+				(errmsg("query plan logging was requested but there was no opportunity to do it for queryid " INT64_FORMAT,
+						queryDesc->plannedstmt->queryId)));
+		LogQueryPlanPending = false;
+	}
 }
 
 /* ----------------------------------------------------------------
