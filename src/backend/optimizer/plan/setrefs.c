@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -51,6 +52,12 @@ typedef struct
 	int			num_vars;		/* number of plain Var tlist entries */
 	bool		has_ph_vars;	/* are there PlaceHolderVar entries? */
 	bool		has_non_vars;	/* are there other entries? */
+
+	/*
+	 * non-Var entries without nullingrels, built on demand by
+	 * search_indexed_tlist_for_nulled_expr(); not freed with the struct
+	 */
+	List	   *nulled_tles;
 	tlist_vinfo vars[FLEXIBLE_ARRAY_MEMBER];	/* has num_vars entries */
 } indexed_tlist;
 
@@ -180,6 +187,10 @@ static Var *search_indexed_tlist_for_phv(PlaceHolderVar *phv,
 static Var *search_indexed_tlist_for_non_var(Expr *node,
 											 indexed_tlist *itlist,
 											 int newvarno);
+static Var *search_indexed_tlist_for_nulled_expr(PlannerInfo *root,
+												 Expr *node,
+												 indexed_tlist *itlist,
+												 int newvarno);
 static Var *search_indexed_tlist_for_sortgroupref(Expr *node,
 												  Index sortgroupref,
 												  indexed_tlist *itlist,
@@ -2923,7 +2934,8 @@ set_dummy_tlist_references(Plan *plan, int rtoffset)
  *
  * The result of this function is an indexed_tlist struct to pass to
  * search_indexed_tlist_for_var() and siblings.
- * When done, the indexed_tlist may be freed with a single pfree().
+ * When done, the indexed_tlist may be freed with a single pfree(); a
+ * nulled_tles list built for it later stays in the planner's context.
  */
 static indexed_tlist *
 build_tlist_index(List *tlist)
@@ -2940,6 +2952,7 @@ build_tlist_index(List *tlist)
 	itlist->tlist = tlist;
 	itlist->has_ph_vars = false;
 	itlist->has_non_vars = false;
+	itlist->nulled_tles = NIL;
 
 	/* Find the Vars and fill in the index array */
 	vinfo = itlist->vars;
@@ -2991,6 +3004,7 @@ build_tlist_index_other_vars(List *tlist, int ignore_rel)
 	itlist->tlist = tlist;
 	itlist->has_ph_vars = false;
 	itlist->has_non_vars = false;
+	itlist->nulled_tles = NIL;
 
 	/* Find the desired Vars and fill in the index array */
 	vinfo = itlist->vars;
@@ -3175,6 +3189,107 @@ search_indexed_tlist_for_non_var(Expr *node,
 		return newvar;
 	}
 	return NULL;				/* no match */
+}
+
+/*
+ * expr_nullingrels
+ *	  The union of the nullingrels of the Vars and PlaceHolderVars in 'node'.
+ */
+static Relids
+expr_nullingrels(Node *node)
+{
+	Relids		result = NULL;
+	ListCell   *lc;
+
+	foreach(lc, pull_var_clause(node, PVC_INCLUDE_PLACEHOLDERS |
+								PVC_RECURSE_AGGREGATES |
+								PVC_RECURSE_WINDOWFUNCS))
+	{
+		Node	   *v = (Node *) lfirst(lc);
+
+		if (IsA(v, Var))
+			result = bms_add_members(result, ((Var *) v)->varnullingrels);
+		else
+			result = bms_add_members(result,
+									 ((PlaceHolderVar *) v)->phnullingrels);
+	}
+	return result;
+}
+
+/*
+ * search_indexed_tlist_for_nulled_expr
+ *	  Like search_indexed_tlist_for_non_var(), for an expression above an
+ *	  outer join whose Vars may carry nullingrels the input's don't.
+ *
+ * An input of an outer join may emit a non-Var expression it read from an
+ * index (see path_extra_exprs()).  Above the join, the query's copy of that
+ * expression has the join's bit added to its Vars' nullingrels, so equal()
+ * won't match it; the join adds the bit because it null-extends those Vars.
+ * It null-extends the input's copy of the expression too, so the two agree
+ * on every row if the expression yields NULL when its Vars are NULL, that
+ * is if it is strict.  Then match it as we match Vars here (NRM_SUPERSET):
+ * equal but for nullingrels, with the query's copy's nullingrels a superset
+ * of the input's.  The planner relies on this when it carries such a value
+ * up through an outer join (see join_path_target()).
+ *
+ * The first call for an itlist saves its non-Var entries without
+ * nullingrels, each paired with the nullingrels it had, so that later calls
+ * don't strip them again.
+ */
+static Var *
+search_indexed_tlist_for_nulled_expr(PlannerInfo *root, Expr *node,
+									 indexed_tlist *itlist, int newvarno)
+{
+	Node	   *stripped = NULL;
+	Relids		nullingrels = NULL;
+	ListCell   *lc;
+
+	Assert(itlist->has_non_vars);
+	if (IsA(node, Const) || IsA(node, Param) ||
+		bms_is_empty(root->outer_join_rels))
+		return NULL;
+
+	if (itlist->nulled_tles == NIL)
+	{
+		foreach(lc, itlist->tlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+			TargetEntry *ntle;
+
+			if (tle->expr == NULL ||
+				IsA(tle->expr, Var) || IsA(tle->expr, PlaceHolderVar))
+				continue;
+			ntle = flatCopyTargetEntry(tle);
+			ntle->expr = (Expr *) strip_nullingrels((Node *) tle->expr);
+			itlist->nulled_tles = lappend(itlist->nulled_tles, ntle);
+			itlist->nulled_tles = lappend(itlist->nulled_tles,
+										  expr_nullingrels((Node *) tle->expr));
+		}
+	}
+
+	for (int i = 0; i < list_length(itlist->nulled_tles); i += 2)
+	{
+		TargetEntry *tle = list_nth_node(TargetEntry, itlist->nulled_tles, i);
+
+		if (stripped == NULL)
+		{
+			if (contain_nonstrict_functions((Node *) node) ||
+				!contain_var_clause((Node *) node))
+				return NULL;
+			stripped = strip_nullingrels((Node *) node);
+			nullingrels = expr_nullingrels((Node *) node);
+		}
+		if (equal(stripped, tle->expr) &&
+			bms_is_subset(list_nth(itlist->nulled_tles, i + 1), nullingrels))
+		{
+			Var		   *newvar = makeVarFromTargetEntry(newvarno, tle);
+
+			newvar->varnosyn = 0;	/* wasn't ever a plain Var */
+			newvar->varattnosyn = 0;
+			return newvar;
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -3384,6 +3499,11 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->outer_itlist,
 												  OUTER_VAR);
+		if (newvar == NULL && context->nrm_match == NRM_SUPERSET)
+			newvar = search_indexed_tlist_for_nulled_expr(context->root,
+														  (Expr *) node,
+														  context->outer_itlist,
+														  OUTER_VAR);
 		if (newvar)
 			return (Node *) newvar;
 	}
@@ -3392,6 +3512,11 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->inner_itlist,
 												  INNER_VAR);
+		if (newvar == NULL && context->nrm_match == NRM_SUPERSET)
+			newvar = search_indexed_tlist_for_nulled_expr(context->root,
+														  (Expr *) node,
+														  context->inner_itlist,
+														  INNER_VAR);
 		if (newvar)
 			return (Node *) newvar;
 	}
