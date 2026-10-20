@@ -20,4 +20,7 @@ extern WindowAggState *ExecInitWindowAgg(WindowAgg *node, EState *estate, int ef
 extern void ExecEndWindowAgg(WindowAggState *node);
 extern void ExecReScanWindowAgg(WindowAggState *node);
 
+/* RPR navigation support for expression evaluation opcodes */
+extern TupleTableSlot *ExecRPRNavGetSlot(WindowAggState *winstate, int64 pos);
+
 #endif							/* NODEWINDOWAGG_H */
