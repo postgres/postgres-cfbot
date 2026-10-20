@@ -508,12 +508,104 @@ select gist_ios_costly(w.i), d.tag from gist_ios_wide w
 reset enable_mergejoin;
 reset enable_nestloop;
 drop table gist_ios_wide;
--- But not from the nullable side of an outer join: there the query's Var
--- differs from the index's (it may be null), so the value read below the
--- join isn't the one asked for.
+-- Also from the nullable side of an outer join, because the function is
+-- strict: a null-extended row gets NULL for the value, which is what the
+-- function returns for a NULL argument.  The value is used inside a larger,
+-- non-strict expression above the join.
+set enable_hashjoin = off;
+set enable_nestloop = off;
 explain (verbose, costs off)
 select coalesce(gist_ios_costly(a.i), -1) from gist_ios_dim d
   left join gist_ios_cost a on a.i = d.i * 2;
+reset enable_hashjoin;
+reset enable_nestloop;
+-- And from both sides' nullable rows of a FULL JOIN.
+set enable_hashjoin = off;
+explain (verbose, costs off)
+select gist_ios_costly(a.i), d.tag from gist_ios_dim d
+  full join gist_ios_cost a on a.i = d.i * 2;
+reset enable_hashjoin;
+select count(*) as total, count(v) as with_value,
+       count(*) filter (where v = i) as same
+  from (select gist_ios_costly(a.i) as v, a.i from gist_ios_dim d
+        full join gist_ios_cost a on a.i = d.i * 2) s;
+-- A function that isn't strict may return something else for NULL, so it's
+-- computed above the join.
+create function gist_ios_nonstrict(int) returns int
+  language plpgsql immutable called on null input cost 100000
+  as $$ begin return coalesce($1, -1); end $$;
+create index on gist_ios_cost (i, gist_ios_nonstrict(i));
+vacuum analyze gist_ios_cost;
+set enable_mergejoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_nonstrict(a.i) from gist_ios_dim d
+  left join gist_ios_cost a on a.i = d.i * 2;
+reset enable_mergejoin;
+reset enable_nestloop;
+select count(*) filter (where v = -1) as null_extended
+  from (select gist_ios_nonstrict(a.i) as v from gist_ios_dim d
+        left join gist_ios_cost a on a.i = d.i * 2) s;
+drop function gist_ios_nonstrict(int) cascade;
+-- A parallel-restricted function: the value is read from the index inside
+-- the workers, not evaluated there, and passed up through the Gather.  (Not
+-- a temp table, which can't be scanned in parallel.)
+create function gist_ios_restricted(int) returns int
+  language plpgsql immutable strict parallel restricted cost 100000
+  as $$ begin return $1; end $$;
+create table gist_ios_par (i int);
+insert into gist_ios_par select g from generate_series(1, 10000) g;
+create index on gist_ios_par (i, gist_ios_restricted(i));
+vacuum analyze gist_ios_par;
+set parallel_setup_cost = 0;
+set parallel_tuple_cost = 0;
+set min_parallel_index_scan_size = 0;
+set max_parallel_workers_per_gather = 2;
+set parallel_leader_participation = off;
+-- (Pin the scan type: these tables aren't temp, so VACUUM may not get to
+-- mark them all-visible while other sessions hold snapshots.)
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+explain (verbose, costs off)
+select gist_ios_restricted(i) from gist_ios_par;
+select count(*), sum(v) from (select gist_ios_restricted(i) as v from gist_ios_par) s;
+-- Also through a Gather Merge, which sorts the workers' rows by a column
+-- the index doesn't lead with.
+create table gist_ios_gm (k int, i int);
+insert into gist_ios_gm select g % 97, g from generate_series(1, 20000) g;
+create index on gist_ios_gm (i, gist_ios_restricted(i)) include (k);
+vacuum analyze gist_ios_gm;
+explain (verbose, costs off)
+select k, gist_ios_restricted(i) from gist_ios_gm where i > 100 order by k;
+select count(*) filter (where v = i) as same, count(*) as total
+  from (select k, i, gist_ios_restricted(i) as v from gist_ios_gm
+        where i > 100 order by k) s;
+drop table gist_ios_gm;
+-- And through a Parallel Append over partitions that all have the index.
+-- (Different sizes, so that the children's cost order, which is the plan's
+-- order, doesn't depend on how many pages VACUUM could mark all-visible
+-- when other sessions hold snapshots.)
+create table gist_ios_ppart (i int) partition by range (i);
+create table gist_ios_ppart1 partition of gist_ios_ppart
+  for values from (1) to (2001);
+create table gist_ios_ppart2 partition of gist_ios_ppart
+  for values from (2001) to (10001);
+insert into gist_ios_ppart select g from generate_series(1, 10000) g;
+create index on gist_ios_ppart (i, gist_ios_restricted(i));
+vacuum analyze gist_ios_ppart;
+explain (verbose, costs off)
+select gist_ios_restricted(i) from gist_ios_ppart;
+select count(*), sum(v) from (select gist_ios_restricted(i) as v from gist_ios_ppart) s;
+drop table gist_ios_ppart;
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset parallel_setup_cost;
+reset parallel_tuple_cost;
+reset min_parallel_index_scan_size;
+reset max_parallel_workers_per_gather;
+reset parallel_leader_participation;
+drop table gist_ios_par;
+drop function gist_ios_restricted(int);
 -- A partitioned table whose partitions all have the index: each child reads
 -- the value and the Append passes it up, even when a partition's columns
 -- are in a different order.
@@ -532,6 +624,14 @@ explain (verbose, costs off)
 select gist_ios_costly(p.i), d.tag from gist_ios_part p
   join gist_ios_dim d on d.i = p.i;
 reset enable_mergejoin;
+reset enable_nestloop;
+-- An ordered Append passes the value up as well, here into a merge join.
+set enable_hashjoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_costly(p.i), d.tag from gist_ios_part p
+  join gist_ios_dim d on d.i = p.i order by p.i;
+reset enable_hashjoin;
 reset enable_nestloop;
 -- An index created on only one partition doesn't count: every child must
 -- emit the value for the Append to.

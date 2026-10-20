@@ -397,6 +397,51 @@ expr_contains(Node *expr, Node *sub)
 	return expr_contains_walker(expr, sub);
 }
 
+/*
+ * strip_nullingrels
+ *	  A copy of 'node' with every Var's and PlaceHolderVar's nullingrels
+ *	  cleared.
+ *
+ * Used to compare an expression read below an outer join with the query's
+ * copy above it (see query_tlist_exprs() in pathnode.c and
+ * search_indexed_tlist_for_nulled_expr() in setrefs.c).
+ * remove_nulling_relids() can't do this: it tests each Var's varno with
+ * bms_is_member(), which errors out on the negative special varnos, such as
+ * the ROWID_VAR a MERGE's targetlist contains.
+ */
+static Node *
+strip_nullingrels_mutator(Node *node, void *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (bms_is_empty(var->varnullingrels))
+			return node;
+		var = copyObject(var);
+		var->varnullingrels = NULL;
+		return (Node *) var;
+	}
+	if (IsA(node, PlaceHolderVar))
+	{
+		PlaceHolderVar *phv;
+
+		phv = (PlaceHolderVar *)
+			expression_tree_mutator(node, strip_nullingrels_mutator, context);
+		phv->phnullingrels = NULL;
+		return (Node *) phv;
+	}
+	return expression_tree_mutator(node, strip_nullingrels_mutator, context);
+}
+
+Node *
+strip_nullingrels(Node *node)
+{
+	return strip_nullingrels_mutator(node, NULL);
+}
+
 /*****************************************************************************
  *		Check clauses for mutable functions
  *****************************************************************************/
