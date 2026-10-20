@@ -22,6 +22,7 @@
 #include "access/xlogdefs.h"
 #include "access/xlogreader.h"
 #include "datatype/timestamp.h"
+#include "utils/uuid.h"
 #include "lib/stringinfo.h"
 #include "pgtime.h"
 #include "storage/block.h"
