@@ -43,7 +43,7 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/pg_ctl$(X)'
 
 clean distclean:
-	rm -f pg_ctl$(X) $(OBJS)
+	rm -f pg_ctl$(X) $(OBJS) pg_ctl_socket_helper$(X)
 	rm -rf tmp_check
 
 check:
@@ -51,3 +51,12 @@ check:
 
 installcheck:
 	$(prove_installcheck)
+
+ifeq ($(PORTNAME), win32)
+pg_ctl_socket_helper$(X): t/socket_copy_helper.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LIBS) -o $@
+
+check: pg_ctl_socket_helper$(X)
+installcheck: pg_ctl_socket_helper$(X)
+export PG_CTL_SOCKET_HELPER := $(abspath pg_ctl_socket_helper$(X))
+endif
