@@ -78,6 +78,9 @@ tests += {
       't/010_tab_completion.pl',
       't/020_cancel.pl',
       't/030_pager.pl',
+      't/040_interrupt.pl',
+      't/041_singlestep_eof.pl',
+      't/042_singlestep.pl',
     ],
   },
 }

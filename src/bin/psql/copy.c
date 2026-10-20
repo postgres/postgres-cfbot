@@ -512,6 +512,8 @@ handleCopyOut(PGconn *conn, FILE *copystream, PGresult **res)
 bool
 handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 {
+	sigjmp_buf	local_sigjmp_buf;
+	sigjmp_buf *save_exception_stack = PG_exception_stack;
 	bool		OK;
 	char		buf[COPYBUFSIZ];
 	bool		showprompt;
@@ -526,7 +528,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 	 * Establish longjmp destination for exiting from wait-for-input. (This is
 	 * only effective while sigint_interrupt_enabled is TRUE.)
 	 */
-	if (sigsetjmp(sigint_interrupt_jmp, 1) != 0)
+	if (sigsetjmp(local_sigjmp_buf, 1) != 0)
 	{
 		/* got here with longjmp */
 
@@ -539,6 +541,8 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 		OK = false;
 		goto copyin_cleanup;
 	}
+
+	PG_exception_stack = &local_sigjmp_buf;
 
 	/* Issue initial prompt if interactive input */
 	if (showprompt && !pset.quiet)
@@ -698,6 +702,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 		OK = false;
 
 copyin_cleanup:
+	PG_exception_stack = save_exception_stack;
 
 	/*
 	 * Clear the EOF flag on the stream, in case copying ended due to an EOF

@@ -25,7 +25,7 @@ extern void NoticeProcessor(void *arg, const char *message);
 
 extern volatile sig_atomic_t sigint_interrupt_enabled;
 
-extern sigjmp_buf sigint_interrupt_jmp;
+extern sigjmp_buf *PG_exception_stack;
 
 extern void psql_setup_cancel_handler(void);
 
