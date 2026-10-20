@@ -244,7 +244,8 @@ add_other_rels_to_query(PlannerInfo *root)
 /*
  * build_base_rel_tlists
  *	  Add targetlist entries for each var needed in the query's final tlist
- *	  (and HAVING clause, if any) to the appropriate base relations.
+ *	  (and HAVING clause and row pattern DEFINE clauses, if any) to the
+ *	  appropriate base relations.
  *
  * We mark such vars as needed by "relation 0" to ensure that they will
  * propagate up through all join plan steps.
@@ -278,6 +279,35 @@ build_base_rel_tlists(PlannerInfo *root, List *final_tlist)
 			add_vars_to_targetlist(root, having_vars,
 								   bms_make_singleton(0));
 			list_free(having_vars);
+		}
+	}
+
+	/*
+	 * A row pattern DEFINE clause is not in the target list, so nothing above
+	 * has asked for the columns it reads.  The WindowAgg evaluates it all the
+	 * same, and setrefs.c has to resolve it against the window's input, so
+	 * mark those columns needed here and let them propagate up through the
+	 * join steps the way the target list's own columns do.
+	 */
+	foreach_node(WindowClause, wc, root->parse->windowClause)
+	{
+		List	   *define_vars;
+
+		if (wc->defineClause == NIL)
+			continue;
+
+		/*
+		 * PVC_INCLUDE_PLACEHOLDERS is the only flag needed: DEFINE rejects
+		 * aggregates, window functions and subqueries at parse time.
+		 */
+		define_vars = pull_var_clause((Node *) wc->defineClause,
+									  PVC_INCLUDE_PLACEHOLDERS);
+
+		if (define_vars != NIL)
+		{
+			add_vars_to_targetlist(root, define_vars,
+								   bms_make_singleton(0));
+			list_free(define_vars);
 		}
 	}
 }

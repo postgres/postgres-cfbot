@@ -2663,6 +2663,23 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 					   rtoffset,
 					   NUM_EXEC_QUAL(plan));
 
+	/*
+	 * Replace an expression tree in each DEFINE clause so that all Var
+	 * nodes's varno refers to OUTER_VAR.
+	 */
+	if (IsA(plan, WindowAgg))
+	{
+		WindowAgg  *wplan = (WindowAgg *) plan;
+
+		wplan->defineClause = (List *)
+			fix_upper_expr(root,
+						   (Node *) wplan->defineClause,
+						   subplan_itlist,
+						   OUTER_VAR,
+						   rtoffset,
+						   NUM_EXEC_QUAL(plan));
+	}
+
 	pfree(subplan_itlist);
 }
 
@@ -3434,6 +3451,28 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 		/* If not supplied by input plan, evaluate the contained expr */
 		/* XXX can we assert something about phnullingrels? */
 		return fix_upper_expr_mutator((Node *) phv->phexpr, context);
+	}
+	if (IsA(node, RPRNavExpr))
+	{
+		RPRNavExpr *nav = (RPRNavExpr *) node;
+		RPRNavExpr *newnav = makeNode(RPRNavExpr);
+
+		memcpy(newnav, nav, sizeof(RPRNavExpr));
+
+		/*
+		 * The offsets are resolved once per scan, before the outer slot is
+		 * set, so they cannot reference it the way arg does.  Same treatment
+		 * as the WindowAgg frame offsets.
+		 */
+		newnav->arg = (Expr *)
+			fix_upper_expr_mutator((Node *) nav->arg, context);
+		newnav->offset_arg = (Expr *)
+			fix_scan_expr(context->root, (Node *) nav->offset_arg,
+						  context->rtoffset, context->num_exec);
+		newnav->compound_offset_arg = (Expr *)
+			fix_scan_expr(context->root, (Node *) nav->compound_offset_arg,
+						  context->rtoffset, context->num_exec);
+		return (Node *) newnav;
 	}
 	/* Try matching more complex expressions too, if tlist has any */
 	if (context->subplan_itlist->has_non_vars)
