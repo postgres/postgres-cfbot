@@ -2855,6 +2855,18 @@ match_previous_words(int pattern_id,
 		set_completion_reference(prev7_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_unique_index_of_table);
 	}
+	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] CHECK (...) constraint options */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CHECK", "(*)") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "CHECK", "(*)"))
+		COMPLETE_WITH("NOT ENFORCED", "NOT VALID", "NO INHERIT");
+	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] CHECK (...) NOT */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CHECK", "(*)", "NOT") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "CHECK", "(*)", "NOT"))
+		COMPLETE_WITH("ENFORCED", "VALID");
+	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] CHECK (...) NO */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CHECK", "(*)", "NO") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "CHECK", "(*)", "NO"))
+		COMPLETE_WITH("INHERIT");
 	/* ALTER TABLE xxx ENABLE */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ENABLE"))
 		COMPLETE_WITH("ALWAYS", "REPLICA", "ROW LEVEL SECURITY", "RULE",
