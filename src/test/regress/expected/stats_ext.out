@@ -1082,6 +1082,33 @@ SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY a, (
 
 DROP STATISTICS s11;
 DROP STATISTICS s12;
+-- grouping sets where an expression on a column is nullable by grouping but
+-- the plain column is not, so the column's Var gets different nullingrels
+CREATE STATISTICS s11 (ndistinct) ON a, b FROM ndistinct;
+ANALYZE ndistinct;
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY a, ROLLUP ((a+1))');
+ estimated | actual 
+-----------+--------
+         6 |      6
+(1 row)
+
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY GROUPING SETS ((a, (a+1)), (a))');
+ estimated | actual 
+-----------+--------
+         6 |      6
+(1 row)
+
+DROP STATISTICS s11;
+-- same, with statistics on the expression
+CREATE STATISTICS s11 (ndistinct) ON a, (a+1) FROM ndistinct;
+ANALYZE ndistinct;
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY a, ROLLUP ((a+1))');
+ estimated | actual 
+-----------+--------
+         6 |      6
+(1 row)
+
+DROP STATISTICS s11;
 -- functional dependencies tests
 CREATE TABLE functional_dependencies (
     filler1 TEXT,
