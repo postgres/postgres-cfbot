@@ -201,6 +201,35 @@ select ROW();
 select ROW() IS NULL;
 select ROW() = ROW();
 
+-- IS [NOT] NULL on a named rowtype with a dropped column must ignore the
+-- dropped column's placeholder, also when simplified by the planner
+create temp table rowdropped (a int, dropme int, b int);
+alter table rowdropped drop column dropme;
+insert into rowdropped values (1, 2), (1, null);
+explain (verbose, costs off)
+select row(a, b)::rowdropped is not null from rowdropped;
+select row(a, b)::rowdropped is not null as nn,
+       row(a, b)::rowdropped is null as n
+from rowdropped;
+-- same for a composite type with a dropped attribute
+create type rowdroppedtype as (x int, y int, z int);
+alter type rowdroppedtype drop attribute y;
+explain (verbose, costs off)
+select row(a, b)::rowdroppedtype is not null from rowdropped;
+select row(a, b)::rowdroppedtype is not null as nn from rowdropped;
+-- a stored view keeps the original expression for the dropped attribute
+create temp table rowdroppedsrc (x int, y int, z int);
+insert into rowdroppedsrc values (1, null, 3), (1, 2, 3);
+create type rowdroppedtype2 as (x int, y int, z int);
+create temp view rowdroppedview as
+  select row(x, y, z)::rowdroppedtype2 is not null as nn from rowdroppedsrc;
+alter type rowdroppedtype2 drop attribute y;
+explain (verbose, costs off)
+select nn from rowdroppedview;
+select nn from rowdroppedview;
+drop view rowdroppedview;
+drop type rowdroppedtype, rowdroppedtype2;
+
 -- Check ability to create arrays of anonymous rowtypes
 select array[ row(1,2), row(3,4), row(5,6) ];
 
