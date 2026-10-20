@@ -1,134 +1,152 @@
-# Copyright (c) 2025, PostgreSQL Global Development Group
-
-# Test that socket handles are not inherited by child processes on Windows.
-#
-# Without the fix, child processes spawned via COPY TO PROGRAM inherit socket
-# handles from the backend. Windows reference counting prevents these sockets
-# from being freed when the postmaster exits, leaving the port bound to a dead
-# process (a "zombie" binding). This test verifies that after killing the
-# postmaster while a child process is still running, the listening port is
-# immediately freed rather than remaining in a zombie state.
-
+# Copyright (c) 2026, PostgreSQL Global Development Group
 use strict;
-use warnings;
-
+use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
-use Time::HiRes qw(sleep);
+use IO::Socket::INET;
+use IO::Select;
+use IPC::Run qw(run);
+use Time::HiRes qw(time sleep);
 
-# This test is Windows-specific
-if ($^O ne 'MSWin32')
+plan skip_all => 'Windows socket inheritance test' unless $windows_os;
+my $helper = $ENV{PG_CTL_SOCKET_HELPER};
+die 'PG_CTL_SOCKET_HELPER is required' unless defined $helper && -f $helper;
+$helper =~ s!\\!/!g;
+my $node = PostgreSQL::Test::Cluster->new('socket_inheritance');
+my $dir = PostgreSQL::Test::Utils::tempdir;
+my $ready = "$dir/copy.ready";
+my $release = "$dir/copy.release";
+my (@identity, $socket);
+
+sub helper_exit
 {
-	plan skip_all => 'test is specific to Windows socket handle inheritance';
+	my (@args) = @_;
+	my ($stdout, $stderr);
+	run [ $helper, @args ], '>', \$stdout, '2>', \$stderr;
+	return $? >> 8;
 }
 
-my $node = PostgreSQL::Test::Cluster->new('main');
-$node->init;
+# Release only our bounded helper. Cluster cleanup knows the owned postmaster.
+END
+{
+	if (defined $release && -d $dir)
+	{
+		open my $f, '>', $release or die $!;
+		close $f;
+	}
+	helper_exit('--wait', @identity) if @identity;
+	close $socket if defined $socket;
+	$node->stop('immediate') if defined $node;
+}
+
+sub read_exact
+{
+	my ($count) = @_;
+	my $bytes = '';
+	while (length($bytes) < $count)
+	{
+		die 'startup socket read timed out'
+		  unless IO::Select->new($socket)->can_read(10);
+		my $n = sysread($socket, my $part, $count - length($bytes));
+		die "startup socket read: $!" unless defined $n && $n;
+		$bytes .= $part;
+	}
+	return $bytes;
+}
+
+sub write_packet
+{
+	my ($bytes) = @_;
+	while (length($bytes))
+	{
+		my $n = syswrite($socket, $bytes);
+		die "socket write: $!" unless defined $n && $n;
+		substr($bytes, 0, $n, '');
+	}
+}
+
+sub transport_closed
+{
+	my $deadline = time + 1;
+	my $select = IO::Select->new($socket);
+	while (time < $deadline)
+	{
+		return 0 unless $select->can_read($deadline - time);
+		my $n = sysread($socket, my $bytes, 65536);
+		return 1 if defined $n && $n == 0;
+		return 1 if !defined $n && $!{ECONNRESET};
+		die "socket read: $!" unless defined $n;
+	}
+	return 0;
+}
+
+$node->init(force_initdb => 1);
+$node->append_conf('postgresql.conf', "listen_addresses = '127.0.0.1'");
+# The raw test client does not implement the default Windows SSPI exchange.
+# Change only this disposable node's loopback authentication rule.
+my $hba = $node->data_dir . '/pg_hba.conf';
+my $hba_contents = slurp_file($hba);
+open my $auth, '>', $hba or die $!;
+print $auth "host all all 127.0.0.1/32 trust\n", $hba_contents;
+close $auth;
 $node->start;
-
-# Get the port number for verification
-my $port = $node->port;
-
-# Spawn a long-running child process via COPY TO PROGRAM that will outlive
-# the postmaster. Without the fix, this child inherits socket handles.
-my $marker_file = $node->data_dir . '/ps_marker.txt';
-unlink $marker_file if -e $marker_file;
-
-$node->safe_psql(
-	'postgres',
-	qq{\\copy (select 1) to program 'powershell -Command "echo marker > $marker_file; Start-Sleep 120"'}
-);
-
-# Wait for PowerShell to spawn
-my $ps_spawned = 0;
-for (my $i = 0; $i < 100; $i++)
+$socket = IO::Socket::INET->new(PeerAddr => '127.0.0.1',
+	PeerPort => $node->port, Proto => 'tcp', Timeout => 10) or die $!;
+my $user = $node->safe_psql('postgres', 'SELECT current_user');
+$user =~ s/[\r\n]+\z//;
+my $body = pack('N', 196608) . "user\0$user\0database\0postgres\0\0";
+write_packet(pack('N', length($body) + 4) . $body);
+while (1)
 {
-	if (-e $marker_file)
-	{
-		$ps_spawned = 1;
-		last;
-	}
-	sleep 0.1;
+	my $type = read_exact(1);
+	my $length = unpack('N', read_exact(4));
+	my $message = read_exact($length - 4);
+	die "startup error: $message" if $type eq 'E';
+	die 'raw client requires trust authentication'
+	  if $type eq 'R' && unpack('N', $message) != 0;
+	last if $type eq 'Z';
 }
-
-ok($ps_spawned, 'child process spawned successfully');
-
-# Stop the postmaster (simulates a crash), leaving the child process running.
+my $program = qq("$helper" "$ready" "$release");
+$program =~ s/'/''/g;
+my $query = "COPY (SELECT 1) TO PROGRAM '$program'\0";
+write_packet('Q' . pack('N', length($query) + 4) . $query);
+my $deadline = time + 10;
+while (time < $deadline)
+{
+	if (-f $ready)
+	{
+		my $identity = slurp_file($ready);
+		@identity = ($identity =~ /^(\d+) (\d+) (\d+)\n$/);
+		last if @identity;
+	}
+	sleep 0.05;
+}
+ok(scalar(@identity) == 3, 'COPY helper publishes exact PID and creation time');
+die 'helper did not become ready' unless @identity;
+is(helper_exit('--alive', @identity), 0, 'helper alive before shutdown');
 $node->stop('immediate');
-sleep 0.5;
-
-# Verify that the listening port is freed immediately. With the bug, the port
-# remains bound to the dead postmaster PID because the child process inherited
-# the socket handles. With the fix, the port is freed because socket handles
-# were not inherited.
-my $netstat_output = `netstat -ano | findstr ":$port.*LISTENING"`;
-
-if ($netstat_output)
+ok(!-f $node->data_dir . '/postmaster.pid', 'owned postmaster stopped');
+my $survived = helper_exit('--alive', @identity) == 0;
+ok($survived, 'precondition: COPY helper remains alive after shutdown');
+SKIP:
 {
-	fail('listening port remains bound after postmaster exit (zombie port)');
-	diag("Port is still bound - socket handles were inherited by child process");
-	diag("netstat output:\n$netstat_output");
-
-	if ($netstat_output =~ /LISTENING\s+(\d+)/)
-	{
-		my $bound_pid = $1;
-		my $process_name = get_process_name($bound_pid);
-
-		if ($process_name eq 'unknown' || $process_name eq '')
-		{
-			diag("Port bound to dead process (PID $bound_pid) - zombie binding detected");
-		}
-		else
-		{
-			diag("Port bound to: $process_name (PID $bound_pid)");
-		}
-	}
+	skip 'environment terminated the COPY helper, socket lifetime not tested', 2
+	  unless $survived;
+	ok(transport_closed(), 'backend client closes while COPY helper is alive');
+	is(helper_exit('--bind', $node->port), 0,
+		'listener port can be rebound while COPY helper is alive');
 }
-else
+append_to_file($release, 'release');
+is(helper_exit('--wait', @identity), 0, 'exact helper exits after release');
+$deadline = time + 5;
+my $bound = 1;
+while (time < $deadline)
 {
-	pass('listening port freed immediately after postmaster exit');
+	$bound = helper_exit('--bind', $node->port);
+	last if $bound == 0;
+	sleep 0.05;
 }
-
-# Additional verification: Confirm the port is actually available for binding.
-# This tests the real-world scenario that matters to users.
-my $can_bind = test_port_available($port);
-ok($can_bind, "port $port is available for new connections");
-
-# Cleanup
-cleanup_powershell_processes();
-unlink $marker_file if -e $marker_file;
-
+is($bound, 0, 'port reusable after helper and COPY shell exit');
+ok(transport_closed(), 'client transport closed after helper release');
 done_testing();
-
-# Test if port can actually be bound
-sub test_port_available
-{
-	my ($port) = @_;
-
-	use Socket;
-
-	socket(my $sock, PF_INET, SOCK_STREAM, getprotobyname('tcp')) or return 0;
-	setsockopt($sock, SOL_SOCKET, SO_REUSEADDR, 1);
-
-	my $addr = sockaddr_in($port, INADDR_ANY);
-	my $result = bind($sock, $addr);
-	close($sock);
-
-	return $result ? 1 : 0;
-}
-
-# Get process name by PID
-sub get_process_name
-{
-	my ($pid) = @_;
-	my $name = `powershell -Command "(Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName" 2>nul`;
-	chomp $name;
-	return $name || 'unknown';
-}
-
-# Clean up test child processes
-sub cleanup_powershell_processes
-{
-	system('powershell -Command "Get-Process powershell -ErrorAction SilentlyContinue | Where-Object {$_.Id -ne $PID} | Stop-Process -Force -ErrorAction SilentlyContinue" 2>nul');
-}

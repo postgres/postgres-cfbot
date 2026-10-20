@@ -17,11 +17,21 @@ pg_ctl = executable('pg_ctl',
 )
 bin_targets += pg_ctl
 
+socket_test_deps = []
+socket_test_env = {}
+if host_system == 'windows'
+  subdir('t')
+  socket_test_deps += socket_test_helper
+  socket_test_env = {'PG_CTL_SOCKET_HELPER': socket_test_helper.full_path()}
+endif
+
 tests += {
   'name': 'pg_ctl',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
   'tap': {
+    'deps': socket_test_deps,
+    'env': socket_test_env,
     'tests': [
       't/001_start_stop.pl',
       't/002_status.pl',
