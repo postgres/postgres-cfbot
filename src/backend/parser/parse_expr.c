@@ -577,6 +577,7 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 		case EXPR_KIND_COPY_WHERE:
 		case EXPR_KIND_GENERATED_COLUMN:
 		case EXPR_KIND_CYCLE_MARK:
+		case EXPR_KIND_RPR_DEFINE:
 			/* okay */
 			break;
 
@@ -610,6 +611,67 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 		node = pstate->p_pre_columnref_hook(pstate, cref);
 		if (node != NULL)
 			return node;
+	}
+
+	/*----------
+	 * A pattern variable qualifier (e.g. UP.price) is valid per ISO/IEC
+	 * 19075-5 6.15 / 4.16 but not yet implemented, and has to be recognized
+	 * here: a pattern variable names no range table entry, so leaving it to
+	 * normal resolution would reject it as a qualified expression instead.
+	 *
+	 * Like every other rule below, this one only reaches names the ref hooks
+	 * left for the query parser to resolve.  A PL that answers a name first
+	 * keeps it: under "#variable_conflict use_variable" PL/pgSQL claims any
+	 * name one of its variables owns, so a PL/pgSQL variable sharing a name
+	 * with a pattern variable takes A.price, exactly as it takes a name a
+	 * table column would otherwise own.  That is what asking for
+	 * use_variable means, and the DEFINE rules do not override it.
+	 *
+	 * Only a two-part name has that shape.  A longer name whose first part
+	 * happens to spell a pattern variable is schema- or catalog-qualified,
+	 * and goes the way of the other qualified forms.
+	 *
+	 * The other qualified forms DEFINE disallows are diagnosed after the
+	 * reference resolves, below.  Classifying them here on the qualifier
+	 * alone would report a misspelled column as a problem with the qualifier
+	 * and lose the "Perhaps you meant" hint normal resolution offers.
+	 *
+	 * The quoted text reflects only the ColumnRef portion; a trailing field
+	 * selection on a composite type (e.g. ".amount" in "(A.items).amount")
+	 * lives in the surrounding A_Indirection node and is not included here.
+	 * That can be revisited when MEASURES support adds indirection-aware
+	 * traversal.
+	 *----------
+	 */
+	if (pstate->p_rpr_define &&
+		list_length(cref->fields) != 1)
+	{
+		if (list_length(cref->fields) == 2)
+		{
+			char	   *qualifier = strVal(linitial(cref->fields));
+
+			foreach_node(String, pv, pstate->p_rpr_pattern_vars)
+			{
+				if (strcmp(strVal(pv), qualifier) == 0)
+					ereport(ERROR,
+							errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							errmsg("pattern variable qualified expression \"%s\" is not supported in DEFINE clause",
+								   NameListToString(cref->fields)),
+							parser_errposition(pstate, cref->location));
+			}
+		}
+
+		/*
+		 * A whole-row reference is barred by its form alone: no qualifier
+		 * makes one legal here, so resolving it first would only choose which
+		 * rejection it gets.
+		 */
+		if (IsA(llast(cref->fields), A_Star))
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("whole-row reference is not allowed in DEFINE clause"),
+					errhint("A DEFINE condition may reference individual columns only."),
+					parser_errposition(pstate, cref->location));
 	}
 
 	/*----------
@@ -663,8 +725,22 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 												  cref->location,
 												  &levels_up);
 					if (nsitem)
+					{
+						/*
+						 * A lone name that resolves as a range variable is a
+						 * whole-row reference without the star, which the
+						 * rule above has no A_Star to match on.
+						 */
+						if (pstate->p_rpr_define)
+							ereport(ERROR,
+									errcode(ERRCODE_SYNTAX_ERROR),
+									errmsg("whole-row reference is not allowed in DEFINE clause"),
+									errhint("A DEFINE condition may reference individual columns only."),
+									parser_errposition(pstate, cref->location));
+
 						node = transformWholeRowRef(pstate, nsitem, levels_up,
 													cref->location);
+					}
 				}
 				break;
 			}
@@ -859,6 +935,25 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 				errorMissingColumn(pstate, relname, colname, cref->location);
 				break;
 			case CRERR_NO_RTE:
+
+				/*
+				 * ISO/IEC 19075-5 6.5 reserves the qualifier slot in a DEFINE
+				 * clause for a row pattern variable, so a qualifier naming
+				 * nothing is rejected for occupying it, the same as one that
+				 * names something.  Reporting a missing FROM-clause entry
+				 * would point at a repair that does not exist: adding the
+				 * relation only moves the reference to one of the rejections
+				 * below, the range variable one for a two-part name and the
+				 * qualified expression one for a longer name, or the outer
+				 * column one if the relation is added to an outer query.
+				 */
+				if (pstate->p_rpr_define)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("qualified expression \"%s\" is not allowed in DEFINE clause",
+								   NameListToString(cref->fields)),
+							parser_errposition(pstate, cref->location));
+
 				errorMissingRTE(pstate, makeRangeVar(nspname, relname,
 													 cref->location));
 				break;
@@ -877,6 +972,88 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 						 parser_errposition(pstate, cref->location)));
 				break;
 		}
+	}
+
+	/*
+	 * Restrict column references in a row pattern DEFINE clause.  node is now
+	 * a successfully resolved reference, so the qualified forms RPR does not
+	 * allow can be rejected without mistaking a name that does not resolve at
+	 * all for one of them: a correlated reference to an outer query's column,
+	 * a range variable qualifier, and a schema/catalog-qualified reference.
+	 *
+	 * The error class follows the division the neighbouring restrictions use:
+	 * ERRCODE_FEATURE_NOT_SUPPORTED for what the standard allows and this
+	 * implementation does not, ERRCODE_SYNTAX_ERROR for every other rejected
+	 * spelling, whether the standard forbids it or never gave it at all.
+	 */
+	if (pstate->p_rpr_define)
+	{
+		ParseNamespaceItem *qual_nsitem = NULL;
+		int			qual_levels_up = 0;
+
+		if (list_length(cref->fields) == 2)
+			qual_nsitem = refnameNamespaceItem(pstate, NULL,
+											   strVal(linitial(cref->fields)),
+											   cref->location,
+											   &qual_levels_up);
+
+		/*
+		 * Ask which level the qualifier resolved at, not merely whether it
+		 * resolved.  A two-part name whose second part is not a column is
+		 * retried as a function call on the whole row, and that yields a
+		 * FuncExpr rather than a Var, so the outer reference its argument
+		 * carries is invisible to the varlevelsup test.
+		 *
+		 * The level counts levels searched, not levels found, so it means
+		 * nothing unless the search succeeded.
+		 */
+		if ((IsA(node, Var) && ((Var *) node)->varlevelsup > 0) ||
+			(qual_nsitem != NULL && qual_levels_up > 0))
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot use outer query column in DEFINE clause"),
+					parser_errposition(pstate, cref->location));
+
+		if (qual_nsitem != NULL)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("range variable qualified expression \"%s\" is not allowed in DEFINE clause",
+						   NameListToString(cref->fields)),
+					parser_errposition(pstate, cref->location));
+
+		/*
+		 * ISO/IEC 19075-5 6.5 reserves the qualifier slot for a row pattern
+		 * variable, so a name is rejected for occupying it whatever the
+		 * qualifier turns out to name.  What is left here resolved through
+		 * p_post_columnref_hook, which reads a two-part name as a routine's
+		 * parameter or variable, or as a field of a composite one, and the
+		 * hook is public enough that an extension may add readings of its
+		 * own; the message names none of them.  Selecting a field from an
+		 * unqualified value, written "(x).f", occupies no qualifier slot and
+		 * remains the way to reach a composite.
+		 *
+		 * The pre hook's readings never arrive here, so this rule is not the
+		 * last word on a qualified name: in a PL/pgSQL function written with
+		 * "#variable_conflict use_variable", plpgsql_pre_column_ref() answers
+		 * fn.var and rec.field itself and returns before any of this runs,
+		 * leaving those spellings usable there.  The pragma redirects name
+		 * resolution wholesale -- it takes names a table column would
+		 * otherwise own too -- and DEFINE does not carve itself out of it.
+		 */
+		if (list_length(cref->fields) == 2)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("qualified expression \"%s\" is not allowed in DEFINE clause",
+						   NameListToString(cref->fields)),
+					errhint("Write the name without its qualifier, or write \"(x).field\" to select a field of a composite value."),
+					parser_errposition(pstate, cref->location));
+
+		if (list_length(cref->fields) >= 3)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("qualified expression \"%s\" is not allowed in DEFINE clause",
+						   NameListToString(cref->fields)),
+					parser_errposition(pstate, cref->location));
 	}
 
 	return node;
@@ -1790,9 +1967,13 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 	 * Check to see if the sublink is in an invalid place within the query. We
 	 * allow sublinks everywhere in SELECT/INSERT/UPDATE/DELETE/MERGE, but
 	 * generally not in utility statements.
+	 *
+	 * A row pattern DEFINE condition rejects a sublink wherever in the
+	 * condition it stands, so its scope is asked about ahead of p_expr_kind,
+	 * which by here may name a clause nested in the condition instead.
 	 */
 	err = NULL;
-	switch (pstate->p_expr_kind)
+	switch (pstate->p_rpr_define ? EXPR_KIND_RPR_DEFINE : pstate->p_expr_kind)
 	{
 		case EXPR_KIND_NONE:
 			Assert(false);		/* can't happen */
@@ -1870,6 +2051,39 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 			break;
 		case EXPR_KIND_GENERATED_COLUMN:
 			err = _("cannot use subquery in column generation expression");
+			break;
+
+			/*----------
+			 * XXX SQL/RPR (ISO/IEC 19075-5 6.17.4 / 4.18.4; R020 / R010)
+			 * permits a subquery nested in a DEFINE expression provided
+			 * that:
+			 *   (a) the subquery does not itself perform row pattern
+			 *       recognition, and
+			 *   (b) the subquery does not reference a row pattern variable
+			 *       of the outer query.
+			 *
+			 * We reject all subqueries here for now.  Implementing the
+			 * case distinction would mean walking the analyzed subquery
+			 * Query tree for nested RPR window clauses to enforce (a),
+			 * and walking it for ColumnRef qualifiers matching any
+			 * ancestor's p_rpr_pattern_vars to enforce (b).  Both checks
+			 * are doable with the existing infrastructure -- they are
+			 * left as future work, not blocked on any other feature.
+			 * Until then this blanket rejection is intentional
+			 * over-rejection, not a standard fit.
+			 *
+			 * It rejects the SubLink, which is not the same as keeping
+			 * the subquery unanalyzed: a construct that analyzes its
+			 * query before building the SubLink, as
+			 * transformJsonArrayQueryConstructor() does, has already
+			 * resolved names and opened relations inside it by the time
+			 * we get here, and reports its own errors first.  Whoever
+			 * implements (a) and (b) must not read this rejection as
+			 * proof that nothing inside a DEFINE subquery runs.
+			 *----------
+			 */
+		case EXPR_KIND_RPR_DEFINE:
+			err = _("cannot use subquery in DEFINE expression");
 			break;
 
 			/*
@@ -3230,6 +3444,8 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "GENERATED AS";
 		case EXPR_KIND_CYCLE_MARK:
 			return "CYCLE";
+		case EXPR_KIND_RPR_DEFINE:
+			return "DEFINE";
 
 			/*
 			 * There is intentionally no default: case here, so that the
