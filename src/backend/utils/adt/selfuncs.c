@@ -3657,6 +3657,21 @@ matchingjoinsel(PG_FUNCTION_ARGS)
 
 
 /*
+ * Get the set of nulling relids that should be ignored when looking up
+ * statistical data about an expression (the outer joins, plus the grouping
+ * step if there is one).
+ */
+static Relids
+get_stats_nulling_relids(PlannerInfo *root)
+{
+	if (root->group_rtindex == 0)
+		return root->outer_join_rels;
+
+	return bms_add_member(bms_copy(root->outer_join_rels),
+						  root->group_rtindex);
+}
+
+/*
  * Helper routine for estimate_num_groups: add an item to a list of
  * GroupVarInfos, but only if it's not known equal to any of the existing
  * entries.
@@ -3687,7 +3702,7 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 	 * extended statistics (see estimate_multivariate_ndistinct).  So strip
 	 * them out first.
 	 */
-	var = remove_nulling_relids(var, root->outer_join_rels, NULL);
+	var = remove_nulling_relids(var, get_stats_nulling_relids(root), NULL);
 
 	foreach(lc, varinfos)
 	{
@@ -4268,7 +4283,8 @@ estimate_multivariate_bucketsize(PlannerInfo *root, RelOptInfo *inner,
 				 * Clear nullingrels to correctly match hash keys.  See
 				 * add_unique_group_var()'s comment for details.
 				 */
-				expr = remove_nulling_relids(expr, root->outer_join_rels, NULL);
+				expr = remove_nulling_relids(expr, get_stats_nulling_relids(root),
+											 NULL);
 
 				/*
 				 * Detect and exclude exact duplicates from the list of hash
@@ -5653,6 +5669,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	Node	   *basenode;
 	Relids		varnos;
 	Relids		basevarnos;
+	Relids		nullingrels;
 	RelOptInfo *onerel;
 
 	/* Make sure we don't return dangling pointers in vardata */
@@ -5703,7 +5720,8 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	 * relation are considered "real" vars.
 	 */
 	varnos = pull_varnos(root, basenode);
-	basevarnos = bms_difference(varnos, root->outer_join_rels);
+	nullingrels = get_stats_nulling_relids(root);
+	basevarnos = bms_difference(varnos, nullingrels);
 
 	onerel = NULL;
 
@@ -5775,8 +5793,8 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		 * matching it to expressional index columns or to the expressions in
 		 * extended statistics.  So strip them out first.
 		 */
-		if (bms_overlap(varnos, root->outer_join_rels))
-			node = remove_nulling_relids(node, root->outer_join_rels, NULL);
+		if (bms_overlap(varnos, nullingrels))
+			node = remove_nulling_relids(node, nullingrels, NULL);
 
 		foreach(ilist, onerel->indexlist)
 		{
