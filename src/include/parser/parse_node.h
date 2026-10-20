@@ -51,6 +51,7 @@ typedef enum ParseExprKind
 	EXPR_KIND_WINDOW_FRAME_RANGE,	/* window frame clause with RANGE */
 	EXPR_KIND_WINDOW_FRAME_ROWS,	/* window frame clause with ROWS */
 	EXPR_KIND_WINDOW_FRAME_GROUPS,	/* window frame clause with GROUPS */
+	EXPR_KIND_RPR_DEFINE,		/* DEFINE */
 	EXPR_KIND_SELECT_TARGET,	/* SELECT target list item */
 	EXPR_KIND_INSERT_TARGET,	/* INSERT target list item */
 	EXPR_KIND_UPDATE_SOURCE,	/* UPDATE assignment source item */
@@ -162,6 +163,18 @@ typedef Node *(*CoerceParamHook) (ParseState *pstate, Param *param,
  * p_expr_kind: kind of expression we're currently parsing, as per enum above;
  * EXPR_KIND_NONE when not in an expression.
  *
+ * p_rpr_define: true while we are anywhere inside a row pattern DEFINE
+ * expression of this query level.  p_expr_kind names the innermost clause, so
+ * it stops saying EXPR_KIND_RPR_DEFINE as soon as a construct nested in the
+ * condition sets a kind of its own -- FILTER and an aggregate's ORDER BY both
+ * do.  The DEFINE restrictions apply to the whole condition, so they test this
+ * instead.  It is not inherited by a sub-select's ParseState, which is right:
+ * the restrictions stop at the query boundary.
+ *
+ * p_rpr_pattern_vars: names of the row pattern variables of the PATTERN that
+ * the DEFINE expression being parsed belongs to; NIL when p_rpr_define is
+ * false.
+ *
  * p_next_resno: next TargetEntry.resno to assign, starting from 1.
  *
  * p_multiassign_exprs: partially-processed MultiAssignRef source expressions.
@@ -207,6 +220,8 @@ struct ParseState
 	ParseNamespaceItem *p_grouping_nsitem;	/* NSItem for grouping, or NULL */
 	List	   *p_windowdefs;	/* raw representations of window clauses */
 	ParseExprKind p_expr_kind;	/* what kind of expression we're parsing */
+	bool		p_rpr_define;	/* inside a row pattern DEFINE expression? */
+	List	   *p_rpr_pattern_vars; /* Row pattern variable names */
 	int			p_next_resno;	/* next targetlist resno to assign */
 	List	   *p_multiassign_exprs;	/* junk tlist entries for multiassign */
 	List	   *p_locking_clause;	/* raw FOR UPDATE/FOR SHARE info */
