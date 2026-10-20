@@ -192,6 +192,19 @@ SELECT (test_json->>'field3') IS NULL AS expect_true FROM test_jsonb WHERE json_
 SELECT (test_json->3) IS NULL AS expect_false FROM test_jsonb WHERE json_type = 'array';
 SELECT (test_json->>3) IS NULL AS expect_true FROM test_jsonb WHERE json_type = 'array';
 
+-- Root strings must match the entries used for string array elements.
+SELECT test_json FROM test_jsonb WHERE test_json @@ 'strict $ == "a scalar"';
+SELECT test_json FROM test_jsonb WHERE test_json @? 'strict $ ? (@ == "a scalar")';
+
+CREATE INDEX test_jsonb_idx ON test_jsonb USING gin (test_json);
+SET enable_seqscan = off;
+
+SELECT test_json FROM test_jsonb WHERE test_json @@ 'strict $ == "a scalar"';
+SELECT test_json FROM test_jsonb WHERE test_json @? 'strict $ ? (@ == "a scalar")';
+
+RESET enable_seqscan;
+DROP INDEX test_jsonb_idx;
+
 -- corner cases
 select '{"a": [{"b": "c"}, {"b": "cc"}]}'::jsonb -> null::text;
 select '{"a": [{"b": "c"}, {"b": "cc"}]}'::jsonb -> null::int;

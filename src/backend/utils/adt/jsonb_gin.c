@@ -442,7 +442,10 @@ jsonb_ops__extract_nodes(JsonPathGinContext *cxt, JsonPathGinPath path,
 			if (cxt->lax)
 				key_entry = GIN_MAYBE;
 			else if (!last)		/* root ($) */
-				key_entry = GIN_FALSE;
+			{
+				/* Root scalars are stored as single-element arrays. */
+				key_entry = GIN_TRUE;
+			}
 			else if (last->type == jpiAnyArray || last->type == jpiIndexArray)
 				key_entry = GIN_TRUE;
 			else if (last->type == jpiAny)
