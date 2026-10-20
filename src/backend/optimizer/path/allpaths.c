@@ -103,6 +103,7 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static void set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel,
 							   RangeTblEntry *rte);
 static void create_plain_partial_paths(PlannerInfo *root, RelOptInfo *rel);
+static PathTarget *gather_target(RelOptInfo *rel, Path *subpath);
 static void add_extras_append_path(PlannerInfo *root, RelOptInfo *rel,
 								   List *live_childrels);
 static void set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
@@ -1412,9 +1413,34 @@ set_grouped_rel_pathlist(PlannerInfo *root, RelOptInfo *rel)
 
 
 /*
+ * extras_child_path
+ *	  The cheapest path from 'paths' that emits every value in
+ *	  'child_extras' (the parent's extras translated to the child, see
+ *	  add_extras_append_path()) and is ordered by 'pathkeys' (NIL for no
+ *	  requirement), or NULL.  Partial paths are sorted by total cost too, so
+ *	  the same search serves partial_pathlist.
+ */
+static Path *
+extras_child_path(List *paths, List *child_extras, List *pathkeys)
+{
+	ListCell   *lp;
+
+	foreach(lp, paths)
+	{
+		Path	   *path = (Path *) lfirst(lp);
+
+		if (path->param_info == NULL &&
+			pathkeys_contained_in(pathkeys, path->pathkeys) &&
+			path_covers_extras(path, child_extras))
+			return path;
+	}
+	return NULL;
+}
+
+/*
  * add_extras_append_path
- *	  Build an unordered, unparameterized Append over child paths that all
- *	  emit the same extra values, if there are any worth emitting.
+ *	  Build Appends over child paths that all emit the same extra values,
+ *	  if there are any worth emitting.
  *
  * A partitioned table's index on an expression is an index on that
  * expression in every partition, so each child may have an index-only scan
@@ -1426,19 +1452,24 @@ set_grouped_rel_pathlist(PlannerInfo *root, RelOptInfo *rel)
  * emits it.  create_append_child_plan() puts each child's values in the
  * Append's order.
  *
- * Only an unordered, non-partial Append is built this way; an ordered or
- * parallel Append still computes the expression above it.
+ * We build an unordered Append, a MergeAppend for each ordering some child
+ * provides (or an ordered Append if the partitions are ordered that way, as
+ * generate_orderedappend_paths() does), and a parallel Append over the
+ * children's partial paths.
  */
 static void
 add_extras_append_path(PlannerInfo *root, RelOptInfo *rel,
 					   List *live_childrels)
 {
 	List	   *extras = NIL;
+	List	   *child_extras_list = NIL;
 	List	   *tlist_exprs;
-	AppendPathInput input = {0};
+	List	   *orderings = NIL;
+	List	   *partition_pathkeys = NIL;
+	bool		partition_pathkeys_partial = true;
 	PathTarget *target;
-	AppendPath *apath;
 	ListCell   *lc;
+	ListCell   *lce;
 
 	if (rel->reloptkind != RELOPT_BASEREL || live_childrels == NIL ||
 		root->processed_tlist == NIL)
@@ -1484,39 +1515,173 @@ add_extras_append_path(PlannerInfo *root, RelOptInfo *rel,
 	if (extras == NIL)
 		return;
 
+	/*
+	 * Translate the extras to each child once, up front.  The translation
+	 * depends only on the child, not on the ordering, and each child is
+	 * searched once per ordering below, so doing it here instead of inside
+	 * extras_child_path() avoids repeating it (2 + number of orderings)
+	 * times per child.  child_extras_list runs parallel to live_childrels.
+	 */
 	foreach(lc, live_childrels)
 	{
 		RelOptInfo *childrel = (RelOptInfo *) lfirst(lc);
-		List	   *child_extras;
-		Path	   *best = NULL;
-		ListCell   *lp;
-
-		child_extras = (List *)
+		List	   *child_extras = (List *)
 			adjust_appendrel_attrs_multilevel(root, (Node *) extras,
-											  childrel, childrel->top_parent);
-		foreach(lp, childrel->pathlist)
-		{
-			Path	   *path = (Path *) lfirst(lp);
+										  childrel, childrel->top_parent);
 
-			if (path->param_info == NULL &&
-				path_covers_extras(path, child_extras))
-			{
-				best = path;	/* pathlist is sorted by total cost */
-				break;
-			}
-		}
-		if (best == NULL)
-			return;
-		accumulate_append_subpath(best, &input.subpaths, NULL,
-								  &input.child_append_relid_sets);
+		child_extras_list = lappend(child_extras_list, child_extras);
 	}
 
-	apath = create_append_path(root, rel, input, NIL, NULL, 0, false, -1);
 	target = copy_pathtarget(rel->reltarget);
 	foreach(lc, extras)
 		add_new_column_to_pathtarget(target, (Expr *) lfirst(lc));
-	apath->path.pathtarget = set_pathtarget_cost_width(root, target);
-	add_path(rel, (Path *) apath);
+	target = set_pathtarget_cost_width(root, target);
+
+	/*
+	 * Unordered Append; also collect the orderings children offer.  If some
+	 * child has no path that emits the values, we can't build this or an
+	 * ordered one, but may still build the parallel Append below.
+	 */
+	{
+		AppendPathInput input = {0};
+		AppendPath *apath;
+		bool		ok = true;
+
+		forboth(lc, live_childrels, lce, child_extras_list)
+		{
+			RelOptInfo *childrel = (RelOptInfo *) lfirst(lc);
+			Path	   *best = extras_child_path(childrel->pathlist,
+												 (List *) lfirst(lce), NIL);
+			ListCell   *lp;
+
+			if (best == NULL)
+			{
+				ok = false;
+				orderings = NIL;
+				break;
+			}
+			accumulate_append_subpath(best, &input.subpaths, NULL,
+									  &input.child_append_relid_sets);
+			foreach(lp, childrel->pathlist)
+			{
+				Path	   *path = (Path *) lfirst(lp);
+
+				if (path->pathkeys != NIL && path_emits_extras(path) &&
+					!list_member(orderings, path->pathkeys))
+					orderings = lappend(orderings, path->pathkeys);
+			}
+		}
+		if (ok)
+		{
+			apath = create_append_path(root, rel, input, NIL, NULL, 0, false,
+									   -1);
+			apath->path.pathtarget = target;
+			add_path(rel, (Path *) apath);
+		}
+	}
+
+	/* Ordered: MergeAppend, or Append if the partitions are in that order */
+	if (rel->part_scheme != NULL &&
+		partitions_are_ordered(rel->boundinfo, rel->live_parts))
+		partition_pathkeys = build_partition_pathkeys(root, rel,
+													  ForwardScanDirection,
+													  &partition_pathkeys_partial);
+	foreach(lc, orderings)
+	{
+		List	   *pathkeys = (List *) lfirst(lc);
+		AppendPathInput input = {0};
+		bool		match_partition_order;
+		bool		ok = true;
+		ListCell   *lcr;
+
+		/* only orderings the parent's paths could be using */
+		pathkeys = truncate_useless_pathkeys(root, rel, pathkeys);
+		if (pathkeys == NIL)
+			continue;
+		match_partition_order =
+			pathkeys_contained_in(pathkeys, partition_pathkeys) ||
+			(!partition_pathkeys_partial &&
+			 pathkeys_contained_in(partition_pathkeys, pathkeys));
+
+		forboth(lcr, live_childrels, lce, child_extras_list)
+		{
+			RelOptInfo *childrel = (RelOptInfo *) lfirst(lcr);
+			Path	   *best = extras_child_path(childrel->pathlist,
+												 (List *) lfirst(lce), pathkeys);
+
+			if (best == NULL)
+			{
+				ok = false;
+				break;
+			}
+
+			/* as generate_orderedappend_paths() collects them */
+			if (match_partition_order)
+				input.subpaths = lappend(input.subpaths,
+										 get_singleton_append_subpath(best,
+																	  &input.child_append_relid_sets));
+			else
+				accumulate_append_subpath(best, &input.subpaths, NULL,
+										  &input.child_append_relid_sets);
+		}
+		if (!ok)
+			continue;
+
+		if (match_partition_order)
+		{
+			AppendPath *apath;
+
+			apath = create_append_path(root, rel, input, pathkeys, NULL, 0,
+									   false, -1);
+			apath->path.pathtarget = target;
+			add_path(rel, (Path *) apath);
+		}
+		else
+		{
+			MergeAppendPath *mapath;
+
+			mapath = create_merge_append_path(root, rel, input.subpaths,
+											  input.child_append_relid_sets,
+											  pathkeys, NULL);
+			mapath->path.pathtarget = target;
+			add_path(rel, (Path *) mapath);
+		}
+	}
+
+	/* Parallel Append over the children's partial paths */
+	if (rel->consider_parallel)
+	{
+		AppendPathInput input = {0};
+		AppendPath *apath;
+		int			parallel_workers = 0;
+
+		forboth(lc, live_childrels, lce, child_extras_list)
+		{
+			RelOptInfo *childrel = (RelOptInfo *) lfirst(lc);
+			Path	   *best = extras_child_path(childrel->partial_pathlist,
+												 (List *) lfirst(lce), NIL);
+
+			if (best == NULL)
+				return;
+			parallel_workers = Max(parallel_workers, best->parallel_workers);
+			accumulate_append_subpath(best, &input.partial_subpaths, NULL,
+									  &input.child_append_relid_sets);
+		}
+		if (enable_parallel_append)
+		{
+			parallel_workers = Max(parallel_workers,
+								   pg_leftmost_one_pos32(list_length(live_childrels)) + 1);
+			parallel_workers = Min(parallel_workers,
+								   max_parallel_workers_per_gather);
+		}
+		if (parallel_workers <= 0)
+			return;
+		apath = create_append_path(root, rel, input, NIL, NULL,
+								   parallel_workers, enable_parallel_append,
+								   -1);
+		apath->path.pathtarget = target;
+		add_partial_path(rel, (Path *) apath);
+	}
 }
 
 /*
@@ -3398,9 +3563,31 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 	cheapest_partial_path = linitial(rel->partial_pathlist);
 	rows = compute_gather_rows(cheapest_partial_path);
 	simple_gather_path = (Path *)
-		create_gather_path(root, rel, cheapest_partial_path, rel->reltarget,
+		create_gather_path(root, rel, cheapest_partial_path,
+						   gather_target(rel, cheapest_partial_path),
 						   NULL, rowsp);
 	add_path(rel, simple_gather_path);
+
+	/*
+	 * A partial path that emits extra values (see path_extra_exprs()) is
+	 * rarely the cheapest; gather the cheapest such path too, passing its
+	 * values up, so whatever is above can use them.
+	 */
+	foreach(lc, rel->partial_pathlist)
+	{
+		Path	   *subpath = (Path *) lfirst(lc);
+
+		if (subpath == cheapest_partial_path)
+			continue;
+		if (path_emits_extras(subpath))
+		{
+			rows = compute_gather_rows(subpath);
+			add_path(rel, (Path *)
+					 create_gather_path(root, rel, subpath,
+										subpath->pathtarget, NULL, rowsp));
+			break;
+		}
+	}
 
 	/*
 	 * For each useful ordering, we can consider an order-preserving Gather
@@ -3415,10 +3602,29 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 			continue;
 
 		rows = compute_gather_rows(subpath);
-		path = create_gather_merge_path(root, rel, subpath, rel->reltarget,
+		path = create_gather_merge_path(root, rel, subpath,
+										gather_target(rel, subpath),
 										subpath->pathkeys, NULL, rowsp);
 		add_path(rel, &path->path);
 	}
+}
+
+/*
+ * gather_target
+ *	  The target for a Gather or Gather Merge over 'subpath': the rel's
+ *	  reltarget, or the subpath's own if it emits extra values (see
+ *	  path_extra_exprs()), so they pass up through the Gather.
+ *
+ * A Gather over a projection to the final scan/join target, as built by
+ * apply_scanjoin_target_to_paths(), takes rel->reltarget, which by then is
+ * that target.
+ */
+static PathTarget *
+gather_target(RelOptInfo *rel, Path *subpath)
+{
+	if (subpath->pathtarget != rel->reltarget && path_emits_extras(subpath))
+		return subpath->pathtarget;
+	return rel->reltarget;
 }
 
 /*
@@ -3609,7 +3815,7 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 			rows = compute_gather_rows(subpath);
 			path = create_gather_merge_path(root, rel,
 											subpath,
-											rel->reltarget,
+											gather_target(rel, subpath),
 											subpath->pathkeys,
 											NULL,
 											rowsp);
