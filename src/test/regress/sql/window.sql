@@ -235,6 +235,14 @@ SELECT last_value(unique1) over (ORDER BY four rows between current row and 2 fo
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
 
+SELECT nth_value(unique1,2) over (ORDER BY four rows between current row and 3 following exclude ties),
+	unique1, four
+FROM tenk1 WHERE unique1 < 10;
+
+SELECT last_value(unique1) over (ORDER BY four rows between 1 following and 2 following exclude ties),
+	unique1, four
+FROM tenk1 WHERE unique1 < 12 ORDER BY four, unique1;
+
 SELECT sum(unique1) over (rows between 2 preceding and 1 preceding),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;

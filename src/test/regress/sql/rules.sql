@@ -1235,6 +1235,42 @@ DROP RULE hat_confsel ON hats;
 drop table hats;
 drop table hat_data;
 
+-- An unnamed FULL JOIN USING makes USING names unique query-wide, but an RTE
+-- outside the FROM clause has no alias list to carry a renamed column.
+create table rule_uniq1 (x int, y int);
+create table rule_uniq2 (x int, z int);
+create table rule_uniq3 (x int, w int);
+create table rule_uniq_log (x int);
+
+create rule rule_uniq_r as on update to rule_uniq1 do also
+  insert into rule_uniq_log
+    select g1.y from rule_uniq1 g1, rule_uniq2 full join rule_uniq3 using (x)
+    where g1.x <> new.x;
+
+create rule rule_uniq_u as on update to rule_uniq1 do also
+  update rule_uniq_log set x = 1
+    from rule_uniq2 full join rule_uniq3 using (x)
+    where rule_uniq_log.x = 0;
+
+-- g1 is in the FROM clause and is re-aliased to x_1; new and the update
+-- target are not, so they keep x
+select rulename, definition from pg_rules where tablename = 'rule_uniq1'
+  order by rulename;
+
+drop table rule_uniq1, rule_uniq2, rule_uniq3, rule_uniq_log;
+
+-- The subquery an INSERT ... SELECT reads from is outside the FROM clause
+-- too, but it is printed, so its unnamed columns still need unique names.
+-- LIMIT keeps the subquery from being pulled up, and the unfilled column
+-- makes the plan project through a subquery scan.
+create table rule_uniq_ins (a int, b int, c text, d int);
+
+explain (verbose, costs off)
+  insert into rule_uniq_ins (a, b, c)
+    select a + 1, b + 1, c || c from rule_uniq_ins limit 2;
+
+drop table rule_uniq_ins;
+
 -- test for pg_get_functiondef properly regurgitating SET parameters
 -- Note that the function is kept around to stress pg_dump.
 CREATE FUNCTION func_with_set_params() RETURNS integer
