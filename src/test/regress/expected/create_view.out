@@ -971,6 +971,457 @@ select pg_get_viewdef('view_of_joins_2d', true);
       JOIN tbl1a USING (a) AS x) y;
 (1 row)
 
+-- A TABLEFUNC RTE names its columns in the clause that produces them, but it
+-- accepts a column alias list like any other RTE, and that list is where a
+-- rename of one of its columns has to be printed: the ON clause below refers
+-- to the column by the name the query sees, and without the list the two
+-- would not agree.  The anonymous FULL JOIN is what forces USING names to be
+-- unique query-wide, which is what pushes the JSON_TABLE column aside.
+create table tblnr (m int);
+create table tblnu (x int, m int);
+create table tblnl (x int);
+create table tblnm (x int);
+create table tblnw (a int, c int, d int);
+create table tblnv (c int);
+create view view_of_unrenamable as
+select j.m
+from (tblnl full join tblnm using (x)),
+     (json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+      join tblnr on jt.x > 0) j;
+select pg_get_viewdef('view_of_unrenamable', true);
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT j.m                                             +
+    FROM tblnl                                           +
+      FULL JOIN tblnm USING (x),                         +
+     (JSON_TABLE(                                        +
+             '[1, 2]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                   +
+                 x integer PATH '$'                      +
+             )                                           +
+         ) jt(x_1)                                       +
+      JOIN tblnr ON jt.x_1 > 0) j;
+(1 row)
+
+-- and that text is what has to reparse
+select 'create view view_of_unrenamable_2 as '
+       || pg_get_viewdef('view_of_unrenamable', true) \gexec
+create view view_of_unrenamable_2 as  SELECT j.m
+   FROM tblnl
+     FULL JOIN tblnm USING (x),
+    (JSON_TABLE(
+            '[1, 2]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt(x_1)
+     JOIN tblnr ON jt.x_1 > 0) j;
+select pg_get_viewdef('view_of_unrenamable', true)
+     = pg_get_viewdef('view_of_unrenamable_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+-- The name of a merged column is the other place a rename lands, and it lands
+-- on both sides at once: whatever is picked, each input has to answer to it,
+-- the TABLEFUNC through its alias list like the table through its own.
+create view view_of_unrenamable_using as
+select j.m
+from (tblnl full join tblnm using (x)),
+     (json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+      join tblnu using (x)) j;
+select pg_get_viewdef('view_of_unrenamable_using', true);
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT j.m                                             +
+    FROM tblnl                                           +
+      FULL JOIN tblnm USING (x),                         +
+     (JSON_TABLE(                                        +
+             '[1, 2]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                   +
+                 x integer PATH '$'                      +
+             )                                           +
+         ) jt(x_1)                                       +
+      JOIN tblnu tblnu(x_1, m) USING (x_1)) j;
+(1 row)
+
+select 'create view view_of_unrenamable_using_2 as '
+       || pg_get_viewdef('view_of_unrenamable_using', true) \gexec
+create view view_of_unrenamable_using_2 as  SELECT j.m
+   FROM tblnl
+     FULL JOIN tblnm USING (x),
+    (JSON_TABLE(
+            '[1, 2]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt(x_1)
+     JOIN tblnu tblnu(x_1, m) USING (x_1)) j;
+select pg_get_viewdef('view_of_unrenamable_using', true)
+     = pg_get_viewdef('view_of_unrenamable_using_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+-- The far side of an INNER or LEFT JOIN is as much a side as the near one:
+-- the merged column's expression names only the near input, but the rename
+-- reaches both.
+create view view_of_unrenamable_right as
+select j.m
+from (tblnl full join tblnm using (x)),
+     ((tblnu join json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+       using (x)) full join tblnm t2 using (x)) j;
+select pg_get_viewdef('view_of_unrenamable_right', true);
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT j.m                                             +
+    FROM tblnl                                           +
+      FULL JOIN tblnm USING (x),                         +
+     (tblnu tblnu(x_1, m)                                +
+      JOIN JSON_TABLE(                                   +
+             '[1, 2]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                   +
+                 x integer PATH '$'                      +
+             )                                           +
+         ) jt(x_1) USING (x_1)                           +
+      FULL JOIN tblnm t2(x_1) USING (x_1)) j;
+(1 row)
+
+select 'create view view_of_unrenamable_right_2 as '
+       || pg_get_viewdef('view_of_unrenamable_right', true) \gexec
+create view view_of_unrenamable_right_2 as  SELECT j.m
+   FROM tblnl
+     FULL JOIN tblnm USING (x),
+    (tblnu tblnu(x_1, m)
+     JOIN JSON_TABLE(
+            '[1, 2]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt(x_1) USING (x_1)
+     FULL JOIN tblnm t2(x_1) USING (x_1)) j;
+select pg_get_viewdef('view_of_unrenamable_right', true)
+     = pg_get_viewdef('view_of_unrenamable_right_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+create view view_of_unrenamable_left as
+select j.m
+from (tblnl full join tblnm using (x)),
+     ((tblnu left join json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+       using (x)) full join tblnm t2 using (x)) j;
+select pg_get_viewdef('view_of_unrenamable_left', true);
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT j.m                                             +
+    FROM tblnl                                           +
+      FULL JOIN tblnm USING (x),                         +
+     (tblnu tblnu(x_1, m)                                +
+      LEFT JOIN JSON_TABLE(                              +
+             '[1, 2]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                   +
+                 x integer PATH '$'                      +
+             )                                           +
+         ) jt(x_1) USING (x_1)                           +
+      FULL JOIN tblnm t2(x_1) USING (x_1)) j;
+(1 row)
+
+select 'create view view_of_unrenamable_left_2 as '
+       || pg_get_viewdef('view_of_unrenamable_left', true) \gexec
+create view view_of_unrenamable_left_2 as  SELECT j.m
+   FROM tblnl
+     FULL JOIN tblnm USING (x),
+    (tblnu tblnu(x_1, m)
+     LEFT JOIN JSON_TABLE(
+            '[1, 2]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt(x_1) USING (x_1)
+     FULL JOIN tblnm t2(x_1) USING (x_1)) j;
+select pg_get_viewdef('view_of_unrenamable_left', true)
+     = pg_get_viewdef('view_of_unrenamable_left_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+-- An aliased join hides its inputs, and a USING name above it is taken by
+-- the join's own column: the join renames it on its alias list, and the
+-- TABLEFUNC underneath, being held to the query-wide USING names as well,
+-- renames its column on its own list.
+create view view_of_unrenamable_hidden as
+select j.m
+from (tblnl full join tblnm using (x)),
+     ((json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+       join tblnr on true) j full join tblnm t2 using (x));
+select pg_get_viewdef('view_of_unrenamable_hidden', true);
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT j.m                                             +
+    FROM tblnl                                           +
+      FULL JOIN tblnm USING (x),                         +
+     (JSON_TABLE(                                        +
+             '[1, 2]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                   +
+                 x integer PATH '$'                      +
+             )                                           +
+         ) jt(x_2)                                       +
+      JOIN tblnr ON true) j(x_1, m)                      +
+      FULL JOIN tblnm t2(x_1) USING (x_1);
+(1 row)
+
+select 'create view view_of_unrenamable_hidden_2 as '
+       || pg_get_viewdef('view_of_unrenamable_hidden', true) \gexec
+create view view_of_unrenamable_hidden_2 as  SELECT j.m
+   FROM tblnl
+     FULL JOIN tblnm USING (x),
+    (JSON_TABLE(
+            '[1, 2]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt(x_2)
+     JOIN tblnr ON true) j(x_1, m)
+     FULL JOIN tblnm t2(x_1) USING (x_1);
+select pg_get_viewdef('view_of_unrenamable_hidden', true)
+     = pg_get_viewdef('view_of_unrenamable_hidden_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+-- A name a parent join pushes down onto a merged column has to be unique in
+-- the input it lands in, whatever the USING clause underneath spells.
+create view view_of_unrenamable_pushed as
+select j2.d
+from (tblnv join (tblnw join json_table(jsonb '[1]', '$[*]' columns (a int path '$')) x
+                  using (a)) using (c)) as j2(a);
+select pg_get_viewdef('view_of_unrenamable_pushed', true);
+                    pg_get_viewdef                     
+-------------------------------------------------------
+  SELECT j2.d                                         +
+    FROM (tblnv tblnv(a)                              +
+      JOIN (tblnw tblnw(a_1, a, d)                    +
+      JOIN JSON_TABLE(                                +
+             '[1]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                +
+                 a integer PATH '$'                   +
+             )                                        +
+         ) x(a_1) USING (a_1)) USING (a)) j2;
+(1 row)
+
+select 'create view view_of_unrenamable_pushed_2 as '
+       || pg_get_viewdef('view_of_unrenamable_pushed', true) \gexec
+create view view_of_unrenamable_pushed_2 as  SELECT j2.d
+   FROM (tblnv tblnv(a)
+     JOIN (tblnw tblnw(a_1, a, d)
+     JOIN JSON_TABLE(
+            '[1]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                a integer PATH '$'
+            )
+        ) x(a_1) USING (a_1)) USING (a)) j2;
+select pg_get_viewdef('view_of_unrenamable_pushed', true)
+     = pg_get_viewdef('view_of_unrenamable_pushed_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+-- Two anonymous FULL JOINs merging the same name through a TABLEFUNC each
+-- still get distinct names.
+create view view_of_unrenamable_twice as
+select count(*) as n
+from (tblnl full join json_table(jsonb '[1]', '$[*]' columns (x int path '$')) jt1
+      using (x)),
+     (tblnm full join json_table(jsonb '[1]', '$[*]' columns (x int path '$')) jt2
+      using (x));
+select pg_get_viewdef('view_of_unrenamable_twice', true);
+                    pg_get_viewdef                     
+-------------------------------------------------------
+  SELECT count(*) AS n                                +
+    FROM tblnl                                        +
+      FULL JOIN JSON_TABLE(                           +
+             '[1]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                +
+                 x integer PATH '$'                   +
+             )                                        +
+         ) jt1 USING (x),                             +
+     tblnm tblnm(x_1)                                 +
+      FULL JOIN JSON_TABLE(                           +
+             '[1]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                +
+                 x integer PATH '$'                   +
+             )                                        +
+         ) jt2(x_1) USING (x_1);
+(1 row)
+
+select 'create view view_of_unrenamable_twice_2 as '
+       || pg_get_viewdef('view_of_unrenamable_twice', true) \gexec
+create view view_of_unrenamable_twice_2 as  SELECT count(*) AS n
+   FROM tblnl
+     FULL JOIN JSON_TABLE(
+            '[1]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt1 USING (x),
+    tblnm tblnm(x_1)
+     FULL JOIN JSON_TABLE(
+            '[1]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                x integer PATH '$'
+            )
+        ) jt2(x_1) USING (x_1);
+select pg_get_viewdef('view_of_unrenamable_twice', true)
+     = pg_get_viewdef('view_of_unrenamable_twice_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+-- and a column alias list the user wrote on a TABLEFUNC is part of the query
+create view view_of_tablefunc_alias as
+select t.a from json_table(jsonb '[1]', '$[*]' columns (c int path '$')) as t(a);
+select pg_get_viewdef('view_of_tablefunc_alias', true);
+                    pg_get_viewdef                     
+-------------------------------------------------------
+  SELECT a                                            +
+    FROM JSON_TABLE(                                  +
+             '[1]'::jsonb, '$[*]' AS json_table_path_0+
+             COLUMNS (                                +
+                 c integer PATH '$'                   +
+             )                                        +
+         ) t(a);
+(1 row)
+
+select 'create view view_of_tablefunc_alias_2 as '
+       || pg_get_viewdef('view_of_tablefunc_alias', true) \gexec
+create view view_of_tablefunc_alias_2 as  SELECT a
+   FROM JSON_TABLE(
+            '[1]'::jsonb, '$[*]' AS json_table_path_0
+            COLUMNS (
+                c integer PATH '$'
+            )
+        ) t(a);
+select pg_get_viewdef('view_of_tablefunc_alias', true)
+     = pg_get_viewdef('view_of_tablefunc_alias_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+drop view view_of_tablefunc_alias_2, view_of_tablefunc_alias;
+drop view view_of_unrenamable_twice_2, view_of_unrenamable_twice;
+drop view view_of_unrenamable_pushed_2, view_of_unrenamable_pushed;
+drop view view_of_unrenamable_hidden_2, view_of_unrenamable_hidden;
+drop view view_of_unrenamable_left_2, view_of_unrenamable_left;
+drop view view_of_unrenamable_right_2, view_of_unrenamable_right;
+drop view view_of_unrenamable_using_2, view_of_unrenamable_using;
+drop view view_of_unrenamable_2, view_of_unrenamable;
+drop table tblnr, tblnu, tblnl, tblnm, tblnw, tblnv;
+-- The columns a function's result type grows after the view is made are
+-- columns the RTE has now, and the alias list being positional they are
+-- printed in full: an aliased join above lays its own list over its inputs'
+-- lists end to end, so a grown column left off would shift the input after
+-- it, and a reference into that input would silently land on another column.
+create table tblfc (a int, z int);
+insert into tblfc values (1, 5);
+create function tblfc_f() returns setof tblfc language sql
+  as $$ select * from tblfc $$;
+create table tblfr (z int, val int);
+insert into tblfr values (1, 7);
+create view view_of_grown_input as
+select j.a, j.val from (tblfc_f() f join tblfr on true) j;
+select * from view_of_grown_input;
+ a | val 
+---+-----
+ 1 |   7
+(1 row)
+
+alter table tblfc add column val int, add column spare int;
+select pg_get_viewdef('view_of_grown_input', true);
+                      pg_get_viewdef                       
+-----------------------------------------------------------
+  SELECT j.a,                                             +
+     j.val                                                +
+    FROM (tblfc_f() f(a, z, val, spare)                   +
+      JOIN tblfr ON true) j(a, z, val_1, spare, z_1, val);
+(1 row)
+
+select 'create view view_of_grown_input_2 as '
+       || pg_get_viewdef('view_of_grown_input', true) \gexec
+create view view_of_grown_input_2 as  SELECT j.a,
+    j.val
+   FROM (tblfc_f() f(a, z, val, spare)
+     JOIN tblfr ON true) j(a, z, val_1, spare, z_1, val);
+select pg_get_viewdef('view_of_grown_input', true)
+     = pg_get_viewdef('view_of_grown_input_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+select * from view_of_grown_input;
+ a | val 
+---+-----
+ 1 |   7
+(1 row)
+
+select * from view_of_grown_input_2;
+ a | val 
+---+-----
+ 1 |   7
+(1 row)
+
+drop view view_of_grown_input_2;
+-- A grown column that is dropped again still takes up its place in the
+-- positional alias list, as a dropped column; a column grown after it must
+-- not slide into that place.
+alter table tblfc drop column val;
+alter table tblfc add column val int;
+select pg_get_viewdef('view_of_grown_input', true);
+                      pg_get_viewdef                       
+-----------------------------------------------------------
+  SELECT j.a,                                             +
+     j.val                                                +
+    FROM (tblfc_f() f(a, z, spare, val)                   +
+      JOIN tblfr ON true) j(a, z, spare, val_1, z_1, val);
+(1 row)
+
+select 'create view view_of_grown_input_2 as '
+       || pg_get_viewdef('view_of_grown_input', true) \gexec
+create view view_of_grown_input_2 as  SELECT j.a,
+    j.val
+   FROM (tblfc_f() f(a, z, spare, val)
+     JOIN tblfr ON true) j(a, z, spare, val_1, z_1, val);
+select pg_get_viewdef('view_of_grown_input', true)
+     = pg_get_viewdef('view_of_grown_input_2', true) as round_trips;
+ round_trips 
+-------------
+ t
+(1 row)
+
+select * from view_of_grown_input;
+ a | val 
+---+-----
+ 1 |   7
+(1 row)
+
+select * from view_of_grown_input_2;
+ a | val 
+---+-----
+ 1 |   7
+(1 row)
+
+drop view view_of_grown_input_2, view_of_grown_input;
+drop function tblfc_f();
+drop table tblfc, tblfr;
 -- Test view decompilation in the face of column addition/deletion/renaming
 create table tt2 (a int, b int, c int);
 create table tt3 (ax int8, b int2, c numeric);
