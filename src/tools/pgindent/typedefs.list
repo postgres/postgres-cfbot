@@ -4225,6 +4225,7 @@ regexp
 regexp_matches_ctx
 registered_buffer
 regproc
+relabel_context
 relopt_bool
 relopt_enum
 relopt_enum_elt_def

@@ -402,9 +402,10 @@ set_cheapest(RelOptInfo *parent_rel)
  * rel->reltarget with the extra expressions appended, so they're its tail.
  *
  * Sort, Material and Memoize don't project and share their input's target,
- * so they emit what it emits.  Nothing else emits extra values: other path
- * types build their own targets, and an upper rel's targets differ from its
- * reltarget for reasons of their own.
+ * so they emit what it emits; so may a Gather or Gather Merge given its
+ * input's target (see generate_gather_paths()).  Nothing else emits extra
+ * values: other path types build their own targets, and an upper rel's
+ * targets differ from its reltarget for reasons of their own.
  */
 static ListCell *
 path_extras_start(Path *path, int *nextras)
@@ -423,6 +424,8 @@ path_extras_start(Path *path, int *nextras)
 		case T_IncrementalSortPath:
 		case T_MaterialPath:
 		case T_MemoizePath:
+		case T_GatherPath:
+		case T_GatherMergePath:
 			{
 				Path	   *subpath;
 
@@ -430,6 +433,10 @@ path_extras_start(Path *path, int *nextras)
 					subpath = ((MaterialPath *) path)->subpath;
 				else if (IsA(path, MemoizePath))
 					subpath = ((MemoizePath *) path)->subpath;
+				else if (IsA(path, GatherPath))
+					subpath = ((GatherPath *) path)->subpath;
+				else if (IsA(path, GatherMergePath))
+					subpath = ((GatherMergePath *) path)->subpath;
 				else
 					subpath = ((SortPath *) path)->subpath;
 				if (subpath->parent != rel ||
@@ -448,6 +455,7 @@ path_extras_start(Path *path, int *nextras)
 				return NULL;
 			break;
 		case T_AppendPath:
+		case T_MergeAppendPath:
 			/* see add_extras_append_path() */
 			if (rel->reloptkind != RELOPT_BASEREL)
 				return NULL;
@@ -1447,6 +1455,14 @@ query_tlist_exprs(PlannerInfo *root, RelOptInfo *rel)
 		exprs = (List *) adjust_appendrel_attrs_multilevel(root, (Node *) exprs,
 														   rel,
 														   rel->top_parent);
+
+	/*
+	 * Above an outer join that null-extends the rel, the query's Vars carry
+	 * nullingrels that a scan's don't.  The scan may still emit the value;
+	 * whether it can be used above the join is join_path_target()'s call.
+	 */
+	if (!bms_is_empty(root->outer_join_rels))
+		exprs = (List *) strip_nullingrels((Node *) exprs);
 	return exprs;
 }
 
@@ -1469,16 +1485,16 @@ query_tlist_exprs(PlannerInfo *root, RelOptInfo *rel)
  * at any depth, with a reference to it; the paths that must compute it
  * instead pay for it when the expression is charged.
  *
- * An expression is matched with equal(), so a Var of a rel on the nullable
- * side of an outer join, which carries varnullingrels in the targetlist,
- * never matches the index's own: the value read below the join isn't the
- * one the query asks for above it.
+ * The query's targetlist is compared without nullingrels (see
+ * query_tlist_exprs()); whether a value read below an outer join can be used
+ * above it is decided as it's passed up (see relabel_extra_for_join()).
  *
- * A partial path gets the extra values only if they're parallel-safe.
+ * A partial path may emit a value that isn't parallel-safe: a worker reads
+ * the stored value, it never evaluates the expression, and nothing above
+ * the scan does either, since it references the scan's output column.
  */
 static PathTarget *
-indexonly_path_target(PlannerInfo *root, IndexOptInfo *index,
-					  bool partial_path)
+indexonly_path_target(PlannerInfo *root, IndexOptInfo *index)
 {
 	RelOptInfo *rel = index->rel;
 	PathTarget *target = NULL;
@@ -1498,8 +1514,6 @@ indexonly_path_target(PlannerInfo *root, IndexOptInfo *index,
 		ListCell   *lq;
 
 		if (!index->canreturn[i++] || IsA(itle->expr, Var))
-			continue;
-		if (partial_path && !is_parallel_safe(root, (Node *) itle->expr))
 			continue;
 		if (!expr_worth_emitting(root, (Node *) itle->expr))
 			continue;
@@ -1563,7 +1577,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = indexonly ?
-		indexonly_path_target(root, index, partial_path) :
+		indexonly_path_target(root, index) :
 		index_path_orderby_target(root, index, indexorderbys,
 								  indexorderbycols);
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
@@ -2800,6 +2814,99 @@ calc_non_nestloop_required_outer(Path *outer_path, Path *inner_path)
 	return required_outer;
 }
 
+/* state for relabel_extra_for_join()'s walker and mutator */
+typedef struct
+{
+	List	   *joinvars;
+	bool		changed;
+	bool		missing;
+} relabel_context;
+
+static Var *
+relabel_find_joinvar(Var *var, List *joinvars)
+{
+	ListCell   *lc;
+
+	foreach(lc, joinvars)
+	{
+		Var		   *jv = (Var *) lfirst(lc);
+
+		if (IsA(jv, Var) && jv->varno == var->varno &&
+			jv->varattno == var->varattno && jv->varlevelsup == 0)
+			return jv;
+	}
+	return NULL;
+}
+
+/* First pass: does anything need relabeling, or is a Var missing? */
+static bool
+relabel_check_walker(Node *node, relabel_context *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) && ((Var *) node)->varlevelsup == 0)
+	{
+		Var		   *var = (Var *) node;
+		Var		   *jv = relabel_find_joinvar(var, context->joinvars);
+
+		if (jv == NULL)
+			context->missing = true;
+		else if (!bms_equal(jv->varnullingrels, var->varnullingrels))
+			context->changed = true;
+		return context->missing;
+	}
+	return expression_tree_walker(node, relabel_check_walker, context);
+}
+
+static Node *
+relabel_extra_mutator(Node *node, relabel_context *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var) && ((Var *) node)->varlevelsup == 0)
+	{
+		Var		   *var = copyObject((Var *) node);
+		Var		   *jv = relabel_find_joinvar(var, context->joinvars);
+
+		var->varnullingrels = bms_copy(jv->varnullingrels);
+		return (Node *) var;
+	}
+	return expression_tree_mutator(node, relabel_extra_mutator, context);
+}
+
+/*
+ * relabel_extra_for_join
+ *	  Express an input's extra value in terms of the joinrel's Vars.
+ *
+ * Above an outer join, the joinrel's reltarget has each Var of the nullable
+ * side with the join's bit added to its nullingrels, and the query's copy of
+ * an expression over those Vars has it too.  The input's copy doesn't.  The
+ * join null-extends the input's value along with the Vars, which gives the
+ * expression's value for null-extended rows only if the expression is
+ * strict, so for a non-strict one we can't pass the value up (return NULL).
+ * Otherwise return the expression with each Var replaced by the joinrel's
+ * version of it, which setrefs.c matches with the input's
+ * (search_indexed_tlist_for_nulled_expr()).  If some Var isn't in the
+ * joinrel's reltarget, the value isn't needed above, so return NULL too.
+ */
+static Node *
+relabel_extra_for_join(RelOptInfo *joinrel, Node *expr)
+{
+	relabel_context context;
+
+	context.joinvars = joinrel->reltarget->exprs;
+	context.changed = false;
+	context.missing = false;
+	(void) relabel_check_walker(expr, &context);
+	if (context.missing)
+		return NULL;
+	if (!context.changed)
+		return expr;
+	if (contain_nonstrict_functions(expr))
+		return NULL;
+	return relabel_extra_mutator(expr, &context);
+}
+
 /*
  * join_path_target
  *	  Choose the PathTarget for a join path.
@@ -2812,17 +2919,14 @@ calc_non_nestloop_required_outer(Path *outer_path, Path *inner_path)
  * ordering IndexScan below the topmost join would read the value for
  * nothing.
  *
- * Only values the query still needs above this join are passed up: a
- * value that refers to a rel on the nullable side of an outer join this
- * join forms would be wrong above it, but those never match the query's
- * targetlist (its Vars carry varnullingrels the index's don't), so no input
- * emits one; and every value we emit came from the final targetlist.
+ * Above an outer join a value from the nullable side is relabeled with the
+ * join's nullingrels, and passed up only if that gives the right answer for
+ * null-extended rows; see relabel_extra_for_join().
  *
- * Values must be parallel-safe if the join is, since a partial join path's
- * target is computed in workers.
- *
- * Every value a scan emits passed expr_worth_emitting() there, so we don't
- * look up its cost again for each join path.
+ * A value needn't be parallel-safe for a partial join path: the join only
+ * references its input's output column.  Every value a scan emits passed
+ * expr_worth_emitting() there, so we don't look up its cost again for each
+ * join path.
  */
 static PathTarget *
 join_path_target(PlannerInfo *root, RelOptInfo *joinrel,
@@ -2842,9 +2946,9 @@ join_path_target(PlannerInfo *root, RelOptInfo *joinrel,
 	nextras = list_length(outer_extras) + list_length(inner_extras);
 	foreach(lc, list_concat(outer_extras, inner_extras))
 	{
-		Node	   *expr = (Node *) lfirst(lc);
+		Node	   *expr = relabel_extra_for_join(joinrel, (Node *) lfirst(lc));
 
-		if (!joinrel->consider_parallel || is_parallel_safe(root, expr))
+		if (expr != NULL)
 			add_new_column_to_pathtarget(target, (Expr *) expr);
 		else
 			all_kept = false;
@@ -3228,8 +3332,38 @@ typedef struct
 {
 	PlannerInfo *root;
 	List	   *free;
+	bool		nulled_ok;		/* see free_expr_match() */
+	List	   *free_stripped;	/* 'free' without nullingrels, on demand */
 	QualCost	cost;
 } credit_free_context;
+
+/*
+ * free_expr_match
+ *	  Is 'node' one of context->free?
+ *
+ * At an outer join (context->nulled_ok), also accept a strict 'node' that is
+ * one of them but for nullingrels, as setrefs.c does.
+ */
+static bool
+free_expr_match(Node *node, credit_free_context *context)
+{
+	Node	   *stripped;
+	ListCell   *lc;
+
+	if (list_member(context->free, node))
+		return true;
+	if (!context->nulled_ok || bms_is_empty(context->root->outer_join_rels))
+		return false;
+	if (context->free_stripped == NIL)
+		context->free_stripped = (List *) strip_nullingrels((Node *) context->free);
+	stripped = strip_nullingrels(node);
+	foreach(lc, context->free_stripped)
+	{
+		if (equal(stripped, lfirst(lc)))
+			return !contain_nonstrict_functions(node);
+	}
+	return false;
+}
 
 /*
  * credit_free_exprs_walker
@@ -3247,7 +3381,7 @@ credit_free_exprs_walker(Node *node, credit_free_context *context)
 {
 	if (node == NULL || IsA(node, Var) || IsA(node, Const))
 		return false;
-	if (list_member(context->free, node))
+	if (free_expr_match(node, context))
 	{
 		QualCost	ecost;
 
@@ -3265,12 +3399,15 @@ credit_free_exprs_walker(Node *node, credit_free_context *context)
  *	  uses (see credit_free_exprs_walker()).
  */
 static QualCost
-free_exprs_cost(PlannerInfo *root, PathTarget *target, List *free)
+free_exprs_cost(PlannerInfo *root, PathTarget *target, List *free,
+				bool nulled_ok)
 {
 	credit_free_context context;
 
 	context.root = root;
 	context.free = free;
+	context.nulled_ok = nulled_ok;
+	context.free_stripped = NIL;
 	context.cost = target->cost;
 	if (free != NIL)
 		(void) credit_free_exprs_walker((Node *) target->exprs, &context);
@@ -3321,6 +3458,8 @@ indexonly_qual_cost(PlannerInfo *root, IndexPath *ipath, List *qpquals,
 
 	context.root = root;
 	context.free = indexonly_free_exprs(ipath);
+	context.nulled_ok = false;
+	context.free_stripped = NIL;
 	context.cost = cost;
 	if (context.free == NIL)
 		return cost;
@@ -3361,6 +3500,7 @@ join_free_exprs(JoinPath *jpath)
  * - a join, for values one of its inputs emits (join_free_exprs());
  * - an index-only scan, for returnable index expression columns
  *   (indexonly_free_exprs());
+ * - a Gather or Gather Merge, for values its input emits;
  *
  * in either case wherever the value appears in the target, since setrefs.c
  * replaces every occurrence (see credit_free_exprs_walker()).  And
@@ -3380,12 +3520,37 @@ path_target_cost(PlannerInfo *root, Path *path, PathTarget *target)
 	ListCell   *lc;
 
 	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath))
-		return free_exprs_cost(root, target,
-							   join_free_exprs((JoinPath *) path));
+	{
+		JoinPath   *jpath = (JoinPath *) path;
+		bool		forms_oj;
+
+		/*
+		 * A join that forms outer joins matches nulled copies too, as
+		 * set_join_references() does when the Join's ojrelids isn't empty.
+		 * The inputs' relids are disjoint and both within the joinrel's, so
+		 * it forms one exactly when the joinrel has more relids than they do.
+		 */
+		forms_oj = bms_num_members(path->parent->relids) >
+			bms_num_members(jpath->outerjoinpath->parent->relids) +
+			bms_num_members(jpath->innerjoinpath->parent->relids);
+		return free_exprs_cost(root, target, join_free_exprs(jpath),
+							   forms_oj);
+	}
 
 	if (IsA(path, IndexPath) && path->pathtype == T_IndexOnlyScan)
 		return free_exprs_cost(root, target,
-							   indexonly_free_exprs((IndexPath *) path));
+							   indexonly_free_exprs((IndexPath *) path),
+							   false);
+
+	/* set_upper_references() matches them in a Gather's subplan's tlist */
+	if (IsA(path, GatherPath))
+		return free_exprs_cost(root, target,
+							   path_extra_exprs(((GatherPath *) path)->subpath),
+							   false);
+	if (IsA(path, GatherMergePath))
+		return free_exprs_cost(root, target,
+							   path_extra_exprs(((GatherMergePath *) path)->subpath),
+							   false);
 
 	if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan)
 		return cost;
