@@ -2335,6 +2335,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * checkpoints, except for their "init" forks, which need to be treated
 	 * just like permanent relations.
 	 */
+
 	/*
 	 * Admit the page on probation: no second chance yet, so the next pass of
 	 * the hand may reclaim it.  A further access promotes it (see PinBuffer).
@@ -3008,7 +3009,10 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			/* Admit on probation; see the comment at the other admission site. */
+			/*
+			 * Admit on probation; see the comment at the other admission
+			 * site.
+			 */
 			set_bits |= BM_TAG_VALID;
 			if (bmr.relpersistence == RELPERSISTENCE_PERMANENT || fork == INIT_FORKNUM)
 				set_bits |= BM_PERMANENT;
@@ -3349,12 +3353,12 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
 				/*
 				 * Ring buffers: a page is pinned once per cycle through the
 				 * ring by the scan that owns it, and those pins must not keep
-				 * it resident -- otherwise a sequential scan would protect its
-				 * own pages and evict the working set.  With a single bit
+				 * it resident -- otherwise a sequential scan would protect
+				 * its own pages and evict the working set.  With a single bit
 				 * there is nothing to cap: leave the bit alone and let the
-				 * ring recycle the page, while an access from outside the ring
-				 * (which takes the default path above) grants the chance and
-				 * so removes the page from the ring's reach.
+				 * ring recycle the page, while an access from outside the
+				 * ring (which takes the default path above) grants the chance
+				 * and so removes the page from the ring's reach.
 				 */
 			}
 
@@ -3861,19 +3865,19 @@ BufferSync(int flags)
  */
 typedef struct BufferSyncPartition
 {
-	int	prev_strategy_buf_id;
-	uint32 prev_strategy_passes;
-	int	next_to_clean;
-	uint32 next_passes;
-} BufferSyncPartition;
+	int			prev_strategy_buf_id;
+	uint32		prev_strategy_passes;
+	int			next_to_clean;
+	uint32		next_passes;
+}			BufferSyncPartition;
 
-static BufferSyncPartition *saved_info = NULL;
+static BufferSyncPartition * saved_info = NULL;
 static bool saved_info_valid = false;
 
 static bool
 BgBufferSyncPartition(WritebackContext *wb_context, int num_partitions,
 					  int partition, int recent_alloc_partition,
-					  BufferSyncPartition *saved)
+					  BufferSyncPartition * saved)
 {
 	/* info obtained from freelist.c */
 	int			strategy_buf_id;
@@ -3904,9 +3908,9 @@ BgBufferSyncPartition(WritebackContext *wb_context, int num_partitions,
 	uint64		sweep_claims;
 
 	/*
-	 * Claim count as of our previous cycle, to get a rate rather than a total.
-	 * One entry per partition: each has its own clock hand and can starve
-	 * independently, so the decision is made for each one separately.
+	 * Claim count as of our previous cycle, to get a rate rather than a
+	 * total. One entry per partition: each has its own clock hand and can
+	 * starve independently, so the decision is made for each one separately.
 	 */
 	static uint64 *prev_sweep_claims = NULL;
 
@@ -4083,12 +4087,13 @@ BgBufferSyncPartition(WritebackContext *wb_context, int num_partitions,
 	reusable_buffers = reusable_buffers_est;
 
 	/*
-	 * Decide whether to spend second chances as we scan.  StrategySweepClaims()
-	 * counts allocations that gave up on the second-chance rule because the
-	 * sweep could not find a candidate; while that count is rising the sweep is
-	 * starving and the cheapest help we can give is to make candidates ahead of
-	 * the hand.  While it is flat we leave the rule alone, so this costs
-	 * nothing on a workload that does not need it.
+	 * Decide whether to spend second chances as we scan.
+	 * StrategySweepClaims() counts allocations that gave up on the
+	 * second-chance rule because the sweep could not find a candidate; while
+	 * that count is rising the sweep is starving and the cheapest help we can
+	 * give is to make candidates ahead of the hand.  While it is flat we
+	 * leave the rule alone, so this costs nothing on a workload that does not
+	 * need it.
 	 */
 	if (prev_sweep_claims == NULL)
 	{

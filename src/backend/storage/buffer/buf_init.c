@@ -81,7 +81,7 @@ const ShmemCallbacks BufferManagerShmemCallbacks = {
  */
 #define MIN_BUFFER_PARTITIONS	4
 
-bool	shared_buffers_numa = false;
+bool		shared_buffers_numa = false;
 
 /*
  * Register shared memory area for the buffer pool.
@@ -89,7 +89,7 @@ bool	shared_buffers_numa = false;
 static void
 BufferManagerShmemRequest(void *arg)
 {
-	int		nparts;
+	int			nparts;
 
 	BufferPartitionsCalculate(NULL, &nparts, NULL);
 
@@ -144,12 +144,12 @@ static void
 BufferManagerShmemInit(void *arg)
 {
 	/*
-	 * Initialize the buffer partition registry first, before other parts
-	 * have a chance to touch the memory.
+	 * Initialize the buffer partition registry first, before other parts have
+	 * a chance to touch the memory.
 	 *
-	 * Also moves memory to different NUMA nodes (if enabled by a GUC).
-	 * Do this before the loop that initializes buffer headers etc. which
-	 * may fault some of the memory pages etc.
+	 * Also moves memory to different NUMA nodes (if enabled by a GUC). Do
+	 * this before the loop that initializes buffer headers etc. which may
+	 * fault some of the memory pages etc.
 	 */
 	BufferPartitionsInit();
 
@@ -295,21 +295,22 @@ BufferPartitionsInit(void)
 		}
 
 #ifdef USE_LIBNUMA
+
 		/*
 		 * Now try to locate buffers and buffer descriptors to the node (all
 		 * partitions for the node at once).
 		 */
 		if (shared_buffers_numa)
 		{
-			Size	numa_page_size = pg_numa_page_size();
+			Size		numa_page_size = pg_numa_page_size();
 
-			int		part_first,
-					part_last,
-					buff_first,
-					buff_last;
+			int			part_first,
+						part_last,
+						buff_first,
+						buff_last;
 
-			char   *startptr,
-				   *endptr;
+			char	   *startptr,
+					   *endptr;
 
 			/* first/last partition for this node */
 			part_first = (n * npartitions_per_node);
@@ -410,13 +411,13 @@ void
 BufferPartitionsCalculate(int *num_nodes, int *num_partitions,
 						  int *num_partitions_per_node)
 {
-	int		nnodes,
-			nparts,
-			nparts_per_node;
+	int			nnodes,
+				nparts,
+				nparts_per_node;
 
 #if USE_LIBNUMA
 	nnodes = numa_num_configured_nodes();
-	nparts_per_node = 1;	/* at least one partition per node */
+	nparts_per_node = 1;		/* at least one partition per node */
 
 	while ((nparts_per_node * nnodes) < MIN_BUFFER_PARTITIONS)
 		nparts_per_node++;

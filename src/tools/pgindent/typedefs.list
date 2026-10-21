@@ -357,6 +357,7 @@ BufferCacheOsPagesContext
 BufferCacheOsPagesRec
 BufferDesc
 BufferDescPadded
+BufferDropCallback
 BufferHeapTupleTableSlot
 BufferLockMode
 BufferLookupEnt
@@ -3527,6 +3528,7 @@ XactCallback
 XactCallbackItem
 XactEvent
 XactLockTableWaitInfo
+XactPinnedBlock
 XidBoundsViolation
 XidCacheStatus
 XidCommitStatus

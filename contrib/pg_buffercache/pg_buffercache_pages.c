@@ -1029,10 +1029,10 @@ pg_buffercache_partitions(PG_FUNCTION_ARGS)
 						   &first_buffer, &last_buffer);
 
 		ClockSweepPartitionGetInfo(i,
-								 &complete_passes, &next_victim_buffer,
-								 &buffer_total_allocs, &buffer_allocs,
-								 &buffer_total_req_allocs, &buffer_req_allocs,
-								 &weights);
+								   &complete_passes, &next_victim_buffer,
+								   &buffer_total_allocs, &buffer_allocs,
+								   &buffer_total_req_allocs, &buffer_req_allocs,
+								   &weights);
 
 		dweights = palloc_array(Datum, funcctx->max_calls);
 		for (int j = 0; j < funcctx->max_calls; j++)
