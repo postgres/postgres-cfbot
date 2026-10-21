@@ -134,13 +134,13 @@ typedef struct TableFunc
 	/* list of column default expressions */
 	List	   *coldefexprs pg_node_attr(query_jumble_ignore);
 	/* JSON_TABLE: list of column value expressions */
-	List	   *colvalexprs pg_node_attr(query_jumble_ignore);
+	List	   *colvalexprs;
 	/* JSON_TABLE: list of PASSING argument expressions */
 	List	   *passingvalexprs pg_node_attr(query_jumble_ignore);
 	/* nullability flag for each output column */
 	Bitmapset  *notnulls pg_node_attr(query_jumble_ignore);
 	/* JSON_TABLE plan */
-	Node	   *plan pg_node_attr(query_jumble_ignore);
+	Node	   *plan;
 	/* counts from 0; -1 if none specified */
 	int			ordinalitycol pg_node_attr(query_jumble_ignore);
 	/* token location, or -1 if unknown */
@@ -1846,8 +1846,11 @@ typedef struct JsonExpr
 
 	JsonExprOp	op;
 
-	char	   *column_name;	/* JSON_TABLE() column name or NULL if this is
-								 * not for a JSON_TABLE() */
+	/*
+	 * JSON_TABLE() column name or NULL if this is not for a JSON_TABLE().
+	 * Only jumbled for a column without PATH, see queryjumblefuncs.c.
+	 */
+	char	   *column_name pg_node_attr(custom_query_jumble);
 
 	/* jsonb-valued expression to query */
 	Node	   *formatted_expr;
@@ -1899,7 +1902,7 @@ typedef struct JsonTablePath
 	NodeTag		type;
 
 	Const	   *value;
-	char	   *name;
+	char	   *name pg_node_attr(query_jumble_ignore);
 } JsonTablePath;
 
 /*

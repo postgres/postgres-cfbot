@@ -79,6 +79,9 @@ static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
 static void _jumbleRangeTblEntry_eref(JumbleState *jstate,
 									  RangeTblEntry *rte,
 									  Alias *expr);
+static void _jumbleJsonExpr_column_name(JumbleState *jstate,
+										JsonExpr *expr,
+										char *column_name);
 
 /*
  * Given a possibly multi-statement source string, confine our attention to the
@@ -772,6 +775,24 @@ _jumbleRangeTblEntry_eref(JumbleState *jstate,
 	 * This includes only the table name, the list of column names is ignored.
 	 */
 	JUMBLE_STRING(aliasname);
+}
+
+/*
+ * Custom query jumble function for JsonExpr.column_name.
+ */
+static void
+_jumbleJsonExpr_column_name(JumbleState *jstate,
+							JsonExpr *expr,
+							char *column_name)
+{
+	/*
+	 * Like other column names, the name of a JSON_TABLE column is ignored.
+	 * But a column without PATH gets a path derived from its name, which
+	 * doesn't appear in the query text and so has no location.  Include the
+	 * name then, since the value of the path is not jumbled.
+	 */
+	if (column_name != NULL && exprLocation(expr->path_spec) < 0)
+		JUMBLE_STRING(column_name);
 }
 
 /*
