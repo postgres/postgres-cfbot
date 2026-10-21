@@ -416,13 +416,13 @@ extern int	GetAccessStrategyPinLimit(BufferAccessStrategy strategy);
 
 extern void FreeAccessStrategy(BufferAccessStrategy strategy);
 extern void ClockSweepPartitionGetInfo(int idx,
-									 uint32 *complete_passes,
-									 uint32 *next_victim_buffer,
-									 uint64 *buffer_total_allocs,
-									 uint32 *buffer_allocs,
-									 uint64 *buffer_total_req_allocs,
-									 uint32 *buffer_req_allocs,
-									 int **weights);
+									   uint32 *complete_passes,
+									   uint32 *next_victim_buffer,
+									   uint64 *buffer_total_allocs,
+									   uint32 *buffer_allocs,
+									   uint64 *buffer_total_req_allocs,
+									   uint32 *buffer_req_allocs,
+									   int **weights);
 extern void ClockSweepSetWeights(int partition, int *weights, int nweights);
 
 /* inline functions */

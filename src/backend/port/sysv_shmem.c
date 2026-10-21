@@ -619,11 +619,12 @@ CreateAnonymousSegment(Size *size)
 #endif
 
 #ifdef USE_LIBNUMA
+
 	/*
 	 * If requested, interleave the shared memory by setting a memory policy
 	 * before the mmap() call. This really matters only with MAP_POPULATE,
-	 * because without page faults the memory does not actually get placed
-	 * to the nodes. But without MAP_POPULATE it's virtually free.
+	 * because without page faults the memory does not actually get placed to
+	 * the nodes. But without MAP_POPULATE it's virtually free.
 	 */
 	if (shmem_interleave)
 		numa_set_interleave_mask(numa_all_nodes_ptr);
@@ -691,14 +692,15 @@ CreateAnonymousSegment(Size *size)
 	}
 
 #ifdef USE_LIBNUMA
+
 	/*
 	 * If set the policy to interleaving by numa_set_membind(), undo it now by
 	 * setting the policy to localalloc. With MAP_POPULATE, all the pages were
 	 * faulted and are now interleaved on the available nodes.
 	 *
-	 * To handle the case without MAP_POPULATE, apply the interleaving policy to
-	 * the shared memory segment allocated by mmap() before touching it in any
-	 * way, so that it gets placed on the correct node on first access.
+	 * To handle the case without MAP_POPULATE, apply the interleaving policy
+	 * to the shared memory segment allocated by mmap() before touching it in
+	 * any way, so that it gets placed on the correct node on first access.
 	 *
 	 * This matters especially with huge pages, where it's possible to run out
 	 * of huge pages on some nodes and then crash. By explicitly interleaving
