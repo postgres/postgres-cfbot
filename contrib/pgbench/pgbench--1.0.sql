@@ -211,6 +211,20 @@ RETURNS text
 AS 'MODULE_PATHNAME', 'pgbench_random_vector_gaussian_text'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
 
+CREATE FUNCTION random_unit_vector(
+    dim integer
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_unit_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_random_unit_vector(
+    dim integer
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_unit_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
 CREATE FUNCTION clustered_vector(
     dim integer,
     num_clusters integer,
@@ -356,3 +370,58 @@ CREATE FUNCTION pgbench_ldbc_flashmob_ts(
 RETURNS bigint
 AS 'MODULE_PATHNAME', 'pgbench_ldbc_flashmob_ts_sql'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE OR REPLACE FUNCTION compute_ground_truth(
+    items_table text,
+    query_vector text,
+    k integer,
+    metric text DEFAULT 'l2'
+)
+RETURNS integer[]
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    result integer[];
+    sql text;
+BEGIN
+    IF metric = 'l2' OR metric = '<->' THEN
+        sql := format('SELECT array_agg(id) FROM (SELECT id FROM %I ORDER BY embedding <-> %L::vector LIMIT %s) sub',
+                      items_table, query_vector, k);
+    ELSIF metric = 'cosine' OR metric = '<=>' THEN
+        sql := format('SELECT array_agg(id) FROM (SELECT id FROM %I ORDER BY embedding <=> %L::vector LIMIT %s) sub',
+                      items_table, query_vector, k);
+    ELSIF metric = 'ip' OR metric = '<#>' THEN
+        sql := format('SELECT array_agg(id) FROM (SELECT id FROM %I ORDER BY embedding <#> %L::vector LIMIT %s) sub',
+                      items_table, query_vector, k);
+    ELSE
+        sql := format('SELECT array_agg(id) FROM (SELECT id FROM %I ORDER BY pgbench.vector_distance(embedding::text, %L, %L) LIMIT %s) sub',
+                      items_table, query_vector, metric, k);
+    END IF;
+
+    BEGIN
+        EXECUTE 'SET LOCAL enable_indexscan = off';
+        EXECUTE 'SET LOCAL enable_bitmapscan = off';
+        EXECUTE sql INTO result;
+    EXCEPTION WHEN undefined_function OR undefined_object OR undefined_table THEN
+        sql := format('SELECT array_agg(id) FROM (SELECT id FROM %I ORDER BY pgbench.vector_distance(embedding::text, %L, %L) LIMIT %s) sub',
+                      items_table, query_vector, metric, k);
+        EXECUTE sql INTO result;
+    END;
+
+    RETURN result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pgbench_compute_ground_truth(
+    items_table text,
+    query_vector text,
+    k integer,
+    metric text DEFAULT 'l2'
+)
+RETURNS integer[]
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN compute_ground_truth(items_table, query_vector, k, metric);
+END;
+$$;

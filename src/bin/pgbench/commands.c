@@ -1226,8 +1226,28 @@ handle_cmd_record_recall(CState *st, Command *cmd, pg_time_usec_t *now)
 		return CSTATE_ABORTED;
 	}
 
+	if (cmd->varprefix != NULL && cmd->varprefix[0] != '\0')
+	{
+		char		varname[64];
+
+		snprintf(varname, sizeof(varname), "last_recall_%s", cmd->varprefix);
+		if (!putVariableValue(&st->variables, "record_recall", varname, &v_rec))
+		{
+			commandFailed(st, "record_recall", "assignment of named last_recall failed");
+			return CSTATE_ABORTED;
+		}
+	}
+
 	if (st->txn_recall_count < (int) lengthof(st->txn_recalls))
-		st->txn_recalls[st->txn_recall_count++] = recall_val;
+	{
+		int			idx = st->txn_recall_count++;
+
+		st->txn_recalls[idx] = recall_val;
+		if (cmd->varprefix != NULL && cmd->varprefix[0] != '\0')
+			strlcpy(st->txn_recall_names[idx], cmd->varprefix, sizeof(st->txn_recall_names[idx]));
+		else
+			st->txn_recall_names[idx][0] = '\0';
+	}
 
 	return CSTATE_END_COMMAND;
 }

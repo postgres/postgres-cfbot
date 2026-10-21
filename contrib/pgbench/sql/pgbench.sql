@@ -63,7 +63,8 @@ SELECT pgbench.array_generate(4, 7) AS const_arr,
 SELECT pgbench.setseed(42::bigint);
 SELECT round(pgbench.vector_distance(pgbench.random_vector(4, -1.0, 1.0, true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS rand_vec_norm_ok,
        round(pgbench.vector_distance(pgbench.random_vector_gaussian(4, 1.0, true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS gauss_vec_norm_ok,
-       round(pgbench.vector_distance(pgbench.random_vector(4, 'gaussian', true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS dist_vec_norm_ok;
+       round(pgbench.vector_distance(pgbench.random_vector(4, 'gaussian', true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS dist_vec_norm_ok,
+       round(pgbench.vector_distance(pgbench.random_unit_vector(4), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS unit_vec_norm_ok;
 SELECT pgbench.clustered_vector(4, 5, 0.0, 42, 2) = pgbench.clustered_vector(4, 5, 0.0, 42, 2) AS centroid_deterministic,
        round(pgbench.vector_distance(pgbench.clustered_vector(4, 5, 0.0, 42, 2), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS centroid_unit_norm;
 SELECT round(pgbench.vector_distance(

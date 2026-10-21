@@ -661,6 +661,134 @@ parseVectorDatasetSpec(const char *spec)
 }
 
 /*
+ * Parse a "--vector-base=[table:][offset:]<path.fvecs>" specification.
+ * Automatically registers dataset "base" (DATASET_FVECS) and registers
+ * a copy-dataset target for parallel COPY into table (defaults to "vecbench_items").
+ */
+void
+parseVectorBaseSpec(const char *spec)
+{
+	char	   *table = NULL;
+	char	   *filepath = NULL;
+	int64		offset = 1;		/* Default 1-based SQL primary key */
+	const char *colon;
+
+	if (spec == NULL || *spec == '\0')
+		pg_fatal("invalid --vector-base specification: empty string");
+
+	colon = strchr(spec, ':');
+	if (colon != NULL)
+	{
+		const char *second_colon = strchr(colon + 1, ':');
+
+		if (second_colon != NULL)
+		{
+			table = pnstrdup(spec, colon - spec);
+			offset = strtoint64(colon + 1, false, NULL);
+			filepath = pg_strdup(second_colon + 1);
+		}
+		else
+		{
+			char	   *part1 = pnstrdup(spec, colon - spec);
+
+			if (is_an_int(part1))
+			{
+				table = pg_strdup("vecbench_items");
+				offset = strtoint64(part1, false, NULL);
+			}
+			else
+			{
+				table = part1;
+				offset = 1;
+			}
+			filepath = pg_strdup(colon + 1);
+		}
+	}
+	else
+	{
+		table = pg_strdup("vecbench_items");
+		offset = 1;
+		filepath = pg_strdup(spec);
+	}
+
+	registerDatasetEx("base", DATASET_FVECS, false, filepath);
+	{
+		PgBenchDataset *ds = findDataset("base");
+
+		if (ds != NULL)
+			ds->id_offset = offset;
+	}
+	registerCopyDatasetSpec(psprintf("base:%s", table));
+
+	pg_free(table);
+	pg_free(filepath);
+}
+
+/*
+ * Parse a "--ground-truth-table=[table:][offset:]<path.ivecs>" specification.
+ * Automatically registers dataset "ground_truth" (DATASET_IVECS) and registers
+ * a copy-dataset target for parallel COPY into table (defaults to "vecbench_ground_truth").
+ */
+void
+parseGroundTruthTableSpec(const char *spec)
+{
+	char	   *table = NULL;
+	char	   *filepath = NULL;
+	int64		offset = 1;		/* Default 1-based SQL primary key / query ID */
+	const char *colon;
+
+	if (spec == NULL || *spec == '\0')
+		pg_fatal("invalid --ground-truth-table specification: empty string");
+
+	colon = strchr(spec, ':');
+	if (colon != NULL)
+	{
+		const char *second_colon = strchr(colon + 1, ':');
+
+		if (second_colon != NULL)
+		{
+			table = pnstrdup(spec, colon - spec);
+			offset = strtoint64(colon + 1, false, NULL);
+			filepath = pg_strdup(second_colon + 1);
+		}
+		else
+		{
+			char	   *part1 = pnstrdup(spec, colon - spec);
+
+			if (is_an_int(part1))
+			{
+				table = pg_strdup("vecbench_ground_truth");
+				offset = strtoint64(part1, false, NULL);
+			}
+			else
+			{
+				table = part1;
+				offset = 1;
+			}
+			filepath = pg_strdup(colon + 1);
+		}
+	}
+	else
+	{
+		table = pg_strdup("vecbench_ground_truth");
+		offset = 1;
+		filepath = pg_strdup(spec);
+	}
+
+	registerDatasetEx("ground_truth", DATASET_IVECS, false, filepath);
+	{
+		PgBenchDataset *ds = findDataset("ground_truth");
+
+		if (ds != NULL)
+			ds->id_offset = offset;
+	}
+	registerCopyDatasetSpec(psprintf("ground_truth:%s", table));
+
+	pg_free(table);
+	pg_free(filepath);
+}
+
+/*
  * Register a "--copy-dataset=<dataset>:<table>[(cols)]" specification.
  */
 void
@@ -959,13 +1087,14 @@ datasetGetRow(PgBenchDataset *ds, int64 row_idx, int col_idx,
 				const uint8 *rec = ds->raw_data + (size_t) row_idx * ds->record_stride;
 				const int32 *ints = (const int32 *) (rec + sizeof(int32));
 				PgBenchValue *elems = pg_malloc_array(PgBenchValue, ds->dim);
+				int64		offset = (col_idx > 0) ? (int64) col_idx : ds->id_offset;
 
 				for (int i = 0; i < ds->dim; i++)
 				{
 					int32		v;
 
 					memcpy(&v, &ints[i], sizeof(int32));
-					setIntValue(&elems[i], (int64) v);
+					setIntValue(&elems[i], (int64) v + offset);
 				}
 
 				retval->type = PGBT_ARRAY;
@@ -1425,7 +1554,7 @@ copyDatasetSlice(PGconn *con, PgBenchDataset *ds, const char *table_spec,
 
 			if (target_cols >= 2)
 			{
-				appendPQExpBuffer(&chunk, INT64_FORMAT "\t%s", r, formatted);
+				appendPQExpBuffer(&chunk, INT64_FORMAT "\t%s", r + ds->id_offset, formatted);
 				for (int c = 2; c < target_cols; c++)
 					appendPQExpBufferStr(&chunk, "\t\\N");
 				appendPQExpBufferChar(&chunk, '\n');

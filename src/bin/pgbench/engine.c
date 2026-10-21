@@ -2222,10 +2222,23 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	accumStats(&thread->stats, tx_skipped, latency, lag, st->estatus, st->tries, has_schedule);
 	if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
+		bool		has_unnamed = false;
+
 		if (has_schedule)
 			addToLagStats(&thread->stats, lag, ontime_threshold_ms * 1000.0);
+
 		for (int r = 0; r < st->txn_recall_count; r++)
-			addToRecallStats(&thread->stats, st->txn_recalls[r]);
+		{
+			if (st->txn_recall_names[r][0] != '\0')
+				addToNamedRecallStats(&thread->stats, st->txn_recall_names[r], st->txn_recalls[r]);
+			else
+			{
+				addToRecallStats(&thread->stats, st->txn_recalls[r]);
+				has_unnamed = true;
+			}
+		}
+		if (!has_unnamed && st->txn_recall_count > 0)
+			addToRecallStats(&thread->stats, st->txn_recalls[0]);
 		thread->stats.validation_passed += st->txn_validation_passed;
 		thread->stats.validation_failed += st->txn_validation_failed;
 		if (st->has_keying_time)
@@ -2251,12 +2264,27 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 				   st->estatus, st->tries, has_schedule);
 		if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 		{
+			bool		has_unnamed_s = false;
+
 			if (has_schedule)
 				addToLagStats(&sql_script[st->use_file].stats, lag,
 							  ontime_threshold_ms * 1000.0);
 			for (int r = 0; r < st->txn_recall_count; r++)
+			{
+				if (st->txn_recall_names[r][0] != '\0')
+					addToNamedRecallStats(&sql_script[st->use_file].stats,
+										  st->txn_recall_names[r],
+										  st->txn_recalls[r]);
+				else
+				{
+					addToRecallStats(&sql_script[st->use_file].stats,
+									 st->txn_recalls[r]);
+					has_unnamed_s = true;
+				}
+			}
+			if (!has_unnamed_s && st->txn_recall_count > 0)
 				addToRecallStats(&sql_script[st->use_file].stats,
-								 st->txn_recalls[r]);
+								 st->txn_recalls[0]);
 			sql_script[st->use_file].stats.validation_passed += st->txn_validation_passed;
 			sql_script[st->use_file].stats.validation_failed += st->txn_validation_failed;
 			if (st->has_keying_time)
@@ -2267,6 +2295,8 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 								 (double) st->txn_think_time);
 		}
 	}
+
+	st->txn_recall_count = 0;
 }
 
 
@@ -2880,6 +2910,15 @@ printResults(StatsData *total,
 							}
 						}
 					}
+					if (!found && rule->named_metric != NULL &&
+						(rule->metric == SLA_METRIC_RECALL_AVG || rule->metric == SLA_METRIC_RECALL_PCT))
+					{
+						if (findNamedRecallStats(total, rule->named_metric) != NULL)
+						{
+							mergeStats(&matched, total);
+							found = true;
+						}
+					}
 				}
 
 				switch (rule->metric)
@@ -2954,6 +2993,29 @@ printResults(StatsData *total,
 						break;
 
 					case SLA_METRIC_RECALL_AVG:
+						if (rule->named_metric != NULL && rule->named_metric[0] != '\0')
+						{
+							const NamedRecallStats *ns = findNamedRecallStats(&matched, rule->named_metric);
+
+							if (ns != NULL)
+							{
+								rule->evaluated = (found && ns->stats.count > 0);
+								rule->actual_val = (rule->evaluated && ns->stats.count > 0) ?
+									(ns->stats.sum / ns->stats.count) : 0.0;
+								rule->passed = rule->evaluated &&
+									((rule->op == SLA_OP_GE) ?
+									 (rule->actual_val >= rule->threshold_val) :
+									 (rule->actual_val <= rule->threshold_val));
+								printf(" - SLA %s:%s:recall %s %.4f: actual = %.4f [%s]\n",
+									   rule->target,
+									   rule->named_metric,
+									   op_str,
+									   rule->threshold_val,
+									   rule->actual_val,
+									   rule->passed ? "PASS" : "FAIL");
+								break;
+							}
+						}
 						rule->evaluated = (found && matched.recall.count > 0);
 						rule->actual_val = rule->evaluated ?
 							(matched.recall.sum / matched.recall.count) : 0.0;
@@ -2970,6 +3032,30 @@ printResults(StatsData *total,
 						break;
 
 					case SLA_METRIC_RECALL_PCT:
+						if (rule->named_metric != NULL && rule->named_metric[0] != '\0')
+						{
+							const NamedRecallStats *ns = findNamedRecallStats(&matched, rule->named_metric);
+
+							if (ns != NULL)
+							{
+								rule->evaluated = (found && ns->stats.count > 0);
+								rule->actual_val = rule->evaluated ?
+									getNamedRecallPercentile(&matched, rule->named_metric, rule->percentile) : 0.0;
+								rule->passed = rule->evaluated &&
+									((rule->op == SLA_OP_GE) ?
+									 (rule->actual_val >= rule->threshold_val) :
+									 (rule->actual_val <= rule->threshold_val));
+								printf(" - SLA %s:%s:recall_p%g %s %.4f: actual = %.4f [%s]\n",
+									   rule->target,
+									   rule->named_metric,
+									   rule->percentile,
+									   op_str,
+									   rule->threshold_val,
+									   rule->actual_val,
+									   rule->passed ? "PASS" : "FAIL");
+								break;
+							}
+						}
 						rule->evaluated = (found && matched.recall.count > 0);
 						rule->actual_val = rule->evaluated ?
 							getRecallPercentile(&matched, rule->percentile) : 0.0;
@@ -3025,9 +3111,7 @@ printResults(StatsData *total,
 
 					case SLA_METRIC_VALIDATION_FAILURES:
 						{
-							int64		val_tot = matched.validation_passed + matched.validation_failed;
-
-							rule->evaluated = (found && val_tot > 0);
+							rule->evaluated = found;
 							rule->actual_val = (double) matched.validation_failed;
 							rule->passed = rule->evaluated &&
 								((rule->op == SLA_OP_LE) ?
@@ -3120,8 +3204,93 @@ printResults(StatsData *total,
 			fprintf(jfp, "      \"max\": %.4f,\n",
 					total->recall.count > 0 ? total->recall.max : 0.0);
 			fprintf(jfp, "      \"p5\": %.4f,\n", getRecallPercentile(total, 5.0));
-			fprintf(jfp, "      \"p50\": %.4f\n", getRecallPercentile(total, 50.0));
-			fprintf(jfp, "    },\n");
+			fprintf(jfp, "      \"p50\": %.4f,\n", getRecallPercentile(total, 50.0));
+			fprintf(jfp, "      \"distribution\": {\n");
+			for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
+			{
+				if (d == RECALL_DIST10_BUCKETS - 1)
+					fprintf(jfp, "        \"0.%d-1.0\": " INT64_FORMAT "\n", d, total->recall_dist10[d]);
+				else
+					fprintf(jfp, "        \"0.%d-0.%d\": " INT64_FORMAT ",\n", d, d + 1, total->recall_dist10[d]);
+			}
+			fprintf(jfp, "      }\n");
+			if (total->recall.count >= 4 && total->q1_recall_count > 0 && total->q4_recall_count > 0)
+			{
+				double		q1_avg = total->q1_recall_sum / total->q1_recall_count;
+				double		q4_sum = 0.0;
+				double		q4_avg;
+				double		delta;
+				double		deg_pct;
+
+				for (int j = 0; j < total->q4_recall_count; j++)
+					q4_sum += total->q4_recall_ring[j];
+				q4_avg = q4_sum / total->q4_recall_count;
+				delta = q4_avg - q1_avg;
+				deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
+
+				fprintf(jfp, ",\n      \"aging_degradation\": {\n");
+				fprintf(jfp, "        \"initial_recall\": %.4f,\n", q1_avg);
+				fprintf(jfp, "        \"mature_recall\": %.4f,\n", q4_avg);
+				fprintf(jfp, "        \"delta\": %.4f,\n", delta);
+				fprintf(jfp, "        \"degradation_pct\": %.4f\n", deg_pct);
+				fprintf(jfp, "      }\n");
+			}
+			fprintf(jfp, "    }");
+			if (total->num_named_recalls > 0)
+			{
+				fprintf(jfp, ",\n    \"named_recall\": {\n");
+				for (int i = 0; i < total->num_named_recalls; i++)
+				{
+					const NamedRecallStats *ns = &total->named_recalls[i];
+					double		avg = ns->stats.count > 0 ? ns->stats.sum / ns->stats.count : 0.0;
+					double		var = ns->stats.count > 0 ? (ns->stats.sum2 / ns->stats.count) - (avg * avg) : 0.0;
+					double		stddev = (var > 0.0) ? sqrt(var) : 0.0;
+
+					fprintf(jfp, "      \"%s\": {\n", ns->name);
+					fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", ns->stats.count);
+					fprintf(jfp, "        \"avg\": %.4f,\n", avg);
+					fprintf(jfp, "        \"stddev\": %.4f,\n", stddev);
+					fprintf(jfp, "        \"min\": %.4f,\n", ns->stats.count > 0 ? ns->stats.min : 0.0);
+					fprintf(jfp, "        \"max\": %.4f,\n", ns->stats.count > 0 ? ns->stats.max : 0.0);
+					fprintf(jfp, "        \"p5\": %.4f,\n", getNamedRecallPercentile(total, ns->name, 5.0));
+					fprintf(jfp, "        \"p50\": %.4f,\n", getNamedRecallPercentile(total, ns->name, 50.0));
+					fprintf(jfp, "        \"distribution\": {\n");
+					for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
+					{
+						if (d == RECALL_DIST10_BUCKETS - 1)
+							fprintf(jfp, "          \"0.%d-1.0\": " INT64_FORMAT "\n", d, ns->dist10[d]);
+						else
+							fprintf(jfp, "          \"0.%d-0.%d\": " INT64_FORMAT ",\n", d, d + 1, ns->dist10[d]);
+					}
+					fprintf(jfp, "        }");
+					if (ns->stats.count >= 4 && ns->q1_count > 0 && ns->q4_count > 0)
+					{
+						double		q1_avg = ns->q1_sum / ns->q1_count;
+						double		q4_sum = 0.0;
+						double		q4_avg;
+						double		delta;
+						double		deg_pct;
+
+						for (int j = 0; j < ns->q4_count; j++)
+							q4_sum += ns->q4_ring[j];
+						q4_avg = q4_sum / ns->q4_count;
+						delta = q4_avg - q1_avg;
+						deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
+
+						fprintf(jfp, ",\n        \"aging_degradation\": {\n");
+						fprintf(jfp, "          \"initial_recall\": %.4f,\n", q1_avg);
+						fprintf(jfp, "          \"mature_recall\": %.4f,\n", q4_avg);
+						fprintf(jfp, "          \"delta\": %.4f,\n", delta);
+						fprintf(jfp, "          \"degradation_pct\": %.4f\n", deg_pct);
+						fprintf(jfp, "        }\n");
+					}
+					else
+						fprintf(jfp, "\n");
+					fprintf(jfp, "      }%s\n", (i + 1 < total->num_named_recalls) ? "," : "");
+				}
+				fprintf(jfp, "    }");
+			}
+			fprintf(jfp, ",\n");
 			fprintf(jfp, "    \"schedule_lag_ms\": {\n");
 			fprintf(jfp, "      \"avg\": %.3f,\n",
 					total->lag.count > 0 ? 0.001 * total->lag.sum / total->lag.count : 0.0);
@@ -3220,6 +3389,12 @@ printResults(StatsData *total,
 				fprintf(jfp, "      \"target\": ");
 				fprintJsonString(jfp, rule->target);
 				fprintf(jfp, ",\n");
+				if (rule->named_metric != NULL)
+				{
+					fprintf(jfp, "      \"named_metric\": ");
+					fprintJsonString(jfp, rule->named_metric);
+					fprintf(jfp, ",\n");
+				}
 				fprintf(jfp, "      \"percentile\": %g,\n", rule->percentile);
 				fprintf(jfp, "      \"threshold_ms\": %.3f,\n", 0.001 * rule->threshold_usec);
 				fprintf(jfp, "      \"actual_ms\": %.3f,\n", 0.001 * rule->actual_usec);

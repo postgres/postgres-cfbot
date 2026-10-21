@@ -11,7 +11,16 @@ ALTER TABLE pgbench_vec_items
 CREATE INDEX pgbench_vec_items_category_idx
     ON pgbench_vec_items (category);
 
+CREATE INDEX pgbench_vec_items_price_idx
+    ON pgbench_vec_items (price);
+
+CREATE INDEX pgbench_vec_items_active_idx
+    ON pgbench_vec_items (is_active);
+
 CREATE INDEX pgbench_vec_items_tags_gin_idx
     ON pgbench_vec_items USING gin (tags);
+
+CREATE INDEX pgbench_vec_items_metadata_gin_idx
+    ON pgbench_vec_items USING gin (metadata);
 
 ANALYZE pgbench_vec_items;

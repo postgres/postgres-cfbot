@@ -161,6 +161,7 @@ typedef enum SlaOpType
 typedef struct SlaRule
 {
 	char		   *target;			/* script name/substring, group name, or "total" */
+	char		   *named_metric;	/* optional named recall metric (e.g. "r10", "r1") */
 	SlaMetricType	metric;			/* metric type */
 	SlaOpType		op;				/* comparison operator */
 	double			percentile;		/* e.g. 50.0, 90.0, 95.0, 99.0, 99.9 */

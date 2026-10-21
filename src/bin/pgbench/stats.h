@@ -37,6 +37,24 @@ typedef struct SimpleStats
  */
 typedef int64 pg_time_usec_t;
 
+#define RECALL_HIST_BUCKETS 101
+#define RECALL_DIST10_BUCKETS 10
+#define MAX_NAMED_RECALL_METRICS 8
+#define AGING_WINDOW_SAMPLES 32
+
+typedef struct NamedRecallStats
+{
+	char		name[32];
+	SimpleStats stats;
+	int			q1_count;
+	double		q1_sum;
+	int			q4_count;
+	int			q4_head;
+	double		q4_ring[AGING_WINDOW_SAMPLES];
+	int64		buckets[RECALL_HIST_BUCKETS];
+	int64		dist10[RECALL_DIST10_BUCKETS];
+} NamedRecallStats;
+
 /*
  * Data structure to hold various statistics: per-thread and per-script stats
  * are maintained and merged together.
@@ -129,8 +147,15 @@ typedef struct StatsData
 	int64		lag_hist_buckets[HDR_TOTAL_BUCKETS];
 	int64		scheduled_count;
 	int64		ontime_count;
-#define RECALL_HIST_BUCKETS 101
 	int64		recall_buckets[RECALL_HIST_BUCKETS];
+	int64		recall_dist10[RECALL_DIST10_BUCKETS];
+	int			q1_recall_count;
+	double		q1_recall_sum;
+	int			q4_recall_count;
+	int			q4_recall_head;
+	double		q4_recall_ring[AGING_WINDOW_SAMPLES];
+	int			num_named_recalls;
+	NamedRecallStats named_recalls[MAX_NAMED_RECALL_METRICS];
 	int64		validation_passed;
 	int64		validation_failed;
 } StatsData;
@@ -185,7 +210,10 @@ extern void addToLagStats(StatsData *sd, double lag_usec, double ontime_thresh_u
 extern double getLagPercentile(const StatsData *stats, double pct);
 extern void printLagPercentiles(const char *prefix, const StatsData *stats);
 extern void addToRecallStats(StatsData *sd, double recall_val);
+extern void addToNamedRecallStats(StatsData *sd, const char *name, double recall_val);
+extern const NamedRecallStats *findNamedRecallStats(const StatsData *stats, const char *name);
 extern double getRecallPercentile(const StatsData *stats, double pct);
+extern double getNamedRecallPercentile(const StatsData *stats, const char *name, double pct);
 extern void printRecallStats(const char *prefix, const StatsData *stats);
 extern void printValidationStats(const char *prefix, const StatsData *stats);
 

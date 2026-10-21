@@ -49,6 +49,7 @@ typedef struct PgBenchDataset
 	bool		is_mmapped;		/* True if backed by mmap(), false if pg_malloc */
 	int64		total_rows;		/* Number of rows/vectors in dataset */
 	int			dim;			/* Dimension (for FVECS/BVECS/IVECS) or column count */
+	int64		id_offset;		/* ID / rank offset (e.g. 1 for 1-based SQL primary keys) */
 	size_t		record_stride;	/* Fixed byte stride for FVECS/BVECS/IVECS, 0 for CSV/TSV */
 	uint64	   *row_offsets;	/* Byte offsets of line starts for CSV/TSV (total_rows + 1) */
 	uint64		cursor;			/* Lock-free global cursor for dataset_next_id / \dataset_bind */
@@ -62,6 +63,8 @@ extern void registerDatasetEx(const char *name, DatasetFormat format,
 							  bool force_header, const char *filepath);
 extern void parseDatasetSpec(const char *spec);
 extern void parseVectorDatasetSpec(const char *spec);
+extern void parseVectorBaseSpec(const char *spec);
+extern void parseGroundTruthTableSpec(const char *spec);
 extern void registerCopyDatasetSpec(const char *spec);
 extern void runRegisteredCopyDatasets(PGconn *con);
 extern void freeAllDatasets(void);

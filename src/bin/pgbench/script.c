@@ -3664,35 +3664,74 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 	}
 	else if (my_command->meta == META_RECORD_RECALL)
 	{
-		const char *v1;
-		const char *v2;
+		const char *metric_name = NULL;
+		int			arg_offset = 1;
 
 		if (my_command->argc < 2)
 			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
-						 "\\record_recall requires <expr> or <retrieved_var> <truth_var> [<k_expr>]",
+						 "\\record_recall requires [[name=]<name>] <expr> or [[name=]<name>] <retrieved_var> <truth_var> [<k_expr>]",
 						 NULL, -1);
 
-		v1 = (my_command->argc >= 3 && my_command->argv[1][0] == ':') ?
-			my_command->argv[1] + 1 : (my_command->argc >= 3 ? my_command->argv[1] : "");
-		v2 = (my_command->argc >= 3 && my_command->argv[2][0] == ':') ?
-			my_command->argv[2] + 1 : (my_command->argc >= 3 ? my_command->argv[2] : "");
-
-		if (my_command->argc >= 3 && *v1 != '\0' && *v2 != '\0' &&
-			valid_variable_name(v1) && valid_variable_name(v2))
+		if (strncmp(my_command->argv[1], "name=", 5) == 0)
 		{
-			my_command->col_target = pg_strdup("VARS");
-			if (my_command->argc >= 4)
+			metric_name = my_command->argv[1] + 5;
+			arg_offset = 2;
+		}
+		else if (my_command->argc >= 5 &&
+				 valid_variable_name(my_command->argv[1]) &&
+				 valid_variable_name(my_command->argv[2][0] == ':' ? my_command->argv[2] + 1 : my_command->argv[2]) &&
+				 valid_variable_name(my_command->argv[3][0] == ':' ? my_command->argv[3] + 1 : my_command->argv[3]))
+		{
+			/* \record_recall <name> <ret_var> <gt_var> [<k_expr>] */
+			metric_name = my_command->argv[1];
+			arg_offset = 2;
+		}
+		else if (my_command->argc >= 3 &&
+				 valid_variable_name(my_command->argv[1]) &&
+				 !valid_variable_name(my_command->argv[2][0] == ':' ? my_command->argv[2] + 1 : my_command->argv[2]))
+		{
+			/* \record_recall <name> <expr> */
+			metric_name = my_command->argv[1];
+			arg_offset = 2;
+		}
+
+		if (metric_name != NULL && *metric_name != '\0')
+			my_command->varprefix = pg_strdup(metric_name);
+
+		if (arg_offset >= my_command->argc)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "\\record_recall: missing expression or variable pair",
+						 NULL, -1);
+
+		{
+			int			rem_argc = my_command->argc - arg_offset;
+			const char *v1 = (rem_argc >= 2 && my_command->argv[arg_offset][0] == ':') ?
+				my_command->argv[arg_offset] + 1 : (rem_argc >= 2 ? my_command->argv[arg_offset] : "");
+			const char *v2 = (rem_argc >= 2 && my_command->argv[arg_offset + 1][0] == ':') ?
+				my_command->argv[arg_offset + 1] + 1 : (rem_argc >= 2 ? my_command->argv[arg_offset + 1] : "");
+
+			if (rem_argc >= 2 && *v1 != '\0' && *v2 != '\0' &&
+				valid_variable_name(v1) && valid_variable_name(v2))
+			{
+				my_command->col_target = pg_strdup("VARS");
+				if (arg_offset > 1)
+				{
+					my_command->argv[1] = my_command->argv[arg_offset];
+					my_command->argv[2] = my_command->argv[arg_offset + 1];
+				}
+				if (rem_argc >= 3)
+				{
+					my_command->expr = parse_sub_expr(
+						my_command->first_line + (offsets[arg_offset + 2] - start_offset),
+						source, lineno, my_command->argv[0]);
+				}
+			}
+			else
 			{
 				my_command->expr = parse_sub_expr(
-					my_command->first_line + (offsets[3] - start_offset),
+					my_command->first_line + (offsets[arg_offset] - start_offset),
 					source, lineno, my_command->argv[0]);
 			}
-		}
-		else
-		{
-			my_command->expr = parse_sub_expr(
-				my_command->first_line + (offsets[1] - start_offset),
-				source, lineno, my_command->argv[0]);
 		}
 	}
 	else if (my_command->meta == META_VALIDATE_RESULT)

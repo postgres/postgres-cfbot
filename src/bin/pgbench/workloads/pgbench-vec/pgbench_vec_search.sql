@@ -25,4 +25,4 @@ SELECT id
  LIMIT :k
 \gset_col ground_truth
 
-\record_recall retrieved ground_truth :k
+\record_recall name=r_unfiltered retrieved ground_truth :k

@@ -491,6 +491,9 @@ static const struct
 		"dataset_next_id", PGBENCH_NARGS_1_TO_2, PGBENCH_DATASET_NEXT_ID
 	},
 	{
+		"vec_next_id", PGBENCH_NARGS_1_TO_2, PGBENCH_DATASET_NEXT_ID
+	},
+	{
 		"get_watermark", PGBENCH_NARGS_0_TO_1, PGBENCH_GET_WATERMARK
 	},
 	{

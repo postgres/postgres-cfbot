@@ -782,6 +782,24 @@ pgbench_random_vector_gaussian_text(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(result);
 }
 
+PG_FUNCTION_INFO_V1(pgbench_random_unit_vector_text);
+Datum
+pgbench_random_unit_vector_text(PG_FUNCTION_ARGS)
+{
+	int32		dim = PG_GETARG_INT32(0);
+	float	   *vec;
+	text	   *result;
+
+	check_vector_dim(dim);
+	initialize_prng();
+	vec = (float *) palloc(sizeof(float) * (Size) dim);
+	pgbench_random_vector_gaussian(&pgbench_prng_state, dim, 1.0, true, vec);
+	result = format_float_vector_to_text(vec, dim);
+	pfree(vec);
+
+	PG_RETURN_TEXT_P(result);
+}
+
 PG_FUNCTION_INFO_V1(pgbench_clustered_vector_text);
 Datum
 pgbench_clustered_vector_text(PG_FUNCTION_ARGS)

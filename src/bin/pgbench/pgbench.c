@@ -341,6 +341,7 @@ parseSlaSpec(const char *spec)
 	char	   *lhs;
 	const char *rhs;
 	char	   *target = NULL;
+	char	   *named_metric = NULL;
 	const char *metric_str = NULL;
 	char	   *endp = NULL;
 	double		val;
@@ -371,12 +372,22 @@ parseSlaSpec(const char *spec)
 	lhs = pnstrdup(spec, op_pos - spec);
 	rhs = op_pos + 2;
 
-	/* Split lhs into target and metric_str, handling compound metrics with ':' */
-	if (pg_strncasecmp(lhs, "schedule_lag:p", 14) == 0 ||
-		pg_strncasecmp(lhs, "recall:p", 8) == 0)
+	/* Split lhs into target, named_metric, and metric_str, handling compound metrics with ':' */
+	if (pg_strncasecmp(lhs, "schedule_lag:p", 14) == 0)
 	{
 		target = pg_strdup("total");
 		metric_str = lhs;
+	}
+	else if (pg_strncasecmp(lhs, "recall:p", 8) == 0)
+	{
+		target = pg_strdup("total");
+		metric_str = lhs;
+	}
+	else if (pg_strncasecmp(lhs, "recall:", 7) == 0)
+	{
+		target = pg_strdup("total");
+		named_metric = pg_strdup(lhs + 7);
+		metric_str = "recall";
 	}
 	else
 	{
@@ -390,10 +401,15 @@ parseSlaSpec(const char *spec)
 				lag_pos = p;
 				break;
 			}
-			if (pg_strncasecmp(p, ":recall:p", 9) == 0)
+			if (p[0] == ':' && pg_strncasecmp(p + 1, "recall", 6) == 0)
 			{
-				rec_pos = p;
-				break;
+				char next = p[7];
+
+				if (next == '\0' || next == '_' || next == ':')
+				{
+					rec_pos = p;
+					break;
+				}
 			}
 		}
 
@@ -404,8 +420,56 @@ parseSlaSpec(const char *spec)
 		}
 		else if (rec_pos != NULL)
 		{
-			target = pnstrdup(lhs, rec_pos - lhs);
+			char	   *before = pnstrdup(lhs, rec_pos - lhs);
+			char	   *last_c = strrchr(before, ':');
+
 			metric_str = rec_pos + 1;
+
+			if (last_c != NULL)
+			{
+				if (pg_strncasecmp(before, "group:", 6) == 0)
+				{
+					char	   *second_c = strchr(before + 6, ':');
+
+					if (second_c != NULL && *(second_c + 1) != '\0')
+					{
+						target = pnstrdup(before, second_c - before);
+						named_metric = pg_strdup(second_c + 1);
+					}
+					else
+					{
+						target = pg_strdup(before);
+					}
+				}
+				else if (pg_strncasecmp(before, "script:", 7) == 0)
+				{
+					char	   *second_c = strchr(before + 7, ':');
+
+					if (second_c != NULL && *(second_c + 1) != '\0')
+					{
+						target = pnstrdup(before, second_c - before);
+						named_metric = pg_strdup(second_c + 1);
+					}
+					else
+					{
+						target = pg_strdup(before);
+					}
+				}
+				else
+				{
+					target = pnstrdup(before, last_c - before);
+					named_metric = pg_strdup(last_c + 1);
+				}
+			}
+			else
+			{
+				target = pg_strdup(before);
+				if (pg_strcasecmp(before, "total") != 0 &&
+					pg_strcasecmp(before, "all") != 0 &&
+					strcmp(before, "*") != 0)
+					named_metric = pg_strdup(before);
+			}
+			pg_free(before);
 		}
 		else
 		{
@@ -434,6 +498,8 @@ parseSlaSpec(const char *spec)
 	if (errno != 0 || endp == rhs)
 	{
 		pg_free(target);
+		if (named_metric != NULL)
+			pg_free(named_metric);
 		pg_free(lhs);
 		pg_fatal("invalid threshold value in --sla specification: \"%s\"", spec);
 	}
@@ -441,6 +507,7 @@ parseSlaSpec(const char *spec)
 	rule = &sla_rules[num_slas];
 	memset(rule, 0, sizeof(SlaRule));
 	rule->target = target;
+	rule->named_metric = named_metric;
 	rule->op = op;
 
 	if (pg_strncasecmp(metric_str, "schedule_lag:p", 14) == 0)
@@ -698,6 +765,8 @@ main(int argc, char **argv)
 		{"max-concurrent-sessions", required_argument, NULL, 28},
 		{"ontime-threshold", required_argument, NULL, 29},
 		{"replay", required_argument, NULL, 30},
+		{"vector-base", required_argument, NULL, 31},
+		{"ground-truth-table", required_argument, NULL, 32},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -1136,6 +1205,14 @@ main(int argc, char **argv)
 					parseDatasetSpec(ds_spec);
 					pg_free(ds_spec);
 				}
+				break;
+			case 31:			/* vector-base */
+				benchmarking_option_set = true;
+				parseVectorBaseSpec(optarg);
+				break;
+			case 32:			/* ground-truth-table */
+				benchmarking_option_set = true;
+				parseGroundTruthTableSpec(optarg);
 				break;
 			default:
 				/* getopt_long already emitted a complaint */

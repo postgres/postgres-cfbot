@@ -115,6 +115,14 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	sd->scheduled_count = 0;
 	sd->ontime_count = 0;
 	memset(sd->recall_buckets, 0, sizeof(sd->recall_buckets));
+	memset(sd->recall_dist10, 0, sizeof(sd->recall_dist10));
+	sd->q1_recall_count = 0;
+	sd->q1_recall_sum = 0.0;
+	sd->q4_recall_count = 0;
+	sd->q4_recall_head = 0;
+	memset(sd->q4_recall_ring, 0, sizeof(sd->q4_recall_ring));
+	sd->num_named_recalls = 0;
+	memset(sd->named_recalls, 0, sizeof(sd->named_recalls));
 	sd->validation_passed = 0;
 	sd->validation_failed = 0;
 }
@@ -203,6 +211,55 @@ mergeStats(StatsData *acc, const StatsData *src)
 	acc->ontime_count += src->ontime_count;
 	for (int b = 0; b < RECALL_HIST_BUCKETS; b++)
 		acc->recall_buckets[b] += src->recall_buckets[b];
+	for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
+		acc->recall_dist10[d] += src->recall_dist10[d];
+	acc->q1_recall_sum += src->q1_recall_sum;
+	acc->q1_recall_count += src->q1_recall_count;
+	for (int k = 0; k < src->q4_recall_count; k++)
+	{
+		acc->q4_recall_ring[acc->q4_recall_head] = src->q4_recall_ring[k];
+		acc->q4_recall_head = (acc->q4_recall_head + 1) % AGING_WINDOW_SAMPLES;
+		if (acc->q4_recall_count < AGING_WINDOW_SAMPLES)
+			acc->q4_recall_count++;
+	}
+	for (int i = 0; i < src->num_named_recalls; i++)
+	{
+		const NamedRecallStats *s = &src->named_recalls[i];
+		NamedRecallStats *dst = NULL;
+
+		for (int j = 0; j < acc->num_named_recalls; j++)
+		{
+			if (strcmp(acc->named_recalls[j].name, s->name) == 0)
+			{
+				dst = &acc->named_recalls[j];
+				break;
+			}
+		}
+		if (dst == NULL && acc->num_named_recalls < MAX_NAMED_RECALL_METRICS)
+		{
+			dst = &acc->named_recalls[acc->num_named_recalls++];
+			memset(dst, 0, sizeof(*dst));
+			strlcpy(dst->name, s->name, sizeof(dst->name));
+			initSimpleStats(&dst->stats);
+		}
+		if (dst != NULL)
+		{
+			mergeSimpleStats(&dst->stats, &s->stats);
+			dst->q1_sum += s->q1_sum;
+			dst->q1_count += s->q1_count;
+			for (int k = 0; k < s->q4_count; k++)
+			{
+				dst->q4_ring[dst->q4_head] = s->q4_ring[k];
+				dst->q4_head = (dst->q4_head + 1) % AGING_WINDOW_SAMPLES;
+				if (dst->q4_count < AGING_WINDOW_SAMPLES)
+					dst->q4_count++;
+			}
+			for (int b = 0; b < RECALL_HIST_BUCKETS; b++)
+				dst->buckets[b] += s->buckets[b];
+			for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
+				dst->dist10[d] += s->dist10[d];
+		}
+	}
 	acc->validation_passed += src->validation_passed;
 	acc->validation_failed += src->validation_failed;
 }
@@ -403,6 +460,7 @@ addToRecallStats(StatsData *sd, double recall_val)
 {
 	double		clamped = recall_val;
 	int			b;
+	int			d;
 
 	if (clamped < 0.0)
 		clamped = 0.0;
@@ -416,6 +474,134 @@ addToRecallStats(StatsData *sd, double recall_val)
 	if (b >= RECALL_HIST_BUCKETS)
 		b = RECALL_HIST_BUCKETS - 1;
 	sd->recall_buckets[b]++;
+
+	d = (int) (clamped * 10.0);
+	if (d >= RECALL_DIST10_BUCKETS)
+		d = RECALL_DIST10_BUCKETS - 1;
+	if (d < 0)
+		d = 0;
+	sd->recall_dist10[d]++;
+
+	if (sd->q1_recall_count < AGING_WINDOW_SAMPLES)
+	{
+		sd->q1_recall_sum += clamped;
+		sd->q1_recall_count++;
+	}
+	sd->q4_recall_ring[sd->q4_recall_head] = clamped;
+	sd->q4_recall_head = (sd->q4_recall_head + 1) % AGING_WINDOW_SAMPLES;
+	if (sd->q4_recall_count < AGING_WINDOW_SAMPLES)
+		sd->q4_recall_count++;
+}
+
+void
+addToNamedRecallStats(StatsData *sd, const char *name, double recall_val)
+{
+	NamedRecallStats *slot = NULL;
+	double		clamped = recall_val;
+	int			b;
+	int			d;
+
+	if (name == NULL || name[0] == '\0')
+	{
+		addToRecallStats(sd, recall_val);
+		return;
+	}
+
+	if (clamped < 0.0)
+		clamped = 0.0;
+	if (clamped > 1.0)
+		clamped = 1.0;
+
+	for (int i = 0; i < sd->num_named_recalls; i++)
+	{
+		if (strcmp(sd->named_recalls[i].name, name) == 0)
+		{
+			slot = &sd->named_recalls[i];
+			break;
+		}
+	}
+
+	if (slot == NULL && sd->num_named_recalls < MAX_NAMED_RECALL_METRICS)
+	{
+		slot = &sd->named_recalls[sd->num_named_recalls++];
+		memset(slot, 0, sizeof(*slot));
+		strlcpy(slot->name, name, sizeof(slot->name));
+		initSimpleStats(&slot->stats);
+	}
+
+	if (slot != NULL)
+	{
+		addToSimpleStats(&slot->stats, clamped);
+		b = (int) floor(clamped * 100.0 + 0.5);
+		if (b < 0)
+			b = 0;
+		if (b >= RECALL_HIST_BUCKETS)
+			b = RECALL_HIST_BUCKETS - 1;
+		slot->buckets[b]++;
+
+		d = (int) (clamped * 10.0);
+		if (d >= RECALL_DIST10_BUCKETS)
+			d = RECALL_DIST10_BUCKETS - 1;
+		if (d < 0)
+			d = 0;
+		slot->dist10[d]++;
+
+		if (slot->q1_count < AGING_WINDOW_SAMPLES)
+		{
+			slot->q1_sum += clamped;
+			slot->q1_count++;
+		}
+		slot->q4_ring[slot->q4_head] = clamped;
+		slot->q4_head = (slot->q4_head + 1) % AGING_WINDOW_SAMPLES;
+		if (slot->q4_count < AGING_WINDOW_SAMPLES)
+			slot->q4_count++;
+	}
+}
+
+const NamedRecallStats *
+findNamedRecallStats(const StatsData *stats, const char *name)
+{
+	if (stats == NULL || name == NULL || name[0] == '\0')
+		return NULL;
+	for (int i = 0; i < stats->num_named_recalls; i++)
+	{
+		if (pg_strcasecmp(stats->named_recalls[i].name, name) == 0)
+			return &stats->named_recalls[i];
+	}
+	return NULL;
+}
+
+double
+getNamedRecallPercentile(const StatsData *stats, const char *name, double pct)
+{
+	const NamedRecallStats *slot = findNamedRecallStats(stats, name);
+	int64		target;
+	int64		cum = 0;
+
+	if (slot == NULL || slot->stats.count <= 0)
+		return 0.0;
+
+	if (pct < 0.0)
+		pct = 0.0;
+	if (pct > 100.0)
+		pct = 100.0;
+
+	target = (int64) ceil((pct / 100.0) * (double) slot->stats.count);
+	if (target < 1)
+		target = 1;
+	if (target > slot->stats.count)
+		target = slot->stats.count;
+
+	for (int b = 0; b < RECALL_HIST_BUCKETS; b++)
+	{
+		if (slot->buckets[b] <= 0)
+			continue;
+		cum += slot->buckets[b];
+		if (cum >= target)
+			return (double) b / 100.0;
+	}
+
+	return slot->stats.max;
 }
 
 double
@@ -450,6 +636,30 @@ getRecallPercentile(const StatsData *stats, double pct)
 	return stats->recall.max;
 }
 
+static void
+print10BucketDist(const char *prefix, const int64 dist10[RECALL_DIST10_BUCKETS])
+{
+	bool		has_dist = false;
+
+	for (int i = 0; i < RECALL_DIST10_BUCKETS; i++)
+	{
+		if (dist10[i] > 0)
+		{
+			if (!has_dist)
+			{
+				printf("%s distribution:", prefix);
+				has_dist = true;
+			}
+			if (i == RECALL_DIST10_BUCKETS - 1)
+				printf(" [0.%d-1.0]: " INT64_FORMAT, i, dist10[i]);
+			else
+				printf(" [0.%d-0.%d): " INT64_FORMAT, i, i + 1, dist10[i]);
+		}
+	}
+	if (has_dist)
+		printf("\n");
+}
+
 void
 printRecallStats(const char *prefix, const StatsData *stats)
 {
@@ -467,6 +677,63 @@ printRecallStats(const char *prefix, const StatsData *stats)
 			   getRecallPercentile(stats, 5.0),
 			   getRecallPercentile(stats, 50.0),
 			   getRecallPercentile(stats, 95.0));
+		print10BucketDist(prefix, stats->recall_dist10);
+		if (stats->recall.count >= 4 && stats->q1_recall_count > 0 && stats->q4_recall_count > 0)
+		{
+			double		q1_avg = stats->q1_recall_sum / stats->q1_recall_count;
+			double		q4_sum = 0.0;
+			double		q4_avg;
+			double		delta;
+			double		deg_pct;
+
+			for (int j = 0; j < stats->q4_recall_count; j++)
+				q4_sum += stats->q4_recall_ring[j];
+			q4_avg = q4_sum / stats->q4_recall_count;
+			delta = q4_avg - q1_avg;
+			deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
+			printf("%s aging degradation: initial = %.4f, mature = %.4f, delta = %+.4f (%+.2f%%)\n",
+				   prefix, q1_avg, q4_avg, delta, deg_pct);
+		}
+	}
+
+	for (int i = 0; i < stats->num_named_recalls; i++)
+	{
+		const NamedRecallStats *s = &stats->named_recalls[i];
+
+		if (s->stats.count > 0)
+		{
+			char		named_prefix[64];
+			double		avg = s->stats.sum / s->stats.count;
+			double		var = (s->stats.sum2 / s->stats.count) - (avg * avg);
+			double		stddev = (var > 0.0) ? sqrt(var) : 0.0;
+
+			snprintf(named_prefix, sizeof(named_prefix), "%s[%s]", prefix, s->name);
+			printf("%s average = %.4f (stddev = %.4f, min = %.4f, max = %.4f, samples = " INT64_FORMAT ")\n",
+				   named_prefix, avg, stddev, s->stats.min, s->stats.max,
+				   s->stats.count);
+			printf("%s percentiles: p5 = %.4f, p50 = %.4f, p95 = %.4f\n",
+				   named_prefix,
+				   getNamedRecallPercentile(stats, s->name, 5.0),
+				   getNamedRecallPercentile(stats, s->name, 50.0),
+				   getNamedRecallPercentile(stats, s->name, 95.0));
+			print10BucketDist(named_prefix, s->dist10);
+			if (s->stats.count >= 4 && s->q1_count > 0 && s->q4_count > 0)
+			{
+				double		q1_avg = s->q1_sum / s->q1_count;
+				double		q4_sum = 0.0;
+				double		q4_avg;
+				double		delta;
+				double		deg_pct;
+
+				for (int j = 0; j < s->q4_count; j++)
+					q4_sum += s->q4_ring[j];
+				q4_avg = q4_sum / s->q4_count;
+				delta = q4_avg - q1_avg;
+				deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
+				printf("%s aging degradation: initial = %.4f, mature = %.4f, delta = %+.4f (%+.2f%%)\n",
+					   named_prefix, q1_avg, q4_avg, delta, deg_pct);
+			}
+		}
 	}
 }
 

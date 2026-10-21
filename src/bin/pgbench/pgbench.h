@@ -390,6 +390,7 @@ typedef struct
 
 	/* Pillar 7: Per-transaction quality / recall & validation samples */
 	double		txn_recalls[16];
+	char		txn_recall_names[16][32];
 	int			txn_recall_count;
 	int			txn_validation_passed;
 	int			txn_validation_failed;

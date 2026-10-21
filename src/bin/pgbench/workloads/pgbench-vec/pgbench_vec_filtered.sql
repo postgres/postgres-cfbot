@@ -16,4 +16,4 @@ SELECT id
  LIMIT :k
 \gset_col filtered_ids
 
-\record_recall filtered_ids filtered_ids :k
+\record_recall name=r_prefilter filtered_ids filtered_ids :k
