@@ -602,6 +602,4 @@ CREATE TABLE rowtypes_cmp_g (a int,
 SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef
   WHERE adrelid = 'rowtypes_cmp_g'::regclass;
 
--- leave the objects around for the pg_upgrade test, except the ones that do
--- not survive dump and restore yet
-DROP VIEW rowtypes_cmp_v3, rowtypes_cmp_v4;
+-- leave the objects around for the pg_upgrade test

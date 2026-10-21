@@ -1434,11 +1434,11 @@ CREATE VIEW rowtypes_cmp_v3 AS
 SELECT x, (j.* = (SELECT ROW(1))) AS r
   FROM rowtypes_cmp_a JOIN rowtypes_cmp_b USING (x) AS j;
 SELECT pg_get_viewdef('rowtypes_cmp_v3'::regclass);
-                        pg_get_viewdef                        
---------------------------------------------------------------
-  SELECT rowtypes_cmp_a.x,                                   +
-     (ROW(rowtypes_cmp_a.x) = ( SELECT ROW(1) AS "row")) AS r+
-    FROM (rowtypes_cmp_a                                     +
+                            pg_get_viewdef                            
+----------------------------------------------------------------------
+  SELECT rowtypes_cmp_a.x,                                           +
+     (ROW(rowtypes_cmp_a.x)::record = ( SELECT ROW(1) AS "row")) AS r+
+    FROM (rowtypes_cmp_a                                             +
       JOIN rowtypes_cmp_b USING (x) AS j);
 (1 row)
 
@@ -1454,12 +1454,12 @@ CREATE VIEW rowtypes_cmp_v4 AS
 SELECT (s1 =#= s2) AS r
   FROM (SELECT 1 AS a, NULL::int AS b) s1, (SELECT 1, NULL::int) s2;
 SELECT pg_get_viewdef('rowtypes_cmp_v4'::regclass);
-                         pg_get_viewdef                         
-----------------------------------------------------------------
-  SELECT (ROW(s1.a, s1.b) =#= ROW(s2."?column?", s2.int4)) AS r+
-    FROM ( SELECT 1 AS a,                                      +
-             NULL::integer AS b) s1,                           +
-     ( SELECT 1 AS "?column?",                                 +
+                                         pg_get_viewdef                                         
+------------------------------------------------------------------------------------------------
+  SELECT (ROW(s1.a, s1.b)::rowtypes_cmp_t =#= ROW(s2."?column?", s2.int4)::rowtypes_cmp_t) AS r+
+    FROM ( SELECT 1 AS a,                                                                      +
+             NULL::integer AS b) s1,                                                           +
+     ( SELECT 1 AS "?column?",                                                                 +
              NULL::integer AS int4) s2;
 (1 row)
 
@@ -1474,6 +1474,4 @@ SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef
  (ROW(a, NULL::integer)::record = ROW(a, NULL::integer)::record)
 (1 row)
 
--- leave the objects around for the pg_upgrade test, except the ones that do
--- not survive dump and restore yet
-DROP VIEW rowtypes_cmp_v3, rowtypes_cmp_v4;
+-- leave the objects around for the pg_upgrade test
