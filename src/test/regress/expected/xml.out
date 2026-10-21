@@ -1940,15 +1940,12 @@ SELECT * FROM XMLTABLE(XMLNAMESPACES(('http://x.y' COLLATE "C") AS p,
                                      DEFAULT ('http://x.z' COLLATE "C")),
   '/p:a' PASSING (NULL::xml) COLUMNS v text PATH 'p:b');
 SELECT pg_get_viewdef('xmltableview_collate'::regclass, true);
-                                                                                    pg_get_viewdef                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-  SELECT v                                                                                                                                                                           +
-    FROM XMLTABLE(XMLNAMESPACES ('http://x.y'::text COLLATE "C" AS p, DEFAULT 'http://x.z'::text COLLATE "C"), ('/p:a'::text) PASSING (NULL::xml) COLUMNS v text PATH ('p:b'::text));
+                                                                                      pg_get_viewdef                                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  SELECT v                                                                                                                                                                               +
+    FROM XMLTABLE(XMLNAMESPACES (('http://x.y'::text COLLATE "C") AS p, DEFAULT ('http://x.z'::text COLLATE "C")), ('/p:a'::text) PASSING (NULL::xml) COLUMNS v text PATH ('p:b'::text));
 (1 row)
 
 SELECT pg_get_viewdef('xmltableview_collate'::regclass, true) AS def \gset
 CREATE OR REPLACE VIEW xmltableview_collate AS :def
-ERROR:  syntax error at or near "COLLATE"
-LINE 2: ...  FROM XMLTABLE(XMLNAMESPACES ('http://x.y'::text COLLATE "C...
-                                                             ^
 DROP VIEW xmltableview_collate;
