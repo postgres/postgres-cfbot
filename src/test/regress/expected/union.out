@@ -984,22 +984,26 @@ set enable_hashagg = true;
 set enable_groupagg = false;
 explain (costs off)
 select from generate_series(1,5) union select from generate_series(1,3);
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  HashAggregate
    ->  Append
-         ->  Function Scan on generate_series
-         ->  Function Scan on generate_series generate_series_1
-(4 rows)
+         ->  Limit
+               ->  Function Scan on generate_series
+         ->  Limit
+               ->  Function Scan on generate_series generate_series_1
+(6 rows)
 
 explain (costs off)
 select from generate_series(1,5) intersect select from generate_series(1,3);
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  HashSetOp Intersect
-   ->  Function Scan on generate_series
-   ->  Function Scan on generate_series generate_series_1
-(3 rows)
+   ->  Limit
+         ->  Function Scan on generate_series
+   ->  Limit
+         ->  Function Scan on generate_series generate_series_1
+(5 rows)
 
 select from generate_series(1,5) union select from generate_series(1,3);
 --
@@ -1030,22 +1034,26 @@ set enable_hashagg = false;
 set enable_groupagg = true;
 explain (costs off)
 select from generate_series(1,5) union select from generate_series(1,3);
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Unique
    ->  Append
-         ->  Function Scan on generate_series
-         ->  Function Scan on generate_series generate_series_1
-(4 rows)
+         ->  Limit
+               ->  Function Scan on generate_series
+         ->  Limit
+               ->  Function Scan on generate_series generate_series_1
+(6 rows)
 
 explain (costs off)
 select from generate_series(1,5) intersect select from generate_series(1,3);
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  SetOp Intersect
-   ->  Function Scan on generate_series
-   ->  Function Scan on generate_series generate_series_1
-(3 rows)
+   ->  Limit
+         ->  Function Scan on generate_series
+   ->  Limit
+         ->  Function Scan on generate_series generate_series_1
+(5 rows)
 
 select from generate_series(1,5) union select from generate_series(1,3);
 --
@@ -1143,16 +1151,18 @@ explain (costs off)
   UNION
   SELECT * FROM t2) t
  WHERE ab = 'ab';
-                    QUERY PLAN                     
----------------------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  HashAggregate
    Group Key: ((t1.a || t1.b))
    ->  Append
-         ->  Index Scan using t1_ab_idx on t1
-               Index Cond: ((a || b) = 'ab'::text)
-         ->  Index Only Scan using t2_pkey on t2
-               Index Cond: (ab = 'ab'::text)
-(7 rows)
+         ->  Limit
+               ->  Index Scan using t1_ab_idx on t1
+                     Index Cond: ((a || b) = 'ab'::text)
+         ->  Limit
+               ->  Index Only Scan using t2_pkey on t2
+                     Index Cond: (ab = 'ab'::text)
+(9 rows)
 
 --
 -- Test that ORDER BY for UNION ALL can be pushed down to inheritance
@@ -1447,23 +1457,27 @@ EXPLAIN (COSTS OFF, VERBOSE)
  SELECT four FROM tenk1 t2 WHERE four = 1)
 EXCEPT ALL
 SELECT ten FROM tenk1 dummy WHERE 1=2;
-               QUERY PLAN                
------------------------------------------
+                  QUERY PLAN                   
+-----------------------------------------------
  SetOp Intersect
    Output: t1.two
    ->  Sort
          Output: t1.two
          Sort Key: t1.two
-         ->  Seq Scan on public.tenk1 t1
+         ->  Limit
                Output: t1.two
-               Filter: (t1.two = 1)
+               ->  Seq Scan on public.tenk1 t1
+                     Output: t1.two
+                     Filter: (t1.two = 1)
    ->  Sort
          Output: t2.four
          Sort Key: t2.four
-         ->  Seq Scan on public.tenk1 t2
+         ->  Limit
                Output: t2.four
-               Filter: (t2.four = 1)
-(14 rows)
+               ->  Seq Scan on public.tenk1 t2
+                     Output: t2.four
+                     Filter: (t2.four = 1)
+(18 rows)
 
 RESET enable_hashagg;
 -- Ensure EXPLAIN can show a dummy set operation whose output is coerced
@@ -2127,3 +2141,905 @@ reset parallel_setup_cost;
 reset parallel_tuple_cost;
 reset min_parallel_table_scan_size;
 reset max_parallel_workers_per_gather;
+--
+-- A de-duplicating set operation needs only one copy of each row, so a
+-- branch whose output is a single constant tuple can stop after its first
+-- row.  This applies to every child of UNION/INTERSECT/EXCEPT, but not to
+-- their ALL variants, where duplicate counts are significant.
+--
+create table union_const_t (a int);
+insert into union_const_t select g from generate_series(1, 1000) g;
+analyze union_const_t;
+create sequence union_const_seq;
+-- Serial plan: only the constant child is limited.
+set max_parallel_workers_per_gather = 0;
+explain (costs off)
+select 1 from union_const_t union select a from union_const_t;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ HashAggregate
+   Group Key: (1)
+   ->  Append
+         ->  Limit
+               ->  Seq Scan on union_const_t
+         ->  Seq Scan on union_const_t union_const_t_1
+(6 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t union select a from union_const_t) s;
+ count | min | max  
+-------+-----+------
+  1000 |   1 | 1000
+(1 row)
+
+-- Every constant child is limited.
+explain (costs off)
+select 1 from union_const_t union select 1 from union_const_t;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+               ->  Limit
+                     ->  Seq Scan on union_const_t union_const_t_1
+(8 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t union select 1 from union_const_t) s;
+ count | min | max 
+-------+-----+-----
+     1 |   1 |   1
+(1 row)
+
+-- A locking clause hidden in a subquery or CTE is subject to the same
+-- early-stop behavior as SELECT DISTINCT's Limit 1: only the first row is
+-- fetched, so only that row is locked.  This is intentional.
+explain (costs off)
+select 1 from (select a from union_const_t for update) s union select 2;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  Subquery Scan on s
+                           ->  LockRows
+                                 ->  Seq Scan on union_const_t
+               ->  Result
+(9 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from (select a from union_const_t for update) s
+   union select 2) t;
+ count | min | max 
+-------+-----+-----
+     2 |   1 |   2
+(1 row)
+
+explain (costs off)
+select 1 from (with c as (select a from union_const_t for update)
+               select a from c) s union select 2;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  Subquery Scan on s
+                           ->  CTE Scan on c
+                                 CTE c
+                                   ->  LockRows
+                                         ->  Seq Scan on union_const_t
+               ->  Result
+(11 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from (with c as (select a from union_const_t for update)
+                       select a from c) s union select 2) t;
+ count | min | max 
+-------+-----+-----
+     2 |   1 |   2
+(1 row)
+
+explain (costs off)
+select 1 from (select a from union_const_t for share) s union select 2;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  Subquery Scan on s
+                           ->  LockRows
+                                 ->  Seq Scan on union_const_t
+               ->  Result
+(9 rows)
+
+-- The zero-column form also qualifies; it is the case where row identity
+-- targets do not incidentally prevent the optimization.
+explain (costs off)
+select * from (select from union_const_t for update) s
+union select from union_const_t;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Append
+         ->  Limit
+               ->  Subquery Scan on s
+                     ->  LockRows
+                           ->  Seq Scan on union_const_t
+         ->  Limit
+               ->  Seq Scan on union_const_t union_const_t_1
+(8 rows)
+
+-- NULL is a pseudo-constant just like any other constant.
+explain (costs off)
+select null::int from union_const_t union select 1;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (NULL::integer)
+         ->  Append
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+               ->  Result
+(7 rows)
+
+select count(*), count(x) from
+  (select null::int as x from union_const_t union select 1) s;
+ count | count 
+-------+-------
+     2 |     1
+(1 row)
+
+-- A child with no FROM clause already produces at most one row, so the
+-- planner deliberately does not add a Limit node.
+explain (costs off)
+select 1 union select 2;
+        QUERY PLAN        
+--------------------------
+ Unique
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Result
+               ->  Result
+(6 rows)
+
+-- An uncorrelated sublink in the target list becomes an InitPlan Param;
+-- it is constant for the scan and is accepted.  (Correlated sublinks
+-- become SubPlans and are rejected by setop_child_output_is_constant.)
+explain (costs off)
+select (select max(a) from union_const_t) from union_const_t
+union select 999;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: ((InitPlan expr_1).col1)
+         ->  Append
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+                           InitPlan expr_1
+                             ->  Aggregate
+                                   ->  Seq Scan on union_const_t union_const_t_1
+               ->  Result
+(10 rows)
+
+select count(*), min(x), max(x) from
+  (select (select max(a) from union_const_t) as x from union_const_t
+   union select 999) s;
+ count | min | max  
+-------+-----+------
+     2 | 999 | 1000
+(1 row)
+
+-- Multi-way UNION: each constant branch gets its own Limit.
+explain (costs off)
+select 1 from union_const_t
+union select 2 from union_const_t
+union select a from union_const_t;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ HashAggregate
+   Group Key: (1)
+   ->  Append
+         ->  Limit
+               ->  Seq Scan on union_const_t
+         ->  Limit
+               ->  Seq Scan on union_const_t union_const_t_1
+         ->  Seq Scan on union_const_t union_const_t_2
+(8 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t
+   union select 2 from union_const_t
+   union select a from union_const_t) s;
+ count | min | max  
+-------+-----+------
+  1000 |   1 | 1000
+(1 row)
+
+-- INTERSECT and EXCEPT also remove duplicates from both inputs.
+explain (costs off)
+select 1 from union_const_t intersect select a from union_const_t;
+                   QUERY PLAN                    
+-------------------------------------------------
+ HashSetOp Intersect
+   ->  Limit
+         ->  Seq Scan on union_const_t
+   ->  Seq Scan on union_const_t union_const_t_1
+(4 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t intersect select a from union_const_t) s;
+ count | min | max 
+-------+-----+-----
+     1 |   1 |   1
+(1 row)
+
+explain (costs off)
+select a from union_const_t intersect select 1 from union_const_t;
+                   QUERY PLAN                    
+-------------------------------------------------
+ HashSetOp Intersect
+   ->  Limit
+         ->  Seq Scan on union_const_t
+   ->  Seq Scan on union_const_t union_const_t_1
+(4 rows)
+
+select count(*), min(x), max(x) from
+  (select a as x from union_const_t intersect select 1 from union_const_t) s;
+ count | min | max 
+-------+-----+-----
+     1 |   1 |   1
+(1 row)
+
+explain (costs off)
+select a from union_const_t except select 1 from union_const_t;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ HashSetOp Except
+   ->  Seq Scan on union_const_t
+   ->  Limit
+         ->  Seq Scan on union_const_t union_const_t_1
+(4 rows)
+
+select count(*), min(x), max(x) from
+  (select a as x from union_const_t except select 1 from union_const_t) s;
+ count | min | max  
+-------+-----+------
+   999 |   2 | 1000
+(1 row)
+
+explain (costs off)
+select 1 from union_const_t except select a from union_const_t;
+                   QUERY PLAN                    
+-------------------------------------------------
+ HashSetOp Except
+   ->  Limit
+         ->  Seq Scan on union_const_t
+   ->  Seq Scan on union_const_t union_const_t_1
+(4 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t except select a from union_const_t) s;
+ count | min | max 
+-------+-----+-----
+     0 |     |    
+(1 row)
+
+-- Parallel plan: the limited partial path must remain available, otherwise
+-- the whole set operation would fall back to a serial Append.
+set parallel_setup_cost = 0;
+set parallel_tuple_cost = 0;
+set min_parallel_table_scan_size = 0;
+set max_parallel_workers_per_gather = 2;
+explain (costs off)
+select 1 from union_const_t union select a from union_const_t;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ HashAggregate
+   Group Key: union_const_t.a
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Append
+               ->  Parallel Seq Scan on union_const_t
+               ->  Limit
+                     ->  Parallel Seq Scan on union_const_t union_const_t_1
+(8 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t union select a from union_const_t) s;
+ count | min | max  
+-------+-----+------
+  1000 |   1 | 1000
+(1 row)
+
+-- Multi-way UNION keeps the partial path as well.
+explain (costs off)
+select 1 from union_const_t
+union select 2 from union_const_t
+union select a from union_const_t;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ HashAggregate
+   Group Key: union_const_t.a
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Append
+               ->  Parallel Seq Scan on union_const_t
+               ->  Limit
+                     ->  Parallel Seq Scan on union_const_t union_const_t_1
+               ->  Limit
+                     ->  Parallel Seq Scan on union_const_t union_const_t_2
+(10 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t
+   union select 2 from union_const_t
+   union select a from union_const_t) s;
+ count | min | max  
+-------+-----+------
+  1000 |   1 | 1000
+(1 row)
+
+-- One worker exercises the Gather row estimate with a single partial path.
+set max_parallel_workers_per_gather = 1;
+explain (costs off)
+select 1 from union_const_t union select a from union_const_t;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ HashAggregate
+   Group Key: union_const_t.a
+   ->  Gather
+         Workers Planned: 1
+         ->  Parallel Append
+               ->  Parallel Seq Scan on union_const_t
+               ->  Limit
+                     ->  Parallel Seq Scan on union_const_t union_const_t_1
+(8 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t union select a from union_const_t) s;
+ count | min | max  
+-------+-----+------
+  1000 |   1 | 1000
+(1 row)
+
+set max_parallel_workers_per_gather = 2;
+reset max_parallel_workers_per_gather;
+reset min_parallel_table_scan_size;
+reset parallel_tuple_cost;
+reset parallel_setup_cost;
+-- The sort-based strategies see the limit as well.
+set enable_hashagg = off;
+explain (costs off)
+select 1 from union_const_t union select a from union_const_t;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+               ->  Seq Scan on union_const_t union_const_t_1
+(7 rows)
+
+select count(*), min(x), max(x) from
+  (select 1 as x from union_const_t union select a from union_const_t) s;
+ count | min | max  
+-------+-----+------
+  1000 |   1 | 1000
+(1 row)
+
+explain (costs off)
+select a from union_const_t except select 1 from union_const_t;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ SetOp Except
+   ->  Sort
+         Sort Key: union_const_t.a
+         ->  Seq Scan on union_const_t
+   ->  Limit
+         ->  Seq Scan on union_const_t union_const_t_1
+(6 rows)
+
+select count(*), min(x), max(x) from
+  (select a as x from union_const_t except select 1 from union_const_t) s;
+ count | min | max  
+-------+-----+------
+   999 |   2 | 1000
+(1 row)
+
+reset enable_hashagg;
+-- UNION ALL preserves duplicates and must not be limited.
+explain (costs off)
+select 1 from union_const_t union all select a from union_const_t;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Append
+   ->  Seq Scan on union_const_t
+   ->  Seq Scan on union_const_t union_const_t_1
+(3 rows)
+
+select count(*) from
+  (select 1 from union_const_t union all select a from union_const_t) s;
+ count 
+-------
+  2000
+(1 row)
+
+-- INTERSECT ALL / EXCEPT ALL preserve duplicate counts and must not be
+-- limited either.
+create table union_const_dup (a int);
+insert into union_const_dup values (1), (1), (1);
+explain (costs off)
+select 1 from union_const_dup intersect all select 1 from union_const_dup;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ SetOp Intersect All
+   ->  Seq Scan on union_const_dup
+   ->  Seq Scan on union_const_dup union_const_dup_1
+(3 rows)
+
+select count(*) from
+  (select 1 from union_const_dup intersect all select 1 from union_const_dup) s;
+ count 
+-------
+     3
+(1 row)
+
+explain (costs off)
+select 1 from union_const_dup except all select 2 from union_const_dup;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ SetOp Except All
+   ->  Seq Scan on union_const_dup
+   ->  Seq Scan on union_const_dup union_const_dup_1
+(3 rows)
+
+select count(*) from
+  (select 1 from union_const_dup except all select 2 from union_const_dup) s;
+ count 
+-------
+     3
+(1 row)
+
+-- The multiplicity of either input matters, so neither side may be limited.
+explain (costs off)
+select a from union_const_dup intersect all select 1 from union_const_dup;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ HashSetOp Intersect All
+   ->  Seq Scan on union_const_dup
+   ->  Seq Scan on union_const_dup union_const_dup_1
+(3 rows)
+
+select count(*) from
+  (select a from union_const_dup intersect all select 1 from union_const_dup) s;
+ count 
+-------
+     3
+(1 row)
+
+explain (costs off)
+select 1 from union_const_dup except all select 1 from union_const_dup;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ SetOp Except All
+   ->  Seq Scan on union_const_dup
+   ->  Seq Scan on union_const_dup union_const_dup_1
+(3 rows)
+
+select count(*) from
+  (select 1 from union_const_dup except all select 1 from union_const_dup) s;
+ count 
+-------
+     0
+(1 row)
+
+-- The set variants of the same queries do discard duplicates.
+select count(*) from
+  (select 1 from union_const_dup intersect select 1 from union_const_dup) s;
+ count 
+-------
+     1
+(1 row)
+
+select count(*) from
+  (select 1 from union_const_dup except select 2 from union_const_dup) s;
+ count 
+-------
+     1
+(1 row)
+
+-- Empty inputs must stay empty.
+select count(*) from
+  (select 1 from union_const_dup where false
+   union select 2 where false) s;
+ count 
+-------
+     0
+(1 row)
+
+-- Outputs that can vary from row to row must not be limited.
+set max_parallel_workers_per_gather = 0;
+explain (costs off)
+select nextval('union_const_seq') from union_const_t
+union select a from union_const_t;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ HashAggregate
+   Group Key: (nextval('union_const_seq'::regclass))
+   ->  Append
+         ->  Seq Scan on union_const_t
+         ->  Subquery Scan on unnamed_subquery_1
+               ->  Seq Scan on union_const_t union_const_t_1
+(6 rows)
+
+explain (costs off)
+select row_number() over () from union_const_t union select a from union_const_t;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ HashAggregate
+   Group Key: (row_number() OVER w1)
+   ->  Append
+         ->  WindowAgg
+               Window: w1 AS (ROWS UNBOUNDED PRECEDING)
+               ->  Seq Scan on union_const_t
+         ->  Subquery Scan on unnamed_subquery_1
+               ->  Seq Scan on union_const_t union_const_t_1
+(8 rows)
+
+explain (costs off)
+select generate_series(1, 3) from union_const_t union select a from union_const_t;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ HashAggregate
+   Group Key: (generate_series(1, 3))
+   ->  Append
+         ->  ProjectSet
+               ->  Seq Scan on union_const_t
+         ->  Seq Scan on union_const_t union_const_t_1
+(6 rows)
+
+-- Equivalence classes can pin a Var to a constant, as in SELECT DISTINCT.
+explain (costs off)
+select a from union_const_t where a = 5 union select 9;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: union_const_t.a
+         ->  Append
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+                           Filter: (a = 5)
+               ->  Result
+(8 rows)
+
+select count(*), min(x), max(x) from
+  (select a as x from union_const_t where a = 5 union select 9) s;
+ count | min | max 
+-------+-----+-----
+     2 |   5 |   9
+(1 row)
+
+explain (costs off)
+select a from union_const_t group by a having a = 5 union select 9;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: union_const_t.a
+         ->  Append
+               ->  Limit
+                     ->  Group
+                           ->  Seq Scan on union_const_t
+                                 Filter: (a = 5)
+               ->  Result
+(9 rows)
+
+select count(*), min(x), max(x) from
+  (select a as x from union_const_t group by a having a = 5 union select 9) s;
+ count | min | max 
+-------+-----+-----
+     2 |   5 |   9
+(1 row)
+
+-- A join equality can carry the constant to another column.
+explain (costs off)
+select t.unique1 from tenk1 t join int8_tbl i on t.unique1 = i.q1
+where i.q1 = 123 union select 9;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: t.unique1
+         ->  Append
+               ->  Limit
+                     ->  Nested Loop
+                           ->  Index Only Scan using tenk1_unique1 on tenk1 t
+                                 Index Cond: (unique1 = 123)
+                           ->  Seq Scan on int8_tbl i
+                                 Filter: (q1 = 123)
+               ->  Result
+(11 rows)
+
+select count(*), min(x), max(x) from
+  (select t.unique1 as x from tenk1 t join int8_tbl i on t.unique1 = i.q1
+   where i.q1 = 123 union select 9) s;
+ count | min | max 
+-------+-----+-----
+     2 |   9 | 123
+(1 row)
+
+-- Like DISTINCT, we do not chase constants through casts or expressions.
+explain (costs off)
+select a::bigint from union_const_t where a = 5 union select 9::bigint;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: ((union_const_t.a)::bigint)
+         ->  Append
+               ->  Seq Scan on union_const_t
+                     Filter: (a = 5)
+               ->  Result
+(7 rows)
+
+explain (costs off)
+select a + 0 from union_const_t where a = 5 union select 9;
+                 QUERY PLAN                  
+---------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: ((union_const_t.a + 0))
+         ->  Append
+               ->  Seq Scan on union_const_t
+                     Filter: (a = 5)
+               ->  Result
+(7 rows)
+
+-- A constant from below the nullable side of an outer join must not be
+-- used: that side can also contribute NULL.
+explain (costs off)
+select ss.two
+from tenk1 a left join
+     (select b.two from tenk1 b join tenk1 c on b.two = c.two
+      where b.two = 10) ss on a.unique1 = ss.two
+union select 9;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ HashAggregate
+   Group Key: b.two
+   ->  Append
+         ->  Hash Left Join
+               Hash Cond: (a.unique1 = b.two)
+               ->  Index Only Scan using tenk1_unique1 on tenk1 a
+               ->  Hash
+                     ->  Nested Loop
+                           ->  Seq Scan on tenk1 b
+                                 Filter: (two = 10)
+                           ->  Seq Scan on tenk1 c
+                                 Filter: (two = 10)
+         ->  Result
+(13 rows)
+
+-- The pinned branch can be on either side.
+explain (costs off)
+select 9 union select a from union_const_t where a = 5;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: (9)
+         ->  Append
+               ->  Result
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+                           Filter: (a = 5)
+(8 rows)
+
+select count(*), min(x), max(x) from
+  (select 9 as x union select a from union_const_t where a = 5) s;
+ count | min | max 
+-------+-----+-----
+     2 |   5 |   9
+(1 row)
+
+explain (costs off)
+select 9 intersect select a from union_const_t where a = 5;
+              QUERY PLAN               
+---------------------------------------
+ HashSetOp Intersect
+   ->  Result
+   ->  Limit
+         ->  Seq Scan on union_const_t
+               Filter: (a = 5)
+(5 rows)
+
+select count(*) from
+  (select 9 as x intersect select a from union_const_t where a = 5) s;
+ count 
+-------
+     0
+(1 row)
+
+explain (costs off)
+select 9 except select a from union_const_t where a = 5;
+              QUERY PLAN               
+---------------------------------------
+ HashSetOp Except
+   ->  Result
+   ->  Limit
+         ->  Seq Scan on union_const_t
+               Filter: (a = 5)
+(5 rows)
+
+select count(*), min(x), max(x) from
+  (select 9 as x except select a from union_const_t where a = 5) s;
+ count | min | max 
+-------+-----+-----
+     1 |   9 |   9
+(1 row)
+
+-- Only one of two output columns is pinned, so the tuple is not constant.
+explain (costs off)
+select q1, q2 from int8_tbl where q1 = 123 union select q1, q2 from int8_tbl;
+                 QUERY PLAN                  
+---------------------------------------------
+ HashAggregate
+   Group Key: int8_tbl.q1, int8_tbl.q2
+   ->  Append
+         ->  Seq Scan on int8_tbl
+               Filter: (q1 = 123)
+         ->  Seq Scan on int8_tbl int8_tbl_1
+(6 rows)
+
+select count(*) from
+  (select q1, q2 from int8_tbl where q1 = 123
+   union select q1, q2 from int8_tbl) s;
+ count 
+-------
+     5
+(1 row)
+
+-- A generic parameter is an EC constant as well.
+prepare union_ec_param(int) as
+  select a from union_const_t where a = $1 union select 9;
+set plan_cache_mode = force_generic_plan;
+explain (costs off) execute union_ec_param(5);
+                    QUERY PLAN                     
+---------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: union_const_t.a
+         ->  Append
+               ->  Limit
+                     ->  Seq Scan on union_const_t
+                           Filter: (a = $1)
+               ->  Result
+(8 rows)
+
+execute union_ec_param(5);
+ a 
+---
+ 5
+ 9
+(2 rows)
+
+deallocate union_ec_param;
+reset plan_cache_mode;
+-- A volatile qual, unlike a volatile output column, does not make the output
+-- non-constant: the child still returns one distinct tuple.  As with the
+-- DISTINCT Limit 1 optimization, the scan may stop early and evaluate the
+-- qual fewer times.  EXPLAIN only; nextval() has side effects.
+explain (costs off)
+select 1 from union_const_t where nextval('union_const_seq') > 0
+union select a from union_const_t;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ HashAggregate
+   Group Key: (1)
+   ->  Append
+         ->  Limit
+               ->  Seq Scan on union_const_t
+                     Filter: (nextval('union_const_seq'::regclass) > 0)
+         ->  Seq Scan on union_const_t union_const_t_1
+(7 rows)
+
+-- A volatile function in FROM can be evaluated fewer times as well.  This
+-- mirrors the DISTINCT Limit 1 behavior.  EXPLAIN only; nextval() has side
+-- effects.
+explain (costs off)
+select 1 from (select nextval('union_const_seq') as v
+               from generate_series(1, 10)) s
+where v > 0
+union select a from union_const_t;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ HashAggregate
+   Group Key: (1)
+   ->  Append
+         ->  Limit
+               ->  Subquery Scan on s
+                     Filter: (s.v > 0)
+                     ->  Function Scan on generate_series
+         ->  Seq Scan on union_const_t
+(8 rows)
+
+-- A recursive CTE child follows the same rule.  Keep the example finite.
+explain (costs off)
+with recursive union_limit_r(n) as (
+  select 1
+  union all
+  select n + 1 from union_limit_r where n < 10
+)
+select 1 from union_limit_r union select 2;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Unique
+   CTE union_limit_r
+     ->  Recursive Union
+           ->  Result
+           ->  WorkTable Scan on union_limit_r union_limit_r_1
+                 Filter: (n < 10)
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  CTE Scan on union_limit_r
+               ->  Result
+(12 rows)
+
+select count(*) from
+  (with recursive union_limit_r(n) as (
+     select 1
+     union all
+     select n + 1 from union_limit_r where n < 10
+   )
+   select 1 from union_limit_r union select 2) s;
+ count 
+-------
+     2
+(1 row)
+
+-- An otherwise infinite recursive CTE is also stopped by the implicit
+-- Limit.  This matches the DISTINCT Limit 1 behavior; EXPLAIN only, since
+-- the finite case above covers execution.
+explain (costs off)
+with recursive union_limit_inf(n) as (
+  select 1
+  union all
+  select n + 1 from union_limit_inf
+)
+select 1 from union_limit_inf union select 2;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Unique
+   CTE union_limit_inf
+     ->  Recursive Union
+           ->  Result
+           ->  WorkTable Scan on union_limit_inf union_limit_inf_1
+   ->  Sort
+         Sort Key: (1)
+         ->  Append
+               ->  Limit
+                     ->  CTE Scan on union_limit_inf
+               ->  Result
+(11 rows)
+
+reset max_parallel_workers_per_gather;
+drop table union_const_t;
+drop table union_const_dup;
+drop sequence union_const_seq;
