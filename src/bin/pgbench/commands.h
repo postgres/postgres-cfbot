@@ -72,9 +72,14 @@ extern ConnectionStateEnum handle_cmd_shell(CState *st, Command *cmd, pg_time_us
 extern ConnectionStateEnum handle_cmd_startpipeline(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_syncpipeline(CState *st, Command *cmd, pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_endpipeline(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_session_connect(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_session_disconnect(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_call(CState *st, Command *cmd, pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_record_recall(CState *st, Command *cmd, pg_time_usec_t *now);
 
 /* Preparation helpers used across commands and SQL preparation */
 extern void allocCStatePrepared(CState *st);
+extern void freeCStatePrepared(CState *st);
 extern void prepareCommand(CState *st, int command_num);
 extern void prepareCommandsInPipeline(CState *st);
 

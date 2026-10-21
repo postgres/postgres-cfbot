@@ -66,7 +66,18 @@ typedef enum MetaCommand
 	META_THINK_TIME,			/* \think_time */
 	META_GSET,					/* \gset */
 	META_ASET,					/* \aset */
+	META_GSET_COL,				/* \gset_col */
 	META_GSET_META,				/* \gset_meta */
+	META_DATASET_BIND,			/* \dataset_bind */
+	META_COPY_DATASET,			/* \copy_dataset */
+	META_WAIT_UNTIL,			/* \wait_until */
+	META_ADVANCE_WATERMARK,		/* \advance_watermark */
+	META_RESERVOIR_PUSH,		/* \reservoir_push */
+	META_RESERVOIR_SAMPLE,		/* \reservoir_sample */
+	META_SESSION_CONNECT,		/* \session_connect */
+	META_SESSION_DISCONNECT,	/* \session_disconnect */
+	META_CALL,					/* \call */
+	META_RECORD_RECALL,			/* \record_recall */
 	META_IF,					/* \if */
 	META_ELIF,					/* \elif */
 	META_ELSE,					/* \else */
@@ -129,6 +140,7 @@ typedef struct Command
 	char	   *argv[MAX_ARGS];
 	char	   *prepname;
 	char	   *varprefix;
+	char	   *col_target;
 	char	   *meta_varprefix;
 	PgBenchExpr *expr;
 	PgBenchExpr *index_expr;
@@ -162,11 +174,16 @@ typedef struct BuiltinScript
 } BuiltinScript;
 
 extern bool evaluateExpr(CState *st, PgBenchExpr *expr, PgBenchValue *retval);
+extern bool computeRecallOrNdcgAtK(const PgBenchValue *ret_val,
+								   const PgBenchValue *gt_val,
+								   int64 k, bool is_ndcg,
+								   double *out_score);
 extern int	chooseScript(pg_prng_state *random_state);
 
 extern void postprocess_sql_command(Command *my_command);
 extern void process_file(const char *filename, int weight);
 extern void process_builtin(const BuiltinScript *bi, int weight);
+extern void process_replay_builtin(int weight);
 extern void listAvailableScripts(void);
 extern const BuiltinScript *findBuiltin(const char *tb);
 extern int	parseScriptWeight(const char *option, char **script);

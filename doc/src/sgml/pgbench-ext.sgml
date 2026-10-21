@@ -348,6 +348,158 @@
      </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-vector">
+    <term>
+     <function>pgbench.random_vector(dim integer [, min_val float8, max_val float8 [, normalize boolean]]) returns text</function>
+     <function>pgbench.random_vector(dim integer, dist text [, normalize boolean]) returns text</function>
+     <indexterm>
+      <primary>random_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> vector of <parameter>dim</parameter>
+      dimensions (in <literal>[1, 65536]</literal>) formatted as a
+      <literal>'[f1,f2,...]'</literal> string literal compatible with
+      <literal>pgvector</literal>.  In the numeric-bound form, coordinates are
+      drawn uniformly from <literal>[min_val, max_val]</literal> (default
+      <literal>[-1, 1]</literal>).  In the named-distribution form,
+      <parameter>dist</parameter> may be <literal>'gaussian'</literal>,
+      <literal>'normal'</literal>, <literal>'sphere'</literal>, or
+      <literal>'uniform'</literal>.  When <parameter>normalize</parameter> is
+      <literal>true</literal>, the generated vector is L2-normalized to unit
+      length.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-vector-gaussian">
+    <term>
+     <function>pgbench.random_vector_gaussian(dim integer [, sigma float8 [, normalize boolean]]) returns text</function>
+     <function>pgbench.random_unit_vector(dim integer [, sigma float8 [, normalize boolean]]) returns text</function>
+     <indexterm>
+      <primary>random_vector_gaussian</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> vector of <parameter>dim</parameter>
+      dimensions with coordinates drawn from <literal>N(0, sigma^2)</literal>
+      via Box-Muller transform, optionally L2-normalized to the unit
+      hypersphere (default <literal>true</literal>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-clustered-vector">
+    <term>
+     <function>pgbench.clustered_vector(dim integer, num_clusters integer [, sigma float8 [, seed bigint [, cluster_id integer]]]) returns text</function>
+     <indexterm>
+      <primary>clustered_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> vector of <parameter>dim</parameter>
+      dimensions around one of <parameter>num_clusters</parameter>
+      deterministic unit-sphere centroids (derived from
+      <parameter>seed</parameter>) perturbed by isotropic Gaussian noise
+      <literal>N(0, sigma^2)</literal> and L2-normalized.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-planted-vector">
+    <term>
+     <function>pgbench.planted_vector(dim integer, target_id bigint [, delta float8 [, seed bigint]]) returns text</function>
+     <indexterm>
+      <primary>planted_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> unit vector at exact Euclidean (chord)
+      distance <parameter>delta</parameter> (in <literal>[0, 2]</literal>)
+      from the deterministic unit-sphere anchor vector for
+      <parameter>target_id</parameter>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-sparse-vector">
+    <term>
+     <function>pgbench.random_sparse_vector(dim integer, nnz integer [, min_val float8, max_val float8]) returns text</function>
+     <indexterm>
+      <primary>random_sparse_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a sparse vector formatted as a <literal>pgvector</literal>
+      <type>sparsevec</type> literal
+      <literal>'{i1:v1,i2:v2,...}/dim'</literal> with <parameter>nnz</parameter>
+      distinct 1-based coordinates sampled without replacement.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-rmat-edge">
+    <term>
+     <function>pgbench.rmat_edge(scale integer [, a float8, b float8, c float8 [, seed bigint]]) returns bigint[]</function>
+     <indexterm>
+      <primary>rmat_edge</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a directed power-law graph edge <literal>ARRAY[src, dst]</literal>
+      over <literal>2^scale</literal> vertices using the Recursive Matrix
+      (R-MAT) Kronecker model with quadrant probabilities
+      <literal>(a, b, c, 1 - a - b - c)</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-vector-distance">
+    <term>
+     <function>pgbench.vector_distance(v1 text, v2 text [, metric text]) returns float8</function>
+     <indexterm>
+      <primary>vector_distance</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Computes the distance between two <literal>'[f1,f2,...]'</literal> vector
+      literals using <literal>'l2'</literal> (Euclidean distance, default),
+      <literal>'cosine'</literal> (cosine distance), or <literal>'ip'</literal>
+      (negative inner product).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-bytea">
+    <term>
+     <function>pgbench.random_bytea(min_len bigint, max_len bigint) returns bytea</function>
+     <indexterm>
+      <primary>random_bytea</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a random binary payload (<type>bytea</type>) of length
+      uniformly chosen in <literal>[min_len, max_len]</literal> (up to 16 MB).
+     </para>
+    </listitem>
+   </varlistentry>
   </variablelist>
  </sect2>
 
@@ -372,13 +524,15 @@ FROM generate_series(1, 10);
 SELECT pgbench.permute(i, 1000, 12345) AS permuted_id
 FROM generate_series(0, 999) i;
 
--- Generate TPC-C customer last names, alphanumeric strings, and date offsets
+-- Generate TPC-C customer last names, alphanumeric strings, vectors, and bytea
 SELECT pgbench.c_last(pgbench.nurand(255, 0, 999, 42)) AS c_last,
        pgbench.random_astring(10, 20) AS c_street,
        pgbench.random_nstring(9, 9) AS c_zip,
        pgbench.format_string('Brand#%d%d', 1, 5) AS brand,
        pgbench.date_add('1998-12-01', -90, 'days') AS cutoff_date,
-       pgbench.array_generate(5, 1, 100) AS item_ids;
+       pgbench.array_generate(5, 1, 100) AS item_ids,
+       pgbench.random_vector(8, 'gaussian', true) AS embedding,
+       octet_length(pgbench.random_bytea(16, 32)) AS payload_bytes;
 </programlisting>
  </sect2>
 

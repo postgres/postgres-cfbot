@@ -110,13 +110,19 @@ clear_socket_set(socket_set *sa)
 }
 
 void
-add_socket_to_set(socket_set *sa, int fd, int idx)
+add_socket_to_set_ex(socket_set *sa, int fd, int idx, bool wait_write)
 {
 	Assert(idx < sa->maxfds && idx == sa->curfds);
 	sa->pollfds[idx].fd = fd;
-	sa->pollfds[idx].events = POLLIN;
+	sa->pollfds[idx].events = wait_write ? (POLLIN | POLLOUT) : POLLIN;
 	sa->pollfds[idx].revents = 0;
 	sa->curfds++;
+}
+
+void
+add_socket_to_set(socket_set *sa, int fd, int idx)
+{
+	add_socket_to_set_ex(sa, fd, idx, false);
 }
 
 int
@@ -151,7 +157,7 @@ socket_has_input(socket_set *sa, int fd, int idx)
 		return false;
 
 	Assert(idx < sa->curfds && sa->pollfds[idx].fd == fd);
-	return (sa->pollfds[idx].revents & POLLIN) != 0;
+	return (sa->pollfds[idx].revents & (POLLIN | POLLOUT | POLLERR | POLLHUP)) != 0;
 }
 
 #endif							/* POLL_USING_PPOLL */
@@ -162,8 +168,10 @@ socket_has_input(socket_set *sa, int fd, int idx)
 
 struct socket_set
 {
-	int			maxfd;			/* largest FD currently set in fds */
+	int			maxfd;			/* largest FD currently set in fds or write_fds */
 	fd_set		fds;
+	fd_set		write_fds;
+	bool		has_write_fds;
 };
 
 const char *
@@ -188,7 +196,41 @@ void
 clear_socket_set(socket_set *sa)
 {
 	FD_ZERO(&sa->fds);
+	FD_ZERO(&sa->write_fds);
+	sa->has_write_fds = false;
 	sa->maxfd = -1;
+}
+
+void
+add_socket_to_set_ex(socket_set *sa, int fd, int idx, bool wait_write)
+{
+	if (!wait_write)
+	{
+		add_socket_to_set(sa, fd, idx);
+		return;
+	}
+
+	/* See connect_slot() for background on this code. */
+#ifdef WIN32
+	if (sa->write_fds.fd_count + 1 >= FD_SETSIZE)
+	{
+		pg_log_error("too many concurrent database clients for this platform: %d",
+					 sa->write_fds.fd_count + 1);
+		exit(1);
+	}
+#else
+	if (fd < 0 || fd >= FD_SETSIZE)
+	{
+		pg_log_error("socket file descriptor out of range for select(): %d",
+					 fd);
+		pg_log_error_hint("Try fewer concurrent database clients.");
+		exit(1);
+	}
+#endif
+	FD_SET(fd, &sa->write_fds);
+	sa->has_write_fds = true;
+	if (fd > sa->maxfd)
+		sa->maxfd = fd;
 }
 
 void
@@ -219,24 +261,27 @@ add_socket_to_set(socket_set *sa, int fd, int idx)
 int
 wait_on_socket_set(socket_set *sa, int64 usecs)
 {
+	fd_set	   *writefds = sa->has_write_fds ? &sa->write_fds : NULL;
+
 	if (usecs > 0)
 	{
 		struct timeval timeout;
 
 		timeout.tv_sec = usecs / 1000000;
 		timeout.tv_usec = usecs % 1000000;
-		return select(sa->maxfd + 1, &sa->fds, NULL, NULL, &timeout);
+		return select(sa->maxfd + 1, &sa->fds, writefds, NULL, &timeout);
 	}
 	else
 	{
-		return select(sa->maxfd + 1, &sa->fds, NULL, NULL, NULL);
+		return select(sa->maxfd + 1, &sa->fds, writefds, NULL, NULL);
 	}
 }
 
 bool
 socket_has_input(socket_set *sa, int fd, int idx)
 {
-	return (FD_ISSET(fd, &sa->fds) != 0);
+	return (FD_ISSET(fd, &sa->fds) != 0) ||
+		(sa->has_write_fds && FD_ISSET(fd, &sa->write_fds) != 0);
 }
 
 #endif							/* POLL_USING_SELECT */

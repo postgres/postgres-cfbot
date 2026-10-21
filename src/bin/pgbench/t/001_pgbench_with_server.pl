@@ -2158,10 +2158,490 @@ SELECT pg_sleep(0.005);
 }
 	});
 
-# Test standard benchmark workload suites (pgbench-b, pgbench-c, pgbench-e, pgbench-h, pgbench-ds, pgbench-htap)
+# Test Tier 1: PGBT_VECTOR, PGBT_BYTEA, vector/sparse/graph generators, and copy-on-write mutation
+$node->pgbench(
+	'-n -t 1 -Dcli_vec=[3,4,0] -Dcli_bin=\\xdeadbeef',
+	0,
+	[qr{processed: 1/1}],
+	[
+		qr{command=1.: vector \[3,4,0\]},
+		qr{command=2.: bytea \\xdeadbeef},
+		qr{command=4.: int 3\b},
+		qr{command=6.: double 5\b},
+		qr{command=9.: vector \[3,12,0\]},
+		qr{command=10.: double 12\.369},
+		qr{command=12.: double 5\b},
+		qr{command=14.: double 1\b},
+		qr{command=16.: double -32\b},
+		qr{command=24.: boolean true\b},
+		qr{command=28.: boolean true\b}
+	],
+	'pgbench PGBT_VECTOR, PGBT_BYTEA, vector/graph generators, and distance metrics',
+	{
+		'001_pgbench_tier1_types_and_generators' => q{
+\set d debug(:cli_vec)
+\set d debug(:cli_bin)
+\set vdim vector_dims(:cli_vec)
+\set d debug(:vdim)
+\set vnorm vector_norm(:cli_vec)
+\set d debug(:vnorm)
+\set v2 :cli_vec
+\set v2[1] 12.0
+\set d debug(:v2)
+\set d debug(vector_norm(:v2))
+\set dl2 vector_distance(vector(3, 4, 0), vector(0, 0, 0), 'l2')
+\set d debug(:dl2)
+\set dcos vector_distance(vector(1, 0, 0), vector(0, 1, 0), 'cosine')
+\set d debug(:dcos)
+\set dip vector_distance(vector(1, 2, 3), vector(4, 5, 6), 'ip')
+\set d debug(:dip)
+\set rv random_vector(8, -1.0, 1.0, true)
+\set gv random_vector_gaussian(8, 1.0, true)
+\set cv1 clustered_vector(8, 4, 0.0, 42, 2)
+\set cv2 clustered_vector(8, 4, 0.0, 42, 2)
+\set pv0 planted_vector(8, 100, 0.0, 42)
+\set pv1 planted_vector(8, 100, 0.25, 42)
+\set pv_ok (abs(vector_distance(:pv0, :pv1, 'l2') - 0.25) < 0.0001 and vector_distance(:cv1, :cv2, 'l2') < 0.0001)
+\set d debug(:pv_ok)
+\set sv random_sparse_vector(50, 3, 0.5, 0.5)
+\set edge rmat_edge(10, 0.57, 0.19, 0.19, 42)
+\set edge_ok (:edge[0] >= 0 and :edge[0] < 1024 and :edge[1] >= 0 and :edge[1] < 1024)
+\set d debug(:edge_ok)
+SELECT ':cli_vec'::text, ':cli_bin'::bytea, ':sv'::text;
+}
+	});
+
+# Test Tier 1: \gset_col and multi-row \aset
+$node->pgbench(
+	'-n -t 1',
+	0,
+	[qr{processed: 1/1}],
+	[
+		qr{command=2.: array \{10,20,30\}},
+		qr{command=4.: array \{a,b,c\}},
+		qr{command=6.: array \{100,200\}},
+		qr{command=7.: array \{x,y\}},
+		qr{command=9.: int 20\b}
+	],
+	'pgbench \gset_col and multi-row \aset',
+	{
+		'001_pgbench_gset_col_and_aset' => q{
+SELECT g * 10 AS id, chr(96 + g) AS lbl FROM generate_series(1, 3) g \gset_col col_ids 0
+\set d debug(:col_ids)
+SELECT g * 10 AS id, chr(96 + g) AS lbl FROM generate_series(1, 3) g \gset_col col_lbls lbl
+\set d debug(:col_lbls)
+SELECT 100 AS k, 'x'::text AS v UNION ALL SELECT 200 AS k, 'y'::text AS v \aset mr_
+\set d debug(:mr_k)
+\set d debug(:mr_v)
+\set mid :col_ids[1]
+\set d debug(:mid)
+}
+	});
+
+# Test Tier 1: Shared Read-Only Memory-Mapped Dataset Pool (.fvecs, .ivecs, .csv, .tsv) and Parallel COPY Ingestion
+my $fvecs_file = $node->basedir . '/test_vecs.fvecs';
+my $ivecs_file = $node->basedir . '/test_gt.ivecs';
+my $csv_file = $node->basedir . '/test_items.csv';
+my $tsv_file = $node->basedir . '/test_edges.tsv';
+
+{
+	open my $fh, '>:raw', $fvecs_file or die "open $fvecs_file: $!";
+	# 4 vectors of dim 3: [1,2,3], [4,5,6], [7,8,9], [10,11,12]
+	for my $r (0 .. 3)
+	{
+		my $base = $r * 3;
+		print $fh pack('l<f<3', 3, $base + 1.0, $base + 2.0, $base + 3.0);
+	}
+	close $fh;
+
+	open my $ifh, '>:raw', $ivecs_file or die "open $ivecs_file: $!";
+	# 4 rows of dim 2 int32 ground-truth IDs
+	for my $r (0 .. 3)
+	{
+		print $ifh pack('l<3', 2, $r * 10 + 1, $r * 10 + 2);
+	}
+	close $ifh;
+}
+append_to_file($csv_file, "id,name,score\n1,alpha,10.5\n2,\"hello,world\",20.5\n3,gamma,30.0\n4,delta,40.25\n");
+append_to_file($tsv_file, "src\tdst\n10\t20\n20\t30\n30\t40\n40\t10\n");
+
+$node->safe_psql('postgres',
+	'CREATE TABLE copy_vecs(id bigint, v text); '
+	  . 'CREATE TABLE copy_csv(id int, name text, score float8); '
+	  . 'CREATE TABLE copy_tsv(src int, dst int);');
+
+# Test --copy-dataset during initialization (-i -I d) with multiple worker threads (-j 2)
+$node->pgbench(
+	"-i -I d -j 2 --dataset=vecs:$fvecs_file --dataset=csv:$csv_file --copy-dataset=vecs:copy_vecs --copy-dataset=csv:copy_csv",
+	0,
+	[qr{^$}],
+	[
+		qr{copying dataset "vecs" \(4 rows\) into copy_vecs},
+		qr{copying dataset "csv" \(4 rows\) into copy_csv}
+	],
+	'pgbench --copy-dataset parallel bulk ingestion');
+
+is($node->safe_psql('postgres', 'SELECT count(*) FROM copy_vecs;'), '4', 'copy_vecs row count after --copy-dataset');
+is($node->safe_psql('postgres', "SELECT v FROM copy_vecs WHERE id = 0;"), '[1,2,3]', 'copy_vecs row 0 vector value');
+is($node->safe_psql('postgres', 'SELECT count(*) FROM copy_csv;'), '4', 'copy_csv row count after --copy-dataset');
+is($node->safe_psql('postgres', "SELECT name FROM copy_csv WHERE id = 2;"), 'hello,world', 'copy_csv quoted comma field');
+
+# Test dataset_count, dataset_get (zero-copy + copy-on-write), dataset_next_id, \dataset_bind, and \copy_dataset
+$node->pgbench(
+	"-n -c 2 -j 2 -t 1 --vector-dataset=vecs:$fvecs_file --dataset=gt:$ivecs_file --dataset=csv:$csv_file --dataset=tsv:$tsv_file",
+	0,
+	[qr{processed: 2/2}],
+	[
+		qr{int 4\b},
+		qr{vector \[1,2,3\]},
+		qr{vector \[99,2,3\]},
+		qr{array \{1,2\}},
+		qr{text 'hello,world'},
+		qr{text 'alpha'}
+	],
+	'pgbench dataset functions, \dataset_bind, and \copy_dataset',
+	{
+		'001_pgbench_datasets' => q{
+\if :client_id = 0
+\set cnt dataset_count('vecs')
+\set d debug(:cnt)
+\set v0 dataset_get('vecs', 0)
+\set d debug(:v0)
+\set v0[0] 99.0
+\set d debug(:v0)
+\set v0_orig dataset_get('vecs', 0)
+\set d debug(:v0_orig)
+\set gt0 dataset_get('gt', 0)
+\set d debug(:gt0)
+\set c1 dataset_get('csv', 1, 1)
+\set d debug(:c1)
+\dataset_bind csv 0 row_id row_name row_score
+\set d debug(:row_name)
+\endif
+\copy_dataset tsv copy_tsv
+}
+	});
+
+is($node->safe_psql('postgres', 'SELECT count(*) FROM copy_tsv;'), '4', 'copy_tsv row count after parallel \copy_dataset');
+$node->safe_psql('postgres', 'DROP TABLE copy_vecs, copy_csv, copy_tsv;');
+
+# Test Tier 2 Pillar 2: Global Monotonic Clock, Causal Watermarks (\wait_until, \advance_watermark, get_watermark, set_watermark), and --tcr
+$node->safe_psql('postgres', 'CREATE TABLE causal_log(seq serial, msg text);');
+
+$node->pgbench(
+	'-n -c 2 -j 2 -t 1 --tcr=10.0',
+	0,
+	[qr{processed: 2/2}],
+	[
+		qr{int 100\b},
+		qr{int 250\b}
+	],
+	'pgbench causal watermarks (\wait_until, \advance_watermark) across threads',
+	{
+		'001_pgbench_causal_watermark' => q{
+\if :client_id = 1
+\wait_until 5000 dep=100
+\set wm get_watermark()
+\set d debug(:wm)
+INSERT INTO causal_log(msg) VALUES ('c1_after_wm:' || :wm);
+\set wm2 set_watermark(250)
+\set d debug(get_watermark())
+\else
+\sleep 2 ms
+INSERT INTO causal_log(msg) VALUES ('c0_before_wm');
+\advance_watermark 100
+\endif
+}
+	});
+
+is(
+	$node->safe_psql('postgres', "SELECT string_agg(msg, ',' ORDER BY seq) FROM causal_log;"),
+	'c0_before_wm,c1_after_wm:100',
+	'cross-thread causal watermark ordering enforced by \wait_until and \advance_watermark');
+$node->safe_psql('postgres', 'DROP TABLE causal_log;');
+
+# Test Tier 2 Pillar 3: Shared Entity Reservoirs (--reservoir, \reservoir_push, \reservoir_sample, reservoir_push/sample/count)
+$node->pgbench(
+	'-n -t 1 --reservoir=orders:3',
+	0,
+	[qr{processed: 1/1}],
+	[
+		qr{command=2.: int 0\b},
+		qr{command=4.: null\b},
+		qr{command=6.: int 999\b},
+		qr{command=8.: null\b},
+		qr{command=12.: int 2\b},
+		qr{command=17.: int 3\b},
+		qr{command=20.: boolean true\b},
+		qr{command=23.: boolean true\b}
+	],
+	'pgbench shared entity reservoirs (empty handling, push, sample, ring wraparound)',
+	{
+		'001_pgbench_reservoirs' => q{
+\set c0 reservoir_count('orders')
+\set d debug(:c0)
+\set s0 reservoir_sample('orders')
+\set d debug(:s0)
+\reservoir_sample orders def_ord 999
+\set d debug(:def_ord)
+\reservoir_sample orders null_ord
+\set d debug(:null_ord)
+\reservoir_push orders 101
+\set p_ok reservoir_push('orders', 102)
+\set c2 reservoir_count('orders')
+\set d debug(:c2)
+\reservoir_push orders 103
+\reservoir_push orders 104
+\reservoir_push orders 105
+\set c3 reservoir_count('orders')
+\set d debug(:c3)
+\reservoir_sample orders samp1
+\set s1_ok (:samp1 >= 101 and :samp1 <= 105)
+\set d debug(:s1_ok)
+\set samp2 reservoir_sample('orders')
+\set s2_ok (:samp2 >= 101 and :samp2 <= 105)
+\set d debug(:s2_ok)
+SELECT :samp1, :samp2;
+}
+	});
+
+# Test Tier 2 Pillar 6: Non-blocking session lifecycle (\session_disconnect, \session_connect, --max-concurrent-sessions) and \call sub-scripts
+my $call_sub = $node->basedir . '/001_pgbench_call_sub.sql';
+my $call_err = $node->basedir . '/001_pgbench_call_err.sql';
+my $call_main = $node->basedir . '/001_pgbench_call_main.sql';
+
+append_to_file($call_sub, q{
+\set sub_res (:arg_x * 10 + :shared_v)
+SELECT :sub_res AS sub_col \gset
+});
+
+append_to_file($call_err, q{
+SELECT 1/0;
+});
+
+append_to_file($call_main, q{
+\set shared_v 7
+\call 001_pgbench_call_sub arg_x=4
+\set d debug(:sub_col)
+\set caught_sub 0
+\try
+\call 001_pgbench_call_err
+\catch '22012'
+\set caught_sub 1
+\endtry
+\set d debug(:caught_sub)
+\session_disconnect
+\session_connect db=postgres
+SELECT current_database() AS cur_db \gset
+\set d debug(:cur_db)
+});
+
+$node->pgbench(
+	"-n -t 1 -f $call_main\@100 -f $call_sub\@0 -f $call_err\@0",
+	0,
+	[
+		qr{processed: 1/1},
+		qr{001_pgbench_call_sub\.sql},
+		qr{number of expected rollbacks: 1\b}
+	],
+	[
+		qr{int 47\b},
+		qr{int 1\b},
+		qr{text 'postgres'}
+	],
+	'pgbench \call sub-scripts (arguments, error catching across frames) and non-blocking \session_disconnect / \session_connect');
+
+# Test --max-concurrent-sessions=1 with 2 clients across 2 threads
+$node->pgbench(
+	'-n -c 2 -j 2 -t 1 --max-concurrent-sessions=1',
+	0,
+	[qr{processed: 2/2}],
+	[qr{^$}],
+	'pgbench --max-concurrent-sessions=1 admission control across 2 clients',
+	{
+		'001_pgbench_max_sessions' => q{
+\session_connect
+SELECT 1;
+\session_disconnect
+}
+	});
+
+# Test Tier 3 Pillar 7: recall_at_k, ndcg_at_k, \record_recall (Forms A and B), :last_recall, and Recall@K SLA gates
+my $recall_json = $node->basedir . '/001_pgbench_recall_report.json';
+$node->pgbench(
+	"-n -t 1 --ontime-threshold=1000 --sla=recall>=0.5 --sla=recall:p50>=0.5 "
+	  . "--sla=schedule_lag:p95<=5000ms --sla=ontime_pct>=50 --json-report=$recall_json",
+	0,
+	[
+		qr{processed: 1/1},
+		qr{recall average = 0\.7500 \(stddev = 0\.2500, min = 0\.5000, max = 1\.0000, samples = 2\)},
+		qr{recall percentiles: p5 = 0\.50\d+, p50 = 0\.50\d+, p95 = 1\.0000},
+		qr{schedule lag percentiles: p50 = \d+\.\d+ ms},
+		qr{schedule on-time \(<= 1000\.0 ms\): 1/1 \(100\.000%\)},
+		qr{SLA total:recall >= 0\.5000: actual = 0\.7500 \[PASS\]},
+		qr{SLA total:recall_p50 >= 0\.5000: actual = 0\.\d+ \[PASS\]},
+		qr{SLA total:schedule_lag:p95 <= 5000\.000 ms: actual = \d+\.\d+ ms \[PASS\]},
+		qr{SLA total:ontime_pct >= 50\.00%: actual = 100\.00% \[PASS\]},
+	],
+	[
+		qr{double 1\b},
+		qr{double 0\.5\b},
+		qr{double 0\b},
+		qr{double 1\b},
+		qr{double 1\b},
+		qr{boolean true\b},
+		qr{double 0\.5\b},
+		qr{double 1\b}
+	],
+	'pgbench recall_at_k, ndcg_at_k, \record_recall, schedule_lag HDR histogram, and SLA gates (PASS)',
+	{
+		'001_pgbench_recall_and_lag' => q{
+\wait_until 0
+\set gt array(10, 20, 30, 40)
+\set ret_perf array(10, 20, 30, 40)
+\set ret_half array(20, 10, 99, 88)
+\set ret_none array(91, 92, 93, 94)
+\set empty_gt array()
+\set r_perf recall_at_k(:ret_perf, :gt, 4)
+\set d debug(:r_perf)
+\set r_half recall_at_k(:ret_half, :gt, 4)
+\set d debug(:r_half)
+\set r_none recall_at_k(:ret_none, :gt, 4)
+\set d debug(:r_none)
+\set r_empty recall_at_k(:ret_perf, :empty_gt, 4)
+\set d debug(:r_empty)
+\set n_perf ndcg_at_k(:ret_perf, :gt, 4)
+\set d debug(:n_perf)
+\set ret_rank1 array(10, 99)
+\set ret_rank2 array(99, 10)
+\set gt_single array(10, 20)
+\set n1 ndcg_at_k(:ret_rank1, :gt_single, 2)
+\set n2 ndcg_at_k(:ret_rank2, :gt_single, 2)
+\set rank_ok (:n1 > :n2)
+\set d debug(:rank_ok)
+\record_recall :ret_half :gt 4
+\set d debug(:last_recall)
+\record_recall 1.0
+\set d debug(:last_recall)
+SELECT 1;
+}
+	});
+
+my $recall_json_content = slurp_file($recall_json);
+like($recall_json_content, qr/"schedule_lag_ms":\s*\{/, 'JSON report contains schedule_lag_ms object');
+like($recall_json_content, qr/"recall":\s*\{\s*"samples":\s*2/, 'JSON report contains recall object with 2 samples');
+
+# Test failing Recall@K SLA gate returns exit status 1
+$node->pgbench(
+	'-n -t 1 --sla=recall>=0.95',
+	1,
+	[
+		qr{SLA total:recall >= 0\.9500: actual = 0\.2500 \[FAIL\]},
+	],
+	[qr{One or more SLA compliance checks failed}],
+	'pgbench Recall@K SLA violation exits with status 1',
+	{
+		'001_pgbench_recall_fail' => q{
+\record_recall 0.25
+SELECT 1;
+}
+	});
+
+# Test --replay=<trace.csv> mode with causal watermarks
+$node->safe_psql('postgres', 'CREATE TABLE replay_log(seq serial, step text);');
+my $replay_csv = $node->basedir . '/001_trace_replay.csv';
+append_to_file($replay_csv,
+	"0,0,10,INSERT INTO replay_log(step) VALUES ('step1_wm10')\n"
+  . "5,10,20,INSERT INTO replay_log(step) VALUES ('step2_after_wm10')\n"
+);
+
+$node->pgbench(
+	"-n -c 2 -j 2 -t 1 --replay=$replay_csv",
+	0,
+	[
+		qr{transaction type: <builtin: trace-replay>},
+		qr{processed: 2/2},
+	],
+	[qr{loaded dataset "replay"}],
+	'pgbench --replay trace replay with causal watermarks');
+
+is(
+	$node->safe_psql('postgres', "SELECT string_agg(step, ',' ORDER BY seq) FROM replay_log;"),
+	'step1_wm10,step2_after_wm10',
+	'--replay trace executed in causal watermark order');
+$node->safe_psql('postgres', 'TRUNCATE replay_log;');
+
+# Test --replay when total_rows % nclients != 0 (3 rows across 2 clients -> 4 tx slots)
+my $replay_odd_csv = $node->basedir . '/001_trace_replay_odd.csv';
+append_to_file($replay_odd_csv,
+	"0,0,10,INSERT INTO replay_log(step) VALUES ('odd_step1')\n"
+  . "0,10,20,INSERT INTO replay_log(step) VALUES ('odd_step2')\n"
+  . "0,20,30,INSERT INTO replay_log(step) VALUES ('odd_step3')\n"
+);
+
+$node->pgbench(
+	"-n -c 2 -j 2 --replay=$replay_odd_csv",
+	0,
+	[
+		qr{transaction type: <builtin: trace-replay>},
+		qr{processed: 4/4},
+	],
+	[qr{loaded dataset "replay"}],
+	'pgbench --replay with non-divisible row count does not wrap around');
+
+is(
+	$node->safe_psql('postgres', "SELECT string_agg(step, ',' ORDER BY seq) FROM replay_log;"),
+	'odd_step1,odd_step2,odd_step3',
+	'--replay trace with 3 rows and 2 clients executes each row exactly once');
+$node->safe_psql('postgres', 'DROP TABLE replay_log;');
+
+# Test causal watermark deadlock detection when no active client can advance the watermark
+$node->pgbench(
+	'-n -c 2 -j 2 -t 1',
+	2,
+	[],
+	[qr{no active client can advance the watermark}],
+	'pgbench detects causal watermark deadlock and aborts cleanly',
+	{
+		'001_pgbench_watermark_deadlock' => q{
+\if :client_id = 1
+\wait_until 0 WATERMARK 999 CHANNEL 2
+\endif
+SELECT 1;
+}
+	});
+
+# Test random_bytea, 3-arg random_vector with string dist, 3-arg array_generate,
+# multi-channel watermarks, and \dataset_bind AT
+my $at_csv = $node->basedir . '/001_dataset_at.csv';
+append_to_file($at_csv, "100,alpha\n200,beta\n300,gamma\n");
+
+$node->pgbench(
+	"-n -t 1 --dataset=at_ds:$at_csv",
+	0,
+	[qr{processed: 1/1}],
+	[qr{loaded dataset "at_ds"}],
+	'pgbench random_bytea, string random_vector, 3-arg array_generate, multi-channel watermarks, and dataset_bind AT',
+	{
+		'001_pgbench_pillars_extra' => q{
+\set b random_bytea(8, 16)
+\set v random_vector(4, 'gaussian', true)
+\set arr array_generate(3, 10, 20)
+\set wm1 advance_watermark(500, 1)
+\advance_watermark 600 CHANNEL 1
+\set wm1_read get_watermark(1)
+\dataset_bind at_ds AT 1 row_id row_label
+SELECT octet_length(:b::bytea) BETWEEN 8 AND 16,
+       :wm1_read = 600,
+       :row_id = 200,
+       :row_label = 'beta';
+}
+	});
+
+# Test standard benchmark workload suites (pgbench-b, pgbench-c, pgbench-e, pgbench-h, pgbench-ds, pgbench-htap, pgbench-vec, pgbench-graph)
 my $wl_dir = "$FindBin::RealBin/../workloads";
 
-for my $db (qw(wl_pgbench_b wl_pgbench_c wl_pgbench_e wl_pgbench_h wl_pgbench_ds wl_pgbench_htap))
+for my $db (qw(wl_pgbench_b wl_pgbench_c wl_pgbench_e wl_pgbench_h wl_pgbench_ds wl_pgbench_htap wl_pgbench_vec wl_pgbench_graph))
 {
 	$node->safe_psql('postgres', "CREATE DATABASE $db;");
 }
@@ -2436,7 +2916,115 @@ $node->pgbench(
 	[qr{^$}],
 	'pgbench-htap hybrid OLTP + OLAP workload execution');
 
-for my $db (qw(wl_pgbench_c wl_pgbench_e wl_pgbench_h wl_pgbench_ds wl_pgbench_htap))
+# 6. pgbench-vec parallel initialization and ANN vector workload execution
+$node->pgbench(
+	"-n -d wl_pgbench_vec -t 1 -f $wl_dir/pgbench-vec/pgbench_vec_schema.sql",
+	0,
+	[qr{processed: 1/1}],
+	[qr{^$}],
+	'pgbench-vec schema creation');
+
+$node->pgbench(
+	"-n -d wl_pgbench_vec -c 2 -j 2 -t 1 -s 1 -D num_workers=2 -f $wl_dir/pgbench-vec/pgbench_vec_init.sql",
+	0,
+	[
+		qr{processed: 2/2},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+	],
+	[qr{^$}],
+	'pgbench-vec parallel in-database initialization');
+
+$node->pgbench(
+	"-n -d wl_pgbench_vec -t 1 -f $wl_dir/pgbench-vec/pgbench_vec_constraints.sql",
+	0,
+	[qr{processed: 1/1}],
+	[qr{^$}],
+	'pgbench-vec post-load constraints');
+
+is($node->safe_psql('wl_pgbench_vec', 'SELECT count(*) FROM pgbench_vec_items;'), '200', 'pgbench-vec pgbench_vec_items count');
+
+$node->pgbench(
+	"-n -d wl_pgbench_vec -c 2 -j 2 -t 3 -s 1 --reservoir=vec_ids:256 "
+	  . "-f $wl_dir/pgbench-vec/pgbench_vec_search.sql\@60 "
+	  . "-f $wl_dir/pgbench-vec/pgbench_vec_filtered.sql\@25 "
+	  . "-f $wl_dir/pgbench-vec/pgbench_vec_insert.sql\@15 "
+	  . "--sla recall>=0.90 --sla total:p95<=60s",
+	0,
+	[
+		qr{processed: 6/6},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{SLA total:recall >= 0\.9000: actual = (?:0\.9\d+|1\.0000) \[PASS\]},
+	],
+	[qr{^$}],
+	'pgbench-vec ANN vector workload suite execution');
+
+# Also verify pgbench-vec insert script works without --reservoir (reservoir_count returns -1)
+$node->pgbench(
+	"-n -d wl_pgbench_vec -c 1 -t 2 -s 1 -f $wl_dir/pgbench-vec/pgbench_vec_insert.sql",
+	0,
+	[
+		qr{processed: 2/2},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+	],
+	[qr{^$}],
+	'pgbench-vec insert execution without --reservoir');
+
+# 7. pgbench-graph parallel initialization and LDBC-like graph workload execution
+$node->pgbench(
+	"-n -d wl_pgbench_graph -t 1 -f $wl_dir/pgbench-graph/pgbench_graph_schema.sql",
+	0,
+	[qr{processed: 1/1}],
+	[qr{^$}],
+	'pgbench-graph schema creation');
+
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 1 -s 1 -D num_workers=2 -f $wl_dir/pgbench-graph/pgbench_graph_init.sql",
+	0,
+	[
+		qr{processed: 2/2},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+	],
+	[qr{^$}],
+	'pgbench-graph parallel in-database initialization');
+
+$node->pgbench(
+	"-n -d wl_pgbench_graph -t 1 -f $wl_dir/pgbench-graph/pgbench_graph_constraints.sql",
+	0,
+	[qr{processed: 1/1}],
+	[qr{^$}],
+	'pgbench-graph post-load constraints');
+
+is($node->safe_psql('wl_pgbench_graph', 'SELECT count(*) FROM pgbench_graph_persons;'), '200', 'pgbench-graph person count');
+
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 3 -s 1 --reservoir=persons:256 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_graph_1hop.sql\@50 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_graph_2hop.sql\@30 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_graph_add_edge.sql\@20 "
+	  . "--sla total:p95<=60s",
+	0,
+	[
+		qr{processed: 6/6},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+	],
+	[qr{^$}],
+	'pgbench-graph LDBC-like graph workload suite execution');
+
+# Also verify pgbench-graph scripts work without --reservoir (reservoir_count returns -1)
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 2 -s 1 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_graph_1hop.sql\@40 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_graph_2hop.sql\@40 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_graph_add_edge.sql\@20",
+	0,
+	[
+		qr{processed: 4/4},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+	],
+	[qr{^$}],
+	'pgbench-graph workload execution without --reservoir');
+
+for my $db (qw(wl_pgbench_b wl_pgbench_c wl_pgbench_e wl_pgbench_h wl_pgbench_ds wl_pgbench_htap wl_pgbench_vec wl_pgbench_graph))
 {
 	$node->safe_psql('postgres', "DROP DATABASE $db;");
 }

@@ -27,6 +27,7 @@ extern socket_set *alloc_socket_set(int count);
 extern void free_socket_set(socket_set *sa);
 extern void clear_socket_set(socket_set *sa);
 extern void add_socket_to_set(socket_set *sa, int fd, int idx);
+extern void add_socket_to_set_ex(socket_set *sa, int fd, int idx, bool wait_write);
 extern int wait_on_socket_set(socket_set *sa, int64 usecs);
 extern bool socket_has_input(socket_set *sa, int fd, int idx);
 extern const char *socket_wait_method_name(void);

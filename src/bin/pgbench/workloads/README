@@ -12,6 +12,8 @@ features (\try ... \catch, \sleep, \if, \gset, \gset_meta, --group, --sla,
   pgbench-h/     pgbench-h (TPC-H-inspired decision support / ad-hoc analytical queries + refresh)
   pgbench-ds/    pgbench-ds (TPC-DS-inspired multi-channel retail decision support + maintenance)
   pgbench-htap/  pgbench-htap (CH-benCHmark-inspired hybrid HTAP combining pgbench-c OLTP + analytical OLAP)
+  pgbench-vec/   pgbench-vec (Vector similarity search, hybrid filtered RAG, and Recall@K telemetry)
+  pgbench-graph/ pgbench-graph (LDBC-inspired social network graph traversal, reservoirs, and causal watermarks)
 
 Trademark and Naming Note:
 --------------------------
@@ -268,3 +270,64 @@ Run simultaneous OLTP and OLAP client groups with independent SLA targets:
           --sla="oltp:p95<=5000ms" \
           --sla="olap:p95<=10000ms" \
           --json-report=htap_results.json
+
+
+6. pgbench-vec (workloads/pgbench-vec/)
+---------------------------------------
+
+Vector similarity search, hybrid filtered RAG, streaming vector ingestion, and
+first-class Recall@K / NDCG@K quality evaluation using PGBT_VECTOR, \gset_col,
+and \record_recall.
+
+Files:
+  pgbench_vec_schema.sql       pgbench_vec_items table + pgbench_vec_parse and
+                               pgbench_vec_l2_sq helper functions
+  pgbench_vec_init.sql         Parallel generator using pgbench.random_vector()
+  pgbench_vec_constraints.sql  Primary key, category/GIN tag indexes, and ANALYZE
+  pgbench_vec_search.sql       Top-K vector search + \gset_col + \record_recall
+  pgbench_vec_filtered.sql     Hybrid metadata + tag + vector similarity search
+  pgbench_vec_insert.sql       Streaming vector upsert + \advance_watermark
+
+Initialize:
+  pgbench -n -f workloads/pgbench-vec/pgbench_vec_schema.sql
+  pgbench -n -c 4 -j 4 -t 1 -D scale=1 -D num_workers=4 \
+          -f workloads/pgbench-vec/pgbench_vec_init.sql
+  pgbench -n -f workloads/pgbench-vec/pgbench_vec_constraints.sql
+
+Run with Recall@K SLA gate:
+  pgbench -n -c 4 -j 2 -T 30 -D scale=1 \
+          -f workloads/pgbench-vec/pgbench_vec_search.sql@70 \
+          -f workloads/pgbench-vec/pgbench_vec_filtered.sql@20 \
+          -f workloads/pgbench-vec/pgbench_vec_insert.sql@10 \
+          --sla="recall>=0.95" \
+          --json-report=vec_results.json
+
+
+7. pgbench-graph (workloads/pgbench-graph/)
+-------------------------------------------
+
+Modeled after LDBC Social Network Benchmark (SNB) interactive graph traversals
+and updates, exercising shared entity reservoirs (\reservoir_push,
+\reservoir_sample) and causal watermarks (\advance_watermark).
+
+Files:
+  pgbench_graph_schema.sql       pgbench_graph_persons, pgbench_graph_knows,
+                                 pgbench_graph_messages + pgbench_graph_add_edge
+  pgbench_graph_init.sql         Parallel graph vertex/edge/message generator
+  pgbench_graph_constraints.sql  Primary keys, bidirectional adjacency indexes
+  pgbench_graph_1hop.sql         1-hop neighborhood + recent posts traversal
+  pgbench_graph_2hop.sql         2-hop friend-of-friend scoring query
+  pgbench_graph_add_edge.sql     Transactional edge/post insert + reservoir push
+
+Initialize:
+  pgbench -n -f workloads/pgbench-graph/pgbench_graph_schema.sql
+  pgbench -n -c 4 -j 4 -t 1 -D scale=1 -D num_workers=4 \
+          -f workloads/pgbench-graph/pgbench_graph_init.sql
+  pgbench -n -f workloads/pgbench-graph/pgbench_graph_constraints.sql
+
+Run with shared reservoir:
+  pgbench -n -c 4 -j 2 -T 30 -D scale=1 \
+          --reservoir=persons:1024 \
+          -f workloads/pgbench-graph/pgbench_graph_1hop.sql@50 \
+          -f workloads/pgbench-graph/pgbench_graph_2hop.sql@30 \
+          -f workloads/pgbench-graph/pgbench_graph_add_edge.sql@20

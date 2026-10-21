@@ -107,8 +107,14 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	initSimpleStats(&sd->lag);
 	initSimpleStats(&sd->keying_time);
 	initSimpleStats(&sd->think_time);
+	initSimpleStats(&sd->recall);
 	sd->hist_count = 0;
 	memset(sd->hist_buckets, 0, sizeof(sd->hist_buckets));
+	sd->lag_hist_count = 0;
+	memset(sd->lag_hist_buckets, 0, sizeof(sd->lag_hist_buckets));
+	sd->scheduled_count = 0;
+	sd->ontime_count = 0;
+	memset(sd->recall_buckets, 0, sizeof(sd->recall_buckets));
 }
 
 /*
@@ -176,6 +182,7 @@ mergeStats(StatsData *acc, const StatsData *src)
 	mergeSimpleStats(&acc->lag, &src->lag);
 	mergeSimpleStats(&acc->keying_time, &src->keying_time);
 	mergeSimpleStats(&acc->think_time, &src->think_time);
+	mergeSimpleStats(&acc->recall, &src->recall);
 	acc->cnt += src->cnt;
 	acc->cnt_skipped += src->cnt_skipped;
 	acc->retries += src->retries;
@@ -187,6 +194,13 @@ mergeStats(StatsData *acc, const StatsData *src)
 	acc->hist_count += src->hist_count;
 	for (int b = 0; b < HDR_TOTAL_BUCKETS; b++)
 		acc->hist_buckets[b] += src->hist_buckets[b];
+	acc->lag_hist_count += src->lag_hist_count;
+	for (int b = 0; b < HDR_TOTAL_BUCKETS; b++)
+		acc->lag_hist_buckets[b] += src->lag_hist_buckets[b];
+	acc->scheduled_count += src->scheduled_count;
+	acc->ontime_count += src->ontime_count;
+	for (int b = 0; b < RECALL_HIST_BUCKETS; b++)
+		acc->recall_buckets[b] += src->recall_buckets[b];
 }
 
 /*
@@ -241,17 +255,13 @@ printSimpleStats(const char *prefix, const SimpleStats *ss)
 	}
 }
 
-/*
- * Compute the given latency percentile (0.0 .. 100.0) in microseconds from
- * the HDR histogram in StatsData.
- */
-double
-getLatencyPercentile(const StatsData *stats, double pct)
+static double
+getHdrHistPercentile(const int64 *buckets, int64 count, double pct, double fallback_max)
 {
 	int64		target;
 	int64		cum = 0;
 
-	if (stats->hist_count <= 0)
+	if (count <= 0)
 		return 0.0;
 
 	if (pct < 0.0)
@@ -259,17 +269,17 @@ getLatencyPercentile(const StatsData *stats, double pct)
 	if (pct > 100.0)
 		pct = 100.0;
 
-	target = (int64) ceil((pct / 100.0) * (double) stats->hist_count);
+	target = (int64) ceil((pct / 100.0) * (double) count);
 	if (target < 1)
 		target = 1;
-	if (target > stats->hist_count)
-		target = stats->hist_count;
+	if (target > count)
+		target = count;
 
 	for (int b = 0; b < HDR_TOTAL_BUCKETS; b++)
 	{
-		if (stats->hist_buckets[b] <= 0)
+		if (buckets[b] <= 0)
 			continue;
-		cum += stats->hist_buckets[b];
+		cum += buckets[b];
 		if (cum >= target)
 		{
 			if (b < HDR_SUB_COUNT)
@@ -285,8 +295,8 @@ getLatencyPercentile(const StatsData *stats, double pct)
 					return (double) low;
 				else
 				{
-					int64		prev_cum = cum - stats->hist_buckets[b];
-					double		frac = (double) (target - prev_cum) / (double) stats->hist_buckets[b];
+					int64		prev_cum = cum - buckets[b];
+					double		frac = (double) (target - prev_cum) / (double) buckets[b];
 
 					return (double) low + frac * (double) width;
 				}
@@ -294,7 +304,18 @@ getLatencyPercentile(const StatsData *stats, double pct)
 		}
 	}
 
-	return stats->latency.max;
+	return fallback_max;
+}
+
+/*
+ * Compute the given latency percentile (0.0 .. 100.0) in microseconds from
+ * the HDR histogram in StatsData.
+ */
+double
+getLatencyPercentile(const StatsData *stats, double pct)
+{
+	return getHdrHistPercentile(stats->hist_buckets, stats->hist_count,
+								pct, stats->latency.max);
 }
 
 void
@@ -309,5 +330,138 @@ printLatencyPercentiles(const char *prefix, const StatsData *stats)
 			   0.001 * getLatencyPercentile(stats, 95.0),
 			   0.001 * getLatencyPercentile(stats, 99.0),
 			   0.001 * getLatencyPercentile(stats, 99.9));
+	}
+}
+
+/*
+ * Record a schedule lag / replay drift sample (in microseconds) into the lag
+ * HDR histogram and on-time counter of StatsData.
+ *
+ * Per Pitfall #8, negative lag values (when a client begins slightly ahead of
+ * its scheduled timestamp) are explicitly clamped to 0 BEFORE casting to uint64
+ * and calling pg_leftmost_one_pos64(), preventing signed-to-unsigned wraparound
+ * to UINT64_MAX.
+ */
+void
+addToLagStats(StatsData *sd, double lag_usec, double ontime_thresh_usec)
+{
+	uint64		u = (lag_usec > 0.0) ? (uint64) llround(lag_usec) : 0;
+	int			idx;
+
+	if (u < HDR_SUB_COUNT)
+		idx = (int) u;
+	else
+	{
+		int			msb = pg_leftmost_one_pos64(u);
+		int			octave = msb - HDR_SUB_BITS;
+
+		if (octave > HDR_MAX_OCTAVE)
+			idx = HDR_TOTAL_BUCKETS - 1;
+		else
+		{
+			int			sub = (int) ((u >> octave) & (HDR_SUB_COUNT - 1));
+
+			idx = ((octave + 1) << HDR_SUB_BITS) | sub;
+		}
+	}
+
+	sd->lag_hist_buckets[idx]++;
+	sd->lag_hist_count++;
+	sd->scheduled_count++;
+	if (lag_usec <= ontime_thresh_usec)
+		sd->ontime_count++;
+}
+
+double
+getLagPercentile(const StatsData *stats, double pct)
+{
+	return getHdrHistPercentile(stats->lag_hist_buckets, stats->lag_hist_count,
+								pct, stats->lag.max > 0.0 ? stats->lag.max : 0.0);
+}
+
+void
+printLagPercentiles(const char *prefix, const StatsData *stats)
+{
+	if (stats->lag_hist_count > 0)
+	{
+		printf("%s: p50 = %.3f ms, p90 = %.3f ms, p95 = %.3f ms, p99 = %.3f ms, p99.9 = %.3f ms\n",
+			   prefix,
+			   0.001 * getLagPercentile(stats, 50.0),
+			   0.001 * getLagPercentile(stats, 90.0),
+			   0.001 * getLagPercentile(stats, 95.0),
+			   0.001 * getLagPercentile(stats, 99.0),
+			   0.001 * getLagPercentile(stats, 99.9));
+	}
+}
+
+void
+addToRecallStats(StatsData *sd, double recall_val)
+{
+	double		clamped = recall_val;
+	int			b;
+
+	if (clamped < 0.0)
+		clamped = 0.0;
+	if (clamped > 1.0)
+		clamped = 1.0;
+
+	addToSimpleStats(&sd->recall, clamped);
+	b = (int) floor(clamped * 100.0 + 0.5);
+	if (b < 0)
+		b = 0;
+	if (b >= RECALL_HIST_BUCKETS)
+		b = RECALL_HIST_BUCKETS - 1;
+	sd->recall_buckets[b]++;
+}
+
+double
+getRecallPercentile(const StatsData *stats, double pct)
+{
+	int64		target;
+	int64		cum = 0;
+
+	if (stats->recall.count <= 0)
+		return 0.0;
+
+	if (pct < 0.0)
+		pct = 0.0;
+	if (pct > 100.0)
+		pct = 100.0;
+
+	target = (int64) ceil((pct / 100.0) * (double) stats->recall.count);
+	if (target < 1)
+		target = 1;
+	if (target > stats->recall.count)
+		target = stats->recall.count;
+
+	for (int b = 0; b < RECALL_HIST_BUCKETS; b++)
+	{
+		if (stats->recall_buckets[b] <= 0)
+			continue;
+		cum += stats->recall_buckets[b];
+		if (cum >= target)
+			return (double) b / 100.0;
+	}
+
+	return stats->recall.max;
+}
+
+void
+printRecallStats(const char *prefix, const StatsData *stats)
+{
+	if (stats->recall.count > 0)
+	{
+		double		avg = stats->recall.sum / stats->recall.count;
+		double		var = (stats->recall.sum2 / stats->recall.count) - (avg * avg);
+		double		stddev = (var > 0.0) ? sqrt(var) : 0.0;
+
+		printf("%s average = %.4f (stddev = %.4f, min = %.4f, max = %.4f, samples = " INT64_FORMAT ")\n",
+			   prefix, avg, stddev, stats->recall.min, stats->recall.max,
+			   stats->recall.count);
+		printf("%s percentiles: p5 = %.4f, p50 = %.4f, p95 = %.4f\n",
+			   prefix,
+			   getRecallPercentile(stats, 5.0),
+			   getRecallPercentile(stats, 50.0),
+			   getRecallPercentile(stats, 95.0));
 	}
 }

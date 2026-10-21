@@ -375,6 +375,25 @@ makeVariableValue(Variable *var)
 			return false;
 		}
 	}
+	else if (slen >= 3 && var->svalue[0] == '[' && var->svalue[slen - 1] == ']')
+	{
+		if (!parseVectorLiteral(var->svalue, &var->value))
+		{
+			pg_log_error("malformed variable \"%s\" value: \"%s\"",
+						 var->name, var->svalue);
+			return false;
+		}
+	}
+	else if (slen >= 2 && var->svalue[0] == '\\' &&
+			 (var->svalue[1] == 'x' || var->svalue[1] == 'X'))
+	{
+		if (!parseByteaLiteral(var->svalue, &var->value))
+		{
+			pg_log_error("malformed variable \"%s\" value: \"%s\"",
+						 var->name, var->svalue);
+			return false;
+		}
+	}
 	else						/* type should be double */
 	{
 		double		dv;
@@ -552,8 +571,10 @@ putVariableInt(Variables *variables, const char *context, const char *name,
 }
 
 /*
- * Assign a value to an element of an array variable at 0-based index.
- * Returns false on failure (undefined variable, not an array, or out of bounds).
+ * Assign a value to an element of an array, vector, or bytea variable at
+ * 0-based index.
+ * Returns false on failure (undefined variable, non-subscriptable type, or
+ * out of bounds).
  */
 bool
 putVariableArrayElement(Variables *variables, const char *context,
@@ -561,7 +582,6 @@ putVariableArrayElement(Variables *variables, const char *context,
 						const PgBenchValue *value)
 {
 	Variable   *var;
-	PgBenchValue copy;
 
 	var = lookupVariable(variables, name);
 	if (var == NULL)
@@ -573,22 +593,89 @@ putVariableArrayElement(Variables *variables, const char *context,
 	if (!makeVariableValue(var))
 		return false;
 
-	if (var->value.type != PGBT_ARRAY)
+	if (var->value.type == PGBT_ARRAY)
+	{
+		PgBenchValue copy;
+
+		if (index < 0 || index >= var->value.u.aval.nelems)
+		{
+			pg_log_error("%s: array index " INT64_FORMAT " out of bounds for variable \"%s\" (length %d)",
+						 context, index, name, var->value.u.aval.nelems);
+			return false;
+		}
+
+		copyValue(&copy, value);
+		freeValue(&var->value.u.aval.elems[index]);
+		var->value.u.aval.elems[index] = copy;
+	}
+	else if (var->value.type == PGBT_VECTOR)
+	{
+		double		dval;
+		float	   *mutable_elems;
+
+		if (index < 0 || index >= var->value.u.vval.dim)
+		{
+			pg_log_error("%s: vector index " INT64_FORMAT " out of bounds for variable \"%s\" (dim %d)",
+						 context, index, name, var->value.u.vval.dim);
+			return false;
+		}
+
+		if (!coerceToDouble(value, &dval))
+			return false;
+
+		/* Copy-on-write if vector currently points into read-only mmap */
+		if (var->value.u.vval.is_borrowed)
+		{
+			int			dim = var->value.u.vval.dim;
+			float	   *new_elems = pg_malloc_array(float, Max(dim, 1));
+
+			if (dim > 0)
+				memcpy(new_elems, var->value.u.vval.elems, sizeof(float) * (size_t) dim);
+			var->value.u.vval.elems = new_elems;
+			var->value.u.vval.is_borrowed = false;
+		}
+
+		mutable_elems = unconstify(float *, var->value.u.vval.elems);
+		mutable_elems[index] = (float) dval;
+	}
+	else if (var->value.type == PGBT_BYTEA)
+	{
+		int64		ival;
+		uint8	   *mutable_data;
+
+		if (index < 0 || index >= var->value.u.byval.len)
+		{
+			pg_log_error("%s: bytea index " INT64_FORMAT " out of bounds for variable \"%s\" (length %d)",
+						 context, index, name, var->value.u.byval.len);
+			return false;
+		}
+
+		if (!coerceToInt(value, &ival) || ival < 0 || ival > 255)
+		{
+			pg_log_error("%s: bytea element value must be in range [0, 255]", context);
+			return false;
+		}
+
+		/* Copy-on-write if bytea currently points into read-only mmap */
+		if (var->value.u.byval.is_borrowed)
+		{
+			int			len = var->value.u.byval.len;
+			uint8	   *new_data = pg_malloc_array(uint8, Max(len, 1));
+
+			if (len > 0)
+				memcpy(new_data, var->value.u.byval.data, (size_t) len);
+			var->value.u.byval.data = new_data;
+			var->value.u.byval.is_borrowed = false;
+		}
+
+		mutable_data = unconstify(uint8 *, var->value.u.byval.data);
+		mutable_data[index] = (uint8) ival;
+	}
+	else
 	{
 		pg_log_error("%s: variable \"%s\" is not an array", context, name);
 		return false;
 	}
-
-	if (index < 0 || index >= var->value.u.aval.nelems)
-	{
-		pg_log_error("%s: array index " INT64_FORMAT " out of bounds for variable \"%s\" (length %d)",
-					 context, index, name, var->value.u.aval.nelems);
-		return false;
-	}
-
-	copyValue(&copy, value);
-	freeValue(&var->value.u.aval.elems[index]);
-	var->value.u.aval.elems[index] = copy;
 
 	/* Invalidate cached string representation */
 	free(var->svalue);
@@ -755,7 +842,10 @@ assignVariables(Variables *variables, char *sql)
 		{
 			size_t		slen = strlen(var->svalue);
 
-			if (slen >= 2 && var->svalue[0] == '{' && var->svalue[slen - 1] == '}')
+			if ((slen >= 2 && var->svalue[0] == '{' && var->svalue[slen - 1] == '}') ||
+				(slen >= 3 && var->svalue[0] == '[' && var->svalue[slen - 1] == ']') ||
+				(slen >= 2 && var->svalue[0] == '\\' &&
+				 (var->svalue[1] == 'x' || var->svalue[1] == 'X')))
 				(void) makeVariableValue(var);
 		}
 		val = getVariable(variables, name);
@@ -769,7 +859,9 @@ assignVariables(Variables *variables, char *sql)
 		if (var != NULL &&
 			(var->value.type == PGBT_TEXT ||
 			 var->value.type == PGBT_TIMESTAMP ||
-			 var->value.type == PGBT_ARRAY))
+			 var->value.type == PGBT_ARRAY ||
+			 var->value.type == PGBT_VECTOR ||
+			 var->value.type == PGBT_BYTEA))
 		{
 			PQExpBufferData qbuf;
 
@@ -816,6 +908,10 @@ valueTypeName(const PgBenchValue *pval)
 		return "timestamp";
 	else if (pval->type == PGBT_ARRAY)
 		return "array";
+	else if (pval->type == PGBT_VECTOR)
+		return "vector";
+	else if (pval->type == PGBT_BYTEA)
+		return "bytea";
 	else
 	{
 		/* internal error, should never get there */
@@ -865,6 +961,10 @@ valueTruth(const PgBenchValue *pval)
 			return pval->u.tval != 0;
 		case PGBT_ARRAY:
 			return pval->u.aval.nelems > 0;
+		case PGBT_VECTOR:
+			return pval->u.vval.dim > 0;
+		case PGBT_BYTEA:
+			return pval->u.byval.len > 0;
 		default:
 			/* internal error, unexpected type */
 			Assert(0);
@@ -901,7 +1001,7 @@ coerceToInt(const PgBenchValue *pval, int64 *ival)
 		pg_log_error("cannot coerce %s to int", valueTypeName(pval));
 		return false;
 	}
-	else						/* BOOLEAN, NULL, TIMESTAMP, ARRAY */
+	else						/* BOOLEAN, NULL, TIMESTAMP, ARRAY, VECTOR, BYTEA */
 	{
 		pg_log_error("cannot coerce %s to int", valueTypeName(pval));
 		return false;
@@ -929,7 +1029,7 @@ coerceToDouble(const PgBenchValue *pval, double *dval)
 		pg_log_error("cannot coerce %s to double", valueTypeName(pval));
 		return false;
 	}
-	else						/* BOOLEAN, NULL, TIMESTAMP, ARRAY */
+	else						/* BOOLEAN, NULL, TIMESTAMP, ARRAY, VECTOR, BYTEA */
 	{
 		pg_log_error("cannot coerce %s to double", valueTypeName(pval));
 		return false;
@@ -1042,6 +1142,70 @@ setArrayValue(PgBenchValue *pv, const PgBenchValue *elems, int nelems)
 	}
 }
 
+/*
+ * assign a float32 vector value.
+ * When is_borrowed is true, stores elems pointer directly (zero-copy into
+ * persistent read-only mmap).  When is_borrowed is false, allocates and
+ * copies dim floats onto the heap.
+ */
+void
+setVectorValue(PgBenchValue *pv, const float *elems, int dim, bool is_borrowed)
+{
+	pv->type = PGBT_VECTOR;
+	pv->u.vval.dim = dim;
+	pv->u.vval.is_borrowed = is_borrowed;
+	if (is_borrowed)
+	{
+		pv->u.vval.elems = elems;
+	}
+	else if (dim > 0)
+	{
+		float	   *copy = pg_malloc_array(float, dim);
+
+		if (elems != NULL)
+			memcpy(copy, elems, sizeof(float) * (size_t) dim);
+		else
+			memset(copy, 0, sizeof(float) * (size_t) dim);
+		pv->u.vval.elems = copy;
+	}
+	else
+	{
+		pv->u.vval.elems = NULL;
+	}
+}
+
+/*
+ * assign a bytea value.
+ * When is_borrowed is true, stores data pointer directly (zero-copy into
+ * persistent read-only mmap).  When is_borrowed is false, allocates and
+ * copies len bytes onto the heap.
+ */
+void
+setByteaValue(PgBenchValue *pv, const uint8 *data, int len, bool is_borrowed)
+{
+	pv->type = PGBT_BYTEA;
+	pv->u.byval.len = len;
+	pv->u.byval.is_borrowed = is_borrowed;
+	if (is_borrowed)
+	{
+		pv->u.byval.data = data;
+	}
+	else if (len > 0)
+	{
+		uint8	   *copy = pg_malloc_array(uint8, len);
+
+		if (data != NULL)
+			memcpy(copy, data, (size_t) len);
+		else
+			memset(copy, 0, (size_t) len);
+		pv->u.byval.data = copy;
+	}
+	else
+	{
+		pv->u.byval.data = NULL;
+	}
+}
+
 /* free any heap storage owned by a PgBenchValue and reset to PGBT_NO_VALUE */
 void
 freeValue(PgBenchValue *pv)
@@ -1062,6 +1226,22 @@ freeValue(PgBenchValue *pv)
 		pv->u.aval.elems = NULL;
 		pv->u.aval.nelems = 0;
 	}
+	else if (pv->type == PGBT_VECTOR)
+	{
+		if (!pv->u.vval.is_borrowed && pv->u.vval.elems != NULL)
+			pg_free(unconstify(float *, pv->u.vval.elems));
+		pv->u.vval.elems = NULL;
+		pv->u.vval.dim = 0;
+		pv->u.vval.is_borrowed = false;
+	}
+	else if (pv->type == PGBT_BYTEA)
+	{
+		if (!pv->u.byval.is_borrowed && pv->u.byval.data != NULL)
+			pg_free(unconstify(uint8 *, pv->u.byval.data));
+		pv->u.byval.data = NULL;
+		pv->u.byval.len = 0;
+		pv->u.byval.is_borrowed = false;
+	}
 	pv->type = PGBT_NO_VALUE;
 }
 
@@ -1073,6 +1253,12 @@ copyValue(PgBenchValue *dest, const PgBenchValue *src)
 		setTextValue(dest, src->u.sval);
 	else if (src->type == PGBT_ARRAY)
 		setArrayValue(dest, src->u.aval.elems, src->u.aval.nelems);
+	else if (src->type == PGBT_VECTOR)
+		setVectorValue(dest, src->u.vval.elems, src->u.vval.dim,
+					   src->u.vval.is_borrowed);
+	else if (src->type == PGBT_BYTEA)
+		setByteaValue(dest, src->u.byval.data, src->u.byval.len,
+					  src->u.byval.is_borrowed);
 	else
 		*dest = *src;
 }
@@ -1155,6 +1341,44 @@ formatValue(const PgBenchValue *pv)
 			formatTimestampValue(pv->u.tval, stringform, sizeof(stringform));
 			return pg_strdup(stringform);
 
+		case PGBT_VECTOR:
+			{
+				int			dim = pv->u.vval.dim;
+				size_t		buflen = (size_t) Max(dim, 1) * 16 + 8;
+				char	   *buf = (char *) pg_malloc(buflen);
+
+				if (pgbench_format_vector(pv->u.vval.elems, dim, buf, buflen) == 0 &&
+					dim > 0)
+				{
+					/* Fallback with larger allocation if needed */
+					buflen = (size_t) dim * 32 + 8;
+					buf = (char *) pg_realloc(buf, buflen);
+					(void) pgbench_format_vector(pv->u.vval.elems, dim, buf, buflen);
+				}
+				return buf;
+			}
+
+		case PGBT_BYTEA:
+			{
+				static const char hex_chars[] = "0123456789abcdef";
+				int			len = pv->u.byval.len;
+				const uint8 *data = pv->u.byval.data;
+				char	   *buf = (char *) pg_malloc((size_t) len * 2 + 3);
+				char	   *dst = buf;
+
+				*dst++ = '\\';
+				*dst++ = 'x';
+				for (int i = 0; i < len; i++)
+				{
+					uint8		b = data[i];
+
+					*dst++ = hex_chars[(b >> 4) & 0x0f];
+					*dst++ = hex_chars[b & 0x0f];
+				}
+				*dst = '\0';
+				return buf;
+			}
+
 		case PGBT_ARRAY:
 			{
 				PQExpBufferData buf;
@@ -1183,7 +1407,10 @@ formatValue(const PgBenchValue *pv)
 					{
 						char	   *s = formatValue(elem);
 
-						if ((elem->type == PGBT_TEXT || elem->type == PGBT_TIMESTAMP) &&
+						if ((elem->type == PGBT_TEXT ||
+							 elem->type == PGBT_TIMESTAMP ||
+							 elem->type == PGBT_VECTOR ||
+							 elem->type == PGBT_BYTEA) &&
 							arrayElemNeedsQuotes(s))
 						{
 							appendPQExpBufferChar(&buf, '"');
@@ -1445,3 +1672,101 @@ fail:
 	pg_free(elems);
 	return false;
 }
+
+/*
+ * Parse a pgvector literal "[f1,f2,...]" into a PGBT_VECTOR value.
+ */
+bool
+parseVectorLiteral(const char *str, PgBenchValue *vval)
+{
+	int			dim;
+	float	   *elems;
+
+	if (!pgbench_parse_vector_count(str, &dim) || dim <= 0)
+		return false;
+
+	elems = pg_malloc_array(float, dim);
+	if (!pgbench_parse_vector_into(str, elems, dim))
+	{
+		pg_free(elems);
+		return false;
+	}
+
+	vval->type = PGBT_VECTOR;
+	vval->u.vval.dim = dim;
+	vval->u.vval.is_borrowed = false;
+	vval->u.vval.elems = elems;
+	return true;
+}
+
+/*
+ * Helper to decode a single hex character into 0..15, or -1 if invalid.
+ */
+static inline int
+hexCharVal(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * Parse a PostgreSQL hex bytea literal "\x..." into a PGBT_BYTEA value.
+ */
+bool
+parseByteaLiteral(const char *str, PgBenchValue *byval)
+{
+	const char *p = str;
+	size_t		len;
+	int			nbytes;
+	uint8	   *data = NULL;
+
+	if (str == NULL)
+		return false;
+
+	while (*p && isspace((unsigned char) *p))
+		p++;
+
+	len = strlen(p);
+	while (len > 0 && isspace((unsigned char) p[len - 1]))
+		len--;
+
+	if (len < 2 || p[0] != '\\' || (p[1] != 'x' && p[1] != 'X'))
+		return false;
+
+	p += 2;
+	len -= 2;
+
+	/* Hex payload must have an even number of hex digits */
+	if ((len % 2) != 0)
+		return false;
+
+	nbytes = (int) (len / 2);
+	if (nbytes > 0)
+	{
+		data = pg_malloc_array(uint8, nbytes);
+		for (int i = 0; i < nbytes; i++)
+		{
+			int			hi = hexCharVal(p[2 * i]);
+			int			lo = hexCharVal(p[2 * i + 1]);
+
+			if (hi < 0 || lo < 0)
+			{
+				pg_free(data);
+				return false;
+			}
+			data[i] = (uint8) ((hi << 4) | lo);
+		}
+	}
+
+	byval->type = PGBT_BYTEA;
+	byval->u.byval.len = nbytes;
+	byval->u.byval.is_borrowed = false;
+	byval->u.byval.data = data;
+	return true;
+}
+

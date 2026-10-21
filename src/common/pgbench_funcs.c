@@ -398,6 +398,33 @@ pgbench_random_nstring(pg_prng_state *state, int64 min_len, int64 max_len, char 
 	buf[len] = '\0';
 }
 
+/*
+ * Generate a random binary payload of length in [min_len, max_len].
+ * Caller must provide a buffer of at least max_len bytes (when max_len > 0).
+ * Returns the generated length in bytes.
+ */
+int64
+pgbench_random_bytea(pg_prng_state *state, int64 min_len, int64 max_len, uint8 *buf)
+{
+	int64		len = pgbench_random(state, min_len, max_len);
+	int64		i = 0;
+
+	while (i + 8 <= len)
+	{
+		uint64		r = pg_prng_uint64(state);
+
+		memcpy(buf + i, &r, 8);
+		i += 8;
+	}
+	if (i < len)
+	{
+		uint64		r = pg_prng_uint64(state);
+
+		memcpy(buf + i, &r, (size_t) (len - i));
+	}
+	return len;
+}
+
 /*-------------------------------------------------------------------------
  * Date / Timestamp Helpers (microseconds since 2000-01-01 00:00:00)
  *-------------------------------------------------------------------------
@@ -864,3 +891,664 @@ pgbench_int_to_date_window(int64 base_usec, int64 val, int64 max_val,
 
 	return true;
 }
+
+/*-------------------------------------------------------------------------
+ * Multi-Modal Vector, Sparse Vector, and Graph Edge Generators
+ *-------------------------------------------------------------------------
+ */
+
+/*
+ * Normalize a float32 vector in-place onto the unit hypersphere S^{dim-1}.
+ * If the vector has zero L2 norm, leaves it unchanged.
+ */
+void
+pgbench_normalize_vector(float *vec, int dim)
+{
+	double		norm2 = 0.0;
+
+	for (int i = 0; i < dim; i++)
+		norm2 += (double) vec[i] * (double) vec[i];
+
+	if (norm2 > 0.0)
+	{
+		double		inv_norm = 1.0 / sqrt(norm2);
+
+		for (int i = 0; i < dim; i++)
+			vec[i] = (float) ((double) vec[i] * inv_norm);
+	}
+}
+
+/*
+ * Generate a uniform random float32 vector in [min_val, max_val]^dim,
+ * optionally L2-normalized to unit length.
+ */
+void
+pgbench_random_vector(pg_prng_state *state, int dim,
+					  double min_val, double max_val,
+					  bool normalize, float *out)
+{
+	double		span = max_val - min_val;
+
+	Assert(dim > 0 && dim <= PGBENCH_MAX_VECTOR_DIM);
+
+	for (int i = 0; i < dim; i++)
+		out[i] = (float) (min_val + span * pg_prng_double(state));
+
+	if (normalize)
+		pgbench_normalize_vector(out, dim);
+}
+
+/*
+ * Generate an isotropic Gaussian float32 vector N(0, sigma^2)^dim,
+ * optionally L2-normalized onto the unit hypersphere S^{dim-1}.
+ */
+void
+pgbench_random_vector_gaussian(pg_prng_state *state, int dim,
+							   double sigma, bool normalize,
+							   float *out)
+{
+	Assert(dim > 0 && dim <= PGBENCH_MAX_VECTOR_DIM);
+
+	for (int i = 0; i < dim; i++)
+		out[i] = (float) (pg_prng_double_normal(state) * sigma);
+
+	if (normalize)
+		pgbench_normalize_vector(out, dim);
+}
+
+/*
+ * Generate a clustered float32 vector around a deterministic centroid on
+ * the unit hypersphere S^{dim-1} with Gaussian perturbation sigma.
+ *
+ * When cluster_id < 0, a cluster in [0, num_clusters - 1] is chosen uniformly
+ * using state.  When cluster_id >= 0, cluster (cluster_id % num_clusters) is
+ * used directly.  Because centroids are derived deterministically via
+ * pgbench_hash_murmur2(cluster, seed), server-side initialization and
+ * client-side query generation share identical cluster geometry without
+ * storing a centroid table in memory.
+ */
+void
+pgbench_clustered_vector(pg_prng_state *state, int dim,
+						 int num_clusters, double sigma,
+						 int64 seed, int cluster_id, float *out)
+{
+	int			nclusters = (num_clusters > 0) ? num_clusters : 1;
+	int			cid;
+	uint64		cseed;
+
+	Assert(dim > 0 && dim <= PGBENCH_MAX_VECTOR_DIM);
+
+	if (cluster_id >= 0)
+		cid = cluster_id % nclusters;
+	else
+		cid = (int) pgbench_random(state, 0, nclusters - 1);
+
+	cseed = (uint64) pgbench_hash_murmur2((int64) cid,
+										  (uint64) seed ^ UINT64CONST(0x9e3779b97f4a7c15));
+
+	/* Reconstruct deterministic unit centroid c_cid on S^{dim-1} */
+	for (int i = 0; i < dim; i++)
+	{
+		uint64		h = (uint64) pgbench_hash_murmur2((int64) i, cseed);
+		double		u = ((double) (h & UINT64CONST(0x1fffffffffffff)) /
+						 (double) UINT64CONST(0x1fffffffffffff)) * 2.0 - 1.0;
+
+		out[i] = (float) u;
+	}
+	pgbench_normalize_vector(out, dim);
+
+	/* Apply Gaussian perturbation around the unit centroid and renormalize */
+	if (sigma > 0.0)
+	{
+		for (int i = 0; i < dim; i++)
+			out[i] += (float) (pg_prng_double_normal(state) * sigma);
+		pgbench_normalize_vector(out, dim);
+	}
+}
+
+/*
+ * Generate a planted vector at controlled Euclidean perturbation delta around
+ * a deterministic unit base vector for target_id and seed.
+ *
+ * When delta == 0.0, returns the exact unit base vector for (target_id, seed).
+ * When delta > 0.0, adds a random unit-norm perturbation vector scaled by
+ * delta so that the Euclidean (L2) distance from the base vector is delta.
+ */
+void
+pgbench_planted_vector(pg_prng_state *state, int dim,
+					   int64 target_id, double delta,
+					   int64 seed, float *out)
+{
+	uint64		tseed;
+
+	Assert(dim > 0 && dim <= PGBENCH_MAX_VECTOR_DIM);
+
+	tseed = (uint64) pgbench_hash_murmur2(target_id,
+										  (uint64) seed ^ UINT64CONST(0x517cc1b727220a95));
+
+	for (int i = 0; i < dim; i++)
+	{
+		uint64		h = (uint64) pgbench_hash_murmur2((int64) i, tseed);
+		double		u = ((double) (h & UINT64CONST(0x1fffffffffffff)) /
+						 (double) UINT64CONST(0x1fffffffffffff)) * 2.0 - 1.0;
+
+		out[i] = (float) u;
+	}
+	pgbench_normalize_vector(out, dim);
+
+	if (delta > 0.0)
+	{
+		pg_prng_state noise_rs;
+		uint64		nseed = pg_prng_uint64(state);
+		double		noise_norm2 = 0.0;
+
+		pg_prng_seed(&noise_rs, nseed);
+		for (int i = 0; i < dim; i++)
+		{
+			double		z = pg_prng_double_normal(&noise_rs);
+
+			noise_norm2 += z * z;
+		}
+		if (noise_norm2 > 0.0)
+		{
+			double		scale_factor = delta / sqrt(noise_norm2);
+
+			pg_prng_seed(&noise_rs, nseed);
+			for (int i = 0; i < dim; i++)
+			{
+				double		z = pg_prng_double_normal(&noise_rs);
+
+				out[i] += (float) (z * scale_factor);
+			}
+		}
+	}
+}
+
+static int
+pgbench_sparse_idx_cmp(const void *a, const void *b)
+{
+	int			ia = *(const int *) a;
+	int			ib = *(const int *) b;
+
+	return (ia > ib) - (ia < ib);
+}
+
+/*
+ * Generate a sparse vector string in pgvector sparsevec format:
+ *   "{i1:v1,i2:v2,...}/dim"
+ * where 1 <= i1 < i2 < ... <= dim are nnz unique 1-based dimension indices
+ * and v_k are uniform non-zero floats in [min_val, max_val].
+ */
+bool
+pgbench_random_sparse_vector(pg_prng_state *state, int dim,
+							 int nnz, double min_val, double max_val,
+							 char *buf, size_t buflen)
+{
+	size_t		pos = 0;
+	int			written;
+
+	if (dim <= 0 || dim > 100000000 || nnz < 0 || nnz > dim ||
+		min_val > max_val || buf == NULL || buflen < 8)
+		return false;
+
+	buf[pos++] = '{';
+
+	if (nnz > 0)
+	{
+		/*
+		 * Use Knuth's Algorithm S when dim <= 4 * nnz, Floyd's sampling +
+		 * stack insertion sort when nnz <= 256, or Floyd's sampling with an
+		 * open-addressing hash table + qsort in O(nnz log nnz) when nnz > 256.
+		 */
+		int			stack_indices[256];
+		int		   *indices = stack_indices;
+		bool		heap_alloc = false;
+
+		if (nnz > 256)
+		{
+			indices = (int *) malloc(sizeof(int) * (size_t) nnz);
+			if (indices == NULL)
+				return false;
+			heap_alloc = true;
+		}
+
+		if ((int64) nnz * 4 >= (int64) dim)
+		{
+			/* Knuth's Algorithm S: single linear scan yielding sorted indices */
+			int			needed = nnz;
+			int			out_idx = 0;
+
+			for (int d = 1; d <= dim && needed > 0; d++)
+			{
+				int			remaining = dim - d + 1;
+
+				if ((int) pg_prng_uint64_range(state, 0, remaining - 1) < needed)
+				{
+					indices[out_idx++] = d;
+					needed--;
+				}
+			}
+		}
+		else if (nnz <= 256)
+		{
+			/* Floyd's algorithm for small k-subset in [1..dim], maintained sorted */
+			int			count = 0;
+
+			for (int j = dim - nnz + 1; j <= dim; j++)
+			{
+				int			t = (int) pgbench_random(state, 1, j);
+				int			ins_val = t;
+				int			k;
+
+				for (k = 0; k < count; k++)
+				{
+					if (indices[k] == t)
+					{
+						ins_val = j;
+						break;
+					}
+					if (indices[k] > t)
+						break;
+				}
+
+				k = count;
+				while (k > 0 && indices[k - 1] > ins_val)
+				{
+					indices[k] = indices[k - 1];
+					k--;
+				}
+				indices[k] = ins_val;
+				count++;
+			}
+		}
+		else
+		{
+			/* Floyd's algorithm with open-addressing hash set + qsort: O(nnz log nnz) */
+			size_t		ht_cap = 512;
+			size_t		mask;
+			int		   *ht;
+			int			out_idx = 0;
+
+			while (ht_cap < (size_t) nnz * 2)
+				ht_cap <<= 1;
+
+			ht = (int *) calloc(ht_cap, sizeof(int));
+			if (ht == NULL)
+			{
+				free(indices);
+				return false;
+			}
+			mask = ht_cap - 1;
+
+			for (int j = dim - nnz + 1; j <= dim; j++)
+			{
+				int			t = (int) pgbench_random(state, 1, j);
+				int			ins_val = t;
+				size_t		slot = ((uint64) t * UINT64CONST(0x9e3779b97f4a7c15)) & mask;
+
+				while (ht[slot] != 0 && ht[slot] != t)
+					slot = (slot + 1) & mask;
+
+				if (ht[slot] == t)
+				{
+					ins_val = j;
+					slot = ((uint64) j * UINT64CONST(0x9e3779b97f4a7c15)) & mask;
+					while (ht[slot] != 0)
+						slot = (slot + 1) & mask;
+				}
+
+				ht[slot] = ins_val;
+				indices[out_idx++] = ins_val;
+			}
+
+			free(ht);
+			qsort(indices, (size_t) nnz, sizeof(int), pgbench_sparse_idx_cmp);
+		}
+
+		for (int i = 0; i < nnz; i++)
+		{
+			double		val = min_val + (max_val - min_val) * pg_prng_double(state);
+
+			if (fabs(val) < 1e-7)
+				val = (max_val != 0.0) ? (float) (max_val * 0.5) : 1.0;
+
+			written = snprintf(buf + pos, buflen - pos,
+							   "%s%d:%.6g",
+							   (i > 0) ? "," : "",
+							   indices[i], (double) (float) val);
+			if (written < 0 || (size_t) written >= buflen - pos)
+			{
+				if (heap_alloc)
+					free(indices);
+				return false;
+			}
+			pos += (size_t) written;
+		}
+
+		if (heap_alloc)
+			free(indices);
+	}
+
+	written = snprintf(buf + pos, buflen - pos, "}/%d", dim);
+	if (written < 0 || (size_t) written >= buflen - pos)
+		return false;
+
+	return true;
+}
+
+/*
+ * Generate a directed graph edge (src, dst) in [0, 2^scale_log2 - 1] using
+ * the Recursive Matrix (R-MAT) Kronecker model with quadrant probabilities
+ * (a, b, c, d = 1 - (a + b + c)).  When seed != 0, applies pgbench_permute
+ * to scramble vertex IDs while preserving the power-law degree distribution.
+ */
+bool
+pgbench_rmat_edge(pg_prng_state *state, int scale_log2,
+				  double a, double b, double c, int64 seed,
+				  int64 *src_out, int64 *dst_out)
+{
+	int64		src = 0;
+	int64		dst = 0;
+	double		ab = a + b;
+	double		abc = a + b + c;
+
+	if (scale_log2 < 1 || scale_log2 > 60)
+		return false;
+	if (a < 0.0 || b < 0.0 || c < 0.0 || abc > 1.000001)
+		return false;
+
+	for (int bit = scale_log2 - 1; bit >= 0; bit--)
+	{
+		double		u = pg_prng_double(state);
+
+		if (u < a)
+		{
+			/* top-left quadrant (0, 0) */
+		}
+		else if (u < ab)
+		{
+			/* top-right quadrant (0, 1) */
+			dst |= (INT64CONST(1) << bit);
+		}
+		else if (u < abc)
+		{
+			/* bottom-left quadrant (1, 0) */
+			src |= (INT64CONST(1) << bit);
+		}
+		else
+		{
+			/* bottom-right quadrant (1, 1) */
+			src |= (INT64CONST(1) << bit);
+			dst |= (INT64CONST(1) << bit);
+		}
+	}
+
+	if (seed != 0)
+	{
+		int64		num_nodes = INT64CONST(1) << scale_log2;
+
+		src = pgbench_permute(src, num_nodes, seed);
+		dst = pgbench_permute(dst, num_nodes, seed);
+	}
+
+	*src_out = src;
+	*dst_out = dst;
+	return true;
+}
+
+/*
+ * Parse a vector distance metric name ("l2", "cosine", "ip").
+ */
+bool
+pgbench_parse_vec_dist_metric(const char *metric_str,
+							  PgBenchVecDistMetric *metric_out)
+{
+	if (metric_str == NULL)
+		return false;
+
+	if (pg_strcasecmp(metric_str, "l2") == 0 ||
+		pg_strcasecmp(metric_str, "euclidean") == 0)
+	{
+		*metric_out = PGBENCH_VEC_DIST_L2;
+		return true;
+	}
+	else if (pg_strcasecmp(metric_str, "cosine") == 0 ||
+			 pg_strcasecmp(metric_str, "cos") == 0)
+	{
+		*metric_out = PGBENCH_VEC_DIST_COSINE;
+		return true;
+	}
+	else if (pg_strcasecmp(metric_str, "ip") == 0 ||
+			 pg_strcasecmp(metric_str, "inner_product") == 0 ||
+			 pg_strcasecmp(metric_str, "dot") == 0)
+	{
+		*metric_out = PGBENCH_VEC_DIST_IP;
+		return true;
+	}
+
+	return false;
+}
+
+/*
+ * Compute exact distance between two float32 vectors of dimension dim:
+ * - PGBENCH_VEC_DIST_L2: Euclidean distance sqrt(sum((v1[i] - v2[i])^2))
+ * - PGBENCH_VEC_DIST_COSINE: Cosine distance 1.0 - (v1 . v2) / (||v1|| * ||v2||)
+ * - PGBENCH_VEC_DIST_IP: Negative inner product -(v1 . v2) (matching pgvector <#>)
+ */
+double
+pgbench_vector_distance(const float *v1, const float *v2,
+						int dim, PgBenchVecDistMetric metric)
+{
+	if (dim <= 0 || v1 == NULL || v2 == NULL)
+		return 0.0;
+
+	switch (metric)
+	{
+		case PGBENCH_VEC_DIST_L2:
+			{
+				double		sum_sq = 0.0;
+
+				for (int i = 0; i < dim; i++)
+				{
+					double		diff = (double) v1[i] - (double) v2[i];
+
+					sum_sq += diff * diff;
+				}
+				return sqrt(sum_sq);
+			}
+
+		case PGBENCH_VEC_DIST_COSINE:
+			{
+				double		dot = 0.0;
+				double		norm1 = 0.0;
+				double		norm2 = 0.0;
+				double		denom;
+
+				for (int i = 0; i < dim; i++)
+				{
+					double		a = (double) v1[i];
+					double		b = (double) v2[i];
+
+					dot += a * b;
+					norm1 += a * a;
+					norm2 += b * b;
+				}
+				denom = sqrt(norm1) * sqrt(norm2);
+				if (denom == 0.0)
+					return 1.0;
+				return 1.0 - (dot / denom);
+			}
+
+		case PGBENCH_VEC_DIST_IP:
+			{
+				double		dot = 0.0;
+
+				for (int i = 0; i < dim; i++)
+					dot += (double) v1[i] * (double) v2[i];
+				return -dot;
+			}
+	}
+
+	return 0.0;
+}
+
+/*
+ * Format a float32 vector into "[v0,v1,...]" in a single pass.
+ * Returns the number of characters written (excluding NUL), or 0 if buflen
+ * is insufficient.
+ */
+size_t
+pgbench_format_vector(const float *vec, int dim, char *buf, size_t buflen)
+{
+	size_t		pos = 0;
+
+	if (buf == NULL || buflen < 4 || dim < 0)
+		return 0;
+
+	buf[pos++] = '[';
+	for (int i = 0; i < dim; i++)
+	{
+		int			written;
+
+		if (i > 0)
+		{
+			if (pos + 2 >= buflen)
+				return 0;
+			buf[pos++] = ',';
+		}
+
+		written = snprintf(buf + pos, buflen - pos, "%.6g", (double) vec[i]);
+		if (written < 0 || (size_t) written >= buflen - pos)
+			return 0;
+		pos += (size_t) written;
+	}
+
+	if (pos + 2 > buflen)
+		return 0;
+	buf[pos++] = ']';
+	buf[pos] = '\0';
+	return pos;
+}
+
+/*
+ * Validate a pgvector-style "[f1,f2,...]" literal and count its dimension.
+ * Requires at least one finite float element inside '[' and ']'.
+ */
+bool
+pgbench_parse_vector_count(const char *str, int *dim_out)
+{
+	const char *p = str;
+	int			dim = 0;
+
+	if (str == NULL)
+		return false;
+
+	while (*p != '\0' && isspace((unsigned char) *p))
+		p++;
+	if (*p != '[')
+		return false;
+	p++;
+
+	for (;;)
+	{
+		char	   *endp;
+		double		val;
+
+		while (*p != '\0' && isspace((unsigned char) *p))
+			p++;
+		if (*p == '\0' || *p == ']')
+			return false;		/* empty vector or trailing comma */
+
+		errno = 0;
+		val = strtod(p, &endp);
+		if (endp == p || errno == ERANGE || isnan(val) || isinf(val))
+			return false;
+
+		dim++;
+		if (dim > PGBENCH_MAX_VECTOR_DIM)
+			return false;
+
+		p = endp;
+		while (*p != '\0' && isspace((unsigned char) *p))
+			p++;
+
+		if (*p == ',')
+		{
+			p++;
+			continue;
+		}
+		else if (*p == ']')
+		{
+			p++;
+			break;
+		}
+		else
+			return false;
+	}
+
+	while (*p != '\0' && isspace((unsigned char) *p))
+		p++;
+	if (*p != '\0')
+		return false;
+
+	*dim_out = dim;
+	return (dim >= 1);
+}
+
+/*
+ * Parse a validated "[f1,f2,...]" literal into out[0 .. expected_dim - 1].
+ */
+bool
+pgbench_parse_vector_into(const char *str, float *out, int expected_dim)
+{
+	const char *p = str;
+	int			idx = 0;
+
+	if (str == NULL || out == NULL || expected_dim <= 0)
+		return false;
+
+	while (*p != '\0' && isspace((unsigned char) *p))
+		p++;
+	if (*p != '[')
+		return false;
+	p++;
+
+	while (idx < expected_dim)
+	{
+		char	   *endp;
+		double		val;
+
+		while (*p != '\0' && isspace((unsigned char) *p))
+			p++;
+
+		errno = 0;
+		val = strtod(p, &endp);
+		if (endp == p || errno == ERANGE || isnan(val) || isinf(val))
+			return false;
+
+		out[idx++] = (float) val;
+		p = endp;
+
+		while (*p != '\0' && isspace((unsigned char) *p))
+			p++;
+
+		if (idx < expected_dim)
+		{
+			if (*p != ',')
+				return false;
+			p++;
+		}
+		else
+		{
+			if (*p != ']')
+				return false;
+			p++;
+		}
+	}
+
+	while (*p != '\0' && isspace((unsigned char) *p))
+		p++;
+	return (*p == '\0');
+}
+
+

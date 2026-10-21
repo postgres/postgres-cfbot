@@ -1014,18 +1014,27 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
        <term><option>--sla=<replaceable>spec</replaceable></option></term>
        <listitem>
         <para>
-         Specify a latency Service Level Agreement (SLA) threshold to verify at
-         the end of the benchmark run.  This option may be repeated to enforce
-         multiple SLA rules.  <replaceable>spec</replaceable> has the form
-         <literal><replaceable>target</replaceable>:p<replaceable>percentile</replaceable>&lt;=<replaceable>value</replaceable>[us|ms|s]</literal>,
-         where <replaceable>target</replaceable> is <literal>total</literal>
-         (or <literal>overall</literal> / <literal>*</literal>), a client group
-         name, or a script name (or unambiguous substring),
-         <replaceable>percentile</replaceable> is a percentile in
-         <literal>(0, 100]</literal> (such as <literal>90</literal>,
-         <literal>95</literal>, <literal>99</literal>, or
-         <literal>99.9</literal>), and <replaceable>value</replaceable> is the
-         maximum allowed latency (default unit <literal>ms</literal>).
+         Specify a Service Level Agreement (SLA) threshold to verify at the end
+         of the benchmark run.  This option may be repeated to enforce multiple
+         SLA rules.  <replaceable>spec</replaceable> has the form
+         <literal>[<replaceable>target</replaceable>:]<replaceable>metric</replaceable>&lt;=<replaceable>value</replaceable>[us|ms|s]</literal>
+         or
+         <literal>[<replaceable>target</replaceable>:]<replaceable>metric</replaceable>&gt;=<replaceable>value</replaceable>[us|ms|s]</literal>,
+         where optional <replaceable>target</replaceable> defaults to
+         <literal>total</literal> (or <literal>overall</literal> /
+         <literal>*</literal>), a client group name, or a script name (or
+         unambiguous substring).  Supported <replaceable>metric</replaceable>
+         expressions are:
+         <itemizedlist>
+          <listitem><para><literal>p<replaceable>X</replaceable></literal> or <literal>latency:p<replaceable>X</replaceable></literal> &mdash; latency percentile in <literal>(0, 100]</literal> (default unit <literal>ms</literal>).</para></listitem>
+          <listitem><para><literal>latency_avg</literal> or <literal>avg</literal> &mdash; mean transaction latency (default unit <literal>ms</literal>).</para></listitem>
+          <listitem><para><literal>schedule_lag:p<replaceable>X</replaceable></literal> or <literal>lag:p<replaceable>X</replaceable></literal> &mdash; schedule lag percentile in <literal>(0, 100]</literal> (default unit <literal>ms</literal>).</para></listitem>
+          <listitem><para><literal>ontime_pct</literal> &mdash; percentage of scheduled transactions starting within <option>--ontime-threshold</option> (<literal>[0, 100]</literal>).</para></listitem>
+          <listitem><para><literal>recall</literal> or <literal>recall_avg</literal> &mdash; mean Recall@K recorded via <literal>\record_recall</literal> (<literal>[0.0, 1.0]</literal>).</para></listitem>
+          <listitem><para><literal>recall:p<replaceable>X</replaceable></literal> &mdash; Recall@K percentile in <literal>(0, 100]</literal> (<literal>[0.0, 1.0]</literal>).</para></listitem>
+          <listitem><para><literal>tps</literal> or <literal>qps</literal> &mdash; transactions per second.</para></listitem>
+          <listitem><para><literal>error_rate</literal> &mdash; percentage of transactions that failed (<literal>[0, 100]</literal>).</para></listitem>
+         </itemizedlist>
         </para>
         <para>
          If any evaluated SLA rule is violated, <application>pgbench</application>
@@ -1033,6 +1042,115 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
          with status 1.
         </para>
        </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-dataset">
+      <term><option>--dataset=<replaceable>name</replaceable>:<replaceable>path</replaceable>[:<replaceable>options</replaceable>]</option></term>
+      <listitem>
+       <para>
+        Load or memory-map an external CSV or TSV file into a named read-only
+        in-memory dataset accessible to all worker threads via
+        <literal>\dataset_bind</literal>, <literal>\copy_dataset</literal>,
+        <function>dataset_count</function>, <function>dataset_next_id</function>,
+        and <function>dataset_get</function>.  Optional comma-separated
+        <replaceable>options</replaceable> include <literal>format=csv|tsv</literal>,
+        <literal>header=true|false</literal>, and
+        <literal>mode=seq|cycle|random|stream</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-vector-dataset">
+      <term><option>--vector-dataset=<replaceable>name</replaceable>:<replaceable>path</replaceable></option></term>
+      <listitem>
+       <para>
+        Memory-map a binary <filename>.fvecs</filename> (float32 vectors) or
+        <filename>.ivecs</filename> (int32 ground-truth neighbor ID arrays) ANN
+        benchmark dataset file with zero heap copies.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-copy-dataset">
+      <term><option>--copy-dataset=<replaceable>dataset</replaceable>:<replaceable>table</replaceable>[:<replaceable>columns</replaceable>]</option></term>
+      <listitem>
+       <para>
+        Bulk-load an in-memory dataset directly into <replaceable>table</replaceable>
+        via <application>libpq</application>'s <command>COPY ... FROM STDIN</command>
+        streaming API during initialization.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-replay-speed">
+      <term><option>--replay-speed=<replaceable>factor</replaceable></option></term>
+      <listitem>
+       <para>
+        Scale relative timestamp offsets in <literal>\wait_until</literal> and
+        <option>--replay</option> by <literal>1 / <replaceable>factor</replaceable></literal>
+        (default <literal>1.0</literal>).  Values greater than 1 accelerate trace
+        replay; values between 0 and 1 slow it down.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-tcr">
+      <term><option>--tcr=<replaceable>factor</replaceable></option></term>
+      <listitem>
+       <para>
+        Alias for <option>--replay-speed=<replaceable>factor</replaceable></option>
+        (Time Compression Ratio, as used in LDBC SNB Interactive and BI
+        benchmarks).
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-reservoir">
+      <term><option>--reservoir=<replaceable>name</replaceable>:<replaceable>capacity</replaceable></option></term>
+      <listitem>
+       <para>
+        Pre-allocate a thread-safe shared in-memory reservoir of
+        <replaceable>capacity</replaceable> slots for cross-client producer/consumer
+        working-set coordination via <literal>\reservoir_push</literal> and
+        <literal>\reservoir_sample</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-max-concurrent-sessions">
+      <term><option>--max-concurrent-sessions=<replaceable>N</replaceable></option></term>
+      <listitem>
+       <para>
+        Bound the number of simultaneous asynchronous connection handshakes in
+        flight across a worker thread when executing
+        <literal>\session_connect</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-ontime-threshold">
+      <term><option>--ontime-threshold=<replaceable>ms</replaceable></option></term>
+      <listitem>
+       <para>
+        Specify the maximum schedule lag (in milliseconds, default
+        <literal>50.0</literal>) for a scheduled transaction (<option>--rate</option>,
+        <literal>\wait_until</literal>, or <option>--replay</option>) to be
+        classified as on-time in the console report, JSON report, and
+        <literal>ontime_pct</literal> SLA rules.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-replay">
+      <term><option>--replay=<replaceable>filename</replaceable></option></term>
+      <listitem>
+       <para>
+        Replay a timestamped SQL workload trace CSV file containing columns
+        <literal>offset_ms,session_id,dep_watermark,publish_watermark,sql</literal>.
+        Wait times and causal watermarks are enforced automatically by the
+        non-blocking client state machine.
+       </para>
+      </listitem>
      </varlistentry>
 
      <varlistentry id="pgbench-option-verbose-errors">
@@ -1319,8 +1437,18 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       </row>
 
       <row>
+       <entry> <literal>last_recall</literal> </entry>
+       <entry>most recent Recall@K score in <literal>[0.0, 1.0]</literal> computed by <literal>\record_recall</literal></entry>
+      </row>
+
+      <row>
        <entry> <literal>scale</literal> </entry>
        <entry>current scale factor</entry>
+      </row>
+
+      <row>
+       <entry> <literal>session_connected</literal> </entry>
+       <entry>boolean (<literal>1</literal> or <literal>0</literal>) indicating whether the client currently holds an open database connection after <literal>\session_connect</literal> or <literal>\session_disconnect</literal></entry>
       </row>
 
       <row>
@@ -1408,6 +1536,23 @@ SELECT 1 \;
 SELECT 2 AS two, 3 AS three \gset p_
 SELECT 4 AS four \; SELECT 5 AS five \aset
 </programlisting></para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-gset-col">
+    <term><literal>\gset_col [<replaceable>prefix</replaceable>]</literal></term>
+    <listitem>
+     <para>
+      Terminates an SQL query (in place of a semicolon) and collects each column
+      across <emphasis>all</emphasis> returned rows into a 1-dimensional
+      <type>PGBT_ARRAY</type> variable named
+      <literal>:<replaceable>prefix</replaceable><replaceable>colname</replaceable></literal>,
+      as well as setting
+      <literal>:<replaceable>prefix</replaceable>_rowcount</literal> to the
+      number of returned rows.  This is useful for capturing multi-row result
+      sets such as <literal>ORDER BY embedding &lt;=&gt; :qvec LIMIT :k</literal>
+      without requiring server-side <function>array_agg()</function>.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -1711,6 +1856,110 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
         for the results of previous statements.  See
         <xref linkend="libpq-pipeline-mode"/> for more details.
         Pipeline mode requires the use of extended query protocol.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-dataset-bind">
+    <term><literal>\dataset_bind <replaceable>dataset_name</replaceable> [AT <replaceable>row_expr</replaceable>] <replaceable>var1</replaceable> [<replaceable>var2</replaceable> ...]</literal></term>
+    <listitem>
+     <para>
+      Binds columns of a row from the in-memory dataset
+      <replaceable>dataset_name</replaceable> (loaded via <option>--dataset</option>
+      or <option>--vector-dataset</option>) into client variables
+      <replaceable>var1</replaceable>, <replaceable>var2</replaceable>, etc.
+      If <literal>AT <replaceable>row_expr</replaceable></literal> is specified,
+      the 0-based row <replaceable>row_expr</replaceable> is accessed; otherwise,
+      the next row according to the dataset's cursor mode is fetched.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-copy-dataset">
+    <term><literal>\copy_dataset <replaceable>dataset_name</replaceable> <replaceable>table_name</replaceable> [(<replaceable>col1</replaceable>, ...)] [BATCH <replaceable>batch_expr</replaceable>]</literal></term>
+    <listitem>
+     <para>
+      Streams rows from the in-memory dataset <replaceable>dataset_name</replaceable>
+      into <replaceable>table_name</replaceable> using <application>libpq</application>'s
+      <command>COPY ... FROM STDIN</command> protocol.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-wait-until">
+    <term><literal>\wait_until <replaceable>offset_ms_expr</replaceable> [WATERMARK <replaceable>dep_expr</replaceable> [CHANNEL <replaceable>chan_expr</replaceable>]]</literal></term>
+    <listitem>
+     <para>
+      Suspends the client non-blockingly in the worker thread's event loop
+      (<literal>CSTATE_WAIT_SYNC</literal>) until the benchmark elapsed time
+      reaches <literal><replaceable>offset_ms_expr</replaceable> / replay_speed</literal>
+      milliseconds and, if <literal>WATERMARK</literal> is specified, until the
+      global atomic causal watermark on channel <replaceable>chan_expr</replaceable>
+      (default <literal>0</literal>) is at least <replaceable>dep_expr</replaceable>.
+      When <replaceable>offset_ms_expr</replaceable> is non-negative, the
+      transaction's schedule lag is recorded in the schedule lag HDR histogram.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-advance-watermark">
+    <term><literal>\advance_watermark <replaceable>val_expr</replaceable> [CHANNEL <replaceable>chan_expr</replaceable>]</literal></term>
+    <listitem>
+     <para>
+      Monotonically advances the global atomic causal watermark on channel
+      <replaceable>chan_expr</replaceable> (default <literal>0</literal>) to at
+      least <replaceable>val_expr</replaceable> and wakes any worker threads
+      waiting in <literal>CSTATE_WAIT_SYNC</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-reservoir">
+    <term><literal>\reservoir_push <replaceable>res_name</replaceable> <replaceable>val1_expr</replaceable> [<replaceable>val2_expr</replaceable> ...]</literal></term>
+    <term><literal>\reservoir_sample <replaceable>res_name</replaceable> <replaceable>var1</replaceable> [<replaceable>var2</replaceable> ...]</literal></term>
+    <listitem>
+     <para>
+      Pushes a tuple of values into, or uniformly samples a tuple of values
+      from, a shared thread-safe reservoir declared with
+      <option>--reservoir</option>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-session">
+    <term><literal>\session_connect [<replaceable>conninfo_var</replaceable>]</literal></term>
+    <term><literal>\session_disconnect</literal></term>
+    <listitem>
+     <para>
+      Asynchronously opens a new database connection (using the state machine's
+      non-blocking <function>PQconnectStart</function> /
+      <function>PQconnectPoll</function> loop) or closes the client's current
+      database connection, updating <literal>:session_connected</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-call">
+    <term><literal>\call <replaceable>script_name</replaceable></literal></term>
+    <listitem>
+     <para>
+      Invokes another loaded script <replaceable>script_name</replaceable> as a
+      subroutine on the client's call stack (up to 16 levels deep) and returns
+      to the instruction following <literal>\call</literal> when the subroutine
+      completes.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-metacommand-record-recall">
+    <term><literal>\record_recall <replaceable>float_expr</replaceable></literal></term>
+    <term><literal>\record_recall <replaceable>retrieved_var</replaceable> <replaceable>truth_var</replaceable> [<replaceable>k_expr</replaceable>]</literal></term>
+    <listitem>
+     <para>
+      Records an ANN search Recall@K sample in <literal>[0.0, 1.0]</literal> for
+      the current transaction and script, sets <literal>:last_recall</literal>,
+      and accumulates into the overall, per-group, and per-script recall
+      histograms and <option>--sla</option> quality gates.
      </para>
     </listitem>
    </varlistentry>
@@ -2154,6 +2403,23 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <function>advance_watermark</function> ( <parameter>val</parameter> <optional>, <parameter>channel</parameter> </optional> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Monotonically advances the global atomic causal watermark on
+        <parameter>channel</parameter> (default <literal>0</literal>, in
+        <literal>[0, 63]</literal>) to at least <parameter>val</parameter> and
+        returns the resulting watermark value.
+       </para>
+       <para>
+        <literal>advance_watermark(42, 0)</literal>
+        <returnvalue>42</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <function>array</function> ( <replaceable>value</replaceable> <optional>, <literal>...</literal> </optional> )
         <returnvalue>array</returnvalue>
        </para>
@@ -2200,6 +2466,52 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
        <para>
         <literal>c_last(123)</literal>
         <returnvalue>oughtableese</returnvalue> (uppercase <literal>OUGHTABLEESE</literal>)
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>dataset_count</function> ( <parameter>dataset_name</parameter> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Returns the total number of rows in the named in-memory dataset.
+       </para>
+       <para>
+        <literal>dataset_count('queries')</literal>
+        <returnvalue>1000</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>dataset_get</function> ( <parameter>dataset_name</parameter>, <parameter>row_idx</parameter>, <parameter>col_idx</parameter> )
+        <returnvalue>value</returnvalue>
+       </para>
+       <para>
+        Returns the value at 0-based <parameter>row_idx</parameter> and 0-based
+        <parameter>col_idx</parameter> from the named in-memory dataset (text for
+        CSV/TSV datasets, <type>vector</type> for <filename>.fvecs</filename>,
+        or <type>array</type> for <filename>.ivecs</filename>).
+       </para>
+       <para>
+        <literal>dataset_get('queries', 0, 0)</literal>
+        <returnvalue>first row/column value</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>dataset_next_id</function> ( <parameter>dataset_name</parameter> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Atomically claims and returns the next 0-based row index from the named
+        in-memory dataset according to its configured cursor mode.
+       </para>
+       <para>
+        <literal>dataset_next_id('queries')</literal>
+        <returnvalue>0</returnvalue>
        </para></entry>
       </row>
 
@@ -2280,6 +2592,22 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
        <para>
         <literal>format_string('Brand#%d%d', 1, 2)</literal>
         <returnvalue>Brand#12</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>get_watermark</function> ( <optional> <parameter>channel</parameter> </optional> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Returns the current value of the global atomic causal watermark on
+        <parameter>channel</parameter> (default <literal>0</literal>, in
+        <literal>[0, 63]</literal>).
+       </para>
+       <para>
+        <literal>get_watermark(0)</literal>
+        <returnvalue>0</returnvalue>
        </para></entry>
       </row>
 
@@ -2419,6 +2747,21 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <function>ndcg_at_k</function> ( <parameter>retrieved</parameter>, <parameter>ground_truth</parameter> <optional>, <parameter>k</parameter> </optional> )
+        <returnvalue>double</returnvalue>
+       </para>
+       <para>
+        Computes Normalized Discounted Cumulative Gain (NDCG@K) in
+        <literal>[0.0, 1.0]</literal> between two <type>array</type> values.
+       </para>
+       <para>
+        <literal>ndcg_at_k(array(1, 2, 3), array(1, 2, 3), 3)</literal>
+        <returnvalue>1.0</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <function>nurand</function> ( <parameter>A</parameter>, <parameter>min</parameter>, <parameter>max</parameter> <optional>, <parameter>C</parameter> </optional> )
         <returnvalue>integer</returnvalue>
        </para>
@@ -2518,6 +2861,21 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <function>random_bytea</function> ( <parameter>min_len</parameter>, <parameter>max_len</parameter> )
+        <returnvalue>bytea</returnvalue>
+       </para>
+       <para>
+        Generates a random binary payload (<type>bytea</type>) of length
+        uniformly chosen in <literal>[min_len, max_len]</literal> (up to 16 MB).
+       </para>
+       <para>
+        <literal>random_bytea(16, 32)</literal>
+        <returnvalue>a 16-to-32 byte binary value</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <function>random_exponential</function> ( <parameter>lb</parameter>, <parameter>ub</parameter>, <parameter>parameter</parameter> )
         <returnvalue>integer</returnvalue>
        </para>
@@ -2563,6 +2921,24 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <function>random_vector</function> ( <parameter>dim</parameter> <optional>, <parameter>dist</parameter> <optional>, <parameter>normalize</parameter> </optional> </optional> )
+        <returnvalue>vector</returnvalue>
+       </para>
+       <para>
+        Generates a <type>float4</type> vector of <parameter>dim</parameter>
+        dimensions using distribution <parameter>dist</parameter>
+        (<literal>'gaussian'</literal>, <literal>'uniform'</literal>, or
+        <literal>'sphere'</literal>) and optional L2 normalization
+        (<parameter>normalize</parameter>, default <literal>true</literal>).
+       </para>
+       <para>
+        <literal>random_vector(128, 'gaussian', true)</literal>
+        <returnvalue>a 128-dimensional unit vector</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <function>random_zipfian</function> ( <parameter>lb</parameter>, <parameter>ub</parameter>, <parameter>parameter</parameter> )
         <returnvalue>integer</returnvalue>
        </para>
@@ -2573,6 +2949,55 @@ SELECT 4 AS four \; SELECT 5 AS five \aset
        <para>
         <literal>random_zipfian(1, 10, 1.5)</literal>
         <returnvalue>an integer between 1 and 10</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>recall_at_k</function> ( <parameter>retrieved</parameter>, <parameter>ground_truth</parameter> <optional>, <parameter>k</parameter> </optional> )
+        <returnvalue>double</returnvalue>
+       </para>
+       <para>
+        Computes set-intersection Recall@K in <literal>[0.0, 1.0]</literal>
+        between the first <parameter>k</parameter> unique elements of
+        <parameter>retrieved</parameter> and the first <parameter>k</parameter>
+        elements of <parameter>ground_truth</parameter>.
+       </para>
+       <para>
+        <literal>recall_at_k(array(1, 2, 9), array(1, 2, 3), 3)</literal>
+        <returnvalue>0.666666666666667</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>reservoir_count</function> ( <parameter>reservoir_name</parameter> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Returns the current number of valid tuples populated in the shared
+        reservoir <parameter>reservoir_name</parameter>.
+       </para>
+       <para>
+        <literal>reservoir_count('active_ids')</literal>
+        <returnvalue>42</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <function>set_watermark</function> ( <parameter>val</parameter> <optional>, <parameter>channel</parameter> </optional> )
+        <returnvalue>integer</returnvalue>
+       </para>
+       <para>
+        Unconditionally sets the global atomic causal watermark on
+        <parameter>channel</parameter> (default <literal>0</literal>, in
+        <literal>[0, 63]</literal>) to <parameter>val</parameter> and returns
+        <parameter>val</parameter>.
+       </para>
+       <para>
+        <literal>set_watermark(100, 0)</literal>
+        <returnvalue>100</returnvalue>
        </para></entry>
       </row>
 
@@ -3300,19 +3725,27 @@ statement latencies in milliseconds, failures and retries:
  </refsect2>
 
  <refsect2 id="pgbench-percentiles-sla-and-reporting">
-  <title>Latency Percentiles, Composite Metrics, and JSON Reporting</title>
+  <title>Latency Percentiles, Schedule Lag, Recall@K, and JSON Reporting</title>
 
   <para>
-   <application>pgbench</application> records transaction latencies in a
-   fixed-memory, sub-bucketed base-2 High Dynamic Range (HDR) histogram with
-   128 linear sub-buckets per power-of-2 octave (~0.78% relative resolution
-   from 0 microseconds up to 38 hours).  At the end of a benchmark run, the
-   50th, 90th, 95th, 99th, and 99.9th latency percentiles are printed for the
-   overall run, for each client group (<option>--group</option>), and for each
-   script:
+   <application>pgbench</application> records transaction latencies and
+   schedule lag times in fixed-memory, sub-bucketed base-2 High Dynamic Range
+   (HDR) histograms with 128 linear sub-buckets per power-of-2 octave (~0.78%
+   relative resolution from 0 microseconds up to 38 hours).  At the end of a
+   benchmark run, the 50th, 90th, 95th, 99th, and 99.9th latency percentiles
+   are printed for the overall run, for each client group
+   (<option>--group</option>), and for each script:
 <screen>
 latency percentiles (ms): p50 = 1.240, p90 = 2.810, p95 = 3.650, p99 = 6.120, p99.9 = 14.300
 </screen>
+   When transactions are scheduled (<option>--rate</option>,
+   <literal>\wait_until</literal>, or <option>--replay</option>),
+   <application>pgbench</application> also reports the schedule lag percentiles
+   and the percentage of scheduled transactions that started within
+   <option>--ontime-threshold</option>.  When <literal>\record_recall</literal>
+   is executed during the run, <application>pgbench</application> reports the
+   mean, standard deviation, minimum, maximum, and <literal>p50</literal> /
+   <literal>p95</literal> / <literal>p99</literal> percentiles of Recall@K.
   </para>
 
   <para>
@@ -3342,12 +3775,14 @@ latency percentiles (ms): p50 = 1.240, p90 = 2.810, p95 = 3.650, p99 = 6.120, p9
   <para>
    When one or more <option>--sla</option> options are supplied,
    <application>pgbench</application> prints an SLA compliance summary table
-   comparing each target's measured latency percentile against its configured
-   threshold, and exits with status 1 if any rule failed.  When
-   <option>--json-report=<replaceable>filename</replaceable></option> is
-   specified, all configuration parameters, overall/group/script statistics,
-   HDR latency percentiles, composite metrics, and SLA evaluations are exported
-   as a machine-readable JSON document.
+   comparing each target's measured metric (latency percentile, mean latency,
+   schedule lag percentile, on-time percentage, Recall@K, TPS, or error rate)
+   against its configured threshold, and exits with status 1 if any rule
+   failed.  When <option>--json-report=<replaceable>filename</replaceable></option>
+   is specified, all configuration parameters, overall/group/script statistics,
+   HDR latency and schedule lag percentiles, Recall@K statistics, composite
+   metrics, and SLA evaluations are exported as a machine-readable JSON
+   document.
   </para>
  </refsect2>
 

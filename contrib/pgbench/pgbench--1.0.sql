@@ -101,6 +101,16 @@ RETURNS text
 AS 'MODULE_PATHNAME', 'pgbench_random_nstring_text'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
 
+CREATE FUNCTION random_bytea(min_len bigint, max_len bigint)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'pgbench_random_bytea_bytea'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_random_bytea(min_len bigint, max_len bigint)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'pgbench_random_bytea_bytea'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
 -- Date / Timestamp Arithmetic and Window Scaling
 CREATE FUNCTION date_add(base_date text, offset_val bigint, unit text)
 RETURNS text
@@ -143,4 +153,164 @@ CREATE FUNCTION array_generate(len bigint, min_val bigint, max_val bigint)
 RETURNS bigint[]
 AS 'MODULE_PATHNAME', 'pgbench_array_generate_random'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+-- Multi-Modal Vector, Sparse Vector, and Graph Edge Generators
+CREATE FUNCTION random_vector(
+    dim integer,
+    min_val double precision DEFAULT -1.0,
+    max_val double precision DEFAULT 1.0,
+    do_normalize boolean DEFAULT true
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION random_vector(
+    dim integer,
+    dist text,
+    do_normalize boolean DEFAULT true
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_vector_dist_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_random_vector(
+    dim integer,
+    min_val double precision DEFAULT -1.0,
+    max_val double precision DEFAULT 1.0,
+    do_normalize boolean DEFAULT true
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_random_vector(
+    dim integer,
+    dist text,
+    do_normalize boolean DEFAULT true
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_vector_dist_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION random_vector_gaussian(
+    dim integer,
+    sigma double precision DEFAULT 1.0,
+    do_normalize boolean DEFAULT true
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_vector_gaussian_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_random_vector_gaussian(
+    dim integer,
+    sigma double precision DEFAULT 1.0,
+    do_normalize boolean DEFAULT true
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_vector_gaussian_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION clustered_vector(
+    dim integer,
+    num_clusters integer,
+    sigma double precision DEFAULT 0.1,
+    seed bigint DEFAULT 0,
+    cluster_id integer DEFAULT -1
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_clustered_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_clustered_vector(
+    dim integer,
+    num_clusters integer,
+    sigma double precision DEFAULT 0.1,
+    seed bigint DEFAULT 0,
+    cluster_id integer DEFAULT -1
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_clustered_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION planted_vector(
+    dim integer,
+    target_id bigint,
+    delta double precision DEFAULT 0.01,
+    seed bigint DEFAULT 0
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_planted_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_planted_vector(
+    dim integer,
+    target_id bigint,
+    delta double precision DEFAULT 0.01,
+    seed bigint DEFAULT 0
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_planted_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION random_sparse_vector(
+    dim integer,
+    nnz integer,
+    min_val double precision DEFAULT 0.1,
+    max_val double precision DEFAULT 1.0
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_sparse_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_random_sparse_vector(
+    dim integer,
+    nnz integer,
+    min_val double precision DEFAULT 0.1,
+    max_val double precision DEFAULT 1.0
+)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgbench_random_sparse_vector_text'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION rmat_edge(
+    scale_log2 integer,
+    a double precision DEFAULT 0.57,
+    b double precision DEFAULT 0.19,
+    c double precision DEFAULT 0.19,
+    seed bigint DEFAULT 0
+)
+RETURNS bigint[]
+AS 'MODULE_PATHNAME', 'pgbench_rmat_edge_record'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pgbench_rmat_edge(
+    scale_log2 integer,
+    a double precision DEFAULT 0.57,
+    b double precision DEFAULT 0.19,
+    c double precision DEFAULT 0.19,
+    seed bigint DEFAULT 0
+)
+RETURNS bigint[]
+AS 'MODULE_PATHNAME', 'pgbench_rmat_edge_record'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION vector_distance(
+    v1 text,
+    v2 text,
+    metric text DEFAULT 'l2'
+)
+RETURNS double precision
+AS 'MODULE_PATHNAME', 'pgbench_vector_distance_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgbench_vector_distance(
+    v1 text,
+    v2 text,
+    metric text DEFAULT 'l2'
+)
+RETURNS double precision
+AS 'MODULE_PATHNAME', 'pgbench_vector_distance_text'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 

@@ -19,6 +19,7 @@
 #include "commands.h"
 #include "common/int.h"
 #include "common/logging.h"
+#include "dataset.h"
 #include "engine.h"
 #include "fe_utils/conditional.h"
 #include "script.h"
@@ -26,6 +27,7 @@
 #include "variable.h"
 
 #define SHELL_COMMAND_SIZE	256 /* maximum size allowed for shell command */
+#define PGBENCH_MAX_GSET_COL_ROWS 100000	/* max rows captured by \gset_col / \aset */
 
 /*
  * Run a shell command. The result is assigned to the variable if not NULL.
@@ -180,6 +182,18 @@ allocCStatePrepared(CState *st)
 		for (numcmds = 0; script->commands[numcmds] != NULL; numcmds++)
 			;
 		st->prepared[i] = pg_malloc0_array(bool, numcmds);
+	}
+}
+
+void
+freeCStatePrepared(CState *st)
+{
+	if (st->prepared != NULL)
+	{
+		for (int i = 0; i < num_scripts; i++)
+			pg_free(st->prepared[i]);
+		pg_free(st->prepared);
+		st->prepared = NULL;
 	}
 }
 
@@ -857,6 +871,367 @@ handle_cmd_endpipeline(CState *st, Command *cmd, pg_time_usec_t *now)
 	return CSTATE_WAIT_RESULT;
 }
 
+ConnectionStateEnum
+handle_cmd_session_connect(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	const char *db_val = NULL;
+	const char *user_val = NULL;
+	int			pos_arg = 0;
+
+	for (int k = 1; k < cmd->argc; k++)
+	{
+		const char *arg = cmd->argv[k];
+		const char *target = NULL;
+		bool		is_db = false;
+		bool		is_user = false;
+
+		if (arg == NULL || *arg == '\0')
+			continue;
+
+		if (pg_strncasecmp(arg, "db=", 3) == 0)
+		{
+			target = arg + 3;
+			is_db = true;
+		}
+		else if (pg_strncasecmp(arg, "user=", 5) == 0)
+		{
+			target = arg + 5;
+			is_user = true;
+		}
+		else
+		{
+			target = arg;
+			if (pos_arg == 0)
+				is_db = true;
+			else if (pos_arg == 1)
+				is_user = true;
+			pos_arg++;
+		}
+
+		if (target != NULL && target[0] == ':' && target[1] != ':')
+		{
+			const char *vname = target + 1;
+
+			target = getVariable(&st->variables, (char *) vname);
+			if (target == NULL)
+			{
+				pg_log_error("\\session_connect: undefined variable \"%s\"", vname);
+				commandFailed(st, "session_connect", "undefined variable");
+				return CSTATE_ABORTED;
+			}
+		}
+
+		if (is_db)
+			db_val = target;
+		else if (is_user)
+			user_val = target;
+	}
+
+	if (st->con != NULL)
+	{
+		if (PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
+		{
+			commandFailed(st, "session_connect",
+						  "cannot reconnect while in pipeline mode");
+			return CSTATE_ABORTED;
+		}
+		PQfinish(st->con);
+		st->con = NULL;
+		(void) __atomic_fetch_sub(&active_sessions_count, 1, __ATOMIC_RELEASE);
+		if (max_concurrent_sessions > 0)
+			wakeWatermarkWaiters();
+	}
+	freeCStatePrepared(st);
+
+	pg_free(st->session_target_db);
+	st->session_target_db = (db_val != NULL) ? pg_strdup(db_val) : NULL;
+	pg_free(st->session_target_user);
+	st->session_target_user = (user_val != NULL) ? pg_strdup(user_val) : NULL;
+
+	return CSTATE_IDLE;
+}
+
+ConnectionStateEnum
+handle_cmd_session_disconnect(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (st->con != NULL && PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
+	{
+		commandFailed(st, "session_disconnect",
+					  "cannot disconnect while in pipeline mode");
+		return CSTATE_ABORTED;
+	}
+	return CSTATE_DISCONNECTING;
+}
+
+static int
+findScriptByName(const char *target)
+{
+	int			idx_match = -1;
+
+	if (target == NULL || *target == '\0')
+		return -1;
+
+	/* 1. Exact match on script descriptor */
+	for (int i = 0; i < num_scripts; i++)
+	{
+		if (strcmp(sql_script[i].desc, target) == 0)
+			return i;
+	}
+
+	/* 2. Exact match on basename or stem (without .sql / .pgbench) */
+	for (int i = 0; i < num_scripts; i++)
+	{
+		const char *desc = sql_script[i].desc;
+		const char *slash = strrchr(desc, '/');
+		const char *base = (slash != NULL) ? (slash + 1) : desc;
+		const char *dot;
+
+		if (strcmp(base, target) == 0)
+			return i;
+
+		dot = strrchr(base, '.');
+		if (dot != NULL &&
+			(pg_strcasecmp(dot, ".sql") == 0 || pg_strcasecmp(dot, ".pgbench") == 0))
+		{
+			size_t		stem_len = (size_t) (dot - base);
+
+			if (strlen(target) == stem_len && strncmp(base, target, stem_len) == 0)
+				return i;
+		}
+	}
+
+	/* 3. Builtin descriptor match "<builtin: ...>" or substring match */
+	for (int i = 0; i < num_scripts; i++)
+	{
+		if (strstr(sql_script[i].desc, target) != NULL)
+		{
+			if (idx_match >= 0)
+				return -2;		/* ambiguous */
+			idx_match = i;
+		}
+	}
+	if (idx_match >= 0)
+		return idx_match;
+
+	/* 4. Integer index (1-based or 0-based if valid) */
+	if (is_an_int(target))
+	{
+		int			val = atoi(target);
+
+		if (val >= 0 && val < num_scripts)
+			return val;
+	}
+
+	return -1;
+}
+
+ConnectionStateEnum
+handle_cmd_call(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	const char *target_name = cmd->argv[1];
+	int			target_script;
+	CallFrame  *frame;
+
+	if (target_name[0] == ':' && target_name[1] != ':')
+	{
+		target_name = getVariable(&st->variables, target_name + 1);
+		if (target_name == NULL)
+		{
+			pg_log_error("\\call: undefined variable \"%s\"", cmd->argv[1] + 1);
+			commandFailed(st, "call", "undefined script variable");
+			return CSTATE_ABORTED;
+		}
+	}
+
+	target_script = findScriptByName(target_name);
+	if (target_script < 0)
+	{
+		if (target_script == -2)
+			pg_log_error("\\call: ambiguous script name \"%s\"", target_name);
+		else
+			pg_log_error("\\call: unknown script \"%s\"", target_name);
+		commandFailed(st, "call", "target script not found");
+		return CSTATE_ABORTED;
+	}
+
+	if (st->call_depth >= MAX_CALL_DEPTH)
+	{
+		pg_log_error("\\call: maximum call nesting depth (%d) exceeded",
+					 MAX_CALL_DEPTH);
+		commandFailed(st, "call", "maximum \\call nesting depth exceeded");
+		return CSTATE_ABORTED;
+	}
+
+	/* Bind any optional inline var=val arguments (argv[2..argc-1]) */
+	for (int k = 2; k < cmd->argc; k++)
+	{
+		const char *arg = cmd->argv[k];
+		const char *eq = strchr(arg, '=');
+
+		if (eq != NULL && eq > arg)
+		{
+			char	   *vname = pg_malloc((eq - arg) + 1);
+			const char *val_str = eq + 1;
+			const char *vn;
+
+			memcpy(vname, arg, eq - arg);
+			vname[eq - arg] = '\0';
+			vn = (vname[0] == ':') ? (vname + 1) : vname;
+
+			if (val_str[0] == ':' && val_str[1] != ':')
+			{
+				Variable   *src = lookupVariable(&st->variables, (char *) (val_str + 1));
+
+				if (src == NULL)
+				{
+					pg_log_error("\\call: undefined variable \"%s\"", val_str + 1);
+					pg_free(vname);
+					commandFailed(st, "call", "undefined parameter variable");
+					return CSTATE_ABORTED;
+				}
+				if (src->value.type == PGBT_NO_VALUE)
+					(void) makeVariableValue(src);
+				if (!putVariableValue(&st->variables, "call", (char *) vn, &src->value))
+				{
+					pg_free(vname);
+					return CSTATE_ABORTED;
+				}
+			}
+			else
+			{
+				int64		ival;
+
+				if (strtoint64(val_str, true, &ival))
+				{
+					if (!putVariableInt(&st->variables, "call", (char *) vn, ival))
+					{
+						pg_free(vname);
+						return CSTATE_ABORTED;
+					}
+				}
+				else if (!putVariable(&st->variables, "call", (char *) vn, val_str))
+				{
+					pg_free(vname);
+					return CSTATE_ABORTED;
+				}
+			}
+			pg_free(vname);
+		}
+	}
+
+	pg_time_now_lazy(now);
+
+	/* Ensure per-script stats are collected when \call is used */
+	per_script_stats = true;
+
+	frame = &st->call_stack[st->call_depth++];
+	frame->script_idx = st->use_file;
+	frame->return_cmd = st->command + 1;
+	frame->cstack = st->cstack;
+	st->cstack = conditional_stack_create();
+	frame->loop_depth = st->loop_depth;
+	if (st->loop_depth > 0)
+		memcpy(frame->loop_stack, st->loop_stack,
+			   sizeof(ForLoopState) * st->loop_depth);
+	st->loop_depth = 0;
+	frame->try_depth = st->try_depth;
+	if (st->try_depth > 0)
+		memcpy(frame->try_stack, st->try_stack,
+			   sizeof(TryState) * st->try_depth);
+	st->try_depth = 0;
+	frame->call_begin = *now;
+
+	st->use_file = target_script;
+	st->command = 0;
+	st->next_command = -1;
+
+	return CSTATE_START_COMMAND;
+}
+
+ConnectionStateEnum
+handle_cmd_record_recall(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	double		recall_val = 0.0;
+	PgBenchValue v_rec;
+
+	if (cmd->col_target != NULL && strcmp(cmd->col_target, "VARS") == 0)
+	{
+		const char *v1_name = (cmd->argv[1][0] == ':') ? (cmd->argv[1] + 1) : cmd->argv[1];
+		const char *v2_name = (cmd->argv[2][0] == ':') ? (cmd->argv[2] + 1) : cmd->argv[2];
+		Variable   *var1 = lookupVariable(&st->variables, v1_name);
+		Variable   *var2 = lookupVariable(&st->variables, v2_name);
+		int64		k_val = 0;
+
+		if (var1 == NULL)
+		{
+			pg_log_error("\\record_recall: undefined variable \"%s\"", v1_name);
+			commandFailed(st, "record_recall", "undefined retrieved variable");
+			return CSTATE_ABORTED;
+		}
+		if (var2 == NULL)
+		{
+			pg_log_error("\\record_recall: undefined variable \"%s\"", v2_name);
+			commandFailed(st, "record_recall", "undefined ground truth variable");
+			return CSTATE_ABORTED;
+		}
+		if (var1->value.type == PGBT_NO_VALUE && !makeVariableValue(var1))
+		{
+			commandFailed(st, "record_recall", "invalid retrieved variable value");
+			return CSTATE_ABORTED;
+		}
+		if (var2->value.type == PGBT_NO_VALUE && !makeVariableValue(var2))
+		{
+			commandFailed(st, "record_recall", "invalid ground truth variable value");
+			return CSTATE_ABORTED;
+		}
+
+		if (cmd->expr != NULL)
+		{
+			PgBenchValue kv;
+
+			if (! evaluateExpr(st, cmd->expr, &kv) || !coerceToInt(&kv, &k_val))
+			{
+				commandFailed(st, "record_recall", "evaluation of k parameter failed");
+				return CSTATE_ABORTED;
+			}
+		}
+
+		if (!computeRecallOrNdcgAtK(&var1->value, &var2->value, k_val, false, &recall_val))
+		{
+			commandFailed(st, "record_recall", "could not compute recall_at_k");
+			return CSTATE_ABORTED;
+		}
+	}
+	else
+	{
+		PgBenchValue val;
+
+		if (!evaluateExpr(st, cmd->expr, &val) || !coerceToDouble(&val, &recall_val))
+		{
+			commandFailed(st, "record_recall", "evaluation of recall expression failed");
+			return CSTATE_ABORTED;
+		}
+	}
+
+	if (recall_val < 0.0)
+		recall_val = 0.0;
+	else if (recall_val > 1.0)
+		recall_val = 1.0;
+
+	memset(&v_rec, 0, sizeof(v_rec));
+	setDoubleValue(&v_rec, recall_val);
+	if (!putVariableValue(&st->variables, "record_recall", "last_recall", &v_rec))
+	{
+		commandFailed(st, "record_recall", "assignment of last_recall failed");
+		return CSTATE_ABORTED;
+	}
+
+	if (st->txn_recall_count < (int) lengthof(st->txn_recalls))
+		st->txn_recalls[st->txn_recall_count++] = recall_val;
+
+	return CSTATE_END_COMMAND;
+}
+
 /* Pluggable meta-command dispatch table */
 static const CommandDescriptor command_handlers[] = {
 	{"set", META_SET, handle_cmd_set},
@@ -878,6 +1253,16 @@ static const CommandDescriptor command_handlers[] = {
 	{"endtry", META_ENDTRY, handle_cmd_endtry},
 	{"expect_error", META_EXPECT_ERROR, handle_cmd_expect_error},
 	{"gset_meta", META_GSET_META, handle_cmd_gset_meta},
+	{"dataset_bind", META_DATASET_BIND, handle_cmd_dataset_bind},
+	{"copy_dataset", META_COPY_DATASET, handle_cmd_copy_dataset},
+	{"wait_until", META_WAIT_UNTIL, handle_cmd_wait_until},
+	{"advance_watermark", META_ADVANCE_WATERMARK, handle_cmd_advance_watermark},
+	{"reservoir_push", META_RESERVOIR_PUSH, handle_cmd_reservoir_push},
+	{"reservoir_sample", META_RESERVOIR_SAMPLE, handle_cmd_reservoir_sample},
+	{"session_connect", META_SESSION_CONNECT, handle_cmd_session_connect},
+	{"session_disconnect", META_SESSION_DISCONNECT, handle_cmd_session_disconnect},
+	{"call", META_CALL, handle_cmd_call},
+	{"record_recall", META_RECORD_RECALL, handle_cmd_record_recall},
 	{"startpipeline", META_STARTPIPELINE, handle_cmd_startpipeline},
 	{"syncpipeline", META_SYNCPIPELINE, handle_cmd_syncpipeline},
 	{"endpipeline", META_ENDPIPELINE, handle_cmd_endpipeline},
@@ -1031,9 +1416,58 @@ skipConditionalCommands(CState *st)
 }
 
 /*
+ * Parse a non-NULL PGresult cell string into a typed PgBenchValue
+ * (for \gset_col and multi-row \aset <prefix>).
+ */
+static void
+parseResultCellValue(const char *valstr, PgBenchValue *elem)
+{
+	size_t		vlen = strlen(valstr);
+	int64		ival;
+	double		dval;
+
+	if (vlen >= 2 && valstr[0] == '{' && valstr[vlen - 1] == '}' &&
+		parseArrayLiteral(valstr, elem))
+		return;
+
+	if (vlen >= 3 && valstr[0] == '[' && valstr[vlen - 1] == ']' &&
+		parseVectorLiteral(valstr, elem))
+		return;
+
+	if (vlen >= 2 && valstr[0] == '\\' &&
+		(valstr[1] == 'x' || valstr[1] == 'X') &&
+		parseByteaLiteral(valstr, elem))
+		return;
+
+	if (pg_strcasecmp(valstr, "true") == 0 || pg_strcasecmp(valstr, "t") == 0)
+	{
+		setBoolValue(elem, true);
+		return;
+	}
+	if (pg_strcasecmp(valstr, "false") == 0 || pg_strcasecmp(valstr, "f") == 0)
+	{
+		setBoolValue(elem, false);
+		return;
+	}
+	if (is_an_int(valstr) && strtoint64(valstr, true, &ival))
+	{
+		setIntValue(elem, ival);
+		return;
+	}
+	if (strtodouble(valstr, true, &dval))
+	{
+		setDoubleValue(elem, dval);
+		return;
+	}
+
+	setTextValue(elem, valstr);
+}
+
+/*
  * Store a non-NULL column value from \gset, \aset, or \gset_meta into a
- * variable, converting PostgreSQL array literals "{...}" directly into
- * PGBT_ARRAY values and non-numeric/non-boolean text values into PGBT_TEXT.
+ * variable, converting PostgreSQL array literals "{...}", pgvector literals
+ * "[...]", and hex bytea literals "\x..." directly into typed values and
+ * non-numeric/non-boolean text values into PGBT_TEXT.
  */
 static bool
 storeGSetColumnValue(Variables *variables, const char *context,
@@ -1042,8 +1476,13 @@ storeGSetColumnValue(Variables *variables, const char *context,
 	size_t		vlen = strlen(valstr);
 	PgBenchValue val;
 
-	if (vlen >= 2 && valstr[0] == '{' && valstr[vlen - 1] == '}' &&
-		parseArrayLiteral(valstr, &val))
+	if ((vlen >= 2 && valstr[0] == '{' && valstr[vlen - 1] == '}' &&
+		 parseArrayLiteral(valstr, &val)) ||
+		(vlen >= 3 && valstr[0] == '[' && valstr[vlen - 1] == ']' &&
+		 parseVectorLiteral(valstr, &val)) ||
+		(vlen >= 2 && valstr[0] == '\\' &&
+		 (valstr[1] == 'x' || valstr[1] == 'X') &&
+		 parseByteaLiteral(valstr, &val)))
 	{
 		bool		ok = putVariableValue(variables, context, varname, &val);
 
@@ -1085,7 +1524,7 @@ storeGSetColumnValue(Variables *variables, const char *context,
 }
 
 /*
- * Process \gset and \aset variable storage from query result.
+ * Process \gset, \aset, and \gset_col variable storage from query result.
  * Returns true if successful, false on error.
  */
 bool
@@ -1094,8 +1533,94 @@ processGSetResult(CState *st, Command *command, PGresult *res, bool is_last, int
 	MetaCommand meta = command->meta;
 	char	   *varprefix = command->varprefix;
 	int			ntuples = PQntuples(res);
-	const char *context = (meta == META_ASET) ? "aset" : "gset";
+	int			nfields = PQnfields(res);
+	const char *context = (meta == META_ASET) ? "aset" :
+		(meta == META_GSET_COL) ? "gset_col" : "gset";
 	int			fld;
+
+	if (meta == META_GSET_COL)
+	{
+		int			col_idx = 0;
+		PgBenchValue *elems = NULL;
+		PgBenchValue arr_val;
+		bool		ok;
+
+		if (ntuples > PGBENCH_MAX_GSET_COL_ROWS)
+		{
+			pg_log_error("client %d script %d command %d query %d: \\gset_col result row count %d exceeds maximum %d",
+						 st->id, st->use_file, st->command, qrynum,
+						 ntuples, PGBENCH_MAX_GSET_COL_ROWS);
+			st->estatus = ESTATUS_META_COMMAND_ERROR;
+			return false;
+		}
+
+		if (nfields <= 0)
+		{
+			pg_log_error("client %d script %d command %d query %d: \\gset_col query returned no columns",
+						 st->id, st->use_file, st->command, qrynum);
+			st->estatus = ESTATUS_META_COMMAND_ERROR;
+			return false;
+		}
+
+		if (command->col_target != NULL)
+		{
+			int			fnum = PQfnumber(res, command->col_target);
+
+			if (fnum >= 0)
+			{
+				col_idx = fnum;
+			}
+			else if (is_an_int(command->col_target))
+			{
+				int			idx = atoi(command->col_target);
+
+				if (idx < 0 || idx >= nfields)
+				{
+					pg_log_error("client %d script %d command %d query %d: \\gset_col column index %d out of range (0 .. %d)",
+								 st->id, st->use_file, st->command, qrynum,
+								 idx, nfields - 1);
+					st->estatus = ESTATUS_META_COMMAND_ERROR;
+					return false;
+				}
+				col_idx = idx;
+			}
+			else
+			{
+				pg_log_error("client %d script %d command %d query %d: \\gset_col unknown column \"%s\"",
+							 st->id, st->use_file, st->command, qrynum,
+							 command->col_target);
+				st->estatus = ESTATUS_META_COMMAND_ERROR;
+				return false;
+			}
+		}
+
+		if (ntuples > 0)
+		{
+			elems = pg_malloc_array(PgBenchValue, ntuples);
+			for (int r = 0; r < ntuples; r++)
+			{
+				if (PQgetisnull(res, r, col_idx))
+					setNullValue(&elems[r]);
+				else
+					parseResultCellValue(PQgetvalue(res, r, col_idx), &elems[r]);
+			}
+		}
+
+		arr_val.type = PGBT_ARRAY;
+		arr_val.u.aval.nelems = ntuples;
+		arr_val.u.aval.elems = elems;
+
+		ok = putVariableValue(&st->variables, context, varprefix, &arr_val);
+		freeValue(&arr_val);
+		if (!ok)
+		{
+			pg_log_error("client %d script %d command %d query %d: error storing into variable %s",
+						 st->id, st->use_file, st->command, qrynum, varprefix);
+			st->estatus = ESTATUS_META_COMMAND_ERROR;
+			return false;
+		}
+		return true;
+	}
 
 	if (meta == META_GSET && ntuples != 1)
 	{
@@ -1104,14 +1629,78 @@ processGSetResult(CState *st, Command *command, PGresult *res, bool is_last, int
 		st->estatus = ESTATUS_META_COMMAND_ERROR;
 		return false;
 	}
-	else if (meta == META_ASET && ntuples <= 0)
+	else if (meta == META_ASET && *varprefix == '\0' && ntuples <= 0)
 	{
-		/* skip empty result under \aset */
+		/* skip empty result under bare \aset */
+		return true;
+	}
+
+	/*
+	 * When \aset <prefix> is given a non-empty prefix, capture all returned
+	 * rows for each column into parallel PGBT_ARRAY variables
+	 * (<prefix><col> and <prefix>_<col>).
+	 */
+	if (meta == META_ASET && *varprefix != '\0')
+	{
+		if (ntuples > PGBENCH_MAX_GSET_COL_ROWS)
+		{
+			pg_log_error("client %d script %d command %d query %d: \\aset result row count %d exceeds maximum %d",
+						 st->id, st->use_file, st->command, qrynum,
+						 ntuples, PGBENCH_MAX_GSET_COL_ROWS);
+			st->estatus = ESTATUS_META_COMMAND_ERROR;
+			return false;
+		}
+
+		for (fld = 0; fld < nfields; fld++)
+		{
+			char	   *colname = PQfname(res, fld);
+			char	   *varname = psprintf("%s%s", varprefix, colname);
+			PgBenchValue *elems = NULL;
+			PgBenchValue arr_val;
+			bool		ok;
+
+			if (ntuples > 0)
+			{
+				elems = pg_malloc_array(PgBenchValue, ntuples);
+				for (int r = 0; r < ntuples; r++)
+				{
+					if (PQgetisnull(res, r, fld))
+						setNullValue(&elems[r]);
+					else
+						parseResultCellValue(PQgetvalue(res, r, fld), &elems[r]);
+				}
+			}
+
+			arr_val.type = PGBT_ARRAY;
+			arr_val.u.aval.nelems = ntuples;
+			arr_val.u.aval.elems = elems;
+
+			ok = putVariableValue(&st->variables, context, varname, &arr_val);
+			if (ok && varprefix[strlen(varprefix) - 1] != '_' &&
+				valid_variable_name(colname))
+			{
+				char	   *alt_varname = psprintf("%s_%s", varprefix, colname);
+
+				(void) putVariableValue(&st->variables, context, alt_varname, &arr_val);
+				pfree(alt_varname);
+			}
+			freeValue(&arr_val);
+
+			if (!ok)
+			{
+				pg_log_error("client %d script %d command %d query %d: error storing into variable %s",
+							 st->id, st->use_file, st->command, qrynum, varname);
+				st->estatus = ESTATUS_META_COMMAND_ERROR;
+				pfree(varname);
+				return false;
+			}
+			pfree(varname);
+		}
 		return true;
 	}
 
 	/* store results into variables */
-	for (fld = 0; fld < PQnfields(res); fld++)
+	for (fld = 0; fld < nfields; fld++)
 	{
 		char	   *colname = PQfname(res, fld);
 		char	   *varname = colname;

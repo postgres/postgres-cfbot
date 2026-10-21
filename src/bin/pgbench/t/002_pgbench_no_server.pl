@@ -264,6 +264,61 @@ my @options = (
 		'bad --sla unit',
 		'--sla total:p90<=5minutes',
 		[qr{invalid unit "minutes" in --sla specification}]
+	],
+	[
+		'bad --dataset format',
+		'--dataset bad_spec',
+		[qr{invalid --dataset specification}]
+	],
+	[
+		'nonexistent --dataset file',
+		'--dataset ds:/no/such/file.fvecs',
+		[qr{could not open dataset "ds" file}]
+	],
+	[
+		'bad --copy-dataset format',
+		'--copy-dataset bad_spec',
+		[qr{invalid --copy-dataset specification}]
+	],
+	[
+		'bad --tcr value',
+		'--tcr 0',
+		[qr{invalid replay speed / TCR value}]
+	],
+	[
+		'bad --reservoir format',
+		'--reservoir bad_spec',
+		[qr{invalid --reservoir specification}]
+	],
+	[
+		'bad --reservoir capacity',
+		'--reservoir orders:0',
+		[qr{invalid capacity "0" in --reservoir}]
+	],
+	[
+		'duplicate --reservoir name',
+		'--reservoir orders:10 --reservoir orders:20',
+		[qr{duplicate reservoir name "orders"}]
+	],
+	[
+		'bad --sla recall threshold',
+		'--sla recall>=1.5',
+		[qr{invalid recall threshold in --sla specification}]
+	],
+	[
+		'bad --sla ontime_pct threshold',
+		'--sla ontime_pct>=120',
+		[qr{invalid ontime_pct threshold in --sla specification}]
+	],
+	[
+		'bad --ontime-threshold value',
+		'--ontime-threshold -5',
+		[qr{invalid on-time threshold value}]
+	],
+	[
+		'nonexistent --replay file',
+		'--replay /no/such/trace.csv',
+		[qr{could not open dataset "replay" file}]
 	],);
 
 for my $o (@options)
@@ -457,6 +512,61 @@ my @script_tests = (
 		'think_time invalid unit',
 		[qr{unrecognized time unit}],
 		{ 'think-bad-unit.sql' => "\\think_time 10 hours\n" }
+	],
+	[
+		'gset_col alone',
+		[qr{\\gset_col must follow an SQL command}],
+		{ 'gset-col-alone.sql' => "\\gset_col v\n" }
+	],
+	[
+		'gset_col missing argument',
+		[qr{missing variable name argument in command "gset_col"}],
+		{ 'gset-col-noarg.sql' => "SELECT 1 \\gset_col\n" }
+	],
+	[
+		'dataset_bind missing argument',
+		[qr{\\dataset_bind requires}],
+		{ 'dataset-bind-noarg.sql' => "\\dataset_bind ds\n" }
+	],
+	[
+		'copy_dataset missing argument',
+		[qr{\\copy_dataset requires}],
+		{ 'copy-dataset-noarg.sql' => "\\copy_dataset ds\n" }
+	],
+	[
+		'wait_until missing argument',
+		[qr{missing argument.*wait_until}],
+		{ 'wait-until-noarg.sql' => "\\wait_until\n" }
+	],
+	[
+		'advance_watermark missing argument',
+		[qr{missing argument.*advance_watermark}],
+		{ 'advance-wm-noarg.sql' => "\\advance_watermark\n" }
+	],
+	[
+		'reservoir_push missing argument',
+		[qr{\\reservoir_push requires}],
+		{ 'reservoir-push-noarg.sql' => "\\reservoir_push orders\n" }
+	],
+	[
+		'reservoir_sample missing argument',
+		[qr{\\reservoir_sample requires}],
+		{ 'reservoir-sample-noarg.sql' => "\\reservoir_sample orders\n" }
+	],
+	[
+		'session_disconnect too many arguments',
+		[qr{too many arguments.*session_disconnect}],
+		{ 'session-disc-args.sql' => "\\session_disconnect a b\n" }
+	],
+	[
+		'call missing argument',
+		[qr{\\call requires}],
+		{ 'call-noarg.sql' => "\\call\n" }
+	],
+	[
+		'record_recall missing argument',
+		[qr{\\record_recall requires}],
+		{ 'record-recall-noarg.sql' => "\\record_recall\n" }
 	],);
 
 for my $t (@script_tests)

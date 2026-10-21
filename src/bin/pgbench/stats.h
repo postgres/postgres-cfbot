@@ -118,12 +118,19 @@ typedef struct StatsData
 	SimpleStats lag;
 	SimpleStats keying_time;
 	SimpleStats think_time;
+	SimpleStats recall;
 #define HDR_SUB_BITS		7
 #define HDR_SUB_COUNT		(1 << HDR_SUB_BITS)
 #define HDR_MAX_OCTAVE		29
 #define HDR_TOTAL_BUCKETS	((HDR_MAX_OCTAVE + 2) * HDR_SUB_COUNT)
 	int64		hist_count;
 	int64		hist_buckets[HDR_TOTAL_BUCKETS];
+	int64		lag_hist_count;
+	int64		lag_hist_buckets[HDR_TOTAL_BUCKETS];
+	int64		scheduled_count;
+	int64		ontime_count;
+#define RECALL_HIST_BUCKETS 101
+	int64		recall_buckets[RECALL_HIST_BUCKETS];
 } StatsData;
 
 /*
@@ -172,5 +179,11 @@ extern const char *getResultString(bool tx_skipped, EStatus estatus, bool failur
 extern void printSimpleStats(const char *prefix, const SimpleStats *ss);
 extern double getLatencyPercentile(const StatsData *stats, double pct);
 extern void printLatencyPercentiles(const char *prefix, const StatsData *stats);
+extern void addToLagStats(StatsData *sd, double lag_usec, double ontime_thresh_usec);
+extern double getLagPercentile(const StatsData *stats, double pct);
+extern void printLagPercentiles(const char *prefix, const StatsData *stats);
+extern void addToRecallStats(StatsData *sd, double recall_val);
+extern double getRecallPercentile(const StatsData *stats, double pct);
+extern void printRecallStats(const char *prefix, const StatsData *stats);
 
 #endif							/* STATS_H */
