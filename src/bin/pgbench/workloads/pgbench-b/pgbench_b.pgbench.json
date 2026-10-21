@@ -1,0 +1,37 @@
+{
+  "suite": "pgbench-b",
+  "description": "Modernized banking OLTP workload using server-side stored procedures (pgbench_b_transaction)",
+  "scale": 10,
+  "no_vacuum": true,
+  "clients": 16,
+  "threads": 4,
+  "duration_sec": 60,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_b_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_b_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_b_constraints.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_b_tx.sql",
+      "weight": 1
+    }
+  ],
+  "sla": [
+    "total:p95<=5000ms"
+  ]
+}

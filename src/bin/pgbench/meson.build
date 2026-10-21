@@ -3,6 +3,7 @@
 pgbench_sources = files(
   'pgbench.c',
   'commands.c',
+  'config.c',
   'dataset.c',
   'engine.c',
   'init.c',

@@ -56,6 +56,7 @@
 #include "libpq-fe.h"
 #include "pgbench.h"
 #include "commands.h"
+#include "config.h"
 #include "dataset.h"
 #include "engine.h"
 #include "init.h"
@@ -66,7 +67,16 @@
 
 
 /* random seed used to initialize base_random_sequence */
-static int64 random_seed = -1;
+int64		random_seed = -1;
+bool		random_seed_set = false;
+
+char	   *initialize_steps = NULL;
+bool		foreign_keys = false;
+bool		is_no_vacuum = false;
+bool		do_vacuum_accounts = false; /* vacuum accounts table? */
+bool		scale_given = false;
+bool		internal_script_used = false;
+int			copy_nthreads = 1;
 
 
 static void
@@ -125,9 +135,11 @@ usage(void)
 		   "  -T, --time=NUM           duration of benchmark test in seconds\n"
 		   "  -v, --vacuum-all         vacuum all four standard tables before tests\n"
 		   "  --aggregate-interval=NUM aggregate data over NUM seconds\n"
+		   "  --config=FILENAME        load configuration from JSON/JSONC file\n"
 		   "  --continue-on-error      continue running after an SQL error\n"
 		   "  --copy-dataset=SPEC      bulk load dataset via parallel COPY (<name>:<table>[(<cols>)])\n"
 		   "  --dataset=NAME=PATH      load shared read-only dataset (.fvecs, .bvecs, .ivecs, .csv, .tsv)\n"
+		   "  --dump-config=FILENAME   export effective configuration to JSON file (\"-\" for stdout)\n"
 		   "  --exit-on-abort          exit when any client is aborted\n"
 		   "  --failures-detailed      report the failures grouped by basic types\n"
 		   "  --group=SPEC             define a client group (name=...,clients=...,threads=...,\n"
@@ -332,7 +344,7 @@ parseSlaTimeUnit(const char *unit_str, const char *spec)
  *   - tps / qps (throughput in transactions/queries per second, e.g. tps>=100)
  *   - error_rate (error rate percentage, e.g. error_rate<=1.0)
  */
-static void
+void
 parseSlaSpec(const char *spec)
 {
 	SlaRule    *rule;
@@ -506,6 +518,7 @@ parseSlaSpec(const char *spec)
 
 	rule = &sla_rules[num_slas];
 	memset(rule, 0, sizeof(SlaRule));
+	rule->raw_spec = pg_strdup(spec);
 	rule->target = target;
 	rule->named_metric = named_metric;
 	rule->op = op;
@@ -660,7 +673,7 @@ parseSlaSpec(const char *spec)
  * Set up a random seed according to seed parameter (NULL means default),
  * and initialize base_random_sequence for use in initializing other sequences.
  */
-static bool
+bool
 set_random_seed(const char *seed)
 {
 	uint64		iseed;
@@ -767,23 +780,23 @@ main(int argc, char **argv)
 		{"replay", required_argument, NULL, 30},
 		{"vector-base", required_argument, NULL, 31},
 		{"ground-truth-table", required_argument, NULL, 32},
+		{"config", required_argument, NULL, 33},
+		{"dump-config", required_argument, NULL, 34},
 		{NULL, 0, NULL, 0}
 	};
 
 	int			c;
 	bool		is_init_mode = false;	/* initialize mode? */
-	char	   *initialize_steps = NULL;
-	bool		foreign_keys = false;
-	bool		is_no_vacuum = false;
-	bool		do_vacuum_accounts = false; /* vacuum accounts table? */
 	int			optindex;
-	bool		scale_given = false;
 
 	bool		benchmarking_option_set = false;
 	bool		initialization_option_set = false;
-	bool		internal_script_used = false;
 	bool		jobs_option_set = false;
-	int			copy_nthreads = 1;
+	bool		cli_nxacts_set = false;
+	bool		cli_duration_set = false;
+	bool		cli_clients_set = false;
+	bool		cli_threads_set = false;
+	char	   *dump_config_file = NULL;
 
 	CState	   *state;			/* status of clients */
 	TState	   *threads;		/* array of thread */
@@ -844,6 +857,50 @@ main(int argc, char **argv)
 	if (!set_random_seed(getenv("PGBENCH_RANDOM_SEED")))
 		pg_fatal("error while setting random seed from PGBENCH_RANDOM_SEED environment variable");
 
+	/*
+	 * Pre-scan argv for -i/--initialize, --dump-config, and --config so that
+	 * configuration files are loaded before CLI option overrides regardless
+	 * of argument ordering on the command line.
+	 */
+	{
+		bool		has_dump_config = false;
+
+		for (i = 1; i < argc; i++)
+		{
+			if (strcmp(argv[i], "--") == 0)
+				break;
+			if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--initialize") == 0)
+				is_init_mode = true;
+			else if (strncmp(argv[i], "--dump-config=", 14) == 0 ||
+					 strcmp(argv[i], "--dump-config") == 0)
+				has_dump_config = true;
+		}
+		for (i = 1; i < argc; i++)
+		{
+			if (strcmp(argv[i], "--") == 0)
+				break;
+			if (strncmp(argv[i], "--config=", 9) == 0)
+			{
+				if (argv[i][9] == '\0')
+					pg_fatal("option --config requires an argument");
+				loadConfigFile(argv[i] + 9, is_init_mode && !has_dump_config,
+							   &state[0].variables,
+							   &benchmarking_option_set,
+							   &initialization_option_set,
+							   &jobs_option_set);
+			}
+			else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
+			{
+				loadConfigFile(argv[i + 1], is_init_mode && !has_dump_config,
+							   &state[0].variables,
+							   &benchmarking_option_set,
+							   &initialization_option_set,
+							   &jobs_option_set);
+				i++;
+			}
+		}
+	}
+
 	while ((c = getopt_long(argc, argv, "b:c:Cd:D:f:F:h:iI:j:lL:M:nNp:P:qrR:s:St:T:U:v", long_options, &optindex)) != -1)
 	{
 		char	   *script;
@@ -856,6 +913,8 @@ main(int argc, char **argv)
 					listAvailableScripts();
 					exit(0);
 				}
+				if (config_scripts_loaded)
+					clearConfigScriptsAndGroups();
 				weight = parseScriptWeight(optarg, &script);
 				process_builtin(findBuiltin(script), weight);
 				benchmarking_option_set = true;
@@ -863,6 +922,7 @@ main(int argc, char **argv)
 				break;
 			case 'c':
 				benchmarking_option_set = true;
+				cli_clients_set = true;
 				if (!option_parse_int(optarg, "-c/--client", 1, INT_MAX,
 									  &nclients))
 				{
@@ -912,9 +972,13 @@ main(int argc, char **argv)
 					*p++ = '\0';
 					if (!putVariable(&state[0].variables, "option", optarg, p))
 						exit(1);
+					if (!putVariable(&config_variables, "option", optarg, p))
+						exit(1);
 				}
 				break;
 			case 'f':
+				if (config_scripts_loaded)
+					clearConfigScriptsAndGroups();
 				weight = parseScriptWeight(optarg, &script);
 				process_file(script, weight);
 				benchmarking_option_set = true;
@@ -939,6 +1003,7 @@ main(int argc, char **argv)
 				break;
 			case 'j':			/* jobs */
 				jobs_option_set = true;
+				cli_threads_set = true;
 				if (!option_parse_int(optarg, "-j/--jobs", 1, INT_MAX,
 									  &nthreads))
 				{
@@ -972,6 +1037,8 @@ main(int argc, char **argv)
 				is_no_vacuum = true;
 				break;
 			case 'N':
+				if (config_scripts_loaded)
+					clearConfigScriptsAndGroups();
 				process_builtin(findBuiltin("simple-update"), 1);
 				benchmarking_option_set = true;
 				internal_script_used = true;
@@ -1013,18 +1080,26 @@ main(int argc, char **argv)
 					exit(1);
 				break;
 			case 'S':
+				if (config_scripts_loaded)
+					clearConfigScriptsAndGroups();
 				process_builtin(findBuiltin("select-only"), 1);
 				benchmarking_option_set = true;
 				internal_script_used = true;
 				break;
 			case 't':
 				benchmarking_option_set = true;
+				cli_nxacts_set = true;
+				if (!cli_duration_set)
+					duration = 0;
 				if (!option_parse_int(optarg, "-t/--transactions", 1, INT_MAX,
 									  &nxacts))
 					exit(1);
 				break;
 			case 'T':
 				benchmarking_option_set = true;
+				cli_duration_set = true;
+				if (!cli_nxacts_set)
+					nxacts = 0;
 				if (!option_parse_int(optarg, "-T/--time", 1, INT_MAX,
 									  &duration))
 					exit(1);
@@ -1076,6 +1151,7 @@ main(int argc, char **argv)
 				benchmarking_option_set = true;
 				if (!set_random_seed(optarg))
 					pg_fatal("error while setting random seed from --random-seed option");
+				random_seed_set = true;
 				break;
 			case 10:			/* list */
 				{
@@ -1132,6 +1208,8 @@ main(int argc, char **argv)
 				continue_on_error = true;
 				break;
 			case 19:			/* group */
+				if (config_scripts_loaded)
+					clearConfigScriptsAndGroups();
 				benchmarking_option_set = true;
 				parseGroupSpec(optarg, &internal_script_used);
 				break;
@@ -1214,11 +1292,27 @@ main(int argc, char **argv)
 				benchmarking_option_set = true;
 				parseGroundTruthTableSpec(optarg);
 				break;
+			case 33:			/* config (already loaded in pre-pass) */
+				break;
+			case 34:			/* dump-config */
+				pg_free(dump_config_file);
+				dump_config_file = pg_strdup(optarg);
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 				exit(1);
 		}
+	}
+
+	if (num_groups == 1)
+	{
+		if (cli_clients_set)
+			client_groups[0].nclients = nclients;
+		if (cli_threads_set)
+			client_groups[0].nthreads = nthreads;
+		if (client_groups[0].nthreads > client_groups[0].nclients)
+			client_groups[0].nthreads = client_groups[0].nclients;
 	}
 
 	if (num_groups > 0)
@@ -1336,6 +1430,18 @@ main(int argc, char **argv)
 
 	if (is_init_mode)
 	{
+		if (dump_config_file != NULL)
+		{
+			dumpConfigFile(dump_config_file);
+			exit(0);
+		}
+
+		if (num_config_init_steps > 0)
+		{
+			runConfigInitSteps(&state[0].variables);
+			exit(0);
+		}
+
 		if (benchmarking_option_set || (jobs_option_set && num_copy_dataset_specs == 0))
 			pg_fatal("some of the specified options cannot be used in initialization (-i) mode");
 
@@ -1391,19 +1497,6 @@ main(int argc, char **argv)
 			pg_fatal("some of the specified options cannot be used in benchmarking mode");
 	}
 
-	/* Standalone --copy-dataset without any benchmark scripts */
-	if (num_copy_dataset_specs > 0 && num_scripts == 0)
-	{
-		con = doConnect();
-		if (con == NULL)
-			pg_fatal("could not create connection for setup");
-		printVersion(con);
-		nthreads = copy_nthreads;
-		runRegisteredCopyDatasets(con);
-		PQfinish(con);
-		exit(0);
-	}
-
 	if (nxacts > 0 && duration > 0)
 		pg_fatal("specify either a number of transactions (-t) or a duration (-T), not both");
 
@@ -1438,6 +1531,25 @@ main(int argc, char **argv)
 	{
 		if (!latency_limit && duration <= 0)
 			pg_fatal("an unlimited number of transaction tries can only be used with --latency-limit or a duration (-T)");
+	}
+
+	if (dump_config_file != NULL)
+	{
+		dumpConfigFile(dump_config_file);
+		exit(0);
+	}
+
+	/* Standalone --copy-dataset without any benchmark scripts */
+	if (num_copy_dataset_specs > 0 && num_scripts == 0)
+	{
+		con = doConnect();
+		if (con == NULL)
+			pg_fatal("could not create connection for setup");
+		printVersion(con);
+		nthreads = copy_nthreads;
+		runRegisteredCopyDatasets(con);
+		PQfinish(con);
+		exit(0);
 	}
 
 	/*
@@ -1505,7 +1617,7 @@ main(int argc, char **argv)
 				 duration <= 0 ? "nxacts" : "duration",
 				 duration <= 0 ? nxacts : duration, PQdb(con));
 
-	if (num_copy_dataset_specs > 0)
+	if (num_copy_dataset_specs > 0 && num_config_init_steps == 0)
 	{
 		int			saved_nthreads = nthreads;
 

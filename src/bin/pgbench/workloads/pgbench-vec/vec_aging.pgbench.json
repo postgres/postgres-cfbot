@@ -1,0 +1,45 @@
+{
+  "suite": "pgbench-vec-aging",
+  "description": "VecBench Mode 6 continuous vector ingestion, centroid drift, churn, and real-time Recall@K degradation telemetry (Q1 vs Q4)",
+  "scale": 1,
+  "no_vacuum": true,
+  "clients": 4,
+  "threads": 2,
+  "duration_sec": 120,
+  "reservoirs": {
+    "vec_ids": 1024
+  },
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_vec_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_vec_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_vec_constraints.sql"
+    },
+    {
+      "name": "ground_truth",
+      "file": "pgbench_vec_gt_gen.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_vec_aging.sql",
+      "weight": 1
+    }
+  ],
+  "sla": [
+    "total:r_aging:recall>=0.80",
+    "total:p95<=150ms"
+  ]
+}

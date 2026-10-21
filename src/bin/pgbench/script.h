@@ -161,6 +161,7 @@ typedef struct Command
 typedef struct ParsedScript
 {
 	const char *desc;			/* script descriptor (eg, file name) */
+	const char *builtin_name;	/* builtin short name if builtin, else NULL */
 	int			weight;			/* selection weight */
 	Command   **commands;		/* NULL-terminated array of Commands */
 	StatsData	stats;			/* total time spent in script */
@@ -191,6 +192,7 @@ extern void process_builtin(const BuiltinScript *bi, int weight);
 extern void process_replay_builtin(int weight);
 extern void listAvailableScripts(void);
 extern const BuiltinScript *findBuiltin(const char *tb);
+extern const BuiltinScript *findBuiltinOrNull(const char *tb);
 extern int	parseScriptWeight(const char *option, char **script);
 
 #endif							/* SCRIPT_H */

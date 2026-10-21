@@ -1,0 +1,70 @@
+{
+  "suite": "pgbench-htap",
+  "description": "CH-benCHmark-inspired hybrid transactional/analytical processing (HTAP) workload with isolated OLTP and OLAP client groups",
+  "scale": 4,
+  "no_vacuum": true,
+  "duration_sec": 60,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_htap_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_htap_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_htap_constraints.sql"
+    }
+  ],
+  "groups": [
+    {
+      "name": "oltp",
+      "clients": 8,
+      "threads": 4,
+      "scripts": [
+        {
+          "file": "pgbench_htap_oltp.sql",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "name": "olap",
+      "clients": 2,
+      "threads": 2,
+      "scripts": [
+        {
+          "file": "pgbench_htap_olap_q1.sql",
+          "weight": 20
+        },
+        {
+          "file": "pgbench_htap_olap_q3.sql",
+          "weight": 20
+        },
+        {
+          "file": "pgbench_htap_olap_q5.sql",
+          "weight": 20
+        },
+        {
+          "file": "pgbench_htap_olap_q6.sql",
+          "weight": 20
+        },
+        {
+          "file": "pgbench_htap_olap_q18.sql",
+          "weight": 20
+        }
+      ]
+    }
+  ],
+  "sla": [
+    "oltp:p95<=5000ms",
+    "olap:p95<=10000ms"
+  ]
+}

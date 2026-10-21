@@ -1,0 +1,37 @@
+{
+  "suite": "pgbench-graph-pgq-snb-bi",
+  "description": "LDBC SNB Business Intelligence phased workload using ISO SQL/PGQ GRAPH_TABLE",
+  "scale": 1,
+  "no_vacuum": true,
+  "clients": 4,
+  "threads": 4,
+  "transactions": 1,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_graph_pgq_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_graph_pgq_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_graph_pgq_constraints.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_ldbc_pgq_snb_bi.sql",
+      "weight": 1
+    }
+  ],
+  "sla": [
+    "validation_failures<=0"
+  ]
+}

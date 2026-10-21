@@ -44,6 +44,7 @@ typedef struct PgBenchDataset
 	DatasetFormat format;		/* File format */
 	int			index;			/* Dataset slot index (0..MAX_DATASETS-1) */
 	bool		force_header;	/* True if :header option was specified */
+	bool		from_config;	/* True if loaded via --config */
 	const uint8 *raw_data;		/* Base pointer to mmap or heap buffer */
 	size_t		raw_size;		/* Total mapped/allocated byte size */
 	bool		is_mmapped;		/* True if backed by mmap(), false if pg_malloc */
@@ -56,6 +57,7 @@ typedef struct PgBenchDataset
 } PgBenchDataset;
 
 extern int	num_copy_dataset_specs;
+extern bool dataset_loading_from_config;
 
 /* CLI registration and lifecycle */
 extern void registerDataset(const char *name, DatasetFormat format, const char *filepath);
@@ -101,6 +103,10 @@ extern ConnectionStateEnum handle_cmd_reservoir_sample(CState *st, Command *cmd,
 extern bool copyDatasetSlice(PGconn *con, PgBenchDataset *ds,
 							 const char *table_spec,
 							 int client_id, int num_clients);
+extern int	getNumDatasets(void);
+extern const PgBenchDataset *getDatasetByIndex(int idx);
+extern bool getCopyDatasetSpecByIndex(int idx, const char **dataset_name,
+									  const char **table_spec);
 
 /* Pillar 2: Global Monotonic Clock, Causal Watermarks & Phase Barrier */
 #define PGBENCH_MAX_WATERMARK_CHANNELS 64
@@ -117,6 +123,7 @@ extern void cancelDependentWrite(CState *st);
 extern bool enterPhaseBarrier(CState *st);
 extern bool checkPhaseBarrierReady(CState *st);
 extern void notifyPhaseBarrierClientDone(CState *st);
+extern void resetPhaseBarriers(void);
 extern void registerThreadWakeupPipe(int tid, int write_fd);
 extern void unregisterThreadWakeupPipe(int tid);
 extern void wakeWatermarkWaiters(void);
@@ -127,13 +134,20 @@ typedef struct PgBenchReservoir
 	char	   *name;
 	uint64		capacity;
 	int64	   *slots;
-	uint64		write_idx __attribute__((aligned(64)));
-	uint64		valid_count __attribute__((aligned(64)));
+	bool		from_config;
+	char		pad0[64];
+	uint64		write_idx;
+	char		pad1[56];
+	uint64		valid_count;
+	char		pad2[56];
 } PgBenchReservoir;
 
 extern void parseReservoirSpec(const char *spec);
 extern void registerReservoir(const char *name, uint64 capacity);
+extern void registerOrUpdateReservoir(const char *name, uint64 capacity);
 extern PgBenchReservoir *findReservoir(const char *name);
+extern int	getNumReservoirs(void);
+extern const PgBenchReservoir *getReservoirByIndex(int idx);
 extern bool reservoirPush(const char *name, int64 val);
 extern bool reservoirPushValue(const char *name, const PgBenchValue *val,
 							   int64 *out_res);

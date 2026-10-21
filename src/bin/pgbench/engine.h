@@ -160,6 +160,7 @@ typedef enum SlaOpType
  */
 typedef struct SlaRule
 {
+	char		   *raw_spec;		/* original SLA specification string */
 	char		   *target;			/* script name/substring, group name, or "total" */
 	char		   *named_metric;	/* optional named recall metric (e.g. "r10", "r1") */
 	SlaMetricType	metric;			/* metric type */
@@ -219,6 +220,7 @@ extern bool exit_on_abort;
 extern bool continue_on_error;
 
 extern void initRandomState(pg_prng_state *state);
+extern void resetEngineRunState(void);
 extern void resolveHostAddrOnce(void);
 extern PGconn *doConnect(void);
 extern PGconn *doConnectAsync(const char *db_override, const char *user_override);

@@ -1,0 +1,53 @@
+{
+  "suite": "pgbench-c",
+  "description": "TPC-C-inspired order-entry OLTP workload (New-Order 45%, Payment 43%, Order-Status 4%, Delivery 4%, Stock-Level 4%)",
+  "scale": 4,
+  "no_vacuum": true,
+  "clients": 16,
+  "threads": 4,
+  "duration_sec": 60,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_c_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_c_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_c_constraints.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_c_new_order.sql",
+      "weight": 45
+    },
+    {
+      "file": "pgbench_c_payment.sql",
+      "weight": 43
+    },
+    {
+      "file": "pgbench_c_order_status.sql",
+      "weight": 4
+    },
+    {
+      "file": "pgbench_c_delivery.sql",
+      "weight": 4
+    },
+    {
+      "file": "pgbench_c_stock_level.sql",
+      "weight": 4
+    }
+  ],
+  "sla": [
+    "total:p95<=5000ms"
+  ]
+}

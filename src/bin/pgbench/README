@@ -10,6 +10,11 @@ organized into modular subsystems with clear ownership boundaries:
 
   - pgbench.c / pgbench.h
       CLI argument parsing, global configuration, and top-level orchestration.
+  - config.c / config.h
+      JSON / JSONC configuration file parser (--config), effective configuration
+      exporter (--dump-config), relative script/dataset path resolution, direct
+      --json-report replay loader, and multi-stage initialization runner
+      (--config=<file> -i).
   - stats.c / stats.h
       Statistical accumulators (SimpleStats, StatsData), latency tracking,
       and interval/summary reporting primitives.

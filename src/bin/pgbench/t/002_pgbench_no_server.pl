@@ -596,5 +596,282 @@ for my $t (@script_tests)
 		$files);
 }
 
+#
+# --config and --dump-config tests (JSONC, CLI overrides, and --json-report replay)
+#
+pgbench(
+	'--config=/no/such/config.pgbench.json',
+	1,
+	[qr{^$}],
+	[qr{could not open configuration file "/no/such/config\.pgbench\.json"}],
+	'pgbench nonexistent --config file');
+
+my $sub_dir = "$testdir/cfg_subdir";
+mkdir $sub_dir or BAIL_OUT("could not create \"$sub_dir\": $!");
+append_to_file("$sub_dir/sub_tx.sql", "SELECT :my_var;\n");
+append_to_file("$sub_dir/sub_schema.sql", "SELECT 1;\n");
+
+my $jsonc_cfg = "$sub_dir/test_workload.pgbench.json";
+append_to_file(
+	$jsonc_cfg, qq{// Top-level line comment
+# Hash comment
+/* Multi-line
+   block comment */
+{
+  "suite": "test-jsonc-suite",
+  "description": "Test JSONC /* not a comment */ // still string",
+  "scale": 4,
+  "clients": 8,
+  "threads": 2,
+  "duration_sec": 30,
+  "no_vacuum": true,
+  "variables": {
+    "my_var": 42,
+    "arr_var": [1, 2, 3,],
+  },
+  "reservoirs": {
+    "orders": 512,
+  },
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "sub_schema.sql",
+    },
+  ],
+  "scripts": [
+    {
+      "file": "sub_tx.sql",
+      "weight": 10,
+    },
+  ],
+  "sla": [
+    "total:p95<=250ms",
+  ],
+}
+});
+
+pgbench(
+	"--config=$jsonc_cfg --dump-config=-",
+	0,
+	[
+		qr{"suite": "test-jsonc-suite"},
+		qr{"scale": 4},
+		qr{"clients": 8},
+		qr{"threads": 2},
+		qr{"duration_sec": 30},
+		qr{"my_var": 42},
+		qr{"orders": 512},
+		qr{sub_tx\.sql},
+		qr{"total:p95<=250ms"}
+	],
+	[qr{^$}],
+	'pgbench --config JSONC parsing and relative script path resolution');
+
+# CLI flags before and after --config override config values
+pgbench(
+	"-c 12 --config=$jsonc_cfg -j 4 -t 25 -s 7 -D my_var=99 --reservoir=orders:1024 --dump-config=-",
+	0,
+	[
+		qr{"scale": 7},
+		qr{"clients": 12},
+		qr{"threads": 4},
+		qr{"transactions_per_client": 25},
+		qr{"my_var": 99},
+		qr{"orders": 1024}
+	],
+	[qr{^$}],
+	'pgbench CLI flags override --config values regardless of option order');
+
+# Direct replay of a --json-report file structure via --config
+my $report_cfg = "$sub_dir/prev_report.json";
+append_to_file(
+	$report_cfg, qq{{
+  "pgbench_version": "20devel",
+  "configuration": {
+    "suite": "replayed-report",
+    "scale": 3,
+    "query_mode": "prepared",
+    "no_vacuum": true,
+    "variables": {
+      "my_var": 77
+    }
+  },
+  "groups": [
+    {
+      "name": "g_readers",
+      "clients": 4,
+      "threads": 2,
+      "rate": 50.0,
+      "scripts": [
+        { "file": "sub_tx.sql", "weight": 100 }
+      ]
+    }
+  ],
+  "sla_verifications": [
+    {
+      "target": "g_readers",
+      "metric": "p95",
+      "threshold": 100.0,
+      "passed": true
+    }
+  ]
+}
+});
+
+pgbench(
+	"--config=$report_cfg --dump-config=-",
+	0,
+	[
+		qr{"suite": "replayed-report"},
+		qr{"scale": 3},
+		qr{"query_mode": "prepared"},
+		qr{"name": "g_readers"},
+		qr{"rate": 50},
+		qr{"g_readers:p95<=100ms"}
+	],
+	[qr{^$}],
+	'pgbench --config direct replay of --json-report output');
+
+my $bad_key_cfg = "$testdir/bad_key.pgbench.json";
+append_to_file($bad_key_cfg, "{ \"unknown_setting\": 123 }\n");
+pgbench(
+	"--config=$bad_key_cfg",
+	1,
+	[qr{^$}],
+	[qr{unrecognized configuration key "unknown_setting"}],
+	'pgbench --config rejects unrecognized configuration key');
+
+my $unterm_comment_cfg = "$testdir/unterm_comment.pgbench.json";
+append_to_file($unterm_comment_cfg, "{ \"scale\": 1 /* unterminated \n");
+pgbench(
+	"--config=$unterm_comment_cfg",
+	1,
+	[qr{^$}],
+	[qr{unterminated /\* \.\.\. \*/ block comment}],
+	'pgbench --config rejects unterminated block comment');
+
+# Rate (-R), init_steps[].scale, and -i --dump-config preserving scripts/groups/sla
+my $init_and_bench_cfg = "$sub_dir/init_and_bench.pgbench.json";
+append_to_file(
+	$init_and_bench_cfg, qq{{
+  "suite": "init-and-bench",
+  "rate": 250,
+  "init_steps": [
+    {
+      "name": "load_step",
+      "file": "sub_tx.sql",
+      "clients": 2,
+      "threads": 2,
+      "transactions": 1,
+      "scale": 8
+    }
+  ],
+  "groups": [
+    {
+      "name": "g_main",
+      "clients": 4,
+      "threads": 2,
+      "scripts": [
+        { "file": "sub_tx.sql", "weight": 100 }
+      ]
+    }
+  ],
+  "sla": [
+    "g_main:p95<=150ms"
+  ]
+}
+});
+
+pgbench(
+	"--config=$init_and_bench_cfg -i --dump-config=-",
+	0,
+	[
+		qr{"suite": "init-and-bench"},
+		qr{"rate": 250},
+		qr{"name": "load_step"},
+		qr{"scale": 8},
+		qr{"name": "g_main"},
+		qr{"g_main:p95<=150ms"}
+	],
+	[qr{^$}],
+	'pgbench --config -i --dump-config preserves rate, init_steps[].scale, groups, and sla');
+
+# Binary .fvecs / .ivecs dataset loading via --config (vector_base, ground_truth_table, datasets)
+# with relative path resolution, id_offset serialization, and CLI --dataset override
+my $fvecs_file = "$sub_dir/base.fvecs";
+my $fvecs_alt_file = "$sub_dir/alt.fvecs";
+my $ivecs_file = "$sub_dir/gt.ivecs";
+{
+	open my $fh, '>:raw', $fvecs_file or die $!;
+	# 2 vectors of dim 2: [1.0, 2.0], [3.0, 4.0]
+	print $fh pack('V f<2 V f<2', 2, 1.0, 2.0, 2, 3.0, 4.0);
+	close $fh;
+
+	open my $fh2, '>:raw', $fvecs_alt_file or die $!;
+	print $fh2 pack('V f<2', 2, 5.0, 6.0);
+	close $fh2;
+
+	open my $fh3, '>:raw', $ivecs_file or die $!;
+	# 2 ground-truth neighbor lists of dim 2: [1, 2], [2, 1]
+	print $fh3 pack('V l<2 V l<2', 2, 1, 2, 2, 2, 1);
+	close $fh3;
+}
+
+my $vec_cfg = "$sub_dir/vec_test.pgbench.json";
+append_to_file(
+	$vec_cfg, qq{{
+  "suite": "vec-config-test",
+  "vector_base": "vec_items:1:base.fvecs",
+  "ground_truth_table": "vec_gt:5:gt.ivecs",
+  "datasets": {
+    "qvecs": {
+      "file": "base.fvecs",
+      "format": "fvecs",
+      "id_offset": 10
+    }
+  },
+  "scripts": [
+    "sub_tx.sql"
+  ]
+}
+});
+
+pgbench(
+	"--config=$vec_cfg --dataset=qvecs=fvecs:$fvecs_alt_file --dump-config=-",
+	0,
+	[
+		qr{"base": \{ "file": ".*base\.fvecs", "format": "fvecs", "id_offset": 1 \}},
+		qr{"ground_truth": \{ "file": ".*gt\.ivecs", "format": "ivecs", "id_offset": 5 \}},
+		qr{"qvecs": \{ "file": ".*alt\.fvecs", "format": "fvecs" \}},
+		qr{"dataset": "base", "table": "vec_items"},
+		qr{"dataset": "ground_truth", "table": "vec_gt"}
+	],
+	[
+		qr{pgbench: loaded dataset "base"},
+		qr{pgbench: loaded dataset "ground_truth"},
+		qr{pgbench: loaded dataset "qvecs"}
+	],
+	'pgbench --config binary .fvecs/.ivecs relative paths, id_offset, and CLI --dataset override');
+
+# Multiple --config files: second config overrides duration_sec with transactions and groups with scripts
+my $override_cfg = "$sub_dir/override.pgbench.json";
+append_to_file(
+	$override_cfg, qq{{
+  "transactions": 15,
+  "builtin_weight": "select-only\@3"
+}
+});
+
+pgbench(
+	"--config=$init_and_bench_cfg --config=$override_cfg --dump-config=-",
+	0,
+	[
+		qr{"duration_sec": 0},
+		qr{"transactions_per_client": 15},
+		qr{"builtin": "select-only", "weight": 3}
+	],
+	[qr{^$}],
+	'pgbench multiple --config files override duration with transactions and groups with builtin_weight');
+
 done_testing();
 

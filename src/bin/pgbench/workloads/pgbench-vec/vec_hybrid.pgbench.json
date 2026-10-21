@@ -1,0 +1,64 @@
+{
+  "suite": "pgbench-vec-hybrid",
+  "description": "VecBench-inspired hybrid vector similarity search (Modes 1-5: unfiltered, pre-filtered, post-filtered, multi-vector fusion, and streaming upsert) with named Recall@K SLAs",
+  "scale": 1,
+  "no_vacuum": true,
+  "clients": 4,
+  "threads": 2,
+  "duration_sec": 60,
+  "reservoirs": {
+    "vec_ids": 1024
+  },
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_vec_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_vec_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_vec_constraints.sql"
+    },
+    {
+      "name": "ground_truth",
+      "file": "pgbench_vec_gt_gen.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_vec_search.sql",
+      "weight": 30
+    },
+    {
+      "file": "pgbench_vec_filtered.sql",
+      "weight": 25
+    },
+    {
+      "file": "pgbench_vec_postfiltered.sql",
+      "weight": 20
+    },
+    {
+      "file": "pgbench_vec_multivec.sql",
+      "weight": 15
+    },
+    {
+      "file": "pgbench_vec_insert.sql",
+      "weight": 10
+    }
+  ],
+  "sla": [
+    "total:r_unfiltered:recall>=0.95",
+    "total:r_prefilter:recall>=0.90",
+    "total:r_postfilter:recall>=0.40",
+    "total:r_multivec:recall>=0.85",
+    "total:p95<=100ms"
+  ]
+}

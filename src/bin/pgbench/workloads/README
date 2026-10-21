@@ -93,6 +93,41 @@ overrides (such as -D items_per_scale=100 -D cust_per_dist=20) can be supplied
 to both <suite>_init.sql and the transaction scripts.
 
 
+JSON/JSONC Workload Configuration Files (--config & --dump-config)
+------------------------------------------------------------------
+
+Every workload suite directory also includes ready-to-run `.pgbench.json`
+configuration files that encapsulate multi-stage initialization (`init_steps`),
+scripts and weights, client groups (`groups`), shared reservoirs (`reservoirs`),
+variables, and SLA compliance rules (`sla`).
+
+  * Multi-stage initialization in a single command (works from any directory):
+      pgbench --config=workloads/pgbench-c/pgbench_c.pgbench.json -i
+
+  * Execute the workload with optional CLI overrides:
+      pgbench --config=workloads/pgbench-c/pgbench_c.pgbench.json \
+              -c 16 -j 4 -T 60 --json-report=pgbench_c_results.json
+
+  * Replay any prior `--json-report` output directly:
+      pgbench --config=pgbench_c_results.json -T 30
+
+  * Export effective configuration (combining `--config` and CLI flags):
+      pgbench --config=workloads/pgbench-c/pgbench_c.pgbench.json \
+              -c 32 -j 8 --dump-config=custom_c.pgbench.json
+
+Ready-to-run `.pgbench.json` files provided:
+  * workloads/pgbench-b/pgbench_b.pgbench.json
+  * workloads/pgbench-c/pgbench_c.pgbench.json
+  * workloads/pgbench-e/pgbench_e.pgbench.json
+  * workloads/pgbench-h/pgbench_h.pgbench.json
+  * workloads/pgbench-ds/pgbench_ds.pgbench.json
+  * workloads/pgbench-htap/pgbench_htap.pgbench.json
+  * workloads/pgbench-vec/{vec_hybrid,vec_aging}.pgbench.json
+  * workloads/pgbench-graph/{lsqb,snb_interactive,snb_bi,finbench,graphalytics}.pgbench.json
+  * workloads/pgbench-graph-sql-ud/{lsqb,snb_interactive,snb_bi,finbench,graphalytics}.pgbench.json
+  * workloads/pgbench-graph-pgq/{lsqb,snb_interactive,snb_bi,finbench,graphalytics}.pgbench.json
+
+
 0. pgbench-b (workloads/pgbench-b/)
 -----------------------------------
 

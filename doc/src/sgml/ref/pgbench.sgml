@@ -888,19 +888,62 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
        </listitem>
      </varlistentry>
 
+     <varlistentry id="pgbench-option-config">
+       <term><option>--config=<replaceable>filename</replaceable></option></term>
+       <listitem>
+        <para>
+         Load benchmark and initialization settings from a JSON or JSONC
+         (<literal>.pgbench.json</literal>) configuration file.  Line comments
+         (<literal>//</literal> and <literal>#</literal>), block comments
+         (<literal>/* ... */</literal>), and trailing commas are supported.
+         Relative file paths inside <literal>scripts</literal>,
+         <literal>groups</literal>, <literal>init_steps</literal>,
+         <literal>datasets</literal>, and <literal>replay</literal> are resolved
+         relative to the directory containing <replaceable>filename</replaceable>.
+         Any command-line options supplied alongside <option>--config</option>
+         (such as <option>-c</option>, <option>-j</option>, <option>-t</option>,
+         <option>-T</option>, <option>-s</option>, <option>-D</option>,
+         <option>--sla</option>, or <option>--json-report</option>) override the
+         corresponding values in the configuration file regardless of option
+         order.  When combined with <option>-i</option>
+         (<option>--initialize</option>) and the configuration file defines an
+         <literal>init_steps</literal> array, <application>pgbench</application>
+         executes those multi-stage initialization steps (such as schema DDL,
+         parallel worker data population, and constraint/index creation)
+         sequentially in-process.  A JSON file previously produced by
+         <option>--json-report</option> can also be passed directly to
+         <option>--config</option> to replay the benchmark configuration.
+        </para>
+       </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgbench-option-dump-config">
+       <term><option>--dump-config=<replaceable>filename</replaceable></option></term>
+       <listitem>
+        <para>
+         Export the effective configuration (combining any
+         <option>--config</option> file and command-line options) as a formatted
+         JSON configuration file to <replaceable>filename</replaceable> (or
+         standard output if <replaceable>filename</replaceable> is
+         <literal>-</literal>) and exit immediately with status 0.
+        </para>
+       </listitem>
+     </varlistentry>
+
      <varlistentry id="pgbench-option-json-report">
        <term><option>--json-report=<replaceable>filename</replaceable></option></term>
        <listitem>
         <para>
          Write a structured JSON benchmark report to
          <replaceable>filename</replaceable> upon completion.  The JSON report
-         includes benchmark configuration, overall summary statistics, HDR
-         latency percentiles (<literal>p50</literal>, <literal>p90</literal>,
-         <literal>p95</literal>, <literal>p99</literal>, <literal>p99.9</literal>),
-         composite metrics (<literal>tpmC</literal>, <literal>QphH</literal>),
-         per-group statistics, per-script statistics, and SLA compliance
-         results.  See <xref linkend="pgbench-percentiles-sla-and-reporting"/>
-         for details.
+         includes a complete replayable <literal>configuration</literal> block
+         (usable directly with <option>--config</option>), overall summary
+         statistics, HDR latency percentiles (<literal>p50</literal>,
+         <literal>p90</literal>, <literal>p95</literal>, <literal>p99</literal>,
+         <literal>p99.9</literal>), composite metrics (<literal>tpmC</literal>,
+         <literal>QphH</literal>), per-group statistics, per-script statistics,
+         and SLA compliance results.  See
+         <xref linkend="pgbench-percentiles-sla-and-reporting"/> for details.
         </para>
        </listitem>
      </varlistentry>

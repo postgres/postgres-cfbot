@@ -1,0 +1,66 @@
+{
+  "suite": "pgbench-graph-pgq-snb-interactive",
+  "description": "LDBC SNB Interactive v1/v2 multi-group readers and writers using ISO SQL/PGQ GRAPH_TABLE",
+  "scale": 1,
+  "no_vacuum": true,
+  "duration_sec": 60,
+  "replay_speed": 0.1,
+  "reservoirs": {
+    "persons": 4096,
+    "messages": 8192
+  },
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_graph_pgq_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_graph_pgq_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_graph_pgq_constraints.sql"
+    }
+  ],
+  "groups": [
+    {
+      "name": "snb_readers",
+      "clients": 4,
+      "threads": 2,
+      "scripts": [
+        {
+          "file": "pgbench_ldbc_pgq_snb_ic.sql",
+          "weight": 30
+        },
+        {
+          "file": "pgbench_ldbc_pgq_snb_is.sql",
+          "weight": 70
+        }
+      ]
+    },
+    {
+      "name": "snb_writers",
+      "clients": 2,
+      "threads": 2,
+      "scripts": [
+        {
+          "file": "pgbench_ldbc_pgq_snb_iu.sql",
+          "weight": 75
+        },
+        {
+          "file": "pgbench_ldbc_pgq_snb_id.sql",
+          "weight": 25
+        }
+      ]
+    }
+  ],
+  "sla": [
+    "validation_failures<=0"
+  ]
+}

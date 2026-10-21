@@ -1,0 +1,52 @@
+{
+  "suite": "pgbench-h",
+  "description": "TPC-H-inspired decision support analytical query streams (Q1, Q3, Q5, Q6, Q10, Q12, Q14, Q19) with concurrent RF1/RF2 refresh stream",
+  "scale": 1,
+  "no_vacuum": true,
+  "duration_sec": 60,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_h_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_h_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_h_constraints.sql"
+    }
+  ],
+  "groups": [
+    {
+      "name": "queries",
+      "clients": 4,
+      "threads": 4,
+      "sequential": true,
+      "scripts": [
+        {
+          "file": "pgbench_h_queries.sql",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "name": "refresh",
+      "clients": 1,
+      "threads": 1,
+      "rate": 2.0,
+      "scripts": [
+        {
+          "file": "pgbench_h_refresh.sql",
+          "weight": 1
+        }
+      ]
+    }
+  ]
+}

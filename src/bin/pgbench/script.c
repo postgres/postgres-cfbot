@@ -4280,6 +4280,8 @@ void
 process_builtin(const BuiltinScript *bi, int weight)
 {
 	ParseScript(bi->script, bi->desc, weight);
+	if (num_scripts > 0)
+		sql_script[num_scripts - 1].builtin_name = bi->name;
 }
 
 /* Parse the built-in trace replay script and add it to the list. */
@@ -4312,6 +4314,35 @@ listAvailableScripts(void)
 	for (size_t i = 0; i < lengthof(builtin_script); i++)
 		fprintf(stderr, "  %13s: %s\n", builtin_script[i].name, builtin_script[i].desc);
 	fprintf(stderr, "\n");
+}
+
+/*
+ * Return builtin script matching "name" or its "<builtin: ...>" description,
+ * or NULL if not found / ambiguous.
+ */
+const BuiltinScript *
+findBuiltinOrNull(const char *name)
+{
+	int			found = 0;
+	size_t		len;
+	const BuiltinScript *result = NULL;
+
+	if (name == NULL || *name == '\0')
+		return NULL;
+
+	len = strlen(name);
+	for (size_t i = 0; i < lengthof(builtin_script); i++)
+	{
+		if (strcmp(builtin_script[i].desc, name) == 0)
+			return &builtin_script[i];
+		if (strncmp(builtin_script[i].name, name, len) == 0)
+		{
+			result = &builtin_script[i];
+			found++;
+		}
+	}
+
+	return (found == 1) ? result : NULL;
 }
 
 /* return builtin script "name" if unambiguous, fails if not found */
