@@ -46,7 +46,20 @@ typedef void (*planner_shutdown_hook_type) (PlannerGlobal *glob, Query *parse,
 											PlannedStmt *pstmt);
 extern PGDLLIMPORT planner_shutdown_hook_type planner_shutdown_hook;
 
-/* Hook for plugins to get control when grouping_planner() plans upper rels */
+/*
+ * Hook for plugins to get control when grouping_planner() plans upper rels.
+ * New stages may be added, so plugins must ignore stages they do not handle.
+ * input_rel may be NULL for set-operation stages, which have no finalized
+ * input relation; output_rel is always non-NULL and receives paths.  extra
+ * is stage-specific and is currently NULL for UPPERREL_PARTIAL_SETOP.
+ *
+ * UPPERREL_PARTIAL_SETOP is invoked only when a partial set-operation
+ * de-duplication path is being considered, and can occur more than once in
+ * a query with multiple non-flattened set operations.  Its output_rel
+ * initially contains partial paths; a plugin can add partial paths (and may
+ * add complete paths, which are also considered).  The corresponding
+ * upper_targets[] entry is not initialized.
+ */
 typedef void (*create_upper_paths_hook_type) (PlannerInfo *root,
 											  UpperRelationKind stage,
 											  RelOptInfo *input_rel,
