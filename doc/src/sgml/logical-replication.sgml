@@ -2483,7 +2483,11 @@ SELECT * FROM pg_conflict.pg_conflict_log_16392 WHERE has_omitted_values;
      A value omitted this way cannot be recovered from the conflict log table.
      Some limit is needed because <literal>replica_identity</literal> is a
      <type>json</type> value, which cannot exceed 1GB, and the text of a value
-     can be much longer than the value itself.
+     can be much longer than the value itself.  However, because the 64kB
+     limit is checked after a key value's text representation is formed, in
+     rare cases where a single key value's text representation on the
+     subscriber itself exceeds 1GB, conflict logging will still fail with an
+     error.
     </para>
    </sect3>
   </sect2>
