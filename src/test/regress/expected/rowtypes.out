@@ -1413,18 +1413,18 @@ DROP TABLE compositetable;
 CREATE VIEW rowtypes_cmp_v1 AS
 SELECT (ROW(1, NULL::int)::record = ROW(1, NULL::int)::record) AS r;
 SELECT pg_get_viewdef('rowtypes_cmp_v1'::regclass);
-                        pg_get_viewdef                         
----------------------------------------------------------------
-  SELECT (ROW(1, NULL::integer) = ROW(1, NULL::integer)) AS r;
+                                pg_get_viewdef                                 
+-------------------------------------------------------------------------------
+  SELECT (ROW(1, NULL::integer)::record = ROW(1, NULL::integer)::record) AS r;
 (1 row)
 
 -- Nor as a row comparison with the columns of a scalar subquery
 CREATE VIEW rowtypes_cmp_v2 AS
 SELECT (ROW(1, NULL::int)::record = (SELECT ROW(1, NULL::int)::record)) AS r;
 SELECT pg_get_viewdef('rowtypes_cmp_v2'::regclass);
-                                  pg_get_viewdef                                  
-----------------------------------------------------------------------------------
-  SELECT (ROW(1, NULL::integer) = ( SELECT ROW(1, NULL::integer) AS "row")) AS r;
+                                          pg_get_viewdef                                          
+--------------------------------------------------------------------------------------------------
+  SELECT (ROW(1, NULL::integer)::record = ( SELECT ROW(1, NULL::integer)::record AS "row")) AS r;
 (1 row)
 
 -- The parser expands a whole-row reference to a JOIN USING alias into a ROW()
@@ -1469,12 +1469,11 @@ CREATE TABLE rowtypes_cmp_g (a int,
     (ROW(a, NULL::int)::record = ROW(a, NULL::int)::record) STORED);
 SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef
   WHERE adrelid = 'rowtypes_cmp_g'::regclass;
-                   pg_get_expr                   
--------------------------------------------------
- (ROW(a, NULL::integer) = ROW(a, NULL::integer))
+                           pg_get_expr                           
+-----------------------------------------------------------------
+ (ROW(a, NULL::integer)::record = ROW(a, NULL::integer)::record)
 (1 row)
 
 -- leave the objects around for the pg_upgrade test, except the ones that do
 -- not survive dump and restore yet
-DROP VIEW rowtypes_cmp_v1, rowtypes_cmp_v2, rowtypes_cmp_v3, rowtypes_cmp_v4;
-DROP TABLE rowtypes_cmp_g;
+DROP VIEW rowtypes_cmp_v3, rowtypes_cmp_v4;
