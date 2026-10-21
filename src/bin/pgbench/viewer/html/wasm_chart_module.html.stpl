@@ -1,0 +1,246 @@
+<script>
+  const PGBENCH_WASM_B64 = "{{wasm_b64}}";
+  const PGBENCH_WASM_SIZE_BYTES = {{wasm_size_bytes}};
+  let wasmExports = null;
+
+  async function initPgbenchWasm() {
+    if (PGBENCH_WASM_B64) {
+      const raw = Uint8Array.from(atob(PGBENCH_WASM_B64), c => c.charCodeAt(0));
+      const mod = new WebAssembly.Module(raw);
+      const inst = new WebAssembly.Instance(mod);
+      wasmExports = inst.exports;
+    } else {
+      const res = await WebAssembly.instantiateStreaming(fetch("/static/pgbench_chart.wasm"));
+      wasmExports = res.instance.exports;
+    }
+    window.pgbenchWasm = wasmExports;
+    const el = document.getElementById("wasm-status-indicator");
+    if (el) {
+      el.textContent = `Active (${PGBENCH_WASM_SIZE_BYTES}B WASM f64 projector)`;
+    }
+    return wasmExports;
+  }
+
+  function escSvg(s) {
+    return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function ensureWasmCapacity(requiredBytes) {
+    const curBytes = wasmExports.memory.buffer.byteLength;
+    if (requiredBytes > curBytes) {
+      wasmExports.memory.grow(Math.ceil((requiredBytes - curBytes) / 65536));
+    }
+    return new Float64Array(wasmExports.memory.buffer);
+  }
+
+  function wasmProjectSeries(values, outStart, outSpan) {
+    if (!values || values.length === 0) return { min: 0, max: 1, mean: 0, coords: [] };
+    const n = values.length;
+    const inByteOffset = 0;
+    const outByteOffset = n * 8 + 64;
+    const f64 = ensureWasmCapacity(outByteOffset + n * 8);
+    for (let i = 0; i < n; i++) {
+      f64[i] = Number(values[i]) || 0.0;
+    }
+    const minV = wasmExports.series_min(inByteOffset, n);
+    const maxV = wasmExports.series_max(inByteOffset, n);
+    const meanV = wasmExports.series_mean(inByteOffset, n);
+    const lo = Math.min(0, minV);
+    const hi = maxV > lo ? maxV * 1.08 : lo + 1.0;
+    wasmExports.project_1d(inByteOffset, n, lo, hi, outStart, outSpan, outByteOffset);
+    const outIdx = outByteOffset / 8;
+    const coords = Array.from(f64.slice(outIdx, outIdx + n));
+    return { min: minV, max: maxV, mean: meanV, lo, hi, coords };
+  }
+
+  function renderWasmLineChart(svgId, seriesList, xKey, yKey, yUnit, colorList) {
+    const svg = document.getElementById(svgId);
+    if (!svg || !wasmExports) return;
+    const W = 540, H = 220, padL = 52, padR = 18, padT = 18, padB = 34;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    const validSeries = seriesList.filter(s => s.rows && s.rows.length > 0);
+    if (validSeries.length === 0) {
+      svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="#888" font-size="13">No time-series rows recorded for this run (use -P 1, -l, or --aggregate-interval)</text>`;
+      return;
+    }
+
+    let allY = [];
+    let minX = 0, maxX = 1;
+    validSeries.forEach(s => {
+      s.rows.forEach((r, idx) => {
+        const xv = r[xKey] !== undefined && r[xKey] !== null ? Number(r[xKey]) : idx + 1;
+        if (xv < minX) minX = xv;
+        if (xv > maxX) maxX = xv;
+        allY.push(Number(r[yKey]) || 0);
+      });
+    });
+
+    const yStats = wasmProjectSeries(allY, padT + plotH, -plotH);
+
+    let html = `<svg viewBox="0 0 ${W} ${H}" class="wasm-svg">`;
+    for (let g = 0; g <= 4; g++) {
+      const gy = padT + (plotH * g) / 4;
+      const gval = yStats.hi - ((yStats.hi - yStats.lo) * g) / 4;
+      html += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="rgba(127,127,127,0.2)" stroke-dasharray="3,3"/>`;
+      html += `<text x="${padL - 6}" y="${(gy + 4).toFixed(1)}" text-anchor="end" font-size="10" fill="currentColor" opacity="0.7">${gval.toFixed(gval >= 100 ? 0 : 2)}</text>`;
+    }
+
+    validSeries.forEach((s, sIdx) => {
+      const color = (colorList && colorList[sIdx]) || "#2563eb";
+      const xs = s.rows.map((r, i) => r[xKey] !== undefined && r[xKey] !== null ? Number(r[xKey]) : i + 1);
+      const ys = s.rows.map(r => Number(r[yKey]) || 0);
+      const n = ys.length;
+      const xIn = 0, yIn = n * 8, xOut = n * 16, yOut = n * 24;
+      const f64 = ensureWasmCapacity((n + 1) * 32);
+      for (let i = 0; i < n; i++) {
+        f64[i] = xs[i];
+        f64[n + i] = ys[i];
+      }
+      wasmExports.project_1d(xIn, n, minX, maxX > minX ? maxX : minX + 1, padL, plotW, xOut);
+      wasmExports.project_1d(yIn, n, yStats.lo, yStats.hi, padT + plotH, -plotH, yOut);
+      const px = Array.from(f64.slice(xOut / 8, xOut / 8 + n));
+      const py = Array.from(f64.slice(yOut / 8, yOut / 8 + n));
+
+      let pts = px.map((x, i) => `${x.toFixed(1)},${py[i].toFixed(1)}`).join(" ");
+      if (n === 1) {
+        html += `<circle cx="${px[0].toFixed(1)}" cy="${py[0].toFixed(1)}" r="4" fill="${color}"/>`;
+      } else {
+        const areaPts = `${px[0].toFixed(1)},${(padT + plotH).toFixed(1)} ` + pts + ` ${px[n - 1].toFixed(1)},${(padT + plotH).toFixed(1)}`;
+        html += `<polygon points="${areaPts}" fill="${color}" fill-opacity="0.10"/>`;
+        html += `<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${pts}"/>`;
+        const sLabel = escSvg(s.label || "");
+        px.forEach((x, i) => {
+          html += `<circle cx="${x.toFixed(1)}" cy="${py[i].toFixed(1)}" r="2.8" fill="${color}"><title>${sLabel}: t=${xs[i]}s, ${ys[i]} ${escSvg(yUnit)}</title></circle>`;
+        });
+      }
+    });
+
+    html += `<text x="${padL + plotW / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.75">Elapsed Time (s) — WASM mean=${yStats.mean.toFixed(2)} ${escSvg(yUnit)}, max=${yStats.max.toFixed(2)} ${escSvg(yUnit)}</text>`;
+    html += `</svg>`;
+    svg.outerHTML = html.replace('<svg ', `<svg id="${svgId}" `);
+  }
+
+  function renderWasmBarChart(svgId, labels, values, unit, color) {
+    const svg = document.getElementById(svgId);
+    if (!svg || !wasmExports) return;
+    const W = 540, H = 220, padL = 52, padR = 18, padT = 22, padB = 36;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    const cleanVals = (values || []).map(v => Number(v) || 0);
+    if (!labels || labels.length === 0 || cleanVals.every(v => v === 0)) {
+      svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="#888" font-size="13">No percentile/bar metrics available for this run</text>`;
+      return;
+    }
+
+    const stats = wasmProjectSeries(cleanVals, 0, plotH);
+    const n = labels.length;
+    const slotW = plotW / n;
+    const barW = Math.min(54, Math.max(16, slotW * 0.62));
+
+    let html = `<svg id="${svgId}" viewBox="0 0 ${W} ${H}" class="wasm-svg">`;
+    for (let g = 0; g <= 4; g++) {
+      const gy = padT + (plotH * g) / 4;
+      const gval = stats.hi - (stats.hi * g) / 4;
+      html += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="rgba(127,127,127,0.2)" stroke-dasharray="3,3"/>`;
+      html += `<text x="${padL - 6}" y="${(gy + 4).toFixed(1)}" text-anchor="end" font-size="10" fill="currentColor" opacity="0.7">${gval.toFixed(gval >= 100 ? 0 : 2)}</text>`;
+    }
+
+    for (let i = 0; i < n; i++) {
+      const bh = Math.max(2, stats.coords[i]);
+      const bx = padL + i * slotW + (slotW - barW) / 2;
+      const by = padT + plotH - bh;
+      html += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" rx="4" fill="${color || '#2563eb'}" fill-opacity="0.85"/>`;
+      html += `<text x="${(bx + barW / 2).toFixed(1)}" y="${(by - 5).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="600" fill="currentColor">${cleanVals[i].toFixed(cleanVals[i] >= 100 ? 1 : 3)}</text>`;
+      html += `<text x="${(bx + barW / 2).toFixed(1)}" y="${(padT + plotH + 16).toFixed(1)}" text-anchor="middle" font-size="11" fill="currentColor">${escSvg(labels[i])}</text>`;
+    }
+    html += `</svg>`;
+    svg.outerHTML = html;
+  }
+
+  function isFiniteNumVal(v) {
+    if (typeof v === "number") return Number.isFinite(v);
+    if (typeof v === "string" && v.trim() !== "") return Number.isFinite(Number(v));
+    return false;
+  }
+
+  function renderExplorerChart(payload) {
+    if (document.getElementById("wasm-chart-explorer") && payload && payload.rows && payload.rows.length > 0) {
+      const rows = payload.rows;
+      const keys = Object.keys(rows[0]);
+      const numKeys = keys.filter(k => k !== "run_id" && rows.some(r => isFiniteNumVal(r[k])));
+      if (numKeys.length > 0) {
+        const yKey = numKeys.find(k => k.includes("tps") || k.includes("latency") || k.includes("recall") || k.includes("val")) || numKeys[0];
+        const xKey = keys[0];
+        const labels = rows.slice(0, 15).map((r, i) => String(r[xKey] ?? i + 1).slice(0, 14));
+        const vals = rows.slice(0, 15).map(r => Number(r[yKey]) || 0);
+        renderWasmBarChart("wasm-chart-explorer", labels, vals, yKey, "#2563eb");
+      } else {
+        renderWasmBarChart("wasm-chart-explorer", [], [], "", "#2563eb");
+      }
+    }
+  }
+
+  function renderAllChartsFromPayload(payload) {
+    if (!wasmExports || !payload) return;
+    const prog = (payload.progress_series && payload.progress_series.length > 0)
+      ? payload.progress_series
+      : ((payload.agg_series && payload.agg_series.length > 0) ? payload.agg_series : (payload.tx_series || []));
+    const tpsKey = (prog.length > 0 && prog[0].tps !== undefined) ? "tps" : ((prog.length > 0 && prog[0].cnt !== undefined) ? "cnt" : "ok_cnt");
+
+    if (document.getElementById("wasm-chart-tps")) {
+      if (payload.compare_pair && payload.compare_pair.base_progress && payload.compare_pair.cand_progress &&
+          (payload.compare_pair.base_progress.length > 0 || payload.compare_pair.cand_progress.length > 0)) {
+        renderWasmLineChart("wasm-chart-tps", [
+          { label: "Base", rows: payload.compare_pair.base_progress },
+          { label: "Candidate", rows: payload.compare_pair.cand_progress }
+        ], "elapsed_sec", "tps", "tx/s", ["#64748b", "#2563eb"]);
+      } else {
+        renderWasmLineChart("wasm-chart-tps", [{ label: "Run", rows: prog }], "elapsed_sec", tpsKey, "tx/s", ["#2563eb"]);
+      }
+    }
+
+    if (document.getElementById("wasm-chart-lat-series")) {
+      renderWasmLineChart("wasm-chart-lat-series", [{ label: "Avg Latency", rows: prog }], "elapsed_sec", "latency_avg_ms", "ms", ["#16a34a"]);
+    }
+
+    if (document.getElementById("wasm-chart-hdr")) {
+      const sr = payload.selected_run || {};
+      const lt = payload.live_tx_summary || {};
+      const pcts = [
+        sr.latency_avg_ms ?? lt.avg_ms ?? 0,
+        sr.latency_p50_ms ?? lt.p50_ms ?? 0,
+        sr.latency_p90_ms ?? lt.p90_ms ?? 0,
+        sr.latency_p95_ms ?? lt.p95_ms ?? 0,
+        sr.latency_p99_ms ?? lt.p99_ms ?? 0,
+        sr.latency_p99_9_ms ?? lt.p99_9_ms ?? 0
+      ];
+      renderWasmBarChart("wasm-chart-hdr", ["avg", "p50", "p90", "p95", "p99", "p99.9"], pcts, "ms", "#8b5cf6");
+    }
+
+    if (document.getElementById("wasm-chart-multi") && payload.compare_multi && payload.compare_multi.selected_runs) {
+      const runs = payload.compare_multi.selected_runs;
+      const labels = runs.map(r => r.run_label ? `#${r.run_id} ${r.run_label}` : `#${r.run_id}`);
+      const vals = runs.map(r => r.tps || 0);
+      renderWasmBarChart("wasm-chart-multi", labels, vals, "tx/s", "#0ea5e9");
+    }
+
+    renderExplorerChart(payload);
+  }
+  const renderAllChartsFromSingleJson = renderAllChartsFromPayload;
+
+  document.addEventListener("DOMContentLoaded", async () => {
+    await initPgbenchWasm();
+    const el = document.getElementById("pgbench-single-json");
+    if (el) {
+      try {
+        const payload = JSON.parse(el.textContent);
+        renderAllChartsFromSingleJson(payload);
+      } catch (e) {
+        console.error("Failed to parse single JSON payload:", e);
+      }
+    }
+  });
+</script>

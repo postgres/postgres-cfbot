@@ -1,0 +1,5 @@
+% bstyle = get('box_style', '')
+<div class="chart-box" data-wasm-chart="{{get('chart_kind', 'line')}}"{{!f' style="{bstyle}"' if bstyle else ''}}>
+  <h4><span>{{chart_title}}</span><span class="wasm-tag">{{wasm_badge}}</span></h4>
+  <svg id="{{chart_id}}" class="wasm-svg"></svg>
+</div>

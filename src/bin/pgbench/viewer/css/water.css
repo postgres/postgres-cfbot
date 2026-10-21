@@ -1,0 +1,81 @@
+/* Water.css v2 semantic core (dark/light adaptive) */
+:root {
+  --background-body: #ffffff;
+  --background: #efefef;
+  --background-alt: #f7f7f7;
+  --selection: #9e9e9e;
+  --text-main: #1f2937;
+  --text-bright: #000000;
+  --text-muted: #6b7280;
+  --links: #0076d1;
+  --focus: rgba(0, 150, 191, 0.67);
+  --border: #dbdbdb;
+  --code: #000000;
+  --button-base: #d0cfcf;
+  --button-hover: #9b9b9b;
+  --form-placeholder: #949494;
+  --form-text: #1d1d1d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background-body: #161f27;
+    --background: #202b38;
+    --background-alt: #1a242f;
+    --selection: #1c76c5;
+    --text-main: #dbdbdb;
+    --text-bright: #ffffff;
+    --text-muted: #a9b1ba;
+    --links: #41adff;
+    --focus: rgba(0, 150, 191, 0.67);
+    --border: #526980;
+    --code: #ffbe85;
+    --button-base: #0c151c;
+    --button-hover: #040a0f;
+    --form-placeholder: #a9a9a9;
+    --form-text: #ffffff;
+  }
+}
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  line-height: 1.5;
+  background: var(--background-body);
+  color: var(--text-main);
+}
+h1, h2, h3, h4, h5, h6 { color: var(--text-bright); margin-top: 1rem; margin-bottom: 0.5rem; }
+a { color: var(--links); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre, kbd, samp {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: var(--background);
+  color: var(--code);
+  border-radius: 4px;
+  padding: 2px 5px;
+}
+pre { padding: 0.75rem; overflow-x: auto; }
+input, select, textarea, button {
+  color: var(--form-text);
+  background-color: var(--background);
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+button, input[type="submit"] {
+  background-color: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover, input[type="submit"]:hover { opacity: 0.92; }
+table { border-collapse: collapse; width: 100%; }
+th { background: var(--background-alt); text-align: left; font-weight: 600; }
+tr:nth-child(even) { background: rgba(127, 127, 127, 0.03); }
+details {
+  background: var(--background-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+summary { cursor: pointer; font-weight: 600; }

@@ -1,0 +1,120 @@
+<!-- 1. Benchmark Run Selector Panel -->
+<section class="panel">
+  <h3>1. Benchmark Run Selector</h3>
+  <form method="get" action="/" class="selector-toolbar">
+    <div>
+      <label for="mode-sel">View Mode</label>
+      <select id="mode-sel" name="mode">
+        <option value="single" {{'selected' if mode == 'single' else ''}}>Single-Run Breakdown (pgbench_show_run)</option>
+        <option value="compare" {{'selected' if mode == 'compare' else ''}}>Pairwise Diff (pgbench_compare_runs)</option>
+        <option value="multi" {{'selected' if mode == 'multi' else ''}}>Multi-Run Matrix (pgbench_compare_runs(bigint[]))</option>
+        <option value="live" {{'selected' if mode == 'live' else ''}}>Live Running Benchmark View</option>
+      </select>
+    </div>
+    <div>
+      <label for="run-sel">Target Run</label>
+      <select id="run-sel" name="run_id">
+        % for r in runs:
+          <option value="{{r['run_id']}}" {{'selected' if sel and sel.get('run_id') == r['run_id'] else ''}}>
+            #{{r['run_id']}} — {{r.get('run_label') or 'unlabeled'}} ({{r.get('status')}}, {{r.get('tps') or 0}} tx/s)
+          </option>
+        % end
+      </select>
+    </div>
+    <div>
+      <label for="base-sel">Base Run (Pairwise)</label>
+      <select id="base-sel" name="base_id">
+        <option value="">— Select Base —</option>
+        % for r in runs:
+          <option value="{{r['run_id']}}" {{'selected' if str(base_id or '') == str(r['run_id']) else ''}}>
+            #{{r['run_id']}} ({{r.get('run_label') or 'unlabeled'}})
+          </option>
+        % end
+      </select>
+    </div>
+    <div>
+      <label for="cand-sel">Candidate Run (Pairwise)</label>
+      <select id="cand-sel" name="cand_id">
+        <option value="">— Select Candidate —</option>
+        % for r in runs:
+          <option value="{{r['run_id']}}" {{'selected' if str(cand_id or '') == str(r['run_id']) else ''}}>
+            #{{r['run_id']}} ({{r.get('run_label') or 'unlabeled'}})
+          </option>
+        % end
+      </select>
+    </div>
+    <div>
+      <label for="multi-inp">Multi-Run IDs (comma-sep)</label>
+      <input id="multi-inp" type="text" name="run_ids" value="{{run_ids_str or ''}}" placeholder="e.g. 1,2,3" style="width:130px;">
+    </div>
+    <div>
+      <button type="submit">Apply View</button>
+    </div>
+  </form>
+
+  <details {{'open' if len(runs) <= 8 else ''}}>
+    <summary><strong>Recorded Runs in <code>pgbench_runs_v</code> ({{len(runs)}} runs)</strong> — check runs to compare in Multi-Run Matrix</summary>
+    <div class="table-wrap" style="margin-top:0.5rem;">
+      <table>
+        <thead>
+          <tr>
+            <th>Sel</th>
+            <th>Run</th>
+            <th>Label</th>
+            <th>Status</th>
+            <th>DB / Scale</th>
+            <th class="num-col">Clients/Thr</th>
+            <th class="num-col">Dur (s)</th>
+            <th class="num-col">TPS</th>
+            <th class="num-col">Avg (ms)</th>
+            <th class="num-col">p50 (ms)</th>
+            <th class="num-col">p95 (ms)</th>
+            <th class="num-col">p99 (ms)</th>
+            <th class="num-col">Recall</th>
+            <th>SLA</th>
+          </tr>
+        </thead>
+        <tbody>
+          % for r in runs:
+          <tr>
+            <td>
+              <input type="checkbox" class="multi-run-cb" value="{{r['run_id']}}"
+                onchange="const ids=Array.from(document.querySelectorAll('.multi-run-cb:checked')).map(x=>x.value);document.getElementById('multi-inp').value=ids.join(',');if(ids.length>=2)document.getElementById('mode-sel').value='multi';">
+            </td>
+            <td><a href="/?mode=single&run_id={{r['run_id']}}"><strong>#{{r['run_id']}}</strong></a></td>
+            <td><code>{{r.get('run_label') or '—'}}</code></td>
+            <td>
+              % st = r.get('status') or ''
+              % if st == 'completed':
+                <span class="badge badge-ok">completed</span>
+              % elif st == 'running':
+                <span class="badge badge-live">running</span>
+              % else:
+                <span class="badge badge-err">{{st}}</span>
+              % end
+            </td>
+            <td>{{r.get('target_db') or '—'}} (s={{r.get('scale') or 1}})</td>
+            <td class="num-col">{{r.get('clients') or 0}} / {{r.get('threads') or 0}}</td>
+            <td class="num-col">{{r.get('duration_sec') if r.get('duration_sec') is not None else '—'}}</td>
+            <td class="num-col"><strong>{{r.get('tps') if r.get('tps') is not None else '—'}}</strong></td>
+            <td class="num-col">{{r.get('latency_avg_ms') if r.get('latency_avg_ms') is not None else '—'}}</td>
+            <td class="num-col">{{r.get('latency_p50_ms') if r.get('latency_p50_ms') is not None else '—'}}</td>
+            <td class="num-col">{{r.get('latency_p95_ms') if r.get('latency_p95_ms') is not None else '—'}}</td>
+            <td class="num-col">{{r.get('latency_p99_ms') if r.get('latency_p99_ms') is not None else '—'}}</td>
+            <td class="num-col">{{r.get('recall_avg') if r.get('recall_avg') is not None else '—'}}</td>
+            <td>
+              % if r.get('sla_all_passed') is True:
+                <span class="badge badge-ok">PASS</span>
+              % elif r.get('sla_all_passed') is False:
+                <span class="badge badge-err">FAIL</span>
+              % else:
+                <span class="muted">—</span>
+              % end
+            </td>
+          </tr>
+          % end
+        </tbody>
+      </table>
+    </div>
+  </details>
+</section>

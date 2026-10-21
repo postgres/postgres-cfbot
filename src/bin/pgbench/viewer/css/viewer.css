@@ -1,0 +1,202 @@
+/* pgbench Telemetry Viewer layout, component, badge, meter & WASM SVG styles */
+:root {
+  --bg-card: rgba(127, 127, 127, 0.07);
+  --border-subtle: rgba(127, 127, 127, 0.22);
+  --accent-blue: #2563eb;
+  --accent-green: #15803d;
+  --accent-red: #b91c1c;
+  --accent-amber: #b45309;
+}
+body {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 1.25rem 1.5rem 3rem;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+header.top-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  border-bottom: 2px solid var(--border-subtle);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+.nav-links {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.nav-pill {
+  display: inline-block;
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.9rem;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+}
+.nav-pill.active {
+  background: var(--accent-blue);
+  color: #fff !important;
+  border-color: var(--accent-blue);
+}
+.meta-bar {
+  font-size: 0.82rem;
+  opacity: 0.82;
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1.25rem;
+}
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+.stat-card .stat-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+.stat-card .stat-value {
+  font-size: 1.45rem;
+  font-weight: 700;
+  margin-top: 0.2rem;
+  font-variant-numeric: tabular-nums;
+}
+.stat-card .stat-sub {
+  font-size: 0.78rem;
+  opacity: 0.75;
+  margin-top: 0.15rem;
+}
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  margin-bottom: 1.25rem;
+}
+.panel h3, .panel h4 {
+  margin-top: 0;
+  margin-bottom: 0.65rem;
+}
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+.chart-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+.chart-box h4 {
+  margin: 0 0 0.4rem 0;
+  font-size: 0.95rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.wasm-tag {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(37, 99, 235, 0.15);
+  color: #3b82f6;
+  font-weight: 600;
+}
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.badge-ok { background: rgba(21, 128, 61, 0.18); color: #16a34a; }
+.badge-err { background: rgba(185, 28, 28, 0.18); color: #ef4444; }
+.badge-live { background: rgba(217, 119, 6, 0.22); color: #f59e0b; animation: pulse 1.6s infinite; }
+.badge-neutral { background: rgba(127, 127, 127, 0.18); }
+@keyframes pulse {
+  0%, 100% { opacity: 1.0; }
+  50% { opacity: 0.55; }
+}
+.table-wrap {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+th, td {
+  padding: 0.42rem 0.6rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.num-col {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.col-kind {
+  opacity: 0.6;
+  font-weight: normal;
+}
+.meter-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.meter-track {
+  width: 72px;
+  height: 5px;
+  background: rgba(127, 127, 127, 0.25);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  background: var(--accent-blue);
+}
+.selector-toolbar {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 0.75rem;
+}
+.selector-toolbar label {
+  font-size: 0.82rem;
+  margin-bottom: 0.2rem;
+  display: block;
+}
+.selector-toolbar select, .selector-toolbar input, .selector-toolbar button {
+  margin: 0;
+}
+.muted { opacity: 0.55; }
+.json-inline {
+  font-size: 0.76rem;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0.25rem 0;
+}
+svg.wasm-svg {
+  width: 100%;
+  height: 230px;
+  display: block;
+  overflow: visible;
+}

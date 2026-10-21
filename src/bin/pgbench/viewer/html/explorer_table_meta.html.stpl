@@ -1,0 +1,87 @@
+<!-- Dynamically Generated bottle.SimpleTemplate (stpl) via Python Metatemplate -->
+<div class="table-wrap">
+  <table class="explorer-table">
+    <thead>
+      <tr>
+      @ for cd in col_descriptors:
+        <th{|! ' class="num-col"' if cd['is_numeric'] else '' |}>{|cd['name']|} <small class="col-kind">({|cd['kind']|})</small></th>
+      @ end
+      </tr>
+    </thead>
+    <tbody>
+      % for row in rows:
+      <tr>
+      @ for cd in col_descriptors:
+      @ col_repr = repr(cd['name'])
+      @ kind = cd['kind']
+      @ if kind == 'run_link':
+        <td>
+        % val = row.get({|!col_repr|})
+        % if val is not None:
+          <a href="/?mode=single&run_id={{val}}"><strong>#{{val}}</strong></a>
+        % else:
+          <span class="muted">NULL</span>
+        % end
+        </td>
+      @ elif kind == 'badge':
+        <td>
+        % val = row.get({|!col_repr|})
+        % sval = str(val).upper() if val is not None else 'NULL'
+        % if sval in ('COMPLETED', 'IMPROVED', 'PASS', 'TRUE'):
+          <span class="badge badge-ok">{{val}}</span>
+        % elif sval in ('RUNNING',):
+          <span class="badge badge-live">{{val}}</span>
+        % elif sval in ('REGRESSED', 'SLA_FAILED', 'ABORTED', 'FAIL', 'FALSE'):
+          <span class="badge badge-err">{{val}}</span>
+        % else:
+          <span class="badge badge-neutral">{{val if val is not None else "NULL"}}</span>
+        % end
+        </td>
+      @ elif kind in ('meter_pct', 'meter_ratio'):
+      @ scale_mult = '1.0' if kind == 'meter_pct' else '100.0'
+      @ suffix = '%' if kind == 'meter_pct' else ''
+        <td class="num-col">
+        % val = row.get({|!col_repr|})
+        % if val is not None:
+          % try:
+            % fval = float(val)
+            % bar_w = max(0.0, min(100.0, abs(fval) * {|!scale_mult|}))
+            <div class="meter-cell"><span>{{f"{fval:.4g}{|!suffix|}"}}</span><div class="meter-track"><div class="meter-fill" style="width:{{f"{bar_w:.1f}%"}}"></div></div></div>
+          % except Exception:
+            {{val}}
+          % end
+        % else:
+          <span class="muted">—</span>
+        % end
+        </td>
+      @ elif kind in ('metric_num', 'num'):
+        <td class="num-col">
+        % val = row.get({|!col_repr|})
+        % if val is not None:
+          % if isinstance(val, float):
+            <code>{{f"{val:,.3f}"}}</code>
+          % else:
+            <code>{{val}}</code>
+          % end
+        % else:
+          <span class="muted">—</span>
+        % end
+        </td>
+      @ elif kind == 'json':
+        <td>
+        % val = row.get({|!col_repr|})
+        % if val is not None:
+          <details><summary>JSON</summary><pre class="json-inline">{{json.dumps(val, indent=2)}}</pre></details>
+        % else:
+          <span class="muted">NULL</span>
+        % end
+        </td>
+      @ else:
+        <td>{{row.get({|!col_repr|}) if row.get({|!col_repr|}) is not None else '—'}}</td>
+      @ end
+      @ end
+      </tr>
+      % end
+    </tbody>
+  </table>
+</div>

@@ -1,0 +1,100 @@
+<!-- 2. Live View Banner / Panel (when mode == 'live' or active runs exist) -->
+<section class="panel" id="live-benchmark-panel" style="border-left: 4px solid #f59e0b;">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
+    <h3 style="margin:0;">
+      Live Running Benchmark Monitor
+      % if len(active_runs) > 0:
+        <span class="badge badge-live">{{len(active_runs)}} IN-FLIGHT</span>
+      % else:
+        <span class="badge badge-neutral">IDLE (Showing Most Recent Run #{{sel.get('run_id') if sel else '—'}})</span>
+      % end
+    </h3>
+    <div>
+      <label style="display:inline;font-size:0.85rem;">Auto-Refresh (Single-JSON Poll):
+        <select id="live-poll-interval" style="display:inline;width:auto;margin:0 0.4rem;">
+          <option value="1000" {{'selected' if mode == 'live' else ''}}>Every 1s</option>
+          <option value="2000">Every 2s</option>
+          <option value="5000">Every 5s</option>
+          <option value="0" {{'selected' if mode != 'live' else ''}}>Paused</option>
+        </select>
+      </label>
+      <span id="live-poll-ts" class="muted" style="font-size:0.8rem;"></span>
+    </div>
+  </div>
+
+  % if len(active_runs) > 0:
+  <div class="table-wrap" style="margin-top:0.65rem;">
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Label</th>
+          <th>Target DB</th>
+          <th class="num-col">Clients/Thr</th>
+          <th class="num-col">Wall Elapsed</th>
+          <th class="num-col">Latest Progress Tick</th>
+          <th class="num-col">Live TPS</th>
+          <th class="num-col">Live Avg Lat (ms)</th>
+          <th class="num-col">Failed TX</th>
+        </tr>
+      </thead>
+      <tbody id="live-active-tbody">
+        % for ar in active_runs:
+        <tr>
+          <td><a href="/live?run_id={{ar['run_id']}}"><strong>#{{ar['run_id']}}</strong></a></td>
+          <td><code>{{ar.get('run_label') or '—'}}</code></td>
+          <td>{{ar.get('target_db') or '—'}}</td>
+          <td class="num-col">{{ar.get('clients') or 0}} / {{ar.get('threads') or 0}}</td>
+          <td class="num-col">{{ar.get('live_elapsed_sec') or 0}} s</td>
+          <td class="num-col">{{ar.get('latest_progress_sec') or 0}} s</td>
+          <td class="num-col"><strong>{{ar.get('latest_tps') or '—'}}</strong></td>
+          <td class="num-col">{{ar.get('latest_latency_avg_ms') or '—'}}</td>
+          <td class="num-col">{{ar.get('latest_failed_cnt') or 0}}</td>
+        </tr>
+        % end
+      </tbody>
+    </table>
+  </div>
+  % end
+</section>
+
+<script>
+(function() {
+  let pollTimer = null;
+  const selEl = document.getElementById("live-poll-interval");
+  const tsEl = document.getElementById("live-poll-ts");
+  async function pollLiveSingleJson() {
+    try {
+      const res = await fetch("/api/payload?mode=live&run_id={{target_run_id or ''}}");
+      if (!res.ok) return;
+      const data = await res.json();
+      if (tsEl) tsEl.textContent = "Updated " + new Date().toLocaleTimeString();
+      renderAllChartsFromPayload(data);
+      if (data.selected_run) {
+        const sr = data.selected_run;
+        const lt = data.live_tx_summary || {};
+        const tpsCard = document.getElementById("card-tps-val");
+        if (tpsCard && sr.tps !== null && sr.tps !== undefined) {
+          tpsCard.textContent = Number(sr.tps).toFixed(2) + " tx/s";
+        } else if (tpsCard && data.progress_series && data.progress_series.length > 0) {
+          const lastP = data.progress_series[data.progress_series.length - 1];
+          tpsCard.textContent = Number(lastP.tps || 0).toFixed(2) + " tx/s (live)";
+        }
+        const cntCard = document.getElementById("card-cnt-val");
+        if (cntCard) {
+          cntCard.textContent = sr.transactions_cnt ?? lt.tx_ok_cnt ?? 0;
+        }
+      }
+    } catch (e) {}
+  }
+  function updateTimer() {
+    if (pollTimer) clearInterval(pollTimer);
+    const ms = Number(selEl ? selEl.value : 0);
+    if (ms > 0) pollTimer = setInterval(pollLiveSingleJson, ms);
+  }
+  if (selEl) {
+    selEl.addEventListener("change", updateTimer);
+    updateTimer();
+  }
+})();
+</script>
