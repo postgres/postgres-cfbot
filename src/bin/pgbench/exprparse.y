@@ -32,6 +32,8 @@
 #define PGBENCH_NARGS_3_TO_4		(-14)
 #define PGBENCH_NARGS_3_TO_5		(-15)
 #define PGBENCH_NARGS_0_TO_1		(-16)
+#define PGBENCH_NARGS_4_TO_5		(-17)
+
 
 static PgBenchExprList *make_elist(PgBenchExpr *expr, PgBenchExprList *list);
 static PgBenchExpr *make_null_constant(void);
@@ -512,6 +514,18 @@ static const struct
 	{
 		"ndcg_at_k", PGBENCH_NARGS_2_TO_3, PGBENCH_NDCG_AT_K
 	},
+	{
+		"ldbc_correlated_edge", PGBENCH_NARGS_4_TO_5, PGBENCH_LDBC_CORRELATED_EDGE
+	},
+	{
+		"ldbc_flashmob_ts", PGBENCH_NARGS_4_TO_5, PGBENCH_LDBC_FLASHMOB_TS
+	},
+	{
+		"begin_dependent_write", PGBENCH_NARGS_1_TO_2, PGBENCH_BEGIN_DEPENDENT_WRITE
+	},
+	{
+		"end_dependent_write", PGBENCH_NARGS_1_TO_2, PGBENCH_END_DEPENDENT_WRITE
+	},
 	/* keep as last array element */
 	{
 		NULL, 0, 0
@@ -696,9 +710,16 @@ make_func(yyscan_t yyscanner, int fnumber, PgBenchExprList *args)
 								  PGBENCH_FUNCTIONS[fnumber].fname);
 			break;
 
+		case PGBENCH_NARGS_4_TO_5:
+			if (len < 4 || len > 5)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
 			/* array(...) takes 0 or more arguments */
 		case PGBENCH_NARGS_VARIADIC_ANY:
 			break;
+
 
 			/* common case: positive arguments number */
 		default:

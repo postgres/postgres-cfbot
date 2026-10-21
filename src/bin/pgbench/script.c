@@ -2188,9 +2188,14 @@ evalStandardFunc(CState *st,
 					else if (pg_strcasecmp(mode_str, "once") == 0 ||
 							 pg_strcasecmp(mode_str, "once_global") == 0)
 						mode = CURSOR_ONCE_GLOBAL;
+					else if (pg_strcasecmp(mode_str, "partitioned") == 0)
+						mode = CURSOR_PARTITIONED;
+					else if (pg_strcasecmp(mode_str, "sample") == 0 ||
+							 pg_strcasecmp(mode_str, "random") == 0)
+						mode = CURSOR_SAMPLE;
 					else
 					{
-						pg_log_error("invalid cursor mode \"%s\" in dataset_next_id (expected \"wrap\" or \"once\")",
+						pg_log_error("invalid cursor mode \"%s\" in dataset_next_id (expected \"wrap\", \"once\", \"partitioned\", or \"sample\")",
 									 mode_str);
 						pg_free(mode_str);
 						pg_free(ds_name);
@@ -2208,7 +2213,7 @@ evalStandardFunc(CState *st,
 				}
 				pg_free(ds_name);
 
-				if (!datasetNextId(ds, mode, retval))
+				if (!datasetNextId(ds, st, mode, retval))
 					goto cleanup;
 
 				ok = true;
@@ -2243,25 +2248,45 @@ evalStandardFunc(CState *st,
 				goto cleanup;
 			}
 
+		case PGBENCH_BEGIN_DEPENDENT_WRITE:
+		case PGBENCH_END_DEPENDENT_WRITE:
+			{
+				int64		ts = 0;
+				int64		chan = 0;
+				int64		res_wm;
+
+				Assert(nargs == 1 || nargs == 2);
+				if (!coerceToInt(&vargs[0], &ts))
+					goto cleanup;
+				if (nargs == 2 && !coerceToInt(&vargs[1], &chan))
+					goto cleanup;
+				if (func == PGBENCH_BEGIN_DEPENDENT_WRITE)
+					res_wm = beginDependentWriteChan(st, (int) chan, ts);
+				else
+					res_wm = endDependentWriteChan(st, (int) chan, ts);
+				setIntValue(retval, res_wm);
+				ok = true;
+				goto cleanup;
+			}
+
 		case PGBENCH_RESERVOIR_PUSH:
 			{
 				char	   *res_name = NULL;
-				int64		val = 0;
+				int64		out_val = 0;
 
 				Assert(nargs == 2);
-				if (!coerceToText(&vargs[0], &res_name) ||
-					!coerceToInt(&vargs[1], &val))
+				if (!coerceToText(&vargs[0], &res_name))
 				{
 					pg_free(res_name);
 					goto cleanup;
 				}
-				if (!reservoirPush(res_name, val))
+				if (!reservoirPushValue(res_name, &vargs[1], &out_val))
 				{
 					pg_free(res_name);
 					goto cleanup;
 				}
 				pg_free(res_name);
-				setIntValue(retval, val);
+				setIntValue(retval, out_val);
 				ok = true;
 				goto cleanup;
 			}
@@ -2332,12 +2357,83 @@ evalStandardFunc(CState *st,
 				goto cleanup;
 			}
 
+		case PGBENCH_LDBC_CORRELATED_EDGE:
+			{
+				int64		src_id = 0;
+				int64		num_vertices = 0;
+				int64		num_communities = 0;
+				double		homophily_prob = 0.0;
+				int64		seed = 0;
+				int64		dst = 0;
+
+				Assert(nargs == 4 || nargs == 5);
+				if (!coerceToInt(&vargs[0], &src_id) ||
+					!coerceToInt(&vargs[1], &num_vertices) ||
+					!coerceToInt(&vargs[2], &num_communities) ||
+					!coerceToDouble(&vargs[3], &homophily_prob))
+					goto cleanup;
+				if (nargs == 5 && !coerceToInt(&vargs[4], &seed))
+					goto cleanup;
+
+				if (!pgbench_ldbc_correlated_edge(&st->cs_func_rs,
+												  src_id,
+												  num_vertices,
+												  num_communities,
+												  homophily_prob,
+												  seed,
+												  &dst))
+				{
+					pg_log_error("ldbc_correlated_edge: invalid parameters (num_vertices=" INT64_FORMAT ", num_communities=" INT64_FORMAT ", homophily_prob=%g)",
+								 num_vertices, num_communities, homophily_prob);
+					goto cleanup;
+				}
+				setIntValue(retval, dst);
+				ok = true;
+				goto cleanup;
+			}
+
+		case PGBENCH_LDBC_FLASHMOB_TS:
+			{
+				int64		base_ts_us = 0;
+				int64		span_us = 0;
+				int64		num_spikes = 0;
+				double		spike_prob = 0.0;
+				int64		seed = 0;
+				int64		ts = 0;
+
+				Assert(nargs == 4 || nargs == 5);
+				if (!coerceToInt(&vargs[0], &base_ts_us) ||
+					!coerceToInt(&vargs[1], &span_us) ||
+					!coerceToInt(&vargs[2], &num_spikes) ||
+					!coerceToDouble(&vargs[3], &spike_prob))
+					goto cleanup;
+				if (nargs == 5 && !coerceToInt(&vargs[4], &seed))
+					goto cleanup;
+
+				if (!pgbench_ldbc_flashmob_ts(&st->cs_func_rs,
+											  base_ts_us,
+											  span_us,
+											  num_spikes,
+											  spike_prob,
+											  seed,
+											  &ts))
+				{
+					pg_log_error("ldbc_flashmob_ts: invalid parameters (span_us=" INT64_FORMAT ", num_spikes=" INT64_FORMAT ", spike_prob=%g)",
+								 span_us, num_spikes, spike_prob);
+					goto cleanup;
+				}
+				setIntValue(retval, ts);
+				ok = true;
+				goto cleanup;
+			}
+
 		default:
 			/* cannot get here */
 			Assert(0);
 			/* dead code to avoid a compiler warning */
 			goto cleanup;
 	}
+
 
 cleanup:
 	freeValues(vargs, nargs);
@@ -2580,6 +2676,12 @@ getMetaCommand(const char *cmd)
 		mc = META_WAIT_UNTIL;
 	else if (pg_strcasecmp(cmd, "advance_watermark") == 0)
 		mc = META_ADVANCE_WATERMARK;
+	else if (pg_strcasecmp(cmd, "begin_dependent_write") == 0)
+		mc = META_BEGIN_DEPENDENT_WRITE;
+	else if (pg_strcasecmp(cmd, "end_dependent_write") == 0)
+		mc = META_END_DEPENDENT_WRITE;
+	else if (pg_strcasecmp(cmd, "phase_barrier") == 0)
+		mc = META_PHASE_BARRIER;
 	else if (pg_strcasecmp(cmd, "reservoir_push") == 0)
 		mc = META_RESERVOIR_PUSH;
 	else if (pg_strcasecmp(cmd, "reservoir_sample") == 0)
@@ -2592,6 +2694,8 @@ getMetaCommand(const char *cmd)
 		mc = META_CALL;
 	else if (pg_strcasecmp(cmd, "record_recall") == 0)
 		mc = META_RECORD_RECALL;
+	else if (pg_strcasecmp(cmd, "validate_result") == 0)
+		mc = META_VALIDATE_RESULT;
 	else if (pg_strcasecmp(cmd, "startpipeline") == 0)
 		mc = META_STARTPIPELINE;
 	else if (pg_strcasecmp(cmd, "syncpipeline") == 0)
@@ -3467,7 +3571,9 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 				source, lineno, my_command->argv[0]);
 		}
 	}
-	else if (my_command->meta == META_ADVANCE_WATERMARK)
+	else if (my_command->meta == META_ADVANCE_WATERMARK ||
+			 my_command->meta == META_BEGIN_DEPENDENT_WRITE ||
+			 my_command->meta == META_END_DEPENDENT_WRITE)
 	{
 		int			chan_kw_idx = -1;
 
@@ -3509,6 +3615,12 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 				my_command->first_line + (offsets[1] - start_offset),
 				source, lineno, my_command->argv[0]);
 		}
+	}
+	else if (my_command->meta == META_PHASE_BARRIER)
+	{
+		if (my_command->argc > 2)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "too many arguments", NULL, -1);
 	}
 	else if (my_command->meta == META_RESERVOIR_PUSH)
 	{
@@ -3583,12 +3695,114 @@ process_backslash_command(PsqlScanState sstate, const char *source,
 				source, lineno, my_command->argv[0]);
 		}
 	}
+	else if (my_command->meta == META_VALIDATE_RESULT)
+	{
+		const char *rest;
+		const char *p;
+		char	   *parts[3] = {NULL, NULL, NULL};
+		int			nparts = 0;
+
+		if (my_command->argc < 3)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "\\validate_result requires <actual_expr> <expected_expr> [<tol_expr>]",
+						 NULL, -1);
+
+		rest = my_command->first_line + (offsets[1] - start_offset);
+		p = rest;
+		while (*p != '\0' && nparts < 3)
+		{
+			const char *tok_start;
+			int			depth = 0;
+			bool		in_quotes = false;
+
+			while (*p != '\0' && isspace((unsigned char) *p))
+				p++;
+			if (*p == '\0')
+				break;
+
+			tok_start = p;
+			if (nparts == 2)
+			{
+				p += strlen(p);
+				while (p > tok_start && isspace((unsigned char) p[-1]))
+					p--;
+				parts[nparts++] = pnstrdup(tok_start, p - tok_start);
+				break;
+			}
+
+			while (*p != '\0')
+			{
+				if (*p == '\'')
+				{
+					in_quotes = !in_quotes;
+					p++;
+					continue;
+				}
+				if (!in_quotes)
+				{
+					if (*p == '(' || *p == '[')
+						depth++;
+					else if (*p == ')' || *p == ']')
+					{
+						if (depth > 0)
+							depth--;
+					}
+					else if (depth == 0 && isspace((unsigned char) *p))
+						break;
+				}
+				p++;
+			}
+			parts[nparts++] = pnstrdup(tok_start, p - tok_start);
+		}
+
+		if (nparts < 2)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "\\validate_result requires <actual_expr> <expected_expr> [<tol_expr>]",
+						 NULL, -1);
+
+		for (int i = 0; i < 2; i++)
+		{
+			if (valid_variable_name(parts[i]) &&
+				pg_strcasecmp(parts[i], "true") != 0 &&
+				pg_strcasecmp(parts[i], "false") != 0 &&
+				pg_strcasecmp(parts[i], "null") != 0)
+			{
+				char	   *prefixed = psprintf(":%s", parts[i]);
+
+				pg_free(parts[i]);
+				parts[i] = prefixed;
+			}
+		}
+
+		my_command->expr = parse_sub_expr(parts[0], source, lineno,
+										  my_command->argv[0]);
+		my_command->end_expr = parse_sub_expr(parts[1], source, lineno,
+											  my_command->argv[0]);
+		if (nparts >= 3)
+		{
+			const char *tol_str = parts[2];
+
+			if (pg_strncasecmp(tol_str, "tol=", 4) == 0)
+			{
+				tol_str += 4;
+				if (*tol_str == '\0')
+					syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+								 "missing tolerance expression after tol=", NULL, -1);
+			}
+			my_command->step_expr = parse_sub_expr(tol_str, source, lineno,
+												   my_command->argv[0]);
+		}
+
+		for (int i = 0; i < nparts; i++)
+			pg_free(parts[i]);
+	}
 	else
 	{
 		/* my_command->meta == META_NONE */
 		syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
 					 "invalid command", NULL, -1);
 	}
+
 
 	termPQExpBuffer(&word_buf);
 

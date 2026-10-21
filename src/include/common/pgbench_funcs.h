@@ -99,7 +99,19 @@ extern size_t pgbench_format_vector(const float *vec, int dim,
 									char *buf, size_t buflen);
 extern bool pgbench_parse_vector_count(const char *str, int *dim_out);
 extern bool pgbench_parse_vector_into(const char *str, float *out, int expected_dim);
+extern bool pgbench_ldbc_correlated_edge(pg_prng_state *state,
+										 int64 src_id,
+										 int64 num_vertices,
+										 int64 num_communities,
+										 double homophily_prob,
+										 int64 seed,
+										 int64 *dst_out);
+extern bool pgbench_ldbc_flashmob_ts(pg_prng_state *state,
+									 int64 base_ts_us,
+									 int64 span_us,
+									 int64 num_spikes,
+									 double spike_prob,
+									 int64 seed,
+									 int64 *ts_out);
 
 #endif							/* PGBENCH_FUNCS_H */
-
-

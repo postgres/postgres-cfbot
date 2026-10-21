@@ -1232,6 +1232,183 @@ handle_cmd_record_recall(CState *st, Command *cmd, pg_time_usec_t *now)
 	return CSTATE_END_COMMAND;
 }
 
+static void parseResultCellValue(const char *valstr, PgBenchValue *elem);
+
+static bool
+comparePgBenchValues(const PgBenchValue *v1, const PgBenchValue *v2, double tol)
+{
+	double		d1,
+				d2;
+
+	if (v1->type == PGBT_NULL && v2->type == PGBT_NULL)
+		return true;
+	if (v1->type == PGBT_NULL || v2->type == PGBT_NULL)
+		return false;
+
+	if (v1->type == PGBT_ARRAY || v2->type == PGBT_ARRAY)
+	{
+		if (v1->type != PGBT_ARRAY || v2->type != PGBT_ARRAY)
+			return false;
+		if (v1->u.aval.nelems != v2->u.aval.nelems)
+			return false;
+		for (int i = 0; i < v1->u.aval.nelems; i++)
+		{
+			if (!comparePgBenchValues(&v1->u.aval.elems[i],
+									  &v2->u.aval.elems[i], tol))
+				return false;
+		}
+		return true;
+	}
+
+	if (v1->type == PGBT_VECTOR || v2->type == PGBT_VECTOR)
+	{
+		if (v1->type != PGBT_VECTOR || v2->type != PGBT_VECTOR)
+			return false;
+		if (v1->u.vval.dim != v2->u.vval.dim)
+			return false;
+		for (int i = 0; i < v1->u.vval.dim; i++)
+		{
+			if (fabs((double) v1->u.vval.elems[i] -
+					 (double) v2->u.vval.elems[i]) > tol)
+				return false;
+		}
+		return true;
+	}
+
+	if (v1->type == PGBT_BYTEA || v2->type == PGBT_BYTEA)
+	{
+		if (v1->type != PGBT_BYTEA || v2->type != PGBT_BYTEA)
+			return false;
+		if (v1->u.byval.len != v2->u.byval.len)
+			return false;
+		return (memcmp(v1->u.byval.data, v2->u.byval.data,
+					   (size_t) v1->u.byval.len) == 0);
+	}
+
+	if (v1->type == PGBT_BOOLEAN || v2->type == PGBT_BOOLEAN)
+	{
+		bool		b1,
+					b2;
+
+		if (coerceToBool(v1, &b1) && coerceToBool(v2, &b2))
+			return (b1 == b2);
+	}
+
+	if (v1->type == PGBT_INT && v2->type == PGBT_INT && tol == 0.0)
+		return (v1->u.ival == v2->u.ival);
+
+	if ((v1->type == PGBT_INT || v1->type == PGBT_DOUBLE) &&
+		(v2->type == PGBT_INT || v2->type == PGBT_DOUBLE))
+	{
+		d1 = (v1->type == PGBT_INT) ? (double) v1->u.ival : v1->u.dval;
+		d2 = (v2->type == PGBT_INT) ? (double) v2->u.ival : v2->u.dval;
+		if (isnan(d1) && isnan(d2))
+			return true;
+		if (isinf(d1) && isinf(d2))
+			return ((d1 > 0) == (d2 > 0));
+		return (fabs(d1 - d2) <= tol);
+	}
+
+	/* Try numeric coercion if one side is PGBT_TEXT and the other is numeric */
+	if (coerceToDouble(v1, &d1) && coerceToDouble(v2, &d2))
+	{
+		if (isnan(d1) && isnan(d2))
+			return true;
+		if (isinf(d1) && isinf(d2))
+			return ((d1 > 0) == (d2 > 0));
+		return (fabs(d1 - d2) <= tol);
+	}
+
+	/* Fallback to string comparison */
+	{
+		char	   *s1 = NULL;
+		char	   *s2 = NULL;
+		bool		eq = false;
+
+		if (coerceToText(v1, &s1) && coerceToText(v2, &s2))
+			eq = (strcmp(s1, s2) == 0);
+		pg_free(s1);
+		pg_free(s2);
+		return eq;
+	}
+}
+
+ConnectionStateEnum
+handle_cmd_validate_result(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchValue v_actual;
+	PgBenchValue v_expected;
+	double		tol = 0.0;
+	bool		matched;
+	PgBenchValue v_ok;
+
+	memset(&v_actual, 0, sizeof(v_actual));
+	memset(&v_expected, 0, sizeof(v_expected));
+
+	if (cmd->expr == NULL || !evaluateExpr(st, cmd->expr, &v_actual))
+	{
+		commandFailed(st, "validate_result", "evaluation of actual expression failed");
+		return CSTATE_ABORTED;
+	}
+
+	if (cmd->end_expr == NULL || !evaluateExpr(st, cmd->end_expr, &v_expected))
+	{
+		freeValue(&v_actual);
+		commandFailed(st, "validate_result", "evaluation of expected expression failed");
+		return CSTATE_ABORTED;
+	}
+
+	if (cmd->step_expr != NULL)
+	{
+		PgBenchValue tv;
+
+		memset(&tv, 0, sizeof(tv));
+		if (!evaluateExpr(st, cmd->step_expr, &tv) || !coerceToDouble(&tv, &tol) || tol < 0.0)
+		{
+			freeValue(&tv);
+			freeValue(&v_actual);
+			freeValue(&v_expected);
+			commandFailed(st, "validate_result", "invalid tolerance expression");
+			return CSTATE_ABORTED;
+		}
+		freeValue(&tv);
+	}
+
+	matched = comparePgBenchValues(&v_actual, &v_expected, tol);
+
+	if (matched)
+	{
+		st->txn_validation_passed++;
+	}
+	else
+	{
+		char	   *act_str = formatValue(&v_actual);
+		char	   *exp_str = formatValue(&v_expected);
+
+		st->txn_validation_failed++;
+		pg_log_warning("client %d: \\validate_result mismatch (actual=%s, expected=%s, tol=%g)",
+					   st->id,
+					   act_str ? act_str : "NULL",
+					   exp_str ? exp_str : "NULL",
+					   tol);
+		pg_free(act_str);
+		pg_free(exp_str);
+	}
+
+	freeValue(&v_actual);
+	freeValue(&v_expected);
+
+	memset(&v_ok, 0, sizeof(v_ok));
+	setBoolValue(&v_ok, matched);
+	if (!putVariableValue(&st->variables, "validate_result", "last_validation_ok", &v_ok))
+	{
+		commandFailed(st, "validate_result", "assignment of last_validation_ok failed");
+		return CSTATE_ABORTED;
+	}
+
+	return CSTATE_END_COMMAND;
+}
+
 /* Pluggable meta-command dispatch table */
 static const CommandDescriptor command_handlers[] = {
 	{"set", META_SET, handle_cmd_set},
@@ -1257,12 +1434,16 @@ static const CommandDescriptor command_handlers[] = {
 	{"copy_dataset", META_COPY_DATASET, handle_cmd_copy_dataset},
 	{"wait_until", META_WAIT_UNTIL, handle_cmd_wait_until},
 	{"advance_watermark", META_ADVANCE_WATERMARK, handle_cmd_advance_watermark},
+	{"begin_dependent_write", META_BEGIN_DEPENDENT_WRITE, handle_cmd_begin_dependent_write},
+	{"end_dependent_write", META_END_DEPENDENT_WRITE, handle_cmd_end_dependent_write},
+	{"phase_barrier", META_PHASE_BARRIER, handle_cmd_phase_barrier},
 	{"reservoir_push", META_RESERVOIR_PUSH, handle_cmd_reservoir_push},
 	{"reservoir_sample", META_RESERVOIR_SAMPLE, handle_cmd_reservoir_sample},
 	{"session_connect", META_SESSION_CONNECT, handle_cmd_session_connect},
 	{"session_disconnect", META_SESSION_DISCONNECT, handle_cmd_session_disconnect},
 	{"call", META_CALL, handle_cmd_call},
 	{"record_recall", META_RECORD_RECALL, handle_cmd_record_recall},
+	{"validate_result", META_VALIDATE_RESULT, handle_cmd_validate_result},
 	{"startpipeline", META_STARTPIPELINE, handle_cmd_startpipeline},
 	{"syncpipeline", META_SYNCPIPELINE, handle_cmd_syncpipeline},
 	{"endpipeline", META_ENDPIPELINE, handle_cmd_endpipeline},

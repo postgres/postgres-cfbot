@@ -79,6 +79,14 @@ SELECT pgbench.vector_distance('[3,4,0]', '[0,0,0]', 'l2') AS dist_l2,
        pgbench.vector_distance('[1,0,0]', '[0,1,0]', 'cosine') AS dist_cosine,
        pgbench.vector_distance('[1,2,3]', '[4,5,6]', 'ip') AS dist_ip;
 
+-- Test LDBC correlated edge and flashmob timestamp generators
+SELECT pgbench.setseed(42::bigint);
+SELECT pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) BETWEEN 0 AND 99 AS corr_in_range,
+       (pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) % 5) = (10 % 5) AS corr_homophily_exact,
+       pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) <> 10 AS corr_no_self_loop;
+SELECT pgbench.ldbc_flashmob_ts(1000000, 500000, 4, 0.8, 42) BETWEEN 1000000 AND 1500000 AS flashmob_in_range,
+       pgbench.ldbc_flashmob_ts(1000000, 500000, 0, 0.0, 42) BETWEEN 1000000 AND 1500000 AS flashmob_unif_in_range;
+
 -- Error cases: parameter boundaries
 SELECT pgbench.random(10, 5);
 SELECT pgbench.random_gaussian(1, 10, 1.5);
@@ -93,5 +101,10 @@ SELECT pgbench.to_timestamp('2026-02-30');
 SELECT pgbench.random_vector(0);
 SELECT pgbench.vector_distance('[1,2]', '[1,2,3]', 'l2');
 SELECT pgbench.vector_distance('[1,2]', '[1,2]', 'hamming');
+SELECT pgbench.ldbc_correlated_edge(0, 1, 1, 0.5, 42);
+SELECT pgbench.ldbc_correlated_edge(0, 100, 5, 1.5, 42);
+SELECT pgbench.ldbc_flashmob_ts(1000, 0, 4, 0.5, 42);
+SELECT pgbench.ldbc_flashmob_ts(1000, 1000, 4, -0.1, 42);
 
 DROP EXTENSION pgbench;
+

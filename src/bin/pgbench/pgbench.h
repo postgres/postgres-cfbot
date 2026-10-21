@@ -115,6 +115,10 @@ typedef enum PgBenchFunction
 	PGBENCH_RESERVOIR_COUNT,
 	PGBENCH_RECALL_AT_K,
 	PGBENCH_NDCG_AT_K,
+	PGBENCH_LDBC_CORRELATED_EDGE,
+	PGBENCH_LDBC_FLASHMOB_TS,
+	PGBENCH_BEGIN_DEPENDENT_WRITE,
+	PGBENCH_END_DEPENDENT_WRITE,
 } PgBenchFunction;
 
 typedef struct PgBenchExpr PgBenchExpr;
@@ -216,11 +220,13 @@ typedef enum
 	CSTATE_WAIT_RESULT,
 	CSTATE_SLEEP,
 	CSTATE_WAIT_SYNC,
+	CSTATE_WAIT_PHASE_BARRIER,
 	CSTATE_IDLE,
 	CSTATE_CONNECTING,
 	CSTATE_DISCONNECTING,
 	CSTATE_END_COMMAND,
 	CSTATE_SKIP_COMMAND,
+
 
 	/*
 	 * States for failed commands.
@@ -369,6 +375,12 @@ typedef struct
 	int			sync_dep_channel;	/* causal watermark channel (0..63) */
 	bool		has_sync_dep;	/* true if waiting on sync_dep_watermark */
 	bool		has_scheduled_time; /* true if scheduled via \wait_until or replay */
+	bool		has_active_dep_write;	/* true if inside \begin_dependent_write */
+	int			active_dep_write_chan;	/* channel of active dependent write */
+	uint64		barrier_gen;	/* phase barrier generation waiting on */
+	bool		barrier_done_notified;	/* true if client completion notified to barrier */
+	uint64		dataset_cursors[64];	/* per-client partitioned dataset cursors */
+
 
 	/* Pillar 6: Non-blocking session connect polling state */
 	PostgresPollingStatusType connect_poll_mode;
@@ -376,9 +388,12 @@ typedef struct
 	char	   *session_target_db;
 	char	   *session_target_user;
 
-	/* Pillar 7: Per-transaction quality / recall samples */
+	/* Pillar 7: Per-transaction quality / recall & validation samples */
 	double		txn_recalls[16];
 	int			txn_recall_count;
+	int			txn_validation_passed;
+	int			txn_validation_failed;
+
 
 	/* whether client prepared each command of each script */
 	bool	  **prepared;

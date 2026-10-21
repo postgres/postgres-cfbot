@@ -144,7 +144,9 @@ typedef enum SlaMetricType
 	SLA_METRIC_RECALL_AVG,		/* recall >= <val> */
 	SLA_METRIC_RECALL_PCT,		/* recall_p<pct> >= <val> */
 	SLA_METRIC_TPS,				/* tps >= <val> or qps >= <val> */
-	SLA_METRIC_ERROR_RATE		/* error_rate <= <pct> */
+	SLA_METRIC_ERROR_RATE,		/* error_rate <= <pct> */
+	SLA_METRIC_VALIDATION_FAILURES, /* validation_failures <= <cnt> */
+	SLA_METRIC_VALIDATION_PCT	/* validation_pct >= <pct> */
 } SlaMetricType;
 
 typedef enum SlaOpType

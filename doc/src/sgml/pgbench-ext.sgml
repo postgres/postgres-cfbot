@@ -500,6 +500,47 @@
      </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-ldbc-correlated-edge">
+    <term>
+     <function>pgbench.ldbc_correlated_edge(src_id bigint, num_vertices bigint, num_communities bigint, homophily_prob double precision [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>ldbc_correlated_edge</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates an LDBC-style attribute-correlated target vertex ID in
+      <literal>[1, num_vertices]</literal> for source vertex
+      <parameter>src_id</parameter>.  With probability
+      <parameter>homophily_prob</parameter>, selects a Zipfian-skewed vertex
+      within the same community modulo <parameter>num_communities</parameter>;
+      otherwise selects a global power-law degree hub permuted by
+      <parameter>seed</parameter>.  Never returns a self-loop.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-ldbc-flashmob-ts">
+    <term>
+     <function>pgbench.ldbc_flashmob_ts(base_ts_us bigint, span_us bigint, num_spikes bigint, spike_prob double precision [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>ldbc_flashmob_ts</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates an LDBC-style flashmob timestamp (in microseconds) in
+      <literal>[base_ts_us, base_ts_us + span_us - 1]</literal>.  With
+      probability <parameter>spike_prob</parameter>, samples from one of
+      <parameter>num_spikes</parameter> Zipfian-weighted burst centers with a
+      heavy-tailed exponential offset; otherwise samples uniformly across the
+      interval.
+     </para>
+    </listitem>
+   </varlistentry>
   </variablelist>
  </sect2>
 

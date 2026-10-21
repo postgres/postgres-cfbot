@@ -115,6 +115,8 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	sd->scheduled_count = 0;
 	sd->ontime_count = 0;
 	memset(sd->recall_buckets, 0, sizeof(sd->recall_buckets));
+	sd->validation_passed = 0;
+	sd->validation_failed = 0;
 }
 
 /*
@@ -201,6 +203,8 @@ mergeStats(StatsData *acc, const StatsData *src)
 	acc->ontime_count += src->ontime_count;
 	for (int b = 0; b < RECALL_HIST_BUCKETS; b++)
 		acc->recall_buckets[b] += src->recall_buckets[b];
+	acc->validation_passed += src->validation_passed;
+	acc->validation_failed += src->validation_failed;
 }
 
 /*
@@ -463,5 +467,20 @@ printRecallStats(const char *prefix, const StatsData *stats)
 			   getRecallPercentile(stats, 5.0),
 			   getRecallPercentile(stats, 50.0),
 			   getRecallPercentile(stats, 95.0));
+	}
+}
+
+void
+printValidationStats(const char *prefix, const StatsData *stats)
+{
+	int64		total_val = stats->validation_passed + stats->validation_failed;
+
+	if (total_val > 0)
+	{
+		printf("%s: passed = " INT64_FORMAT ", failed = " INT64_FORMAT " (%.2f%%)\n",
+			   prefix,
+			   stats->validation_passed,
+			   stats->validation_failed,
+			   100.0 * (double) stats->validation_passed / (double) total_val);
 	}
 }

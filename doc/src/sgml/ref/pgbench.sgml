@@ -3776,13 +3776,18 @@ latency percentiles (ms): p50 = 1.240, p90 = 2.810, p95 = 3.650, p99 = 6.120, p9
    When one or more <option>--sla</option> options are supplied,
    <application>pgbench</application> prints an SLA compliance summary table
    comparing each target's measured metric (latency percentile, mean latency,
-   schedule lag percentile, on-time percentage, Recall@K, TPS, or error rate)
-   against its configured threshold, and exits with status 1 if any rule
-   failed.  When <option>--json-report=<replaceable>filename</replaceable></option>
-   is specified, all configuration parameters, overall/group/script statistics,
-   HDR latency and schedule lag percentiles, Recall@K statistics, composite
-   metrics, and SLA evaluations are exported as a machine-readable JSON
-   document.
+   schedule lag percentile, on-time percentage, Recall@K, result validation
+   failures/percentage via <literal>\validate_result</literal>, TPS, or error
+   rate) against its configured threshold, and exits with status 1 if any rule
+   failed.  Scripts can also coordinate multi-writer causal watermarks via
+   <literal>\begin_dependent_write</literal> and
+   <literal>\end_dependent_write</literal>, and synchronize phased workloads
+   across clients via <literal>\phase_barrier</literal>.  When
+   <option>--json-report=<replaceable>filename</replaceable></option> is
+   specified, all configuration parameters, overall/group/script statistics,
+   HDR latency and schedule lag percentiles, Recall@K statistics, validation
+   counts, composite metrics, and SLA evaluations are exported as a
+   machine-readable JSON document.
   </para>
  </refsect2>
 

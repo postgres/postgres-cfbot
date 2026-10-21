@@ -2638,6 +2638,80 @@ SELECT octet_length(:b::bytea) BETWEEN 8 AND 16,
 }
 	});
 
+# Test Phase 1 LDBC Engine & Generator Extensions:
+# 1) ldbc_correlated_edge & ldbc_flashmob_ts
+# 2) \begin_dependent_write / \end_dependent_write multi-writer min-watermark gatekeeper
+# 3) --dataset :header flag and \dataset_bind partitioned / sample cursor modes
+# 4) \reservoir_push with PGBT_ARRAY (from \gset_col)
+# 5) \phase_barrier across multiple clients
+# 6) \validate_result and --sla validation_failures / validation_pct
+my $ldbc_hdr_csv = $node->basedir . '/001_ldbc_header.csv';
+append_to_file($ldbc_hdr_csv, "personId|firstName\n101|Alice\n102|Bob\n103|Carol\n104|Dave\n");
+
+my $ldbc_val_json = $node->basedir . '/001_ldbc_validation.json';
+$node->pgbench(
+	"-n -c 2 -j 2 -t 2 --dataset=ldbc_p:$ldbc_hdr_csv:pipe:header --reservoir=ldbc_res:64 "
+	  . "--sla validation_failures<=0 --sla validation_pct>=100.0 --json-report=$ldbc_val_json",
+	0,
+	[
+		qr{processed: 4/4},
+		qr{validation results: passed = 12, failed = 0 \(100\.00%\)},
+		qr{SLA total:validation_failures <= 0: actual = 0 \[PASS\]},
+		qr{SLA total:validation_pct >= 100\.00%: actual = 100\.00% \[PASS\]},
+	],
+	[
+		qr{loaded dataset "ldbc_p".*4 rows},
+	],
+	'pgbench Phase 1 LDBC generators, dataset :header/partitioned/sample, array reservoir_push, phase_barrier, and validate_result',
+	{
+		'001_pgbench_ldbc_phase1' => q{
+\set dst ldbc_correlated_edge(10, 100, 5, 1.0, 42)
+\set fts ldbc_flashmob_ts(1000000, 500000, 4, 0.8, 42)
+\validate_result (:dst >= 1 and :dst <= 100 and :dst != 10 and (:dst % 5) = 0) true
+\validate_result (:fts >= 1000000 and :fts <= 1500000) true
+\dataset_bind ldbc_p partitioned pid pname
+\dataset_bind ldbc_p sample spid spname
+SELECT g FROM generate_series(1001, 1003) g \gset_col discovered_ids
+\reservoir_push ldbc_res :discovered_ids
+\phase_barrier
+\reservoir_sample ldbc_res sampled_id 0
+SELECT (:pid >= 101 AND :pid <= 104) AND (:spid >= 101 AND :spid <= 104) AND (:sampled_id >= 1001 AND :sampled_id <= 1003) AS ok \gset
+\validate_result :ok true
+}
+	});
+
+my $ldbc_val_json_content = slurp_file($ldbc_val_json);
+like($ldbc_val_json_content, qr/"validation_passed": 12/, 'JSON report contains validation_passed: 12');
+like($ldbc_val_json_content, qr/"validation_failed": 0/, 'JSON report contains validation_failed: 0');
+
+# Test multi-writer min-watermark gatekeeper (\begin_dependent_write / \end_dependent_write)
+# Out-of-order completion: writer A starts at t=100, writer B starts at t=200 and finishes at t=200
+# while writer A is still in flight -> get_watermark(3) must stay at 99 until writer A ends!
+$node->pgbench(
+	'-n -t 1',
+	0,
+	[
+		qr{processed: 1/1},
+		qr{validation results: passed = 3, failed = 0 \(100\.00%\)},
+	],
+	[qr{^$}],
+	'pgbench multi-writer min-watermark gatekeeper holds back watermark until oldest in-flight writer completes',
+	{
+		'001_pgbench_dep_write_gatekeeper' => q{
+\begin_dependent_write 100 CHANNEL 3
+\set wm_during_100 get_watermark(3)
+\validate_result :wm_during_100 0
+\set dummy begin_dependent_write(200, 3)
+\set dummy end_dependent_write(200, 3)
+\set wm_while_100_still_active get_watermark(3)
+\validate_result :wm_while_100_still_active 99
+\end_dependent_write 100 CHANNEL 3
+\set wm_after_100_done get_watermark(3)
+\validate_result :wm_after_100_done 200
+SELECT 1;
+}
+	});
+
 # Test standard benchmark workload suites (pgbench-b, pgbench-c, pgbench-e, pgbench-h, pgbench-ds, pgbench-htap, pgbench-vec, pgbench-graph)
 my $wl_dir = "$FindBin::RealBin/../workloads";
 
@@ -3023,6 +3097,86 @@ $node->pgbench(
 	],
 	[qr{^$}],
 	'pgbench-graph workload execution without --reservoir');
+
+# Phase 2 LDBC Suite 1: LSQB (Q1-Q9 cyclic, acyclic, and anti-join pattern matching)
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 1 -s 1 "
+	  . "--sla validation_failures<=0 --sla validation_pct>=100.0 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_ldbc_lsqb.sql",
+	0,
+	[
+		qr{processed: 2/2},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{validation results: passed = 18, failed = 0 \(100\.00%\)},
+		qr{SLA total:validation_failures <= 0: actual = 0 \[PASS\]},
+	],
+	[qr{^$}],
+	'pgbench-graph LDBC LSQB (Q1-Q9) workload suite execution');
+
+# Phase 2 LDBC Suite 2: LDBC SNB Interactive v1/v2 (multi-group readers IC->\call IS + writers IU/ID)
+$node->pgbench(
+	"-n -d wl_pgbench_graph -t 3 -s 1 --tcr=0.1 "
+	  . "--reservoir=persons:512 --reservoir=messages:1024 "
+	  . "--group name=snb_readers,clients=1,threads=1,"
+	  . "file=$wl_dir/pgbench-graph/pgbench_ldbc_snb_ic.sql\@50,"
+	  . "file=$wl_dir/pgbench-graph/pgbench_ldbc_snb_is.sql\@50 "
+	  . "--group name=snb_writers,clients=1,threads=1,"
+	  . "file=$wl_dir/pgbench-graph/pgbench_ldbc_snb_iu.sql\@70,"
+	  . "file=$wl_dir/pgbench-graph/pgbench_ldbc_snb_id.sql\@30 "
+	  . "--sla validation_failures<=0 --sla total:p95<=60s",
+	0,
+	[
+		qr{processed: 6/6},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{SLA total:validation_failures <= 0: actual = 0 \[PASS\]},
+	],
+	[qr{^$}],
+	'pgbench-graph LDBC SNB Interactive v1/v2 multi-group workload execution');
+
+# Phase 3 LDBC Suite 3: LDBC SNB Business Intelligence (Power -> \phase_barrier -> Batch Update -> \phase_barrier -> Throughput)
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 1 -s 1 "
+	  . "--sla validation_failures<=0 --sla validation_pct>=100.0 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_ldbc_snb_bi.sql",
+	0,
+	[
+		qr{processed: 2/2},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{validation results: passed = 14, failed = 0 \(100\.00%\)},
+		qr{SLA total:validation_failures <= 0: actual = 0 \[PASS\]},
+	],
+	[qr{^$}],
+	'pgbench-graph LDBC SNB BI phased workload execution with phase_barrier');
+
+# Phase 3 LDBC Suite 4a: LDBC FinBench (TSR, TCR temporal cycles, TW, and TRW conditional ROLLBACK)
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 4 -s 1 "
+	  . "--sla validation_failures<=0 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_ldbc_finbench.sql",
+	0,
+	[
+		qr{processed: 8/8},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{validation results: passed = 32, failed = 0 \(100\.00%\)},
+		qr{SLA total:validation_failures <= 0: actual = 0 \[PASS\]},
+	],
+	[qr{^$}],
+	'pgbench-graph LDBC FinBench workload execution (TSR, TCR, TW, TRW)');
+
+# Phase 3 LDBC Suite 4b: LDBC Graphalytics (BFS, WCC, SSSP, PageRank, LCC with \validate_result)
+$node->pgbench(
+	"-n -d wl_pgbench_graph -c 2 -j 2 -t 1 -s 1 "
+	  . "--sla validation_failures<=0 --sla validation_pct>=100.0 "
+	  . "-f $wl_dir/pgbench-graph/pgbench_ldbc_graphalytics.sql",
+	0,
+	[
+		qr{processed: 2/2},
+		qr{number of failed transactions: 0 \(0\.000%\)},
+		qr{validation results: passed = 16, failed = 0 \(100\.00%\)},
+		qr{SLA total:validation_failures <= 0: actual = 0 \[PASS\]},
+	],
+	[qr{^$}],
+	'pgbench-graph LDBC Graphalytics (BFS, WCC, SSSP, PageRank, LCC) execution');
 
 for my $db (qw(wl_pgbench_b wl_pgbench_c wl_pgbench_e wl_pgbench_h wl_pgbench_ds wl_pgbench_htap wl_pgbench_vec wl_pgbench_graph))
 {

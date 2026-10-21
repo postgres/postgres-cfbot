@@ -245,6 +245,28 @@ SELECT pgbench.vector_distance('[3,4,0]', '[0,0,0]', 'l2') AS dist_l2,
        5 |           1 |     -32
 (1 row)
 
+-- Test LDBC correlated edge and flashmob timestamp generators
+SELECT pgbench.setseed(42::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) BETWEEN 0 AND 99 AS corr_in_range,
+       (pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) % 5) = (10 % 5) AS corr_homophily_exact,
+       pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) <> 10 AS corr_no_self_loop;
+ corr_in_range | corr_homophily_exact | corr_no_self_loop 
+---------------+----------------------+-------------------
+ t             | t                    | t
+(1 row)
+
+SELECT pgbench.ldbc_flashmob_ts(1000000, 500000, 4, 0.8, 42) BETWEEN 1000000 AND 1500000 AS flashmob_in_range,
+       pgbench.ldbc_flashmob_ts(1000000, 500000, 0, 0.0, 42) BETWEEN 1000000 AND 1500000 AS flashmob_unif_in_range;
+ flashmob_in_range | flashmob_unif_in_range 
+-------------------+------------------------
+ t                 | t
+(1 row)
+
 -- Error cases: parameter boundaries
 SELECT pgbench.random(10, 5);
 ERROR:  empty range given to random: lower bound 10 is greater than upper bound 5
@@ -272,4 +294,12 @@ SELECT pgbench.vector_distance('[1,2]', '[1,2,3]', 'l2');
 ERROR:  different vector dimensions 2 and 3
 SELECT pgbench.vector_distance('[1,2]', '[1,2]', 'hamming');
 ERROR:  invalid vector distance metric "hamming" (expected "l2", "cosine", or "ip")
+SELECT pgbench.ldbc_correlated_edge(0, 1, 1, 0.5, 42);
+ERROR:  invalid ldbc_correlated_edge parameters (num_vertices=1, num_communities=1, homophily_prob=0.5)
+SELECT pgbench.ldbc_correlated_edge(0, 100, 5, 1.5, 42);
+ERROR:  invalid ldbc_correlated_edge parameters (num_vertices=100, num_communities=5, homophily_prob=1.5)
+SELECT pgbench.ldbc_flashmob_ts(1000, 0, 4, 0.5, 42);
+ERROR:  invalid ldbc_flashmob_ts parameters (span_us=0, num_spikes=4, spike_prob=0.5)
+SELECT pgbench.ldbc_flashmob_ts(1000, 1000, 4, -0.1, 42);
+ERROR:  invalid ldbc_flashmob_ts parameters (span_us=1000, num_spikes=4, spike_prob=-0.1)
 DROP EXTENSION pgbench;

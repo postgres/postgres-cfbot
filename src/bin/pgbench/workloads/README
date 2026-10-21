@@ -306,18 +306,31 @@ Run with Recall@K SLA gate:
 7. pgbench-graph (workloads/pgbench-graph/)
 -------------------------------------------
 
-Modeled after LDBC Social Network Benchmark (SNB) interactive graph traversals
-and updates, exercising shared entity reservoirs (\reservoir_push,
-\reservoir_sample) and causal watermarks (\advance_watermark).
+Comprehensive LDBC-inspired Graph Benchmark Ecosystem covering social network
+property graphs and financial transaction graphs across all four major LDBC
+workload families:
+  * Suite 1: LSQB (Labelled Subgraph Query Benchmark, Q1-Q9)
+  * Suite 2: LDBC SNB Interactive v1 & v2 (IS1-IS7, IC1-IC13, IU1-IU8, ID1-ID8)
+  * Suite 3: LDBC SNB Business Intelligence (Power -> \phase_barrier -> Batch Update -> \phase_barrier -> Throughput)
+  * Suite 4: LDBC FinBench (TSR, TCR temporal chains/cycles, TW, TRW1-TRW3 conditional ROLLBACK) & LDBC Graphalytics (BFS, WCC, SSSP, PageRank, LCC)
 
 Files:
-  pgbench_graph_schema.sql       pgbench_graph_persons, pgbench_graph_knows,
-                                 pgbench_graph_messages + pgbench_graph_add_edge
-  pgbench_graph_init.sql         Parallel graph vertex/edge/message generator
-  pgbench_graph_constraints.sql  Primary keys, bidirectional adjacency indexes
-  pgbench_graph_1hop.sql         1-hop neighborhood + recent posts traversal
-  pgbench_graph_2hop.sql         2-hop friend-of-friend scoring query
-  pgbench_graph_add_edge.sql     Transactional edge/post insert + reservoir push
+  pgbench_graph_schema.sql         Unified LDBC SNB (10 tables) + FinBench (5 tables)
+                                   schema + pgbench_graph_add_edge procedure
+  pgbench_graph_init.sql           Parallel graph generator using pgbench.ldbc_correlated_edge
+                                   and pgbench.ldbc_flashmob_ts
+  pgbench_graph_constraints.sql    Primary keys, bidirectional adjacency & temporal indexes
+  pgbench_graph_1hop.sql           1-hop neighborhood + recent posts traversal
+  pgbench_graph_2hop.sql           2-hop friend-of-friend scoring query
+  pgbench_graph_add_edge.sql       Transactional edge/post insert + reservoir push
+  pgbench_ldbc_lsqb.sql            LSQB Q1-Q9 cyclic, acyclic, and anti-join patterns
+  pgbench_ldbc_snb_is.sql          LDBC SNB Interactive Short Reads (IS1-IS7)
+  pgbench_ldbc_snb_ic.sql          LDBC SNB Interactive Complex Reads (IC + \call IS)
+  pgbench_ldbc_snb_iu.sql          LDBC SNB Interactive Inserts (IU1-IU8 + min-watermark)
+  pgbench_ldbc_snb_id.sql          LDBC SNB Interactive v2 Cascading Deletes (ID1-ID8)
+  pgbench_ldbc_snb_bi.sql          LDBC SNB BI phased run synchronized via \phase_barrier
+  pgbench_ldbc_finbench.sql        LDBC FinBench TSR/TCR/TW + TRW conditional ROLLBACK
+  pgbench_ldbc_graphalytics.sql    LDBC Graphalytics (BFS, WCC, SSSP, PageRank, LCC)
 
 Initialize:
   pgbench -n -f workloads/pgbench-graph/pgbench_graph_schema.sql
@@ -325,9 +338,84 @@ Initialize:
           -f workloads/pgbench-graph/pgbench_graph_init.sql
   pgbench -n -f workloads/pgbench-graph/pgbench_graph_constraints.sql
 
-Run with shared reservoir:
-  pgbench -n -c 4 -j 2 -T 30 -D scale=1 \
-          --reservoir=persons:1024 \
-          -f workloads/pgbench-graph/pgbench_graph_1hop.sql@50 \
-          -f workloads/pgbench-graph/pgbench_graph_2hop.sql@30 \
-          -f workloads/pgbench-graph/pgbench_graph_add_edge.sql@20
+Run LSQB (Q1-Q9) with result validation:
+  pgbench -n -c 4 -j 4 -t 5 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph/pgbench_ldbc_lsqb.sql
+
+Run LDBC SNB Interactive v1/v2 (multi-group readers + writers with reservoirs):
+  pgbench -n -T 60 -s 1 --tcr=0.1 \
+          --reservoir=persons:4096 --reservoir=messages:8192 \
+          --group="name=snb_readers,clients=4,threads=2,file=workloads/pgbench-graph/pgbench_ldbc_snb_ic.sql@30,file=workloads/pgbench-graph/pgbench_ldbc_snb_is.sql@70" \
+          --group="name=snb_writers,clients=2,threads=2,file=workloads/pgbench-graph/pgbench_ldbc_snb_iu.sql@75,file=workloads/pgbench-graph/pgbench_ldbc_snb_id.sql@25"
+
+Run LDBC SNB BI (Power -> Micro-Batch -> Throughput synchronized via \phase_barrier):
+  pgbench -n -c 4 -j 4 -t 1 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph/pgbench_ldbc_snb_bi.sql
+
+Run LDBC FinBench & LDBC Graphalytics:
+  pgbench -n -c 4 -j 2 -t 10 -s 1 \
+          -f workloads/pgbench-graph/pgbench_ldbc_finbench.sql
+  pgbench -n -c 2 -j 2 -t 1 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph/pgbench_ldbc_graphalytics.sql
+
+
+8. pgbench-graph-pgq (workloads/pgbench-graph-pgq/)
+---------------------------------------------------
+
+ISO SQL/PGQ (GRAPH_TABLE / CREATE PROPERTY GRAPH) counterpart to
+pgbench-graph. Implements the exact same 14 LDBC-inspired social network and
+financial graph benchmark scripts using declarative property graph DDL
+(CREATE PROPERTY GRAPH snb_graph and finbench_graph with NODE TABLES and EDGE
+TABLES) and GRAPH_TABLE (... MATCH ... COLUMNS (...)) pattern matching.
+
+Files:
+  pgbench_graph_pgq_schema.sql       Unified LDBC SNB + FinBench relational tables,
+                                     pgbench_graph_add_edge procedure, and SQL/PGQ
+                                     CREATE PROPERTY GRAPH snb_graph & finbench_graph
+  pgbench_graph_pgq_init.sql         Parallel graph generator using pgbench.ldbc_correlated_edge
+                                     and pgbench.ldbc_flashmob_ts
+  pgbench_graph_pgq_constraints.sql  Primary keys, bidirectional adjacency & temporal indexes
+  pgbench_graph_pgq_1hop.sql         1-hop neighborhood + recent posts via GRAPH_TABLE
+  pgbench_graph_pgq_2hop.sql         2-hop friend-of-friend scoring via GRAPH_TABLE
+  pgbench_graph_pgq_add_edge.sql     Transactional edge/post insert + reservoir push
+  pgbench_ldbc_pgq_lsqb.sql          LSQB Q1-Q9 cyclic, acyclic, and anti-join GRAPH_TABLE patterns
+  pgbench_ldbc_pgq_snb_is.sql        LDBC SNB Interactive Short Reads (IS1-IS7) via GRAPH_TABLE
+  pgbench_ldbc_pgq_snb_ic.sql        LDBC SNB Interactive Complex Reads (IC + \call IS) via GRAPH_TABLE
+  pgbench_ldbc_pgq_snb_iu.sql        LDBC SNB Interactive Inserts (IU1-IU8 + min-watermark)
+  pgbench_ldbc_pgq_snb_id.sql        LDBC SNB Interactive v2 Cascading Deletes (ID1-ID8) via GRAPH_TABLE
+  pgbench_ldbc_pgq_snb_bi.sql        LDBC SNB BI phased run via GRAPH_TABLE + \phase_barrier
+  pgbench_ldbc_pgq_finbench.sql      LDBC FinBench TSR/TCR/TW + TRW conditional ROLLBACK via GRAPH_TABLE
+  pgbench_ldbc_pgq_graphalytics.sql  LDBC Graphalytics (BFS, WCC, SSSP, PageRank, LCC) via GRAPH_TABLE
+
+Initialize:
+  pgbench -n -f workloads/pgbench-graph-pgq/pgbench_graph_pgq_schema.sql
+  pgbench -n -c 4 -j 4 -t 1 -D scale=1 -D num_workers=4 \
+          -f workloads/pgbench-graph-pgq/pgbench_graph_pgq_init.sql
+  pgbench -n -f workloads/pgbench-graph-pgq/pgbench_graph_pgq_constraints.sql
+
+Run LSQB (Q1-Q9) with GRAPH_TABLE and result validation:
+  pgbench -n -c 4 -j 4 -t 5 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_lsqb.sql
+
+Run LDBC SNB Interactive v1/v2 (multi-group GRAPH_TABLE readers + writers with reservoirs):
+  pgbench -n -T 60 -s 1 --tcr=0.1 \
+          --reservoir=persons:4096 --reservoir=messages:8192 \
+          --group="name=snb_readers,clients=4,threads=2,file=workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_snb_ic.sql@30,file=workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_snb_is.sql@70" \
+          --group="name=snb_writers,clients=2,threads=2,file=workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_snb_iu.sql@75,file=workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_snb_id.sql@25"
+
+Run LDBC SNB BI (Power -> Micro-Batch -> Throughput via GRAPH_TABLE + \phase_barrier):
+  pgbench -n -c 4 -j 4 -t 1 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_snb_bi.sql
+
+Run LDBC FinBench & LDBC Graphalytics via GRAPH_TABLE:
+  pgbench -n -c 4 -j 2 -t 10 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_finbench.sql
+  pgbench -n -c 2 -j 2 -t 1 -s 1 \
+          --sla="validation_failures<=0" \
+          -f workloads/pgbench-graph-pgq/pgbench_ldbc_pgq_graphalytics.sql

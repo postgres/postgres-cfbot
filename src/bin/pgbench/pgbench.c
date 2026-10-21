@@ -526,6 +526,28 @@ parseSlaSpec(const char *spec)
 		rule->metric = SLA_METRIC_ERROR_RATE;
 		rule->threshold_val = val;
 	}
+	else if (pg_strcasecmp(metric_str, "validation_failures") == 0)
+	{
+		while (isspace((unsigned char) *endp))
+			endp++;
+		if (*endp != '\0' || val < 0.0)
+			pg_fatal("invalid validation_failures threshold in --sla specification: \"%s\"", spec);
+		rule->metric = SLA_METRIC_VALIDATION_FAILURES;
+		rule->threshold_val = val;
+	}
+	else if (pg_strcasecmp(metric_str, "validation_pct") == 0)
+	{
+		while (isspace((unsigned char) *endp))
+			endp++;
+		if (*endp == '%')
+			endp++;
+		while (isspace((unsigned char) *endp))
+			endp++;
+		if (*endp != '\0' || val < 0.0 || val > 100.0)
+			pg_fatal("invalid validation_pct threshold in --sla specification: \"%s\"", spec);
+		rule->metric = SLA_METRIC_VALIDATION_PCT;
+		rule->threshold_val = val;
+	}
 	else if (pg_strcasecmp(metric_str, "avg") == 0 ||
 			 pg_strcasecmp(metric_str, "latency_avg") == 0)
 	{

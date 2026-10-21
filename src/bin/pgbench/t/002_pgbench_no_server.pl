@@ -567,6 +567,26 @@ my @script_tests = (
 		'record_recall missing argument',
 		[qr{\\record_recall requires}],
 		{ 'record-recall-noarg.sql' => "\\record_recall\n" }
+	],
+	[
+		'begin_dependent_write missing argument',
+		[qr{missing argument.*begin_dependent_write}],
+		{ 'begin-dep-write-noarg.sql' => "\\begin_dependent_write\n" }
+	],
+	[
+		'end_dependent_write missing argument',
+		[qr{missing argument.*end_dependent_write}],
+		{ 'end-dep-write-noarg.sql' => "\\end_dependent_write\n" }
+	],
+	[
+		'phase_barrier too many arguments',
+		[qr{too many arguments.*phase_barrier}],
+		{ 'phase-barrier-args.sql' => "\\phase_barrier a b\n" }
+	],
+	[
+		'validate_result missing argument',
+		[qr{\\validate_result requires}],
+		{ 'validate-result-noarg.sql' => "\\validate_result :x\n" }
 	],);
 
 for my $t (@script_tests)
@@ -577,3 +597,4 @@ for my $t (@script_tests)
 }
 
 done_testing();
+

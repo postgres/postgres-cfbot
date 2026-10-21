@@ -1188,6 +1188,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				st->loop_depth = 0;
 				st->try_depth = 0;
 				unwindCallStack(st);
+				cancelDependentWrite(st);
 				st->expect_error = false;
 				st->expect_sqlstate = NULL;
 				st->error_caught = false;
@@ -1201,6 +1202,8 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				st->sync_scheduled_us = 0;
 				st->has_scheduled_time = false;
 				st->txn_recall_count = 0;
+				st->txn_validation_passed = 0;
+				st->txn_validation_failed = 0;
 				break;
 
 				/*
@@ -1451,6 +1454,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					 * - on errors CSTATE_ABORTED
 					 * - on sleep CSTATE_SLEEP
 					 * - on wait_until CSTATE_WAIT_SYNC
+					 * - on phase_barrier CSTATE_WAIT_PHASE_BARRIER
 					 * - on session_connect CSTATE_CONNECTING
 					 * - on session_disconnect CSTATE_DISCONNECTING
 					 * - on call CSTATE_START_COMMAND
@@ -1471,6 +1475,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					   st->state == CSTATE_START_COMMAND ||
 					   st->state == CSTATE_SLEEP ||
 					   st->state == CSTATE_WAIT_SYNC ||
+					   st->state == CSTATE_WAIT_PHASE_BARRIER ||
 					   st->state == CSTATE_IDLE ||
 					   st->state == CSTATE_CONNECTING ||
 					   st->state == CSTATE_DISCONNECTING ||
@@ -1583,6 +1588,24 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				st->sync_dep_channel = 0;
 				st->sync_scheduled_us = 0;
 				break;
+
+				/*
+				 * Wait until all active clients reach \phase_barrier.
+				 */
+			case CSTATE_WAIT_PHASE_BARRIER:
+				if (__atomic_load_n(&aborted_clients_count, __ATOMIC_ACQUIRE) > 0)
+				{
+					pg_log_error("client %d aborted while waiting at phase barrier because another client aborted",
+								 st->id);
+					st->state = CSTATE_ABORTED;
+					break;
+				}
+				if (checkPhaseBarrierReady(st))
+				{
+					st->state = CSTATE_END_COMMAND;
+					break;
+				}
+				return;
 
 			case CSTATE_IDLE:
 				{
@@ -1735,6 +1758,7 @@ session_slot_acquired:
 					TStatus		tstatus;
 
 					Assert(st->estatus != ESTATUS_NO_ERROR);
+					cancelDependentWrite(st);
 
 					if (st->error_caught)
 					{
@@ -1865,6 +1889,7 @@ session_slot_acquired:
 				 */
 			case CSTATE_RETRY:
 				unwindCallStack(st);
+				cancelDependentWrite(st);
 				command = sql_script[st->use_file].commands[st->command];
 
 				/*
@@ -1900,6 +1925,8 @@ session_slot_acquired:
 				st->has_sync_dep = false;
 				st->sync_dep_watermark = 0;
 				st->sync_scheduled_us = 0;
+				st->txn_validation_passed = 0;
+				st->txn_validation_failed = 0;
 				st->estatus = ESTATUS_NO_ERROR;
 				st->state = CSTATE_START_COMMAND;
 				break;
@@ -1909,6 +1936,7 @@ session_slot_acquired:
 				 */
 			case CSTATE_FAILURE:
 				unwindCallStack(st);
+				cancelDependentWrite(st);
 				command = sql_script[st->use_file].commands[st->command];
 
 				/* Accumulate the failure. */
@@ -1929,6 +1957,8 @@ session_slot_acquired:
 				 */
 			case CSTATE_END_TX:
 				{
+					cancelDependentWrite(st);
+
 					/* transaction finished: calculate latency and do log */
 					processXactStats(thread, st, &now, false, agg);
 
@@ -1998,6 +2028,8 @@ session_slot_acquired:
 				 */
 			case CSTATE_ABORTED:
 			case CSTATE_FINISHED:
+				cancelDependentWrite(st);
+				notifyPhaseBarrierClientDone(st);
 				if (st->state == CSTATE_ABORTED)
 					(void) __atomic_fetch_add(&aborted_clients_count, 1, __ATOMIC_RELEASE);
 				wakeWatermarkWaiters();
@@ -2166,7 +2198,8 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	bool		has_pacing = (st->has_keying_time || st->has_think_time);
 	bool		detailed = progress || has_schedule || latency_limit ||
 		use_log || per_script_stats || num_groups > 0 || num_slas > 0 ||
-		json_report_file != NULL || has_pacing || st->txn_recall_count > 0;
+		json_report_file != NULL || has_pacing || st->txn_recall_count > 0 ||
+		st->txn_validation_passed > 0 || st->txn_validation_failed > 0;
 
 	if (detailed && !tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
@@ -2193,6 +2226,8 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 			addToLagStats(&thread->stats, lag, ontime_threshold_ms * 1000.0);
 		for (int r = 0; r < st->txn_recall_count; r++)
 			addToRecallStats(&thread->stats, st->txn_recalls[r]);
+		thread->stats.validation_passed += st->txn_validation_passed;
+		thread->stats.validation_failed += st->txn_validation_failed;
 		if (st->has_keying_time)
 			addToSimpleStats(&thread->stats.keying_time, (double) st->txn_keying_time);
 		if (st->has_think_time)
@@ -2222,6 +2257,8 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 			for (int r = 0; r < st->txn_recall_count; r++)
 				addToRecallStats(&sql_script[st->use_file].stats,
 								 st->txn_recalls[r]);
+			sql_script[st->use_file].stats.validation_passed += st->txn_validation_passed;
+			sql_script[st->use_file].stats.validation_failed += st->txn_validation_failed;
 			if (st->has_keying_time)
 				addToSimpleStats(&sql_script[st->use_file].stats.keying_time,
 								 (double) st->txn_keying_time);
@@ -2520,6 +2557,8 @@ printResults(StatsData *total,
 		printSimpleStats("think time", &total->think_time);
 	if (total->recall.count > 0)
 		printRecallStats("recall", total);
+	if (total->validation_passed + total->validation_failed > 0)
+		printValidationStats("validation results", total);
 
 	if (throttle_delay)
 	{
@@ -2599,6 +2638,8 @@ printResults(StatsData *total,
 					printSimpleStats(" - think time", &gstats->think_time);
 				if (gstats->recall.count > 0)
 					printRecallStats(" - recall", gstats);
+				if (gstats->validation_passed + gstats->validation_failed > 0)
+					printValidationStats(" - validation results", gstats);
 				if (gstats->lag_hist_count > 0)
 					printLagPercentiles(" - schedule lag percentiles", gstats);
 			}
@@ -2685,6 +2726,8 @@ printResults(StatsData *total,
 					printSimpleStats(" - think time", &sstats->think_time);
 				if (sstats->recall.count > 0)
 					printRecallStats(" - recall", sstats);
+				if (sstats->validation_passed + sstats->validation_failed > 0)
+					printValidationStats(" - validation results", sstats);
 				if (sstats->lag_hist_count > 0)
 					printLagPercentiles(" - schedule lag percentiles", sstats);
 			}
@@ -2979,6 +3022,45 @@ printResults(StatsData *total,
 								   rule->passed ? "PASS" : "FAIL");
 							break;
 						}
+
+					case SLA_METRIC_VALIDATION_FAILURES:
+						{
+							int64		val_tot = matched.validation_passed + matched.validation_failed;
+
+							rule->evaluated = (found && val_tot > 0);
+							rule->actual_val = (double) matched.validation_failed;
+							rule->passed = rule->evaluated &&
+								((rule->op == SLA_OP_LE) ?
+								 (rule->actual_val <= rule->threshold_val) :
+								 (rule->actual_val >= rule->threshold_val));
+							printf(" - SLA %s:validation_failures %s %.0f: actual = %.0f [%s]\n",
+								   rule->target,
+								   op_str,
+								   rule->threshold_val,
+								   rule->actual_val,
+								   rule->passed ? "PASS" : "FAIL");
+							break;
+						}
+
+					case SLA_METRIC_VALIDATION_PCT:
+						{
+							int64		val_tot = matched.validation_passed + matched.validation_failed;
+
+							rule->evaluated = (found && val_tot > 0);
+							rule->actual_val = rule->evaluated ?
+								(100.0 * (double) matched.validation_passed / (double) val_tot) : 0.0;
+							rule->passed = rule->evaluated &&
+								((rule->op == SLA_OP_GE) ?
+								 (rule->actual_val >= rule->threshold_val) :
+								 (rule->actual_val <= rule->threshold_val));
+							printf(" - SLA %s:validation_pct %s %.2f%%: actual = %.2f%% [%s]\n",
+								   rule->target,
+								   op_str,
+								   rule->threshold_val,
+								   rule->actual_val,
+								   rule->passed ? "PASS" : "FAIL");
+							break;
+						}
 				}
 
 				if (!rule->passed)
@@ -3010,6 +3092,12 @@ printResults(StatsData *total,
 			fprintf(jfp, "    \"transactions_failed\": " INT64_FORMAT ",\n", failures);
 			fprintf(jfp, "    \"expected_rollbacks\": " INT64_FORMAT ",\n", total->expected_rollbacks);
 			fprintf(jfp, "    \"transactions_skipped\": " INT64_FORMAT ",\n", total->cnt_skipped);
+			fprintf(jfp, "    \"validation_passed\": " INT64_FORMAT ",\n", total->validation_passed);
+			fprintf(jfp, "    \"validation_failed\": " INT64_FORMAT ",\n", total->validation_failed);
+			fprintf(jfp, "    \"validation_pct\": %.4f,\n",
+					(total->validation_passed + total->validation_failed) > 0 ?
+					100.0 * (double) total->validation_passed /
+					(double) (total->validation_passed + total->validation_failed) : 100.0);
 			fprintf(jfp, "    \"duration_sec\": %.6f,\n", bench_duration);
 			fprintf(jfp, "    \"tps\": %.6f,\n", tps);
 			fprintf(jfp, "    \"latency_ms\": {\n");
@@ -3311,6 +3399,18 @@ threadRun(void *arg)
 				}
 				if (sched_wait > 0 && min_usec > sched_wait)
 					min_usec = sched_wait;
+			}
+			else if (st->state == CSTATE_WAIT_PHASE_BARRIER)
+			{
+				if (__atomic_load_n(&aborted_clients_count, __ATOMIC_ACQUIRE) > 0 ||
+					checkPhaseBarrierReady(st))
+				{
+					min_usec = 0;
+					break;
+				}
+				waiting_watermark = true;
+				if (min_usec > 10000)
+					min_usec = 10000;
 			}
 			else if (st->state == CSTATE_IDLE)
 			{

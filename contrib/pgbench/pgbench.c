@@ -954,4 +954,63 @@ pgbench_vector_distance_text(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(dist);
 }
 
+PG_FUNCTION_INFO_V1(pgbench_ldbc_correlated_edge_sql);
+Datum
+pgbench_ldbc_correlated_edge_sql(PG_FUNCTION_ARGS)
+{
+	int64		src_id = PG_GETARG_INT64(0);
+	int64		num_vertices = PG_GETARG_INT64(1);
+	int64		num_communities = PG_GETARG_INT64(2);
+	double		homophily_prob = PG_GETARG_FLOAT8(3);
+	int64		seed = PG_GETARG_INT64(4);
+	int64		dst = 0;
+
+	initialize_prng();
+
+	if (!pgbench_ldbc_correlated_edge(&pgbench_prng_state,
+									  src_id,
+									  num_vertices,
+									  num_communities,
+									  homophily_prob,
+									  seed,
+									  &dst))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid ldbc_correlated_edge parameters (num_vertices=%lld, num_communities=%lld, homophily_prob=%g)",
+						(long long) num_vertices,
+						(long long) num_communities,
+						homophily_prob)));
+
+	PG_RETURN_INT64(dst);
+}
+
+PG_FUNCTION_INFO_V1(pgbench_ldbc_flashmob_ts_sql);
+Datum
+pgbench_ldbc_flashmob_ts_sql(PG_FUNCTION_ARGS)
+{
+	int64		base_ts_us = PG_GETARG_INT64(0);
+	int64		span_us = PG_GETARG_INT64(1);
+	int64		num_spikes = PG_GETARG_INT64(2);
+	double		spike_prob = PG_GETARG_FLOAT8(3);
+	int64		seed = PG_GETARG_INT64(4);
+	int64		ts = 0;
+
+	initialize_prng();
+
+	if (!pgbench_ldbc_flashmob_ts(&pgbench_prng_state,
+								  base_ts_us,
+								  span_us,
+								  num_spikes,
+								  spike_prob,
+								  seed,
+								  &ts))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid ldbc_flashmob_ts parameters (span_us=%lld, num_spikes=%lld, spike_prob=%g)",
+						(long long) span_us,
+						(long long) num_spikes,
+						spike_prob)));
+
+	PG_RETURN_INT64(ts);
+}
 

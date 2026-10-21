@@ -1551,4 +1551,137 @@ pgbench_parse_vector_into(const char *str, float *out, int expected_dim)
 	return (*p == '\0');
 }
 
+/*
+ * Generate an LDBC-style attribute-correlated (homophily + power-law degree)
+ * target vertex ID in [1, num_vertices] for a given source vertex src_id.
+ *
+ * With probability homophily_prob, picks a target vertex belonging to the
+ * same community as src_id (modulo num_communities) with Zipfian skew;
+ * otherwise picks a global power-law degree hub permuted by seed.
+ * Never returns a self-loop (dst != src_id when src_id is in [1, num_vertices]).
+ */
+bool
+pgbench_ldbc_correlated_edge(pg_prng_state *state,
+							 int64 src_id,
+							 int64 num_vertices,
+							 int64 num_communities,
+							 double homophily_prob,
+							 int64 seed,
+							 int64 *dst_out)
+{
+	int64		norm_src;
+	int64		src_comm;
+	int64		max_k;
+	int64		dst = 1;
+	double		u;
 
+	if (dst_out == NULL || num_vertices < 2 || num_communities < 1 ||
+		isnan(homophily_prob) || homophily_prob < 0.0 || homophily_prob > 1.0)
+		return false;
+
+	if (num_communities > num_vertices)
+		num_communities = num_vertices;
+
+	norm_src = (src_id - 1) % num_vertices;
+	if (norm_src < 0)
+		norm_src += num_vertices;
+	norm_src += 1;
+
+	src_comm = (norm_src - 1) % num_communities;
+	max_k = (num_vertices - 1 - src_comm) / num_communities;
+
+	u = pg_prng_double(state);
+
+	if (u < homophily_prob && max_k >= 1)
+	{
+		int64		k;
+
+		k = (max_k == 1) ? (int64) (pg_prng_uint64(state) & 1) :
+			pgbench_random_zipfian(state, 0, max_k, 1.15);
+		if (seed != 0)
+			k = pgbench_permute(k, max_k + 1, seed ^ src_comm);
+
+		dst = src_comm + 1 + k * num_communities;
+		if (dst == norm_src)
+		{
+			k = (k + 1) % (max_k + 1);
+			dst = src_comm + 1 + k * num_communities;
+		}
+	}
+	else
+	{
+		int64		rank;
+
+		rank = pgbench_random_zipfian(state, 1, num_vertices, 1.25);
+		dst = pgbench_permute(rank - 1, num_vertices, seed) + 1;
+	}
+
+	if (dst == norm_src || dst < 1 || dst > num_vertices)
+		dst = (norm_src % num_vertices) + 1;
+
+	*dst_out = dst;
+	return true;
+}
+
+/*
+ * Generate an LDBC-style flashmob timestamp in [base_ts_us, base_ts_us + span_us - 1].
+ *
+ * With probability spike_prob (when num_spikes > 0), selects one of num_spikes
+ * deterministic burst centers (weighted by Zipfian amplitude) and adds a
+ * heavy-tailed exponential offset around the spike peak. Otherwise samples
+ * uniformly across [0, span_us - 1].
+ */
+bool
+pgbench_ldbc_flashmob_ts(pg_prng_state *state,
+						 int64 base_ts_us,
+						 int64 span_us,
+						 int64 num_spikes,
+						 double spike_prob,
+						 int64 seed,
+						 int64 *ts_out)
+{
+	double		u;
+	int64		offset;
+
+	if (ts_out == NULL || span_us <= 0 || num_spikes < 0 ||
+		isnan(spike_prob) || spike_prob < 0.0 || spike_prob > 1.0)
+		return false;
+
+	u = pg_prng_double(state);
+
+	if (num_spikes > 0 && u < spike_prob)
+	{
+		int64		s_idx;
+		uint64		h;
+		int64		center;
+		int64		half_width;
+		int64		delta;
+		bool		after_peak;
+
+		s_idx = (num_spikes == 1) ? 1 :
+			pgbench_random_zipfian(state, 1, num_spikes, 1.2);
+		h = (uint64) pgbench_hash_fnv1a(s_idx, seed ^ INT64CONST(0x5F3759DF));
+		center = (int64) (h % (uint64) span_us);
+
+		half_width = span_us / (num_spikes * 20);
+		if (half_width < 1)
+			half_width = 1;
+
+		delta = (half_width > 1) ?
+			pgbench_random_exponential(state, 0, half_width, 4.0) : 0;
+		after_peak = (pg_prng_double(state) < 0.65);
+
+		offset = after_peak ? (center + delta) : (center - delta);
+		if (offset < 0)
+			offset = 0;
+		if (offset >= span_us)
+			offset = span_us - 1;
+	}
+	else
+	{
+		offset = pgbench_random(state, 0, span_us - 1);
+	}
+
+	*ts_out = base_ts_us + offset;
+	return true;
+}

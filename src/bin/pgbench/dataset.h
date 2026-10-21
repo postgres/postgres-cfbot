@@ -32,7 +32,9 @@ typedef enum DatasetFormat
 typedef enum DatasetCursorMode
 {
 	CURSOR_WRAP_ROUND_ROBIN = 0,
-	CURSOR_ONCE_GLOBAL
+	CURSOR_ONCE_GLOBAL,
+	CURSOR_PARTITIONED,
+	CURSOR_SAMPLE
 } DatasetCursorMode;
 
 typedef struct PgBenchDataset
@@ -40,6 +42,8 @@ typedef struct PgBenchDataset
 	char	   *name;			/* Logical dataset identifier */
 	char	   *filepath;		/* Source file path */
 	DatasetFormat format;		/* File format */
+	int			index;			/* Dataset slot index (0..MAX_DATASETS-1) */
+	bool		force_header;	/* True if :header option was specified */
 	const uint8 *raw_data;		/* Base pointer to mmap or heap buffer */
 	size_t		raw_size;		/* Total mapped/allocated byte size */
 	bool		is_mmapped;		/* True if backed by mmap(), false if pg_malloc */
@@ -54,6 +58,8 @@ extern int	num_copy_dataset_specs;
 
 /* CLI registration and lifecycle */
 extern void registerDataset(const char *name, DatasetFormat format, const char *filepath);
+extern void registerDatasetEx(const char *name, DatasetFormat format,
+							  bool force_header, const char *filepath);
 extern void parseDatasetSpec(const char *spec);
 extern void parseVectorDatasetSpec(const char *spec);
 extern void registerCopyDatasetSpec(const char *spec);
@@ -65,7 +71,7 @@ extern PgBenchDataset *findDataset(const char *name);
 extern int64 datasetCount(const char *name);
 extern bool datasetGetRow(PgBenchDataset *ds, int64 row_idx, int col_idx,
 						  PgBenchValue *retval);
-extern bool datasetNextId(PgBenchDataset *ds, DatasetCursorMode mode,
+extern bool datasetNextId(PgBenchDataset *ds, CState *st, DatasetCursorMode mode,
 						  PgBenchValue *retval);
 
 /* Meta-command handlers */
@@ -77,6 +83,12 @@ extern ConnectionStateEnum handle_cmd_wait_until(CState *st, Command *cmd,
 												 pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_advance_watermark(CState *st, Command *cmd,
 														pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_begin_dependent_write(CState *st, Command *cmd,
+															pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_end_dependent_write(CState *st, Command *cmd,
+														  pg_time_usec_t *now);
+extern ConnectionStateEnum handle_cmd_phase_barrier(CState *st, Command *cmd,
+													pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_reservoir_push(CState *st, Command *cmd,
 													 pg_time_usec_t *now);
 extern ConnectionStateEnum handle_cmd_reservoir_sample(CState *st, Command *cmd,
@@ -87,7 +99,7 @@ extern bool copyDatasetSlice(PGconn *con, PgBenchDataset *ds,
 							 const char *table_spec,
 							 int client_id, int num_clients);
 
-/* Pillar 2: Global Monotonic Clock & Causal Watermark Coordination */
+/* Pillar 2: Global Monotonic Clock, Causal Watermarks & Phase Barrier */
 #define PGBENCH_MAX_WATERMARK_CHANNELS 64
 
 extern int64 getWatermark(void);
@@ -96,6 +108,12 @@ extern int64 setWatermark(int64 wm);
 extern int64 setWatermarkChan(int chan, int64 wm);
 extern int64 advanceWatermark(int64 wm);
 extern int64 advanceWatermarkChan(int chan, int64 wm);
+extern int64 beginDependentWriteChan(CState *st, int chan, int64 event_ts);
+extern int64 endDependentWriteChan(CState *st, int chan, int64 event_ts);
+extern void cancelDependentWrite(CState *st);
+extern bool enterPhaseBarrier(CState *st);
+extern bool checkPhaseBarrierReady(CState *st);
+extern void notifyPhaseBarrierClientDone(CState *st);
 extern void registerThreadWakeupPipe(int tid, int write_fd);
 extern void unregisterThreadWakeupPipe(int tid);
 extern void wakeWatermarkWaiters(void);
@@ -114,8 +132,11 @@ extern void parseReservoirSpec(const char *spec);
 extern void registerReservoir(const char *name, uint64 capacity);
 extern PgBenchReservoir *findReservoir(const char *name);
 extern bool reservoirPush(const char *name, int64 val);
+extern bool reservoirPushValue(const char *name, const PgBenchValue *val,
+							   int64 *out_res);
 extern bool reservoirSample(const char *name, pg_prng_state *rstate,
 							int64 *out_val, bool *is_empty);
 extern int64 reservoirCount(const char *name);
 
 #endif							/* PGBENCH_DATASET_H */
+

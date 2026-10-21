@@ -72,12 +72,16 @@ typedef enum MetaCommand
 	META_COPY_DATASET,			/* \copy_dataset */
 	META_WAIT_UNTIL,			/* \wait_until */
 	META_ADVANCE_WATERMARK,		/* \advance_watermark */
+	META_BEGIN_DEPENDENT_WRITE, /* \begin_dependent_write */
+	META_END_DEPENDENT_WRITE,	/* \end_dependent_write */
+	META_PHASE_BARRIER,			/* \phase_barrier */
 	META_RESERVOIR_PUSH,		/* \reservoir_push */
 	META_RESERVOIR_SAMPLE,		/* \reservoir_sample */
 	META_SESSION_CONNECT,		/* \session_connect */
 	META_SESSION_DISCONNECT,	/* \session_disconnect */
 	META_CALL,					/* \call */
 	META_RECORD_RECALL,			/* \record_recall */
+	META_VALIDATE_RESULT,		/* \validate_result */
 	META_IF,					/* \if */
 	META_ELIF,					/* \elif */
 	META_ELSE,					/* \else */
@@ -94,6 +98,7 @@ typedef enum MetaCommand
 	META_SYNCPIPELINE,			/* \syncpipeline */
 	META_ENDPIPELINE,			/* \endpipeline */
 } MetaCommand;
+
 
 typedef enum QueryMode
 {

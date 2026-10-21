@@ -53,16 +53,27 @@ int			num_copy_dataset_specs = 0;
 static PgBenchReservoir reservoirs[MAX_RESERVOIRS];
 static int	num_reservoirs = 0;
 
+#define MAX_WRITER_SLOTS 1024
+#define MAX_BARRIER_SLOTS 33
+
 typedef struct PgBenchCausalClock
 {
 	int64		channel_watermarks[PGBENCH_MAX_WATERMARK_CHANNELS] __attribute__((aligned(64)));
 	int64		global_virtual_time_us __attribute__((aligned(64)));
+	int64		active_writer_ts[PGBENCH_MAX_WATERMARK_CHANNELS][MAX_WRITER_SLOTS];
+	int64		max_committed_ts[PGBENCH_MAX_WATERMARK_CHANNELS];
+	bool		writer_slots_initialized;
+	volatile int lock;
+	int			barrier_arrived[MAX_BARRIER_SLOTS];
+	int			barrier_done[MAX_BARRIER_SLOTS];
+	uint64		barrier_generation[MAX_BARRIER_SLOTS];
 	char		pad[64];
 } PgBenchCausalClock;
 
-static PgBenchCausalClock causal_clock = {{0}, 0, {0}};
+static PgBenchCausalClock causal_clock;
 static int	thread_wakeup_fds[MAX_WAKEUP_THREADS];
 static bool wakeup_fds_initialized = false;
+
 
 /*
  * Cleanup all registered datasets and reservoirs at process exit.
@@ -184,11 +195,17 @@ indexDelimitedDataset(PgBenchDataset *ds)
 	offsets[nrows] = (uint64) size;
 
 	/*
-	 * If there are at least 2 rows and the first row starts with an
-	 * alphabetic header identifier while the second row starts with a digit
-	 * or sign, treat the first row as a header line and skip it.
+	 * If :header was explicitly specified, or if there are at least 2 rows
+	 * and the first row starts with an alphabetic header identifier while
+	 * the second row starts with a digit or sign, treat the first row as a
+	 * header line and skip it.
 	 */
-	if (nrows >= 2)
+	if (ds->force_header && nrows >= 1)
+	{
+		memmove(offsets, offsets + 1, (size_t) nrows * sizeof(uint64));
+		nrows--;
+	}
+	else if (nrows >= 2)
 	{
 		uint8		c0 = data[offsets[0]];
 		uint8		c1 = data[offsets[1]];
@@ -301,13 +318,15 @@ validateBinaryVectorDataset(PgBenchDataset *ds)
  * Load and register a dataset in the shared read-only dataset pool.
  */
 void
-registerDataset(const char *name, DatasetFormat format, const char *filepath)
+registerDatasetEx(const char *name, DatasetFormat format,
+				  bool force_header, const char *filepath)
 {
 	int			fd;
 	struct stat st;
 	PgBenchDataset *ds;
 	uint8	   *buf = NULL;
 	bool		mmapped = false;
+	int			ds_idx;
 
 	if (name == NULL || *name == '\0')
 		pg_fatal("dataset name cannot be empty");
@@ -392,11 +411,14 @@ registerDataset(const char *name, DatasetFormat format, const char *filepath)
 	}
 	close(fd);
 
-	ds = &datasets[num_datasets++];
+	ds_idx = num_datasets++;
+	ds = &datasets[ds_idx];
 	memset(ds, 0, sizeof(PgBenchDataset));
 	ds->name = pg_strdup(name);
 	ds->filepath = pg_strdup(filepath);
 	ds->format = format;
+	ds->index = ds_idx;
+	ds->force_header = force_header;
 	ds->raw_data = buf;
 	ds->raw_size = (size_t) st.st_size;
 	ds->is_mmapped = mmapped;
@@ -412,9 +434,16 @@ registerDataset(const char *name, DatasetFormat format, const char *filepath)
 				ds->is_mmapped ? "mmap" : "heap");
 }
 
+void
+registerDataset(const char *name, DatasetFormat format, const char *filepath)
+{
+	registerDatasetEx(name, format, false, filepath);
+}
+
 /*
- * Parse a "--dataset=<name>[:<format>]=<path>" or "--dataset=<name>:<format>:<path>"
- * or "--dataset=<name>=<path>" or "--dataset=<name>:<path>" specification.
+ * Parse a "--dataset=<name>[:<format>][:header]=<path>" or
+ * "--dataset=<name>:<format>[:header]:<path>" or
+ * "--dataset=<name>=<path>" or "--dataset=<name>:<path>" specification.
  */
 void
 parseDatasetSpec(const char *spec)
@@ -426,6 +455,7 @@ parseDatasetSpec(const char *spec)
 	const char *filepath;
 	DatasetFormat fmt = DATASET_FVECS;
 	bool		explicit_fmt = false;
+	bool		force_header = false;
 
 	if (spec == NULL || *spec == '\0')
 		pg_fatal("invalid --dataset specification: empty string");
@@ -440,7 +470,7 @@ parseDatasetSpec(const char *spec)
 	}
 
 	if (sep1 == NULL || sep1 == spec || *(sep1 + 1) == '\0')
-		pg_fatal("invalid --dataset specification \"%s\" (expected <name>[:<format>]=<path> or <name>:<format>:<path>)",
+		pg_fatal("invalid --dataset specification \"%s\" (expected <name>[:<format>][:header]=<path> or <name>:<format>[:header]:<path>)",
 				 spec);
 
 	name = pg_malloc((sep1 - spec) + 1);
@@ -466,53 +496,160 @@ parseDatasetSpec(const char *spec)
 		memcpy(fmt_str, rest, sep2 - rest);
 		fmt_str[sep2 - rest] = '\0';
 
-		if (pg_strcasecmp(fmt_str, "fvecs") == 0)
+		if (pg_strcasecmp(fmt_str, "header") == 0)
+		{
+			force_header = true;
+			explicit_fmt = false;
+		}
+		else if (pg_strcasecmp(fmt_str, "fvecs") == 0)
+		{
 			fmt = DATASET_FVECS;
+			explicit_fmt = true;
+		}
 		else if (pg_strcasecmp(fmt_str, "bvecs") == 0)
+		{
 			fmt = DATASET_BVECS;
+			explicit_fmt = true;
+		}
 		else if (pg_strcasecmp(fmt_str, "ivecs") == 0)
+		{
 			fmt = DATASET_IVECS;
+			explicit_fmt = true;
+		}
 		else if (pg_strcasecmp(fmt_str, "csv") == 0 ||
 				 pg_strcasecmp(fmt_str, "psv") == 0 ||
 				 pg_strcasecmp(fmt_str, "pipe") == 0)
+		{
 			fmt = DATASET_CSV;
+			explicit_fmt = true;
+		}
 		else if (pg_strcasecmp(fmt_str, "tsv") == 0)
+		{
 			fmt = DATASET_TSV;
+			explicit_fmt = true;
+		}
 		else
 			pg_fatal("unknown dataset format \"%s\" in --dataset=\"%s\" (expected fvecs, bvecs, ivecs, csv, or tsv)",
 					 fmt_str, spec);
 
 		pg_free(fmt_str);
 		filepath = sep2 + 1;
-		explicit_fmt = true;
+
+		/* Check for optional ":header:" or ":header=" following format */
+		{
+			const char *sep3 = NULL;
+
+			for (const char *p = filepath; *p != '\0'; p++)
+			{
+				if (*p == ':' || *p == '=')
+				{
+					sep3 = p;
+					break;
+				}
+				if (*p == '/')
+					break;
+			}
+			if (sep3 != NULL && (sep3 - filepath) == 6 &&
+				pg_strncasecmp(filepath, "header", 6) == 0 &&
+				*(sep3 + 1) != '\0')
+			{
+				force_header = true;
+				filepath = sep3 + 1;
+			}
+		}
 	}
 	else
 	{
 		filepath = rest;
 	}
 
-	if (!explicit_fmt)
+	/*
+	 * Also support trailing ":header" and/or ":<format>" suffixes after
+	 * <path>, e.g. "--dataset=ldbc_p:/path/to/file.csv:pipe:header" or
+	 * "--dataset=ldbc_p:/path/to/file.csv:header".
+	 */
 	{
-		const char *ext = strrchr(filepath, '.');
+		char	   *fp_copy = pg_strdup(filepath);
+		int			pass;
 
-		if (ext != NULL)
+		for (pass = 0; pass < 2; pass++)
 		{
-			if (pg_strcasecmp(ext, ".fvecs") == 0)
-				fmt = DATASET_FVECS;
-			else if (pg_strcasecmp(ext, ".bvecs") == 0)
-				fmt = DATASET_BVECS;
-			else if (pg_strcasecmp(ext, ".ivecs") == 0)
-				fmt = DATASET_IVECS;
-			else if (pg_strcasecmp(ext, ".csv") == 0)
-				fmt = DATASET_CSV;
-			else if (pg_strcasecmp(ext, ".tsv") == 0)
-				fmt = DATASET_TSV;
-		}
-	}
+			char	   *last_colon = strrchr(fp_copy, ':');
 
-	registerDataset(name, fmt, filepath);
+			if (last_colon == NULL || last_colon == fp_copy ||
+				strchr(last_colon, '/') != NULL)
+				break;
+
+			if (pg_strcasecmp(last_colon + 1, "header") == 0)
+			{
+				force_header = true;
+				*last_colon = '\0';
+			}
+			else if (pg_strcasecmp(last_colon + 1, "csv") == 0 ||
+					 pg_strcasecmp(last_colon + 1, "psv") == 0 ||
+					 pg_strcasecmp(last_colon + 1, "pipe") == 0)
+			{
+				fmt = DATASET_CSV;
+				explicit_fmt = true;
+				*last_colon = '\0';
+			}
+			else if (pg_strcasecmp(last_colon + 1, "tsv") == 0)
+			{
+				fmt = DATASET_TSV;
+				explicit_fmt = true;
+				*last_colon = '\0';
+			}
+			else if (pg_strcasecmp(last_colon + 1, "fvecs") == 0)
+			{
+				fmt = DATASET_FVECS;
+				explicit_fmt = true;
+				*last_colon = '\0';
+			}
+			else if (pg_strcasecmp(last_colon + 1, "bvecs") == 0)
+			{
+				fmt = DATASET_BVECS;
+				explicit_fmt = true;
+				*last_colon = '\0';
+			}
+			else if (pg_strcasecmp(last_colon + 1, "ivecs") == 0)
+			{
+				fmt = DATASET_IVECS;
+				explicit_fmt = true;
+				*last_colon = '\0';
+			}
+			else
+				break;
+		}
+
+		if (!explicit_fmt)
+		{
+			const char *ext = strrchr(fp_copy, '.');
+
+			if (ext != NULL)
+			{
+				if (pg_strcasecmp(ext, ".fvecs") == 0)
+					fmt = DATASET_FVECS;
+				else if (pg_strcasecmp(ext, ".bvecs") == 0)
+					fmt = DATASET_BVECS;
+				else if (pg_strcasecmp(ext, ".ivecs") == 0)
+					fmt = DATASET_IVECS;
+				else if (pg_strcasecmp(ext, ".csv") == 0)
+					fmt = DATASET_CSV;
+				else if (pg_strcasecmp(ext, ".tsv") == 0)
+					fmt = DATASET_TSV;
+			}
+			else if (force_header)
+			{
+				fmt = DATASET_CSV;
+			}
+		}
+
+		registerDatasetEx(name, fmt, force_header, fp_copy);
+		pg_free(fp_copy);
+	}
 	pg_free(name);
 }
+
 
 /*
  * Alias for parseDatasetSpec().
@@ -848,11 +985,12 @@ datasetGetRow(PgBenchDataset *ds, int64 row_idx, int col_idx,
 }
 
 /*
- * Advance the dataset's lock-free atomic cursor and return the next row index
- * (or PGBT_NULL when CURSOR_ONCE_GLOBAL is exhausted).
+ * Advance the dataset's cursor according to mode and return the next row index
+ * (or PGBT_NULL when CURSOR_ONCE_GLOBAL or CURSOR_PARTITIONED is exhausted).
  */
 bool
-datasetNextId(PgBenchDataset *ds, DatasetCursorMode mode, PgBenchValue *retval)
+datasetNextId(PgBenchDataset *ds, CState *st, DatasetCursorMode mode,
+			  PgBenchValue *retval)
 {
 	uint64		idx;
 
@@ -865,21 +1003,72 @@ datasetNextId(PgBenchDataset *ds, DatasetCursorMode mode, PgBenchValue *retval)
 		return true;
 	}
 
-	idx = __atomic_fetch_add(&ds->cursor, 1, __ATOMIC_RELAXED);
-	if (mode == CURSOR_ONCE_GLOBAL)
+	switch (mode)
 	{
-		if (idx >= (uint64) ds->total_rows)
-		{
-			setNullValue(retval);
+		case CURSOR_ONCE_GLOBAL:
+			idx = __atomic_fetch_add(&ds->cursor, 1, __ATOMIC_RELAXED);
+			if (idx >= (uint64) ds->total_rows)
+			{
+				setNullValue(retval);
+				return true;
+			}
+			setIntValue(retval, (int64) idx);
 			return true;
-		}
-		setIntValue(retval, (int64) idx);
-		return true;
-	}
-	else
-	{
-		setIntValue(retval, (int64) (idx % (uint64) ds->total_rows));
-		return true;
+
+		case CURSOR_PARTITIONED:
+			{
+				int			num_streams = 1;
+				int			stream_id = 0;
+				uint64		k = 0;
+				uint64		row_idx;
+
+				if (st != NULL)
+				{
+					num_streams = (st->group_id >= 0 && st->group_id < num_groups) ?
+						client_groups[st->group_id].nclients : nclients;
+					if (num_streams < 1)
+						num_streams = 1;
+					stream_id = (st->group_id >= 0) ? st->stream_id : st->id;
+					if (stream_id < 0)
+						stream_id = 0;
+					if (ds->index >= 0 && ds->index < MAX_DATASETS)
+						k = st->dataset_cursors[ds->index]++;
+					else
+						k = __atomic_fetch_add(&ds->cursor, 1, __ATOMIC_RELAXED);
+				}
+				else
+				{
+					k = __atomic_fetch_add(&ds->cursor, 1, __ATOMIC_RELAXED);
+				}
+
+				row_idx = k * (uint64) num_streams + (uint64) stream_id;
+				if (row_idx >= (uint64) ds->total_rows)
+				{
+					setNullValue(retval);
+					return true;
+				}
+				setIntValue(retval, (int64) row_idx);
+				return true;
+			}
+
+		case CURSOR_SAMPLE:
+			{
+				int64		sample_idx;
+
+				if (st != NULL)
+					sample_idx = pgbench_random(&st->cs_func_rs, 0, ds->total_rows - 1);
+				else
+					sample_idx = (int64) (__atomic_fetch_add(&ds->cursor, 1, __ATOMIC_RELAXED) %
+										  (uint64) ds->total_rows);
+				setIntValue(retval, sample_idx);
+				return true;
+			}
+
+		case CURSOR_WRAP_ROUND_ROBIN:
+		default:
+			idx = __atomic_fetch_add(&ds->cursor, 1, __ATOMIC_RELAXED);
+			setIntValue(retval, (int64) (idx % (uint64) ds->total_rows));
+			return true;
 	}
 }
 
@@ -974,14 +1163,27 @@ handle_cmd_dataset_bind(CState *st, Command *cmd, pg_time_usec_t *now)
 			 pg_strcasecmp(mode_str, "wrap_round_robin") == 0)
 	{
 		mode = CURSOR_WRAP_ROUND_ROBIN;
-		if (!datasetNextId(ds, mode, &idx_val))
+		if (!datasetNextId(ds, st, mode, &idx_val))
 			return CSTATE_ABORTED;
 	}
 	else if (pg_strcasecmp(mode_str, "once") == 0 ||
 			 pg_strcasecmp(mode_str, "once_global") == 0)
 	{
 		mode = CURSOR_ONCE_GLOBAL;
-		if (!datasetNextId(ds, mode, &idx_val))
+		if (!datasetNextId(ds, st, mode, &idx_val))
+			return CSTATE_ABORTED;
+	}
+	else if (pg_strcasecmp(mode_str, "partitioned") == 0)
+	{
+		mode = CURSOR_PARTITIONED;
+		if (!datasetNextId(ds, st, mode, &idx_val))
+			return CSTATE_ABORTED;
+	}
+	else if (pg_strcasecmp(mode_str, "sample") == 0 ||
+			 pg_strcasecmp(mode_str, "random") == 0)
+	{
+		mode = CURSOR_SAMPLE;
+		if (!datasetNextId(ds, st, mode, &idx_val))
 			return CSTATE_ABORTED;
 	}
 	else if (mode_str[0] == ':')
@@ -1007,10 +1209,11 @@ handle_cmd_dataset_bind(CState *st, Command *cmd, pg_time_usec_t *now)
 	}
 	else
 	{
-		pg_log_error("client %d: invalid cursor mode \"%s\" in \\dataset_bind (expected wrap, once, or row index)",
+		pg_log_error("client %d: invalid cursor mode \"%s\" in \\dataset_bind (expected wrap, once, partitioned, sample, or row index)",
 					 st->id, mode_str);
 		return CSTATE_ABORTED;
 	}
+
 
 	/* Exhausted ONCE_GLOBAL cursor: set all target variables to NULL */
 	if (idx_val.type == PGBT_NULL)
@@ -1495,6 +1698,77 @@ wakeWatermarkWaiters(void)
 	}
 }
 
+static inline void
+lockCausalClock(void)
+{
+	while (__atomic_test_and_set(&causal_clock.lock, __ATOMIC_ACQUIRE))
+	{
+		/* spin */
+	}
+	if (!causal_clock.writer_slots_initialized)
+	{
+		for (int c = 0; c < PGBENCH_MAX_WATERMARK_CHANNELS; c++)
+		{
+			for (int s = 0; s < MAX_WRITER_SLOTS; s++)
+				causal_clock.active_writer_ts[c][s] = PG_INT64_MAX;
+			causal_clock.max_committed_ts[c] = 0;
+		}
+		causal_clock.writer_slots_initialized = true;
+	}
+}
+
+static inline void
+unlockCausalClock(void)
+{
+	__atomic_clear(&causal_clock.lock, __ATOMIC_RELEASE);
+}
+
+/*
+ * Recompute safe lower-bound watermark for channel chan while holding
+ * causal_clock.lock.
+ *
+ * safe_watermark = min(max_committed_ts[chan], min_i(active_writer_ts[chan][i]) - 1)
+ */
+static int64
+recomputeSafeWatermarkLocked(int chan, bool *advanced_out)
+{
+	int64		min_active = PG_INT64_MAX;
+	int64		max_comm = causal_clock.max_committed_ts[chan];
+	int64		safe_wm;
+	int64		cur_wm;
+
+	for (int s = 0; s < MAX_WRITER_SLOTS; s++)
+	{
+		int64		ats = causal_clock.active_writer_ts[chan][s];
+
+		if (ats < min_active)
+			min_active = ats;
+	}
+
+	if (min_active < PG_INT64_MAX)
+	{
+		int64		gate = (min_active > PG_INT64_MIN) ? (min_active - 1) : PG_INT64_MIN;
+
+		safe_wm = (max_comm > gate) ? gate : max_comm;
+	}
+	else
+	{
+		safe_wm = max_comm;
+	}
+
+	cur_wm = __atomic_load_n(&causal_clock.channel_watermarks[chan], __ATOMIC_RELAXED);
+	if (safe_wm > cur_wm)
+	{
+		__atomic_store_n(&causal_clock.channel_watermarks[chan], safe_wm, __ATOMIC_RELEASE);
+		if (advanced_out != NULL)
+			*advanced_out = true;
+		return safe_wm;
+	}
+	if (advanced_out != NULL)
+		*advanced_out = false;
+	return cur_wm;
+}
+
 int64
 getWatermarkChan(int chan)
 {
@@ -1514,7 +1788,10 @@ setWatermarkChan(int chan, int64 wm)
 {
 	if (chan < 0 || chan >= PGBENCH_MAX_WATERMARK_CHANNELS)
 		chan = 0;
+	lockCausalClock();
+	causal_clock.max_committed_ts[chan] = wm;
 	__atomic_store_n(&causal_clock.channel_watermarks[chan], wm, __ATOMIC_RELEASE);
+	unlockCausalClock();
 	wakeWatermarkWaiters();
 	return wm;
 }
@@ -1528,29 +1805,246 @@ setWatermark(int64 wm)
 int64
 advanceWatermarkChan(int chan, int64 wm)
 {
-	int64		cur;
+	int64		res;
+	bool		advanced = false;
 
 	if (chan < 0 || chan >= PGBENCH_MAX_WATERMARK_CHANNELS)
 		chan = 0;
 
-	cur = __atomic_load_n(&causal_clock.channel_watermarks[chan], __ATOMIC_RELAXED);
-	while (wm > cur)
-	{
-		if (__atomic_compare_exchange_n(&causal_clock.channel_watermarks[chan],
-										&cur, wm, true,
-										__ATOMIC_RELEASE, __ATOMIC_RELAXED))
-		{
-			wakeWatermarkWaiters();
-			return wm;
-		}
-	}
-	return cur;
+	lockCausalClock();
+	if (wm > causal_clock.max_committed_ts[chan])
+		causal_clock.max_committed_ts[chan] = wm;
+	res = recomputeSafeWatermarkLocked(chan, &advanced);
+	unlockCausalClock();
+
+	if (advanced)
+		wakeWatermarkWaiters();
+	return res;
 }
 
 int64
 advanceWatermark(int64 wm)
 {
 	return advanceWatermarkChan(0, wm);
+}
+
+/*
+ * Register an in-flight dependent write timestamp for client st on channel chan.
+ */
+int64
+beginDependentWriteChan(CState *st, int chan, int64 event_ts)
+{
+	int			slot = (st != NULL && st->id >= 0) ? (st->id % MAX_WRITER_SLOTS) : 0;
+	int64		cur_wm;
+
+	if (chan < 0 || chan >= PGBENCH_MAX_WATERMARK_CHANNELS)
+		chan = 0;
+
+	if (st != NULL && st->has_active_dep_write && st->active_dep_write_chan != chan)
+		cancelDependentWrite(st);
+
+	lockCausalClock();
+	if (causal_clock.active_writer_ts[chan][slot] != PG_INT64_MAX &&
+		causal_clock.active_writer_ts[chan][slot] != event_ts)
+	{
+		for (int s = 0; s < MAX_WRITER_SLOTS; s++)
+		{
+			if (causal_clock.active_writer_ts[chan][s] == PG_INT64_MAX)
+			{
+				slot = s;
+				break;
+			}
+		}
+	}
+	causal_clock.active_writer_ts[chan][slot] = event_ts;
+	cur_wm = __atomic_load_n(&causal_clock.channel_watermarks[chan], __ATOMIC_RELAXED);
+	unlockCausalClock();
+
+	if (st != NULL)
+	{
+		st->has_active_dep_write = true;
+		st->active_dep_write_chan = chan;
+	}
+
+	return cur_wm;
+}
+
+/*
+ * Complete an in-flight dependent write for client st on channel chan,
+ * advancing max_committed_ts[chan], clearing the client's active slot,
+ * and advancing the safe watermark to min(max_committed_ts, min_active - 1).
+ */
+int64
+endDependentWriteChan(CState *st, int chan, int64 event_ts)
+{
+	int			slot = (st != NULL && st->id >= 0) ? (st->id % MAX_WRITER_SLOTS) : 0;
+	bool		advanced = false;
+	int64		new_wm;
+	bool		any_remaining = false;
+
+	if (chan < 0 || chan >= PGBENCH_MAX_WATERMARK_CHANNELS)
+		chan = 0;
+
+	lockCausalClock();
+	if (event_ts > causal_clock.max_committed_ts[chan])
+		causal_clock.max_committed_ts[chan] = event_ts;
+
+	if (causal_clock.active_writer_ts[chan][slot] == event_ts)
+	{
+		causal_clock.active_writer_ts[chan][slot] = PG_INT64_MAX;
+	}
+	else
+	{
+		bool		cleared = false;
+
+		for (int s = 0; s < MAX_WRITER_SLOTS; s++)
+		{
+			if (causal_clock.active_writer_ts[chan][s] == event_ts)
+			{
+				causal_clock.active_writer_ts[chan][s] = PG_INT64_MAX;
+				cleared = true;
+				break;
+			}
+		}
+		if (!cleared)
+			causal_clock.active_writer_ts[chan][slot] = PG_INT64_MAX;
+	}
+
+	if (causal_clock.active_writer_ts[chan][slot] != PG_INT64_MAX)
+		any_remaining = true;
+
+	new_wm = recomputeSafeWatermarkLocked(chan, &advanced);
+	unlockCausalClock();
+
+	if (st != NULL && st->has_active_dep_write && st->active_dep_write_chan == chan && !any_remaining)
+		st->has_active_dep_write = false;
+
+	if (advanced)
+		wakeWatermarkWaiters();
+
+	return new_wm;
+}
+
+/*
+ * Clear an active dependent write slot without advancing max_committed_ts
+ * (invoked automatically if a client aborts, retries, fails, or finishes a
+ * transaction while holding an active dependent write slot).
+ */
+void
+cancelDependentWrite(CState *st)
+{
+	int			chan;
+	int			slot;
+	bool		advanced = false;
+
+	if (st == NULL || !st->has_active_dep_write)
+		return;
+
+	chan = st->active_dep_write_chan;
+	if (chan < 0 || chan >= PGBENCH_MAX_WATERMARK_CHANNELS)
+		chan = 0;
+	slot = (st->id >= 0) ? (st->id % MAX_WRITER_SLOTS) : 0;
+
+	lockCausalClock();
+	causal_clock.active_writer_ts[chan][slot] = PG_INT64_MAX;
+	(void) recomputeSafeWatermarkLocked(chan, &advanced);
+	unlockCausalClock();
+
+	st->has_active_dep_write = false;
+	if (advanced)
+		wakeWatermarkWaiters();
+}
+
+/*
+ * Non-blocking cross-client phase barrier helpers.
+ */
+static inline int
+getBarrierSlot(CState *st, int *total_clients_out)
+{
+	if (st != NULL && st->group_id >= 0 && st->group_id < num_groups &&
+		(st->group_id + 1) < MAX_BARRIER_SLOTS)
+	{
+		if (total_clients_out != NULL)
+			*total_clients_out = client_groups[st->group_id].nclients;
+		return st->group_id + 1;
+	}
+	if (total_clients_out != NULL)
+		*total_clients_out = nclients;
+	return 0;
+}
+
+bool
+enterPhaseBarrier(CState *st)
+{
+	int			total_clients = 1;
+	int			b = getBarrierSlot(st, &total_clients);
+	int			active_target;
+
+	lockCausalClock();
+	active_target = total_clients - causal_clock.barrier_done[b];
+	if (active_target < 1)
+		active_target = 1;
+
+	causal_clock.barrier_arrived[b]++;
+	if (causal_clock.barrier_arrived[b] >= active_target)
+	{
+		causal_clock.barrier_arrived[b] = 0;
+		__atomic_store_n(&causal_clock.barrier_generation[b],
+						 causal_clock.barrier_generation[b] + 1,
+						 __ATOMIC_RELEASE);
+		unlockCausalClock();
+		wakeWatermarkWaiters();
+		return true;
+	}
+	else
+	{
+		if (st != NULL)
+			st->barrier_gen = causal_clock.barrier_generation[b];
+		unlockCausalClock();
+		return false;
+	}
+}
+
+bool
+checkPhaseBarrierReady(CState *st)
+{
+	int			b = getBarrierSlot(st, NULL);
+	uint64		cur_gen = __atomic_load_n(&causal_clock.barrier_generation[b],
+										  __ATOMIC_ACQUIRE);
+
+	return (st == NULL || cur_gen > st->barrier_gen);
+}
+
+void
+notifyPhaseBarrierClientDone(CState *st)
+{
+	int			total_clients = 1;
+	int			b;
+	int			active_target;
+	bool		should_wake = false;
+
+	if (st == NULL || st->barrier_done_notified)
+		return;
+	st->barrier_done_notified = true;
+
+	b = getBarrierSlot(st, &total_clients);
+
+	lockCausalClock();
+	causal_clock.barrier_done[b]++;
+	active_target = total_clients - causal_clock.barrier_done[b];
+	if (causal_clock.barrier_arrived[b] > 0 &&
+		causal_clock.barrier_arrived[b] >= active_target)
+	{
+		causal_clock.barrier_arrived[b] = 0;
+		__atomic_store_n(&causal_clock.barrier_generation[b],
+						 causal_clock.barrier_generation[b] + 1,
+						 __ATOMIC_RELEASE);
+		should_wake = true;
+	}
+	unlockCausalClock();
+
+	if (should_wake)
+		wakeWatermarkWaiters();
 }
 
 /*
@@ -1679,6 +2173,99 @@ handle_cmd_advance_watermark(CState *st, Command *cmd, pg_time_usec_t *now)
 	return CSTATE_END_COMMAND;
 }
 
+/*
+ * Handler for \begin_dependent_write <ts_expr> [CHANNEL <chan_expr>]
+ */
+ConnectionStateEnum
+handle_cmd_begin_dependent_write(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchValue ts_val;
+	int64		ts = 0;
+	int64		chan = 0;
+
+	if (!evaluateExpr(st, cmd->expr, &ts_val))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of dependent write timestamp expression failed");
+		return CSTATE_ABORTED;
+	}
+	if (!coerceToInt(&ts_val, &ts))
+	{
+		freeValue(&ts_val);
+		commandFailed(st, cmd->argv[0], "dependent write timestamp expression is not an integer");
+		return CSTATE_ABORTED;
+	}
+	freeValue(&ts_val);
+
+	if (cmd->end_expr != NULL)
+	{
+		PgBenchValue chan_val;
+
+		if (!evaluateExpr(st, cmd->end_expr, &chan_val) ||
+			!coerceToInt(&chan_val, &chan))
+		{
+			freeValue(&chan_val);
+			commandFailed(st, cmd->argv[0], "watermark channel expression is not an integer");
+			return CSTATE_ABORTED;
+		}
+		freeValue(&chan_val);
+	}
+
+	(void) beginDependentWriteChan(st, (int) chan, ts);
+	return CSTATE_END_COMMAND;
+}
+
+/*
+ * Handler for \end_dependent_write <ts_expr> [CHANNEL <chan_expr>]
+ */
+ConnectionStateEnum
+handle_cmd_end_dependent_write(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	PgBenchValue ts_val;
+	int64		ts = 0;
+	int64		chan = 0;
+
+	if (!evaluateExpr(st, cmd->expr, &ts_val))
+	{
+		commandFailed(st, cmd->argv[0], "evaluation of dependent write timestamp expression failed");
+		return CSTATE_ABORTED;
+	}
+	if (!coerceToInt(&ts_val, &ts))
+	{
+		freeValue(&ts_val);
+		commandFailed(st, cmd->argv[0], "dependent write timestamp expression is not an integer");
+		return CSTATE_ABORTED;
+	}
+	freeValue(&ts_val);
+
+	if (cmd->end_expr != NULL)
+	{
+		PgBenchValue chan_val;
+
+		if (!evaluateExpr(st, cmd->end_expr, &chan_val) ||
+			!coerceToInt(&chan_val, &chan))
+		{
+			freeValue(&chan_val);
+			commandFailed(st, cmd->argv[0], "watermark channel expression is not an integer");
+			return CSTATE_ABORTED;
+		}
+		freeValue(&chan_val);
+	}
+
+	(void) endDependentWriteChan(st, (int) chan, ts);
+	return CSTATE_END_COMMAND;
+}
+
+/*
+ * Handler for \phase_barrier [<name>]
+ */
+ConnectionStateEnum
+handle_cmd_phase_barrier(CState *st, Command *cmd, pg_time_usec_t *now)
+{
+	if (enterPhaseBarrier(st))
+		return CSTATE_END_COMMAND;
+	return CSTATE_WAIT_PHASE_BARRIER;
+}
+
 /*-------------------------------------------------------------------------
  * Pillar 3: Shared Entity Reservoirs (Bounded Ring Buffers)
  *-------------------------------------------------------------------------
@@ -1795,6 +2382,61 @@ reservoirPush(const char *name, int64 val)
 	return true;
 }
 
+/*
+ * Push a scalar integer or all elements of a PGBT_ARRAY of integers into a
+ * reservoir.
+ */
+bool
+reservoirPushValue(const char *name, const PgBenchValue *val, int64 *out_res)
+{
+	if (findReservoir(name) == NULL)
+	{
+		pg_log_error("unknown reservoir \"%s\"", name ? name : "");
+		return false;
+	}
+
+	if (val == NULL || val->type == PGBT_NULL)
+	{
+		if (out_res != NULL)
+			*out_res = 0;
+		return true;
+	}
+
+	if (val->type == PGBT_ARRAY)
+	{
+		int64		pushed = 0;
+
+		for (int i = 0; i < val->u.aval.nelems; i++)
+		{
+			const PgBenchValue *elem = &val->u.aval.elems[i];
+			int64		ival = 0;
+
+			if (elem->type == PGBT_NULL)
+				continue;
+			if (!coerceToInt(elem, &ival))
+				return false;
+			if (!reservoirPush(name, ival))
+				return false;
+			pushed++;
+		}
+		if (out_res != NULL)
+			*out_res = pushed;
+		return true;
+	}
+	else
+	{
+		int64		ival = 0;
+
+		if (!coerceToInt(val, &ival))
+			return false;
+		if (!reservoirPush(name, ival))
+			return false;
+		if (out_res != NULL)
+			*out_res = ival;
+		return true;
+	}
+}
+
 bool
 reservoirSample(const char *name, pg_prng_state *rstate,
 				int64 *out_val, bool *is_empty)
@@ -1841,29 +2483,27 @@ handle_cmd_reservoir_push(CState *st, Command *cmd, pg_time_usec_t *now)
 {
 	const char *res_name = cmd->argv[1];
 	PgBenchValue v;
-	int64		ival = 0;
+	int64		out_res = 0;
+	bool		ok;
 
 	if (!evaluateExpr(st, cmd->expr, &v))
 	{
 		commandFailed(st, cmd->argv[0], "evaluation of reservoir_push expression failed");
 		return CSTATE_ABORTED;
 	}
-	if (!coerceToInt(&v, &ival))
-	{
-		freeValue(&v);
-		commandFailed(st, cmd->argv[0], "reservoir_push value is not an integer");
-		return CSTATE_ABORTED;
-	}
+
+	ok = reservoirPushValue(res_name, &v, &out_res);
 	freeValue(&v);
 
-	if (!reservoirPush(res_name, ival))
+	if (!ok)
 	{
-		commandFailed(st, cmd->argv[0], "reservoir_push failed");
+		commandFailed(st, cmd->argv[0], "reservoir_push failed (expected integer or integer array)");
 		return CSTATE_ABORTED;
 	}
 
 	return CSTATE_END_COMMAND;
 }
+
 
 /*
  * Handler for \reservoir_sample <name> <varname> [<default_expr>]

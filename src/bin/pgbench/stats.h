@@ -131,6 +131,8 @@ typedef struct StatsData
 	int64		ontime_count;
 #define RECALL_HIST_BUCKETS 101
 	int64		recall_buckets[RECALL_HIST_BUCKETS];
+	int64		validation_passed;
+	int64		validation_failed;
 } StatsData;
 
 /*
@@ -185,5 +187,6 @@ extern void printLagPercentiles(const char *prefix, const StatsData *stats);
 extern void addToRecallStats(StatsData *sd, double recall_val);
 extern double getRecallPercentile(const StatsData *stats, double pct);
 extern void printRecallStats(const char *prefix, const StatsData *stats);
+extern void printValidationStats(const char *prefix, const StatsData *stats);
 
 #endif							/* STATS_H */
