@@ -4349,8 +4349,6 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexes);
 	else if (Matches("DROP", "INDEX", MatchAny))
 		COMPLETE_WITH("CASCADE", "RESTRICT");
-	else if (Matches("DROP", "INDEX", "CONCURRENTLY", MatchAny))
-		COMPLETE_WITH("CASCADE", "RESTRICT");
 
 	/* DROP MATERIALIZED VIEW */
 	else if (Matches("DROP", "MATERIALIZED"))
