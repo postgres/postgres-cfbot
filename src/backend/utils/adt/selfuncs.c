@@ -3751,8 +3751,9 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
  * Outputs:
  *	estinfo - When passed as non-NULL, the function will set bits in the
  *		"flags" field in order to provide callers with additional information
- *		about the estimation.  Currently, we only set the SELFLAG_USED_DEFAULT
- *		bit if we used any default values in the estimation.
+ *		about the estimation.  We set SELFLAG_USED_DEFAULT if we used any
+ *		default values, and SELFLAG_USED_MULTIVAR_CLAMP if a multi-column
+ *		estimate was capped by the correlation clamp.
  *
  * Given the lack of any cross-correlation statistics in the system, it's
  * impossible to do anything really trustworthy with GROUP BY conditions
@@ -4065,7 +4066,11 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 				}
 			}
 			if (reldistinct > clamp)
+			{
 				reldistinct = clamp;
+				if (estinfo != NULL && relvarcount > 1)
+					estinfo->flags |= SELFLAG_USED_MULTIVAR_CLAMP;
+			}
 
 			/*
 			 * Update the estimate based on the restriction selectivity,

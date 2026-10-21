@@ -27,6 +27,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
+#include "executor/nodeSetOp.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
 #include "lib/bipartite_match.h"
@@ -5149,6 +5150,198 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
+ * Shared de-duplication support
+ *
+ * DISTINCT and set operations both remove duplicate rows.  Keep the shape of
+ * the hash-aggregate path and of the single-row Limit path in one place so
+ * that the two callers cannot drift apart.  The callers still decide whether
+ * de-duplication is possible and how many groups to expect: DISTINCT
+ * estimates groups from its input relation, while set operations derive them
+ * from their children.
+ */
+
+/*
+ * create_dedup_hashagg_path
+ *		Build a hash-aggregate path that removes duplicate rows.
+ *
+ * There are no aggregate functions and no qual; the aggregate only groups.
+ */
+Path *
+create_dedup_hashagg_path(PlannerInfo *root, RelOptInfo *rel,
+						  Path *subpath, PathTarget *target,
+						  List *group_clause, double num_groups)
+{
+	return (Path *) create_agg_path(root, rel, subpath, target,
+									AGG_HASHED, AGGSPLIT_SIMPLE,
+									group_clause, NIL, NULL, num_groups);
+}
+
+/*
+ * create_dedup_limit_path
+ *		Build a Limit path that returns at most one row of 'subpath'.
+ *
+ * Used when all output columns of a de-duplicating step are known to be
+ * equal, so one row represents the whole group.  A user-written LIMIT 1 has
+ * the same effect; keeping the constructor here ensures that the count,
+ * limit option and row estimate stay consistent with the other
+ * de-duplication paths.
+ */
+Path *
+create_dedup_limit_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath)
+{
+	Node	   *limit_count;
+
+	limit_count = (Node *) makeConst(INT8OID, -1, InvalidOid,
+									 sizeof(int64),
+									 Int64GetDatum(1), false,
+									 true);
+
+	return (Path *) create_limit_path(root, rel, subpath,
+									  NULL, limit_count,
+									  LIMIT_OPTION_COUNT, 0, 1);
+}
+
+/*
+ * create_partial_dedup_rel
+ *
+ * Create the upper relation used for partially-deduplicated paths.  The
+ * caller adds partial paths before calling finish_partial_dedup_rel().
+ *
+ * 'source_rel' supplies the parallel-safety and FDW metadata.
+ */
+RelOptInfo *
+create_partial_dedup_rel(PlannerInfo *root, UpperRelationKind kind,
+						 RelOptInfo *source_rel, Relids relids,
+						 PathTarget *target)
+{
+	RelOptInfo *partial_rel;
+
+	partial_rel = fetch_upper_rel(root, kind, relids);
+	partial_rel->reltarget = target;
+	partial_rel->consider_parallel = source_rel->consider_parallel;
+	partial_rel->pgs_mask = source_rel->pgs_mask;
+
+	/*
+	 * If source_rel belongs to a single FDW, so does the partial rel.
+	 */
+	partial_rel->serverid = source_rel->serverid;
+	partial_rel->userid = source_rel->userid;
+	partial_rel->useridiscurrent = source_rel->useridiscurrent;
+	partial_rel->fdwroutine = source_rel->fdwroutine;
+
+	return partial_rel;
+}
+
+/*
+ * add_partial_dedup_hash_path
+ *
+ * Add a hash-based partial Agg path on 'partial_input' to 'partial_rel'.
+ * The caller may add other partial paths before or after this one; callers
+ * that need a specific ordering (for example, DISTINCT, whose historical
+ * path order is part of its plan-selection behavior) must call this at the
+ * appropriate point.
+ *
+ * 'partial_groups' is the number of groups one worker is expected to produce.
+ * 'partial_input' must be able to produce the path target; we use its target
+ * so that this preserves the pre-existing DISTINCT path shape.
+ */
+void
+add_partial_dedup_hash_path(PlannerInfo *root, RelOptInfo *partial_rel,
+							Path *partial_input, List *group_clause,
+							double partial_groups, bool allow_hash)
+{
+	if (!allow_hash)
+		return;
+
+	add_partial_path(partial_rel,
+					 create_dedup_hashagg_path(root, partial_rel,
+											   partial_input,
+											   partial_input->pathtarget,
+											   group_clause,
+											   partial_groups));
+}
+
+/*
+ * finish_partial_dedup_rel
+ *
+ * Let FDWs and extensions add partial paths, then collect the partial paths
+ * into Gather (or Gather Merge, when preserve_ordering is set) paths and
+ * choose the cheapest.  hook_input_rel is what the create_upper_paths_hook
+ * callback receives; it is NULL for set operations, whose input has no
+ * finalized RelOptInfo.
+ */
+void
+finish_partial_dedup_rel(PlannerInfo *root, RelOptInfo *source_rel,
+						 RelOptInfo *hook_input_rel,
+						 RelOptInfo *partial_rel, UpperRelationKind kind,
+						 bool preserve_ordering)
+{
+	/*
+	 * If there is an FDW that's responsible for all baserels of the query,
+	 * let it consider adding ForeignPaths.  Set-operation upper rels do not
+	 * currently carry an fdwroutine, so this is a no-op for them.
+	 */
+	if (partial_rel->fdwroutine &&
+		partial_rel->fdwroutine->GetForeignUpperPaths)
+		partial_rel->fdwroutine->GetForeignUpperPaths(root, kind,
+													  source_rel,
+													  partial_rel, NULL);
+
+	/* Let extensions possibly add some more partial paths */
+	if (create_upper_paths_hook)
+		(*create_upper_paths_hook) (root, kind, hook_input_rel, partial_rel,
+									NULL);
+
+	if (partial_rel->partial_pathlist != NIL)
+	{
+		/*
+		 * Callers that can exploit ordering in their final dedup step (for
+		 * example DISTINCT, which may build Unique over sorted paths) want
+		 * Gather Merge; callers that cannot (the set-operation hash path)
+		 * want plain Gather paths.
+		 */
+		if (preserve_ordering)
+			generate_useful_gather_paths(root, partial_rel, true);
+		else
+			generate_gather_paths(root, partial_rel, true);
+	}
+
+	/*
+	 * Choose the cheapest paths.  DISTINCT historically set cheapest only
+	 * when it had partial paths, so preserve that behavior when
+	 * preserve_ordering is true.  Set operations look at complete paths too,
+	 * because an FDW or extension hook may have added some even when no
+	 * partial path was found.  We must not call set_cheapest() on a
+	 * completely empty rel.
+	 */
+	if (partial_rel->pathlist != NIL &&
+		(!preserve_ordering || partial_rel->partial_pathlist != NIL))
+		set_cheapest(partial_rel);
+}
+
+/*
+ * add_final_dedup_hash_paths
+ *
+ * Add a final hash-aggregate path over the cheapest gathered path in
+ * 'input_rel' to 'final_rel'.  The caller decides whether hashing is allowed.
+ */
+void
+add_final_dedup_hash_paths(PlannerInfo *root, RelOptInfo *input_rel,
+						   RelOptInfo *final_rel, List *group_clause,
+						   double num_groups)
+{
+	Path	   *input_path = input_rel->cheapest_total_path;
+
+	if (input_path == NULL)
+		return;
+
+	add_path(final_rel,
+			 create_dedup_hashagg_path(root, final_rel, input_path,
+									   input_path->pathtarget,
+									   group_clause, num_groups));
+}
+
+/*
  * create_partial_distinct_paths
  *
  * Process 'input_rel' partial paths and add unique/aggregate paths to the
@@ -5165,8 +5358,11 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	Query	   *parse;
 	List	   *distinctExprs;
 	double		numDistinctRows;
+	double		numHashGroups;
 	Path	   *cheapest_partial_path;
 	ListCell   *lc;
+	EstimationInfo estinfo = {0};
+	bool		allow_hash;
 
 	/* nothing to do when there are no partial paths in the input rel */
 	if (!input_rel->consider_parallel || input_rel->partial_pathlist == NIL)
@@ -5178,18 +5374,9 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	if (parse->hasDistinctOn)
 		return;
 
-	partial_distinct_rel = fetch_upper_rel(root, UPPERREL_PARTIAL_DISTINCT,
-										   NULL);
-	partial_distinct_rel->reltarget = target;
-	partial_distinct_rel->consider_parallel = input_rel->consider_parallel;
-
-	/*
-	 * If input_rel belongs to a single FDW, so does the partial_distinct_rel.
-	 */
-	partial_distinct_rel->serverid = input_rel->serverid;
-	partial_distinct_rel->userid = input_rel->userid;
-	partial_distinct_rel->useridiscurrent = input_rel->useridiscurrent;
-	partial_distinct_rel->fdwroutine = input_rel->fdwroutine;
+	partial_distinct_rel = create_partial_dedup_rel(root,
+													UPPERREL_PARTIAL_DISTINCT,
+													input_rel, NULL, target);
 
 	cheapest_partial_path = linitial(input_rel->partial_pathlist);
 
@@ -5199,7 +5386,43 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/* estimate how many distinct rows we'll get from each worker */
 	numDistinctRows = estimate_num_groups(root, distinctExprs,
 										  cheapest_partial_path->rows,
-										  NULL, NULL);
+										  NULL, &estinfo);
+
+	/*
+	 * Worker-side hash deduplication uses the estimated number of groups to
+	 * size its hash table.  When that estimate is unreliable (default
+	 * statistics or the multi-column correlation clamp), decide whether the
+	 * worst case is dangerous.  The worst case is one group per input row.
+	 * If even that hash table fits in hash_mem, keep the normal estimate and
+	 * let add_path() decide; otherwise cost the hash path with the worst-case
+	 * group count.  This mirrors create_setop_path(), which disables HashSetOp
+	 * when its hash table would exceed hash_mem.
+	 * The sorted+Unique partial paths keep the raw estimate: their cost is
+	 * dominated by sorting, not by the hash table size, and this preserves
+	 * the pre-existing behavior for that strategy.
+	 */
+	if (estimate_num_groups_unreliable(&estinfo))
+	{
+		Size		hashsize;
+
+		/*
+		 * The hash table is worker-local, so use the per-worker input row
+		 * estimate, not the total input size.  EstimateSetOpHashTableSpace's
+		 * per-group allowance is conservative for a grouping-only HashAgg,
+		 * but it keeps the gate on the safe side for near-unique keys.
+		 */
+		hashsize = EstimateSetOpHashTableSpace(cheapest_partial_path->rows,
+											   cheapest_partial_path->pathtarget->width);
+		if (hashsize < get_hash_memory_limit())
+			numHashGroups = numDistinctRows;
+		else
+			numHashGroups = cheapest_partial_path->rows;
+	}
+	else
+		numHashGroups = numDistinctRows;
+
+	allow_hash = enable_hashagg &&
+		grouping_is_hashable(root->processed_distinctClause);
 
 	/*
 	 * Try sorting the cheapest path and incrementally sorting any paths with
@@ -5241,13 +5464,6 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				 */
 				if (root->distinct_pathkeys == NIL)
 				{
-					Node	   *limitCount;
-
-					limitCount = (Node *) makeConst(INT8OID, -1, InvalidOid,
-													sizeof(int64),
-													Int64GetDatum(1), false,
-													true);
-
 					/*
 					 * Apply a LimitPath onto the partial path to restrict the
 					 * tuples from each worker to 1.
@@ -5259,13 +5475,10 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					 * these could be done, but does not seem worth troubling
 					 * over.
 					 */
-					add_partial_path(partial_distinct_rel, (Path *)
-									 create_limit_path(root, partial_distinct_rel,
-													   sorted_path,
-													   NULL,
-													   limitCount,
-													   LIMIT_OPTION_COUNT,
-													   0, 1));
+					add_partial_path(partial_distinct_rel,
+									 create_dedup_limit_path(root,
+														 partial_distinct_rel,
+														 sorted_path));
 				}
 				else
 				{
@@ -5280,48 +5493,23 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	}
 
 	/*
-	 * Now try hash aggregate paths, if enabled and hashing is possible. Since
-	 * we're not on the hook to ensure we do our best to create at least one
-	 * path here, we treat enable_hashagg as a hard off-switch rather than the
-	 * slightly softer variant in create_final_distinct_paths.
+	 * Now try hash aggregate paths, if enabled and hashing is possible.  As
+	 * before, add this after the sorted partial paths so that the historical
+	 * partial_pathlist order is preserved.  enable_hashagg is a hard
+	 * off-switch here because the caller is not required to produce a hash
+	 * path.
 	 */
-	if (enable_hashagg && grouping_is_hashable(root->processed_distinctClause))
-	{
-		add_partial_path(partial_distinct_rel, (Path *)
-						 create_agg_path(root,
-										 partial_distinct_rel,
-										 cheapest_partial_path,
-										 cheapest_partial_path->pathtarget,
-										 AGG_HASHED,
-										 AGGSPLIT_SIMPLE,
-										 root->processed_distinctClause,
-										 NIL,
-										 NULL,
-										 numDistinctRows));
-	}
+	add_partial_dedup_hash_path(root, partial_distinct_rel,
+								cheapest_partial_path,
+								root->processed_distinctClause,
+								numHashGroups, allow_hash);
 
-	/*
-	 * If there is an FDW that's responsible for all baserels of the query,
-	 * let it consider adding ForeignPaths.
-	 */
-	if (partial_distinct_rel->fdwroutine &&
-		partial_distinct_rel->fdwroutine->GetForeignUpperPaths)
-		partial_distinct_rel->fdwroutine->GetForeignUpperPaths(root,
-															   UPPERREL_PARTIAL_DISTINCT,
-															   input_rel,
-															   partial_distinct_rel,
-															   NULL);
-
-	/* Let extensions possibly add some more partial paths */
-	if (create_upper_paths_hook)
-		(*create_upper_paths_hook) (root, UPPERREL_PARTIAL_DISTINCT,
-									input_rel, partial_distinct_rel, NULL);
+	finish_partial_dedup_rel(root, input_rel, input_rel,
+							 partial_distinct_rel,
+							 UPPERREL_PARTIAL_DISTINCT, true);
 
 	if (partial_distinct_rel->partial_pathlist != NIL)
 	{
-		generate_useful_gather_paths(root, partial_distinct_rel, true);
-		set_cheapest(partial_distinct_rel);
-
 		/*
 		 * Finally, create paths to distinctify the final result.  This step
 		 * is needed to remove any duplicates due to combining rows from
@@ -5444,22 +5632,14 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				 */
 				if (root->distinct_pathkeys == NIL)
 				{
-					Node	   *limitCount;
-
-					limitCount = (Node *) makeConst(INT8OID, -1, InvalidOid,
-													sizeof(int64),
-													Int64GetDatum(1), false,
-													true);
-
 					/*
 					 * If the query already has a LIMIT clause, then we could
 					 * end up with a duplicate LimitPath in the final plan.
 					 * That does not seem worth troubling over too much.
 					 */
-					add_path(distinct_rel, (Path *)
-							 create_limit_path(root, distinct_rel, sorted_path,
-											   NULL, limitCount,
-											   LIMIT_OPTION_COUNT, 0, 1));
+					add_path(distinct_rel,
+							 create_dedup_limit_path(root, distinct_rel,
+												   sorted_path));
 				}
 				else
 				{
@@ -5493,20 +5673,9 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		allow_hash = true;		/* default */
 
 	if (allow_hash && grouping_is_hashable(root->processed_distinctClause))
-	{
-		/* Generate hashed aggregate path --- no sort needed */
-		add_path(distinct_rel, (Path *)
-				 create_agg_path(root,
-								 distinct_rel,
-								 cheapest_input_path,
-								 cheapest_input_path->pathtarget,
-								 AGG_HASHED,
-								 AGGSPLIT_SIMPLE,
-								 root->processed_distinctClause,
-								 NIL,
-								 NULL,
-								 numDistinctRows));
-	}
+		add_final_dedup_hash_paths(root, input_rel, distinct_rel,
+								   root->processed_distinctClause,
+								   numDistinctRows);
 
 	return distinct_rel;
 }
