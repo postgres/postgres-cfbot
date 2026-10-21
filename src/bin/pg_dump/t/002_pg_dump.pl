@@ -4006,6 +4006,178 @@ my %tests = (
 		},
 	},
 
+	# Inherited (non-local) generated columns whose expressions were changed
+	# with SET EXPRESSION must have those expressions dumped separately.
+	'CREATE TABLE test_table_generated_child3 (differing expressions)' => {
+		create_order => 4,
+		create_sql => 'CREATE TABLE dump_test.test_table_generated_child3 ()
+						 INHERITS (dump_test.test_table_generated);
+					   ALTER TABLE dump_test.test_table_generated_child3
+						 ALTER COLUMN col2 SET EXPRESSION AS (col1 * 4),
+						 ALTER COLUMN col3 SET EXPRESSION AS (col1 * 5);',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_generated_child3 (\E\n
+			\)\n
+			\QINHERITS (dump_test.test_table_generated);\E\n
+			/xms,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	'ALTER TABLE test_table_generated_child3 SET EXPRESSION (stored)' => {
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_child3 ALTER COLUMN col2 SET EXPRESSION AS ((col1 * 4));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	'ALTER TABLE test_table_generated_child3 SET EXPRESSION (virtual)' => {
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_child3 ALTER COLUMN col3 SET EXPRESSION AS ((col1 * 5));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# A grandchild with the same expression as its parent cannot inherit it
+	# when the parent's own expression is dumped separately, since the
+	# grandchild would then be created before that command runs.
+	'ALTER TABLE test_table_generated_grandchild SET EXPRESSION' => {
+		create_order => 5,
+		create_sql => 'CREATE TABLE dump_test.test_table_generated_grandchild ()
+						 INHERITS (dump_test.test_table_generated_child3);',
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_grandchild ALTER COLUMN col2 SET EXPRESSION AS ((col1 * 4));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# Same, where the parent's expression calls a function that depends on
+	# the grandchild.  (In binary upgrade mode, the grandchild's expression
+	# is dumped separately, too, but to break the dependency loop between
+	# it and the function.)
+	'ALTER TABLE test_table_generated_fn_child2 SET EXPRESSION' => {
+		create_order => 4,
+		create_sql => 'CREATE TABLE dump_test.test_table_generated_fn (
+						   x int,
+						   g int generated always as (x * 2) stored
+						 );
+					   CREATE TABLE dump_test.test_table_generated_fn_child1 ()
+						 INHERITS (dump_test.test_table_generated_fn);
+					   CREATE TABLE dump_test.test_table_generated_fn_child2 ()
+						 INHERITS (dump_test.test_table_generated_fn_child1);
+					   CREATE FUNCTION dump_test.generated_fn(int) RETURNS int
+						 IMMUTABLE LANGUAGE sql
+						 BEGIN ATOMIC
+						   SELECT $1 * 3 + (SELECT count(*)::int
+							 FROM dump_test.test_table_generated_fn_child2 WHERE false);
+						 END;
+					   ALTER TABLE dump_test.test_table_generated_fn_child1
+						 ALTER COLUMN g SET EXPRESSION AS (dump_test.generated_fn(x));',
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_fn_child2 ALTER COLUMN g SET EXPRESSION AS (dump_test.generated_fn(x));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# Here the parent's column is local, but its expression has to be dumped
+	# separately to break a dependency loop, which is only decided while
+	# sorting; the child must then get its own expression, too.
+	'ALTER TABLE test_table_generated_loop_child SET EXPRESSION' => {
+		create_order => 4,
+		create_sql => 'CREATE TABLE dump_test.test_table_generated_loop_parent (
+						   a int,
+						   g int generated always as (a * 2) stored
+						 );
+					   CREATE TABLE dump_test.test_table_generated_loop (a int);
+					   CREATE FUNCTION dump_test.generated_loop_fn(int) RETURNS int
+						 IMMUTABLE LANGUAGE sql
+						 BEGIN ATOMIC
+						   SELECT $1 * 3 + 0 * (SELECT count(*)::int
+							 FROM dump_test.test_table_generated_loop);
+						 END;
+					   ALTER TABLE dump_test.test_table_generated_loop
+						 ADD COLUMN g int
+						 GENERATED ALWAYS AS (dump_test.generated_loop_fn(a)) STORED;
+					   ALTER TABLE dump_test.test_table_generated_loop
+						 INHERIT dump_test.test_table_generated_loop_parent;
+					   CREATE TABLE dump_test.test_table_generated_loop_child ()
+						 INHERITS (dump_test.test_table_generated_loop);',
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_loop_child ALTER COLUMN g SET EXPRESSION AS (dump_test.generated_loop_fn(a));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# The last table of this chain is created first and attached later, so
+	# that its OID is lower than its parent's; its expression must still be
+	# dumped, since its parent's is.
+	'CREATE TABLE test_table_generated_chain_late' => {
+		create_order => 4,
+		create_sql => 'CREATE TABLE dump_test.test_table_generated_chain_late (x int);
+					   CREATE TABLE dump_test.test_table_generated_chain (
+						   x int,
+						   g int generated always as (x * 2) stored
+						 );
+					   CREATE TABLE dump_test.test_table_generated_chain_child ()
+						 INHERITS (dump_test.test_table_generated_chain);
+					   CREATE TABLE dump_test.test_table_generated_chain_grandchild ()
+						 INHERITS (dump_test.test_table_generated_chain_child);
+					   ALTER TABLE dump_test.test_table_generated_chain_child
+						 ALTER COLUMN g SET EXPRESSION AS (x * 3);
+					   ALTER TABLE dump_test.test_table_generated_chain_late
+						 ADD COLUMN g int GENERATED ALWAYS AS (x * 3) STORED;
+					   ALTER TABLE dump_test.test_table_generated_chain_late
+						 INHERIT dump_test.test_table_generated_chain_grandchild;',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_generated_chain_late (\E\n
+			\s+\Qx integer,\E\n
+			\s+\Qg integer GENERATED ALWAYS AS ((x * 3)) STORED\E\n
+			\)\n
+			\QINHERITS (dump_test.test_table_generated_chain_grandchild);\E\n
+			/xms,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CREATE TABLE table_with_stats' => {
 		create_order => 98,
 		create_sql => 'CREATE TABLE dump_test.table_index_stats (
