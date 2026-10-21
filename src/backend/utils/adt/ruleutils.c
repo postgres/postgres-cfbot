@@ -12100,16 +12100,28 @@ get_xmltable(TableFunc *tf, deparse_context *context, bool showimplicit)
 			else
 				first = false;
 
+			/*
+			 * The URI is a b_expr, which lacks a_expr-only syntax such as
+			 * COLLATE, so parenthesize anything but a plain Const.
+			 */
 			if (ns_node != NULL)
 			{
+				if (!IsA(expr, Const))
+					appendStringInfoChar(buf, '(');
 				get_rule_expr(expr, context, showimplicit);
+				if (!IsA(expr, Const))
+					appendStringInfoChar(buf, ')');
 				appendStringInfo(buf, " AS %s",
 								 quote_identifier(strVal(ns_node)));
 			}
 			else
 			{
 				appendStringInfoString(buf, "DEFAULT ");
+				if (!IsA(expr, Const))
+					appendStringInfoChar(buf, '(');
 				get_rule_expr(expr, context, showimplicit);
+				if (!IsA(expr, Const))
+					appendStringInfoChar(buf, ')');
 			}
 		}
 		appendStringInfoString(buf, "), ");
