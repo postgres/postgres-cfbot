@@ -81,6 +81,47 @@ extern Path *get_cheapest_fractional_path(RelOptInfo *rel,
 extern RelOptInfo *create_unique_paths(PlannerInfo *root, RelOptInfo *rel,
 									   SpecialJoinInfo *sjinfo);
 
+/*
+ * Shared de-duplication support (used by DISTINCT and set operations).
+ *
+ * These helpers cover only the mechanics of the de-duplication path shapes.
+ * Callers remain responsible for deciding whether de-duplication is possible,
+ * for estimating the number of groups, and for the applicable strategy
+ * policy: DISTINCT estimates groups from its input relation, while set
+ * operations derive them from their children.  DISTINCT also hard-disables
+ * hashing when enable_hashagg is off and alternatives exist, whereas set
+ * operations leave it as a cost penalty, consistent with their other hash
+ * paths.
+ */
+extern Path *create_dedup_hashagg_path(PlannerInfo *root, RelOptInfo *rel,
+									   Path *subpath, PathTarget *target,
+									   List *group_clause,
+									   double num_groups);
+extern Path *create_dedup_limit_path(PlannerInfo *root, RelOptInfo *rel,
+									 Path *subpath);
+extern RelOptInfo *create_partial_dedup_rel(PlannerInfo *root,
+											UpperRelationKind kind,
+											RelOptInfo *source_rel,
+											Relids relids,
+											PathTarget *target);
+extern void add_partial_dedup_hash_path(PlannerInfo *root,
+										RelOptInfo *partial_rel,
+										Path *partial_input,
+										List *group_clause,
+										double partial_groups,
+										bool allow_hash);
+extern void finish_partial_dedup_rel(PlannerInfo *root,
+									 RelOptInfo *source_rel,
+									 RelOptInfo *hook_input_rel,
+									 RelOptInfo *partial_rel,
+									 UpperRelationKind kind,
+									 bool preserve_ordering);
+extern void add_final_dedup_hash_paths(PlannerInfo *root,
+									   RelOptInfo *input_rel,
+									   RelOptInfo *final_rel,
+									   List *group_clause,
+									   double num_groups);
+
 extern char *choose_plan_name(PlannerGlobal *glob, const char *name,
 							  bool always_number);
 
