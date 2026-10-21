@@ -31,6 +31,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -39,7 +40,9 @@
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_oper.h"
 #include "port/pg_bitutils.h"
+#include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 
 
@@ -57,7 +60,12 @@ static void build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 									bool trivial_tlist, List *child_tlist,
 									List *interesting_pathkeys,
 									double *pNumGroups,
-									bool *pUnreliableStats);
+									bool *pUnreliableStats,
+									bool dedup_child);
+static bool setop_child_output_is_constant(PlannerInfo *subroot);
+static bool setop_child_expr_is_constant(PlannerInfo *subroot, Expr *expr);
+static bool setop_child_expr_has_nullable_input(Node *node, void *context);
+static bool setop_child_has_scan_input(PlannerInfo *subroot);
 static RelOptInfo *generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 										List *refnames_tlist,
 										List **pTargetList);
@@ -401,7 +409,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 								  &lpath_trivial_tlist);
 	if (lrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, lrel, lpath_trivial_tlist, lpath_tlist,
-								NIL, NULL, NULL);
+								NIL, NULL, NULL, false);
 	lpath = lrel->cheapest_total_path;
 	/* The right path will want to look at the left one ... */
 	root->non_recursive_path = lpath;
@@ -413,7 +421,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 								  &rpath_trivial_tlist);
 	if (rrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, rrel, rpath_trivial_tlist, rpath_tlist,
-								NIL, NULL, NULL);
+								NIL, NULL, NULL, false);
 	rpath = rrel->cheapest_total_path;
 	root->non_recursive_path = NULL;
 
@@ -476,6 +484,187 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 }
 
 /*
+ * setop_child_output_is_constant
+ *		Can this set-operation child output at most one distinct row?
+ *
+ * We return true when every non-junk output column is constant for every
+ * output row.  Such a child emits either no rows or N copies of a single
+ * tuple; a parent set operation that removes duplicates (UNION / INTERSECT /
+ * EXCEPT without ALL) therefore never needs more than one of them.
+ *
+ * "Constant" means either an expression that contains no Vars and no volatile
+ * functions, or an expression pinned to a constant by equivalence-class
+ * processing, for example "x" in "SELECT x FROM t WHERE x = 5".  The latter
+ * mirrors the test that SELECT DISTINCT applies to its DISTINCT expressions;
+ * like DISTINCT, we do not chase constants through casts or arbitrary
+ * expressions.
+ *
+ * SRFs and window functions can produce different values per input row even
+ * when their expressions contain no Vars.  A sublink that is represented as
+ * a SubPlan is rejected (it can hide volatile functions in its subplan);
+ * an uncorrelated sublink that becomes an InitPlan Param is constant for the
+ * scan and is accepted.  Aggregates (including GroupingFunc) are rejected
+ * as well because their value can differ between groups.  A child that is
+ * itself a set operation is left alone; its own output would need a similar
+ * analysis.
+ */
+static bool
+setop_child_output_is_constant(PlannerInfo *subroot)
+{
+	Query	   *subquery = subroot->parse;
+	ListCell   *lc;
+
+	if (subquery->hasTargetSRFs ||
+		subquery->hasWindowFuncs ||
+		subquery->groupingSets ||
+		subquery->setOperations != NULL)
+		return false;
+
+	foreach(lc, subquery->targetList)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (tle->resjunk)
+			continue;
+
+		if (contain_agg_clause((Node *) tle->expr) ||
+			contain_subplans((Node *) tle->expr))
+			return false;
+
+		if (!setop_child_expr_is_constant(subroot, tle->expr))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * setop_child_expr_is_constant
+ *		Is this expression constant for every output row of the child?
+ *
+ * In addition to syntactic pseudo-constants, accept expressions whose
+ * equivalence class is pinned to a constant.  To find that class we use the
+ * same operator-family list that process_equivalence() would have used for an
+ * equality clause on the expression's type; this follows
+ * make_pathkey_from_sortinfo().
+ *
+ * A constant member is only relevant if it belongs to the top join domain:
+ * a constant from below the nullable side of an outer join does not hold for
+ * every output row.  For the same reason, reject expressions that are known
+ * to be nulled by an outer join, and broken equivalence classes, whose
+ * members are not guaranteed to satisfy all the derived equalities.
+ */
+static bool
+setop_child_expr_is_constant(PlannerInfo *subroot, Expr *expr)
+{
+	Oid			eqopr;
+	Oid			opcintype;
+	Oid			righttype;
+	List	   *opfamilies;
+	ListCell   *lc;
+	EquivalenceClass *ec;
+	JoinDomain *top_domain;
+
+	if (setop_child_expr_has_nullable_input((Node *) expr, NULL))
+		return false;
+
+	if (is_pseudo_constant_clause((Node *) expr))
+		return true;
+
+	/* Without any equivalence classes, only syntactic constants apply. */
+	if (subroot->eq_classes == NIL)
+		return false;
+
+	/*
+	 * Get the type's default equality operator.  If there is none, or it is
+	 * not part of an ordering operator family, there can be no equivalence
+	 * class to consult.
+	 */
+	get_sort_group_operators(exprType((Node *) expr),
+							 false, false, false,
+							 NULL, &eqopr, NULL, NULL);
+	if (!OidIsValid(eqopr))
+		return false;
+
+	opfamilies = get_mergejoin_opfamilies(eqopr);
+	if (opfamilies == NIL)
+		return false;
+
+	op_input_types(eqopr, &opcintype, &righttype);
+
+	ec = get_eclass_for_sort_expr(subroot, expr, opfamilies, opcintype,
+								  exprCollation((Node *) expr), 0, NULL,
+								  false);
+	if (ec == NULL || ec->ec_broken || !ec->ec_has_const)
+		return false;
+
+	top_domain = linitial_node(JoinDomain, subroot->join_domains);
+	foreach(lc, ec->ec_members)
+	{
+		EquivalenceMember *em = lfirst_node(EquivalenceMember, lc);
+
+		if (em->em_is_const && em->em_jdomain == top_domain)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * setop_child_expr_has_nullable_input
+ *		Does this expression contain a Var or PlaceHolderVar that is nulled by
+ *		an outer join?
+ *
+ * Such an expression can be NULL for some output rows even if its
+ * equivalence class contains a top-domain constant.
+ */
+static bool
+setop_child_expr_has_nullable_input(Node *node, void *context)
+{
+	(void) context;
+
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) &&
+		!bms_is_empty(((Var *) node)->varnullingrels))
+		return true;
+	if (IsA(node, PlaceHolderVar) &&
+		!bms_is_empty(((PlaceHolderVar *) node)->phnullingrels))
+		return true;
+	return expression_tree_walker(node, setop_child_expr_has_nullable_input,
+								  context);
+}
+
+/*
+ * setop_child_has_scan_input
+ *		Does this set-operation child read any input rows?
+ *
+ * A query without a FROM clause is represented by a dummy RTE_RESULT entry,
+ * which produces one row natively; a restriction qual can filter that row
+ * out.  Limiting such a child would add a plan node without saving any work.
+ */
+static bool
+setop_child_has_scan_input(PlannerInfo *subroot)
+{
+	ListCell   *lc;
+
+	foreach(lc, subroot->parse->jointree->fromlist)
+	{
+		Node	   *jtnode = (Node *) lfirst(lc);
+		RangeTblEntry *rte;
+
+		if (!IsA(jtnode, RangeTblRef))
+			return true;
+
+		rte = subroot->simple_rte_array[((RangeTblRef *) jtnode)->rtindex];
+		if (rte->rtekind != RTE_RESULT)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * build_setop_child_paths
  *		Build paths for the set op child relation denoted by 'rel'.
  *
@@ -491,12 +680,17 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
  * based on default statistics or was capped by the multi-column correlation
  * clamp.  Grouping-set children are conservatively treated as unreliable.
  * Such estimates must not be used to cost parallel deduplication.
+ * dedup_child: true if the parent set operation removes duplicate rows from
+ * this child's output (i.e. it is not an ALL variant).  In that case, a
+ * child whose output is a single constant tuple needs to be scanned only
+ * until its first row.  Recursive UNION inputs pass false; their working
+ * table semantics need a separate analysis.
  */
 static void
 build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 						bool trivial_tlist, List *child_tlist,
 						List *interesting_pathkeys, double *pNumGroups,
-						bool *pUnreliableStats)
+						bool *pUnreliableStats, bool dedup_child)
 {
 	RelOptInfo *final_rel;
 	List	   *setop_pathkeys = rel->subroot->setop_pathkeys;
@@ -655,6 +849,61 @@ build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 									 trivial_tlist,
 									 NIL, NULL);
 		add_partial_path(rel, partial_path);
+	}
+
+	/*
+	 * If the parent set operation removes duplicates and this child emits a
+	 * single constant tuple, only its first row can affect the result.  Add
+	 * LIMIT 1 to every path we built.  It is important to do this for the
+	 * partial paths as well as for the total paths: adding a limit above the
+	 * subquery (as a user-written LIMIT would) would remove the child's
+	 * partial paths and defeat parallel set-operation plans.
+	 *
+	 * Skip this when the child has no FROM clause: it can produce only one
+	 * row anyway, and adding a Limit node would just be noise.
+	 *
+	 * A one-row result trivially satisfies any pathkeys the underlying path
+	 * claimed, so the Limit paths can keep them and compete with the
+	 * originals; add_path() discards the latter as dominated.  Detach the
+	 * lists first, so that add_path() cannot free a path that has become a
+	 * subpath of one of the Limit paths.
+	 *
+	 * As with the Limit 1 paths built for SELECT DISTINCT, we do not look
+	 * for volatile functions in the child's quals: the scan can stop
+	 * evaluating them early, just as it would with a user-written LIMIT.
+	 * The same applies to CTEs and to volatile functions in FROM.  DISTINCT's
+	 * Limit 1 path already has this behavior, and the regression tests below
+	 * document it for set operations too.
+	 *
+	 * The same early-stop rule applies when the child contains a locking
+	 * clause in a non-pullable subquery or CTE: only the first row is
+	 * fetched, so only that row is locked.  This is the same observable
+	 * behavior as the existing DISTINCT Limit 1 path.  It is intentional;
+	 * see the FOR UPDATE cases in union.sql.
+	 */
+	if (dedup_child && !is_dummy_rel(rel) &&
+		setop_child_has_scan_input(rel->subroot) &&
+		setop_child_output_is_constant(rel->subroot))
+	{
+		List	   *paths;
+
+		paths = rel->pathlist;
+		rel->pathlist = NIL;
+		foreach(lc, paths)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			add_path(rel, create_dedup_limit_path(root, rel, path));
+		}
+
+		paths = rel->partial_pathlist;
+		rel->partial_pathlist = NIL;
+		foreach(lc, paths)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			add_partial_path(rel, create_dedup_limit_path(root, rel, path));
+		}
 	}
 
 	postprocess_setop_rel(root, rel);
@@ -872,7 +1121,8 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			build_setop_child_paths(root, rel, trivial_tlist, child_tlist,
 									union_pathkeys,
 									op->all ? NULL : &childGroups,
-									op->all ? NULL : &childUnreliableStats);
+									op->all ? NULL : &childUnreliableStats,
+									!op->all);
 		else
 		{
 			/*
@@ -1338,12 +1588,14 @@ generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
 	 */
 	if (lrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, lrel, lpath_trivial_tlist, lpath_tlist,
-								nonunion_pathkeys, &dLeftGroups, NULL);
+								nonunion_pathkeys, &dLeftGroups, NULL,
+								!op->all);
 	else
 		dLeftGroups = lrel->rows;
 	if (rrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, rrel, rpath_trivial_tlist, rpath_tlist,
-								nonunion_pathkeys, &dRightGroups, NULL);
+								nonunion_pathkeys, &dRightGroups, NULL,
+								!op->all);
 	else
 		dRightGroups = rrel->rows;
 
