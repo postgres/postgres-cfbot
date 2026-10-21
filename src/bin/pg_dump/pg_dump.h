@@ -406,6 +406,15 @@ typedef struct _attrDefInfo
 	int			adnum;
 	char	   *adef_expr;		/* decompiled DEFAULT expression */
 	bool		separate;		/* true if must dump as separate item */
+
+	/*
+	 * True if this is a generation expression that flagInhAttrs() chose not
+	 * to dump, because CREATE TABLE ... INHERITS will copy it from the
+	 * parents.  It may still have to be dumped later, if a parent's own
+	 * expression turns out to be dumped as a separate ALTER TABLE command;
+	 * see flagInhGenerationExprs().
+	 */
+	bool		maybe_dump_later_if_altered_expression;
 } AttrDefInfo;
 
 typedef struct _tableDataInfo
@@ -756,6 +765,7 @@ typedef struct _SubRelInfo
  */
 
 extern TableInfo *getSchemaData(Archive *fout, int *numTablesPtr);
+extern void flagInhGenerationExprs(DumpableObject **dobjs, int numObjs);
 
 extern void AssignDumpId(DumpableObject *dobj);
 extern void recordAdditionalCatalogID(CatalogId catId, DumpableObject *dobj);
