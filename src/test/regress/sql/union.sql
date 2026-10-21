@@ -710,3 +710,131 @@ select null::int[] union all select null::int[] union all select null::bigint[];
 explain (costs off)
 select * from tenk1 t
 join (select ten from tenk1 union select ten from onek) s on s.ten = t.unique1;
+
+--
+-- Parallel partial deduplication for UNION
+--
+-- Force parallel paths to be cheap and available on the small regression
+-- tables.
+--
+set parallel_setup_cost = 0;
+set parallel_tuple_cost = 0;
+set min_parallel_table_scan_size = 0;
+set max_parallel_workers_per_gather = 2;
+
+-- With an index-provided order, MergeAppend + Unique still wins.
+explain (costs off)
+select unique1 from tenk1 union select unique1 from tenk1;
+
+-- The same holds for ORDER BY + LIMIT, which can terminate early.
+explain (costs off)
+select unique1 from tenk1 union select unique1 from tenk1
+order by 1 limit 10;
+
+create table union_par_nostat (a int, b int) with (autovacuum_enabled = false);
+insert into union_par_nostat select g % 100, g % 100 from generate_series(1, 20000) g;
+
+-- Grouped and DISTINCT children: the current planner does not expose
+-- partial paths for these child shapes, so no union-level worker dedup path
+-- is built.  Keep the plan and result coverage for them.
+explain (costs off)
+select a from (select a from union_par_nostat group by a) s
+union select a from union_par_nostat;
+select count(*) from
+  (select a as x from (select a from union_par_nostat group by a) s
+   union select a from union_par_nostat) s;
+
+explain (costs off)
+select distinct a from union_par_nostat
+union select a from union_par_nostat;
+select count(*) from
+  (select distinct a as x from union_par_nostat
+   union select a from union_par_nostat) s;
+
+-- A child that is itself a set operation: likewise no partial path is
+-- exposed, so this checks the current plan shape and result rather than the
+-- worker-side dedup path.
+explain (costs off)
+select a from (select a from union_par_nostat
+               intersect select a from union_par_nostat) s
+union select a from union_par_nostat;
+select count(*) from
+  (select a as x from (select a from union_par_nostat
+                       intersect select a from union_par_nostat) s
+   union select a from union_par_nostat) s;
+
+-- No statistics: the estimate is unreliable, but the worst-case hash table
+-- (one group per input row) fits in hash_mem, so the worker-side path is
+-- still considered.
+explain (costs off)
+select a, b from union_par_nostat union select a, b from union_par_nostat;
+
+-- With a small work_mem the worst-case hash table does not fit, so the
+-- worker-side path is rejected.
+set work_mem = '64kB';
+explain (costs off)
+select a, b from union_par_nostat union select a, b from union_par_nostat;
+reset work_mem;
+
+create statistics union_par_stats (ndistinct) on a, b from union_par_nostat;
+analyze union_par_nostat;
+
+-- Extended statistics give a usable ndistinct estimate for the multi-column
+-- key, so the worker-side dedup path is chosen.
+explain (costs off)
+select a, b from union_par_nostat union select a, b from union_par_nostat;
+
+-- Execute the plan and check the result.
+select count(*) from
+  (select a, b from union_par_nostat union select a, b from union_par_nostat) s;
+
+-- Multi-way UNION is flattened into a single partial-dedup path.
+explain (costs off)
+select a, b from union_par_nostat
+union select a, b from union_par_nostat
+union select a, b from union_par_nostat;
+
+-- A nested UNION ALL child is flattened into the parent UNION.
+explain (costs off)
+select a, b from union_par_nostat
+union (select a, b from union_par_nostat union all select a, b from union_par_nostat);
+
+-- A near-unique multi-column key without extended statistics must not use
+-- the worker-side dedup path: the 10% correlation clamp makes the estimate
+-- unreliable.
+create table union_par_unique (a int, b int);
+insert into union_par_unique
+select g / 1000, g % 1000 from generate_series(1, 200000) g;
+analyze union_par_unique;
+explain (costs off)
+select a, b from union_par_unique union select a, b from union_par_unique;
+drop table union_par_unique;
+
+-- With enable_hashagg off, cost_agg's disabled_nodes penalty prevents the
+-- hash-aggregate paths from being chosen.
+set enable_hashagg = off;
+explain (costs off)
+select a, b from union_par_nostat union select a, b from union_par_nostat;
+reset enable_hashagg;
+
+-- Without parallel append, the path must still be correct.
+set enable_parallel_append = off;
+explain (costs off)
+select a, b from union_par_nostat union select a, b from union_par_nostat;
+
+-- Execute the plan and check the result.
+select count(*) from
+  (select a, b from union_par_nostat union select a, b from union_par_nostat) s;
+reset enable_parallel_append;
+
+-- With no workers, the serial path is used.
+set max_parallel_workers_per_gather = 0;
+explain (costs off)
+select a, b from union_par_nostat union select a, b from union_par_nostat;
+
+drop table union_par_nostat;
+reset parallel_setup_cost;
+reset parallel_tuple_cost;
+reset min_parallel_table_scan_size;
+reset max_parallel_workers_per_gather;
+

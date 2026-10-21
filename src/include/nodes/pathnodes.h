@@ -141,6 +141,7 @@ typedef struct AggClauseCosts
  */
 typedef enum UpperRelationKind
 {
+	UPPERREL_PARTIAL_SETOP,		/* result of partial setop dedup, if any */
 	UPPERREL_SETOP,				/* result of UNION/INTERSECT/EXCEPT, if any */
 	UPPERREL_PARTIAL_GROUP_AGG, /* result of partial grouping/aggregation, if
 								 * any */
