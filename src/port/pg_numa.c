@@ -20,7 +20,7 @@
 #include "port/pg_numa.h"
 #include "storage/pg_shmem.h"
 
-int	numa_flags;
+int			numa_flags;
 
 /*
  * At this point we provide support only for Linux thanks to libnuma, but in
@@ -154,7 +154,7 @@ pg_numa_move_to_node(char *startptr, char *endptr, int node)
 int
 pg_numa_bind_to_node(char *startptr, char *endptr, int node)
 {
-	int				ret;
+	int			ret;
 	struct bitmask *nodemask;
 
 	if (node < 0)
@@ -173,9 +173,9 @@ pg_numa_bind_to_node(char *startptr, char *endptr, int node)
 	numa_bitmask_setbit(nodemask, node);
 
 	/*
-	 * MPOL_BIND places the pages strictly on the node, and MPOL_MF_MOVE migrates
-	 * pages already faulted in to that node. If mbind() fails, leave the default
-	 * placement in effect, and report the failure.
+	 * MPOL_BIND places the pages strictly on the node, and MPOL_MF_MOVE
+	 * migrates pages already faulted in to that node. If mbind() fails, leave
+	 * the default placement in effect, and report the failure.
 	 */
 	ret = mbind(startptr, (endptr - startptr),
 				MPOL_BIND, nodemask->maskp, nodemask->size, MPOL_MF_MOVE);
