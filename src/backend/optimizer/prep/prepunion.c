@@ -27,10 +27,12 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
+#include "executor/nodeSetOp.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
@@ -54,7 +56,8 @@ static RelOptInfo *generate_recursion_path(SetOperationStmt *setOp,
 static void build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 									bool trivial_tlist, List *child_tlist,
 									List *interesting_pathkeys,
-									double *pNumGroups);
+									double *pNumGroups,
+									bool *pUnreliableStats);
 static RelOptInfo *generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 										List *refnames_tlist,
 										List **pTargetList);
@@ -398,7 +401,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 								  &lpath_trivial_tlist);
 	if (lrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, lrel, lpath_trivial_tlist, lpath_tlist,
-								NIL, NULL);
+								NIL, NULL, NULL);
 	lpath = lrel->cheapest_total_path;
 	/* The right path will want to look at the left one ... */
 	root->non_recursive_path = lpath;
@@ -410,7 +413,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 								  &rpath_trivial_tlist);
 	if (rrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, rrel, rpath_trivial_tlist, rpath_tlist,
-								NIL, NULL);
+								NIL, NULL, NULL);
 	rpath = rrel->cheapest_total_path;
 	root->non_recursive_path = NULL;
 
@@ -484,11 +487,16 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
  * pathkeys, sorting any unsorted paths as required.
  * *pNumGroups: if not NULL, we estimate the number of distinct groups
  * in the result, and store it there.
+ * *pUnreliableStats: if not NULL, set to true when the group estimate is
+ * based on default statistics or was capped by the multi-column correlation
+ * clamp.  Grouping-set children are conservatively treated as unreliable.
+ * Such estimates must not be used to cost parallel deduplication.
  */
 static void
 build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 						bool trivial_tlist, List *child_tlist,
-						List *interesting_pathkeys, double *pNumGroups)
+						List *interesting_pathkeys, double *pNumGroups,
+						bool *pUnreliableStats)
 {
 	RelOptInfo *final_rel;
 	List	   *setop_pathkeys = rel->subroot->setop_pathkeys;
@@ -496,6 +504,9 @@ build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 
 	/* it can't be a set op child rel if it's not a subquery */
 	Assert(rel->rtekind == RTE_SUBQUERY);
+
+	if (pUnreliableStats)
+		*pUnreliableStats = false;
 
 	/* when sorting is needed, add child rel equivalences */
 	if (interesting_pathkeys != NIL)
@@ -670,17 +681,106 @@ build_setop_child_paths(PlannerInfo *root, RelOptInfo *rel,
 	{
 		PlannerInfo *subroot = rel->subroot;
 		Query	   *subquery = subroot->parse;
+		EstimationInfo estinfo = {0};
+		List	   *groupExprs = NIL;
+		bool		reliable = true;
+		bool		estimated = false;
+
+		/*
+		 * A child that is itself a set operation exposes varno-0 output
+		 * expressions, which estimate_num_groups() cannot use reliably.
+		 * Treat its estimate as unreliable.
+		 *
+		 * Note: grouped, DISTINCT and nested-setop children generally do
+		 * not expose partial paths in the current planner, so the UNION
+		 * worker-side dedup path is normally not built for them (see
+		 * partial_paths_valid in generate_union_paths).  We still compute
+		 * this state correctly for partitionwise aggregation and for
+		 * future path shapes; the regression tests cover the current plan
+		 * shape for these children.
+		 */
+		if (subquery->setOperations != NULL)
+			reliable = false;
 
 		if (subquery->groupClause || subquery->groupingSets ||
-			subquery->distinctClause || subroot->hasHavingQual ||
-			subquery->hasAggs)
+			subroot->hasHavingQual || subquery->hasAggs)
+		{
 			*pNumGroups = rel->cheapest_total_path->rows;
+
+			/*
+			 * The row estimate comes from the subquery's own upper-level
+			 * planning, and the statistics reliability must be judged using
+			 * the same expressions that produced that estimate.  Mirror
+			 * get_number_of_groups(), which estimates a plain GROUP BY with
+			 * the processed grouping expressions; the subquery's output
+			 * target list can be a completely different set of expressions
+			 * (for example, it may contain only "count(*)").
+			 *
+			 * Grouping sets are treated conservatively as unreliable: the
+			 * per-set estimates are not retained on the subroot, so we
+			 * cannot reconstruct them here.
+			 *
+			 * In most cases a grouped child exposes no partial paths, so the
+			 * UNION parallel-dedup path is not built at all (see
+			 * partial_paths_valid in generate_union_paths).  We still compute
+			 * this correctly so the decision remains sound if partial paths
+			 * become available, for example with partitionwise aggregation.
+			 */
+			if (pUnreliableStats)
+			{
+				if (subquery->groupingSets)
+					reliable = false;
+				else if (subquery->groupClause)
+					groupExprs = get_sortgrouplist_exprs(subroot->processed_groupClause,
+														 subquery->targetList);
+				/* else: plain aggregation, exactly one row */
+			}
+		}
+		else if (subquery->distinctClause)
+		{
+			*pNumGroups = rel->cheapest_total_path->rows;
+
+			/*
+			 * For DISTINCT without grouping or aggregation, the row estimate
+			 * comes from create_final_distinct_paths(), which estimates the
+			 * distinct expressions.  Mirror that here.
+			 */
+			if (pUnreliableStats)
+				groupExprs = get_sortgrouplist_exprs(subroot->processed_distinctClause,
+													 subquery->targetList);
+		}
 		else
+		{
+			groupExprs = get_tlist_exprs(subquery->targetList, false);
 			*pNumGroups = estimate_num_groups(subroot,
-											  get_tlist_exprs(subroot->parse->targetList, false),
+											  groupExprs,
 											  rel->cheapest_total_path->rows,
 											  NULL,
-											  NULL);
+											  &estinfo);
+			estimated = true;
+		}
+
+		/*
+		 * For grouped and DISTINCT children, run the estimator only to learn
+		 * whether the inputs are trustworthy; the return value is deliberately
+		 * discarded.  The input_rows value does not affect the flags we care
+		 * about: SELFLAG_USED_DEFAULT depends only on the available
+		 * statistics, and SELFLAG_USED_MULTIVAR_CLAMP depends only on the
+		 * relation size and the number of grouping variables.  So passing the
+		 * post-grouping row estimate here is fine.
+		 */
+		if (pUnreliableStats)
+		{
+			if (!estimated && groupExprs != NIL)
+				(void) estimate_num_groups(subroot, groupExprs,
+										   rel->cheapest_total_path->rows,
+										   NULL, &estinfo);
+
+			if (estimate_num_groups_unreliable(&estinfo))
+				reliable = false;
+
+			*pUnreliableStats = !reliable;
+		}
 	}
 }
 
@@ -709,9 +809,11 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	List	   *groupList = NIL;
 	Path	   *apath;
 	Path	   *gpath = NULL;
+	Path	   *papath = NULL;
 	bool		try_sorted = false;
 	List	   *union_pathkeys = NIL;
 	double		dNumChildGroups = 0;
+	bool		dNumChildGroupsUnreliable = false;
 
 	/*
 	 * If any of my children are identical UNION nodes (same op, all-flag, and
@@ -763,14 +865,23 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 		bool		trivial_tlist = lfirst_int(lc2);
 		List	   *child_tlist = lfirst_node(List, lc3);
 		double		childGroups = 0;
+		bool		childUnreliableStats = true;
 
 		/* only build paths for the union children */
 		if (rel->rtekind == RTE_SUBQUERY)
 			build_setop_child_paths(root, rel, trivial_tlist, child_tlist,
 									union_pathkeys,
-									op->all ? NULL : &childGroups);
+									op->all ? NULL : &childGroups,
+									op->all ? NULL : &childUnreliableStats);
 		else
+		{
+			/*
+			 * A non-subquery child is usually a nested set operation.  We do
+			 * not retain a reliability flag for its row estimate, so treat it
+			 * conservatively.
+			 */
 			childGroups = rel->rows;
+		}
 
 		/*
 		 * For UNION (not UNION ALL), accumulate the per-child distinct-group
@@ -781,7 +892,11 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 		 * them.
 		 */
 		if (!op->all && !is_dummy_rel(rel))
+		{
 			dNumChildGroups += childGroups;
+			if (childUnreliableStats)
+				dNumChildGroupsUnreliable = true;
+		}
 	}
 
 	/* Build path lists and relid set. */
@@ -886,8 +1001,14 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	 */
 	if (partial_paths_valid)
 	{
-		Path	   *papath;
+		double		gather_rows;
 		int			parallel_workers = 0;
+
+		/*
+		 * UPPERREL_PARTIAL_SETOP is currently created only for UNION.
+		 * INTERSECT/EXCEPT keep SetOp semantics and do not use this path.
+		 */
+		Assert(op->op == SETOP_UNION);
 
 		/* Find the highest number of workers requested for any subpath. */
 		foreach(lc, partial.partial_subpaths)
@@ -922,9 +1043,16 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 		/* See comment above about pathkeys vs. "varno 0" Vars */
 		papath->pathkeys = NIL;
 
+		/*
+		 * Pass the Gather row estimate explicitly.  The total Append row
+		 * count can differ from this after a constant child's partial path
+		 * is limited to one row per worker: each worker still contributes a
+		 * row, while the total path contributes only one.
+		 */
+		gather_rows = compute_gather_rows(papath);
 		gpath = (Path *)
 			create_gather_path(root, result_rel, papath,
-							   result_rel->reltarget, NULL, NULL);
+							   result_rel->reltarget, NULL, &gather_rows);
 	}
 
 	if (!op->all)
@@ -932,6 +1060,14 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 		bool		can_sort = grouping_is_sortable(groupList);
 		bool		can_hash = grouping_is_hashable(groupList);
 
+		/*
+		 * The de-duplication path shapes here use the helpers shared with
+		 * DISTINCT (see planner.h).  Note that UNION cannot call
+		 * create_final_distinct_paths() directly: its input paths are
+		 * Append/Gather paths whose output columns are varno-0 Vars without
+		 * statistics, its group count is derived from the children, and
+		 * MergeAppend is specific to set operations.
+		 */
 		/*
 		 * result_rel->rows was initialized to the total input size above,
 		 * which is the correct estimate for UNION ALL.  A UNION removes
@@ -948,33 +1084,89 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			 * Try a hash aggregate plan on 'apath'.  This is the cheapest
 			 * available path containing each append child.
 			 */
-			path = (Path *) create_agg_path(root,
-											result_rel,
-											apath,
-											result_rel->reltarget,
-											AGG_HASHED,
-											AGGSPLIT_SIMPLE,
-											groupList,
-											NIL,
-											NULL,
-											dNumChildGroups);
+			path = create_dedup_hashagg_path(root, result_rel, apath,
+											 result_rel->reltarget,
+											 groupList, dNumChildGroups);
 			add_path(result_rel, path);
 
 			/* Try hash aggregate on the Gather path, if valid */
 			if (gpath != NULL)
 			{
 				/* Hashed aggregate plan --- no sort needed */
-				path = (Path *) create_agg_path(root,
-												result_rel,
-												gpath,
-												result_rel->reltarget,
-												AGG_HASHED,
-												AGGSPLIT_SIMPLE,
-												groupList,
-												NIL,
-												NULL,
-												dNumChildGroups);
+				path = create_dedup_hashagg_path(root, result_rel, gpath,
+												 result_rel->reltarget,
+												 groupList,
+												 dNumChildGroups);
 				add_path(result_rel, path);
+			}
+
+			/*
+			 * Try deduplicating inside each worker before gathering: the same
+			 * shape DISTINCT uses for parallel deduplication.  With
+			 * enable_hashagg off, cost_agg marks this path as disabled, so it
+			 * is only chosen when no enabled alternative exists.
+			 *
+			 * When the group estimate is unreliable (default statistics or
+			 * the multi-column correlation clamp), decide whether the worst
+			 * case is dangerous.  The worst case is one group per input row.
+			 * If even that hash table fits in hash_mem, keep the normal
+			 * estimate and let add_path() decide.  Otherwise cost the path
+			 * with the worst-case group count, which makes it lose unless it
+			 * is the only alternative.  This follows the same memory-fit
+			 * policy that create_setop_path() uses for HashSetOp.
+			 *
+			 * This is conservative: the clamp can also fire on a correlated
+			 * low-cardinality key whose raw estimate was a harmless
+			 * overestimate.  Without extended statistics we cannot tell those
+			 * cases apart; users can enable the optimization by creating
+			 * extended statistics on the dedup key.
+			 */
+			if (papath != NULL &&
+				papath->parallel_workers > 0 &&
+				dNumChildGroups > 0)
+			{
+				RelOptInfo *partial_rel;
+				double		dNumPartialGroups;
+
+				/*
+				 * A worker cannot produce more groups than it has input rows,
+				 * and cannot exceed the union-wide estimate.
+				 */
+				if (dNumChildGroupsUnreliable)
+				{
+					Size		hashsize;
+
+					/*
+					 * The worker hash table holds only this worker's rows, so
+					 * use the per-worker input estimate.  The SetOp per-group
+					 * allowance is conservative for a grouping-only HashAgg,
+					 * but keeps the gate on the safe side for near-unique
+					 * keys.
+					 */
+					hashsize = EstimateSetOpHashTableSpace(papath->rows,
+														   papath->pathtarget->width);
+					if (hashsize < get_hash_memory_limit())
+						dNumPartialGroups = Min(dNumChildGroups, papath->rows);
+					else
+						dNumPartialGroups = papath->rows;
+				}
+				else
+					dNumPartialGroups = Min(dNumChildGroups, papath->rows);
+
+				partial_rel = create_partial_dedup_rel(root,
+													   UPPERREL_PARTIAL_SETOP,
+													   result_rel,
+													   result_rel->relids,
+													   result_rel->reltarget);
+				add_partial_dedup_hash_path(root, partial_rel, papath,
+											groupList, dNumPartialGroups,
+											can_hash);
+
+				finish_partial_dedup_rel(root, result_rel, NULL,
+										 partial_rel,
+										 UPPERREL_PARTIAL_SETOP, false);
+				add_final_dedup_hash_paths(root, partial_rel, result_rel,
+										   groupList, dNumChildGroups);
 			}
 		}
 
@@ -1146,12 +1338,12 @@ generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
 	 */
 	if (lrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, lrel, lpath_trivial_tlist, lpath_tlist,
-								nonunion_pathkeys, &dLeftGroups);
+								nonunion_pathkeys, &dLeftGroups, NULL);
 	else
 		dLeftGroups = lrel->rows;
 	if (rrel->rtekind == RTE_SUBQUERY)
 		build_setop_child_paths(root, rrel, rpath_trivial_tlist, rpath_tlist,
-								nonunion_pathkeys, &dRightGroups);
+								nonunion_pathkeys, &dRightGroups, NULL);
 	else
 		dRightGroups = rrel->rows;
 
