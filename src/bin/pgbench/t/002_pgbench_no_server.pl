@@ -873,5 +873,59 @@ pgbench(
 	[qr{^$}],
 	'pgbench multiple --config files override duration with transactions and groups with builtin_weight');
 
+# --log-db option errors and .pgbench.json configuration round-trip
+pgbench(
+	'--log-db-unlogged=invalid_mode',
+	1,
+	[qr{^$}],
+	[qr{invalid --log-db-unlogged mode "invalid_mode"}],
+	'pgbench option error: bad --log-db-unlogged');
+
+pgbench(
+	'--log-db-mode=invalid_mode',
+	1,
+	[qr{^$}],
+	[qr{invalid --log-db-mode "invalid_mode"}],
+	'pgbench option error: bad --log-db-mode');
+
+my $logdb_cfg = "$sub_dir/logdb_test.pgbench.json";
+append_to_file(
+	$logdb_cfg, qq{{
+  "suite": "logdb-config-test",
+  "log_db": "dbname=telemetry_db",
+  "log_db_unlogged": "all",
+  "log_db_mode": "deferred",
+  "log_db_schema": "bench_telemetry",
+  "log_db_index": true,
+  "run_label": "baseline_v1"
+}
+});
+
+pgbench(
+	"--config=$logdb_cfg --dump-config=-",
+	0,
+	[
+		qr{"log_db": "dbname=telemetry_db"},
+		qr{"log_db_unlogged": "all"},
+		qr{"log_db_mode": "deferred"},
+		qr{"log_db_schema": "bench_telemetry"},
+		qr{"log_db_index": true},
+		qr{"run_label": "baseline_v1"}
+	],
+	[qr{^$}],
+	'pgbench --config log_db keys and --dump-config round-trip');
+
+pgbench(
+	"--config=$logdb_cfg --log-db-unlogged=off --log-db-mode=stream --run-label=override_v2 --dump-config=-",
+	0,
+	[
+		qr{"log_db_unlogged": "off"},
+		qr{"log_db_mode": "stream"},
+		qr{"run_label": "override_v2"}
+	],
+	[qr{^$}],
+	'pgbench CLI flags override --config log_db settings');
+
 done_testing();
+
 

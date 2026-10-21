@@ -3285,8 +3285,132 @@ for my $db (qw(wl_pgbench_b wl_pgbench_c wl_pgbench_e wl_pgbench_h wl_pgbench_ds
 	$node->safe_psql('postgres', "DROP DATABASE $db;");
 }
 
+# 8. Direct PostgreSQL Database Logging & Reporting (--log-db)
+$node->safe_psql('postgres', 'CREATE DATABASE pgbench_telemetry_test;');
+my $log_db_connstr = 'dbname=pgbench_telemetry_test';
+
+# Run 1: stream mode, --log-db-unlogged=stream (default), -P 1, -l (no local log file without --log-prefix),
+# named recall metrics, SLA pass, --log-db-index, --run-label=tap_run_1
+$node->pgbench(
+	"-n -c 2 -j 2 -t 5 -P 1 -l "
+	  . "--log-db=$log_db_connstr --log-db-mode=stream --log-db-index "
+	  . "--run-label=tap_run_1 --sla=r10:recall>=0.5 --sla=total:p95<=60s",
+	0,
+	[
+		qr{processed: 10/10},
+		qr{SLA r10:r10:recall >= 0\.5000: actual = 0\.7500 \[PASS\]},
+	],
+	[],
+	'pgbench --log-db stream mode with -P 1, -l, recall, SLA pass, and --log-db-index',
+	{
+		'001_pgbench_logdb_stream' => q{
+\record_recall r10 0.75
+SELECT 1;
+}
+	});
+
+is(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT status || ':' || exit_code || ':' || transactions_cnt || ':' || coalesce(run_label,'') FROM pgbench_runs WHERE run_id = 1;"),
+	'completed:0:10:tap_run_1',
+	'pgbench_runs row 1 finalized with status=completed, exit_code=0, transactions_cnt=10, run_label=tap_run_1');
+is(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT count(*) FROM pgbench_tx_log WHERE run_id = 1;"),
+	'10',
+	'pgbench_tx_log streamed all 10 transaction rows in stream mode');
+is(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT count(*) FROM pgbench_run_recalls WHERE run_id = 1 AND metric_name = 'r10';"),
+	'2',
+	'pgbench_run_recalls recorded r10 metric for overall and script scopes');
+is(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT count(*) FROM pgbench_run_slas WHERE run_id = 1 AND passed;"),
+	'2',
+	'pgbench_run_slas recorded 2 passing SLA rules');
+
+# Run 2: deferred mode, -l --aggregate-interval=1 (testing trailing partial interval flush at thread exit!),
+# --run-label=tap_run_2, and SLA failure (status = 'sla_failed', exit_code = 1)
+$node->pgbench(
+	"-n -c 1 -j 1 -t 4 -l --aggregate-interval=1 "
+	  . "--log-db=$log_db_connstr --log-db-mode=deferred "
+	  . "--run-label=tap_run_2 --sla=recall>=0.99",
+	1,
+	[
+		qr{processed: 4/4},
+		qr{SLA total:recall >= 0\.9900: actual = 0\.5000 \[FAIL\]},
+	],
+	[
+		qr{One or more SLA compliance checks failed},
+	],
+	'pgbench --log-db deferred mode with --aggregate-interval=1 partial flush and SLA failure',
+	{
+		'001_pgbench_logdb_deferred' => q{
+\record_recall 0.50
+SELECT 1;
+}
+	});
+
+is(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT status || ':' || exit_code || ':' || transactions_cnt FROM pgbench_runs WHERE run_id = 2;"),
+	'sla_failed:1:4',
+	'pgbench_runs row 2 finalized with status=sla_failed, exit_code=1');
+cmp_ok(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT coalesce(sum(cnt), 0) FROM pgbench_agg_log WHERE run_id = 2;"),
+	'==', 4,
+	'pgbench_agg_log flushed all 4 aggregated transactions including trailing partial interval');
+
+# Verify views, all 5 overloaded reporting SRFs, and pgbench_viewer_payload_json
+is(
+	$node->safe_psql('pgbench_telemetry_test', "SELECT count(*) FROM pgbench_runs_v;"),
+	'2',
+	'pgbench_runs_v returns both runs');
+like(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT string_agg(section || ':' || metric, ',') FROM pgbench_show_run('tap_run_1');"),
+	qr/1\. Run Info:run_id.*2\. Overall Metrics:tps.*5\. Recall & Aging:avg_recall.*7\. SLA Verifications/s,
+	'pgbench_show_run(text) returns Run Info, Overall Metrics, Recall & Aging, and SLA Verifications sections');
+like(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT string_agg(metric, ',') FROM pgbench_compare_runs('tap_run_1', 'tap_run_2');"),
+	qr/tps.*latency_avg_ms/,
+	'pgbench_compare_runs(text, text) compares runs by label');
+like(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT string_agg(metric, ',') FROM pgbench_compare_runs(ARRAY[1::bigint, 2::bigint]);"),
+	qr/tps.*latency_avg_ms/,
+	'pgbench_compare_runs(bigint[]) compares N runs');
+like(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT pgbench_viewer_payload_json('overview', 1::bigint, 1::bigint, 2::bigint, ARRAY[1::bigint, 2::bigint], 50)::text;"),
+	qr/"compare_pair".*"selected_run".*"compare_multi"/,
+	'pgbench_viewer_payload_json returns complete single-JSON payload');
+
+# Run 3: custom --log-db-schema=custom_telem and --log-db-unlogged=off (all tables LOGGED 'p')
+$node->pgbench(
+	"-n -t 2 --log-db=$log_db_connstr --log-db-schema=custom_telem --log-db-unlogged=off --run-label=schema_logged",
+	0,
+	[qr{processed: 2/2}],
+	[qr{^$}],
+	'pgbench --log-db with custom schema and --log-db-unlogged=off',
+	{
+		'001_pgbench_logdb_schema' => q{SELECT 1;}
+	});
+
+is(
+	$node->safe_psql('pgbench_telemetry_test',
+		"SELECT DISTINCT c.relpersistence FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'custom_telem' AND c.relkind = 'r';"),
+	'p',
+	'all telemetry tables in custom_telem have relpersistence = p when --log-db-unlogged=off');
+
+$node->safe_psql('postgres', 'DROP DATABASE pgbench_telemetry_test;');
+
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
 $node->stop;
 done_testing();
+
 

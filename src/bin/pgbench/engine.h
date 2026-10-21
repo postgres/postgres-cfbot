@@ -18,6 +18,7 @@
 #include "common/pg_prng.h"
 #include "libpq-fe.h"
 #include "pgbench.h"
+#include "pqexpbuffer.h"
 #include "stats.h"
 #include "variable.h"
 
@@ -131,6 +132,16 @@ typedef struct
 	StatsData	stats;
 	int64		latency_late;	/* count executed but late transactions */
 	int			wakeup_pipe[2]; /* non-blocking self-pipe for watermark wakeups */
+
+	/* Direct database logging (--log-db) per-thread state */
+	PGconn	   *log_conn;		/* dedicated COPY connection to --log-db */
+	PQExpBufferData log_buf;	/* 64 KB batch buffer for COPY rows */
+	int64		log_buf_rows;	/* number of rows buffered in log_buf */
+	int64		log_db_dropped_rows;	/* rows dropped if log_conn fails */
+	FILE	   *log_spool_fp;	/* local spool file in deferred mode */
+	char	   *log_spool_path; /* path to local spool file in deferred mode */
+	bool		log_db_failed;	/* true if COPY stream failed mid-run */
+	pg_time_usec_t log_last_flush_us;	/* timestamp of last COPY batch flush */
 } TState;
 
 #define MAX_SLAS		64		/* max number of SLA rules */
@@ -212,6 +223,7 @@ extern const char *dbName;
 extern char *logfile_prefix;
 extern const char *progname;
 extern volatile sig_atomic_t timer_exceeded;
+extern volatile sig_atomic_t signal_aborted;
 extern pg_time_usec_t epoch_shift;
 extern pg_prng_state base_random_sequence;
 extern THREAD_BARRIER_T barrier;
@@ -223,14 +235,19 @@ extern void initRandomState(pg_prng_state *state);
 extern void resetEngineRunState(void);
 extern void resolveHostAddrOnce(void);
 extern PGconn *doConnect(void);
+extern PGconn *doConnectCustom(const char *conninfo);
 extern PGconn *doConnectAsync(const char *db_override, const char *user_override);
 extern void disconnect_all(CState *state, int length);
 extern void printVersion(PGconn *con);
+extern void evaluateSlaRules(StatsData *total, double bench_duration, bool print_stdout);
+extern void writeReportJsonObject(FILE *jfp, StatsData *total, double bench_duration,
+								  double tpmc, double qphh);
 extern void printResults(StatsData *total, pg_time_usec_t total_time,
 						 pg_time_usec_t conn_total_time,
 						 pg_time_usec_t bench_total_time,
 						 int64 latency_late);
 extern THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC threadRun(void *arg);
 extern void setalarm(int seconds);
+extern void set_abort_signals(void);
 
 #endif							/* ENGINE_H */

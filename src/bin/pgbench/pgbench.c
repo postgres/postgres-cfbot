@@ -60,6 +60,7 @@
 #include "dataset.h"
 #include "engine.h"
 #include "init.h"
+#include "logdb.h"
 #include "poller.h"
 #include "script.h"
 #include "stats.h"
@@ -145,6 +146,11 @@ usage(void)
 		   "  --group=SPEC             define a client group (name=...,clients=...,threads=...,\n"
 		   "                           file=...,builtin=...,sequential=...,rate=...)\n"
 		   "  --json-report=FILENAME   write structured JSON benchmark report to FILENAME\n"
+		   "  --log-db=CONNINFO        persist telemetry and reports to PostgreSQL (\"self\" or conninfo)\n"
+		   "  --log-db-index           build post-run indexes on pgbench_tx_log and pgbench_agg_log\n"
+		   "  --log-db-mode=MODE       database logging mode: stream|deferred (default: stream)\n"
+		   "  --log-db-schema=SCHEMA   target schema for --log-db tables and functions (default: public)\n"
+		   "  --log-db-unlogged[=MODE] table persistence for --log-db: stream|all|off (default: stream)\n"
 		   "  --log-prefix=PREFIX      prefix for transaction time log file\n"
 		   "                           (default: \"pgbench_log\")\n"
 		   "  --max-concurrent-sessions=NUM\n"
@@ -156,6 +162,7 @@ usage(void)
 		   "  --replay=FILENAME        replay timestamped SQL trace from CSV file\n"
 		   "  --replay-speed=FACTOR    scale relative timestamps in \\wait_until (default: 1.0)\n"
 		   "  --reservoir=NAME:CAP     create a shared bounded reservoir of capacity CAP\n"
+		   "  --run-label=LABEL        human-readable label for this benchmark run\n"
 		   "  --sampling-rate=NUM      fraction of transactions to log (e.g., 0.01 for 1%%)\n"
 		   "  --show-script=NAME       show builtin script code, then exit\n"
 		   "  --sla=SPEC               define SLA threshold ([scope:]metric(<=|>=)val[unit])\n"
@@ -782,6 +789,12 @@ main(int argc, char **argv)
 		{"ground-truth-table", required_argument, NULL, 32},
 		{"config", required_argument, NULL, 33},
 		{"dump-config", required_argument, NULL, 34},
+		{"log-db", required_argument, NULL, 35},
+		{"log-db-unlogged", optional_argument, NULL, 36},
+		{"log-db-mode", required_argument, NULL, 37},
+		{"log-db-schema", required_argument, NULL, 38},
+		{"log-db-index", no_argument, NULL, 39},
+		{"run-label", required_argument, NULL, 40},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -1298,6 +1311,48 @@ main(int argc, char **argv)
 				pg_free(dump_config_file);
 				dump_config_file = pg_strdup(optarg);
 				break;
+			case 35:			/* log-db */
+				benchmarking_option_set = true;
+				pg_free(log_db_conninfo);
+				log_db_conninfo = pg_strdup(optarg);
+				break;
+			case 36:			/* log-db-unlogged */
+				{
+					const char *val = optarg;
+
+					benchmarking_option_set = true;
+					if (val == NULL && optind < argc &&
+						(pg_strcasecmp(argv[optind], "stream") == 0 ||
+						 pg_strcasecmp(argv[optind], "all") == 0 ||
+						 pg_strcasecmp(argv[optind], "off") == 0 ||
+						 pg_strcasecmp(argv[optind], "true") == 0 ||
+						 pg_strcasecmp(argv[optind], "false") == 0))
+					{
+						val = argv[optind++];
+					}
+					parseLogDbUnloggedMode(val);
+				}
+				break;
+			case 37:			/* log-db-mode */
+				benchmarking_option_set = true;
+				parseLogDbMode(optarg);
+				break;
+			case 38:			/* log-db-schema */
+				benchmarking_option_set = true;
+				if (optarg[0] == '\0')
+					pg_fatal("--log-db-schema must not be empty");
+				pg_free(log_db_schema);
+				log_db_schema = pg_strdup(optarg);
+				break;
+			case 39:			/* log-db-index */
+				benchmarking_option_set = true;
+				log_db_index = true;
+				break;
+			case 40:			/* run-label */
+				benchmarking_option_set = true;
+				pg_free(run_label);
+				run_label = pg_strdup(optarg);
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -1386,8 +1441,9 @@ main(int argc, char **argv)
 	if (total_weight == 0 && !is_init_mode && num_copy_dataset_specs == 0)
 		pg_fatal("total script weight must not be zero");
 
-	/* show per script stats if several scripts, groups, SLAs, or JSON report are used */
-	if (num_scripts > 1 || num_groups > 0 || num_slas > 0 || json_report_file != NULL)
+	/* show per script stats if several scripts, groups, SLAs, JSON report, or --log-db are used */
+	if (num_scripts > 1 || num_groups > 0 || num_slas > 0 ||
+		json_report_file != NULL || log_db_conninfo != NULL)
 		per_script_stats = true;
 
 	/*
@@ -1715,6 +1771,9 @@ main(int argc, char **argv)
 	}
 	PQfinish(con);
 
+	if (log_db_conninfo != NULL)
+		logDbBootstrapAndStartRun();
+
 	/* set up thread data structures */
 	threads = pg_malloc_array(TState, nthreads);
 	nclients_dealt = 0;
@@ -1782,6 +1841,8 @@ main(int argc, char **argv)
 	/* set alarm if duration is specified. */
 	if (duration > 0)
 		setalarm(duration);
+	if (log_db_conninfo != NULL)
+		set_abort_signals();
 
 	errno = THREAD_BARRIER_INIT(&barrier, nthreads);
 	if (errno != 0)
@@ -1848,12 +1909,22 @@ main(int argc, char **argv)
 	 * here encompasses all transactions so that tps shown is somehow slightly
 	 * underestimated.
 	 */
-	printResults(&stats, pg_time_now() - bench_start, conn_total_duration,
-				 bench_start - start_time, latency_late);
+	{
+		pg_time_usec_t total_time_us = pg_time_now() - bench_start;
+
+		printResults(&stats, total_time_us, conn_total_duration,
+					 bench_start - start_time, latency_late);
+
+		if (exit_code == 0 && sla_failed)
+			exit_code = 1;
+
+		if (log_db_conninfo != NULL)
+			logDbFinalizeRun(&stats, total_time_us, threads, exit_code);
+	}
 
 	THREAD_BARRIER_DESTROY(&barrier);
 
-	if (exit_code != 0)
+	if (exit_code == 2)
 		pg_log_error("Run was aborted; the above results are incomplete.");
 	else if (sla_failed)
 	{

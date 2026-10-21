@@ -29,6 +29,7 @@
 #include "engine.h"
 #include "fe_utils/string_utils.h"
 #include "init.h"
+#include "logdb.h"
 #include "poller.h"
 #include "script.h"
 #include "stats.h"
@@ -120,6 +121,7 @@ const char *progname;
 
 volatile sig_atomic_t timer_exceeded = false;	/* flag from signal
 														 * handler */
+volatile sig_atomic_t signal_aborted = false;	/* SIGINT/SIGTERM received */
 
 /*
  * For displaying Unix epoch timestamps, as some time functions may have
@@ -161,6 +163,7 @@ resetEngineRunState(void)
 	__atomic_store_n(&aborted_clients_count, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&active_sessions_count, 0, __ATOMIC_RELEASE);
 	timer_exceeded = false;
+	signal_aborted = false;
 }
 
 /*
@@ -255,6 +258,77 @@ doConnect(void)
 	} while (new_pass);
 
 	/* check to see that the backend connection was successfully made */
+	if (PQstatus(conn) == CONNECTION_BAD)
+	{
+		pg_log_error("%s", PQerrorMessage(conn));
+		PQfinish(conn);
+		return NULL;
+	}
+
+	return conn;
+}
+
+/*
+ * Set up a connection using a custom conninfo / URI / dbname string,
+ * inheriting host/port/user/password defaults unless overridden in conninfo.
+ */
+PGconn *
+doConnectCustom(const char *conninfo)
+{
+	PGconn	   *conn;
+	bool		new_pass;
+	const char *eff_db = (conninfo != NULL && *conninfo != '\0') ? conninfo : dbName;
+	bool		is_simple_dbname = (eff_db != NULL &&
+									strchr(eff_db, '=') == NULL &&
+									strncmp(eff_db, "postgres://", 11) != 0 &&
+									strncmp(eff_db, "postgresql://", 13) != 0);
+
+	do
+	{
+		const char *keywords[PARAMS_ARRAY_SIZE];
+		const char *values[PARAMS_ARRAY_SIZE];
+		int			k = 0;
+
+		keywords[k] = "host";
+		values[k++] = pghost;
+		if (is_simple_dbname && resolved_hostaddr != NULL)
+		{
+			keywords[k] = "hostaddr";
+			values[k++] = resolved_hostaddr;
+		}
+		keywords[k] = "port";
+		values[k++] = pgport;
+		keywords[k] = "user";
+		values[k++] = username;
+		keywords[k] = "password";
+		values[k++] = saved_password;
+		keywords[k] = "dbname";
+		values[k++] = eff_db;
+		keywords[k] = "fallback_application_name";
+		values[k++] = progname;
+		keywords[k] = NULL;
+		values[k] = NULL;
+
+		new_pass = false;
+
+		conn = PQconnectdbParams(keywords, values, true);
+
+		if (!conn)
+		{
+			pg_log_error("connection to database \"%s\" failed", eff_db);
+			return NULL;
+		}
+
+		if (PQstatus(conn) == CONNECTION_BAD &&
+			PQconnectionNeedsPassword(conn) &&
+			!saved_password)
+		{
+			PQfinish(conn);
+			saved_password = simple_prompt("Password: ", false);
+			new_pass = true;
+		}
+	} while (new_pass);
+
 	if (PQstatus(conn) == CONNECTION_BAD)
 	{
 		pg_log_error("%s", PQerrorMessage(conn));
@@ -2086,7 +2160,7 @@ doLog(TState *thread, CState *st,
 	 * Skip the log entry if sampling is enabled and this row doesn't belong
 	 * to the random sample.
 	 */
-	if (sample_rate != 0.0 &&
+	if (st != NULL && sample_rate != 0.0 &&
 		pg_prng_double(&thread->ts_sample_rs) > sample_rate)
 		return;
 
@@ -2114,78 +2188,114 @@ doLog(TState *thread, CState *st,
 			int64		retried = 0;
 			int64		retries = 0;
 
-			/* print aggregated report to logfile */
-			fprintf(logfile, INT64_FORMAT " " INT64_FORMAT " %.0f %.0f %.0f %.0f",
-					agg->start_time / 1000000,	/* seconds since Unix epoch */
-					agg->cnt,
-					agg->latency.sum,
-					agg->latency.sum2,
-					agg->latency.min,
-					agg->latency.max);
-
-			if (has_throttle)
+			if (logfile != NULL)
 			{
-				lag_sum = agg->lag.sum;
-				lag_sum2 = agg->lag.sum2;
-				lag_min = agg->lag.min;
-				lag_max = agg->lag.max;
+				/* print aggregated report to logfile */
+				fprintf(logfile, INT64_FORMAT " " INT64_FORMAT " %.0f %.0f %.0f %.0f",
+						agg->start_time / 1000000,	/* seconds since Unix epoch */
+						agg->cnt,
+						agg->latency.sum,
+						agg->latency.sum2,
+						agg->latency.min,
+						agg->latency.max);
+
+				if (has_throttle)
+				{
+					lag_sum = agg->lag.sum;
+					lag_sum2 = agg->lag.sum2;
+					lag_min = agg->lag.min;
+					lag_max = agg->lag.max;
+				}
+				fprintf(logfile, " %.0f %.0f %.0f %.0f",
+						lag_sum,
+						lag_sum2,
+						lag_min,
+						lag_max);
+
+				if (latency_limit)
+					cnt_skipped = agg->cnt_skipped;
+				fprintf(logfile, " " INT64_FORMAT, cnt_skipped);
+
+				if (max_tries != 1)
+				{
+					retried = agg->retried;
+					retries = agg->retries;
+				}
+				fprintf(logfile, " " INT64_FORMAT " " INT64_FORMAT, retried, retries);
+
+				if (failures_detailed)
+				{
+					serialization_failures = agg->serialization_failures;
+					deadlock_failures = agg->deadlock_failures;
+					other_sql_failures = agg->other_sql_failures;
+				}
+				fprintf(logfile, " " INT64_FORMAT " " INT64_FORMAT " " INT64_FORMAT,
+						serialization_failures,
+						deadlock_failures,
+						other_sql_failures);
+
+				fputc('\n', logfile);
 			}
-			fprintf(logfile, " %.0f %.0f %.0f %.0f",
-					lag_sum,
-					lag_sum2,
-					lag_min,
-					lag_max);
 
-			if (latency_limit)
-				cnt_skipped = agg->cnt_skipped;
-			fprintf(logfile, " " INT64_FORMAT, cnt_skipped);
-
-			if (max_tries != 1)
-			{
-				retried = agg->retried;
-				retries = agg->retries;
-			}
-			fprintf(logfile, " " INT64_FORMAT " " INT64_FORMAT, retried, retries);
-
-			if (failures_detailed)
-			{
-				serialization_failures = agg->serialization_failures;
-				deadlock_failures = agg->deadlock_failures;
-				other_sql_failures = agg->other_sql_failures;
-			}
-			fprintf(logfile, " " INT64_FORMAT " " INT64_FORMAT " " INT64_FORMAT,
-					serialization_failures,
-					deadlock_failures,
-					other_sql_failures);
-
-			fputc('\n', logfile);
+			logDbRecordAggInterval(thread, agg, has_throttle);
 
 			/* reset data and move to next interval */
 			initStats(agg, next);
 		}
 
-		/* accumulate the current transaction */
-		accumStats(agg, tx_skipped, latency, lag, st->estatus, st->tries, has_throttle);
-	}
-	else
-	{
-		/* no, print raw transactions */
-		if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
-			fprintf(logfile, "%d " INT64_FORMAT " %.0f %d " INT64_FORMAT " "
-					INT64_FORMAT,
-					st->id, st->cnt, latency, st->use_file,
-					now / 1000000, now % 1000000);
-		else
-			fprintf(logfile, "%d " INT64_FORMAT " %s %d " INT64_FORMAT " "
-					INT64_FORMAT,
-					st->id, st->cnt, getResultString(tx_skipped, st->estatus, failures_detailed),
-					st->use_file, now / 1000000, now % 1000000);
+		if (st != NULL)
+		{
+			/* accumulate the current transaction */
+			accumStats(agg, tx_skipped, latency, lag, st->estatus, st->tries, has_throttle);
+			if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
+			{
+				bool		has_unnamed = false;
 
-		if (has_throttle)
-			fprintf(logfile, " %.0f", lag);
-		if (max_tries != 1)
-			fprintf(logfile, " %u", st->tries - 1);
-		fputc('\n', logfile);
+				for (int r = 0; r < st->txn_recall_count; r++)
+				{
+					if (st->txn_recall_names[r][0] == '\0')
+					{
+						addToRecallStats(agg, st->txn_recalls[r]);
+						has_unnamed = true;
+					}
+				}
+				if (!has_unnamed && st->txn_recall_count > 0)
+					addToRecallStats(agg, st->txn_recalls[0]);
+				agg->validation_passed += st->txn_validation_passed;
+				agg->validation_failed += st->txn_validation_failed;
+			}
+		}
+		else if (agg->cnt > 0 || agg->cnt_skipped > 0 || getFailures(agg) > 0)
+		{
+			logDbRecordAggInterval(thread, agg, has_throttle);
+			initStats(agg, next);
+		}
+	}
+	else if (st != NULL)
+	{
+		if (logfile != NULL)
+		{
+			/* no, print raw transactions */
+			if (!tx_skipped && st->estatus == ESTATUS_NO_ERROR)
+				fprintf(logfile, "%d " INT64_FORMAT " %.0f %d " INT64_FORMAT " "
+						INT64_FORMAT,
+						st->id, st->cnt, latency, st->use_file,
+						now / 1000000, now % 1000000);
+			else
+				fprintf(logfile, "%d " INT64_FORMAT " %s %d " INT64_FORMAT " "
+						INT64_FORMAT,
+						st->id, st->cnt, getResultString(tx_skipped, st->estatus, failures_detailed),
+						st->use_file, now / 1000000, now % 1000000);
+
+			if (has_throttle)
+				fprintf(logfile, " %.0f", lag);
+			if (max_tries != 1)
+				fprintf(logfile, " %u", st->tries - 1);
+			fputc('\n', logfile);
+		}
+
+		logDbRecordTransaction(thread, st, now, tx_skipped, latency, lag,
+							   has_throttle || st->has_scheduled_time);
 	}
 }
 
@@ -2207,7 +2317,8 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	bool		has_pacing = (st->has_keying_time || st->has_think_time);
 	bool		detailed = progress || has_schedule || latency_limit ||
 		use_log || per_script_stats || num_groups > 0 || num_slas > 0 ||
-		json_report_file != NULL || has_pacing || st->txn_recall_count > 0 ||
+		json_report_file != NULL || log_db_conninfo != NULL ||
+		has_pacing || st->txn_recall_count > 0 ||
 		st->txn_validation_passed > 0 || st->txn_validation_failed > 0;
 
 	if (detailed && !tx_skipped && st->estatus == ESTATUS_NO_ERROR)
@@ -2405,6 +2516,9 @@ printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
 				retried, cur.retries - last->retries);
 	fprintf(stderr, "\n");
 
+	logDbRecordProgress(PG_TIME_GET_DOUBLE(now + epoch_shift),
+						total_run, tps, latency, stdev, lag, failures);
+
 	*last = cur;
 	*last_report = now;
 }
@@ -2484,6 +2598,617 @@ fprintJsonString(FILE *fp, const char *str)
 		}
 	}
 	fputc('"', fp);
+}
+
+/*
+ * Evaluate SLA compliance rules against aggregated statistics, optionally
+ * printing each check to stdout.
+ */
+void
+evaluateSlaRules(StatsData *total, double bench_duration, bool print_stdout)
+{
+	if (num_slas <= 0)
+		return;
+
+	if (print_stdout)
+		printf("SLA compliance:\n");
+
+	for (int k = 0; k < num_slas; k++)
+	{
+		SlaRule    *rule = &sla_rules[k];
+		StatsData	matched;
+		bool		found = false;
+		const char *target_name = rule->target;
+		const char *op_str = (rule->op == SLA_OP_GE) ? ">=" : "<=";
+
+		if (pg_strncasecmp(target_name, "group:", 6) == 0)
+			target_name += 6;
+		else if (pg_strncasecmp(target_name, "script:", 7) == 0)
+			target_name += 7;
+
+		initStats(&matched, 0);
+
+		if (pg_strcasecmp(target_name, "total") == 0 ||
+			pg_strcasecmp(target_name, "all") == 0 ||
+			strcmp(target_name, "*") == 0)
+		{
+			mergeStats(&matched, total);
+			found = true;
+		}
+		else
+		{
+			for (int g = 0; g < num_groups; g++)
+			{
+				if (strcmp(client_groups[g].name, target_name) == 0)
+				{
+					mergeStats(&matched, &client_groups[g].stats);
+					found = true;
+				}
+			}
+			if (!found)
+			{
+				for (int i = 0; i < num_scripts; i++)
+				{
+					if (strcmp(sql_script[i].desc, target_name) == 0 ||
+						strstr(sql_script[i].desc, target_name) != NULL)
+					{
+						mergeStats(&matched,
+								   per_script_stats ? &sql_script[i].stats : total);
+						found = true;
+					}
+				}
+			}
+			if (!found && rule->named_metric != NULL &&
+				(rule->metric == SLA_METRIC_RECALL_AVG || rule->metric == SLA_METRIC_RECALL_PCT))
+			{
+				if (findNamedRecallStats(total, rule->named_metric) != NULL)
+				{
+					mergeStats(&matched, total);
+					found = true;
+				}
+			}
+		}
+
+		switch (rule->metric)
+		{
+			case SLA_METRIC_LATENCY_PCT:
+				rule->evaluated = (found && matched.hist_count > 0);
+				rule->actual_usec = rule->evaluated ?
+					getLatencyPercentile(&matched, rule->percentile) : 0.0;
+				rule->actual_val = 0.001 * rule->actual_usec;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_LE) ?
+					 (rule->actual_usec <= rule->threshold_usec) :
+					 (rule->actual_usec >= rule->threshold_usec));
+				if (print_stdout)
+					printf(" - SLA %s:p%g %s %.3f ms: actual = %.3f ms [%s]\n",
+						   rule->target,
+						   rule->percentile,
+						   op_str,
+						   0.001 * rule->threshold_usec,
+						   0.001 * rule->actual_usec,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_LATENCY_AVG:
+				rule->evaluated = (found && matched.latency.count > 0);
+				rule->actual_usec = rule->evaluated ?
+					(matched.latency.sum / matched.latency.count) : 0.0;
+				rule->actual_val = 0.001 * rule->actual_usec;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_LE) ?
+					 (rule->actual_usec <= rule->threshold_usec) :
+					 (rule->actual_usec >= rule->threshold_usec));
+				if (print_stdout)
+					printf(" - SLA %s:avg %s %.3f ms: actual = %.3f ms [%s]\n",
+						   rule->target,
+						   op_str,
+						   0.001 * rule->threshold_usec,
+						   0.001 * rule->actual_usec,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_LAG_PCT:
+				rule->evaluated = (found && matched.lag_hist_count > 0);
+				rule->actual_usec = rule->evaluated ?
+					getLagPercentile(&matched, rule->percentile) : 0.0;
+				rule->actual_val = 0.001 * rule->actual_usec;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_LE) ?
+					 (rule->actual_usec <= rule->threshold_usec) :
+					 (rule->actual_usec >= rule->threshold_usec));
+				if (print_stdout)
+					printf(" - SLA %s:schedule_lag:p%g %s %.3f ms: actual = %.3f ms [%s]\n",
+						   rule->target,
+						   rule->percentile,
+						   op_str,
+						   0.001 * rule->threshold_usec,
+						   0.001 * rule->actual_usec,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_ONTIME_PCT:
+				rule->evaluated = (found && matched.scheduled_count > 0);
+				rule->actual_val = rule->evaluated ?
+					(100.0 * matched.ontime_count / matched.scheduled_count) : 0.0;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_GE) ?
+					 (rule->actual_val >= rule->threshold_val) :
+					 (rule->actual_val <= rule->threshold_val));
+				if (print_stdout)
+					printf(" - SLA %s:ontime_pct %s %.2f%%: actual = %.2f%% [%s]\n",
+						   rule->target,
+						   op_str,
+						   rule->threshold_val,
+						   rule->actual_val,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_RECALL_AVG:
+				if (rule->named_metric != NULL && rule->named_metric[0] != '\0')
+				{
+					const NamedRecallStats *ns = findNamedRecallStats(&matched, rule->named_metric);
+
+					if (ns != NULL)
+					{
+						rule->evaluated = (found && ns->stats.count > 0);
+						rule->actual_val = (rule->evaluated && ns->stats.count > 0) ?
+							(ns->stats.sum / ns->stats.count) : 0.0;
+						rule->passed = rule->evaluated &&
+							((rule->op == SLA_OP_GE) ?
+							 (rule->actual_val >= rule->threshold_val) :
+							 (rule->actual_val <= rule->threshold_val));
+						if (print_stdout)
+							printf(" - SLA %s:%s:recall %s %.4f: actual = %.4f [%s]\n",
+								   rule->target,
+								   rule->named_metric,
+								   op_str,
+								   rule->threshold_val,
+								   rule->actual_val,
+								   rule->passed ? "PASS" : "FAIL");
+						break;
+					}
+				}
+				rule->evaluated = (found && matched.recall.count > 0);
+				rule->actual_val = rule->evaluated ?
+					(matched.recall.sum / matched.recall.count) : 0.0;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_GE) ?
+					 (rule->actual_val >= rule->threshold_val) :
+					 (rule->actual_val <= rule->threshold_val));
+				if (print_stdout)
+					printf(" - SLA %s:recall %s %.4f: actual = %.4f [%s]\n",
+						   rule->target,
+						   op_str,
+						   rule->threshold_val,
+						   rule->actual_val,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_RECALL_PCT:
+				if (rule->named_metric != NULL && rule->named_metric[0] != '\0')
+				{
+					const NamedRecallStats *ns = findNamedRecallStats(&matched, rule->named_metric);
+
+					if (ns != NULL)
+					{
+						rule->evaluated = (found && ns->stats.count > 0);
+						rule->actual_val = rule->evaluated ?
+							getNamedRecallPercentile(&matched, rule->named_metric, rule->percentile) : 0.0;
+						rule->passed = rule->evaluated &&
+							((rule->op == SLA_OP_GE) ?
+							 (rule->actual_val >= rule->threshold_val) :
+							 (rule->actual_val <= rule->threshold_val));
+						if (print_stdout)
+							printf(" - SLA %s:%s:recall_p%g %s %.4f: actual = %.4f [%s]\n",
+								   rule->target,
+								   rule->named_metric,
+								   rule->percentile,
+								   op_str,
+								   rule->threshold_val,
+								   rule->actual_val,
+								   rule->passed ? "PASS" : "FAIL");
+						break;
+					}
+				}
+				rule->evaluated = (found && matched.recall.count > 0);
+				rule->actual_val = rule->evaluated ?
+					getRecallPercentile(&matched, rule->percentile) : 0.0;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_GE) ?
+					 (rule->actual_val >= rule->threshold_val) :
+					 (rule->actual_val <= rule->threshold_val));
+				if (print_stdout)
+					printf(" - SLA %s:recall_p%g %s %.4f: actual = %.4f [%s]\n",
+						   rule->target,
+						   rule->percentile,
+						   op_str,
+						   rule->threshold_val,
+						   rule->actual_val,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_TPS:
+				rule->evaluated = (found && bench_duration > 0.0);
+				rule->actual_val = rule->evaluated ?
+					(matched.cnt / bench_duration) : 0.0;
+				rule->passed = rule->evaluated &&
+					((rule->op == SLA_OP_GE) ?
+					 (rule->actual_val >= rule->threshold_val) :
+					 (rule->actual_val <= rule->threshold_val));
+				if (print_stdout)
+					printf(" - SLA %s:tps %s %.2f: actual = %.2f [%s]\n",
+						   rule->target,
+						   op_str,
+						   rule->threshold_val,
+						   rule->actual_val,
+						   rule->passed ? "PASS" : "FAIL");
+				break;
+
+			case SLA_METRIC_ERROR_RATE:
+				{
+					int64		m_fail = getFailures(&matched);
+					int64		m_tot = matched.cnt + matched.cnt_skipped + m_fail;
+
+					rule->evaluated = (found && m_tot > 0);
+					rule->actual_val = rule->evaluated ?
+						(100.0 * m_fail / m_tot) : 0.0;
+					rule->passed = rule->evaluated &&
+						((rule->op == SLA_OP_LE) ?
+						 (rule->actual_val <= rule->threshold_val) :
+						 (rule->actual_val >= rule->threshold_val));
+					if (print_stdout)
+						printf(" - SLA %s:error_rate %s %.3f%%: actual = %.3f%% [%s]\n",
+							   rule->target,
+							   op_str,
+							   rule->threshold_val,
+							   rule->actual_val,
+							   rule->passed ? "PASS" : "FAIL");
+					break;
+				}
+
+			case SLA_METRIC_VALIDATION_FAILURES:
+				{
+					rule->evaluated = found;
+					rule->actual_val = (double) matched.validation_failed;
+					rule->passed = rule->evaluated &&
+						((rule->op == SLA_OP_LE) ?
+						 (rule->actual_val <= rule->threshold_val) :
+						 (rule->actual_val >= rule->threshold_val));
+					if (print_stdout)
+						printf(" - SLA %s:validation_failures %s %.0f: actual = %.0f [%s]\n",
+							   rule->target,
+							   op_str,
+							   rule->threshold_val,
+							   rule->actual_val,
+							   rule->passed ? "PASS" : "FAIL");
+					break;
+				}
+
+			case SLA_METRIC_VALIDATION_PCT:
+				{
+					int64		val_tot = matched.validation_passed + matched.validation_failed;
+
+					rule->evaluated = (found && val_tot > 0);
+					rule->actual_val = rule->evaluated ?
+						(100.0 * (double) matched.validation_passed / (double) val_tot) : 0.0;
+					rule->passed = rule->evaluated &&
+						((rule->op == SLA_OP_GE) ?
+						 (rule->actual_val >= rule->threshold_val) :
+						 (rule->actual_val <= rule->threshold_val));
+					if (print_stdout)
+						printf(" - SLA %s:validation_pct %s %.2f%%: actual = %.2f%% [%s]\n",
+							   rule->target,
+							   op_str,
+							   rule->threshold_val,
+							   rule->actual_val,
+							   rule->passed ? "PASS" : "FAIL");
+					break;
+				}
+		}
+
+		if (!rule->passed)
+			sla_failed = true;
+	}
+}
+
+/*
+ * Write the complete structured JSON benchmark report object to jfp.
+ */
+void
+writeReportJsonObject(FILE *jfp, StatsData *total, double bench_duration,
+					  double tpmc, double qphh)
+{
+	int64		failures = getFailures(total);
+	double		tps = (bench_duration > 0.0) ? (total->cnt / bench_duration) : 0.0;
+	int64		run_id = logDbGetRunId();
+
+	fprintf(jfp, "{\n");
+	if (run_id > 0)
+		fprintf(jfp, "  \"run_id\": " INT64_FORMAT ",\n", run_id);
+	if (run_label != NULL)
+	{
+		fprintf(jfp, "  \"run_label\": ");
+		fprintJsonString(jfp, run_label);
+		fprintf(jfp, ",\n");
+	}
+	fprintf(jfp, "  \"configuration\": ");
+	writeConfigJsonObject(jfp, 2, false);
+	fprintf(jfp, ",\n");
+
+	fprintf(jfp, "  \"overall\": {\n");
+	fprintf(jfp, "    \"transactions_processed\": " INT64_FORMAT ",\n", total->cnt);
+	fprintf(jfp, "    \"transactions_failed\": " INT64_FORMAT ",\n", failures);
+	fprintf(jfp, "    \"expected_rollbacks\": " INT64_FORMAT ",\n", total->expected_rollbacks);
+	fprintf(jfp, "    \"transactions_skipped\": " INT64_FORMAT ",\n", total->cnt_skipped);
+	fprintf(jfp, "    \"validation_passed\": " INT64_FORMAT ",\n", total->validation_passed);
+	fprintf(jfp, "    \"validation_failed\": " INT64_FORMAT ",\n", total->validation_failed);
+	fprintf(jfp, "    \"validation_pct\": %.4f,\n",
+			(total->validation_passed + total->validation_failed) > 0 ?
+			100.0 * (double) total->validation_passed /
+			(double) (total->validation_passed + total->validation_failed) : 100.0);
+	fprintf(jfp, "    \"duration_sec\": %.6f,\n", bench_duration);
+	fprintf(jfp, "    \"tps\": %.6f,\n", tps);
+	fprintf(jfp, "    \"latency_ms\": {\n");
+	fprintf(jfp, "      \"avg\": %.3f,\n",
+			total->latency.count > 0 ? 0.001 * total->latency.sum / total->latency.count : 0.0);
+	fprintf(jfp, "      \"min\": %.3f,\n", 0.001 * total->latency.min);
+	fprintf(jfp, "      \"max\": %.3f,\n", 0.001 * total->latency.max);
+	fprintf(jfp, "      \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(total, 50.0));
+	fprintf(jfp, "      \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(total, 90.0));
+	fprintf(jfp, "      \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(total, 95.0));
+	fprintf(jfp, "      \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(total, 99.0));
+	fprintf(jfp, "      \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(total, 99.9));
+	fprintf(jfp, "    },\n");
+	fprintf(jfp, "    \"recall\": {\n");
+	fprintf(jfp, "      \"samples\": " INT64_FORMAT ",\n", total->recall.count);
+	fprintf(jfp, "      \"avg\": %.4f,\n",
+			total->recall.count > 0 ? total->recall.sum / total->recall.count : 0.0);
+	fprintf(jfp, "      \"min\": %.4f,\n",
+			total->recall.count > 0 ? total->recall.min : 0.0);
+	fprintf(jfp, "      \"max\": %.4f,\n",
+			total->recall.count > 0 ? total->recall.max : 0.0);
+	fprintf(jfp, "      \"p5\": %.4f,\n", getRecallPercentile(total, 5.0));
+	fprintf(jfp, "      \"p50\": %.4f,\n", getRecallPercentile(total, 50.0));
+	fprintf(jfp, "      \"distribution\": {\n");
+	for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
+	{
+		if (d == RECALL_DIST10_BUCKETS - 1)
+			fprintf(jfp, "        \"0.%d-1.0\": " INT64_FORMAT "\n", d, total->recall_dist10[d]);
+		else
+			fprintf(jfp, "        \"0.%d-0.%d\": " INT64_FORMAT ",\n", d, d + 1, total->recall_dist10[d]);
+	}
+	fprintf(jfp, "      }\n");
+	if (total->recall.count >= 4 && total->q1_recall_count > 0 && total->q4_recall_count > 0)
+	{
+		double		q1_avg = total->q1_recall_sum / total->q1_recall_count;
+		double		q4_sum = 0.0;
+		double		q4_avg;
+		double		delta;
+		double		deg_pct;
+
+		for (int j = 0; j < total->q4_recall_count; j++)
+			q4_sum += total->q4_recall_ring[j];
+		q4_avg = q4_sum / total->q4_recall_count;
+		delta = q4_avg - q1_avg;
+		deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
+
+		fprintf(jfp, ",\n      \"aging_degradation\": {\n");
+		fprintf(jfp, "        \"initial_recall\": %.4f,\n", q1_avg);
+		fprintf(jfp, "        \"mature_recall\": %.4f,\n", q4_avg);
+		fprintf(jfp, "        \"delta\": %.4f,\n", delta);
+		fprintf(jfp, "        \"degradation_pct\": %.4f\n", deg_pct);
+		fprintf(jfp, "      }\n");
+	}
+	fprintf(jfp, "    }");
+	if (total->num_named_recalls > 0)
+	{
+		fprintf(jfp, ",\n    \"named_recall\": {\n");
+		for (int i = 0; i < total->num_named_recalls; i++)
+		{
+			const NamedRecallStats *ns = &total->named_recalls[i];
+			double		avg = ns->stats.count > 0 ? ns->stats.sum / ns->stats.count : 0.0;
+			double		var = ns->stats.count > 0 ? (ns->stats.sum2 / ns->stats.count) - (avg * avg) : 0.0;
+			double		stddev = (var > 0.0) ? sqrt(var) : 0.0;
+
+			fprintf(jfp, "      \"%s\": {\n", ns->name);
+			fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", ns->stats.count);
+			fprintf(jfp, "        \"avg\": %.4f,\n", avg);
+			fprintf(jfp, "        \"stddev\": %.4f,\n", stddev);
+			fprintf(jfp, "        \"min\": %.4f,\n", ns->stats.count > 0 ? ns->stats.min : 0.0);
+			fprintf(jfp, "        \"max\": %.4f,\n", ns->stats.count > 0 ? ns->stats.max : 0.0);
+			fprintf(jfp, "        \"p5\": %.4f,\n", getNamedRecallPercentile(total, ns->name, 5.0));
+			fprintf(jfp, "        \"p50\": %.4f,\n", getNamedRecallPercentile(total, ns->name, 50.0));
+			fprintf(jfp, "        \"distribution\": {\n");
+			for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
+			{
+				if (d == RECALL_DIST10_BUCKETS - 1)
+					fprintf(jfp, "          \"0.%d-1.0\": " INT64_FORMAT "\n", d, ns->dist10[d]);
+				else
+					fprintf(jfp, "          \"0.%d-0.%d\": " INT64_FORMAT ",\n", d, d + 1, ns->dist10[d]);
+			}
+			fprintf(jfp, "        }");
+			if (ns->stats.count >= 4 && ns->q1_count > 0 && ns->q4_count > 0)
+			{
+				double		q1_avg = ns->q1_sum / ns->q1_count;
+				double		q4_sum = 0.0;
+				double		q4_avg;
+				double		delta;
+				double		deg_pct;
+
+				for (int j = 0; j < ns->q4_count; j++)
+					q4_sum += ns->q4_ring[j];
+				q4_avg = q4_sum / ns->q4_count;
+				delta = q4_avg - q1_avg;
+				deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
+
+				fprintf(jfp, ",\n        \"aging_degradation\": {\n");
+				fprintf(jfp, "          \"initial_recall\": %.4f,\n", q1_avg);
+				fprintf(jfp, "          \"mature_recall\": %.4f,\n", q4_avg);
+				fprintf(jfp, "          \"delta\": %.4f,\n", delta);
+				fprintf(jfp, "          \"degradation_pct\": %.4f\n", deg_pct);
+				fprintf(jfp, "        }\n");
+			}
+			else
+				fprintf(jfp, "\n");
+			fprintf(jfp, "      }%s\n", (i + 1 < total->num_named_recalls) ? "," : "");
+		}
+		fprintf(jfp, "    }");
+	}
+	fprintf(jfp, ",\n");
+	fprintf(jfp, "    \"schedule_lag_ms\": {\n");
+	fprintf(jfp, "      \"avg\": %.3f,\n",
+			total->lag.count > 0 ? 0.001 * total->lag.sum / total->lag.count : 0.0);
+	fprintf(jfp, "      \"p50\": %.3f,\n", 0.001 * getLagPercentile(total, 50.0));
+	fprintf(jfp, "      \"p90\": %.3f,\n", 0.001 * getLagPercentile(total, 90.0));
+	fprintf(jfp, "      \"p95\": %.3f,\n", 0.001 * getLagPercentile(total, 95.0));
+	fprintf(jfp, "      \"p99\": %.3f,\n", 0.001 * getLagPercentile(total, 99.0));
+	fprintf(jfp, "      \"ontime_pct\": %.3f\n",
+			total->scheduled_count > 0 ? 100.0 * total->ontime_count / total->scheduled_count : 100.0);
+	fprintf(jfp, "    }\n");
+	fprintf(jfp, "  },\n");
+
+	fprintf(jfp, "  \"composite_metrics\": {\n");
+	fprintf(jfp, "    \"tpmC\": %.2f,\n", tpmc);
+	fprintf(jfp, "    \"QphH\": %.2f\n", qphh);
+	fprintf(jfp, "  },\n");
+
+	fprintf(jfp, "  \"groups\": [\n");
+	for (int g = 0; g < num_groups; g++)
+	{
+		ClientGroup *grp = &client_groups[g];
+		StatsData  *gs = &grp->stats;
+
+		fprintf(jfp, "    {\n");
+		fprintf(jfp, "      \"name\": ");
+		fprintJsonString(jfp, grp->name);
+		fprintf(jfp, ",\n");
+		fprintf(jfp, "      \"clients\": %d,\n", grp->nclients);
+		fprintf(jfp, "      \"threads\": %d,\n", grp->nthreads);
+		fprintf(jfp, "      \"sequential\": %s,\n", grp->sequential ? "true" : "false");
+		fprintf(jfp, "      \"rate\": %.6f,\n", grp->rate);
+		fprintf(jfp, "      \"scripts\": [\n");
+		for (int s = 0; s < grp->num_scripts; s++)
+		{
+			int			sidx = grp->script_indices[s];
+
+			fprintf(jfp, "        { ");
+			if (sql_script[sidx].builtin_name != NULL)
+			{
+				fprintf(jfp, "\"builtin\": ");
+				fprintJsonString(jfp, sql_script[sidx].builtin_name);
+			}
+			else
+			{
+				fprintf(jfp, "\"file\": ");
+				fprintJsonString(jfp, sql_script[sidx].desc);
+			}
+			fprintf(jfp, ", \"weight\": %d }%s\n",
+					sql_script[sidx].weight,
+					(s + 1 < grp->num_scripts) ? "," : "");
+		}
+		fprintf(jfp, "      ],\n");
+		fprintf(jfp, "      \"transactions_processed\": " INT64_FORMAT ",\n", gs->cnt);
+		fprintf(jfp, "      \"transactions_failed\": " INT64_FORMAT ",\n", getFailures(gs));
+		fprintf(jfp, "      \"expected_rollbacks\": " INT64_FORMAT ",\n", gs->expected_rollbacks);
+		fprintf(jfp, "      \"tps\": %.6f,\n", bench_duration > 0 ? gs->cnt / bench_duration : 0.0);
+		fprintf(jfp, "      \"latency_ms\": {\n");
+		fprintf(jfp, "        \"avg\": %.3f,\n",
+				gs->latency.count > 0 ? 0.001 * gs->latency.sum / gs->latency.count : 0.0);
+		fprintf(jfp, "        \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 50.0));
+		fprintf(jfp, "        \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 90.0));
+		fprintf(jfp, "        \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 95.0));
+		fprintf(jfp, "        \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 99.0));
+		fprintf(jfp, "        \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(gs, 99.9));
+		fprintf(jfp, "      },\n");
+		fprintf(jfp, "      \"recall\": {\n");
+		fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", gs->recall.count);
+		fprintf(jfp, "        \"avg\": %.4f,\n",
+				gs->recall.count > 0 ? gs->recall.sum / gs->recall.count : 0.0);
+		fprintf(jfp, "        \"p5\": %.4f,\n", getRecallPercentile(gs, 5.0));
+		fprintf(jfp, "        \"p50\": %.4f\n", getRecallPercentile(gs, 50.0));
+		fprintf(jfp, "      }\n");
+		fprintf(jfp, "    }%s\n", (g + 1 < num_groups) ? "," : "");
+	}
+	fprintf(jfp, "  ],\n");
+
+	fprintf(jfp, "  \"scripts\": [\n");
+	for (int i = 0; i < num_scripts; i++)
+	{
+		StatsData  *ss = per_script_stats ? &sql_script[i].stats : total;
+
+		fprintf(jfp, "    {\n");
+		fprintf(jfp, "      \"index\": %d,\n", i + 1);
+		fprintf(jfp, "      \"name\": ");
+		fprintJsonString(jfp, sql_script[i].desc);
+		fprintf(jfp, ",\n");
+		if (sql_script[i].builtin_name != NULL)
+		{
+			fprintf(jfp, "      \"builtin\": ");
+			fprintJsonString(jfp, sql_script[i].builtin_name);
+			fprintf(jfp, ",\n");
+		}
+		fprintf(jfp, "      \"weight\": %d,\n", sql_script[i].weight);
+		fprintf(jfp, "      \"transactions_processed\": " INT64_FORMAT ",\n", ss->cnt);
+		fprintf(jfp, "      \"transactions_failed\": " INT64_FORMAT ",\n", getFailures(ss));
+		fprintf(jfp, "      \"expected_rollbacks\": " INT64_FORMAT ",\n", ss->expected_rollbacks);
+		fprintf(jfp, "      \"tps\": %.6f,\n", bench_duration > 0 ? ss->cnt / bench_duration : 0.0);
+		fprintf(jfp, "      \"latency_ms\": {\n");
+		fprintf(jfp, "        \"avg\": %.3f,\n",
+				ss->latency.count > 0 ? 0.001 * ss->latency.sum / ss->latency.count : 0.0);
+		fprintf(jfp, "        \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 50.0));
+		fprintf(jfp, "        \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 90.0));
+		fprintf(jfp, "        \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 95.0));
+		fprintf(jfp, "        \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 99.0));
+		fprintf(jfp, "        \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(ss, 99.9));
+		fprintf(jfp, "      },\n");
+		fprintf(jfp, "      \"recall\": {\n");
+		fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", ss->recall.count);
+		fprintf(jfp, "        \"avg\": %.4f,\n",
+				ss->recall.count > 0 ? ss->recall.sum / ss->recall.count : 0.0);
+		fprintf(jfp, "        \"p5\": %.4f,\n", getRecallPercentile(ss, 5.0));
+		fprintf(jfp, "        \"p50\": %.4f\n", getRecallPercentile(ss, 50.0));
+		fprintf(jfp, "      }\n");
+		fprintf(jfp, "    }%s\n", (i + 1 < num_scripts) ? "," : "");
+	}
+	fprintf(jfp, "  ],\n");
+
+	fprintf(jfp, "  \"sla_verifications\": [\n");
+	for (int k = 0; k < num_slas; k++)
+	{
+		SlaRule    *rule = &sla_rules[k];
+
+		fprintf(jfp, "    {\n");
+		if (rule->raw_spec != NULL)
+		{
+			fprintf(jfp, "      \"spec\": ");
+			fprintJsonString(jfp, rule->raw_spec);
+			fprintf(jfp, ",\n");
+		}
+		fprintf(jfp, "      \"target\": ");
+		fprintJsonString(jfp, rule->target);
+		fprintf(jfp, ",\n");
+		if (rule->named_metric != NULL)
+		{
+			fprintf(jfp, "      \"named_metric\": ");
+			fprintJsonString(jfp, rule->named_metric);
+			fprintf(jfp, ",\n");
+		}
+		fprintf(jfp, "      \"percentile\": %g,\n", rule->percentile);
+		fprintf(jfp, "      \"threshold_ms\": %.3f,\n", 0.001 * rule->threshold_usec);
+		fprintf(jfp, "      \"actual_ms\": %.3f,\n", 0.001 * rule->actual_usec);
+		fprintf(jfp, "      \"threshold\": %.4f,\n",
+				(rule->metric == SLA_METRIC_LATENCY_PCT ||
+				 rule->metric == SLA_METRIC_LATENCY_AVG ||
+				 rule->metric == SLA_METRIC_LAG_PCT) ?
+				0.001 * rule->threshold_usec : rule->threshold_val);
+		fprintf(jfp, "      \"actual\": %.4f,\n", rule->actual_val);
+		fprintf(jfp, "      \"passed\": %s\n", rule->passed ? "true" : "false");
+		fprintf(jfp, "    }%s\n", (k + 1 < num_slas) ? "," : "");
+	}
+	fprintf(jfp, "  ],\n");
+	fprintf(jfp, "  \"sla_all_passed\": %s\n", sla_failed ? "false" : "true");
+	fprintf(jfp, "}\n");
 }
 
 /* print out results */
@@ -2575,7 +3300,7 @@ printResults(StatsData *total,
 			   (total->cnt > 0) ? 100.0 * latency_late / total->cnt : 0.0);
 
 	if (throttle_delay || progress || latency_limit || num_groups > 0 ||
-		num_slas > 0 || json_report_file != NULL ||
+		num_slas > 0 || json_report_file != NULL || log_db_conninfo != NULL ||
 		total->keying_time.count > 0 || total->think_time.count > 0 ||
 		total->lag_hist_count > 0 || total->recall.count > 0)
 	{
@@ -2871,295 +3596,7 @@ printResults(StatsData *total,
 		}
 
 		/* Evaluate and report SLA compliance rules */
-		if (num_slas > 0)
-		{
-			printf("SLA compliance:\n");
-			for (int k = 0; k < num_slas; k++)
-			{
-				SlaRule    *rule = &sla_rules[k];
-				StatsData	matched;
-				bool		found = false;
-				const char *target_name = rule->target;
-				const char *op_str = (rule->op == SLA_OP_GE) ? ">=" : "<=";
-
-				if (pg_strncasecmp(target_name, "group:", 6) == 0)
-					target_name += 6;
-				else if (pg_strncasecmp(target_name, "script:", 7) == 0)
-					target_name += 7;
-
-				initStats(&matched, 0);
-
-				if (pg_strcasecmp(target_name, "total") == 0 ||
-					pg_strcasecmp(target_name, "all") == 0 ||
-					strcmp(target_name, "*") == 0)
-				{
-					mergeStats(&matched, total);
-					found = true;
-				}
-				else
-				{
-					for (int g = 0; g < num_groups; g++)
-					{
-						if (strcmp(client_groups[g].name, target_name) == 0)
-						{
-							mergeStats(&matched, &client_groups[g].stats);
-							found = true;
-						}
-					}
-					if (!found)
-					{
-						for (int i = 0; i < num_scripts; i++)
-						{
-							if (strcmp(sql_script[i].desc, target_name) == 0 ||
-								strstr(sql_script[i].desc, target_name) != NULL)
-							{
-								mergeStats(&matched,
-										   per_script_stats ? &sql_script[i].stats : total);
-								found = true;
-							}
-						}
-					}
-					if (!found && rule->named_metric != NULL &&
-						(rule->metric == SLA_METRIC_RECALL_AVG || rule->metric == SLA_METRIC_RECALL_PCT))
-					{
-						if (findNamedRecallStats(total, rule->named_metric) != NULL)
-						{
-							mergeStats(&matched, total);
-							found = true;
-						}
-					}
-				}
-
-				switch (rule->metric)
-				{
-					case SLA_METRIC_LATENCY_PCT:
-						rule->evaluated = (found && matched.hist_count > 0);
-						rule->actual_usec = rule->evaluated ?
-							getLatencyPercentile(&matched, rule->percentile) : 0.0;
-						rule->actual_val = 0.001 * rule->actual_usec;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_LE) ?
-							 (rule->actual_usec <= rule->threshold_usec) :
-							 (rule->actual_usec >= rule->threshold_usec));
-						printf(" - SLA %s:p%g %s %.3f ms: actual = %.3f ms [%s]\n",
-							   rule->target,
-							   rule->percentile,
-							   op_str,
-							   0.001 * rule->threshold_usec,
-							   0.001 * rule->actual_usec,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_LATENCY_AVG:
-						rule->evaluated = (found && matched.latency.count > 0);
-						rule->actual_usec = rule->evaluated ?
-							(matched.latency.sum / matched.latency.count) : 0.0;
-						rule->actual_val = 0.001 * rule->actual_usec;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_LE) ?
-							 (rule->actual_usec <= rule->threshold_usec) :
-							 (rule->actual_usec >= rule->threshold_usec));
-						printf(" - SLA %s:avg %s %.3f ms: actual = %.3f ms [%s]\n",
-							   rule->target,
-							   op_str,
-							   0.001 * rule->threshold_usec,
-							   0.001 * rule->actual_usec,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_LAG_PCT:
-						rule->evaluated = (found && matched.lag_hist_count > 0);
-						rule->actual_usec = rule->evaluated ?
-							getLagPercentile(&matched, rule->percentile) : 0.0;
-						rule->actual_val = 0.001 * rule->actual_usec;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_LE) ?
-							 (rule->actual_usec <= rule->threshold_usec) :
-							 (rule->actual_usec >= rule->threshold_usec));
-						printf(" - SLA %s:schedule_lag:p%g %s %.3f ms: actual = %.3f ms [%s]\n",
-							   rule->target,
-							   rule->percentile,
-							   op_str,
-							   0.001 * rule->threshold_usec,
-							   0.001 * rule->actual_usec,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_ONTIME_PCT:
-						rule->evaluated = (found && matched.scheduled_count > 0);
-						rule->actual_val = rule->evaluated ?
-							(100.0 * matched.ontime_count / matched.scheduled_count) : 0.0;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_GE) ?
-							 (rule->actual_val >= rule->threshold_val) :
-							 (rule->actual_val <= rule->threshold_val));
-						printf(" - SLA %s:ontime_pct %s %.2f%%: actual = %.2f%% [%s]\n",
-							   rule->target,
-							   op_str,
-							   rule->threshold_val,
-							   rule->actual_val,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_RECALL_AVG:
-						if (rule->named_metric != NULL && rule->named_metric[0] != '\0')
-						{
-							const NamedRecallStats *ns = findNamedRecallStats(&matched, rule->named_metric);
-
-							if (ns != NULL)
-							{
-								rule->evaluated = (found && ns->stats.count > 0);
-								rule->actual_val = (rule->evaluated && ns->stats.count > 0) ?
-									(ns->stats.sum / ns->stats.count) : 0.0;
-								rule->passed = rule->evaluated &&
-									((rule->op == SLA_OP_GE) ?
-									 (rule->actual_val >= rule->threshold_val) :
-									 (rule->actual_val <= rule->threshold_val));
-								printf(" - SLA %s:%s:recall %s %.4f: actual = %.4f [%s]\n",
-									   rule->target,
-									   rule->named_metric,
-									   op_str,
-									   rule->threshold_val,
-									   rule->actual_val,
-									   rule->passed ? "PASS" : "FAIL");
-								break;
-							}
-						}
-						rule->evaluated = (found && matched.recall.count > 0);
-						rule->actual_val = rule->evaluated ?
-							(matched.recall.sum / matched.recall.count) : 0.0;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_GE) ?
-							 (rule->actual_val >= rule->threshold_val) :
-							 (rule->actual_val <= rule->threshold_val));
-						printf(" - SLA %s:recall %s %.4f: actual = %.4f [%s]\n",
-							   rule->target,
-							   op_str,
-							   rule->threshold_val,
-							   rule->actual_val,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_RECALL_PCT:
-						if (rule->named_metric != NULL && rule->named_metric[0] != '\0')
-						{
-							const NamedRecallStats *ns = findNamedRecallStats(&matched, rule->named_metric);
-
-							if (ns != NULL)
-							{
-								rule->evaluated = (found && ns->stats.count > 0);
-								rule->actual_val = rule->evaluated ?
-									getNamedRecallPercentile(&matched, rule->named_metric, rule->percentile) : 0.0;
-								rule->passed = rule->evaluated &&
-									((rule->op == SLA_OP_GE) ?
-									 (rule->actual_val >= rule->threshold_val) :
-									 (rule->actual_val <= rule->threshold_val));
-								printf(" - SLA %s:%s:recall_p%g %s %.4f: actual = %.4f [%s]\n",
-									   rule->target,
-									   rule->named_metric,
-									   rule->percentile,
-									   op_str,
-									   rule->threshold_val,
-									   rule->actual_val,
-									   rule->passed ? "PASS" : "FAIL");
-								break;
-							}
-						}
-						rule->evaluated = (found && matched.recall.count > 0);
-						rule->actual_val = rule->evaluated ?
-							getRecallPercentile(&matched, rule->percentile) : 0.0;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_GE) ?
-							 (rule->actual_val >= rule->threshold_val) :
-							 (rule->actual_val <= rule->threshold_val));
-						printf(" - SLA %s:recall_p%g %s %.4f: actual = %.4f [%s]\n",
-							   rule->target,
-							   rule->percentile,
-							   op_str,
-							   rule->threshold_val,
-							   rule->actual_val,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_TPS:
-						rule->evaluated = (found && bench_duration > 0.0);
-						rule->actual_val = rule->evaluated ?
-							(matched.cnt / bench_duration) : 0.0;
-						rule->passed = rule->evaluated &&
-							((rule->op == SLA_OP_GE) ?
-							 (rule->actual_val >= rule->threshold_val) :
-							 (rule->actual_val <= rule->threshold_val));
-						printf(" - SLA %s:tps %s %.2f: actual = %.2f [%s]\n",
-							   rule->target,
-							   op_str,
-							   rule->threshold_val,
-							   rule->actual_val,
-							   rule->passed ? "PASS" : "FAIL");
-						break;
-
-					case SLA_METRIC_ERROR_RATE:
-						{
-							int64		m_fail = getFailures(&matched);
-							int64		m_tot = matched.cnt + matched.cnt_skipped + m_fail;
-
-							rule->evaluated = (found && m_tot > 0);
-							rule->actual_val = rule->evaluated ?
-								(100.0 * m_fail / m_tot) : 0.0;
-							rule->passed = rule->evaluated &&
-								((rule->op == SLA_OP_LE) ?
-								 (rule->actual_val <= rule->threshold_val) :
-								 (rule->actual_val >= rule->threshold_val));
-							printf(" - SLA %s:error_rate %s %.3f%%: actual = %.3f%% [%s]\n",
-								   rule->target,
-								   op_str,
-								   rule->threshold_val,
-								   rule->actual_val,
-								   rule->passed ? "PASS" : "FAIL");
-							break;
-						}
-
-					case SLA_METRIC_VALIDATION_FAILURES:
-						{
-							rule->evaluated = found;
-							rule->actual_val = (double) matched.validation_failed;
-							rule->passed = rule->evaluated &&
-								((rule->op == SLA_OP_LE) ?
-								 (rule->actual_val <= rule->threshold_val) :
-								 (rule->actual_val >= rule->threshold_val));
-							printf(" - SLA %s:validation_failures %s %.0f: actual = %.0f [%s]\n",
-								   rule->target,
-								   op_str,
-								   rule->threshold_val,
-								   rule->actual_val,
-								   rule->passed ? "PASS" : "FAIL");
-							break;
-						}
-
-					case SLA_METRIC_VALIDATION_PCT:
-						{
-							int64		val_tot = matched.validation_passed + matched.validation_failed;
-
-							rule->evaluated = (found && val_tot > 0);
-							rule->actual_val = rule->evaluated ?
-								(100.0 * (double) matched.validation_passed / (double) val_tot) : 0.0;
-							rule->passed = rule->evaluated &&
-								((rule->op == SLA_OP_GE) ?
-								 (rule->actual_val >= rule->threshold_val) :
-								 (rule->actual_val <= rule->threshold_val));
-							printf(" - SLA %s:validation_pct %s %.2f%%: actual = %.2f%% [%s]\n",
-								   rule->target,
-								   op_str,
-								   rule->threshold_val,
-								   rule->actual_val,
-								   rule->passed ? "PASS" : "FAIL");
-							break;
-						}
-				}
-
-				if (!rule->passed)
-					sla_failed = true;
-			}
-		}
+		evaluateSlaRules(total, bench_duration, true);
 
 		/* Export structured JSON telemetry report if requested */
 		if (json_report_file != NULL)
@@ -3170,284 +3607,7 @@ printResults(StatsData *total,
 				pg_fatal("could not open JSON report file \"%s\": %m",
 						 json_report_file);
 
-			fprintf(jfp, "{\n");
-			fprintf(jfp, "  \"configuration\": ");
-			writeConfigJsonObject(jfp, 2, false);
-			fprintf(jfp, ",\n");
-
-			fprintf(jfp, "  \"overall\": {\n");
-			fprintf(jfp, "    \"transactions_processed\": " INT64_FORMAT ",\n", total->cnt);
-			fprintf(jfp, "    \"transactions_failed\": " INT64_FORMAT ",\n", failures);
-			fprintf(jfp, "    \"expected_rollbacks\": " INT64_FORMAT ",\n", total->expected_rollbacks);
-			fprintf(jfp, "    \"transactions_skipped\": " INT64_FORMAT ",\n", total->cnt_skipped);
-			fprintf(jfp, "    \"validation_passed\": " INT64_FORMAT ",\n", total->validation_passed);
-			fprintf(jfp, "    \"validation_failed\": " INT64_FORMAT ",\n", total->validation_failed);
-			fprintf(jfp, "    \"validation_pct\": %.4f,\n",
-					(total->validation_passed + total->validation_failed) > 0 ?
-					100.0 * (double) total->validation_passed /
-					(double) (total->validation_passed + total->validation_failed) : 100.0);
-			fprintf(jfp, "    \"duration_sec\": %.6f,\n", bench_duration);
-			fprintf(jfp, "    \"tps\": %.6f,\n", tps);
-			fprintf(jfp, "    \"latency_ms\": {\n");
-			fprintf(jfp, "      \"avg\": %.3f,\n",
-					total->latency.count > 0 ? 0.001 * total->latency.sum / total->latency.count : 0.0);
-			fprintf(jfp, "      \"min\": %.3f,\n", 0.001 * total->latency.min);
-			fprintf(jfp, "      \"max\": %.3f,\n", 0.001 * total->latency.max);
-			fprintf(jfp, "      \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(total, 50.0));
-			fprintf(jfp, "      \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(total, 90.0));
-			fprintf(jfp, "      \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(total, 95.0));
-			fprintf(jfp, "      \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(total, 99.0));
-			fprintf(jfp, "      \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(total, 99.9));
-			fprintf(jfp, "    },\n");
-			fprintf(jfp, "    \"recall\": {\n");
-			fprintf(jfp, "      \"samples\": " INT64_FORMAT ",\n", total->recall.count);
-			fprintf(jfp, "      \"avg\": %.4f,\n",
-					total->recall.count > 0 ? total->recall.sum / total->recall.count : 0.0);
-			fprintf(jfp, "      \"min\": %.4f,\n",
-					total->recall.count > 0 ? total->recall.min : 0.0);
-			fprintf(jfp, "      \"max\": %.4f,\n",
-					total->recall.count > 0 ? total->recall.max : 0.0);
-			fprintf(jfp, "      \"p5\": %.4f,\n", getRecallPercentile(total, 5.0));
-			fprintf(jfp, "      \"p50\": %.4f,\n", getRecallPercentile(total, 50.0));
-			fprintf(jfp, "      \"distribution\": {\n");
-			for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
-			{
-				if (d == RECALL_DIST10_BUCKETS - 1)
-					fprintf(jfp, "        \"0.%d-1.0\": " INT64_FORMAT "\n", d, total->recall_dist10[d]);
-				else
-					fprintf(jfp, "        \"0.%d-0.%d\": " INT64_FORMAT ",\n", d, d + 1, total->recall_dist10[d]);
-			}
-			fprintf(jfp, "      }\n");
-			if (total->recall.count >= 4 && total->q1_recall_count > 0 && total->q4_recall_count > 0)
-			{
-				double		q1_avg = total->q1_recall_sum / total->q1_recall_count;
-				double		q4_sum = 0.0;
-				double		q4_avg;
-				double		delta;
-				double		deg_pct;
-
-				for (int j = 0; j < total->q4_recall_count; j++)
-					q4_sum += total->q4_recall_ring[j];
-				q4_avg = q4_sum / total->q4_recall_count;
-				delta = q4_avg - q1_avg;
-				deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
-
-				fprintf(jfp, ",\n      \"aging_degradation\": {\n");
-				fprintf(jfp, "        \"initial_recall\": %.4f,\n", q1_avg);
-				fprintf(jfp, "        \"mature_recall\": %.4f,\n", q4_avg);
-				fprintf(jfp, "        \"delta\": %.4f,\n", delta);
-				fprintf(jfp, "        \"degradation_pct\": %.4f\n", deg_pct);
-				fprintf(jfp, "      }\n");
-			}
-			fprintf(jfp, "    }");
-			if (total->num_named_recalls > 0)
-			{
-				fprintf(jfp, ",\n    \"named_recall\": {\n");
-				for (int i = 0; i < total->num_named_recalls; i++)
-				{
-					const NamedRecallStats *ns = &total->named_recalls[i];
-					double		avg = ns->stats.count > 0 ? ns->stats.sum / ns->stats.count : 0.0;
-					double		var = ns->stats.count > 0 ? (ns->stats.sum2 / ns->stats.count) - (avg * avg) : 0.0;
-					double		stddev = (var > 0.0) ? sqrt(var) : 0.0;
-
-					fprintf(jfp, "      \"%s\": {\n", ns->name);
-					fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", ns->stats.count);
-					fprintf(jfp, "        \"avg\": %.4f,\n", avg);
-					fprintf(jfp, "        \"stddev\": %.4f,\n", stddev);
-					fprintf(jfp, "        \"min\": %.4f,\n", ns->stats.count > 0 ? ns->stats.min : 0.0);
-					fprintf(jfp, "        \"max\": %.4f,\n", ns->stats.count > 0 ? ns->stats.max : 0.0);
-					fprintf(jfp, "        \"p5\": %.4f,\n", getNamedRecallPercentile(total, ns->name, 5.0));
-					fprintf(jfp, "        \"p50\": %.4f,\n", getNamedRecallPercentile(total, ns->name, 50.0));
-					fprintf(jfp, "        \"distribution\": {\n");
-					for (int d = 0; d < RECALL_DIST10_BUCKETS; d++)
-					{
-						if (d == RECALL_DIST10_BUCKETS - 1)
-							fprintf(jfp, "          \"0.%d-1.0\": " INT64_FORMAT "\n", d, ns->dist10[d]);
-						else
-							fprintf(jfp, "          \"0.%d-0.%d\": " INT64_FORMAT ",\n", d, d + 1, ns->dist10[d]);
-					}
-					fprintf(jfp, "        }");
-					if (ns->stats.count >= 4 && ns->q1_count > 0 && ns->q4_count > 0)
-					{
-						double		q1_avg = ns->q1_sum / ns->q1_count;
-						double		q4_sum = 0.0;
-						double		q4_avg;
-						double		delta;
-						double		deg_pct;
-
-						for (int j = 0; j < ns->q4_count; j++)
-							q4_sum += ns->q4_ring[j];
-						q4_avg = q4_sum / ns->q4_count;
-						delta = q4_avg - q1_avg;
-						deg_pct = (q1_avg > 0.000001) ? (delta / q1_avg * 100.0) : 0.0;
-
-						fprintf(jfp, ",\n        \"aging_degradation\": {\n");
-						fprintf(jfp, "          \"initial_recall\": %.4f,\n", q1_avg);
-						fprintf(jfp, "          \"mature_recall\": %.4f,\n", q4_avg);
-						fprintf(jfp, "          \"delta\": %.4f,\n", delta);
-						fprintf(jfp, "          \"degradation_pct\": %.4f\n", deg_pct);
-						fprintf(jfp, "        }\n");
-					}
-					else
-						fprintf(jfp, "\n");
-					fprintf(jfp, "      }%s\n", (i + 1 < total->num_named_recalls) ? "," : "");
-				}
-				fprintf(jfp, "    }");
-			}
-			fprintf(jfp, ",\n");
-			fprintf(jfp, "    \"schedule_lag_ms\": {\n");
-			fprintf(jfp, "      \"avg\": %.3f,\n",
-					total->lag.count > 0 ? 0.001 * total->lag.sum / total->lag.count : 0.0);
-			fprintf(jfp, "      \"p50\": %.3f,\n", 0.001 * getLagPercentile(total, 50.0));
-			fprintf(jfp, "      \"p90\": %.3f,\n", 0.001 * getLagPercentile(total, 90.0));
-			fprintf(jfp, "      \"p95\": %.3f,\n", 0.001 * getLagPercentile(total, 95.0));
-			fprintf(jfp, "      \"p99\": %.3f,\n", 0.001 * getLagPercentile(total, 99.0));
-			fprintf(jfp, "      \"ontime_pct\": %.3f\n",
-					total->scheduled_count > 0 ? 100.0 * total->ontime_count / total->scheduled_count : 100.0);
-			fprintf(jfp, "    }\n");
-			fprintf(jfp, "  },\n");
-
-			fprintf(jfp, "  \"composite_metrics\": {\n");
-			fprintf(jfp, "    \"tpmC\": %.2f,\n", tpmc);
-			fprintf(jfp, "    \"QphH\": %.2f\n", qphh);
-			fprintf(jfp, "  },\n");
-
-			fprintf(jfp, "  \"groups\": [\n");
-			for (int g = 0; g < num_groups; g++)
-			{
-				ClientGroup *grp = &client_groups[g];
-				StatsData  *gs = &grp->stats;
-
-				fprintf(jfp, "    {\n");
-				fprintf(jfp, "      \"name\": ");
-				fprintJsonString(jfp, grp->name);
-				fprintf(jfp, ",\n");
-				fprintf(jfp, "      \"clients\": %d,\n", grp->nclients);
-				fprintf(jfp, "      \"threads\": %d,\n", grp->nthreads);
-				fprintf(jfp, "      \"sequential\": %s,\n", grp->sequential ? "true" : "false");
-				fprintf(jfp, "      \"rate\": %.6f,\n", grp->rate);
-				fprintf(jfp, "      \"scripts\": [\n");
-				for (int s = 0; s < grp->num_scripts; s++)
-				{
-					int			sidx = grp->script_indices[s];
-
-					fprintf(jfp, "        { ");
-					if (sql_script[sidx].builtin_name != NULL)
-					{
-						fprintf(jfp, "\"builtin\": ");
-						fprintJsonString(jfp, sql_script[sidx].builtin_name);
-					}
-					else
-					{
-						fprintf(jfp, "\"file\": ");
-						fprintJsonString(jfp, sql_script[sidx].desc);
-					}
-					fprintf(jfp, ", \"weight\": %d }%s\n",
-							sql_script[sidx].weight,
-							(s + 1 < grp->num_scripts) ? "," : "");
-				}
-				fprintf(jfp, "      ],\n");
-				fprintf(jfp, "      \"transactions_processed\": " INT64_FORMAT ",\n", gs->cnt);
-				fprintf(jfp, "      \"transactions_failed\": " INT64_FORMAT ",\n", getFailures(gs));
-				fprintf(jfp, "      \"expected_rollbacks\": " INT64_FORMAT ",\n", gs->expected_rollbacks);
-				fprintf(jfp, "      \"tps\": %.6f,\n", bench_duration > 0 ? gs->cnt / bench_duration : 0.0);
-				fprintf(jfp, "      \"latency_ms\": {\n");
-				fprintf(jfp, "        \"avg\": %.3f,\n",
-						gs->latency.count > 0 ? 0.001 * gs->latency.sum / gs->latency.count : 0.0);
-				fprintf(jfp, "        \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 50.0));
-				fprintf(jfp, "        \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 90.0));
-				fprintf(jfp, "        \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 95.0));
-				fprintf(jfp, "        \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(gs, 99.0));
-				fprintf(jfp, "        \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(gs, 99.9));
-				fprintf(jfp, "      },\n");
-				fprintf(jfp, "      \"recall\": {\n");
-				fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", gs->recall.count);
-				fprintf(jfp, "        \"avg\": %.4f,\n",
-						gs->recall.count > 0 ? gs->recall.sum / gs->recall.count : 0.0);
-				fprintf(jfp, "        \"p5\": %.4f,\n", getRecallPercentile(gs, 5.0));
-				fprintf(jfp, "        \"p50\": %.4f\n", getRecallPercentile(gs, 50.0));
-				fprintf(jfp, "      }\n");
-				fprintf(jfp, "    }%s\n", (g + 1 < num_groups) ? "," : "");
-			}
-			fprintf(jfp, "  ],\n");
-
-			fprintf(jfp, "  \"scripts\": [\n");
-			for (int i = 0; i < num_scripts; i++)
-			{
-				StatsData  *ss = per_script_stats ? &sql_script[i].stats : total;
-
-				fprintf(jfp, "    {\n");
-				fprintf(jfp, "      \"index\": %d,\n", i + 1);
-				fprintf(jfp, "      \"name\": ");
-				fprintJsonString(jfp, sql_script[i].desc);
-				fprintf(jfp, ",\n");
-				if (sql_script[i].builtin_name != NULL)
-				{
-					fprintf(jfp, "      \"builtin\": ");
-					fprintJsonString(jfp, sql_script[i].builtin_name);
-					fprintf(jfp, ",\n");
-				}
-				fprintf(jfp, "      \"weight\": %d,\n", sql_script[i].weight);
-				fprintf(jfp, "      \"transactions_processed\": " INT64_FORMAT ",\n", ss->cnt);
-				fprintf(jfp, "      \"transactions_failed\": " INT64_FORMAT ",\n", getFailures(ss));
-				fprintf(jfp, "      \"expected_rollbacks\": " INT64_FORMAT ",\n", ss->expected_rollbacks);
-				fprintf(jfp, "      \"tps\": %.6f,\n", bench_duration > 0 ? ss->cnt / bench_duration : 0.0);
-				fprintf(jfp, "      \"latency_ms\": {\n");
-				fprintf(jfp, "        \"avg\": %.3f,\n",
-						ss->latency.count > 0 ? 0.001 * ss->latency.sum / ss->latency.count : 0.0);
-				fprintf(jfp, "        \"p50\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 50.0));
-				fprintf(jfp, "        \"p90\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 90.0));
-				fprintf(jfp, "        \"p95\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 95.0));
-				fprintf(jfp, "        \"p99\": %.3f,\n", 0.001 * getLatencyPercentile(ss, 99.0));
-				fprintf(jfp, "        \"p99_9\": %.3f\n", 0.001 * getLatencyPercentile(ss, 99.9));
-				fprintf(jfp, "      },\n");
-				fprintf(jfp, "      \"recall\": {\n");
-				fprintf(jfp, "        \"samples\": " INT64_FORMAT ",\n", ss->recall.count);
-				fprintf(jfp, "        \"avg\": %.4f,\n",
-						ss->recall.count > 0 ? ss->recall.sum / ss->recall.count : 0.0);
-				fprintf(jfp, "        \"p5\": %.4f,\n", getRecallPercentile(ss, 5.0));
-				fprintf(jfp, "        \"p50\": %.4f\n", getRecallPercentile(ss, 50.0));
-				fprintf(jfp, "      }\n");
-				fprintf(jfp, "    }%s\n", (i + 1 < num_scripts) ? "," : "");
-			}
-			fprintf(jfp, "  ],\n");
-
-			fprintf(jfp, "  \"sla_verifications\": [\n");
-			for (int k = 0; k < num_slas; k++)
-			{
-				SlaRule    *rule = &sla_rules[k];
-
-				fprintf(jfp, "    {\n");
-				if (rule->raw_spec != NULL)
-				{
-					fprintf(jfp, "      \"spec\": ");
-					fprintJsonString(jfp, rule->raw_spec);
-					fprintf(jfp, ",\n");
-				}
-				fprintf(jfp, "      \"target\": ");
-				fprintJsonString(jfp, rule->target);
-				fprintf(jfp, ",\n");
-				if (rule->named_metric != NULL)
-				{
-					fprintf(jfp, "      \"named_metric\": ");
-					fprintJsonString(jfp, rule->named_metric);
-					fprintf(jfp, ",\n");
-				}
-				fprintf(jfp, "      \"percentile\": %g,\n", rule->percentile);
-				fprintf(jfp, "      \"threshold_ms\": %.3f,\n", 0.001 * rule->threshold_usec);
-				fprintf(jfp, "      \"actual_ms\": %.3f,\n", 0.001 * rule->actual_usec);
-				fprintf(jfp, "      \"threshold\": %.4f,\n",
-						(rule->metric == SLA_METRIC_LATENCY_PCT ||
-						 rule->metric == SLA_METRIC_LATENCY_AVG ||
-						 rule->metric == SLA_METRIC_LAG_PCT) ?
-						0.001 * rule->threshold_usec : rule->threshold_val);
-				fprintf(jfp, "      \"actual\": %.4f,\n", rule->actual_val);
-				fprintf(jfp, "      \"passed\": %s\n", rule->passed ? "true" : "false");
-				fprintf(jfp, "    }%s\n", (k + 1 < num_slas) ? "," : "");
-			}
-			fprintf(jfp, "  ],\n");
-			fprintf(jfp, "  \"sla_all_passed\": %s\n", sla_failed ? "false" : "true");
-			fprintf(jfp, "}\n");
+			writeReportJsonObject(jfp, total, bench_duration, tpmc, qphh);
 			fclose(jfp);
 		}
 	}
@@ -3479,8 +3639,8 @@ threadRun(void *arg)
 	}
 #endif
 
-	/* open log file if requested */
-	if (use_log)
+	/* open log file if requested (only when not solely using --log-db) */
+	if (use_log && (logfile_prefix != NULL || log_db_conninfo == NULL))
 	{
 		char		logpath[MAXPGPATH];
 		char	   *prefix = logfile_prefix ? logfile_prefix : "pgbench_log";
@@ -3495,6 +3655,8 @@ threadRun(void *arg)
 		if (thread->logfile == NULL)
 			pg_fatal("could not open logfile \"%s\": %m", logpath);
 	}
+
+	logDbInitThread(thread);
 
 	/* explicitly initialize the state machines */
 	for (int i = 0; i < nstate; i++)
@@ -3552,6 +3714,16 @@ threadRun(void *arg)
 		pg_time_usec_t min_usec;
 		pg_time_usec_t now = 0; /* set this only if needed */
 		bool		waiting_watermark = false;
+
+		if (signal_aborted)
+		{
+			for (int i = 0; i < nstate; i++)
+			{
+				if (state[i].state != CSTATE_FINISHED)
+					state[i].state = CSTATE_ABORTED;
+			}
+			goto done;
+		}
 
 		/*
 		 * identify which client sockets should be checked for input, and
@@ -3678,7 +3850,8 @@ threadRun(void *arg)
 			}
 		}
 
-		if (waiting_watermark && min_usec > 0 && thread->wakeup_pipe[0] >= 0)
+		if ((waiting_watermark || log_db_conninfo != NULL) &&
+			min_usec > 0 && thread->wakeup_pipe[0] >= 0)
 			add_socket_to_set(sockets, thread->wakeup_pipe[0], nsocks++);
 
 		/* also wake up to print the next progress report on time */
@@ -3729,7 +3902,8 @@ threadRun(void *arg)
 			}
 
 #ifndef WIN32
-			if (waiting_watermark && thread->wakeup_pipe[0] >= 0)
+			if ((waiting_watermark || log_db_conninfo != NULL) &&
+				thread->wakeup_pipe[0] >= 0)
 			{
 				char		drain_buf[64];
 
@@ -3738,6 +3912,8 @@ threadRun(void *arg)
 				}
 			}
 #endif
+			if (signal_aborted)
+				continue;
 		}
 		else
 		{
@@ -3857,6 +4033,7 @@ done:
 			{
 				pg_log_error("Run was aborted due to an error in thread %d",
 							 thread->tid);
+				logDbMarkRunAbortedOnExit(NULL, 2);
 				exit(2);
 			}
 		}
@@ -3873,16 +4050,17 @@ done:
 	}
 	disconnect_all(state, nstate);
 
+	if ((thread->logfile != NULL || log_db_conninfo != NULL) && agg_interval > 0)
+	{
+		/* log aggregated but not yet reported transactions */
+		doLog(thread, NULL, &aggs, false, 0, 0);
+	}
 	if (thread->logfile)
 	{
-		if (agg_interval > 0)
-		{
-			/* log aggregated but not yet reported transactions */
-			doLog(thread, state, &aggs, false, 0, 0);
-		}
 		fclose(thread->logfile);
 		thread->logfile = NULL;
 	}
+	logDbFinishThread(thread);
 	free_socket_set(sockets);
 	THREAD_FUNC_RETURN;
 }
@@ -3912,11 +4090,26 @@ handle_sig_alarm(SIGNAL_ARGS)
 	timer_exceeded = true;
 }
 
+static void
+handle_sig_abort(SIGNAL_ARGS)
+{
+	signal_aborted = true;
+	timer_exceeded = true;
+	wakeWatermarkWaiters();
+}
+
 void
 setalarm(int seconds)
 {
 	pqsignal(SIGALRM, handle_sig_alarm);
 	alarm(seconds);
+}
+
+void
+set_abort_signals(void)
+{
+	pqsignal(SIGINT, handle_sig_abort);
+	pqsignal(SIGTERM, handle_sig_abort);
 }
 
 #else							/* WIN32 */
@@ -3940,6 +4133,11 @@ setalarm(int seconds)
 							   win32_timer_callback, NULL, seconds * 1000, 0,
 							   WT_EXECUTEINTIMERTHREAD | WT_EXECUTEONLYONCE))
 		pg_fatal("failed to set timer");
+}
+
+void
+set_abort_signals(void)
+{
 }
 
 #endif							/* WIN32 */

@@ -34,6 +34,11 @@ organized into modular subsystems with clear ownership boundaries:
   - engine.c / engine.h
       Non-blocking client state machine (advanceConnectionState()), worker
       thread runner (threadRun()), and result/log output.
+  - logdb.c / logdb.h
+      Direct PostgreSQL database telemetry logging (--log-db), UNLOGGED/LOGGED
+      schema & table bootstrap, buffered COPY ... FROM STDIN batch streaming,
+      and SQL run inspection/comparison SRFs (pgbench_show_run(),
+      pgbench_compare_runs()).
   - src/common/pgbench_funcs.c / src/include/common/pgbench_funcs.h
       Frontend/backend-agnostic random distributions, hashes, permutations,
       and data generators shared between pgbench and contrib/pgbench.
@@ -159,6 +164,17 @@ HDR Latency Histogram, SLA Validation & JSON Reporting (stats.c, engine.c)
   `--sla` percentiles.
 - `printResults()` evaluates all `sla_rules[]`, derives `tpmC` and `QphH@SF`,
   and optionally writes the structured JSON report via `writeJsonReport()`.
+
+Direct Database Telemetry (--log-db) (logdb.c)
+----------------------------------------------
+- `logdb.c` / `logdb.h` implements direct PostgreSQL telemetry logging
+  (`--log-db`, `--log-db-unlogged[=stream|all|off]`, `--log-db-mode=stream|deferred`,
+  `--log-db-schema`, `--log-db-index`, `--run-label`).  It provisions a 3-tier,
+  9-table schema (`pgbench_runs`, `pgbench_run_groups`, `pgbench_run_scripts`,
+  `pgbench_run_commands`, `pgbench_run_recalls`, `pgbench_run_slas`,
+  `pgbench_progress_log`, `pgbench_agg_log`, `pgbench_tx_log`), two views
+  (`pgbench_runs_v`, `pgbench_live_progress_v`), and 5 overloaded Set-Returning
+  Functions (`pgbench_show_run` and `pgbench_compare_runs`).
 
 How to Add a New Built-in Function or Meta-Command
 --------------------------------------------------

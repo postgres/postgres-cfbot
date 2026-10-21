@@ -32,6 +32,7 @@
 #include "fe_utils/conditional.h"
 #include "fe_utils/option_utils.h"
 #include "init.h"
+#include "logdb.h"
 #include "mb/pg_wchar.h"
 #include "script.h"
 #include "stats.h"
@@ -1691,6 +1692,54 @@ applyConfigObject(const char *config_path,
 				json_report_file = pg_strdup(expectJsonString(config_path, k, v));
 			}
 		}
+		else if (strcmp(k, "log_db") == 0)
+		{
+			if (v->type != CJSON_NULL)
+			{
+				pg_free(log_db_conninfo);
+				log_db_conninfo = pg_strdup(expectJsonString(config_path, k, v));
+			}
+		}
+		else if (strcmp(k, "log_db_unlogged") == 0)
+		{
+			if (v->type == CJSON_BOOL)
+				log_db_unlogged = v->bool_val ? LOG_DB_UNLOGGED_ALL : LOG_DB_UNLOGGED_OFF;
+			else if (v->type == CJSON_STRING)
+				parseLogDbUnloggedMode(v->scalar_str);
+			else if (v->type != CJSON_NULL)
+				pg_fatal("%s:%d: configuration key \"log_db_unlogged\" expects \"stream\", \"all\", \"off\", or boolean",
+						 config_path, v->line_number);
+		}
+		else if (strcmp(k, "log_db_mode") == 0)
+		{
+			if (v->type != CJSON_NULL)
+				parseLogDbMode(expectJsonString(config_path, k, v));
+		}
+		else if (strcmp(k, "log_db_schema") == 0)
+		{
+			if (v->type != CJSON_NULL)
+			{
+				const char *sch = expectJsonString(config_path, k, v);
+
+				if (sch[0] == '\0')
+					pg_fatal("%s:%d: \"log_db_schema\" must not be empty",
+							 config_path, v->line_number);
+				pg_free(log_db_schema);
+				log_db_schema = pg_strdup(sch);
+			}
+		}
+		else if (strcmp(k, "log_db_index") == 0)
+		{
+			log_db_index = expectJsonBool(config_path, k, v);
+		}
+		else if (strcmp(k, "run_label") == 0)
+		{
+			if (v->type != CJSON_NULL)
+			{
+				pg_free(run_label);
+				run_label = pg_strdup(expectJsonString(config_path, k, v));
+			}
+		}
 		else if (strcmp(k, "vector_base") == 0 ||
 				 strcmp(k, "ground_truth_table") == 0)
 		{
@@ -2668,6 +2717,46 @@ writeConfigJsonObject(FILE *fp, int base_indent, bool include_init_steps)
 		fprintIndent(fp, ind);
 		fputs("\"json_report\": ", fp);
 		fprintConfigJsonStr(fp, json_report_file);
+	}
+	if (run_label != NULL)
+	{
+		fputs(",\n", fp);
+		fprintIndent(fp, ind);
+		fputs("\"run_label\": ", fp);
+		fprintConfigJsonStr(fp, run_label);
+	}
+	if (log_db_conninfo != NULL)
+	{
+		fputs(",\n", fp);
+		fprintIndent(fp, ind);
+		fputs("\"log_db\": ", fp);
+		fprintConfigJsonStr(fp, log_db_conninfo);
+	}
+	if (log_db_conninfo != NULL || log_db_unlogged != LOG_DB_UNLOGGED_STREAM)
+	{
+		fputs(",\n", fp);
+		fprintIndent(fp, ind);
+		fprintf(fp, "\"log_db_unlogged\": \"%s\"", logDbUnloggedModeToString(log_db_unlogged));
+	}
+	if (log_db_conninfo != NULL || log_db_mode != LOG_DB_MODE_STREAM)
+	{
+		fputs(",\n", fp);
+		fprintIndent(fp, ind);
+		fprintf(fp, "\"log_db_mode\": \"%s\"", logDbModeToString(log_db_mode));
+	}
+	if (log_db_schema != NULL &&
+		(log_db_conninfo != NULL || strcmp(log_db_schema, "public") != 0))
+	{
+		fputs(",\n", fp);
+		fprintIndent(fp, ind);
+		fputs("\"log_db_schema\": ", fp);
+		fprintConfigJsonStr(fp, log_db_schema);
+	}
+	if (log_db_index)
+	{
+		fputs(",\n", fp);
+		fprintIndent(fp, ind);
+		fputs("\"log_db_index\": true", fp);
 	}
 
 	/* init_steps (when dumping config or when present) */

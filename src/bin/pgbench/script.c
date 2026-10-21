@@ -4031,6 +4031,7 @@ ParseScript(const char *script, const char *desc, int weight)
 	alloc_num = COMMANDS_ALLOC_NUM;
 
 	/* Initialize all fields of ps */
+	memset(&ps, 0, sizeof(ps));
 	ps.desc = desc;
 	ps.weight = weight;
 	ps.commands = pg_malloc_array(Command *, alloc_num);

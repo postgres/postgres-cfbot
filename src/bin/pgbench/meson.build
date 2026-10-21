@@ -7,6 +7,7 @@ pgbench_sources = files(
   'dataset.c',
   'engine.c',
   'init.c',
+  'logdb.c',
   'poller.c',
   'script.c',
   'stats.c',
