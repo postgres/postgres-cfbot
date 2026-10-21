@@ -99,7 +99,7 @@ static JsonBehavior *transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 										   JsonBehavior *behavior,
 										   JsonBehaviorType default_behavior,
 										   JsonReturning *returning);
-static Node *GetJsonBehaviorConst(JsonBehaviorType btype, int location);
+static Node *GetJsonBehaviorConst(JsonBehaviorType btype);
 static Node *make_row_comparison_op(ParseState *pstate, List *opname,
 									List *largs, List *rargs, int location);
 static Node *make_row_distinct_op(ParseState *pstate, List *opname,
@@ -4897,7 +4897,7 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 	}
 
 	if (expr == NULL && btype != JSON_BEHAVIOR_ERROR)
-		expr = GetJsonBehaviorConst(btype, location);
+		expr = GetJsonBehaviorConst(btype);
 
 	/*
 	 * Try to coerce the expression if needed.
@@ -4988,7 +4988,7 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 							errmsg("cannot cast behavior expression of type %s to %s",
 								   format_type_be(exprType(expr)),
 								   format_type_be(returning->typid)),
-							parser_errposition(pstate, exprLocation(expr)));
+							parser_errposition(pstate, location));
 			}
 
 			expr = coerced_expr;
@@ -5010,7 +5010,7 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
  * JsonBehaviorType.
  */
 static Node *
-GetJsonBehaviorConst(JsonBehaviorType btype, int location)
+GetJsonBehaviorConst(JsonBehaviorType btype)
 {
 	Datum		val = (Datum) 0;
 	Oid			typid = JSONBOID;
@@ -5064,8 +5064,13 @@ GetJsonBehaviorConst(JsonBehaviorType btype, int location)
 			break;
 	}
 
+	/*
+	 * Leave the location unset: the constant doesn't appear in the query
+	 * text, so it mustn't look like it does, for example to query jumbling,
+	 * which would make pg_stat_statements replace the behavior keyword with a
+	 * parameter symbol.
+	 */
 	con = makeConst(typid, -1, InvalidOid, len, val, isnull, isbyval);
-	con->location = location;
 
 	return (Node *) con;
 }
