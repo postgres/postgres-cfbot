@@ -136,6 +136,7 @@ PostgreSQL documentation
       <listitem>
        <para>
         Specifies the
+        <literal>vacuum</literal>
         <glossterm linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
         ring buffer size for a given invocation of <application>vacuumdb</application>.
         This size is used to calculate the number of shared buffers which will

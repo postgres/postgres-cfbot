@@ -329,12 +329,49 @@
      <glossterm linkend="glossary-wal">WAL</glossterm> to permanent storage.
     </para>
     <para>
-     Buffer Access Strategies are used for various operations such as
-     sequential scans of large tables, <command>VACUUM</command>,
-     <command>COPY</command>, <command>CREATE TABLE AS SELECT</command>,
-     <command>ALTER TABLE</command>, <command>CREATE DATABASE</command>,
-     <command>CREATE INDEX</command>, and <command>CLUSTER</command>.
+     The available strategies are:
     </para>
+    <variablelist>
+     <varlistentry>
+      <term><literal>normal</literal></term>
+      <listitem>
+       <para>
+        Uses ordinary buffer replacement without a strategy ring.
+       </para>
+      </listitem>
+     </varlistentry>
+     <varlistentry>
+      <term><literal>bulkread</literal></term>
+      <listitem>
+       <para>
+        Uses a strategy ring for operations expected to read many pages with
+        little reuse, such as large sequential scans.  Reusing a limited set
+        of buffers reduces eviction of unrelated pages from shared buffers.
+       </para>
+      </listitem>
+     </varlistentry>
+     <varlistentry>
+      <term><literal>bulkwrite</literal></term>
+      <listitem>
+       <para>
+        Uses a strategy ring for operations that write many pages, such as
+        <command>COPY FROM</command> and
+        <command>CREATE TABLE AS SELECT</command>.
+       </para>
+      </listitem>
+     </varlistentry>
+     <varlistentry>
+      <term><literal>vacuum</literal></term>
+      <listitem>
+       <para>
+        Uses a strategy ring for maintenance operations such as
+        <command>VACUUM</command> and <command>ANALYZE</command>.  Its size can
+        be controlled with
+        <xref linkend="guc-vacuum-buffer-usage-limit"/>.
+       </para>
+      </listitem>
+     </varlistentry>
+    </variablelist>
    </glossdef>
   </glossentry>
 

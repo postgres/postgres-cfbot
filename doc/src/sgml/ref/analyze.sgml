@@ -94,10 +94,11 @@ ANALYZE [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] [ <r
     <listitem>
      <para>
       Specifies the
+      <literal>vacuum</literal>
       <glossterm linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
       ring buffer size for <command>ANALYZE</command>.  This size is used to
       calculate the number of shared buffers which will be reused as part of
-      this strategy.  <literal>0</literal> disables use of a
+      this strategy.  <literal>0</literal> disables use of a <literal>vacuum</literal>
       <literal>Buffer Access Strategy</literal>.   When this option is not
       specified, <command>ANALYZE</command> uses the value from
       <xref linkend="guc-vacuum-buffer-usage-limit"/>.  Higher settings can
