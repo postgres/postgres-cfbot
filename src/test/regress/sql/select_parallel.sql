@@ -495,6 +495,85 @@ SELECT unnest(ARRAY[]::integer[]) + 1 AS pathkey
   FROM tenk1 t1 JOIN tenk1 t2 ON TRUE
   ORDER BY pathkey;
 
+-- Regression test for a use-after-free of a shared partial path.
+--
+-- Planning a UNION branch recurses into its own subquery_planner() call.
+-- If that branch's own scan/join rel builds a Gather/Gather Merge path
+-- over one of its partial paths, and grouping_planner() then promotes
+-- that same (still partial_pathlist-resident) partial path, unmodified,
+-- to the outer query level's final rel so an outer Gather could use it,
+-- a dominance comparison against another promoted candidate could decide
+-- to pfree() it -- even though the branch's own Gather/Gather Merge path
+-- still points to it.  This crashed with "unrecognized node type: N" once
+-- the freed memory got reused.  Needs at least 7 partitions per relation
+-- to get enough competing partial-path candidates for the promotion's own
+-- dominance check to discard one that a Gather still depends on.
+SAVEPOINT settings;
+SET LOCAL parallel_setup_cost = 0;
+SET LOCAL parallel_tuple_cost = 0;
+SET LOCAL min_parallel_table_scan_size = 0;
+SET LOCAL max_parallel_workers_per_gather = 2;
+
+CREATE TABLE psrf_upload (
+    id int,
+    crt_time timestamp,
+    jdata jsonb,
+    tag text
+) PARTITION BY RANGE (crt_time);
+CREATE TABLE psrf_upload_dtl (
+    id int,
+    upload_id int,
+    crt_time timestamp,
+    jdata jsonb
+) PARTITION BY RANGE (crt_time);
+
+CREATE TABLE psrf_upload_p0 PARTITION OF psrf_upload FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+CREATE TABLE psrf_upload_p1 PARTITION OF psrf_upload FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
+CREATE TABLE psrf_upload_p2 PARTITION OF psrf_upload FOR VALUES FROM ('2024-03-01') TO ('2024-04-01');
+CREATE TABLE psrf_upload_p3 PARTITION OF psrf_upload FOR VALUES FROM ('2024-04-01') TO ('2024-05-01');
+CREATE TABLE psrf_upload_p4 PARTITION OF psrf_upload FOR VALUES FROM ('2024-05-01') TO ('2024-06-01');
+CREATE TABLE psrf_upload_p5 PARTITION OF psrf_upload FOR VALUES FROM ('2024-06-01') TO ('2024-07-01');
+CREATE TABLE psrf_upload_p6 PARTITION OF psrf_upload FOR VALUES FROM ('2024-07-01') TO ('2024-08-01');
+
+CREATE TABLE psrf_upload_dtl_p0 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+CREATE TABLE psrf_upload_dtl_p1 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
+CREATE TABLE psrf_upload_dtl_p2 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-03-01') TO ('2024-04-01');
+CREATE TABLE psrf_upload_dtl_p3 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-04-01') TO ('2024-05-01');
+CREATE TABLE psrf_upload_dtl_p4 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-05-01') TO ('2024-06-01');
+CREATE TABLE psrf_upload_dtl_p5 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-06-01') TO ('2024-07-01');
+CREATE TABLE psrf_upload_dtl_p6 PARTITION OF psrf_upload_dtl FOR VALUES FROM ('2024-07-01') TO ('2024-08-01');
+
+INSERT INTO psrf_upload VALUES
+  (1, '2024-05-01 00:00:00', jsonb_build_array(jsonb_build_object('v', repeat('x', 1000))), 'tag1');
+INSERT INTO psrf_upload_dtl
+  SELECT id, id, crt_time, jsonb_build_array(jsonb_build_object('v', repeat('x', 1000)))
+  FROM psrf_upload;
+
+ANALYZE psrf_upload;
+ANALYZE psrf_upload_dtl;
+
+SELECT id, tag, length(val) FROM (
+  SELECT u.id, u.tag, jsonb_array_elements(u.jdata)->>'v' AS val
+  FROM psrf_upload u
+  UNION
+  SELECT u.id, u.tag, jsonb_array_elements(d.jdata)->>'v' AS val
+  FROM psrf_upload u LEFT JOIN psrf_upload_dtl d ON d.upload_id = u.id
+) s;
+
+-- Same underlying issue, triggered a different way: a set-returning
+-- function in the target list forces current_rel and final_rel apart even
+-- for this single-relation query, and two competing partial index paths
+-- tie in cost once the SRF's cost swamps the difference between them.
+SET LOCAL min_parallel_index_scan_size = 0;
+SET LOCAL max_parallel_workers_per_gather = 1;
+
+EXPLAIN (COSTS OFF)
+SELECT unique1, generate_series(1, 5000000) FROM tenk1 WHERE unique2 < 100
+UNION
+SELECT 1, 2;
+
+ROLLBACK TO SAVEPOINT settings;
+
 -- test passing expanded-value representations to workers
 CREATE FUNCTION make_some_array(int,int) returns int[] as
 $$declare x int[];
