@@ -75,6 +75,7 @@ spghandler(PG_FUNCTION_ARGS)
 		.ambuildempty = spgbuildempty,
 		.aminsert = spginsert,
 		.aminsertcleanup = NULL,
+		.amnotifydelete = NULL,
 		.ambulkdelete = spgbulkdelete,
 		.amvacuumcleanup = spgvacuumcleanup,
 		.amcanreturn = spgcanreturn,

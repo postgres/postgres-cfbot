@@ -133,6 +133,7 @@ blhandler(PG_FUNCTION_ARGS)
 		.ambuildempty = blbuildempty,
 		.aminsert = blinsert,
 		.aminsertcleanup = NULL,
+		.amnotifydelete = NULL,
 		.ambulkdelete = blbulkdelete,
 		.amvacuumcleanup = blvacuumcleanup,
 		.amcanreturn = NULL,

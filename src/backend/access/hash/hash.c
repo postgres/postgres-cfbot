@@ -101,6 +101,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.ambuildempty = hashbuildempty,
 		.aminsert = hashinsert,
 		.aminsertcleanup = NULL,
+		.amnotifydelete = NULL,
 		.ambulkdelete = hashbulkdelete,
 		.amvacuumcleanup = hashvacuumcleanup,
 		.amcanreturn = NULL,

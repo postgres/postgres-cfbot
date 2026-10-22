@@ -154,6 +154,7 @@ typedef struct IndexAmRoutine
     ambuildempty_function ambuildempty;
     aminsert_function aminsert;
     aminsertcleanup_function aminsertcleanup;   /* can be NULL */
+    amnotifydelete_function amnotifydelete;     /* can be NULL */
     ambulkdelete_function ambulkdelete;
     amvacuumcleanup_function amvacuumcleanup;
     amcanreturn_function amcanreturn;   /* can be NULL */
@@ -399,6 +400,69 @@ aminsertcleanup (Relation indexRelation,
    <literal>indexInfo-&gt;ii_AmCache</literal>. This is useful if the data
    requires additional cleanup steps (e.g., releasing pinned buffers), and
    simply releasing the memory is not sufficient.
+  </para>
+
+  <para>
+<programlisting>
+void
+amnotifydelete (Relation indexRelation,
+                Datum *values,
+                bool *isnull,
+                ItemPointer heap_tid,
+                Relation heapRelation,
+                IndexInfo *indexInfo);
+</programlisting>
+   Tell the index that the current transaction deleted a table tuple, or
+   replaced it with a new version.  <literal>values</literal> and
+   <literal>isnull</literal> are the index column values of the old tuple
+   version, and <literal>heap_tid</literal> is its TID.  The values are
+   computed again from the old version, so they are those
+   <function>aminsert</function> received, as index expressions are
+   immutable.  After HOT updates, <literal>heap_tid</literal> is not the TID
+   the index entry points to.  The call is made after the tuple is deleted,
+   for <command>DELETE</command>, the delete action of
+   <command>MERGE</command>, a row moved to another partition, a delete
+   applied by logical replication or replayed by <command>REPACK
+   (CONCURRENTLY)</command>, and a tuple that <command>INSERT ... ON
+   CONFLICT</command> inserted speculatively and removed again because a
+   concurrent insert conflicted.  For an update, it is made when the update
+   adds new index entries, so HOT updates don't call it, and an update that
+   only needs new entries in summarizing indexes calls only those.  A
+   partial index is called only if the old version satisfied its predicate.
+  </para>
+
+  <para>
+   The callback is not made for <command>TRUNCATE</command>, which rebuilds
+   the index through <function>ambuild</function>, nor when the transaction
+   or subtransaction aborts.  It can also come before the command fails, for
+   example when a unique index then rejects the new version of an updated
+   row.  An index that changes its state in this callback or in
+   <function>aminsert</function> must therefore do so transactionally, so
+   that an abort undoes the change.  An index that takes predicate locks
+   must check for serializable conflicts itself, as in
+   <function>aminsert</function>.
+  </para>
+
+  <para>
+   While <command>CREATE INDEX CONCURRENTLY</command> or <command>REINDEX
+   CONCURRENTLY</command> builds an index, the index is called only once it
+   accepts inserts.  It can therefore miss the delete of a tuple that its
+   initial build included, or hear of the delete of a tuple it never
+   received.  An index that keeps summaries must be built without
+   <literal>CONCURRENTLY</literal>, or be able to correct them itself.  To
+   refuse a concurrent build, <function>ambuild</function> can raise an
+   error when <literal>indexInfo-&gt;ii_Concurrent</literal> is set.
+  </para>
+
+  <para>
+   Most index access methods don't need this callback, because
+   <command>VACUUM</command> finds and removes dead index entries through
+   <function>ambulkdelete</function>.  It is for an index that stores
+   aggregates over its rows, such as a count per time range.  Such an index
+   must hear of a delete in the deleting transaction, or its summary keeps
+   counting a row that later snapshots no longer see.  The callback can be
+   NULL.  When no index on a table provides it, deletes and updates on the
+   table pay one cached relcache check per row.
   </para>
 
   <para>
