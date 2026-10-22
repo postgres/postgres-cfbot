@@ -422,6 +422,9 @@ _outBoolExpr(StringInfo str, const BoolExpr *node)
 		case NOT_EXPR:
 			opstr = "not";
 			break;
+		case IMPLIES_EXPR:
+			opstr = "implies";
+			break;
 	}
 	appendStringInfoString(str, " :boolop ");
 	outToken(str, opstr);
@@ -641,6 +644,10 @@ _outA_Expr(StringInfo str, const A_Expr *node)
 			break;
 		case AEXPR_NOT_BETWEEN_SYM:
 			appendStringInfoString(str, " NOT_BETWEEN_SYM");
+			WRITE_NODE_FIELD(name);
+			break;
+		case AEXPR_IMPLIES:
+			appendStringInfoString(str, " IMPLIES");
 			WRITE_NODE_FIELD(name);
 			break;
 		default:
