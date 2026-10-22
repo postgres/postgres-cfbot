@@ -1,0 +1,109 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_check s1_read s2_drop_table s2_drop_ts s2_check s1_flush s2_check
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_check: 
+	SELECT EXISTS (SELECT FROM pg_tablespace t WHERE t.oid = o.oid) AS in_catalog,
+	       pg_stat_have_stats('tablespace', 0, o.oid::int8) AS have_stats
+	FROM ts_oid o;
+
+in_catalog|have_stats
+----------+----------
+t         |t         
+(1 row)
+
+step s1_read: SELECT count(*) FROM t_drop;
+count
+-----
+  100
+(1 row)
+
+step s2_drop_table: DROP TABLE t_drop;
+step s2_drop_ts: DROP TABLESPACE regress_tblspace_drop;
+step s2_check: 
+	SELECT EXISTS (SELECT FROM pg_tablespace t WHERE t.oid = o.oid) AS in_catalog,
+	       pg_stat_have_stats('tablespace', 0, o.oid::int8) AS have_stats
+	FROM ts_oid o;
+
+in_catalog|have_stats
+----------+----------
+f         |f         
+(1 row)
+
+step s1_flush: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_check: 
+	SELECT EXISTS (SELECT FROM pg_tablespace t WHERE t.oid = o.oid) AS in_catalog,
+	       pg_stat_have_stats('tablespace', 0, o.oid::int8) AS have_stats
+	FROM ts_oid o;
+
+in_catalog|have_stats
+----------+----------
+f         |f         
+(1 row)
+
+s2: NOTICE:  table "t_drop" does not exist, skipping
+
+starting permutation: s2_check s1_temp s2_drop_table s2_drop_ts s2_check s1_flush s2_check
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_check: 
+	SELECT EXISTS (SELECT FROM pg_tablespace t WHERE t.oid = o.oid) AS in_catalog,
+	       pg_stat_have_stats('tablespace', 0, o.oid::int8) AS have_stats
+	FROM ts_oid o;
+
+in_catalog|have_stats
+----------+----------
+t         |t         
+(1 row)
+
+step s1_temp: 
+	SET temp_tablespaces = regress_tblspace_drop;
+	SET work_mem = '64kB';
+	SELECT count(*) FROM (SELECT * FROM generate_series(1, 10000) g ORDER BY g DESC) s;
+
+count
+-----
+10000
+(1 row)
+
+step s2_drop_table: DROP TABLE t_drop;
+step s2_drop_ts: DROP TABLESPACE regress_tblspace_drop;
+step s2_check: 
+	SELECT EXISTS (SELECT FROM pg_tablespace t WHERE t.oid = o.oid) AS in_catalog,
+	       pg_stat_have_stats('tablespace', 0, o.oid::int8) AS have_stats
+	FROM ts_oid o;
+
+in_catalog|have_stats
+----------+----------
+f         |f         
+(1 row)
+
+step s1_flush: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2_check: 
+	SELECT EXISTS (SELECT FROM pg_tablespace t WHERE t.oid = o.oid) AS in_catalog,
+	       pg_stat_have_stats('tablespace', 0, o.oid::int8) AS have_stats
+	FROM ts_oid o;
+
+in_catalog|have_stats
+----------+----------
+f         |f         
+(1 row)
+
+s2: NOTICE:  table "t_drop" does not exist, skipping
