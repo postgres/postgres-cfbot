@@ -1353,6 +1353,7 @@ RelOptInfos are mostly dummy, but their pathlist lists hold all the Paths
 considered useful for each step.  Currently, we may create these types of
 additional RelOptInfos during upper-level planning:
 
+UPPERREL_PARTIAL_SETOP	result of partial setop deduplication, if any
 UPPERREL_SETOP		result of UNION/INTERSECT/EXCEPT, if any
 UPPERREL_PARTIAL_GROUP_AGG	result of partial grouping/aggregation, if any
 UPPERREL_GROUP_AGG	result of grouping/aggregation, if any
@@ -1366,6 +1367,13 @@ UPPERREL_FINAL is used to represent any final processing steps, currently
 LockRows (SELECT FOR UPDATE), LIMIT/OFFSET, and ModifyTable.  There is no
 flexibility about the order in which these steps are done, and thus no need
 to subdivide this stage more finely.
+
+UPPERREL_PARTIAL_SETOP is used for worker-local de-duplication of UNION
+(and, in the future, other set operations).  It is created only when the
+planner is considering a partial de-duplication path, and its output relation
+initially receives partial paths; the final de-duplication path is added to
+the corresponding UPPERREL_SETOP relation.  Extensions may see this stage
+more than once in a query with multiple non-flattened set operations.
 
 These "upper relations" are identified by the UPPERREL enum values shown
 above, plus a relids set, which allows there to be more than one upperrel
