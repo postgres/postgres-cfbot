@@ -245,6 +245,7 @@ extern PlannedStmt *PortalGetPrimaryStmt(Portal portal);
 extern void PortalCreateHoldStore(Portal portal);
 extern void PortalHashTableDeleteAll(void);
 extern bool ThereAreNoReadyPortals(void);
+extern bool HasActiveWithHoldCursors(void);
 extern void HoldPinnedPortals(void);
 extern void ForgetPortalSnapshots(void);
 
