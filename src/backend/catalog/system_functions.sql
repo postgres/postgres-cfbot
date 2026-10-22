@@ -66,30 +66,35 @@ RETURN octet_length($1) * 8;
 CREATE OR REPLACE FUNCTION log(numeric)
  RETURNS numeric
  LANGUAGE sql
+ SUPPORT arg0_asc_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN log(10, $1);
 
 CREATE OR REPLACE FUNCTION log10(numeric)
  RETURNS numeric
  LANGUAGE sql
+ SUPPORT arg0_asc_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN log(10, $1);
 
 CREATE OR REPLACE FUNCTION round(numeric)
  RETURNS numeric
  LANGUAGE sql
+ SUPPORT arg0_asc_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN round($1, 0);
 
 CREATE OR REPLACE FUNCTION trunc(numeric)
  RETURNS numeric
  LANGUAGE sql
+ SUPPORT arg0_asc_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN trunc($1, 0);
 
 CREATE OR REPLACE FUNCTION numeric_pl_pg_lsn(numeric, pg_lsn)
  RETURNS pg_lsn
  LANGUAGE sql
+ SUPPORT addition_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN $2 + $1;
 
@@ -120,18 +125,21 @@ RETURN date_part($1, cast($2 as timestamp));
 CREATE OR REPLACE FUNCTION timestamptz(date, time)
  RETURNS timestamptz
  LANGUAGE sql
+ SUPPORT arg0_asc_slope_support
  STABLE PARALLEL SAFE STRICT COST 1
 RETURN cast(($1 + $2) as timestamptz);
 
 CREATE OR REPLACE FUNCTION timedate_pl(time, date)
  RETURNS timestamp
  LANGUAGE sql
+ SUPPORT arg1_asc_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN $2 + $1;
 
 CREATE OR REPLACE FUNCTION timetzdate_pl(timetz, date)
  RETURNS timestamptz
  LANGUAGE sql
+ SUPPORT arg1_asc_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN $2 + $1;
 
@@ -168,6 +176,7 @@ RETURN $2 + $1;
 CREATE OR REPLACE FUNCTION integer_pl_date(integer, date)
  RETURNS date
  LANGUAGE sql
+ SUPPORT addition_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN $2 + $1;
 
@@ -237,6 +246,7 @@ RETURN ($1, ($1 + $2)) overlaps ($3, $4);
 CREATE OR REPLACE FUNCTION int8pl_inet(bigint, inet)
  RETURNS inet
  LANGUAGE sql
+ SUPPORT addition_slope_support
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN $2 + $1;
 
