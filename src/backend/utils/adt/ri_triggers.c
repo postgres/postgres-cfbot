@@ -141,6 +141,7 @@ typedef struct RI_ConstraintInfo
 												 * delete */
 	char		confmatchtype;	/* foreign key's match type */
 	bool		hasperiod;		/* if the foreign key uses PERIOD */
+	bool		pk_not_unique;	/* PERIOD FK references a non-unique EXCLUDE */
 	int			nkeys;			/* number of key columns */
 	int16		pk_attnums[RI_MAX_NUMKEYS]; /* attnums of referenced cols */
 	int16		fk_attnums[RI_MAX_NUMKEYS]; /* attnums of referencing cols */
@@ -270,6 +271,7 @@ static RI_ConstraintInfo *ri_FetchConstraintInfo(Trigger *trigger,
 												 Relation trig_rel, bool rel_is_pk);
 static RI_ConstraintInfo *ri_LoadConstraintInfo(Oid constraintOid);
 static Oid	get_ri_constraint_root(Oid constrOid);
+static void ri_WarnIfNotUnique(const RI_ConstraintInfo *riinfo);
 static SPIPlanPtr ri_PlanCheck(const char *querystr, int nargs, const Oid *argtypes,
 							   RI_QueryKey *qkey, Relation fk_rel, Relation pk_rel);
 static bool ri_PerformCheck(const RI_ConstraintInfo *riinfo,
@@ -520,6 +522,8 @@ RI_FKey_check(TriggerData *trigdata)
 			appendStringInfoString(&querybuf, "(x1.r)");
 		}
 
+		ri_WarnIfNotUnique(riinfo);
+
 		/* Prepare and save the plan */
 		qplan = ri_PlanCheck(querybuf.data, riinfo->nkeys, queryoids,
 							 &qkey, fk_rel, pk_rel);
@@ -688,6 +692,8 @@ ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
 							"pg_catalog.range_agg", ANYMULTIRANGEOID);
 			appendStringInfoString(&querybuf, "(x1.r)");
 		}
+
+		ri_WarnIfNotUnique(riinfo);
 
 		/* Prepare and save the plan */
 		qplan = ri_PlanCheck(querybuf.data, riinfo->nkeys, queryoids,
@@ -964,6 +970,8 @@ ri_restrict(TriggerData *trigdata, bool is_no_action)
 		}
 
 		appendStringInfoString(&querybuf, " FOR KEY SHARE OF x");
+
+		ri_WarnIfNotUnique(riinfo);
 
 		/* Prepare and save the plan */
 		qplan = ri_PlanCheck(querybuf.data, riinfo->nkeys, queryoids,
@@ -1911,6 +1919,7 @@ RI_PartitionRemove_Check(Trigger *trigger, Relation fk_rel, Relation pk_rel)
 	int			i;
 
 	riinfo = ri_FetchConstraintInfo(trigger, fk_rel, false);
+	ri_WarnIfNotUnique(riinfo);
 
 	/*
 	 * We don't check permissions before displaying the error message, on the
@@ -2418,14 +2427,22 @@ ri_LoadConstraintInfo(Oid constraintOid)
 	 * opclass of the PK element for these. This all gets cached (as does the
 	 * generated plan), so there's no performance issue.
 	 */
+	riinfo->pk_not_unique = false;
 	if (riinfo->hasperiod)
 	{
 		Oid			opclass = get_index_column_opclass(conForm->conindid, riinfo->nkeys);
+		HeapTuple	indtup;
 
 		FindFKPeriodOpers(opclass,
 						  &riinfo->period_contained_by_oper,
 						  &riinfo->agged_period_contained_by_oper,
 						  &riinfo->period_intersect_oper);
+
+		indtup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(conForm->conindid));
+		if (!HeapTupleIsValid(indtup))
+			elog(ERROR, "cache lookup failed for index %u", conForm->conindid);
+		riinfo->pk_not_unique = !((Form_pg_index) GETSTRUCT(indtup))->indisunique;
+		ReleaseSysCache(indtup);
 	}
 
 	/* Metadata used by fast path. */
@@ -2566,6 +2583,27 @@ InvalidateConstraintCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 	}
 }
 
+
+/*
+ * ri_WarnIfNotUnique -
+ *
+ * Earlier 18.x releases let a foreign key with PERIOD reference a plain
+ * exclusion constraint, which doesn't guarantee uniqueness, so such a foreign
+ * key can't reliably enforce referential integrity.  We no longer allow
+ * creating one, but some may already exist, so warn when we find one.
+ */
+static void
+ri_WarnIfNotUnique(const RI_ConstraintInfo *riinfo)
+{
+	if (!riinfo->pk_not_unique)
+		return;
+
+	ereport(WARNING,
+			errmsg("foreign key constraint \"%s\" on table \"%s\" references an exclusion constraint instead of a primary key or unique constraint using WITHOUT OVERLAPS",
+				   NameStr(riinfo->conname), get_rel_name(riinfo->fk_relid)),
+			errdetail("Such a foreign key cannot reliably enforce referential integrity."),
+			errhint("Drop the foreign key and recreate it referencing a primary key or unique constraint using WITHOUT OVERLAPS."));
+}
 
 /*
  * Prepare execution plan for a query to enforce an RI restriction

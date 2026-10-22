@@ -612,6 +612,8 @@ static void CloneForeignKeyConstraints(List **wqueue, Relation parentRel,
 static void CloneFkReferenced(Relation parentRel, Relation partitionRel);
 static void CloneFkReferencing(List **wqueue, Relation parentRel,
 							   Relation partRel);
+static void warnIfPeriodFkIndexNotUnique(bool with_period, Oid indexOid,
+										 const char *conname, Oid relid);
 static void createForeignKeyCheckTriggers(Oid myRelOid, Oid refRelOid,
 										  Constraint *fkconstraint, Oid constraintOid,
 										  Oid indexOid,
@@ -10319,6 +10321,15 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	}
 
 	/*
+	 * If the referencing foreign key uses PERIOD, the primary key must use
+	 * WITHOUT OVERLAPS
+	 */
+	if (!pk_has_without_overlaps && with_period)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_FOREIGN_KEY),
+				errmsg("foreign key using PERIOD must reference a primary key or unique constraint using WITHOUT OVERLAPS"));
+
+	/*
 	 * If the referenced primary key has WITHOUT OVERLAPS, the foreign key
 	 * must use PERIOD.
 	 */
@@ -11505,6 +11516,9 @@ CloneFkReferenced(Relation parentRel, Relation partitionRel)
 								  conkey, conpfeqop, conppeqop, conffeqop,
 								  numfkdelsetcols, confdelsetcols, false,
 								  constrForm->conperiod);
+		warnIfPeriodFkIndexNotUnique(constrForm->conperiod, partIndexId,
+									 fkconstraint->conname,
+									 constrForm->conrelid);
 		/* ... and recurse */
 		addFkRecurseReferenced(fkconstraint,
 							   fkRel,
@@ -11750,6 +11764,9 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 								  conppeqop, conffeqop,
 								  numfkdelsetcols, confdelsetcols,
 								  false, with_period);
+		warnIfPeriodFkIndexNotUnique(with_period, indexOid,
+									 get_constraint_name(address.objectId),
+									 RelationGetRelid(partRel));
 
 		/* Done with the cloned constraint's tuple */
 		ReleaseSysCache(tuple);
@@ -11778,6 +11795,38 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 	}
 
 	table_close(trigrel, RowExclusiveLock);
+}
+
+/*
+ * warnIfPeriodFkIndexNotUnique
+ *
+ * Earlier 18.x releases let a PERIOD foreign key reference a plain exclusion
+ * constraint.  ATAddForeignKeyConstraint rejects that now, but cloning such a
+ * foreign key for a new partition copies its index without that check, so
+ * warn when it happens.
+ */
+static void
+warnIfPeriodFkIndexNotUnique(bool with_period, Oid indexOid,
+							 const char *conname, Oid relid)
+{
+	HeapTuple	indtup;
+	bool		isunique;
+
+	if (!with_period)
+		return;
+
+	indtup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexOid));
+	if (!HeapTupleIsValid(indtup))
+		elog(ERROR, "cache lookup failed for index %u", indexOid);
+	isunique = ((Form_pg_index) GETSTRUCT(indtup))->indisunique;
+	ReleaseSysCache(indtup);
+
+	if (!isunique)
+		ereport(WARNING,
+				errmsg("foreign key constraint \"%s\" on table \"%s\" references an exclusion constraint instead of a primary key or unique constraint using WITHOUT OVERLAPS",
+					   conname, get_rel_name(relid)),
+				errdetail("Such a foreign key cannot reliably enforce referential integrity."),
+				errhint("Drop the foreign key and recreate it referencing a primary key or unique constraint using WITHOUT OVERLAPS."));
 }
 
 /*
@@ -14022,12 +14071,11 @@ transformFkeyCheckAttrs(Relation pkrel,
 		indexStruct = (Form_pg_index) GETSTRUCT(indexTuple);
 
 		/*
-		 * Must have the right number of columns; must be unique (or if
-		 * temporal then exclusion instead) and not a partial index; forget it
-		 * if there are any expressions, too. Invalid indexes are out as well.
+		 * Must have the right number of columns; must be unique and not a
+		 * partial index; forget it if there are any expressions, too. Invalid
+		 * indexes are out as well.
 		 */
-		if (indexStruct->indnkeyatts == numattrs &&
-			(with_period ? indexStruct->indisexclusion : indexStruct->indisunique) &&
+		if (indexStruct->indnkeyatts == numattrs && indexStruct->indisunique &&
 			indexStruct->indisvalid &&
 			heap_attisnull(indexTuple, Anum_pg_index_indpred, NULL) &&
 			heap_attisnull(indexTuple, Anum_pg_index_indexprs, NULL))
@@ -14090,7 +14138,8 @@ transformFkeyCheckAttrs(Relation pkrel,
 
 			/* We need to know whether the index has WITHOUT OVERLAPS */
 			if (found)
-				*pk_has_without_overlaps = indexStruct->indisexclusion;
+				*pk_has_without_overlaps = indexStruct->indisunique &&
+					indexStruct->indisexclusion;
 		}
 		ReleaseSysCache(indexTuple);
 		if (found)
