@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
@@ -38,6 +39,7 @@
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
+#include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/checksum.h"
 #include "storage/dsm_impl.h"
@@ -59,7 +61,7 @@
  * NB: The buffer size is required to be a multiple of the system block
  * size, so use that value instead if it's bigger than our preference.
  */
-#define SINK_BUFFER_LENGTH			Max(32768, BLCKSZ)
+#define SINK_BUFFER_LENGTH			Max(256 * 1024, BLCKSZ)
 
 typedef struct
 {
@@ -79,6 +81,35 @@ typedef struct
 	pg_compress_specification compression_specification;
 	pg_checksum_type manifest_checksum_type;
 } basebackup_options;
+
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+/*
+ * State of incremental prefetching, used by sendFile().
+ */
+typedef struct IncrPrefetch
+{
+	/* Is prefetching enabled? */
+	bool		enabled;
+
+	/*
+	 * Number of prefetch runs (fadvise calls) to stay ahead of the current
+	 * block
+	 */
+	unsigned	readahead_window;
+
+	/* Max number of blocks hinted ahead of the current block */
+	unsigned	max_blks_ahead;
+
+	/*
+	 * Max number of blocks to combine into a single prefetch run (fadvise
+	 * call)
+	 */
+	unsigned	max_blks_per_run;
+
+	/* Index of the next block to be prefetched */
+	unsigned	prefetch_idx;
+} IncrPrefetch;
+#endif
 
 #define TAR_NUM_TERMINATION_BLOCKS 2
 
@@ -106,6 +137,12 @@ static off_t read_file_data_into_buffer(bbsink *sink,
 										BlockNumber blkno,
 										bool verify_checksum,
 										int *checksum_failures);
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+static void prefetch_next_incremental_run(int fd,
+										  BlockNumber *incremental_blocks,
+										  unsigned num_incremental_blocks,
+										  IncrPrefetch *prefetch);
+#endif
 static void push_to_sink(bbsink *sink, pg_checksum_context *checksum_ctx,
 						 size_t *bytes_done, void *data, size_t length);
 static bool backup_checksums_verifiable(XLogRecPtr start_lsn);
@@ -1593,6 +1630,14 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 	bool		verify_checksum = false;
 	pg_checksum_context checksum_ctx;
 	int			ibindex = 0;
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+	IncrPrefetch incr_prefetch = {
+		.enabled = maintenance_io_concurrency > 0,
+		.readahead_window = maintenance_io_concurrency,
+		.max_blks_per_run = io_combine_limit,
+		.max_blks_ahead = maintenance_io_concurrency * io_combine_limit,
+	};
+#endif
 
 	if (pg_checksum_init(&checksum_ctx, manifest->checksum_type) < 0)
 		elog(ERROR, "could not initialize checksum of file \"%s\"",
@@ -1607,6 +1652,38 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", readfilename)));
 	}
+
+	/*
+	 * On full backups, let the OS know that we are going to read the whole
+	 * file. It's just a hint, but it helps avoid longer synchronous read
+	 * stalls.
+	 */
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_SEQUENTIAL)
+	if (incremental_blocks == NULL)
+		(void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+
+	/*
+	 * On incremental backups, let the OS know the exact blocks we'll need.
+	 * For that, maintain a bounded window of readahead hints, sized by
+	 * incr_prefetch->readahead_window.  Initially, issue
+	 * incr_prefetch->readahead_window runs of prefetch to widen the window;
+	 * then, after each block read, prefetch another run.  The number of
+	 * blocks prefetched ahead of the reader is capped at
+	 * incr_prefetch->max_blks_ahead to avoid over-fetching.
+	 */
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+	if (incremental_blocks != NULL && incr_prefetch.enabled)
+	{
+		unsigned	initial_prefetch = incr_prefetch.readahead_window;
+
+		while (initial_prefetch-- > 0 &&
+			   incr_prefetch.prefetch_idx < num_incremental_blocks)
+			prefetch_next_incremental_run(fd, incremental_blocks,
+										  num_incremental_blocks,
+										  &incr_prefetch);
+	}
+#endif
 
 	_tarWriteHeader(sink, tarfilename, NULL, statbuf, false);
 
@@ -1738,12 +1815,24 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 											 verify_checksum,
 											 &checksum_failures);
 
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+			/* Advance the prefetch window by prefetching another run */
+			if (incr_prefetch.enabled &&
+				incr_prefetch.prefetch_idx < num_incremental_blocks &&
+				incr_prefetch.prefetch_idx - ibindex <
+				incr_prefetch.max_blks_ahead)
+				prefetch_next_incremental_run(fd, incremental_blocks,
+											  num_incremental_blocks,
+											  &incr_prefetch);
+#endif
+
 			/*
-			 * If we get a partial read, that must mean that the relation is
-			 * being truncated. Ultimately, it should be truncated to a
-			 * multiple of BLCKSZ, since this path should only be reached for
-			 * relation files, but we might transiently observe an
-			 * intermediate value.
+			 * read_file_data_into_buffer() retries short reads, so if we got
+			 * fewer bytes than requested we must have hit EOF (which means
+			 * that the relation is being truncated). Ultimately, it should be
+			 * truncated to a multiple of BLCKSZ, since this path  should only
+			 * be reached for relation files, but we might transiently observe
+			 * an intermediate value.
 			 *
 			 * It should be fine to treat this just as if the entire block had
 			 * been truncated away - i.e. fill this and all later blocks with
@@ -1841,6 +1930,50 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 	return true;
 }
 
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
+
+/*
+ * Prefetch the next run of blocks to be read from an incremental file.
+ *
+ * incremental_blocks is the sorted array of block numbers that sendFile() will
+ * read, and prefetch->prefetch_idx is the position of the first block not yet
+ * hinted.  A single run can cover multiple blocks if they are adjacent, up to
+ * prefetch->max_blks_per_run.
+ *
+ * A "run" means a single fadvise request, not a single block.
+ *
+ * The hint is advisory only.  Failures are ignored, since the worst outcome
+ * is that we lose the intended readahead and sendFile() falls back to
+ * ordinary synchronous reads.
+ */
+static void
+prefetch_next_incremental_run(int fd, BlockNumber *incremental_blocks,
+							  unsigned num_incremental_blocks,
+							  IncrPrefetch *prefetch)
+{
+	BlockNumber start_blk = incremental_blocks[prefetch->prefetch_idx];
+	unsigned	blks_prefetched = 1;
+
+	prefetch->prefetch_idx++;
+
+	/*
+	 * Merge contiguous blocks into a single run, up to max_blks_per_run.
+	 */
+	while (prefetch->prefetch_idx < num_incremental_blocks &&
+		   blks_prefetched < prefetch->max_blks_per_run &&
+		   incremental_blocks[prefetch->prefetch_idx] ==
+		   start_blk + blks_prefetched)
+	{
+		blks_prefetched++;
+		prefetch->prefetch_idx++;
+	}
+
+	(void) posix_fadvise(fd, (off_t) start_blk * BLCKSZ,
+						 (off_t) blks_prefetched * BLCKSZ,
+						 POSIX_FADV_WILLNEED);
+}
+#endif
+
 /*
  * Read some more data from the file into the bbsink's buffer, verifying
  * checksums as required.
@@ -1848,8 +1981,9 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
  * 'offset' is the file offset from which we should begin to read, and
  * 'length' is the amount of data that should be read. The actual amount
  * of data read will be less than the requested amount if the bbsink's
- * buffer isn't big enough to hold it all, or if the underlying file has
- * been truncated. The return value is the number of bytes actually read.
+ * buffer isn't big enough to hold it all, or if we hit EOF, which means
+ * that the underlying file has been truncated. The return value is the
+ * number of bytes actually read.
  *
  * 'blkno' is the block number of the first page in the bbsink's buffer
  * relative to the start of the relation.
@@ -2177,7 +2311,8 @@ convert_link_to_directory(const char *pathbuf, struct stat *statbuf)
 
 /*
  * Read some data from a file, setting a wait event and reporting any error
- * encountered.
+ * encountered. Short reads are retried until either all requested bytes have
+ * been read or EOF is hit ( potentially due to concurrent truncation).
  *
  * If partial_read_ok is false, also report an error if the number of bytes
  * read is not equal to the number of bytes requested.
@@ -2188,21 +2323,45 @@ static ssize_t
 basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
 					 const char *filename, bool partial_read_ok)
 {
-	ssize_t		rc;
+	ssize_t		transferred = 0;
 
-	pgstat_report_wait_start(WAIT_EVENT_BASEBACKUP_READ);
-	rc = pg_pread(fd, buf, nbytes, offset);
-	pgstat_report_wait_end();
+	/*
+	 * Loop to continue after a short read. Short reads are more likely to
+	 * show up with large read requests such as ours due to e.g. signals. This
+	 * tries to mirror what mdreadv() does.
+	 */
+	while (transferred < nbytes)
+	{
+		ssize_t		rc;
 
-	if (rc < 0)
+		pgstat_report_wait_start(WAIT_EVENT_BASEBACKUP_READ);
+		rc = pg_pread(fd, buf + transferred, nbytes - transferred,
+					  offset + transferred);
+		pgstat_report_wait_end();
+
+#ifdef SIMULATE_SHORT_READ
+		rc = Min(rc, 4096);
+#endif
+		if (rc < 0 && errno == EINTR)
+			continue;
+
+		if (rc < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m", filename)));
+
+		/* EOF */
+		if (rc == 0)
+			break;
+
+		transferred += rc;
+	}
+
+	if (!partial_read_ok && transferred > 0 && transferred != nbytes)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not read file \"%s\": %m", filename)));
-	if (!partial_read_ok && rc > 0 && rc != nbytes)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read file \"%s\": read %zd of %zu",
-						filename, rc, nbytes)));
+				 errmsg("could not read file \"%s\": read %zu of %zu",
+						filename, transferred, nbytes)));
 
-	return rc;
+	return transferred;
 }
