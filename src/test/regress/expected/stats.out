@@ -293,6 +293,60 @@ FROM prevstats AS pr;
 
 COMMIT;
 -----
+-- Changes committed by this backend whose stats are still pending must not be
+-- counted twice by VACUUM/ANALYZE, and a pending TRUNCATE must not be
+-- forgotten when another transaction commits before the stats are flushed.
+-- Pending stats are only flushed while the backend is idle, so run the
+-- TRUNCATE and ANALYZE cases inside a procedure to make sure they are not
+-- flushed in between.  VACUUM cannot run in a procedure; if the stats happen
+-- to get flushed between the INSERT and the VACUUM, that case still passes,
+-- but doesn't test anything.
+-----
+CREATE TABLE stats_pending_trunc(id int);
+CREATE TABLE stats_pending_analyze(id int);
+CREATE TABLE stats_pending_vacuum(id int);
+INSERT INTO stats_pending_trunc SELECT generate_series(1, 10);
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+CREATE PROCEDURE stats_pending_proc() LANGUAGE plpgsql AS $$
+BEGIN
+  TRUNCATE stats_pending_trunc;
+  COMMIT;
+  INSERT INTO stats_pending_trunc SELECT generate_series(1, 3);
+  COMMIT;
+  INSERT INTO stats_pending_analyze SELECT generate_series(1, 10);
+  COMMIT;
+  DELETE FROM stats_pending_analyze WHERE id <= 4;
+  COMMIT;
+  ANALYZE stats_pending_analyze;
+END
+$$;
+CALL stats_pending_proc();
+INSERT INTO stats_pending_vacuum SELECT generate_series(1, 10);
+VACUUM stats_pending_vacuum;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT relname, n_live_tup, n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum
+  FROM pg_stat_user_tables
+ WHERE relname LIKE 'stats_pending_%' ORDER BY relname;
+        relname        | n_live_tup | n_dead_tup | n_mod_since_analyze | n_ins_since_vacuum 
+-----------------------+------------+------------+---------------------+--------------------
+ stats_pending_analyze |          6 |          4 |                   0 |                 10
+ stats_pending_trunc   |          3 |          0 |                  13 |                  3
+ stats_pending_vacuum  |         10 |          0 |                  10 |                  0
+(3 rows)
+
+DROP PROCEDURE stats_pending_proc();
+DROP TABLE stats_pending_trunc, stats_pending_analyze, stats_pending_vacuum;
+-----
 -- Basic tests for pg_stat_all_indexes
 -----
 CREATE TEMPORARY TABLE test_idx_tup_read AS
