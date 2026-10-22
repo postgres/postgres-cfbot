@@ -1,2 +1,3 @@
 /libpq_testclient
+/libpq_trace_regress
 /libpq_uri_regress
