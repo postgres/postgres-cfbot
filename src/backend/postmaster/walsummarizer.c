@@ -1287,6 +1287,18 @@ SummarizeWAL(TimeLineID tli, XLogRecPtr start_lsn, bool exact,
 			break;
 	}
 
+	/*
+	 * If the timeline we were reading became historic while we were waiting
+	 * for more WAL, summarizer_read_local_xlog_page() may have moved read_upto
+	 * backwards to a switch point that precedes the point where this summary
+	 * started (for example, when a standby that has summarized WAL beyond its
+	 * recovery target is promoted). In that case we have summarized nothing,
+	 * so report that we made no progress. The caller will notice the timeline
+	 * switch on its next iteration and back up to the switch point.
+	 */
+	if (summary_end_lsn < summary_start_lsn)
+		summary_end_lsn = summary_start_lsn;
+
 	/* Destroy xlogreader. */
 	pfree(xlogreader->private_data);
 	XLogReaderFree(xlogreader);
@@ -1729,7 +1741,9 @@ summarizer_read_local_xlog_page(XLogReaderState *state,
 					 * backwards, because we might have been promoted before
 					 * reaching the end of the previous timeline. In that
 					 * case, the next loop iteration will likely conclude that
-					 * we've reached end of WAL.
+					 * we've reached end of WAL. If the switch point precedes
+					 * the start of the current summary, SummarizeWAL() then
+					 * reports no progress.
 					 */
 					private_data->read_upto = switchpoint;
 
