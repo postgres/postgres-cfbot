@@ -1276,6 +1276,8 @@ WHERE a1.amopopr = o1.oid AND a1.amoppurpose = 's' AND
 
 -- Check that each opclass in an opfamily has associated operators, that is
 -- ones whose oprleft matches opcintype (possibly by coercion).
+-- Currently, the only exception is stir_ops: STIR stores no key data and
+-- supports no scans, so its opclass intentionally has no operators.
 
 SELECT c1.opcname, c1.opcfamily
 FROM pg_opclass AS c1

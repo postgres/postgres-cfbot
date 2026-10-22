@@ -57,6 +57,8 @@
 #include "utils/syscache.h"
 
 
+int			concurrent_index_reset_snapshot_interval = 100;
+
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
 									 TransactionId xid, CommandId cid, uint32 options);
 static XLogRecPtr log_heap_update(Relation reln, Buffer oldbuf,
