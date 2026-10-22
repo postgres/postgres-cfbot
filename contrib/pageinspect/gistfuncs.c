@@ -169,10 +169,24 @@ gist_page_items_bytea(PG_FUNCTION_ARGS)
 
 		id = PageGetItemId(page, offset);
 
-		if (!ItemIdIsValid(id))
-			elog(ERROR, "invalid ItemId");
+		/* Check that the line pointer and tuple lie within the page. */
+		if (!ItemIdHasStorage(id) ||
+			ItemIdGetOffset(id) != MAXALIGN(ItemIdGetOffset(id)) ||
+			ItemIdGetLength(id) < sizeof(IndexTupleData) ||
+			ItemIdGetOffset(id) + ItemIdGetLength(id) > BLCKSZ)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid line pointer at offset %u in GiST page",
+							offset)));
 
 		itup = (IndexTuple) PageGetItem(page, id);
+
+		if (IndexTupleSize(itup) > ItemIdGetLength(id))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid index tuple length at offset %u in GiST page",
+							offset)));
+
 		tuple_len = IndexTupleSize(itup);
 
 		memset(nulls, 0, sizeof(nulls));
@@ -274,10 +288,23 @@ gist_page_items(PG_FUNCTION_ARGS)
 
 		id = PageGetItemId(page, offset);
 
-		if (!ItemIdIsValid(id))
-			elog(ERROR, "invalid ItemId");
+		/* Check that the line pointer and tuple lie within the page. */
+		if (!ItemIdHasStorage(id) ||
+			ItemIdGetOffset(id) != MAXALIGN(ItemIdGetOffset(id)) ||
+			ItemIdGetLength(id) < sizeof(IndexTupleData) ||
+			ItemIdGetOffset(id) + ItemIdGetLength(id) > BLCKSZ)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid line pointer at offset %u in GiST page",
+							offset)));
 
 		itup = (IndexTuple) PageGetItem(page, id);
+
+		if (IndexTupleSize(itup) > ItemIdGetLength(id))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid index tuple length at offset %u in GiST page",
+							offset)));
 
 		index_deform_tuple(itup, tupdesc,
 						   itup_values, itup_isnull);
