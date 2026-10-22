@@ -356,10 +356,23 @@ hash_page_items(PG_FUNCTION_ARGS)
 
 		id = PageGetItemId(uargs->page, uargs->offset);
 
-		if (!ItemIdIsValid(id))
-			elog(ERROR, "invalid ItemId");
+		/* Check that the line pointer and tuple lie within the page. */
+		if (!ItemIdHasStorage(id) ||
+			ItemIdGetOffset(id) != MAXALIGN(ItemIdGetOffset(id)) ||
+			ItemIdGetLength(id) < sizeof(IndexTupleData) ||
+			ItemIdGetOffset(id) + ItemIdGetLength(id) > BLCKSZ)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid line pointer at offset %u in hash page",
+							uargs->offset)));
 
 		itup = (IndexTuple) PageGetItem(uargs->page, id);
+
+		if (IndexInfoFindDataOffset(itup->t_info) + sizeof(uint32) > ItemIdGetLength(id))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid index tuple length at offset %u in hash page",
+							uargs->offset)));
 
 		j = 0;
 		values[j++] = Int32GetDatum((int32) uargs->offset);
