@@ -2051,7 +2051,7 @@ SELECT * FROM JSON_TABLE(jsonb '{}', '$' PASSING ROW(1, 2) < ROW(3, 4) AS x
 
 -- Test JSON_TABLE() column alias list deparsing, and the alias of a
 -- JSON_TABLE() that is renamed to avoid a conflict with another one in an
--- outer query level
+-- outer query level; leave the views around for the pg_upgrade test
 CREATE VIEW json_table_view_alias AS
 SELECT t.p, t.q
 FROM JSON_TABLE(jsonb '[{"a": 1, "b": 2}]', '$[*]'
@@ -2066,7 +2066,7 @@ CREATE OR REPLACE VIEW public.json_table_view_alias AS
                 a integer PATH '$."a"',
                 b integer PATH '$."b"'
             )
-        ) t
+        ) t(p, q)
 CREATE VIEW json_table_view_conflict AS
 SELECT a, (SELECT max(b) FROM JSON_TABLE(jsonb '[{"b": 2}]', '$[*]'
 	COLUMNS (b int PATH '$.b'))) AS m
@@ -2080,7 +2080,7 @@ CREATE OR REPLACE VIEW public.json_table_view_conflict AS
                     COLUMNS (
                         b integer PATH '$."b"'
                     )
-                )) AS m
+                ) json_table_1) AS m
    FROM JSON_TABLE(
             '[{"a": 1}]'::jsonb, '$[*]' AS json_table_path_0
             COLUMNS (
@@ -2104,13 +2104,11 @@ CREATE OR REPLACE VIEW public.json_table_view_natural AS
                 a integer PATH '$."a"',
                 b integer PATH '$."b"'
             )
-        ) t1
+        ) t1(x, y)
      JOIN JSON_TABLE(
             '[{"a": 2, "b": 1}]'::jsonb, '$[*]' AS json_table_path_0
             COLUMNS (
                 a integer PATH '$."a"',
                 b integer PATH '$."b"'
             )
-        ) t2 USING (x, y)
-DROP VIEW json_table_view_alias, json_table_view_conflict,
-	json_table_view_natural;
+        ) t2(y, x) USING (x, y)
