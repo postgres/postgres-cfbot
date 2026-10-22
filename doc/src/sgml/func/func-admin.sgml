@@ -1479,7 +1479,12 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         <literal>false</literal>) controls if the message is immediately
         flushed to WAL or not. <parameter>flush</parameter> has no effect
         with <parameter>transactional</parameter>, as the message's WAL
-        record is flushed along with its transaction.
+        record is flushed along with its transaction. In addition to logical
+        decoding clients, messages emitted by this function are delivered to
+        subscribers whose subscriptions have
+        <link linkend="sql-createsubscription-params-with-messages"><literal>messages</literal></link>
+        enabled, where they are passed to a handler registered by an extension
+        on the subscriber.
        </para></entry>
       </row>
 
