@@ -803,13 +803,25 @@ clause_selectivity_ext(PlannerInfo *root,
 	}
 	else if (is_notclause(clause))
 	{
-		/* inverse of the selectivity of the underlying clause */
-		s1 = 1.0 - clause_selectivity_ext(root,
-										  (Node *) get_notclausearg((Expr *) clause),
-										  varRelid,
-										  jointype,
-										  sjinfo,
-										  use_extended_stats);
+		Node	   *arg = (Node *) get_notclausearg((Expr *) clause);
+		VariableStatData vardata;
+
+		examine_variable(root, arg, varRelid, &vardata);
+		if (HeapTupleIsValid(vardata.statsTuple))
+		{
+			/* Use statistics to select FALSE values, excluding NULLs. */
+			s1 = booltestsel(root, IS_FALSE, arg, varRelid, jointype, sjinfo);
+		}
+		else
+		{
+			/* Otherwise, estimate the underlying clause */
+			s1 = 1.0 - clause_selectivity_ext(root, arg,
+											  varRelid,
+											  jointype,
+											  sjinfo,
+											  use_extended_stats);
+		}
+		ReleaseVariableStats(vardata);
 	}
 	else if (is_andclause(clause))
 	{
