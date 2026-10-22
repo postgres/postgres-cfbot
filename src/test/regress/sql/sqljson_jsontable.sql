@@ -1120,7 +1120,7 @@ SELECT * FROM JSON_TABLE(jsonb '{}', '$' PASSING ROW(1, 2) < ROW(3, 4) AS x
 
 -- Test JSON_TABLE() column alias list deparsing, and the alias of a
 -- JSON_TABLE() that is renamed to avoid a conflict with another one in an
--- outer query level
+-- outer query level; leave the views around for the pg_upgrade test
 CREATE VIEW json_table_view_alias AS
 SELECT t.p, t.q
 FROM JSON_TABLE(jsonb '[{"a": 1, "b": 2}]', '$[*]'
@@ -1139,5 +1139,3 @@ FROM JSON_TABLE(jsonb '[{"a": 1, "b": 2}]', '$[*]'
 NATURAL JOIN JSON_TABLE(jsonb '[{"a": 2, "b": 1}]', '$[*]'
 	COLUMNS (a int PATH '$.a', b int PATH '$.b')) t2(y, x);
 \sv json_table_view_natural;
-DROP VIEW json_table_view_alias, json_table_view_conflict,
-	json_table_view_natural;
