@@ -2993,7 +2993,10 @@ END$$;
 CREATE CAST (fp_vch AS int) WITH FUNCTION fp_vcast(fp_vch) AS IMPLICIT;
 CREATE TABLE fp_reentry_fk (a fp_vch
     REFERENCES fp_reentry_pk (id));
--- cast re-enters with DML on the same FK
+-- The cast re-enters with DML on the same FK, so the inner check looks up
+-- the same cached SPI plan while the outer check is still executing it.
+-- If the plan has been invalidated meanwhile (as CLOBBER_CACHE_ALWAYS makes
+-- certain), the inner check must not free it out from under the outer one.
 INSERT INTO fp_reentry_fk SELECT row(1)::fp_vch FROM generate_series(1, 2);
 SELECT a, count(*) FROM fp_reentry_fk GROUP BY a ORDER BY a;
 DROP TABLE fp_reentry_fk, fp_reentry_pk;
