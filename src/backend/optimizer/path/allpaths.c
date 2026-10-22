@@ -3686,7 +3686,8 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 											agg_info->group_clauses,
 											NIL,
 											&agg_costs,
-											dNumGroups);
+											dNumGroups,
+											NIL);
 
 			add_path(grouped_rel, path);
 		}
@@ -3762,7 +3763,8 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 											agg_info->group_clauses,
 											NIL,
 											&agg_costs,
-											dNumPartialGroups);
+											dNumPartialGroups,
+											NIL);
 
 			add_partial_path(grouped_rel, path);
 		}
@@ -3798,7 +3800,8 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 										agg_info->group_clauses,
 										NIL,
 										&agg_costs,
-										dNumGroups);
+										dNumGroups,
+										NIL);
 
 		add_path(grouped_rel, path);
 	}
@@ -3833,7 +3836,8 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 										agg_info->group_clauses,
 										NIL,
 										&agg_costs,
-										dNumPartialGroups);
+										dNumPartialGroups,
+										NIL);
 
 		add_partial_path(grouped_rel, path);
 	}
@@ -4175,6 +4179,25 @@ subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 	 */
 	if (subquery->setOperations == NULL)
 		check_output_expressions(subquery, safetyInfo);
+	else if (subquery->hasDistinctOn)
+	{
+		ListCell   *lc;
+
+		foreach(lc, subquery->targetList)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			if (tle->resjunk)
+				continue;
+
+			if ((safetyInfo->unsafeFlags[tle->resno] &
+				 UNSAFE_NOTIN_DISTINCTON_CLAUSE) == 0 &&
+				!targetIsInSortList(tle, InvalidOid, subquery->distinctClause))
+			{
+				safetyInfo->unsafeFlags[tle->resno] |= UNSAFE_NOTIN_DISTINCTON_CLAUSE;
+			}
+		}
+	}
 
 	/* Are we at top level, or looking at a setop component? */
 	if (subquery == topquery)
@@ -4223,6 +4246,37 @@ recurse_pushdown_safe(Node *setOp, Query *topquery,
 		/* EXCEPT is no good (point 2 for subquery_is_pushdown_safe) */
 		if (op->op == SETOP_EXCEPT)
 			return false;
+
+		/*
+		 * If a UNION uses DISTINCT ON (so it groups on a subset of columns),
+		 * we must not push down quals referencing non-DISTINCT ON columns.
+		 */
+		if (op->op == SETOP_UNION && !op->all &&
+			list_length(op->groupClauses) < list_length(op->colTypes))
+		{
+			int			colno;
+			int			ncols = list_length(op->colTypes);
+
+			for (colno = 1; colno <= ncols; colno++)
+			{
+				ListCell   *lc;
+				bool		found = false;
+
+				foreach(lc, op->groupClauses)
+				{
+					SortGroupClause *gc = lfirst_node(SortGroupClause, lc);
+
+					if (gc->tleSortGroupRef == colno)
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+					safetyInfo->unsafeFlags[colno] |= UNSAFE_NOTIN_DISTINCTON_CLAUSE;
+			}
+		}
+
 		/* Else recurse */
 		if (!recurse_pushdown_safe(op->larg, topquery, safetyInfo))
 			return false;

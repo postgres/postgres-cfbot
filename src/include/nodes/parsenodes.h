@@ -226,6 +226,8 @@ typedef struct Query
 
 	List	   *distinctClause; /* a list of SortGroupClause's */
 
+	List	   *distinctSortClause; /* a list of SortGroupClause's for inline DISTINCT ON ORDER BY */
+
 	List	   *sortClause;		/* a list of SortGroupClause's */
 
 	Node	   *limitOffset;	/* # of result tuples to skip (int8 expr) */
@@ -2269,6 +2271,7 @@ typedef struct SelectStmt
 	struct SelectStmt *larg;	/* left child */
 	struct SelectStmt *rarg;	/* right child */
 	/* Eventually add fields for CORRESPONDING spec here */
+	List	   *distinctSortClause; /* inline DISTINCT ON ORDER BY clause (list of SortBy's) */
 } SelectStmt;
 
 
@@ -2310,6 +2313,7 @@ typedef struct SetOperationStmt
 	/* a list of SortGroupClause's */
 	List	   *groupClauses pg_node_attr(query_jumble_ignore);
 	/* groupClauses is NIL if UNION ALL, but must be set otherwise */
+	List	   *sortClauses pg_node_attr(query_jumble_ignore); /* inline DISTINCT ON ORDER BY clauses */
 } SetOperationStmt;
 
 
