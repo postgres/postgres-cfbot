@@ -202,7 +202,7 @@ BeginSampleScan (SampleScanState *node,
    This function may adjust the fields <literal>node-&gt;use_bulkread</literal>
    and <literal>node-&gt;use_pagemode</literal>.
    If <literal>node-&gt;use_bulkread</literal> is <literal>true</literal>, which it is by
-   default, the scan will use a buffer access strategy that encourages
+   default, the scan will use a <literal>bulkread</literal> buffer access strategy that encourages
    recycling buffers after use.  It might be reasonable to set this
    to <literal>false</literal> if the scan will visit only a small fraction of the
    table's pages.
