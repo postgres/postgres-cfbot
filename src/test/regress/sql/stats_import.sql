@@ -1326,6 +1326,7 @@ CREATE STATISTICS stats_import.test_stat_clone
 --
 -- Copy stats from test to test_clone, and is_odd to is_odd_clone
 --
+-- If most_common_vals_kind is not specified, default to 1-STATISTIC_KIND_MCV.
 SELECT s.schemaname, s.tablename, s.attname, s.inherited, r.*
 FROM pg_catalog.pg_stats AS s
 CROSS JOIN LATERAL
@@ -1348,6 +1349,50 @@ CROSS JOIN LATERAL
         'range_bounds_histogram', s.range_bounds_histogram::text,
         'range_empty_frac', s.range_empty_frac,
         'range_length_histogram', s.range_length_histogram::text) AS r
+WHERE s.schemaname = 'stats_import'
+AND s.tablename IN ('test', 'is_odd')
+ORDER BY s.tablename, s.attname, s.inherited;
+
+SELECT c.relname, COUNT(*) AS num_stats
+FROM pg_class AS c
+JOIN pg_statistic s ON s.starelid = c.oid
+WHERE c.relnamespace = 'stats_import'::regnamespace
+AND c.relname IN ('test', 'test_clone', 'is_odd', 'is_odd_clone')
+GROUP BY c.relname
+ORDER BY c.relname;
+
+SELECT relname, (stats).*
+FROM stats_import.pg_statistic_get_difference('test', 'test_clone')
+\gx
+
+SELECT relname, (stats).*
+FROM stats_import.pg_statistic_get_difference('is_odd', 'is_odd_clone')
+\gx
+
+-- Specify 8-STATISTIC_KIND_MCV_VALUE_SORTED.
+SELECT s.schemaname, s.tablename, s.attname, s.inherited, r.*
+FROM pg_catalog.pg_stats AS s
+CROSS JOIN LATERAL
+    pg_catalog.pg_restore_attribute_stats(
+        'schemaname', 'stats_import',
+        'relname', s.tablename::text || '_clone',
+        'attname', s.attname::text,
+        'inherited', s.inherited,
+        'version', 150000,
+        'null_frac', s.null_frac,
+        'avg_width', s.avg_width,
+        'n_distinct', s.n_distinct,
+        'most_common_vals', s.most_common_vals::text,
+        'most_common_freqs', s.most_common_freqs,
+        'histogram_bounds', s.histogram_bounds::text,
+        'correlation', s.correlation,
+        'most_common_elems', s.most_common_elems::text,
+        'most_common_elem_freqs', s.most_common_elem_freqs,
+        'elem_count_histogram', s.elem_count_histogram,
+        'range_bounds_histogram', s.range_bounds_histogram::text,
+        'range_empty_frac', s.range_empty_frac,
+        'range_length_histogram', s.range_length_histogram::text,
+        'most_common_vals_kind', 8::smallint) AS r
 WHERE s.schemaname = 'stats_import'
 AND s.tablename IN ('test', 'is_odd')
 ORDER BY s.tablename, s.attname, s.inherited;
@@ -2897,5 +2942,177 @@ SELECT * FROM stats_import.test_range_expr_null
   WHERE (rng * int4range(50, 150)) && '[60,70)'::int4range;
 SELECT COUNT(*) FROM stats_import.test_range_expr_null
   WHERE (rng * int4range(50, 150)) && '[60,70)'::int4range;
+
+-- Test pg_restore_extended_stats() with respect to the most_common_vals_kind parameter.
+\set check_sql 'SELECT cn.nspname AS schemaname,'
+\set check_sql :check_sql 'c.relname AS tablename,'
+\set check_sql :check_sql 'sn.nspname AS statistics_schemaname,'
+\set check_sql :check_sql 's.stxname AS statistics_name,'
+\set check_sql :check_sql 'stat.expr,'
+\set check_sql :check_sql 'sd.stxdinherit AS inherited,'
+\set check_sql :check_sql '(stat.a).stanullfrac AS null_frac,'
+\set check_sql :check_sql '(stat.a).stawidth AS avg_width,'
+\set check_sql :check_sql '(stat.a).stadistinct AS n_distinct,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 1 THEN 1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 1 THEN 1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 1 THEN 1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 1 THEN 1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 1 THEN 1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 8 THEN 8 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 8 THEN 8 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 8 THEN 8 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 8 THEN 8 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 8 THEN 8 '
+\set check_sql :check_sql 'else -1 '
+\set check_sql :check_sql 'END) AS most_common_vals_kind,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 1 THEN (stat.a).stavalues1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 1 THEN (stat.a).stavalues2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 1 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 1 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 1 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 8 THEN (stat.a).stavalues1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 8 THEN (stat.a).stavalues2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 8 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 8 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 8 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'END) AS most_common_vals_kind,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 1 THEN (stat.a).stanumbers1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 1 THEN (stat.a).stanumbers2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 1 THEN (stat.a).stanumbers3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 1 THEN (stat.a).stanumbers4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 1 THEN (stat.a).stanumbers5 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 8 THEN (stat.a).stanumbers1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 8 THEN (stat.a).stanumbers2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 8 THEN (stat.a).stanumbers3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 8 THEN (stat.a).stanumbers4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 8 THEN (stat.a).stanumbers5 '
+\set check_sql :check_sql 'END) AS most_common_freqs,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 2 THEN (stat.a).stavalues1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 2 THEN (stat.a).stavalues2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 2 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 2 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 2 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'END) AS histogram_bounds,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 2 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 2 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 2 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'END) AS histogram_bounds,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 3 THEN (stat.a).stanumbers1[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 3 THEN (stat.a).stanumbers2[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 3 THEN (stat.a).stanumbers3[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 3 THEN (stat.a).stanumbers4[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 3 THEN (stat.a).stanumbers5[1] '
+\set check_sql :check_sql 'END) correlation,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 4 THEN (stat.a).stavalues1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 4 THEN (stat.a).stavalues2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 4 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 4 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 4 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'END) AS most_common_elems,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 4 THEN (stat.a).stanumbers1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 4 THEN (stat.a).stanumbers2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 4 THEN (stat.a).stanumbers3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 4 THEN (stat.a).stanumbers4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 4 THEN (stat.a).stanumbers5 '
+\set check_sql :check_sql 'END) AS most_common_elem_freqs,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 5 THEN (stat.a).stanumbers1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 5 THEN (stat.a).stanumbers2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 5 THEN (stat.a).stanumbers3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 5 THEN (stat.a).stanumbers4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 5 THEN (stat.a).stanumbers5 '
+\set check_sql :check_sql 'END) AS elem_count_histogram,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 6 THEN (stat.a).stavalues1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 6 THEN (stat.a).stavalues2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 6 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 6 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 6 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'END) AS range_length_histogram,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 6 THEN (stat.a).stanumbers1[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 6 THEN (stat.a).stanumbers2[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 6 THEN (stat.a).stanumbers3[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 6 THEN (stat.a).stanumbers4[1] '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 6 THEN (stat.a).stanumbers5[1] '
+\set check_sql :check_sql 'END) AS range_empty_frac,'
+\set check_sql :check_sql '(CASE '
+\set check_sql :check_sql 'WHEN (stat.a).stakind1 = 7 THEN (stat.a).stavalues1 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind2 = 7 THEN (stat.a).stavalues2 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind3 = 7 THEN (stat.a).stavalues3 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind4 = 7 THEN (stat.a).stavalues4 '
+\set check_sql :check_sql 'WHEN (stat.a).stakind5 = 7 THEN (stat.a).stavalues5 '
+\set check_sql :check_sql 'END) AS range_bounds_histogram '
+\set check_sql :check_sql 'FROM pg_statistic_ext s JOIN pg_class c ON (c.oid = s.stxrelid) '
+\set check_sql :check_sql 'LEFT JOIN pg_statistic_ext_data sd ON (s.oid = sd.stxoid) '
+\set check_sql :check_sql 'LEFT JOIN pg_namespace cn ON (cn.oid = c.relnamespace) '
+\set check_sql :check_sql 'LEFT JOIN pg_namespace sn ON (sn.oid = s.stxnamespace) '
+\set check_sql :check_sql 'JOIN LATERAL ('
+\set check_sql :check_sql 'SELECT unnest(pg_get_statisticsobjdef_expressions(s.oid)) AS expr,'
+\set check_sql :check_sql 'unnest(sd.stxdexpr)::pg_statistic AS a'
+\set check_sql :check_sql ') stat ON (stat.expr IS NOT NULL) '
+\set check_sql :check_sql 'WHERE pg_has_role(c.relowner, ''USAGE'') '
+\set check_sql :check_sql 'AND (c.relrowsecurity = false OR NOT row_security_active(c.oid)) '
+\set check_sql :check_sql 'AND sn.nspname = ''stats_import'' AND s.stxname = ''test_stat_clone'''
+
+-- If most_common_vals_kind is not specified, default to 1-STATISTIC_KIND_MCV.
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_clone',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_stat_clone',
+  'inherited', false,
+  'exprs', '[
+  { "most_common_vals": "{11,13,12}", "most_common_freqs": "{0.30,0.20,0.10}" },
+  { "most_common_vals": "{11,33,22}", "most_common_freqs": "{0.33,0.22,0.11}" }
+          ]'::jsonb);
+:check_sql \gx
+
+-- Specify most_common_vals_kind as 1-STATISTIC_KIND_MCV.
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_clone',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_stat_clone',
+  'inherited', false,
+  'exprs', '[
+  { "most_common_vals": "{110,330,220}", "most_common_freqs": "{0.330,0.220,0.110}", "most_common_vals_kind":"1" },
+  { "most_common_vals": "{101,303,202}", "most_common_freqs": "{0.303,0.202,0.101}" }
+          ]'::jsonb);
+:check_sql \gx
+
+-- Specify most_common_vals_kind as 8-STATISTIC_KIND_MCV_VALUE_SORTED.
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_clone',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_stat_clone',
+  'inherited', false,
+  'exprs', '[
+  { "most_common_vals": "{11,12,13}", "most_common_freqs": "{0.110,0.130,0.120}", "most_common_vals_kind":"8" },
+  { "most_common_vals": "{41,42,43}", "most_common_freqs": "{0.011,0.033,0.022}", "most_common_vals_kind":"8" }
+          ]'::jsonb);
+:check_sql \gx
+
+-- Specify most_common_vals_kind as 8-STATISTIC_KIND_MCV_VALUE_SORTED.
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_clone',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_stat_clone',
+  'inherited', false,
+  'exprs', '[
+  { "most_common_vals": "{11,12,13}", "most_common_freqs": "{0.333,0.111,0.222}", "most_common_vals_kind":"8" },
+  { "most_common_vals": "{31,32,33}", "most_common_freqs": "{0.011,0.022,0.033}", "most_common_vals_kind":"8" }
+          ]'::jsonb);
+:check_sql \gx
 
 DROP SCHEMA stats_import CASCADE;
