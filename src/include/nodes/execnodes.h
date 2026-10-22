@@ -502,6 +502,9 @@ typedef struct ResultRelInfo
 	/* array of key/attr info for indices */
 	IndexInfo **ri_IndexRelationInfo;
 
+	/* old tuple version, for indexes that want amnotifydelete calls */
+	TupleTableSlot *ri_DeleteNotifySlot;
+
 	/*
 	 * For UPDATE/DELETE/MERGE result relations, the attribute number of the
 	 * row identity junk attribute in the source plan's output tuples

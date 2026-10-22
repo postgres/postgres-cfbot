@@ -131,6 +131,14 @@ typedef bool (*aminsert_function) (Relation indexRelation,
 typedef void (*aminsertcleanup_function) (Relation indexRelation,
 										  IndexInfo *indexInfo);
 
+/* a heap tuple was deleted, or replaced by a new version */
+typedef void (*amnotifydelete_function) (Relation indexRelation,
+										 Datum *values,
+										 bool *isnull,
+										 ItemPointer heap_tid,
+										 Relation heapRelation,
+										 IndexInfo *indexInfo);
+
 /* bulk delete */
 typedef IndexBulkDeleteResult *(*ambulkdelete_function) (IndexVacuumInfo *info,
 														 IndexBulkDeleteResult *stats,
@@ -297,6 +305,7 @@ typedef struct IndexAmRoutine
 	ambuildempty_function ambuildempty;
 	aminsert_function aminsert;
 	aminsertcleanup_function aminsertcleanup;	/* can be NULL */
+	amnotifydelete_function amnotifydelete; /* can be NULL */
 	ambulkdelete_function ambulkdelete;
 	amvacuumcleanup_function amvacuumcleanup;
 	amcanreturn_function amcanreturn;	/* can be NULL */

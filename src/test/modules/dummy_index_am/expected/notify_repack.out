@@ -1,0 +1,46 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin s1_repack s2_delete s2_update s2_commit s1_show
+step s2_begin: BEGIN; SELECT count(*) FROM repack_tab;
+count
+-----
+    3
+(1 row)
+
+step s1_repack: REPACK (CONCURRENTLY) repack_tab; <waiting ...>
+s2: NOTICE:  repack_idx: deleted 10
+step s2_delete: DELETE FROM repack_tab WHERE k = 1;
+s2: NOTICE:  repack_idx: deleted 20
+step s2_update: UPDATE repack_tab SET v = 21 WHERE k = 2;
+step s2_commit: COMMIT;
+s1: NOTICE:  repack_idx_repacknew: deleted 10
+s1: NOTICE:  repack_idx_repacknew: deleted 20
+step s1_repack: <... completed>
+step s1_show: SELECT * FROM repack_tab ORDER BY k;
+k| v
+-+--
+2|21
+3|30
+(2 rows)
+
+
+starting permutation: s2_begin s1_repack s2_insert s2_commit s1_show
+step s2_begin: BEGIN; SELECT count(*) FROM repack_tab;
+count
+-----
+    3
+(1 row)
+
+step s1_repack: REPACK (CONCURRENTLY) repack_tab; <waiting ...>
+step s2_insert: INSERT INTO repack_tab VALUES (4, 40);
+step s2_commit: COMMIT;
+step s1_repack: <... completed>
+step s1_show: SELECT * FROM repack_tab ORDER BY k;
+k| v
+-+--
+1|10
+2|20
+3|30
+4|40
+(4 rows)
+
