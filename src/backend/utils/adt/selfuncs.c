@@ -272,6 +272,7 @@ static bool get_actual_variable_endpoint(Relation heapRel,
 static RelOptInfo *find_join_input_rel(PlannerInfo *root, Relids relids);
 static double btcost_correlation(IndexOptInfo *index,
 								 VariableStatData *vardata);
+static bool is_same_base_simple_var(PlannerInfo *root, Node *leftnode, Node *rightnode);
 
 /* Define support routines for MCV hash tables */
 #define SH_PREFIX				MCVHashTable
@@ -3291,6 +3292,53 @@ scalargejoinsel(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
 }
 
+/*
+ * is_same_base_simple_var
+ *
+ * Check whether two plain Vars reference the same underlying table column.
+ * Different range-table indexes are allowed, as with self-join aliases.
+ */
+static bool
+is_same_base_simple_var(PlannerInfo *root, Node *leftnode, Node *rightnode)
+{
+	const Var  *leftvar;
+	const Var  *rightvar;
+	RangeTblEntry *leftrte;
+	RangeTblEntry *rightrte;
+
+	if (!leftnode || !rightnode ||
+		!IsA(leftnode, Var) || !IsA(rightnode, Var))
+		return false;
+
+	leftvar = (const Var *) leftnode;
+	rightvar = (const Var *) rightnode;
+
+	/* Only handle references to the current query's range table. */
+	if (leftvar->varlevelsup != 0 || rightvar->varlevelsup != 0 ||
+		leftvar->varno <= 0 || rightvar->varno <= 0)
+		return false;
+
+	/* Compare all semantic Var attributes except the range-table index. */
+	if (leftvar->varattno != rightvar->varattno ||
+		leftvar->vartype != rightvar->vartype ||
+		leftvar->vartypmod != rightvar->vartypmod ||
+		leftvar->varcollid != rightvar->varcollid ||
+		leftvar->varreturningtype != rightvar->varreturningtype ||
+		!bms_equal(leftvar->varnullingrels, rightvar->varnullingrels))
+		return false;
+
+	leftrte = planner_rt_fetch(leftvar->varno, root);
+	rightrte = planner_rt_fetch(rightvar->varno, root);
+
+	if (leftrte->rtekind == RTE_RELATION &&
+		rightrte->rtekind == RTE_RELATION)
+	{
+		return leftrte->relid == rightrte->relid &&
+			leftrte->inh == rightrte->inh;
+	}
+
+	return false;
+}
 
 /*
  * mergejoinscansel			- Scan selectivity of merge join.
@@ -3347,6 +3395,7 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 				rightmin,
 				rightmax;
 	double		selec;
+	bool		same_base_simple_var = false;
 
 	/* Set default results if we can't figure anything out. */
 	/* XXX should default "start" fraction be a bit more than 0? */
@@ -3363,10 +3412,16 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 	if (!right)
 		return;					/* shouldn't happen */
 
+	same_base_simple_var = is_same_base_simple_var(root, left, right);
+
 	/* Look for stats for the inputs */
 	examine_variable(root, left, 0, &leftvar);
-	examine_variable(root, right, 0, &rightvar);
-
+	if (same_base_simple_var)
+		memcpy(&rightvar, &leftvar, sizeof(VariableStatData));
+	else
+	{
+		examine_variable(root, right, 0, &rightvar);
+	}
 	opmethod = get_opfamily_method(opfamily);
 
 	/* Extract the operator's declared left/right datatypes */
@@ -3501,8 +3556,14 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 		if (!get_variable_range(root, &leftvar, lstatop, collation,
 								&leftmin, &leftmax))
 			goto fail;			/* no range available from stats */
-		if (!get_variable_range(root, &rightvar, rstatop, collation,
-								&rightmin, &rightmax))
+		if (same_base_simple_var &&
+			lstatop == rstatop)
+		{
+			rightmin = leftmin;
+			rightmax = leftmax;
+		}
+		else if (!get_variable_range(root, &rightvar, rstatop, collation,
+									 &rightmin, &rightmax))
 			goto fail;			/* no range available from stats */
 	}
 	else
@@ -3511,8 +3572,14 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 		if (!get_variable_range(root, &leftvar, lstatop, collation,
 								&leftmax, &leftmin))
 			goto fail;			/* no range available from stats */
-		if (!get_variable_range(root, &rightvar, rstatop, collation,
-								&rightmax, &rightmin))
+		if (same_base_simple_var &&
+			lstatop == rstatop)
+		{
+			rightmax = leftmax;
+			rightmin = leftmin;
+		}
+		else if (!get_variable_range(root, &rightvar, rstatop, collation,
+									 &rightmax, &rightmin))
 			goto fail;			/* no range available from stats */
 	}
 
@@ -3527,8 +3594,14 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 		*leftend = selec;
 
 	/* And similarly for the right variable. */
-	selec = scalarineqsel(root, revleop, isgt, true, collation, &rightvar,
-						  leftmax, op_lefttype);
+	if (!same_base_simple_var ||
+		leop != revleop ||
+		rightmax != leftmax ||
+		op_righttype != op_lefttype)
+	{
+		selec = scalarineqsel(root, revleop, isgt, true, collation, &rightvar,
+							  leftmax, op_lefttype);
+	}
 	if (selec != DEFAULT_INEQ_SEL)
 		*rightend = selec;
 
@@ -3557,8 +3630,14 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 		*leftstart = selec;
 
 	/* And similarly for the right variable. */
-	selec = scalarineqsel(root, revltop, isgt, false, collation, &rightvar,
-						  leftmin, op_lefttype);
+	if (!same_base_simple_var ||
+		ltop != revltop ||
+		rightmin != leftmin ||
+		op_righttype != op_lefttype)
+	{
+		selec = scalarineqsel(root, revltop, isgt, false, collation, &rightvar,
+							  leftmin, op_lefttype);
+	}
 	if (selec != DEFAULT_INEQ_SEL)
 		*rightstart = selec;
 
@@ -3617,7 +3696,8 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 
 fail:
 	ReleaseVariableStats(leftvar);
-	ReleaseVariableStats(rightvar);
+	if (!same_base_simple_var)
+		ReleaseVariableStats(rightvar);
 }
 
 
