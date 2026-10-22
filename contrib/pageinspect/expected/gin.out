@@ -35,6 +35,13 @@ FROM gin_leafpage_items(get_raw_page('test1_y_idx',
 -[ RECORD 1 ]
 ?column? | t
 
+-- A posting list that claims to be longer than the page must be reported,
+-- rather than read out of bounds.  The first list's nbytes is at offset 38.
+SELECT gin_leafpage_items(set_byte(set_byte(get_raw_page('test1_y_idx',
+                        (pg_relation_size('test1_y_idx') /
+                         current_setting('block_size')::bigint)::int - 1),
+                        38, 255), 39, 255));
+ERROR:  invalid posting list in GIN data leaf page
 -- Failure with various modes.
 -- Suppress the DETAIL message, to allow the tests to work across various
 -- page sizes and architectures.

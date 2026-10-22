@@ -17,6 +17,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/tupmacs.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -231,6 +232,93 @@ get_page_from_raw(bytea *raw_page)
 	memcpy(page, VARDATA_ANY(raw_page), raw_page_size);
 
 	return page;
+}
+
+/*
+ * verify_page_header
+ *
+ * Check that a page's header is self-consistent.  Functions that walk the
+ * contents of a page must call this first: PageGetMaxOffsetNumber() and the
+ * other page accessors are all derived from these fields, so a corrupt header
+ * would make them address memory outside the page.
+ *
+ * This is deliberately not done by get_page_from_raw(), so that page_header()
+ * can still be used to inspect a page whose header is damaged.
+ */
+void
+verify_page_header(Page page)
+{
+	PageHeader	ph = (PageHeader) page;
+
+	/*
+	 * These are the checks PageIsVerified() makes on the header, except for
+	 * the pd_flags test: they are the fields the page accessors derive
+	 * addresses from.  An all-zero page passes, and callers handle those.
+	 */
+	if (!(ph->pd_lower <= ph->pd_upper &&
+		  ph->pd_upper <= ph->pd_special &&
+		  ph->pd_special <= BLCKSZ &&
+		  ph->pd_special == MAXALIGN(ph->pd_special)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid page header"),
+				 errdetail("Lower = %u, upper = %u, special = %u.",
+						   ph->pd_lower, ph->pd_upper, ph->pd_special)));
+}
+
+/*
+ * stored_value_fits
+ *
+ * Check that the next stored value of a tuple, of the given type, lies within
+ * the "len" bytes at "data".  "*off" is where the previous value ended, and
+ * is advanced past this one.  This walks the data the same way
+ * index_deform_tuple() and brin_deform_tuple() do, but checks only lengths,
+ * not the contents of a value.
+ */
+bool
+stored_value_fits(const char *data, Size len, Size *off,
+				  int16 typlen, char typalign)
+{
+	Size		o = *off;
+	Size		size;
+
+	if (typlen == -1)
+	{
+		Size		hdrsz;
+
+		if (o >= len)
+			return false;
+		o = att_align_pointer(o, typalign, -1, data + o);
+		if (o >= len || VARATT_IS_EXTERNAL(data + o))
+			return false;
+		hdrsz = VARATT_IS_1B(data + o) ? VARHDRSZ_SHORT : VARHDRSZ;
+		if (hdrsz > len - o)
+			return false;
+		size = VARSIZE_ANY(data + o);
+		if (size < hdrsz)
+			return false;
+	}
+	else if (typlen == -2)
+	{
+		const char *nul;
+
+		if (o >= len)
+			return false;
+		nul = memchr(data + o, '\0', len - o);
+		if (nul == NULL)
+			return false;
+		size = nul - (data + o) + 1;
+	}
+	else
+	{
+		o = att_align_nominal(o, typalign);
+		size = typlen;
+	}
+
+	if (o > len || size > len - o)
+		return false;
+	*off = o + size;
+	return true;
 }
 
 
