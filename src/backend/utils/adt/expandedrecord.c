@@ -20,6 +20,7 @@
 
 #include "access/detoast.h"
 #include "access/heaptoast.h"
+#include "access/toast_compression.h"
 #include "access/htup_details.h"
 #include "catalog/heap.h"
 #include "catalog/pg_type.h"
@@ -703,7 +704,8 @@ ER_get_flat_size(ExpandedObjectHeader *eohptr)
 
 			if (!erh->dnulls[i] &&
 				!attr->attbyval && attr->attlen == -1 &&
-				VARATT_IS_EXTERNAL(DatumGetPointer(erh->dvalues[i])))
+				(VARATT_IS_EXTERNAL(DatumGetPointer(erh->dvalues[i])) ||
+				 VARATT_IS_COMPRESSED_DICT(DatumGetPointer(erh->dvalues[i]))))
 			{
 				/*
 				 * expanded_record_set_field_internal can do the actual work
@@ -1155,7 +1157,8 @@ expanded_record_set_field_internal(ExpandedRecordHeader *erh, int fnumber,
 		if (expand_external)
 		{
 			if (attr->attlen == -1 &&
-				VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))
+				(VARATT_IS_EXTERNAL(DatumGetPointer(newValue)) ||
+				 VARATT_IS_COMPRESSED_DICT(DatumGetPointer(newValue))))
 			{
 				/* Detoasting should be done in short-lived context. */
 				oldcxt = MemoryContextSwitchTo(get_short_term_cxt(erh));
@@ -1185,7 +1188,8 @@ expanded_record_set_field_internal(ExpandedRecordHeader *erh, int fnumber,
 		 * by itself have made the value non-external.)
 		 */
 		if (attr->attlen == -1 &&
-			VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))
+			(VARATT_IS_EXTERNAL(DatumGetPointer(newValue)) ||
+			 VARATT_IS_COMPRESSED_DICT(DatumGetPointer(newValue))))
 			erh->flags |= ER_FLAG_HAVE_EXTERNAL;
 	}
 
@@ -1300,7 +1304,8 @@ expanded_record_set_fields(ExpandedRecordHeader *erh,
 			{
 				/* Is it an external toasted value? */
 				if (attr->attlen == -1 &&
-					VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))
+					(VARATT_IS_EXTERNAL(DatumGetPointer(newValue)) ||
+					 VARATT_IS_COMPRESSED_DICT(DatumGetPointer(newValue))))
 				{
 					if (expand_external)
 					{
@@ -1312,7 +1317,8 @@ expanded_record_set_fields(ExpandedRecordHeader *erh,
 						/* Just copy the value */
 						newValue = datumCopy(newValue, false, -1);
 						/* If it's still external, remember that */
-						if (VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))
+						if (VARATT_IS_EXTERNAL(DatumGetPointer(newValue)) ||
+							VARATT_IS_COMPRESSED_DICT(DatumGetPointer(newValue)))
 							erh->flags |= ER_FLAG_HAVE_EXTERNAL;
 					}
 				}

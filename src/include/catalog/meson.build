@@ -26,6 +26,7 @@ catalog_headers = [
   'pg_statistic.h',
   'pg_statistic_ext.h',
   'pg_statistic_ext_data.h',
+  'pg_toast_dictionary.h',
   'pg_rewrite.h',
   'pg_trigger.h',
   'pg_event_trigger.h',

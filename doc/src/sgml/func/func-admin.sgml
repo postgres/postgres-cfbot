@@ -1589,6 +1589,29 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_train_toast_dictionary</primary>
+        </indexterm>
+        <function>pg_train_toast_dictionary</function> ( <parameter>rel</parameter> <type>regclass</type>, <parameter>col</parameter> <type>name</type> <optional>, <parameter>dict_size</parameter> <type>integer</type> <literal>DEFAULT</literal> <literal>65536</literal> </optional> )
+        <returnvalue>oid</returnvalue>
+       </para>
+       <para>
+        Trains a compression dictionary of at most
+        <parameter>dict_size</parameter> bytes from the current values of
+        column <parameter>col</parameter>, which must use the
+        <literal>zstd_dict</literal> compression method, and makes it the
+        dictionary used to compress new values of that column.  Returns the
+        dictionary's OID, or <literal>NULL</literal> if no dictionary could
+        be trained from the values found.  The column's previous dictionary,
+        if any, remains in use for the values compressed with it until the
+        next rewrite of the table, such as <command>VACUUM FULL</command>,
+        which recompresses them and removes it.  Only the table's owner can
+        call this function.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_column_toast_chunk_id</primary>
         </indexterm>
         <function>pg_column_toast_chunk_id</function> ( <type>"any"</type> )

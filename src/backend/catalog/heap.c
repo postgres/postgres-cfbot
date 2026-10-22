@@ -34,6 +34,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/toast_dictionary.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/heap.h"
@@ -1787,6 +1788,13 @@ RemoveAttributeById(Oid relid, AttrNumber attnum)
 
 	RemoveStatistics(relid, attnum);
 
+	/*
+	 * The column's compression dictionaries are not removed here: its values
+	 * stay in the heap until the next rewrite, and whole-row references and
+	 * REPLICA IDENTITY FULL still read them.  The rewrite nulls them and
+	 * toast_dictionary_retire() then deletes the dictionaries.
+	 */
+
 	relation_close(rel, NoLock);
 }
 
@@ -1938,6 +1946,11 @@ heap_drop_with_catalog(Oid relid)
 	 * delete statistics
 	 */
 	RemoveStatistics(relid, 0);
+
+	/*
+	 * delete compression dictionaries
+	 */
+	RemoveToastDictionaries(relid, 0);
 
 	/*
 	 * delete attribute tuples
