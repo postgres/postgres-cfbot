@@ -70,6 +70,7 @@ ginhandler(PG_FUNCTION_ARGS)
 		.ambuildempty = ginbuildempty,
 		.aminsert = gininsert,
 		.aminsertcleanup = NULL,
+		.amnotifydelete = NULL,
 		.ambulkdelete = ginbulkdelete,
 		.amvacuumcleanup = ginvacuumcleanup,
 		.amcanreturn = NULL,
