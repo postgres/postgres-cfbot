@@ -34,6 +34,9 @@ SELECT gist_page_opaque_info('aaa'::bytea);
 SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist', 0));
 SELECT gist_page_items_bytea(get_raw_page('test_gist', 0));
 SELECT gist_page_items_bytea(get_raw_page('test_gist_btree', 0));
+-- A corrupt line pointer must be reported, not read out of bounds.  All-ones is
+-- an invalid (out-of-range, unaligned) line pointer on any architecture.
+SELECT gist_page_items_bytea(set_byte(set_byte(set_byte(set_byte(get_raw_page('test_gist_idx', 0), 24, 255), 25, 255), 26, 255), 27, 255));
 \set VERBOSITY default
 
 -- Tests with all-zero pages.
