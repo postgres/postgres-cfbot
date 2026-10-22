@@ -1259,9 +1259,9 @@ PinBufferForBlock(Relation rel,
 	if (rel)
 	{
 		/*
-		 * While pgBufferUsage's "read" counter isn't bumped unless we reach
-		 * WaitReadBuffers() (so, not for hits, and not for buffers that are
-		 * zeroed instead), the per-relation stats always count them.
+		 * While the current buffer usage "read" counter isn't bumped unless
+		 * we reach WaitReadBuffers() (so, not for hits, and not for buffers
+		 * that are zeroed instead), the per-relation stats always count them.
 		 */
 		pgstat_count_buffer_read(rel);
 	}

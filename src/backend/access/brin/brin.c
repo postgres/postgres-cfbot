@@ -2434,8 +2434,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * and PARALLEL_KEY_BUFFER_USAGE.
 	 *
 	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgWalUsage or
-	 * pgBufferUsage, so do it unconditionally.
+	 * have no way of knowing whether anyone's looking at instrumentation, so
+	 * do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
 						   mul_size(sizeof(WalUsage), pcxt->nworkers));

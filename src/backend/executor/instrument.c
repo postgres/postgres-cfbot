@@ -24,7 +24,6 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
-BufferUsage pgBufferUsage;
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
 InstrStackState instr_stack = {
@@ -62,39 +61,21 @@ InstrStackGrow(void)
 }
 
 /* General purpose instrumentation handling */
-Instrumentation *
-InstrAlloc(int instrument_options)
-{
-	Instrumentation *instr = palloc0_object(Instrumentation);
-
-	InstrInitOptions(instr, instrument_options);
-	return instr;
-}
-
-void
-InstrInitOptions(Instrumentation *instr, int instrument_options)
-{
-	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
-	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
-	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
-}
-
 static inline bool
 InstrNeedStack(int instrument_options)
 {
 	return (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0;
 }
 
-/*
- * Common part of InstrStart and InstrStartNode: start the timer, and enter
- * the entry onto the instrumentation stack.
- *
- * The diff-mode handling (see struct comment in instrument.h) lives only in
- * InstrStart: node instrumentation never measures by diffing, so keeping the
- * checks out of here keeps them out of the per-tuple ExecProcNodeInstr path.
- */
-static inline void
-InstrStartCommon(Instrumentation *instr)
+void
+InstrInitOptions(Instrumentation *instr, int instrument_options)
+{
+	instr->need_stack = InstrNeedStack(instrument_options);
+	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+}
+
+inline void
+InstrStart(Instrumentation *instr)
 {
 	if (instr->need_timer)
 	{
@@ -108,26 +89,9 @@ InstrStartCommon(Instrumentation *instr)
 		InstrPushStack(instr);
 }
 
-inline void
-InstrStart(Instrumentation *instr)
-{
-	InstrStartCommon(instr);
-
-	if (!instr->need_stack)
-	{
-		/* save buffer usage totals at start, if needed */
-		if (instr->need_bufusage)
-			instr->bufusage_start = pgBufferUsage;
-
-		if (instr->need_walusage)
-			instr->walusage_start = pgWalUsage;
-	}
-}
-
 /*
  * Helper for InstrStop() and InstrStopNode(), to avoid code duplication
- * despite slightly different needs about how time is accumulated.  Like
- * InstrStartCommon, this omits the diff-mode handling.
+ * despite slightly different needs about how time is accumulated.
  */
 static inline void
 InstrStopCommon(Instrumentation *instr, instr_time *accum_time)
@@ -155,18 +119,6 @@ void
 InstrStop(Instrumentation *instr)
 {
 	InstrStopCommon(instr, &instr->total);
-
-	if (!instr->need_stack)
-	{
-		/* Add delta of buffer usage since InstrStart to the totals */
-		if (instr->need_bufusage)
-			BufferUsageAccumDiff(&instr->bufusage,
-								 &pgBufferUsage, &instr->bufusage_start);
-
-		if (instr->need_walusage)
-			WalUsageAccumDiff(&instr->walusage,
-							  &pgWalUsage, &instr->walusage_start);
-	}
 }
 
 /*
@@ -351,7 +303,6 @@ InstrQueryAlloc(int instrument_options)
 	instr->instr_cxt = instr_cxt;
 
 	InstrInitOptions(&instr->instr, instrument_options);
-	instr->instr.need_stack = InstrNeedStack(instrument_options);
 	dlist_init(&instr->unfinalized_entries);
 
 	return instr;
@@ -451,12 +402,11 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
 }
 
 /*
- * Record WAL/buffer usage imported from a parallel worker.
+ * Record WAL usage imported from a parallel worker.
  */
 void
 InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
 	WalUsageAdd(&pgWalUsage, walusage);
 }
 
@@ -509,7 +459,6 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 {
 	memset(instr, 0, sizeof(NodeInstrumentation));
 	InstrInitOptions(&instr->instr, instrument_options);
-	instr->instr.need_stack = InstrNeedStack(instrument_options);
 	instr->async_mode = async_mode;
 }
 
@@ -517,7 +466,7 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 inline void
 InstrStartNode(NodeInstrumentation *instr)
 {
-	InstrStartCommon(&instr->instr);
+	InstrStart(&instr->instr);
 }
 
 
@@ -653,7 +602,6 @@ InstrAllocTrigger(QueryInstrumentation *qinstr, int instrument_options, int n)
 	for (i = 0; i < n; i++)
 	{
 		InstrInitOptions(&tginstr[i].instr, instrument_options);
-		tginstr[i].instr.need_stack = InstrNeedStack(instrument_options);
 		InstrQueryRememberChild(qinstr, &tginstr[i].instr);
 	}
 
@@ -711,36 +659,6 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	INSTR_TIME_ADD(dst->local_blk_write_time, add->local_blk_write_time);
 	INSTR_TIME_ADD(dst->temp_blk_read_time, add->temp_blk_read_time);
 	INSTR_TIME_ADD(dst->temp_blk_write_time, add->temp_blk_write_time);
-}
-
-/* dst += add - sub */
-inline void
-BufferUsageAccumDiff(BufferUsage *dst,
-					 const BufferUsage *add,
-					 const BufferUsage *sub)
-{
-	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
-	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
-	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
-	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
-	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
-	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;
-	dst->local_blks_dirtied += add->local_blks_dirtied - sub->local_blks_dirtied;
-	dst->local_blks_written += add->local_blks_written - sub->local_blks_written;
-	dst->temp_blks_read += add->temp_blks_read - sub->temp_blks_read;
-	dst->temp_blks_written += add->temp_blks_written - sub->temp_blks_written;
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_read_time,
-						  add->shared_blk_read_time, sub->shared_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_write_time,
-						  add->shared_blk_write_time, sub->shared_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_read_time,
-						  add->local_blk_read_time, sub->local_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_write_time,
-						  add->local_blk_write_time, sub->local_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_read_time,
-						  add->temp_blk_read_time, sub->temp_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
-						  add->temp_blk_write_time, sub->temp_blk_write_time);
 }
 
 /* helper functions for WAL usage accumulation */
