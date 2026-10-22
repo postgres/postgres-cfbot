@@ -84,6 +84,16 @@ ERROR:  input page is not a valid GiST page
 -- an invalid (out-of-range, unaligned) line pointer on any architecture.
 SELECT gist_page_items_bytea(set_byte(set_byte(set_byte(set_byte(get_raw_page('test_gist_idx', 0), 24, 255), 25, 255), 26, 255), 27, 255));
 ERROR:  invalid line pointer at offset 1 in GiST page
+-- A stored value must not reach past the end of its tuple.  The index has one
+-- tuple, at pd_upper, and its first data byte is the 1-byte varlena header of
+-- the range.  0xFF claims 127 bytes on both byte orders.
+CREATE TABLE test_gist_range AS SELECT int4range(1, 11) r;
+CREATE INDEX test_gist_range_idx ON test_gist_range USING gist (r);
+SELECT gist_page_items(set_byte(get_raw_page('test_gist_range_idx', 0),
+       (SELECT upper FROM page_header(get_raw_page('test_gist_range_idx', 0))) + 8, 255),
+       'test_gist_range_idx');
+ERROR:  invalid tuple at offset 1 in GiST page
+DROP TABLE test_gist_range;
 \set VERBOSITY default
 -- Tests with all-zero pages.
 SHOW block_size \gset
