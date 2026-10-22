@@ -77,25 +77,26 @@
  *
  * The ckpt counters allow backends to watch for completion of a checkpoint
  * request they send.  Here's how it works:
- *	* At start of a checkpoint, checkpointer reads (and clears) the request
- *	  flags and increments ckpt_started, while holding ckpt_lck.
+ *	* At start of a checkpoint, checkpointer sets ckpt_started != ckpt_done
+ *    and reset ckpt_state, clearing all its flags and advancing its version.
  *	* On completion of a checkpoint, checkpointer sets ckpt_done to
  *	  equal ckpt_started.
- *	* On failure of a checkpoint, checkpointer increments ckpt_failed
+ *	* On failure of a checkpoint, checkpointer changes ckpt_failed
  *	  and sets ckpt_done to equal ckpt_started.
  *
  * The algorithm for backends is:
- *	1. Record current values of ckpt_failed and ckpt_started, and
- *	   set request flags, while holding ckpt_lck.
+ *	1. Record current values of ckpt_done, ckpt_failed and ckpt_started,
+ *     then atomically set request flags saving the previous state.
  *	2. Send signal to request checkpoint.
- *	3. Sleep until ckpt_started changes.  Now you know a checkpoint has
+ *	3. If ckpt_state version didn't change since the flags were set,
+ *     sleep until ckpt_started changes.  Now you know a checkpoint has
  *	   begun since you started this algorithm (although *not* that it was
  *	   specifically initiated by your signal), and that it is using your flags.
- *	4. Record new value of ckpt_started.
- *	5. Sleep until ckpt_done >= saved value of ckpt_started.  (Use modulo
- *	   arithmetic here in case counters wrap around.)  Now you know a
- *	   checkpoint has started and completed, but not whether it was
- *	   successful.
+ *	4. Record new value of ckpt_started. At this stage if ckpt_failed
+ *	   has changed since step 1, report the early error.
+ *	5. Sleep until ckpt_done - ckpt_started >= 0 value of ckpt_started,
+ *     checkpoint has started and completed, even after ckpt_started, wraps
+ *     around, but not whether it was successful.
  *	6. If ckpt_failed is different from the originally saved value,
  *	   assume request failed; otherwise it was definitely successful.
  *
@@ -120,13 +121,11 @@ typedef struct
 {
 	pid_t		checkpointer_pid;	/* PID (0 if not started) */
 
-	slock_t		ckpt_lck;		/* protects all the ckpt_* fields */
+	volatile int		ckpt_started;	/* advances when checkpoint starts */
+	volatile int		ckpt_done;		/* advances when checkpoint done */
+	volatile int		ckpt_failed;	/* advances when checkpoint fails */
 
-	int			ckpt_started;	/* advances when checkpoint starts */
-	int			ckpt_done;		/* advances when checkpoint done */
-	int			ckpt_failed;	/* advances when checkpoint fails */
-
-	int			ckpt_flags;		/* checkpoint flags, as defined in xlog.h */
+	pg_atomic_uint32	ckpt_state;	/* checkpoint state, as defined in xlog.h */
 
 	ConditionVariable start_cv; /* signaled when ckpt_started advances */
 	ConditionVariable done_cv;	/* signaled when ckpt_done advances */
@@ -314,10 +313,9 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 		/* Warn any waiting backends that the checkpoint failed. */
 		if (ckpt_active)
 		{
-			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
 			CheckpointerShmem->ckpt_failed++;
+			pg_memory_barrier();
 			CheckpointerShmem->ckpt_done = CheckpointerShmem->ckpt_started;
-			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
 
 			ConditionVariableBroadcast(&CheckpointerShmem->done_cv);
 
@@ -367,6 +365,8 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 	{
 		bool		do_checkpoint = false;
 		int			flags = 0;
+		uint32		state = 0;
+		uint32		last_state = 0;
 		pg_time_t	now;
 		int			elapsed_secs;
 		int			cur_timeout;
@@ -387,10 +387,10 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 
 		/*
 		 * Detect a pending checkpoint request by checking whether the flags
-		 * word in shared memory is nonzero.  We shouldn't need to acquire the
-		 * ckpt_lck for this.
+		 * word in shared memory is nonzero.
 		 */
-		if (((volatile CheckpointerShmemStruct *) CheckpointerShmem)->ckpt_flags)
+		state = pg_atomic_read_u32(&CheckpointerShmem->ckpt_state);
+		if (state != last_state)
 		{
 			do_checkpoint = true;
 			chkpt_or_rstpt_requested = true;
@@ -424,15 +424,24 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 			do_restartpoint = RecoveryInProgress();
 
 			/*
-			 * Atomically fetch the request flags to figure out what kind of a
-			 * checkpoint we should perform, and increase the started-counter
-			 * to acknowledge that we've started a new checkpoint.
+			 * Increment ckpt_started, indicating to any waiting backend that 
+			 * holds a snapshot of it that we are taking their flags.
 			 */
-			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
-			flags |= CheckpointerShmem->ckpt_flags;
-			CheckpointerShmem->ckpt_flags = 0;
 			CheckpointerShmem->ckpt_started++;
-			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
+
+			/*
+			 * CAS on the state, copying and clearing the flags, and advancing
+			 * state version. The state version lets waiting backends who observed
+			 * ckpt_started after the increment know that their flags have been
+			 * taken.
+			 */
+			for(;;){
+				pg_atomic_uint32 *ckpt_state = &CheckpointerShmem->ckpt_state;
+				last_state = CHECKPOINT_ROTATE_STATE(state);
+				if(pg_atomic_compare_exchange_u32(ckpt_state, &state, last_state))
+					break;
+			}
+			flags |= state & CHECKPOINT_FLAGS_MASK;
 
 			ConditionVariableBroadcast(&CheckpointerShmem->start_cv);
 
@@ -509,9 +518,7 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 			/*
 			 * Indicate checkpoint completion to any waiting backends.
 			 */
-			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
 			CheckpointerShmem->ckpt_done = CheckpointerShmem->ckpt_started;
-			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
 
 			ConditionVariableBroadcast(&CheckpointerShmem->done_cv);
 
@@ -580,7 +587,8 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
 		 * If any checkpoint flags have been set, redo the loop to handle the
 		 * checkpoint without sleeping.
 		 */
-		if (((volatile CheckpointerShmemStruct *) CheckpointerShmem)->ckpt_flags)
+		state = pg_atomic_read_u32(&CheckpointerShmem->ckpt_state);
+		if (state != last_state)
 			continue;
 
 		/*
@@ -767,13 +775,7 @@ CheckArchiveTimeout(void)
 static bool
 FastCheckpointRequested(void)
 {
-	volatile CheckpointerShmemStruct *cps = CheckpointerShmem;
-
-	/*
-	 * We don't need to acquire the ckpt_lck in this case because we're only
-	 * looking at a single flag bit.
-	 */
-	if (cps->ckpt_flags & CHECKPOINT_FAST)
+	if (pg_atomic_read_u32(&CheckpointerShmem->ckpt_state) & CHECKPOINT_FAST)
 		return true;
 	return false;
 }
@@ -984,7 +986,6 @@ CheckpointerShmemRequest(void *arg)
 static void
 CheckpointerShmemInit(void *arg)
 {
-	SpinLockInit(&CheckpointerShmem->ckpt_lck);
 	CheckpointerShmem->max_requests = Min(NBuffers, MAX_CHECKPOINT_REQUESTS);
 	CheckpointerShmem->head = CheckpointerShmem->tail = 0;
 	ConditionVariableInit(&CheckpointerShmem->start_cv);
@@ -1066,6 +1067,10 @@ RequestCheckpoint(int flags)
 	int			ntries;
 	int			old_failed,
 				old_started;
+	int			new_failed,
+				new_started,
+				new_done;
+	uint32		old_state;
 
 	/*
 	 * If in a standalone backend, just do it ourselves.
@@ -1085,22 +1090,34 @@ RequestCheckpoint(int flags)
 	}
 
 	/*
-	 * Atomically set the request flags, and take a snapshot of the counters.
-	 * When we see ckpt_started > old_started, we know the flags we set here
-	 * have been seen by checkpointer.
+	 * Take a snapshot of .ckpt_done, .ckpt_started, .ckpt_failed before we
+	 * set the request flags, for later comparison.
 	 *
 	 * Note that we OR the flags with any existing flags, to avoid overriding
 	 * a "stronger" request by another backend.  The flag senses must be
 	 * chosen to make this work!
 	 */
-	SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
-
-	old_failed = CheckpointerShmem->ckpt_failed;
 	old_started = CheckpointerShmem->ckpt_started;
-	CheckpointerShmem->ckpt_flags |= (flags | CHECKPOINT_REQUESTED);
+	old_failed = CheckpointerShmem->ckpt_failed;
+	old_state = pg_atomic_fetch_or_u32(&CheckpointerShmem->ckpt_state, flags | CHECKPOINT_REQUESTED);
 
-	SpinLockRelease(&CheckpointerShmem->ckpt_lck);
-
+	/*
+	 * ckpt_started might have changed since we observed it, in that case,
+	 * checkpointer might have taken the flags before or after we set ours.
+	 */
+	new_started = CheckpointerShmem->ckpt_started;
+	if (new_started != old_started)
+	{
+		uint32 new_state = pg_atomic_read_membarrier_u32(&CheckpointerShmem->ckpt_state);
+		if (((new_state ^ old_state) & ~CHECKPOINT_FLAGS_MASK) == 0)
+		{
+			/*
+			 * state version didn't change, so we will have to wait 
+			 * for the next checkpoint.
+			 */
+			old_started = new_started;
+		}
+	}
 	/*
 	 * Set checkpointer's latch to request checkpoint.  It's possible that the
 	 * checkpointer hasn't started yet, so we will retry a few times if
@@ -1142,16 +1159,11 @@ RequestCheckpoint(int flags)
 	 */
 	if (flags & CHECKPOINT_WAIT)
 	{
-		int			new_started,
-					new_failed;
-
 		/* Wait for a new checkpoint to start. */
 		ConditionVariablePrepareToSleep(&CheckpointerShmem->start_cv);
 		for (;;)
 		{
-			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
 			new_started = CheckpointerShmem->ckpt_started;
-			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
 
 			if (new_started != old_started)
 				break;
@@ -1161,6 +1173,16 @@ RequestCheckpoint(int flags)
 		}
 		ConditionVariableCancelSleep();
 
+		new_failed = CheckpointerShmem->ckpt_failed;
+		new_done = CheckpointerShmem->ckpt_done;
+		/*
+		* Distinguish failures of checkoints that started before this request
+		* from failures of those that started after it.
+		*/
+		if (new_failed != old_failed && new_done == old_started)
+			ereport(ERROR,
+					(errmsg("checkpoint request failed before done"),
+					errhint("Consult recent messages in the server log for details.")));
 		/*
 		 * We are waiting for ckpt_done >= new_started, in a modulo sense.
 		 */
@@ -1169,10 +1191,9 @@ RequestCheckpoint(int flags)
 		{
 			int			new_done;
 
-			SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
 			new_done = CheckpointerShmem->ckpt_done;
+			pg_memory_barrier();
 			new_failed = CheckpointerShmem->ckpt_failed;
-			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
 
 			if (new_done - new_started >= 0)
 				break;
@@ -1517,9 +1538,7 @@ FirstCallSinceLastCheckpoint(void)
 	int			new_done;
 	bool		FirstCall = false;
 
-	SpinLockAcquire(&CheckpointerShmem->ckpt_lck);
 	new_done = CheckpointerShmem->ckpt_done;
-	SpinLockRelease(&CheckpointerShmem->ckpt_lck);
 
 	if (new_done != ckpt_done)
 		FirstCall = true;
