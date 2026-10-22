@@ -59,6 +59,7 @@ ginhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = true,
 		.amcanparallel = false,
 		.amcanbuildparallel = true,
+		.amcanresetsnapshot = true,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = true,
 		.amsummarizing = false,

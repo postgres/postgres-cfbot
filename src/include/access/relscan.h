@@ -19,6 +19,7 @@
 #include "access/sdir.h"
 #include "nodes/tidbitmap.h"
 #include "port/atomics.h"
+#include "storage/condition_variable.h"
 #include "storage/relfilelocator.h"
 #include "utils/relcache.h"
 
@@ -88,7 +89,12 @@ typedef struct ParallelTableScanDescData
 	RelFileLocator phs_locator; /* physical relation to scan */
 	bool		phs_syncscan;	/* report location to syncscan logic? */
 	bool		phs_snapshot_any;	/* SnapshotAny, not phs_snapshot_data? */
+	bool		phs_reset_snapshot; /* use SO_RESET_SNAPSHOT? */
 	Size		phs_snapshot_off;	/* data for snapshot */
+	/* remaining fields are used only when phs_reset_snapshot */
+	pg_atomic_uint32 phs_nrestored; /* # participants that joined the scan
+									 * with their own snapshot */
+	ConditionVariable phs_restored_cv;	/* signaled on phs_nrestored change */
 } ParallelTableScanDescData;
 typedef struct ParallelTableScanDescData *ParallelTableScanDesc;
 

@@ -509,6 +509,16 @@
   options => 'compute_query_id_options',
 },
 
+{ name => 'concurrent_index_reset_snapshot_interval', type => 'int', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Sets the minimum time between snapshot resets during concurrent index builds.',
+  long_desc => 'Resets occur at page boundaries during the first heap scan and between tuples in later build phases. 0 resets at every opportunity. -1 disables resets.',
+  flags => 'GUC_NOT_IN_SAMPLE | GUC_UNIT_MS',
+  variable => 'concurrent_index_reset_snapshot_interval',
+  boot_val => '100',
+  min => '-1',
+  max => 'INT_MAX',
+},
+
 { name => 'config_file', type => 'string', context => 'PGC_POSTMASTER', group => 'FILE_LOCATIONS',
   short_desc => 'Sets the server\'s main configuration file.',
   flags => 'GUC_DISALLOW_IN_FILE | GUC_SUPERUSER_ONLY',
@@ -1344,6 +1354,16 @@
   variable => 'in_hot_standby_guc',
   boot_val => 'false',
   show_hook => 'show_in_hot_standby',
+},
+
+{ name => 'index_build_duplicate_check_scale_factor', type => 'real', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Limits heap fetches for early duplicate checks in concurrent unique index builds.',
+  long_desc => 'Sorting and loading have separate heap-fetch budgets, each a fraction of their input tuple count with a minimum of 1000 fetches. Zero leaves duplicate checks to validation.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'index_build_duplicate_check_scale_factor',
+  boot_val => '0.05',
+  min => '0.0',
+  max => '1.0',
 },
 
 { name => 'integer_datetimes', type => 'bool', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',

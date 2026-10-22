@@ -69,10 +69,12 @@
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -1525,8 +1527,15 @@ index_concurrently_build(Oid heapRelationId,
 	Relation	indexRelation;
 	IndexInfo  *indexInfo;
 
-	/* This had better make sure that a snapshot is active */
-	Assert(ActiveSnapshotSet());
+	Assert(!ActiveSnapshotSet());
+	Assert(!TransactionIdIsValid(MyProc->xid));
+
+	/*
+	 * Keep a snapshot while loading pg_index expressions, which may be
+	 * TOASTed, and evaluating them in BuildIndexInfo().  index_build()
+	 * manages its own snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	/* Open and lock the parent heap relation */
 	heapRel = table_open(heapRelationId, ShareUpdateExclusiveLock);
@@ -1550,6 +1559,8 @@ index_concurrently_build(Oid heapRelationId,
 	 * the catalog level.
 	 */
 	indexInfo = BuildIndexInfo(indexRelation);
+	/* Done with snapshot */
+	PopActiveSnapshot();
 	Assert(!indexInfo->ii_ReadyForInserts);
 	indexInfo->ii_Concurrent = true;
 	indexInfo->ii_BrokenHotChain = false;
@@ -1568,11 +1579,18 @@ index_concurrently_build(Oid heapRelationId,
 	index_close(indexRelation, NoLock);
 
 	/*
+	 * Updating pg_index might involve TOAST table access, so ensure we
+	 * have a valid snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+	/*
 	 * Update the pg_index row to mark the index as ready for inserts. Once we
 	 * commit this transaction, any new transactions that open the table must
 	 * insert new entries into the index for insertions and non-HOT updates.
 	 */
 	index_set_state_flags(indexRelationId, INDEX_CREATE_SET_READY);
+	/* we can do away with our snapshot */
+	PopActiveSnapshot();
 }
 
 /*
@@ -3103,6 +3121,43 @@ index_update_stats(Relation rel,
 
 
 /*
+ * index_build_resets_snapshots -- check whether this build supports resets
+ *
+ * The index AM must opt in with amcanresetsnapshot.  The scan decides whether
+ * to perform resets; see SO_RESET_SNAPSHOT.
+ */
+static bool
+index_build_resets_snapshots(Relation indexRelation, IndexInfo *indexInfo)
+{
+	return indexInfo->ii_Concurrent &&
+		indexRelation->rd_indam->amcanresetsnapshot;
+}
+
+/*
+ * index_build_rotate_snapshot -- reset the snapshot after the heap scan
+ *
+ * Call between tuples in later build phases.  Do not call while the heap
+ * scan is open: it still holds a pointer to the active snapshot.
+ */
+void
+index_build_rotate_snapshot(IndexInfo *indexInfo)
+{
+	SnapshotRotation *rotation = &indexInfo->ii_SnapshotRotation;
+
+	if (!indexInfo->ii_ResetSnapshot)
+		return;
+
+	if (rotation->snapshot == NULL)
+		StartSnapshotRotation(rotation);
+
+	if (!SnapshotRotationDue(rotation))
+		return;
+
+	RotateSnapshot(rotation);
+	INJECTION_POINT("index_build_rotate_snapshot", NULL);
+}
+
+/*
  * index_build - invoke access-method-specific index build procedure
  *
  * On entry, the index's catalog entries are valid, and its physical disk
@@ -3148,9 +3203,27 @@ index_build(Relation heapRelation,
 	 */
 	if (parallel && IsNormalProcessingMode() &&
 		indexRelation->rd_indam->amcanbuildparallel)
+	{
+		/*
+		 * Concurrent builds arrive without an active snapshot.  The planner
+		 * needs one for expressions and catalog access, so provide it here
+		 * and release it before the build starts.
+		 */
+		if (indexInfo->ii_Concurrent)
+		{
+			Assert(!ActiveSnapshotSet());
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
 		indexInfo->ii_ParallelWorkers =
 			plan_create_index_workers(RelationGetRelid(heapRelation),
 									  RelationGetRelid(indexRelation));
+		if (indexInfo->ii_Concurrent)
+			PopActiveSnapshot();
+	}
+
+	/* Decide once whether this build uses periodic snapshot resets. */
+	indexInfo->ii_ResetSnapshot =
+		index_build_resets_snapshots(indexRelation, indexInfo);
 
 	if (indexInfo->ii_ParallelWorkers == 0)
 		ereport(DEBUG1,
@@ -3193,6 +3266,12 @@ index_build(Relation heapRelation,
 		};
 
 		pgstat_progress_update_multi_param(6, progress_index, progress_vals);
+	}
+
+	if (indexInfo->ii_Concurrent)
+	{
+		Assert(!ActiveSnapshotSet());
+		PushActiveSnapshot(GetTransactionSnapshot());
 	}
 
 	/*
@@ -3295,6 +3374,12 @@ index_build(Relation heapRelation,
 	if (indexInfo->ii_ExclusionOps != NULL)
 		IndexCheckExclusion(heapRelation, indexRelation, indexInfo);
 
+	if (indexInfo->ii_Concurrent)
+	{
+		PopActiveSnapshot();
+		indexInfo->ii_SnapshotRotation.snapshot = NULL;
+	}
+
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
 
@@ -3359,7 +3444,8 @@ IndexCheckExclusion(Relation heapRelation,
 								 0, /* number of keys */
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
-								 true); /* syncscan OK */
+								 true, /* syncscan OK */
+								 false);	/* reset_snapshot not OK */
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
@@ -3419,14 +3505,18 @@ IndexCheckExclusion(Relation heapRelation,
  * incompatible HOT update done to it.  We now build the index normally via
  * index_build(), while holding a weak lock that allows concurrent
  * insert/update/delete.  Also, we index only tuples that are valid
- * as of the start of the scan (see table_index_build_scan), whereas a normal
+ * as of the scan's snapshot (see table_index_build_scan), whereas a normal
  * build takes care to include recently-dead tuples.  This is OK because
  * we won't mark the index valid until all transactions that might be able
  * to see those tuples are gone.  The reason for doing that is to avoid
  * bogus unique-index failures due to concurrent UPDATEs (we might see
  * different versions of the same row as being valid when we pass over them,
- * if we used HeapTupleSatisfiesVacuum).  This leaves us with an index that
- * does not contain any tuples added to the table while we built the index.
+ * if we used HeapTupleSatisfiesVacuum).  The build can still miss tuples
+ * added while it is running.
+ *
+ * With SO_RESET_SNAPSHOT, the build can replace the snapshot between
+ * pages to let xmin advance.  Each page is read under one snapshot; the
+ * validation phase below finds any live tuples missed by the build.
  *
  * Next, we mark the index "indisready" (but still not "indisvalid") and
  * commit the second transaction and start a third.  Again we wait for all
