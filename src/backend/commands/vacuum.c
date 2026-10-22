@@ -176,6 +176,7 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	int			ring_size;
 	bool		skip_database_stats = false;
 	bool		only_database_stats = false;
+	bool		only_database_stats_conflict = false;
 	MemoryContext vac_context;
 	ListCell   *lc;
 
@@ -196,7 +197,10 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	 */
 	ring_size = -1;
 
-	/* Parse options list */
+	/*
+	 * Parse options list, remembering any specified option that conflicts
+	 * with ONLY_DATABASE_STATS.  Only VERBOSE is allowed alongside it.
+	 */
 	foreach(lc, vacstmt->options)
 	{
 		DefElem    *opt = (DefElem *) lfirst(lc);
@@ -205,7 +209,10 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 		if (strcmp(opt->defname, "verbose") == 0)
 			verbose = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "skip_locked") == 0)
+		{
 			skip_locked = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "buffer_usage_limit") == 0)
 		{
 			const char *hintmsg;
@@ -231,6 +238,7 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 			}
 
 			ring_size = result;
+			only_database_stats_conflict = true;
 		}
 		else if (!vacstmt->is_vacuumcmd)
 			ereport(ERROR,
@@ -241,13 +249,25 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 
 		/* Parse options available on VACUUM */
 		else if (strcmp(opt->defname, "analyze") == 0)
+		{
 			analyze = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "freeze") == 0)
+		{
 			freeze = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "full") == 0)
+		{
 			full = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "disable_page_skipping") == 0)
+		{
 			disable_page_skipping = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "index_cleanup") == 0)
 		{
 			/* Interpret no string as the default, which is 'auto' */
@@ -263,13 +283,23 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 				else
 					params.index_cleanup = get_vacoptval_from_boolean(opt);
 			}
+			only_database_stats_conflict = true;
 		}
 		else if (strcmp(opt->defname, "process_main") == 0)
+		{
 			process_main = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "process_toast") == 0)
+		{
 			process_toast = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "truncate") == 0)
+		{
 			params.truncate = get_vacoptval_from_boolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "parallel") == 0)
 		{
 			int			nworkers = defGetInt32(opt);
@@ -290,9 +320,13 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 				params.nworkers = -1;
 			else
 				params.nworkers = nworkers;
+			only_database_stats_conflict = true;
 		}
 		else if (strcmp(opt->defname, "skip_database_stats") == 0)
+		{
 			skip_database_stats = defGetBoolean(opt);
+			only_database_stats_conflict = true;
+		}
 		else if (strcmp(opt->defname, "only_database_stats") == 0)
 			only_database_stats = defGetBoolean(opt);
 		else
@@ -378,12 +412,7 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("ONLY_DATABASE_STATS cannot be specified with a list of tables")));
-		/* don't require people to turn off PROCESS_TOAST/MAIN explicitly */
-		if (params.options & ~(VACOPT_VACUUM |
-							   VACOPT_VERBOSE |
-							   VACOPT_PROCESS_MAIN |
-							   VACOPT_PROCESS_TOAST |
-							   VACOPT_ONLY_DATABASE_STATS))
+		if (only_database_stats_conflict)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")));
