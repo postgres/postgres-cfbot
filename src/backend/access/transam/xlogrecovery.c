@@ -427,12 +427,13 @@ EnableStandbyMode(void)
 	StandbyMode = true;
 
 	/*
-	 * To avoid server log bloat, we don't report recovery progress in a
-	 * standby as it will always be in recovery unless promoted. We disable
-	 * startup progress timeout in standby mode to avoid calling
-	 * startup_progress_timeout_handler() unnecessarily.
+	 * Report standby recovery progress only until consistency is reached.  If
+	 * redo has not started, disable any timeout left active by an earlier
+	 * startup phase; the redo phase will start its own timer.  If standby
+	 * mode is enabled during redo, keep the existing timer active.
 	 */
-	disable_startup_progress_timeout();
+	if (!InRedo || reachedConsistency)
+		disable_startup_progress_timeout();
 }
 
 /*
@@ -1715,7 +1716,7 @@ PerformWalRecovery(void)
 					   LSN_FORMAT_ARGS(xlogreader->ReadRecPtr)));
 
 		/* Prepare to report progress of the redo phase. */
-		if (!StandbyMode)
+		if (!StandbyMode || !reachedConsistency)
 			begin_startup_progress_phase();
 
 		/*
@@ -1723,7 +1724,7 @@ PerformWalRecovery(void)
 		 */
 		do
 		{
-			if (!StandbyMode)
+			if (!StandbyMode || !reachedConsistency)
 				ereport_startup_progress("redo in progress, elapsed time: %ld.%02d s, current LSN: %X/%08X",
 										 LSN_FORMAT_ARGS(xlogreader->ReadRecPtr));
 
@@ -2234,6 +2235,8 @@ CheckRecoveryConsistency(void)
 		CheckTablespaceDirectory();
 
 		reachedConsistency = true;
+		if (StandbyMode)
+			disable_startup_progress_timeout();
 		SendPostmasterSignal(PMSIGNAL_RECOVERY_CONSISTENT);
 		ereport(LOG,
 				errmsg("consistent recovery state reached at %X/%08X",
