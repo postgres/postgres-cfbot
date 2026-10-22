@@ -37,6 +37,41 @@ PG_FUNCTION_INFO_V1(gist_page_items_bytea);
 static Page verify_gist_page(bytea *raw_page);
 
 /*
+ * Check that the null bitmap and stored values of an index tuple lie within
+ * the tuple, so that index_deform_tuple() does not read past it.
+ */
+static void
+verify_gist_tuple(TupleDesc tupdesc, IndexTuple itup, OffsetNumber offset)
+{
+	Size		len = IndexTupleSize(itup);
+	Size		hoff = IndexInfoFindDataOffset(itup->t_info);
+	uint8	   *bp = (uint8 *) ((char *) itup + sizeof(IndexTupleData));
+	Size		off = 0;
+
+	if (hoff > len)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("invalid tuple at offset %u in GiST page", offset),
+				 errdetail("Data offset %zu is outside the %zu-byte tuple.",
+						   hoff, len)));
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (IndexTupleHasNulls(itup) && att_isnull(i, bp))
+			continue;
+		if (!stored_value_fits((char *) itup + hoff, len - hoff, &off,
+							   att->attlen, att->attalign))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("invalid tuple at offset %u in GiST page", offset),
+					 errdetail("Stored values extend past the end of the %zu-byte tuple.",
+							   len)));
+	}
+}
+
+/*
  * Verify that the given bytea contains a GIST page or die in the attempt.
  * A pointer to the page is returned.
  */
@@ -45,6 +80,8 @@ verify_gist_page(bytea *raw_page)
 {
 	Page		page = get_page_from_raw(raw_page);
 	GISTPageOpaque opaq;
+
+	verify_page_header(page);
 
 	if (PageIsNew(page))
 		return page;
@@ -305,6 +342,8 @@ gist_page_items(PG_FUNCTION_ARGS)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("invalid index tuple length at offset %u in GiST page",
 							offset)));
+
+		verify_gist_tuple(tupdesc, itup, offset);
 
 		index_deform_tuple(itup, tupdesc,
 						   itup_values, itup_isnull);

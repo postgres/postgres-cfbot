@@ -52,6 +52,22 @@ SELECT (COUNT(*) = (SELECT relpages FROM pg_class WHERE relname = 'test2')) AS r
                       (SELECT (relpages - 1) FROM pg_class WHERE relname = 'test2_a_idx')) AS pages(p),
       LATERAL brin_page_items(get_raw_page('test2_a_idx', p), 'test2_a_idx') AS items;
 
+-- A corrupt line pointer must be reported, not read out of bounds.  All-ones is
+-- an invalid (out-of-range, unaligned) line pointer on any architecture.
+SELECT brin_page_items(set_byte(set_byte(set_byte(set_byte(get_raw_page('test1_a_idx', 2), 24, 255), 25, 255), 26, 255), 27, 255), 'test1_a_idx');
+
+-- A tuple must not reach past the length given by its line pointer.  First
+-- set the tuple's data offset (the low bits of bt_info) beyond the tuple, then
+-- make the first stored value of a text index claim a length beyond the tuple.
+-- The tuple is the only one on the page, so it starts at pd_upper.
+SELECT brin_page_items(set_byte(get_raw_page('test1_a_idx', 2),
+       (SELECT upper FROM page_header(get_raw_page('test1_a_idx', 2))) + 4, 31),
+       'test1_a_idx');
+CREATE INDEX test1_b_idx ON test1 USING brin (b);
+SELECT brin_page_items(set_byte(get_raw_page('test1_b_idx', 2),
+       (SELECT upper FROM page_header(get_raw_page('test1_b_idx', 2))) + 8, 255),
+       'test1_b_idx');
+
 DROP TABLE test1;
 DROP TABLE test2;
 

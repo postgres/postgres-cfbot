@@ -23,6 +23,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/tuplestore.h"
+#include "utils/typcache.h"
 
 PG_FUNCTION_INFO_V1(brin_page_type);
 PG_FUNCTION_INFO_V1(brin_page_items);
@@ -95,6 +96,8 @@ verify_brin_page(bytea *raw_page, uint16 type, const char *strtype)
 {
 	Page		page = get_page_from_raw(raw_page);
 
+	verify_page_header(page);
+
 	if (PageIsNew(page))
 		return page;
 
@@ -116,6 +119,62 @@ verify_brin_page(bytea *raw_page, uint16 type, const char *strtype)
 						   type, BrinPageType(page))));
 
 	return page;
+}
+
+/*
+ * Check that the header, null bitmap and stored values of a BRIN tuple all
+ * lie within the "len" bytes that its line pointer claims.  brin_deform_tuple()
+ * trusts the tuple, so we must not call it on one that reaches past the end.
+ *
+ * The contents of a value are not checked.
+ */
+static void
+verify_brin_tuple(BrinDesc *bdesc, BrinTuple *tuple, Size len,
+				  OffsetNumber offset)
+{
+	int			natts = bdesc->bd_tupdesc->natts;
+	bool		hasnulls = BrinTupleHasNulls(tuple);
+	Size		hoff = BrinTupleDataOffset(tuple);
+	Size		minhoff = SizeOfBrinTuple;
+	uint8	   *nullbits = (uint8 *) ((char *) tuple + SizeOfBrinTuple);
+	char	   *data;
+	Size		avail;
+	Size		off = 0;
+
+	if (hasnulls)
+		minhoff += BITMAPLEN(natts * 2);
+
+	if (hoff < minhoff || hoff > len)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("invalid tuple at offset %u in BRIN page", offset),
+				 errdetail("Data offset %zu is outside the %zu-byte tuple.",
+						   hoff, len)));
+
+	data = (char *) tuple + hoff;
+	avail = len - hoff;
+
+	for (int attno = 0; attno < natts; attno++)
+	{
+		BrinOpcInfo *opcinfo = bdesc->bd_info[attno];
+
+		/* all-nulls columns store no values */
+		if (hasnulls && !att_isnull(attno, nullbits))
+			continue;
+
+		for (int i = 0; i < opcinfo->oi_nstored; i++)
+		{
+			TypeCacheEntry *typ = opcinfo->oi_typcache[i];
+
+			if (!stored_value_fits(data, avail, &off,
+								   typ->typlen, typ->typalign))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid tuple at offset %u in BRIN page", offset),
+						 errdetail("Stored values extend past the end of the %zu-byte tuple.",
+								   len)));
+		}
+	}
 }
 
 /* Number of output arguments (columns) for brin_page_items() */
@@ -232,6 +291,18 @@ brin_page_items(PG_FUNCTION_ARGS)
 			itemId = PageGetItemId(page, offset);
 			if (ItemIdIsUsed(itemId))
 			{
+				/* Check that the line pointer and tuple lie within the page. */
+				if (ItemIdGetOffset(itemId) != MAXALIGN(ItemIdGetOffset(itemId)) ||
+					ItemIdGetLength(itemId) < SizeOfBrinTuple ||
+					ItemIdGetOffset(itemId) + ItemIdGetLength(itemId) > BLCKSZ)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid line pointer at offset %u in BRIN page",
+									offset)));
+
+				verify_brin_tuple(bdesc, (BrinTuple *) PageGetItem(page, itemId),
+								  ItemIdGetLength(itemId), offset);
+
 				dtup = brin_deform_tuple(bdesc,
 										 (BrinTuple *) PageGetItem(page, itemId),
 										 NULL);
