@@ -636,7 +636,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 				new_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
-	Instrumentation *instr = NULL;
+	QueryInstrumentation *instr = NULL;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
 	Size		dead_items_max_bytes = 0;
@@ -647,8 +647,8 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	if (instrument)
 	{
 		pg_rusage_init(&ru0);
-		instr = InstrAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
-		InstrStart(instr);
+		instr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+		InstrQueryStart(instr);
 	}
 
 	/* Used for instrumentation and stats report */
@@ -989,7 +989,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
 
-		InstrStop(instr);
+		InstrQueryStopFinalize(instr);
 
 		if (verbose || params->log_vacuum_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
@@ -1005,8 +1005,8 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
-			BufferUsage bufferusage = instr->bufusage;
-			WalUsage	walusage = instr->walusage;
+			BufferUsage bufferusage = instr->instr.bufusage;
+			WalUsage	walusage = instr->instr.walusage;
 
 			TimestampDifference(starttime, endtime, &secs_dur, &usecs_dur);
 

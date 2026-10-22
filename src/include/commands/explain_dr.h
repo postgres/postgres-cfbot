@@ -27,6 +27,8 @@ typedef struct SerializeMetrics
 } SerializeMetrics;
 
 extern DestReceiver *CreateExplainSerializeDestReceiver(ExplainState *es);
+extern void SetExplainSerializeQueryInstr(DestReceiver *dest,
+										  QueryInstrumentation *qinstr);
 extern SerializeMetrics *GetSerializationMetrics(DestReceiver *dest);
 
 #endif

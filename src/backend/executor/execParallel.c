@@ -739,7 +739,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	 *
 	 * If EXPLAIN is not in use and there are no extensions loaded that care,
 	 * we could skip this.  But we have no way of knowing whether anyone's
-	 * looking at pgBufferUsage, so do it unconditionally.
+	 * looking at instrumentation, so do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
 						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
