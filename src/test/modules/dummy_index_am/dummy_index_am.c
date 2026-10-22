@@ -18,6 +18,7 @@
 #include "catalog/index.h"
 #include "commands/vacuum.h"
 #include "nodes/pathnodes.h"
+#include "utils/rel.h"
 
 PG_MODULE_MAGIC;
 
@@ -189,6 +190,22 @@ diinsert(Relation index, Datum *values, bool *isnull,
 }
 
 /*
+ * A table tuple was deleted, or replaced by a new version.  Report its old
+ * value, so that tests can see which paths reach the index.
+ */
+static void
+dinotifydelete(Relation index, Datum *values, bool *isnull,
+			   ItemPointer ht_ctid, Relation heapRel,
+			   IndexInfo *indexInfo)
+{
+	if (isnull[0])
+		elog(NOTICE, "%s: deleted NULL", RelationGetRelationName(index));
+	else
+		elog(NOTICE, "%s: deleted %d", RelationGetRelationName(index),
+			 DatumGetInt32(values[0]));
+}
+
+/*
  * Bulk deletion of all index entries pointing to a set of table tuples.
  */
 static IndexBulkDeleteResult *
@@ -322,6 +339,7 @@ dihandler(PG_FUNCTION_ARGS)
 		.ambuild = dibuild,
 		.ambuildempty = dibuildempty,
 		.aminsert = diinsert,
+		.amnotifydelete = dinotifydelete,
 		.ambulkdelete = dibulkdelete,
 		.amvacuumcleanup = divacuumcleanup,
 		.amcanreturn = NULL,

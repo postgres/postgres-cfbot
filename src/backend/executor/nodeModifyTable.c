@@ -1238,6 +1238,11 @@ ExecInsert(ModifyTableContext *context,
 			table_tuple_complete_speculative(resultRelationDesc, slot,
 											 specToken, !specConflict);
 
+			/* The indexes were told of the tuple we just killed */
+			if (specConflict)
+				ExecNotifyIndexesOfDelete(resultRelInfo, estate, 0,
+										  &slot->tts_tid, slot);
+
 			/*
 			 * Wake up anyone waiting for our decision.  They will re-check
 			 * the tuple, see that it's no longer speculative, and wait on our
@@ -1483,9 +1488,9 @@ ExecPendingInserts(EState *estate)
 /*
  * ExecDeletePrologue -- subroutine for ExecDelete
  *
- * Prepare executor state for DELETE.  Actually, the only thing we have to do
- * here is execute BEFORE ROW triggers.  We return false if one of them makes
- * the delete a no-op; otherwise, return true.
+ * Prepare executor state for DELETE: open the indexes if one wants to hear
+ * of the delete, and execute BEFORE ROW triggers.  We return false if one of
+ * them makes the delete a no-op; otherwise, return true.
  */
 static bool
 ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
@@ -1494,6 +1499,15 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 {
 	if (result)
 		*result = TM_Ok;
+
+	/*
+	 * Open the table's indexes, if we have not done so already, so that we
+	 * can tell them of the deleted tuple.  Take their locks before the tuple
+	 * is deleted, as an INSERT or UPDATE does.
+	 */
+	if (RelationHasDeleteNotifyIndex(resultRelInfo->ri_RelationDesc) &&
+		resultRelInfo->ri_IndexRelationDescs == NULL)
+		ExecOpenIndices(resultRelInfo, false);
 
 	/* BEFORE ROW DELETE triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -1553,6 +1567,10 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	EState	   *estate = context->estate;
 	TransitionCaptureState *ar_delete_trig_tcs;
 
+	/* Foreign tables and views have no tuple ID */
+	if (ItemPointerIsValid(tupleid))
+		ExecNotifyIndexesOfDelete(resultRelInfo, estate, 0, tupleid, NULL);
+
 	/*
 	 * If this delete is the result of a partition key update that moved the
 	 * tuple to a new partition, put this row into the transition OLD TABLE,
@@ -1585,7 +1603,7 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
  *		ExecDelete
  *
  *		DELETE is like UPDATE, except that we delete the tuple and no
- *		index modifications are needed.
+ *		index entries are added.
  *
  *		When deleting from a table, tupleid identifies the tuple to delete and
  *		oldtuple is NULL.  When deleting through a view INSTEAD OF trigger,
@@ -2356,7 +2374,8 @@ lreplace:
 static void
 ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 				   ResultRelInfo *resultRelInfo, ItemPointer tupleid,
-				   HeapTuple oldtuple, TupleTableSlot *slot)
+				   HeapTuple oldtuple, TupleTableSlot *oldSlot,
+				   TupleTableSlot *slot)
 {
 	ModifyTableState *mtstate = context->mtstate;
 	List	   *recheckIndexes = NIL;
@@ -2368,6 +2387,8 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 
 		if (updateCxt->updateIndexes == TU_Summarizing)
 			flags |= EIIT_ONLY_SUMMARIZING;
+		ExecNotifyIndexesOfDelete(resultRelInfo, context->estate, flags,
+								  tupleid, oldSlot);
 		recheckIndexes = ExecInsertIndexTuples(resultRelInfo, context->estate,
 											   flags, slot, NIL,
 											   NULL);
@@ -2525,10 +2546,10 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * If the target tuple was concurrently updated, the trigger code will
 	 * have done EPQ and updated tupleid, following the update chain.  In this
 	 * case, we must fetch the most recent version of old tuple for the
-	 * benefit of RETURNING.  Technically, we could get away with not doing
-	 * this, if there is no RETURNING clause, or it doesn't refer to OLD, but
-	 * it seems preferable to always ensure that the contents of oldSlot are
-	 * correct.
+	 * benefit of RETURNING, and of indexes told of the old version.
+	 * Technically, we could get away with not doing this, if there is no
+	 * RETURNING clause, or it doesn't refer to OLD, but it seems preferable
+	 * to always ensure that the contents of oldSlot are correct.
 	 */
 	if (context->tmfd.traversed)
 	{
@@ -2747,7 +2768,7 @@ redo_act:
 		(estate->es_processed)++;
 
 	ExecUpdateEpilogue(context, &updateCxt, resultRelInfo, tupleid, oldtuple,
-					   slot);
+					   oldSlot, slot);
 
 	/* Process RETURNING if present */
 	if (resultRelInfo->ri_projectReturning)
@@ -3458,7 +3479,9 @@ lmerge_matched:
 				if (result == TM_Ok)
 				{
 					ExecUpdateEpilogue(context, &updateCxt, resultRelInfo,
-									   tupleid, NULL, newslot);
+									   tupleid, NULL,
+									   resultRelInfo->ri_oldTupleSlot,
+									   newslot);
 					mtstate->mt_merge_updated += 1;
 				}
 				break;
