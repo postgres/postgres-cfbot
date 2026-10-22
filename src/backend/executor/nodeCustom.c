@@ -218,6 +218,43 @@ ExecCustomScanInitializeWorker(CustomScanState *node,
 }
 
 void
+ExecCustomScanInstrumentEstimate(CustomScanState *node, ParallelContext *pcxt)
+{
+	const CustomExecMethods *methods = node->methods;
+
+	if (methods->EstimateDSMCustomScanInstrumentation)
+		methods->EstimateDSMCustomScanInstrumentation(node, pcxt);
+}
+
+void
+ExecCustomScanInstrumentInitDSM(CustomScanState *node, ParallelContext *pcxt)
+{
+	const CustomExecMethods *methods = node->methods;
+
+	if (methods->InitializeDSMCustomScanInstrumentation)
+		methods->InitializeDSMCustomScanInstrumentation(node, pcxt);
+}
+
+void
+ExecCustomScanInstrumentInitWorker(CustomScanState *node,
+								   ParallelWorkerContext *pwcxt)
+{
+	const CustomExecMethods *methods = node->methods;
+
+	if (methods->InitializeWorkerCustomScanInstrumentation)
+		methods->InitializeWorkerCustomScanInstrumentation(node, pwcxt);
+}
+
+void
+ExecCustomScanRetrieveInstrumentation(CustomScanState *node)
+{
+	const CustomExecMethods *methods = node->methods;
+
+	if (methods->RetrieveInstrumentationCustomScan)
+		methods->RetrieveInstrumentationCustomScan(node);
+}
+
+void
 ExecShutdownCustomScan(CustomScanState *node)
 {
 	const CustomExecMethods *methods = node->methods;
