@@ -1117,3 +1117,27 @@ SELECT * FROM JSON_TABLE(jsonb '{}', '$' PASSING 'a' < 'b' COLLATE "C" AS x
 	COLUMNS (a bool PATH '$x'));
 SELECT * FROM JSON_TABLE(jsonb '{}', '$' PASSING ROW(1, 2) < ROW(3, 4) AS x
 	COLUMNS (a bool PATH '$x'));
+
+-- Test JSON_TABLE() column alias list deparsing, and the alias of a
+-- JSON_TABLE() that is renamed to avoid a conflict with another one in an
+-- outer query level
+CREATE VIEW json_table_view_alias AS
+SELECT t.p, t.q
+FROM JSON_TABLE(jsonb '[{"a": 1, "b": 2}]', '$[*]'
+	COLUMNS (a int PATH '$.a', b int PATH '$.b')) AS t(p, q);
+\sv json_table_view_alias;
+CREATE VIEW json_table_view_conflict AS
+SELECT a, (SELECT max(b) FROM JSON_TABLE(jsonb '[{"b": 2}]', '$[*]'
+	COLUMNS (b int PATH '$.b'))) AS m
+FROM JSON_TABLE(jsonb '[{"a": 1}]', '$[*]' COLUMNS (a int PATH '$.a'));
+\sv json_table_view_conflict;
+-- NATURAL JOIN matches the columns by the names in the alias lists
+CREATE VIEW json_table_view_natural AS
+SELECT x, y
+FROM JSON_TABLE(jsonb '[{"a": 1, "b": 2}]', '$[*]'
+	COLUMNS (a int PATH '$.a', b int PATH '$.b')) t1(x, y)
+NATURAL JOIN JSON_TABLE(jsonb '[{"a": 2, "b": 1}]', '$[*]'
+	COLUMNS (a int PATH '$.a', b int PATH '$.b')) t2(y, x);
+\sv json_table_view_natural;
+DROP VIEW json_table_view_alias, json_table_view_conflict,
+	json_table_view_natural;
