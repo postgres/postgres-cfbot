@@ -372,8 +372,8 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	 * PARALLEL_VACUUM_KEY_BUFFER_USAGE and PARALLEL_VACUUM_KEY_WAL_USAGE.
 	 *
 	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgBufferUsage or
-	 * pgWalUsage, so do it unconditionally.
+	 * have no way of knowing whether anyone's looking at instrumentation, so
+	 * do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
 						   mul_size(sizeof(BufferUsage), pcxt->nworkers));

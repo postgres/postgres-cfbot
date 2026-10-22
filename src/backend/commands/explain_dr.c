@@ -41,6 +41,7 @@ typedef struct SerializeDestReceiver
 	MemoryContext tmpcontext;	/* per-row temporary memory context */
 	StringInfoData buf;			/* buffer to hold the constructed message */
 	SerializeMetrics metrics;	/* collected metrics */
+	QueryInstrumentation *qinstr;	/* parent instrumentation to accumulate to */
 } SerializeDestReceiver;
 
 /*
@@ -226,6 +227,14 @@ serializeAnalyzeStartup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	if (receiver->es->buffers)
 		instrument_options |= INSTRUMENT_BUFFERS;
 	InstrInitOptions(&receiver->metrics.instr, instrument_options);
+
+	/*
+	 * Register the metrics as a child of the query instrumentation, so the
+	 * usage measured below reaches the session totals even on error, when
+	 * serializeAnalyzeShutdown (which finalizes it on success) is not called.
+	 */
+	Assert(receiver->qinstr != NULL);
+	InstrQueryRememberChild(receiver->qinstr, &receiver->metrics.instr);
 }
 
 /*
@@ -235,6 +244,9 @@ static void
 serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	/* Accumulate what we measured to the query instrumentation. */
+	InstrFinalizeChild(&receiver->metrics.instr, &receiver->qinstr->instr);
 
 	if (receiver->finfos)
 		pfree(receiver->finfos);
@@ -277,6 +289,23 @@ CreateExplainSerializeDestReceiver(ExplainState *es)
 	self->es = es;
 
 	return (DestReceiver *) self;
+}
+
+/*
+ * Set the query instrumentation that a serialize receiver accumulates to.
+ *
+ * Must be called after ExecutorStart has created the instrumentation and
+ * before the query runs.  A no-op for other receivers.
+ */
+void
+SetExplainSerializeQueryInstr(DestReceiver *self, QueryInstrumentation *qinstr)
+{
+	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	if (receiver->pub.mydest != DestExplainSerialize)
+		return;
+
+	receiver->qinstr = qinstr;
 }
 
 /*

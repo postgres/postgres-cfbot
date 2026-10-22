@@ -581,7 +581,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	ListCell   *p;
 	ParamListInfo paramLI = NULL;
 	EState	   *estate = NULL;
-	Instrumentation plan_instr = {0};
+	QueryInstrumentation *plan_instr = NULL;
 	int			instrument_options = INSTRUMENT_TIMER;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
@@ -590,7 +590,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	if (es->buffers)
 		instrument_options |= INSTRUMENT_BUFFERS;
 
-	InstrInitOptions(&plan_instr, instrument_options);
+	plan_instr = InstrQueryAlloc(instrument_options);
 
 	if (es->memory)
 	{
@@ -602,7 +602,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	InstrStart(&plan_instr);
+	InstrQueryStart(plan_instr);
 
 	/* Look it up in the hash table */
 	entry = FetchPreparedStatement(execstmt->name, true);
@@ -637,13 +637,18 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	cplan = GetCachedPlan(entry->plansource, paramLI,
 						  CurrentResourceOwner, pstate->p_queryEnv);
 
-	InstrStop(&plan_instr);
+	if (es->memory)
+		MemoryContextSwitchTo(saved_ctx);
+
+	/*
+	 * Finalize only after switching back, so that the instrumentation's
+	 * memory context gets reparented to our context rather than the planner
+	 * one, where it would be counted as planner memory.
+	 */
+	InstrQueryStopFinalize(plan_instr);
 
 	if (es->memory)
-	{
-		MemoryContextSwitchTo(saved_ctx);
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
-	}
 
 	plan_list = cplan->stmt_list;
 
@@ -654,7 +659,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 
 		if (pstmt->commandType != CMD_UTILITY)
 			ExplainOnePlan(pstmt, into, es, query_string, paramLI, pstate->p_queryEnv,
-						   &plan_instr.total, (es->buffers ? &plan_instr.bufusage : NULL),
+						   &plan_instr->instr.total, (es->buffers ? &plan_instr->instr.bufusage : NULL),
 						   es->memory ? &mem_counters : NULL);
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, pstate, paramLI);
