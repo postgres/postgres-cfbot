@@ -4849,10 +4849,10 @@ match_previous_words(int pattern_id,
 
 	/*
 	 * Complete INSERT INTO <table> with "(" or "VALUES" or "SELECT" or
-	 * "TABLE" or "DEFAULT VALUES" or "OVERRIDING"
+	 * "TABLE" or "DEFAULT VALUES" or "OVERRIDING" or "SET"
 	 */
 	else if (TailMatches("INSERT", "INTO", MatchAny))
-		COMPLETE_WITH("(", "DEFAULT VALUES", "SELECT", "TABLE", "VALUES", "OVERRIDING");
+		COMPLETE_WITH("(", "DEFAULT VALUES", "SELECT", "SET", "TABLE", "VALUES", "OVERRIDING");
 
 	/*
 	 * Complete INSERT INTO <table> (attribs) with "VALUES" or "SELECT" or
@@ -4868,7 +4868,17 @@ match_previous_words(int pattern_id,
 
 	/* Complete after OVERRIDING clause */
 	else if (TailMatches("OVERRIDING", MatchAny, "VALUE"))
-		COMPLETE_WITH("SELECT", "TABLE", "VALUES");
+		COMPLETE_WITH("SELECT", "SET", "TABLE", "VALUES");
+
+	/* Complete INSERT INTO <table> SET with list of attributes */
+	else if (TailMatches("INSERT", "INTO", MatchAny, "SET"))
+		COMPLETE_WITH_ATTR(prev2_wd);
+	else if (TailMatches("INSERT", "INTO", MatchAny, "OVERRIDING", MatchAny, "VALUE", "SET"))
+		COMPLETE_WITH_ATTR(prev5_wd);
+	/* INSERT INTO <table> SET <attr> = */
+	else if (TailMatches("INSERT", "INTO", MatchAny, "SET", MatchAnyExcept("*=")) ||
+			 TailMatches("INSERT", "INTO", MatchAny, "OVERRIDING", MatchAny, "VALUE", "SET", MatchAnyExcept("*=")))
+		COMPLETE_WITH("=");
 
 	/* Insert an open parenthesis after "VALUES" */
 	else if (TailMatches("VALUES") && !TailMatches("DEFAULT", "VALUES"))
