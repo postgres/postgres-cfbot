@@ -2762,4 +2762,100 @@ order by 1, 2;
  2 |   
 (6 rows)
 
+-- test that all references to a variable-free grouping expression that is
+-- nullable by grouping sets are recognized as the same grouping column
+create temp table gs_nn (id int primary key, a int not null, b int);
+insert into gs_nn values (1, 1, null), (2, 2, 2);
+-- "a is not null" is reduced to constant true
+explain (verbose, costs off)
+select case when a is not null then 'has a' else 'no a' end as label,
+       grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null);
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ MixedAggregate
+   Output: CASE WHEN (true) THEN 'has a'::text ELSE 'no a'::text END, GROUPING(true), count(*), (true)
+   Hash Key: true
+   Group Key: ()
+   ->  Seq Scan on pg_temp.gs_nn
+         Output: true
+(6 rows)
+
+select case when a is not null then 'has a' else 'no a' end as label,
+       grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null) order by g;
+ label | g | count 
+-------+---+-------
+ has a | 0 |     2
+ no a  | 1 |     2
+(2 rows)
+
+set enable_hashagg = false;
+select case when a is not null then 'has a' else 'no a' end as label,
+       grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null) order by g;
+ label | g | count 
+-------+---+-------
+ has a | 0 |     2
+ no a  | 1 |     2
+(2 rows)
+
+reset enable_hashagg;
+select grouping(a is not null) as g, count(*)
+from gs_nn group by rollup(a is not null)
+having (a is not null) is null;
+ g | count 
+---+-------
+ 1 |     2
+(1 row)
+
+-- "(b is null) is unknown" is reduced to constant false
+select ((b is null) is unknown)::int as x,
+       grouping((b is null) is unknown) as g, count(*)
+from gs_nn group by rollup((b is null) is unknown) order by g;
+ x | g | count 
+---+---+-------
+ 0 | 0 |     2
+   | 1 |     2
+(2 rows)
+
+-- distinct grouping expressions that are reduced to equal constants
+select (a is not null)::int as xa, (id is not null)::int as xid,
+       grouping(a is not null, id is not null) as g
+from gs_nn
+group by grouping sets ((a is not null), (id is not null), ())
+order by g;
+ xa | xid | g 
+----+-----+---
+  1 |     | 1
+    |   1 | 2
+    |     | 3
+(3 rows)
+
+-- constant grouping expression, referenced in ORDER BY and in a subquery
+select (1 + 1) * 10 as x, grouping(1 + 1) as g,
+       (select count(*) from gs_nn where a * 10 < (1 + 1) * 10) as c
+from gs_nn group by cube(1 + 1)
+order by (1 + 1) * 10 nulls first;
+ x  | g | c 
+----+---+---
+    | 1 | 0
+ 20 | 0 | 1
+(2 rows)
+
+-- grouping expression containing a LATERAL reference
+select t1.a, ss.x, ss.count
+from gs_nn t1,
+     lateral (select (t1.a + 1) * 10 as x, count(*)
+              from gs_nn t2 group by rollup(t1.a + 1)) ss
+order by t1.a, ss.x;
+ a | x  | count 
+---+----+-------
+ 1 | 20 |     2
+ 1 |    |     2
+ 2 | 30 |     2
+ 2 |    |     2
+(4 rows)
+
+drop table gs_nn;
 -- end
