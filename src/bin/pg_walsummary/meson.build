@@ -26,6 +26,7 @@ tests += {
       't/001_basic.pl',
       't/002_blocks.pl',
       't/003_tli_switch.pl',
+      't/004_promote_past_target.pl',
     ],
   }
 }
