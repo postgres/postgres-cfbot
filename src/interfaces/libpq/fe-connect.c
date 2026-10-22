@@ -4089,8 +4089,13 @@ keep_going:						/* We will come back to here until there is
 						/* We'll come back when there is more data */
 						return PGRES_POLLING_READING;
 					}
-					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+
+					/*
+					 * OK, we read the message; mark data consumed.  Don't
+					 * trace it: it has no length word, so the tracer can't
+					 * tell where it ends.
+					 */
+					conn->inStart = conn->inCursor;
 
 					/*
 					 * Before 7.2, the postmaster didn't always end its
