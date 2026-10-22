@@ -152,6 +152,11 @@ extern bool index_insert(Relation indexRelation,
 						 IndexUniqueCheck checkUnique,
 						 bool indexUnchanged,
 						 IndexInfo *indexInfo);
+extern void index_notify_delete(Relation indexRelation,
+								Datum *values, bool *isnull,
+								ItemPointer heap_t_ctid,
+								Relation heapRelation,
+								IndexInfo *indexInfo);
 extern void index_insert_cleanup(Relation indexRelation,
 								 IndexInfo *indexInfo);
 

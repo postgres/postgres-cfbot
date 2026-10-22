@@ -155,6 +155,7 @@ bthandler(PG_FUNCTION_ARGS)
 		.ambuildempty = btbuildempty,
 		.aminsert = btinsert,
 		.aminsertcleanup = NULL,
+		.amnotifydelete = NULL,
 		.ambulkdelete = btbulkdelete,
 		.amvacuumcleanup = btvacuumcleanup,
 		.amcanreturn = btcanreturn,
