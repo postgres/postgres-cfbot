@@ -60,6 +60,43 @@ SELECT reverse(good) FROM regress_encoding;
  éfac
 (1 row)
 
+-- multibyte pad strings: whole repetitions, a partial final repetition, and
+-- fewer than one repetition
+SELECT lpad(good, 7, 'é'), rpad(good, 7, 'é') FROM regress_encoding;
+  lpad   |  rpad   
+---------+---------
+ ééécafé | caféééé
+(1 row)
+
+SELECT lpad(good, 12, 'éab'), rpad(good, 12, 'éab') FROM regress_encoding;
+     lpad     |     rpad     
+--------------+--------------
+ éabéabéacafé | cafééabéabéa
+(1 row)
+
+SELECT lpad(good, 5, 'éab'), rpad(good, 5, 'éab') FROM regress_encoding;
+ lpad  | rpad  
+-------+-------
+ écafé | caféé
+(1 row)
+
+-- a lone lead byte in the pad string is an error if the padding reaches it
+SELECT lpad(good, 7, test_bytea_to_text('\xc3')) FROM regress_encoding;
+ERROR:  invalid byte sequence for encoding "UTF8": 0xc3
+SELECT rpad(good, 7, 'ab' || test_bytea_to_text('\xc3')) FROM regress_encoding;
+ERROR:  invalid byte sequence for encoding "UTF8": 0xc3
+SELECT lpad(good, 5, 'ab' || test_bytea_to_text('\xc3')), rpad(good, 6, 'ab' || test_bytea_to_text('\xc3')) FROM regress_encoding;
+ lpad  |  rpad  
+-------+--------
+ acafé | caféab
+(1 row)
+
+SELECT lpad(good, 4, test_bytea_to_text('\xc3')), rpad(good, 4, test_bytea_to_text('\xc3')) FROM regress_encoding;
+ lpad | rpad 
+------+------
+ café | café
+(1 row)
+
 -- invalid short mb character = error
 SELECT length(truncated) FROM regress_encoding;
 ERROR:  invalid byte sequence for encoding "UTF8": 0xc3
