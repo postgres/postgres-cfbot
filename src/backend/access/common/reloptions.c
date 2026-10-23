@@ -175,6 +175,14 @@ static relopt_ternary ternaryRelOpts[] =
 			ShareUpdateExclusiveLock
 		}
 	},
+	{
+		{
+			"direct_toast_self_prune",
+			"Enables on-access page pruning and FSM updates for Direct TOAST tables",
+			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,
+			ShareUpdateExclusiveLock
+		}
+	},
 	/* list terminator */
 	{
 		{
@@ -530,6 +538,13 @@ static relopt_enum_elt_def StdRdOptIndexCleanupValues[] =
 	{(const char *) NULL}		/* list terminator */
 };
 
+static relopt_enum_elt_def toastFlavourOptValues[] =
+{
+	{"plain", TOAST_FLAVOUR_PLAIN},
+	{"direct", TOAST_FLAVOUR_DIRECT},
+	{(const char *) NULL}		/* list terminator */
+};
+
 /* values from GistOptBufferingMode */
 static relopt_enum_elt_def gistBufferingOptValues[] =
 {
@@ -580,6 +595,17 @@ static relopt_enum enumRelOpts[] =
 		StdRdOptToastValueTypes,
 		STDRD_OPTION_TOAST_VALUE_TYPE_OID,
 		gettext_noop("Valid values are \"oid\" and \"oid8\".")
+	},
+	{
+		{
+			"toast_flavour",
+			"Sets the TOAST flavour for this table",
+			RELOPT_KIND_HEAP,
+			ShareUpdateExclusiveLock
+		},
+		toastFlavourOptValues,
+		TOAST_FLAVOUR_PLAIN,
+		gettext_noop("Valid values are \"plain\" and \"direct\".")
 	},
 	{
 		{
@@ -2114,6 +2140,10 @@ static const relopt_parse_elt stdRdOptionsTab[] = {
 	offsetof(StdRdOptions, parallel_workers)},
 	{"vacuum_index_cleanup", RELOPT_TYPE_ENUM,
 	offsetof(StdRdOptions, vacuum_index_cleanup)},
+	{"toast_flavour", RELOPT_TYPE_ENUM,
+	offsetof(StdRdOptions, toast_flavour)},
+	{"direct_toast_self_prune", RELOPT_TYPE_TERNARY,
+	offsetof(StdRdOptions, direct_toast_self_prune)},
 	{"vacuum_truncate", RELOPT_TYPE_TERNARY,
 	offsetof(StdRdOptions, vacuum_truncate)},
 	{"vacuum_max_eager_freeze_failure_rate", RELOPT_TYPE_REAL,
