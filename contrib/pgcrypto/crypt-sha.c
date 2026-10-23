@@ -186,12 +186,25 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 	{
 		const char *num = dec_salt_binary + sizeof(rounds_prefix) - 1;
 		char	   *endp;
-		int			srounds = strtoint(num, &endp, 10);
+		int			srounds;
+		bool		rounds_overflow;
+
+		/*
+		 * strtoint() signals a value that does not fit into an int only by
+		 * setting errno to ERANGE, so reset errno before the call and check
+		 * it afterwards.  Without this check, an out-of-range rounds value
+		 * wraps around modulo 2^32 and the clamping below would operate on
+		 * the truncated value.
+		 */
+		errno = 0;
+		srounds = strtoint(num, &endp, 10);
 
 		if (*endp != '$')
 			ereport(ERROR,
 					errcode(ERRCODE_SYNTAX_ERROR),
 					errmsg("could not parse salt options"));
+
+		rounds_overflow = (errno == ERANGE);
 
 		dec_salt_binary = endp + 1;
 
@@ -206,7 +219,42 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 		 * But Drepper's upstream reference implementation supports this when
 		 * passing the salt string directly, so we maintain compatibility.
 		 */
-		if (srounds > PX_SHACRYPT_ROUNDS_MAX)
+		if (rounds_overflow)
+		{
+			/*
+			 * The supplied value does not fit into an int, so it lies
+			 * outside the supported range in the direction of its sign:
+			 * clamp it like any other out-of-range value.  Report the
+			 * value as supplied, since srounds only holds the truncated
+			 * remainder of the conversion.
+			 */
+			const char *signp = num;
+
+			while (isspace((unsigned char) *signp))
+				signp++;
+
+			if (*signp == '-')
+			{
+				ereport(NOTICE,
+						errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						errmsg("rounds=%.*s is below supported value (%d), using %d instead",
+							   (int) (endp - num), num,
+							   PX_SHACRYPT_ROUNDS_MIN,
+							   PX_SHACRYPT_ROUNDS_MIN));
+				srounds = PX_SHACRYPT_ROUNDS_MIN;
+			}
+			else
+			{
+				ereport(NOTICE,
+						errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						errmsg("rounds=%.*s exceeds maximum supported value (%d), using %d instead",
+							   (int) (endp - num), num,
+							   PX_SHACRYPT_ROUNDS_MAX,
+							   PX_SHACRYPT_ROUNDS_MAX));
+				srounds = PX_SHACRYPT_ROUNDS_MAX;
+			}
+		}
+		else if (srounds > PX_SHACRYPT_ROUNDS_MAX)
 		{
 			ereport(NOTICE,
 					errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),

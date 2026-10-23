@@ -192,5 +192,62 @@ NOTICE:  rounds=10 is below supported value (1000), using 1000 instead
  t
 (1 row)
 
+-- Rounds values in a hand-written salt string that do not fit into an int
+-- must not wrap around modulo 2^32: they are out of range and get clamped
+-- like any other out-of-range value, with a NOTICE reporting the value as
+-- supplied.
+-- Negative overflow clamps to the minimum, so this is the same hash as
+-- rounds=1000, computed above for 'password' and 'saltsalt'
+SELECT crypt('password', '$5$rounds=-4294968296$saltsalt$')
+           = '$5$rounds=1000$saltsalt$azOwbpkvuuBKkE82dQPwTsQE8JyT9Fflpr9aKid3aT9' AS result;
+NOTICE:  rounds=-4294968296 is below supported value (1000), using 1000 instead
+ result 
+--------
+ t
+(1 row)
+
+SELECT crypt('password', '$6$rounds=-4294968296$saltsalt$')
+           = '$6$rounds=1000$saltsalt$Z/J9iYO1iE9xnr8JPQL57ZWsVRtVjrUv3CiWc/wKWseqXgSqn3HFYJ/Ng7YXa8XlLj.wpdAwHOJJzuGFqBBRa0' AS result;
+NOTICE:  rounds=-4294968296 is below supported value (1000), using 1000 instead
+ result 
+--------
+ t
+(1 row)
+
+-- A value beyond the range of long is out of range in the same way;
+-- this exercises the ERANGE that strtol() itself reports, rather than
+-- the int range check in strtoint()
+SELECT crypt('password', '$5$rounds=-99999999999999999999$saltsalt$')
+           = '$5$rounds=1000$saltsalt$azOwbpkvuuBKkE82dQPwTsQE8JyT9Fflpr9aKid3aT9' AS result;
+NOTICE:  rounds=-99999999999999999999 is below supported value (1000), using 1000 instead
+ result 
+--------
+ t
+(1 row)
+
+-- This value wrapped to an in-range 5000 rounds before the fix, so it
+-- was computed silently at the wrong number of rounds
+SELECT crypt('password', '$5$rounds=-4294962296$saltsalt$')
+           = '$5$rounds=1000$saltsalt$azOwbpkvuuBKkE82dQPwTsQE8JyT9Fflpr9aKid3aT9' AS result;
+NOTICE:  rounds=-4294962296 is below supported value (1000), using 1000 instead
+ result 
+--------
+ t
+(1 row)
+
+-- Positive overflow clamps to the maximum.  Actually computing 999999999
+-- rounds would take far too long for a regression test, so interrupt the
+-- computation with statement_timeout once the NOTICE has been printed.
+SET statement_timeout = '1s';
+SELECT crypt('password', '$5$rounds=4294967295$saltsalt$');
+NOTICE:  rounds=4294967295 exceeds maximum supported value (999999999), using 999999999 instead
+ERROR:  canceling statement due to statement timeout
+SELECT crypt('password', '$5$rounds=4294968296$saltsalt$');
+NOTICE:  rounds=4294968296 exceeds maximum supported value (999999999), using 999999999 instead
+ERROR:  canceling statement due to statement timeout
+SELECT crypt('password', '$5$rounds=99999999999999999999$saltsalt$');
+NOTICE:  rounds=99999999999999999999 exceeds maximum supported value (999999999), using 999999999 instead
+ERROR:  canceling statement due to statement timeout
+RESET statement_timeout;
 -- cleanup
 DROP TABLE ctest;
