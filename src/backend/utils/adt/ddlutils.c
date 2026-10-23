@@ -26,9 +26,12 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
+#include "catalog/pg_event_trigger.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/tablespace.h"
 #include "common/relpath.h"
+#include "commands/trigger.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -56,7 +59,8 @@ static List *pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner
 static Datum pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid);
 static List *pg_get_database_ddl_internal(Oid dbid, bool pretty,
 										  bool no_owner, bool no_tablespace);
-
+static List *pg_get_event_trigger_ddl_internal(Name evtTrigName, bool pretty,
+											   bool owner, bool enable);
 
 /*
  * Helper to append a formatted string with optional pretty-printing.
@@ -952,6 +956,217 @@ pg_get_database_ddl(PG_FUNCTION_ARGS)
 
 		statements = pg_get_database_ddl_internal(dbid, pretty, no_owner,
 												  no_tablespace);
+		funcctx->user_fctx = statements;
+		funcctx->max_calls = list_length(statements);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	statements = (List *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		char	   *stmt;
+
+		stmt = list_nth(statements, funcctx->call_cntr);
+
+		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
+	}
+	else
+	{
+		list_free_deep(statements);
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+static List *
+pg_get_event_trigger_ddl_internal(Name evtTrigName, bool pretty,
+								  bool owner, bool enable)
+{
+	HeapTuple	evtTup;
+	HeapTuple	procTup;
+	Form_pg_event_trigger evtForm;
+	char		*evtevent;
+	char		*evtname;
+	Datum		evttagsDatum;
+	bool		evttagsIsNull;
+	Form_pg_proc proc;
+	char		*proname;
+	StringInfoData buf;
+	List	   *statements = NIL;
+
+	evtTup = SearchSysCache1(EVENTTRIGGERNAME, NameGetDatum(evtTrigName));
+
+	if (!HeapTupleIsValid(evtTup))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("event trigger \"%s\" does not exist", NameStr(*evtTrigName))));
+
+	evtForm = (Form_pg_event_trigger) GETSTRUCT(evtTup);
+	evtname = pstrdup(NameStr(evtForm->evtname));
+	evtevent = pstrdup(NameStr(evtForm->evtevent));
+
+	procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(evtForm->evtfoid));
+
+	if (!HeapTupleIsValid(procTup))
+		elog(ERROR,
+			 "cache lookup failed for function %u", evtForm->evtfoid);
+
+	proc = (Form_pg_proc) GETSTRUCT(procTup);
+	proname = NameStr(proc->proname);
+
+	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "CREATE EVENT TRIGGER %s",
+					 quote_identifier(evtname));
+	append_ddl_option(&buf, pretty, 4, "ON %s",
+					  quote_identifier(evtevent));
+
+	/*
+	 * Generate WHEN clause, if any filter events were specified.
+	 *
+	 * Note that as of PostgreSQL 20, the only filter_variable supported
+	 * is "TAG", which is not stored in pg_event_trigger, so is hard-coded
+	 * in the generated output. This also means that by definition, the AND
+	 * clause supported by the CREATE EVENT TRIGGER grammar cannot actually
+	 * be used in a valid statement, and thus will never be part of the
+	 * generated output.
+	 */
+	evttagsDatum = SysCacheGetAttr(EVENTTRIGGEROID, evtTup,
+								   Anum_pg_event_trigger_evttags,
+								   &evttagsIsNull);
+
+	if (!evttagsIsNull)
+	{
+		ArrayType  *event_tags = DatumGetArrayTypePCopy(evttagsDatum);
+		Datum	   *elems;
+		int			nelems;
+		int			i;
+		StringInfoData filters;
+
+		initStringInfo(&filters);
+
+		deconstruct_array_builtin(event_tags, TEXTOID, &elems, NULL, &nelems);
+
+		for (i = 0; i < nelems; ++i)
+		{
+			char	   *str = TextDatumGetCString(elems[i]);
+
+			if (i)
+				appendStringInfoString(&filters, ", ");
+
+			appendStringInfoString(&filters, quote_literal_cstr(str));
+
+			pfree(str);
+		}
+
+		append_ddl_option(&buf, pretty, 4, "WHEN TAG IN (%s)",
+						  filters.data);
+
+		pfree(event_tags);
+		pfree(elems);
+		pfree(filters.data);
+	}
+
+	/*
+	 * Finally, add the EXECUTE clause. Note that although the command syntax
+	 * accepts the keyword PROCEDURE for historical reasons, only an actual
+	 * FUNCTION can be referenced, so we don't check the prokind.
+	 */
+	append_ddl_option(&buf, pretty, 4, "EXECUTE FUNCTION %s.%s();",
+					  quote_identifier(get_namespace_name(proc->pronamespace)),
+					  quote_identifier(proname));
+
+	ReleaseSysCache(procTup);
+
+	statements = lappend(statements, pstrdup(buf.data));
+
+	/* OWNER */
+	if (owner && OidIsValid(evtForm->evtowner))
+	{
+		char	   *owner_name = GetUserNameFromId(evtForm->evtowner, false);
+
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "ALTER EVENT TRIGGER %s OWNER TO %s;",
+						 quote_identifier(evtname), quote_identifier(owner_name));
+		pfree(owner_name);
+		statements = lappend(statements, pstrdup(buf.data));
+	}
+
+	/* ENABLE */
+	if (enable)
+	{
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "ALTER EVENT TRIGGER %s ",
+						 quote_identifier(evtname));
+
+		switch (evtForm->evtenabled)
+		{
+			case TRIGGER_DISABLED:
+				appendStringInfoString(&buf, "DISABLE");
+				break;
+			case TRIGGER_FIRES_ON_ORIGIN:
+				appendStringInfoString(&buf, "ENABLE");
+				break;
+			case TRIGGER_FIRES_ON_REPLICA:
+				appendStringInfoString(&buf, "ENABLE REPLICA");
+				break;
+			case TRIGGER_FIRES_ALWAYS:
+				appendStringInfoString(&buf, "ENABLE ALWAYS");
+				break;
+			default:
+				elog(ERROR, "unsupported evtenabled type %c", evtForm->evtenabled);
+				break;
+		}
+
+		appendStringInfoChar(&buf, ';');
+		statements = lappend(statements, pstrdup(buf.data));
+	}
+
+	ReleaseSysCache(evtTup);
+
+	pfree(buf.data);
+	pfree(evtname);
+	pfree(evtevent);
+
+	return statements;
+}
+
+/*
+ * pg_get_event_trigger_ddl
+ *		Get the DDL statement for an event trigger.
+ *
+ * Each row is a complete SQL statement. The first row is always the
+ * CREATE EVENT TRIGGER statement; subsequent elements are ALTER EVENT
+ * TRIGGER statements for ownership and enablement state, which can be
+ * optionally omitted.
+ */
+Datum
+pg_get_event_trigger_ddl(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	List	   *statements;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		Name		evtTrigName;
+		bool		pretty;
+		bool		owner;
+		bool		enable;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		evtTrigName = PG_GETARG_NAME(0);
+		pretty = PG_GETARG_BOOL(1);
+		owner = PG_GETARG_BOOL(2);
+		enable = PG_GETARG_BOOL(3);
+
+		statements = pg_get_event_trigger_ddl_internal(evtTrigName, pretty,
+													   owner, enable);
+
 		funcctx->user_fctx = statements;
 		funcctx->max_calls = list_length(statements);
 
