@@ -4696,6 +4696,37 @@ my %tests = (
 		},
 	},
 
+	'GRANT SELECT ON LARGE OBJECT ... by non-owner' => {
+		create_order => 61,
+		create_sql => 'SELECT pg_catalog.lo_create(90001), pg_catalog.lo_create(90002);
+					   GRANT SELECT ON LARGE OBJECT 90001, 90002
+						 TO regress_dump_test_role WITH GRANT OPTION;
+					   SET ROLE regress_dump_test_role;
+					   GRANT SELECT ON LARGE OBJECT 90001, 90002 TO PUBLIC;
+					   RESET ROLE;',
+		regexp => qr/^
+			\QSET SESSION AUTHORIZATION regress_dump_test_role;\E\n\n
+			\QGRANT SELECT ON LARGE OBJECT 90001 TO PUBLIC;\E\n
+			\QGRANT SELECT ON LARGE OBJECT 90002 TO PUBLIC;\E\n\n
+			\QRESET SESSION AUTHORIZATION;\E
+			/xm,
+		like => {
+			%full_runs,
+			column_inserts => 1,
+			data_only => 1,
+			inserts => 1,
+			no_schema => 1,
+			section_data => 1,
+			test_schema_plus_large_objects => 1,
+		},
+		unlike => {
+			binary_upgrade => 1,
+			no_large_objects => 1,
+			no_privs => 1,
+			schema_only => 1,
+		},
+	},
+
 	'GRANT INSERT(col1) ON TABLE test_second_table' => {
 		create_order => 8,
 		create_sql =>
