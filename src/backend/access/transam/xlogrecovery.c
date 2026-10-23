@@ -604,6 +604,10 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 					ereport(FATAL,
 							errmsg("could not find redo location %X/%08X referenced by checkpoint record at %X/%08X",
 								   LSN_FORMAT_ARGS(checkPoint.redo), LSN_FORMAT_ARGS(CheckPointLoc)),
+							ControlFile->backupLabelRequired ?
+							errhint("Touch \"%s/recovery.signal\" or \"%s/standby.signal\" and add required recovery options.\n"
+									"Do not remove \"%s/backup_label\"; it is required to recover this backup.",
+									DataDir, DataDir, DataDir) :
 							errhint("If you are restoring from a backup, touch \"%s/recovery.signal\" or \"%s/standby.signal\" and add required recovery options.\n"
 									"If you are not restoring from a backup, try removing the file \"%s/backup_label\".\n"
 									"Be careful: removing \"%s/backup_label\" will result in a corrupt cluster if restoring from a backup.",
@@ -615,6 +619,10 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 			ereport(FATAL,
 					errmsg("could not locate required checkpoint record at %X/%08X",
 						   LSN_FORMAT_ARGS(CheckPointLoc)),
+					ControlFile->backupLabelRequired ?
+					errhint("Touch \"%s/recovery.signal\" or \"%s/standby.signal\" and add required recovery options.\n"
+							"Do not remove \"%s/backup_label\"; it is required to recover this backup.",
+							DataDir, DataDir, DataDir) :
 					errhint("If you are restoring from a backup, touch \"%s/recovery.signal\" or \"%s/standby.signal\" and add required recovery options.\n"
 							"If you are not restoring from a backup, try removing the file \"%s/backup_label\".\n"
 							"Be careful: removing \"%s/backup_label\" will result in a corrupt cluster if restoring from a backup.",
@@ -659,7 +667,14 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 	}
 	else
 	{
-		/* No backup_label file has been found if we are here. */
+		/*
+		 * No backup_label file has been found if we are here. Error if the
+		 * control file requires backup_label.
+		 */
+		if (ControlFile->backupLabelRequired)
+			ereport(FATAL,
+					errmsg("could not find backup_label required for recovery"),
+					errhint("Restore the backup_label file that was created during the backup."));
 
 		/*
 		 * If tablespace_map file is present without backup_label file, there
@@ -939,11 +954,21 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		 *
 		 * Any other state indicates that the backup somehow became corrupted
 		 * and we can't sensibly continue with recovery.
+		 *
+		 * backupLabelRequired is set to false since backup_label is no longer
+		 * required once pg_control has been updated on disk. If recovery
+		 * terminates abnormally between when pg_control is updated and
+		 * backup_label is renamed then on restart pg_control will be
+		 * reinitialized from backup_label. If the user manually deletes
+		 * backup_label before restarting then recovery will proceed with the
+		 * contents of pg_control just as it would if the crash had happened
+		 * directly after backup_label rename.
 		 */
 		if (haveBackupLabel)
 		{
 			ControlFile->backupStartPoint = checkPoint.redo;
 			ControlFile->backupEndRequired = backupEndRequired;
+			ControlFile->backupLabelRequired = false;
 
 			if (backupFromStandby)
 			{

@@ -10609,7 +10609,8 @@ do_pg_abort_backup(int code, Datum arg)
 }
 
 /*
- * Create a consistent copy of control data to be used for backup.
+ * Create a consistent copy of control data to be used for backup and flag it
+ * to require backup_label for recovery.
  *
  * Reading pg_control from disk while it is being rewritten can return a torn
  * copy, so make the copy from shared memory under ControlFileLock instead.
@@ -10629,6 +10630,8 @@ backup_control_file(uint8 *controlFile)
 	LWLockAcquire(ControlFileLock, LW_SHARED);
 	memcpy(&controlData, ControlFile, sizeof(ControlFileData));
 	LWLockRelease(ControlFileLock);
+
+	controlData.backupLabelRequired = true;
 
 	/*
 	 * Recalculate the CRC. The in-memory copy can be updated without being
