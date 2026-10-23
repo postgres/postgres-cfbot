@@ -107,16 +107,6 @@ do
 	test "$f" = src/include/port/win32ntdll.h && continue
 	test "$f" = src/port/pthread-win32.h && continue
 
-	# Likewise, these files are platform-specific, and the one
-	# relevant to our platform will be included by atomics.h.
-	test "$f" = src/include/port/atomics/arch-arm.h && continue
-	test "$f" = src/include/port/atomics/arch-ppc.h && continue
-	test "$f" = src/include/port/atomics/arch-x86.h && continue
-	test "$f" = src/include/port/atomics/fallback.h && continue
-	test "$f" = src/include/port/atomics/generic.h && continue
-	test "$f" = src/include/port/atomics/generic-gcc.h && continue
-	test "$f" = src/include/port/atomics/generic-msvc.h && continue
-
 	# sepgsql.h depends on headers that aren't there on most platforms.
 	test "$f" = contrib/sepgsql/sepgsql.h && continue
 
