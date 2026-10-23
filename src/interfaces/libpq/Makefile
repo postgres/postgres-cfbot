@@ -33,6 +33,7 @@ OBJS = \
 	$(WIN32RES) \
 	fe-auth-scram.o \
 	fe-cancel.o \
+	fe-compress.o \
 	fe-connect.o \
 	fe-exec.o \
 	fe-lobj.o \
@@ -87,9 +88,9 @@ endif
 # that are built correctly for use in a shlib.
 SHLIB_LINK_INTERNAL = -lpgcommon_shlib -lpgport_shlib
 ifneq ($(PORTNAME), win32)
-SHLIB_LINK += $(filter -lcrypt -ldes -lcom_err -lcrypto -lk5crypto -lkrb5 -lgssapi_krb5 -lgss -lgssapi -lssl -lsocket -lnsl -lresolv -lintl -ldl -lm, $(LIBS)) $(LDAP_LIBS_FE) $(PTHREAD_LIBS)
+SHLIB_LINK += $(filter -lcrypt -ldes -lcom_err -lcrypto -lk5crypto -lkrb5 -lgssapi_krb5 -lgss -lgssapi -lssl -lsocket -lnsl -lresolv -lintl -ldl -lm -lzstd, $(LIBS)) $(LDAP_LIBS_FE) $(PTHREAD_LIBS)
 else
-SHLIB_LINK += $(filter -lcrypt -ldes -lcom_err -lcrypto -lk5crypto -lkrb5 -lgssapi32 -lssl -lsocket -lnsl -lresolv -lintl -lm $(PTHREAD_LIBS), $(LIBS)) $(LDAP_LIBS_FE)
+SHLIB_LINK += $(filter -lcrypt -ldes -lcom_err -lcrypto -lk5crypto -lkrb5 -lgssapi32 -lssl -lsocket -lnsl -lresolv -lintl -lm -lzstd $(PTHREAD_LIBS), $(LIBS)) $(LDAP_LIBS_FE)
 endif
 ifeq ($(PORTNAME), win32)
 SHLIB_LINK += -lshell32 -lws2_32 -lsecur32 $(filter -lcomerr32 -lkrb5_32, $(LIBS))
@@ -107,6 +108,10 @@ endef
 ifeq ($(with_ssl),openssl)
 $(call add_to_list,PKG_CONFIG_REQUIRES_PRIVATE,libssl)
 $(call add_to_list,PKG_CONFIG_REQUIRES_PRIVATE,libcrypto)
+endif
+
+ifneq (,$(filter -lzstd, $(LIBS)))
+$(call add_to_list,PKG_CONFIG_REQUIRES_PRIVATE,libzstd)
 endif
 
 ifeq ($(with_libcurl),yes)

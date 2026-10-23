@@ -99,7 +99,7 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false, false);
 
 	/* Only try to acquire credentials if GSS delegation isn't disabled. */
 	if (!pg_GSS_have_cred_cache(&conn->gcred))
@@ -267,7 +267,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false, false);
 
 	OutBuffers[0].pvBuffer = NULL;
 	OutBuffers[0].BufferType = SECBUFFER_TOKEN;
@@ -605,7 +605,7 @@ pg_SASL_init(PGconn *conn, int payloadlen, bool *async)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false, false);
 
 	Assert(conn->sasl);
 
@@ -726,7 +726,7 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final, bool *async)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false, false);
 
 	/* For safety and convenience, ensure the buffer is NULL-terminated. */
 	challenge[payloadlen] = '\0';
@@ -809,7 +809,7 @@ pg_password_sendauth(PGconn *conn, const char *password, AuthRequest areq)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false, false);
 
 	/* Encrypt the password if needed. */
 

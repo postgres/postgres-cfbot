@@ -5,6 +5,7 @@ libpq_sources = files(
   'fe-auth-scram.c',
   'fe-auth.c',
   'fe-cancel.c',
+  'fe-compress.c',
   'fe-connect.c',
   'fe-exec.c',
   'fe-lobj.c',
@@ -161,6 +162,7 @@ tests += {
       't/004_load_balance_dns.pl',
       't/005_negotiate_encryption.pl',
       't/006_service.pl',
+      't/007_compression.pl',
     ],
     'env': {
       'with_ssl': ssl_library,
