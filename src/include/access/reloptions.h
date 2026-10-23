@@ -235,6 +235,7 @@ extern Datum transformRelOptions(Datum oldOptions, List *defList,
 								 const char *nameSpace, const char *const validnsps[],
 								 bool acceptOidsOff, bool isReset);
 extern List *untransformRelOptions(Datum options);
+extern List *untransformRelOptionsExtended(Datum options, char *nameSpace);
 extern bytea *extractRelOptions(HeapTuple tuple, TupleDesc tupdesc,
 								amoptions_function amoptions);
 extern void *build_reloptions(Datum reloptions, bool validate,
