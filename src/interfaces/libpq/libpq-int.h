@@ -375,6 +375,7 @@ typedef struct msg_buffer
 	int			end;			/* offset to first position after avail data */
 } msg_buffer;
 
+
 /*
  * PGconn stores all the state data associated with a single connection
  * to a backend.
@@ -439,6 +440,7 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char	   *compression;	/* protocol compression policy */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal
@@ -582,7 +584,16 @@ struct pg_conn
 	 * code that uses ints during size calculations.
 	 */
 	msg_buffer	inBuffer;
-
+	msg_buffer	decompressBuffer;	/* decompressed ordinary messages */
+	void	   *compression_dctx;
+	void	   *compression_cctx;
+	PQExpBufferData compression_output_buffer;
+	bool		compression_buffers_initialized;
+	bool		compression_in_frame;
+	bool		compression_frame_ended;
+	bool		compression_ready;
+	bool		compression_copy_started;
+	bool		compression_rejected;
 
 	/* Buffer for data not yet sent to backend */
 	char	   *outBuffer;		/* currently allocated buffer */
@@ -793,6 +804,16 @@ extern PGresult *pqFunctionCall3(PGconn *conn, Oid fnid,
 
 extern int	PQsendCancelRequest(PGconn *cancelConn);
 
+/* === in fe-compress.c === */
+extern msg_buffer *pqGetMessageBuffer(PGconn *conn);
+extern int	pqReadCompressedMessage(PGconn *conn, int msgLength);
+extern void pqCompressionReset(PGconn *conn);
+extern void pqCompressionReady(PGconn *conn);
+#ifdef USE_ZSTD
+extern int	pqPutCompressedCopyData(PGconn *conn, const char *buffer, int nbytes);
+extern int	pqEndCompressedCopyData(PGconn *conn);
+#endif
+
 /* === in fe-misc.c === */
 
  /*
@@ -921,7 +942,7 @@ extern ssize_t pg_GSS_bytes_pending(PGconn *conn);
 /* === in fe-trace.c === */
 
 extern void pqTraceOutputMessage(PGconn *conn, const char *message,
-								 bool toServer);
+								 bool toServer, bool compressed);
 extern void pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message);
 extern void pqTraceOutputCharResponse(PGconn *conn, const char *responseType,
 									  char response);

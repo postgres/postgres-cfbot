@@ -2428,6 +2428,7 @@ ProjectSetState
 ProjectionInfo
 ProjectionPath
 PromptInterruptContext
+ProtocolCompression
 ProtocolVersion
 PrsStorage
 PruneFreezeParams
@@ -3540,6 +3541,7 @@ ZSTD_CCtx
 ZSTD_CStream
 ZSTD_DCtx
 ZSTD_DStream
+ZSTD_EndDirective
 ZSTD_cParameter
 ZSTD_inBuffer
 ZSTD_outBuffer

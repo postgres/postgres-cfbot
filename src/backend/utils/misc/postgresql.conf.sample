@@ -826,6 +826,9 @@
 #createrole_self_grant = ''             # set and/or inherit
 #event_triggers = on
 
+# - Protocol Compression -
+#protocol_compression = off             # off, zstd
+
 # - Locale and Formatting -
 
 #datestyle = 'iso, mdy'

@@ -175,4 +175,18 @@ extern bool check_ssl_key_file_permissions(const char *ssl_key_file,
 										   bool isServerStart);
 extern HostsFileLoadResult load_hosts(List **hosts, char **err_msg);
 
+/* Protocol compression is negotiated at connection startup. */
+typedef enum ProtocolCompression
+{
+	PROTOCOL_COMPRESSION_OFF,
+	PROTOCOL_COMPRESSION_ZSTD
+} ProtocolCompression;
+
+extern PGDLLIMPORT int protocol_compression;
+#ifdef USE_ZSTD
+extern void pq_enable_protocol_compression(void);
+extern void pq_check_protocol_compression_message(int msgtype);
+extern int	pq_get_compressed_message(StringInfo s);
+#endif
+
 #endif							/* LIBPQ_H */

@@ -273,8 +273,10 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 					/* Try to receive another message */
 					int			mtype;
 					int			maxmsglen;
+					bool		message_body_read;
 
 			readmessage:
+					message_body_read = false;
 					HOLD_CANCEL_INTERRUPTS();
 					pq_startmsgread();
 					mtype = pq_getbyte();
@@ -282,6 +284,23 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 						ereport(ERROR,
 								(errcode(ERRCODE_CONNECTION_FAILURE),
 								 errmsg("unexpected EOF on client connection with an open transaction")));
+#ifdef USE_ZSTD
+					pq_check_protocol_compression_message(mtype);
+					if (mtype == PqMsg_CompressedData)
+					{
+						mtype = pq_get_compressed_message(cstate->fe_msgbuf);
+						if (mtype == 0)
+						{
+							RESUME_CANCEL_INTERRUPTS();
+							goto readmessage;
+						}
+						if (mtype == EOF)
+							ereport(ERROR,
+									(errcode(ERRCODE_CONNECTION_FAILURE),
+									 errmsg("unexpected EOF on client connection with an open transaction")));
+						message_body_read = true;
+					}
+#endif
 					/* Validate message type and set packet size limit */
 					switch (mtype)
 					{
@@ -303,7 +322,8 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 							break;
 					}
 					/* Now collect the message body */
-					if (pq_getmessage(cstate->fe_msgbuf, maxmsglen))
+					if (!message_body_read &&
+						pq_getmessage(cstate->fe_msgbuf, maxmsglen))
 						ereport(ERROR,
 								(errcode(ERRCODE_CONNECTION_FAILURE),
 								 errmsg("unexpected EOF on client connection with an open transaction")));
