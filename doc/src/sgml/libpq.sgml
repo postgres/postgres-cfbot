@@ -2234,6 +2234,40 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-compression" xreflabel="compression">
+      <term><literal>compression</literal></term>
+      <listitem>
+       <para>
+        Enables compression of data-bearing protocol messages.
+        The supported values are <literal>off</literal>, the default,
+        <literal>prefer</literal>, and <literal>zstd</literal>.
+        <literal>prefer</literal> requests Zstandard compression and continues
+        without compression if the server rejects the protocol extension.
+        <literal>zstd</literal> requires compression and fails the connection
+        if the server rejects it.  If <application>libpq</application> was built
+        without Zstandard, <literal>prefer</literal> is equivalent to
+        <literal>off</literal>, while <literal>zstd</literal> is rejected.
+       </para>
+
+       <para>
+        Compression starts only after authentication.  It currently applies
+        to <literal>DataRow</literal> and <literal>CopyData</literal> messages
+        sent by the server, and to <literal>CopyData</literal> sent by the
+        client during <command>COPY FROM</command>.  Queries, bind parameters,
+        and control messages are not compressed.
+       </para>
+
+       <warning>
+        <para>
+         Protocol data is compressed before SSL or GSS encryption.  Observing
+         compressed lengths can reveal information when attacker-controlled
+         and secret values occur in the same compressed response.  Enable this
+         option only when that risk is acceptable for the application.
+        </para>
+       </warning>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="libpq-connect-krbsrvname" xreflabel="krbsrvname">
       <term><literal>krbsrvname</literal></term>
       <listitem>
@@ -7745,6 +7779,12 @@ void PQtrace(PGconn *conn, FILE *stream);
       <xref linkend="protocol-message-formats"/>.
      </para>
 
+     <para>
+      A received <literal>CompressedData</literal> message is followed by its
+      decoded messages, marked with direction <literal>B*</literal>.
+      The compressed payload itself is not printed.
+     </para>
+
      <note>
       <para>
        On Windows, if the <application>libpq</application> library and an application are
@@ -8927,6 +8967,16 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       </indexterm>
       <envar>PGHOST</envar> behaves the same as the <xref
       linkend="libpq-connect-host"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGCOMPRESSION</envar></primary>
+      </indexterm>
+      <envar>PGCOMPRESSION</envar> behaves the same as the <xref
+      linkend="libpq-connect-compression"/> connection parameter.
      </para>
     </listitem>
 

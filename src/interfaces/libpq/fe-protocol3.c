@@ -43,6 +43,7 @@
 	 (id) == PqMsg_NoticeResponse || \
 	 (id) == PqMsg_NotificationResponse || \
 	 (id) == PqMsg_RowDescription || \
+	 (id) == PqMsg_CompressedData || \
 	 (id) == PqMsg_ParameterDescription)
 
 
@@ -61,6 +62,16 @@ static void reportErrorPosition(PQExpBuffer msg, const char *query,
 static size_t build_startup_packet(const PGconn *conn, char *packet,
 								   const PQEnvironmentOption *options);
 
+/* Select the input buffer and report invalid compressed input. */
+static msg_buffer *
+getMsgBuffer(PGconn *conn)
+{
+	msg_buffer *buf = pqGetMessageBuffer(conn);
+
+	if (buf == NULL)
+		handleFatalError(conn);
+	return buf;
+}
 
 /*
  * parseInput: if appropriate, parse input data from backend
@@ -73,13 +84,17 @@ pqParseInput3(PGconn *conn)
 	char		id;
 	int			msgLength;
 	int			avail;
-	msg_buffer *msgBuf = &conn->inBuffer;
+	msg_buffer *msgBuf;
 
 	/*
 	 * Loop to parse successive complete messages available in the buffer.
 	 */
 	for (;;)
 	{
+		msgBuf = getMsgBuffer(conn);
+		if (!msgBuf)
+			return;
+
 		/*
 		 * Try to read a message.  First get the type code and length. Return
 		 * if not enough data.
@@ -284,6 +299,13 @@ pqParseInput3(PGconn *conn)
 					break;
 				case PqMsg_BindComplete:
 					/* Nothing to do for this message type */
+					break;
+				case PqMsg_CompressedData:
+					if (pqReadCompressedMessage(conn, msgLength) != 0)
+					{
+						handleFatalError(conn);
+						return;
+					}
 					break;
 				case PqMsg_CloseComplete:
 					/* If we're doing PQsendClose, we're done; else ignore */
@@ -1512,16 +1534,25 @@ pqGetNegotiateProtocolVersion3(PGconn *conn, msg_buffer *msgBuf)
 	/* the version is acceptable */
 	conn->pversion = their_version;
 
-	/*
-	 * We don't currently request any protocol extensions, so we don't expect
-	 * the server to reply with any either.
-	 */
+	/* Recognize rejection of our optional compression profile. */
 	for (int i = 0; i < num; i++)
 	{
 		if (pqGets(&conn->workBuffer, conn, msgBuf))
 		{
 			goto eof;
 		}
+#ifdef USE_ZSTD
+		if (strcmp(conn->workBuffer.data, "_pq_.compression") == 0 &&
+			conn->compression && strcmp(conn->compression, "off") != 0 &&
+			!conn->compression_rejected)
+		{
+			conn->compression_rejected = true;
+			if (strcmp(conn->compression, "prefer") == 0)
+				continue;
+			libpq_append_conn_error(conn, "server does not support protocol compression method \"zstd\"");
+			goto failure;
+		}
+#endif
 		if (strncmp(conn->workBuffer.data, "_pq_.", 5) != 0)
 		{
 			libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported unsupported parameter name without a \"%s\" prefix (\"%s\")", "_pq_.", conn->workBuffer.data);
@@ -1796,6 +1827,7 @@ getReadyForQuery(PGconn *conn, msg_buffer *msgBuf)
 			break;
 	}
 
+	pqCompressionReady(conn);
 	return 0;
 }
 
@@ -1811,12 +1843,15 @@ getCopyDataMessage(PGconn *conn, msg_buffer **out_buf)
 	char		id;
 	int			msgLength;
 	int			avail;
-	msg_buffer *msgBuf = &conn->inBuffer;
-
-	*out_buf = msgBuf;
+	msg_buffer *msgBuf;
 
 	for (;;)
 	{
+		msgBuf = getMsgBuffer(conn);
+		if (!msgBuf)
+			return -2;
+		*out_buf = msgBuf;
+
 		/*
 		 * Do we have the next input message?  To make life simpler for async
 		 * callers, we keep returning 0 until the next message is fully
@@ -1865,6 +1900,13 @@ getCopyDataMessage(PGconn *conn, msg_buffer **out_buf)
 			case PqMsg_NotificationResponse:
 				if (getNotify(conn, msgBuf))
 					return 0;
+				break;
+			case PqMsg_CompressedData:
+				if (pqReadCompressedMessage(conn, msgLength - 4) != 0)
+				{
+					handleFatalError(conn);
+					return -2;
+				}
 				break;
 			case PqMsg_NoticeResponse:
 				if (pqGetErrorNotice3(conn, false, msgBuf))
@@ -1924,7 +1966,7 @@ int
 pqGetCopyData3(PGconn *conn, char **buffer, int async)
 {
 	int			msgLength;
-	msg_buffer *msgBuf = &conn->inBuffer;
+	msg_buffer *msgBuf;
 
 	for (;;)
 	{
@@ -2036,7 +2078,7 @@ pqGetlineAsync3(PGconn *conn, char *buffer, int bufsize)
 {
 	int			msgLength;
 	int			avail;
-	msg_buffer *msgBuf = &conn->inBuffer;
+	msg_buffer *msgBuf;
 
 	if (conn->asyncStatus != PGASYNC_COPY_OUT
 		&& conn->asyncStatus != PGASYNC_COPY_BOTH)
@@ -2099,6 +2141,13 @@ pqEndcopy3(PGconn *conn)
 		libpq_append_conn_error(conn, "no COPY in progress");
 		return 1;
 	}
+
+#ifdef USE_ZSTD
+	if (conn->compression_ready &&
+		conn->asyncStatus == PGASYNC_COPY_IN &&
+		pqEndCompressedCopyData(conn) < 0)
+		return 1;
+#endif
 
 	/* Send the CopyDone message if needed */
 	if (conn->asyncStatus == PGASYNC_COPY_IN ||
@@ -2192,7 +2241,7 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 	int			msgLength;
 	int			avail;
 	int			i;
-	msg_buffer *msgBuf = &conn->inBuffer;
+	msg_buffer *msgBuf;
 
 	/* already validated by PQnfn */
 	Assert(conn->pipelineStatus == PQ_PIPELINE_OFF);
@@ -2250,6 +2299,9 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 		 */
 		needInput = true;
 
+		msgBuf = getMsgBuffer(conn);
+		if (!msgBuf)
+			break;
 		msgBuf->cursor = msgBuf->start;
 		if (pqGetc(&id, conn, msgBuf))
 			continue;
@@ -2341,6 +2393,13 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 				if (pqGetErrorNotice3(conn, true, msgBuf))
 					continue;
 				status = PGRES_FATAL_ERROR;
+				break;
+			case PqMsg_CompressedData:
+				if (pqReadCompressedMessage(conn, msgLength) != 0)
+				{
+					handleFatalError(conn);
+					return pqPrepareAsyncResult(conn);
+				}
 				break;
 			case PqMsg_NotificationResponse:
 				/* handle notify and go back to processing return values */
@@ -2509,6 +2568,11 @@ build_startup_packet(const PGconn *conn, char *packet,
 
 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+
+#ifdef USE_ZSTD
+	if (conn->compression && strcmp(conn->compression, "off") != 0)
+		ADD_STARTUP_OPTION("_pq_.compression", "zstd");
+#endif
 
 	/* Add any environment-driven GUC settings needed */
 	for (next_eo = options; next_eo->envName; next_eo++)
