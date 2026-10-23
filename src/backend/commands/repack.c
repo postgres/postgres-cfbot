@@ -148,6 +148,9 @@ typedef struct DecodingWorker
 
 	/* Handle of the error queue. */
 	shm_mq_handle *error_mqh;
+
+	/* Error context stack in effect when the worker was started. */
+	ErrorContextCallback *error_context_stack;
 } DecodingWorker;
 
 /* Pointer to currently running decoding worker. */
@@ -3889,6 +3892,9 @@ start_repack_decoding_worker(Oid relid)
 
 	decoding_worker->error_mqh = shm_mq_attach(mq, decoding_worker->seg, NULL);
 
+	/* Preserve an error context stack */
+	decoding_worker->error_context_stack = error_context_stack;
+
 	memset(&bgw, 0, sizeof(bgw));
 	snprintf(bgw.bgw_name, BGW_MAXLEN,
 			 "REPACK decoding worker for relation \"%s\"",
@@ -4283,6 +4289,7 @@ ProcessRepackMessage(StringInfo msg)
 		case PqMsg_NoticeResponse:
 			{
 				ErrorData	edata;
+				ErrorContextCallback *save_error_context_stack;
 
 				/* Parse ErrorResponse or NoticeResponse. */
 				pq_parse_errornotice(msg, &edata);
@@ -4301,9 +4308,19 @@ ProcessRepackMessage(StringInfo msg)
 				else
 					edata.context = pstrdup(_("REPACK decoding worker"));
 
+				/*
+				 * Context beyond that should use the error context callbacks
+				 * that were in effect when the repack worker was launched, not
+				 * the current ones.
+				 */
+				save_error_context_stack = error_context_stack;
+				error_context_stack = decoding_worker->error_context_stack;
+
 				/* Rethrow error or print notice. */
 				ThrowErrorData(&edata);
 
+				/* Not an error, so restore previous context stack. */
+				error_context_stack = save_error_context_stack;
 				break;
 			}
 

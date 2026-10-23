@@ -28,6 +28,7 @@
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 
 #define PGREPACK_PLUGIN   "pgrepack"
@@ -395,6 +396,8 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 		XLogSegNo	segno_new;
 		char	   *errm = NULL;
 		XLogRecPtr	end_lsn;
+
+		INJECTION_POINT("repack-worker-error-context", NULL);
 
 		CHECK_FOR_INTERRUPTS();
 
