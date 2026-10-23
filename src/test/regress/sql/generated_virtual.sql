@@ -279,6 +279,9 @@ INSERT INTO gtest_tableoid VALUES (1), (2);
 ALTER TABLE gtest_tableoid ADD COLUMN
   c regclass GENERATED ALWAYS AS (tableoid) VIRTUAL;
 SELECT * FROM gtest_tableoid;
+-- but not through EXCLUDED, which has no system columns
+INSERT INTO gtest_tableoid VALUES (1)
+  ON CONFLICT (a) DO UPDATE SET a = excluded.a WHERE excluded.b;
 
 -- drop column behavior
 CREATE TABLE gtest10 (a int PRIMARY KEY, b int, c int GENERATED ALWAYS AS (b * 2) VIRTUAL);
