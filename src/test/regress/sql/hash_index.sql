@@ -235,14 +235,17 @@ INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 500) a;
 CREATE INDEX hash_split_index on hash_split_heap USING HASH (keycol);
 INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 5000) a;
 
--- Let's do a backward scan.
+-- Let's do a backward scan.  Moving back over 5000 of the 5500 rows
+-- crosses the bucket's overflow pages; a further fetch must still find a
+-- row.
 BEGIN;
 SET enable_seqscan = OFF;
 SET enable_bitmapscan = OFF;
 
 DECLARE c CURSOR FOR SELECT * from hash_split_heap WHERE keycol = 1;
 MOVE FORWARD ALL FROM c;
-MOVE BACKWARD 10000 FROM c;
+MOVE BACKWARD 5000 FROM c;
+FETCH BACKWARD 1 FROM c;
 MOVE BACKWARD ALL FROM c;
 CLOSE c;
 END;

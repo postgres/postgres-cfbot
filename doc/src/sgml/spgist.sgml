@@ -336,7 +336,12 @@ typedef struct spgConfigOut
       <structfield>longValuesOK</structfield> should be set true only when the
       <structfield>attType</structfield> is of variable length and the operator
       class is capable of segmenting long values by repeated suffixing
-      (see <xref linkend="spgist-limits"/>).
+      (see <xref linkend="spgist-limits"/>).  Setting it true disables
+      index-only scans for the operator class, even if
+      <structfield>canReturnData</structfield> is also set: reconstructing the
+      indexed value can then require materializing an arbitrarily large prefix
+      (a long value is stored by spreading its prefix across many inner tuples),
+      so such queries are executed as regular index scans instead.
      </para>
 
      <para>
@@ -851,6 +856,19 @@ typedef struct spgLeafConsistentOut
        is not exact, set <structfield>recheckDistances</structfield> to true.
        In this case, the executor will calculate the exact distances after
        fetching the tuple from the heap, and will reorder the tuples if needed.
+      </para>
+
+      <para>
+       During an index-only scan, the function is called a second time for
+       each matching leaf tuple, as the scan returns it, to reconstruct
+       <structfield>leafValue</structfield>.  On this second call
+       <structfield>traversalValue</structfield> is always NULL (and
+       <structfield>orderbys</structfield> is empty), so
+       <structfield>leafValue</structfield> must be reconstructable from
+       <structfield>reconstructedValue</structfield>,
+       <structfield>level</structfield>, and
+       <structfield>leafDatum</structfield> alone, without consulting
+       <structfield>traversalValue</structfield>.
       </para>
      </listitem>
     </varlistentry>
