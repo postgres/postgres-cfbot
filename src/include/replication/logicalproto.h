@@ -89,6 +89,8 @@ typedef struct LogicalRepTupleData
 	char	   *colstatus;
 	/* Length of above arrays */
 	int			ncols;
+	/* Sum of received value lengths; an estimate of in-memory tuple size */
+	Size		datasize;
 } LogicalRepTupleData;
 
 /* Possible values for LogicalRepTupleData.colstatus[colnum] */
