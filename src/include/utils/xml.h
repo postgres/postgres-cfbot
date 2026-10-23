@@ -78,7 +78,8 @@ extern xmltype *xmlpi(const char *target, text *arg, bool arg_is_null, bool *res
 extern xmltype *xmlroot(xmltype *data, text *version, int standalone);
 extern bool xml_is_document(xmltype *arg);
 extern text *xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg,
-									bool indent);
+									bool indent, XmlSerializeDeclarationOption xmldeclaration,
+									const char *version);
 extern char *escape_xml(const char *str);
 
 extern char *map_sql_identifier_to_xml_name(const char *ident, bool fully_escaped, bool escape_period);
