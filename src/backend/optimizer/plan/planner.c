@@ -60,6 +60,7 @@
 #include "rewrite/rewriteManip.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
@@ -9250,65 +9251,102 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
+ * Hash table key size for subplan names.  Base names passed to
+ * choose_plan_name() are identifiers (subquery aliases, CTE names) or short
+ * fixed strings such as "setop" or "exists_to_any", so they are shorter than
+ * NAMEDATALEN; a numeric suffix adds at most "_" plus 10 digits.
+ */
+#define SUBPLAN_NAME_KEYSIZE	(NAMEDATALEN + 11)
+
+/*
+ * An entry of glob->subplanNames.  Every name handed out by
+ * choose_plan_name() has an entry with "used" set.  A base name that has been
+ * given numeric suffixes also has an entry, whose next_suffix records where
+ * the next search for a free suffix should start; it has "used" set only if
+ * the base name itself was also handed out.
+ */
+typedef struct SubplanNameEntry
+{
+	char		name[SUBPLAN_NAME_KEYSIZE]; /* hash key; must be first */
+	bool		used;			/* has this name been handed out? */
+	unsigned	next_suffix;	/* as a base name: first suffix to try */
+} SubplanNameEntry;
+
+/*
+ * Find or create the entry for a subplan name.
+ */
+static SubplanNameEntry *
+subplan_name_entry(PlannerGlobal *glob, const char *name)
+{
+	SubplanNameEntry *entry;
+	bool		found;
+
+	/*
+	 * Create the hash table on first use, so that queries without subplans
+	 * don't pay for it.  Allocate it alongside glob, since it has to live as
+	 * long as glob does, whatever context the first caller happens to be in.
+	 */
+	if (glob->subplanNames == NULL)
+	{
+		HASHCTL		hash_ctl;
+
+		hash_ctl.keysize = SUBPLAN_NAME_KEYSIZE;
+		hash_ctl.entrysize = sizeof(SubplanNameEntry);
+		hash_ctl.hcxt = GetMemoryChunkContext(glob);
+		glob->subplanNames = hash_create("subplan names", 64, &hash_ctl,
+										 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	}
+
+	entry = (SubplanNameEntry *) hash_search(glob->subplanNames, name,
+											 HASH_ENTER, &found);
+	if (!found)
+	{
+		entry->used = false;
+		entry->next_suffix = 1;
+	}
+	return entry;
+}
+
+/*
  * Choose a unique name for some subroot.
  *
- * Modifies glob->subplanNames to track names already used.
+ * If always_number is false and the name is not already in use, it is used
+ * as-is; otherwise, it is suffixed with the smallest positive integer that
+ * yields an unused name.  glob->subplanNames tracks the names already used.
  */
 char *
 choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 {
+	SubplanNameEntry *base;
 	unsigned	n;
 
-	/*
-	 * If a numeric suffix is not required, then search the list of
-	 * previously-assigned names for a match. If none is found, then we can
-	 * use the provided name without modification.
-	 */
-	if (!always_number)
+	Assert(strlen(name) < NAMEDATALEN);
+
+	base = subplan_name_entry(glob, name);
+
+	if (!always_number && !base->used)
 	{
-		bool		found = false;
-
-		foreach_ptr(char, subplan_name, glob->subplanNames)
-		{
-			if (strcmp(subplan_name, name) == 0)
-			{
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			/* pstrdup here is just to avoid cast-away-const */
-			char	   *chosen_name = pstrdup(name);
-
-			glob->subplanNames = lappend(glob->subplanNames, chosen_name);
-			return chosen_name;
-		}
+		base->used = true;
+		/* pstrdup here is just to avoid cast-away-const */
+		return pstrdup(name);
 	}
 
 	/*
-	 * If a numeric suffix is required or if the un-suffixed name is already
-	 * in use, then loop until we find a positive integer that produces a
-	 * novel name.
+	 * Names are never released, so every suffix below next_suffix is known to
+	 * be taken.  Starting the search there rather than at 1 yields the same
+	 * name, but keeps the cost per call constant instead of growing with the
+	 * number of subplans that share this base name.  (Entries do not move
+	 * when the table grows, so "base" stays valid while we add entries.)
 	 */
-	for (n = 1; true; ++n)
+	for (n = base->next_suffix; true; ++n)
 	{
 		char	   *proposed_name = psprintf("%s_%u", name, n);
-		bool		found = false;
+		SubplanNameEntry *entry = subplan_name_entry(glob, proposed_name);
 
-		foreach_ptr(char, subplan_name, glob->subplanNames)
+		if (!entry->used)
 		{
-			if (strcmp(subplan_name, proposed_name) == 0)
-			{
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			glob->subplanNames = lappend(glob->subplanNames, proposed_name);
+			entry->used = true;
+			base->next_suffix = n + 1;
 			return proposed_name;
 		}
 
