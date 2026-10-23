@@ -305,3 +305,62 @@ EXPLAIN (COSTS OFF) :qry;
 :qry;
 
 COMMIT;
+
+----
+-- Bounded sorts.  Once 2 * bound tuples are in memory, the sort keeps a
+-- buffer of them (at least TOPN_SELECT_MIN_BUFFER, 1000) and prunes it to
+-- bound with quickselect.  If work_mem runs out first it falls back to a
+-- heap.  Compare each with a full sort, which is what a bound above
+-- INT_MAX / 2 gets.
+----
+CREATE TEMP TABLE bounded_sort AS
+  SELECT g AS id, (g * 7919) % 1000 AS k, md5(g::text) AS t
+  FROM generate_series(1, 5000) g;
+
+-- true if ORDER BY ... LIMIT returns the same rows, in the same order, as a
+-- full sort cut to the same length
+CREATE FUNCTION bounded_sort_ok(ord text, lim int) RETURNS bool
+LANGUAGE plpgsql AS $$
+DECLARE
+  bounded int[];
+  full_sort int[];
+BEGIN
+  EXECUTE format('SELECT array(SELECT id FROM bounded_sort ORDER BY %s LIMIT %s)',
+                 ord, lim) INTO bounded;
+  EXECUTE format('SELECT array(SELECT id FROM (SELECT id FROM bounded_sort ORDER BY %s LIMIT 1073741824) f LIMIT %s)',
+                 ord, lim) INTO full_sort;
+  RETURN bounded = full_sort;
+END $$;
+
+SELECT o, l
+FROM unnest(ARRAY['k, id', 'k DESC, id', 't', 't DESC', 'id DESC']) o,
+     unnest(ARRAY[1, 2, 7, 100, 499, 500, 501, 1250, 2499, 2500]) l
+WHERE NOT bounded_sort_ok(o, l);
+
+-- duplicates: the bound falls inside a run of equal keys
+SELECT count(*), count(DISTINCT k), min(k), max(k)
+FROM (SELECT k FROM bounded_sort ORDER BY k LIMIT 2000) s;
+
+-- rescan with a different bound each time
+SELECT l, max(s.k), count(*)
+FROM generate_series(10, 50, 20) l,
+     LATERAL (SELECT k FROM bounded_sort ORDER BY k, id LIMIT l) s
+GROUP BY l ORDER BY l;
+
+-- work_mem runs out after the buffer starts: narrow rows with large keys
+-- come first, then wide rows that sort before them, so the survivors get
+-- wider until bound of them no longer fit and the sort falls back to a heap
+CREATE TEMP TABLE bounded_sort_wide AS
+  SELECT g AS id,
+         CASE WHEN g > 3000 THEN g - 3000 ELSE 100000 + g END AS k,
+         CASE WHEN g > 3000 THEN repeat(md5(g::text), 16) ELSE 'x' END AS pad
+  FROM generate_series(1, 6000) g;
+BEGIN;
+SET LOCAL work_mem = '256kB';
+SELECT array(SELECT id FROM (SELECT id, pad FROM bounded_sort_wide
+                             ORDER BY k, id LIMIT 400) s) =
+       array(SELECT id FROM (SELECT id FROM bounded_sort_wide
+                             ORDER BY k, id LIMIT 1073741824) f LIMIT 400) AS ok;
+COMMIT;
+
+DROP FUNCTION bounded_sort_ok(text, int);
