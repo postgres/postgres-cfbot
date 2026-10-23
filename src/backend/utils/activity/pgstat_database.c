@@ -25,8 +25,8 @@
 static bool pgstat_should_report_connstat(void);
 
 
-PgStat_Counter pgStatBlockReadTime = 0;
-PgStat_Counter pgStatBlockWriteTime = 0;
+instr_time	pgStatBlockReadTime;
+instr_time	pgStatBlockWriteTime;
 PgStat_Counter pgStatActiveTime = 0;
 PgStat_Counter pgStatTransactionIdleTime = 0;
 SessionEndType pgStatSessionEndCause = DISCONNECT_NORMAL;
@@ -349,8 +349,8 @@ pgstat_update_dbstats(TimestampTz ts)
 	 */
 	dbentry->xact_commit += pgStatXactCommit;
 	dbentry->xact_rollback += pgStatXactRollback;
-	dbentry->blk_read_time += pgStatBlockReadTime;
-	dbentry->blk_write_time += pgStatBlockWriteTime;
+	dbentry->blk_read_time += INSTR_TIME_GET_MICROSEC(pgStatBlockReadTime);
+	dbentry->blk_write_time += INSTR_TIME_GET_MICROSEC(pgStatBlockWriteTime);
 
 	if (pgstat_should_report_connstat())
 	{
@@ -370,8 +370,8 @@ pgstat_update_dbstats(TimestampTz ts)
 
 	pgStatXactCommit = 0;
 	pgStatXactRollback = 0;
-	pgStatBlockReadTime = 0;
-	pgStatBlockWriteTime = 0;
+	INSTR_TIME_SET_ZERO(pgStatBlockReadTime);
+	INSTR_TIME_SET_ZERO(pgStatBlockWriteTime);
 	pgStatActiveTime = 0;
 	pgStatTransactionIdleTime = 0;
 }
