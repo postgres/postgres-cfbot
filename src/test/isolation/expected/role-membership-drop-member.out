@@ -1,0 +1,97 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_grant s2_drop_member s1_commit s2_check_orphans
+step s1_begin: BEGIN;
+step s1_grant: GRANT regress_role_group TO regress_role_member;
+step s2_drop_member: DROP ROLE regress_role_member; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop_member: <... completed>
+step s2_check_orphans: 
+	SELECT count(*)
+	FROM pg_auth_members m
+	LEFT JOIN pg_authid ra ON m.roleid  = ra.oid
+	LEFT JOIN pg_authid me ON m.member  = me.oid
+	LEFT JOIN pg_authid gr ON m.grantor = gr.oid
+	WHERE ra.oid IS NULL OR me.oid IS NULL OR gr.oid IS NULL;
+
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: s1_begin s1_alter_add s2_drop_member s1_commit s2_check_orphans
+step s1_begin: BEGIN;
+step s1_alter_add: ALTER GROUP regress_role_group ADD USER regress_role_member;
+step s2_drop_member: DROP ROLE regress_role_member; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop_member: <... completed>
+step s2_check_orphans: 
+	SELECT count(*)
+	FROM pg_auth_members m
+	LEFT JOIN pg_authid ra ON m.roleid  = ra.oid
+	LEFT JOIN pg_authid me ON m.member  = me.oid
+	LEFT JOIN pg_authid gr ON m.grantor = gr.oid
+	WHERE ra.oid IS NULL OR me.oid IS NULL OR gr.oid IS NULL;
+
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: s1_begin s1_create_role s2_drop_member s1_commit s2_check_orphans
+step s1_begin: BEGIN;
+step s1_create_role: CREATE ROLE regress_role_new ROLE regress_role_member;
+step s2_drop_member: DROP ROLE regress_role_member; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop_member: <... completed>
+step s2_check_orphans: 
+	SELECT count(*)
+	FROM pg_auth_members m
+	LEFT JOIN pg_authid ra ON m.roleid  = ra.oid
+	LEFT JOIN pg_authid me ON m.member  = me.oid
+	LEFT JOIN pg_authid gr ON m.grantor = gr.oid
+	WHERE ra.oid IS NULL OR me.oid IS NULL OR gr.oid IS NULL;
+
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: s1_begin s1_drop_owned s2_drop_member s1_commit
+step s1_begin: BEGIN;
+step s1_drop_owned: DROP OWNED BY regress_role_member;
+step s2_drop_member: DROP ROLE regress_role_member; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop_member: <... completed>
+
+starting permutation: s1_begin s1_reassign_owned s2_drop_member s1_commit
+step s1_begin: BEGIN;
+step s1_reassign_owned: REASSIGN OWNED BY regress_role_member TO regress_role_group;
+step s2_drop_member: DROP ROLE regress_role_member; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop_member: <... completed>
+
+starting permutation: s1_begin s1_set_role s1_grant_cu s2_drop_member_cu s1_commit s1_reset s2_check_orphans
+step s1_begin: BEGIN;
+step s1_set_role: SET ROLE regress_role_member_cu;
+step s1_grant_cu: GRANT regress_role_group_cu TO CURRENT_USER;
+step s2_drop_member_cu: DROP ROLE regress_role_member_cu; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop_member_cu: <... completed>
+step s1_reset: RESET ROLE;
+step s2_check_orphans: 
+	SELECT count(*)
+	FROM pg_auth_members m
+	LEFT JOIN pg_authid ra ON m.roleid  = ra.oid
+	LEFT JOIN pg_authid me ON m.member  = me.oid
+	LEFT JOIN pg_authid gr ON m.grantor = gr.oid
+	WHERE ra.oid IS NULL OR me.oid IS NULL OR gr.oid IS NULL;
+
+count
+-----
+    0
+(1 row)
+
