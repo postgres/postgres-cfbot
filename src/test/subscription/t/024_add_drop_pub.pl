@@ -135,6 +135,86 @@ is( $result, qq(1
 	'check that the incremental data is replicated after the publication is created'
 );
 
+# Verify that the apply worker reports changes it does not apply because the
+# relation is not part of the subscription.  Such changes are discarded and
+# still acknowledged to the publisher as applied, so the report is the only
+# indication that they were received at all.
+#
+# wal_retrieve_retry_interval throttles the report; set it high so that the
+# message is emitted exactly once no matter how many changes arrive, which is
+# what the count below checks.
+$node_subscriber->append_conf(
+	'postgresql.conf', qq(
+log_min_messages = debug1
+wal_retrieve_retry_interval = 10min
+));
+$node_subscriber->reload;
+
+$node_publisher->safe_psql('postgres', "CREATE TABLE tab_4 (a int)");
+$node_subscriber->safe_psql('postgres', "CREATE TABLE tab_4 (a int)");
+
+# Add the table to the publication, but do not refresh the subscription, so
+# the subscriber has no pg_subscription_rel entry for it.
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_3 ADD TABLE tab_4");
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO tab_4 SELECT generate_series(1, 10)");
+
+$node_subscriber->wait_for_log(
+	qr/DEBUG: ( [A-Z0-9]+:)? logical replication apply worker for subscription "tap_sub" is not applying changes for relation "public\.tab_4"/,
+	$offset);
+
+# The subscription does have other tables, so this must be reported as a
+# single missing relation rather than as a subscription with no tables.
+ok( $node_subscriber->log_contains(
+		qr/DETAIL: ( [A-Z0-9]+:)? The relation "public\.tab_4" is not part of the subscription\./,
+		$offset),
+	'relation not in the subscription is reported with the relation name');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_4");
+is($result, qq(0),
+	'changes for a relation not in the subscription are discarded');
+
+# Send more changes and confirm the report is throttled rather than emitted
+# once per change.
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO tab_4 SELECT generate_series(11, 100)");
+$node_publisher->wait_for_catchup('tap_sub');
+
+my $log =
+  PostgreSQL::Test::Utils::slurp_file($node_subscriber->logfile, $offset);
+my $count = () =
+  $log =~ /is not applying changes for relation "public\.tab_4"/g;
+is($count, 1, 'the report is emitted once rather than once per change');
+
+# Restore the retry interval before refreshing: tablesync worker startup is
+# gated on the same GUC, so leaving it at 10min would stall the sync below.
+$node_subscriber->append_conf('postgresql.conf',
+	"wal_retrieve_retry_interval = 5s\n");
+$node_subscriber->reload;
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub REFRESH PUBLICATION");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub');
+
+$node_publisher->safe_psql('postgres', "INSERT INTO tab_4 VALUES (101)");
+$node_publisher->wait_for_catchup('tap_sub');
+
+# Once the relation is part of the subscription its changes are applied, and
+# the initial copy brings across the rows that were discarded earlier.
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*), max(a) FROM tab_4");
+is($result, qq(101|101),
+	'changes are applied once the relation is part of the subscription');
+
+$node_subscriber->append_conf('postgresql.conf',
+	"log_min_messages = warning\n");
+$node_subscriber->reload;
+
 # shutdown
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');
