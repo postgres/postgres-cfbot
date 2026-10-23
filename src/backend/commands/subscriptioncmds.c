@@ -29,6 +29,8 @@
 #include "catalog/pg_authid_d.h"
 #include "catalog/pg_database_d.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/partition.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_subscription_rel.h"
@@ -1501,53 +1503,270 @@ AlterSubscription_refresh_seq(Subscription *sub, char *conninfo)
  * Refuse to re-synchronize relations that another subscription also populates.
  *
  * REFRESH TABLE discards a relation and relies on this subscription's table
- * synchronization to refill it.  If another subscription tracks the same
- * relation, its rows would be discarded here while its state stays untouched,
- * so nothing would ever copy them back.  We cannot reset another
- * subscription's state on its behalf -- that would need its workers stopped
- * and its own tablesync slots dropped over its own connection -- so this
- * combination is rejected rather than silently losing data.
+ * synchronization to refill it.  A relation is fed by any subscription that
+ * tracks it directly, and, when it is a partition, by any subscription that
+ * tracks a partitioned ancestor and routes tuples down into it.  If such
+ * another subscription exists, its rows would be discarded here while its
+ * state stays untouched, so nothing would ever copy them back.  We cannot
+ * reset another subscription's state on its behalf -- that would need its
+ * workers stopped and its own tablesync slots dropped over its own connection
+ * -- so this combination is rejected rather than silently losing data.
+ *
+ * subrelids is the set of relations named in the command, relids the full set
+ * that will be truncated, which additionally contains the partitions of any
+ * named partitioned table.
  */
 static void
 CheckRefreshTableNotInOtherSubscriptions(Relation pgsubrel, Subscription *sub,
-										 List *relids)
+										 List *subrelids, List *relids)
 {
 	foreach_oid(relid, relids)
 	{
-		ScanKeyData skey;
-		SysScanDesc scan;
-		HeapTuple	tup;
+		List	   *feeders;
 
-		ScanKeyInit(&skey, Anum_pg_subscription_rel_srrelid,
-					BTEqualStrategyNumber, F_OIDEQ,
-					ObjectIdGetDatum(relid));
+		/*
+		 * Tuples reach a partition through its ancestors, so a subscription
+		 * tracking any of them keeps this relation populated too.  A named
+		 * relation's own entry belongs to this subscription and is skipped
+		 * below by the srsubid test.
+		 *
+		 * Only partitions have such feeders.  get_partition_ancestors() scans
+		 * pg_inherits without regard to relispartition, so for an inheritance
+		 * child it would return the parent as well, and a parent does not
+		 * route rows into its inheritance children.
+		 */
+		if (get_rel_relispartition(relid))
+			feeders = lappend_oid(get_partition_ancestors(relid), relid);
+		else
+			feeders = list_make1_oid(relid);
 
-		scan = systable_beginscan(pgsubrel,
-								  SubscriptionRelSrrelidSrsubidIndexId,
-								  true, NULL, 1, &skey);
-
-		while (HeapTupleIsValid(tup = systable_getnext(scan)))
+		foreach_oid(feederid, feeders)
 		{
-			Form_pg_subscription_rel subrel;
-			char	   *othername;
+			ScanKeyData skey;
+			SysScanDesc scan;
+			HeapTuple	tup;
 
-			subrel = (Form_pg_subscription_rel) GETSTRUCT(tup);
+			ScanKeyInit(&skey, Anum_pg_subscription_rel_srrelid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(feederid));
 
-			if (subrel->srsubid == sub->oid)
-				continue;
+			scan = systable_beginscan(pgsubrel,
+									  SubscriptionRelSrrelidSrsubidIndexId,
+									  true, NULL, 1, &skey);
 
-			othername = get_subscription_name(subrel->srsubid, false);
+			while (HeapTupleIsValid(tup = systable_getnext(scan)))
+			{
+				Form_pg_subscription_rel subrel;
+				char	   *othername;
 
-			ereport(ERROR,
-					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					errmsg("table \"%s\" is also part of the subscription \"%s\"",
-						   get_rel_name(relid), othername),
-					errdetail("Re-synchronizing it would discard rows that subscription \"%s\" maintains but would not copy again.",
-							  othername));
+				subrel = (Form_pg_subscription_rel) GETSTRUCT(tup);
+
+				if (subrel->srsubid == sub->oid)
+					continue;
+
+				othername = get_subscription_name(subrel->srsubid, false);
+
+				/*
+				 * Report the relation that is actually shared, which is not
+				 * necessarily the one that was named, together with why it is
+				 * in the truncation set.
+				 */
+				if (feederid != relid)
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("table \"%s\" is a partition of \"%s\", which is part of the subscription \"%s\"",
+								   get_rel_name(relid), get_rel_name(feederid),
+								   othername),
+							errdetail("Re-synchronizing it would discard rows that subscription \"%s\" routes into the partition but would not copy again.",
+									  othername));
+				else if (list_member_oid(subrelids, relid))
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("table \"%s\" is also part of the subscription \"%s\"",
+								   get_rel_name(relid), othername),
+							errdetail("Re-synchronizing it would discard rows that subscription \"%s\" maintains but would not copy again.",
+									  othername));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("table \"%s\" is also part of the subscription \"%s\"",
+								   get_rel_name(relid), othername),
+							errdetail("Re-synchronizing a partitioned table truncates its partitions, discarding rows that subscription \"%s\" maintains but would not copy again.",
+									  othername));
+			}
+
+			systable_endscan(scan);
 		}
 
-		systable_endscan(scan);
+		list_free(feeders);
 	}
+}
+
+/*
+ * Order the relations named in REFRESH TABLE so that a partitioned ancestor
+ * comes before its descendants.
+ *
+ * They are locked in this order further down, and the rest of the system
+ * takes a partition hierarchy from the root downwards: an INSERT into a
+ * partitioned table locks the root and then the partition it routes into.
+ * Locking a partition before its root deadlocks against that, and the command
+ * can be asked to, because both a root and its partition can be members of
+ * the same subscription when the publisher has them as independent tables,
+ * and the order they are named in is the user's to choose.
+ *
+ * Relations that are not related to each other keep the order they were named
+ * in.  Only the named relations need this: the partitions collected for a
+ * named partitioned table come from find_all_inheritors(), which already
+ * returns each of them after its root.
+ */
+static List *
+SortRefreshTableRelations(List *subrelids)
+{
+	List	   *result = NIL;
+	int			nrels = list_length(subrelids);
+	int		   *depth;
+	int			maxdepth = 0;
+	int			i;
+
+	if (nrels < 2)
+		return subrelids;
+
+	depth = palloc(nrels * sizeof(int));
+
+	i = 0;
+	foreach_oid(relid, subrelids)
+	{
+		List	   *ancestors = get_partition_ancestors(relid);
+
+		/* A relation is always deeper than any of its ancestors. */
+		depth[i] = list_length(ancestors);
+		maxdepth = Max(maxdepth, depth[i]);
+		list_free(ancestors);
+		i++;
+	}
+
+	for (int d = 0; d <= maxdepth; d++)
+	{
+		i = 0;
+		foreach_oid(relid, subrelids)
+		{
+			if (depth[i] == d)
+				result = lappend_oid(result, relid);
+			i++;
+		}
+	}
+
+	pfree(depth);
+	list_free(subrelids);
+
+	return result;
+}
+
+/*
+ * Lock the relations that CheckRefreshTableNotInOtherSubscriptions() consults
+ * but that are not themselves truncated.
+ *
+ * That check can only see the subscriptions that exist while it runs, so
+ * something has to keep another one from appearing for the same relations
+ * before this command commits.  CREATE SUBSCRIPTION and ALTER SUBSCRIPTION
+ * ... REFRESH PUBLICATION both resolve a relation with AccessShareLock before
+ * registering it in pg_subscription_rel, so AccessExclusiveLock on that
+ * relation blocks them, and nothing weaker conflicts with AccessShareLock.
+ *
+ * The relations in the truncation set are locked that way in any case, because
+ * they are about to be truncated.  A partitioned ancestor is not in the set
+ * and would otherwise not be locked at all, even though the check consults it:
+ * a subscription tracking an ancestor routes rows down into the partition, so
+ * it feeds a relation this command discards.  Locking the ancestors here makes
+ * the rule uniform, namely that every relation the check looks at is held at a
+ * level that conflicts with registering a subscription for it.
+ *
+ * Ancestors are locked before their descendants, the order used elsewhere for
+ * a partition hierarchy.  A relation already in the truncation set is left to
+ * the caller, which locks that set in an order that is itself top-down
+ * because SortRefreshTableRelations() put it in one.
+ */
+static void
+LockRefreshTableFeeders(List *relids)
+{
+	foreach_oid(relid, relids)
+	{
+		List	   *ancestors;
+
+		/* Only a partition has ancestors that route rows into it. */
+		if (!get_rel_relispartition(relid))
+			continue;
+
+		ancestors = get_partition_ancestors(relid);
+
+		/* get_partition_ancestors() returns the closest parent first. */
+		for (int i = list_length(ancestors) - 1; i >= 0; i--)
+		{
+			Oid			ancestorid = list_nth_oid(ancestors, i);
+
+			if (!list_member_oid(relids, ancestorid))
+				LockRelationOid(ancestorid, AccessExclusiveLock);
+		}
+
+		list_free(ancestors);
+	}
+}
+
+/*
+ * Expand the relations named in REFRESH TABLE into the set that has to be
+ * truncated: each of them, plus the partitions of any that are partitioned.
+ *
+ * This mirrors apply_handle_truncate().  Only partitions are followed, never
+ * inheritance children; see the comment on the invariant in
+ * AlterSubscription_refresh_table().
+ *
+ * The result is used both to build the truncation set and, once the relations
+ * are locked, to confirm that it has not changed in the meantime, so the two
+ * must be derived the same way.
+ */
+static List *
+RefreshTableTruncationSet(List *subrelids, LOCKMODE lockmode)
+{
+	List	   *result = NIL;
+
+	foreach_oid(relid, subrelids)
+	{
+		/* It may already be in the set as another named table's partition. */
+		if (list_member_oid(result, relid))
+			continue;
+
+		result = lappend_oid(result, relid);
+
+		if (get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
+			continue;
+
+		foreach_oid(childrelid, find_all_inheritors(relid, lockmode, NULL))
+		{
+			Relation	childrel;
+
+			if (list_member_oid(result, childrelid))
+				continue;
+
+			/* find_all_inheritors() already took the lock */
+			childrel = table_open(childrelid, NoLock);
+
+			/*
+			 * Ignore temp tables of other backends, as ExecuteTruncate()
+			 * does.
+			 */
+			if (RELATION_IS_OTHER_TEMP(childrel))
+			{
+				table_close(childrel, lockmode);
+				continue;
+			}
+
+			/* Keep the lock, the caller opens the relation again later. */
+			table_close(childrel, NoLock);
+			result = lappend_oid(result, childrelid);
+		}
+	}
+
+	return result;
 }
 
 /*
@@ -1620,31 +1839,28 @@ AlterSubscription_refresh_table(Subscription *sub, List *relations)
 						   rv->relname),
 					errhint("Use ALTER SUBSCRIPTION ... REFRESH SEQUENCES instead."));
 
-		/*
-		 * Partitioned tables are not supported yet.  Re-synchronizing one has
-		 * to truncate its partitions, and the relations that feed them are
-		 * then not the named relation alone, which the checks below are not
-		 * prepared for.
-		 */
-		if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
-			ereport(ERROR,
-					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot refresh partitioned table \"%s\"",
-						   rv->relname));
-
-		if (get_rel_relispartition(relid))
-			ereport(ERROR,
-					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot refresh table \"%s\" because it is a partition",
-						   rv->relname));
-
 		/* The relation must already be part of the subscription. */
 		relstate = GetSubscriptionRelState(sub->oid, relid, &relstatelsn);
 		if (relstate == SUBREL_STATE_UNKNOWN)
+		{
+			/*
+			 * A partitioned table is tracked in pg_subscription_rel only when
+			 * the publication uses publish_via_partition_root.  Otherwise its
+			 * partitions are tracked individually, and those are what can be
+			 * refreshed, so point the user at them.
+			 */
+			if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("table \"%s\" is not part of the subscription \"%s\"",
+							   rv->relname, sub->name),
+						errhint("The publication may publish its partitions individually; refresh those instead."));
+
 			ereport(ERROR,
 					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					errmsg("table \"%s\" is not part of the subscription \"%s\"",
 						   rv->relname, sub->name));
+		}
 
 		/* Don't complain about "REFRESH TABLE foo, foo". */
 		if (list_member_oid(subrelids, relid))
@@ -1652,7 +1868,9 @@ AlterSubscription_refresh_table(Subscription *sub, List *relations)
 
 		/*
 		 * The local copy is discarded below, so require the same privilege
-		 * TRUNCATE itself would.
+		 * TRUNCATE itself would.  As in ExecuteTruncate(), the privilege is
+		 * required of the relations named in the command, not of the
+		 * partitions that come with them.
 		 *
 		 * This is not the check the command relies on, because REVOKE can
 		 * still take the privilege away afterwards; it runs here so that a
@@ -1682,7 +1900,28 @@ AlterSubscription_refresh_table(Subscription *sub, List *relations)
 			slotrelids = lappend_oid(slotrelids, relid);
 	}
 
-	relids = subrelids;
+	/*
+	 * Lock the hierarchy from the root down, whatever order the relations
+	 * were named in.
+	 */
+	subrelids = SortRefreshTableRelations(subrelids);
+
+	/*
+	 * A partitioned table holds no data itself, so its partitions have to be
+	 * truncated as well.
+	 *
+	 * Only partitions are followed, never inheritance children.  The rule is
+	 * that we must not discard a relation unless we also reset the state of
+	 * whatever will refill it.  A tracked partitioned root is tracked
+	 * precisely because the publication uses publish_via_partition_root, in
+	 * which case its partitions are not themselves in pg_subscription_rel and
+	 * the root's re-copy refills them through tuple routing.  An inheritance
+	 * child, by contrast, is an independent relation that may be a
+	 * subscription member in its own right, or may hold data that is not
+	 * replicated at all; truncating it here would destroy rows that nothing
+	 * is going to copy back.  Naming it in the command refreshes it.
+	 */
+	relids = RefreshTableTruncationSet(subrelids, AccessShareLock);
 
 	/*
 	 * Everything that will be truncated has to be fed by this subscription
@@ -1690,33 +1929,58 @@ AlterSubscription_refresh_table(Subscription *sub, List *relations)
 	 * subscription would restore.  Check before touching anything, so this
 	 * stays all-or-nothing.
 	 */
-	CheckRefreshTableNotInOtherSubscriptions(rel, sub, relids);
+	CheckRefreshTableNotInOtherSubscriptions(rel, sub, subrelids, relids);
 
 	/*
 	 * The relation set is now known to be fed by this subscription alone, and
 	 * this subscription has no running workers, so nothing that replicates
 	 * into these relations is still holding them.  Take the level the
-	 * truncate needs, which is also what makes the re-check below conclusive.
+	 * truncate needs, and the same level on the ancestors the check above
+	 * relies on, so that the re-check below is conclusive.
 	 */
+	LockRefreshTableFeeders(relids);
+
 	foreach_oid(relid, relids)
 		LockRelationOid(relid, AccessExclusiveLock);
 
 	/*
-	 * Check membership again with the locks held.  The check above runs first
-	 * only so that the common rejection does not have to wait for a tablesync
-	 * worker to finish copying, and it is not conclusive on its own:
-	 * pg_subscription_rel is held at RowExclusiveLock, which is also what
-	 * CREATE SUBSCRIPTION takes.  What makes this one conclusive is that
-	 * every relation it consults is now held at AccessExclusiveLock, so no
-	 * further subscription can be registered for any of them until this
-	 * command commits.  It matters because CREATE SUBSCRIPTION ... WITH
-	 * (copy_data = false) records the relation as ready, and would therefore
-	 * never copy back what the truncate discards.
+	 * The set used to take those locks was collected under AccessShareLock,
+	 * which ATTACH PARTITION and DETACH PARTITION CONCURRENTLY do not
+	 * conflict with, so a partition may have come or gone since.  Derive it
+	 * again now that the locks are held and use that instead: a partition
+	 * attached in the meantime has to be truncated as well, or the re-copy
+	 * would add rows on top of the ones it kept, and one detached in the
+	 * meantime has to be left alone, as this subscription no longer feeds it
+	 * and nothing would copy its rows back.
+	 *
+	 * A relation that has dropped out of the set stays locked until commit,
+	 * which is harmless.  Nothing can change the set from here on: ATTACH and
+	 * DETACH both need a lock on the root that AccessExclusiveLock conflicts
+	 * with, and find_all_inheritors() has just locked any newly attached
+	 * partition at that same level.
 	 */
-	CheckRefreshTableNotInOtherSubscriptions(rel, sub, relids);
+	relids = RefreshTableTruncationSet(subrelids, AccessExclusiveLock);
 
 	/*
-	 * Open what is about to be truncated.  The locks are already held.
+	 * With the set settled, check its membership again.  The check above runs
+	 * first only so that the common rejection does not have to wait for a
+	 * tablesync worker to finish copying, and it is not conclusive on its
+	 * own: pg_subscription_rel is held at RowExclusiveLock, which is also
+	 * what CREATE SUBSCRIPTION takes.  What makes this one conclusive is that
+	 * every relation it consults is now held at AccessExclusiveLock, the
+	 * truncation set and the partitioned ancestors that route rows into it
+	 * alike, so no further subscription can be registered for any of them
+	 * until this command commits.  It matters because CREATE SUBSCRIPTION ...
+	 * WITH (copy_data = false) records the relation as ready, and would
+	 * therefore never copy back what the truncate discards.
+	 */
+	CheckRefreshTableNotInOtherSubscriptions(rel, sub, subrelids, relids);
+
+	INJECTION_POINT("subscription-refresh-table-after-subscription-check", NULL);
+
+	/*
+	 * The set is settled, so open what is about to be truncated.  The locks
+	 * are already held.
 	 */
 	foreach_oid(relid, relids)
 	{
@@ -1750,7 +2014,8 @@ AlterSubscription_refresh_table(Subscription *sub, List *relations)
 		 * taken.  This command resolves its relations without a callback, so
 		 * it has to repeat the check itself.
 		 */
-		truncate_check_perms(relid, userrel->rd_rel);
+		if (list_member_oid(subrelids, relid))
+			truncate_check_perms(relid, userrel->rd_rel);
 	}
 
 	/*

@@ -4,7 +4,7 @@
 # Tests for ALTER SUBSCRIPTION ... REFRESH TABLE, which re-copies one or more
 # already-subscribed tables on the subscriber without touching publication
 # membership or other tables.  The first version requires the subscription
-# to be disabled, and does not accept partitioned tables or partitions.
+# to be disabled.
 use strict;
 use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
@@ -47,8 +47,6 @@ $node_subscriber->safe_psql(
 	CREATE TABLE tab_other (a int primary key, b text);
 	CREATE TABLE tab_local (a int primary key);
 	CREATE SEQUENCE seq_local;
-	CREATE TABLE tab_pt (a int primary key) PARTITION BY RANGE (a);
-	CREATE TABLE tab_pt_1 PARTITION OF tab_pt FOR VALUES FROM (1) TO (11);
 ));
 
 $node_subscriber->safe_psql('postgres',
@@ -100,17 +98,6 @@ refresh_should_fail(
 	"ALTER SUBSCRIPTION tap_sub REFRESH TABLE seq_local",
 	qr/cannot refresh sequence/,
 	'REFRESH TABLE rejected for a sequence');
-
-# Neither a partitioned table nor a partition can be refreshed yet.
-refresh_should_fail(
-	"ALTER SUBSCRIPTION tap_sub REFRESH TABLE tab_pt",
-	qr/cannot refresh partitioned table "tab_pt"/,
-	'REFRESH TABLE rejects a partitioned table');
-
-refresh_should_fail(
-	"ALTER SUBSCRIPTION tap_sub REFRESH TABLE tab_pt_1",
-	qr/cannot refresh table "tab_pt_1" because it is a partition/,
-	'REFRESH TABLE rejects a partition');
 
 # The command cannot run inside a transaction block.
 refresh_should_fail(
@@ -248,6 +235,134 @@ my $sub_oth = $node_subscriber->safe_psql('postgres',
 is($sub_oth, $pub_oth,
 	'tab_other matches publisher after multi-table resync');
 
+# A partitioned table holds no data itself, so refreshing it has to truncate
+# its partitions as well.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_part (a int primary key, b text) PARTITION BY RANGE (a);
+	CREATE TABLE tab_part_1 PARTITION OF tab_part FOR VALUES FROM (1) TO (51);
+	CREATE TABLE tab_part_2 PARTITION OF tab_part FOR VALUES FROM (51) TO (101);
+	INSERT INTO tab_part SELECT g, 'r' || g FROM generate_series(1, 100) g;
+	CREATE PUBLICATION tap_pub_part FOR TABLE tab_part
+		WITH (publish_via_partition_root = true);
+));
+
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_part (a int primary key, b text) PARTITION BY RANGE (a);
+	CREATE TABLE tab_part_1 PARTITION OF tab_part FOR VALUES FROM (1) TO (51);
+	CREATE TABLE tab_part_2 PARTITION OF tab_part FOR VALUES FROM (51) TO (101);
+));
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_part CONNECTION '$publisher_connstr' PUBLICATION tap_pub_part"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_part');
+
+is( $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_part"),
+	'100',
+	'initial sync of partitioned table');
+
+# Publishing via the root means the subscription tracks the root, not the
+# individual partitions.
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_subscription_rel r JOIN pg_class c ON c.oid = r.srrelid JOIN pg_subscription s ON s.oid = r.srsubid WHERE s.subname = 'tap_sub_part'"
+	),
+	'tab_part',
+	'subscription tracks the partitioned root');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_part DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_subscription WHERE subname = 'tap_sub_part' AND pid IS NOT NULL"
+) or die "Timed out waiting for subscription workers to stop";
+
+$node_subscriber->safe_psql('postgres', "DELETE FROM tab_part WHERE a <= 30");
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_part REFRESH TABLE tab_part");
+
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT (SELECT count(*) FROM tab_part_1) + (SELECT count(*) FROM tab_part_2)"
+	),
+	'0',
+	'partitions truncated by REFRESH TABLE on the partitioned root');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_part ENABLE");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_part');
+
+my $pub_part = $node_publisher->safe_psql('postgres',
+	"SELECT md5(string_agg(a || ':' || b, ',' ORDER BY a)) FROM tab_part");
+my $sub_part = $node_subscriber->safe_psql('postgres',
+	"SELECT md5(string_agg(a || ':' || b, ',' ORDER BY a)) FROM tab_part");
+is($sub_part, $pub_part, 'partitioned table matches publisher after resync');
+
+# Without publish_via_partition_root it is the partitions that are tracked, not
+# the root, so naming the root should point the user at them.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_leaf (a int primary key, b text) PARTITION BY RANGE (a);
+	CREATE TABLE tab_leaf_1 PARTITION OF tab_leaf FOR VALUES FROM (1) TO (51);
+	CREATE TABLE tab_leaf_2 PARTITION OF tab_leaf FOR VALUES FROM (51) TO (101);
+	INSERT INTO tab_leaf SELECT g, 's' || g FROM generate_series(1, 100) g;
+	CREATE PUBLICATION tap_pub_leaf FOR TABLE tab_leaf;
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_leaf (a int primary key, b text) PARTITION BY RANGE (a);
+	CREATE TABLE tab_leaf_1 PARTITION OF tab_leaf FOR VALUES FROM (1) TO (51);
+	CREATE TABLE tab_leaf_2 PARTITION OF tab_leaf FOR VALUES FROM (51) TO (101);
+));
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_leaf CONNECTION '$publisher_connstr' PUBLICATION tap_pub_leaf"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_leaf');
+
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_subscription_rel r JOIN pg_class c ON c.oid = r.srrelid JOIN pg_subscription s ON s.oid = r.srsubid WHERE s.subname = 'tap_sub_leaf'"
+	),
+	'tab_leaf_1,tab_leaf_2',
+	'without publish_via_partition_root the partitions are tracked');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_leaf DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_subscription WHERE subname = 'tap_sub_leaf' AND pid IS NOT NULL"
+) or die "Timed out waiting for subscription workers to stop";
+
+my ($lret, $lout, $lerr) = ('', '', '');
+$lret = $node_subscriber->psql(
+	'postgres',
+	"ALTER SUBSCRIPTION tap_sub_leaf REFRESH TABLE tab_leaf",
+	stdout => \$lout,
+	stderr => \$lerr);
+ok( $lret != 0
+	  && $lerr =~ /is not part of the subscription/
+	  && $lerr =~ /partitions individually/,
+	'naming an untracked partitioned root points at its partitions'
+) or diag("got ret=$lret stderr=$lerr");
+
+# Refreshing one partition must leave the sibling partitions alone.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_leaf REFRESH TABLE tab_leaf_1");
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT (SELECT count(*) FROM tab_leaf_1) || '/' || (SELECT count(*) FROM tab_leaf_2)"
+	),
+	'0/50',
+	'refreshing one partition leaves its siblings alone');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_leaf ENABLE");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_leaf');
+is( $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_leaf"),
+	'100',
+	'refreshed partition re-copied after enable');
+
 # Refreshing an inheritance parent must not discard its children.  A child is an
 # independent relation: it may be a subscription member in its own right, in
 # which case truncating it here would leave rows that nothing copies back.
@@ -336,8 +451,40 @@ is( $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_inh_c"),
 	'2',
 	'child re-copied after refreshing both');
 
+# An inheritance parent does not route rows into its children, so another
+# subscription tracking only the parent must not block refreshing the child.
+# The ancestor test has to be restricted to partitions for this: pg_inherits
+# records inheritance and partitioning alike, so walking it unconditionally
+# would report the inheritance parent as a feeder of the child.
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION tap_pub_inh_ponly FOR TABLE ONLY tab_inh_p");
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_inh_ponly CONNECTION '$publisher_connstr' PUBLICATION tap_pub_inh_ponly WITH (copy_data = false, enabled = false, create_slot = false, slot_name = NONE)"
+);
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_inh DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_subscription WHERE subname = 'tap_sub_inh' AND pid IS NOT NULL"
+) or die "Timed out waiting for subscription workers to stop";
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_inh REFRESH TABLE tab_inh_c");
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT r.srsubstate FROM pg_subscription_rel r JOIN pg_class c ON c.oid = r.srrelid JOIN pg_subscription s ON s.oid = r.srsubid WHERE s.subname = 'tap_sub_inh' AND c.relname = 'tab_inh_c'"
+	),
+	'i',
+	'inheritance child can be refreshed when another subscription tracks only the parent'
+);
+
+$node_subscriber->safe_psql('postgres',
+	"DROP SUBSCRIPTION tap_sub_inh_ponly");
+$node_publisher->safe_psql('postgres', "DROP PUBLICATION tap_pub_inh_ponly");
+
 # Done with the subscriptions above; free their workers before adding more.
 $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub");
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_part");
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_leaf");
 $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_inh");
 
 # A subscription with origin = none does not want rows that originated
@@ -544,6 +691,68 @@ $node_subscriber->safe_psql(
 ));
 $node_publisher->safe_psql('postgres', "DROP PUBLICATION tap_pub_bidi");
 
+# A partitioned table and one of its partitions can both be members of the
+# same subscription, when the publisher has them as independent tables and
+# only the subscriber puts them in a hierarchy.  Naming the partition first
+# then asks for the two to be locked in the opposite order to the one the rest
+# of the system uses, which the command has to correct.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_mix_p (id int);
+	CREATE TABLE tab_mix_c (id int);
+	INSERT INTO tab_mix_p SELECT generate_series(-90, -81);
+	INSERT INTO tab_mix_c SELECT generate_series(-50, -41);
+	CREATE PUBLICATION tap_pub_mix_p FOR TABLE tab_mix_p;
+	CREATE PUBLICATION tap_pub_mix_c FOR TABLE tab_mix_c;
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_mix_p (id int) PARTITION BY RANGE (id);
+	CREATE TABLE tab_mix_c PARTITION OF tab_mix_p FOR VALUES FROM (-100) TO (0);
+));
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_mix CONNECTION '$publisher_connstr' PUBLICATION tap_pub_mix_p, tap_pub_mix_c"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_mix');
+
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_subscription_rel r JOIN pg_class c ON c.oid = r.srrelid JOIN pg_subscription s ON s.oid = r.srsubid WHERE s.subname = 'tap_sub_mix'"
+	),
+	'tab_mix_c,tab_mix_p',
+	'a partition and its root can both be subscription members');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_mix DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_subscription WHERE subname = 'tap_sub_mix' AND pid IS NOT NULL"
+) or die "Timed out waiting for subscription workers to stop";
+
+# The partition is named before its root on purpose.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_mix REFRESH TABLE tab_mix_c, tab_mix_p");
+
+is( $node_subscriber->safe_psql(
+		'postgres',
+		"SELECT string_agg(c.relname || '=' || r.srsubstate::text, ',' ORDER BY c.relname) FROM pg_subscription_rel r JOIN pg_class c ON c.oid = r.srrelid JOIN pg_subscription s ON s.oid = r.srsubid WHERE s.subname = 'tap_sub_mix'"
+	),
+	'tab_mix_c=i,tab_mix_p=i',
+	'both the partition and its root are reset when named in either order');
+is( $node_subscriber->safe_psql(
+		'postgres', "SELECT count(*) FROM tab_mix_p"),
+	'0',
+	'the whole hierarchy is truncated');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_mix ENABLE");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_mix');
+is( $node_subscriber->safe_psql(
+		'postgres', "SELECT count(*) FROM tab_mix_p"),
+	'20',
+	'both members are re-copied');
+
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_mix");
+
 # A table referenced by a foreign key can only be re-synchronized together with
 # the referencing table, because the truncate is rejected on the existence of
 # the constraint rather than on the referencing rows.  This is what naming
@@ -650,6 +859,69 @@ is( $node_subscriber->safe_psql(
 
 $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_lo");
 $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_hi");
+
+# The same hazard reaches partitions through tuple routing: one subscription
+# tracks the partitioned root, another tracks a partition directly.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_cross (a int primary key, b text) PARTITION BY RANGE (a);
+	CREATE TABLE tab_cross_1 PARTITION OF tab_cross FOR VALUES FROM (1) TO (51);
+	CREATE TABLE tab_cross_2 PARTITION OF tab_cross FOR VALUES FROM (51) TO (101);
+	INSERT INTO tab_cross SELECT g, 'w' || g FROM generate_series(1, 100) g;
+	CREATE PUBLICATION tap_pub_croot FOR TABLE tab_cross
+	    WITH (publish_via_partition_root = true);
+	CREATE PUBLICATION tap_pub_cleaf FOR TABLE tab_cross_1;
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_cross (a int primary key, b text) PARTITION BY RANGE (a);
+	CREATE TABLE tab_cross_1 PARTITION OF tab_cross FOR VALUES FROM (1) TO (51);
+	CREATE TABLE tab_cross_2 PARTITION OF tab_cross FOR VALUES FROM (51) TO (101);
+));
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_croot CONNECTION '$publisher_connstr' PUBLICATION tap_pub_croot"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher,
+	'tap_sub_croot');
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_cleaf CONNECTION '$publisher_connstr' PUBLICATION tap_pub_cleaf WITH (copy_data = false)"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher,
+	'tap_sub_cleaf');
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_croot DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_subscription WHERE subname = 'tap_sub_croot' AND pid IS NOT NULL"
+) or die "Timed out waiting for subscription workers to stop";
+
+# Naming the root would truncate the partition owned by the other subscription.
+refresh_should_fail(
+	"ALTER SUBSCRIPTION tap_sub_croot REFRESH TABLE tab_cross",
+	qr/table "tab_cross_1" is also part of the subscription "tap_sub_cleaf"/,
+	'REFRESH TABLE rejects a root whose partition another subscription populates'
+);
+
+is( $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_cross"),
+	'100',
+	'the partitioned table is left untouched by the rejected command');
+
+# And the reverse: naming the partition, whose ancestor the other subscription
+# tracks and routes tuples into.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_cleaf DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_subscription WHERE subname = 'tap_sub_cleaf' AND pid IS NOT NULL"
+) or die "Timed out waiting for subscription workers to stop";
+
+refresh_should_fail(
+	"ALTER SUBSCRIPTION tap_sub_cleaf REFRESH TABLE tab_cross_1",
+	qr/table "tab_cross_1" is a partition of "tab_cross", which is part of the subscription "tap_sub_croot"/,
+	'REFRESH TABLE rejects a partition whose ancestor another subscription tracks'
+);
+
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_croot");
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_cleaf");
 
 # Re-copying a table is not allowed once two_phase is enabled.
 $node_publisher->safe_psql(

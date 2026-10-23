@@ -303,7 +303,20 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
      <para>
       Only tables that the subscription actually tracks, as listed in
       <link linkend="catalog-pg-subscription-rel"><structname>pg_subscription_rel</structname></link>,
-      can be named.  Partitioned tables and partitions cannot be refreshed.
+      can be named.  For a partitioned table this depends on the publication:
+      with
+      <link linkend="sql-createpublication-params-with-publish-via-partition-root"><literal>publish_via_partition_root</literal></link>,
+      the partitioned table itself is tracked and refreshing it re-copies the
+      whole hierarchy; otherwise the individual partitions are tracked and
+      those are what can be refreshed.  Refreshing one partition leaves the
+      others untouched.
+     </para>
+     <para>
+      Re-copying a partitioned table truncates every one of its partitions,
+      just as replicating a <command>TRUNCATE</command> of that table does.
+      That includes a partition which exists only on the subscriber, or which
+      holds rows the publisher does not have: those rows are discarded and
+      nothing copies them back.
      </para>
      <para>
       See <xref linkend="sql-createsubscription-notes"/> for details of how
@@ -342,6 +355,8 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
       A table that another subscription also populates cannot be refreshed.
       Discarding it would throw away the rows maintained by that subscription,
       which would not copy them again, so the command reports an error instead.
+      This includes the case where the other subscription publishes a
+      partitioned ancestor of the table and routes rows into it.
      </para>
      <warning>
       <para>
