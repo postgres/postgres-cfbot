@@ -311,15 +311,42 @@ add_vars_to_targetlist(PlannerInfo *root, List *vars,
 			Var		   *var = (Var *) node;
 			RelOptInfo *rel = find_base_rel(root, var->varno);
 			int			attno = var->varattno;
+			bool		has_tlist_entry;
 
 			if (bms_is_subset(where_needed, rel->relids))
 				continue;
 			Assert(attno >= rel->min_attr && attno <= rel->max_attr);
 			attno -= rel->min_attr;
-			if (rel->attr_needed[attno] == NULL)
+			if (var->varattno == InvalidAttrNumber)
+			{
+				ListCell   *lc;
+
+				/*
+				 * Whole-row Vars for a table can have its named composite
+				 * type or RECORDOID for a row identity.  attr_needed tracks
+				 * only the attribute number, so check for the requested type.
+				 */
+				has_tlist_entry = false;
+				foreach(lc, rel->reltarget->exprs)
+				{
+					Var		   *existing_var = (Var *) lfirst(lc);
+
+					if (IsA(existing_var, Var) &&
+						existing_var->varattno == var->varattno &&
+						existing_var->vartype == var->vartype)
+					{
+						has_tlist_entry = true;
+						break;
+					}
+				}
+			}
+			else
+				has_tlist_entry = (rel->attr_needed[attno] != NULL);
+
+			if (!has_tlist_entry)
 			{
 				/*
-				 * Variable not yet requested, so add to rel's targetlist.
+				 * Add the variable to rel's targetlist.
 				 *
 				 * The value available at the rel's scan level has not been
 				 * nulled by any outer join, so drop its varnullingrels.

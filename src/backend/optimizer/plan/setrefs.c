@@ -41,6 +41,7 @@ typedef struct
 {
 	int			varno;			/* RT index of Var */
 	AttrNumber	varattno;		/* attr number of Var */
+	Oid			vartype;		/* type OID of Var */
 	AttrNumber	resno;			/* TLE position of Var */
 	Bitmapset  *varnullingrels; /* Var's varnullingrels */
 } tlist_vinfo;
@@ -2891,6 +2892,7 @@ build_tlist_index(List *tlist)
 
 			vinfo->varno = var->varno;
 			vinfo->varattno = var->varattno;
+			vinfo->vartype = var->vartype;
 			vinfo->resno = tle->resno;
 			vinfo->varnullingrels = var->varnullingrels;
 			vinfo++;
@@ -2944,6 +2946,7 @@ build_tlist_index_other_vars(List *tlist, int ignore_rel)
 			{
 				vinfo->varno = var->varno;
 				vinfo->varattno = var->varattno;
+				vinfo->vartype = var->vartype;
 				vinfo->resno = tle->resno;
 				vinfo->varnullingrels = var->varnullingrels;
 				vinfo++;
@@ -2966,6 +2969,11 @@ build_tlist_index_other_vars(List *tlist, int ignore_rel)
  * Also ensure that varnosyn is incremented by rtoffset.
  * If no match, return NULL.
  *
+ * Match on vartype as well as varno/varattno, since a whole-row Var can
+ * have either the relation's named composite type or RECORDOID when used
+ * as a row identity.  As in tlist_member_match_var(), we allow typmod to
+ * differ, but require the same type OID.
+ *
  * We cross-check the varnullingrels of the subplan output Var based on
  * nrm_match.  Most call sites should pass NRM_EQUAL indicating we expect
  * an exact match.  However, there are places where we haven't cleaned
@@ -2985,7 +2993,8 @@ search_indexed_tlist_for_var(Var *var, indexed_tlist *itlist,
 	i = itlist->num_vars;
 	while (i-- > 0)
 	{
-		if (vinfo->varno == varno && vinfo->varattno == varattno)
+		if (vinfo->varno == varno && vinfo->varattno == varattno &&
+			vinfo->vartype == var->vartype)
 		{
 			/* Found a match */
 			Var		   *newvar = copyVar(var);

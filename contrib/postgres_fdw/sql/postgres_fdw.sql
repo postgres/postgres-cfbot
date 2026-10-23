@@ -1929,6 +1929,22 @@ UPDATE ft2 d SET c2 = CASE WHEN random() >= 0 THEN d.c2 ELSE 0 END
 UPDATE ft2 d SET c2 = CASE WHEN random() >= 0 THEN d.c2 ELSE 0 END
   FROM ft2 AS t WHERE d.c1 = t.c1 AND d.c1 > 1000;
 
+-- A target whole-row reference in SET must be distinguished from the
+-- RECORD-typed row identity when the join is pushed down.
+BEGIN;
+INSERT INTO ft2 (c1, c2, c3) VALUES (2001, 42, 'whole-row');
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE ft2 d SET c2 = (row_to_json(d)->>'c2')::int + 1
+  FROM ft2 t WHERE d.c1 = t.c1 AND d.c1 = 2001
+  RETURNING d.c1, d.c2, d.c3;
+UPDATE ft2 d SET c2 = (row_to_json(d)->>'c2')::int + 1
+  FROM ft2 t WHERE d.c1 = t.c1 AND d.c1 = 2001
+  RETURNING d.c1, d.c2, d.c3;
+UPDATE ft2 d SET c2 = length(d::text)
+  FROM ft2 t WHERE d.c1 = t.c1 AND d.c1 = 2001
+  RETURNING d.c1, d.c2;
+ROLLBACK;
+
 -- Test UPDATE/DELETE with WHERE or JOIN/ON conditions containing
 -- user-defined operators/functions
 ALTER SERVER loopback OPTIONS (DROP extensions);
