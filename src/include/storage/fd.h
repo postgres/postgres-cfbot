@@ -138,6 +138,7 @@ extern int	FilePrefetch(File file, pgoff_t offset, pgoff_t amount, uint32 wait_e
 extern ssize_t FileReadV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset, uint32 wait_event_info);
 extern ssize_t FileWriteV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset, uint32 wait_event_info);
 extern int	FileStartReadV(struct PgAioHandle *ioh, File file, int iovcnt, pgoff_t offset, uint32 wait_event_info);
+extern int	FileStartSync(struct PgAioHandle *ioh, File file, bool datasync, uint32 wait_event_info);
 extern int	FileSync(File file, uint32 wait_event_info);
 extern int	FileZero(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info);
 extern int	FileFallocate(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info);
@@ -211,6 +212,8 @@ extern int	pg_fsync(int fd);
 extern int	pg_fsync_no_writethrough(int fd);
 extern int	pg_fsync_writethrough(int fd);
 extern int	pg_fdatasync(int fd);
+extern int	pg_fsync_unconditional(int fd, bool writethrough);
+extern int	pg_fdatasync_unconditional(int fd);
 extern bool pg_file_exists(const char *name);
 extern void pg_flush_data(int fd, pgoff_t offset, pgoff_t nbytes);
 extern int	pg_truncate(const char *path, pgoff_t length);
@@ -219,6 +222,7 @@ extern int	fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int 
 extern int	durable_rename(const char *oldfile, const char *newfile, int elevel);
 extern int	durable_unlink(const char *fname, int elevel);
 extern void SyncDataDirectory(void);
+extern int	GetFsyncConcurrencyLimit(bool uses_transient_fd);
 extern int	data_sync_elevel(int elevel);
 
 static inline ssize_t
