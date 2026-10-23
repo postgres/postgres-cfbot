@@ -131,6 +131,7 @@ StaticAssertDecl(TOPN_SELECT_MIN_BUFFER < INITIAL_MEMTUPSIZE,
 
 /* GUC variables */
 bool		trace_sort = false;
+bool		debug_topn_quickselect = true;
 
 #ifdef DEBUG_BOUNDED_SORT
 bool		optimize_bounded_sort = true;
@@ -1153,7 +1154,7 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 				 * If 2 * bound tuples fit in memory, keep a buffer of them and
 				 * prune it back to bound with quickselect whenever it fills.
 				 */
-				if (state->bound > 0 && !LACKMEM(state))
+				if (debug_topn_quickselect && state->bound > 0 && !LACKMEM(state))
 				{
 					if (trace_sort)
 						elog(LOG, "switching to bounded quickselect at %d tuples: %s",
