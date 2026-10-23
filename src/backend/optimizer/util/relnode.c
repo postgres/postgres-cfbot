@@ -2010,6 +2010,8 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 		pclauses = lappend(pclauses, rinfo);
 	}
 
+	list_free(eclauses);
+
 	/*
 	 * EquivalenceClasses are harder to deal with than we could wish, because
 	 * of the fact that a given EC can generate different clauses depending on
@@ -2073,6 +2075,9 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 				continue;		/* drop if already accepted */
 			pclauses = lappend(pclauses, rinfo);
 		}
+
+		list_free(dropped_ecs);
+		list_free(eclauses);
 	}
 
 	/*
