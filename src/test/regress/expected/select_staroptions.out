@@ -1,0 +1,965 @@
+--
+-- SELECT EXCLUDE/REPLACE/RENAME
+--
+SET client_min_messages TO 'warning';
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS orders;
+RESET client_min_messages;
+CREATE TABLE users (
+    id          INT PRIMARY KEY,
+    name        TEXT,
+    email       TEXT,
+    created_at  TIMESTAMP
+);
+CREATE TABLE orders (
+    id          INT PRIMARY KEY,
+    user_id     INT REFERENCES users(id),
+    amount      NUMERIC(10,2),
+    status      TEXT
+);
+CREATE SCHEMA s1;
+CREATE SCHEMA s2;
+CREATE TABLE s1.products (
+    id          INT PRIMARY KEY,
+    name        TEXT,
+    price       NUMERIC(10,2)
+);
+CREATE TABLE s2.products (
+    id          INT PRIMARY KEY,
+    name        TEXT,
+    price       NUMERIC(10,2),
+    description TEXT
+);
+-- Insert sample data
+INSERT INTO users (id, name, email, created_at) VALUES
+(1, 'Alice', 'alice@example.com', '2026-01-01 10:00:00'),
+(2, 'Bob', 'bob@example.com', '2026-01-02 11:00:00'),
+(3, 'Carol', NULL, '2026-01-03 12:00:00');
+INSERT INTO orders (id, user_id, amount, status) VALUES
+(101, 1, 50.00, 'paid'),
+(102, 1, 75.50, 'shipped'),
+(103, 2, 20.00, 'cancelled');
+INSERT INTO s1.products (id, name, price) VALUES
+(1, 'Product A', 10.00),
+(2, 'Product B', 15.50);
+INSERT INTO s2.products (id, name, price, description) VALUES
+(1, 'Product X', 20.00, 'Description for X'),
+(2, 'Product Y', 25.75, 'Description for Y');
+--
+-- EXCLUDE clause
+--
+-- Simple EXCLUDE
+SELECT * (EXCLUDE (email, created_at))
+FROM users
+ORDER BY id;
+ id | name  
+----+-------
+  1 | Alice
+  2 | Bob
+  3 | Carol
+(3 rows)
+
+-- Exclude all but one column
+SELECT * (EXCLUDE (name, email, created_at))
+FROM users
+ORDER BY id;
+ id 
+----
+  1
+  2
+  3
+(3 rows)
+
+-- Exclude all columns
+SELECT * (EXCLUDE (id, name, email, created_at))
+FROM users;
+--
+(3 rows)
+
+-- EXCLUDE all using exclude list but overall SELECT list is not empty
+SELECT id, users.* (EXCLUDE (id, name, email, created_at))
+FROM users
+ORDER BY id;
+ id 
+----
+  1
+  2
+  3
+(3 rows)
+
+-- Aliasing with EXCLUDE
+SELECT * (EXCLUDE (u.email))
+FROM users AS u
+ORDER BY u.id;
+ id | name  |        created_at        
+----+-------+--------------------------
+  1 | Alice | Thu Jan 01 10:00:00 2026
+  2 | Bob   | Fri Jan 02 11:00:00 2026
+  3 | Carol | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- Expressions with EXCLUDE
+SELECT * (EXCLUDE (name)), 1 + 1 AS two
+FROM users
+ORDER BY id;
+ id |       email       |        created_at        | two 
+----+-------------------+--------------------------+-----
+  1 | alice@example.com | Thu Jan 01 10:00:00 2026 |   2
+  2 | bob@example.com   | Fri Jan 02 11:00:00 2026 |   2
+  3 |                   | Sat Jan 03 12:00:00 2026 |   2
+(3 rows)
+
+-- JOINs with EXCLUDE
+-- Join, unqualified EXCLUDE
+SELECT * (EXCLUDE (created_at))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |       email       | id  | user_id | amount |  status   
+----+-------+-------------------+-----+---------+--------+-----------
+  1 | Alice | alice@example.com | 101 |       1 |  50.00 | paid
+  1 | Alice | alice@example.com | 102 |       1 |  75.50 | shipped
+  2 | Bob   | bob@example.com   | 103 |       2 |  20.00 | cancelled
+(3 rows)
+
+-- Join, qualified EXCLUDE
+SELECT * (EXCLUDE (users.created_at, orders.amount))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |       email       | id  | user_id |  status   
+----+-------+-------------------+-----+---------+-----------
+  1 | Alice | alice@example.com | 101 |       1 | paid
+  1 | Alice | alice@example.com | 102 |       1 | shipped
+  2 | Bob   | bob@example.com   | 103 |       2 | cancelled
+(3 rows)
+
+-- Join, aliased tables with EXCLUDE
+SELECT * (EXCLUDE (u.created_at, o.amount))
+FROM users AS u
+JOIN orders AS o ON o.user_id = u.id
+ORDER BY u.id, o.id;
+ id | name  |       email       | id  | user_id |  status   
+----+-------+-------------------+-----+---------+-----------
+  1 | Alice | alice@example.com | 101 |       1 | paid
+  1 | Alice | alice@example.com | 102 |       1 | shipped
+  2 | Bob   | bob@example.com   | 103 |       2 | cancelled
+(3 rows)
+
+-- Qualified stars; EXCLUDE is applied to each star separately
+SELECT
+users.* (EXCLUDE (id)),
+orders.* (EXCLUDE (user_id))
+FROM users
+LEFT JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ name  |       email       |        created_at        | id  | amount |  status   
+-------+-------------------+--------------------------+-----+--------+-----------
+ Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |  50.00 | paid
+ Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |  75.50 | shipped
+ Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |  20.00 | cancelled
+ Carol |                   | Sat Jan 03 12:00:00 2026 |     |        | 
+(4 rows)
+
+-- Schema-qualified star
+SELECT s1.products.* (EXCLUDE (price))
+FROM s1.products
+ORDER BY id;
+ id |   name    
+----+-----------
+  1 | Product A
+  2 | Product B
+(2 rows)
+
+-- Schema-qualified column
+SELECT * (EXCLUDE (s1.products.price))
+FROM s1.products
+ORDER BY id;
+ id |   name    
+----+-----------
+  1 | Product A
+  2 | Product B
+(2 rows)
+
+-- Name collision
+SELECT * (EXCLUDE (id))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ name  |       email       |        created_at        | user_id | amount |  status   
+-------+-------------------+--------------------------+---------+--------+-----------
+ Alice | alice@example.com | Thu Jan 01 10:00:00 2026 |       1 |  50.00 | paid
+ Alice | alice@example.com | Thu Jan 01 10:00:00 2026 |       1 |  75.50 | shipped
+ Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 |       2 |  20.00 | cancelled
+(3 rows)
+
+-- Subqueries with EXCLUDE
+SELECT * (EXCLUDE (u.created_at))
+FROM (
+    SELECT * FROM users
+) u
+ORDER BY id;
+ id | name  |       email       
+----+-------+-------------------
+  1 | Alice | alice@example.com
+  2 | Bob   | bob@example.com
+  3 | Carol | 
+(3 rows)
+
+SELECT * (EXCLUDE (j.created_at))
+FROM (
+    users JOIN orders USING (id)
+) AS j;
+ id | name | email | user_id | amount | status 
+----+------+-------+---------+--------+--------
+(0 rows)
+
+-- CTEs with EXCLUDE
+WITH base_users AS (
+    SELECT * FROM users
+)
+SELECT * (EXCLUDE (base_users.created_at))
+FROM base_users
+ORDER BY id;
+ id | name  |       email       
+----+-------+-------------------
+  1 | Alice | alice@example.com
+  2 | Bob   | bob@example.com
+  3 | Carol | 
+(3 rows)
+
+-- Multiple FROM items with EXCLUDE
+SELECT * (EXCLUDE (email, status)) FROM users, orders ORDER BY users.id, orders.id;
+ id | name  |        created_at        | id  | user_id | amount 
+----+-------+--------------------------+-----+---------+--------
+  1 | Alice | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00
+  1 | Alice | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50
+  1 | Alice | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00
+  2 | Bob   | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00
+  2 | Bob   | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50
+  2 | Bob   | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00
+  3 | Carol | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00
+  3 | Carol | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50
+  3 | Carol | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00
+(9 rows)
+
+-- CROSS JOIN with EXCLUDE
+SELECT * (EXCLUDE (email, status)) FROM users CROSS JOIN orders ORDER BY users.id, orders.id;
+ id | name  |        created_at        | id  | user_id | amount 
+----+-------+--------------------------+-----+---------+--------
+  1 | Alice | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00
+  1 | Alice | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50
+  1 | Alice | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00
+  2 | Bob   | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00
+  2 | Bob   | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50
+  2 | Bob   | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00
+  3 | Carol | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00
+  3 | Carol | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50
+  3 | Carol | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00
+(9 rows)
+
+--
+-- REPLACE clause
+--
+-- Simple REPLACE
+SELECT * (REPLACE (email WITH 'user@example.com', created_at WITH NULL))
+FROM users
+ORDER BY id;
+ id | name  |      email       | created_at 
+----+-------+------------------+------------
+  1 | Alice | user@example.com | 
+  2 | Bob   | user@example.com | 
+  3 | Carol | user@example.com | 
+(3 rows)
+
+-- Aliasing with REPLACE
+SELECT * (REPLACE (u.email WITH 'user@example.com'))
+FROM users AS u
+ORDER BY u.id;
+ id | name  |      email       |        created_at        
+----+-------+------------------+--------------------------
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- Expressions with REPLACE
+SELECT * (REPLACE (created_at WITH NULL)), 1 + 1 AS two
+FROM users
+ORDER BY id;
+ id | name  |       email       | created_at | two 
+----+-------+-------------------+------------+-----
+  1 | Alice | alice@example.com |            |   2
+  2 | Bob   | bob@example.com   |            |   2
+  3 | Carol |                   |            |   2
+(3 rows)
+
+-- JOINs with REPLACE
+-- Join, unqualified REPLACE
+SELECT * (REPLACE (created_at WITH created_at + INTERVAL '1 day'))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |       email       |        created_at        | id  | user_id | amount |  status   
+----+-------+-------------------+--------------------------+-----+---------+--------+-----------
+  1 | Alice | alice@example.com | Fri Jan 02 10:00:00 2026 | 101 |       1 |  50.00 | paid
+  1 | Alice | alice@example.com | Fri Jan 02 10:00:00 2026 | 102 |       1 |  75.50 | shipped
+  2 | Bob   | bob@example.com   | Sat Jan 03 11:00:00 2026 | 103 |       2 |  20.00 | cancelled
+(3 rows)
+
+-- Join, qualified REPLACE
+SELECT * (REPLACE (users.created_at WITH NULL, orders.amount WITH orders.amount * 2))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |       email       | created_at | id  | user_id | amount |  status   
+----+-------+-------------------+------------+-----+---------+--------+-----------
+  1 | Alice | alice@example.com |            | 101 |       1 | 100.00 | paid
+  1 | Alice | alice@example.com |            | 102 |       1 | 151.00 | shipped
+  2 | Bob   | bob@example.com   |            | 103 |       2 |  40.00 | cancelled
+(3 rows)
+
+-- Join, aliased tables with REPLACE
+SELECT * (REPLACE (u.created_at WITH NULL, o.amount WITH o.amount * 2))
+FROM users AS u
+JOIN orders AS o ON o.user_id = u.id
+ORDER BY u.id, o.id;
+ id | name  |       email       | created_at | id  | user_id | amount |  status   
+----+-------+-------------------+------------+-----+---------+--------+-----------
+  1 | Alice | alice@example.com |            | 101 |       1 | 100.00 | paid
+  1 | Alice | alice@example.com |            | 102 |       1 | 151.00 | shipped
+  2 | Bob   | bob@example.com   |            | 103 |       2 |  40.00 | cancelled
+(3 rows)
+
+-- Qualified stars; REPLACE is applied to each star separately
+SELECT
+users.* (REPLACE (id WITH 999)),
+orders.* (REPLACE (user_id WITH NULL))
+FROM users
+LEFT JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id  | name  |       email       |        created_at        | id  | user_id | amount |  status   
+-----+-------+-------------------+--------------------------+-----+---------+--------+-----------
+ 999 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |         |  50.00 | paid
+ 999 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |         |  75.50 | shipped
+ 999 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |         |  20.00 | cancelled
+ 999 | Carol |                   | Sat Jan 03 12:00:00 2026 |     |         |        | 
+(4 rows)
+
+-- Schema-qualified star
+SELECT s1.products.* (REPLACE (price WITH price * 1.1))
+FROM s1.products
+ORDER BY id;
+ id |   name    | price  
+----+-----------+--------
+  1 | Product A | 11.000
+  2 | Product B | 17.050
+(2 rows)
+
+-- Schema-qualified column
+SELECT * (REPLACE (s1.products.price WITH s1.products.price * 1.1))
+FROM s1.products
+ORDER BY id;
+ id |   name    | price  
+----+-----------+--------
+  1 | Product A | 11.000
+  2 | Product B | 17.050
+(2 rows)
+
+-- Name collision
+SELECT * (REPLACE (id WITH 999))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id  | name  |       email       |        created_at        | id  | user_id | amount |  status   
+-----+-------+-------------------+--------------------------+-----+---------+--------+-----------
+ 999 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 999 |       1 |  50.00 | paid
+ 999 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 999 |       1 |  75.50 | shipped
+ 999 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 999 |       2 |  20.00 | cancelled
+(3 rows)
+
+-- Subqueries with REPLACE
+SELECT * (REPLACE (u.created_at WITH u.created_at + INTERVAL '1 day'))
+FROM (
+    SELECT * FROM users
+) u
+ORDER BY id;
+ id | name  |       email       |        created_at        
+----+-------+-------------------+--------------------------
+  1 | Alice | alice@example.com | Fri Jan 02 10:00:00 2026
+  2 | Bob   | bob@example.com   | Sat Jan 03 11:00:00 2026
+  3 | Carol |                   | Sun Jan 04 12:00:00 2026
+(3 rows)
+
+SELECT * (REPLACE (j.created_at WITH j.created_at + INTERVAL '1 day'))
+FROM (
+    users JOIN orders USING (id)
+) AS j;
+ id | name | email | created_at | user_id | amount | status 
+----+------+-------+------------+---------+--------+--------
+(0 rows)
+
+-- CTEs with REPLACE
+WITH base_users AS (
+    SELECT * FROM users
+)
+SELECT * (REPLACE (base_users.created_at WITH NULL))
+FROM base_users
+ORDER BY id;
+ id | name  |       email       | created_at 
+----+-------+-------------------+------------
+  1 | Alice | alice@example.com | 
+  2 | Bob   | bob@example.com   | 
+  3 | Carol |                   | 
+(3 rows)
+
+-- Multiple FROM items with REPLACE
+SELECT * (REPLACE (email WITH 'user@example.com', status WITH 'N/A')) FROM users, orders ORDER BY users.id, orders.id;
+ id | name  |      email       |        created_at        | id  | user_id | amount | status 
+----+-------+------------------+--------------------------+-----+---------+--------+--------
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00 | N/A
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50 | N/A
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00 | N/A
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00 | N/A
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50 | N/A
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00 | N/A
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00 | N/A
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50 | N/A
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00 | N/A
+(9 rows)
+
+-- CROSS JOIN with REPLACE
+SELECT * (REPLACE (email WITH 'user@example.com', status WITH 'N/A')) FROM users CROSS JOIN orders ORDER BY users.id, orders.id;
+ id | name  |      email       |        created_at        | id  | user_id | amount | status 
+----+-------+------------------+--------------------------+-----+---------+--------+--------
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00 | N/A
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50 | N/A
+  1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00 | N/A
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00 | N/A
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50 | N/A
+  2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00 | N/A
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00 | N/A
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50 | N/A
+  3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00 | N/A
+(9 rows)
+
+--
+-- RENAME clause
+--
+-- Simple RENAME
+SELECT * (RENAME (name AS user_name, email AS user_email))
+FROM users
+ORDER BY id;
+ id | user_name |    user_email     |        created_at        
+----+-----------+-------------------+--------------------------
+  1 | Alice     | alice@example.com | Thu Jan 01 10:00:00 2026
+  2 | Bob       | bob@example.com   | Fri Jan 02 11:00:00 2026
+  3 | Carol     |                   | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- Aliasing with RENAME
+SELECT * (RENAME (u.email AS user_email))
+FROM users AS u
+ORDER BY u.id;
+ id | name  |    user_email     |        created_at        
+----+-------+-------------------+--------------------------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- Expressions with RENAME
+SELECT * (RENAME (created_at AS date_created)), 1 + 1 AS two
+FROM users
+ORDER BY id;
+ id | name  |       email       |       date_created       | two 
+----+-------+-------------------+--------------------------+-----
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 |   2
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 |   2
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 |   2
+(3 rows)
+
+-- JOINs with RENAME
+-- Join, unqualified RENAME
+SELECT * (RENAME (created_at AS date_created))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |       email       |       date_created       | id  | user_id | amount |  status   
+----+-------+-------------------+--------------------------+-----+---------+--------+-----------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00 | paid
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50 | shipped
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00 | cancelled
+(3 rows)
+
+-- Join, qualified RENAME
+SELECT * (RENAME (users.created_at AS date_created, orders.amount AS order_amount))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |       email       |       date_created       | id  | user_id | order_amount |  status   
+----+-------+-------------------+--------------------------+-----+---------+--------------+-----------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |        50.00 | paid
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |        75.50 | shipped
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |       2 |        20.00 | cancelled
+(3 rows)
+
+-- Join, aliased tables with RENAME
+SELECT * (RENAME (u.created_at AS date_created, o.amount AS order_amount))
+FROM users AS u
+JOIN orders AS o ON o.user_id = u.id
+ORDER BY u.id, o.id;
+ id | name  |       email       |       date_created       | id  | user_id | order_amount |  status   
+----+-------+-------------------+--------------------------+-----+---------+--------------+-----------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |        50.00 | paid
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |        75.50 | shipped
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |       2 |        20.00 | cancelled
+(3 rows)
+
+-- Qualified stars; RENAME is applied to each star separately
+SELECT
+users.* (RENAME (id AS uid)),
+orders.* (RENAME (user_id AS customer_id))
+FROM users
+LEFT JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ uid | name  |       email       |        created_at        | id  | customer_id | amount |  status   
+-----+-------+-------------------+--------------------------+-----+-------------+--------+-----------
+   1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |           1 |  50.00 | paid
+   1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |           1 |  75.50 | shipped
+   2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |           2 |  20.00 | cancelled
+   3 | Carol |                   | Sat Jan 03 12:00:00 2026 |     |             |        | 
+(4 rows)
+
+-- Schema-qualified star
+SELECT s1.products.* (RENAME (price AS product_price))
+FROM s1.products
+ORDER BY id;
+ id |   name    | product_price 
+----+-----------+---------------
+  1 | Product A |         10.00
+  2 | Product B |         15.50
+(2 rows)
+
+-- Schema-qualified column
+SELECT * (RENAME (s1.products.price AS product_price))
+FROM s1.products
+ORDER BY id;
+ id |   name    | product_price 
+----+-----------+---------------
+  1 | Product A |         10.00
+  2 | Product B |         15.50
+(2 rows)
+
+-- Name collision
+SELECT * (RENAME (id AS _id))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ _id | name  |       email       |        created_at        | _id | user_id | amount |  status   
+-----+-------+-------------------+--------------------------+-----+---------+--------+-----------
+   1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00 | paid
+   1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50 | shipped
+   2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00 | cancelled
+(3 rows)
+
+-- Subqueries with RENAME
+SELECT * (RENAME (u.created_at AS date_created))
+FROM (
+    SELECT * FROM users
+) u
+ORDER BY id;
+ id | name  |       email       |       date_created       
+----+-------+-------------------+--------------------------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+SELECT * (RENAME (j.created_at AS date_created))
+FROM (
+    users JOIN orders USING (id)
+) AS j;
+ id | name | email | date_created | user_id | amount | status 
+----+------+-------+--------------+---------+--------+--------
+(0 rows)
+
+-- CTEs with RENAME
+WITH base_users AS (
+    SELECT * FROM users
+)
+SELECT * (RENAME (base_users.created_at AS date_created))
+FROM base_users
+ORDER BY id;
+ id | name  |       email       |       date_created       
+----+-------+-------------------+--------------------------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- Multiple FROM items with RENAME
+SELECT * (RENAME (email AS user_email, status AS order_status)) FROM users, orders ORDER BY users.id, orders.id;
+ id | name  |    user_email     |        created_at        | id  | user_id | amount | order_status 
+----+-------+-------------------+--------------------------+-----+---------+--------+--------------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00 | paid
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50 | shipped
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00 | cancelled
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00 | paid
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50 | shipped
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00 | cancelled
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00 | paid
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50 | shipped
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00 | cancelled
+(9 rows)
+
+-- CROSS JOIN with RENAME
+SELECT * (RENAME (email AS user_email, status AS order_status)) FROM users CROSS JOIN orders ORDER BY users.id, orders.id;
+ id | name  |    user_email     |        created_at        | id  | user_id | amount | order_status 
+----+-------+-------------------+--------------------------+-----+---------+--------+--------------
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00 | paid
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50 | shipped
+  1 | Alice | alice@example.com | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00 | cancelled
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00 | paid
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50 | shipped
+  2 | Bob   | bob@example.com   | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00 | cancelled
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00 | paid
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50 | shipped
+  3 | Carol |                   | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00 | cancelled
+(9 rows)
+
+--
+-- EXCLUDE/REPLACE/RENAME combinations
+--
+-- EXCLUDE + REPLACE different columns
+SELECT * (EXCLUDE (created_at) REPLACE (email WITH 'user@example.com'))
+FROM users;
+ id | name  |      email       
+----+-------+------------------
+  1 | Alice | user@example.com
+  2 | Bob   | user@example.com
+  3 | Carol | user@example.com
+(3 rows)
+
+-- EXCLUDE + RENAME different columns
+SELECT * (EXCLUDE (created_at) RENAME (email AS user_email))
+FROM users;
+ id | name  |    user_email     
+----+-------+-------------------
+  1 | Alice | alice@example.com
+  2 | Bob   | bob@example.com
+  3 | Carol | 
+(3 rows)
+
+-- REPLACE + RENAME on same column
+SELECT * (REPLACE (email WITH 'user@example.com', name WITH 'Unknown') RENAME (email AS user_email, name AS user_name))
+FROM users
+ORDER BY id;
+ id | user_name |    user_email    |        created_at        
+----+-----------+------------------+--------------------------
+  1 | Unknown   | user@example.com | Thu Jan 01 10:00:00 2026
+  2 | Unknown   | user@example.com | Fri Jan 02 11:00:00 2026
+  3 | Unknown   | user@example.com | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- REPLACE + RENAME on same column with EXCLUDE
+SELECT * (EXCLUDE (created_at) REPLACE (email WITH 'user@example.com') RENAME (email AS user_email))
+FROM users;
+ id | name  |    user_email    
+----+-------+------------------
+  1 | Alice | user@example.com
+  2 | Bob   | user@example.com
+  3 | Carol | user@example.com
+(3 rows)
+
+-- All three clauses on different columns
+SELECT * (EXCLUDE (created_at) REPLACE (email WITH 'user@example.com') RENAME (name AS user_name))
+FROM users
+ORDER BY id;
+ id | user_name |      email       
+----+-----------+------------------
+  1 | Alice     | user@example.com
+  2 | Bob       | user@example.com
+  3 | Carol     | user@example.com
+(3 rows)
+
+-- JOIN, unqualified
+SELECT * (EXCLUDE (created_at) REPLACE (email WITH 'user@example.com') RENAME (amount AS order_amount))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ id | name  |      email       | id  | user_id | order_amount |  status   
+----+-------+------------------+-----+---------+--------------+-----------
+  1 | Alice | user@example.com | 101 |       1 |        50.00 | paid
+  1 | Alice | user@example.com | 102 |       1 |        75.50 | shipped
+  2 | Bob   | user@example.com | 103 |       2 |        20.00 | cancelled
+(3 rows)
+
+-- JOIN, qualified + aliased tables
+SELECT * (EXCLUDE (u.created_at) REPLACE (u.email WITH 'user@example.com') RENAME (o.amount AS order_amount))
+FROM users AS u
+JOIN orders AS o ON o.user_id = u.id
+ORDER BY u.id, o.id;
+ id | name  |      email       | id  | user_id | order_amount |  status   
+----+-------+------------------+-----+---------+--------------+-----------
+  1 | Alice | user@example.com | 101 |       1 |        50.00 | paid
+  1 | Alice | user@example.com | 102 |       1 |        75.50 | shipped
+  2 | Bob   | user@example.com | 103 |       2 |        20.00 | cancelled
+(3 rows)
+
+-- Qualified stars with all three
+SELECT
+users.* (EXCLUDE (email) REPLACE (name WITH 'Unknown') RENAME (id AS uid)),
+orders.* (EXCLUDE (status) REPLACE (amount WITH amount * 2) RENAME (id AS oid))
+FROM users
+JOIN orders ON orders.user_id = users.id
+ORDER BY users.id, orders.id;
+ uid |  name   |        created_at        | oid | user_id | amount 
+-----+---------+--------------------------+-----+---------+--------
+   1 | Unknown | Thu Jan 01 10:00:00 2026 | 101 |       1 | 100.00
+   1 | Unknown | Thu Jan 01 10:00:00 2026 | 102 |       1 | 151.00
+   2 | Unknown | Fri Jan 02 11:00:00 2026 | 103 |       2 |  40.00
+(3 rows)
+
+-- Schema-qualified star
+SELECT s1.products.* (EXCLUDE (price) REPLACE (name WITH 'Product X') RENAME (id AS product_id))
+FROM s1.products
+ORDER BY id;
+ product_id |   name    
+------------+-----------
+          1 | Product X
+          2 | Product X
+(2 rows)
+
+-- Schema-qualified column
+SELECT * (EXCLUDE (s1.products.price) REPLACE (s1.products.name WITH 'Product X') RENAME (s1.products.id AS product_id))
+FROM s1.products
+ORDER BY id;
+ product_id |   name    
+------------+-----------
+          1 | Product X
+          2 | Product X
+(2 rows)
+
+-- Subquery with all three
+SELECT * (EXCLUDE (u.created_at) REPLACE (u.email WITH 'user@example.com') RENAME (u.name AS user_name))
+FROM (
+    SELECT * FROM users
+) AS u
+ORDER BY id;
+ id | user_name |      email       
+----+-----------+------------------
+  1 | Alice     | user@example.com
+  2 | Bob       | user@example.com
+  3 | Carol     | user@example.com
+(3 rows)
+
+-- CTE with all three
+WITH base_users AS (
+    SELECT * FROM users
+)
+SELECT * (EXCLUDE (base_users.created_at) REPLACE (base_users.email WITH 'user@example.com') RENAME (base_users.name AS user_name))
+FROM base_users
+ORDER BY id;
+ id | user_name |      email       
+----+-----------+------------------
+  1 | Alice     | user@example.com
+  2 | Bob       | user@example.com
+  3 | Carol     | user@example.com
+(3 rows)
+
+-- CROSS JOIN with all three
+SELECT * (EXCLUDE (status) REPLACE (email WITH 'user@example.com') RENAME (users.id AS uid, orders.id AS oid)) FROM users, orders ORDER BY users.id, orders.id;
+ uid | name  |      email       |        created_at        | oid | user_id | amount 
+-----+-------+------------------+--------------------------+-----+---------+--------
+   1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 101 |       1 |  50.00
+   1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 102 |       1 |  75.50
+   1 | Alice | user@example.com | Thu Jan 01 10:00:00 2026 | 103 |       2 |  20.00
+   2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 101 |       1 |  50.00
+   2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 102 |       1 |  75.50
+   2 | Bob   | user@example.com | Fri Jan 02 11:00:00 2026 | 103 |       2 |  20.00
+   3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 101 |       1 |  50.00
+   3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 102 |       1 |  75.50
+   3 | Carol | user@example.com | Sat Jan 03 12:00:00 2026 | 103 |       2 |  20.00
+(9 rows)
+
+-- Test 3-part qualification with JOIN on different schema tables
+SELECT * (EXCLUDE (s1.products.name) REPLACE (s2.products.name WITH 'Z') RENAME (s1.products.id AS p1_id, s2.products.id AS p2_id))
+FROM s1.products
+JOIN s2.products ON s1.products.id = s2.products.id
+ORDER BY s1.products.id;
+ p1_id | price | p2_id | name | price |    description    
+-------+-------+-------+------+-------+-------------------
+     1 | 10.00 |     1 | Z    | 20.00 | Description for X
+     2 | 15.50 |     2 | Z    | 25.75 | Description for Y
+(2 rows)
+
+-- Test 4-part qualification
+SELECT * (EXCLUDE (regression.public.users.email))
+FROM users
+ORDER BY id;
+ id | name  |        created_at        
+----+-------+--------------------------
+  1 | Alice | Thu Jan 01 10:00:00 2026
+  2 | Bob   | Fri Jan 02 11:00:00 2026
+  3 | Carol | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- SELECT INTO with star options
+CREATE TABLE tbl_a (a int, b int, c int);
+CREATE TABLE tbl_b (c int, d int, e int);
+INSERT INTO tbl_a VALUES (1, 2, 3), (4, 5, 6);
+INSERT INTO tbl_b VALUES (6, 7, 8), (9, 10, 11);
+SELECT * (EXCLUDE (b, e)) INTO tbl_copy
+FROM tbl_a
+JOIN tbl_b ON tbl_a.c = tbl_b.c
+ORDER BY tbl_a.a, tbl_b.c; -- error, as c is in both tables
+ERROR:  column "c" specified more than once
+SELECT * (EXCLUDE (ta.c, tb.d)) INTO tbl_copy
+FROM tbl_a AS ta
+JOIN tbl_b AS tb ON ta.c = tb.c
+ORDER BY ta.a, tb.c;
+SELECT * FROM tbl_copy;
+ a | b | c | e 
+---+---+---+---
+ 4 | 5 | 6 | 8
+(1 row)
+
+-- INSERT INTO ... SELECT with star options
+INSERT INTO tbl_copy SELECT * (EXCLUDE (ta.c, tb.d))
+FROM tbl_a AS ta
+JOIN tbl_b AS tb ON ta.c = tb.c
+ORDER BY ta.a, tb.c;
+SELECT * FROM tbl_copy;
+ a | b | c | e 
+---+---+---+---
+ 4 | 5 | 6 | 8
+ 4 | 5 | 6 | 8
+(2 rows)
+
+-- RETURNING with star options
+INSERT INTO tbl_copy SELECT * (EXCLUDE (b))
+FROM tbl_a
+RETURNING * (EXCLUDE (c)); -- error, cannot use star options with RETURNING clause
+ERROR:  RETURNING with star options is not supported
+LINE 3: RETURNING * (EXCLUDE (c));
+                  ^
+INSERT INTO tbl_copy SELECT * (EXCLUDE (ta.c, tb.d))
+FROM tbl_a AS ta
+JOIN tbl_b AS tb ON ta.c = tb.c
+RETURNING *;
+ a | b | c | e 
+---+---+---+---
+ 4 | 5 | 6 | 8
+(1 row)
+
+-- Error cases
+-- Non-existent columns (error case)
+SELECT * (EXCLUDE (does_not_exist)) FROM users;
+ERROR:  column "does_not_exist" does not exist
+LINE 1: SELECT * (EXCLUDE (does_not_exist)) FROM users;
+                           ^
+SELECT * (REPLACE (does_not_exist WITH 'user@example.com')) FROM users;
+ERROR:  column "does_not_exist" does not exist
+LINE 1: SELECT * (REPLACE (does_not_exist WITH 'user@example.com')) ...
+                           ^
+SELECT * (RENAME (does_not_exist AS user_email)) FROM users;
+ERROR:  column "does_not_exist" does not exist
+LINE 1: SELECT * (RENAME (does_not_exist AS user_email)) FROM users;
+                          ^
+-- Empty lists (error case)
+SELECT * (EXCLUDE ()) FROM users;
+ERROR:  syntax error at or near ")"
+LINE 1: SELECT * (EXCLUDE ()) FROM users;
+                           ^
+SELECT * (REPLACE ()) FROM users;
+ERROR:  syntax error at or near ")"
+LINE 1: SELECT * (REPLACE ()) FROM users;
+                           ^
+SELECT * (RENAME ()) FROM users;
+ERROR:  syntax error at or near ")"
+LINE 1: SELECT * (RENAME ()) FROM users;
+                          ^
+-- duplicate column names (error case)
+SELECT * (EXCLUDE (id, id)) FROM users;
+ERROR:  duplicate column "id" in EXCLUDE list
+SELECT * (REPLACE (email WITH 'user@example.com', email WITH NULL)) FROM users;
+ERROR:  duplicate column "email" in REPLACE list
+SELECT * (RENAME (email AS user_email, email AS user_name)) FROM users;
+ERROR:  duplicate column "email" in RENAME list
+SELECT * ()
+FROM users;
+ERROR:  syntax error at or near ")"
+LINE 1: SELECT * ()
+                  ^
+-- EXCLUDE + REPLACE same column (error case)
+SELECT * (EXCLUDE (id) REPLACE (id WITH 999))
+FROM users;
+ERROR:  column "id" cannot occur in both EXCLUDE and REPLACE list
+-- EXCLUDE + RENAME same column (error case)
+SELECT * (EXCLUDE (id) RENAME (id AS user_id))
+FROM users;
+ERROR:  column "id" cannot occur in both EXCLUDE and RENAME list
+-- Cannot use star inside options list (error case)
+SELECT * (EXCLUDE (users.*))
+FROM users
+ORDER BY id;
+ERROR:  syntax error at or near ")"
+LINE 1: SELECT * (EXCLUDE (users.*))
+                                  ^
+-- Incorrect use of table alias (error case)
+SELECT u.* (EXCLUDE (users.email)) FROM users u;
+ERROR:  invalid reference to FROM-clause entry for table "users"
+LINE 1: SELECT u.* (EXCLUDE (users.email)) FROM users u;
+                             ^
+HINT:  Perhaps you meant to reference the table alias "u".
+-- Test dropping a column
+ALTER TABLE users DROP COLUMN email;
+SELECT * (EXCLUDE (users.email)) FROM users; -- error, as email column no longer exists
+ERROR:  column users.email does not exist
+LINE 1: SELECT * (EXCLUDE (users.email)) FROM users;
+                           ^
+SELECT * (EXCLUDE (name)) FROM users;
+ id |        created_at        
+----+--------------------------
+  1 | Thu Jan 01 10:00:00 2026
+  2 | Fri Jan 02 11:00:00 2026
+  3 | Sat Jan 03 12:00:00 2026
+(3 rows)
+
+-- Apply star options to a column from a different table in a multi-table query (error case)
+SELECT
+users.* (EXCLUDE (orders.amount))
+FROM users, orders;
+ERROR:  column orders.amount does not exist
+LINE 2: users.* (EXCLUDE (orders.amount))
+                          ^
+DETAIL:  There is a column named "amount" in table "orders", but it cannot be referenced from this part of the query.
+-- Check privilege handling with star options
+CREATE USER tuser;
+GRANT SELECT (name) ON TABLE users TO tuser;
+SET ROLE tuser;
+SELECT * (EXCLUDE (id, created_at)) FROM users; -- should succeed, as id and created_at are excluded
+ name  
+-------
+ Alice
+ Bob
+ Carol
+(3 rows)
+
+SELECT * (REPLACE (created_at WITH NULL)) FROM users; -- should fail, as created_at is not accessible
+ERROR:  permission denied for table users
+SELECT * (RENAME (created_at AS date_created)) FROM users; -- should fail, as created_at is not accessible
+ERROR:  permission denied for table users
+RESET ROLE;
+-- clean up
+DROP TABLE orders;
+DROP TABLE users;
+DROP TABLE tbl_a;
+DROP TABLE tbl_b;
+DROP TABLE tbl_copy;
+DROP TABLE s1.products;
+DROP TABLE s2.products;
+DROP SCHEMA s1;
+DROP SCHEMA s2;
+DROP user tuser;
