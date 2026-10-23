@@ -20,6 +20,7 @@
 
 #include "access/hash.h"
 #include "access/hash_xlog.h"
+#include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/stratnum.h"
 #include "access/tableam.h"
@@ -33,7 +34,9 @@
 #include "storage/read_stream.h"
 #include "utils/fmgrprotos.h"
 #include "utils/index_selfuncs.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/typcache.h"
 
 /* Working state for hashbuild and its callback */
 typedef struct
@@ -123,6 +126,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.amparallelrescan = NULL,
 		.amtranslatestrategy = hashtranslatestrategy,
 		.amtranslatecmptype = hashtranslatecmptype,
+		.amcomparedatums = hashcomparedatums,
 	};
 
 	PG_RETURN_POINTER(&amroutine);
@@ -1027,4 +1031,48 @@ hashtranslatecmptype(CompareType cmptype, Oid opfamily)
 	if (cmptype == COMPARE_EQ)
 		return HTEqualStrategyNumber;
 	return InvalidStrategy;
+}
+
+/*
+ * hashcomparedatums() -- would newValue give the same index entry as oldValue?
+ *
+ * A hash index stores only the hash code of the value, and every scan
+ * rechecks the heap tuple, so the entries are the same if the hash codes
+ * are.  Then, for example, numeric 1.0 and 1.00, or strings equal under a
+ * case-insensitive collation, make no new entries.
+ *
+ * We are only asked about values that differ once detoasted.  If the type's
+ * equality implies image equality, as its default btree operator class's
+ * equalimage function says for the index's collation, such values are
+ * unequal, and their hash codes can be the same only by collision: say so
+ * without hashing them.  The answer is kept in ii_AmCache for the statement.
+ */
+bool
+hashcomparedatums(Relation index, IndexInfo *indexInfo, int attnum,
+				  Oid typid, int16 typlen, bool typbyval,
+				  Datum oldValue, Datum newValue)
+{
+	bool	   *imageeq = (bool *) indexInfo->ii_AmCache;
+
+	Assert(attnum == 1);
+	if (imageeq == NULL)
+	{
+		TypeCacheEntry *tce = lookup_type_cache(index->rd_opcintype[0],
+												TYPECACHE_BTREE_OPFAMILY);
+		Oid			proc = InvalidOid;
+
+		if (OidIsValid(tce->btree_opf))
+			proc = get_opfamily_proc(tce->btree_opf, tce->btree_opintype,
+									 tce->btree_opintype, BTEQUALIMAGE_PROC);
+		imageeq = MemoryContextAlloc(indexInfo->ii_Context, sizeof(bool));
+		*imageeq = OidIsValid(proc) &&
+			DatumGetBool(OidFunctionCall1Coll(proc, index->rd_indcollation[0],
+											  ObjectIdGetDatum(tce->btree_opintype)));
+		indexInfo->ii_AmCache = imageeq;
+	}
+	if (*imageeq)
+		return false;
+
+	return _hash_datum2hashkey(index, oldValue) ==
+		_hash_datum2hashkey(index, newValue);
 }

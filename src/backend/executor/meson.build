@@ -16,6 +16,7 @@ backend_sources += files(
   'execReplication.c',
   'execSRF.c',
   'execScan.c',
+  'execSubattr.c',
   'execTuples.c',
   'execUtils.c',
   'functions.c',

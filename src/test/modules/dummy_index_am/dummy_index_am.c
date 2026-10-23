@@ -16,8 +16,10 @@
 #include "access/amapi.h"
 #include "access/reloptions.h"
 #include "catalog/index.h"
+#include "catalog/pg_type.h"
 #include "commands/vacuum.h"
 #include "nodes/pathnodes.h"
+#include "utils/rel.h"
 
 PG_MODULE_MAGIC;
 
@@ -245,6 +247,39 @@ dioptions(Datum reloptions, bool validate)
 }
 
 /*
+ * amcanreturn: with option_ternary_1 set to true, claim that every column
+ * can be returned, so that amcomparedatums is not to be asked about it.
+ * (The index cannot actually be scanned.)
+ */
+static bool
+dicanreturn(Relation index, int attno)
+{
+	DummyIndexOptions *opts = (DummyIndexOptions *) index->rd_options;
+
+	return opts != NULL && opts->option_ternary_1 == PG_TERNARY_TRUE;
+}
+
+/*
+ * Would newValue give the same entries as oldValue?  The dummy index stores
+ * nothing, so any answer is correct.  For testing the executor's use of
+ * amcomparedatums: with option_real set to 1, int4 values that are equal
+ * modulo option_int count as giving the same entries.
+ */
+static bool
+dicomparedatums(Relation index, IndexInfo *indexInfo, int attnum,
+				Oid typid, int16 typlen, bool typbyval,
+				Datum oldValue, Datum newValue)
+{
+	DummyIndexOptions *opts = (DummyIndexOptions *) index->rd_options;
+
+	if (opts == NULL || opts->option_real != 1 || opts->option_int < 2 ||
+		typid != INT4OID)
+		return false;
+	return DatumGetInt32(oldValue) % opts->option_int ==
+		DatumGetInt32(newValue) % opts->option_int;
+}
+
+/*
  * Validator for index AM.
  */
 static bool
@@ -324,7 +359,7 @@ dihandler(PG_FUNCTION_ARGS)
 		.aminsert = diinsert,
 		.ambulkdelete = dibulkdelete,
 		.amvacuumcleanup = divacuumcleanup,
-		.amcanreturn = NULL,
+		.amcanreturn = dicanreturn,
 		.amcostestimate = dicostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = dioptions,
@@ -341,6 +376,7 @@ dihandler(PG_FUNCTION_ARGS)
 		.amestimateparallelscan = NULL,
 		.aminitparallelscan = NULL,
 		.amparallelrescan = NULL,
+		.amcomparedatums = dicomparedatums,
 	};
 
 	PG_RETURN_POINTER(&amroutine);
