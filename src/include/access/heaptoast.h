@@ -17,6 +17,8 @@
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
 
+struct BulkInsertStateData;
+
 /*
  * Find the maximum size of a tuple if there are to be N tuples per page.
  */
@@ -109,7 +111,8 @@
  * ----------
  */
 extern HeapTuple heap_toast_insert_or_update(Relation rel, HeapTuple newtup,
-											 HeapTuple oldtup, uint32 options);
+											 HeapTuple oldtup, uint32 options,
+											 struct BulkInsertStateData *bistate);
 
 /* ----------
  * heap_toast_delete -

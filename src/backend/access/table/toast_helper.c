@@ -269,7 +269,8 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
  * Move an attribute to external storage.
  */
 void
-toast_tuple_externalize(ToastTupleContext *ttc, int attribute, uint32 options)
+toast_tuple_externalize(ToastTupleContext *ttc, int attribute, uint32 options,
+						struct BulkInsertStateData *bistate)
 {
 	Datum	   *value = &ttc->ttc_values[attribute];
 	Datum		old_value = *value;
@@ -277,7 +278,7 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, uint32 options)
 
 	attr->tai_colflags |= TOASTCOL_IGNORE;
 	*value = toast_save_datum(ttc->ttc_rel, old_value, attr->tai_oldexternal,
-							  options);
+							  options, bistate);
 	if ((attr->tai_colflags & TOASTCOL_NEEDS_FREE) != 0)
 		pfree(DatumGetPointer(old_value));
 	attr->tai_colflags |= TOASTCOL_NEEDS_FREE;

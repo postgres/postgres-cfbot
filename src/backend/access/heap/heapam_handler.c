@@ -596,6 +596,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 double *tups_recently_dead)
 {
 	RewriteState rwstate;
+	BufferAccessStrategy strategy;
 	BulkInsertState bistate;
 	IndexScanDesc indexScan;
 	TableScanDesc tableScan;
@@ -638,9 +639,15 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	/* In concurrent mode, prepare for bulk-insert operation. */
 	if (concurrent)
-		bistate = GetBulkInsertState();
+	{
+		strategy = GetAccessStrategy(BAS_BULKWRITE);
+		bistate = GetBulkInsertState(NewHeap, strategy);
+	}
 	else
+	{
+		strategy = NULL;
 		bistate = NULL;
+	}
 
 	/* Set up sorting if wanted */
 	if (use_sort)
@@ -941,7 +948,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	if (rwstate)
 		end_heap_rewrite(rwstate);
 	if (bistate)
+	{
 		FreeBulkInsertState(bistate);
+		FreeAccessStrategy(strategy);
+	}
 
 	/* Clean up */
 	pfree(values);

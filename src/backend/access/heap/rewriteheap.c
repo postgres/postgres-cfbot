@@ -133,6 +133,8 @@ typedef struct RewriteStateData
 	Relation	rs_old_rel;		/* source heap */
 	Relation	rs_new_rel;		/* destination heap */
 	BulkWriteState *rs_bulkstate;	/* writer for the destination */
+	BufferAccessStrategy rs_toast_strategy; /* ring for TOAST writes */
+	BulkInsertState rs_toast_bistate;	/* parent state for TOAST writes */
 	BulkWriteBuffer rs_buffer;	/* page currently being built */
 	BlockNumber rs_blockno;		/* block where page will go */
 	bool		rs_logical_rewrite; /* do we need to do logical rewriting */
@@ -320,6 +322,11 @@ end_heap_rewrite(RewriteState state)
 	}
 
 	smgr_bulk_finish(state->rs_bulkstate);
+	if (state->rs_toast_bistate != NULL)
+	{
+		FreeBulkInsertState(state->rs_toast_bistate);
+		FreeAccessStrategy(state->rs_toast_strategy);
+	}
 
 	logical_end_heap_rewrite(state);
 
@@ -627,8 +634,16 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 		 */
 		options |= HEAP_INSERT_NO_LOGICAL;
 
+		if (state->rs_toast_bistate == NULL)
+		{
+			state->rs_toast_strategy = GetAccessStrategy(BAS_BULKWRITE);
+			state->rs_toast_bistate = GetBulkInsertState(state->rs_new_rel,
+														 state->rs_toast_strategy);
+		}
+
 		heaptup = heap_toast_insert_or_update(state->rs_new_rel, tup, NULL,
-											  options);
+											  options,
+											  state->rs_toast_bistate);
 	}
 	else
 		heaptup = tup;

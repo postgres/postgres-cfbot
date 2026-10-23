@@ -58,7 +58,8 @@
 
 
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
-									 TransactionId xid, CommandId cid, uint32 options);
+									 TransactionId xid, CommandId cid, uint32 options,
+									 BulkInsertState bistate);
 static XLogRecPtr log_heap_update(Relation reln, Buffer oldbuf,
 								  Buffer vmbuffer_old, Buffer newbuf,
 								  Buffer vmbuffer_new, HeapTuple oldtup,
@@ -1934,15 +1935,33 @@ UpdateXmaxHintBits(HeapTupleHeader tuple, Buffer buffer, TransactionId xid)
 
 
 /*
- * GetBulkInsertState - prepare status object for a bulk insert
+ * Verify that bulk insert state is used only with its assigned relation.
+ */
+static inline void
+CheckBulkInsertState(Relation relation, BulkInsertState bistate)
+{
+	if (unlikely(bistate != NULL &&
+				 bistate->relation_id != RelationGetRelid(relation)))
+		elog(ERROR, "bulk insert state for relation %u used for relation %u",
+			 bistate->relation_id, RelationGetRelid(relation));
+}
+
+/*
+ * GetBulkInsertState - prepare bulk insert state for the given relation
+ *
+ * The caller owns strategy and may share it with states for other relations.
  */
 BulkInsertState
-GetBulkInsertState(void)
+GetBulkInsertState(Relation relation, BufferAccessStrategy strategy)
 {
 	BulkInsertState bistate;
 
+	Assert(strategy != NULL);
+
 	bistate = (BulkInsertState) palloc_object(BulkInsertStateData);
-	bistate->strategy = GetAccessStrategy(BAS_BULKWRITE);
+	bistate->strategy = strategy;
+	bistate->relation_id = RelationGetRelid(relation);
+	bistate->toast_state = NULL;
 	bistate->current_buf = InvalidBuffer;
 	bistate->next_free = InvalidBlockNumber;
 	bistate->last_free = InvalidBlockNumber;
@@ -1956,30 +1975,28 @@ GetBulkInsertState(void)
 void
 FreeBulkInsertState(BulkInsertState bistate)
 {
+	if (bistate->toast_state != NULL)
+		FreeBulkInsertState(bistate->toast_state);
 	if (bistate->current_buf != InvalidBuffer)
 		ReleaseBuffer(bistate->current_buf);
-	FreeAccessStrategy(bistate->strategy);
 	pfree(bistate);
 }
 
 /*
  * ReleaseBulkInsertStatePin - release a buffer currently held in bistate
+ *
+ * Also abandon unused pages from the state's most recent bulk extension.
  */
 void
 ReleaseBulkInsertStatePin(BulkInsertState bistate)
 {
+	if (bistate->toast_state != NULL)
+		ReleaseBulkInsertStatePin(bistate->toast_state);
+
 	if (bistate->current_buf != InvalidBuffer)
 		ReleaseBuffer(bistate->current_buf);
 	bistate->current_buf = InvalidBuffer;
 
-	/*
-	 * Despite the name, we also reset bulk relation extension state.
-	 * Otherwise we can end up erroring out due to looking for free space in
-	 * ->next_free of one partition, even though ->next_free was set when
-	 * extending another partition. It could obviously also be bad for
-	 * efficiency to look at existing blocks at offsets from another
-	 * partition, even if we don't error out.
-	 */
 	bistate->next_free = InvalidBlockNumber;
 	bistate->last_free = InvalidBlockNumber;
 }
@@ -2015,6 +2032,8 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	bool		clear_all_visible = false;
 	bool		vmbuffer_modified = false;
 
+	CheckBulkInsertState(relation, bistate);
+
 	/* Cheap, simplistic check that the tuple matches the rel's rowtype. */
 	Assert(HeapTupleHeaderGetNatts(tup->t_data) <=
 		   RelationGetNumberOfAttributes(relation));
@@ -2027,7 +2046,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	 * Note: below this point, heaptup is the data we actually intend to store
 	 * into the relation; tup is the caller's original untoasted data.
 	 */
-	heaptup = heap_prepare_insert(relation, tup, xid, cid, options);
+	heaptup = heap_prepare_insert(relation, tup, xid, cid, options, bistate);
 
 	/*
 	 * Find buffer to insert this tuple into.  If the page is all visible,
@@ -2228,7 +2247,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
  */
 static HeapTuple
 heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
-					CommandId cid, uint32 options)
+					CommandId cid, uint32 options, BulkInsertState bistate)
 {
 	/*
 	 * To allow parallel inserts, we need to ensure that they are safe to be
@@ -2264,7 +2283,7 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 		return tup;
 	}
 	else if (HeapTupleHasExternal(tup) || tup->t_len > TOAST_TUPLE_THRESHOLD)
-		return heap_toast_insert_or_update(relation, tup, NULL, options);
+		return heap_toast_insert_or_update(relation, tup, NULL, options, bistate);
 	else
 		return tup;
 }
@@ -2325,6 +2344,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	int			npages = 0;
 	int			npages_used = 0;
 
+	CheckBulkInsertState(relation, bistate);
+
 	/* currently not needed (thus unsupported) for heap_multi_insert() */
 	Assert(!(options & HEAP_INSERT_NO_LOGICAL));
 
@@ -2344,7 +2365,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		slots[i]->tts_tableOid = RelationGetRelid(relation);
 		tuple->t_tableOid = slots[i]->tts_tableOid;
 		heaptuples[i] = heap_prepare_insert(relation, tuple, xid, cid,
-											options);
+											options, bistate);
 	}
 
 	/*
@@ -3979,7 +4000,8 @@ l2:
 			 * tuples too. We never skip the FSM here.
 			 */
 			heaptup = heap_toast_insert_or_update(relation, newtup, &oldtup,
-												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL);
+												  walLogical ? 0 : HEAP_INSERT_NO_LOGICAL,
+												  NULL);
 			newtupsize = MAXALIGN(heaptup->t_len);
 		}
 		else

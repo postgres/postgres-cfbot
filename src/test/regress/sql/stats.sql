@@ -902,6 +902,76 @@ SELECT sum(extends) AS io_sum_bulkwrite_strategy_extends_after
   FROM pg_stat_io WHERE context = 'bulkwrite' \gset
 SELECT :io_sum_bulkwrite_strategy_extends_after > :io_sum_bulkwrite_strategy_extends_before;
 
+-- Test that TOAST relations use the BAS_BULKWRITE strategy during single and
+-- multi insert COPY.
+CREATE TABLE test_io_bulkwrite_toast (
+  id int,
+  payload text NOT NULL DEFAULT repeat('x', 10000),
+  force_single_insert float8 DEFAULT random()
+);
+ALTER TABLE test_io_bulkwrite_toast ALTER COLUMN payload SET STORAGE EXTERNAL;
+
+-- Make COPY reuse the main relation's first page, so that relation extensions
+-- measured below belong to the TOAST relation.
+INSERT INTO test_io_bulkwrite_toast (id, payload) VALUES (-1, 'x');
+
+-- The volatile default makes COPY use the single insert path
+SELECT sum(extends) AS io_sum_bulkwrite_toast_single_extends_before
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+COPY test_io_bulkwrite_toast(id) FROM stdin;
+0
+1
+2
+3
+\.
+SELECT pg_stat_force_next_flush();
+SELECT sum(extends) AS io_sum_bulkwrite_toast_single_extends_after
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+SELECT :io_sum_bulkwrite_toast_single_extends_after >
+  :io_sum_bulkwrite_toast_single_extends_before;
+
+-- Dropping the volatile default makes COPY use the multi insert path
+ALTER TABLE test_io_bulkwrite_toast
+  ALTER COLUMN force_single_insert DROP DEFAULT;
+SELECT sum(extends) AS io_sum_bulkwrite_toast_multi_extends_before
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+COPY test_io_bulkwrite_toast(id) FROM stdin;
+4
+5
+6
+7
+\.
+SELECT pg_stat_force_next_flush();
+SELECT sum(extends) AS io_sum_bulkwrite_toast_multi_extends_after
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+SELECT :io_sum_bulkwrite_toast_multi_extends_after >
+  :io_sum_bulkwrite_toast_multi_extends_before;
+
+-- Check that a TOAST bulk insertion state survives per-tuple context resets
+-- during a table rewrite.
+ALTER TABLE test_io_bulkwrite_toast
+  ADD COLUMN rewrite_id int GENERATED ALWAYS AS (id) STORED;
+SELECT count(*), bool_and(rewrite_id = id) AS rewrite_ok
+  FROM test_io_bulkwrite_toast;
+
+-- Test that TOAST writes performed during a heap rewrite use the
+-- BAS_BULKWRITE strategy.
+SELECT sum(extends) AS io_sum_rewrite_toast_extends_before
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+VACUUM FULL test_io_bulkwrite_toast;
+SELECT pg_stat_force_next_flush();
+SELECT sum(extends) AS io_sum_rewrite_toast_extends_after
+  FROM pg_stat_get_backend_io(pg_backend_pid())
+  WHERE context = 'bulkwrite' \gset
+SELECT :io_sum_rewrite_toast_extends_after >
+  :io_sum_rewrite_toast_extends_before;
+DROP TABLE test_io_bulkwrite_toast;
+
 -- Test IO stats reset
 SELECT pg_stat_have_stats('io', 0, 0);
 SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS io_stats_pre_reset
