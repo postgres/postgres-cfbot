@@ -78,6 +78,7 @@ static bool match_prosrc_to_literal(const char *prosrc, const char *literal,
  *	isStrict: strict? (proisstrict)
  *	volatility: volatility code (provolatile)
  *	parallel: parallel safety code (proparallel)
+ *	isErrorSafe: error safe? (proerrorsafe)
  *	parameterTypes: input parameter types, as an oidvector (proargtypes)
  *	allParameterTypes: all parameter types, as an OID array (proallargtypes)
  *	parameterModes: parameter modes, as a "char" array (proargmodes)
@@ -113,6 +114,7 @@ ProcedureCreate(const char *procedureName,
 				bool isStrict,
 				char volatility,
 				char parallel,
+				bool isErrorSafe,
 				oidvector *parameterTypes,
 				Datum allParameterTypes,
 				Datum parameterModes,
@@ -342,6 +344,7 @@ ProcedureCreate(const char *procedureName,
 	values[Anum_pg_proc_proretset - 1] = BoolGetDatum(returnsSet);
 	values[Anum_pg_proc_provolatile - 1] = CharGetDatum(volatility);
 	values[Anum_pg_proc_proparallel - 1] = CharGetDatum(parallel);
+	values[Anum_pg_proc_proerrorsafe - 1] = BoolGetDatum(isErrorSafe);
 	values[Anum_pg_proc_pronargs - 1] = Int16GetDatum(parameterCount);
 	values[Anum_pg_proc_pronargdefaults - 1] = Int16GetDatum(list_length(parameterDefaults));
 	values[Anum_pg_proc_prorettype - 1] = ObjectIdGetDatum(returnType);
