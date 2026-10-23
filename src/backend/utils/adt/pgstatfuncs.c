@@ -417,7 +417,7 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_activity(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_ACTIVITY_COLS	31
+#define PG_STAT_GET_ACTIVITY_COLS	34
 	int			num_backends = pgstat_fetch_stat_numbackends();
 	int			curr_backend;
 	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
@@ -731,6 +731,60 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 				nulls[30] = true;
 			else
 				values[30] = Int64GetDatum(beentry->st_query_id);
+
+			/* Proxy information */
+			if (pg_memory_is_all_zeros(&beentry->st_proxyaddr,
+									   sizeof(beentry->st_proxyaddr)))
+			{
+				nulls[31] = true;
+				nulls[32] = true;
+				nulls[33] = true;
+			}
+			else if (beentry->st_proxyaddr.addr.ss_family == AF_INET ||
+					 beentry->st_proxyaddr.addr.ss_family == AF_INET6)
+			{
+				char		proxy_host[NI_MAXHOST];
+				char		proxy_port[NI_MAXSERV];
+				int			ret;
+
+				proxy_host[0] = '\0';
+				proxy_port[0] = '\0';
+				ret = pg_getnameinfo_all(&beentry->st_proxyaddr.addr,
+										 beentry->st_proxyaddr.salen,
+										 proxy_host, sizeof(proxy_host),
+										 proxy_port, sizeof(proxy_port),
+										 NI_NUMERICHOST | NI_NUMERICSERV);
+				if (ret == 0)
+				{
+					clean_ipv6_addr(beentry->st_proxyaddr.addr.ss_family, proxy_host);
+					values[31] = DirectFunctionCall1(inet_in,
+													 CStringGetDatum(proxy_host));
+					if (beentry->st_proxyhostname &&
+						beentry->st_proxyhostname[0])
+						values[32] = CStringGetTextDatum(beentry->st_proxyhostname);
+					else
+						nulls[32] = true;
+					values[33] = Int32GetDatum(atoi(proxy_port));
+				}
+				else
+				{
+					nulls[31] = true;
+					nulls[32] = true;
+					nulls[33] = true;
+				}
+			}
+			else if (beentry->st_proxyaddr.addr.ss_family == AF_UNIX)
+			{
+				nulls[31] = true;
+				nulls[32] = true;
+				values[33] = Int32GetDatum(-1);
+			}
+			else
+			{
+				nulls[31] = true;
+				nulls[32] = true;
+				nulls[33] = true;
+			}
 		}
 		else
 		{
@@ -760,6 +814,9 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 			nulls[28] = true;
 			nulls[29] = true;
 			nulls[30] = true;
+			nulls[31] = true;
+			nulls[32] = true;
+			nulls[33] = true;
 		}
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
