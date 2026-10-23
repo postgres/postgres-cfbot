@@ -120,6 +120,15 @@
 #define INITIAL_MEMTUPSIZE Max(1024, \
 	ALLOCSET_SEPARATE_THRESHOLD / sizeof(SortTuple) + 1)
 
+/*
+ * A quickselect bounded sort buffers at least this many tuples between
+ * prunes, so that a small LIMIT does not prune every few tuples.  It must fit
+ * in the initial memtuples array, which is never shrunk.
+ */
+#define TOPN_SELECT_MIN_BUFFER 1000
+StaticAssertDecl(TOPN_SELECT_MIN_BUFFER < INITIAL_MEMTUPSIZE,
+				 "TOPN_SELECT_MIN_BUFFER must fit in the initial memtuples array");
+
 /* GUC variables */
 bool		trace_sort = false;
 
@@ -155,6 +164,8 @@ typedef enum
 {
 	TSS_INITIAL,				/* Loading tuples; still within memory limit */
 	TSS_BOUNDED,				/* Loading tuples into bounded-size heap */
+	TSS_BOUNDED_SELECT,			/* Loading tuples into a 2 * bound buffer that
+								 * quickselect prunes back to bound */
 	TSS_BUILDRUNS,				/* Loading tuples; writing to tape */
 	TSS_SORTEDINMEM,			/* Sort completed entirely in memory */
 	TSS_SORTEDONTAPE,			/* Sort completed, final run is on tape */
@@ -460,6 +471,7 @@ static bool mergereadnext(Tuplesortstate *state, LogicalTape *srcTape, SortTuple
 static void dumptuples(Tuplesortstate *state, bool alltuples);
 static void make_bounded_heap(Tuplesortstate *state);
 static void sort_bounded_heap(Tuplesortstate *state);
+static void prune_bounded_select(Tuplesortstate *state);
 static void tuplesort_sort_memtuples(Tuplesortstate *state);
 static void tuplesort_heap_insert(Tuplesortstate *state, SortTuple *tuple);
 static void tuplesort_heap_replace_top(Tuplesortstate *state, SortTuple *tuple);
@@ -1137,6 +1149,22 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 				(state->memtupcount > state->bound * 2 ||
 				 (state->memtupcount > state->bound && LACKMEM(state))))
 			{
+				/*
+				 * If 2 * bound tuples fit in memory, keep a buffer of them and
+				 * prune it back to bound with quickselect whenever it fills.
+				 */
+				if (state->bound > 0 && !LACKMEM(state))
+				{
+					if (trace_sort)
+						elog(LOG, "switching to bounded quickselect at %d tuples: %s",
+							 state->memtupcount,
+							 pg_rusage_show(&state->ru_start));
+					prune_bounded_select(state);
+					state->status = TSS_BOUNDED_SELECT;
+					MemoryContextSwitchTo(oldcontext);
+					return;
+				}
+
 				if (trace_sort)
 					elog(LOG, "switching to bounded heapsort at %d tuples: %s",
 						 state->memtupcount,
@@ -1187,6 +1215,48 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 				/* discard top of heap, replacing it with the new tuple */
 				free_sort_tuple(state, &state->memtuples[0]);
 				tuplesort_heap_replace_top(state, tuple);
+			}
+			break;
+
+		case TSS_BOUNDED_SELECT:
+
+			/*
+			 * memtuples[bound - 1] is the largest of the bound smallest
+			 * tuples seen so far, so nothing >= it can make the cut.
+			 */
+			if (COMPARETUP(state, tuple, &state->memtuples[state->bound - 1]) >= 0)
+			{
+				free_sort_tuple(state, tuple);
+				CHECK_FOR_INTERRUPTS();
+				break;
+			}
+			/* the buffer never outgrows the array; see TOPN_SELECT_MIN_BUFFER */
+			Assert(state->memtupcount < state->memtupsize);
+			state->memtuples[state->memtupcount++] = *tuple;
+			if (state->memtupcount > Max(state->bound * 2, TOPN_SELECT_MIN_BUFFER))
+				prune_bounded_select(state);
+			else if (LACKMEM(state) && state->memtupcount > state->bound * 2)
+			{
+				/*
+				 * The floor, not the bound, filled work_mem.  More than bound
+				 * tuples arrived since the last prune, so pruning early still
+				 * costs O(1) per tuple.
+				 */
+				prune_bounded_select(state);
+			}
+			else if (LACKMEM(state))
+			{
+				/*
+				 * Tuples got wider than when we started.  Keep just bound of
+				 * them and finish with the heap, which never holds more.
+				 */
+				if (trace_sort)
+					elog(LOG, "switching from bounded quickselect to heapsort at %d tuples: %s",
+						 state->memtupcount,
+						 pg_rusage_show(&state->ru_start));
+				prune_bounded_select(state);
+				state->status = TSS_INITIAL;
+				make_bounded_heap(state);
 			}
 			break;
 
@@ -1313,6 +1383,18 @@ tuplesort_performsort(Tuplesortstate *state)
 			 * that sort_bounded_heap sets the correct state->status.
 			 */
 			sort_bounded_heap(state);
+			state->current = 0;
+			state->eof_reached = false;
+			state->markpos_offset = 0;
+			state->markpos_eof = false;
+			break;
+
+		case TSS_BOUNDED_SELECT:
+			if (state->memtupcount > state->bound)
+				prune_bounded_select(state);
+			tuplesort_sort_memtuples(state);
+			state->status = TSS_SORTEDINMEM;
+			state->boundUsed = true;
 			state->current = 0;
 			state->eof_reached = false;
 			state->markpos_offset = 0;
@@ -2560,6 +2642,127 @@ sort_bounded_heap(Tuplesortstate *state)
 
 	state->status = TSS_SORTEDINMEM;
 	state->boundUsed = true;
+}
+
+/* Index of the median of memtuples[i], [j], [k] */
+static inline int
+med3_index(Tuplesortstate *state, int i, int j, int k)
+{
+	SortTuple  *a = state->memtuples;
+
+	return COMPARETUP(state, &a[i], &a[j]) < 0 ?
+		(COMPARETUP(state, &a[j], &a[k]) < 0 ? j :
+		 (COMPARETUP(state, &a[i], &a[k]) < 0 ? k : i)) :
+		(COMPARETUP(state, &a[j], &a[k]) > 0 ? j :
+		 (COMPARETUP(state, &a[i], &a[k]) < 0 ? i : k));
+}
+
+/*
+ * Rearrange memtuples[0 .. n-1] so that memtuples[k] holds the tuple it would
+ * hold if the array were sorted, with nothing larger before it and nothing
+ * smaller after it.
+ *
+ * Hoare partitioning stops on keys equal to the pivot, so runs of equal keys
+ * still split evenly.  If pivots keep coming out badly, sort what is left.
+ */
+static void
+tuplesort_select(Tuplesortstate *state, int n, int k)
+{
+	SortTuple  *a = state->memtuples;
+	int			lo = 0;
+	int			hi = n - 1;
+	int			budget = 2 * (pg_leftmost_one_pos32((uint32) n) + 1);
+
+	Assert(k >= 0 && k < n);
+
+	while (hi > lo)
+	{
+		int			len = hi - lo + 1;
+		int			mid = lo + len / 2;
+		int			p;
+		int			i;
+		int			j;
+		SortTuple	tmp;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (--budget < 0)
+		{
+			qsort_tuple(a + lo, len, state->base.comparetup, state);
+			return;
+		}
+
+		/* median of three, or pseudo-median of nine for larger ranges */
+		if (len > 40)
+		{
+			int			d = len / 8;
+
+			p = med3_index(state,
+						   med3_index(state, lo, lo + d, lo + 2 * d),
+						   med3_index(state, mid - d, mid, mid + d),
+						   med3_index(state, hi - 2 * d, hi - d, hi));
+		}
+		else
+			p = med3_index(state, lo, mid, hi);
+
+		tmp = a[lo];
+		a[lo] = a[p];
+		a[p] = tmp;
+
+		i = lo;
+		j = hi + 1;
+		for (;;)
+		{
+			while (COMPARETUP(state, &a[++i], &a[lo]) < 0)
+				if (i == hi)
+					break;
+			while (COMPARETUP(state, &a[lo], &a[--j]) < 0)
+				if (j == lo)
+					break;
+			if (i >= j)
+				break;
+			tmp = a[i];
+			a[i] = a[j];
+			a[j] = tmp;
+		}
+		tmp = a[lo];
+		a[lo] = a[j];
+		a[j] = tmp;
+
+		/* a[lo .. j-1] <= a[j] <= a[j+1 .. hi] */
+		if (j == k)
+			return;
+		if (j > k)
+			hi = j - 1;
+		else
+			lo = j + 1;
+	}
+}
+
+/*
+ * Keep only the bound smallest memtuples, leaving the largest of them at
+ * memtuples[bound - 1].
+ */
+static void
+prune_bounded_select(Tuplesortstate *state)
+{
+	Assert(state->bounded);
+	Assert(state->memtupcount > state->bound);
+	Assert(SERIAL(state));
+
+	tuplesort_select(state, state->memtupcount, state->bound - 1);
+#ifdef USE_ASSERT_CHECKING
+	for (int i = 0; i < state->memtupcount; i++)
+	{
+		int			c = COMPARETUP(state, &state->memtuples[i],
+								   &state->memtuples[state->bound - 1]);
+
+		Assert(i < state->bound ? c <= 0 : c >= 0);
+	}
+#endif
+	for (int i = state->bound; i < state->memtupcount; i++)
+		free_sort_tuple(state, &state->memtuples[i]);
+	state->memtupcount = state->bound;
 }
 
 
