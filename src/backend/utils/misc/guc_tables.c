@@ -533,6 +533,14 @@ extern const struct config_enum_entry dynamic_shared_memory_options[];
  * GUC option variables that are exported from this module
  */
 bool		AllowAlterSystem = true;
+
+/*
+ * Defined here rather than in sysv_shmem.c because that file is only linked
+ * on platforms with System V shared memory; Windows links win32_shmem.c
+ * instead, and the GUC machinery below needs these on every platform.
+ */
+bool		shmem_populate = false;
+bool		shmem_interleave = false;
 bool		log_duration = false;
 bool		Debug_print_plan = false;
 bool		Debug_print_parse = false;

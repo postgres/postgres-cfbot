@@ -357,10 +357,13 @@ BufferCacheOsPagesContext
 BufferCacheOsPagesRec
 BufferDesc
 BufferDescPadded
+BufferDropCallback
 BufferHeapTupleTableSlot
 BufferLockMode
 BufferLookupEnt
 BufferManagerRelation
+BufferPartition
+BufferPartitions
 BufferStrategyControl
 BufferTag
 BufferUsage
@@ -445,6 +448,7 @@ ClientCertName
 ClientConnectionInfo
 ClientData
 ClientSocket
+ClockSweep
 ClonePtrType
 ClosePortalStmt
 ClosePtrType
@@ -3524,6 +3528,7 @@ XactCallback
 XactCallbackItem
 XactEvent
 XactLockTableWaitInfo
+XactPinnedBlock
 XidBoundsViolation
 XidCacheStatus
 XidCommitStatus

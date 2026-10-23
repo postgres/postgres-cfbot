@@ -632,6 +632,27 @@
   boot_val => 'DEFAULT_ASSERT_ENABLED',
 },
 
+{ name => 'debug_clocksweep_balance', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables balancing of buffer allocations between clock-sweep partitions.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'clocksweep_balance',
+  boot_val => 'true'
+},
+
+{ name => 'debug_clocksweep_balance_recalc', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables periodic recalculation of clock-sweep partition balance weights.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'clocksweep_balance_recalc',
+  boot_val => 'true'
+},
+
+{ name => 'debug_clocksweep_scan_all_partitions', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables scanning all clock-sweep partitions when looking for a free buffer.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'clocksweep_scan_all_partitions',
+  boot_val => 'true'
+},
+
 { name => 'debug_copy_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Set this to force all parse and plan trees to be passed through copyObject(), to facilitate catching errors and omissions in copyObject().',
   flags => 'GUC_NOT_IN_SAMPLE',
@@ -684,6 +705,16 @@
   options => 'debug_logical_replication_streaming_options',
 },
 
+{ name => 'debug_numa_node', type => 'int', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Pins the backend to the given NUMA node at query start.',
+  long_desc => '-1 (the default) disables pinning.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_numa_node',
+  boot_val => '-1',
+  min => '-1',
+  max => 'INT_MAX',
+},
+
 { name => 'debug_parallel_query', type => 'enum', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Forces the planner\'s use parallel query nodes.',
   long_desc => 'This can be useful for testing the parallel query infrastructure by forcing the planner to generate plans that contain nodes that perform tuple communication between workers and the main process.',
@@ -729,6 +760,20 @@
   variable => 'Debug_raw_expression_coverage_test',
   boot_val => 'DEFAULT_DEBUG_RAW_EXPRESSION_COVERAGE_TEST',
   ifdef => 'DEBUG_NODE_TESTS_ENABLED',
+},
+
+{ name => 'debug_shmem_interleave', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Forces interleaving for the whole shared memory segment.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'shmem_interleave',
+  boot_val => 'false'
+},
+
+{ name => 'debug_shmem_populate', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Populates (faults) the whole shared memory segment using MAP_POPULATE.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'shmem_populate',
+  boot_val => 'false'
 },
 
 { name => 'debug_write_read_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
@@ -2723,6 +2768,12 @@
   boot_val => '16384',
   min => '16',
   max => 'INT_MAX / 2',
+},
+
+{ name => 'shared_buffers_numa', type => 'bool', context => 'PGC_POSTMASTER', group => 'RESOURCES_MEM',
+  short_desc => 'Locate partitions of shared buffers (and descriptors) to NUMA nodes.',
+  variable => 'shared_buffers_numa',
+  boot_val => 'false',
 },
 
 { name => 'shared_memory_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
