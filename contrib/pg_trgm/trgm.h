@@ -47,9 +47,9 @@ typedef char trgm[3];
 } while(0)
 extern int	(*CMPTRGM) (const void *a, const void *b);
 
-#define ISWORDCHR(c, len)	(t_isalnum_with_len(c, len))
-#define ISPRINTABLECHAR(a)	( isascii( *(unsigned char*)(a) ) && (isalnum( *(unsigned char*)(a) ) || *(unsigned char*)(a)==' ') )
-#define ISPRINTABLETRGM(t)	( ISPRINTABLECHAR( ((char*)(t)) ) && ISPRINTABLECHAR( ((char*)(t))+1 ) && ISPRINTABLECHAR( ((char*)(t))+2 ) )
+#define ISWORDCHR(c, len, collation)	(t_isalnum_with_len_collation(c, len, collation))
+#define ISPRINTABLECHAR(a)				( isascii( *(unsigned char*)(a) ) && (isalnum( *(unsigned char*)(a) ) || *(unsigned char*)(a)==' ') )
+#define ISPRINTABLETRGM(t)				( ISPRINTABLECHAR( ((char*)(t)) ) && ISPRINTABLECHAR( ((char*)(t))+1 ) && ISPRINTABLECHAR( ((char*)(t))+2 ) )
 
 #define ISESCAPECHAR(x) (*(x) == '\\')	/* Wildcard escape character */
 #define ISWILDCARDCHAR(x) (*(x) == '_' || *(x) == '%')	/* Wildcard
@@ -119,8 +119,8 @@ extern double strict_word_similarity_threshold;
 extern double index_strategy_get_limit(StrategyNumber strategy);
 extern uint32 trgm2int(trgm *ptr);
 extern void compact_trigram(trgm *tptr, char *str, int bytelen);
-extern TRGM *generate_trgm(char *str, int slen);
-extern TRGM *generate_wildcard_trgm(const char *str, int slen);
+extern TRGM *generate_trgm(char *str, int slen, Oid collation);
+extern TRGM *generate_wildcard_trgm(const char *str, int slen, Oid collation);
 extern float4 cnt_sml(TRGM *trg1, TRGM *trg2, bool inexact);
 extern bool trgm_contained_by(TRGM *trg1, TRGM *trg2);
 extern bool *trgm_presence_map(TRGM *query, TRGM *key);
