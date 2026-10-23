@@ -12,6 +12,7 @@ backend_sources += files(
   'hba.c',
   'ifaddr.c',
   'pqcomm.c',
+  'pqcomm_compress.c',
   'pqformat.c',
   'pqmq.c',
   'pqsignal.c',

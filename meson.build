@@ -3631,6 +3631,7 @@ libpq_deps += [
   ldap_r,
   libintl,
   ssl,
+  zstd,
 ]
 
 libpq_oauth_deps += [

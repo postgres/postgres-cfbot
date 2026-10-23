@@ -477,6 +477,14 @@ static const struct config_enum_entry default_toast_compression_options[] = {
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry protocol_compression_options[] = {
+	{"off", PROTOCOL_COMPRESSION_OFF, false},
+#ifdef USE_ZSTD
+	{"zstd", PROTOCOL_COMPRESSION_ZSTD, false},
+#endif
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry wal_compression_options[] = {
 	{"pglz", WAL_COMPRESSION_PGLZ, false},
 #ifdef USE_LZ4
