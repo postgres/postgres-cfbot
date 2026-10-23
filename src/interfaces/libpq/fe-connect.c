@@ -416,6 +416,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
 
+	{"compression", "PGCOMPRESSION", "off", NULL,
+		"Protocol-Compression", "", 6,
+	offsetof(struct pg_conn, compression)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}
@@ -541,7 +545,10 @@ pqDropConnection(PGconn *conn, bool flushInput)
 
 	/* Optionally discard any unread data */
 	if (flushInput)
+	{
 		conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
+		pqCompressionReset(conn);
+	}
 
 	/* Always discard any unsent data */
 	conn->outCount = 0;
@@ -2175,6 +2182,23 @@ pqConnectOptions2(PGconn *conn)
 			goto oom_error;
 	}
 
+	if (conn->compression &&
+		strcmp(conn->compression, "off") != 0 &&
+		strcmp(conn->compression, "prefer") != 0 &&
+		strcmp(conn->compression, "zstd") != 0)
+	{
+		libpq_append_conn_error(conn, "invalid compression value: \"%s\"",
+								conn->compression);
+		return false;
+	}
+#ifndef USE_ZSTD
+	if (conn->compression && strcmp(conn->compression, "zstd") == 0)
+	{
+		libpq_append_conn_error(conn, "compression value \"zstd\" is not supported");
+		return false;
+	}
+#endif
+
 	/*
 	 * Only if we get this far is it appropriate to try to connect. (We need a
 	 * state flag, rather than just the boolean result of this function, in
@@ -2739,7 +2763,8 @@ pqConnectDBStart(PGconn *conn)
 		goto connect_errReturn;
 	}
 
-	/* Ensure our buffers are empty */
+	/* Ensure buffers and compression state are empty on every connection. */
+	pqCompressionReset(conn);
 	conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
 	conn->outCount = 0;
 
@@ -5131,6 +5156,7 @@ freePGconn(PGconn *conn)
 	free(conn->scram_client_key);
 	free(conn->scram_server_key);
 	free(conn->sslkeylogfile);
+	free(conn->compression);
 	free(conn->oauth_issuer);
 	free(conn->oauth_issuer_id);
 	free(conn->oauth_discovery_uri);
@@ -5150,6 +5176,7 @@ freePGconn(PGconn *conn)
 	free(conn->inBuffer.buffer);
 	free(conn->outBuffer);
 	free(conn->rowBuf);
+	pqCompressionReset(conn);
 	termPQExpBuffer(&conn->errorMessage);
 	termPQExpBuffer(&conn->workBuffer);
 

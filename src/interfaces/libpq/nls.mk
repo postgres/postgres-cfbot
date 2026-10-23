@@ -4,6 +4,7 @@ GETTEXT_FILES    = fe-auth.c \
                    fe-auth-oauth.c \
                    fe-auth-scram.c \
                    fe-cancel.c \
+                   fe-compress.c \
                    fe-connect.c \
                    fe-exec.c \
                    fe-gssapi-common.c \
