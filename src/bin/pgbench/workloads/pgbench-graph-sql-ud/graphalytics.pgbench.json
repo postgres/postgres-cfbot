@@ -1,0 +1,37 @@
+{
+  "suite": "pgbench-graph-sql-ud-graphalytics",
+  "description": "LDBC Graphalytics algorithmic graph suite (BFS, WCC, SSSP, PageRank, LCC) using SQL with UNION DISTINCT ON",
+  "scale": 1,
+  "no_vacuum": true,
+  "clients": 2,
+  "threads": 2,
+  "transactions": 1,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_graph_sql_ud_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_graph_sql_ud_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_graph_sql_ud_constraints.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_ldbc_sql_ud_graphalytics.sql",
+      "weight": 1
+    }
+  ],
+  "sla": [
+    "validation_failures<=0"
+  ]
+}

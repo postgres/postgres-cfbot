@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{page_title}} — pgbench Telemetry Viewer</title>
+  <style>
+{{!inline_css}}
+  </style>
+</head>
+<body>
+  <header class="top-nav">
+    <div>
+      <h2 style="margin:0;">pgbench Telemetry &amp; Live Benchmark Viewer</h2>
+      <small class="muted">Single-JSON-from-DB &bull; bottle.py (SimpleTemplate) &bull; Water.css &bull; WASM Plotter</small>
+    </div>
+    <nav class="nav-links">
+      <a class="nav-pill {{'active' if nav_tab == 'overview' else ''}}" href="/?mode=single">Runs &amp; Breakdown</a>
+      <a class="nav-pill {{'active' if nav_tab == 'compare' else ''}}" href="/?mode=compare">Compare Runs</a>
+      <a class="nav-pill {{'active' if nav_tab == 'live' else ''}}" href="/live">
+        Live View
+        % if active_runs and len(active_runs) > 0:
+          <span class="badge badge-live">{{len(active_runs)}} active</span>
+        % end
+      </a>
+      <a class="nav-pill {{'active' if nav_tab == 'explorer' else ''}}" href="/explorer">SQL Data Explorer (Metatemplates)</a>
+      <a class="nav-pill" href="/api/payload?mode={{mode}}&run_id={{target_run_id or ''}}" target="_blank">Raw Single-JSON</a>
+    </nav>
+  </header>
+
+  <div class="meta-bar">
+    <span><strong>Schema:</strong> <code>{{payload.get('schema', 'public')}}</code></span>
+    <span><strong>Single-Query Latency:</strong> <code>{{payload.get('_query_elapsed_ms', 0)}} ms</code></span>
+    <span><strong>Generated At:</strong> <code>{{payload.get('generated_at', '')}}</code></span>
+    <span><strong>WASM Engine:</strong> <code id="wasm-status-indicator">Initializing...</code></span>
+  </div>
+
+  % include(body_template)
+
+  <!-- Single Page JSON Payload from PostgreSQL -->
+  <script id="pgbench-single-json" type="application/json">{{!payload_json_str}}</script>
+
+  <!-- WebAssembly Diagram & Charting Module Expanded from html/wasm_chart_module.html.stpl -->
+  % include('wasm_chart_module.html.stpl', wasm_b64=wasm_b64, wasm_size_bytes=wasm_size_bytes)
+</body>
+</html>

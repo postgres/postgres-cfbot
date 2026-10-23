@@ -3,3 +3,4 @@
 /exprscan.c
 /pgbench
 /tmp_check/
+__pycache__/

@@ -1,0 +1,51 @@
+<section class="panel">
+  <h3>Phase 2: SQL Data Explorer with Dynamic Python Metatemplates</h3>
+  <p class="muted" style="margin-top:0;">
+    Executes your read-only SQL query inside PostgreSQL as a <strong>single JSONB document</strong>
+    (<code>SELECT jsonb_build_object('row_count', ..., 'rows', jsonb_agg(to_jsonb(q)))</code>),
+    infers column semantics in Python, dynamically generates a specialized
+    <code>bottle.SimpleTemplate</code> (<code>stpl</code>) metatemplate, and renders both the table and WASM chart.
+  </p>
+
+  <div style="margin-bottom:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
+    <strong>Presets:</strong>
+    % for pr in presets:
+      <a class="nav-pill {{'active' if preset_id == pr['id'] else ''}}" href="/explorer?preset={{pr['id']}}" style="font-size:0.8rem;padding:0.25rem 0.6rem;">
+        {{pr['title']}}
+      </a>
+    % end
+  </div>
+
+  <form method="get" action="/explorer">
+    <label for="sql-box"><strong>PostgreSQL Query (Read-Only <code>SELECT</code> / <code>WITH</code>):</strong></label>
+    <textarea id="sql-box" name="sql" rows="6" style="font-family:monospace;font-size:0.86rem;width:100%;">{{user_sql}}</textarea>
+    <div style="display:flex;gap:0.75rem;align-items:center;">
+      <button type="submit">Execute Single-JSON Query &amp; Synthesize Metatemplate</button>
+      <span class="muted">Rows returned: <strong>{{payload.get('row_count', 0)}}</strong></span>
+    </div>
+  </form>
+</section>
+
+% if error_msg:
+<section class="panel" style="border-left: 4px solid #ef4444;">
+  <h4 style="color:#ef4444;">Query Error</h4>
+  <pre>{{error_msg}}</pre>
+</section>
+% end
+
+% if payload.get('rows'):
+  % include('wasm_chart_box.html.stpl', chart_id='wasm-chart-explorer', chart_title='Automatic Explorer Metric Plot (First 15 Rows)', wasm_badge='WASM Bar Projector', chart_kind='bar', box_style='margin-bottom:1.25rem;')
+% end
+
+<section class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+    <h4 style="margin:0;">Rendered Output from Synthesized <code>bottle.SimpleTemplate</code></h4>
+    <details>
+      <summary style="cursor:pointer;font-size:0.85rem;"><strong>Inspect Generated <code>stpl</code> Metatemplate Source ({{len(generated_stpl.splitlines())}} lines)</strong></summary>
+      <pre class="json-inline" style="max-width:760px;">{{generated_stpl}}</pre>
+    </details>
+  </div>
+  <div style="margin-top:0.75rem;">
+    {{!rendered_metatemplate_html}}
+  </div>
+</section>

@@ -1,0 +1,146 @@
+<!-- 5. Selected Run Summary Cards & WASM Charts -->
+<section>
+  <h3>
+    Run #{{sel.get('run_id')}}
+    % if sel.get('run_label'):
+      — <code>{{sel.get('run_label')}}</code>
+    % end
+    % st = sel.get('status') or ''
+    % if st == 'completed':
+      <span class="badge badge-ok">completed</span>
+    % elif st == 'running':
+      <span class="badge badge-live">running</span>
+    % else:
+      <span class="badge badge-err">{{st}}</span>
+    % end
+  </h3>
+
+  <div class="card-grid">
+    <div class="stat-card">
+      <div class="stat-label">Throughput (TPS)</div>
+      <div class="stat-value" id="card-tps-val">
+        {{f"{sel['tps']:.2f} tx/s" if sel.get('tps') is not None else 'In-Flight'}}
+      </div>
+      <div class="stat-sub">{{sel.get('clients') or 0}} clients / {{sel.get('threads') or 0}} threads</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Transactions</div>
+      <div class="stat-value" id="card-cnt-val">
+        {{sel.get('transactions_cnt') if sel.get('transactions_cnt') is not None else (live_tx.get('tx_ok_cnt') or 0)}}
+      </div>
+      <div class="stat-sub">Failed: {{sel.get('transactions_failed') or live_tx.get('tx_err_cnt') or 0}} | Duration: {{f"{sel['duration_sec']:.2f}s" if sel.get('duration_sec') else 'live'}}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Latency Avg / p50</div>
+      <div class="stat-value">
+        {{f"{sel['latency_avg_ms']:.2f}" if sel.get('latency_avg_ms') is not None else (live_tx.get('avg_ms') or '—')}} ms
+      </div>
+      <div class="stat-sub">p50: {{f"{sel['latency_p50_ms']:.2f}" if sel.get('latency_p50_ms') is not None else (live_tx.get('p50_ms') or '—')}} ms</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Tail Latency p95 / p99</div>
+      <div class="stat-value">
+        {{f"{sel['latency_p95_ms']:.2f}" if sel.get('latency_p95_ms') is not None else (live_tx.get('p95_ms') or '—')}} ms
+      </div>
+      <div class="stat-sub">p99: {{f"{sel['latency_p99_ms']:.2f}" if sel.get('latency_p99_ms') is not None else (live_tx.get('p99_ms') or '—')}} ms | p99.9: {{f"{sel['latency_p99_9_ms']:.2f}" if sel.get('latency_p99_9_ms') is not None else (live_tx.get('p99_9_ms') or '—')}} ms</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Recall@K / Validation</div>
+      <div class="stat-value">
+        {{f"{sel['recall_avg']:.4f}" if sel.get('recall_avg') is not None else (live_tx.get('recall_avg') or 'N/A')}}
+      </div>
+      <div class="stat-sub">Validation: {{f"{sel['validation_pct']:.1f}%" if sel.get('validation_pct') is not None else '100%'}}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">SLA &amp; Stream Health</div>
+      <div class="stat-value">
+        % if sel.get('sla_all_passed') is False:
+          <span class="badge badge-err">SLA FAILED</span>
+        % else:
+          <span class="badge badge-ok">SLA PASS</span>
+        % end
+      </div>
+      <div class="stat-sub">Dropped log rows: {{sel.get('log_db_dropped_rows') or 0}}</div>
+    </div>
+  </div>
+
+  <!-- WASM Diagram Grid -->
+  <div class="chart-grid">
+    % include('wasm_chart_box.html.stpl', chart_id='wasm-chart-tps', chart_title='Throughput Time-Series (TPS over Elapsed Sec)', wasm_badge='WASM f64 Projector', chart_kind='line', box_style='')
+    % include('wasm_chart_box.html.stpl', chart_id='wasm-chart-lat-series', chart_title='Latency Time-Series (ms over Elapsed Sec)', wasm_badge='WASM f64 Projector', chart_kind='line', box_style='')
+    % include('wasm_chart_box.html.stpl', chart_id='wasm-chart-hdr', chart_title='HDR Latency Percentile Distribution (ms)', wasm_badge='WASM Bar Projector', chart_kind='bar', box_style='')
+  </div>
+
+  <!-- Structured Single-Run Breakdown via pgbench_show_run(run_id) -->
+  <div class="panel">
+    <h4>Structured Run Breakdown (<code>SELECT * FROM pgbench_show_run({{sel.get('run_id')}})</code>)</h4>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Section</th>
+            <th>Scope</th>
+            <th>Metric</th>
+            <th class="num-col">Value</th>
+            <th>Unit</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          % for sr in show_rows:
+          <tr>
+            <td><strong>{{sr.get('section')}}</strong></td>
+            <td><code>{{sr.get('scope')}}</code></td>
+            <td><code>{{sr.get('metric')}}</code></td>
+            <td class="num-col"><strong>{{sr.get('value')}}</strong></td>
+            <td>{{sr.get('unit')}}</td>
+            <td class="muted">{{sr.get('details')}}</td>
+          </tr>
+          % end
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  % if commands and len(commands) > 0:
+  <div class="panel">
+    <h4>Per-Command Latency &amp; Failure Profile (<code>pgbench_run_commands</code>)</h4>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Script #</th>
+            <th>Cmd #</th>
+            <th>Type</th>
+            <th class="num-col">Count</th>
+            <th class="num-col">Failed</th>
+            <th class="num-col">Retries</th>
+            <th class="num-col">Avg (ms)</th>
+            <th class="num-col">Stddev (ms)</th>
+            <th class="num-col">Min (ms)</th>
+            <th class="num-col">Max (ms)</th>
+            <th>Statement</th>
+          </tr>
+        </thead>
+        <tbody>
+          % for c in commands:
+          <tr>
+            <td>#{{c.get('script_idx')}}</td>
+            <td>#{{c.get('cmd_idx')}}</td>
+            <td><span class="badge badge-neutral">{{c.get('cmd_type')}}</span></td>
+            <td class="num-col">{{c.get('cnt') or 0}}</td>
+            <td class="num-col">{{c.get('failed') or 0}}</td>
+            <td class="num-col">{{c.get('retries') or 0}}</td>
+            <td class="num-col"><strong>{{f"{c['latency_avg_ms']:.3f}" if isinstance(c.get('latency_avg_ms'), (int, float)) else '0.000'}}</strong></td>
+            <td class="num-col">{{f"{c['latency_stddev_ms']:.3f}" if isinstance(c.get('latency_stddev_ms'), (int, float)) else '0.000'}}</td>
+            <td class="num-col">{{f"{c['latency_min_ms']:.3f}" if isinstance(c.get('latency_min_ms'), (int, float)) else '0.000'}}</td>
+            <td class="num-col">{{f"{c['latency_max_ms']:.3f}" if isinstance(c.get('latency_max_ms'), (int, float)) else '0.000'}}</td>
+            <td><code>{{c.get('first_line') or ''}}</code></td>
+          </tr>
+          % end
+        </tbody>
+      </table>
+    </div>
+  </div>
+  % end
+</section>

@@ -1,0 +1,63 @@
+{
+  "suite": "pgbench-ds",
+  "description": "TPC-DS-inspired multi-channel retail decision support star-schema reporting and maintenance workload",
+  "scale": 1,
+  "no_vacuum": true,
+  "duration_sec": 60,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_ds_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_ds_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_ds_constraints.sql"
+    }
+  ],
+  "groups": [
+    {
+      "name": "reporting",
+      "clients": 4,
+      "threads": 4,
+      "scripts": [
+        {
+          "file": "pgbench_ds_q_store_sales.sql",
+          "weight": 25
+        },
+        {
+          "file": "pgbench_ds_q_cross_channel.sql",
+          "weight": 25
+        },
+        {
+          "file": "pgbench_ds_q_inventory.sql",
+          "weight": 25
+        },
+        {
+          "file": "pgbench_ds_q_promotion.sql",
+          "weight": 25
+        }
+      ]
+    },
+    {
+      "name": "maint",
+      "clients": 1,
+      "threads": 1,
+      "rate": 2.0,
+      "scripts": [
+        {
+          "file": "pgbench_ds_maintenance.sql",
+          "weight": 1
+        }
+      ]
+    }
+  ]
+}

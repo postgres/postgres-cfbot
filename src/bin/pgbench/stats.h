@@ -1,0 +1,220 @@
+/*-------------------------------------------------------------------------
+ *
+ * stats.h
+ *	  Statistics structures and functions for pgbench
+ *
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ * src/bin/pgbench/stats.h
+ *
+ *-------------------------------------------------------------------------
+ */
+#ifndef STATS_H
+#define STATS_H
+
+#include "portability/instr_time.h"
+
+/*
+ * Simple data structure to keep stats about something.
+ *
+ * XXX probably the first value should be kept and used as an offset for
+ * better numerical stability...
+ */
+typedef struct SimpleStats
+{
+	int64		count;			/* how many values were encountered */
+	double		min;			/* the minimum seen */
+	double		max;			/* the maximum seen */
+	double		sum;			/* sum of values */
+	double		sum2;			/* sum of squared values */
+} SimpleStats;
+
+/*
+ * The instr_time type is expensive when dealing with time arithmetic.  Define
+ * a type to hold microseconds instead.  Type int64 is good enough for about
+ * 584500 years.
+ */
+typedef int64 pg_time_usec_t;
+
+#define RECALL_HIST_BUCKETS 101
+#define RECALL_DIST10_BUCKETS 10
+#define MAX_NAMED_RECALL_METRICS 8
+#define AGING_WINDOW_SAMPLES 32
+
+typedef struct NamedRecallStats
+{
+	char		name[32];
+	SimpleStats stats;
+	int			q1_count;
+	double		q1_sum;
+	int			q4_count;
+	int			q4_head;
+	double		q4_ring[AGING_WINDOW_SAMPLES];
+	int64		buckets[RECALL_HIST_BUCKETS];
+	int64		dist10[RECALL_DIST10_BUCKETS];
+} NamedRecallStats;
+
+/*
+ * Data structure to hold various statistics: per-thread and per-script stats
+ * are maintained and merged together.
+ */
+typedef struct StatsData
+{
+	pg_time_usec_t start_time;	/* interval start time, for aggregates */
+
+	/*----------
+	 * Transactions are counted depending on their execution and outcome.
+	 * First a transaction may have started or not: skipped transactions occur
+	 * under --rate and --latency-limit when the client is too late to execute
+	 * them. Secondly, a started transaction may ultimately succeed or fail,
+	 * possibly after some retries when --max-tries is not one. Thus
+	 *
+	 * the number of all transactions =
+	 *   'cnt_skipped' (it was too late to execute them) +
+	 *   'cnt' (the number of successful transactions) +
+	 *   'failed' (the number of failed transactions).
+	 *
+	 * A successful transaction can have several unsuccessful tries before a
+	 * successful run. Thus
+	 *
+	 * 'cnt' (the number of successful transactions) =
+	 *   successfully retried transactions (they got a serialization or a
+	 *                                      deadlock error(s), but were
+	 *                                      successfully retried from the very
+	 *                                      beginning) +
+	 *   directly successful transactions (they were successfully completed on
+	 *                                     the first try).
+	 *
+	 * 'failed' (the number of failed transactions) =
+	 *   'serialization_failures' (they got a serialization error and were not
+	 *                        successfully retried) +
+	 *   'deadlock_failures' (they got a deadlock error and were not
+	 *                        successfully retried) +
+	 *   'other_sql_failures'  (they failed on the first try or after retries
+	 *                        due to a SQL error other than serialization or
+	 *                        deadlock; they are counted as a failed transaction
+	 *                        only when --continue-on-error is specified).
+	 *
+	 * If the transaction was retried after a serialization or a deadlock
+	 * error this does not guarantee that this retry was successful. Thus
+	 *
+	 * 'retries' (number of retries) =
+	 *   number of retries in all retried transactions =
+	 *   number of retries in (successfully retried transactions +
+	 *                         failed transactions);
+	 *
+	 * 'retried' (number of all retried transactions) =
+	 *   successfully retried transactions +
+	 *   unsuccessful retried transactions.
+	 *----------
+	 */
+	int64		cnt;			/* number of successful transactions, not
+								 * including 'cnt_skipped' */
+	int64		cnt_skipped;	/* number of transactions skipped under --rate
+								 * and --latency-limit */
+	int64		retries;		/* number of retries after a serialization or
+								 * a deadlock error in all the transactions */
+	int64		retried;		/* number of all transactions that were
+								 * retried after a serialization or a deadlock
+								 * error (perhaps the last try was
+								 * unsuccessful) */
+	int64		serialization_failures; /* number of transactions that were
+										 * not successfully retried after a
+										 * serialization error */
+	int64		deadlock_failures;	/* number of transactions that were not
+									 * successfully retried after a deadlock
+									 * error */
+	int64		other_sql_failures; /* number of failed transactions for
+									 * reasons other than
+									 * serialization/deadlock failure, which
+									 * is counted if --continue-on-error is
+									 * specified */
+	int64		expected_rollbacks; /* number of caught/expected SQL errors
+									 * that were rolled back gracefully */
+	SimpleStats latency;
+	SimpleStats lag;
+	SimpleStats keying_time;
+	SimpleStats think_time;
+	SimpleStats recall;
+#define HDR_SUB_BITS		7
+#define HDR_SUB_COUNT		(1 << HDR_SUB_BITS)
+#define HDR_MAX_OCTAVE		29
+#define HDR_TOTAL_BUCKETS	((HDR_MAX_OCTAVE + 2) * HDR_SUB_COUNT)
+	int64		hist_count;
+	int64		hist_buckets[HDR_TOTAL_BUCKETS];
+	int64		lag_hist_count;
+	int64		lag_hist_buckets[HDR_TOTAL_BUCKETS];
+	int64		scheduled_count;
+	int64		ontime_count;
+	int64		recall_buckets[RECALL_HIST_BUCKETS];
+	int64		recall_dist10[RECALL_DIST10_BUCKETS];
+	int			q1_recall_count;
+	double		q1_recall_sum;
+	int			q4_recall_count;
+	int			q4_recall_head;
+	double		q4_recall_ring[AGING_WINDOW_SAMPLES];
+	int			num_named_recalls;
+	NamedRecallStats named_recalls[MAX_NAMED_RECALL_METRICS];
+	int64		validation_passed;
+	int64		validation_failed;
+} StatsData;
+
+/*
+ * Error status for errors during script execution.
+ */
+typedef enum EStatus
+{
+	ESTATUS_NO_ERROR = 0,
+	ESTATUS_META_COMMAND_ERROR,
+	ESTATUS_CONN_ERROR,
+
+	/* SQL errors */
+	ESTATUS_SERIALIZATION_ERROR,
+	ESTATUS_DEADLOCK_ERROR,
+	ESTATUS_OTHER_SQL_ERROR,
+} EStatus;
+
+static inline pg_time_usec_t
+pg_time_now(void)
+{
+	instr_time	now;
+
+	INSTR_TIME_SET_CURRENT(now);
+
+	return (pg_time_usec_t) INSTR_TIME_GET_MICROSEC(now);
+}
+
+static inline void
+pg_time_now_lazy(pg_time_usec_t *now)
+{
+	if ((*now) == 0)
+		(*now) = pg_time_now();
+}
+
+#define PG_TIME_GET_DOUBLE(t) (0.000001 * (t))
+
+extern void initSimpleStats(SimpleStats *ss);
+extern void addToSimpleStats(SimpleStats *ss, double val);
+extern void mergeSimpleStats(SimpleStats *acc, const SimpleStats *ss);
+extern void initStats(StatsData *sd, pg_time_usec_t start);
+extern void accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
+					   EStatus estatus, int64 tries, bool has_throttle_delay);
+extern void mergeStats(StatsData *acc, const StatsData *src);
+extern int64 getFailures(const StatsData *stats);
+extern const char *getResultString(bool tx_skipped, EStatus estatus, bool failures_detailed);
+extern void printSimpleStats(const char *prefix, const SimpleStats *ss);
+extern double getLatencyPercentile(const StatsData *stats, double pct);
+extern void printLatencyPercentiles(const char *prefix, const StatsData *stats);
+extern void addToLagStats(StatsData *sd, double lag_usec, double ontime_thresh_usec);
+extern double getLagPercentile(const StatsData *stats, double pct);
+extern void printLagPercentiles(const char *prefix, const StatsData *stats);
+extern void addToRecallStats(StatsData *sd, double recall_val);
+extern void addToNamedRecallStats(StatsData *sd, const char *name, double recall_val);
+extern const NamedRecallStats *findNamedRecallStats(const StatsData *stats, const char *name);
+extern double getRecallPercentile(const StatsData *stats, double pct);
+extern double getNamedRecallPercentile(const StatsData *stats, const char *name, double pct);
+extern void printRecallStats(const char *prefix, const StatsData *stats);
+extern void printValidationStats(const char *prefix, const StatsData *stats);
+
+#endif							/* STATS_H */

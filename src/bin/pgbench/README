@@ -1,0 +1,217 @@
+src/bin/pgbench/README
+
+pgbench Architecture and Developer Guide
+========================================
+
+Overview
+--------
+pgbench is PostgreSQL's built-in benchmarking driver.  Its source code is
+organized into modular subsystems with clear ownership boundaries:
+
+  - pgbench.c / pgbench.h
+      CLI argument parsing, global configuration, and top-level orchestration.
+  - config.c / config.h
+      JSON / JSONC configuration file parser (--config), effective configuration
+      exporter (--dump-config), relative script/dataset path resolution, direct
+      --json-report replay loader, and multi-stage initialization runner
+      (--config=<file> -i).
+  - stats.c / stats.h
+      Statistical accumulators (SimpleStats, StatsData), latency tracking,
+      and interval/summary reporting primitives.
+  - variable.c / variable.h
+      Scoped variable store (Variables, VariableScope, Variable) and typed
+      runtime value system (PgBenchValue).
+  - poller.c / poller.h
+      Cross-platform non-blocking socket multiplexing (ppoll() or select()).
+  - script.c / script.h, exprscan.l, exprparse.y
+      Custom and built-in script parsing, flex/bison expression compilation,
+      and runtime expression evaluation (evaluateExpr()).
+  - commands.c / commands.h
+      Pluggable backslash meta-command handler registry (CommandDescriptor)
+      and execution routines.
+  - init.c / init.h
+      Database schema initialization (-i / --init-steps) and data population.
+  - engine.c / engine.h
+      Non-blocking client state machine (advanceConnectionState()), worker
+      thread runner (threadRun()), and result/log output.
+  - logdb.c / logdb.h
+      Direct PostgreSQL database telemetry logging (--log-db), UNLOGGED/LOGGED
+      schema & table bootstrap, buffered COPY ... FROM STDIN batch streaming,
+      and SQL run inspection/comparison SRFs (pgbench_show_run(),
+      pgbench_compare_runs()).
+  - viewer/ (pgbench_viewer.py, bottle.py, README.md, html/, css/, wasm/, src/)
+      Standalone zero-dependency web telemetry viewer & SQL Data Explorer built
+      with bottle.py, modular SimpleTemplate (html/*.html.stpl) views, Water.css
+      (css/), and a 439-byte WebAssembly charting kernel (wasm/pgbench_chart.wasm,
+      with build-time sources in src/).
+  - src/common/pgbench_funcs.c / src/include/common/pgbench_funcs.h
+      Frontend/backend-agnostic random distributions, hashes, permutations,
+      and data generators shared between pgbench and contrib/pgbench.
+
+Value Type System (variable.c / variable.h)
+-------------------------------------------
+Runtime values in expressions and variables are represented by PgBenchValue,
+a tagged union supporting:
+
+  - PGBT_NO_VALUE : unparsed raw string in Variable.svalue
+  - PGBT_NULL     : SQL/expression NULL
+  - PGBT_INT      : 64-bit signed integer (int64)
+  - PGBT_DOUBLE   : IEEE 754 double precision float (double)
+  - PGBT_BOOLEAN  : boolean (bool)
+  - PGBT_TEXT     : heap-allocated NUL-terminated string (char *)
+  - PGBT_TIMESTAMP: microseconds since 2000-01-01 00:00:00 UTC (int64)
+  - PGBT_ARRAY    : 1D dynamic array of PgBenchValue (PgBenchArray)
+
+Memory Ownership Invariants:
+  - PGBT_TEXT (u.sval) and PGBT_ARRAY (u.aval.elems) own heap allocations.
+  - Always use copyValue(dest, src) to duplicate a PgBenchValue and
+    freeValue(pv) before overwriting or discarding an owned PgBenchValue.
+  - Variable.svalue caches the formatted string representation for SQL
+    interpolation (:var and :var[idx]) and is invalidated whenever the
+    underlying Variable.value is updated.
+
+Shared Benchmark Functions (src/common/pgbench_funcs.c)
+-------------------------------------------------------
+Low-level mathematical, statistical, string, and calendar functions live in
+src/common/pgbench_funcs.c (declared in src/include/common/pgbench_funcs.h)
+so they can be linked into both the frontend pgbench binary and the backend
+contrib/pgbench extension:
+
+  - Random distributions: pgbench_random(), pgbench_random_gaussian(),
+    pgbench_random_exponential(), pgbench_random_zipfian(),
+    pgbench_random_poisson()
+  - Hashes & permutations: pgbench_hash_fnv1a(), pgbench_hash_murmur2(),
+    pgbench_permute()
+  - TPC-C generators: pgbench_nurand(), pgbench_c_last(),
+    pgbench_random_astring(), pgbench_random_nstring()
+  - Calendar & timestamp arithmetic: pgbench_parse_timestamp(),
+    pgbench_format_timestamp(), pgbench_date_add(),
+    pgbench_int_to_date_window()
+
+All PRNG-dependent routines take an explicit `pg_prng_state *state` pointer.
+In src/bin/pgbench, each client passes `&st->cs_func_rs`; in contrib/pgbench,
+the backend passes its session-local `&pgbench_ext_prng_state`.
+
+Script Control Flow & Structured Exception Handling (script.c, commands.c, engine.c)
+------------------------------------------------------------------------------------
+During script parsing (`parseScript()` in `script.c`), a static linking pass
+validates and resolves jump targets (`jump_target` and `endtry_target` on
+`Command` structs) for all block-structured meta-commands:
+
+  - `or var start .. end [BY s]` ... `\endfor`:
+      `META_FOR.jump_target` points to `META_ENDFOR + 1`;
+      `META_ENDFOR.jump_target` points back to `META_FOR`.
+      Runtime state is tracked on `st->loop_stack[MAX_LOOP_DEPTH]`.
+  - `\while expr` ... `\endwhile`:
+      `META_WHILE.jump_target` points to `META_ENDWHILE + 1`;
+      `META_ENDWHILE.jump_target` points back to `META_WHILE`.
+  - `	ry` ... `[\catch ['SQLSTATE']]` ... `\endtry`:
+      `META_TRY.jump_target` points to `META_CATCH` (or `META_ENDTRY` if no
+      `\catch` is present); `META_TRY.endtry_target` and `META_CATCH.jump_target`
+      point to `META_ENDTRY`.
+      Runtime state is tracked on `st->try_stack[MAX_TRY_DEPTH]`, saving the
+      enclosing `cstack_depth` and `loop_depth`.
+
+When `readCommandResponse()` in `engine.c` encounters `PGRES_FATAL_ERROR`, it
+extracts `PQresultErrorField(res, PG_DIAG_SQLSTATE)` and checks:
+  1. `st->expect_error` (set by `\expect_error ['SQLSTATE']`), or
+  2. The innermost active `st->try_stack` frame not yet in its `\catch` block.
+If matched, `:sqlstate` and `:error_message` are stored in `st->variables`,
+inner conditional/loop frames are unwound, `expected_rollbacks` is incremented,
+and `CSTATE_END_COMMAND` transitions directly to `caught_jump_target`.
+
+Result Set Inspection & Array Binding (commands.c, variable.c)
+--------------------------------------------------------------
+- `processGSetResult()` inspects each column value returned by `\gset` or
+  `set`.  When a value starts with `{` and ends with `}`,
+  `parseArrayLiteral()` parses the 1D PostgreSQL array representation into a
+  `PGBT_ARRAY` value (coercing unquoted elements to `NULL`, `int64`, `double`,
+  `bool`, or `text`) and binds `<prefix><colname>_count` to the array length.
+- `processGSetMetaResult()` / `populateGSetMeta()` record result metadata
+  (`_rowcount`, `_ntuples`, `_nfields`, `_sqlstate`, `_status`, `_elapsed_us`)
+  for both trailing `\gset_meta` and standalone `\gset_meta` commands.
+
+Pacing: Dynamic \sleep, \keying_time, and \think_time (script.c, commands.c, engine.c)
+--------------------------------------------------------------------------------------
+`parseSleepCommand()` parses the optional trailing unit (`us`, `ms`, `s`) and
+compiles the preceding tokens into `cmd->expr` using the full expression parser.
+At runtime, `handle_cmd_sleep()` evaluates `cmd->expr` (supporting both integer
+and floating-point results), scales by the unit multiplier into microseconds,
+records `st->sleep_begin` and `st->sleep_type`, and transitions the client to
+`CSTATE_SLEEP` (monitored non-blockingly by `poller.c`).
+When `CSTATE_SLEEP` finishes, `META_KEYING_TIME` and `META_THINK_TIME`
+accumulate elapsed microseconds into `st->txn_keying_time` and
+`st->txn_think_time`, allowing `StatsData` to report both total cycle latency
+and database `response time average` (latency minus keying and think time).
+
+Heterogeneous Client Groups & Sequential Streams (pgbench.c, engine.c)
+----------------------------------------------------------------------
+`parseClientGroup()` parses repeatable `--group` specifications into
+`client_groups[MAX_GROUPS]`.  When groups are active:
+  - Total `nclients` and `nthreads` are the sums of per-group `nclients` and
+    `nthreads`.
+  - Each `TState` and `CState` is assigned a `group_id` and a 0-based
+    group-local `stream_id` (exposed in client variables `:group_name` and
+    `:stream_id`).
+  - `chooseScriptForClient()` restricts script selection to the group's
+    `script_indices[]`.  When `sequential=true`, scripts are chosen via
+    `pgbench_permute(st->seq_counter++, grp->num_scripts, st->stream_id + 1)`.
+
+HDR Latency Histogram, SLA Validation & JSON Reporting (stats.c, engine.c)
+--------------------------------------------------------------------------
+- `StatsData` embeds a 3,968-bucket sub-bucketed base-2 HDR latency histogram
+  (`HDR_SUB_BITS = 7`, 128 sub-buckets per power-of-2 octave across 31 octaves).
+  Recording a sample (`accumStats()`) uses `pg_leftmost_one_pos64()` in O(1)
+  time with zero heap allocations, and `mergeStats()` sums bucket counts across
+  threads, client groups, and scripts.
+- `getLatencyPercentile()` interpolates within the target sub-bucket to bounded
+  ~0.78% relative error for `p50`, `p90`, `p95`, `p99`, `p99.9`, or arbitrary
+  `--sla` percentiles.
+- `printResults()` evaluates all `sla_rules[]`, derives `tpmC` and `QphH@SF`,
+  and optionally writes the structured JSON report via `writeJsonReport()`.
+
+Direct Database Telemetry (--log-db) & Web Viewer (logdb.c, viewer/)
+--------------------------------------------------------------------
+- `logdb.c` / `logdb.h` implements direct PostgreSQL telemetry logging
+  (`--log-db`, `--log-db-unlogged[=stream|all|off]`, `--log-db-mode=stream|deferred`,
+  `--log-db-schema`, `--log-db-index`, `--run-label`).  It provisions a 3-tier,
+  9-table schema (`pgbench_runs`, `pgbench_run_groups`, `pgbench_run_scripts`,
+  `pgbench_run_commands`, `pgbench_run_recalls`, `pgbench_run_slas`,
+  `pgbench_progress_log`, `pgbench_agg_log`, `pgbench_tx_log`), two views
+  (`pgbench_runs_v`, `pgbench_live_progress_v`), and 5 overloaded Set-Returning
+  Functions (`pgbench_show_run` and `pgbench_compare_runs`).
+- `src/bin/pgbench/viewer/` provides a standalone `bottle.py` + `Water.css`
+  (`css/`) + modular `SimpleTemplate` (`html/*.html.stpl`) + 439-byte
+  WebAssembly (`wasm/pgbench_chart.wasm`, built from `src/`) web viewer
+  (`pgbench_viewer.py`) featuring single-JSON-from-DB benchmark views, a live
+  running benchmark monitor (`/live`), and a two-stage Bottle metatemplate SQL
+  Data Explorer (`/explorer`).
+  See `src/bin/pgbench/viewer/README.md` for usage, CLI flags, and architecture.
+
+How to Add a New Built-in Function or Meta-Command
+--------------------------------------------------
+To add a new built-in script function:
+  1. If backend-reusable, implement the core routine in
+     `src/common/pgbench_funcs.c` and `src/include/common/pgbench_funcs.h`.
+  2. Add a `PGBENCH_*` enum value to `PgBenchFunction` in `src/bin/pgbench/pgbench.h`.
+  3. Register the function name and arity in `PGBENCH_FUNCTIONS[]` in `script.c`.
+  4. Implement its evaluation case in `evalStandardFunc()` in `script.c`.
+  5. Document it in `doc/src/sgml/ref/pgbench.sgml` and add TAP tests in
+     `src/bin/pgbench/t/001_pgbench_with_server.pl`.
+
+To add a new backslash meta-command:
+  1. Add a `META_*` enum value to `MetaCommand` in `src/bin/pgbench/script.h`.
+  2. Parse its syntax in `process_backslash_command()` in `script.c` (and link
+     any control-flow targets in `parseScript()`).
+  3. Implement `handle_cmd_<name>()` and register it in `command_descriptors[]`
+     in `src/bin/pgbench/commands.c`.
+  4. Document it in `doc/src/sgml/ref/pgbench.sgml` and add tests in `t/`.
+
+Running the Test Suites
+-----------------------
+- TAP tests for `src/bin/pgbench`:
+    make -C src/bin/pgbench check
+- SQL regression tests for `contrib/pgbench`:
+    make -C contrib/pgbench check
+- SGML documentation validation:
+    make -C doc/src/sgml check

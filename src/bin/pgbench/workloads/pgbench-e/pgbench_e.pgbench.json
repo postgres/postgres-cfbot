@@ -1,0 +1,57 @@
+{
+  "suite": "pgbench-e",
+  "description": "TPC-E-inspired financial brokerage OLTP workload across 16 tables and 10 stored procedures",
+  "scale": 2,
+  "no_vacuum": true,
+  "clients": 8,
+  "threads": 4,
+  "duration_sec": 60,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_e_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_e_init.sql",
+      "clients": 2,
+      "threads": 2,
+      "variables": {
+        "num_workers": 2
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_e_constraints.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_e_trade_order.sql",
+      "weight": 10
+    },
+    {
+      "file": "pgbench_e_trade_result.sql",
+      "weight": 10
+    },
+    {
+      "file": "pgbench_e_customer_position.sql",
+      "weight": 13
+    },
+    {
+      "file": "pgbench_e_market_watch.sql",
+      "weight": 18
+    },
+    {
+      "file": "pgbench_e_broker_volume.sql",
+      "weight": 5
+    },
+    {
+      "file": "pgbench_e_trade_status.sql",
+      "weight": 44
+    }
+  ],
+  "sla": [
+    "total:p95<=5000ms"
+  ]
+}

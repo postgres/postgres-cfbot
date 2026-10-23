@@ -1,0 +1,43 @@
+<!-- 4. Multi-Run Matrix Comparison View (pgbench_compare_runs(bigint[])) -->
+<section class="panel">
+  <h3>Multi-Run Matrix Comparison (<code>pgbench_compare_runs(bigint[])</code>)</h3>
+  % include('wasm_chart_box.html.stpl', chart_id='wasm-chart-multi', chart_title='Multi-Run Throughput Comparison (TPS)', wasm_badge='WASM Bar Projector', chart_kind='bar', box_style='margin-bottom:1rem;')
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Scope</th>
+          <th>Metric</th>
+          <th>Unit</th>
+          <th>Run</th>
+          <th class="num-col">Value</th>
+          <th class="num-col">Delta vs Base</th>
+          <th class="num-col">% vs Base</th>
+          <th>SLA</th>
+        </tr>
+      </thead>
+      <tbody>
+        % for m in multi['matrix_rows']:
+        <tr>
+          <td><code>{{m['scope']}}</code></td>
+          <td><strong>{{m['metric']}}</strong></td>
+          <td>{{m['unit']}}</td>
+          <td><a href="/?mode=single&run_id={{m['run_id']}}">#{{m['run_id']}} ({{m.get('run_label') or 'unlabeled'}})</a></td>
+          <td class="num-col"><strong>{{f"{m['val']:.4f}" if isinstance(m.get('val'), (int, float)) else '—'}}</strong></td>
+          <td class="num-col">{{f"{m['delta_vs_base']:+.4f}" if isinstance(m.get('delta_vs_base'), (int, float)) else '—'}}</td>
+          <td class="num-col">{{f"{m['pct_vs_base']:+.2f}%" if isinstance(m.get('pct_vs_base'), (int, float)) else '—'}}</td>
+          <td>
+            % if m.get('sla_all_passed') is True:
+              <span class="badge badge-ok">PASS</span>
+            % elif m.get('sla_all_passed') is False:
+              <span class="badge badge-err">FAIL</span>
+            % else:
+              <span class="muted">—</span>
+            % end
+          </td>
+        </tr>
+        % end
+      </tbody>
+    </table>
+  </div>
+</section>

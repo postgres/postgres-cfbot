@@ -3,6 +3,8 @@
 PGFILEDESC = "pgbench - a simple program for running benchmark tests"
 PGAPPICON = win32
 
+EXTRA_INSTALL = contrib/pgbench
+
 subdir = src/bin/pgbench
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
@@ -11,6 +13,16 @@ OBJS = \
 	$(WIN32RES) \
 	exprparse.o \
 	exprscan.o \
+	commands.o \
+	config.o \
+	dataset.o \
+	engine.o \
+	init.o \
+	logdb.o \
+	poller.o \
+	script.o \
+	stats.o \
+	variable.o \
 	pgbench.o
 
 override CPPFLAGS := -I. -I$(srcdir) -I$(libpq_srcdir) $(CPPFLAGS)
@@ -37,6 +49,7 @@ exprparse.c: BISONFLAGS += -d
 
 # Force these dependencies to be known even without dependency info built:
 exprparse.o exprscan.o: exprparse.h
+$(OBJS): pgbench.h variable.h config.h dataset.h script.h commands.h engine.h stats.h poller.h init.h logdb.h
 
 install: all installdirs
 	$(INSTALL_PROGRAM) pgbench$(X) '$(DESTDIR)$(bindir)/pgbench$(X)'

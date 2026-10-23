@@ -1,0 +1,49 @@
+<!-- 3. Pairwise Run Comparison View (pgbench_compare_runs(base, cand)) -->
+<section class="panel">
+  <h3>
+    Pairwise Run Comparison:
+    Base #{{pair['base_run']['run_id'] if pair.get('base_run') else base_id}}
+    (<code>{{pair['base_run'].get('run_label') if pair.get('base_run') else ''}}</code>)
+    vs Candidate #{{pair['cand_run']['run_id'] if pair.get('cand_run') else cand_id}}
+    (<code>{{pair['cand_run'].get('run_label') if pair.get('cand_run') else ''}}</code>)
+  </h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Scope</th>
+          <th>Metric</th>
+          <th>Unit</th>
+          <th class="num-col">Base Value</th>
+          <th class="num-col">Candidate Value</th>
+          <th class="num-col">Abs Delta</th>
+          <th class="num-col">% Change</th>
+          <th>Verdict</th>
+        </tr>
+      </thead>
+      <tbody>
+        % for d in pair['diff_rows']:
+        <tr>
+          <td><code>{{d['scope']}}</code></td>
+          <td><strong>{{d['metric']}}</strong></td>
+          <td>{{d['unit']}}</td>
+          <td class="num-col">{{f"{d['base_val']:.4f}" if isinstance(d.get('base_val'), (int, float)) else '—'}}</td>
+          <td class="num-col"><strong>{{f"{d['cand_val']:.4f}" if isinstance(d.get('cand_val'), (int, float)) else '—'}}</strong></td>
+          <td class="num-col">{{f"{d['abs_delta']:+.4f}" if isinstance(d.get('abs_delta'), (int, float)) else '—'}}</td>
+          <td class="num-col"><strong>{{f"{d['pct_change']:+.2f}%" if isinstance(d.get('pct_change'), (int, float)) else '—'}}</strong></td>
+          <td>
+            % v = d.get('verdict')
+            % if v == 'IMPROVED':
+              <span class="badge badge-ok">IMPROVED</span>
+            % elif v == 'REGRESSED':
+              <span class="badge badge-err">REGRESSED</span>
+            % else:
+              <span class="badge badge-neutral">{{v}}</span>
+            % end
+          </td>
+        </tr>
+        % end
+      </tbody>
+    </table>
+  </div>
+</section>

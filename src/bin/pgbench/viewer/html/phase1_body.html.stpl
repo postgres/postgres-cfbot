@@ -1,0 +1,30 @@
+% runs = payload.get('runs') or []
+% active_runs = payload.get('active_runs') or []
+% sel = payload.get('selected_run') or {}
+% show_rows = payload.get('show_run_rows') or []
+% groups = payload.get('groups') or []
+% scripts = payload.get('scripts') or []
+% commands = payload.get('commands') or []
+% recalls = payload.get('recalls') or []
+% slas = payload.get('slas') or []
+% pair = payload.get('compare_pair')
+% multi = payload.get('compare_multi')
+% live_tx = payload.get('live_tx_summary') or {}
+
+% include('run_selector.html.stpl', runs=runs, sel=sel, mode=mode, base_id=base_id, cand_id=cand_id, run_ids_str=run_ids_str)
+
+% if mode == 'live' or len(active_runs) > 0:
+  % include('live_monitor.html.stpl', active_runs=active_runs, sel=sel, mode=mode, target_run_id=target_run_id)
+% end
+
+% if pair and pair.get('diff_rows'):
+  % include('compare_pair.html.stpl', pair=pair, base_id=base_id, cand_id=cand_id)
+% end
+
+% if multi and multi.get('matrix_rows'):
+  % include('compare_matrix.html.stpl', multi=multi)
+% end
+
+% if sel:
+  % include('single_run.html.stpl', sel=sel, live_tx=live_tx, show_rows=show_rows, commands=commands)
+% end

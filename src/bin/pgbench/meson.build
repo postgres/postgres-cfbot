@@ -2,6 +2,16 @@
 
 pgbench_sources = files(
   'pgbench.c',
+  'commands.c',
+  'config.c',
+  'dataset.c',
+  'engine.c',
+  'init.c',
+  'logdb.c',
+  'poller.c',
+  'script.c',
+  'stats.c',
+  'variable.c',
 )
 
 exprscan = custom_target('exprscan',

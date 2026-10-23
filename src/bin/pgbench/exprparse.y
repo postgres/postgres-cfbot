@@ -16,16 +16,31 @@
 
 #include "pgbench.h"
 
-#define PGBENCH_NARGS_VARIABLE	(-1)
-#define PGBENCH_NARGS_CASE		(-2)
-#define PGBENCH_NARGS_HASH		(-3)
-#define PGBENCH_NARGS_PERMUTE	(-4)
+#define PGBENCH_NARGS_VARIABLE		(-1)
+#define PGBENCH_NARGS_CASE			(-2)
+#define PGBENCH_NARGS_HASH			(-3)
+#define PGBENCH_NARGS_PERMUTE		(-4)
+#define PGBENCH_NARGS_NURAND		(-5)
+#define PGBENCH_NARGS_INT_TO_DATE	(-6)
+#define PGBENCH_NARGS_VARIADIC_ANY	(-7)
+#define PGBENCH_NARGS_1_TO_2		(-8)
+#define PGBENCH_NARGS_1_TO_3		(-9)
+#define PGBENCH_NARGS_1_TO_4		(-10)
+#define PGBENCH_NARGS_1_TO_5		(-11)
+#define PGBENCH_NARGS_2_TO_3		(-12)
+#define PGBENCH_NARGS_2_TO_4		(-13)
+#define PGBENCH_NARGS_3_TO_4		(-14)
+#define PGBENCH_NARGS_3_TO_5		(-15)
+#define PGBENCH_NARGS_0_TO_1		(-16)
+#define PGBENCH_NARGS_4_TO_5		(-17)
+
 
 static PgBenchExprList *make_elist(PgBenchExpr *expr, PgBenchExprList *list);
 static PgBenchExpr *make_null_constant(void);
 static PgBenchExpr *make_boolean_constant(bool bval);
 static PgBenchExpr *make_integer_constant(int64 ival);
 static PgBenchExpr *make_double_constant(double dval);
+static PgBenchExpr *make_string_constant(char *sval);
 static PgBenchExpr *make_variable(char *varname);
 static PgBenchExpr *make_op(yyscan_t yyscanner, const char *operator,
 							PgBenchExpr *lexpr, PgBenchExpr *rexpr);
@@ -59,10 +74,10 @@ static PgBenchExpr *make_case(yyscan_t yyscanner, PgBenchExprList *when_then_lis
 %type <ival> INTEGER_CONST function
 %type <dval> DOUBLE_CONST
 %type <bval> BOOLEAN_CONST
-%type <str> VARIABLE FUNCTION
+%type <str> STRING_CONST VARIABLE FUNCTION
 
 %token NULL_CONST INTEGER_CONST MAXINT_PLUS_ONE_CONST DOUBLE_CONST
-%token BOOLEAN_CONST VARIABLE FUNCTION
+%token BOOLEAN_CONST STRING_CONST VARIABLE FUNCTION
 %token AND_OP OR_OP NOT_OP NE_OP LE_OP GE_OP LS_OP RS_OP IS_OP
 %token CASE_KW WHEN_KW THEN_KW ELSE_KW END_KW
 
@@ -76,6 +91,7 @@ static PgBenchExpr *make_case(yyscan_t yyscanner, PgBenchExprList *when_then_lis
 %left	'+' '-'
 %left	'*' '/' '%'
 %right	UNARY
+%left	'[' ']'
 
 %%
 
@@ -145,8 +161,10 @@ expr: '(' expr ')'			{ $$ = $2; }
 	| BOOLEAN_CONST			{ $$ = make_boolean_constant($1); }
 	| INTEGER_CONST			{ $$ = make_integer_constant($1); }
 	| DOUBLE_CONST			{ $$ = make_double_constant($1); }
+	| STRING_CONST			{ $$ = make_string_constant($1); }
 	/* misc */
 	| VARIABLE				{ $$ = make_variable($1); }
+	| expr '[' expr ']'		{ $$ = make_op(yyscanner, "!subscript", $1, $3); }
 	| function '(' elist ')' { $$ = make_func(yyscanner, $1, $3); }
 	| case_control			{ $$ = $1; }
 	;
@@ -205,6 +223,17 @@ make_boolean_constant(bool bval)
 	expr->etype = ENODE_CONSTANT;
 	expr->u.constant.type = PGBT_BOOLEAN;
 	expr->u.constant.u.bval = bval;
+	return expr;
+}
+
+static PgBenchExpr *
+make_string_constant(char *sval)
+{
+	PgBenchExpr *expr = pg_malloc_object(PgBenchExpr);
+
+	expr->etype = ENODE_CONSTANT;
+	expr->u.constant.type = PGBT_TEXT;
+	expr->u.constant.u.sval = sval;
 	return expr;
 }
 
@@ -377,6 +406,129 @@ static const struct
 	{
 		"permute", PGBENCH_NARGS_PERMUTE, PGBENCH_PERMUTE
 	},
+	{
+		"!subscript", 2, PGBENCH_SUBSCRIPT
+	},
+	{
+		"nurand", PGBENCH_NARGS_NURAND, PGBENCH_NURAND
+	},
+	{
+		"c_last", 1, PGBENCH_C_LAST
+	},
+	{
+		"random_astring", 2, PGBENCH_RANDOM_ASTRING
+	},
+	{
+		"random_nstring", 2, PGBENCH_RANDOM_NSTRING
+	},
+	{
+		"random_bytea", 2, PGBENCH_RANDOM_BYTEA
+	},
+	{
+		"format_string", PGBENCH_NARGS_VARIABLE, PGBENCH_FORMAT_STRING
+	},
+	{
+		"to_timestamp", 1, PGBENCH_TO_TIMESTAMP
+	},
+	{
+		"date_add", 3, PGBENCH_DATE_ADD
+	},
+	{
+		"int_to_date", PGBENCH_NARGS_INT_TO_DATE, PGBENCH_INT_TO_DATE
+	},
+	{
+		"array", PGBENCH_NARGS_VARIADIC_ANY, PGBENCH_ARRAY
+	},
+	{
+		"array_generate", PGBENCH_NARGS_2_TO_3, PGBENCH_ARRAY_GENERATE
+	},
+	{
+		"vector", PGBENCH_NARGS_VARIABLE, PGBENCH_VECTOR
+	},
+	{
+		"vector_dims", 1, PGBENCH_VECTOR_DIMS
+	},
+	{
+		"vector_norm", 1, PGBENCH_VECTOR_NORM
+	},
+	{
+		"vector_distance", PGBENCH_NARGS_2_TO_3, PGBENCH_VECTOR_DISTANCE
+	},
+	{
+		"random_vector", PGBENCH_NARGS_1_TO_4, PGBENCH_RANDOM_VECTOR
+	},
+	{
+		"random_vector_gaussian", PGBENCH_NARGS_1_TO_3, PGBENCH_RANDOM_VECTOR_GAUSSIAN
+	},
+	{
+		"random_unit_vector", PGBENCH_NARGS_1_TO_3, PGBENCH_RANDOM_VECTOR_GAUSSIAN
+	},
+	{
+		"clustered_vector", PGBENCH_NARGS_3_TO_5, PGBENCH_CLUSTERED_VECTOR
+	},
+	{
+		"planted_vector", PGBENCH_NARGS_2_TO_4, PGBENCH_PLANTED_VECTOR
+	},
+	{
+		"random_sparse_vector", PGBENCH_NARGS_2_TO_4, PGBENCH_RANDOM_SPARSE_VECTOR
+	},
+	{
+		"rmat_edge", PGBENCH_NARGS_1_TO_5, PGBENCH_RMAT_EDGE
+	},
+	{
+		"dataset_count", 1, PGBENCH_DATASET_COUNT
+	},
+	{
+		"vec_dataset_count", 1, PGBENCH_DATASET_COUNT
+	},
+	{
+		"dataset_get", PGBENCH_NARGS_2_TO_3, PGBENCH_DATASET_GET
+	},
+	{
+		"vec_load", PGBENCH_NARGS_2_TO_3, PGBENCH_DATASET_GET
+	},
+	{
+		"dataset_next_id", PGBENCH_NARGS_1_TO_2, PGBENCH_DATASET_NEXT_ID
+	},
+	{
+		"vec_next_id", PGBENCH_NARGS_1_TO_2, PGBENCH_DATASET_NEXT_ID
+	},
+	{
+		"get_watermark", PGBENCH_NARGS_0_TO_1, PGBENCH_GET_WATERMARK
+	},
+	{
+		"set_watermark", PGBENCH_NARGS_1_TO_2, PGBENCH_SET_WATERMARK
+	},
+	{
+		"advance_watermark", PGBENCH_NARGS_1_TO_2, PGBENCH_ADVANCE_WATERMARK
+	},
+	{
+		"reservoir_push", 2, PGBENCH_RESERVOIR_PUSH
+	},
+	{
+		"reservoir_sample", PGBENCH_NARGS_1_TO_2, PGBENCH_RESERVOIR_SAMPLE
+	},
+	{
+		"reservoir_count", 1, PGBENCH_RESERVOIR_COUNT
+	},
+	{
+		"recall_at_k", PGBENCH_NARGS_2_TO_3, PGBENCH_RECALL_AT_K
+	},
+	{
+		"ndcg_at_k", PGBENCH_NARGS_2_TO_3, PGBENCH_NDCG_AT_K
+	},
+	{
+		"ldbc_correlated_edge", PGBENCH_NARGS_4_TO_5, PGBENCH_LDBC_CORRELATED_EDGE
+	},
+	{
+		"ldbc_flashmob_ts", PGBENCH_NARGS_4_TO_5, PGBENCH_LDBC_FLASHMOB_TS
+	},
+	{
+		"begin_dependent_write", PGBENCH_NARGS_1_TO_2, PGBENCH_BEGIN_DEPENDENT_WRITE
+	},
+	{
+		"end_dependent_write", PGBENCH_NARGS_1_TO_2, PGBENCH_END_DEPENDENT_WRITE
+	},
 	/* keep as last array element */
 	{
 		NULL, 0, 0
@@ -460,7 +612,7 @@ make_func(yyscan_t yyscanner, int fnumber, PgBenchExprList *args)
 	/* validate arguments number including few special cases */
 	switch (PGBENCH_FUNCTIONS[fnumber].nargs)
 	{
-			/* check at least one arg for least & greatest */
+			/* check at least one arg for least, greatest, format_string, vector */
 		case PGBENCH_NARGS_VARIABLE:
 			if (len == 0)
 				expr_yyerror_more(yyscanner, "at least one argument expected",
@@ -503,6 +655,74 @@ make_func(yyscan_t yyscanner, int fnumber, PgBenchExprList *args)
 				args = make_elist(var, args);
 			}
 			break;
+
+			/* nurand(A, min, max [, C]), int_to_date, planted_vector */
+		case PGBENCH_NARGS_NURAND:
+		case PGBENCH_NARGS_INT_TO_DATE:
+		case PGBENCH_NARGS_3_TO_4:
+			if (len < 3 || len > 4)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_0_TO_1:
+			if (len < 0 || len > 1)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_1_TO_2:
+			if (len < 1 || len > 2)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_1_TO_3:
+			if (len < 1 || len > 3)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_1_TO_4:
+			if (len < 1 || len > 4)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_1_TO_5:
+			if (len < 1 || len > 5)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_2_TO_3:
+			if (len < 2 || len > 3)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_2_TO_4:
+			if (len < 2 || len > 4)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_3_TO_5:
+			if (len < 2 || len > 5)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+		case PGBENCH_NARGS_4_TO_5:
+			if (len < 4 || len > 5)
+				expr_yyerror_more(yyscanner, "unexpected number of arguments",
+								  PGBENCH_FUNCTIONS[fnumber].fname);
+			break;
+
+			/* array(...) takes 0 or more arguments */
+		case PGBENCH_NARGS_VARIADIC_ANY:
+			break;
+
 
 			/* common case: positive arguments number */
 		default:

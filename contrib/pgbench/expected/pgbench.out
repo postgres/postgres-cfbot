@@ -1,0 +1,306 @@
+CREATE EXTENSION pgbench;
+-- Test Hashing functions
+SELECT pgbench.hash_murmur2(12345, 0);
+     hash_murmur2     
+----------------------
+ -8599128181304237022
+(1 row)
+
+SELECT pgbench.hash_murmur2(12345, 42);
+    hash_murmur2     
+---------------------
+ -591810079667318857
+(1 row)
+
+SELECT pgbench.hash_fnv1a(12345, 0);
+      hash_fnv1a      
+----------------------
+ -1792800413050876852
+(1 row)
+
+SELECT pgbench.hash_fnv1a(12345, 42);
+      hash_fnv1a      
+----------------------
+ -5267424053501251834
+(1 row)
+
+-- pgbench.hash is alias for hash_murmur2
+SELECT pgbench.hash(12345, 0) = pgbench.hash_murmur2(12345, 0);
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT pgbench.hash(12345, 42) = pgbench.hash_murmur2(12345, 42);
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Test Permutation function (bijective mapping over 0..9)
+SELECT array_agg(pgbench.permute(i, 10, 42) ORDER BY i) FROM generate_series(0, 9) i;
+       array_agg       
+-----------------------
+ {1,7,0,4,3,8,6,5,9,2}
+(1 row)
+
+SELECT count(DISTINCT pgbench.permute(i, 10, 42)) = 10 FROM generate_series(0, 9) i;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT count(DISTINCT pgbench.permute(i, 100, 12345)) = 100 FROM generate_series(0, 99) i;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Test setseed and reproducibility
+SELECT pgbench.setseed(0.5);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100) AS r_unif,
+       pgbench.random_gaussian(1, 100, 2.5) AS r_gauss,
+       pgbench.random_exponential(1, 100, 3.0) AS r_exp,
+       pgbench.random_zipfian(1, 100, 1.5) AS r_zipf,
+       pgbench.random_poisson(50.0) AS r_poiss;
+ r_unif | r_gauss | r_exp | r_zipf | r_poiss 
+--------+---------+-------+--------+---------
+     17 |      60 |    61 |     50 |      36
+(1 row)
+
+-- Reset seed and verify exact same values
+SELECT pgbench.setseed(0.5);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100) AS r_unif,
+       pgbench.random_gaussian(1, 100, 2.5) AS r_gauss,
+       pgbench.random_exponential(1, 100, 3.0) AS r_exp,
+       pgbench.random_zipfian(1, 100, 1.5) AS r_zipf,
+       pgbench.random_poisson(50.0) AS r_poiss;
+ r_unif | r_gauss | r_exp | r_zipf | r_poiss 
+--------+---------+-------+--------+---------
+     17 |      60 |    61 |     50 |      36
+(1 row)
+
+-- Test bigint setseed
+SELECT pgbench.setseed(123456789::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     41
+(1 row)
+
+SELECT pgbench.setseed(123456789::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     41
+(1 row)
+
+-- Test integer setseed
+SELECT pgbench.setseed(42);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     53
+(1 row)
+
+SELECT pgbench.setseed(42);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     53
+(1 row)
+
+-- Test TPC-C NURand, c_last, random strings, and date functions
+SELECT pgbench.setseed(42::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.nurand(255, 0, 999) BETWEEN 0 AND 999 AS nurand_in_range,
+       pgbench.nurand(255, 0, 999, 100) BETWEEN 0 AND 999 AS nurand_c_in_range;
+ nurand_in_range | nurand_c_in_range 
+-----------------+-------------------
+ t               | t
+(1 row)
+
+SELECT pgbench.c_last(0), pgbench.c_last(48), pgbench.c_last(999);
+  c_last   |    c_last    |    c_last    
+-----------+--------------+--------------
+ BARBARBAR | BARPRESATION | EINGEINGEING
+(1 row)
+
+SELECT length(pgbench.random_astring(8, 8)) = 8 AS astring_len_ok,
+       pgbench.random_nstring(6, 6) ~ '^[0-9]{6}$' AS nstring_digits_ok,
+       octet_length(pgbench.random_bytea(16, 32)) BETWEEN 16 AND 32 AS bytea_len_ok;
+ astring_len_ok | nstring_digits_ok | bytea_len_ok 
+----------------+-------------------+--------------
+ t              | t                 | t
+(1 row)
+
+SELECT pgbench.date_add('1998-12-01', -90, 'day') AS q1_date,
+       pgbench.int_to_date('1998-12-01', -90, 'day') AS q1_int_to_date,
+       pgbench.int_to_date('1992-01-01', 0, 10000, '7 years') AS win_start,
+       pgbench.int_to_date('1992-01-01', 10000, 10000, '7 years') AS win_end,
+       pgbench.to_timestamp('2026-02-28 14:30:00') AS ts_val;
+  q1_date   | q1_int_to_date | win_start  |  win_end   |       ts_val        
+------------+----------------+------------+------------+---------------------
+ 1998-09-02 | 1998-09-02     | 1992-01-01 | 1999-01-01 | 2026-02-28 14:30:00
+(1 row)
+
+SELECT pgbench.format_string('ORD_%04d_%s_%.2f%%', 42, 'ABC', 12.345) AS fmt_str;
+       fmt_str       
+---------------------
+ ORD_0042_ABC_12.35%
+(1 row)
+
+SELECT pgbench.array_generate(4, 7) AS const_arr,
+       cardinality(pgbench.array_generate(5, 1, 100)) = 5 AS rand_arr_len_ok;
+ const_arr | rand_arr_len_ok 
+-----------+-----------------
+ {7,7,7,7} | t
+(1 row)
+
+-- Test Multi-Modal Vector, Sparse Vector, and Graph Edge Generators
+SELECT pgbench.setseed(42::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT round(pgbench.vector_distance(pgbench.random_vector(4, -1.0, 1.0, true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS rand_vec_norm_ok,
+       round(pgbench.vector_distance(pgbench.random_vector_gaussian(4, 1.0, true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS gauss_vec_norm_ok,
+       round(pgbench.vector_distance(pgbench.random_vector(4, 'gaussian', true), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS dist_vec_norm_ok,
+       round(pgbench.vector_distance(pgbench.random_unit_vector(4), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS unit_vec_norm_ok;
+ rand_vec_norm_ok | gauss_vec_norm_ok | dist_vec_norm_ok | unit_vec_norm_ok 
+------------------+-------------------+------------------+------------------
+ t                | t                 | t                | t
+(1 row)
+
+SELECT pgbench.clustered_vector(4, 5, 0.0, 42, 2) = pgbench.clustered_vector(4, 5, 0.0, 42, 2) AS centroid_deterministic,
+       round(pgbench.vector_distance(pgbench.clustered_vector(4, 5, 0.0, 42, 2), '[0,0,0,0]', 'l2')::numeric, 5) = 1.00000 AS centroid_unit_norm;
+ centroid_deterministic | centroid_unit_norm 
+------------------------+--------------------
+ t                      | t
+(1 row)
+
+SELECT round(pgbench.vector_distance(
+           pgbench.planted_vector(8, 100, 0.0, 42),
+           pgbench.planted_vector(8, 100, 0.25, 42),
+           'l2')::numeric, 5) = 0.25000 AS planted_delta_exact;
+ planted_delta_exact 
+---------------------
+ t
+(1 row)
+
+SELECT pgbench.random_sparse_vector(100, 3, 0.5, 0.5) ~ '^\{([0-9]+:0\.5(,)?){1,3}\}/100$' AS sparse_fmt_ok,
+       pgbench.random_sparse_vector(5000, 300, 0.5, 0.5) ~ '^\{([0-9]+:0\.5,){250}([0-9]+:0\.5,){49}[0-9]+:0\.5\}/5000$' AS sparse_large_nnz_ok;
+ sparse_fmt_ok | sparse_large_nnz_ok 
+---------------+---------------------
+ t             | t
+(1 row)
+
+SELECT cardinality(pgbench.rmat_edge(10, 0.57, 0.19, 0.19, 42)) = 2 AS rmat_len_ok,
+       (pgbench.rmat_edge(10))[1] BETWEEN 0 AND 1023 AS rmat_src_in_range,
+       (pgbench.rmat_edge(10))[2] BETWEEN 0 AND 1023 AS rmat_dst_in_range;
+ rmat_len_ok | rmat_src_in_range | rmat_dst_in_range 
+-------------+-------------------+-------------------
+ t           | t                 | t
+(1 row)
+
+SELECT pgbench.vector_distance('[3,4,0]', '[0,0,0]', 'l2') AS dist_l2,
+       pgbench.vector_distance('[1,0,0]', '[0,1,0]', 'cosine') AS dist_cosine,
+       pgbench.vector_distance('[1,2,3]', '[4,5,6]', 'ip') AS dist_ip;
+ dist_l2 | dist_cosine | dist_ip 
+---------+-------------+---------
+       5 |           1 |     -32
+(1 row)
+
+-- Test LDBC correlated edge and flashmob timestamp generators
+SELECT pgbench.setseed(42::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) BETWEEN 0 AND 99 AS corr_in_range,
+       (pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) % 5) = (10 % 5) AS corr_homophily_exact,
+       pgbench.ldbc_correlated_edge(10, 100, 5, 1.0, 42) <> 10 AS corr_no_self_loop;
+ corr_in_range | corr_homophily_exact | corr_no_self_loop 
+---------------+----------------------+-------------------
+ t             | t                    | t
+(1 row)
+
+SELECT pgbench.ldbc_flashmob_ts(1000000, 500000, 4, 0.8, 42) BETWEEN 1000000 AND 1500000 AS flashmob_in_range,
+       pgbench.ldbc_flashmob_ts(1000000, 500000, 0, 0.0, 42) BETWEEN 1000000 AND 1500000 AS flashmob_unif_in_range;
+ flashmob_in_range | flashmob_unif_in_range 
+-------------------+------------------------
+ t                 | t
+(1 row)
+
+-- Error cases: parameter boundaries
+SELECT pgbench.random(10, 5);
+ERROR:  empty range given to random: lower bound 10 is greater than upper bound 5
+SELECT pgbench.random_gaussian(1, 10, 1.5);
+ERROR:  gaussian parameter must be at least 2.000000 (not 1.500000)
+SELECT pgbench.random_exponential(1, 10, 0.0);
+ERROR:  exponential parameter must be greater than zero (not 0.000000)
+SELECT pgbench.random_zipfian(1, 10, 1.0);
+ERROR:  zipfian parameter must be in range [1.001, 1000] (not 1.000000)
+SELECT pgbench.random_zipfian(1, 10, 1001.0);
+ERROR:  zipfian parameter must be in range [1.001, 1000] (not 1001.000000)
+SELECT pgbench.random_poisson(0.0);
+ERROR:  poisson center parameter must be greater than zero (not 0.000000)
+SELECT pgbench.permute(5, 0, 42);
+ERROR:  permute size parameter must be greater than zero
+SELECT pgbench.setseed(1.5);
+ERROR:  setseed parameter 1.5 is out of allowed range [-1,1]
+SELECT pgbench.c_last(1000);
+ERROR:  c_last parameter must be in range [0, 999] (not 1000)
+SELECT pgbench.to_timestamp('2026-02-30');
+ERROR:  invalid timestamp string "2026-02-30"
+SELECT pgbench.random_vector(0);
+ERROR:  vector dimension 0 out of range [1, 65536]
+SELECT pgbench.vector_distance('[1,2]', '[1,2,3]', 'l2');
+ERROR:  different vector dimensions 2 and 3
+SELECT pgbench.vector_distance('[1,2]', '[1,2]', 'hamming');
+ERROR:  invalid vector distance metric "hamming" (expected "l2", "cosine", or "ip")
+SELECT pgbench.ldbc_correlated_edge(0, 1, 1, 0.5, 42);
+ERROR:  invalid ldbc_correlated_edge parameters (num_vertices=1, num_communities=1, homophily_prob=0.5)
+SELECT pgbench.ldbc_correlated_edge(0, 100, 5, 1.5, 42);
+ERROR:  invalid ldbc_correlated_edge parameters (num_vertices=100, num_communities=5, homophily_prob=1.5)
+SELECT pgbench.ldbc_flashmob_ts(1000, 0, 4, 0.5, 42);
+ERROR:  invalid ldbc_flashmob_ts parameters (span_us=0, num_spikes=4, spike_prob=0.5)
+SELECT pgbench.ldbc_flashmob_ts(1000, 1000, 4, -0.1, 42);
+ERROR:  invalid ldbc_flashmob_ts parameters (span_us=1000, num_spikes=4, spike_prob=-0.1)
+DROP EXTENSION pgbench;

@@ -1,0 +1,37 @@
+{
+  "suite": "pgbench-graph-sql-ud-lsqb",
+  "description": "LDBC-inspired Labelled Subgraph Query Benchmark (LSQB Q1-Q9) using SQL with UNION DISTINCT ON",
+  "scale": 1,
+  "no_vacuum": true,
+  "clients": 4,
+  "threads": 4,
+  "transactions": 5,
+  "init_steps": [
+    {
+      "name": "schema",
+      "file": "pgbench_graph_sql_ud_schema.sql"
+    },
+    {
+      "name": "data",
+      "file": "pgbench_graph_sql_ud_init.sql",
+      "clients": 4,
+      "threads": 4,
+      "variables": {
+        "num_workers": 4
+      }
+    },
+    {
+      "name": "constraints",
+      "file": "pgbench_graph_sql_ud_constraints.sql"
+    }
+  ],
+  "scripts": [
+    {
+      "file": "pgbench_ldbc_sql_ud_lsqb.sql",
+      "weight": 1
+    }
+  ],
+  "sla": [
+    "validation_failures<=0"
+  ]
+}

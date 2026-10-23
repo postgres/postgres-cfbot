@@ -1,0 +1,580 @@
+<!-- doc/src/sgml/pgbench-ext.sgml -->
+
+<sect1 id="pgbench-ext" xreflabel="pgbench (extension)">
+ <title>pgbench &mdash; benchmark random distributions, hashing, and permutation functions</title>
+
+ <indexterm zone="pgbench-ext">
+  <primary>pgbench</primary>
+  <secondary>extension</secondary>
+ </indexterm>
+
+ <para>
+  The <filename>pgbench</filename> module provides SQL-callable functions
+  implementing the statistical random distribution generators, domain
+  permutations, and 64-bit hashing routines from the
+  <xref linkend="pgbench"/> benchmarking tool.
+ </para>
+
+ <para>
+  These functions are installed into the <literal>pgbench</literal> schema and
+  enable reproducible server-side synthetic data generation, procedural
+  workload simulation, and client/server algorithmic parity in custom test
+  harnesses.
+ </para>
+
+ <para>
+  This module is considered <quote>trusted</quote>, that is, it can be
+  installed by non-superusers who have <literal>CREATE</literal> privilege
+  on the current database.
+ </para>
+
+ <sect2 id="pgbench-ext-funcs">
+  <title>Functions</title>
+
+  <para>
+   All functions provided by this extension are installed in the
+   <literal>pgbench</literal> schema.
+  </para>
+
+  <variablelist>
+   <varlistentry id="pgbench-ext-funcs-setseed">
+    <term>
+     <function>pgbench.setseed(seed double precision) returns void</function>
+     <indexterm>
+      <primary>setseed</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.setseed(seed bigint) returns void</function>
+    </term>
+    <term>
+     <function>pgbench.setseed(seed integer) returns void</function>
+    </term>
+    <listitem>
+     <para>
+      Sets the seed for the backend's internal pseudorandom number generator used
+      by the <literal>pgbench</literal> random functions.  When passed a
+      <type>double precision</type> value, it must be in the range
+      <literal>[-1.0, 1.0]</literal>.  When passed a <type>bigint</type> or
+      <type>integer</type> value, it initializes the full 64-bit state directly.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random">
+    <term>
+     <function>pgbench.random(min bigint, max bigint) returns bigint</function>
+     <indexterm>
+      <primary>random</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a uniformly-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-gaussian">
+    <term>
+     <function>pgbench.random_gaussian(min bigint, max bigint, parameter double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_gaussian</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a Gaussian-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+      The <parameter>parameter</parameter> defines how concentrated the values
+      are toward the center of the range and must be at least <literal>2.0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-exponential">
+    <term>
+     <function>pgbench.random_exponential(min bigint, max bigint, parameter double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_exponential</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates an exponentially-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+      The <parameter>parameter</parameter> controls the distribution density and
+      must be greater than <literal>0.0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-zipfian">
+    <term>
+     <function>pgbench.random_zipfian(min bigint, max bigint, parameter double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_zipfian</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a Zipfian-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+      The <parameter>parameter</parameter> (Zipfian skew factor <literal>s</literal>)
+      must be in the range <literal>[1.001, 1000.0]</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-poisson">
+    <term>
+     <function>pgbench.random_poisson(center double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_poisson</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a Poisson-distributed random integer centered on
+      <parameter>center</parameter>, which must be greater than <literal>0.0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-hash-murmur2">
+    <term>
+     <function>pgbench.hash_murmur2(val bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>hash_murmur2</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Computes the 64-bit Austin Appleby MurmurHash2 of <parameter>val</parameter>
+      using optional <parameter>seed</parameter> (default is <literal>0</literal>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-hash-fnv1a">
+    <term>
+     <function>pgbench.hash_fnv1a(val bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>hash_fnv1a</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Computes the 64-bit Fowler&ndash;Noll&ndash;Vo 1a hash of
+      <parameter>val</parameter> using optional <parameter>seed</parameter>
+      (default is <literal>0</literal>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-hash">
+    <term>
+     <function>pgbench.hash(val bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>hash</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      An alias for <function>pgbench.hash_murmur2</function>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-permute">
+    <term>
+     <function>pgbench.permute(val bigint, size bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>permute</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Permutes <parameter>val</parameter> into the range
+      <literal>[0, size)</literal> using a multi-round Feistel-style bijective
+      permutation seeded with <parameter>seed</parameter> (default is
+      <literal>0</literal>).  <parameter>size</parameter> must be greater than
+      <literal>0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-nurand">
+    <term>
+     <function>pgbench.nurand(a bigint, min bigint, max bigint [, c bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>nurand</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a TPC-C non-uniform random integer in
+      <literal>[min, max]</literal> using parameter <parameter>a</parameter>
+      and optional constant <parameter>c</parameter>.  If <parameter>c</parameter>
+      is omitted, a session-sticky random constant in <literal>[0, a]</literal>
+      is selected per <parameter>a</parameter> domain.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-c-last">
+    <term>
+     <function>pgbench.c_last(val bigint) returns text</function>
+     <indexterm>
+      <primary>c_last</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a TPC-C customer last name by concatenating three syllables
+      corresponding to the digits of <parameter>val</parameter> in the range
+      <literal>[0, 999]</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-astring">
+    <term>
+     <function>pgbench.random_astring(min_len bigint, max_len bigint) returns text</function>
+     <indexterm>
+      <primary>random_astring</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.random_nstring(min_len bigint, max_len bigint) returns text</function>
+     <indexterm>
+      <primary>random_nstring</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a random ASCII alphanumeric (<function>random_astring</function>)
+      or numeric digit (<function>random_nstring</function>) string of length
+      uniformly chosen in <literal>[min_len, max_len]</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-format-string">
+    <term>
+     <function>pgbench.format_string(fmt text [, args "any" ... ]) returns text</function>
+     <indexterm>
+      <primary>format_string</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Formats arguments according to a printf-style format string supporting
+      <literal>%d</literal>, <literal>%i</literal>, <literal>%u</literal>,
+      <literal>%x</literal>, <literal>%X</literal>, <literal>%o</literal>,
+      <literal>%f</literal>, <literal>%e</literal>, <literal>%g</literal>,
+      <literal>%s</literal>, and <literal>%%</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-date-add">
+    <term>
+     <function>pgbench.to_timestamp(str text) returns text</function>
+     <indexterm>
+      <primary>to_timestamp</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.date_add(base_date text, offset_val bigint, unit text) returns text</function>
+     <indexterm>
+      <primary>date_add</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.int_to_date(base_date text, val bigint, unit text) returns text</function>
+     <indexterm>
+      <primary>int_to_date</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.int_to_date(base_date text, val bigint, max_val bigint, interval_str text) returns text</function>
+    </term>
+    <listitem>
+     <para>
+      Parses ISO-8601 date/timestamp strings and performs calendar/time offset
+      arithmetic (<literal>years</literal>, <literal>months</literal>,
+      <literal>days</literal>, <literal>hours</literal>, <literal>minutes</literal>,
+      <literal>seconds</literal>) or linear integer-to-date window scaling.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-array-generate">
+    <term>
+     <function>pgbench.array_generate(len bigint, val bigint) returns bigint[]</function>
+     <indexterm>
+      <primary>array_generate</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.array_generate(len bigint, min_val bigint, max_val bigint) returns bigint[]</function>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>bigint[]</type> array of <parameter>len</parameter>
+      elements filled either with a constant value <parameter>val</parameter>
+      or with uniform random integers in <literal>[min_val, max_val]</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-vector">
+    <term>
+     <function>pgbench.random_vector(dim integer [, min_val float8, max_val float8 [, normalize boolean]]) returns text</function>
+     <function>pgbench.random_vector(dim integer, dist text [, normalize boolean]) returns text</function>
+     <indexterm>
+      <primary>random_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> vector of <parameter>dim</parameter>
+      dimensions (in <literal>[1, 65536]</literal>) formatted as a
+      <literal>'[f1,f2,...]'</literal> string literal compatible with
+      <literal>pgvector</literal>.  In the numeric-bound form, coordinates are
+      drawn uniformly from <literal>[min_val, max_val]</literal> (default
+      <literal>[-1, 1]</literal>).  In the named-distribution form,
+      <parameter>dist</parameter> may be <literal>'gaussian'</literal>,
+      <literal>'normal'</literal>, <literal>'sphere'</literal>, or
+      <literal>'uniform'</literal>.  When <parameter>normalize</parameter> is
+      <literal>true</literal>, the generated vector is L2-normalized to unit
+      length.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-vector-gaussian">
+    <term>
+     <function>pgbench.random_vector_gaussian(dim integer [, sigma float8 [, normalize boolean]]) returns text</function>
+     <function>pgbench.random_unit_vector(dim integer [, sigma float8 [, normalize boolean]]) returns text</function>
+     <indexterm>
+      <primary>random_vector_gaussian</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> vector of <parameter>dim</parameter>
+      dimensions with coordinates drawn from <literal>N(0, sigma^2)</literal>
+      via Box-Muller transform, optionally L2-normalized to the unit
+      hypersphere (default <literal>true</literal>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-clustered-vector">
+    <term>
+     <function>pgbench.clustered_vector(dim integer, num_clusters integer [, sigma float8 [, seed bigint [, cluster_id integer]]]) returns text</function>
+     <indexterm>
+      <primary>clustered_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> vector of <parameter>dim</parameter>
+      dimensions around one of <parameter>num_clusters</parameter>
+      deterministic unit-sphere centroids (derived from
+      <parameter>seed</parameter>) perturbed by isotropic Gaussian noise
+      <literal>N(0, sigma^2)</literal> and L2-normalized.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-planted-vector">
+    <term>
+     <function>pgbench.planted_vector(dim integer, target_id bigint [, delta float8 [, seed bigint]]) returns text</function>
+     <indexterm>
+      <primary>planted_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a <type>float4</type> unit vector at exact Euclidean (chord)
+      distance <parameter>delta</parameter> (in <literal>[0, 2]</literal>)
+      from the deterministic unit-sphere anchor vector for
+      <parameter>target_id</parameter>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-sparse-vector">
+    <term>
+     <function>pgbench.random_sparse_vector(dim integer, nnz integer [, min_val float8, max_val float8]) returns text</function>
+     <indexterm>
+      <primary>random_sparse_vector</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a sparse vector formatted as a <literal>pgvector</literal>
+      <type>sparsevec</type> literal
+      <literal>'{i1:v1,i2:v2,...}/dim'</literal> with <parameter>nnz</parameter>
+      distinct 1-based coordinates sampled without replacement.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-rmat-edge">
+    <term>
+     <function>pgbench.rmat_edge(scale integer [, a float8, b float8, c float8 [, seed bigint]]) returns bigint[]</function>
+     <indexterm>
+      <primary>rmat_edge</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a directed power-law graph edge <literal>ARRAY[src, dst]</literal>
+      over <literal>2^scale</literal> vertices using the Recursive Matrix
+      (R-MAT) Kronecker model with quadrant probabilities
+      <literal>(a, b, c, 1 - a - b - c)</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-vector-distance">
+    <term>
+     <function>pgbench.vector_distance(v1 text, v2 text [, metric text]) returns float8</function>
+     <indexterm>
+      <primary>vector_distance</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Computes the distance between two <literal>'[f1,f2,...]'</literal> vector
+      literals using <literal>'l2'</literal> (Euclidean distance, default),
+      <literal>'cosine'</literal> (cosine distance), or <literal>'ip'</literal>
+      (negative inner product).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-bytea">
+    <term>
+     <function>pgbench.random_bytea(min_len bigint, max_len bigint) returns bytea</function>
+     <indexterm>
+      <primary>random_bytea</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a random binary payload (<type>bytea</type>) of length
+      uniformly chosen in <literal>[min_len, max_len]</literal> (up to 16 MB).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-ldbc-correlated-edge">
+    <term>
+     <function>pgbench.ldbc_correlated_edge(src_id bigint, num_vertices bigint, num_communities bigint, homophily_prob double precision [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>ldbc_correlated_edge</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates an LDBC-style attribute-correlated target vertex ID in
+      <literal>[1, num_vertices]</literal> for source vertex
+      <parameter>src_id</parameter>.  With probability
+      <parameter>homophily_prob</parameter>, selects a Zipfian-skewed vertex
+      within the same community modulo <parameter>num_communities</parameter>;
+      otherwise selects a global power-law degree hub permuted by
+      <parameter>seed</parameter>.  Never returns a self-loop.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-ldbc-flashmob-ts">
+    <term>
+     <function>pgbench.ldbc_flashmob_ts(base_ts_us bigint, span_us bigint, num_spikes bigint, spike_prob double precision [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>ldbc_flashmob_ts</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates an LDBC-style flashmob timestamp (in microseconds) in
+      <literal>[base_ts_us, base_ts_us + span_us - 1]</literal>.  With
+      probability <parameter>spike_prob</parameter>, samples from one of
+      <parameter>num_spikes</parameter> Zipfian-weighted burst centers with a
+      heavy-tailed exponential offset; otherwise samples uniformly across the
+      interval.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgbench-ext-examples">
+  <title>Examples</title>
+
+  <para>
+   Generate a reproducible synthetic customer workload directly within SQL:
+  </para>
+
+<programlisting>
+CREATE EXTENSION pgbench;
+
+-- Seed PRNG for reproducible test run
+SELECT pgbench.setseed(42::bigint);
+
+-- Generate non-uniform account IDs following a Zipfian distribution
+SELECT pgbench.random_zipfian(1, 100000, 1.2) AS aid
+FROM generate_series(1, 10);
+
+-- Generate a unique permutation of customer IDs from 0 to 999
+SELECT pgbench.permute(i, 1000, 12345) AS permuted_id
+FROM generate_series(0, 999) i;
+
+-- Generate TPC-C customer last names, alphanumeric strings, vectors, and bytea
+SELECT pgbench.c_last(pgbench.nurand(255, 0, 999, 42)) AS c_last,
+       pgbench.random_astring(10, 20) AS c_street,
+       pgbench.random_nstring(9, 9) AS c_zip,
+       pgbench.format_string('Brand#%d%d', 1, 5) AS brand,
+       pgbench.date_add('1998-12-01', -90, 'days') AS cutoff_date,
+       pgbench.array_generate(5, 1, 100) AS item_ids,
+       pgbench.random_vector(8, 'gaussian', true) AS embedding,
+       octet_length(pgbench.random_bytea(16, 32)) AS payload_bytes;
+</programlisting>
+ </sect2>
+
+</sect1>

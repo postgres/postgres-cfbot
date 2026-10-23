@@ -12,6 +12,11 @@
 #define PGBENCH_H
 
 #include "fe_utils/psqlscan.h"
+#include "common/pg_prng.h"
+#include "fe_utils/conditional.h"
+#include "libpq-fe.h"
+#include "stats.h"
+#include "variable.h"
 
 /*
  * This file is included outside exprscan.l, in places where we can't see
@@ -28,30 +33,6 @@ typedef void *yyscan_t;
  */
 union YYSTYPE;
 
-/*
- * Variable types used in parser.
- */
-typedef enum
-{
-	PGBT_NO_VALUE = 0,
-	PGBT_NULL,
-	PGBT_INT,
-	PGBT_DOUBLE,
-	PGBT_BOOLEAN,
-	/* add other types here */
-} PgBenchValueType;
-
-typedef struct
-{
-	PgBenchValueType type;
-	union
-	{
-		int64		ival;
-		double		dval;
-		bool		bval;
-		/* add other types here */
-	}			u;
-} PgBenchValue;
 
 /* Types of expression nodes */
 typedef enum PgBenchExprType
@@ -101,6 +82,43 @@ typedef enum PgBenchFunction
 	PGBENCH_HASH_FNV1A,
 	PGBENCH_HASH_MURMUR2,
 	PGBENCH_PERMUTE,
+	PGBENCH_SUBSCRIPT,
+	PGBENCH_NURAND,
+	PGBENCH_C_LAST,
+	PGBENCH_RANDOM_ASTRING,
+	PGBENCH_RANDOM_NSTRING,
+	PGBENCH_RANDOM_BYTEA,
+	PGBENCH_FORMAT_STRING,
+	PGBENCH_TO_TIMESTAMP,
+	PGBENCH_DATE_ADD,
+	PGBENCH_INT_TO_DATE,
+	PGBENCH_ARRAY,
+	PGBENCH_ARRAY_GENERATE,
+	PGBENCH_VECTOR,
+	PGBENCH_VECTOR_DIMS,
+	PGBENCH_VECTOR_NORM,
+	PGBENCH_VECTOR_DISTANCE,
+	PGBENCH_RANDOM_VECTOR,
+	PGBENCH_RANDOM_VECTOR_GAUSSIAN,
+	PGBENCH_CLUSTERED_VECTOR,
+	PGBENCH_PLANTED_VECTOR,
+	PGBENCH_RANDOM_SPARSE_VECTOR,
+	PGBENCH_RMAT_EDGE,
+	PGBENCH_DATASET_COUNT,
+	PGBENCH_DATASET_GET,
+	PGBENCH_DATASET_NEXT_ID,
+	PGBENCH_GET_WATERMARK,
+	PGBENCH_SET_WATERMARK,
+	PGBENCH_ADVANCE_WATERMARK,
+	PGBENCH_RESERVOIR_PUSH,
+	PGBENCH_RESERVOIR_SAMPLE,
+	PGBENCH_RESERVOIR_COUNT,
+	PGBENCH_RECALL_AT_K,
+	PGBENCH_NDCG_AT_K,
+	PGBENCH_LDBC_CORRELATED_EDGE,
+	PGBENCH_LDBC_FLASHMOB_TS,
+	PGBENCH_BEGIN_DEPENDENT_WRITE,
+	PGBENCH_END_DEPENDENT_WRITE,
 } PgBenchFunction;
 
 typedef struct PgBenchExpr PgBenchExpr;
@@ -138,6 +156,273 @@ struct PgBenchExprList
 	PgBenchExprLink *tail;
 };
 
+
+/*
+ * Connection state machine states.
+ */
+typedef enum
+{
+	/*
+	 * The client must first choose a script to execute.  Once chosen, it can
+	 * either be throttled (state CSTATE_PREPARE_THROTTLE under --rate), start
+	 * right away (state CSTATE_START_TX) or not start at all if the timer was
+	 * exceeded (state CSTATE_FINISHED).
+	 */
+	CSTATE_CHOOSE_SCRIPT,
+
+	/*
+	 * CSTATE_START_TX performs start-of-transaction processing.  Establishes
+	 * a new connection for the transaction in --connect mode, records the
+	 * transaction start time, and proceed to the first command.
+	 *
+	 * Note: once a script is started, it will either error or run till its
+	 * end, where it may be interrupted. It is not interrupted while running,
+	 * so pgbench --time is to be understood as tx are allowed to start in
+	 * that time, and will finish when their work is completed.
+	 */
+	CSTATE_START_TX,
+
+	/*
+	 * In CSTATE_PREPARE_THROTTLE state, we calculate when to begin the next
+	 * transaction, and advance to CSTATE_THROTTLE.  CSTATE_THROTTLE state
+	 * sleeps until that moment, then advances to CSTATE_START_TX, or
+	 * CSTATE_FINISHED if the next transaction would start beyond the end of
+	 * the run.
+	 */
+	CSTATE_PREPARE_THROTTLE,
+	CSTATE_THROTTLE,
+
+	/*
+	 * We loop through these states, to process each command in the script:
+	 *
+	 * CSTATE_START_COMMAND starts the execution of a command.  On a SQL
+	 * command, the command is sent to the server, and we move to
+	 * CSTATE_WAIT_RESULT state unless in pipeline mode. On a \sleep
+	 * meta-command, the timer is set, and we enter the CSTATE_SLEEP state to
+	 * wait for it to expire. Other meta-commands are executed immediately. If
+	 * the command about to start is actually beyond the end of the script,
+	 * advance to CSTATE_END_TX.
+	 *
+	 * CSTATE_WAIT_RESULT waits until we get a result set back from the server
+	 * for the current command.
+	 *
+	 * CSTATE_SLEEP waits until the end of \sleep.
+	 *
+	 * CSTATE_END_COMMAND records the end-of-command timestamp, increments the
+	 * command counter, and loops back to CSTATE_START_COMMAND state.
+	 *
+	 * CSTATE_SKIP_COMMAND is used by conditional branches which are not
+	 * executed. It quickly skip commands that do not need any evaluation.
+	 * This state can move forward several commands, till there is something
+	 * to do or the end of the script.
+	 */
+	CSTATE_START_COMMAND,
+	CSTATE_WAIT_RESULT,
+	CSTATE_SLEEP,
+	CSTATE_WAIT_SYNC,
+	CSTATE_WAIT_PHASE_BARRIER,
+	CSTATE_IDLE,
+	CSTATE_CONNECTING,
+	CSTATE_DISCONNECTING,
+	CSTATE_END_COMMAND,
+	CSTATE_SKIP_COMMAND,
+
+
+	/*
+	 * States for failed commands.
+	 *
+	 * If the SQL/meta command fails, in CSTATE_ERROR clean up after an error:
+	 * (1) clear the conditional stack; (2) if we have an unterminated
+	 * (possibly failed) transaction block, send the rollback command to the
+	 * server and wait for the result in CSTATE_WAIT_ROLLBACK_RESULT.  If
+	 * something goes wrong with rolling back, go to CSTATE_ABORTED.
+	 *
+	 * But if everything is ok we are ready for future transactions: if this
+	 * is a serialization or deadlock error and we can re-execute the
+	 * transaction from the very beginning, go to CSTATE_RETRY; otherwise go
+	 * to CSTATE_FAILURE.
+	 *
+	 * In CSTATE_RETRY report an error, set the same parameters for the
+	 * transaction execution as in the previous tries and process the first
+	 * transaction command in CSTATE_START_COMMAND.
+	 *
+	 * In CSTATE_FAILURE report a failure, set the parameters for the
+	 * transaction execution as they were before the first run of this
+	 * transaction (except for a random state) and go to CSTATE_END_TX to
+	 * complete this transaction.
+	 */
+	CSTATE_ERROR,
+	CSTATE_WAIT_ROLLBACK_RESULT,
+	CSTATE_RETRY,
+	CSTATE_FAILURE,
+
+	/*
+	 * CSTATE_END_TX performs end-of-transaction processing.  It calculates
+	 * latency, and logs the transaction.  In --connect mode, it closes the
+	 * current connection.
+	 *
+	 * Then either starts over in CSTATE_CHOOSE_SCRIPT, or enters
+	 * CSTATE_FINISHED if we have no more work to do.
+	 */
+	CSTATE_END_TX,
+
+	/*
+	 * Final states.  CSTATE_ABORTED means that the script execution was
+	 * aborted because a command failed, CSTATE_FINISHED means success.
+	 */
+	CSTATE_ABORTED,
+	CSTATE_FINISHED,
+} ConnectionStateEnum;
+
+#define MAX_LOOP_DEPTH	32
+#define MAX_TRY_DEPTH	32
+#define MAX_CALL_DEPTH	8
+
+typedef struct ForLoopState
+{
+	int			for_cmd;		/* command index of \for */
+	char	   *varname;		/* loop variable name */
+	int64		current;		/* current loop counter value */
+	int64		end;			/* loop bound value */
+	int64		step;			/* loop step value */
+} ForLoopState;
+
+typedef struct TryState
+{
+	int			try_cmd;		/* command index of \try */
+	int			catch_cmd;		/* command index of \catch, or endtry_cmd */
+	int			endtry_cmd;		/* command index of \endtry */
+	const char *sqlstate_pat;	/* expected SQLSTATE pattern, or NULL */
+	int			cstack_depth;	/* conditional stack depth at \try entry */
+	int			loop_depth;		/* loop stack depth at \try entry */
+	bool		in_catch;		/* true once execution enters \catch */
+} TryState;
+
+typedef struct CallFrame
+{
+	int			script_idx;		/* caller script index in sql_script[] */
+	int			return_cmd;		/* command index to resume in caller */
+	ConditionalStack cstack;	/* caller conditional stack */
+	int			loop_depth;
+	ForLoopState loop_stack[MAX_LOOP_DEPTH];
+	int			try_depth;
+	TryState	try_stack[MAX_TRY_DEPTH];
+	pg_time_usec_t call_begin;
+} CallFrame;
+
+/*
+ * Connection state.
+ */
+typedef struct
+{
+	PGconn	   *con;			/* connection handle to DB */
+	int			id;				/* client No. */
+	ConnectionStateEnum state;	/* state machine's current state. */
+	ConditionalStack cstack;	/* enclosing conditionals state */
+
+	/*
+	 * Separate randomness for each client. This is used for random functions
+	 * PGBENCH_RANDOM_* during the execution of the script.
+	 */
+	pg_prng_state cs_func_rs;
+
+	int			use_file;		/* index in sql_script for this client */
+	int			group_id;		/* client group index, or -1 */
+	int			stream_id;		/* 0-based stream index within group */
+	int64		seq_counter;	/* sequential script counter */
+	int			command;		/* command number in script */
+	int			next_command;	/* explicit jump target, or -1 */
+	int			num_syncs;		/* number of ongoing sync commands */
+
+	/* sub-script call stack (\call) */
+	CallFrame	call_stack[MAX_CALL_DEPTH];
+	int			call_depth;
+
+	/* loop and exception handling state */
+	ForLoopState loop_stack[MAX_LOOP_DEPTH];
+	int			loop_depth;
+	TryState	try_stack[MAX_TRY_DEPTH];
+	int			try_depth;
+	bool		expect_error;
+	const char *expect_sqlstate;
+	bool		error_caught;
+	int			caught_jump_target;
+	int			caught_cstack_depth;
+	int			caught_loop_depth;
+	const char *last_status;
+	char		last_sqlstate[6];
+	int64		last_nrows;
+
+	/* client variables */
+	Variables	variables;
+
+	/* various times about current transaction in microseconds */
+	pg_time_usec_t txn_scheduled;	/* scheduled start time of transaction */
+	pg_time_usec_t sleep_until; /* scheduled start time of next cmd */
+	pg_time_usec_t sleep_begin; /* start time of current sleep/keying/think */
+	int			sleep_type;		/* MetaCommand of active sleep */
+	pg_time_usec_t txn_keying_time; /* cumulated keying time in current tx */
+	pg_time_usec_t txn_think_time;	/* cumulated think time in current tx */
+	bool		has_keying_time;
+	bool		has_think_time;
+	pg_time_usec_t txn_begin;	/* used for measuring schedule lag times */
+	pg_time_usec_t stmt_begin;	/* used for measuring statement latencies */
+
+	/* Pillar 2: Event-time pacing and causal watermark synchronization */
+	pg_time_usec_t bench_start_us;	/* thread benchmark start timestamp */
+	pg_time_usec_t sync_scheduled_us;	/* target wall-clock time for \wait_until */
+	int64		sync_dep_watermark; /* required causal watermark */
+	int			sync_dep_channel;	/* causal watermark channel (0..63) */
+	bool		has_sync_dep;	/* true if waiting on sync_dep_watermark */
+	bool		has_scheduled_time; /* true if scheduled via \wait_until or replay */
+	bool		has_active_dep_write;	/* true if inside \begin_dependent_write */
+	int			active_dep_write_chan;	/* channel of active dependent write */
+	uint64		barrier_gen;	/* phase barrier generation waiting on */
+	bool		barrier_done_notified;	/* true if client completion notified to barrier */
+	uint64		dataset_cursors[64];	/* per-client partitioned dataset cursors */
+
+
+	/* Pillar 6: Non-blocking session connect polling state */
+	PostgresPollingStatusType connect_poll_mode;
+	pg_time_usec_t session_conn_start;
+	char	   *session_target_db;
+	char	   *session_target_user;
+
+	/* Pillar 7: Per-transaction quality / recall & validation samples */
+	double		txn_recalls[16];
+	char		txn_recall_names[16][32];
+	int			txn_recall_count;
+	int			txn_validation_passed;
+	int			txn_validation_failed;
+
+
+	/* whether client prepared each command of each script */
+	bool	  **prepared;
+
+	/*
+	 * For processing failures and repeating transactions with serialization
+	 * or deadlock errors:
+	 */
+	EStatus		estatus;		/* the error status of the current transaction
+								 * execution; this is ESTATUS_NO_ERROR if
+								 * there were no errors */
+	pg_prng_state random_state; /* random state */
+	uint32		tries;			/* how many times have we already tried the
+								 * current transaction? */
+
+	/* per client collected stats */
+	int64		cnt;			/* client transaction count, for -t; skipped
+								 * and failed transactions are also counted
+								 * here */
+
+	/* persistent per-client NURand C constants (TPC-C) */
+	bool		nurand_c_initialized;
+	int64		nurand_c_last;
+	int64		nurand_c_id;
+	int64		nurand_c_ol;
+	int64		nurand_c_other;
+} CState;
+
 extern int	expr_yyparse(PgBenchExpr **expr_parse_result_p, yyscan_t yyscanner);
 extern int	expr_yylex(union YYSTYPE *yylval_param, yyscan_t yyscanner);
 pg_noreturn extern void expr_yyerror(PgBenchExpr **expr_parse_result_p, yyscan_t yyscanner, const char *message);
@@ -157,7 +442,140 @@ pg_noreturn extern void syntax_error(const char *source, int lineno, const char 
 									 const char *command, const char *msg,
 									 const char *more, int column);
 
-extern bool strtoint64(const char *str, bool errorOK, int64 *result);
-extern bool strtodouble(const char *str, bool errorOK, double *dv);
+#ifdef _MSC_VER
+#include <intrin.h>
+#pragma intrinsic(_ReadWriteBarrier)
+#pragma intrinsic(_InterlockedCompareExchange64)
+#ifdef _WIN64
+#pragma intrinsic(_InterlockedExchange64)
+#pragma intrinsic(_InterlockedExchangeAdd64)
+#endif
+
+#define __ATOMIC_RELAXED 0
+#define __ATOMIC_ACQUIRE 2
+#define __ATOMIC_RELEASE 3
+#define __ATOMIC_ACQ_REL 4
+#define __ATOMIC_SEQ_CST 5
+
+static inline int64
+pgbench_msvc_load_64(const volatile int64 *ptr)
+{
+#ifdef _WIN64
+	int64		val = *ptr;
+
+	_ReadWriteBarrier();
+	return val;
+#else
+	return _InterlockedCompareExchange64((volatile __int64 *) ptr, 0, 0);
+#endif
+}
+
+static inline int32
+pgbench_msvc_load_32(const volatile int32 *ptr)
+{
+	int32		val = *ptr;
+
+	_ReadWriteBarrier();
+	return val;
+}
+
+static inline uint8
+pgbench_msvc_load_8(const volatile uint8 *ptr)
+{
+	uint8		val = *ptr;
+
+	_ReadWriteBarrier();
+	return val;
+}
+
+static inline void
+pgbench_msvc_store_64(volatile int64 *ptr, int64 val)
+{
+#ifdef _WIN64
+	_InterlockedExchange64((volatile __int64 *) ptr, (__int64) val);
+#else
+	__int64		old;
+
+	do
+	{
+		old = *ptr;
+	} while (_InterlockedCompareExchange64((volatile __int64 *) ptr, (__int64) val, old) != old);
+#endif
+}
+
+static inline void
+pgbench_msvc_store_32(volatile int32 *ptr, int32 val)
+{
+	InterlockedExchange((volatile LONG *) ptr, (LONG) val);
+}
+
+static inline uint64
+pgbench_msvc_fetch_add_64(volatile int64 *ptr, int64 val)
+{
+#ifdef _WIN64
+	return (uint64) _InterlockedExchangeAdd64((volatile __int64 *) ptr, (__int64) val);
+#else
+	__int64		old;
+
+	do
+	{
+		old = *ptr;
+	} while (_InterlockedCompareExchange64((volatile __int64 *) ptr, old + (__int64) val, old) != old);
+	return (uint64) old;
+#endif
+}
+
+static inline int32
+pgbench_msvc_fetch_add_32(volatile int32 *ptr, int32 val)
+{
+	return (int32) InterlockedExchangeAdd((volatile LONG *) ptr, (LONG) val);
+}
+
+static inline bool
+pgbench_msvc_cas_32(volatile int32 *ptr, int32 *expected, int32 desired)
+{
+	int32		old = (int32) InterlockedCompareExchange((volatile LONG *) ptr,
+														 (LONG) desired,
+														 (LONG) *expected);
+
+	if (old == *expected)
+		return true;
+	*expected = old;
+	return false;
+}
+
+#define __atomic_load_n(ptr, memorder) \
+	(sizeof(*(ptr)) == 8 ? pgbench_msvc_load_64((const volatile int64 *) (ptr)) : \
+	 sizeof(*(ptr)) == 4 ? pgbench_msvc_load_32((const volatile int32 *) (ptr)) : \
+	 pgbench_msvc_load_8((const volatile uint8 *) (ptr)))
+
+#define __atomic_store_n(ptr, val, memorder) \
+	do { \
+		if (sizeof(*(ptr)) == 8) \
+			pgbench_msvc_store_64((volatile int64 *) (ptr), (int64) (val)); \
+		else \
+			pgbench_msvc_store_32((volatile int32 *) (ptr), (int32) (val)); \
+	} while (0)
+
+#define __atomic_fetch_add(ptr, val, memorder) \
+	(sizeof(*(ptr)) == 8 ? \
+	 pgbench_msvc_fetch_add_64((volatile int64 *) (ptr), (int64) (val)) : \
+	 (uint64) pgbench_msvc_fetch_add_32((volatile int32 *) (ptr), (int32) (val)))
+
+#define __atomic_fetch_sub(ptr, val, memorder) \
+	(sizeof(*(ptr)) == 8 ? \
+	 pgbench_msvc_fetch_add_64((volatile int64 *) (ptr), -((int64) (val))) : \
+	 (uint64) pgbench_msvc_fetch_add_32((volatile int32 *) (ptr), -((int32) (val))))
+
+#define __atomic_compare_exchange_n(ptr, expected, desired, weak, succ, fail) \
+	pgbench_msvc_cas_32((volatile int32 *) (ptr), (int32 *) (expected), (int32) (desired))
+
+#define __atomic_test_and_set(ptr, memorder) \
+	(InterlockedExchange((volatile LONG *) (ptr), 1) != 0)
+
+#define __atomic_clear(ptr, memorder) \
+	((void) InterlockedExchange((volatile LONG *) (ptr), 0))
+
+#endif							/* _MSC_VER */
 
 #endif							/* PGBENCH_H */

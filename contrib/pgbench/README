@@ -1,0 +1,34 @@
+contrib/pgbench/README
+
+pgbench Extension Developer Notes
+=================================
+
+Overview
+--------
+The `contrib/pgbench` extension exposes the shared statistical distributions,
+hashes, domain permutations, TPC-C NURand / syllable / string generators,
+calendar date arithmetic, and array generators from `src/common/pgbench_funcs.c`
+as SQL-callable functions in the `pgbench` schema.
+
+Architecture
+------------
+- `contrib/pgbench/pgbench.c` provides thin `PG_FUNCTION_INFO_V1` wrappers
+  around `src/common/pgbench_funcs.c`.
+- Session PRNG state is stored in `static pg_prng_state pgbench_ext_prng_state`
+  and lazily seeded on first use if `pgbench.setseed()` has not been called.
+- Session-sticky NURand `C` constants for the standard TPC-C `A` domains
+  (`255`, `1023`, `8191`, and fallback) are maintained per backend session
+  and reset whenever `pgbench.setseed()` is invoked.
+- `pgbench.format_string(text, VARIADIC "any")` inspects argument OIDs via
+  `get_fn_expr_argtype()` and converts arbitrary SQL types when needed using
+  `getTypeOutputInfo()` / `OidOutputFunctionCall()`.
+
+Adding a New Function
+---------------------
+1. Implement the frontend/backend-safe algorithm in `src/common/pgbench_funcs.c`
+   and declare it in `src/include/common/pgbench_funcs.h`.
+2. Add the `PG_FUNCTION_INFO_V1` wrapper in `contrib/pgbench/pgbench.c`.
+3. Register the SQL signature in `contrib/pgbench/pgbench--1.0.sql`.
+4. Add regression tests in `contrib/pgbench/sql/pgbench.sql` and update
+   `contrib/pgbench/expected/pgbench.out`.
+5. Document the SQL function in `doc/src/sgml/pgbench-ext.sgml`.
