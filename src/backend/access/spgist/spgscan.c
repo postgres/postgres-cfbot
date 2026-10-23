@@ -24,6 +24,7 @@
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 #include "utils/float.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -1087,4 +1088,24 @@ spgcanreturn(Relation index, int attno)
 	cache = spgGetCache(index);
 
 	return cache->config.canReturnData;
+}
+
+/*
+ * Are the distances the opclass reports for 'orderbyop' on a leaf tuple,
+ * when it does not set recheckDistances, the operator's own result?
+ *
+ * As for GiST, the contract only requires them to sort like the operator's
+ * result.  quad_point_ops and kd_point_ops (whose leaf function is
+ * spg_quad_leaf_consistent()) compute a leaf's distance with
+ * point_distance(), the function behind <->(point, point).  box_ops doesn't
+ * qualify, for the reason given in gistcanreturnorderby(); polygon sets
+ * recheckDistances.
+ */
+bool
+spgcanreturnorderby(Oid opfamily, Oid opcintype, Oid orderbyop)
+{
+	return (get_opfamily_proc(opfamily, opcintype, opcintype,
+							  SPGIST_LEAF_CONSISTENT_PROC) ==
+			F_SPG_QUAD_LEAF_CONSISTENT &&
+			get_opcode(orderbyop) == F_POINT_DISTANCE);
 }

@@ -169,6 +169,512 @@ explain (verbose, costs off)
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 
+drop index gist_tbl_multi_index;
+
+-- Test that an ordering Index Scan returns the AM's ORDER BY values to a
+-- targetlist entry equal to the ORDER BY expression, instead of evaluating
+-- the expression again, for an opclass that passes amcanreturnorderby.
+set enable_indexonlyscan = off;
+
+-- An expression index over a counting function proves the operator is not
+-- re-evaluated: the count stays at zero for the rows returned.
+create sequence gist_cnt_seq;
+create function gist_cnt_pt(point) returns point language plpgsql immutable
+  as $$ begin perform nextval('public.gist_cnt_seq'); return $1; end $$;
+create index gist_tbl_cnt_index on gist_tbl using gist (gist_cnt_pt(p));
+
+explain (verbose, costs off)
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+
+select setval('gist_cnt_seq', 1, false);
+-- the distance numbers are not exactly the same across platforms
+set extra_float_digits = 0;
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+reset extra_float_digits;
+select nextval('gist_cnt_seq') - 1 as calls_during_scan;
+
+-- Every copy of the ORDER BY expression is served from the index; an
+-- expression that merely contains it is not.
+explain (verbose, costs off)
+select gist_cnt_pt(p) <-> point(0,0) as d1,
+       (gist_cnt_pt(p) <-> point(0,0)) * 2 as d2,
+       gist_cnt_pt(p) <-> point(0,0) as d3
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0,0) limit 2;
+
+drop index gist_tbl_cnt_index;
+drop function gist_cnt_pt(point);
+drop sequence gist_cnt_seq;
+
+-- The values must equal the operator's, also for a row re-fetched under
+-- row locking, and for a rescan with a new ORDER BY argument (LATERAL).
+create index gist_tbl_point_index on gist_tbl using gist (p);
+
+select count(*) filter (where dist = p <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select p, p <-> point(5.2, 5.91) as dist from gist_tbl
+          order by p <-> point(5.2, 5.91) limit 200) ss;
+
+set extra_float_digits = 0;
+select p, p <-> point(5.2, 5.91) as dist from gist_tbl
+  where p <@ box(point(5,5), point(6,6)) order by p <-> point(5.2, 5.91)
+  limit 3 for update;
+reset extra_float_digits;
+
+explain (verbose, costs off)
+select v.q, n.dist
+  from (values (point(0.3, 0.3)), (point(7.1, 7.2)), (point(42, 42))) v(q),
+       lateral (select p <-> v.q as dist from gist_tbl
+                order by p <-> v.q limit 2) n;
+select count(*) filter (where n.dist = n.p <-> v.q) as same, count(*) as total
+  from (values (point(0.3, 0.3)), (point(7.1, 7.2)), (point(42, 42))) v(q),
+       lateral (select p, p <-> v.q as dist from gist_tbl
+                order by p <-> v.q limit 50) n;
+
+-- A multi-column index ordered by an exact key and a lossy one: the lossy
+-- one's distances are rechecked, rows pass through the reorder queue, and
+-- the exact key's value is still the operator's.
+create index gist_tbl_pc_index on gist_tbl using gist (p, c);
+explain (verbose, costs off)
+select p <-> point(1, 1) as dp, c <-> point(2, 2) as dc from gist_tbl
+  order by p <-> point(1, 1), c <-> point(2, 2) limit 5;
+select count(*) filter (where dp = p <-> point(1, 1)) as same_p,
+       count(*) filter (where dc = c <-> point(2, 2)) as same_c,
+       count(*) as total
+  from (select p, c, p <-> point(1, 1) as dp, c <-> point(2, 2) as dc
+          from gist_tbl
+          order by p <-> point(1, 1), c <-> point(2, 2) limit 200) ss;
+drop index gist_tbl_pc_index;
+drop index gist_tbl_point_index;
+
+-- The box opclass computes a leaf's distance exactly, but the operator treats
+-- a point within EPSILON of an edge's line as on it, so the two can differ in
+-- the last digits; it doesn't qualify, and the operator is evaluated.
+create index gist_tbl_box_index on gist_tbl using gist (b);
+
+explain (verbose, costs off)
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91);
+
+-- For this point, the index's distance is 1 and the operator's is
+-- 1.00000000000008: dist is the operator's only if the scan doesn't hand
+-- back its own.
+create temp table gist_box_eps (b box);
+insert into gist_box_eps values ('((0,0),(1,1))');
+create index on gist_box_eps using gist (b);
+select count(*) filter (where dist = b <-> point(0.9999996, 2)) as same,
+       count(*) as total
+  from (select b, b <-> point(0.9999996, 2) as dist from gist_box_eps
+          order by b <-> point(0.9999996, 2) limit 1) ss;
+drop table gist_box_eps;
+
+drop index gist_tbl_box_index;
+
+-- The circle opclass's distance is a lower bound that is always rechecked,
+-- and its opclass does not pass amcanreturnorderby: the targetlist is left
+-- alone and the operator is evaluated as before.
+create index gist_tbl_circle_index on gist_tbl using gist (c);
+
+explain (verbose, costs off)
+select c <-> point(5.2, 5.91) as dist from gist_tbl
+  order by c <-> point(5.2, 5.91) limit 3;
+
+select count(*) filter (where dist = c <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select c, c <-> point(5.2, 5.91) as dist from gist_tbl
+          order by c <-> point(5.2, 5.91) limit 200) ss;
+
+drop index gist_tbl_circle_index;
+reset enable_indexonlyscan;
+
+-- SP-GiST's quad and k-d point opclasses qualify as well; its box opclass
+-- doesn't, for the same reason as GiST's.
+create temp table spg_orderby (p point, b box);
+insert into spg_orderby
+  select point(i % 97 * 0.31, i / 97 * 0.29),
+         box(point(i % 97 * 0.31, i / 97 * 0.29),
+             point(i % 97 * 0.31 + 0.2, i / 97 * 0.29 + 0.1))
+  from generate_series(1, 5000) i;
+create index spg_orderby_quad on spg_orderby using spgist (p);
+set enable_indexonlyscan = off;
+explain (verbose, costs off)
+select p <-> point(3, 4) as dist from spg_orderby
+  order by p <-> point(3, 4) limit 3;
+select count(*) filter (where dist = p <-> point(3, 4)) as same,
+       count(*) as total
+  from (select p, p <-> point(3, 4) as dist from spg_orderby
+          order by p <-> point(3, 4) limit 300) ss;
+drop index spg_orderby_quad;
+create index spg_orderby_kd on spg_orderby using spgist (p kd_point_ops);
+select count(*) filter (where dist = p <-> point(3, 4)) as same,
+       count(*) as total
+  from (select p, p <-> point(3, 4) as dist from spg_orderby
+          order by p <-> point(3, 4) limit 300) ss;
+drop index spg_orderby_kd;
+create index spg_orderby_box on spg_orderby using spgist (b);
+explain (verbose, costs off)
+select b <-> point(3, 4) as dist from spg_orderby
+  order by b <-> point(3, 4) limit 3;
+reset enable_indexonlyscan;
+drop table spg_orderby;
+
+-- The planner must not charge an ordering Index Scan for evaluating a
+-- targetlist entry it takes from its ORDER BY values.  With a costly ORDER BY
+-- expression, the kNN scan should win over Seq Scan + Sort even when the
+-- filter is selective, since the Sort plan really does evaluate it per row.
+create function gist_costly_pt(point) returns point
+  language plpgsql immutable strict cost 10000
+  as $$ begin return $1; end $$;
+create temp table gist_costly (id int, p point, grp int);
+insert into gist_costly
+  select g, point(g % 101, g % 103), g % 100 from generate_series(1, 10000) g;
+create index on gist_costly using gist (gist_costly_pt(p));
+create index on gist_costly (grp);
+vacuum analyze gist_costly;
+set enable_bitmapscan = off;
+-- (Seq Scan + Sort is a real choice here; the earlier tests turned it off.)
+set enable_seqscan = on;
+
+explain (costs off)
+select id, gist_costly_pt(p) <-> point(0,0) as dist from gist_costly
+  where grp < 5 order by gist_costly_pt(p) <-> point(0,0);
+set enable_seqscan = off;
+
+-- The ORDER BY value is in every plan's target (as a sort column), so the
+-- kNN scan used to be charged rows * cost(gist_costly_pt) for it, ~2.5e5
+-- here.  It is now charged nothing for it; an expression that merely
+-- contains it is still evaluated, and charged.
+create function gist_costly_total(q text) returns float8 language plpgsql as
+$$ declare j json; begin
+     execute 'explain (format json) ' || q into j;
+     return (j->0->'Plan'->>'Total Cost')::float8;
+   end $$;
+set enable_sort = off;
+select gist_costly_total('select id, gist_costly_pt(p) <-> point(0,0)
+         from gist_costly order by gist_costly_pt(p) <-> point(0,0)') < 10000
+         as returned_is_free,
+       gist_costly_total('select id, (gist_costly_pt(p) <-> point(0,0)) * 2
+         from gist_costly order by gist_costly_pt(p) <-> point(0,0)') > 100000
+         as nested_is_charged;
+reset enable_sort;
+drop function gist_costly_total(text);
+
+reset enable_bitmapscan;
+drop table gist_costly;
+drop function gist_costly_pt(point);
+
+-- The ORDER BY expression written as "const OP key" is commuted into
+-- "key OP const" for the index; a targetlist entry in the original form is
+-- still the same value, and is still taken from the scan.
+create temp table gist_commute as
+  select g as id, point(g % 101, g % 103) as p from generate_series(1, 1000) g;
+create index on gist_commute using gist (p);
+vacuum analyze gist_commute;
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+set enable_indexonlyscan = off;
+explain (verbose, costs off)
+select point(5,5) <-> p as d from gist_commute order by point(5,5) <-> p limit 3;
+set extra_float_digits = 0;
+select point(5,5) <-> p as d from gist_commute order by point(5,5) <-> p limit 3;
+reset extra_float_digits;
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+drop table gist_commute;
+
+-- An ordering Index Scan below a join emits the ORDER BY value it returns,
+-- so the join above reads it instead of evaluating the expression again.
+-- The counting function shows the expression is evaluated zero times.
+create sequence gist_join_cnt;
+create function gist_join_pt(point) returns point
+  language plpgsql immutable strict cost 1000
+  as $$ begin perform nextval('public.gist_join_cnt'); return $1; end $$;
+create temp table gist_join_fact as
+  select g as id, point(g % 101, g % 103) as p from generate_series(1, 1000) g;
+create index on gist_join_fact using gist (gist_join_pt(p));
+create temp table gist_join_dim as select g as id from generate_series(1, 1000, 2) g;
+create index on gist_join_dim (id);
+vacuum analyze gist_join_fact;
+vacuum analyze gist_join_dim;
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+set enable_indexonlyscan = off;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+set enable_sort = off;
+explain (verbose, costs off)
+select f.id, gist_join_pt(f.p) <-> point(5,5) as d
+  from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by gist_join_pt(f.p) <-> point(5,5) limit 3;
+select setval('gist_join_cnt', 1, false);
+set extra_float_digits = 0;
+select f.id, gist_join_pt(f.p) <-> point(5,5) as d
+  from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by gist_join_pt(f.p) <-> point(5,5) limit 3;
+reset extra_float_digits;
+select nextval('gist_join_cnt') - 1 as calls_during_join;
+-- Nothing extra is emitted when the query doesn't need the value above the
+-- scan.
+explain (verbose, costs off)
+select f.id from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by gist_join_pt(f.p) <-> point(5,5) limit 3;
+-- Nor for a cheap ORDER BY expression: the plain point distance is computed
+-- again above the join, which costs less than carrying it up.
+create index on gist_join_fact using gist (p);
+explain (verbose, costs off)
+select f.id, f.p <-> point(5,5) as d
+  from gist_join_fact f join gist_join_dim j on j.id = f.id
+  order by f.p <-> point(5,5) limit 3;
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+reset enable_hashjoin;
+reset enable_mergejoin;
+reset enable_sort;
+drop table gist_join_fact;
+drop table gist_join_dim;
+drop function gist_join_pt(point);
+drop sequence gist_join_cnt;
+
+-- An index-only scan isn't charged for evaluating a target expression it
+-- reads from a returnable index expression column: it reads the stored
+-- value instead.  (Not GiST-specific; btree returns expression columns.)
+create function gist_ios_costly(int) returns int
+  language plpgsql immutable strict cost 100000
+  as $$ begin return $1; end $$;
+create temp table gist_ios_cost (i int);
+insert into gist_ios_cost select g from generate_series(1, 10000) g;
+create index on gist_ios_cost (i, gist_ios_costly(i));
+vacuum analyze gist_ios_cost;
+create function gist_ios_total(q text) returns float8 language plpgsql as
+$$ declare j json; begin
+     execute 'explain (format json) ' || q into j;
+     return (j->0->'Plan'->>'Total Cost')::float8;
+   end $$;
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost order by i;
+select gist_ios_total('select gist_ios_costly(i) from gist_ios_cost order by i')
+  < 10000 as ios_expr_is_free;
+-- With nothing else to recommend it (no qual, no useful order), an
+-- index-only scan that reads the expression still beats a seq scan that has
+-- to compute it: add_path() keeps the path that emits the value.
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost order by gist_ios_costly(i);
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost;
+-- Ordered by the index, the scan emits the final targetlist directly and
+-- still reads the expression from the index.
+explain (verbose, costs off)
+select gist_ios_costly(i) from gist_ios_cost order by i desc limit 3;
+-- The expression may be part of a larger one, or appear in a qual.
+explain (verbose, costs off)
+select gist_ios_costly(i) + 1 from gist_ios_cost
+  where gist_ios_costly(i) % 3 = 0;
+-- Below a join, the scan emits it and the join passes it up, through more
+-- than one join level.
+create temp table gist_ios_dim (i int, tag text);
+insert into gist_ios_dim select g, 't' || g from generate_series(1, 10000, 7) g;
+create index on gist_ios_dim (i);
+create temp table gist_ios_dim2 (k int, i int);
+insert into gist_ios_dim2 select g, g * 3 from generate_series(1, 3000) g;
+vacuum analyze gist_ios_dim, gist_ios_dim2;
+-- (Each join method is pinned; it's the value passing up that's tested.)
+set enable_hashjoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_costly(a.i), d.tag from gist_ios_cost a
+  join gist_ios_dim d on d.i = a.i;
+reset enable_nestloop;
+set enable_mergejoin = off;
+explain (verbose, costs off)
+select gist_ios_costly(a.i), d.tag, n.k from gist_ios_cost a
+  join gist_ios_dim d on d.i = a.i join gist_ios_dim2 n on n.i = a.i;
+reset enable_hashjoin;
+reset enable_mergejoin;
+-- When everything the scan emits is an index column, it returns the
+-- index's own tlist without projecting (here including k, which nothing
+-- needs); the value is still read above the join.
+create temp table gist_ios_wide (k int, i int);
+insert into gist_ios_wide select g, g from generate_series(1, 10000) g;
+create index on gist_ios_wide (k, gist_ios_costly(i)) include (i);
+vacuum analyze gist_ios_wide;
+set enable_mergejoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_costly(w.i), d.tag from gist_ios_wide w
+  join gist_ios_dim d on d.i = w.i;
+reset enable_mergejoin;
+reset enable_nestloop;
+drop table gist_ios_wide;
+-- Also from the nullable side of an outer join, because the function is
+-- strict: a null-extended row gets NULL for the value, which is what the
+-- function returns for a NULL argument.  The value is used inside a larger,
+-- non-strict expression above the join.
+set enable_hashjoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select coalesce(gist_ios_costly(a.i), -1) from gist_ios_dim d
+  left join gist_ios_cost a on a.i = d.i * 2;
+reset enable_hashjoin;
+reset enable_nestloop;
+-- And from both sides' nullable rows of a FULL JOIN.
+set enable_hashjoin = off;
+explain (verbose, costs off)
+select gist_ios_costly(a.i), d.tag from gist_ios_dim d
+  full join gist_ios_cost a on a.i = d.i * 2;
+reset enable_hashjoin;
+select count(*) as total, count(v) as with_value,
+       count(*) filter (where v = i) as same
+  from (select gist_ios_costly(a.i) as v, a.i from gist_ios_dim d
+        full join gist_ios_cost a on a.i = d.i * 2) s;
+-- A function that isn't strict may return something else for NULL, so it's
+-- computed above the join.
+create function gist_ios_nonstrict(int) returns int
+  language plpgsql immutable called on null input cost 100000
+  as $$ begin return coalesce($1, -1); end $$;
+create index on gist_ios_cost (i, gist_ios_nonstrict(i));
+vacuum analyze gist_ios_cost;
+set enable_mergejoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_nonstrict(a.i) from gist_ios_dim d
+  left join gist_ios_cost a on a.i = d.i * 2;
+reset enable_mergejoin;
+reset enable_nestloop;
+select count(*) filter (where v = -1) as null_extended
+  from (select gist_ios_nonstrict(a.i) as v from gist_ios_dim d
+        left join gist_ios_cost a on a.i = d.i * 2) s;
+drop function gist_ios_nonstrict(int) cascade;
+-- A parallel-restricted function: the value is read from the index inside
+-- the workers, not evaluated there, and passed up through the Gather.  (Not
+-- a temp table, which can't be scanned in parallel.)
+create function gist_ios_restricted(int) returns int
+  language plpgsql immutable strict parallel restricted cost 100000
+  as $$ begin return $1; end $$;
+create table gist_ios_par (i int);
+insert into gist_ios_par select g from generate_series(1, 10000) g;
+create index on gist_ios_par (i, gist_ios_restricted(i));
+vacuum analyze gist_ios_par;
+set parallel_setup_cost = 0;
+set parallel_tuple_cost = 0;
+set min_parallel_index_scan_size = 0;
+set max_parallel_workers_per_gather = 2;
+set parallel_leader_participation = off;
+-- (Pin the scan type: these tables aren't temp, so VACUUM may not get to
+-- mark them all-visible while other sessions hold snapshots.)
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+explain (verbose, costs off)
+select gist_ios_restricted(i) from gist_ios_par;
+select count(*), sum(v) from (select gist_ios_restricted(i) as v from gist_ios_par) s;
+-- Also through a Gather Merge, which sorts the workers' rows by a column
+-- the index doesn't lead with.
+create table gist_ios_gm (k int, i int);
+insert into gist_ios_gm select g % 97, g from generate_series(1, 20000) g;
+create index on gist_ios_gm (i, gist_ios_restricted(i)) include (k);
+vacuum analyze gist_ios_gm;
+explain (verbose, costs off)
+select k, gist_ios_restricted(i) from gist_ios_gm where i > 100 order by k;
+select count(*) filter (where v = i) as same, count(*) as total
+  from (select k, i, gist_ios_restricted(i) as v from gist_ios_gm
+        where i > 100 order by k) s;
+drop table gist_ios_gm;
+-- And through a Parallel Append over partitions that all have the index.
+-- (Different sizes, so that the children's cost order, which is the plan's
+-- order, doesn't depend on how many pages VACUUM could mark all-visible
+-- when other sessions hold snapshots.)
+create table gist_ios_ppart (i int) partition by range (i);
+create table gist_ios_ppart1 partition of gist_ios_ppart
+  for values from (1) to (2001);
+create table gist_ios_ppart2 partition of gist_ios_ppart
+  for values from (2001) to (10001);
+insert into gist_ios_ppart select g from generate_series(1, 10000) g;
+create index on gist_ios_ppart (i, gist_ios_restricted(i));
+vacuum analyze gist_ios_ppart;
+explain (verbose, costs off)
+select gist_ios_restricted(i) from gist_ios_ppart;
+select count(*), sum(v) from (select gist_ios_restricted(i) as v from gist_ios_ppart) s;
+drop table gist_ios_ppart;
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset parallel_setup_cost;
+reset parallel_tuple_cost;
+reset min_parallel_index_scan_size;
+reset max_parallel_workers_per_gather;
+reset parallel_leader_participation;
+drop table gist_ios_par;
+drop function gist_ios_restricted(int);
+-- A partitioned table whose partitions all have the index: each child reads
+-- the value and the Append passes it up, even when a partition's columns
+-- are in a different order.
+create temp table gist_ios_part (i int, pad text) partition by range (i);
+create temp table gist_ios_part1 (pad text, i int);
+alter table gist_ios_part attach partition gist_ios_part1
+  for values from (1) to (5001);
+create temp table gist_ios_part2 partition of gist_ios_part
+  for values from (5001) to (10001);
+insert into gist_ios_part select g, 'p' from generate_series(1, 10000) g;
+create index on gist_ios_part (i, gist_ios_costly(i));
+vacuum analyze gist_ios_part;
+set enable_mergejoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_costly(p.i), d.tag from gist_ios_part p
+  join gist_ios_dim d on d.i = p.i;
+reset enable_mergejoin;
+reset enable_nestloop;
+-- An ordered Append passes the value up as well, here into a merge join.
+set enable_hashjoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_costly(p.i), d.tag from gist_ios_part p
+  join gist_ios_dim d on d.i = p.i order by p.i;
+reset enable_hashjoin;
+reset enable_nestloop;
+-- An index created on only one partition doesn't count: every child must
+-- emit the value for the Append to.
+create temp table gist_ios_part_x (i int) partition by range (i);
+create temp table gist_ios_part_x1 partition of gist_ios_part_x
+  for values from (1) to (5001);
+create temp table gist_ios_part_x2 partition of gist_ios_part_x
+  for values from (5001) to (10001);
+insert into gist_ios_part_x select g from generate_series(1, 10000) g;
+create index on gist_ios_part_x1 (i, gist_ios_costly(i));
+vacuum analyze gist_ios_part_x;
+set enable_mergejoin = off;
+set enable_nestloop = off;
+explain (verbose, costs off)
+select gist_ios_costly(p.i), d.tag from gist_ios_part_x p
+  join gist_ios_dim d on d.i = p.i;
+reset enable_mergejoin;
+reset enable_nestloop;
+-- Each of these returns what the same query does without index-only scans.
+create temp table gist_ios_check as
+select gist_ios_costly(a.i) as e, d.tag from gist_ios_cost a
+  join gist_ios_dim d on d.i = a.i;
+set enable_indexonlyscan = off;
+select count(*) as mismatches from (
+  (select gist_ios_costly(a.i) as e, d.tag from gist_ios_cost a
+    join gist_ios_dim d on d.i = a.i
+   except all select * from gist_ios_check)
+  union all
+  (select * from gist_ios_check
+   except all select gist_ios_costly(a.i), d.tag from gist_ios_cost a
+    join gist_ios_dim d on d.i = a.i)) s;
+reset enable_indexonlyscan;
+drop table gist_ios_check, gist_ios_part, gist_ios_part_x, gist_ios_dim,
+  gist_ios_dim2;
+drop function gist_ios_total(text);
+drop table gist_ios_cost;
+drop function gist_ios_costly(int);
+
+-- (The tests above reset these to their defaults; the rest of this file
+-- wants them as set at the top.)
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);
