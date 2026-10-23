@@ -612,9 +612,16 @@ IssueACLPerBlob(ArchiveHandle *AH, TocEntry *te)
 		{
 			/* Terminate the second-half string */
 			*en++ = '\0';
-			Assert(st2 != NULL);
-			/* Issue this command for each blob */
-			IssueCommandPerBlob(AH, blobte, st, st2);
+			if (st2 != NULL)
+			{
+				/* Issue this command for each blob */
+				IssueCommandPerBlob(AH, blobte, st, st2);
+			}
+			else
+			{
+				/* Not blob-specific (e.g. SET SESSION AUTHORIZATION) */
+				ahprintf(AH, "%s;\n\n", st);
+			}
 			/* For neatness, skip whitespace before the next command */
 			while (isspace((unsigned char) *en))
 				en++;
