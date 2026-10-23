@@ -13,6 +13,7 @@
 #include "access/hash.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -430,6 +431,12 @@ hash_bitmap_info(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(indexRel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	if (ovflblkno < 0 || ovflblkno > MaxBlockNumber)
 		ereport(ERROR,
