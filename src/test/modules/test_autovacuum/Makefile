@@ -4,7 +4,8 @@ PGFILEDESC = "test_autovacuum - test code for autovacuum"
 
 TAP_TESTS = 1
 
-EXTRA_INSTALL = src/test/modules/injection_points
+EXTRA_INSTALL = src/test/modules/injection_points \
+	src/test/modules/xid_wraparound
 
 export enable_injection_points
 
