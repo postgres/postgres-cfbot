@@ -86,6 +86,7 @@ pg_noreturn extern void PostgresMain(const char *dbname,
 									 const char *username);
 extern void ResetUsage(void);
 extern void ShowUsage(const char *title);
+extern bool IsExtendedQueryMessage(void);
 extern int	check_log_duration(char *msec_str, bool was_logged);
 extern void set_debug_options(int debug_flag,
 							  GucContext context, GucSource source);
