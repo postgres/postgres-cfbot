@@ -34,6 +34,7 @@ AfterTriggerEvent
 AfterTriggerEventChunk
 AfterTriggerEventData
 AfterTriggerEventList
+AfterTriggerImage
 AfterTriggerShared
 AfterTriggerSharedData
 AfterTriggersData
@@ -1247,12 +1248,14 @@ HeapScanDesc
 HeapScanDescData
 HeapTuple
 HeapTupleData
+HeapTupleFailureData
 HeapTupleFields
 HeapTupleForceOption
 HeapTupleFreeze
 HeapTupleHeader
 HeapTupleHeaderData
 HeapTupleTableSlot
+HeapUpdateIndexMode
 HistControl
 HostCacheEntry
 HostsFileLoadResult
@@ -1631,6 +1634,7 @@ LocalTransactionId
 Location
 LocationIndex
 LocationLen
+LocatorDesc
 LockAcquireResult
 LockClauseStrength
 LockData
@@ -3118,7 +3122,6 @@ TSVectorStat
 TState
 TStatus
 TStoreState
-TU_UpdateIndexes
 TXNEntryFile
 TYPCATEGORY
 T_Action

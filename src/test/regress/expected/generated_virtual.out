@@ -287,7 +287,7 @@ DETAIL:  Column "b" is a generated column.
 INSERT INTO gtest1v VALUES (8, DEFAULT), (9, DEFAULT);  -- error
 ERROR:  cannot insert a non-DEFAULT value into column "b"
 DETAIL:  Column "b" is a generated column.
-SELECT * FROM gtest1v;
+SELECT * FROM gtest1v ORDER BY a;
  a | b  
 ---+----
  3 |  6

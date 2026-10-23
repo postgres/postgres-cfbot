@@ -56,6 +56,8 @@ tests += {
       'hash',
       'checksum',
       'oldextversions',
+      'hot_updates',
+      'hot_indexed_updates',
     ],
   },
 }

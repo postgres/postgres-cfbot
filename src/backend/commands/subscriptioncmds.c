@@ -84,6 +84,7 @@
 #define SUBOPT_LSN					0x00020000
 #define SUBOPT_ORIGIN				0x00040000
 #define SUBOPT_CONFLICT_LOG_DEST	0x00080000
+#define SUBOPT_HOT_INDEXED_ON_APPLY	0x00100000
 
 /* check if the 'val' has 'bits' set */
 #define IsSet(val, bits)  (((val) & (bits)) == (bits))
@@ -115,6 +116,7 @@ typedef struct SubOpts
 	ConflictLogDest conflictlogdest;
 	XLogRecPtr	lsn;
 	char	   *wal_receiver_timeout;
+	char		hotindexedonapply;
 } SubOpts;
 
 /*
@@ -208,6 +210,8 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 		opts->origin = pstrdup(LOGICALREP_ORIGIN_ANY);
 	if (IsSet(supported_opts, SUBOPT_CONFLICT_LOG_DEST))
 		opts->conflictlogdest = CONFLICT_LOG_DEST_LOG;
+	if (IsSet(supported_opts, SUBOPT_HOT_INDEXED_ON_APPLY))
+		opts->hotindexedonapply = LOGICALREP_HOT_INDEXED_SUBSET_ONLY;
 
 	/* Parse options */
 	foreach(lc, stmt_options)
@@ -460,6 +464,30 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 			opts->conflictlogdest = GetConflictLogDest(val);
 			opts->specified_opts |= SUBOPT_CONFLICT_LOG_DEST;
 		}
+		else if (IsSet(supported_opts, SUBOPT_HOT_INDEXED_ON_APPLY) &&
+				 strcmp(defel->defname, "hot_indexed_on_apply") == 0)
+		{
+			char	   *val;
+
+			if (IsSet(opts->specified_opts, SUBOPT_HOT_INDEXED_ON_APPLY))
+				errorConflictingDefElem(defel, pstate);
+
+			opts->specified_opts |= SUBOPT_HOT_INDEXED_ON_APPLY;
+			val = defGetString(defel);
+
+			if (pg_strcasecmp(val, "off") == 0)
+				opts->hotindexedonapply = LOGICALREP_HOT_INDEXED_OFF;
+			else if (pg_strcasecmp(val, "subset_only") == 0)
+				opts->hotindexedonapply = LOGICALREP_HOT_INDEXED_SUBSET_ONLY;
+			else if (pg_strcasecmp(val, "always") == 0)
+				opts->hotindexedonapply = LOGICALREP_HOT_INDEXED_ALWAYS;
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("unrecognized value for subscription parameter \"%s\": \"%s\"",
+								"hot_indexed_on_apply", val),
+						 errhint("Valid values are \"off\", \"subset_only\", and \"always\".")));
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -700,7 +728,8 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 					  SUBOPT_RETAIN_DEAD_TUPLES |
 					  SUBOPT_MAX_RETENTION_DURATION |
 					  SUBOPT_WAL_RECEIVER_TIMEOUT | SUBOPT_ORIGIN |
-					  SUBOPT_CONFLICT_LOG_DEST);
+					  SUBOPT_CONFLICT_LOG_DEST |
+					  SUBOPT_HOT_INDEXED_ON_APPLY);
 	parse_subscription_options(pstate, stmt->options, supported_opts, &opts);
 
 	/*
@@ -871,6 +900,8 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 		Int32GetDatum(opts.maxretention);
 	values[Anum_pg_subscription_subretentionactive - 1] =
 		BoolGetDatum(opts.retaindeadtuples);
+	values[Anum_pg_subscription_subhotindexedonapply - 1] =
+		CharGetDatum(opts.hotindexedonapply);
 	values[Anum_pg_subscription_subserver - 1] = ObjectIdGetDatum(serverid);
 	if (stmt->conninfo)
 	{
@@ -1714,7 +1745,8 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 							  SUBOPT_MAX_RETENTION_DURATION |
 							  SUBOPT_WAL_RECEIVER_TIMEOUT |
 							  SUBOPT_ORIGIN |
-							  SUBOPT_CONFLICT_LOG_DEST);
+							  SUBOPT_CONFLICT_LOG_DEST |
+							  SUBOPT_HOT_INDEXED_ON_APPLY);
 			break;
 
 		case ALTER_SUBSCRIPTION_ENABLED:
@@ -2119,6 +2151,13 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 								true;
 						}
 					}
+				}
+
+				if (IsSet(opts.specified_opts, SUBOPT_HOT_INDEXED_ON_APPLY))
+				{
+					values[Anum_pg_subscription_subhotindexedonapply - 1] =
+						CharGetDatum(opts.hotindexedonapply);
+					replaces[Anum_pg_subscription_subhotindexedonapply - 1] = true;
 				}
 
 				update_tuple = true;
