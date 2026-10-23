@@ -10609,6 +10609,42 @@ do_pg_abort_backup(int code, Datum arg)
 }
 
 /*
+ * Create a consistent copy of control data to be used for backup.
+ *
+ * Reading pg_control from disk while it is being rewritten can return a torn
+ * copy, so make the copy from shared memory under ControlFileLock instead.
+ *
+ * The caller's buffer must be at least PG_CONTROL_FILE_SIZE bytes and is
+ * zero-padded to that size.
+ *
+ * All field access is done through a local, properly-aligned ControlFileData;
+ * the caller's buffer is only ever written via memcpy() and so need not be
+ * suitably aligned for ControlFileData.
+ */
+void
+backup_control_file(uint8 *controlFile)
+{
+	ControlFileData controlData;
+
+	LWLockAcquire(ControlFileLock, LW_SHARED);
+	memcpy(&controlData, ControlFile, sizeof(ControlFileData));
+	LWLockRelease(ControlFileLock);
+
+	/*
+	 * Recalculate the CRC. The in-memory copy can be updated without being
+	 * written, e.g. during replay of an online checkpoint, in which case its
+	 * CRC does not match its contents.
+	 */
+	INIT_CRC32C(controlData.crc);
+	COMP_CRC32C(controlData.crc, &controlData, offsetof(ControlFileData, crc));
+	FIN_CRC32C(controlData.crc);
+
+	/* Copy into the caller's buffer, zero-padded to the full file size */
+	memset(controlFile, 0, PG_CONTROL_FILE_SIZE);
+	memcpy(controlFile, &controlData, sizeof(ControlFileData));
+}
+
+/*
  * Register a handler that will warn about unterminated backups at end of
  * session, unless this has already been done.
  */
