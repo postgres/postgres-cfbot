@@ -53,6 +53,7 @@
 #include "access/heapam.h"
 #include "access/flux.h"
 #include "access/flux_pbu.h"
+#include "access/perbackend/pbu_undoworker.h"
 #include "access/flux_undo.h"
 #include "access/relation.h"
 #include "access/slog.h"
@@ -78,6 +79,7 @@ static UndoApplyResult flux_undo_apply(uint8 rmid, uint16 info,
 									   UndoRecPtr urec_ptr);
 static void flux_undo_desc(StringInfo buf, uint8 rmid, uint16 info,
 						   const char *payload, Size payload_len);
+static void flux_undo_apply_xact_callback(XactEvent event, void *arg);
 
 
 /* The FLUX UNDO RM registration entry */
@@ -99,6 +101,12 @@ void
 FluxUndoRmgrInit(void)
 {
 	RegisterUndoRmgr(UNDO_RMID_FLUX, &flux_undo_rmgr);
+
+	/*
+	 * Release the relation kept open across a worker rollback's records (see
+	 * flux_undo_open_rel) at the end of the transaction that opened it.
+	 */
+	RegisterXactCallback(flux_undo_apply_xact_callback, NULL);
 }
 
 
@@ -714,6 +722,176 @@ flux_undo_block_exists(Relation rel, BlockNumber blkno, TransactionId xid)
 }
 
 /*
+ * One relation kept open across the UNDO records of a single top-level
+ * rollback, so the rollback does not reopen it once per record.
+ *
+ * flux_undo_apply() is dispatched once per record, and the generic engine
+ * sorts a transaction's records by (rmid, reloid, block): all records of one
+ * relation arrive consecutively.  Opening and closing the relation per record
+ * is cheap when the relcache entry survives between records, but under
+ * RELCACHE_FORCE_RELEASE (and on any relcache invalidation) relation_close()
+ * drops the entry once its reference count reaches zero, taking the smgr and
+ * every open segment file descriptor with it.  The next record's ReadBuffer()
+ * then re-runs _mdfd_getseg(), which re-opens every segment from 0 up to the
+ * target block's segment.  With many small segments -- a wide-value FLUX
+ * relation whose native-overflow chunks span hundreds of segment files under a
+ * tiny RELSEG_SIZE -- that is O(records x segments): a 100k-record rollback
+ * takes minutes, long enough that an undo apply worker never finishes within
+ * the discard worker's window and the transaction's non-permanent undo is
+ * never discarded (recovery/103 under --with-segsize-blocks=6).  On a normal
+ * build it still cuts the per-record cost to one relcache lookup and one lock
+ * acquire per relation per rollback instead of per record.
+ *
+ * Keeping the relation open (reference count > 0) across the records of one
+ * relation defeats the drop, so its smgr and segment descriptors persist and
+ * the rollback is O(records + segments).
+ *
+ * Lifecycle.  The cache is populated ONLY on the top-level rollback path
+ * (an undo apply worker, a backend's inline AbortTransaction apply, the
+ * post-recovery and pending-undo re-drives): there the relation's lock and
+ * relcache reference belong to the top transaction's resource owner and live
+ * until it ends, where flux_undo_apply_xact_callback() closes the cache.  It
+ * is NOT used while applying a subtransaction's undo (ROLLBACK TO SAVEPOINT,
+ * PbuApplySubxactUndo / PbuRetrySubxactUndo): there the reference would belong
+ * to the subtransaction's resource owner, which releases it at subxact end and
+ * would leave this static dangling.  Nor in a backend's inline abort or
+ * ROLLBACK PREPARED, whose resource owner may be gone by the transaction-end
+ * callback, nor in recovery.  In every excluded context flux_undo_apply opens
+ * and closes the relation per record, as before (flux_undo_use_relation_cache).
+ *
+ * The lock taken on the first open (RowExclusiveLock) is held, with the
+ * relation, across its records; relation locks are held to transaction end on
+ * this path regardless, so the cache closes a relation with NoLock (the lock
+ * is released with the rest at transaction end).
+ */
+static Relation flux_undo_open_rel = NULL;
+static Oid	flux_undo_open_reloid = InvalidOid;
+
+/*
+ * flux_undo_relation_forget
+ *		Drop the cached relation pointer WITHOUT closing it.
+ *
+ * Used from the subtransaction-abort callback: by then the subtransaction's
+ * resource owner has already (or is about to) release the reference, so
+ * closing it ourselves would be a double release.
+ */
+static void
+flux_undo_relation_forget(void)
+{
+	flux_undo_open_rel = NULL;
+	flux_undo_open_reloid = InvalidOid;
+}
+
+/*
+ * flux_undo_relation_close
+ *		Close the cached rollback relation, if any (NoLock; see above).
+ */
+static void
+flux_undo_relation_close(void)
+{
+	if (flux_undo_open_rel != NULL)
+	{
+		relation_close(flux_undo_open_rel, NoLock);
+		flux_undo_relation_forget();
+	}
+}
+
+/*
+ * flux_undo_apply_xact_callback
+ *		Release the cached rollback relation at every transaction boundary.
+ */
+static void
+flux_undo_apply_xact_callback(XactEvent event, void *arg)
+{
+	switch (event)
+	{
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PREPARE:
+		case XACT_EVENT_PARALLEL_COMMIT:
+		case XACT_EVENT_PARALLEL_ABORT:
+			flux_undo_relation_close();
+			break;
+		default:
+			break;
+	}
+}
+
+/*
+ * flux_undo_use_relation_cache
+ *		Is the per-rollback relation cache safe to use right now?
+ *
+ * Only in an undo apply worker (PbuInUndoWorker): there execute_undo_actions()
+ * runs in a clean top-level transaction whose resource owner is
+ * TopTransactionResourceOwner for the whole apply, so the relation pinned
+ * while applying a record is still owned by the resource owner live when
+ * flux_undo_apply_xact_callback() closes it at transaction end.  Every other
+ * apply path keeps the old per-record open/close: a backend's inline abort and
+ * ROLLBACK PREPARED apply under a portal/other resource owner that may be gone
+ * by the transaction-end callback (a close there raises "relcache reference is
+ * not owned by resource owner"); a subtransaction's apply owns the reference
+ * under the subtransaction; recovery returns before any open.  The worker is
+ * also the only path that hits the O(records x segments) cliff this cache
+ * fixes, since overflow_size = 0 hands every large rollback to it.
+ */
+static inline bool
+flux_undo_use_relation_cache(void)
+{
+	return PbuInUndoWorker();
+}
+
+/*
+ * flux_undo_relation_open
+ *		Open reloid for undo apply.
+ *
+ * On the cacheable path reuse the relation the previous record left open when
+ * it names the same reloid, else close that one and open reloid afresh,
+ * caching it.  Off the cacheable path open per record (not cached).  Returns
+ * NULL if the relation no longer exists.
+ */
+static Relation
+flux_undo_relation_open(Oid reloid, bool use_cache)
+{
+	Relation	rel;
+
+	if (!use_cache)
+		return try_relation_open(reloid, RowExclusiveLock);
+
+	if (flux_undo_open_rel != NULL && flux_undo_open_reloid == reloid)
+		return flux_undo_open_rel;
+
+	/* A different relation: release the previous one first. */
+	flux_undo_relation_close();
+
+	rel = try_relation_open(reloid, RowExclusiveLock);
+	if (rel != NULL)
+	{
+		flux_undo_open_rel = rel;
+		flux_undo_open_reloid = reloid;
+	}
+	return rel;
+}
+
+/*
+ * flux_undo_apply_relation_release
+ *		Release the relation flux_undo_apply() opened for one record.
+ *
+ * On the cached path the relation stays open for the next record and the
+ * transaction-end callback closes it, so this is a no-op; off the cached path
+ * it closes with the lock it opened with.  forget_cache drops a cached
+ * relation now (used when the record no longer applies to the open file, so
+ * the next record re-opens and re-checks -- see the relfilenode re-check).
+ */
+static void
+flux_undo_apply_relation_release(Relation rel, bool cached, bool forget_cache)
+{
+	if (!cached)
+		relation_close(rel, RowExclusiveLock);
+	else if (forget_cache)
+		flux_undo_relation_close();
+}
+
+/*
  * flux_undo_apply
  *		Apply a single FLUX UNDO record.
  *
@@ -732,6 +910,7 @@ flux_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 	Buffer		buffer;
 	BlockNumber blkno;
 	UndoApplyResult result;
+	bool		use_cache;
 
 	Assert(rmid == UNDO_RMID_FLUX);
 
@@ -764,8 +943,12 @@ flux_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 	memcpy(&hdr, payload, SizeOfFluxUndoPayloadHeader);
 	blkno = ItemPointerGetBlockNumber(&hdr.tid);
 
-	/* Open the relation; skip if dropped */
-	rel = try_relation_open(reloid, RowExclusiveLock);
+	/*
+	 * Open the relation; skip if dropped.  On the top-level rollback path keep
+	 * it open across the records of this relation (see flux_undo_open_rel).
+	 */
+	use_cache = flux_undo_use_relation_cache();
+	rel = flux_undo_relation_open(reloid, use_cache);
 	if (rel == NULL)
 	{
 		ereport(DEBUG2,
@@ -793,7 +976,7 @@ flux_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 								 (unsigned long long) urec_ptr,
 								 hdr.relnumber, reloid,
 								 rel->rd_locator.relNumber)));
-		relation_close(rel, RowExclusiveLock);
+		flux_undo_apply_relation_release(rel, use_cache, true);
 		return flux_undo_gone(xid);
 	}
 
@@ -804,7 +987,7 @@ flux_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 				(errmsg_internal("FLUX UNDO: block %u beyond end of "
 								 "relation %u, skipping",
 								 blkno, reloid)));
-		relation_close(rel, RowExclusiveLock);
+		flux_undo_apply_relation_release(rel, use_cache, false);
 		return flux_undo_gone(xid);
 	}
 
@@ -815,7 +998,13 @@ flux_undo_apply(uint8 rmid, uint16 info, TransactionId xid, Oid reloid,
 									payload_len, urec_ptr);
 
 	UnlockReleaseBuffer(buffer);
-	relation_close(rel, RowExclusiveLock);
+
+	/*
+	 * On the cached path leave the relation open for the next record;
+	 * flux_undo_apply_xact_callback() closes it at transaction end.  Off the
+	 * cached path close it now, as before.
+	 */
+	flux_undo_apply_relation_release(rel, use_cache, false);
 
 	return result;
 }
@@ -877,5 +1066,184 @@ flux_undo_desc(StringInfo buf, uint8 rmid, uint16 info,
 	{
 		appendStringInfo(buf, "%s (truncated payload, %zu bytes)",
 						 subtype, payload_len);
+	}
+}
+
+
+/*
+ * FluxUndoPriorImage
+ *		Reverse-apply one FLUX UNDO record to the image it produced, yielding
+ *		the immediately prior committed image.
+ *
+ * Shared by every per-tuple version-chain walk (the MVCC read path in
+ * flux_pvs.c and VACUUM's overflow reachability walk in flux_overflow.c) so
+ * they cannot drift in how they step a chain -- in particular, neither may
+ * stop at a FLUX_UNDO_UPDATE_DELTA: a delta is emitted whenever the byte diff
+ * is smaller than the full image, for ANY column (including a wide/overflow
+ * one), and is reconstructed to a full prior image here.
+ *
+ * Inputs:
+ *	subtype			- the record's FLUX_UNDO_* subtype (urec_info)
+ *	payload/size	- the record's payload (a FluxUndoPayloadHeader followed by
+ *					  a full before-image or a FluxUndoDelta)
+ *	candidate/len	- the image this record produced (the newer image the
+ *					  delta is reverse-applied onto); for a full-image record it
+ *					  is not read
+ *
+ * On success returns true and sets *out_image (palloc'd in the current memory
+ * context) and *out_len to the prior image.  On any malformed or
+ * un-steppable record returns false and sets *what to a short static reason;
+ * it never raises an error, so a caller that must fail safe (VACUUM) can stop
+ * reclaiming, and a caller that treats a broken chain as corruption (a reader)
+ * can raise its own ERROR with *what.
+ */
+
+/*
+ * A reconstructed before-image is read by the version-chain walk as a
+ * FluxTupleHeader (FluxTupleGetXmin / t_verptr, at offsets below
+ * SizeOfFluxTupleHeader).  A corrupt undo record whose recorded length is
+ * shorter than that header, or larger than any tuple can be, must be rejected
+ * here: otherwise the walk reads past the palloc'd image (out-of-bounds).
+ */
+static inline bool
+FluxUndoPriorImageLenOk(Size len, const char **what)
+{
+	if (len < SizeOfFluxTupleHeader)
+	{
+		*what = "before-image shorter than a tuple header";
+		return false;
+	}
+	if (len > FLUX_MAX_TUPLE_SIZE)
+	{
+		*what = "before-image larger than a FLUX tuple";
+		return false;
+	}
+	return true;
+}
+
+bool
+FluxUndoPriorImage(uint16 subtype,
+				   const char *payload, Size payload_size,
+				   const char *candidate, Size candidate_len,
+				   char **out_image, Size *out_len,
+				   const char **what)
+{
+	FluxUndoPayloadHeader phdr;
+
+	*out_image = NULL;
+	*out_len = 0;
+	*what = NULL;
+
+	switch (subtype)
+	{
+		case FLUX_UNDO_UPDATE:
+		case FLUX_UNDO_DELETE:
+
+			/*
+			 * Both carry the full prior image.  A DELETE record is the chain
+			 * head of a deleted row; stepping past an invisible delete yields
+			 * the row as it was before it.
+			 */
+			if (payload == NULL ||
+				payload_size < SizeOfFluxUndoPayloadHeader)
+			{
+				*what = "payload too short";
+				return false;
+			}
+			memcpy(&phdr, payload, SizeOfFluxUndoPayloadHeader);
+			if (!(phdr.flags & FLUX_UNDO_FLAG_HAS_TUPLE) ||
+				phdr.tuple_len == 0)
+			{
+				*what = "no before-image";
+				return false;
+			}
+			if (payload_size < SizeOfFluxUndoPayloadHeader + phdr.tuple_len)
+			{
+				*what = "before-image truncated";
+				return false;
+			}
+			*out_len = phdr.tuple_len;
+#ifdef USE_INJECTION_POINTS
+			if (IS_INJECTION_POINT_ATTACHED("flux-undo-prior-image-short"))
+				*out_len = 1;
+#endif
+			if (!FluxUndoPriorImageLenOk(*out_len, what))
+			{
+				*out_len = 0;
+				return false;
+			}
+			*out_image = (char *) palloc(*out_len);
+			memcpy(*out_image,
+				   payload + SizeOfFluxUndoPayloadHeader,
+				   *out_len);
+			return true;
+
+		case FLUX_UNDO_UPDATE_DELTA:
+			{
+				const FluxUndoDelta *delta;
+				Size		delta_len;
+
+				if (payload == NULL ||
+					payload_size < SizeOfFluxUndoPayloadHeader +
+					SizeOfFluxUndoDelta)
+				{
+					*what = "delta payload too short";
+					return false;
+				}
+				memcpy(&phdr, payload, SizeOfFluxUndoPayloadHeader);
+				if (!(phdr.flags & FLUX_UNDO_FLAG_HAS_TUPLE))
+				{
+					*what = "delta without before-image";
+					return false;
+				}
+				delta = (const FluxUndoDelta *)
+					(payload + SizeOfFluxUndoPayloadHeader);
+
+				/*
+				 * tuple_len is the delta's length; a reserved index-revive
+				 * area (FLUX_UNDO_FLAG_INDEX_LIST) may follow it.
+				 */
+				delta_len = phdr.tuple_len;
+				if (delta_len < SizeOfFluxUndoDelta ||
+					delta_len > payload_size - SizeOfFluxUndoPayloadHeader)
+				{
+					*what = "delta length out of range";
+					return false;
+				}
+
+				/*
+				 * Reconstruct the prior image by reverse-applying the delta
+				 * onto the CURRENT candidate image (not onto the page).  The
+				 * delta always covers the t_verptr at offset 8, so the
+				 * reconstructed image carries the prior chain link and the
+				 * walk continues one step further back.
+				 */
+				*out_len = delta->old_len;
+#ifdef USE_INJECTION_POINTS
+				if (IS_INJECTION_POINT_ATTACHED("flux-undo-prior-image-short"))
+					*out_len = 1;
+#endif
+				if (!FluxUndoPriorImageLenOk(*out_len, what))
+				{
+					*out_len = 0;
+					return false;
+				}
+				*out_image = (char *) palloc(*out_len);
+				if (!FluxUndoDeltaReconstruct(delta, delta_len,
+											  candidate, candidate_len,
+											  *out_image))
+				{
+					pfree(*out_image);
+					*out_image = NULL;
+					*out_len = 0;
+					*what = "delta does not fit the newer image";
+					return false;
+				}
+				return true;
+			}
+
+		default:
+			*what = "not an UPDATE or DELETE record";
+			return false;
 	}
 }

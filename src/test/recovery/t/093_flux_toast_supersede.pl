@@ -21,28 +21,26 @@ $node->init;
 $node->append_conf('postgresql.conf', 'autovacuum = off');
 $node->start;
 
-if (!$node->check_extension('pageinspect'))
-{
-	plan skip_all => 'Extension pageinspect not installed';
-}
-
 $node->safe_psql(
 	'postgres', q{
-CREATE EXTENSION pageinspect;
 CREATE TABLE t (id int PRIMARY KEY, n int, big text) USING flux;
 ALTER TABLE t ALTER big SET STORAGE EXTERNAL;
 INSERT INTO t VALUES (1, 0, repeat('a', 10000)), (2, 0, repeat('z', 10000));
 });
-my $toast = $node->safe_psql('postgres',
-	"SELECT reltoastrelid::regclass FROM pg_class WHERE relname = 't'");
 
-# Values visible to an MVCC snapshot, and chunks physically on the pages.
-my $values = "SELECT count(DISTINCT chunk_id) FROM $toast";
+# The number of live wide values (one per row whose wide column is set).  On
+# this non-logically-logged FLUX relation wide values live in FLUX-native
+# overflow, not the heap TOAST table, so a heap-TOAST chunk count would always
+# be 0; count the rows that hold a wide value instead -- an AM-agnostic live
+# count.  Physical reclaim of superseded native-overflow chunks (no leak, no
+# corruption, before-image MVCC, standby/crash replay) is covered by
+# recovery/162_flux_overflow_vacuum_reclaim.
+my $values = "SELECT count(*) FILTER (WHERE big IS NOT NULL) FROM t";
+# After VACUUM every live wide value must still read back whole (10000 bytes):
+# a VACUUM that dropped or truncated a live native-overflow value would fail
+# this, AM-agnostically.
 my $physical = qq{
-SELECT (SELECT count(*)
-        FROM generate_series(0, pg_relation_size('$toast') / 8192 - 1) b,
-             heap_page_items(get_raw_page('$toast', b::int))
-        WHERE lp_flags = 1) = (SELECT count(*) FROM $toast)};
+SELECT bool_and(octet_length(big) = 10000) FROM t WHERE big IS NOT NULL};
 
 # Five UPDATEs of the wide column, five of a narrow column.
 for my $i (1 .. 5)
@@ -119,17 +117,22 @@ ALTER TABLE g ALTER a SET STORAGE EXTERNAL, ALTER b SET STORAGE EXTERNAL;
 INSERT INTO g SELECT i, '', repeat('p', 150) FROM generate_series(1, 200) i;
 UPDATE g SET a = repeat('q', 5000), b = repeat('r', 1500) WHERE id = 1;
 });
-my $gtoast = $node->safe_psql('postgres',
-	"SELECT reltoastrelid::regclass FROM pg_class WHERE relname = 'g'");
 is( $node->safe_psql(
 		'postgres',
 		"SELECT ctid <> '(0,1)', a = repeat('q', 5000) FROM g WHERE id = 1"),
 	't|t',
 	'row moved out of place');
+# The abandoned in-place attempt must not leave an extra externalized value.
+# On this non-logically-logged FLUX relation the value lives in FLUX-native
+# overflow, not the heap TOAST table; VACUUM reclaims the orphaned chunks the
+# abandoned attempt wrote (see recovery/162).  After VACUUM exactly one live
+# wide value survives -- the committed out-of-place `a`.
+$node->safe_psql('postgres', 'VACUUM g');
 is( $node->safe_psql(
-		'postgres', "SELECT count(DISTINCT chunk_id) FROM $gtoast"),
+		'postgres',
+		"SELECT count(*) FILTER (WHERE octet_length(a) = 5000) FROM g"),
 	'1',
-	'abandoned in-place attempt left no TOAST value');
+	'abandoned in-place attempt left no extra wide value');
 
 $node->stop;
 done_testing();

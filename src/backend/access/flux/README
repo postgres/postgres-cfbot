@@ -61,15 +61,38 @@ How FLUX differs from heap
    capability gate that falls back to a new TID where in-place index
    maintenance would be unsound.  See the next section.
 
-3. Wide values use standard heap TOAST.  A FLUX relation gets an ordinary
-   heap TOAST table (relation_needs_toast_table mirrors heap; relation_toast_am
-   returns the heap AM).  On INSERT/UPDATE, oversized varlena columns are
-   externalized through the AM-agnostic toast_helper routines (flux_toast_tuple
-   in flux_tuple.c) exactly as heap does.  As in heap, a DELETE (also the
-   delete half of an out-of-place UPDATE) deletes the external values of the
-   version it deletes (flux_toast_delete), as an MVCC delete that commits or
-   rolls back with it, and TOAST VACUUM reclaims them; VACUUM of the table
-   does not touch TOAST.  FLUX has no on-page overflow mechanism of its own.
+3. Wide values live on FLUX's own pages (flux_overflow.c).  A varlena column
+   over FLUX_OVERFLOW_THRESHOLD (a quarter page) is stored as DATA chunk
+   records on ordinary FLUX data pages plus one ROOT directory chunk that
+   names every data chunk's (block, offset); a value too large for one
+   directory gets one level of INDIRECT directory chunks.  The tuple keeps a
+   20-byte FluxOverflowPtr to the root, plus a short inline prefix when there
+   is room.  Each chunk is written under its own buffer lock and its own WAL
+   record (XLOG_FLUX_OVERFLOW_WRITE), and that lock is released before the
+   next chunk is placed, so a writer never holds two chunk-page locks or holds
+   one while it waits for the tuple's page.  Readers learn every data block
+   from the directory, and a value of at least
+   FLUX_OVERFLOW_STREAM_MIN_CHUNKS chunks is read through a read_stream.
+
+   Chunks carry no MVCC fields: a chunk lives as long as some version that
+   names it is visible to someone, whether that version is on the page or
+   only in UNDO.  An in-place UPDATE that keeps a wide value unchanged
+   re-references its chunks instead of rewriting them.  Nothing frees chunks
+   at DML time.  VACUUM's orphan sweep (FluxOverflowCheckOrphans) marks every
+   chunk reachable from a version that is not dead to all, including the
+   before-images on each row's UNDO chain, and frees the rest once their
+   creating XID (FluxOverflowRecordHeader.or_xid) is all-visible.  That covers
+   aborted writers, a crash between a value's chunks and its tuple, and
+   superseded or deleted versions.  Freeing is offset-stable (ItemIdSetUnused
+   and FluxPageDefragment, WAL-logged as XLOG_FLUX_DEFRAG), because chunks
+   share pages with tuples that indexes name by TID.
+
+   Logically-logged relations are the exception: their wide values use the
+   relation's ordinary heap TOAST table (flux_toast_tuple, flux_toast_delete),
+   because reorderbuffer expects an oversized value as a heap TOAST pointer
+   and the decoder has no FLUX relation to reassemble chunks from.  For that
+   reason every FLUX relation that could hold a wide value still gets a TOAST
+   table (relation_needs_toast_table mirrors heap).
 
 4. Heap-shaped xmin/xmax visibility.  FLUX uses the "boring correct"
    visibility model: each tuple carries t_xmin (inserter) and t_xmax
@@ -295,6 +318,7 @@ Source layout
   flux_operations.c  INSERT / DELETE / UPDATE (in-place + out-of-place),
                      in-place index maintenance + its capability gate, VACUUM
   flux_tuple.c       tuple form/deform, flux_toast_tuple / flux_toast_delete
+  flux_overflow.c    FLUX-native overflow: chunk store/fetch, orphan sweep
   flux_mvcc.c        heap-shaped xmin/xmax visibility state, shmem
   flux_pvs.c         prior-version reconstruction from the undo chain
   flux_slot.c        FLUX minimal tuple slot

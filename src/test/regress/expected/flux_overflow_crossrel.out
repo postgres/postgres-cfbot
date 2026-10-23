@@ -1,0 +1,98 @@
+--
+-- FLUX-native overflow: a wide value read from one FLUX relation and written
+-- into another must be resolved against the relation it was READ from, not the
+-- destination.  Regression guard for the cross-relation overflow-pointer bug:
+-- tts_flux_deform resolved the inline FluxOverflowPtr via the mutable
+-- slot->tts_tableOid, which the executor overwrites with the result relation
+-- when a source scan slot is routed into INSERT/UPDATE/MERGE.  That opened the
+-- wrong (destination) relation and read a block past its end
+-- ("could not read blocks N..N ... read only 0 of 8192 bytes").
+--
+-- All cases are deterministic (no concurrency needed).
+--
+CREATE TABLE ovcr_src (id int PRIMARY KEY, v text, w text) USING flux;
+ALTER TABLE ovcr_src ALTER COLUMN v SET STORAGE EXTERNAL;
+-- id 1: ~100 kB EXTERNAL v + ~1 MB w (self-logged, multi-chunk w/ indirection);
+-- ids 2-4: mixed widths and a NULL.
+INSERT INTO ovcr_src
+SELECT g,
+  CASE WHEN g < 4
+       THEN (SELECT string_agg(md5((g * 10000 + i)::text), '')
+             FROM generate_series(1, 3125) i)
+       ELSE 'short' END,
+  CASE g WHEN 1 THEN repeat(md5('w'), 32768)
+         WHEN 2 THEN NULL
+         WHEN 3 THEN 'w3'
+         ELSE repeat('x', 5000) END
+FROM generate_series(1, 4) g;
+CREATE TABLE ovcr_ref AS
+  SELECT id, md5(v) AS mv, md5(w) AS mw, length(v) AS lv, length(w) AS lw
+  FROM ovcr_src;
+CREATE FUNCTION ovcr_ok(tbl regclass) RETURNS boolean LANGUAGE plpgsql AS $$
+DECLARE
+  bad int;
+BEGIN
+  EXECUTE format($q$
+    SELECT count(*) FROM %s d JOIN ovcr_ref r USING (id)
+    WHERE md5(d.v) IS DISTINCT FROM r.mv
+       OR md5(d.w) IS DISTINCT FROM r.mw
+       OR length(d.v) IS DISTINCT FROM r.lv
+       OR length(d.w) IS DISTINCT FROM r.lw $q$, tbl)
+  INTO bad;
+  RETURN bad = 0;
+END $$;
+-- Same-relation read (common case): must keep working.
+SELECT ovcr_ok('ovcr_src') AS same_rel_ok;
+ same_rel_ok 
+-------------
+ t
+(1 row)
+
+-- INSERT ... SELECT from a FLUX source into a FLUX destination.
+CREATE TABLE ovcr_ins (id int, v text, w text) USING flux;
+INSERT INTO ovcr_ins SELECT * FROM ovcr_src;
+SELECT ovcr_ok('ovcr_ins') AS insert_select_ok;
+ insert_select_ok 
+------------------
+ t
+(1 row)
+
+-- INSERT ... SELECT ... ON CONFLICT DO NOTHING (speculative).
+CREATE TABLE ovcr_ocn (id int PRIMARY KEY, v text, w text) USING flux;
+INSERT INTO ovcr_ocn SELECT * FROM ovcr_src ON CONFLICT DO NOTHING;
+SELECT ovcr_ok('ovcr_ocn') AS on_conflict_ok;
+ on_conflict_ok 
+----------------
+ t
+(1 row)
+
+-- CREATE TABLE AS from a FLUX source.
+CREATE TABLE ovcr_ctas USING flux AS SELECT * FROM ovcr_src;
+SELECT ovcr_ok('ovcr_ctas') AS ctas_ok;
+ ctas_ok 
+---------
+ t
+(1 row)
+
+-- Cross-table UPDATE ... FROM pulling wide values out of the source.
+CREATE TABLE ovcr_upd (id int, v text, w text) USING flux;
+INSERT INTO ovcr_upd SELECT id, 'ph', 'ph' FROM ovcr_src;
+UPDATE ovcr_upd d SET v = s.v, w = s.w FROM ovcr_src s WHERE d.id = s.id;
+SELECT ovcr_ok('ovcr_upd') AS update_from_ok;
+ update_from_ok 
+----------------
+ t
+(1 row)
+
+-- MERGE from a FLUX source.
+CREATE TABLE ovcr_mrg (id int PRIMARY KEY, v text, w text) USING flux;
+MERGE INTO ovcr_mrg d USING ovcr_src s ON d.id = s.id
+  WHEN NOT MATCHED THEN INSERT (id, v, w) VALUES (s.id, s.v, s.w);
+SELECT ovcr_ok('ovcr_mrg') AS merge_ok;
+ merge_ok 
+----------
+ t
+(1 row)
+
+DROP FUNCTION ovcr_ok(regclass);
+DROP TABLE ovcr_src, ovcr_ref, ovcr_ins, ovcr_ocn, ovcr_ctas, ovcr_upd, ovcr_mrg;

@@ -101,23 +101,29 @@ EXCEPTION WHEN OTHERS THEN
   RETURN 'ERROR: ' || regexp_replace(SQLERRM, '[0-9]+', 'N', 'g');
 END $$;
 
--- How each value is stored: compressed, external, and whether it is held
--- inline at more than the TOAST target.  (Exact sizes differ by design: FLUX
--- does not convert short varlenas to 1-byte headers.)
+-- How each value is stored.  The heap-specific split (held inline, compressed,
+-- external) does not carry across access methods: for a wide value heap uses
+-- an external TOAST pointer (optionally compressed) while FLUX uses a native
+-- overflow pointer held inline, and heap may compress a MAIN value inline
+-- where FLUX stores it raw inline.  The AM-agnostic invariant is whether the
+-- AM stored the value *specially* -- off the main page, in native overflow, or
+-- compressed -- rather than as a plain short inline varlena.  Content equality
+-- (tf_check: md5/length round-trip) covers correctness regardless of shape.
 CREATE FUNCTION tf_shape(tbl regclass)
-RETURNS TABLE (id int, bv bool, cv bool, ev bool, bw bool, cw bool, ew bool)
+RETURNS TABLE (id int, sv bool, sw bool)
 LANGUAGE plpgsql AS $$
 BEGIN
   IF tbl IS NULL THEN
     RETURN;
   END IF;
   RETURN QUERY EXECUTE format($q$
-    SELECT id, pg_column_size(v) > 2000 AND pg_column_toast_chunk_id(v) IS NULL,
-           pg_column_compression(v) IS NOT NULL,
-           pg_column_toast_chunk_id(v) IS NOT NULL,
-           pg_column_size(w) > 2000 AND pg_column_toast_chunk_id(w) IS NULL,
-           pg_column_compression(w) IS NOT NULL,
-           pg_column_toast_chunk_id(w) IS NOT NULL
+    SELECT id,
+           (pg_column_size(v) > 2000 AND pg_column_toast_chunk_id(v) IS NULL)
+             OR pg_column_compression(v) IS NOT NULL
+             OR pg_column_toast_chunk_id(v) IS NOT NULL,
+           (pg_column_size(w) > 2000 AND pg_column_toast_chunk_id(w) IS NULL)
+             OR pg_column_compression(w) IS NOT NULL
+             OR pg_column_toast_chunk_id(w) IS NOT NULL
     FROM %s$q$, tbl);
 END $$;
 
@@ -307,8 +313,10 @@ WHERE (c.relname LIKE 'tf\_%' OR c.relname IN ('heap_src', 'flux_src'))
   AND r.res !~ '^rows=[14] bad=0 foreign=0$'
 ORDER BY 1; -- expect none
 
--- Storage shape: every FLUX table must store its rows the way its heap twin
--- does.  Lists the rows that differ.
+-- Storage shape: a wide value must be stored off the main page (heap: external
+-- TOAST pointer; FLUX: native overflow pointer held inline), and compression
+-- stays an AM-internal detail.  Lists the rows whose off-page/special status
+-- differs between a FLUX table and its heap twin.
 SELECT p.path, d.*
 FROM (SELECT left(relname, -5) AS path FROM pg_class
       WHERE relname LIKE 'tf\_%\_heap' AND relkind IN ('r', 'm')) p,

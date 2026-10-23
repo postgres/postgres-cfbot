@@ -86,7 +86,6 @@ typedef struct FluxLogicalImage
 
 /* Flags for xl_flux_overflow_write */
 #define FLUX_OVERFLOW_WAL_NEW_RECORD	0x0000	/* New overflow record */
-#define FLUX_OVERFLOW_WAL_LINK_UPDATE	0x0001	/* Link update only */
 
 /*
  * Common WAL record flags.
@@ -100,8 +99,10 @@ typedef struct FluxLogicalImage
  */
 #define FLUX_WAL_NO_LOGICAL	0x0001
 #define FLUX_WAL_CROSS_PAGE	0x0002	/* Cross-page out-of-place update */
-#define FLUX_WAL_HAS_OVERFLOW_BLK0	0x0004	/* Block 0 buf data has overflow
-											 * records */
+/*
+ * 0x0004 reserved (was FLUX_WAL_HAS_OVERFLOW_BLK0; overflow chunks are now
+ * self-logged, never collected onto a DML record)
+ */
 #define FLUX_WAL_PREFIX_SUFFIX	0x0008	/* Update uses prefix/suffix
 										 * compression */
 /*
@@ -131,8 +132,8 @@ typedef struct FluxLogicalImage
 /*
  * Block id of the visibility map page an INSERT, UPDATE or DELETE record
  * clears bits on (with FLUX_WAL_ALL_VISIBLE_CLEARED).  The highest one, so
- * that it never takes the place of an overflow, destination or undo block,
- * which follow block 0 without gaps.
+ * that it never takes the place of a destination or undo block, which follow
+ * block 0 without gaps.
  */
 #define FLUX_WAL_KEY_INTACT 0x0400	/* SUPERSEDE did not change key columns */
 
@@ -404,11 +405,10 @@ typedef struct xl_flux_defrag
 typedef struct xl_flux_overflow_write
 {
 	OffsetNumber offnum;		/* Offset of overflow record on page */
-	uint16		flags;			/* Flags (0 = new record, 1 = link update) */
+	uint16		flags;			/* Reserved; always FLUX_OVERFLOW_WAL_NEW_RECORD */
 	uint32		data_len;		/* Length of overflow data chunk */
 	uint64		commit_ts;		/* Commit timestamp */
-	/* FluxOverflowRecordHeader + data follows for new records */
-	/* FluxOverflowRecordHeader follows for link updates */
+	/* FluxOverflowRecordHeader + data follows */
 } xl_flux_overflow_write;
 
 typedef struct xl_flux_compress
@@ -564,13 +564,11 @@ extern void FluxXLogRegisterLogicalImage(FluxLogicalImage *img, uint16 *flags);
 
 extern XLogRecPtr FluxXLogInsert(Relation rel, Buffer buffer, OffsetNumber offnum,
 								 FluxTuple tuple, uint64 commit_ts,
-								 FluxOverflowBuffers *overflow_buffers,
 								 FluxLogicalImage *logical_img,
 								 bool force_page_image);
 extern XLogRecPtr FluxXLogUpdate(Relation rel, Buffer buffer, OffsetNumber offnum,
 								 FluxTuple old_tuple, FluxTuple new_tuple,
 								 uint64 old_commit_ts, uint64 new_commit_ts,
-								 FluxOverflowBuffers *overflow_buffers,
 								 Buffer new_buffer,
 								 FluxLogicalImage *old_img,
 								 FluxLogicalImage *new_img,

@@ -72,7 +72,7 @@ test: brin gin gist spgist privileges init_privs security_label collate matview 
 # Additional BRIN tests
 # ----------
 test: brin_bloom brin_multi
-test: flux flux_toast_foreign flux_fk flux_deferred_trigger flux_rewrite_xact
+test: flux flux_toast_foreign flux_overflow_crossrel flux_overflow_align flux_fk flux_deferred_trigger flux_rewrite_xact
 test: flux_index_aba
 test: flux_dml_semantics
 test: flux_cluster

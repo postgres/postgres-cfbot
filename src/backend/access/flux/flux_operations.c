@@ -593,7 +593,6 @@ flux_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	FluxLogicalImage insert_logical_img;
 	Buffer		vmbuffer;
 	Size		targetFreeSpace;
-	int			i;
 	Datum		toast_values[MaxTupleAttributeNumber];
 	bool		toast_isnull[MaxTupleAttributeNumber];
 	ToastAttrInfo toast_attr[MaxTupleAttributeNumber];
@@ -623,24 +622,24 @@ flux_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	 * store large attributes (> FLUX_OVERFLOW_THRESHOLD) in overflow records
 	 * on normal data pages, replacing them with compact inline overflow
 	 * pointers.
-	 *
-	 * Overflow buffers are kept pinned for atomic WAL logging inside the
-	 * critical section below.
 	 */
-	overflow_buffers.count = 0;
+	overflow_buffers.avoid_block = InvalidBlockNumber;
 
 	/*
-	 * FLUX has no on-page overflow: TOAST any wide varlena columns into the
-	 * relation's standard heap TOAST table before forming the tuple, exactly
-	 * like heap.  On return toast_values[] holds the (possibly externalized)
-	 * datums that FluxFormTuple stores verbatim.
+	 * Wide varlena columns go to FLUX-native overflow (records on FLUX pages)
+	 * inside FluxFormTuple.  Each overflow chunk is self-logged under its own
+	 * lock and released before the next, so no chunk page is held when we
+	 * lock the main tuple page below.  For logically-logged relations we
+	 * still route wide values through the standard heap TOAST path so the
+	 * heap-format logical image carries resolvable values for decoding.
 	 */
 	memcpy(toast_values, slot->tts_values,
 		   RelationGetDescr(relation)->natts * sizeof(Datum));
 	memcpy(toast_isnull, slot->tts_isnull,
 		   RelationGetDescr(relation)->natts * sizeof(bool));
-	flux_toast_tuple(relation, toast_values, toast_isnull, NULL, NULL,
-					 &ttc, toast_attr, &toasted, 0);
+	if (RelationIsLogicallyLogged(relation))
+		flux_toast_tuple(relation, toast_values, toast_isnull, NULL, NULL,
+						 &ttc, toast_attr, &toasted, 0);
 
 	flux_tuple = FluxFormTuple(RelationGetDescr(relation),
 							   toast_values,
@@ -734,11 +733,6 @@ flux_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	 * only a hint -- a stale or too-full target just falls through to the FSM
 	 * below and to the have_page free-space recheck.
 	 *
-	 * The cached-target fast path is used only when the tuple has no overflow
-	 * data: with overflow, FluxFormTupleWithOverflow has already chosen and
-	 * locked pages and the target_block/overflow-buffer interplay below
-	 * assumes the FSM was consulted, so that path stays on the FSM.
-	 *
 	 * Account for fill factor: reserve space for future in-place updates.
 	 */
 
@@ -759,61 +753,28 @@ flux_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	targetFreeSpace = FluxTargetFreeSpace(relation, tuple_size);
 
 	{
-		target_block = InvalidBlockNumber;
-		if (overflow_buffers.count == 0)
-			target_block = RelationGetTargetBlock(relation);
+		target_block = RelationGetTargetBlock(relation);
 
 		if (target_block == InvalidBlockNumber)
 			target_block = FluxGetPageWithFreeSpace(relation, targetFreeSpace);
 	}
 
 	if (target_block == InvalidBlockNumber)
-	{
-		/* Clean up overflow buffers before throwing error */
-		for (i = 0; i < overflow_buffers.count; i++)
-		{
-			UnlockReleaseBuffer(overflow_buffers.buffers[i].buffer);
-			pfree(overflow_buffers.buffers[i].record_data);
-		}
 		elog(ERROR, "FLUX failed to allocate page for tuple insertion");
-	}
 
 	/*
 	 * Pre-allocate WAL buffer space BEFORE acquiring the data buffer lock.
 	 * XLogEnsureRecordSpace() may allocate memory, so it MUST be called
-	 * outside the critical section.
-	 *
-	 * rdata slots needed: MAX_OVERFLOW_BUFFERS * 2 (header + data per
-	 * overflow record) + 2 (xl_flux_insert header + tuple data)
+	 * outside the critical section.  Overflow chunks are self-logged on their
+	 * own records (not folded onto this INSERT), so the only forward block is
+	 * block 0; the folded undo pages follow it.
 	 */
 	if (RelationNeedsWAL(relation))
-		XLogEnsureRecordSpace(XLR_MAX_BLOCK_ID, 3 + MAX_OVERFLOW_BUFFERS * 2);
+		XLogEnsureRecordSpace(XLR_MAX_BLOCK_ID, 3);
 
-	/*
-	 * Check if target_block is already locked in overflow_buffers from
-	 * FluxFormTupleWithOverflow. If FSM returns the same block for both
-	 * overflow storage and main tuple storage, we must reuse that buffer to
-	 * avoid double-locking.
-	 */
-	buffer = InvalidBuffer;
-	for (i = 0; i < overflow_buffers.count; i++)
-	{
-		if (BufferGetBlockNumber(overflow_buffers.buffers[i].buffer) == target_block)
-		{
-			buffer = overflow_buffers.buffers[i].buffer;
-			break;
-		}
-	}
-
-	/*
-	 * Read and lock the target page only if we don't already have it locked
-	 * from overflow processing.
-	 */
-	if (!BufferIsValid(buffer))
-	{
-		buffer = ReadBuffer(relation, target_block);
-		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-	}
+	/* Read and lock the target page. */
+	buffer = ReadBuffer(relation, target_block);
+	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
 
 	/*
@@ -825,141 +786,58 @@ flux_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	 */
 	if (PageGetHeapFreeSpace(page) < targetFreeSpace)
 	{
-		bool		buffer_is_from_overflow = false;
-
-		/*
-		 * Check if this buffer is from overflow_buffers. If so, we must NOT
-		 * unlock it for pruning, as overflow_buffers expects all its buffers
-		 * to remain locked until the critical section.
-		 */
-		for (i = 0; i < overflow_buffers.count; i++)
-		{
-			if (overflow_buffers.buffers[i].buffer == buffer)
-			{
-				buffer_is_from_overflow = true;
-				break;
-			}
-		}
+		bool		buffer_locked_after_prune = false;
 
 		/*
 		 * Page doesn't have enough space.  Try opportunistic pruning to
 		 * reclaim space from dead tuples before falling back to the FSM. We
 		 * must release our lock first since FluxPagePruneOpt() takes its own
 		 * conditional lock.
-		 *
-		 * IMPORTANT: Skip pruning if buffer is from overflow_buffers, as we
-		 * must keep those buffers locked.
 		 */
-		if (!buffer_is_from_overflow)
+		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+		if (FluxPagePruneOpt(relation, buffer))
 		{
-			bool		buffer_locked_after_prune = false;
-
-			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
-			if (FluxPagePruneOpt(relation, buffer))
-			{
-				/* Pruning freed space -- re-lock and check again */
-				LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-				buffer_locked_after_prune = true;
-				page = BufferGetPage(buffer);
-				if (PageGetHeapFreeSpace(page) >= targetFreeSpace)
-					goto have_page;
-				/* Still not enough after pruning, fall through to FSM retry */
-			}
-
-			/*
-			 * FSM information was stale or pruning didn't help. Update and
-			 * retry.  Re-acquire the buffer lock only if we do not already
-			 * hold it: FluxPagePruneOpt drops the lock it takes, so after a
-			 * prune that did not free enough (buffer_locked_after_prune) the
-			 * buffer IS still locked from the re-lock above -- locking again
-			 * here would double-lock and trip the buffer content-lock
-			 * assertion under concurrency.
-			 */
-			if (!buffer_locked_after_prune)
-				LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-			FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
-			UnlockReleaseBuffer(buffer);
-		}
-		else
-		{
-			/*
-			 * Buffer is from overflow_buffers and can't be pruned or
-			 * released. This means FSM returned an overflow page for the main
-			 * tuple, which doesn't have enough space. This should be rare but
-			 * can happen if overflow pages filled up during tuple formation.
-			 *
-			 * Update FSM for this page, then get a DIFFERENT page. We must
-			 * retry until we find a page that's NOT in overflow_buffers.
-			 */
-			FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
+			/* Pruning freed space -- re-lock and check again */
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+			buffer_locked_after_prune = true;
+			page = BufferGetPage(buffer);
+			if (PageGetHeapFreeSpace(page) >= targetFreeSpace)
+				goto have_page;
+			/* Still not enough after pruning, fall through to FSM retry */
 		}
 
 		/*
-		 * Retry with updated FSM, excluding blocks in overflow_buffers. Keep
-		 * trying until we find a suitable page that we don't already have
-		 * locked for overflow storage.
+		 * FSM information was stale or pruning didn't help. Update and retry.
+		 * Re-acquire the buffer lock only if we do not already hold it:
+		 * FluxPagePruneOpt drops the lock it takes, so after a prune that did
+		 * not free enough (buffer_locked_after_prune) the buffer IS still
+		 * locked from the re-lock above -- locking again here would
+		 * double-lock and trip the buffer content-lock assertion under
+		 * concurrency.
 		 */
+		if (!buffer_locked_after_prune)
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+		FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
+		UnlockReleaseBuffer(buffer);
+
+		/* Retry with updated FSM until we find a page with room. */
 		for (;;)
 		{
 			target_block = FluxGetPageWithFreeSpace(relation, targetFreeSpace);
 			if (target_block == InvalidBlockNumber)
-			{
-				/* Clean up overflow buffers before throwing error */
-				for (i = 0; i < overflow_buffers.count; i++)
-				{
-					UnlockReleaseBuffer(overflow_buffers.buffers[i].buffer);
-					pfree(overflow_buffers.buffers[i].record_data);
-				}
 				elog(ERROR, "FLUX failed to allocate page for tuple insertion after retry");
-			}
 
-			/*
-			 * Check if target_block is already locked in overflow_buffers. If
-			 * so, skip it and try again - we need a different page.
-			 */
-			buffer = InvalidBuffer;
-			for (i = 0; i < overflow_buffers.count; i++)
-			{
-				if (BufferGetBlockNumber(overflow_buffers.buffers[i].buffer) == target_block)
-				{
-					/*
-					 * This block is already used for overflow - mark FSM and
-					 * retry
-					 */
-					FluxRecordFreeSpace(relation, target_block, 0);
-					buffer = InvalidBuffer;
-					break;
-				}
-			}
+			buffer = ReadBuffer(relation, target_block);
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+			page = BufferGetPage(buffer);
 
-			/*
-			 * If we found a block not in overflow_buffers, check if it has
-			 * space
-			 */
-			if (i >= overflow_buffers.count)
-			{
-				buffer = ReadBuffer(relation, target_block);
-				LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-				page = BufferGetPage(buffer);
+			/* Verify the page actually has enough space. */
+			if (PageGetHeapFreeSpace(page) >= targetFreeSpace)
+				break;			/* Found a suitable page - exit retry loop */
 
-				/*
-				 * Verify the page actually has enough space. If not, update
-				 * FSM and retry.
-				 */
-				if (PageGetHeapFreeSpace(page) >= targetFreeSpace)
-				{
-					/* Found a suitable page - exit retry loop */
-					break;
-				}
-				else
-				{
-					/* FSM was wrong - update it and retry */
-					FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
-					UnlockReleaseBuffer(buffer);
-					buffer = InvalidBuffer;
-					/* Continue outer loop to try again */
-				}
-			}
+			/* FSM was wrong - update it and retry */
+			FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
+			UnlockReleaseBuffer(buffer);
 		}
 	}
 
@@ -1099,12 +977,11 @@ have_page:
 	FluxVMClearForChange(buffer, vmbuffer);
 	MarkBufferDirty(buffer);
 
-	/* Log the insertion with all overflow buffers atomically */
+	/* Log the insertion (overflow chunks were already self-logged). */
 	if (RelationNeedsWAL(relation))
 	{
 		XLogRecPtr	recptr = FluxXLogInsert(relation, buffer, offnum,
 											flux_tuple, current_ts,
-											&overflow_buffers,
 											&insert_logical_img,
 											false);
 
@@ -1118,34 +995,6 @@ have_page:
 		ReleaseBuffer(vmbuffer);
 
 	FluxXLogReleaseLogicalImage(&insert_logical_img);
-
-	/*
-	 * Release all overflow buffers and free their cached data.
-	 *
-	 * IMPORTANT: Due to spatial locality optimization, an overflow buffer
-	 * might be the SAME as the main buffer or as another overflow buffer
-	 * (when overflow data is placed on the same page). Skip releasing buffers
-	 * that were already released.  The main buffer is NOT released yet; only
-	 * overflow buffers that differ from it.
-	 */
-	for (i = 0; i < overflow_buffers.count; i++)
-	{
-		Buffer		ovf_buf = overflow_buffers.buffers[i].buffer;
-		bool		already_released = (ovf_buf == buffer);
-		int			j;
-
-		/* Check if this buffer was already released by a prior overflow entry */
-		for (j = 0; j < i && !already_released; j++)
-		{
-			if (overflow_buffers.buffers[j].buffer == ovf_buf)
-				already_released = true;
-		}
-
-		if (!already_released)
-			UnlockReleaseBuffer(ovf_buf);
-		pfree(overflow_buffers.buffers[i].record_data);
-	}
-
 
 	/*
 	 * Save free space while we still have the buffer locked, then release the
@@ -1165,13 +1014,10 @@ have_page:
 		/*
 		 * Cache this block as the next insert target (heap's
 		 * RelationSetTargetBlock pattern) so the following append skips the
-		 * FSM search entirely.  Only on the no-overflow path -- the overflow
-		 * path deliberately stays on the FSM (see the target-block lookup
-		 * above).  If the page is now too full for the next tuple, the
-		 * have_page free-space recheck falls back to the FSM.
+		 * FSM search entirely.  If the page is now too full for the next
+		 * tuple, the have_page free-space recheck falls back to the FSM.
 		 */
-		if (overflow_buffers.count == 0)
-			RelationSetTargetBlock(relation, saved_blkno);
+		RelationSetTargetBlock(relation, saved_blkno);
 	}
 
 	/*
@@ -2208,7 +2054,6 @@ restart:
 	 * releasing the buffer so we can read the tuple header and page state.
 	 */
 	{
-		bool		has_overflow = (tuple_hdr->t_flags & FLUX_TUPLE_HAS_OVERFLOW) != 0;
 		Size		free_space = PageGetHeapFreeSpace(page);
 
 		UnlockReleaseBuffer(buffer);
@@ -2259,19 +2104,10 @@ restart:
 		FluxLocalDirtyPageMark(relation, blkno);
 
 		/*
-		 * NOTE: We do NOT immediately clean up overflow chains here.
-		 * Immediate cleanup was: 1. Buggy (collected wrong overflow pointers
-		 * after modification) 2. Expensive on hot paths (extra buffer I/O +
-		 * locking) 3. Complex to WAL-log correctly
-		 *
-		 * Instead, overflow cleanup is deferred to VACUUM.  When VACUUM
-		 * prunes deleted tuples, it will also reclaim orphaned overflow
-		 * pages.
-		 *
-		 * Future enhancement: Log overflow block/offset in WAL DELETE record
-		 * so UNDO log pruning can also clean up overflow chains.
+		 * The deleted version's overflow chunks stay: an older snapshot may
+		 * still read them, and VACUUM's orphan sweep reclaims them once no
+		 * version that names them is visible to anyone.
 		 */
-		(void) has_overflow;	/* Suppress unused variable warning */
 
 		/* Update free space map - deleted tuple creates more free space */
 		FluxRecordFreeSpace(relation, blkno, free_space);
@@ -2281,40 +2117,6 @@ restart:
 	if (!(options & FLUX_DML_NO_STATS))
 		pgstat_count_heap_delete(relation);
 	return TM_Ok;
-}
-
-/*
- * Release a set of overflow buffers collected during a force-shrink update.
- *
- * FluxStoreOverflowColumn leaves each overflow page locked, dirty, and
- * unlogged, handing the buffers back to the caller for atomic WAL logging on
- * the success path.  On any error path before that logging happens, the caller
- * must release them here so no dirty unlogged page is pinned into transaction
- * abort.  Skips main_buffer (released separately by the caller) and any buffer
- * that appears more than once (two overflow columns can land on one page).
- */
-static void
-flux_release_update_overflow_buffers(FluxOverflowBuffers *bufs,
-									 Buffer main_buffer)
-{
-	int			i;
-
-	for (i = 0; i < bufs->count; i++)
-	{
-		Buffer		ovf_buf = bufs->buffers[i].buffer;
-		bool		already_released = (ovf_buf == main_buffer);
-		int			j;
-
-		for (j = 0; j < i && !already_released; j++)
-		{
-			if (bufs->buffers[j].buffer == ovf_buf)
-				already_released = true;
-		}
-		if (!already_released)
-			UnlockReleaseBuffer(ovf_buf);
-		pfree(bufs->buffers[i].record_data);
-	}
-	bufs->count = 0;
 }
 
 /*
@@ -2813,7 +2615,7 @@ flux_index_change_exact(Relation relation, ItemPointer otid,
 			econtext = GetPerTupleExprContext(estate);
 			oldslot = MakeSingleTupleTableSlot(RelationGetDescr(relation),
 											   table_slot_callbacks(relation));
-			FluxSlotStoreTuple(oldslot, old_hdr, old_len, InvalidBuffer);
+			FluxSlotStoreTuple(oldslot, old_hdr, old_len, InvalidBuffer, relation);
 			oldslot->tts_tid = *otid;
 			slot_getallattrs(oldslot);
 			slot_getallattrs(newslot);
@@ -3065,6 +2867,126 @@ flux_same_version(const FluxTupleHeader *tuple_hdr, UndoRecPtr verptr,
 {
 	return FluxTupleGetVersionPtr(tuple_hdr) == verptr &&
 		TransactionIdEquals(FluxTupleGetXmin(tuple_hdr), xmin);
+}
+
+/*
+ * flux_update_needs_overflow
+ *
+ * Would forming the new in-place UPDATE tuple from these datums write (or
+ * COW-read) any FLUX-native overflow chunk?  Answer it WITHOUT forming, so the
+ * caller can decide whether the main page lock must be dropped before forming.
+ *
+ * Overflow page I/O inside FluxFormTupleUpdate (both the Pass-1 COW verify and
+ * the Pass-2 store) happens only for a varlena column, storage != PLAIN, not
+ * already an overflow pointer, whose detoasted length reaches
+ * FLUX_OVERFLOW_THRESHOLD -- exactly the eligibility in flux_form_tuple_internal.
+ * A logically-logged relation never takes the native path (it routes wide
+ * values through heap TOAST), so nothing overflows there either.  When this
+ * returns false the tuple can be formed with the main page lock held, which
+ * closes the unlock window entirely for the common narrow row (TPC-C's
+ * warehouse/district counters never overflow).
+ */
+static bool
+flux_update_needs_overflow(Relation relation, Datum *values, bool *isnull)
+{
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	int			i;
+
+	if (RelationIsLogicallyLogged(relation))
+		return false;
+
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+		struct varlena *vl;
+		struct varlena *detoasted;
+		Size		vlen;
+
+		if (isnull[i] || att->attisdropped || att->attlen != -1)
+			continue;
+		if (att->attstorage == TYPSTORAGE_PLAIN)
+			continue;
+
+		vl = (struct varlena *) DatumGetPointer(values[i]);
+
+		/* An already-stored overflow pointer passes straight through. */
+		if (FluxIsOverflowPtr(vl))
+			continue;
+
+		/*
+		 * Only detoast to measure when the value could reach the threshold:
+		 * an inline value already smaller than the threshold cannot, and the
+		 * common narrow row short-circuits here with no detoast.
+		 */
+		if (!VARATT_IS_EXTERNAL(vl) &&
+			VARSIZE_ANY_EXHDR(vl) < (Size) FLUX_OVERFLOW_THRESHOLD)
+			continue;
+
+		detoasted = pg_detoast_datum(vl);
+		vlen = VARSIZE_ANY_EXHDR(detoasted);
+		if (detoasted != vl)
+			pfree(detoasted);
+		if (vlen >= (Size) FLUX_OVERFLOW_THRESHOLD)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * flux_recheck_version_after_relock
+ *
+ * The in-place UPDATE slow path drops the main page's exclusive lock to write
+ * the new tuple's overflow chunks, then re-locks.  While unlocked, the page's
+ * only serialization of two writers of this row is gone (an uncontended writer
+ * holds no heavyweight tuple lock), so a second writer can run its own update
+ * and COMMIT in the window.  Overwriting the row with a tuple formed from the
+ * values read before the unlock would silently lose that committed update.
+ *
+ * After re-locking, confirm the row is still the version this update decided
+ * from (verptr + xmin unchanged, like flux_same_version), and not a committed
+ * delete that landed meanwhile.  Caller passes the (verptr, xmin) captured
+ * from the on-page header BEFORE the unlock.  Returns:
+ *   TM_Ok      -- unchanged, safe to overwrite in place;
+ *   TM_Deleted -- a committed delete landed (tmfd filled with the deleter);
+ *   TM_Updated -- a concurrent writer moved the version; tmfd points the
+ *                 executor back at otid so it waits/EPQs, exactly as the
+ *                 pre-update gates would have.
+ * On a non-Ok return the caller must release the buffer and free its work.
+ * This is the check force_shrink_retry runs after ITS unlock; both call here.
+ */
+static TM_Result
+flux_recheck_version_after_relock(FluxTupleHeader *old_tuple_hdr,
+								  ItemPointer otid,
+								  UndoRecPtr verptr, TransactionId xmin,
+								  TM_FailureData *tmfd)
+{
+	if ((old_tuple_hdr->t_flags & FLUX_TUPLE_DELETED) &&
+		flux_deleted_after_wait(old_tuple_hdr) == TM_Deleted)
+	{
+		if (tmfd)
+		{
+			tmfd->ctid = *otid;
+			tmfd->xmax = FluxTupleGetXmax(old_tuple_hdr);
+			tmfd->cmax = InvalidCommandId;
+			tmfd->traversed = false;
+		}
+		return TM_Deleted;
+	}
+
+	if (FluxTupleGetVersionPtr(old_tuple_hdr) != verptr ||
+		!TransactionIdEquals(FluxTupleGetXmin(old_tuple_hdr), xmin))
+	{
+		if (tmfd)
+		{
+			tmfd->ctid = *otid;
+			tmfd->xmax = InvalidTransactionId;
+			tmfd->cmax = InvalidCommandId;
+			tmfd->traversed = false;
+		}
+		return TM_Updated;
+	}
+
+	return TM_Ok;
 }
 
 /*
@@ -3818,7 +3740,6 @@ flux_tuple_update_inplace(Relation relation, ItemPointer otid, TupleTableSlot *s
 	FluxTuple	new_tuple;
 	Size		new_tuple_size;
 	uint64		current_ts;
-	bool		old_has_overflow = false;
 	bool		have_tuple_lock = false;
 	LockTupleMode update_lockmode = key_changed ?
 		LockTupleExclusive : LockTupleNoKeyExclusive;
@@ -3830,7 +3751,6 @@ flux_tuple_update_inplace(Relation relation, ItemPointer otid, TupleTableSlot *s
 	FluxLogicalImage update_old_img;
 	FluxLogicalImage update_new_img;
 	FluxOverflowBuffers update_overflow_buffers;
-	int			upd_i;
 	uint64		defrag_oldest_ts = 0;
 	TransactionId defrag_oldest_xmin = InvalidTransactionId;
 	bool		force_shrink_attempted = false;
@@ -4756,9 +4676,6 @@ flux_update_slow_path:
 		}
 	}
 
-	/* Check if old tuple has overflow chains to clean up later */
-	old_has_overflow = (old_tuple_hdr->t_flags & FLUX_TUPLE_HAS_OVERFLOW) != 0;
-
 	/*
 	 * Check if tuple is already deleted.  As in the delete path, a DELETED
 	 * flag may reflect an in-progress delete by a concurrent transaction
@@ -5620,9 +5537,26 @@ self_lock_done:
 	 * If overflow data lands on the same page we're updating, that would
 	 * cause a buffer lock re-entry assertion failure.
 	 */
-	update_overflow_buffers.count = 0;
+	update_overflow_buffers.avoid_block = blkno;	/* main tuple's page:
+													 * never place or re-lock
+													 * a chunk there while we
+													 * form the new tuple with
+													 * the main lock released */
+	upd_ttc.ttc_rel = NULL;		/* set by flux_toast_tuple(); NULL == skipped */
 	{
 		bool		buffer_unlocked = false;
+		bool		needs_overflow;
+
+		/*
+		 * Identity of the row we decided this update from, captured from the
+		 * on-page header while the main lock is still held.  If we must drop
+		 * the lock to write overflow chunks, we re-check this after relocking
+		 * (flux_recheck_version_after_relock) so a writer that committed in
+		 * the window is not clobbered -- the lost update this path otherwise
+		 * allows.
+		 */
+		UndoRecPtr	recheck_verptr = FluxTupleGetVersionPtr(old_tuple_hdr);
+		TransactionId recheck_xmin = FluxTupleGetXmin(old_tuple_hdr);
 
 		/*
 		 * This in-place UPDATE path runs only when no indexed column changed
@@ -5663,21 +5597,63 @@ self_lock_done:
 			memcpy(upd_toast_isnull, slot->tts_isnull, upd_natts * sizeof(bool));
 
 			/*
-			 * Without logical decoding of the UPDATE, as for heap, none of
-			 * its TOAST chunks either.
+			 * Wide varlena columns go to FLUX-native overflow inside
+			 * FluxFormTupleUpdate (which COW-re-references an unchanged wide
+			 * value against the old tuple's chunks instead of rewriting it).
+			 * Logically-logged relations still route through heap TOAST so
+			 * the logical image carries resolvable values.
 			 */
-			flux_toast_tuple(relation, upd_toast_values, upd_toast_isnull,
-							 upd_old_copy ? upd_old_values : NULL,
-							 upd_old_copy ? upd_old_isnull : NULL,
-							 &upd_ttc, upd_toast_attr,
-							 &upd_toasted,
-							 walLogical ? 0 : HEAP_INSERT_NO_LOGICAL);
+			if (RelationIsLogicallyLogged(relation))
+				flux_toast_tuple(relation, upd_toast_values, upd_toast_isnull,
+								 upd_old_copy ? upd_old_values : NULL,
+								 upd_old_copy ? upd_old_isnull : NULL,
+								 &upd_ttc, upd_toast_attr,
+								 &upd_toasted,
+								 walLogical ? 0 : HEAP_INSERT_NO_LOGICAL);
 
-			new_tuple = FluxFormTuple(RelationGetDescr(relation),
-									  upd_toast_values,
-									  upd_toast_isnull,
-									  NULL, /* FLUX has no on-page overflow */
-									  NULL);
+			{
+				int			nov = RelationGetDescr(relation)->natts;
+				FluxOverflowPtr *upd_old_ovp = palloc(nov * sizeof(FluxOverflowPtr));
+				bool	   *upd_old_ovpr = palloc(nov * sizeof(bool));
+
+				/*
+				 * Collect the old version's overflow refs (for COW) while its
+				 * buffer is still locked.
+				 */
+				FluxCollectOverflowPtrsByAttr(old_tuple_hdr,
+											  RelationGetDescr(relation),
+											  upd_old_ovp, upd_old_ovpr, nov);
+
+				/*
+				 * Drop the main page lock ONLY when forming the new tuple will
+				 * actually touch overflow pages: FluxFormTupleUpdate locks
+				 * overflow pages (to store new chunks, or to COW-verify an
+				 * old chunk), which could be the page we are updating --
+				 * holding the main lock across that would self-deadlock.  When
+				 * no column overflows (the common narrow row -- TPC-C's
+				 * warehouse/district counters never do), form UNDER the lock
+				 * as v7 did, so there is no unlock window and no lost update
+				 * to guard against.  When we do unlock, the item is re-locked
+				 * and the row re-validated below (buffer_unlocked path).
+				 */
+				needs_overflow = flux_update_needs_overflow(relation,
+															upd_toast_values,
+															upd_toast_isnull);
+				if (needs_overflow)
+				{
+					LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+					buffer_unlocked = true;
+				}
+
+				new_tuple = FluxFormTupleUpdate(RelationGetDescr(relation),
+												upd_toast_values,
+												upd_toast_isnull,
+												relation,
+												&update_overflow_buffers,
+												upd_old_ovp, upd_old_ovpr);
+				pfree(upd_old_ovp);
+				pfree(upd_old_ovpr);
+			}
 		}
 
 		/* Set MVCC fields for new tuple (heap-shaped: fresh version) */
@@ -5720,22 +5696,12 @@ self_lock_done:
 		{
 			/*
 			 * Re-acquire the buffer lock for the in-place update decision.
-			 * Check if the main buffer is already locked as part of the
-			 * overflow buffers to avoid double-lock assertion failure.
+			 * The main page lock was released before forming the new tuple
+			 * (which self-logs and releases each overflow chunk page), so we
+			 * hold no chunk-page lock here and re-lock the main page
+			 * normally.
 			 */
-			bool		buffer_already_locked = false;
-
-			for (upd_i = 0; upd_i < update_overflow_buffers.count; upd_i++)
-			{
-				if (update_overflow_buffers.buffers[upd_i].buffer == buffer)
-				{
-					buffer_already_locked = true;
-					break;
-				}
-			}
-
-			if (!buffer_already_locked)
-				LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
 			page = BufferGetPage(buffer);
 
@@ -5753,6 +5719,35 @@ self_lock_done:
 				return TM_Invisible;
 			}
 			old_tuple_hdr = (FluxTupleHeader *) PageGetItem(page, itemid);
+
+			/*
+			 * Re-check that the row is still the version we decided from.  A
+			 * second writer could have updated and COMMITTED this row while
+			 * the lock was dropped to write overflow chunks (nothing else
+			 * serializes two writers here); overwriting with our tuple, formed
+			 * from the values read before the unlock, would silently lose its
+			 * update.  If the version pointer / xmin moved (a concurrent
+			 * writer replaced the row) report TM_Updated so the executor
+			 * waits and re-evaluates via EPQ; a committed delete gives
+			 * TM_Deleted.  Shared with force_shrink_retry via
+			 * flux_recheck_version_after_relock.
+			 */
+			{
+				TM_Result	reval =
+					flux_recheck_version_after_relock(old_tuple_hdr, otid,
+													  recheck_verptr,
+													  recheck_xmin, tmfd);
+
+				if (reval != TM_Ok)
+				{
+					UnlockReleaseBuffer(buffer);
+					FluxFreeTuple(new_tuple);
+					flux_toast_abandon(&upd_ttc);
+					FLUX_RELEASE_TUPLOCK();
+					return reval;
+				}
+			}
+
 		}
 	}
 
@@ -5930,10 +5925,8 @@ retry_fit:
 				else
 				{
 					if (!force_shrink_attempted &&
-						update_overflow_buffers.count == 0)
+						!(new_tuple->t_data->t_infomask & FLUX_INFOMASK_HASOVERFLOW))
 						goto force_shrink_retry;
-					flux_release_update_overflow_buffers(&update_overflow_buffers,
-														 buffer);
 					UnlockReleaseBuffer(buffer);
 					FluxFreeTuple(new_tuple);
 					flux_toast_abandon(&upd_ttc);
@@ -5962,10 +5955,8 @@ retry_fit:
 			{
 				/* Defrag wouldn't free enough space */
 				if (!force_shrink_attempted &&
-					update_overflow_buffers.count == 0)
+					!(new_tuple->t_data->t_infomask & FLUX_INFOMASK_HASOVERFLOW))
 					goto force_shrink_retry;
-				flux_release_update_overflow_buffers(&update_overflow_buffers,
-													 buffer);
 				UnlockReleaseBuffer(buffer);
 				FluxFreeTuple(new_tuple);
 				flux_toast_abandon(&upd_ttc);
@@ -5995,19 +5986,26 @@ retry_fit:
 		 * Strategy 1).
 		 *
 		 * This branch is only entered from the ERROR sites above, and only
-		 * when the first form attempt took the no-overflow fast path (the
-		 * main buffer is still locked and no overflow buffers were
-		 * collected).
+		 * when the first form attempt did NOT already push a column off-page
+		 * (the tuple carries no FLUX_INFOMASK_HASOVERFLOW): a row that
+		 * already overflowed its wide columns and still cannot fit must move
+		 * to a new TID (out-of-place), not be force-shrunk in place.
 		 */
 force_shrink_retry:
 		{
-			bool		relock_already_locked = false;
 			UndoRecPtr	shrink_verptr = FluxTupleGetVersionPtr(old_tuple_hdr);
 			TransactionId shrink_xmin = FluxTupleGetXmin(old_tuple_hdr);
 
 			FluxFreeTuple(new_tuple);
 
-			/* Release the main buffer lock before re-forming with overflow. */
+			/*
+			 * Release the main buffer lock before re-forming with overflow:
+			 * FluxFormTupleForceShrink writes the forced-off-page columns,
+			 * and each overflow chunk is self-logged under its own lock and
+			 * released before the next, so we must not hold the main page
+			 * lock across it (the lock-ordering invariant's second half).  We
+			 * hold no chunk-page lock when we re-lock the main page below.
+			 */
 			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
 			new_tuple = FluxFormTupleForceShrink(RelationGetDescr(relation),
@@ -6034,21 +6032,8 @@ force_shrink_retry:
 			FluxTupleSetVersionPtr(new_tuple->t_data,
 								   InvalidUndoRecPtr);
 
-			/*
-			 * Re-acquire the main buffer lock.  An overflow column may have
-			 * landed on the page we are updating, in which case it is already
-			 * locked as part of update_overflow_buffers.
-			 */
-			for (upd_i = 0; upd_i < update_overflow_buffers.count; upd_i++)
-			{
-				if (update_overflow_buffers.buffers[upd_i].buffer == buffer)
-				{
-					relock_already_locked = true;
-					break;
-				}
-			}
-			if (!relock_already_locked)
-				LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+			/* Re-acquire the main buffer lock (we hold no chunk-page lock). */
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
 			page = BufferGetPage(buffer);
 
@@ -6056,8 +6041,6 @@ force_shrink_retry:
 			itemid = PageGetItemId(page, offnum);
 			if (!ItemIdIsNormal(itemid))
 			{
-				flux_release_update_overflow_buffers(&update_overflow_buffers,
-													 buffer);
 				UnlockReleaseBuffer(buffer);
 				FluxFreeTuple(new_tuple);
 				flux_toast_abandon(&upd_ttc);
@@ -6067,49 +6050,29 @@ force_shrink_retry:
 			old_tuple_hdr = (FluxTupleHeader *) PageGetItem(page, itemid);
 
 			/*
-			 * Re-validate visibility after the unlock/relock window.  The fit
+			 * Re-validate the row after the unlock/relock window.  The fit
 			 * cascade ran conflict detection before forming the tuple, but
-			 * re-forming with overflow drops the buffer lock again.  A
+			 * re-forming with overflow dropped the buffer lock again.  A
 			 * concurrent committed delete that landed in that window must be
-			 * reported as TM_Deleted rather than silently overwritten.
+			 * reported as TM_Deleted, and a concurrent writer that moved the
+			 * version as TM_Updated (so the executor waits/EPQs), rather than
+			 * either being silently overwritten.  Shared with the normal
+			 * overflow path via flux_recheck_version_after_relock.
 			 */
-			if ((old_tuple_hdr->t_flags & FLUX_TUPLE_DELETED) &&
-				flux_deleted_after_wait(old_tuple_hdr) == TM_Deleted)
 			{
-				flux_release_update_overflow_buffers(&update_overflow_buffers,
-													 buffer);
-				UnlockReleaseBuffer(buffer);
-				FluxFreeTuple(new_tuple);
-				flux_toast_abandon(&upd_ttc);
-				FLUX_RELEASE_TUPLOCK();
-				return TM_Deleted;
-			}
+				TM_Result	reval =
+					flux_recheck_version_after_relock(old_tuple_hdr, otid,
+													  shrink_verptr,
+													  shrink_xmin, tmfd);
 
-			/*
-			 * Likewise a concurrent writer that got in while the buffer was
-			 * unlocked, or one that came and went: either the header names a
-			 * foreign writer we did not see at the conflict gates, or the
-			 * version-chain head moved.  Do not overwrite it; report
-			 * TM_Updated so the executor waits and re-evaluates via EPQ, as
-			 * the gates would have.
-			 */
-			if (FluxTupleGetVersionPtr(old_tuple_hdr) != shrink_verptr ||
-				!TransactionIdEquals(FluxTupleGetXmin(old_tuple_hdr),
-									 shrink_xmin))
-			{
-				flux_release_update_overflow_buffers(&update_overflow_buffers,
-													 buffer);
-				UnlockReleaseBuffer(buffer);
-				FluxFreeTuple(new_tuple);
-				if (tmfd)
+				if (reval != TM_Ok)
 				{
-					tmfd->ctid = *otid;
-					tmfd->xmax = InvalidTransactionId;
-					tmfd->cmax = InvalidCommandId;
-					tmfd->traversed = false;
+					UnlockReleaseBuffer(buffer);
+					FluxFreeTuple(new_tuple);
+					flux_toast_abandon(&upd_ttc);
+					FLUX_RELEASE_TUPLOCK();
+					return reval;
 				}
-				FLUX_RELEASE_TUPLOCK();
-				return TM_Updated;
 			}
 
 			force_shrink_attempted = true;
@@ -6170,18 +6133,16 @@ force_shrink_retry:
 
 
 	/*
-	 * Pre-allocate WAL buffer space BEFORE entering critical section. We may
-	 * need to register the main buffer plus overflow buffers.
-	 *
-	 * rdata slots needed for UPDATE: MAX_OVERFLOW_BUFFERS * 2 (header + data
-	 * per overflow record) + 3 (xl_flux_update header + old tuple data + new
-	 * tuple data)
+	 * Pre-allocate WAL buffer space BEFORE entering critical section.  The
+	 * forward blocks are the main page, the cross-page destination (if any),
+	 * and the folded undo pages; overflow chunks are self-logged on their own
+	 * records, not here.
 	 *
 	 * CRITICAL: XLogEnsureRecordSpace() may allocate memory, so it MUST be
 	 * called outside the critical section.
 	 */
 	if (RelationNeedsWAL(relation))
-		XLogEnsureRecordSpace(XLR_MAX_BLOCK_ID, 10 + MAX_OVERFLOW_BUFFERS * 2);
+		XLogEnsureRecordSpace(XLR_MAX_BLOCK_ID, 10);
 
 	/*
 	 * Per-backend UNDO: prepare a full-tuple UPDATE record before the
@@ -6190,15 +6151,14 @@ force_shrink_retry:
 	 * must run outside the crit section.  Lock order: data buffer then UNDO
 	 * buffer.
 	 *
-	 * If a force-shrink retry pushed columns off-page,
-	 * update_overflow_buffers holds buffers that are pinned, content-locked,
-	 * and marked dirty but not yet WAL-logged (overflow WAL is deferred to
-	 * the atomic record below). PrepareUndoInsert and
-	 * CheckForSerializableConflictIn can both ereport here, before the
-	 * critical section makes the change durable.  Resource-owner cleanup
-	 * would still release the pins and locks on abort, leaving only
-	 * VACUUM-reclaimable dead overflow space, but release them explicitly so
-	 * the abort path leaves no dirtied-yet-orphaned overflow pages behind.
+	 * A force-shrink retry may have written columns off-page, but those
+	 * overflow chunks were already self-logged and their pages released, so
+	 * there is nothing of ours to unwind here.  PrepareUndoInsert and
+	 * CheckForSerializableConflictIn can ereport before the critical section
+	 * makes the change durable; resource-owner cleanup releases the main
+	 * buffer's pin and lock on abort.  A crash or abort between a chunk
+	 * becoming durable and this UPDATE committing leaves orphan chunks the
+	 * VACUUM sweep reclaims, as for any self-logged write.
 	 */
 
 	/*
@@ -6219,9 +6179,9 @@ force_shrink_retry:
 		 * the caller asked for no decoding (TABLE_UPDATE_NO_LOGICAL, as
 		 * REPACK (CONCURRENTLY) does for its transient table), these leave
 		 * data == NULL, and the record carries no logical images, which
-		 * decoding then skips.  These calls palloc and can ereport on OOM, so
-		 * they stay inside the PG_TRY: a throw here must also release the
-		 * force-shrink overflow buffers, exactly like the reservation above.
+		 * decoding then skips.  These calls palloc and can ereport on OOM; a
+		 * throw unwinds through the PG_CATCH below (no overflow buffers of
+		 * ours to release, since chunks are self-logged).
 		 */
 		FluxXLogPrepareReplicaIdentity(relation,
 									   walLogical ? old_tuple_for_inplace_wal : NULL,
@@ -6407,7 +6367,11 @@ force_shrink_retry:
 	}
 	PG_CATCH();
 	{
-		flux_release_update_overflow_buffers(&update_overflow_buffers, buffer);
+		/*
+		 * Overflow chunks are self-logged and already released by the time we
+		 * get here, so there is nothing of our own to unwind; resource-owner
+		 * cleanup releases the main buffer's pin and lock on abort.
+		 */
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -6522,10 +6486,7 @@ force_shrink_retry:
 	if (UndoRecPtrIsValid(upd_undo_ptr))
 		FluxPbuInsertUndo();
 
-	/*
-	 * WAL log the update with all overflow buffers (and folded undo)
-	 * atomically
-	 */
+	/* WAL log the update (overflow chunks were already self-logged). */
 	if (RelationNeedsWAL(relation))
 	{
 		XLogRecPtr	upd_recptr;
@@ -6540,7 +6501,6 @@ force_shrink_retry:
 									old_tuple_for_inplace_wal->t_data->t_commit_ts,
 									0,	/* new version: t_xmax = Invalid
 										 * (heap-shaped) */
-									&update_overflow_buffers,
 									InvalidBuffer,
 									&update_old_img, &update_new_img,
 									!walLogical);
@@ -6559,27 +6519,6 @@ force_shrink_retry:
 
 	FluxXLogReleaseLogicalImage(&update_old_img);
 	FluxXLogReleaseLogicalImage(&update_new_img);
-
-	/*
-	 * Release all overflow buffers first; they were WAL-logged atomically
-	 * above so they're safe to unlock now.
-	 */
-	for (upd_i = 0; upd_i < update_overflow_buffers.count; upd_i++)
-	{
-		Buffer		ovf_buf = update_overflow_buffers.buffers[upd_i].buffer;
-		bool		already_released = (ovf_buf == buffer);
-		int			dup_j;
-
-		for (dup_j = 0; dup_j < upd_i && !already_released; dup_j++)
-		{
-			if (update_overflow_buffers.buffers[dup_j].buffer == ovf_buf)
-				already_released = true;
-		}
-
-		if (!already_released)
-			UnlockReleaseBuffer(ovf_buf);
-		pfree(update_overflow_buffers.buffers[upd_i].record_data);
-	}
 
 	/* Capture free space while we still hold the main buffer lock. */
 	{
@@ -6625,19 +6564,10 @@ force_shrink_retry:
 		FluxLocalDirtyPageMark(relation, blkno);
 
 		/*
-		 * NOTE: We do NOT immediately clean up overflow chains here.
-		 * Immediate cleanup was: 1. Buggy (collected wrong overflow pointers
-		 * after in-place modification) 2. Expensive on hot paths (extra
-		 * buffer I/O + locking during UPDATE) 3. Complex to WAL-log correctly
-		 *
-		 * Instead, overflow cleanup is deferred to VACUUM.  When VACUUM
-		 * prunes deleted tuples, it will also reclaim orphaned overflow
-		 * pages.
-		 *
-		 * Future enhancement: Log overflow block/offset in WAL UPDATE record
-		 * so UNDO log pruning can also clean up overflow chains.
+		 * The superseded version's overflow chunks stay: its UNDO image names
+		 * them for older snapshots, and VACUUM's orphan sweep reclaims them
+		 * once that version is dead to everyone.
 		 */
-		(void) old_has_overflow;	/* Suppress unused variable warning */
 	}
 
 	FluxFreeTuple(new_tuple);
@@ -8358,18 +8288,6 @@ next_round:
 
 	/*
 	 * -----------------------------------------------------------------------
-	 * Phase IV-C: Orphan overflow cleanup
-	 *
-	 * Run the two-pass orphan detection algorithm to find and remove overflow
-	 * records that are not referenced by any live tuple.  This catches
-	 * overflow records that were orphaned by crashes, aborted transactions,
-	 * or bugs in the eager cleanup path.
-	 * -----------------------------------------------------------------------
-	 */
-	/* FLUX has no on-page overflow records to vacuum (wide values use TOAST). */
-
-	/*
-	 * -----------------------------------------------------------------------
 	 * Phase IV-D: per-backend UNDO discard
 	 *
 	 * FLUX's DML UNDO lives in the per-backend engine, which reclaims its own
@@ -8411,6 +8329,25 @@ next_round:
 
 	pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
 								 PROGRESS_VACUUM_PHASE_FINAL_CLEANUP);
+
+	/*
+	 * Overflow orphan sweep: reclaim overflow chunk records reachable by no
+	 * version any snapshot can still see.  They come from aborted writers, a
+	 * crash between a value's self-logged chunks and its tuple-ref commit,
+	 * and superseded or deleted versions that have become dead to everyone.
+	 * A chunk is freed only once its creating XID is all-visible.
+	 */
+	{
+		int64		ov_reclaimed = 0;
+		int			ov_orphans = FluxOverflowCheckOrphans(onerel, true,
+														  &ov_reclaimed);
+
+		if (ov_orphans > 0)
+			ereport(DEBUG1,
+					(errmsg("FLUX vacuum \"%s\": %d overflow orphan(s), %lld reclaimed",
+							RelationGetRelationName(onerel),
+							ov_orphans, (long long) ov_reclaimed)));
+	}
 
 	/* The complete Phase III scan bounds every on-page and historical XID. */
 	nblocks -= pages_truncated;

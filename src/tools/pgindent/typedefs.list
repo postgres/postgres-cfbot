@@ -898,7 +898,6 @@ FluxFreeSpaceMap
 FluxLogicalImage
 FluxMvccShmemData
 FluxOffsetMapping
-FluxOverflowBuffer
 FluxOverflowBuffers
 FluxOverflowPtr
 FluxOverflowRecordHeader

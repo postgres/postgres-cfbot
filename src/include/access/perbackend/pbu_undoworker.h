@@ -25,5 +25,6 @@ extern void PbuEnsureUndoLauncher(void);
 extern void UndoLauncherMain(Datum main_arg);
 pg_noreturn extern void PbuUndoWorkerMain(Datum main_arg);
 extern void WakeupUndoWorker(Oid dbid);
+extern bool PbuInUndoWorker(void);
 
 #endif							/* PBU_UNDOWORKER_H */

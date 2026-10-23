@@ -374,7 +374,7 @@ typedef struct FluxOverflowPtr
  * force-shrink UPDATE recovery path, breaking in-place updates on full pages.
  *
  * The hash is only a cheap prefilter: every COW-reference candidate is
- * byte-verified against the fetched old chain before it is accepted, so a
+ * byte-verified against the fetched old value before it is accepted, so a
  * 32-bit collision merely costs a wasted fetch and falls through to a normal
  * re-store.  It never produces an incorrect result.
  */
@@ -394,7 +394,7 @@ static inline bool
 FluxIsOverflowPtr(const void *ptr)
 {
 	Size		vsize;
-	const FluxOverflowPtr *ovp;
+	uint32		magic;
 
 	if (ptr == NULL)
 		return false;
@@ -403,8 +403,14 @@ FluxIsOverflowPtr(const void *ptr)
 	if (vsize < sizeof(FluxOverflowPtr))
 		return false;
 
-	ovp = (const FluxOverflowPtr *) VARDATA_ANY(ptr);
-	return ovp->ov_magic == FLUX_OVERFLOW_PTR_MAGIC;
+	/*
+	 * Called on arbitrary executor varlenas, which may carry a 1-byte short
+	 * header, making VARDATA_ANY() an unaligned address.  memcpy the magic
+	 * into an aligned local rather than dereferencing a cast pointer, which
+	 * would be a misaligned 4-byte load (SIGBUS on strict-alignment CPUs).
+	 */
+	memcpy(&magic, VARDATA_ANY(ptr), sizeof(magic));
+	return magic == FLUX_OVERFLOW_PTR_MAGIC;
 }
 
 /*
@@ -430,9 +436,9 @@ typedef struct FluxOverflowRecordHeader
 {
 	uint32		or_magic;		/* FLUX_OVERFLOW_RECORD_MAGIC */
 	uint32		or_data_len;	/* Bytes of column data in this record */
-	BlockNumber or_next_block;	/* Next overflow record's page, or Invalid */
-	OffsetNumber or_next_offset;	/* Next overflow record's offset */
-	uint16		or_flags;		/* Flags (reserved) */
+	TransactionId or_xid;		/* creating transaction, for the orphan sweep */
+	uint16		or_pad;			/* zero */
+	uint16		or_flags;		/* chunk kind (FLUX_OVCHUNK_*) */
 	/* Column data follows immediately after this header */
 } FluxOverflowRecordHeader;
 
@@ -442,28 +448,74 @@ typedef struct FluxOverflowRecordHeader
 	(FLUX_MAX_TUPLE_SIZE - FLUX_OVERFLOW_RECORD_OVERHEAD)
 
 /*
- * Structure to track overflow buffers for atomic WAL logging.
+ * Directory-in-root-chunk model.
  *
- * When creating overflow chains, we keep buffers pinned and collect them
- * here so the caller can register them all in a single WAL record with
- * the main tuple modification. This ensures atomicity during crash recovery.
+ * An overflowed column is stored as a set of DATA chunks plus one ROOT
+ * directory chunk.  The tuple's FluxOverflowPtr names the ROOT chunk.  The
+ * ROOT chunk's payload is a FluxOverflowDir header followed by an array of
+ * FluxOverflowDirEnt, one per DATA chunk, in value-byte order.  Because every
+ * data chunk's (block,offset) is known once the root is read, the fetch path
+ * can hand all blocks to a read_stream up front and let AIO prefetch them.
+ *
+ * For very large values whose directory does not fit one root chunk, the root
+ * becomes a level-1 directory whose entries name INDIRECT directory chunks,
+ * each of which lists DATA chunks (one indirection level, rethinkdb-style
+ * fanout).  od_levels records the height (0 = entries are DATA chunks,
+ * 1 = entries are INDIRECT chunks).
+ *
+ * Chunk kind is carried in FluxOverflowRecordHeader.or_flags.  The WAL redo replays every chunk record byte-for-byte via
+ * PageAddItem regardless of kind, so the directory needs no new redo op.
  */
-#define MAX_OVERFLOW_BUFFERS 32
+#define FLUX_OVCHUNK_DATA		0x0000	/* payload is value bytes */
+#define FLUX_OVCHUNK_ROOT		0x0001	/* payload is FluxOverflowDir +
+										 * entries */
+#define FLUX_OVCHUNK_INDIRECT	0x0002	/* payload is FluxOverflowDir +
+										 * entries pointing at DATA chunks */
+#define FLUX_OVCHUNK_KIND_MASK	0x0003
 
-typedef struct FluxOverflowBuffer
+typedef struct FluxOverflowDirEnt
 {
-	Buffer		buffer;			/* Pinned buffer containing overflow record */
-	OffsetNumber offset;		/* Offset of overflow record on page */
-	char	   *record_data;	/* FluxOverflowRecordHeader + data */
-	uint32		record_len;		/* Total record length */
-	uint16		flags;			/* FLUX_OVERFLOW_WAL_NEW_RECORD or
-								 * _LINK_UPDATE */
-} FluxOverflowBuffer;
+	BlockNumber block;			/* page holding the referenced chunk */
+	OffsetNumber offset;		/* offset of the chunk record on that page */
+	uint16		pad;			/* keep 8-byte entries, no implicit padding */
+}			FluxOverflowDirEnt;
 
+StaticAssertDecl(sizeof(FluxOverflowDirEnt) == 8, "FluxOverflowDirEnt padded");
+
+typedef struct FluxOverflowDir
+{
+	uint32		od_total_length;	/* total value bytes across all data
+									 * chunks */
+	uint32		od_chunk_size;	/* data bytes per full DATA chunk */
+	uint32		od_nentries;	/* number of FluxOverflowDirEnt that follow */
+	uint16		od_levels;		/* 0: entries are DATA; 1: entries are
+								 * INDIRECT dir chunks */
+	uint16		od_pad;
+	/* FluxOverflowDirEnt[od_nentries] follows immediately */
+}			FluxOverflowDir;
+
+#define FLUX_OVERFLOW_DIR_HDR	MAXALIGN(sizeof(FluxOverflowDir))
+
+/* Directory entries that fit in one chunk's payload */
+#define FLUX_OVERFLOW_DIR_MAX_ENTRIES \
+	((FLUX_OVERFLOW_MAX_CHUNK_SIZE - FLUX_OVERFLOW_DIR_HDR) / sizeof(FluxOverflowDirEnt))
+
+/*
+ * Per-caller overflow write context.
+ *
+ * Every over-threshold value is written through the self-logged path, where
+ * each chunk is placed under its OWN buffer lock and its OWN
+ * XLOG_FLUX_OVERFLOW_WRITE record, and the page is released before the next
+ * chunk is allocated (see FluxStoreOverflowColumn).  Nothing is collected for
+ * the tuple op's WAL record, so this context only carries the one block the
+ * caller already holds pinned+locked (its main tuple page): a chunk must
+ * never land there, and the writer must never re-lock it.
+ */
 typedef struct FluxOverflowBuffers
 {
-	int			count;			/* Number of overflow buffers */
-	FluxOverflowBuffer buffers[MAX_OVERFLOW_BUFFERS];
+	BlockNumber avoid_block;	/* chunk allocation must skip this block (the
+								 * caller's already-pinned main tuple page);
+								 * InvalidBlockNumber to disable */
 } FluxOverflowBuffers;
 
 /*
@@ -789,7 +841,8 @@ extern bool FluxReconstructVisibleVersionEx(Relation rel, ItemPointer tid,
 /* Slot operations for FLUX tuples */
 extern PGDLLIMPORT const TupleTableSlotOps TTSOpsFluxTuple;
 extern void FluxSlotStoreTuple(TupleTableSlot *slot, FluxTupleHeader *tuple,
-							   uint32 tuple_len, Buffer buffer);
+							   uint32 tuple_len, Buffer buffer,
+							   Relation origin);
 
 #define TTS_IS_FLUXTUPLE(slot) ((slot)->tts_ops == &TTSOpsFluxTuple)
 
@@ -832,29 +885,21 @@ extern void FluxPageDefragment(Page page);
 extern void FluxPageIndexTupleDelete(Page page, OffsetNumber offnum);
 extern int	FluxPagePruneOpt(Relation rel, Buffer buffer);
 
-/* Overflow handling - column-level overflow */
+/* Overflow handling - column-level overflow (directory-in-root-chunk model) */
 extern Datum FluxStoreOverflowColumn(Relation rel, Datum value, int attnum,
 									 Size inline_prefix_size,
 									 FluxOverflowBuffers *overflow_buffers);
 extern Datum FluxFetchOverflowColumn(Relation rel, const void *overflow_varlena);
-extern void FluxDeleteOverflowChain(Relation rel, BlockNumber first_block,
-									OffsetNumber first_offset);
-extern int	FluxCollectOverflowPtrs(FluxTupleHeader *tuple_hdr,
-									TupleDesc tupdesc,
-									BlockNumber *blocks, OffsetNumber *offsets,
-									int max_ptrs);
 extern void FluxCollectOverflowPtrsByAttr(FluxTupleHeader *tuple_hdr,
 										  TupleDesc tupdesc,
 										  FluxOverflowPtr *out_ptrs,
 										  bool *out_present, int natts);
-extern void FluxDeleteTupleOverflows(Relation rel, FluxTupleHeader *tuple_hdr,
-									 TupleDesc tupdesc);
-extern bool FluxIsOverflowRecord(const void *item, Size item_len);
+extern int	FluxOverflowCheckOrphans(Relation rel, bool reclaim,
+									 int64 *reclaimed_out);
 
 /*
- * Inline version of FluxIsOverflowRecord for hot scan paths.
- * Checks whether an item is an overflow continuation record by testing
- * the magic number in the header.
+ * Test whether an item is an overflow continuation record, by checking the
+ * magic number in its header.  Inlined for the hot scan paths.
  */
 static inline bool
 FluxIsOverflowRecordInline(const void *item, Size item_len)
@@ -864,8 +909,6 @@ FluxIsOverflowRecordInline(const void *item, Size item_len)
 	return ((const FluxOverflowRecordHeader *) item)->or_magic ==
 		FLUX_OVERFLOW_RECORD_MAGIC;
 }
-extern void FluxGetOverflowStats(Relation rel, int64 *total_overflow_records,
-								 int64 *total_overflow_bytes, int64 *avg_chain_length);
 
 /* Free space management */
 extern Size FluxTargetFreeSpace(Relation rel, Size len);

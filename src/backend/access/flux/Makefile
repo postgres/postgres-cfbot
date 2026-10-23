@@ -15,6 +15,7 @@ include $(top_builddir)/src/Makefile.global
 OBJS = \
 	flux_handler.o \
 	flux_tuple.o \
+	flux_overflow.o \
 	flux_mvcc.o \
 	flux_stats.o \
 	flux_xlog.o \

@@ -248,7 +248,6 @@ FluxXLogRegisterLogicalImage(FluxLogicalImage *img, uint16 *flags)
 XLogRecPtr
 FluxXLogInsert(Relation rel, Buffer buffer, OffsetNumber offnum,
 			   FluxTuple tuple, uint64 commit_ts,
-			   FluxOverflowBuffers *overflow_buffers,
 			   FluxLogicalImage *logical_img,
 			   bool force_page_image)
 {
@@ -257,9 +256,7 @@ FluxXLogInsert(Relation rel, Buffer buffer, OffsetNumber offnum,
 	Page		page = BufferGetPage(buffer);
 	uint8		info = XLOG_FLUX_INSERT;
 	uint8		main_buf_flags = REGBUF_STANDARD;
-	int			i;
 	int			flux_undo_block_id = 1; /* next free WAL block id after main */
-	xl_flux_overflow_write ovf_xlrecs[MAX_OVERFLOW_BUFFERS];
 
 	/*
 	 * The multi-insert (COPY/bulk) path adds many tuples to one page but
@@ -283,7 +280,7 @@ FluxXLogInsert(Relation rel, Buffer buffer, OffsetNumber offnum,
 	/*
 	 * NOTE: XLogEnsureRecordSpace() has already been called by the caller
 	 * (before entering the critical section) to pre-allocate space for the
-	 * main buffer plus all overflow buffers.
+	 * main buffer plus any folded undo blocks.
 	 */
 	XLogBeginInsert();
 
@@ -291,107 +288,11 @@ FluxXLogInsert(Relation rel, Buffer buffer, OffsetNumber offnum,
 	XLogRegisterBuffer(0, buffer, main_buf_flags);
 
 	/*
-	 * Register all overflow buffers (buffers 1..N) for atomic WAL logging.
-	 * This ensures the main tuple and all overflow records are restored
-	 * together during crash recovery, preventing orphaned overflow pages.
-	 *
-	 * IMPORTANT: Due to spatial locality optimization, multiple overflow
-	 * records may reside on the same page. We must register each unique
-	 * buffer only once, but register data for all overflow records.
-	 *
-	 * For each overflow buffer, we need to include: 1. The offset where the
-	 * record should be placed 2. The actual overflow record data
+	 * Overflow chunks are not carried on this record: each is self-logged by
+	 * FluxStoreOverflowColumn under its own lock and XLOG_FLUX_OVERFLOW_WRITE
+	 * record before this INSERT is emitted.  So block 1 onward is free for
+	 * the folded per-backend UNDO pages.
 	 */
-	if (overflow_buffers != NULL)
-	{
-		int			registered_block_id = 1;	/* Start after main buffer */
-		Buffer		registered_buffers[MAX_OVERFLOW_BUFFERS];
-		int			registered_buffer_ids[MAX_OVERFLOW_BUFFERS];
-		int			num_registered = 0;
-
-		/*
-		 * NOTE: ovf_xlrecs[] is declared at function scope (not here) so that
-		 * the pointers registered via XLogRegisterBufData() remain valid
-		 * until XLogInsert() is called after this block ends.
-		 */
-
-		/* Ensure we don't exceed PostgreSQL's hard limit */
-		if (overflow_buffers->count > XLR_MAX_BLOCK_ID)
-			elog(ERROR, "too many overflow records: %d (max %d)",
-				 overflow_buffers->count, XLR_MAX_BLOCK_ID);
-
-		for (i = 0; i < overflow_buffers->count; i++)
-		{
-			FluxOverflowBuffer *ovb = &overflow_buffers->buffers[i];
-			int			block_id = -1;
-			int			j;
-
-			/*
-			 * First check if this overflow buffer is the SAME as the main
-			 * buffer. This can happen when spatial locality places an
-			 * overflow record on the same page as the main tuple. In this
-			 * case, reuse block_id=0.
-			 */
-			if (ovb->buffer == buffer)
-			{
-				block_id = 0;
-				xlrec.flags |= FLUX_WAL_HAS_OVERFLOW_BLK0;
-			}
-			else
-			{
-				/*
-				 * Check if this buffer was already registered among overflow
-				 * buffers (spatial locality: multiple overflow records on
-				 * same page). If so, reuse its block_id instead of
-				 * registering again.
-				 */
-				for (j = 0; j < num_registered; j++)
-				{
-					if (registered_buffers[j] == ovb->buffer)
-					{
-						block_id = registered_buffer_ids[j];
-						break;
-					}
-				}
-
-				/* If not registered yet, register it now */
-				if (block_id < 0)
-				{
-					block_id = registered_block_id++;
-
-					/*
-					 * Force a full-page image for overflow buffers. See
-					 * FluxXLogUpdate for the rationale.
-					 */
-					XLogRegisterBuffer(block_id, ovb->buffer,
-									   REGBUF_STANDARD | REGBUF_FORCE_IMAGE);
-
-					/* Track this buffer so we don't register it again */
-					registered_buffers[num_registered] = ovb->buffer;
-					registered_buffer_ids[num_registered] = block_id;
-					num_registered++;
-				}
-			}
-
-			/*
-			 * Create a proper xl_flux_overflow_write header with the offset.
-			 * This tells the redo handler where to place the record. Each
-			 * header is stored in a dedicated array slot so the pointer
-			 * passed to XLogRegisterBufData remains valid until XLogInsert.
-			 */
-			ovf_xlrecs[i].offnum = ovb->offset;
-			ovf_xlrecs[i].flags = ovb->flags;
-			ovf_xlrecs[i].data_len = ovb->record_len;
-			ovf_xlrecs[i].commit_ts = commit_ts;
-
-			/* Register the header first, then the data */
-			XLogRegisterBufData(block_id, (char *) &ovf_xlrecs[i], sizeof(xl_flux_overflow_write));
-			XLogRegisterBufData(block_id, ovb->record_data, ovb->record_len);
-		}
-
-		/* Undo pages (if any) fold in after the last overflow block. */
-		flux_undo_block_id = registered_block_id;
-	}
 
 	/* Now register the main data */
 	XLogRegisterData((char *) &xlrec, sizeof(xl_flux_insert));
@@ -415,22 +316,6 @@ FluxXLogInsert(Relation rel, Buffer buffer, OffsetNumber offnum,
 
 	/* Set LSN on main page */
 	PageSetLSN(page, recptr);
-
-	/*
-	 * Set LSN on all overflow pages. Due to spatial locality, some buffers
-	 * may appear multiple times in overflow_buffers. PageSetLSN is idempotent
-	 * (setting the same LSN multiple times is safe), so we can just iterate
-	 * through all entries without checking for duplicates.
-	 */
-	if (overflow_buffers != NULL)
-	{
-		for (i = 0; i < overflow_buffers->count; i++)
-		{
-			Page		ovpage = BufferGetPage(overflow_buffers->buffers[i].buffer);
-
-			PageSetLSN(ovpage, recptr);
-		}
-	}
 
 	return recptr;
 }
@@ -548,7 +433,6 @@ XLogRecPtr
 FluxXLogUpdate(Relation rel, Buffer buffer, OffsetNumber offnum,
 			   FluxTuple old_tuple, FluxTuple new_tuple,
 			   uint64 old_commit_ts, uint64 new_commit_ts,
-			   FluxOverflowBuffers *overflow_buffers,
 			   Buffer new_buffer,
 			   FluxLogicalImage *old_img,
 			   FluxLogicalImage *new_img,
@@ -557,12 +441,8 @@ FluxXLogUpdate(Relation rel, Buffer buffer, OffsetNumber offnum,
 	xl_flux_update xlrec;
 	xl_flux_prefix_suffix ps;
 
-	/* Registered by pointer: must stay live until XLogInsert(). */
-	xl_flux_overflow_write ovf_xlrecs[MAX_OVERFLOW_BUFFERS];
-
 	XLogRecPtr	recptr;
 	uint8		info = XLOG_FLUX_UPDATE_INPLACE;
-	int			i;
 	int			flux_undo_block_id = 1; /* next free WAL block id after main */
 	bool		is_cross_page = (BufferIsValid(new_buffer) &&
 								 new_buffer != buffer);
@@ -583,7 +463,7 @@ FluxXLogUpdate(Relation rel, Buffer buffer, OffsetNumber offnum,
 	/*
 	 * NOTE: XLogEnsureRecordSpace() has already been called by the caller
 	 * (before entering the critical section) to pre-allocate space for the
-	 * main buffer plus all overflow buffers.
+	 * main buffer plus the cross-page destination and any folded undo blocks.
 	 */
 	XLogBeginInsert();
 
@@ -610,103 +490,13 @@ FluxXLogUpdate(Relation rel, Buffer buffer, OffsetNumber offnum,
 	}
 
 	/*
-	 * Register all overflow buffers (buffers 1..N) for atomic WAL logging.
-	 * This ensures the main tuple UPDATE and all overflow records are
-	 * restored together during crash recovery, preventing orphaned overflow
-	 * pages.
-	 *
-	 * IMPORTANT: Due to spatial locality optimization, multiple overflow
-	 * records may reside on the same page. We must register each unique
-	 * buffer only once, but register data for all overflow records.
+	 * Overflow chunks are not carried on this record: each is self-logged by
+	 * FluxStoreOverflowColumn before this UPDATE is emitted.  So the only
+	 * forward block after block 0 is the cross-page destination (if any); the
+	 * folded per-backend UNDO pages follow it.
 	 */
 	{
 		int			next_block_id = 1;	/* Start after main buffer (block 0) */
-
-		if (overflow_buffers != NULL)
-		{
-			Buffer		registered_buffers[MAX_OVERFLOW_BUFFERS];
-			int			registered_buffer_ids[MAX_OVERFLOW_BUFFERS];
-			int			num_registered = 0;
-
-			/* Ensure we don't exceed PostgreSQL's hard limit */
-			if (overflow_buffers->count > XLR_MAX_BLOCK_ID)
-				elog(ERROR, "too many overflow records: %d (max %d)",
-					 overflow_buffers->count, XLR_MAX_BLOCK_ID);
-
-			for (i = 0; i < overflow_buffers->count; i++)
-			{
-				FluxOverflowBuffer *ovb = &overflow_buffers->buffers[i];
-				int			block_id = -1;
-				int			j;
-
-				/*
-				 * First check if this overflow buffer is the SAME as the main
-				 * buffer.  This can happen when spatial locality places an
-				 * overflow record on the same page as the main tuple. In this
-				 * case, reuse block_id=0.
-				 */
-				if (ovb->buffer == buffer)
-				{
-					block_id = 0;
-					xlrec.flags |= FLUX_WAL_HAS_OVERFLOW_BLK0;
-				}
-				else
-				{
-					/*
-					 * Check if this buffer was already registered among
-					 * overflow buffers (spatial locality: multiple overflow
-					 * records on same page). If so, reuse its block_id
-					 * instead of registering again.
-					 */
-					for (j = 0; j < num_registered; j++)
-					{
-						if (registered_buffers[j] == ovb->buffer)
-						{
-							block_id = registered_buffer_ids[j];
-							break;
-						}
-					}
-
-					/* If not registered yet, register it now */
-					if (block_id < 0)
-					{
-						block_id = next_block_id++;
-
-						/*
-						 * Force a full-page image for overflow buffers. The
-						 * redo handler for overflow pages reconstructs items
-						 * using PageAddItem, but the page layout can differ
-						 * from the primary when the page already contains
-						 * items from prior operations (e.g., free space
-						 * fragmentation, item alignment). Using
-						 * REGBUF_FORCE_IMAGE guarantees the page is restored
-						 * exactly as the primary had it.
-						 */
-						XLogRegisterBuffer((uint8) block_id, ovb->buffer,
-										   REGBUF_STANDARD | REGBUF_FORCE_IMAGE);
-
-						/* Track this buffer so we don't register it again */
-						registered_buffers[num_registered] = ovb->buffer;
-						registered_buffer_ids[num_registered] = block_id;
-						num_registered++;
-					}
-				}
-
-				/*
-				 * Header first, then the record, as the insert path logs
-				 * them: update redo parses [xl_flux_overflow_write][data] and
-				 * places the record at the logged offnum.
-				 */
-				ovf_xlrecs[i].offnum = ovb->offset;
-				ovf_xlrecs[i].flags = ovb->flags;
-				ovf_xlrecs[i].data_len = ovb->record_len;
-				ovf_xlrecs[i].commit_ts = new_commit_ts;
-				XLogRegisterBufData((uint8) block_id, (char *) &ovf_xlrecs[i],
-									sizeof(xl_flux_overflow_write));
-				XLogRegisterBufData((uint8) block_id, ovb->record_data,
-									ovb->record_len);
-			}
-		}
 
 		/*
 		 * For cross-page out-of-place updates, register the destination
@@ -827,12 +617,6 @@ FluxXLogUpdate(Relation rel, Buffer buffer, OffsetNumber offnum,
 	PageSetLSN(BufferGetPage(buffer), recptr);
 	if (is_cross_page)
 		PageSetLSN(BufferGetPage(new_buffer), recptr);
-	if (overflow_buffers != NULL)
-	{
-		for (i = 0; i < overflow_buffers->count; i++)
-			PageSetLSN(BufferGetPage(overflow_buffers->buffers[i].buffer),
-					   recptr);
-	}
 
 	return recptr;
 }
@@ -959,7 +743,7 @@ FluxXLogDefrag(Relation rel, Buffer buffer, FluxOffsetMapping *mappings,
  * offnum:      offset of the overflow record on the page
  * record_data: pointer to the record data to log (header, or header+data)
  * record_len:  length of data to log
- * flags:       FLUX_OVERFLOW_WAL_NEW_RECORD or FLUX_OVERFLOW_WAL_LINK_UPDATE
+ * flags:       FLUX_OVERFLOW_WAL_NEW_RECORD (reserved; only value)
  * commit_ts:   commit timestamp
  */
 XLogRecPtr
@@ -1247,8 +1031,6 @@ flux_xlog_insert_redo(XLogReaderState *record)
 		{
 			FluxPageOpaque phdr;
 			OffsetNumber inserted_offnum;
-			char	   *ovf_data;
-			Size		ovf_len;
 
 			page = BufferGetPage(buffer);
 
@@ -1259,63 +1041,6 @@ flux_xlog_insert_redo(XLogReaderState *record)
 			if (PageIsNew(page))
 			{
 				FluxInitPage(page, BufferGetPageSize(buffer));
-			}
-
-			/*
-			 * CRITICAL: During normal operation, overflow records are
-			 * inserted BEFORE the main tuple (via FluxStoreOverflowColumn
-			 * called from FluxFormTuple, then FluxPageAddTuple for main).
-			 * This means overflow records get lower offsets (1, 2, 3...) and
-			 * the main tuple gets a higher offset (4, ...).
-			 *
-			 * We MUST replay in the same order. If there are overflow records
-			 * on block_id=0 (same page as main tuple due to spatial
-			 * locality), replay them FIRST before the main tuple.
-			 */
-			ovf_data = XLogRecGetBlockData(record, 0, &ovf_len);
-			if (ovf_data != NULL && ovf_len > 0 &&
-				(xlrec->flags & FLUX_WAL_HAS_OVERFLOW_BLK0))
-			{
-				char	   *ovf_ptr = ovf_data;
-				Size		ovf_remaining = ovf_len;
-
-				/*
-				 * Block 0 has overflow data. Parse and replay all overflow
-				 * records on this block before the main tuple. Each overflow
-				 * record has format: [xl_flux_overflow_write header][actual
-				 * record data]
-				 */
-				while (ovf_remaining > sizeof(xl_flux_overflow_write))
-				{
-					xl_flux_overflow_write *ovf_xlrec = (xl_flux_overflow_write *) ovf_ptr;
-					char	   *actual_data = ovf_ptr + sizeof(xl_flux_overflow_write);
-					Size		actual_len = ovf_xlrec->data_len;
-					OffsetNumber ovf_offnum;
-
-					if (ovf_remaining < sizeof(xl_flux_overflow_write) + actual_len)
-						elog(PANIC, "FLUX INSERT redo: corrupt overflow data on block 0: "
-							 "ovf_remaining=%zu, sizeof(hdr)=%zu, data_len=%u, "
-							 "total_len=%zu, offnum=%u, flags=%u",
-							 ovf_remaining, sizeof(xl_flux_overflow_write),
-							 (unsigned) actual_len, ovf_len,
-							 (unsigned) ovf_xlrec->offnum,
-							 (unsigned) ovf_xlrec->flags);
-
-					/*
-					 * Use InvalidOffsetNumber to let PageAddItem choose the
-					 * next available offset. This ensures sequential offsets
-					 * matching the original insertion order.
-					 */
-					ovf_offnum = PageAddItem(page, actual_data, actual_len,
-											 InvalidOffsetNumber, false, false);
-					if (ovf_offnum == InvalidOffsetNumber)
-						elog(PANIC, "FLUX INSERT redo: failed to add overflow record on block %u",
-							 blkno);
-
-					/* Advance to next overflow record in the block data */
-					ovf_ptr += sizeof(xl_flux_overflow_write) + actual_len;
-					ovf_remaining -= sizeof(xl_flux_overflow_write) + actual_len;
-				}
 			}
 
 			/*
@@ -1338,9 +1063,7 @@ flux_xlog_insert_redo(XLogReaderState *record)
 			 * wal_consistency_checking as an "inconsistent page", and a
 			 * latent standby/replica divergence.  overwrite=true fills a
 			 * reused dead/unused line pointer in place; for a plain append
-			 * (offnum == max+1) it behaves like a normal add.  Any block-0
-			 * overflow records added above already occupy their own (lower)
-			 * offsets, which the primary's offnum accounts for.
+			 * (offnum == max+1) it behaves like a normal add.
 			 */
 			inserted_offnum = PageAddItem(page, tuple_hdr, xlrec->tuple_len,
 										  xlrec->offnum, true, true);
@@ -1404,94 +1127,11 @@ flux_xlog_insert_redo(XLogReaderState *record)
 			UnlockReleaseBuffer(buffer);
 
 		/*
-		 * Process overflow buffers on separate pages (buffers 1..N). Each
-		 * overflow buffer contains an overflow record that was registered
-		 * with XLogRegisterBufData during WAL logging.
-		 *
-		 * Note: Overflow records on block_id=0 were already handled above
-		 * before the main tuple to preserve insertion order.
+		 * Blocks 1..N carry only the folded per-backend UNDO pages now
+		 * (overflow chunks are self-logged on their own records, never on an
+		 * INSERT).  FluxPbuRedoUndo() below rebuilds them from the undo
+		 * region.
 		 */
-		for (int ovf_idx = 1; ovf_idx < XLR_MAX_BLOCK_ID; ovf_idx++)
-		{
-			Buffer		ovf_buffer;
-			Page		ovf_page;
-			XLogRedoAction ovf_action;
-
-			if (!XLogRecHasBlockRef(record, ovf_idx))
-				break;			/* No more overflow buffers */
-
-			/*
-			 * Skip the per-backend UNDO pages folded onto this record.  They
-			 * are not FLUX overflow pages: replaying them as such would
-			 * FluxInitPage over the undo page and parse undo bytes as
-			 * overflow records, destroying the before-image rollback needs.
-			 * FluxPbuRedoUndo() below rebuilds them from the record's undo
-			 * region.
-			 */
-			if (FluxPbuBlockIsUndo(record, (uint8) ovf_idx))
-				continue;
-
-			ovf_action = XLogReadBufferForRedo(record, (uint8) ovf_idx, &ovf_buffer);
-			if (ovf_action == BLK_NEEDS_REDO)
-			{
-				char	   *ovf_data;
-				Size		ovf_len;
-
-				ovf_page = BufferGetPage(ovf_buffer);
-
-				/* Initialize as FLUX page if new */
-				if (PageIsNew(ovf_page))
-				{
-					FluxInitPage(ovf_page, BufferGetPageSize(ovf_buffer));
-				}
-
-				/* Get the overflow record data from WAL */
-				ovf_data = XLogRecGetBlockData(record, (uint8) ovf_idx, &ovf_len);
-				if (ovf_data != NULL && ovf_len > 0)
-				{
-					char	   *ovf_ptr = ovf_data;
-					Size		ovf_remaining = ovf_len;
-
-					/*
-					 * Parse and replay all overflow records on this block.
-					 * Multiple overflow records may be on the same page due
-					 * to spatial locality optimization.
-					 */
-					while (ovf_remaining > sizeof(xl_flux_overflow_write))
-					{
-						xl_flux_overflow_write *ovf_xlrec = (xl_flux_overflow_write *) ovf_ptr;
-						char	   *actual_data = ovf_ptr + sizeof(xl_flux_overflow_write);
-						Size		actual_len = ovf_xlrec->data_len;
-						OffsetNumber ovf_offnum;
-
-						if (ovf_remaining < sizeof(xl_flux_overflow_write) + actual_len)
-							elog(PANIC, "FLUX INSERT redo: corrupt overflow data on block %u",
-								 BufferGetBlockNumber(ovf_buffer));
-
-						/*
-						 * Use the specific offset from WAL record. Overflow
-						 * pointers reference these offsets. Use the specific
-						 * offset from WAL record. Overflow pointers reference
-						 * these offsets.
-						 */
-						ovf_offnum = PageAddItem(ovf_page, actual_data, actual_len,
-												 ovf_xlrec->offnum, false, false);
-						if (ovf_offnum == InvalidOffsetNumber)
-							elog(PANIC, "FLUX INSERT redo: failed to add overflow record on block %u",
-								 BufferGetBlockNumber(ovf_buffer));
-
-						/* Advance to next overflow record */
-						ovf_ptr += sizeof(xl_flux_overflow_write) + actual_len;
-						ovf_remaining -= sizeof(xl_flux_overflow_write) + actual_len;
-					}
-				}
-
-				PageSetLSN(ovf_page, record->EndRecPtr);
-				MarkBufferDirty(ovf_buffer);
-			}
-			if (BufferIsValid(ovf_buffer))
-				UnlockReleaseBuffer(ovf_buffer);
-		}
 
 		/*
 		 * Re-run the per-backend UNDO insert folded onto this record,
@@ -1670,9 +1310,6 @@ flux_xlog_update_inplace_redo(XLogReaderState *record)
 
 		if (action == BLK_NEEDS_REDO)
 		{
-			char	   *blk0_ovf_data;
-			Size		blk0_ovf_len;
-
 			page = BufferGetPage(buffer);
 
 			/*
@@ -1682,41 +1319,6 @@ flux_xlog_update_inplace_redo(XLogReaderState *record)
 			if (PageIsNew(page))
 			{
 				FluxInitPage(page, BufferGetPageSize(buffer));
-			}
-
-			/*
-			 * Process overflow records on block 0 BEFORE the main tuple,
-			 * matching the original insertion order.  During normal
-			 * operation, overflow records stored on the same page as the main
-			 * tuple (spatial locality) get lower offsets.  We must replay
-			 * them first so the main tuple ends up at the correct offset.
-			 */
-			blk0_ovf_data = XLogRecGetBlockData(record, 0, &blk0_ovf_len);
-			if (blk0_ovf_data != NULL && blk0_ovf_len > 0 &&
-				(xlrec->flags & FLUX_WAL_HAS_OVERFLOW_BLK0))
-			{
-				char	   *ovf_ptr = blk0_ovf_data;
-				Size		ovf_remaining = blk0_ovf_len;
-
-				while (ovf_remaining > sizeof(xl_flux_overflow_write))
-				{
-					xl_flux_overflow_write *blk0_ovf_xlrec =
-						(xl_flux_overflow_write *) ovf_ptr;
-					char	   *actual_data = ovf_ptr + sizeof(xl_flux_overflow_write);
-					Size		actual_len = blk0_ovf_xlrec->data_len;
-					OffsetNumber ovf_offnum;
-
-					if (ovf_remaining < sizeof(xl_flux_overflow_write) + actual_len)
-						elog(PANIC, "FLUX UPDATE redo: corrupt overflow data on block 0");
-
-					ovf_offnum = PageAddItem(page, actual_data, actual_len,
-											 blk0_ovf_xlrec->offnum, true, false);
-					if (ovf_offnum == InvalidOffsetNumber)
-						elog(PANIC, "FLUX UPDATE redo: failed to add overflow record on block 0");
-
-					ovf_ptr += sizeof(xl_flux_overflow_write) + actual_len;
-					ovf_remaining -= sizeof(xl_flux_overflow_write) + actual_len;
-				}
 			}
 
 			/*
@@ -1849,85 +1451,25 @@ flux_xlog_update_inplace_redo(XLogReaderState *record)
 			UnlockReleaseBuffer(buffer);
 
 		/*
-		 * Process overflow buffers on separate pages (buffers 1..N) for
-		 * UPDATE.  Multiple overflow records may share a single block due to
-		 * spatial locality, so we loop through all records within each
-		 * block's data (matching INSERT redo).
+		 * Blocks 1..N carry the cross-page out-of-place destination (if any)
+		 * and the folded per-backend UNDO pages.  Overflow chunks are not on
+		 * this record (self-logged on their own records).  The destination is
+		 * registered REGBUF_FORCE_IMAGE, so XLogReadBufferForRedo restores it
+		 * from its full-page image and returns BLK_RESTORED; we only need to
+		 * drive that restore and release the buffer.  Undo pages are rebuilt
+		 * by FluxPbuRedoUndo() below, so skip them here.
 		 */
 		for (int ovf_idx = 1; ovf_idx < XLR_MAX_BLOCK_ID; ovf_idx++)
 		{
 			Buffer		ovf_buffer;
-			Page		ovf_page;
-			XLogRedoAction ovf_action;
 
 			if (!XLogRecHasBlockRef(record, ovf_idx))
-				break;			/* No more overflow buffers */
+				break;			/* No more forward blocks */
 
-			/*
-			 * Skip the per-backend UNDO pages folded onto this record (see
-			 * the same guard in flux_xlog_insert_redo).  The cross-page
-			 * destination buffer is a FLUX page and is handled by this loop
-			 * as before.
-			 */
 			if (FluxPbuBlockIsUndo(record, (uint8) ovf_idx))
 				continue;
 
-			ovf_action = XLogReadBufferForRedo(record, (uint8) ovf_idx, &ovf_buffer);
-			if (ovf_action == BLK_NEEDS_REDO)
-			{
-				char	   *ovf_data;
-				Size		ovf_len;
-
-				ovf_page = BufferGetPage(ovf_buffer);
-
-				/* Initialize as FLUX page if new */
-				if (PageIsNew(ovf_page))
-				{
-					FluxInitPage(ovf_page, BufferGetPageSize(ovf_buffer));
-				}
-
-				/* Get the overflow record data from WAL */
-				ovf_data = XLogRecGetBlockData(record, (uint8) ovf_idx, &ovf_len);
-				if (ovf_data != NULL && ovf_len > 0)
-				{
-					char	   *ovf_ptr = ovf_data;
-					Size		ovf_remaining = ovf_len;
-
-					/*
-					 * Parse and replay all overflow records on this block.
-					 * Multiple overflow records may share a page due to
-					 * spatial locality.
-					 */
-					while (ovf_remaining > sizeof(xl_flux_overflow_write))
-					{
-						xl_flux_overflow_write *ovf_xlrec2 =
-							(xl_flux_overflow_write *) ovf_ptr;
-						char	   *actual_data = ovf_ptr + sizeof(xl_flux_overflow_write);
-						Size		actual_len = ovf_xlrec2->data_len;
-						OffsetNumber ovf_offnum;
-
-						if (ovf_remaining < sizeof(xl_flux_overflow_write) + actual_len)
-							elog(PANIC, "FLUX UPDATE redo: corrupt overflow data on block %u",
-								 BufferGetBlockNumber(ovf_buffer));
-
-						/*
-						 * Place the record at the offset the primary used,
-						 * with overwrite=true, exactly as insert redo does.
-						 */
-						ovf_offnum = PageAddItem(ovf_page, actual_data, actual_len,
-												 ovf_xlrec2->offnum, true, false);
-						if (ovf_offnum == InvalidOffsetNumber)
-							elog(PANIC, "FLUX UPDATE redo: failed to add overflow record on block %u",
-								 BufferGetBlockNumber(ovf_buffer));
-
-						ovf_ptr += sizeof(xl_flux_overflow_write) + actual_len;
-						ovf_remaining -= sizeof(xl_flux_overflow_write) + actual_len;
-					}
-				}
-
-				PageSetLSN(ovf_page, record->EndRecPtr);
-				MarkBufferDirty(ovf_buffer);
-			}
+			(void) XLogReadBufferForRedo(record, (uint8) ovf_idx, &ovf_buffer);
 			if (BufferIsValid(ovf_buffer))
 				UnlockReleaseBuffer(ovf_buffer);
 		}
@@ -2123,39 +1665,51 @@ flux_xlog_overflow_write_redo(XLogReaderState *record)
 				FluxInitPage(page, BufferGetPageSize(buffer));
 			}
 
-			if (xlrec->flags & FLUX_OVERFLOW_WAL_LINK_UPDATE)
-			{
-				/*
-				 * Link update: overwrite the existing overflow record header
-				 * at the specified offset with updated chain pointers.
-				 */
-				ItemId		itemid;
-
-				itemid = PageGetItemId(page, xlrec->offnum);
-				if (xlrec->offnum > PageGetMaxOffsetNumber(page) ||
-					!ItemIdIsNormal(itemid) || !ItemIdHasStorage(itemid))
-					elog(PANIC, "FLUX OVERFLOW_WRITE redo: invalid lp at offset %u", xlrec->offnum);
-				{
-					FluxOverflowRecordHeader *existing_hdr =
-						(FluxOverflowRecordHeader *) PageGetItem(page, itemid);
-
-					memcpy(existing_hdr, record_data,
-						   sizeof(FluxOverflowRecordHeader));
-				}
-			}
-			else
 			{
 				/*
 				 * New overflow record: the logged data is the complete record
-				 * (FluxOverflowRecordHeader + chunk data). Add it to the page
-				 * at the specified offset.
+				 * (FluxOverflowRecordHeader + chunk data).  Add it at the EXACT
+				 * offset the primary used (xlrec->offnum) with overwrite=true.
+				 *
+				 * The primary (flux_overflow_add_chunk_logged) adds the chunk with
+				 * InvalidOffsetNumber, so PageAddItem REUSES the first LP_UNUSED
+				 * line pointer when the page has one -- and the orphan sweep makes
+				 * exactly those (it frees chunks with ItemIdSetUnused).  Replaying
+				 * with an explicit offnum and overwrite=false would instead SHUFFLE
+				 * the line pointers up to insert at offnum (PageAddItemExtended's
+				 * needshuffle branch), shifting every later offset and diverging
+				 * from the primary's page -- caught by wal_consistency_checking,
+				 * and a real standby/PITR divergence of chunk TIDs.  overwrite=true
+				 * fills the reused LP_UNUSED slot in place, and for a plain append
+				 * (offnum == max+1) behaves like a normal add.  This mirrors the
+				 * FLUX INSERT redo above.
 				 */
 				OffsetNumber offnum;
 
 				offnum = PageAddItem(page, record_data, xlrec->data_len,
-									 xlrec->offnum, false, false);
+									 xlrec->offnum, true, false);
 				if (offnum == InvalidOffsetNumber)
 					elog(ERROR, "failed to add overflow record to page during redo");
+				if (offnum != xlrec->offnum)
+					elog(PANIC, "FLUX OVERFLOW_WRITE redo: placed chunk at offset %u, expected %u",
+						 offnum, xlrec->offnum);
+			}
+
+			/*
+			 * Re-apply the page commit timestamp the primary stamped (and
+			 * logged in xlrec->commit_ts), as the INSERT redo does.  Without
+			 * this, a second chunk written to an already-initialized overflow
+			 * page -- which carries no INIT_PAGE record and, under
+			 * full_page_writes off, no full-page image -- leaves the standby
+			 * page's commit-ts word at the value the first write stamped,
+			 * while the primary advanced it.  flux_mask zeroes this word, so
+			 * wal_consistency_checking cannot catch the divergence.
+			 */
+			{
+				FluxPageOpaque phdr = FluxPageGetOpaque(page);
+
+				FluxPageSetCommitTs(phdr, Max(FluxPageGetCommitTs(phdr),
+											  xlrec->commit_ts));
 			}
 
 			PageSetLSN(page, record->EndRecPtr);

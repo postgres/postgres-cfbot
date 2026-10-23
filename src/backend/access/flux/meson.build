@@ -5,6 +5,7 @@ backend_sources += files(
   'flux_handler.c',
   'flux_operations.c',
   'flux_tuple.c',
+  'flux_overflow.c',
   'flux_mvcc.c',
   'flux_stats.c',
   'flux_xlog.c',

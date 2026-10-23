@@ -440,6 +440,24 @@ UndoWorkerCleanup(UndoApplyWorker *worker)
 static UndoRequestInfo *MyUndoRequest = NULL;
 
 /*
+ * Set only while UndoWorkerPerformRequest() drives execute_undo_actions() in
+ * an undo apply worker: a clean top-level transaction whose resource owner is
+ * TopTransactionResourceOwner for the whole apply, so an access methods undo
+ * callback may safely keep a relation open across records and release it from
+ * a transaction-end callback (see flux_undo.c flux_undo_open_rel).  False on
+ * every other apply path (inline abort, ROLLBACK PREPARED, subxact, recovery),
+ * where the resource owner live during apply may not be the one live at the
+ * callback.
+ */
+static bool pbu_in_undo_worker = false;
+
+bool
+PbuInUndoWorker(void)
+{
+	return pbu_in_undo_worker;
+}
+
+/*
  * Put a rollback request this worker did not finish back for another worker,
  * after the usual retry delay, without counting a failed attempt.  If the
  * error queue is full, drop the hash entry so that the discard worker
@@ -535,6 +553,7 @@ UndoWorkerPerformRequest(UndoRequestInfo *urinfo)
 	INJECTION_POINT("pbu-undo-worker-before-apply", NULL);
 
 	StartTransactionCommand();
+	pbu_in_undo_worker = true;
 	PG_TRY();
 	{
 		applied = execute_undo_actions(urinfo->full_xid, urinfo->end_urec_ptr,
@@ -564,6 +583,7 @@ UndoWorkerPerformRequest(UndoRequestInfo *urinfo)
 
 	if (!error)
 		CommitTransactionCommand();
+	pbu_in_undo_worker = false;
 	MyUndoRequest = NULL;
 
 	/*

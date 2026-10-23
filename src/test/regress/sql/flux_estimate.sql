@@ -159,8 +159,13 @@ FROM est_result h JOIN est_result f USING (shape)
 WHERE h.am = 'heap' AND f.am = 'flux'
 ORDER BY h.ctid;
 
--- ANALYZE's average column width is the stored width, as for heap: a
--- compressed value inline, an external value's TOAST pointer.
+-- ANALYZE's average column width is the stored width.  For heap a wide value
+-- is stored off page (compressed inline or an external TOAST pointer), so its
+-- recorded width is narrow.  FLUX stores a wide value in native overflow with
+-- a compact pointer held inline, but ANALYZE still sees the full reassembled
+-- value, so its recorded width is the full width -- a legitimate storage-shape
+-- difference, not a content difference (content round-trips: flux_toast_foreign).
+-- The narrow column `a` matches heap exactly.
 \set ECHO none
 \set stmt 'CREATE TABLE est_width_%1$s (a int, m text, e text) USING %1$s WITH (autovacuum_enabled = off)'
 :per_am
@@ -172,7 +177,7 @@ ORDER BY h.ctid;
 :per_am
 \set ECHO all
 SELECT attname, h.avg_width = f.avg_width AS same_width,
-	   f.avg_width < 100 AS stored_width
+	   h.avg_width < 100 AS heap_narrow
 FROM pg_stats h JOIN pg_stats f USING (attname)
 WHERE h.tablename = 'est_width_heap' AND f.tablename = 'est_width_flux'
 ORDER BY attname;

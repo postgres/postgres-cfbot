@@ -52,11 +52,11 @@ t
 (1 row)
 
 step s2_insert: <... completed>
-step c_show: SELECT count(*) AS nrows, flux_sct_chunks() AS nvalues,
+step c_show: SELECT count(*) AS nrows,
                      bool_and(md5(data) = md5(flux_sct_val())) AS ok
               FROM flux_sct;
-nrows|nvalues|ok
------+-------+--
-    1|      1|t 
+nrows|ok
+-----+--
+    1|t 
 (1 row)
 

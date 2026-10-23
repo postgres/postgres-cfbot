@@ -88,89 +88,17 @@ flux_pvs_prior_image(Relation rel, ItemPointer tid,
 					 const char *candidate, Size candidate_len,
 					 char **out_image, Size *out_len)
 {
-	char	   *next_image = NULL;
-	Size		next_len = 0;
+	const char *what = NULL;
 
-	switch (urec_subtype)
-	{
-		case FLUX_UNDO_UPDATE:
-		case FLUX_UNDO_DELETE:
-
-			/*
-			 * Both carry the full prior image.  A DELETE record is the chain
-			 * head of a deleted row; stepping past an invisible delete yields
-			 * the row as it was before it.
-			 */
-			{
-				FluxUndoPayloadHeader phdr;
-
-				if (payload == NULL ||
-					payload_size < SizeOfFluxUndoPayloadHeader)
-					flux_pvs_corrupt(rel, tid, verptr, "payload too short");
-				memcpy(&phdr, payload, SizeOfFluxUndoPayloadHeader);
-				if (!(phdr.flags & FLUX_UNDO_FLAG_HAS_TUPLE) ||
-					phdr.tuple_len == 0)
-					flux_pvs_corrupt(rel, tid, verptr, "no before-image");
-				if (payload_size < SizeOfFluxUndoPayloadHeader + phdr.tuple_len)
-					flux_pvs_corrupt(rel, tid, verptr, "before-image truncated");
-
-				next_len = phdr.tuple_len;
-				next_image = (char *) palloc(next_len);
-				memcpy(next_image,
-					   payload + SizeOfFluxUndoPayloadHeader,
-					   next_len);
-				break;
-			}
-
-		case FLUX_UNDO_UPDATE_DELTA:
-			{
-				FluxUndoPayloadHeader phdr;
-				const FluxUndoDelta *delta;
-				Size		delta_len;
-
-				if (payload == NULL ||
-					payload_size < SizeOfFluxUndoPayloadHeader +
-					SizeOfFluxUndoDelta)
-					flux_pvs_corrupt(rel, tid, verptr, "delta payload too short");
-				memcpy(&phdr, payload, SizeOfFluxUndoPayloadHeader);
-				if (!(phdr.flags & FLUX_UNDO_FLAG_HAS_TUPLE))
-					flux_pvs_corrupt(rel, tid, verptr, "delta without before-image");
-
-				delta = (const FluxUndoDelta *)
-					(payload + SizeOfFluxUndoPayloadHeader);
-
-				/*
-				 * tuple_len is the delta's length; a reserved index-revive
-				 * area (FLUX_UNDO_FLAG_INDEX_LIST) may follow it.
-				 */
-				delta_len = phdr.tuple_len;
-				if (delta_len < SizeOfFluxUndoDelta ||
-					delta_len > payload_size - SizeOfFluxUndoPayloadHeader)
-					flux_pvs_corrupt(rel, tid, verptr, "delta length out of range");
-
-				/*
-				 * Reconstruct the prior image by reverse-applying the delta
-				 * onto the CURRENT candidate image (not onto the page). The
-				 * delta always covers the t_verptr at offset 8, so the
-				 * reconstructed image carries the prior chain link and the
-				 * walk continues one step further back.
-				 */
-				next_len = delta->old_len;
-				next_image = (char *) palloc(next_len);
-				if (!FluxUndoDeltaReconstruct(delta, delta_len,
-											  candidate, candidate_len,
-											  next_image))
-					flux_pvs_corrupt(rel, tid, verptr, "delta does not fit the newer image");
-				break;
-			}
-
-		default:
-			flux_pvs_corrupt(rel, tid, verptr, "not an UPDATE or DELETE record");
-	}
-
-
-	*out_image = next_image;
-	*out_len = next_len;
+	/*
+	 * The shared reverse-apply (FluxUndoPriorImage) handles every subtype,
+	 * including reconstructing a FLUX_UNDO_UPDATE_DELTA onto the candidate.
+	 * A record it cannot step past is corruption for a reader: serving the
+	 * newer image would return a version the snapshot must not see.
+	 */
+	if (!FluxUndoPriorImage(urec_subtype, payload, payload_size,
+							candidate, candidate_len, out_image, out_len, &what))
+		flux_pvs_corrupt(rel, tid, verptr, what);
 }
 
 /*

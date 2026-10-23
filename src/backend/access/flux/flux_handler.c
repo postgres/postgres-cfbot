@@ -770,7 +770,7 @@ flux_pending_version(Relation rel, Buffer buffer, OffsetNumber offnum,
 			!FluxTupleHasAbortedVersion((FluxTupleHeader *) bi_data))
 		{
 			FluxSlotStoreTuple(slot, (FluxTupleHeader *) bi_data, bi_len,
-							   InvalidBuffer);
+							   InvalidBuffer, rel);
 			pfree(bi_data);
 			pfree(onpage);
 			slot->tts_tableOid = RelationGetRelid(rel);
@@ -838,7 +838,7 @@ flux_store_visible_older(Relation rel, Buffer buffer, ItemPointer tid,
 	pfree(onpage);
 	if (!found)
 		return false;
-	FluxSlotStoreTuple(slot, (FluxTupleHeader *) bi_data, bi_len, InvalidBuffer);
+	FluxSlotStoreTuple(slot, (FluxTupleHeader *) bi_data, bi_len, InvalidBuffer, rel);
 	pfree(bi_data);
 	slot->tts_tableOid = RelationGetRelid(rel);
 	slot->tts_tid = *tid;
@@ -994,7 +994,7 @@ flux_scan_getnext(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *
 				{
 					FluxTupleHeader *bi_tuple = (FluxTupleHeader *) bi_data;
 
-					FluxSlotStoreTuple(slot, bi_tuple, bi_len, InvalidBuffer);
+					FluxSlotStoreTuple(slot, bi_tuple, bi_len, InvalidBuffer, scan->rs_base.rs_rd);
 					pfree(bi_tuple);
 					ItemPointerSet(&slot->tts_tid, scan->rs_cblock, offnum);
 					return true;
@@ -1021,7 +1021,7 @@ flux_scan_getnext(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *
 												  scan->rs_cbuf, &self_tid)))
 			{
 				FluxSlotStoreTuple(slot, tuple_header,
-								   ItemIdGetLength(itemid), scan->rs_cbuf);
+								   ItemIdGetLength(itemid), scan->rs_cbuf, scan->rs_base.rs_rd);
 				LockBuffer(scan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 				ItemPointerSet(&slot->tts_tid, scan->rs_cblock, offnum);
 				return true;
@@ -1322,7 +1322,7 @@ flux_scan_bitmap_next_tuple(TableScanDesc scan,
 				{
 					FluxTupleHeader *bi_tuple = (FluxTupleHeader *) bi_data;
 
-					FluxSlotStoreTuple(slot, bi_tuple, bi_len, InvalidBuffer);
+					FluxSlotStoreTuple(slot, bi_tuple, bi_len, InvalidBuffer, scan->rs_rd);
 					pfree(bi_tuple);
 					slot->tts_tableOid = RelationGetRelid(scan->rs_rd);
 					ItemPointerSet(&slot->tts_tid, rscan->rs_cblock, offnum);
@@ -1347,7 +1347,7 @@ flux_scan_bitmap_next_tuple(TableScanDesc scan,
 			}
 
 			FluxSlotStoreTuple(slot, tuple_hdr,
-							   ItemIdGetLength(itemid), rscan->rs_cbuf);
+							   ItemIdGetLength(itemid), rscan->rs_cbuf, scan->rs_rd);
 			slot->tts_tableOid = RelationGetRelid(scan->rs_rd);
 			ItemPointerSet(&slot->tts_tid, rscan->rs_cblock, offnum);
 			LockBuffer(rscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
@@ -1857,7 +1857,7 @@ flux_dirty_old_key_match(IndexScanFluxData *fscan, Relation rel,
 	cv = flux_read_committed_version(rel, tid, &cv_len);
 	if (cv == NULL)
 		return false;
-	FluxSlotStoreTuple(slot, cv, cv_len, InvalidBuffer);
+	FluxSlotStoreTuple(slot, cv, cv_len, InvalidBuffer, rel);
 	pfree(cv);
 	slot->tts_tableOid = RelationGetRelid(rel);
 	slot->tts_tid = *tid;
@@ -2323,7 +2323,7 @@ flux_index_fetch_tuple(IndexScanFluxData *scan,
 		pfree(onpage);
 		if (cv == NULL)
 			return false;
-		FluxSlotStoreTuple(tts, cv, cv_len, InvalidBuffer);
+		FluxSlotStoreTuple(tts, cv, cv_len, InvalidBuffer, rel);
 		pfree(cv);
 		tts->tts_tableOid = RelationGetRelid(rel);
 		tts->tts_tid = *tid;
@@ -2406,7 +2406,7 @@ flux_index_fetch_tuple(IndexScanFluxData *scan,
 				FluxTupleHeader *bi_tuple = (FluxTupleHeader *) bi_data;
 
 				PredicateLockTID(rel, tid, snapshot, InvalidTransactionId);
-				FluxSlotStoreTuple(tts, bi_tuple, bi_len, InvalidBuffer);
+				FluxSlotStoreTuple(tts, bi_tuple, bi_len, InvalidBuffer, rel);
 				pfree(bi_tuple);
 				tts->tts_tableOid = RelationGetRelid(rel);
 				ItemPointerCopy(tid, &tts->tts_tid);
@@ -2498,7 +2498,7 @@ flux_index_fetch_tuple(IndexScanFluxData *scan,
 			FluxTupleHeader *bi_tuple = (FluxTupleHeader *) bi_data;
 
 			pfree(tuple_hdr);
-			FluxSlotStoreTuple(tts, bi_tuple, bi_len, InvalidBuffer);
+			FluxSlotStoreTuple(tts, bi_tuple, bi_len, InvalidBuffer, rel);
 			pfree(bi_tuple);
 			tts->tts_tableOid = RelationGetRelid(rel);
 			tts->tts_tid = *tid;
@@ -2522,7 +2522,7 @@ flux_index_fetch_tuple(IndexScanFluxData *scan,
 	 */
 	if (visible && (tuple_hdr->t_flags & FLUX_TUPLE_DELETED))
 	{
-		FluxSlotStoreTuple(tts, tuple_hdr, tuple_len, InvalidBuffer);
+		FluxSlotStoreTuple(tts, tuple_hdr, tuple_len, InvalidBuffer, rel);
 		pfree(tuple_hdr);
 		tts->tts_tableOid = RelationGetRelid(rel);
 		tts->tts_tid = *tid;
@@ -2726,7 +2726,7 @@ flux_tuple_fetch_row_version(Relation relation,
 		{
 			FluxTupleHeader *bi_tuple = (FluxTupleHeader *) bi_data;
 
-			FluxSlotStoreTuple(slot, bi_tuple, bi_len, InvalidBuffer);
+			FluxSlotStoreTuple(slot, bi_tuple, bi_len, InvalidBuffer, relation);
 			pfree(bi_tuple);
 			slot->tts_tableOid = RelationGetRelid(relation);
 			slot->tts_tid = *tid;
@@ -2767,12 +2767,12 @@ flux_tuple_fetch_row_version(Relation relation,
 										&bi_data, &bi_len))
 			{
 				FluxSlotStoreTuple(slot, (FluxTupleHeader *) bi_data, bi_len,
-								   InvalidBuffer);
+								   InvalidBuffer, relation);
 				pfree(bi_data);
 			}
 			else				/* it committed meanwhile: as on page */
 				FluxSlotStoreTuple(slot, (FluxTupleHeader *) onpage, len,
-								   InvalidBuffer);
+								   InvalidBuffer, relation);
 			pfree(onpage);
 			slot->tts_tableOid = RelationGetRelid(relation);
 			slot->tts_tid = *tid;
@@ -2782,7 +2782,7 @@ flux_tuple_fetch_row_version(Relation relation,
 
 	/* Store tuple into slot with buffer pin for safe access */
 	FluxSlotStoreTuple(slot, tuple_hdr,
-					   ItemIdGetLength(itemid), buffer);
+					   ItemIdGetLength(itemid), buffer, relation);
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = *tid;
 
@@ -3069,9 +3069,7 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 	BlockNumber target_block;
 	OffsetNumber offnum;
 	FluxTupleHeader *tuple_hdr;
-	uint64		commit_ts;
 	FluxOverflowBuffers overflow_buffers;
-	int			i;
 	int			natts = RelationGetDescr(relation)->natts;
 	Datum	   *toast_values;
 	bool	   *toast_isnull;
@@ -3095,10 +3093,12 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 	toast_attr = palloc_array(ToastAttrInfo, natts);
 	memcpy(toast_values, slot->tts_values, natts * sizeof(Datum));
 	memcpy(toast_isnull, slot->tts_isnull, natts * sizeof(bool));
-	flux_toast_tuple(relation, toast_values, toast_isnull, NULL, NULL,
-					 &ttc, toast_attr, &toasted, 0);
+	ttc.ttc_rel = NULL;
+	if (RelationIsLogicallyLogged(relation))
+		flux_toast_tuple(relation, toast_values, toast_isnull, NULL, NULL,
+						 &ttc, toast_attr, &toasted, 0);
 
-	overflow_buffers.count = 0;
+	overflow_buffers.avoid_block = InvalidBlockNumber;
 	tuple = FluxFormTuple(RelationGetDescr(relation),
 						  toast_values, toast_isnull,
 						  relation, &overflow_buffers);
@@ -3123,12 +3123,6 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 						tuple_size, (Size) FLUX_MAX_TUPLE_SIZE)));
 
 	/*
-	 * Get timestamp BEFORE entering critical section, as this may allocate
-	 * memory.
-	 */
-	commit_ts = FluxGetCommitTimestamp();
-
-	/*
 	 * Mark the tuple as uncommitted so that SNAPSHOT_DIRTY callers can detect
 	 * in-progress insertions via the sLog.  The sLog entry is registered
 	 * after the tuple is placed on the page (below) so that the TID is valid.
@@ -3141,65 +3135,34 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 	tuple->t_data->t_cmin = cid;	/* see flux_tuple_insert */
 
 	/*
-	 * Use the FSM to find a page with enough free space, or extend the
-	 * relation with a properly initialized new page.
+	 * Find a page with room for the tuple.  The tuple's overflow chunks (if
+	 * any) were self-logged and their pages already released inside
+	 * FluxFormTuple, so this backend holds no chunk-page lock here and the
+	 * target page can be any FLUX data page.  Retry on a stale FSM answer and
+	 * extend a fresh page as the last resort.
 	 */
-	target_block = FluxGetPageWithFreeSpace(relation, tuple_size);
-	if (target_block == InvalidBlockNumber)
+	buf = InvalidBuffer;
+	for (;;)
 	{
-		/* Clean up overflow buffers before throwing error */
-		for (i = 0; i < overflow_buffers.count; i++)
-		{
-			UnlockReleaseBuffer(overflow_buffers.buffers[i].buffer);
-			pfree(overflow_buffers.buffers[i].record_data);
-		}
-		FluxFreeTuple(tuple);
-		elog(ERROR, "FLUX failed to allocate page for speculative insertion");
-	}
-
-	buf = ReadBuffer(relation, target_block);
-	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-	page = BufferGetPage(buf);
-
-	/* Verify page has sufficient space */
-	if (PageGetHeapFreeSpace(page) < tuple_size)
-	{
-		/* FSM was stale, update and retry */
-		FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
-		UnlockReleaseBuffer(buf);
-
 		target_block = FluxGetPageWithFreeSpace(relation, tuple_size);
 		if (target_block == InvalidBlockNumber)
 		{
-			/* Clean up overflow buffers before throwing error */
-			for (i = 0; i < overflow_buffers.count; i++)
-			{
-				UnlockReleaseBuffer(overflow_buffers.buffers[i].buffer);
-				pfree(overflow_buffers.buffers[i].record_data);
-			}
-			FluxFreeTuple(tuple);
-			elog(ERROR, "FLUX failed to allocate page for speculative insertion after retry");
+			/* Race-safe extension (see FluxExtendRelationBuffer). */
+			buf = FluxExtendRelationBuffer(relation);
+			page = BufferGetPage(buf);
+			break;
 		}
 
 		buf = ReadBuffer(relation, target_block);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		page = BufferGetPage(buf);
+		if (PageGetHeapFreeSpace(page) >= tuple_size)
+			break;
 
-		if (PageGetHeapFreeSpace(page) < tuple_size)
-		{
-			/*
-			 * Both FSM attempts returned stale pages.  Extend the relation
-			 * as the final fallback to get a guaranteed-empty page.
-			 * Update FSM for accuracy on the bad page.
-			 */
-			FluxRecordFreeSpace(relation, BufferGetBlockNumber(buf),
-								PageGetHeapFreeSpace(page));
-			UnlockReleaseBuffer(buf);
-
-			/* Race-safe extension (see FluxExtendRelationBuffer). */
-			buf = FluxExtendRelationBuffer(relation);
-			page = BufferGetPage(buf);
-		}
+		/* Stale FSM: record real free space and retry. */
+		FluxRecordFreeSpace(relation, target_block, PageGetHeapFreeSpace(page));
+		UnlockReleaseBuffer(buf);
+		buf = InvalidBuffer;
 	}
 
 	/*
@@ -3226,12 +3189,12 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 	}
 
 	/*
-	 * Reserve WAL room for the overflow blocks and their header + data chunks
-	 * outside the critical section, as the plain insert path does.
+	 * Build the heap-format logical-decoding image.  Wide columns on a
+	 * logically-logged relation are heap-TOAST pointers here (FLUX-native
+	 * overflow is declined for such relations so logical decoding can resolve
+	 * the value as an EXTERNAL pointer), so deforming the tuple is safe and
+	 * carries no held FLUX overflow pages.  No-op unless logically logged.
 	 */
-	if (RelationNeedsWAL(relation) && overflow_buffers.count > 0)
-		XLogEnsureRecordSpace(XLR_MAX_BLOCK_ID, 3 + MAX_OVERFLOW_BUFFERS * 2);
-
 	FluxXLogPrepareLogicalImage(relation, tuple, &logical_img);
 
 	vmbuffer = FluxVMPinForChange(relation, buf);
@@ -3267,9 +3230,6 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 	{
 		XLogRecPtr	recptr;
 		xl_flux_insert xlrec;
-		xl_flux_overflow_write ovf_xlrecs[MAX_OVERFLOW_BUFFERS];
-		int			ovf_block_ids[MAX_OVERFLOW_BUFFERS];
-		int			ovf_next_block_id = 1;
 
 		xlrec.offnum = offnum;
 		xlrec.relid = RelationGetRelid(relation);
@@ -3296,39 +3256,11 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 		FluxVMRegisterClear(&xlrec.flags);
 
 		/*
-		 * Register the overflow pages the way the plain insert path does,
-		 * which is what insert redo parses: each page once (records can share
-		 * a page), and each record's data preceded by its
-		 * xl_flux_overflow_write header.
+		 * No overflow blocks ride this record: the tuple's overflow chunks
+		 * were self-logged on their own XLOG_FLUX_OVERFLOW_WRITE records
+		 * before this speculative INSERT, so block 0 is the only forward
+		 * block.
 		 */
-		for (i = 0; i < overflow_buffers.count; i++)
-		{
-			FluxOverflowBuffer *ovb = &overflow_buffers.buffers[i];
-			int			j;
-
-			Assert(ovb->buffer != buf);
-			ovf_block_ids[i] = -1;
-			for (j = 0; j < i && ovf_block_ids[i] < 0; j++)
-			{
-				if (overflow_buffers.buffers[j].buffer == ovb->buffer)
-					ovf_block_ids[i] = ovf_block_ids[j];
-			}
-			if (ovf_block_ids[i] < 0)
-			{
-				ovf_block_ids[i] = ovf_next_block_id++;
-				XLogRegisterBuffer(ovf_block_ids[i], ovb->buffer,
-								   REGBUF_STANDARD | REGBUF_FORCE_IMAGE);
-			}
-
-			ovf_xlrecs[i].offnum = ovb->offset;
-			ovf_xlrecs[i].flags = ovb->flags;
-			ovf_xlrecs[i].data_len = ovb->record_len;
-			ovf_xlrecs[i].commit_ts = commit_ts;
-			XLogRegisterBufData(ovf_block_ids[i], (char *) &ovf_xlrecs[i],
-								sizeof(xl_flux_overflow_write));
-			XLogRegisterBufData(ovf_block_ids[i], ovb->record_data,
-								ovb->record_len);
-		}
 
 		if (logical_img.data != NULL)
 		{
@@ -3361,24 +3293,6 @@ flux_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 						PageGetHeapFreeSpace(page));
 
 	UnlockReleaseBuffer(buf);
-
-	/* Release overflow buffers, deduplicating shared buffers */
-	for (i = 0; i < overflow_buffers.count; i++)
-	{
-		Buffer		ovf_buf = overflow_buffers.buffers[i].buffer;
-		bool		already_released = (ovf_buf == buf);
-		int			j;
-
-		for (j = 0; j < i && !already_released; j++)
-		{
-			if (overflow_buffers.buffers[j].buffer == ovf_buf)
-				already_released = true;
-		}
-
-		if (!already_released)
-			UnlockReleaseBuffer(ovf_buf);
-		pfree(overflow_buffers.buffers[i].record_data);
-	}
 
 	FluxFreeTuple(tuple);
 
@@ -4583,7 +4497,7 @@ out_unlock:
 				 * reject inside the overflow-aware path would refuse a
 				 * delete-marked tuple outright.
 				 */
-				FluxSlotStoreTuple(slot, ihdr, ItemIdGetLength(iid), buf);
+				FluxSlotStoreTuple(slot, ihdr, ItemIdGetLength(iid), buf, relation);
 				slot->tts_tableOid = RelationGetRelid(relation);
 				slot->tts_tid = *tid;
 				ExecMaterializeSlot(slot);
@@ -5727,7 +5641,7 @@ flux_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 			ov.xmax_committed = !TransactionIdIsCurrentTransactionId(cv->xmax);
 			ov.moved_partition = false;
 			FluxSlotStoreTuple(vslot, (FluxTupleHeader *) cv->image, cv->len,
-							   InvalidBuffer);
+							   InvalidBuffer, OldTable);
 			vslot->tts_tableOid = RelationGetRelid(OldTable);
 			vslot->tts_tid = otid;
 			flux_cluster_emit(NewTable, vslot, &ov, tuplesort);
@@ -5925,7 +5839,7 @@ flux_index_build_range_scan(Relation tablerel, Relation indexrel,
 				 */
 				tuple_hdr = (FluxTupleHeader *) PageGetItem(page, itemid);
 				FluxSlotStoreTuple(slot, tuple_hdr, ItemIdGetLength(itemid),
-								   buf);
+								   buf, tablerel);
 				slot->tts_tableOid = RelationGetRelid(tablerel);
 				ItemPointerSet(&slot->tts_tid, blkno, offnum);
 			}
@@ -6208,9 +6122,11 @@ static bool
 flux_relation_needs_toast_table(Relation rel)
 {
 	/*
-	 * FLUX uses standard heap TOAST for wide values (it has no on-page
-	 * overflow mechanism).  This mirrors heapam_relation_needs_toast_table: a
-	 * TOAST table is needed iff there is a toastable attribute and the
+	 * A FLUX relation keeps an ordinary heap TOAST table: wide values of a
+	 * logically-logged relation go there (decoding needs heap TOAST
+	 * pointers), and such a relation can become logically logged after
+	 * creation.  Every other wide value uses FLUX-native overflow.  This
+	 * mirrors heapam_relation_needs_toast_table: a TOAST table is needed iff there is a toastable attribute and the
 	 * maximum tuple length could exceed TOAST_TUPLE_THRESHOLD.
 	 */
 	int32		data_length = 0;
@@ -6500,7 +6416,7 @@ flux_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 			 * (FluxSlotStoreTuple).
 			 */
 			FluxSlotStoreTuple(slot, tuple_hdr,
-							   ItemIdGetLength(itemid), rscan->rs_cbuf);
+							   ItemIdGetLength(itemid), rscan->rs_cbuf, scan->rs_rd);
 			slot->tts_tableOid = RelationGetRelid(scan->rs_rd);
 			ItemPointerSet(&slot->tts_tid, blockno, tupoffset);
 			LockBuffer(rscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
@@ -6635,7 +6551,10 @@ static const TableAmRoutine flux_methods = {
 };
 
 /*
- * Return the FLUX table AM routine
+ * Return the FLUX table AM routine.
+ *
+ * Intentionally retained public accessor (mirrors GetHeapamTableAmRoutine):
+ * no in-tree caller today, kept for other access-method code and extensions.
  */
 const TableAmRoutine *
 GetFluxTableAmRoutine(void)
@@ -6854,7 +6773,7 @@ flux_scan_analyze_next_tuple(TableScanDesc scan,
 			 * (bufmgr.c).
 			 */
 			FluxSlotStoreTuple(slot, tuple_hdr, ItemIdGetLength(itemid),
-							   rscan->rs_cbuf);
+							   rscan->rs_cbuf, scan->rs_rd);
 			slot->tts_tableOid = RelationGetRelid(scan->rs_rd);
 			ItemPointerSet(&slot->tts_tid, rscan->rs_cblock, rscan->rs_cindex);
 			rscan->rs_cindex++;

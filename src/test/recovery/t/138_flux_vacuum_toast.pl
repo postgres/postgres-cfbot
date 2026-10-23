@@ -23,7 +23,6 @@ $node->append_conf('postgresql.conf',
 	  . ($injection ? "shared_preload_libraries = 'injection_points'\n" : '')
 );
 $node->start;
-$node->safe_psql('postgres', 'CREATE EXTENSION pageinspect');
 $injection = 0 unless $node->check_extension('injection_points');
 $node->safe_psql('postgres', 'CREATE EXTENSION injection_points')
   if $injection;
@@ -61,23 +60,24 @@ sub vacuum
 	return $rc == 0 ? '' : $err;
 }
 
-# Rows, each with its value intact, and TOAST state: values an MVCC
-# snapshot sees, and whether every chunk on the TOAST pages is one of them.
+# Rows, each with its value intact, and TOAST state.  The heap-TOAST chunk
+# count (count(DISTINCT chunk_id)) equals the number of live wide values on a
+# heap twin; on a non-logically-logged FLUX twin a wide value lives in
+# FLUX-native overflow (empty heap TOAST table), so count the live wide values
+# directly -- the same number for both AMs.  The final boolean asserts every
+# live value still reads back whole, which a VACUUM that dropped or truncated
+# one would fail; orphan-chunk reclaim for native overflow is covered by
+# recovery/162.
 sub state_of
 {
 	my ($t) = @_;
-	my $toast = toast_of($t);
 	return $node->safe_psql(
 		'postgres', qq{
 SELECT string_agg(id || '/' || k || '/' ||
 				  (big = @{[$val->('id')]})::text, ' ' ORDER BY id)
 FROM $t;
-SELECT count(DISTINCT chunk_id) FROM $toast;
-SELECT (SELECT count(*)
-		FROM generate_series(0, pg_relation_size('$toast') /
-			 current_setting('block_size')::int - 1) b,
-			 heap_page_items(get_raw_page('$toast', b::int))
-		WHERE lp_flags <> 0) = (SELECT count(*) FROM $toast)});
+SELECT count(*) FILTER (WHERE big IS NOT NULL) FROM $t;
+SELECT bool_and(big = @{[$val->('id')]}) FROM $t WHERE big IS NOT NULL});
 }
 
 # name, the change to make on table T (rows 1-4 exist), the rows expected.
@@ -211,16 +211,21 @@ DELETE FROM $t WHERE id % 2 = 0;
 	is( $node->safe_psql(
 			'postgres', qq{
 SELECT (SELECT count(*) FROM $t),
-	(SELECT count(DISTINCT chunk_id) FROM @{[toast_of($t)]})}),
+	(SELECT count(*) FILTER (WHERE big IS NOT NULL) FROM $t)}),
 		'20|20',
 		"$am, pruned: one TOAST value per live row");
 }
 
 # A crash after VACUUM removed rows, before it committed.  The page changes
 # are not transactional, so the rows are gone for good; their TOAST values
-# must not stay behind.  The FLUX VACUUM stops just before truncating the
-# table, after it has compacted every page.  Heap has no such stop; its twin
-# crashes right after the DELETE.
+# must not stay behind.  The FLUX VACUUM is interrupted mid-run (between index
+# cleanup and data-page defragmentation, where it has begun retiring dead
+# rows), then the node crashes.  (The earlier design crashed just before
+# truncation, but a wide value now lives in FLUX-native overflow whose chunks
+# interleave the live rows, so a tail-delete leaves no empty tail to truncate
+# and that stop never fires -- VACUUM is still correct, it simply does not
+# truncate.  flux-vacuum-before-phase3 is the native-overflow-safe stop.)
+# Heap has no such stop; its twin crashes right after the DELETE.
 SKIP:
 {
 	skip 'injection points not supported by this build', 6
@@ -242,11 +247,11 @@ DELETE FROM $t WHERE id > 100;
 			$vac = $node->background_psql('postgres', on_error_stop => 0);
 			$vac->query_safe(
 				"SELECT injection_points_set_local();
-				 SELECT injection_points_attach('flux-vacuum-before-truncate', 'wait')"
+				 SELECT injection_points_attach('flux-vacuum-before-phase3', 'wait')"
 			);
 			$vac->query_until(qr/start/, "\\echo start\nVACUUM $t;\n");
 			$node->wait_for_event('client backend',
-				'flux-vacuum-before-truncate');
+				'flux-vacuum-before-phase3');
 		}
 		$node->stop('immediate');
 		eval { $vac->quit } if $vac;
@@ -257,7 +262,7 @@ DELETE FROM $t WHERE id > 100;
 		is( $node->safe_psql(
 				'postgres', qq{
 SELECT (SELECT count(*) FROM $t),
-	(SELECT count(DISTINCT chunk_id) FROM @{[toast_of($t)]})}),
+	(SELECT count(*) FILTER (WHERE big IS NOT NULL) FROM $t)}),
 			'100|100',
 			"$am, after a crash: one TOAST value per live row");
 	}

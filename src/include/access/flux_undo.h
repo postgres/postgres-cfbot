@@ -276,4 +276,15 @@ extern bool FluxRevertAbortedVersions(Relation rel, Buffer buffer,
  */
 extern void FluxUndoRmgrInit(void);
 
+/*
+ * Reverse-apply one FLUX UNDO record to the image it produced, yielding the
+ * prior committed image.  Shared by every per-tuple version-chain walk.  Fails
+ * safe: returns false with *what set on a malformed record, never errors.
+ */
+extern bool FluxUndoPriorImage(uint16 subtype,
+							   const char *payload, Size payload_size,
+							   const char *candidate, Size candidate_len,
+							   char **out_image, Size *out_len,
+							   const char **what);
+
 #endif							/* FLUX_UNDO_H */

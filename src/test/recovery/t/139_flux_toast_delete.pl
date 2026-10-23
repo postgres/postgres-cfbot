@@ -293,8 +293,14 @@ WHERE wait_event = 'pbu-undo-worker-before-apply'}
 	$h->poll_query_until('postgres', 'SELECT release_one()')
 	  or die 'worker not released';
 	vacuum_both('hp');
+	# The helped node runs at wal_level=replica (no logical streaming), so this
+	# non-logically-logged FLUX relation stores the wide value in FLUX-native
+	# overflow, not the heap TOAST table: state_of's heap-TOAST chunk count is 0
+	# and its heap-TOAST physical-consistency check is trivially true.  The
+	# content line (every row's value intact) and the row count below carry the
+	# correctness; native-overflow VACUUM reclaim is covered by recovery/162.
 	is( state_of('hp'),
-		"1/10/true 2/2/true 3/3/true 4/4/true\n4\nt",
+		"1/10/true 2/2/true 3/3/true 4/4/true\n0\nt",
 		'flux: helped revert of a DELETE keeps every value');
 	is($h->safe_psql('postgres', 'SELECT count(*) FROM hp'),
 		'4', 'flux: no row lost');

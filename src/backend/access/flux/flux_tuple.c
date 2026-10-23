@@ -29,6 +29,7 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 
 /*
  * FluxComputeDataSize
@@ -107,9 +108,11 @@ FluxComputeDataSize(TupleDesc tupdesc, Datum *values, bool *isnull)
  * flux_toast_tuple
  *
  * TOAST the varlena columns of a to-be-stored FLUX tuple, exactly like heap.
- * FLUX has no on-page overflow mechanism; wide values are pushed to the
- * relation's standard heap TOAST table via the AM-agnostic toast_helper
- * routines (toast_tuple_*).  On return, values[]/isnull[] have had any
+ * Used only for logically-logged relations, whose wide values must reach
+ * logical decoding as heap TOAST pointers; every other FLUX relation stores
+ * wide values in FLUX-native overflow (flux_overflow.c).  Wide values are
+ * pushed to the relation's standard heap TOAST table via the AM-agnostic
+ * toast_helper routines (toast_tuple_*).  On return, values[]/isnull[] have had any
  * externalized/compressed columns replaced so that the tuple formed from
  * them fits within a FLUX page.
  *
@@ -219,6 +222,12 @@ flux_toast_tuple(Relation rel, Datum *values, bool *isnull,
 void
 flux_toast_cleanup(ToastTupleContext *ttc)
 {
+	/*
+	 * Not initialised when the caller skipped flux_toast_tuple(): nothing to
+	 * do.
+	 */
+	if (ttc->ttc_rel == NULL)
+		return;
 	toast_tuple_cleanup(ttc);
 }
 
@@ -234,7 +243,12 @@ flux_toast_cleanup(ToastTupleContext *ttc)
 void
 flux_toast_abandon(ToastTupleContext *ttc)
 {
-	int			numAttrs = ttc->ttc_rel->rd_att->natts;
+	int			numAttrs;
+
+	/* Not initialised when the caller skipped flux_toast_tuple(). */
+	if (ttc->ttc_rel == NULL)
+		return;
+	numAttrs = ttc->ttc_rel->rd_att->natts;
 
 	for (int i = 0; i < numAttrs; i++)
 	{
@@ -275,15 +289,16 @@ flux_toast_delete(Relation rel, Datum *values, bool *isnull,
  * the tuple's FLUX_INFOMASK_COMPRESSED bit is set.
  *
  * When a relation is provided, large attributes exceeding FLUX_OVERFLOW_THRESHOLD
- * are automatically stored in overflow pages. Overflow pointers are collected in
- * overflow_buffers for atomic WAL logging by the caller.
+ * are automatically stored in overflow pages via FluxStoreOverflowColumn, which
+ * self-logs each chunk under its own lock before this tuple is formed.
  *
  * Parameters:
  *   tupdesc - tuple descriptor defining the schema
  *   values  - array of Datum values for each attribute
  *   isnull  - array of boolean null indicators
  *   rel     - relation for overflow storage (NULL to disable overflow handling)
- *   overflow_buffers - output for overflow buffers (NULL if rel is NULL)
+ *   overflow_buffers - overflow write context carrying avoid_block (NULL if
+ *                      rel is NULL)
  *
  * Returns a palloc'd FluxTuple.  The caller is responsible for freeing it
  * with FluxFreeTuple() when done.
@@ -294,6 +309,34 @@ static FluxTuple flux_form_tuple_internal(TupleDesc tupdesc, Datum *values,
 										  bool force_shrink,
 										  const FluxOverflowPtr *old_ovptrs,
 										  const bool *old_ovpresent);
+
+/*
+ * flux_overflow_prefix_len
+ *		Choose the inline-prefix length for an overflow reference, making the
+ *		tuple ref VARIABLE-WIDTH: a value only slightly over the overflow
+ *		threshold pays NO prefix (ref is the minimum width), while larger values
+ *		keep the full FLUX_OVERFLOW_DEFAULT_PREFIX so a prefix-only comparison
+ *		can avoid a chunk fetch.  force-shrink always uses zero prefix.
+ *
+ * The locator struct (FluxOverflowPtr) is a fixed 20 bytes BY DESIGN: that is
+ * the force-shrink MAX ref width (prefix == 0), and FLUX_OVERFLOW_PTR_SIZE must
+ * stay within the bound the in-place UPDATE refit math assumes (flux.h:369),
+ * so a force-shrunk column never grows past its current footprint.  The
+ * VARIABLE part is the inline prefix, so the on-disk ref ranges from
+ * VARHDRSZ+20 (tiny value / force-shrink) up to
+ * VARHDRSZ+20+FLUX_OVERFLOW_DEFAULT_PREFIX, never exceeding the force-shrink
+ * bound.
+ */
+static Size
+flux_overflow_prefix_len(bool force_shrink, Size vlen)
+{
+	if (force_shrink)
+		return 0;
+	/* Within 2x the threshold the whole value is cheap to fetch: no prefix. */
+	if (vlen <= (Size) FLUX_OVERFLOW_THRESHOLD * 2)
+		return 0;
+	return Min((Size) FLUX_OVERFLOW_DEFAULT_PREFIX, vlen);
+}
 
 FluxTuple
 FluxFormTuple(TupleDesc tupdesc, Datum *values, bool *isnull,
@@ -311,7 +354,7 @@ FluxFormTuple(TupleDesc tupdesc, Datum *values, bool *isnull,
  * on-page overflow pointers, collected while its buffer was still locked.  Any
  * over-threshold varlena whose content hash matches the old pointer's stored
  * hash (and byte-verifies equal) is COW-referenced against the existing
- * overflow chain instead of being re-stored, avoiding needless disk growth and
+ * overflow value instead of being re-stored, avoiding needless disk growth and
  * WAL.  Pass NULL arrays to disable this (identical to FluxFormTuple).
  */
 FluxTuple
@@ -406,10 +449,183 @@ flux_form_tuple_internal(TupleDesc tupdesc, Datum *values, bool *isnull,
 	memcpy(work_values, values, tupdesc->natts * sizeof(Datum));
 
 	/*
-	 * FLUX has no on-page overflow mechanism; wide varlena values are TOASTed
-	 * by the caller (standard heap TOAST path) before reaching here.
-	 * Likewise, FLUX does not compress attributes.  work_values therefore
-	 * mirrors values exactly.
+	 * Phase 1b: FLUX-native column overflow.
+	 *
+	 * When a relation and an overflow_buffers context are supplied, push each
+	 * over-threshold varlena column off the main tuple into FLUX overflow
+	 * records (DATA chunks + a ROOT directory) on FLUX-managed pages, and
+	 * replace the inline value with a compact FluxOverflowPtr.  Each chunk is
+	 * self-logged under its own lock and released before the next (so no
+	 * chunk page is held when the caller later locks its main tuple page).
+	 * Overflow records share the parent version's visibility (no MVCC fields
+	 * of their own).
+	 *
+	 * Eligibility mirrors heap TOAST: only varlena (attlen == -1) columns
+	 * with a storage mode other than PLAIN.  force_shrink lowers the bar to
+	 * "wider than an overflow pointer" so an in-place UPDATE can refit its
+	 * slot.
+	 *
+	 * Exception: a logically-logged relation keeps wide values on the
+	 * standard heap TOAST path (the caller runs flux_toast_tuple first).
+	 * Logical decoding must resolve a wide value WITHOUT a FLUX relation
+	 * handle, and PostgreSQL's reorderbuffer requires a large logical value
+	 * to travel as an EXTERNAL (heap-TOAST) pointer the output plugin
+	 * detoasts -- it rejects a multi-megabyte inline logical tuple (Assert
+	 * t_len <= MaxHeapTupleSize in ReorderBufferToastReplace).  A FLUX-native
+	 * overflow pointer is neither, so it could not be decoded.  Declining
+	 * native overflow here leaves the value as a heap-TOAST pointer, which
+	 * both the read path and decoding resolve.
+	 */
+	if (rel != NULL && overflow_buffers != NULL &&
+		!RelationIsLogicallyLogged(rel))
+	{
+		Size		threshold = force_shrink ? sizeof(FluxOverflowPtr)
+			: FLUX_OVERFLOW_THRESHOLD;
+
+		/*
+		 * Two passes.  Pass 1 detoasts each eligible column and resolves the
+		 * COW re-reference decision, which READS the old value's chunks via
+		 * FluxFetchOverflowColumn.  Pass 2 WRITES the new chunks via the
+		 * self-logged path (one chunk-page lock at a time, released before
+		 * the next).  They must not interleave: a Pass-2 store briefly locks
+		 * a page a later Pass-1 verify would share-lock to read an old chunk,
+		 * and although each is released promptly, doing all reads first keeps
+		 * the COW compare simple and avoids re-reading a page mid-write.
+		 */
+		Datum	   *ov_detoasted = (Datum *) palloc0(tupdesc->natts * sizeof(Datum));
+		bool	   *ov_tostore = (bool *) palloc0(tupdesc->natts * sizeof(bool));
+
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+			struct varlena *vl;
+			struct varlena *detoasted;
+			Size		vlen;
+			const FluxOverflowPtr *reuse = NULL;
+
+			if (isnull[i] || att->attisdropped || att->attlen != -1)
+				continue;
+			if (att->attstorage == TYPSTORAGE_PLAIN)
+				continue;
+
+			vl = (struct varlena *) DatumGetPointer(work_values[i]);
+
+			/* An already-stored overflow pointer passes straight through. */
+			if (FluxIsOverflowPtr(vl))
+				continue;
+
+			/* Detoast first: FLUX overflow stores plain uncompressed bytes. */
+			detoasted = pg_detoast_datum(vl);
+			vlen = VARSIZE_ANY_EXHDR(detoasted);
+			if (vlen < threshold)
+			{
+				if (detoasted != vl)
+					pfree(detoasted);
+				continue;
+			}
+
+			/*
+			 * COW re-reference (in-place UPDATE): if the old tuple had an
+			 * overflow value for this attr whose content hash matches and
+			 * byte-verifies equal, reuse the existing chunks instead of
+			 * rewriting them -- avoids needless disk growth and WAL.
+			 */
+			if (old_ovptrs != NULL && old_ovpresent != NULL && old_ovpresent[i])
+			{
+				const FluxOverflowPtr *oldp = &old_ovptrs[i];
+				uint32		h = hash_bytes((const unsigned char *) VARDATA_ANY(detoasted),
+										   vlen);
+
+				if (oldp->ov_total_length == vlen &&
+					oldp->ov_content_hash == h)
+					reuse = oldp;
+			}
+
+			if (reuse != NULL)
+			{
+				/*
+				 * Byte-verify the candidate before trusting the hash: fetch
+				 * the old value and compare.  On mismatch fall through to
+				 * re-store.
+				 */
+				struct varlena *refvl;
+				Datum		oldfull;
+				bool		same = false;
+				FluxOverflowPtr tmp = *reuse;
+				char		refbuf[VARHDRSZ + sizeof(FluxOverflowPtr)];
+
+				refvl = (struct varlena *) refbuf;
+				SET_VARSIZE(refvl, VARHDRSZ + sizeof(FluxOverflowPtr));
+				memcpy(VARDATA(refvl), &tmp, sizeof(FluxOverflowPtr));
+				oldfull = FluxFetchOverflowColumn(rel, refvl);
+				if (VARSIZE_ANY_EXHDR(DatumGetPointer(oldfull)) == vlen &&
+					memcmp(VARDATA_ANY(DatumGetPointer(oldfull)),
+						   VARDATA_ANY(detoasted), vlen) == 0)
+					same = true;
+				pfree(DatumGetPointer(oldfull));
+
+				if (same)
+				{
+					/* Reuse old chunks: emit a ref varlena to the same root. */
+					Size		pfx = flux_overflow_prefix_len(force_shrink, vlen);
+					Size		sz = VARHDRSZ + sizeof(FluxOverflowPtr) + pfx;
+					struct varlena *r = (struct varlena *) palloc0(sz);
+					FluxOverflowPtr *op = (FluxOverflowPtr *) VARDATA(r);
+
+					SET_VARSIZE(r, sz);
+					*op = tmp;
+					op->ov_inline_prefix = (uint16) pfx;
+					if (pfx > 0)
+						memcpy((char *) op + sizeof(FluxOverflowPtr),
+							   VARDATA_ANY(detoasted), pfx);
+					if (detoasted != vl)
+						pfree(detoasted);
+					work_values[i] = PointerGetDatum(r);
+					is_overflowed[i] = true;
+					has_overflow = true;
+					continue;
+				}
+			}
+
+			/* Not reused: remember the detoasted value for Pass 2. */
+			ov_detoasted[i] = PointerGetDatum(detoasted);
+			ov_tostore[i] = true;
+		}
+
+		/* Pass 2: write the new chunks (each self-logged under its own lock). */
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			struct varlena *vl;
+			struct varlena *detoasted;
+			Size		vlen;
+			Size		prefix;
+			Datum		ref;
+
+			if (!ov_tostore[i])
+				continue;
+
+			vl = (struct varlena *) DatumGetPointer(work_values[i]);
+			detoasted = (struct varlena *) DatumGetPointer(ov_detoasted[i]);
+			vlen = VARSIZE_ANY_EXHDR(detoasted);
+			prefix = flux_overflow_prefix_len(force_shrink, vlen);
+			ref = FluxStoreOverflowColumn(rel, PointerGetDatum(detoasted),
+										  i, prefix, overflow_buffers);
+			if (detoasted != vl)
+				pfree(detoasted);
+			work_values[i] = ref;
+			is_overflowed[i] = true;
+			has_overflow = true;
+		}
+
+		pfree(ov_detoasted);
+		pfree(ov_tostore);
+	}
+
+	/*
+	 * Any remaining wide varlena values (e.g. logically-logged relations, or
+	 * values the overflow path declined) are TOASTed by the caller via the
+	 * standard heap TOAST path before reaching here.  FLUX does not compress
+	 * attributes.
 	 */
 
 	/*
@@ -601,6 +817,7 @@ FluxDeformTupleUpTo(Relation rel, FluxTuple tuple, TupleDesc tupdesc,
 	Size		bitmap_len;
 	int			i;
 	bool		tuple_has_compressed;
+	bool		tuple_has_overflow;
 
 	Assert(tuple != NULL);
 	Assert(tupdesc != NULL);
@@ -626,6 +843,7 @@ FluxDeformTupleUpTo(Relation rel, FluxTuple tuple, TupleDesc tupdesc,
 		data_ptr = (char *) header + MAXALIGN(FLUX_TUPLE_OVERHEAD + bitmap_len);
 
 		tuple_has_compressed = false;	/* FLUX does not compress attributes */
+		tuple_has_overflow = (header->t_flags & FLUX_TUPLE_HAS_OVERFLOW) != 0;
 		(void) tuple_has_compressed;
 
 		/* Extract each attribute present in the tuple */
@@ -681,10 +899,28 @@ FluxDeformTupleUpTo(Relation rel, FluxTuple tuple, TupleDesc tupdesc,
 			}
 			else if (att->attlen == -1)
 			{
-				/* Variable-length attribute (FLUX stores it verbatim) */
+				/* Variable-length attribute */
 				Size		attr_len = VARSIZE_ANY(data_ptr);
 
-				values[i] = PointerGetDatum(data_ptr);
+				/*
+				 * A FLUX-native overflow value is held inline as a compact
+				 * FluxOverflowPtr; resolve it to the full value by reading
+				 * its chunks (like the normal read path) when a relation
+				 * handle is available, so callers -- notably the
+				 * logical-decode image builder and replica-identity -- get
+				 * the real bytes, never the raw pointer.  rel == NULL
+				 * (callers that only read narrow leading key columns) leaves
+				 * the pointer verbatim.  The chunks must be on disk and
+				 * unlocked here; the fresh-insert path, whose chunks are
+				 * still held locked, builds its image from the full
+				 * pre-overflow values instead (see
+				 * FluxXLogPrepareLogicalImage*).
+				 */
+				if (tuple_has_overflow && rel != NULL &&
+					FluxIsOverflowPtr(data_ptr))
+					values[i] = FluxFetchOverflowColumn(rel, data_ptr);
+				else
+					values[i] = PointerGetDatum(data_ptr);
 				data_ptr += attr_len;
 			}
 			else if (att->attlen == -2)
@@ -1102,9 +1338,8 @@ FluxTupleToSlotWithOverflow(FluxTupleHeader *tuple_header,
 		data_ptr = (char *) tuple_header + MAXALIGN(FLUX_TUPLE_OVERHEAD + bitmap_len);
 
 		tuple_has_compressed = false;	/* FLUX does not compress attributes */
-		tuple_has_overflow = false; /* FLUX uses TOAST, not on-page overflow */
+		tuple_has_overflow = (tuple_header->t_flags & FLUX_TUPLE_HAS_OVERFLOW) != 0;
 		(void) tuple_has_compressed;
-		(void) tuple_has_overflow;
 
 		/* Decode each attribute present in the tuple */
 		for (i = 0; i < loop_natts; i++)
@@ -1159,11 +1394,22 @@ FluxTupleToSlotWithOverflow(FluxTupleHeader *tuple_header,
 					attr_len = VARSIZE_ANY(data_ptr);
 
 					/*
-					 * FLUX stores varlena values verbatim (wide values are
-					 * TOASTed by the standard heap TOAST path; no on-page
-					 * overflow, no attribute compression).
+					 * A FLUX overflow pointer is reassembled from its chunks
+					 * when a relation handle is available; otherwise it is
+					 * returned verbatim (same as FluxTupleToSlot).  Other
+					 * varlena values are stored verbatim (wide values either
+					 * overflow, above, or are heap-TOASTed; no attribute
+					 * compression).
 					 */
-					slot->tts_values[i] = PointerGetDatum(data_ptr);
+					if (tuple_has_overflow && rel != NULL &&
+						FluxIsOverflowPtr(data_ptr))
+					{
+						Datum		full = FluxFetchOverflowColumn(rel, data_ptr);
+
+						slot->tts_values[i] = full;
+					}
+					else
+						slot->tts_values[i] = PointerGetDatum(data_ptr);
 
 					/*
 					 * No padding after the value: the next attribute aligns

@@ -27,6 +27,7 @@
 #include "access/flux.h"
 #include "access/slog.h"
 #include "access/htup_details.h"
+#include "access/table.h"
 #include "access/tupdesc.h"
 #include "access/xact.h"
 #include "executor/tuptable.h"
@@ -101,6 +102,21 @@ typedef struct FluxTupleTableSlot
 	 * sys_xmin names one version of the row (FluxSlotGetVersion).
 	 */
 	CommandId	sys_cmin;
+
+	/*
+	 * OID of the relation this physical tuple was read from.  A FLUX-native
+	 * overflow value is held inline as a FluxOverflowPtr whose (block,offset)
+	 * is relative to its OWNING relation; to reassemble it we must open that
+	 * relation, not slot->tts_tableOid.  tts_tableOid is mutable -- the
+	 * executor overwrites it with the result relation's OID when a source scan
+	 * slot is routed into an INSERT/UPDATE (INSERT ... SELECT, CREATE TABLE
+	 * AS, cross-table UPDATE ... FROM, MERGE, tuple routing).  Resolving an
+	 * overflow pointer against that stale OID opens the wrong relation and
+	 * reads a block past its end ("could not read blocks").  ov_relid is set
+	 * when the tuple is stored (the origin relation is always known there) and
+	 * is the authoritative relation for overflow reassembly.
+	 */
+	Oid			ov_relid;
 } FluxTupleTableSlot;
 
 /* Forward declarations */
@@ -195,6 +211,7 @@ tts_flux_clear(TupleTableSlot *slot)
 	rslot->tuple_len = 0;
 	rslot->off = 0;
 	rslot->values_block = NULL;
+	rslot->ov_relid = InvalidOid;
 
 	/*
 	 * Drop the cached system columns with the tuple: an emptied slot must not
@@ -225,6 +242,8 @@ tts_flux_deform(TupleTableSlot *slot, int natts)
 	Size		bitmap_len;
 	bool		has_nulls;
 	bool		tuple_has_compressed;
+	bool		tuple_has_overflow;
+	Relation	ovrel = NULL;	/* lazily opened for overflow reassembly */
 
 	Assert(header != NULL);
 	Assert(natts <= tupdesc->natts);
@@ -246,6 +265,7 @@ tts_flux_deform(TupleTableSlot *slot, int natts)
 		nulls_bitmap = (uint8 *) header->t_attrs_bitmap;
 		has_nulls = (header->t_infomask & FLUX_INFOMASK_HASNULL) != 0;
 		tuple_has_compressed = false;	/* FLUX does not compress attributes */
+		tuple_has_overflow = (header->t_flags & FLUX_TUPLE_HAS_OVERFLOW) != 0;
 		(void) tuple_has_compressed;
 
 		/*
@@ -319,11 +339,32 @@ tts_flux_deform(TupleTableSlot *slot, int natts)
 			attr_len = VARSIZE_ANY(data_ptr);
 
 			/*
-			 * FLUX stores varlena values verbatim (wide values are TOASTed
-			 * through the standard heap TOAST path; FLUX has no on-page
-			 * overflow and does not compress attributes).
+			 * A wide value stored in FLUX-native overflow is held inline as a
+			 * compact FluxOverflowPtr; reassemble the full value from its
+			 * chunks here so every read path (seqscan, TID fetch, logical
+			 * decode) sees the real bytes, never the raw pointer.  The owning
+			 * relation is ov_relid (the relation the tuple was read from), NOT
+			 * slot->tts_tableOid -- the executor overwrites tts_tableOid with
+			 * the result relation when a source scan slot is routed into an
+			 * INSERT/UPDATE, so resolving against it opens the wrong relation
+			 * and reads past its end.  The scan still holds a lock on the
+			 * origin, so NoLock is sufficient.  Other varlena values are
+			 * returned verbatim (wide values either overflow or are
+			 * heap-TOASTed; FLUX does not compress attributes).
 			 */
-			slot->tts_values[attnum] = PointerGetDatum(data_ptr);
+			if (tuple_has_overflow &&
+				OidIsValid(rslot->ov_relid) &&
+				FluxIsOverflowPtr(data_ptr))
+			{
+				Datum		full;
+
+				if (ovrel == NULL)
+					ovrel = relation_open(rslot->ov_relid, NoLock);
+				full = FluxFetchOverflowColumn(ovrel, data_ptr);
+				slot->tts_values[attnum] = full;
+			}
+			else
+				slot->tts_values[attnum] = PointerGetDatum(data_ptr);
 			data_ptr += attr_len;
 		}
 		else if (att->attlen == -2)
@@ -342,6 +383,9 @@ tts_flux_deform(TupleTableSlot *slot, int natts)
 	/* Save deform state for incremental deforming */
 	rslot->off = (uint32) (data_ptr - (char *) header);
 	slot->tts_nvalid = natts;
+
+	if (ovrel != NULL)
+		relation_close(ovrel, NoLock);
 }
 
 /*
@@ -822,6 +866,8 @@ tts_flux_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 		memcpy(copy, rsrc->tuple, rsrc->tuple_len);
 		flux_slot_adopt_tuple(dstslot, copy, rsrc->tuple_len);
 		dstslot->tts_tid = srcslot->tts_tid;
+		/* Carry the origin so the copy can still reassemble overflow values. */
+		rdst->ov_relid = rsrc->ov_relid;
 		return;
 	}
 
@@ -1012,7 +1058,7 @@ const TupleTableSlotOps TTSOpsFluxTuple = {
  */
 void
 FluxSlotStoreTuple(TupleTableSlot *slot, FluxTupleHeader *tuple,
-				   uint32 tuple_len, Buffer buffer)
+				   uint32 tuple_len, Buffer buffer, Relation origin)
 {
 	FluxTupleHeader *copy;
 
@@ -1024,6 +1070,16 @@ FluxSlotStoreTuple(TupleTableSlot *slot, FluxTupleHeader *tuple,
 	copy = MemoryContextAlloc(slot->tts_mcxt, tuple_len);
 	memcpy(copy, tuple, tuple_len);
 	flux_slot_adopt_tuple(slot, copy, tuple_len);
+
+	/*
+	 * Record the relation this tuple came from so a FLUX-native overflow
+	 * pointer in it can later be reassembled against the correct relation,
+	 * independent of the mutable tts_tableOid (see FluxTupleTableSlot.ov_relid
+	 * and tts_flux_deform).  flux_slot_adopt_tuple() cleared ov_relid via
+	 * tts_flux_clear(), so set it after.
+	 */
+	((FluxTupleTableSlot *) slot)->ov_relid =
+		(origin != NULL) ? RelationGetRelid(origin) : InvalidOid;
 }
 
 /*
