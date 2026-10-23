@@ -34,8 +34,6 @@ typedef enum XLTW_Oper
 	XLTW_RecheckExclusionConstr,
 } XLTW_Oper;
 
-extern void RelationInitLockInfo(Relation relation);
-
 /* Lock a relation */
 extern void LockRelationOid(Oid relid, LOCKMODE lockmode);
 extern void LockRelationId(LockRelId *relid, LOCKMODE lockmode);

@@ -2558,7 +2558,7 @@ PredicateLockTID(Relation relation, const ItemPointerData *tid, Snapshot snapsho
 	/*
 	 * Return if this xact wrote it.
 	 */
-	if (relation->rd_index == NULL)
+	if (!RelationIsIndex(relation))
 	{
 		/* If we wrote it; we already have a write lock. */
 		if (TransactionIdIsCurrentTransactionId(tuple_xid))
@@ -2890,7 +2890,7 @@ DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 
 	dbId = relation->rd_locator.dbOid;
 	relId = relation->rd_id;
-	if (relation->rd_index == NULL)
+	if (!RelationIsIndex(relation))
 	{
 		isIndex = false;
 		heapId = relId;
@@ -4371,7 +4371,7 @@ CheckTableForSerializableConflictIn(Relation relation)
 	 */
 	MyXactDidWrite = true;
 
-	Assert(relation->rd_index == NULL); /* not an index relation */
+	Assert(!RelationIsIndex(relation));
 
 	dbId = relation->rd_locator.dbOid;
 	heapId = relation->rd_id;
