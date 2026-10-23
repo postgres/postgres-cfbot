@@ -195,6 +195,19 @@ CREATE TABLE ctlt1 (LIKE ctlt1 INCLUDING ALL);
 \d+ ctlt1
 ROLLBACK;
 
+-- Check that copied comments go to a new temp table, not to a same-named
+-- permanent table that precedes pg_temp in the search path
+BEGIN;
+SET LOCAL search_path = public, pg_temp;
+CREATE TABLE ctlt_src (a int);
+COMMENT ON COLUMN ctlt_src.a IS 'src column';
+CREATE TABLE ctlt_temp (a int);
+COMMENT ON COLUMN ctlt_temp.a IS 'unrelated column';
+CREATE TEMP TABLE ctlt_temp (LIKE ctlt_src INCLUDING COMMENTS);
+SELECT relpersistence, col_description(oid, 1) AS column_comment
+FROM pg_class WHERE relname = 'ctlt_temp' ORDER BY 1;
+ROLLBACK;
+
 DROP TABLE ctlt1, ctlt2, ctlt3, ctlt4, ctlt12_storage, ctlt12_comments, ctlt1_inh, ctlt13_inh, ctlt13_like, ctlt_all, ctla, ctlb CASCADE;
 
 -- LIKE must respect NO INHERIT property of constraints
