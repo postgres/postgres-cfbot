@@ -4425,6 +4425,7 @@ typedef enum AlterSubscriptionType
 	ALTER_SUBSCRIPTION_DROP_PUBLICATION,
 	ALTER_SUBSCRIPTION_REFRESH_PUBLICATION,
 	ALTER_SUBSCRIPTION_REFRESH_SEQUENCES,
+	ALTER_SUBSCRIPTION_REFRESH_TABLE,
 	ALTER_SUBSCRIPTION_ENABLED,
 	ALTER_SUBSCRIPTION_SKIP,
 } AlterSubscriptionType;
@@ -4437,6 +4438,7 @@ typedef struct AlterSubscriptionStmt
 	char	   *servername;		/* Server name of publisher */
 	char	   *conninfo;		/* Connection string to publisher */
 	List	   *publication;	/* One or more publication to subscribe to */
+	List	   *relations;		/* Tables to resync (for REFRESH TABLE) */
 	List	   *options;		/* List of DefElem nodes */
 } AlterSubscriptionStmt;
 
