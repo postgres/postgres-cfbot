@@ -4,6 +4,8 @@ citext_sources = files(
   'citext.c',
 )
 
+citext_bitcode_sources = citext_sources
+
 if host_system == 'windows'
   citext_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'citext',
@@ -29,6 +31,11 @@ install_data(
   'citext--1.7--1.8.sql',
   kwargs: contrib_data_args,
 )
+
+bitcode_modules += {
+  'target': citext,
+  'srcfiles': citext_bitcode_sources,
+}
 
 tests += {
   'name': 'citext',

@@ -7,6 +7,8 @@ pg_trgm_sources = files(
   'trgm_regexp.c',
 )
 
+pg_trgm_bitcode_sources = pg_trgm_sources
+
 if host_system == 'windows'
   pg_trgm_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_trgm',
@@ -31,6 +33,11 @@ install_data(
   'pg_trgm.control',
   kwargs: contrib_data_args,
 )
+
+bitcode_modules += {
+  'target': pg_trgm,
+  'srcfiles': pg_trgm_bitcode_sources,
+}
 
 tests += {
   'name': 'pg_trgm',
