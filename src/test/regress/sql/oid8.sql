@@ -56,6 +56,21 @@ SELECT 1::oid8::int8;
 SELECT 1::oid::oid8; -- ok
 SELECT 1::oid8::oid; -- not ok
 
+-- Numeric casts round the magnitude, then wrap negative values.
+BEGIN;
+INSERT INTO OID8_TBL VALUES (18446744073709551615) RETURNING f1;
+ROLLBACK;
+SELECT 18446744073709551616::numeric::oid8;
+SELECT (-1)::numeric::oid8;
+SELECT (-1.5)::numeric::oid8;
+SELECT (-18446744073709551615)::numeric::oid8;
+SELECT (-18446744073709551616)::numeric::oid8;
+SELECT 'NaN'::numeric::oid8;
+SELECT 'Infinity'::numeric::oid8;
+
+-- Numeric casts are not implicit in expressions.
+SELECT 2::oid8 = 1.5;
+
 -- Aggregates
 SELECT min(f1), max(f1) FROM OID8_TBL;
 
