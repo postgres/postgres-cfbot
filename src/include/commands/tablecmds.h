@@ -15,8 +15,10 @@
 #define TABLECMDS_H
 
 #include "access/htup.h"
+#include "access/xlogdefs.h"
 #include "catalog/dependency.h"
 #include "catalog/objectaddress.h"
+#include "catalog/pg_class.h"
 #include "nodes/parsenodes.h"
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
@@ -64,7 +66,11 @@ extern void ExecuteTruncateGuts(List *explicit_rels,
 								List *relids_logged,
 								DropBehavior behavior,
 								bool restart_seqs,
-								bool run_as_table_owner);
+								bool run_as_table_owner,
+								ReplOriginId origin);
+extern void truncate_check_rel(Oid relid, Form_pg_class reltuple);
+extern void truncate_check_perms(Oid relid, Form_pg_class reltuple);
+extern void truncate_check_activity(Relation rel);
 
 extern void SetRelationHasSubclass(Oid relationId, bool relhassubclass);
 
