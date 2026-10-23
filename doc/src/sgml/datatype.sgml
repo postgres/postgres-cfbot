@@ -4844,6 +4844,18 @@ INSERT INTO mytable VALUES(-1);  -- fails
    </para>
 
    <para>
+    Values of type <type>numeric</type> can be cast to <type>oid8</type>,
+    either explicitly or when assigned to an <type>oid8</type> column.
+    They are rounded to the nearest integer, with ties
+    away from zero.  The absolute value of the rounded result must not
+    exceed <literal>18446744073709551615</literal>.
+    Negative results wrap around modulo 2<superscript>64</superscript>,
+    as with negative textual input; for example, <literal>-1</literal>
+    converts to <literal>18446744073709551615</literal>.
+    <literal>NaN</literal> and infinite values cannot be converted.
+   </para>
+
+   <para>
     The OID alias types have no operations of their own except
     for specialized input and output routines.  These routines are able
     to accept and display symbolic names for system objects, rather than

@@ -202,6 +202,48 @@ SELECT 1::oid8::oid; -- not ok
 ERROR:  cannot cast type oid8 to oid
 LINE 1: SELECT 1::oid8::oid;
                       ^
+-- Numeric casts round the magnitude, then wrap negative values.
+BEGIN;
+INSERT INTO OID8_TBL VALUES (18446744073709551615) RETURNING f1;
+          f1          
+----------------------
+ 18446744073709551615
+(1 row)
+
+ROLLBACK;
+SELECT 18446744073709551616::numeric::oid8;
+ERROR:  oid8 out of range
+SELECT (-1)::numeric::oid8;
+         oid8         
+----------------------
+ 18446744073709551615
+(1 row)
+
+SELECT (-1.5)::numeric::oid8;
+         oid8         
+----------------------
+ 18446744073709551614
+(1 row)
+
+SELECT (-18446744073709551615)::numeric::oid8;
+ oid8 
+------
+    1
+(1 row)
+
+SELECT (-18446744073709551616)::numeric::oid8;
+ERROR:  oid8 out of range
+SELECT 'NaN'::numeric::oid8;
+ERROR:  cannot convert NaN to oid8
+SELECT 'Infinity'::numeric::oid8;
+ERROR:  cannot convert infinity to oid8
+-- Numeric casts are not implicit in expressions.
+SELECT 2::oid8 = 1.5;
+ERROR:  operator does not exist: oid8 = numeric
+LINE 1: SELECT 2::oid8 = 1.5;
+                       ^
+DETAIL:  No operator of that name accepts the given argument types.
+HINT:  You might need to add explicit type casts.
 -- Aggregates
 SELECT min(f1), max(f1) FROM OID8_TBL;
  min |         max          
