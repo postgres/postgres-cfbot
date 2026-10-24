@@ -1093,6 +1093,8 @@ static bool from_char_set_mode(TmFromChar *tmfc, const FromCharDateMode mode,
 							   Node *escontext);
 static bool from_char_set_int(int *dest, const int value, const FormatNode *node,
 							  Node *escontext);
+static bool from_char_in_range(int value, int min, int max, const char *in,
+							   Node *escontext);
 static int	from_char_parse_int_len(int *dest, const char **src, const size_t len,
 									FormatNode *node, Node *escontext);
 static int	from_char_parse_int(int *dest, const char **src, FormatNode *node,
@@ -2153,6 +2155,26 @@ from_char_set_int(int *dest, const int value, const FormatNode *node,
 						node->key->name),
 				 errdetail("This value contradicts a previous setting for the same field type.")));
 	*dest = value;
+	return true;
+}
+
+/*
+ * Check that 'value' lies in [min, max].
+ *
+ * Puke if it does not.  This must run at parse time: a later 0 means
+ * the field was unset.
+ *
+ * Returns true on success, false on failure (if escontext points to an
+ * ErrorSaveContext; otherwise errors are thrown).
+ */
+static bool
+from_char_in_range(int value, int min, int max, const char *in,
+				   Node *escontext)
+{
+	if (value < min || value > max)
+		ereturn(escontext, false,
+				(errcode(ERRCODE_DATETIME_FIELD_OVERFLOW),
+				 errmsg("date/time field value out of range: \"%s\"", in)));
 	return true;
 }
 
@@ -3293,10 +3315,27 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 				SKIP_THth(s, n->suffix);
 				break;
 			case DCH_SSSS:
-				if (from_char_parse_int(&out->ssss, &s, n, escontext) < 0)
-					return;
-				SKIP_THth(s, n->suffix);
-				break;
+				{
+					bool		neg = false;
+
+					/* Minus may have been taken as a separator (see TZH). */
+					if (*s == '+' || *s == '-')
+					{
+						neg = (*s == '-');
+						s++;
+					}
+					else if (extra_skip > 0 && *(s - 1) == '-')
+						neg = true;
+					if (from_char_parse_int(&out->ssss, &s, n, escontext) < 0)
+						return;
+					if (neg)
+						out->ssss = -out->ssss;
+					if (!from_char_in_range(out->ssss, 0, SECS_PER_DAY - 1,
+											in, escontext))
+						return;
+					SKIP_THth(s, n->suffix);
+					break;
+				}
 			case DCH_tz:
 			case DCH_TZ:
 				{
@@ -3464,10 +3503,16 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 			case DCH_DDD:
 				if (from_char_parse_int(&out->ddd, &s, n, escontext) < 0)
 					return;
+				/* DDD is documented as day 001 to 366 of Gregorian year. */
+				if (!from_char_in_range(out->ddd, 1, 366, in, escontext))
+					return;
 				SKIP_THth(s, n->suffix);
 				break;
 			case DCH_IDDD:
 				if (from_char_parse_int_len(&out->ddd, &s, 3, n, escontext) < 0)
+					return;
+				/* IDDD is documented as day 001 to 371 of ISO year. */
+				if (!from_char_in_range(out->ddd, 1, 371, in, escontext))
 					return;
 				SKIP_THth(s, n->suffix);
 				break;
@@ -3484,14 +3529,19 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 			case DCH_ID:
 				if (from_char_parse_int_len(&out->d, &s, 1, n, escontext) < 0)
 					return;
+				if (!from_char_in_range(out->d, 1, DAYS_PER_WEEK, in, escontext))
+					return;
 				/* Shift numbering to match Gregorian where Sunday = 1 */
-				if (++out->d > 7)
+				if (++out->d > DAYS_PER_WEEK)
 					out->d = 1;
 				SKIP_THth(s, n->suffix);
 				break;
 			case DCH_WW:
 			case DCH_IW:
 				if (from_char_parse_int(&out->ww, &s, n, escontext) < 0)
+					return;
+				/* IW/WW are documented as week 01 to 53. */
+				if (!from_char_in_range(out->ww, 1, 53, in, escontext))
 					return;
 				SKIP_THth(s, n->suffix);
 				break;
@@ -3586,6 +3636,16 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 										  NULL, InvalidOid,
 										  n, escontext))
 					return;
+				{
+					unsigned char c = pg_ascii_toupper((unsigned char) *s);
+
+					/* leftover roman: XIII would match XII */
+					if (c == 'I' || c == 'V' || c == 'X')
+						ereturn(escontext,,
+								(errcode(ERRCODE_DATETIME_FIELD_OVERFLOW),
+								 errmsg("date/time field value out of range: \"%s\"",
+										in)));
+				}
 				if (!from_char_set_int(&out->mm, MONTHS_PER_YEAR - value, n,
 									   escontext))
 					return;
