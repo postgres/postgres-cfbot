@@ -4075,6 +4075,17 @@ reparameterize_path(PlannerInfo *root, Path *path,
 													mpath->binary_mode,
 													mpath->est_calls);
 			}
+		case T_ForeignScan:
+			{
+				ReparameterizeForeignPath_function rfp_func;
+
+				if (!IS_SIMPLE_REL(rel) || rel->fdwroutine == NULL)
+					break;
+				rfp_func = rel->fdwroutine->ReparameterizeForeignPath;
+				if (rfp_func == NULL)
+					break;
+				return rfp_func(root, (ForeignPath *) path, required_outer);
+			}
 		default:
 			break;
 	}
