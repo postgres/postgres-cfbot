@@ -274,4 +274,6 @@ CirclePGetDatum(const CIRCLE *X)
 #define PG_GETARG_CIRCLE_P(n) DatumGetCircleP(PG_GETARG_DATUM(n))
 #define PG_RETURN_CIRCLE_P(x) return CirclePGetDatum(x)
 
+extern float8 point_box_distance(Point *pt, BOX *box);
+
 #endif							/* GEO_DECLS_H */
