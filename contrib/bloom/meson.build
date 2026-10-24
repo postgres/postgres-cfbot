@@ -40,6 +40,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_wal.pl',
+      't/002_explain.pl',
     ],
   },
 }

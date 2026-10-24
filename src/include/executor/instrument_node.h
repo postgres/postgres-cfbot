@@ -150,7 +150,44 @@ typedef struct IndexScanInstrumentation
 
 	/* Table tuples fetched count (incremented during index-only scans) */
 	uint64		ntabletuplefetches;
+
+	/* Whether the index AM should record its buffer access strategy */
+	bool		need_strategy;
+
+	/* Buffer access strategies reported by the index AM */
+	uint32		strategy_mask;
 } IndexScanInstrumentation;
+
+/*
+ * Record a buffer access strategy selected by an index AM.
+ *
+ * Record strategies only when requested by the executor and preserve every
+ * strategy observed across rescans.
+ */
+static inline void
+RecordIndexScanStrategy(IndexScanInstrumentation *instrument,
+						BufferAccessStrategyType strategy)
+{
+	if (!instrument)
+		return;
+
+	if (instrument->need_strategy)
+		instrument->strategy_mask |= BufferAccessStrategyBit(strategy);
+}
+
+/*
+ * Combine index scan instrumentation from 'src' into 'dst'.
+ *
+ * Counter values are added and observed strategies are preserved.
+ */
+static inline void
+CombineIndexScanInstrumentation(IndexScanInstrumentation *dst,
+								IndexScanInstrumentation *src)
+{
+	dst->nsearches += src->nsearches;
+	dst->ntabletuplefetches += src->ntabletuplefetches;
+	dst->strategy_mask |= src->strategy_mask;
+}
 
 /*
  * Shared memory container for per-worker information

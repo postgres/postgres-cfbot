@@ -598,6 +598,7 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	pgstat_count_index_scan(idxRel);
 	if (scan->instrument)
 		scan->instrument->nsearches++;
+	RecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
 
 	/*
 	 * We need to know the size of the table so that we know how long to

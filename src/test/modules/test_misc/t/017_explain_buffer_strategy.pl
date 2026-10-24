@@ -1,6 +1,6 @@
 # Copyright (c) 2026, PostgreSQL Global Development Group
 
-# Test EXPLAIN reporting of buffer access strategies for table scans,
+# Test EXPLAIN reporting of buffer access strategies for table and index scans,
 # including rescans, parallel execution, and cases where no strategy is shown.
 
 use strict;
@@ -37,6 +37,25 @@ check_strategy($seqscan, 'bulkread', 'sequential scan');
 my $normal_scan = explain_json('SELECT * FROM test_normal');
 is($normal_scan->{'Node Type'}, 'Seq Scan', 'small sequential scan plan');
 check_strategy($normal_scan, 'normal', 'small sequential scan');
+
+my $index_scan_plan = explain_json(
+	'SELECT * FROM test_strategy WHERE g = 1', qq{
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+});
+my $index_scan = find_plan_node($index_scan_plan, 'Index Scan');
+ok(defined $index_scan, 'B-tree index scan plan');
+check_strategy($index_scan, 'normal', 'B-tree index scan');
+
+my $index_only_scan_plan = explain_json(
+	'SELECT g FROM test_strategy WHERE g = 1', qq{
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+});
+my $index_only_scan =
+  find_plan_node($index_only_scan_plan, 'Index Only Scan');
+ok(defined $index_only_scan, 'B-tree index-only scan plan');
+check_strategy($index_only_scan, 'normal', 'B-tree index-only scan');
 
 my $never_executed_plan = decode_json(
 	$node->safe_psql(
@@ -81,17 +100,17 @@ is_deeply(
 	[ 'normal', 'bulkread' ],
 	'parameterized sample scan reports every strategy used');
 
-my $bitmap_plan = decode_json(
-	$node->safe_psql(
-		'postgres', qq{
+my $bitmap_plan = explain_json(
+	'SELECT * FROM test_strategy WHERE g BETWEEN 1 AND 1000', qq{
 SET enable_seqscan = off;
 SET enable_indexscan = off;
-EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)
-  SELECT * FROM test_strategy WHERE g BETWEEN 1 AND 1000;
-}))->[0]->{'Plan'};
+});
 my $bitmap_scan = find_plan_node($bitmap_plan, 'Bitmap Heap Scan');
 ok(defined $bitmap_scan, 'bitmap heap scan plan');
 check_strategy($bitmap_scan, 'normal', 'bitmap heap scan');
+my $bitmap_index_scan = find_plan_node($bitmap_plan, 'Bitmap Index Scan');
+ok(defined $bitmap_index_scan, 'B-tree bitmap index scan plan');
+check_strategy($bitmap_index_scan, 'normal', 'B-tree bitmap index scan');
 
 my $tid_plan =
   explain_json("SELECT * FROM test_strategy WHERE ctid = '(0,1)'");
@@ -190,9 +209,11 @@ done_testing();
 # Run EXPLAIN for the query and return its top-level plan.
 sub explain_json
 {
-	my ($query) = @_;
+	my ($query, $settings) = @_;
+
+	$settings //= '';
 	my $output = $node->safe_psql('postgres',
-		"EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) $query");
+		"$settings\nEXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) $query");
 
 	return decode_json($output)->[0]->{'Plan'};
 }
