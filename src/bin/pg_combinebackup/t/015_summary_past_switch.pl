@@ -1,0 +1,130 @@
+# Copyright (c) 2026, PostgreSQL Global Development Group
+#
+# A streaming standby summarizes the WAL it receives, ahead of replay.  When
+# it is promoted at a recovery target inside a WAL summary, the old-timeline
+# summary covering the target also covers WAL that the promoted server never
+# replayed.  Block references from that WAL are harmless, but a truncation
+# recorded there must not be applied to an incremental backup.
+
+use strict;
+use warnings FATAL => 'all';
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
+
+my $mode = $ENV{PG_TEST_PG_COMBINEBACKUP_MODE} || '--copy';
+
+my $primary = PostgreSQL::Test::Cluster->new('primary');
+$primary->init(allows_streaming => 1);
+$primary->append_conf('postgresql.conf', <<EOF);
+summarize_wal = on
+autovacuum = off
+EOF
+$primary->start;
+
+# One row per page, so that the heap fits in one segment even with the
+# six-block RELSEG_SIZE used by CI.
+my $block_size = $primary->safe_psql('postgres', 'SHOW block_size');
+my $pad_size = $block_size / 2;
+$primary->safe_psql('postgres', <<EOF);
+CREATE TABLE t (id int, pad text STORAGE PLAIN);
+INSERT INTO t SELECT g, repeat('x', $pad_size) FROM generate_series(1, 4) g;
+VACUUM t;
+EOF
+$primary->backup('full');
+my $full_path = $primary->backup_dir . '/full';
+
+# Each recovery target is inside a WAL summary: after the redo pointer of a
+# checkpoint and some WAL that the standby replays.
+my $insert_lsn = 'SELECT pg_current_wal_insert_lsn()';
+$primary->safe_psql('postgres', 'CHECKPOINT');
+$primary->safe_psql('postgres', "UPDATE t SET pad = pad || 'o' WHERE id > 2");
+my $target1 = $primary->safe_psql('postgres', $insert_lsn);
+
+# Past the first target, only new rows: harmless for that standby.
+$primary->safe_psql('postgres',
+	"INSERT INTO t VALUES (5, repeat('x', $pad_size))");
+$primary->safe_psql('postgres', 'CHECKPOINT');
+$primary->safe_psql('postgres', 'CREATE TABLE marker ()');
+my $target2 = $primary->safe_psql('postgres', $insert_lsn);
+
+# Past the second target, a truncation from 7 blocks to 2.
+$primary->safe_psql('postgres', 'DELETE FROM t WHERE id > 2');
+$primary->safe_psql('postgres', 'VACUUM t');
+is($primary->safe_psql('postgres', "SELECT pg_relation_size('t') / $block_size"),
+	'2', 'VACUUM truncates the heap after the second target');
+$primary->safe_psql('postgres', 'CHECKPOINT');
+my $end_lsn = $primary->safe_psql('postgres',
+	'SELECT redo_lsn FROM pg_control_checkpoint()');
+
+# Start a standby that pauses at the target and has summarized everything
+# the primary wrote, then promote it.
+sub promoted_standby
+{
+	my ($name, $target) = @_;
+	my $node = PostgreSQL::Test::Cluster->new($name);
+	$node->init_from_backup($primary, 'full', has_streaming => 1);
+	$node->append_conf('postgresql.conf', <<EOF);
+recovery_target_lsn = '$target'
+recovery_target_inclusive = false
+recovery_target_action = 'pause'
+EOF
+	$node->start;
+	$node->poll_query_until('postgres',
+		"SELECT pg_get_wal_replay_pause_state() = 'paused'")
+	  or die "timed out waiting for $name to pause";
+	$node->poll_query_until('postgres', <<EOF)
+SELECT EXISTS (SELECT FROM pg_available_wal_summaries()
+               WHERE tli = 1 AND end_lsn >= '$end_lsn')
+EOF
+	  or die "timed out waiting for $name to summarize up to $end_lsn";
+	$node->promote;
+	return $node;
+}
+
+my $standby1 = promoted_standby('standby1', $target1);
+my $standby2 = promoted_standby('standby2', $target2);
+$primary->stop;
+
+# The tables are not read before the backups: with data checksums, setting
+# hint bits would WAL-log their blocks again on the new timeline.
+my $contents_sql = "SELECT id, right(pad, 1) FROM t ORDER BY id";
+
+# First standby: the summary past the switch only adds block references, so
+# the incremental backup works and restores the promoted server's rows.
+$standby1->command_ok(
+	[
+		'pg_basebackup', '--no-sync',
+		'--pgdata' => $primary->backup_dir . '/incr1',
+		'--checkpoint' => 'fast',
+		'--incremental' => "$full_path/backup_manifest",
+	],
+	'incremental backup when only new rows follow the target');
+my $expected1 = "1|x\n2|x\n3|o\n4|o";
+is($standby1->safe_psql('postgres', $contents_sql),
+	$expected1, 'first standby has the rows replayed before the target');
+$standby1->stop;
+my $restored = PostgreSQL::Test::Cluster->new('restored');
+$restored->init_from_backup(
+	$primary, 'incr1',
+	combine_with_prior => ['full'],
+	combine_mode => $mode);
+$restored->start;
+is($restored->safe_psql('postgres', $contents_sql),
+	$expected1, 'restored rows match the first standby');
+$restored->stop;
+
+# Second standby: the summary past the switch records the truncation, which
+# never happened on this server, so the incremental backup must refuse it.
+$standby2->command_fails_like(
+	[
+		'pg_basebackup', '--no-sync',
+		'--pgdata' => $primary->backup_dir . '/incr2',
+		'--checkpoint' => 'fast',
+		'--incremental' => "$full_path/backup_manifest",
+	],
+	qr/cannot use WAL summary file .* for an incremental backup/,
+	'incremental backup refuses a truncation past the switch point');
+$standby2->stop;
+
+done_testing();

@@ -267,7 +267,8 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 	MemoryContext oldcontext;
 	List	   *expectedTLEs;
 	List	   *all_wslist,
-			   *required_wslist = NIL;
+			   *required_wslist = NIL,
+			   *past_switch_wslist = NIL;
 	ListCell   *lc;
 	TimeLineHistoryEntry **tlep;
 	int			num_wal_ranges;
@@ -567,6 +568,29 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 		required_wslist = list_concat(required_wslist, tli_wslist);
 
 		/*
+		 * A summary that ends after the point where we switched away from
+		 * this timeline also covers WAL that this server may never have
+		 * replayed: a standby summarizes the WAL it has received, ahead of
+		 * replay, and recovery can stop at a recovery target before the end
+		 * of it.  Block references from that WAL only make us copy more than
+		 * needed, but a relation truncation recorded there would discard the
+		 * references to blocks modified before the switch.  Remember these
+		 * summaries, so that the merge below can refuse such a truncation.
+		 */
+		if (tle->tli != backup_state->starttli)
+		{
+			ListCell   *lc2;
+
+			foreach(lc2, tli_wslist)
+			{
+				WalSummaryFile *ws = lfirst(lc2);
+
+				if (ws->end_lsn > tli_end_lsn)
+					past_switch_wslist = lappend(past_switch_wslist, ws);
+			}
+		}
+
+		/*
 		 * Timelines earlier than the one in which the prior backup began are
 		 * not relevant.
 		 */
@@ -591,6 +615,7 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 	foreach(lc, required_wslist)
 	{
 		WalSummaryFile *ws = lfirst(lc);
+		bool		past_switch = list_member_ptr(past_switch_wslist, ws);
 		WalSummaryIO wsio;
 		BlockRefTableReader *reader;
 		RelFileLocator rlocator;
@@ -609,6 +634,22 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 		while (BlockRefTableReaderNextRelation(reader, &rlocator, &forknum,
 											   &limit_block))
 		{
+			/*
+			 * A limit block of 0 only makes us copy the whole file, which is
+			 * safe.  Any other limit from a summary that extends past a
+			 * timeline switch may describe a truncation that never happened
+			 * on this server, and applying it could lose data.
+			 */
+			if (past_switch && limit_block != 0 &&
+				limit_block != InvalidBlockNumber)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("cannot use WAL summary file \"%s\" for an incremental backup",
+								FilePathName(wsio.file)),
+						 errdetail("The file extends past the end of timeline %u and records a relation truncation, which may come from WAL that this server did not replay.",
+								   ws->tli),
+						 errhint("Take a new full backup.")));
+
 			BlockRefTableSetLimitBlock(ib->brtab, &rlocator,
 									   forknum, limit_block);
 
