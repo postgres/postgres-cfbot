@@ -59,6 +59,19 @@
  <sect2 id="pgwalinspect-funcs">
   <title>General Functions</title>
 
+  <para>
+   Record lengths and the <structfield>record_size</structfield>,
+   <structfield>fpi_size</structfield>, and <structfield>combined_size</structfield>
+   statistics describe records before whole-record compression, but after any
+   per-image compression.  <structfield>physical_length</structfield> and
+   <structfield>physical_size</structfield>, added in version 1.2, give the
+   corresponding sizes stored in WAL, including compression headers but not
+   WAL page headers or alignment padding.  Divide physical size by combined
+   size to measure the whole-record compression ratio.  The physical payload
+   of a compressed record cannot be apportioned between its images and other
+   data.
+  </para>
+
   <variablelist>
    <varlistentry id="pgwalinspect-funcs-pg-get-wal-record-info">
     <term>
