@@ -3580,8 +3580,34 @@ show_ctescan_info(CteScanState *ctescanstate, ExplainState *es)
 static void
 show_functionscan_info(FunctionScanState *fsstate, ExplainState *es)
 {
+	bool		totalDiskUsed = false;
+	int64		totalSpaceUsed = 0;
+
 	if (!es->analyze)
 		return;
+
+	/*
+	 * Similar to the logic in ExecReScanFunctionScan(), we need to fetch the
+	 * stats from the final rescan (or the only one) and use these values if
+	 * they're higher than what's already stored in FunctionScanState.stats.
+	 */
+	for (int i = 0; i < fsstate->nfuncs; i++)
+	{
+		FunctionScanPerFuncState *fs = &fsstate->funcstates[i];
+
+		if (fs->tstore != NULL)
+		{
+			bool		diskUsed;
+			int64		spaceUsed;
+
+			tuplestore_get_stats(fs->tstore, &diskUsed, &spaceUsed);
+			totalSpaceUsed += spaceUsed;
+			totalDiskUsed |= diskUsed;
+		}
+	}
+
+	fsstate->stats.maxSpaceUsed = Max(fsstate->stats.maxSpaceUsed, totalSpaceUsed);
+	fsstate->stats.usedDisk |= totalDiskUsed;
 
 	/*
 	 * Nothing to show for the leader if execution didn't get as far as
