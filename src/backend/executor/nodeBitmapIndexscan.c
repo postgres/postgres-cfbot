@@ -203,7 +203,7 @@ ExecEndBitmapIndexScan(BitmapIndexScanState *node)
 		 * shutdown on the workers.  On rescan it will spin up new workers
 		 * which will have a new BitmapIndexScanState and zeroed stats.
 		 */
-		winstrument->nsearches += node->biss_Instrument->nsearches;
+		CombineIndexScanInstrumentation(winstrument, node->biss_Instrument);
 		Assert(node->biss_Instrument->ntabletuplefetches == 0);
 	}
 
@@ -277,7 +277,11 @@ ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of bitmap index scans if requested */
 	if (estate->es_instrument)
+	{
 		indexstate->biss_Instrument = palloc0_object(IndexScanInstrumentation);
+		indexstate->biss_Instrument->need_strategy =
+			(estate->es_instrument & INSTRUMENT_BUFFERS) != 0;
+	}
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
