@@ -724,3 +724,13 @@ SELECT xmltext('  ');
 SELECT xmltext('foo `$_-+?=*^%!|/\()[]{}');
 SELECT xmltext('foo & <"bar">');
 SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
+
+-- The namespace URI of XMLNAMESPACES is a b_expr, so a COLLATE clause in it
+-- needs parentheses, which pretty-printed output does not add by itself
+CREATE VIEW xmltableview_collate AS
+SELECT * FROM XMLTABLE(XMLNAMESPACES(('http://x.y' COLLATE "C") AS p),
+  '/p:a' PASSING (NULL::xml) COLUMNS v text PATH 'p:b');
+SELECT pg_get_viewdef('xmltableview_collate'::regclass, true);
+SELECT pg_get_viewdef('xmltableview_collate'::regclass, true) AS def \gset
+CREATE OR REPLACE VIEW xmltableview_collate AS :def
+DROP VIEW xmltableview_collate;
