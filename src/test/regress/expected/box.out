@@ -641,6 +641,74 @@ WHERE seq.id IS NULL OR idx.id IS NULL;
 RESET enable_seqscan;
 RESET enable_indexscan;
 RESET enable_bitmapscan;
+-- The distance from a point to a box is exact, so a kNN index scan, which
+-- orders by the index's own distance, returns rows in the operator's order.
+-- For the point (0.9999996,2), box 1 is 1 away and box 2 is 1.00000000000004
+-- away.  (The operator used to give box 1 1.00000000000008, out of order.)
+-- Both distances are exact on any platform: the point is above both boxes,
+-- so each is hypot(0, dy) = |dy|.
+CREATE TEMP TABLE box_knn (id int, b box);
+INSERT INTO box_knn VALUES (1, '((0,0),(1,1))'),
+  (2, box(point(0.4999996, 0), point(1.4999996, 0.99999999999996)));
+SET extra_float_digits = 0;
+SET enable_seqscan = OFF;
+SET enable_bitmapscan = OFF;
+CREATE INDEX box_knn_gist ON box_knn USING gist (b);
+SELECT id, b <-> point(0.9999996, 2) AS dist FROM box_knn
+  ORDER BY b <-> point(0.9999996, 2);
+ id |       dist       
+----+------------------
+  1 |                1
+  2 | 1.00000000000004
+(2 rows)
+
+DROP INDEX box_knn_gist;
+CREATE INDEX box_knn_spgist ON box_knn USING spgist (b);
+SELECT id, b <-> point(0.9999996, 2) AS dist FROM box_knn
+  ORDER BY b <-> point(0.9999996, 2);
+ id |       dist       
+----+------------------
+  1 |                1
+  2 | 1.00000000000004
+(2 rows)
+
+RESET extra_float_digits;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE box_knn;
+-- A coordinate within the box's range contributes nothing to the distance,
+-- even when it is infinite, and Infinity - Infinity must not make it NaN.
+SELECT point '(Infinity,5)' <-> box '((0,0),(Infinity,10))' AS inside,
+       point '(Infinity,20)' <-> box '((0,0),(Infinity,10))' AS above,
+       point '(5,10)' <-> box '((0,0),(Infinity,1))' AS over_infinite_box,
+       point '(Infinity,20)' ## box '((0,0),(Infinity,10))' AS closest;
+ inside | above | over_infinite_box |    closest    
+--------+-------+-------------------+---------------
+      0 |    10 |                 9 | (Infinity,10)
+(1 row)
+
+-- The same holds for the bounds an SP-GiST kNN scan computes for its inner
+-- nodes, whose boxes reach to infinity: the row whose distance is NaN
+-- comes last, after every row at an infinite distance.
+CREATE TEMP TABLE box_knn_inf (p point);
+INSERT INTO box_knn_inf SELECT point(i, i % 7) FROM generate_series(1, 500) i;
+INSERT INTO box_knn_inf VALUES ('(Infinity,5)');
+CREATE INDEX ON box_knn_inf USING spgist (p);
+SET enable_seqscan = OFF;
+SET enable_bitmapscan = OFF;
+SELECT count(*) AS total,
+       max(rn) FILTER (WHERE p ~= point '(Infinity,5)') AS nan_row_position
+  FROM (SELECT p, row_number() OVER () AS rn
+          FROM (SELECT p FROM box_knn_inf
+                 ORDER BY p <-> point '(Infinity,0)') s) ss;
+ total | nan_row_position 
+-------+------------------
+   501 |              501
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE box_knn_inf;
 -- test non-error-throwing API for some core types
 SELECT pg_input_is_valid('200', 'box');
  pg_input_is_valid 
