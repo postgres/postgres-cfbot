@@ -1138,6 +1138,45 @@ my %tests = (
 		},
 	},
 
+	# The child is not local here, and sorts before its parents.
+	'CONSTRAINT CHECK / ENFORCED only on child, after NO INHERIT' => {
+		create_sql => 'CREATE TABLE dump_test.test_table_ni_p1 (col1 int CONSTRAINT ck CHECK (col1 > 0));
+			CREATE TABLE dump_test.test_table_ni_p2 (col1 int CONSTRAINT ck CHECK (col1 > 0) NOT ENFORCED);
+			CREATE TABLE dump_test.test_table_ni_c () INHERITS (dump_test.test_table_ni_p1, dump_test.test_table_ni_p2);
+			ALTER TABLE dump_test.test_table_ni_c NO INHERIT dump_test.test_table_ni_p1;',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_ni_c (\E\n
+			\s+\QCONSTRAINT ck CHECK ((col1 > 0))\E\n
+			/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+			binary_upgrade => 1,
+		},
+	},
+
+	'CONSTRAINT CHECK / ENFORCED only on child, after parent DROP CONSTRAINT' => {
+		create_sql => 'CREATE TABLE dump_test.test_table_dc_p1 (col1 int CONSTRAINT ck CHECK (col1 > 0));
+			CREATE TABLE dump_test.test_table_dc_p2 (col1 int CONSTRAINT ck CHECK (col1 > 0) NOT ENFORCED);
+			CREATE TABLE dump_test.test_table_dc_c () INHERITS (dump_test.test_table_dc_p1, dump_test.test_table_dc_p2);
+			ALTER TABLE dump_test.test_table_dc_p1 DROP CONSTRAINT ck;',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_dc_c (\E\n
+			\s+\QCONSTRAINT ck CHECK ((col1 > 0))\E\n
+			/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+			binary_upgrade => 1,
+		},
+	},
+
 	'CONSTRAINT CHECK / NOT VALID only on partition' => {
 		create_sql => 'CREATE TABLE dump_test.test_table_nv (col1 int CONSTRAINT ck CHECK (col1 > 0) NOT ENFORCED) PARTITION BY LIST (col1);
 			CREATE TABLE dump_test.test_table_nv_1 (col1 int);

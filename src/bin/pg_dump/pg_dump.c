@@ -9771,6 +9771,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		int			i_conislocal;
 		int			i_convalidated;
 		int			i_conenforced;
+		int			i_childenforced;
 
 		pg_log_info("finding table check constraints");
 
@@ -9780,9 +9781,15 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 							 "pg_catalog.pg_get_constraintdef(c.oid) AS consrc, "
 							 "conislocal, convalidated, ");
 		if (fout->remoteVersion >= 180000)
-			appendPQExpBufferStr(q, "conenforced ");
+			appendPQExpBufferStr(q,
+								 "conenforced, "
+								 "(c.conenforced AND NOT c.conislocal AND NOT EXISTS "
+								 "(SELECT 1 FROM pg_catalog.pg_inherits i "
+								 "JOIN pg_catalog.pg_constraint p ON (p.conrelid = i.inhparent) "
+								 "WHERE i.inhrelid = c.conrelid AND p.contype = 'c' "
+								 "AND p.conname = c.conname AND p.conenforced)) AS childenforced ");
 		else
-			appendPQExpBufferStr(q, "true AS conenforced ");
+			appendPQExpBufferStr(q, "true AS conenforced, false AS childenforced ");
 		appendPQExpBuffer(q,
 						  "FROM unnest('%s'::pg_catalog.oid[]) AS src(tbloid)\n"
 						  "JOIN pg_catalog.pg_constraint c ON (src.tbloid = c.conrelid)\n"
@@ -9803,6 +9810,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		i_conislocal = PQfnumber(res, "conislocal");
 		i_convalidated = PQfnumber(res, "convalidated");
 		i_conenforced = PQfnumber(res, "conenforced");
+		i_childenforced = PQfnumber(res, "childenforced");
 
 		/* As above, this loop iterates once per table, not once per row */
 		curtblindx = -1;
@@ -9862,6 +9870,18 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 				constrs[j].condeferred = false;
 				constrs[j].conislocal = (PQgetvalue(res, j, i_conislocal)[0] == 't');
 				constrs[j].conenforced = (PQgetvalue(res, j, i_conenforced)[0] == 't');
+
+				/*
+				 * An inherited constraint that is ENFORCED here while no
+				 * parent enforces it would come back NOT ENFORCED from the
+				 * parents' definitions, so dump it as if it were local, like
+				 * a direct ALTER CONSTRAINT ... ENFORCED on the child makes
+				 * it.  Not for a NOT VALID one, since adding it to the child
+				 * would merge it into the inherited copy and mark it valid.
+				 */
+				if (PQgetvalue(res, j, i_childenforced)[0] == 't' && validated &&
+					!tbinfo->ispartition && !dopt->binary_upgrade)
+					constrs[j].conislocal = true;
 
 				/*
 				 * An unvalidated constraint needs to be dumped separately, so
