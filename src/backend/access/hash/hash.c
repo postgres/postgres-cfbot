@@ -356,21 +356,26 @@ hashgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	HashScanOpaque so = (HashScanOpaque) scan->opaque;
 	bool		res;
 	int64		ntids = 0;
-	HashScanPosItem *currItem;
 
 	res = _hash_first(scan, ForwardScanDirection);
 
+	/*
+	 * Each iteration of this loop reads one index page worth of matching
+	 * TIDs (already collected into so->currPos.items by _hash_first/
+	 * _hash_next) and adds them to the TIDBitmap in a single batch.  Dead
+	 * index entries are handled by _hash_first/_hash_next whenever
+	 * scan->ignore_killed_tuples is true, so there is nothing else to do.
+	 */
 	while (res)
 	{
-		currItem = &so->currPos.items[so->currPos.itemIndex];
+		ItemPointerData tids[MaxIndexTuplesPerPage];
+		int			ntids_page = 0;
 
-		/*
-		 * _hash_first and _hash_next handle eliminate dead index entries
-		 * whenever scan->ignore_killed_tuples is true.  Therefore, there's
-		 * nothing to do here except add the results to the TIDBitmap.
-		 */
-		tbm_add_tuples(tbm, &(currItem->heapTid), 1, true);
-		ntids++;
+		while (so->currPos.itemIndex <= so->currPos.lastItem)
+			tids[ntids_page++] = so->currPos.items[so->currPos.itemIndex++].heapTid;
+
+		tbm_add_tuples(tbm, tids, ntids_page, true);
+		ntids += ntids_page;
 
 		res = _hash_next(scan, ForwardScanDirection);
 	}

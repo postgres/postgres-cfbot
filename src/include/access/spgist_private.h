@@ -22,6 +22,8 @@
 #include "utils/geo_decls.h"
 #include "utils/relcache.h"
 
+#define SPGIST_TBM_BATCH_SIZE 256
+
 
 typedef struct SpGistOptions
 {
@@ -220,6 +222,9 @@ typedef struct SpGistScanOpaqueData
 	/* These fields are only used in amgetbitmap scans: */
 	TIDBitmap  *tbm;			/* bitmap being filled */
 	int64		ntids;			/* number of TIDs passed to bitmap */
+
+	ItemPointerData tbmTids[2][SPGIST_TBM_BATCH_SIZE];
+	int			ntbmTids[2];	/* number of buffered TIDs */
 
 	/* These fields are only used in amgettuple scans: */
 	bool		want_itup;		/* are we reconstructing tuples? */
