@@ -944,6 +944,9 @@ spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	so->tbm = tbm;
 	so->ntids = 0;
 
+	if (so->searchNulls || so->searchNonNulls)
+		RecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	spgWalk(scan->indexRelation, so, true, storeBitmap);
 
 	return so->ntids;
@@ -1064,6 +1067,9 @@ spggettuple(IndexScanDesc scan, ScanDirection dir)
 				pfree(so->reconTups[i]);
 		}
 		so->iPtr = so->nPtrs = 0;
+
+		if (so->searchNulls || so->searchNonNulls)
+			RecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
 
 		spgWalk(scan->indexRelation, so, false, storeGettuple);
 

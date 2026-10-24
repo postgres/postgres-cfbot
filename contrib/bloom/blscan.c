@@ -117,6 +117,7 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	 * We're going to read the whole index. This is why we use appropriate
 	 * buffer access strategy.
 	 */
+	RecordIndexScanStrategy(scan->instrument, BAS_BULKREAD);
 	bas = GetAccessStrategy(BAS_BULKREAD);
 	npages = RelationGetNumberOfBlocks(scan->indexRelation);
 	pgstat_count_index_scan(scan->indexRelation);
