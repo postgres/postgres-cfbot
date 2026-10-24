@@ -1,0 +1,65 @@
+Parsed test spec with 3 sessions
+
+starting permutation: p_begin p_declare p_fetch f_fill r_scan r_ff r_stats p_commit r_scan r_ff r_stats
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step p_begin: BEGIN;
+step p_declare: DECLARE c CURSOR FOR SELECT id FROM prunetest;
+step p_fetch: FETCH 1 FROM c;
+id
+--
+ 4
+(1 row)
+
+step f_fill: 
+    DO $$
+    BEGIN
+        WHILE (SELECT pg_relation_size('prunetest')) <=
+              current_setting('block_size')::int LOOP
+            INSERT INTO prunetest
+                SELECT g, repeat('z', 200) FROM generate_series(100, 110) g;
+        END LOOP;
+    END $$;
+
+step r_scan: SELECT count(*) > 0 AS scanned FROM prunetest;
+scanned
+-------
+t      
+(1 row)
+
+step r_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step r_stats: SELECT prune_onaccess, prune_onaccess_missed
+		  FROM pg_stat_all_tables WHERE relname = 'prunetest';
+prune_onaccess|prune_onaccess_missed
+--------------+---------------------
+             0|                    1
+(1 row)
+
+step p_commit: COMMIT;
+step r_scan: SELECT count(*) > 0 AS scanned FROM prunetest;
+scanned
+-------
+t      
+(1 row)
+
+step r_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step r_stats: SELECT prune_onaccess, prune_onaccess_missed
+		  FROM pg_stat_all_tables WHERE relname = 'prunetest';
+prune_onaccess|prune_onaccess_missed
+--------------+---------------------
+             1|                    1
+(1 row)
+
