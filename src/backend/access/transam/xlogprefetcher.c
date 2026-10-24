@@ -337,6 +337,24 @@ XLogPrefetchResetStats(void)
 	pg_atomic_write_u64(&SharedStats->skip_rep, 0);
 }
 
+/*
+ * Log a summary of the prefetch counters at the end of recovery.
+ */
+void
+XLogPrefetchLogStats(void)
+{
+	if (recovery_prefetch == RECOVERY_PREFETCH_OFF)
+		return;
+
+	ereport(LOG,
+			errmsg("redo prefetch stats: prefetched %" PRIu64 " blocks, skipped (%" PRIu64 " in the buffer pool, %" PRIu64 " zero-initialized, %" PRIu64 " non-existent, %" PRIu64 " full page image, %" PRIu64 " recently prefetched)",
+				   pg_atomic_read_u64(&SharedStats->prefetch),
+				   pg_atomic_read_u64(&SharedStats->hit),
+				   pg_atomic_read_u64(&SharedStats->skip_init),
+				   pg_atomic_read_u64(&SharedStats->skip_new),
+				   pg_atomic_read_u64(&SharedStats->skip_fpw),
+				   pg_atomic_read_u64(&SharedStats->skip_rep)));
+}
 
 /*
  * Called when any GUC is changed that affects prefetching.
