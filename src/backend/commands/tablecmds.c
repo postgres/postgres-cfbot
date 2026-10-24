@@ -12728,6 +12728,21 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	}
 
 	/*
+	 * The constraint is about to be marked validated, so a descendant that is
+	 * enforced but not yet valid conflicts with it, as in ALTER TABLE ...
+	 * INHERIT.
+	 */
+	if (recursing && cmdcon->is_enforced &&
+		currcon->conenforced && !currcon->convalidated)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+				errmsg("constraint \"%s\" conflicts with NOT VALID constraint on child table \"%s\"",
+					   NameStr(currcon->conname), RelationGetRelationName(rel)),
+				errhint("You may need to use %s on table \"%s\" first.",
+						"ALTER TABLE ... VALIDATE CONSTRAINT",
+						RelationGetRelationName(rel)));
+
+	/*
 	 * Update to the merged enforceability if needed. This may differ from the
 	 * requested enforceability when another matching parent constraint
 	 * remains enforced.
@@ -12735,10 +12750,31 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	if (currcon->conenforced != target_enforced)
 	{
 		ATAlterConstraint updatecon = *cmdcon;
+		HeapTuple	newtup = contuple;
+
+		/*
+		 * Directly setting an inherited constraint of a regular inheritance
+		 * child to ENFORCED while its parents don't enforce it gives the child
+		 * a local definition, just like ALTER TABLE ... ADD CONSTRAINT ...
+		 * ENFORCED on the child would.  That way, the constraint stays with the
+		 * child if it is detached from its parents, and pg_dump can dump it as
+		 * part of the child's definition rather than with an additional ALTER
+		 * CONSTRAINT, which would require a rescan of the child.  Partitions
+		 * never have local definitions of inherited constraints.
+		 */
+		if (!recursing && target_enforced && !currcon->conislocal &&
+			!rel->rd_rel->relispartition)
+		{
+			newtup = heap_copytuple(contuple);
+			((Form_pg_constraint) GETSTRUCT(newtup))->conislocal = true;
+		}
 
 		updatecon.is_enforced = target_enforced;
-		AlterConstrUpdateConstraintEntry(&updatecon, conrel, contuple);
+		AlterConstrUpdateConstraintEntry(&updatecon, conrel, newtup);
 		changed = true;
+
+		if (newtup != contuple)
+			heap_freetuple(newtup);
 	}
 
 	/*
