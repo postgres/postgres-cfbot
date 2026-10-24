@@ -11,4 +11,5 @@ backend_sources += files(
   'memdebug.c',
   'portalmem.c',
   'slab.c',
+  'systemctx.c',
 )

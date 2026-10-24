@@ -204,9 +204,9 @@ typedef struct RelationData
 	MemoryContext rd_indexcxt;	/* private memory cxt for this stuff */
 	/* use "struct" here to avoid needing to include amapi.h: */
 	const struct IndexAmRoutine *rd_indam;	/* index AM's API struct */
-	Oid		   *rd_opfamily;	/* OIDs of op families for each index col */
-	Oid		   *rd_opcintype;	/* OIDs of opclass declared input data types */
-	RegProcedure *rd_support;	/* OIDs of support procedures */
+	const Oid  *rd_opfamily;	/* OIDs of op families for each index col */
+	const Oid  *rd_opcintype;	/* OIDs of opclass declared input data types */
+	const RegProcedure *rd_support;	/* OIDs of support procedures */
 	struct FmgrInfo *rd_supportinfo;	/* lookup info for support procedures */
 	int16	   *rd_indoption;	/* per-column AM-specific flags */
 	List	   *rd_indexprs;	/* index expression trees, if any */
@@ -215,7 +215,7 @@ typedef struct RelationData
 	Oid		   *rd_exclprocs;	/* OIDs of exclusion ops' procs, if any */
 	uint16	   *rd_exclstrats;	/* exclusion ops' strategy numbers, if any */
 	Oid		   *rd_indcollation;	/* OIDs of index collations */
-	bytea	  **rd_opcoptions;	/* parsed opclass-specific options */
+	const bytea *const *rd_opcoptions;	/* parsed opclass-specific options */
 
 	/*
 	 * rd_amcache is available for index and table AMs to cache private data
