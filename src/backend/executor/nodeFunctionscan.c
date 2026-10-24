@@ -29,30 +29,8 @@
 #include "utils/memutils.h"
 #include "utils/tuplestore.h"
 
-
-/*
- * Runtime data for each function being scanned.
- */
-typedef struct FunctionScanPerFuncState
-{
-	SetExprState *setexpr;		/* state of the expression being evaluated */
-	TupleDesc	tupdesc;		/* desc of the function result type */
-	int			colcount;		/* expected number of result columns */
-	Tuplestorestate *tstore;	/* holds the function result set */
-	int64		rowcount;		/* # of rows in result set, -1 if not known */
-	TupleTableSlot *func_slot;	/* function result slot (or NULL) */
-
-	/*
-	 * Storage statistics of the current tuplestore, to report in EXPLAIN
-	 * ANALYZE.  Only meaningful while tstore is not NULL.
-	 */
-	bool		usedDisk;
-	int64		spaceUsed;
-} FunctionScanPerFuncState;
-
 static TupleTableSlot *FunctionNext(FunctionScanState *node);
-static void update_storage_stats(FunctionScanState *node,
-								 FunctionScanPerFuncState *fs);
+static void update_storage_stats(FunctionScanState *node);
 
 
 /* ----------------------------------------------------------------
@@ -113,10 +91,6 @@ FunctionNext(FunctionScanState *node)
 			 * call is fast, so the overhead shouldn't be an issue.
 			 */
 			tuplestore_rescan(tstore);
-
-			/* Collect its storage statistics for EXPLAIN ANALYZE */
-			if (node->ss.ps.instrument)
-				update_storage_stats(node, &node->funcstates[0]);
 		}
 
 		/*
@@ -176,10 +150,6 @@ FunctionNext(FunctionScanState *node)
 			 * call is fast, so the overhead shouldn't be an issue.
 			 */
 			tuplestore_rescan(fs->tstore);
-
-			/* Collect its storage statistics for EXPLAIN ANALYZE */
-			if (node->ss.ps.instrument)
-				update_storage_stats(node, fs);
 		}
 
 		/*
@@ -375,8 +345,6 @@ ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)
 		 */
 		fs->tstore = NULL;
 		fs->rowcount = -1;
-		fs->usedDisk = false;
-		fs->spaceUsed = 0;
 
 		/*
 		 * Now build a tupdesc showing the result type we expect from the
@@ -566,6 +534,9 @@ ExecEndFunctionScan(FunctionScanState *node)
 	{
 		FunctionScanInstrumentation *si;
 
+		/* Take the tuplestores still existing into account */
+		update_storage_stats(node);
+
 		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
 		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
 		si->maxSpaceUsed = Max(si->maxSpaceUsed, node->stats.maxSpaceUsed);
@@ -590,7 +561,7 @@ ExecEndFunctionScan(FunctionScanState *node)
 /*
  * update_storage_stats
  *		Update the storage statistics to report in EXPLAIN ANALYZE with the
- *		function's tuplestore, which already holds the whole result set.
+ *		tuplestores that exist at this moment.
  *
  * A FunctionScan node has one tuplestore per function.  We report the peak
  * of the total space used by the tuplestores existing at the same time.  The
@@ -598,22 +569,25 @@ ExecEndFunctionScan(FunctionScanState *node)
  * any rescan, spilled to disk.
  */
 static void
-update_storage_stats(FunctionScanState *node, FunctionScanPerFuncState *fs)
+update_storage_stats(FunctionScanState *node)
 {
 	int64		totalSpaceUsed = 0;
 
-	tuplestore_get_stats(fs->tstore, &fs->usedDisk, &fs->spaceUsed);
-
 	for (int i = 0; i < node->nfuncs; i++)
 	{
-		FunctionScanPerFuncState *f = &node->funcstates[i];
+		FunctionScanPerFuncState *fs = &node->funcstates[i];
+		bool		usedDisk;
+		int64		spaceUsed;
 
-		if (f->tstore != NULL)
-			totalSpaceUsed += f->spaceUsed;
+		if (fs->tstore == NULL)
+			continue;
+
+		tuplestore_get_stats(fs->tstore, &usedDisk, &spaceUsed);
+		totalSpaceUsed += spaceUsed;
+		node->stats.usedDisk |= usedDisk;
 	}
 
 	node->stats.maxSpaceUsed = Max(node->stats.maxSpaceUsed, totalSpaceUsed);
-	node->stats.usedDisk |= fs->usedDisk;
 }
 
 /* ----------------------------------------------------------------
@@ -652,6 +626,14 @@ ExecReScanFunctionScan(FunctionScanState *node)
 	if (chgparam)
 	{
 		ListCell   *lc;
+
+		/*
+		 * Collect the storage statistics for EXPLAIN ANALYZE before any
+		 * tuplestore is destroyed.  The tuplestores of the functions that are
+		 * not recomputed exist at the same time, so they are counted too.
+		 */
+		if (node->ss.ps.instrument)
+			update_storage_stats(node);
 
 		i = 0;
 		foreach(lc, scan->functions)
