@@ -1138,6 +1138,13 @@ chr			(PG_FUNCTION_ARGS)
 		result = (text *) palloc(VARHDRSZ + 1);
 		SET_VARSIZE(result, VARHDRSZ + 1);
 		*VARDATA(result) = (char) cvalue;
+
+		/* Some single-byte encodings leave byte values unassigned */
+		if (!pg_verifymbstr(VARDATA(result), 1, true))
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("requested character not valid for encoding: %u",
+							cvalue)));
 	}
 
 	PG_RETURN_TEXT_P(result);
