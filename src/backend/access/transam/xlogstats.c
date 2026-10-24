@@ -16,7 +16,8 @@
 #include "access/xlogstats.h"
 
 /*
- * Calculate the size of a record, split into !FPI and FPI parts.
+ * Calculate the size of a record, split into !FPI and FPI parts, before
+ * whole-record compression.  Per-image compression is reflected in fpi_len.
  */
 void
 XLogRecGetLen(XLogReaderState *record, uint32 *rec_len,
@@ -71,6 +72,7 @@ XLogRecStoreStats(XLogStats *stats, XLogReaderState *record)
 	stats->rmgr_stats[rmid].count++;
 	stats->rmgr_stats[rmid].rec_len += rec_len;
 	stats->rmgr_stats[rmid].fpi_len += fpi_len;
+	stats->rmgr_stats[rmid].physical_len += XLogRecGetPhysicalLen(record);
 
 	/*
 	 * Update per-record statistics, where the record is identified by a
@@ -93,4 +95,5 @@ XLogRecStoreStats(XLogStats *stats, XLogReaderState *record)
 	stats->record_stats[rmid][recid].count++;
 	stats->record_stats[rmid][recid].rec_len += rec_len;
 	stats->record_stats[rmid][recid].fpi_len += fpi_len;
+	stats->record_stats[rmid][recid].physical_len += XLogRecGetPhysicalLen(record);
 }
