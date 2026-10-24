@@ -1,0 +1,16 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_1 s2_1 c2 s1_2 s1_3 c1
+step s1_1: SELECT k, j FROM test WHERE k = 1;
+k|      j
+-+-------
+1|1000000
+(1 row)
+
+step s2_1: DELETE FROM test WHERE j = 1000000;
+step c2: COMMIT;
+step s1_2: INSERT INTO test VALUES (1, 2);
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step s1_3: SELECT k, j FROM test WHERE k = 1 ORDER BY j;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+step c1: COMMIT;

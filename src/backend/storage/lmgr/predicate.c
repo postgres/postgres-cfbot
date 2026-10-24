@@ -195,6 +195,7 @@
 
 #include "access/parallel.h"
 #include "access/slru.h"
+#include "access/tableam.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/twophase_rmgr.h"
@@ -433,6 +434,12 @@ static HTAB *LocalPredicateLockHash = NULL;
  */
 static SERIALIZABLEXACT *MySerializableXact = InvalidSerializableXact;
 static bool MyXactDidWrite = false;
+
+/*
+ * Counts reads which conflicted out to a concurrent serializable transaction.
+ * Never reset; see GetSerializableConflictOutCount().
+ */
+static uint64 SerializableConflictOutCount = 0;
 
 /*
  * The SXACT_FLAG_RO_UNSAFE optimization might lead us to release
@@ -4009,6 +4016,7 @@ CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot s
 						 errhint("The transaction might succeed if retried.")));
 
 			MySerializableXact->flags |= SXACT_FLAG_SUMMARY_CONFLICT_OUT;
+			SerializableConflictOutCount++;
 		}
 
 		/* It's not serializable or otherwise not important. */
@@ -4075,6 +4083,7 @@ CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot s
 	if (RWConflictExists(MySerializableXact, sxact))
 	{
 		/* We don't want duplicate conflict records in the list. */
+		SerializableConflictOutCount++;
 		LWLockRelease(SerializableXactHashLock);
 		return;
 	}
@@ -4083,6 +4092,7 @@ CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot s
 	 * Flag the conflict.  But first, if this conflict creates a dangerous
 	 * structure, ereport an error.
 	 */
+	SerializableConflictOutCount++;
 	FlagRWConflict(MySerializableXact, sxact);
 	LWLockRelease(SerializableXactHashLock);
 }
@@ -4417,6 +4427,69 @@ CheckTableForSerializableConflictIn(Relation relation)
 	for (i = NUM_PREDICATELOCK_PARTITIONS - 1; i >= 0; i--)
 		LWLockRelease(PredicateLockHashPartitionLockByIndex(i));
 	LWLockRelease(SerializablePredicateListLock);
+}
+
+/*
+ * Report a key reuse the caller has established.
+ */
+void
+ReportSerializableKeyReuse(void)
+{
+	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
+	MySerializableXact->flags |= SXACT_FLAG_DOOMED;
+	LWLockRelease(SerializableXactHashLock);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+			 errmsg("could not serialize access due to read/write dependencies among transactions"),
+			 errdetail_internal("Reason code: Canceled on reuse of a key which a concurrent transaction deleted."),
+			 errhint("The transaction might succeed if retried.")));
+}
+
+/*
+ * Report how many reads have conflicted out to a concurrent serializable
+ * transaction.  Sample this before and after a read to learn whether that read
+ * did so.  The counter is never reset, so compare samples for equality.
+ */
+uint64
+GetSerializableConflictOutCount(void)
+{
+	return SerializableConflictOutCount;
+}
+
+/*
+ * Refuse to let a uniqueness check conclude that a key is unused when our own
+ * snapshot says otherwise.
+ */
+void
+CheckForSerializableKeyReuse(Relation relation, const ItemPointerData *tid)
+{
+	ItemPointerData htid;
+	Snapshot	snapshot;
+	uint64		conflicts;
+
+	if (!ActiveSnapshotSet())
+		return;
+	snapshot = GetActiveSnapshot();
+
+	if (!CheckForSerializableConflictOutNeeded(relation, snapshot))
+		return;
+
+	htid = *tid;
+	conflicts = SerializableConflictOutCount;
+
+	/*
+	 * The fetch reports a conflict out to whoever deleted the tuple we can
+	 * still see.  No conflict means the deleter was ourselves or was not
+	 * serializable, and the key is ours to reuse.
+	 */
+	if (!table_fetch_tid(relation, &htid, snapshot, NULL))
+		return;
+
+	if (SerializableConflictOutCount == conflicts)
+		return;
+
+	ReportSerializableKeyReuse();
 }
 
 
