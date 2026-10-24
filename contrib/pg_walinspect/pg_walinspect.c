@@ -60,6 +60,7 @@ static void FillXLogStatsRow(const char *name, uint64 n, uint64 total_count,
 							 uint64 rec_len, uint64 total_rec_len,
 							 uint64 fpi_len, uint64 total_fpi_len,
 							 uint64 tot_len, uint64 total_len,
+							 uint64 physical_len,
 							 Datum *values, bool *nulls, uint32 ncols);
 static void GetWalStats(FunctionCallInfo fcinfo,
 						XLogRecPtr start_lsn,
@@ -244,6 +245,10 @@ GetWALRecordInfo(XLogReaderState *record, Datum *values,
 	else
 		nulls[i++] = true;
 
+	/* The physical length was added in extension version 1.2. */
+	if (ncols > i)
+		values[i++] = Int32GetDatum(XLogRecGetPhysicalLen(record));
+
 	Assert(i == ncols);
 }
 
@@ -262,7 +267,7 @@ static void
 GetWALBlockInfo(FunctionCallInfo fcinfo, XLogReaderState *record,
 				bool show_data)
 {
-#define PG_GET_WAL_BLOCK_INFO_COLS 20
+#define PG_GET_WAL_BLOCK_INFO_COLS 21
 	int			block_id;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	RmgrData	desc;
@@ -408,7 +413,10 @@ GetWALBlockInfo(FunctionCallInfo fcinfo, XLogReaderState *record,
 		else
 			nulls[i++] = true;
 
-		Assert(i == PG_GET_WAL_BLOCK_INFO_COLS);
+		if (rsinfo->setDesc->natts > i)
+			values[i++] = Int32GetDatum(XLogRecGetPhysicalLen(record));
+
+		Assert(i == rsinfo->setDesc->natts);
 
 		/* Store a tuple for this block reference */
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
@@ -472,7 +480,7 @@ pg_get_wal_block_info(PG_FUNCTION_ARGS)
 Datum
 pg_get_wal_record_info(PG_FUNCTION_ARGS)
 {
-#define PG_GET_WAL_RECORD_INFO_COLS 11
+#define PG_GET_WAL_RECORD_INFO_COLS 12
 	Datum		result;
 	Datum		values[PG_GET_WAL_RECORD_INFO_COLS] = {0};
 	bool		nulls[PG_GET_WAL_RECORD_INFO_COLS] = {0};
@@ -504,7 +512,7 @@ pg_get_wal_record_info(PG_FUNCTION_ARGS)
 				 errmsg("could not read WAL at %X/%08X",
 						LSN_FORMAT_ARGS(xlogreader->EndRecPtr))));
 
-	GetWALRecordInfo(xlogreader, values, nulls, PG_GET_WAL_RECORD_INFO_COLS);
+	GetWALRecordInfo(xlogreader, values, nulls, tupdesc->natts);
 
 	pfree(xlogreader->private_data);
 	XLogReaderFree(xlogreader);
@@ -550,7 +558,7 @@ static void
 GetWALRecordsInfo(FunctionCallInfo fcinfo, XLogRecPtr start_lsn,
 				  XLogRecPtr end_lsn)
 {
-#define PG_GET_WAL_RECORDS_INFO_COLS 11
+#define PG_GET_WAL_RECORDS_INFO_COLS 12
 	XLogReaderState *xlogreader;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	MemoryContext old_cxt;
@@ -576,7 +584,7 @@ GetWALRecordsInfo(FunctionCallInfo fcinfo, XLogRecPtr start_lsn,
 		old_cxt = MemoryContextSwitchTo(tmp_cxt);
 
 		GetWALRecordInfo(xlogreader, values, nulls,
-						 PG_GET_WAL_RECORDS_INFO_COLS);
+						 rsinfo->setDesc->natts);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 							 values, nulls);
@@ -619,6 +627,7 @@ FillXLogStatsRow(const char *name,
 				 uint64 rec_len, uint64 total_rec_len,
 				 uint64 fpi_len, uint64 total_fpi_len,
 				 uint64 tot_len, uint64 total_len,
+				 uint64 physical_len,
 				 Datum *values, bool *nulls, uint32 ncols)
 {
 	double		n_pct,
@@ -652,6 +661,9 @@ FillXLogStatsRow(const char *name,
 	values[i++] = Float8GetDatum(fpi_len_pct);
 	values[i++] = Int64GetDatum(tot_len);
 	values[i++] = Float8GetDatum(tot_len_pct);
+
+	if (ncols > i)
+		values[i++] = Int64GetDatum(physical_len);
 
 	Assert(i == ncols);
 }
@@ -734,6 +746,7 @@ GetXLogSummaryStats(XLogStats *stats, ReturnSetInfo *rsinfo,
 				FillXLogStatsRow(psprintf("%s/%s", desc.rm_name, id), count,
 								 total_count, rec_len, total_rec_len, fpi_len,
 								 total_fpi_len, tot_len, total_len,
+								 stats->record_stats[ri][rj].physical_len,
 								 values, nulls, ncols);
 
 				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
@@ -755,7 +768,8 @@ GetXLogSummaryStats(XLogStats *stats, ReturnSetInfo *rsinfo,
 
 			FillXLogStatsRow(desc.rm_name, count, total_count, rec_len,
 							 total_rec_len, fpi_len, total_fpi_len, tot_len,
-							 total_len, values, nulls, ncols);
+							 total_len, stats->rmgr_stats[ri].physical_len,
+							 values, nulls, ncols);
 
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 								 values, nulls);
@@ -776,7 +790,7 @@ static void
 GetWalStats(FunctionCallInfo fcinfo, XLogRecPtr start_lsn, XLogRecPtr end_lsn,
 			bool stats_per_record)
 {
-#define PG_GET_WAL_STATS_COLS 9
+#define PG_GET_WAL_STATS_COLS 10
 	XLogReaderState *xlogreader;
 	XLogStats	stats = {0};
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -801,7 +815,7 @@ GetWalStats(FunctionCallInfo fcinfo, XLogRecPtr start_lsn, XLogRecPtr end_lsn,
 	XLogReaderFree(xlogreader);
 
 	GetXLogSummaryStats(&stats, rsinfo, values, nulls,
-						PG_GET_WAL_STATS_COLS,
+						rsinfo->setDesc->natts,
 						stats_per_record);
 
 #undef PG_GET_WAL_STATS_COLS

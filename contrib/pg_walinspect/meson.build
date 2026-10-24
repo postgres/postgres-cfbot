@@ -20,6 +20,7 @@ install_data(
   'pg_walinspect.control',
   'pg_walinspect--1.0.sql',
   'pg_walinspect--1.0--1.1.sql',
+  'pg_walinspect--1.1--1.2.sql',
   kwargs: contrib_data_args,
 )
 

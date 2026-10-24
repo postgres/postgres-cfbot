@@ -172,6 +172,24 @@ sub test_wal_compression
 	my $end_lsn =
 	  $primary->safe_psql('postgres', 'SELECT pg_current_wal_flush_lsn()');
 
+	is($primary->safe_psql('postgres', qq{
+		WITH records AS (
+			SELECT sum(record_length) AS decoded, sum(physical_length) AS physical
+			FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')),
+		stats AS (
+			SELECT sum(combined_size) AS decoded, sum(physical_size) AS physical
+			FROM pg_get_wal_stats('$start_lsn', '$end_lsn'))
+		SELECT records.decoded = stats.decoded AND records.physical = stats.physical
+		FROM records, stats;
+	}), 't', "physical and decoded statistics agree ($method)");
+
+	my $sizes_differ = $primary->safe_psql('postgres', qq{
+		SELECT bool_or(physical_length < record_length)
+		FROM pg_get_wal_records_info('$start_lsn', '$end_lsn');
+	});
+	is($sizes_differ, $method eq 'pglz' ? 'f' : 't',
+		"physical sizes reflect whole-record compression ($method)");
+
 	$primary->command_ok(
 		[
 			'pg_waldump',
