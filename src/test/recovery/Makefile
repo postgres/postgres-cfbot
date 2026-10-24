@@ -10,6 +10,7 @@
 #-------------------------------------------------------------------------
 
 EXTRA_INSTALL=contrib/pg_prewarm \
+	contrib/pg_walinspect \
 	contrib/pg_stat_statements \
 	contrib/test_decoding \
 	src/test/modules/injection_points \

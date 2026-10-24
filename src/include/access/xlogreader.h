@@ -165,6 +165,7 @@ typedef struct DecodedXLogRecord
 	XLogRecPtr	lsn;			/* location */
 	XLogRecPtr	next_lsn;		/* location of next record */
 	XLogRecord	header;			/* header */
+	uint32		physical_length;	/* size in WAL, before decompression */
 	ReplOriginId record_origin;
 	TransactionId toplevel_xid; /* XID of top-level transaction */
 	char	   *main_data;		/* record's main data portion */
@@ -242,7 +243,7 @@ struct XLogReaderState
 	 */
 
 #ifdef USE_ZSTD
-	/* Decompression context reused for zstd-compressed full-page images. */
+	/* Decompression context for independent zstd records and page images. */
 	void	   *zstd_dctx;
 #ifndef FRONTEND
 	/* Reset callback for zstd_dctx */
@@ -261,6 +262,10 @@ struct XLogReaderState
 	bool		free_decode_buffer; /* need to free? */
 	char	   *decode_buffer_head; /* data is read from the head */
 	char	   *decode_buffer_tail; /* new data is written at the tail */
+
+	/* Buffer for decompressing whole-record compressed WAL records */
+	char	   *decompression_buffer;
+	uint32		decompression_buffer_size;
 
 	/*
 	 * Queue of records that have been decoded.  This is a linked list that
@@ -427,7 +432,9 @@ extern bool DecodeXLogRecord(XLogReaderState *state,
  * Macros that provide access to parts of the record most recently returned by
  * XLogReadRecord() or XLogNextRecord().
  */
+/* TotalLen is before whole-record compression; PhysicalLen is stored in WAL. */
 #define XLogRecGetTotalLen(decoder) ((decoder)->record->header.xl_tot_len)
+#define XLogRecGetPhysicalLen(decoder) ((decoder)->record->physical_length)
 #define XLogRecGetPrev(decoder) ((decoder)->record->header.xl_prev)
 #define XLogRecGetInfo(decoder) ((decoder)->record->header.xl_info)
 #define XLogRecGetRmid(decoder) ((decoder)->record->header.xl_rmid)

@@ -271,6 +271,15 @@ PostgreSQL documentation
        </para>
 
        <para>
+        Record, FPI, and combined sizes are measured before whole-record
+        compression, but after any per-image compression.  Physical size
+        includes compression headers and compressed payloads, but excludes
+        WAL page headers and alignment padding.  Individual compressed
+        records likewise show their physical length separately from the
+        decoded <literal>len (rec/tot)</literal> values.
+       </para>
+
+       <para>
         If <application>pg_waldump</application> is terminated by signal
         <systemitem>SIGINT</systemitem>
         (<keycombo action="simul"><keycap>Control</keycap><keycap>C</keycap></keycombo>),
