@@ -263,38 +263,42 @@ PGTYPESdate_fmt_asc(date dDate, const char *fmtstring, char *outbuf)
 						free(replace_val.str_val);
 					break;
 				case PGTYPES_TYPE_UINT:
-					{
-						char	   *t = pgtypes_alloc(PGTYPES_DATE_NUM_MAX_DIGITS);
-
-						if (!t)
-							return -1;
-						snprintf(t, PGTYPES_DATE_NUM_MAX_DIGITS,
-								 "%u", replace_val.uint_val);
-						memcpy(start_pattern, t, strlen(t));
-						free(t);
-					}
-					break;
 				case PGTYPES_TYPE_UINT_2_LZ:
-					{
-						char	   *t = pgtypes_alloc(PGTYPES_DATE_NUM_MAX_DIGITS);
-
-						if (!t)
-							return -1;
-						snprintf(t, PGTYPES_DATE_NUM_MAX_DIGITS,
-								 "%02u", replace_val.uint_val);
-						memcpy(start_pattern, t, strlen(t));
-						free(t);
-					}
-					break;
 				case PGTYPES_TYPE_UINT_4_LZ:
 					{
 						char	   *t = pgtypes_alloc(PGTYPES_DATE_NUM_MAX_DIGITS);
+						size_t		pat_len;
+						size_t		t_len;
+						const char *fmt;
 
 						if (!t)
 							return -1;
+
+						if (replace_type == PGTYPES_TYPE_UINT)
+							fmt = "%u";
+						else if (replace_type == PGTYPES_TYPE_UINT_2_LZ)
+							fmt = "%02u";
+						else
+							fmt = "%04u";
+
 						snprintf(t, PGTYPES_DATE_NUM_MAX_DIGITS,
-								 "%04u", replace_val.uint_val);
-						memcpy(start_pattern, t, strlen(t));
+								 fmt, replace_val.uint_val);
+						t_len = strlen(t);
+						pat_len = strlen(mapping[i].format);
+
+						/*
+						 * In-place replace over a fixed-width token
+						 * ("yyyy" is four digits).  A longer value
+						 * would overrun typical outbufs.
+						 */
+						if (t_len > pat_len)
+						{
+							free(t);
+							errno = PGTYPES_DATE_BAD_DATE;
+							return -1;
+						}
+
+						memcpy(start_pattern, t, t_len);
 						free(t);
 					}
 					break;
