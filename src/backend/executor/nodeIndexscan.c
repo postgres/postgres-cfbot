@@ -819,7 +819,7 @@ ExecEndIndexScan(IndexScanState *node)
 		 * shutdown on the workers.  On rescan it will spin up new workers
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
-		winstrument->nsearches += node->iss_Instrument->nsearches;
+		CombineIndexScanInstrumentation(winstrument, node->iss_Instrument);
 		Assert(node->iss_Instrument->ntabletuplefetches == 0);
 	}
 
@@ -983,7 +983,11 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of index scans if requested */
 	if (estate->es_instrument)
+	{
 		indexstate->iss_Instrument = palloc0_object(IndexScanInstrumentation);
+		indexstate->iss_Instrument->need_strategy =
+			(estate->es_instrument & INSTRUMENT_BUFFERS) != 0;
+	}
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;

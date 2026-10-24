@@ -140,6 +140,8 @@ static void show_hashagg_info(AggState *aggstate, ExplainState *es);
 static void show_indexscan_info(PlanState *planstate, ExplainState *es);
 static void show_tidbitmap_info(BitmapHeapScanState *planstate,
 								ExplainState *es);
+static void print_buffer_access_strategy(ExplainState *es,
+										 BufferAccessStrategyType strategy);
 static void show_scan_buffer_access_strategy(ScanState *planstate, ExplainState *es);
 static void show_scan_io_usage(ScanState *planstate,
 							   ExplainState *es);
@@ -3909,8 +3911,10 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 {
 	Plan	   *plan = planstate->plan;
 	SharedIndexScanInstrumentation *SharedInfo = NULL;
-	uint64		nsearches = 0,
-				ntabletuplefetches = 0;
+	WorkerNodeInstrumentation *worker_instrument = planstate->worker_instrument;
+	IndexScanInstrumentation stats = {0};
+	double		leader_nloops = planstate->instrument ?
+		planstate->instrument->nloops : 0;
 
 	if (!es->analyze)
 		return;
@@ -3922,7 +3926,7 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 			{
 				IndexScanState *indexstate = ((IndexScanState *) planstate);
 
-				nsearches = indexstate->iss_Instrument->nsearches;
+				stats = *indexstate->iss_Instrument;
 				SharedInfo = indexstate->iss_SharedInfo;
 				break;
 			}
@@ -3930,8 +3934,7 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 			{
 				IndexOnlyScanState *indexstate = ((IndexOnlyScanState *) planstate);
 
-				nsearches = indexstate->ioss_Instrument->nsearches;
-				ntabletuplefetches = indexstate->ioss_Instrument->ntabletuplefetches;
+				stats = *indexstate->ioss_Instrument;
 				SharedInfo = indexstate->ioss_SharedInfo;
 				break;
 			}
@@ -3939,12 +3942,23 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 			{
 				BitmapIndexScanState *indexstate = ((BitmapIndexScanState *) planstate);
 
-				nsearches = indexstate->biss_Instrument->nsearches;
+				stats = *indexstate->biss_Instrument;
 				SharedInfo = indexstate->biss_SharedInfo;
 				break;
 			}
 		default:
 			break;
+	}
+
+	if (worker_instrument)
+	{
+		/*
+		 * After parallel cleanup, the node's loop count includes worker
+		 * loops. Remove them to determine whether the leader executed the
+		 * scan.
+		 */
+		for (int i = 0; i < worker_instrument->num_workers; ++i)
+			leader_nloops -= worker_instrument->instrument[i].nloops;
 	}
 
 	/* Next get the sum of the counters set within each and every process */
@@ -3953,16 +3967,32 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 		for (int i = 0; i < SharedInfo->num_workers; ++i)
 		{
 			IndexScanInstrumentation *winstrument = &SharedInfo->winstrument[i];
+			double		worker_nloops =
+				worker_instrument && i < worker_instrument->num_workers ?
+				worker_instrument->instrument[i].nloops : 0;
 
-			nsearches += winstrument->nsearches;
-			ntabletuplefetches += winstrument->ntabletuplefetches;
+			stats.nsearches += winstrument->nsearches;
+			stats.ntabletuplefetches += winstrument->ntabletuplefetches;
+
+			if (!es->buffers || worker_nloops <= 0 ||
+				!winstrument->strategy_valid)
+				continue;
+
+			if (es->workers_state)
+				ExplainOpenWorker(i, es);
+			print_buffer_access_strategy(es, winstrument->strategy);
+			if (es->workers_state)
+				ExplainCloseWorker(i, es);
 		}
 	}
 
-	if (nodeTag(plan) == T_IndexOnlyScan)
-		ExplainPropertyUInteger("Heap Fetches", NULL, ntabletuplefetches, es);
+	if (es->buffers && stats.strategy_valid && leader_nloops > 0)
+		print_buffer_access_strategy(es, stats.strategy);
 
-	ExplainPropertyUInteger("Index Searches", NULL, nsearches, es);
+	if (nodeTag(plan) == T_IndexOnlyScan)
+		ExplainPropertyUInteger("Heap Fetches", NULL, stats.ntabletuplefetches, es);
+
+	ExplainPropertyUInteger("Index Searches", NULL, stats.nsearches, es);
 }
 
 /*

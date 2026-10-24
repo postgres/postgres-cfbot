@@ -377,6 +377,8 @@ spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 {
 	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	/* copy scankeys into local storage */
 	if (scankey && scan->numberOfKeys > 0)
 		memcpy(scan->keyData, scankey, scan->numberOfKeys * sizeof(ScanKeyData));

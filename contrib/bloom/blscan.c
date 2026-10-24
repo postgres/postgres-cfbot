@@ -49,6 +49,8 @@ blrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 {
 	BloomScanOpaque so = (BloomScanOpaque) scan->opaque;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_BULKREAD);
+
 	if (so->sign)
 		pfree(so->sign);
 	so->sign = NULL;

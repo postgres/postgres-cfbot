@@ -390,6 +390,8 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 {
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	/* we aren't holding any read locks, but gotta drop the pins */
 	if (BTScanPosIsValid(so->currPos))
 	{

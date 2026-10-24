@@ -133,6 +133,8 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 	int			i;
 	MemoryContext oldCxt;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	/* Before leaving current page, deal with any killed items */
 	if (so->numKilled > 0)
 		gistkillitems(scan);

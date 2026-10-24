@@ -490,6 +490,8 @@ ginrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 {
 	GinScanOpaque so = (GinScanOpaque) scan->opaque;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	ginFreeScanKeys(so);
 
 	if (scankey && scan->numberOfKeys > 0)

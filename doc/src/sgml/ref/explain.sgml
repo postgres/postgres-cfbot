@@ -206,7 +206,11 @@ ROLLBACK;
       <literal>TID Scan</literal>, and <literal>TID Range Scan</literal> plan
       nodes report the <glossterm
       linkend="glossary-buffer-access-strategy">buffer access
-      strategy</glossterm> used by the table scan.
+      strategy</glossterm> used by the table scan.  Executed
+      <literal>Index Scan</literal>, <literal>Index Only Scan</literal>, and
+      <literal>Bitmap Index Scan</literal> plan nodes likewise report the
+      strategy used by the index scan when the index access method provides
+      it.
       The number of blocks shown for an
       upper-level node includes those used by all its child nodes.  In text
       format, only non-zero values are printed.  Buffers information is
