@@ -153,6 +153,15 @@ static relopt_bool boolRelOpts[] =
 		},
 		true
 	},
+	{
+		{
+			"dictionary_evolution",
+			"Enables automatic retraining of this column's TOAST compression dictionary during ANALYZE.",
+			RELOPT_KIND_ATTRIBUTE,
+			ShareUpdateExclusiveLock
+		},
+		false
+	},
 	/* list terminator */
 	{{NULL}}
 };
@@ -412,6 +421,15 @@ static relopt_int intRelOpts[] =
 		},
 		-1, 0, 1024
 	},
+	{
+		{
+			"dictionary_evolution_min_rows",
+			"Minimum live-row count before a column's TOAST compression dictionary is eligible for automatic retraining.",
+			RELOPT_KIND_ATTRIBUTE,
+			ShareUpdateExclusiveLock
+		},
+		10000, 0, INT_MAX
+	},
 
 	/* list terminator */
 	{{NULL}}
@@ -500,6 +518,15 @@ static relopt_real realRelOpts[] =
 			ShareUpdateExclusiveLock
 		},
 		0, -1.0, DBL_MAX
+	},
+	{
+		{
+			"dictionary_evolution_growth",
+			"Factor by which a column's live-row count must grow since its TOAST compression dictionary was trained before automatic retraining is eligible.",
+			RELOPT_KIND_ATTRIBUTE,
+			ShareUpdateExclusiveLock
+		},
+		2.0, 1.0, DBL_MAX
 	},
 	{
 		{
@@ -2418,7 +2445,13 @@ attribute_reloptions(Datum reloptions, bool validate)
 {
 	static const relopt_parse_elt tab[] = {
 		{"n_distinct", RELOPT_TYPE_REAL, offsetof(AttributeOpts, n_distinct)},
-		{"n_distinct_inherited", RELOPT_TYPE_REAL, offsetof(AttributeOpts, n_distinct_inherited)}
+		{"n_distinct_inherited", RELOPT_TYPE_REAL, offsetof(AttributeOpts, n_distinct_inherited)},
+		{"dictionary_evolution", RELOPT_TYPE_BOOL,
+		offsetof(AttributeOpts, dictionary_evolution)},
+		{"dictionary_evolution_growth", RELOPT_TYPE_REAL,
+		offsetof(AttributeOpts, dictionary_evolution_growth)},
+		{"dictionary_evolution_min_rows", RELOPT_TYPE_INT,
+		offsetof(AttributeOpts, dictionary_evolution_min_rows)}
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate,

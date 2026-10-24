@@ -22,6 +22,8 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
 #include "access/visibilitymap.h"
@@ -611,6 +613,25 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 				n_distinct = inh ? aopt->n_distinct_inherited : aopt->n_distinct;
 				if (n_distinct != 0.0)
 					stats->stadistinct = n_distinct;
+			}
+
+			/*
+			 * Automatic TOAST dictionary evolution: for an opted-in column
+			 * that uses a dictionary compression method, consider retraining
+			 * from the sample rows we already fetched.  A quick attcompression
+			 * check keeps this free for every other column.  Only on the
+			 * table's own rows, not inherited stats.
+			 */
+			if (!inh && stats->tupattnum > 0 &&
+				stats->tupattnum <= onerel->rd_att->natts)
+			{
+				char		cmethod = TupleDescAttr(onerel->rd_att,
+													stats->tupattnum - 1)->attcompression;
+
+				if (cmethod == TOAST_ZSTD_DICT_COMPRESSION ||
+					cmethod == TOAST_LZ4_DICT_COMPRESSION)
+					toast_dictionary_maybe_evolve(onerel, stats->tupattnum,
+												  rows, numrows, totalrows);
 			}
 
 			MemoryContextReset(col_context);

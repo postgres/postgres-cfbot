@@ -40,9 +40,13 @@ CATALOG(pg_toast_dictionary,9260,ToastDictionaryRelationId)
 	Oid			tdrelid BKI_LOOKUP(pg_class);	/* owning relation */
 	int16		tdattnum;		/* owning column */
 	bool		tdcurrent;		/* used to compress new values? */
+	int64		tdtrainrows;	/* reltuples estimate when trained, for
+								 * the auto-evolution growth trigger */
+	int64		tdtraintime;	/* training time as a TimestampTz, for the
+								 * auto-evolution cooldown */
 
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
-	bytea		tddict BKI_FORCE_NOT_NULL;	/* zstd dictionary content */
+	bytea		tddict BKI_FORCE_NOT_NULL;	/* trained dictionary content */
 #endif
 } FormData_pg_toast_dictionary;
 
