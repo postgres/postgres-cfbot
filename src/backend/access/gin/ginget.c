@@ -17,6 +17,7 @@
 #include "access/gin_private.h"
 #include "access/relscan.h"
 #include "common/pg_prng.h"
+#include "executor/instrument_node.h"
 #include "miscadmin.h"
 #include "storage/predicate.h"
 #include "utils/datum.h"
@@ -1941,6 +1942,8 @@ gingetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
 	if (GinIsVoidRes(scan))
 		return 0;
+
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
 
 	ntids = 0;
 
