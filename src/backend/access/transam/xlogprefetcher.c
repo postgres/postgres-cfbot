@@ -62,10 +62,22 @@
  * A small history of most recently seen FPIs, so that we can skip useless
  * prefetches for these blocks (most likely still in cache).
  *
- * XXX At which point should we switch to a hash table, instead of a linear
- * search in a small array?
+ * The history is a set-associative hash table, i.e. each block maps to a group
+ * of slots, and it can only be stored in one of the slots of that group.
  */
-#define XLOGPREFETCHER_FPI_HISTORY_SIZE 64
+#define XLOGPREFETCHER_FPI_GROUPS		16
+#define XLOGPREFETCHER_FPI_PER_GROUP	16
+#define XLOGPREFETCHER_FPI_HISTORY_SIZE	\
+	(XLOGPREFETCHER_FPI_GROUPS * XLOGPREFETCHER_FPI_PER_GROUP)
+
+/*
+ * Trivial hash function mapping block to a group in the hash table, using
+ * small prime numbers.
+ */
+#define XLOGPREFETCHER_FPI_HASH(blkno, rlocator)	\
+	((blkno) + 31 * (rlocator).spcOid + 83 * (rlocator).dbOid + 127 * (rlocator).relNumber)
+#define XLOGPREFETCHER_FPI_GROUP(blkno, rlocator)	\
+	(XLOGPREFETCHER_FPI_HASH((blkno), (rlocator)) % XLOGPREFETCHER_FPI_GROUPS)
 
 /*
  * When maintenance_io_concurrency is not saturated, we're prepared to look
@@ -155,7 +167,7 @@ struct XLogPrefetcher
 	/* Book-keeping to avoid prefetching right after FPI */
 	RelFileLocator recent_fpi_rlocator[XLOGPREFETCHER_FPI_HISTORY_SIZE];
 	BlockNumber recent_fpi_block[XLOGPREFETCHER_FPI_HISTORY_SIZE];
-	int			recent_fpi_idx;
+	XLogRecPtr	recent_fpi_lsn[XLOGPREFETCHER_FPI_HISTORY_SIZE];
 
 	/* Book-keeping to disable prefetching temporarily. */
 	XLogRecPtr	no_readahead_until;
@@ -704,11 +716,44 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 				 * duplicate FPI, it means the system is almost idle. We also
 				 * don't bother with evicting blocks from the history, for the
 				 * same reason.
+				 *
+				 * XXX Could we see multiple FPIs for the same block within
+				 * the same checkpoint interval? E.g. during a backup, etc?
+				 * Then maybe we should try to deduplicate the entries a bit
+				 * more aggressively.
 				 */
-				prefetcher->recent_fpi_rlocator[prefetcher->recent_fpi_idx] = block->rlocator;
-				prefetcher->recent_fpi_block[prefetcher->recent_fpi_idx] = block->blkno;
-				prefetcher->recent_fpi_idx =
-					(prefetcher->recent_fpi_idx + 1) % XLOGPREFETCHER_FPI_HISTORY_SIZE;
+
+				/* add the FPI to the oldest (or empty) slot in the group */
+				{
+					int			group = XLOGPREFETCHER_FPI_GROUP(block->blkno, block->rlocator);
+					int			slot = (group * XLOGPREFETCHER_FPI_PER_GROUP);	/* first slot */
+
+					for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
+					{
+						/* index in the whole arrays */
+						int			idx = (group * XLOGPREFETCHER_FPI_PER_GROUP + i);
+
+						/*
+						 * found an empty slot, so just use that
+						 *
+						 * XXX We could also have a cutoff age, and consider
+						 * older slots as empty.
+						 */
+						if (prefetcher->recent_fpi_lsn[idx] == InvalidXLogRecPtr)
+						{
+							slot = idx;
+							break;
+						}
+
+						/* use the older of the two slots */
+						if (prefetcher->recent_fpi_lsn[idx] < prefetcher->recent_fpi_lsn[slot])
+							slot = idx;
+					}
+
+					prefetcher->recent_fpi_rlocator[slot] = block->rlocator;
+					prefetcher->recent_fpi_block[slot] = block->blkno;
+					prefetcher->recent_fpi_lsn[slot] = record->lsn;
+				}
 
 				return LRQ_NEXT_NO_IO;
 			}
@@ -748,17 +793,22 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			 * it from an FPI. We keep a bit longer history of FPIs.
 			 *
 			 * XXX Maybe we could skip this with full-page writes disabled?
-			 *
-			 * XXX Maybe we could skip this backwards, with the assumption
-			 * that if there is a FPI, it's likely very close?
 			 */
-			for (int i = 0; i < XLOGPREFETCHER_FPI_HISTORY_SIZE; ++i)
 			{
-				if (block->blkno == prefetcher->recent_fpi_block[i] &&
-					RelFileLocatorEquals(block->rlocator, prefetcher->recent_fpi_rlocator[i]))
+				int			group = XLOGPREFETCHER_FPI_GROUP(block->blkno, block->rlocator);
+
+				/* scan the whole group */
+				for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; ++i)
 				{
-					XLogPrefetchIncrement(&SharedStats->skip_fpi);
-					return LRQ_NEXT_NO_IO;
+					int			idx = (group * XLOGPREFETCHER_FPI_PER_GROUP + i);
+
+					if (prefetcher->recent_fpi_lsn[idx] != InvalidXLogRecPtr &&
+						block->blkno == prefetcher->recent_fpi_block[idx] &&
+						RelFileLocatorEquals(block->rlocator, prefetcher->recent_fpi_rlocator[idx]))
+					{
+						XLogPrefetchIncrement(&SharedStats->skip_fpi);
+						return LRQ_NEXT_NO_IO;
+					}
 				}
 			}
 
