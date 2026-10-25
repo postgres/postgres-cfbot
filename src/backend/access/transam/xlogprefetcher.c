@@ -177,6 +177,7 @@ struct XLogPrefetcher
 	/* Book-keeping to avoid prefetching blocks restored from FPIs. */
 	XLogPrefetcherFPI *recent_fpi;
 	uint32		recent_fpi_groups;	/* always a power of two */
+	XLogRecPtr	recent_fpi_max_lsn; /* highest LSN in recent_fpi */
 
 	/* Book-keeping to disable prefetching temporarily. */
 	XLogRecPtr	no_readahead_until;
@@ -770,8 +771,6 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			 * restored from an FPI in a record that has not been replayed
 			 * yet. The block will be in shared buffers by the time this
 			 * record gets replayed.
-			 *
-			 * XXX Maybe we could skip this with full-page writes disabled?
 			 */
 			if (XLogPrefetcherHasFPI(prefetcher, block->rlocator, block->blkno,
 									 replaying_lsn))
@@ -1104,6 +1103,13 @@ XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 	slot->rlocator = rlocator;
 	slot->blkno = blkno;
 	slot->lsn = lsn;
+
+	/*
+	 * FPIs are normally added in LSN order, but use Max() so that the quick
+	 * exit in XLogPrefetcherHasFPI() can't give a different answer than
+	 * searching the history, no matter what.
+	 */
+	prefetcher->recent_fpi_max_lsn = Max(prefetcher->recent_fpi_max_lsn, lsn);
 }
 
 /*
@@ -1121,8 +1127,19 @@ static inline bool
 XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 					 BlockNumber blkno, XLogRecPtr replaying_lsn)
 {
-	XLogPrefetcherFPI *slots = XLogPrefetcherFPIGroup(prefetcher, rlocator,
-													  blkno);
+	XLogPrefetcherFPI *slots;
+
+	/*
+	 * Quick exit if all FPIs in the history have been replayed already.  This
+	 * is the common case when there are no FPIs within the look-ahead
+	 * distance, e.g. with full_page_writes=off, or later in a checkpoint
+	 * cycle, when most of the modified blocks were modified since the
+	 * checkpoint already.
+	 */
+	if (prefetcher->recent_fpi_max_lsn <= replaying_lsn)
+		return false;
+
+	slots = XLogPrefetcherFPIGroup(prefetcher, rlocator, blkno);
 
 	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
 	{
@@ -1216,6 +1233,7 @@ XLogPrefetcherReadRecord(XLogPrefetcher *prefetcher, char **errmsg)
 			palloc0_array(XLogPrefetcherFPI,
 						  prefetcher->recent_fpi_groups *
 						  XLOGPREFETCHER_FPI_PER_GROUP);
+		prefetcher->recent_fpi_max_lsn = InvalidXLogRecPtr;
 
 		prefetcher->reconfigure_count = XLogPrefetchReconfigureCount;
 	}
