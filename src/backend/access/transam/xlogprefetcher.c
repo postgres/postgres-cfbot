@@ -32,6 +32,7 @@
 #include "catalog/pg_control.h"
 #include "catalog/storage_xlog.h"
 #include "commands/dbcommands_xlog.h"
+#include "common/hashfn.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/atomics.h"
@@ -69,15 +70,6 @@
 #define XLOGPREFETCHER_FPI_PER_GROUP	16
 #define XLOGPREFETCHER_FPI_HISTORY_SIZE	\
 	(XLOGPREFETCHER_FPI_GROUPS * XLOGPREFETCHER_FPI_PER_GROUP)
-
-/*
- * Trivial hash function mapping block to a group in the hash table, using
- * small prime numbers.
- */
-#define XLOGPREFETCHER_FPI_HASH(blkno, rlocator)	\
-	((blkno) + 31 * (rlocator).spcOid + 83 * (rlocator).dbOid + 127 * (rlocator).relNumber)
-#define XLOGPREFETCHER_FPI_GROUP(blkno, rlocator)	\
-	(XLOGPREFETCHER_FPI_HASH((blkno), (rlocator)) % XLOGPREFETCHER_FPI_GROUPS)
 
 /*
  * When maintenance_io_concurrency is not saturated, we're prepared to look
@@ -1029,12 +1021,25 @@ XLogPrefetcherIsFiltered(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 /*
  * Return the group of slots in the history of recent FPIs, that the given
  * block maps to.
+ *
+ * The hash has to depend on all bits of the block number and the relation,
+ * otherwise blocks modified with a regular stride (or blocks of relations
+ * with some relfilenumbers) would map to only some of the groups, and the
+ * history would forget FPIs while other groups have plenty of space.
  */
 static inline XLogPrefetcherFPI *
 XLogPrefetcherFPIGroup(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 					   BlockNumber blkno)
 {
-	int			group = XLOGPREFETCHER_FPI_GROUP(blkno, rlocator);
+	uint32		hash;
+	uint32		group;
+
+	hash = murmurhash32(blkno);
+	hash = hash_combine(hash, murmurhash32(rlocator.relNumber));
+	hash = hash_combine(hash, murmurhash32(rlocator.dbOid));
+	hash = hash_combine(hash, murmurhash32(rlocator.spcOid));
+
+	group = hash % XLOGPREFETCHER_FPI_GROUPS;
 
 	return &prefetcher->recent_fpi[group * XLOGPREFETCHER_FPI_PER_GROUP];
 }
