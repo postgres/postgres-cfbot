@@ -93,3 +93,22 @@ SELECT reloptions FROM pg_class WHERE oid = 'bloomidx'::regclass;
 \set VERBOSITY terse
 CREATE INDEX bloomidx2 ON tst USING bloom (i, t) WITH (length=0);
 CREATE INDEX bloomidx2 ON tst USING bloom (i, t) WITH (col1=0);
+\set VERBOSITY default
+
+-- In a new backend, bloom's options are not yet registered when ALTER INDEX
+-- chooses its lock level; the lock taken must still be the one bloom
+-- declares.
+\c
+BEGIN;
+ALTER INDEX bloomidx SET (length = 80);
+SELECT mode FROM pg_locks
+  WHERE pid = pg_backend_pid() AND relation = 'bloomidx'::regclass
+  ORDER BY mode;
+ROLLBACK;
+\c
+BEGIN;
+ALTER INDEX bloomidx RESET (col1);
+SELECT mode FROM pg_locks
+  WHERE pid = pg_backend_pid() AND relation = 'bloomidx'::regclass
+  ORDER BY mode;
+ROLLBACK;
