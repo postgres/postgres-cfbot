@@ -2467,6 +2467,7 @@ AlterTableGetRelOptionsLockLevel(List *defList)
 	foreach(cell, defList)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
+		bool		found = false;
 		int			i;
 
 		for (i = 0; relOpts[i]; i++)
@@ -2475,10 +2476,19 @@ AlterTableGetRelOptionsLockLevel(List *defList)
 						def->defname,
 						relOpts[i]->namelen + 1) == 0)
 			{
+				found = true;
 				if (lockmode < relOpts[i]->lockmode)
 					lockmode = relOpts[i]->lockmode;
 			}
 		}
+
+		/*
+		 * An unrecognized option might belong to an access method whose
+		 * library has not yet been loaded in this backend, so we can't tell
+		 * what lock it needs.  Use the strongest one.
+		 */
+		if (!found)
+			return AccessExclusiveLock;
 	}
 
 	return lockmode;
