@@ -55,6 +55,10 @@ typedef struct QueryDesc
 
 	/* This field is allocated by ExecutorStart if needed */
 	struct Instrumentation *query_instr;	/* query level instrumentation */
+
+	/* Private state of extensions; see GetQueryDescExtensionId() */
+	void	  **extension_state;
+	int			extension_state_allocated;
 } QueryDesc;
 
 /* in pquery.c */
@@ -68,5 +72,30 @@ extern QueryDesc *CreateQueryDesc(PlannedStmt *plannedstmt,
 								  int instrument_options);
 
 extern void FreeQueryDesc(QueryDesc *qdesc);
+
+/*
+ * Loadable modules can attach private state to a QueryDesc.  Get an integer
+ * ID for the module with GetQueryDescExtensionId(), which returns the same ID
+ * for the same name within a backend, and use it with the functions below.
+ * The state lives as long as the QueryDesc, and is not touched by core
+ * otherwise, so the module is responsible for what it points to.
+ */
+extern int	GetQueryDescExtensionId(const char *extension_name);
+extern void SetQueryDescExtensionState(QueryDesc *qdesc, int extension_id,
+									   void *opaque);
+
+/*
+ * Get extension-specific state from a QueryDesc, or NULL if none was set.
+ */
+static inline void *
+GetQueryDescExtensionState(QueryDesc *qdesc, int extension_id)
+{
+	Assert(extension_id >= 0);
+
+	if (extension_id >= qdesc->extension_state_allocated)
+		return NULL;
+
+	return qdesc->extension_state[extension_id];
+}
 
 #endif							/* EXECDESC_H  */
