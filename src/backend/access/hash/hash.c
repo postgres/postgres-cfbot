@@ -90,6 +90,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = true,
 		.amcanparallel = false,
 		.amcanbuildparallel = false,
+		.amcanresetsnapshot = true,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,
@@ -199,7 +200,7 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	if (buildstate.spool)
 	{
 		/* sort the tuples and insert them into the index */
-		_h_indexbuild(buildstate.spool, buildstate.heapRel);
+		_h_indexbuild(buildstate.spool, buildstate.heapRel, indexInfo);
 		_h_spooldestroy(buildstate.spool);
 	}
 

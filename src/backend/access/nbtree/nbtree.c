@@ -138,6 +138,7 @@ bthandler(PG_FUNCTION_ARGS)
 		.ampredlocks = true,
 		.amcanparallel = true,
 		.amcanbuildparallel = true,
+		.amcanresetsnapshot = true,
 		.amcaninclude = true,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = false,

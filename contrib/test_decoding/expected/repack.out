@@ -57,6 +57,13 @@ INSERT INTO repack_conc_invidx VALUES (1, 0), (2, 0);
 CREATE UNIQUE INDEX CONCURRENTLY repack_conc_invidx_uq ON repack_conc_invidx (j);
 ERROR:  could not create unique index "repack_conc_invidx_uq"
 DETAIL:  Key (j)=(0) is duplicated.
+SELECT indisready FROM pg_index
+WHERE indexrelid = 'repack_conc_invidx_uq'::regclass;
+ indisready 
+------------
+ f
+(1 row)
+
 CREATE INDEX CONCURRENTLY repack_conc_invalid_expr ON repack_conc_invidx ((1/j));
 ERROR:  division by zero
 REPACK repack_conc_invidx;

@@ -11,7 +11,7 @@ PGFILEDESC = "injection_points - facility for injection points"
 
 EXTRA_INSTALL = contrib/test_decoding
 
-REGRESS = injection_points hashagg reindex_conc vacuum
+REGRESS = injection_points hashagg reindex_conc vacuum cic_reset_snapshots
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
 # wait_cleanup terminates another backend, whose FATAL message can be lost
@@ -20,6 +20,7 @@ REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 WAIT_CLEANUP_TST = $(if $(filter win32,$(PORTNAME)),,wait_cleanup)
 
 ISOLATION = basic \
+	    cic_reset_unique \
 	    inplace \
 	    reindex_concurrently_deferred \
 	    repack \

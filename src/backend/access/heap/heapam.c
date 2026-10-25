@@ -56,6 +56,9 @@
 #include "utils/spccache.h"
 #include "utils/syscache.h"
 
+/* GUCs */
+int			concurrent_index_reset_snapshot_interval = 100;
+
 
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
 									 TransactionId xid, CommandId cid, uint32 options);
@@ -702,6 +705,40 @@ heap_prepare_pagescan(TableScanDesc sscan)
 }
 
 /*
+ * heap_reset_scan_snapshot - periodically replace the scan snapshot
+ *
+ * The scan uses the active snapshot without registering another copy,
+ * allowing RotateSnapshot() to release it and advance xmin.
+ */
+static inline void
+heap_reset_scan_snapshot(HeapScanDesc scan)
+{
+	/* The scan and rotation state must refer to the active snapshot. */
+	Assert(GetActiveSnapshot() == scan->rs_base.rs_snapshot);
+	Assert(scan->rs_rotation.snapshot == scan->rs_base.rs_snapshot);
+
+	if (!SnapshotRotationDue(&scan->rs_rotation))
+		return;
+
+	INJECTION_POINT("heap_reset_scan_snapshot_swap", NULL);
+	RotateSnapshot(&scan->rs_rotation);
+	scan->rs_base.rs_snapshot = scan->rs_rotation.snapshot;
+
+#ifdef USE_INJECTION_POINTS
+
+	/*
+	 * An assigned xid or an older registered snapshot can hold back xmin
+	 * despite the reset.  This is safe, but defeats the purpose of resets.
+	 * Tests attach here when they expect neither condition.
+	 */
+	if (TransactionIdIsValid(MyProc->xid))
+		INJECTION_POINT("heap_reset_scan_snapshot_xid_assigned", NULL);
+	if (unlikely(MyProc->xmin != scan->rs_base.rs_snapshot->xmin))
+		INJECTION_POINT("heap_reset_scan_snapshot_xmin_pinned", NULL);
+#endif
+}
+
+/*
  * heap_fetch_next_buffer - read and pin the next block from MAIN_FORKNUM.
  *
  * Read the next block of the scan relation from the read stream and save it
@@ -742,7 +779,11 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
 
 	scan->rs_cbuf = read_stream_next_buffer(scan->rs_read_stream, NULL);
 	if (BufferIsValid(scan->rs_cbuf))
+	{
 		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
+		if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+			heap_reset_scan_snapshot(scan);
+	}
 }
 
 /*
@@ -1174,6 +1215,21 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 {
 	HeapScanDesc scan;
 
+	if (flags & SO_RESET_SNAPSHOT)
+	{
+		/* The scan snapshot is required to be the active one. */
+		Assert(GetActiveSnapshot() == snapshot);
+		Assert(!(flags & SO_TEMP_SNAPSHOT));
+#ifdef USE_INJECTION_POINTS
+		/*
+		 * Parallel scans fire table_parallelscan_initialize_reset_snapshot
+		 * once during initialization, rather than once per participant here.
+		 */
+		if (parallel_scan == NULL)
+			INJECTION_POINT("heap_beginscan_reset_snapshot", NULL);
+#endif
+	}
+
 	/*
 	 * increment relation ref count while scanning relation
 	 *
@@ -1203,6 +1259,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_snapshot = snapshot;
 	scan->rs_base.rs_nkeys = nkeys;
 	scan->rs_base.rs_flags = flags;
+	if (flags & SO_RESET_SNAPSHOT)
+		StartSnapshotRotation(&scan->rs_rotation);
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_base.rs_instrument = NULL;
 	scan->rs_strategy = NULL;	/* set in initscan */
@@ -1336,6 +1394,12 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 {
 	HeapScanDesc scan = (HeapScanDesc) sscan;
 
+	/*
+	 * A rescan uses the current snapshot, which must still be active.
+	 */
+	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+		Assert(GetActiveSnapshot() == scan->rs_base.rs_snapshot);
+
 	if (set_params)
 	{
 		if (allow_strat)
@@ -1425,6 +1489,12 @@ heap_endscan(TableScanDesc sscan)
 	if (scan->rs_parallelworkerdata != NULL)
 		pfree(scan->rs_parallelworkerdata);
 
+	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+	{
+		/* The caller owns the active snapshot. */
+		Assert(!(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT));
+		Assert(GetActiveSnapshot() == sscan->rs_snapshot);
+	}
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
 

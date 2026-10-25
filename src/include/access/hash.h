@@ -455,7 +455,8 @@ extern HSpool *_h_spoolinit(Relation heap, Relation index, uint32 num_buckets);
 extern void _h_spooldestroy(HSpool *hspool);
 extern void _h_spool(HSpool *hspool, const ItemPointerData *self,
 					 const Datum *values, const bool *isnull);
-extern void _h_indexbuild(HSpool *hspool, Relation heapRel);
+extern void _h_indexbuild(HSpool *hspool, Relation heapRel,
+						  IndexInfo *indexInfo);
 
 /* hashutil.c */
 extern bool _hash_checkqual(IndexScanDesc scan, IndexTuple itup);
