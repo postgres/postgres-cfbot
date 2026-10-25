@@ -2238,11 +2238,12 @@ pg_stat_recovery_prefetch| SELECT stats_reset,
     skip_init,
     skip_new,
     skip_fpw,
+    skip_fpi,
     skip_rep,
     wal_distance,
     block_distance,
     io_depth
-   FROM pg_stat_get_recovery_prefetch() s(stats_reset, prefetch, hit, skip_init, skip_new, skip_fpw, skip_rep, wal_distance, block_distance, io_depth);
+   FROM pg_stat_get_recovery_prefetch() s(stats_reset, prefetch, hit, skip_init, skip_new, skip_fpw, skip_fpi, skip_rep, wal_distance, block_distance, io_depth);
 pg_stat_replication| SELECT s.pid,
     s.usesysid,
     u.rolname AS usename,

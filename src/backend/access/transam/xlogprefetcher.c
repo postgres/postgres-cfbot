@@ -54,9 +54,18 @@
 
 /*
  * To detect repeated access to the same block and skip useless extra system
- * calls, we remember a small window of recently prefetched / FPW blocks.
+ * calls, we remember a small window of recently prefetched blocks.
  */
 #define XLOGPREFETCHER_SEQ_WINDOW_SIZE 4
+
+/*
+ * A small history of most recently seen FPIs, so that we can skip useless
+ * prefetches for these blocks (most likely still in cache).
+ *
+ * XXX At which point should we switch to a hash table, instead of a linear
+ * search in a small array?
+ */
+#define XLOGPREFETCHER_FPI_HISTORY_SIZE 64
 
 /*
  * When maintenance_io_concurrency is not saturated, we're prepared to look
@@ -143,6 +152,11 @@ struct XLogPrefetcher
 	BlockNumber recent_block[XLOGPREFETCHER_SEQ_WINDOW_SIZE];
 	int			recent_idx;
 
+	/* Book-keeping to avoid prefetching right after FPI */
+	RelFileLocator recent_fpi_rlocator[XLOGPREFETCHER_FPI_HISTORY_SIZE];
+	BlockNumber recent_fpi_block[XLOGPREFETCHER_FPI_HISTORY_SIZE];
+	int			recent_fpi_idx;
+
 	/* Book-keeping to disable prefetching temporarily. */
 	XLogRecPtr	no_readahead_until;
 
@@ -179,6 +193,7 @@ typedef struct XLogPrefetchStats
 	pg_atomic_uint64 skip_init; /* Zero-inited blocks skipped. */
 	pg_atomic_uint64 skip_new;	/* New/missing blocks filtered. */
 	pg_atomic_uint64 skip_fpw;	/* FPWs skipped. */
+	pg_atomic_uint64 skip_fpi;	/* Accesses after FPI skipped. */
 	pg_atomic_uint64 skip_rep;	/* Repeat accesses skipped. */
 
 	/* Dynamic values */
@@ -319,6 +334,7 @@ XLogPrefetchShmemInit(void *arg)
 	pg_atomic_init_u64(&SharedStats->skip_init, 0);
 	pg_atomic_init_u64(&SharedStats->skip_new, 0);
 	pg_atomic_init_u64(&SharedStats->skip_fpw, 0);
+	pg_atomic_init_u64(&SharedStats->skip_fpi, 0);
 	pg_atomic_init_u64(&SharedStats->skip_rep, 0);
 }
 
@@ -334,6 +350,7 @@ XLogPrefetchResetStats(void)
 	pg_atomic_write_u64(&SharedStats->skip_init, 0);
 	pg_atomic_write_u64(&SharedStats->skip_new, 0);
 	pg_atomic_write_u64(&SharedStats->skip_fpw, 0);
+	pg_atomic_write_u64(&SharedStats->skip_fpi, 0);
 	pg_atomic_write_u64(&SharedStats->skip_rep, 0);
 }
 
@@ -681,23 +698,17 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 				XLogPrefetchIncrement(&SharedStats->skip_fpw);
 
 				/*
-				 * A full page image is copied to shared buffer during replay.
-				 * Every next WAL records related to particular block doesn't
-				 * require prefetching of shared buffer.
+				 * We should not really see a FPI for the same block very
+				 * often, not more than once per checkpoint cycle. So don't
+				 * bother with scanning the history here. If we end up with a
+				 * duplicate FPI, it means the system is almost idle. We also
+				 * don't bother with evicting blocks from the history, for the
+				 * same reason.
 				 */
-				for (int i = 0; i < XLOGPREFETCHER_SEQ_WINDOW_SIZE; ++i)
-				{
-					if (block->blkno == prefetcher->recent_block[i] &&
-						RelFileLocatorEquals(block->rlocator, prefetcher->recent_rlocator[i]))
-					{
-						return LRQ_NEXT_NO_IO;
-					}
-				}
-
-				prefetcher->recent_rlocator[prefetcher->recent_idx] = block->rlocator;
-				prefetcher->recent_block[prefetcher->recent_idx] = block->blkno;
-				prefetcher->recent_idx =
-					(prefetcher->recent_idx + 1) % XLOGPREFETCHER_SEQ_WINDOW_SIZE;
+				prefetcher->recent_fpi_rlocator[prefetcher->recent_fpi_idx] = block->rlocator;
+				prefetcher->recent_fpi_block[prefetcher->recent_fpi_idx] = block->blkno;
+				prefetcher->recent_fpi_idx =
+					(prefetcher->recent_fpi_idx + 1) % XLOGPREFETCHER_FPI_HISTORY_SIZE;
 
 				return LRQ_NEXT_NO_IO;
 			}
@@ -731,6 +742,27 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 					return LRQ_NEXT_NO_IO;
 				}
 			}
+
+			/*
+			 * Likewise, no point in prefetching a block right after restoring
+			 * it from an FPI. We keep a bit longer history of FPIs.
+			 *
+			 * XXX Maybe we could skip this with full-page writes disabled?
+			 *
+			 * XXX Maybe we could skip this backwards, with the assumption
+			 * that if there is a FPI, it's likely very close?
+			 */
+			for (int i = 0; i < XLOGPREFETCHER_FPI_HISTORY_SIZE; ++i)
+			{
+				if (block->blkno == prefetcher->recent_fpi_block[i] &&
+					RelFileLocatorEquals(block->rlocator, prefetcher->recent_fpi_rlocator[i]))
+				{
+					XLogPrefetchIncrement(&SharedStats->skip_fpi);
+					return LRQ_NEXT_NO_IO;
+				}
+			}
+
+			/* We're going to prefetch the block, so add it to history. */
 			prefetcher->recent_rlocator[prefetcher->recent_idx] = block->rlocator;
 			prefetcher->recent_block[prefetcher->recent_idx] = block->blkno;
 			prefetcher->recent_idx =
@@ -849,7 +881,7 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 Datum
 pg_stat_get_recovery_prefetch(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_RECOVERY_PREFETCH_COLS 10
+#define PG_STAT_GET_RECOVERY_PREFETCH_COLS 11
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Datum		values[PG_STAT_GET_RECOVERY_PREFETCH_COLS];
 	bool		nulls[PG_STAT_GET_RECOVERY_PREFETCH_COLS];
@@ -865,10 +897,11 @@ pg_stat_get_recovery_prefetch(PG_FUNCTION_ARGS)
 	values[3] = Int64GetDatum(pg_atomic_read_u64(&SharedStats->skip_init));
 	values[4] = Int64GetDatum(pg_atomic_read_u64(&SharedStats->skip_new));
 	values[5] = Int64GetDatum(pg_atomic_read_u64(&SharedStats->skip_fpw));
-	values[6] = Int64GetDatum(pg_atomic_read_u64(&SharedStats->skip_rep));
-	values[7] = Int32GetDatum(SharedStats->wal_distance);
-	values[8] = Int32GetDatum(SharedStats->block_distance);
-	values[9] = Int32GetDatum(SharedStats->io_depth);
+	values[6] = Int64GetDatum(pg_atomic_read_u64(&SharedStats->skip_fpi));
+	values[7] = Int64GetDatum(pg_atomic_read_u64(&SharedStats->skip_rep));
+	values[8] = Int32GetDatum(SharedStats->wal_distance);
+	values[9] = Int32GetDatum(SharedStats->block_distance);
+	values[10] = Int32GetDatum(SharedStats->io_depth);
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
 	return (Datum) 0;
