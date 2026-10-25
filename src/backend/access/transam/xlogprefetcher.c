@@ -60,8 +60,9 @@
 #define XLOGPREFETCHER_SEQ_WINDOW_SIZE 4
 
 /*
- * A small history of most recently seen FPIs, so that we can skip useless
- * prefetches for these blocks (most likely still in cache).
+ * A small history of most recently seen full-page images (FPIs), so that we
+ * can skip useless prefetches of blocks that are going to be restored from an
+ * FPI in a record that has not been replayed yet.
  *
  * The history is a set-associative hash table, i.e. each block maps to a group
  * of slots, and it can only be stored in one of the slots of that group.
@@ -167,7 +168,7 @@ struct XLogPrefetcher
 	BlockNumber recent_block[XLOGPREFETCHER_SEQ_WINDOW_SIZE];
 	int			recent_idx;
 
-	/* Book-keeping to avoid prefetching right after FPI */
+	/* Book-keeping to avoid prefetching blocks restored from FPIs. */
 	XLogPrefetcherFPI recent_fpi[XLOGPREFETCHER_FPI_HISTORY_SIZE];
 
 	/* Book-keeping to disable prefetching temporarily. */
@@ -230,7 +231,8 @@ static inline void XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher,
 										XLogRecPtr lsn);
 static inline bool XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher,
 										RelFileLocator rlocator,
-										BlockNumber blkno);
+										BlockNumber blkno,
+										XLogRecPtr replaying_lsn);
 static LsnReadQueueNextStatus XLogPrefetcherNextBlock(uintptr_t pgsr_private,
 													  XLogRecPtr *lsn);
 
@@ -755,12 +757,15 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			}
 
 			/*
-			 * Likewise, no point in prefetching a block right after restoring
-			 * it from an FPI. We keep a bit longer history of FPIs.
+			 * Likewise, no point in prefetching a block that is going to be
+			 * restored from an FPI in a record that has not been replayed
+			 * yet. The block will be in shared buffers by the time this
+			 * record gets replayed.
 			 *
 			 * XXX Maybe we could skip this with full-page writes disabled?
 			 */
-			if (XLogPrefetcherHasFPI(prefetcher, block->rlocator, block->blkno))
+			if (XLogPrefetcherHasFPI(prefetcher, block->rlocator, block->blkno,
+									 replaying_lsn))
 			{
 				XLogPrefetchIncrement(&SharedStats->skip_fpi);
 				return LRQ_NEXT_NO_IO;
@@ -1051,8 +1056,7 @@ XLogPrefetcherFPIGroup(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
  * We should not really see a FPI for the same block very often, not more
  * than once per checkpoint cycle.  So don't bother checking whether the
  * block already is in the history.  If we end up with a duplicate FPI, it
- * means the system is almost idle.  We also don't bother with evicting
- * blocks from the history, for the same reason.
+ * means the system is almost idle.
  *
  * XXX Could we see multiple FPIs for the same block within the same
  * checkpoint interval? E.g. during a backup, etc? Then maybe we should
@@ -1069,7 +1073,9 @@ XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 	/*
 	 * Add the FPI to the first empty slot in the group, or to the oldest one.
 	 *
-	 * XXX We could also have a cutoff age, and consider older slots as empty.
+	 * Entries for FPIs that have been replayed already are ignored by
+	 * XLogPrefetcherHasFPI(), so they are effectively empty.  They're also
+	 * older than any entry that still matters, so they get reused first.
 	 */
 	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
 	{
@@ -1089,18 +1095,26 @@ XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 }
 
 /*
- * Check if the given block is in the history of recent FPIs.
+ * Check if the given block is going to be restored from an FPI, i.e. if it's
+ * in the history of recent FPIs, and the record with the FPI has not been
+ * replayed yet.
+ *
+ * Once the record with the FPI is replayed, the block is in shared buffers,
+ * unless it got evicted since then.  If it's still there, we want
+ * PrefetchSharedBuffer() to find it, so that XLogReadBufferForRedo() can use
+ * the buffer without another lookup.  If it was evicted, it has to be read
+ * again, and prefetching it is useful.
  */
 static inline bool
 XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
-					 BlockNumber blkno)
+					 BlockNumber blkno, XLogRecPtr replaying_lsn)
 {
 	XLogPrefetcherFPI *slots = XLogPrefetcherFPIGroup(prefetcher, rlocator,
 													  blkno);
 
 	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
 	{
-		if (slots[i].lsn != InvalidXLogRecPtr &&
+		if (slots[i].lsn > replaying_lsn &&
 			slots[i].blkno == blkno &&
 			RelFileLocatorEquals(slots[i].rlocator, rlocator))
 			return true;
@@ -1115,7 +1129,7 @@ XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 void
 XLogPrefetcherBeginRead(XLogPrefetcher *prefetcher, XLogRecPtr recPtr)
 {
-	/* This will forget about any in-flight IO. */
+	/* This will forget about any in-flight IO, and about FPIs seen so far. */
 	prefetcher->reconfigure_count--;
 
 	/* Book-keeping to avoid readahead on first read. */
@@ -1165,6 +1179,15 @@ XLogPrefetcherReadRecord(XLogPrefetcher *prefetcher, char **errmsg)
 											   max_inflight,
 											   (uintptr_t) prefetcher,
 											   XLogPrefetcherNextBlock);
+
+		/*
+		 * Forget about FPIs seen so far.  XLogPrefetcherBeginRead() may have
+		 * moved the reader to a different position, and the entries would not
+		 * be considered replayed until we replay past them again (if ever),
+		 * so we might skip prefetching blocks that are not going to be
+		 * restored from an FPI.
+		 */
+		memset(prefetcher->recent_fpi, 0, sizeof(prefetcher->recent_fpi));
 
 		prefetcher->reconfigure_count = XLogPrefetchReconfigureCount;
 	}
