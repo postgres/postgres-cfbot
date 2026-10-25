@@ -142,6 +142,17 @@ typedef struct LsnReadQueue
 } LsnReadQueue;
 
 /*
+ * An entry in the history of recently seen FPIs.  Only main fork blocks are
+ * tracked, so there's no need to remember the fork number.
+ */
+typedef struct XLogPrefetcherFPI
+{
+	RelFileLocator rlocator;
+	BlockNumber blkno;
+	XLogRecPtr	lsn;			/* InvalidXLogRecPtr means the slot is empty */
+} XLogPrefetcherFPI;
+
+/*
  * A prefetcher.  This is a mechanism that wraps an XLogReader, prefetching
  * blocks that will be soon be referenced, to try to avoid IO stalls.
  */
@@ -165,9 +176,7 @@ struct XLogPrefetcher
 	int			recent_idx;
 
 	/* Book-keeping to avoid prefetching right after FPI */
-	RelFileLocator recent_fpi_rlocator[XLOGPREFETCHER_FPI_HISTORY_SIZE];
-	BlockNumber recent_fpi_block[XLOGPREFETCHER_FPI_HISTORY_SIZE];
-	XLogRecPtr	recent_fpi_lsn[XLOGPREFETCHER_FPI_HISTORY_SIZE];
+	XLogPrefetcherFPI recent_fpi[XLOGPREFETCHER_FPI_HISTORY_SIZE];
 
 	/* Book-keeping to disable prefetching temporarily. */
 	XLogRecPtr	no_readahead_until;
@@ -223,6 +232,13 @@ static inline bool XLogPrefetcherIsFiltered(XLogPrefetcher *prefetcher,
 											BlockNumber blockno);
 static inline void XLogPrefetcherCompleteFilters(XLogPrefetcher *prefetcher,
 												 XLogRecPtr replaying_lsn);
+static inline void XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher,
+										RelFileLocator rlocator,
+										BlockNumber blkno,
+										XLogRecPtr lsn);
+static inline bool XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher,
+										RelFileLocator rlocator,
+										BlockNumber blkno);
 static LsnReadQueueNextStatus XLogPrefetcherNextBlock(uintptr_t pgsr_private,
 													  XLogRecPtr *lsn);
 
@@ -709,51 +725,9 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			{
 				XLogPrefetchIncrement(&SharedStats->skip_fpw);
 
-				/*
-				 * We should not really see a FPI for the same block very
-				 * often, not more than once per checkpoint cycle. So don't
-				 * bother with scanning the history here. If we end up with a
-				 * duplicate FPI, it means the system is almost idle. We also
-				 * don't bother with evicting blocks from the history, for the
-				 * same reason.
-				 *
-				 * XXX Could we see multiple FPIs for the same block within
-				 * the same checkpoint interval? E.g. during a backup, etc?
-				 * Then maybe we should try to deduplicate the entries a bit
-				 * more aggressively.
-				 */
-
-				/* add the FPI to the oldest (or empty) slot in the group */
-				{
-					int			group = XLOGPREFETCHER_FPI_GROUP(block->blkno, block->rlocator);
-					int			slot = (group * XLOGPREFETCHER_FPI_PER_GROUP);	/* first slot */
-
-					for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
-					{
-						/* index in the whole arrays */
-						int			idx = (group * XLOGPREFETCHER_FPI_PER_GROUP + i);
-
-						/*
-						 * found an empty slot, so just use that
-						 *
-						 * XXX We could also have a cutoff age, and consider
-						 * older slots as empty.
-						 */
-						if (prefetcher->recent_fpi_lsn[idx] == InvalidXLogRecPtr)
-						{
-							slot = idx;
-							break;
-						}
-
-						/* use the older of the two slots */
-						if (prefetcher->recent_fpi_lsn[idx] < prefetcher->recent_fpi_lsn[slot])
-							slot = idx;
-					}
-
-					prefetcher->recent_fpi_rlocator[slot] = block->rlocator;
-					prefetcher->recent_fpi_block[slot] = block->blkno;
-					prefetcher->recent_fpi_lsn[slot] = record->lsn;
-				}
+				/* Remember the FPI, so that we can skip later references. */
+				XLogPrefetcherAddFPI(prefetcher, block->rlocator, block->blkno,
+									 record->lsn);
 
 				return LRQ_NEXT_NO_IO;
 			}
@@ -794,22 +768,10 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			 *
 			 * XXX Maybe we could skip this with full-page writes disabled?
 			 */
+			if (XLogPrefetcherHasFPI(prefetcher, block->rlocator, block->blkno))
 			{
-				int			group = XLOGPREFETCHER_FPI_GROUP(block->blkno, block->rlocator);
-
-				/* scan the whole group */
-				for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; ++i)
-				{
-					int			idx = (group * XLOGPREFETCHER_FPI_PER_GROUP + i);
-
-					if (prefetcher->recent_fpi_lsn[idx] != InvalidXLogRecPtr &&
-						block->blkno == prefetcher->recent_fpi_block[idx] &&
-						RelFileLocatorEquals(block->rlocator, prefetcher->recent_fpi_rlocator[idx]))
-					{
-						XLogPrefetchIncrement(&SharedStats->skip_fpi);
-						return LRQ_NEXT_NO_IO;
-					}
-				}
+				XLogPrefetchIncrement(&SharedStats->skip_fpi);
+				return LRQ_NEXT_NO_IO;
 			}
 
 			/* We're going to prefetch the block, so add it to history. */
@@ -1059,6 +1021,84 @@ XLogPrefetcherIsFiltered(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 #endif
 			return true;
 		}
+	}
+
+	return false;
+}
+
+/*
+ * Return the group of slots in the history of recent FPIs, that the given
+ * block maps to.
+ */
+static inline XLogPrefetcherFPI *
+XLogPrefetcherFPIGroup(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+					   BlockNumber blkno)
+{
+	int			group = XLOGPREFETCHER_FPI_GROUP(blkno, rlocator);
+
+	return &prefetcher->recent_fpi[group * XLOGPREFETCHER_FPI_PER_GROUP];
+}
+
+/*
+ * Remember that the given block is restored from an FPI in the WAL record
+ * with the given LSN.
+ *
+ * We should not really see a FPI for the same block very often, not more
+ * than once per checkpoint cycle.  So don't bother checking whether the
+ * block already is in the history.  If we end up with a duplicate FPI, it
+ * means the system is almost idle.  We also don't bother with evicting
+ * blocks from the history, for the same reason.
+ *
+ * XXX Could we see multiple FPIs for the same block within the same
+ * checkpoint interval? E.g. during a backup, etc? Then maybe we should
+ * try to deduplicate the entries a bit more aggressively.
+ */
+static inline void
+XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+					 BlockNumber blkno, XLogRecPtr lsn)
+{
+	XLogPrefetcherFPI *slots = XLogPrefetcherFPIGroup(prefetcher, rlocator,
+													  blkno);
+	XLogPrefetcherFPI *slot = &slots[0];
+
+	/*
+	 * Add the FPI to the first empty slot in the group, or to the oldest one.
+	 *
+	 * XXX We could also have a cutoff age, and consider older slots as empty.
+	 */
+	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
+	{
+		if (slots[i].lsn == InvalidXLogRecPtr)
+		{
+			slot = &slots[i];
+			break;
+		}
+
+		if (slots[i].lsn < slot->lsn)
+			slot = &slots[i];
+	}
+
+	slot->rlocator = rlocator;
+	slot->blkno = blkno;
+	slot->lsn = lsn;
+}
+
+/*
+ * Check if the given block is in the history of recent FPIs.
+ */
+static inline bool
+XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+					 BlockNumber blkno)
+{
+	XLogPrefetcherFPI *slots = XLogPrefetcherFPIGroup(prefetcher, rlocator,
+													  blkno);
+
+	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
+	{
+		if (slots[i].lsn != InvalidXLogRecPtr &&
+			slots[i].blkno == blkno &&
+			RelFileLocatorEquals(slots[i].rlocator, rlocator))
+			return true;
 	}
 
 	return false;
