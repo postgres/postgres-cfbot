@@ -36,6 +36,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/atomics.h"
+#include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/shmem.h"
@@ -66,11 +67,16 @@
  *
  * The history is a set-associative hash table, i.e. each block maps to a group
  * of slots, and it can only be stored in one of the slots of that group.
+ *
+ * Only FPIs in records that have not been replayed yet matter, and there are
+ * never more of those than the maximum look-ahead distance, because each of
+ * them occupies an entry in the LsnReadQueue until the record is replayed.
+ * The history has XLOGPREFETCHER_FPI_HISTORY_MULTIPLIER times as many slots
+ * (rounded up so that the number of groups is a power of two), so that a
+ * group overflows and forgets an FPI that still matters only very rarely.
  */
-#define XLOGPREFETCHER_FPI_GROUPS		16
 #define XLOGPREFETCHER_FPI_PER_GROUP	16
-#define XLOGPREFETCHER_FPI_HISTORY_SIZE	\
-	(XLOGPREFETCHER_FPI_GROUPS * XLOGPREFETCHER_FPI_PER_GROUP)
+#define XLOGPREFETCHER_FPI_HISTORY_MULTIPLIER 4
 
 /*
  * When maintenance_io_concurrency is not saturated, we're prepared to look
@@ -169,7 +175,8 @@ struct XLogPrefetcher
 	int			recent_idx;
 
 	/* Book-keeping to avoid prefetching blocks restored from FPIs. */
-	XLogPrefetcherFPI recent_fpi[XLOGPREFETCHER_FPI_HISTORY_SIZE];
+	XLogPrefetcherFPI *recent_fpi;
+	uint32		recent_fpi_groups;	/* always a power of two */
 
 	/* Book-keeping to disable prefetching temporarily. */
 	XLogRecPtr	no_readahead_until;
@@ -435,6 +442,8 @@ XLogPrefetcherFree(XLogPrefetcher *prefetcher)
 {
 	lrq_free(prefetcher->streaming_read);
 	hash_destroy(prefetcher->filter_table);
+	if (prefetcher->recent_fpi)
+		pfree(prefetcher->recent_fpi);
 	pfree(prefetcher);
 }
 
@@ -1044,7 +1053,7 @@ XLogPrefetcherFPIGroup(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 	hash = hash_combine(hash, murmurhash32(rlocator.dbOid));
 	hash = hash_combine(hash, murmurhash32(rlocator.spcOid));
 
-	group = hash % XLOGPREFETCHER_FPI_GROUPS;
+	group = hash & (prefetcher->recent_fpi_groups - 1);
 
 	return &prefetcher->recent_fpi[group * XLOGPREFETCHER_FPI_PER_GROUP];
 }
@@ -1188,13 +1197,25 @@ XLogPrefetcherReadRecord(XLogPrefetcher *prefetcher, char **errmsg)
 											   XLogPrefetcherNextBlock);
 
 		/*
-		 * Forget about FPIs seen so far.  XLogPrefetcherBeginRead() may have
-		 * moved the reader to a different position, and the entries would not
-		 * be considered replayed until we replay past them again (if ever),
-		 * so we might skip prefetching blocks that are not going to be
-		 * restored from an FPI.
+		 * Allocate a new history of FPIs, sized for the new look-ahead
+		 * distance.  This also forgets about FPIs seen so far, which is
+		 * necessary because XLogPrefetcherBeginRead() may have moved the
+		 * reader to a different position, and the entries would not be
+		 * considered replayed until we replay past them again (if ever), so
+		 * we might skip prefetching blocks that are not going to be restored
+		 * from an FPI.
 		 */
-		memset(prefetcher->recent_fpi, 0, sizeof(prefetcher->recent_fpi));
+		if (prefetcher->recent_fpi)
+			pfree(prefetcher->recent_fpi);
+
+		prefetcher->recent_fpi_groups =
+			pg_nextpower2_32(Max(1, max_distance *
+								 XLOGPREFETCHER_FPI_HISTORY_MULTIPLIER /
+								 XLOGPREFETCHER_FPI_PER_GROUP));
+		prefetcher->recent_fpi =
+			palloc0_array(XLogPrefetcherFPI,
+						  prefetcher->recent_fpi_groups *
+						  XLOGPREFETCHER_FPI_PER_GROUP);
 
 		prefetcher->reconfigure_count = XLogPrefetchReconfigureCount;
 	}
