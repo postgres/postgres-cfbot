@@ -1053,14 +1053,11 @@ XLogPrefetcherFPIGroup(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
  * Remember that the given block is restored from an FPI in the WAL record
  * with the given LSN.
  *
- * We should not really see a FPI for the same block very often, not more
- * than once per checkpoint cycle.  So don't bother checking whether the
- * block already is in the history.  If we end up with a duplicate FPI, it
- * means the system is almost idle.
- *
- * XXX Could we see multiple FPIs for the same block within the same
- * checkpoint interval? E.g. during a backup, etc? Then maybe we should
- * try to deduplicate the entries a bit more aggressively.
+ * If the block already is in the history, the existing entry is updated, so
+ * that each block occupies at most one slot. It's not common to see multiple
+ * FPIs for the same block within the look-ahead distance, but it can happen,
+ * e.g. when a checkpoint starts between two modifications of the block, or
+ * with wal_consistency_checking (which adds an image to block references).
  */
 static inline void
 XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
@@ -1071,7 +1068,11 @@ XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 	XLogPrefetcherFPI *slot = &slots[0];
 
 	/*
-	 * Add the FPI to the first empty slot in the group, or to the oldest one.
+	 * Use the slot with the same block, or the first empty slot, or the
+	 * oldest slot in the group.  Empty slots are always at the end of the
+	 * group, because we use the first empty slot, and slots only become empty
+	 * when the whole history is reset.  So if there is an entry for the same
+	 * block, we find it before the first empty slot.
 	 *
 	 * Entries for FPIs that have been replayed already are ignored by
 	 * XLogPrefetcherHasFPI(), so they are effectively empty.  They're also
@@ -1079,7 +1080,9 @@ XLogPrefetcherAddFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 	 */
 	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
 	{
-		if (slots[i].lsn == InvalidXLogRecPtr)
+		if (slots[i].lsn == InvalidXLogRecPtr ||
+			(slots[i].blkno == blkno &&
+			 RelFileLocatorEquals(slots[i].rlocator, rlocator)))
 		{
 			slot = &slots[i];
 			break;
@@ -1114,10 +1117,14 @@ XLogPrefetcherHasFPI(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
 
 	for (int i = 0; i < XLOGPREFETCHER_FPI_PER_GROUP; i++)
 	{
-		if (slots[i].lsn > replaying_lsn &&
-			slots[i].blkno == blkno &&
+		/* Empty slots are always at the end of the group. */
+		if (slots[i].lsn == InvalidXLogRecPtr)
+			break;
+
+		/* There's at most one entry for each block. */
+		if (slots[i].blkno == blkno &&
 			RelFileLocatorEquals(slots[i].rlocator, rlocator))
-			return true;
+			return (slots[i].lsn > replaying_lsn);
 	}
 
 	return false;
