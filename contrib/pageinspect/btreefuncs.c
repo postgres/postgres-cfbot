@@ -30,6 +30,7 @@
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
@@ -240,6 +241,12 @@ bt_index_block_validate(Relation rel, int64 blkno)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	if (blkno == 0)
 		ereport(ERROR,
@@ -873,6 +880,12 @@ bt_metap(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	buffer = ReadBuffer(rel, 0);
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
