@@ -1,17 +1,18 @@
 /*-------------------------------------------------------------------------
  *
  * tuplestore.h
- *	  Generalized routines for temporary tuple storage.
+ *	  Generalized routines for temporary storage of tuples and Datums.
  *
- * This module handles temporary storage of tuples for purposes such
- * as Materialize nodes, hashjoin batch files, etc.  It is essentially
- * a dumbed-down version of tuplesort.c; it does no sorting of tuples
- * but can only store and regurgitate a sequence of tuples.  However,
- * because no sort is required, it is allowed to start reading the sequence
- * before it has all been written.  This is particularly useful for cursors,
- * because it allows random access within the already-scanned portion of
- * a query without having to process the underlying scan to completion.
- * Also, it is possible to support multiple independent read pointers.
+ * This module handles temporary storage of either tuples or single
+ * Datum values for purposes such as Materialize nodes, hashjoin batch
+ * files, etc. It is essentially a dumbed-down version of tuplesort.c;
+ * it does no sorting of tuples but can only store and regurgitate a sequence
+ * of tuples.  However, because no sort is required, it is allowed to start
+ * reading the sequence before it has all been written.
+ *
+ * This is particularly useful for cursors, because it allows random access
+ * within the already-scanned portion of a query without having to process
+ * the underlying scan to completion.
  *
  * A temporary file is used to handle the data if it exceeds the
  * space limit specified by the caller.
@@ -40,14 +41,13 @@
  */
 typedef struct Tuplestorestate Tuplestorestate;
 
-/*
- * Currently we only need to store MinimalTuples, but it would be easy
- * to support the same behavior for IndexTuples and/or bare Datums.
- */
-
 extern Tuplestorestate *tuplestore_begin_heap(bool randomAccess,
 											  bool interXact,
 											  int maxKBytes);
+extern Tuplestorestate *tuplestore_begin_datum(Oid datumType,
+											   bool randomAccess,
+											   bool interXact,
+											   int maxKBytes);
 
 extern void tuplestore_set_eflags(Tuplestorestate *state, int eflags);
 
@@ -56,6 +56,7 @@ extern void tuplestore_puttupleslot(Tuplestorestate *state,
 extern void tuplestore_puttuple(Tuplestorestate *state, HeapTuple tuple);
 extern void tuplestore_putvalues(Tuplestorestate *state, TupleDesc tdesc,
 								 const Datum *values, const bool *isnull);
+extern void tuplestore_putdatum(Tuplestorestate *state, Datum datum);
 
 extern int	tuplestore_alloc_read_pointer(Tuplestorestate *state, int eflags);
 
@@ -73,6 +74,8 @@ extern bool tuplestore_in_memory(Tuplestorestate *state);
 
 extern bool tuplestore_gettupleslot(Tuplestorestate *state, bool forward,
 									bool copy, TupleTableSlot *slot);
+extern bool tuplestore_getdatum(Tuplestorestate *state, bool forward,
+								bool *should_free, Datum *result);
 
 extern bool tuplestore_gettupleslot_force(Tuplestorestate *state, bool forward,
 										  bool copy, TupleTableSlot *slot);

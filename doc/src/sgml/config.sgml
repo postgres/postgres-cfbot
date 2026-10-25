@@ -12780,6 +12780,33 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-concurrent-index-reset-snapshot-interval" xreflabel="concurrent_index_reset_snapshot_interval">
+      <term><varname>concurrent_index_reset_snapshot_interval</varname> (<type>integer</type>)
+      <indexterm>
+        <primary><varname>concurrent_index_reset_snapshot_interval</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the minimum time between snapshot resets during validation of
+        <command>CREATE INDEX CONCURRENTLY</command> and
+        <command>REINDEX CONCURRENTLY</command>.  Resets occur between validation
+        phases and heap pages, allowing the xmin horizon to advance.  Each
+        index scan, sort, and merge of TID lists keeps its snapshot until it
+        finishes.
+        If no unit is specified, the value is in milliseconds.  The default
+        is <literal>100ms</literal>.  A value of <literal>0</literal> resets at
+        every opportunity; <literal>-1</literal> disables resets.
+       </para>
+       <para>
+        Resets are disabled at <literal>REPEATABLE READ</literal> and
+        <literal>SERIALIZABLE</literal>, where the transaction snapshot keeps
+        xmin from advancing.  Other registered snapshots, such as those held
+        by cursors, can also hold back xmin.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-backtrace-functions" xreflabel="backtrace_functions">
       <term><varname>backtrace_functions</varname> (<type>string</type>)
       <indexterm>

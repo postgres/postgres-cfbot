@@ -39,6 +39,7 @@
 #include "partitioning/partdefs.h"
 #include "storage/buf.h"
 #include "utils/reltrigger.h"
+#include "utils/snapmgr.h"
 
 
 /*
@@ -168,8 +169,10 @@ typedef struct ExprState
  *		entries for a particular index.  Used for both index_build and
  *		retail creation of index entries.
  *
- * ii_Concurrent, ii_BrokenHotChain, and ii_ParallelWorkers are used only
- * during index build; they're conventionally zeroed otherwise.
+ * ii_Concurrent, ii_BrokenHotChain, ii_ParallelWorkers, and ii_SnapshotRotation
+ * are used only during index build; they're conventionally zeroed otherwise.
+ * ii_Auxiliary is also used during retail inserts to skip datum formation for
+ * auxiliary indexes.
  * ----------------
  */
 typedef struct IndexInfo
@@ -227,9 +230,13 @@ typedef struct IndexInfo
 	bool		ii_Summarizing;
 	/* is it a WITHOUT OVERLAPS index? */
 	bool		ii_WithoutOverlaps;
+	/* is auxiliary for concurrent index build? */
+	bool		ii_Auxiliary;
 	/* # of workers requested (excludes leader) */
 	int			ii_ParallelWorkers;
 
+	/* if creating an auxiliary index, the OID of the main index; otherwise InvalidOid. */
+	Oid			ii_AuxiliaryForIndexId;
 	/* Oid of index AM */
 	Oid			ii_Am;
 	/* private cache area for index AM */
@@ -237,6 +244,9 @@ typedef struct IndexInfo
 
 	/* memory context holding this IndexInfo */
 	MemoryContext ii_Context;
+
+	/* snapshot resets during index validation */
+	SnapshotRotation ii_SnapshotRotation;
 } IndexInfo;
 
 /* ----------------

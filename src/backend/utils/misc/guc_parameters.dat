@@ -509,6 +509,16 @@
   options => 'compute_query_id_options',
 },
 
+{ name => 'concurrent_index_reset_snapshot_interval', type => 'int', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Sets the minimum time between snapshot resets during concurrent index builds.',
+  long_desc => 'Validation resets its snapshot between phases and heap pages. 0 resets at every opportunity. -1 disables resets.',
+  flags => 'GUC_NOT_IN_SAMPLE | GUC_UNIT_MS',
+  variable => 'concurrent_index_reset_snapshot_interval',
+  boot_val => '100',
+  min => '-1',
+  max => 'INT_MAX',
+},
+
 { name => 'config_file', type => 'string', context => 'PGC_POSTMASTER', group => 'FILE_LOCATIONS',
   short_desc => 'Sets the server\'s main configuration file.',
   flags => 'GUC_DISALLOW_IN_FILE | GUC_SUPERUSER_ONLY',
@@ -630,6 +640,15 @@
   flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',
   variable => 'assert_enabled',
   boot_val => 'DEFAULT_ASSERT_ENABLED',
+},
+
+{ name => 'debug_cic_validate_store_mem_pct', type => 'int', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Percentage of maintenance_work_mem used for CIC validation tuplestore.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_cic_validate_store_mem_pct',
+  boot_val => '10',
+  min => '1',
+  max => '90',
 },
 
 { name => 'debug_copy_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',

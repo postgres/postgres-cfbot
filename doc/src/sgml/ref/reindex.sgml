@@ -368,9 +368,8 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
     <productname>PostgreSQL</productname> supports rebuilding indexes with minimum locking
     of writes.  This method is invoked by specifying the
     <literal>CONCURRENTLY</literal> option of <command>REINDEX</command>. When this option
-    is used, <productname>PostgreSQL</productname> must perform two scans of the table
-    for each index that needs to be rebuilt and wait for termination of
-    all existing transactions that could potentially use the index.
+    is used, <productname>PostgreSQL</productname> must perform several steps to ensure data
+    consistency while allowing normal operations to continue.
     This method requires more total work than a standard index
     rebuild and takes significantly longer to complete as it needs to wait
     for unfinished transactions that might modify the index. However, since
@@ -388,7 +387,7 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
     <orderedlist>
      <listitem>
       <para>
-       A new transient index definition is added to the catalog
+       A new transient index definition and an auxiliary index are added to the catalog
        <literal>pg_index</literal>.  This definition will be used to replace
        the old index.  A <literal>SHARE UPDATE EXCLUSIVE</literal> lock at
        session level is taken on the indexes being reindexed as well as their
@@ -398,7 +397,15 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
 
      <listitem>
       <para>
-       A first pass to build the index is done for each new index.  Once the
+       The auxiliary index is marked as "ready for inserts", making
+       it visible to other sessions. This index efficiently tracks all new
+       tuples during the reindex process.
+      </para>
+     </listitem>
+
+     <listitem>
+      <para>
+       The new main index is built by scanning the table.  Once the
        index is built, its flag <literal>pg_index.indisready</literal> is
        switched to <quote>true</quote> to make it ready for inserts, making it
        visible to other sessions once the transaction that performed the build
@@ -409,9 +416,9 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
 
      <listitem>
       <para>
-       Then a second pass is performed to add tuples that were added while the
-       first pass was running.  This step is also done in a separate
-       transaction for each index.
+       A validation phase merges any missing entries from the auxiliary index
+       into the main index, ensuring all concurrent changes are captured.
+       This step is also done in a separate transaction for each index.
       </para>
      </listitem>
 
@@ -428,7 +435,7 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
 
      <listitem>
       <para>
-       The old indexes have <literal>pg_index.indisready</literal> switched to
+       The old and auxiliary indexes have <literal>pg_index.indisready</literal> switched to
        <quote>false</quote> to prevent any new tuple insertions, after waiting
        for running queries that might reference the old index to complete.
       </para>
@@ -436,7 +443,7 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
 
      <listitem>
       <para>
-       The old indexes are dropped.  The <literal>SHARE UPDATE
+       The old and auxiliary indexes are dropped.  The <literal>SHARE UPDATE
        EXCLUSIVE</literal> session locks for the indexes and the table are
        released.
       </para>
@@ -447,11 +454,11 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
    <para>
     If a problem arises while rebuilding the indexes, such as a
     uniqueness violation in a unique index, the <command>REINDEX</command>
-    command will fail but leave behind an <quote>invalid</quote> new index in addition to
-    the pre-existing one. This index will be ignored for querying purposes
-    because it might be incomplete; however it will still consume update
+    command will fail but leave behind an <quote>invalid</quote> new index and an <quote>invalid</quote> auxiliary index in addition to
+    the pre-existing one. These indexes will be ignored for querying purposes
+    because they might be incomplete; however they will still consume update
     overhead. The <application>psql</application> <command>\d</command> command will report
-    such an index as <literal>INVALID</literal>:
+    such indexes as <literal>INVALID</literal>:
 
 <programlisting>
 postgres=# \d tab
@@ -462,17 +469,22 @@ postgres=# \d tab
 Indexes:
     "idx" btree (col)
     "idx_ccnew" btree (col) INVALID
+    "idx_ccaux" stir (col) INVALID
 </programlisting>
 
     If the index marked <literal>INVALID</literal> is suffixed
-    <literal>_ccnew</literal>, then it corresponds to the transient
+    <literal>_ccnew</literal> or <literal>_ccaux</literal>, then it corresponds to the transient or auxiliary
     index created during the concurrent operation, and the recommended
-    recovery method is to drop it using <literal>DROP INDEX</literal>,
-    then attempt <command>REINDEX CONCURRENTLY</command> again.
+    recovery method is to drop the transient index using <literal>DROP INDEX</literal>,
+    then attempt <command>REINDEX CONCURRENTLY</command> again. The auxiliary index
+    (suffixed with <literal>_ccaux</literal>) will be automatically dropped
+    along with its main index.
     If the invalid index is instead suffixed <literal>_ccold</literal>,
     it corresponds to the original index which could not be dropped;
     the recommended recovery method is to just drop said index, since the
-    rebuild proper has been successful.
+    rebuild proper has been successful. If the only
+    invalid index is one suffixed <literal>_ccaux</literal>, the recommended
+    recovery method is just <literal>DROP INDEX</literal> for that index.
     A nonzero number may be appended to the suffix of the invalid index
     names to keep them unique, like <literal>_ccnew1</literal>,
     <literal>_ccold2</literal>, etc.

@@ -61,11 +61,11 @@ CREATE INDEX CONCURRENTLY repack_conc_invalid_expr ON repack_conc_invidx ((1/j))
 ERROR:  division by zero
 REPACK repack_conc_invidx;
 ERROR:  cannot execute REPACK on relation "repack_conc_invidx"
-DETAIL:  Some invalid indexes cannot be processed correctly: "repack_conc_invidx_uq", "repack_conc_invalid_expr".
+DETAIL:  Some invalid indexes cannot be processed correctly: "repack_conc_invidx_uq", "repack_conc_invidx_uq_ccaux", "repack_conc_invalid_expr", "repack_conc_invalid_expr_ccaux".
 HINT:  Use DROP INDEX or REINDEX.
 REPACK (CONCURRENTLY) repack_conc_invidx;
 ERROR:  cannot execute REPACK on relation "repack_conc_invidx"
-DETAIL:  Some invalid indexes cannot be processed correctly: "repack_conc_invidx_uq", "repack_conc_invalid_expr".
+DETAIL:  Some invalid indexes cannot be processed correctly: "repack_conc_invidx_uq", "repack_conc_invidx_uq_ccaux", "repack_conc_invalid_expr", "repack_conc_invalid_expr_ccaux".
 HINT:  Use DROP INDEX or REINDEX.
 -- Error cases for concurrent mode
 -- Doesn't like partitioned tables

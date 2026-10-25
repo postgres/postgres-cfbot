@@ -33,7 +33,56 @@ REINDEX INDEX CONCURRENTLY reindex_inj.ind_pred;
 NOTICE:  notice triggered for injection point reindex-conc-index-not-safe
 REINDEX INDEX CONCURRENTLY reindex_inj.ind_expr_pred;
 NOTICE:  notice triggered for injection point reindex-conc-index-not-safe
+-- Validation must reset snapshots even when STIR is empty.
+SELECT injection_points_attach('validate-index-snapshot-reset', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_attach('validate-index-xmin-not-advanced', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+SET concurrent_index_reset_snapshot_interval = 0;
+INSERT INTO reindex_inj.tbl(i) VALUES (1), (2), (3);
+CREATE INDEX CONCURRENTLY ind_reset ON reindex_inj.tbl(i);
+NOTICE:  notice triggered for injection point validate-index-snapshot-reset
+NOTICE:  notice triggered for injection point validate-index-snapshot-reset
+NOTICE:  notice triggered for injection point validate-index-snapshot-reset
+REINDEX INDEX CONCURRENTLY reindex_inj.ind_reset;
+NOTICE:  notice triggered for injection point reindex-conc-index-safe
+NOTICE:  notice triggered for injection point validate-index-snapshot-reset
+NOTICE:  notice triggered for injection point validate-index-snapshot-reset
+NOTICE:  notice triggered for injection point validate-index-snapshot-reset
+-- These cases keep a fixed snapshot.
+SET concurrent_index_reset_snapshot_interval = -1;
+REINDEX INDEX CONCURRENTLY reindex_inj.ind_reset;
+NOTICE:  notice triggered for injection point reindex-conc-index-safe
+SET concurrent_index_reset_snapshot_interval = 0;
+SET default_transaction_isolation = 'repeatable read';
+REINDEX INDEX CONCURRENTLY reindex_inj.ind_reset;
+NOTICE:  notice triggered for injection point reindex-conc-index-safe
+SET default_transaction_isolation = 'serializable';
+REINDEX INDEX CONCURRENTLY reindex_inj.ind_reset;
+NOTICE:  notice triggered for injection point reindex-conc-index-safe
+RESET default_transaction_isolation;
+RESET concurrent_index_reset_snapshot_interval;
 -- Cleanup
+SELECT injection_points_detach('validate-index-snapshot-reset');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_detach('validate-index-xmin-not-advanced');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
 SELECT injection_points_detach('reindex-conc-index-safe');
  injection_points_detach 
 -------------------------
