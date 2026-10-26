@@ -80,6 +80,7 @@ extern void CacheInvalidateRelSync(Oid relid);
 extern void CacheInvalidateRelSyncAll(void);
 
 extern void CacheInvalidateSmgr(RelFileLocatorBackend rlocator);
+extern void CacheInvalidateSmgrNblocks(RelFileLocatorBackend rlocator);
 
 extern void CacheInvalidateRelmap(Oid databaseId);
 
