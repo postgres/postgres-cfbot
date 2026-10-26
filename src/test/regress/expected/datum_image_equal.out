@@ -1,0 +1,108 @@
+--
+-- Contract for pg_datum_image_equal: it reports whether two values of the same
+-- type have identical on-disk binary images -- NOT whether they are equal by
+-- the type's = operator.  The two differ precisely at the cases this function
+-- exists to serve (REFRESH MATERIALIZED VIEW CONCURRENTLY, incremental sort):
+--
+--   value-equal but image-UNequal:  float8  0.0 vs -0.0 (sign bit)
+--                                   numeric 1.0 vs 1.00 (stored scale)
+--   value-UNequal (by IEEE) but =   float8  'NaN' vs 'NaN' -- and image-equal
+--     (PostgreSQL's float = treats NaN as equal to NaN, unlike IEEE, so here
+--     both = and the image agree; the point is the function tracks the image).
+--
+-- and NULL handling: NULL vs NULL is equal, NULL vs non-NULL is not.
+--
+-- The oracle is the type's own binary output: two non-NULL values have equal
+-- images iff their <type>send() bytes are identical.  The test checks that
+-- equivalence across a range of types and the known edge cases, so a future
+-- change that accidentally made the function track = instead of the image is
+-- caught.
+--
+-- Literals are folded, so -0.0 and a computed -0.0 are different data: route
+-- values through a table to get the genuine datums on disk.
+CREATE TABLE die_f8 (x float8);
+INSERT INTO die_f8 VALUES (0.0), ((-1.0::float8) * 0.0), ('NaN'), ('Infinity'), (1.5);
+-- 0.0 and -0.0 are = but have different images.
+SELECT 'f8 0 vs -0' AS t,
+       (SELECT x FROM die_f8 WHERE x = 0.0 ORDER BY float8send(x) LIMIT 1) =
+       (SELECT x FROM die_f8 WHERE x = 0.0 ORDER BY float8send(x) DESC LIMIT 1) AS by_eq,
+       pg_datum_image_equal(
+         (SELECT x FROM die_f8 WHERE x = 0.0 ORDER BY float8send(x) LIMIT 1),
+         (SELECT x FROM die_f8 WHERE x = 0.0 ORDER BY float8send(x) DESC LIMIT 1)) AS by_image;
+     t      | by_eq | by_image 
+------------+-------+----------
+ f8 0 vs -0 | t     | f
+(1 row)
+
+-- NaN is not = to NaN, but two NaNs have the same image.
+SELECT 'f8 NaN vs NaN' AS t,
+       ('NaN'::float8 = 'NaN'::float8) AS by_eq,
+       pg_datum_image_equal('NaN'::float8, 'NaN'::float8) AS by_image;
+       t       | by_eq | by_image 
+---------------+-------+----------
+ f8 NaN vs NaN | t     | t
+(1 row)
+
+-- numeric 1.0 and 1.00 are = but stored with different scale -> different image.
+SELECT 'numeric 1.0 vs 1.00' AS t,
+       (1.0::numeric = 1.00::numeric) AS by_eq,
+       pg_datum_image_equal(1.0::numeric, 1.00::numeric) AS by_image;
+          t          | by_eq | by_image 
+---------------------+-------+----------
+ numeric 1.0 vs 1.00 | t     | f
+(1 row)
+
+-- NULL handling.
+SELECT 'null vs null'  AS t, pg_datum_image_equal(NULL::int, NULL::int) AS by_image;
+      t       | by_image 
+--------------+----------
+ null vs null | t
+(1 row)
+
+SELECT 'null vs value' AS t, pg_datum_image_equal(NULL::int, 1) AS by_image;
+       t       | by_image 
+---------------+----------
+ null vs value | f
+(1 row)
+
+-- General equivalence: for non-NULL same-type values, image equality agrees
+-- with identical binary output, across by-value and varlena types.  Every row
+-- must report t.
+SELECT format('%s image==send agrees', typ) AS t, bool_and(ok) AS all_true
+FROM (
+  SELECT 'int4' typ,
+         pg_datum_image_equal(a::int4, b::int4) = (int4send(a::int4) = int4send(b::int4)) ok
+  FROM (VALUES (0,0),(1,1),(1,2),(-1,-1),(2147483647,-2147483648)) v(a,b)
+  UNION ALL
+  SELECT 'int8',
+         pg_datum_image_equal(a::int8, b::int8) = (int8send(a::int8) = int8send(b::int8))
+  FROM (VALUES (0,0),(1,2),(9223372036854775807,-1)) v(a,b)
+  UNION ALL
+  SELECT 'text',
+         pg_datum_image_equal(a::text, b::text) = (textsend(a::text) = textsend(b::text))
+  FROM (VALUES ('a','a'),('a','b'),('','a'),('abc','abc')) v(a,b)
+  UNION ALL
+  SELECT 'bool',
+         pg_datum_image_equal(a::bool, b::bool) = (boolsend(a::bool) = boolsend(b::bool))
+  FROM (VALUES (true,true),(true,false)) v(a,b)
+  UNION ALL
+  SELECT 'numeric',
+         pg_datum_image_equal(a::numeric, b::numeric) = (numeric_send(a::numeric) = numeric_send(b::numeric))
+  FROM (VALUES ('1.0','1.00'),('0','0.0'),('100','1e2'),('NaN','NaN')) v(a,b)
+  UNION ALL
+  SELECT 'float8',
+         pg_datum_image_equal(a::float8, b::float8) = (float8send(a::float8) = float8send(b::float8))
+  FROM (VALUES ('1.5','1.5'),('NaN','NaN'),('Infinity','-Infinity')) v(a,b)
+) s
+GROUP BY typ ORDER BY typ;
+             t              | all_true 
+----------------------------+----------
+ bool image==send agrees    | t
+ float8 image==send agrees  | t
+ int4 image==send agrees    | t
+ int8 image==send agrees    | t
+ numeric image==send agrees | t
+ text image==send agrees    | t
+(6 rows)
+
+DROP TABLE die_f8;
