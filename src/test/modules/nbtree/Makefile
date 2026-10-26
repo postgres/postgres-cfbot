@@ -3,7 +3,8 @@
 EXTRA_INSTALL = src/test/modules/injection_points contrib/amcheck
 
 REGRESS = nbtree_half_dead_pages \
-	nbtree_incomplete_splits
+	nbtree_incomplete_splits \
+	nbtree_prefix_rfpi
 
 ISOLATION = backwards-scan-concurrent-splits \
 	predicate-empty-index

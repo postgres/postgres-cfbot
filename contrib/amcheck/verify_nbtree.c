@@ -158,7 +158,12 @@ typedef struct BtreeLastVisibleEntry
 	OffsetNumber offset;		/* Offset on index block */
 	int			postingIndex;	/* Number in the posting list (-1 for
 								 * non-deduplicated tuples) */
-	ItemPointer tid;			/* Heap tid */
+	ItemPointer tid;			/* Heap tid, or NULL; points at tiddata */
+	ItemPointerData tiddata;	/* Own storage for *tid: a prefix-coded leaf
+								 * tuple is decoded into a scratch buffer that
+								 * is reused on the next loop iteration, so we
+								 * must keep the heap TID by value, not point
+								 * into the (transient) decoded tuple */
 } BtreeLastVisibleEntry;
 
 /*
@@ -935,7 +940,8 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 				lVis->blkno = targetblock;
 				lVis->offset = offset;
 				lVis->postingIndex = i;
-				lVis->tid = tid;
+				ItemPointerCopy(tid, &lVis->tiddata);
+				lVis->tid = &lVis->tiddata;
 			}
 		}
 	}
@@ -961,7 +967,8 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 
 			lVis->blkno = targetblock;
 			lVis->offset = offset;
-			lVis->tid = tid;
+			ItemPointerCopy(tid, &lVis->tiddata);
+			lVis->tid = &lVis->tiddata;
 			lVis->postingIndex = -1;
 		}
 	}
@@ -1229,6 +1236,16 @@ bt_target_page_check(BtreeCheckState *state)
 	OffsetNumber max;
 	BTPageOpaque topaque;
 
+	/*
+	 * Scratch space for decoding prefix-coded leaf tuples (_bt_getitem).
+	 * itupbuf backs the current loop item; crossbuf backs the right sibling's
+	 * first item in the cross-page unique check, which must coexist with the
+	 * current item's state.  A pivot, high key or non-prefix leaf item is
+	 * returned by _bt_getitem unchanged (buffer unused).
+	 */
+	BTItemBuf	itupbuf;
+	BTItemBuf	crossbuf;
+
 	/* Last visible entry info for checking indexes with unique constraint */
 	BtreeLastVisibleEntry lVis = {InvalidBlockNumber, InvalidOffsetNumber, -1, NULL};
 
@@ -1267,6 +1284,54 @@ bt_target_page_check(BtreeCheckState *state)
 	}
 
 	/*
+	 * Structural checks for a prefix-compressed (BTP_PREFIX) leaf.  A reader
+	 * trusts this format implicitly, so validate the parts that an out-of-
+	 * place decode would otherwise read as garbage: the flag appears only on
+	 * leaf pages, and the PREFIX item sits at the expected offset with a
+	 * length in the legal range.  The per-item key/content checks below run
+	 * on the decoded tuple from _bt_getitem, which fails on a malformed coded
+	 * item, so item-level coding is covered there.
+	 */
+	if (P_HASPREFIX(topaque))
+	{
+		ItemId		pitemid;
+		IndexTuple	pitup;
+		Size		prefixlen;
+		OffsetNumber prefixoff = BTPageGetPrefixOff(topaque);
+
+		if (!P_ISLEAF(topaque))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("prefix compression flag set on non-leaf page in index \"%s\"",
+							RelationGetRelationName(state->rel)),
+					 errdetail_internal("Index block=%u page lsn=%X/%08X.",
+										state->targetblock,
+										LSN_FORMAT_ARGS(state->targetlsn))));
+
+		if (prefixoff > max)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("prefix-compressed page has no PREFIX item in index \"%s\"",
+							RelationGetRelationName(state->rel)),
+					 errdetail_internal("Index block=%u prefix offset=%u max offset=%u page lsn=%X/%08X.",
+										state->targetblock, prefixoff, max,
+										LSN_FORMAT_ARGS(state->targetlsn))));
+
+		pitemid = PageGetItemIdCareful(state, state->targetblock,
+									   state->target, prefixoff);
+		pitup = (IndexTuple) PageGetItem(state->target, pitemid);
+		prefixlen = IndexTupleSize(pitup) - sizeof(IndexTupleData);
+		if (prefixlen < 1 || prefixlen > BTREE_PREFIX_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("PREFIX item has invalid length in index \"%s\"",
+							RelationGetRelationName(state->rel)),
+					 errdetail_internal("Index block=%u prefix length=%zu page lsn=%X/%08X.",
+										state->targetblock, prefixlen,
+										LSN_FORMAT_ARGS(state->targetlsn))));
+	}
+
+	/*
 	 * Loop over page items, starting from first non-highkey item, not high
 	 * key (if any).  Most tests are not performed for the "negative infinity"
 	 * real item (if any).
@@ -1293,8 +1358,15 @@ bt_target_page_check(BtreeCheckState *state)
 
 		itemid = PageGetItemIdCareful(state, state->targetblock,
 									  state->target, offset);
-		itup = (IndexTuple) PageGetItem(state->target, itemid);
-		tupsize = IndexTupleSize(itup);
+
+		/*
+		 * lp_len and the tuple size limit are physical properties of the item
+		 * as stored, so they are checked against the raw on-page tuple (coded,
+		 * on a BTP_PREFIX leaf).  Every key/content check below instead uses
+		 * the decoded tuple returned by _bt_getitem.
+		 */
+		tupsize = IndexTupleSize((IndexTuple) PageGetItem(state->target, itemid));
+		itup = _bt_getitem(state->target, offset, &itupbuf);
 
 		/*
 		 * lp_len should match the IndexTuple reported length exactly, since
@@ -1606,7 +1678,7 @@ bt_target_page_check(BtreeCheckState *state)
 			itemid = PageGetItemIdCareful(state, state->targetblock,
 										  state->target,
 										  OffsetNumberNext(offset));
-			itup = (IndexTuple) PageGetItem(state->target, itemid);
+			itup = _bt_getitem(state->target, OffsetNumberNext(offset), &itupbuf);
 			tid = BTreeTupleGetPointsToTID(itup);
 			nhtid = psprintf("(%u,%u)",
 							 ItemPointerGetBlockNumberNoCheck(tid),
@@ -1793,7 +1865,7 @@ bt_target_page_check(BtreeCheckState *state)
 					itemid = PageGetItemIdCareful(state, rightblock_number,
 												  rightpage,
 												  rightfirstoffset);
-					itup = (IndexTuple) PageGetItem(rightpage, itemid);
+					itup = _bt_getitem(rightpage, rightfirstoffset, &crossbuf);
 
 					bt_entry_unique_check(state, itup, rightblock_number, rightfirstoffset, &lVis);
 
@@ -1857,6 +1929,8 @@ bt_right_page_check_scankey(BtreeCheckState *state, OffsetNumber *rightfirstoffs
 	BlockNumber targetnext;
 	Page		rightpage;
 	OffsetNumber nline;
+	OffsetNumber rightoffset;
+	BTItemBuf	firstbuf;
 
 	/* Determine target's next block number */
 	opaque = BTPageGetOpaque(state->target);
@@ -2016,6 +2090,7 @@ bt_right_page_check_scankey(BtreeCheckState *state, OffsetNumber *rightfirstoffs
 		/* Return first data item (if any) */
 		rightitem = PageGetItemIdCareful(state, targetnext, rightpage,
 										 P_FIRSTDATAKEY(opaque));
+		rightoffset = P_FIRSTDATAKEY(opaque);
 		*rightfirstoffset = P_FIRSTDATAKEY(opaque);
 	}
 	else if (!P_ISLEAF(opaque) &&
@@ -2027,6 +2102,7 @@ bt_right_page_check_scankey(BtreeCheckState *state, OffsetNumber *rightfirstoffs
 		 */
 		rightitem = PageGetItemIdCareful(state, targetnext, rightpage,
 										 OffsetNumberNext(P_FIRSTDATAKEY(opaque)));
+		rightoffset = OffsetNumberNext(P_FIRSTDATAKEY(opaque));
 	}
 	else
 	{
@@ -2046,9 +2122,19 @@ bt_right_page_check_scankey(BtreeCheckState *state, OffsetNumber *rightfirstoffs
 	/*
 	 * Return first real item scankey.  Note that this relies on right page
 	 * memory remaining allocated.
+	 *
+	 * On a BTP_PREFIX leaf the first data item is prefix-coded, so decode it;
+	 * because the returned scankey (built by _bt_mkscankey) references the
+	 * tuple's own storage, and _bt_getitem decodes into a buffer local to
+	 * this function, copy the decoded tuple into the caller-reset memory
+	 * context so it outlives the call.  A pivot or non-prefix item is
+	 * returned by _bt_getitem unchanged (it lives in the right page, which
+	 * remains allocated), so no copy is needed then.
 	 */
-	firstitup = (IndexTuple) PageGetItem(rightpage, rightitem);
-	return bt_mkscankey_pivotsearch(state->rel, firstitup);
+	firstitup = _bt_getitem(rightpage, rightoffset, &firstbuf);
+	if (firstitup == (IndexTuple) PageGetItem(rightpage, rightitem))
+		return bt_mkscankey_pivotsearch(state->rel, firstitup);
+	return bt_mkscankey_pivotsearch(state->rel, CopyIndexTuple(firstitup));
 }
 
 /*
@@ -3095,14 +3181,13 @@ static inline bool
 invariant_l_offset(BtreeCheckState *state, BTScanInsert key,
 				   OffsetNumber upperbound)
 {
-	ItemId		itemid;
 	int32		cmp;
 
 	Assert(!key->nextkey && key->backward);
 
 	/* Verify line pointer before checking tuple */
-	itemid = PageGetItemIdCareful(state, state->targetblock, state->target,
-								  upperbound);
+	(void) PageGetItemIdCareful(state, state->targetblock, state->target,
+								upperbound);
 	/* pg_upgrade'd indexes may legally have equal sibling tuples */
 	if (!key->heapkeyspace)
 		return invariant_leq_offset(state, key, upperbound);
@@ -3122,11 +3207,12 @@ invariant_l_offset(BtreeCheckState *state, BTScanInsert key,
 	{
 		BTPageOpaque topaque;
 		IndexTuple	ritup;
+		BTItemBuf	ritupbuf;
 		int			uppnkeyatts;
 		ItemPointer rheaptid;
 		bool		nonpivot;
 
-		ritup = (IndexTuple) PageGetItem(state->target, itemid);
+		ritup = _bt_getitem(state->target, upperbound, &ritupbuf);
 		topaque = BTPageGetOpaque(state->target);
 		nonpivot = P_ISLEAF(topaque) && upperbound >= P_FIRSTDATAKEY(topaque);
 
@@ -3218,14 +3304,13 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 							 BlockNumber nontargetblock, Page nontarget,
 							 OffsetNumber upperbound)
 {
-	ItemId		itemid;
 	int32		cmp;
 
 	Assert(!key->nextkey && key->backward);
 
 	/* Verify line pointer before checking tuple */
-	itemid = PageGetItemIdCareful(state, nontargetblock, nontarget,
-								  upperbound);
+	(void) PageGetItemIdCareful(state, nontargetblock, nontarget,
+								upperbound);
 	cmp = _bt_compare(state->rel, key, nontarget, upperbound);
 
 	/* pg_upgrade'd indexes may legally have equal sibling tuples */
@@ -3236,12 +3321,13 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 	if (cmp == 0)
 	{
 		IndexTuple	child;
+		BTItemBuf	childbuf;
 		int			uppnkeyatts;
 		ItemPointer childheaptid;
 		BTPageOpaque copaque;
 		bool		nonpivot;
 
-		child = (IndexTuple) PageGetItem(nontarget, itemid);
+		child = _bt_getitem(nontarget, upperbound, &childbuf);
 		copaque = BTPageGetOpaque(nontarget);
 		nonpivot = P_ISLEAF(copaque) && upperbound >= P_FIRSTDATAKEY(copaque);
 

@@ -696,6 +696,7 @@ _bt_compare(Relation rel,
 	TupleDesc	itupdesc = RelationGetDescr(rel);
 	BTPageOpaque opaque = BTPageGetOpaque(page);
 	IndexTuple	itup;
+	BTItemBuf	itupbuf;
 	ItemPointer heapTid;
 	ScanKey		scankey;
 	int			ncmpkey;
@@ -713,7 +714,7 @@ _bt_compare(Relation rel,
 	if (!P_ISLEAF(opaque) && offnum == P_FIRSTDATAKEY(opaque))
 		return 1;
 
-	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+	itup = _bt_getitem(page, offnum, &itupbuf);
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
 
 	/*

@@ -1212,11 +1212,26 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 	if (ndeletable > 0)
 		PageIndexMultiDelete(page, deletable, ndeletable);
 
+	opaque = BTPageGetOpaque(page);
+
+	/*
+	 * If VACUUM emptied a prefix-compressed leaf of all its data items, drop
+	 * the PREFIX item too and clear BTP_PREFIX: an empty page carries no
+	 * prefix, and page deletion relies on an emptied leaf holding only its
+	 * high key (nbtpage.c's _bt_mark_page_halfdead).  Recorded in the vacuum
+	 * record so redo does the same.
+	 */
+	if (P_HASPREFIX(opaque) &&
+		PageGetMaxOffsetNumber(page) == BTPageGetPrefixOff(opaque))
+	{
+		PageIndexTupleDelete(page, BTPageGetPrefixOff(opaque));
+		opaque->btpo_flags &= ~BTP_PREFIX;
+	}
+
 	/*
 	 * We can clear the vacuum cycle ID since this page has certainly been
 	 * processed by the current vacuum scan.
 	 */
-	opaque = BTPageGetOpaque(page);
 	opaque->btpo_cycleid = 0;
 
 	/*
@@ -2244,6 +2259,20 @@ _bt_mark_page_halfdead(Relation rel, Relation heaprel, Buffer leafbuf,
 	page = BufferGetPage(leafbuf);
 	opaque = BTPageGetOpaque(page);
 	opaque->btpo_flags |= BTP_HALF_DEAD;
+
+	/*
+	 * A prefix-compressed leaf being deleted may still carry its PREFIX item
+	 * (e.g. emptied by simple deletion, which does not drop it).  Remove it
+	 * and clear BTP_PREFIX so the page holds only its high key, as the
+	 * half-dead transition below requires.  Redo (btree_xlog_mark_page_halfdead)
+	 * reinitializes the page, so it needs no separate handling.
+	 */
+	if (P_HASPREFIX(opaque) &&
+		PageGetMaxOffsetNumber(page) == BTPageGetPrefixOff(opaque))
+	{
+		PageIndexTupleDelete(page, BTPageGetPrefixOff(opaque));
+		opaque->btpo_flags &= ~BTP_PREFIX;
+	}
 
 	Assert(PageGetMaxOffsetNumber(page) == P_HIKEY);
 	MemSet(&trunctuple, 0, sizeof(IndexTupleData));

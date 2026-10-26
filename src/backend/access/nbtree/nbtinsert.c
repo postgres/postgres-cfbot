@@ -348,8 +348,8 @@ _bt_search_insert(Relation rel, Relation heaprel, BTInsertState insertstate)
 				P_ISLEAF(opaque) &&
 				!P_IGNORE(opaque) &&
 				PageGetFreeSpace(page) > insertstate->itemsz &&
-				PageGetMaxOffsetNumber(page) >= P_HIKEY &&
-				_bt_compare(rel, insertstate->itup_key, page, P_HIKEY) > 0)
+				PageGetMaxOffsetNumber(page) >= P_FIRSTDATAKEY(opaque) &&
+				_bt_compare(rel, insertstate->itup_key, page, P_FIRSTDATAKEY(opaque)) > 0)
 			{
 				/*
 				 * Caller can use the fastpath optimization because cached
@@ -1135,6 +1135,11 @@ _bt_insertonpg(Relation rel,
 	IndexTuple	oposting = NULL;
 	IndexTuple	origitup = NULL;
 	IndexTuple	nposting = NULL;
+	IndexTuple	codeditup;		/* itup coded for the page, or itup */
+	Size		codeditemsz;	/* its MAXALIGNed size */
+	IndexTuple	codednposting = NULL;	/* nposting coded for the page */
+	BTItemBuf	opostbuf;		/* decode workspace for an existing posting */
+	bool		pageprefix;		/* target page is BTP_PREFIX */
 	XLogRecPtr	recptr;
 
 	page = BufferGetPage(buf);
@@ -1143,6 +1148,7 @@ _bt_insertonpg(Relation rel,
 	isroot = P_ISROOT(opaque);
 	isrightmost = P_RIGHTMOST(opaque);
 	isonly = P_LEFTMOST(opaque) && P_RIGHTMOST(opaque);
+	pageprefix = P_HASPREFIX(opaque);
 
 	/* child buffer must be given iff inserting on an internal page */
 	Assert(isleaf == !BufferIsValid(cbuf));
@@ -1182,6 +1188,9 @@ _bt_insertonpg(Relation rel,
 		 */
 		Assert(isleaf && itup_key->heapkeyspace && itup_key->allequalimage);
 		oposting = (IndexTuple) PageGetItem(page, itemid);
+		/* On a prefix page the existing posting is coded; decode for the swap. */
+		if (pageprefix)
+			oposting = _bt_prefix_decode(page, oposting, &opostbuf);
 
 		/*
 		 * postingoff value comes from earlier call to _bt_binsrch_posting().
@@ -1214,17 +1223,48 @@ _bt_insertonpg(Relation rel,
 	}
 
 	/*
+	 * On a prefix-compressed page the new item is stored coded, which is at
+	 * most MAXALIGN larger than plain and usually much smaller.  Size the fit
+	 * test and the placement by the coded size.  (Split is handled on plain
+	 * tuples; _bt_split re-compresses each half itself.)
+	 */
+	if (pageprefix)
+	{
+		codeditup = _bt_prefix_encode(page, itup);
+		codeditemsz = MAXALIGN(IndexTupleSize(codeditup));
+		/*
+		 * A posting-list split replaces the existing coded posting with a
+		 * re-coded one; encode it here, before the critical section, since
+		 * _bt_prefix_encode() allocates.
+		 */
+		if (nposting != NULL)
+			codednposting = _bt_prefix_encode(page, nposting);
+	}
+	else
+	{
+		codeditup = itup;
+		codeditemsz = itemsz;
+	}
+
+	/*
 	 * Do we need to split the page to fit the item on it?
 	 *
 	 * Note: PageGetFreeSpace() subtracts sizeof(ItemIdData) from its result,
 	 * so this comparison is correct even though we appear to be accounting
-	 * only for the item and not for its line pointer.
+	 * only for the item and not for its line pointer.  The coded item size is
+	 * used; a posting-list split additionally changes the posting tuple's
+	 * size, but that can only shrink or keep free space (the new posting has
+	 * one fewer TID's worth of room reused by newitem), so the item fit test
+	 * remains a safe upper bound.
 	 */
-	if (PageGetFreeSpace(page) < itemsz)
+	if (PageGetFreeSpace(page) < codeditemsz)
 	{
 		Buffer		rbuf;
 
 		Assert(!split_only_page);
+
+		if (codeditup != itup)
+			pfree(codeditup);
 
 		/* split the buffer into left and right halves */
 		rbuf = _bt_split(rel, heaprel, itup_key, buf, cbuf, newitemoff, itemsz,
@@ -1295,9 +1335,25 @@ _bt_insertonpg(Relation rel,
 		START_CRIT_SECTION();
 
 		if (postingoff != 0)
-			memcpy(oposting, nposting, MAXALIGN(IndexTupleSize(nposting)));
+		{
+			if (pageprefix)
+			{
+				/*
+				 * The existing posting is stored coded; replace its slot (at
+				 * the offset just before newitemoff, since newitemoff was
+				 * advanced past it above) with the coded new posting (encoded
+				 * before the critical section), whose size may differ.
+				 */
+				if (!PageIndexTupleOverwrite(page, OffsetNumberPrev(newitemoff),
+											 codednposting, IndexTupleSize(codednposting)))
+					elog(PANIC, "failed to overwrite posting list in block %u in index \"%s\"",
+						 BufferGetBlockNumber(buf), RelationGetRelationName(rel));
+			}
+			else
+				memcpy(oposting, nposting, MAXALIGN(IndexTupleSize(nposting)));
+		}
 
-		if (PageAddItem(page, itup, itemsz, newitemoff, false, false) == InvalidOffsetNumber)
+		if (PageAddItem(page, codeditup, codeditemsz, newitemoff, false, false) == InvalidOffsetNumber)
 			elog(PANIC, "failed to add new item to block %u in index \"%s\"",
 				 BufferGetBlockNumber(buf), RelationGetRelationName(rel));
 
@@ -1381,8 +1437,30 @@ _bt_insertonpg(Relation rel,
 				}
 			}
 
-			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-			if (postingoff == 0)
+			XLogRegisterBuffer(0, buf,
+							   REGBUF_STANDARD |
+							   ((pageprefix && postingoff != 0) ? REGBUF_FORCE_IMAGE : 0));
+			if (pageprefix && postingoff != 0)
+			{
+				/*
+				 * A posting-list split on a prefix page rewrites an existing
+				 * coded posting and adds a coded item; rather than teach redo to
+				 * re-code both, force a full-page image (this is a rare case).
+				 * postingoff is still recorded for the record format.
+				 */
+				upostingoff = postingoff;
+				XLogRegisterBufData(0, &upostingoff, sizeof(uint16));
+			}
+			else if (pageprefix)
+			{
+				/*
+				 * Simple insert on a prefix page: log the CODED item bytes as
+				 * they were placed on the page, so redo adds them verbatim at
+				 * newitemoff -- no full-page image needed, and byte-identical.
+				 */
+				XLogRegisterBufData(0, (char *) codeditup, IndexTupleSize(codeditup));
+			}
+			else if (postingoff == 0)
 			{
 				/* Just log itup from caller */
 				XLogRegisterBufData(0, itup, IndexTupleSize(itup));
@@ -1417,6 +1495,11 @@ _bt_insertonpg(Relation rel,
 		PageSetLSN(page, recptr);
 
 		END_CRIT_SECTION();
+
+		if (codeditup != itup)
+			pfree(codeditup);
+		if (codednposting != NULL && codednposting != nposting)
+			pfree(codednposting);
 
 		/* Release subsidiary buffers */
 		if (BufferIsValid(metabuf))
@@ -1506,6 +1589,22 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	ItemId		itemid;
 	IndexTuple	firstright,
 				lefthighkey;
+	BTItemBuf	frbuf;			/* decode scratch for firstright */
+	BTItemBuf	llbuf;			/* decode scratch for lastleft */
+	IndexTuple *leftitems = NULL;	/* leaf: plain items for the left half */
+	IndexTuple *rightitems = NULL;	/* leaf: plain items for the right half */
+	int			nleft = 0;
+	int			nright = 0;
+	IndexTuple	righthighkey = NULL;	/* leaf right half's high key (NULL=rightmost) */
+	const char *origprefix = NULL;
+	Size		origprefixlen = 0;
+	char		leftprefix[BTREE_PREFIX_MAX];	/* chosen prefix of each leaf half */
+	char		rightprefix[BTREE_PREFIX_MAX];
+	Size		leftprefixlen = 0;
+	Size		rightprefixlen = 0;
+	char	   *rightwalbuf = NULL;	/* packed right-page WAL payload */
+	Size		rightwalbuflen = 0;
+	bool		force_rfpi = false;	/* carry the right page as a forced image */
 	OffsetNumber firstrightoff;
 	OffsetNumber afterleftoff,
 				afterrightoff,
@@ -1575,7 +1674,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * and HAS_GARBAGE flags.
 	 */
 	lopaque->btpo_flags = oopaque->btpo_flags;
-	lopaque->btpo_flags &= ~(BTP_ROOT | BTP_SPLIT_END | BTP_HAS_GARBAGE);
+	lopaque->btpo_flags &= ~(BTP_ROOT | BTP_SPLIT_END | BTP_HAS_GARBAGE | BTP_PREFIX);
 	/* set flag in leftpage indicating that rightpage has no downlink yet */
 	lopaque->btpo_flags |= BTP_INCOMPLETE_SPLIT;
 	lopaque->btpo_prev = oopaque->btpo_prev;
@@ -1650,6 +1749,8 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		itemid = PageGetItemId(origpage, firstrightoff);
 		itemsz = ItemIdGetLength(itemid);
 		firstright = (IndexTuple) PageGetItem(origpage, itemid);
+		if (P_HASPREFIX(oopaque))
+			firstright = _bt_prefix_decode(origpage, firstright, &frbuf);
 		if (firstrightoff == origpagepostingoff)
 			firstright = nposting;
 	}
@@ -1673,6 +1774,8 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 			Assert(lastleftoff >= P_FIRSTDATAKEY(oopaque));
 			itemid = PageGetItemId(origpage, lastleftoff);
 			lastleft = (IndexTuple) PageGetItem(origpage, itemid);
+			if (P_HASPREFIX(oopaque))
+				lastleft = _bt_prefix_decode(origpage, lastleft, &llbuf);
 			if (lastleftoff == origpagepostingoff)
 				lastleft = nposting;
 		}
@@ -1712,7 +1815,11 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	}
 
 	/*
-	 * Add new high key to leftpage
+	 * Add new high key to leftpage.  For a leaf split the left half is built
+	 * as a whole below (so it can be prefix-compressed from the start, which
+	 * a plain incremental build cannot represent when the page holds more
+	 * logical data than fits plain); the high key is passed to the builder
+	 * then.  Internal halves are built incrementally here as before.
 	 */
 	afterleftoff = P_HIKEY;
 
@@ -1720,11 +1827,23 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	Assert(BTreeTupleGetNAtts(lefthighkey, rel) <=
 		   IndexRelationGetNumberOfKeyAttributes(rel));
 	Assert(itemsz == MAXALIGN(IndexTupleSize(lefthighkey)));
-	if (PageAddItem(leftpage, lefthighkey, itemsz, afterleftoff, false, false) == InvalidOffsetNumber)
-		elog(ERROR, "failed to add high key to the left sibling"
-			 " while splitting block %u of index \"%s\"",
-			 origpagenumber, RelationGetRelationName(rel));
-	afterleftoff = OffsetNumberNext(afterleftoff);
+	if (isleaf)
+	{
+		/* The builder needs a stable copy; lefthighkey points into workspace. */
+		lefthighkey = CopyIndexTuple(lefthighkey);
+		leftitems = palloc_array(IndexTuple, maxoff + 2);
+		rightitems = palloc_array(IndexTuple, maxoff + 2);
+		if (P_HASPREFIX(oopaque))
+			origprefix = _bt_page_get_prefix(origpage, &origprefixlen);
+	}
+	else
+	{
+		if (PageAddItem(leftpage, lefthighkey, itemsz, afterleftoff, false, false) == InvalidOffsetNumber)
+			elog(ERROR, "failed to add high key to the left sibling"
+				 " while splitting block %u of index \"%s\"",
+				 origpagenumber, RelationGetRelationName(rel));
+		afterleftoff = OffsetNumberNext(afterleftoff);
+	}
 
 	/*
 	 * Acquire a new right page to split into, now that left page has a new
@@ -1765,7 +1884,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * and HAS_GARBAGE flags.
 	 */
 	ropaque->btpo_flags = oopaque->btpo_flags;
-	ropaque->btpo_flags &= ~(BTP_ROOT | BTP_SPLIT_END | BTP_HAS_GARBAGE);
+	ropaque->btpo_flags &= ~(BTP_ROOT | BTP_SPLIT_END | BTP_HAS_GARBAGE | BTP_PREFIX);
 	ropaque->btpo_prev = origpagenumber;
 	ropaque->btpo_next = oopaque->btpo_next;
 	ropaque->btpo_level = oopaque->btpo_level;
@@ -1782,21 +1901,25 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 
 	if (!isrightmost)
 	{
-		IndexTuple	righthighkey;
+		ItemId		hiitemid = PageGetItemId(origpage, P_HIKEY);
+		Size		hiitemsz = ItemIdGetLength(hiitemid);
+		IndexTuple	hikey = (IndexTuple) PageGetItem(origpage, hiitemid);
 
-		itemid = PageGetItemId(origpage, P_HIKEY);
-		itemsz = ItemIdGetLength(itemid);
-		righthighkey = (IndexTuple) PageGetItem(origpage, itemid);
-		Assert(BTreeTupleGetNAtts(righthighkey, rel) > 0);
-		Assert(BTreeTupleGetNAtts(righthighkey, rel) <=
+		Assert(BTreeTupleGetNAtts(hikey, rel) > 0);
+		Assert(BTreeTupleGetNAtts(hikey, rel) <=
 			   IndexRelationGetNumberOfKeyAttributes(rel));
-		if (PageAddItem(rightpage, righthighkey, itemsz, afterrightoff, false, false) == InvalidOffsetNumber)
+		if (isleaf)
+			righthighkey = CopyIndexTuple(hikey);	/* stable: origpage is
+														 * overwritten by the left
+														 * half before WAL logging */
+		else
 		{
-			elog(ERROR, "failed to add high key to the right sibling"
-				 " while splitting block %u of index \"%s\"",
-				 origpagenumber, RelationGetRelationName(rel));
+			if (PageAddItem(rightpage, hikey, hiitemsz, afterrightoff, false, false) == InvalidOffsetNumber)
+				elog(ERROR, "failed to add high key to the right sibling"
+					 " while splitting block %u of index \"%s\"",
+					 origpagenumber, RelationGetRelationName(rel));
+			afterrightoff = OffsetNumberNext(afterrightoff);
 		}
-		afterrightoff = OffsetNumberNext(afterrightoff);
 	}
 
 	/*
@@ -1813,7 +1936,21 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 *
 	 * Note: we *must* insert at least the right page's items in item-number
 	 * order, for the benefit of _bt_restore_page().
+	 *
+	 * A leaf split builds each half as a whole page below (so it can be
+	 * prefix-compressed from the start), which redo must reproduce byte for
+	 * byte.  To keep the primary and redo in lock step, both derive the
+	 * split's plain item arrays from the original page through the single
+	 * shared routine _bt_split_leaf_collect(); the incremental loop here
+	 * handles only the internal (!isleaf) case.
 	 */
+	if (isleaf)
+	{
+		_bt_split_leaf_collect(origpage, firstrightoff, newitemoff, newitem,
+							   newitemonleft, origpagepostingoff, nposting,
+							   leftitems, &nleft, rightitems, &nright);
+	}
+	else
 	for (i = P_FIRSTDATAKEY(oopaque); i <= maxoff; i = OffsetNumberNext(i))
 	{
 		IndexTuple	dataitem;
@@ -1837,24 +1974,20 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 			{
 				Assert(newitemoff <= firstrightoff);
 				if (!_bt_pgaddtup(leftpage, newitemsz, newitem, afterleftoff,
-								  false))
-				{
+									   false))
 					elog(ERROR, "failed to add new item to the left sibling"
 						 " while splitting block %u of index \"%s\"",
 						 origpagenumber, RelationGetRelationName(rel));
-				}
 				afterleftoff = OffsetNumberNext(afterleftoff);
 			}
 			else
 			{
 				Assert(newitemoff >= firstrightoff);
 				if (!_bt_pgaddtup(rightpage, newitemsz, newitem, afterrightoff,
-								  afterrightoff == minusinfoff))
-				{
+									   afterrightoff == minusinfoff))
 					elog(ERROR, "failed to add new item to the right sibling"
 						 " while splitting block %u of index \"%s\"",
 						 origpagenumber, RelationGetRelationName(rel));
-				}
 				afterrightoff = OffsetNumberNext(afterrightoff);
 			}
 		}
@@ -1863,28 +1996,24 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		if (i < firstrightoff)
 		{
 			if (!_bt_pgaddtup(leftpage, itemsz, dataitem, afterleftoff, false))
-			{
 				elog(ERROR, "failed to add old item to the left sibling"
 					 " while splitting block %u of index \"%s\"",
 					 origpagenumber, RelationGetRelationName(rel));
-			}
 			afterleftoff = OffsetNumberNext(afterleftoff);
 		}
 		else
 		{
 			if (!_bt_pgaddtup(rightpage, itemsz, dataitem, afterrightoff,
-							  afterrightoff == minusinfoff))
-			{
+								   afterrightoff == minusinfoff))
 				elog(ERROR, "failed to add old item to the right sibling"
 					 " while splitting block %u of index \"%s\"",
 					 origpagenumber, RelationGetRelationName(rel));
-			}
 			afterrightoff = OffsetNumberNext(afterrightoff);
 		}
 	}
 
-	/* Handle case where newitem goes at the end of rightpage */
-	if (i <= newitemoff)
+	/* Handle case where newitem goes at the end of rightpage (internal only) */
+	if (!isleaf && i <= newitemoff)
 	{
 		/*
 		 * Can't have newitemonleft here; that would imply we were told to put
@@ -1893,13 +2022,88 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		 */
 		Assert(!newitemonleft && newitemoff == maxoff + 1);
 		if (!_bt_pgaddtup(rightpage, newitemsz, newitem, afterrightoff,
-						  afterrightoff == minusinfoff))
-		{
+							   afterrightoff == minusinfoff))
 			elog(ERROR, "failed to add new item to the right sibling"
 				 " while splitting block %u of index \"%s\"",
 				 origpagenumber, RelationGetRelationName(rel));
-		}
 		afterrightoff = OffsetNumberNext(afterrightoff);
+	}
+
+	/*
+	 * Leaf halves are built as whole pages now, so they can be prefix-
+	 * compressed from the start (Strategy 1: a page is faulted into the
+	 * BTP_PREFIX format only when it is written whole).  The plain item arrays
+	 * were collected above by _bt_split_leaf_collect(), the same routine redo
+	 * uses, so the primary and redo lay out identical bytes.
+	 */
+	if (isleaf)
+	{
+		_bt_split_leaf_half(rel, leftpage, lefthighkey, leftitems, nleft,
+							origprefix, origprefixlen,
+							leftprefix, &leftprefixlen);
+		_bt_split_leaf_half(rel, rightpage, righthighkey, rightitems, nright,
+							origprefix, origprefixlen,
+							rightprefix, &rightprefixlen);
+
+		/*
+		 * Build the right page's WAL payload now, before the critical section
+		 * (palloc is disallowed inside it): the right prefix bytes, then the
+		 * right high key (unless rightmost), then the right half's plain items,
+		 * each MAXALIGN'd, in one contiguous buffer logged with a single rdata
+		 * slot.  A very compressible right half whose plain items would exceed
+		 * a page is instead carried as a full-page image (set below), so this
+		 * buffer is bounded.
+		 */
+		if (leftprefixlen > 0 || rightprefixlen > 0 || origprefixlen > 0)
+		{
+			Size		roff = rightprefixlen;
+
+			if (righthighkey != NULL)
+				roff += MAXALIGN(IndexTupleSize(righthighkey));
+			for (int ri = 0; ri < nright; ri++)
+				roff += MAXALIGN(IndexTupleSize(rightitems[ri]));
+			rightwalbuf = palloc(Max(roff, 1));
+			rightwalbuflen = roff;
+
+			/*
+			 * Decide (before the critical section, since the injection-point
+			 * cache load can allocate) whether to carry the right page as a
+			 * forced full-page image: normally only when its plain payload
+			 * would exceed a block, but a test can force the otherwise-rare
+			 * path with the nbtree-prefix-force-rfpi injection point.
+			 */
+			if (rightwalbuflen > BLCKSZ)
+				force_rfpi = true;
+#ifdef USE_INJECTION_POINTS
+			else if (IS_INJECTION_POINT_ATTACHED("nbtree-prefix-force-rfpi"))
+				force_rfpi = true;
+#endif
+
+			roff = 0;
+			if (rightprefixlen > 0)
+			{
+				memcpy(rightwalbuf, rightprefix, rightprefixlen);
+				roff += rightprefixlen;
+			}
+			if (righthighkey != NULL)
+			{
+				Size		hsz = IndexTupleSize(righthighkey);
+
+				memcpy(rightwalbuf + roff, righthighkey, hsz);
+				if (MAXALIGN(hsz) != hsz)
+					memset(rightwalbuf + roff + hsz, 0, MAXALIGN(hsz) - hsz);
+				roff += MAXALIGN(hsz);
+			}
+			for (int ri = 0; ri < nright; ri++)
+			{
+				Size		rsz = IndexTupleSize(rightitems[ri]);
+
+				memcpy(rightwalbuf + roff, rightitems[ri], rsz);
+				if (MAXALIGN(rsz) != rsz)
+					memset(rightwalbuf + roff + rsz, 0, MAXALIGN(rsz) - rsz);
+				roff += MAXALIGN(rsz);
+			}
+		}
 	}
 
 	/*
@@ -2005,16 +2209,70 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		if (postingoff != 0 && origpagepostingoff < firstrightoff)
 			xlrec.postingoff = postingoff;
 
+		/*
+		 * A leaf split that involves prefix compression (either half ends up
+		 * compressed, or the pre-split page was compressed so its items are
+		 * coded) is replayed by rebuilding both halves from the pre-split page,
+		 * exactly as the primary did, rather than by replaying logged tuples --
+		 * the coded physical layout would not match _bt_restore_page.  No
+		 * full-page image is needed; redo reconstructs the plain items from the
+		 * original page (block 0) and lays each half out coded against the
+		 * chosen prefix, whose length and bytes are carried in the record.
+		 */
+		xlrec.flags = 0;
+		xlrec.leftprefixlen = 0;
+		xlrec.rightprefixlen = 0;
+		if (isleaf && (leftprefixlen > 0 || rightprefixlen > 0 || origprefixlen > 0))
+		{
+			xlrec.flags |= XLH_SPLIT_LEAFPREFIX;
+			xlrec.leftprefixlen = (uint8) leftprefixlen;
+			xlrec.rightprefixlen = (uint8) rightprefixlen;
+
+			/*
+			 * The right half is normally carried as its packed plain payload
+			 * (redo lays it out coded), far cheaper than a full-page image.
+			 * But a very compressible page can hold more plain data than fits
+			 * in one page; force_rfpi (decided before the critical section)
+			 * carries the coded right page as a bounded full-page image instead.
+			 */
+			if (force_rfpi)
+				xlrec.flags |= XLH_SPLIT_RFPI;
+		}
+
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfBtreeSplit);
 
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-		XLogRegisterBuffer(1, rbuf, REGBUF_WILL_INIT);
+		/*
+		 * The right page is rebuilt from scratch in redo.  Ordinarily that is
+		 * from the logged tuple region (REGBUF_WILL_INIT).  A prefix-leaf split
+		 * instead rebuilds it from its logged plain items, unless those would
+		 * overflow the record (XLH_SPLIT_RFPI), in which case the coded page is
+		 * carried as a forced full-page image.
+		 */
+		XLogRegisterBuffer(1, rbuf,
+						   (xlrec.flags & XLH_SPLIT_RFPI) ?
+						   (REGBUF_STANDARD | REGBUF_FORCE_IMAGE) : REGBUF_WILL_INIT);
 		/* Log original right sibling, since we've changed its prev-pointer */
 		if (!isrightmost)
 			XLogRegisterBuffer(2, sbuf, REGBUF_STANDARD);
 		if (!isleaf)
 			XLogRegisterBuffer(3, cbuf, REGBUF_STANDARD);
+
+		/*
+		 * For a prefix leaf split, carry each half's chosen prefix bytes, and
+		 * (unless the right page is carried as a full-page image) the right
+		 * high key and the right half's PLAIN items on block 1, so redo can lay
+		 * the right page out coded without depending on block 0's state (block
+		 * 0 may be restored from an automatic full-page image).  The left half
+		 * is rebuilt in redo from the original page (block 0) when it needs
+		 * redo, or from its own FPI otherwise, so the left items are not logged.
+		 */
+		if (xlrec.flags & XLH_SPLIT_LEAFPREFIX)
+		{
+			if (!(xlrec.flags & XLH_SPLIT_RFPI) && rightwalbuflen > 0)
+				XLogRegisterBufData(1, rightwalbuf, rightwalbuflen);
+		}
 
 		/*
 		 * Log the new item, if it was inserted on the left page. (If it was
@@ -2064,6 +2322,14 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 							MAXALIGN(IndexTupleSize(lefthighkey)));
 
 		/*
+		 * For a prefix leaf split, the left half's chosen prefix bytes follow
+		 * the high key on block 0 (redo reads newitem/orignewitem, then the
+		 * high key, then this prefix).
+		 */
+		if ((xlrec.flags & XLH_SPLIT_LEAFPREFIX) && leftprefixlen > 0)
+			XLogRegisterBufData(0, leftprefix, leftprefixlen);
+
+		/*
 		 * Log the contents of the right page in the format understood by
 		 * _bt_restore_page().  The whole right page will be recreated.
 		 *
@@ -2071,11 +2337,14 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		 * some new func in page API.  Note we only store the tuples
 		 * themselves, knowing that they were inserted in item-number order
 		 * and so the line pointers can be reconstructed.  See comments for
-		 * _bt_restore_page().
+		 * _bt_restore_page().  A prefix-compressed leaf split instead rebuilds
+		 * the right page from the original page in redo (see XLH_SPLIT_LEAFPREFIX),
+		 * so its tuple region is not logged.
 		 */
-		XLogRegisterBufData(1,
-							(char *) rightpage + ((PageHeader) rightpage)->pd_upper,
-							((PageHeader) rightpage)->pd_special - ((PageHeader) rightpage)->pd_upper);
+		if (!(xlrec.flags & XLH_SPLIT_LEAFPREFIX))
+			XLogRegisterBufData(1,
+								(char *) rightpage + ((PageHeader) rightpage)->pd_upper,
+								((PageHeader) rightpage)->pd_special - ((PageHeader) rightpage)->pd_upper);
 
 		xlinfo = newitemonleft ? XLOG_BTREE_SPLIT_L : XLOG_BTREE_SPLIT_R;
 		recptr = XLogInsert(RM_BTREE_ID, xlinfo);
@@ -2820,7 +3089,15 @@ _bt_delete_or_dedup_one_page(Relation rel, Relation heapRel,
 		_bt_bottomupdel_pass(rel, buffer, heapRel, insertstate->itemsz))
 		return;
 
-	/* Perform deduplication pass (when enabled and index-is-allequalimage) */
+	/*
+	 * Perform deduplication pass (when enabled and index-is-allequalimage).
+	 *
+	 * On a prefix-compressed page the pass decodes items and lays the deduped
+	 * result out plain before re-coding it; the decoded set can exceed one
+	 * page even when the coded form fit, in which case the pass aborts without
+	 * touching the page and we fall through to split it.  When it does fit, the
+	 * recompressed page's WAL replays without a full-page image.
+	 */
 	if (BTGetDeduplicateItems(rel) && itup_key->allequalimage)
 		_bt_dedup_pass(rel, buffer, insertstate->itup, insertstate->itemsz,
 					   (indexUnchanged || uniquedup));

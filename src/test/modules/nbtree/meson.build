@@ -12,6 +12,7 @@ tests += {
     'sql': [
       'nbtree_half_dead_pages',
       'nbtree_incomplete_splits',
+      'nbtree_prefix_rfpi',
     ],
   },
   'isolation': {

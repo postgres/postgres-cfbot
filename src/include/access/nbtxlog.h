@@ -156,25 +156,59 @@ typedef struct xl_btree_split
 	OffsetNumber firstrightoff; /* first origpage item on rightpage */
 	OffsetNumber newitemoff;	/* new item's offset */
 	uint16		postingoff;		/* offset inside orig posting tuple */
+	uint16		flags;			/* XLH_SPLIT_* below */
+	uint8		leftprefixlen;	/* leaf: left half's prefix length (0 none) */
+	uint8		rightprefixlen; /* leaf: right half's prefix length (0 none) */
 } xl_btree_split;
 
-#define SizeOfBtreeSplit	(offsetof(xl_btree_split, postingoff) + sizeof(uint16))
+#define SizeOfBtreeSplit	(offsetof(xl_btree_split, rightprefixlen) + sizeof(uint8))
+
+/*
+ * xl_btree_split flag bits.
+ *
+ * A prefix-compressed leaf split logs no full-page image in the common case:
+ * redo rebuilds each half the way the primary did.  The left half is
+ * reconstructed from the pre-split original page (block 0) together with the
+ * logged new item and high key; the right half is reconstructed from its plain
+ * data items, which are logged as block-1 data.  Each half's chosen prefix
+ * bytes are logged too (block 0 for the left half, block 1 for the right), and
+ * applied with _bt_split_leaf_layout(); redo cannot run the prefix-choosing
+ * heuristic itself, so the primary logs the prefix it chose.
+ * leftprefixlen/rightprefixlen give the lengths (0 means the half is not
+ * prefix-compressed).  XLH_SPLIT_LEAFPREFIX marks a leaf split that uses this
+ * path at all (so redo rebuilds coded rather than replaying items).
+ */
+#define XLH_SPLIT_LEAFPREFIX	0x01	/* leaf split, rebuild halves coded */
+#define XLH_SPLIT_RFPI			0x08	/* right half carried by a full-page image
+										 * (its plain items would overflow the WAL
+										 * record); redo restores it from the image */
 
 /*
  * When page is deduplicated, consecutive groups of tuples with equal keys are
  * merged together into posting list tuples.
  *
- * The WAL record represents a deduplication pass for a leaf page.  An array
- * of BTDedupInterval structs follows.
+ * The WAL record represents a deduplication pass for a leaf page.  Normally
+ * (prefixlen == 0) an array of BTDedupInterval structs follows and redo
+ * replays them against the old page.  When the page is prefix-compressed
+ * (prefixlen > 0) the deduped result is instead carried as the chosen prefix
+ * bytes (prefixlen) followed by, when not rightmost, the high key, then the
+ * deduped plain data items -- each MAXALIGN'd -- and redo lays them out coded
+ * with _bt_split_leaf_layout(), avoiding a full-page image.
  */
 typedef struct xl_btree_dedup
 {
 	uint16		nintervals;
+	uint8		prefixlen;		/* >0: prefix-dedup payload, see above */
+	uint8		flags;			/* XLH_DEDUP_* */
 
-	/* DEDUPLICATION INTERVALS FOLLOW */
+	/* DEDUPLICATION INTERVALS or PREFIX PAYLOAD FOLLOW */
 } xl_btree_dedup;
 
-#define SizeOfBtreeDedup 	(offsetof(xl_btree_dedup, nintervals) + sizeof(uint16))
+#define SizeOfBtreeDedup 	(offsetof(xl_btree_dedup, flags) + sizeof(uint8))
+
+/* xl_btree_dedup flag bits */
+#define XLH_DEDUP_NOT_RIGHTMOST	0x01	/* prefix payload includes a high key */
+#define XLH_DEDUP_RFPI			0x02	/* prefix page carried as a forced image */
 
 /*
  * This is what we need to know about page reuse within btree.  This record

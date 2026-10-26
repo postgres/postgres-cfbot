@@ -1081,3 +1081,100 @@ item is irrelevant, and need not be stored at all.  This arrangement
 corresponds to the fact that an L&Y non-leaf page has one more pointer
 than key.  Suffix truncation's negative infinity attributes behave in
 the same way.
+
+Notes about leaf key prefix compression
+----------------------------------------
+
+With the prefix_compression storage parameter (default off) a leaf page may
+front-code the first key column of each of its data tuples against a per-page
+prefix, which shrinks indexes on keys that share long leading bytes (URLs,
+jsonb keys with common paths, zero-padded codes).  Like deduplication, this
+alters the physical representation of tuples without changing the logical
+contents of the index, and comparisons always operate on the reconstructed
+original values, so every collation and operator class is unaffected.
+
+A leaf that uses the technique carries the BTP_PREFIX page flag and one extra
+item, the PREFIX item, at the offset where its first data item would otherwise
+be (P_HIKEY on a rightmost page, P_FIRSTKEY otherwise); data items begin one
+offset later, which P_FIRSTDATAKEY() accounts for.  The PREFIX item is an
+IndexTupleData header followed by 1..BTREE_PREFIX_MAX prefix bytes, shaped so
+that code which walks a page's items by IndexTupleSize (such as
+_bt_restore_page) steps over it.  On such a page every non-pivot tuple (plain
+or posting) whose first key column is not NULL stores that column as a varlena
+whose payload begins with a one-byte count of how many leading bytes it shares
+with the page prefix, followed by the unshared remainder (or, for a value whose
+header is not the form index_form_tuple would reproduce, the whole value after
+a sentinel count).  Trailing key columns, INCLUDE columns, a posting list and
+alignment padding follow, moved to preserve alignment; padding that is only the
+key's closing zeros is dropped and restored on decode.  Pivots, NULL first
+columns and the high key are always stored uncompressed.  Coding and decoding
+depend only on the page prefix and the tuple, never the catalog, so WAL redo
+reproduces them and decoding yields the original tuple byte for byte.  All of
+nbtprefix.c implements this; _bt_getitem() is the one accessor through which
+readers obtain a decoded leaf data tuple.
+
+A page adopts a prefix only when it is written as a whole: a finished leaf
+during an index build, or either half of a leaf page split (built coded from
+the start by _bt_split_leaf_half, since a compressed leaf can hold more logical
+data than fits on a plain page, choosing each half's own prefix and falling
+back to a plain layout or the original page's prefix if its own does not fit).
+Crucially, no insert, VACUUM, deduplication or change of a page's key range
+ever rewrites a page to keep its prefix valid: a tuple that happens to share
+fewer bytes simply records a smaller shared count.  Because the format is a
+per-page opt-in flag with no btree version change, pages without the flag are
+read exactly as before, so pg_upgrade and physical/logical replication keep
+working and existing indexes continue to work with no REINDEX.  Turning the
+parameter on with ALTER INDEX does not rewrite anything; each leaf is converted
+the next time it is written whole, and compressed and uncompressed leaves
+coexist in the same index indefinitely.  Turning it off likewise rewrites
+nothing: existing BTP_PREFIX leaves keep their coded form (the flag is cleared
+only when a page is split, emptied or dedup-rewritten) and are still read back
+correctly with the parameter off, since every reader decodes based on the page
+flag, not on the current reloption.  Scan-time workspace that must hold decoded
+tuples (the index-only-scan currTuples/markTuples buffers, see
+BTTupleStorageSize) is therefore sized for a decoded page on every btree index,
+not just those whose parameter is currently on.
+
+Leaf changes to a prefix page are replayed without a full-page image in the
+common case.  Redo cannot run the prefix-choosing heuristic (it has no
+relcache), so the primary logs the prefix it chose and both sides lay the
+page out through one Relation-free routine, _bt_split_leaf_layout(), fed by
+one item-collection routine, _bt_split_leaf_collect(), that the primary
+(_bt_split) and redo (btree_xlog_split) both call.  Because the two derive
+the plain item sequence the same way and code it against the same logged
+prefix, they produce byte-identical pages.  An in-place insert logs the coded
+tuple (standard insert redo adds it verbatim); a split logs each half's
+chosen prefix plus the right half's plain items; a deduplication logs the
+chosen prefix plus the deduped plain items.  A bounded fallback forces a
+full-page image only when a pathologically compressible page's plain payload
+would exceed BLCKSZ (so the logged payload can never exceed one block); redo
+then restores the image via BLK_RESTORED.  When VACUUM or page deletion
+empties a prefix leaf, the PREFIX item is removed and the flag cleared so that
+the invariant that an emptied leaf holds only its high key (relied on by page
+deletion) still holds.
+
+Deduplication and bottom-up index deletion both run on BTP_PREFIX pages.
+Bottom-up deletion only removes items and never rewrites survivors, so it is
+safe on coded pages unchanged.  A deduplication pass decodes the page's items,
+merges duplicates into posting lists and re-compresses the result as a whole;
+because a coded page can hold more logical data than fits plain, if the
+decoded set would overflow a plain page the pass aborts cleanly and the page
+splits instead, so no in-place rewrite is ever forced to fail.  An index build
+deduplicates before coding the finished page, so a duplicate-heavy prefix
+index is no larger than a plain one.
+
+Prefix compression is a separate mechanism from deduplication rather than an
+extension of it because the two attack different redundancy.  Deduplication
+collapses tuples whose whole key is *equal* into one posting list tuple; it
+does nothing for keys that are all distinct.  Prefix compression factors out a
+leading byte run shared by *distinct* keys and leaves their differing suffixes
+alone; it does nothing for exact duplicates that a posting list already
+collapses.  The common case this targets -- a URL or jsonb-path column whose
+values are distinct but share a long prefix -- is exactly where deduplication
+does not help.  The two compose on one page (deduplicate first, then code the
+survivors), which is why a build applies both.  Reusing the posting-list
+format to carry a shared prefix was considered and rejected: a posting list
+stores one key plus many TIDs, whereas prefix coding stores many keys that
+share a prefix, so the two would need different per-item layouts anyway, and
+overloading posting lists would entangle the deduplication and compression
+paths that are kept separate here on purpose.

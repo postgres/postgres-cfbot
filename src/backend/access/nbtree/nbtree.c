@@ -435,8 +435,10 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	 */
 	if (scan->xs_want_itup && so->currTuples == NULL)
 	{
-		so->currTuples = (char *) palloc(BLCKSZ * 2);
-		so->markTuples = so->currTuples + BLCKSZ;
+		Size		half = BTTupleStorageSize(scan->indexRelation);
+
+		so->currTuples = (char *) palloc(half * 2);
+		so->markTuples = so->currTuples + half;
 	}
 
 	/*

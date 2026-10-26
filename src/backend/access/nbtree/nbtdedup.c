@@ -19,6 +19,7 @@
 #include "access/tableam.h"
 #include "access/xloginsert.h"
 #include "miscadmin.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 
 static void _bt_bottomupdel_finish_pending(Page page, BTDedupState state,
@@ -69,7 +70,19 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	Size		pagesaving PG_USED_FOR_ASSERTS_ONLY = 0;
 	bool		singlevalstrat = false;
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
+	bool		pageprefix = P_HASPREFIX(opaque);
+	BTItemBuf	curbuf;			/* decode scratch for the loop's current item */
+	BTItemBuf	basebuf;		/* decode scratch kept for the pending base */
 	XLogRecPtr	recptr;
+	IndexTuple *dedup_plain = NULL;	/* deduped plain items, for prefix WAL */
+	int			dedup_nplain = 0;
+	IndexTuple	dedup_hikey = NULL;
+	char		dedup_prefix[BTREE_PREFIX_MAX];
+	Size		dedup_prefixlen = 0;
+	bool		dedup_islogprefix = false;	/* page ended up prefix-coded */
+	char	   *dedup_walbuf = NULL;	/* packed prefix-dedup WAL payload */
+	Size		dedup_walbuflen = 0;
+	bool		dedup_rfpi = false;	/* fall back to a forced full-page image */
 
 	/* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
 	newitemsz += sizeof(ItemIdData);
@@ -120,7 +133,16 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	newpage = PageGetTempPageCopySpecial(page);
 	PageSetLSN(newpage, PageGetLSN(page));
 
-	/* Copy high key, if any */
+	/*
+	 * The rebuilt page is laid out plain here (clear any inherited BTP_PREFIX;
+	 * PageGetTempPageCopySpecial copies the special area but not the PREFIX
+	 * item).  If the page was prefix-compressed it is re-compressed as a whole
+	 * below, after deduplication, honouring Strategy 1.
+	 */
+	if (pageprefix)
+		BTPageGetOpaque(newpage)->btpo_flags &= ~BTP_PREFIX;
+
+	/* Copy high key, if any (a pivot, stored plain on any page) */
 	if (!P_RIGHTMOST(opaque))
 	{
 		ItemId		hitemid = PageGetItemId(page, P_HIKEY);
@@ -140,12 +162,22 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 
 		Assert(!ItemIdIsDead(itemid));
 
+		/* Decode on a prefix page so keys/posting lists are the real ones. */
+		if (pageprefix)
+			itup = _bt_prefix_decode(page, itup, &curbuf);
+
 		if (offnum == minoff)
 		{
 			/*
 			 * No previous/base tuple for the data item -- use the data item
-			 * as base tuple of pending posting list
+			 * as base tuple of pending posting list.  On a prefix page the
+			 * base must survive the whole merge run (it is kept as a pointer
+			 * in state and read by _bt_dedup_finish_pending), so keep it in a
+			 * dedicated buffer rather than the per-iteration curbuf.
 			 */
+			if (pageprefix)
+				itup = _bt_prefix_decode(page, (IndexTuple) PageGetItem(page, itemid),
+										 &basebuf);
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 		else if (state->deduplicate &&
@@ -170,7 +202,20 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			 * form new posting tuple and add it to our temp page (newpage).
 			 * Else add pending interval's base tuple to the temp page as-is.
 			 */
-			pagesaving += _bt_dedup_finish_pending(newpage, state);
+			/*
+			 * On a prefix page the deduped items are laid out plain here; the
+			 * decoded set can exceed one page even when the coded form fit, so
+			 * tolerate an overflow and abort the whole pass (the caller then
+			 * splits the page instead of deduplicating it).
+			 */
+			{
+				Size		saved = _bt_dedup_finish_pending(newpage, state,
+																pageprefix);
+
+				if (pageprefix && saved == (Size) -1)
+					goto dedup_overflow;
+				pagesaving += saved;
+			}
 
 			if (singlevalstrat)
 			{
@@ -198,12 +243,22 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			}
 
 			/* itup starts new pending posting list */
+			if (pageprefix)
+				itup = _bt_prefix_decode(page,
+										 (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum)),
+										 &basebuf);
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 	}
 
 	/* Handle the last item */
-	pagesaving += _bt_dedup_finish_pending(newpage, state);
+	{
+		Size		saved = _bt_dedup_finish_pending(newpage, state, pageprefix);
+
+		if (pageprefix && saved == (Size) -1)
+			goto dedup_overflow;
+		pagesaving += saved;
+	}
 
 	/*
 	 * If no items suitable for deduplication were found, newpage must be
@@ -238,6 +293,110 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 		nopaque->btpo_flags &= ~BTP_HAS_GARBAGE;
 	}
 
+	/*
+	 * Re-apply prefix compression to the rebuilt (plain) page as a whole
+	 * (Strategy 1), before the critical section since it allocates a scratch
+	 * page.  First capture the deduped plain items and high key: if the page
+	 * does become prefix-compressed, redo rebuilds its coded bytes from these
+	 * plus the chosen prefix (via _bt_split_leaf_layout), the same way a prefix
+	 * leaf split is replayed -- no full-page image needed.
+	 */
+	if (pageprefix)
+	{
+		BTPageOpaque nopq = BTPageGetOpaque(newpage);
+		OffsetNumber nmin = P_FIRSTDATAKEY(nopq);
+		OffsetNumber nmax = PageGetMaxOffsetNumber(newpage);
+
+		dedup_nplain = (nmax >= nmin) ? (int) nmax - (int) nmin + 1 : 0;
+		if (dedup_nplain > 0)
+		{
+			dedup_plain = palloc(dedup_nplain * sizeof(IndexTuple));
+			for (int i = 0; i < dedup_nplain; i++)
+				dedup_plain[i] = CopyIndexTuple((IndexTuple)
+												PageGetItem(newpage,
+															PageGetItemId(newpage, nmin + i)));
+		}
+		if (!P_RIGHTMOST(nopq))
+		{
+			ItemId		hii = PageGetItemId(newpage, P_HIKEY);
+
+			dedup_hikey = CopyIndexTuple((IndexTuple) PageGetItem(newpage, hii));
+		}
+
+		_bt_prefix_compress_page(rel, newpage);
+
+		/* Did it actually compress?  (It gives up if a coded item won't fit.) */
+		if (P_HASPREFIX(BTPageGetOpaque(newpage)))
+		{
+			const char *pfx = _bt_page_get_prefix(newpage, &dedup_prefixlen);
+
+			if (dedup_prefixlen > 0)
+				memcpy(dedup_prefix, pfx, dedup_prefixlen);
+			dedup_islogprefix = true;
+		}
+	}
+
+	/*
+	 * Pack the prefix-dedup WAL payload now, before the critical section
+	 * (palloc is disallowed inside it): the chosen prefix bytes, then the high
+	 * key (unless rightmost), then the deduped plain items, each MAXALIGN'd,
+	 * in one contiguous buffer logged with a single rdata slot.
+	 */
+	if (dedup_islogprefix)
+	{
+		Size		off = dedup_prefixlen;
+
+		if (dedup_hikey != NULL)
+			off += MAXALIGN(IndexTupleSize(dedup_hikey));
+		for (int i = 0; i < dedup_nplain; i++)
+			off += MAXALIGN(IndexTupleSize(dedup_plain[i]));
+
+		/*
+		 * A pathologically compressible page can hold more plain data than
+		 * fits in one page; if the payload would be that large, fall back to
+		 * a forced full-page image of the coded page (bounded at BLCKSZ).
+		 */
+		if (off > BLCKSZ)
+			dedup_rfpi = true;
+#ifdef USE_INJECTION_POINTS
+		/* Let a test force the otherwise-rare full-page-image fallback. */
+		if (IS_INJECTION_POINT_ATTACHED("nbtree-prefix-force-rfpi"))
+			dedup_rfpi = true;
+#endif
+		if (dedup_rfpi)
+			 ;					/* image forced; no payload buffer built */
+		else
+		{
+			dedup_walbuflen = off;
+			dedup_walbuf = palloc(Max(off, 1));
+
+			off = 0;
+			if (dedup_prefixlen > 0)
+			{
+				memcpy(dedup_walbuf, dedup_prefix, dedup_prefixlen);
+				off += dedup_prefixlen;
+			}
+			if (dedup_hikey != NULL)
+			{
+				Size		hsz = IndexTupleSize(dedup_hikey);
+
+				memcpy(dedup_walbuf + off, dedup_hikey, hsz);
+				if (MAXALIGN(hsz) != hsz)
+					memset(dedup_walbuf + off + hsz, 0, MAXALIGN(hsz) - hsz);
+				off += MAXALIGN(hsz);
+			}
+			for (int i = 0; i < dedup_nplain; i++)
+			{
+				Size		sz = IndexTupleSize(dedup_plain[i]);
+
+				memcpy(dedup_walbuf + off, dedup_plain[i], sz);
+				if (MAXALIGN(sz) != sz)
+					memset(dedup_walbuf + off + sz, 0, MAXALIGN(sz) - sz);
+				off += MAXALIGN(sz);
+			}
+		}
+	}
+
 	START_CRIT_SECTION();
 
 	PageRestoreTempPage(newpage, page);
@@ -248,19 +407,38 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	{
 		xl_btree_dedup xlrec_dedup;
 
-		xlrec_dedup.nintervals = state->nintervals;
+		xlrec_dedup.nintervals = dedup_islogprefix ? 0 : state->nintervals;
+		xlrec_dedup.prefixlen = (uint8) dedup_prefixlen;
+		xlrec_dedup.flags = (dedup_hikey != NULL) ? XLH_DEDUP_NOT_RIGHTMOST : 0;
+		if (dedup_rfpi)
+			xlrec_dedup.flags |= XLH_DEDUP_RFPI;
 
 		XLogBeginInsert();
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		XLogRegisterBuffer(0, buf,
+						   REGBUF_STANDARD |
+						   (dedup_rfpi ? REGBUF_FORCE_IMAGE : 0));
 		XLogRegisterData(&xlrec_dedup, SizeOfBtreeDedup);
 
-		/*
-		 * The intervals array is not in the buffer, but pretend that it is.
-		 * When XLogInsert stores the whole buffer, the array need not be
-		 * stored too.
-		 */
-		XLogRegisterBufData(0, state->intervals,
-							state->nintervals * sizeof(BTDedupInterval));
+		if (dedup_islogprefix)
+		{
+			/*
+			 * Prefix-dedup: carry the chosen prefix and the deduped plain
+			 * items so redo can lay out the coded page; no full-page image
+			 * (unless the payload was too large, handled by the forced image).
+			 */
+			if (!dedup_rfpi && dedup_walbuflen > 0)
+				XLogRegisterBufData(0, dedup_walbuf, dedup_walbuflen);
+		}
+		else
+		{
+			/*
+			 * The intervals array is not in the buffer, but pretend that it
+			 * is.  When XLogInsert stores the whole buffer, the array need not
+			 * be stored too.
+			 */
+			XLogRegisterBufData(0, state->intervals,
+								state->nintervals * sizeof(BTDedupInterval));
+		}
 
 		recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_DEDUP);
 	}
@@ -275,6 +453,20 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	Assert(pagesaving < newitemsz || PageGetExactFreeSpace(page) >= newitemsz);
 
 	/* cannot leak memory here */
+	pfree(state->htids);
+	pfree(state);
+	return;
+
+dedup_overflow:
+
+	/*
+	 * A prefix page's deduped items did not fit when laid out plain.  Leave
+	 * the original page untouched and return without writing anything; the
+	 * caller falls through to split the page.  No critical section was
+	 * entered and the buffer was not marked dirty, so the page is unchanged.
+	 */
+	Assert(pageprefix);
+	pfree(newpage);
 	pfree(state->htids);
 	pfree(state);
 }
@@ -318,6 +510,9 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 	TM_IndexDeleteOp delstate;
 	bool		neverdedup;
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
+	bool		pageprefix = P_HASPREFIX(opaque);
+	BTItemBuf	curbuf;			/* decode scratch for the loop's current item */
+	BTItemBuf	basebuf;		/* decode scratch kept for the pending base */
 
 	/* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
 	newitemsz += sizeof(ItemIdData);
@@ -371,9 +566,24 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 
 		Assert(!ItemIdIsDead(itemid));
 
+		/*
+		 * On a prefix-compressed page decode the item so _bt_keep_natts_fast
+		 * sees the real key.  The base of a pending interval must survive the
+		 * whole run (it is compared against each following item), so keep it
+		 * in its own buffer; the current item uses a reused buffer.  Heap TIDs
+		 * and posting lists are preserved by coding, so _bt_dedup_start_pending
+		 * and _bt_bottomupdel_finish_pending (which read only TIDs/sizes, by
+		 * page offset) need no decode.
+		 */
+		if (pageprefix)
+			itup = _bt_prefix_decode(page, itup, &curbuf);
+
 		if (offnum == minoff)
 		{
 			/* itup starts first pending interval */
+			if (pageprefix)
+				itup = _bt_prefix_decode(page, (IndexTuple) PageGetItem(page, itemid),
+										 &basebuf);
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 		else if (_bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
@@ -387,6 +597,9 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 			_bt_bottomupdel_finish_pending(page, state, &delstate);
 
 			/* itup starts new pending interval */
+			if (pageprefix)
+				itup = _bt_prefix_decode(page, (IndexTuple) PageGetItem(page, itemid),
+										 &basebuf);
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 	}
@@ -554,7 +767,7 @@ _bt_dedup_save_htid(BTDedupState state, IndexTuple itup)
  * where no deduplication was possible.
  */
 Size
-_bt_dedup_finish_pending(Page newpage, BTDedupState state)
+_bt_dedup_finish_pending(Page newpage, BTDedupState state, bool overflowok)
 {
 	OffsetNumber tupoff;
 	Size		tuplesz;
@@ -572,7 +785,11 @@ _bt_dedup_finish_pending(Page newpage, BTDedupState state)
 		Assert(tuplesz == MAXALIGN(IndexTupleSize(state->base)));
 		Assert(tuplesz <= BTMaxItemSize);
 		if (PageAddItem(newpage, state->base, tuplesz, tupoff, false, false) == InvalidOffsetNumber)
+		{
+			if (overflowok)
+				return (Size) -1;
 			elog(ERROR, "deduplication failed to add tuple to page");
+		}
 
 		spacesaving = 0;
 	}
@@ -591,13 +808,26 @@ _bt_dedup_finish_pending(Page newpage, BTDedupState state)
 		Assert(tuplesz == MAXALIGN(IndexTupleSize(final)));
 		Assert(tuplesz <= BTMaxItemSize);
 		if (PageAddItem(newpage, final, tuplesz, tupoff, false, false) == InvalidOffsetNumber)
+		{
+			pfree(final);
+			if (overflowok)
+				return (Size) -1;
 			elog(ERROR, "deduplication failed to add tuple to page");
+		}
 
 		pfree(final);
 		spacesaving = state->phystupsize - (tuplesz + sizeof(ItemIdData));
 		/* Increment nintervals, since we wrote a new posting list tuple */
 		state->nintervals++;
-		Assert(spacesaving > 0 && spacesaving < BLCKSZ);
+
+		/*
+		 * On an ordinary page the merged interval's tuples were all physically
+		 * present on one page, so the saving is bounded by BLCKSZ.  On a prefix
+		 * page (overflowok) phystupsize is the DECODED size of those tuples,
+		 * which can exceed a page (a coded page holds more logical data than
+		 * fits plain), so only require the saving to be positive there.
+		 */
+		Assert(spacesaving > 0 && (overflowok || spacesaving < BLCKSZ));
 	}
 
 	/* Reset state for next pending posting list */
@@ -783,16 +1013,22 @@ _bt_do_singleval(Relation rel, Page page, BTDedupState state,
 				 OffsetNumber minoff, IndexTuple newitem)
 {
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
+	bool		pageprefix = P_HASPREFIX(BTPageGetOpaque(page));
 	ItemId		itemid;
 	IndexTuple	itup;
+	BTItemBuf	buf;
 
 	itemid = PageGetItemId(page, minoff);
 	itup = (IndexTuple) PageGetItem(page, itemid);
+	if (pageprefix)
+		itup = _bt_prefix_decode(page, itup, &buf);
 
 	if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
 	{
 		itemid = PageGetItemId(page, PageGetMaxOffsetNumber(page));
 		itup = (IndexTuple) PageGetItem(page, itemid);
+		if (pageprefix)
+			itup = _bt_prefix_decode(page, itup, &buf);
 
 		if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
 			return true;
