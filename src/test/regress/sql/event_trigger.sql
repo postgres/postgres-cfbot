@@ -643,3 +643,25 @@ DROP POLICY pguc ON event_trigger_test;
 CREATE POLICY pguc ON event_trigger_test USING (FALSE);
 SET event_triggers = 'off';
 DROP POLICY pguc ON event_trigger_test;
+-- event triggers were disabled above; re-enable them for the test below
+RESET event_triggers;
+
+-- FOUND should be initially false in a PL/pgSQL event trigger function,
+-- and a value set by one call should not carry over to the next
+CREATE FUNCTION test_event_trigger_found() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE NOTICE 'FOUND is %', FOUND;
+	PERFORM 1;
+	RAISE NOTICE 'FOUND after PERFORM is %', FOUND;
+END;
+$$;
+CREATE EVENT TRIGGER test_event_trigger_found
+	ON ddl_command_start
+	WHEN TAG IN ('CREATE SCHEMA') EXECUTE FUNCTION test_event_trigger_found();
+CREATE SCHEMA test_event_trigger_found_schema;
+DROP SCHEMA test_event_trigger_found_schema;
+CREATE SCHEMA test_event_trigger_found_schema;
+DROP SCHEMA test_event_trigger_found_schema;
+DROP EVENT TRIGGER test_event_trigger_found;
+DROP FUNCTION test_event_trigger_found();

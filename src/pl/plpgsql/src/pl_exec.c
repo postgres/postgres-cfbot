@@ -1200,6 +1200,11 @@ plpgsql_exec_event_trigger(PLpgSQL_function *func, EventTriggerData *trigdata)
 	copy_plpgsql_datums(&estate, func);
 
 	/*
+	 * Set the magic variable FOUND to false
+	 */
+	exec_set_found(&estate, false);
+
+	/*
 	 * Let the instrumentation plugin peek at this function
 	 */
 	if (*plpgsql_plugin_ptr && (*plpgsql_plugin_ptr)->func_beg)
