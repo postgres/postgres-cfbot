@@ -31,18 +31,79 @@
 #include "utils/resowner.h"
 
 /*
- * Buffer state is a single 64-bit variable where following data is combined.
+ * Buffer state is a single 64-bit variable, [63:0], where the following
+ * data is combined.  Bit 0 is the least significant bit.  Bits [63:54] are
+ * unused.
  *
  * State of the buffer itself (in order):
- * - 18 bits refcount
- * - 4 bits usage count
- * - 12 bits of flags
- * - 18 bits share-lock count
- * - 1 bit share-exclusive locked
- * - 1 bit exclusive locked
+ * ------------------ LOW HALF -------------------
+ * [17: 0]  refcount                (18 bits)
+ * [21:18]  usage count             ( 4 bits)
+ * [33:22]  flags                   (12 bits)
+ * [   22]    BM_LOCKED
+ * [   23]    BM_DIRTY
+ * [   24]    BM_VALID
+ * [   25]    BM_TAG_VALID
+ * [   26]    BM_IO_IN_PROGRESS
+ * [   27]    BM_IO_ERROR
+ * [   28]    unused
+ * [   29]    BM_PIN_COUNT_WAITER
+ * [   30]    BM_CHECKPOINT_NEEDED
+ * [   31]    BM_PERMANENT
+ * ------------------ HIGH HALF ------------------
+ * [   32]    BM_LOCK_HAS_WAITERS
+ * [   33]    BM_LOCK_WAKE_IN_PROGRESS
+ * [51:34]  share-lock count        (18 bits)
+ * [   52]  share-exclusive locked  ( 1 bit)
+ * [   53]  exclusive locked        ( 1 bit)
+ * [63:54]  unused                  (10 bits)
  *
  * Combining these values allows to perform some operations without locking
- * the buffer header, by modifying them together with a CAS loop.
+ * the buffer header, by modifying them together with a CAS loop.  A 32-bit
+ * atomic is enough when every bit of the update sits in one half.  An
+ * update that touches both halves needs a 64-bit atomic.
+ *
+ * 32-bit atomic, low half [31:0]:
+ *
+ * - Pinning: raise the refcount [17:0] and, when appropriate, the usage
+ *   count [21:18], but only while BM_LOCKED [22] is clear (PinBuffer).
+ *   Seeing the header unlocked and raising the refcount is one step, so a
+ *   buffer is not pinned while its tag is being replaced.
+ *
+ * - Unpinning: subtract from the refcount [17:0] even while the header lock
+ *   [22] is held, and observe BM_PIN_COUNT_WAITER [29] in that same value,
+ *   so the last other pin can wake a cleanup-lock waiter (UnpinBuffer).
+ *
+ * - Clock-sweep victim selection and ring-buffer reuse: if the refcount
+ *   [17:0] is zero (and, for a ring buffer, the usage count [21:18] is at
+ *   most one) and the header is unlocked [22], either pin the buffer, 
+ *   setting refcount [17:0] to 1 if usagecount [21:18] is 0, or decrease
+ *   usagecount [21:18] (StrategyGetBuffer, GetBufferFromRing).
+ *
+ * - Setting BM_DIRTY [23], retrying while BM_LOCKED [22] is set, so the
+ *   flag is not set across TerminateBufferIO clearing it (MarkBufferDirty).
+ *
+ * - Publishing BM_PIN_COUNT_WAITER [29] with an atomic OR while the header
+ *   lock [22] is held, which leaves a concurrent refcount [17:0] decrement
+ *   intact (LockBufferForCleanup).
+ *
+ * - Finishing I/O: clear BM_IO_IN_PROGRESS [26], possibly BM_DIRTY [23],
+ *   and drop the I/O pin [17:0] together (TerminateBufferIO).
+ *
+ * 32-bit atomic, high half [63:32]:
+ *
+ * - Acquiring, upgrading a share lock [51:34] to share-exclusive [52], and
+ *   releasing the content lock [51:34], [52], or [53] (BufferLockAttempt,
+ *   SharedBufferBeginSetHintBits, BufferLockUnlock).
+ *
+ * 64-bit atomic, both halves:
+ *
+ * - Releasing the content lock ([51:34], [52], or [53]) and the pin [17:0]
+ *   in one subtraction (UnlockReleaseBuffer).
+ *
+ * - Releasing the header lock [22] while setting or clearing flags [33:22]
+ *   and adjusting the refcount [17:0] (UnlockBufHdrExt).  Flags [33:32]
+ *   are the high-half bits of that field.
  *
  * The definition of buffer state components is below.
  */
@@ -471,12 +532,31 @@ UnlockBufHdr(BufferDesc *desc)
  *
  * Note that this approach would not trivially work for usagecount, since we
  * need to cap the usagecount at BM_MAX_USAGE_COUNT.
+ *
+ * When set_bits and unset_bits are both in the low half, this is a 32-bit
+ * CAS of bits [31:0]. BM_LOCKED and the refcount are in that half too. The
+ * returned high half is then whatever old_buf_state already held, which can
+ * lag a concurrent content-lock update.
  */
 static inline uint64
 UnlockBufHdrExt(BufferDesc *desc, uint64 old_buf_state,
 				uint64 set_bits, uint64 unset_bits,
 				int refcount_change)
 {
+	bool		low_only;
+
+	if (set_bits == 0 && refcount_change == 0)
+	{
+		/*
+		 * No bits are being set and the refcount stays unchanged.
+		 * The update can be performed with an atomic AND.
+		 */
+		return pg_atomic_fetch_and_u64(&desc->state, ~(unset_bits | BM_LOCKED));
+	}
+
+	/* Refcount and BM_LOCKED are in [31:0]. Flags [33:32] are not. */
+	low_only = ((set_bits | unset_bits) >> 32) == 0;
+
 	for (;;)
 	{
 		uint64		buf_state = old_buf_state;
@@ -494,11 +574,19 @@ UnlockBufHdrExt(BufferDesc *desc, uint64 old_buf_state,
 		if (refcount_change != 0)
 			buf_state += BUF_REFCOUNT_ONE * refcount_change;
 
-		if (pg_atomic_compare_exchange_u64(&desc->state, &old_buf_state,
-										   buf_state))
+		if (low_only)
 		{
-			return old_buf_state;
+			/*
+			 * The update hits only the low half, compare exchange
+			 * can ignore the high half.
+			 */
+			if (pg_atomic_compare_exchange_u64_lo(&desc->state, &old_buf_state,
+												  buf_state))
+				return old_buf_state;
 		}
+		else if (pg_atomic_compare_exchange_u64(&desc->state, &old_buf_state,
+												buf_state))
+			return old_buf_state;
 	}
 }
 
