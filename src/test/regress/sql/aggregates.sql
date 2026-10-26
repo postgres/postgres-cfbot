@@ -1837,3 +1837,7 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+
+-- check that a grouped constant does not match an equal Const elsewhere
+select array[]::varchar(500)[] as a group by cast('true' as boolean);
+select array[]::varchar(500)[] as a group by 504::int4;
