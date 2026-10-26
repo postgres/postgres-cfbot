@@ -1287,28 +1287,13 @@ remove_self_join_rel(PlannerInfo *root,
 	Assert(found_relid);
 
 	/*
-	 * If the removed relation has a row mark, transfer it to the remaining
-	 * one.
-	 *
-	 * If both rels have row marks, just keep the one corresponding to the
-	 * remaining relation because we verified earlier that they have the same
-	 * strength.
+	 * If the relations have row marks, discard the removed relation's mark.
+	 * The caller has verified that both marks exist and have the same type.
 	 */
 	if (rmark)
 	{
-		if (kmark)
-		{
-			Assert(kmark->markType == rmark->markType);
-
-			root->rowMarks = list_delete_ptr(root->rowMarks, rmark);
-		}
-		else
-		{
-			/* Shouldn't have inheritance children yet. */
-			Assert(rmark->rti == rmark->prti);
-
-			rmark->rti = rmark->prti = toKeep->relid;
-		}
+		Assert(rmark->markType == kmark->markType);
+		root->rowMarks = list_delete_ptr(root->rowMarks, rmark);
 	}
 }
 
@@ -1826,10 +1811,16 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				continue;
 
 			/*
-			 * Check Row Marks equivalence. We can't remove the join if the
-			 * relations have row marks of different strength (e.g., one is
-			 * locked FOR UPDATE, and another just has ROW_MARK_REFERENCE for
-			 * EvalPlanQual rechecking).
+			 * If row marks are needed, preprocess_rowmarks() creates one for
+			 * every non-target base relation.  Target relations aren't SJE
+			 * candidates, so these relations must either both have row marks or
+			 * both lack them.
+			 *
+			 * Don't merge relations with different row mark types.  In
+			 * particular, a locking row mark can fetch an updated version of a
+			 * tuple, while a non-locking row mark preserves the version found by
+			 * the original scan.  We also conservatively reject different locking
+			 * row mark types rather than try to combine their lock strengths.
 			 */
 			foreach(lc, root->rowMarks)
 			{
@@ -1849,7 +1840,8 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				if (kmark && rmark)
 					break;
 			}
-			if (kmark && rmark && kmark->markType != rmark->markType)
+			Assert((kmark == NULL) == (rmark == NULL));
+			if (kmark && kmark->markType != rmark->markType)
 				continue;
 
 			/*
