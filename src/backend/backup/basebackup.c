@@ -382,6 +382,14 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 					ereport(ERROR,
 							(errmsg("calculated CRC checksum does not match value stored in file")));
 
+				/* Require backup_label for recovery from this backup */
+				controlData->backupLabelRequired = true;
+
+				INIT_CRC32C(controlData->crc);
+				COMP_CRC32C(controlData->crc, controlData,
+							offsetof(ControlFileData, crc));
+				FIN_CRC32C(controlData->crc);
+
 				/* Send the full file, zero-padded as it is on disk */
 				memset(controlFile, 0, PG_CONTROL_FILE_SIZE);
 				memcpy(controlFile, controlData, sizeof(ControlFileData));

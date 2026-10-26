@@ -305,6 +305,8 @@ main(int argc, char *argv[])
 		   LSN_FORMAT_ARGS(ControlFile->backupEndPoint));
 	printf(_("End-of-backup record required:        %s\n"),
 		   ControlFile->backupEndRequired ? _("yes") : _("no"));
+	printf(_("Backup label required:                %s\n"),
+		   ControlFile->backupLabelRequired ? _("yes") : _("no"));
 	printf(_("wal_level setting:                    %s\n"),
 		   wal_level_str(ControlFile->wal_level));
 	printf(_("wal_log_hints setting:                %s\n"),
