@@ -1287,12 +1287,58 @@ remove_self_join_rel(PlannerInfo *root,
 	Assert(found_relid);
 
 	/*
-	 * If the relations have row marks, discard the removed relation's mark.
-	 * The caller has verified that both marks exist and have the same type.
+	 * If the relations have row marks, merge their locking requirements into
+	 * the kept relation's mark, then discard the removed relation's mark.
+	 * The caller has rejected cases in which only one mark requires row
+	 * locking.
+	 *
+	 * When the marks have different lock strengths, retain the stronger lock
+	 * and its waitPolicy.  This produces the same result as an execution of
+	 * the unoptimized query in which the scan requesting the stronger lock
+	 * reaches each tuple first.  Choosing that ordering also avoids the risk
+	 * of lock-upgrade deadlocks that would exist if the weaker lock were
+	 * acquired first.
+	 *
+	 * For equal lock strengths, take the greater waitPolicy, as
+	 * applyLockingClause() does when combining locking clauses for one RTE.
 	 */
 	if (rmark)
 	{
-		Assert(rmark->markType == kmark->markType);
+		Assert(kmark != NULL);
+		Assert(kmark->rti == kmark->prti);
+		Assert(rmark->rti == rmark->prti);
+		Assert(!kmark->isParent);
+		Assert(!rmark->isParent);
+
+		/*
+		 * Since SJE only considers regular tables (not foreign tables),
+		 * we don't expect to see ROW_MARK_COPY marks.  It's important to
+		 * check this since the associated row-identity Vars in the tlist
+		 * are different for COPY marks.
+		 */
+		Assert(kmark->markType != ROW_MARK_COPY);
+		Assert(rmark->markType != ROW_MARK_COPY);
+
+		/* Merge the lock strengths and waitPolicies as described above */
+		if (rmark->strength > kmark->strength)
+		{
+			kmark->strength = rmark->strength;
+			/* copy fields derived from strength */
+			kmark->markType = rmark->markType;
+			kmark->allMarkTypes = rmark->allMarkTypes;
+			/* adopt rmark's waitPolicy too */
+			kmark->waitPolicy = rmark->waitPolicy;
+		}
+		else if (rmark->strength == kmark->strength)
+		{
+			/* adopt the greater waitPolicy */
+			kmark->waitPolicy = Max(kmark->waitPolicy, rmark->waitPolicy);
+		}
+		/*
+		 * Now drop the rmark from root->rowMarks.  Ideally we'd also get
+		 * rid of the rmark's associated row-identity Var in the tlist.
+		 * But that's just a ctid, so it doesn't seem worth the trouble.
+		 */
 		root->rowMarks = list_delete_ptr(root->rowMarks, rmark);
 	}
 }
@@ -1816,11 +1862,10 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 			 * candidates, so these relations must either both have row marks or
 			 * both lack them.
 			 *
-			 * Don't merge relations with different row mark types.  In
-			 * particular, a locking row mark can fetch an updated version of a
-			 * tuple, while a non-locking row mark preserves the version found by
-			 * the original scan.  We also conservatively reject different locking
-			 * row mark types rather than try to combine their lock strengths.
+			 * We cannot merge a locking mark with a non-locking mark, since they
+			 * can represent different sets of row values.  Different locking mark
+			 * types are compatible, however: remove_self_join_rel() will retain
+			 * the stronger lock requirement.
 			 */
 			foreach(lc, root->rowMarks)
 			{
@@ -1841,7 +1886,10 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 					break;
 			}
 			Assert((kmark == NULL) == (rmark == NULL));
-			if (kmark && kmark->markType != rmark->markType)
+			if (kmark &&
+				kmark->markType != rmark->markType &&
+				(!RowMarkRequiresRowShareLock(kmark->markType) ||
+				 !RowMarkRequiresRowShareLock(rmark->markType)))
 				continue;
 
 			/*
