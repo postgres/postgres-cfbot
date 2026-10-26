@@ -17,6 +17,7 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
+#include "access/hio.h"
 #include "access/table.h"
 #include "access/toast_compression.h"
 #include "access/toast_internals.h"
@@ -24,6 +25,7 @@
 #include "catalog/catalog.h"
 #include "miscadmin.h"
 #include "utils/fmgroids.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -184,13 +186,15 @@ toast_preserve_valueid(Relation toastrel, Oid toastoid,
  * value: datum to be pushed to toast storage
  * oldexternal: if not NULL, toast pointer previously representing the datum
  * options: options to be passed to heap_insert() for toast rows
+ * bistate: bulk insert state for the main relation, or NULL
  * ----------
  */
 Datum
-toast_save_datum(Relation rel, Datum value,
-				 varlena *oldexternal, uint32 options)
+toast_save_datum(Relation rel, Datum value, varlena *oldexternal, uint32 options,
+				 BulkInsertState bistate)
 {
 	Relation	toastrel;
+	BulkInsertState toast_bistate = NULL;
 	Relation   *toastidxs;
 	TupleDesc	toasttupDesc;
 	CommandId	mycid = GetCurrentCommandId(true);
@@ -219,6 +223,24 @@ toast_save_datum(Relation rel, Datum value,
 	 */
 	toastrel = table_open(rel->rd_rel->reltoastrelid, RowExclusiveLock);
 	toasttupDesc = toastrel->rd_att;
+
+	if (bistate != NULL)
+	{
+		if (bistate->toast_state == NULL)
+		{
+			MemoryContext oldcontext;
+
+			/*
+			 * Allocate the TOAST state in the same context as its parent, as
+			 * the current context may be reset before the bulk insert
+			 * finishes.
+			 */
+			oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(bistate));
+			bistate->toast_state = GetBulkInsertState(toastrel, bistate->strategy);
+			MemoryContextSwitchTo(oldcontext);
+		}
+		toast_bistate = bistate->toast_state;
+	}
 
 	/* Open all the toast indexes and look for the valid one */
 	validIndex = toast_open_indexes(toastrel,
@@ -354,7 +376,7 @@ toast_save_datum(Relation rel, Datum value,
 
 		toasttup = heap_form_tuple(toasttupDesc, t_values, t_isnull);
 
-		heap_insert(toastrel, toasttup, mycid, options, NULL);
+		heap_insert(toastrel, toasttup, mycid, options, toast_bistate);
 
 		/*
 		 * Create the index entry.  We cheat a little here by not using

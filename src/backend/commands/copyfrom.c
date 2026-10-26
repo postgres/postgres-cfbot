@@ -44,6 +44,7 @@
 #include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
 #include "utils/lsyscache.h"
@@ -81,12 +82,20 @@ typedef struct CopyMultiInsertBuffer
 {
 	TupleTableSlot *slots[MAX_BUFFERED_TUPLES]; /* Array to store tuples */
 	ResultRelInfo *resultRelInfo;	/* ResultRelInfo for 'relid' */
+	BufferAccessStrategy strategy;	/* bulk-write buffer strategy */
 	BulkInsertState bistate;	/* BulkInsertState for this rel if plain
 								 * table; NULL if foreign table */
 	int			nused;			/* number of 'slots' containing tuples */
 	uint64		linenos[MAX_BUFFERED_TUPLES];	/* Line # of tuple in copy
 												 * stream */
 } CopyMultiInsertBuffer;
+
+/* Stores single-insert state for one partition. */
+typedef struct CopySingleInsertState
+{
+	ResultRelInfo *resultRelInfo;
+	BulkInsertState bistate;
+} CopySingleInsertState;
 
 /*
  * Stores one or many CopyMultiInsertBuffers and details about the size and
@@ -369,7 +378,16 @@ CopyMultiInsertBufferInit(ResultRelInfo *rri)
 	buffer = palloc_object(CopyMultiInsertBuffer);
 	memset(buffer->slots, 0, sizeof(TupleTableSlot *) * MAX_BUFFERED_TUPLES);
 	buffer->resultRelInfo = rri;
-	buffer->bistate = (rri->ri_FdwRoutine == NULL) ? GetBulkInsertState() : NULL;
+	if (rri->ri_FdwRoutine == NULL)
+	{
+		buffer->strategy = GetAccessStrategy(BAS_BULKWRITE);
+		buffer->bistate = GetBulkInsertState(rri->ri_RelationDesc, buffer->strategy);
+	}
+	else
+	{
+		buffer->strategy = NULL;
+		buffer->bistate = NULL;
+	}
 	buffer->nused = 0;
 
 	return buffer;
@@ -635,9 +653,13 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
 	{
 		Assert(buffer->bistate != NULL);
 		FreeBulkInsertState(buffer->bistate);
+		FreeAccessStrategy(buffer->strategy);
 	}
 	else
+	{
 		Assert(buffer->bistate == NULL);
+		Assert(buffer->strategy == NULL);
+	}
 
 	/* Since we only create slots on demand, just drop the non-null ones. */
 	for (i = 0; i < MAX_BUFFERED_TUPLES && buffer->slots[i] != NULL; i++)
@@ -648,6 +670,44 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
 								 miinfo->ti_options);
 
 	pfree(buffer);
+}
+
+/*
+ * Create state for single inserts into one partition.
+ */
+static CopySingleInsertState *
+CopySingleInsertStateInit(ResultRelInfo *rri, BufferAccessStrategy strategy)
+{
+	CopySingleInsertState *state;
+
+	Assert(rri->ri_CopySingleInsertState == NULL);
+
+	state = palloc_object(CopySingleInsertState);
+	state->resultRelInfo = rri;
+	state->bistate = GetBulkInsertState(rri->ri_RelationDesc, strategy);
+	rri->ri_CopySingleInsertState = state;
+
+	return state;
+}
+
+/*
+ * Release all states used for partitioned single inserts.
+ */
+static void
+CopySingleInsertStatesCleanup(List *states)
+{
+	ListCell   *lc;
+
+	foreach(lc, states)
+	{
+		CopySingleInsertState *state = lfirst(lc);
+
+		state->resultRelInfo->ri_CopySingleInsertState = NULL;
+		FreeBulkInsertState(state->bistate);
+		pfree(state);
+	}
+
+	list_free(states);
 }
 
 /*
@@ -793,7 +853,9 @@ CopyFrom(CopyFromState cstate)
 	ErrorContextCallback errcallback;
 	CommandId	mycid = GetCurrentCommandId(true);
 	uint32		ti_options = 0; /* start with default options for insert */
+	BufferAccessStrategy strategy = NULL;
 	BulkInsertState bistate = NULL;
+	List	   *singleInsertStates = NIL;
 	CopyInsertMethod insertMethod;
 	CopyMultiInsertInfo multiInsertInfo = {0};	/* pacify compiler */
 	int64		processed = 0;
@@ -1086,7 +1148,9 @@ CopyFrom(CopyFromState cstate)
 	{
 		singleslot = table_slot_create(resultRelInfo->ri_RelationDesc,
 									   &estate->es_tupleTable);
-		bistate = GetBulkInsertState();
+		strategy = GetAccessStrategy(BAS_BULKWRITE);
+		if (proute == NULL)
+			bistate = GetBulkInsertState(resultRelInfo->ri_RelationDesc, strategy);
 	}
 
 	has_before_insert_row_trig = (resultRelInfo->ri_TrigDesc &&
@@ -1256,8 +1320,25 @@ CopyFrom(CopyFromState cstate)
 											 &processed);
 				}
 
-				if (bistate != NULL)
-					ReleaseBulkInsertStatePin(bistate);
+				if (prevResultRelInfo != NULL &&
+					prevResultRelInfo->ri_CopySingleInsertState != NULL)
+					ReleaseBulkInsertStatePin(prevResultRelInfo->ri_CopySingleInsertState->bistate);
+
+				if (!leafpart_use_multi_insert && resultRelInfo->ri_FdwRoutine == NULL)
+				{
+					CopySingleInsertState *state = resultRelInfo->ri_CopySingleInsertState;
+
+					if (state == NULL)
+					{
+						state = CopySingleInsertStateInit(resultRelInfo, strategy);
+						singleInsertStates = lappend(singleInsertStates, state);
+					}
+
+					bistate = state->bistate;
+				}
+				else
+					bistate = NULL;
+
 				prevResultRelInfo = resultRelInfo;
 			}
 
@@ -1482,8 +1563,12 @@ CopyFrom(CopyFromState cstate)
 								  cstate->num_errors));
 	}
 
-	if (bistate != NULL)
+	if (proute != NULL)
+		CopySingleInsertStatesCleanup(singleInsertStates);
+	else if (bistate != NULL)
 		FreeBulkInsertState(bistate);
+	if (strategy != NULL)
+		FreeAccessStrategy(strategy);
 
 	MemoryContextSwitchTo(oldcontext);
 

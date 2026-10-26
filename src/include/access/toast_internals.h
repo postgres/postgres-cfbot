@@ -17,12 +17,15 @@
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
+struct BulkInsertStateData;
+
 extern Datum toast_compress_datum(Datum value, char cmethod);
 extern Oid	toast_get_valid_index(Oid toastoid, LOCKMODE lock);
 
 extern void toast_delete_datum(Relation rel, Datum value, bool is_speculative);
 extern Datum toast_save_datum(Relation rel, Datum value,
-							  varlena *oldexternal, uint32 options);
+							  varlena *oldexternal, uint32 options,
+							  struct BulkInsertStateData *bistate);
 
 extern void toast_valueid_scankey_init(ScanKey entry, Oid toast_typid,
 									   Oid8 valueid);

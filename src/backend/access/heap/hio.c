@@ -244,15 +244,23 @@ RelationAddBlocks(Relation relation, BulkInsertState bistate,
 	uint32		not_in_fsm_pages;
 	Buffer		buffer;
 	Page		page;
+	bool		use_extension_state;
+
+	/*
+	 * TOAST writes share the bulk ring and retain a target-page pin, but do
+	 * not reserve private extension ranges that can leave large unused tails
+	 * in small TOAST relations.
+	 */
+	use_extension_state = bistate != NULL && relation->rd_rel->relkind != RELKIND_TOASTVALUE;
 
 	/*
 	 * Determine by how many pages to try to extend by.
 	 */
-	if (bistate == NULL && !use_fsm)
+	if (!use_extension_state && !use_fsm)
 	{
 		/*
-		 * If we have neither bistate, nor can use the FSM, we can't bulk
-		 * extend - there'd be no way to find the additional pages.
+		 * Without the FSM or relation extension state, there'd be no way to
+		 * find additional pages after extending.
 		 */
 		extend_by_pages = 1;
 	}
@@ -295,7 +303,7 @@ RelationAddBlocks(Relation relation, BulkInsertState bistate,
 		 *   prevent future contention.
 		 * ---
 		 */
-		if (bistate)
+		if (use_extension_state)
 			extend_by_pages = Max(extend_by_pages, bistate->already_extended_by);
 
 		/*
@@ -308,14 +316,14 @@ RelationAddBlocks(Relation relation, BulkInsertState bistate,
 	/*
 	 * How many of the extended pages should be entered into the FSM?
 	 *
-	 * If we have a bistate, only enter pages that we don't need ourselves
-	 * into the FSM.  Otherwise every other backend will immediately try to
-	 * use the pages this backend needs for itself, causing unnecessary
-	 * contention.  If we don't have a bistate, we can't avoid the FSM.
+	 * If we retain private extension state, only enter pages that we don't
+	 * need ourselves into the FSM.  Otherwise every other backend will
+	 * immediately try to use the pages this backend needs for itself, causing
+	 * unnecessary contention.
 	 *
 	 * Never enter the page returned into the FSM, we'll immediately use it.
 	 */
-	if (num_pages > 1 && bistate == NULL)
+	if (num_pages > 1 && !use_extension_state)
 		not_in_fsm_pages = 1;
 	else
 		not_in_fsm_pages = num_pages;
@@ -404,7 +412,7 @@ RelationAddBlocks(Relation relation, BulkInsertState bistate,
 		FreeSpaceMapVacuumRange(relation, first_fsm_block, last_block + 1);
 	}
 
-	if (bistate)
+	if (use_extension_state)
 	{
 		/*
 		 * Remember the additional pages we extended by, so we later can use
@@ -421,10 +429,14 @@ RelationAddBlocks(Relation relation, BulkInsertState bistate,
 			bistate->last_free = InvalidBlockNumber;
 		}
 
-		/* maintain bistate->current_buf */
+		bistate->already_extended_by += extend_by_pages;
+	}
+
+	/* maintain bistate->current_buf */
+	if (bistate)
+	{
 		IncrBufferRefCount(buffer);
 		bistate->current_buf = buffer;
-		bistate->already_extended_by += extend_by_pages;
 	}
 
 	return buffer;
