@@ -47,7 +47,11 @@ else
   var_cxx = 'g++'
   var_cxxflags = ''
 endif
-var_cppflags = ' '.join(cppflags)
+var_cppflags = ' '.join(cppflags + pgxs_dep_cflags['openssl'])
+# pg_config --cppflags also includes ICU_CFLAGS, as with autoconf, where
+# Makefile.global adds $(ICU_CFLAGS) to CPPFLAGS
+var_cppflags_pg_config = ' '.join(
+  cppflags + pgxs_dep_cflags['openssl'] + pgxs_dep_cflags['icu'])
 var_cflags_sl = ' '.join(cc.get_supported_arguments('-fPIC'))
 # explicitly add -Wl,--as-needed, normally added by meson, but we want it for
 # PGXS compatibility
