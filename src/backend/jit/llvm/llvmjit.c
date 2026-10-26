@@ -432,6 +432,15 @@ llvm_pg_var_type(const char *varname)
 
 	typ = LLVMGlobalGetValueType(v_srcvar);
 
+	/*
+	 * The variables in llvmjit_types.c are of scalar or named struct types,
+	 * so a variable of an unnamed struct type is not of its declared type.
+	 * Using it would generate invalid IR, so refuse it.
+	 */
+	if (LLVMGetTypeKind(typ) == LLVMStructTypeKind && LLVMIsLiteralStruct(typ))
+		elog(ERROR, "variable %s in llvmjit_types.c is not of its declared type",
+			 varname);
+
 	return typ;
 }
 
