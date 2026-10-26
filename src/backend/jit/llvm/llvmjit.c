@@ -433,6 +433,24 @@ llvm_pg_var_type(const char *varname)
 	typ = LLVMGlobalGetValueType(v_srcvar);
 
 	/*
+	 * When llvmjit_types.c is compiled with -fsanitize=address,
+	 * AddressSanitizer gives each variable the type { T, [N x i8] }: the
+	 * object of the declared type T at offset zero, followed by a redzone.
+	 * Take T from it.
+	 */
+	if (LLVMGetTypeKind(typ) == LLVMStructTypeKind &&
+		LLVMIsLiteralStruct(typ) &&
+		LLVMCountStructElementTypes(typ) == 2)
+	{
+		LLVMTypeRef redzone = LLVMStructGetTypeAtIndex(typ, 1);
+
+		if (LLVMGetTypeKind(redzone) == LLVMArrayTypeKind &&
+			LLVMGetTypeKind(LLVMGetElementType(redzone)) == LLVMIntegerTypeKind &&
+			LLVMGetIntTypeWidth(LLVMGetElementType(redzone)) == 8)
+			typ = LLVMStructGetTypeAtIndex(typ, 0);
+	}
+
+	/*
 	 * The variables in llvmjit_types.c are of scalar or named struct types,
 	 * so a variable of an unnamed struct type is not of its declared type.
 	 * Using it would generate invalid IR, so refuse it.
