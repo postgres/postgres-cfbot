@@ -1933,3 +1933,19 @@ SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
  x&lt;P&gt;73&lt;/P&gt;0.42truej
 (1 row)
 
+-- The namespace URI of XMLNAMESPACES is a b_expr, so a COLLATE clause in it
+-- needs parentheses, which pretty-printed output does not add by itself
+CREATE VIEW xmltableview_collate AS
+SELECT * FROM XMLTABLE(XMLNAMESPACES(('http://x.y' COLLATE "C") AS p,
+                                     DEFAULT ('http://x.z' COLLATE "C")),
+  '/p:a' PASSING (NULL::xml) COLUMNS v text PATH 'p:b');
+SELECT pg_get_viewdef('xmltableview_collate'::regclass, true);
+                                                                                      pg_get_viewdef                                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  SELECT v                                                                                                                                                                               +
+    FROM XMLTABLE(XMLNAMESPACES (('http://x.y'::text COLLATE "C") AS p, DEFAULT ('http://x.z'::text COLLATE "C")), ('/p:a'::text) PASSING (NULL::xml) COLUMNS v text PATH ('p:b'::text));
+(1 row)
+
+SELECT pg_get_viewdef('xmltableview_collate'::regclass, true) AS def \gset
+CREATE OR REPLACE VIEW xmltableview_collate AS :def
+DROP VIEW xmltableview_collate;
