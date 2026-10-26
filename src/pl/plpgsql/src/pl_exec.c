@@ -5123,12 +5123,7 @@ exec_assign_expr(PLpgSQL_execstate *estate, PLpgSQL_datum *target,
 	Oid			valtype;
 	int32		valtypmod;
 
-	/*
-	 * If first time through, create a plan for this expression.
-	 */
-	if (expr->plan == NULL)
-		exec_prepare_plan(estate, expr, 0);
-
+	/* exec_eval_expr will create a plan if this is the first time through */
 	value = exec_eval_expr(estate, expr, &isnull, &valtype, &valtypmod);
 	exec_assign_value(estate, target, value, isnull, valtype, valtypmod);
 	exec_eval_cleanup(estate);
