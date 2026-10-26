@@ -53,6 +53,8 @@ typedef struct
 	List	   *groupClauseSubLevels;	/* list of lists of TargetEntry */
 	List	   *gset_common;	/* integer list of sortgrouprefs */
 	bool		have_non_var_grouping;
+	Bitmapset  *varfree_grouping;	/* groupClauses items with no level-zero
+									 * Vars, by position */
 	List	  **func_grouped_rels;
 	int			sublevels_up;
 	bool		in_agg_direct_args;
@@ -69,6 +71,7 @@ static Node *substitute_grouped_columns(Node *node, ParseState *pstate, Query *q
 										List *groupClauses, List *groupClauseCommonVars,
 										List *gset_common,
 										bool have_non_var_grouping,
+										Bitmapset *varfree_grouping,
 										List **func_grouped_rels);
 static Node *substitute_grouped_columns_mutator(Node *node,
 												substitute_grouped_columns_context *context);
@@ -1142,8 +1145,10 @@ parseCheckAggregates(ParseState *pstate, Query *qry)
 	List	   *groupClauses = NIL;
 	List	   *groupClauseCommonVars = NIL;
 	bool		have_non_var_grouping;
+	Bitmapset  *varfree_grouping = NULL;
 	List	   *func_grouped_rels = NIL;
 	ListCell   *l;
+	int			attnum;
 	bool		hasJoinRTEs;
 	bool		hasSelfRefRTEs;
 	Node	   *clause;
@@ -1267,11 +1272,21 @@ parseCheckAggregates(ParseState *pstate, Query *qry)
 	 * Track Vars that are included in all grouping sets separately in
 	 * groupClauseCommonVars, since these are the only ones we can use to
 	 * check for functional dependencies.
+	 *
+	 * Also remember which grouping expressions contain no Vars of this query
+	 * level (constants, Params, outer references and the like).  Those can
+	 * only be referenced through the targetlist entry that GROUP BY
+	 * identified; see substitute_grouped_columns_mutator.
 	 */
 	have_non_var_grouping = false;
+	attnum = 0;
 	foreach(l, groupClauses)
 	{
 		TargetEntry *tle = lfirst(l);
+
+		attnum++;
+		if (!contain_vars_of_level((Node *) tle->expr, 0))
+			varfree_grouping = bms_add_member(varfree_grouping, attnum);
 
 		if (!IsA(tle->expr, Var))
 		{
@@ -1308,6 +1323,7 @@ parseCheckAggregates(ParseState *pstate, Query *qry)
 								   groupClauses, groupClauseCommonVars,
 								   gset_common,
 								   have_non_var_grouping,
+								   varfree_grouping,
 								   &func_grouped_rels);
 
 	clause = (Node *) qry->havingQual;
@@ -1321,6 +1337,7 @@ parseCheckAggregates(ParseState *pstate, Query *qry)
 								   groupClauses, groupClauseCommonVars,
 								   gset_common,
 								   have_non_var_grouping,
+								   varfree_grouping,
 								   &func_grouped_rels);
 
 	/*
@@ -1351,6 +1368,7 @@ substitute_grouped_columns(Node *node, ParseState *pstate, Query *qry,
 						   List *groupClauses, List *groupClauseCommonVars,
 						   List *gset_common,
 						   bool have_non_var_grouping,
+						   Bitmapset *varfree_grouping,
 						   List **func_grouped_rels)
 {
 	substitute_grouped_columns_context context;
@@ -1363,6 +1381,7 @@ substitute_grouped_columns(Node *node, ParseState *pstate, Query *qry,
 	context.groupClauseSubLevels = NIL;
 	context.gset_common = gset_common;
 	context.have_non_var_grouping = have_non_var_grouping;
+	context.varfree_grouping = varfree_grouping;
 	context.func_grouped_rels = func_grouped_rels;
 	context.sublevels_up = 0;
 	context.in_agg_direct_args = false;
@@ -1377,6 +1396,9 @@ substitute_grouped_columns_mutator(Node *node,
 
 	if (node == NULL)
 		return NULL;
+	if (IsA(node, Const) ||
+		IsA(node, Param))
+		return node;			/* constants are always acceptable */
 
 	if (IsA(node, Aggref))
 	{
@@ -1425,6 +1447,42 @@ substitute_grouped_columns_mutator(Node *node,
 	}
 
 	/*
+	 * A grouping expression that contains no Vars of this query level, such
+	 * as a constant, refers only to the targetlist entry that GROUP BY
+	 * identified.  Other occurrences of an equal expression are not
+	 * references to that grouping column, so they are not candidates for the
+	 * equal() matching below.  Replacing them would be wrong anyway: they can
+	 * appear in places where Vars are not allowed, such as the elemexpr of an
+	 * ArrayCoerceExpr.
+	 */
+	if (IsA(node, TargetEntry) &&
+		((TargetEntry *) node)->ressortgroupref != 0 &&
+		context->have_non_var_grouping &&
+		context->sublevels_up == 0)
+	{
+		TargetEntry *tle = (TargetEntry *) node;
+		int			attnum = 0;
+
+		foreach(gl, context->groupClauses)
+		{
+			TargetEntry *grouptle = (TargetEntry *) lfirst(gl);
+
+			attnum++;
+			if (grouptle->ressortgroupref != tle->ressortgroupref)
+				continue;
+			if (bms_is_member(attnum, context->varfree_grouping))
+			{
+				tle = flatCopyTargetEntry(tle);
+				tle->expr = (Expr *) buildGroupedVar(attnum,
+													 tle->ressortgroupref,
+													 context);
+				return (Node *) tle;
+			}
+			break;
+		}
+	}
+
+	/*
 	 * If we have any GROUP BY items that are not simple Vars, check to see if
 	 * subexpression as a whole matches any GROUP BY item. We need to do this
 	 * at every recursion level so that we recognize GROUPed-BY expressions
@@ -1448,6 +1506,11 @@ substitute_grouped_columns_mutator(Node *node,
 			TargetEntry *tle = (TargetEntry *) lfirst(gl);
 
 			attnum++;
+
+			/* Var-free items are matched only by targetlist entry, above */
+			if (bms_is_member(attnum, context->varfree_grouping))
+				continue;
+
 			if (equal(node, tle->expr))
 			{
 				/* acceptable, replace it with a GROUP Var */
@@ -1457,16 +1520,6 @@ substitute_grouped_columns_mutator(Node *node,
 			}
 		}
 	}
-
-	/*
-	 * Constants are always acceptable.  We have to do this after we checked
-	 * the subexpression as a whole for a match, because it is possible that
-	 * we have GROUP BY items that are constants, and the constants would
-	 * become not so constant after the grouping step.
-	 */
-	if (IsA(node, Const) ||
-		IsA(node, Param))
-		return node;
 
 	/*
 	 * If we have an ungrouped Var of the original query level, we have a
@@ -1624,6 +1677,7 @@ finalize_grouping_exprs(Node *node, ParseState *pstate, Query *qry,
 	context.groupClauseSubLevels = NIL;
 	context.gset_common = NIL;
 	context.have_non_var_grouping = have_non_var_grouping;
+	context.varfree_grouping = NULL;
 	context.func_grouped_rels = NULL;
 	context.sublevels_up = 0;
 	context.in_agg_direct_args = false;
