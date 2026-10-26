@@ -1847,6 +1847,8 @@ OpenTableList(List *tables)
 	ListCell   *lc;
 	List	   *relids_with_rf = NIL;
 	List	   *relids_with_collist = NIL;
+	List	   *relids_explicit = NIL;
+	List	   *relids_recursing = NIL;
 
 	/*
 	 * Open, share-lock, and check all the explicitly-specified relations
@@ -1888,6 +1890,45 @@ OpenTableList(List *tables)
 						 errmsg("conflicting or redundant column lists for table \"%s\"",
 								RelationGetRelationName(rel))));
 
+			/*
+			 * Disallow duplicate tables if one mention specifies ONLY and
+			 * another does not, since it's not clear whether descendant
+			 * tables should be included.  Plain "foo, foo" (agreeing on
+			 * ONLY-ness) remains a silently-tolerated no-op, as before.
+			 *
+			 * Check is just for explicitly mentioned tables to avoid falsely
+			 * giving errors for implicitly inherited child tables.
+			 *
+			 * Mismatched ONLY-ness remains silently-tolerated for
+			 * partitioned tables since ONLY has "no effect" for them anyway.
+			 *
+			 * About the Lists:
+			 *
+			 * `relids` holds every relation added to the result so far, both
+			 * those the user named and inheritance children added implicitly
+			 * by recursion.  It is used to filter out duplicates.
+			 *
+			 * `relids_explicit` holds only the relations the user actually
+			 * named (a subset of `relids`).  `relids_recursing` holds those
+			 * explicitly named relations whose first mention did not specify
+			 * ONLY.  Together they are used to detect conflicting ONLY
+			 * specifications for the same table.
+			 */
+			if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
+				list_member_oid(relids_explicit, myrelid) &&
+				recurse != list_member_oid(relids_recursing, myrelid))
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_OBJECT),
+						 errmsg("conflicting ONLY specifications for table \"%s\"",
+								RelationGetRelationName(rel))));
+
+			if (!list_member_oid(relids_explicit, myrelid))
+			{
+				relids_explicit = lappend_oid(relids_explicit, myrelid);
+				if (recurse)
+					relids_recursing = lappend_oid(relids_recursing, myrelid);
+			}
+
 			table_close(rel, ShareUpdateExclusiveLock);
 			continue;
 		}
@@ -1899,12 +1940,16 @@ OpenTableList(List *tables)
 		pub_rel->except = t->except;
 		rels = lappend(rels, pub_rel);
 		relids = lappend_oid(relids, myrelid);
+		relids_explicit = lappend_oid(relids_explicit, myrelid);
 
 		if (t->whereClause)
 			relids_with_rf = lappend_oid(relids_with_rf, myrelid);
 
 		if (t->columns)
 			relids_with_collist = lappend_oid(relids_with_collist, myrelid);
+
+		if (recurse)
+			relids_recursing = lappend_oid(relids_recursing, myrelid);
 
 		/*
 		 * Add children of this rel, if requested, so that they too are added
