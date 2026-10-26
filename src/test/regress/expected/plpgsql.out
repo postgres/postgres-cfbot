@@ -1870,6 +1870,30 @@ select f1(int4range(42, 49), array[11]) as int, f1(float8range(4.5, 7.8), array[
 (1 row)
 
 drop function f1(x anycompatiblerange, y anycompatiblearray);
+create function f1(x anycompatiblemultirange) returns anycompatiblemultirange as $$
+begin
+  return x;
+end$$ language plpgsql;
+select f1(int4multirange(int4range(42, 49))) as int, f1(nummultirange(numrange(4.5, 7.8))) as num;
+    int    |     num     
+-----------+-------------
+ {[42,49)} | {[4.5,7.8)}
+(1 row)
+
+drop function f1(x anycompatiblemultirange);
+-- validation must not compile an anycompatiblemultirange result as int4,
+-- else a later call with a different range type would reuse that function
+create function f1(x anycompatiblerange) returns anycompatiblemultirange as $$
+begin
+  return multirange(x);
+end$$ language plpgsql;
+select f1(int4range(42, 49)) as int, f1(numrange(4.5, 7.8)) as num;
+    int    |     num     
+-----------+-------------
+ {[42,49)} | {[4.5,7.8)}
+(1 row)
+
+drop function f1(x anycompatiblerange);
 create function f1(a anyelement, b anyarray,
                    c anycompatible, d anycompatible,
                    OUT x anyarray, OUT y anycompatiblearray)
