@@ -1969,22 +1969,42 @@ select * from
   current_date as d,
   localtimestamp(3) as t,
   cast(1+2 as int4) as i4,
-  cast(1+2 as int8) as i8;
+  cast(1+2 as int8) as i8,
+  cast(localtimestamp at time zone 'UTC' as timestamptz) as atz,
+  cast(current_time at time zone 'UTC' as timetz) as atzt,
+  cast(localtimestamp at local as timestamptz) as atl,
+  cast((localtimestamp, localtimestamp) overlaps
+       (localtimestamp, localtimestamp) as boolean) as o,
+  cast('foo' is normalized as boolean) as isn,
+  rows from(cast('foo' is normalized as boolean), now()) as rf(rfa, rfb);
 select pg_get_viewdef('tt20v', true);
-               pg_get_viewdef                
----------------------------------------------
-  SELECT c.c,                               +
-     col.col,                               +
-     d.d,                                   +
-     t.t,                                   +
-     i4.i4,                                 +
-     i8.i8                                  +
-    FROM COALESCE(1, 2) c(c),               +
-     COLLATION FOR ('x'::text) col(col),    +
-     CURRENT_DATE d(d),                     +
-     LOCALTIMESTAMP(3) t(t),                +
-     CAST(1 + 2 AS integer) i4(i4),         +
-     CAST((1 + 2)::bigint AS bigint) i8(i8);
+                                     pg_get_viewdef                                     
+----------------------------------------------------------------------------------------
+  SELECT c.c,                                                                          +
+     col.col,                                                                          +
+     d.d,                                                                              +
+     t.t,                                                                              +
+     i4.i4,                                                                            +
+     i8.i8,                                                                            +
+     atz.atz,                                                                          +
+     atzt.atzt,                                                                        +
+     atl.atl,                                                                          +
+     o.o,                                                                              +
+     isn.isn,                                                                          +
+     rf.rfa,                                                                           +
+     rf.rfb                                                                            +
+    FROM COALESCE(1, 2) c(c),                                                          +
+     COLLATION FOR ('x'::text) col(col),                                               +
+     CURRENT_DATE d(d),                                                                +
+     LOCALTIMESTAMP(3) t(t),                                                           +
+     CAST(1 + 2 AS integer) i4(i4),                                                    +
+     CAST((1 + 2)::bigint AS bigint) i8(i8),                                           +
+     (LOCALTIMESTAMP AT TIME ZONE 'UTC'::text) atz(atz),                               +
+     (CURRENT_TIME AT TIME ZONE 'UTC'::text) atzt(atzt),                               +
+     (LOCALTIMESTAMP AT LOCAL) atl(atl),                                               +
+     ((LOCALTIMESTAMP, LOCALTIMESTAMP) OVERLAPS (LOCALTIMESTAMP, LOCALTIMESTAMP)) o(o),+
+     ('foo'::text IS NORMALIZED) isn(isn),                                             +
+     ROWS FROM(('foo'::text IS NORMALIZED), now()) rf(rfa, rfb);
 (1 row)
 
 -- reverse-listing of various special function syntaxes required by SQL
