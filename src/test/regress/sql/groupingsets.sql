@@ -771,6 +771,24 @@ explain (costs off)
 select 1 as one group by rollup(one) order by one nulls first;
 select 1 as one group by rollup(one) order by one nulls first;
 
+-- A grouping expression containing no Vars of the query level refers only
+-- to the targetlist entry GROUP BY identified.  An equal expression elsewhere
+-- must not be replaced by a grouped Var.
+select (select array[]::varchar(500)[]) as a
+group by rollup(cast('true' as boolean));
+
+explain (verbose, costs off)
+select 1 as a, 1 as b, 1+2 as c, (1+2)*10 as d
+group by rollup(a, c);
+select 1 as a, 1 as b, 1+2 as c, (1+2)*10 as d
+group by rollup(a, c)
+order by a nulls first, c nulls first;
+
+-- likewise for an outer reference used as a grouping expression
+select array(select o.a as k from (values (1)) as i (x)
+             group by rollup(o.a, x+0) order by 1 nulls first)
+from (values (10)) as o (a);
+
 explain (costs off)
 select a, b, row_number() over (order by a, b nulls first)
 from (values (1, 1), (2, 2)) as t (a, b) where a = b
