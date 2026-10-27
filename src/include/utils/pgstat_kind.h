@@ -20,6 +20,9 @@
 #define PGSTAT_KIND_MIN	1		/* Minimum ID allowed */
 #define PGSTAT_KIND_MAX	32		/* Maximum ID allowed */
 
+/* Value that represents all stats kinds */
+#define PGSTAT_KIND_ALL		(PGSTAT_KIND_MAX + 1)
+
 /* use 0 for INVALID, to catch zero-initialized data */
 #define PGSTAT_KIND_INVALID 0
 
