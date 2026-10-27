@@ -2319,14 +2319,17 @@ RelationReloadIndexInfo(Relation relation)
 	RelationInitPhysicalAddr(relation);
 
 	/*
-	 * For a non-system index, there are fields of the pg_index row that are
+	 * For a non-catalog index, there are fields of the pg_index row that are
 	 * allowed to change, so re-read that row and update the relcache entry.
 	 * Most of the info derived from pg_index (such as support function lookup
 	 * info) cannot change, and indeed the whole point of this routine is to
 	 * update the relcache entry without clobbering that data; so wholesale
 	 * replacement is not appropriate.
+	 *
+	 * This includes the TOAST indexes of non-catalog tables, whose fields do
+	 * change, for example during concurrent index builds.
 	 */
-	if (!IsSystemRelation(relation))
+	if (!IsCatalogRelation(relation))
 	{
 		HeapTuple	tuple;
 		Form_pg_index index;

@@ -1,0 +1,84 @@
+Parsed test spec with 3 sessions
+
+starting permutation: lock reindex ins1 unlock await_ready wake_ins inserted wake_ready await_swap ins2 wake_swap reindexed read
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step lock: BEGIN; LOCK TABLE reind_toast IN ROW EXCLUSIVE MODE;
+step reindex: REINDEX TABLE CONCURRENTLY reind_toast; <waiting ...>
+step ins1: INSERT INTO reind_toast VALUES (2, repeat('y', 10000)); <waiting ...>
+step unlock: COMMIT;
+step await_ready: SELECT wait_for_point('reindex-conc-index-built');
+wait_for_point
+--------------
+              
+(1 row)
+
+step wake_ins: 
+    SELECT injection_points_detach('toast-save-datum-indexes-opened');
+    SELECT injection_points_wakeup('toast-save-datum-indexes-opened');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step ins1: <... completed>
+step inserted: 
+step wake_ready: 
+    SELECT injection_points_detach('reindex-conc-index-built');
+    SELECT injection_points_wakeup('reindex-conc-index-built');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step await_swap: SELECT wait_for_point('reindex-relation-concurrently-before-swap');
+wait_for_point
+--------------
+              
+(1 row)
+
+step ins2: INSERT INTO reind_toast VALUES (3, repeat('z', 10000));
+step wake_swap: 
+    SELECT injection_points_detach('reindex-relation-concurrently-before-swap');
+    SELECT injection_points_wakeup('reindex-relation-concurrently-before-swap');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step reindex: <... completed>
+step reindexed: 
+step read: SELECT id, length(val) FROM reind_toast ORDER BY id;
+id|length
+--+------
+ 1| 10000
+ 2| 10000
+ 3| 10000
+(3 rows)
+
