@@ -177,6 +177,18 @@ SELECT * FROM pgss_sqljson_tab,
   JSON_TABLE(js, '$[*]' COLUMNS (b int)) jt;
 SELECT * FROM pgss_sqljson_tab,
   JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$.a', b int PATH '$.b')) jt;
+-- several columns, with and without PATH
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int, b int)) jt;
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (b int, a int)) jt;
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$.a', b int)) jt;
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int, b int PATH '$.b')) jt;
+-- the same path as the one derived from the column name
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$."a"')) jt;
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
 
 -- NESTED PATH
