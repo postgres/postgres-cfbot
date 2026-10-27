@@ -605,6 +605,82 @@ drop table t2;
 drop table t3;
 drop table p_t1;
 
+--
+-- Test GROUP BY ALL
+--
+-- We don't care about the data here, just the proper transformation of the
+-- GROUP BY clause, so test some queries and verify the EXPLAIN plans.
+--
+
+CREATE TEMP TABLE t1 (
+  a int,
+  b int,
+  c int
+);
+
+-- basic example
+EXPLAIN (COSTS OFF) SELECT b, COUNT(*) FROM t1 GROUP BY ALL;
+
+-- multiple columns, non-consecutive order
+EXPLAIN (COSTS OFF) SELECT a, SUM(b), b FROM t1 GROUP BY ALL;
+
+-- multi columns, no aggregate
+EXPLAIN (COSTS OFF) SELECT a + b FROM t1 GROUP BY ALL;
+
+-- check we detect a non-top-level aggregate
+EXPLAIN (COSTS OFF) SELECT a, SUM(b) + 4 FROM t1 GROUP BY ALL;
+
+-- including grouped column is okay
+EXPLAIN (COSTS OFF) SELECT a, SUM(b) + a FROM t1 GROUP BY ALL;
+
+-- including non-grouped column, not so much
+EXPLAIN (COSTS OFF) SELECT a, SUM(b) + c FROM t1 GROUP BY ALL;
+
+-- all aggregates, should reduce to GROUP BY ()
+EXPLAIN (COSTS OFF) SELECT COUNT(a), SUM(b) FROM t1 GROUP BY ALL;
+
+-- likewise with empty target list
+EXPLAIN (COSTS OFF) SELECT FROM t1 GROUP BY ALL;
+
+-- window functions are not to be included in GROUP BY, either
+EXPLAIN (COSTS OFF) SELECT a, COUNT(a) OVER (PARTITION BY a) FROM t1 GROUP BY ALL;
+
+-- all cols
+EXPLAIN (COSTS OFF) SELECT *, count(*) FROM t1 GROUP BY ALL;
+
+-- group by all with grouping element(s) (equivalent to GROUP BY's
+-- default behavior, explicit antithesis to GROUP BY DISTINCT)
+EXPLAIN (COSTS OFF) SELECT a, count(*) FROM t1 GROUP BY ALL a;
+
+-- verify deparsing of GROUP BY ALL
+CREATE TEMP VIEW v1 AS SELECT b, COUNT(*) FROM t1 GROUP BY ALL;
+SELECT pg_get_viewdef('v1'::regclass);
+
+DROP VIEW v1;
+DROP TABLE t1;
+
+-- GROUP BY ALL must inherit equality semantics from a matching ORDER BY item,
+-- exactly as an explicitly-spelled-out GROUP BY does.  Using record_image_ops
+-- (bytewise equality) via ORDER BY ... USING, the byte-distinct values
+-- row(1.0) and row(1.00) must form two groups, not one.
+CREATE TYPE gba_rec AS (x numeric);
+CREATE TEMP TABLE t_gba (a gba_rec);
+INSERT INTO t_gba VALUES (row(1.0)::gba_rec), (row(1.00)::gba_rec);
+
+-- explicit GROUP BY: two groups (record_image inequality from ORDER BY)
+SELECT a, count(*) FROM t_gba
+  GROUP BY a ORDER BY a USING operator(pg_catalog.*<);
+
+-- GROUP BY ALL: must match the explicit form (two groups)
+SELECT a, count(*) FROM t_gba
+  GROUP BY ALL ORDER BY a USING operator(pg_catalog.*<);
+
+-- without the record_image ORDER BY, default record_ops merges them (one group)
+SELECT a, count(*) FROM t_gba GROUP BY ALL ORDER BY a;
+
+DROP TABLE t_gba;
+DROP TYPE gba_rec;
+
 -- A composite type used by the tests below to exercise the asymmetry
 -- between record_ops (per-field equality, the default) and record_image_ops
 -- (bytewise equality): values like row(1.0) and row(1.00) are field-equal
