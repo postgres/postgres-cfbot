@@ -34,6 +34,7 @@ static void make_rels_by_clauseless_joins(PlannerInfo *root,
 										  List *other_rels);
 static bool has_join_restriction(PlannerInfo *root, RelOptInfo *rel);
 static bool has_legal_joinclause(PlannerInfo *root, RelOptInfo *rel);
+static bool has_ph_lateral_restriction(PlannerInfo *root, RelOptInfo *rel);
 static bool restriction_is_constant_false(List *restrictlist,
 										  RelOptInfo *joinrel,
 										  bool only_pushed_down);
@@ -173,7 +174,8 @@ join_search_one_level(PlannerInfo *root, int level)
 			 * to force a bushy join plan.
 			 */
 			if (old_rel->joininfo == NIL && !old_rel->has_eclass_joins &&
-				!has_join_restriction(root, old_rel))
+				!has_join_restriction(root, old_rel) &&
+				!has_ph_lateral_restriction(root, old_rel))
 				continue;
 
 			if (k == other_level)	/* only consider remaining rels */
@@ -1503,6 +1505,27 @@ has_legal_joinclause(PlannerInfo *root, RelOptInfo *rel)
 	return false;
 }
 
+static bool
+has_ph_lateral_restriction(PlannerInfo *root, RelOptInfo *rel)
+{
+	ListCell   *lc;
+
+	foreach(lc, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = lfirst_node(PlaceHolderInfo, lc);
+
+		/*
+		 * A relation containing all lateral dependencies of a PHV may
+		 * have to be joined to the relation where the PHV is evaluated.
+		 */
+		if (phinfo->ph_lateral != NULL &&
+			bms_is_subset(phinfo->ph_lateral, rel->relids) &&
+			!bms_is_subset(phinfo->ph_eval_at, rel->relids))
+			return true;
+	}
+
+	return false;
+}
 
 /*
  * is_dummy_rel --- has relation been proven empty?
