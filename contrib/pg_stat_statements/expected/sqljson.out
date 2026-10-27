@@ -653,12 +653,44 @@ SELECT * FROM pgss_sqljson_tab,
 ----+---+---+---+---
 (0 rows)
 
+-- several columns, with and without PATH
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int, b int)) jt;
+ js | t | b | a | b 
+----+---+---+---+---
+(0 rows)
+
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (b int, a int)) jt;
+ js | t | b | b | a 
+----+---+---+---+---
+(0 rows)
+
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$.a', b int)) jt;
+ js | t | b | a | b 
+----+---+---+---+---
+(0 rows)
+
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int, b int PATH '$.b')) jt;
+ js | t | b | a | b 
+----+---+---+---+---
+(0 rows)
+
+-- the same path as the one derived from the column name
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$."a"')) jt;
+ js | t | b | a 
+----+---+---+---
+(0 rows)
+
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
  calls |                                query                                 
 -------+----------------------------------------------------------------------
-     4 | SELECT * FROM pgss_sqljson_tab,                                     +
+     5 | SELECT * FROM pgss_sqljson_tab,                                     +
        |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a')) jt
-     1 | SELECT * FROM pgss_sqljson_tab,                                     +
+     5 | SELECT * FROM pgss_sqljson_tab,                                     +
        |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a', b int PATH '$.b')) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
 (3 rows)
