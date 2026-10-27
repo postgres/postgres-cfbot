@@ -36,6 +36,7 @@
 #include "utils/builtins.h"
 #include "utils/injection_point.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
@@ -83,6 +84,8 @@ static const ShmemCallbacks inj_io_shmem_callbacks = {
 	.init_fn = test_aio_shmem_init,
 	.attach_fn = test_aio_shmem_attach,
 };
+
+static bool clear_usage_count_if_unpinned(BufferDesc *desc);
 
 
 static PgAioHandle *last_handle;
@@ -537,6 +540,32 @@ invalidate_rel_block(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(invalidate_rel_blocks);
+Datum
+invalidate_rel_blocks(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	Relation	rel;
+	uint32	   *blocks;
+	int			nblocks;
+
+	if (ARR_NDIM(blocksarray) != 1 ||
+		ARR_HASNULL(blocksarray) ||
+		ARR_ELEMTYPE(blocksarray) != INT4OID)
+		elog(ERROR, "expected 1 dimensional int4 array");
+
+	blocks = (uint32 *) ARR_DATA_PTR(blocksarray);
+	nblocks = ARR_DIMS(blocksarray)[0];
+
+	rel = relation_open(relid, AccessExclusiveLock);
+	for (int i = 0; i < nblocks; i++)
+		invalidate_one_block(rel, MAIN_FORKNUM, blocks[i]);
+	relation_close(rel, AccessExclusiveLock);
+
+	PG_RETURN_VOID();
+}
+
 PG_FUNCTION_INFO_V1(evict_rel);
 Datum
 evict_rel(PG_FUNCTION_ARGS)
@@ -582,6 +611,234 @@ evict_rel(PG_FUNCTION_ARGS)
 
 	relation_close(rel, AccessExclusiveLock);
 
+
+	PG_RETURN_VOID();
+}
+
+static bool
+clear_usage_count_if_unpinned(BufferDesc *desc)
+{
+	uint64		buf_state;
+
+	buf_state = LockBufHdr(desc);
+	for (;;)
+	{
+		uint64		new_buf_state;
+
+		if ((buf_state & BM_VALID) == 0 ||
+			BUF_STATE_GET_REFCOUNT(buf_state) != 0)
+		{
+			UnlockBufHdr(desc);
+			return false;
+		}
+
+		new_buf_state = buf_state;
+		new_buf_state &= ~BUF_USAGECOUNT_MASK;
+		new_buf_state &= ~BM_LOCKED;
+
+		if (pg_atomic_compare_exchange_u64(&desc->state, &buf_state,
+										   new_buf_state))
+			return true;
+	}
+}
+
+PG_FUNCTION_INFO_V1(flush_rel_buffers);
+Datum
+flush_rel_buffers(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel;
+
+	rel = relation_open(relid, AccessExclusiveLock);
+	FlushRelationBuffers(rel);
+	relation_close(rel, NoLock);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(make_blocks_unused_dirty_flushed);
+Datum
+make_blocks_unused_dirty_flushed(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	Relation	rel;
+	uint32	   *blocks;
+	int			nblocks;
+
+	if (ARR_NDIM(blocksarray) != 1 ||
+		ARR_HASNULL(blocksarray) ||
+		ARR_ELEMTYPE(blocksarray) != INT4OID)
+		elog(ERROR, "expected 1 dimensional int4 array");
+
+	blocks = (uint32 *) ARR_DATA_PTR(blocksarray);
+	nblocks = ARR_DIMS(blocksarray)[0];
+
+	rel = relation_open(relid, AccessExclusiveLock);
+	if (RelationUsesLocalBuffers(rel))
+		ereport(ERROR,
+				errmsg("this function doesn't prepare local buffers"));
+
+	for (int i = 0; i < nblocks; i++)
+	{
+		Buffer		buf;
+		BufferDesc *desc;
+
+		CHECK_FOR_INTERRUPTS();
+
+		buf = ReadBufferExtended(rel, MAIN_FORKNUM, blocks[i], RBM_NORMAL, NULL);
+		desc = GetBufferDescriptor(buf - 1);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+		FlushOneBuffer(buf);
+		MarkBufferDirty(buf);
+		UnlockReleaseBuffer(buf);
+
+		/*
+		 * There's no way to explicitly guarantee the usage count stays 0 for
+		 * our bgwriter tests. It requires careful coding and setup in the
+		 * test to make sure that nothing else is going to look for a free
+		 * buffer.
+		 */
+		if (!clear_usage_count_if_unpinned(desc))
+			elog(ERROR, "could not clear usage count for block %u",
+				 blocks[i]);
+	}
+
+	relation_close(rel, NoLock);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(run_bgwriter_cleaner);
+Datum
+run_bgwriter_cleaner(PG_FUNCTION_ARGS)
+{
+	int			lru_maxpages = PG_GETARG_INT32(0);
+	WritebackContext wb_context;
+	int			next_to_clean = 0;
+	uint32		next_passes = 0;
+	int			num_to_scan = NBuffers;
+	int			reusable_buffers = 0;
+	bool		maxwritten_clean;
+	int			num_written;
+
+	WritebackContextInit(&wb_context, &bgwriter_flush_after);
+	num_written = BgwriterWriteBuffers(lru_maxpages, &wb_context,
+									   &next_to_clean, &next_passes,
+									   &num_to_scan, &reusable_buffers,
+									   NBuffers, &maxwritten_clean);
+	IssuePendingWritebacks(&wb_context, IOCONTEXT_NORMAL);
+
+	PG_RETURN_INT32(num_written);
+}
+
+PG_FUNCTION_INFO_V1(eager_clean_rel_block);
+Datum
+eager_clean_rel_block(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	BlockNumber blkno = PG_GETARG_UINT32(1);
+	Relation	rel;
+	Buffer		buf;
+
+	rel = relation_open(relid, AccessShareLock);
+	if (RelationUsesLocalBuffers(rel))
+		ereport(ERROR,
+				(errmsg("cannot eager clean local buffers")));
+
+	buf = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, NULL);
+	LockBuffer(buf, BUFFER_LOCK_SHARE_EXCLUSIVE);
+	WriteBufferAndNeighbors(buf, GetBufferDescriptor(buf - 1), IOCONTEXT_NORMAL,
+							&BackendWritebackContext);
+	ReleaseBuffer(buf);
+
+	relation_close(rel, NoLock);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(rel_blocks_are_dirty);
+Datum
+rel_blocks_are_dirty(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	Relation	rel;
+	uint32	   *blocks;
+	int			nblocks;
+	Datum	   *dirty_datums;
+	ArrayType  *dirty_array;
+
+	if (ARR_NDIM(blocksarray) != 1 ||
+		ARR_HASNULL(blocksarray) ||
+		ARR_ELEMTYPE(blocksarray) != INT4OID)
+		elog(ERROR, "expected 1 dimensional int4 array");
+
+	blocks = (uint32 *) ARR_DATA_PTR(blocksarray);
+	nblocks = ARR_DIMS(blocksarray)[0];
+	dirty_datums = palloc0(sizeof(Datum) * nblocks);
+
+	rel = relation_open(relid, AccessShareLock);
+	for (int i = 0; i < nblocks; i++)
+	{
+		BufferTag	tag;
+		uint32		hash;
+		LWLock	   *partition_lock;
+		int			buf_id;
+		bool		is_dirty = false;
+
+		InitBufferTag(&tag, &rel->rd_locator, MAIN_FORKNUM, blocks[i]);
+		hash = BufTableHashCode(&tag);
+		partition_lock = BufMappingPartitionLock(hash);
+
+		LWLockAcquire(partition_lock, LW_SHARED);
+		buf_id = BufTableLookup(&tag, hash);
+		LWLockRelease(partition_lock);
+
+		if (buf_id >= 0)
+		{
+			BufferDesc *desc = GetBufferDescriptor(buf_id);
+
+			is_dirty = (pg_atomic_read_u64(&desc->state) & BM_DIRTY) != 0;
+		}
+
+		dirty_datums[i] = BoolGetDatum(is_dirty);
+	}
+	relation_close(rel, NoLock);
+
+	dirty_array = construct_array(dirty_datums, nblocks, BOOLOID, 1, true,
+								  TYPALIGN_CHAR);
+
+	PG_RETURN_ARRAYTYPE_P(dirty_array);
+}
+
+PG_FUNCTION_INFO_V1(pin_rel_block);
+Datum
+pin_rel_block(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	BlockNumber blkno = PG_GETARG_UINT32(1);
+	Relation	rel;
+	Buffer		buf;
+
+	rel = relation_open(relid, AccessShareLock);
+	buf = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, NULL);
+	ResourceOwnerForgetBuffer(CurrentResourceOwner, buf);
+	ResourceOwnerRememberBuffer(TopTransactionResourceOwner, buf);
+	relation_close(rel, NoLock);
+
+	PG_RETURN_INT32(buf);
+}
+
+PG_FUNCTION_INFO_V1(release_buffer);
+Datum
+release_buffer(PG_FUNCTION_ARGS)
+{
+	Buffer		buf = PG_GETARG_INT32(0);
+
+	ResourceOwnerForgetBuffer(TopTransactionResourceOwner, buf);
+	ResourceOwnerRememberBuffer(CurrentResourceOwner, buf);
+	ReleaseBuffer(buf);
 
 	PG_RETURN_VOID();
 }

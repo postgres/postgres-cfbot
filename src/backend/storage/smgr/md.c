@@ -852,6 +852,30 @@ mdmaxcombine(SMgrRelation reln, ForkNumber forknum,
 }
 
 /*
+ * Return the start and end block numbers of the segment containing blocknum.
+ *
+ * These bounds are computed arithmetically from the segment size and do not
+ * consult the actual on-disk relation size to save syscall overhead. As a
+ * consequence, if the relation is not yet that large -- for example, the last
+ * segment is not full, or blocknum is at or beyond the current EOF -- the
+ * bounds may not be accurate: *end can refer to a block past the real end of
+ * the relation.  Callers that scan this range must be prepared to encounter
+ * blocks that do not exist.
+ */
+void
+mdblockbounds(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			  BlockNumber *start, BlockNumber *end)
+{
+	BlockNumber segstart;
+
+	segstart = (blocknum / ((BlockNumber) RELSEG_SIZE)) *
+		((BlockNumber) RELSEG_SIZE);
+
+	*start = segstart;
+	*end = segstart + ((BlockNumber) RELSEG_SIZE - 1);
+}
+
+/*
  * mdreadv() -- Read the specified blocks from a relation.
  */
 void
