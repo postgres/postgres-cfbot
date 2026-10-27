@@ -187,6 +187,8 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 		const char *num = dec_salt_binary + sizeof(rounds_prefix) - 1;
 		char	   *endp;
 		int			srounds = strtoint(num, &endp, 10);
+		int			numlen = (int) (endp - num);
+		bool		num_truncated = numlen > PX_SHACRYPT_ROUNDS_PRINT_MAX;
 
 		if (*endp != '$')
 			ereport(ERROR,
@@ -194,6 +196,14 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 					errmsg("could not parse salt options"));
 
 		dec_salt_binary = endp + 1;
+
+		/*
+		 * Limit how much of the supplied rounds value the NOTICEs below echo
+		 * back; the token is part of the caller-supplied salt string and can
+		 * be arbitrarily long.
+		 */
+		if (num_truncated)
+			numlen = PX_SHACRYPT_ROUNDS_PRINT_MAX;
 
 		/*
 		 * We violate supported lower or upper bound of rounds, but in this
@@ -210,8 +220,9 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 		{
 			ereport(NOTICE,
 					errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					errmsg("rounds=%d exceeds maximum supported value (%d), using %d instead",
-						   srounds, PX_SHACRYPT_ROUNDS_MAX,
+					errmsg("rounds=%.*s%s exceeds maximum supported value (%d), using %d instead",
+						   numlen, num, num_truncated ? "..." : "",
+						   PX_SHACRYPT_ROUNDS_MAX,
 						   PX_SHACRYPT_ROUNDS_MAX));
 			srounds = PX_SHACRYPT_ROUNDS_MAX;
 		}
@@ -219,8 +230,9 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 		{
 			ereport(NOTICE,
 					errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					errmsg("rounds=%d is below supported value (%d), using %d instead",
-						   srounds, PX_SHACRYPT_ROUNDS_MIN,
+					errmsg("rounds=%.*s%s is below supported value (%d), using %d instead",
+						   numlen, num, num_truncated ? "..." : "",
+						   PX_SHACRYPT_ROUNDS_MIN,
 						   PX_SHACRYPT_ROUNDS_MIN));
 			srounds = PX_SHACRYPT_ROUNDS_MIN;
 		}
