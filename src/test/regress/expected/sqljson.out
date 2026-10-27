@@ -295,6 +295,42 @@ SELECT JSON_OBJECT();
  {}
 (1 row)
 
+SELECT JSON_OBJECT(NULL ON NULL);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(ABSENT ON NULL);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(WITH UNIQUE KEYS);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(WITHOUT UNIQUE);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(NULL ON NULL WITH UNIQUE KEYS);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb);
+ json_object 
+-------------
+ {}
+(1 row)
+
 SELECT JSON_OBJECT(RETURNING json);
  json_object 
 -------------
@@ -612,6 +648,30 @@ DROP FUNCTION mood_to_json;
 DROP TYPE mood;
 -- JSON_ARRAY()
 SELECT JSON_ARRAY();
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(NULL ON NULL);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(ABSENT ON NULL);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(NULL ON NULL RETURNING jsonb);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(ABSENT ON NULL RETURNING jsonb);
  json_array 
 ------------
  []
