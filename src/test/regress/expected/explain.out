@@ -89,9 +89,10 @@ select explain_filter('explain (analyze, buffers, format text) select * from int
                                          explain_filter                                          
 -------------------------------------------------------------------------------------------------
  Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N.N loops=N)
+   Buffer Access Strategy: normal
  Planning Time: N.N ms
  Execution Time: N.N ms
-(3 rows)
+(4 rows)
 
 select explain_filter('explain (buffers, format text) select * from int8_tbl i8');
                      explain_filter                      
@@ -119,6 +120,7 @@ explain_filter
       <Actual-Rows>N.N</Actual-Rows>
       <Actual-Loops>N</Actual-Loops>
       <Disabled>false</Disabled>
+      <Buffer-Access-Strategy>normal</Buffer-Access-Strategy>
       <Average-Prefetch-Distance>N.N</Average-Prefetch-Distance>
       <Max-Prefetch-Distance>N</Max-Prefetch-Distance>
       <Prefetch-Capacity>N</Prefetch-Capacity>
@@ -173,6 +175,7 @@ explain_filter
     Actual Rows: N.N
     Actual Loops: N
     Disabled: false
+    Buffer Access Strategy: "normal"
     Average Prefetch Distance: N.N
     Max Prefetch Distance: N
     Prefetch Capacity: N
@@ -301,65 +304,66 @@ select explain_filter('explain verbose select sum(unique1) over w1, sum(unique2)
 -- but always set in JSON format, so check them only in this case.
 set track_io_timing = on;
 select explain_filter('explain (analyze, buffers, format json) select * from int8_tbl i8');
-           explain_filter            
--------------------------------------
- [                                  +
-   {                                +
-     "Plan": {                      +
-       "Node Type": "Seq Scan",     +
-       "Parallel Aware": false,     +
-       "Async Capable": false,      +
-       "Relation Name": "int8_tbl", +
-       "Alias": "i8",               +
-       "Startup Cost": N.N,         +
-       "Total Cost": N.N,           +
-       "Plan Rows": N,              +
-       "Plan Width": N,             +
-       "Actual Startup Time": N.N,  +
-       "Actual Total Time": N.N,    +
-       "Actual Rows": N.N,          +
-       "Actual Loops": N,           +
-       "Disabled": false,           +
-       "Shared Hit Blocks": N,      +
-       "Shared Read Blocks": N,     +
-       "Shared Dirtied Blocks": N,  +
-       "Shared Written Blocks": N,  +
-       "Local Hit Blocks": N,       +
-       "Local Read Blocks": N,      +
-       "Local Dirtied Blocks": N,   +
-       "Local Written Blocks": N,   +
-       "Temp Read Blocks": N,       +
-       "Temp Written Blocks": N,    +
-       "Shared I/O Read Time": N.N, +
-       "Shared I/O Write Time": N.N,+
-       "Local I/O Read Time": N.N,  +
-       "Local I/O Write Time": N.N, +
-       "Temp I/O Read Time": N.N,   +
-       "Temp I/O Write Time": N.N   +
-     },                             +
-     "Planning": {                  +
-       "Shared Hit Blocks": N,      +
-       "Shared Read Blocks": N,     +
-       "Shared Dirtied Blocks": N,  +
-       "Shared Written Blocks": N,  +
-       "Local Hit Blocks": N,       +
-       "Local Read Blocks": N,      +
-       "Local Dirtied Blocks": N,   +
-       "Local Written Blocks": N,   +
-       "Temp Read Blocks": N,       +
-       "Temp Written Blocks": N,    +
-       "Shared I/O Read Time": N.N, +
-       "Shared I/O Write Time": N.N,+
-       "Local I/O Read Time": N.N,  +
-       "Local I/O Write Time": N.N, +
-       "Temp I/O Read Time": N.N,   +
-       "Temp I/O Write Time": N.N   +
-     },                             +
-     "Planning Time": N.N,          +
-     "Triggers": [                  +
-     ],                             +
-     "Execution Time": N.N          +
-   }                                +
+              explain_filter               
+-------------------------------------------
+ [                                        +
+   {                                      +
+     "Plan": {                            +
+       "Node Type": "Seq Scan",           +
+       "Parallel Aware": false,           +
+       "Async Capable": false,            +
+       "Relation Name": "int8_tbl",       +
+       "Alias": "i8",                     +
+       "Startup Cost": N.N,               +
+       "Total Cost": N.N,                 +
+       "Plan Rows": N,                    +
+       "Plan Width": N,                   +
+       "Actual Startup Time": N.N,        +
+       "Actual Total Time": N.N,          +
+       "Actual Rows": N.N,                +
+       "Actual Loops": N,                 +
+       "Disabled": false,                 +
+       "Buffer Access Strategy": "normal",+
+       "Shared Hit Blocks": N,            +
+       "Shared Read Blocks": N,           +
+       "Shared Dirtied Blocks": N,        +
+       "Shared Written Blocks": N,        +
+       "Local Hit Blocks": N,             +
+       "Local Read Blocks": N,            +
+       "Local Dirtied Blocks": N,         +
+       "Local Written Blocks": N,         +
+       "Temp Read Blocks": N,             +
+       "Temp Written Blocks": N,          +
+       "Shared I/O Read Time": N.N,       +
+       "Shared I/O Write Time": N.N,      +
+       "Local I/O Read Time": N.N,        +
+       "Local I/O Write Time": N.N,       +
+       "Temp I/O Read Time": N.N,         +
+       "Temp I/O Write Time": N.N         +
+     },                                   +
+     "Planning": {                        +
+       "Shared Hit Blocks": N,            +
+       "Shared Read Blocks": N,           +
+       "Shared Dirtied Blocks": N,        +
+       "Shared Written Blocks": N,        +
+       "Local Hit Blocks": N,             +
+       "Local Read Blocks": N,            +
+       "Local Dirtied Blocks": N,         +
+       "Local Written Blocks": N,         +
+       "Temp Read Blocks": N,             +
+       "Temp Written Blocks": N,          +
+       "Shared I/O Read Time": N.N,       +
+       "Shared I/O Write Time": N.N,      +
+       "Local I/O Read Time": N.N,        +
+       "Local I/O Write Time": N.N,       +
+       "Temp I/O Read Time": N.N,         +
+       "Temp I/O Write Time": N.N         +
+     },                                   +
+     "Planning Time": N.N,                +
+     "Triggers": [                        +
+     ],                                   +
+     "Execution Time": N.N                +
+   }                                      +
  ]
 (1 row)
 
@@ -436,55 +440,56 @@ select explain_filter('explain (memory, summary, format yaml) select * from int8
 (1 row)
 
 select explain_filter('explain (memory, analyze, format json) select * from int8_tbl i8');
-           explain_filter           
-------------------------------------
- [                                 +
-   {                               +
-     "Plan": {                     +
-       "Node Type": "Seq Scan",    +
-       "Parallel Aware": false,    +
-       "Async Capable": false,     +
-       "Relation Name": "int8_tbl",+
-       "Alias": "i8",              +
-       "Startup Cost": N.N,        +
-       "Total Cost": N.N,          +
-       "Plan Rows": N,             +
-       "Plan Width": N,            +
-       "Actual Startup Time": N.N, +
-       "Actual Total Time": N.N,   +
-       "Actual Rows": N.N,         +
-       "Actual Loops": N,          +
-       "Disabled": false,          +
-       "Shared Hit Blocks": N,     +
-       "Shared Read Blocks": N,    +
-       "Shared Dirtied Blocks": N, +
-       "Shared Written Blocks": N, +
-       "Local Hit Blocks": N,      +
-       "Local Read Blocks": N,     +
-       "Local Dirtied Blocks": N,  +
-       "Local Written Blocks": N,  +
-       "Temp Read Blocks": N,      +
-       "Temp Written Blocks": N    +
-     },                            +
-     "Planning": {                 +
-       "Shared Hit Blocks": N,     +
-       "Shared Read Blocks": N,    +
-       "Shared Dirtied Blocks": N, +
-       "Shared Written Blocks": N, +
-       "Local Hit Blocks": N,      +
-       "Local Read Blocks": N,     +
-       "Local Dirtied Blocks": N,  +
-       "Local Written Blocks": N,  +
-       "Temp Read Blocks": N,      +
-       "Temp Written Blocks": N,   +
-       "Memory Used": N,           +
-       "Memory Allocated": N       +
-     },                            +
-     "Planning Time": N.N,         +
-     "Triggers": [                 +
-     ],                            +
-     "Execution Time": N.N         +
-   }                               +
+              explain_filter               
+-------------------------------------------
+ [                                        +
+   {                                      +
+     "Plan": {                            +
+       "Node Type": "Seq Scan",           +
+       "Parallel Aware": false,           +
+       "Async Capable": false,            +
+       "Relation Name": "int8_tbl",       +
+       "Alias": "i8",                     +
+       "Startup Cost": N.N,               +
+       "Total Cost": N.N,                 +
+       "Plan Rows": N,                    +
+       "Plan Width": N,                   +
+       "Actual Startup Time": N.N,        +
+       "Actual Total Time": N.N,          +
+       "Actual Rows": N.N,                +
+       "Actual Loops": N,                 +
+       "Disabled": false,                 +
+       "Buffer Access Strategy": "normal",+
+       "Shared Hit Blocks": N,            +
+       "Shared Read Blocks": N,           +
+       "Shared Dirtied Blocks": N,        +
+       "Shared Written Blocks": N,        +
+       "Local Hit Blocks": N,             +
+       "Local Read Blocks": N,            +
+       "Local Dirtied Blocks": N,         +
+       "Local Written Blocks": N,         +
+       "Temp Read Blocks": N,             +
+       "Temp Written Blocks": N           +
+     },                                   +
+     "Planning": {                        +
+       "Shared Hit Blocks": N,            +
+       "Shared Read Blocks": N,           +
+       "Shared Dirtied Blocks": N,        +
+       "Shared Written Blocks": N,        +
+       "Local Hit Blocks": N,             +
+       "Local Read Blocks": N,            +
+       "Local Dirtied Blocks": N,         +
+       "Local Written Blocks": N,         +
+       "Temp Read Blocks": N,             +
+       "Temp Written Blocks": N,          +
+       "Memory Used": N,                  +
+       "Memory Allocated": N              +
+     },                                   +
+     "Planning Time": N.N,                +
+     "Triggers": [                        +
+     ],                                   +
+     "Execution Time": N.N                +
+   }                                      +
  ]
 (1 row)
 
@@ -542,6 +547,8 @@ select jsonb_pretty(
                          select * from tenk1 order by tenthous')
   -- remove "Workers" node of the Seq Scan plan node
   #- '{0,Plan,Plans,0,Plans,0,Workers}'
+  -- remove its buffer access strategy, as it depends on shared_buffers
+  #- '{0,Plan,Plans,0,Plans,0,Buffer Access Strategy}'
   -- remove "Workers" node of the Sort plan node
   #- '{0,Plan,Plans,0,Workers}'
   -- Also remove its sort-type fields, as those aren't 100% stable
@@ -767,19 +774,21 @@ select explain_filter('explain (analyze,serialize text,buffers,timing off) selec
                                   explain_filter                                   
 -----------------------------------------------------------------------------------
  Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual rows=N.N loops=N)
+   Buffer Access Strategy: normal
  Planning Time: N.N ms
  Serialization: output=NkB  format=text
  Execution Time: N.N ms
-(4 rows)
+(5 rows)
 
 select explain_filter('explain (analyze,serialize binary,buffers,timing) select * from int8_tbl i8');
                                          explain_filter                                          
 -------------------------------------------------------------------------------------------------
  Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N.N loops=N)
+   Buffer Access Strategy: normal
  Planning Time: N.N ms
  Serialization: time=N.N ms  output=NkB  format=binary
  Execution Time: N.N ms
-(4 rows)
+(5 rows)
 
 -- this tests an edge case where we have no data to return
 select explain_filter('explain (analyze,buffers off,serialize) create temp table explain_temp as select * from int8_tbl i8');

@@ -200,6 +200,13 @@ ROLLBACK;
       number of blocks <emphasis>written</emphasis> indicates the number of
       previously-dirtied blocks evicted from cache by this backend during
       query processing.
+      When both <literal>ANALYZE</literal> and <literal>BUFFERS</literal> are
+      enabled, executed <literal>Seq Scan</literal>,
+      <literal>Sample Scan</literal>, <literal>Bitmap Heap Scan</literal>,
+      <literal>TID Scan</literal>, and <literal>TID Range Scan</literal> plan
+      nodes report the <glossterm
+      linkend="glossary-buffer-access-strategy">buffer access
+      strategy</glossterm> used by the table scan.
       The number of blocks shown for an
       upper-level node includes those used by all its child nodes.  In text
       format, only non-zero values are printed.  Buffers information is

@@ -140,6 +140,7 @@ static void show_hashagg_info(AggState *aggstate, ExplainState *es);
 static void show_indexscan_info(PlanState *planstate, ExplainState *es);
 static void show_tidbitmap_info(BitmapHeapScanState *planstate,
 								ExplainState *es);
+static void show_scan_buffer_access_strategy(ScanState *planstate, ExplainState *es);
 static void show_scan_io_usage(ScanState *planstate,
 							   ExplainState *es);
 static void show_instrumentation_count(const char *qlabel, int which,
@@ -2010,6 +2011,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			show_tidbitmap_info((BitmapHeapScanState *) planstate, es);
+			show_scan_buffer_access_strategy((ScanState *) planstate, es);
 			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_SampleScan:
@@ -2029,6 +2031,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										   planstate, es);
 			if (IsA(plan, CteScan))
 				show_ctescan_info(castNode(CteScanState, planstate), es);
+			show_scan_buffer_access_strategy((ScanState *) planstate, es);
 			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_Gather:
@@ -2129,6 +2132,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (plan->qual)
 					show_instrumentation_count("Rows Removed by Filter", 1,
 											   planstate, es);
+				show_scan_buffer_access_strategy((ScanState *) planstate, es);
 			}
 			break;
 		case T_TidRangeScan:
@@ -2146,6 +2150,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (plan->qual)
 					show_instrumentation_count("Rows Removed by Filter", 1,
 											   planstate, es);
+				show_scan_buffer_access_strategy((ScanState *) planstate, es);
 				show_scan_io_usage((ScanState *) planstate, es);
 			}
 			break;
@@ -4028,6 +4033,38 @@ show_tidbitmap_info(BitmapHeapScanState *planstate, ExplainState *es)
 }
 
 /*
+ * Return the name of a buffer access strategy for EXPLAIN.
+ */
+static const char *
+buffer_access_strategy_name(BufferAccessStrategyType strategy)
+{
+	switch (strategy)
+	{
+		case BAS_NORMAL:
+			return "normal";
+		case BAS_BULKREAD:
+			return "bulkread";
+		case BAS_BULKWRITE:
+			return "bulkwrite";
+		case BAS_VACUUM:
+			return "vacuum";
+	}
+
+	elog(ERROR, "unrecognized buffer access strategy type: %d", strategy);
+	pg_unreachable();
+}
+
+/*
+ * Print the buffer access strategy.
+ */
+static void
+print_buffer_access_strategy(ExplainState *es,
+							 BufferAccessStrategyType strategy)
+{
+	ExplainPropertyText("Buffer Access Strategy", buffer_access_strategy_name(strategy), es);
+}
+
+/*
  * Print I/O stats - prefetching and I/O performed
  *
  * This prints two types of stats - "prefetch" about the prefetching done by
@@ -4115,10 +4152,28 @@ get_table_scan_instrumentation(ScanState *planstate, int worker)
 					return &sinstrument->sinstrument[worker].stats;
 				break;
 			}
+		case T_SampleScan:
+			{
+				SharedSampleScanInstrumentation *sinstrument =
+					((SampleScanState *) planstate)->sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
 		case T_SeqScan:
 			{
 				SharedSeqScanInstrumentation *sinstrument =
 					((SeqScanState *) planstate)->sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
+		case T_TidScan:
+			{
+				SharedTidScanInstrumentation *sinstrument =
+					((TidScanState *) planstate)->tss_sinstrument;
 
 				if (sinstrument && worker < sinstrument->num_workers)
 					return &sinstrument->sinstrument[worker].stats;
@@ -4138,6 +4193,66 @@ get_table_scan_instrumentation(ScanState *planstate, int worker)
 	}
 
 	return NULL;
+}
+
+/*
+ * Show the buffer access strategy for a scan node.
+ */
+static void
+show_scan_buffer_access_strategy(ScanState *planstate, ExplainState *es)
+{
+	WorkerNodeInstrumentation *worker_instrument = planstate->ps.worker_instrument;
+	TableScanInstrumentation *instrument;
+	double		leader_nloops = planstate->ps.instrument ?
+		planstate->ps.instrument->nloops : 0;
+
+	if (!es->buffers)
+		return;
+
+	/* Report the buffer access strategy only for these scan types. */
+	switch (nodeTag(planstate->ps.plan))
+	{
+		case T_BitmapHeapScan:
+		case T_SampleScan:
+		case T_SeqScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+			break;
+		default:
+			return;
+	}
+
+	instrument = get_table_scan_instrumentation(planstate, -1);
+
+	if (worker_instrument)
+	{
+		/*
+		 * After parallel cleanup, the node's loop count includes worker
+		 * loops. Remove them to determine whether the leader executed the
+		 * scan.
+		 */
+		for (int i = 0; i < worker_instrument->num_workers; ++i)
+		{
+			double		worker_nloops = worker_instrument->instrument[i].nloops;
+			TableScanInstrumentation *winstrument =
+				get_table_scan_instrumentation(planstate, i);
+
+			leader_nloops -= worker_nloops;
+
+			if (!winstrument || !winstrument->strategy_valid ||
+				worker_nloops <= 0)
+				continue;
+
+			if (es->workers_state)
+				ExplainOpenWorker(i, es);
+			print_buffer_access_strategy(es, winstrument->strategy);
+			if (es->workers_state)
+				ExplainCloseWorker(i, es);
+		}
+	}
+
+	if (instrument && instrument->strategy_valid && leader_nloops > 0)
+		print_buffer_access_strategy(es, instrument->strategy);
 }
 
 /*

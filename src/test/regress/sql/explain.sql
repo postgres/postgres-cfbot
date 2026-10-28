@@ -151,6 +151,8 @@ select jsonb_pretty(
                          select * from tenk1 order by tenthous')
   -- remove "Workers" node of the Seq Scan plan node
   #- '{0,Plan,Plans,0,Plans,0,Workers}'
+  -- remove its buffer access strategy, as it depends on shared_buffers
+  #- '{0,Plan,Plans,0,Plans,0,Buffer Access Strategy}'
   -- remove "Workers" node of the Sort plan node
   #- '{0,Plan,Plans,0,Workers}'
   -- Also remove its sort-type fields, as those aren't 100% stable
