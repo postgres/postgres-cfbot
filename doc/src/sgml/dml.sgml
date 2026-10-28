@@ -397,6 +397,17 @@ DELETE FROM products
   </para>
 
   <para>
+   If a temporal update or delete is replaced by an unconditional <literal>DO
+   INSTEAD</literal> rule (see <xref linkend="rules-update"/>), the rule's
+   actions run only for rows that overlap the targeted portion.  In those
+   actions, the application-time value in <literal>NEW</literal> is narrowed
+   based on the <literal>FOR PORTION OF</literal> target, while
+   <literal>OLD</literal> has the original value.  The original command does
+   not run, so no temporal leftovers are inserted.  This is the same whether
+   the rule is on a table or a view.
+  </para>
+
+  <para>
    In <literal>READ COMMITTED</literal> mode, a temporal update or delete can
    fail with a serialization failure when it touches a row that another
    transaction has concurrently changed.  The transaction can be retried.
