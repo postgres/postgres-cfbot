@@ -3622,6 +3622,7 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		{
 			Path	   *input_path = (Path *) lfirst(lc);
 			Path	   *path;
+			List	   *input_group_pathkeys;
 			bool		is_sorted;
 			int			presorted_keys;
 
@@ -3633,7 +3634,16 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 				input_path != cheapest_total_path)
 				continue;
 
-			is_sorted = pathkeys_count_contained_in(group_pathkeys,
+			/*
+			 * Partial aggregation compares the grouping keys only for
+			 * equality, so the input can be sorted on them in any direction.
+			 * Take the direction from the input path where it can provide the
+			 * grouping order.
+			 */
+			input_group_pathkeys =
+				adjust_group_pathkeys_to_input(group_pathkeys,
+											   input_path->pathkeys);
+			is_sorted = pathkeys_count_contained_in(input_group_pathkeys,
 													input_path->pathkeys,
 													&presorted_keys);
 
@@ -3667,13 +3677,13 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 					path = (Path *) create_sort_path(root,
 													 grouped_rel,
 													 path,
-													 group_pathkeys,
+													 input_group_pathkeys,
 													 -1.0);
 				else
 					path = (Path *) create_incremental_sort_path(root,
 																 grouped_rel,
 																 path,
-																 group_pathkeys,
+																 input_group_pathkeys,
 																 presorted_keys,
 																 -1.0);
 			}
@@ -3706,10 +3716,14 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		{
 			Path	   *input_path = (Path *) lfirst(lc);
 			Path	   *path;
+			List	   *input_group_pathkeys;
 			bool		is_sorted;
 			int			presorted_keys;
 
-			is_sorted = pathkeys_count_contained_in(group_pathkeys,
+			input_group_pathkeys =
+				adjust_group_pathkeys_to_input(group_pathkeys,
+											   input_path->pathkeys);
+			is_sorted = pathkeys_count_contained_in(input_group_pathkeys,
 													input_path->pathkeys,
 													&presorted_keys);
 
@@ -3743,13 +3757,13 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 					path = (Path *) create_sort_path(root,
 													 grouped_rel,
 													 path,
-													 group_pathkeys,
+													 input_group_pathkeys,
 													 -1.0);
 				else
 					path = (Path *) create_incremental_sort_path(root,
 																 grouped_rel,
 																 path,
-																 group_pathkeys,
+																 input_group_pathkeys,
 																 presorted_keys,
 																 -1.0);
 			}
