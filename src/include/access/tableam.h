@@ -1032,14 +1032,16 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
  * table_beginscan_tid is an alternative entry point for setting up a
  * TableScanDesc for a Tid scan. As with bitmap scans, it's worth using
  * the same data structure although the behavior is rather different.
+ *
+ * flags is a bitmask of ScanOptions. No SO_INTERNAL_FLAGS are permitted.
  */
 static inline TableScanDesc
-table_beginscan_tid(Relation rel, Snapshot snapshot)
+table_beginscan_tid(Relation rel, Snapshot snapshot, uint32 flags)
 {
-	uint32		flags = SO_TYPE_TIDSCAN;
+	uint32		internal_flags = SO_TYPE_TIDSCAN;
 
 	return table_beginscan_common(rel, snapshot, 0, NULL, NULL,
-								  flags, SO_NONE);
+								  internal_flags, flags);
 }
 
 /*
