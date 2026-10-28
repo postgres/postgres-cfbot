@@ -397,14 +397,16 @@ DELETE FROM products
   </para>
 
   <para>
-   If a temporal update or delete is replaced by an unconditional <literal>DO
-   INSTEAD</literal> rule (see <xref linkend="rules-update"/>), the rule's
-   actions run only for rows that overlap the targeted portion.  In those
-   actions, the application-time value in <literal>NEW</literal> is narrowed
-   based on the <literal>FOR PORTION OF</literal> target, while
-   <literal>OLD</literal> has the original value.  The original command does
-   not run, so no temporal leftovers are inserted.  This is the same whether
-   the rule is on a table or a view.
+   The actions of <literal>ON UPDATE</literal> and <literal>ON
+   DELETE</literal> rules (see <xref linkend="rules-update"/>) run only for
+   rows that overlap the targeted portion.  In those actions, the
+   application-time value in <literal>NEW</literal> is narrowed based on the
+   <literal>FOR PORTION OF</literal> target, while <literal>OLD</literal> has
+   the original value.  With a <literal>DO ALSO</literal> rule the original
+   command runs as well and inserts temporal leftovers as usual, but if the
+   command is replaced by an unconditional <literal>DO INSTEAD</literal> rule,
+   it does not run, so no temporal leftovers are inserted.  This is the same
+   whether the rule is on a table or a view.
   </para>
 
   <para>
