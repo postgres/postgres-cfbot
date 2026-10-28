@@ -495,6 +495,7 @@
 #jit = off                              # allow JIT compilation
 #join_collapse_limit = 8                # 1 disables collapsing of explicit
                                         # JOIN clauses
+#or_expansion_limit = 8                 # 0 disables OR-expansion to UNION ALL
 #plan_cache_mode = auto                 # auto, force_generic_plan or
                                         # force_custom_plan
 #recursive_worktable_factor = 10.0      # range 0.001-1000000
