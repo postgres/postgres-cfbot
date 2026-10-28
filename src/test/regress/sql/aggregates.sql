@@ -1457,6 +1457,23 @@ SELECT count(*) FROM btg GROUP BY w, x, z, y ORDER BY y, x, z, w;
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM btg GROUP BY w, x, y, z ORDER BY x*x, z;
 
+-- Utilize the ordering of index scan even if it differs in sort direction
+-- from the ordering that the GROUP BY keys took from ORDER BY
+CREATE TABLE btg_dir AS
+  SELECT i % 4 AS x, i % 5 AS y, i AS w FROM generate_series(1, 1000) AS i;
+CREATE INDEX btg_dir_x_y_idx ON btg_dir(x, y);
+ANALYZE btg_dir;
+EXPLAIN (COSTS OFF)
+SELECT x, y, count(*) FROM btg_dir GROUP BY x, y ORDER BY x, y DESC;
+SELECT x, y, count(*) FROM btg_dir GROUP BY x, y ORDER BY x, y DESC LIMIT 6;
+
+-- Likewise for a backward index scan that also provides the ordering
+-- required by the aggregate
+EXPLAIN (COSTS OFF)
+SELECT x, array_agg(y ORDER BY y DESC) FROM btg_dir GROUP BY x;
+SELECT x, array_agg(DISTINCT y ORDER BY y DESC) FROM btg_dir GROUP BY x ORDER BY x;
+DROP TABLE btg_dir;
+
 -- Test the case where the number of incoming subtree path keys is more than
 -- the number of grouping keys.
 CREATE INDEX btg_y_x_w_idx ON btg(y, x, w);
