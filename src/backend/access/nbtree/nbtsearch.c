@@ -326,17 +326,19 @@ _bt_moveright(Relation rel,
 /*
  *	_bt_binsrch() -- Do a binary search for a key on a particular page.
  *
- * On an internal (non-leaf) page, _bt_binsrch() returns the OffsetNumber
- * of the last key < given scankey, or last key <= given scankey if nextkey
- * is true.  (Since _bt_compare treats the first data key of such a page as
- * minus infinity, there will be at least one key < scankey, so the result
- * always points at one of the keys on the page.)
+ * When called from _bt_search() to find a downlink on an internal (non-leaf)
+ * page, _bt_binsrch() returns the OffsetNumber of the last key < given scankey,
+ * or last key <= given scankey if nextkey is true.  (Since _bt_compare treats
+ * the first data key of such a page as minus infinity, there will be at least
+ * one key < scankey, so the result always points at one of the keys on the
+ * page.)
  *
- * On a leaf page, _bt_binsrch() returns the final result of the initial
- * positioning process that started with _bt_first's call to _bt_search.
- * We're returning a non-pivot tuple offset, so things are a little different.
- * It is possible that we'll return an offset that's either past the last
- * non-pivot slot, or (in the case of a backward scan) before the first slot.
+ * When called from _bt_first() to find a key on a leaf page, _bt_binsrch()
+ * returns the final result of the initial positioning process that started
+ * with _bt_search. Since we're returning a non-pivot tuple offset, the logic
+ * differs slightly. It is possible that we'll return an offset that's either
+ * past the last non-pivot slot, or (in the case of a backward scan) before the
+ * first slot.
  *
  * This procedure is not responsible for walking right, it just examines
  * the given page.  _bt_binsrch() has no lock or refcount side effects
@@ -1545,12 +1547,12 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 		}
 	}
 
-	/* position to the precise item on the page */
+	/* position to the precise item on the leaf page */
 	offnum = _bt_binsrch(rel, &inskey, so->currPos.buf);
 
 	/*
-	 * Now load data from the first page of the scan (usually the page
-	 * currently in so->currPos.buf).
+	 * Now load data from the first leaf page of the scan (usually the
+	 * page currently in so->currPos.buf).
 	 *
 	 * If inskey.nextkey = false and inskey.backward = false, offnum is
 	 * positioned at the first non-pivot tuple >= inskey.scankeys.
