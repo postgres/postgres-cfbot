@@ -2289,38 +2289,114 @@ select * from uv_fpo_rinst_log order by tag, old_valid_at;
 drop view uv_fpo_rinst_view;
 drop table uv_fpo_rinst_tab, uv_fpo_rinst_log;
 
--- FOR PORTION OF is not supported on views with INSTEAD OF triggers
-create view uv_fpo_instead_view as select id, valid_at, b from uv_fpo_tab;
-
+-- FOR PORTION OF on a view with INSTEAD OF triggers.  The triggers fire only
+-- for rows that overlap the target range, NEW holds the targeted portion of
+-- the range, and OLD holds the whole row.  The trigger replaces the command,
+-- so there are no temporal leftovers.
+create table uv_fpo_instead_tab (id int4range, valid_at daterange, b int);
+insert into uv_fpo_instead_tab values
+  ('[1,1]', '[2000-01-01,2010-01-01)', 0),
+  ('[2,2]', '[2020-01-01,2030-01-01)', 0);
+create view uv_fpo_instead_view as
+  select id, valid_at, b from uv_fpo_instead_tab;
 create function uv_fpo_instead_trig() returns trigger language plpgsql as
-$$ begin return null; end $$;
-
+$$
+begin
+  raise notice '% OLD: %, NEW: %', tg_op, old, new;
+  return coalesce(new, old);
+end;
+$$;
 create trigger uv_fpo_instead_upd_trig
   instead of update on uv_fpo_instead_view
   for each row execute function uv_fpo_instead_trig();
 create trigger uv_fpo_instead_del_trig
   instead of delete on uv_fpo_instead_view
   for each row execute function uv_fpo_instead_trig();
-
 update uv_fpo_instead_view
-  for portion of valid_at from '2015-01-01' to '2020-01-01'
-  set b = 99 where id = '[1,1]'; -- error
-
+  for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 1
+  returning *;
 delete from uv_fpo_instead_view
-  for portion of valid_at from '2017-01-01' to '2022-01-01'
-  where id = '[1,1]'; -- error
-
--- The check does not depend on which rows match, so it errors even when
--- no rows do.
+  for portion of valid_at from '2006-01-01' to '2008-01-01'
+  returning *;
 update uv_fpo_instead_view
-  for portion of valid_at from '2015-01-01' to '2020-01-01'
-  set b = 99 where id = '[9,9]'; -- error, even with no matching rows
+  for portion of valid_at from '2012-01-01' to '2014-01-01' set b = 2;
+select * from uv_fpo_instead_tab order by id, valid_at;
+-- A check option on a view on top still applies to the trigger's NEW.
+create view uv_fpo_instead_wco as
+  select * from uv_fpo_instead_view where b < 10 with check option;
+update uv_fpo_instead_wco
+  for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 20; -- error
+drop view uv_fpo_instead_wco;
 
+-- With only one of the triggers, the other command auto-updates the view and
+-- inserts leftovers.
+drop trigger uv_fpo_instead_del_trig on uv_fpo_instead_view;
 delete from uv_fpo_instead_view
-  for portion of valid_at from '2017-01-01' to '2022-01-01'
-  where id = '[9,9]'; -- error, even with no matching rows
-
+  for portion of valid_at from '2006-01-01' to '2008-01-01';
+drop trigger uv_fpo_instead_upd_trig on uv_fpo_instead_view;
+create trigger uv_fpo_instead_del_trig
+  instead of delete on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+update uv_fpo_instead_view
+  for portion of valid_at from '2024-01-01' to '2026-01-01' set b = 3;
+select * from uv_fpo_instead_tab order by id, valid_at;
 drop view uv_fpo_instead_view;
+drop table uv_fpo_instead_tab;
+drop function uv_fpo_instead_trig();
+
+-- A trigger can preserve the untargeted history by using FOR PORTION OF
+-- itself, here on a partitioned table, where a leftover moves to the other
+-- partition.  The trigger also fires through an auto-updatable view on top,
+-- and a DO ALSO rule's action sees the same narrowed NEW.  A DELETE trigger
+-- sees only OLD, though, so this one can't tell which portion was targeted,
+-- and deletes the whole row.
+create table uv_fpo_instead_part (id int4range, valid_at daterange, b int)
+  partition by range (lower(valid_at));
+create table uv_fpo_instead_part1 partition of uv_fpo_instead_part
+  for values from ('2000-01-01') to ('2005-01-01');
+create table uv_fpo_instead_part2 partition of uv_fpo_instead_part
+  for values from ('2005-01-01') to (maxvalue);
+insert into uv_fpo_instead_part values
+  ('[1,1]', '[2000-01-01,2008-01-01)', 0),
+  ('[2,2]', '[2000-01-01,2008-01-01)', 0);
+create view uv_fpo_instead_view as
+  select id, valid_at, b from uv_fpo_instead_part;
+create view uv_fpo_instead_outer as
+  select b, valid_at, id from uv_fpo_instead_view;
+create function uv_fpo_instead_trig() returns trigger language plpgsql as
+$$
+begin
+  if tg_op = 'DELETE' then
+    delete from uv_fpo_instead_part
+      for portion of valid_at (old.valid_at) where id = old.id;
+    return old;
+  end if;
+  update uv_fpo_instead_part
+    for portion of valid_at (new.valid_at) set b = new.b where id = old.id;
+  return new;
+end;
+$$;
+create trigger uv_fpo_instead_upd_trig
+  instead of update on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+create trigger uv_fpo_instead_del_trig
+  instead of delete on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+create table uv_fpo_instead_log (old_valid_at daterange,
+  new_valid_at daterange, b int);
+create rule uv_fpo_instead_also as on update to uv_fpo_instead_view
+  do also insert into uv_fpo_instead_log
+    values (old.valid_at, new.valid_at, new.b);
+update uv_fpo_instead_outer
+  for portion of valid_at from '2002-01-01' to '2006-01-01' set b = 1
+  where id = '[1,1]';
+delete from uv_fpo_instead_view
+  for portion of valid_at from '2004-01-01' to '2005-01-01'
+  where id = '[2,2]';
+select * from uv_fpo_instead_log;
+select tableoid::regclass, * from uv_fpo_instead_part order by id, valid_at;
+drop table uv_fpo_instead_part cascade;
+drop table uv_fpo_instead_log;
 drop function uv_fpo_instead_trig();
 
 -- FOR PORTION OF on a view with DO ALSO rules.  As on a table, the rule
@@ -2377,11 +2453,11 @@ select * from uv_fpo_also_tab order by valid_at;
 select * from uv_fpo_also_tab_log order by valid_at;
 drop table uv_fpo_also_tab, uv_fpo_also_tab_log;
 
--- Forbid INSTEAD OF triggers with FOR PORTION OF even if the FOR PORTION OF
--- statement is parsed before the trigger exists.
--- This can happen in at least a couple ways: a rewrite rule or a BEGIN ATOMIC function.
+-- INSTEAD OF triggers also apply to FOR PORTION OF statements parsed before
+-- the trigger existed.  This can happen in at least a couple ways: a rewrite
+-- rule or a BEGIN ATOMIC function.
 create function uv_fpo_instead_trig() returns trigger language plpgsql as
-$$ begin return new; end $$;
+$$ begin raise notice 'NEW: %', new; return new; end $$;
 
 -- via a rewrite rule
 create table uv_fpo_rule_tab (id int4range, valid_at tsrange, b float);
@@ -2394,7 +2470,6 @@ create rule uv_fpo_rule as on insert to uv_fpo_rule_tab do also
 create trigger uv_fpo_rule_instead
   instead of update on uv_fpo_rule_view
   for each row execute function uv_fpo_instead_trig();
--- Would crash if we checked at parse-time:
 insert into uv_fpo_rule_tab values ('[2,2]', '[2000-01-01,2030-01-01)', 0);
 drop table uv_fpo_rule_tab cascade;
 
@@ -2410,7 +2485,6 @@ end;
 create trigger uv_fpo_atomic_instead
   instead of update on uv_fpo_atomic_view
   for each row execute function uv_fpo_instead_trig();
--- Would crash if we checked at parse-time:
 select uv_fpo_atomic_fn();
 drop function uv_fpo_atomic_fn();
 drop table uv_fpo_atomic_tab cascade;

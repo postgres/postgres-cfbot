@@ -4210,6 +4210,7 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		int			product_orig_rt_length;
 		List	   *product_queries;
 		Query	   *rule_parsetree;
+		bool		defer_fpo;
 		bool		hasUpdate = false;
 		int			values_rte_index = 0;
 		bool		defaults_remaining = false;
@@ -4225,13 +4226,21 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		 */
 		rt_entry_relation = relation_open(rt_entry->relid, NoLock);
 
-		/* We don't support FOR PORTION OF on views with INSTEAD OF triggers. */
-		if (parsetree->forPortionOf &&
+		/*
+		 * Usually we add the FOR PORTION OF details (the overlaps qual and
+		 * the range assignment) to the query right away.  But if the target
+		 * is a view that we may auto-update, we wait until we recurse on the
+		 * auto-updated query, so that we don't add them twice.  A view with
+		 * an INSTEAD OF trigger is never auto-updated, so it gets them now:
+		 * the trigger should fire only for overlapping rows, and NEW should
+		 * hold the targeted portion of the range.
+		 *
+		 * Views don't need to do anything special here to remap Vars; that is
+		 * handled by the tree walker.
+		 */
+		defer_fpo = parsetree->forPortionOf &&
 			rt_entry_relation->rd_rel->relkind == RELKIND_VIEW &&
-			view_has_instead_trigger(rt_entry_relation, event, NIL))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("views with INSTEAD OF triggers do not support FOR PORTION OF")));
+			!view_has_instead_trigger(rt_entry_relation, event, NIL);
 
 		/*
 		 * Rewrite the targetlist as needed for the command type.
@@ -4312,16 +4321,7 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		{
 			Assert(parsetree->override == OVERRIDING_NOT_SET);
 
-			/*
-			 * Don't add FOR PORTION OF details to a view's query, so that we
-			 * don't add the same qual and TLE again when we recurse on the
-			 * auto-updated query.  Rule actions get them below.
-			 *
-			 * Views don't need to do anything special here to remap Vars;
-			 * that is handled by the tree walker.
-			 */
-			if (parsetree->forPortionOf &&
-				rt_entry_relation->rd_rel->relkind != RELKIND_VIEW)
+			if (parsetree->forPortionOf && !defer_fpo)
 				addForPortionOfDetails(parsetree, rt_entry_relation);
 
 			parsetree->targetList =
@@ -4369,9 +4369,7 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		}
 		else if (event == CMD_DELETE)
 		{
-			/* As for UPDATE, a view's query doesn't get these yet. */
-			if (parsetree->forPortionOf &&
-				rt_entry_relation->rd_rel->relkind != RELKIND_VIEW)
+			if (parsetree->forPortionOf && !defer_fpo)
 				addForPortionOfDetails(parsetree, rt_entry_relation);
 		}
 		else
@@ -4387,14 +4385,13 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		 * Rule actions on a view must see the FOR PORTION OF restriction,
 		 * just as they do on a table: they should only fire for rows that
 		 * overlap the target range, and an UPDATE rule's NEW should hold the
-		 * targeted portion of the range.  We didn't add those details to the
-		 * view's query above, so build the rule actions from a copy that has
-		 * them.  If the view gets auto-updated below, the original query gets
-		 * them when we recurse on the base relation.
+		 * targeted portion of the range.  If we deferred adding those details
+		 * above, build the rule actions from a copy that has them.  If the
+		 * view gets auto-updated below, the original query gets them when we
+		 * recurse on the base relation.
 		 */
 		rule_parsetree = parsetree;
-		if (parsetree->forPortionOf &&
-			rt_entry_relation->rd_rel->relkind == RELKIND_VIEW)
+		if (defer_fpo)
 		{
 			rule_parsetree = copyObject(parsetree);
 			addForPortionOfDetails(rule_parsetree, rt_entry_relation);

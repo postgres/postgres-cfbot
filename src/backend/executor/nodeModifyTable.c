@@ -1632,6 +1632,12 @@ ExecForPortionOfLeftovers(ModifyTableContext *context,
 		rootRelInfo &&
 		rootRelInfo->ri_RelationDesc->rd_rel->relkind == RELKIND_PARTITIONED_TABLE;
 
+	/*
+	 * We only insert leftovers into a table: CheckValidResultRel rejects
+	 * foreign tables, and our callers skip views with INSTEAD OF triggers.
+	 */
+	Assert(resultRelInfo->ri_RelationDesc->rd_rel->relkind == RELKIND_RELATION);
+
 	fpoState = resultRelInfo->ri_forPortionOf;
 	oldtupleSlot = fpoState->fp_existing;
 	leftoverSlot = fpoState->fp_leftover;
@@ -2012,8 +2018,13 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		ar_delete_trig_tcs = NULL;
 	}
 
-	/* Compute temporal leftovers in FOR PORTION OF */
-	if (((ModifyTable *) context->mtstate->ps.plan)->forPortionOf)
+	/*
+	 * Compute temporal leftovers from FOR PORTION OF, unless the command was
+	 * replaced by an INSTEAD OF trigger.
+	 */
+	if (((ModifyTable *) context->mtstate->ps.plan)->forPortionOf &&
+		!(resultRelInfo->ri_TrigDesc &&
+		  resultRelInfo->ri_TrigDesc->trig_delete_instead_row))
 		ExecForPortionOfLeftovers(context, estate, resultRelInfo, tupleid);
 
 	/* AFTER ROW DELETE Triggers */
@@ -2856,8 +2867,13 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 		ExecWithCheckOptions(WCO_VIEW_CHECK, resultRelInfo,
 							 slot, context->estate);
 
-	/* Compute temporal leftovers in FOR PORTION OF */
-	if (((ModifyTable *) context->mtstate->ps.plan)->forPortionOf)
+	/*
+	 * Compute temporal leftovers from FOR PORTION OF, unless the command was
+	 * replaced by an INSTEAD OF trigger.
+	 */
+	if (((ModifyTable *) context->mtstate->ps.plan)->forPortionOf &&
+		!(resultRelInfo->ri_TrigDesc &&
+		  resultRelInfo->ri_TrigDesc->trig_update_instead_row))
 		ExecForPortionOfLeftovers(context, context->estate, resultRelInfo, tupleid);
 
 	/* AFTER ROW UPDATE Triggers */
