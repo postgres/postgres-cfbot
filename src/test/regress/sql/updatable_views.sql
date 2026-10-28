@@ -2323,31 +2323,45 @@ delete from uv_fpo_instead_view
 drop view uv_fpo_instead_view;
 drop function uv_fpo_instead_trig();
 
--- FOR PORTION OF is not supported on views with DO ALSO rules either.  The
--- rule action is built before we narrow the view's query, so it would see an
--- unnarrowed NEW range and would not be limited to the targeted rows.
-create table uv_fpo_also_log (tag text, valid_at tsrange, b float);
-create view uv_fpo_also_view as select id, valid_at, b from uv_fpo_tab;
+-- FOR PORTION OF on a view with DO ALSO rules.  As on a table, the rule
+-- actions fire only for rows that overlap the target range, NEW holds the
+-- targeted portion of the range, and OLD holds the whole row.  The view is
+-- still auto-updated, inserting temporal leftovers.  Here it's a
+-- security-barrier view on a partitioned table, and one leftover moves to
+-- the other partition.
+create table uv_fpo_also_vtab (id int4range, valid_at daterange, b int)
+  partition by range (lower(valid_at));
+create table uv_fpo_also_vtab1 partition of uv_fpo_also_vtab
+  for values from ('2000-01-01') to ('2005-01-01');
+create table uv_fpo_also_vtab2 partition of uv_fpo_also_vtab
+  for values from ('2005-01-01') to (maxvalue);
+insert into uv_fpo_also_vtab values
+  ('[1,1]', '[2000-01-01,2010-01-01)', 0),
+  ('[2,2]', '[2020-01-01,2030-01-01)', 0);
+create table uv_fpo_also_log (tag text, old_valid_at daterange,
+  new_valid_at daterange, b int);
+create view uv_fpo_also_view with (security_barrier) as
+  select id, valid_at, b from uv_fpo_also_vtab;
 create rule uv_fpo_also_upd as on update to uv_fpo_also_view
-  do also insert into uv_fpo_also_log values ('upd', new.valid_at, new.b);
+  do also insert into uv_fpo_also_log
+    values ('upd', old.valid_at, new.valid_at, new.b);
 create rule uv_fpo_also_del as on delete to uv_fpo_also_view
-  do also insert into uv_fpo_also_log values ('del', old.valid_at, old.b);
-
+  do also insert into uv_fpo_also_log
+    values ('del', old.valid_at, null, old.b);
 update uv_fpo_also_view
-  for portion of valid_at from '2015-01-01' to '2020-01-01'
-  set b = 99 where id = '[1,1]'; -- error
-
+  for portion of valid_at from '2002-01-01' to '2006-01-01' set b = 1;
 delete from uv_fpo_also_view
-  for portion of valid_at from '2017-01-01' to '2022-01-01'
-  where id = '[1,1]'; -- error
-
--- Without FOR PORTION OF the rules work as always.
-update uv_fpo_also_view set b = 98 where id = '[1,1]';
-delete from uv_fpo_also_view where id = '[1,1]';
-select * from uv_fpo_also_log order by tag, valid_at;
-
-drop view uv_fpo_also_view;
-drop table uv_fpo_also_log;
+  for portion of valid_at from '2007-01-01' to '2008-01-01';
+update uv_fpo_also_view
+  for portion of valid_at from '2012-01-01' to '2014-01-01' set b = 2;
+-- through an auto-updatable view with the columns in a different order
+create view uv_fpo_also_outer as select b, valid_at, id from uv_fpo_also_view;
+update uv_fpo_also_outer
+  for portion of valid_at from '2024-01-01' to '2026-01-01' set b = 3;
+select * from uv_fpo_also_log order by tag, old_valid_at;
+select tableoid::regclass, * from uv_fpo_also_vtab order by id, valid_at;
+drop view uv_fpo_also_outer, uv_fpo_also_view;
+drop table uv_fpo_also_vtab, uv_fpo_also_log;
 
 -- A DO ALSO rule on the base table is fine: the rule action is built from a
 -- query that already carries the FOR PORTION OF restriction.

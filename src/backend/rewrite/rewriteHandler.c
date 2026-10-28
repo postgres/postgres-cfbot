@@ -4493,12 +4493,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 										 parsetree->mergeActionList,
 										 gettext_noop("Views with conditional DO INSTEAD rules are not automatically updatable."));
 
-			/* We don't support FOR PORTION OF on views with DO ALSO rules. */
-			if (parsetree->forPortionOf && product_queries != NIL)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("views with DO ALSO rules do not support FOR PORTION OF")));
-
 			/*
 			 * Attempt to rewrite the query to automatically update the view.
 			 * This throws an error if the view can't be automatically
