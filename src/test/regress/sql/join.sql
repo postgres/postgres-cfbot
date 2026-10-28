@@ -2696,6 +2696,21 @@ explain (costs off)
 explain (costs off)
   select * from tenk1 a full join tenk1 b using(unique2) where unique2 = 42;
 
+-- the merged COALESCE may be relabeled to keep its typmod after inlining
+begin;
+
+create function join_typmod_f(numeric) returns numeric
+  language sql immutable as 'select $1';
+create temp table fj_a (a numeric(10,2));
+create temp table fj_b (b numeric(10,2));
+
+explain (costs off)
+  select * from (select join_typmod_f(a) as x from fj_a) s1
+    full join (select join_typmod_f(b) as x from fj_b) s2 using (x)
+  where x = 1;
+
+rollback;
+
 --
 -- test that quals attached to an outer join have correct semantics,
 -- specifically that they don't re-use expressions computed below the join;
