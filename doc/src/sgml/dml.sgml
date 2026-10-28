@@ -410,6 +410,20 @@ DELETE FROM products
   </para>
 
   <para>
+   Similarly, a view's row-level <literal>INSTEAD OF UPDATE</literal> and
+   <literal>INSTEAD OF DELETE</literal> triggers (see <xref
+   linkend="trigger-definition"/>) fire only for rows that overlap the
+   targeted portion.  In those triggers, the application-time value in
+   <literal>NEW</literal> is narrowed based on the <literal>FOR PORTION
+   OF</literal> target, while <literal>OLD</literal> has the original value.
+   The trigger replaces the command, so no temporal leftovers are inserted.
+   The trigger can use <literal>FOR PORTION OF</literal> itself to preserve
+   the untargeted history.  But note that an
+   <literal>INSTEAD OF DELETE</literal> trigger receives only
+   <literal>OLD</literal>, so it cannot tell which portion was targeted.
+  </para>
+
+  <para>
    In <literal>READ COMMITTED</literal> mode, a temporal update or delete can
    fail with a serialization failure when it touches a row that another
    transaction has concurrently changed.  The transaction can be retried.
