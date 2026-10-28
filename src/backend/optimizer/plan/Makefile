@@ -18,6 +18,7 @@ OBJS = \
 	initsplan.o \
 	planagg.o \
 	planmain.o \
+	planorexpand.o \
 	planner.o \
 	setrefs.o \
 	subselect.o

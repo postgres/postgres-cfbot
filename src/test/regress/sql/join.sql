@@ -4806,11 +4806,15 @@ WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 -- to SAOP.
 --
 
+SET or_expansion_limit = 0;
+
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM tenk1 t1, tenk1 t2
 WHERE t2.thousand = t1.tenthous OR t2.thousand = t1.unique1 OR t2.thousand = t1.unique2;
 SELECT COUNT(*) FROM tenk1 t1, tenk1 t2
 WHERE t2.thousand = t1.tenthous OR t2.thousand = t1.unique1 OR t2.thousand = t1.unique2;
+
+RESET or_expansion_limit;
 
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
