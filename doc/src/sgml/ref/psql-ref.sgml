@@ -3314,6 +3314,16 @@ SELECT $1 \parse stmt1
           </listitem>
           </varlistentry>
 
+          <varlistentry id="app-psql-meta-command-pset-n_decimals">
+          <term><literal>n_decimals</literal></term>
+          <listitem>
+          <para>
+          Sets the number of digits after the decimal point. Valid values are
+          <literal>all</literal>, and an integer value.
+          </para>
+          </listitem>
+          </varlistentry>
+
           <varlistentry id="app-psql-meta-command-pset-null">
           <term><literal>null</literal></term>
           <listitem>
