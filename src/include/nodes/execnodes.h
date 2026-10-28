@@ -1673,6 +1673,7 @@ typedef struct SampleScanState
 	int64		donetuples;		/* number of tuples already returned */
 	bool		haveblock;		/* has a block for sampling been determined */
 	bool		done;			/* exhausted all tuples? */
+	struct SharedSampleScanInstrumentation *sinstrument;
 } SampleScanState;
 
 /*
@@ -1875,6 +1876,7 @@ typedef struct TidScanState
 	int			tss_NumTids;
 	int			tss_TidPtr;
 	ItemPointerData *tss_TidList;
+	struct SharedTidScanInstrumentation *tss_sinstrument;
 } TidScanState;
 
 /* ----------------
