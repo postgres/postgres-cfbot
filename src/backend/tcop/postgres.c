@@ -367,11 +367,16 @@ SocketBackend(StringInfo inBuf)
 {
 	int			qtype;
 	int			maxmsglen;
+	bool		message_body_read = false;
 
 	/*
 	 * Get message type code from the frontend.
 	 */
 	HOLD_CANCEL_INTERRUPTS();
+
+#ifdef USE_ZSTD
+read_message:
+#endif
 	pq_startmsgread();
 	qtype = pq_getbyte();
 
@@ -395,6 +400,19 @@ SocketBackend(StringInfo inBuf)
 		}
 		return qtype;
 	}
+
+#ifdef USE_ZSTD
+	pq_check_protocol_compression_message(qtype);
+	if (qtype == PqMsg_CompressedData)
+	{
+		qtype = pq_get_compressed_message(inBuf);
+		if (qtype == 0)
+			goto read_message;
+		if (qtype == EOF)
+			return EOF;
+		message_body_read = true;
+	}
+#endif
 
 	/*
 	 * Validate message type code before trying to read body; if we have lost
@@ -476,7 +494,7 @@ SocketBackend(StringInfo inBuf)
 	 * after the type code; we can read the message contents independently of
 	 * the type.
 	 */
-	if (pq_getmessage(inBuf, maxmsglen))
+	if (!message_body_read && pq_getmessage(inBuf, maxmsglen))
 		return EOF;				/* suitable message already logged */
 	RESUME_CANCEL_INTERRUPTS();
 

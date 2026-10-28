@@ -622,11 +622,12 @@ pqTraceOutput_ReadyForQuery(FILE *f, const char *message, int *cursor)
  * Print the given message to the trace output stream.
  */
 void
-pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
+pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer,
+					 bool compressed)
 {
 	char		id;
 	int			length;
-	char	   *prefix = toServer ? "F" : "B";
+	const char *prefix = toServer ? "F" : compressed ? "B*" : "B";
 	int			logCursor = 0;
 	bool		regress;
 
@@ -651,7 +652,8 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 	 * name) fields can change as server code is modified, and if their
 	 * lengths differ from the originals, that would break tests.
 	 */
-	if (regress && !toServer && (id == PqMsg_ErrorResponse || id == PqMsg_NoticeResponse))
+	if (regress && (id == PqMsg_CompressedData ||
+					(!toServer && (id == PqMsg_ErrorResponse || id == PqMsg_NoticeResponse))))
 		fprintf(conn->Pfdebug, "%s\tNN\t", prefix);
 	else
 		fprintf(conn->Pfdebug, "%s\t%d\t", prefix, length);
@@ -687,6 +689,11 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 				pqTraceOutput_Close(conn->Pfdebug, message, &logCursor);
 			else
 				pqTraceOutput_CommandComplete(conn->Pfdebug, message, &logCursor);
+			break;
+		case PqMsg_CompressedData:
+			fprintf(conn->Pfdebug, "CompressedData");
+			/* Trace decoded messages separately instead of the payload. */
+			logCursor = length + 1;
 			break;
 		case PqMsg_CopyData:
 			pqTraceOutput_CopyData(conn->Pfdebug, message, &logCursor,
