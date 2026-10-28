@@ -2356,6 +2356,17 @@ description | Waiting for a newly initialized WAL file to reach durable storage
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
+        <structfield>skip_fpi</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of blocks not prefetched because they would be restored from a full page image included in an earlier WAL record
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
         <structfield>skip_rep</structfield> <type>bigint</type>
        </para>
        <para>
