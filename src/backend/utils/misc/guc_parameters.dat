@@ -2319,6 +2319,16 @@
   ifdef => 'DEBUG_BOUNDED_SORT',
 },
 
+{ name => 'or_expansion_limit', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
+  short_desc => 'Sets the maximum number of OR arms considered for OR-expansion.',
+  long_desc => 'The planner will consider expanding OR clauses if they have no more than this many arms. 0 disables OR-expansion.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'or_expansion_limit',
+  boot_val => '8',
+  min => '0',
+  max => 'INT_MAX',
+},
+
 { name => 'output_plugin_libraries', type => 'string', context => 'PGC_SUSET', group => 'REPLICATION_SENDING',
   short_desc => 'Lists libraries that may be named as logical decoding output plugins.',
   long_desc => 'Users with REPLICATION privileges may only use plugins in this list when creating logical replication slots.',
