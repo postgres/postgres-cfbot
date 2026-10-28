@@ -21,6 +21,8 @@
 #include "postgres_fe.h"
 #endif
 
+#include <limits.h>
+
 #include "common/string.h"
 
 
@@ -45,6 +47,8 @@ pg_str_endswith(const char *str, const char *end)
 
 /*
  * strtoint --- just like strtol, but returns int not long
+ *
+ * On overflow, returns INT_MAX or INT_MIN and sets errno to ERANGE.
  */
 int
 strtoint(const char *pg_restrict str, char **pg_restrict endptr, int base)
@@ -52,8 +56,16 @@ strtoint(const char *pg_restrict str, char **pg_restrict endptr, int base)
 	long		val;
 
 	val = strtol(str, endptr, base);
-	if (val != (int) val)
+	if (val > INT_MAX)
+	{
 		errno = ERANGE;
+		return INT_MAX;
+	}
+	if (val < INT_MIN)
+	{
+		errno = ERANGE;
+		return INT_MIN;
+	}
 	return (int) val;
 }
 
