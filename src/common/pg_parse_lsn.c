@@ -22,6 +22,9 @@
 
 #define MAXPG_LSNCOMPONENT	8
 
+static_assert(MAXPG_LSNLEN == MAXPG_LSNCOMPONENT * 2 + 1,
+			  "MAXPG_LSNLEN does not match MAXPG_LSNCOMPONENT");
+
 /*
  * pg_parse_lsn
  *
