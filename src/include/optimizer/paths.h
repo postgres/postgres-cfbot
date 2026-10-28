@@ -226,6 +226,8 @@ typedef enum
 extern PathKeysComparison compare_pathkeys(List *keys1, List *keys2);
 extern bool pathkeys_contained_in(List *keys1, List *keys2);
 extern bool pathkeys_count_contained_in(List *keys1, List *keys2, int *n_common);
+extern List *adjust_group_pathkeys_to_input(List *group_pathkeys,
+											List *pathkeys);
 extern List *get_useful_group_keys_orderings(PlannerInfo *root, Path *path);
 extern Path *get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
 											Relids required_outer,
