@@ -2714,8 +2714,8 @@ exec_command_pset(PsqlScanState scan_state, bool active_branch)
 			static const char *const my_list[] = {
 				"border", "columns", "csv_fieldsep",
 				"display_false", "display_true", "expanded", "fieldsep",
-				"fieldsep_zero", "footer", "format", "linestyle", "null",
-				"numericlocale", "pager", "pager_min_lines",
+				"fieldsep_zero", "footer", "format", "linestyle", "n_decimals",
+				"null", "numericlocale", "pager", "pager_min_lines",
 				"recordsep", "recordsep_zero",
 				"tableattr", "title", "tuples_only",
 				"unicode_border_linestyle",
@@ -5345,6 +5345,26 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 		popt->topt.fieldSep.separator_zero = true;
 	}
 
+	/* number of decimals */
+	else if (strcmp(param, "n_decimals") == 0)
+	{
+		if (value)
+		{
+			int intval = -1;
+
+			if (pg_strcasecmp(value, "all") != 0)
+			{
+				intval = atoi(value);
+				if (intval < -1)
+				{
+					intval = -1;
+				}
+			}
+
+			popt->n_decimals = intval;
+		}
+	}
+
 	/* record separator for unaligned text */
 	else if (strcmp(param, "recordsep") == 0)
 	{
@@ -5552,6 +5572,19 @@ printPsetInfo(const char *param, printQueryOpt *popt)
 			   get_line_style(&popt->topt)->name);
 	}
 
+	/* show number of decimals */
+	else if (strcmp(param, "n_decimals") == 0)
+	{
+		if (popt->n_decimals == -1)
+		{
+			printf(_("Number of decimals is \"all\".\n"));
+		}
+		else
+		{
+			printf(_("Number of decimals is \"%d\".\n"), popt->n_decimals);
+		}
+	}
+
 	/* show null display */
 	else if (strcmp(param, "null") == 0)
 	{
@@ -5691,6 +5724,8 @@ savePsetInfo(const printQueryOpt *popt)
 		save->falsePrint = pg_strdup(popt->falsePrint);
 	if (popt->title)
 		save->title = pg_strdup(popt->title);
+	if (popt->n_decimals)
+		save->n_decimals = popt->n_decimals;
 
 	/*
 	 * footers and translate_columns are never set in psql's print settings,
@@ -5810,6 +5845,21 @@ pset_value_string(const char *param, printQueryOpt *popt)
 		return pstrdup(_align2string(popt->topt.format));
 	else if (strcmp(param, "linestyle") == 0)
 		return pstrdup(get_line_style(&popt->topt)->name);
+	else if (strcmp(param, "n_decimals") == 0)
+	{
+		/* must be PRINT_XHEADER_EXACT_WIDTH */
+		char		wbuff[32];
+
+		if (popt->n_decimals == -1)
+		{
+			snprintf(wbuff, sizeof(wbuff), "all");
+		}
+		else
+		{
+			snprintf(wbuff, sizeof(wbuff), "%d", popt->n_decimals);
+		}
+		return pstrdup(wbuff);
+	}
 	else if (strcmp(param, "null") == 0)
 		return pset_quoted_string(popt->nullPrint
 								  ? popt->nullPrint
