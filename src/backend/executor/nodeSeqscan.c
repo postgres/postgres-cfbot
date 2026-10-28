@@ -73,6 +73,8 @@ SeqNext(SeqScanState *node)
 
 		if (estate->es_instrument & INSTRUMENT_IO)
 			flags |= SO_SCAN_INSTRUMENT;
+		if (estate->es_instrument & INSTRUMENT_BUFFERS)
+			flags |= SO_SCAN_INSTRUMENT_STRATEGY;
 
 		/*
 		 * We reach here if the scan is not parallel, or if we're serially
@@ -310,7 +312,7 @@ ExecEndSeqScan(SeqScanState *node)
 	scanDesc = node->ss.ss_currentScanDesc;
 
 	/*
-	 * Collect I/O stats for this process into shared instrumentation.
+	 * Collect scan statistics for this process into shared instrumentation.
 	 */
 	if (node->sinstrument != NULL && IsParallelWorker())
 	{
@@ -321,7 +323,7 @@ ExecEndSeqScan(SeqScanState *node)
 
 		if (scanDesc && scanDesc->rs_instrument)
 		{
-			AccumulateIOStats(&si->stats.io, &scanDesc->rs_instrument->io);
+			CombineTableScanInstrumentation(&si->stats, scanDesc->rs_instrument);
 		}
 	}
 
@@ -400,6 +402,8 @@ ExecSeqScanInitializeDSM(SeqScanState *node,
 
 	if (estate->es_instrument & INSTRUMENT_IO)
 		flags |= SO_SCAN_INSTRUMENT;
+	if (estate->es_instrument & INSTRUMENT_BUFFERS)
+		flags |= SO_SCAN_INSTRUMENT_STRATEGY;
 
 	pscan = shm_toc_allocate(pcxt->toc, node->pscan_len);
 	table_parallelscan_initialize(node->ss.ss_currentRelation,
@@ -445,6 +449,8 @@ ExecSeqScanInitializeWorker(SeqScanState *node,
 
 	if (node->ss.ps.state->es_instrument & INSTRUMENT_IO)
 		flags |= SO_SCAN_INSTRUMENT;
+	if (node->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS)
+		flags |= SO_SCAN_INSTRUMENT_STRATEGY;
 
 	pscan = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
 	node->ss.ss_currentScanDesc =
@@ -461,7 +467,8 @@ ExecSeqScanInstrumentEstimate(SeqScanState *node, ParallelContext *pcxt)
 	EState	   *estate = node->ss.ps.state;
 	Size		size;
 
-	if ((estate->es_instrument & INSTRUMENT_IO) == 0 || pcxt->nworkers == 0)
+	if ((estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_IO)) == 0 ||
+		pcxt->nworkers == 0)
 		return;
 
 	size = add_size(offsetof(SharedSeqScanInstrumentation, sinstrument),
@@ -481,7 +488,8 @@ ExecSeqScanInstrumentInitDSM(SeqScanState *node, ParallelContext *pcxt)
 	SharedSeqScanInstrumentation *sinstrument;
 	Size		size;
 
-	if ((estate->es_instrument & INSTRUMENT_IO) == 0 || pcxt->nworkers == 0)
+	if ((estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_IO)) == 0 ||
+		pcxt->nworkers == 0)
 		return;
 
 	size = add_size(offsetof(SharedSeqScanInstrumentation, sinstrument),
@@ -505,7 +513,7 @@ ExecSeqScanInstrumentInitWorker(SeqScanState *node,
 {
 	EState	   *estate = node->ss.ps.state;
 
-	if ((estate->es_instrument & INSTRUMENT_IO) == 0)
+	if ((estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_IO)) == 0)
 		return;
 
 	node->sinstrument = shm_toc_lookup(pwcxt->toc,
