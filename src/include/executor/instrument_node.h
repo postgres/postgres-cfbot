@@ -335,6 +335,43 @@ typedef struct SharedSeqScanInstrumentation
 } SharedSeqScanInstrumentation;
 
 
+/* ---------------------
+ *	Instrumentation information for sample scans
+ * ---------------------
+ */
+typedef struct SampleScanInstrumentation
+{
+	TableScanInstrumentation stats;
+} SampleScanInstrumentation;
+
+/*
+ * Shared memory container for per-worker information
+ */
+typedef struct SharedSampleScanInstrumentation
+{
+	int			num_workers;
+	SampleScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedSampleScanInstrumentation;
+
+/* ---------------------
+ *	Instrumentation information for TID scans
+ * ---------------------
+ */
+typedef struct TidScanInstrumentation
+{
+	TableScanInstrumentation stats;
+} TidScanInstrumentation;
+
+/*
+ * Shared memory container for per-worker information
+ */
+typedef struct SharedTidScanInstrumentation
+{
+	int			num_workers;
+	TidScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedTidScanInstrumentation;
+
+
 /*
  *	Instrumentation information for TID range scans
  */

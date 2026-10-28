@@ -2767,6 +2767,7 @@ SYNCHRONIZATION_BARRIER
 SYSTEM_INFO
 SampleScan
 SampleScanGetSampleSize_function
+SampleScanInstrumentation
 SampleScanState
 SavedTransactionCharacteristics
 ScalarArrayOpExpr
@@ -2867,8 +2868,10 @@ SharedMemoizeInfo
 SharedRecordTableEntry
 SharedRecordTableKey
 SharedRecordTypmodRegistry
+SharedSampleScanInstrumentation
 SharedSeqScanInstrumentation
 SharedSortInfo
+SharedTidScanInstrumentation
 SharedTidRangeScanInstrumentation
 SharedTuplestore
 SharedTuplestoreAccessor
@@ -3182,6 +3185,7 @@ TidRangeScan
 TidRangeScanInstrumentation
 TidRangeScanState
 TidScan
+TidScanInstrumentation
 TidScanState
 TidStore
 TidStoreIter
