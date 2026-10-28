@@ -551,6 +551,39 @@ VACUUM (SKIP_DATABASE_STATS) vactst;
 VACUUM (ONLY_DATABASE_STATS);
 VACUUM (ONLY_DATABASE_STATS) vactst;  -- error
 ERROR:  ONLY_DATABASE_STATS cannot be specified with a list of tables
+VACUUM (ONLY_DATABASE_STATS, FREEZE);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, ANALYZE);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, FULL);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, SKIP_LOCKED);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, DISABLE_PAGE_SKIPPING);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, SKIP_DATABASE_STATS);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, PARALLEL 1);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, INDEX_CLEANUP ON);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, INDEX_CLEANUP AUTO);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, INDEX_CLEANUP);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, TRUNCATE ON);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, BUFFER_USAGE_LIMIT '1MB');  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, PROCESS_MAIN ON);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (ONLY_DATABASE_STATS, PROCESS_TOAST ON);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+VACUUM (PARALLEL 1, ONLY_DATABASE_STATS);  -- error
+ERROR:  ONLY_DATABASE_STATS cannot be specified with other VACUUM options
+-- VERBOSE is allowed.
+VACUUM (ONLY_DATABASE_STATS, VERBOSE);
+VACUUM (ONLY_DATABASE_STATS, VERBOSE false);
 DROP VIEW vac_option_tab_counts;
 DROP TABLE vac_option_tab;
 DROP TABLE vaccluster;
