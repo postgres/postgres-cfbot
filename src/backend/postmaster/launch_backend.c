@@ -33,6 +33,7 @@
 
 #include <unistd.h>
 
+#include "access/xlog.h"
 #include "libpq/libpq-be.h"
 #include "miscadmin.h"
 #include "postmaster/autovacuum.h"
@@ -131,6 +132,14 @@ typedef struct
 	int			MyPMChildSlot;
 
 	int32		timing_tsc_frequency_khz;
+
+	/*
+	 * data_checksum_version from pg_control.  Propagated explicitly because
+	 * the data_checksums GUC is bound directly to its variable (no
+	 * SetConfigOption call), so it doesn't ride along the regular
+	 * non-default-GUCs propagation path used for, e.g., wal_segment_size.
+	 */
+	uint32		data_checksum_version;
 
 	/*
 	 * These are only used by backend processes, but are here because passing
@@ -662,10 +671,28 @@ SubPostmasterMain(int argc, char *argv[])
 	checkDataDir();
 
 	/*
-	 * (re-)read control file, as it contains config. The postmaster will
-	 * already have read this, but this process doesn't know about that.
+	 * The postmaster already validated pg_control at startup.  We don't
+	 * re-read it here: doing so would race against concurrent writes by
+	 * the checkpointer and could see a torn image (NTFS and ext4 can
+	 * return mashed-together data for a concurrent read/write of the same
+	 * region).  Instead, we rely on inherited state:
+	 *
+	 *  - wal_segment_size and other initdb-time GUCs are restored above by
+	 *    read_nondefault_variables() since SetConfigOption() in the
+	 *    postmaster placed them on guc_nondef_list.
+	 *
+	 *  - data_checksum_version was applied in restore_backend_variables()
+	 *    from the BackendParameters snapshot.
+	 *
+	 *  - The shared-memory ControlFile is re-attached below by
+	 *    InitShmemAllocator() / ShmemCallRequestCallbacks(), at which
+	 *    point the global ControlFile pointer is again valid for any
+	 *    code that needs the live (volatile) fields.
+	 *
+	 * Recompute settings derived from wal_segment_size that aren't
+	 * propagated through GUCs (UsableBytesInSegment, CheckPointSegments).
 	 */
-	LocalProcessControlFile(false);
+	ApplyWalSegSizeSettings();
 
 	RegisterBuiltinShmemCallbacks();
 
@@ -754,6 +781,15 @@ save_backend_variables(BackendParameters *param,
 	param->num_pmchild_slots = num_pmchild_slots;
 
 	param->timing_tsc_frequency_khz = timing_tsc_frequency_khz;
+
+	/*
+	 * Propagate the data checksum version.  In the postmaster the GUC-bound
+	 * 'data_checksums' variable was set from pg_control by
+	 * SetLocalDataChecksumState(); 'data_checksums' is not propagated via
+	 * the regular non-default-GUC mechanism (its value is assigned directly,
+	 * so its source stays at PGC_S_DEFAULT), so we ship it explicitly here.
+	 */
+	param->data_checksum_version = data_checksums;
 
 #ifdef WIN32
 	param->PostmasterHandle = PostmasterHandle;
@@ -1010,6 +1046,14 @@ restore_backend_variables(BackendParameters *param)
 	num_pmchild_slots = param->num_pmchild_slots;
 
 	timing_tsc_frequency_khz = param->timing_tsc_frequency_khz;
+
+	/*
+	 * Restore data checksum state from the inherited snapshot of
+	 * pg_control.  Doing this here, before any code can need it, avoids
+	 * having to re-read pg_control from disk in this child (which used to
+	 * race against concurrent writes by the postmaster's checkpointer).
+	 */
+	SetLocalDataChecksumState(param->data_checksum_version);
 
 	/* Re-run logic usually done by assign_timing_clock_source */
 	pg_initialize_timing();
