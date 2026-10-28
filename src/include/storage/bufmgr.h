@@ -25,21 +25,6 @@
 
 typedef void *Block;
 
-/*
- * Possible arguments for GetAccessStrategy().
- *
- * If adding a new BufferAccessStrategyType, also add a new IOContext so
- * IO statistics using this strategy are tracked.
- */
-typedef enum BufferAccessStrategyType
-{
-	BAS_NORMAL,					/* Normal random access */
-	BAS_BULKREAD,				/* Large read-only scan (hint bit updates are
-								 * ok) */
-	BAS_BULKWRITE,				/* Large multi-block write (e.g. COPY IN) */
-	BAS_VACUUM,					/* VACUUM */
-} BufferAccessStrategyType;
-
 /* Possible modes for ReadBufferExtended() */
 typedef enum
 {
@@ -379,6 +364,7 @@ extern void AtProcExit_LocalBuffers(void);
 extern BufferAccessStrategy GetAccessStrategy(BufferAccessStrategyType btype);
 extern BufferAccessStrategy GetAccessStrategyWithSize(BufferAccessStrategyType btype,
 													  int ring_size_kb);
+extern BufferAccessStrategyType GetAccessStrategyType(BufferAccessStrategy strategy);
 extern int	GetAccessStrategyBufferCount(BufferAccessStrategy strategy);
 extern int	GetAccessStrategyPinLimit(BufferAccessStrategy strategy);
 

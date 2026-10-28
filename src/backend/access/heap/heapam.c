@@ -1317,12 +1317,20 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 														  sizeof(TBMIterateResult));
 	}
 
-	/* enable read stream instrumentation */
-	if ((flags & SO_SCAN_INSTRUMENT) && (scan->rs_read_stream != NULL))
+	/* enable scan instrumentation */
+	if (flags & (SO_SCAN_INSTRUMENT | SO_SCAN_INSTRUMENT_STRATEGY))
 	{
 		scan->rs_base.rs_instrument = palloc0_object(TableScanInstrumentation);
-		read_stream_enable_stats(scan->rs_read_stream,
-								 &scan->rs_base.rs_instrument->io);
+
+		/* strategy instrumentation */
+		if (flags & SO_SCAN_INSTRUMENT_STRATEGY)
+			InstrRecordTableScanStrategy(scan->rs_base.rs_instrument,
+										 GetAccessStrategyType(scan->rs_strategy));
+
+		/* read stream instrumentation */
+		if ((flags & SO_SCAN_INSTRUMENT) && scan->rs_read_stream != NULL)
+			read_stream_enable_stats(scan->rs_read_stream,
+									 &scan->rs_base.rs_instrument->io);
 	}
 
 	scan->rs_vmbuffer = InvalidBuffer;
@@ -1387,6 +1395,10 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	 * reinitialize scan descriptor
 	 */
 	initscan(scan, key, true);
+
+	if (scan->rs_base.rs_flags & SO_SCAN_INSTRUMENT_STRATEGY)
+		InstrRecordTableScanStrategy(scan->rs_base.rs_instrument,
+									 GetAccessStrategyType(scan->rs_strategy));
 }
 
 void
