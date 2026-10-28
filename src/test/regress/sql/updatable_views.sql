@@ -2211,6 +2211,84 @@ select * from base_tab order by a;
 drop view base_tab_view;
 drop table base_tab;
 
+-- FOR PORTION OF on a view with DO INSTEAD rules.  As on a table, the rule
+-- actions fire only for rows that overlap the target range, NEW holds the
+-- targeted portion of the range, and OLD holds the whole row.  The original
+-- statement doesn't run, so there are no temporal leftovers.
+create table uv_fpo_rinst_tab (id int4range, valid_at daterange, b int)
+  partition by list (id);
+create table uv_fpo_rinst_tab1 partition of uv_fpo_rinst_tab
+  for values in ('[1,1]');
+create table uv_fpo_rinst_tab2 partition of uv_fpo_rinst_tab
+  for values in ('[2,2]');
+insert into uv_fpo_rinst_tab values
+  ('[1,1]', '[2000-01-01,2010-01-01)', 0),
+  ('[2,2]', '[2020-01-01,2030-01-01)', 0);
+create table uv_fpo_rinst_log (tag text, old_valid_at daterange,
+  new_valid_at daterange, b int);
+create view uv_fpo_rinst_view as select id, valid_at, b from uv_fpo_rinst_tab;
+create rule uv_fpo_rinst_upd as on update to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('upd', old.valid_at, new.valid_at, new.b)
+    returning null::int4range, new_valid_at, b;
+create rule uv_fpo_rinst_del as on delete to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('del', old.valid_at, null, old.b)
+    returning null::int4range, old_valid_at, b;
+update uv_fpo_rinst_view
+  for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 1
+  returning *;
+delete from uv_fpo_rinst_view
+  for portion of valid_at from '2006-01-01' to '2008-01-01'
+  returning *;
+update uv_fpo_rinst_view
+  for portion of valid_at from '2012-01-01' to '2014-01-01' set b = 2;
+-- through an auto-updatable view with the columns in a different order
+create view uv_fpo_rinst_outer as select b, valid_at, id from uv_fpo_rinst_view;
+update uv_fpo_rinst_outer
+  for portion of valid_at from '2024-01-01' to '2026-01-01' set b = 3;
+drop view uv_fpo_rinst_outer;
+select * from uv_fpo_rinst_log order by tag, old_valid_at;
+select * from uv_fpo_rinst_tab order by id, valid_at;
+truncate uv_fpo_rinst_log;
+
+-- The rules also apply to statements parsed before the rules existed.
+drop rule uv_fpo_rinst_upd on uv_fpo_rinst_view;
+create function uv_fpo_rinst_fn() returns void language sql begin atomic
+  update uv_fpo_rinst_view
+    for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 4;
+end;
+prepare uv_fpo_rinst_prep as update uv_fpo_rinst_view
+  for portion of valid_at from '2004-01-01' to '2006-01-01' set b = 5;
+execute uv_fpo_rinst_prep;  -- auto-updates the view, making leftovers
+create rule uv_fpo_rinst_upd as on update to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('upd', old.valid_at, new.valid_at, new.b);
+select uv_fpo_rinst_fn();
+execute uv_fpo_rinst_prep;
+select * from uv_fpo_rinst_log order by tag, old_valid_at;
+deallocate uv_fpo_rinst_prep;
+drop function uv_fpo_rinst_fn();
+truncate uv_fpo_rinst_log;
+
+-- A conditional DO INSTEAD rule needs an unconditional one too.  Its action
+-- also sees the FOR PORTION OF restriction.
+drop rule uv_fpo_rinst_upd on uv_fpo_rinst_view;
+create rule uv_fpo_rinst_cond as on update to uv_fpo_rinst_view
+  where old.id = '[2,2]'
+  do instead insert into uv_fpo_rinst_log
+    values ('cond', old.valid_at, new.valid_at, new.b);
+update uv_fpo_rinst_view
+  for portion of valid_at from '2026-01-01' to '2028-01-01' set b = 6; -- error
+create rule uv_fpo_rinst_upd as on update to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('upd', old.valid_at, new.valid_at, new.b);
+update uv_fpo_rinst_view
+  for portion of valid_at from '2026-01-01' to '2028-01-01' set b = 6;
+select * from uv_fpo_rinst_log order by tag, old_valid_at;
+drop view uv_fpo_rinst_view;
+drop table uv_fpo_rinst_tab, uv_fpo_rinst_log;
+
 -- FOR PORTION OF is not supported on views with INSTEAD OF triggers
 create view uv_fpo_instead_view as select id, valid_at, b from uv_fpo_tab;
 

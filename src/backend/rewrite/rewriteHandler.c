@@ -97,6 +97,7 @@ static List *matchLocks(CmdType event, Relation relation,
 static Query *fireRIRrules(Query *parsetree, List *activeRIRs);
 static Bitmapset *adjust_view_column_set(Bitmapset *cols, List *targetlist);
 static List *get_generated_columns(Relation rel, int rt_index, bool include_stored);
+static void addForPortionOfDetails(Query *parsetree, Relation rel);
 
 
 /*
@@ -4021,6 +4022,64 @@ rewriteTargetView(Query *parsetree, Relation view)
 
 
 /*
+ * addForPortionOfDetails -
+ *	  add the FOR PORTION OF restriction to an UPDATE or DELETE
+ *
+ * The query is limited to rows that overlap the target range, and an UPDATE
+ * also sets the range column(s) to the targeted portion.  rel is the target
+ * relation, named in the error for assigning the range column twice.
+ */
+static void
+addForPortionOfDetails(Query *parsetree, Relation rel)
+{
+	ListCell   *tl;
+
+	Assert(parsetree->forPortionOf);
+
+	/*
+	 * Add qual: UPDATE/DELETE FOR PORTION OF should be limited to rows that
+	 * overlap the target range.
+	 */
+	AddQual(parsetree, parsetree->forPortionOf->overlapsExpr);
+
+	/* Update FOR PORTION OF column(s) automatically. */
+	if (parsetree->commandType == CMD_UPDATE)
+	{
+		foreach(tl, parsetree->forPortionOf->rangeTargetList)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(tl);
+			ListCell   *tl2;
+
+			/*
+			 * Detect multiple-assignment early, so that we can report the
+			 * same error as against a regular table.  If we detect it later,
+			 * the error message will use the column names of the base table,
+			 * not the view.
+			 */
+			foreach(tl2, parsetree->targetList)
+			{
+				TargetEntry *prior = (TargetEntry *) lfirst(tl2);
+
+				if (prior->resjunk || prior->resno != tle->resno)
+					continue;
+
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("cannot update column \"%s\" because it is used in FOR PORTION OF",
+								prior->resname),
+						 strcmp(prior->resname, tle->resname) != 0 ?
+						 errdetail("Columns \"%s\" and \"%s\" are the same column of relation \"%s\".",
+								   prior->resname, tle->resname,
+								   RelationGetRelationName(rel)) : 0));
+			}
+
+			parsetree->targetList = lappend(parsetree->targetList, tle);
+		}
+	}
+}
+
+
+/*
  * RewriteQuery -
  *	  rewrites the query and apply the rules again on the queries rewritten
  *
@@ -4150,6 +4209,7 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		List	   *locks;
 		int			product_orig_rt_length;
 		List	   *product_queries;
+		Query	   *rule_parsetree;
 		bool		hasUpdate = false;
 		int			values_rte_index = 0;
 		bool		defaults_remaining = false;
@@ -4252,59 +4312,17 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		{
 			Assert(parsetree->override == OVERRIDING_NOT_SET);
 
-			if (parsetree->forPortionOf)
-			{
-				/*
-				 * Don't add FOR PORTION OF details until we're done rewriting
-				 * a view update, so that we don't add the same qual and TLE
-				 * on the recursion.
-				 *
-				 * Views don't need to do anything special here to remap Vars;
-				 * that is handled by the tree walker.
-				 */
-				if (rt_entry_relation->rd_rel->relkind != RELKIND_VIEW)
-				{
-					ListCell   *tl;
-
-					/*
-					 * Add qual: UPDATE FOR PORTION OF should be limited to
-					 * rows that overlap the target range.
-					 */
-					AddQual(parsetree, parsetree->forPortionOf->overlapsExpr);
-
-					/* Update FOR PORTION OF column(s) automatically. */
-					foreach(tl, parsetree->forPortionOf->rangeTargetList)
-					{
-						TargetEntry *tle = (TargetEntry *) lfirst(tl);
-						ListCell   *tl2;
-
-						/*
-						 * Detect multiple-assignment early, so that we can
-						 * report the same error as against a regular table.
-						 * If we detect it later, the error message will use
-						 * the column names of the base table, not the view.
-						 */
-						foreach(tl2, parsetree->targetList)
-						{
-							TargetEntry *prior = (TargetEntry *) lfirst(tl2);
-
-							if (prior->resjunk || prior->resno != tle->resno)
-								continue;
-
-							ereport(ERROR,
-									(errcode(ERRCODE_SYNTAX_ERROR),
-									 errmsg("cannot update column \"%s\" because it is used in FOR PORTION OF",
-											prior->resname),
-									 strcmp(prior->resname, tle->resname) != 0 ?
-									 errdetail("Columns \"%s\" and \"%s\" are the same column of relation \"%s\".",
-											   prior->resname, tle->resname,
-											   RelationGetRelationName(rt_entry_relation)) : 0));
-						}
-
-						parsetree->targetList = lappend(parsetree->targetList, tle);
-					}
-				}
-			}
+			/*
+			 * Don't add FOR PORTION OF details to a view's query, so that we
+			 * don't add the same qual and TLE again when we recurse on the
+			 * auto-updated query.  Rule actions get them below.
+			 *
+			 * Views don't need to do anything special here to remap Vars;
+			 * that is handled by the tree walker.
+			 */
+			if (parsetree->forPortionOf &&
+				rt_entry_relation->rd_rel->relkind != RELKIND_VIEW)
+				addForPortionOfDetails(parsetree, rt_entry_relation);
 
 			parsetree->targetList =
 				rewriteTargetListIU(parsetree->targetList,
@@ -4351,25 +4369,10 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		}
 		else if (event == CMD_DELETE)
 		{
-			if (parsetree->forPortionOf)
-			{
-				/*
-				 * Don't add FOR PORTION OF details until we're done rewriting
-				 * a view delete, so that we don't add the same qual on the
-				 * recursion.
-				 *
-				 * Views don't need to do anything special here to remap Vars;
-				 * that is handled by the tree walker.
-				 */
-				if (rt_entry_relation->rd_rel->relkind != RELKIND_VIEW)
-				{
-					/*
-					 * Add qual: DELETE FOR PORTION OF should be limited to
-					 * rows that overlap the target range.
-					 */
-					AddQual(parsetree, parsetree->forPortionOf->overlapsExpr);
-				}
-			}
+			/* As for UPDATE, a view's query doesn't get these yet. */
+			if (parsetree->forPortionOf &&
+				rt_entry_relation->rd_rel->relkind != RELKIND_VIEW)
+				addForPortionOfDetails(parsetree, rt_entry_relation);
 		}
 		else
 			elog(ERROR, "unrecognized commandType: %d", (int) event);
@@ -4380,8 +4383,25 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		locks = matchLocks(event, rt_entry_relation,
 						   result_relation, parsetree, &hasUpdate);
 
+		/*
+		 * Rule actions on a view must see the FOR PORTION OF restriction,
+		 * just as they do on a table: they should only fire for rows that
+		 * overlap the target range, and an UPDATE rule's NEW should hold the
+		 * targeted portion of the range.  We didn't add those details to the
+		 * view's query above, so build the rule actions from a copy that has
+		 * them.  If the view gets auto-updated below, the original query gets
+		 * them when we recurse on the base relation.
+		 */
+		rule_parsetree = parsetree;
+		if (parsetree->forPortionOf &&
+			rt_entry_relation->rd_rel->relkind == RELKIND_VIEW)
+		{
+			rule_parsetree = copyObject(parsetree);
+			addForPortionOfDetails(rule_parsetree, rt_entry_relation);
+		}
+
 		product_orig_rt_length = list_length(parsetree->rtable);
-		product_queries = fireRules(parsetree,
+		product_queries = fireRules(rule_parsetree,
 									result_relation,
 									event,
 									locks,
@@ -4473,16 +4493,7 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 										 parsetree->mergeActionList,
 										 gettext_noop("Views with conditional DO INSTEAD rules are not automatically updatable."));
 
-			/*
-			 * We don't support FOR PORTION OF on views with DO ALSO rules
-			 * either.  product_queries holds their actions, and fireRules()
-			 * built those from a query that does not carry the FOR PORTION OF
-			 * restriction yet: we add the overlaps qual and the range
-			 * assignment only after the view has been rewritten down to its
-			 * base relation, so as not to add them twice.  So a rule action
-			 * would see an unnarrowed NEW range and would not be limited to
-			 * the rows the statement targets.
-			 */
+			/* We don't support FOR PORTION OF on views with DO ALSO rules. */
 			if (parsetree->forPortionOf && product_queries != NIL)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
