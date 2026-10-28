@@ -18,7 +18,9 @@
 #include "access/tableam.h"
 #include "access/tsmapi.h"
 #include "common/pg_prng.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
+#include "executor/instrument.h"
 #include "executor/nodeSamplescan.h"
 #include "utils/fmgrprotos.h"
 #include "utils/rel.h"
@@ -179,17 +181,31 @@ ExecInitSampleScan(SampleScan *node, EState *estate, int eflags)
 void
 ExecEndSampleScan(SampleScanState *node)
 {
+	TableScanDesc scan = node->ss.ss_currentScanDesc;
+
 	/*
 	 * Tell sampling function that we finished the scan.
 	 */
 	if (node->tsmroutine->EndSampleScan)
 		node->tsmroutine->EndSampleScan(node);
 
+	/* Collect scan statistics for this process into shared instrumentation */
+	if (node->sinstrument != NULL && IsParallelWorker())
+	{
+		SampleScanInstrumentation *si;
+
+		Assert(ParallelWorkerNumber < node->sinstrument->num_workers);
+		si = &node->sinstrument->sinstrument[ParallelWorkerNumber];
+
+		if (scan && scan->rs_instrument)
+			CombineTableScanInstrumentation(&si->stats, scan->rs_instrument);
+	}
+
 	/*
 	 * close heap scan
 	 */
-	if (node->ss.ss_currentScanDesc)
-		table_endscan(node->ss.ss_currentScanDesc);
+	if (scan)
+		table_endscan(scan);
 }
 
 /* ----------------------------------------------------------------
@@ -209,6 +225,89 @@ ExecReScanSampleScan(SampleScanState *node)
 	node->donetuples = 0;
 
 	ExecScanReScan(&node->ss);
+}
+
+/*
+ * Compute the amount of space needed for shared sample scan instrumentation.
+ */
+void
+ExecSampleScanInstrumentEstimate(SampleScanState *node, ParallelContext *pcxt)
+{
+	EState	   *estate = node->ss.ps.state;
+	Size		size;
+
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) == 0 || pcxt->nworkers == 0)
+		return;
+
+	size = add_size(offsetof(SharedSampleScanInstrumentation, sinstrument),
+					mul_size(pcxt->nworkers, sizeof(SampleScanInstrumentation)));
+
+	shm_toc_estimate_chunk(&pcxt->estimator, size);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+}
+
+/*
+ * Set up shared sample scan instrumentation.
+ */
+void
+ExecSampleScanInstrumentInitDSM(SampleScanState *node, ParallelContext *pcxt)
+{
+	EState	   *estate = node->ss.ps.state;
+	SharedSampleScanInstrumentation *sinstrument;
+	Size		size;
+
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) == 0 ||
+		pcxt->nworkers == 0)
+		return;
+
+	size = add_size(offsetof(SharedSampleScanInstrumentation, sinstrument),
+					mul_size(pcxt->nworkers, sizeof(SampleScanInstrumentation)));
+
+	sinstrument = shm_toc_allocate(pcxt->toc, size);
+	memset(sinstrument, 0, size);
+	sinstrument->num_workers = pcxt->nworkers;
+
+	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id +
+				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+				   sinstrument);
+
+	node->sinstrument = sinstrument;
+}
+
+/*
+ * Look up the shared sample scan instrumentation in a parallel worker.
+ */
+void
+ExecSampleScanInstrumentInitWorker(SampleScanState *node, ParallelWorkerContext *pwcxt)
+{
+	EState	   *estate = node->ss.ps.state;
+
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) == 0)
+		return;
+
+	node->sinstrument = shm_toc_lookup(pwcxt->toc,
+									   node->ss.ps.plan->plan_node_id +
+									   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+									   false);
+}
+
+/*
+ * Transfer sample scan instrumentation from DSM to private memory.
+ */
+void
+ExecSampleScanRetrieveInstrumentation(SampleScanState *node)
+{
+	SharedSampleScanInstrumentation *sinstrument = node->sinstrument;
+	Size		size;
+
+	if (sinstrument == NULL)
+		return;
+
+	size = offsetof(SharedSampleScanInstrumentation, sinstrument)
+		+ sinstrument->num_workers * sizeof(SampleScanInstrumentation);
+
+	node->sinstrument = palloc(size);
+	memcpy(node->sinstrument, sinstrument, size);
 }
 
 
@@ -292,6 +391,12 @@ tablesample_init(SampleScanState *scanstate)
 	/* Now we can create or reset the HeapScanDesc */
 	if (scanstate->ss.ss_currentScanDesc == NULL)
 	{
+		uint32		flags = ScanRelIsReadOnly(&scanstate->ss) ?
+			SO_HINT_REL_READ_ONLY : SO_NONE;
+
+		if (scanstate->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS)
+			flags |= SO_SCAN_INSTRUMENT_STRATEGY;
+
 		scanstate->ss.ss_currentScanDesc =
 			table_beginscan_sampling(scanstate->ss.ss_currentRelation,
 									 scanstate->ss.ps.state->es_snapshot,
@@ -299,8 +404,7 @@ tablesample_init(SampleScanState *scanstate)
 									 scanstate->use_bulkread,
 									 allow_sync,
 									 scanstate->use_pagemode,
-									 ScanRelIsReadOnly(&scanstate->ss) ?
-									 SO_HINT_REL_READ_ONLY : SO_NONE);
+									 flags);
 	}
 	else
 	{
