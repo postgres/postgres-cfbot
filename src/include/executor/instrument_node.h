@@ -18,6 +18,8 @@
 #ifndef INSTRUMENT_NODE_H
 #define INSTRUMENT_NODE_H
 
+#include "storage/buf.h"
+
 /*
  * Offset added to plan_node_id to create a second TOC key for per-worker scan
  * instrumentation. Instrumentation and parallel-awareness are independent, so
@@ -78,6 +80,10 @@ typedef struct IOStats
 typedef struct TableScanInstrumentation
 {
 	IOStats		io;
+
+	/* Buffer access strategy reported by the table AM, if available. */
+	BufferAccessStrategyType strategy;
+	bool		strategy_valid;
 } TableScanInstrumentation;
 
 /* merge IO statistics from 'src' into 'dst' */
@@ -94,6 +100,25 @@ AccumulateIOStats(IOStats *dst, IOStats *src)
 	dst->io_count += src->io_count;
 	dst->io_nblocks += src->io_nblocks;
 	dst->io_in_progress += src->io_in_progress;
+}
+
+/*
+ * Combine table scan instrumentation from 'src' into 'dst'.
+ *
+ * I/O statistics are accumulated, while the strategy from 'src' replaces the
+ * strategy in 'dst' when available.
+ */
+static inline void
+CombineTableScanInstrumentation(TableScanInstrumentation *dst,
+								TableScanInstrumentation *src)
+{
+	AccumulateIOStats(&dst->io, &src->io);
+
+	if (src->strategy_valid)
+	{
+		dst->strategy = src->strategy;
+		dst->strategy_valid = true;
+	}
 }
 
 

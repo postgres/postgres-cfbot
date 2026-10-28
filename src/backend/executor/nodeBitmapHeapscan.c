@@ -149,6 +149,8 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 
 		if (node->ss.ps.state->es_instrument & INSTRUMENT_IO)
 			flags |= SO_SCAN_INSTRUMENT;
+		if (node->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS)
+			flags |= SO_SCAN_INSTRUMENT_STRATEGY;
 
 		node->ss.ss_currentScanDesc =
 			table_beginscan_bm(node->ss.ss_currentRelation,
@@ -334,12 +336,14 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 		si->exact_pages += node->stats.exact_pages;
 		si->lossy_pages += node->stats.lossy_pages;
 
-		/* collect I/O instrumentation for this process */
+		/* Collect scan instrumentation for this process */
 		if (node->ss.ss_currentScanDesc &&
 			node->ss.ss_currentScanDesc->rs_instrument)
 		{
-			AccumulateIOStats(&si->stats.io,
-							  &node->ss.ss_currentScanDesc->rs_instrument->io);
+			TableScanInstrumentation *stats =
+				node->ss.ss_currentScanDesc->rs_instrument;
+
+			CombineTableScanInstrumentation(&si->stats, stats);
 		}
 	}
 
