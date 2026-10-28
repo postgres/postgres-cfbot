@@ -3347,6 +3347,103 @@ endif
 
 
 ###############################################################
+# Dependency compiler flags for PGXS and pg_config
+###############################################################
+
+# Extensions built with PGXS need the include paths of dependencies whose
+# headers are included by public server headers (e.g. libpq-be.h includes
+# <openssl/ssl.h>).  As in the autoconf build, OpenSSL goes into CPPFLAGS and
+# ICU into ICU_CFLAGS.
+#
+# Meson doesn't expose a dependency's compiler flags, so ask the tool that
+# found it: pkg-config or CMake.  Dependencies found in other ways get no flags
+# here.  Method 'system' is only used if the headers are on the default search
+# path, and extra_include_dirs of cc.find_library() isn't passed on to PGXS at
+# all, which is a separate gap.
+
+# Run pkg-config with the same settings Meson uses, so that we get the flags
+# from the same .pc files.
+pkg_config = find_program('pkg-config', required: false)
+pkg_config_env = environment()
+pkg_config_path = get_option('pkg_config_path')
+if pkg_config_path.length() > 0
+  pkg_config_env.set('PKG_CONFIG_PATH', pkg_config_path)
+endif
+pkg_config_sysroot = meson.get_external_property('sys_root', '')
+if pkg_config_sysroot != ''
+  pkg_config_env.set('PKG_CONFIG_SYSROOT_DIR', pkg_config_sysroot)
+endif
+pkg_config_libdir = [] + meson.get_external_property('pkg_config_libdir', [])
+if pkg_config_libdir.length() > 0
+  pkg_config_env.set('PKG_CONFIG_LIBDIR', pkg_config_libdir)
+endif
+
+# Dependencies to get compiler flags for: the dependency objects, and the
+# pkg-config modules to query (together, like configure's PKG_CHECK_MODULES).
+pgxs_flag_deps = {
+  'openssl': {'deps': [ssl], 'pc_modules': ['openssl']},
+  'icu': {'deps': [icu, icu_i18n], 'pc_modules': ['icu-uc', 'icu-i18n']},
+}
+
+pgxs_dep_cflags = {}
+foreach dep_name, dep_info : pgxs_flag_deps
+  dep_objs = dep_info['deps']
+  dep_flags = []
+
+  if not dep_objs[0].found()
+    # nothing to do
+  elif dep_objs[0].type_name() == 'pkgconfig'
+    pc_modules = dep_info['pc_modules']
+    if not pkg_config.found()
+      error('pkg-config is needed to get the compiler flags of @0@'.format(
+        dep_name))
+    endif
+    pc_cflags = run_command(pkg_config, '--cflags', pc_modules,
+                            env: pkg_config_env, check: false)
+    if pc_cflags.returncode() != 0
+      error('pkg-config --cflags @0@ failed:\n@1@'.format(
+        ' '.join(pc_modules), pc_cflags.stderr()))
+    endif
+    # Use the output as is, like configure, keeping pkg-config's quoting
+    if pc_cflags.stdout().strip() != ''
+      dep_flags += pc_cflags.stdout().strip()
+    endif
+  elif dep_objs[0].type_name() == 'cmake'
+    # Meson sets PACKAGE_INCLUDE_DIRS from the package's <Name>_INCLUDE_DIRS,
+    # <Name>_INCLUDES or <Name>_INCLUDE_DIR, for Find modules and package
+    # config files alike.  Those variables can't be read directly: FindOpenSSL,
+    # for one, sets OPENSSL_INCLUDE_DIR only through find_path(), which Meson's
+    # CMake trace doesn't see.
+    foreach dep : dep_objs
+      incdirs = dep.get_variable(cmake: 'PACKAGE_INCLUDE_DIRS',
+                                 default_value: '')
+      # The value may be a string or an array, depending on the Meson version.
+      # Plain list + string addition isn't supported by older Meson, += is.
+      incdirs_list = []
+      incdirs_list += incdirs
+      foreach incdir_raw : ';'.join(incdirs_list).split(';')
+        incdir = incdir_raw.strip()
+        if incdir == ''
+          continue
+        endif
+        # Escape spaces like pkg-config does
+        incflag = '-I' + '\\ '.join(incdir.split(' '))
+        if incflag not in dep_flags
+          dep_flags += incflag
+        endif
+      endforeach
+    endforeach
+    if dep_flags.length() == 0
+      warning('could not find include directories of @0@ via CMake, PGXS builds may not find its headers'.format(dep_name))
+    endif
+  endif
+
+  pgxs_dep_cflags += {dep_name: dep_flags}
+endforeach
+
+
+
+###############################################################
 # Build
 ###############################################################
 
