@@ -127,18 +127,6 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			}
 		}
 
-		/*
-		 * We don't currently support rechecking ORDER BY distances.  (In
-		 * principle, if the index can support retrieval of the originally
-		 * indexed value, it should be able to produce an exact distance
-		 * calculation too.  So it's not clear that adding code here for
-		 * recheck/re-sort would be worth the trouble.  But we should at least
-		 * throw an error if someone tries it.)
-		 */
-		if (scandesc->numberOfOrderBys > 0 && scandesc->xs_recheckorderby)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("lossy distance functions are not supported in index-only scans")));
 		return slot;
 	}
 
@@ -262,6 +250,9 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
 		winstrument->ntabletuplefetches += node->ioss_Instrument->ntabletuplefetches;
+
+		/* Collect IO stats for this process into shared instrumentation */
+		AccumulateIOStats(&winstrument->io, &node->ioss_Instrument->io);
 	}
 
 	/*
@@ -310,7 +301,7 @@ ExecIndexOnlyMarkPos(IndexOnlyScanState *node)
 		}
 	}
 
-	index_markpos(node->ioss_ScanDesc);
+	table_index_scan_markpos(node->ioss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
@@ -339,7 +330,7 @@ ExecIndexOnlyRestrPos(IndexOnlyScanState *node)
 		}
 	}
 
-	index_restrpos(node->ioss_ScanDesc);
+	table_index_scan_restrpos(node->ioss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
