@@ -129,9 +129,13 @@ typedef struct xl_hash_split_complete
  *
  * This data record is used for XLOG_HASH_MOVE_PAGE_CONTENTS
  *
- * Backup Blk 0: primary bucket page
- * Backup Blk 1: page containing moved tuples
- * Backup Blk 2: page from which tuples will be removed
+ * Backup Blk 0: page containing moved tuples
+ * Backup Blk 1: page from which tuples will be removed
+ *
+ * The primary bucket page is not registered.  If it is not the page moved to
+ * (is_prim_bucket_same_wrt is false), the block number of the primary bucket
+ * page follows the struct as a BlockNumber, and replay takes a cleanup lock
+ * on that block.
  */
 typedef struct xl_hash_move_page_contents
 {
@@ -149,13 +153,18 @@ typedef struct xl_hash_move_page_contents
  *
  * This data record is used for XLOG_HASH_SQUEEZE_PAGE
  *
- * Backup Blk 0: primary bucket page
- * Backup Blk 1: page containing tuples moved from freed overflow page
- * Backup Blk 2: freed overflow page
- * Backup Blk 3: page previous to the freed overflow page
- * Backup Blk 4: page next to the freed overflow page
- * Backup Blk 5: bitmap page containing info of freed overflow page
- * Backup Blk 6: meta page
+ * Backup Blk 0: page containing tuples moved from freed overflow page, if
+ *				 it is modified
+ * Backup Blk 1: freed overflow page
+ * Backup Blk 2: page previous to the freed overflow page
+ * Backup Blk 3: page next to the freed overflow page
+ * Backup Blk 4: bitmap page containing info of freed overflow page
+ * Backup Blk 5: meta page
+ *
+ * The primary bucket page is registered only as block 0, when it is the
+ * modified write page.  Otherwise the block number of the primary bucket
+ * page follows the struct as a BlockNumber, and replay takes a cleanup lock
+ * on that block.
  */
 typedef struct xl_hash_squeeze_page
 {
@@ -179,8 +188,12 @@ typedef struct xl_hash_squeeze_page
  *
  * This data record is used for XLOG_HASH_DELETE
  *
- * Backup Blk 0: primary bucket page
- * Backup Blk 1: page from which tuples are deleted
+ * Backup Blk 0: page from which tuples are deleted
+ *
+ * If block 0 is not the primary bucket page (is_primary_bucket_page is
+ * false), the block number of the primary bucket page follows the struct as a
+ * BlockNumber, and replay takes a cleanup lock on that block.  The primary
+ * bucket page is not registered.
  */
 typedef struct xl_hash_delete
 {

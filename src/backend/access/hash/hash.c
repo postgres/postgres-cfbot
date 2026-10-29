@@ -909,19 +909,17 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 				XLogRegisterData(&xlrec, SizeOfHashDelete);
 
 				/*
-				 * bucket buffer was not changed, but still needs to be
-				 * registered to ensure that we can acquire a cleanup lock on
-				 * it during replay.
+				 * Replay must take a cleanup lock on the primary bucket page
+				 * to serialize with scans on a hot standby.  If buf is an
+				 * overflow page, the unchanged primary page is held only by a
+				 * pin, so append its block number instead of registering it.
+				 * Otherwise block 0 identifies the primary page.
 				 */
 				if (!xlrec.is_primary_bucket_page)
-				{
-					uint8		flags = REGBUF_STANDARD | REGBUF_NO_IMAGE | REGBUF_NO_CHANGE;
+					XLogRegisterData(&bucket_blkno, sizeof(BlockNumber));
 
-					XLogRegisterBuffer(0, bucket_buf, flags);
-				}
-
-				XLogRegisterBuffer(1, buf, REGBUF_STANDARD);
-				XLogRegisterBufData(1, deletable,
+				XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+				XLogRegisterBufData(0, deletable,
 									ndeletable * sizeof(OffsetNumber));
 
 				recptr = XLogInsert(RM_HASH_ID, XLOG_HASH_DELETE);
