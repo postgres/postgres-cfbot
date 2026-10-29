@@ -776,8 +776,6 @@ ExecForeignDelete_function
 ExecForeignInsert_function
 ExecForeignTruncate_function
 ExecForeignUpdate_function
-ExecParallelEstimateContext
-ExecParallelInitializeDSMContext
 ExecPhraseData
 ExecProcNodeMtd
 ExecRowMark
@@ -4140,6 +4138,7 @@ pivot_field
 planner_hook_type
 planner_setup_hook_type
 planner_shutdown_hook_type
+planstate_tree_collect_context
 planstate_tree_walker_callback
 plperl_array_info
 plperl_call_data

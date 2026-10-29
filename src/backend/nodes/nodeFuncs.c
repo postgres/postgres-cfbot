@@ -4860,3 +4860,55 @@ planstate_walk_members(PlanState **planstates, int nplans,
 
 	return false;
 }
+
+typedef struct planstate_tree_collect_context
+{
+	List	   *nodes;			/* result, in depth-first pre-order */
+	Bitmapset  *seen;			/* plan_node_ids already in 'nodes' */
+} planstate_tree_collect_context;
+
+static bool
+planstate_tree_collect_walker(PlanState *planstate,
+							  planstate_tree_collect_context *context)
+{
+	/* plan_node_id is unique across the whole PlannedStmt */
+	int			plan_node_id = planstate->plan->plan_node_id;
+
+	if (bms_is_member(plan_node_id, context->seen))
+		return false;
+	context->seen = bms_add_member(context->seen, plan_node_id);
+	context->nodes = lappend(context->nodes, planstate);
+
+	return planstate_tree_walker(planstate, planstate_tree_collect_walker,
+								 context);
+}
+
+/*
+ * planstate_tree_collect --- list all PlanStates of a plan state tree
+ *
+ * Returns a freshly-allocated list of every distinct PlanState reachable
+ * from 'planstate', including 'planstate' itself, in the order a
+ * planstate_tree_walker traversal would first visit them (depth-first,
+ * pre-order).
+ *
+ * Unlike a recursive walk with planstate_tree_walker, each node appears
+ * exactly once in the result.  That matters for SubPlans: the same SubPlan
+ * (identified by plan_id) can be referenced from several expressions, e.g.
+ * a hash clause along with the hash key expressions derived from it.
+ *
+ * The caller is responsible for freeing the list.
+ */
+List *
+planstate_tree_collect(PlanState *planstate)
+{
+	planstate_tree_collect_context context;
+
+	context.nodes = NIL;
+	context.seen = NULL;
+
+	(void) planstate_tree_collect_walker(planstate, &context);
+
+	bms_free(context.seen);
+
+	return context.nodes;
+}
