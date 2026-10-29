@@ -40,7 +40,7 @@ static int64 blocks_written = 0;
 static int64 badblocks = 0;
 static ControlFileData *ControlFile;
 
-static char *only_filenode = NULL;
+static int	only_filenode = 0;
 static bool do_sync = true;
 static bool verbose = false;
 static bool showprogress = false;
@@ -89,34 +89,6 @@ usage(void)
 }
 
 /*
- * Definition of one element part of an exclusion list, used for files
- * to exclude from checksum validation.  "name" is the name of the file
- * or path to check for exclusion.  If "match_prefix" is true, any items
- * matching the name as prefix are excluded.
- */
-struct exclude_list_item
-{
-	const char *name;
-	bool		match_prefix;
-};
-
-/*
- * List of files excluded from checksum validation.
- *
- * Note: this list should be kept in sync with what basebackup.c includes.
- */
-static const struct exclude_list_item skip[] = {
-	{"pg_control", false},
-	{"pg_filenode.map", false},
-	{"pg_internal.init", true},
-	{"PG_VERSION", false},
-#ifdef EXEC_BACKEND
-	{"config_exec_params", true},
-#endif
-	{NULL, false}
-};
-
-/*
  * Report current progress status.  Parts borrowed from
  * src/bin/pg_basebackup/pg_basebackup.c.
  */
@@ -154,26 +126,8 @@ progress_report(bool finished)
 	fputc((!finished && isatty(fileno(stderr))) ? '\r' : '\n', stderr);
 }
 
-static bool
-skipfile(const char *fn)
-{
-	int			excludeIdx;
-
-	for (excludeIdx = 0; skip[excludeIdx].name != NULL; excludeIdx++)
-	{
-		int			cmplen = strlen(skip[excludeIdx].name);
-
-		if (!skip[excludeIdx].match_prefix)
-			cmplen++;
-		if (strncmp(skip[excludeIdx].name, fn, cmplen) == 0)
-			return true;
-	}
-
-	return false;
-}
-
 static void
-scan_file(const char *fn, int segmentno)
+scan_file(const char *fn, unsigned segmentno)
 {
 	PGIOAlignedBlock buf;
 	PageHeader	header = (PageHeader) buf.data;
@@ -339,36 +293,22 @@ scan_directory(const char *basedir, const char *subdir, bool sizeonly)
 			pg_fatal("could not stat file \"%s\": %m", fn);
 		if (S_ISREG(st.st_mode))
 		{
-			char		fnonly[MAXPGPATH];
-			char	   *forkpath,
-					   *segmentpath;
-			int			segmentno = 0;
-
-			if (skipfile(de->d_name))
-				continue;
+			RelFileNumber relfileno;
+			ForkNumber	fork;
+			unsigned	segmentno;
 
 			/*
-			 * Cut off at the segment boundary (".") to get the segment number
-			 * in order to mix it into the checksum. Then also cut off at the
-			 * fork boundary, to get the filenode the file belongs to for
-			 * filtering.
+			 * If this is a relfile, get the segment number in order to mix it
+			 * into the checksum, and filter on the relfile number if
+			 * requested. Skip any temporary relations and anything that's not
+			 * a relation at all.
 			 */
-			strlcpy(fnonly, de->d_name, sizeof(fnonly));
-			segmentpath = strchr(fnonly, '.');
-			if (segmentpath != NULL)
-			{
-				*segmentpath++ = '\0';
-				segmentno = atoi(segmentpath);
-				if (segmentno == 0)
-					pg_fatal("invalid segment number %d in file name \"%s\"",
-							 segmentno, fn);
-			}
+			if (!parse_filename_for_nontemp_relation(de->d_name,
+													 &relfileno, &fork,
+													 &segmentno))
+				continue;
 
-			forkpath = strchr(fnonly, '_');
-			if (forkpath != NULL)
-				*forkpath++ = '\0';
-
-			if (only_filenode && strcmp(only_filenode, fnonly) != 0)
+			if (only_filenode && relfileno != only_filenode)
 				/* filenode not to be included */
 				continue;
 
@@ -488,11 +428,10 @@ main(int argc, char *argv[])
 				mode = PG_MODE_ENABLE;
 				break;
 			case 'f':
-				if (!option_parse_int(optarg, "-f/--filenode", 0,
+				if (!option_parse_int(optarg, "-f/--filenode", 1,
 									  INT_MAX,
-									  NULL))
+									  &only_filenode))
 					exit(1);
-				only_filenode = pstrdup(optarg);
 				break;
 			case 'N':
 				do_sync = false;
