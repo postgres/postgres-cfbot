@@ -873,6 +873,7 @@ logicalrep_read_tuple(StringInfo in, LogicalRepTupleData *tuple)
 	tuple->colvalues = palloc0_array(StringInfoData, natts);
 	tuple->colstatus = palloc_array(char, natts);
 	tuple->ncols = natts;
+	tuple->datasize = 0;
 
 	/* Read the data */
 	for (i = 0; i < natts; i++)
@@ -896,6 +897,9 @@ logicalrep_read_tuple(StringInfo in, LogicalRepTupleData *tuple)
 			case LOGICALREP_COLUMN_TEXT:
 			case LOGICALREP_COLUMN_BINARY:
 				len = pq_getmsgint(in, 4);	/* read length */
+
+				/* accumulate received value length for buffering estimates */
+				tuple->datasize += len;
 
 				/* and data */
 				buff = palloc(len + 1);
