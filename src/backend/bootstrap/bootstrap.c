@@ -379,7 +379,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 	InitializeFastPathLocks();
 
 	ShmemCallRequestCallbacks();
-	CreateSharedMemoryAndSemaphores();
+	CreateSharedMemoryAndSemaphores(CalculateShmemSize());
 
 	/*
 	 * Estimate number of openable files.  This is essential too in --check
