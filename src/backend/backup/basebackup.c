@@ -62,7 +62,7 @@
  * NB: The buffer size is required to be a multiple of the system block
  * size, so use that value instead if it's bigger than our preference.
  */
-#define SINK_BUFFER_LENGTH			Max(32768, BLCKSZ)
+#define SINK_BUFFER_LENGTH			Max(256 * 1024, BLCKSZ)
 
 typedef struct
 {
@@ -107,6 +107,7 @@ static off_t read_file_data_into_buffer(bbsink *sink,
 										const char *readfilename, int fd,
 										off_t offset, size_t length,
 										BlockNumber blkno,
+										bool is_relfile,
 										bool verify_checksum,
 										int *checksum_failures);
 static void push_to_sink(bbsink *sink, pg_checksum_context *checksum_ctx,
@@ -128,7 +129,7 @@ static void perform_base_backup(basebackup_options *opt, bbsink *sink,
 static void parse_basebackup_options(List *options, basebackup_options *opt);
 static int	compareWalFileNames(const ListCell *a, const ListCell *b);
 static ssize_t basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
-									const char *filename, bool partial_read_ok);
+									const char *filename);
 
 /* Was the backup currently in-progress initiated in recovery mode? */
 static bool backup_started_in_recovery = false;
@@ -594,7 +595,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 			while ((cnt = basebackup_read_file(fd, sink->bbs_buffer,
 											   Min(sink->bbs_buffer_length,
 												   wal_segment_size - len),
-											   len, pathbuf, true)) > 0)
+											   len, pathbuf)) > 0)
 			{
 				CheckXLogRemoved(segno, tli);
 				bbsink_archive_contents(sink, cnt);
@@ -1742,6 +1743,7 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 			cnt = read_file_data_into_buffer(sink, readfilename, fd,
 											 bytes_done, remaining,
 											 blkno + segno * RELSEG_SIZE,
+											 RelFileNumberIsValid(relfilenumber),
 											 verify_checksum,
 											 &checksum_failures);
 		}
@@ -1764,15 +1766,17 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 											 relative_blkno * BLCKSZ,
 											 BLCKSZ,
 											 relative_blkno + segno * RELSEG_SIZE,
+											 true,
 											 verify_checksum,
 											 &checksum_failures);
 
 			/*
-			 * If we get a partial read, that must mean that the relation is
-			 * being truncated. Ultimately, it should be truncated to a
-			 * multiple of BLCKSZ, since this path should only be reached for
-			 * relation files, but we might transiently observe an
-			 * intermediate value.
+			 * read_file_data_into_buffer() retries short reads, so if we got
+			 * fewer bytes than requested we must have hit EOF (which means
+			 * that the relation is being truncated). Ultimately, it should be
+			 * truncated to a multiple of BLCKSZ, since this path should only
+			 * be reached for relation files, but we might transiently observe
+			 * an intermediate value.
 			 *
 			 * It should be fine to treat this just as if the entire block had
 			 * been truncated away - i.e. fill this and all later blocks with
@@ -1790,11 +1794,22 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 			backup_checksums_verifiable(sink->bbs_state->startptr) &&
 			(cnt % BLCKSZ != 0))
 		{
+			/* Gain more insight into the state of file now */
+			struct stat fstatdbg;
+			int			fstatrc = fstat(fd, &fstatdbg);
+
 			ereport(WARNING,
 					(errmsg("could not verify checksum in file \"%s\", block "
 							"%u: read buffer size %d and page size %d "
 							"differ",
-							readfilename, blkno, (int) cnt, BLCKSZ)));
+							readfilename, blkno, (int) cnt, BLCKSZ),
+					 errdetail("bytes_done=%lld filestat_size=%lld "
+							   "fstat_rc=%d fstat_size=%lld",
+							   (long long) bytes_done,
+							   (long long) filestat.st_size,
+							   fstatrc,
+							   (long long) (fstatrc == 0 ? fstatdbg.st_size : -1))));
+
 			verify_checksum = false;
 		}
 
@@ -1877,11 +1892,14 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
  * 'offset' is the file offset from which we should begin to read, and
  * 'length' is the amount of data that should be read. The actual amount
  * of data read will be less than the requested amount if the bbsink's
- * buffer isn't big enough to hold it all, or if the underlying file has
- * been truncated. The return value is the number of bytes actually read.
+ * buffer isn't big enough to hold it all, or if we hit EOF, which means
+ * that the underlying file has been truncated. The return value is the
+ * number of bytes actually read.
  *
  * 'blkno' is the block number of the first page in the bbsink's buffer
  * relative to the start of the relation.
+ *
+ * 'is_relfile' determines if this is a relation file.
  *
  * 'verify_checksum' determines if the user has asked to verify checksums, but
  * since data checksums can be disabled, or become disabled, we need to check
@@ -1891,16 +1909,30 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 static off_t
 read_file_data_into_buffer(bbsink *sink, const char *readfilename, int fd,
 						   off_t offset, size_t length, BlockNumber blkno,
-						   bool verify_checksum, int *checksum_failures)
+						   bool is_relfile, bool verify_checksum,
+						   int *checksum_failures)
 {
 	off_t		cnt;
+	size_t		requested = Min(sink->bbs_buffer_length, length);
 	int			i;
 	char	   *page;
 
 	/* Try to read some more data. */
-	cnt = basebackup_read_file(fd, sink->bbs_buffer,
-							   Min(sink->bbs_buffer_length, length),
-							   offset, readfilename, true);
+	cnt = basebackup_read_file(fd, sink->bbs_buffer, requested,
+							   offset, readfilename);
+
+	/*
+	 * Short read of relations: if we got less than we asked for, we hit EOF, so
+	 * the file is being truncated concurrently. For relation files truncation
+	 * happens in whole blocks, but apparently the OS might copy data page by
+	 * OS page size (4kB), so our big read happening with the truncation can
+	 * end in the middle of a block. Treat that partial block as truncated as
+	 * WAL replay will fix this anyway.
+	 *
+	 * For non-relation there's no WAL replay, so we just use what we have.
+	 */
+	if (is_relfile && cnt < requested && (cnt % BLCKSZ) != 0)
+		cnt -= cnt % BLCKSZ;
 
 	/* Can't verify checksums if read length is not a multiple of BLCKSZ. */
 	if (!verify_checksum || (cnt % BLCKSZ) != 0)
@@ -1950,13 +1982,18 @@ read_file_data_into_buffer(bbsink *sink, const char *readfilename, int fd,
 		reread_cnt =
 			basebackup_read_file(fd, sink->bbs_buffer + BLCKSZ * i,
 								 BLCKSZ, offset + BLCKSZ * i,
-								 readfilename, false);
-		if (reread_cnt == 0)
+								 readfilename);
+		if (reread_cnt != BLCKSZ)
 		{
 			/*
 			 * If we hit end-of-file, a concurrent truncation must have
 			 * occurred, so reduce cnt to reflect only the blocks already
 			 * processed and break out of this loop.
+			 *
+			 * In unlikely situation where reread ended up getting only part of
+			 * the block, we classify this as truncation too (We drop that block
+			 * and everything after it instead of raising read X out Y bytes and
+			 * aborting the backup).
 			 */
 			cnt = BLCKSZ * i;
 			break;
@@ -2206,32 +2243,48 @@ convert_link_to_directory(const char *pathbuf, struct stat *statbuf)
 
 /*
  * Read some data from a file, setting a wait event and reporting any error
- * encountered.
- *
- * If partial_read_ok is false, also report an error if the number of bytes
- * read is not equal to the number of bytes requested.
+ * encountered. Short reads are retried until either all requested bytes have
+ * been read or EOF is hit (potentially due to concurrent truncation).
  *
  * Returns the number of bytes read.
  */
 static ssize_t
 basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
-					 const char *filename, bool partial_read_ok)
+					 const char *filename)
 {
-	ssize_t		rc;
+	ssize_t		transferred = 0;
 
-	pgstat_report_wait_start(WAIT_EVENT_BASEBACKUP_READ);
-	rc = pg_pread(fd, buf, nbytes, offset);
-	pgstat_report_wait_end();
+	/*
+	 * Loop to continue after a short read. Short reads are more likely to
+	 * show up with large read requests such as ours due to e.g. signals. This
+	 * tries to mirror what mdreadv() does.
+	 */
+	while (transferred < nbytes)
+	{
+		ssize_t		rc;
 
-	if (rc < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read file \"%s\": %m", filename)));
-	if (!partial_read_ok && rc > 0 && rc != nbytes)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read file \"%s\": read %zd of %zu",
-						filename, rc, nbytes)));
+		pgstat_report_wait_start(WAIT_EVENT_BASEBACKUP_READ);
+		rc = pg_pread(fd, buf + transferred, nbytes - transferred,
+					  offset + transferred);
+		pgstat_report_wait_end();
 
-	return rc;
+#ifdef SIMULATE_SHORT_READ
+		rc = Min(rc, 4096);
+#endif
+		if (rc < 0 && errno == EINTR)
+			continue;
+
+		if (rc < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m", filename)));
+
+		/* EOF */
+		if (rc == 0)
+			break;
+
+		transferred += rc;
+	}
+
+	return transferred;
 }
