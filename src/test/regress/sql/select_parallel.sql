@@ -447,6 +447,27 @@ explain (costs off)
   select * from tenk1 a where two in
     (select two from tenk1 b where stringu1 like '%AAAA' limit 3);
 
+-- PL/pgSQL assignment from a query should be able to use parallel query;
+-- check by provoking an error in a worker
+SAVEPOINT settings;
+SET LOCAL debug_parallel_query = 1;
+do $$
+declare x int2;
+begin
+  x := stringu1::int2 from tenk1 where unique1 = 1;
+end $$;
+ROLLBACK TO SAVEPOINT settings;
+
+-- same for a DECLARE default expression
+SAVEPOINT settings;
+SET LOCAL debug_parallel_query = 1;
+do $$
+declare x int2 := stringu1::int2 from tenk1 where unique1 = 1;
+begin
+  null;
+end $$;
+ROLLBACK TO SAVEPOINT settings;
+
 -- to increase the parallel query test coverage
 SAVEPOINT settings;
 SET LOCAL debug_parallel_query = 1;
