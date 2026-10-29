@@ -132,6 +132,7 @@ StaticAssertDecl(TOPN_SELECT_MIN_BUFFER < INITIAL_MEMTUPSIZE,
 /* GUC variables */
 bool		trace_sort = false;
 bool		debug_topn_quickselect = true;
+bool		debug_topn_context_swap = true;
 
 #ifdef DEBUG_BOUNDED_SORT
 bool		optimize_bounded_sort = true;
@@ -201,6 +202,8 @@ struct Tuplesortstate
 	bool		bounded;		/* did caller specify a maximum number of
 								 * tuples to return? */
 	bool		boundUsed;		/* true if we made use of a bounded heap */
+	MemoryContext sparetuplecontext;	/* bounded quickselect copies the
+										 * survivors here at each prune */
 	int			bound;			/* if bounded, the maximum number of tuples */
 	int64		tupleMem;		/* memory consumed by individual tuples.
 								 * storing this separately from what we track
@@ -473,6 +476,10 @@ static void dumptuples(Tuplesortstate *state, bool alltuples);
 static void make_bounded_heap(Tuplesortstate *state);
 static void sort_bounded_heap(Tuplesortstate *state);
 static void prune_bounded_select(Tuplesortstate *state);
+static void prune_bounded_select_swap(Tuplesortstate *state);
+#define PRUNE_BOUNDED(state) \
+	((state)->sparetuplecontext ? prune_bounded_select_swap(state) : \
+	 prune_bounded_select(state))
 static void tuplesort_sort_memtuples(Tuplesortstate *state);
 static void tuplesort_heap_insert(Tuplesortstate *state, SortTuple *tuple);
 static void tuplesort_heap_replace_top(Tuplesortstate *state, SortTuple *tuple);
@@ -693,6 +700,7 @@ tuplesort_begin_batch(Tuplesortstate *state)
 	state->status = TSS_INITIAL;
 	state->bounded = false;
 	state->boundUsed = false;
+	state->sparetuplecontext = NULL;
 
 	state->availMem = state->allowedMem;
 
@@ -1160,7 +1168,12 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 						elog(LOG, "switching to bounded quickselect at %d tuples: %s",
 							 state->memtupcount,
 							 pg_rusage_show(&state->ru_start));
-					prune_bounded_select(state);
+					if (debug_topn_context_swap && state->base.tuplelen != NULL)
+						state->sparetuplecontext =
+							AllocSetContextCreate(state->base.sortcontext,
+												  "Caller tuples",
+												  ALLOCSET_DEFAULT_SIZES);
+					PRUNE_BOUNDED(state);
 					state->status = TSS_BOUNDED_SELECT;
 					MemoryContextSwitchTo(oldcontext);
 					return;
@@ -1235,7 +1248,7 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 			Assert(state->memtupcount < state->memtupsize);
 			state->memtuples[state->memtupcount++] = *tuple;
 			if (state->memtupcount > Max(state->bound * 2, TOPN_SELECT_MIN_BUFFER))
-				prune_bounded_select(state);
+				PRUNE_BOUNDED(state);
 			else if (LACKMEM(state) && state->memtupcount > state->bound * 2)
 			{
 				/*
@@ -1243,7 +1256,7 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 				 * tuples arrived since the last prune, so pruning early still
 				 * costs O(1) per tuple.
 				 */
-				prune_bounded_select(state);
+				PRUNE_BOUNDED(state);
 			}
 			else if (LACKMEM(state))
 			{
@@ -2764,6 +2777,56 @@ prune_bounded_select(Tuplesortstate *state)
 	for (int i = state->bound; i < state->memtupcount; i++)
 		free_sort_tuple(state, &state->memtuples[i]);
 	state->memtupcount = state->bound;
+}
+
+/*
+ * Keep the bound smallest memtuples like prune_bounded_select(), but instead
+ * of freeing each discarded tuple, copy the survivors into the spare tuple
+ * context and reset the old one.  That drops the losers, and every tuple the
+ * admission check freed since the last prune, in one step, and leaves the
+ * survivors packed together.
+ */
+static void
+prune_bounded_select_swap(Tuplesortstate *state)
+{
+	MemoryContext from = state->base.tuplecontext;
+	MemoryContext to = state->sparetuplecontext;
+
+	Assert(state->base.tuplelen != NULL && to != NULL);
+
+	tuplesort_select(state, state->memtupcount, state->bound - 1);
+
+	for (int i = 0; i < state->memtupcount; i++)
+	{
+		SortTuple  *stup = &state->memtuples[i];
+		char	   *old = stup->tuple;
+		char	   *new;
+		Size		len;
+
+		if (old == NULL)
+			continue;
+		FREEMEM(state, GetMemoryChunkSpace(old));
+		if (i >= state->bound)
+			continue;
+
+		len = state->base.tuplelen(state, stup);
+		new = MemoryContextAlloc(to, len);
+		memcpy(new, old, len);
+		USEMEM(state, GetMemoryChunkSpace(new));
+		stup->tuple = new;
+
+		/*
+		 * datum1 may point into the old copy.  Bounded sorts never abbreviate
+		 * (see tuplesort_set_bound), so removeabbrev just re-derives it from
+		 * the new copy.
+		 */
+		REMOVEABBREV(state, stup, 1);
+	}
+	state->memtupcount = state->bound;
+
+	MemoryContextReset(from);
+	state->base.tuplecontext = to;
+	state->sparetuplecontext = from;
 }
 
 

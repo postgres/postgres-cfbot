@@ -328,6 +328,7 @@ extern PGDLLIMPORT char *role_string;
 extern PGDLLIMPORT bool in_hot_standby_guc;
 extern PGDLLIMPORT bool trace_sort;
 extern PGDLLIMPORT bool debug_topn_quickselect;
+extern PGDLLIMPORT bool debug_topn_context_swap;
 
 #ifdef DEBUG_BOUNDED_SORT
 extern PGDLLIMPORT bool optimize_bounded_sort;

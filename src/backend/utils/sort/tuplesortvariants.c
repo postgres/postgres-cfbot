@@ -59,6 +59,8 @@ static int	comparetup_heap(const SortTuple *a, const SortTuple *b,
 							Tuplesortstate *state);
 static int	comparetup_heap_tiebreak(const SortTuple *a, const SortTuple *b,
 									 Tuplesortstate *state);
+static Size tuplelen_heap(Tuplesortstate *state, SortTuple *stup);
+static Size tuplelen_datum(Tuplesortstate *state, SortTuple *stup);
 static void writetup_heap(Tuplesortstate *state, LogicalTape *tape,
 						  SortTuple *stup);
 static void readtup_heap(Tuplesortstate *state, SortTuple *stup,
@@ -213,6 +215,7 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 	base->comparetup_tiebreak = comparetup_heap_tiebreak;
 	base->writetup = writetup_heap;
 	base->readtup = readtup_heap;
+	base->tuplelen = tuplelen_heap;
 	base->haveDatum1 = true;
 	base->arg = tupDesc;		/* assume we need not copy tupDesc */
 
@@ -696,6 +699,7 @@ tuplesort_begin_datum(Oid datumType, Oid sortOperator, Oid sortCollation,
 	base->comparetup_tiebreak = comparetup_datum_tiebreak;
 	base->writetup = writetup_datum;
 	base->readtup = readtup_datum;
+	base->tuplelen = tuplelen_datum;
 	base->haveDatum1 = true;
 	base->arg = arg;
 
@@ -1294,6 +1298,12 @@ comparetup_heap_tiebreak(const SortTuple *a, const SortTuple *b, Tuplesortstate 
 	}
 
 	return 0;
+}
+
+static Size
+tuplelen_heap(Tuplesortstate *state, SortTuple *stup)
+{
+	return ((MinimalTuple) stup->tuple)->t_len;
 }
 
 static void
@@ -2023,6 +2033,14 @@ comparetup_datum_tiebreak(const SortTuple *a, const SortTuple *b, Tuplesortstate
 												base->sortKeys);
 
 	return compare;
+}
+
+static Size
+tuplelen_datum(Tuplesortstate *state, SortTuple *stup)
+{
+	TuplesortDatumArg *arg = (TuplesortDatumArg *) TuplesortstateGetPublic(state)->arg;
+
+	return datumGetSize(PointerGetDatum(stup->tuple), false, arg->datumTypeLen);
 }
 
 static void
