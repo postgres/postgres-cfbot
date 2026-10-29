@@ -657,6 +657,7 @@ _hash_freeovflpage(Relation rel, Buffer bucketbuf, Buffer ovflbuf,
 	{
 		xl_hash_squeeze_page xlrec;
 
+		xlrec.bucket_blkno = BufferGetBlockNumber(bucketbuf);
 		xlrec.prevblkno = prevblkno;
 		xlrec.nextblkno = nextblkno;
 		xlrec.ntups = nitups;
@@ -667,42 +668,21 @@ _hash_freeovflpage(Relation rel, Buffer bucketbuf, Buffer ovflbuf,
 		XLogRegisterData(&xlrec, SizeOfHashSqueezePage);
 
 		/*
-		 * bucket buffer was not changed, but still needs to be registered to
-		 * ensure that we can acquire a cleanup lock on it during replay.
+		 * Register only the pages this record changes.  The primary bucket
+		 * page is registered only if it is the write page and is modified;
+		 * otherwise we may hold only a pin on it, and replay takes a cleanup
+		 * lock on bucket_blkno instead.
 		 */
-		if (!is_prim_bucket_same_wrt)
-		{
-			uint8		flags = REGBUF_STANDARD | REGBUF_NO_IMAGE | REGBUF_NO_CHANGE;
-
-			XLogRegisterBuffer(0, bucketbuf, flags);
-		}
-
-		if (nitups > 0)
+		if (mod_wbuf)
 		{
 			XLogRegisterBuffer(1, wbuf, REGBUF_STANDARD);
-			XLogRegisterBufData(1, itup_offsets,
-								nitups * sizeof(OffsetNumber));
-			for (int i = 0; i < nitups; i++)
-				XLogRegisterBufData(1, itups[i], tups_size[i]);
-		}
-		else if (is_prim_bucket_same_wrt || is_prev_bucket_same_wrt)
-		{
-			uint8		wbuf_flags;
-
-			/*
-			 * A write buffer needs to be registered even if no tuples are
-			 * added to it to ensure that we can acquire a cleanup lock on it
-			 * if it is the same as primary bucket buffer or update the
-			 * nextblkno if it is same as the previous bucket buffer.
-			 */
-			Assert(nitups == 0);
-
-			wbuf_flags = REGBUF_STANDARD;
-			if (!is_prev_bucket_same_wrt)
-				wbuf_flags |= REGBUF_NO_CHANGE;
-			else
-				Assert(mod_wbuf);
-			XLogRegisterBuffer(1, wbuf, wbuf_flags);
+			if (nitups > 0)
+			{
+				XLogRegisterBufData(1, itup_offsets,
+									nitups * sizeof(OffsetNumber));
+				for (int i = 0; i < nitups; i++)
+					XLogRegisterBufData(1, itups[i], tups_size[i]);
+			}
 		}
 
 		XLogRegisterBuffer(2, ovflbuf, REGBUF_STANDARD);
@@ -991,6 +971,7 @@ readpage:
 					{
 						xl_hash_move_page_contents xlrec;
 
+						xlrec.bucket_blkno = bucket_blkno;
 						xlrec.ntups = nitups;
 						xlrec.is_prim_bucket_same_wrt = (wbuf == bucket_buf);
 
@@ -998,17 +979,11 @@ readpage:
 						XLogRegisterData(&xlrec, SizeOfHashMovePageContents);
 
 						/*
-						 * bucket buffer was not changed, but still needs to
-						 * be registered to ensure that we can acquire a
-						 * cleanup lock on it during replay.
+						 * If wbuf is an overflow page, the primary bucket
+						 * page is not changed and we hold only a pin on it,
+						 * so it is not registered.  Replay takes a cleanup
+						 * lock on bucket_blkno instead.
 						 */
-						if (!xlrec.is_prim_bucket_same_wrt)
-						{
-							int			flags = REGBUF_STANDARD | REGBUF_NO_IMAGE | REGBUF_NO_CHANGE;
-
-							XLogRegisterBuffer(0, bucket_buf, flags);
-						}
-
 						XLogRegisterBuffer(1, wbuf, REGBUF_STANDARD);
 						XLogRegisterBufData(1, itup_offsets,
 											nitups * sizeof(OffsetNumber));

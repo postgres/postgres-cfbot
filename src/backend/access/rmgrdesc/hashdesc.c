@@ -80,7 +80,8 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 			{
 				xl_hash_move_page_contents *xlrec = (xl_hash_move_page_contents *) rec;
 
-				appendStringInfo(buf, "ntups %d, is_primary %c",
+				appendStringInfo(buf, "bucket_blkno %u, ntups %d, is_primary %c",
+								 xlrec->bucket_blkno,
 								 xlrec->ntups,
 								 xlrec->is_prim_bucket_same_wrt ? 'T' : 'F');
 				break;
@@ -89,7 +90,8 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 			{
 				xl_hash_squeeze_page *xlrec = (xl_hash_squeeze_page *) rec;
 
-				appendStringInfo(buf, "prevblkno %u, nextblkno %u, ntups %d, is_primary %c, is_previous %c",
+				appendStringInfo(buf, "bucket_blkno %u, prevblkno %u, nextblkno %u, ntups %d, is_primary %c, is_previous %c",
+								 xlrec->bucket_blkno,
 								 xlrec->prevblkno,
 								 xlrec->nextblkno,
 								 xlrec->ntups,
@@ -101,7 +103,8 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 			{
 				xl_hash_delete *xlrec = (xl_hash_delete *) rec;
 
-				appendStringInfo(buf, "clear_dead_marking %c, is_primary %c",
+				appendStringInfo(buf, "bucket_blkno %u, clear_dead_marking %c, is_primary %c",
+								 xlrec->bucket_blkno,
 								 xlrec->clear_dead_marking ? 'T' : 'F',
 								 xlrec->is_primary_bucket_page ? 'T' : 'F');
 				break;

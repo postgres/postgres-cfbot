@@ -902,6 +902,7 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 			{
 				xl_hash_delete xlrec;
 
+				xlrec.bucket_blkno = bucket_blkno;
 				xlrec.clear_dead_marking = clear_dead_marking;
 				xlrec.is_primary_bucket_page = (buf == bucket_buf);
 
@@ -909,17 +910,11 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 				XLogRegisterData(&xlrec, SizeOfHashDelete);
 
 				/*
-				 * bucket buffer was not changed, but still needs to be
-				 * registered to ensure that we can acquire a cleanup lock on
-				 * it during replay.
+				 * If buf is an overflow page, the primary bucket page is not
+				 * changed and we hold only a pin on it, so it is not
+				 * registered.  Replay takes a cleanup lock on bucket_blkno
+				 * instead.
 				 */
-				if (!xlrec.is_primary_bucket_page)
-				{
-					uint8		flags = REGBUF_STANDARD | REGBUF_NO_IMAGE | REGBUF_NO_CHANGE;
-
-					XLogRegisterBuffer(0, bucket_buf, flags);
-				}
-
 				XLogRegisterBuffer(1, buf, REGBUF_STANDARD);
 				XLogRegisterBufData(1, deletable,
 									ndeletable * sizeof(OffsetNumber));

@@ -641,6 +641,15 @@ entire bucket.  After recovery, the operations will work correctly, but
 the index will remain bloated and this can impact performance of read and
 insert operations until the next vacuum squeeze the bucket completely.
 
+Replay of the delete, move-page-contents and squeeze-page records takes a
+cleanup lock on the primary bucket page before touching any other page, so
+that no scan on a hot standby is in progress in the bucket or can start in
+it while tuples are removed or moved; such a scan could otherwise miss
+tuples or return them twice.  When the primary bucket page is not one of
+the pages the record changes, the operation holds only a pin on it, so it
+is not registered in the record.  The record stores its block number
+instead, and replay locks that block directly.
+
 
 Other Notes
 -----------

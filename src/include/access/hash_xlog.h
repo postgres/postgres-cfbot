@@ -129,12 +129,15 @@ typedef struct xl_hash_split_complete
  *
  * This data record is used for XLOG_HASH_MOVE_PAGE_CONTENTS
  *
- * Backup Blk 0: primary bucket page
  * Backup Blk 1: page containing moved tuples
  * Backup Blk 2: page from which tuples will be removed
+ *
+ * The primary bucket page is not registered; replay takes a cleanup lock on
+ * bucket_blkno instead.
  */
 typedef struct xl_hash_move_page_contents
 {
+	BlockNumber bucket_blkno;	/* primary bucket page */
 	uint16		ntups;
 	bool		is_prim_bucket_same_wrt;	/* true if the page to which
 											 * tuples are moved is same as
@@ -149,16 +152,20 @@ typedef struct xl_hash_move_page_contents
  *
  * This data record is used for XLOG_HASH_SQUEEZE_PAGE
  *
- * Backup Blk 0: primary bucket page
- * Backup Blk 1: page containing tuples moved from freed overflow page
+ * Backup Blk 1: page containing tuples moved from freed overflow page, if
+ *				 it is modified
  * Backup Blk 2: freed overflow page
  * Backup Blk 3: page previous to the freed overflow page
  * Backup Blk 4: page next to the freed overflow page
  * Backup Blk 5: bitmap page containing info of freed overflow page
  * Backup Blk 6: meta page
+ *
+ * The primary bucket page is registered only as block 1, when it is the
+ * modified write page; otherwise replay takes a cleanup lock on bucket_blkno.
  */
 typedef struct xl_hash_squeeze_page
 {
+	BlockNumber bucket_blkno;	/* primary bucket page */
 	BlockNumber prevblkno;
 	BlockNumber nextblkno;
 	uint16		ntups;
@@ -179,11 +186,14 @@ typedef struct xl_hash_squeeze_page
  *
  * This data record is used for XLOG_HASH_DELETE
  *
- * Backup Blk 0: primary bucket page
  * Backup Blk 1: page from which tuples are deleted
+ *
+ * If block 1 is not the primary bucket page, replay takes a cleanup lock on
+ * bucket_blkno, which is not registered.
  */
 typedef struct xl_hash_delete
 {
+	BlockNumber bucket_blkno;	/* primary bucket page */
 	bool		clear_dead_marking; /* true if this operation clears
 									 * LH_PAGE_HAS_DEAD_TUPLES flag */
 	bool		is_primary_bucket_page; /* true if the operation is for
