@@ -1458,6 +1458,22 @@ DefineIndex(ParseState *pstate,
 						continue;
 
 					cldidx = index_open(cldidxid, lockmode);
+
+					/*
+					 * Recheck now that we hold the lock, in case the index
+					 * was concurrently attached to some other parent while we
+					 * waited for it.  The unlocked check above cannot give a
+					 * stale true answer, because the lock we hold on the
+					 * partition prevents detaching it or dropping the parent
+					 * index; so it only serves to avoid locking indexes we're
+					 * going to skip anyway.
+					 */
+					if (has_superclass(cldidxid))
+					{
+						index_close(cldidx, lockmode);
+						continue;
+					}
+
 					cldIdxInfo = BuildIndexInfo(cldidx);
 					if (CompareIndexInfo(cldIdxInfo, indexInfo,
 										 cldidx->rd_indcollation,
