@@ -3173,3 +3173,37 @@ SAVEPOINT s;
 INSERT INTO ri_fk_io VALUES ('2');	-- fails
 ROLLBACK TO SAVEPOINT s;
 ROLLBACK;
+
+-- FK persistence rules apply to unlogged partitions on the referenced side
+-- just like to standalone unlogged tables: crash recovery resets them, so
+-- rows in a permanent referencing table would be left dangling.
+CREATE SCHEMA fkpart14;
+SET search_path TO fkpart14;
+CREATE TABLE pk (a int PRIMARY KEY) PARTITION BY RANGE (a);
+CREATE UNLOGGED TABLE pk1 PARTITION OF pk FOR VALUES FROM (0) TO (100);
+-- fails: an existing partition of the referenced table is unlogged
+CREATE TABLE fk (x int REFERENCES pk);
+-- ok: an unlogged table may reference unlogged partitions
+CREATE UNLOGGED TABLE ufk (x int REFERENCES pk);
+DROP TABLE ufk, pk;
+CREATE TABLE pk (a int PRIMARY KEY) PARTITION BY RANGE (a);
+CREATE TABLE fk (x int REFERENCES pk);
+-- fails: creating an unlogged partition of the referenced table
+CREATE UNLOGGED TABLE pk1 PARTITION OF pk FOR VALUES FROM (0) TO (100);
+-- fails: attaching an unlogged partition to the referenced table
+CREATE UNLOGGED TABLE pk2 (a int PRIMARY KEY);
+ALTER TABLE pk ATTACH PARTITION pk2 FOR VALUES FROM (0) TO (100);
+-- fails: same, with the unlogged table below a sub-partitioned table
+CREATE TABLE pk3 (a int PRIMARY KEY) PARTITION BY RANGE (a);
+CREATE UNLOGGED TABLE pk31 PARTITION OF pk3 FOR VALUES FROM (0) TO (50);
+ALTER TABLE pk ATTACH PARTITION pk3 FOR VALUES FROM (0) TO (100);
+-- ok: permanent partitions can be added, but not made unlogged afterwards
+CREATE TABLE pk4 PARTITION OF pk FOR VALUES FROM (0) TO (100);
+ALTER TABLE pk4 SET UNLOGGED;
+-- ok: unlogged partitions on the referencing side are still allowed
+CREATE TABLE pk5 (a int PRIMARY KEY);
+CREATE TABLE fk2 (x int REFERENCES pk5) PARTITION BY RANGE (x);
+CREATE UNLOGGED TABLE fk21 PARTITION OF fk2 FOR VALUES FROM (0) TO (100);
+DROP TABLE fk2, pk5, fk, pk, pk2, pk3;
+DROP SCHEMA fkpart14;
+RESET search_path;
