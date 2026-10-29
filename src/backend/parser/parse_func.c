@@ -895,6 +895,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		/* winref will be set by transformWindowFuncCall */
 		wfunc->winstar = agg_star;
 		wfunc->winagg = (fdresult == FUNCDETAIL_AGGREGATE);
+		wfunc->windistinct = agg_distinct;
 		wfunc->aggfilter = agg_filter;
 		wfunc->ignore_nulls = ignore_nulls;
 		wfunc->runCondition = NIL;
@@ -902,11 +903,12 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 
 		/*
 		 * agg_star is allowed for aggregate functions but distinct isn't
+		 * allowed for non-aggregate window functions.
 		 */
-		if (agg_distinct)
+		if (agg_distinct && !wfunc->winagg)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("DISTINCT is not implemented for window functions"),
+					 errmsg("DISTINCT is not implemented for non-aggregate window functions"),
 					 parser_errposition(pstate, location)));
 
 		/*
