@@ -100,7 +100,13 @@ int			synchronous_commit = SYNCHRONOUS_COMMIT_ON;
  * concurrent aborts only in systable_* APIs.
  */
 TransactionId CheckXidAlive = InvalidTransactionId;
-bool		bsysscan = false;
+
+/*
+ * Number of nested systable scans while CheckXidAlive is valid.  A counter is
+ * needed because systable scans can be nested.  Transaction abort resets it,
+ * since ERROR can bypass the matching systable_endscan().
+ */
+static int sysscan_depth = 0;
 
 /*
  * When running as a parallel worker, we place only a single
@@ -6530,4 +6536,47 @@ xact_redo(XLogReaderState *record)
 	}
 	else
 		elog(PANIC, "xact_redo: unknown op code %u", info);
+}
+
+/*
+ * Record entry into a system table scan while CheckXidAlive is valid.
+ */
+void
+TrackSystemTableScanStart(void)
+{
+	if (!TransactionIdIsValid(CheckXidAlive))
+		return;
+
+	sysscan_depth++;
+}
+
+/*
+ * Record normal exit from a tracked system table scan.
+ */
+void
+TrackSystemTableScanEnd(void)
+{
+	if (!TransactionIdIsValid(CheckXidAlive))
+		return;
+
+	Assert(IsSystemTableScanInProgress());
+	sysscan_depth--;
+}
+
+/*
+ * Reset the system table scan state during transaction abort.
+ */
+void
+ResetSystemTableScanState(void)
+{
+	sysscan_depth = 0;
+}
+
+/*
+ * Return whether any tracked system table scan is in progress.
+ */
+bool
+IsSystemTableScanInProgress(void)
+{
+	return sysscan_depth > 0;
 }
