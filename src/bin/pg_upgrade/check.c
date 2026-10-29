@@ -1107,6 +1107,9 @@ check_is_install_user(ClusterInfo *cluster)
  *	Ensure that all non-template0 databases allow connections since they
  *	otherwise won't be restored; and that template0 explicitly doesn't allow
  *	connections since it would make pg_dumpall --globals restore fail.
+ *
+ *	Invalid databases, that is, databases whose DROP DATABASE got interrupted,
+ *	can't be connected to and hence can't be upgraded, so they are skipped.
  */
 static void
 check_for_connection_status(ClusterInfo *cluster)
@@ -1152,20 +1155,26 @@ check_for_connection_status(ClusterInfo *cluster)
 				pg_fatal("template0 must not allow connections, "
 						 "i.e. its pg_database.datallowconn must be false");
 		}
-		else
+		else if (strcmp(datconnlimit, "-2") == 0)
+		{
+			/*
+			 * Skip invalid databases, they can't be upgraded. Check this
+			 * before datallowconn, since an invalid database can have
+			 * datallowconn = false too, and allowing connections would still
+			 * not make it upgradable.
+			 */
+			continue;
+		}
+		else if (strcmp(datallowconn, "f") == 0)
 		{
 			/*
 			 * Avoid datallowconn == false databases from being skipped on
-			 * restore, and ensure that no databases are marked invalid with
-			 * datconnlimit == -2.
+			 * restore.
 			 */
-			if ((strcmp(datallowconn, "f") == 0) || strcmp(datconnlimit, "-2") == 0)
-			{
-				if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-					pg_fatal("could not open file \"%s\": %m", output_path);
+			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", output_path);
 
-				fprintf(script, "%s\n", datname);
-			}
+			fprintf(script, "%s\n", datname);
 		}
 	}
 
@@ -1178,11 +1187,11 @@ check_for_connection_status(ClusterInfo *cluster)
 		fclose(script);
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("All non-template0 databases must allow connections, i.e. their\n"
-				 "pg_database.datallowconn must be true and pg_database.datconnlimit\n"
-				 "must not be -2.  Your installation contains non-template0 databases\n"
-				 "which cannot be connected to.  Consider allowing connection for all\n"
-				 "non-template0 databases or drop the databases which do not allow\n"
-				 "connections.  A list of databases with the problem is in the file:\n"
+				 "pg_database.datallowconn must be true.  Your installation contains\n"
+				 "non-template0 databases which cannot be connected to.  Consider\n"
+				 "allowing connection for all non-template0 databases or drop the\n"
+				 "databases which do not allow connections.  A list of databases with\n"
+				 "the problem is in the file:\n"
 				 "    %s", output_path);
 	}
 	else
@@ -1212,9 +1221,11 @@ check_for_unsupported_encodings(ClusterInfo *cluster)
 
 	conn = connectToServer(cluster, "template1");
 
+	/* Invalid databases are skipped, so their encoding doesn't matter */
 	res = executeQueryOrDie(conn,
 							"SELECT datname, encoding "
-							"FROM pg_catalog.pg_database");
+							"FROM pg_catalog.pg_database "
+							"WHERE datconnlimit <> -2");
 	ntups = PQntuples(res);
 	i_datname = PQfnumber(res, "datname");
 	i_encoding = PQfnumber(res, "encoding");
@@ -2566,11 +2577,13 @@ check_old_cluster_global_names(ClusterInfo *cluster)
 
 	/*
 	 * Get database, user/role and tablespace names from cluster.  Can't use
-	 * pg_authid because only superusers can view it.
+	 * pg_authid because only superusers can view it. Invalid databases are
+	 * skipped, so their names don't matter.
 	 */
 	res = executeQueryOrDie(conn_template1,
 							"SELECT datname AS objname, 'database' AS objtype "
-							"FROM pg_catalog.pg_database UNION ALL "
+							"FROM pg_catalog.pg_database "
+							"WHERE datconnlimit <> -2 UNION ALL "
 							"SELECT rolname AS objname, 'role' AS objtype "
 							"FROM pg_catalog.pg_roles UNION ALL "
 							"SELECT spcname AS objname, 'tablespace' AS objtype "
@@ -2643,9 +2656,15 @@ check_for_oldestxid_consistency(ClusterInfo *cluster)
 
 	conn_template1 = connectToServer(cluster, "template1");
 
+	/*
+	 * Invalid databases are skipped, and VACUUM ignores them when it advances
+	 * the cluster-wide oldest XID and multixact ID, so it is normal for their
+	 * datfrozenxid and datminmxid to lag behind the control file.
+	 */
 	dbres = executeQueryOrDie(conn_template1,
 							  "SELECT datname, datfrozenxid, datminmxid "
-							  "FROM	pg_catalog.pg_database");
+							  "FROM	pg_catalog.pg_database "
+							  "WHERE datconnlimit <> -2");
 
 	i_datname = PQfnumber(dbres, "datname");
 	i_datfrozenxid = PQfnumber(dbres, "datfrozenxid");
