@@ -696,6 +696,30 @@ ERROR:  new row for relation "gtest20c" violates check constraint "whole_row_che
 DETAIL:  Failing row contains (null, virtual).
 ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
 ERROR:  check constraint "whole_row_check" of relation "gtest20c" is violated by some row
+-- whole-row reference with a dropped column: the NULL placeholder for the
+-- dropped column must not make the row test as null
+CREATE TABLE gtest20e (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL, c int);
+ALTER TABLE gtest20e DROP COLUMN c;
+INSERT INTO gtest20e VALUES (1);
+SELECT gtest20e, gtest20e IS NOT NULL AS nn, gtest20e IS NULL AS n FROM gtest20e;
+ gtest20e | nn | n 
+----------+----+---
+ (1,2)    | t  | f
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT gtest20e IS NOT NULL FROM gtest20e;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Seq Scan on generated_virtual_tests.gtest20e
+   Output: ((a IS NOT NULL) AND ((a * 2) IS NOT NULL))
+(2 rows)
+
+ALTER TABLE gtest20e ADD CONSTRAINT whole_row_check CHECK (gtest20e IS NOT NULL);  -- ok
+INSERT INTO gtest20e VALUES (2);  -- ok
+INSERT INTO gtest20e VALUES (NULL);  -- fails
+ERROR:  new row for relation "gtest20e" violates check constraint "whole_row_check"
+DETAIL:  Failing row contains (null, virtual).
 -- index with whole-row reference needs rebuild
 CREATE TABLE gtest20d (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 INSERT INTO gtest20d VALUES (1), (1);
