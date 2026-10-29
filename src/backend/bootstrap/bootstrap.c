@@ -243,6 +243,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 	char	   *userDoption = NULL;
 	uint32		bootstrap_data_checksum_version = PG_DATA_CHECKSUM_OFF;
 	yyscan_t	scanner;
+	Size		shmem_size;
 
 	Assert(!IsUnderPostmaster);
 
@@ -377,7 +378,8 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 	InitializeFastPathLocks();
 
 	ShmemCallRequestCallbacks();
-	CreateSharedMemoryAndSemaphores();
+	shmem_size = CalculateShmemSize();
+	CreateSharedMemoryAndSemaphores(shmem_size);
 
 	/*
 	 * Estimate number of openable files.  This is essential too in --check

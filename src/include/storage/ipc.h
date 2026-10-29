@@ -79,10 +79,10 @@ extern PGDLLIMPORT shmem_startup_hook_type shmem_startup_hook;
 
 extern void RegisterBuiltinShmemCallbacks(void);
 extern Size CalculateShmemSize(void);
-extern void CreateSharedMemoryAndSemaphores(void);
+extern void CreateSharedMemoryAndSemaphores(Size size);
 #ifdef EXEC_BACKEND
 extern void AttachSharedMemoryStructs(void);
 #endif
-extern void InitializeShmemGUCs(void);
+extern void InitializeShmemGUCs(Size size_b);
 
 #endif							/* IPC_H */

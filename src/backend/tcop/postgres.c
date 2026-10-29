@@ -4222,6 +4222,7 @@ PostgresSingleUserMain(int argc, char *argv[],
 					   const char *username)
 {
 	const char *dbname = NULL;
+	Size		shmem_size;
 
 	Assert(!IsUnderPostmaster);
 
@@ -4303,13 +4304,14 @@ PostgresSingleUserMain(int argc, char *argv[],
 	 * add-ins, a chance to chance to adjust their requested shmem sizes.
 	 */
 	ShmemCallRequestCallbacks();
+	shmem_size = CalculateShmemSize();
 
 	/*
 	 * Now that loadable modules have had their chance to request additional
 	 * shared memory, determine the value of any runtime-computed GUCs that
 	 * depend on the amount of shared memory required.
 	 */
-	InitializeShmemGUCs();
+	InitializeShmemGUCs(shmem_size);
 
 	/*
 	 * Now that modules have been loaded, we can process any custom resource
@@ -4321,7 +4323,7 @@ PostgresSingleUserMain(int argc, char *argv[],
 	 * Create shared memory etc.  (Nothing's really "shared" in single-user
 	 * mode, but we must have these data structures anyway.)
 	 */
-	CreateSharedMemoryAndSemaphores();
+	CreateSharedMemoryAndSemaphores(shmem_size);
 
 	/*
 	 * Estimate number of openable files.  This must happen after setting up
