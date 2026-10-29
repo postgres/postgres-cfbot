@@ -1309,6 +1309,32 @@ SELECT XMLPARSE(DOCUMENT '<!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4
  <!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4.1.2//EN" "http://www.oasis-open.org/docbook/xml/4.1.2/docbookx.dtd"><chapter>&nbsp;</chapter>
 (1 row)
 
+-- Entity references are expanded before XPath evaluation.
+SELECT xpath('/r/text()', '<!DOCTYPE r [<!ENTITY e "y">]><r>u&e;</r>');
+ xpath 
+-------
+ {uy}
+(1 row)
+
+SELECT xpath('count(//b)', '<!DOCTYPE r [<!ENTITY e "<b>z</b>">]><r>&e;&e;</r>');
+ xpath 
+-------
+ {2}
+(1 row)
+
+SELECT xmlexists('//b' PASSING BY REF '<!DOCTYPE r [<!ENTITY e "<b>z</b>">]><r>&e;</r>');
+ xmlexists 
+-----------
+ t
+(1 row)
+
+SELECT * FROM XMLTABLE('//b' PASSING '<!DOCTYPE r [<!ENTITY e "<b>z</b>">]><r>&e;&e;</r>' COLUMNS b text PATH '.');
+ b 
+---
+ z
+ z
+(2 rows)
+
 -- XMLPATH tests
 CREATE TABLE xmldata(data xml);
 INSERT INTO xmldata VALUES('<ROWS>
