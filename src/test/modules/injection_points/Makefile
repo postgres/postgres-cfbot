@@ -37,7 +37,8 @@ ISOLATION = basic \
 	    $(WAIT_CLEANUP_TST) \
 	    heap_lock_update \
 	    on_conflict_probe_window \
-	    multixact-aborted-updater
+	    multixact-aborted-updater \
+	    serializable-summarization
 
 # some isolation tests require wal_level=replica
 ISOLATION_OPTS = --temp-config $(top_srcdir)/src/test/modules/injection_points/extra.conf

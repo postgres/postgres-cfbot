@@ -169,6 +169,7 @@
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "utils/guc_hooks.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/wait_event.h"
@@ -1689,6 +1690,13 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 	 */
 #ifdef TEST_SUMMARIZE_SERIAL
 	SummarizeOldestCommittedSxact();
+#endif
+#ifdef USE_INJECTION_POINTS
+	if (IS_INJECTION_POINT_ATTACHED("serializable-summarize"))
+	{
+		INJECTION_POINT("serializable-summarize", NULL);
+		SummarizeOldestCommittedSxact();
+	}
 #endif
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 	do
@@ -3836,6 +3844,33 @@ XidIsConcurrent(TransactionId xid)
 	return pg_lfind32(xid, snap->xip, snap->xcnt);
 }
 
+/*
+ * Does this predicate lock belong to a transaction which overlaps ours?
+ *
+ * Normal SERIALIZABLEXACTs retain an XID horizon for this test.  The dummy
+ * transaction used for summarized locks has no such horizon, but each of its
+ * locks retains the latest commit sequence number among the transactions
+ * folded into it.  If the latest commit occurred after our snapshot, at least
+ * one transaction represented by the lock overlapped ours.
+ */
+static bool
+PredicateLockIsForOverlappingTransaction(const PREDICATELOCK *predlock)
+{
+	SERIALIZABLEXACT *sxact = predlock->tag.myXact;
+
+	if (sxact == OldCommittedSxact)
+	{
+		Assert(predlock->commitSeqNo != 0);
+		Assert(predlock->commitSeqNo != InvalidSerCommitSeqNo);
+		return predlock->commitSeqNo >
+			MySerializableXact->SeqNo.lastCommitBeforeSnapshot;
+	}
+
+	return !SxactIsCommitted(sxact) ||
+		TransactionIdPrecedes(GetTransactionSnapshot()->xmin,
+							  sxact->finishedBefore);
+}
+
 bool
 CheckForSerializableConflictOutNeeded(Relation relation, Snapshot snapshot)
 {
@@ -4072,9 +4107,7 @@ CheckTargetForConflictsIn(PREDICATELOCKTARGETTAG *targettag)
 			}
 		}
 		else if (!SxactIsDoomed(sxact)
-				 && (!SxactIsCommitted(sxact)
-					 || TransactionIdPrecedes(GetTransactionSnapshot()->xmin,
-											  sxact->finishedBefore))
+				 && PredicateLockIsForOverlappingTransaction(predlock)
 				 && !RWConflictExists(sxact, MySerializableXact))
 		{
 			LWLockRelease(SerializableXactHashLock);
@@ -4085,9 +4118,7 @@ CheckTargetForConflictsIn(PREDICATELOCKTARGETTAG *targettag)
 			 * transaction may have flagged a conflict.
 			 */
 			if (!SxactIsDoomed(sxact)
-				&& (!SxactIsCommitted(sxact)
-					|| TransactionIdPrecedes(GetTransactionSnapshot()->xmin,
-											 sxact->finishedBefore))
+				&& PredicateLockIsForOverlappingTransaction(predlock)
 				&& !RWConflictExists(sxact, MySerializableXact))
 			{
 				FlagRWConflict(sxact, MySerializableXact);
