@@ -156,6 +156,40 @@ all summarizing indexes.  (Realistically, we only need to propagate the
 update to the indexes that contain the updated values, but that is yet to
 be implemented.)
 
+
+Per-Index Update Tracking
+-------------------------
+
+After the table AM performs the update, the executor determines which
+indexes need new entries using per-index tracking.
+
+The table AM communicates whether a HOT update occurred via the
+row_moved boolean output of table_tuple_update(), together with the
+modified-attrs Bitmapset the caller passed in (attribute numbers encoded with
+FirstLowInvalidHeapAttributeNumber).  When row_moved is true the
+update was non-HOT and every index requires a new entry (the tuple has a new
+TID).  When false the update was HOT: the caller consults modified_attrs with
+each index's own attributes to insert entries only into the indexes whose key
+attributes changed (a HOT-indexed update) or only the summarizing indexes (a
+classic HOT update that changed a summarized column), and skips the rest.
+
+The executor then calls ExecSetIndexUnchanged() to populate the per-index
+ii_IndexUnchanged flag on each IndexInfo.  This flag indicates whether each
+index's key values are unchanged by the update.  For non-HOT updates
+the flag is cleared on every index, so each gets a fresh entry at the
+new TID; the flag is never a skip on its own, just a hint to the
+index AM's aminsert for optimizations such as bottom-up deletion of
+logically equivalent duplicate entries.
+
+ExecInsertIndexTuples consults ii_IndexUnchanged to decide whether to
+skip a non-summarizing index during an UPDATE: if the index is marked
+unchanged, the HOT chain root's existing entry still points at the
+tuple, so no new entry is needed.  For non-HOT updates the TID
+changed and ExecSetIndexUnchanged marks every index as changed,
+forcing each to receive a new entry.  Summarizing indexes always get
+the opportunity to update their block-level summaries.
+
+
 Abort Cases
 -----------
 

@@ -53,6 +53,7 @@
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "commands/defrem.h"
 #include "commands/event_trigger.h"
 #include "commands/progress.h"
 #include "commands/tablecmds.h"
@@ -74,6 +75,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
@@ -101,6 +103,7 @@ typedef struct
 
 /* non-export function prototypes */
 static bool relationHasPrimaryKey(Relation rel);
+static void index_check_locator(Relation heapRelation, Oid accessMethodId);
 static TupleDesc ConstructTupleDescriptor(Relation heapRelation,
 										  const IndexInfo *indexInfo,
 										  const List *indexColNames,
@@ -677,6 +680,39 @@ UpdateIndexRelation(Oid indexoid,
 
 
 /*
+ * index_check_locator
+ *
+ * Unless the index AM can store a variable-width locator (amcanvarlocator),
+ * it keeps each entry's table locator in an ItemPointerData, so the table's
+ * locator must be fixed-width and fit in one.  index_create() checks this
+ * before making any catalog entries, and index_build() checks it again
+ * because a table's access method, and so its locator, can change after its
+ * indexes were created (ALTER TABLE ... SET ACCESS METHOD rebuilds them).
+ */
+static void
+index_check_locator(Relation heapRelation, Oid accessMethodId)
+{
+	const LocatorDesc *locdesc = RelationGetLocatorDesc(heapRelation);
+	const IndexAmRoutine *amroutine;
+
+	if (locdesc->width > 0 && locdesc->width <= sizeof(ItemPointerData))
+		return;
+
+	amroutine = GetIndexAmRoutineByAmId(accessMethodId, false);
+	if (!amroutine->amcanvarlocator)
+	{
+		char	   *amname = get_am_name(accessMethodId);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("access method \"%s\" cannot index table \"%s\"",
+						amname, RelationGetRelationName(heapRelation)),
+				 errdetail("The table's access method identifies rows using the \"%s\" locator, which \"%s\" cannot store.",
+						   locdesc->name, amname)));
+	}
+}
+
+/*
  * index_create
  *
  * heapRelation: table to build index on (suitably locked by caller)
@@ -854,6 +890,13 @@ index_create(Relation heapRelation,
 			}
 		}
 	}
+
+	/*
+	 * A partitioned table has no table AM; each partition's index_create()
+	 * checks its own locator.
+	 */
+	if (heapRelation->rd_tableam != NULL)
+		index_check_locator(heapRelation, accessMethodId);
 
 	/*
 	 * Concurrent index build on a system catalog is unsafe because we tend to
@@ -1556,6 +1599,8 @@ index_concurrently_build(Oid heapRelationId,
 
 	/* Now build the index */
 	index_build(heapRel, indexRelation, indexInfo, false, true, true);
+
+	INJECTION_POINT("index-concurrently-built", NULL);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -3139,6 +3184,8 @@ index_build(Relation heapRelation,
 	Assert(indexRelation->rd_indam);
 	Assert(indexRelation->rd_indam->ambuild);
 	Assert(indexRelation->rd_indam->ambuildempty);
+
+	index_check_locator(heapRelation, indexRelation->rd_rel->relam);
 
 	/*
 	 * Determine worker process details for parallel CREATE INDEX.  Currently,

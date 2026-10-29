@@ -2240,7 +2240,7 @@
     <para>
      A storage structure that keeps metadata about each data page
      of a table's main fork.  The visibility map entry for
-     each page stores two bits: the first one
+     each page stores two visibility bits: the first one
      (<literal>all-visible</literal>) indicates that all tuples
      in the page are visible to all transactions.  The second one
      (<literal>all-frozen</literal>) indicates that all tuples

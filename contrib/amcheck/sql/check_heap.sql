@@ -168,6 +168,43 @@ SELECT * FROM verify_heapam('test_foreign_table',
 							startblock := NULL,
 							endblock := NULL);
 
+-- HOT-indexed (HOT/SIU) on-page artifacts:
+--
+-- A HOT-indexed UPDATE keeps the new tuple on the same page as a heap-only
+-- tuple marked HEAP_INDEXED_UPDATED and plants index entries pointing at its
+-- own TID.  Pruning a chain of such updates collapses dead members to
+-- LP_REDIRECT forwarders and preserves the LP of a live HOT-indexed member
+-- whose index entries may not yet be swept.  verify_heapam must treat all of
+-- these as legitimate.  This scenario exercises them and asserts that
+-- verify_heapam reports zero corruption against legitimate HOT-indexed
+-- activity.
+CREATE TABLE hot_indexed_check (id int PRIMARY KEY, c1 int, c2 int, c3 int)
+	WITH (fillfactor = 70);
+CREATE INDEX hot_indexed_check_c1 ON hot_indexed_check (c1);
+CREATE INDEX hot_indexed_check_c2 ON hot_indexed_check (c2);
+INSERT INTO hot_indexed_check
+	SELECT g, g, g, g FROM generate_series(1, 200) g;
+-- Single-step UPDATEs: each row gets one HOT-indexed update.  Each
+-- successful HOT-indexed update keeps its new tuple on-page and inserts an
+-- entry only into the index whose attribute changed.
+UPDATE hot_indexed_check SET c1 = c1 + 1000;
+-- Multi-step UPDATEs: drive several successive HOT-indexed updates against
+-- the same rows so prune sees a chain of dead intermediates and collapses
+-- them to LP_REDIRECT forwarders.  An explicit VACUUM runs the prune path
+-- and exercises chain collapse.
+UPDATE hot_indexed_check SET c2 = c2 + 1 WHERE id <= 50;
+UPDATE hot_indexed_check SET c2 = c2 + 1 WHERE id <= 50;
+UPDATE hot_indexed_check SET c2 = c2 + 1 WHERE id <= 50;
+VACUUM (INDEX_CLEANUP off) hot_indexed_check;
+-- verify_heapam must not report any corruption against legitimate HOT-
+-- indexed artifacts.  Selecting the corrupting message makes any
+-- regression unmistakable in the regress diff.
+SELECT blkno, offnum, attnum, msg
+	FROM verify_heapam('hot_indexed_check',
+					   startblock := NULL,
+					   endblock := NULL);
+DROP TABLE hot_indexed_check;
+
 -- cleanup
 DROP TABLE test_toast_oid;
 DROP TABLE test_toast_oid8;

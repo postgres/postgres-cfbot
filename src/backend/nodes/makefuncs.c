@@ -845,8 +845,6 @@ makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid, List *expressions,
 	n->ii_Unique = unique;
 	n->ii_NullsNotDistinct = nulls_not_distinct;
 	n->ii_ReadyForInserts = isready;
-	n->ii_CheckedUnchanged = false;
-	n->ii_IndexUnchanged = false;
 	n->ii_Concurrent = concurrent;
 	n->ii_Summarizing = summarizing;
 	n->ii_WithoutOverlaps = withoutoverlaps;
