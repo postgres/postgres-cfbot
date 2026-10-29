@@ -134,13 +134,13 @@ IPC::Run::run(
 	'2>' => \$stderr);
 my @records = grep { /^rmgr: Hash/ } split(/^(?=rmgr: )/m, $stdout);
 
-# The primary page: a DELETE or SQUEEZE_PAGE marked is_primary T has it as
-# block 1, the page that is changed.
+# The primary page: a DELETE or SQUEEZE_PAGE marked is_primary T changes it, so
+# it is the first block reference of the record.
 my $pblk;
 for my $r (@records)
 {
 	if ($r =~ /desc: (?:DELETE|SQUEEZE_PAGE) .*is_primary T/
-		&& $r =~ /blkref #1: rel \S+ blk (\d+)/)
+		&& $r =~ /blkref #0: rel \S+ blk (\d+)/)
 	{
 		$pblk = $1;
 		last;
