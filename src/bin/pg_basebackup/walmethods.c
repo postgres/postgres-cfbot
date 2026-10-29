@@ -804,7 +804,7 @@ tar_write(Walfile *f, const void *buf, size_t count)
 static bool
 tar_write_padding_data(TarMethodFile *f, size_t bytes)
 {
-	PGAlignedXLogBlock zerobuf;
+	PGIOAlignedXLogBlock zerobuf;
 	size_t		bytesleft = bytes;
 
 	memset(zerobuf.data, 0, XLOG_BLCKSZ);
