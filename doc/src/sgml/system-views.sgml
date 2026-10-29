@@ -1316,9 +1316,9 @@ AND c1.path[c2.level] = c2.path[c2.level];
    setting cannot be changed after server start) it will have an appropriate
    message in the <structfield>error</structfield> field.  Another way that
    an entry might have <structfield>applied</structfield> = false is that it is
-   overridden by a later entry for the same parameter name; this case is not
-   considered an error so nothing appears in
-   the <structfield>error</structfield> field.
+   overridden by a later entry for the same parameter name or from command line;
+   these cases are not considered an error so nothing appears in the
+   <structfield>error</structfield> field.
   </para>
 
   <para>
