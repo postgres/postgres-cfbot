@@ -42,10 +42,12 @@ static bool backend_has_iostats = false;
 static bool backend_has_lockstats = false;
 
 /*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_flush_backend().  This is used to calculate how much WAL usage
- * happens between pgstat_flush_backend() calls, by subtracting the
- * previous counters from the current ones.
+ * WAL usage counters saved at the previous call to pgstat_flush_backend().
+ * This is used to calculate how much WAL usage happens between
+ * pgstat_flush_backend() calls, by subtracting the previous counters from the
+ * current ones.  As in pgstat_wal.c, these are this process' own counters
+ * (ComputeOwnWalUsage), excluding what a parallel leader accumulated from its
+ * workers.
  */
 static WalUsage prevBackendWalUsage;
 
@@ -250,7 +252,10 @@ pgstat_flush_backend_entry_io(PgStat_EntryRef *entry_ref)
 static inline bool
 pgstat_backend_wal_have_pending(void)
 {
-	return (pgWalUsage.wal_records != prevBackendWalUsage.wal_records);
+	WalUsage	walusage;
+
+	ComputeOwnWalUsage(&walusage);
+	return (walusage.wal_records != prevBackendWalUsage.wal_records);
 }
 
 /*
@@ -262,6 +267,7 @@ pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
 {
 	PgStatShared_Backend *shbackendent;
 	PgStat_WalCounters *bktype_shstats;
+	WalUsage	walusage;
 	WalUsage	wal_usage_diff = {0};
 
 	/*
@@ -279,7 +285,8 @@ pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
 	 * Calculate how much WAL usage counters were increased by subtracting the
 	 * previous counters from the current ones.
 	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevBackendWalUsage);
+	ComputeOwnWalUsage(&walusage);
+	WalUsageAccumDiff(&wal_usage_diff, &walusage, &prevBackendWalUsage);
 
 #define WALSTAT_ACC(fld, var_to_add) \
 	(bktype_shstats->fld += var_to_add.fld)
@@ -293,7 +300,7 @@ pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
 	/*
 	 * Save the current counters for the subsequent calculation of WAL usage.
 	 */
-	prevBackendWalUsage = pgWalUsage;
+	prevBackendWalUsage = walusage;
 }
 
 /*
@@ -413,11 +420,11 @@ pgstat_create_backend(ProcNumber procnum)
 	backend_has_lockstats = false;
 
 	/*
-	 * Initialize prevBackendWalUsage with pgWalUsage so that
-	 * pgstat_backend_flush_cb() can calculate how much pgWalUsage counters
-	 * are increased by subtracting prevBackendWalUsage from pgWalUsage.
+	 * Initialize prevBackendWalUsage with the current counters so that
+	 * pgstat_backend_flush_cb() can calculate how much they are increased by
+	 * subtracting prevBackendWalUsage from them.
 	 */
-	prevBackendWalUsage = pgWalUsage;
+	ComputeOwnWalUsage(&prevBackendWalUsage);
 }
 
 /*
