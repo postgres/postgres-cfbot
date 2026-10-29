@@ -348,6 +348,10 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 	OffsetNumber maxoff;
 	OffsetNumber i;
 	MemoryContext oldcxt;
+	ItemPointerData tids_match[MaxIndexTuplesPerPage];
+	ItemPointerData tids_recheck[MaxIndexTuplesPerPage];
+	int				ntids_match = 0;
+	int				ntids_recheck = 0;
 
 	Assert(!GISTSearchItemIsHeap(*pageItem));
 
@@ -464,9 +468,15 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 		{
 			/*
 			 * getbitmap scan, so just push heap tuple TIDs into the bitmap
-			 * without worrying about ordering
+			 * without worrying about ordering.  Because tbm_add_tuples
+			 * takes a single recheck flag, we split matching TIDs into two
+			 * per-page batches based on the recheck value.
 			 */
-			tbm_add_tuples(tbm, &it->t_tid, 1, recheck);
+			if (recheck)
+				tids_recheck[ntids_recheck++] = it->t_tid;
+			else
+				tids_match[ntids_match++] = it->t_tid;
+
 			(*ntids)++;
 		}
 		else if (scan->numberOfOrderBys == 0 && GistPageIsLeaf(page))
@@ -541,6 +551,15 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 
 			MemoryContextSwitchTo(oldcxt);
 		}
+	}
+
+	/*
+	 * For a getbitmap scan, flush all matching TIDs from this page into the TIDBitmap.
+	 */
+	if (tbm)
+	{
+		tbm_add_tuples(tbm, tids_match, ntids_match, false);
+		tbm_add_tuples(tbm, tids_recheck, ntids_recheck, true);
 	}
 
 	UnlockReleaseBuffer(buffer);
