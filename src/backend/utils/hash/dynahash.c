@@ -285,6 +285,7 @@ static int	next_pow2_int(int64 num);
 static void register_seq_scan(HTAB *hashp);
 static void deregister_seq_scan(HTAB *hashp);
 static bool has_seq_scans(HTAB *hashp);
+static void hash_stats(const char *caller, HTAB *hashp);
 
 
 /*
@@ -812,7 +813,7 @@ hash_destroy(HTAB *hashp)
 	}
 }
 
-void
+static void
 hash_stats(const char *caller, HTAB *hashp)
 {
 #ifdef HASH_STATISTICS
