@@ -408,6 +408,12 @@ SELECT XMLPARSE(DOCUMENT '<!DOCTYPE foo [<!ENTITY c SYSTEM "/etc/no.such.file">]
 -- This might or might not load the requested DTD, but it mustn't throw error.
 SELECT XMLPARSE(DOCUMENT '<!DOCTYPE chapter PUBLIC "-//OASIS//DTD DocBook XML V4.1.2//EN" "http://www.oasis-open.org/docbook/xml/4.1.2/docbookx.dtd"><chapter>&nbsp;</chapter>');
 
+-- Entity references are expanded before XPath evaluation.
+SELECT xpath('/r/text()', '<!DOCTYPE r [<!ENTITY e "y">]><r>u&e;</r>');
+SELECT xpath('count(//b)', '<!DOCTYPE r [<!ENTITY e "<b>z</b>">]><r>&e;&e;</r>');
+SELECT xmlexists('//b' PASSING BY REF '<!DOCTYPE r [<!ENTITY e "<b>z</b>">]><r>&e;</r>');
+SELECT * FROM XMLTABLE('//b' PASSING '<!DOCTYPE r [<!ENTITY e "<b>z</b>">]><r>&e;&e;</r>' COLUMNS b text PATH '.');
+
 -- XMLPATH tests
 CREATE TABLE xmldata(data xml);
 INSERT INTO xmldata VALUES('<ROWS>
