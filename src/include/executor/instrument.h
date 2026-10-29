@@ -128,6 +128,17 @@ typedef struct TriggerInstrumentation
 extern PGDLLIMPORT BufferUsage pgBufferUsage;
 extern PGDLLIMPORT WalUsage pgWalUsage;
 
+/*
+ * The portion of pgBufferUsage/pgWalUsage that a parallel leader accumulated
+ * from its workers (see InstrAccumParallelQuery).  Query-level consumers want
+ * the workers' activity included, which is why it is folded into the globals
+ * above, but a session-level consumer that must count each process' activity
+ * exactly once, such as the cumulative statistics system, has to subtract it
+ * out again, as the workers report their activity themselves.
+ */
+extern PGDLLIMPORT BufferUsage pgBufferUsageFromWorkers;
+extern PGDLLIMPORT WalUsage pgWalUsageFromWorkers;
+
 extern Instrumentation *InstrAlloc(int instrument_options);
 extern void InstrInitOptions(Instrumentation *instr, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
@@ -150,6 +161,7 @@ extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings);
 extern void InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
 extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
+extern void ComputeOwnWalUsage(WalUsage *walusage);
 extern void BufferUsageAccumDiff(BufferUsage *dst,
 								 const BufferUsage *add, const BufferUsage *sub);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
