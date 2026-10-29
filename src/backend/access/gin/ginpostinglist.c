@@ -130,51 +130,25 @@ encode_varbyte(uint64 val, unsigned char **ptr)
  * Decode varbyte-encoded integer at *ptr. *ptr is incremented to next integer.
  */
 static uint64
-decode_varbyte(unsigned char **ptr)
+decode_varbyte(unsigned char **ptr, unsigned char *endptr)
 {
-	uint64		val;
+	uint64		val = 0;
 	unsigned char *p = *ptr;
-	uint64		c;
 
-	/* 1st byte */
-	c = *(p++);
-	val = c & 0x7F;
-	if (c & 0x80)
+	for (int i = 0;; i++)
 	{
-		/* 2nd byte */
+		uint64		c;
+
+		if (p >= endptr || i >= MaxBytesPerInteger)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("corrupted GIN posting list")));
+
 		c = *(p++);
-		val |= (c & 0x7F) << 7;
-		if (c & 0x80)
-		{
-			/* 3rd byte */
-			c = *(p++);
-			val |= (c & 0x7F) << 14;
-			if (c & 0x80)
-			{
-				/* 4th byte */
-				c = *(p++);
-				val |= (c & 0x7F) << 21;
-				if (c & 0x80)
-				{
-					/* 5th byte */
-					c = *(p++);
-					val |= (c & 0x7F) << 28;
-					if (c & 0x80)
-					{
-						/* 6th byte */
-						c = *(p++);
-						val |= (c & 0x7F) << 35;
-						if (c & 0x80)
-						{
-							/* 7th byte, should not have continuation bit */
-							c = *(p++);
-							val |= c << 42;
-							Assert((c & 0x80) == 0);
-						}
-					}
-				}
-			}
-		}
+		val |= (c & 0x7F) << (7 * i);
+
+		if ((c & 0x80) == 0)
+			break;
 	}
 
 	*ptr = p;
@@ -298,48 +272,83 @@ ginPostingListDecodeAllSegments(GinPostingList *segment, int len, int *ndecoded_
 {
 	ItemPointer result;
 	int			nallocated;
-	uint64		val;
 	char	   *endseg = ((char *) segment) + len;
 	int			ndecoded;
-	unsigned char *ptr;
-	unsigned char *endptr;
 
 	/*
-	 * Guess an initial size of the array.
+	 * Size from len, not segment->nbytes.  len can be smaller than a segment
+	 * header, so reading nbytes here could run off the buffer.  len also
+	 * bounds the item count, since every item costs at least a byte, so a
+	 * valid list never grows the array.
 	 */
-	nallocated = segment->nbytes * 2 + 1;
+	nallocated = Max(len, 1);
 	result = palloc_array(ItemPointerData, nallocated);
 
 	ndecoded = 0;
 	while ((char *) segment < endseg)
 	{
-		/* enlarge output array if needed */
-		if (ndecoded >= nallocated)
-		{
-			nallocated *= 2;
-			result = repalloc_array(result, ItemPointerData, nallocated);
-		}
+		OffsetNumber firstoff;
+		uint64		val;
+		uint64		prev;
+		unsigned char *ptr;
+		unsigned char *endptr;
+
+		/*
+		 * Reject a segment that runs past the end of the posting list.
+		 * Compare sizes rather than forming segment +
+		 * SizeOfGinPostingList(segment), which would be an out-of-bounds
+		 * pointer.  The header is tested before nbytes is read, and the loop
+		 * condition keeps endseg - segment positive for the unsigned cast.
+		 */
+		if (offsetof(GinPostingList, bytes) > (Size) (endseg - (char *) segment) ||
+			SizeOfGinPostingList(segment) > (Size) (endseg - (char *) segment))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("corrupted GIN posting list")));
+
+		/*
+		 * The first item's offset must fit in MaxHeapTuplesPerPageBits, as
+		 * itemptr_to_uint64() below requires.  That is tighter than
+		 * OffsetNumberIsValid(), which is why the range is open-coded here.
+		 * Read it with the No-Check accessor, since the checking one would
+		 * Assert() on the corrupt value being rejected.  The last clause keeps
+		 * items ascending across segment boundaries.
+		 */
+		firstoff = GinItemPointerGetOffsetNumber(&segment->first);
+		if (firstoff == InvalidOffsetNumber ||
+			firstoff >= (1 << MaxHeapTuplesPerPageBits) ||
+			(ndecoded > 0 &&
+			 ginCompareItemPointers(&segment->first, &result[ndecoded - 1]) <= 0))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("corrupted GIN posting list")));
 
 		/* copy the first item */
-		Assert(OffsetNumberIsValid(ItemPointerGetOffsetNumber(&segment->first)));
-		Assert(ndecoded == 0 || ginCompareItemPointers(&segment->first, &result[ndecoded - 1]) > 0);
+		Assert(ndecoded < nallocated);
 		result[ndecoded] = segment->first;
 		ndecoded++;
 
 		val = itemptr_to_uint64(&segment->first);
+		prev = val;
 		ptr = segment->bytes;
 		endptr = segment->bytes + segment->nbytes;
 		while (ptr < endptr)
 		{
-			/* enlarge output array if needed */
-			if (ndecoded >= nallocated)
-			{
-				nallocated *= 2;
-				result = repalloc_array(result, ItemPointerData, nallocated);
-			}
+			val += decode_varbyte(&ptr, endptr);
 
-			val += decode_varbyte(&ptr);
+			/*
+			 * Reject offset 0 and a non-increasing item.  Neither appears in a
+			 * valid list, and uint64_to_itemptr() below Asserts on offset 0, so
+			 * this has to run before it.
+			 */
+			if ((val & ((1 << MaxHeapTuplesPerPageBits) - 1)) == 0 ||
+				val <= prev)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("corrupted GIN posting list")));
+			prev = val;
 
+			Assert(ndecoded < nallocated);
 			uint64_to_itemptr(val, &result[ndecoded]);
 			ndecoded++;
 		}
