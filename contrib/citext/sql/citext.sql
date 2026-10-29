@@ -653,6 +653,14 @@ SELECT split_part('abc~@~def~@~ghi'::citext, '~@~', 2) = 'def' AS t;
 SELECT split_part('abcTdefTghi'::citext, 't', 2) = 'def' AS t;
 SELECT split_part('abcTdefTghi'::citext, 't'::citext, 2) = 'def' AS t;
 SELECT split_part('abcTdefTghi', 't'::citext, 2) = 'def' AS t;
+-- positions are handled as in the core split_part()
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -1) = 'ghi' AS t;
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -3) = 'abc' AS t;
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, 4) = '' AS t;
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -4) = '' AS t;
+SELECT split_part('abcTdefTghi'::citext, ''::citext, 1) = 'abcTdefTghi' AS t;
+SELECT split_part('abcTdefTghi'::citext, ''::citext, 2) = '' AS t;
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, 0);
 
 SELECT strpos('high'::citext, 'gh'        ) = 3 AS t;
 SELECT strpos('high',         'gh'::citext) = 3 AS t;
