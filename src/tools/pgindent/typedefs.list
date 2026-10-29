@@ -3310,6 +3310,7 @@ UVersionInfo
 UnicodeNormalizationForm
 UnicodeNormalizationQC
 Unique
+UniqueKey
 UniquePath
 UniqueRelInfo
 UniqueState
