@@ -80,8 +80,8 @@
  * are not implemented; otherwise functionality is identical.
  *
  * Compilation controls:
- * HASH_STATISTICS causes some usage statistics to be maintained, which can be
- * logged by calling hash_stats().
+ * HASH_STATISTICS causes some usage statistics to be maintained, which are
+ * logged when the hashtable is destroyed.
  *
  * Problems & fixes to ejp@ausmelb.oz. WARNING: relies on pre-processor
  * concatenation property, in probably unnecessary code 'optimization'.
@@ -285,6 +285,9 @@ static int	next_pow2_int(int64 num);
 static void register_seq_scan(HTAB *hashp);
 static void deregister_seq_scan(HTAB *hashp);
 static bool has_seq_scans(HTAB *hashp);
+#ifdef HASH_STATISTICS
+static void hash_stats(const char *caller, HTAB *hashp);
+#endif
 
 
 /*
@@ -803,7 +806,9 @@ hash_destroy(HTAB *hashp)
 		/* so this hashtable must have its own context */
 		Assert(hashp->hcxt != NULL);
 
+#ifdef HASH_STATISTICS
 		hash_stats(__func__, hashp);
+#endif
 
 		/*
 		 * Free everything by destroying the hash table's memory context.
@@ -812,10 +817,10 @@ hash_destroy(HTAB *hashp)
 	}
 }
 
-void
+#ifdef HASH_STATISTICS
+static void
 hash_stats(const char *caller, HTAB *hashp)
 {
-#ifdef HASH_STATISTICS
 	HASHHDR    *hctl = hashp->hctl;
 
 	elog(DEBUG4,
@@ -823,8 +828,8 @@ hash_stats(const char *caller, HTAB *hashp)
 		 caller != NULL ? caller : "(unknown)", hashp->tabname, hctl->accesses,
 		 hctl->collisions, hctl->expansions, hash_get_num_entries(hashp),
 		 hctl->keysize, hctl->max_bucket, hctl->nsegs);
-#endif
 }
+#endif
 
 /*******************************SEARCH ROUTINES *****************************/
 
