@@ -2226,6 +2226,7 @@ static bool
 check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 {
 	bool		result;
+	bool		any_canreturn;
 	Bitmapset  *attrs_used = NULL;
 	Bitmapset  *index_canreturn_attrs = NULL;
 	ListCell   *lc;
@@ -2269,9 +2270,14 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 	 * Construct a bitmapset of columns that the index can return back in an
 	 * index-only scan.
 	 */
+	any_canreturn = false;
 	for (i = 0; i < index->ncolumns; i++)
 	{
 		int			attno = index->indexkeys[i];
+		bool		col_canreturn = index->canreturn[i];
+
+		if (col_canreturn)
+			any_canreturn = true;
 
 		/*
 		 * For the moment, we just ignore index expressions.  It might be nice
@@ -2280,7 +2286,7 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 		if (attno == 0)
 			continue;
 
-		if (index->canreturn[i])
+		if (col_canreturn)
 			index_canreturn_attrs =
 				bms_add_member(index_canreturn_attrs,
 							   attno - FirstLowInvalidHeapAttributeNumber);
@@ -2288,6 +2294,15 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 
 	/* Do we have all the necessary attributes? */
 	result = bms_is_subset(attrs_used, index_canreturn_attrs);
+
+	/*
+	 * bms_is_subset() is true when attrs_used is empty, even if the index
+	 * returns nothing.  That would allow a broken index-only scan for AMs
+	 * with amcanreturn == NULL.  Expression columns can be returnable even
+	 * when the key-column bitmap is empty, so test canreturn[] directly.
+	 */
+	if (result && !any_canreturn)
+		result = false;
 
 	bms_free(attrs_used);
 	bms_free(index_canreturn_attrs);
