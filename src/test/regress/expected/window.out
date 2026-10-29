@@ -4839,6 +4839,336 @@ WHERE first_emp = 1 OR last_emp = 1;
  sales     |     4 |   4800 | 08-08-2007  |         3 |        1
 (6 rows)
 
+-- Test reordering of the GROUP BY keys to match the first window's sort
+-- order
+SET enable_hashagg TO off;
+-- Ensure the GROUP BY keys are reordered to match the sort order of the
+-- window's PARTITION BY clause, allowing the sort for the grouping step to
+-- also provide the sorted input required by the WindowAgg.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, depname;
+               QUERY PLAN                
+-----------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY depname)
+   ->  GroupAggregate
+         Group Key: depname, empno
+         ->  Sort
+               Sort Key: depname, empno
+               ->  Seq Scan on empsalary
+(7 rows)
+
+-- As above, but include the window's ORDER BY keys too.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno) c
+FROM empsalary
+GROUP BY empno, depname;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY depname ORDER BY empno)
+   ->  Group
+         Group Key: depname, empno
+         ->  Sort
+               Sort Key: depname, empno
+               ->  Seq Scan on empsalary
+(7 rows)
+
+-- Ensure the GROUP BY keys are matched to the window's sort order in
+-- preference to the query's ORDER BY, since the latter sort is performed
+-- above the WindowAgg.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY empno;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Sort
+   Sort Key: empno
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY depname)
+         ->  GroupAggregate
+               Group Key: depname, empno
+               ->  Sort
+                     Sort Key: depname, empno
+                     ->  Seq Scan on empsalary
+(9 rows)
+
+-- Ensure the GROUP BY keys remaining after matching the window's sort order
+-- are ordered to match the query's ORDER BY, allowing the final sort to be
+-- avoided when the WindowAgg preserves the grouping step's output ordering.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY depname, enroll_date;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY depname)
+   ->  GroupAggregate
+         Group Key: depname, enroll_date, empno
+         ->  Sort
+               Sort Key: depname, enroll_date, empno
+               ->  Seq Scan on empsalary
+(7 rows)
+
+-- As above, but with an ORDER BY that does not lead with the window's sort
+-- keys.  Ensure the remaining GROUP BY keys still follow the query's ORDER
+-- BY even though the final sort cannot be avoided.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY enroll_date, empno;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: enroll_date, empno
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY depname)
+         ->  GroupAggregate
+               Group Key: depname, enroll_date, empno
+               ->  Sort
+                     Sort Key: depname, enroll_date, empno
+                     ->  Seq Scan on empsalary
+(9 rows)
+
+-- Ensure the GROUP BY keys are still matched to the query's ORDER BY when
+-- the window imposes no sort order of its own.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER () salarysum
+FROM empsalary
+GROUP BY depname, empno
+ORDER BY empno, depname;
+               QUERY PLAN                
+-----------------------------------------
+ WindowAgg
+   Window: w1 AS ()
+   ->  GroupAggregate
+         Group Key: empno, depname
+         ->  Sort
+               Sort Key: empno, depname
+               ->  Seq Scan on empsalary
+(7 rows)
+
+-- Ensure the GROUP BY keys adopt the sort direction of the window's ORDER BY
+-- keys, so that a single sort still serves both steps.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno DESC) c
+FROM empsalary
+GROUP BY empno, depname;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY depname ORDER BY empno)
+   ->  Group
+         Group Key: depname, empno
+         ->  Sort
+               Sort Key: depname, empno DESC
+               ->  Seq Scan on empsalary
+(7 rows)
+
+-- As above, but with NULLS FIRST in the window's ORDER BY.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno NULLS FIRST) c
+FROM empsalary
+GROUP BY empno, depname;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY depname ORDER BY empno)
+   ->  Group
+         Group Key: depname, empno
+         ->  Sort
+               Sort Key: depname, empno NULLS FIRST
+               ->  Seq Scan on empsalary
+(7 rows)
+
+-- Ensure the window's sort direction is preferred even when the query's
+-- ORDER BY has given the GROUP BY key a different one.  The final sort can
+-- then be done incrementally.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno DESC) c
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY depname, empno;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Incremental Sort
+   Sort Key: depname, empno
+   Presorted Key: depname
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY depname ORDER BY empno)
+         ->  Group
+               Group Key: depname, empno
+               ->  Sort
+                     Sort Key: depname, empno DESC
+                     ->  Seq Scan on empsalary
+(10 rows)
+
+-- Likewise for a PARTITION BY key whose direction differs from that given
+-- to the GROUP BY key by the query's ORDER BY.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno) c
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY depname DESC;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Sort
+   Sort Key: depname DESC
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY depname ORDER BY empno)
+         ->  Group
+               Group Key: depname, empno
+               ->  Sort
+                     Sort Key: depname, empno
+                     ->  Seq Scan on empsalary
+(9 rows)
+
+-- Ensure the GROUP BY key does not adopt the window's sort ordering when
+-- the query's ORDER BY has given it a different equality operator.
+EXPLAIN (COSTS OFF)
+SELECT r, count(*) OVER (ORDER BY r DESC) c
+FROM (SELECT row(depname, empno) AS r FROM empsalary) s
+GROUP BY r
+ORDER BY r USING *<;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Sort
+   Sort Key: (ROW(empsalary.depname, empsalary.empno)) USING *<
+   ->  WindowAgg
+         Window: w1 AS (ORDER BY (ROW(empsalary.depname, empsalary.empno)))
+         ->  Sort
+               Sort Key: (ROW(empsalary.depname, empsalary.empno)) DESC
+               ->  Group
+                     Group Key: (ROW(empsalary.depname, empsalary.empno))
+                     ->  Sort
+                           Sort Key: (ROW(empsalary.depname, empsalary.empno)) USING *<
+                           ->  Seq Scan on empsalary
+(11 rows)
+
+-- Ensure the GROUP BY keys do not adopt a window's ORDER BY that uses a
+-- different operator family, even with the same equality operator.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY empno ORDER BY depname USING ~<~) c
+FROM empsalary
+GROUP BY depname, empno;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY empno ORDER BY depname)
+   ->  Incremental Sort
+         Sort Key: empno, depname USING ~<~
+         Presorted Key: empno
+         ->  Group
+               Group Key: empno, depname
+               ->  Sort
+                     Sort Key: empno, depname
+                     ->  Seq Scan on empsalary
+(10 rows)
+
+-- Ensure a later sort clause referencing an already-matched GROUP BY key
+-- with the same equality operator is skipped as redundant rather than
+-- ending the match, even without window functions.
+EXPLAIN (COSTS OFF)
+SELECT empno, enroll_date, depname
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY depname USING ~<~, depname, enroll_date, empno;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Group
+   Group Key: depname, enroll_date, empno
+   ->  Sort
+         Sort Key: depname USING ~<~, enroll_date, empno
+         ->  Seq Scan on empsalary
+(5 rows)
+
+CREATE TABLE groupwin (x int, y int, z int);
+INSERT INTO groupwin
+  SELECT i % 4, i % 5, CASE WHEN i % 7 = 0 THEN NULL ELSE i % 3 END
+  FROM generate_series(1, 1000) i;
+CREATE INDEX groupwin_x_y_idx ON groupwin (x, y);
+ANALYZE groupwin;
+-- Ensure the GROUP BY keys adopting the window's sort direction doesn't
+-- prevent grouping directly off a presorted input, then sorting just the
+-- groups for the window.
+EXPLAIN (COSTS OFF)
+SELECT x, y, count(*), count(*) OVER (PARTITION BY x ORDER BY y DESC) c
+FROM groupwin
+GROUP BY x, y;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY x ORDER BY y)
+   ->  Incremental Sort
+         Sort Key: x, y DESC
+         Presorted Key: x
+         ->  GroupAggregate
+               Group Key: x, y
+               ->  Index Only Scan using groupwin_x_y_idx on groupwin
+(8 rows)
+
+-- Check the results with a descending window ORDER BY over NULLs.
+EXPLAIN (COSTS OFF)
+SELECT x, z, count(*),
+       sum(count(*)) OVER (PARTITION BY x ORDER BY z DESC NULLS LAST) s
+FROM groupwin
+GROUP BY x, z;
+                  QUERY PLAN                  
+----------------------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY x ORDER BY z)
+   ->  GroupAggregate
+         Group Key: x, z
+         ->  Sort
+               Sort Key: x, z DESC NULLS LAST
+               ->  Seq Scan on groupwin
+(7 rows)
+
+SELECT x, z, count(*),
+       sum(count(*)) OVER (PARTITION BY x ORDER BY z DESC NULLS LAST) s
+FROM groupwin
+GROUP BY x, z
+ORDER BY x, z DESC NULLS LAST;
+ x | z | count |  s  
+---+---+-------+-----
+ 0 | 2 |    71 |  71
+ 0 | 1 |    72 | 143
+ 0 | 0 |    72 | 215
+ 0 |   |    35 | 250
+ 1 | 2 |    72 |  72
+ 1 | 1 |    72 | 144
+ 1 | 0 |    71 | 215
+ 1 |   |    35 | 250
+ 2 | 2 |    72 |  72
+ 2 | 1 |    71 | 143
+ 2 | 0 |    71 | 214
+ 2 |   |    36 | 250
+ 3 | 2 |    71 |  71
+ 3 | 1 |    71 | 142
+ 3 | 0 |    72 | 214
+ 3 |   |    36 | 250
+(16 rows)
+
+DROP TABLE groupwin;
+RESET enable_hashagg;
 CREATE INDEX empsalary_salary_empno_idx ON empsalary (salary, empno);
 SET enable_seqscan = 0;
 -- Ensure no sorting is done and that the IndexScan maintains all pathkeys

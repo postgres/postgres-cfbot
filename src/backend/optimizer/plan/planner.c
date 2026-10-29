@@ -170,7 +170,8 @@ static void preprocess_rowmarks(PlannerInfo *root);
 static double preprocess_limit(PlannerInfo *root,
 							   double tuple_fraction,
 							   int64 *offset_est, int64 *count_est);
-static List *preprocess_groupclause(PlannerInfo *root, List *force);
+static List *preprocess_groupclause(PlannerInfo *root, List *force,
+									List *activeWindows);
 static List *extract_rollup_sets(List *groupingSets);
 static List *reorder_grouping_sets(List *groupingSets, List *sortclause);
 static void standard_qp_callback(PlannerInfo *root, void *extra);
@@ -1854,16 +1855,9 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		/* A recursive query should always have setOperations */
 		Assert(!root->hasRecursion);
 
-		/* Preprocess grouping sets and GROUP BY clause, if any */
+		/* Preprocess grouping sets, if any */
 		if (parse->groupingSets)
-		{
 			gset_data = preprocess_grouping_sets(root);
-		}
-		else if (parse->groupClause)
-		{
-			/* Preprocess regular GROUP BY clause, if any */
-			root->processed_groupClause = preprocess_groupclause(root, NIL);
-		}
 
 		/*
 		 * Preprocess targetlist.  Note that much of the remaining planning
@@ -1915,6 +1909,17 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 			else
 				parse->hasWindowFuncs = false;
 		}
+
+		/*
+		 * Preprocess a plain GROUP BY clause, if any.  We do this after
+		 * selecting the active windows so that preprocess_groupclause can try
+		 * to match the ordering of the GROUP BY elements to the sort order
+		 * required by the first window, if there is one.  (Grouping sets were
+		 * already handled by preprocess_grouping_sets, above.)
+		 */
+		if (parse->groupClause && !parse->groupingSets)
+			root->processed_groupClause = preprocess_groupclause(root, NIL,
+																 activeWindows);
 
 		/*
 		 * Preprocess MIN/MAX aggregates, if any.  Note: be careful about
@@ -2613,7 +2618,7 @@ preprocess_grouping_sets(PlannerInfo *root)
 		 * The groupClauses for hashed grouping sets are built later on.)
 		 */
 		if (gs->set)
-			rollup->groupClause = preprocess_groupclause(root, gs->set);
+			rollup->groupClause = preprocess_groupclause(root, gs->set, NIL);
 		else
 			rollup->groupClause = NIL;
 
@@ -3114,6 +3119,22 @@ limit_needed(Query *parse)
  * We also consider partial match between GROUP BY and ORDER BY elements,
  * which could allow to implement ORDER BY using the incremental sort.
  *
+ * When the query contains window functions, the sort performed directly
+ * above the grouping step is the one required by the first window clause
+ * rather than the one for ORDER BY (which is performed above the window
+ * functions).  In that case we try to match the sort order required by the
+ * first of the 'activeWindows' (ie its PARTITION BY keys followed by its
+ * ORDER BY keys) first, and then the query's ORDER BY clause, since the
+ * WindowAgg steps may preserve the grouping step's output ordering up to
+ * the final sort.  Callers passing a non-NIL 'force' list need not bother
+ * passing activeWindows.
+ *
+ * The GROUP BY elements also take on the sort direction and NULLS ordering
+ * of the sort clauses they are matched to, as long as the sort operator
+ * belongs to the same btree opfamily, which is semantically insignificant as
+ * well, since grouping depends only on the equality operator.  The parser
+ * has already done that for ORDER BY, but not for the window clauses.
+ *
  * We also consider other orderings of the GROUP BY elements, which could
  * match the sort ordering of other possible plans (eg an indexscan) and
  * thereby reduce cost.  This is implemented during the generation of grouping
@@ -3122,9 +3143,11 @@ limit_needed(Query *parse)
  * Note: we need no comparable processing of the distinctClause because
  * the parser already enforced that that matches ORDER BY.
  *
- * Note: we return a fresh List, but its elements are the same
- * SortGroupClauses appearing in parse->groupClause.  This is important
- * because later processing may modify the processed_groupClause list.
+ * Note: we return a fresh List, whose elements are the SortGroupClauses
+ * appearing in parse->groupClause, except that a GROUP BY item whose sort
+ * ordering we change to match a window's sort clause is replaced by a
+ * modified copy.  Returning a fresh List is important because later
+ * processing may modify the processed_groupClause list.
  *
  * For grouping sets, the order of items is instead forced to agree with that
  * of the grouping set (and items not in the grouping set are skipped). The
@@ -3132,10 +3155,12 @@ limit_needed(Query *parse)
  * possible is done elsewhere.
  */
 static List *
-preprocess_groupclause(PlannerInfo *root, List *force)
+preprocess_groupclause(PlannerInfo *root, List *force, List *activeWindows)
 {
 	Query	   *parse = root->parse;
 	List	   *new_groupclause = NIL;
+	List	   *matchClause;
+	Bitmapset  *matched_refs = NULL;
 	ListCell   *sl;
 	ListCell   *gl;
 
@@ -3153,32 +3178,104 @@ preprocess_groupclause(PlannerInfo *root, List *force)
 		return new_groupclause;
 	}
 
-	/* If no ORDER BY, nothing useful to do here */
-	if (parse->sortClause == NIL)
+	/*
+	 * Select the list of sort clauses that we'll try to match the GROUP BY
+	 * elements to.  Without window functions, this is simply the ORDER BY
+	 * clause.
+	 *
+	 * If there are any active windows, the sort directly above the grouping
+	 * step is the one for the first window, so match its PARTITION BY keys
+	 * followed by its ORDER BY keys first.
+	 *
+	 * We then append the query's ORDER BY clause.  The ordering of any GROUP
+	 * BY items beyond the first window's sort requirements is otherwise
+	 * arbitrary, and since the WindowAgg steps preserve their input ordering
+	 * (as long as the remaining windows require no additional sorts, which is
+	 * the case whenever their sort requirements are prefixes of the first
+	 * window's, per select_active_windows()), making the tail match the ORDER
+	 * BY can save the final sort too.  This also covers the case where no
+	 * active window requires any sort at all.
+	 */
+	if (activeWindows != NIL)
+	{
+		WindowClause *wc = linitial_node(WindowClause, activeWindows);
+
+		matchClause = list_concat_copy(wc->partitionClause, wc->orderClause);
+		matchClause = list_concat(matchClause, parse->sortClause);
+	}
+	else
+		matchClause = parse->sortClause;
+
+	/* If nothing to match against, nothing useful to do here */
+	if (matchClause == NIL)
 		return list_copy(parse->groupClause);
 
 	/*
-	 * Scan the ORDER BY clause and construct a list of matching GROUP BY
+	 * Scan the clauses to match and construct a list of matching GROUP BY
 	 * items, but only as far as we can make a matching prefix.
 	 *
-	 * This code assumes that the sortClause contains no duplicate items.
+	 * A GROUP BY item matches a sort clause if both refer to the same
+	 * targetlist entry and use the same equality operator.  The sort
+	 * direction doesn't matter for grouping, which only needs equal values to
+	 * be adjacent.  The parser already makes GROUP BY items take on the sort
+	 * ordering of matching ORDER BY items, but the window clauses get theirs
+	 * independently: PARTITION BY items follow the window's ORDER BY, while
+	 * the window's ORDER BY items are as the user wrote them.  So when the
+	 * ordering differs, we make the GROUP BY item adopt the ordering of the
+	 * sort clause we match it to.  We must not scribble on the parse tree's
+	 * SortGroupClause, so use a modified copy in that case.
+	 *
+	 * We only adopt a sort operator from the same btree opfamily, though. The
+	 * opfamily's sort operators are consistent with its equality operator,
+	 * but a sort operator from another opfamily need not be, even when the
+	 * two opfamilies share the equality operator: under a nondeterministic
+	 * collation, text_pattern_ops' ~<~ compares bytes whereas = does not, so
+	 * ~<~ wouldn't bring all equal values together.
+	 *
+	 * The list may refer to the same targetlist entry more than once, for
+	 * instance when the window's ORDER BY and the query's ORDER BY sort the
+	 * same column in different directions.  A later reference using the same
+	 * equality operator is redundant, as the earlier sort key already brought
+	 * its equal values together, so just skip over it.
 	 */
-	foreach(sl, parse->sortClause)
+	foreach(sl, matchClause)
 	{
 		SortGroupClause *sc = lfirst_node(SortGroupClause, sl);
+		SortGroupClause *gc;
 
-		foreach(gl, parse->groupClause)
-		{
-			SortGroupClause *gc = lfirst_node(SortGroupClause, gl);
-
-			if (equal(gc, sc))
-			{
-				new_groupclause = lappend(new_groupclause, gc);
-				break;
-			}
-		}
-		if (gl == NULL)
+		gc = get_sortgroupref_clause_noerr(sc->tleSortGroupRef,
+										   parse->groupClause);
+		if (gc == NULL || gc->eqop != sc->eqop || !OidIsValid(sc->sortop))
 			break;				/* no match, so stop scanning */
+
+		if (bms_is_member(gc->tleSortGroupRef, matched_refs))
+			continue;			/* redundant with an earlier match */
+
+		if (gc->sortop != sc->sortop)
+		{
+			Oid			gc_opfamily;
+			Oid			sc_opfamily;
+			Oid			opcintype;
+			CompareType cmptype;
+
+			if (!get_ordering_op_properties(gc->sortop, &gc_opfamily,
+											&opcintype, &cmptype) ||
+				!get_ordering_op_properties(sc->sortop, &sc_opfamily,
+											&opcintype, &cmptype) ||
+				gc_opfamily != sc_opfamily)
+				break;			/* different opfamily, so stop scanning */
+		}
+
+		if (gc->sortop != sc->sortop || gc->nulls_first != sc->nulls_first)
+		{
+			gc = copyObject(gc);
+			gc->sortop = sc->sortop;
+			gc->reverse_sort = sc->reverse_sort;
+			gc->nulls_first = sc->nulls_first;
+		}
+
+		new_groupclause = lappend(new_groupclause, gc);
+		matched_refs = bms_add_member(matched_refs, gc->tleSortGroupRef);
 	}
 
 
@@ -3196,8 +3293,8 @@ preprocess_groupclause(PlannerInfo *root, List *force)
 	{
 		SortGroupClause *gc = lfirst_node(SortGroupClause, gl);
 
-		if (list_member_ptr(new_groupclause, gc))
-			continue;			/* it matched an ORDER BY item */
+		if (bms_is_member(gc->tleSortGroupRef, matched_refs))
+			continue;			/* it matched a sort clause item */
 		if (!OidIsValid(gc->sortop))	/* give up, GROUP BY can't be sorted */
 			return list_copy(parse->groupClause);
 		new_groupclause = lappend(new_groupclause, gc);
@@ -4589,7 +4686,7 @@ consider_groupingsets_paths(PlannerInfo *root,
 			{
 				rollup = makeNode(RollupData);
 
-				rollup->groupClause = preprocess_groupclause(root, gset);
+				rollup->groupClause = preprocess_groupclause(root, gset, NIL);
 				rollup->gsets_data = list_make1(gs);
 				rollup->gsets = remap_to_groupclause_idx(rollup->groupClause,
 														 rollup->gsets_data,
@@ -4778,7 +4875,7 @@ consider_groupingsets_paths(PlannerInfo *root,
 
 			Assert(gs->set != NIL);
 
-			rollup->groupClause = preprocess_groupclause(root, gs->set);
+			rollup->groupClause = preprocess_groupclause(root, gs->set, NIL);
 			rollup->gsets_data = list_make1(gs);
 			rollup->gsets = remap_to_groupclause_idx(rollup->groupClause,
 													 rollup->gsets_data,
