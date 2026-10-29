@@ -95,20 +95,23 @@ static int64 sendDir(bbsink *sink, const char *path, int basepathlen, bool sizeo
 					 List *tablespaces, bool sendtblspclinks,
 					 backup_manifest_info *manifest, Oid spcoid,
 					 IncrementalBackupInfo *ib);
+static bool sendRelFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+						const struct stat *statbuf, bool missing_ok,
+						Oid dboid, Oid spcoid, RelFileNumber relfilenumber,
+						unsigned segno,
+						backup_manifest_info *manifest,
+						unsigned num_incremental_blocks,
+						BlockNumber *incremental_blocks,
+						unsigned truncation_block_length);
 static bool sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
-					 const struct stat *statbuf, bool missing_ok,
-					 Oid dboid, Oid spcoid, RelFileNumber relfilenumber,
-					 unsigned segno,
-					 backup_manifest_info *manifest,
-					 unsigned num_incremental_blocks,
-					 BlockNumber *incremental_blocks,
-					 unsigned truncation_block_length);
-static off_t read_file_data_into_buffer(bbsink *sink,
-										const char *readfilename, int fd,
-										off_t offset, size_t length,
-										BlockNumber blkno,
-										bool verify_checksum,
-										int *checksum_failures);
+					 bool missing_ok, Oid spcoid,
+					 backup_manifest_info *manifest);
+static BlockNumber read_relfile_data_into_buffer(bbsink *sink,
+												 const char *readfilename,
+												 int fd, unsigned segno,
+												 BlockNumber start_blk, BlockNumber nblocks,
+												 bool verify_checksum,
+												 int *checksum_failures);
 static void push_to_sink(bbsink *sink, pg_checksum_context *checksum_ctx,
 						 size_t *bytes_done, void *data, size_t length);
 static bool backup_checksums_verifiable(XLogRecPtr start_lsn);
@@ -128,7 +131,7 @@ static void perform_base_backup(basebackup_options *opt, bbsink *sink,
 static void parse_basebackup_options(List *options, basebackup_options *opt);
 static int	compareWalFileNames(const ListCell *a, const ListCell *b);
 static ssize_t basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
-									const char *filename, bool partial_read_ok);
+									const char *filename);
 
 /* Was the backup currently in-progress initiated in recovery mode? */
 static bool backup_started_in_recovery = false;
@@ -594,7 +597,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 			while ((cnt = basebackup_read_file(fd, sink->bbs_buffer,
 											   Min(sink->bbs_buffer_length,
 												   wal_segment_size - len),
-											   len, pathbuf, true)) > 0)
+											   len, pathbuf)) > 0)
 			{
 				CheckXLogRemoved(segno, tli);
 				bbsink_archive_contents(sink, cnt);
@@ -646,14 +649,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 
 			snprintf(pathbuf, MAXPGPATH, XLOGDIR "/%s", fname);
 
-			if (lstat(pathbuf, &statbuf) != 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not stat file \"%s\": %m", pathbuf)));
-
-			sendFile(sink, pathbuf, pathbuf, &statbuf, false,
-					 InvalidOid, InvalidOid, InvalidRelFileNumber, 0,
-					 &manifest, 0, NULL, 0);
+			sendFile(sink, pathbuf, pathbuf, false, InvalidOid, &manifest);
 
 			/* unconditionally mark file as archived */
 			StatusFilePath(pathbuf, fname, ".done");
@@ -1544,12 +1540,18 @@ sendDir(bbsink *sink, const char *path, int basepathlen, bool sizeonly,
 			}
 
 			if (!sizeonly)
-				sent = sendFile(sink, pathbuf, tarfilename, &statbuf,
-								true, dboid, spcoid,
-								relfilenumber, segno, manifest,
-								num_blocks_required,
-								method == BACK_UP_FILE_INCREMENTALLY ? relative_block_numbers : NULL,
-								truncation_block_length);
+			{
+				if (isRelationFile)
+					sent = sendRelFile(sink, pathbuf, tarfilename, &statbuf,
+									   true, dboid, spcoid,
+									   relfilenumber, segno, manifest,
+									   num_blocks_required,
+									   method == BACK_UP_FILE_INCREMENTALLY ? relative_block_numbers : NULL,
+									   truncation_block_length);
+				else
+					sent = sendFile(sink, pathbuf, tarfilename, true,
+									spcoid, manifest);
+			}
 
 			if (sent || sizeonly)
 			{
@@ -1576,40 +1578,21 @@ sendDir(bbsink *sink, const char *path, int basepathlen, bool sizeonly,
 }
 
 /*
- * Given the member, write the TAR header & send the file.
+ * Write the TAR header & send the file.
  *
  * If 'missing_ok' is true, will not throw an error if the file is not found.
- *
- * If dboid is anything other than InvalidOid then any checksum failures
- * detected will get reported to the cumulative stats system.
- *
- * If the file is to be sent incrementally, then num_incremental_blocks
- * should be the number of blocks to be sent, and incremental_blocks
- * an array of block numbers relative to the start of the current segment.
- * If the whole file is to be sent, then incremental_blocks should be NULL,
- * and num_incremental_blocks can have any value, as it will be ignored.
- *
- * For non-relation files, the stat data of the opened file is used, not
- * 'statbuf'.
  *
  * Returns true if the file was successfully sent, false if 'missing_ok',
  * and the file did not exist.
  */
 static bool
 sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
-		 const struct stat *statbuf, bool missing_ok, Oid dboid, Oid spcoid,
-		 RelFileNumber relfilenumber, unsigned segno,
-		 backup_manifest_info *manifest, unsigned num_incremental_blocks,
-		 BlockNumber *incremental_blocks, unsigned truncation_block_length)
+		 bool missing_ok, Oid spcoid, backup_manifest_info *manifest)
 {
 	int			fd;
-	BlockNumber blkno = 0;
-	int			checksum_failures = 0;
 	off_t		cnt;
 	pgoff_t		bytes_done = 0;
-	bool		verify_checksum = false;
 	pg_checksum_context checksum_ctx;
-	int			ibindex = 0;
 	struct stat filestat;
 
 	if (pg_checksum_init(&checksum_ctx, manifest->checksum_type) < 0)
@@ -1627,15 +1610,143 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 	}
 
 	/*
-	 * Non-relation files may be replaced by a rename(), making irrelevant the
-	 * caller's stat data.  Reuse fstat() on the opened file.
+	 * Note: Non-relation files may be replaced by a rename(), so even if the
+	 * caller had stat data, we should not use it here.
 	 */
-	filestat = *statbuf;
-
-	if (!RelFileNumberIsValid(relfilenumber) && fstat(fd, &filestat) != 0)
+	if (fstat(fd, &filestat) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not stat file \"%s\": %m", readfilename)));
+
+	_tarWriteHeader(sink, tarfilename, NULL, &filestat, false);
+
+	/*
+	 * Loop until we read the amount of data the caller told us to expect. The
+	 * file could be longer, if it was extended while we were sending it, but
+	 * for a base backup we can ignore such extended data. It will be restored
+	 * from WAL.
+	 */
+	while (1)
+	{
+		size_t		remaining = filestat.st_size - bytes_done;
+
+		/*
+		 * If we've read the required number of bytes, then it's time to
+		 * stop.
+		 */
+		if (remaining == 0)
+			break;
+
+		/*
+		 * Read as many bytes as will fit in the buffer, or however many
+		 * are left to read, whichever is less.
+		 */
+		cnt = basebackup_read_file(fd, sink->bbs_buffer,
+								   Min(sink->bbs_buffer_length, remaining),
+								   bytes_done, readfilename);
+		Assert(cnt <= remaining);
+
+		/*
+		 * If we hit end-of-file, a concurrent truncation must have occurred.
+		 * That's not an error condition, because WAL replay will fix things
+		 * up.
+		 */
+		if (cnt == 0)
+			break;
+
+		/* Update # of bytes done for next loop iteration. */
+		bytes_done += cnt;
+
+		/* Archive the data we just read. */
+		bbsink_archive_contents(sink, cnt);
+
+		/* Also feed it to the checksum machinery. */
+		if (pg_checksum_update(&checksum_ctx,
+							   (uint8 *) sink->bbs_buffer, cnt) < 0)
+			elog(ERROR, "could not update checksum of base backup");
+	}
+
+	/* If the file was truncated while we were sending it, pad it with zeros */
+	while (bytes_done < filestat.st_size)
+	{
+		size_t		remaining = filestat.st_size - bytes_done;
+		size_t		nbytes = Min(sink->bbs_buffer_length, remaining);
+
+		MemSet(sink->bbs_buffer, 0, nbytes);
+		if (pg_checksum_update(&checksum_ctx,
+							   (uint8 *) sink->bbs_buffer,
+							   nbytes) < 0)
+			elog(ERROR, "could not update checksum of base backup");
+		bbsink_archive_contents(sink, nbytes);
+		bytes_done += nbytes;
+	}
+
+	/*
+	 * Pad to a block boundary, per tar format requirements. (This small piece
+	 * of data is probably not worth throttling, and is not checksummed
+	 * because it's not actually part of the file.)
+	 */
+	_tarWritePadding(sink, bytes_done);
+
+	CloseTransientFile(fd);
+
+	AddFileToBackupManifest(manifest, spcoid, tarfilename, filestat.st_size,
+							(pg_time_t) filestat.st_mtime, &checksum_ctx);
+
+	return true;
+}
+
+/*
+ * Write the TAR header & send a relation file.
+ *
+ * If 'missing_ok' is true, will not throw an error if the file is not found.
+ *
+ * The file is read block by block, verifying checksums if necessary.
+ *
+ * If dboid is anything other than InvalidOid then any checksum failures
+ * detected will get reported to the cumulative stats system.
+ *
+ * If the file is to be sent incrementally, then num_incremental_blocks
+ * should be the number of blocks to be sent, and incremental_blocks
+ * an array of block numbers relative to the start of the current segment.
+ * If the whole file is to be sent, then incremental_blocks should be NULL,
+ * and num_incremental_blocks can have any value, as it will be ignored.
+ *
+ * Returns true if the file was successfully sent, false if 'missing_ok',
+ * and the file did not exist.
+ */
+static bool
+sendRelFile(bbsink *sink, const char *readfilename, const char *tarfilename,
+			const struct stat *statbuf, bool missing_ok, Oid dboid, Oid spcoid,
+			RelFileNumber relfilenumber, unsigned segno,
+			backup_manifest_info *manifest, unsigned num_incremental_blocks,
+			BlockNumber *incremental_blocks, unsigned truncation_block_length)
+{
+	int			fd;
+	int			checksum_failures = 0;
+	size_t		bytes_done = 0;
+	BlockNumber	total_blocks;
+	BlockNumber	blocks_done;
+	bool		verify_checksum;
+	pg_checksum_context checksum_ctx;
+	int			ibindex;
+	struct stat filestat = *statbuf;
+
+	Assert(RelFileNumberIsValid(relfilenumber));
+
+	if (pg_checksum_init(&checksum_ctx, manifest->checksum_type) < 0)
+		elog(ERROR, "could not initialize checksum of file \"%s\"",
+			 readfilename);
+
+	fd = OpenTransientFile(readfilename, O_RDONLY | PG_BINARY);
+	if (fd < 0)
+	{
+		if (errno == ENOENT && missing_ok)
+			return false;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", readfilename)));
+	}
 
 	_tarWriteHeader(sink, tarfilename, NULL, &filestat, false);
 
@@ -1646,15 +1757,15 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 	Assert((sink->bbs_buffer_length % BLCKSZ) == 0);
 
 	/*
-	 * Verify checksums unless the client requested otherwise, but only for
-	 * relation files, and only while checksums have been continuously enabled
-	 * since the checkpoint this backup started from.  Checksums can still be
-	 * disabled while the backup runs, thus we check at each point where we
-	 * could be validating a checksum.
+	 * Verify checksums unless the client requested otherwise, but only while
+	 * checksums have been continuously enabled since the checkpoint this
+	 * backup started from.  Checksums can still be disabled while the backup
+	 * runs, thus we check at each point where we could be validating a
+	 * checksum.
 	 */
-	if (!noverify_checksums && RelFileNumberIsValid(relfilenumber) &&
-		backup_checksums_verifiable(sink->bbs_state->startptr))
-		verify_checksum = true;
+	verify_checksum = true;
+	if (noverify_checksums || !backup_checksums_verifiable(sink->bbs_state->startptr))
+		verify_checksum = false;
 
 	/*
 	 * If we're sending an incremental file, write the file header.
@@ -1710,6 +1821,12 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 		bytes_done += sizeof(num_incremental_blocks);
 		bytes_done += sizeof(truncation_block_length);
 		bytes_done += sizeof(BlockNumber) * num_incremental_blocks;
+
+		/*
+		 * Make sure incremental files with block data are properly aligned
+		 * (header is a multiple of BLCKSZ, blocks are BLCKSZ too).
+		 */
+		Assert((num_incremental_blocks == 0) || (bytes_done % BLCKSZ == 0));
 	}
 
 	/*
@@ -1718,37 +1835,44 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 	 * for a base backup we can ignore such extended data. It will be restored
 	 * from WAL.
 	 */
+	total_blocks = filestat.st_size / BLCKSZ;
+	blocks_done = 0;
+	ibindex = 0;
+
+	/*
+	 * We read only whole blocks and that is harmless, but segment size not being
+	 * multiple of BLCKSZ is unusual sign.
+	 */
+	if (incremental_blocks == NULL && filestat.st_size % BLCKSZ != 0)
+		ereport(WARNING,
+				(errmsg("file \"%s\" has size %lld which is not a multiple of block size %d",
+						readfilename, (long long) filestat.st_size, BLCKSZ)));
+
 	while (1)
 	{
+		size_t		cnt;
+		BlockNumber	start_blk;
+		BlockNumber nblocks;
+		BlockNumber blocks_read;
+
 		/*
 		 * Determine whether we've read all the data that we need, and if not,
 		 * read some more.
 		 */
 		if (incremental_blocks == NULL)
 		{
-			size_t		remaining = filestat.st_size - bytes_done;
-
 			/*
-			 * If we've read the required number of bytes, then it's time to
-			 * stop.
+			 * Read as many blocks as will fit in the buffer, or however many
+			 * are left to read, whichever is less.  If we've read the
+			 * required number of blocks, then it's time to stop.
 			 */
-			if (bytes_done >= filestat.st_size)
+			start_blk = blocks_done;
+			nblocks = total_blocks - blocks_done;
+			if (nblocks == 0)
 				break;
-
-			/*
-			 * Read as many bytes as will fit in the buffer, or however many
-			 * are left to read, whichever is less.
-			 */
-			cnt = read_file_data_into_buffer(sink, readfilename, fd,
-											 bytes_done, remaining,
-											 blkno + segno * RELSEG_SIZE,
-											 verify_checksum,
-											 &checksum_failures);
 		}
 		else
 		{
-			BlockNumber relative_blkno;
-
 			/*
 			 * If we've read all the blocks, then it's time to stop.
 			 */
@@ -1759,64 +1883,29 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 			 * Read just one block, whichever one is the next that we're
 			 * supposed to include.
 			 */
-			relative_blkno = incremental_blocks[ibindex++];
-			cnt = read_file_data_into_buffer(sink, readfilename, fd,
-											 relative_blkno * BLCKSZ,
-											 BLCKSZ,
-											 relative_blkno + segno * RELSEG_SIZE,
-											 verify_checksum,
-											 &checksum_failures);
-
-			/*
-			 * read_file_data_into_buffer() retries short reads, so if we got
-			 * fewer bytes than requested we must have hit EOF (which means
-			 * that the relation is being truncated). Ultimately, it should be
-			 * truncated to a multiple of BLCKSZ, since this path  should only
-			 * be reached for relation files, but we might transiently observe
-			 * an intermediate value.
-			 *
-			 * It should be fine to treat this just as if the entire block had
-			 * been truncated away - i.e. fill this and all later blocks with
-			 * zeroes. WAL replay will fix things up.
-			 */
-			if (cnt < BLCKSZ)
-				break;
+			start_blk = incremental_blocks[ibindex++];
+			nblocks = 1;
 		}
 
-		/*
-		 * If the amount of data we were able to read was not a multiple of
-		 * BLCKSZ, we cannot verify checksums, which are block-level.
-		 */
-		if (verify_checksum &&
-			backup_checksums_verifiable(sink->bbs_state->startptr) &&
-			(cnt % BLCKSZ != 0))
-		{
-			ereport(WARNING,
-					(errmsg("could not verify checksum in file \"%s\", block "
-							"%u: read buffer size %d and page size %d "
-							"differ",
-							readfilename, blkno, (int) cnt, BLCKSZ)));
-			verify_checksum = false;
-		}
+		blocks_read =
+			read_relfile_data_into_buffer(sink, readfilename,
+										  fd, segno,
+										  start_blk, nblocks,
+										  verify_checksum,
+										  &checksum_failures);
 
 		/*
 		 * If we hit end-of-file, a concurrent truncation must have occurred.
 		 * That's not an error condition, because WAL replay will fix things
 		 * up.
 		 */
-		if (cnt == 0)
+		if (blocks_read == 0)
 			break;
 
-		/* Update block number and # of bytes done for next loop iteration. */
-		blkno += cnt / BLCKSZ;
+		/* Update # of blocks and bytes done for next loop iteration. */
+		cnt = (size_t) blocks_read * BLCKSZ;
+		blocks_done += blocks_read;
 		bytes_done += cnt;
-
-		/*
-		 * Make sure incremental files with block data are properly aligned
-		 * (header is a multiple of BLCKSZ, blocks are BLCKSZ too).
-		 */
-		Assert(!((incremental_blocks != NULL && num_incremental_blocks > 0) &&
-				 (bytes_done % BLCKSZ != 0)));
 
 		/* Archive the data we just read. */
 		bbsink_archive_contents(sink, cnt);
@@ -1872,54 +1961,74 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 }
 
 /*
- * Read some more data from the file into the bbsink's buffer, verifying
- * checksums as required.
+ * Read some more data from a relation file into the bbsink's buffer,
+ * verifying checksums as required.
  *
- * 'offset' is the file offset from which we should begin to read, and
- * 'length' is the amount of data that should be read. The actual amount
- * of data read will be less than the requested amount if the bbsink's
- * buffer isn't big enough to hold it all, or if we hit EOF, which means
- * that the underlying file has been truncated. The return value is the
- * number of bytes actually read.
+ * 'start_blk' is the block number from the beginning of the file from which
+ * we should begin to read, and 'nblocks' is the number of blocks that should
+ * be read.  The actual amount of data read will be less than the requested
+ * amount if the bbsink's buffer isn't big enough to hold it all, or if we hit
+ * EOF, which means that the underlying file has been truncated.  The return
+ * value is the number of blocks actually read.
  *
- * 'blkno' is the block number of the first page in the bbsink's buffer
- * relative to the start of the relation.
+ * 'segno' is the relation segment number, needed to calculate the checksums
+ * correctly.
  *
  * 'verify_checksum' determines if the user has asked to verify checksums, but
  * since data checksums can be disabled, or become disabled, we need to check
  * state before verifying individual pages.  If we do this, we'll update
  * *checksum_failures and issue warnings as appropriate.
  */
-static off_t
-read_file_data_into_buffer(bbsink *sink, const char *readfilename, int fd,
-						   off_t offset, size_t length, BlockNumber blkno,
-						   bool verify_checksum, int *checksum_failures)
+static BlockNumber
+read_relfile_data_into_buffer(bbsink *sink, const char *readfilename,
+							  int fd, unsigned segno,
+							  BlockNumber start_blk, BlockNumber nblocks,
+							  bool verify_checksum, int *checksum_failures)
 {
-	off_t		cnt;
+	BlockNumber	blkno;
+	BlockNumber	blocks_read;
+	ssize_t		cnt;
 	int			i;
 	char	   *page;
 
+	Assert(sink->bbs_buffer_length >= BLCKSZ);
+	nblocks = Min(sink->bbs_buffer_length / BLCKSZ, nblocks);
+
 	/* Try to read some more data. */
 	cnt = basebackup_read_file(fd, sink->bbs_buffer,
-							   Min(sink->bbs_buffer_length, length),
-							   offset, readfilename, true);
+							   (size_t) nblocks * BLCKSZ,
+							   (off_t) start_blk * BLCKSZ,
+							   readfilename);
 
-	/* Can't verify checksums if read length is not a multiple of BLCKSZ. */
-	if (!verify_checksum || (cnt % BLCKSZ) != 0)
-		return cnt;
+	/*
+	 * basebackup_read_file() retries short reads, so if we got fewer
+	 * bytes than requested we must have hit EOF, which means that the
+	 * relation is being truncated.
+	 *
+	 * Ultimately, it should be truncated to a multiple of BLCKSZ since this
+	 * function is only used for relation files, but because the OS might copy
+	 * data in smaller chunks (e.g. OS page size), we might transiently
+	 * observe an intermediate value.
+	 *
+	 * It should be fine to treat this just as if the entire block had been
+	 * truncated away - i.e. fill this and all later blocks with zeroes. WAL
+	 * replay will fix things up.
+	 */
+	blocks_read = (BlockNumber) (cnt / BLCKSZ);
+
+	/*
+	 * The data checksum state can change at any point, so we need to
+	 * re-check.
+	 */
+	if (!verify_checksum || !backup_checksums_verifiable(sink->bbs_state->startptr))
+		return blocks_read;
 
 	/* Verify checksum for each block. */
-	for (i = 0; i < cnt / BLCKSZ; i++)
+	blkno = start_blk + segno * RELSEG_SIZE;
+	for (i = 0; i < blocks_read; i++)
 	{
-		int			reread_cnt;
+		ssize_t		reread_cnt;
 		uint16		expected_checksum;
-
-		/*
-		 * The data checksum state can change at any point, so we need to
-		 * re-check before each page.
-		 */
-		if (!backup_checksums_verifiable(sink->bbs_state->startptr))
-			return cnt;
 
 		page = sink->bbs_buffer + BLCKSZ * i;
 
@@ -1948,19 +2057,22 @@ read_file_data_into_buffer(bbsink *sink, const char *readfilename, int fd,
 		 * again.
 		 */
 		if (!backup_checksums_verifiable(sink->bbs_state->startptr))
-			return cnt;
+			break;
 		reread_cnt =
 			basebackup_read_file(fd, sink->bbs_buffer + BLCKSZ * i,
-								 BLCKSZ, offset + BLCKSZ * i,
-								 readfilename, false);
-		if (reread_cnt == 0)
+								 BLCKSZ, (off_t) (start_blk + i) * BLCKSZ,
+								 readfilename);
+		if (reread_cnt != BLCKSZ)
 		{
 			/*
 			 * If we hit end-of-file, a concurrent truncation must have
-			 * occurred, so reduce cnt to reflect only the blocks already
-			 * processed and break out of this loop.
+			 * occurred, so reduce 'blocks_read' to reflect only the blocks
+			 * already processed and break out of this loop.
+			 *
+			 * In the unlikely situation where reread ended up getting only
+			 * part of the block, we classify this as truncation too.
 			 */
-			cnt = BLCKSZ * i;
+			blocks_read = i;
 			break;
 		}
 
@@ -1985,7 +2097,7 @@ read_file_data_into_buffer(bbsink *sink, const char *readfilename, int fd,
 							"be reported", readfilename)));
 	}
 
-	return cnt;
+	return blocks_read;
 }
 
 /*
@@ -2209,16 +2321,13 @@ convert_link_to_directory(const char *pathbuf, struct stat *statbuf)
 /*
  * Read some data from a file, setting a wait event and reporting any error
  * encountered. Short reads are retried until either all requested bytes have
- * been read or EOF is hit ( potentially due to concurrent truncation).
- *
- * If partial_read_ok is false, also report an error if the number of bytes
- * read is not equal to the number of bytes requested.
+ * been read or EOF is hit (potentially due to concurrent truncation).
  *
  * Returns the number of bytes read.
  */
 static ssize_t
 basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
-					 const char *filename, bool partial_read_ok)
+					 const char *filename)
 {
 	ssize_t		transferred = 0;
 
@@ -2253,12 +2362,6 @@ basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
 
 		transferred += rc;
 	}
-
-	if (!partial_read_ok && transferred > 0 && transferred != nbytes)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read file \"%s\": read %zu of %zu",
-						filename, transferred, nbytes)));
 
 	return transferred;
 }
