@@ -786,12 +786,10 @@ lookup_var_attr_stats(Bitmapset *attrs, List *exprs,
 		}
 
 		/*
-		 * XXX We need tuple descriptor later, and we just grab it from
-		 * stats[0]->tupDesc (see e.g. statext_mcv_build). But as coded
-		 * examine_attribute does not set that, so just grab it from the first
-		 * vacatts element.
+		 * Expression stats are not tied to a heap attribute, so they do not
+		 * need a tuple descriptor.
 		 */
-		stats[i]->tupDesc = vacatts[0]->tupDesc;
+		Assert(stats[i]->tupDesc == NULL);
 
 		i++;
 	}
