@@ -1855,6 +1855,33 @@ PerformWalRecovery(void)
 					proc_exit(3);
 
 				case RECOVERY_TARGET_ACTION_PAUSE:
+
+					/*
+					 * If hot standby is inactive, recoveryPausesHere() does
+					 * nothing, so we would fall through and promote, silently
+					 * ignoring the requested action.
+					 *
+					 * Hot standby stays inactive while standbyState is
+					 * STANDBY_SNAPSHOT_PENDING. We enter that state from an
+					 * overflowed standby snapshot and leave it only once a
+					 * non-overflowed snapshot arrives, or the oldest running
+					 * xid advances past the pending snapshot's xmin (see
+					 * ProcArrayApplyRecoveryInfo()). So, instead of falling
+					 * through and silently promoting, we shut down and let
+					 * the user choose a different recovery target or action.
+					 *
+					 * If a promotion has already been triggered, let it
+					 * proceed (the fall-through below promotes) rather than
+					 * shutting down.
+					 */
+					if (!LocalHotStandbyActive && !CheckForStandbyTrigger())
+					{
+						ereport(LOG,
+								(errmsg("recovery cannot pause at the recovery target because hot standby is not active"),
+								 errhint("Set \"recovery_target_action\" to \"promote\", or choose a recovery target at which hot standby can be enabled.")));
+						proc_exit(3);
+					}
+
 					SetRecoveryPause(true);
 					recoveryPausesHere(true);
 
