@@ -1865,6 +1865,9 @@ apply_handle_stream_start(StringInfo s)
 		case TRANS_PARALLEL_APPLY:
 			if (first_segment)
 			{
+				/* Test hook: pause here before the worker is tracked as STARTED. */
+				INJECTION_POINT("parallel-worker-before-stream-start", NULL);
+
 				/* Hold the lock until the end of the transaction. */
 				pa_lock_transaction(MyParallelShared->xid, AccessExclusiveLock);
 				pa_set_xact_state(MyParallelShared, PARALLEL_TRANS_STARTED);
@@ -2715,6 +2718,10 @@ apply_handle_insert(StringInfo s)
 
 	/* Set relation for error callback */
 	remote_ctx.rel = rel;
+
+	/* Test hook: pause here with remote_ctx pointing at this relation. */
+	if (am_leader_apply_worker())
+		INJECTION_POINT("leader-apply-insert-remote-ctx-set", NULL);
 
 	/* Initialize the executor state. */
 	edata = create_edata_for_relation(rel);
@@ -4075,13 +4082,18 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 	pgstat_report_activity(STATE_IDLE, NULL);
 
 	/*
+	 * Save the current callbacks so that an error propagated from a parallel
+	 * apply worker does not use this leader's unrelated apply error context.
+	 */
+	apply_error_context_stack = error_context_stack;
+
+	/*
 	 * Push apply error context callback. Fields will be filled while applying
 	 * a change.
 	 */
 	errcallback.callback = apply_error_callback;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
-	apply_error_context_stack = error_context_stack;
 
 	/* This outer loop iterates once per wait. */
 	for (;;)
