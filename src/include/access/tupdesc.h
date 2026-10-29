@@ -42,7 +42,12 @@ typedef struct TupleConstr
 	struct AttrMissing *missing;	/* missing attributes values, NULL if none */
 	uint16		num_defval;
 	uint16		num_check;
-	bool		has_not_null;	/* any not-null, including not valid ones */
+
+	/*
+	 * any enforced not-null, including not valid ones. Note this does not
+	 * include not enforced not-null.
+	 */
+	bool		has_not_null;
 	bool		has_generated_stored;
 	bool		has_generated_virtual;
 } TupleConstr;
