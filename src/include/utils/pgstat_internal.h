@@ -19,6 +19,7 @@
 #include "lib/ilist.h"
 #include "pgstat.h"
 #include "storage/lwlock.h"
+#include "storage/proc.h"
 #include "utils/dsa.h"
 
 
@@ -54,6 +55,8 @@
  * NB: We assume that this struct contains no padding.  Also, 8 bytes
  * allocated for the object ID are good enough to ensure the uniqueness
  * of the hash key, hence the addition of new fields is not recommended.
+ * Backend-local snapshots also use this key for per-backend fixed statistics,
+ * with InvalidOid as the database ID and ProcNumber as the object ID.
  */
 typedef struct PgStat_HashKey
 {
@@ -390,6 +393,28 @@ typedef struct PgStat_KindInfo
 	 */
 	void		(*snapshot_cb) (void);
 
+	/*
+	 * Per-backend array metadata for built-in fixed-numbered statistics
+	 * kinds.
+	 *
+	 * A nonzero per_backend_entry_size enables array allocation and process
+	 * entry initialization. Zero means that the kind has no per-backend
+	 * entries. The remaining fields describe the kind-specific payload used
+	 * by the generic fetch, snapshot, and accumulation helpers.
+	 *
+	 * Each entry starts with PgStatShared_PerBackendEntry, followed by the
+	 * kind-specific statistics payload.
+	 */
+	uint32		per_backend_entry_size; /* size of one array entry */
+	uint32		per_backend_data_off;	/* offset of stats data in entry */
+	uint32		per_backend_data_len;	/* size of stats data in entry */
+
+	/*
+	 * Callback to accumulate one per-backend entry into a destination of the
+	 * kind's statistics type. Called with the entry's content lock held.
+	 */
+	void		(*per_backend_acc_cb) (void *dst, void *entry);
+
 	/* name of the kind of stats */
 	const char *const name;
 } PgStat_KindInfo;
@@ -468,16 +493,19 @@ typedef struct PgStatShared_Checkpointer
 typedef struct PgStatShared_IO
 {
 	/*
-	 * locks[i] protects stats.stats[i]. locks[0] also protects
-	 * stats.stat_reset_timestamp.
+	 * The lock protects global stats and serializes snapshots and resets with
+	 * transfers from per-backend entries.
 	 */
-	LWLock		locks[BACKEND_NUM_TYPES];
+	LWLock		lock;
 	PgStat_IO	stats;
 } PgStatShared_IO;
 
 typedef struct PgStatShared_Lock
 {
-	/* lock protects ->stats */
+	/*
+	 * The lock protects global stats and serializes snapshots and resets with
+	 * transfers from per-backend entries.
+	 */
 	LWLock		lock;
 	PgStat_Lock stats;
 } PgStatShared_Lock;
@@ -489,9 +517,60 @@ typedef struct PgStatShared_SLRU
 	PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
 } PgStatShared_SLRU;
 
+/*
+ * Number of slots in each per-backend statistics array. Prepared
+ * transactions do not run code and therefore do not report statistics.
+ */
+#define NumPerBackendStatSlots (MaxBackends + NUM_AUXILIARY_PROCS)
+
+/*
+ * Common header for entries in per-backend statistics arrays.
+ *
+ * The lock protects the backend type and kind-specific payload that follows
+ * this header. B_INVALID marks an unused entry.
+ */
+typedef struct PgStatShared_PerBackendEntry
+{
+	LWLock		lock;
+	BackendType backend_type;
+} PgStatShared_PerBackendEntry;
+
+/*
+ * Per-backend entry for I/O statistics, stored in an array indexed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_IOBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_BackendIO stats;
+} PgStatShared_IOBackendEntry;
+
+/*
+ * Per-backend entry for lock statistics, stored in an array indexed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_LockBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_Lock stats;
+} PgStatShared_LockBackendEntry;
+
+/*
+ * Per-backend entry for WAL statistics, stored in an array indexed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_WalBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_WalStats stats;
+} PgStatShared_WalBackendEntry;
+
 typedef struct PgStatShared_Wal
 {
-	/* lock protects ->stats */
+	/*
+	 * The lock protects global stats and serializes snapshots and resets with
+	 * transfers from per-backend entries.
+	 */
 	LWLock		lock;
 	PgStat_WalStats stats;
 } PgStatShared_Wal;
@@ -541,12 +620,6 @@ typedef struct PgStatShared_ReplSlot
 	PgStatShared_Common header;
 	PgStat_StatReplSlotEntry stats;
 } PgStatShared_ReplSlot;
-
-typedef struct PgStatShared_Backend
-{
-	PgStatShared_Common header;
-	PgStat_Backend stats;
-} PgStatShared_Backend;
 
 /*
  * Central shared memory entry for the cumulative stats system.
@@ -600,6 +673,12 @@ typedef struct PgStat_ShmemControl
 	PgStatShared_Wal wal;
 
 	/*
+	 * Per-backend arrays for built-in fixed-numbered statistics kinds.
+	 * Entries are indexed by ProcNumber.
+	 */
+	void	   *per_backend_arrays[PGSTAT_KIND_BUILTIN_SIZE];
+
+	/*
 	 * Custom stats data with fixed-numbered objects, indexed by (PgStat_Kind
 	 * - PGSTAT_KIND_CUSTOM_MIN).
 	 */
@@ -644,6 +723,11 @@ typedef struct PgStat_Snapshot
 
 	/* to free snapshot in bulk */
 	MemoryContext context;
+
+	/*
+	 * Cached variable-numbered and per-backend entries, including negative
+	 * lookups. Entries are owned by the snapshot memory context.
+	 */
 	struct pgstat_snapshot_hash *stats;
 } PgStat_Snapshot;
 
@@ -711,6 +795,23 @@ extern PgStat_EntryRef *pgstat_fetch_pending_entry(PgStat_Kind kind,
 extern void *pgstat_fetch_entry(PgStat_Kind kind, Oid dboid, uint64 objid,
 								bool *may_free);
 extern void pgstat_snapshot_fixed(PgStat_Kind kind);
+extern void pgstat_prep_snapshot(void);
+extern void *pgstat_lookup_snapshot_entry(const PgStat_HashKey *key,
+										  bool *found);
+extern void *pgstat_cache_snapshot_entry(const PgStat_HashKey *key,
+										 const void *data, Size data_len);
+
+/*
+ * These functions implement generic per-backend statistics.
+ */
+extern void *pgstat_get_per_backend_entry(PgStat_Kind kind,
+										  ProcNumber procnum);
+extern void pgstat_create_my_per_backend_entries(void);
+extern void *pgstat_lock_my_per_backend_entry(PgStat_Kind kind, bool nowait);
+extern void pgstat_per_backend_snapshot(PgStat_Kind kind, void *snap);
+extern void *pgstat_fetch_per_backend(PgStat_Kind kind, ProcNumber procnum);
+extern void pgstat_acc_my_per_backend(PgStat_Kind kind, LWLock *lock);
+extern void pgstat_acc_all_per_backend(PgStat_Kind kind, LWLock *lock);
 
 
 /*
@@ -720,21 +821,6 @@ extern void pgstat_snapshot_fixed(PgStat_Kind kind);
 extern void pgstat_archiver_init_shmem_cb(void *stats);
 extern void pgstat_archiver_reset_all_cb(TimestampTz ts);
 extern void pgstat_archiver_snapshot_cb(void);
-
-/*
- * Functions in pgstat_backend.c
- */
-
-/* flags for pgstat_flush_backend() */
-#define PGSTAT_BACKEND_FLUSH_IO		(1 << 0)	/* Flush I/O statistics */
-#define PGSTAT_BACKEND_FLUSH_WAL   (1 << 1) /* Flush WAL statistics */
-#define PGSTAT_BACKEND_FLUSH_LOCK  (1 << 2) /* Flush lock statistics */
-#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL | PGSTAT_BACKEND_FLUSH_LOCK)
-
-extern bool pgstat_flush_backend(bool nowait, uint32 flags);
-extern bool pgstat_backend_flush_cb(bool nowait);
-extern void pgstat_backend_reset_timestamp_cb(PgStatShared_Common *header,
-											  TimestampTz ts);
 
 /*
  * Functions in pgstat_bgwriter.c
@@ -786,6 +872,9 @@ extern bool pgstat_io_flush_cb(bool nowait);
 extern void pgstat_io_init_shmem_cb(void *stats);
 extern void pgstat_io_reset_all_cb(TimestampTz ts);
 extern void pgstat_io_snapshot_cb(void);
+extern void pgstat_io_acc_backend_cb(void);
+extern void pgstat_io_acc_all_backends(void);
+extern void pgstat_io_per_backend_acc_cb(void *dst, void *entry);
 
 /*
  * Functions in pgstat_lock.c
@@ -795,6 +884,9 @@ extern bool pgstat_lock_flush_cb(bool nowait);
 extern void pgstat_lock_init_shmem_cb(void *stats);
 extern void pgstat_lock_reset_all_cb(TimestampTz ts);
 extern void pgstat_lock_snapshot_cb(void);
+extern void pgstat_lock_acc_backend_cb(void);
+extern void pgstat_lock_acc_all_backends(void);
+extern void pgstat_lock_per_backend_acc_cb(void *dst, void *entry);
 
 /*
  * Functions in pgstat_relation.c
@@ -879,6 +971,9 @@ extern bool pgstat_wal_flush_cb(bool nowait);
 extern void pgstat_wal_init_shmem_cb(void *stats);
 extern void pgstat_wal_reset_all_cb(TimestampTz ts);
 extern void pgstat_wal_snapshot_cb(void);
+extern void pgstat_wal_acc_backend_cb(void);
+extern void pgstat_wal_acc_all_backends(void);
+extern void pgstat_wal_per_backend_acc_cb(void *dst, void *entry);
 
 
 /*
