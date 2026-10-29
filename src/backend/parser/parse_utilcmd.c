@@ -222,11 +222,13 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	 * If the target relation name isn't schema-qualified, make it so.  This
 	 * prevents some corner cases in which added-on rewritten commands might
 	 * think they should apply to other relations that have the same name and
-	 * are earlier in the search path.  But a local temp table is effectively
-	 * specified to be in pg_temp, so no need for anything extra in that case.
+	 * are earlier in the search path.  This applies to temp tables too: the
+	 * RangeVar's relpersistence suffices for commands that look the table up
+	 * via the RangeVar itself, but not for those that identify it by a name
+	 * list, such as the COMMENT commands generated for LIKE ... INCLUDING
+	 * COMMENTS.
 	 */
-	if (stmt->relation->schemaname == NULL
-		&& stmt->relation->relpersistence != RELPERSISTENCE_TEMP)
+	if (stmt->relation->schemaname == NULL)
 		stmt->relation->schemaname = get_namespace_name(namespaceid);
 
 	/* Set up CreateStmtContext */
