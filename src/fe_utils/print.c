@@ -392,6 +392,68 @@ format_numeric_locale(const char *my_str)
 }
 
 
+/*
+ * Format a numeric value per current n_decimals setting
+ *
+ * Returns the appropriately formatted string in a new allocated block,
+ * caller must free.
+ */
+static char *
+format_ndecimals(const char *my_str, int n_decimals)
+{
+	char	   *new_str;
+	int			new_len,
+				int_len,
+				i,
+				new_str_pos;
+
+	/*
+	 * If the string doesn't look like a number, return it unchanged.  This
+	 * check is essential to avoid mangling already-localized "money" values.
+	 */
+	if (strspn(my_str, "0123456789+-.eE") != strlen(my_str))
+		return pg_strdup(my_str);
+
+	new_len = strlen(my_str);// + additional_numeric_locale_len(my_str);
+	new_str = pg_malloc_array(char, (new_len + 1));
+	new_str_pos = 0;
+	int_len = integer_digits(my_str);
+
+	/* process sign */
+	if (my_str[0] == '-' || my_str[0] == '+')
+	{
+		new_str[new_str_pos++] = my_str[0];
+		my_str++;
+	}
+
+	/* process integer part of number plus the decimal point */
+	for (i = 0; i < int_len; i++)
+	{
+		new_str[new_str_pos++] = my_str[i];
+	}
+
+	/* process the decimal point if we have digits after the decimal point */
+	if (n_decimals > 0)
+	{
+		/* add the decimal point */
+		new_str[new_str_pos++] = my_str[i++];
+
+		/* copy the "n_decimals" rest */
+		for (int j = 1; j <= n_decimals ; j++)
+		{
+			new_str[new_str_pos++] = my_str[i++];
+		}
+	}
+
+	new_str[new_str_pos++] = '\0';
+
+	/* assert we didn't underestimate new_len (an overestimate is OK) */
+	Assert(strlen(new_str) <= new_len);
+
+	return new_str;
+}
+
+
 static void
 print_separator(struct separator sep, FILE *fout)
 {
@@ -3836,6 +3898,15 @@ printQuery(const PGresult *result, const printQueryOpt *opt,
 			else
 			{
 				cell = PQgetvalue(result, r, c);
+
+				if ((PQftype(result, c) == FLOAT4OID ||
+					PQftype(result, c) == FLOAT8OID ||
+					PQftype(result, c) == NUMERICOID) &&
+					opt->n_decimals > -1)
+				{
+					cell = format_ndecimals(cell, opt->n_decimals);
+				}
+
 				if (cont.aligns[c] == 'r' && opt->topt.numericLocale)
 				{
 					cell = format_numeric_locale(cell);

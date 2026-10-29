@@ -191,6 +191,7 @@ typedef struct printQueryOpt
 	const bool *translate_columns;	/* translate_columns[i-1] => do gettext on
 									 * col i */
 	int			n_translate_columns;	/* length of translate_columns[] */
+	int			n_decimals;		/* number of decimals */
 } printQueryOpt;
 
 
