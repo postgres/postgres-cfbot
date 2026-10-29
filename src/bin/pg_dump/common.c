@@ -473,6 +473,12 @@ flagInhIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
  *   we are in binary upgrade mode, we dump such expressions anyway because
  *   in those cases inherited tables are recreated standalone first and then
  *   reattached to the parent.  (See also the logic in dumpTableSchema().)
+ *   A child's expression that differs from the parent's is dumped, either
+ *   as part of the column definition or, if the column is inherited without
+ *   a local definition, as a separate ALTER TABLE ... SET EXPRESSION.  A
+ *   suppressed expression may still have to be dumped if the parent's own
+ *   expression is not yet in place when the child is created; that is
+ *   decided after sorting, by flagInhGenerationExprs().
  *
  * modifies tblinfo
  */
@@ -620,6 +626,7 @@ flagInhAttrs(Archive *fout, DumpOptions *dopt, TableInfo *tblinfo, int numTables
 				attrDef->adtable = tbinfo;
 				attrDef->adnum = j + 1;
 				attrDef->adef_expr = pg_strdup("NULL");
+				attrDef->maybe_dump_later_if_altered_expression = false;
 
 				/* Will column be dumped explicitly? */
 				if (shouldPrintColumn(dopt, tbinfo, j))
@@ -639,10 +646,90 @@ flagInhAttrs(Archive *fout, DumpOptions *dopt, TableInfo *tblinfo, int numTables
 				tbinfo->attrdefs[j] = attrDef;
 			}
 
-			/* No need to dump generation expression if it's inheritable */
+			/*
+			 * No need to dump generation expression if it's inheritable.
+			 *
+			 * This assumes that each parent has its final expression by the
+			 * time the child table is created.  That is not so if a parent's
+			 * own expression is dumped as a separate ALTER TABLE ... SET
+			 * EXPRESSION command, which we can only know after the dependency
+			 * sort (see flagInhGenerationExprs()); so remember why we
+			 * suppressed the expression.
+			 */
 			if (foundSameGenerated && !foundDiffGenerated &&
 				!tbinfo->ispartition && !dopt->binary_upgrade)
+			{
 				tbinfo->attrdefs[j]->dobj.dump = DUMP_COMPONENT_NONE;
+				tbinfo->attrdefs[j]->maybe_dump_later_if_altered_expression = true;
+			}
+		}
+	}
+}
+
+/*
+ * flagInhGenerationExprs -
+ *	 dump generation expressions that cannot be inherited after all
+ *
+ * flagInhAttrs() suppresses a child's generation expression if it is the
+ * same as its parents', relying on CREATE TABLE ... INHERITS to copy it.
+ * That only works if each parent has its final expression when the child is
+ * created, which is not the case if the parent's own expression is dumped as
+ * a separate ALTER TABLE ... SET EXPRESSION command.  Whether that happens
+ * is only settled after the dependency sort, since breaking a dependency
+ * loop can make an expression separate.  For each such child, dump its own
+ * expression instead.  The suppressed expressions have already been sorted
+ * like all other objects, so they will be emitted in a valid position.
+ *
+ * This must be called after sortDumpableObjects(), with the sorted array, and
+ * before dumping.  In that order, each table comes after its parents, since a
+ * child table depends on them, so a parent's expression has been dealt with
+ * before its children are looked at.
+ */
+void
+flagInhGenerationExprs(DumpableObject **dobjs, int numObjs)
+{
+	for (int i = 0; i < numObjs; i++)
+	{
+		TableInfo  *tbinfo;
+
+		if (dobjs[i]->objType != DO_TABLE)
+			continue;
+		tbinfo = (TableInfo *) dobjs[i];
+
+		if (!tbinfo->dobj.dump || tbinfo->numParents == 0 ||
+			tbinfo->attrdefs == NULL)
+			continue;
+
+		for (int j = 0; j < tbinfo->numatts; j++)
+		{
+			AttrDefInfo *attrDef = tbinfo->attrdefs[j];
+
+			if (attrDef == NULL ||
+				!attrDef->maybe_dump_later_if_altered_expression)
+				continue;
+
+			for (int k = 0; k < tbinfo->numParents; k++)
+			{
+				TableInfo  *parent = tbinfo->parents[k];
+				int			inhAttrInd;
+				AttrDefInfo *parentDef;
+
+				inhAttrInd = strInArray(tbinfo->attnames[j],
+										parent->attnames,
+										parent->numatts);
+				if (inhAttrInd < 0 || parent->attrdefs == NULL)
+					continue;
+				parentDef = parent->attrdefs[inhAttrInd];
+
+				if (parentDef != NULL && parentDef->separate &&
+					(parentDef->dobj.dump & DUMP_COMPONENT_DEFINITION))
+				{
+					/* dump the child's own expression after all */
+					attrDef->dobj.dump = tbinfo->dobj.dump;
+					attrDef->maybe_dump_later_if_altered_expression = false;
+					break;
+				}
+			}
 		}
 	}
 }
