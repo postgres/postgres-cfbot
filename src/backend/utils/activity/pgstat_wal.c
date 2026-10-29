@@ -22,10 +22,14 @@
 
 
 /*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_report_wal(). This is used to calculate how much WAL usage
- * happens between pgstat_report_wal() calls, by subtracting
- * the previous counters from the current ones.
+ * WAL usage counters saved at the previous call to pgstat_report_wal(). This
+ * is used to calculate how much WAL usage happens between pgstat_report_wal()
+ * calls, by subtracting the previous counters from the current ones.
+ *
+ * The counters are this process' own WAL usage (ComputeOwnWalUsage), i.e. without
+ * what a parallel leader accumulated from its workers into pgWalUsage: the
+ * workers report their own activity themselves, so counting it here as well
+ * would count it twice.
  */
 static WalUsage prevWalUsage;
 
@@ -77,7 +81,10 @@ pgstat_fetch_stat_wal(void)
 static inline bool
 pgstat_wal_have_pending(void)
 {
-	return pgWalUsage.wal_records != prevWalUsage.wal_records;
+	WalUsage	walusage;
+
+	ComputeOwnWalUsage(&walusage);
+	return walusage.wal_records != prevWalUsage.wal_records;
 }
 
 /*
@@ -91,6 +98,7 @@ bool
 pgstat_wal_flush_cb(bool nowait)
 {
 	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+	WalUsage	walusage;
 	WalUsage	wal_usage_diff = {0};
 
 	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
@@ -109,7 +117,8 @@ pgstat_wal_flush_cb(bool nowait)
 	 * Calculate how much WAL usage counters were increased by subtracting the
 	 * previous counters from the current ones.
 	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevWalUsage);
+	ComputeOwnWalUsage(&walusage);
+	WalUsageAccumDiff(&wal_usage_diff, &walusage, &prevWalUsage);
 
 	if (!nowait)
 		LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
@@ -130,7 +139,7 @@ pgstat_wal_flush_cb(bool nowait)
 	/*
 	 * Save the current counters for the subsequent calculation of WAL usage.
 	 */
-	prevWalUsage = pgWalUsage;
+	prevWalUsage = walusage;
 
 	return false;
 }
@@ -139,11 +148,11 @@ void
 pgstat_wal_init_backend_cb(void)
 {
 	/*
-	 * Initialize prevWalUsage with pgWalUsage so that pgstat_wal_flush_cb()
-	 * can calculate how much pgWalUsage counters are increased by subtracting
-	 * prevWalUsage from pgWalUsage.
+	 * Initialize prevWalUsage with the current counters so that
+	 * pgstat_wal_flush_cb() can calculate how much they are increased by
+	 * subtracting prevWalUsage from them.
 	 */
-	prevWalUsage = pgWalUsage;
+	ComputeOwnWalUsage(&prevWalUsage);
 }
 
 void
