@@ -54,10 +54,18 @@ tests += {
   'name': 'test_json_parser',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
+  'pytest': {
+    'tests': [
+      'pyt/test_002_inline.py',
+    ],
+    'deps': [
+      test_json_parser_incremental,
+      test_json_parser_incremental_shlib,
+    ],
+  },
   'tap': {
     'tests': [
       't/001_test_json_parser_incremental.pl',
-      't/002_inline.pl',
       't/003_test_semantic.pl',
       't/004_test_parser_perf.pl'
     ],

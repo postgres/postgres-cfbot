@@ -11,6 +11,7 @@ EXTENSION = test_aio
 DATA = test_aio--1.0.sql
 
 TAP_TESTS = 1
+PYTEST_TESTS = 1
 
 export enable_injection_points
 

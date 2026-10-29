@@ -47,6 +47,7 @@
 #   REGRESS -- list of regression test cases (without suffix)
 #   REGRESS_OPTS -- additional switches to pass to pg_regress
 #   TAP_TESTS -- switch to enable TAP tests
+#   PYTEST_TESTS -- switch to enable pytest tests
 #   ISOLATION -- list of isolation test cases
 #   ISOLATION_OPTS -- additional switches to pass to pg_isolation_regress
 #   NO_INSTALL -- don't define an install target, useful for test modules
@@ -380,6 +381,9 @@ endif
 ifdef TAP_TESTS
 	rm -rf tmp_check/
 endif
+ifdef PYTEST_TESTS
+	rm -rf tmp_check/
+endif
 ifdef ISOLATION
 	rm -rf output_iso/ tmp_check_iso/
 endif
@@ -438,6 +442,9 @@ endif
 ifdef TAP_TESTS
 	$(prove_installcheck)
 endif
+ifdef PYTEST_TESTS
+	$(pytest_installcheck)
+endif
 endif # NO_INSTALLCHECK
 
 # Runs independently of any installation
@@ -455,6 +462,9 @@ ifdef ISOLATION
 endif
 ifdef TAP_TESTS
 	$(prove_check)
+endif
+ifdef PYTEST_TESTS
+	$(pytest_check)
 endif
 endif # PGXS
 

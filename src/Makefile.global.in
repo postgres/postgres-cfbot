@@ -211,6 +211,7 @@ enable_dtrace	= @enable_dtrace@
 enable_coverage	= @enable_coverage@
 enable_injection_points = @enable_injection_points@
 enable_tap_tests	= @enable_tap_tests@
+enable_pytest	= @enable_pytest@
 
 python_includespec	= @python_includespec@
 python_libdir		= @python_libdir@
@@ -357,6 +358,7 @@ MSGFMT  = @MSGFMT@
 MSGFMT_FLAGS = @MSGFMT_FLAGS@
 MSGMERGE = @MSGMERGE@
 OPENSSL	= @OPENSSL@
+PYTEST	= @PYTEST@
 PYTHON	= @PYTHON@
 TAR	= @TAR@
 XGETTEXT = @XGETTEXT@
@@ -509,6 +511,45 @@ endef
 else
 prove_installcheck = @echo "TAP tests not enabled. Try configuring with --enable-tap-tests"
 prove_check = $(prove_installcheck)
+endif
+
+ifeq ($(enable_pytest),yes)
+
+# We also configure the same PYTHONPATH in the pytest settings in
+# pyproject.toml, but pytest versions below 8.4 only actually use that value
+# after plugin loading. So we need to configure it here too. This won't help
+# people manually running pytest outside of meson/make, but we expect those to
+# use a recent enough version of pytest anyway (and if not they can manually
+# configure PYTHONPATH too).
+define pytest_installcheck
+echo "# +++ pytest install-check in $(subdir) +++" && \
+rm -rf '$(CURDIR)'/tmp_check && \
+$(MKDIR_P) '$(CURDIR)'/tmp_check && \
+cd $(srcdir) && \
+   TESTLOGDIR='$(CURDIR)/tmp_check/log' \
+   TESTDATADIR='$(CURDIR)/tmp_check' \
+   PYTHONPATH='$(abs_top_srcdir)/src/test/pytest:$$PYTHONPATH' \
+   PATH="$(bindir):$$PATH" \
+   top_builddir='$(CURDIR)/$(top_builddir)' \
+   $(PYTEST) -c '$(abs_top_srcdir)/pyproject.toml' --verbose -ra ./pyt/
+endef
+
+define pytest_check
+echo "# +++ pytest check in $(subdir) +++" && \
+rm -rf '$(CURDIR)'/tmp_check && \
+$(MKDIR_P) '$(CURDIR)'/tmp_check && \
+cd $(srcdir) && \
+   TESTLOGDIR='$(CURDIR)/tmp_check/log' \
+   TESTDATADIR='$(CURDIR)/tmp_check' \
+   PYTHONPATH='$(abs_top_srcdir)/src/test/pytest:$$PYTHONPATH' \
+   $(with_temp_install) \
+   top_builddir='$(CURDIR)/$(top_builddir)' \
+   $(PYTEST) -c '$(abs_top_srcdir)/pyproject.toml' --verbose -ra ./pyt/
+endef
+
+else
+pytest_installcheck = @echo "pytest is not enabled. Try configuring with --enable-pytest"
+pytest_check = $(pytest_installcheck)
 endif
 
 # Installation.

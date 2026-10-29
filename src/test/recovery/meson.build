@@ -4,6 +4,14 @@ tests += {
   'name': 'recovery',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
+  'pytest': {
+    'test_kwargs': {'priority': 40}, # recovery tests are slow, start early
+    'tests': [
+      'pyt/test_029_stats_restart.py',
+      'pyt/test_031_recovery_conflict.py',
+      'pyt/test_049_wait_for_lsn.py',
+    ],
+  },
   'tap': {
     'test_kwargs': {'priority': 40}, # recovery tests are slow, start early
     'env': {
@@ -37,9 +45,7 @@ tests += {
       't/026_overwrite_contrecord.pl',
       't/027_stream_regress.pl',
       't/028_pitr_timelines.pl',
-      't/029_stats_restart.pl',
       't/030_stats_cleanup_replica.pl',
-      't/031_recovery_conflict.pl',
       't/032_relfilenode_reuse.pl',
       't/033_replay_tsp_drops.pl',
       't/034_create_database.pl',
@@ -57,7 +63,6 @@ tests += {
       't/046_checkpoint_logical_slot.pl',
       't/047_checkpoint_physical_slot.pl',
       't/048_vacuum_horizon_floor.pl',
-      't/049_wait_for_lsn.pl',
       't/050_redo_segment_missing.pl',
       't/051_effective_wal_level.pl',
       't/052_checkpoint_segment_missing.pl',
