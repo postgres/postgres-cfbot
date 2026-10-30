@@ -391,6 +391,15 @@ retry:
 	hdr->totalsize = size;
 	hdr->content_offset = MAXALIGN(sizeof(PGShmemHeader));
 	hdr->dsm_control = 0;
+	if (flProtect & SEC_LARGE_PAGES)
+		hdr->page_size = largePageSize;
+	else
+	{
+		SYSTEM_INFO sysinfo;
+
+		GetSystemInfo(&sysinfo);
+		hdr->page_size = sysinfo.dwPageSize;
+	}
 
 	/* Save info for possible future use */
 	UsedShmemSegAddr = memAddress;

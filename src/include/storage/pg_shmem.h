@@ -39,6 +39,8 @@ typedef struct PGShmemHeader	/* standard header for all Postgres shmem */
 	dev_t		device;			/* device data directory is on */
 	ino_t		inode;			/* inode number of data directory */
 #endif
+	Size		page_size;		/* size of each memory page backing this
+								 * segment. */
 } PGShmemHeader;
 
 /* GUC variables */
