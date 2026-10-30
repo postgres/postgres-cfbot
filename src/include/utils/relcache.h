@@ -76,6 +76,7 @@ typedef enum IndexAttrBitmapKind
 
 extern Bitmapset *RelationGetIndexAttrBitmap(Relation relation,
 											 IndexAttrBitmapKind attrKind);
+extern bool RelationHasDeleteNotifyIndex(Relation relation);
 
 extern Bitmapset *RelationGetIdentityKeyBitmap(Relation relation);
 

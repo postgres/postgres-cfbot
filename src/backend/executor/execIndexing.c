@@ -106,6 +106,7 @@
  */
 #include "postgres.h"
 
+#include "access/amapi.h"
 #include "access/genam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
@@ -516,6 +517,95 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 	}
 
 	return result;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecNotifyIndexesOfDelete
+ *
+ *		Tell the indexes whose access method sets amnotifydelete that a
+ *		heap tuple was deleted, or replaced by a new version.  tupleid is
+ *		the old version.  If oldslot is given it already holds that
+ *		version; otherwise it is fetched.  flags are those of
+ *		ExecInsertIndexTuples; only EIIT_ONLY_SUMMARIZING is looked at.
+ *
+ *		The caller must have opened the indexes, as for
+ *		ExecInsertIndexTuples, before deleting the tuple.  A table with no
+ *		index that wants the call pays one cached lookup per row.
+ * ----------------------------------------------------------------
+ */
+void
+ExecNotifyIndexesOfDelete(ResultRelInfo *resultRelInfo,
+						  EState *estate,
+						  uint32 flags,
+						  ItemPointer tupleid,
+						  TupleTableSlot *oldslot)
+{
+	Relation	heapRelation = resultRelInfo->ri_RelationDesc;
+	ExprContext *econtext;
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+
+	Assert(ItemPointerIsValid(tupleid));
+
+	if (!RelationHasDeleteNotifyIndex(heapRelation))
+		return;
+
+	Assert(resultRelInfo->ri_IndexRelationDescs != NULL);
+
+	if (oldslot == NULL)
+	{
+		if (resultRelInfo->ri_DeleteNotifySlot == NULL)
+			resultRelInfo->ri_DeleteNotifySlot =
+				table_slot_create(heapRelation, &estate->es_tupleTable);
+		oldslot = resultRelInfo->ri_DeleteNotifySlot;
+
+		/* our own transaction deleted it, so it can't be pruned yet */
+		if (!table_tuple_fetch_row_version(heapRelation, tupleid,
+										   SnapshotAny, oldslot))
+			elog(ERROR, "failed to fetch old tuple version for index notification");
+	}
+
+	econtext = GetPerTupleExprContext(estate);
+	econtext->ecxt_scantuple = oldslot;
+
+	for (int i = 0; i < resultRelInfo->ri_NumIndices; i++)
+	{
+		Relation	indexRelation = resultRelInfo->ri_IndexRelationDescs[i];
+		IndexInfo  *indexInfo = resultRelInfo->ri_IndexRelationInfo[i];
+
+		if (indexRelation == NULL ||
+			indexRelation->rd_indam->amnotifydelete == NULL)
+			continue;
+
+		/*
+		 * An index that isn't ready for inserts yet (CREATE INDEX
+		 * CONCURRENTLY) didn't hear of the tuple either.
+		 */
+		if (!indexInfo->ii_ReadyForInserts)
+			continue;
+
+		if ((flags & EIIT_ONLY_SUMMARIZING) && !indexInfo->ii_Summarizing)
+			continue;
+
+		/* A partial index never held a version failing its predicate */
+		if (indexInfo->ii_Predicate != NIL)
+		{
+			ExprState  *predicate = indexInfo->ii_PredicateState;
+
+			if (predicate == NULL)
+			{
+				predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+				indexInfo->ii_PredicateState = predicate;
+			}
+			if (!ExecQual(predicate, econtext))
+				continue;
+		}
+
+		FormIndexDatum(indexInfo, oldslot, estate, values, isnull);
+
+		index_notify_delete(indexRelation, values, isnull, tupleid,
+							heapRelation, indexInfo);
+	}
 }
 
 /* ----------------------------------------------------------------
