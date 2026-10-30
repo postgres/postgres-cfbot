@@ -1502,7 +1502,15 @@ FinishWalRecovery(void)
 		lastRecTLI = XLogRecoveryCtl->lastReplayedTLI;
 	}
 	XLogPrefetcherBeginRead(xlogprefetcher, lastRec);
+
+	/*
+	 * Only the extent of the record and its page are wanted here, and a
+	 * record that was compressed against earlier ones cannot be decoded a
+	 * second time.
+	 */
+	xlogreader->framing_only = true;
 	(void) ReadRecord(xlogprefetcher, PANIC, false, lastRecTLI);
+	xlogreader->framing_only = false;
 	endOfLog = xlogreader->EndRecPtr;
 
 	/*

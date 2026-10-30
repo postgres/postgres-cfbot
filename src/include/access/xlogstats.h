@@ -23,6 +23,7 @@ typedef struct XLogRecStats
 	uint64		count;
 	uint64		rec_len;
 	uint64		fpi_len;
+	uint64		physical_len;
 } XLogRecStats;
 
 typedef struct XLogStats
