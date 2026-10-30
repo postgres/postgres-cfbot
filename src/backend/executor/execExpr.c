@@ -99,6 +99,12 @@ static void ExecBuildAggTransCall(ExprState *state, AggState *aggstate,
 static void ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 							 Datum *resv, bool *resnull,
 							 ExprEvalStep *scratch);
+static void ExecInitSafeCastElement(SafeCastElement *elem, ExprState *state,
+									Datum *resv, bool *resnull,
+									ExprEvalStep *scratch);
+static void ExecInitSafeTypeCastExpr(SafeTypeCastExpr *stcexpr, ExprState *state,
+									 Datum *resv, bool *resnull,
+									 ExprEvalStep *scratch);
 static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 								 ErrorSaveContext *escontext, bool omit_quotes,
 								 bool exists_coerce,
@@ -142,6 +148,26 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
+	return ExecInitExprWithContext(node, parent, NULL);
+}
+
+/*
+ * ExecInitExprWithContext: same as ExecInitExpr, but with an optional
+ * ErrorSaveContext for soft error handling.
+ *
+ * When 'escontext' is non-NULL, expression nodes that support soft errors
+ * (currently CoerceToDomain's NOT NULL and CHECK constraint steps, and function
+ * calls, including operator will use errsave() instead of ereport(), allowing
+ * the caller to detect and handle failures without a transaction abort.
+ *
+ * The escontext must be provided at initialization time (not after), because
+ * it is copied into per-step data during expression compilation.
+ *
+ * Not all expression node types support soft errors.  If in doubt, pass NULL.
+ */
+ExprState *
+ExecInitExprWithContext(Expr *node, PlanState *parent, Node *escontext)
+{
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
 
@@ -154,6 +180,7 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	state->expr = node;
 	state->parent = parent;
 	state->ext_params = NULL;
+	state->escontext = (ErrorSaveContext *) escontext;
 
 	/* Insert setup steps as needed */
 	ExecCreateExprSetupSteps(state, (Node *) node);
@@ -1701,6 +1728,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 
 				elemstate->innermost_caseval = palloc_object(Datum);
 				elemstate->innermost_casenull = palloc_object(bool);
+				elemstate->escontext = state->escontext;
 
 				ExecInitExprRec(acoerce->elemexpr, elemstate,
 								&elemstate->resvalue, &elemstate->resnull);
@@ -1921,6 +1949,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				int			nelems = list_length(arrayexpr->elements);
 				ListCell   *lc;
 				int			elemoff;
+				List	   *skipjumps = NIL;
 
 				/*
 				 * Evaluate by computing each element, and then forming the
@@ -1953,11 +1982,32 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					ExecInitExprRec(e, state,
 									&scratch.d.arrayexpr.elemvalues[elemoff],
 									&scratch.d.arrayexpr.elemnulls[elemoff]);
+
+					/*
+					 * If this ArrayExpr is being evaluated softly has already
+					 * failed, the result is going to be discarded, so don't
+					 * check the remaining against it; doing so might throw a
+					 * hard error or overwrite the saved error.
+					 */
+					if (state->escontext != NULL)
+					{
+						ExprEvalStep jump = {0};
+
+						jump.opcode = EEOP_JUMP_IF_NULL;
+						jump.resnull = &state->escontext->error_occurred;
+						jump.d.jump.jumpdone = -1;	/* set below */
+						skipjumps = lappend_int(skipjumps, state->steps_len);
+						ExprEvalPushStep(state, &jump);
+					}
 					elemoff++;
 				}
 
 				/* and then collect all into an array */
 				ExprEvalPushStep(state, &scratch);
+
+				foreach_int(jumpno, skipjumps)
+					state->steps[jumpno].d.jump.jumpdone = state->steps_len;
+
 				break;
 			}
 
@@ -2172,6 +2222,26 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					/* jump to the following expression */
 					as->d.rowcompare_step.jumpnull = state->steps_len;
 				}
+
+				break;
+			}
+
+		case T_SafeTypeCastExpr:
+			{
+				SafeTypeCastExpr *stcexpr = castNode(SafeTypeCastExpr, node);
+
+				ExecInitSafeTypeCastExpr(stcexpr, state, resv, resnull,
+										 &scratch);
+
+				break;
+			}
+
+		case T_SafeCastElement:
+			{
+				SafeCastElement *elem = castNode(SafeCastElement, node);
+
+				ExecInitSafeCastElement(elem, state, resv, resnull,
+										&scratch);
 
 				break;
 			}
@@ -2702,6 +2772,8 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 	FunctionCallInfo fcinfo;
 	int			argno;
 	ListCell   *lc;
+	bool		strict;
+	bool		fusage;
 
 	/* Check permission to call function */
 	aclresult = object_aclcheck(ProcedureRelationId, funcid, GetUserId(), ACL_EXECUTE);
@@ -2735,7 +2807,8 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 
 	/* Initialize function call parameter structure too */
 	InitFunctionCallInfoData(*fcinfo, flinfo,
-							 nargs, inputcollid, NULL, NULL);
+							 nargs, inputcollid,
+							 (Node *) state->escontext, NULL);
 
 	/* Keep extra copies of this info to save an indirection at runtime */
 	scratch->d.func.fn_addr = flinfo->fn_addr;
@@ -2776,10 +2849,35 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 		argno++;
 	}
 
-	/* Insert appropriate opcode depending on strictness and stats level */
-	if (pgstat_track_functions <= flinfo->fn_stats)
+	strict = (flinfo->fn_strict && nargs > 0);
+	fusage = (pgstat_track_functions > flinfo->fn_stats);
+
+	/*
+	 * Insert appropriate opcode depending on strictness and stats level.
+	 * Under an ErrorSaveContext, use the _SAFE variants, which pass the
+	 * context to the function and return NULL when it reports an error
+	 * softly.
+	 */
+	if (state->escontext != NULL)
 	{
-		if (flinfo->fn_strict && nargs > 0)
+		if (!fusage)
+		{
+			if (strict)
+				scratch->opcode = EEOP_FUNCEXPR_STRICT_SAFE;
+			else
+				scratch->opcode = EEOP_FUNCEXPR_SAFE;
+		}
+		else
+		{
+			if (strict)
+				scratch->opcode = EEOP_FUNCEXPR_STRICT_SAFE_FUSAGE;
+			else
+				scratch->opcode = EEOP_FUNCEXPR_SAFE_FUSAGE;
+		}
+	}
+	else if (!fusage)
+	{
+		if (strict)
 		{
 			/* Choose nargs optimized implementation if available. */
 			if (nargs == 1)
@@ -2794,7 +2892,7 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 	}
 	else
 	{
-		if (flinfo->fn_strict && nargs > 0)
+		if (strict)
 			scratch->opcode = EEOP_FUNCEXPR_STRICT_FUSAGE;
 		else
 			scratch->opcode = EEOP_FUNCEXPR_FUSAGE;
@@ -4757,6 +4855,108 @@ ExecBuildParamSetEqual(TupleDesc desc,
 	ExecReadyExpr(state);
 
 	return state;
+}
+
+/*
+ * Push steps to evaluate a SafeTypeCastExpr and its various subsidiary
+ * expressions.
+ */
+static void
+ExecInitSafeTypeCastExpr(SafeTypeCastExpr *stcexpr, ExprState *state,
+						 Datum *resv, bool *resnull,
+						 ExprEvalStep *scratch)
+{
+	SafeTypeCastState *stcstate;
+	ErrorSaveContext *saved_escontext = state->escontext;
+	Datum	   *saved_caseval = state->innermost_caseval;
+	bool	   *saved_casenull = state->innermost_casenull;
+
+	stcstate = palloc0_object(SafeTypeCastState);
+	stcstate->stcexpr = stcexpr;
+	stcstate->escontext.type = T_ErrorSaveContext;
+	stcstate->escontext.error_occurred = false;
+	stcstate->escontext.details_wanted = false;
+	stcstate->escontext.error_data = NULL;
+
+	/*
+	 * arg normally throws its own errors, so it is compiled under the
+	 * caller's context.  If arg_errorsafe, it holds SafeCastElement nodes
+	 * converting its elements; it is then compiled under our context, which
+	 * makes those conversions error-safe.  The element expressions themselves
+	 * still throw their errors.
+	 */
+	if (stcexpr->arg_errorsafe)
+		state->escontext = &stcstate->escontext;
+	ExecInitExprRec(stcexpr->arg, state,
+					&stcstate->args.value, &stcstate->args.isnull);
+
+	/*
+	 * No coercion path exists at all (castexpr is NULL), so the result is
+	 * always the DEFAULT expression.  The argument above is still evaluated,
+	 * so that its own errors are thrown, but its value is unused.
+	 */
+	if (stcexpr->castexpr == NULL)
+	{
+		state->escontext = saved_escontext;
+		ExecInitExprRec(stcexpr->defexpr, state, resv, resnull);
+		return;
+	}
+
+	state->escontext = &stcstate->escontext;
+
+	/* The conversion itself is always evaluated error-safe */
+	state->innermost_caseval = &stcstate->args.value;
+	state->innermost_casenull = &stcstate->args.isnull;
+	ExecInitExprRec(stcexpr->castexpr, state, resv, resnull);
+	scratch->d.stcexpr.stcstate = stcstate;
+	scratch->opcode = EEOP_SAFETYPE_CAST;
+	ExprEvalPushStep(state, scratch);
+
+	state->innermost_caseval = saved_caseval;
+	state->innermost_casenull = saved_casenull;
+	state->escontext = saved_escontext;
+	/* DEFAULT, under the caller's context */
+	ExecInitExprRec(stcexpr->defexpr, state, resv, resnull);
+	stcstate->jump_end = state->steps_len;
+}
+
+/*
+ * Push steps to evaluate a SafeCastElement.
+ *
+ * In CAST(ARRAY[...] AS type DEFAULT ... ON CONVERSION ERROR), each element
+ * expression must be evaluated in a non-error-safe way, while its conversion to
+ * the target element type must be error-safe.
+ */
+static void
+ExecInitSafeCastElement(SafeCastElement *elem, ExprState *state,
+						Datum *resv, bool *resnull,
+						ExprEvalStep *scratch)
+{
+	ErrorSaveContext *saved_escontext = state->escontext;
+	Datum	   *saved_caseval = state->innermost_caseval;
+	bool	   *saved_casenull = state->innermost_casenull;
+	NullableDatum *argval = palloc_object(NullableDatum);
+
+	state->escontext = NULL;
+	ExecInitExprRec(elem->arg, state, &argval->value, &argval->isnull);
+	state->escontext = saved_escontext;
+
+	if (elem->castexpr == NULL)
+	{
+		scratch->opcode = EEOP_CONST;
+		scratch->resvalue = resv;
+		scratch->resnull = resnull;
+		scratch->d.constval.value = (Datum) 0;
+		scratch->d.constval.isnull = true;
+		ExprEvalPushStep(state, scratch);
+		return;
+	}
+
+	state->innermost_caseval = &argval->value;
+	state->innermost_casenull = &argval->isnull;
+	ExecInitExprRec(elem->castexpr, state, resv, resnull);
+	state->innermost_caseval = saved_caseval;
+	state->innermost_casenull = saved_casenull;
 }
 
 /*
