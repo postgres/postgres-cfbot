@@ -219,6 +219,148 @@ select conname, obj_description(oid, 'pg_constraint') from pg_constraint
 
 drop type comptype cascade;
 
+-- check altering columns used by constraints of domains whose base type
+-- isn't composite (bug #19724)
+create type rt as (i int);
+create domain dt as int check ((row(value)::rt).i > 0);
+alter type rt alter attribute i type text;  -- fail
+alter type rt alter attribute i type bigint;
+select 1::dt;
+select (-1)::dt;  -- fail
+drop domain dt;
+drop type rt;
+
+-- same for a domain over float8 that uses one field of a two-field type
+create type comptype as (r float8, i float8);
+create domain silly as float8 check ((row(value, 0)::comptype).r > 0);
+alter type comptype alter attribute r type bigint;
+select 1.0::silly;
+select (-1.0)::silly;  -- fail
+drop domain silly;
+drop type comptype;
+
+-- rebuilding a constraint for one type it depends on must preserve its
+-- dependency on another
+create type r1 as (a int);
+create type r2 as (b int);
+create domain dt_multi as int
+  check ((row(value)::r1).a > 0 and (row(value)::r2).b > 0);
+alter type r1 alter attribute a type bigint;
+alter type r2 alter attribute b type text;  -- fail
+alter type r2 alter attribute b type bigint;
+select 1::dt_multi;
+select (-1)::dt_multi;  -- fail
+drop domain dt_multi;
+drop type r1;
+drop type r2;
+
+-- same via ALTER TABLE, with the constraint depending on both the parent's
+-- and the inheritance child's row types
+create table dp (a int);
+create table dc (b int) inherits (dp);
+create domain dt_inh as int
+  check ((row(value)::dp).a > 0 and (row(value, value)::dc).a > 0);
+alter table dp alter column a type bigint;
+select 1::dt_inh;
+select (-1)::dt_inh;  -- fail
+drop domain dt_inh;
+drop table dc;
+drop table dp;
+
+-- A domain constraint rebuilt by ALTER COLUMN TYPE must not be validated
+-- until tables using the domain have been rewritten.  (These tests avoid
+-- ROW(value)::domrw_t, since the rebuilt expression would then contain a
+-- NULL coerced to the domain itself.)
+create function domrw_show(int) returns bool language plpgsql as
+  $$ begin raise notice 'domain check sees value %', $1; return true; end $$;
+create table domrw_t (c int);
+create domain domrw_dt as int
+  check (domrw_show(value) and (null::domrw_t).c is null);
+alter table domrw_t add column d domrw_dt;
+insert into domrw_t values (1, 5), (2, 7);
+alter table domrw_t alter column c type bigint;  -- should see 5 and 7
+select * from domrw_t;
+select convalidated from pg_constraint where contypid = 'domrw_dt'::regtype;
+drop domain domrw_dt cascade;
+drop table domrw_t;
+
+-- same, domain over composite
+create type domrw_ct as (j int);
+create table domrw_t (c int);
+create domain domrw_dt as domrw_ct
+  check (domrw_show((value).j) and (null::domrw_t).c is null);
+alter table domrw_t add column d domrw_dt;
+insert into domrw_t values (1, row(5)), (2, row(7));
+alter table domrw_t alter column c type bigint;  -- should see 5 and 7
+select * from domrw_t;
+drop domain domrw_dt cascade;
+drop table domrw_t;
+drop type domrw_ct;
+drop function domrw_show(int);
+
+-- domain column in an inheritance child that is rewritten by recursion
+create table domrw_p (c int);
+create domain domrw_dt as int check ((row(value)::domrw_p).c > 0);
+create table domrw_ch (d domrw_dt) inherits (domrw_p);
+insert into domrw_ch values (1, 5), (2, 7);
+alter table domrw_p alter column c type bigint;
+select * from domrw_ch;
+drop domain domrw_dt cascade;
+drop table domrw_p cascade;
+
+-- a rebuilt constraint that rejects stored values must still be enforced,
+-- even when the altered object is a standalone composite type
+create type domrw_rt as (i int);
+create domain domrw_dt as int check ((row(value)::domrw_rt).i is not null);
+create table domrw_u (x domrw_dt);
+insert into domrw_u values (40000);
+alter type domrw_rt alter attribute i type smallint;  -- fail
+drop table domrw_u;
+
+-- a NOT VALID constraint is not validated and stays NOT VALID
+alter domain domrw_dt drop constraint domrw_dt_check;
+create table domrw_u (x domrw_dt);
+insert into domrw_u values (40000);
+alter domain domrw_dt add constraint domrw_nv
+  check ((row(value)::domrw_rt).i is not null) not valid;
+alter type domrw_rt alter attribute i type smallint;
+select pg_get_constraintdef(oid), convalidated from pg_constraint
+  where contypid = 'domrw_dt'::regtype;
+drop table domrw_u;
+drop domain domrw_dt;
+drop type domrw_rt;
+
+-- Rebuilding a constraint (and its comment) owned by someone else must not
+-- require ownership of the constraint's domain or table
+create role regress_domrw_typeowner;
+create role regress_domrw_conowner;
+grant create on schema public to regress_domrw_typeowner, regress_domrw_conowner;
+set role regress_domrw_typeowner;
+create type domrw_rt as (i int);
+set role regress_domrw_conowner;
+create domain domrw_dt1 as int
+  constraint domrw_dt1_check check ((row(value)::domrw_rt).i > 0);
+comment on constraint domrw_dt1_check on domain domrw_dt1 is 'domain over int';
+create domain domrw_dt2 as domrw_rt
+  constraint domrw_dt2_check check ((value).i > 0);
+comment on constraint domrw_dt2_check on domain domrw_dt2 is 'domain over composite';
+create table domrw_t (x int
+  constraint domrw_t_check check ((row(x)::domrw_rt).i > 0));
+comment on constraint domrw_t_check on domrw_t is 'table constraint';
+set role regress_domrw_typeowner;
+alter type domrw_rt alter attribute i type bigint;
+reset role;
+select conname, pg_get_constraintdef(oid), obj_description(oid, 'pg_constraint')
+  from pg_constraint where conname like 'domrw\_%' order by conname;
+select (-1)::domrw_dt1;  -- fail
+drop table domrw_t;
+drop domain domrw_dt1;
+drop domain domrw_dt2;
+drop type domrw_rt;
+revoke create on schema public from regress_domrw_typeowner, regress_domrw_conowner;
+drop role regress_domrw_typeowner;
+drop role regress_domrw_conowner;
+
 
 -- Test domains over arrays of composite
 

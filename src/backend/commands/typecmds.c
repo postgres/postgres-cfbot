@@ -128,7 +128,6 @@ static Oid	findTypeSubscriptingFunction(List *procname, Oid typeOid);
 static Oid	findRangeSubOpclass(List *opcname, Oid subtype);
 static Oid	findRangeCanonicalFunction(List *procname, Oid typeOid);
 static Oid	findRangeSubtypeDiffFunction(List *procname, Oid subtype);
-static void validateDomainCheckConstraint(Oid domainoid, const char *ccbin);
 static void validateDomainNotNullConstraint(Oid domainoid);
 static List *get_rels_with_domain(Oid domainOid, LOCKMODE lockmode);
 static void checkEnumOwner(HeapTuple tup);
@@ -3005,8 +3004,22 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 		elog(ERROR, "cache lookup failed for type %u", domainoid);
 	typTup = (Form_pg_type) GETSTRUCT(tup);
 
-	/* Check it's a domain and check user has permission for ALTER DOMAIN */
-	checkDomainOwner(tup);
+	/*
+	 * Check it's a domain and check user has permission for ALTER DOMAIN.
+	 * When re-adding a constraint during ALTER TABLE, skip the permission
+	 * check since the constraint already existed, and the user altering a
+	 * column it depends on need not own the domain.
+	 */
+	if (is_readd)
+	{
+		if (typTup->typtype != TYPTYPE_DOMAIN)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("%s is not a domain",
+							format_type_be(typTup->oid))));
+	}
+	else
+		checkDomainOwner(tup);
 
 	if (!IsA(newConstraint, Constraint))
 		elog(ERROR, "unrecognized node type: %d",
@@ -3029,13 +3042,17 @@ AlterDomainAddConstraint(List *names, Node *newConstraint,
 										 constr, NameStr(typTup->typname), constrAddr,
 										 is_readd);
 
-
 		/*
 		 * If requested to validate the constraint, test all values stored in
 		 * the attributes based on the domain the constraint is being added
 		 * to.
+		 *
+		 * When re-adding a constraint during ALTER TABLE, the tables using
+		 * the domain might not have been rewritten to match their new catalog
+		 * definitions yet, so the caller must do the validation after its
+		 * rewrite phase instead.
 		 */
-		if (!constr->skip_validation)
+		if (!constr->skip_validation && !is_readd)
 			validateDomainCheckConstraint(domainoid, ccbin);
 
 		/*
@@ -3249,7 +3266,7 @@ validateDomainNotNullConstraint(Oid domainoid)
  * Verify that all columns currently using the domain satisfy the given check
  * constraint expression.
  */
-static void
+void
 validateDomainCheckConstraint(Oid domainoid, const char *ccbin)
 {
 	Expr	   *expr = (Expr *) stringToNode(ccbin);
