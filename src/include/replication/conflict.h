@@ -15,6 +15,7 @@
 
 /* Avoid including execnodes.h here */
 typedef struct EState EState;
+typedef struct LogicalRepRelMapEntry LogicalRepRelMapEntry;
 typedef struct ResultRelInfo ResultRelInfo;
 typedef struct TupleTableSlot TupleTableSlot;
 
@@ -111,6 +112,7 @@ extern bool GetTupleTransactionInfo(TupleTableSlot *localslot,
 									TimestampTz *localts);
 extern void ReportApplyConflict(EState *estate, ResultRelInfo *relinfo,
 								int elevel, ConflictType type,
+								LogicalRepRelMapEntry *relmapentry,
 								TupleTableSlot *searchslot,
 								TupleTableSlot *remoteslot,
 								List *conflicttuples);
