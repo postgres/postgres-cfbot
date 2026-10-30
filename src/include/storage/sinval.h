@@ -28,6 +28,7 @@
  *	* invalidate the mapped-relation mapping for a given database
  *	* invalidate any saved snapshot that might be used to scan a given relation
  *	* invalidate a RelationSyncCache entry for a specific relation
+ *	* forget the cached fork sizes of an smgr cache entry
  * More types could be added if needed.  The message type is identified by
  * the first "int8" field of the message struct.  Zero or positive means a
  * specific-catcache inval message (and also serves as the catcache ID field).
@@ -54,8 +55,8 @@
  * the new state.  The generating backend also has to process them at abort,
  * to flush out any cache state it's loaded from no-longer-valid entries.
  *
- * smgr and relation mapping invalidations are non-transactional: they are
- * sent immediately when the underlying file change is made.
+ * smgr, smgr size, and relation mapping invalidations are non-transactional:
+ * they are sent immediately when the underlying file change is made.
  */
 
 typedef struct
@@ -93,6 +94,9 @@ typedef struct
 	uint16		backend_lo;		/* low bits of backend procno, if temprel */
 	RelFileLocator rlocator;	/* spcOid, dbOid, relNumber */
 } SharedInvalSmgrMsg;
+
+/* uses SharedInvalSmgrMsg too, but only resets cached fork sizes */
+#define SHAREDINVALSMGRNBLOCKS_ID	(-7)
 
 #define SHAREDINVALRELMAP_ID	(-4)
 
