@@ -1358,6 +1358,7 @@ RecordTransactionCommit(void)
 	SharedInvalidationMessage *invalMessages = NULL;
 	bool		RelcacheInitFileInval = false;
 	bool		wrote_xlog;
+	XLogRecPtr	commit_lsn = InvalidXLogRecPtr;
 
 	/*
 	 * Log pending invalidations for logical decoding of in-progress
@@ -1493,6 +1494,8 @@ RecordTransactionCommit(void)
 							MyXactFlags,
 							InvalidTransactionId, NULL /* plain commit */ );
 
+		commit_lsn = ProcLastRecPtr;
+
 		if (replorigin)
 			/* Move LSNs forward for this replication origin */
 			replorigin_session_advance(replorigin_xact_state.origin_lsn,
@@ -1591,6 +1594,9 @@ RecordTransactionCommit(void)
 	{
 		MyProc->delayChkptFlags &= ~DELAY_CHKPT_IN_COMMIT;
 		END_CRIT_SECTION();
+
+		/* Log dropped and truncated tables before waiting for a sync standby */
+		LogDropOrTruncateTable(commit_lsn);
 	}
 
 	/* Compute latestXid while we have the child XIDs handy */
@@ -2524,6 +2530,7 @@ CommitTransaction(void)
 	AtEOXact_SPI(true);
 	AtEOXact_Enum();
 	AtEOXact_on_commit_actions(true);
+	AtEOXact_DropOrTruncateTable();
 	AtEOXact_Namespace(true, is_parallel_worker);
 	AtEOXact_SMgr();
 	AtEOXact_Files(true);
@@ -2820,6 +2827,7 @@ PrepareTransaction(void)
 	AtEOXact_SPI(true);
 	AtEOXact_Enum();
 	AtEOXact_on_commit_actions(true);
+	AtEOXact_DropOrTruncateTable();
 	AtEOXact_Namespace(true, false);
 	AtEOXact_SMgr();
 	AtEOXact_Files(true);
@@ -3051,6 +3059,7 @@ AbortTransaction(void)
 		AtEOXact_SPI(false);
 		AtEOXact_Enum();
 		AtEOXact_on_commit_actions(false);
+		AtEOXact_DropOrTruncateTable();
 		AtEOXact_Namespace(false, is_parallel_worker);
 		AtEOXact_SMgr();
 		AtEOXact_Files(false);
@@ -5284,6 +5293,8 @@ CommitSubTransaction(void)
 	AtEOSubXact_SPI(true, s->subTransactionId);
 	AtEOSubXact_on_commit_actions(true, s->subTransactionId,
 								  s->parent->subTransactionId);
+	AtEOSubXact_DropOrTruncateTable(true, s->subTransactionId,
+									s->parent->subTransactionId);
 	AtEOSubXact_Namespace(true, s->subTransactionId,
 						  s->parent->subTransactionId);
 	AtEOSubXact_Files(true, s->subTransactionId,
@@ -5458,6 +5469,8 @@ AbortSubTransaction(void)
 		AtEOSubXact_SPI(false, s->subTransactionId);
 		AtEOSubXact_on_commit_actions(false, s->subTransactionId,
 									  s->parent->subTransactionId);
+		AtEOSubXact_DropOrTruncateTable(false, s->subTransactionId,
+										s->parent->subTransactionId);
 		AtEOSubXact_Namespace(false, s->subTransactionId,
 							  s->parent->subTransactionId);
 		AtEOSubXact_Files(false, s->subTransactionId,
