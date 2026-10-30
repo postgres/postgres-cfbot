@@ -61,7 +61,9 @@ static Node *transformMultiAssignRef(ParseState *pstate, MultiAssignRef *maref);
 static Node *transformCaseExpr(ParseState *pstate, CaseExpr *c);
 static Node *transformSubLink(ParseState *pstate, SubLink *sublink);
 static Node *transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
-								Oid array_type, Oid element_type, int32 typmod);
+								Oid array_type, Oid element_type, int32 typmod,
+								bool *coercion_failed);
+
 static Node *transformRowExpr(ParseState *pstate, RowExpr *r, bool allowDefault);
 static Node *transformCoalesceExpr(ParseState *pstate, CoalesceExpr *c);
 static Node *transformMinMaxExpr(ParseState *pstate, MinMaxExpr *m);
@@ -109,6 +111,9 @@ static Expr *make_distinct_op(ParseState *pstate, List *opname,
 static Node *make_nulltest_from_distinct(ParseState *pstate,
 										 A_Expr *distincta, Node *arg);
 
+static Node *transformSafeTypeCast(ParseState *pstate, TypeCast *tc);
+static Node *transformSafeCastSource(ParseState *pstate, Node *expr,
+									 Oid targetType, int32 targetTypmod);
 
 /*
  * transformExpr -
@@ -165,7 +170,7 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 
 		case T_A_ArrayExpr:
 			result = transformArrayExpr(pstate, (A_ArrayExpr *) expr,
-										InvalidOid, InvalidOid, -1);
+										InvalidOid, InvalidOid, -1, NULL);
 			break;
 
 		case T_TypeCast:
@@ -2024,12 +2029,14 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
  */
 static Node *
 transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
-				   Oid array_type, Oid element_type, int32 typmod)
+				   Oid array_type, Oid element_type, int32 typmod,
+				   bool *coercion_failed)
 {
 	ArrayExpr  *newa = makeNode(ArrayExpr);
 	List	   *newelems = NIL;
 	List	   *newcoercedelems = NIL;
 	ListCell   *element;
+	ListCell   *rawelement;
 	Oid			coerce_type;
 	bool		coerce_hard;
 
@@ -2055,7 +2062,8 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 									  (A_ArrayExpr *) e,
 									  array_type,
 									  element_type,
-									  typmod);
+									  typmod,
+									  coercion_failed);
 			/* we certainly have an array here */
 			Assert(array_type == InvalidOid || array_type == exprType(newe));
 			newa->multidims = true;
@@ -2133,6 +2141,111 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 						 parser_errposition(pstate, a->location)));
 		}
 		coerce_hard = false;
+	}
+
+	if (coercion_failed != NULL)
+	{
+		Assert(coerce_hard);
+
+		/*
+		 * Build a SafeCastElement converting each element of an ARRAY[]
+		 * constructor argument of (CAST ... DEFAULT ... ON CONVERSION ERROR)
+		 * to the target element type.
+		 */
+		forboth(element, newelems, rawelement, a->elements)
+		{
+			Node	   *e = (Node *) lfirst(element);
+			Node	   *newe;
+
+			if (IsA(lfirst(rawelement), A_ArrayExpr))
+				newe = e;
+			else
+			{
+				Node	   *castexpr;
+				SafeCastElement *elem;
+				int			location = exprLocation(e);
+				Node	   *saved_escontext = pstate->p_escontext;
+				ErrorSaveContext *escontext = makeNode(ErrorSaveContext);
+
+				/*
+				 * each element gets its own context, so one failure doesn't
+				 * hide others
+				 */
+				pstate->p_escontext = (Node *) escontext;
+
+				e = transformSafeCastSource(pstate, e, coerce_type, typmod);
+
+				/*
+				 * Run collation assignment on the argument so that we know
+				 * what collation to mark the placeholder with, as
+				 * transformCaseExpr does.
+				 */
+				assign_expr_collations(pstate, e);
+
+				if (escontext->error_occurred)
+					castexpr = NULL;
+				else
+				{
+					CaseTestExpr *placeholder;
+
+					placeholder = makeNode(CaseTestExpr);
+					placeholder->typeId = exprType(e);
+					placeholder->typeMod = exprTypmod(e);
+					placeholder->collation = exprCollation(e);
+
+					castexpr = coerce_to_target_type(pstate, (Node *) placeholder,
+													 placeholder->typeId,
+													 coerce_type, typmod,
+													 COERCION_EXPLICIT,
+													 COERCE_EXPLICIT_CAST,
+													 location);
+					if (escontext->error_occurred)
+						castexpr = NULL;
+
+					/*
+					 * The placeholder carries the argument's collation only
+					 * at implicit strength.  Keep an explicit COLLATE on the
+					 * argument explicit
+					 */
+					if (castexpr != NULL && IsA(e, CollateExpr) &&
+						type_is_collatable(coerce_type))
+					{
+						CollateExpr *coll = makeNode(CollateExpr);
+
+						coll->arg = (Expr *) castexpr;
+						coll->collOid = ((CollateExpr *) e)->collOid;
+						coll->location = ((CollateExpr *) e)->location;
+						castexpr = (Node *) coll;
+					}
+				}
+
+				if (castexpr == NULL)
+					*coercion_failed = true;
+
+				elem = makeNode(SafeCastElement);
+				elem->arg = (Expr *) e;
+				elem->castexpr = (Expr *) castexpr;
+				elem->resulttype = coerce_type;
+				elem->resulttypmod = typmod;
+				elem->resultcollid = get_typcollation(coerce_type);
+				elem->location = location;
+				newe = (Node *) elem;
+
+				pstate->p_escontext = saved_escontext;
+			}
+
+			newcoercedelems = lappend(newcoercedelems, newe);
+		}
+
+		newa->array_typeid = array_type;
+		/* array_collid will be set by transformSafeTypeCast() */
+		newa->element_typeid = element_type;
+		newa->elements = newcoercedelems;
+		newa->list_start = a->list_start;
+		newa->list_end = a->list_end;
+		newa->location = a->location;
+
+		return (Node *) newa;
 	}
 
 	/*
@@ -2722,6 +2835,9 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 	int32		targetTypmod;
 	int			location;
 
+	if (tc->defexpr)
+		return transformSafeTypeCast(pstate, tc);
+
 	/* Look up the type name first */
 	typenameTypeIdAndMod(pstate, tc->typeName, &targetType, &targetTypmod);
 
@@ -2753,7 +2869,8 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 									  (A_ArrayExpr *) arg,
 									  targetBaseType,
 									  elementType,
-									  targetBaseTypmod);
+									  targetBaseTypmod,
+									  NULL);
 		}
 		else
 			expr = transformExprRecurse(pstate, arg);
@@ -2821,6 +2938,253 @@ transformCollateClause(ParseState *pstate, CollateClause *c)
 	newc->location = c->location;
 
 	return (Node *) newc;
+}
+
+/*
+ * Transform CAST(expr AS type DEFAULT defexpr ON CONVERSION ERROR).
+ *
+ * The argument is stored once, in "arg", and is not coerced itself; instead we
+ * coerce a CaseTestExpr placeholder of its type, so castexpr holds only the
+ * coercion and no tree walker sees the argument twice. At runtime the executor
+ * feeds the value of "arg" to the placeholder, as ArrayCoerceExpr does for
+ * elemexpr.
+ */
+static Node *
+transformSafeTypeCast(ParseState *pstate, TypeCast *tc)
+{
+	Node	   *defexpr;
+	Node	   *castexpr;
+	Node	   *arg = tc->arg;
+	Node	   *expr = NULL;
+	SafeTypeCastExpr *stc;
+	Oid			targetType;
+	int32		targetTypmod;
+	Oid			targetTypecoll;
+	bool		arg_errorsafe = false;
+	bool		array_failed = false;
+	int			defloc;
+	Node	   *last_srf;
+	Node	   *saved_escontext;
+
+	last_srf = pstate->p_last_srf;
+	defloc = exprLocation(tc->defexpr);
+	saved_escontext = pstate->p_escontext;
+
+	/* Look up the type name first */
+	typenameTypeIdAndMod(pstate, tc->typeName, &targetType, &targetTypmod);
+
+	targetTypecoll = get_typcollation(targetType);
+
+	defexpr = transformExprRecurse(pstate, tc->defexpr);
+
+	/* if the DEFAULT contained a SRF, complain */
+	if (pstate->p_last_srf != last_srf)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("set-returning functions are not allowed in CAST DEFAULT expression"),
+				parser_errposition(pstate, defloc));
+
+	defexpr = coerce_to_target_type(pstate, defexpr, exprType(defexpr),
+									targetType, targetTypmod,
+									COERCION_EXPLICIT,
+									COERCE_EXPLICIT_CAST,
+									exprLocation(defexpr));
+	if (defexpr == NULL)
+		ereport(ERROR,
+				errcode(ERRCODE_CANNOT_COERCE),
+				errmsg("cannot coerce %s expression to type %s",
+					   "CAST DEFAULT",
+					   format_type_be(targetType)),
+				parser_coercion_errposition(pstate, exprLocation(tc->defexpr), defexpr));
+
+	/*
+	 * If the subject of the typecast is an ARRAY[] construct and the target
+	 * type is an array type, we invoke transformArrayExpr() directly so that
+	 * we can pass down the type information.  This avoids some cases where
+	 * transformArrayExpr() might not infer the correct type.  It wraps each
+	 * element in a SafeCastElement converting it to the target element type,
+	 * and sets array_failed if an element has no conversion.
+	 */
+	if (IsA(arg, A_ArrayExpr))
+	{
+		Oid			targetBaseType;
+		int32		targetBaseTypmod;
+		Oid			elementType;
+
+		/*
+		 * If target is a domain over array, work with the base array type
+		 * here.  Below, we'll cast the array type to the domain.  In the
+		 * usual case that the target is not a domain, the remaining steps
+		 * will be a no-op.
+		 */
+		targetBaseTypmod = targetTypmod;
+		targetBaseType = getBaseTypeAndTypmod(targetType, &targetBaseTypmod);
+		elementType = get_element_type(targetBaseType);
+		if (OidIsValid(elementType))
+		{
+			expr = transformArrayExpr(pstate,
+									  (A_ArrayExpr *) arg,
+									  targetBaseType,
+									  elementType,
+									  targetBaseTypmod,
+									  &array_failed);
+			arg_errorsafe = true;
+		}
+		else
+			expr = transformExprRecurse(pstate, arg);
+	}
+	else
+		expr = transformExprRecurse(pstate, arg);
+
+	if (array_failed)
+	{
+		assign_expr_collations(pstate, expr);
+		castexpr = NULL;
+	}
+	else
+	{
+		ErrorSaveContext *escontext = NULL;
+
+		/*
+		 * Build the coercion expression under our ErrorSaveContext, so that
+		 * cast functions not marked ERROR SAFE are rejected, and an invalid
+		 * literal is recorded rather than thrown.
+		 */
+		escontext = makeNode(ErrorSaveContext);
+		pstate->p_escontext = (Node *) escontext;
+
+		expr = transformSafeCastSource(pstate, expr, targetType, targetTypmod);
+
+		/*
+		 * Run collation assignment on the argument so that we know what
+		 * collation to mark the placeholder with, as transformCaseExpr does.
+		 */
+		assign_expr_collations(pstate, expr);
+
+		if (SOFT_ERROR_OCCURRED(pstate->p_escontext))
+			castexpr = NULL;
+		else
+		{
+			CaseTestExpr *placeholder;
+
+			placeholder = makeNode(CaseTestExpr);
+			placeholder->typeId = exprType(expr);
+			placeholder->typeMod = exprTypmod(expr);
+			placeholder->collation = exprCollation(expr);
+
+			castexpr = coerce_to_target_type(pstate, (Node *) placeholder, exprType(expr),
+											 targetType, targetTypmod,
+											 COERCION_EXPLICIT,
+											 COERCE_EXPLICIT_CAST,
+											 tc->location);
+
+			if (SOFT_ERROR_OCCURRED(pstate->p_escontext))
+				castexpr = NULL;
+
+			/*
+			 * The placeholder carries the argument's collation only at
+			 * implicit strength.  Keep an explicit COLLATE on the argument
+			 * explicit
+			 */
+			if (castexpr != NULL && IsA(expr, CollateExpr) &&
+				type_is_collatable(targetType))
+			{
+				CollateExpr *coll = makeNode(CollateExpr);
+
+				coll->arg = (Expr *) castexpr;
+				coll->collOid = ((CollateExpr *) expr)->collOid;
+				coll->location = ((CollateExpr *) expr)->location;
+				castexpr = (Node *) coll;
+			}
+		}
+	}
+
+	pstate->p_escontext = saved_escontext;
+
+	stc = makeNode(SafeTypeCastExpr);
+	stc->arg = (Expr *) expr;
+	stc->arg_errorsafe = arg_errorsafe;
+	stc->castexpr = (Expr *) castexpr;
+	stc->defexpr = (Expr *) defexpr;
+	stc->resulttype = targetType;
+	stc->resulttypmod = targetTypmod;
+	stc->resultcollid = targetTypecoll;
+	stc->location = tc->location;
+
+	return (Node *) stc;
+}
+
+/*
+ * Prepare the source expression of CAST ... DEFAULT ... ON CONVERSION ERROR, or
+ * of one of its ARRAY[] elements, for conversion over a placeholder.
+ *
+ * Only the placeholder is coerced to the target type, but an unknown literal
+ * still needs a real type.  It is first converted to the target's base type, as
+ * in a plain CAST; for INTERVAL that passes the typmod (see coerce_type()). So
+ *		'1'::interval hour			gives 01:00:00
+ *		'1'::text::interval hour	gives 00:00:00
+ */
+static Node *
+transformSafeCastSource(ParseState *pstate, Node *expr,
+						Oid targetType, int32 targetTypmod)
+{
+	Node	   *origexpr = expr;
+	Node	   *result = NULL;
+
+	Assert(pstate->p_escontext != NULL &&
+		   !SOFT_ERROR_OCCURRED(pstate->p_escontext));
+
+	while (expr && IsA(expr, CollateExpr))
+		expr = (Node *) ((CollateExpr *) expr)->arg;
+
+	if (exprType(expr) != UNKNOWNOID)
+		result = expr;
+	else
+	{
+		if (IsA(expr, Const))
+		{
+			Oid			baseType;
+			int32		baseTypmod = targetTypmod;
+
+			baseType = getBaseTypeAndTypmod(targetType, &baseTypmod);
+
+			result = coerce_type(pstate, expr, UNKNOWNOID,
+								 baseType, baseTypmod,
+								 COERCION_EXPLICIT,
+								 COERCE_EXPLICIT_CAST,
+								 exprLocation(expr));
+
+			if (SOFT_ERROR_OCCURRED(pstate->p_escontext) ||
+				exprType(result) == UNKNOWNOID)
+				result = NULL;
+		}
+
+		if (result == NULL)
+			result = coerce_type(pstate, expr, UNKNOWNOID,
+								 TEXTOID, -1,
+								 COERCION_IMPLICIT,
+								 COERCE_IMPLICIT_CAST,
+								 exprLocation(expr));
+	}
+
+	/*
+	 * Reinstall the top CollateExpr, unless the type is not collatable, as
+	 * coerce_type() does for a plain CAST.
+	 */
+	if (IsA(origexpr, CollateExpr) && type_is_collatable(exprType(result)))
+	{
+		CollateExpr *coll = (CollateExpr *) origexpr;
+		CollateExpr *newcoll = makeNode(CollateExpr);
+
+		newcoll->arg = (Expr *) result;
+		newcoll->collOid = coll->collOid;
+		newcoll->location = coll->location;
+		result = (Node *) newcoll;
+	}
+
+	Assert(result != NULL);
+
+	return result;
 }
 
 /*

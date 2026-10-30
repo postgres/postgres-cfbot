@@ -151,7 +151,7 @@ extern void convert_saop_to_hashed_saop(Node *node);
 extern Node *estimate_expression_value(PlannerInfo *root, Node *node);
 
 extern Expr *evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod,
-						   Oid result_collation);
+						   Oid result_collation, Node *escontext);
 
 extern bool var_is_nonnullable(PlannerInfo *root, Var *var,
 							   NotNullSource source);
