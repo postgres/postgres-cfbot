@@ -765,6 +765,77 @@ typedef enum CoercionForm
 } CoercionForm;
 
 /*
+ * SafeTypeCastExpr -
+ *		Transformed representation of
+ * 		CAST(expr AS typename DEFAULT expr ON CONVERSION ERROR)
+ */
+typedef struct SafeTypeCastExpr
+{
+	Expr		xpr;
+
+	/*
+	 * The transformed input expression, evaluated once and fed to castexpr.
+	 * Normally arg is not evaluated in an error-safe manner.  For an ARRAY[]
+	 * input cast to an array type, however, its elements are SafeCastElement
+	 * nodes converting them to the target element type.  arg_errorsafe is
+	 * then true, and arg is evaluated under this cast's error context, so
+	 * that those conversions fail softly.
+	 */
+	Expr	   *arg;
+	bool		arg_errorsafe;
+
+	/*
+	 * coercion of arg to the target type, built over a CaseTestExpr that
+	 * stands for its value; NULL means no cast path exists, in which case the
+	 * result is always defexpr
+	 */
+	Expr	   *castexpr;
+	/* Fall-back to the default expression if cast evaluation fails */
+	Expr	   *defexpr;
+
+	/* target type Oid */
+	Oid			resulttype;
+	/* target type modifier */
+	int32		resulttypmod;
+	/* OID of collation, or InvalidOid if none */
+	Oid			resultcollid;
+	/* token location, or -1 if unknown */
+	ParseLoc	location;
+} SafeTypeCastExpr;
+
+/*
+ * SafeCastElement -
+ *		One element of an ARRAY[] SafeTypeCastExpr.arg (see arg_errorsafe)
+ *
+ * arg, the element itself, is evaluated with hard errors.  castexpr converts
+ * its value to the target element type and reports errors into the enclosing
+ * SafeTypeCastExpr's context, which then returns its DEFAULT.
+ */
+typedef struct SafeCastElement
+{
+	Expr		xpr;
+
+	/* the element expression */
+	Expr	   *arg;
+
+	/*
+	 * coercion of arg to the target element type, built over a CaseTestExpr
+	 * that stands for arg's value; NULL means no cast path exists, in which
+	 * case the element yields NULL and the enclosing cast has no castexpr
+	 */
+	Expr	   *castexpr;
+
+	/* target element type Oid */
+	Oid			resulttype;
+	/* target element type modifier */
+	int32		resulttypmod;
+	/* OID of collation, or InvalidOid if none */
+	Oid			resultcollid;
+	/* token location, or -1 if unknown */
+	ParseLoc	location;
+} SafeCastElement;
+
+/*
  * FuncExpr - expression node for a function call
  */
 typedef struct FuncExpr
