@@ -19,6 +19,7 @@
 extern void InitCompressorLZ4(CompressorState *cs,
 							  const pg_compress_specification compression_spec);
 extern void InitCompressFileHandleLZ4(CompressFileHandle *CFH,
-									  const pg_compress_specification compression_spec);
+									  const pg_compress_specification compression_spec,
+									  bool is_pipe);
 
 #endif							/* _COMPRESS_LZ4_H_ */
