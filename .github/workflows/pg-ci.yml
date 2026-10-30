@@ -866,6 +866,7 @@ jobs:
       MESON_FEATURES: >-
         -Dauto_features=disabled
         -Dcpp_args=/std:c++20
+        -Detw=enabled
         -Dldap=enabled
         -Dplperl=enabled
         -Dplpython=enabled
