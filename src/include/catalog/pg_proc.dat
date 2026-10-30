@@ -12028,7 +12028,7 @@
 { oid => '9266', descr => 'for use by pg_upgrade',
   proname => 'binary_upgrade_add_toast_dictionary', provolatile => 'v',
   proparallel => 'u', prorettype => 'void',
-  proargtypes => 'regclass int2 oid bool bytea',
+  proargtypes => 'regclass int2 oid bool int8 timestamptz bytea',
   prosrc => 'binary_upgrade_add_toast_dictionary' },
 { oid => '4545', descr => 'for use by pg_upgrade',
   proname => 'binary_upgrade_set_next_heap_relfilenode', provolatile => 'v',

@@ -5859,7 +5859,8 @@ binary_upgrade_dump_toast_dictionaries(Archive *fout, PQExpBuffer q,
 
 	query = createPQExpBuffer();
 	appendPQExpBuffer(query,
-					  "SELECT d.oid, d.tdattnum, d.tdcurrent, d.tddict "
+					  "SELECT d.oid, d.tdattnum, d.tdcurrent, d.tdtrainrows, "
+					  "d.tdtraintime, d.tddict "
 					  "FROM pg_catalog.pg_toast_dictionary d "
 					  "WHERE d.tdrelid = '%u'::pg_catalog.oid "
 					  "ORDER BY d.oid",
@@ -5875,7 +5876,11 @@ binary_upgrade_dump_toast_dictionaries(Archive *fout, PQExpBuffer q,
 						  PQgetvalue(res, i, 1),
 						  PQgetvalue(res, i, 0),
 						  PQgetvalue(res, i, 2)[0] == 't' ? "true" : "false");
-		appendStringLiteralAH(q, PQgetvalue(res, i, 3), fout);
+		appendPQExpBuffer(q, "%s::pg_catalog.int8, ",
+						  PQgetvalue(res, i, 3));
+		appendStringLiteralAH(q, PQgetvalue(res, i, 4), fout);
+		appendPQExpBufferStr(q, "::pg_catalog.timestamptz, ");
+		appendStringLiteralAH(q, PQgetvalue(res, i, 5), fout);
 		appendPQExpBufferStr(q, "::pg_catalog.bytea);\n");
 	}
 

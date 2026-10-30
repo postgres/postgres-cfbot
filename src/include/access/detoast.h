@@ -122,6 +122,15 @@ toast_external_info_get(const struct varlena *attr, toast_external_data *toast_e
 		else
 			toast_ext_data->compress_method = TOAST_INVALID_COMPRESSION_ID;
 	}
+
+	/*
+	 * An external datum that is not compressed has no method; report it as
+	 * the invalid id rather than leaving the raw method bits (which read as
+	 * pglz) in place, so toast_external_data is self-describing.
+	 */
+	if (!VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data->extinfo,
+									  toast_ext_data->rawsize))
+		toast_ext_data->compress_method = TOAST_INVALID_COMPRESSION_ID;
 }
 
 /* ----------

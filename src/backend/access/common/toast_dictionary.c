@@ -71,6 +71,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/bitmapset.h"
 #include "utils/acl.h"
 #include "utils/attoptcache.h"
 #include "utils/builtins.h"
@@ -223,9 +224,15 @@ toast_dictionary_current(Relation rel, AttrNumber attnum)
 	SysScanDesc scan;
 	HeapTuple	tup;
 	Oid			result = InvalidOid;
+	int			natts = RelationGetNumberOfAttributes(rel);
+	MemoryContext oldcxt;
 
-	if (rel->rd_toastdictattnum == attnum)
-		return rel->rd_toastdictoid;
+	Assert(attnum >= 1 && attnum <= natts);
+
+	/* fast path: a filled per-column cache entry */
+	if (rel->rd_toastdictoids != NULL &&
+		bms_is_member(attnum, rel->rd_toastdictvalid))
+		return rel->rd_toastdictoids[attnum - 1];
 
 	drel = table_open(ToastDictionaryRelationId, AccessShareLock);
 	tup = dict_lookup(dict_owner_relid(rel), attnum, true, drel, &scan);
@@ -234,8 +241,18 @@ toast_dictionary_current(Relation rel, AttrNumber attnum)
 	systable_endscan(scan);
 	table_close(drel, AccessShareLock);
 
-	rel->rd_toastdictoid = result;
-	rel->rd_toastdictattnum = attnum;
+	/*
+	 * Cache the result in a per-column array, kept in CacheMemoryContext so
+	 * it lives as long as the relcache entry and is freed with it; a relcache
+	 * invalidation from dict_install() rebuilds the entry and drops it.
+	 */
+	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+	if (rel->rd_toastdictoids == NULL)
+		rel->rd_toastdictoids = palloc0_array(Oid, natts);
+	rel->rd_toastdictoids[attnum - 1] = result;
+	rel->rd_toastdictvalid = bms_add_member(rel->rd_toastdictvalid, attnum);
+	MemoryContextSwitchTo(oldcxt);
+
 	return result;
 }
 
@@ -345,9 +362,11 @@ dict_cache_victim(Oid *ids, uint64 *used)
  * DICT_CACHE_SIZE entries per direction.
  */
 static Oid	cdict_ids[DICT_CACHE_SIZE];
+static uint32 cdict_hashes[DICT_CACHE_SIZE];
 static uint64 cdict_used[DICT_CACHE_SIZE];
 static ZSTD_CDict *cdicts[DICT_CACHE_SIZE];
 static Oid	ddict_ids[DICT_CACHE_SIZE];
+static uint32 ddict_hashes[DICT_CACHE_SIZE];
 static uint64 ddict_used[DICT_CACHE_SIZE];
 static ZSTD_DDict *ddicts[DICT_CACHE_SIZE];
 static ZSTD_CCtx *dict_cctx = NULL;
@@ -358,13 +377,28 @@ dict_cache_invalidate(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 {
 	for (int i = 0; i < DICT_CACHE_SIZE; i++)
 	{
-		if (cdicts[i])
+		/*
+		 * hashvalue == 0 is the "reset everything" signal; otherwise evict
+		 * only entries whose dictionary row hashes to the changed one, so an
+		 * unrelated pg_toast_dictionary change elsewhere does not throw away
+		 * a backend's whole cache.  The hash is the one computed when the
+		 * entry was cached; this callback must not touch the catalogs, since
+		 * it can run when no transaction is in progress.
+		 */
+		if (cdicts[i] &&
+			(hashvalue == 0 || cdict_hashes[i] == hashvalue))
+		{
 			ZSTD_freeCDict(cdicts[i]);
-		if (ddicts[i])
+			cdicts[i] = NULL;
+			cdict_ids[i] = InvalidOid;
+		}
+		if (ddicts[i] &&
+			(hashvalue == 0 || ddict_hashes[i] == hashvalue))
+		{
 			ZSTD_freeDDict(ddicts[i]);
-		cdicts[i] = NULL;
-		ddicts[i] = NULL;
-		cdict_ids[i] = ddict_ids[i] = InvalidOid;
+			ddicts[i] = NULL;
+			ddict_ids[i] = InvalidOid;
+		}
 	}
 }
 #endif							/* USE_ZSTD */
@@ -423,6 +457,8 @@ dict_get_cdict(Oid dictid)
 		if (cdicts[slot] == NULL)
 			elog(ERROR, "could not load compression dictionary %u", dictid);
 		cdict_ids[slot] = dictid;
+		cdict_hashes[slot] = GetSysCacheHashValue1(TOASTDICTOID,
+												   ObjectIdGetDatum(dictid));
 		cdict_used[slot] = ++dict_cache_clock;
 	}
 	if (dict_cctx == NULL && (dict_cctx = ZSTD_createCCtx()) == NULL)
@@ -448,6 +484,8 @@ dict_get_ddict(Oid dictid)
 		if (ddicts[slot] == NULL)
 			elog(ERROR, "could not load compression dictionary %u", dictid);
 		ddict_ids[slot] = dictid;
+		ddict_hashes[slot] = GetSysCacheHashValue1(TOASTDICTOID,
+												   ObjectIdGetDatum(dictid));
 		ddict_used[slot] = ++dict_cache_clock;
 	}
 	if (dict_dctx == NULL && (dict_dctx = ZSTD_createDCtx()) == NULL)
@@ -565,10 +603,21 @@ zstd_dict_compressed_total(const char *dict, size_t dictlen,
 		maxlen = Max(maxlen, sizes[i]);
 	if (dict_cctx == NULL && (dict_cctx = ZSTD_createCCtx()) == NULL)
 		elog(ERROR, "could not create zstd compression context");
+
+	/*
+	 * Allocate the output buffer before creating the CDict, so no palloc
+	 * (which can ereport on OOM) sits between ZSTD_createCDict() and
+	 * ZSTD_freeCDict(): toast_dictionary_maybe_evolve() catches errors in a
+	 * subtransaction, and a longjmp from between the two would leak the
+	 * malloc'd CDict for the life of the backend.
+	 */
+	out = palloc(ZSTD_compressBound(maxlen));
 	cd = ZSTD_createCDict(dict, dictlen, ZSTD_CLEVEL_DEFAULT);
 	if (cd == NULL)
+	{
+		pfree(out);
 		return 0;
-	out = palloc(ZSTD_compressBound(maxlen));
+	}
 	for (int i = 0; i < nvals; i++)
 	{
 		size_t		clen = ZSTD_compress_usingCDict(dict_cctx, out,
@@ -598,18 +647,42 @@ zstd_dict_compressed_total(const char *dict, size_t dictlen,
  * pg_toast_dictionary.
  */
 static Oid	lz4dict_ids[DICT_CACHE_SIZE];
+static uint32 lz4dict_hashes[DICT_CACHE_SIZE];
 static uint64 lz4dict_used[DICT_CACHE_SIZE];
 static bytea *lz4dicts[DICT_CACHE_SIZE];
+
+/*
+ * Backend-static lz4 compression stream, reset before each use.  Keeping it
+ * static avoids LZ4_createStream()/LZ4_freeStream() per value (a malloc that
+ * would also leak on an OOM longjmp out of the compression path), as the zstd
+ * side keeps a static CCtx.  LZ4_stream_t is a fixed-size POD, safe as a
+ * file-scope static.
+ */
+static LZ4_stream_t lz4_cstream_storage;
+static LZ4_stream_t *lz4_cstream = NULL;
+
+static void
+lz4_cstream_reset(void)
+{
+	if (lz4_cstream == NULL)
+		lz4_cstream = LZ4_initStream(&lz4_cstream_storage,
+									 sizeof(lz4_cstream_storage));
+	else
+		LZ4_resetStream_fast(lz4_cstream);
+}
 
 static void
 lz4_dict_cache_invalidate(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 {
 	for (int i = 0; i < DICT_CACHE_SIZE; i++)
 	{
-		if (lz4dicts[i])
+		if (lz4dicts[i] &&
+			(hashvalue == 0 || lz4dict_hashes[i] == hashvalue))
+		{
 			pfree(lz4dicts[i]);
-		lz4dicts[i] = NULL;
-		lz4dict_ids[i] = InvalidOid;
+			lz4dicts[i] = NULL;
+			lz4dict_ids[i] = InvalidOid;
+		}
 	}
 }
 
@@ -645,6 +718,8 @@ lz4_dict_get(Oid dictid)
 			pfree(lz4dicts[slot]);
 		lz4dicts[slot] = cached;
 		lz4dict_ids[slot] = dictid;
+		lz4dict_hashes[slot] = GetSysCacheHashValue1(TOASTDICTOID,
+													 ObjectIdGetDatum(dictid));
 		lz4dict_used[slot] = ++dict_cache_clock;
 	}
 	return lz4dicts[slot];
@@ -667,21 +742,23 @@ lz4_dict_compress_datum(const varlena *value, Oid dictid)
 	int32		valsize = VARSIZE_ANY_EXHDR(value);
 	int32		max_size = LZ4_compressBound(valsize);
 	bytea	   *dict = lz4_dict_get(dictid);
-	LZ4_stream_t *stream;
 	varlena    *tmp;
 	int32		len;
 
-	stream = LZ4_createStream();
-	if (stream == NULL)
-		elog(ERROR, "could not create lz4 stream");
-	LZ4_loadDict(stream, VARDATA_ANY(dict), VARSIZE_ANY_EXHDR(dict));
+	/*
+	 * Use a backend-static stream, reset per call, rather than
+	 * LZ4_createStream(): a malloc'd stream between here and the palloc below
+	 * would leak on an OOM longjmp, and avoiding the per-value malloc/free is
+	 * cheaper on bulk loads.
+	 */
+	lz4_cstream_reset();
+	LZ4_loadDict(lz4_cstream, VARDATA_ANY(dict), VARSIZE_ANY_EXHDR(dict));
 
 	tmp = (varlena *) palloc(max_size + VARHDRSZ_COMPRESSED_DICT);
-	len = LZ4_compress_fast_continue(stream,
+	len = LZ4_compress_fast_continue(lz4_cstream,
 									 VARDATA_ANY(value),
 									 (char *) tmp + VARHDRSZ_COMPRESSED_DICT,
 									 valsize, max_size, 1);
-	LZ4_freeStream(stream);
 	if (len <= 0)
 		elog(ERROR, "lz4 compression failed");
 	if (len > valsize)
@@ -758,20 +835,17 @@ lz4_dict_compressed_total(const char *dict, size_t dictlen,
 
 	for (int i = 0; i < nvals; i++)
 	{
-		LZ4_stream_t *stream;
 		int32		bound = LZ4_compressBound(sizes[i]);
 		char	   *out;
 		int32		clen;
 
 		if (bound <= 0)
 			return 0;
-		stream = LZ4_createStream();
-		if (stream == NULL)
-			return 0;
-		LZ4_loadDict(stream, dict, dictlen);
+		/* static stream reset per value; no malloc to leak on OOM */
 		out = palloc(bound);
-		clen = LZ4_compress_fast_continue(stream, vals, out, sizes[i], bound, 1);
-		LZ4_freeStream(stream);
+		lz4_cstream_reset();
+		LZ4_loadDict(lz4_cstream, dict, dictlen);
+		clen = LZ4_compress_fast_continue(lz4_cstream, vals, out, sizes[i], bound, 1);
 		pfree(out);
 		if (clen <= 0)
 			return 0;
@@ -918,10 +992,13 @@ toast_dictionary_retire(Oid relid)
  * previous current one.  dictid may be given (binary upgrade) or chosen here.
  * trainrows is the reltuples estimate at training time, recorded for the
  * auto-evolution growth trigger; pass 0 when not training from a live count.
+ * traintime is the training timestamp to record (0 means now); pg_upgrade
+ * passes the original so the evolution cooldown survives an upgrade.
  */
 static Oid
 dict_install(Relation rel, AttrNumber attnum, Oid dictid, bool current,
-			 int64 trainrows, const void *dict, size_t dictlen)
+			 int64 trainrows, TimestampTz traintime,
+			 const void *dict, size_t dictlen)
 {
 	Relation	drel;
 	SysScanDesc scan;
@@ -960,7 +1037,7 @@ dict_install(Relation rel, AttrNumber attnum, Oid dictid, bool current,
 	values[Anum_pg_toast_dictionary_tdcurrent - 1] = BoolGetDatum(current);
 	values[Anum_pg_toast_dictionary_tdtrainrows - 1] = Int64GetDatum(trainrows);
 	values[Anum_pg_toast_dictionary_tdtraintime - 1] =
-		TimestampTzGetDatum(GetCurrentTimestamp());
+		TimestampTzGetDatum(traintime != 0 ? traintime : GetCurrentTimestamp());
 	values[Anum_pg_toast_dictionary_tddict - 1] = PointerGetDatum(dictval);
 	tup = heap_form_tuple(RelationGetDescr(drel), values, nulls);
 	CatalogTupleInsert(drel, tup);
@@ -1003,6 +1080,10 @@ dict_check_column(Relation rel, const char *colname)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot use compression dictionaries on a system catalog")));
+	if (RELATION_IS_OTHER_TEMP(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot use compression dictionaries on temporary tables of other sessions")));
 
 	attnum = get_attnum(RelationGetRelid(rel), colname);
 	if (attnum <= 0)
@@ -1055,6 +1136,9 @@ pg_train_toast_dictionary(PG_FUNCTION_ARGS)
 	void	   *dictbuf;
 	size_t		dictlen;
 	Oid			dictid;
+	int64		trainrows;
+	MemoryContext workcxt,
+				oldcxt;
 
 	if (dict_size < DICT_MIN_SIZE || dict_size > DICT_MAX_SIZE)
 		ereport(ERROR,
@@ -1062,8 +1146,39 @@ pg_train_toast_dictionary(PG_FUNCTION_ARGS)
 				 errmsg("dictionary size must be between %d and %d bytes",
 						DICT_MIN_SIZE, DICT_MAX_SIZE)));
 
+	/*
+	 * Check ownership before taking a lock on the table, so that an
+	 * unprivileged caller (the function is executable by PUBLIC) cannot take
+	 * ShareUpdateExclusiveLock on an arbitrary relation and block its
+	 * maintenance just by failing the later ACL check, the way VACUUM and
+	 * ANALYZE check first.
+	 */
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+	{
+		char		relkind = get_rel_relkind(relid);
+
+		if (relkind == '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("relation with OID %u does not exist", relid)));
+		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(relkind),
+					   get_rel_name(relid));
+	}
+
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 	attnum = dict_check_column(rel, colname);
+
+	/*
+	 * Sampling and training allocate up to DICT_SAMPLE_FACTOR times the
+	 * dictionary size (about 100 MB at a 1 MB dictionary) plus the sizes
+	 * array and the trained dictionary.  Do it in a short-lived context so a
+	 * call across many columns or partitions in one query does not accumulate
+	 * that in the caller's (executor) context.
+	 */
+	workcxt = AllocSetContextCreate(CurrentMemoryContext,
+									"pg_train_toast_dictionary",
+									ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(workcxt);
 
 	initStringInfo(&samples);
 	sizes = palloc_array(size_t, DICT_MAX_SAMPLES);
@@ -1107,12 +1222,23 @@ pg_train_toast_dictionary(PG_FUNCTION_ARGS)
 		ereport(NOTICE,
 				(errmsg("could not train a compression dictionary for column \"%s\" from %d values",
 						colname, nsamples)));
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextDelete(workcxt);
 		table_close(rel, NoLock);
 		PG_RETURN_NULL();
 	}
 
+	/*
+	 * reltuples is -1 on a table that has never been vacuumed or analyzed;
+	 * store 0 then, so the evolution growth gate (currows * growth) is not
+	 * negative, which would make it fire on every ANALYZE.
+	 */
+	trainrows = rel->rd_rel->reltuples < 0 ? 0 : (int64) rel->rd_rel->reltuples;
 	dictid = dict_install(rel, attnum, InvalidOid, true,
-						  (int64) rel->rd_rel->reltuples, dictbuf, dictlen);
+						  trainrows, 0, dictbuf, dictlen);
+
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(workcxt);
 	table_close(rel, NoLock);
 
 	PG_RETURN_OID(dictid);
@@ -1377,7 +1503,7 @@ toast_dictionary_maybe_evolve(Relation onerel, AttrNumber attnum,
 		/* (g) adopt on a win; otherwise change nothing */
 		if (adopt)
 			dict_install(onerel, attnum, InvalidOid, true,
-						 (int64) totalrows, candbuf, candlen);
+						 (int64) totalrows, 0, candbuf, candlen);
 
 done:
 		ReleaseCurrentSubTransaction();
@@ -1421,10 +1547,13 @@ done:
 
 /*
  * binary_upgrade_add_toast_dictionary(rel regclass, attnum int2, dictid oid,
- *									   current bool, dict bytea)
+ *									   current bool, trainrows int8,
+ *									   traintime timestamptz, dict bytea)
  *
  * pg_upgrade copies the heap files as they are, and with them the dictionary
  * OIDs embedded in each datum, so dictionaries are restored with their OIDs.
+ * The evolution bookkeeping (trainrows, traintime) is carried too, so the
+ * growth and cooldown gates are unchanged across an upgrade.
  */
 Datum
 binary_upgrade_add_toast_dictionary(PG_FUNCTION_ARGS)
@@ -1433,7 +1562,9 @@ binary_upgrade_add_toast_dictionary(PG_FUNCTION_ARGS)
 	AttrNumber	attnum = PG_GETARG_INT16(1);
 	Oid			dictid = PG_GETARG_OID(2);
 	bool		current = PG_GETARG_BOOL(3);
-	bytea	   *dict = PG_GETARG_BYTEA_PP(4);
+	int64		trainrows = PG_GETARG_INT64(4);
+	TimestampTz traintime = PG_GETARG_TIMESTAMPTZ(5);
+	bytea	   *dict = PG_GETARG_BYTEA_PP(6);
 	Relation	rel;
 
 	if (!IsBinaryUpgrade)
@@ -1451,8 +1582,8 @@ binary_upgrade_add_toast_dictionary(PG_FUNCTION_ARGS)
 	if (attnum <= 0 || attnum > RelationGetNumberOfAttributes(rel))
 		elog(ERROR, "invalid attribute number %d for relation %u",
 			 attnum, relid);
-	dict_install(rel, attnum, dictid, current, 0, VARDATA_ANY(dict),
-				 VARSIZE_ANY_EXHDR(dict));
+	dict_install(rel, attnum, dictid, current, trainrows, traintime,
+				 VARDATA_ANY(dict), VARSIZE_ANY_EXHDR(dict));
 	table_close(rel, NoLock);
 
 	PG_RETURN_VOID();

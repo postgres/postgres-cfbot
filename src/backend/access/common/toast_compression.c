@@ -24,6 +24,7 @@
 #include "access/detoast.h"
 #include "access/toast_compression.h"
 #include "common/pg_lzcompress.h"
+#include "miscadmin.h"
 #include "varatt.h"
 
 /* GUC */
@@ -66,6 +67,27 @@ zstd_get_dctx(void)
 	else
 		ZSTD_DCtx_reset(zstd_dctx, ZSTD_reset_session_only);
 	return zstd_dctx;
+}
+
+/*
+ * A backend-lifetime ZSTD_CCtx for plain (non-dictionary) compression, kept
+ * for the same reason as the decompression context above: a one-shot
+ * ZSTD_compress() allocates and frees a compression context of over a
+ * megabyte for every value, which dominates a bulk load.  The dictionary
+ * path keeps its own context (dict_cctx in toast_dictionary.c).
+ */
+static ZSTD_CCtx *zstd_cctx = NULL;
+
+static ZSTD_CCtx *
+zstd_get_cctx(void)
+{
+	if (zstd_cctx == NULL)
+	{
+		zstd_cctx = ZSTD_createCCtx();
+		if (zstd_cctx == NULL)
+			elog(ERROR, "could not create zstd compression context");
+	}
+	return zstd_cctx;
 }
 #endif
 
@@ -327,11 +349,12 @@ zstd_compress_datum(const varlena *value)
 	max_size = ZSTD_compressBound(valsize);
 	tmp = (varlena *) palloc(max_size + VARHDRSZ_COMPRESSED_LONG);
 
-	len = ZSTD_compress((char *) tmp + VARHDRSZ_COMPRESSED_LONG,
-						max_size,
-						VARDATA_ANY(value),
-						valsize,
-						ZSTD_CLEVEL_DEFAULT);
+	len = ZSTD_compressCCtx(zstd_get_cctx(),
+							(char *) tmp + VARHDRSZ_COMPRESSED_LONG,
+							max_size,
+							VARDATA_ANY(value),
+							valsize,
+							ZSTD_CLEVEL_DEFAULT);
 	if (ZSTD_isError(len))
 		elog(ERROR, "zstd compression failed: %s", ZSTD_getErrorName(len));
 
@@ -448,7 +471,10 @@ zstd_decompress_datum_slice(const varlena *value, int32 slicelength)
 
 	while (outbuf.pos < outbuf.size)
 	{
-		size_t		ret = ZSTD_decompressStream(dctx, &outbuf, &inbuf);
+		size_t		ret;
+
+		CHECK_FOR_INTERRUPTS();
+		ret = ZSTD_decompressStream(dctx, &outbuf, &inbuf);
 
 		if (ZSTD_isError(ret))
 		{

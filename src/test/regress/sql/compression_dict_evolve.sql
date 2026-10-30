@@ -20,20 +20,24 @@ SET search_path TO dict_evolve, public;
 -- held-out size test is the real adoption decision.
 SET dictionary_evolution_min_interval = 0;
 
--- Two visibly different value distributions.  A dictionary trained on one
--- compresses it well and the other poorly, so switching the stored
--- distribution produces a candidate that wins the held-out test.
+-- Two visibly different value distributions, each wide enough to be TOASTed
+-- and compressed on disk (a few kB), so the test exercises real
+-- dictionary compression and not just catalog-row churn.  A dictionary
+-- trained on one compresses it well and the other poorly, so switching the
+-- stored distribution produces a candidate that wins the held-out test.
 CREATE FUNCTION docA(i int) RETURNS text LANGUAGE SQL IMMUTABLE AS $$
-  SELECT format('{"customer_id": %s, "status": "active", "region": "us-east", '
-                '"plan": "enterprise", "features": ["sso", "audit", "backup"], '
-                '"env": "production", "tier": "gold", "shard": "a-%s"}',
-                i, i % 7)
+  SELECT repeat(
+    format('{"customer_id": %s, "status": "active", "region": "us-east", '
+           '"plan": "enterprise", "features": ["sso", "audit", "backup"], '
+           '"env": "production", "tier": "gold", "shard": "a-%s"}' || chr(10),
+           i, i % 7), 40)
 $$;
 CREATE FUNCTION docB(i int) RETURNS text LANGUAGE SQL IMMUTABLE AS $$
-  SELECT format('<record seq="%s"><owner>warehouse</owner><kind>pallet</kind>'
-                '<zone>cold-storage</zone><lane>%s</lane><status>in-transit</status>'
-                '<carrier>freightways</carrier><priority>standard</priority></record>',
-                i, i % 7)
+  SELECT repeat(
+    format('<record seq="%s"><owner>warehouse</owner><kind>pallet</kind>'
+           '<zone>cold-storage</zone><lane>%s</lane><status>in-transit</status>'
+           '<carrier>freightways</carrier><priority>standard</priority></record>' || chr(10),
+           i, i % 7), 40)
 $$;
 
 CREATE TABLE evo (id int, f1 text COMPRESSION zstd_dict)
@@ -55,6 +59,12 @@ SELECT count(*) AS ndicts, count(*) FILTER (WHERE tdcurrent) AS ncurrent
 SELECT oid AS dicta FROM pg_toast_dictionary
   WHERE tdrelid = :evo_oid AND tdcurrent \gset
 
+-- Confirm the rows really are wide enough to be TOAST-compressed on disk
+-- (stored smaller than raw), so the test exercises real on-disk compression
+-- and not just catalog-row churn on sub-threshold values.
+SELECT bool_and(pg_column_size(f1) < octet_length(f1)) AS compressed_on_disk
+  FROM evo;
+
 -- Same distribution again: a re-trained candidate does not beat the current
 -- dictionary by the margin, so nothing is adopted and the catalog is quiet.
 ANALYZE evo;
@@ -62,11 +72,12 @@ SELECT count(*) AS ndicts FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
 SELECT oid = :dicta AS still_same_current FROM pg_toast_dictionary
   WHERE tdrelid = :evo_oid AND tdcurrent;
 
--- Drift: rewrite every value to distribution B (row count unchanged, so the
--- growth gate still accepts).  ANALYZE should find a candidate that beats the
--- A-trained dictionary on the held-out B sample and adopt it: the count rises
--- and the current dictionary changes.
-UPDATE evo SET f1 = docB(id);
+-- Drift: add a batch of distribution-B rows (the A rows stay, so values
+-- compressed with the A dictionary coexist with B rows on disk).  ANALYZE
+-- should find a candidate that beats the A-trained dictionary on the held-out
+-- B-dominated sample and adopt it: the count rises and the current dictionary
+-- changes.
+INSERT INTO evo SELECT g, docB(g) FROM generate_series(4001, 12000) g;
 ANALYZE evo;
 SELECT count(*) AS ndicts FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
 SELECT oid <> :dicta AS current_changed FROM pg_toast_dictionary
@@ -74,14 +85,15 @@ SELECT oid <> :dicta AS current_changed FROM pg_toast_dictionary
 SELECT oid AS dictb FROM pg_toast_dictionary
   WHERE tdrelid = :evo_oid AND tdcurrent \gset
 
+-- Both generations read back correctly: the A rows decode with the retired
+-- dictionary stamped into them, the B rows with the current one.
+SELECT bool_and(f1 = docA(id)) AS a_ok FROM evo WHERE id <= 4000;
+SELECT bool_and(f1 = docB(id)) AS b_ok FROM evo WHERE id > 4000;
+
 -- Stable again on B: ANALYZE must not churn.
 ANALYZE evo;
 SELECT oid = :dictb AS still_same_current FROM pg_toast_dictionary
   WHERE tdrelid = :evo_oid AND tdcurrent;
-
--- Every value still reads back correctly (each decodes with the dictionary
--- stamped into it, old or new).
-SELECT bool_and(f1 = docB(id)) AS all_equal FROM evo;
 
 -- Cap: with a low cap, repeated drift keeps adopting only until the cap is
 -- reached, after which evolution declines and the catalog stops growing.  The

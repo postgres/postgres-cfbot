@@ -624,6 +624,20 @@ VARDATA_COMPRESSED_GET_EXTSIZE(const void *PTR)
 }
 
 /*
+ * Raw two-bit method field of a compressed-in-line varlena, without reading
+ * the long-form method byte.  A value of VARLENA_COMPRESS_METHOD_LONG means
+ * the real method is in va_cmid, which is only present (and safe to read)
+ * when the datum is at least VARHDRSZ_COMPRESSED_LONG bytes.
+ */
+static inline uint32
+VARDATA_COMPRESSED_GET_RAW_METHOD(const void *PTR)
+{
+	const varattrib_4b *va = (const varattrib_4b *) PTR;
+
+	return va->va_compressed.va_tcinfo >> VARLENA_EXTSIZE_BITS;
+}
+
+/*
  * Compression method of a compressed-in-line varlena datum.  This handles
  * both header forms, so it always returns the actual method ID.
  */

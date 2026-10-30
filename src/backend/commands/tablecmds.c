@@ -25,6 +25,7 @@
 #include "access/sysattr.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/tupconvert.h"
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -2277,6 +2278,14 @@ ExecuteTruncateGuts(List *explicit_rels,
 			 */
 			reindex_relation(NULL, heap_relid, REINDEX_REL_PROCESS_TOAST,
 							 &reindex_params);
+
+			/*
+			 * TRUNCATE just discarded every row, so no value references any
+			 * compression dictionary of this relation's columns any more.
+			 * Retire the non-current ones, as a table rewrite would; the
+			 * current dictionary stays for new rows.
+			 */
+			toast_dictionary_retire(heap_relid);
 		}
 
 		pgstat_count_truncate(rel);

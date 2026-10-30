@@ -36,7 +36,7 @@
  * the value did not get smaller.  decompress() and decompress_slice() read a
  * datum this codec produced.
  *
- * train() and compressed_size() exist only for automatic dictionary
+ * train() and compressed_total() exist only for automatic dictionary
  * evolution (see toast_dictionary_maybe_evolve()).  train() builds a
  * dictionary of at most max_dict_bytes from nsamples concatenated samples
  * (sizes[] gives each one's length), writing it into dictbuf and returning
