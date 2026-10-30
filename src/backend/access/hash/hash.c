@@ -902,7 +902,6 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 			{
 				xl_hash_delete xlrec;
 
-				xlrec.bucket_blkno = bucket_blkno;
 				xlrec.clear_dead_marking = clear_dead_marking;
 				xlrec.is_primary_bucket_page = (buf == bucket_buf);
 
@@ -912,9 +911,12 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 				/*
 				 * If buf is an overflow page, the primary bucket page is not
 				 * changed and we hold only a pin on it, so it is not
-				 * registered.  Replay takes a cleanup lock on bucket_blkno
-				 * instead.
+				 * registered.  Append its block number instead, and replay
+				 * takes a cleanup lock on it.  It is not needed otherwise.
 				 */
+				if (!xlrec.is_primary_bucket_page)
+					XLogRegisterData(&bucket_blkno, sizeof(BlockNumber));
+
 				XLogRegisterBuffer(1, buf, REGBUF_STANDARD);
 				XLogRegisterBufData(1, deletable,
 									ndeletable * sizeof(OffsetNumber));
