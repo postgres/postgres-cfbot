@@ -3151,29 +3151,29 @@ add_child_rel_pathkey_equivalences(PlannerInfo *root, RelOptInfo *child_rel,
  * EquivalenceMembers for.
  * 'child_tlist' is the target list for the setop child relation.  The target
  * list expressions are what we add as EquivalenceMembers.
- * 'setop_pathkeys' is a list of PathKeys which must contain an entry for each
- * non-resjunk target in 'child_tlist'.
+ * 'setop_pathkeys' is a list of PathKeys which may contain an entry for each
+ * non-resjunk target in 'child_tlist', or a subset when UNION DISTINCT ON is
+ * used.
  */
 void
 add_setop_child_rel_equivalences(PlannerInfo *root, RelOptInfo *child_rel,
 								 List *child_tlist, List *setop_pathkeys)
 {
 	ListCell   *lc;
-	ListCell   *lc2 = list_head(setop_pathkeys);
 
-	foreach(lc, child_tlist)
+	foreach(lc, setop_pathkeys)
 	{
-		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		PathKey    *pk = lfirst_node(PathKey, lc);
+		Index		ref = pk->pk_eclass->ec_sortref;
+		TargetEntry *tle;
 		EquivalenceMember *parent_em;
-		PathKey    *pk;
 
-		if (tle->resjunk)
-			continue;
+		if (ref == 0 || ref > list_length(child_tlist))
+			elog(ERROR, "could not find target entry for setop pathkey ref %u", ref);
 
-		if (lc2 == NULL)
-			elog(ERROR, "too few pathkeys for set operation");
+		tle = list_nth_node(TargetEntry, child_tlist, ref - 1);
+		Assert(!tle->resjunk && tle->ressortgroupref == ref);
 
-		pk = lfirst_node(PathKey, lc2);
 		parent_em = linitial(pk->pk_eclass->ec_members);
 
 		/*
@@ -3192,18 +3192,25 @@ add_setop_child_rel_equivalences(PlannerInfo *root, RelOptInfo *child_rel,
 							parent_em,
 							exprType((Node *) tle->expr),
 							child_rel->relid);
-
-		lc2 = lnext(setop_pathkeys, lc2);
 	}
 
 	/*
-	 * transformSetOperationStmt() ensures that the targetlist never contains
-	 * any resjunk columns, so all eclasses that exist in 'root' must have
-	 * received a new member in the loop above.  Add them to the child_rel's
-	 * eclass_indexes.
+	 * Add each EquivalenceClass that received a new child member for
+	 * child_rel to child_rel->eclass_indexes.  When UNION DISTINCT ON or
+	 * nested set operations are used, root->eq_classes may contain ECs that
+	 * are not in setop_pathkeys and thus have no child member for child_rel.
 	 */
-	child_rel->eclass_indexes = bms_add_range(child_rel->eclass_indexes, 0,
-											  list_length(root->eq_classes) - 1);
+	foreach(lc, root->eq_classes)
+	{
+		EquivalenceClass *ec = lfirst_node(EquivalenceClass, lc);
+
+		if (ec->ec_childmembers != NULL &&
+			child_rel->relid < ec->ec_childmembers_size &&
+			ec->ec_childmembers[child_rel->relid] != NIL)
+			child_rel->eclass_indexes =
+				bms_add_member(child_rel->eclass_indexes,
+							   foreach_current_index(lc));
+	}
 }
 
 /*
