@@ -315,6 +315,7 @@ typedef struct _tableInfo
 	char	   *reloptions;		/* options specified by WITH (...) */
 	char	   *checkoption;	/* WITH CHECK OPTION, if any */
 	char	   *toast_reloptions;	/* WITH options for the TOAST table */
+	char	   *amreloptions;	/* options specific to the access method */
 	bool		hasindex;		/* does it have any indexes? */
 	bool		hasrules;		/* does it have any rules? */
 	bool		hastriggers;	/* does it have any triggers? */
