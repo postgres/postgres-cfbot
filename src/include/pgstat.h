@@ -236,6 +236,8 @@ typedef struct PgStat_RelationStatus
 			struct PgStat_TableXactStatus *trans;	/* lowest subxact's counts */
 			PgStat_TableCounts counts;	/* event counts to be sent */
 			PgStat_TableCountsXact counts_xact; /* transactional counts */
+			/* pending tuples_inserted already covered by a VACUUM */
+			PgStat_Counter ins_before_vacuum;
 		}			tab;
 
 		/* index counters */
