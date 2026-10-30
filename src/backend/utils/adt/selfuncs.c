@@ -272,6 +272,15 @@ static bool get_actual_variable_endpoint(Relation heapRel,
 static RelOptInfo *find_join_input_rel(PlannerInfo *root, Relids relids);
 static double btcost_correlation(IndexOptInfo *index,
 								 VariableStatData *vardata);
+static bool mergejoin_vardata_equivalent(PlannerInfo *root,
+										 VariableStatData *vardata1,
+										 VariableStatData *vardata2);
+static void mergejoinscansel_internal(PlannerInfo *root, Node *clause,
+									  Oid opfamily, CompareType cmptype,
+									  bool nulls_first, bool allow_shortcut,
+									  bool *used_shortcut,
+									  Selectivity *leftstart, Selectivity *leftend,
+									  Selectivity *rightstart, Selectivity *rightend);
 
 /* Define support routines for MCV hash tables */
 #define SH_PREFIX				MCVHashTable
@@ -3291,6 +3300,144 @@ scalargejoinsel(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
 }
 
+/*
+ * mergejoin_vardata_equivalent
+ *
+ * Check whether the two inputs of mergejoinscansel(), as examined by
+ * examine_variable(), are equivalent: they refer to the same column (or the
+ * same expression) of the same plain relation, possibly through different
+ * RTEs.  This covers self-joins, and also subqueries and views that have been
+ * pulled up into the current query, since at this point their Vars reference
+ * the underlying relation's RTE directly.
+ *
+ * If this returns true, every get_variable_range() and scalarineqsel() call
+ * that mergejoinscansel() makes for the two inputs has identical inputs, and
+ * so returns identical results.  To that end we require:
+ *
+ * - a valid statsTuple, and the same pointer for both: both sides use the
+ *	 same statistics (histogram, MCVs, stanullfrac);
+ *
+ * - the same vartype: ineq_histogram_selectivity() passes it to
+ *	 convert_to_scalar().  It is the type of the expression before
+ *	 RelabelTypes are stripped, so it can differ even for the same column;
+ *
+ * - the same acl_ok: it decides whether statistic_proc_security_check() lets
+ *	 non-leakproof operators be applied to the statistics;
+ *
+ * - RTE_RELATION on both sides, with the same relid and inh: inh selects
+ *	 which statistics (stainherit) are used.  Requiring RTE_RELATION excludes
+ *	 Vars of subqueries, which may also reach the same statistics of an
+ *	 underlying relation;
+ *
+ * - for Vars, the same varattno, and varnullingrels either empty on both
+ *	 sides or nonempty on both.  match_index_to_operand() accepts only Vars
+ *	 with empty varnullingrels, which determines whether
+ *	 get_actual_variable_range() can probe an index for the actual min/max.
+ *	 The contents of a nonempty set do not matter, so they need not be equal;
+ *
+ * - for other expressions, equal() after replacing rel1's varno with rel2's.
+ *	 This requires identical nullingrels, which is stricter than needed; it
+ *	 can only miss the optimization, not produce a wrong answer.
+ *
+ * The remaining fields compared (atttype, atttypmod, isunique, pages, tuples,
+ * relkind, etc.) are implied by the conditions above and are checked only for
+ * safety.  Syntactic identifiers (varnosyn, varattnosyn) and parse locations
+ * are ignored.
+ *
+ * Note: if any of the functions mentioned above change what their results
+ * depend on, this function may need to be adjusted too.
+ */
+static bool
+mergejoin_vardata_equivalent(PlannerInfo *root,
+							 VariableStatData *vardata1,
+							 VariableStatData *vardata2)
+{
+	RelOptInfo *rel1;
+	RelOptInfo *rel2;
+	RangeTblEntry *rte1;
+	RangeTblEntry *rte2;
+
+	/* Both sides must use the same valid statistics */
+	if (!HeapTupleIsValid(vardata1->statsTuple) ||
+		vardata1->statsTuple != vardata2->statsTuple)
+		return false;
+	/* vartype and acl_ok affect the estimates; the rest are for safety */
+	if (vardata1->vartype != vardata2->vartype ||
+		vardata1->atttype != vardata2->atttype ||
+		vardata1->atttypmod != vardata2->atttypmod ||
+		vardata1->isunique != vardata2->isunique ||
+		vardata1->acl_ok != vardata2->acl_ok)
+		return false;
+
+	/*
+	 * Both sides must be plain relations.  The last three fields are implied
+	 * by the same relation and are checked only for safety.
+	 */
+	rel1 = vardata1->rel;
+	rel2 = vardata2->rel;
+	if (!rel1 || !rel2 ||
+		rel1->rtekind != RTE_RELATION ||
+		rel2->rtekind != RTE_RELATION ||
+		rel1->reltablespace != rel2->reltablespace ||
+		rel1->pages != rel2->pages ||
+		rel1->tuples != rel2->tuples)
+		return false;
+
+	rte1 = planner_rt_fetch(rel1->relid, root);
+	rte2 = planner_rt_fetch(rel2->relid, root);
+
+	/* Same relation, and same inh (which selects the statistics used) */
+	if (!rte1->relid ||
+		rte1->relid != rte2->relid ||
+		rte1->rtekind != RTE_RELATION ||
+		rte2->rtekind != RTE_RELATION ||
+		rte1->relkind != rte2->relkind ||
+		rte1->inh != rte2->inh)
+		return false;
+
+	/* Both sides must have an expression, of the same node type */
+	if (!vardata1->var || !vardata2->var ||
+		nodeTag(vardata1->var) != nodeTag(vardata2->var))
+		return false;
+
+	if (IsA(vardata1->var, Var))
+	{
+		Var		   *var1;
+		Var		   *var2;
+
+		var1 = (Var *) vardata1->var;
+		var2 = (Var *) vardata2->var;
+
+		/*
+		 * Like _equalVar(), but ignoring varno and location.  For
+		 * varnullingrels only emptiness must match; see above.  Vars in a
+		 * join clause always have varlevelsup 0 and the default
+		 * varreturningtype, so those checks, like the ones on vartype,
+		 * vartypmod and varcollid, are only for safety.
+		 */
+		return (var1->varno > 0 &&
+				var1->varattno == var2->varattno &&
+				var1->vartype == var2->vartype &&
+				var1->vartypmod == var2->vartypmod &&
+				var1->varcollid == var2->varcollid &&
+				((var1->varnullingrels == NULL) == (var2->varnullingrels == NULL)) &&
+				var1->varlevelsup == 0 && var2->varlevelsup == 0 &&
+				var1->varreturningtype == var2->varreturningtype);
+	}
+	else
+	{
+		/*
+		 * Other expressions: compare after replacing rel1's varno with
+		 * rel2's.  ChangeVarNodes() modifies the tree in place, so work on a
+		 * copy.
+		 */
+		Node	   *node = copyObject(vardata1->var);
+
+		ChangeVarNodes(node, rel1->relid, rel2->relid, 0);
+
+		return equal(node, vardata2->var);
+	}
+}
 
 /*
  * mergejoinscansel			- Scan selectivity of merge join.
@@ -3318,6 +3465,51 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 				 Oid opfamily, CompareType cmptype, bool nulls_first,
 				 Selectivity *leftstart, Selectivity *leftend,
 				 Selectivity *rightstart, Selectivity *rightend)
+{
+	bool		used_shortcut;
+
+	mergejoinscansel_internal(root, clause, opfamily, cmptype, nulls_first,
+							  true, &used_shortcut,
+							  leftstart, leftend, rightstart, rightend);
+
+#ifdef USE_ASSERT_CHECKING
+
+	/*
+	 * mergejoin_vardata_equivalent() relies on what the full computation
+	 * depends on.  If the shortcut was taken, verify that the full
+	 * computation gives the same answer, so that any drift between the two is
+	 * caught by the regression tests.
+	 */
+	if (used_shortcut)
+	{
+		Selectivity ls,
+					le,
+					rs,
+					re;
+		bool		dummy;
+
+		mergejoinscansel_internal(root, clause, opfamily, cmptype, nulls_first,
+								  false, &dummy, &ls, &le, &rs, &re);
+		Assert(*leftstart == ls && *leftend == le &&
+			   *rightstart == rs && *rightend == re);
+	}
+#endif
+}
+
+/*
+ * mergejoinscansel_internal
+ *		Workhorse for mergejoinscansel().
+ *
+ * If allow_shortcut is false, the shortcut for equivalent inputs is not
+ * taken.  *used_shortcut is set to whether it was taken.
+ */
+static void
+mergejoinscansel_internal(PlannerInfo *root, Node *clause,
+						  Oid opfamily, CompareType cmptype,
+						  bool nulls_first, bool allow_shortcut,
+						  bool *used_shortcut,
+						  Selectivity *leftstart, Selectivity *leftend,
+						  Selectivity *rightstart, Selectivity *rightend)
 {
 	Node	   *left,
 			   *right;
@@ -3352,6 +3544,7 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 	/* XXX should default "start" fraction be a bit more than 0? */
 	*leftstart = *rightstart = 0.0;
 	*leftend = *rightend = 1.0;
+	*used_shortcut = false;
 
 	/* Deconstruct the merge clause */
 	if (!is_opclause(clause))
@@ -3495,6 +3688,42 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 		!OidIsValid(revleop))
 		goto fail;				/* insufficient info in catalogs */
 
+	/*
+	 * If both inputs are the same column of the same relation (see
+	 * mergejoin_vardata_equivalent()) and the operator is not cross-type,
+	 * then the operator lookups above reduce to lstatop == rstatop, leop ==
+	 * revleop and ltop == revltop, so every computation below would be done
+	 * with identical inputs for the left and right variables:
+	 *
+	 * - both get_variable_range() calls return the same range, so leftmin ==
+	 * rightmin and leftmax == rightmax;
+	 *
+	 * - hence each pair of scalarineqsel() calls returns equal estimates,
+	 * which the "exactly equal estimates" rules below then discard, leaving
+	 * the defaults *leftend = *rightend = 1.0 and *leftstart = *rightstart =
+	 * 0.0.
+	 *
+	 * So we can skip all of that.  If the sort order is not nulls-first, the
+	 * defaults are the answer.  Otherwise we must still add stanullfrac, but
+	 * only if get_variable_range() would have succeeded, since the full path
+	 * gives up without accounting for nulls when it fails.  One call suffices
+	 * because both sides are equivalent, and we pass NULL for min and max
+	 * because we don't need the actual values.
+	 */
+	if (allow_shortcut &&
+		mergejoin_vardata_equivalent(root, &leftvar, &rightvar) &&
+		op_lefttype == op_righttype && lstatop == rstatop &&
+		leop == revleop && ltop == revltop)
+	{
+		*used_shortcut = true;
+
+		if (!nulls_first ||
+			!get_variable_range(root, &leftvar, lstatop, collation, NULL, NULL))
+			goto fail;
+
+		goto do_nulls_first;
+	}
+
 	/* Try to get ranges of both inputs */
 	if (!isgt)
 	{
@@ -3574,6 +3803,8 @@ mergejoinscansel(PlannerInfo *root, Node *clause,
 		*rightstart = 0.0;
 	else
 		*leftstart = *rightstart = 0.0;
+
+do_nulls_first:
 
 	/*
 	 * If the sort order is nulls-first, we're going to have to skip over any
@@ -6837,6 +7068,12 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
  *		If successful, store values in *min and *max, and return true.
  *		If no data available, return false.
  *
+ * min and max may both be NULL (they must be both NULL or both non-NULL),
+ * in which case we only report whether a range is available, without
+ * computing it.  This saves the datumCopy() calls and the comparisons
+ * against the statistics values; the result is the same as with non-NULL
+ * pointers.
+ *
  * sortop is the "<" comparison operator to use.  This should generally
  * be "<" not ">", as only the former is likely to be found in pg_statistic.
  * The collation must be specified too.
@@ -6898,8 +7135,11 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata,
 	{
 		if (sslot.stacoll == collation && sslot.nvalues > 0)
 		{
-			tmin = datumCopy(sslot.values[0], typByVal, typLen);
-			tmax = datumCopy(sslot.values[sslot.nvalues - 1], typByVal, typLen);
+			if (min && max)
+			{
+				tmin = datumCopy(sslot.values[0], typByVal, typLen);
+				tmax = datumCopy(sslot.values[sslot.nvalues - 1], typByVal, typLen);
+			}
 			have_data = true;
 		}
 		free_attstatsslot(&sslot);
@@ -6916,9 +7156,12 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata,
 						 STATISTIC_KIND_HISTOGRAM, InvalidOid,
 						 ATTSTATSSLOT_VALUES))
 	{
-		get_stats_slot_range(&sslot, opfuncoid, &opproc,
-							 collation, typLen, typByVal,
-							 &tmin, &tmax, &have_data);
+		if (min && max)
+			get_stats_slot_range(&sslot, opfuncoid, &opproc,
+								 collation, typLen, typByVal,
+								 &tmin, &tmax, &have_data);
+		else if (sslot.nvalues > 0)
+			have_data = true;
 		free_attstatsslot(&sslot);
 	}
 
@@ -6951,14 +7194,22 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata,
 		}
 
 		if (use_mcvs)
-			get_stats_slot_range(&sslot, opfuncoid, &opproc,
-								 collation, typLen, typByVal,
-								 &tmin, &tmax, &have_data);
+		{
+			if (min && max)
+				get_stats_slot_range(&sslot, opfuncoid, &opproc,
+									 collation, typLen, typByVal,
+									 &tmin, &tmax, &have_data);
+			else if (sslot.nvalues > 0)
+				have_data = true;
+		}
 		free_attstatsslot(&sslot);
 	}
 
-	*min = tmin;
-	*max = tmax;
+	if (min && max)
+	{
+		*min = tmin;
+		*max = tmax;
+	}
 	return have_data;
 }
 
