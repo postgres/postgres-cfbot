@@ -210,23 +210,51 @@ pg_eucjp_dsplen(const unsigned char *s)
 
 /*
  * EUC_KR
+ *
+ * Per KS X 2901 (formerly KS C 5861-1992), EUC-KR designates only G0
+ * (ASCII) and G1 (KS X 1001).  G2 and G3 are not designated, so the
+ * single-shift codes SS2 (0x8E) and SS3 (0x8F) never appear as lead
+ * bytes and no 3-byte sequence is ever valid.  These routines therefore
+ * implement EUC-KR directly rather than delegating to the shared
+ * pg_euc_* helpers, which include SS2/SS3 handling for encodings that
+ * designate G2/G3.
  */
 static int
 pg_euckr2wchar_with_len(const unsigned char *from, pg_wchar *to, int len)
 {
-	return pg_euc2wchar_with_len(from, to, len);
+	int			cnt = 0;
+
+	while (len > 0 && *from)
+	{
+		if (IS_HIGHBIT_SET(*from))	/* G1: KS X 1001, 2 bytes */
+		{
+			MB2CHAR_NEED_AT_LEAST(len, 2);
+			*to = *from++ << 8;
+			*to |= *from++;
+			len -= 2;
+		}
+		else					/* G0: ASCII */
+		{
+			*to = *from++;
+			len--;
+		}
+		to++;
+		cnt++;
+	}
+	*to = 0;
+	return cnt;
 }
 
 static int
 pg_euckr_mblen(const unsigned char *s)
 {
-	return pg_euc_mblen(s);
+	return IS_HIGHBIT_SET(*s) ? 2 : 1;
 }
 
 static int
 pg_euckr_dsplen(const unsigned char *s)
 {
-	return pg_euc_dsplen(s);
+	return IS_HIGHBIT_SET(*s) ? 2 : pg_ascii_dsplen(s);
 }
 
 /*
@@ -1866,7 +1894,7 @@ const pg_wchar_tbl pg_wchar_table[] = {
 	[PG_SQL_ASCII] = {pg_ascii2wchar_with_len, pg_wchar2single_with_len, pg_ascii_mblen, pg_ascii_dsplen, pg_ascii_verifychar, pg_ascii_verifystr, 1},
 	[PG_EUC_JP] = {pg_eucjp2wchar_with_len, pg_wchar2euc_with_len, pg_eucjp_mblen, pg_eucjp_dsplen, pg_eucjp_verifychar, pg_eucjp_verifystr, 3},
 	[PG_EUC_CN] = {pg_euccn2wchar_with_len, pg_wchar2euc_with_len, pg_euccn_mblen, pg_euccn_dsplen, pg_euccn_verifychar, pg_euccn_verifystr, 3},
-	[PG_EUC_KR] = {pg_euckr2wchar_with_len, pg_wchar2euc_with_len, pg_euckr_mblen, pg_euckr_dsplen, pg_euckr_verifychar, pg_euckr_verifystr, 3},
+	[PG_EUC_KR] = {pg_euckr2wchar_with_len, pg_wchar2euc_with_len, pg_euckr_mblen, pg_euckr_dsplen, pg_euckr_verifychar, pg_euckr_verifystr, 2},
 	[PG_EUC_TW] = {pg_euctw2wchar_with_len, pg_wchar2euc_with_len, pg_euctw_mblen, pg_euctw_dsplen, pg_euctw_verifychar, pg_euctw_verifystr, 4},
 	[PG_EUC_JIS_2004] = {pg_eucjp2wchar_with_len, pg_wchar2euc_with_len, pg_eucjp_mblen, pg_eucjp_dsplen, pg_eucjp_verifychar, pg_eucjp_verifystr, 3},
 	[PG_UTF8] = {pg_utf2wchar_with_len, pg_wchar2utf_with_len, pg_utf_mblen, pg_utf_dsplen, pg_utf8_verifychar, pg_utf8_verifystr, 4},
