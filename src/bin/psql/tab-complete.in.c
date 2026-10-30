@@ -2475,6 +2475,27 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("ADD", "ALTER", "DISABLE TRIGGER", "DROP", "ENABLE",
 					  "INHERIT", "NO INHERIT", "OPTIONS", "OWNER TO",
 					  "RENAME", "SET", "VALIDATE CONSTRAINT");
+	/* ALTER FOREIGN TABLE <name> RENAME (TO|COLUMN|CONSTRAINT) */
+	else if (Matches("ALTER", "FOREIGN", "TABLE", MatchAny, "RENAME"))
+		COMPLETE_WITH_ATTR_PLUS(prev2_wd, "TO", "COLUMN", "CONSTRAINT");
+	/* ALTER FOREIGN TABLE <name> RENAME <column>, provide "TO" */
+	else if (Matches("ALTER", "FOREIGN", "TABLE", MatchAny, "RENAME", MatchAnyExcept("COLUMN|CONSTRAINT|TO")))
+		COMPLETE_WITH("TO");
+	/* ALTER FOREIGN TABLE <name> RENAME (COLUMN|CONSTRAINT) <sth>, provide "TO" */
+	else if (Matches("ALTER", "FOREIGN", "TABLE", MatchAny, "RENAME", "COLUMN|CONSTRAINT", MatchAnyExcept("TO")))
+		COMPLETE_WITH("TO");
+	/* ALTER FOREIGN TABLE <name> (ADD|DROP), provide "COLUMN" or "CONSTRAINT" */
+	else if (Matches("ALTER", "FOREIGN", "TABLE", MatchAny, "ADD|DROP"))
+		COMPLETE_WITH("COLUMN", "CONSTRAINT");
+	/* ALTER FOREIGN TABLE <name> (DROP|RENAME) COLUMN, provide list of columns */
+	else if (Matches("ALTER", "FOREIGN", "TABLE", MatchAny, "DROP|RENAME", "COLUMN"))
+		COMPLETE_WITH_ATTR(prev3_wd);
+	/* ALTER FOREIGN TABLE <name> (DROP|RENAME) CONSTRAINT, provide list of constraints */
+	else if (Matches("ALTER", "FOREIGN", "TABLE", MatchAny, "DROP|RENAME", "CONSTRAINT"))
+	{
+		set_completion_reference(prev3_wd);
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_constraint_of_table);
+	}
 
 	/* ALTER INDEX */
 	else if (Matches("ALTER", "INDEX"))
