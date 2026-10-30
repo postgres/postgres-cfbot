@@ -37,6 +37,7 @@
 #include "catalog/pg_enum.h"
 #include "catalog/storage.h"
 #include "commands/async.h"
+#include "commands/explain_running.h"
 #include "commands/tablecmds.h"
 #include "commands/trigger.h"
 #include "common/pg_prng.h"
@@ -218,6 +219,7 @@ typedef struct TransactionStateData
 	bool		parallelChildXact;	/* is any parent transaction parallel? */
 	bool		chain;			/* start a new block after this one */
 	bool		topXidLogged;	/* for a subxact: is top-level XID logged? */
+	QueryDesc  *queryDesc;		/* my current QueryDesc */
 	struct TransactionStateData *parent;	/* back link to parent */
 } TransactionStateData;
 
@@ -251,6 +253,7 @@ static TransactionStateData TopTransactionStateData = {
 	.state = TRANS_DEFAULT,
 	.blockState = TBLOCK_DEFAULT,
 	.topXidLogged = false,
+	.queryDesc = NULL,
 };
 
 /*
@@ -936,6 +939,27 @@ GetCurrentTransactionNestLevel(void)
 	return s->nestingLevel;
 }
 
+/*
+ * SetCurrentQueryDesc
+ */
+void
+SetCurrentQueryDesc(QueryDesc *queryDesc)
+{
+	TransactionState s = CurrentTransactionState;
+
+	s->queryDesc = queryDesc;
+}
+
+/*
+ * GetCurrentQueryDesc
+ */
+QueryDesc *
+GetCurrentQueryDesc(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	return s->queryDesc;
+}
 
 /*
  *	TransactionIdIsCurrentTransactionId
@@ -2969,6 +2993,10 @@ AbortTransaction(void)
 
 	/* Reset snapshot export state. */
 	SnapBuildResetExportedSnapshotState();
+
+	/* Discard the current QueryDesc and any unfinished plan logging request. */
+	SetCurrentQueryDesc(NULL);
+	AbortLogQueryPlanRequest();
 
 	/*
 	 * If this xact has started any unfinished parallel operation, clean up
@@ -5381,6 +5409,15 @@ AbortSubTransaction(void)
 
 	/* Reset logical streaming state. */
 	ResetLogicalStreamingState();
+
+	/*
+	 * Reset current QueryDesc. Note that even after this reset, it's still
+	 * possible to obtain the parent transaction's query plans, since they are
+	 * preserved in standard_ExecutorRun().
+	 * Discard any unfinished plan logging request as well.
+	 */
+	SetCurrentQueryDesc(NULL);
+	AbortLogQueryPlanRequest();
 
 	/*
 	 * No need for SnapBuildResetExportedSnapshotState() here, snapshot
