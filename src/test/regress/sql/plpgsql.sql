@@ -2183,6 +2183,12 @@ select missing_return_expr();
 drop function void_return_expr();
 drop function missing_return_expr();
 
+-- unterminated constructs should complain about the missing terminator
+do $$ begin if true $$;
+do $$ begin while true $$;
+do $$ begin case 1 $$;
+do $$ declare x int; begin x := 1 $$;
+
 --
 -- EXECUTE ... INTO test
 --

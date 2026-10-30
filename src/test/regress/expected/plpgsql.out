@@ -2557,6 +2557,23 @@ ERROR:  control reached end of function without RETURN
 CONTEXT:  PL/pgSQL function missing_return_expr()
 drop function void_return_expr();
 drop function missing_return_expr();
+-- unterminated constructs should complain about the missing terminator
+do $$ begin if true $$;
+ERROR:  missing "THEN" at end of SQL expression
+LINE 1: do $$ begin if true $$;
+                            ^
+do $$ begin while true $$;
+ERROR:  missing "LOOP" at end of SQL expression
+LINE 1: do $$ begin while true $$;
+                               ^
+do $$ begin case 1 $$;
+ERROR:  missing "WHEN" at end of SQL expression
+LINE 1: do $$ begin case 1 $$;
+                           ^
+do $$ declare x int; begin x := 1 $$;
+ERROR:  missing ";" at end of SQL statement
+LINE 1: do $$ declare x int; begin x := 1 $$;
+                                          ^
 --
 -- EXECUTE ... INTO test
 --
