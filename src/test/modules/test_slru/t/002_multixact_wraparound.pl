@@ -40,7 +40,7 @@ my $slru_pages_per_segment = $1;
 my $multixact_offsets_per_page = $blcksz / 8;   # sizeof(MultiXactOffset) == 8
 my $segno =
   int(0xFFFFFFF8 / $multixact_offsets_per_page / $slru_pages_per_segment);
-my $slru_file = sprintf('%s/pg_multixact/offsets/%04X', $node_pgdata, $segno);
+my $slru_file = sprintf('%s/pg_multixact/offsets/%015X', $node_pgdata, $segno);
 open my $fh, ">", $slru_file
   or die "could not open \"$slru_file\": $!";
 binmode $fh;
@@ -50,8 +50,8 @@ syswrite($fh, "\0" x $bytes_per_seg) == $bytes_per_seg
 close $fh;
 
 # remove old file
-unlink("$node_pgdata/pg_multixact/offsets/0000")
-  or die "could not unlink \"$node_pgdata/pg_multixact/offsets/0000\": $!";
+unlink("$node_pgdata/pg_multixact/offsets/000000000000000")
+  or die "could not unlink \"$node_pgdata/pg_multixact/offsets/000000000000000\": $!";
 
 # Consume multixids to wrap around.  We start at 0xFFFFFFF8, so after
 # creating 16 multixacts we should definitely have wrapped around.
