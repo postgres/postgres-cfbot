@@ -3229,6 +3229,28 @@ ninja install
       </listitem>
      </varlistentry>
 
+     <varlistentry id="configure-etw-meson">
+      <term><option>-Detw={ auto | enabled | disabled }</option></term>
+      <listitem>
+       <para>
+        <indexterm>
+         <primary>ETW</primary>
+        </indexterm>
+        On <productname>Windows</productname>, enabling this compiles
+        <productname>PostgreSQL</productname> with support for emitting its
+        probes as Event Tracing for Windows (ETW) events.  It requires
+        <filename>&lt;TraceLoggingProvider.h&gt;</filename> from a recent
+        <productname>Windows SDK</productname>, so it is available when
+        building with <productname>Visual Studio</productname> but not with
+        <productname>MinGW</productname>; with <literal>auto</literal>, builds
+        that lack the header keep the empty probe macros.  This option has no
+        effect on other platforms, and is mutually exclusive with
+        <option>-Ddtrace</option>.  See <xref linkend="dynamic-trace"/> for
+        more information.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="configure-injection-points-meson">
       <term><option>-Dinjection_points={ true | false }</option></term>
       <listitem>
