@@ -2502,9 +2502,25 @@ SELECT * FROM ... WHERE (replica_identity->>'r')::regclass[] = '{pg_class}';  --
 SELECT * FROM pg_conflict.pg_conflict_log_16392 WHERE has_omitted_values;
 </programlisting>
      A value omitted this way cannot be recovered from the conflict log table.
+    </para>
+
+    <para>
      Some limit is needed because <literal>replica_identity</literal> is a
      <type>json</type> value, which cannot exceed 1GB, and the text of a value
-     can be much longer than the value itself.
+     can be much longer than the value itself. However, the 64kB limit is
+     applied only after a key value's text representation has been produced,
+     so it limits how much text is kept in the conflict log table but does not
+     stop that text from exceeding 1GB in the first place. Normally this
+     cannot happen, because the publisher had to produce the same text, within
+     the same 1GB limit, in order to send the value. That does not hold when,
+     for example, the key column has a different data type on the subscriber,
+     the subscription uses
+     <link linkend="sql-createsubscription-params-with-binary"><literal>binary</literal></link>
+     mode so the value is not sent as text, or the subscriber's
+     <xref linkend="guc-bytea-output"/> or
+     <xref linkend="guc-quote-all-identifiers"/> setting differs from the
+     publisher's. In such cases the text can exceed 1GB, and the apply worker
+     fails with an error when it tries to log the conflict.
     </para>
    </sect3>
   </sect2>

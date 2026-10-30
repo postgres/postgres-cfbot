@@ -1132,8 +1132,9 @@ build_index_key_json(EState *estate, Relation localrel,
 	 * unrelated to the size of the value we received, and a small key could
 	 * produce a json value over the 1GB limit and fail the apply worker.
 	 * Rendering each value with its type's output function keeps us to the
-	 * representation the publisher sent, and matches what the server log does
-	 * in BuildIndexValueDescription().
+	 * representation the publisher sent (when the column types and output
+	 * settings match, see below), and matches what the server log does in
+	 * BuildIndexValueDescription().
 	 *
 	 * Only the key attributes are recorded. FormIndexDatum() above also fills
 	 * in any non-key (INCLUDE) columns, but those are not part of the replica
@@ -1184,6 +1185,15 @@ build_index_key_json(EState *estate, Relation localrel,
 			 * instead index's tupleDesc.
 			 */
 			getTypeOutputInfo(indexDesc->rd_opcintype[i], &outfuncoid, &typisvarlena);
+
+			/*
+			 * XXX The cap below is checked only after the value is rendered.
+			 * The publisher rendered the same value to send it, which bounds
+			 * its length, unless the column types differ, binary = true, or
+			 * the apply worker's bytea_output or quote_all_identifiers
+			 * differs. Then the render can exceed 1GB and error out the apply
+			 * worker.
+			 */
 			outputstr = OidOutputFunctionCall(outfuncoid, values[i]);
 			outputlen = strlen(outputstr);
 
