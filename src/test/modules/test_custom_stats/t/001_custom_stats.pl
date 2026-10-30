@@ -114,17 +114,42 @@ foreach my $stats_kind (@var_stats_kinds)
 		"entry4|3|Test entry 4",
 		"variable-sized stats of entry4 for $kind_name");
 
-	# Test drop of variable-sized stats.
+	# Test drop of variable-sized stats via pgstat_drop_entry().
 	$node->safe_psql('postgres',
 		q(select * from test_custom_stats_var_drop('entry3')));
 	$result = $node->safe_psql('postgres',
 		q(select * from test_custom_stats_var_report('entry3')));
 	is($result, "", "entry3 not found after drop for $kind_name");
+
+	# In the shared hash case, keep a relation stats entry of a different kind
+	# around to exercise filtering by kind before the callback is called.
+	if ($own_hash eq 'f')
+	{
+		$node->safe_psql('postgres',
+			q(CREATE TABLE test_custom_stats_shared_hash_rel(a int);
+			  INSERT INTO test_custom_stats_shared_hash_rel VALUES (1);
+			  SELECT pg_stat_force_next_flush()));
+		$result = $node->safe_psql('postgres',
+			q(SELECT n_tup_ins FROM pg_stat_user_tables
+			  WHERE relname = 'test_custom_stats_shared_hash_rel'));
+		is($result, "1", "relation stats entry exists in shared hash for $kind_name");
+	}
+
+	# Test drop of variable-sized stats via pgstat_drop_matching_entries().
 	$node->safe_psql('postgres',
-		q(select * from test_custom_stats_var_drop('entry4')));
+		q(select * from test_custom_stats_var_drop_matching('entry4')));
 	$result = $node->safe_psql('postgres',
 		q(select * from test_custom_stats_var_report('entry4')));
 	is($result, "", "entry4 not found after drop for $kind_name");
+	if ($own_hash eq 'f')
+	{
+		# The relation stats entry should survive the custom stats drop.
+		$result = $node->safe_psql('postgres',
+			q(SELECT n_tup_ins FROM pg_stat_user_tables
+			  WHERE relname = 'test_custom_stats_shared_hash_rel'));
+		is($result, "1",
+			"relation stats entry remains after custom stats drop for $kind_name");
+	}
 
 	# Test persistence across clean restart.
 	$node->stop();
@@ -172,6 +197,71 @@ foreach my $stats_kind (@var_stats_kinds)
 	is($result, "",
 		"variable-sized stats of entry2 lost after crash recovery for $kind_name"
 	);
+
+	# Test drop of custom variable-numbered stats via
+	# pgstat_drop_matching_entries() with an all-kinds scan and a callback.
+	$node->safe_psql('postgres',
+		q(select test_custom_stats_var_create('entry5', 'Test entry 5')));
+	$node->safe_psql('postgres',
+		q(select test_custom_stats_var_create('entry6', 'Test entry 6')));
+	my $matching_all_rel = "test_custom_stats_matching_all_rel_$own_hash";
+	$node->safe_psql('postgres',
+		"CREATE TABLE $matching_all_rel(a int);
+		 INSERT INTO $matching_all_rel VALUES (1);
+		 SELECT pg_stat_force_next_flush()");
+	$result = $node->safe_psql('postgres',
+		"SELECT n_tup_ins FROM pg_stat_user_tables
+		 WHERE relname = '$matching_all_rel'");
+	is($result, "1",
+		"relation stats entry exists before all-kinds matching drop for $kind_name");
+	$node->safe_psql('postgres',
+		q(select test_custom_stats_var_drop_matching('entry5', true)));
+	$result = $node->safe_psql('postgres',
+		q(select * from test_custom_stats_var_report('entry5')));
+	is($result, "",
+		"entry5 not found after all-kinds matching drop for $kind_name");
+	$result = $node->safe_psql('postgres',
+		q(select * from test_custom_stats_var_report('entry6')));
+	is($result, "entry6|0|Test entry 6",
+		"entry6 remains after all-kinds matching drop for $kind_name");
+	$result = $node->safe_psql('postgres',
+		"SELECT n_tup_ins FROM pg_stat_user_tables
+		 WHERE relname = '$matching_all_rel'");
+	is($result, "1",
+		"relation stats entry remains after all-kinds matching drop for $kind_name");
+
+	# Test drop of all custom variable-numbered stats entries via
+	# pgstat_drop_matching_entries() with a NULL callback.
+	$node->safe_psql('postgres',
+		q(select test_custom_stats_var_create('entry5', 'Test entry 5')));
+	$node->safe_psql('postgres',
+		q(select test_custom_stats_var_create('entry6', 'Test entry 6')));
+	if ($own_hash eq 'f')
+	{
+		$node->safe_psql('postgres',
+			q(INSERT INTO test_custom_stats_shared_hash_rel VALUES (2);
+			  SELECT pg_stat_force_next_flush()));
+		$result = $node->safe_psql('postgres',
+			q(SELECT n_tup_ins FROM pg_stat_user_tables
+			  WHERE relname = 'test_custom_stats_shared_hash_rel'));
+		is($result, "1",
+			"relation stats entry exists before kind drop all for $kind_name");
+	}
+	$node->safe_psql('postgres', q(select test_custom_stats_var_drop_all()));
+	$result = $node->safe_psql('postgres',
+		q(select * from test_custom_stats_var_report('entry5')));
+	is($result, "", "entry5 not found after drop all for $kind_name");
+	$result = $node->safe_psql('postgres',
+		q(select * from test_custom_stats_var_report('entry6')));
+	is($result, "", "entry6 not found after drop all for $kind_name");
+	if ($own_hash eq 'f')
+	{
+		$result = $node->safe_psql('postgres',
+			q(SELECT n_tup_ins FROM pg_stat_user_tables
+			  WHERE relname = 'test_custom_stats_shared_hash_rel'));
+		is($result, "1",
+			"relation stats entry remains after kind drop all for $kind_name");
+	}
 }
 
 # fixed-sized stats are updated 3 times, so the report below should match.

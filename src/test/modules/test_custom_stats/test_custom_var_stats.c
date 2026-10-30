@@ -635,6 +635,28 @@ test_custom_stats_var_update(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+static bool
+test_custom_stats_var_match_entry(PgStatShared_HashEntry *p, Datum match_data)
+{
+	/* For kind-specific scans, non-custom entries should not reach here. */
+	if (p->key.kind != PGSTAT_KIND_TEST_CUSTOM_VAR_STATS)
+		elog(ERROR,
+			 "unexpected stats kind for custom stats match callback: %u",
+			 p->key.kind);
+
+	return p->key.objid == DatumGetUInt64(match_data);
+}
+
+static bool
+test_custom_stats_var_match_entry_all_kinds(PgStatShared_HashEntry *p,
+											Datum match_data)
+{
+	if (p->key.kind != PGSTAT_KIND_TEST_CUSTOM_VAR_STATS)
+		return false;
+
+	return p->key.objid == DatumGetUInt64(match_data);
+}
+
 /*
  * test_custom_stats_var_drop
  *		Remove custom statistic entry
@@ -651,6 +673,43 @@ test_custom_stats_var_drop(PG_FUNCTION_ARGS)
 	if (!pgstat_drop_entry(PGSTAT_KIND_TEST_CUSTOM_VAR_STATS, InvalidOid,
 						   PGSTAT_CUSTOM_VAR_STATS_IDX(stat_name), false))
 		pgstat_request_entry_refs_gc();
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * test_custom_stats_var_drop_matching
+ *		Remove custom statistic entry using a matching callback
+ *
+ * Drops the named statistic from shared memory.
+ */
+PG_FUNCTION_INFO_V1(test_custom_stats_var_drop_matching);
+Datum
+test_custom_stats_var_drop_matching(PG_FUNCTION_ARGS)
+{
+	char	   *stat_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	bool		all_kinds = PG_NARGS() > 1 && PG_GETARG_BOOL(1);
+	PgStat_Kind kind = all_kinds ? PGSTAT_KIND_ALL :
+		PGSTAT_KIND_TEST_CUSTOM_VAR_STATS;
+	bool		(*match_entry) (PgStatShared_HashEntry *, Datum) =
+		all_kinds ? test_custom_stats_var_match_entry_all_kinds :
+		test_custom_stats_var_match_entry;
+	uint64		stat_idx = PGSTAT_CUSTOM_VAR_STATS_IDX(stat_name);
+
+	pgstat_drop_matching_entries(kind, match_entry, UInt64GetDatum(stat_idx));
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * test_custom_stats_var_drop_all
+ *		Remove all custom statistic entries of this kind
+ */
+PG_FUNCTION_INFO_V1(test_custom_stats_var_drop_all);
+Datum
+test_custom_stats_var_drop_all(PG_FUNCTION_ARGS)
+{
+	pgstat_drop_matching_entries(PGSTAT_KIND_TEST_CUSTOM_VAR_STATS, NULL, 0);
 
 	PG_RETURN_VOID();
 }
