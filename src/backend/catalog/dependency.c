@@ -74,6 +74,7 @@
 #include "commands/publicationcmds.h"
 #include "commands/seclabel.h"
 #include "commands/sequence.h"
+#include "commands/tablecmds.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "funcapi.h"
@@ -1388,7 +1389,16 @@ doDeletion(const ObjectAddress *object, int flags)
 						RemoveAttributeById(object->objectId,
 											object->objectSubId);
 					else
+					{
+						/*
+						 * RegisterDropOrTruncateTable() decides whether this
+						 * table is logged
+						 */
+						if (!(flags & PERFORM_DELETION_INTERNAL))
+							RegisterDropOrTruncateTable(object->objectId, false);
+
 						heap_drop_with_catalog(object->objectId);
+					}
 				}
 
 				/*

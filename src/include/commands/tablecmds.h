@@ -15,6 +15,7 @@
 #define TABLECMDS_H
 
 #include "access/htup.h"
+#include "access/xlogdefs.h"
 #include "catalog/dependency.h"
 #include "catalog/objectaddress.h"
 #include "nodes/parsenodes.h"
@@ -31,6 +32,8 @@ extern ObjectAddress DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 extern TupleDesc BuildDescForRelation(const List *columns);
 
 extern void RemoveRelations(DropStmt *drop);
+
+extern void RegisterDropOrTruncateTable(Oid reloid, bool is_truncate);
 
 extern Oid	AlterTableLookupRelation(AlterTableStmt *stmt, LOCKMODE lockmode);
 
@@ -98,6 +101,12 @@ extern void AtEOXact_on_commit_actions(bool isCommit);
 extern void AtEOSubXact_on_commit_actions(bool isCommit,
 										  SubTransactionId mySubid,
 										  SubTransactionId parentSubid);
+
+extern void LogDropOrTruncateTable(XLogRecPtr commit_lsn);
+extern void AtEOXact_DropOrTruncateTable(void);
+extern void AtEOSubXact_DropOrTruncateTable(bool isCommit,
+											SubTransactionId mySubid,
+											SubTransactionId parentSubid);
 
 extern void RangeVarCallbackMaintainsTable(const RangeVar *relation,
 										   Oid relId, Oid oldRelId,
