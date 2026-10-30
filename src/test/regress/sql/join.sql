@@ -4919,3 +4919,22 @@ FROM (VALUES (1)) AS v(z) LEFT JOIN
 WHERE s.x = s.c;
 
 ROLLBACK;
+
+-- Rescanning a single-batch hash join on the inner side of a nestloop reuses
+-- the hash table, but still reruns the outer side.  An expensive outer side
+-- (here a LATERAL top-N sort) must not be treated as free on rescan.
+CREATE TEMP TABLE hjr_cust (id int PRIMARY KEY);
+INSERT INTO hjr_cust SELECT g FROM generate_series(1, 50) g;
+CREATE TEMP TABLE hjr_events (cust_id int, ts int, cat int);
+INSERT INTO hjr_events SELECT g % 50 + 1, g, g % 30 FROM generate_series(1, 20000) g;
+CREATE INDEX ON hjr_events (cust_id);
+CREATE TEMP TABLE hjr_cat (cat int PRIMARY KEY, name text);
+INSERT INTO hjr_cat SELECT g, 'c' || g FROM generate_series(0, 29) g;
+ANALYZE hjr_cust, hjr_events, hjr_cat;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM hjr_cust c CROSS JOIN LATERAL
+  (SELECT e.ts, k.name
+   FROM (SELECT * FROM hjr_events e WHERE e.cust_id = c.id
+         ORDER BY ts DESC LIMIT 50) e
+   JOIN hjr_cat k ON k.cat = e.cat) x;
+DROP TABLE hjr_cust, hjr_events, hjr_cat;
