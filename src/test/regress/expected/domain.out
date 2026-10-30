@@ -690,7 +690,7 @@ insert into nulltest values ('a', 'b', 'c', 'd', NULL);
 ERROR:  domain dcheck does not allow null values
 insert into nulltest values ('a', 'b', 'c', 'd', 'a');
 ERROR:  new row for relation "nulltest" violates check constraint "nulltest_col5_check"
-DETAIL:  Failing row contains (a, b, c, d, a).
+DETAIL:  Failing row contains (a, b, c, d, a). Check constraint expression: ((col5)::text = ANY ((ARRAY['c'::character varying, 'd'::character varying])::text[])).
 INSERT INTO nulltest values (NULL, 'b', 'c', 'd', 'd');
 ERROR:  domain dnotnull does not allow null values
 INSERT INTO nulltest values ('a', NULL, 'c', 'd', 'c');
@@ -710,7 +710,7 @@ CONTEXT:  COPY nulltest, line 1, column col5: null input
 -- Last row is bad
 COPY nulltest FROM stdin;
 ERROR:  new row for relation "nulltest" violates check constraint "nulltest_col5_check"
-DETAIL:  Failing row contains (a, b, c, null, a).
+DETAIL:  Failing row contains (a, b, c, null, a). Check constraint expression: ((col5)::text = ANY ((ARRAY['c'::character varying, 'd'::character varying])::text[])).
 CONTEXT:  COPY nulltest, line 3: "a	b	c	\N	a"
 select * from nulltest;
  col1 | col2 | col3 | col4 | col5 

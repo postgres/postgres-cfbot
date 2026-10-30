@@ -867,10 +867,10 @@ select pc.relname, pgc.conname, pgc.contype, pgc.conislocal, pgc.coninhcount, pg
 
 insert into ac (aa) values (NULL);
 ERROR:  new row for relation "ac" violates check constraint "ac_check"
-DETAIL:  Failing row contains (null).
+DETAIL:  Failing row contains (null). Check constraint expression: (aa IS NOT NULL).
 insert into bc (aa) values (NULL);
 ERROR:  new row for relation "bc" violates check constraint "ac_check"
-DETAIL:  Failing row contains (null, null).
+DETAIL:  Failing row contains (null, null). Check constraint expression: (aa IS NOT NULL).
 alter table bc drop constraint ac_check;  -- fail, disallowed
 ERROR:  cannot drop inherited constraint "ac_check" of relation "bc"
 alter table ac drop constraint ac_check;
@@ -890,10 +890,10 @@ select pc.relname, pgc.conname, pgc.contype, pgc.conislocal, pgc.coninhcount, pg
 
 insert into ac (aa) values (NULL);
 ERROR:  new row for relation "ac" violates check constraint "ac_aa_check"
-DETAIL:  Failing row contains (null).
+DETAIL:  Failing row contains (null). Check constraint expression: (aa IS NOT NULL).
 insert into bc (aa) values (NULL);
 ERROR:  new row for relation "bc" violates check constraint "ac_aa_check"
-DETAIL:  Failing row contains (null, null).
+DETAIL:  Failing row contains (null, null). Check constraint expression: (aa IS NOT NULL).
 alter table bc drop constraint ac_aa_check;  -- fail, disallowed
 ERROR:  cannot drop inherited constraint "ac_aa_check" of relation "bc"
 alter table ac drop constraint ac_aa_check;
@@ -980,7 +980,7 @@ insert into c1 values(1,1,2);
 alter table p2 add check (f2>0);
 insert into c1 values(1,-1,2);  -- fail
 ERROR:  new row for relation "c1" violates check constraint "p2_f2_check"
-DETAIL:  Failing row contains (1, -1, 2).
+DETAIL:  Failing row contains (1, -1, 2). Check constraint expression: (f2 > 0).
 create table c2(f3 int) inherits(p1,p2);
 \d c2
                  Table "public.c2"
@@ -1614,7 +1614,7 @@ alter table p1_c1 inherit p1;
 insert into p1 values(-1); --ok
 insert into p1_c1 values(-1); --error
 ERROR:  new row for relation "p1_c1" violates check constraint "p1_a_check"
-DETAIL:  Failing row contains (-1).
+DETAIL:  Failing row contains (-1). Check constraint expression: (f1 > 0).
 alter table p1 alter constraint p1_a_check enforced; --error
 ERROR:  check constraint "p1_a_check" of relation "p1" is violated by some row
 truncate p1;
@@ -1765,10 +1765,10 @@ alter table invalid_check_con add constraint inh_check_constraint check(f1 > 0) 
 NOTICE:  merging constraint "inh_check_constraint" with inherited definition
 insert into invalid_check_con values(0); -- fail
 ERROR:  new row for relation "invalid_check_con" violates check constraint "inh_check_constraint"
-DETAIL:  Failing row contains (0).
+DETAIL:  Failing row contains (0). Check constraint expression: (f1 > 0).
 insert into invalid_check_con_child values(0); -- fail
 ERROR:  new row for relation "invalid_check_con_child" violates check constraint "inh_check_constraint"
-DETAIL:  Failing row contains (0).
+DETAIL:  Failing row contains (0). Check constraint expression: (f1 > 0).
 select conrelid::regclass::text as relname, conname,
        convalidated, conislocal, coninhcount, connoinherit
 from pg_constraint where conname like 'inh\_check\_constraint%'
@@ -3981,13 +3981,13 @@ INSERT INTO errtst_parent(partid, shdata, data) VALUES ('20', '1', '5');
 -- insert with child check constraint error
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ( '0', '1', '10');
 ERROR:  new row for relation "errtst_child_fastdef" violates check constraint "errtest_child_fastdef_data_check"
-DETAIL:  Failing row contains (0, 1, 10).
+DETAIL:  Failing row contains (0, 1, 10). Check constraint expression: (data < 10).
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ('10', '1', '10');
 ERROR:  new row for relation "errtst_child_plaindef" violates check constraint "errtst_child_plaindef_data_check"
-DETAIL:  Failing row contains (10, 1, 10).
+DETAIL:  Failing row contains (10, 1, 10). Check constraint expression: (data < 10).
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ('20', '1', '10');
 ERROR:  new row for relation "errtst_child_reorder" violates check constraint "errtst_child_reorder_data_check"
-DETAIL:  Failing row contains (20, 1, 10).
+DETAIL:  Failing row contains (20, 1, 10). Check constraint expression: (data < 10).
 -- insert with child not null constraint error
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ( '0', '1', NULL);
 ERROR:  null value in column "data" of relation "errtst_child_fastdef" violates not-null constraint
@@ -4001,13 +4001,13 @@ DETAIL:  Failing row contains (20, 1, null).
 -- insert with shared check constraint error
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ( '0', '5', '5');
 ERROR:  new row for relation "errtst_child_fastdef" violates check constraint "shdata_small"
-DETAIL:  Failing row contains (0, 5, 5).
+DETAIL:  Failing row contains (0, 5, 5). Check constraint expression: (shdata < 3).
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ('10', '5', '5');
 ERROR:  new row for relation "errtst_child_plaindef" violates check constraint "shdata_small"
-DETAIL:  Failing row contains (10, 5, 5).
+DETAIL:  Failing row contains (10, 5, 5). Check constraint expression: (shdata < 3).
 INSERT INTO errtst_parent(partid, shdata, data) VALUES ('20', '5', '5');
 ERROR:  new row for relation "errtst_child_reorder" violates check constraint "shdata_small"
-DETAIL:  Failing row contains (20, 5, 5).
+DETAIL:  Failing row contains (20, 5, 5). Check constraint expression: (shdata < 3).
 -- within partition update without child check constraint violation
 BEGIN;
 UPDATE errtst_parent SET data = data + 1 WHERE partid = 0;
@@ -4017,13 +4017,13 @@ ROLLBACK;
 -- within partition update with child check constraint violation
 UPDATE errtst_parent SET data = data + 10 WHERE partid = 0;
 ERROR:  new row for relation "errtst_child_fastdef" violates check constraint "errtest_child_fastdef_data_check"
-DETAIL:  Failing row contains (0, 1, 15).
+DETAIL:  Failing row contains (0, 1, 15). Check constraint expression: (data < 10).
 UPDATE errtst_parent SET data = data + 10 WHERE partid = 10;
 ERROR:  new row for relation "errtst_child_plaindef" violates check constraint "errtst_child_plaindef_data_check"
-DETAIL:  Failing row contains (10, 1, 15).
+DETAIL:  Failing row contains (10, 1, 15). Check constraint expression: (data < 10).
 UPDATE errtst_parent SET data = data + 10 WHERE partid = 20;
 ERROR:  new row for relation "errtst_child_reorder" violates check constraint "errtst_child_reorder_data_check"
-DETAIL:  Failing row contains (20, 1, 15).
+DETAIL:  Failing row contains (20, 1, 15). Check constraint expression: (data < 10).
 -- direct leaf partition update, without partition id violation
 BEGIN;
 UPDATE errtst_child_fastdef SET partid = 1 WHERE partid = 0;
@@ -4049,13 +4049,13 @@ ROLLBACK;
 -- partition move, with child check constraint violation
 UPDATE errtst_parent SET partid = 10, data = data + 10 WHERE partid = 0;
 ERROR:  new row for relation "errtst_child_plaindef" violates check constraint "errtst_child_plaindef_data_check"
-DETAIL:  Failing row contains (10, 1, 15).
+DETAIL:  Failing row contains (10, 1, 15). Check constraint expression: (data < 10).
 UPDATE errtst_parent SET partid = 20, data = data + 10 WHERE partid = 10;
 ERROR:  new row for relation "errtst_child_reorder" violates check constraint "errtst_child_reorder_data_check"
-DETAIL:  Failing row contains (20, 1, 15).
+DETAIL:  Failing row contains (20, 1, 15). Check constraint expression: (data < 10).
 UPDATE errtst_parent SET partid = 0, data = data + 10 WHERE partid = 20;
 ERROR:  new row for relation "errtst_child_fastdef" violates check constraint "errtest_child_fastdef_data_check"
-DETAIL:  Failing row contains (0, 1, 15).
+DETAIL:  Failing row contains (0, 1, 15). Check constraint expression: (data < 10).
 -- partition move, without target partition
 UPDATE errtst_parent SET partid = 30, data = data + 10 WHERE partid = 20;
 ERROR:  no partition of relation "errtst_parent" found for row
