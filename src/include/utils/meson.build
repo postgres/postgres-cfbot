@@ -37,6 +37,22 @@ guc_tables = custom_target('guc_tables',
   command: [perl, files('../../backend/utils/misc/gen_guc_tables.pl'), '@INPUT@', '@OUTPUT@'])
 generated_headers += guc_tables
 
+# Builds without ETW still check probes_etw.txt against probes.d before
+# generating probes.h, so that a probe change is caught on the platform
+# where it is made.
+probes_etw_check = []
+if not etw.found()
+  probes_etw_check = custom_target('probes_etw_check',
+    input: files(
+      '../../backend/utils/probes.d',
+      '../../backend/utils/probes_etw.txt'),
+    output: 'probes_etw_check.stamp',
+    capture: true,
+    command: [perl, files('../../backend/utils/Gen_etw_probes.pl'),
+      '--check', '@INPUT0@', '@INPUT1@'],
+  )
+endif
+
 if dtrace.found()
   probes_tmp = custom_target('probes.h.tmp',
     input: files('../../backend/utils/probes.d'),
@@ -48,6 +64,21 @@ if dtrace.found()
     output: 'probes.h',
     capture: true,
     command: [sed, '-f', files('../../backend/utils/postprocess_dtrace.sed'), '@INPUT@'],
+    depends: probes_etw_check,
+    install: true,
+    install_dir: dir_include_server / 'utils',
+  )
+elif etw.found()
+  # Generate TraceLogging macros from probes.d (argument types) and
+  # probes_etw.txt (keyword, level and field names).
+  probes = custom_target('probes.h',
+    input: files(
+      '../../backend/utils/probes.d',
+      '../../backend/utils/probes_etw.txt'),
+    output: 'probes.h',
+    capture: true,
+    command: [perl, files('../../backend/utils/Gen_etw_probes.pl'),
+      '@INPUT0@', '@INPUT1@'],
     install: true,
     install_dir: dir_include_server / 'utils',
   )
@@ -57,6 +88,7 @@ else
     output: 'probes.h',
     capture: true,
     command: [perl, '-n', files('../../backend/utils/Gen_dummy_probes.pl'), '@INPUT@'],
+    depends: probes_etw_check,
     install: true,
     install_dir: dir_include_server / 'utils',
   )
