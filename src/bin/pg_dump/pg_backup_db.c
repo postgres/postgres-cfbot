@@ -84,7 +84,7 @@ ReconnectToServer(ArchiveHandle *AH, const char *dbname)
 
 	/*
 	 * Note: we want to establish the new connection, and in particular update
-	 * ArchiveHandle's connCancel, before closing old connection.  Otherwise
+	 * ArchiveHandle's cancelConn, before closing old connection.  Otherwise
 	 * an ill-timed SIGINT could try to access a dead connection.
 	 */
 	AH->connection = NULL;		/* dodge error check in ConnectDatabaseAhx */
@@ -164,12 +164,11 @@ void
 DisconnectDatabase(Archive *AHX)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	char		errbuf[1];
 
 	if (!AH->connection)
 		return;
 
-	if (AH->connCancel)
+	if (AH->cancelConn)
 	{
 		/*
 		 * If we have an active query, send a cancel before closing, ignoring
@@ -177,7 +176,7 @@ DisconnectDatabase(Archive *AHX)
 		 * helpful during pg_fatal().
 		 */
 		if (PQtransactionStatus(AH->connection) == PQTRANS_ACTIVE)
-			(void) PQcancel(AH->connCancel, errbuf, sizeof(errbuf));
+			(void) PQcancelBlocking(AH->cancelConn);
 
 		/*
 		 * Prevent signal handler from sending a cancel after this.
