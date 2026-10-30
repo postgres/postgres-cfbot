@@ -52,6 +52,7 @@
 #include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
+#include "utils/pg_trace_etw.h"
 #include "utils/pidfile.h"
 #include "utils/syscache.h"
 #include "utils/varlena.h"
@@ -165,6 +166,9 @@ InitPostmasterChild(void)
 				(errcode_for_socket_access(),
 				 errmsg_internal("could not set postmaster death monitoring pipe to FD_CLOEXEC mode: %m")));
 #endif
+
+	/* Register the ETW trace provider, if built with ETW support. */
+	pg_trace_etw_register();
 }
 
 /*
@@ -187,6 +191,9 @@ InitStandaloneProcess(const char *argv0)
 #endif
 
 	InitProcessGlobals();
+
+	/* Register the ETW trace provider, if built with ETW support. */
+	pg_trace_etw_register();
 
 	/* Initialize process-local latch support */
 	InitializeWaitEventSupport();
