@@ -1386,7 +1386,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				int			off;
 				ListCell   *lc;
 
-				/* allocate scratch memory used by all steps of AND/OR */
+				/* allocate scratch memory used by all steps of AND/OR/IMPLIES */
 				if (boolexpr->boolop != NOT_EXPR)
 					scratch.d.boolexpr.anynull = palloc_object(bool);
 
@@ -1438,6 +1438,24 @@ ExecInitExprRec(Expr *node, ExprState *state,
 							Assert(nargs == 1);
 
 							scratch.opcode = EEOP_BOOL_NOT_STEP;
+							break;
+						case IMPLIES_EXPR:
+
+							/*
+							 * The planner normally expands this, but in case
+							 * it didn't, evaluate it as NOT a OR b.  The NOT
+							 * step doesn't jump, so it needs no adjusting.
+							 */
+							Assert(nargs == 2);
+
+							if (off == 0)
+							{
+								scratch.opcode = EEOP_BOOL_NOT_STEP;
+								ExprEvalPushStep(state, &scratch);
+								scratch.opcode = EEOP_BOOL_OR_STEP_FIRST;
+							}
+							else
+								scratch.opcode = EEOP_BOOL_OR_STEP_LAST;
 							break;
 						default:
 							elog(ERROR, "unrecognized boolop: %d",

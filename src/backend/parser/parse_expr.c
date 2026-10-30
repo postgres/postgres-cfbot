@@ -54,6 +54,7 @@ static Node *transformAExprDistinct(ParseState *pstate, A_Expr *a);
 static Node *transformAExprNullIf(ParseState *pstate, A_Expr *a);
 static Node *transformAExprIn(ParseState *pstate, A_Expr *a);
 static Node *transformAExprBetween(ParseState *pstate, A_Expr *a);
+static Node *transformAExprImplies(ParseState *pstate, A_Expr *a);
 static Node *transformMergeSupportFunc(ParseState *pstate, MergeSupportFunc *f);
 static Node *transformBoolExpr(ParseState *pstate, BoolExpr *a);
 static Node *transformFuncCall(ParseState *pstate, FuncCall *fn);
@@ -212,6 +213,9 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 					case AEXPR_BETWEEN_SYM:
 					case AEXPR_NOT_BETWEEN_SYM:
 						result = transformAExprBetween(pstate, a);
+						break;
+					case AEXPR_IMPLIES:
+						result = transformAExprImplies(pstate, a);
 						break;
 					default:
 						elog(ERROR, "unrecognized A_Expr kind: %d", a->kind);
@@ -1444,6 +1448,29 @@ transformBoolExpr(ParseState *pstate, BoolExpr *a)
 	}
 
 	return (Node *) makeBoolExpr(a->boolop, args, a->location);
+}
+
+/*
+ * Transform "a IMPLIES b".
+ *
+ * This means the same as "NOT a OR b", but we keep it as its own BoolExpr so
+ * that stored expressions deparse as written.  eval_const_expressions does the
+ * expansion, so the planner proper never sees IMPLIES.
+ */
+static Node *
+transformAExprImplies(ParseState *pstate, A_Expr *a)
+{
+	Node	   *lexpr;
+	Node	   *rexpr;
+
+	lexpr = transformExprRecurse(pstate, a->lexpr);
+	rexpr = transformExprRecurse(pstate, a->rexpr);
+
+	lexpr = coerce_to_boolean(pstate, lexpr, "IMPLIES");
+	rexpr = coerce_to_boolean(pstate, rexpr, "IMPLIES");
+
+	return (Node *) makeBoolExpr(IMPLIES_EXPR, list_make2(lexpr, rexpr),
+								 a->location);
 }
 
 static Node *
