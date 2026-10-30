@@ -4790,6 +4790,9 @@
 { oid => '6103', descr => 'convert numeric to pg_lsn',
   proname => 'pg_lsn', prorettype => 'pg_lsn', proargtypes => 'numeric',
   prosrc => 'numeric_pg_lsn' },
+{ oid => '2775', descr => 'convert numeric to oid8',
+  proname => 'oid8', prorettype => 'oid8', proargtypes => 'numeric',
+  prosrc => 'numeric_oid8' },
 
 { oid => '3556', descr => 'convert jsonb to boolean',
   proname => 'bool', prorettype => 'bool', proargtypes => 'jsonb',

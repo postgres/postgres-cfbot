@@ -306,8 +306,10 @@
   castcontext => 'i', castmethod => 'f' },
 { castsource => 'oid8', casttarget => 'int8', castfunc => '0',
   castcontext => 'a', castmethod => 'b' },
-# Assignment coercion from oid to oid8.
+# Assignment coercion from oid and numeric to oid8.
 { castsource => 'oid', casttarget => 'oid8', castfunc => 'oid8(oid)',
+  castcontext => 'a', castmethod => 'f' },
+{ castsource => 'numeric', casttarget => 'oid8', castfunc => 'oid8(numeric)',
   castcontext => 'a', castmethod => 'f' },
 
 # String category
