@@ -455,6 +455,7 @@ ExecBuildProjectionInfo(List *targetList,
 					/*
 					 * Get the tuple from the relation being scanned, or the
 					 * old/new tuple slot, if old/new values were requested.
+					 * Should not see EXCLUDED here (should be INNER_VAR).
 					 */
 					switch (variable->varreturningtype)
 					{
@@ -468,6 +469,10 @@ ExecBuildProjectionInfo(List *targetList,
 						case VAR_RETURNING_NEW:
 							scratch.opcode = EEOP_ASSIGN_NEW_VAR;
 							state->flags |= EEO_FLAG_HAS_NEW;
+							break;
+						case VAR_RETURNING_EXCLUDED:
+							elog(ERROR, "wrong varno %d (expected %d) for variable returning excluded",
+								 variable->varno, INNER_VAR);
 							break;
 					}
 					break;
@@ -972,6 +977,10 @@ ExecInitExprRec(Expr *node, ExprState *state,
 									scratch.opcode = EEOP_NEW_SYSVAR;
 									state->flags |= EEO_FLAG_HAS_NEW;
 									break;
+								case VAR_RETURNING_EXCLUDED:
+									elog(ERROR, "wrong varno %d (expected %d) for variable returning excluded",
+										 variable->varno, INNER_VAR);
+									break;
 							}
 							break;
 					}
@@ -1006,6 +1015,10 @@ ExecInitExprRec(Expr *node, ExprState *state,
 								case VAR_RETURNING_NEW:
 									scratch.opcode = EEOP_NEW_VAR;
 									state->flags |= EEO_FLAG_HAS_NEW;
+									break;
+								case VAR_RETURNING_EXCLUDED:
+									elog(ERROR, "wrong varno %d (expected %d) for variable returning excluded",
+										 variable->varno, INNER_VAR);
 									break;
 							}
 							break;
@@ -2631,10 +2644,23 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				ReturningExpr *rexpr = (ReturningExpr *) node;
 				int			retstep;
 
-				/* Skip expression evaluation if OLD/NEW row doesn't exist */
+				/*
+				 * Skip expression evaluation if OLD/NEW/EXCLUDED row doesn't
+				 * exist.
+				 */
 				scratch.opcode = EEOP_RETURNINGEXPR;
-				scratch.d.returningexpr.nullflag = rexpr->retold ?
-					EEO_FLAG_OLD_IS_NULL : EEO_FLAG_NEW_IS_NULL;
+				switch (rexpr->retkind)
+				{
+					case RETURNING_OLD_EXPR:
+						scratch.d.returningexpr.nullflag = EEO_FLAG_OLD_IS_NULL;
+						break;
+					case RETURNING_NEW_EXPR:
+						scratch.d.returningexpr.nullflag = EEO_FLAG_NEW_IS_NULL;
+						break;
+					case RETURNING_EXCLUDED_EXPR:
+						scratch.d.returningexpr.nullflag = EEO_FLAG_INNER_IS_NULL;
+						break;
+				}
 				scratch.d.returningexpr.jumpdone = -1;	/* set below */
 				ExprEvalPushStep(state, &scratch);
 				retstep = state->steps_len - 1;
@@ -2642,14 +2668,15 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				/* Steps to evaluate expression to return */
 				ExecInitExprRec(rexpr->retexpr, state, resv, resnull);
 
-				/* Jump target used if OLD/NEW row doesn't exist */
+				/* Jump target used if OLD/NEW/EXCLUDED row doesn't exist */
 				state->steps[retstep].d.returningexpr.jumpdone = state->steps_len;
 
 				/* Update ExprState flags */
-				if (rexpr->retold)
+				if (rexpr->retkind == RETURNING_OLD_EXPR)
 					state->flags |= EEO_FLAG_HAS_OLD;
-				else
+				else if (rexpr->retkind == RETURNING_NEW_EXPR)
 					state->flags |= EEO_FLAG_HAS_NEW;
+				/* we don't bother recording references to EXCLUDED */
 
 				break;
 			}
@@ -3007,6 +3034,10 @@ expr_setup_walker(Node *node, ExprSetupInfo *info)
 					case VAR_RETURNING_NEW:
 						info->last_new = Max(info->last_new, attnum);
 						break;
+					case VAR_RETURNING_EXCLUDED:
+						elog(ERROR, "wrong varno %d (expected %d) for variable returning excluded",
+							 variable->varno, INNER_VAR);
+						break;
 				}
 				break;
 		}
@@ -3172,6 +3203,7 @@ ExecInitWholeRowVar(ExprEvalStep *scratch, Var *variable, ExprState *state)
 		state->flags |= EEO_FLAG_HAS_OLD;
 	else if (variable->varreturningtype == VAR_RETURNING_NEW)
 		state->flags |= EEO_FLAG_HAS_NEW;
+	/* we don't bother recording references to EXCLUDED */
 
 	/*
 	 * If the input tuple came from a subquery, it might contain "resjunk"
