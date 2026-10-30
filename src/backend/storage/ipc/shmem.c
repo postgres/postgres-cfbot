@@ -1367,36 +1367,19 @@ pg_get_shmem_allocations_numa(PG_FUNCTION_ARGS)
 }
 
 /*
- * Determine the memory page size used for the shared memory segment.
+ * Return the memory page size used to create the main shared memory segment.
  *
- * If the shared segment was allocated using huge pages, returns the size of
- * a huge page. Otherwise returns the size of regular memory page.
+ * This function avoids exposing the ShmemSegHdr structure directly.
  *
  * This should be used only after shared memory has been initialized.
  */
 Size
 pg_get_shmem_pagesize(void)
 {
-	Size		os_page_size;
-#ifdef WIN32
-	SYSTEM_INFO sysinfo;
+	Assert(ShmemSegHdr != NULL);
+	Assert(ShmemSegHdr->page_size > 0);
 
-	GetSystemInfo(&sysinfo);
-	os_page_size = sysinfo.dwPageSize;
-#else
-	os_page_size = sysconf(_SC_PAGESIZE);
-#endif
-
-	Assert(huge_pages_status != HUGE_PAGES_UNKNOWN);
-
-	if (huge_pages_status == HUGE_PAGES_ON)
-#ifdef WIN32
-		os_page_size = GetLargePageMinimum();
-#else
-		GetHugePageSize(&os_page_size, NULL);
-#endif
-
-	return os_page_size;
+	return ShmemSegHdr->page_size;
 }
 
 Datum
