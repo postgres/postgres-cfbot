@@ -352,6 +352,151 @@ typedef struct ForeignTruncateInfo
 	List	   *rels;
 } ForeignTruncateInfo;
 
+/* Structure to hold DROP/ TRUNCATE TABLE information */
+typedef struct DropOrTruncateTableInfo
+{
+	Oid			reloid;
+	char		relname[NAMEDATALEN];
+	char		schemaname[NAMEDATALEN];
+	SubTransactionId subxid;
+	bool		is_truncate;
+} DropOrTruncateTableInfo;
+
+/* Per-transaction list of dropped tables */
+static List *pending_drop_tables = NIL;
+
+/*
+ * Register a dropped or truncated table, to log its LSN at commit.
+ */
+void
+RegisterDropOrTruncateTable(Oid reloid, bool is_truncate)
+{
+	DropOrTruncateTableInfo *info;
+	MemoryContext oldcontext;
+	char		relkind;
+	char	   *relname;
+	char	   *schemaname;
+
+	if (!log_object_drops)
+		return;
+
+	relkind = get_rel_relkind(reloid);
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
+		return;
+	if (get_rel_persistence(reloid) != RELPERSISTENCE_PERMANENT)
+		return;
+
+	relname = get_rel_name(reloid);
+	schemaname = get_namespace_name(get_rel_namespace(reloid));
+
+	oldcontext = MemoryContextSwitchTo(TopTransactionContext);
+
+	info = (DropOrTruncateTableInfo *) palloc(sizeof(DropOrTruncateTableInfo));
+	info->reloid = reloid;
+	strlcpy(info->relname, relname, NAMEDATALEN);
+	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
+	info->subxid = GetCurrentSubTransactionId();
+	info->is_truncate = is_truncate;
+
+	pending_drop_tables = lappend(pending_drop_tables, info);
+
+	MemoryContextSwitchTo(oldcontext);
+
+	pfree(relname);
+	pfree(schemaname);
+}
+
+/*
+ * Post-subcommit or post-subabort processing for log_object_drops.
+ *
+ * On subcommit, entries registered in this subtransaction become the
+ * parent's; on subabort they are removed, since those drops never happened.
+ */
+void
+AtEOSubXact_DropOrTruncateTable(bool isCommit, SubTransactionId mySubid,
+								SubTransactionId parentSubid)
+{
+	ListCell   *lc;
+
+	if (pending_drop_tables == NIL)
+		return;
+
+	foreach(lc, pending_drop_tables)
+	{
+		DropOrTruncateTableInfo *info = (DropOrTruncateTableInfo *) lfirst(lc);
+
+		if (info->subxid != mySubid)
+			continue;
+		if (isCommit)
+			info->subxid = parentSubid;
+		else
+		{
+			pending_drop_tables = foreach_delete_current(pending_drop_tables, lc);
+			pfree(info);
+		}
+	}
+}
+
+/*
+ * Post-commit or post-abort processing for log_object_drops.
+ *
+ * At commit, log every table that was dropped or truncated in this
+ * transaction, with the start LSN of the commit record.  At abort or
+ * prepare, just forget them.
+ */
+void
+AtEOXact_DropOrTruncateTable(bool isCommit)
+{
+	ListCell   *lc;
+
+	if (pending_drop_tables == NIL)
+		return;
+
+	/*
+	 * A transaction that changed nothing writes no commit record, for example
+	 * TRUNCATE of a partitioned table with no partitions under wal_level is
+	 * minimal.  There is nothing to recover then.
+	 */
+	if (isCommit && !XLogRecPtrIsInvalid(XactLastCommitStart))
+	{
+		DropOrTruncateTableInfo *last = llast(pending_drop_tables);
+
+		foreach(lc, pending_drop_tables)
+		{
+			DropOrTruncateTableInfo *info = (DropOrTruncateTableInfo *) lfirst(lc);
+
+			if (info->is_truncate)
+			{
+				ereport(LOG,
+						(errmsg("table \"%s.%s\" (OID %u) truncated at LSN %X/%08X",
+								info->schemaname, info->relname, info->reloid,
+								LSN_FORMAT_ARGS(XactLastCommitStart)),
+						 (info == last) ?
+						 errhint("To recover dropped or truncated tables, use "
+								 "recovery_target_lsn = '%X/%08X' with "
+								 "recovery_target_inclusive = false.",
+								 LSN_FORMAT_ARGS(XactLastCommitStart)) : 0));
+			}
+			else
+			{
+				ereport(LOG,
+						(errmsg("table \"%s.%s\" (OID %u) dropped at LSN %X/%08X",
+								info->schemaname, info->relname, info->reloid,
+								LSN_FORMAT_ARGS(XactLastCommitStart)),
+						 (info == last) ?
+						 errhint("To recover dropped or truncated tables, use "
+								 "recovery_target_lsn = '%X/%08X' with "
+								 "recovery_target_inclusive = false.",
+								 LSN_FORMAT_ARGS(XactLastCommitStart)) : 0));
+			}
+		}
+	}
+
+	/* Commit, abort and prepare all end with an empty list */
+	list_free_deep(pending_drop_tables);
+	pending_drop_tables = NIL;
+}
+
 /* Partial or complete FK creation in addFkConstraint() */
 typedef enum addFkConstraintSides
 {
@@ -2173,6 +2318,12 @@ ExecuteTruncateGuts(List *explicit_rels,
 	foreach(cell, rels)
 	{
 		Relation	rel = (Relation) lfirst(cell);
+
+		/*
+		 * RegisterDropOrTruncateTable() decides whether this table is logged.
+		 * Pass "true" because this is a TRUNCATE, not a DROP
+		 */
+		RegisterDropOrTruncateTable(RelationGetRelid(rel), true);
 
 		/* Skip partitioned tables as there is nothing to do */
 		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)

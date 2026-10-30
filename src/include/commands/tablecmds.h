@@ -32,6 +32,8 @@ extern TupleDesc BuildDescForRelation(const List *columns);
 
 extern void RemoveRelations(DropStmt *drop);
 
+extern void RegisterDropOrTruncateTable(Oid reloid, bool is_truncate);
+
 extern Oid	AlterTableLookupRelation(AlterTableStmt *stmt, LOCKMODE lockmode);
 
 extern void AlterTable(AlterTableStmt *stmt, LOCKMODE lockmode,
@@ -98,6 +100,11 @@ extern void AtEOXact_on_commit_actions(bool isCommit);
 extern void AtEOSubXact_on_commit_actions(bool isCommit,
 										  SubTransactionId mySubid,
 										  SubTransactionId parentSubid);
+
+extern void AtEOXact_DropOrTruncateTable(bool isCommit);
+extern void AtEOSubXact_DropOrTruncateTable(bool isCommit,
+											SubTransactionId mySubid,
+											SubTransactionId parentSubid);
 
 extern void RangeVarCallbackMaintainsTable(const RangeVar *relation,
 										   Oid relId, Oid oldRelId,
