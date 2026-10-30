@@ -514,6 +514,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_FUNCEXPR_STRICT_2,
 		&&CASE_EEOP_FUNCEXPR_FUSAGE,
 		&&CASE_EEOP_FUNCEXPR_STRICT_FUSAGE,
+		&&CASE_EEOP_FUNCEXPR_SAFE,
+		&&CASE_EEOP_FUNCEXPR_STRICT_SAFE,
+		&&CASE_EEOP_FUNCEXPR_SAFE_FUSAGE,
+		&&CASE_EEOP_FUNCEXPR_STRICT_SAFE_FUSAGE,
 		&&CASE_EEOP_BOOL_AND_STEP_FIRST,
 		&&CASE_EEOP_BOOL_AND_STEP,
 		&&CASE_EEOP_BOOL_AND_STEP_LAST,
@@ -578,6 +582,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_XMLEXPR,
 		&&CASE_EEOP_JSON_CONSTRUCTOR,
 		&&CASE_EEOP_IS_JSON,
+		&&CASE_EEOP_SAFETYPE_CAST,
 		&&CASE_EEOP_JSONEXPR_PATH,
 		&&CASE_EEOP_JSONEXPR_COERCION,
 		&&CASE_EEOP_JSONEXPR_COERCION_FINISH,
@@ -1028,6 +1033,77 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* not common enough to inline */
 			ExecEvalFuncExprStrictFusage(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_FUNCEXPR_SAFE)
+		{
+			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			Datum		d;
+
+			fcinfo->isnull = false;
+			d = op->d.func.fn_addr(fcinfo);
+			*op->resvalue = d;
+			*op->resnull = fcinfo->isnull;
+
+			/*
+			 * A function that reported an error softly returned a dummy
+			 * datum.
+			 */
+			if (SOFT_ERROR_OCCURRED(fcinfo->context))
+			{
+				*op->resnull = true;
+				*op->resvalue = (Datum) 0;
+			}
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_FUNCEXPR_STRICT_SAFE)
+		{
+			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			NullableDatum *args = fcinfo->args;
+			Datum		d;
+
+			for (int argno = 0; argno < op->d.func.nargs; argno++)
+			{
+				if (args[argno].isnull)
+				{
+					*op->resnull = true;
+					*op->resvalue = (Datum) 0;
+					goto strictsafe_fail;
+				}
+			}
+
+			fcinfo->isnull = false;
+			d = op->d.func.fn_addr(fcinfo);
+			*op->resvalue = d;
+			*op->resnull = fcinfo->isnull;
+
+			/*
+			 * A function that reported an error softly returned a dummy
+			 * datum.
+			 */
+			if (SOFT_ERROR_OCCURRED(fcinfo->context))
+			{
+				*op->resnull = true;
+				*op->resvalue = (Datum) 0;
+			}
+	strictsafe_fail:
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_FUNCEXPR_SAFE_FUSAGE)
+		{
+			ExecEvalFuncSafeFusage(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_FUNCEXPR_STRICT_SAFE_FUSAGE)
+		{
+			ExecEvalFuncStrictSafeFusage(state, op, econtext);
 
 			EEO_NEXT();
 		}
@@ -1934,6 +2010,27 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			ExecEvalJsonIsPredicate(state, op);
 
 			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_SAFETYPE_CAST)
+		{
+			SafeTypeCastState *stcstate = op->d.stcexpr.stcstate;
+
+			if (SOFT_ERROR_OCCURRED(&stcstate->escontext))
+			{
+				/*
+				 * The conversion failed softly, so fall through to evaluate
+				 * the DEFAULT expression.  Clear the error first, so that the
+				 * next evaluation starts afresh.
+				 */
+				stcstate->escontext.error_occurred = false;
+				*op->resnull = true;
+				*op->resvalue = (Datum) 0;
+
+				EEO_NEXT();
+			}
+			else
+				EEO_JUMP(stcstate->jump_end);
 		}
 
 		EEO_CASE(EEOP_JSONEXPR_PATH)
@@ -3015,6 +3112,36 @@ ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
 }
 
 /*
+ * Evaluate EEOP_FUNCEXPR_SAFE_FUSAGE
+ */
+void
+ExecEvalFuncSafeFusage(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+	PgStat_FunctionCallUsage fcusage;
+	Datum		d;
+
+	pgstat_init_function_usage(fcinfo, &fcusage);
+
+	fcinfo->isnull = false;
+	d = op->d.func.fn_addr(fcinfo);
+	*op->resvalue = d;
+	*op->resnull = fcinfo->isnull;
+
+	/*
+	 * A function that reported an error softly returned a dummy datum. Hand a
+	 * NULL to whatever consumes the result instead.
+	 */
+	if (SOFT_ERROR_OCCURRED(fcinfo->context))
+	{
+		*op->resnull = true;
+		*op->resvalue = (Datum) 0;
+	}
+
+	pgstat_end_function_usage(&fcusage, true);
+}
+
+/*
  * Evaluate EEOP_FUNCEXPR_STRICT_FUSAGE
  */
 void
@@ -3044,6 +3171,50 @@ ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
 	d = op->d.func.fn_addr(fcinfo);
 	*op->resvalue = d;
 	*op->resnull = fcinfo->isnull;
+
+	pgstat_end_function_usage(&fcusage, true);
+}
+
+/*
+ * Evaluate EEOP_FUNCEXPR_STRICT_SAFE_FUSAGE
+ */
+void
+ExecEvalFuncStrictSafeFusage(ExprState *state, ExprEvalStep *op,
+							 ExprContext *econtext)
+{
+	FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+	PgStat_FunctionCallUsage fcusage;
+	NullableDatum *args = fcinfo->args;
+	int			nargs = op->d.func.nargs;
+	Datum		d;
+
+	/* strict function, so check for NULL args */
+	for (int argno = 0; argno < nargs; argno++)
+	{
+		if (args[argno].isnull)
+		{
+			*op->resnull = true;
+			*op->resvalue = (Datum) 0;
+			return;
+		}
+	}
+
+	pgstat_init_function_usage(fcinfo, &fcusage);
+
+	fcinfo->isnull = false;
+	d = op->d.func.fn_addr(fcinfo);
+	*op->resvalue = d;
+	*op->resnull = fcinfo->isnull;
+
+	/*
+	 * A function that reported an error softly returned a dummy datum. Hand a
+	 * NULL to whatever consumes the result instead.
+	 */
+	if (SOFT_ERROR_OCCURRED(fcinfo->context))
+	{
+		*op->resnull = true;
+		*op->resvalue = (Datum) 0;
+	}
 
 	pgstat_end_function_usage(&fcusage, true);
 }
@@ -3654,6 +3825,17 @@ ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 							  econtext,
 							  op->d.arraycoerce.resultelemtype,
 							  op->d.arraycoerce.amstate);
+
+	if (SOFT_ERROR_OCCURRED(op->d.arraycoerce.elemexprstate->escontext))
+	{
+		*op->resvalue = (Datum) 0;
+		*op->resnull = true;
+
+		/*
+		 * A soft error occurred. The caller may need to reset
+		 * ExprState.ErrorSaveContext.error_occurred for the next evaluation.
+		 */
+	}
 }
 
 /*

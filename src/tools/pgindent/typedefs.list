@@ -2765,6 +2765,9 @@ STRLEN
 SV
 SYNCHRONIZATION_BARRIER
 SYSTEM_INFO
+SafeCastElement
+SafeTypeCastExpr
+SafeTypeCastState
 SampleScan
 SampleScanGetSampleSize_function
 SampleScanState
