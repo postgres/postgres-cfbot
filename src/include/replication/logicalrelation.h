@@ -40,6 +40,14 @@ typedef struct LogicalRepRelMapEntry
 
 	/* Sync state. */
 	char		state;
+
+	/*
+	 * Sync state for which report_unapplied_change() last reported, or
+	 * SUBREL_STATE_INIT_LAST_UNAPPLIED if nothing has been reported since
+	 * changes were last applied.  This must be set whenever the entry is
+	 * zeroed, as zero is SUBREL_STATE_UNKNOWN.
+	 */
+	char		last_unapplied_state;
 	XLogRecPtr	statelsn;
 } LogicalRepRelMapEntry;
 

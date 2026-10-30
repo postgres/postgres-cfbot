@@ -76,6 +76,8 @@ MAKE_SYSCACHE(SUBSCRIPTIONRELMAP, pg_subscription_rel_srrelid_srsubid_index, 64)
 #define SUBREL_STATE_UNKNOWN	'\0'	/* unknown state */
 #define SUBREL_STATE_SYNCWAIT	'w' /* waiting for sync */
 #define SUBREL_STATE_CATCHUP	'c' /* catching up with apply */
+#define SUBREL_STATE_INIT_LAST_UNAPPLIED	'?' /* nothing reported yet for
+												 * skipped changes */
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 

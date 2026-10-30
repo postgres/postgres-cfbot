@@ -135,6 +135,84 @@ is( $result, qq(1
 	'check that the incremental data is replicated after the publication is created'
 );
 
+# Verify that the apply worker reports changes it does not apply because the
+# relation is not part of the subscription.  Such changes are discarded and
+# still acknowledged to the publisher as applied, so the report is the only
+# indication that they were received at all.
+#
+# A relation is reported once per sync state, however many changes arrive.
+$node_publisher->safe_psql('postgres', "CREATE TABLE tab_4 (a int)");
+$node_subscriber->safe_psql('postgres', "CREATE TABLE tab_4 (a int)");
+
+# Add the table to the publication, but do not refresh the subscription, so
+# the subscriber has no pg_subscription_rel entry for it.
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_3 ADD TABLE tab_4");
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres', "INSERT INTO tab_4 VALUES (1)");
+$node_subscriber->wait_for_log(
+	qr/LOG: ( [A-Z0-9]+:)? skipping changes for relation "public\.tab_4"/,
+	$offset);
+
+ok( $node_subscriber->log_contains(
+		qr/DETAIL: ( [A-Z0-9]+:)? The published relation is not included in subscription "tap_sub"\./,
+		$offset),
+	'relation not in the subscription is reported with the relation name');
+
+# DDL makes the publisher send the relation again.  The sync state has not
+# changed, so this must not cause a second report.
+$node_publisher->safe_psql('postgres',
+	"CREATE INDEX tab_4_a_idx ON tab_4 (a)");
+$node_publisher->safe_psql('postgres', "INSERT INTO tab_4 VALUES (2)");
+$node_publisher->wait_for_catchup('tap_sub');
+
+my $log =
+  PostgreSQL::Test::Utils::slurp_file($node_subscriber->logfile, $offset);
+my $count = () = $log =~ /skipping changes for relation "public\.tab_4"/g;
+is($count, 1, 'relation is reported once, not again after DDL');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_4");
+is($result, qq(0),
+	'changes for a relation not in the subscription are discarded');
+
+# Once the relation is part of the subscription its changes are applied, and
+# the initial copy brings across the rows that were discarded earlier.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub REFRESH PUBLICATION");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub');
+$node_publisher->safe_psql('postgres', "INSERT INTO tab_4 VALUES (3)");
+$node_publisher->wait_for_catchup('tap_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_4");
+is($result, qq(3),
+	'changes are applied once the relation is part of the subscription');
+
+# Remove the relation from the subscription but keep it published.  Changes
+# were applied in between, so skipping them again must be reported again.
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_3 DROP TABLE tab_4");
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub REFRESH PUBLICATION");
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_3 ADD TABLE tab_4");
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres', "INSERT INTO tab_4 VALUES (4)");
+$node_subscriber->wait_for_log(
+	qr/LOG: ( [A-Z0-9]+:)? skipping changes for relation "public\.tab_4"/,
+	$offset);
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_4");
+is($result, qq(3),
+	'changes are discarded again once the relation is removed from the subscription'
+);
+
 # shutdown
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');

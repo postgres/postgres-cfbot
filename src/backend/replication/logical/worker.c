@@ -678,6 +678,50 @@ ReplicationOriginNameForLogicalRep(Oid suboid, Oid relid,
 }
 
 /*
+ * Report that changes for a relation are being skipped.
+ *
+ * Logs at most once per sync state of the relation.  Called from
+ * should_apply_changes_for_rel() each time it decides not to apply a change,
+ * so the last state reported is remembered in the relation map entry.  It is
+ * kept when the entry is rebuilt for the same relation, and cleared when
+ * changes are applied again, so a later skip is reported again.
+ */
+static void
+report_unapplied_change(LogicalRepRelMapEntry *rel)
+{
+	/* Quick return if no state change. */
+	if (rel->state == rel->last_unapplied_state)
+		return;
+
+	/*
+	 * A relation with no pg_subscription_rel row is not being synchronized at
+	 * all.  Its changes are discarded for as long as that holds, yet are
+	 * still acknowledged to the publisher as applied, so log at LOG;
+	 * otherwise nothing shows that they were dropped.
+	 */
+	if (rel->state == SUBREL_STATE_UNKNOWN)
+		ereport(LOG,
+				errmsg("skipping changes for relation \"%s.%s\"",
+					   rel->remoterel.nspname, rel->remoterel.relname),
+				errdetail("The published relation is not included in subscription \"%s\".",
+						  MySubscription->name),
+				errhint("If this relation should be replicated, use ALTER SUBSCRIPTION ... REFRESH PUBLICATION."));
+	else
+	{
+		/*
+		 * The relation is still being synchronized by a tablesync worker, so
+		 * skipping its changes is transient and expected.
+		 */
+		ereport(DEBUG2,
+				errmsg_internal("skipping changes for relation \"%s.%s\" in subscription \"%s\": synchronization state is \"%c\"",
+								rel->remoterel.nspname, rel->remoterel.relname,
+								MySubscription->name, rel->state));
+	}
+
+	rel->last_unapplied_state = rel->state;
+}
+
+/*
  * Should this worker apply changes for given relation.
  *
  * This is mainly needed for initial relation data sync as that runs in
@@ -720,12 +764,26 @@ should_apply_changes_for_rel(LogicalRepRelMapEntry *rel)
 								MySubscription->name),
 						 errdetail("Cannot handle streamed replication transactions using parallel apply workers until all tables have been synchronized.")));
 
-			return rel->state == SUBREL_STATE_READY;
+			if (rel->state == SUBREL_STATE_READY)
+			{
+				rel->last_unapplied_state = SUBREL_STATE_INIT_LAST_UNAPPLIED;
+				return true;
+			}
+
+			report_unapplied_change(rel);
+			return false;
 
 		case WORKERTYPE_APPLY:
-			return (rel->state == SUBREL_STATE_READY ||
-					(rel->state == SUBREL_STATE_SYNCDONE &&
-					 rel->statelsn <= remote_ctx.finish_lsn));
+			if (rel->state == SUBREL_STATE_READY ||
+				(rel->state == SUBREL_STATE_SYNCDONE &&
+				 rel->statelsn <= remote_ctx.finish_lsn))
+			{
+				rel->last_unapplied_state = SUBREL_STATE_INIT_LAST_UNAPPLIED;
+				return true;
+			}
+
+			report_unapplied_change(rel);
+			return false;
 
 		case WORKERTYPE_SEQUENCESYNC:
 			/* Should never happen. */

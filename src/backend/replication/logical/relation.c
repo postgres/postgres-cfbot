@@ -168,6 +168,7 @@ logicalrep_relmap_update(LogicalRepRelation *remoterel)
 	LogicalRepRelMapEntry *entry;
 	bool		found;
 	int			i;
+	char		last_unapplied_state = SUBREL_STATE_INIT_LAST_UNAPPLIED;
 
 	if (LogicalRepRelMap == NULL)
 		logicalrep_relmap_init();
@@ -179,9 +180,18 @@ logicalrep_relmap_update(LogicalRepRelation *remoterel)
 						HASH_ENTER, &found);
 
 	if (found)
+	{
+		/*
+		 * The publisher sends the relation again after DDL and for each
+		 * streamed transaction, so keep what has already been reported about
+		 * skipped changes; see report_unapplied_change().
+		 */
+		last_unapplied_state = entry->last_unapplied_state;
 		logicalrep_relmap_free_entry(entry);
+	}
 
 	memset(entry, 0, sizeof(LogicalRepRelMapEntry));
+	entry->last_unapplied_state = last_unapplied_state;
 
 	/* Make cached copy of the data */
 	oldctx = MemoryContextSwitchTo(LogicalRepRelMapContext);
@@ -681,6 +691,7 @@ logicalrep_partition_open(LogicalRepRelMapEntry *root,
 	{
 		memset(part_entry, 0, sizeof(LogicalRepPartMapEntry));
 		part_entry->partoid = partOid;
+		entry->last_unapplied_state = SUBREL_STATE_INIT_LAST_UNAPPLIED;
 	}
 
 	/* Release the no-longer-useful attrmap, if any. */
