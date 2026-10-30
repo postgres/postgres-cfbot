@@ -8537,6 +8537,14 @@ FROM pg_stat_get_backend_idset() AS backendid;
    the macros in <filename>src/include/utils/probes.h</filename>.
   </para>
 
+  <para>
+   On <productname>Windows</productname>, where these probes cannot be traced
+   with DTrace, the same probe points can instead be emitted as
+   <ulink url="https://learn.microsoft.com/en-us/windows/win32/etw/about-event-tracing">Event
+   Tracing for Windows</ulink> (ETW) events and consumed with the standard
+   Windows performance tools.  See <xref linkend="dynamic-trace-etw"/>.
+  </para>
+
   <sect2 id="compiling-for-trace">
    <title>Compiling for Dynamic Tracing</title>
 
@@ -8546,6 +8554,23 @@ FROM pg_stat_get_backend_idset() AS backendid;
    in <productname>PostgreSQL</productname>. To include DTrace support
    specify <option>--enable-dtrace</option> to configure.  See <xref
    linkend="configure-options-devel"/> for further information.
+  </para>
+
+  <para>
+   On <productname>Windows</productname>, the <productname>Meson</productname>
+   option <option>-Detw</option> (see <xref linkend="configure-etw-meson"/>)
+   makes the probes available as ETW events instead (see
+   <xref linkend="dynamic-trace-etw"/>).  It defaults to
+   <literal>auto</literal>, so it is enabled whenever the build environment
+   supports it.  This requires the
+   <productname>Windows SDK</productname> header
+   <filename>&lt;TraceLoggingProvider.h&gt;</filename>, in a version recent
+   enough to provide the TraceLogging macros the probes use, so it is
+   available when building with <productname>Visual Studio</productname>; no
+   additional libraries are needed.  <productname>MinGW</productname> does not provide
+   this header, so ETW support is not available in
+   <productname>MinGW</productname> builds, which keep the empty probe
+   macros.  ETW and DTrace support are mutually exclusive.
   </para>
   </sect2>
 
@@ -9130,6 +9155,17 @@ Total time (ns)                        2312105013
 
    <step>
     <para>
+     Add a matching line for each new probe to
+     <filename>src/backend/utils/probes_etw.txt</filename>, giving its ETW
+     keyword and level and the type and name of each argument (see
+     <xref linkend="dynamic-trace-etw"/>).  The build checks that the two
+     files agree on every platform, not only on
+     <productname>Windows</productname>.
+    </para>
+   </step>
+
+   <step>
+    <para>
      Include <filename>pg_trace.h</filename> if it is not already present in the
      module(s) containing the probe points, and insert
      <literal>TRACE_POSTGRESQL</literal> probe macros at the desired locations
@@ -9170,6 +9206,16 @@ probe transaction__start(LocalTransactionId);
      script using the probe, the double underline needs to be replaced with a
      hyphen, so <literal>transaction-start</literal> is the name to document for
      users.
+    </para>
+   </step>
+
+   <step>
+    <para>
+     Add the probe to <filename>src/backend/utils/probes_etw.txt</filename>,
+     with its ETW keyword and level and the type and name of its argument:
+<programlisting>
+transaction__start                  TRANSACTION  INFO     LocalTransactionId lxid
+</programlisting>
     </para>
    </step>
 
@@ -9239,8 +9285,196 @@ if (TRACE_POSTGRESQL_TRANSACTION_START_ENABLED())
       Each trace macro has a corresponding <literal>ENABLED</literal> macro.
      </para>
     </listitem>
+
+    <listitem>
+     <para>
+      With ETW (see <xref linkend="dynamic-trace-etw"/>), the arguments are
+      evaluated only when a trace session has enabled the event, so the
+      arguments to a trace macro must not have side effects.
+     </para>
+    </listitem>
    </itemizedlist>
 
+  </para>
+
+  </sect2>
+
+  <sect2 id="dynamic-trace-etw">
+   <title>Event Tracing for Windows (ETW)</title>
+
+   <indexterm zone="dynamic-trace-etw">
+    <primary>ETW</primary>
+   </indexterm>
+   <indexterm zone="dynamic-trace-etw">
+    <primary>Event Tracing for Windows</primary>
+   </indexterm>
+
+  <para>
+   When <productname>PostgreSQL</productname> is built on
+   <productname>Windows</productname> with ETW support (see
+   <xref linkend="compiling-for-trace"/>), the same probe points listed in
+   <xref linkend="dtrace-probe-point-table"/> are emitted as
+   <ulink url="https://learn.microsoft.com/en-us/windows/win32/tracelogging/trace-logging-portal">TraceLogging</ulink>
+   events through a single ETW provider.  They can be captured and analyzed
+   with the standard Windows tools, including
+   <application>Windows Performance Recorder</application>
+   (<command>wpr</command>),
+   <application>Windows Performance Analyzer</application>
+   (<application>WPA</application>),
+   <application>PerfView</application>, <command>logman</command>,
+   <command>tracerpt</command>, and <command>xperf</command>.  No manifest
+   registration or additional consumer binary is required: the events are
+   self-describing, so consumers display each field by name.
+  </para>
+
+  <para>
+   The provider is identified as follows.  The name and
+   <acronym>GUID</acronym> are a stable contract that capture profiles depend
+   on, and never change:
+   <itemizedlist>
+    <listitem>
+     <para>Provider name: <literal>PostgreSQL.Server</literal></para>
+    </listitem>
+    <listitem>
+     <para>Provider GUID:
+      <literal>ea7811de-e757-5488-7ad6-2b057cced37d</literal></para>
+    </listitem>
+   </itemizedlist>
+   The <acronym>GUID</acronym> is derived from the provider name using the
+   standard ETW name hash, so tools that accept a provider name in place of a
+   <acronym>GUID</acronym> (for example
+   <literal>*PostgreSQL.Server</literal> in
+   <application>PerfView</application>) compute the same value.
+  </para>
+
+  <para>
+   Every event carries the same name as the corresponding DTrace probe (with
+   underscores in place of hyphens, for example
+   <literal>transaction_start</literal>), and its arguments appear as named
+   fields using the parameter descriptions from
+   <xref linkend="dtrace-probe-point-table"/> (for example
+   <literal>lxid</literal>, <literal>blocknum</literal>, or
+   <literal>tranche</literal>).
+  </para>
+
+  <para>
+   String fields, such as query text and lightweight lock tranche names, are
+   marked as UTF-8 in the event, but their contents are passed through in the
+   server encoding without conversion, so non-ASCII characters are displayed
+   correctly only when the server encoding is <literal>UTF8</literal>.  To
+   keep events within the size limit that ETW imposes, string fields longer
+   than 32kB are truncated.  ETW also discards any event larger than the trace
+   session's buffer size, so sessions that record query text should use
+   buffers of at least 64kB (for example <literal>-bs 64</literal> with
+   <command>logman</command>).
+  </para>
+
+  <note>
+   <para>
+    The query probes include the full text of each statement.  Any user who
+    can start a trace session on the server machine, which includes members
+    of the <literal>Performance Log Users</literal> group, can record these
+    events, so treat the trace files accordingly.
+   </para>
+  </note>
+
+  <para>
+   Each event is tagged with one <firstterm>keyword</firstterm> and a
+   <firstterm>level</firstterm>, so a consumer can enable just the subsystems
+   and verbosity it needs by filtering on the tuple
+   <literal>(provider, level, keyword)</literal>.  The keywords are a 64-bit
+   bitmask; the bits currently in use are shown in
+   <xref linkend="etw-keyword-table"/>.  Bits 48 to 63 are reserved by
+   <productname>Windows</productname>, and the other unused bits are reserved
+   for future keywords.
+  </para>
+
+  <table id="etw-keyword-table">
+   <title>ETW Probe Keywords</title>
+   <tgroup cols="3">
+    <colspec colname="col1" colwidth="2*"/>
+    <colspec colname="col2" colwidth="1*"/>
+    <colspec colname="col3" colwidth="4*"/>
+    <thead>
+     <row>
+      <entry>Keyword</entry>
+      <entry>Bit</entry>
+      <entry>Probes</entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>PG_KW_QUERY</literal></entry>
+      <entry><literal>0x01</literal></entry>
+      <entry>Query parse, rewrite, plan, execute, and statement status</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_TRANSACTION</literal></entry>
+      <entry><literal>0x02</literal></entry>
+      <entry>Transaction start, commit, and abort</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_LOCK</literal></entry>
+      <entry><literal>0x04</literal></entry>
+      <entry>Lightweight locks, heavyweight locks, and deadlock detection</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_BUFFER</literal></entry>
+      <entry><literal>0x08</literal></entry>
+      <entry>Buffer reads, flushes, extends, and checkpoint buffer writing</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_STORAGE</literal></entry>
+      <entry><literal>0x10</literal></entry>
+      <entry>Storage manager (md) block reads and writes</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_WAL</literal></entry>
+      <entry><literal>0x20</literal></entry>
+      <entry>WAL insert, segment switch, and buffer write</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_CHECKPOINT</literal></entry>
+      <entry><literal>0x40</literal></entry>
+      <entry>Checkpoint progress, including the CLOG, SUBTRANS, MultiXact, and
+       two-phase phases</entry>
+     </row>
+     <row>
+      <entry><literal>PG_KW_SORT</literal></entry>
+      <entry><literal>0x80</literal></entry>
+      <entry>Sort start and completion</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   Levels follow the <productname>Windows</productname> convention, where a
+   higher number is more verbose.  Low-volume, high-interest probes
+   (transaction, query, checkpoint, heavyweight lock wait, deadlock, and WAL
+   segment switch) are emitted at <literal>WINEVENT_LEVEL_INFO</literal> (4),
+   so they are captured by a default session.  High-volume probes (lightweight locks, buffer and
+   storage I/O, sort, and WAL record insertion) are emitted at
+   <literal>WINEVENT_LEVEL_VERBOSE</literal> (5), so they are excluded unless a
+   session explicitly asks for verbose events.
+  </para>
+
+  <para>
+   The following example uses <command>logman</command> to capture all
+   <productname>PostgreSQL</productname> events (every keyword, up to the
+   verbose level) into an event trace log, then decodes it with
+   <command>tracerpt</command>:
+<programlisting>
+logman create trace pg_etw -p "{ea7811de-e757-5488-7ad6-2b057cced37d}" 0xffffffffffffffff 0x5 -bs 64 -o pg_etw.etl -ets
+<lineannotation>... run the workload ...</lineannotation>
+logman stop pg_etw -ets
+tracerpt pg_etw.etl -o pg_etw.xml -of XML
+</programlisting>
+   To capture a single subsystem, supply just its keyword bit in place of
+   <literal>0xffffffffffffffff</literal>; for example, <literal>0x2</literal>
+   captures only transaction events.  Because every server process registers
+   the provider at startup, events from all of them appear in the same
+   session.
   </para>
 
   </sect2>

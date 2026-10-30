@@ -1128,6 +1128,37 @@ endif
 
 
 ###############################################################
+# Library: ETW (Event Tracing for Windows)
+#
+# Only a header from the Windows SDK is needed.  Check for the newest
+# TraceLogging macro the generated probes use, since older SDKs have the
+# header without it.
+###############################################################
+
+etwopt = get_option('etw')
+etw = not_found_dep
+if host_system == 'windows' and not etwopt.disabled()
+  if cc.has_header_symbol('TraceLoggingProvider.h',
+      'TraceLoggingCountedUtf8String',
+      prefix: '#include <windows.h>',
+      args: test_c_args)
+    cdata.set('USE_ETW', 1)
+    etw = declare_dependency()
+  elif etwopt.enabled()
+    error('ETW support requested but a suitable <TraceLoggingProvider.h> was not found (it is part of the Windows SDK; MinGW does not provide it)')
+  endif
+elif etwopt.enabled()
+  error('ETW support is only available on Windows')
+endif
+
+# Only one backend can generate probes.h from probes.d.
+if etw.found() and dtrace.found()
+  error('ETW and DTrace probe support are mutually exclusive')
+endif
+
+
+
+###############################################################
 # Library: libxml
 ###############################################################
 
@@ -4330,6 +4361,7 @@ summary(
     'bsd_auth': bsd_auth,
     'docs': docs_dep,
     'docs_pdf': docs_pdf_dep,
+    'etw': etw,
     'gss': gssapi,
     'icu': icu,
     'ldap': ldap,
