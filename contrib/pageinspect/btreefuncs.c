@@ -49,8 +49,7 @@ PG_FUNCTION_INFO_V1(bt_page_stats_1_9);
 PG_FUNCTION_INFO_V1(bt_page_stats);
 PG_FUNCTION_INFO_V1(bt_multi_page_stats);
 
-#define IS_INDEX(r) ((r)->rd_rel->relkind == RELKIND_INDEX)
-#define IS_BTREE(r) ((r)->rd_rel->relam == BTREE_AM_OID)
+#define IS_BTREE(r) (IS_INDEX(r) && (r)->rd_rel->relam == BTREE_AM_OID)
 
 /* ------------------------------------------------
  * structure for single btree page statistics
@@ -225,7 +224,7 @@ check_relation_block_range(Relation rel, int64 blkno)
 static void
 bt_index_block_validate(Relation rel, int64 blkno)
 {
-	if (!IS_INDEX(rel) || !IS_BTREE(rel))
+	if (!IS_BTREE(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a %s index",
@@ -858,7 +857,7 @@ bt_metap(PG_FUNCTION_ARGS)
 	relrv = makeRangeVarFromNameList(textToQualifiedNameList(relname));
 	rel = relation_openrv(relrv, AccessShareLock);
 
-	if (!IS_INDEX(rel) || !IS_BTREE(rel))
+	if (!IS_BTREE(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a %s index",
