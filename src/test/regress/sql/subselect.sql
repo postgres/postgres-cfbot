@@ -1790,3 +1790,15 @@ WHERE COALESCE(t1.id, -1) NOT IN
     (SELECT t1.val FROM not_null_tab t2 WHERE t2.val IS NOT NULL);
 
 ROLLBACK;
+
+--
+-- Subplan names given a numeric suffix must not collide with names that are
+-- used as given, such as CTE names, whichever is chosen first
+--
+EXPLAIN (COSTS OFF)
+WITH expr_1 AS MATERIALIZED (SELECT 1 AS x)
+SELECT (SELECT x FROM expr_1), (SELECT 2 WHERE random() >= 0);
+
+EXPLAIN (COSTS OFF)
+SELECT (SELECT 1 WHERE random() >= 0),
+       (WITH expr_1 AS MATERIALIZED (SELECT 2 AS x) SELECT x FROM expr_1);

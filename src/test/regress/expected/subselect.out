@@ -4075,3 +4075,37 @@ WHERE COALESCE(t1.id, -1) NOT IN
 (0 rows)
 
 ROLLBACK;
+--
+-- Subplan names given a numeric suffix must not collide with names that are
+-- used as given, such as CTE names, whichever is chosen first
+--
+EXPLAIN (COSTS OFF)
+WITH expr_1 AS MATERIALIZED (SELECT 1 AS x)
+SELECT (SELECT x FROM expr_1), (SELECT 2 WHERE random() >= 0);
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Result
+   CTE expr_1
+     ->  Result
+   InitPlan expr_2
+     ->  CTE Scan on expr_1
+   InitPlan expr_3
+     ->  Result
+           One-Time Filter: (random() >= '0'::double precision)
+(8 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT (SELECT 1 WHERE random() >= 0),
+       (WITH expr_1 AS MATERIALIZED (SELECT 2 AS x) SELECT x FROM expr_1);
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Result
+   InitPlan expr_1
+     ->  Result
+           One-Time Filter: (random() >= '0'::double precision)
+   InitPlan expr_2
+     ->  CTE Scan on expr_1
+           CTE expr_1_1
+             ->  Result
+(8 rows)
+

@@ -9250,65 +9250,118 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
+ * For a base name that has been given numeric suffixes, the next suffix to
+ * try; see choose_plan_name().
+ */
+typedef struct SubplanNameSuffix
+{
+	const char *base;			/* the base name */
+	unsigned	next_suffix;	/* every smaller suffix is taken */
+} SubplanNameSuffix;
+
+/*
+ * Find the SubplanNameSuffix for a base name, creating it if asked to.
+ */
+static SubplanNameSuffix *
+subplan_name_suffix(PlannerGlobal *glob, const char *base, bool create)
+{
+	SubplanNameSuffix *entry;
+
+	foreach_ptr(SubplanNameSuffix, s, glob->subplanNameSuffixes)
+	{
+		if (strcmp(s->base, base) == 0)
+			return s;
+	}
+	if (!create)
+		return NULL;
+
+	entry = palloc_object(SubplanNameSuffix);
+	entry->base = pstrdup(base);
+	entry->next_suffix = 1;
+	glob->subplanNameSuffixes = lappend(glob->subplanNameSuffixes, entry);
+	return entry;
+}
+
+/*
+ * Is "name" already in use as a subplan name?  See choose_plan_name().
+ */
+static bool
+subplan_name_in_use(PlannerGlobal *glob, const char *name)
+{
+	const char *suffix = strrchr(name, '_');
+
+	foreach_ptr(char, subplan_name, glob->subplanNames)
+	{
+		if (strcmp(subplan_name, name) == 0)
+			return true;
+	}
+
+	/*
+	 * A name given a numeric suffix is the base name, "_" and the suffix
+	 * written without leading zeros, and it is in use if the suffix is below
+	 * the base name's next_suffix.
+	 */
+	if (suffix != NULL && suffix[1] >= '1' && suffix[1] <= '9')
+	{
+		char	   *endptr;
+		unsigned long val = strtoul(suffix + 1, &endptr, 10);
+
+		if (*endptr == '\0')
+		{
+			char	   *base = pnstrdup(name, suffix - name);
+			SubplanNameSuffix *entry = subplan_name_suffix(glob, base, false);
+
+			pfree(base);
+			if (entry != NULL && val < entry->next_suffix)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+/*
  * Choose a unique name for some subroot.
  *
- * Modifies glob->subplanNames to track names already used.
+ * If always_number is false and the name is not in use, it is used as is and
+ * remembered in glob->subplanNames.  Otherwise it gets the smallest positive
+ * numeric suffix that makes it unused.  Names are never released, so for each
+ * base name we remember in glob->subplanNameSuffixes the suffix after the
+ * last one used, and every smaller one is known to be taken.  Starting the
+ * search there gives the same name as starting at 1, but takes constant time
+ * instead of time proportional to the number of names; searching from 1 and
+ * scanning every name for each candidate made planning O(N^3) in the number
+ * of subplans.
+ *
+ * A name with a suffix determines its base name and suffix: they are what
+ * comes before and after the last underscore.  So names given suffixes never
+ * collide with each other, and the names given suffixes need not be stored.
+ * Only the names used as is, such as CTE names and subquery aliases, can
+ * collide with them, and those are checked.
  */
 char *
 choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 {
+	SubplanNameSuffix *entry;
 	unsigned	n;
 
-	/*
-	 * If a numeric suffix is not required, then search the list of
-	 * previously-assigned names for a match. If none is found, then we can
-	 * use the provided name without modification.
-	 */
-	if (!always_number)
+	if (!always_number && !subplan_name_in_use(glob, name))
 	{
-		bool		found = false;
+		/* pstrdup here is just to avoid cast-away-const */
+		char	   *chosen_name = pstrdup(name);
 
-		foreach_ptr(char, subplan_name, glob->subplanNames)
-		{
-			if (strcmp(subplan_name, name) == 0)
-			{
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			/* pstrdup here is just to avoid cast-away-const */
-			char	   *chosen_name = pstrdup(name);
-
-			glob->subplanNames = lappend(glob->subplanNames, chosen_name);
-			return chosen_name;
-		}
+		glob->subplanNames = lappend(glob->subplanNames, chosen_name);
+		return chosen_name;
 	}
 
-	/*
-	 * If a numeric suffix is required or if the un-suffixed name is already
-	 * in use, then loop until we find a positive integer that produces a
-	 * novel name.
-	 */
-	for (n = 1; true; ++n)
+	entry = subplan_name_suffix(glob, name, true);
+	for (n = entry->next_suffix; true; ++n)
 	{
 		char	   *proposed_name = psprintf("%s_%u", name, n);
-		bool		found = false;
 
-		foreach_ptr(char, subplan_name, glob->subplanNames)
+		if (!subplan_name_in_use(glob, proposed_name))
 		{
-			if (strcmp(subplan_name, proposed_name) == 0)
-			{
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			glob->subplanNames = lappend(glob->subplanNames, proposed_name);
+			entry->next_suffix = n + 1;
 			return proposed_name;
 		}
 
