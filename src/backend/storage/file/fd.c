@@ -683,9 +683,10 @@ retry:
 		 */
 
 		rc = posix_fadvise(fd, offset, nbytes, POSIX_FADV_DONTNEED);
-
 		if (rc != 0)
 		{
+			/* for compatibility with %m printing etc */
+			errno = rc;
 			/* don't error out, this is just a performance optimization */
 			ereport(WARNING,
 					(errcode_for_file_access(),
@@ -2078,7 +2079,7 @@ FilePrefetch(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
 
 		returnCode = FileAccess(file);
 		if (returnCode < 0)
-			return returnCode;
+			return errno;
 
 retry:
 		pgstat_report_wait_start(wait_event_info);
@@ -2102,7 +2103,7 @@ retry:
 
 		returnCode = FileAccess(file);
 		if (returnCode < 0)
-			return returnCode;
+			return errno;
 
 		ra.ra_offset = offset;
 		ra.ra_count = amount;
