@@ -501,6 +501,7 @@ PostmasterMain(int argc, char *argv[])
 	char	   *userDoption = NULL;
 	bool		listen_addr_saved = false;
 	char	   *output_config_variable = NULL;
+	Size		shmem_size;
 
 	InitProcessGlobals();
 
@@ -973,13 +974,14 @@ PostmasterMain(int argc, char *argv[])
 	 * shared memory needs.
 	 */
 	ShmemCallRequestCallbacks();
+	shmem_size = CalculateShmemSize();
 
 	/*
 	 * Now that loadable modules have had their chance to request additional
 	 * shared memory, determine the value of any runtime-computed GUCs that
 	 * depend on the amount of shared memory required.
 	 */
-	InitializeShmemGUCs();
+	InitializeShmemGUCs(shmem_size);
 
 	/*
 	 * Now that modules have been loaded, we can process any custom resource
@@ -1014,7 +1016,7 @@ PostmasterMain(int argc, char *argv[])
 	 * normally choose the same IPC keys.  This helps ensure that we will
 	 * clean up dead IPC objects if the postmaster crashes and is restarted.
 	 */
-	CreateSharedMemoryAndSemaphores();
+	CreateSharedMemoryAndSemaphores(shmem_size);
 
 	/*
 	 * Estimate number of openable files.  This must happen after setting up
@@ -3257,6 +3259,8 @@ PostmasterStateMachine(void)
 	 */
 	if (FatalError && pmState == PM_NO_CHILDREN)
 	{
+		Size		shmem_size;
+
 		ereport(LOG,
 				(errmsg("all server processes terminated; reinitializing")));
 
@@ -3280,7 +3284,8 @@ PostmasterStateMachine(void)
 		 */
 		ResetShmemAllocator();
 		ShmemCallRequestCallbacks();
-		CreateSharedMemoryAndSemaphores();
+		shmem_size = CalculateShmemSize();
+		CreateSharedMemoryAndSemaphores(shmem_size);
 
 		UpdatePMState(PM_STARTUP);
 

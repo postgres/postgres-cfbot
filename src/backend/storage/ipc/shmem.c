@@ -389,16 +389,18 @@ ShmemRequestInternal(ShmemStructOpts *options, ShmemRequestKind kind)
 }
 
 /*
- *	ShmemGetRequestedSize() --- estimate the total size of all registered shared
- *                              memory structures.
+ * ShmemGetRequestedSize() --- estimate the total size of all registered shared
+ * memory structures.
  *
- * This is called at postmaster startup, before the shared memory segment has
- * been created.
+ * This is called at postmaster startup or server restart, before the shared
+ * memory segment has been created.
  */
 size_t
 ShmemGetRequestedSize(void)
 {
 	size_t		size;
+
+	Assert(shmem_request_state == SRS_REQUESTING);
 
 	/* memory needed for the ShmemIndex */
 	size = hash_estimate_size(list_length(pending_shmem_requests) + SHMEM_INDEX_ADDITIONAL_SIZE,

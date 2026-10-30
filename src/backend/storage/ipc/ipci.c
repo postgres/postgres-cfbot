@@ -52,6 +52,10 @@ RequestAddinShmemSpace(Size size)
 /*
  * CalculateShmemSize
  *		Calculates the amount of shared memory needed.
+ *
+ * Expected to be called only once after collecting all shared memory requests
+ * but before allocating the shared memory segment at the startup or server
+ * restart.
  */
 Size
 CalculateShmemSize(void)
@@ -114,19 +118,16 @@ AttachSharedMemoryStructs(void)
 
 /*
  * CreateSharedMemoryAndSemaphores
- *		Creates and initializes shared memory and semaphores.
+ *		Creates and initializes shared memory of given size and semaphores.
  */
 void
-CreateSharedMemoryAndSemaphores(void)
+CreateSharedMemoryAndSemaphores(Size size)
 {
 	PGShmemHeader *shim;
 	PGShmemHeader *seghdr;
-	Size		size;
 
 	Assert(!IsUnderPostmaster);
 
-	/* Compute the size of the shared-memory block */
-	size = CalculateShmemSize();
 	elog(DEBUG3, "invoking IpcMemoryCreate(size=%zu)", size);
 
 	/*
@@ -183,20 +184,20 @@ RegisterBuiltinShmemCallbacks(void)
  * InitializeShmemGUCs
  *
  * This function initializes runtime-computed GUCs related to the amount of
- * shared memory required for the current configuration.
+ * shared memory required for the current configuration.  The input size is
+ * expected to be the total shared memory size computed for the current
+ * configuration.
  */
 void
-InitializeShmemGUCs(void)
+InitializeShmemGUCs(Size size_b)
 {
 	char		buf[64];
-	Size		size_b;
 	Size		size_mb;
 	Size		hp_size;
 
 	/*
-	 * Calculate the shared memory size and round up to the nearest megabyte.
+	 * Round the shared memory size up to the nearest megabyte.
 	 */
-	size_b = CalculateShmemSize();
 	size_mb = add_size(size_b, (1024 * 1024) - 1) / (1024 * 1024);
 	sprintf(buf, "%zu", size_mb);
 	SetConfigOption("shared_memory_size", buf,
