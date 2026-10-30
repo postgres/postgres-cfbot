@@ -25,6 +25,8 @@ ALTER FOREIGN TABLE [ IF EXISTS ] [ ONLY ] <replaceable class="parameter">name</
     <replaceable class="parameter">action</replaceable> [, ... ]
 ALTER FOREIGN TABLE [ IF EXISTS ] [ ONLY ] <replaceable class="parameter">name</replaceable> [ * ]
     RENAME [ COLUMN ] <replaceable class="parameter">column_name</replaceable> TO <replaceable class="parameter">new_column_name</replaceable>
+ALTER FOREIGN TABLE [ IF EXISTS ] [ ONLY ] <replaceable class="parameter">name</replaceable> [ * ]
+    RENAME CONSTRAINT <replaceable class="parameter">constraint_name</replaceable> TO <replaceable class="parameter">new_constraint_name</replaceable>
 ALTER FOREIGN TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     RENAME TO <replaceable class="parameter">new_name</replaceable>
 ALTER FOREIGN TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
@@ -288,8 +290,8 @@ ALTER FOREIGN TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceab
     <term><literal>RENAME</literal></term>
     <listitem>
      <para>
-      The <literal>RENAME</literal> forms change the name of a foreign table
-      or the name of an individual column in a foreign table.
+      The <literal>RENAME</literal> forms change the name of a foreign table,
+      or the name of an individual column or constraint in a foreign table.
      </para>
     </listitem>
    </varlistentry>

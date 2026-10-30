@@ -9940,6 +9940,7 @@ RenameStmt: ALTER AGGREGATE aggregate_with_argtypes RENAME TO name
 					RenameStmt *n = makeNode(RenameStmt);
 
 					n->renameType = OBJECT_TABCONSTRAINT;
+					n->relationType = OBJECT_TABLE;
 					n->relation = $3;
 					n->subname = $6;
 					n->newname = $8;
@@ -9951,9 +9952,34 @@ RenameStmt: ALTER AGGREGATE aggregate_with_argtypes RENAME TO name
 					RenameStmt *n = makeNode(RenameStmt);
 
 					n->renameType = OBJECT_TABCONSTRAINT;
+					n->relationType = OBJECT_TABLE;
 					n->relation = $5;
 					n->subname = $8;
 					n->newname = $10;
+					n->missing_ok = true;
+					$$ = (Node *) n;
+				}
+			| ALTER FOREIGN TABLE relation_expr RENAME CONSTRAINT name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+
+					n->renameType = OBJECT_TABCONSTRAINT;
+					n->relationType = OBJECT_FOREIGN_TABLE;
+					n->relation = $4;
+					n->subname = $7;
+					n->newname = $9;
+					n->missing_ok = false;
+					$$ = (Node *) n;
+				}
+			| ALTER FOREIGN TABLE IF_P EXISTS relation_expr RENAME CONSTRAINT name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+
+					n->renameType = OBJECT_TABCONSTRAINT;
+					n->relationType = OBJECT_FOREIGN_TABLE;
+					n->relation = $6;
+					n->subname = $9;
+					n->newname = $11;
 					n->missing_ok = true;
 					$$ = (Node *) n;
 				}
