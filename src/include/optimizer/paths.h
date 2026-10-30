@@ -148,6 +148,7 @@ extern EquivalenceClass *get_eclass_for_sort_expr(PlannerInfo *root,
 extern EquivalenceMember *find_ec_member_matching_expr(EquivalenceClass *ec,
 													   Expr *expr,
 													   Relids relids);
+extern List *get_available_input_vars(List *exprs);
 extern EquivalenceMember *find_computable_ec_member(PlannerInfo *root,
 													EquivalenceClass *ec,
 													List *exprs,
