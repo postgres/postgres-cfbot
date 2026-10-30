@@ -166,7 +166,22 @@ coerce_type(ParseState *pstate, Node *node,
 	if (targetTypeId == inputTypeId ||
 		node == NULL)
 	{
-		/* no conversion needed */
+		/*
+		 * No conversion needed.  But an explicit cast of a ROW() changes how
+		 * an operator on it is parsed, so record it in the RowExpr, else
+		 * ruleutils.c prints a bare ROW() that reads back as a row
+		 * comparison.  Copy the node, since we must not modify the input.
+		 */
+		if (node != NULL && IsA(node, RowExpr) &&
+			cformat == COERCE_EXPLICIT_CAST &&
+			((RowExpr *) node)->row_format != COERCE_EXPLICIT_CAST)
+		{
+			RowExpr    *rowexpr = makeNode(RowExpr);
+
+			memcpy(rowexpr, node, sizeof(RowExpr));
+			rowexpr->row_format = COERCE_EXPLICIT_CAST;
+			return (Node *) rowexpr;
+		}
 		return node;
 	}
 	if (targetTypeId == ANYOID ||
