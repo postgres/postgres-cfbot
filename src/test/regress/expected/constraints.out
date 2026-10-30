@@ -1715,6 +1715,101 @@ ERROR:  cannot create primary key on column "a"
 DETAIL:  The constraint "nn" on column "a" of table "pp_nn_1", marked NO INHERIT, is incompatible with a primary key.
 HINT:  You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT.
 DROP TABLE pp_nn;
+-- Constraint name picking on a partitioned root must consider names
+-- already in use on descendants in any schema, otherwise the auto-picked
+-- name collides with the leaf's existing constraint during recursion.
+CREATE SCHEMA other_schema;
+-- SET NOT NULL: auto-named
+CREATE TABLE pp_nn (a int) PARTITION BY RANGE (a);
+CREATE TABLE other_schema.pp_nn_1
+    PARTITION OF pp_nn FOR VALUES FROM (1) TO (10);
+ALTER TABLE other_schema.pp_nn_1
+    ADD CONSTRAINT pp_nn_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE pp_nn ALTER COLUMN a SET NOT NULL;
+EXECUTE get_nnconstraint_info('{pp_nn, other_schema.pp_nn_1}');
+       tabname        |      conname      | convalidated | conislocal | coninhcount 
+----------------------+-------------------+--------------+------------+-------------
+ other_schema.pp_nn_1 | pp_nn_a_not_null  | t            | t          |           0
+ other_schema.pp_nn_1 | pp_nn_a_not_null1 | t            | f          |           1
+ pp_nn                | pp_nn_a_not_null1 | t            | t          |           0
+(3 rows)
+
+DROP TABLE pp_nn;
+-- ADD NOT NULL (constraint syntax): auto-named
+CREATE TABLE pp_nn (a int) PARTITION BY RANGE (a);
+CREATE TABLE other_schema.pp_nn_1
+    PARTITION OF pp_nn FOR VALUES FROM (1) TO (10);
+ALTER TABLE other_schema.pp_nn_1
+    ADD CONSTRAINT pp_nn_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE pp_nn ADD NOT NULL a;
+EXECUTE get_nnconstraint_info('{pp_nn, other_schema.pp_nn_1}');
+       tabname        |      conname      | convalidated | conislocal | coninhcount 
+----------------------+-------------------+--------------+------------+-------------
+ other_schema.pp_nn_1 | pp_nn_a_not_null  | t            | t          |           0
+ other_schema.pp_nn_1 | pp_nn_a_not_null1 | t            | f          |           1
+ pp_nn                | pp_nn_a_not_null1 | t            | t          |           0
+(3 rows)
+
+DROP TABLE pp_nn;
+-- ADD CHECK: auto-named
+CREATE TABLE pp_nn (a int) PARTITION BY RANGE (a);
+CREATE TABLE other_schema.pp_nn_1
+    PARTITION OF pp_nn FOR VALUES FROM (1) TO (10);
+ALTER TABLE other_schema.pp_nn_1 ADD CONSTRAINT pp_nn_a_check CHECK (a > -1);
+ALTER TABLE pp_nn ADD CHECK (a > 0);
+SELECT conrelid::regclass, conname, contype FROM pg_constraint
+WHERE conrelid IN ('pp_nn'::regclass, 'other_schema.pp_nn_1'::regclass)
+  AND contype = 'c'
+ORDER BY 1, 2;
+       conrelid       |    conname     | contype 
+----------------------+----------------+---------
+ pp_nn                | pp_nn_a_check1 | c
+ other_schema.pp_nn_1 | pp_nn_a_check  | c
+ other_schema.pp_nn_1 | pp_nn_a_check1 | c
+(3 rows)
+
+DROP TABLE pp_nn;
+-- Both ALTERs auto-named: a partition that shares its root's relname,
+-- even though it lives in a different schema, makes each auto-name
+-- pick the same name
+CREATE TABLE pp_nn_dup (a int) PARTITION BY RANGE (a);
+CREATE TABLE other_schema.pp_nn_dup
+    PARTITION OF pp_nn_dup FOR VALUES FROM (1) TO (10);
+ALTER TABLE other_schema.pp_nn_dup ADD CHECK (a > 100);
+ALTER TABLE pp_nn_dup ADD CHECK (a > 0);
+SELECT conrelid::regclass, conname FROM pg_constraint
+WHERE conrelid IN ('pp_nn_dup'::regclass, 'other_schema.pp_nn_dup'::regclass)
+  AND contype = 'c'
+ORDER BY 1, 2;
+        conrelid        |      conname       
+------------------------+--------------------
+ pp_nn_dup              | pp_nn_dup_a_check1
+ other_schema.pp_nn_dup | pp_nn_dup_a_check
+ other_schema.pp_nn_dup | pp_nn_dup_a_check1
+(3 rows)
+
+DROP TABLE pp_nn_dup;
+-- Multi-level partition tree: the collision is on a grandchild in a
+-- different schema (mid-level partition lives in the root's schema)
+CREATE TABLE pp_nn (a int) PARTITION BY RANGE (a);
+CREATE TABLE pp_nn_mid PARTITION OF pp_nn
+    FOR VALUES FROM (1) TO (10) PARTITION BY RANGE (a);
+CREATE TABLE other_schema.pp_nn_leaf
+    PARTITION OF pp_nn_mid FOR VALUES FROM (1) TO (5);
+ALTER TABLE other_schema.pp_nn_leaf
+    ADD CONSTRAINT pp_nn_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE pp_nn ALTER COLUMN a SET NOT NULL;
+EXECUTE get_nnconstraint_info('{pp_nn, pp_nn_mid, other_schema.pp_nn_leaf}');
+         tabname         |      conname      | convalidated | conislocal | coninhcount 
+-------------------------+-------------------+--------------+------------+-------------
+ other_schema.pp_nn_leaf | pp_nn_a_not_null  | t            | t          |           0
+ other_schema.pp_nn_leaf | pp_nn_a_not_null1 | t            | f          |           1
+ pp_nn                   | pp_nn_a_not_null1 | t            | t          |           0
+ pp_nn_mid               | pp_nn_a_not_null1 | t            | f          |           1
+(4 rows)
+
+DROP TABLE pp_nn;
+DROP SCHEMA other_schema;
 -- Create table with NOT NULL INVALID constraint, for pg_upgrade.
 CREATE TABLE notnull_tbl1_upg (a int, b int);
 INSERT INTO notnull_tbl1_upg VALUES (NULL, 1), (NULL, 2), (300, 3);
