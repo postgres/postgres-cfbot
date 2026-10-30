@@ -512,6 +512,24 @@ typedef struct PgStatShared_Database
 	PgStat_StatDBEntry stats;
 } PgStatShared_Database;
 
+typedef struct PgStatShared_Tablespace
+{
+	PgStatShared_Common header;
+	PgStat_StatTabspaceEntry stats;
+} PgStatShared_Tablespace;
+
+/*
+ * Counts of a tablespace not yet flushed to shared memory.  The array of
+ * these lives in pgstat_tablespace.c.  pgstat_count_smgr_io_op_time() indexes
+ * it by the slot cached in the SMgrRelation, see
+ * pgstat_tablespace_pending_counts().
+ */
+typedef struct PgStat_PendingTabspace
+{
+	Oid			spcoid;
+	PgStat_StatTabspaceEntry counts;
+} PgStat_PendingTabspace;
+
 typedef struct PgStatShared_Relation
 {
 	PgStatShared_Common header;
@@ -769,6 +787,32 @@ extern void pgstat_database_reset_timestamp_cb(PgStatShared_Common *header, Time
 
 
 /*
+ * Functions in pgstat_tablespace.c
+ */
+
+extern void pgstat_ensure_tablespace_entry(Oid spcoid);
+extern PgStat_StatTabspaceEntry *pgstat_prep_tablespace_pending(Oid spcoid);
+extern Oid	pgstat_tablespace_from_tempfile_path(const char *path);
+extern uint16 pgstat_assign_tablespace_slot(Oid spcoid);
+extern bool pgstat_flush_tablespace(bool nowait);
+extern void pgstat_tablespace_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
+
+extern PGDLLIMPORT PgStat_PendingTabspace *pgstat_pending_tabspaces;
+
+/*
+ * The pending counts of the tablespace in slot "tsslot", see
+ * pgstat_assign_tablespace_slot().  Inline, as this runs for every timed
+ * block I/O.
+ */
+static inline PgStat_StatTabspaceEntry *
+pgstat_tablespace_pending_counts(uint16 tsslot)
+{
+	Assert(tsslot != 0);
+	return &pgstat_pending_tabspaces[tsslot - 1].counts;
+}
+
+
+/*
  * Functions in pgstat_function.c
  */
 
@@ -804,6 +848,7 @@ extern void AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isC
 extern void AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth);
 extern void AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 extern void PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
+extern void pgstat_relation_flush_tablespace(PgStat_RelationStatus *ps);
 
 extern bool pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
 extern void pgstat_relation_delete_pending_cb(PgStat_EntryRef *entry_ref);
@@ -854,6 +899,8 @@ extern void pgstat_reset_matching_entries(bool (*do_reset) (PgStatShared_HashEnt
 										  TimestampTz ts);
 
 extern void pgstat_request_entry_refs_gc(void);
+extern bool pgstat_need_entry_refs_gc(void);
+extern void pgstat_gc_entry_refs(void);
 extern dsa_pointer pgstat_alloc_entry_body(PgStat_Kind kind);
 extern PgStatShared_Common *pgstat_init_entry(PgStat_Kind kind,
 											  PgStatShared_HashEntry *shhashent,
