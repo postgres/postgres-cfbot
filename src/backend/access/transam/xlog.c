@@ -7941,7 +7941,9 @@ CreateCheckPoint(int flags)
 	 * We don't need to save oldestClogXid in the checkpoint, it only matters
 	 * for the short period in which clog is being truncated, and if we crash
 	 * during that we'll redo the clog truncation and fix up oldestClogXid
-	 * there.
+	 * there.  If our redo pointer is after the clog truncation record, we see
+	 * the new oldestXid, because vac_truncate_clog() advances it before
+	 * truncating.
 	 */
 	LWLockAcquire(XidGenLock, LW_SHARED);
 	checkPoint.nextXid = TransamVariables->nextXid;
