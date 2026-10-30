@@ -2346,39 +2346,32 @@ flatten_grouping_sets(Node *expr, bool toplevel, bool *hasGroupingSets)
 }
 
 /*
- * Transform a single expression within a GROUP BY clause or grouping set.
+ * Add a resolved targetlist entry to a GROUP BY (or PARTITION BY) clause.
  *
- * The expression is added to the targetlist if not already present, and to the
- * flatresult list (which will become the groupClause) if not already present
- * there.  The sortClause is consulted for operator and sort order hints.
+ * This is the common core shared by transformGroupClauseExpr() and the
+ * GROUP BY ALL path in transformGroupClause(): given a TargetEntry that is
+ * to become a grouping column, add it to *flatresult, inheriting equality
+ * and ordering semantics from a matching ORDER BY item if one exists.
  *
- * Returns the ressortgroupref of the expression.
+ * Returns the ressortgroupref of the entry, or 0 if it was a local-level
+ * duplicate that we dropped.
  *
  * flatresult	reference to flat list of SortGroupClause nodes
  * seen_local	bitmapset of sortgrouprefs already seen at the local level
  * pstate		ParseState
- * gexpr		node to transform
+ * tle			targetlist entry to add
  * targetlist	reference to TargetEntry list
  * sortClause	ORDER BY clause (SortGroupClause nodes)
- * exprKind		expression kind
- * useSQL99		SQL99 rather than SQL92 syntax
  * toplevel		false if within any grouping set
+ * location		parse location to finger in event of trouble
  */
 static Index
-transformGroupClauseExpr(List **flatresult, Bitmapset *seen_local,
-						 ParseState *pstate, Node *gexpr,
-						 List **targetlist, List *sortClause,
-						 ParseExprKind exprKind, bool useSQL99, bool toplevel)
+addTargetToGroupClause(List **flatresult, Bitmapset *seen_local,
+					   ParseState *pstate, TargetEntry *tle,
+					   List **targetlist, List *sortClause,
+					   bool toplevel, int location)
 {
-	TargetEntry *tle;
 	bool		found = false;
-
-	if (useSQL99)
-		tle = findTargetlistEntrySQL99(pstate, gexpr,
-									   targetlist, exprKind);
-	else
-		tle = findTargetlistEntrySQL92(pstate, gexpr,
-									   targetlist, exprKind);
 
 	if (tle->ressortgroupref > 0)
 	{
@@ -2446,13 +2439,53 @@ transformGroupClauseExpr(List **flatresult, Bitmapset *seen_local,
 	if (!found)
 		*flatresult = addTargetToGroupList(pstate, tle,
 										   *flatresult, *targetlist,
-										   exprLocation(gexpr));
+										   location);
 
 	/*
 	 * _something_ must have assigned us a sortgroupref by now...
 	 */
 
 	return tle->ressortgroupref;
+}
+
+/*
+ * Transform a single expression within a GROUP BY clause or grouping set.
+ *
+ * The expression is added to the targetlist if not already present, and to the
+ * flatresult list (which will become the groupClause) if not already present
+ * there.  The sortClause is consulted for operator and sort order hints.
+ *
+ * Returns the ressortgroupref of the expression.
+ *
+ * flatresult	reference to flat list of SortGroupClause nodes
+ * seen_local	bitmapset of sortgrouprefs already seen at the local level
+ * pstate		ParseState
+ * gexpr		node to transform
+ * targetlist	reference to TargetEntry list
+ * sortClause	ORDER BY clause (SortGroupClause nodes)
+ * exprKind		expression kind
+ * useSQL99		SQL99 rather than SQL92 syntax
+ * toplevel		false if within any grouping set
+ */
+static Index
+transformGroupClauseExpr(List **flatresult, Bitmapset *seen_local,
+						 ParseState *pstate, Node *gexpr,
+						 List **targetlist, List *sortClause,
+						 ParseExprKind exprKind, bool useSQL99, bool toplevel)
+{
+	TargetEntry *tle;
+
+	if (useSQL99)
+		tle = findTargetlistEntrySQL99(pstate, gexpr,
+									   targetlist, exprKind);
+	else
+		tle = findTargetlistEntrySQL92(pstate, gexpr,
+									   targetlist, exprKind);
+
+	return addTargetToGroupClause(flatresult, seen_local,
+								  pstate, tle,
+								  targetlist, sortClause,
+								  toplevel, exprLocation(gexpr));
 }
 
 /*
@@ -2619,10 +2652,14 @@ transformGroupingSet(List **flatresult,
  * aggregates or a HAVING clause with no GROUP BY; the output is one row per
  * grouping set even if the input is empty.
  *
+ * If GROUP BY ALL is specified, the groupClause is inferred to be all the
+ * non-aggregate, non-window expressions in the targetlist.
+ *
  * Returns the transformed (flat) groupClause.
  *
  * pstate		ParseState
  * grouplist	clause to transform
+ * groupByAll	is this a GROUP BY ALL statement?
  * groupingSets reference to list to contain the grouping set tree
  * targetlist	reference to TargetEntry list
  * sortClause	ORDER BY clause (SortGroupClause nodes)
@@ -2630,7 +2667,8 @@ transformGroupingSet(List **flatresult,
  * useSQL99		SQL99 rather than SQL92 syntax
  */
 List *
-transformGroupClause(ParseState *pstate, List *grouplist, List **groupingSets,
+transformGroupClause(ParseState *pstate, List *grouplist, bool groupByAll,
+					 List **groupingSets,
 					 List **targetlist, List *sortClause,
 					 ParseExprKind exprKind, bool useSQL99)
 {
@@ -2640,6 +2678,74 @@ transformGroupClause(ParseState *pstate, List *grouplist, List **groupingSets,
 	ListCell   *gl;
 	bool		hasGroupingSets = false;
 	Bitmapset  *seen_local = NULL;
+
+	/* Handle GROUP BY ALL */
+	if (groupByAll)
+	{
+		/* There cannot have been any explicit grouplist items */
+		Assert(grouplist == NIL);
+
+		/* Iterate over targets, adding acceptable ones to the result list */
+		foreach_ptr(TargetEntry, tle, *targetlist)
+		{
+			Index		ref;
+
+			/* Ignore junk TLEs */
+			if (tle->resjunk)
+				continue;
+
+			/*
+			 * TLEs containing aggregates are not okay to add to GROUP BY
+			 * (compare checkTargetlistEntrySQL92).  But the SQL standard
+			 * directs us to skip them, so it's fine.
+			 */
+			if (pstate->p_hasAggs &&
+				contain_aggs_of_level((Node *) tle->expr, 0))
+				continue;
+
+			/*
+			 * Likewise, TLEs containing window functions are not okay to add
+			 * to GROUP BY.  At this writing, the SQL standard is silent on
+			 * what to do with them, but by analogy to aggregates we'll just
+			 * skip them.
+			 */
+			if (pstate->p_hasWindowFuncs &&
+				contain_windowfuncs((Node *) tle->expr))
+				continue;
+
+			/*
+			 * Otherwise, add the TLE to the result.  We route it through the
+			 * same code path that an explicit GROUP BY item uses, so that a
+			 * target expression also named in ORDER BY inherits that item's
+			 * equality/ordering semantics (see addTargetToGroupClause).  This
+			 * is what makes GROUP BY ALL exactly equivalent to spelling out
+			 * the same expressions.
+			 *
+			 * We specify the parse location as the TLE's location, despite
+			 * the comment for addTargetToGroupList discouraging that.  The
+			 * only other thing we could point to is the ALL keyword, which
+			 * seems unhelpful when there are multiple TLEs.
+			 */
+			ref = addTargetToGroupClause(&result, seen_local,
+										 pstate, tle,
+										 targetlist, sortClause,
+										 true /* toplevel */ ,
+										 exprLocation((Node *) tle->expr));
+			if (ref > 0)
+				seen_local = bms_add_member(seen_local, ref);
+		}
+
+		/* If we found any acceptable targets, we're done */
+		if (result != NIL)
+			return result;
+
+		/*
+		 * Otherwise, the SQL standard says to treat it like "GROUP BY ()".
+		 * Build a representation of that, and let the rest of this function
+		 * handle it.
+		 */
+		grouplist = list_make1(makeGroupingSet(GROUPING_SET_EMPTY, NIL, -1));
+	}
 
 	/*
 	 * Recursively flatten implicit RowExprs. (Technically this is only needed
@@ -2819,6 +2925,7 @@ transformWindowDefinitions(ParseState *pstate,
 										  true /* force SQL99 rules */ );
 		partitionClause = transformGroupClause(pstate,
 											   windef->partitionClause,
+											   false /* not GROUP BY ALL */ ,
 											   NULL,
 											   targetlist,
 											   orderClause,
