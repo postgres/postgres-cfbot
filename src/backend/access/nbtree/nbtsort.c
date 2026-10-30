@@ -241,6 +241,10 @@ typedef struct BTPageState
 	Size		btps_lastextra; /* last item's extra posting list space */
 	uint32		btps_level;		/* tree level (0 = leaf) */
 	Size		btps_full;		/* "full" if less than this much free space */
+	/* Leaf prefix compression: the candidate prefix of the page being filled */
+	const char *btps_prefix;	/* into the page's first data item, or NULL */
+	Size		btps_prefixlen; /* its length (0 = no candidate) */
+	Size		btps_codedsaved;	/* bytes the page's items would save coded */
 	struct BTPageState *btps_next;	/* link to parent level, if any */
 } BTPageState;
 
@@ -856,7 +860,8 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	 */
 	Assert(last_truncextra == 0 || isleaf);
 	if (pgspc < itupsz + (isleaf ? MAXALIGN(sizeof(ItemPointerData)) : 0) ||
-		(pgspc + last_truncextra < state->btps_full && last_off > P_FIRSTKEY))
+		(pgspc + last_truncextra + state->btps_codedsaved < state->btps_full &&
+		 last_off > P_FIRSTKEY))
 	{
 		/*
 		 * Finish off the page and write it out.
@@ -981,6 +986,15 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		}
 
 		/*
+		 * The old leaf page is complete: fault it forward into the
+		 * BTP_PREFIX format if a prefix pays off.  Done after btps_lowkey
+		 * (the downlink, a copy of the uncoded high key) is saved, since
+		 * compression rewrites opage in place.
+		 */
+		if (isleaf)
+			_bt_prefix_compress_page(wstate->index, opage);
+
+		/*
 		 * Write out the old page. _bt_blwritepage takes ownership of the
 		 * 'opage' buffer.
 		 */
@@ -990,6 +1004,11 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		 * Reset last_off to point to new page
 		 */
 		last_off = P_FIRSTKEY;
+
+		/* The new page starts with no prefix candidate and no savings yet. */
+		state->btps_prefix = NULL;
+		state->btps_prefixlen = 0;
+		state->btps_codedsaved = 0;
 	}
 
 	/*
@@ -1016,6 +1035,34 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	last_off = OffsetNumberNext(last_off);
 	_bt_sortaddtup(npage, itupsz, itup, last_off,
 				   !isleaf && last_off == P_FIRSTKEY);
+
+	/*
+	 * Leaf prefix compression accounting (Strategy 1): the page's eventual
+	 * prefix is its first data item's first-column bytes; estimate how much
+	 * room coding this page's items would free, so the fillfactor test above
+	 * can pack more plain items onto a page that will shrink when it is
+	 * compressed at finish.  Items are still placed plain here; the estimate
+	 * only relaxes the soft limit, never the hard fit check.
+	 */
+	if (isleaf && _bt_prefix_enabled(wstate->index))
+	{
+		if (state->btps_prefix == NULL)
+			state->btps_prefix = _bt_prefix_candidate(itup,
+													  &state->btps_prefixlen);
+		else
+		{
+			int			shared = _bt_prefix_shared(state->btps_prefix,
+											   state->btps_prefixlen, itup);
+
+			/*
+			 * A coded item drops `shared' value bytes but keeps a 1-byte
+			 * share count; count the net MAXALIGN-rounded saving.
+			 */
+			if (shared > 1)
+				state->btps_codedsaved +=
+					MAXALIGN(itupsz) - MAXALIGN(itupsz - (shared - 1));
+		}
+	}
 
 	state->btps_buf = nbuf;
 	state->btps_blkno = nblkno;
@@ -1115,6 +1162,11 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 		 * back one slot.  Then we can dump out the page.
 		 */
 		_bt_slideleft((Page) s->btps_buf);
+
+		/* Fault the finished rightmost leaf forward into BTP_PREFIX if it pays. */
+		if (s->btps_level == 0)
+			_bt_prefix_compress_page(wstate->index, (Page) s->btps_buf);
+
 		_bt_blwritepage(wstate, s->btps_buf, s->btps_blkno);
 		s->btps_buf = NULL;		/* writepage took ownership of the buffer */
 	}

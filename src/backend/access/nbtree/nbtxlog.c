@@ -243,6 +243,211 @@ btree_xlog_insert(bool isleaf, bool ismeta, bool posting,
 		_bt_restore_meta(record, 2);
 }
 
+/*
+ * Replay a prefix-compressed leaf page split.
+ *
+ * Rather than replay logged tuples (whose coded physical layout
+ * _bt_restore_page could not reproduce), rebuild both halves the way the
+ * primary did: collect the split's plain items from the pre-split original
+ * page (block 0) with _bt_split_leaf_collect, then lay each half out coded
+ * against its chosen prefix (carried in the record) with _bt_split_leaf_layout.
+ * The result is byte-identical to the primary, so no full-page image is
+ * needed.  The record's block-0 data carries, in order: newitem (when it went
+ * on the left, or for a posting split), the left high key, and the left half's
+ * prefix bytes; block-1 data carries the right half's prefix bytes.
+ */
+static void
+btree_xlog_split_prefix(XLogReaderState *record, BlockNumber origpagenumber,
+						BlockNumber rightpagenumber, BlockNumber spagenumber,
+						bool newitemonleft)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	xl_btree_split *xlrec = (xl_btree_split *) XLogRecGetData(record);
+	Buffer		rbuf;
+	Buffer		origbuf;
+	Page		origpage;
+	BTPageOpaque oopaque;
+	char	   *datapos;
+	Size		datalen;
+	IndexTuple	newitem = NULL;
+	IndexTuple	left_hikey;
+	IndexTuple	right_hikey = NULL;
+	IndexTuple	nposting = NULL;
+	Size		newitemsz = 0;
+	const char *leftprefix = NULL;
+	const char *rightprefix = NULL;
+	IndexTuple	rightitems[MaxIndexTuplesPerPage];
+	int			nright = 0;
+	Page		rightpage;
+	BTPageOpaque ropaque;
+	XLogRedoAction origaction;
+
+	/*
+	 * The right (new) page is rebuilt entirely from data logged with the
+	 * record, independent of block 0, because block 0 may be restored from an
+	 * automatic full-page image (so its live contents after redo are the left
+	 * half, not the pre-split page).  Block-1 data is, in order: the right
+	 * half's chosen prefix bytes (rightprefixlen), the right high key when the
+	 * split is not rightmost (spagenumber != P_NONE), then the right half's
+	 * plain data items in offset order (self-describing by IndexTupleSize).
+	 */
+	datapos = XLogRecGetBlockData(record, 1, &datalen);
+	if (xlrec->flags & XLH_SPLIT_RFPI)
+	{
+		/*
+		 * The right half's plain items would have overflowed the WAL record,
+		 * so the primary carried the coded right page as a forced full-page
+		 * image.  Restore it from that image.
+		 */
+		if (XLogReadBufferForRedo(record, 1, &rbuf) != BLK_RESTORED)
+			elog(ERROR, "prefix leaf split right page lacks its full-page image");
+	}
+	else
+	{
+		if (xlrec->rightprefixlen > 0)
+		{
+			rightprefix = datapos;
+			datapos += xlrec->rightprefixlen;
+			datalen -= xlrec->rightprefixlen;
+		}
+		if (spagenumber != P_NONE)
+		{
+			right_hikey = (IndexTuple) datapos;
+			datapos += MAXALIGN(IndexTupleSize(right_hikey));
+			datalen -= MAXALIGN(IndexTupleSize(right_hikey));
+		}
+		while (datalen > 0)
+		{
+			IndexTuple	it = (IndexTuple) datapos;
+			Size		sz = MAXALIGN(IndexTupleSize(it));
+
+			Assert(nright < MaxIndexTuplesPerPage);
+			rightitems[nright++] = it;
+			datapos += sz;
+			datalen -= sz;
+		}
+		Assert(datalen == 0);
+
+		rbuf = XLogInitBufferForRedo(record, 1);
+		rightpage = BufferGetPage(rbuf);
+		_bt_pageinit(rightpage, BufferGetPageSize(rbuf));
+		ropaque = BTPageGetOpaque(rightpage);
+		ropaque->btpo_prev = origpagenumber;
+		ropaque->btpo_next = spagenumber;
+		ropaque->btpo_level = xlrec->level;
+		ropaque->btpo_flags = BTP_LEAF;
+		ropaque->btpo_cycleid = 0;
+		if (!_bt_split_leaf_layout(rightpage, right_hikey, rightitems, nright,
+								   rightprefix, xlrec->rightprefixlen))
+			elog(ERROR, "failed to replay right half of a prefix leaf split");
+		PageSetLSN(rightpage, lsn);
+	}
+	MarkBufferDirty(rbuf);
+
+	/*
+	 * Rebuild the left (original) page from the pre-split page, unless it was
+	 * restored from a full-page image (then it is already the final left
+	 * half).  Block-0 data is: [newitem (left/posting)] [left high key]
+	 * [left prefix].  The left plain items come from the pre-split page.
+	 */
+	origaction = XLogReadBufferForRedo(record, 0, &origbuf);
+	origpage = BufferGetPage(origbuf);
+
+	if (origaction == BLK_NEEDS_REDO)
+	{
+		IndexTuple *leftitems;
+		int			nleft;
+		OffsetNumber origpagepostingoff = InvalidOffsetNumber;
+		Page		leftpage;
+		BTPageOpaque lopaque;
+
+		oopaque = BTPageGetOpaque(origpage);
+
+		datapos = XLogRecGetBlockData(record, 0, &datalen);
+		if (newitemonleft || xlrec->postingoff != 0)
+		{
+			newitem = (IndexTuple) datapos;
+			newitemsz = MAXALIGN(IndexTupleSize(newitem));
+			datapos += newitemsz;
+			datalen -= newitemsz;
+		}
+		left_hikey = (IndexTuple) datapos;
+		datapos += MAXALIGN(IndexTupleSize(left_hikey));
+		datalen -= MAXALIGN(IndexTupleSize(left_hikey));
+		if (xlrec->leftprefixlen > 0)
+		{
+			leftprefix = datapos;
+			datapos += xlrec->leftprefixlen;
+			datalen -= xlrec->leftprefixlen;
+		}
+		Assert(datalen == 0);
+
+		if (xlrec->postingoff != 0)
+		{
+			ItemId		itemid;
+			IndexTuple	oposting;
+			BTItemBuf	obuf;
+
+			origpagepostingoff = OffsetNumberPrev(xlrec->newitemoff);
+			newitem = CopyIndexTuple(newitem);
+			itemid = PageGetItemId(origpage, origpagepostingoff);
+			oposting = (IndexTuple) PageGetItem(origpage, itemid);
+			if (P_HASPREFIX(oopaque))
+				oposting = _bt_prefix_decode(origpage, oposting, &obuf);
+			nposting = _bt_swap_posting(newitem, oposting, xlrec->postingoff);
+		}
+
+		leftitems = palloc_array(IndexTuple, PageGetMaxOffsetNumber(origpage) + 2);
+		rightitems[0] = NULL;	/* not reused below */
+		{
+			IndexTuple	dummyright[MaxIndexTuplesPerPage];
+			int			dummynr;
+
+			_bt_split_leaf_collect(origpage, xlrec->firstrightoff,
+								   xlrec->newitemoff, newitem, newitemonleft,
+								   origpagepostingoff, nposting,
+								   leftitems, &nleft, dummyright, &dummynr);
+		}
+
+		leftpage = PageGetTempPageCopySpecial(origpage);
+		lopaque = BTPageGetOpaque(leftpage);
+		lopaque->btpo_flags = BTP_LEAF | BTP_INCOMPLETE_SPLIT;
+		lopaque->btpo_prev = oopaque->btpo_prev;
+		lopaque->btpo_next = rightpagenumber;
+		lopaque->btpo_level = xlrec->level;
+		lopaque->btpo_cycleid = 0;
+		if (!_bt_split_leaf_layout(leftpage, left_hikey, leftitems, nleft,
+								   leftprefix, xlrec->leftprefixlen))
+			elog(ERROR, "failed to replay left half of a prefix leaf split");
+		PageRestoreTempPage(leftpage, origpage);
+		PageSetLSN(origpage, lsn);
+		MarkBufferDirty(origbuf);
+		pfree(leftitems);
+	}
+
+	/* Fix left-link of the page to the right of the new right sibling. */
+	if (spagenumber != P_NONE)
+	{
+		Buffer		sbuf;
+
+		if (XLogReadBufferForRedo(record, 2, &sbuf) == BLK_NEEDS_REDO)
+		{
+			Page		spage = BufferGetPage(sbuf);
+			BTPageOpaque spageop = BTPageGetOpaque(spage);
+
+			spageop->btpo_prev = rightpagenumber;
+			PageSetLSN(spage, lsn);
+			MarkBufferDirty(sbuf);
+		}
+		if (BufferIsValid(sbuf))
+			UnlockReleaseBuffer(sbuf);
+	}
+
+	UnlockReleaseBuffer(rbuf);
+	if (BufferIsValid(origbuf))
+		UnlockReleaseBuffer(origbuf);
+}
+
 static void
 btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 {
@@ -265,6 +470,18 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 		spagenumber = P_NONE;
 
 	/*
+	 * A prefix-compressed leaf split is replayed by rebuilding both halves
+	 * from the pre-split original page, exactly as the primary did, so the
+	 * coded pages come out byte-identical without a full-page image.
+	 */
+	if (xlrec->flags & XLH_SPLIT_LEAFPREFIX)
+	{
+		btree_xlog_split_prefix(record, origpagenumber, rightpagenumber,
+								spagenumber, newitemonleft);
+		return;
+	}
+
+	/*
 	 * Clear the incomplete split flag on the appropriate child page one level
 	 * down when origpage/buf is an internal page (there must have been
 	 * cascading page splits during original execution in the event of an
@@ -280,7 +497,7 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 	if (!isleaf)
 		_bt_clear_incomplete_split(record, 3);
 
-	/* Reconstruct right (new) sibling page from scratch */
+	/* Reconstruct right (new) sibling page from the logged tuples. */
 	rbuf = XLogInitBufferForRedo(record, 1);
 	datapos = XLogRecGetBlockData(record, 1, &datalen);
 	rpage = BufferGetPage(rbuf);
@@ -468,6 +685,56 @@ btree_xlog_dedup(XLogReaderState *record)
 		BTDedupState state;
 		BTDedupInterval *intervals;
 		Page		newpage;
+		bool		pageprefix;		/* source page is BTP_PREFIX */
+		BTItemBuf	curbuf;			/* decode scratch for the current item */
+		BTItemBuf	basebuf;		/* decode scratch kept for the pending base */
+
+		if (xlrec->prefixlen > 0)
+		{
+			/*
+			 * Prefix-dedup: the deduped result was carried as the chosen prefix
+			 * bytes, then (unless rightmost) the high key, then the deduped
+			 * plain items.  Rebuild the coded page byte-for-byte the way the
+			 * primary did, using the same layout routine as a prefix leaf split.
+			 */
+			Size		datalen;
+			char	   *datapos = XLogRecGetBlockData(record, 0, &datalen);
+			const char *prefix = datapos;
+			IndexTuple	hikey = NULL;
+			IndexTuple	items[MaxIndexTuplesPerPage];
+			int			nitems = 0;
+
+			datapos += xlrec->prefixlen;
+			datalen -= xlrec->prefixlen;
+			if (xlrec->flags & XLH_DEDUP_NOT_RIGHTMOST)
+			{
+				hikey = (IndexTuple) datapos;
+				datapos += MAXALIGN(IndexTupleSize(hikey));
+				datalen -= MAXALIGN(IndexTupleSize(hikey));
+			}
+			while (datalen > 0)
+			{
+				IndexTuple	it = (IndexTuple) datapos;
+				Size		sz = MAXALIGN(IndexTupleSize(it));
+
+				Assert(nitems < MaxIndexTuplesPerPage);
+				items[nitems++] = it;
+				datapos += sz;
+				datalen -= sz;
+			}
+			Assert(datalen == 0);
+
+			newpage = PageGetTempPageCopySpecial(page);
+			BTPageGetOpaque(newpage)->btpo_flags &= ~(BTP_PREFIX | BTP_HAS_GARBAGE);
+			if (!_bt_split_leaf_layout(newpage, hikey, items, nitems,
+									   prefix, xlrec->prefixlen))
+				elog(ERROR, "failed to replay prefix deduplication");
+			PageRestoreTempPage(newpage, page);
+			PageSetLSN(page, lsn);
+			MarkBufferDirty(buf);
+			UnlockReleaseBuffer(buf);
+			return;
+		}
 
 		state = palloc_object(BTDedupStateData);
 		state->deduplicate = true;	/* unused */
@@ -487,6 +754,19 @@ btree_xlog_dedup(XLogReaderState *record)
 		maxoff = PageGetMaxOffsetNumber(page);
 		newpage = PageGetTempPageCopySpecial(page);
 
+		/*
+		 * The source page may be prefix-compressed even on the ordinary
+		 * (non-prefix) dedup path: that happens when the primary deduplicated
+		 * a prefix page but re-compression of the result declined, leaving a
+		 * plain page (prefixlen == 0, no full-page image).  Reproduce the
+		 * primary: lay the result out plain and decode each coded data item
+		 * before feeding it to the dedup state machine.  The high key is a
+		 * pivot and is never coded.
+		 */
+		pageprefix = P_HASPREFIX(opaque);
+		if (pageprefix)
+			BTPageGetOpaque(newpage)->btpo_flags &= ~BTP_PREFIX;
+
 		if (!P_RIGHTMOST(opaque))
 		{
 			ItemId		itemid = PageGetItemId(page, P_HIKEY);
@@ -505,8 +785,18 @@ btree_xlog_dedup(XLogReaderState *record)
 			ItemId		itemid = PageGetItemId(page, offnum);
 			IndexTuple	itup = (IndexTuple) PageGetItem(page, itemid);
 
+			/* Decode on a prefix source so keys/posting lists are real. */
+			if (pageprefix)
+				itup = _bt_prefix_decode(page, itup, &curbuf);
+
 			if (offnum == minoff)
+			{
+				/* base must survive the whole run; keep it in its own buffer */
+				if (pageprefix)
+					itup = _bt_prefix_decode(page, (IndexTuple) PageGetItem(page, itemid),
+											 &basebuf);
 				_bt_dedup_start_pending(state, itup, offnum);
+			}
 			else if (state->nintervals < xlrec->nintervals &&
 					 state->baseoff == intervals[state->nintervals].baseoff &&
 					 state->nitems < intervals[state->nintervals].nitems)
@@ -516,12 +806,15 @@ btree_xlog_dedup(XLogReaderState *record)
 			}
 			else
 			{
-				_bt_dedup_finish_pending(newpage, state);
+				_bt_dedup_finish_pending(newpage, state, false);
+				if (pageprefix)
+					itup = _bt_prefix_decode(page, (IndexTuple) PageGetItem(page, itemid),
+											 &basebuf);
 				_bt_dedup_start_pending(state, itup, offnum);
 			}
 		}
 
-		_bt_dedup_finish_pending(newpage, state);
+		_bt_dedup_finish_pending(newpage, state, false);
 		Assert(state->nintervals == xlrec->nintervals);
 		Assert(memcmp(state->intervals, intervals,
 					  state->nintervals * sizeof(BTDedupInterval)) == 0);
@@ -621,11 +914,23 @@ btree_xlog_vacuum(XLogReaderState *record)
 		if (xlrec->ndeleted > 0)
 			PageIndexMultiDelete(page, (OffsetNumber *) ptr, xlrec->ndeleted);
 
+		opaque = BTPageGetOpaque(page);
+
+		/*
+		 * Mirror the primary: an emptied prefix-compressed leaf drops its
+		 * PREFIX item and the BTP_PREFIX flag (see _bt_delitems_vacuum).
+		 */
+		if (P_HASPREFIX(opaque) &&
+			PageGetMaxOffsetNumber(page) == BTPageGetPrefixOff(opaque))
+		{
+			PageIndexTupleDelete(page, BTPageGetPrefixOff(opaque));
+			opaque->btpo_flags &= ~BTP_PREFIX;
+		}
+
 		/*
 		 * Clear the vacuum cycle ID, and mark the page as not containing any
 		 * LP_DEAD items
 		 */
-		opaque = BTPageGetOpaque(page);
 		opaque->btpo_cycleid = 0;
 		opaque->btpo_flags &= ~BTP_HAS_GARBAGE;
 

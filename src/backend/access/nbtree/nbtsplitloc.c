@@ -52,6 +52,9 @@ typedef struct
 	int			rightspace;		/* space available for items on right page */
 	int			olddataitemstotal;	/* space taken by old items */
 	Size		minfirstrightsz;	/* smallest firstright size */
+	bool		hasprefix;		/* origpage is prefix-compressed (BTP_PREFIX) */
+	BTItemBuf	lbuf;			/* decode scratch for _bt_split_lastleft */
+	BTItemBuf	rbuf;			/* decode scratch for _bt_split_firstright */
 
 	/* candidate split point data */
 	int			maxsplits;		/* maximum number of splits */
@@ -172,6 +175,23 @@ _bt_findsplitloc(Relation rel,
 	olddataitemstotal = rightspace - (int) PageGetExactFreeSpace(origpage);
 	leaffillfactor = BTGetFillFactor(rel);
 
+	/*
+	 * On a prefix-compressed leaf the page carries an extra PREFIX item that
+	 * is not a data item.  The split is reasoned about in CODED (on-page)
+	 * bytes -- the physical reality of the page and of each recompressed half
+	 * -- so subtract only the PREFIX item's space from olddataitemstotal and
+	 * use the on-page (coded) item sizes in the scan below.  (Plain-size
+	 * accounting is not usable here: a compressed leaf can hold far more
+	 * logical data than two plain pages, so a plain split can be infeasible.)
+	 */
+	if (P_HASPREFIX(opaque))
+	{
+		ItemId		pii = PageGetItemId(origpage, BTPageGetPrefixOff(opaque));
+
+		olddataitemstotal -= (int) (MAXALIGN(ItemIdGetLength(pii)) +
+									sizeof(ItemIdData));
+	}
+
 	/* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
 	newitemsz += sizeof(ItemIdData);
 	state.rel = rel;
@@ -185,6 +205,7 @@ _bt_findsplitloc(Relation rel,
 	state.olddataitemstotal = olddataitemstotal;
 	state.minfirstrightsz = SIZE_MAX;
 	state.newitemoff = newitemoff;
+	state.hasprefix = P_HASPREFIX(opaque);
 
 	/* newitem cannot be a posting list item */
 	Assert(!BTreeTupleIsPosting(newitem));
@@ -463,6 +484,19 @@ _bt_recsplitloc(FindSplitData *state,
 	newitemisfirstright = (firstrightoff == state->newitemoff &&
 						   !newitemonleft);
 
+	/*
+	 * Reject a split that would leave the left page with no data items at all
+	 * (firstrightoff at the first data key, with newitem not on the left).
+	 * Upstream's split-point heuristics never choose such a point for a plain
+	 * page; on a prefix-compressed page the coded-size accounting can make it
+	 * look attractive, and _bt_split cannot form a left high key from a
+	 * nonexistent lastleft.
+	 */
+	if (state->hasprefix &&
+		firstrightoff == P_FIRSTDATAKEY(BTPageGetOpaque(state->origpage)) &&
+		!newitemonleft)
+		return;
+
 	if (newitemisfirstright)
 		firstrightsz = state->newitemsz;
 	else
@@ -686,8 +720,12 @@ _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
 	 */
 	if (state->newitemoff > maxoff)
 	{
+		BTItemBuf	tbuf;
+
 		itemid = PageGetItemId(state->origpage, maxoff);
 		tup = (IndexTuple) PageGetItem(state->origpage, itemid);
+		if (state->hasprefix)
+			tup = _bt_prefix_decode(state->origpage, tup, &tbuf);
 		keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);
 
 		if (keepnatts > 1 && keepnatts <= nkeyatts)
@@ -714,12 +752,20 @@ _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
 	 */
 	itemid = PageGetItemId(state->origpage, OffsetNumberPrev(state->newitemoff));
 	tup = (IndexTuple) PageGetItem(state->origpage, itemid);
-	/* Do cheaper test first */
+	/* Do cheaper test first (t_tid and the posting bit survive coding) */
 	if (BTreeTupleIsPosting(tup) ||
 		!_bt_adjacenthtid(&tup->t_tid, &state->newitem->t_tid))
 		return false;
 	/* Check same conditions as rightmost item case, too */
-	keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);
+	if (state->hasprefix)
+	{
+		BTItemBuf	tbuf;
+
+		tup = _bt_prefix_decode(state->origpage, tup, &tbuf);
+		keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);
+	}
+	else
+		keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);
 
 	if (keepnatts > 1 && keepnatts <= nkeyatts)
 	{
@@ -1160,12 +1206,38 @@ static inline IndexTuple
 _bt_split_lastleft(FindSplitData *state, SplitPoint *split)
 {
 	ItemId		itemid;
+	OffsetNumber off;
 
 	if (split->newitemonleft && split->firstrightoff == state->newitemoff)
 		return state->newitem;
 
-	itemid = PageGetItemId(state->origpage,
-						   OffsetNumberPrev(split->firstrightoff));
+	off = OffsetNumberPrev(split->firstrightoff);
+
+	/*
+	 * On a prefix-compressed leaf the PREFIX item sits just before the first
+	 * data item.  When the split boundary is at the first data key, the data
+	 * predecessor is the high key on a plain page (a pivot, read plain); a
+	 * rightmost page has none, so fall back to the first data item (this only
+	 * feeds penalty estimation, never placement).  Never read the PREFIX item
+	 * as a data tuple.
+	 */
+	if (state->hasprefix)
+	{
+		BTPageOpaque op = BTPageGetOpaque(state->origpage);
+
+		if (off == BTPageGetPrefixOff(op))
+		{
+			if (!P_RIGHTMOST(op))
+				return (IndexTuple) PageGetItem(state->origpage,
+												PageGetItemId(state->origpage, P_HIKEY));
+			off = P_FIRSTDATAKEY(op);
+		}
+		itemid = PageGetItemId(state->origpage, off);
+		return _bt_prefix_decode(state->origpage,
+								 (IndexTuple) PageGetItem(state->origpage, itemid),
+								 &state->lbuf);
+	}
+	itemid = PageGetItemId(state->origpage, off);
 	return (IndexTuple) PageGetItem(state->origpage, itemid);
 }
 
@@ -1181,5 +1253,9 @@ _bt_split_firstright(FindSplitData *state, SplitPoint *split)
 		return state->newitem;
 
 	itemid = PageGetItemId(state->origpage, split->firstrightoff);
+	if (state->hasprefix)
+		return _bt_prefix_decode(state->origpage,
+								 (IndexTuple) PageGetItem(state->origpage, itemid),
+								 &state->rbuf);
 	return (IndexTuple) PageGetItem(state->origpage, itemid);
 }

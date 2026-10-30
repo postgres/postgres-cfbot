@@ -145,6 +145,8 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 				ignore_killed_tuples = scan->ignore_killed_tuples;
 	int			itemIndex,
 				indnatts;
+	BTItemBuf	itupbuf;			/* decode workspace for a loop's current item */
+	BTItemBuf	finalbuf;		/* decode workspace for a backward finaltup */
 
 	/* save the page/buffer block number, along with its sibling links */
 	page = BufferGetPage(so->currPos.buf);
@@ -252,7 +254,7 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 				continue;
 			}
 
-			itup = (IndexTuple) PageGetItem(page, iid);
+			itup = _bt_getitem(page, offnum, &itupbuf);
 			Assert(!BTreeTupleIsPivot(itup));
 
 			pstate.offnum = offnum;
@@ -353,9 +355,7 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 		{
 			if (minoff <= maxoff && !P_LEFTMOST(opaque))
 			{
-				ItemId		iid = PageGetItemId(page, minoff);
-
-				pstate.finaltup = (IndexTuple) PageGetItem(page, iid);
+				pstate.finaltup = _bt_getitem(page, minoff, &finalbuf);
 
 				if (unlikely(so->scanBehind) &&
 					!_bt_scanbehind_checkkeys(scan, dir, pstate.finaltup))
@@ -415,7 +415,7 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 			else
 				tuple_alive = true;
 
-			itup = (IndexTuple) PageGetItem(page, iid);
+			itup = _bt_getitem(page, offnum, &itupbuf);
 			Assert(!BTreeTupleIsPivot(itup));
 
 			pstate.offnum = offnum;
@@ -596,9 +596,10 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
 	Relation	rel = scan->indexRelation;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
-	ItemId		iid;
 	IndexTuple	firsttup,
 				lasttup;
+	BTItemBuf	firstbuf,
+				lastbuf;
 	int			startikey = 0,
 				arrayidx = 0,
 				firstchangingattnum;
@@ -616,12 +617,10 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 		return;
 
 	/* minoff is an offset to the lowest non-pivot tuple on the page */
-	iid = PageGetItemId(pstate->page, pstate->minoff);
-	firsttup = (IndexTuple) PageGetItem(pstate->page, iid);
+	firsttup = _bt_getitem(pstate->page, pstate->minoff, &firstbuf);
 
 	/* maxoff is an offset to the highest non-pivot tuple on the page */
-	iid = PageGetItemId(pstate->page, pstate->maxoff);
-	lasttup = (IndexTuple) PageGetItem(pstate->page, iid);
+	lasttup = _bt_getitem(pstate->page, pstate->maxoff, &lastbuf);
 
 	/* Determine the first attribute whose values change on caller's page */
 	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
@@ -2053,6 +2052,7 @@ _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 	ScanDirection dir = pstate->dir;
 	OffsetNumber aheadoffnum;
 	IndexTuple	ahead;
+	BTItemBuf	aheadbuf;		/* decode workspace for the look-ahead tuple */
 
 	Assert(!pstate->forcenonrequired);
 
@@ -2088,8 +2088,7 @@ _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 		aheadoffnum = Max((int) pstate->minoff,
 						  (int) pstate->offnum - pstate->targetdistance);
 
-	ahead = (IndexTuple) PageGetItem(pstate->page,
-									 PageGetItemId(pstate->page, aheadoffnum));
+	ahead = _bt_getitem(pstate->page, aheadoffnum, &aheadbuf);
 	if (_bt_tuple_before_array_skeys(scan, dir, ahead, tupdesc, tupnatts,
 									 false, 0, NULL))
 	{

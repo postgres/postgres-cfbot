@@ -477,6 +477,41 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
     </note>
     </listitem>
    </varlistentry>
+
+   <varlistentry id="index-reloption-prefix-compression" xreflabel="prefix_compression">
+    <term><literal>prefix_compression</literal> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>prefix_compression</varname> storage parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+    <para>
+      Controls leaf key prefix compression.  When set to
+      <literal>ON</literal>, and the index's first key column is of a
+      variable-length type, a leaf page may store a shared prefix of that
+      column once and record only each tuple's unshared remainder, which can
+      substantially shrink indexes on keys that share long leading bytes
+      (for example URLs or <type>jsonb</type> keys with common paths).  Set
+      to <literal>ON</literal> or <literal>OFF</literal> to enable or disable
+      the optimization.  The default is <literal>OFF</literal>.
+    </para>
+
+    <note>
+     <para>
+      Prefix compression only changes how keys are stored; comparisons always
+      see the original key values, so every collation and operator class
+      behaves identically with it on or off.  A leaf adopts a prefix only when
+      it is written as a whole (during an index build, or either half of a
+      page split), so turning <literal>prefix_compression</literal> on or off
+      via <command>ALTER INDEX</command> does not rewrite the index: existing
+      pages are left as they are and are converted the next time they are
+      written whole.  No <command>REINDEX</command> is required, and indexes
+      upgraded with <application>pg_upgrade</application> keep working
+      unchanged.
+     </para>
+    </note>
+    </listitem>
+   </varlistentry>
    </variablelist>
 
    <para>
