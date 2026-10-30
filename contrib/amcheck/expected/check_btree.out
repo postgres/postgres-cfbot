@@ -283,6 +283,187 @@ SELECT bt_index_check('varlena_bug_idx', true);
  
 (1 row)
 
+-- HOT updates of rows indexed by expression and partial indexes must leave
+-- every index entry consistent with the heap.
+CREATE TABLE hot_expr (id int PRIMARY KEY, s text, d jsonb,
+                       status text, v int, n numeric) WITH (fillfactor = 50);
+CREATE INDEX hot_expr_lower ON hot_expr (lower(s));
+CREATE INDEX hot_expr_name ON hot_expr ((d->>'name'));
+CREATE INDEX hot_expr_partial ON hot_expr (v) WHERE status = 'active';
+CREATE INDEX hot_expr_numeric ON hot_expr ((n + 0));
+INSERT INTO hot_expr
+  SELECT g, 'abc' || g, jsonb_build_object('name', 'n' || g, 'age', g),
+         CASE WHEN g % 2 = 0 THEN 'active' ELSE 'done' END, g, 3
+    FROM generate_series(1, 200) g;
+UPDATE hot_expr SET s = upper(s);
+UPDATE hot_expr SET d = jsonb_set(d, '{age}', '0');
+UPDATE hot_expr SET v = v + 1000 WHERE status = 'done';
+UPDATE hot_expr SET status = 'done' WHERE id % 4 = 0;
+UPDATE hot_expr SET status = 'active' WHERE id % 3 = 0;
+UPDATE hot_expr SET n = 3.0 WHERE id % 5 = 0;
+UPDATE hot_expr SET d = jsonb_set(d, '{name}', '"x"') WHERE id % 7 = 0;
+SELECT bt_index_check('hot_expr_lower', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_check('hot_expr_name', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_check('hot_expr_partial', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_check('hot_expr_numeric', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_parent_check('hot_expr_partial', heapallindexed => true);
+ bt_index_parent_check 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE hot_expr;
+-- One UPDATE in which different rows are decided by different indexes: an
+-- expression index created first, a partial index created after it.
+CREATE TABLE hot_expr_multi (id int PRIMARY KEY, doc jsonb) WITH (fillfactor = 30);
+CREATE INDEX hot_expr_multi_status ON hot_expr_multi ((doc->>'status'));
+CREATE INDEX hot_expr_multi_vip ON hot_expr_multi ((doc->>'email'))
+  WHERE (doc->>'vip')::bool;
+INSERT INTO hot_expr_multi
+  SELECT g, jsonb_build_object('status', 'a', 'email', 'e' || g,
+                               'vip', g % 2 = 0, 'n', 0)
+    FROM generate_series(1, 3000) g;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 4 = 0 THEN jsonb_set(doc, '{status}', '"b"')
+    WHEN id % 4 = 1 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 4 = 2 THEN jsonb_set(jsonb_set(doc, '{status}', '"c"'),
+                                   '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    ELSE jsonb_set(doc, '{n}', '1') END;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 3 = 0 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 3 = 1 THEN jsonb_set(doc, '{status}', '"d"')
+    ELSE jsonb_set(doc, '{n}', '2') END;
+SELECT bt_index_check('hot_expr_multi_status', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_check('hot_expr_multi_vip', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+DROP TABLE hot_expr_multi;
+-- An UPDATE that writes back the value a row has, when the old value is
+-- stored compressed or out of line and the new one is not yet, is HOT: the
+-- index would store the same bytes.  Index-only scans must return the new
+-- row's value.
+CREATE TABLE hot_bt_image (id int, t text, e text) WITH (fillfactor = 50);
+ALTER TABLE hot_bt_image ALTER COLUMN e SET STORAGE EXTERNAL;
+CREATE INDEX hot_bt_image_t ON hot_bt_image (t);
+CREATE INDEX hot_bt_image_e ON hot_bt_image (e) INCLUDE (id);
+INSERT INTO hot_bt_image
+  SELECT g, repeat('x', 3000) || g, repeat('y', 2500) || g
+    FROM generate_series(1, 20) g;
+SELECT pg_column_compression(t) IS NOT NULL AS t_compressed,
+       pg_column_size(e) > 2500 AS e_out_of_line
+  FROM hot_bt_image WHERE id = 1;
+ t_compressed | e_out_of_line 
+--------------+---------------
+ t            | t
+(1 row)
+
+CREATE FUNCTION hot_bt_image_count(OUT updated bigint, OUT hot bigint)
+LANGUAGE sql AS $$
+  SELECT pg_stat_get_xact_tuples_updated('hot_bt_image'::regclass),
+         pg_stat_get_xact_tuples_hot_updated('hot_bt_image'::regclass) $$;
+BEGIN;
+UPDATE hot_bt_image SET t = repeat('x', 3000) || id;
+SELECT * FROM hot_bt_image_count();
+ updated | hot 
+---------+-----
+      20 |  20
+(1 row)
+
+UPDATE hot_bt_image SET e = e || '';
+SELECT * FROM hot_bt_image_count();
+ updated | hot 
+---------+-----
+      40 |  40
+(1 row)
+
+UPDATE hot_bt_image SET t = repeat('x', 3000) || (id + 100) WHERE id <= 5;
+SELECT * FROM hot_bt_image_count();
+ updated | hot 
+---------+-----
+      45 |  40
+(1 row)
+
+COMMIT;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE FUNCTION hot_bt_image_plan() RETURNS SETOF text LANGUAGE plpgsql AS
+$$ DECLARE l text; BEGIN
+  FOR l IN EXPLAIN (COSTS OFF)
+    SELECT right(t, 3) FROM hot_bt_image WHERE t > repeat('x', 3000)
+  LOOP RETURN NEXT left(l, 40); END LOOP; END $$;
+SELECT * FROM hot_bt_image_plan();
+            hot_bt_image_plan             
+------------------------------------------
+ Index Only Scan using hot_bt_image_t on 
+   Index Cond: (t > 'xxxxxxxxxxxxxxxxxxxx
+(2 rows)
+
+SELECT right(t, 3) FROM hot_bt_image WHERE t > repeat('x', 3000)
+  ORDER BY t COLLATE "C" LIMIT 3;
+ right 
+-------
+ x10
+ 101
+ 102
+(3 rows)
+
+SELECT count(*) FROM hot_bt_image WHERE t > repeat('x', 3000);
+ count 
+-------
+    20
+(1 row)
+
+SELECT count(*) FROM hot_bt_image WHERE e > repeat('y', 2500);
+ count 
+-------
+    20
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SELECT bt_index_check('hot_bt_image_t', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+SELECT bt_index_check('hot_bt_image_e', heapallindexed => true);
+ bt_index_check 
+----------------
+ 
+(1 row)
+
+DROP TABLE hot_bt_image;
+DROP FUNCTION hot_bt_image_count;
+DROP FUNCTION hot_bt_image_plan;
 -- cleanup
 DROP TABLE bttest_a;
 DROP TABLE bttest_b;

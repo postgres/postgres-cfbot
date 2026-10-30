@@ -23,6 +23,7 @@
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
+#include "nodes/execnodes.h"
 #include "storage/indexfsm.h"
 #include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
@@ -90,6 +91,7 @@ ginhandler(PG_FUNCTION_ARGS)
 		.amestimateparallelscan = NULL,
 		.aminitparallelscan = NULL,
 		.amparallelrescan = NULL,
+		.amcomparedatums = gincomparedatums,
 	};
 
 	PG_RETURN_POINTER(&amroutine);
@@ -678,4 +680,62 @@ ginbuildphasename(int64 phasenum)
 		default:
 			return NULL;
 	}
+}
+
+/*
+ * gincomparedatums() -- would newValue give the same entries as oldValue?
+ *
+ * A GIN index stores, for each item, the keys its operator class extracts,
+ * and nothing else about the item: scans see an item only as the set of its
+ * keys, which is all the consistent function is shown and all a lossy match
+ * leaves to recheck.  So two values give the same entries if they have the
+ * same keys, as GIN compares them.  Keys equal under the compare function
+ * share one entry in the index whichever of them came first, so the compare
+ * function is the right test.  Then, for example, reordering or repeating
+ * the elements of an array, or changing a tsvector's positions but not its
+ * lexemes, makes no new entries.
+ */
+bool
+gincomparedatums(Relation index, IndexInfo *indexInfo, int attnum,
+				 Oid typid, int16 typlen, bool typbyval,
+				 Datum oldValue, Datum newValue)
+{
+	GinState   *ginstate = (GinState *) indexInfo->ii_AmCache;
+	Datum	   *oldEntries;
+	Datum	   *newEntries;
+	GinNullCategory *oldCategories;
+	GinNullCategory *newCategories;
+	int32		noldEntries;
+	int32		nnewEntries;
+
+	/* the same cache as gininsert(), for the same statement */
+	if (ginstate == NULL)
+	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(indexInfo->ii_Context);
+
+		ginstate = palloc_object(GinState);
+		initGinState(ginstate, index);
+		indexInfo->ii_AmCache = ginstate;
+		MemoryContextSwitchTo(oldCtx);
+	}
+
+	oldEntries = ginExtractEntries(ginstate, (OffsetNumber) attnum,
+								   oldValue, false,
+								   &noldEntries, &oldCategories);
+	newEntries = ginExtractEntries(ginstate, (OffsetNumber) attnum,
+								   newValue, false,
+								   &nnewEntries, &newCategories);
+
+	if (noldEntries != nnewEntries)
+		return false;
+	for (int32 i = 0; i < noldEntries; i++)
+	{
+		/* there could be many entries, so be willing to abort here */
+		CHECK_FOR_INTERRUPTS();
+		if (ginCompareEntries(ginstate, (OffsetNumber) attnum,
+							  oldEntries[i], oldCategories[i],
+							  newEntries[i], newCategories[i]) != 0)
+			return false;
+	}
+	return true;
 }

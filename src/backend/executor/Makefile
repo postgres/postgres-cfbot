@@ -28,6 +28,7 @@ OBJS = \
 	execReplication.o \
 	execSRF.o \
 	execScan.o \
+	execSubattr.o \
 	execTuples.o \
 	execUtils.o \
 	functions.o \

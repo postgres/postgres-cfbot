@@ -1109,7 +1109,29 @@ data. Empty in ordinary tables.</entry>
      The update does not modify any columns referenced by the table's indexes,
      not including summarizing indexes.  The only summarizing index method in
      the core <productname>PostgreSQL</productname> distribution is <link
-     linkend="brin">BRIN</link>.
+     linkend="brin">BRIN</link>.  A column that indexes reference only through
+     <link linkend="indexes-expressional">expressions</link>, or only as
+     <link linkend="indexes-partial">partial indexes</link>, does not count as
+     modified if the update changes neither the value of any such index's
+     expressions nor whether the row satisfies its predicate.  The values are
+     compared as stored, so equal values with different representations, such
+     as <literal>1.0</literal> and <literal>1.00</literal> of type
+     <type>numeric</type>, count as different.  When the update's
+     <literal>SET</literal> clause changes only parts of the column that the
+     indexes do not read, for example through <function>jsonb_set</function>
+     or array subscripting, this is known without evaluating the indexes'
+     expressions.  A column that indexes store directly is treated the same
+     way if the access method of each such index can tell whether the new
+     value gives the same index entries as the old one; among the built-in
+     methods, that depends on the method and on the change (see
+     <xref linkend="indexam"/>).  This does not apply to the columns of
+     unique indexes that a foreign key can reference, of the replica
+     identity index, or of exclusion constraints.  Nor is a column changed
+     whose new value is the same as the old one, only stored differently, as
+     when the old value is compressed or stored out of line
+     (see <xref linkend="storage-toast"/>) and an update writes it back;
+     except for the columns of those unique and replica identity indexes,
+     this holds for every kind of index.
      </para>
    </listitem>
    <listitem>
