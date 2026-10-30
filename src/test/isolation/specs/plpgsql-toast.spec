@@ -14,10 +14,13 @@ setup
     ALTER TABLE test1 ALTER COLUMN b SET STORAGE EXTERNAL;
     INSERT INTO test1 VALUES (1, repeat('foo', 2000));
     CREATE TYPE test2 AS (a bigint, b text);
+    CREATE FUNCTION get_test1() RETURNS test1 LANGUAGE plpgsql
+      AS $$ declare r test1; begin select * into r from test1; return r; end $$;
 }
 
 teardown
 {
+    DROP FUNCTION get_test1();
     DROP TABLE test1;
     DROP TYPE test2;
 }
@@ -131,6 +134,22 @@ do $$
 $$;
 }
 
+# exec_move_row_from_datum(), given a function's read/write expanded record
+step assign7
+{
+do $$
+  declare
+    r test1;
+  begin
+    r := get_test1();
+    delete from test1;
+    commit;
+    perform pg_advisory_lock(1);
+    raise notice 'length(r) = %', length(r::text);
+  end;
+$$;
+}
+
 # Check that the results of a query can be detoasted just after committing
 # (there's no interaction with VACUUM here)
 step "fetch-after-commit"
@@ -175,4 +194,5 @@ permutation lock assign3 vacuum unlock
 permutation lock assign4 vacuum unlock
 permutation lock assign5 vacuum unlock
 permutation lock assign6 vacuum unlock
+permutation lock assign7 vacuum unlock
 permutation "fetch-after-commit"
