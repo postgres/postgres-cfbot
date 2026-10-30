@@ -1390,7 +1390,11 @@ pg_get_shmem_pagesize(void)
 	Assert(huge_pages_status != HUGE_PAGES_UNKNOWN);
 
 	if (huge_pages_status == HUGE_PAGES_ON)
+#ifdef WIN32
+		os_page_size = GetLargePageMinimum();
+#else
 		GetHugePageSize(&os_page_size, NULL);
+#endif
 
 	return os_page_size;
 }
