@@ -1182,6 +1182,30 @@ SELECT * FROM ft1 WHERE CASE c3 COLLATE "C" WHEN c6 THEN true ELSE c3 < 'bar' EN
    Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1"
 (4 rows)
 
+-- age(timestamptz, timestamptz) depends on TimeZone, so it can't be shipped:
+-- the remote session runs with TimeZone = GMT
+CREATE TABLE loct_age (s timestamptz, e timestamptz);
+INSERT INTO loct_age VALUES ('2026-01-31 00:00+00', '2026-03-01 00:00+00');
+CREATE FOREIGN TABLE ft_age (s timestamptz, e timestamptz)
+  SERVER loopback OPTIONS (table_name 'loct_age');
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT age(e, s) FROM ft_age WHERE age(e, s) = '29 days';
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Foreign Scan on public.ft_age
+   Output: age(e, s)
+   Filter: (age(ft_age.e, ft_age.s) = '@ 29 days'::interval)
+   Remote SQL: SELECT s, e FROM public.loct_age
+(4 rows)
+
+SELECT age(e, s) FROM ft_age WHERE age(e, s) = '29 days';
+    age    
+-----------
+ @ 29 days
+(1 row)
+
+DROP FOREIGN TABLE ft_age;
+DROP TABLE loct_age;
 -- Test array type conversion pushdown
 SET plan_cache_mode = force_generic_plan;
 PREPARE s(varchar[]) AS SELECT count(*) FROM ft2 WHERE c6 = ANY ($1);

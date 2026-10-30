@@ -458,6 +458,18 @@ SELECT * FROM ft1 WHERE CASE c3 WHEN c6 THEN true ELSE c3 < 'bar' END;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM ft1 WHERE CASE c3 COLLATE "C" WHEN c6 THEN true ELSE c3 < 'bar' END;
 
+-- age(timestamptz, timestamptz) depends on TimeZone, so it can't be shipped:
+-- the remote session runs with TimeZone = GMT
+CREATE TABLE loct_age (s timestamptz, e timestamptz);
+INSERT INTO loct_age VALUES ('2026-01-31 00:00+00', '2026-03-01 00:00+00');
+CREATE FOREIGN TABLE ft_age (s timestamptz, e timestamptz)
+  SERVER loopback OPTIONS (table_name 'loct_age');
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT age(e, s) FROM ft_age WHERE age(e, s) = '29 days';
+SELECT age(e, s) FROM ft_age WHERE age(e, s) = '29 days';
+DROP FOREIGN TABLE ft_age;
+DROP TABLE loct_age;
+
 -- Test array type conversion pushdown
 SET plan_cache_mode = force_generic_plan;
 PREPARE s(varchar[]) AS SELECT count(*) FROM ft2 WHERE c6 = ANY ($1);
