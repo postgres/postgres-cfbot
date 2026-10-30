@@ -405,6 +405,25 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <xref linkend="planner-stats"/>.
      </para>
      <para>
+      Three further per-attribute options control automatic
+      <link linkend="storage-toast">TOAST</link> compression dictionary
+      evolution, and apply only to columns that use a dictionary compression
+      method (<literal>zstd_dict</literal> or <literal>lz4_dict</literal>).
+      <literal>dictionary_evolution</literal> (boolean, default
+      <literal>false</literal>) enables, for the column, retraining of its
+      compression dictionary from the sample gathered by a subsequent
+      <link linkend="sql-analyze"><command>ANALYZE</command></link>; a newly
+      trained dictionary is adopted only if it wins a held-out size test by
+      the margin set by <xref linkend="guc-dictionary-evolution-min-gain"/>.
+      <literal>dictionary_evolution_growth</literal> (floating point, default
+      <literal>2.0</literal>, minimum <literal>1.0</literal>) is the factor by
+      which the column's live-row count must grow since the current dictionary
+      was trained before retraining is considered.
+      <literal>dictionary_evolution_min_rows</literal> (integer, default
+      <literal>10000</literal>) is a floor below which the column is never
+      retrained.
+     </para>
+     <para>
       Changing per-attribute options acquires a
       <literal>SHARE UPDATE EXCLUSIVE</literal> lock.
      </para>
@@ -464,13 +483,24 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       its existing compression method, rather than being recompressed with the
       compression method of the target column.
       The supported compression
-      methods are <literal>pglz</literal> and <literal>lz4</literal>.
-      (<literal>lz4</literal> is available only if <option>--with-lz4</option>
-      was used when building <productname>PostgreSQL</productname>.)  In
+      methods are <literal>pglz</literal>, <literal>lz4</literal>, and
+      <literal>zstd</literal>.  (<literal>lz4</literal> and
+      <literal>zstd</literal> are available only if
+      <option>--with-lz4</option> or <option>--with-zstd</option>,
+      respectively, was used when building
+      <productname>PostgreSQL</productname>.)  In
       addition, <replaceable class="parameter">compression_method</replaceable>
       can be <literal>default</literal>, which selects the default behavior of
       consulting the <xref linkend="guc-default-toast-compression"/> setting
       at the time of data insertion to determine the method to use.
+     </para>
+     <para>
+      <literal>zstd_dict</literal> is <literal>zstd</literal> with a
+      compression dictionary trained for the column by
+      <function>pg_train_toast_dictionary</function>; until one is trained it
+      behaves like <literal>zstd</literal>.  Values compressed with a
+      dictionary are decompressed when copied to any other column or table.
+      See <link linkend="catalog-pg-toast-dictionary"><structname>pg_toast_dictionary</structname></link>.
      </para>
     </listitem>
    </varlistentry>

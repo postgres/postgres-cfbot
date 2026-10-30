@@ -10505,11 +10505,72 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         the <literal>COMPRESSION</literal> column option in
         <command>CREATE TABLE</command> or
         <command>ALTER TABLE</command>.)
-        The supported compression methods are <literal>pglz</literal> and
+        The supported compression methods are <literal>pglz</literal>,
         (if <productname>PostgreSQL</productname> was compiled with
-        <option>--with-lz4</option>) <literal>lz4</literal>.
+        <option>--with-lz4</option>) <literal>lz4</literal>, and
+        (if <productname>PostgreSQL</productname> was compiled with
+        <option>--with-zstd</option>) <literal>zstd</literal>.
         The default is <literal>lz4</literal> (if available); otherwise,
         <literal>pglz</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-dictionary-evolution-max-retained" xreflabel="dictionary_evolution_max_retained">
+      <term><varname>dictionary_evolution_max_retained</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>dictionary_evolution_max_retained</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        The maximum number of <link linkend="storage-toast">TOAST</link>
+        compression dictionaries kept per column by automatic dictionary
+        evolution (enabled with the per-column
+        <literal>dictionary_evolution</literal> attribute option).  When a
+        column reaches this many dictionaries, evolution stops retraining it
+        and logs a message; a table rewrite
+        (<command>VACUUM FULL</command>, <command>CLUSTER</command>, or
+        <command>REPACK</command>) retires the superseded dictionaries so
+        evolution can resume.  The default is <literal>8</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-dictionary-evolution-min-gain" xreflabel="dictionary_evolution_min_gain">
+      <term><varname>dictionary_evolution_min_gain</varname> (<type>floating point</type>)
+      <indexterm>
+       <primary><varname>dictionary_evolution_min_gain</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        The minimum fractional reduction in compressed size a newly trained
+        candidate <link linkend="storage-toast">TOAST</link> compression
+        dictionary must achieve, measured on a held-out sample, before
+        automatic evolution adopts it in place of the current dictionary.
+        For example, the default of <literal>0.05</literal> requires the
+        candidate to compress the held-out sample to at most 95% of the size
+        the current dictionary achieves.  A larger value makes evolution more
+        conservative.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-dictionary-evolution-min-interval" xreflabel="dictionary_evolution_min_interval">
+      <term><varname>dictionary_evolution_min_interval</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>dictionary_evolution_min_interval</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        The minimum time that must pass after a column's
+        <link linkend="storage-toast">TOAST</link> compression dictionary was
+        trained before automatic evolution will retrain it again, acting as a
+        cooldown that bounds churn.  If this value is specified without units,
+        it is taken as seconds.  The default is one day
+        (<literal>86400</literal> seconds).
        </para>
       </listitem>
      </varlistentry>

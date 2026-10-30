@@ -33,6 +33,7 @@
 #include "access/gin.h"
 #include "access/slru.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/twophase.h"
 #include "access/xlog_internal.h"
 #include "access/xlogprefetcher.h"
@@ -473,6 +474,9 @@ static const struct config_enum_entry default_toast_compression_options[] = {
 	{"pglz", TOAST_PGLZ_COMPRESSION, false},
 #ifdef  USE_LZ4
 	{"lz4", TOAST_LZ4_COMPRESSION, false},
+#endif
+#ifdef  USE_ZSTD
+	{"zstd", TOAST_ZSTD_COMPRESSION, false},
 #endif
 	{NULL, 0, false}
 };

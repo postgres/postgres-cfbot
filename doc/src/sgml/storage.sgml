@@ -439,7 +439,10 @@ any.  Allowing for the varlena header bytes,
 the total size of an on-disk <acronym>TOAST</acronym> pointer datum is 18
 bytes when using an OID as <structfield>chunk_id</structfield>, or 22 bytes
 when using an OID8 as <structfield>chunk_id</structfield>, regardless of the
-actual size of the represented value.
+actual size of the represented value.  Values compressed with a method other
+than <literal>pglz</literal> or <literal>lz4</literal> need one additional
+byte to identify the compression method, both in the pointer datum and in
+the header of the compressed data itself.
 </para>
 
 <para>

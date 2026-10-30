@@ -157,6 +157,21 @@ typedef struct RelationData
 	/* data managed by RelationGetStatExtList: */
 	List	   *rd_statlist;	/* list of OIDs of extended stats */
 
+	/*
+	 * Per-column cache of each column's current TOAST compression dictionary
+	 * OID, filled lazily by toast_dictionary_current() to avoid a catalog
+	 * index probe per compressed value.  rd_toastdictoids is a natts-long
+	 * array in CacheMemoryContext (NULL until first use); an entry is
+	 * InvalidOid both when a column has no dictionary and when it has not been
+	 * looked up yet, so rd_toastdictvalid flags which entries are filled.
+	 * A single array avoids thrashing on the write path when a table has more
+	 * than one dictionary column.  dict_install() issues
+	 * CacheInvalidateRelcacheByRelid(), which rebuilds the entry and so drops
+	 * this cache, whenever a column's current dictionary changes.
+	 */
+	Oid		   *rd_toastdictoids;
+	Bitmapset  *rd_toastdictvalid;
+
 	/* data managed by RelationGetIndexAttrBitmap: */
 	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? */
 	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */

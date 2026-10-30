@@ -1,0 +1,173 @@
+-- Tests for automatic TOAST dictionary evolution during ANALYZE: an opted-in
+-- column retrains its dictionary from ANALYZE's sample, adopts a candidate
+-- only when a held-out size test shows a margin win, rejects churn when no
+-- candidate wins, and stops at the retained-dictionary cap.  See
+-- toast_dictionary_maybe_evolve().
+SELECT NOT(enumvals @> '{zstd}') AS skip_test FROM pg_settings WHERE
+  name = 'default_toast_compression' \gset
+\if :skip_test
+   \echo '*** skipping TOAST dictionary evolution tests (not supported) ***'
+   \quit
+\endif
+CREATE SCHEMA dict_evolve;
+SET search_path TO dict_evolve, public;
+-- Lenient gates so the test is deterministic: no cooldown and any growth
+-- (the row count is held constant below, so the growth gate must accept
+-- equality), with a low row floor.  The 5% margin keeps its default so the
+-- held-out size test is the real adoption decision.
+SET dictionary_evolution_min_interval = 0;
+-- Two visibly different value distributions, each wide enough to be TOASTed
+-- and compressed on disk (a few kB), so the test exercises real
+-- dictionary compression and not just catalog-row churn.  A dictionary
+-- trained on one compresses it well and the other poorly, so switching the
+-- stored distribution produces a candidate that wins the held-out test.
+CREATE FUNCTION docA(i int) RETURNS text LANGUAGE SQL IMMUTABLE AS $$
+  SELECT repeat(
+    format('{"customer_id": %s, "status": "active", "region": "us-east", '
+           '"plan": "enterprise", "features": ["sso", "audit", "backup"], '
+           '"env": "production", "tier": "gold", "shard": "a-%s"}' || chr(10),
+           i, i % 7), 40)
+$$;
+CREATE FUNCTION docB(i int) RETURNS text LANGUAGE SQL IMMUTABLE AS $$
+  SELECT repeat(
+    format('<record seq="%s"><owner>warehouse</owner><kind>pallet</kind>'
+           '<zone>cold-storage</zone><lane>%s</lane><status>in-transit</status>'
+           '<carrier>freightways</carrier><priority>standard</priority></record>' || chr(10),
+           i, i % 7), 40)
+$$;
+CREATE TABLE evo (id int, f1 text COMPRESSION zstd_dict)
+  WITH (autovacuum_enabled = off);
+ALTER TABLE evo ALTER COLUMN f1 SET (dictionary_evolution = on,
+                                     dictionary_evolution_growth = 1.0,
+                                     dictionary_evolution_min_rows = 50);
+SELECT 'evo'::regclass::oid AS evo_oid \gset
+-- no dictionary yet
+SELECT count(*) AS ndicts FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
+ ndicts 
+--------
+      0
+(1 row)
+
+-- A fixed set of rows, distribution A.  ANALYZE adopts the first dictionary
+-- unconditionally once the row floor is cleared.
+INSERT INTO evo SELECT g, docA(g) FROM generate_series(1, 4000) g;
+ANALYZE evo;
+SELECT count(*) AS ndicts, count(*) FILTER (WHERE tdcurrent) AS ncurrent
+  FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
+ ndicts | ncurrent 
+--------+----------
+      1 |        1
+(1 row)
+
+SELECT oid AS dicta FROM pg_toast_dictionary
+  WHERE tdrelid = :evo_oid AND tdcurrent \gset
+-- Confirm the rows really are wide enough to be TOAST-compressed on disk
+-- (stored smaller than raw), so the test exercises real on-disk compression
+-- and not just catalog-row churn on sub-threshold values.
+SELECT bool_and(pg_column_size(f1) < octet_length(f1)) AS compressed_on_disk
+  FROM evo;
+ compressed_on_disk 
+--------------------
+ t
+(1 row)
+
+-- Same distribution again: a re-trained candidate does not beat the current
+-- dictionary by the margin, so nothing is adopted and the catalog is quiet.
+ANALYZE evo;
+SELECT count(*) AS ndicts FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
+ ndicts 
+--------
+      1
+(1 row)
+
+SELECT oid = :dicta AS still_same_current FROM pg_toast_dictionary
+  WHERE tdrelid = :evo_oid AND tdcurrent;
+ still_same_current 
+--------------------
+ t
+(1 row)
+
+-- Drift: add a batch of distribution-B rows (the A rows stay, so values
+-- compressed with the A dictionary coexist with B rows on disk).  ANALYZE
+-- should find a candidate that beats the A-trained dictionary on the held-out
+-- B-dominated sample and adopt it: the count rises and the current dictionary
+-- changes.
+INSERT INTO evo SELECT g, docB(g) FROM generate_series(4001, 12000) g;
+ANALYZE evo;
+SELECT count(*) AS ndicts FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
+ ndicts 
+--------
+      2
+(1 row)
+
+SELECT oid <> :dicta AS current_changed FROM pg_toast_dictionary
+  WHERE tdrelid = :evo_oid AND tdcurrent;
+ current_changed 
+-----------------
+ t
+(1 row)
+
+SELECT oid AS dictb FROM pg_toast_dictionary
+  WHERE tdrelid = :evo_oid AND tdcurrent \gset
+-- Both generations read back correctly: the A rows decode with the retired
+-- dictionary stamped into them, the B rows with the current one.
+SELECT bool_and(f1 = docA(id)) AS a_ok FROM evo WHERE id <= 4000;
+ a_ok 
+------
+ t
+(1 row)
+
+SELECT bool_and(f1 = docB(id)) AS b_ok FROM evo WHERE id > 4000;
+ b_ok 
+------
+ t
+(1 row)
+
+-- Stable again on B: ANALYZE must not churn.
+ANALYZE evo;
+SELECT oid = :dictb AS still_same_current FROM pg_toast_dictionary
+  WHERE tdrelid = :evo_oid AND tdcurrent;
+ still_same_current 
+--------------------
+ t
+(1 row)
+
+-- Cap: with a low cap, repeated drift keeps adopting only until the cap is
+-- reached, after which evolution declines and the catalog stops growing.  The
+-- cap message goes to the server log; here we just check the bound holds.
+SET dictionary_evolution_max_retained = 3;
+DO $$
+DECLARE
+  i int;
+BEGIN
+  FOR i IN 1..6 LOOP
+    IF i % 2 = 0 THEN
+      UPDATE evo SET f1 = docA(id);
+    ELSE
+      UPDATE evo SET f1 = docB(id);
+    END IF;
+    ANALYZE evo;
+  END LOOP;
+END $$;
+SELECT count(*) <= 3 AS within_cap,
+       count(*) FILTER (WHERE tdcurrent) AS ncurrent
+  FROM pg_toast_dictionary WHERE tdrelid = :evo_oid;
+ within_cap | ncurrent 
+------------+----------
+ t          |        1
+(1 row)
+
+SELECT bool_and(f1 = docA(id)) AS all_equal FROM evo;
+ all_equal 
+-----------
+ t
+(1 row)
+
+RESET dictionary_evolution_max_retained;
+RESET dictionary_evolution_min_interval;
+RESET search_path;
+DROP SCHEMA dict_evolve CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to function dict_evolve.doca(integer)
+drop cascades to function dict_evolve.docb(integer)
+drop cascades to table dict_evolve.evo

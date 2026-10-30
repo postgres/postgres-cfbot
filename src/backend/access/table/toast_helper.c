@@ -15,6 +15,8 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_helper.h"
 #include "access/toast_internals.h"
 #include "catalog/pg_type_d.h"
@@ -151,6 +153,26 @@ toast_tuple_init(ToastTupleContext *ttc)
 			}
 
 			/*
+			 * A value compressed with a dictionary may only be stored in the
+			 * column owning that dictionary, and only while the dictionary is
+			 * current; otherwise decompress it, so that it is recompressed,
+			 * if at all, with this column's own method.  This is what keeps a
+			 * dictionary's values inside its column (see toast_dictionary.c).
+			 */
+			if (VARATT_IS_COMPRESSED_DICT(new_value) &&
+				!toast_dictionary_keep(ttc->ttc_rel, att->attnum, new_value))
+			{
+				varlena    *plain = toast_dict_decompress_datum(new_value);
+
+				if ((ttc->ttc_attr[i].tai_colflags & TOASTCOL_NEEDS_FREE) != 0)
+					pfree(new_value);
+				new_value = plain;
+				ttc->ttc_values[i] = PointerGetDatum(new_value);
+				ttc->ttc_attr[i].tai_colflags |= TOASTCOL_NEEDS_FREE;
+				ttc->ttc_flags |= (TOAST_NEEDS_CHANGE | TOAST_NEEDS_FREE);
+			}
+
+			/*
 			 * Remember the size of this attribute
 			 */
 			ttc->ttc_attr[i].tai_size = VARSIZE_ANY(new_value);
@@ -246,7 +268,8 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 	Datum		new_value;
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
 
-	new_value = toast_compress_datum(*value, attr->tai_compression);
+	new_value = toast_compress_datum_rel(*value, attr->tai_compression,
+										 ttc->ttc_rel, attribute + 1);
 
 	if (DatumGetPointer(new_value) != NULL)
 	{
