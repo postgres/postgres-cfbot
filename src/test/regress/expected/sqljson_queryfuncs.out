@@ -1224,22 +1224,22 @@ ORDER BY 1;
 
 INSERT INTO test_jsonb_constraints VALUES ('', 1);
 ERROR:  new row for relation "test_jsonb_constraints" violates check constraint "test_jsonb_constraint1"
-DETAIL:  Failing row contains (, 1, [1, 2]).
+DETAIL:  Failing row contains (, 1, [1, 2]). Check constraint expression: (js IS JSON).
 INSERT INTO test_jsonb_constraints VALUES ('1', 1);
 ERROR:  new row for relation "test_jsonb_constraints" violates check constraint "test_jsonb_constraint2"
-DETAIL:  Failing row contains (1, 1, [1, 2]).
+DETAIL:  Failing row contains (1, 1, [1, 2]). Check constraint expression: JSON_EXISTS((js)::jsonb, '$."a"' PASSING (i + 5) AS "int", (i)::text AS "TXT", ARRAY[1, 2, 3] AS arr).
 INSERT INTO test_jsonb_constraints VALUES ('[]');
 ERROR:  new row for relation "test_jsonb_constraints" violates check constraint "test_jsonb_constraint2"
-DETAIL:  Failing row contains ([], null, [1, 2]).
+DETAIL:  Failing row contains ([], null, [1, 2]). Check constraint expression: JSON_EXISTS((js)::jsonb, '$."a"' PASSING (i + 5) AS "int", (i)::text AS "TXT", ARRAY[1, 2, 3] AS arr).
 INSERT INTO test_jsonb_constraints VALUES ('{"b": 1}', 1);
 ERROR:  new row for relation "test_jsonb_constraints" violates check constraint "test_jsonb_constraint2"
-DETAIL:  Failing row contains ({"b": 1}, 1, [1, 2]).
+DETAIL:  Failing row contains ({"b": 1}, 1, [1, 2]). Check constraint expression: JSON_EXISTS((js)::jsonb, '$."a"' PASSING (i + 5) AS "int", (i)::text AS "TXT", ARRAY[1, 2, 3] AS arr).
 INSERT INTO test_jsonb_constraints VALUES ('{"a": 1}', 1);
 ERROR:  new row for relation "test_jsonb_constraints" violates check constraint "test_jsonb_constraint3"
-DETAIL:  Failing row contains ({"a": 1}, 1, [1, 2]).
+DETAIL:  Failing row contains ({"a": 1}, 1, [1, 2]). Check constraint expression: (JSON_VALUE((js)::jsonb, '$."a"' RETURNING integer DEFAULT 12 ON EMPTY ERROR ON ERROR) > i).
 INSERT INTO test_jsonb_constraints VALUES ('{"a": 10}', 1);
 ERROR:  new row for relation "test_jsonb_constraints" violates check constraint "test_jsonb_constraint4"
-DETAIL:  Failing row contains ({"a": 10}, 1, [1, 2]).
+DETAIL:  Failing row contains ({"a": 10}, 1, [1, 2]). Check constraint expression: (JSON_QUERY((js)::jsonb, '$."a"' RETURNING jsonb WITH CONDITIONAL WRAPPER KEEP QUOTES EMPTY OBJECT ON ERROR) = '[10]'::jsonb).
 DROP TABLE test_jsonb_constraints;
 -- Test mutability of query functions
 CREATE TABLE test_jsonb_mutability(js jsonb, b int);
