@@ -4479,7 +4479,7 @@ xpath_internal(text *xpath_expr_text, xmltype *data, ArrayType *namespaces,
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
 						"could not allocate parser context");
 		doc = xmlCtxtReadMemory(ctxt, (char *) string + xmldecl_len,
-								len - xmldecl_len, NULL, NULL, 0);
+								len - xmldecl_len, NULL, NULL, XML_PARSE_NOENT);
 		if (doc == NULL || xmlerrcxt->err_occurred)
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INVALID_XML_DOCUMENT,
 						"could not parse XML document");
@@ -4816,7 +4816,8 @@ XmlTableSetDocument(TableFuncScanState *state, Datum value)
 
 	PG_TRY();
 	{
-		doc = xmlCtxtReadMemory(xtCxt->ctxt, (char *) xstr, length, NULL, NULL, 0);
+		doc = xmlCtxtReadMemory(xtCxt->ctxt, (char *) xstr, length, NULL, NULL,
+								XML_PARSE_NOENT);
 		if (doc == NULL || xtCxt->xmlerrcxt->err_occurred)
 			xml_ereport(xtCxt->xmlerrcxt, ERROR, ERRCODE_INVALID_XML_DOCUMENT,
 						"could not parse XML document");
