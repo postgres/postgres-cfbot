@@ -122,7 +122,7 @@ typedef struct
 	bool		varprefix;		/* true to print prefixes on Vars */
 	bool		colNamesVisible;	/* do we care about output column names? */
 	bool		inGroupBy;		/* deparsing GROUP BY clause? */
-	bool		varInOrderBy;	/* deparsing simple Var in ORDER BY? */
+	bool		varInOrderBy;	/* deparsing simple Var or Param in ORDER BY? */
 	Bitmapset  *appendparents;	/* if not null, map child Vars of these relids
 								 * back to the parent rel */
 } deparse_context;
@@ -457,6 +457,8 @@ static SubPlan *find_param_generator(Param *param, deparse_context *context,
 									 int *column_p);
 static SubPlan *find_param_generator_initplan(Param *param, Plan *plan,
 											  int *column_p);
+static bool funcname_is_visible_refname(List *namespaces,
+										const char *funcname);
 static void get_parameter(Param *param, deparse_context *context);
 static const char *get_simple_binary_op_name(OpExpr *expr);
 static bool isSimpleNode(Node *node, Node *parentNode, int prettyFlags);
@@ -6610,6 +6612,15 @@ get_rule_sortgroupclause(Index ref, List *tlist, bool force_colno,
 		(void) get_variable((Var *) expr, 0, false, context);
 		context->varInOrderBy = save_varinorderby;
 	}
+	else if (IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXTERN)
+	{
+		/* Tell get_parameter not to print a bare parameter name */
+		bool		save_varinorderby = context->varInOrderBy;
+
+		context->varInOrderBy = true;
+		get_parameter((Param *) expr, context);
+		context->varInOrderBy = save_varinorderby;
+	}
 	else
 	{
 		/*
@@ -8718,6 +8729,46 @@ find_param_generator_initplan(Param *param, Plan *plan, int *column_p)
 }
 
 /*
+ * Is a name that the parser could take as a relation qualifier equal to the
+ * name of the SQL function whose body is being deparsed?
+ *
+ * If so, "funcname.argname" might not be read back as the parameter: it can
+ * be captured by a column of that relation, including a system column or one
+ * added later, or by a function taking the relation's whole row
+ * ("argname(funcname.*)").  Look only at the names, not at the columns.
+ * Besides the RTE names, a JOIN/USING alias and the RETURNING aliases for OLD
+ * and NEW are visible as qualifiers.
+ */
+static bool
+funcname_is_visible_refname(List *namespaces, const char *funcname)
+{
+	foreach_ptr(deparse_namespace, depns, namespaces)
+	{
+		ListCell   *lc;
+		int			rtindex = 0;
+
+		if ((depns->ret_old_alias &&
+			 strcmp(depns->ret_old_alias, funcname) == 0) ||
+			(depns->ret_new_alias &&
+			 strcmp(depns->ret_new_alias, funcname) == 0))
+			return true;
+
+		foreach(lc, depns->rtable_names)
+		{
+			const char *rname = lfirst(lc);
+			RangeTblEntry *rte = rt_fetch(++rtindex, depns->rtable);
+
+			if (rname && strcmp(rname, funcname) == 0)
+				return true;
+			if (rte->rtekind == RTE_JOIN && rte->join_using_alias &&
+				strcmp(rte->join_using_alias->aliasname, funcname) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+/*
  * Display a Param appropriately.
  */
 static void
@@ -8815,16 +8866,19 @@ get_parameter(Param *param, deparse_context *context)
 		{
 			char	   *argname = dpns->argnames[param->paramid - 1];
 
-			if (argname)
+			/* unnamed arguments are stored as empty strings, not NULLs */
+			if (argname && argname[0] != '\0')
 			{
 				bool		should_qualify = false;
 				ListCell   *lc;
 
 				/*
-				 * Qualify the parameter name if there are any other deparse
-				 * namespaces with range tables.  This avoids qualifying in
-				 * trivial cases like "RETURN a + b", but makes it safe in all
-				 * other cases.
+				 * With no range table at any query level, the bare name
+				 * cannot be taken as a column, so prefer it for readability
+				 * in cases like "RETURN a + b".  Otherwise qualify it with
+				 * the function name, unless that name could itself be taken
+				 * as a relation qualifier, in which case only $N is
+				 * unambiguous.
 				 */
 				foreach(lc, context->namespaces)
 				{
@@ -8836,14 +8890,28 @@ get_parameter(Param *param, deparse_context *context)
 						break;
 					}
 				}
-				if (should_qualify)
+
+				if (!should_qualify)
+				{
+					/*
+					 * A bare name used as a sort or group key would be taken
+					 * by findTargetlistEntrySQL92 as an output-column name,
+					 * so print $N there.
+					 */
+					if (!context->varInOrderBy)
+					{
+						appendStringInfoString(context->buf, quote_identifier(argname));
+						return;
+					}
+				}
+				else if (!funcname_is_visible_refname(context->namespaces,
+													  dpns->funcname))
 				{
 					appendStringInfoString(context->buf, quote_identifier(dpns->funcname));
 					appendStringInfoChar(context->buf, '.');
+					appendStringInfoString(context->buf, quote_identifier(argname));
+					return;
 				}
-
-				appendStringInfoString(context->buf, quote_identifier(argname));
-				return;
 			}
 		}
 	}
