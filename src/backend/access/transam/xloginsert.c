@@ -39,6 +39,7 @@
 #include "replication/origin.h"
 #include "storage/bufmgr.h"
 #include "storage/proc.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 #include "utils/rel.h"
@@ -990,6 +991,27 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	COMP_CRC32C(rdata_crc, hdr_scratch + SizeOfXLogRecord, hdr_rdt.len - SizeOfXLogRecord);
 	for (rdt = hdr_rdt.next; rdt != NULL; rdt = rdt->next)
 		COMP_CRC32C(rdata_crc, rdt->data, rdt->len);
+
+	/*
+	 * Test hook: let a test modify a buffer after the record's CRC has been
+	 * computed but before the record is copied into the WAL buffers, to
+	 * reproduce the window in which a concurrently modified, pin-only
+	 * registered buffer could make the on-disk CRC not match the record.  The
+	 * argument names the record as "rmid/info/mainlen" (resource manager, its
+	 * info bits, and the length of the main data) so a test can wait on
+	 * exactly one kind of record.  This runs inside a critical section, so it
+	 * must not allocate; it fires only in a backend that loaded the point
+	 * beforehand.
+	 */
+#ifdef USE_INJECTION_POINTS
+	{
+		char		pointarg[24];
+
+		snprintf(pointarg, sizeof(pointarg), "%d/%02X/" UINT64_FORMAT,
+				 rmid, info, mainrdata_len);
+		INJECTION_POINT_CACHED("xlog-assemble-after-crc", pointarg);
+	}
+#endif
 
 	/*
 	 * Ensure that the XLogRecord is not too large.
