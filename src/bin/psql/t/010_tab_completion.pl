@@ -422,6 +422,61 @@ check_completion(
 
 clear_line();
 
+# check REPACK option lists.  CONCURRENTLY and ANALYZE need a table name, so
+# USING INDEX must not be offered after them.  The table name below shares a
+# prefix with USING INDEX: if only the table matches, "us" completes to it.
+$node->safe_psql('postgres', "CREATE TABLE using_tab (f1 int);");
+
+foreach my $opts (
+	'(CONCURRENTLY)',
+	'(analyze)',
+	'(concurrently true)',
+	'(verbose, concurrently 1)',
+	'(concurrently off, concurrently)',
+	'(analyse off, analyze on)')
+{
+	check_completion(
+		"REPACK $opts us\t",
+		qr/using_tab /,
+		"REPACK $opts does not offer USING INDEX");
+
+	clear_query();
+}
+
+# In these cases both USING INDEX and the table match, so the first tab
+# stops at the shared prefix and a second double tab lists both.  The last
+# three have values psql doesn't interpret, so USING INDEX stays, even after
+# an earlier setting that turned CONCURRENTLY on.
+foreach my $cmd (
+	'REPACK',
+	'REPACK (verbose)',
+	'REPACK (CONCURRENTLY OFF)',
+	'REPACK (concurrently, concurrently false)',
+	'REPACK (analyze, analyse 0)',
+	'REPACK (concurrently, concurrently maybe)',
+	"REPACK (concurrently 'on')",
+	"REPACK (concurrently, concurrently 'off')")
+{
+	check_completion("$cmd us\t", qr/using/, "$cmd completes common prefix");
+	check_completion(
+		"\t\t",
+		qr/using index +using_tab/,
+		"$cmd still offers USING INDEX");
+
+	clear_query();
+}
+
+# With an explicit table, USING INDEX is fine again.
+foreach my $opts ('(CONCURRENTLY)', '(analyze)')
+{
+	check_completion(
+		"REPACK $opts tab1 us\t",
+		qr/using index /i,
+		"REPACK $opts with a table offers USING INDEX");
+
+	clear_query();
+}
+
 # send psql an explicit \q to shut it down, else pty won't close properly
 $h->quit or die "psql returned $?";
 
