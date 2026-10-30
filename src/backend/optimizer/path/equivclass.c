@@ -959,6 +959,35 @@ find_ec_member_matching_expr(EquivalenceClass *ec,
 }
 
 /*
+ * Return Vars and quasi-Vars available as independent values in an input
+ * expression list.  Unlike pull_var_clause(), do not descend into computed
+ * output expressions: an output of x + 1 does not separately supply x.
+ *
+ * The result is safe to pass to find_computable_ec_member(), whose flattening
+ * of this list must accurately describe the values available to a projection.
+ * Both bare expressions and TargetEntry lists are accepted.
+ */
+List *
+get_available_input_vars(List *exprs)
+{
+	List	   *vars = NIL;
+	ListCell   *lc;
+
+	foreach(lc, exprs)
+	{
+		Node	   *expr = lfirst(lc);
+
+		if (IsA(expr, TargetEntry))
+			expr = (Node *) ((TargetEntry *) expr)->expr;
+		if (IsA(expr, Var) || IsA(expr, PlaceHolderVar) ||
+			IsA(expr, Aggref) || IsA(expr, GroupingFunc) || IsA(expr, WindowFunc))
+			vars = lappend(vars, expr);
+	}
+
+	return vars;
+}
+
+/*
  * find_computable_ec_member
  *		Locate an EquivalenceClass member that can be computed from the
  *		expressions appearing in "exprs"; return NULL if no match.
@@ -1069,11 +1098,11 @@ find_computable_ec_member(PlannerInfo *root,
  * relation_can_be_sorted_early
  *		Can this relation be sorted on this EC before the final output step?
  *
- * To succeed, we must find an EC member that prepare_sort_from_pathkeys knows
- * how to sort on, given the rel's reltarget as input.  There are also a few
- * additional constraints based on the fact that the desired sort will be done
- * "early", within the scan/join part of the plan.  Also, non-parallel-safe
- * expressions are ignored if 'require_parallel_safe'.
+ * To succeed, an EC member must either match a reltarget expression
+ * directly or be computable from Vars and quasi-Vars independently
+ * exposed by the reltarget.  Since no particular Plan has been selected
+ * here, conservatively avoid assuming that Vars within computed
+ * reltarget expressions are separately available.
  *
  * At some point we might want to return the identified EquivalenceMember,
  * but for now, callers only want to know if there is one.
@@ -1126,7 +1155,9 @@ relation_can_be_sorted_early(PlannerInfo *root, RelOptInfo *rel,
 	/*
 	 * Try to find an expression computable from the reltarget.
 	 */
-	em = find_computable_ec_member(root, ec, target->exprs, rel->relids,
+	em = find_computable_ec_member(root, ec,
+								   get_available_input_vars(target->exprs),
+								   rel->relids,
 								   require_parallel_safe);
 	if (!em)
 		return false;
