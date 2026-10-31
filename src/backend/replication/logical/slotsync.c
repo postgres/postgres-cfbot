@@ -865,7 +865,7 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 							  remote_slot->two_phase,
 							  false,
 							  remote_slot->failover,
-							  true);
+							  true, true);
 
 		/*
 		 * The remote slot information can predate a status change record that
