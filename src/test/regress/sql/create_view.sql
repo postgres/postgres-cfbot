@@ -852,6 +852,25 @@ insert into tt27v values (1); -- Error
 select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system view.
 reset restrict_nonsystem_relation_kind;
 
+-- check that unary minus applied to a constant is not printed in a way that
+-- would be read back as a negative constant, ie, a column number (bug #19767)
+create view tt28v as
+select distinct on (- (- '1'::int4)) x, y
+from (values (1, 2)) v(x, y)
+order by - (- '1'::int4), y, - 3.5::numeric;
+select pg_get_viewdef('tt28v', true);
+create view tt29v as
+select count(*) from (values (1)) v(x)
+group by - '3'::int4, rollup(- '3'::int4);
+select pg_get_viewdef('tt29v', true);
+-- the printed definitions must be re-loadable
+do $$ begin
+  execute 'create view tt28v_copy as ' || pg_get_viewdef('tt28v');
+  execute 'create view tt29v_copy as ' || pg_get_viewdef('tt29v');
+end $$;
+select pg_get_viewdef('tt28v_copy', true) = pg_get_viewdef('tt28v', true),
+       pg_get_viewdef('tt29v_copy', true) = pg_get_viewdef('tt29v', true);
+
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 DROP SCHEMA testviewschm2 CASCADE;
