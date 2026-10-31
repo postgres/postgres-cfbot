@@ -23,6 +23,7 @@
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_authid.h"
@@ -362,11 +363,12 @@ static char *pg_get_indexdef_worker(Oid indexrelid, int colno,
 									bool showTblSpc, bool inherits,
 									int prettyFlags, bool missing_ok);
 static char *pg_get_statisticsobj_worker(Oid statextid, bool columns_only,
-										 bool missing_ok);
+										 bool missing_ok, int prettyFlags);
 static char *pg_get_partkeydef_worker(Oid relid, int prettyFlags,
 									  bool attrsOnly, bool missing_ok);
 static char *pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
-										 int prettyFlags, bool missing_ok);
+										 int prettyFlags, bool missing_ok,
+										 bool no_tablespace);
 static text *pg_get_expr_worker(text *expr, Oid relid, int prettyFlags);
 static int	print_function_arguments(StringInfo buf, HeapTuple proctup,
 									 bool print_table_args, bool print_defaults);
@@ -593,6 +595,19 @@ pg_get_ruledef_ext(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_TEXT_P(string_to_text(res));
+}
+
+/*
+ * pg_get_ruledef_ddl
+ *		Like pg_get_ruledef but uses the active search_path to decide
+ *		whether to schema-qualify the rule's target relation name.
+ *		For use by pg_get_table_ddl which has already set search_path
+ *		to the base schema when schema_qualified=false.
+ */
+char *
+pg_get_ruledef_ddl(Oid ruleoid)
+{
+	return pg_get_ruledef_worker(ruleoid, PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA);
 }
 
 
@@ -1233,6 +1248,26 @@ pg_get_indexdef_string(Oid indexrelid)
 								  0, false);
 }
 
+/*
+ * pg_get_indexdef_ddl
+ *		Like pg_get_indexdef_string but uses the active search_path to
+ *		decide whether to schema-qualify the indexed relation name.
+ *		For use by pg_get_table_ddl which has already set search_path
+ *		to the base schema when schema_qualified=false.
+ *
+ * When no_tablespace is true, the TABLESPACE clause is suppressed.
+ * inherits=false is always passed so partitioned indexes emit ON ONLY,
+ * preventing auto-creation of child indexes on replay.
+ */
+char *
+pg_get_indexdef_ddl(Oid indexrelid, bool no_tablespace)
+{
+	return pg_get_indexdef_worker(indexrelid, 0, NULL,
+								  false, false,
+								  !no_tablespace, false,
+								  PRETTYFLAG_SCHEMA, false);
+}
+
 /* Internal version that just reports the key-column definitions */
 char *
 pg_get_indexdef_columns(Oid indexrelid, bool pretty)
@@ -1613,7 +1648,7 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
 	Oid			statextid = PG_GETARG_OID(0);
 	char	   *res;
 
-	res = pg_get_statisticsobj_worker(statextid, false, true);
+	res = pg_get_statisticsobj_worker(statextid, false, true, 0);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
@@ -1628,7 +1663,20 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
 char *
 pg_get_statisticsobjdef_string(Oid statextid)
 {
-	return pg_get_statisticsobj_worker(statextid, false, false);
+	return pg_get_statisticsobj_worker(statextid, false, false, 0);
+}
+
+/*
+ * pg_get_statisticsobjdef_ddl
+ *		Like pg_get_statisticsobjdef_string but uses the active search_path
+ *		to decide whether to schema-qualify the statistics object name.
+ *		For use by pg_get_table_ddl which has already set search_path
+ *		to the base schema when schema_qualified=false.
+ */
+char *
+pg_get_statisticsobjdef_ddl(Oid statextid)
+{
+	return pg_get_statisticsobj_worker(statextid, false, false, PRETTYFLAG_SCHEMA);
 }
 
 /*
@@ -1641,7 +1689,7 @@ pg_get_statisticsobjdef_columns(PG_FUNCTION_ARGS)
 	Oid			statextid = PG_GETARG_OID(0);
 	char	   *res;
 
-	res = pg_get_statisticsobj_worker(statextid, true, true);
+	res = pg_get_statisticsobj_worker(statextid, true, true, 0);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
@@ -1653,7 +1701,8 @@ pg_get_statisticsobjdef_columns(PG_FUNCTION_ARGS)
  * Internal workhorse to decompile an extended statistics object.
  */
 static char *
-pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
+pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok,
+							int prettyFlags)
 {
 	Form_pg_statistic_ext statextrec;
 	HeapTuple	statexttup;
@@ -1713,10 +1762,18 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 
 	if (!columns_only)
 	{
-		nsp = get_namespace_name_or_temp(statextrec->stxnamespace);
-		appendStringInfo(&buf, "CREATE STATISTICS %s",
-						 quote_qualified_identifier(nsp,
-													NameStr(statextrec->stxname)));
+		if ((prettyFlags & PRETTYFLAG_SCHEMA) &&
+			StatisticsObjIsVisible(statextid))
+			appendStringInfo(&buf, "CREATE STATISTICS %s",
+							 quote_identifier(NameStr(statextrec->stxname)));
+		else
+		{
+			nsp = get_namespace_name_or_temp(statextrec->stxnamespace);
+			appendStringInfo(&buf, "CREATE STATISTICS %s",
+							 quote_qualified_identifier(nsp,
+														NameStr(statextrec->stxname)));
+			pfree(nsp);
+		}
 
 		/*
 		 * Decode the stxkind column so that we know which stats types to
@@ -1807,10 +1864,9 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 	{
 		Node	   *expr = (Node *) lfirst(lc);
 		char	   *str;
-		int			prettyFlags = PRETTYFLAG_PAREN;
 
 		str = deparse_expression_pretty(expr, context, false, false,
-										prettyFlags, 0);
+										PRETTYFLAG_PAREN, 0);
 
 		if (colno > 0)
 			appendStringInfoString(&buf, ", ");
@@ -2153,7 +2209,7 @@ pg_get_constraintdef(PG_FUNCTION_ARGS)
 
 	prettyFlags = PRETTYFLAG_INDENT;
 
-	res = pg_get_constraintdef_worker(constraintId, false, prettyFlags, true);
+	res = pg_get_constraintdef_worker(constraintId, false, prettyFlags, true, false);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
@@ -2171,7 +2227,7 @@ pg_get_constraintdef_ext(PG_FUNCTION_ARGS)
 
 	prettyFlags = GET_PRETTY_FLAGS(pretty);
 
-	res = pg_get_constraintdef_worker(constraintId, false, prettyFlags, true);
+	res = pg_get_constraintdef_worker(constraintId, false, prettyFlags, true, false);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
@@ -2185,7 +2241,25 @@ pg_get_constraintdef_ext(PG_FUNCTION_ARGS)
 char *
 pg_get_constraintdef_command(Oid constraintId)
 {
-	return pg_get_constraintdef_worker(constraintId, true, 0, false);
+	return pg_get_constraintdef_worker(constraintId, true, 0, false, false);
+}
+
+/*
+ * pg_get_constraintdef_body
+ *		Returns the constraint definition body without the
+ *		"ALTER TABLE name ADD CONSTRAINT cname" prefix.
+ *		FK target relation names in the body already use
+ *		generate_relation_name (search_path-aware).  For use by
+ *		pg_get_table_ddl which builds the ALTER TABLE prefix itself.
+ *
+ * When no_tablespace is true, any USING INDEX TABLESPACE clause that would
+ * otherwise be appended for PK/UNIQUE/EXCLUSION constraints is suppressed.
+ */
+char *
+pg_get_constraintdef_body(Oid constraintId, bool no_tablespace)
+{
+	return pg_get_constraintdef_worker(constraintId, false, 0, false,
+									   no_tablespace);
 }
 
 /*
@@ -2193,7 +2267,8 @@ pg_get_constraintdef_command(Oid constraintId)
  */
 static char *
 pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
-							int prettyFlags, bool missing_ok)
+							int prettyFlags, bool missing_ok,
+							bool no_tablespace)
 {
 	HeapTuple	tup;
 	Form_pg_constraint conForm;
@@ -2450,11 +2525,16 @@ pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
 				}
 				ReleaseSysCache(indtup);
 
-				/* XXX why do we only print these bits if fullCommand? */
-				if (fullCommand && OidIsValid(indexId))
+				/*
+				 * Emit WITH and USING INDEX TABLESPACE when the backing index
+				 * has non-default options.  These are part of the constraint
+				 * body regardless of whether fullCommand is set; omitting them
+				 * would produce DDL that cannot round-trip when WITH or
+				 * TABLESPACE differs from the defaults.
+				 */
+				if (OidIsValid(indexId))
 				{
 					char	   *options = flatten_reloptions(indexId);
-					Oid			tblspc;
 
 					if (options)
 					{
@@ -2463,15 +2543,17 @@ pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
 					}
 
 					/*
-					 * Print the tablespace, unless it's the database default.
-					 * This is to help ALTER TABLE usage of this facility,
-					 * which needs this behavior to recreate exact catalog
-					 * state.
+					 * Print the tablespace, unless it's the database default
+					 * or the caller asked to suppress it.
 					 */
-					tblspc = get_rel_tablespace(indexId);
-					if (OidIsValid(tblspc))
-						appendStringInfo(&buf, " USING INDEX TABLESPACE %s",
-										 quote_identifier(get_tablespace_name(tblspc)));
+					if (!no_tablespace)
+					{
+						Oid			tblspc = get_rel_tablespace(indexId);
+
+						if (OidIsValid(tblspc))
+							appendStringInfo(&buf, " USING INDEX TABLESPACE %s",
+											 quote_identifier(get_tablespace_name(tblspc)));
+					}
 				}
 
 				break;
@@ -2577,14 +2659,13 @@ pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
 					operators[i] = DatumGetObjectId(elems[i]);
 
 				/* pg_get_indexdef_worker does the rest */
-				/* suppress tablespace because pg_dump wants it that way */
 				appendStringInfoString(&buf,
 									   pg_get_indexdef_worker(indexOid,
 															  0,
 															  operators,
 															  false,
 															  false,
-															  false,
+															  !no_tablespace,
 															  false,
 															  prettyFlags,
 															  false));
