@@ -164,6 +164,30 @@ CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple,
 					   values,
 					   isnull);
 
+		/* Check if a concurrent command inserted an entry with the same key */
+		if (index->rd_index->indisunique && IsCatalogRelation(heapRelation))
+		{
+			bool	satisfied;
+			EState  *estate = CreateExecutorState();
+
+			BuildSpeculativeIndexInfo(index, indexInfo);
+			satisfied = check_unique_constraint(heapRelation,
+												 index, indexInfo,
+												 &(heapTuple->t_self), values, isnull,
+												 estate);
+
+			if (!satisfied)
+			{
+				char *key_desc = BuildIndexValueDescription(index, values, isnull);
+				ereport(ERROR,
+						(errcode(ERRCODE_UNIQUE_VIOLATION),
+						 errmsg("could not create object because a conflicting object already exists"),
+						 errdetail("Key %s conflicts with existing entry in unique index %s.",
+								   key_desc, RelationGetRelationName(index)),
+						 errhint("Another session might have created an object with the same key concurrently.")));
+			}
+		}
+
 		/*
 		 * The index AM does the rest.
 		 */
