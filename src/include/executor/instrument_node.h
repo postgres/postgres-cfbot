@@ -106,8 +106,8 @@ typedef struct IndexScanInstrumentation
 	/* Index search count (incremented with pgstat_count_index_scan call) */
 	uint64		nsearches;
 
-	/* Table tuples fetched count (incremented during index-only scans) */
-	uint64		ntabletuplefetches;
+	/* Table block fetch count (incremented during index-only scans) */
+	uint64		ntableblockfetches;
 } IndexScanInstrumentation;
 
 /*
