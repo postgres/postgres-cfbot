@@ -166,6 +166,14 @@ typedef struct LWLockHandle
 static int	num_held_lwlocks = 0;
 static LWLockHandle held_lwlocks[MAX_SIMUL_LWLOCKS];
 
+/*
+ * Adaptive spin delay for LWLockWaitListLock: controls how often we
+ * re-read the lock state while spinning. This reduces cache line contention
+ * when multiple backends are waiting on the same lock.
+ */
+#define SPINS_PER_LOCK_READ_THRESHOLD  5
+static int spins_per_lock_read = 1;
+
 /* Maximum number of LWLock tranches that can be assigned by extensions */
 #define MAX_USER_DEFINED_TRANCHES 256
 
@@ -857,13 +865,28 @@ LWLockWaitListLock(LWLock *lock)
 		{
 			SpinDelayStatus delayStatus;
 
+			int spins_since_read = 0;
+			int lock_read_count = 0;
+
 			init_local_spin_delay(&delayStatus);
 
 			while (old_state & LW_FLAG_LOCKED)
 			{
 				perform_spin_delay(&delayStatus);
-				old_state = pg_atomic_read_u32(&lock->state);
+				/* Only read lock state periodically to reduce cache contention */
+				if (++spins_since_read >= spins_per_lock_read)
+				{
+					old_state = pg_atomic_read_u32(&lock->state);
+					++lock_read_count;
+					spins_since_read = 0;
+				}
 			}
+			/* Adaptively adjust read interval based on wait duration */
+			if (lock_read_count > SPINS_PER_LOCK_READ_THRESHOLD)
+				spins_per_lock_read = Min(spins_per_lock_read + 5, 256);
+			else
+				spins_per_lock_read = Max(spins_per_lock_read - 1, 1);
+
 #ifdef LWLOCK_STATS
 			delays += delayStatus.delays;
 #endif
