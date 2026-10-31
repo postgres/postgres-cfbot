@@ -18,6 +18,7 @@ OBJS = \
 	detoast.o \
 	heaptuple.o \
 	indextuple.o \
+	parallel_index_build.o \
 	printsimple.o \
 	printtup.o \
 	relation.o \

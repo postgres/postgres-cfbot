@@ -17,6 +17,7 @@
 #include "access/gin_private.h"
 #include "access/gin_tuple.h"
 #include "access/parallel.h"
+#include "access/parallel_index_build.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
@@ -28,7 +29,6 @@
 #include "nodes/execnodes.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
-#include "storage/condition_variable.h"
 #include "storage/proc.h"
 #include "storage/predicate.h"
 #include "tcop/tcopprot.h"
@@ -54,52 +54,8 @@
  */
 typedef struct GinBuildShared
 {
-	/*
-	 * These fields are not modified during the build.  They primarily exist
-	 * for the benefit of worker processes that need to create state
-	 * corresponding to that used by the leader.
-	 */
-	Oid			heaprelid;
-	Oid			indexrelid;
-	bool		isconcurrent;
-	int			scantuplesortstates;
-
-	/* Query ID, for report in worker processes */
-	int64		queryid;
-
-	/*
-	 * workersdonecv is used to monitor the progress of workers.  All parallel
-	 * participants must indicate that they are done before leader can use
-	 * results built by the workers (and before leader can write the data into
-	 * the index).
-	 */
-	ConditionVariable workersdonecv;
-
-	/*
-	 * mutex protects all following fields
-	 *
-	 * These fields contain status information of interest to GIN index builds
-	 * that must work just the same when an index is built in parallel.
-	 */
-	slock_t		mutex;
-
-	/*
-	 * Mutable state that is maintained by workers, and reported back to
-	 * leader at end of the scans.
-	 *
-	 * nparticipantsdone is number of worker processes finished.
-	 *
-	 * reltuples is the total number of input heap tuples.
-	 *
-	 * indtuples is the total number of tuples that made it into the index.
-	 *
-	 * brokenhotchain indicates if any worker detected a broken HOT chain
-	 * during build.
-	 */
-	int			nparticipantsdone;
-	double		reltuples;
-	double		indtuples;
-	bool		brokenhotchain;
+	/* Common parallel index build state (must be first) */
+	ParallelIndexBuildShared base;
 
 	/*
 	 * ParallelTableScanDescData data follows. Can't directly embed here, as
@@ -194,7 +150,6 @@ typedef struct
 static void _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 								bool isconcurrent, int request);
 static void _gin_end_parallel(GinLeader *ginleader, GinBuildState *state);
-static Size _gin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
 static double _gin_parallel_heapscan(GinBuildState *state,
 									 bool *brokenhotchain);
 static double _gin_parallel_merge(GinBuildState *state,
@@ -966,29 +921,19 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/*
 	 * Enter parallel mode, and create context for parallel build of gin index
 	 */
-	EnterParallelMode();
-	Assert(request > 0);
-	pcxt = CreateParallelContext("postgres", "_gin_parallel_build_main",
-								 request);
+	pcxt = ParallelIndexBuildCreateContext("postgres",
+										   "_gin_parallel_build_main", request);
 
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
 
-	/*
-	 * Prepare for scan of the base relation.  In a normal index build, we use
-	 * SnapshotAny because we must retrieve all tuples and do our own time
-	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
-	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
-	 */
-	if (!isconcurrent)
-		snapshot = SnapshotAny;
-	else
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	/* Prepare for scan of the base relation. */
+	snapshot = ParallelIndexBuildGetSnapshot(isconcurrent);
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_GIN_SHARED workspace.
 	 */
-	estginshared = _gin_parallel_estimate_shared(heap, snapshot);
+	estginshared = ParallelIndexBuildEstimateShared(heap, snapshot,
+													sizeof(GinBuildShared));
 	shm_toc_estimate_chunk(&pcxt->estimator, estginshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -1026,34 +971,17 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
-			UnregisterSnapshot(snapshot);
-		DestroyParallelContext(pcxt);
-		ExitParallelMode();
+		ParallelIndexBuildAbort(pcxt, snapshot);
 		return;
 	}
 
 	/* Store shared build state, for which we reserved space */
 	ginshared = (GinBuildShared *) shm_toc_allocate(pcxt->toc, estginshared);
-	/* Initialize immutable state */
-	ginshared->heaprelid = RelationGetRelid(heap);
-	ginshared->indexrelid = RelationGetRelid(index);
-	ginshared->isconcurrent = isconcurrent;
-	ginshared->scantuplesortstates = scantuplesortstates;
-	ginshared->queryid = pgstat_get_my_query_id();
-
-	ConditionVariableInit(&ginshared->workersdonecv);
-	SpinLockInit(&ginshared->mutex);
-
-	/* Initialize mutable state */
-	ginshared->nparticipantsdone = 0;
-	ginshared->reltuples = 0.0;
-	ginshared->indtuples = 0.0;
-	ginshared->brokenhotchain = false;
-
-	table_parallelscan_initialize(heap,
-								  ParallelTableScanFromGinBuildShared(ginshared),
-								  snapshot);
+	/* Initialize common state, and the parallel scan that follows the struct */
+	ParallelIndexBuildInitShared(&ginshared->base, heap, index, isconcurrent,
+								 scantuplesortstates,
+								 ParallelTableScanFromGinBuildShared(ginshared),
+								 snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1126,23 +1054,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 static void
 _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
 {
-	int			i;
-
-	/* Shutdown worker processes */
-	WaitForParallelWorkersToFinish(ginleader->pcxt);
-
-	/*
-	 * Next, accumulate WAL usage.  (This must wait for the workers to finish,
-	 * or we might get incomplete data.)
-	 */
-	for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&ginleader->bufferusage[i], &ginleader->walusage[i]);
-
-	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(ginleader->snapshot))
-		UnregisterSnapshot(ginleader->snapshot);
-	DestroyParallelContext(ginleader->pcxt);
-	ExitParallelMode();
+	ParallelIndexBuildEnd(ginleader->pcxt, ginleader->bufferusage,
+						  ginleader->walusage, ginleader->snapshot);
 }
 
 /*
@@ -1159,29 +1072,12 @@ static double
 _gin_parallel_heapscan(GinBuildState *state, bool *brokenhotchain)
 {
 	GinBuildShared *ginshared = state->bs_leader->ginshared;
-	int			nparticipanttuplesorts;
 
-	nparticipanttuplesorts = state->bs_leader->nparticipanttuplesorts;
-	for (;;)
-	{
-		SpinLockAcquire(&ginshared->mutex);
-		if (ginshared->nparticipantsdone == nparticipanttuplesorts)
-		{
-			/* copy the data into leader state */
-			state->bs_reltuples = ginshared->reltuples;
-			state->bs_numtuples = ginshared->indtuples;
-			*brokenhotchain = ginshared->brokenhotchain;
-
-			SpinLockRelease(&ginshared->mutex);
-			break;
-		}
-		SpinLockRelease(&ginshared->mutex);
-
-		ConditionVariableSleep(&ginshared->workersdonecv,
-							   WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-	}
-
-	ConditionVariableCancelSleep();
+	/* Wait for all participants to finish, and collect their results */
+	ParallelIndexBuildWaitForWorkers(&ginshared->base,
+									 state->bs_leader->nparticipanttuplesorts,
+									 &state->bs_reltuples, &state->bs_numtuples,
+									 NULL, brokenhotchain);
 
 	return state->bs_reltuples;
 }
@@ -1814,18 +1710,6 @@ _gin_parallel_merge(GinBuildState *state, IndexInfo *indexInfo)
 }
 
 /*
- * Returns size of shared memory required to store state for a parallel
- * gin index build based on the snapshot its parallel scan will use.
- */
-static Size
-_gin_parallel_estimate_shared(Relation heap, Snapshot snapshot)
-{
-	/* c.f. shm_toc_allocate as to why BUFFERALIGN is used */
-	return add_size(BUFFERALIGN(sizeof(GinBuildShared)),
-					table_parallelscan_estimate(heap, snapshot));
-}
-
-/*
  * Within leader, participate as a parallel worker.
  */
 static void
@@ -2058,7 +1942,7 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 	state->work_mem = (sortmem / 2);
 
 	/* remember how many workers participate in the build */
-	state->bs_num_workers = ginshared->scantuplesortstates;
+	state->bs_num_workers = ginshared->base.scantuplesortstates;
 
 	/* Begin "partial" tuplesort */
 	state->bs_sortstate = tuplesort_begin_index_gin(heap, index,
@@ -2074,7 +1958,7 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 
 	/* Join parallel scan */
 	indexInfo = BuildIndexInfo(index);
-	indexInfo->ii_Concurrent = ginshared->isconcurrent;
+	indexInfo->ii_Concurrent = ginshared->base.isconcurrent;
 
 	scan = table_beginscan_parallel(heap,
 									ParallelTableScanFromGinBuildShared(ginshared),
@@ -2099,19 +1983,12 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 	state->bs_reltuples += reltuples;
 
 	/*
-	 * Done.  Record ambuild statistics, and whether we encountered a broken
-	 * HOT chain.
+	 * Done.  Record ambuild statistics (including whether we encountered a
+	 * broken HOT chain), and notify the leader.
 	 */
-	SpinLockAcquire(&ginshared->mutex);
-	ginshared->nparticipantsdone++;
-	ginshared->reltuples += state->bs_reltuples;
-	ginshared->indtuples += state->bs_numtuples;
-	if (indexInfo->ii_BrokenHotChain)
-		ginshared->brokenhotchain = true;
-	SpinLockRelease(&ginshared->mutex);
-
-	/* Notify leader */
-	ConditionVariableSignal(&ginshared->workersdonecv);
+	ParallelIndexBuildReportScanDone(&ginshared->base, state->bs_reltuples,
+									 state->bs_numtuples, false,
+									 indexInfo->ii_BrokenHotChain);
 
 	tuplesort_end(state->bs_sortstate);
 }
@@ -2128,8 +2005,6 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	GinBuildState buildstate;
 	Relation	heapRel;
 	Relation	indexRel;
-	LOCKMODE	heapLockmode;
-	LOCKMODE	indexLockmode;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	int			sortmem;
@@ -2151,24 +2026,8 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Look up gin shared state */
 	ginshared = shm_toc_lookup(toc, PARALLEL_KEY_GIN_SHARED, false);
 
-	/* Open relations using lock modes known to be obtained by index.c */
-	if (!ginshared->isconcurrent)
-	{
-		heapLockmode = ShareLock;
-		indexLockmode = AccessExclusiveLock;
-	}
-	else
-	{
-		heapLockmode = ShareUpdateExclusiveLock;
-		indexLockmode = RowExclusiveLock;
-	}
-
-	/* Track query ID */
-	pgstat_report_query_id(ginshared->queryid, false);
-
-	/* Open relations within worker */
-	heapRel = table_open(ginshared->heaprelid, heapLockmode);
-	indexRel = index_open(ginshared->indexrelid, indexLockmode);
+	/* Open relations within worker, using the leader's lock modes */
+	ParallelIndexBuildOpenRelations(&ginshared->base, &heapRel, &indexRel);
 
 	/* initialize the GIN build state */
 	initGinState(&buildstate.ginstate, indexRel);
@@ -2213,7 +2072,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * (when requested number of workers were not launched, this will be
 	 * somewhat higher than it is for other workers).
 	 */
-	sortmem = maintenance_work_mem / ginshared->scantuplesortstates;
+	sortmem = maintenance_work_mem / ginshared->base.scantuplesortstates;
 
 	_gin_parallel_scan_and_build(&buildstate, ginshared, sharedsort,
 								 heapRel, indexRel, sortmem, false);
@@ -2224,8 +2083,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
 						  &walusage[ParallelWorkerNumber]);
 
-	index_close(indexRel, indexLockmode);
-	table_close(heapRel, heapLockmode);
+	ParallelIndexBuildCloseRelations(&ginshared->base, heapRel, indexRel);
 }
 
 /*
