@@ -30,4 +30,11 @@ extern void ExecReScanModifyTable(ModifyTableState *node);
 extern void ExecInitMergeTupleSlots(ModifyTableState *mtstate,
 									ResultRelInfo *resultRelInfo);
 
+extern Datum ExecForPortionOfOldRange(ResultRelInfo *resultRelInfo,
+									  ItemPointer tupleid);
+extern void ExecForPortionOfCheckSplit(ResultRelInfo *resultRelInfo,
+									   Datum oldRange,
+									   TupleTableSlot *newSlot);
+pg_noreturn extern void ExecForPortionOfConcurrentDelete(void);
+
 #endif							/* NODEMODIFYTABLE_H */

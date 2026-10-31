@@ -69,6 +69,7 @@ tests += {
       't/058_shutdown_crash_restart.pl',
       't/059_remote_apply_status_interval.pl',
       't/060_multixact_crashed_updater.pl',
+      't/061_for_portion_of_2pc.pl',
     ],
   },
 }

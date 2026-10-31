@@ -1,0 +1,86 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1b s2b s3b s1lock2020 s2lock2021 s3lock2022 s1lock2021 s2lock2022 s3lock2020 s2upd2022 s2c s1upd2021 s1c s3c s1q
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s3b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1lock2020: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2020-01-01,2021-01-01)' FOR UPDATE;
+price
+-----
+ 5.00
+(1 row)
+
+step s2lock2021: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2021-01-01,2022-01-01)' FOR UPDATE;
+price
+-----
+ 5.00
+(1 row)
+
+step s3lock2022: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2022-01-01,2023-01-01)' FOR UPDATE;
+price
+-----
+ 5.00
+(1 row)
+
+step s1lock2021: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2021-01-01,2022-01-01)' FOR UPDATE; <waiting ...>
+step s2lock2022: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2022-01-01,2023-01-01)' FOR UPDATE; <waiting ...>
+step s3lock2020: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2020-01-01,2021-01-01)' FOR UPDATE; <waiting ...>
+step s3lock2020: <... completed>
+ERROR:  deadlock detected
+step s2lock2022: <... completed>
+price
+-----
+ 5.00
+(1 row)
+
+step s2upd2022: UPDATE products FOR PORTION OF valid_at FROM '2022-03-01' TO '2022-04-01' SET price = 8.00 WHERE id = '[1,2)';
+step s2c: COMMIT;
+step s1lock2021: <... completed>
+price
+-----
+ 5.00
+(1 row)
+
+step s1upd2021: UPDATE products FOR PORTION OF valid_at FROM '2021-03-01' TO '2021-04-01' SET price = 8.00 WHERE id = '[1,2)';
+step s1c: COMMIT;
+step s3c: COMMIT;
+step s1q: SELECT id, valid_at, price FROM products ORDER BY valid_at;
+id   |valid_at               |price
+-----+-----------------------+-----
+[1,2)|[2020-01-01,2021-01-01)| 5.00
+[1,2)|[2021-01-01,2021-03-01)| 5.00
+[1,2)|[2021-03-01,2021-04-01)| 8.00
+[1,2)|[2021-04-01,2022-01-01)| 5.00
+[1,2)|[2022-01-01,2022-03-01)| 5.00
+[1,2)|[2022-03-01,2022-04-01)| 8.00
+[1,2)|[2022-04-01,2023-01-01)| 5.00
+(7 rows)
+
+
+starting permutation: s1b s2b s3b s1lock2020 s2lock2020 s3lock2020 s1c s2c s3c
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s3b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1lock2020: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2020-01-01,2021-01-01)' FOR UPDATE;
+price
+-----
+ 5.00
+(1 row)
+
+step s2lock2020: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2020-01-01,2021-01-01)' FOR UPDATE; <waiting ...>
+step s3lock2020: SELECT price FROM products WHERE id = '[1,2)' AND valid_at && '[2020-01-01,2021-01-01)' FOR UPDATE; <waiting ...>
+step s1c: COMMIT;
+step s2lock2020: <... completed>
+price
+-----
+ 5.00
+(1 row)
+
+step s2c: COMMIT;
+step s3lock2020: <... completed>
+price
+-----
+ 5.00
+(1 row)
+
+step s3c: COMMIT;
