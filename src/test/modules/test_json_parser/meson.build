@@ -31,6 +31,37 @@ test_json_parser_incremental_shlib = executable('test_json_parser_incremental_sh
   },
 )
 
+test_json_parser_standalone_sources = files(
+  'test_json_parser_standalone.c',
+)
+
+if host_system == 'windows'
+  test_json_parser_standalone_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
+    '--NAME', 'test_json_parser_standalone',
+    '--FILEDESC', 'standalone json parser tester',
+  ])
+endif
+
+test_json_parser_standalone = executable('test_json_parser_standalone',
+  test_json_parser_standalone_sources,
+  dependencies: [frontend_code],
+  kwargs: default_bin_args + {
+    'install': false,
+  },
+)
+
+# A second version of test_json_parser_standalone, this time compiled against
+# the shared-library flavor of jsonapi.
+test_json_parser_standalone_shlib = executable('test_json_parser_standalone_shlib',
+  test_json_parser_standalone_sources,
+  dependencies: [frontend_shlib_code, libpq],
+  c_args: ['-DJSONAPI_SHLIB_ALLOC'],
+  link_with: [common_excluded_shlib],
+  kwargs: default_bin_args + {
+    'install': false,
+  },
+)
+
 test_json_parser_perf_sources = files(
   'test_json_parser_perf.c',
 )
@@ -59,12 +90,15 @@ tests += {
       't/001_test_json_parser_incremental.pl',
       't/002_inline.pl',
       't/003_test_semantic.pl',
-      't/004_test_parser_perf.pl'
+      't/004_test_parser_perf.pl',
+      't/005_test_json5.pl'
     ],
     'deps': [
       test_json_parser_incremental,
       test_json_parser_incremental_shlib,
       test_json_parser_perf,
+      test_json_parser_standalone,
+      test_json_parser_standalone_shlib,
     ],
   },
 }

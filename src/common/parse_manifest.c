@@ -238,7 +238,7 @@ json_parse_manifest(JsonManifestParseContext *context, const char *buffer,
 	parse.saw_version_field = false;
 
 	/* Create a JSON lexing context. */
-	lex = makeJsonLexContextCstringLen(NULL, buffer, size, PG_UTF8, true);
+	lex = makeJsonLexContextCstringLen(NULL, buffer, size, PG_UTF8, true, false);
 
 	/* Set up semantic actions. */
 	sem.semstate = &parse;
