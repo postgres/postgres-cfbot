@@ -123,8 +123,18 @@ hash_xlog_insert(XLogReaderState *record)
 	if (BufferIsValid(buffer))
 		UnlockReleaseBuffer(buffer);
 
+	/* The metapage is included only if the insert updated the tuple count */
+	if (!XLogRecHasBlockRef(record, 1))
+		return;
+
 	if (XLogReadBufferForRedo(record, 1, &buffer) == BLK_NEEDS_REDO)
 	{
+		uint32		ntup_delta = 1;
+
+		if (XLogRecHasBlockData(record, 1))
+			memcpy(&ntup_delta, XLogRecGetBlockData(record, 1, NULL),
+				   sizeof(uint32));
+
 		/*
 		 * Note: in normal operation, we'd update the metapage while still
 		 * holding lock on the page we inserted into.  But during replay it's
@@ -133,7 +143,7 @@ hash_xlog_insert(XLogReaderState *record)
 		 */
 		page = BufferGetPage(buffer);
 		metap = HashPageGetMeta(page);
-		metap->hashm_ntuples += 1;
+		metap->hashm_ntuples += ntup_delta;
 
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);
@@ -1027,7 +1037,10 @@ hash_xlog_vacuum_one_page(XLogReaderState *record)
 		metapage = BufferGetPage(metabuf);
 		metap = HashPageGetMeta(metapage);
 
-		metap->hashm_ntuples -= xldata->ntuples;
+		if (metap->hashm_ntuples > xldata->ntuples)
+			metap->hashm_ntuples -= xldata->ntuples;
+		else
+			metap->hashm_ntuples = 0;
 
 		PageSetLSN(metapage, lsn);
 		MarkBufferDirty(metabuf);
