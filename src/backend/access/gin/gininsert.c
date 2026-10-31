@@ -46,6 +46,7 @@
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xB000000000000003)
 #define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xB000000000000004)
 #define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xB000000000000005)
+#define PARALLEL_KEY_TABLE_SCAN			UINT64CONST(0xB000000000000006)
 
 /*
  * Status for index builds performed in parallel.  This is allocated in a
@@ -55,22 +56,7 @@ typedef struct GinBuildShared
 {
 	/* Common parallel index build state (must be first) */
 	ParallelIndexBuildShared base;
-
-	/*
-	 * ParallelTableScanDescData data follows. Can't directly embed here, as
-	 * implementations of the parallel table scan desc interface might need
-	 * stronger alignment.
-	 */
 } GinBuildShared;
-
-/*
- * Return pointer to a GinBuildShared's parallel table scan.
- *
- * c.f. shm_toc_allocate as to why BUFFERALIGN is used, rather than just
- * MAXALIGN.
- */
-#define ParallelTableScanFromGinBuildShared(shared) \
-	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(GinBuildShared)))
 
 /*
  * Status for leader in parallel index build.
@@ -150,13 +136,14 @@ static void _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relati
 								bool isconcurrent, int request);
 static void _gin_end_parallel(GinLeader *ginleader, GinBuildState *state);
 static double _gin_parallel_heapscan(GinBuildState *state,
-									 bool *brokenhotchain);
+									 IndexInfo *indexInfo);
 static double _gin_parallel_merge(GinBuildState *state,
 								  IndexInfo *indexInfo);
 static void _gin_leader_participate_as_worker(GinBuildState *buildstate,
 											  Relation heap, Relation index);
 static void _gin_parallel_scan_and_build(GinBuildState *state,
 										 GinBuildShared *ginshared,
+										 shm_toc *toc,
 										 Sharedsort *sharedsort,
 										 Relation heap, Relation index,
 										 int sortmem, bool progress);
@@ -929,10 +916,11 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	snapshot = ParallelIndexBuildGetSnapshot(isconcurrent);
 
 	/*
-	 * Estimate size for our own PARALLEL_KEY_GIN_SHARED workspace.
+	 * Estimate size for the PARALLEL_KEY_TABLE_SCAN parallel heap scan, and
+	 * our own PARALLEL_KEY_GIN_SHARED workspace.
 	 */
-	estginshared = ParallelIndexBuildEstimateShared(heap, snapshot,
-													sizeof(GinBuildShared));
+	ParallelIndexBuildEstimate(pcxt, heap, snapshot);
+	estginshared = sizeof(GinBuildShared);
 	shm_toc_estimate_chunk(&pcxt->estimator, estginshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -969,11 +957,10 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 
 	/* Store shared build state, for which we reserved space */
 	ginshared = (GinBuildShared *) shm_toc_allocate(pcxt->toc, estginshared);
-	/* Initialize common state, and the parallel scan that follows the struct */
-	ParallelIndexBuildInitShared(&ginshared->base, heap, index, isconcurrent,
-								 scantuplesortstates,
-								 ParallelTableScanFromGinBuildShared(ginshared),
-								 snapshot);
+	/* Initialize common state, and the parallel heap scan */
+	ParallelIndexBuildInitShared(pcxt, &ginshared->base, PARALLEL_KEY_TABLE_SCAN,
+								 heap, index, isconcurrent,
+								 scantuplesortstates, snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1050,19 +1037,19 @@ _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
  * already be underway within worker processes (when leader participates
  * as a worker, we should end up here just as workers are finishing).
  *
- * Returns the total number of heap tuples scanned.  Also sets *brokenhotchain
- * to whether any participant detected a broken HOT chain.
+ * Returns the total number of heap tuples scanned.  Also sets
+ * indexInfo->ii_BrokenHotChain if any participant detected a broken HOT chain.
  */
 static double
-_gin_parallel_heapscan(GinBuildState *state, bool *brokenhotchain)
+_gin_parallel_heapscan(GinBuildState *state, IndexInfo *indexInfo)
 {
 	GinBuildShared *ginshared = state->bs_leader->ginshared;
 
 	/* Wait for all participants to finish, and collect their results */
 	ParallelIndexBuildWaitForWorkers(&ginshared->base,
 									 state->bs_leader->nparticipanttuplesorts,
-									 &state->bs_reltuples, &state->bs_numtuples,
-									 NULL, brokenhotchain);
+									 indexInfo, &state->bs_reltuples,
+									 &state->bs_numtuples, NULL);
 
 	return state->bs_reltuples;
 }
@@ -1552,7 +1539,7 @@ _gin_parallel_merge(GinBuildState *state, IndexInfo *indexInfo)
 	double		numtuples = 0;
 
 	/* wait for workers to scan table and produce partial results */
-	reltuples = _gin_parallel_heapscan(state, &indexInfo->ii_BrokenHotChain);
+	reltuples = _gin_parallel_heapscan(state, indexInfo);
 
 	/* Execute the sort */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
@@ -1712,8 +1699,8 @@ _gin_leader_participate_as_worker(GinBuildState *buildstate, Relation heap, Rela
 
 	/* Perform work common to all participants */
 	_gin_parallel_scan_and_build(buildstate, ginleader->ginshared,
-								 ginleader->sharedsort, heap, index,
-								 sortmem, true);
+								 ginleader->pcxt->toc, ginleader->sharedsort,
+								 heap, index, sortmem, true);
 }
 
 /*
@@ -1908,14 +1895,13 @@ _gin_process_worker_data(GinBuildState *state, Tuplesortstate *worker_sort,
  */
 static void
 _gin_parallel_scan_and_build(GinBuildState *state,
-							 GinBuildShared *ginshared, Sharedsort *sharedsort,
+							 GinBuildShared *ginshared, shm_toc *toc,
+							 Sharedsort *sharedsort,
 							 Relation heap, Relation index,
 							 int sortmem, bool progress)
 {
 	SortCoordinate coordinate;
-	TableScanDesc scan;
 	double		reltuples;
-	IndexInfo  *indexInfo;
 
 	/* Initialize local tuplesort coordination state */
 	coordinate = palloc0_object(SortCoordinateData);
@@ -1942,15 +1928,10 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 													  TUPLESORT_NONE);
 
 	/* Join parallel scan */
-	indexInfo = BuildIndexInfo(index);
-	indexInfo->ii_Concurrent = ginshared->base.isconcurrent;
-
-	scan = table_beginscan_parallel(heap,
-									ParallelTableScanFromGinBuildShared(ginshared),
-									SO_NONE);
-
-	reltuples = table_index_build_scan(heap, index, indexInfo, true, progress,
-									   ginBuildCallbackParallel, state, scan);
+	reltuples = ParallelIndexBuildScan(&ginshared->base, toc,
+									   PARALLEL_KEY_TABLE_SCAN, heap, index,
+									   progress, ginBuildCallbackParallel,
+									   state);
 
 	/* write remaining accumulated entries */
 	ginFlushBuildState(state, index);
@@ -1967,13 +1948,9 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 
 	state->bs_reltuples += reltuples;
 
-	/*
-	 * Done.  Record ambuild statistics (including whether we encountered a
-	 * broken HOT chain), and notify the leader.
-	 */
+	/* Done.  Record ambuild statistics, and notify the leader. */
 	ParallelIndexBuildReportScanDone(&ginshared->base, state->bs_reltuples,
-									 state->bs_numtuples, false,
-									 indexInfo->ii_BrokenHotChain);
+									 state->bs_numtuples, false);
 
 	tuplesort_end(state->bs_sortstate);
 }
@@ -2054,7 +2031,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 */
 	sortmem = maintenance_work_mem / ginshared->base.scantuplesortstates;
 
-	_gin_parallel_scan_and_build(&buildstate, ginshared, sharedsort,
+	_gin_parallel_scan_and_build(&buildstate, ginshared, toc, sharedsort,
 								 heapRel, indexRel, sortmem, false);
 
 	/* Report WAL/buffer usage during parallel execution */
