@@ -1,0 +1,259 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1b s1k s2b s2k s1r s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2b: BEGIN;
+step s2k: UPDATE kw SET k = 100 WHERE id = 3; <waiting ...>
+step s1r: ROLLBACK;
+step s2k: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+
+starting permutation: s1b s1k s2b s2k s1c s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2b: BEGIN;
+step s2k: UPDATE kw SET k = 100 WHERE id = 3; <waiting ...>
+step s1c: COMMIT;
+step s2k: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+
+starting permutation: s1b s1k s2b s2k2 s1r s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2b: BEGIN;
+step s2k2: UPDATE kw SET k = 200 WHERE id = 3; <waiting ...>
+step s1r: ROLLBACK;
+step s2k2: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|200|0
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|200|0
+(1 row)
+
+
+starting permutation: s1b s1k s2b s2k2 s1c s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2b: BEGIN;
+step s2k2: UPDATE kw SET k = 200 WHERE id = 3; <waiting ...>
+step s1c: COMMIT;
+step s2k2: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|200|0
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|200|0
+(1 row)
+
+
+starting permutation: s1b s1k s2b s2v s1r s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2b: BEGIN;
+step s2v: UPDATE kw SET v = 2 WHERE id = 3; <waiting ...>
+step s1r: ROLLBACK;
+step s2v: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|k|v
+--+-+-
+ 3|3|2
+(1 row)
+
+id|k|v
+--+-+-
+ 3|3|2
+(1 row)
+
+
+starting permutation: s1b s1k s2b s2v s1c s2c chk
+step s1b: BEGIN;
+step s1k: UPDATE kw SET k = 100 WHERE id = 3;
+step s2b: BEGIN;
+step s2v: UPDATE kw SET v = 2 WHERE id = 3; <waiting ...>
+step s1c: COMMIT;
+step s2v: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|100|2
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|100|2
+(1 row)
+
+
+starting permutation: s1b s1v s2b s2k s1r s2c chk
+step s1b: BEGIN;
+step s1v: UPDATE kw SET v = 1 WHERE id = 3;
+step s2b: BEGIN;
+step s2k: UPDATE kw SET k = 100 WHERE id = 3; <waiting ...>
+step s1r: ROLLBACK;
+step s2k: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+
+starting permutation: s1b s1v s2b s2k s1c s2c chk
+step s1b: BEGIN;
+step s1v: UPDATE kw SET v = 1 WHERE id = 3;
+step s2b: BEGIN;
+step s2k: UPDATE kw SET k = 100 WHERE id = 3; <waiting ...>
+step s1c: COMMIT;
+step s2k: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|100|1
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|100|1
+(1 row)
+
+
+starting permutation: s1b s1d s2b s2k s1r s2c chk
+step s1b: BEGIN;
+step s1d: DELETE FROM kw WHERE id = 3;
+step s2b: BEGIN;
+step s2k: UPDATE kw SET k = 100 WHERE id = 3; <waiting ...>
+step s1r: ROLLBACK;
+step s2k: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+id|  k|v
+--+---+-
+ 3|100|0
+(1 row)
+
+
+starting permutation: s1b s1d s2b s2k s1c s2c chk
+step s1b: BEGIN;
+step s1d: DELETE FROM kw WHERE id = 3;
+step s2b: BEGIN;
+step s2k: UPDATE kw SET k = 100 WHERE id = 3; <waiting ...>
+step s1c: COMMIT;
+step s2k: <... completed>
+step s2c: COMMIT;
+step chk: 
+  SET enable_seqscan = off; SET enable_bitmapscan = off;
+  SET enable_indexonlyscan = off;
+  SELECT id, k, v FROM kw WHERE k IN (3, 100, 200) ORDER BY k;
+  RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexonlyscan;
+  SELECT id, k, v FROM kw WHERE id = 3;
+
+id|k|v
+--+-+-
+(0 rows)
+
+id|k|v
+--+-+-
+(0 rows)
+

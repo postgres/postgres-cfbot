@@ -1,0 +1,103 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2b s2u s1b s1lock s2c s1c
+step s2b: BEGIN;
+step s2u: UPDATE acc SET bal = bal + 450 WHERE id = 'checking';
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1lock: SELECT * FROM acc a1, acc a2 WHERE a1.id = a2.id ORDER BY a1.id FOR UPDATE OF a1; <waiting ...>
+step s2c: COMMIT;
+step s1lock: <... completed>
+id      | bal|id      |bal
+--------+----+--------+---
+checking|1050|checking|600
+savings | 600|savings |600
+(2 rows)
+
+step s1c: COMMIT;
+
+starting permutation: s2b s2u s2uo s1b s1join s2c s1c
+step s2b: BEGIN;
+step s2u: UPDATE acc SET bal = bal + 450 WHERE id = 'checking';
+step s2uo: UPDATE oth SET v = v + 10 WHERE id = 'checking';
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1join: SELECT * FROM acc a JOIN oth o USING (id) ORDER BY id FOR UPDATE OF a; <waiting ...>
+step s2c: COMMIT;
+step s1join: <... completed>
+id      | bal|v
+--------+----+-
+checking|1050|1
+savings | 600|1
+(2 rows)
+
+step s1c: COMMIT;
+
+starting permutation: s2b s2u s2do s1b s1join s2c s1c
+step s2b: BEGIN;
+step s2u: UPDATE acc SET bal = bal + 450 WHERE id = 'checking';
+step s2do: DELETE FROM oth WHERE id = 'checking';
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1join: SELECT * FROM acc a JOIN oth o USING (id) ORDER BY id FOR UPDATE OF a; <waiting ...>
+step s2c: COMMIT;
+step s1join: <... completed>
+id      | bal|v
+--------+----+-
+checking|1050|1
+savings | 600|1
+(2 rows)
+
+step s1c: COMMIT;
+
+starting permutation: s1brr s1sel s2u s1tid s1c
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1sel: SELECT * FROM acc ORDER BY id;
+id      |bal
+--------+---
+checking|600
+savings |600
+(2 rows)
+
+step s2u: UPDATE acc SET bal = bal + 450 WHERE id = 'checking';
+step s1tid: SELECT * FROM acc WHERE ctid = '(0,1)';
+id      |bal
+--------+---
+checking|600
+(1 row)
+
+step s1c: COMMIT;
+
+starting permutation: s1brr s1sel s2d s1tid s1c
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1sel: SELECT * FROM acc ORDER BY id;
+id      |bal
+--------+---
+checking|600
+savings |600
+(2 rows)
+
+step s2d: DELETE FROM acc WHERE id = 'checking';
+step s1tid: SELECT * FROM acc WHERE ctid = '(0,1)';
+id      |bal
+--------+---
+checking|600
+(1 row)
+
+step s1c: COMMIT;
+
+starting permutation: s1brr s1sel s2u s2u s1tid s1c
+step s1brr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s1sel: SELECT * FROM acc ORDER BY id;
+id      |bal
+--------+---
+checking|600
+savings |600
+(2 rows)
+
+step s2u: UPDATE acc SET bal = bal + 450 WHERE id = 'checking';
+step s2u: UPDATE acc SET bal = bal + 450 WHERE id = 'checking';
+step s1tid: SELECT * FROM acc WHERE ctid = '(0,1)';
+id      |bal
+--------+---
+checking|600
+(1 row)
+
+step s1c: COMMIT;

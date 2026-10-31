@@ -1,0 +1,18 @@
+--
+-- Tests for FILEOPS UNDO rollback of direct file operations.
+--
+-- This test module provides SQL-callable wrappers around FileOps C functions
+-- that have no DDL-level callers, enabling direct testing of UNDO rollback
+-- for: FileOpsTruncate, FileOpsChmod, FileOpsLink, FileOpsSetXattr,
+-- FileOpsRemoveXattr.
+--
+-- REQUIRES: UNDO subsystem (always active)
+--
+-- These are POSIX file semantics: modes, hard links that do not share the
+-- target's attributes, extended attributes.  Windows has none of them (chmod
+-- only toggles the read-only attribute, which a hard link shares), so the test
+-- does not run there; the TAP tests cover the operations FILEOPS supports on
+-- Windows.
+SELECT version() ~ '(Visual C\+\+|mingw32|msvc|windows)' AS skip_test \gset
+\if :skip_test
+\quit

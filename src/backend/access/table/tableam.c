@@ -24,6 +24,8 @@
 #include "access/syncscan.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/catalog.h"
+#include "miscadmin.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/plancat.h"
 #include "port/pg_bitutils.h"
@@ -678,6 +680,10 @@ table_block_relation_size(Relation rel, ForkNumber forkNumber)
  * usable_bytes_per_page should contain the approximate number of bytes per
  * page usable for tuple data, excluding the page header and any anticipated
  * special space.
+ *
+ * A relation without a fillfactor reloption is assumed to be filled to
+ * HEAP_DEFAULT_FILLFACTOR; an AM that fills its pages to a different default
+ * should use table_block_relation_estimate_size_extended() instead.
  */
 void
 table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
@@ -685,6 +691,28 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
 								   double *allvisfrac,
 								   Size overhead_bytes_per_tuple,
 								   Size usable_bytes_per_page)
+{
+	table_block_relation_estimate_size_extended(rel, attr_widths, pages,
+												tuples, allvisfrac,
+												overhead_bytes_per_tuple,
+												usable_bytes_per_page,
+												HEAP_DEFAULT_FILLFACTOR);
+}
+
+/*
+ * table_block_relation_estimate_size_extended
+ *
+ * As table_block_relation_estimate_size(), but default_fillfactor is the
+ * fillfactor the AM fills its pages to when the relation does not set one;
+ * it should be the same default the AM's insert path uses.
+ */
+void
+table_block_relation_estimate_size_extended(Relation rel, int32 *attr_widths,
+											BlockNumber *pages, double *tuples,
+											double *allvisfrac,
+											Size overhead_bytes_per_tuple,
+											Size usable_bytes_per_page,
+											int default_fillfactor)
 {
 	BlockNumber curpages;
 	BlockNumber relpages;
@@ -764,7 +792,7 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
 		 * The other branch considers it implicitly by calculating density
 		 * from actual relpages/reltuples statistics.
 		 */
-		fillfactor = RelationGetFillFactor(rel, HEAP_DEFAULT_FILLFACTOR);
+		fillfactor = RelationGetFillFactor(rel, default_fillfactor);
 
 		tuple_width = get_rel_data_width(rel, attr_widths);
 		tuple_width += overhead_bytes_per_tuple;
@@ -787,4 +815,134 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
 		*allvisfrac = 1;
 	else
 		*allvisfrac = (double) relallvisible / curpages;
+}
+
+
+/*
+ * RelationUsesIndexUndo
+ *		Should 'indexrel' write structural index UNDO for inserts driven by
+ *		parent table 'heaprel'?
+ *
+ * This is the single gate for the index-UNDO write path (nbtinsert.c /
+ * hashinsert.c).  Index UNDO is a per-RELATION property, enabled by the
+ * index_undo reloption on the table, not a table-AM engine property: the
+ * records go to the cluster-wide UNDO-in-WAL stream, tagged UNDO_RMID_NBTREE /
+ * UNDO_RMID_HASH, and are applied on rollback by ApplyUndoChainFromWAL() ->
+ * GetUndoRmgr(rmid)->rm_undo.  None of that depends on how -- or whether -- the
+ * parent table AM writes its own table UNDO, so an AM need not declare
+ * am_supports_undo to get index UNDO, and the "a table AM's own UNDO must use
+ * UNDO_ENGINE_PERBACKEND" rule enforced by GetTableAmRoutine() is neither
+ * consulted nor weakened here.  Plain heap can and does use index UNDO.
+ *
+ * Every condition is checked here rather than at the call sites, so none can be
+ * forgotten by a future index AM that joins the path.  Because index UNDO is now
+ * ON BY DEFAULT, these exclusions are what the feature degrades to when it
+ * cannot safely apply -- each one returns false (feature OFF for this relation)
+ * rather than raising an error, so no workload becomes unrunnable:
+ *
+ * - Both relations must be permanent and WAL-logged.  The rollback path
+ *   recovers the records by re-reading WAL, so a relation whose changes are not
+ *   in WAL has no chain to walk, and the apply path's CLR needs a WAL-logged
+ *   index page to bump.  This is what excludes TEMP and UNLOGGED tables.
+ *
+ * - System catalogs and any relation in a reserved (pg_catalog, pg_toast)
+ *   namespace are excluded.  Catalog mutation runs in contexts where the apply
+ *   path's try_relation_open() is not safe to call (and bootstrap has no
+ *   syscache at all), DDL rollback already restores catalog rows by other means,
+ *   and a catalog index left with an extra LP_DEAD entry would be a far worse
+ *   failure than the VACUUM it saves.
+ *
+ * - Bootstrap processing mode is excluded outright: initdb builds the catalogs
+ *   before the UNDO machinery, syscache, or WAL retention bookkeeping the apply
+ *   path depends on exist.
+ *
+ * - An index created in the current transaction is skipped: aborting the
+ *   transaction removes the whole index, so per-entry UNDO for it could only
+ *   ever be a no-op at apply time.  Without this, CREATE INDEX / REINDEX on a
+ *   large table would emit one UNDO record per indexed row for nothing.
+ *   (nbtree passes heaprel = NULL during builds and so is already excluded, but
+ *   hash's _hash_doinsert() receives a live heapRel from hashbuildCallback().)
+ *   rd_firstRelfilelocatorSubid covers REINDEX, which keeps the index's OID but
+ *   gives it a new relfilelocator in this transaction.
+ *
+ * - A delete-marking table AM (FLUX) is refused; see the comment in the
+ *   body.
+ */
+bool
+RelationUsesIndexUndo(Relation indexrel, Relation heaprel)
+{
+	if (indexrel == NULL || heaprel == NULL)
+		return false;
+
+	/*
+	 * Never during bootstrap: the catalogs are being built and none of the
+	 * machinery the apply path needs (syscache, UNDO engine, WAL retention)
+	 * exists yet.
+	 */
+	if (IsBootstrapProcessingMode())
+		return false;
+
+	/*
+	 * Never for catalogs.  Degrade to OFF rather than error: an unconditional
+	 * feature must leave DDL and catalog maintenance exactly as they were.
+	 */
+	if (IsCatalogRelation(heaprel) || IsCatalogRelation(indexrel) ||
+		IsToastRelation(heaprel))
+		return false;
+
+	/*
+	 * A delete-marking table AM drives index cleanup from its own table UNDO
+	 * -- it clears the old delete-mark and removes the new entry -- so an
+	 * independent index-UNDO record for the same entry would double-apply.
+	 * Refusing here, rather than at each call site, makes that unreachable
+	 * whatever the reloption says.
+	 */
+	if (RelationSupportsDeleteMarking(heaprel))
+		return false;
+
+	/* No WAL, no recoverable UNDO chain.  Excludes TEMP and UNLOGGED. */
+	if (!RelationNeedsWAL(heaprel) || !RelationNeedsWAL(indexrel))
+		return false;
+
+	/* A brand-new or REINDEXed index is dropped wholesale by the abort. */
+	if (indexrel->rd_createSubid != InvalidSubTransactionId ||
+		indexrel->rd_firstRelfilelocatorSubid != InvalidSubTransactionId)
+		return false;
+
+	return RelationGetIndexUndoOption(heaprel);
+}
+
+/*
+ * RelationUndoEngine
+ *		Report which UNDO engine the relation's table AM writes UNDO to.
+ *
+ * Index AMs use this to route their index-UNDO writes to the same engine the
+ * parent table uses so a single transaction's UNDO is not split across engines.
+ * An AM that does not support UNDO maps to UNDO_ENGINE_NONE; one that supports
+ * UNDO uses the per-backend engine (the only engine a table AM may declare).
+ */
+UndoEngine
+RelationUndoEngine(Relation rel)
+{
+	if (!rel->rd_tableam || !rel->rd_tableam->am_supports_undo)
+		return UNDO_ENGINE_NONE;
+
+	Assert(rel->rd_tableam->am_undo_engine == UNDO_ENGINE_PERBACKEND);
+	return UNDO_ENGINE_PERBACKEND;
+}
+
+/*
+ * RelationSupportsDeleteMarking
+ *		Returns true if the relation's table AM does in-place indexed-column
+ *		UPDATE via nbtree delete-marking.  Index AMs use this to
+ *		suppress their own index UNDO (the table AM's UNDO drives index cleanup
+ *		on rollback) and the planner uses it to disable index-only scans
+ *		(a delete-marked entry's key may not match the live tuple).
+ */
+bool
+RelationSupportsDeleteMarking(Relation rel)
+{
+	if (!rel->rd_tableam || !rel->rd_tableam->am_supports_undo)
+		return false;
+	return rel->rd_tableam->am_index_delete_marking;
 }

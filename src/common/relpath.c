@@ -220,3 +220,29 @@ GetRelationPath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
 
 	return rp;
 }
+
+/*
+ * Undo filenames encode a log number and a hexadecimal byte offset.  They
+ * are not relation segments; callers must copy them whole when making an
+ * incremental backup or rewinding, and use this block offset for checksums.
+ */
+bool
+ParseUndoSegmentPath(const char *path, BlockNumber *block)
+{
+	const char *name = strrchr(path, '/');
+	uint64		offset;
+
+	if (name == NULL || name - path < 5 ||
+		strncmp(name - 5, "/undo", 5) != 0)
+		return false;
+	name++;
+	if (strlen(name) != 17 || name[6] != '.' ||
+		strspn(name, "0123456789ABCDEF") != 6 ||
+		strspn(name + 7, "0123456789ABCDEF") != 10)
+		return false;
+	offset = strtoull(name + 7, NULL, 16);
+	if (offset % BLCKSZ != 0 || offset / BLCKSZ > MaxBlockNumber)
+		return false;
+	*block = offset / BLCKSZ;
+	return true;
+}

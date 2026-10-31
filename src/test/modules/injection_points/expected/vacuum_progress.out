@@ -1,0 +1,73 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_vac_heap s2_round0 s2_wake s1_done s1_rows_heap
+step s1_vac_heap: VACUUM (PARALLEL 0) vp_heap; <waiting ...>
+step s2_round0: SELECT * FROM vp_progress(0);
+rel    |phase            |total_is_size|scanned|vacuumed|index_vacuum_count|max_dead_tuple_bytes|have_dead_bytes|num_dead_item_ids|indexes_total|indexes_processed|at_index|delayed|mode  |started_by
+-------+-----------------+-------------+-------+--------+------------------+--------------------+---------------+-----------------+-------------+-----------------+--------+-------+------+----------
+vp_heap|vacuuming indexes|t            |all    |none    |                 0|             1048576|t              |             1000|            1|                0|t       |t      |normal|manual    
+(1 row)
+
+step s2_wake: SELECT injection_points_wakeup('vacuum-bulkdel-one-index');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_vac_heap: <... completed>
+step s1_done: 
+	SELECT count(*) AS progress_rows FROM pg_stat_progress_vacuum
+		WHERE pid = pg_backend_pid();
+
+progress_rows
+-------------
+            0
+(1 row)
+
+step s1_rows_heap: SELECT count(*), sum(id) FROM vp_heap;
+count|    sum
+-----+-------
+ 2000|3000000
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: s1_vac_flux s2_round0 s2_wake s1_done s1_rows_flux
+step s1_vac_flux: VACUUM (PARALLEL 0) vp_flux; <waiting ...>
+step s2_round0: SELECT * FROM vp_progress(0);
+rel    |phase            |total_is_size|scanned|vacuumed|index_vacuum_count|max_dead_tuple_bytes|have_dead_bytes|num_dead_item_ids|indexes_total|indexes_processed|at_index|delayed|mode  |started_by
+-------+-----------------+-------------+-------+--------+------------------+--------------------+---------------+-----------------+-------------+-----------------+--------+-------+------+----------
+vp_flux|vacuuming indexes|t            |all    |none    |                 0|             1048576|t              |             1000|            1|                0|t       |t      |normal|manual    
+(1 row)
+
+step s2_wake: SELECT injection_points_wakeup('vacuum-bulkdel-one-index');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_vac_flux: <... completed>
+step s1_done: 
+	SELECT count(*) AS progress_rows FROM pg_stat_progress_vacuum
+		WHERE pid = pg_backend_pid();
+
+progress_rows
+-------------
+            0
+(1 row)
+
+step s1_rows_flux: SELECT count(*), sum(id) FROM vp_flux;
+count|    sum
+-----+-------
+ 2000|3000000
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

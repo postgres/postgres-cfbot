@@ -72,6 +72,15 @@ test: brin gin gist spgist privileges init_privs security_label collate matview 
 # Additional BRIN tests
 # ----------
 test: brin_bloom brin_multi
+test: flux flux_toast_foreign flux_overflow_crossrel flux_overflow_align flux_fk flux_deferred_trigger flux_rewrite_xact
+test: flux_index_aba
+test: flux_dml_semantics
+test: flux_cluster
+test: flux_abort_ddl
+test: flux_merge_delete
+test: flux_tidbitmap
+test: flux_trigger_memory
+test: flux_user_catalog
 
 # ----------
 # Another group of parallel tests
@@ -146,3 +155,9 @@ test: fast_default
 # run tablespace test at the end because it drops the tablespace created during
 # setup that other tests may use.
 test: tablespace
+
+# Heap-controlled FLUX VACUUM catalog and cumulative statistics.
+test: flux_vacuum_stats
+
+# FLUX planner size estimates, heap as control.
+test: flux_estimate

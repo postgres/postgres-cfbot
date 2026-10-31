@@ -1,0 +1,4 @@
+comment = 'Test module for transactional file operations (FILEOPS)'
+default_version = '1.0'
+module_pathname = '$libdir/test_fileops'
+relocatable = true

@@ -77,6 +77,8 @@
 #include <unistd.h>
 
 #include "access/commit_ts.h"
+#include "access/atm.h"
+#include "access/xactundo.h"
 #include "access/htup_details.h"
 #include "access/subtrans.h"
 #include "access/transam.h"
@@ -98,6 +100,7 @@
 #include "replication/origin.h"
 #include "replication/syncrep.h"
 #include "storage/fd.h"
+#include "storage/fileops.h"
 #include "storage/ipc.h"
 #include "storage/md.h"
 #include "storage/predicate.h"
@@ -148,6 +151,23 @@ int			max_prepared_xacts = 0;
  * twophase.h
  */
 
+/*
+ * FILEOPS 2PC prepare hook (fileops.c).  Declared locally by prototype to
+ * avoid pulling storage/fileops.h into this file.  Serializes this
+ * transaction's pending file operations into the 2PC state file so
+ * COMMIT/ROLLBACK PREPARED -- possibly from another backend after a crash --
+ * can perform the deferred commit-time ops or the abort-time filesystem undo.
+ */
+extern void FileOpsAtPrepare(void);
+
+/*
+ * Per-backend UNDO 2PC prepare hook (pbu_recovery.c).  Declared locally by
+ * prototype: the per-backend engine headers conflict with the cluster-wide
+ * UNDO engine headers included here.  Registers this transaction's per-backend
+ * undo chain-head into the 2PC state file at EndPrepare().
+ */
+extern void PbuAtPrepare_Undo(void);
+
 typedef struct GlobalTransactionData
 {
 	GlobalTransaction next;		/* list link for free list */
@@ -163,6 +183,23 @@ typedef struct GlobalTransactionData
 	 */
 	XLogRecPtr	prepare_start_lsn;	/* XLOG offset of prepare record start */
 	XLogRecPtr	prepare_end_lsn;	/* XLOG offset of prepare record end */
+
+	/*
+	 * Permanent-level UNDO chain-head LSN for this prepared xact, or
+	 * InvalidXLogRecPtr if it generated no cluster-wide UNDO.  Set at PREPARE
+	 * (MarkAsPreparingGuts), at redo (PrepareRedoAdd), and when a stale 2PC
+	 * file is recovered from disk.  UndoGetOldestBatchLSN() scans this so the
+	 * UNDO-batch WAL a still-prepared xact needs for ROLLBACK PREPARED is not
+	 * recycled -- neither the per-backend retention slot (cleared when the
+	 * preparing backend exits) nor the ATM (prepared xacts aren't in it)
+	 * covers this case.
+	 *
+	 * undo_batch_lsn is the chain head (where ROLLBACK PREPARED starts the
+	 * walk); undo_first_batch_lsn its oldest batch, which is what retention
+	 * must keep.
+	 */
+	XLogRecPtr	undo_batch_lsn;
+	XLogRecPtr	undo_first_batch_lsn;
 	FullTransactionId fxid;		/* The GXACT full xid */
 
 	Oid			owner;			/* ID of user that executed the xact */
@@ -228,7 +265,7 @@ static void RecordTransactionAbortPrepared(TransactionId xid,
 										   RelFileLocator *rels,
 										   int nstats,
 										   xl_xact_stats_item *stats,
-										   const char *gid);
+										   const char *gid, const char *fileops, uint32 fileops_len);
 static void ProcessRecords(char *bufptr, FullTransactionId fxid,
 						   const TwoPhaseCallback callbacks[]);
 static void RemoveGXact(GlobalTransaction gxact);
@@ -493,6 +530,9 @@ MarkAsPreparingGuts(GlobalTransaction gxact, FullTransactionId fxid,
 	gxact->locking_backend = MyProcNumber;
 	gxact->valid = false;
 	gxact->inredo = false;
+	gxact->undo_batch_lsn = GetCurrentXactLastBatchLSN(UNDOPERSISTENCE_PERMANENT);
+	gxact->undo_first_batch_lsn =
+		GetCurrentXactFirstBatchLSN(UNDOPERSISTENCE_PERMANENT);
 	strlcpy(gxact->gid, gid, GIDSIZE);
 
 	/*
@@ -979,8 +1019,22 @@ TwoPhaseFilePath(char *path, FullTransactionId fxid)
 
 /*
  * Header for a 2PC state file
+ *
+ * TWOPHASE_MAGIC must be bumped whenever xl_xact_prepare changes layout.
+ * The struct gained last_batch_lsn[NUndoPersistenceLevels] (24 bytes) for
+ * UNDO chain tracking across 2PC boundaries, requiring a bump from
+ * 0x57F94534 to 0x57F94535 to prevent old servers from silently misreading
+ * the variable-length arrays that follow the fixed header at the wrong offsets.
+ *
+ * Bumped again to 0x57F94536: FILEOPS now registers TWOPHASE_RM_FILEOPS_ID
+ * records so deferred commit-time file operations (RENAME/DELETE/RMDIR/RMTREE)
+ * and abort-time filesystem undo survive PREPARE.  This adds a new 2PC record
+ * type (not a header field), but a bump still keeps a mixed-version cluster
+ * from replaying a state file whose record stream it does not understand.
+ *
+ * Bumped to 0x57F94537: the header gained undo_first_batch_lsn.
  */
-#define TWOPHASE_MAGIC	0x57F94534	/* format identifier */
+#define TWOPHASE_MAGIC	0x57F94537	/* format identifier */
 
 typedef xl_xact_prepare TwoPhaseFileHeader;
 
@@ -1102,6 +1156,12 @@ StartPrepare(GlobalTransaction gxact)
 	hdr.origin_lsn = InvalidXLogRecPtr;
 	hdr.origin_timestamp = 0;
 
+	/* Save UNDO chain head LSNs so recovery can find UNDO records */
+	for (int j = 0; j < NUndoPersistenceLevels; j++)
+		hdr.last_batch_lsn[j] = GetCurrentXactLastBatchLSN(j);
+	hdr.undo_first_batch_lsn =
+		GetCurrentXactFirstBatchLSN(UNDOPERSISTENCE_PERMANENT);
+
 	save_state_data(&hdr, sizeof(TwoPhaseFileHeader));
 	save_state_data(gxact->gid, hdr.gidlen);
 
@@ -1154,6 +1214,25 @@ EndPrepare(GlobalTransaction gxact)
 	TwoPhaseFileHeader *hdr;
 	StateFileChunk *record;
 	bool		replorigin;
+
+	/*
+	 * Per-backend UNDO: persist this transaction's per-backend undo
+	 * chain-head location into the 2PC state file (as a
+	 * TWOPHASE_RM_PERBACKEND_ID record) so ROLLBACK PREPARED -- including
+	 * from a different backend after a crash -- can reverse-apply it, and
+	 * COMMIT PREPARED can discard it.  Must run before the END sentinel while
+	 * the record chain is still open.  A no-op if this transaction produced
+	 * no per-backend undo.
+	 */
+	PbuAtPrepare_Undo();
+
+	/*
+	 * FILEOPS: persist this transaction's pending file operations into the
+	 * 2PC state file, for the same reasons the per-backend UNDO prepare hook
+	 * does.  Must run before the END sentinel while the record chain is still
+	 * open.  A no-op if this transaction registered no file operations.
+	 */
+	FileOpsAtPrepare();
 
 	/* Add the end sentinel to the list of 2PC records */
 	RegisterTwoPhaseRecord(TWOPHASE_RM_END_ID, 0,
@@ -1500,6 +1579,47 @@ StandbyTransactionIdIsPrepared(TransactionId xid)
 }
 
 /*
+ * RecoveryTransactionIdIsPrepared
+ *		Check if a transaction ID is in the in-memory prepared transaction list.
+ *
+ * This is used during crash recovery UNDO phase, before prepared transaction
+ * files exist on disk. It checks the in-memory TwoPhaseState that was
+ * reconstructed from WAL replay.
+ */
+bool
+RecoveryTransactionIdIsPrepared(TransactionId xid)
+{
+	int			i;
+	FullTransactionId fxid;
+
+	Assert(TransactionIdIsValid(xid));
+
+	if (max_prepared_xacts <= 0)
+		return false;			/* 2PC not enabled */
+
+	if (TwoPhaseState == NULL)
+		return false;			/* 2PC not initialized yet */
+
+	fxid = AdjustToFullTransactionId(xid);
+
+	LWLockAcquire(TwoPhaseStateLock, LW_SHARED);
+
+	for (i = 0; i < TwoPhaseState->numPrepXacts; i++)
+	{
+		GlobalTransaction gxact = TwoPhaseState->prepXacts[i];
+
+		if (FullTransactionIdEquals(gxact->fxid, fxid))
+		{
+			LWLockRelease(TwoPhaseStateLock);
+			return true;
+		}
+	}
+
+	LWLockRelease(TwoPhaseStateLock);
+	return false;
+}
+
+/*
  * FinishPreparedTransaction: execute COMMIT PREPARED or ROLLBACK PREPARED
  */
 void
@@ -1578,6 +1698,19 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	 * callbacks will release the locks the transaction held.
 	 */
 	if (isCommit)
+	{
+		XLogRecPtr	atm_lsn;
+
+		/*
+		 * A ROLLBACK PREPARED that crashed before its abort record can have
+		 * left an ATM entry (see below).  Nothing was applied from it: the
+		 * revert worker skips a transaction still in progress.  Forget it
+		 * before the commit record, so a committed transaction never has one.
+		 */
+		if (XLogRecPtrIsValid(hdr->last_batch_lsn[UNDOPERSISTENCE_PERMANENT]) &&
+			ATMGetLastBatchLSN(xid, &atm_lsn))
+			ATMForget(xid);
+
 		RecordTransactionCommitPrepared(xid,
 										hdr->nsubxacts, children,
 										hdr->ncommitrels, commitrels,
@@ -1585,13 +1718,84 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 										commitstats,
 										hdr->ninvalmsgs, invalmsgs,
 										hdr->initfileinval, gid);
+	}
 	else
+	{
+		char	   *fileops = NULL;
+		uint32		fileops_len = 0;
+		char	   *scan = bufptr;
+
+		/*
+		 * ROLLBACK PREPARED: hand any cluster-wide UNDO chain to the same
+		 * async revert machinery an ordinary large-transaction abort uses.
+		 * The permanent-level chain-head LSN was durably saved in the 2PC
+		 * header at PREPARE; ATMAddAborted() records (xid, dboid,
+		 * last_batch_lsn) in the sLog Aborted Transaction Map, and the
+		 * logical revert worker walks the UNDO chain backwards from that LSN,
+		 * restoring before-images.  No apply code lives here.
+		 *
+		 * This must precede the abort record.  Once that is durable, a crash
+		 * leaves no prepared transaction to roll back again, so an ATM entry
+		 * not yet written would be lost with its rollback.  The abort
+		 * record's flush makes the ATM record durable too.  If we crash
+		 * before that, the transaction is still prepared, perhaps with an ATM
+		 * entry, from which the revert worker applies nothing while the
+		 * transaction is in progress.  A later ROLLBACK PREPARED finds the
+		 * entry already present (SLogTxnInsert keeps it); a COMMIT PREPARED
+		 * forgets it (above).
+		 *
+		 * Only the permanent level is applied: TEMP undo is gone (the
+		 * originating backend exited) and UNLOGGED forks are reset on crash;
+		 * this matches the crash-recovery UNDO phase in undo_xlog.c.
+		 */
+		{
+			XLogRecPtr	perm_lsn =
+				hdr->last_batch_lsn[UNDOPERSISTENCE_PERMANENT];
+
+			/*
+			 * The prepared transaction's backend may be from before a
+			 * restart.
+			 */
+			if (XLogRecPtrIsValid(perm_lsn))
+				ATMEnsureCreated();
+			if (XLogRecPtrIsValid(perm_lsn) &&
+				!ATMAddAborted(xid, hdr->database, perm_lsn,
+							   hdr->undo_first_batch_lsn, true))
+				elog(WARNING,
+					 "ATM full: could not record rolled-back prepared "
+					 "transaction %u for UNDO", xid);
+		}
+
+
+		/* The abort decision and inverses must occupy the same WAL record. */
+		for (;;)
+		{
+			TwoPhaseRecordOnDisk *record = (TwoPhaseRecordOnDisk *) scan;
+
+			if (record->rmid == TWOPHASE_RM_END_ID)
+				break;
+			scan += MAXALIGN(sizeof(TwoPhaseRecordOnDisk));
+			if (record->rmid == TWOPHASE_RM_FILEOPS_ID &&
+				record->info == FILEOPS_TWOPHASE_INVERSES)
+			{
+				fileops = scan;
+				fileops_len = record->len;
+				break;
+			}
+			scan += MAXALIGN(record->len);
+		}
+
+		INJECTION_POINT("rollback-prepared-before-abort-record", NULL);
+
 		RecordTransactionAbortPrepared(xid,
 									   hdr->nsubxacts, children,
 									   hdr->nabortrels, abortrels,
 									   hdr->nabortstats,
 									   abortstats,
-									   gid);
+									   gid, fileops, fileops_len);
+
+		INJECTION_POINT("rollback-prepared-after-abort-record", NULL);
+	}
 
 	ProcArrayRemove(proc, latestXid);
 
@@ -2173,6 +2377,15 @@ RecoverPreparedTransactions(void)
 							hdr->prepared_at,
 							hdr->owner, hdr->database);
 
+		/*
+		 * MarkAsPreparingGuts read the live backend's last_batch_lsn (wrong
+		 * xact during recovery); restore this xact's real value from the 2PC
+		 * header so WAL retention pins its UNDO batch until ROLLBACK
+		 * PREPARED.
+		 */
+		gxact->undo_batch_lsn = hdr->last_batch_lsn[UNDOPERSISTENCE_PERMANENT];
+		gxact->undo_first_batch_lsn = hdr->undo_first_batch_lsn;
+
 		/* recovered, so reset the flag for entries generated by redo */
 		gxact->inredo = false;
 
@@ -2480,7 +2693,7 @@ RecordTransactionAbortPrepared(TransactionId xid,
 							   RelFileLocator *rels,
 							   int nstats,
 							   xl_xact_stats_item *stats,
-							   const char *gid)
+							   const char *gid, const char *fileops, uint32 fileops_len)
 {
 	XLogRecPtr	recptr;
 	bool		replorigin;
@@ -2500,6 +2713,8 @@ RecordTransactionAbortPrepared(TransactionId xid,
 		elog(PANIC, "cannot abort transaction %u, it was already committed",
 			 xid);
 
+	if (fileops_len)
+		FileOpsBeginAbort();
 	START_CRIT_SECTION();
 
 	/*
@@ -2512,7 +2727,7 @@ RecordTransactionAbortPrepared(TransactionId xid,
 								nrels, rels,
 								nstats, stats,
 								MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
-								xid, gid);
+								xid, gid, fileops, fileops_len);
 
 	if (replorigin)
 		/* Move LSNs forward for this replication origin */
@@ -2529,6 +2744,19 @@ RecordTransactionAbortPrepared(TransactionId xid,
 	TransactionIdAbortTree(xid, nchildren, children);
 
 	END_CRIT_SECTION();
+	if (fileops_len)
+	{
+		PG_TRY();
+		{
+			INJECTION_POINT("fileops-abort-after-flush", NULL);
+			FileOpsApplyAbort(fileops, fileops_len);
+		}
+		PG_FINALLY();
+		{
+			FileOpsEndAbort();
+		}
+		PG_END_TRY();
+	}
 
 	/*
 	 * Wait for synchronous replication, if required.
@@ -2633,6 +2861,8 @@ PrepareRedoAdd(FullTransactionId fxid, char *buf,
 	gxact->valid = false;
 	gxact->ondisk = !XLogRecPtrIsValid(start_lsn);
 	gxact->inredo = true;		/* yes, added in redo */
+	gxact->undo_batch_lsn = hdr->last_batch_lsn[UNDOPERSISTENCE_PERMANENT];
+	gxact->undo_first_batch_lsn = hdr->undo_first_batch_lsn;
 	strlcpy(gxact->gid, gid, GIDSIZE);
 
 	/* And insert it into the active array */
@@ -2913,4 +3143,38 @@ TwoPhaseGetOldestXidInCommit(void)
 	LWLockRelease(TwoPhaseStateLock);
 
 	return oldestRunningXid;
+}
+
+/*
+ * TwoPhaseGetOldestUndoBatchLSN
+ *		Return the oldest permanent-level UNDO batch LSN (the first batch of
+ *		each chain, since ROLLBACK PREPARED walks all of it) across all
+ *		prepared transactions, or InvalidXLogRecPtr if none generated UNDO.
+ *
+ * UndoGetOldestBatchLSN() folds this into the WAL-retention horizon so the
+ * UNDO-batch WAL a still-prepared xact needs for ROLLBACK PREPARED survives
+ * checkpoints and backend exit (see undo_batch_lsn in GlobalTransactionData).
+ */
+XLogRecPtr
+TwoPhaseGetOldestUndoBatchLSN(void)
+{
+	XLogRecPtr	oldest = InvalidXLogRecPtr;
+
+	if (max_prepared_xacts <= 0)
+		return InvalidXLogRecPtr;
+
+	LWLockAcquire(TwoPhaseStateLock, LW_SHARED);
+
+	for (int i = 0; i < TwoPhaseState->numPrepXacts; i++)
+	{
+		XLogRecPtr	lsn = TwoPhaseState->prepXacts[i]->undo_first_batch_lsn;
+
+		if (XLogRecPtrIsValid(lsn) &&
+			(!XLogRecPtrIsValid(oldest) || lsn < oldest))
+			oldest = lsn;
+	}
+
+	LWLockRelease(TwoPhaseStateLock);
+
+	return oldest;
 }

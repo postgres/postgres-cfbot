@@ -1,0 +1,4 @@
+comment = 'Synthetic exerciser for nbtree delete-marking'
+default_version = '1.0'
+module_pathname = '$libdir/test_deletemark'
+relocatable = true

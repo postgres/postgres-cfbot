@@ -487,4 +487,10 @@ extern void hashbucketcleanup(Relation rel, Bucket cur_bucket,
 							  bool split_cleanup,
 							  IndexBulkDeleteCallback callback, void *callback_state);
 
+/* hash_undo.c -- UNDO support */
+extern void HashUndoRmgrInit(void);
+extern void HashUndoLogInsert(Relation rel, Relation heapRel, Buffer buf,
+							  OffsetNumber offset, IndexTuple itup,
+							  Size itemsz);
+
 #endif							/* HASH_H */

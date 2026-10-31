@@ -1,0 +1,214 @@
+Parsed test spec with 2 sessions
+
+starting permutation: b1rc b2rc d1 d2 c1 c2 sel
+step b1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step b2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step d1: DELETE FROM d WHERE id = 1;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v; <waiting ...>
+step c1: COMMIT;
+step d2: <... completed>
+v
+-
+(0 rows)
+
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rc b2rc d1 d2 a1 c2 sel
+step b1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step b2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step d1: DELETE FROM d WHERE id = 1;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v; <waiting ...>
+step a1: ROLLBACK;
+step d2: <... completed>
+ v
+--
+10
+(1 row)
+
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rc b2rc u1 d2 c1 c2 sel
+step b1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step b2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step u1: UPDATE d SET v = v + 1 WHERE id = 1;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v; <waiting ...>
+step c1: COMMIT;
+step d2: <... completed>
+ v
+--
+11
+(1 row)
+
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rc b2rc d1 u2 c1 c2 sel
+step b1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step b2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step d1: DELETE FROM d WHERE id = 1;
+step u2: UPDATE d SET v = v + 100 WHERE id = 1 RETURNING v; <waiting ...>
+step c1: COMMIT;
+step u2: <... completed>
+v
+-
+(0 rows)
+
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rc b2rc d1 u2 a1 c2 sel
+step b1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step b2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step d1: DELETE FROM d WHERE id = 1;
+step u2: UPDATE d SET v = v + 100 WHERE id = 1 RETURNING v; <waiting ...>
+step a1: ROLLBACK;
+step u2: <... completed>
+  v
+---
+110
+(1 row)
+
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id|  v
+--+---
+ 1|110
+ 2| 20
+(2 rows)
+
+
+starting permutation: b1rr b2rr snap2 d1 d2 c1 c2 sel
+step b1rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step b2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step snap2: SELECT count(*) FROM d;
+count
+-----
+    2
+(1 row)
+
+step d1: DELETE FROM d WHERE id = 1;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v; <waiting ...>
+step c1: COMMIT;
+step d2: <... completed>
+ERROR:  could not serialize access due to concurrent delete
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rr b2rr snap2 d1 d2 a1 c2 sel
+step b1rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step b2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step snap2: SELECT count(*) FROM d;
+count
+-----
+    2
+(1 row)
+
+step d1: DELETE FROM d WHERE id = 1;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v; <waiting ...>
+step a1: ROLLBACK;
+step d2: <... completed>
+ v
+--
+10
+(1 row)
+
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rr b2rr snap2 u1 d2 c1 c2 sel
+step b1rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step b2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step snap2: SELECT count(*) FROM d;
+count
+-----
+    2
+(1 row)
+
+step u1: UPDATE d SET v = v + 1 WHERE id = 1;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v; <waiting ...>
+step c1: COMMIT;
+step d2: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 1|11
+ 2|20
+(2 rows)
+
+
+starting permutation: b1rr b2rr snap2 d1 u2 c1 c2 sel
+step b1rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step b2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step snap2: SELECT count(*) FROM d;
+count
+-----
+    2
+(1 row)
+
+step d1: DELETE FROM d WHERE id = 1;
+step u2: UPDATE d SET v = v + 100 WHERE id = 1 RETURNING v; <waiting ...>
+step c1: COMMIT;
+step u2: <... completed>
+ERROR:  could not serialize access due to concurrent delete
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+
+
+starting permutation: b1rr b2rr snap2 d1 c1 d2 c2 sel
+step b1rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step b2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step snap2: SELECT count(*) FROM d;
+count
+-----
+    2
+(1 row)
+
+step d1: DELETE FROM d WHERE id = 1;
+step c1: COMMIT;
+step d2: DELETE FROM d WHERE id = 1 RETURNING v;
+ERROR:  could not serialize access due to concurrent delete
+step c2: COMMIT;
+step sel: SELECT id, v FROM d ORDER BY id;
+id| v
+--+--
+ 2|20
+(1 row)
+

@@ -360,6 +360,13 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 
 		Assert(datalen == 0);
 
+		/* newitem took the place of the item at newitemoff */
+		if (xlrec->replace)
+		{
+			Assert(xlrec->postingoff == 0);
+			PageIndexTupleDelete(origpage, xlrec->newitemoff);
+		}
+
 		leftpage = PageGetTempPageCopySpecial(origpage);
 
 		/* Add high key tuple from WAL record to temp page */
@@ -1000,6 +1007,63 @@ btree_xlog_reuse_page(XLogReaderState *record)
 												   xlrec->locator);
 }
 
+/*
+ * btree_xlog_delete_mark - redo an in-place delete-mark/unmark of a leaf tuple
+ *
+ * The record carries the final tuple image (already in delete-marked or plain
+ * form) as block data; we overwrite the item at offnum with it.  Logging the
+ * exact bytes keeps redo byte-for-byte deterministic for
+ * wal_consistency_checking.
+ */
+static void
+btree_xlog_delete_mark(XLogReaderState *record)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	xl_btree_delete_mark *xlrec = (xl_btree_delete_mark *) XLogRecGetData(record);
+	Buffer		buf;
+
+	if (XLogReadBufferForRedo(record, 0, &buf) == BLK_NEEDS_REDO)
+	{
+		Page		page = BufferGetPage(buf);
+
+		if (xlrec->deleted)
+		{
+			/* btundomark() removed an aborted UPDATE's new-key entry */
+			PageIndexTupleDelete(page, xlrec->offnum);
+		}
+		else
+		{
+			Size		newsize = 0;
+			char	   *newtup = XLogRecGetBlockData(record, 0, &newsize);
+
+			if (!PageIndexTupleOverwrite(page, xlrec->offnum,
+										 (IndexTuple) newtup, newsize))
+				elog(ERROR, "btree_xlog_delete_mark: failed to overwrite item at offset %u",
+					 xlrec->offnum);
+
+			/*
+			 * The primary never leaves the entry LP_DEAD, whichever way it
+			 * went: it does not delete-mark an LP_DEAD entry, and it clears
+			 * the hint when it makes an entry live again.  Do the same here;
+			 * the overwrite keeps lp_flags, and the standby's copy of the
+			 * page may carry an LP_DEAD hint from a full-page image.
+			 */
+			{
+				ItemId		itemid = PageGetItemId(page, xlrec->offnum);
+
+				if (ItemIdIsDead(itemid))
+					ItemIdSetNormal(itemid, ItemIdGetOffset(itemid),
+									ItemIdGetLength(itemid));
+			}
+		}
+
+		PageSetLSN(page, lsn);
+		MarkBufferDirty(buf);
+	}
+	if (BufferIsValid(buf))
+		UnlockReleaseBuffer(buf);
+}
+
 void
 btree_redo(XLogReaderState *record)
 {
@@ -1051,6 +1115,9 @@ btree_redo(XLogReaderState *record)
 			break;
 		case XLOG_BTREE_META_CLEANUP:
 			_bt_restore_meta(record, 0);
+			break;
+		case XLOG_BTREE_DELETE_MARK:
+			btree_xlog_delete_mark(record);
 			break;
 		default:
 			elog(PANIC, "btree_redo: unknown op code %u", info);

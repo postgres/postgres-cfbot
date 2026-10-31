@@ -1,0 +1,25 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s0rw s1fu s2fu s1locks s1c
+step s0rw: VACUUM FULL tl;
+step s1fu: SELECT id FROM tl WHERE id = 1 FOR UPDATE;
+id
+--
+ 1
+(1 row)
+
+step s2fu: SELECT id FROM tl WHERE id = 1 FOR UPDATE; <waiting ...>
+step s1locks: SELECT relation = 'tl'::regclass AS names_tl
+		  FROM pg_locks WHERE locktype = 'tuple';
+names_tl
+--------
+t       
+(1 row)
+
+step s1c: COMMIT;
+step s2fu: <... completed>
+id
+--
+ 1
+(1 row)
+

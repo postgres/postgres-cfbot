@@ -1,0 +1,305 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1b s2d s2cle s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2d: DELETE FROM cs WHERE k > 10;
+step s2cle: CLUSTER cs USING cs_e;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   10|  1| 10| 55
+(1 row)
+
+
+starting permutation: s1b s2d s2clb s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2d: DELETE FROM cs WHERE k > 10;
+step s2clb: CLUSTER cs USING cs_b;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   10|  1| 10| 55
+(1 row)
+
+
+starting permutation: s1b s2d s2clg s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2d: DELETE FROM cs WHERE k > 10;
+step s2clg: CLUSTER cs USING cs_g;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   10|  1| 10| 55
+(1 row)
+
+
+starting permutation: s1b s2d s2vf s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2d: DELETE FROM cs WHERE k > 10;
+step s2vf: VACUUM FULL cs;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   10|  1| 10| 55
+(1 row)
+
+
+starting permutation: s1b s2u s2cle s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2u: UPDATE cs SET v = v + 100;
+step s2cle: CLUSTER cs USING cs_e;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max| sum
+-----+---+---+----
+   20|  1| 20|2210
+(1 row)
+
+
+starting permutation: s1b s2u s2u s2clg s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2u: UPDATE cs SET v = v + 100;
+step s2u: UPDATE cs SET v = v + 100;
+step s2clg: CLUSTER cs USING cs_g;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max| sum
+-----+---+---+----
+   20|  1| 20|4210
+(1 row)
+
+
+starting permutation: s1b s2u s2d s2vf s1r s1ri s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2u: UPDATE cs SET v = v + 100;
+step s2d: DELETE FROM cs WHERE k > 10;
+step s2vf: VACUUM FULL cs;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max| sum
+-----+---+---+----
+   10|  1| 10|1055
+(1 row)
+
+
+starting permutation: s1b s2i s2u s2vff s1r s1ri s2flush s2v s2dead s1c s2v s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2i: INSERT INTO cs VALUES (21, 21, point(21, 21));
+step s2u: UPDATE cs SET v = v + 100;
+step s2vff: VACUUM (FULL, FREEZE) cs;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1ri: 
+	SET LOCAL enable_seqscan = off;
+	SET LOCAL enable_bitmapscan = off;
+	SELECT count(*), min(k), max(k), sum(v) FROM cs WHERE k > 0;
+
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s2flush: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+step s2v: VACUUM cs;
+step s2dead: SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = 'cs';
+n_dead_tup
+----------
+        21
+(1 row)
+
+step s1c: COMMIT;
+step s2v: VACUUM cs;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max| sum
+-----+---+---+----
+   21|  1| 21|2331
+(1 row)
+
+
+starting permutation: s1b s2d s2u s1r s1c s2chk
+step s1b: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM cs_other;
+count
+-----
+    0
+(1 row)
+
+step s2d: DELETE FROM cs WHERE k > 10;
+step s2u: UPDATE cs SET v = v + 100;
+step s1r: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max|sum
+-----+---+---+---
+   20|  1| 20|210
+(1 row)
+
+step s1c: COMMIT;
+step s2chk: SELECT count(*), min(k), max(k), sum(v) FROM cs;
+count|min|max| sum
+-----+---+---+----
+   10|  1| 10|1055
+(1 row)
+

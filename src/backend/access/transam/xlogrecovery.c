@@ -32,6 +32,8 @@
 
 #include "access/timeline.h"
 #include "access/transam.h"
+#include "access/undo_xlog.h"
+#include "access/undolog.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
@@ -73,6 +75,13 @@
 /* Unsupported old recovery command file names (relative to $PGDATA) */
 #define RECOVERY_COMMAND_FILE	"recovery.conf"
 #define RECOVERY_COMMAND_DONE	"recovery.done"
+
+/*
+ * Per-backend UNDO crash-recovery apply driver (pbu_recovery.c).  Declared
+ * locally by prototype rather than via a pbu header, which would drag in the
+ * per-backend engine's conflicting type definitions.
+ */
+extern int	PbuPerformUndoRecovery(void);
 
 /*
  * GUC support
@@ -207,6 +216,9 @@ typedef struct XLogPageReadPrivate
 
 /* flag to tell XLogPageRead that we have started replaying */
 static bool InRedo = false;
+
+/* Successful FILEOPS loser inverses require an end-of-recovery checkpoint. */
+static bool fileopsUndoApplied = false;
 
 /*
  * Codes indicating where we got a WAL file from during recovery, or where
@@ -1579,6 +1591,7 @@ FinishWalRecovery(void)
 
 	result->standby_signal_file_found = standby_signal_file_found;
 	result->recovery_signal_file_found = recovery_signal_file_found;
+	result->fileopsUndoApplied = fileopsUndoApplied;
 
 	return result;
 }
@@ -1877,6 +1890,45 @@ PerformWalRecovery(void)
 			ereport(LOG,
 					(errmsg("last completed transaction was at log time %s",
 							timestamptz_to_str(xtime))));
+
+		/*
+		 * ARIES-style undo phase: roll back incomplete transactions that
+		 * wrote UNDO records (XLOG_UNDO_BATCH) but did not commit.
+		 *
+		 * During the redo phase above, UndoRecoveryTrackBatch() was called
+		 * from the XLOG_UNDO_BATCH redo handler to record which transactions
+		 * have UNDO data.  UndoRecoveryRemoveXid() was called from the
+		 * XLOG_XACT_COMMIT and XLOG_XACT_ABORT redo handlers to remove
+		 * completed transactions.  Any remaining entries represent incomplete
+		 * transactions that need their UNDO chains walked for rollback.
+		 *
+		 * We check UndoRecoveryNeeded() to avoid overhead when no UNDO
+		 * records were present in the WAL stream.
+		 */
+		if (UndoRecoveryNeeded())
+		{
+			ereport(LOG,
+					(errmsg("starting undo phase for incomplete transactions")));
+			fileopsUndoApplied = PerformUndoRecovery();
+			ereport(LOG,
+					(errmsg("undo phase complete")));
+		}
+
+		/* The deferred chains are in the ATM, which retains their WAL. */
+		UndoSetRecoveryBatchLSN(InvalidXLogRecPtr);
+
+		/*
+		 * Reverse-apply per-backend UNDO for loser transactions.  The
+		 * per-backend engine's UndoLogControl banks were rebuilt by
+		 * StartupUndoLogs() before redo, redo advanced them and rebuilt the
+		 * xid->logno map, and the undo pages were replayed (they ride on
+		 * their producers' WAL records).  Now walk the recovered undo logs'
+		 * transaction-header chains and roll back transactions that wrote
+		 * per-backend undo but did not commit and are not prepared.  Runs
+		 * unconditionally for the same promoted-standby reason as
+		 * PerformUndoRecovery() above.
+		 */
+		PbuPerformUndoRecovery();
 
 		InRedo = false;
 	}

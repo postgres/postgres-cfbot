@@ -73,6 +73,14 @@ typedef enum ScanOptions
 
 	/* collect scan instrumentation */
 	SO_SCAN_INSTRUMENT = 1 << 11,
+
+	/*
+	 * With SnapshotAny, also return row versions that a committed or
+	 * in-progress DELETE removed, for a caller that judges them itself.
+	 * Heap's SnapshotAny always returns them; an AM whose SnapshotAny hides
+	 * deleted versions returns them only when asked.
+	 */
+	SO_RETURN_DELETED = 1 << 12,
 }			ScanOptions;
 
 /*
@@ -309,6 +317,26 @@ typedef void (*IndexBuildCallback) (Relation index,
 									void *state);
 
 /*
+ * UndoEngine -- which UNDO engine an AM writes its UNDO records to.
+ *
+ * This describes where a TABLE AM writes its own TABLE UNDO, and nothing else.
+ * Index UNDO is NOT routed on it: nbtree/hash write their structural UNDO to the
+ * cluster-wide UNDO-in-WAL stream, gated per relation by
+ * RelationUsesIndexUndo() (the index_undo reloption).  A table AM therefore
+ * neither enables nor disables index UNDO by choosing an engine, and plain heap
+ * -- UNDO_ENGINE_NONE -- can and does use index UNDO.
+ *
+ *   UNDO_ENGINE_NONE       -- AM does not use UNDO (e.g. heap).
+ *   UNDO_ENGINE_PERBACKEND -- per-backend UNDO engine (access/undo/perbackend).
+ *                             This is the only engine a table AM may declare.
+ */
+typedef enum UndoEngine
+{
+	UNDO_ENGINE_NONE = 0,
+	UNDO_ENGINE_PERBACKEND,
+} UndoEngine;
+
+/*
  * API struct for a table AM.  Note this must be allocated in a
  * server-lifetime manner, typically as a static const struct, which then gets
  * returned by FormData_pg_am.amhandler.
@@ -323,6 +351,101 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+
+	/*
+	 * am_supports_undo: true if this AM records UNDO for its own table
+	 * changes and relies on applying it to roll back an aborted transaction,
+	 * rather than on visibility rules alone as heap does.  The records are
+	 * opaque to the UNDO core; the AM's own UNDO resource manager interprets
+	 * them and its page format.  Heap leaves this false.
+	 */
+	bool		am_supports_undo;
+
+	/*
+	 * am_inplace_update_keeps_tid: this AM updates a row in place, so the row
+	 * keeps its TID for the whole of its lifetime and the TID names only the
+	 * row's newest version.  Heap writes a new tuple version at a new TID on
+	 * every UPDATE, and the core relies on that in the places below; each
+	 * tests RelationUpdatesInPlace() and keeps heap's behaviour otherwise.
+	 *
+	 * A TUPLE_LOCK_FLAG_FIND_LAST_VERSION lock that reaches the latest
+	 * version of a row it had found outdated must, for heap, have followed
+	 * the update chain to a different TID, and reports
+	 * TM_FailureData.traversed.  An AM that sets this flag reaches the latest
+	 * version without moving, so it correctly reports traversed = false, and
+	 * ExecUpdate and ExecDelete accept that.
+	 *
+	 * The update overwrites the storage the pre-update row was read from, and
+	 * the row's TID yields the new version afterwards.  So ExecUpdate, MERGE
+	 * and logical replication apply copy the old row out of its slot before
+	 * updating, and hand that copy to RETURNING OLD and the AFTER ROW UPDATE
+	 * triggers instead of re-fetching it by TID.
+	 *
+	 * An EvalPlanQual recheck fetches a ROW_MARK_REFERENCE row by TID.  With
+	 * SnapshotAny that would be the newest version, possibly one the query's
+	 * snapshot does not see, so the row is fetched with that snapshot.
+	 *
+	 * Logical replication apply reports a unique-key conflict of an UPDATE
+	 * after inserting its index entries.  This AM may maintain the indexes of
+	 * a key change inside tuple_update, where a duplicate fails as a plain
+	 * unique violation, so apply checks the unique indexes whose key the
+	 * UPDATE changes beforehand.
+	 *
+	 * AFTER row triggers do not re-fetch their rows by TID either: the
+	 * trigger queue stores each event's rows as heap-format copies, made by
+	 * the AM slot's copy_heap_tuple callback, and fires the trigger with
+	 * slots of the AM's own type loaded from them by its copyslot callback.
+	 * The RI triggers ask tuple_satisfies_snapshot of such a slot whether
+	 * that exact row version is still live, which heap answers for the
+	 * version its TID names; to answer it, the AM must carry what identifies
+	 * the version through that copy and back.
+	 *
+	 * The heap AM leaves this false.
+	 */
+	bool		am_inplace_update_keeps_tid;
+
+	/*
+	 * am_undo_engine: which UNDO engine this AM writes UNDO to.  Only
+	 * consulted when am_supports_undo is true.
+	 *
+	 * An AM with am_supports_undo = true MUST set this to
+	 * UNDO_ENGINE_PERBACKEND; it is the only supported value.
+	 *
+	 * See RelationUndoEngine() for the mapping.  The index UNDO write path
+	 * does NOT route on this; see the UndoEngine comment above and
+	 * RelationUsesIndexUndo().
+	 */
+	UndoEngine	am_undo_engine;
+
+	/*
+	 * am_index_delete_marking: true if this AM performs in-place UPDATE of an
+	 * indexed column via nbtree delete-marking rather than moving the row to
+	 * a new TID.  When true: - the row keeps a STABLE TID across an
+	 * indexed-column UPDATE; - the AM itself drives index maintenance for the
+	 * changed indexes (insert the new (k_new,TID) entry + delete-mark the old
+	 * (k_old,TID) entry via index_delete_mark) and reports TU_None so the
+	 * executor does NOT re-insert; - the AM's own UNDO drives index cleanup
+	 * on rollback (remove the new entry + clear the old delete-mark), so
+	 * index AMs must NOT write their own index UNDO for such a parent table
+	 * (see nbtinsert.c/hashinsert.c); - index-only scans are suppressed for
+	 * indexes on the table (a delete-marked entry's key may not match the
+	 * live tuple), which the planner enforces via
+	 * RelationSupportsDeleteMarking() in get_relation_info(). Only meaningful
+	 * when am_supports_undo is true.
+	 */
+	bool		am_index_delete_marking;
+
+	/*
+	 * am_logical_decoding: every committed change of a row in a logically
+	 * logged relation of this AM is decoded by logical decoding as an INSERT,
+	 * UPDATE or DELETE carrying the tuple images output plugins expect, and
+	 * an aborted change is not.  REPACK (CONCURRENTLY) replays the changes
+	 * made during the rewrite from that stream, so it refuses a table whose
+	 * AM leaves this false; it would lose changes silently.  The rewrite
+	 * itself goes through relation_copy_for_cluster with the decoding's
+	 * initial snapshot.
+	 */
+	bool		am_logical_decoding;
 
 
 	/* ------------------------------------------------------------------------
@@ -502,6 +625,13 @@ typedef struct TableAmRoutine
 							  bool *all_dead);
 
 	/*
+	 * Optional, for am_index_delete_marking AMs; see table_index_fetch_tid().
+	 */
+	bool		(*index_fetch_tid) (Relation rel, Relation irel,
+									IndexTuple itup, ItemPointer tid,
+									Snapshot snapshot, bool *all_dead);
+
+	/*
 	 * Fetch tuple at `tid` into `slot`, after doing a visibility test
 	 * according to `snapshot`. If a tuple was found and passed the visibility
 	 * test, returns true, false otherwise.
@@ -535,6 +665,14 @@ typedef struct TableAmRoutine
 	/* see table_index_delete_tuples() */
 	TransactionId (*index_delete_tuples) (Relation rel,
 										  TM_IndexDeleteOp *delstate);
+
+	/*
+	 * Optional, for am_index_delete_marking AMs; see
+	 * table_index_tombstone_removable().
+	 */
+	bool		(*index_tombstone_removable) (Relation rel, Relation irel,
+											  IndexTuple itup, ItemPointer tid,
+											  TransactionId *conflict_xid);
 
 
 	/* ------------------------------------------------------------------------
@@ -1351,6 +1489,70 @@ table_fetch_tid(Relation rel,
 }
 
 /*
+ * table_fetch_tid() for a uniqueness check that knows the index entry it
+ * found `tid` through: is there a version of the row that passes `snapshot`
+ * AND carries the key of the entry `itup` of unique index `irel`?
+ *
+ * A delete-marking AM (am_index_delete_marking) updates an indexed column in
+ * place, so one TID carries several keys over time: the UPDATE inserts a new
+ * (k_new, TID) entry and delete-marks the old (k_old, TID) one, which stays
+ * for snapshots that still see k_old.  The TID alone no longer says which
+ * version a uniqueness check is about; only the table AM can tell whether
+ * the version that carries the entry's key is live, being changed, or dead.
+ * This asks it.  It answers exactly what heap's table_fetch_tid() answers
+ * for the version that carries the key, as if that version had its own TID:
+ *
+ * - `itup` is the entry as the index stores it.  It may be delete-marked
+ *   (a tombstone); its key is the entry's key either way, and the caller has
+ *   already matched it against the key being inserted.  `tid` is the heap
+ *   TID it points to (for a tombstone, BTreeTupleGetHeapTID(), not t_tid),
+ *   and is not modified.
+ *
+ * - `snapshot` is SnapshotDirty or SnapshotSelf.  Returns true if a version
+ *   carrying the key passes it, false otherwise.
+ *
+ * - For SnapshotDirty, a version whose inserter, updater or deleter is still
+ *   in progress passes, and its xid is reported as heap does
+ *   (HeapTupleSatisfiesDirty): snapshot->xmin for a running writer that made
+ *   the version (and snapshot->speculativeToken for a speculative insertion
+ *   that is not yet confirmed), snapshot->xmax for a running writer that is
+ *   replacing it -- for an in-place key UPDATE in progress, the updater, on
+ *   both its old-key and its new-key entry.  The caller waits for that xid
+ *   and checks again.  Both are InvalidTransactionId and the token 0 when
+ *   there is nothing to wait for.
+ *
+ * - A version whose writer aborted is not the row's, even when the AM's
+ *   rollback has not been applied yet: the version before it is, so the old
+ *   key of an aborted key UPDATE passes and the new one does not.  A version
+ *   superseded by a committed key UPDATE (or deleted by a committed DELETE)
+ *   does not pass.
+ *
+ * - If all_dead is not NULL, *all_dead is set as by table_fetch_tid(): true
+ *   iff no snapshot, now or in the future, can need any version at `tid`, so
+ *   that a plain entry may be marked LP_DEAD.  The caller never marks a
+ *   tombstone LP_DEAD, whatever *all_dead says: tombstones are removed by
+ *   table_index_tombstone_removable() only.
+ *
+ * AMs without delete-marking leave the callback NULL; the call is then
+ * table_fetch_tid(rel, tid, snapshot, all_dead), which is right because
+ * their TIDs carry a single key, and which an AM with delete-marking may
+ * also be given for a plain entry.
+ */
+static inline bool
+table_index_fetch_tid(Relation rel, Relation irel, IndexTuple itup,
+					  ItemPointer tid, Snapshot snapshot, bool *all_dead)
+{
+	if (rel->rd_tableam->index_fetch_tid == NULL)
+		return table_fetch_tid(rel, tid, snapshot, all_dead);
+
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+		elog(ERROR, "unexpected table_index_fetch_tid call during logical decoding");
+
+	return rel->rd_tableam->index_fetch_tid(rel, irel, itup, tid, snapshot,
+											all_dead);
+}
+
+/*
  * Fetch tuple at `tid` into `slot`, after doing a visibility test according to
  * `snapshot`. If a tuple was found and passed the visibility test, returns
  * true, false otherwise.
@@ -1430,6 +1632,25 @@ static inline TransactionId
 table_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
 	return rel->rd_tableam->index_delete_tuples(rel, delstate);
+}
+
+/*
+ * May the delete-marked index entry itup of index irel be removed?
+ *
+ * A delete-marking AM's in-place UPDATE of an indexed column leaves the old
+ * entry delete-marked for older snapshots, at a TID that stays live, so the
+ * index AM's dead-TID test never removes it.  Returns true once no snapshot
+ * can need the row through that entry, setting *conflict_xid to the XID whose
+ * snapshots (on a standby) must have ended before it is removed.  AMs without
+ * the callback keep their delete-marked entries.
+ */
+static inline bool
+table_index_tombstone_removable(Relation rel, Relation irel, IndexTuple itup,
+								ItemPointer tid, TransactionId *conflict_xid)
+{
+	return rel->rd_tableam->index_tombstone_removable != NULL &&
+		rel->rd_tableam->index_tombstone_removable(rel, irel, itup, tid,
+												   conflict_xid);
 }
 
 
@@ -2147,6 +2368,14 @@ extern void table_block_relation_estimate_size(Relation rel,
 											   double *allvisfrac,
 											   Size overhead_bytes_per_tuple,
 											   Size usable_bytes_per_page);
+extern void table_block_relation_estimate_size_extended(Relation rel,
+														int32 *attr_widths,
+														BlockNumber *pages,
+														double *tuples,
+														double *allvisfrac,
+														Size overhead_bytes_per_tuple,
+														Size usable_bytes_per_page,
+														int default_fillfactor);
 
 /* ----------------------------------------------------------------------------
  * Functions in tableamapi.c
@@ -2161,5 +2390,24 @@ extern const TableAmRoutine *GetTableAmRoutine(Oid amhandler);
  */
 
 extern const TableAmRoutine *GetHeapamTableAmRoutine(void);
+
+/*
+ * Does this relation's AM overwrite a row's storage on UPDATE?  False for
+ * relations without a table AM (foreign tables, views, partitioned tables).
+ */
+static inline bool
+RelationUpdatesInPlace(Relation rel)
+{
+	return rel->rd_tableam != NULL && rel->rd_tableam->am_inplace_update_keeps_tid;
+}
+
+/* ----------------------------------------------------------------------------
+ * Functions in tableam.c
+ * ----------------------------------------------------------------------------
+ */
+
+extern bool RelationUsesIndexUndo(Relation indexrel, Relation heaprel);
+extern UndoEngine RelationUndoEngine(Relation rel);
+extern bool RelationSupportsDeleteMarking(Relation rel);
 
 #endif							/* TABLEAM_H */

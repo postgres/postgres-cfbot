@@ -1,0 +1,206 @@
+--
+-- FLUX planner size estimates (flux_relation_estimate_size), heap as control.
+--
+-- Every result is a boolean so the expected output does not depend on
+-- platform details; heap's column shows what the shared block estimator
+-- gives for the same shape.
+--
+-- Estimated rows and total cost of a whole-table scan.
+CREATE FUNCTION est_plan(tbl regclass, what text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan json;
+BEGIN
+	EXECUTE format('EXPLAIN (FORMAT JSON) SELECT * FROM %s', tbl) INTO plan;
+	RETURN (plan->0->'Plan'->>what)::float8;
+END $$;
+CREATE FUNCTION est_rows(tbl regclass) RETURNS float8 LANGUAGE sql AS $$
+	SELECT est_plan(tbl, 'Plan Rows')
+$$;
+CREATE FUNCTION real_rows(tbl regclass) RETURNS float8 LANGUAGE plpgsql AS $$
+DECLARE
+	n float8;
+BEGIN
+	EXECUTE format('SELECT count(*) FROM %s', tbl) INTO n;
+	RETURN n;
+END $$;
+CREATE FUNCTION real_pages(tbl regclass) RETURNS float8 LANGUAGE sql AS $$
+	SELECT pg_relation_size(tbl) / current_setting('block_size')::float8
+$$;
+-- The estimate is within [0.5x, 2x] of the real row count.
+CREATE FUNCTION est_ok(tbl regclass) RETURNS bool LANGUAGE sql AS $$
+	SELECT est_rows(tbl) BETWEEN 0.5 * real_rows(tbl) AND 2 * real_rows(tbl)
+$$;
+-- A never-analyzed table: the rows per page the planner assumes (the
+-- estimate over the page count, which is at least 10) is within 10% of the
+-- rows a full page really holds (the most rows on any block of a table
+-- filled by INSERT alone).
+CREATE FUNCTION real_density(tbl regclass) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+	n float8;
+BEGIN
+	EXECUTE format('SELECT max(c) FROM (SELECT count(*) AS c FROM %s
+					GROUP BY (ctid::text::point)[0]) s', tbl) INTO n;
+	RETURN n;
+END $$;
+CREATE FUNCTION density_ok(tbl regclass) RETURNS bool LANGUAGE sql AS $$
+	SELECT abs(est_rows(tbl) / greatest(real_pages(tbl), 10) /
+			   real_density(tbl) - 1) <= 0.10
+$$;
+CREATE TABLE est_result (shape text, am text, ok bool);
+CREATE TABLE est_am (am text);
+INSERT INTO est_am VALUES ('heap'), ('flux');
+-- Run one statement per access method; %1$s is the AM name.  The
+-- statements are not echoed: only est_result is shown.
+\set ECHO none
+SELECT h.shape, h.ok AS heap, f.ok AS flux
+FROM est_result h JOIN est_result f USING (shape)
+WHERE h.am = 'heap' AND f.am = 'flux'
+ORDER BY h.ctid;
+               shape                | heap | flux 
+------------------------------------+------+------
+ fresh 2 rows: 10-page rule         | t    | t
+ empty after VACUUM: 0 pages        | t    | t
+ fresh default fillfactor: density  | t    | t
+ fresh 1000 columns: density        | t    | t
+ fresh narrow: density              | t    | t
+ fresh narrow: rows                 | t    | t
+ fresh wide: density                | t    | t
+ fresh wide: rows                   | t    | t
+ fresh with nulls: rows             | t    | t
+ fresh fillfactor 50: density       | t    | t
+ fresh fillfactor 50: rows          | t    | t
+ after ANALYZE: exact               | t    | t
+ grown 3x since ANALYZE: rows       | t    | t
+ 3 non-key UPDATE rounds: rows      | f    | t
+ 3 non-key UPDATE rounds: no drift  | f    | t
+ key UPDATE + DELETE + VACUUM: rows | t    | t
+(16 rows)
+
+-- ANALYZE's average column width is the stored width.  For heap a wide value
+-- is stored off page (compressed inline or an external TOAST pointer), so its
+-- recorded width is narrow.  FLUX stores a wide value in native overflow with
+-- a compact pointer held inline, but ANALYZE still sees the full reassembled
+-- value, so its recorded width is the full width -- a legitimate storage-shape
+-- difference, not a content difference (content round-trips: flux_toast_foreign).
+-- The narrow column `a` matches heap exactly.
+\set ECHO none
+SELECT attname, h.avg_width = f.avg_width AS same_width,
+	   h.avg_width < 100 AS heap_narrow
+FROM pg_stats h JOIN pg_stats f USING (attname)
+WHERE h.tablename = 'est_width_heap' AND f.tablename = 'est_width_flux'
+ORDER BY attname;
+ attname | same_width | heap_narrow 
+---------+------------+-------------
+ a       | t          | t
+ e       | f          | t
+ m       | f          | t
+(3 rows)
+
+-- Planning a never-analyzed table reads no table block: 50 plans, 0 reads.
+\set ECHO none
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot 
+------------------------
+ 
+(1 row)
+
+CREATE TEMP TABLE est_io_before AS
+	SELECT relname, heap_blks_hit + heap_blks_read AS blks
+	FROM pg_statio_user_tables WHERE relname IN ('est_io_heap', 'est_io_flux');
+DO $$
+BEGIN
+	FOR i IN 1..50 LOOP
+		EXECUTE 'EXPLAIN SELECT * FROM est_io_heap WHERE a = 1';
+		EXECUTE 'EXPLAIN SELECT * FROM est_io_flux WHERE a = 1';
+	END LOOP;
+END $$;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot 
+------------------------
+ 
+(1 row)
+
+SELECT s.relname,
+	   s.heap_blks_hit + s.heap_blks_read - b.blks AS blocks_read_by_planning
+FROM pg_statio_user_tables s JOIN est_io_before b USING (relname)
+ORDER BY s.relname;
+   relname   | blocks_read_by_planning 
+-------------+-------------------------
+ est_io_flux |                       0
+ est_io_heap |                       0
+(2 rows)
+
+-- An index scan of a range in physical order visits each table page once, as
+-- the planner's index-correlation costing assumes: 3000 rows, 0 to 30 pages.
+\set ECHO none
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot 
+------------------------
+ 
+(1 row)
+
+CREATE TEMP TABLE est_corr_before AS
+	SELECT relname, heap_blks_hit + heap_blks_read AS blks
+	FROM pg_statio_user_tables WHERE relname IN ('est_corr_heap', 'est_corr_flux');
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT sum(v) FROM est_corr_heap WHERE id BETWEEN 1001 AND 4000;
+   sum   
+---------
+ 7501500
+(1 row)
+
+SELECT sum(v) FROM est_corr_flux WHERE id BETWEEN 1001 AND 4000;
+   sum   
+---------
+ 7501500
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot 
+------------------------
+ 
+(1 row)
+
+SELECT s.relname,
+	   s.heap_blks_hit + s.heap_blks_read - b.blks BETWEEN 1 AND 30 AS pages_once
+FROM pg_statio_user_tables s JOIN est_corr_before b USING (relname)
+ORDER BY s.relname;
+    relname    | pages_once 
+---------------+------------
+ est_corr_flux | t
+ est_corr_heap | t
+(2 rows)
+
+\set ECHO none
+DROP TABLE est_result, est_am;
+DROP FUNCTION est_ok, density_ok, real_density, est_rows, est_plan, real_rows,
+	real_pages;

@@ -6,6 +6,7 @@
  * src/backend/access/transam/rmgr.c
  */
 #include "postgres.h"
+#include "storage/fileops.h"
 
 #include "access/rmgr.h"
 #include "access/xlog_internal.h"
@@ -40,6 +41,13 @@
 #include "replication/origin.h"
 #include "storage/standby.h"
 #include "utils/relmapper.h"
+#include "access/undo_xlog.h"
+#include "access/atm.h"
+#ifdef USE_FLUX
+#include "access/flux_xlog.h"
+#endif
+#include "access/perbackend/pbu_undolog_xlog.h"
+#include "access/perbackend/pbu_undoaction_xlog.h"
 /* IWYU pragma: end_keep */
 
 

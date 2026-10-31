@@ -3187,6 +3187,7 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 					 ResultRelInfo *dst_partinfo,
 					 ItemPointer tupleid,
 					 HeapTuple fdw_trigtuple,
+					 TupleTableSlot *old_image,
 					 TupleTableSlot *newslot,
 					 List *recheckIndexes,
 					 TransitionCaptureState *transition_capture,
@@ -3224,7 +3225,21 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 		tupsrc = src_partinfo ? src_partinfo : relinfo;
 		oldslot = ExecGetTriggerOldSlot(estate, tupsrc);
 
-		if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
+		/*
+		 * The caller may already hold the pre-update image.  It must when the
+		 * AM updated the row in place: by now the row's TID yields the new
+		 * version, so re-fetching it would hand the trigger NEW as OLD.
+		 */
+		if (old_image != NULL && !TupIsNull(old_image) &&
+			RelationUpdatesInPlace(tupsrc->ri_RelationDesc))
+		{
+			if (old_image != oldslot)
+				ExecCopySlot(oldslot, old_image);
+			oldslot->tts_tableOid = RelationGetRelid(tupsrc->ri_RelationDesc);
+			if (tupleid != NULL && ItemPointerIsValid(tupleid))
+				oldslot->tts_tid = *tupleid;
+		}
+		else if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
 			GetTupleForTrigger(estate,
 							   NULL,
 							   tupsrc,
@@ -3728,6 +3743,15 @@ typedef uint32 TriggerFlags;
 #define AFTER_TRIGGER_1CTID				0x10000000
 #define AFTER_TRIGGER_2CTID				0x30000000
 #define AFTER_TRIGGER_CP_UPDATE			0x08000000
+/*
+ * A row event on a table whose AM updates rows in place carries its tuple
+ * images: by the time the trigger fires, the row's TID may yield a later
+ * version.  An UPDATE carries two, an INSERT or DELETE one.  (These and the
+ * one unused TUP_BITS value include the CP_UPDATE bit; that bit is only
+ * tested on the ctid-fetch path, which these kinds never take.)
+ */
+#define AFTER_TRIGGER_IMAGES			0x18000000
+#define AFTER_TRIGGER_1IMAGE			0x28000000
 #define AFTER_TRIGGER_TUP_BITS			0x38000000
 typedef struct AfterTriggerSharedData *AfterTriggerShared;
 
@@ -3774,6 +3798,28 @@ typedef struct AfterTriggerEventDataOneCtid
 	ItemPointerData ate_ctid1;	/* inserted, deleted, or old updated tuple */
 }			AfterTriggerEventDataOneCtid;
 
+/*
+ * AFTER_TRIGGER_IMAGES: the ctids plus pointers to the OLD and NEW images.
+ * Events are packed, so the pointers are only 4-byte aligned: access them
+ * with afterTriggerGetImage/afterTriggerSetImage.  See
+ * AfterTriggersQueryData.image_cxt for who owns the images.
+ */
+typedef struct AfterTriggerEventDataImages
+{
+	TriggerFlags ate_flags;
+	ItemPointerData ate_ctid1;
+	ItemPointerData ate_ctid2;
+	char		ate_image[2 * sizeof(HeapTuple)];
+} AfterTriggerEventDataImages;
+
+/* AFTER_TRIGGER_1IMAGE: likewise, for an INSERT or DELETE */
+typedef struct AfterTriggerEventDataOneImage
+{
+	TriggerFlags ate_flags;
+	ItemPointerData ate_ctid1;
+	char		ate_image[sizeof(HeapTuple)];
+} AfterTriggerEventDataOneImage;
+
 /* AfterTriggerEventData, minus ate_*_part, ate_ctid1 and ate_ctid2 */
 typedef struct AfterTriggerEventDataZeroCtids
 {
@@ -3783,6 +3829,10 @@ typedef struct AfterTriggerEventDataZeroCtids
 #define SizeofTriggerEvent(evt) \
 	(((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_CP_UPDATE ? \
 	 sizeof(AfterTriggerEventData) : \
+	 ((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_IMAGES ? \
+	 sizeof(AfterTriggerEventDataImages) : \
+	 ((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_1IMAGE ? \
+	 sizeof(AfterTriggerEventDataOneImage) : \
 	 (((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_2CTID ? \
 	  sizeof(AfterTriggerEventDataNoOids) : \
 	  (((evt)->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_1CTID ? \
@@ -3791,6 +3841,46 @@ typedef struct AfterTriggerEventDataZeroCtids
 
 #define GetTriggerSharedData(evt) \
 	((AfterTriggerShared) ((char *) (evt) + ((evt)->ate_flags & AFTER_TRIGGER_OFFSET)))
+
+/* The image pointers of an AFTER_TRIGGER_[1]IMAGE[S] event, and their number */
+static inline char *
+afterTriggerImageArea(AfterTriggerEvent event, int *nimages)
+{
+	switch (event->ate_flags & AFTER_TRIGGER_TUP_BITS)
+	{
+		case AFTER_TRIGGER_IMAGES:
+			*nimages = 2;
+			return ((AfterTriggerEventDataImages *) event)->ate_image;
+		case AFTER_TRIGGER_1IMAGE:
+			*nimages = 1;
+			return ((AfterTriggerEventDataOneImage *) event)->ate_image;
+		default:
+			*nimages = 0;
+			return NULL;
+	}
+}
+
+static inline HeapTuple
+afterTriggerGetImage(AfterTriggerEvent event, int n)
+{
+	int			nimages;
+	char	   *area = afterTriggerImageArea(event, &nimages);
+	HeapTuple	tuple;
+
+	Assert(n < nimages);
+	memcpy(&tuple, area + n * sizeof(HeapTuple), sizeof(HeapTuple));
+	return tuple;
+}
+
+static inline void
+afterTriggerSetImage(AfterTriggerEvent event, int n, HeapTuple tuple)
+{
+	int			nimages;
+	char	   *area = afterTriggerImageArea(event, &nimages);
+
+	Assert(n < nimages);
+	memcpy(area + n * sizeof(HeapTuple), &tuple, sizeof(HeapTuple));
+}
 
 /*
  * To avoid palloc overhead, we keep trigger events in arrays in successively-
@@ -3805,6 +3895,7 @@ typedef struct AfterTriggerEventChunk
 	char	   *freeptr;		/* start of free space in chunk */
 	char	   *endfree;		/* end of free space in chunk */
 	char	   *endptr;			/* end of chunk */
+	bool		has_images;		/* holds AFTER_TRIGGER_[1]IMAGE[S] events? */
 	/* event data follows here */
 } AfterTriggerEventChunk;
 
@@ -3934,9 +4025,31 @@ typedef struct AfterTriggersData
 	int			maxtransdepth;	/* allocated len of above array */
 } AfterTriggersData;
 
+/*
+ * Row events of a table whose AM updates rows in place carry pointers to
+ * copies of their tuple images (heap re-fetches its versions by TID instead;
+ * an in-place AM's TID names only the newest version).  The images are
+ * heap-format copies made by the AM's slot (ExecCopySlotHeapTuple), not
+ * minimal tuples: a heap tuple header can carry the identity of the row
+ * version the image was taken of (xmin, cmin, ctid), as a heap tuple's own
+ * header does.  Heap's events are judged by that identity, through the
+ * version the TID still names; an in-place AM must find the identity in the
+ * image (see am_inplace_update_keeps_tid).
+ *
+ * The images live as long as their events.  Those queued by a query are
+ * allocated in its level's image_cxt, shared by all the events of a row, and
+ * freed with the level's events in AfterTriggerFreeQuery.  An event deferred
+ * to afterTriggers.events gets its own copies in event_cxt
+ * (afterTriggerMarkEvents), which it owns: they are freed when the event is
+ * discarded with an aborted subtransaction (afterTriggerRestoreEventList) or
+ * deleted after firing (afterTriggerInvokeEvents), and at the latest with
+ * event_cxt at transaction end.  So, as for heap, only deferred events hold
+ * memory beyond their statement.
+ */
 struct AfterTriggersQueryData
 {
 	AfterTriggerEventList events;	/* events pending from this query */
+	MemoryContext image_cxt;	/* tuple images for said events, if any */
 	Tuplestorestate *fdw_tuplestore;	/* foreign tuples for said events */
 	List	   *tables;			/* list of AfterTriggersTableData, see below */
 };
@@ -4111,10 +4224,10 @@ afterTriggerCopyBitmap(Bitmapset *src)
  * afterTriggerAddEvent()
  *
  *	Add a new trigger event to the specified queue.
- *	The passed-in event data is copied.
+ *	The passed-in event data is copied; the copy is returned.
  * ----------
  */
-static void
+static AfterTriggerEvent
 afterTriggerAddEvent(AfterTriggerEventList *events,
 					 AfterTriggerEvent event, AfterTriggerShared evtshared)
 {
@@ -4181,6 +4294,7 @@ afterTriggerAddEvent(AfterTriggerEventList *events,
 		chunk->next = NULL;
 		chunk->freeptr = CHUNK_DATA_START(chunk);
 		chunk->endptr = chunk->endfree = (char *) chunk + chunksize;
+		chunk->has_images = false;
 		Assert(chunk->endfree - chunk->freeptr >= needed);
 
 		if (events->tail == NULL)
@@ -4231,8 +4345,40 @@ afterTriggerAddEvent(AfterTriggerEventList *events,
 	newevent->ate_flags &= ~AFTER_TRIGGER_OFFSET;
 	newevent->ate_flags |= (char *) newshared - (char *) newevent;
 
+	if ((event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_IMAGES ||
+		(event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_1IMAGE)
+		chunk->has_images = true;
+
 	chunk->freeptr += eventsize;
 	events->tailfree = chunk->freeptr;
+
+	return newevent;
+}
+
+/* ----------
+ * afterTriggerFreeImages()
+ *
+ *	Free the images owned by the events of "chunk" from "from" (or from its
+ *	first event, if NULL) on.  Only the events of afterTriggers.events own
+ *	their images; see AfterTriggersQueryData.
+ * ----------
+ */
+static void
+afterTriggerFreeImages(AfterTriggerEventChunk *chunk, char *from)
+{
+	AfterTriggerEvent event;
+
+	if (!chunk->has_images)
+		return;
+	event = (AfterTriggerEvent) (from ? from : CHUNK_DATA_START(chunk));
+	for_each_event_from(event, chunk)
+	{
+		int			nimages;
+
+		afterTriggerImageArea(event, &nimages);
+		for (int i = 0; i < nimages; i++)
+			heap_freetuple(afterTriggerGetImage(event, i));
+	}
 }
 
 /* ----------
@@ -4268,6 +4414,21 @@ afterTriggerRestoreEventList(AfterTriggerEventList *events,
 {
 	AfterTriggerEventChunk *chunk;
 	AfterTriggerEventChunk *next_chunk;
+
+	/*
+	 * Free the images of the events being removed.  Only the deferred-event
+	 * list is restored, and its events own their images.
+	 */
+	Assert(events == &afterTriggers.events);
+	if (old_events->tail == NULL)
+		chunk = events->head;
+	else
+	{
+		afterTriggerFreeImages(old_events->tail, old_events->tailfree);
+		chunk = old_events->tail->next;
+	}
+	for (; chunk != NULL; chunk = chunk->next)
+		afterTriggerFreeImages(chunk, NULL);
 
 	if (old_events->tail == NULL)
 	{
@@ -4435,6 +4596,51 @@ AfterTriggerExecute(EState *estate,
 			}
 			pg_fallthrough;
 		case AFTER_TRIGGER_FDW_REUSE:
+		case AFTER_TRIGGER_IMAGES:
+		case AFTER_TRIGGER_1IMAGE:
+			if ((event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_IMAGES ||
+				(event->ate_flags & AFTER_TRIGGER_TUP_BITS) == AFTER_TRIGGER_1IMAGE)
+			{
+				ExecStoreHeapTuple(afterTriggerGetImage(event, 0),
+								   trig_tuple_slot1, false);
+				trig_tuple_slot1->tts_tid = event->ate_ctid1;
+				if ((evtshared->ats_event & TRIGGER_EVENT_OPMASK) ==
+					TRIGGER_EVENT_UPDATE)
+				{
+					ExecStoreHeapTuple(afterTriggerGetImage(event, 1),
+									   trig_tuple_slot2, false);
+					trig_tuple_slot2->tts_tid = event->ate_ctid2;
+				}
+
+				/*
+				 * Fire the trigger with slots of the AM's own type, as the
+				 * ctid path does.  The AM's copyslot callback loads them from
+				 * the images, which its copy_heap_tuple made, so what the AM
+				 * records of each row version survives the trip.
+				 */
+				LocTriggerData.tg_trigslot = ExecGetTriggerOldSlot(estate, relInfo);
+				ExecCopySlot(LocTriggerData.tg_trigslot, trig_tuple_slot1);
+				LocTriggerData.tg_trigslot->tts_tid = trig_tuple_slot1->tts_tid;
+				LocTriggerData.tg_trigslot->tts_tableOid = RelationGetRelid(rel);
+				ExecClearTuple(trig_tuple_slot1);
+				LocTriggerData.tg_trigtuple =
+					ExecFetchSlotHeapTuple(LocTriggerData.tg_trigslot, false,
+										   &should_free_trig);
+				LocTriggerData.tg_newtuple = NULL;
+				if ((evtshared->ats_event & TRIGGER_EVENT_OPMASK) ==
+					TRIGGER_EVENT_UPDATE)
+				{
+					LocTriggerData.tg_newslot = ExecGetTriggerNewSlot(estate, relInfo);
+					ExecCopySlot(LocTriggerData.tg_newslot, trig_tuple_slot2);
+					LocTriggerData.tg_newslot->tts_tid = trig_tuple_slot2->tts_tid;
+					LocTriggerData.tg_newslot->tts_tableOid = RelationGetRelid(rel);
+					ExecClearTuple(trig_tuple_slot2);
+					LocTriggerData.tg_newtuple =
+						ExecFetchSlotHeapTuple(LocTriggerData.tg_newslot, false,
+											   &should_free_new);
+				}
+				break;
+			}
 
 			/*
 			 * Store tuple in the slot so that tg_trigtuple does not reference
@@ -4619,7 +4825,8 @@ AfterTriggerExecute(EState *estate,
 		heap_freetuple(LocTriggerData.tg_newtuple);
 
 	/* don't clear slots' contents if foreign table */
-	if (trig_tuple_slot1 == NULL)
+	if (trig_tuple_slot1 == NULL ||
+		LocTriggerData.tg_trigslot != trig_tuple_slot1)
 	{
 		if (LocTriggerData.tg_trigslot)
 			ExecClearTuple(LocTriggerData.tg_trigslot);
@@ -4692,11 +4899,33 @@ afterTriggerMarkEvents(AfterTriggerEventList *events,
 		 */
 		if (defer_it && move_list != NULL)
 		{
+			AfterTriggerEvent moved;
+			int			nimages;
+
 			deferred_found = true;
 			/* add it to move_list */
-			afterTriggerAddEvent(move_list, event, evtshared);
+			moved = afterTriggerAddEvent(move_list, event, evtshared);
 			/* mark original copy "done" so we don't do it again */
 			event->ate_flags |= AFTER_TRIGGER_DONE;
+
+			/*
+			 * The images of the original copy go away with its query level;
+			 * the moved copy gets its own (see AfterTriggersQueryData).
+			 *
+			 * ponytail: one copy per deferred event, so several deferred
+			 * triggers on a row each copy its images; share them (refcount)
+			 * if that ever matters.
+			 */
+			afterTriggerImageArea(moved, &nimages);
+			if (nimages > 0)
+			{
+				MemoryContext oldcxt = MemoryContextSwitchTo(afterTriggers.event_cxt);
+
+				for (int i = 0; i < nimages; i++)
+					afterTriggerSetImage(moved, i,
+										 heap_copytuple(afterTriggerGetImage(moved, i)));
+				MemoryContextSwitchTo(oldcxt);
+			}
 		}
 	}
 
@@ -4811,6 +5040,14 @@ afterTriggerInvokeEvents(AfterTriggerEventList *events,
 						slot2 = MakeSingleTupleTableSlot(rel->rd_att,
 														 &TTSOpsMinimalTuple);
 					}
+					else if (RelationUpdatesInPlace(rel))
+					{
+						/* AFTER_TRIGGER_[1]IMAGE[S]: to hold the images */
+						slot1 = MakeSingleTupleTableSlot(rel->rd_att,
+														 &TTSOpsHeapTuple);
+						slot2 = MakeSingleTupleTableSlot(rel->rd_att,
+														 &TTSOpsHeapTuple);
+					}
 				}
 
 				/*
@@ -4858,6 +5095,10 @@ afterTriggerInvokeEvents(AfterTriggerEventList *events,
 		/* Clear the chunk if delete_ok and nothing left of interest */
 		if (delete_ok && all_fired_in_chunk)
 		{
+			/* delete_ok is only passed for the deferred list; see above */
+			Assert(!chunk->has_images || events == &afterTriggers.events);
+			afterTriggerFreeImages(chunk, NULL);
+			chunk->has_images = false;
 			chunk->freeptr = CHUNK_DATA_START(chunk);
 			chunk->endfree = chunk->endptr;
 
@@ -5270,8 +5511,15 @@ AfterTriggerFreeQuery(AfterTriggersQueryData *qs)
 	List	   *tables;
 	ListCell   *lc;
 
-	/* Drop the trigger events */
+	/* Drop the trigger events, and their images */
 	afterTriggerFreeEventList(&qs->events);
+	if (qs->image_cxt)
+	{
+		MemoryContext cxt = qs->image_cxt;
+
+		qs->image_cxt = NULL;
+		MemoryContextDelete(cxt);
+	}
 
 	/* Drop FDW tuplestore if any */
 	ts = qs->fdw_tuplestore;
@@ -5716,6 +5964,7 @@ AfterTriggerEnlargeQueryState(void)
 		qs->events.head = NULL;
 		qs->events.tail = NULL;
 		qs->events.tailfree = NULL;
+		qs->image_cxt = NULL;
 		qs->fdw_tuplestore = NULL;
 		qs->tables = NIL;
 
@@ -6222,6 +6471,9 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 	int			tgtype_level;
 	int			i;
 	Tuplestorestate *fdw_tuplestore = NULL;
+	bool		spool_images;
+	AfterTriggerEventDataImages img_event;
+	HeapTuple	images[2] = {NULL, NULL};
 
 	/*
 	 * Check state.  We use a normal test not Assert because it is possible to
@@ -6400,8 +6652,30 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 			break;
 	}
 
+	/*
+	 * A row event normally records TIDs and re-fetches the images when the
+	 * trigger fires.  An AM that updates rows in place cannot reproduce them
+	 * by then -- the TID yields the current version -- so capture them now,
+	 * as heap-format copies that identify the version they were taken of (see
+	 * AfterTriggersQueryData).  They are made below, once a trigger wants the
+	 * row, and shared by all of the row's events.
+	 */
+	spool_images = (row_trigger && RelationUpdatesInPlace(rel));
+
 	/* Determine flags */
-	if (!(relkind == RELKIND_FOREIGN_TABLE && row_trigger))
+	if (spool_images)
+	{
+		/* img_event is laid out per its flags; see afterTriggerImageArea */
+		img_event.ate_ctid1 = new_event.ate_ctid1;
+		if (oldslot && newslot)
+		{
+			new_event.ate_flags = AFTER_TRIGGER_IMAGES;
+			img_event.ate_ctid2 = new_event.ate_ctid2;
+		}
+		else
+			new_event.ate_flags = AFTER_TRIGGER_1IMAGE;
+	}
+	else if (!(relkind == RELKIND_FOREIGN_TABLE && row_trigger))
 	{
 		if (row_trigger && event == TRIGGER_EVENT_UPDATE)
 		{
@@ -6596,8 +6870,36 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 			new_shared.ats_table = NULL;
 		new_shared.ats_modifiedcols = modifiedCols;
 
-		afterTriggerAddEvent(&afterTriggers.query_stack[afterTriggers.query_depth].events,
-							 &new_event, &new_shared);
+		if (spool_images)
+		{
+			AfterTriggersQueryData *qs =
+				&afterTriggers.query_stack[afterTriggers.query_depth];
+
+			if (images[0] == NULL)
+			{
+				MemoryContext oldcxt;
+
+				if (qs->image_cxt == NULL)
+					qs->image_cxt =
+						AllocSetContextCreate(TopTransactionContext,
+											  "AfterTriggerImages",
+											  ALLOCSET_DEFAULT_SIZES);
+				oldcxt = MemoryContextSwitchTo(qs->image_cxt);
+				images[0] = ExecCopySlotHeapTuple(oldslot ? oldslot : newslot);
+				if (oldslot && newslot)
+					images[1] = ExecCopySlotHeapTuple(newslot);
+				MemoryContextSwitchTo(oldcxt);
+			}
+			img_event.ate_flags = new_event.ate_flags;
+			afterTriggerSetImage((AfterTriggerEvent) &img_event, 0, images[0]);
+			if (images[1] != NULL)
+				afterTriggerSetImage((AfterTriggerEvent) &img_event, 1, images[1]);
+			afterTriggerAddEvent(&qs->events,
+								 (AfterTriggerEvent) &img_event, &new_shared);
+		}
+		else
+			afterTriggerAddEvent(&afterTriggers.query_stack[afterTriggers.query_depth].events,
+								 &new_event, &new_shared);
 	}
 
 	/*

@@ -17,9 +17,13 @@
 #include "access/hash_xlog.h"
 #include "access/heapam_xlog.h"
 #include "access/multixact.h"
+#include "access/flux_xlog.h"
+#include "access/fileops_xlog.h"
 #include "access/nbtxlog.h"
 #include "access/rmgr.h"
 #include "access/spgxlog.h"
+#include "access/atm_xlog.h"
+#include "access/undo_xlog.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "catalog/storage_xlog.h"
@@ -29,6 +33,12 @@
 #include "replication/message.h"
 #include "replication/origin.h"
 #include "rmgrdesc.h"
+
+/* per-backend UNDO rmgr desc routines (see access/perbackend/pbu_*_xlog.h) */
+extern void undolog_desc(StringInfo buf, XLogReaderState *record);
+extern const char *undolog_identify(uint8 info);
+extern void undoaction_desc(StringInfo buf, XLogReaderState *record);
+extern const char *undoaction_identify(uint8 info);
 #include "storage/standbydefs.h"
 #include "utils/relmapper.h"
 

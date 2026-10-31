@@ -4786,6 +4786,9 @@ PostgresMain(const char *dbname, const char *username)
 				if (notifyInterruptPending)
 					ProcessNotifyInterrupt(false);
 
+				/* Finish rollbacks that had to wait for the transaction end. */
+				PbuApplyPendingUndo();
+
 				/*
 				 * Check if we need to report stats. If pgstat_report_stat()
 				 * decides it's too soon to flush out pending stats / lock

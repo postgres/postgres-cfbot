@@ -1,0 +1,129 @@
+Parsed test spec with 2 sessions
+
+starting permutation: pick_fx skip rp s2_changes s2_wake decode
+?column?
+--------
+init    
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: ALTER TABLE fx RENAME TO t;
+step skip: 
+  SELECT count(*) > 0 AS skipped FROM pg_logical_slot_get_changes('s', NULL, NULL);
+
+skipped
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step s2_changes: 
+  UPDATE t SET t = 'short' WHERE i = 1;
+  UPDATE t SET k = 20 WHERE i = 2;
+  UPDATE t SET t = repeat(md5('new'), 100) WHERE i = 3;
+  INSERT INTO t VALUES (4, 4, 'four');
+  DELETE FROM t WHERE i = 4;
+
+step s2_wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step decode: 
+  SELECT regexp_replace(data, '''[0-9a-f]+''', '''<md5s>''', 'g') AS data
+	FROM pg_logical_slot_get_changes('s', NULL, NULL, 'include-rewrites', '1',
+	  'skip-empty-xacts', '1', 'include-xids', '0');
+
+data                                                                            
+--------------------------------------------------------------------------------
+BEGIN                                                                           
+table public.t: UPDATE: i[integer]:1 k[integer]:1 t[text]:'short'               
+table public.t: UPDATE: i[integer]:2 k[integer]:20 t[text]:unchanged-toast-datum
+table public.t: UPDATE: i[integer]:3 k[integer]:3 t[text]:'<md5s>'              
+table public.t: INSERT: i[integer]:4 k[integer]:4 t[text]:'four'                
+table public.t: DELETE: i[integer]:4                                            
+COMMIT                                                                          
+(7 rows)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+pg_drop_replication_slot
+------------------------
+                        
+(1 row)
+
+
+starting permutation: pick_hp skip rp s2_changes s2_wake decode
+?column?
+--------
+init    
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: ALTER TABLE hp RENAME TO t;
+step skip: 
+  SELECT count(*) > 0 AS skipped FROM pg_logical_slot_get_changes('s', NULL, NULL);
+
+skipped
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step s2_changes: 
+  UPDATE t SET t = 'short' WHERE i = 1;
+  UPDATE t SET k = 20 WHERE i = 2;
+  UPDATE t SET t = repeat(md5('new'), 100) WHERE i = 3;
+  INSERT INTO t VALUES (4, 4, 'four');
+  DELETE FROM t WHERE i = 4;
+
+step s2_wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step decode: 
+  SELECT regexp_replace(data, '''[0-9a-f]+''', '''<md5s>''', 'g') AS data
+	FROM pg_logical_slot_get_changes('s', NULL, NULL, 'include-rewrites', '1',
+	  'skip-empty-xacts', '1', 'include-xids', '0');
+
+data                                                                            
+--------------------------------------------------------------------------------
+BEGIN                                                                           
+table public.t: UPDATE: i[integer]:1 k[integer]:1 t[text]:'short'               
+table public.t: UPDATE: i[integer]:2 k[integer]:20 t[text]:unchanged-toast-datum
+table public.t: UPDATE: i[integer]:3 k[integer]:3 t[text]:'<md5s>'              
+table public.t: INSERT: i[integer]:4 k[integer]:4 t[text]:'four'                
+table public.t: DELETE: i[integer]:4                                            
+COMMIT                                                                          
+(7 rows)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+pg_drop_replication_slot
+------------------------
+                        
+(1 row)
+

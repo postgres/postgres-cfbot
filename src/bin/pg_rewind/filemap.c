@@ -590,6 +590,8 @@ getFileContentType(const char *path)
 	 * relation files. Other forks are always copied in toto, because we
 	 * cannot reliably track changes to them, because WAL only contains block
 	 * references for the main fork.
+	 * Undo segment files are also copied in full: their hexadecimal names
+	 * below base/undo or a tablespace undo directory do not match here.
 	 *
 	 * Relation data files can be in one of the following directories:
 	 *

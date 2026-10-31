@@ -1585,6 +1585,28 @@ else
 endif
 
 
+###############################################################
+# Library: FLUX
+###############################################################
+
+# FLUX table access method (UNDO-based heap replacement) is always built:
+# guc_parameters.dat and pg_proc.dat reference flux symbols unconditionally,
+# so a build with USE_FLUX unset fails to link.  USE_FLUX is therefore always
+# defined and the sources are always compiled.
+flux = declare_dependency()
+cdata.set('USE_FLUX', 1)
+
+
+###############################################################
+# Library: FILEOPS
+###############################################################
+
+# FILEOPS transactional filesystem operations (WAL rmgr RM_FILEOPS_ID) is
+# always built.  Mirrors USE_FILEOPS in src/Makefile.global.in: without it the
+# rmgrlist.h entry is compiled out and every RM_FILEOPS_ID reference fails to
+# build.
+cdata.set('USE_FILEOPS', 1)
+
 
 ###############################################################
 # Library: selinux

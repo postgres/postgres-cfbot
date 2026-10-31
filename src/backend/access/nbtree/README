@@ -1041,6 +1041,113 @@ that need a page split anyway.  Besides, supporting variable "split points"
 while splitting posting lists won't actually improve overall space
 utilization.
 
+Delete-marking
+--------------
+
+A table AM that updates rows in place keeps a row's TID across an
+UPDATE, including one that changes an indexed column.  The index then
+needs two entries for one TID: (k_new, TID) for snapshots that see the
+new version, and (k_old, TID) for snapshots that still see the old one.
+The old entry cannot simply be deleted, and it cannot stay a plain
+entry either, because a scan has no way to tell it from a live one.
+nbtree supports this by delete-marking: the old entry is rewritten in
+place as a "tombstone" that stays in the index until no snapshot can
+need it.  Only AMs that set am_index_delete_marking (and
+am_supports_undo) use it; RelationSupportsDeleteMarking() tests the
+table, and every rule below applies only to indexes on such tables.
+Heap tables never produce a delete-marked entry.
+
+A delete-marked entry is a third kind of tuple with INDEX_ALT_TID_MASK
+set, beside pivot tuples and posting list tuples.  Its t_tid offset
+number has BT_IS_DELETE_MARKED (0x4000) set and BT_IS_POSTING clear,
+and its block number is zero; the heap TID moves to a trailer in the
+last sizeof(ItemPointerData) bytes of the tuple, where a pivot tuple
+keeps its heap TID.  BTreeTupleIsPivot() and BTreeTupleIsPosting() both
+return false for it, and BTreeTupleGetHeapTID() and
+BTreeTupleGetMaxHeapTID() return the trailer.  The tombstone sorts
+exactly where the plain entry did, since its key and heap TID are
+unchanged.  It is bigger than the plain entry (the size is
+BTreeTupleGetDeleteMarkedSize()), so plain leaf entries of such an
+index are limited to BTMaxItemSizeDeleteMarking, which leaves room for
+the trailer within BTMaxItemSize.  When a pivot tuple is formed from a
+tombstone, _bt_truncate() first rebuilds it as a plain tuple, so pivots
+never carry the delete-mark bit.
+
+The index AM interface is amdeletemark (btdeletemark) and amundomark
+(btundomark), reached through index_delete_mark(), index_undo_mark()
+and index_probe_delete_mark().  btdeletemark descends to the leaf by
+(k_old, TID), using the heap TID as scantid, with a write lock on the
+leaf page, and rewrites the matching plain entry as a tombstone.  An
+entry that is already delete-marked, missing, or LP_DEAD is left alone
+(an LP_DEAD entry is dead to every snapshot, so nobody needs a
+tombstone for it).  If the bigger tuple does not fit on the page,
+_bt_replace_split() splits the page with the tombstone taking the place
+of the plain entry; the leaf stays locked from the search to the split,
+so this is one atomic action and a scan always finds one of the two
+tuples.  btundomark reverses an in-place key UPDATE: with clear_mark it
+turns the old key's tombstone back into a plain entry (if a plain entry
+for that key and TID already exists, it only clears an LP_DEAD hint on
+it), and without clear_mark it physically deletes the new key's entry
+that the aborted UPDATE inserted.  With probe it only reports whether
+the entry is a tombstone, and if it is calls
+CheckForSerializableConflictIn() for the leaf page as an insertion
+would, because the caller is about to revive the tombstone instead of
+inserting a new entry.  Locking is that of an insertion: a write lock
+on the one leaf page, plus what a page split takes.
+
+Delete-marked entries are never merged into posting lists.
+Deduplication is disabled for an index on a delete-marking table, both
+in _bt_delete_or_dedup_one_page() and in _bt_load(), and an insertion
+into such an index never splits a posting list (insertstate's
+nopostingsplit).  Revival and removal by btundomark rely on every entry
+being a single (key, TID) tuple.
+
+Scans return a tombstone's heap TID with recheck set, both in
+btgettuple and in btgetbitmap, because its key may not be the key of
+the version the scan's snapshot sees.  The table AM rechecks the key
+against the version it fetches; for that, it asks for the index tuple
+with xs_want_itup_recheck, which keeps xs_itup filled during an
+ordinary index scan (and keeps the scan from dropping its leaf pin).
+Index-only scans would return a stale key without visiting the table,
+so the planner disables them for indexes on a delete-marking table
+(get_relation_info() clears canreturn).  btcanreturn cannot make that
+decision itself: it is called while relcache entries are being built,
+before the table AM can be asked.
+
+A uniqueness check that meets a tombstone with an equal key asks the
+table AM about it through table_index_fetch_tid(), passing the heap TID
+from the trailer.  The key is still taken while the UPDATE that moved
+the row off it is running, or after that UPDATE aborted and before its
+rollback has been applied, and free once it committed; only the table
+AM knows which.  If the AM has no index_fetch_tid callback, the
+tombstone is skipped.
+
+A tombstone is never marked LP_DEAD (_bt_killitems skips it) and is
+never removed by simple or bottom-up deletion: its TID is live, since
+the row lives on under its new key, so the usual "TID is dead" test
+says nothing about it.  VACUUM removes a tombstone when the table AM's
+bulk-delete callback reports its heap TID dead, like any entry, or when
+table_index_tombstone_removable() says no snapshot can need the row
+through the tombstone's key any more.  The second kind of removal has
+no table-side WAL record carrying a recovery conflict, so btvacuumpage
+logs it with _bt_delitems_delete(), with a snapshotConflictHorizon the
+table AM supplies.
+
+Delete-marking and its reversal are WAL-logged as
+XLOG_BTREE_DELETE_MARK.  The record names the leaf item; for a mark or
+an unmark it carries the new tuple image, which redo writes over the
+item, and with deleted set it carries no image and redo deletes the
+item.  Redo also clears an LP_DEAD hint on the item, as the primary
+does when it makes an entry live again.  A delete-mark that needs a
+page split is logged as an ordinary XLOG_BTREE_SPLIT_L/R record with
+xl_btree_split.replace set: redo removes the replaced item from the
+original page before it rebuilds the left page.
+
+UNDO: an index on a delete-marking table writes no index UNDO of its
+own (RelationUsesIndexUndo() is false for it).  The table AM's own UNDO
+for the in-place UPDATE calls amundomark to put the index back the way
+it was on rollback.
+
 Notes About Data Representation
 -------------------------------
 

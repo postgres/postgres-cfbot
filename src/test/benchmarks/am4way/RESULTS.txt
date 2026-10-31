@@ -1,0 +1,12 @@
+=== 4-way AM benchmark Sat Aug 29 05:46:14 UTC 2026 ===
+host: 16 vCPU, 30G RAM; PG -O2 cassert, fsync=off
+
+----- AM=heap -----
+  max sustained bulk insert: 20000 rows
+  insert200k=0.38s  index=0.06s  update100k=0.80s  idxupd4k=0.06s  sel=19600  wal_per_100k_update=32476296B
+
+----- AM=flux -----
+  max sustained bulk insert: 20000 rows
+  insert200k=2.08s  index=0.07s  update100k=1.05s  idxupd4k=0.14s  sel=19600  wal_per_100k_update=862631528B
+
+BENCH4_DONE

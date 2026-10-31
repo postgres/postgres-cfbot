@@ -2,6 +2,7 @@
 
 backend_sources += files(
   'hash.c',
+  'hash_undo.c',
   'hash_xlog.c',
   'hashfunc.c',
   'hashinsert.c',

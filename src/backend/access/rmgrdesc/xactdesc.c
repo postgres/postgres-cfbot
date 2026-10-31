@@ -230,6 +230,12 @@ ParseAbortRecord(uint8 info, xl_xact_abort *xlrec, xl_xact_parsed_abort *parsed)
 
 		data += sizeof(xl_xact_origin);
 	}
+	if (parsed->xinfo & XACT_XINFO_HAS_FILEOPS)
+	{
+		memcpy(&parsed->fileops_len, data, sizeof(uint32));
+		parsed->fileops = data + sizeof(uint32);
+	}
+
 }
 
 /*
@@ -391,6 +397,8 @@ xact_desc_abort(StringInfo buf, uint8 info, xl_xact_abort *xlrec, ReplOriginId o
 	}
 
 	xact_desc_stats(buf, "", parsed.nstats, parsed.stats);
+	if (parsed.fileops_len)
+		appendStringInfo(buf, "; fileops undo: %u bytes", parsed.fileops_len);
 }
 
 static void

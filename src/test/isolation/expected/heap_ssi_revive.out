@@ -1,0 +1,145 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1b s1r s3a s3b s2b s2r s2w s1w s1c s2c s3chk
+step s1b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s1r: SELECT count(*) FROM t WHERE k = 1;
+count
+-----
+    0
+(1 row)
+
+step s3a: UPDATE t SET k = 1 WHERE id = 1;
+step s3b: UPDATE t SET k = 2 WHERE id = 1;
+step s2b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s2r: SELECT v FROM u WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s2w: UPDATE t SET k = 1 WHERE id = 1;
+step s1w: UPDATE u SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step s3chk: SELECT id, k FROM t ORDER BY id; SELECT * FROM u;
+id|k
+--+-
+ 1|2
+ 2|5
+ 3|7
+(3 rows)
+
+id|v
+--+-
+ 1|1
+(1 row)
+
+
+starting permutation: s1b s1r s3a s3b s2b s2r s2w s2c s1w s1c s3chk
+step s1b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s1r: SELECT count(*) FROM t WHERE k = 1;
+count
+-----
+    0
+(1 row)
+
+step s3a: UPDATE t SET k = 1 WHERE id = 1;
+step s3b: UPDATE t SET k = 2 WHERE id = 1;
+step s2b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s2r: SELECT v FROM u WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s2w: UPDATE t SET k = 1 WHERE id = 1;
+step s2c: COMMIT;
+step s1w: UPDATE u SET v = v + 1 WHERE id = 1;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step s1c: COMMIT;
+step s3chk: SELECT id, k FROM t ORDER BY id; SELECT * FROM u;
+id|k
+--+-
+ 1|1
+ 2|5
+ 3|7
+(3 rows)
+
+id|v
+--+-
+ 1|0
+(1 row)
+
+
+starting permutation: s3a s3b s1b s1r s2b s2r s2w s1w s1c s2c s3chk
+step s3a: UPDATE t SET k = 1 WHERE id = 1;
+step s3b: UPDATE t SET k = 2 WHERE id = 1;
+step s1b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s1r: SELECT count(*) FROM t WHERE k = 1;
+count
+-----
+    0
+(1 row)
+
+step s2b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s2r: SELECT v FROM u WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s2w: UPDATE t SET k = 1 WHERE id = 1;
+step s1w: UPDATE u SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step s3chk: SELECT id, k FROM t ORDER BY id; SELECT * FROM u;
+id|k
+--+-
+ 1|2
+ 2|5
+ 3|7
+(3 rows)
+
+id|v
+--+-
+ 1|1
+(1 row)
+
+
+starting permutation: s3a s3b s1b s1r5 s2b s2r s2w s1w s1c s2c s3chk
+step s3a: UPDATE t SET k = 1 WHERE id = 1;
+step s3b: UPDATE t SET k = 2 WHERE id = 1;
+step s1b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s1r5: SELECT count(*) FROM t WHERE k = 5;
+count
+-----
+    1
+(1 row)
+
+step s2b: BEGIN ISOLATION LEVEL SERIALIZABLE; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+step s2r: SELECT v FROM u WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s2w: UPDATE t SET k = 1 WHERE id = 1;
+step s1w: UPDATE u SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step s3chk: SELECT id, k FROM t ORDER BY id; SELECT * FROM u;
+id|k
+--+-
+ 1|2
+ 2|5
+ 3|7
+(3 rows)
+
+id|v
+--+-
+ 1|1
+(1 row)
+

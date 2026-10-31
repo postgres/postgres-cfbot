@@ -1,0 +1,62 @@
+Parsed test spec with 3 sessions
+
+starting permutation: c_locks s1_insert s2_insert c_unlock_1_1 c_unlock_2_1 c_unlock_1_3 c_unlock_2_3 c_unlock_1_2 c_unlock_2_2 c_show
+step c_locks: SELECT pg_advisory_lock(sess, lock), sess, lock FROM generate_series(1, 2) a(sess), generate_series(1, 3) b(lock);
+pg_advisory_lock|sess|lock
+----------------+----+----
+                |   1|   1
+                |   1|   2
+                |   1|   3
+                |   2|   1
+                |   2|   2
+                |   2|   3
+(6 rows)
+
+step s1_insert: INSERT INTO flux_sct VALUES ('k', flux_sct_val()) ON CONFLICT DO NOTHING; <waiting ...>
+step s2_insert: INSERT INTO flux_sct VALUES ('k', flux_sct_val()) ON CONFLICT DO NOTHING; <waiting ...>
+step c_unlock_1_1: SELECT pg_advisory_unlock(1, 1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step c_unlock_2_1: SELECT pg_advisory_unlock(2, 1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step c_unlock_1_3: SELECT pg_advisory_unlock(1, 3);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step c_unlock_2_3: SELECT pg_advisory_unlock(2, 3);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step c_unlock_1_2: SELECT pg_advisory_unlock(1, 2);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_insert: <... completed>
+step c_unlock_2_2: SELECT pg_advisory_unlock(2, 2);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s2_insert: <... completed>
+step c_show: SELECT count(*) AS nrows,
+                     bool_and(md5(data) = md5(flux_sct_val())) AS ok
+              FROM flux_sct;
+nrows|ok
+-----+--
+    1|t 
+(1 row)
+

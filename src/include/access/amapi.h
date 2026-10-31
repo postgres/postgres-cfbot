@@ -203,6 +203,43 @@ typedef bool (*amgettuple_function) (IndexScanDesc scan,
 typedef int64 (*amgetbitmap_function) (IndexScanDesc scan,
 									   TIDBitmap *tbm);
 
+/*
+ * delete-mark an existing (key, TID) entry in place
+ *
+ * Optional: NULL if the AM does not support delete-marking.  Called by the
+ * table AM during an in-place UPDATE of an indexed column to mark the old
+ * (key, TID) entry as a tombstone instead of deleting it.  Returns true if a
+ * live entry was found and marked, false otherwise.
+ */
+typedef bool (*amdeletemark_function) (Relation indexRelation,
+									   Relation heapRelation,
+									   Datum *values,
+									   bool *isnull,
+									   ItemPointer heap_t_ctid);
+
+/*
+ * undo an in-place indexed-column UPDATE's index change
+ *
+ * Optional: NULL if the AM does not support delete-marking.  Called by a
+ * delete-marking table AM's UNDO during ROLLBACK of an in-place key UPDATE, to
+ * restore the index to its pre-update state:
+ *   clear_mark == true : the (key, TID) entry is a delete-marked tombstone of
+ *                        the OLD key; demote it back to a plain live entry.
+ *   clear_mark == false: the (key, TID) entry is the NEW key's live entry that
+ *                        the aborted update inserted; physically remove it.
+ * With probe=true, only test whether the exact entry is delete-marked; the
+ * caller is about to revive it in a forward UPDATE, so the AM must report the
+ * serializable rw-conflict an insert of the entry would (it may ERROR).
+ * Returns true if the entry was found and reversed, false otherwise (already
+ * gone -- not an error).
+ */
+typedef bool (*amundomark_function) (Relation indexRelation,
+									 Relation heapRelation,
+									 Datum *values,
+									 bool *isnull,
+									 ItemPointer heap_t_ctid,
+									 bool clear_mark, bool probe);
+
 /* end index scan */
 typedef void (*amendscan_function) (IndexScanDesc scan);
 
@@ -311,6 +348,8 @@ typedef struct IndexAmRoutine
 	amrescan_function amrescan;
 	amgettuple_function amgettuple; /* can be NULL */
 	amgetbitmap_function amgetbitmap;	/* can be NULL */
+	amdeletemark_function amdeletemark; /* can be NULL */
+	amundomark_function amundomark; /* can be NULL */
 	amendscan_function amendscan;
 	ammarkpos_function ammarkpos;	/* can be NULL */
 	amrestrpos_function amrestrpos; /* can be NULL */

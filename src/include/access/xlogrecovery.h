@@ -209,6 +209,9 @@ typedef struct
 	 */
 	bool		standby_signal_file_found;
 	bool		recovery_signal_file_found;
+
+	/* Startup successfully applied at least one FILEOPS loser inverse. */
+	bool		fileopsUndoApplied;
 } EndOfWalRecoveryInfo;
 
 extern EndOfWalRecoveryInfo *FinishWalRecovery(void);
