@@ -76,12 +76,30 @@
 #define SELFLAG_USED_DEFAULT		(1 << 0)	/* Estimation fell back on one
 												 * of the DEFAULTs as defined
 												 * above. */
+#define SELFLAG_USED_MULTIVAR_CLAMP		(1 << 1)	/* Multi-column ndistinct
+												 * estimate was capped by the
+												 * correlation clamp. */
 
 typedef struct EstimationInfo
 {
 	uint32		flags;			/* Flags, as defined above to mark special
 								 * properties of the estimation. */
 } EstimationInfo;
+
+/*
+ * True if an estimate_num_groups() result used default statistics or was
+ * capped by the multi-column correlation clamp.  This is a hint that the
+ * group count may be weak; callers making decisions that depend on it
+ * should consider a conservative bound.  It does not mean the estimate is
+ * unusable in every context (for example, a worst-case hash-table size can
+ * still be checked separately).
+ */
+static inline bool
+estimate_num_groups_unreliable(const EstimationInfo *estinfo)
+{
+	return (estinfo->flags &
+			(SELFLAG_USED_DEFAULT | SELFLAG_USED_MULTIVAR_CLAMP)) != 0;
+}
 
 /* Return data from examine_variable and friends */
 typedef struct VariableStatData
