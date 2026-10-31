@@ -1420,14 +1420,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
-	if (debug_query_string)
-	{
-		querylen = strlen(debug_query_string);
-		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
-		shm_toc_estimate_keys(&pcxt->estimator, 1);
-	}
-	else
-		querylen = 0;			/* keep compiler quiet */
+	querylen = EstimateParallelQueryText(pcxt);
 
 	/* Everyone's had a chance to ask for space, so now create the DSM */
 	InitializeParallelDSM(pcxt);
@@ -1479,14 +1472,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	}
 
 	/* Store query string for workers */
-	if (debug_query_string)
-	{
-		char	   *sharedquery;
-
-		sharedquery = (char *) shm_toc_allocate(pcxt->toc, querylen + 1);
-		memcpy(sharedquery, debug_query_string, querylen + 1);
-		shm_toc_insert(pcxt->toc, PARALLEL_KEY_QUERY_TEXT, sharedquery);
-	}
+	StoreParallelQueryText(pcxt, PARALLEL_KEY_QUERY_TEXT, querylen);
 
 	/*
 	 * Allocate space for each worker's WalUsage and BufferUsage; no need to
@@ -1629,7 +1615,6 @@ _bt_leader_participate_as_worker(BTBuildState *buildstate)
 void
 _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
-	char	   *sharedquery;
 	BTSpool    *btspool;
 	BTSpool    *btspool2;
 	BTShared   *btshared;
@@ -1653,12 +1638,8 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Assert((MyProc->statusFlags == 0) ||
 		   (MyProc->statusFlags == PROC_IN_SAFE_IC));
 
-	/* Set debug_query_string for individual workers first */
-	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, true);
-	debug_query_string = sharedquery;
-
-	/* Report the query string from leader */
-	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+	/* Set debug_query_string and report the query string from leader */
+	RestoreParallelQueryText(toc, PARALLEL_KEY_QUERY_TEXT);
 
 	/* Look up nbtree shared state */
 	btshared = shm_toc_lookup(toc, PARALLEL_KEY_BTREE_SHARED, false);
