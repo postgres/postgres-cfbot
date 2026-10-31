@@ -10,6 +10,8 @@ intarray_sources = files(
   '_intbig_gist.c',
 )
 
+intarray_bitcode_sources = intarray_sources
+
 if host_system == 'windows'
   intarray_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', '_int',
@@ -32,6 +34,11 @@ install_data(
   'intarray--1.4--1.5.sql',
   kwargs: contrib_data_args,
 )
+
+bitcode_modules += {
+  'target': intarray,
+  'srcfiles': intarray_bitcode_sources,
+}
 
 tests += {
   'name': 'intarray',

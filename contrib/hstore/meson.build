@@ -12,6 +12,8 @@ hstore_sources = files(
   'hstore_subs.c',
 )
 
+hstore_bitcode_sources = hstore_sources
+
 if host_system == 'windows'
   hstore_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'hstore',
@@ -42,6 +44,11 @@ install_headers(
   'hstore.h',
   install_dir: dir_include_extension / 'hstore',
 )
+
+bitcode_modules += {
+  'target': hstore,
+  'srcfiles': hstore_bitcode_sources,
+}
 
 tests += {
   'name': 'hstore',
