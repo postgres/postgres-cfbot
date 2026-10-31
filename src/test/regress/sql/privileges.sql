@@ -1370,7 +1370,19 @@ REVOKE regress_priv_group2 FROM regress_priv_user5;
 
 CREATE SEQUENCE x_seq;
 
+-- information_schema.usage_privileges must show the owner's implicit USAGE
+-- privilege on a sequence, even when nothing has been granted explicitly
+SELECT grantee = current_user AS grantee_is_owner, privilege_type, is_grantable
+  FROM information_schema.usage_privileges
+  WHERE object_name = 'x_seq' AND object_type = 'SEQUENCE'
+  ORDER BY 1;
+
 GRANT USAGE on x_seq to regress_priv_user2;
+
+SELECT grantee = current_user AS grantee_is_owner, privilege_type, is_grantable
+  FROM information_schema.usage_privileges
+  WHERE object_name = 'x_seq' AND object_type = 'SEQUENCE'
+  ORDER BY 1;
 
 SELECT has_sequence_privilege('regress_priv_user1', 'atest1', 'SELECT');
 SELECT has_sequence_privilege('regress_priv_user1', 'x_seq', 'INSERT');
