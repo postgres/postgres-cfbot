@@ -74,6 +74,20 @@ DROP TABLE pgss_dml_tab;
 
 SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
 
+-- FOR PORTION OF: constant bounds are normalized, so statements differing only
+-- in their bounds collapse to a single entry.
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+CREATE TEMP TABLE pgss_fpo_tab (id int, valid_at int4range, b text);
+INSERT INTO pgss_fpo_tab VALUES (1, '[1,1000)', 'a');
+UPDATE pgss_fpo_tab FOR PORTION OF valid_at FROM 10 TO 20 SET b = 'x';
+UPDATE pgss_fpo_tab FOR PORTION OF valid_at FROM 30 TO 40 SET b = 'y';
+DELETE FROM pgss_fpo_tab FOR PORTION OF valid_at FROM 100 TO 200;
+DELETE FROM pgss_fpo_tab FOR PORTION OF valid_at FROM 300 TO 400;
+SELECT calls, query FROM pg_stat_statements
+  WHERE query LIKE '%FOR PORTION OF%' ORDER BY query COLLATE "C";
+DROP TABLE pgss_fpo_tab;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
 -- check that [temp] table relation extensions are tracked as writes
 CREATE TABLE pgss_extend_tab (a int, b text);
 CREATE TEMP TABLE pgss_extend_temp_tab (a int, b text);

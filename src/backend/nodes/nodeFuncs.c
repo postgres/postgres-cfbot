@@ -2582,6 +2582,24 @@ expression_tree_walker_impl(Node *node,
 					return true;
 			}
 			break;
+		case T_ForPortionOfExpr:
+			{
+				ForPortionOfExpr *forPortionOf = (ForPortionOfExpr *) node;
+
+				if (WALK(forPortionOf->rangeVar))
+					return true;
+				if (WALK(forPortionOf->targetFrom))
+					return true;
+				if (WALK(forPortionOf->targetTo))
+					return true;
+				if (WALK(forPortionOf->targetRange))
+					return true;
+				if (WALK(forPortionOf->overlapsExpr))
+					return true;
+				if (WALK(forPortionOf->rangeTargetList))
+					return true;
+			}
+			break;
 		case T_PartitionPruneStepOp:
 			{
 				PartitionPruneStepOp *opstep = (PartitionPruneStepOp *) node;
@@ -2730,6 +2748,8 @@ query_tree_walker_impl(Query *query,
 	if (WALK(query->mergeActionList))
 		return true;
 	if (WALK(query->mergeJoinCondition))
+		return true;
+	if (WALK(query->forPortionOf))
 		return true;
 	if (WALK(query->returningList))
 		return true;
@@ -3627,6 +3647,22 @@ expression_tree_mutator_impl(Node *node,
 				return (Node *) newnode;
 			}
 			break;
+		case T_ForPortionOfExpr:
+			{
+				ForPortionOfExpr *fpo = (ForPortionOfExpr *) node;
+				ForPortionOfExpr *newnode;
+
+				FLATCOPY(newnode, fpo, ForPortionOfExpr);
+				MUTATE(newnode->rangeVar, fpo->rangeVar, Var *);
+				MUTATE(newnode->targetFrom, fpo->targetFrom, Node *);
+				MUTATE(newnode->targetTo, fpo->targetTo, Node *);
+				MUTATE(newnode->targetRange, fpo->targetRange, Node *);
+				MUTATE(newnode->overlapsExpr, fpo->overlapsExpr, Node *);
+				MUTATE(newnode->rangeTargetList, fpo->rangeTargetList, List *);
+
+				return (Node *) newnode;
+			}
+			break;
 		case T_PartitionPruneStepOp:
 			{
 				PartitionPruneStepOp *opstep = (PartitionPruneStepOp *) node;
@@ -3809,6 +3845,7 @@ query_tree_mutator_impl(Query *query,
 	MUTATE(query->onConflict, query->onConflict, OnConflictExpr *);
 	MUTATE(query->mergeActionList, query->mergeActionList, List *);
 	MUTATE(query->mergeJoinCondition, query->mergeJoinCondition, Node *);
+	MUTATE(query->forPortionOf, query->forPortionOf, ForPortionOfExpr *);
 	MUTATE(query->returningList, query->returningList, List *);
 	MUTATE(query->jointree, query->jointree, FromExpr *);
 	MUTATE(query->setOperations, query->setOperations, Node *);
