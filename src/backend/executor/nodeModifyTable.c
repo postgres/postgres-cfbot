@@ -73,6 +73,7 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/injection_point.h"
+#include "utils/rangetypes.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -169,6 +170,10 @@ static bool ExecOnConflictSelect(ModifyTableContext *context,
 								 TupleTableSlot *excludedSlot,
 								 bool canSetTag,
 								 TupleTableSlot **returning);
+static void ExecForPortionOfLeftovers(ModifyTableContext *context,
+									  EState *estate,
+									  ResultRelInfo *resultRelInfo,
+									  ItemPointer tupleid);
 static TupleTableSlot *ExecPrepareTupleRouting(ModifyTableState *mtstate,
 											   EState *estate,
 											   PartitionTupleRouting *proute,
@@ -191,6 +196,16 @@ static TupleTableSlot *ExecMergeMatched(ModifyTableContext *context,
 static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
 										   ResultRelInfo *resultRelInfo,
 										   bool canSetTag);
+static void ExecSetupTransitionCaptureState(ModifyTableState *mtstate,
+											EState *estate,
+											ResultRelInfo *targetRelInfo,
+											CmdType cmdType);
+static void fireBSTriggers(ModifyTableState *node,
+						   ResultRelInfo *resultRelInfo, CmdType cmdType);
+static void fireASTriggers(ModifyTableState *node,
+						   ResultRelInfo *resultRelInfo, CmdType cmdType);
+static void ExecInitForPortionOf(ModifyTableState *mtstate, EState *estate,
+								 ResultRelInfo *resultRelInfo);
 
 
 /*
@@ -1085,8 +1100,14 @@ ExecInsert(ModifyTableContext *context,
 		 *
 		 * If we're running MERGE, we refer to the action that we're executing
 		 * to know if we're doing an INSERT or UPDATE to a partition table.
+		 *
+		 * A FOR PORTION OF temporal leftover is an insert of its own, not a
+		 * row moving between partitions, so it gets INSERT policies even
+		 * though the enclosing statement is an UPDATE or DELETE.
 		 */
-		if (mtstate->operation == CMD_UPDATE)
+		if (mtstate->mt_forPortionOfLeftover)
+			wco_kind = WCO_RLS_INSERT_CHECK;
+		else if (mtstate->operation == CMD_UPDATE)
 			wco_kind = WCO_RLS_UPDATE_CHECK;
 		else if (mtstate->operation == CMD_MERGE)
 			wco_kind = (mtstate->mt_merge_action->mas_action->commandType == CMD_UPDATE) ?
@@ -1285,7 +1306,8 @@ ExecInsert(ModifyTableContext *context,
 	 * because they happen on different tables.
 	 */
 	ar_insert_trig_tcs = mtstate->mt_transition_capture;
-	if (mtstate->operation == CMD_UPDATE && mtstate->mt_transition_capture
+	if (mtstate->operation == CMD_UPDATE && !mtstate->mt_forPortionOfLeftover
+		&& mtstate->mt_transition_capture
 		&& mtstate->mt_transition_capture->tcs_update_new_table)
 	{
 		ExecARUpdateTriggers(estate, resultRelInfo,
@@ -1325,8 +1347,17 @@ ExecInsert(ModifyTableContext *context,
 	if (resultRelInfo->ri_WithCheckOptions != NIL)
 		ExecWithCheckOptions(WCO_VIEW_CHECK, resultRelInfo, slot, estate);
 
-	/* Process RETURNING if present */
-	if (resultRelInfo->ri_projectReturning)
+	/*
+	 * Process RETURNING if present.
+	 *
+	 * If this is an UPDATE/DELETE ... FOR PORTION OF, we do not return the
+	 * leftover rows inserted by ExecForPortionOfLeftovers().  We do still
+	 * want to process the newly inserted row of a cross-partition UPDATE with
+	 * a FOR PORTION OF clause, which is why this tests the leftover flag
+	 * rather than how we got here.
+	 */
+	if (resultRelInfo->ri_projectReturning &&
+		!mtstate->mt_forPortionOfLeftover)
 	{
 		TupleTableSlot *oldSlot = NULL;
 
@@ -1384,6 +1415,410 @@ ExecInsert(ModifyTableContext *context,
 		*insert_destrel = resultRelInfo;
 
 	return result;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecForPortionOfOldRange
+ *
+ *		Return the range column of the row version at tupleid.
+ *
+ *		The result points into the FOR PORTION OF "existing tuple" slot, so
+ *		it is only valid until something else stores into that slot.
+ * ----------------------------------------------------------------
+ */
+Datum
+ExecForPortionOfOldRange(ResultRelInfo *resultRelInfo, ItemPointer tupleid)
+{
+	ForPortionOfState *fpoState = resultRelInfo->ri_forPortionOf;
+	TupleTableSlot *slot = fpoState->fp_existing;
+	Datum		range;
+	bool		isnull;
+
+	if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
+									   tupleid, SnapshotAny, slot))
+		elog(ERROR, "failed to fetch tuple for FOR PORTION OF");
+
+	range = slot_getattr(slot, fpoState->fp_rangeAttno, &isnull);
+	if (isnull)
+		elog(ERROR, "found a NULL range in a temporal table");
+
+	return range;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecForPortionOfCheckSplit
+ *
+ *		Complain if a concurrent transaction has moved part of the history
+ *		we were asked to change out of the row we are about to change.
+ *
+ *		In READ COMMITTED mode, when we find that the row we picked has
+ *		been updated by a concurrent transaction, we lock the latest
+ *		version and re-check it with EvalPlanQual().  That is enough for an
+ *		ordinary UPDATE, because a row has only one successor and
+ *		EvalPlanQual() reaches it by following the ctid chain.  It is not
+ *		enough here: a FOR PORTION OF update or delete narrows the row's
+ *		range and re-inserts the rest of its history as brand new rows,
+ *		which are not chained off the original and which our snapshot
+ *		cannot see.  If we simply carried on, we would change only the part
+ *		of the history that stayed in this row and silently leave the rest
+ *		alone -- a lost update.
+ *
+ *		We cannot go and find those rows: they are not reachable from the
+ *		row we hold, and re-scanning for them under a new snapshot would be
+ *		a different feature.  So we detect the case and report a
+ *		serialization failure, which is what the higher isolation levels
+ *		would have done, and which the client can retry.  MERGE does the
+ *		same thing when a concurrent update moves a row to another
+ *		partition and the executor cannot follow it.
+ *
+ *		The test is precise: we only complain if some part of the range the
+ *		row used to have, and no longer has, overlaps the portion this
+ *		statement targets.  A concurrent update that does not touch the
+ *		range column, or a FOR PORTION OF update whose target contains
+ *		ours, leaves nothing behind for us to miss.
+ * ----------------------------------------------------------------
+ */
+void
+ExecForPortionOfCheckSplit(ResultRelInfo *resultRelInfo,
+						   Datum oldRange,
+						   TupleTableSlot *newSlot)
+{
+	ForPortionOfState *fpoState = resultRelInfo->ri_forPortionOf;
+	PgStat_FunctionCallUsage fcusage;
+	FmgrInfo	flinfo;
+	ReturnSetInfo rsi_data;
+	ReturnSetInfo *rsi = &rsi_data;
+	Datum		newRange;
+	bool		isnull;
+
+	LOCAL_FCINFO(fcinfo, 2);
+
+	newRange = slot_getattr(newSlot, fpoState->fp_rangeAttno, &isnull);
+	if (isnull)
+		elog(ERROR, "found a NULL range in a temporal table");
+
+	/*
+	 * Ask for the parts of the old range that the row no longer covers.
+	 *
+	 * We call the same support function ExecForPortionOfLeftovers() does, but
+	 * with our own call state rather than the one prepared for it: its second
+	 * argument is the targeted range, set once at executor start-up, and we
+	 * would have to overwrite it here.  This path only runs when a concurrent
+	 * change was detected, so setting up a call each time costs nothing worth
+	 * saving.
+	 */
+	fmgr_info(fpoState->fp_withoutPortionInfo->fn_oid, &flinfo);
+
+	rsi->type = T_ReturnSetInfo;
+	rsi->econtext = fpoState->fp_withoutPortionRsi->econtext;
+	rsi->expectedDesc = NULL;
+	rsi->allowedModes = (int) (SFRM_ValuePerCall);
+	rsi->returnMode = SFRM_ValuePerCall;
+	/* isDone is filled in for each call */
+	rsi->setResult = NULL;
+	rsi->setDesc = NULL;
+
+	InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, NULL, (Node *) rsi);
+
+	fcinfo->args[0].value = oldRange;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = newRange;
+	fcinfo->args[1].isnull = false;
+
+	while (true)
+	{
+		Datum		lost;
+
+		pgstat_init_function_usage(fcinfo, &fcusage);
+
+		fcinfo->isnull = false;
+		rsi->isDone = ExprSingleResult;
+		lost = FunctionCallInvoke(fcinfo);
+
+		pgstat_end_function_usage(&fcusage,
+								  rsi->isDone != ExprMultipleResult);
+
+		if (rsi->returnMode != SFRM_ValuePerCall)
+			elog(ERROR, "without_portion function violated function call protocol");
+
+		if (rsi->isDone == ExprEndResult)
+			break;
+
+		if (fcinfo->isnull)
+			elog(ERROR, "got a null from without_portion function");
+
+		if (DatumGetBool(FunctionCall2Coll(fpoState->fp_overlapsInfo,
+										   fpoState->fp_overlapsCollation,
+										   lost, fpoState->fp_targetRange)))
+			ereport(ERROR,
+					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+					 errmsg("could not serialize access due to concurrent update"),
+					 errdetail("A concurrent transaction moved part of the history targeted by FOR PORTION OF into a row this statement cannot see."),
+					 errhint("Retry the transaction.")));
+	}
+}
+
+/* ----------------------------------------------------------------
+ *		ExecForPortionOfConcurrentDelete
+ *
+ *		Report a concurrent delete of a row targeted by FOR PORTION OF.
+ *
+ *		A FOR PORTION OF delete that only covers part of a row's history
+ *		deletes the row and inserts the remaining history as new rows, so a
+ *		concurrently deleted row may have left behind history we were
+ *		supposed to change.  We cannot tell that case apart from a plain
+ *		delete, which we would be entitled to ignore, so we report a
+ *		serialization failure for both.
+ * ----------------------------------------------------------------
+ */
+void
+ExecForPortionOfConcurrentDelete(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+			 errmsg("could not serialize access due to concurrent delete"),
+			 errdetail("A concurrent transaction deleted a row targeted by FOR PORTION OF, which may have left behind history this statement cannot see."),
+			 errhint("Retry the transaction.")));
+}
+
+/* ----------------------------------------------------------------
+ *		ExecForPortionOfLeftovers
+ *
+ *		Insert tuples for the untouched portion of a row in a FOR
+ *		PORTION OF UPDATE/DELETE.
+ *
+ *		If a row's history exceeds the portion targeted, we need to insert
+ *		temporal leftovers to avoid changing more than the user requested. So we
+ *		fetch the pre-UPDATE tuple, set just its start/end time, and insert a
+ *		copy as a leftover.
+ *
+ *		To find the untouched portion(s) of history, we call a set-returning
+ *		support function based on the type of the application-time column. (XXX:
+ *		Currently only rangetypes and multirangetypes are supported, but we
+ *		would like to support any type that offers the necessary
+ *		functions/operators.) For a rangetype, there can be zero, one, or two
+ *		leftovers. For a multirange, which can accommodate gaps, there can be at
+ *		most one. User-defined types may return more.
+ *
+ *		Each temporal leftover gets its own insert "statement", per the SQL
+ *		standard. So we fire statement triggers and row triggers (complete with
+ *		transition tables). These leftovers do not contribute to the command tag
+ *		or ROW_COUNT.
+ * ----------------------------------------------------------------
+ */
+static void
+ExecForPortionOfLeftovers(ModifyTableContext *context,
+						  EState *estate,
+						  ResultRelInfo *resultRelInfo,
+						  ItemPointer tupleid)
+{
+	ModifyTableState *mtstate = context->mtstate;
+	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
+	ForPortionOfExpr *forPortionOf = (ForPortionOfExpr *) node->forPortionOf;
+	Datum		oldRange;
+	ForPortionOfState *fpoState;
+	TupleTableSlot *oldtupleSlot;
+	TupleTableSlot *leftoverSlot;
+	TupleConversionMap *map = NULL;
+	HeapTuple	oldtuple = NULL;
+	TransitionCaptureState *oldTcs;
+	PgStat_FunctionCallUsage fcusage;
+	FunctionCallInfo fcinfo;
+	ReturnSetInfo *rsi;
+	bool		didInit = false;
+	bool		shouldFree = false;
+	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
+	bool		partitionRouting =
+		rootRelInfo &&
+		rootRelInfo->ri_RelationDesc->rd_rel->relkind == RELKIND_PARTITIONED_TABLE;
+
+	fpoState = resultRelInfo->ri_forPortionOf;
+	oldtupleSlot = fpoState->fp_existing;
+	leftoverSlot = fpoState->fp_leftover;
+	fcinfo = fpoState->fp_withoutPortionFcinfo;
+	rsi = fpoState->fp_withoutPortionRsi;
+
+	/*
+	 * Get the old pre-UPDATE/DELETE tuple. We will use its range to compute
+	 * untouched parts of history, and if necessary we will insert copies with
+	 * truncated start/end times.
+	 *
+	 * We have already locked the tuple, in ExecUpdate/ExecDelete or, if there
+	 * is a BEFORE row trigger, in GetTupleForTrigger, and it has passed
+	 * EvalPlanQual. This ensures that concurrent updates in READ COMMITTED
+	 * can't insert conflicting temporal leftovers.
+	 *
+	 * That alone would not stop us from overlooking a concurrent update or
+	 * delete's leftovers, but if a concurrent change moved part of our target
+	 * out of this row, ExecForPortionOfCheckSplit() has already raised a
+	 * serialization failure.
+	 */
+	if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc, tupleid, SnapshotAny, oldtupleSlot))
+		elog(ERROR, "failed to fetch tuple for FOR PORTION OF");
+
+	slot_getallattrs(oldtupleSlot);
+
+	/* Get the old range of the record being updated/deleted. */
+	if (oldtupleSlot->tts_isnull[fpoState->fp_rangeAttno - 1])
+		elog(ERROR, "found a NULL range in a temporal table");
+	oldRange = oldtupleSlot->tts_values[fpoState->fp_rangeAttno - 1];
+
+	/*
+	 * Get the ranges to the left/right of the targeted range. We call a SETOF
+	 * support function and insert as many temporal leftovers as it gives us.
+	 * Although rangetypes have 0/1/2 leftovers, multiranges have 0/1, and
+	 * other types may have more.
+	 */
+
+	fcinfo->args[0].value = oldRange;
+
+	/*
+	 * For partitioned tables, we must read leftovers with the tuple
+	 * descriptor of the child table, but insert into the root table to enable
+	 * tuple routing. So leftoverSlot is configured with the root's tuple
+	 * descriptor. But for traditional table inheritance, we don't need tuple
+	 * routing and just insert directly into the child table to preserve
+	 * child-specific columns. In that case, leftoverSlot uses the child's
+	 * (resultRelInfo) tuple descriptor.
+	 */
+	if (partitionRouting)
+	{
+		map = ExecGetChildToRootMap(resultRelInfo);
+		resultRelInfo = resultRelInfo->ri_RootResultRelInfo;
+	}
+
+	/*
+	 * Insert a leftover for each value returned by the without_portion helper
+	 * function
+	 */
+	while (true)
+	{
+		Datum		leftover;
+
+		/* Call the function one time */
+		pgstat_init_function_usage(fcinfo, &fcusage);
+
+		fcinfo->isnull = false;
+		rsi->isDone = ExprSingleResult;
+		leftover = FunctionCallInvoke(fcinfo);
+
+		pgstat_end_function_usage(&fcusage,
+								  rsi->isDone != ExprMultipleResult);
+
+		/*
+		 * XXX: Support other returnModes. For now we only call
+		 * range_minus_multi and multirange_minus_multi, so we can depend on
+		 * the value-per-call protocol.
+		 */
+		if (rsi->returnMode != SFRM_ValuePerCall)
+			elog(ERROR, "without_portion function violated function call protocol");
+
+		/* Are we done? */
+		if (rsi->isDone == ExprEndResult)
+			break;
+
+		if (fcinfo->isnull)
+			elog(ERROR, "got a null from without_portion function");
+
+		/*
+		 * Does the new Datum violate domain checks? Row-level CHECK
+		 * constraints are validated by ExecInsert, so we don't need to do
+		 * anything here for those.
+		 */
+		if (forPortionOf->isDomain)
+			domain_check(leftover, false, forPortionOf->rangeVar->vartype,
+						 &fpoState->fp_domaininfo, estate->es_query_cxt);
+
+		if (!didInit)
+		{
+			/*
+			 * Get the pre-UPDATE row. We'll make copies of it below for each
+			 * leftover we need to insert.
+			 */
+			if (map == NULL)
+				oldtuple = ExecFetchSlotHeapTuple(oldtupleSlot, false, &shouldFree);
+
+			/*
+			 * Mark that the inserts below are temporal leftovers, and save
+			 * the transition capture state, which we replace for each one.
+			 *
+			 * XXX: Should we create our own ModifyTableState instead?  That
+			 * would be tidier than borrowing this one, but it would have to
+			 * duplicate a fair amount of setup.
+			 */
+			mtstate->mt_forPortionOfLeftover = true;
+			oldTcs = mtstate->mt_transition_capture;
+
+			didInit = true;
+		}
+
+		/*
+		 * Copy the pre-UPDATE row, then overwrite the range column. We need a
+		 * new copy for each leftover, because ExecInsert might pass the slot
+		 * to BEFORE ROW INSERT triggers, which can modify its contents.
+		 *
+		 * If the table is partitioned, map back to the root's format, so that
+		 * we get tuple routing.
+		 */
+		if (map != NULL)
+			leftoverSlot = execute_attr_map_slot(map->attrMap,
+												 oldtupleSlot,
+												 leftoverSlot);
+		else
+			ExecForceStoreHeapTuple(oldtuple, leftoverSlot, false);
+
+		leftoverSlot->tts_values[resultRelInfo->ri_forPortionOf->fp_rangeAttno - 1] = leftover;
+		leftoverSlot->tts_isnull[resultRelInfo->ri_forPortionOf->fp_rangeAttno - 1] = false;
+		ExecMaterializeSlot(leftoverSlot);
+
+		/*
+		 * The standard says that each temporal leftover should execute its
+		 * own INSERT statement, firing all statement and row triggers, but
+		 * skipping insert permission checks. Therefore we give each insert
+		 * its own transition table. If we just push & pop a new trigger level
+		 * for each insert, we get exactly what we need.
+		 *
+		 * We have to make sure that the inserts don't add to the ROW_COUNT
+		 * diagnostic or the command tag, so we pass false for canSetTag.
+		 */
+		AfterTriggerBeginQuery();
+		ExecSetupTransitionCaptureState(mtstate, estate, resultRelInfo,
+										CMD_INSERT);
+
+		/*
+		 * When inserting directly into a child table (for traditional
+		 * inheritance), we must avoid converting to the root table's format.
+		 */
+		if (!partitionRouting && mtstate->mt_transition_capture != NULL)
+			mtstate->mt_transition_capture->tcs_original_insert_tuple =
+				leftoverSlot;
+
+		fireBSTriggers(mtstate, resultRelInfo, CMD_INSERT);
+		ExecInsert(context, resultRelInfo, leftoverSlot, false, NULL, NULL);
+		fireASTriggers(mtstate, resultRelInfo, CMD_INSERT);
+
+		/* Reset the transition state, as ExecCrossPartitionUpdate() does. */
+		if (mtstate->mt_transition_capture != NULL)
+			mtstate->mt_transition_capture->tcs_original_insert_tuple = NULL;
+
+		AfterTriggerEndQuery(estate);
+
+		/* Don't leak the capture state */
+		if (mtstate->mt_transition_capture != NULL)
+		{
+			pfree(mtstate->mt_transition_capture);
+			mtstate->mt_transition_capture = NULL;
+		}
+	}
+
+	if (didInit)
+	{
+		mtstate->mt_forPortionOfLeftover = false;
+		mtstate->mt_transition_capture = oldTcs;
+
+		if (shouldFree)
+			heap_freetuple(oldtuple);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -1543,7 +1978,8 @@ ExecDeleteAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
  *
  * Closing steps of tuple deletion; this invokes AFTER FOR EACH ROW triggers,
  * including the UPDATE triggers if the deletion is being done as part of a
- * cross-partition tuple move.
+ * cross-partition tuple move. It also inserts temporal leftovers from a
+ * DELETE FOR PORTION OF.
  */
 static void
 ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
@@ -1575,6 +2011,10 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 */
 		ar_delete_trig_tcs = NULL;
 	}
+
+	/* Compute temporal leftovers in FOR PORTION OF */
+	if (((ModifyTable *) context->mtstate->ps.plan)->forPortionOf)
+		ExecForPortionOfLeftovers(context, estate, resultRelInfo, tupleid);
 
 	/* AFTER ROW DELETE Triggers */
 	ExecARDeleteTriggers(estate, resultRelInfo, tupleid, oldtuple,
@@ -1719,6 +2159,7 @@ ldelete:
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
+							 errdetail_temporal_leftovers(resultRelInfo),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
 				/* Else, already deleted by self; nothing to do */
@@ -1731,11 +2172,23 @@ ldelete:
 				{
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
+					bool		forPortionOf;
+					Datum		oldRange = (Datum) 0;
 
 					if (IsolationUsesXactSnapshot())
 						ereport(ERROR,
 								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 								 errmsg("could not serialize access due to concurrent update")));
+
+					/*
+					 * For FOR PORTION OF, remember the range this row had
+					 * when we chose it, so we can tell below whether the
+					 * concurrent change split any of our target away.
+					 */
+					forPortionOf = resultRelInfo->ri_forPortionOf != NULL;
+					if (forPortionOf)
+						oldRange = ExecForPortionOfOldRange(resultRelInfo,
+															tupleid);
 
 					/*
 					 * Already know that we're going to need to do EPQ, so
@@ -1756,6 +2209,12 @@ ldelete:
 					{
 						case TM_Ok:
 							Assert(context->tmfd.traversed);
+
+							if (forPortionOf)
+								ExecForPortionOfCheckSplit(resultRelInfo,
+														   oldRange,
+														   inputslot);
+
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
 												   resultRelInfo->ri_RangeTableIndex,
@@ -1793,10 +2252,13 @@ ldelete:
 								ereport(ERROR,
 										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 										 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
+										 errdetail_temporal_leftovers(resultRelInfo),
 										 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 							return NULL;
 
 						case TM_Deleted:
+							if (forPortionOf)
+								ExecForPortionOfConcurrentDelete();
 							/* tuple already deleted; nothing to do */
 							return NULL;
 
@@ -1826,6 +2288,8 @@ ldelete:
 					ereport(ERROR,
 							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 							 errmsg("could not serialize access due to concurrent delete")));
+				if (resultRelInfo->ri_forPortionOf)
+					ExecForPortionOfConcurrentDelete();
 				/* tuple already deleted; nothing to do */
 				return NULL;
 
@@ -2001,7 +2465,10 @@ ExecCrossPartitionUpdate(ModifyTableContext *context,
 	if (resultRelInfo == mtstate->rootResultRelInfo)
 		ExecPartitionCheckEmitError(resultRelInfo, slot, estate);
 
-	/* Initialize tuple routing info if not already done. */
+	/*
+	 * Initialize tuple routing info if not already done. Note whatever we do
+	 * here must be done in ExecInitModifyTable for FOR PORTION OF as well.
+	 */
 	if (mtstate->mt_partition_tuple_routing == NULL)
 	{
 		Relation	rootRel = mtstate->rootResultRelInfo->ri_RelationDesc;
@@ -2351,7 +2818,8 @@ lreplace:
  * ExecUpdateEpilogue -- subroutine for ExecUpdate
  *
  * Closing steps of updating a tuple.  Must be called if ExecUpdateAct
- * returns indicating that the tuple was updated.
+ * returns indicating that the tuple was updated. It also inserts temporal
+ * leftovers from an UPDATE FOR PORTION OF.
  */
 static void
 ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
@@ -2373,6 +2841,25 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 											   NULL);
 	}
 
+	/*
+	 * Check any WITH CHECK OPTION constraints from parent views.  We are
+	 * required to do this after testing all constraints and uniqueness
+	 * violations per the SQL spec, so we do it after actually updating the
+	 * record in the heap and all indexes.  We do it before inserting any
+	 * temporal leftovers, so that if both this row and a leftover violate a
+	 * check option, the error names this row.
+	 *
+	 * ExecWithCheckOptions() will skip any WCOs which are not of the kind we
+	 * are looking for at this point.
+	 */
+	if (resultRelInfo->ri_WithCheckOptions != NIL)
+		ExecWithCheckOptions(WCO_VIEW_CHECK, resultRelInfo,
+							 slot, context->estate);
+
+	/* Compute temporal leftovers in FOR PORTION OF */
+	if (((ModifyTable *) context->mtstate->ps.plan)->forPortionOf)
+		ExecForPortionOfLeftovers(context, context->estate, resultRelInfo, tupleid);
+
 	/* AFTER ROW UPDATE Triggers */
 	ExecARUpdateTriggers(context->estate, resultRelInfo,
 						 NULL, NULL,
@@ -2384,19 +2871,6 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 						 false);
 
 	list_free(recheckIndexes);
-
-	/*
-	 * Check any WITH CHECK OPTION constraints from parent views.  We are
-	 * required to do this after testing all constraints and uniqueness
-	 * violations per the SQL spec, so we do it after actually updating the
-	 * record in the heap and all indexes.
-	 *
-	 * ExecWithCheckOptions() will skip any WCOs which are not of the kind we
-	 * are looking for at this point.
-	 */
-	if (resultRelInfo->ri_WithCheckOptions != NIL)
-		ExecWithCheckOptions(WCO_VIEW_CHECK, resultRelInfo,
-							 slot, context->estate);
 }
 
 /*
@@ -2625,6 +3099,7 @@ redo_act:
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
+							 errdetail_temporal_leftovers(resultRelInfo),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
 				/* Else, already updated by self; nothing to do */
@@ -2637,11 +3112,23 @@ redo_act:
 				{
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
+					bool		forPortionOf;
+					Datum		oldRange = (Datum) 0;
 
 					if (IsolationUsesXactSnapshot())
 						ereport(ERROR,
 								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 								 errmsg("could not serialize access due to concurrent update")));
+
+					/*
+					 * For FOR PORTION OF, remember the range this row had
+					 * when we chose it, so we can tell below whether the
+					 * concurrent change split any of our target away.
+					 */
+					forPortionOf = resultRelInfo->ri_forPortionOf != NULL;
+					if (forPortionOf)
+						oldRange = ExecForPortionOfOldRange(resultRelInfo,
+															tupleid);
 
 					/*
 					 * Already know that we're going to need to do EPQ, so
@@ -2661,6 +3148,11 @@ redo_act:
 					{
 						case TM_Ok:
 							Assert(context->tmfd.traversed);
+
+							if (forPortionOf)
+								ExecForPortionOfCheckSplit(resultRelInfo,
+														   oldRange,
+														   inputslot);
 
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
@@ -2695,6 +3187,8 @@ redo_act:
 							goto redo_act;
 
 						case TM_Deleted:
+							if (forPortionOf)
+								ExecForPortionOfConcurrentDelete();
 							/* tuple already deleted; nothing to do */
 							return NULL;
 
@@ -2715,6 +3209,7 @@ redo_act:
 								ereport(ERROR,
 										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 										 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
+										 errdetail_temporal_leftovers(resultRelInfo),
 										 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 							return NULL;
 
@@ -2733,6 +3228,8 @@ redo_act:
 					ereport(ERROR,
 							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 							 errmsg("could not serialize access due to concurrent delete")));
+				if (resultRelInfo->ri_forPortionOf)
+					ExecForPortionOfConcurrentDelete();
 				/* tuple already deleted; nothing to do */
 				return NULL;
 
@@ -4218,12 +4715,12 @@ ExecInitMergeTupleSlots(ModifyTableState *mtstate,
  * Process BEFORE EACH STATEMENT triggers
  */
 static void
-fireBSTriggers(ModifyTableState *node)
+fireBSTriggers(ModifyTableState *node, ResultRelInfo *resultRelInfo,
+			   CmdType cmdType)
 {
 	ModifyTable *plan = (ModifyTable *) node->ps.plan;
-	ResultRelInfo *resultRelInfo = node->rootResultRelInfo;
 
-	switch (node->operation)
+	switch (cmdType)
 	{
 		case CMD_INSERT:
 			ExecBSInsertTriggers(node->ps.state, resultRelInfo);
@@ -4255,12 +4752,12 @@ fireBSTriggers(ModifyTableState *node)
  * Process AFTER EACH STATEMENT triggers
  */
 static void
-fireASTriggers(ModifyTableState *node)
+fireASTriggers(ModifyTableState *node, ResultRelInfo *resultRelInfo,
+			   CmdType cmdType)
 {
 	ModifyTable *plan = (ModifyTable *) node->ps.plan;
-	ResultRelInfo *resultRelInfo = node->rootResultRelInfo;
 
-	switch (node->operation)
+	switch (cmdType)
 	{
 		case CMD_INSERT:
 			if (plan->onConflictAction == ONCONFLICT_UPDATE)
@@ -4298,18 +4795,23 @@ fireASTriggers(ModifyTableState *node)
 /*
  * Set up the state needed for collecting transition tuples for AFTER
  * triggers.
+ *
+ * targetRelInfo is the relation whose transition tables we collect into.
+ * Normally this is the statement's target relation, but temporal leftovers are
+ * inserted directly into child tables (for traditional inheritance), so it
+ * needs to match.
  */
 static void
-ExecSetupTransitionCaptureState(ModifyTableState *mtstate, EState *estate)
+ExecSetupTransitionCaptureState(ModifyTableState *mtstate, EState *estate,
+								ResultRelInfo *targetRelInfo, CmdType cmdType)
 {
 	ModifyTable *plan = (ModifyTable *) mtstate->ps.plan;
-	ResultRelInfo *targetRelInfo = mtstate->rootResultRelInfo;
 
-	/* Check for transition tables on the directly targeted relation. */
+	/* Check for transition tables on the given relation. */
 	mtstate->mt_transition_capture =
 		MakeTransitionCaptureState(targetRelInfo->ri_TrigDesc,
 								   RelationGetRelid(targetRelInfo->ri_RelationDesc),
-								   mtstate->operation);
+								   cmdType);
 	if (plan->operation == CMD_INSERT &&
 		plan->onConflictAction == ONCONFLICT_UPDATE)
 		mtstate->mt_oc_transition_capture =
@@ -4433,7 +4935,7 @@ ExecModifyTable(PlanState *pstate)
 	 */
 	if (node->fireBSTriggers)
 	{
-		fireBSTriggers(node);
+		fireBSTriggers(node, node->rootResultRelInfo, node->operation);
 		node->fireBSTriggers = false;
 	}
 
@@ -4550,6 +5052,16 @@ ExecModifyTable(PlanState *pstate)
 				resultRelInfo = ExecLookupResultRelByOid(node, resultoid,
 														 false, true);
 		}
+
+		/*
+		 * If we don't have a ForPortionOfState yet, we must be a partition or
+		 * inheritance child being hit for the first time. Make a copy from
+		 * the root, with our own TupleTableSlot. We do this lazily so that we
+		 * don't pay the price of unused partitions.
+		 */
+		if (((ModifyTable *) context.mtstate->ps.plan)->forPortionOf &&
+			!resultRelInfo->ri_forPortionOf)
+			ExecInitForPortionOf(context.mtstate, estate, resultRelInfo);
 
 		/*
 		 * If resultRelInfo->ri_usesFdwDirectModify is true, all we need to do
@@ -4804,7 +5316,7 @@ ExecModifyTable(PlanState *pstate)
 	/*
 	 * We're done, but fire AFTER STATEMENT triggers before exiting.
 	 */
-	fireASTriggers(node);
+	fireASTriggers(node, node->rootResultRelInfo, node->operation);
 
 	node->mt_done = true;
 
@@ -5049,7 +5561,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * valid trigger query context, so skip it in explain-only mode.
 	 */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		ExecSetupTransitionCaptureState(mtstate, estate);
+		ExecSetupTransitionCaptureState(mtstate, estate,
+										mtstate->rootResultRelInfo,
+										mtstate->operation);
 
 	/*
 	 * Open all the result relations and initialize the ResultRelInfo structs.
@@ -5088,7 +5602,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		 * Verify result relation is a valid target for the current operation
 		 */
 		CheckValidResultRel(resultRelInfo, operation, node->onConflictAction,
-							mergeActions);
+							mergeActions, node);
 
 		resultRelInfo++;
 		i++;
@@ -5358,6 +5872,171 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	}
 
 	/*
+	 * If needed, initialize the target range for FOR PORTION OF.
+	 */
+	if (node->forPortionOf)
+	{
+		ResultRelInfo *rootRelInfo;
+		TupleDesc	tupDesc;
+		ForPortionOfExpr *forPortionOf;
+		ForPortionOfState *fpoState;
+
+		rootRelInfo = mtstate->resultRelInfo;
+		if (rootRelInfo->ri_RootResultRelInfo)
+			rootRelInfo = rootRelInfo->ri_RootResultRelInfo;
+
+		tupDesc = rootRelInfo->ri_RelationDesc->rd_att;
+		forPortionOf = (ForPortionOfExpr *) node->forPortionOf;
+
+		/* Create state for FOR PORTION OF operation */
+
+		fpoState = makeNode(ForPortionOfState);
+		fpoState->fp_rangeAttno = forPortionOf->rangeVar->varattno;
+
+		/*
+		 * Evaluate the target and prepare to call the without_portion
+		 * set-returning function. None of this varies across partitions or
+		 * child tables.
+		 */
+		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		{
+			bool		isNull;
+			ExprContext *econtext;
+			ExprState  *exprState;
+			FmgrInfo   *flinfo;
+			FunctionCallInfo fcinfo;
+			ReturnSetInfo *rsi;
+			OpExpr	   *overlapsOp;
+
+			/*
+			 * We need an expression context to evaluate the target and to
+			 * call the without_portion support function.
+			 */
+			if (mtstate->ps.ps_ExprContext == NULL)
+				ExecAssignExprContext(estate, &mtstate->ps);
+			econtext = mtstate->ps.ps_ExprContext;
+
+			/* The planner has already prepared the expression. */
+			exprState = ExecInitExpr((Expr *) forPortionOf->targetRange,
+									 &mtstate->ps);
+
+			fpoState->fp_targetRange = ExecEvalExpr(exprState, econtext, &isNull);
+
+			/*
+			 * FOR PORTION OF ... FROM ... TO should never give us a NULL
+			 * target, but FOR PORTION OF (...) could.
+			 */
+			if (isNull)
+				ereport(ERROR,
+						(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						 errmsg("FOR PORTION OF target must not be null"),
+						 executor_errposition(estate, forPortionOf->targetLocation)));
+
+			/*
+			 * Prepare the call to the without_portion support function. Only
+			 * its first arg varies row-by-row.
+			 */
+
+			flinfo = palloc0_object(FmgrInfo);
+			fcinfo = palloc0(SizeForFunctionCallInfo(2));
+			rsi = makeNode(ReturnSetInfo);
+
+			fmgr_info(forPortionOf->withoutPortionProc, flinfo);
+
+			rsi->econtext = econtext;
+			rsi->expectedDesc = NULL;
+			rsi->allowedModes = (int) (SFRM_ValuePerCall);
+			rsi->returnMode = SFRM_ValuePerCall;
+			/* isDone is filled in for each call */
+			rsi->setResult = NULL;
+			rsi->setDesc = NULL;
+
+			InitFunctionCallInfoData(*fcinfo, flinfo, 2, InvalidOid, NULL, (Node *) rsi);
+
+			/* Neither argument is ever null; only args[0] varies per row. */
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].isnull = false;
+			fcinfo->args[1].value = fpoState->fp_targetRange;
+
+			fpoState->fp_withoutPortionInfo = flinfo;
+			fpoState->fp_withoutPortionFcinfo = fcinfo;
+			fpoState->fp_withoutPortionRsi = rsi;
+
+			/*
+			 * Also prepare the range column's "overlaps" function, which
+			 * ExecForPortionOfCheckSplit() uses.  The parser has already
+			 * looked up the operator to build the extra qual, so borrow it
+			 * from there.
+			 */
+			overlapsOp = castNode(OpExpr, forPortionOf->overlapsExpr);
+			fpoState->fp_overlapsInfo = palloc0_object(FmgrInfo);
+			fmgr_info(overlapsOp->opfuncid, fpoState->fp_overlapsInfo);
+			fpoState->fp_overlapsCollation = overlapsOp->inputcollid;
+		}
+
+		/* Initialize slot for the existing tuple */
+
+		fpoState->fp_existing =
+			table_slot_create(rootRelInfo->ri_RelationDesc,
+							  &mtstate->ps.state->es_tupleTable);
+
+		/*
+		 * Create the tuple slot for INSERTing the temporal leftovers.
+		 *
+		 * A virtual slot lets us set the range column and re-map attributes
+		 * for partitions. A heap tuple would still need deforming and
+		 * re-forming.
+		 */
+
+		fpoState->fp_leftover =
+			ExecInitExtraTupleSlot(mtstate->ps.state, tupDesc, &TTSOpsVirtual);
+
+		rootRelInfo->ri_forPortionOf = fpoState;
+
+		/*
+		 * Make sure the root relation has the FOR PORTION OF clause too. Each
+		 * partition needs its own TupleTableSlot, since they can have
+		 * different descriptors, so they'll use the root fpoState to
+		 * initialize one if necessary.
+		 */
+		if (node->rootRelation > 0)
+			mtstate->rootResultRelInfo->ri_forPortionOf = fpoState;
+
+		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
+			mtstate->mt_partition_tuple_routing == NULL)
+		{
+			/*
+			 * We will need tuple routing to insert temporal leftovers. Since
+			 * we are initializing things before ExecCrossPartitionUpdate
+			 * runs, we must do everything it needs as well.
+			 */
+			Relation	rootRel = mtstate->rootResultRelInfo->ri_RelationDesc;
+			MemoryContext oldcxt;
+
+			/* Things built here have to last for the query duration. */
+			oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+			mtstate->mt_partition_tuple_routing =
+				ExecSetupPartitionTupleRouting(estate, rootRel);
+
+			/*
+			 * Before a partition's tuple can be re-routed, it must first be
+			 * converted to the root's format, so we'll need a slot for
+			 * storing such tuples.
+			 */
+			Assert(mtstate->mt_root_tuple_slot == NULL);
+			mtstate->mt_root_tuple_slot = table_slot_create(rootRel, NULL);
+
+			MemoryContextSwitchTo(oldcxt);
+		}
+
+		/*
+		 * Don't free the ExprContext here because the result must last for
+		 * the whole query.
+		 */
+	}
+
+	/*
 	 * If we have any secondary relations in an UPDATE or DELETE, they need to
 	 * be treated like non-locked relations in SELECT FOR UPDATE, i.e., the
 	 * EvalPlanQual mechanism needs to be told about them.  This also goes for
@@ -5549,4 +6228,85 @@ ExecReScanModifyTable(ModifyTableState *node)
 	 * semantics of that would be a bit debatable anyway.
 	 */
 	elog(ERROR, "ExecReScanModifyTable is not implemented");
+}
+
+/* ----------------------------------------------------------------
+ *		ExecInitForPortionOf
+ *
+ *		Initializes resultRelInfo->ri_forPortionOf for child tables.
+ *
+ *		Partitions share the root leftover slot, since they must insert via
+ *		the root relation to get tuple routing. Plain inheritance children
+ *		must keep their own leftover slot and insert back into the child, or
+ *		else child-only column values and physical placement would be lost.
+ * ----------------------------------------------------------------
+ */
+static void
+ExecInitForPortionOf(ModifyTableState *mtstate, EState *estate,
+					 ResultRelInfo *resultRelInfo)
+{
+	MemoryContext oldcxt;
+	ForPortionOfState *leafState;
+	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
+	ForPortionOfState *fpoState;
+	TupleConversionMap *map;
+
+	if (!rootRelInfo)
+		elog(ERROR, "no root relation but ri_forPortionOf is uninitialized");
+
+	fpoState = rootRelInfo->ri_forPortionOf;
+	Assert(fpoState);
+
+	/* Things built here have to last for the query duration. */
+	oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	leafState = makeNode(ForPortionOfState);
+
+	leafState->fp_targetRange = fpoState->fp_targetRange;
+
+	/*
+	 * The support function and its call state depend only on the range type,
+	 * which is the same for every child, so share the root's.
+	 */
+	leafState->fp_withoutPortionInfo = fpoState->fp_withoutPortionInfo;
+	leafState->fp_withoutPortionFcinfo = fpoState->fp_withoutPortionFcinfo;
+	leafState->fp_withoutPortionRsi = fpoState->fp_withoutPortionRsi;
+	leafState->fp_overlapsInfo = fpoState->fp_overlapsInfo;
+	leafState->fp_overlapsCollation = fpoState->fp_overlapsCollation;
+	map = ExecGetChildToRootMap(resultRelInfo);
+
+	/*
+	 * fp_rangeAttno must match the tuple layout used for reading the old
+	 * range value. The query uses the target relation's attno, so translate
+	 * it to the child attno when the child has a different column layout.
+	 */
+	if (map)
+		leafState->fp_rangeAttno = map->attrMap->attnums[fpoState->fp_rangeAttno - 1];
+	else
+		leafState->fp_rangeAttno = fpoState->fp_rangeAttno;
+
+	/*
+	 * For partitioned tables we must read the leftovers using the child
+	 * table's tuple descriptor, but then insert them into the root table
+	 * (using its tuple descriptor) so we get tuple routing.
+	 *
+	 * For traditional table inheritance, we read and insert directly into
+	 * this resultRelInfo; no tuple routing via the parent is required.
+	 */
+	if (rootRelInfo->ri_RelationDesc->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		leafState->fp_leftover = fpoState->fp_leftover;
+	else
+		leafState->fp_leftover =
+			ExecInitExtraTupleSlot(mtstate->ps.state,
+								   RelationGetDescr(resultRelInfo->ri_RelationDesc),
+								   &TTSOpsVirtual);
+
+	/* Each child relation needs a slot matching its tuple descriptor. */
+	leafState->fp_existing =
+		table_slot_create(resultRelInfo->ri_RelationDesc,
+						  &mtstate->ps.state->es_tupleTable);
+
+	resultRelInfo->ri_forPortionOf = leafState;
+
+	MemoryContextSwitchTo(oldcxt);
 }

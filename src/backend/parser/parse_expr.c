@@ -566,6 +566,13 @@ checkColumnRefAllowed(ParseState *pstate, ParseExprKind exprKind, int location)
 			/* okay */
 			break;
 
+		case EXPR_KIND_FOR_PORTION:
+			/*
+			 * Actual columns are forbidden, but we need to allow PL/pgSQL
+			 * variables, so we enforce this in checkForPortionOfBound.
+			 */
+			break;
+
 		case EXPR_KIND_COLUMN_DEFAULT:
 			err = _("cannot use column reference in DEFAULT expression");
 			break;
@@ -1882,6 +1889,9 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 			break;
 		case EXPR_KIND_GENERATED_COLUMN:
 			err = _("cannot use subquery in column generation expression");
+			break;
+		case EXPR_KIND_FOR_PORTION:
+			err = _("cannot use subquery in FOR PORTION OF expression");
 			break;
 
 			/*
@@ -3242,6 +3252,8 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "GENERATED AS";
 		case EXPR_KIND_CYCLE_MARK:
 			return "CYCLE";
+		case EXPR_KIND_FOR_PORTION:
+			return "FOR PORTION OF";
 
 			/*
 			 * There is intentionally no default: case here, so that the
