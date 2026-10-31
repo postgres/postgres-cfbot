@@ -1224,6 +1224,148 @@ pg_latin1_verifystr(const unsigned char *s, int len)
 		return nullpos - s;
 }
 
+/*
+ * Some single-byte encodings leave byte values unassigned.  We reject those
+ * as well as NUL, so that the database can't hold bytes that have no
+ * character and so can't be converted to any other encoding.  Each bitmap
+ * covers the bytes 0x80 to 0xFF, and has a bit set for each byte with no
+ * entry in the encoding's *_to_utf8.map.  The comments list those bytes.
+ */
+
+/*
+ * A1 A2 A3 A5 A6 A7 A8 A9 AA AB AE AF B0 B1 B2 B3 B4 B5 B6 B7 B8 B9
+ * BA BC BD BE C0 DB DC DD DE DF F3 F4 F5 F6 F7 F8 F9 FA FB FC FD FE
+ * FF
+ */
+static const uint64 iso_8859_6_unassigned[2] = {
+	UINT64CONST(0x77FFCFEE00000000), UINT64CONST(0xFFF80000F8000001)
+};
+
+/* AE D2 FF */
+static const uint64 iso_8859_7_unassigned[2] = {
+	UINT64CONST(0x0000400000000000), UINT64CONST(0x8000000000040000)
+};
+
+/*
+ * A1 BF C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF D0 D1 D2 D3
+ * D4 D5 D6 D7 D8 D9 DA DB DC DD DE FB FC FF
+ */
+static const uint64 iso_8859_8_unassigned[2] = {
+	UINT64CONST(0x8000000200000000), UINT64CONST(0x980000007FFFFFFF)
+};
+
+/* A5 AE BE C3 D0 E3 F0 */
+static const uint64 latin3_unassigned[2] = {
+	UINT64CONST(0x4000402000000000), UINT64CONST(0x0001000800010008)
+};
+
+/* 81 83 88 90 98 */
+static const uint64 win1250_unassigned[2] = {
+	UINT64CONST(0x000000000101010A), UINT64CONST(0x0000000000000000)
+};
+
+/* 98 */
+static const uint64 win1251_unassigned[2] = {
+	UINT64CONST(0x0000000001000000), UINT64CONST(0x0000000000000000)
+};
+
+/* 81 8D 8F 90 9D */
+static const uint64 win1252_unassigned[2] = {
+	UINT64CONST(0x000000002001A002), UINT64CONST(0x0000000000000000)
+};
+
+/* 81 88 8A 8C 8D 8E 8F 90 98 9A 9C 9D 9E 9F AA D2 FF */
+static const uint64 win1253_unassigned[2] = {
+	UINT64CONST(0x00000400F501F502), UINT64CONST(0x8000000000040000)
+};
+
+/* 81 8D 8E 8F 90 9D 9E */
+static const uint64 win1254_unassigned[2] = {
+	UINT64CONST(0x000000006001E002), UINT64CONST(0x0000000000000000)
+};
+
+/*
+ * 81 8A 8C 8D 8E 8F 90 9A 9C 9D 9E 9F CA D9 DA DB DC DD DE DF FB FC
+ * FF
+ */
+static const uint64 win1255_unassigned[2] = {
+	UINT64CONST(0x00000000F401F402), UINT64CONST(0x98000000FE000400)
+};
+
+/* 81 83 88 8A 8C 90 98 9A 9C 9F A1 A5 */
+static const uint64 win1257_unassigned[2] = {
+	UINT64CONST(0x000000229501150A), UINT64CONST(0x0000000000000000)
+};
+
+/* 81 8A 8D 8E 8F 90 9A 9D 9E */
+static const uint64 win1258_unassigned[2] = {
+	UINT64CONST(0x000000006401E402), UINT64CONST(0x0000000000000000)
+};
+
+/*
+ * 81 82 83 84 86 87 88 89 8A 8B 8C 8D 8E 8F 90 98 99 9A 9B 9C 9D 9E
+ * 9F DB DC DD DE FC FD FE FF
+ */
+static const uint64 win874_unassigned[2] = {
+	UINT64CONST(0x00000000FF01FFDE), UINT64CONST(0xF000000078000000)
+};
+
+static inline bool
+singlebyte_is_valid(unsigned char c, const uint64 *unassigned)
+{
+	/* No branches here, as text often mixes ASCII and high-bit bytes */
+	uint64		hole = (unassigned[(c >> 6) & 1] >> (c & 63)) & (c >> 7);
+
+	return (c != '\0') & ((hole & 1) == 0);
+}
+
+static int
+pg_singlebyte_verifystr(const unsigned char *s, int len,
+						const uint64 *unassigned)
+{
+	const unsigned char *start = s;
+
+	while (len > 0)
+	{
+		int			n = Min(len, (int) sizeof(Vector8));
+
+		/* Skip a chunk of plain ASCII quickly, else check it byte by byte */
+		if (n < (int) sizeof(Vector8) || !is_valid_ascii(s, n))
+		{
+			for (int i = 0; i < n; i++)
+			{
+				if (!singlebyte_is_valid(s[i], unassigned))
+					return s + i - start;
+			}
+		}
+		s += n;
+		len -= n;
+	}
+
+	return s - start;
+}
+
+#define SINGLEBYTE_VERIFYSTR(enc) \
+static int \
+pg_##enc##_verifystr(const unsigned char *s, int len) \
+{ \
+	return pg_singlebyte_verifystr(s, len, enc##_unassigned); \
+}
+
+SINGLEBYTE_VERIFYSTR(iso_8859_6)
+SINGLEBYTE_VERIFYSTR(iso_8859_7)
+SINGLEBYTE_VERIFYSTR(iso_8859_8)
+SINGLEBYTE_VERIFYSTR(latin3)
+SINGLEBYTE_VERIFYSTR(win1250)
+SINGLEBYTE_VERIFYSTR(win1251)
+SINGLEBYTE_VERIFYSTR(win1252)
+SINGLEBYTE_VERIFYSTR(win1253)
+SINGLEBYTE_VERIFYSTR(win1254)
+SINGLEBYTE_VERIFYSTR(win1255)
+SINGLEBYTE_VERIFYSTR(win1257)
+SINGLEBYTE_VERIFYSTR(win1258)
+SINGLEBYTE_VERIFYSTR(win874)
+
 static int
 pg_sjis_verifychar(const unsigned char *s, int len)
 {
@@ -1872,7 +2014,7 @@ const pg_wchar_tbl pg_wchar_table[] = {
 	[PG_UTF8] = {pg_utf2wchar_with_len, pg_wchar2utf_with_len, pg_utf_mblen, pg_utf_dsplen, pg_utf8_verifychar, pg_utf8_verifystr, 4},
 	[PG_LATIN1] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
 	[PG_LATIN2] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_LATIN3] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
+	[PG_LATIN3] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin3_verifystr, 1},
 	[PG_LATIN4] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
 	[PG_LATIN5] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
 	[PG_LATIN6] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
@@ -1881,21 +2023,21 @@ const pg_wchar_tbl pg_wchar_table[] = {
 	[PG_LATIN9] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
 	[PG_LATIN10] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
 	[PG_WIN1256] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1258] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
+	[PG_WIN1258] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1258_verifystr, 1},
 	[PG_WIN866] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN874] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
+	[PG_WIN874] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win874_verifystr, 1},
 	[PG_KOI8R] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1251] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1252] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
+	[PG_WIN1251] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1251_verifystr, 1},
+	[PG_WIN1252] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1252_verifystr, 1},
 	[PG_ISO_8859_5] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_ISO_8859_6] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_ISO_8859_7] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_ISO_8859_8] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1250] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1253] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1254] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1255] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
-	[PG_WIN1257] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
+	[PG_ISO_8859_6] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_iso_8859_6_verifystr, 1},
+	[PG_ISO_8859_7] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_iso_8859_7_verifystr, 1},
+	[PG_ISO_8859_8] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_iso_8859_8_verifystr, 1},
+	[PG_WIN1250] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1250_verifystr, 1},
+	[PG_WIN1253] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1253_verifystr, 1},
+	[PG_WIN1254] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1254_verifystr, 1},
+	[PG_WIN1255] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1255_verifystr, 1},
+	[PG_WIN1257] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_win1257_verifystr, 1},
 	[PG_KOI8U] = {pg_latin12wchar_with_len, pg_wchar2single_with_len, pg_latin1_mblen, pg_latin1_dsplen, pg_latin1_verifychar, pg_latin1_verifystr, 1},
 	[PG_SJIS] = {0, 0, pg_sjis_mblen, pg_sjis_dsplen, pg_sjis_verifychar, pg_sjis_verifystr, 2},
 	[PG_BIG5] = {0, 0, pg_big5_mblen, pg_big5_dsplen, pg_big5_verifychar, pg_big5_verifystr, 2},

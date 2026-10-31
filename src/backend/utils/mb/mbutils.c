@@ -1729,17 +1729,18 @@ pg_verify_mbstr_len(int encoding, const char *mbstr, int len, bool noError)
 	Assert(PG_VALID_ENCODING(encoding));
 
 	/*
-	 * In single-byte encodings, we need only reject nulls (\0).
+	 * In single-byte encodings, the string length is the character count.
 	 */
 	if (pg_encoding_max_length(encoding) <= 1)
 	{
-		const char *nullpos = memchr(mbstr, 0, len);
+		int			oklen;
 
-		if (nullpos == NULL)
+		oklen = pg_wchar_table[encoding].mbverifystr((const unsigned char *) mbstr, len);
+		if (oklen == len)
 			return len;
 		if (noError)
 			return -1;
-		report_invalid_encoding(encoding, nullpos, 1);
+		report_invalid_encoding(encoding, mbstr + oklen, 1);
 	}
 
 	/* fetch function pointer just once */
