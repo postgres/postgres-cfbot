@@ -18,6 +18,8 @@
 #ifndef INSTRUMENT_NODE_H
 #define INSTRUMENT_NODE_H
 
+#include "storage/buf.h"
+
 /*
  * Offset added to plan_node_id to create a second TOC key for per-worker scan
  * instrumentation. Instrumentation and parallel-awareness are independent, so
@@ -78,6 +80,10 @@ typedef struct IOStats
 typedef struct TableScanInstrumentation
 {
 	IOStats		io;
+
+	/* Buffer access strategy reported by the table AM, if available. */
+	BufferAccessStrategyType strategy;
+	bool		strategy_valid;
 } TableScanInstrumentation;
 
 /* merge IO statistics from 'src' into 'dst' */
@@ -96,6 +102,25 @@ AccumulateIOStats(IOStats *dst, IOStats *src)
 	dst->io_in_progress += src->io_in_progress;
 }
 
+/*
+ * Combine table scan instrumentation from 'src' into 'dst'.
+ *
+ * I/O statistics are accumulated, while the strategy from 'src' replaces the
+ * strategy in 'dst' when available.
+ */
+static inline void
+CombineTableScanInstrumentation(TableScanInstrumentation *dst,
+								TableScanInstrumentation *src)
+{
+	AccumulateIOStats(&dst->io, &src->io);
+
+	if (src->strategy_valid)
+	{
+		dst->strategy = src->strategy;
+		dst->strategy_valid = true;
+	}
+}
+
 
 /* ---------------------
  *	Instrumentation information for index scans (used by all AM interfaces)
@@ -108,7 +133,54 @@ typedef struct IndexScanInstrumentation
 
 	/* Table tuples fetched count (incremented during index-only scans) */
 	uint64		ntabletuplefetches;
+
+	/* Whether the index AM should record its buffer access strategy */
+	bool		need_strategy;
+
+	/* Most recently reported buffer access strategy, if available */
+	BufferAccessStrategyType strategy;
+	bool		strategy_valid;
 } IndexScanInstrumentation;
+
+/*
+ * Record the buffer access strategy selected by an index AM.
+ *
+ * The strategy is recorded only when requested by the executor.  The most
+ * recently reported strategy is retained.
+ */
+static inline void
+InstrRecordIndexScanStrategy(IndexScanInstrumentation *instrument,
+							 BufferAccessStrategyType strategy)
+{
+	if (!instrument)
+		return;
+
+	if (instrument->need_strategy)
+	{
+		instrument->strategy = strategy;
+		instrument->strategy_valid = true;
+	}
+}
+
+/*
+ * Combine index scan instrumentation from 'src' into 'dst'.
+ *
+ * Counter values are added, while the strategy from 'src' replaces the
+ * strategy in 'dst' when available.
+ */
+static inline void
+CombineIndexScanInstrumentation(IndexScanInstrumentation *dst,
+								IndexScanInstrumentation *src)
+{
+	dst->nsearches += src->nsearches;
+	dst->ntabletuplefetches += src->ntabletuplefetches;
+
+	if (src->strategy_valid)
+	{
+		dst->strategy = src->strategy;
+		dst->strategy_valid = true;
+	}
+}
 
 /*
  * Shared memory container for per-worker information
@@ -308,6 +380,43 @@ typedef struct SharedSeqScanInstrumentation
 	int			num_workers;
 	SeqScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
 } SharedSeqScanInstrumentation;
+
+
+/* ---------------------
+ *	Instrumentation information for sample scans
+ * ---------------------
+ */
+typedef struct SampleScanInstrumentation
+{
+	TableScanInstrumentation stats;
+} SampleScanInstrumentation;
+
+/*
+ * Shared memory container for per-worker information
+ */
+typedef struct SharedSampleScanInstrumentation
+{
+	int			num_workers;
+	SampleScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedSampleScanInstrumentation;
+
+/* ---------------------
+ *	Instrumentation information for TID scans
+ * ---------------------
+ */
+typedef struct TidScanInstrumentation
+{
+	TableScanInstrumentation stats;
+} TidScanInstrumentation;
+
+/*
+ * Shared memory container for per-worker information
+ */
+typedef struct SharedTidScanInstrumentation
+{
+	int			num_workers;
+	TidScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedTidScanInstrumentation;
 
 
 /*

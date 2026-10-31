@@ -2130,6 +2130,7 @@ include_dir 'conf.d'
       <listitem>
        <para>
         Specifies the size of the
+        <literal>vacuum</literal>
         <glossterm linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
         used by the <command>VACUUM</command> and <command>ANALYZE</command>
         commands.  A setting of <literal>0</literal> will allow the operation
@@ -10133,6 +10134,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
          When the failsafe is triggered, any cost-based delay that is
          in effect will no longer be applied, further non-essential
          maintenance tasks (such as index vacuuming) are bypassed, and any
+         <literal>vacuum</literal>
          <glossterm linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
          in use will be disabled resulting in <command>VACUUM</command> being
          free to make use of all of

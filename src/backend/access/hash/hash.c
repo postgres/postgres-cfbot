@@ -419,6 +419,8 @@ hashrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	HashScanOpaque so = (HashScanOpaque) scan->opaque;
 	Relation	rel = scan->indexRelation;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	if (HashScanPosIsValid(so->currPos))
 	{
 		/* Before leaving current page, deal with any killed items */

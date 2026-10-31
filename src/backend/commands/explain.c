@@ -140,6 +140,9 @@ static void show_hashagg_info(AggState *aggstate, ExplainState *es);
 static void show_indexscan_info(PlanState *planstate, ExplainState *es);
 static void show_tidbitmap_info(BitmapHeapScanState *planstate,
 								ExplainState *es);
+static void print_buffer_access_strategy(ExplainState *es,
+										 BufferAccessStrategyType strategy);
+static void show_scan_buffer_access_strategy(ScanState *planstate, ExplainState *es);
 static void show_scan_io_usage(ScanState *planstate,
 							   ExplainState *es);
 static void show_instrumentation_count(const char *qlabel, int which,
@@ -2010,6 +2013,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			show_tidbitmap_info((BitmapHeapScanState *) planstate, es);
+			show_scan_buffer_access_strategy((ScanState *) planstate, es);
 			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_SampleScan:
@@ -2029,6 +2033,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										   planstate, es);
 			if (IsA(plan, CteScan))
 				show_ctescan_info(castNode(CteScanState, planstate), es);
+			show_scan_buffer_access_strategy((ScanState *) planstate, es);
 			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_Gather:
@@ -2129,6 +2134,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (plan->qual)
 					show_instrumentation_count("Rows Removed by Filter", 1,
 											   planstate, es);
+				show_scan_buffer_access_strategy((ScanState *) planstate, es);
 			}
 			break;
 		case T_TidRangeScan:
@@ -2146,6 +2152,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (plan->qual)
 					show_instrumentation_count("Rows Removed by Filter", 1,
 											   planstate, es);
+				show_scan_buffer_access_strategy((ScanState *) planstate, es);
 				show_scan_io_usage((ScanState *) planstate, es);
 			}
 			break;
@@ -3904,8 +3911,10 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 {
 	Plan	   *plan = planstate->plan;
 	SharedIndexScanInstrumentation *SharedInfo = NULL;
-	uint64		nsearches = 0,
-				ntabletuplefetches = 0;
+	WorkerNodeInstrumentation *worker_instrument = planstate->worker_instrument;
+	IndexScanInstrumentation stats = {0};
+	double		leader_nloops = planstate->instrument ?
+		planstate->instrument->nloops : 0;
 
 	if (!es->analyze)
 		return;
@@ -3917,7 +3926,7 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 			{
 				IndexScanState *indexstate = ((IndexScanState *) planstate);
 
-				nsearches = indexstate->iss_Instrument->nsearches;
+				stats = *indexstate->iss_Instrument;
 				SharedInfo = indexstate->iss_SharedInfo;
 				break;
 			}
@@ -3925,8 +3934,7 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 			{
 				IndexOnlyScanState *indexstate = ((IndexOnlyScanState *) planstate);
 
-				nsearches = indexstate->ioss_Instrument->nsearches;
-				ntabletuplefetches = indexstate->ioss_Instrument->ntabletuplefetches;
+				stats = *indexstate->ioss_Instrument;
 				SharedInfo = indexstate->ioss_SharedInfo;
 				break;
 			}
@@ -3934,12 +3942,23 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 			{
 				BitmapIndexScanState *indexstate = ((BitmapIndexScanState *) planstate);
 
-				nsearches = indexstate->biss_Instrument->nsearches;
+				stats = *indexstate->biss_Instrument;
 				SharedInfo = indexstate->biss_SharedInfo;
 				break;
 			}
 		default:
 			break;
+	}
+
+	if (worker_instrument)
+	{
+		/*
+		 * After parallel cleanup, the node's loop count includes worker
+		 * loops. Remove them to determine whether the leader executed the
+		 * scan.
+		 */
+		for (int i = 0; i < worker_instrument->num_workers; ++i)
+			leader_nloops -= worker_instrument->instrument[i].nloops;
 	}
 
 	/* Next get the sum of the counters set within each and every process */
@@ -3948,16 +3967,32 @@ show_indexscan_info(PlanState *planstate, ExplainState *es)
 		for (int i = 0; i < SharedInfo->num_workers; ++i)
 		{
 			IndexScanInstrumentation *winstrument = &SharedInfo->winstrument[i];
+			double		worker_nloops =
+				worker_instrument && i < worker_instrument->num_workers ?
+				worker_instrument->instrument[i].nloops : 0;
 
-			nsearches += winstrument->nsearches;
-			ntabletuplefetches += winstrument->ntabletuplefetches;
+			stats.nsearches += winstrument->nsearches;
+			stats.ntabletuplefetches += winstrument->ntabletuplefetches;
+
+			if (!es->buffers || worker_nloops <= 0 ||
+				!winstrument->strategy_valid)
+				continue;
+
+			if (es->workers_state)
+				ExplainOpenWorker(i, es);
+			print_buffer_access_strategy(es, winstrument->strategy);
+			if (es->workers_state)
+				ExplainCloseWorker(i, es);
 		}
 	}
 
-	if (nodeTag(plan) == T_IndexOnlyScan)
-		ExplainPropertyUInteger("Heap Fetches", NULL, ntabletuplefetches, es);
+	if (es->buffers && stats.strategy_valid && leader_nloops > 0)
+		print_buffer_access_strategy(es, stats.strategy);
 
-	ExplainPropertyUInteger("Index Searches", NULL, nsearches, es);
+	if (nodeTag(plan) == T_IndexOnlyScan)
+		ExplainPropertyUInteger("Heap Fetches", NULL, stats.ntabletuplefetches, es);
+
+	ExplainPropertyUInteger("Index Searches", NULL, stats.nsearches, es);
 }
 
 /*
@@ -4028,6 +4063,38 @@ show_tidbitmap_info(BitmapHeapScanState *planstate, ExplainState *es)
 }
 
 /*
+ * Return the name of a buffer access strategy for EXPLAIN.
+ */
+static const char *
+buffer_access_strategy_name(BufferAccessStrategyType strategy)
+{
+	switch (strategy)
+	{
+		case BAS_NORMAL:
+			return "normal";
+		case BAS_BULKREAD:
+			return "bulkread";
+		case BAS_BULKWRITE:
+			return "bulkwrite";
+		case BAS_VACUUM:
+			return "vacuum";
+	}
+
+	elog(ERROR, "unrecognized buffer access strategy type: %d", strategy);
+	pg_unreachable();
+}
+
+/*
+ * Print the buffer access strategy.
+ */
+static void
+print_buffer_access_strategy(ExplainState *es,
+							 BufferAccessStrategyType strategy)
+{
+	ExplainPropertyText("Buffer Access Strategy", buffer_access_strategy_name(strategy), es);
+}
+
+/*
  * Print I/O stats - prefetching and I/O performed
  *
  * This prints two types of stats - "prefetch" about the prefetching done by
@@ -4088,16 +4155,159 @@ print_io_usage(ExplainState *es, IOStats *stats)
 }
 
 /*
+ * Return table scan instrumentation for the leader or a parallel worker.
+ *
+ * Pass a negative worker number for the leader. Return NULL if the process
+ * has no scan instrumentation or the node type does not collect it.
+ */
+static TableScanInstrumentation *
+get_table_scan_instrumentation(ScanState *planstate, int worker)
+{
+	if (worker < 0)
+	{
+		if (planstate->ss_currentScanDesc)
+			return planstate->ss_currentScanDesc->rs_instrument;
+
+		return NULL;
+	}
+
+	switch (nodeTag(planstate->ps.plan))
+	{
+		case T_BitmapHeapScan:
+			{
+				SharedBitmapHeapInstrumentation *sinstrument =
+					((BitmapHeapScanState *) planstate)->sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
+		case T_SampleScan:
+			{
+				SharedSampleScanInstrumentation *sinstrument =
+					((SampleScanState *) planstate)->sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
+		case T_SeqScan:
+			{
+				SharedSeqScanInstrumentation *sinstrument =
+					((SeqScanState *) planstate)->sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
+		case T_TidScan:
+			{
+				SharedTidScanInstrumentation *sinstrument =
+					((TidScanState *) planstate)->tss_sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
+		case T_TidRangeScan:
+			{
+				SharedTidRangeScanInstrumentation *sinstrument =
+					((TidRangeScanState *) planstate)->trss_sinstrument;
+
+				if (sinstrument && worker < sinstrument->num_workers)
+					return &sinstrument->sinstrument[worker].stats;
+				break;
+			}
+		default:
+			break;
+	}
+
+	return NULL;
+}
+
+/*
+ * Show the buffer access strategy for a scan node.
+ */
+static void
+show_scan_buffer_access_strategy(ScanState *planstate, ExplainState *es)
+{
+	WorkerNodeInstrumentation *worker_instrument = planstate->ps.worker_instrument;
+	TableScanInstrumentation *instrument;
+	double		leader_nloops = planstate->ps.instrument ?
+		planstate->ps.instrument->nloops : 0;
+
+	if (!es->buffers)
+		return;
+
+	/* Report the buffer access strategy only for these scan types. */
+	switch (nodeTag(planstate->ps.plan))
+	{
+		case T_BitmapHeapScan:
+		case T_SampleScan:
+		case T_SeqScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+			break;
+		default:
+			return;
+	}
+
+	instrument = get_table_scan_instrumentation(planstate, -1);
+
+	if (worker_instrument)
+	{
+		/*
+		 * After parallel cleanup, the node's loop count includes worker
+		 * loops. Remove them to determine whether the leader executed the
+		 * scan.
+		 */
+		for (int i = 0; i < worker_instrument->num_workers; ++i)
+		{
+			double		worker_nloops = worker_instrument->instrument[i].nloops;
+			TableScanInstrumentation *winstrument =
+				get_table_scan_instrumentation(planstate, i);
+
+			leader_nloops -= worker_nloops;
+
+			if (!winstrument || !winstrument->strategy_valid ||
+				worker_nloops <= 0)
+				continue;
+
+			if (es->workers_state)
+				ExplainOpenWorker(i, es);
+			print_buffer_access_strategy(es, winstrument->strategy);
+			if (es->workers_state)
+				ExplainCloseWorker(i, es);
+		}
+	}
+
+	if (instrument && instrument->strategy_valid && leader_nloops > 0)
+		print_buffer_access_strategy(es, instrument->strategy);
+}
+
+/*
  * Show information about prefetch and I/O in a scan node.
  */
 static void
 show_scan_io_usage(ScanState *planstate, ExplainState *es)
 {
-	Plan	   *plan = planstate->ps.plan;
+	TableScanInstrumentation *instrument;
 	IOStats		stats = {0};
 
 	if (!es->io)
 		return;
+
+	/* I/O usage is reported only for these scan types */
+	switch (nodeTag(planstate->ps.plan))
+	{
+		case T_BitmapHeapScan:
+		case T_SeqScan:
+		case T_TidRangeScan:
+			break;
+		default:
+			/* ignore other plans */
+			return;
+	}
 
 	/*
 	 * Initialize counters with stats from the local process first.
@@ -4106,92 +4316,29 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 	 * because of debug_parallel_query=regress. We still want to collect data
 	 * from workers.
 	 */
-	if (planstate->ss_currentScanDesc &&
-		planstate->ss_currentScanDesc->rs_instrument)
-	{
-		stats = planstate->ss_currentScanDesc->rs_instrument->io;
-	}
+	instrument = get_table_scan_instrumentation(planstate, -1);
+	if (instrument)
+		stats = instrument->io;
 
 	/*
 	 * Accumulate data from parallel workers (if any).
 	 */
-	switch (nodeTag(plan))
+	for (int i = 0;; ++i)
 	{
-		case T_BitmapHeapScan:
-			{
-				SharedBitmapHeapInstrumentation *sinstrument
-				= ((BitmapHeapScanState *) planstate)->sinstrument;
+		TableScanInstrumentation *winstrument =
+			get_table_scan_instrumentation(planstate, i);
 
-				if (sinstrument)
-				{
-					for (int i = 0; i < sinstrument->num_workers; ++i)
-					{
-						BitmapHeapScanInstrumentation *winstrument = &sinstrument->sinstrument[i];
+		if (!winstrument)
+			break;
 
-						AccumulateIOStats(&stats, &winstrument->stats.io);
+		AccumulateIOStats(&stats, &winstrument->io);
 
-						if (!es->workers_state)
-							continue;
+		if (!es->workers_state)
+			continue;
 
-						ExplainOpenWorker(i, es);
-						print_io_usage(es, &winstrument->stats.io);
-						ExplainCloseWorker(i, es);
-					}
-				}
-
-				break;
-			}
-		case T_SeqScan:
-			{
-				SharedSeqScanInstrumentation *sinstrument
-				= ((SeqScanState *) planstate)->sinstrument;
-
-				if (sinstrument)
-				{
-					for (int i = 0; i < sinstrument->num_workers; ++i)
-					{
-						SeqScanInstrumentation *winstrument = &sinstrument->sinstrument[i];
-
-						AccumulateIOStats(&stats, &winstrument->stats.io);
-
-						if (!es->workers_state)
-							continue;
-
-						ExplainOpenWorker(i, es);
-						print_io_usage(es, &winstrument->stats.io);
-						ExplainCloseWorker(i, es);
-					}
-				}
-
-				break;
-			}
-		case T_TidRangeScan:
-			{
-				SharedTidRangeScanInstrumentation *sinstrument
-				= ((TidRangeScanState *) planstate)->trss_sinstrument;
-
-				if (sinstrument)
-				{
-					for (int i = 0; i < sinstrument->num_workers; ++i)
-					{
-						TidRangeScanInstrumentation *winstrument = &sinstrument->sinstrument[i];
-
-						AccumulateIOStats(&stats, &winstrument->stats.io);
-
-						if (!es->workers_state)
-							continue;
-
-						ExplainOpenWorker(i, es);
-						print_io_usage(es, &winstrument->stats.io);
-						ExplainCloseWorker(i, es);
-					}
-				}
-
-				break;
-			}
-		default:
-			/* ignore other plans */
-			return;
+		ExplainOpenWorker(i, es);
+		print_io_usage(es, &winstrument->io);
+		ExplainCloseWorker(i, es);
 	}
 
 	print_io_usage(es, &stats);

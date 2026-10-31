@@ -964,6 +964,8 @@ void
 brinrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 		   ScanKey orderbys, int norderbys)
 {
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	/*
 	 * Other index AMs preprocess the scan keys at this point, or sometime
 	 * early during the scan; this lets them optimize by removing redundant
