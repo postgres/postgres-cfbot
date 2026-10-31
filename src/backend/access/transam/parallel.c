@@ -1035,6 +1035,63 @@ DestroyParallelContext(ParallelContext *pcxt)
 }
 
 /*
+ * Helpers for passing the current query text down to parallel workers.
+ */
+
+/*
+ * Reserve DSM space for the query text, if any.
+ *
+ * Returns the length of the query text (or 0 if there is none), which the
+ * caller must pass on to StoreParallelQueryText, so that the space allocated
+ * always matches the space reserved.
+ */
+int
+EstimateParallelQueryText(ParallelContext *pcxt)
+{
+	int			querylen;
+
+	if (!debug_query_string)
+		return 0;
+
+	querylen = strlen(debug_query_string);
+	shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+
+	return querylen;
+}
+
+/*
+ * Copy the query text into DSM under the given key, if any.  querylen is the
+ * value returned by EstimateParallelQueryText.
+ */
+void
+StoreParallelQueryText(ParallelContext *pcxt, uint64 key, int querylen)
+{
+	char	   *sharedquery;
+
+	if (!debug_query_string)
+		return;
+
+	Assert(strlen(debug_query_string) == querylen);
+
+	sharedquery = (char *) shm_toc_allocate(pcxt->toc, querylen + 1);
+	memcpy(sharedquery, debug_query_string, querylen + 1);
+	shm_toc_insert(pcxt->toc, key, sharedquery);
+}
+
+/*
+ * Restore the query text in a worker: set debug_query_string and report it as
+ * the current activity.  The key is looked up with missing_ok, so when the
+ * leader stored no text this sets debug_query_string to NULL.
+ */
+void
+RestoreParallelQueryText(shm_toc *toc, uint64 key)
+{
+	debug_query_string = shm_toc_lookup(toc, key, true);
+	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+}
+
+/*
  * Are there any parallel contexts currently active?
  */
 bool

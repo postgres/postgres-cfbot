@@ -383,14 +383,7 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/* Finally, estimate PARALLEL_VACUUM_KEY_QUERY_TEXT space */
-	if (debug_query_string)
-	{
-		querylen = strlen(debug_query_string);
-		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
-		shm_toc_estimate_keys(&pcxt->estimator, 1);
-	}
-	else
-		querylen = 0;			/* keep compiler quiet */
+	querylen = EstimateParallelQueryText(pcxt);
 
 	InitializeParallelDSM(pcxt);
 
@@ -494,16 +487,7 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	pvs->wal_usage = wal_usage;
 
 	/* Store query string for workers */
-	if (debug_query_string)
-	{
-		char	   *sharedquery;
-
-		sharedquery = (char *) shm_toc_allocate(pcxt->toc, querylen + 1);
-		memcpy(sharedquery, debug_query_string, querylen + 1);
-		sharedquery[querylen] = '\0';
-		shm_toc_insert(pcxt->toc,
-					   PARALLEL_VACUUM_KEY_QUERY_TEXT, sharedquery);
-	}
+	StoreParallelQueryText(pcxt, PARALLEL_VACUUM_KEY_QUERY_TEXT, querylen);
 
 	/* Success -- return parallel vacuum state */
 	return pvs;
@@ -1271,7 +1255,6 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	BufferUsage *buffer_usage;
 	WalUsage   *wal_usage;
 	int			nindexes;
-	char	   *sharedquery;
 	ErrorContextCallback errcallback;
 
 	/*
@@ -1296,9 +1279,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	shared = (PVShared *) shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_SHARED, false);
 
 	/* Set debug_query_string for individual workers */
-	sharedquery = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_QUERY_TEXT, true);
-	debug_query_string = sharedquery;
-	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+	RestoreParallelQueryText(toc, PARALLEL_VACUUM_KEY_QUERY_TEXT);
 
 	/* Track query ID */
 	pgstat_report_query_id(shared->queryid, false);

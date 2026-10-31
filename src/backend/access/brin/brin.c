@@ -36,7 +36,6 @@
 #include "storage/bufmgr.h"
 #include "storage/freespace.h"
 #include "storage/proc.h"
-#include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
@@ -2400,14 +2399,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
-	if (debug_query_string)
-	{
-		querylen = strlen(debug_query_string);
-		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
-		shm_toc_estimate_keys(&pcxt->estimator, 1);
-	}
-	else
-		querylen = 0;			/* keep compiler quiet */
+	querylen = EstimateParallelQueryText(pcxt);
 
 	/* Everyone's had a chance to ask for space, so now create the DSM */
 	InitializeParallelDSM(pcxt);
@@ -2445,14 +2437,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_TUPLESORT, sharedsort);
 
 	/* Store query string for workers */
-	if (debug_query_string)
-	{
-		char	   *sharedquery;
-
-		sharedquery = (char *) shm_toc_allocate(pcxt->toc, querylen + 1);
-		memcpy(sharedquery, debug_query_string, querylen + 1);
-		shm_toc_insert(pcxt->toc, PARALLEL_KEY_QUERY_TEXT, sharedquery);
-	}
+	StoreParallelQueryText(pcxt, PARALLEL_KEY_QUERY_TEXT, querylen);
 
 	/*
 	 * Allocate space for each worker's WalUsage and BufferUsage; no need to
@@ -2777,7 +2762,6 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 void
 _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
-	char	   *sharedquery;
 	BrinShared *brinshared;
 	Sharedsort *sharedsort;
 	BrinBuildState *buildstate;
@@ -2794,12 +2778,8 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Assert((MyProc->statusFlags == 0) ||
 		   (MyProc->statusFlags == PROC_IN_SAFE_IC));
 
-	/* Set debug_query_string for individual workers first */
-	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, true);
-	debug_query_string = sharedquery;
-
-	/* Report the query string from leader */
-	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+	/* Set debug_query_string and report the query string from leader */
+	RestoreParallelQueryText(toc, PARALLEL_KEY_QUERY_TEXT);
 
 	/* Look up brin shared state */
 	brinshared = shm_toc_lookup(toc, PARALLEL_KEY_BRIN_SHARED, false);
