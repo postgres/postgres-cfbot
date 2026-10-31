@@ -1,0 +1,4 @@
+comment = 'Test overload-capture protection for a superuser = false extension'
+default_version = '1.0'
+relocatable = false
+superuser = false
