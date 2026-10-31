@@ -6,6 +6,7 @@ backend_sources += files(
   'detoast.c',
   'heaptuple.c',
   'indextuple.c',
+  'parallel_index_build.c',
   'printsimple.c',
   'printtup.c',
   'relation.c',

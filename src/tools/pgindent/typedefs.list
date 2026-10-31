@@ -2146,6 +2146,7 @@ ParallelHashGrowth
 ParallelHashJoinBatch
 ParallelHashJoinBatchAccessor
 ParallelHashJoinState
+ParallelIndexBuildShared
 ParallelIndexScanDesc
 ParallelSlot
 ParallelSlotArray
