@@ -260,6 +260,15 @@ static bool use_quiet;			/* quiet logging onto stderr */
 static int	agg_interval;		/* log aggregates instead of individual
 								 * transactions */
 static bool per_script_stats = false;	/* whether to collect stats per script */
+
+/*
+ * which latency percentiles to show in the final
+ * report, in addition to min/max (--latency-percentiles)
+ */
+#define MAX_LATENCY_PERCENTILES 10
+static double latency_percentiles[MAX_LATENCY_PERCENTILES];
+static int	num_latency_percentiles = 0;
+
 static int	progress = 0;		/* thread progress report every this seconds */
 static bool progress_timestamp = false; /* progress report with Unix time */
 static int	nclients = 1;		/* number of clients */
@@ -365,6 +374,24 @@ typedef struct SimpleStats
 } SimpleStats;
 
 /*
+ * Log-scale histogram of latency values in microseconds.
+ *
+ * 32 sub-buckets per binary octave, covering [0 .. 2^32) usec (~71 min);
+ * everything at or above 2^31 usec falls (clamped) into the last bucket,
+ * which is treated as an overflow counter (see latencyHistogramPercentile).
+ * ~1024 uint32 counters = 4 KB, no allocations, merged exactly by
+ * element-wise addition.
+ */
+#define LAT_HIST_OCTAVES	32	/* [0 .. 2^31) usec, plus overflow */
+#define LAT_HIST_SUBBCPTS	32	/* sub-buckets per octave */
+#define LAT_HIST_BUCKETS	(LAT_HIST_OCTAVES * LAT_HIST_SUBBCPTS)
+
+typedef struct LatencyHistogram
+{
+	uint32		buckets[LAT_HIST_BUCKETS];	/* values in usec */
+}			LatencyHistogram;
+
+/*
  * The instr_time type is expensive when dealing with time arithmetic.  Define
  * a type to hold microseconds instead.  Type int64 is good enough for about
  * 584500 years.
@@ -448,6 +475,8 @@ typedef struct StatsData
 									 * specified */
 	SimpleStats latency;
 	SimpleStats lag;
+	LatencyHistogram latency_hist;	/* log-scale histogram of latency values,
+									 * for --latency-percentiles */
 } StatsData;
 
 /*
@@ -960,6 +989,9 @@ usage(void)
 		   "  --continue-on-error      continue running after an SQL error\n"
 		   "  --exit-on-abort          exit when any client is aborted\n"
 		   "  --failures-detailed      report the failures grouped by basic types\n"
+		   "  --latency-percentiles[=P1,P2,...]\n"
+		   "                           report latency min/max and percentiles in the\n"
+		   "                           final report (default: 50,95,99)\n"
 		   "  --log-prefix=PREFIX      prefix for transaction time log file\n"
 		   "                           (default: \"pgbench_log\")\n"
 		   "  --max-tries=NUM          max number of tries to run transaction (default: 1)\n"
@@ -1379,12 +1411,137 @@ permute(const int64 val, const int64 isize, const int64 seed)
 }
 
 /*
+ * Return the index of the histogram bucket covering the given value in
+ * usec.
+ *
+ * Octave o (o >= 1) covers [2^o .. 2^(o+1)) and is split into
+ * LAT_HIST_SUBBCPTS sub-buckets of width 2^(o-5) usec; sub-buckets have
+ * integer width only from octave 5 on, so lower octaves use a single
+ * bucket.  Values >= 2^31 usec are clamped into the last bucket, which
+ * serves as an overflow counter.
+ */
+static int
+latencyBucketIdx(int64 val)
+{
+	int			octave = 0;
+	int64		tmp = val;
+
+	while (tmp >= 2 && octave < LAT_HIST_OCTAVES - 1)
+	{
+		tmp >>= 1;
+		octave++;
+	}
+
+	if (octave < 5)
+		return octave * LAT_HIST_SUBBCPTS;
+
+	return octave * LAT_HIST_SUBBCPTS +
+		(int) ((val >> (octave - 5)) & (LAT_HIST_SUBBCPTS - 1));
+}
+
+/*
+ * Lower bound (in usec) of the given histogram bucket.
+ */
+static double
+latencyBucketStart(int idx)
+{
+	int			octave = idx / LAT_HIST_SUBBCPTS;
+	int			sub = idx % LAT_HIST_SUBBCPTS;
+
+	if (octave == 0)
+		return 0.0;
+
+	if (octave < 5)
+		return (double) (INT64CONST(1) << octave);
+
+	return (double) (INT64CONST(1) << octave) +
+		(double) sub * (double) (INT64CONST(1) << (octave - 5));
+}
+
+/*
  * Initialize the given SimpleStats struct to all zeroes
  */
 static void
 initSimpleStats(SimpleStats *ss)
 {
 	memset(ss, 0, sizeof(SimpleStats));
+}
+
+/*
+ * Add one latency value (in microseconds) to a LatencyHistogram.
+ */
+static void
+latencyHistogramAdd(LatencyHistogram * h, double val)
+{
+	int64		usec = (int64) val;
+	int			idx;
+
+	if (usec < 0)
+		usec = 0;
+	idx = latencyBucketIdx(usec);
+	if (h->buckets[idx] < UINT32_MAX)
+		h->buckets[idx]++;
+}
+
+/*
+ * Merge two LatencyHistogram objects; histograms merge exactly, with
+ * saturation against counter overflow.
+ */
+static void
+latencyHistogramMerge(LatencyHistogram * acc, LatencyHistogram * h)
+{
+	for (int i = 0; i < LAT_HIST_BUCKETS; i++)
+	{
+		uint64		sum = (uint64) acc->buckets[i] + h->buckets[i];
+
+		acc->buckets[i] = (sum > UINT32_MAX) ? UINT32_MAX : (uint32) sum;
+	}
+}
+
+/*
+ * Estimate the p-th percentile (0 < p <= 100) of the 'count' values
+ * accumulated into a LatencyHistogram, with linear interpolation inside
+ * the bucket where the requested rank falls.
+ *
+ * If the rank falls into the overflow (last) bucket, only the bucket
+ * lower bound is returned, so the result is then a lower bound on the
+ * actual percentile.
+ */
+static double
+latencyHistogramPercentile(LatencyHistogram * h, int64 count, double p)
+{
+	double		rank;
+	uint64		cum = 0;
+
+	Assert(count > 0);
+	Assert(p > 0.0 && p <= 100.0);
+
+	rank = (count - 1) * p / 100.0;
+
+	for (int i = 0; i < LAT_HIST_BUCKETS; i++)
+	{
+		if (cum + h->buckets[i] > (uint64) rank)
+		{
+			double		start = latencyBucketStart(i);
+			double		width;
+
+			/* overflow bucket: no (meaningful) upper bound */
+			if (i == LAT_HIST_BUCKETS - 1)
+				return start;
+
+			width = latencyBucketStart(i + 1) - start;
+			if (h->buckets[i] == 0)
+				return start;
+
+			return start + width *
+				((double) ((uint64) rank - cum) / h->buckets[i]);
+		}
+
+		cum += h->buckets[i];
+	}
+
+	/* all values in the overflow bucket, or corrupted histogram */
+	return latencyBucketStart(LAT_HIST_BUCKETS - 1);
 }
 
 /*
@@ -1434,6 +1591,7 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	sd->other_sql_failures = 0;
 	initSimpleStats(&sd->latency);
 	initSimpleStats(&sd->lag);
+	memset(&sd->latency_hist, 0, sizeof(sd->latency_hist));
 }
 
 /*
@@ -1468,6 +1626,8 @@ accumStats(StatsData *stats, bool tx_skipped, double lat, double lag,
 			stats->cnt++;
 
 			addToSimpleStats(&stats->latency, lat);
+			if (num_latency_percentiles > 0)
+				latencyHistogramAdd(&stats->latency_hist, lat);
 
 			/* and possibly the same for schedule lag */
 			if (throttle_delay)
@@ -4769,7 +4929,7 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 	double		latency = 0.0,
 				lag = 0.0;
 	bool		detailed = progress || throttle_delay || latency_limit ||
-		use_log || per_script_stats;
+		use_log || per_script_stats || num_latency_percentiles > 0;
 
 	if (detailed && !tx_skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
@@ -6347,6 +6507,8 @@ printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
 	for (int i = 0; i < nthreads; i++)
 	{
 		mergeSimpleStats(&cur.latency, &threads[i].stats.latency);
+		latencyHistogramMerge(&cur.latency_hist,
+							  &threads[i].stats.latency_hist);
 		mergeSimpleStats(&cur.lag, &threads[i].stats.lag);
 		cur.cnt += threads[i].stats.cnt;
 		cur.cnt_skipped += threads[i].stats.cnt_skipped;
@@ -6411,7 +6573,8 @@ printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
 }
 
 static void
-printSimpleStats(const char *prefix, SimpleStats *ss)
+printSimpleStats(const char *prefix, SimpleStats *ss,
+				 LatencyHistogram * latency_hist)
 {
 	if (ss->count > 0)
 	{
@@ -6420,6 +6583,21 @@ printSimpleStats(const char *prefix, SimpleStats *ss)
 
 		printf("%s average = %.3f ms\n", prefix, 0.001 * latency);
 		printf("%s stddev = %.3f ms\n", prefix, 0.001 * stddev);
+
+		if (num_latency_percentiles > 0)
+		{
+			printf("%s min = %.3f ms\n", prefix, 0.001 * ss->min);
+			printf("%s max = %.3f ms\n", prefix, 0.001 * ss->max);
+
+			for (int i = 0; i < num_latency_percentiles; i++)
+			{
+				double		p = latency_percentiles[i];
+
+				printf("%s p%g = %.3f ms\n", prefix, p,
+					   0.001 * latencyHistogramPercentile(latency_hist,
+														  ss->count, p));
+			}
+		}
 	}
 }
 
@@ -6537,8 +6715,9 @@ printResults(StatsData *total,
 			   latency_limit / 1000.0, latency_late, total->cnt,
 			   (total->cnt > 0) ? 100.0 * latency_late / total->cnt : 0.0);
 
-	if (throttle_delay || progress || latency_limit)
-		printSimpleStats("latency", &total->latency);
+	if (throttle_delay || progress || latency_limit || num_latency_percentiles > 0)
+		printSimpleStats("latency", &total->latency,
+						 &total->latency_hist);
 	else
 	{
 		/* no measurement, show average latency computed from run time */
@@ -6646,7 +6825,8 @@ printResults(StatsData *total,
 							   100.0 * sstats->cnt_skipped / script_total_cnt);
 
 				}
-				printSimpleStats(" - latency", &sstats->latency);
+				printSimpleStats(" - latency", &sstats->latency,
+								 &sstats->latency_hist);
 			}
 
 			/*
@@ -6734,6 +6914,46 @@ set_random_seed(const char *seed)
 	return true;
 }
 
+/*
+ * Parse the --latency-percentiles option value: a comma-separated list of
+ * percentages in (0, 100].
+ */
+static void
+parseLatencyPercentiles(const char *opt)
+{
+	const char *p = opt;
+
+	if (num_latency_percentiles > 0)
+		pg_fatal("--latency-percentiles can only be specified once");
+
+	while (*p)
+	{
+		char	   *end;
+		double		percentile;
+
+		errno = 0;
+		percentile = strtod(p, &end);
+		if (end == p || errno != 0 ||
+			percentile <= 0.0 || percentile > 100.0)
+			pg_fatal("invalid latency percentile value: \"%s\"", p);
+
+		if (num_latency_percentiles >= MAX_LATENCY_PERCENTILES)
+			pg_fatal("too many latency percentiles (maximum is %d)",
+					 MAX_LATENCY_PERCENTILES);
+
+		latency_percentiles[num_latency_percentiles++] = percentile;
+
+		p = end;
+		if (*p == ',')
+			p++;
+		else if (*p != '\0')
+			pg_fatal("invalid latency percentile list: \"%s\"", opt);
+	}
+
+	if (num_latency_percentiles == 0)
+		pg_fatal("empty latency percentile list: \"%s\"", opt);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6785,6 +7005,7 @@ main(int argc, char **argv)
 		{"exit-on-abort", no_argument, NULL, 16},
 		{"debug", no_argument, NULL, 17},
 		{"continue-on-error", no_argument, NULL, 18},
+		{"latency-percentiles", optional_argument, NULL, 19},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -7145,6 +7366,19 @@ main(int argc, char **argv)
 				benchmarking_option_set = true;
 				continue_on_error = true;
 				break;
+			case 19:			/* latency-percentiles */
+				benchmarking_option_set = true;
+				if (optarg != NULL)
+					parseLatencyPercentiles(optarg);
+				else
+				{
+					/* bare flag: default set */
+					latency_percentiles[0] = 50.0;
+					latency_percentiles[1] = 95.0;
+					latency_percentiles[2] = 99.0;
+					num_latency_percentiles = 3;
+				}
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -7493,6 +7727,8 @@ main(int argc, char **argv)
 
 		/* aggregate thread level stats */
 		mergeSimpleStats(&stats.latency, &thread->stats.latency);
+		latencyHistogramMerge(&stats.latency_hist,
+							  &thread->stats.latency_hist);
 		mergeSimpleStats(&stats.lag, &thread->stats.lag);
 		stats.cnt += thread->stats.cnt;
 		stats.cnt_skipped += thread->stats.cnt_skipped;
