@@ -44,6 +44,17 @@ test_install_data += files(
   'test_ext_req_schema3.control',
   'test_ext_set_schema--1.0.sql',
   'test_ext_set_schema.control',
+  'test_ext_owned_schema--1.0.sql',
+  'test_ext_owned_schema--1.0--1.1.sql',
+  'test_ext_owned_schema.control',
+  'test_ext_owned_schema_nosuperuser--1.0.sql',
+  'test_ext_owned_schema_nosuperuser--1.0--1.1.sql',
+  'test_ext_owned_schema_nosuperuser.control',
+  'test_ext_owned_schema_trusted--1.0.sql',
+  'test_ext_owned_schema_trusted--1.0--1.1.sql',
+  'test_ext_owned_schema_trusted.control',
+  'test_ext_owned_schema_relocatable--1.0.sql',
+  'test_ext_owned_schema_relocatable.control',
 )
 
 test_ext_sources = files('test_ext.c')
