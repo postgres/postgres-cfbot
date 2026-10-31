@@ -82,5 +82,25 @@ ROLLBACK;
 INSERT INTO stream_test VALUES ('after-abort');
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 
+-- Verify that a transactional message emitted in a streamed subtransaction
+-- is associated with the subtransaction's XID.
+SET debug_logical_replication_streaming = immediate;
+BEGIN;
+SAVEPOINT sp;
+SELECT 'msg_subxact' FROM pg_logical_emit_message(true, 'test', 'msg');
+ROLLBACK TO SAVEPOINT sp;
+COMMIT;
+
+WITH changes AS (
+	SELECT xid, data
+	FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL,
+		'include-xids', '0', 'skip-empty-xacts', '1', 'stream-changes', '1')
+)
+SELECT m.xid = a.xid AS subxid_matches
+FROM changes m, changes a
+WHERE m.data LIKE 'streaming message:%'
+  AND a.data = 'aborting streamed (sub)transaction';
+RESET debug_logical_replication_streaming;
+
 DROP TABLE stream_test;
 SELECT pg_drop_replication_slot('regression_slot');
