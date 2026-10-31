@@ -68,6 +68,7 @@
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xA000000000000004)
 #define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xA000000000000005)
 #define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xA000000000000006)
+#define PARALLEL_KEY_TABLE_SCAN			UINT64CONST(0xA000000000000007)
 
 /*
  * DISABLE_LEADER_PARTICIPATION disables the leader's participation in
@@ -102,22 +103,7 @@ typedef struct BTShared
 	/* nbtree-specific immutable state, not modified during the sort */
 	bool		isunique;
 	bool		nulls_not_distinct;
-
-	/*
-	 * ParallelTableScanDescData data follows. Can't directly embed here, as
-	 * implementations of the parallel table scan desc interface might need
-	 * stronger alignment.
-	 */
 } BTShared;
-
-/*
- * Return pointer to a BTShared's parallel table scan.
- *
- * c.f. shm_toc_allocate as to why BUFFERALIGN is used, rather than just
- * MAXALIGN.
- */
-#define ParallelTableScanFromBTShared(shared) \
-	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(BTShared)))
 
 /*
  * Status for leader in parallel index build.
@@ -237,10 +223,11 @@ static void _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent,
 							   int request);
 static void _bt_end_parallel(BTLeader *btleader);
 static double _bt_parallel_heapscan(BTBuildState *buildstate,
-									bool *brokenhotchain);
+									IndexInfo *indexInfo);
 static void _bt_leader_participate_as_worker(BTBuildState *buildstate);
 static void _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
-									   BTShared *btshared, Sharedsort *sharedsort,
+									   BTShared *btshared, shm_toc *toc,
+									   Sharedsort *sharedsort,
 									   Sharedsort *sharedsort2, int sortmem,
 									   bool progress);
 
@@ -435,8 +422,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 										   _bt_build_callback, buildstate,
 										   NULL);
 	else
-		reltuples = _bt_parallel_heapscan(buildstate,
-										  &indexInfo->ii_BrokenHotChain);
+		reltuples = _bt_parallel_heapscan(buildstate, indexInfo);
 
 	/*
 	 * Set the progress target for the next phase.  Reset the block number
@@ -1383,11 +1369,12 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	snapshot = ParallelIndexBuildGetSnapshot(isconcurrent);
 
 	/*
-	 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
-	 * PARALLEL_KEY_TUPLESORT tuplesort workspace
+	 * Estimate size for the PARALLEL_KEY_TABLE_SCAN parallel heap scan, our
+	 * own PARALLEL_KEY_BTREE_SHARED workspace, and PARALLEL_KEY_TUPLESORT
+	 * tuplesort workspace
 	 */
-	estbtshared = ParallelIndexBuildEstimateShared(btspool->heap, snapshot,
-												   sizeof(BTShared));
+	ParallelIndexBuildEstimate(pcxt, btspool->heap, snapshot);
+	estbtshared = sizeof(BTShared);
 	shm_toc_estimate_chunk(&pcxt->estimator, estbtshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -1437,11 +1424,10 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* Initialize nbtree-specific immutable state */
 	btshared->isunique = btspool->isunique;
 	btshared->nulls_not_distinct = btspool->nulls_not_distinct;
-	/* Initialize common state, and the parallel scan that follows the struct */
-	ParallelIndexBuildInitShared(&btshared->base, btspool->heap, btspool->index,
-								 isconcurrent, scantuplesortstates,
-								 ParallelTableScanFromBTShared(btshared),
-								 snapshot);
+	/* Initialize common state, and the parallel heap scan */
+	ParallelIndexBuildInitShared(pcxt, &btshared->base, PARALLEL_KEY_TABLE_SCAN,
+								 btspool->heap, btspool->index, isconcurrent,
+								 scantuplesortstates, snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1536,13 +1522,14 @@ _bt_end_parallel(BTLeader *btleader)
  * already be underway within worker processes (when leader participates
  * as a worker, we should end up here just as workers are finishing).
  *
- * Fills in fields needed for ambuild statistics, and lets caller set
- * field indicating that some worker encountered a broken HOT chain.
+ * Fills in fields needed for ambuild statistics, and sets
+ * indexInfo->ii_BrokenHotChain if some participant encountered a broken HOT
+ * chain.
  *
  * Returns the total number of heap tuples scanned.
  */
 static double
-_bt_parallel_heapscan(BTBuildState *buildstate, bool *brokenhotchain)
+_bt_parallel_heapscan(BTBuildState *buildstate, IndexInfo *indexInfo)
 {
 	BTShared   *btshared = buildstate->btleader->btshared;
 	double		reltuples;
@@ -1550,8 +1537,9 @@ _bt_parallel_heapscan(BTBuildState *buildstate, bool *brokenhotchain)
 	/* Wait for all participants to finish, and collect their results */
 	ParallelIndexBuildWaitForWorkers(&btshared->base,
 									 buildstate->btleader->nparticipanttuplesorts,
-									 &reltuples, &buildstate->indtuples,
-									 &buildstate->havedead, brokenhotchain);
+									 indexInfo, &reltuples,
+									 &buildstate->indtuples,
+									 &buildstate->havedead);
 
 	return reltuples;
 }
@@ -1597,8 +1585,8 @@ _bt_leader_participate_as_worker(BTBuildState *buildstate)
 
 	/* Perform work common to all participants */
 	_bt_parallel_scan_and_sort(leaderworker, leaderworker2, btleader->btshared,
-							   btleader->sharedsort, btleader->sharedsort2,
-							   sortmem, true);
+							   btleader->pcxt->toc, btleader->sharedsort,
+							   btleader->sharedsort2, sortmem, true);
 
 #ifdef BTREE_BUILD_STATS
 	if (log_btree_build_stats)
@@ -1681,7 +1669,7 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* Perform sorting of spool, and possibly a spool2 */
 	sortmem = maintenance_work_mem / btshared->base.scantuplesortstates;
-	_bt_parallel_scan_and_sort(btspool, btspool2, btshared, sharedsort,
+	_bt_parallel_scan_and_sort(btspool, btspool2, btshared, toc, sharedsort,
 							   sharedsort2, sortmem, false);
 
 	/* Report WAL/buffer usage during parallel execution */
@@ -1715,14 +1703,13 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
  */
 static void
 _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
-						   BTShared *btshared, Sharedsort *sharedsort,
-						   Sharedsort *sharedsort2, int sortmem, bool progress)
+						   BTShared *btshared, shm_toc *toc,
+						   Sharedsort *sharedsort, Sharedsort *sharedsort2,
+						   int sortmem, bool progress)
 {
 	SortCoordinate coordinate;
 	BTBuildState buildstate;
-	TableScanDesc scan;
 	double		reltuples;
-	IndexInfo  *indexInfo;
 
 	/* Initialize local tuplesort coordination state */
 	coordinate = palloc0_object(SortCoordinateData);
@@ -1773,14 +1760,10 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	buildstate.btleader = NULL;
 
 	/* Join parallel scan */
-	indexInfo = BuildIndexInfo(btspool->index);
-	indexInfo->ii_Concurrent = btshared->base.isconcurrent;
-	scan = table_beginscan_parallel(btspool->heap,
-									ParallelTableScanFromBTShared(btshared),
-									SO_NONE);
-	reltuples = table_index_build_scan(btspool->heap, btspool->index, indexInfo,
-									   true, progress, _bt_build_callback,
-									   &buildstate, scan);
+	reltuples = ParallelIndexBuildScan(&btshared->base, toc,
+									   PARALLEL_KEY_TABLE_SCAN, btspool->heap,
+									   btspool->index, progress,
+									   _bt_build_callback, &buildstate);
 
 	/* Execute this worker's part of the sort */
 	if (progress)
@@ -1795,13 +1778,9 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 		tuplesort_performsort(btspool2->sortstate);
 	}
 
-	/*
-	 * Done.  Record ambuild statistics (including whether we encountered a
-	 * broken HOT chain), and notify the leader.
-	 */
+	/* Done.  Record ambuild statistics, and notify the leader. */
 	ParallelIndexBuildReportScanDone(&btshared->base, reltuples,
-									 buildstate.indtuples, buildstate.havedead,
-									 indexInfo->ii_BrokenHotChain);
+									 buildstate.indtuples, buildstate.havedead);
 
 	/* We can end tuplesorts immediately */
 	tuplesort_end(btspool->sortstate);

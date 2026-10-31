@@ -52,6 +52,7 @@
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xB000000000000003)
 #define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xB000000000000004)
 #define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xB000000000000005)
+#define PARALLEL_KEY_TABLE_SCAN			UINT64CONST(0xB000000000000006)
 
 /*
  * Status for index builds performed in parallel.  This is allocated in a
@@ -66,22 +67,7 @@ typedef struct BrinShared
 	 * BRIN-specific immutable state, not modified during the build.
 	 */
 	BlockNumber pagesPerRange;
-
-	/*
-	 * ParallelTableScanDescData data follows. Can't directly embed here, as
-	 * implementations of the parallel table scan desc interface might need
-	 * stronger alignment.
-	 */
 } BrinShared;
-
-/*
- * Return pointer to a BrinShared's parallel table scan.
- *
- * c.f. shm_toc_allocate as to why BUFFERALIGN is used, rather than just
- * MAXALIGN.
- */
-#define ParallelTableScanFromBrinShared(shared) \
-	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(BrinShared)))
 
 /*
  * Status for leader in parallel index build.
@@ -199,13 +185,14 @@ static void _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Rela
 								 bool isconcurrent, int request);
 static void _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state);
 static double _brin_parallel_heapscan(BrinBuildState *state,
-									  bool *brokenhotchain);
+									  IndexInfo *indexInfo);
 static double _brin_parallel_merge(BrinBuildState *state,
 								   IndexInfo *indexInfo);
 static void _brin_leader_participate_as_worker(BrinBuildState *buildstate,
 											   Relation heap, Relation index);
 static void _brin_parallel_scan_and_build(BrinBuildState *state,
 										  BrinShared *brinshared,
+										  shm_toc *toc,
 										  Sharedsort *sharedsort,
 										  Relation heap, Relation index,
 										  int sortmem, bool progress);
@@ -2373,10 +2360,11 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	snapshot = ParallelIndexBuildGetSnapshot(isconcurrent);
 
 	/*
-	 * Estimate size for our own PARALLEL_KEY_BRIN_SHARED workspace.
+	 * Estimate size for the PARALLEL_KEY_TABLE_SCAN parallel heap scan, and
+	 * our own PARALLEL_KEY_BRIN_SHARED workspace.
 	 */
-	estbrinshared = ParallelIndexBuildEstimateShared(heap, snapshot,
-													 sizeof(BrinShared));
+	ParallelIndexBuildEstimate(pcxt, heap, snapshot);
+	estbrinshared = sizeof(BrinShared);
 	shm_toc_estimate_chunk(&pcxt->estimator, estbrinshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -2415,11 +2403,10 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	brinshared = (BrinShared *) shm_toc_allocate(pcxt->toc, estbrinshared);
 	/* Initialize BRIN-specific immutable state */
 	brinshared->pagesPerRange = buildstate->bs_pagesPerRange;
-	/* Initialize common state, and the parallel scan that follows the struct */
-	ParallelIndexBuildInitShared(&brinshared->base, heap, index, isconcurrent,
-								 scantuplesortstates,
-								 ParallelTableScanFromBrinShared(brinshared),
-								 snapshot);
+	/* Initialize common state, and the parallel heap scan */
+	ParallelIndexBuildInitShared(pcxt, &brinshared->base,
+								 PARALLEL_KEY_TABLE_SCAN, heap, index,
+								 isconcurrent, scantuplesortstates, snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -2500,19 +2487,19 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
  * already be underway within worker processes (when leader participates
  * as a worker, we should end up here just as workers are finishing).
  *
- * Returns the total number of heap tuples scanned.  Also sets *brokenhotchain
- * to whether any participant detected a broken HOT chain.
+ * Returns the total number of heap tuples scanned.  Also sets
+ * indexInfo->ii_BrokenHotChain if any participant detected a broken HOT chain.
  */
 static double
-_brin_parallel_heapscan(BrinBuildState *state, bool *brokenhotchain)
+_brin_parallel_heapscan(BrinBuildState *state, IndexInfo *indexInfo)
 {
 	BrinShared *brinshared = state->bs_leader->brinshared;
 
 	/* Wait for all participants to finish, and collect their results */
 	ParallelIndexBuildWaitForWorkers(&brinshared->base,
 									 state->bs_leader->nparticipanttuplesorts,
-									 &state->bs_reltuples, &state->bs_numtuples,
-									 NULL, brokenhotchain);
+									 indexInfo, &state->bs_reltuples,
+									 &state->bs_numtuples, NULL);
 
 	return state->bs_reltuples;
 }
@@ -2542,8 +2529,7 @@ _brin_parallel_merge(BrinBuildState *state, IndexInfo *indexInfo)
 	double		reltuples;
 
 	/* wait for workers to scan table and produce partial results */
-	reltuples = _brin_parallel_heapscan(state,
-										&indexInfo->ii_BrokenHotChain);
+	reltuples = _brin_parallel_heapscan(state, indexInfo);
 
 	/* do the actual sort in the leader */
 	tuplesort_performsort(state->bs_sortstate);
@@ -2692,7 +2678,8 @@ _brin_leader_participate_as_worker(BrinBuildState *buildstate, Relation heap, Re
 
 	/* Perform work common to all participants */
 	_brin_parallel_scan_and_build(buildstate, brinleader->brinshared,
-								  brinleader->sharedsort, heap, index, sortmem, true);
+								  brinleader->pcxt->toc, brinleader->sharedsort,
+								  heap, index, sortmem, true);
 }
 
 /*
@@ -2707,14 +2694,13 @@ _brin_leader_participate_as_worker(BrinBuildState *buildstate, Relation heap, Re
  */
 static void
 _brin_parallel_scan_and_build(BrinBuildState *state,
-							  BrinShared *brinshared, Sharedsort *sharedsort,
+							  BrinShared *brinshared, shm_toc *toc,
+							  Sharedsort *sharedsort,
 							  Relation heap, Relation index,
 							  int sortmem, bool progress)
 {
 	SortCoordinate coordinate;
-	TableScanDesc scan;
 	double		reltuples;
-	IndexInfo  *indexInfo;
 
 	/* Initialize local tuplesort coordination state */
 	coordinate = palloc0_object(SortCoordinateData);
@@ -2727,15 +2713,9 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 													 TUPLESORT_NONE);
 
 	/* Join parallel scan */
-	indexInfo = BuildIndexInfo(index);
-	indexInfo->ii_Concurrent = brinshared->base.isconcurrent;
-
-	scan = table_beginscan_parallel(heap,
-									ParallelTableScanFromBrinShared(brinshared),
-									SO_NONE);
-
-	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
-									   brinbuildCallbackParallel, state, scan);
+	reltuples = ParallelIndexBuildScan(&brinshared->base, toc,
+									   PARALLEL_KEY_TABLE_SCAN, heap, index,
+									   true, brinbuildCallbackParallel, state);
 
 	/* insert the last item */
 	form_and_spill_tuple(state);
@@ -2745,13 +2725,9 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 
 	state->bs_reltuples += reltuples;
 
-	/*
-	 * Done.  Record ambuild statistics (including whether we encountered a
-	 * broken HOT chain), and notify the leader.
-	 */
+	/* Done.  Record ambuild statistics, and notify the leader. */
 	ParallelIndexBuildReportScanDone(&brinshared->base, state->bs_reltuples,
-									 state->bs_numtuples, false,
-									 indexInfo->ii_BrokenHotChain);
+									 state->bs_numtuples, false);
 
 	tuplesort_end(state->bs_sortstate);
 }
@@ -2805,7 +2781,7 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 */
 	sortmem = maintenance_work_mem / brinshared->base.scantuplesortstates;
 
-	_brin_parallel_scan_and_build(buildstate, brinshared, sharedsort,
+	_brin_parallel_scan_and_build(buildstate, brinshared, toc, sharedsort,
 								  heapRel, indexRel, sortmem, false);
 
 	/* Report WAL/buffer usage during parallel execution */

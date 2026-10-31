@@ -23,6 +23,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/index.h"
 #include "executor/instrument.h"
 #include "pgstat.h"
 #include "utils/rel.h"
@@ -65,35 +66,43 @@ ParallelIndexBuildGetSnapshot(bool isconcurrent)
 }
 
 /*
- * Estimate the DSM space for the shared state struct of a parallel index
- * build, including the parallel table scan descriptor that trails it.
+ * Estimate the DSM space and keys this module needs for a parallel index
+ * build, namely the parallel table scan descriptor for the heap scan.  The
+ * access method's own shared struct (which embeds ParallelIndexBuildShared)
+ * is estimated by the caller, like any other AM-specific chunk.
  *
- * am_shared_size is sizeof() the access method's whole shared struct (which
- * embeds ParallelIndexBuildShared as its first member).
+ * Must be called before InitializeParallelDSM.
  */
-Size
-ParallelIndexBuildEstimateShared(Relation heap, Snapshot snapshot,
-								 Size am_shared_size)
+void
+ParallelIndexBuildEstimate(ParallelContext *pcxt, Relation heap,
+						   Snapshot snapshot)
 {
-	/* c.f. shm_toc_allocate as to why BUFFERALIGN is used */
-	return add_size(BUFFERALIGN(am_shared_size),
-					table_parallelscan_estimate(heap, snapshot));
+	shm_toc_estimate_chunk(&pcxt->estimator,
+						   table_parallelscan_estimate(heap, snapshot));
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
 }
 
 /*
  * Initialize the common shared state for a parallel index build.
  *
  * The caller has already allocated the embedding shared struct in DSM; this
- * fills in the common header and initializes the parallel heap scan
- * descriptor that follows the (whole) embedding struct, which the caller
- * passes as pscan.  AM-specific fields are the caller's responsibility.
+ * fills in the common header.  It also allocates and initializes the parallel
+ * heap scan descriptor, for which ParallelIndexBuildEstimate reserved space,
+ * and stores it in the TOC under pscan_key (one of the caller's own keys).
+ * Participants join the scan through ParallelIndexBuildScan(), which also
+ * takes care of reporting broken HOT chains.  AM-specific fields are the
+ * caller's responsibility.
  */
 void
-ParallelIndexBuildInitShared(ParallelIndexBuildShared *shared,
+ParallelIndexBuildInitShared(ParallelContext *pcxt,
+							 ParallelIndexBuildShared *shared,
+							 uint64 pscan_key,
 							 Relation heap, Relation index,
 							 bool isconcurrent, int scantuplesortstates,
-							 ParallelTableScanDesc pscan, Snapshot snapshot)
+							 Snapshot snapshot)
 {
+	ParallelTableScanDesc pscan;
+
 	/* Initialize immutable state */
 	shared->heaprelid = RelationGetRelid(heap);
 	shared->indexrelid = RelationGetRelid(index);
@@ -110,23 +119,29 @@ ParallelIndexBuildInitShared(ParallelIndexBuildShared *shared,
 	shared->brokenhotchain = false;
 	shared->havedead = false;
 
+	/* Set up the parallel heap scan, in its own TOC entry */
+	pscan = (ParallelTableScanDesc)
+		shm_toc_allocate(pcxt->toc,
+						 table_parallelscan_estimate(heap, snapshot));
 	table_parallelscan_initialize(heap, pscan, snapshot);
+	shm_toc_insert(pcxt->toc, pscan_key, pscan);
 }
 
 /*
  * Wait, in the leader, for all participants to finish their portion of the
  * scan, then read back the accumulated per-build results.
  *
- * reltuples and indtuples receive the totals.  brokenhotchain receives whether
- * any participant saw a broken HOT chain; the caller must propagate it to the
- * IndexInfo passed to ambuild.  havedead is optional (pass NULL when the AM
- * does not track it): it reports whether any worker saw RECENTLY_DEAD tuples.
+ * reltuples and indtuples receive the totals.  indexInfo must be the IndexInfo
+ * passed to ambuild: if any participant's scan detected a broken HOT chain,
+ * its ii_BrokenHotChain is set, so that index_build() marks the index with
+ * indcheckxmin.  havedead is optional (pass NULL when the AM does not track
+ * it): it reports whether any worker saw RECENTLY_DEAD tuples.
  */
 void
 ParallelIndexBuildWaitForWorkers(ParallelIndexBuildShared *shared,
-								 int nparticipants,
+								 int nparticipants, IndexInfo *indexInfo,
 								 double *reltuples, double *indtuples,
-								 bool *havedead, bool *brokenhotchain)
+								 bool *havedead)
 {
 	for (;;)
 	{
@@ -137,8 +152,8 @@ ParallelIndexBuildWaitForWorkers(ParallelIndexBuildShared *shared,
 			*indtuples = shared->indtuples;
 			if (havedead)
 				*havedead = shared->havedead;
-			if (brokenhotchain)
-				*brokenhotchain = shared->brokenhotchain;
+			if (shared->brokenhotchain)
+				indexInfo->ii_BrokenHotChain = true;
 			SpinLockRelease(&shared->mutex);
 			break;
 		}
@@ -262,19 +277,65 @@ ParallelIndexBuildCloseRelations(ParallelIndexBuildShared *shared,
 }
 
 /*
+ * Run a participant's portion of the parallel heap scan.
+ *
+ * Builds the IndexInfo for the scan, joins the shared parallel scan and runs
+ * table_index_build_scan() with the given callback, as a serial build would.
+ * Returns the number of heap tuples this participant scanned.
+ *
+ * toc is the parallel build's table of contents: the one passed to the worker
+ * entry point in a worker, or the ParallelContext's in the leader.  pscan_key
+ * must be the key passed to ParallelIndexBuildInitShared.
+ *
+ * If the scan detected a broken HOT chain, that is recorded in the shared
+ * state here, so that ParallelIndexBuildWaitForWorkers() can propagate it to
+ * the IndexInfo passed to ambuild.  Doing this here rather than in
+ * ParallelIndexBuildReportScanDone() means an AM cannot forget to report it.
+ * It is safe to set the flag before the participant reports done, since the
+ * leader only reads it once every participant has done so.
+ */
+double
+ParallelIndexBuildScan(ParallelIndexBuildShared *shared, shm_toc *toc,
+					   uint64 pscan_key, Relation heap, Relation index,
+					   bool progress, IndexBuildCallback callback,
+					   void *callback_state)
+{
+	ParallelTableScanDesc pscan;
+	IndexInfo  *indexInfo;
+	TableScanDesc scan;
+	double		reltuples;
+
+	indexInfo = BuildIndexInfo(index);
+	indexInfo->ii_Concurrent = shared->isconcurrent;
+
+	pscan = shm_toc_lookup(toc, pscan_key, false);
+	scan = table_beginscan_parallel(heap, pscan, SO_NONE);
+	reltuples = table_index_build_scan(heap, index, indexInfo, true, progress,
+									   callback, callback_state, scan);
+
+	if (indexInfo->ii_BrokenHotChain)
+	{
+		SpinLockAcquire(&shared->mutex);
+		shared->brokenhotchain = true;
+		SpinLockRelease(&shared->mutex);
+	}
+
+	return reltuples;
+}
+
+/*
  * Report that a participant (a worker, or the leader when it participates as
  * a worker) has finished its portion of the scan.
  *
  * Accumulates the participant's tuple counts into the shared totals, ORs in
- * the havedead/brokenhotchain flags, and signals the leader.  brokenhotchain
- * must be the ii_BrokenHotChain of the IndexInfo used for the participant's
- * heap scan; havedead is only tracked by nbtree (others pass false).  Must be
- * paired with ParallelIndexBuildWaitForWorkers in the leader.
+ * the havedead flag (only tracked by nbtree; others pass false), and signals
+ * the leader.  Must be paired with ParallelIndexBuildWaitForWorkers in the
+ * leader.  Broken HOT chains are reported by ParallelIndexBuildScan() instead.
  */
 void
 ParallelIndexBuildReportScanDone(ParallelIndexBuildShared *shared,
 								 double reltuples, double indtuples,
-								 bool havedead, bool brokenhotchain)
+								 bool havedead)
 {
 	SpinLockAcquire(&shared->mutex);
 	shared->nparticipantsdone++;
@@ -282,8 +343,6 @@ ParallelIndexBuildReportScanDone(ParallelIndexBuildShared *shared,
 	shared->indtuples += indtuples;
 	if (havedead)
 		shared->havedead = true;
-	if (brokenhotchain)
-		shared->brokenhotchain = true;
 	SpinLockRelease(&shared->mutex);
 
 	/* Notify leader */
