@@ -16,6 +16,7 @@
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/visibilitymap.h"
+#include "access/xlog.h"
 #include "catalog/pg_am_d.h"
 #include "commands/vacuum.h"
 #include "funcapi.h"
@@ -331,6 +332,12 @@ pgstattuple_approx_internal(Oid relid, FunctionCallInfo fcinfo)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	/*
 	 * We support only relation kinds with a visibility map and a free space

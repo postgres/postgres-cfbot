@@ -27,6 +27,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -389,7 +390,16 @@ tuple_data_split_internal(Oid relid, char *tupdata,
 						 errmsg("unexpected end of tuple data")));
 
 			if (attr->attlen == -1 && do_detoast)
+			{
+				/* A saved page can still refer to unlogged TOAST storage. */
+				if (VARATT_IS_EXTERNAL_ONDISK(tupdata + off) &&
+					!RelationIsPermanent(rel) && RecoveryInProgress())
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot access temporary or unlogged relations during recovery")));
+
 				attr_data = pg_detoast_datum_copy((varlena *) (tupdata + off));
+			}
 			else
 			{
 				attr_data = (bytea *) palloc(len + VARHDRSZ);
