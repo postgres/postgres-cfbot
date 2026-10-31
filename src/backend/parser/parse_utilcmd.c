@@ -2182,6 +2182,7 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 	stats->stxcomment = NULL;
 	stats->transformed = true;	/* don't need transformStatsStmt again */
 	stats->if_not_exists = false;
+	stats->stxstattarget = -1;
 
 	/* Clean up */
 	ReleaseSysCache(ht_stats);
