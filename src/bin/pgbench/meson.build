@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 pgbench_sources = files(
+  'expr.c',
   'pgbench.c',
   'poller.c',
   'random.c',
