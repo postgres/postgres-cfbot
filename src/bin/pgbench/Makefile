@@ -15,6 +15,7 @@ OBJS = \
 	pgbench.o \
 	poller.o \
 	random.o \
+	script.o \
 	stats.o \
 	variable.o
 
