@@ -8,6 +8,7 @@ pgbench_sources = files(
   'pgbench.c',
   'poller.c',
   'random.c',
+  'report.c',
   'script.c',
   'stats.c',
   'variable.c',

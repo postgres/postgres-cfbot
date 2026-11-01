@@ -146,11 +146,5 @@ extern PGconn *doConnect(void);
 extern void disconnect_all(CState *state, int length);
 extern THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC threadRun(void *arg);
 extern void setalarm(int seconds);
-extern void doLog(TState *thread, CState *st,
-				  StatsData *agg, bool tx_skipped, double latency, double lag);
-extern void processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
-							 bool tx_skipped, StatsData *agg);
-extern void printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
-								StatsData *last, int64 *last_report);
 
 #endif							/* ENGINE_H */
