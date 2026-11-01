@@ -2298,7 +2298,7 @@ ExecuteTruncateGuts(List *explicit_rels,
 		 * No value references a compression dictionary of this relation's
 		 * columns any more, so retire the ones a rewrite would.
 		 */
-		toast_dictionary_retire(RelationGetRelid(rel));
+		toast_dictionary_retire(RelationGetRelid(rel), true);
 
 		pgstat_count_truncate(rel);
 	}

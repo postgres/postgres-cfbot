@@ -1609,7 +1609,10 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         next rewrite of the table, such as <command>VACUUM FULL</command>,
         which recompresses them and removes it.  The caller must have the
         <literal>MAINTAIN</literal> privilege on the table or own the
-        database, as for <command>ANALYZE</command>.
+        database, as for <command>ANALYZE</command>.  Unless called by a
+        superuser, the function refuses to train another dictionary for a
+        column that already has
+        <xref linkend="guc-dictionary-evolution-max-retained"/> of them.
        </para></entry>
       </row>
 

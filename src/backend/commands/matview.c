@@ -19,6 +19,7 @@
 #include "access/htup_details.h"
 #include "access/multixact.h"
 #include "access/tableam.h"
+#include "access/toast_dictionary.h"
 #include "access/xact.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -352,6 +353,18 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 	else
 	{
 		refresh_by_heap_swap(matviewOid, OIDNewHeap, relpersistence);
+
+		/*
+		 * finish_heap_swap() has already retired the dictionaries the new
+		 * heap no longer references.  A refresh that leaves the matview empty
+		 * (WITH NO DATA, or a query that produced no rows) also invalidates
+		 * the row count recorded for evolution, so reset it as TRUNCATE does.
+		 * A populated refresh keeps that count: a matview grows only across
+		 * refreshes, so clearing it here would strand evolution at the first
+		 * dictionary.
+		 */
+		if (skipData || processed == 0)
+			toast_dictionary_retire(matviewOid, true);
 
 		/*
 		 * Inform cumulative stats system about our activity: basically, we

@@ -1,0 +1,11 @@
+-- Tests for automatic TOAST dictionary evolution during ANALYZE: an opted-in
+-- column retrains its dictionary from ANALYZE's sample, adopts a candidate
+-- only when a held-out size test shows a margin win, rejects churn when no
+-- candidate wins, and stops at the retained-dictionary cap.  See
+-- toast_dictionary_maybe_evolve().
+SELECT NOT(enumvals @> '{zstd}') AS skip_test FROM pg_settings WHERE
+  name = 'default_toast_compression' \gset
+\if :skip_test
+   \echo '*** skipping TOAST dictionary evolution tests (not supported) ***'
+*** skipping TOAST dictionary evolution tests (not supported) ***
+   \quit
