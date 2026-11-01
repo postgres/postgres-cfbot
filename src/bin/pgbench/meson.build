@@ -3,6 +3,7 @@
 pgbench_sources = files(
   'commands.c',
   'expr.c',
+  'init.c',
   'pgbench.c',
   'poller.c',
   'random.c',
