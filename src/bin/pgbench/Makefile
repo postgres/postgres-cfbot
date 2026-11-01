@@ -9,6 +9,7 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	$(WIN32RES) \
+	expr.o \
 	exprparse.o \
 	exprscan.o \
 	pgbench.o \
