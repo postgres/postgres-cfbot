@@ -13,6 +13,7 @@
 #ifndef SCRIPT_H
 #define SCRIPT_H
 
+#include "engine.h"
 #include "pgbench.h"
 #include "pqexpbuffer.h"
 #include "stats.h"
