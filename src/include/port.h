@@ -40,9 +40,10 @@ typedef SOCKET pgsocket;
 typedef unsigned int socklen_t;
 #endif
 
-/* non-blocking */
+/* non-blocking, close-on-exec */
 extern bool pg_set_noblock(pgsocket sock);
 extern bool pg_set_block(pgsocket sock);
+extern bool socket_set_cloexec(pgsocket sock);
 
 /* Portable path handling for Unix/Win32 (in path.c) */
 
