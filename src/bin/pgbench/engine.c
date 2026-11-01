@@ -25,6 +25,7 @@
 #include "poller.h"
 #include "pqexpbuffer.h"
 #include "random.h"
+#include "report.h"
 #include "script.h"
 #include "stats.h"
 #include "variable.h"
