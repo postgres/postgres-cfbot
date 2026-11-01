@@ -78,7 +78,7 @@ $node->stop('immediate');
 
 SKIP:
 {
-	skip 'program did not outlive the server', 2 unless kill(0, $pid);
+	skip 'program did not outlive the server', 3 unless kill(0, $pid);
 
 	# The client socket: the client should see its connection drop.  The
 	# timer throws if it expires, so catch that and report a failure.
@@ -94,6 +94,12 @@ SKIP:
 	# The listen sockets: the port should be free for a new postmaster.
 	ok(PostgreSQL::Test::Cluster::can_bind('127.0.0.1', $node->port),
 		'port is free while program is still running');
+
+	# The shared memory segment: a new postmaster should start.  The program
+	# does still hold the old log file as its stderr, so give the new
+	# postmaster another one.
+	$node->rotate_logfile;
+	ok($node->start(fail_ok => 1), 'restart while program is still running');
 }
 
 append_to_file($release, '');
