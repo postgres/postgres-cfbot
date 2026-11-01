@@ -209,8 +209,7 @@ PGSharedMemoryCreate(Size size,
 {
 	void	   *memAddress;
 	PGShmemHeader *hdr;
-	HANDLE		hmap,
-				hmap2;
+	HANDLE		hmap;
 	char	   *szShareMem;
 	int			i;
 	DWORD		size_high;
@@ -341,21 +340,6 @@ retry:
 
 	free(szShareMem);
 
-	/*
-	 * Make the handle inheritable
-	 */
-	if (!DuplicateHandle(GetCurrentProcess(), hmap, GetCurrentProcess(), &hmap2, 0, TRUE, DUPLICATE_SAME_ACCESS))
-		ereport(FATAL,
-				(errmsg("could not create shared memory segment: error code %lu", GetLastError()),
-				 errdetail("Failed system call was DuplicateHandle.")));
-
-	/*
-	 * Close the old, non-inheritable handle. If this fails we don't really
-	 * care.
-	 */
-	if (!CloseHandle(hmap))
-		elog(LOG, "could not close handle to shared memory: error code %lu", GetLastError());
-
 	desiredAccess = FILE_MAP_WRITE | FILE_MAP_READ;
 
 #ifdef FILE_MAP_LARGE_PAGES
@@ -368,7 +352,7 @@ retry:
 	 * Get a pointer to the new shared memory segment. Map the whole segment
 	 * at once, and let the system decide on the initial address.
 	 */
-	memAddress = MapViewOfFileEx(hmap2, desiredAccess, 0, 0, 0, NULL);
+	memAddress = MapViewOfFileEx(hmap, desiredAccess, 0, 0, 0, NULL);
 	if (!memAddress)
 		ereport(FATAL,
 				(errmsg("could not create shared memory segment: error code %lu", GetLastError()),
@@ -395,10 +379,10 @@ retry:
 	/* Save info for possible future use */
 	UsedShmemSegAddr = memAddress;
 	UsedShmemSegSize = size;
-	UsedShmemSegID = hmap2;
+	UsedShmemSegID = hmap;
 
 	/* Register on-exit routine to delete the new segment */
-	on_shmem_exit(pgwin32_SharedMemoryDelete, PointerGetDatum(hmap2));
+	on_shmem_exit(pgwin32_SharedMemoryDelete, PointerGetDatum(hmap));
 
 	*shim = hdr;
 
@@ -413,12 +397,12 @@ retry:
  * PGSharedMemoryReAttach
  *
  * This is called during startup of a postmaster child process to re-attach to
- * an already existing shared memory segment, using the handle inherited from
- * the postmaster.
+ * an already existing shared memory segment, using the handle the postmaster
+ * duplicated for it.
  *
  * ShmemProtectiveRegion, UsedShmemSegID and UsedShmemSegAddr are implicit
- * parameters to this routine.  The caller must have already restored them to
- * the postmaster's values.
+ * parameters to this routine.  The caller must have already restored them
+ * from the backend parameters.
  */
 void
 PGSharedMemoryReAttach(void)
@@ -465,8 +449,8 @@ PGSharedMemoryReAttach(void)
  * after this; make sure that it will be a no-op if called.
  *
  * ShmemProtectiveRegion, UsedShmemSegID and UsedShmemSegAddr are implicit
- * parameters to this routine.  The caller must have already restored them to
- * the postmaster's values.
+ * parameters to this routine.  The caller must have already restored them
+ * from the backend parameters.
  */
 void
 PGSharedMemoryNoReAttach(void)
@@ -482,9 +466,9 @@ PGSharedMemoryNoReAttach(void)
 	UsedShmemSegAddr = NULL;
 
 	/*
-	 * We *must* close the inherited shmem segment handle, else Windows will
-	 * consider the existence of this process to mean it can't release the
-	 * shmem segment yet.  We can now use PGSharedMemoryDetach to do that.
+	 * We *must* close our shmem segment handle, else Windows will consider
+	 * the existence of this process to mean it can't release the shmem
+	 * segment yet.  We can now use PGSharedMemoryDetach to do that.
 	 */
 	PGSharedMemoryDetach();
 }
@@ -495,8 +479,8 @@ PGSharedMemoryNoReAttach(void)
  * Detach from the shared memory segment, if still attached.  This is not
  * intended to be called explicitly by the process that originally created the
  * segment (it will have an on_shmem_exit callback registered to do that).
- * Rather, this is for subprocesses that have inherited an attachment and want
- * to get rid of it.
+ * Rather, this is for subprocesses that have been given an attachment and
+ * want to get rid of it.
  *
  * ShmemProtectiveRegion, UsedShmemSegID and UsedShmemSegAddr are implicit
  * parameters to this routine.

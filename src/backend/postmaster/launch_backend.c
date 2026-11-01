@@ -726,8 +726,22 @@ save_backend_variables(BackendParameters *param,
 
 #ifdef WIN32
 	param->ShmemProtectiveRegion = ShmemProtectiveRegion;
-#endif
+
+	/* Give the child its own handle to the segment, not inheritable */
+	param->UsedShmemSegID = INVALID_HANDLE_VALUE;
+	if (UsedShmemSegID != INVALID_HANDLE_VALUE &&
+		!DuplicateHandle(GetCurrentProcess(), UsedShmemSegID,
+						 childProcess, &param->UsedShmemSegID,
+						 0, FALSE, DUPLICATE_SAME_ACCESS))
+	{
+		ereport(LOG,
+				(errmsg_internal("could not duplicate shared memory handle for child process: error code %lu",
+								 GetLastError())));
+		return false;
+	}
+#else
 	param->UsedShmemSegID = UsedShmemSegID;
+#endif
 	param->UsedShmemSegAddr = UsedShmemSegAddr;
 
 #ifdef USE_INJECTION_POINTS
@@ -782,7 +796,8 @@ save_backend_variables(BackendParameters *param,
 #ifdef WIN32
 /*
  * Duplicate a handle for usage in a child process, and write the child
- * process instance of the handle to the parameter file.
+ * process instance of the handle to the parameter file.  The child's copy
+ * is not inheritable.
  */
 static bool
 write_duplicated_handle(HANDLE *dest, HANDLE src, HANDLE childProcess)
@@ -794,7 +809,7 @@ write_duplicated_handle(HANDLE *dest, HANDLE src, HANDLE childProcess)
 						 childProcess,
 						 &hChild,
 						 0,
-						 TRUE,
+						 FALSE,
 						 DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS))
 	{
 		ereport(LOG,
