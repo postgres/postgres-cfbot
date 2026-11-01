@@ -81,4 +81,33 @@ like(
 	qr/ERROR:  new locale provider \(builtin\) does not match locale provider of the template database \(icu\)/,
 	"locale provider must match template: error message");
 
+# ICU rules set by initdb are inherited from template0 only by ICU databases
+my $node2 = PostgreSQL::Test::Cluster->new('node2');
+$node2->init(
+	extra => [
+		'--locale-provider=icu', '--icu-locale=en',
+		'--icu-rules=&a < g', '--encoding=UTF8'
+	]);
+$node2->start;
+
+$node2->safe_psql('postgres',
+	q{CREATE DATABASE dbbuiltin LOCALE_PROVIDER builtin LOCALE 'C' TEMPLATE template0}
+);
+is( $node2->safe_psql(
+		'postgres',
+		q{SELECT daticurules IS NULL FROM pg_database WHERE datname = 'dbbuiltin'}
+	),
+	qq(t),
+	'non-ICU database does not inherit ICU rules from template0');
+
+$node2->safe_psql('postgres',
+	q{CREATE DATABASE dbicurules TEMPLATE template0});
+is( $node2->safe_psql(
+		'dbicurules',
+		q{SELECT x FROM (VALUES ('a'), ('b'), ('g')) t(x) ORDER BY x}),
+	qq(a
+g
+b),
+	'ICU database inherits ICU rules from template0');
+
 done_testing();
