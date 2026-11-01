@@ -10,6 +10,7 @@ include $(top_builddir)/src/Makefile.global
 OBJS = \
 	$(WIN32RES) \
 	commands.o \
+	engine.o \
 	expr.o \
 	exprparse.o \
 	exprscan.o \

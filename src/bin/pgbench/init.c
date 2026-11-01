@@ -17,6 +17,7 @@
 
 #include "catalog/pg_class_d.h"
 #include "common/logging.h"
+#include "engine.h"
 #include "fe_utils/cancel.h"
 #include "fe_utils/string_utils.h"
 #include "init.h"

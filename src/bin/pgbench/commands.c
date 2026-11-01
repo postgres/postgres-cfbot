@@ -17,6 +17,7 @@
 
 #include "commands.h"
 #include "common/logging.h"
+#include "engine.h"
 #include "expr.h"
 #include "fe_utils/conditional.h"
 #include "pgbench.h"
