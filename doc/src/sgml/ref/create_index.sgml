@@ -759,7 +759,7 @@ Indexes:
    If no matching index exists, a new index will be created and
    automatically attached; the name of the new index in each partition
    will be determined as if no index name had been specified in the
-   command.
+   command.  Invalid indexes on leaf partitions are skipped.
    If the <literal>ONLY</literal> option is specified, no recursion
    is done, and the index is marked invalid.
    (<command>ALTER INDEX ... ATTACH PARTITION</command> marks the index
