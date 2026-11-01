@@ -288,7 +288,11 @@ CREATE VIEW pg_toast_dictionaries WITH (security_barrier) AS
         c.relname AS tablename,
         a.attname AS attname,
         d.tdcurrent AS is_current,
-        octet_length(d.tddict) AS dict_size
+        octet_length(d.tddict) AS dict_size,
+        d.tdtrainrows AS trained_rows,
+        CASE WHEN d.tdtraintime <> 0 THEN
+            to_timestamp(946684800 + d.tdtraintime / 1000000.0)
+        END AS trained_at
     FROM pg_toast_dictionary d JOIN pg_class c ON (c.oid = d.tdrelid)
          JOIN pg_attribute a ON (c.oid = a.attrelid AND a.attnum = d.tdattnum)
          LEFT JOIN pg_namespace n ON (n.oid = c.relnamespace)

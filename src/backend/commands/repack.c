@@ -2159,7 +2159,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	 * that used a non-current compression dictionary, so those dictionaries
 	 * are no longer referenced and can go.
 	 */
-	toast_dictionary_retire(OIDOldHeap);
+	toast_dictionary_retire(OIDOldHeap, false);
 
 	/* Destroy new heap with old filenumber */
 	object.classId = RelationRelationId;

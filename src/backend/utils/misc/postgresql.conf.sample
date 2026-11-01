@@ -775,6 +775,15 @@
 # - Default Behavior -
 
 #vacuum_truncate = on                   # enable truncation after vacuum
+#dictionary_evolution_autovacuum = on   # let autovacuum retrain TOAST
+                                        # compression dictionaries
+#dictionary_evolution_max_retained = 8  # max TOAST dictionaries kept per
+                                        # column by automatic evolution
+#dictionary_evolution_min_gain = 0.05   # min fractional size win to adopt a
+                                        # retrained TOAST dictionary
+#dictionary_evolution_min_interval = 86400s
+                                        # min time between automatic TOAST
+                                        # dictionary retrainings
 
 # - Freezing -
 

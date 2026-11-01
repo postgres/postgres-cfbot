@@ -3954,7 +3954,7 @@ heap_truncate(List *relids)
 		heap_truncate_one_rel(rel);
 
 		/* No value references its old compression dictionaries any more */
-		toast_dictionary_retire(RelationGetRelid(rel));
+		toast_dictionary_retire(RelationGetRelid(rel), true);
 
 		/* Close the relation, but keep exclusive lock on it until commit */
 		table_close(rel, NoLock);
