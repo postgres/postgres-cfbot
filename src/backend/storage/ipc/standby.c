@@ -754,12 +754,12 @@ ResolveRecoveryConflictWithLock(LOCKTAG locktag, bool logging_conflict)
 cleanup:
 
 	/*
-	 * Clear any timeout requests established above.  We assume here that the
-	 * Startup process doesn't have any other outstanding timeouts than those
-	 * used by this function. If that stops being true, we could cancel the
-	 * timeouts individually, but that'd be slower.
+	 * Cancel only the timeouts established above.  The startup process also
+	 * has STARTUP_PROGRESS_TIMEOUT, which must not be canceled here, or
+	 * recovery progress reporting would stop for the rest of the redo.
 	 */
-	disable_all_timeouts(false);
+	disable_timeout(STANDBY_LOCK_TIMEOUT, false);
+	disable_timeout(STANDBY_DEADLOCK_TIMEOUT, false);
 	got_standby_lock_timeout = false;
 	got_standby_deadlock_timeout = false;
 }
@@ -865,12 +865,12 @@ ResolveRecoveryConflictWithBufferPin(void)
 	}
 
 	/*
-	 * Clear any timeout requests established above.  We assume here that the
-	 * Startup process doesn't have any other timeouts than what this function
-	 * uses.  If that stops being true, we could cancel the timeouts
-	 * individually, but that'd be slower.
+	 * Cancel only the timeouts established above.  The startup process also
+	 * has STARTUP_PROGRESS_TIMEOUT, which must not be canceled here, or
+	 * recovery progress reporting would stop for the rest of the redo.
 	 */
-	disable_all_timeouts(false);
+	disable_timeout(STANDBY_TIMEOUT, false);
+	disable_timeout(STANDBY_DEADLOCK_TIMEOUT, false);
 	got_standby_delay_timeout = false;
 	got_standby_deadlock_timeout = false;
 }
