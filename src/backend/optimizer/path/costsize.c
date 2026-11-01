@@ -5134,7 +5134,15 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 		add_function_cost(context->root, saop->opfuncid, NULL,
 						  &sacosts);
 
-		if (OidIsValid(saop->hashfuncid))
+		/*
+		 * Charge for hash lookups only for a Const or a one-dimensional
+		 * ARRAY[...], whose length the planner checked.  Any other array is
+		 * hashed only if it turns out long enough, so charge a linear search.
+		 */
+		if (OidIsValid(saop->hashfuncid) &&
+			(IsA(arraynode, Const) ||
+			 (IsA(arraynode, ArrayExpr) &&
+			  !castNode(ArrayExpr, arraynode)->multidims)))
 		{
 			/* Handle costs for hashed ScalarArrayOpExpr */
 			hcosts.startup = hcosts.per_tuple = 0;
