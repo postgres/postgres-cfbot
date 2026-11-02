@@ -1232,6 +1232,7 @@ HashPageOpaque
 HashPageOpaqueData
 HashPageStat
 HashPath
+HashPendingTuples
 HashScanOpaque
 HashScanOpaqueData
 HashScanPosData

@@ -1,8 +1,10 @@
 # src/test/modules/hash/Makefile
 
-EXTRA_INSTALL = src/test/modules/injection_points
+EXTRA_INSTALL = src/test/modules/injection_points contrib/pageinspect
 
-REGRESS = hash_incomplete_splits
+REGRESS = hash_deferred_count hash_incomplete_splits
+
+TAP_TESTS = 1
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

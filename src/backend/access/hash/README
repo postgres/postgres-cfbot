@@ -304,17 +304,25 @@ The insertion algorithm is rather similar:
 	release lock but not pin, read/exclusive-lock
      next page; repeat as needed
 	>> see below if no space in any page of bucket
-	take buffer content lock in exclusive mode on metapage
+	if this backend has done 1024 inserts into the index, has since seen the
+	 metapage lock taken, this is not its 32nd insert since, and we did not
+	 add an overflow page, don't touch the metapage
+	else pin the metapage and try to take the lock without waiting; if that
+	 fails and 255 tuples are pending, wait for it
 	insert tuple at appropriate place in page
 	mark current page dirty
-	increment tuple count, decide if split needed
-	mark meta page dirty
+	if we got the metapage lock
+		add this tuple and any pending ones to the tuple count, decide if
+		 split needed
+		mark meta page dirty
+	else
+		remember the tuple as pending
 	write WAL for insertion of tuple
-	release the buffer content lock on metapage
+	release the buffer content lock on metapage, if we hold it
 	release buffer content lock on current page
 	if current page is not a bucket page, release the pin on bucket page
 	if split is needed, enter Split algorithm below
-	release the pin on metapage
+	release the pin on metapage, if we hold one
 
 To speed searches, the index entries within any individual index page are
 kept sorted by hash code; the insertion code must take care to insert new
@@ -326,10 +334,31 @@ that readers do not see a partially-updated page.
 To avoid deadlock between readers and inserters, whenever there is a need
 to lock multiple buckets, we always take in the order suggested in Lock
 Definitions above.  This algorithm allows them a very high degree of
-concurrency.  (The exclusive metapage lock taken to update the tuple count
-is stronger than necessary, since readers do not care about the tuple count,
-but the lock is held for such a short time that this is probably not an
-issue.)
+concurrency.
+
+The tuple count in the metapage (hashm_ntuples) only decides when to split
+a bucket.  Taking the metapage lock on every insert just to bump it
+serializes concurrent inserters on that one buffer, so an inserter that
+finds the lock taken does not wait for it.  It leaves its tuple uncounted,
+as a per-backend pending count for that index.  Even a failed attempt to
+take the lock, or a pin, writes to the buffer header, and with many
+inserters that cache line moves between CPUs on every insert.  So once a
+backend has done 1024 inserts into the index and then found the lock
+taken, it only looks at the metapage on every 32nd insert: it tries the
+lock, and if it gets it adds the pending tuples to the count.  Shorter
+sessions try the lock on every insert, because tuples still pending when a
+backend exits are never counted, and batching would leave a large share of
+a short session's tuples uncounted.  An insert that had to add an overflow
+page tries the lock too, because a full bucket is the sign that a split
+may be due.  The backend waits for the lock if 256 tuples would otherwise
+be pending.  Without concurrent inserters the lock is always free, and the
+count is exact.
+
+Tuples still pending when a backend exits are never counted.  That costs
+at most a slightly late split, since a backend leaves fewer than 256
+tuples per index uncounted.  A VACUUM that removes tuples recounts them
+(see below), and the code that subtracts from the count does not let it go
+negative.
 
 When an inserter cannot find space in any existing page of a bucket, it
 must obtain an overflow page and add that page to the bucket's chain.
@@ -423,7 +452,9 @@ buckets did *not* change at any time during the scan.  This provides a way of
 correcting the stored tuple count if it gets out of sync for some reason.  But
 if a split or insertion does occur concurrently, the scan count is
 untrustworthy; instead, subtract the number of tuples deleted from the stored
-tuple count and use that.
+tuple count and use that.  (An insertion that left its tuple pending goes
+unnoticed here, but the error that causes is bounded by the cap on pending
+tuples.)
 
 Interlocking Between Scans and VACUUM
 -------------------------------------

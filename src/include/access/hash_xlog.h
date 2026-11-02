@@ -57,7 +57,8 @@
  * This data record is used for XLOG_HASH_INSERT
  *
  * Backup Blk 0: original page (data contains the inserted tuple)
- * Backup Blk 1: metapage (HashMetaPageData)
+ * Backup Blk 1: metapage, present only if the tuple count was updated (data
+ * is the uint32 count increment if it is not 1)
  */
 typedef struct xl_hash_insert
 {
