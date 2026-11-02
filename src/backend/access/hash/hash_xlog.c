@@ -231,7 +231,14 @@ hash_xlog_add_ovfl_page(XLogReaderState *record)
 			data = XLogRecGetBlockData(record, 2, &datalen);
 			bitmap_page_bit = (uint32 *) data;
 
-			SETBIT(freep, *bitmap_page_bit);
+			if (xlrec->bmpage_found)
+				SETBIT(freep, *bitmap_page_bit);
+			else
+			{
+				/* added pages left free */
+				for (uint32 k = 0; k < xlrec->nadded - 1; k++)
+					CLRBIT(freep, *bitmap_page_bit + k);
+			}
 
 			PageSetLSN(mappage, lsn);
 			MarkBufferDirty(mapbuffer);
@@ -257,6 +264,10 @@ hash_xlog_add_ovfl_page(XLogReaderState *record)
 		UnlockReleaseBuffer(newmapbuf);
 	}
 
+	/* The metapage is present only if it was modified */
+	if (!XLogRecHasBlockRef(record, 4))
+		return;
+
 	if (XLogReadBufferForRedo(record, 4, &metabuf) == BLK_NEEDS_REDO)
 	{
 		HashMetaPage metap;
@@ -272,7 +283,7 @@ hash_xlog_add_ovfl_page(XLogReaderState *record)
 
 		if (!xlrec->bmpage_found)
 		{
-			metap->hashm_spares[metap->hashm_ovflpoint]++;
+			metap->hashm_spares[metap->hashm_ovflpoint] += xlrec->nadded;
 
 			if (new_bmpage)
 			{
@@ -831,33 +842,6 @@ hash_xlog_squeeze_page(XLogReaderState *record)
 	}
 	if (BufferIsValid(mapbuf))
 		UnlockReleaseBuffer(mapbuf);
-
-	/* replay the record for meta page */
-	if (XLogRecHasBlockRef(record, 6))
-	{
-		Buffer		metabuf;
-
-		if (XLogReadBufferForRedo(record, 6, &metabuf) == BLK_NEEDS_REDO)
-		{
-			HashMetaPage metap;
-			Page		page;
-			char	   *data;
-			uint32	   *firstfree_ovflpage;
-			Size		datalen;
-
-			data = XLogRecGetBlockData(record, 6, &datalen);
-			firstfree_ovflpage = (uint32 *) data;
-
-			page = BufferGetPage(metabuf);
-			metap = HashPageGetMeta(page);
-			metap->hashm_firstfree = *firstfree_ovflpage;
-
-			PageSetLSN(page, lsn);
-			MarkBufferDirty(metabuf);
-		}
-		if (BufferIsValid(metabuf))
-			UnlockReleaseBuffer(metabuf);
-	}
 }
 
 /*
