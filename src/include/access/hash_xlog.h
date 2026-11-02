@@ -74,13 +74,18 @@ typedef struct xl_hash_insert
  *
  * Backup Blk 0: newly allocated overflow page
  * Backup Blk 1: page before new overflow page in the bucket chain
- * Backup Blk 2: bitmap page
+ * Backup Blk 2: bitmap page.  If bmpage_found, data is the bit to set for
+ *				 the reused page; otherwise data is the first of the
+ *				 nadded - 1 bits to clear for the added pages left free
  * Backup Blk 3: new bitmap page
- * Backup Blk 4: metapage
+ * Backup Blk 4: metapage, present only if it was modified (data is
+ *				 hashm_firstfree)
  */
 typedef struct xl_hash_add_ovfl_page
 {
 	uint16		bmsize;
+	uint16		nadded;			/* pages added to the overflow area, if
+								 * !bmpage_found */
 	bool		bmpage_found;
 } xl_hash_add_ovfl_page;
 
@@ -156,7 +161,7 @@ typedef struct xl_hash_move_page_contents
  * Backup Blk 3: page previous to the freed overflow page
  * Backup Blk 4: page next to the freed overflow page
  * Backup Blk 5: bitmap page containing info of freed overflow page
- * Backup Blk 6: meta page
+ * Backup Blk 6: meta page (not written by current servers)
  */
 typedef struct xl_hash_squeeze_page
 {
