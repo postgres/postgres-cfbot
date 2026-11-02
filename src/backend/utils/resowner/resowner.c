@@ -1038,6 +1038,15 @@ ReleaseAuxProcessResources(bool isCommit)
 	ResourceOwnerRelease(AuxProcessResourceOwner,
 						 RESOURCE_RELEASE_AFTER_LOCKS,
 						 isCommit, true);
+
+	/*
+	 * Sorting can leave copies of entries beyond the sorted prefix, and bulk
+	 * release only resets the counts.  Clear the entire table before reuse.
+	 */
+	if (AuxProcessResourceOwner->hash != NULL)
+		memset(AuxProcessResourceOwner->hash, 0,
+			   AuxProcessResourceOwner->capacity * sizeof(ResourceElem));
+
 	/* allow it to be reused */
 	AuxProcessResourceOwner->releasing = false;
 	AuxProcessResourceOwner->sorted = false;
