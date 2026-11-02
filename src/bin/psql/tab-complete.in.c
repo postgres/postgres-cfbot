@@ -3429,7 +3429,12 @@ match_previous_words(int pattern_id,
 
 			/* Complete COPY <sth> FROM|TO filename WITH (FORMAT */
 			else if (TailMatches("FORMAT"))
-				COMPLETE_WITH("binary", "csv", "text", "json");
+			{
+				if (HeadMatches("COPY|\\copy", MatchAny, "FROM"))
+					COMPLETE_WITH("binary", "csv", "text");
+				else
+					COMPLETE_WITH("binary", "csv", "text", "json");
+			}
 
 			/* Complete COPY <sth> FROM|TO filename WITH (FREEZE */
 			else if (TailMatches("FREEZE"))
