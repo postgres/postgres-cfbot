@@ -12,6 +12,7 @@ tests += {
     'sql': [
       'hash_deferred_count',
       'hash_incomplete_splits',
+      'hash_overflow_pages',
     ],
   },
   'tap': {

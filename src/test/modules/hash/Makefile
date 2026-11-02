@@ -2,7 +2,7 @@
 
 EXTRA_INSTALL = src/test/modules/injection_points contrib/pageinspect
 
-REGRESS = hash_deferred_count hash_incomplete_splits
+REGRESS = hash_deferred_count hash_incomplete_splits hash_overflow_pages
 
 TAP_TESTS = 1
 
