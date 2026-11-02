@@ -710,7 +710,7 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 		/*
 		 * Update pg_database.datfrozenxid, and truncate pg_xact if possible.
 		 */
-		vac_update_datfrozenxid();
+		vac_update_datfrozenxid(false);
 	}
 
 }
@@ -1627,6 +1627,10 @@ vac_update_relstats(Relation relation,
  *		If we are able to advance either pg_database value, also try to
  *		truncate pg_xact and pg_multixact.
  *
+ *		If nowait is true, skip the update when the database frozen-ID
+ *		lock cannot be acquired immediately.  Once acquired, the lock is
+ *		held until transaction end.
+ *
  *		We violate transaction semantics here by overwriting the database's
  *		existing pg_database tuple with the new values.  This is reasonably
  *		safe since the new values are correct whether or not this transaction
@@ -1634,7 +1638,7 @@ vac_update_relstats(Relation relation,
  *		behind after a VACUUM.
  */
 void
-vac_update_datfrozenxid(void)
+vac_update_datfrozenxid(bool nowait)
 {
 	HeapTuple	tuple;
 	Form_pg_database dbform;
@@ -1656,7 +1660,13 @@ vac_update_datfrozenxid(void)
 	 * avoids calling vac_truncate_clog() with a datfrozenxid preceding a
 	 * datfrozenxid passed to an earlier vac_truncate_clog() call.
 	 */
-	LockDatabaseFrozenIds(ExclusiveLock);
+	if (nowait)
+	{
+		if (!ConditionalLockDatabaseFrozenIds(ExclusiveLock))
+			return;
+	}
+	else
+		LockDatabaseFrozenIds(ExclusiveLock);
 
 	/*
 	 * Initialize the "min" calculation with
@@ -1834,6 +1844,8 @@ vac_update_datfrozenxid(void)
 	if (dirty || ForceTransactionIdLimitUpdate())
 		vac_truncate_clog(newFrozenXid, newMinMulti,
 						  lastSaneFrozenXid, lastSaneMinMulti);
+
+	pgstat_report_frozenxid_update();
 }
 
 

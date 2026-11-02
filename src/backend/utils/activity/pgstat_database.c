@@ -75,6 +75,24 @@ pgstat_report_autovac(Oid dboid)
 }
 
 /*
+ * Record completion even when the database's frozen IDs did not advance,
+ * so that autovacuum workers can throttle their periodic update attempts.
+ * The caller must still hold the database frozen-ID lock.
+ */
+void
+pgstat_report_frozenxid_update(void)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Database *dbentry;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_DATABASE,
+											MyDatabaseId, InvalidOid, false);
+	dbentry = (PgStatShared_Database *) entry_ref->shared_stats;
+	dbentry->stats.last_frozenxid_update = GetCurrentTimestamp();
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
  * Report a Hot Standby recovery conflict.
  */
 void
@@ -460,8 +478,9 @@ pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	PGSTAT_ACCUM_DBCOUNT(tuples_updated);
 	PGSTAT_ACCUM_DBCOUNT(tuples_deleted);
 
-	/* last_autovac_time is reported immediately */
+	/* last_autovac_time and last_frozenxid_update are reported immediately */
 	Assert(pendingent->last_autovac_time == 0);
+	Assert(pendingent->last_frozenxid_update == 0);
 
 	PGSTAT_ACCUM_DBCOUNT(conflict_tablespace);
 	PGSTAT_ACCUM_DBCOUNT(conflict_lock);
