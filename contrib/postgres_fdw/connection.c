@@ -177,11 +177,10 @@ static void pgfdw_inval_callback(Datum arg, SysCacheIdentifier cacheid,
 								 uint32 hashvalue);
 static void pgfdw_reject_incomplete_xact_state_change(ConnCacheEntry *entry);
 static void pgfdw_reset_xact_state(ConnCacheEntry *entry, bool toplevel);
-static bool pgfdw_cancel_query(PGconn *conn);
 static bool pgfdw_cancel_query_begin(PGconn *conn, TimestampTz endtime);
 static bool pgfdw_cancel_query_end(PGconn *conn, TimestampTz endtime,
 								   TimestampTz retrycanceltime,
-								   bool consume_input);
+								   bool consume_input, PgFdwConnState *state);
 static bool pgfdw_exec_cleanup_query(PGconn *conn, const char *query,
 									 bool ignore_errors);
 static bool pgfdw_exec_cleanup_query_begin(PGconn *conn, const char *query);
@@ -313,6 +312,9 @@ GetConnection(UserMapping *user, bool will_prep_stmt, PgFdwConnState **state)
 		/* Process a pending asynchronous request if any. */
 		if (entry->state.pendingAreq)
 			process_pending_request(entry->state.pendingAreq);
+
+		/* Likewise, finish any streaming_fetch scan using the connection. */
+		drain_active_scan(&entry->state);
 		/* Start a new transaction or subtransaction if needed. */
 		begin_remote_xact(entry);
 	}
@@ -1096,13 +1098,19 @@ GetPrepStmtNumber(PGconn *conn)
  * ignore that for now.
  *
  * Caller is responsible for the error handling on the result.
+ *
+ * state must not be NULL, since any streaming_fetch scan still using the
+ * connection has to be drained first.
  */
 PGresult *
 pgfdw_exec_query(PGconn *conn, const char *query, PgFdwConnState *state)
 {
 	/* First, process a pending asynchronous request, if any. */
-	if (state && state->pendingAreq)
+	if (state->pendingAreq)
 		process_pending_request(state->pendingAreq);
+
+	/* Likewise, finish any streaming_fetch scan using the connection. */
+	drain_active_scan(state);
 
 	if (!PQsendQuery(conn, query))
 		return NULL;
@@ -1118,6 +1126,18 @@ PGresult *
 pgfdw_get_result(PGconn *conn)
 {
 	return libpqsrv_get_result_last(conn, pgfdw_we_get_result);
+}
+
+/*
+ * Wrap libpqsrv_get_result(), adding wait event.  Used to read a
+ * streaming_fetch result one chunk at a time.
+ *
+ * Caller is responsible for the error handling on the result.
+ */
+PGresult *
+pgfdw_get_next_result(PGconn *conn)
+{
+	return libpqsrv_get_result(conn, pgfdw_we_get_result);
 }
 
 /*
@@ -1293,7 +1313,7 @@ pgfdw_xact_callback(XactEvent event, void *arg)
 					if (entry->have_prep_stmt && entry->have_error)
 					{
 						res = pgfdw_exec_query(entry->conn, "DEALLOCATE ALL",
-											   NULL);
+											   &entry->state);
 						PQclear(res);
 					}
 					entry->have_prep_stmt = false;
@@ -1422,6 +1442,14 @@ pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 			 * can't issue any more commands against it.
 			 */
 			pgfdw_reject_incomplete_xact_state_change(entry);
+
+			/*
+			 * A cursor that outlives this subtransaction may still be
+			 * streaming; drain it before RELEASE SAVEPOINT.  Do this before
+			 * setting changing_xact_state, so an error only aborts the
+			 * subtransaction.
+			 */
+			drain_active_scan(&entry->state);
 
 			/* Commit all remote subtransactions during pre-commit */
 			snprintf(sql, sizeof(sql), "RELEASE SAVEPOINT s%d", curlevel);
@@ -1619,9 +1647,11 @@ pgfdw_reset_xact_state(ConnCacheEntry *entry, bool toplevel)
  * XXX: if the query was one sent by fetch_more_data_begin(), we could get the
  * query text from the pendingAreq saved in the per-connection state, then
  * report the query using it.
+ *
+ * On success, pgfdw_cancel_query_end() also clears state->active_scan.
  */
-static bool
-pgfdw_cancel_query(PGconn *conn)
+bool
+pgfdw_cancel_query(PGconn *conn, PgFdwConnState *state)
 {
 	TimestampTz now = GetCurrentTimestamp();
 	TimestampTz endtime;
@@ -1641,7 +1671,7 @@ pgfdw_cancel_query(PGconn *conn)
 
 	if (!pgfdw_cancel_query_begin(conn, endtime))
 		return false;
-	return pgfdw_cancel_query_end(conn, endtime, retrycanceltime, false);
+	return pgfdw_cancel_query_end(conn, endtime, retrycanceltime, false, state);
 }
 
 /*
@@ -1668,7 +1698,8 @@ pgfdw_cancel_query_begin(PGconn *conn, TimestampTz endtime)
 
 static bool
 pgfdw_cancel_query_end(PGconn *conn, TimestampTz endtime,
-					   TimestampTz retrycanceltime, bool consume_input)
+					   TimestampTz retrycanceltime, bool consume_input,
+					   PgFdwConnState *state)
 {
 	PGresult   *result;
 	bool		timed_out;
@@ -1704,6 +1735,9 @@ pgfdw_cancel_query_end(PGconn *conn, TimestampTz endtime,
 		return false;
 	}
 	PQclear(result);
+
+	/* The canceled query's result is consumed; nothing is streaming now. */
+	state->active_scan = NULL;
 
 	return true;
 }
@@ -1956,7 +1990,7 @@ pgfdw_abort_cleanup(ConnCacheEntry *entry, bool toplevel)
 	 * remote server, and if so, request cancellation of the command.
 	 */
 	if (PQtransactionStatus(entry->conn) == PQTRANS_ACTIVE &&
-		!pgfdw_cancel_query(entry->conn))
+		!pgfdw_cancel_query(entry->conn, &entry->state))
 		return;					/* Unable to cancel running query */
 
 	CONSTRUCT_ABORT_COMMAND(sql, entry, toplevel);
@@ -1979,10 +2013,12 @@ pgfdw_abort_cleanup(ConnCacheEntry *entry, bool toplevel)
 	 * If pendingAreq of the per-connection state is not NULL, it means that
 	 * an asynchronous fetch begun by fetch_more_data_begin() was not done
 	 * successfully and thus the per-connection state was not reset in
-	 * fetch_more_data(); in that case reset the per-connection state here.
+	 * fetch_more_data().  Likewise, active_scan may still point at a
+	 * streaming_fetch scan that is going away with this (sub)transaction.
+	 * Reset both, so the connection's next user sees no stale state.
 	 */
-	if (entry->state.pendingAreq)
-		memset(&entry->state, 0, sizeof(entry->state));
+	entry->state.pendingAreq = NULL;
+	entry->state.active_scan = NULL;
 
 	/* Disarm changing_xact_state if it all worked */
 	entry->changing_xact_state = false;
@@ -2206,7 +2242,7 @@ pgfdw_finish_abort_cleanup(List *pending_entries, List *cancel_requested,
 														  RETRY_CANCEL_TIMEOUT);
 
 			if (!pgfdw_cancel_query_end(entry->conn, endtime,
-										retrycanceltime, true))
+										retrycanceltime, true, &entry->state))
 			{
 				/* Unable to cancel running query */
 				pgfdw_reset_xact_state(entry, toplevel);
@@ -2276,9 +2312,9 @@ pgfdw_finish_abort_cleanup(List *pending_entries, List *cancel_requested,
 			entry->have_error = false;
 		}
 
-		/* Reset the per-connection state if needed */
-		if (entry->state.pendingAreq)
-			memset(&entry->state, 0, sizeof(entry->state));
+		/* Reset the async request and any undrained streaming_fetch scan */
+		entry->state.pendingAreq = NULL;
+		entry->state.active_scan = NULL;
 
 		/* We're done with this entry; unset the changing_xact_state flag */
 		entry->changing_xact_state = false;
@@ -2321,9 +2357,9 @@ pgfdw_finish_abort_cleanup(List *pending_entries, List *cancel_requested,
 		entry->have_prep_stmt = false;
 		entry->have_error = false;
 
-		/* Reset the per-connection state if needed */
-		if (entry->state.pendingAreq)
-			memset(&entry->state, 0, sizeof(entry->state));
+		/* Reset the async request and any undrained streaming_fetch scan */
+		entry->state.pendingAreq = NULL;
+		entry->state.active_scan = NULL;
 
 		/* We're done with this entry; unset the changing_xact_state flag */
 		entry->changing_xact_state = false;

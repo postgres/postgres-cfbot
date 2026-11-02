@@ -484,6 +484,58 @@ OPTIONS (ADD password_required 'false');
      </listitem>
     </varlistentry>
 
+    <varlistentry>
+     <term><literal>streaming_fetch</literal> (<type>boolean</type>)</term>
+     <listitem>
+      <para>
+       This option controls whether <filename>postgres_fdw</filename> reads the
+       results of a foreign scan without declaring a cursor on the remote
+       server. Because the execution of a cursor's query can be suspended
+       between fetches, the remote server never uses a parallel plan for it
+       (see <xref linkend="when-can-parallel-query-be-used"/>). With
+       <literal>streaming_fetch</literal> enabled, the remote query instead runs
+       to completion in a single execution and may be parallelized, which can
+       significantly speed up large scans. It can be specified for a foreign
+       table or a foreign server. The option specified on a table overrides an
+       option specified for the server. The default is <literal>false</literal>.
+       Asynchronous execution is not supported in this mode and is disabled
+       automatically when it is enabled.
+      </para>
+
+      <para>
+       Even when this option is enabled, a scan that needs the remote rows'
+       <literal>ctid</literal>, such as one feeding an <command>UPDATE</command>
+       or <command>DELETE</command> that cannot be pushed down to the remote
+       server, or a scan that locks rows with <literal>FOR UPDATE</literal> or
+       <literal>FOR SHARE</literal>, still uses a cursor.
+       <command>EXPLAIN VERBOSE</command> shows <literal>Streaming Fetch:
+       true</literal> for scans that use this mode.
+      </para>
+
+      <para>
+       In this mode the rows of a scan are streamed from the remote server in
+       chunks of <literal>fetch_size</literal> rows, and a connection can carry
+       only one such stream at a time. If another scan or statement needs the
+       same connection while a streaming scan has not yet returned all of its
+       rows, <filename>postgres_fdw</filename> reads the remainder of that
+       scan's rows into a local tuplestore (kept in memory up to
+       <varname>work_mem</varname> and spilling to disk beyond that) and returns
+       them from there.
+      </para>
+
+      <para>
+       If a streaming scan is stopped before all of its rows have been read
+       (for example by a <literal>LIMIT</literal> that cannot be pushed to the
+       remote server, or by a rescan), the remaining rows must still be read
+       from the connection and discarded before it can be reused; likewise a
+       rescan with changed parameters re-executes the whole remote query rather
+       than rewinding a cursor. For queries that read only a small fraction of
+       their rows, <literal>streaming_fetch</literal> can therefore be slower
+       than the default cursor-based mode.
+      </para>
+     </listitem>
+    </varlistentry>
+
    </variablelist>
 
   </sect3>
