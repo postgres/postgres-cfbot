@@ -133,6 +133,10 @@ CREATE TABLE default_expr_wholerow (id int DEFAULT (ROW(default_expr_wholerow.*)
 ERROR:  cannot use column reference in DEFAULT expression
 LINE 1: ... TABLE default_expr_wholerow (id int DEFAULT (ROW(default_ex...
                                                              ^
+CREATE TABLE default_expr_wholerow (id int DEFAULT (ROW(bar.*)).f1);
+ERROR:  cannot use column reference in DEFAULT expression
+LINE 1: ... TABLE default_expr_wholerow (id int DEFAULT (ROW(bar.*)).f1...
+                                                             ^
 -- but a row constructor with no column reference in it is fine, even one
 -- that expands a composite value that is not a table
 CREATE TABLE default_expr_rowexpr (id int DEFAULT (ROW(1)).f1);
@@ -468,6 +472,10 @@ LINE 1: ...expr_fail PARTITION OF list_parted FOR VALUES IN (somename.s...
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN ((ROW(part_bogus_expr_fail.*)).f1);
 ERROR:  cannot use column reference in partition bound expression
 LINE 1: ...fail PARTITION OF list_parted FOR VALUES IN ((ROW(part_bogus...
+                                                             ^
+CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN ((ROW(somename.*)).f1);
+ERROR:  cannot use column reference in partition bound expression
+LINE 1: ...fail PARTITION OF list_parted FOR VALUES IN ((ROW(somename.*...
                                                              ^
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (a);
 ERROR:  cannot use column reference in partition bound expression

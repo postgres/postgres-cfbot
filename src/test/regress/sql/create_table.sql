@@ -83,6 +83,7 @@ CREATE TABLE default_expr_column (id int DEFAULT (bar.id));
 CREATE TABLE default_expr_agg_column (id int DEFAULT (avg(id)));
 -- a whole-row reference is a column reference too
 CREATE TABLE default_expr_wholerow (id int DEFAULT (ROW(default_expr_wholerow.*)).f1);
+CREATE TABLE default_expr_wholerow (id int DEFAULT (ROW(bar.*)).f1);
 -- but a row constructor with no column reference in it is fine, even one
 -- that expands a composite value that is not a table
 CREATE TABLE default_expr_rowexpr (id int DEFAULT (ROW(1)).f1);
@@ -328,6 +329,7 @@ CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (somena
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (somename.somename);
 -- a whole-row reference to the partition being created is a column reference
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN ((ROW(part_bogus_expr_fail.*)).f1);
+CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN ((ROW(somename.*)).f1);
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (a);
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (sum(a));
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (sum(somename));
