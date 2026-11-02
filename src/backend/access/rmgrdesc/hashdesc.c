@@ -64,8 +64,9 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 			{
 				xl_hash_add_ovfl_page *xlrec = (xl_hash_add_ovfl_page *) rec;
 
-				appendStringInfo(buf, "bmsize %d, bmpage_found %c",
-								 xlrec->bmsize, (xlrec->bmpage_found) ? 'T' : 'F');
+				appendStringInfo(buf, "bmsize %d, bmpage_found %c, nadded %u",
+								 xlrec->bmsize, (xlrec->bmpage_found) ? 'T' : 'F',
+								 xlrec->nadded);
 				break;
 			}
 		case XLOG_HASH_SPLIT_ALLOCATE_PAGE:
