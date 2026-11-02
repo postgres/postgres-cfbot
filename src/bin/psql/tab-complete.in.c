@@ -3437,7 +3437,12 @@ match_previous_words(int pattern_id,
 
 			/* Complete COPY <sth> FROM|TO filename WITH (HEADER */
 			else if (TailMatches("HEADER"))
-				COMPLETE_WITH("true", "false", "MATCH");
+			{
+				if (HeadMatches("COPY|\\copy", MatchAny, "FROM"))
+					COMPLETE_WITH("true", "false", "MATCH");
+				else
+					COMPLETE_WITH("true", "false");
+			}
 
 			/* Complete COPY <sth> FROM filename WITH (ON_ERROR */
 			else if (TailMatches("ON_ERROR"))
