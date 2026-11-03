@@ -6762,124 +6762,46 @@ error_return:
 
 /*
  * \dRs
- * Describes subscriptions.
+ * Lists subscriptions.
  *
  * Takes an optional regexp to select particular subscriptions
  */
 bool
-describeSubscriptions(const char *pattern, bool verbose)
+listSubscriptions(const char *pattern)
 {
 	PQExpBufferData buf;
 	PGresult   *res;
 	printQueryOpt myopt = pset.popt;
-	static const bool translate_columns[] = {false, false, false, false,
-		false, false, false, false, false, false, false, false, false, false,
-	false, false, false, false, false, false, false};
+	static const bool translate_columns[] = {false, false, false, false};
+
+	if (pset.sversion < 100000)
+	{
+		char		sverbuf[32];
+
+		pg_log_error("The server (version %s) does not support subscriptions.",
+					 formatPGVersionNumber(pset.sversion, false,
+										   sverbuf, sizeof(sverbuf)));
+		return true;
+	}
 
 	initPQExpBuffer(&buf);
 
 	addQueryComment(&buf, "Get matching subscriptions");
+
+	/* Only display subscriptions in current database. */
 	appendPQExpBuffer(&buf,
 					  "SELECT subname AS \"%s\"\n"
 					  ",  pg_catalog.pg_get_userbyid(subowner) AS \"%s\"\n"
 					  ",  subenabled AS \"%s\"\n"
-					  ",  subpublications AS \"%s\"\n",
+					  ",  subpublications AS \"%s\"\n"
+					  "FROM pg_catalog.pg_subscription\n"
+					  "WHERE subdbid = (SELECT oid\n"
+					  "                 FROM pg_catalog.pg_database\n"
+					  "                 WHERE datname = pg_catalog.current_database())",
 					  gettext_noop("Name"),
 					  gettext_noop("Owner"),
 					  gettext_noop("Enabled"),
 					  gettext_noop("Publication"));
-
-	if (verbose)
-	{
-		/* Binary mode and streaming are only supported in v14 and higher */
-		if (pset.sversion >= 140000)
-		{
-			appendPQExpBuffer(&buf,
-							  ", subbinary AS \"%s\"\n",
-							  gettext_noop("Binary"));
-
-			if (pset.sversion >= 160000)
-				appendPQExpBuffer(&buf,
-								  ", (CASE substream\n"
-								  "    WHEN " CppAsString2(LOGICALREP_STREAM_OFF) " THEN 'off'\n"
-								  "    WHEN " CppAsString2(LOGICALREP_STREAM_ON) " THEN 'on'\n"
-								  "    WHEN " CppAsString2(LOGICALREP_STREAM_PARALLEL) " THEN 'parallel'\n"
-								  "   END) AS \"%s\"\n",
-								  gettext_noop("Streaming"));
-			else
-				appendPQExpBuffer(&buf,
-								  ", substream AS \"%s\"\n",
-								  gettext_noop("Streaming"));
-		}
-
-		/* Two_phase and disable_on_error are only supported in v15 and higher */
-		if (pset.sversion >= 150000)
-			appendPQExpBuffer(&buf,
-							  ", subtwophasestate AS \"%s\"\n"
-							  ", subdisableonerr AS \"%s\"\n",
-							  gettext_noop("Two-phase commit"),
-							  gettext_noop("Disable on error"));
-
-		if (pset.sversion >= 160000)
-			appendPQExpBuffer(&buf,
-							  ", suborigin AS \"%s\"\n"
-							  ", subpasswordrequired AS \"%s\"\n"
-							  ", subrunasowner AS \"%s\"\n",
-							  gettext_noop("Origin"),
-							  gettext_noop("Password required"),
-							  gettext_noop("Run as owner?"));
-
-		if (pset.sversion >= 170000)
-			appendPQExpBuffer(&buf,
-							  ", subfailover AS \"%s\"\n",
-							  gettext_noop("Failover"));
-		if (pset.sversion >= 190000)
-		{
-			appendPQExpBuffer(&buf,
-							  ", (select srvname from pg_catalog.pg_foreign_server where oid=subserver) AS \"%s\"\n",
-							  gettext_noop("Server"));
-
-			appendPQExpBuffer(&buf,
-							  ", subretaindeadtuples AS \"%s\"\n",
-							  gettext_noop("Retain dead tuples"));
-
-			appendPQExpBuffer(&buf,
-							  ", submaxretention AS \"%s\"\n",
-							  gettext_noop("Max retention duration"));
-
-			appendPQExpBuffer(&buf,
-							  ", subretentionactive AS \"%s\"\n",
-							  gettext_noop("Retention active"));
-		}
-
-		appendPQExpBuffer(&buf,
-						  ",  subsynccommit AS \"%s\"\n"
-						  ",  subconninfo AS \"%s\"\n",
-						  gettext_noop("Synchronous commit"),
-						  gettext_noop("Conninfo"));
-
-		if (pset.sversion >= 190000)
-			appendPQExpBuffer(&buf,
-							  ", subwalrcvtimeout AS \"%s\"\n",
-							  gettext_noop("Receiver timeout"));
-
-		/* Skip LSN is only supported in v15 and higher */
-		if (pset.sversion >= 150000)
-			appendPQExpBuffer(&buf,
-							  ", subskiplsn AS \"%s\"\n",
-							  gettext_noop("Skip LSN"));
-
-		appendPQExpBuffer(&buf,
-						  ",  pg_catalog.obj_description(oid, 'pg_subscription') AS \"%s\"\n",
-						  gettext_noop("Description"));
-	}
-
-	/* Only display subscriptions in current database. */
-	appendPQExpBufferStr(&buf,
-						 "FROM pg_catalog.pg_subscription\n"
-						 "WHERE subdbid = (SELECT oid\n"
-						 "                 FROM pg_catalog.pg_database\n"
-						 "                 WHERE datname = pg_catalog.current_database())");
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								NULL, "subname", NULL,
@@ -6904,6 +6826,345 @@ describeSubscriptions(const char *pattern, bool verbose)
 
 	printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
 
+	PQclear(res);
+
+	return true;
+}
+
+/*
+ * \dRs+
+ * Describes subscriptions.
+ *
+ * Takes an optional regexp to select particular subscriptions
+ */
+bool
+describeSubscriptions(const char *pattern)
+{
+	PQExpBufferData buf;
+	int			i;
+	PGresult   *res;
+	int			ncols;
+	int			nrows = 1;
+
+	PQExpBufferData title;
+	PQExpBufferData footer;
+	printTableContent cont;
+
+	if (pset.sversion < 100000)
+	{
+		char		sverbuf[32];
+
+		pg_log_error("The server (version %s) does not support subscriptions.",
+					 formatPGVersionNumber(pset.sversion, false,
+										   sverbuf, sizeof(sverbuf)));
+		return true;
+	}
+
+	initPQExpBuffer(&buf);
+	initPQExpBuffer(&footer);
+
+	addQueryComment(&buf, "Get matching subscriptions");
+	appendPQExpBuffer(&buf,
+					  "SELECT subname AS \"%s\"\n",
+					  gettext_noop("Name"));
+
+	/*
+	 * The conflict log table is only shown in a footer, so it is fetched
+	 * here, as a hidden column, and not with the displayed ones below.
+	 */
+	if (pset.sversion >= 200000)
+		appendPQExpBufferStr(&buf,
+							 ",  CASE WHEN subconflictlogrelid <> 0\n"
+							 "        THEN subconflictlogrelid::pg_catalog.regclass::pg_catalog.text\n"
+							 "   END AS conflict_log_table\n");
+	else
+		appendPQExpBufferStr(&buf,
+							 ",  NULL::pg_catalog.text AS conflict_log_table\n");
+
+	appendPQExpBuffer(&buf,
+					  ",  pg_catalog.pg_get_userbyid(subowner) AS \"%s\"\n"
+					  ",  subenabled AS \"%s\"\n"
+					  ",  subpublications AS \"%s\"\n",
+					  gettext_noop("Owner"),
+					  gettext_noop("Enabled"),
+					  gettext_noop("Publication"));
+
+	/*
+	 * The subname and conflict_log_table columns are internal and not
+	 * displayed, so only 3 visible columns.
+	 */
+	ncols = 3;
+
+	/* Binary mode and streaming are only supported in v14 and higher */
+	if (pset.sversion >= 140000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", subbinary AS \"%s\"\n",
+						  gettext_noop("Binary"));
+		ncols++;
+
+		if (pset.sversion >= 160000)
+			appendPQExpBuffer(&buf,
+							  ", (CASE substream\n"
+							  "    WHEN " CppAsString2(LOGICALREP_STREAM_OFF) " THEN 'off'\n"
+							  "    WHEN " CppAsString2(LOGICALREP_STREAM_ON) " THEN 'on'\n"
+							  "    WHEN " CppAsString2(LOGICALREP_STREAM_PARALLEL) " THEN 'parallel'\n"
+							  "   END) AS \"%s\"\n",
+							  gettext_noop("Streaming"));
+		else
+			appendPQExpBuffer(&buf,
+							  ", substream AS \"%s\"\n",
+							  gettext_noop("Streaming"));
+
+		ncols++;
+	}
+
+	/* Two_phase and disable_on_error are only supported in v15 and higher */
+	if (pset.sversion >= 150000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", subtwophasestate AS \"%s\"\n"
+						  ", subdisableonerr AS \"%s\"\n",
+						  gettext_noop("Two-phase commit"),
+						  gettext_noop("Disable on error"));
+		ncols += 2;
+	}
+
+	if (pset.sversion >= 160000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", suborigin AS \"%s\"\n"
+						  ", subpasswordrequired AS \"%s\"\n"
+						  ", subrunasowner AS \"%s\"\n",
+						  gettext_noop("Origin"),
+						  gettext_noop("Password required"),
+						  gettext_noop("Run as owner?"));
+		ncols += 3;
+	}
+
+	if (pset.sversion >= 170000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", subfailover AS \"%s\"\n",
+						  gettext_noop("Failover"));
+		ncols++;
+	}
+
+	if (pset.sversion >= 190000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", (select srvname from pg_catalog.pg_foreign_server where oid=subserver) AS \"%s\"\n"
+						  ", subretaindeadtuples AS \"%s\"\n"
+						  ", submaxretention AS \"%s\"\n"
+						  ", subretentionactive AS \"%s\"\n",
+						  gettext_noop("Server"),
+						  gettext_noop("Retain dead tuples"),
+						  gettext_noop("Max retention duration"),
+						  gettext_noop("Retention active"));
+		ncols += 4;
+	}
+
+	appendPQExpBuffer(&buf,
+					  ",  subsynccommit AS \"%s\"\n"
+					  ",  subconninfo AS \"%s\"\n",
+					  gettext_noop("Synchronous commit"),
+					  gettext_noop("Conninfo"));
+	ncols += 2;
+
+	if (pset.sversion >= 190000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", subwalrcvtimeout AS \"%s\"\n",
+						  gettext_noop("Receiver timeout"));
+		ncols++;
+	}
+
+	/* Skip LSN is only supported in v15 and higher */
+	if (pset.sversion >= 150000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", subskiplsn AS \"%s\"\n",
+						  gettext_noop("Skip LSN"));
+		ncols++;
+	}
+
+	/* Conflict log destination is supported in v20 and higher */
+	if (pset.sversion >= 200000)
+	{
+		appendPQExpBuffer(&buf,
+						  ", subconflictlogdest AS \"%s\"\n",
+						  gettext_noop("Conflict log destination"));
+		ncols++;
+	}
+
+	appendPQExpBuffer(&buf,
+					  ",  pg_catalog.obj_description(oid, 'pg_subscription') AS \"%s\"\n",
+					  gettext_noop("Description"));
+	ncols++;
+
+	/* Only display subscriptions in current database. */
+	appendPQExpBufferStr(&buf,
+						 "FROM pg_catalog.pg_subscription\n"
+						 "WHERE subdbid = (SELECT oid\n"
+						 "                 FROM pg_catalog.pg_database\n"
+						 "                 WHERE datname = pg_catalog.current_database())");
+
+	if (!validateSQLNamePattern(&buf, pattern, true, false,
+								NULL, "subname", NULL,
+								NULL,
+								NULL, 1))
+	{
+		termPQExpBuffer(&buf);
+		termPQExpBuffer(&footer);
+		return false;
+	}
+
+	appendPQExpBufferStr(&buf, "ORDER BY subname;");
+
+	res = PSQLexec(buf.data);
+	termPQExpBuffer(&buf);
+	if (!res)
+	{
+		termPQExpBuffer(&footer);
+		return false;
+	}
+
+	if (PQntuples(res) == 0)
+	{
+		if (!pset.quiet)
+		{
+			if (pattern)
+				pg_log_error("Did not find any subscription named \"%s\".",
+							 pattern);
+			else
+				pg_log_error("Did not find any subscriptions.");
+		}
+
+		termPQExpBuffer(&footer);
+		PQclear(res);
+		return false;
+	}
+
+	for (i = 0; i < PQntuples(res); i++)
+	{
+		const char	align = 'l';
+		char	   *subname = PQgetvalue(res, i, 0);
+		char	   *conflict_log_table = PQgetvalue(res, i, 1);
+		int			current_col = 2;
+		printTableOpt myopt = pset.popt.topt;
+
+		/* Like \d, show only the footers, no row count. */
+		myopt.default_footer = false;
+
+		initPQExpBuffer(&title);
+		printfPQExpBuffer(&title, _("Subscription %s"), subname);
+		printTableInit(&cont, &myopt, title.data, ncols, nrows);
+
+		printTableAddHeader(&cont, gettext_noop("Owner"), true, align);
+		printTableAddHeader(&cont, gettext_noop("Enabled"), true, align);
+		printTableAddHeader(&cont, gettext_noop("Publication"), true, align);
+
+		printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+		if (pset.sversion >= 140000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Binary"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Streaming"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		if (pset.sversion >= 150000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Two-phase commit"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Disable on error"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		if (pset.sversion >= 160000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Origin"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Password required"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Run as owner?"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		if (pset.sversion >= 170000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Failover"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		if (pset.sversion >= 190000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Server"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Retain dead tuples"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Max retention duration"),
+								true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+			printTableAddHeader(&cont, gettext_noop("Retention active"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		printTableAddHeader(&cont, gettext_noop("Synchronous commit"), true, align);
+		printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+		printTableAddHeader(&cont, gettext_noop("Conninfo"), true, align);
+		printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+		if (pset.sversion >= 190000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Receiver timeout"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		if (pset.sversion >= 150000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Skip LSN"), true, align);
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+		}
+
+		if (pset.sversion >= 200000)
+		{
+			printTableAddHeader(&cont, gettext_noop("Conflict log destination"),
+								true, align);
+
+			printTableAddCell(&cont, PQgetvalue(res, i, current_col++),
+							  false, false);
+		}
+
+		printTableAddHeader(&cont, gettext_noop("Description"), true, align);
+		printTableAddCell(&cont, PQgetvalue(res, i, current_col++), false, false);
+
+		/* NULL (an empty string here) when there is no conflict log table */
+		if (conflict_log_table[0] != '\0')
+		{
+			printTableAddFooter(&cont, _("Conflict log table:"));
+			printfPQExpBuffer(&footer, "    %s", conflict_log_table);
+			printTableAddFooter(&cont, footer.data);
+		}
+
+		printTable(&cont, pset.queryFout, false, pset.logfile);
+		printTableCleanup(&cont);
+
+		termPQExpBuffer(&title);
+	}
+
+	termPQExpBuffer(&footer);
 	PQclear(res);
 	return true;
 }

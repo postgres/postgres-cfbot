@@ -1132,12 +1132,12 @@ repairTableAttrDefMultiLoop(DumpableObject *tableobj,
 /*
  * A subscription and its conflict log table depend on each other.
  *
- * pg_depend records an internal dependency of the table on the subscription
- * (so that dropping the subscription drops the table), which makes pg_dump
- * want the subscription first. In the other direction, getSubscriptions()
- * makes the subscription depend on its table: the ALTER SUBSCRIPTION that
- * restores conflict_log_destination looks up the table by name and, in
- * binary-upgrade mode, reuses it, so the table must already exist.
+ * The old cluster's pg_depend records an internal dependency of the table on
+ * the subscription (so that dropping the subscription drops the table), which
+ * makes pg_dump want the subscription first. In the other direction,
+ * getSubscriptions() makes the subscription depend on its table: the ALTER
+ * SUBSCRIPTION that restores conflict_log_destination looks up the table by
+ * name and, in binary-upgrade mode, reuses it, so the table must already exist.
  *
  * Break the loop by removing the table's dependency on the subscription.
  * This dependency is not needed to establish the restore order. The
