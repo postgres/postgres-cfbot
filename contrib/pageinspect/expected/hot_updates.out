@@ -151,7 +151,7 @@ SELECT pg_relation_size('hint_test_a') = pg_relation_size('hint_test_d')
     AS same_size;
  same_size 
 -----------
- f
+ t
 (1 row)
 
 DROP TABLE hint_test;

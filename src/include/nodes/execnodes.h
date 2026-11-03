@@ -215,10 +215,10 @@ typedef struct IndexInfo
 	bool		ii_NullsNotDistinct;
 	/* is it valid for inserts? */
 	bool		ii_ReadyForInserts;
-	/* IndexUnchanged status determined yet? */
-	bool		ii_CheckedUnchanged;
-	/* aminsert hint, cached for retail inserts */
-	bool		ii_IndexUnchanged;
+	/* ii_KeyAttrs determined yet? */
+	bool		ii_KeyAttrsValid;
+	/* attributes the key columns are formed from, for the aminsert hint */
+	Bitmapset  *ii_KeyAttrs;
 	/* are we doing a concurrent index build? */
 	bool		ii_Concurrent;
 	/* did we detect any broken HOT chains? */

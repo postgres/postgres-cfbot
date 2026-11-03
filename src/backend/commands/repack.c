@@ -2899,7 +2899,7 @@ apply_concurrent_insert(Relation rel, TupleTableSlot *slot,
 						  chgcxt->cc_estate,
 						  0,
 						  slot,
-						  NIL, NULL);
+						  NULL, NIL, NULL);
 	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED, 1);
 }
 
@@ -2933,7 +2933,6 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 							 false,
 							 &tmfd, &lockmode,
 							 modified_idx_attrs, &update_indexes);
-	bms_free(modified_idx_attrs);
 	if (res != TM_Ok)
 		ereport(ERROR,
 				errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
@@ -2950,8 +2949,10 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 							  chgcxt->cc_estate,
 							  flags,
 							  spilled_tuple,
+							  modified_idx_attrs,
 							  NIL, NULL);
 	}
+	bms_free(modified_idx_attrs);
 
 	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_UPDATED, 1);
 }
@@ -3284,10 +3285,7 @@ initialize_change_context(ChangeContext *chgcxt,
 	 */
 	{
 		RangeTblEntry *rte;
-		TupleDesc	desc = RelationGetDescr(tgt_relation);
 		List	   *perminfos = NIL;
-		Bitmapset  *updatedCols = NULL;
-		RTEPermissionInfo *perminfo;
 
 		/*
 		 * For our use, the RTE only needs to have perminfoindex initialized,
@@ -3300,29 +3298,6 @@ initialize_change_context(ChangeContext *chgcxt,
 		rte->relkind = RelationGetForm(tgt_relation)->relkind;
 		/* Create the RTEPermissionInfo instance (and set ->perminfoindex). */
 		addRTEPermissionInfo(&perminfos, rte);
-
-		/*
-		 * Initialize updatedCols to show that all columns are updated.  This
-		 * is of course not necessarily true, and we cannot know this early;
-		 * but this is only used by ExecInsertIndexTuples to flag index
-		 * updates with no logical value changes, so if it's wrong, nothing
-		 * terribly bad happens. We may want to improve this someday though.
-		 *
-		 * Don't claim that dropped columns are changed though.
-		 */
-		for (int i = 0; i < desc->natts; i++)
-		{
-			CompactAttribute *attr = TupleDescCompactAttr(desc, i);
-
-			if (attr->attisdropped)
-				continue;
-			updatedCols = bms_add_member(updatedCols,
-										 i + 1 - FirstLowInvalidHeapAttributeNumber);
-		}
-
-		/* install updatedCols in the right place */
-		perminfo = getRTEPermissionInfo(perminfos, rte);
-		perminfo->updatedCols = updatedCols;
 
 		/* finally we can initialize the range table proper */
 		ExecInitRangeTable(chgcxt->cc_estate, list_make1(rte), perminfos,
