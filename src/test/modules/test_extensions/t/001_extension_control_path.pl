@@ -115,6 +115,43 @@ is($ret, "\$system",
 	"\$system location is shown correctly in pg_available_extensions with empty extension_control_path"
 );
 
+# Empty path elements do not prevent searching the remaining directories.
+for my $path (
+	"$sep$ext_dir_canonicalized",
+	"$ext_dir_canonicalized$sep")
+{
+	$ret = $node->safe_psql(
+		'postgres',
+		"set extension_control_path = '$path';
+		 select location from pg_available_extensions where name = '$ext_name'");
+	is($ret, "$ext_dir_canonicalized/extension",
+		"extension is found with an empty element in path '$path'");
+}
+
+# A separator-only value provides no directories, unlike an empty value.
+$ret = $node->safe_psql(
+	'postgres',
+	"set extension_control_path = '$sep';
+	 select count(*) from pg_available_extensions");
+is($ret, '0', 'separator-only path lists no extensions');
+
+# Empty elements must not replace an unknown-language error or prevent a hint
+# from being found using the remaining directories.
+for my $sql (
+	"create function test_invalid_language() returns int language $ext_name as 'x'",
+	"do language $ext_name 'x'")
+{
+	my ($code, $stdout, $stderr) = $node->psql(
+		'postgres',
+		"set extension_control_path = '$sep$ext_dir_canonicalized$sep'; $sql");
+	is($code, 3, "unknown language is rejected by $sql");
+	like($stderr, qr/ERROR:  language "\Q$ext_name\E" does not exist/,
+		"invalid path does not replace the unknown-language error");
+	like($stderr,
+		qr/HINT:  Use CREATE EXTENSION to load the language into the database\./,
+		"remaining directory provides the extension hint");
+}
+
 # Test with an extension that does not exists
 my ($code, $stdout, $stderr) =
   $node->psql('postgres', "CREATE EXTENSION invalid");
