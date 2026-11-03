@@ -86,6 +86,7 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
+#include "utils/system_version.h"
 
 /* ----------------
  *		global variables
@@ -199,6 +200,7 @@ static void report_recovery_conflict(RecoveryConflictReason reason);
 static void log_disconnections(int code, Datum arg);
 static void enable_statement_timeout(void);
 static void disable_statement_timeout(void);
+static void register_system_versions(void);
 
 
 /* ----------------------------------------------------------------
@@ -4489,6 +4491,9 @@ PostgresMain(const char *dbname, const char *username)
 	 */
 	BeginReportingGUCOptions();
 
+	/* Prepare information for reporting versions and libraries. */
+	register_system_versions();
+
 	/*
 	 * Also set up handler to log session end; we have to wait till now to be
 	 * sure Log_disconnections has its final value.
@@ -5407,4 +5412,18 @@ disable_statement_timeout(void)
 {
 	if (get_timeout_active(STATEMENT_TIMEOUT))
 		disable_timeout(STATEMENT_TIMEOUT, false);
+}
+
+static void
+register_system_versions(void)
+{
+	/* Set up reporting of core versions. */
+	register_core_versions();
+
+	/*
+	 * Set up reporting for JIT provider version. JIT provider initialization
+	 * happens when the first expression is getting compiled, which is too
+	 * late. Thus register the callback here instead.
+	 */
+	jit_register_version();
 }
