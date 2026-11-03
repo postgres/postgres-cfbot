@@ -33,6 +33,9 @@ OBJS = \
 ifeq ($(with_ssl),openssl)
 OBJS += be-secure-openssl.o
 endif
+ifeq ($(with_ssl),libressl)
+OBJS += be-secure-libressl.o
+endif
 
 ifeq ($(with_gssapi),yes)
 OBJS += be-gssapi-common.o be-secure-gssapi.o
