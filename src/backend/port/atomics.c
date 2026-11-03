@@ -70,4 +70,51 @@ pg_atomic_fetch_add_u64_impl(volatile pg_atomic_uint64 *ptr, int64 add_)
 	return oldval;
 }
 
+bool
+pg_atomic_compare_exchange_u64_lo_impl(volatile pg_atomic_uint64 *ptr,
+									   uint64 *expected, uint64 newval)
+{
+	bool		ret;
+	u64_halves *cur = (u64_halves *) &ptr->value;
+	u64_halves *exp = (u64_halves *) expected;
+	u64_halves *new = (u64_halves *) &newval;
+
+	SpinLockAcquire((slock_t *) &ptr->sema);
+
+	/* perform compare/exchange logic */
+	ret = cur->lo == exp->lo;
+	if (ret)
+		cur->lo = new->lo;
+	else
+		exp->lo = cur->lo;
+	/* and release lock */
+	SpinLockRelease((slock_t *) &ptr->sema);
+
+	return ret;
+}
+
+bool
+pg_atomic_compare_exchange_u64_hi_impl(volatile pg_atomic_uint64 *ptr,
+									   uint64 *expected, uint64 newval)
+{
+	bool		ret;
+	u64_halves *cur = (u64_halves *) &ptr->value;
+	u64_halves *exp = (u64_halves *) expected;
+	u64_halves *new = (u64_halves *) &newval;
+
+	SpinLockAcquire((slock_t *) &ptr->sema);
+
+	/* perform compare/exchange logic */
+	ret = cur->hi == exp->hi;
+	if (ret)
+		cur->hi = new->hi;
+	else
+		exp->hi = cur->hi;
+
+	/* and release lock */
+	SpinLockRelease((slock_t *) &ptr->sema);
+
+	return ret;
+}
+
 #endif							/* PG_HAVE_ATOMIC_U64_SIMULATION */
