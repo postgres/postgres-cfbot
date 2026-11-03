@@ -681,7 +681,7 @@ check_control_files(int n_backups, char **backup_dirs)
 	if (data_checksum_mismatch)
 	{
 		pg_log_error("only some backups have checksums enabled");
-		pg_log_error_hint("Take a new full backup after changing the data checksum state with pg_checksums.");
+		pg_log_error_hint("Take a new full backup after changing the data checksum state.");
 		exit(1);
 	}
 
