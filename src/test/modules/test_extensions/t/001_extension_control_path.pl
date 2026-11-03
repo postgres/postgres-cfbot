@@ -139,6 +139,42 @@ for my $path (
 		"empty elements should not search /extension with path '$path'");
 }
 
+# Repeated directories, including differently spelled paths that canonicalize
+# to the same directory, must be searched only once and preserve the first
+# location for each extension.
+my $ext_dir2_canonicalized = $ext_dir2;
+$ext_dir2_canonicalized =~ s!\\!/!g if $windows_os;
+for my $dirs (
+	[ $ext_dir_canonicalized, $ext_dir2_canonicalized ],
+	[ $ext_dir2_canonicalized, $ext_dir_canonicalized ])
+{
+	my ($first, $second) = @$dirs;
+	my $path = join($sep, $first, "$first/.", $second, $first);
+	for my $view (qw(pg_available_extensions pg_available_extension_versions))
+	{
+		my $stderr;
+		$node->psql(
+			'postgres',
+			"set client_min_messages = debug3;
+			 set extension_control_path = '$path';
+			 select location from $view where name = '$ext_name'",
+			stdout => \$ret,
+			stderr => \$stderr,
+			on_error_die => 1);
+		is($ret, "$first/extension",
+			"duplicate directories preserve the first location in $view with path '$path'");
+		my $count = () = $stderr =~ /$path_message "\Q$first\E\/extension"/g;
+		is($count, 1,
+			"duplicate directory is searched only once in $view with path '$path'");
+	}
+}
+
+$ret = $node->safe_psql(
+	'postgres',
+	"set extension_control_path = '\$system$sep\$system';
+	 select location from pg_available_extensions where name = 'plpgsql'");
+is($ret, '$system', 'repeated system directory preserves the macro location');
+
 # Test with an extension that does not exists
 my ($code, $stdout, $stderr) =
   $node->psql('postgres', "CREATE EXTENSION invalid");
