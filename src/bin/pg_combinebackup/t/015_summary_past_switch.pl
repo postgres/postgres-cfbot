@@ -1,14 +1,16 @@
 # Copyright (c) 2026, PostgreSQL Global Development Group
 #
-# A streaming standby summarizes the WAL it receives, ahead of replay.  When
-# it is promoted at a recovery target inside a WAL summary, the old-timeline
-# summary covering the target also covers WAL that the promoted server never
-# replayed.  Block references from that WAL are harmless, but a truncation
-# recorded there must not be applied to an incremental backup.  The
-# incremental backup copies such a relation fully instead.
+# A streaming standby promoted at a recovery target inside a WAL summary,
+# after receiving WAL past the target, including a truncation.  A standby only
+# summarizes replayed WAL, so the old-timeline summaries end at the switch
+# point, and incremental backups after promotion restore the promoted
+# server's rows.  An older release summarized received WAL, so the test also
+# puts such a summary in place and checks that the backup still restores the
+# promoted server's rows.
 
 use strict;
 use warnings FATAL => 'all';
+use File::Copy;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -58,8 +60,8 @@ $primary->safe_psql('postgres', 'CHECKPOINT');
 my $end_lsn = $primary->safe_psql('postgres',
 	'SELECT redo_lsn FROM pg_control_checkpoint()');
 
-# Start a standby that pauses at the target and has summarized everything
-# the primary wrote, then promote it.
+# Start a standby that pauses at the target and has received everything the
+# primary wrote, then promote it.
 sub promoted_standby
 {
 	my ($name, $target) = @_;
@@ -74,25 +76,38 @@ EOF
 	$node->poll_query_until('postgres',
 		"SELECT pg_get_wal_replay_pause_state() = 'paused'")
 	  or die "timed out waiting for $name to pause";
-	$node->poll_query_until('postgres', <<EOF)
-SELECT EXISTS (SELECT FROM pg_available_wal_summaries()
-               WHERE tli = 1 AND end_lsn >= '$end_lsn')
-EOF
-	  or die "timed out waiting for $name to summarize up to $end_lsn";
+	$node->poll_query_until('postgres',
+		"SELECT pg_last_wal_receive_lsn() >= '$end_lsn'")
+	  or die "timed out waiting for $name to receive up to $end_lsn";
+	$node->poll_query_until('postgres',
+		"SELECT pending_lsn >= pg_last_wal_replay_lsn() FROM pg_get_wal_summarizer_state()")
+	  or die "timed out waiting for $name to summarize up to replay";
+	is( $node->safe_psql(
+			'postgres',
+			"SELECT pending_lsn <= pg_last_wal_replay_lsn() FROM pg_get_wal_summarizer_state()"),
+		't',
+		"$name: the summarizer does not read past replay");
 	$node->promote;
 	return $node;
 }
 
 my $standby1 = promoted_standby('standby1', $target1);
 my $standby2 = promoted_standby('standby2', $target2);
+
+# A summary of the primary is used below, so wait for the one that records
+# the truncation.
+$primary->poll_query_until('postgres', <<EOF)
+SELECT EXISTS (SELECT FROM pg_available_wal_summaries()
+               WHERE tli = 1 AND end_lsn >= '$end_lsn')
+EOF
+  or die "timed out waiting for the primary to summarize up to $end_lsn";
 $primary->stop;
 
 # The tables are not read before the backups: with data checksums, setting
 # hint bits would WAL-log their blocks again on the new timeline.
 my $contents_sql = "SELECT id, right(pad, 1) FROM t ORDER BY id";
 
-# First standby: the summary past the switch only adds block references, so
-# the incremental backup works and restores the promoted server's rows.
+# First standby: only new rows follow its target.
 $standby1->command_ok(
 	[
 		'pg_basebackup', '--no-sync',
@@ -115,9 +130,8 @@ is($restored->safe_psql('postgres', $contents_sql),
 	$expected1, 'restored rows match the first standby');
 $restored->stop;
 
-# Second standby: the summary past the switch records the truncation, which
-# never happened on this server.  The incremental backup must copy the
-# relation fully instead of taking the truncated blocks from the full backup.
+# Second standby: the truncation after its target was received but never
+# replayed or summarized, so the incremental backup restores the rows.
 $standby2->command_ok(
 	[
 		'pg_basebackup', '--no-sync',
@@ -127,6 +141,48 @@ $standby2->command_ok(
 	],
 	'incremental backup when a truncation follows the target');
 my $expected2 = "1|x\n2|x\n3|o\n4|o\n5|x";
+
+# An older release summarized the WAL a standby received, ahead of replay.  If
+# a summary was in progress at promotion, it ends at the switch point but also
+# records the truncation after the target.  Put such a summary in place: the
+# summary of the primary that starts where the last old-timeline summary of
+# the standby starts, under the name of that summary.
+sub lsn_hex
+{
+	return join '', map { sprintf('%08X', hex) } split m{/}, shift;
+}
+my ($last_start, $switch_lsn) = split /\|/,
+  $standby2->safe_psql('postgres', <<EOF);
+SELECT start_lsn, end_lsn FROM pg_available_wal_summaries()
+WHERE tli = 1 ORDER BY end_lsn DESC LIMIT 1
+EOF
+my $prefix = '00000001' . lsn_hex($last_start);
+my $primary_dir = $primary->data_dir . '/pg_wal/summaries';
+my ($primary_summary) =
+  grep { /^$prefix[0-9A-F]{16}\.summary$/ } slurp_dir($primary_dir);
+die "no summary of the primary starts at $last_start"
+  unless defined $primary_summary;
+copy("$primary_dir/$primary_summary",
+	$standby2->data_dir
+	  . "/pg_wal/summaries/$prefix"
+	  . lsn_hex($switch_lsn)
+	  . '.summary')
+  or die "could not copy $primary_summary: $!";
+is( $standby2->safe_psql(
+		'postgres', <<EOF),
+SELECT count(*) FROM pg_wal_summary_contents(1, '$last_start', '$switch_lsn')
+WHERE relfilenode = pg_relation_filenode('t') AND relforknumber = 0
+  AND is_limit_block
+EOF
+	'1', 'the summary ending at the switch point records the truncation');
+$standby2->command_ok(
+	[
+		'pg_basebackup', '--no-sync',
+		'--pgdata' => $primary->backup_dir . '/incr3',
+		'--checkpoint' => 'fast',
+		'--incremental' => "$full_path/backup_manifest",
+	],
+	'incremental backup with a summary written by an older release');
 is($standby2->safe_psql('postgres', $contents_sql),
 	$expected2, 'second standby has the rows replayed before the target');
 $standby2->stop;
@@ -139,5 +195,14 @@ $restored2->start;
 is($restored2->safe_psql('postgres', $contents_sql),
 	$expected2, 'restored rows match the second standby');
 $restored2->stop;
+my $restored3 = PostgreSQL::Test::Cluster->new('restored3');
+$restored3->init_from_backup(
+	$primary, 'incr3',
+	combine_with_prior => ['full'],
+	combine_mode => $mode);
+$restored3->start;
+is($restored3->safe_psql('postgres', $contents_sql),
+	$expected2, 'restored rows match with the summary of an older release');
+$restored3->stop;
 
 done_testing();

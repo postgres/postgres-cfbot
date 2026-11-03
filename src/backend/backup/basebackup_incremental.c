@@ -570,14 +570,16 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 		/*
 		 * A summary that ends at or after the point where we switched away
 		 * from this timeline may also cover WAL that this server never
-		 * replayed: a standby summarizes the WAL it has received, ahead of
-		 * replay, and recovery can stop at a recovery target before the end
-		 * of it.  A summary that was in progress at promotion ends exactly at
-		 * the switch point, even if it read WAL past it.  Block references
-		 * from that WAL only make us copy more than needed, but a relation
-		 * truncation recorded there would discard the references to blocks
-		 * modified before the switch.  Remember these summaries, so that the
-		 * merge below can back up such a relation fork fully.
+		 * replayed.  A standby now summarizes only replayed WAL, but a
+		 * summary written by an older release, which followed the walreceiver
+		 * ahead of replay, may still be on disk, and recovery can have
+		 * stopped at a recovery target before the end of it.  A summary that
+		 * was in progress at promotion ends exactly at the switch point, even
+		 * if it read WAL past it.  Block references from that WAL only make
+		 * us copy more than needed, but a relation truncation recorded there
+		 * would discard the references to blocks modified before the switch.
+		 * Remember these summaries, so that the merge below can back up such
+		 * a relation fork fully.
 		 */
 		if (tle->tli != backup_state->starttli)
 		{
