@@ -841,10 +841,6 @@ GetLatestLSN(TimeLineID *tli)
 	}
 	else
 	{
-		XLogRecPtr	flush_lsn;
-		TimeLineID	flush_tli;
-		XLogRecPtr	replay_lsn;
-		TimeLineID	replay_tli;
 		TimeLineID	insert_tli;
 
 		/*
@@ -863,26 +859,19 @@ GetLatestLSN(TimeLineID *tli)
 		}
 
 		/*
-		 * What we really want to know is how much WAL has been flushed to
-		 * disk, but the only flush position available is the one provided by
-		 * the walreceiver, which may not be running, because this could be
-		 * crash recovery or recovery via restore_command. So use either the
-		 * WAL receiver's flush position or the replay position, whichever is
-		 * further ahead, on the theory that if the WAL has been replayed then
-		 * it must also have been flushed to disk.
+		 * Otherwise, summarize only WAL that has been replayed.  A
+		 * walreceiver may have flushed WAL beyond that point, but it is not
+		 * yet part of this server's history: recovery may stop at a recovery
+		 * target before reaching it, and if the server is then promoted, that
+		 * WAL belongs to a timeline this server abandoned.  A summary
+		 * covering it would describe changes, such as relation truncations,
+		 * that never happened here, and incremental backups would trust it.
+		 *
+		 * Backups taken during recovery start at a restartpoint, which is
+		 * never ahead of replay, so they don't need summaries of anything
+		 * further.
 		 */
-		flush_lsn = GetWalRcvFlushRecPtr(NULL, &flush_tli);
-		replay_lsn = GetXLogReplayRecPtr(&replay_tli);
-		if (flush_lsn > replay_lsn)
-		{
-			*tli = flush_tli;
-			return flush_lsn;
-		}
-		else
-		{
-			*tli = replay_tli;
-			return replay_lsn;
-		}
+		return GetXLogReplayRecPtr(tli);
 	}
 }
 
