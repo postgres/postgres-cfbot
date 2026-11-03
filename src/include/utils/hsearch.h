@@ -127,7 +127,6 @@ typedef struct
 extern HTAB *hash_create(const char *tabname, int64 nelem,
 						 const HASHCTL *info, int flags);
 extern void hash_destroy(HTAB *hashp);
-extern void hash_stats(const char *caller, HTAB *hashp);
 extern void *hash_search(HTAB *hashp, const void *keyPtr, HASHACTION action,
 						 bool *foundPtr);
 extern uint32 get_hash_value(HTAB *hashp, const void *keyPtr);
@@ -143,7 +142,6 @@ extern void hash_seq_init_with_hash_value(HASH_SEQ_STATUS *status,
 										  uint32 hashvalue);
 extern void *hash_seq_search(HASH_SEQ_STATUS *status);
 extern void hash_seq_term(HASH_SEQ_STATUS *status);
-extern void hash_freeze(HTAB *hashp);
 extern Size hash_estimate_size(int64 num_entries, Size entrysize);
 extern void AtEOXact_HashTables(bool isCommit);
 extern void AtEOSubXact_HashTables(bool isCommit, int nestDepth);
