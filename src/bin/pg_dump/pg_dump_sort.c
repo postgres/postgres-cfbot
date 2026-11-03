@@ -1130,6 +1130,28 @@ repairTableAttrDefMultiLoop(DumpableObject *tableobj,
 }
 
 /*
+ * A subscription and its conflict log table depend on each other.
+ *
+ * pg_depend records an internal dependency of the table on the subscription
+ * (so that dropping the subscription drops the table), which makes pg_dump
+ * want the subscription first. In the other direction, getSubscriptions()
+ * makes the subscription depend on its table: the ALTER SUBSCRIPTION that
+ * restores conflict_log_destination looks up the table by name and, in
+ * binary-upgrade mode, reuses it, so the table must already exist.
+ *
+ * Break the loop by removing the table's dependency on the subscription.
+ * This dependency is not needed to establish the restore order. The
+ * ALTER SUBSCRIPTION that associates the table with the subscription
+ * records the internal dependency again.
+ */
+static void
+repairSubscriptionTableLoop(DumpableObject *subobj, DumpableObject *tableobj)
+{
+	/* Remove table's dependency on subscription */
+	removeObjectDependency(tableobj, subobj->dumpId);
+}
+
+/*
  * CHECK, NOT NULL constraints on domains work just like those on tables ...
  */
 static void
@@ -1356,6 +1378,24 @@ repairDependencyLoop(DumpableObject **loop,
 		((AttrDefInfo *) loop[0])->adtable == (TableInfo *) loop[1])
 	{
 		repairTableAttrDefLoop(loop[1], loop[0]);
+		return;
+	}
+
+	/*
+	 * Subscription and its Conflict Log Table
+	 */
+	if (nLoop == 2 &&
+		loop[0]->objType == DO_TABLE &&
+		loop[1]->objType == DO_SUBSCRIPTION)
+	{
+		repairSubscriptionTableLoop(loop[1], loop[0]);
+		return;
+	}
+	if (nLoop == 2 &&
+		loop[0]->objType == DO_SUBSCRIPTION &&
+		loop[1]->objType == DO_TABLE)
+	{
+		repairSubscriptionTableLoop(loop[0], loop[1]);
 		return;
 	}
 

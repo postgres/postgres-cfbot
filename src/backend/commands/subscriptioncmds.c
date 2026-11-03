@@ -19,6 +19,7 @@
 #include "access/table.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -87,6 +88,12 @@
 
 /* check if the 'val' has 'bits' set */
 #define IsSet(val, bits)  (((val) & (bits)) == (bits))
+
+/*
+ * This will be set by the pg_upgrade_support function --
+ * binary_upgrade_set_next_pg_subscription_oid().
+ */
+Oid			binary_upgrade_next_pg_subscription_oid = InvalidOid;
 
 /*
  * Structure to hold a bitmap representing the user-provided CREATE/ALTER
@@ -846,8 +853,21 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	subid = GetNewOidWithIndex(rel, SubscriptionObjectIndexId,
-							   Anum_pg_subscription_oid);
+	/* Use binary-upgrade override for pg_subscription.oid? */
+	if (IsBinaryUpgrade)
+	{
+		if (!OidIsValid(binary_upgrade_next_pg_subscription_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("pg_subscription OID value not set when in binary upgrade mode")));
+
+		subid = binary_upgrade_next_pg_subscription_oid;
+		binary_upgrade_next_pg_subscription_oid = InvalidOid;
+	}
+	else
+		subid = GetNewOidWithIndex(rel, SubscriptionObjectIndexId,
+								   Anum_pg_subscription_oid);
+
 	values[Anum_pg_subscription_oid - 1] = ObjectIdGetDatum(subid);
 	values[Anum_pg_subscription_subdbid - 1] = ObjectIdGetDatum(MyDatabaseId);
 	values[Anum_pg_subscription_subskiplsn - 1] = LSNGetDatum(InvalidXLogRecPtr);
@@ -1639,18 +1659,40 @@ alter_sub_conflict_log_dest(Subscription *sub, ConflictLogDest oldlogdest,
 		{
 			ObjectAddress cltaddr;
 			ObjectAddress subobj;
+			char		relname[NAMEDATALEN];
 
-			relid = create_conflict_log_table(sub->oid, sub->name, sub->owner);
-			update_relid = true;
+			snprintf(relname, NAMEDATALEN, CONFLICT_LOG_RELATION_NAME_FMT, sub->oid);
 
 			/*
-			 * Establish an internal dependency between the conflict log table
-			 * and the subscription.  For details refer comments in
-			 * CreateSubscription function.
+			 * In upgrade scenarios, old_dest reflects the default behavior of
+			 * a newly created subscription (i.e., no conflict logging to
+			 * table).  However, the conflict log table will already exist from
+			 * the upgraded cluster.  In such cases, we need to detect the
+			 * pre-existing table and update the catalog state to associate it
+			 * with the subscription instead of creating a new one.
+			 */
+			relid = get_relname_relid(relname, PG_CONFLICT_NAMESPACE);
+			if (OidIsValid(relid))
+			{
+				/* Existing table from upgrade */
+				Assert(IsBinaryUpgrade);
+			}
+			else
+			{
+				relid = create_conflict_log_table(sub->oid, sub->name,
+												  sub->owner);
+			}
+
+			/*
+			 * Establish an internal dependency between the conflict log
+			 * table and the subscription.  Refer to comments in the
+			 * CreateSubscription function for details.
 			 */
 			ObjectAddressSet(cltaddr, RelationRelationId, relid);
 			ObjectAddressSet(subobj, SubscriptionRelationId, sub->oid);
 			recordDependencyOn(&cltaddr, &subobj, DEPENDENCY_INTERNAL);
+
+			update_relid = true;
 		}
 	}
 

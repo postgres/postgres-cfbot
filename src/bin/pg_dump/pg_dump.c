@@ -2050,8 +2050,33 @@ selectDumpableNamespace(NamespaceInfo *nsinfo, Archive *fout)
 static void
 selectDumpableTable(TableInfo *tbinfo, Archive *fout)
 {
+	DumpOptions *dopt = fout->dopt;
+
 	if (checkExtensionMembership(&tbinfo->dobj, fout))
 		return;					/* extension membership overrides all else */
+
+	if (strcmp(tbinfo->dobj.namespace->dobj.name, "pg_conflict") == 0)
+	{
+		/*
+		 * Conflict log tables are dumped only during binary upgrade, where the
+		 * table must be restored with the same OIDs and filenode so that the
+		 * ALTER SUBSCRIPTION emitted by dumpSubscription() can reuse it.
+		 * Otherwise the table is created again when the subscription's
+		 * conflict_log_destination is set.  Also dump the privileges that were
+		 * granted on the table, for example to let non-superusers delete
+		 * conflicts.
+		 *
+		 * The pg_conflict schema itself is created by initdb and is not dumped,
+		 * so the tables in it are selected here, regardless of the schema and
+		 * table switches.
+		 */
+		if (dopt->binary_upgrade)
+			tbinfo->dobj.dump = DUMP_COMPONENT_DEFINITION | DUMP_COMPONENT_ACL;
+		else
+			tbinfo->dobj.dump = DUMP_COMPONENT_NONE;
+
+		return;
+	}
 
 	/*
 	 * If specific tables are being dumped, dump just those tables; else, dump
@@ -5136,6 +5161,8 @@ getSubscriptions(Archive *fout)
 	int			i_subfailover;
 	int			i_subretaindeadtuples;
 	int			i_submaxretention;
+	int			i_subconflictlogrelid;
+	int			i_sublogdestination;
 	int			i,
 				ntups;
 
@@ -5234,9 +5261,16 @@ getSubscriptions(Archive *fout)
 							 " '-1' AS subwalrcvtimeout,\n");
 
 	if (fout->remoteVersion >= 190000)
-		appendPQExpBufferStr(query, " fs.srvname AS subservername\n");
+		appendPQExpBufferStr(query, " fs.srvname AS subservername,\n");
 	else
-		appendPQExpBufferStr(query, " NULL AS subservername\n");
+		appendPQExpBufferStr(query, " NULL AS subservername,\n");
+
+	if (fout->remoteVersion >= 200000)
+		appendPQExpBufferStr(query,
+							 " s.subconflictlogrelid, s.subconflictlogdest\n");
+	else
+		appendPQExpBufferStr(query,
+							 " NULL AS subconflictlogrelid, NULL AS subconflictlogdest\n");
 
 	appendPQExpBufferStr(query,
 						 "FROM pg_subscription s\n");
@@ -5285,6 +5319,8 @@ getSubscriptions(Archive *fout)
 	i_subpublications = PQfnumber(res, "subpublications");
 	i_suborigin = PQfnumber(res, "suborigin");
 	i_suboriginremotelsn = PQfnumber(res, "suboriginremotelsn");
+	i_subconflictlogrelid = PQfnumber(res, "subconflictlogrelid");
+	i_sublogdestination = PQfnumber(res, "subconflictlogdest");
 
 	subinfo = pg_malloc_array(SubscriptionInfo, ntups);
 
@@ -5342,6 +5378,32 @@ getSubscriptions(Archive *fout)
 		else
 			subinfo[i].suboriginremotelsn =
 				pg_strdup(PQgetvalue(res, i, i_suboriginremotelsn));
+
+		if (PQgetisnull(res, i, i_subconflictlogrelid))
+			subinfo[i].subconflictlogrelid = InvalidOid;
+		else
+		{
+			subinfo[i].subconflictlogrelid =
+				atooid(PQgetvalue(res, i, i_subconflictlogrelid));
+
+			if (subinfo[i].subconflictlogrelid)
+			{
+				TableInfo  *tableInfo;
+
+				tableInfo = findTableByOid(subinfo[i].subconflictlogrelid);
+				if (!tableInfo)
+					pg_fatal("could not find conflict log table with OID %u",
+							 subinfo[i].subconflictlogrelid);
+
+				addObjectDependency(&subinfo[i].dobj, tableInfo->dobj.dumpId);
+			}
+		}
+
+		if (PQgetisnull(res, i, i_sublogdestination))
+			subinfo[i].subconflictlogdest = NULL;
+		else
+			subinfo[i].subconflictlogdest =
+				pg_strdup(PQgetvalue(res, i, i_sublogdestination));
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subinfo[i].dobj), fout);
@@ -5535,6 +5597,14 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	appendPQExpBuffer(delq, "DROP SUBSCRIPTION %s;\n",
 					  qsubname);
 
+	if (dopt->binary_upgrade)
+	{
+		appendPQExpBufferStr(query, "\n-- For binary upgrade, must preserve pg_subscription.oid\n");
+		appendPQExpBuffer(query,
+						  "SELECT pg_catalog.binary_upgrade_set_next_pg_subscription_oid('%u'::pg_catalog.oid);\n\n",
+						  subinfo->dobj.catId.oid);
+	}
+
 	appendPQExpBuffer(query, "CREATE SUBSCRIPTION %s ",
 					  qsubname);
 	if (subinfo->subservername)
@@ -5607,6 +5677,28 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 		appendPQExpBuffer(query, ", origin = %s", subinfo->suborigin);
 
 	appendPQExpBufferStr(query, ");\n");
+
+	/*
+	 * Restore the conflict log destination separately from CREATE SUBSCRIPTION.
+	 * Setting conflict_log_destination to 'table' may create and associate
+	 * a conflict log table whose name is derived from the subscription OID.
+	 * Since the subscription must already exist before that OID is known,
+	 * emit this as a separate ALTER SUBSCRIPTION so that any required conflict
+	 * log table can be created and linked after the subscription itself has
+	 * been restored.
+	 *
+	 * We skip the default value ('log') to match the handling of other
+	 * subscription options.
+	 */
+	if (subinfo->subconflictlogdest &&
+		(pg_strcasecmp(subinfo->subconflictlogdest, "log") != 0))
+	{
+		appendPQExpBuffer(query,
+						  "\nALTER SUBSCRIPTION %s SET (conflict_log_destination = ",
+						  qsubname);
+		appendStringLiteralAH(query, subinfo->subconflictlogdest, fout);
+		appendPQExpBufferStr(query, ");\n");
+	}
 
 	/*
 	 * In binary-upgrade mode, we allow the replication to continue after the
@@ -17029,6 +17121,15 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 	int			j,
 				k;
 
+	/*
+	 * Do not emit "ALTER TABLE ... OWNER TO ..." for a conflict log table:
+	 * changing its owner is not allowed.  Its owner follows the owner of the
+	 * subscription, and is set when the ALTER SUBSCRIPTION ... OWNER TO of the
+	 * dump is restored.
+	 */
+	bool		conflict_log_table =
+		(strcmp(tbinfo->dobj.namespace->dobj.name, "pg_conflict") == 0);
+
 	/* We had better have loaded per-column details about this table */
 	Assert(tbinfo->interesting);
 
@@ -17930,7 +18031,7 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 								  .tablespace = tablespace,
 								  .tableam = tableam,
 								  .relkind = tbinfo->relkind,
-								  .owner = tbinfo->rolname,
+								  .owner = conflict_log_table ? NULL : tbinfo->rolname,
 								  .description = reltypename,
 								  .section = tbinfo->postponed_def ?
 								  SECTION_POST_DATA : SECTION_PRE_DATA,

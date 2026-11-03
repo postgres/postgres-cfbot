@@ -219,6 +219,9 @@ typedef struct Subscription
  */
 #define LOGICALREP_STREAM_PARALLEL 'p'
 
+/* Conflict log table name format. %u is replaced with the subscription OID. */
+#define CONFLICT_LOG_RELATION_NAME_FMT "pg_conflict_log_%u"
+
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 
 extern Subscription *GetSubscription(Oid subid, bool missing_ok);

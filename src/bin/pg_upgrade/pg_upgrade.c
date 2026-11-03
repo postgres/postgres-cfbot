@@ -35,6 +35,10 @@
  *
  *	We control all assignments of pg_database.oid because we want the directory
  *	names to match between the old and new cluster.
+ *
+ *	We control assignment of pg_subscription.oid because we want the oid to
+ *	match between the old and new cluster to make use of subscription's
+ *	conflict log table which is named using the subscription oid.
  */
 
 
