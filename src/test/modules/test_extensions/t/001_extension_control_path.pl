@@ -115,6 +115,30 @@ is($ret, "\$system",
 	"\$system location is shown correctly in pg_available_extensions with empty extension_control_path"
 );
 
+# Empty path elements must not add /extension to the search path.
+my $path_message = qr/get_extension_control_directories: path/;
+for my $path (
+	"$sep$ext_dir_canonicalized",
+	"$ext_dir_canonicalized$sep",
+	$sep)
+{
+	my $stderr;
+	$node->psql(
+		'postgres',
+		"set client_min_messages = debug3;
+		 set extension_control_path = '$path';
+		 select count(*) from pg_available_extensions",
+		stderr => \$stderr,
+		on_error_die => 1);
+	if ($path ne $sep)
+	{
+		like($stderr, qr{$path_message "\Q$ext_dir_canonicalized\E/extension"},
+			"custom directory is searched with path '$path'");
+	}
+	unlike($stderr, qr{$path_message "/extension"},
+		"empty elements should not search /extension with path '$path'");
+}
+
 # Test with an extension that does not exists
 my ($code, $stdout, $stderr) =
   $node->psql('postgres', "CREATE EXTENSION invalid");

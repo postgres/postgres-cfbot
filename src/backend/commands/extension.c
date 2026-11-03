@@ -541,13 +541,24 @@ get_extension_control_directories(void)
 			int			len;
 			char	   *mangled;
 			char	   *piece = first_path_var_separator(ecp);
-			ExtensionLocation *location = palloc_object(ExtensionLocation);
+			ExtensionLocation *location;
 
 			/* Get the length of the next path on ecp */
 			if (piece == NULL)
 				len = strlen(ecp);
 			else
 				len = piece - ecp;
+
+			/* Ignore empty path elements, including a trailing one. */
+			if (len == 0)
+			{
+				if (ecp[len] == '\0')
+					break;
+				ecp += len + 1;
+				continue;
+			}
+
+			location = palloc_object(ExtensionLocation);
 
 			/* Copy the next path found on ecp */
 			piece = palloc(len + 1);
@@ -581,6 +592,9 @@ get_extension_control_directories(void)
 				ecp += len + 1;
 		}
 	}
+
+	foreach_ptr(ExtensionLocation, location, paths)
+		elog(DEBUG3, "%s: path \"%s\"", __func__, location->loc);
 
 	return paths;
 #undef EXTENSION_SYSTEM_MACRO
