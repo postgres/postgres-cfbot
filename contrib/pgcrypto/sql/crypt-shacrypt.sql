@@ -28,6 +28,9 @@ UPDATE ctest SET salt = gen_salt('sha256crypt', 10);
 -- should fail, exceeds supported maximum rounds value
 UPDATE ctest SET salt = gen_salt('sha256crypt', 1000000000);
 
+-- should fail, empty rounds value
+SELECT crypt('password', '$5$rounds=$salt');
+
 TRUNCATE ctest;
 
 -- $6$ is sha512crypt
@@ -54,6 +57,9 @@ UPDATE ctest SET salt = gen_salt('sha512crypt', 10);
 
 -- should fail, exceeds supported maximum rounds value
 UPDATE ctest SET salt = gen_salt('sha512crypt', 1000000000);
+
+-- should fail, empty rounds value
+SELECT crypt('password', '$6$rounds=$salt');
 
 -- Extended tests taken from public domain code at
 -- https://www.akkadia.org/drepper/SHA-crypt.txt
