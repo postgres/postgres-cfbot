@@ -959,7 +959,8 @@ ExecSimpleRelationInsert(ResultRelInfo *resultRelInfo,
 				flags = 0;
 			recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 												   estate, flags,
-												   slot, conflictindexes,
+												   slot, NULL,
+												   conflictindexes,
 												   &conflict);
 		}
 
@@ -1054,7 +1055,6 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 
 		simple_table_tuple_update_ext(rel, tid, slot, estate->es_snapshot,
 									  modified_idx_attrs, &update_indexes);
-		bms_free(modified_idx_attrs);
 
 		conflictindexes = resultRelInfo->ri_onConflictArbiterIndexes;
 
@@ -1068,9 +1068,11 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 				flags |= EIIT_ONLY_SUMMARIZING;
 			recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 												   estate, flags,
-												   slot, conflictindexes,
+												   slot, modified_idx_attrs,
+												   conflictindexes,
 												   &conflict);
 		}
+		bms_free(modified_idx_attrs);
 
 		/*
 		 * Refer to the comments above the call to CheckAndReportConflict() in
