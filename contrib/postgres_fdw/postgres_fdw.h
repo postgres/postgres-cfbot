@@ -13,12 +13,21 @@
 #ifndef POSTGRES_FDW_H
 #define POSTGRES_FDW_H
 
+#include "access/htup_details.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
 #include "libpq/libpq-be-fe.h"
 #include "nodes/execnodes.h"
 #include "nodes/pathnodes.h"
 #include "utils/relcache.h"
+
+/*
+ * Pseudo-attribute number for the remote table OID, used to identify a row for
+ * UPDATE/DELETE when a foreign table maps to a remote partitioned table (see
+ * postgresAddForeignUpdateTargets).  Larger than any real attno, so it never
+ * collides with a genuine column; fetched as an ordinary fdw_scan_tlist column.
+ */
+#define RemoteTableOidAttributeNumber	(MaxHeapAttributeNumber + 1)
 
 /*
  * FDW-specific planner information kept in RelOptInfo.fdw_private for a

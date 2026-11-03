@@ -5161,3 +5161,75 @@ RESET client_min_messages;
 DROP FUNCTION wait_for_backend_termination(int);
 DROP FOREIGN TABLE remote_backend_pid;
 DROP VIEW my_backend_pid;
+
+-- ===================================================================
+-- test UPDATE/DELETE on a foreign table whose remote counterpart is
+-- itself a partitioned table
+-- ===================================================================
+
+-- The two rows below land in separate partitions and, being the first
+-- row in each partition's heap, collide on ctid (0,1).  A row-identity
+-- scheme that relies on ctid alone can't tell them apart.
+CREATE TABLE parted_remote (a int, b int) PARTITION BY LIST (a);
+CREATE TABLE parted_remote_p1 PARTITION OF parted_remote FOR VALUES IN (1);
+CREATE TABLE parted_remote_p2 PARTITION OF parted_remote FOR VALUES IN (2);
+INSERT INTO parted_remote_p1 VALUES (1, 100);
+INSERT INTO parted_remote_p2 VALUES (2, 200);
+
+CREATE FOREIGN TABLE foreign_parted_remote (a int, b int)
+  SERVER loopback OPTIONS (table_name 'parted_remote');
+
+-- Force a non-direct-modify UPDATE (random() isn't shippable), so the
+-- ctid/tableoid row-identity path below is actually exercised.
+UPDATE foreign_parted_remote SET b = 999 WHERE a = 1 AND random() <= 1;
+
+-- Only the a = 1 row (in parted_remote_p1) should have changed.
+SELECT tableoid::regclass, a, b FROM parted_remote ORDER BY a;
+
+DELETE FROM foreign_parted_remote WHERE a = 2 AND random() <= 1;
+
+-- Only the a = 2 row (in parted_remote_p2) should be gone.
+SELECT tableoid::regclass, a, b FROM parted_remote ORDER BY a;
+
+DROP FOREIGN TABLE foreign_parted_remote;
+DROP TABLE parted_remote;
+
+-- A whole-row reference to the target relation in a local qual must resolve
+-- consistently with the row-identity columns fetched for UPDATE/DELETE.
+CREATE TABLE wr_remote (a int PRIMARY KEY, b text, c int);
+INSERT INTO wr_remote SELECT i, 'row' || i, i * 10 FROM generate_series(1, 5) i;
+CREATE FOREIGN TABLE wr_ft (a int, b text, c int)
+  SERVER loopback OPTIONS (table_name 'wr_remote');
+
+BEGIN;
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM wr_ft WHERE wr_ft.* IS NULL AND random() <= 1;
+DELETE FROM wr_ft WHERE wr_ft.* IS NULL AND random() <= 1;
+UPDATE wr_ft SET b = 'x' WHERE wr_ft.* IS NULL AND random() <= 1;
+DELETE FROM wr_ft WHERE wr_ft.* IS NOT NULL AND a = 2 AND random() <= 1 RETURNING a, b;
+SELECT count(*) FROM wr_remote;
+ROLLBACK;
+
+DROP FOREIGN TABLE wr_ft;
+DROP TABLE wr_remote;
+
+-- Same, when the foreign table is a partition of a local partitioned table:
+-- the parent's whole-row reference is then converted from the partition's
+-- row type, which must remain visible above the retyped whole-row Var.
+CREATE TABLE wr_remote2 (a int PRIMARY KEY, b text, c int);
+INSERT INTO wr_remote2 SELECT i, 'row' || i, i * 10 FROM generate_series(1, 5) i;
+CREATE TABLE wr_parent (a int, b text, c int) PARTITION BY RANGE (a);
+CREATE FOREIGN TABLE wr_part1 PARTITION OF wr_parent
+  FOR VALUES FROM (1) TO (10) SERVER loopback OPTIONS (table_name 'wr_remote2');
+CREATE TABLE wr_part2 PARTITION OF wr_parent FOR VALUES FROM (10) TO (20);
+INSERT INTO wr_part2 VALUES (11, 'local11', 110);
+
+BEGIN;
+DELETE FROM wr_parent WHERE wr_parent.* IS NULL AND random() <= 1;
+UPDATE wr_parent SET b = 'x' WHERE wr_parent.* IS NULL AND random() <= 1;
+UPDATE wr_parent SET b = 'x' WHERE wr_parent.* IS NOT NULL AND a < 5 AND random() <= 1 RETURNING a, b;
+DELETE FROM wr_parent WHERE wr_parent.* IS NOT NULL AND a IN (2, 11) AND random() <= 1 RETURNING a, b;
+ROLLBACK;
+
+DROP TABLE wr_parent;
+DROP TABLE wr_remote2;
