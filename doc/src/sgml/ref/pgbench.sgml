@@ -823,8 +823,31 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       </listitem>
      </varlistentry>
 
-     <varlistentry id="pgbench-option-log-prefix">
-      <term><option>--log-prefix=<replaceable>prefix</replaceable></option></term>
+      <varlistentry id="pgbench-option-latency-percentiles">
+       <term><option>--latency-percentiles[=<replaceable>p1</replaceable>,<replaceable>p2</replaceable>,...]</option></term>
+       <listitem>
+        <para>
+         Report the minimum, maximum and percentiles of the transaction
+         latency in the main and per-script reports, in addition to the
+         average and standard deviation.  The option accepts an optional
+         comma-separated list of percentiles to show; each value must be
+         greater than 0 and not greater than 100, and at most 10 values
+         can be specified.  When the option is given without a value, the
+         default set <literal>50,95,99</literal> is used.
+        </para>
+        <para>
+         Like the other detailed latency statistics, these values are
+         measured only for successful transactions.  Percentiles are
+         estimated from a fixed-size in-memory logarithmic histogram, so
+         the option does not require logging transactions
+         (<option>--log</option>) to a file and does not perturb subsequent
+         transactions.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry id="pgbench-option-log-prefix">
+       <term><option>--log-prefix=<replaceable>prefix</replaceable></option></term>
       <listitem>
        <para>
         Set the filename prefix for the log files created by
@@ -2939,8 +2962,9 @@ statement latencies in milliseconds, failures and retries:
   <para>
    The latency of a successful transaction includes the entire time of
    transaction execution with rollbacks and retries.  In the main report,
-   when neither <option>--progress</option>, <option>--rate</option>, nor
-   <option>--latency-limit</option> is specified, the
+    when neither <option>--progress</option>, <option>--rate</option>,
+    <option>--latency-limit</option>, nor
+    <option>--latency-percentiles</option> is specified, the
    <literal>latency average</literal> is computed from the total benchmark
    duration divided by both successful and failed transactions, and therefore
    includes failed transactions.  Otherwise, the <literal>latency
@@ -2951,14 +2975,35 @@ statement latencies in milliseconds, failures and retries:
    transactions or commands.
   </para>
 
-  <para>
-   The main report contains the number of failed transactions. If the
-   <option>--max-tries</option> option is not equal to 1, the main report also
-   contains statistics related to retries: the total number of retried
-   transactions and total number of retries. The per-script report inherits all
-   these fields from the main report. The per-statement report displays retry
-   statistics only if the <option>--max-tries</option> option is not equal to 1.
-  </para>
+   <para>
+    <indexterm>
+     <primary>percentile</primary>
+     <secondary>pgbench</secondary>
+    </indexterm>
+    If the <option>--latency-percentiles</option> option is used, the main
+    and per-script reports also contain the latency minimum, maximum and
+    the requested percentiles, for example:
+<programlisting>
+latency min = 4.114 ms
+latency max = 15.213 ms
+latency p50 = 6.097 ms
+latency p95 = 12.211 ms
+latency p99 = 13.883 ms
+</programlisting>
+    These values are computed from a logarithmic histogram of the latencies
+    of successful transactions, so they are estimates: the reported
+    percentile lies within the histogram bucket that contains the requested
+    rank.
+   </para>
+
+   <para>
+    The main report contains the number of failed transactions. If the
+    <option>--max-tries</option> option is not equal to 1, the main report also
+    contains statistics related to retries: the total number of retried
+    transactions and total number of retries. The per-script report inherits all
+    these fields from the main report. The per-statement report displays retry
+    statistics only if the <option>--max-tries</option> option is not equal to 1.
+   </para>
 
   <para>
    If you want to group failures by basic types in per-transaction and
