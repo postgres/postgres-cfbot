@@ -231,7 +231,9 @@ typedef struct Expr
  * varreturningtype is used for Vars that refer to the target relation in the
  * RETURNING list of data-modifying queries.  The default behavior is to
  * return old values for DELETE and new values for INSERT and UPDATE, but it
- * is also possible to explicitly request old or new values.
+ * is also possible to explicitly request old or new values.  For INSERT ...
+ * ON CONFLICT DO SELECT/UPDATE, varreturningtype is also used for Vars in the
+ * RETURNING list that refer to the EXCLUDED pseudo-relation.
  *
  * In the parser, varnosyn and varattnosyn are either identical to
  * varno/varattno, or they specify the column's position in an aliased JOIN
@@ -261,6 +263,7 @@ typedef enum VarReturningType
 	VAR_RETURNING_DEFAULT,		/* return OLD for DELETE, else return NEW */
 	VAR_RETURNING_OLD,			/* return OLD for DELETE/UPDATE, else NULL */
 	VAR_RETURNING_NEW,			/* return NEW for INSERT/UPDATE, else NULL */
+	VAR_RETURNING_EXCLUDED,		/* return EXCLUDED on conflict, else NULL */
 } VarReturningType;
 
 typedef struct Var
@@ -2161,14 +2164,15 @@ typedef struct InferenceElem
 } InferenceElem;
 
 /*
- * ReturningExpr - return OLD/NEW.(expression) in RETURNING list
+ * ReturningExpr - return OLD/NEW/EXCLUDED.(expression) in RETURNING list
  *
  * This is used when updating an auto-updatable view and returning a view
  * column that is not simply a Var referring to the base relation.  In such
- * cases, OLD/NEW.viewcol can expand to an arbitrary expression, but the
- * result is required to be NULL if the OLD/NEW row doesn't exist.  To handle
- * this, the rewriter wraps the expanded expression in a ReturningExpr, which
- * is equivalent to "CASE WHEN (OLD/NEW row exists) THEN (expr) ELSE NULL".
+ * cases, OLD/NEW/EXCLUDED.viewcol can expand to an arbitrary expression, but
+ * the result is required to be NULL if the OLD/NEW/EXCLUDED row doesn't
+ * exist.  To handle this, the rewriter wraps the expanded expression in a
+ * ReturningExpr, which is equivalent to "CASE WHEN (OLD/NEW/EXCLUDED row
+ * exists) THEN (expr) ELSE NULL".
  *
  * A similar situation can arise when rewriting the RETURNING clause of a
  * rule, which may also contain arbitrary expressions.
@@ -2176,11 +2180,19 @@ typedef struct InferenceElem
  * ReturningExpr nodes never appear in a parsed Query --- they are only ever
  * inserted by the rewriter and the planner.
  */
+typedef enum ReturningExprKind
+{
+	/* values here match non-default VarReturningType values */
+	RETURNING_OLD_EXPR = VAR_RETURNING_OLD,
+	RETURNING_NEW_EXPR = VAR_RETURNING_NEW,
+	RETURNING_EXCLUDED_EXPR = VAR_RETURNING_EXCLUDED,
+} ReturningExprKind;
+
 typedef struct ReturningExpr
 {
 	Expr		xpr;
 	int			retlevelsup;	/* > 0 if it belongs to outer query */
-	bool		retold;			/* true for OLD, false for NEW */
+	ReturningExprKind retkind;	/* return OLD/NEW/EXCLUDED expression */
 	Expr	   *retexpr;		/* expression to be returned */
 } ReturningExpr;
 
