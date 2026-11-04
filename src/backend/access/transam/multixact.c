@@ -2775,6 +2775,7 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
 	 * once consistent the newOldestMulti will always exist in members, even
 	 * if we crashed in the wrong moment.
 	 */
+	INJECTION_POINT_LOAD("multixact-truncate-after-record");
 	START_CRIT_SECTION();
 
 	/*
@@ -2808,6 +2809,9 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
 
 	/* WAL log truncation */
 	WriteMTruncateXlogRec(newOldestMultiDB, newOldestMulti, newOldestOffset);
+
+	/* Loaded above, as we are in a critical section here. */
+	INJECTION_POINT_CACHED("multixact-truncate-after-record", NULL);
 
 	/* First truncate members */
 	PerformMembersTruncation(newOldestOffset);
