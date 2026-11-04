@@ -29,21 +29,8 @@
 #include "utils/memutils.h"
 #include "utils/tuplestore.h"
 
-
-/*
- * Runtime data for each function being scanned.
- */
-typedef struct FunctionScanPerFuncState
-{
-	SetExprState *setexpr;		/* state of the expression being evaluated */
-	TupleDesc	tupdesc;		/* desc of the function result type */
-	int			colcount;		/* expected number of result columns */
-	Tuplestorestate *tstore;	/* holds the function result set */
-	int64		rowcount;		/* # of rows in result set, -1 if not known */
-	TupleTableSlot *func_slot;	/* function result slot (or NULL) */
-} FunctionScanPerFuncState;
-
 static TupleTableSlot *FunctionNext(FunctionScanState *node);
+static void update_storage_stats(FunctionScanState *node);
 
 
 /* ----------------------------------------------------------------
@@ -520,6 +507,8 @@ ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)
 												  "Table function arguments",
 												  ALLOCSET_DEFAULT_SIZES);
 
+	scanstate->shared_info = NULL;
+
 	return scanstate;
 }
 
@@ -535,6 +524,26 @@ ExecEndFunctionScan(FunctionScanState *node)
 	int			i;
 
 	/*
+	 * When ending a parallel worker, copy the tuplestore usage details into
+	 * shared memory so that they can be picked up by the main process to
+	 * report in EXPLAIN ANALYZE.  The Gather node above us may be rescanned,
+	 * in which case a new set of workers will write to the same slots, so
+	 * merge with any existing values rather than overwriting them.
+	 */
+	if (node->shared_info != NULL && IsParallelWorker())
+	{
+		FunctionScanInstrumentation *si;
+
+		/* Take the tuplestores still existing into account */
+		update_storage_stats(node);
+
+		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
+		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
+		si->maxSpaceUsed = Max(si->maxSpaceUsed, node->stats.maxSpaceUsed);
+		si->usedDisk |= node->stats.usedDisk;
+	}
+
+	/*
 	 * Release slots and tuplestore resources
 	 */
 	for (i = 0; i < node->nfuncs; i++)
@@ -547,6 +556,38 @@ ExecEndFunctionScan(FunctionScanState *node)
 			fs->tstore = NULL;
 		}
 	}
+}
+
+/*
+ * update_storage_stats
+ *		Update the storage statistics to report in EXPLAIN ANALYZE with the
+ *		tuplestores that exist at this moment.
+ *
+ * A FunctionScan node has one tuplestore per function.  We report the peak
+ * of the total space used by the tuplestores existing at the same time.  The
+ * storage type is reported as disk if any tuplestore, of any function and in
+ * any rescan, spilled to disk.
+ */
+static void
+update_storage_stats(FunctionScanState *node)
+{
+	int64		totalSpaceUsed = 0;
+
+	for (int i = 0; i < node->nfuncs; i++)
+	{
+		FunctionScanPerFuncState *fs = &node->funcstates[i];
+		bool		usedDisk;
+		int64		spaceUsed;
+
+		if (fs->tstore == NULL)
+			continue;
+
+		tuplestore_get_stats(fs->tstore, &usedDisk, &spaceUsed);
+		totalSpaceUsed += spaceUsed;
+		node->stats.usedDisk |= usedDisk;
+	}
+
+	node->stats.maxSpaceUsed = Max(node->stats.maxSpaceUsed, totalSpaceUsed);
 }
 
 /* ----------------------------------------------------------------
@@ -586,6 +627,14 @@ ExecReScanFunctionScan(FunctionScanState *node)
 	{
 		ListCell   *lc;
 
+		/*
+		 * Collect the storage statistics for EXPLAIN ANALYZE before any
+		 * tuplestore is destroyed.  The tuplestores of the functions that are
+		 * not recomputed exist at the same time, so they are counted too.
+		 */
+		if (node->ss.ps.instrument)
+			update_storage_stats(node);
+
 		i = 0;
 		foreach(lc, scan->functions)
 		{
@@ -613,4 +662,91 @@ ExecReScanFunctionScan(FunctionScanState *node)
 		if (node->funcstates[i].tstore != NULL)
 			tuplestore_rescan(node->funcstates[i].tstore);
 	}
+}
+
+/* ----------------------------------------------------------------
+ *						Parallel Query Support
+ * ----------------------------------------------------------------
+ */
+
+/* ----------------------------------------------------------------
+ *		ExecFunctionScanEstimate
+ *
+ *		Estimate space required to propagate function scan statistics.
+ * ----------------------------------------------------------------
+ */
+void
+ExecFunctionScanEstimate(FunctionScanState *node, ParallelContext *pcxt)
+{
+	Size		size;
+
+	/* don't need this if not instrumenting or no workers */
+	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
+		return;
+
+	size = mul_size(pcxt->nworkers, sizeof(FunctionScanInstrumentation));
+	size = add_size(size, offsetof(SharedFunctionScanInfo, sinstrument));
+	shm_toc_estimate_chunk(&pcxt->estimator, size);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecFunctionScanInitializeDSM
+ *
+ *		Initialize DSM space for function scan statistics.
+ * ----------------------------------------------------------------
+ */
+void
+ExecFunctionScanInitializeDSM(FunctionScanState *node, ParallelContext *pcxt)
+{
+	Size		size;
+
+	/* don't need this if not instrumenting or no workers */
+	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
+		return;
+
+	size = offsetof(SharedFunctionScanInfo, sinstrument)
+		+ pcxt->nworkers * sizeof(FunctionScanInstrumentation);
+	node->shared_info = shm_toc_allocate(pcxt->toc, size);
+	/* ensure any unfilled slots will contain zeroes */
+	memset(node->shared_info, 0, size);
+	node->shared_info->num_workers = pcxt->nworkers;
+	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id,
+				   node->shared_info);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecFunctionScanInitializeWorker
+ *
+ *		Attach worker to DSM space for function scan statistics.
+ * ----------------------------------------------------------------
+ */
+void
+ExecFunctionScanInitializeWorker(FunctionScanState *node,
+								 ParallelWorkerContext *pwcxt)
+{
+	node->shared_info =
+		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecFunctionScanRetrieveInstrumentation
+ *
+ *		Transfer function scan statistics from DSM to private memory.
+ * ----------------------------------------------------------------
+ */
+void
+ExecFunctionScanRetrieveInstrumentation(FunctionScanState *node)
+{
+	Size		size;
+	SharedFunctionScanInfo *si;
+
+	if (node->shared_info == NULL)
+		return;
+
+	size = offsetof(SharedFunctionScanInfo, sinstrument)
+		+ node->shared_info->num_workers * sizeof(FunctionScanInstrumentation);
+	si = palloc(size);
+	memcpy(si, node->shared_info, size);
+	node->shared_info = si;
 }
