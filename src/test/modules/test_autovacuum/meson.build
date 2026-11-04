@@ -11,6 +11,7 @@ tests += {
     'tests': [
       't/001_parallel_autovacuum.pl',
       't/002_toast_relopts.pl',
+      't/003_parallel_vacuum_failsafe.pl',
     ],
   },
 }
