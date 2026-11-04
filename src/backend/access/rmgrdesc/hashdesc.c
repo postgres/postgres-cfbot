@@ -46,14 +46,27 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 				xl_hash_insert *xlrec = (xl_hash_insert *) rec;
 
 				appendStringInfo(buf, "off %u", xlrec->offnum);
+				/* a full-page image of the metapage drops the increment */
+				if (XLogRecHasBlockRef(record, 1) &&
+					(XLogRecHasBlockData(record, 1) ||
+					 !XLogRecHasBlockImage(record, 1)))
+				{
+					uint32		ntup_delta = 1;
+
+					if (XLogRecHasBlockData(record, 1))
+						memcpy(&ntup_delta, XLogRecGetBlockData(record, 1, NULL),
+							   sizeof(uint32));
+					appendStringInfo(buf, ", ntuples +%u", ntup_delta);
+				}
 				break;
 			}
 		case XLOG_HASH_ADD_OVFL_PAGE:
 			{
 				xl_hash_add_ovfl_page *xlrec = (xl_hash_add_ovfl_page *) rec;
 
-				appendStringInfo(buf, "bmsize %d, bmpage_found %c",
-								 xlrec->bmsize, (xlrec->bmpage_found) ? 'T' : 'F');
+				appendStringInfo(buf, "bmsize %d, bmpage_found %c, nadded %u",
+								 xlrec->bmsize, (xlrec->bmpage_found) ? 'T' : 'F',
+								 xlrec->nadded);
 				break;
 			}
 		case XLOG_HASH_SPLIT_ALLOCATE_PAGE:

@@ -38,8 +38,6 @@
 #include "utils/injection_point.h"
 #include "utils/rel.h"
 
-static bool _hash_alloc_buckets(Relation rel, BlockNumber firstblock,
-								uint32 nblocks);
 static void _hash_splitbucket(Relation rel, Buffer metabuf,
 							  Bucket obucket, Bucket nbucket,
 							  Buffer obuf,
@@ -975,6 +973,8 @@ fail:
  * EOF to the end of the splitpoint; this keeps smgr's idea of the EOF in
  * sync with ours, so that we don't get complaints from smgr.
  *
+ * _hash_addovflpage() uses this too, to add a batch of overflow pages.
+ *
  * We do this by writing a page of zeroes at the end of the splitpoint range.
  * We expect that the filesystem will ensure that the intervening pages read
  * as zeroes too.  On many filesystems this "hole" will not be allocated
@@ -991,7 +991,7 @@ fail:
  * Returns true if successful, or false if allocation failed due to
  * BlockNumber overflow.
  */
-static bool
+bool
 _hash_alloc_buckets(Relation rel, BlockNumber firstblock, uint32 nblocks)
 {
 	BlockNumber lastblock;
