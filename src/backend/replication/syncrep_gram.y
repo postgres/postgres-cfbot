@@ -1,7 +1,9 @@
 %{
 /*-------------------------------------------------------------------------
  *
- * syncrep_gram.y				- Parser for synchronous_standby_names
+ * syncrep_gram.y
+ * 	Parser for synchronous_standby_names, also reused by
+ * 	synchronized_standby_slots
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -65,7 +67,7 @@ result:
 	;
 
 standby_config:
-		standby_list				{ $$ = create_syncrep_config("1", $1, SYNC_REP_PRIORITY); }
+		standby_list				{ $$ = create_syncrep_config("1", $1, SYNC_REP_DEFAULT); }
 		| NUM '(' standby_list ')'		{ $$ = create_syncrep_config($1, $3, SYNC_REP_PRIORITY); }
 		| ANY NUM '(' standby_list ')'		{ $$ = create_syncrep_config($2, $4, SYNC_REP_QUORUM); }
 		| FIRST NUM '(' standby_list ')'		{ $$ = create_syncrep_config($2, $4, SYNC_REP_PRIORITY); }

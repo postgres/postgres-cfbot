@@ -2,7 +2,8 @@
 /*-------------------------------------------------------------------------
  *
  * syncrep_scanner.l
- *	  a lexical scanner for synchronous_standby_names
+ *	  a lexical scanner for synchronous_standby_names, also reused by
+ *	  synchronized_standby_slots
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
