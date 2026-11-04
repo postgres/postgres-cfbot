@@ -2211,6 +2211,7 @@ PartitionSchemeData
 PartitionSpec
 PartitionStrategy
 PartitionTupleRouting
+PartitionWorker
 PartitionedRelPruneInfo
 PartitionedRelPruningData
 PartitionwiseAggregateType
