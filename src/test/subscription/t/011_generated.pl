@@ -329,6 +329,80 @@ $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION sub1");
 $node_publisher->safe_psql('postgres', "DROP PUBLICATION pub1");
 
 # =============================================================================
+# Exercise the initial sync of tables whose only columns are generated columns
+# that are not published, i.e. tables for which no columns are replicated:
+#
+# - a table with only a VIRTUAL generated column (never published);
+# - a table with only a STORED generated column, with
+#   publish_generated_columns = 'none'.
+#
+# The tablesync worker must not try to replicate the generated columns.  The
+# subscriber-only columns must get their default values, and the value of a
+# generated column must not be copied into a subscriber column of the same
+# name.  Test both text and binary mode.
+# =============================================================================
+
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_virt_only_text (a int GENERATED ALWAYS AS (99) VIRTUAL);
+	CREATE TABLE tab_virt_only_bin (a int GENERATED ALWAYS AS (99) VIRTUAL);
+	CREATE TABLE tab_stored_only_text (a int GENERATED ALWAYS AS (77) STORED);
+	CREATE TABLE tab_stored_only_bin (a int GENERATED ALWAYS AS (77) STORED);
+	INSERT INTO tab_virt_only_text DEFAULT VALUES;
+	INSERT INTO tab_virt_only_bin DEFAULT VALUES;
+	INSERT INTO tab_stored_only_text DEFAULT VALUES;
+	INSERT INTO tab_stored_only_bin DEFAULT VALUES;
+	CREATE PUBLICATION regress_pub_gen_only_text FOR TABLE tab_virt_only_text, tab_stored_only_text WITH (publish_generated_columns = none);
+	CREATE PUBLICATION regress_pub_gen_only_bin FOR TABLE tab_virt_only_bin, tab_stored_only_bin WITH (publish_generated_columns = none);
+));
+
+# The subscriber tables for tab_virt_only_* have no column named "a", and the
+# ones for tab_stored_only_* have a regular column "a".
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_virt_only_text (local_col text DEFAULT 'sub-default');
+	CREATE TABLE tab_virt_only_bin (local_col text DEFAULT 'sub-default');
+	CREATE TABLE tab_stored_only_text (a int, local_col text DEFAULT 'sub-default');
+	CREATE TABLE tab_stored_only_bin (a int, local_col text DEFAULT 'sub-default');
+	CREATE SUBSCRIPTION regress_sub_gen_only_text CONNECTION '$publisher_connstr' PUBLICATION regress_pub_gen_only_text WITH (binary = false);
+	CREATE SUBSCRIPTION regress_sub_gen_only_bin CONNECTION '$publisher_connstr' PUBLICATION regress_pub_gen_only_bin WITH (binary = true);
+));
+
+$node_subscriber->wait_for_subscription_sync($node_publisher,
+	'regress_sub_gen_only_text');
+$node_subscriber->wait_for_subscription_sync($node_publisher,
+	'regress_sub_gen_only_bin');
+
+is( $node_subscriber->safe_psql('postgres',
+		"SELECT local_col FROM tab_virt_only_text"),
+	'sub-default',
+	'unpublished VIRTUAL generated column is not synced (text)');
+is( $node_subscriber->safe_psql('postgres',
+		"SELECT local_col FROM tab_virt_only_bin"),
+	'sub-default',
+	'unpublished VIRTUAL generated column is not synced (binary)');
+is( $node_subscriber->safe_psql('postgres',
+		"SELECT a, local_col FROM tab_stored_only_text"),
+	'|sub-default',
+	'unpublished STORED generated column is not synced (text)');
+is( $node_subscriber->safe_psql('postgres',
+		"SELECT a, local_col FROM tab_stored_only_bin"),
+	'|sub-default',
+	'unpublished STORED generated column is not synced (binary)');
+
+# cleanup
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	DROP SUBSCRIPTION regress_sub_gen_only_text;
+	DROP SUBSCRIPTION regress_sub_gen_only_bin;
+));
+$node_publisher->safe_psql(
+	'postgres', qq(
+	DROP PUBLICATION regress_pub_gen_only_text;
+	DROP PUBLICATION regress_pub_gen_only_bin;
+));
+
+# =============================================================================
 # The following test verifies the expected error when replicating to a
 # generated subscriber column. Test the following combinations:
 # - regular -> generated
