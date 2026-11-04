@@ -131,7 +131,7 @@ if ($ENV{with_icu} eq 'yes')
 		],
 		'option --icu-locale');
 
-	command_like(
+	command_checks_all(
 		[
 			'initdb', '--no-sync',
 			'--auth' => 'trust',
@@ -145,7 +145,9 @@ if ($ENV{with_icu} eq 'yes')
 			'--lc-time' => 'C',
 			"$tempdir/data4"
 		],
-		qr/^\s+default collation:\s+und\n/ms,
+		0,
+		[qr/^\s+default collation:\s+und\n/ms],
+		[],    # stderr may have LOG messages
 		'options --locale-provider=icu --locale=und --lc-*=C');
 
 	command_fails_like(
