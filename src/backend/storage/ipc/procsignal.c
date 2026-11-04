@@ -19,6 +19,7 @@
 
 #include "access/parallel.h"
 #include "commands/async.h"
+#include "commands/explain_running.h"
 #include "commands/repack.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -714,6 +715,9 @@ procsignal_sigusr1_handler(SIGNAL_ARGS)
 
 	if (CheckProcSignal(PROCSIG_LOG_MEMORY_CONTEXT))
 		HandleLogMemoryContextInterrupt();
+
+	if (CheckProcSignal(PROCSIG_LOG_QUERY_PLAN))
+		HandleLogQueryPlanInterrupt();
 
 	if (CheckProcSignal(PROCSIG_PARALLEL_APPLY_MESSAGE))
 		HandleParallelApplyMessageInterrupt();
