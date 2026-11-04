@@ -3,6 +3,7 @@ PGFILEDESC = "standalone json parser tester"
 PGAPPICON = win32
 
 TAP_TESTS = 1
+PYTEST_TESTS = 1
 
 OBJS = test_json_parser_incremental.o test_json_parser_perf.o $(WIN32RES)
 

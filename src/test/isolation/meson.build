@@ -67,7 +67,7 @@ tests += {
     'schedule': files('isolation_schedule'),
     'test_kwargs': {
       'priority': 40,
-      'timeout': 1000,
+      'timeout': test_timeout,
     },
     'dbname': 'isolation_regression',
   },

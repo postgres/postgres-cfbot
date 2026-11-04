@@ -928,7 +928,7 @@ float4:out:.*-.*-cygwin.*=float4-misrounded-input.out
   </sect1>
 
   <sect1 id="regress-tap">
-   <title>TAP Tests</title>
+   <title>Perl TAP Tests</title>
 
    <para>
     Various tests, particularly the client program tests
@@ -1014,6 +1014,74 @@ PG_TEST_NOCLEAN=1 make -C src/bin/pg_dump check
     framework to read only a limited number of lines for its reports.
    </para>
   </sect2>
+
+  </sect1>
+
+  <sect1 id="regress-pytest">
+   <title>Pytest Tests</title>
+
+   <para>
+    Tests in <filename>pyt</filename> directories use the Python
+    <application>pytest</application> framework. These tests provide a
+    convenient way to test libpq client functionality and scenarios requiring
+    multiple PostgreSQL server instances.
+   </para>
+
+   <para>
+    The pytest tests require <productname>PostgreSQL</productname> to be
+    configured with the option <option>--enable-pytest</option> (or
+    <option>-Dpytest=enabled</option> for Meson builds). You also need
+    <application>pytest</application> installed. You can either install it
+    system-wide, or create a virtual environment in the source directory:
+<programlisting>
+python -m venv .venv
+source .venv/bin/activate
+pip install .
+</programlisting>
+    Alternatively, if you have <application>uv</application> installed:
+<programlisting>
+uv sync
+source .venv/bin/activate
+</programlisting>
+    Remember to activate the virtual environment before running
+    <command>configure</command> or <command>meson setup</command>.
+   </para>
+
+   <para>
+    With Meson builds, a directory's pytest tests belong to that directory's
+    test suite, the same way its TAP tests do, so they run together with it:
+<programlisting>
+meson test --suite recovery
+</programlisting>
+    With autoconf-based builds, a directory's pytest tests run as part of its
+    <literal>check</literal> target, and against an existing installation as
+    part of its <literal>installcheck</literal> target, e.g.:
+<programlisting>
+make -C src/test/recovery check
+</programlisting>
+   </para>
+
+   <para>
+    You can also run pytest directly, to run every pytest test in the tree, or
+    to select tests the ways pytest itself supports:
+<programlisting>
+pytest
+pytest src/test/recovery/pyt/test_049_wait_for_lsn.py
+pytest -k "wait_for_lsn"
+</programlisting>
+   </para>
+
+   <para>
+    Many operations in the test suites use a 180-second timeout, which on slow
+    hosts may lead to load-induced timeouts.  Setting the environment variable
+    <varname>PG_TEST_TIMEOUT_DEFAULT</varname> to a higher number will change
+    the default to avoid this.
+   </para>
+
+   <para>
+    For more information on writing pytest tests, see the
+    <filename>src/test/pytest/README</filename> file.
+   </para>
 
   </sect1>
 
