@@ -48,6 +48,13 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'injection_points_run'
 LANGUAGE C PARALLEL UNSAFE;
 
+-- Test PANIC core-dump suppression with ENOSPC or EIO.
+CREATE FUNCTION injection_points_test_panic_core_dump(IN disk_full boolean,
+    IN reenable_abort boolean DEFAULT false)
+RETURNS void
+AS 'MODULE_PATHNAME', 'injection_points_test_panic_core_dump'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
 --
 -- injection_points_cached()
 --
