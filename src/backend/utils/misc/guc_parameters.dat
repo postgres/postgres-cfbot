@@ -81,6 +81,16 @@
   show_hook => 'show_archive_command',
 },
 
+{ name => 'archive_command_jobs', type => 'int', context => 'PGC_SIGHUP', group => 'WAL_ARCHIVING',
+  short_desc => 'Sets the maximum number of concurrent archive_command processes.',
+  long_desc => 'Values greater than 1 are not supported on Windows.',
+  variable => 'XLogArchiveCommandJobs',
+  boot_val => '1',
+  min => '1',
+  max => '8',
+  check_hook => 'check_archive_command_jobs',
+},
+
 { name => 'archive_library', type => 'string', context => 'PGC_SIGHUP', group => 'WAL_ARCHIVING',
   short_desc => 'Sets the library that will be called to archive a WAL file.',
   long_desc => 'An empty string means use "archive_command".',

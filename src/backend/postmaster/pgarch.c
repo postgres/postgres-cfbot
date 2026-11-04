@@ -147,6 +147,7 @@ typedef struct ArchInFlight
 static ArchInFlight arch_inflight[NUM_FILES_PER_DIRECTORY_SCAN];
 static int	arch_inflight_count = 0;
 static bool archiver_use_async = false;
+static int	archiver_shell_jobs = 1;
 
 /*
  * Flags set by interrupt handlers for later service in the main loop.
@@ -1287,6 +1288,14 @@ ProcessPgArchInterrupts(void)
 			proc_exit(0);
 		}
 
+		if (XLogArchiveLibrary[0] == '\0' &&
+			XLogArchiveCommandJobs != archiver_shell_jobs)
+		{
+			ereport(LOG,
+					(errmsg("restarting archiver process because value of "
+							"\"archive_command_jobs\" was changed")));
+			proc_exit(0);
+		}
 	}
 }
 
@@ -1329,6 +1338,7 @@ LoadArchiveLibrary(void)
 				(errmsg("archive modules must provide both submit and poll callbacks for asynchronous archiving")));
 
 	archiver_use_async = (ArchiveCallbacks->submit_cb != NULL);
+	archiver_shell_jobs = XLogArchiveCommandJobs;
 	if (archiver_use_async)
 	{
 		if (ArchiveCallbacks->archive_file_cb != NULL)
