@@ -735,6 +735,7 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 	int			natt;
 	StringInfo	pub_names = NULL;
 	Bitmapset  *included_cols = NULL;
+	bool		no_cols_published = false;
 	int			server_version = walrcv_server_version(LogRepWorkerWalRcvConn);
 
 	lrel->nspname = nspname;
@@ -787,7 +788,7 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 	{
 		WalRcvExecResult *pubres;
 		TupleTableSlot *tslot;
-		Oid			attrsRow[] = {INT2VECTOROID};
+		Oid			attrsRow[] = {INT2VECTOROID, BOOLOID};
 
 		/* Build the pub_names comma-separated string. */
 		pub_names = makeStringInfo();
@@ -808,7 +809,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 			appendStringInfo(&cmd,
 							 "SELECT DISTINCT"
 							 "  (CASE WHEN (array_length(gpt.attrs, 1) = c.relnatts)"
-							 "   THEN NULL ELSE gpt.attrs END)"
+							 "   THEN NULL ELSE gpt.attrs END),"
+							 "  gpt.attrs IS NULL AS no_cols_published"
 							 "  FROM pg_get_publication_tables(ARRAY[%s], %u) gpt,"
 							 "  pg_class c"
 							 " WHERE c.oid = gpt.relid",
@@ -819,7 +821,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 			appendStringInfo(&cmd,
 							 "SELECT DISTINCT"
 							 "  (CASE WHEN (array_length(gpt.attrs, 1) = c.relnatts)"
-							 "   THEN NULL ELSE gpt.attrs END)"
+							 "   THEN NULL ELSE gpt.attrs END),"
+							 "  gpt.attrs IS NULL AS no_cols_published"
 							 "  FROM pg_publication p,"
 							 "  LATERAL pg_get_publication_tables(p.pubname) gpt,"
 							 "  pg_class c"
@@ -875,6 +878,21 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 				for (natt = 0; natt < nelems; natt++)
 					included_cols = bms_add_member(included_cols, elems[natt]);
 			}
+
+			/*
+			 * Since v16, pg_get_publication_tables() reports the full set of
+			 * published columns even when no column list was specified, so a
+			 * NULL there means that no column of the table is published (for
+			 * example, a table whose only columns are generated columns that
+			 * are not published).  The CASE above folds that into the same
+			 * NULL as "all columns", so look at the raw value instead.
+			 *
+			 * Before v18 the column query below excludes generated columns
+			 * itself, so this only matters for v18+ publishers.
+			 */
+			if (server_version >= 180000 &&
+				DatumGetBool(slot_getattr(tslot, 2, &isnull)))
+				no_cols_published = true;
 
 			ExecClearTuple(tslot);
 		}
@@ -938,7 +956,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 		Assert(!isnull);
 
 		/* If the column is not in the column list, skip it. */
-		if (included_cols != NULL && !bms_is_member(attnum, included_cols))
+		if (no_cols_published ||
+			(included_cols != NULL && !bms_is_member(attnum, included_cols)))
 		{
 			ExecClearTuple(slot);
 			continue;
