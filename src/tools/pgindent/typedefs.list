@@ -3021,6 +3021,7 @@ SubXactCallback
 SubXactCallbackItem
 SubXactEvent
 SubXactInfo
+SubplanNameEntry
 SubqueryScan
 SubqueryScanPath
 SubqueryScanState
@@ -4331,6 +4332,7 @@ storeInfo
 storeRes_func
 stream_stop_callback
 string
+subplan_name_hash
 substitute_actual_parameters_context
 substitute_actual_parameters_in_from_context
 substitute_grouped_columns_context
