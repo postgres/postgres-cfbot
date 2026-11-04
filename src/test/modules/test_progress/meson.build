@@ -7,9 +7,12 @@ tests += {
   'tap': {
     'env': {
       'PROGRESS_H': meson.project_source_root() / 'src/include/commands/progress.h',
+      'SYSTEM_VIEWS_SQL': meson.project_source_root() / 'src/backend/catalog/system_views.sql',
+      'MONITORING_SGML': meson.project_source_root() / 'doc/src/sgml/monitoring.sgml',
     },
     'tests': [
       't/001_progress.pl',
+      't/002_doc_phases.pl',
     ],
     # The test reads the server log, which is cluster-wide.
     'runningcheck': false,

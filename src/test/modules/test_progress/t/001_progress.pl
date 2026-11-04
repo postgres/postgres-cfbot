@@ -1630,7 +1630,8 @@ my ($part_run) =
   grep { @{ $_->[0] } }
   map {
 	my $i = $_;
-	[ map { (values_of($trace, 'ANALYZE', $part_relid, $_))[$i] }
+	[
+		map   { (values_of($trace, 'ANALYZE', $part_relid, $_))[$i] }
 		  map { "PROGRESS_ANALYZE_$_" }
 		  qw(CURRENT_CHILD_TABLE_RELID BLOCKS_TOTAL BLOCKS_DONE CHILD_TABLES_DONE)
 	]
