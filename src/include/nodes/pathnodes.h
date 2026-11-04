@@ -186,6 +186,9 @@ typedef struct PlannerGlobal
 	/* names already used for subplans (list of C strings) */
 	List	   *subplanNames pg_node_attr(read_write_ignore);
 
+	/* optional hash table for fast lookup; contains same names as list */
+	struct subplan_name_hash *subplanNameHash pg_node_attr(read_write_ignore);
+
 	/* indices of subplans that require REWIND */
 	Bitmapset  *rewindPlanIDs;
 
