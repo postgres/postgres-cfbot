@@ -31,7 +31,9 @@
    <literal>localXID</literal>.  For example, the virtual transaction
    ID <literal>4/12532</literal> has a <literal>procNumber</literal>
    of <literal>4</literal> and a <literal>localXID</literal> of
-   <literal>12532</literal>.
+   <literal>12532</literal>.  The function
+   <function>pg_current_vxact_id</function> returns the current
+   transaction's VXID.
   </para>
 
   <para>

@@ -33,6 +33,7 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "storage/lwlock.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procnumber.h"
 #include "utils/builtins.h"
@@ -358,6 +359,31 @@ pg_current_xact_id_if_assigned(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_FULLTRANSACTIONID(topfxid);
+}
+
+/*
+ * pg_current_vxact_id() returns text
+ *
+ *	Return the current virtual transaction ID (vxid).
+ *	vxid is always assigned and available, unlike regular transaction IDs.
+ *	Returns NULL if no valid vxid exists (e.g., during startup/recovery).
+ */
+Datum
+pg_current_vxact_id(PG_FUNCTION_ARGS)
+{
+	char		vxidstr[32];
+
+	/*
+	 * Check if we have a valid vxid.  The vxid format matches what's used in
+	 * elog.c for the %v placeholder and in pg_locks.virtualtransaction.
+	 */
+	if (MyProc == NULL || MyProc->vxid.procNumber == INVALID_PROC_NUMBER)
+		PG_RETURN_NULL();
+
+	snprintf(vxidstr, sizeof(vxidstr), VXID_FMT,
+			 MyProc->vxid.procNumber, MyProc->vxid.lxid);
+
+	PG_RETURN_TEXT_P(cstring_to_text(vxidstr));
 }
 
 /*
