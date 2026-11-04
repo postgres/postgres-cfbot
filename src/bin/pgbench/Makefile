@@ -9,9 +9,19 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	$(WIN32RES) \
+	commands.o \
+	engine.o \
+	expr.o \
 	exprparse.o \
 	exprscan.o \
-	pgbench.o
+	init.o \
+	pgbench.o \
+	poller.o \
+	random.o \
+	report.o \
+	script.o \
+	stats.o \
+	variable.o
 
 override CPPFLAGS := -I. -I$(srcdir) -I$(libpq_srcdir) $(CPPFLAGS)
 LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils $(libpq_pgport)
