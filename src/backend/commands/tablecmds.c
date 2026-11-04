@@ -23264,8 +23264,11 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 	/*
 	 * If we found as many inherited indexes as the partitioned table has
 	 * partitions, we're good; update pg_index to set indisvalid.
+	 *
+	 * Partitions pending detach must be counted too, because their indexes
+	 * remain attached to this index until the detach is finalized.
 	 */
-	if (tuples == RelationGetPartitionDesc(partedTbl, true)->nparts)
+	if (tuples == RelationGetPartitionDesc(partedTbl, false)->nparts)
 	{
 		Relation	idxRel;
 		HeapTuple	indTup;
