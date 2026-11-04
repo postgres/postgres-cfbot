@@ -799,6 +799,62 @@ is($result, qq(), 'check replicated rows to tab_rowfilter_viaroot_part_1');
 # Testcase end: FOR TABLE with row filter publications
 # ======================================================
 
+# ====================================================================
+# Testcase start: UPDATE-to-INSERT transformation of a row with an
+# unchanged out-of-line column
+#
+# Decoding can transform an UPDATE into an INSERT when the row moves into
+# the set of rows satisfying the row filter.  An unchanged externally
+# stored value of a column that is not part of the replica identity is
+# not present in the update's WAL record, so heap_update() logs it along
+# with the old-key tuple, letting the transformation send the complete
+# row to the subscriber.
+
+# create tables pub and sub
+$node_publisher->safe_psql('postgres',
+	"CREATE TABLE tab_rowfilter_toast_loss (id int PRIMARY KEY, val text)");
+$node_subscriber->safe_psql('postgres',
+	"CREATE TABLE tab_rowfilter_toast_loss (id int PRIMARY KEY, val text)");
+$node_publisher->safe_psql('postgres',
+	"ALTER TABLE tab_rowfilter_toast_loss ALTER COLUMN val SET STORAGE EXTERNAL");
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION tap_pub_toast_loss FOR TABLE tab_rowfilter_toast_loss WHERE (id = 7)");
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub ADD PUBLICATION tap_pub_toast_loss");
+
+# wait for the sync of the newly added publication's table to finish
+$node_subscriber->wait_for_subscription_sync($node_publisher, $appname);
+
+# This row does not satisfy the row filter, so it is not replicated.
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO tab_rowfilter_toast_loss VALUES (3, repeat('a', 5000))");
+$node_publisher->wait_for_catchup($appname);
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM tab_rowfilter_toast_loss");
+is($result, qq(0), 'row not satisfying the row filter is not replicated');
+
+# The transformation can only lose the value when it is stored out-of-line;
+# an inline value would replicate fine even without the fix, so make sure
+# the test actually exercises the out-of-line case.
+$result = $node_publisher->safe_psql('postgres',
+	"SELECT pg_column_toast_chunk_id(val) IS NOT NULL FROM tab_rowfilter_toast_loss");
+is($result, qq(t), 'unchanged column value is stored out-of-line');
+
+# Move the row into the filter's set, leaving the out-of-line column
+# unchanged: the UPDATE is transformed into an INSERT, which must still
+# carry the unchanged externally stored value.
+$node_publisher->safe_psql('postgres',
+	"UPDATE tab_rowfilter_toast_loss SET id = 7");
+$node_publisher->wait_for_catchup($appname);
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM tab_rowfilter_toast_loss WHERE id = 7 AND val = repeat('a', 5000)");
+is($result, qq(1),
+	'transformed INSERT carries the unchanged out-of-line value');
+
+# Testcase end: UPDATE-to-INSERT transformation of a row with an
+# unchanged out-of-line column
+# ====================================================================
+
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');
 
