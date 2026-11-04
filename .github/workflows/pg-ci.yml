@@ -1186,7 +1186,7 @@ jobs:
   # Test that code can be built with both gcc and clang without warnings,
   # with various combinations of cassert/dtrace flags. Trace probes have
   # a history of getting accidentally broken; the matrix is there to
-  # catch that.
+  # catch that.  Also runs some other source-level checks.
   compiler-warnings:
     name: CompilerWarnings
     needs: [setup, sanity-check]
@@ -1319,6 +1319,57 @@ jobs:
 
           ninja -C build --quiet -k 0 \
             headerscheck cpluspluscheck
+
+      ###
+      # Verify that the tree is pgindent-clean
+      #
+      # Advisory only: reports violations as a warning annotation and in the
+      # step summary, but does not fail the workflow.
+      #
+      # Relies on the preceding headerscheck step having configured the tree,
+      # which is needed to build pg_bsd_indent.
+      ###
+      - name: pgindent check
+        if: ${{ !cancelled() }}
+        run: |
+          echo "::group::build pg_bsd_indent"
+          ninja -C build src/tools/pg_bsd_indent/pg_bsd_indent
+          echo "::endgroup::"
+
+          rc=0
+          src/tools/pgindent/pgindent --indent=build/src/tools/pg_bsd_indent/pg_bsd_indent --check --diff . || rc=$?
+
+          if [ "$rc" -eq 2 ]; then
+            echo "::warning title=pgindent::Tree is not pgindent-clean; see CompilerWarnings job."
+          elif [ "$rc" -ne 0 ]; then
+            # pgindent itself failed; that is a real error
+            exit "$rc"
+          fi
+
+      ###
+      # Verify that the tree is git whitespace clean
+      #
+      # Advisory only: reports violations as a warning annotation and in the
+      # step summary, but does not fail the workflow.
+      ###
+      - name: git whitespace check
+        if: ${{ !cancelled() }}
+        run: |
+          # This job runs in a container, where the checkout is owned
+          # by a different user than the one running the steps, so git
+          # would otherwise refuse to operate on it ("dubious
+          # ownership").
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          rc=0
+          git diff-tree --check `git hash-object -t tree /dev/null` HEAD || rc=$?
+
+          if [ "$rc" -eq 2 ]; then
+            echo "::warning title=git::Tree is not git whitespace-clean; see CompilerWarnings job."
+          elif [ "$rc" -ne 0 ]; then
+            # git itself failed; that is a real error
+            exit "$rc"
+          fi
 
       - *ccache_decide_save_step
       - *ccache_save_step
