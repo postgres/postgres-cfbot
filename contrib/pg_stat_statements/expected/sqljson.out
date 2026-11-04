@@ -511,12 +511,29 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                       query                        
--------+----------------------------------------------------
-    10 | SELECT * FROM pgss_sqljson_tab,                   +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a')) jt
+ calls |                                query                                
+-------+---------------------------------------------------------------------
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2                         +
+       |     DEFAULT $3 ON EMPTY ERROR ON ERROR)) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2 DEFAULT $3 ON EMPTY)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2 DEFAULT $3 ON ERROR)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2 ERROR ON EMPTY)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2 ERROR ON ERROR)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a text PATH $2)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a varchar(3) PATH $2)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                    +
+       |   JSON_TABLE(js, $1 COLUMNS (a varchar(4) PATH $2)) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
-(2 rows)
+(10 rows)
 
 -- EXISTS, FORMAT JSON and FOR ORDINALITY columns
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
@@ -607,12 +624,37 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                                  query                                   
--------+--------------------------------------------------------------------------
-    13 | SELECT * FROM pgss_sqljson_tab,                                         +
-       |   JSON_TABLE(js, $1 COLUMNS (a int EXISTS PATH '$.a' FALSE ON ERROR)) jt
+ calls |                                   query                                    
+-------+----------------------------------------------------------------------------
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a FOR ORDINALITY)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a int EXISTS PATH $2 ERROR ON ERROR)) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a int EXISTS PATH $2 FALSE ON ERROR)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a int EXISTS PATH $2 TRUE ON ERROR)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a int EXISTS PATH $2 UNKNOWN ON ERROR)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a jsonb FORMAT JSON PATH $2                  +
+       |     EMPTY ARRAY ON EMPTY EMPTY OBJECT ON ERROR)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a jsonb FORMAT JSON PATH $2                  +
+       |     EMPTY ARRAY ON EMPTY)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a jsonb FORMAT JSON PATH $2                  +
+       |     EMPTY OBJECT ON EMPTY)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a jsonb FORMAT JSON PATH $2 WITH WRAPPER)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a jsonb FORMAT JSON PATH $2)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a jsonb PATH $2)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                                           +
+       |   JSON_TABLE(js, $1 COLUMNS (a text FORMAT JSON PATH $2 OMIT QUOTES)) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
-(2 rows)
+(13 rows)
 
 -- column names and paths
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
@@ -653,13 +695,45 @@ SELECT * FROM pgss_sqljson_tab,
 ----+---+---+---+---
 (0 rows)
 
+-- several columns, with and without PATH
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int, b int)) jt;
+ js | t | b | a | b 
+----+---+---+---+---
+(0 rows)
+
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (b int, a int)) jt;
+ js | t | b | b | a 
+----+---+---+---+---
+(0 rows)
+
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$.a', b int)) jt;
+ js | t | b | a | b 
+----+---+---+---+---
+(0 rows)
+
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int, b int PATH '$.b')) jt;
+ js | t | b | a | b 
+----+---+---+---+---
+(0 rows)
+
+-- the same path as the one derived from the column name
+SELECT * FROM pgss_sqljson_tab,
+  JSON_TABLE(js, '$[*]' COLUMNS (a int PATH '$."a"')) jt;
+ js | t | b | a 
+----+---+---+---
+(0 rows)
+
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                                query                                 
--------+----------------------------------------------------------------------
-     4 | SELECT * FROM pgss_sqljson_tab,                                     +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a')) jt
-     1 | SELECT * FROM pgss_sqljson_tab,                                     +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a', b int PATH '$.b')) jt
+ calls |                             query                              
+-------+----------------------------------------------------------------
+     5 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2)) jt
+     5 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2, b int PATH $3)) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
 (3 rows)
 
@@ -723,16 +797,23 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                                query                                 
--------+----------------------------------------------------------------------
-     2 | SELECT * FROM pgss_sqljson_tab,                                     +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a',                      +
-       |     NESTED PATH '$.b[*]' COLUMNS (b int PATH '$'),                  +
-       |     NESTED PATH '$.c[*]' COLUMNS (c int PATH '$'))) jt
-     5 | SELECT * FROM pgss_sqljson_tab,                                     +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a', b int PATH '$.b')) jt
+ calls |                             query                              
+-------+----------------------------------------------------------------
+     4 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2,                   +
+       |     NESTED PATH $3 COLUMNS (b int PATH $4))) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2,                   +
+       |     NESTED PATH $3 COLUMNS (b int PATH $4),                   +
+       |     NESTED PATH $5 COLUMNS (c int PATH $6))) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2,                   +
+       |     NESTED PATH $3 COLUMNS (b int PATH $4,                    +
+       |       NESTED PATH $5 COLUMNS (c int PATH $6)))) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2, b int PATH $3)) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
-(3 rows)
+(5 rows)
 
 -- PLAN without NESTED PATH, which is the same as no PLAN
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
@@ -754,10 +835,10 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                               query                                
--------+--------------------------------------------------------------------
-     2 | SELECT * FROM pgss_sqljson_tab,                                   +
-       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH '$.a') PLAN (p0)) jt
+ calls |                              query                              
+-------+-----------------------------------------------------------------
+     2 | SELECT * FROM pgss_sqljson_tab,                                +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2) PLAN (p0)) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
 (2 rows)
 
@@ -793,13 +874,17 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                            query                             
--------+--------------------------------------------------------------
-     3 | SELECT * FROM pgss_sqljson_tab,                             +
-       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH '$.a',        +
-       |     NESTED PATH '$.b[*]' AS p1 COLUMNS (b int PATH '$'))) jt
+ calls |                         query                         
+-------+-------------------------------------------------------
+     1 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4))    +
+       |     PLAN (p0 INNER p1)) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4))) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
-(2 rows)
+(3 rows)
 
 -- PLAN with sibling NESTED PATH
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
@@ -881,14 +966,29 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                            query                             
--------+--------------------------------------------------------------
-     8 | SELECT * FROM pgss_sqljson_tab,                             +
-       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH '$.a',        +
-       |     NESTED PATH '$.b[*]' AS p1 COLUMNS (b int PATH '$'),    +
-       |     NESTED PATH '$.c[*]' AS p2 COLUMNS (c int PATH '$'))) jt
+ calls |                         query                         
+-------+-------------------------------------------------------
+     3 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4),    +
+       |     NESTED PATH $5 AS p2 COLUMNS (c int PATH $6))    +
+       |     PLAN (p0 INNER (p1 UNION p2))) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4),    +
+       |     NESTED PATH $5 AS p2 COLUMNS (c int PATH $6))    +
+       |     PLAN (p0 OUTER (p1 CROSS p2))) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4),    +
+       |     NESTED PATH $5 AS p2 COLUMNS (c int PATH $6))    +
+       |     PLAN DEFAULT (INNER, CROSS)) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4),    +
+       |     NESTED PATH $5 AS p2 COLUMNS (c int PATH $6))) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
-(2 rows)
+(5 rows)
 
 -- PLAN with chained UNION and CROSS
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
@@ -927,15 +1027,21 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                            query                             
--------+--------------------------------------------------------------
-     3 | SELECT * FROM pgss_sqljson_tab,                             +
-       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH '$.a',        +
-       |     NESTED PATH '$.b[*]' AS p1 COLUMNS (b int PATH '$'),    +
-       |     NESTED PATH '$.c[*]' AS p2 COLUMNS (c int PATH '$'),    +
-       |     NESTED PATH '$.d[*]' AS p3 COLUMNS (d int PATH '$'))) jt
+ calls |                         query                         
+-------+-------------------------------------------------------
+     1 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4),    +
+       |     NESTED PATH $5 AS p2 COLUMNS (c int PATH $6),    +
+       |     NESTED PATH $7 AS p3 COLUMNS (d int PATH $8))    +
+       |     PLAN (p0 OUTER (p1 CROSS p2 CROSS p3))) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                      +
+       |   JSON_TABLE(js, $1 AS p0 COLUMNS (a int PATH $2,    +
+       |     NESTED PATH $3 AS p1 COLUMNS (b int PATH $4),    +
+       |     NESTED PATH $5 AS p2 COLUMNS (c int PATH $6),    +
+       |     NESTED PATH $7 AS p3 COLUMNS (d int PATH $8))) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
-(2 rows)
+(3 rows)
 
 -- table-level ON ERROR and PASSING
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
@@ -992,18 +1098,18 @@ SELECT * FROM pgss_sqljson_tab,
 (0 rows)
 
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C", calls;
- calls |                               query                               
--------+-------------------------------------------------------------------
-     3 | SELECT * FROM pgss_sqljson_tab,                                  +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a') EMPTY ON ERROR) jt
-     1 | SELECT * FROM pgss_sqljson_tab,                                  +
-       |   JSON_TABLE(js, $1 COLUMNS (a int PATH '$.a') ERROR ON ERROR) jt
-     2 | SELECT * FROM pgss_sqljson_tab,                                  +
-       |   JSON_TABLE(js, $1 PASSING $2 AS x                              +
-       |     COLUMNS (a int PATH '$.a')) jt
-     1 | SELECT * FROM pgss_sqljson_tab,                                  +
-       |   JSON_TABLE(js, $1 PASSING $2 AS y                              +
-       |     COLUMNS (a int PATH '$.a')) jt
+ calls |                             query                              
+-------+----------------------------------------------------------------
+     3 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2) EMPTY ON ERROR) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 COLUMNS (a int PATH $2) ERROR ON ERROR) jt
+     2 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 PASSING $2 AS x                           +
+       |     COLUMNS (a int PATH $3)) jt
+     1 | SELECT * FROM pgss_sqljson_tab,                               +
+       |   JSON_TABLE(js, $1 PASSING $2 AS y                           +
+       |     COLUMNS (a int PATH $3)) jt
      1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
 (5 rows)
 

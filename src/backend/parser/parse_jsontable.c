@@ -693,6 +693,8 @@ makeJsonTablePathScan(JsonTableParseContext *cxt, JsonTablePathSpec *pathspec,
 					  DirectFunctionCall1(jsonpath_in,
 										  CStringGetDatum(pathstring)),
 					  false, false);
+	/* The path is a constant in the query text, so it can be normalized */
+	value->location = pathspec->location;
 
 	scan->plan.type = T_JsonTablePathScan;
 	scan->path = makeJsonTablePath(value, pathspec->name);
