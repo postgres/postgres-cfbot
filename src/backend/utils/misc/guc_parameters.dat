@@ -3174,6 +3174,15 @@
   boot_val => 'false',
 },
 
+# this is undocumented because not exposed in a standard build
+{ name => 'trace_progress', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Emits every change to the progress reported by commands.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'trace_progress',
+  boot_val => 'false',
+  ifdef => 'PROGRESS_DEBUG',
+},
+
 { name => 'trace_sort', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Emit information about resource usage in sorting.',
   flags => 'GUC_NOT_IN_SAMPLE',

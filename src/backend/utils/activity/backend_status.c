@@ -572,6 +572,12 @@ pgstat_report_activity(BackendState state, const char *cmd_str)
 		return;
 	}
 
+#ifdef PROGRESS_DEBUG
+	/* a command whose progress is still shown may never have been ended */
+	if (state != STATE_RUNNING && state != STATE_FASTPATH)
+		pgstat_progress_debug_idle();
+#endif
+
 	/*
 	 * To minimize the time spent modifying the entry, and avoid risk of
 	 * errors inside the critical section, fetch all the needed data first.
