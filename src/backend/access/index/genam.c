@@ -432,13 +432,7 @@ systable_beginscan(Relation heapRelation,
 		sysscan->snapshot = NULL;
 	}
 
-	/*
-	 * If CheckXidAlive is set then set a flag to indicate that system table
-	 * scan is in-progress.  See detailed comments in xact.c where these
-	 * variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = true;
+	TrackSystemTableScanStart();
 
 	if (irel)
 	{
@@ -633,12 +627,7 @@ systable_endscan(SysScanDesc sysscan)
 	if (sysscan->snapshot)
 		UnregisterSnapshot(sysscan->snapshot);
 
-	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
-	 * comments in xact.c where these variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = false;
+	TrackSystemTableScanEnd();
 
 	pfree(sysscan);
 }
@@ -721,13 +710,7 @@ systable_beginscan_ordered(Relation heapRelation,
 			elog(ERROR, "column is not in index");
 	}
 
-	/*
-	 * If CheckXidAlive is set then set a flag to indicate that system table
-	 * scan is in-progress.  See detailed comments in xact.c where these
-	 * variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = true;
+	TrackSystemTableScanStart();
 
 	sysscan->iscan = index_beginscan(heapRelation, indexRelation, false,
 									 snapshot, NULL, nkeys, 0,
@@ -782,12 +765,7 @@ systable_endscan_ordered(SysScanDesc sysscan)
 	if (sysscan->snapshot)
 		UnregisterSnapshot(sysscan->snapshot);
 
-	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
-	 * comments in xact.c where these variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = false;
+	TrackSystemTableScanEnd();
 
 	pfree(sysscan);
 }
