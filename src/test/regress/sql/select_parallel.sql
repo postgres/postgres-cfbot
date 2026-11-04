@@ -122,6 +122,52 @@ select count(*) from tenk1 where (two, four) not in
 explain (costs off)
 	select * from tenk1 where (unique1 + random())::integer not in
 	(select ten from tenk2);
+
+-- test instrumentation of a subplan shared by several expressions (here a
+-- hash clause and the hash keys derived from it), which the parallel-query
+-- walks must process only once
+set enable_nestloop = off;
+set enable_mergejoin = off;
+set enable_indexscan = off;
+set enable_indexonlyscan = off;
+set parallel_leader_participation = off;
+create function explain_parallel_shared_subplan() returns setof text
+language plpgsql as
+$$
+declare ln text;
+declare prev text;
+begin
+    for ln in
+        explain (analyze, timing off, summary off, costs off, buffers off)
+          select count(*) from tenk1 t1 join tenk1 t2
+            on t2.unique1 = case when t1.hundred not in
+               (select thousand from tenk2 order by twothousand limit 50)
+               then 1 else 2 end
+    loop
+        ln := regexp_replace(ln, 'actual rows=[0-9.]+ loops=[0-9]+',
+                             'actual rows=N loops=N');
+        ln := regexp_replace(ln, 'Memory: \S*', 'Memory: xxx');
+        ln := regexp_replace(ln, 'Memory Usage: \S*', 'Memory Usage: xxx');
+        -- the launched worker count and the number of per-worker "Sort
+        -- Method" lines vary with how many workers start and get rows;
+        -- normalize both so the test only confirms that per-worker sort
+        -- statistics are reported at all (they vanish without the fix)
+        ln := regexp_replace(ln, 'Workers Launched: \d+', 'Workers Launched: N');
+        ln := regexp_replace(ln, 'Worker \d+:', 'Worker N:');
+        if ln is distinct from prev then
+            return next ln;
+        end if;
+        prev := ln;
+    end loop;
+end;
+$$;
+select * from explain_parallel_shared_subplan();
+drop function explain_parallel_shared_subplan();
+reset parallel_leader_participation;
+reset enable_indexscan;
+reset enable_indexonlyscan;
+reset enable_nestloop;
+reset enable_mergejoin;
 alter table tenk2 reset (parallel_workers);
 
 -- test parallel plan for a query containing initplan.
