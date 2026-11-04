@@ -17,7 +17,7 @@ setup
 }
 
 teardown {
-    DROP TABLE IF EXISTS d3_listp, d3_listp1, d3_listp2, d3_pid;
+    DROP TABLE IF EXISTS d3_listp, d3_listp1, d3_listp2, d3_listp3, d3_pid;
 }
 
 session s1
@@ -41,6 +41,15 @@ step s1list			{ SELECT relname FROM pg_catalog.pg_class
 					  WHERE relname LIKE 'd3_listp%' ORDER BY 1; }
 step s1describe		{ SELECT 'd3_listp' AS root, * FROM pg_partition_tree('d3_listp')
 					  UNION ALL SELECT 'd3_listp1', * FROM pg_partition_tree('d3_listp1'); }
+step s1idx			{ CREATE TABLE d3_listp3 PARTITION OF d3_listp FOR VALUES IN (3);
+					  CREATE UNIQUE INDEX d3_idx ON ONLY d3_listp (a);
+					  CREATE UNIQUE INDEX d3_listp1_a ON d3_listp1 (a);
+					  CREATE UNIQUE INDEX d3_listp2_a ON d3_listp2 (a);
+					  ALTER INDEX d3_idx ATTACH PARTITION d3_listp1_a; }
+step s1attach2		{ ALTER INDEX d3_idx ATTACH PARTITION d3_listp2_a; }
+step s1attach3		{ CREATE UNIQUE INDEX d3_listp3_a ON d3_listp3 (a);
+					  ALTER INDEX d3_idx ATTACH PARTITION d3_listp3_a; }
+step s1valid		{ SELECT indisvalid FROM pg_index WHERE indexrelid = 'd3_idx'::regclass; }
 
 session s2
 step s2begin		{ BEGIN; }
@@ -94,3 +103,6 @@ permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s1b s1spart s2detac
 permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s2begin s2detachfinal s2commit
 permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s2begin s2detachfinal s1spart s2commit
 permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s2begin s2detachfinal s1insertpart s2commit
+
+# The index of a partition pending detach must not count toward validity.
+permutation s2snitch s1idx s1b s1s s2detach s1cancel(s2detach) s1c s1attach2 s1valid s1attach3 s1valid

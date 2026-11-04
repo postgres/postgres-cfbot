@@ -529,3 +529,44 @@ step s2detachfinal: ALTER TABLE d3_listp DETACH PARTITION d3_listp1 FINALIZE;
 step s1insertpart: INSERT INTO d3_listp1 VALUES (1); <waiting ...>
 step s2commit: COMMIT;
 step s1insertpart: <... completed>
+
+starting permutation: s2snitch s1idx s1b s1s s2detach s1cancel s1c s1attach2 s1valid s1attach3 s1valid
+step s2snitch: INSERT INTO d3_pid SELECT pg_backend_pid();
+step s1idx: CREATE TABLE d3_listp3 PARTITION OF d3_listp FOR VALUES IN (3);
+					  CREATE UNIQUE INDEX d3_idx ON ONLY d3_listp (a);
+					  CREATE UNIQUE INDEX d3_listp1_a ON d3_listp1 (a);
+					  CREATE UNIQUE INDEX d3_listp2_a ON d3_listp2 (a);
+					  ALTER INDEX d3_idx ATTACH PARTITION d3_listp1_a;
+step s1b: BEGIN;
+step s1s: SELECT * FROM d3_listp;
+a
+-
+1
+(1 row)
+
+step s2detach: ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY; <waiting ...>
+step s1cancel: SELECT pg_cancel_backend(pid) FROM d3_pid; <waiting ...>
+step s2detach: <... completed>
+ERROR:  canceling statement due to user request
+step s1cancel: <... completed>
+pg_cancel_backend
+-----------------
+t                
+(1 row)
+
+step s1c: COMMIT;
+step s1attach2: ALTER INDEX d3_idx ATTACH PARTITION d3_listp2_a;
+step s1valid: SELECT indisvalid FROM pg_index WHERE indexrelid = 'd3_idx'::regclass;
+indisvalid
+----------
+f         
+(1 row)
+
+step s1attach3: CREATE UNIQUE INDEX d3_listp3_a ON d3_listp3 (a);
+					  ALTER INDEX d3_idx ATTACH PARTITION d3_listp3_a;
+step s1valid: SELECT indisvalid FROM pg_index WHERE indexrelid = 'd3_idx'::regclass;
+indisvalid
+----------
+t         
+(1 row)
+
