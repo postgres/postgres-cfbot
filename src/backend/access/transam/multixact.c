@@ -2786,9 +2786,6 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
 	Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
 	MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
-	/* WAL log truncation */
-	WriteMTruncateXlogRec(newOldestMultiDB, newOldestMulti, newOldestOffset);
-
 	/*
 	 * Update in-memory limits before performing the truncation, while inside
 	 * the critical section: Have to do it before truncation, to prevent
@@ -2796,12 +2793,21 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
 	 * section as otherwise a future call to this function would error out,
 	 * while looking up the oldest member in offsets, if our caller crashes
 	 * before updating the limits.
+	 *
+	 * Also do it before writing the WAL record.  DELAY_CHKPT_START does not
+	 * keep a checkpoint from setting its redo pointer and reading oldestMulti
+	 * for the checkpoint record before it waits for us.  If its redo pointer
+	 * is after our record, recovery from it will not replay the record, so it
+	 * must already see the new value.
 	 */
 	LWLockAcquire(MultiXactGenLock, LW_EXCLUSIVE);
 	MultiXactState->oldestMultiXactId = newOldestMulti;
 	MultiXactState->oldestMultiXactDB = newOldestMultiDB;
 	MultiXactState->oldestOffset = newOldestOffset;
 	LWLockRelease(MultiXactGenLock);
+
+	/* WAL log truncation */
+	WriteMTruncateXlogRec(newOldestMultiDB, newOldestMulti, newOldestOffset);
 
 	/* First truncate members */
 	PerformMembersTruncation(newOldestOffset);
