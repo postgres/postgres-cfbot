@@ -347,6 +347,47 @@ check_completion(
 
 clear_query();
 
+# CREATE INDEX CONCURRENTLY doesn't support partitioned tables, so they
+# must not be offered after it.  The two tables share a prefix: if only the
+# plain one is offered, "cic_p" completes to it.
+$node->safe_psql('postgres',
+		"CREATE TABLE cic_part (f1 int) PARTITION BY RANGE (f1);\n"
+	  . "CREATE TABLE cic_plain (f1 int);\n");
+
+# "index" is a valid index name, and must not make the command look like a
+# plain CREATE INDEX.
+foreach my $cmd (
+	'CREATE INDEX CONCURRENTLY ON',
+	'CREATE INDEX CONCURRENTLY cic_idx ON',
+	'CREATE INDEX CONCURRENTLY index ON',
+	'CREATE UNIQUE INDEX CONCURRENTLY ON',
+	'CREATE UNIQUE INDEX CONCURRENTLY index ON')
+{
+	check_completion("$cmd cic_p\t", qr/cic_plain /,
+		"$cmd does not offer partitioned tables");
+	clear_query();
+
+	# A prefix that matches only the partitioned table must not complete.
+	# The X typed after the tab shows that the word was left alone.
+	check_completion("$cmd cic_pa\tX",
+		qr/cic_pa\a?X/, "$cmd does not complete a partitioned table");
+	clear_query();
+}
+
+# Without CONCURRENTLY, partitioned tables are fine.
+foreach my $cmd (
+	'CREATE INDEX ON',
+	'CREATE INDEX cic_idx ON',
+	'CREATE INDEX index ON',
+	'CREATE UNIQUE INDEX ON')
+{
+	check_completion(
+		"$cmd cic_p\t\t",
+		qr/cic_part +cic_plain/,
+		"$cmd offers partitioned tables");
+	clear_query();
+}
+
 # check VersionedQuery infrastructure
 check_completion(
 	"DROP PUBLIC\t \t\t",
