@@ -65,6 +65,8 @@
 									 * archive status directory; in seconds. */
 #define PGARCH_RESTART_INTERVAL 10	/* How often to attempt to restart a
 									 * failed archiver; in seconds. */
+#define PGARCH_ASYNC_POLL_MS	1000L
+#define PGARCH_ASYNC_STOP_GRACE_S	60
 
 /*
  * Maximum number of retries allowed when attempting to archive a WAL
@@ -134,6 +136,18 @@ struct arch_files_state
 
 static struct arch_files_state *arch_files = NULL;
 
+typedef struct ArchInFlight
+{
+	char		xlog[MAX_XFN_CHARS + 1];	/* empty = free */
+	int			failures;
+	bool		waiting;
+	time_t		not_before;
+} ArchInFlight;
+
+static ArchInFlight arch_inflight[NUM_FILES_PER_DIRECTORY_SCAN];
+static int	arch_inflight_count = 0;
+static bool archiver_use_async = false;
+
 /*
  * Flags set by interrupt handlers for later service in the main loop.
  */
@@ -146,6 +160,7 @@ static volatile sig_atomic_t ready_to_stop = false;
 static void pgarch_waken_stop(SIGNAL_ARGS);
 static void pgarch_MainLoop(void);
 static void pgarch_ArchiverCopyLoop(void);
+static void pgarch_ArchiverAsyncLoop(void);
 static bool pgarch_archiveXlog(char *xlog);
 static bool pgarch_readyXlog(char *xlog);
 static void pgarch_archiveDone(char *xlog);
@@ -154,6 +169,20 @@ static void ProcessPgArchInterrupts(void);
 static int	ready_file_comparator(Datum a, Datum b, void *arg);
 static void LoadArchiveLibrary(void);
 static void pgarch_call_module_shutdown_cb(int code, Datum arg);
+static void pgarch_module_error_cleanup(MemoryContext oldcontext);
+static bool pgarch_archive_configured(void);
+static int	pgarch_wal_file_present(const char *xlog);
+static ArchInFlight *pgarch_inflight_find(const char *xlog);
+static ArchInFlight *pgarch_inflight_acquire(const char *xlog);
+static bool pgarch_inflight_blocked(const ArchInFlight *slot);
+static void pgarch_inflight_clear(void);
+static void pgarch_abort_async_inflight(void);
+static void pgarch_set_activity(const char *fmt, const char *xlog);
+static long pgarch_async_retry_sleep(bool have_deferred);
+static bool pgarch_async_finish(ArchInFlight *slot, ArchiveResultStatus status);
+static int	pgarch_submitXlog(char *xlog);
+static int	pgarch_pollXlog(char *file, ArchiveResultStatus *status,
+							 long timeout_ms);
 
 static void PgArchShmemRequest(void *arg);
 static void PgArchShmemInit(void *arg);
@@ -348,6 +377,8 @@ pgarch_MainLoop(void)
 		/* Do what we're here for */
 		pgarch_ArchiverCopyLoop();
 
+		time_to_stop = ready_to_stop;
+
 		/*
 		 * Sleep until a signal is received, or until a poll is forced by
 		 * PGARCH_AUTOWAKE_INTERVAL, or until postmaster dies.
@@ -382,6 +413,12 @@ pgarch_ArchiverCopyLoop(void)
 {
 	char		xlog[MAX_XFN_CHARS + 1];
 
+	if (archiver_use_async)
+	{
+		pgarch_ArchiverAsyncLoop();
+		return;
+	}
+
 	/* force directory scan in the first call to pgarch_readyXlog() */
 	arch_files->arch_files_size = 0;
 
@@ -394,12 +431,10 @@ pgarch_ArchiverCopyLoop(void)
 	while (pgarch_readyXlog(xlog))
 	{
 		int			failures = 0;
-		int			failures_orphan = 0;
 
 		for (;;)
 		{
-			struct stat stat_buf;
-			char		pathname[MAXPGPATH];
+			int			wal_present;
 
 			/*
 			 * Do not initiate any more archive commands after receiving
@@ -418,59 +453,14 @@ pgarch_ArchiverCopyLoop(void)
 			 */
 			ProcessPgArchInterrupts();
 
-			/* Reset variables that might be set by the callback */
-			arch_module_check_errdetail_string = NULL;
-
-			/* can't do anything if not configured ... */
-			if (ArchiveCallbacks->check_configured_cb != NULL &&
-				!ArchiveCallbacks->check_configured_cb(archive_module_state))
-			{
-				ereport(WARNING,
-						(errmsg("\"archive_mode\" enabled, yet archiving is not configured"),
-						 arch_module_check_errdetail_string ?
-						 errdetail_internal("%s", arch_module_check_errdetail_string) : 0));
+			if (!pgarch_archive_configured())
 				return;
-			}
 
-			/*
-			 * Since archive status files are not removed in a durable manner,
-			 * a system crash could leave behind .ready files for WAL segments
-			 * that have already been recycled or removed.  In this case,
-			 * simply remove the orphan status file and move on.  unlink() is
-			 * used here as even on subsequent crashes the same orphan files
-			 * would get removed, so there is no need to worry about
-			 * durability.
-			 */
-			snprintf(pathname, MAXPGPATH, XLOGDIR "/%s", xlog);
-			if (stat(pathname, &stat_buf) != 0 && errno == ENOENT)
-			{
-				char		xlogready[MAXPGPATH];
-
-				StatusFilePath(xlogready, xlog, ".ready");
-				if (unlink(xlogready) == 0)
-				{
-					ereport(WARNING,
-							(errmsg("removed orphan archive status file \"%s\"",
-									xlogready)));
-
-					/* leave loop and move to the next status file */
-					break;
-				}
-
-				if (++failures_orphan >= NUM_ORPHAN_CLEANUP_RETRIES)
-				{
-					ereport(WARNING,
-							(errmsg("removal of orphan archive status file \"%s\" failed too many times, will try again later",
-									xlogready)));
-
-					/* give up cleanup of orphan status files */
-					return;
-				}
-
-				/* wait a bit before retrying */
-				pg_usleep(1000000L);
-				continue;
-			}
+			wal_present = pgarch_wal_file_present(xlog);
+			if (wal_present < 0)
+				return;
+			if (wal_present == 0)
+				break;
 
 			if (pgarch_archiveXlog(xlog))
 			{
@@ -506,6 +496,469 @@ pgarch_ArchiverCopyLoop(void)
 	}
 }
 
+static void
+pgarch_module_error_cleanup(MemoryContext oldcontext)
+{
+	error_context_stack = NULL;
+
+	HOLD_INTERRUPTS();
+
+	EmitErrorReport();
+
+	disable_all_timeouts(false);
+	LWLockReleaseAll();
+	ConditionVariableCancelSleep();
+	pgstat_report_wait_end();
+	pgaio_error_cleanup();
+	ReleaseAuxProcessResources(false);
+	AtEOXact_Files(false);
+	AtEOXact_HashTables(false);
+
+	MemoryContextSwitchTo(oldcontext);
+	FlushErrorState();
+	MemoryContextReset(archive_context);
+	PG_exception_stack = NULL;
+
+	RESUME_INTERRUPTS();
+}
+
+static bool
+pgarch_archive_configured(void)
+{
+	arch_module_check_errdetail_string = NULL;
+	if (ArchiveCallbacks->check_configured_cb != NULL &&
+		!ArchiveCallbacks->check_configured_cb(archive_module_state))
+	{
+		ereport(WARNING,
+				(errmsg("\"archive_mode\" enabled, yet archiving is not configured"),
+				 arch_module_check_errdetail_string ?
+				 errdetail_internal("%s", arch_module_check_errdetail_string) : 0));
+		return false;
+	}
+	return true;
+}
+
+/*
+ * Return 1 if present, 0 if an orphan .ready was removed, -1 after too
+ * many cleanup failures.
+ *
+ * Since archive status files are not removed in a durable manner, a system
+ * crash could leave behind .ready files for WAL segments that have already
+ * been recycled or removed.  In this case, simply remove the orphan status
+ * file and move on.  unlink() is used here as even on subsequent crashes
+ * the same orphan files would get removed, so there is no need to worry
+ * about durability.
+ */
+static int
+pgarch_wal_file_present(const char *xlog)
+{
+	struct stat stat_buf;
+	char		pathname[MAXPGPATH];
+	char		xlogready[MAXPGPATH];
+	int			failures_orphan = 0;
+
+	snprintf(pathname, MAXPGPATH, XLOGDIR "/%s", xlog);
+	if (stat(pathname, &stat_buf) == 0 || errno != ENOENT)
+		return 1;
+
+	StatusFilePath(xlogready, xlog, ".ready");
+	for (;;)
+	{
+		if (unlink(xlogready) == 0)
+		{
+			ereport(WARNING,
+					(errmsg("removed orphan archive status file \"%s\"",
+							xlogready)));
+			return 0;
+		}
+
+		if (++failures_orphan >= NUM_ORPHAN_CLEANUP_RETRIES)
+		{
+			ereport(WARNING,
+					(errmsg("removal of orphan archive status file \"%s\" failed too many times, will try again later",
+							xlogready)));
+			return -1;
+		}
+
+		pg_usleep(1000000L);
+	}
+}
+
+static ArchInFlight *
+pgarch_inflight_find(const char *xlog)
+{
+	for (int i = 0; i < NUM_FILES_PER_DIRECTORY_SCAN; i++)
+	{
+		if (arch_inflight[i].xlog[0] != '\0' &&
+			strcmp(arch_inflight[i].xlog, xlog) == 0)
+			return &arch_inflight[i];
+	}
+	return NULL;
+}
+
+static ArchInFlight *
+pgarch_inflight_acquire(const char *xlog)
+{
+	ArchInFlight *slot = pgarch_inflight_find(xlog);
+
+	if (slot != NULL)
+		return slot;
+
+	for (int i = 0; i < NUM_FILES_PER_DIRECTORY_SCAN; i++)
+	{
+		if (arch_inflight[i].xlog[0] == '\0')
+		{
+			slot = &arch_inflight[i];
+			strlcpy(slot->xlog, xlog, sizeof(slot->xlog));
+			slot->failures = 0;
+			slot->waiting = false;
+			slot->not_before = 0;
+			return slot;
+		}
+	}
+	return NULL;
+}
+
+static bool
+pgarch_inflight_blocked(const ArchInFlight *slot)
+{
+	return slot->waiting ||
+		slot->failures >= NUM_ARCHIVE_RETRIES ||
+		(slot->not_before != 0 && time(NULL) < slot->not_before);
+}
+
+static void
+pgarch_inflight_clear(void)
+{
+	MemSet(arch_inflight, 0, sizeof(arch_inflight));
+	arch_inflight_count = 0;
+}
+
+static void
+pgarch_abort_async_inflight(void)
+{
+	if (ArchiveCallbacks->cancel_cb != NULL)
+		ArchiveCallbacks->cancel_cb(archive_module_state);
+	pgarch_inflight_clear();
+}
+
+static void
+pgarch_abort_async_inflight_msg(const char *msg)
+{
+	if (arch_inflight_count > 0)
+		ereport(LOG, (errmsg("%s", msg)));
+	pgarch_abort_async_inflight();
+}
+
+static void
+pgarch_set_activity(const char *fmt, const char *xlog)
+{
+	char		activitymsg[MAXFNAMELEN + 16];
+
+	snprintf(activitymsg, sizeof(activitymsg), fmt, xlog);
+	set_ps_display(activitymsg);
+}
+
+static long
+pgarch_async_retry_sleep(bool have_deferred)
+{
+	time_t		now = time(NULL);
+	time_t		wait_until = 0;
+	bool		pending = have_deferred;
+	bool		have_wait = false;
+
+	for (int i = 0; i < NUM_FILES_PER_DIRECTORY_SCAN; i++)
+	{
+		if (arch_inflight[i].xlog[0] == '\0' ||
+			arch_inflight[i].waiting ||
+			arch_inflight[i].failures >= NUM_ARCHIVE_RETRIES)
+			continue;
+		pending = true;
+		if (arch_inflight[i].not_before == 0 ||
+			arch_inflight[i].not_before <= now)
+			return PGARCH_ASYNC_POLL_MS;
+		if (!have_wait || arch_inflight[i].not_before < wait_until)
+		{
+			wait_until = arch_inflight[i].not_before;
+			have_wait = true;
+		}
+	}
+
+	if (!pending)
+		return -1;
+	if (have_wait && wait_until > now)
+		return (wait_until - now) * 1000L;
+	return PGARCH_ASYNC_POLL_MS;
+}
+
+static bool
+pgarch_async_finish(ArchInFlight *slot, ArchiveResultStatus status)
+{
+	if (slot->waiting)
+	{
+		arch_inflight_count--;
+		slot->waiting = false;
+	}
+
+	if (status == ARCHIVE_RESULT_SUCCESS)
+	{
+		pgarch_archiveDone(slot->xlog);
+		pgstat_report_archiver(slot->xlog, false);
+		pgarch_set_activity("last was %s", slot->xlog);
+		MemSet(slot, 0, sizeof(*slot));
+		return false;
+	}
+
+	pgstat_report_archiver(slot->xlog, true);
+	pgarch_set_activity("failed on %s", slot->xlog);
+
+	if (status == ARCHIVE_RESULT_FAIL)
+		slot->failures = NUM_ARCHIVE_RETRIES;
+	else
+	{
+		slot->failures++;
+		slot->not_before = time(NULL) + 1;
+	}
+
+	if (slot->failures < NUM_ARCHIVE_RETRIES)
+		return false;
+
+	ereport(WARNING,
+			(errmsg("archiving write-ahead log file \"%s\" failed too many times, will try again later",
+					slot->xlog)));
+	return true;
+}
+
+static int
+pgarch_submitXlog(char *xlog)
+{
+	sigjmp_buf	local_sigjmp_buf;
+	MemoryContext oldcontext;
+	char		pathname[MAXPGPATH];
+	int			result;
+
+	snprintf(pathname, MAXPGPATH, XLOGDIR "/%s", xlog);
+	oldcontext = MemoryContextSwitchTo(archive_context);
+
+	if (sigsetjmp(local_sigjmp_buf, 1) != 0)
+	{
+		pgarch_module_error_cleanup(oldcontext);
+		result = -1;
+	}
+	else
+	{
+		bool		ok;
+
+		PG_exception_stack = &local_sigjmp_buf;
+		ok = ArchiveCallbacks->submit_cb(archive_module_state, xlog, pathname);
+		PG_exception_stack = NULL;
+		MemoryContextSwitchTo(oldcontext);
+		MemoryContextReset(archive_context);
+		result = ok ? 1 : 0;
+	}
+
+	return result;
+}
+
+static int
+pgarch_pollXlog(char *file, ArchiveResultStatus *status, long timeout_ms)
+{
+	sigjmp_buf	local_sigjmp_buf;
+	MemoryContext oldcontext;
+	const char *modulefile = NULL;
+	int			result;
+
+	oldcontext = MemoryContextSwitchTo(archive_context);
+
+	if (sigsetjmp(local_sigjmp_buf, 1) != 0)
+	{
+		pgarch_module_error_cleanup(oldcontext);
+		result = -1;
+	}
+	else
+	{
+		bool		got;
+
+		PG_exception_stack = &local_sigjmp_buf;
+		got = ArchiveCallbacks->poll_cb(archive_module_state, &modulefile,
+										status, timeout_ms);
+		if (got)
+		{
+			if (modulefile == NULL || modulefile[0] == '\0')
+				file[0] = '\0';
+			else
+				strlcpy(file, modulefile, MAX_XFN_CHARS + 1);
+			result = 1;
+		}
+		else
+			result = 0;
+		PG_exception_stack = NULL;
+		MemoryContextSwitchTo(oldcontext);
+		MemoryContextReset(archive_context);
+	}
+
+	return result;
+}
+
+static void
+pgarch_ArchiverAsyncLoop(void)
+{
+	bool		give_up = false;
+	char		deferred[MAX_XFN_CHARS + 1];
+	time_t		stop_deadline = 0;
+
+	arch_files->arch_files_size = 0;
+	pgarch_inflight_clear();
+	deferred[0] = '\0';
+
+	for (;;)
+	{
+		int			skips = 0;
+		char		xlog[MAX_XFN_CHARS + 1];
+		char		done_file[MAX_XFN_CHARS + 1];
+		ArchiveResultStatus status;
+		int			cbres;
+		ArchInFlight *slot;
+
+		if (ShutdownRequestPending || !PostmasterIsAlive())
+		{
+			pgarch_abort_async_inflight_msg("canceling in flight archive commands due to shutdown");
+			return;
+		}
+
+		ProcessPgArchInterrupts();
+		if (!pgarch_archive_configured())
+		{
+			pgarch_abort_async_inflight_msg("canceling in flight archive commands because archiving is no longer configured");
+			return;
+		}
+
+		if (ready_to_stop)
+		{
+			time_t		now = time(NULL);
+
+			if (stop_deadline == 0)
+				stop_deadline = now + PGARCH_ASYNC_STOP_GRACE_S;
+			else if (now >= stop_deadline ||
+					 now < stop_deadline - PGARCH_ASYNC_STOP_GRACE_S)
+			{
+				pgarch_abort_async_inflight_msg("canceling in flight archive commands due to shutdown");
+				return;
+			}
+		}
+
+		while (!give_up &&
+			   arch_inflight_count < NUM_FILES_PER_DIRECTORY_SCAN &&
+			   skips < NUM_FILES_PER_DIRECTORY_SCAN)
+		{
+			int			wal_present;
+
+			if (deferred[0] != '\0')
+			{
+				strlcpy(xlog, deferred, sizeof(xlog));
+				deferred[0] = '\0';
+			}
+			else if (!pgarch_readyXlog(xlog))
+				break;
+
+			slot = pgarch_inflight_find(xlog);
+			if (slot != NULL && pgarch_inflight_blocked(slot))
+			{
+				skips++;
+				continue;
+			}
+
+			wal_present = pgarch_wal_file_present(xlog);
+			if (wal_present < 0)
+			{
+				give_up = true;
+				break;
+			}
+			if (wal_present == 0)
+			{
+				if (slot != NULL)
+					MemSet(slot, 0, sizeof(*slot));
+				continue;
+			}
+
+			slot = pgarch_inflight_acquire(xlog);
+			if (slot == NULL)
+			{
+				if (arch_inflight_count == 0)
+					give_up = true;
+				else
+					strlcpy(deferred, xlog, sizeof(deferred));
+				break;
+			}
+
+			skips = 0;
+			pgarch_set_activity("submitting %s", xlog);
+
+			cbres = pgarch_submitXlog(xlog);
+			if (cbres < 0)
+			{
+				if (pgarch_async_finish(slot, ARCHIVE_RESULT_RETRY))
+					give_up = true;
+				continue;
+			}
+			if (cbres == 0)
+			{
+				strlcpy(deferred, xlog, sizeof(deferred));
+				break;
+			}
+
+			slot->waiting = true;
+			arch_inflight_count++;
+		}
+
+		if (arch_inflight_count == 0)
+		{
+			long		sleep_ms;
+
+			if (give_up || ShutdownRequestPending)
+				return;
+
+			sleep_ms = pgarch_async_retry_sleep(deferred[0] != '\0');
+			if (sleep_ms < 0)
+				return;
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 sleep_ms,
+							 WAIT_EVENT_ARCHIVER_MAIN);
+			ResetLatch(MyLatch);
+			continue;
+		}
+
+		cbres = pgarch_pollXlog(done_file, &status, PGARCH_ASYNC_POLL_MS);
+		if (cbres < 0)
+		{
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 PGARCH_ASYNC_POLL_MS,
+							 WAIT_EVENT_ARCHIVER_MAIN);
+			ResetLatch(MyLatch);
+			continue;
+		}
+		if (cbres == 0)
+			continue;
+
+		slot = (done_file[0] != '\0') ? pgarch_inflight_find(done_file) : NULL;
+		if (slot == NULL || !slot->waiting)
+		{
+			ereport(WARNING,
+					(errmsg("asynchronous archive module returned unexpected file \"%s\"",
+							done_file)));
+			pgarch_abort_async_inflight();
+			return;
+		}
+
+		if (pgarch_async_finish(slot, status))
+			give_up = true;
+		if (give_up && arch_inflight_count == 0)
+			return;
+	}
+}
+
 /*
  * pgarch_archiveXlog
  *
@@ -519,15 +972,10 @@ pgarch_archiveXlog(char *xlog)
 	sigjmp_buf	local_sigjmp_buf;
 	MemoryContext oldcontext;
 	char		pathname[MAXPGPATH];
-	char		activitymsg[MAXFNAMELEN + 16];
 	bool		ret;
 
 	snprintf(pathname, MAXPGPATH, XLOGDIR "/%s", xlog);
-
-	/* Report archive activity in PS display */
-	snprintf(activitymsg, sizeof(activitymsg), "archiving %s", xlog);
-	set_ps_display(activitymsg);
-
+	pgarch_set_activity("archiving %s", xlog);
 	oldcontext = MemoryContextSwitchTo(archive_context);
 
 	/*
@@ -537,85 +985,23 @@ pgarch_archiveXlog(char *xlog)
 	 * code and maintain.  Therefore, we create our own exception handler to
 	 * catch ERRORs and return false instead of restarting the archiver
 	 * whenever there is a failure.
-	 *
-	 * We assume ERRORs from the archiving callback are the most common
-	 * exceptions experienced by the archiver, so we opt to handle exceptions
-	 * here instead of PgArchiverMain() to avoid reinitializing the archiver
-	 * too frequently.  We could instead add a sigsetjmp() block to
-	 * PgArchiverMain() and use PG_TRY/PG_CATCH here, but the extra code to
-	 * avoid the odd archiver restart doesn't seem worth it.
 	 */
 	if (sigsetjmp(local_sigjmp_buf, 1) != 0)
 	{
-		/* Since not using PG_TRY, must reset error stack by hand */
-		error_context_stack = NULL;
-
-		/* Prevent interrupts while cleaning up */
-		HOLD_INTERRUPTS();
-
-		/* Report the error to the server log. */
-		EmitErrorReport();
-
-		/*
-		 * Try to clean up anything the archive module left behind.  We try to
-		 * cover anything that an archive module could conceivably have left
-		 * behind, but it is of course possible that modules could be doing
-		 * unexpected things that require additional cleanup.  Module authors
-		 * should be sure to do any extra required cleanup in a PG_CATCH block
-		 * within the archiving callback, and they are encouraged to notify
-		 * the pgsql-hackers mailing list so that we can add it here.
-		 */
-		disable_all_timeouts(false);
-		LWLockReleaseAll();
-		ConditionVariableCancelSleep();
-		pgstat_report_wait_end();
-		pgaio_error_cleanup();
-		ReleaseAuxProcessResources(false);
-		AtEOXact_Files(false);
-		AtEOXact_HashTables(false);
-
-		/*
-		 * Return to the original memory context and clear ErrorContext for
-		 * next time.
-		 */
-		MemoryContextSwitchTo(oldcontext);
-		FlushErrorState();
-
-		/* Flush any leaked data */
-		MemoryContextReset(archive_context);
-
-		/* Remove our exception handler */
-		PG_exception_stack = NULL;
-
-		/* Now we can allow interrupts again */
-		RESUME_INTERRUPTS();
-
-		/* Report failure so that the archiver retries this file */
+		pgarch_module_error_cleanup(oldcontext);
 		ret = false;
 	}
 	else
 	{
-		/* Enable our exception handler */
 		PG_exception_stack = &local_sigjmp_buf;
-
-		/* Archive the file! */
 		ret = ArchiveCallbacks->archive_file_cb(archive_module_state,
 												xlog, pathname);
-
-		/* Remove our exception handler */
 		PG_exception_stack = NULL;
-
-		/* Reset our memory context and switch back to the original one */
 		MemoryContextSwitchTo(oldcontext);
 		MemoryContextReset(archive_context);
 	}
 
-	if (ret)
-		snprintf(activitymsg, sizeof(activitymsg), "last was %s", xlog);
-	else
-		snprintf(activitymsg, sizeof(activitymsg), "failed on %s", xlog);
-	set_ps_display(activitymsg);
-
+	pgarch_set_activity(ret ? "last was %s" : "failed on %s", xlog);
 	return ret;
 }
 
@@ -623,10 +1009,9 @@ pgarch_archiveXlog(char *xlog)
  * pgarch_readyXlog
  *
  * Return name of the oldest xlog file that has not yet been archived.
- * No notification is set that file archiving is now in progress, so
- * this would need to be extended if multiple concurrent archival
- * tasks were created. If a failure occurs, we will completely
- * re-copy the file at the next available opportunity.
+ * Concurrent callers must skip in-flight names themselves. If a failure
+ * occurs, we will completely re-copy the file at the next available
+ * opportunity.
  *
  * It is important that we return the oldest, so that we archive xlogs
  * in order that they were written, for two reasons:
@@ -901,6 +1286,7 @@ ProcessPgArchInterrupts(void)
 
 			proc_exit(0);
 		}
+
 	}
 }
 
@@ -937,7 +1323,22 @@ LoadArchiveLibrary(void)
 
 	ArchiveCallbacks = (*archive_init) ();
 
-	if (ArchiveCallbacks->archive_file_cb == NULL)
+	if ((ArchiveCallbacks->submit_cb == NULL) !=
+		(ArchiveCallbacks->poll_cb == NULL))
+		ereport(ERROR,
+				(errmsg("archive modules must provide both submit and poll callbacks for asynchronous archiving")));
+
+	archiver_use_async = (ArchiveCallbacks->submit_cb != NULL);
+	if (archiver_use_async)
+	{
+		if (ArchiveCallbacks->archive_file_cb != NULL)
+			ereport(ERROR,
+					(errmsg("archive modules must not register both synchronous and asynchronous archive callbacks")));
+		if (ArchiveCallbacks->cancel_cb == NULL)
+			ereport(ERROR,
+					(errmsg("asynchronous archive modules must provide a cancel callback")));
+	}
+	else if (ArchiveCallbacks->archive_file_cb == NULL)
 		ereport(ERROR,
 				(errmsg("archive modules must register an archive callback")));
 

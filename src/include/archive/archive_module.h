@@ -30,14 +30,23 @@ typedef struct ArchiveModuleState
 /*
  * Archive module callbacks
  *
- * These callback functions should be defined by archive libraries and returned
- * via _PG_archive_module_init().  ArchiveFileCB is the only required callback.
- * For more information about the purpose of each callback, refer to the
- * archive modules documentation.
+ * Returned via _PG_archive_module_init().  Provide archive_file_cb, or
+ * submit_cb plus poll_cb with cancel_cb.
  */
+typedef enum ArchiveResultStatus
+{
+	ARCHIVE_RESULT_SUCCESS,
+	ARCHIVE_RESULT_RETRY,
+	ARCHIVE_RESULT_FAIL
+} ArchiveResultStatus;
+
 typedef void (*ArchiveStartupCB) (ArchiveModuleState *state);
 typedef bool (*ArchiveCheckConfiguredCB) (ArchiveModuleState *state);
 typedef bool (*ArchiveFileCB) (ArchiveModuleState *state, const char *file, const char *path);
+typedef bool (*ArchiveSubmitCB) (ArchiveModuleState *state, const char *file, const char *path);
+typedef bool (*ArchivePollCB) (ArchiveModuleState *state, const char **file,
+							   ArchiveResultStatus *status, long timeout_ms);
+typedef void (*ArchiveCancelCB) (ArchiveModuleState *state);
 typedef void (*ArchiveShutdownCB) (ArchiveModuleState *state);
 
 typedef struct ArchiveModuleCallbacks
@@ -46,6 +55,9 @@ typedef struct ArchiveModuleCallbacks
 	ArchiveCheckConfiguredCB check_configured_cb;
 	ArchiveFileCB archive_file_cb;
 	ArchiveShutdownCB shutdown_cb;
+	ArchiveSubmitCB submit_cb;
+	ArchivePollCB poll_cb;
+	ArchiveCancelCB cancel_cb;
 } ArchiveModuleCallbacks;
 
 /*

@@ -133,6 +133,7 @@ ApplyRemoteCtx
 ApplySubXactData
 Archive
 ArchiveCheckConfiguredCB
+ArchiveCancelCB
 ArchiveEntryPtrType
 ArchiveFileCB
 ArchiveFormat
@@ -142,8 +143,12 @@ ArchiveModuleCallbacks
 ArchiveModuleInit
 ArchiveModuleState
 ArchiveOpts
+ArchivePollCB
+ArchiveResultStatus
 ArchiveShutdownCB
 ArchiveStartupCB
+ArchiveSubmitCB
+ArchInFlight
 ArchiveStreamState
 ArchivedWALFile
 ArchivedWAL_hash
