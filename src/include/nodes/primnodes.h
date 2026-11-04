@@ -891,11 +891,13 @@ typedef OpExpr NullIfExpr;
  * the result type (or the collation) because it must be boolean.
  *
  * A ScalarArrayOpExpr with a valid hashfuncid is evaluated during execution
- * by building a hash table containing the Const values from the RHS arg.
+ * by building a hash table containing the values from the RHS arg, which is
+ * a Const or is fixed for one execution (see convert_saop_to_hashed_saop()).
  * This table is probed during expression evaluation.  The planner will set
  * hashfuncid to the hash function which must be used to build and probe the
  * hash table.  The executor determines if it should use hash-based checks or
  * the more traditional means based on if the hashfuncid is set or not.
+ * Exceptions: see ExecInitExprRec() and ExecEvalHashedScalarArrayOp().
  *
  * When performing hashed NOT IN, the negfuncid will also be set to the
  * equality function which the hash table must use to build and probe the hash
@@ -936,6 +938,9 @@ typedef struct ScalarArrayOpExpr
 	/* token location, or -1 if unknown */
 	ParseLoc	location;
 } ScalarArrayOpExpr;
+
+/* Minimum array length for which hashing a ScalarArrayOpExpr pays off */
+#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
 
 /*
  * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT
