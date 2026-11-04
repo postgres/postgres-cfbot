@@ -652,7 +652,12 @@ include_dir         <replaceable>directory</replaceable>
         <listitem>
          <para>
           Authorize and optionally authenticate using a third-party OAuth 2.0
-          identity provider. See <xref linkend="auth-oauth"/> for details.
+          identity provider. The bearer token is sent across the connection and
+          grants access to the database like a clear-text password. On an
+          unencrypted connection it can be captured by network sniffing. For
+          this reason the <literal>oauth</literal> method should only be used
+          over connections protected by SSL/TLS encryption.
+          See <xref linkend="auth-oauth"/> for details.
          </para>
         </listitem>
        </varlistentry>
@@ -2233,6 +2238,15 @@ host ... ldap ldapbasedn="dc=example,dc=net"
     OAuth client support has to be enabled when <productname>PostgreSQL</productname>
     is built, see <xref linkend="installation"/> for more information.
    </para>
+
+   <warning>
+    <para>
+     The bearer token is sent across the connection and grants access to the
+     database like a clear-text password. On an unencrypted connection it can
+     be captured by network sniffing. For this reason OAuth should only be used
+     over connections protected by SSL/TLS encryption.
+    </para>
+   </warning>
 
    <para>
     This documentation uses the following terminology when discussing the OAuth
