@@ -610,3 +610,17 @@ drop table toasted_data;
 fetch all in held_portal;
 
 reset default_toast_compression;
+
+-- Changing a composite type after a cursor has emitted rows should error
+DROP TYPE IF EXISTS portal_composite CASCADE;
+CREATE TYPE portal_composite AS (a int, b int);
+
+BEGIN;
+DECLARE stale_portal CURSOR FOR
+  SELECT (i, power(2, 10))::portal_composite FROM generate_series(1, 2) i;
+FETCH FROM stale_portal;
+ALTER TYPE portal_composite ALTER ATTRIBUTE b TYPE text;
+FETCH FROM stale_portal; -- should fail instead of crashing
+ROLLBACK;
+
+DROP TYPE portal_composite;
