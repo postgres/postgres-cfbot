@@ -149,7 +149,8 @@ extern bool import_attribute_statistics(Relation rel,
 										const NullableDatum *elem_count_histogram,
 										const NullableDatum *range_length_histogram,
 										const NullableDatum *range_empty_frac,
-										const NullableDatum *range_bounds_histogram);
+										const NullableDatum *range_bounds_histogram,
+										const NullableDatum *most_common_vals_kind);
 extern bool delete_attribute_statistics(Relation rel,
 										AttrNumber attnum, bool inherited);
 
