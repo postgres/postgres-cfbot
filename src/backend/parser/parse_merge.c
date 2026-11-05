@@ -17,6 +17,7 @@
 
 #include "access/sysattr.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
 #include "parser/parse_clause.h"
 #include "parser/parse_collate.h"
@@ -345,6 +346,11 @@ transformMergeStmt(ParseState *pstate, MergeStmt *stmt)
 														   mergeWhenClause->values,
 														   EXPR_KIND_VALUES_SINGLE,
 														   true);
+						if (pstate->p_hasTargetSRFs)
+							ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("set-returning functions are not allowed in MERGE INSERT actions"),
+								 parser_errposition(pstate, exprLocation(pstate->p_last_srf))));
 
 						/* Prepare row for assignment to target table */
 						exprList = transformInsertRow(pstate, exprList,
