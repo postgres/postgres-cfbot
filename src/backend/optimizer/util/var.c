@@ -1210,6 +1210,12 @@ mark_nullable_by_grouping(PlannerInfo *root, Node *newnode, Var *oldvar)
 		 *
 		 * Aggregate functions and window functions are not allowed in
 		 * grouping expressions.
+		 *
+		 * All references to the same grouping expression must share the
+		 * PlaceHolderVar's phid.  Otherwise, a reference other than the
+		 * grouping item itself would not be recognized as the grouping
+		 * column, and would be computed as a separate input column of the
+		 * grouping step, which is not nulled by grouping sets.
 		 */
 		Assert(!contain_agg_clause(newnode));
 		Assert(!contain_window_function(newnode));
@@ -1219,12 +1225,35 @@ mark_nullable_by_grouping(PlannerInfo *root, Node *newnode, Var *oldvar)
 		{
 			PlaceHolderVar *newphv;
 			Relids		phrels;
+			int			attidx = oldvar->varattno - 1;
 
 			phrels = get_relids_in_jointree((Node *) root->parse->jointree,
 											true, false);
 			Assert(!bms_is_empty(phrels));
 
-			newphv = make_placeholder_expr(root, (Expr *) newnode, phrels);
+			/* group_phids is indexed by column of the RTE_GROUP RTE */
+			Assert(oldvar->varno == root->group_rtindex);
+			if (root->group_phids == NULL)
+			{
+				RangeTblEntry *rte = rt_fetch(root->group_rtindex,
+											  root->parse->rtable);
+
+				root->group_phids = palloc0_array(Index,
+												  list_length(rte->groupexprs));
+			}
+
+			if (root->group_phids[attidx] == 0)
+			{
+				newphv = make_placeholder_expr(root, (Expr *) newnode, phrels);
+				root->group_phids[attidx] = newphv->phid;
+			}
+			else
+			{
+				newphv = makeNode(PlaceHolderVar);
+				newphv->phexpr = (Expr *) newnode;
+				newphv->phrels = phrels;
+				newphv->phid = root->group_phids[attidx];
+			}
 			/* newphv has zero phlevelsup and NULL phnullingrels; fix it */
 			newphv->phlevelsup = oldvar->varlevelsup;
 			newphv->phnullingrels = bms_copy(oldvar->varnullingrels);

@@ -649,6 +649,13 @@ struct PlannerInfo
 	int			group_rtindex;
 
 	/*
+	 * PlaceHolderVar IDs assigned to variable-free grouping expressions that
+	 * are nullable by grouping sets, indexed by RTE_GROUP column number minus
+	 * one, or NULL if none assigned yet.  See mark_nullable_by_grouping().
+	 */
+	Index	   *group_phids pg_node_attr(read_write_ignore);
+
+	/*
 	 * Information about aggregates. Filled by preprocess_aggrefs().
 	 */
 	/* AggInfo structs */
