@@ -107,6 +107,7 @@ test: timeouts
 test: vacuum-concurrent-drop
 test: vacuum-conflict
 test: vacuum-skip-locked
+test: vacuum-skip-locked-perms
 test: stats
 test: horizons
 test: predicate-hash
