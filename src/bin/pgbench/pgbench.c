@@ -48,7 +48,14 @@
 #ifdef HAVE_POLL_H
 #include <poll.h>
 #endif
-#else							/* no ppoll(), so use select() */
+#elif defined(HAVE_KQUEUE) && defined(HAVE_SYS_EVENT_H) && !defined(PGBENCH_USE_SELECT)
+/*
+ * On platforms that have kqueue(2) but not ppoll(2), such as macOS, use the
+ * former.  This has no FD_SETSIZE-style ceiling either.
+ */
+#define POLL_USING_KQUEUE
+#include <sys/event.h>
+#else							/* no ppoll() and no kqueue(), use select() */
 #define POLL_USING_SELECT
 #include <sys/select.h>
 #endif
@@ -102,6 +109,28 @@ typedef struct socket_set
 } socket_set;
 
 #endif							/* POLL_USING_PPOLL */
+
+#ifdef POLL_USING_KQUEUE
+#define SOCKET_WAIT_METHOD "kevent"
+#define KQUEUE_NO_SLOT			(-1)
+
+typedef struct socket_set
+{
+	int			maxfds;			/* allocated length of the arrays */
+	int			curfds;			/* number in cur_fds[] currently in use */
+	int			kqfd;			/* kqueue file descriptor */
+	int			nregistered;	/* length of registered_fds[] array */
+	int		   *cur_fds;		/* FDs in the set, valid while the set is
+								 * being built */
+	int		   *registered_fds; /* FDs registered with the kernel at the last
+								 * wait_on_socket_set() call */
+	bool	   *input_ready;	/* per-slot input indicator, valid after
+								 * wait_on_socket_set() */
+	struct kevent *changes;		/* changelist buffer */
+	struct kevent *events;		/* event list buffer */
+} socket_set;
+
+#endif							/* POLL_USING_KQUEUE */
 
 #ifdef POLL_USING_SELECT
 #define SOCKET_WAIT_METHOD "select"
@@ -7893,11 +7922,13 @@ setalarm(int seconds)
  * These functions provide an abstraction layer that hides the syscall
  * we use to wait for input on a set of sockets.
  *
- * Currently there are two implementations, based on ppoll(2) and select(2).
- * ppoll() is preferred where available due to its typically higher ceiling
- * on the number of usable sockets.  We do not use the more-widely-available
- * poll(2) because it only offers millisecond timeout resolution, which could
- * be problematic with high --rate settings.
+ * Currently there are three implementations, based on ppoll(2), select(2)
+ * and kqueue(2). ppoll() is preferred where available due to its typically
+ * higher ceiling on the number of usable sockets. On platforms that lack
+ * ppoll() but have kqueue(2), such as macOS and the BSDs, we use kqueue(),
+ * which has no FD_SETSIZE-style ceiling either.  We do not use the
+ * more-widely-available poll(2) because it only offers millisecond timeout
+ * resolution, which could be problematic with high --rate settings.
  *
  * Function APIs:
  *
@@ -7996,6 +8027,207 @@ socket_has_input(socket_set *sa, int fd, int idx)
 }
 
 #endif							/* POLL_USING_PPOLL */
+
+#ifdef POLL_USING_KQUEUE
+
+static socket_set *
+alloc_socket_set(int count)
+{
+	socket_set *sa;
+	int			kqfd;
+
+	kqfd = kqueue();
+	if (kqfd < 0)
+		pg_fatal("kqueue() failed: %m");
+
+	sa = (socket_set *) pg_malloc0_object(socket_set);
+	sa->maxfds = count;
+	sa->kqfd = kqfd;
+	sa->curfds = 0;
+	sa->nregistered = 0;
+	sa->cur_fds = (int *) pg_malloc0(sizeof(int) * count);
+	sa->registered_fds = (int *) pg_malloc0(sizeof(int) * count);
+	sa->input_ready = (bool *) pg_malloc0(sizeof(bool) * count);
+	/* at most one disable and one enable change per descriptor ... */
+	sa->changes = (struct kevent *) pg_malloc0(sizeof(struct kevent) * count * 2);
+	/* ... and at most one event per enabled descriptor, plus EV_ERROR entries */
+	sa->events = (struct kevent *) pg_malloc0(sizeof(struct kevent) * count * 2);
+	return sa;
+}
+
+static void
+free_socket_set(socket_set *sa)
+{
+	close(sa->kqfd);
+	pg_free(sa->cur_fds);
+	pg_free(sa->registered_fds);
+	pg_free(sa->input_ready);
+	pg_free(sa->changes);
+	pg_free(sa->events);
+	pg_free(sa);
+}
+
+static void
+clear_socket_set(socket_set *sa)
+{
+	sa->curfds = 0;
+}
+
+static void
+add_socket_to_set(socket_set *sa, int fd, int idx)
+{
+	Assert(idx < sa->maxfds && idx == sa->curfds);
+	sa->cur_fds[idx] = fd;
+	sa->curfds++;
+}
+
+static int
+socket_set_enable_and_wait(socket_set *sa, int64 usecs)
+{
+	struct timespec timeout;
+	int			rc;
+
+	for (int i = 0; i < sa->curfds; i++)
+	{
+		EV_SET(&sa->changes[i], sa->cur_fds[i],
+			   EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, (void *) (intptr_t) i);
+	}
+
+	if (usecs > 0)
+	{
+		timeout.tv_sec = usecs / 1000000;
+		timeout.tv_nsec = (usecs % 1000000) * 1000;
+		rc = kevent(sa->kqfd, sa->changes, sa->curfds,
+					sa->events, sa->maxfds * 2, &timeout);
+	}
+	else
+	{
+		rc = kevent(sa->kqfd, sa->changes, sa->curfds,
+					sa->events, sa->maxfds * 2, NULL);
+	}
+	if (rc < 0)
+		return -1;
+
+	for (int i = 0; i < rc; i++)
+	{
+		struct kevent *ev = &sa->events[i];
+
+		if (ev->flags & EV_ERROR)
+		{
+			errno = (int) ev->data;
+			return -1;
+		}
+	}
+
+	memset(sa->input_ready, 0, sizeof(bool) * sa->curfds);
+	for (int i = 0; i < rc; i++)
+	{
+		struct kevent *ev = &sa->events[i];
+		int			idx = (int) (intptr_t) ev->udata;
+
+		if (idx >= 0 && idx < sa->curfds &&
+			sa->cur_fds[idx] == (int) ev->ident)
+			sa->input_ready[idx] = true;
+	}
+
+	memcpy(sa->registered_fds, sa->cur_fds, sizeof(int) * sa->curfds);
+	sa->nregistered = sa->curfds;
+
+	return rc;
+}
+
+static int
+wait_on_socket_set(socket_set *sa, int64 usecs)
+{
+	int			nchanges = 0;
+	int			rc;
+	int			nregistered;
+
+	/*
+	 * Fast path: if the current set is identical to the one registered at the
+	 * previous wait (same descriptors in the same slots), the kernel already
+	 * has all the right knotes, so we only need to wait.
+	 */
+	if (sa->nregistered == sa->curfds &&
+		memcmp(sa->registered_fds, sa->cur_fds, sizeof(int) * sa->curfds) == 0)
+		return socket_set_enable_and_wait(sa, usecs);
+
+	/*
+	 * Phase 1: disable every descriptor registered at the previous wait.
+	 * Descriptors that are also part of the current set are re-enabled in
+	 * phase 2, so at this point it doesn't matter that we disable them too;
+	 * the changes of a changelist are processed in order.  Note that on a
+	 * platform where knotes are not deleted on descriptor close, this is the
+	 * only place where we would notice a stale registration.
+	 */
+	for (int i = 0; i < sa->nregistered; i++)
+	{
+		EV_SET(&sa->changes[nchanges++], sa->registered_fds[i],
+			   EVFILT_READ, EV_ADD | EV_DISABLE, 0, 0,
+			   (void *) (intptr_t) KQUEUE_NO_SLOT);
+	}
+
+	if (nchanges > 0)
+	{
+		struct timespec zero = {0, 0};
+
+		/*
+		 * All descriptors that were enabled are now disabled, so this call
+		 * cannot report any readiness events; the only entries it can return
+		 * are EV_ERROR ones for changes that refer to descriptors that no
+		 * longer exist (i.e. were closed without their number being reused).
+		 * Check for those and drop them from registered_fds[]; their knotes
+		 * are already gone.
+		 */
+		rc = kevent(sa->kqfd, sa->changes, nchanges,
+					sa->events, sa->maxfds * 2, &zero);
+		if (rc < 0)
+			return -1;
+
+		nregistered = 0;
+
+		for (int i = 0; i < sa->nregistered; i++)
+		{
+			bool		dropped = false;
+
+			for (int j = 0; j < rc; j++)
+			{
+				if ((sa->events[j].flags & EV_ERROR) &&
+					sa->events[j].ident == (uintptr_t) sa->registered_fds[i])
+				{
+					dropped = true;
+					break;
+				}
+			}
+			if (!dropped)
+				sa->registered_fds[nregistered++] = sa->registered_fds[i];
+		}
+		sa->nregistered = nregistered;
+	}
+
+	/* Phase 2: enable the current set and wait. */
+	return socket_set_enable_and_wait(sa, usecs);
+}
+
+static bool
+socket_has_input(socket_set *sa, int fd, int idx)
+{
+	/*
+	 * In some cases, threadRun will apply clear_socket_set and then try to
+	 * apply socket_has_input anyway with arguments that it used before that,
+	 * or might've used before that except that it exited its setup loop
+	 * early.  Hence, if the socket set is empty, silently return false
+	 * regardless of the parameters.  If it's not empty, we can Assert that
+	 * the parameters match a previous call.
+	 */
+	if (sa->curfds == 0)
+		return false;
+
+	Assert(idx < sa->curfds && sa->cur_fds[idx] == fd);
+	return sa->input_ready[idx];
+}
+
+#endif							/* POLL_USING_KQUEUE */
 
 #ifdef POLL_USING_SELECT
 
