@@ -18,6 +18,7 @@
 
 #include "executor/instrument.h"
 #include "storage/bufmgr.h"
+#include "storage/smgr.h"
 #include "utils/pgstat_internal.h"
 
 static PgStat_PendingIO PendingIOStats;
@@ -104,16 +105,24 @@ pgstat_prepare_io_time(bool track_io_guc)
  *
  * The calls related to pgstat_count_buffer_*() are for pgstat_database.  As
  * pg_stat_database only counts block read and write times, these are done for
- * IOOP_READ, IOOP_WRITE and IOOP_EXTEND.
+ * IOOP_READ, IOOP_WRITE and IOOP_EXTEND.  Given a relation, the same times
+ * are also counted for its tablespace, for pg_stat_tablespace.
  *
  * pgBufferUsage is used for EXPLAIN.  pgBufferUsage has write and read stats
  * for shared, local and temporary blocks.  pg_stat_io does not track the
  * activity of temporary blocks, so these are ignored here.
+ *
+ * This is the body of pgstat_count_io_op_time() and
+ * pgstat_count_smgr_io_op_time(), inlined into both so that neither pays for
+ * a second call.
  */
-void
-pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
-						instr_time start_time, uint32 cnt, uint64 bytes)
+static pg_always_inline void
+pgstat_count_io_op_time_internal(IOObject io_object, IOContext io_context,
+								 IOOp io_op, instr_time start_time, uint32 cnt,
+								 uint64 bytes, SMgrRelation reln)
 {
+	Assert(reln == NULL || io_object != IOOBJECT_WAL);
+
 	if (!INSTR_TIME_IS_ZERO(start_time))
 	{
 		instr_time	io_time;
@@ -123,9 +132,30 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 
 		if (io_object != IOOBJECT_WAL)
 		{
+			uint16		tsslot = 0;
+
+			if (reln != NULL)
+			{
+				/*
+				 * The slot of the tablespace in the pending counts is cached
+				 * in the SMgrRelation, so only the first timed I/O on a
+				 * relation looks it up.  That also creates the shared entry
+				 * of a tablespace nothing else has counted for yet, as in the
+				 * checkpointer of a standby.
+				 */
+				if (unlikely(reln->smgr_pgstat_tsslot == 0))
+					reln->smgr_pgstat_tsslot =
+						pgstat_assign_tablespace_slot(reln->smgr_rlocator.locator.spcOid);
+				tsslot = reln->smgr_pgstat_tsslot;
+			}
+
 			if (io_op == IOOP_WRITE || io_op == IOOP_EXTEND)
 			{
-				pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+				int64		io_usecs = INSTR_TIME_GET_MICROSEC(io_time);
+
+				pgstat_count_buffer_write_time(io_usecs);
+				if (tsslot != 0)
+					pgstat_tablespace_pending_counts(tsslot)->blk_write_time += io_usecs;
 				if (io_object == IOOBJECT_RELATION)
 					INSTR_TIME_ADD(pgBufferUsage.shared_blk_write_time, io_time);
 				else if (io_object == IOOBJECT_TEMP_RELATION)
@@ -133,7 +163,11 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 			}
 			else if (io_op == IOOP_READ)
 			{
-				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+				int64		io_usecs = INSTR_TIME_GET_MICROSEC(io_time);
+
+				pgstat_count_buffer_read_time(io_usecs);
+				if (tsslot != 0)
+					pgstat_tablespace_pending_counts(tsslot)->blk_read_time += io_usecs;
 				if (io_object == IOOBJECT_RELATION)
 					INSTR_TIME_ADD(pgBufferUsage.shared_blk_read_time, io_time);
 				else if (io_object == IOOBJECT_TEMP_RELATION)
@@ -152,6 +186,28 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 	pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
 }
 
+void
+pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
+						instr_time start_time, uint32 cnt, uint64 bytes)
+{
+	pgstat_count_io_op_time_internal(io_object, io_context, io_op, start_time,
+									 cnt, bytes, NULL);
+}
+
+/*
+ * Like pgstat_count_io_op_time(), for block I/O on a relation, whose
+ * tablespace is credited with the time as well.
+ */
+void
+pgstat_count_smgr_io_op_time(SMgrRelation reln, IOContext io_context, IOOp io_op,
+							 instr_time start_time, uint32 cnt, uint64 bytes)
+{
+	IOObject	io_object = SmgrIsTemp(reln) ? IOOBJECT_TEMP_RELATION : IOOBJECT_RELATION;
+
+	pgstat_count_io_op_time_internal(io_object, io_context, io_op, start_time,
+									 cnt, bytes, reln);
+}
+
 PgStat_IO *
 pgstat_fetch_stat_io(void)
 {
@@ -162,11 +218,16 @@ pgstat_fetch_stat_io(void)
 
 /*
  * Simpler wrapper of pgstat_io_flush_cb()
+ *
+ * This also flushes the per-tablespace I/O times counted along with the I/O
+ * statistics, as some of the processes calling this, like the checkpointer
+ * and the background writer, never call pgstat_report_stat().
  */
 void
 pgstat_flush_io(bool nowait)
 {
 	(void) pgstat_io_flush_cb(nowait);
+	(void) pgstat_flush_tablespace(nowait);
 }
 
 /*

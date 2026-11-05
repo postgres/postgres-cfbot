@@ -80,6 +80,12 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	dbentry->blocks_fetched += lstats->idx.blocks_fetched;
 	dbentry->blocks_hit += lstats->idx.blocks_hit;
 
+	/*
+	 * Likewise for the tablespace the index lives in, which need not be the
+	 * one holding the table.
+	 */
+	pgstat_relation_flush_tablespace(lstats);
+
 	return true;
 }
 
@@ -93,6 +99,8 @@ pgstat_index_delete_pending_cb(PgStat_EntryRef *entry_ref)
 
 	if (pending->relation)
 		pgstat_unlink_relation(pending->relation);
+	if (pending->tsbase)
+		pfree(pending->tsbase);
 }
 
 /*
