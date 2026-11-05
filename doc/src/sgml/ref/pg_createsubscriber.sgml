@@ -355,14 +355,17 @@ PostgreSQL documentation
      <term><option>--subscription=<replaceable class="parameter">name</replaceable></option></term>
      <listitem>
       <para>
-       The subscription name to set up the logical replication.  Multiple
+       The subscription name to set up the logical replication.  This option
+       cannot be used together with <option>--all</option>.  Multiple
        subscriptions can be specified by writing multiple
        <option>--subscription</option> switches.  The number of subscription
        names must match the number of specified databases, otherwise an error
        is reported.  The order of the multiple subscription name switches must
        match the order of database switches.  If this option is not specified,
-       a generated name is assigned to the subscription name. This option cannot
-       be used together with <option>--all</option>.
+       a generated name is assigned to the subscription name.  The same
+       subscription name can be used in different databases only when
+       replication slot names are specified with
+       <option>--replication-slot</option>.
       </para>
      </listitem>
     </varlistentry>
