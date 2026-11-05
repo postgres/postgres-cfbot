@@ -13,7 +13,7 @@ use Test::More;
 
 # Set up nodes
 my $node_primary = PostgreSQL::Test::Cluster->new('primary');
-$node_primary->init(allows_streaming => 1);
+$node_primary->init(allows_streaming => 1, has_archiving => 1);
 
 my $tablespace1 = "test_recovery_conflict_tblspc";
 
@@ -288,7 +288,8 @@ $psql_standby->reconnect_and_clear();
 # pg_stat_database. Needs to be tested before database is dropped, for obvious
 # reasons. A backend can process the same recovery conflict more than once
 # before it exits.
-cmp_ok( $node_standby->safe_psql(
+cmp_ok(
+	$node_standby->safe_psql(
 		$test_db,
 		qq[SELECT conflicts FROM pg_stat_database WHERE datname='$test_db';]),
 	'>=',
@@ -312,6 +313,214 @@ check_conflict_log("User was connected to a database that must be dropped");
 $psql_standby->quit;
 
 $node_standby->stop();
+
+## RECOVERY CONFLICT 7: Progress reporting survives conflicts
+#
+# The startup process arms STARTUP_PROGRESS_TIMEOUT once, before the redo
+# loop, to log "redo in progress" every log_startup_progress_interval.  The
+# lock and buffer pin conflict resolvers set up timeouts of their own and
+# must not cancel this one.
+#
+# A streaming standby can't show this, because it never reports redo
+# progress. So this section uses archive recovery (recovery.signal), which
+# reports progress, with hot_standby on to accept conflicting queries.
+
+# Flow: the primary writes WAL across many small segments, including a LOCK
+# TABLE record and, later, a VACUUM prune record, and archives it all.  For
+# each conflict, a new node restores from a backup taken before that WAL and
+# replays it slowly.  Once it accepts connections, a session holds the lock
+# or pin that replay of the conflict record needs.  We release it, let
+# replay finish, and check that "redo in progress" was logged both before
+# and after the conflict.
+$sect = "progress after conflict";
+
+SKIP:
+{
+	skip "restore_command for this test uses a Unix shell", 6
+	  if $windows_os;
+
+	my $table_lock = 'test_recovery_conflict_pitr_lock';
+	my $table_pin = 'test_recovery_conflict_pitr_pin';
+	my $backup_pitr = 'backup_pitr';
+
+	# WAL segments written around the two conflict records:
+	#
+	#   [backup] fill A | LOCK TABLE | fill B | VACUUM | fill C [end]
+	#
+	# Replay takes ~0.2s per segment (see restore_command below).  The segments
+	# before a record give the test time to take its lock or pin first: A for
+	# the lock (~3s), A+B for the pin (~5s).  Those after it are where progress
+	# must still be reported.
+	my $segs_a = 15;
+	my $segs_b = 10;
+	my $segs_c = 5;
+
+	# Lock conflict table; the fills write its rows.
+	$node_primary->safe_psql('postgres',
+		qq[CREATE TABLE $table_lock (a int)]);
+
+	# Buffer pin conflict table: one page with a dead row from an aborted
+	# insert, for VACUUM to prune.  Replaying the prune needs a cleanup lock on
+	# the page, which a pinned page blocks.  As in section 1, all of this is
+	# older than the session's snapshot, so there's no snapshot conflict.
+	$node_primary->safe_psql(
+		'postgres', qq[
+CREATE TABLE $table_pin (a int, b int);
+INSERT INTO $table_pin SELECT i, 0 FROM generate_series(1, 20) i;
+BEGIN;
+INSERT INTO $table_pin VALUES (21, 0);
+ROLLBACK;
+]);
+
+	# Recovery starts from this backup; everything after it is replayed from the archive.
+	$node_primary->backup($backup_pitr);
+
+	# Write a row and switch WAL segment, $n times.  Only completed segments
+	# are archived.  The row makes sure each switch has WAL to complete, since
+	# pg_switch_wal() does nothing on an empty segment.
+	my $fill_segments = sub {
+		my $n = shift;
+		$node_primary->safe_psql(
+			'postgres', qq[
+DO \$\$
+BEGIN
+	FOR i IN 1..$n LOOP
+		INSERT INTO $table_lock VALUES (i);
+		PERFORM pg_switch_wal();
+	END LOOP;
+END
+\$\$;]);
+	};
+
+	$fill_segments->($segs_a);
+
+	# Replay of this record takes AccessExclusiveLock in the startup process.
+	# Remember its LSN, to check below that the session got its lock first.
+	my $lock_lsn = $node_primary->safe_psql('postgres',
+		'SELECT pg_current_wal_insert_lsn()');
+	$node_primary->safe_psql('postgres',
+		qq[BEGIN; LOCK TABLE $table_lock; COMMIT;]);
+
+	$fill_segments->($segs_b);
+
+	# Likewise, replay of this VACUUM's prune record needs a cleanup lock on the page.
+	my $vacuum_lsn = $node_primary->safe_psql('postgres',
+		'SELECT pg_current_wal_insert_lsn()');
+	$node_primary->safe_psql('postgres', qq[VACUUM FREEZE $table_pin;]);
+
+	$fill_segments->($segs_c);
+
+	# A clean shutdown archives all completed segments, so the archive now
+	# holds all the WAL.
+	$node_primary->stop;
+
+	my $archive = $node_primary->archive_dir;
+
+	# Restore a node from the backup and archive, run $hold_sql in a session to
+	# hold what replay of the record at $conflict_lsn needs, and check progress
+	# reporting around the conflict.  $kind is its name in the log: "lock" or
+	# "buffer pin".
+	my $check_progress_after_conflict = sub {
+		my ($name, $kind, $conflict_lsn, $hold_sql) = @_;
+		my $what = "$sect ($kind)";
+
+		my $node_pitr = PostgreSQL::Test::Cluster->new($name);
+		# standby => 0 gives archive recovery (recovery.signal) with a
+		# restore_command reading the primary's archive.  Unlike standby mode, it
+		# reports redo progress.
+		$node_pitr->init_from_backup(
+			$node_primary, $backup_pitr,
+			has_restoring => 1,
+			standby => 0);
+
+		#  Config values:
+		#  - archive_mode = off: don't archive into the primary's archive.
+		#  - recovery_prefetch = off: no WAL readahead, so restores stay in step
+		#    with replay.
+		#  - sleep in restore_command: slows replay to ~0.2s per segment, long
+		#    enough for progress messages and for the test to set up its conflict.
+		#  - max_standby_archive_delay = -1: wait for the session instead of
+		#    canceling it, so the test decides when the conflict ends.  Deadlock
+		#    checks don't cancel it either, as it never waits for a lock.
+		#  - log_recovery_conflict_waits: logs "recovery still waiting" (after
+		#    deadlock_timeout) and "recovery finished waiting"; the test follows
+		#    the conflict by these lines.
+		$node_pitr->append_conf(
+			'postgresql.conf', qq[
+archive_mode = off
+hot_standby = on
+recovery_prefetch = off
+restore_command = 'sleep 0.2; cp "$archive/%f" "%p"'
+log_startup_progress_interval = 100ms
+log_recovery_conflict_waits = on
+deadlock_timeout = 10ms
+max_standby_archive_delay = -1
+]);
+
+		# pg_ctl returns once read-only connections are accepted
+		# (at consistency), while replay continues.
+		$node_pitr->start;
+
+		# Hold the lock or pin in an open transaction.
+		my $psql_pitr = $node_pitr->background_psql('postgres');
+		$psql_pitr->query_safe($hold_sql);
+
+		# If replay already passed the record, the wait
+		# below would time out; fail clearly instead.
+		is( $node_pitr->safe_psql(
+				'postgres',
+				qq[SELECT pg_last_wal_replay_lsn() < '$conflict_lsn']),
+			't',
+			"$what: conflict set up before replay reached its record");
+
+		# Replay is now waiting.  Ending the transaction releases the
+		# lock or pin.
+		my $log_offset = $node_pitr->wait_for_log(
+			qr/recovery still waiting after .* recovery conflict on $kind/);
+		$psql_pitr->query_safe('COMMIT');
+		$psql_pitr->quit;
+
+		# Wait for replay to finish.
+		$node_pitr->wait_for_log(qr/redo done at/, $log_offset);
+
+		# Count "redo in progress" lines before and after the conflict
+		# ends, up to the end of redo.
+		my ($before, $after) = split(
+			/recovery finished waiting after [^\n]*recovery conflict on $kind[^\n]*\n/,
+			slurp_file($node_pitr->logfile), 2);
+		$after =~ s/redo done at.*//s;
+		my $n_before = () = $before =~ /redo in progress/g;
+		my $n_after = () = $after =~ /redo in progress/g;
+
+		# Control: without progress before the conflict, the check below
+		# proves nothing.
+		cmp_ok($n_before, '>', 0,
+			"$what: progress reported before the conflict");
+
+		# The actual check: fails if the conflict canceled the progress
+		# timeout.
+		cmp_ok($n_after, '>', 0,
+			"$what: progress reported after the conflict");
+
+		$node_pitr->stop;
+	};
+
+	# Lock conflict: ResolveRecoveryConflictWithLock().  Hold ACCESS SHARE on
+	# the table, which replay of the LOCK TABLE record waits for.
+	$check_progress_after_conflict->(
+		'pitr_lock', 'lock', $lock_lsn,
+		qq[BEGIN; LOCK TABLE $table_lock IN ACCESS SHARE MODE;]);
+
+	# Buffer pin conflict: ResolveRecoveryConflictWithBufferPin().  A cursor on
+	# the table's only page keeps it pinned; replay of VACUUM's prune record
+	# waits for the pin to go away.
+	$check_progress_after_conflict->(
+		'pitr_pin', 'buffer pin', $vacuum_lsn,
+		qq[BEGIN;
+		   DECLARE pitr_cursor CURSOR FOR SELECT b FROM $table_pin;
+		   FETCH FORWARD FROM pitr_cursor;]);
+}
+
 $node_primary->stop();
 
 
