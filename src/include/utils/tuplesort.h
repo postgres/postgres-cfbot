@@ -180,6 +180,14 @@ typedef struct
 	void		(*freestate) (Tuplesortstate *state);
 
 	/*
+	 * Optional: size in bytes of the self-contained allocation holding
+	 * stup->tuple, so a bounded sort can copy survivors into a fresh memory
+	 * context instead of freeing each discarded tuple.  NULL if the variant's
+	 * tuples cannot be moved with a plain memcpy.
+	 */
+	Size		(*tuplelen) (Tuplesortstate *state, SortTuple *stup);
+
+	/*
 	 * The subsequent fields are used in the implementations of the functions
 	 * above.
 	 */

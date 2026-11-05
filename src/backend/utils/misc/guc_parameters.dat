@@ -731,6 +731,20 @@
   ifdef => 'DEBUG_NODE_TESTS_ENABLED',
 },
 
+{ name => 'debug_topn_context_swap', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Copies bounded-sort survivors into a fresh memory context at each quickselect prune.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_topn_context_swap',
+  boot_val => 'true',
+},
+
+{ name => 'debug_topn_quickselect', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Uses quickselect instead of a heap for large bounded (top-N) sorts.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_topn_quickselect',
+  boot_val => 'true',
+},
+
 { name => 'debug_write_read_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Set this to force all parse and plan trees to be passed through outfuncs.c/readfuncs.c, to facilitate catching errors and omissions in those modules.',
   flags => 'GUC_NOT_IN_SAMPLE',
