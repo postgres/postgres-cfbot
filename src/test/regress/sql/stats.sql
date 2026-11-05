@@ -1070,4 +1070,32 @@ SELECT fastpath_exceeded > :backend_fastpath_exceeded_before
 
 DROP TABLE part_test;
 
+-- Test that the lookups of foreign keys by referenced relation use
+-- pg_constraint_confrelid_index.  The counter is this backend's, for the
+-- current transaction, so other sessions cannot change the result.
+CREATE TABLE confrelid_pk (id int PRIMARY KEY) PARTITION BY LIST (id);
+CREATE TABLE confrelid_fk (pid int REFERENCES confrelid_pk);
+CREATE TABLE confrelid_ul (a int);
+CREATE FUNCTION confrelid_idx_scan() RETURNS bigint LANGUAGE sql AS
+  $$SELECT pg_stat_get_xact_idx_numscans('pg_constraint_confrelid_index'::regclass)$$;
+BEGIN;
+SELECT confrelid_idx_scan() AS confrelid_scans \gset
+-- CloneFkReferenced()
+CREATE TABLE confrelid_pk1 PARTITION OF confrelid_pk FOR VALUES IN (1);
+SELECT confrelid_idx_scan() > :confrelid_scans AS clone_fk_referenced,
+       confrelid_idx_scan() AS confrelid_scans \gset
+-- GetParentedForeignKeyRefs()
+ALTER TABLE confrelid_pk DETACH PARTITION confrelid_pk1;
+SELECT confrelid_idx_scan() > :confrelid_scans AS get_parented_fk_refs,
+       confrelid_idx_scan() AS confrelid_scans \gset
+-- ATPrepChangePersistence()
+ALTER TABLE confrelid_ul SET UNLOGGED;
+SELECT confrelid_idx_scan() > :confrelid_scans AS change_persistence \gset
+COMMIT;
+SELECT :'clone_fk_referenced' AS clone_fk_referenced,
+       :'get_parented_fk_refs' AS get_parented_fk_refs,
+       :'change_persistence' AS change_persistence;
+DROP TABLE confrelid_fk, confrelid_pk, confrelid_pk1, confrelid_ul;
+DROP FUNCTION confrelid_idx_scan();
+
 -- End of Stats Test
