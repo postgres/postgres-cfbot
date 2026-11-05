@@ -1937,11 +1937,11 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 	result = FileSync(file, WAIT_EVENT_DATA_FILE_SYNC);
 	save_errno = errno;
 
-	if (need_to_close)
-		FileClose(file);
-
 	pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL,
 							IOOP_FSYNC, io_start, 1, 0);
+
+	if (need_to_close)
+		FileClose(file);
 
 	errno = save_errno;
 	return result;
