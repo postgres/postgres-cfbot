@@ -192,23 +192,23 @@ false, true, false, true);
 SELECT explain_mask_costs($$
 SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 99, NULL]);$$,
 false, true, false, true);
-                   explain_mask_costs                    
----------------------------------------------------------
- Seq Scan on tenk1  (cost=N..N rows=1 width=N)
-   Filter: (unique1 <> ALL ('{1,2,99,NULL}'::integer[]))
-(2 rows)
+         explain_mask_costs         
+------------------------------------
+ Result  (cost=N..N rows=0 width=N)
+   Replaces: Scan on tenk1
+   One-Time Filter: false
+(3 rows)
 
 -- Try a non-const array containing a NULL
 SELECT explain_mask_costs($$
 SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 98, (SELECT 99), NULL]);$$,
 false, true, false, true);
-                                 explain_mask_costs                                  
--------------------------------------------------------------------------------------
- Seq Scan on tenk1  (cost=N..N rows=1 width=N)
-   Filter: (unique1 <> ALL (ARRAY[1, 2, 98, (InitPlan expr_1).col1, NULL::integer]))
-   InitPlan expr_1
-     ->  Result  (cost=N..N rows=1 width=N)
-(4 rows)
+         explain_mask_costs         
+------------------------------------
+ Result  (cost=N..N rows=0 width=N)
+   Replaces: Scan on tenk1
+   One-Time Filter: false
+(3 rows)
 
 -- Verify that scalarineqsel() works on "char" columns
 CREATE TEMP TABLE char_table_1 AS

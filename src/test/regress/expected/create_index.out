@@ -2413,19 +2413,25 @@ SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{7, 14, 22}') and unique1 = ANY('
 ---------
 (0 rows)
 
+-- Use a generic plan, since a constant NULL array is folded away by the planner
+SET plan_cache_mode = force_generic_plan;
+PREPARE null_array_key(int[]) AS
+SELECT unique1 FROM tenk1 WHERE unique1 = ANY($1);
 explain (costs off)
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY(NULL);
-                   QUERY PLAN                    
--------------------------------------------------
+EXECUTE null_array_key(NULL);
+                  QUERY PLAN                  
+----------------------------------------------
  Index Only Scan using tenk1_unique1 on tenk1
-   Index Cond: (unique1 = ANY (NULL::integer[]))
+   Index Cond: (unique1 = ANY ($1))
 (2 rows)
 
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY(NULL);
+EXECUTE null_array_key(NULL);
  unique1 
 ---------
 (0 rows)
 
+DEALLOCATE null_array_key;
+RESET plan_cache_mode;
 explain (costs off)
 SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{NULL,NULL,NULL}');
                           QUERY PLAN                           
