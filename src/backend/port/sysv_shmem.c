@@ -594,10 +594,10 @@ check_huge_page_size(int *newval, void **extra, GucSource source)
  *
  * Pass the requested size in *size.  This function will modify *size to the
  * actual size of the allocation, if it ends up allocating a segment that is
- * larger than requested.
+ * larger than requested.  The memory page size used is returned in *page_size.
  */
 static void *
-CreateAnonymousSegment(Size *size)
+CreateAnonymousSegment(Size *size, Size *page_size)
 {
 	Size		allocsize = *size;
 	void	   *ptr = MAP_FAILED;
@@ -624,6 +624,8 @@ CreateAnonymousSegment(Size *size)
 		ptr = mmap(NULL, allocsize, PROT_READ | PROT_WRITE,
 				   mmap_flags | huge_mmap_flags, -1, 0);
 		mmap_errno = errno;
+		if (ptr != MAP_FAILED)
+			*page_size = hugepagesize;
 		if (huge_pages == HUGE_PAGES_TRY && ptr == MAP_FAILED)
 			elog(DEBUG1, "mmap(%zu) with MAP_HUGETLB failed, huge pages disabled: %m",
 				 allocsize);
@@ -648,6 +650,7 @@ CreateAnonymousSegment(Size *size)
 		ptr = mmap(NULL, allocsize, PROT_READ | PROT_WRITE,
 				   mmap_flags, -1, 0);
 		mmap_errno = errno;
+		*page_size = sysconf(_SC_PAGESIZE);
 	}
 
 	if (ptr == MAP_FAILED)
@@ -707,6 +710,7 @@ PGSharedMemoryCreate(Size size,
 	PGShmemHeader *hdr;
 	struct stat statbuf;
 	Size		sysvsize;
+	Size		page_size;
 
 	/*
 	 * We use the data directory's ID info (inode and device numbers) to
@@ -738,7 +742,7 @@ PGSharedMemoryCreate(Size size,
 
 	if (shared_memory_type == SHMEM_TYPE_MMAP)
 	{
-		AnonymousShmem = CreateAnonymousSegment(&size);
+		AnonymousShmem = CreateAnonymousSegment(&size, &page_size);
 		AnonymousShmemSize = size;
 
 		/* Register on-exit routine to unmap the anonymous segment */
@@ -750,6 +754,7 @@ PGSharedMemoryCreate(Size size,
 	else
 	{
 		sysvsize = size;
+		page_size = sysconf(_SC_PAGESIZE);
 
 		/* huge pages are only available with mmap */
 		SetConfigOption("huge_pages_status", "off",
@@ -855,6 +860,7 @@ PGSharedMemoryCreate(Size size,
 	 * Initialize space allocation status for segment.
 	 */
 	hdr->totalsize = size;
+	hdr->page_size = page_size;
 	hdr->content_offset = MAXALIGN(sizeof(PGShmemHeader));
 	*shim = hdr;
 
