@@ -23,15 +23,17 @@
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
+#include "storage/procsignal.h"
 #include "utils/acl.h"
 #include "utils/fmgrprotos.h"
 #include "utils/wait_event.h"
 
 
 /*
- * Send a signal to another backend.
+ * Check whether the current user has permission to signal the backend with
+ * the given PID.
  *
- * The signal is delivered if the user is either a superuser or the same
+ * Sending a signal is allowed if the user is either a superuser or the same
  * role as the backend being signaled. For "dangerous" signals, an explicit
  * check for superuser needs to be done prior to calling this function.
  *
@@ -42,6 +44,10 @@
  * In the event of a general failure (return code 1), a warning message will
  * be emitted. For permission errors, doing that is the responsibility of
  * the caller.
+ *
+ * The caller can optionally obtain a pointer to the backend's PGPROC struct
+ * using the proc_return argument.  If the caller doesn't need that, it can
+ * pass NULL.
  */
 #define SIGNAL_BACKEND_SUCCESS 0
 #define SIGNAL_BACKEND_ERROR 1
@@ -49,17 +55,21 @@
 #define SIGNAL_BACKEND_NOSUPERUSER 3
 #define SIGNAL_BACKEND_NOAUTOVAC 4
 static int
-pg_signal_backend(int pid, int sig)
+pg_check_signal_backend(int pid, PGPROC **proc_return)
 {
 	PGPROC	   *proc = BackendPidGetProc(pid);
 
+	if (proc_return != NULL)
+		*proc_return = proc;
+
 	/*
 	 * BackendPidGetProc returns NULL if the pid isn't valid; but by the time
-	 * we reach kill(), a process for which we get a valid proc here might
-	 * have terminated on its own.  There's no way to acquire a lock on an
-	 * arbitrary process to prevent that. But since so far all the callers of
-	 * this mechanism involve some request for ending the process anyway, that
-	 * it might end on its own first is not a problem.
+	 * the caller actually tries to send a signal, a process for which we get
+	 * a valid proc here might have terminated on its own.  There's no way to
+	 * acquire a lock on an arbitrary process to prevent that. But since so
+	 * far all the callers of this mechanism involve some request for ending
+	 * the process anyway, that it might end on its own first is not a
+	 * problem.
 	 *
 	 * Note that proc will also be NULL if the pid refers to an auxiliary
 	 * process or the postmaster (neither of which can be signaled via
@@ -99,6 +109,22 @@ pg_signal_backend(int pid, int sig)
 	else if (!has_privs_of_role(GetUserId(), proc->roleId) &&
 			 !has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
 		return SIGNAL_BACKEND_NOPERMISSION;
+
+	return SIGNAL_BACKEND_SUCCESS;
+}
+
+/*
+ * Send a signal to another backend, after checking permissions.
+ *
+ * See pg_check_signal_backend for return codes.
+ */
+static int
+pg_signal_backend(int pid, int sig)
+{
+	int			r = pg_check_signal_backend(pid, NULL);
+
+	if (r != SIGNAL_BACKEND_SUCCESS)
+		return r;
 
 	/*
 	 * Can the process we just validated above end, followed by the pid being
@@ -274,6 +300,83 @@ pg_terminate_backend(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(pg_wait_until_termination(pid, timeout));
 	else
 		PG_RETURN_BOOL(r == SIGNAL_BACKEND_SUCCESS);
+}
+
+/*
+ * Request a backend to ask its client to disconnect gracefully, by turning on
+ * the backend's disconnect_requested GUC.  That GUC is reported to the client
+ * via a ParameterStatus message; honoring it is advisory, so the connection
+ * remains fully functional.
+ *
+ * If timeout is 0, returns true as soon as the signal is sent successfully.
+ * If timeout is nonzero, waits up to that many milliseconds for the backend
+ * to exit (i.e. for the client to honor the request and disconnect). Returns
+ * true if the backend exits within the timeout, false (with a warning) if not.
+ *
+ * Permission checking follows the same rules as pg_cancel_backend.
+ */
+Datum
+pg_request_disconnect_backend(PG_FUNCTION_ARGS)
+{
+	int			pid;
+	int			r;
+	int64		timeout;		/* milliseconds */
+	PGPROC	   *proc;
+
+	pid = PG_GETARG_INT32(0);
+	timeout = PG_GETARG_INT64(1);
+
+	if (timeout < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("\"timeout\" must not be negative")));
+
+	r = pg_check_signal_backend(pid, &proc);
+
+	if (r == SIGNAL_BACKEND_NOSUPERUSER)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to request backend disconnect"),
+				 errdetail("Only roles with the %s attribute may request disconnect from backends of roles with the %s attribute.",
+						   "SUPERUSER", "SUPERUSER")));
+
+	if (r == SIGNAL_BACKEND_NOAUTOVAC)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to request backend disconnect"),
+				 errdetail("Only roles with privileges of the \"%s\" role may request disconnect from autovacuum workers.",
+						   "pg_signal_autovacuum_worker")));
+
+	if (r == SIGNAL_BACKEND_NOPERMISSION)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to request backend disconnect"),
+				 errdetail("Only roles with privileges of the role whose backend is being signaled or with privileges of the \"%s\" role may request disconnect from this backend.",
+						   "pg_signal_backend")));
+
+	if (r != SIGNAL_BACKEND_SUCCESS)
+		PG_RETURN_BOOL(false);
+
+	if (proc->backendType != B_BACKEND)
+	{
+		ereport(WARNING,
+				(errmsg("PID %d is not a regular backend process", pid)));
+		PG_RETURN_BOOL(false);
+	}
+
+	if (SendProcSignal(pid, PROCSIG_REQUEST_DISCONNECT,
+					   INVALID_PROC_NUMBER) != 0)
+	{
+		ereport(WARNING,
+				(errmsg("could not send disconnect request to process %d: %m", pid)));
+		PG_RETURN_BOOL(false);
+	}
+
+	/* Wait only if actually requested */
+	if (timeout > 0)
+		PG_RETURN_BOOL(pg_wait_until_termination(pid, timeout));
+
+	PG_RETURN_BOOL(true);
 }
 
 /*
