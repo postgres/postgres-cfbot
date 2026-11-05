@@ -170,9 +170,11 @@ typedef struct RelationData
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.
 	 * Note that you can NOT look into rd_rel for this data.  NULL means "use
-	 * defaults".
+	 * defaults".  rd_stdoptions is true if rd_options is a StdRdOptions, or a
+	 * struct that begins with one; see RelationParseRelOptions().
 	 */
 	bytea	   *rd_options;		/* parsed pg_class.reloptions */
+	bool		rd_stdoptions;	/* rd_options holds StdRdOptions? */
 
 	/*
 	 * Oid of the handler for this relation. For an index this is a function
@@ -382,11 +384,23 @@ typedef struct StdRdOptions
 #define HEAP_DEFAULT_FILLFACTOR		100
 
 /*
+ * RelationHasStdRdOptions
+ *		Returns true if rd_options can be read as StdRdOptions.  The macros
+ *		below must check this, since a table AM with its own amoptions
+ *		callback may use a different layout.
+ */
+static inline bool
+RelationHasStdRdOptions(Relation relation)
+{
+	return relation->rd_stdoptions;
+}
+
+/*
  * RelationGetToastTupleTarget
  *		Returns the relation's toast_tuple_target.  Note multiple eval of argument!
  */
 #define RelationGetToastTupleTarget(relation, defaulttarg) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->toast_tuple_target : (defaulttarg))
 
 /*
@@ -394,7 +408,7 @@ typedef struct StdRdOptions
  *		Returns the relation's toast_value_type.  Note multiple eval of argument!
  */
 #define RelationGetToastValueType(relation, defaulttarg) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->toast_value_type : (defaulttarg))
 
 /*
@@ -402,7 +416,7 @@ typedef struct StdRdOptions
  *		Returns the relation's fillfactor.  Note multiple eval of argument!
  */
 #define RelationGetFillFactor(relation, defaultff) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->fillfactor : (defaultff))
 
 /*
@@ -425,7 +439,7 @@ typedef struct StdRdOptions
  *		from the pov of logical decoding.  Note multiple eval of argument!
  */
 #define RelationIsUsedAsCatalogTable(relation)	\
-	((relation)->rd_options && \
+	(RelationHasStdRdOptions(relation) && \
 	 ((relation)->rd_rel->relkind == RELKIND_RELATION || \
 	  (relation)->rd_rel->relkind == RELKIND_MATVIEW) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->user_catalog_table : false)
@@ -436,7 +450,7 @@ typedef struct StdRdOptions
  *		Note multiple eval of argument!
  */
 #define RelationGetParallelWorkers(relation, defaultpw) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->parallel_workers : (defaultpw))
 
 /* ViewOptions->check_option values */

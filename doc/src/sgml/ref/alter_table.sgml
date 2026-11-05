@@ -807,6 +807,21 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       causing future partitions to default to
       <varname>default_table_access_method</varname>.
      </para>
+     <para>
+      The new access method must accept all of the table's storage
+      parameters, or an error is raised.  An access method can define its
+      own storage parameters, so parameters set under the old access method
+      might not be accepted by the new one.  Such parameters can be removed
+      in the same command, for example:
+<programlisting>
+ALTER TABLE measurement
+    SET ACCESS METHOD heap,
+    RESET (compression);
+</programlisting>
+      The parameters are checked after any <literal>SET</literal> or
+      <literal>RESET</literal> of storage parameters in the same command has
+      been applied, so the order of the subcommands does not matter.
+     </para>
     </listitem>
    </varlistentry>
 
