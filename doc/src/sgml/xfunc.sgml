@@ -4304,4 +4304,19 @@ supportfn(internal) returns internal
     To create such conditions, the support function must implement
     the <literal>SupportRequestIndexCondition</literal> request type.
    </para>
+
+   <para>
+    For functions that read part of a structured value, such as a member of a
+    document, or that return a copy of a structured value with some parts
+    changed, the executor can use a description of which parts are read or
+    changed.  When an <command>UPDATE</command> changes a column only through
+    such functions, and every expression index and partial-index predicate
+    that uses the column reads only other parts of it, the executor knows
+    without evaluating them that the update leaves those indexes unaffected
+    (see <xref linkend="storage-hot"/>).  To describe a call, the support
+    function must implement the <literal>SupportRequestSubattr</literal>
+    request type.  Its answer must be exact for every value the call could be
+    given: an answer that omits a part the call reads or changes can cause
+    index entries to be missing.
+   </para>
   </sect1>

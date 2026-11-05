@@ -1,0 +1,112 @@
+--
+-- HOT_UPDATES
+-- The HOT chain an update leaves on the page.  src/test/regress's
+-- hot_updates test covers which updates are HOT.
+--
+
+-- oldextversions, which runs just before this, drops the extension; this
+-- creates it again and drops it at the end, leaving things as they were
+CREATE EXTENSION pageinspect;
+
+-- Sum of committed and in-progress (non-HOT, HOT) update counters.
+CREATE FUNCTION get_hot_count(rel_name text)
+RETURNS TABLE (
+    updates BIGINT,
+    hot BIGINT
+) AS $$
+DECLARE
+    rel_oid oid;
+BEGIN
+    rel_oid := rel_name::regclass::oid;
+    updates := COALESCE(pg_stat_get_tuples_updated(rel_oid), 0) +
+               COALESCE(pg_stat_get_xact_tuples_updated(rel_oid), 0);
+    hot := COALESCE(pg_stat_get_tuples_hot_updated(rel_oid), 0) +
+           COALESCE(pg_stat_get_xact_tuples_hot_updated(rel_oid), 0);
+    RETURN NEXT;
+END;
+$$ LANGUAGE plpgsql;
+
+-- True iff another live tuple on the same page has its t_ctid pointing at
+-- target_ctid, i.e. target_ctid is a later member of a HOT chain.
+CREATE FUNCTION has_hot_chain(rel_name text, target_ctid tid)
+RETURNS boolean LANGUAGE sql AS $$
+    SELECT EXISTS (
+        SELECT FROM heap_page_items(get_raw_page(rel_name,
+                                                 tid_block(target_ctid)::int))
+        WHERE lp_flags = 1 AND t_ctid = target_ctid
+          AND lp <> tid_offset(target_ctid))
+$$;
+
+-- The HOT chain through start_ctid, from the live tuple pointing at it if
+-- there is one, following t_ctid on the page until a tuple points at itself.
+CREATE FUNCTION print_hot_chain(rel_name text, start_ctid tid)
+RETURNS TABLE (chain_position int, ctid tid, lp_flags text, t_ctid tid)
+LANGUAGE sql AS $$
+    WITH RECURSIVE items AS (
+        SELECT * FROM heap_page_items(get_raw_page(rel_name,
+                                                   tid_block(start_ctid)::int))
+    ), chain (chain_position, lp) AS (
+        SELECT 0, coalesce((SELECT lp FROM items
+                            WHERE lp_flags = 1 AND t_ctid = start_ctid
+                              AND lp <> tid_offset(start_ctid)),
+                           tid_offset(start_ctid))
+        UNION ALL
+        SELECT c.chain_position + 1, tid_offset(i.t_ctid)
+        FROM chain c JOIN items i ON i.lp = c.lp
+        WHERE tid_block(i.t_ctid) = tid_block(start_ctid)
+          AND tid_offset(i.t_ctid) <> c.lp
+    )
+    SELECT c.chain_position,
+           format('(%s,%s)', tid_block(start_ctid), c.lp)::tid,
+           CASE i.lp_flags WHEN 0 THEN 'unused (0)' WHEN 1 THEN 'normal (1)'
+                           WHEN 2 THEN 'redirect (2)' WHEN 3 THEN 'dead (3)' END,
+           i.t_ctid
+    FROM chain c JOIN items i ON i.lp = c.lp
+    ORDER BY c.chain_position
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Basic HOT: update of a non-indexed column
+-- ---------------------------------------------------------------------------
+-- (No autovacuum: the chain printed below must not be pruned first.)
+CREATE TABLE hot_test (
+    id int PRIMARY KEY,
+    indexed_col int,
+    non_indexed_col text
+) WITH (fillfactor = 50, autovacuum_enabled = off);
+CREATE INDEX hot_test_indexed_idx ON hot_test(indexed_col);
+
+INSERT INTO hot_test VALUES (1, 100, 'initial');
+INSERT INTO hot_test VALUES (2, 200, 'initial');
+INSERT INTO hot_test VALUES (3, 300, 'initial');
+
+SELECT pg_stat_force_next_flush();
+SELECT * FROM get_hot_count('hot_test');
+
+-- Three classic HOT updates (non-indexed col).
+UPDATE hot_test SET non_indexed_col = 'updated1' WHERE id = 1;
+UPDATE hot_test SET non_indexed_col = 'updated2' WHERE id = 2;
+UPDATE hot_test SET non_indexed_col = 'updated3' WHERE id = 3;
+SELECT pg_stat_force_next_flush();
+SELECT * FROM get_hot_count('hot_test');
+
+-- Chain-of-1 on id=1 still has a predecessor line pointer.
+WITH current_tuple AS (SELECT ctid FROM hot_test WHERE id = 1)
+SELECT has_hot_chain('hot_test', current_tuple.ctid) AS has_chain,
+       chain_position, print_hot_chain.ctid, lp_flags, t_ctid
+FROM current_tuple, LATERAL print_hot_chain('hot_test', current_tuple.ctid);
+
+-- VACUUM collapses the chain.
+VACUUM hot_test;
+
+WITH current_tuple AS (SELECT ctid FROM hot_test WHERE id = 1)
+SELECT has_hot_chain('hot_test', current_tuple.ctid) AS has_chain,
+       chain_position, print_hot_chain.ctid, lp_flags, t_ctid
+FROM current_tuple, LATERAL print_hot_chain('hot_test', current_tuple.ctid);
+
+DROP TABLE hot_test;
+
+DROP FUNCTION has_hot_chain(text, tid);
+DROP FUNCTION print_hot_chain(text, tid);
+DROP FUNCTION get_hot_count(text);
+DROP EXTENSION pageinspect;

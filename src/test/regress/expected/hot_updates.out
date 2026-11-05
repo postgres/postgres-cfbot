@@ -1,0 +1,723 @@
+--
+-- HOT_UPDATES
+-- Test Heap-Only Tuple (HOT) update decisions
+--
+-- Expected output records which UPDATEs are HOT, so that a change to the
+-- rules shows up as a change to this file.  contrib/pageinspect's
+-- hot_updates test looks at the HOT chain itself.
+--
+-- Sum of committed and in-progress (non-HOT, HOT) update counters.
+CREATE FUNCTION get_hot_count(rel_name text)
+RETURNS TABLE (
+    updates BIGINT,
+    hot BIGINT
+) AS $$
+DECLARE
+    rel_oid oid;
+BEGIN
+    rel_oid := rel_name::regclass::oid;
+    updates := COALESCE(pg_stat_get_tuples_updated(rel_oid), 0) +
+               COALESCE(pg_stat_get_xact_tuples_updated(rel_oid), 0);
+    hot := COALESCE(pg_stat_get_tuples_hot_updated(rel_oid), 0) +
+           COALESCE(pg_stat_get_xact_tuples_hot_updated(rel_oid), 0);
+    RETURN NEXT;
+END;
+$$ LANGUAGE plpgsql;
+-- ---------------------------------------------------------------------------
+-- Summarizing indexes (BRIN) do not block HOT
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_test (
+    id int PRIMARY KEY,
+    ts timestamp,
+    value int,
+    brin_col int
+) WITH (fillfactor = 50);
+CREATE INDEX hot_test_ts_brin ON hot_test USING brin(ts);
+CREATE INDEX hot_test_brin_col_brin ON hot_test USING brin(brin_col);
+INSERT INTO hot_test VALUES (1, '2024-01-01', 100, 1000);
+-- BRIN columns are summarizing; updating them stays classic HOT even
+-- though their values change.
+UPDATE hot_test SET ts = '2024-01-02', brin_col = 2000 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+-- Non-indexed column: also HOT.
+UPDATE hot_test SET value = 200 WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       2 |   2
+(1 row)
+
+DROP TABLE hot_test;
+-- ---------------------------------------------------------------------------
+-- TOAST participates in HOT (non-indexed column paths only)
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_test (
+    id int PRIMARY KEY,
+    indexed_col int,
+    large_text text,
+    small_text text
+) WITH (fillfactor = 50);
+CREATE INDEX hot_test_idx ON hot_test(indexed_col);
+-- stored out of line at any block size
+ALTER TABLE hot_test ALTER COLUMN large_text SET STORAGE EXTERNAL;
+SELECT current_setting('block_size')::int / 2 AS large_len \gset
+INSERT INTO hot_test VALUES (1, 100, repeat('x', :large_len), 'small');
+SELECT pg_column_toast_chunk_id(large_text) IS NOT NULL AS toasted
+  FROM hot_test;
+ toasted 
+---------
+ t
+(1 row)
+
+-- Non-indexed, non-TOAST column: HOT.
+UPDATE hot_test SET small_text = 'updated';
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+-- TOAST column, indexed_col unchanged: HOT.
+UPDATE hot_test SET large_text = repeat('y', :large_len);
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       2 |   2
+(1 row)
+
+DROP TABLE hot_test;
+-- ---------------------------------------------------------------------------
+-- Partial index where update leaves indexed attrs unchanged
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_test (
+    id int PRIMARY KEY,
+    status text,
+    data text
+) WITH (fillfactor = 50);
+CREATE INDEX hot_test_active_idx ON hot_test(status) WHERE status = 'active';
+INSERT INTO hot_test VALUES (1, 'active', 'data1');
+INSERT INTO hot_test VALUES (2, 'inactive', 'data2');
+INSERT INTO hot_test VALUES (3, 'deleted', 'data3');
+-- Update data on a row whose status matches the partial predicate: HOT.
+UPDATE hot_test SET data = 'updated1' WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+-- Update data on a row outside the predicate: HOT.
+UPDATE hot_test SET data = 'updated2' WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       2 |   2
+(1 row)
+
+SELECT id, status FROM hot_test WHERE status = 'active';
+ id | status 
+----+--------
+  1 | active
+(1 row)
+
+DROP TABLE hot_test;
+-- ---------------------------------------------------------------------------
+-- Multi-column btree: update of non-indexed column
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_test (
+    id int PRIMARY KEY,
+    col_a int,
+    col_b int,
+    col_c int,
+    data text
+) WITH (fillfactor = 50);
+CREATE INDEX hot_test_ab_idx ON hot_test(col_a, col_b);
+INSERT INTO hot_test VALUES (1, 10, 20, 30, 'data');
+-- col_c not in any index: HOT.
+UPDATE hot_test SET col_c = 35;
+-- data not in any index: HOT.
+UPDATE hot_test SET data = 'updated';
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       2 |   2
+(1 row)
+
+DROP TABLE hot_test;
+-- ---------------------------------------------------------------------------
+-- Unique index: update of non-indexed column + uniqueness enforcement
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_test (
+    id int PRIMARY KEY,
+    unique_col int UNIQUE,
+    data text
+) WITH (fillfactor = 50);
+INSERT INTO hot_test VALUES (1, 100, 'data1');
+INSERT INTO hot_test VALUES (2, 200, 'data2');
+UPDATE hot_test SET data = 'updated';
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test');
+ updates | hot 
+---------+-----
+       2 |   2
+(1 row)
+
+SELECT id, unique_col, data FROM hot_test ORDER BY id;
+ id | unique_col |  data   
+----+------------+---------
+  1 |        100 | updated
+  2 |        200 | updated
+(2 rows)
+
+-- Unique constraint still enforced on any path.
+UPDATE hot_test SET unique_col = 100 WHERE id = 2;
+ERROR:  duplicate key value violates unique constraint "hot_test_unique_col_key"
+DETAIL:  Key (unique_col)=(100) already exists.
+DROP TABLE hot_test;
+-- ---------------------------------------------------------------------------
+-- Partitioned tables: HOT within a partition
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_test_partitioned (
+    id int,
+    partition_key int,
+    indexed_col int,
+    data text,
+    PRIMARY KEY (id, partition_key)
+) PARTITION BY RANGE (partition_key);
+CREATE TABLE hot_test_part1 PARTITION OF hot_test_partitioned
+    FOR VALUES FROM (1) TO (100) WITH (fillfactor = 50);
+CREATE TABLE hot_test_part2 PARTITION OF hot_test_partitioned
+    FOR VALUES FROM (100) TO (200) WITH (fillfactor = 50);
+CREATE INDEX hot_test_part_idx ON hot_test_partitioned(indexed_col);
+INSERT INTO hot_test_partitioned VALUES (1, 50, 100, 'initial1');
+INSERT INTO hot_test_partitioned VALUES (2, 150, 200, 'initial2');
+UPDATE hot_test_partitioned SET data = 'updated1' WHERE id = 1;
+UPDATE hot_test_partitioned SET data = 'updated2' WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test_part1');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test_part2');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+SELECT id FROM hot_test_partitioned WHERE indexed_col = 100;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM hot_test_partitioned WHERE indexed_col = 200;
+ id 
+----
+  2
+(1 row)
+
+DROP TABLE hot_test_partitioned CASCADE;
+-- An update through the parent that writes back an indexed column's value
+-- is HOT.  Routing hands the partition a new tuple whose short text value
+-- has not been packed yet; it is still the same value.
+CREATE TABLE hot_test_partitioned (id int UNIQUE, tag char, n int)
+    PARTITION BY LIST (id);
+CREATE TABLE hot_test_part1 PARTITION OF hot_test_partitioned
+    (tag UNIQUE) FOR VALUES IN (1, 2) WITH (fillfactor = 50);
+INSERT INTO hot_test_partitioned VALUES (1, 'a', 0), (2, 'b', 0);
+INSERT INTO hot_test_partitioned VALUES (1, 'a', 1)
+    ON CONFLICT (id) DO UPDATE SET tag = excluded.tag, n = excluded.n;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_test_part1');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+DROP TABLE hot_test_partitioned CASCADE;
+-- ---------------------------------------------------------------------------
+-- Expression index on a JSONB field
+-- ---------------------------------------------------------------------------
+CREATE TABLE hot_jsonb_test (
+    id int PRIMARY KEY,
+    data jsonb
+) WITH (fillfactor = 50);
+CREATE INDEX hot_jsonb_name_idx ON hot_jsonb_test ((data->>'name'));
+INSERT INTO hot_jsonb_test VALUES
+    (1, '{"name":"Alice","age":30,"city":"NYC"}'),
+    (2, '{"name":"Bob","age":25,"city":"LA"}');
+-- Each UPDATE changes the indexed column but not the indexed expression.
+UPDATE hot_jsonb_test SET data = jsonb_set(data, '{age}', '31') WHERE id = 1;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_jsonb_test');
+ updates | hot 
+---------+-----
+       1 |   1
+(1 row)
+
+UPDATE hot_jsonb_test SET data = data - 'city' WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_jsonb_test');
+ updates | hot 
+---------+-----
+       2 |   2
+(1 row)
+
+UPDATE hot_jsonb_test SET data = jsonb_insert(data, '{country}', '"USA"') WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT * FROM get_hot_count('hot_jsonb_test');
+ updates | hot 
+---------+-----
+       3 |   3
+(1 row)
+
+DROP TABLE hot_jsonb_test;
+-- ---------------------------------------------------------------------------
+-- Expression and partial indexes
+--
+-- update_case() runs one UPDATE on a fresh table and reports how many rows
+-- it updated, and how many of those with HOT.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION update_case(setup text, upd text,
+                            OUT updated bigint, OUT hot bigint)
+LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE 'DROP TABLE IF EXISTS hot_expr_test';
+    EXECUTE setup;
+    updated := pg_stat_get_xact_tuples_updated('hot_expr_test'::regclass);
+    hot := pg_stat_get_xact_tuples_hot_updated('hot_expr_test'::regclass);
+    EXECUTE upd;
+    updated := pg_stat_get_xact_tuples_updated('hot_expr_test'::regclass) - updated;
+    hot := pg_stat_get_xact_tuples_hot_updated('hot_expr_test'::regclass) - hot;
+END;
+$$;
+-- Expression value unchanged.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, s text) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (lower(s));
+    INSERT INTO hot_expr_test SELECT g, 'abc' || g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET s = upper(s)$$);
+NOTICE:  table "hot_expr_test" does not exist, skipping
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, a int, b int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test ((a + b));
+    INSERT INTO hot_expr_test SELECT g, g, 0 FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET a = a - 1, b = b + 1$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- Expression value changed.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, d jsonb) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test ((d->>'name'));
+    INSERT INTO hot_expr_test SELECT g, jsonb_build_object('name', 'n' || g)
+      FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET d = jsonb_set(d, '{name}', '"x"')$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+-- Equal values that are stored differently.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, n numeric) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test ((n + 0));
+    INSERT INTO hot_expr_test SELECT g, 3 FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET n = 3.0$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+-- The index stores a type other than the expression's: name_ops stores
+-- cstring, and gist point_ops stores box.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, s text) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test ((lower(s)::name));
+    INSERT INTO hot_expr_test SELECT g, 'abc' || g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET s = upper(s)$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, p point) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test USING gist ((point(p[0], 0)));
+    INSERT INTO hot_expr_test SELECT g, point(g, g) FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET p = point(p[0], p[1] + 1)$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- An expression that is a point, stored by the gist index as a box.
+-- Comparing it as the box the index stores rather than as the point it is
+-- crashed the server in 2018 (2877.1541538838@sss.pgh.pa.us).
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, d smallint) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test USING gist ((point(d::integer % 7, 0)));
+    INSERT INTO hot_expr_test SELECT g, 1 FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET d = d + 7$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- A plain index on the same column as an expression index.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, s text) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (lower(s));
+    CREATE INDEX ON hot_expr_test (s);
+    INSERT INTO hot_expr_test SELECT g, 'abc' || g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET s = upper(s)$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+-- A BRIN index whose column changed, and an expression index whose value
+-- did not.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, s text, b int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (lower(s));
+    CREATE INDEX ON hot_expr_test USING brin (b);
+    INSERT INTO hot_expr_test SELECT g, 'abc' || g, g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET s = upper(s), b = b + 1$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- A BEFORE ROW trigger that changes the expression's value.
+CREATE FUNCTION hot_expr_trig() RETURNS trigger LANGUAGE plpgsql AS
+  $$BEGIN NEW.s := NEW.s || 'z'; RETURN NEW; END$$;
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, s text, x int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (lower(s));
+    CREATE TRIGGER t BEFORE UPDATE ON hot_expr_test
+      FOR EACH ROW EXECUTE FUNCTION hot_expr_trig();
+    INSERT INTO hot_expr_test SELECT g, 'abc' || g, 0 FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET x = 1$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+DROP FUNCTION hot_expr_trig() CASCADE;
+NOTICE:  drop cascades to trigger t on table hot_expr_test
+-- Partial index, both versions outside the predicate, changing the key or
+-- the predicate's column.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (v) WHERE status = 'active';
+    INSERT INTO hot_expr_test SELECT g, 'done', g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET v = v + 1$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (v) WHERE status = 'active';
+    INSERT INTO hot_expr_test SELECT g, 'done', g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET status = 'archived'$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- Both versions inside the predicate with the key unchanged.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (v) WHERE status <> 'x';
+    INSERT INTO hot_expr_test SELECT g, 'a', g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET status = 'b'$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- Entering or leaving the predicate, or changing the key inside it.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (v) WHERE status = 'active';
+    INSERT INTO hot_expr_test SELECT g, 'active', g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET status = 'done'$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (v) WHERE status = 'active';
+    INSERT INTO hot_expr_test SELECT g, 'done', g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET status = 'active'$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (v) WHERE status = 'active';
+    INSERT INTO hot_expr_test SELECT g, 'active', g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET v = v + 1000$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+-- Rows updated outside a partial index must not be found through it.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, status text, v int) WITH (fillfactor = 50);
+    CREATE INDEX hot_expr_test_v ON hot_expr_test (v) WHERE status = 'active';
+    INSERT INTO hot_expr_test SELECT g, CASE WHEN g <= 5 THEN 'active' ELSE 'done' END, g
+      FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET v = v + 100 WHERE status = 'done'$$);
+ updated | hot 
+---------+-----
+       5 |   5
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM hot_expr_test WHERE status = 'active' AND v > 0;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Index Scan using hot_expr_test_v on hot_expr_test
+   Index Cond: (v > 0)
+(2 rows)
+
+SELECT id FROM hot_expr_test WHERE status = 'active' AND v > 0 ORDER BY v;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+(5 rows)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SELECT id FROM hot_expr_test WHERE status = 'active' AND v > 0 ORDER BY v;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+(5 rows)
+
+DROP TABLE hot_expr_test;
+-- One UPDATE whose rows each need a different index to decide: some change
+-- the expression index, some only enter or leave the partial index created
+-- after it, some change neither.  The partial index must hold exactly the
+-- rows that satisfy its predicate.
+CREATE TABLE hot_expr_multi (id int PRIMARY KEY, doc jsonb) WITH (fillfactor = 30);
+CREATE INDEX hot_expr_multi_status ON hot_expr_multi ((doc->>'status'));
+CREATE INDEX hot_expr_multi_vip ON hot_expr_multi ((doc->>'email'))
+  WHERE (doc->>'vip')::bool;
+INSERT INTO hot_expr_multi
+  SELECT g, jsonb_build_object('status', 'a', 'email', 'e' || g,
+                               'vip', g % 2 = 0, 'n', 0)
+    FROM generate_series(1, 300) g;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 4 = 0 THEN jsonb_set(doc, '{status}', '"b"')
+    WHEN id % 4 = 1 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 4 = 2 THEN jsonb_set(jsonb_set(doc, '{status}', '"c"'),
+                                   '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    ELSE jsonb_set(doc, '{n}', '1') END;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM hot_expr_multi
+ WHERE (doc->>'vip')::bool AND doc->>'email' >= 'e';
+ count 
+-------
+   150
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SELECT count(*) FROM hot_expr_multi WHERE (doc->>'vip')::bool;
+ count 
+-------
+   150
+(1 row)
+
+DROP TABLE hot_expr_multi;
+-- An index whose concurrent build failed is not ready for inserts, and its
+-- expression need not be computable for every row.  An UPDATE must not
+-- evaluate it.
+CREATE TABLE hot_expr_cic (id int PRIMARY KEY, x int) WITH (fillfactor = 50);
+INSERT INTO hot_expr_cic VALUES (1, 1), (2, 0);
+CREATE INDEX CONCURRENTLY hot_expr_cic_idx ON hot_expr_cic ((100 / x));
+ERROR:  division by zero
+SELECT indisready, indisvalid FROM pg_index
+ WHERE indexrelid = 'hot_expr_cic_idx'::regclass;
+ indisready | indisvalid 
+------------+------------
+ f          | f
+(1 row)
+
+UPDATE hot_expr_cic SET x = 0 WHERE id = 1;
+UPDATE hot_expr_cic SET x = 1 WHERE id = 2;
+SELECT * FROM hot_expr_cic ORDER BY id;
+ id | x 
+----+---
+  1 | 0
+  2 | 1
+(2 rows)
+
+DROP TABLE hot_expr_cic;
+-- Writing back a value that is stored compressed in the old row, and not
+-- yet in the new one.  An SP-GiST index, whose access method cannot compare
+-- entries, and which returns the value in index-only scans.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, t text) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test USING spgist (t);
+    INSERT INTO hot_expr_test SELECT g, repeat('x', 3000) || g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET t = repeat('x', 3000) || id$$);
+NOTICE:  table "hot_expr_test" does not exist, skipping
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM hot_expr_test WHERE t = repeat('x', 3000) || 7;
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+-- The same in a partial index evaluated for another column's change.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, t text, x int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test (t) WHERE x >= 0;
+    INSERT INTO hot_expr_test SELECT g, repeat('x', 3000) || g, 0 FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET t = repeat('x', 3000) || id, x = x + 1$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- The same through an expression that returns the column's value as is.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int PRIMARY KEY, t text, x int) WITH (fillfactor = 50);
+    CREATE INDEX ON hot_expr_test ((coalesce(t, ''))) WHERE x >= 0;
+    INSERT INTO hot_expr_test SELECT g, repeat('x', 3000) || g, 0 FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET t = repeat('x', 3000) || id, x = x + 1$$);
+ updated | hot 
+---------+-----
+      10 |  10
+(1 row)
+
+-- ... but not for a column of a unique index, which the table's lock
+-- strength is decided by as stored.
+SELECT * FROM update_case(
+  $$CREATE TABLE hot_expr_test (id int, t text) WITH (fillfactor = 50);
+    CREATE UNIQUE INDEX ON hot_expr_test (t);
+    INSERT INTO hot_expr_test SELECT g, repeat('x', 3000) || g FROM generate_series(1, 10) g$$,
+  $$UPDATE hot_expr_test SET t = repeat('x', 3000) || id$$);
+ updated | hot 
+---------+-----
+      10 |   0
+(1 row)
+
+DROP TABLE hot_expr_test;
+DROP FUNCTION update_case(text, text);
+DROP FUNCTION get_hot_count(text);
