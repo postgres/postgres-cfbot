@@ -1,0 +1,41 @@
+Parsed test spec with 2 sessions
+
+starting permutation: lock s2_unpriv s2_vacuum s2_analyze s2_reset commit check_stat
+step lock: 
+	BEGIN;
+	LOCK TABLE vsl_tab IN ACCESS EXCLUSIVE MODE;
+
+step s2_unpriv: SET ROLE regress_vsl_unpriv;
+s2: WARNING:  skipping vacuum of "vsl_tab" --- lock not available
+step s2_vacuum: VACUUM (SKIP_LOCKED) vsl_tab;
+s2: WARNING:  skipping analyze of "vsl_tab" --- lock not available
+step s2_analyze: ANALYZE (SKIP_LOCKED) vsl_tab;
+step s2_reset: RESET ROLE;
+step commit: 
+	COMMIT;
+
+step check_stat: SELECT pg_stat_get_lock_skipped_vacuum_count('vsl_tab'::regclass) AS vac_skips, pg_stat_get_lock_skipped_analyze_count('vsl_tab'::regclass) AS anl_skips;
+vac_skips|anl_skips
+---------+---------
+        0|        0
+(1 row)
+
+
+starting permutation: lock s2_vacuum s2_analyze commit check_stat
+step lock: 
+	BEGIN;
+	LOCK TABLE vsl_tab IN ACCESS EXCLUSIVE MODE;
+
+s2: WARNING:  skipping vacuum of "vsl_tab" --- lock not available
+step s2_vacuum: VACUUM (SKIP_LOCKED) vsl_tab;
+s2: WARNING:  skipping analyze of "vsl_tab" --- lock not available
+step s2_analyze: ANALYZE (SKIP_LOCKED) vsl_tab;
+step commit: 
+	COMMIT;
+
+step check_stat: SELECT pg_stat_get_lock_skipped_vacuum_count('vsl_tab'::regclass) AS vac_skips, pg_stat_get_lock_skipped_analyze_count('vsl_tab'::regclass) AS anl_skips;
+vac_skips|anl_skips
+---------+---------
+        1|        1
+(1 row)
+
