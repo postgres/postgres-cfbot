@@ -7734,6 +7734,18 @@ exec_move_row_from_datum(PLpgSQL_execstate *estate,
 				 (rec->rectypeid == RECORDOID &&
 				  !ExpandedRecordIsDomain(erh))))
 			{
+				/*
+				 * In a non-atomic context, though, the record must not keep
+				 * any out-of-line field values, since such TOAST pointers
+				 * might become stale after a COMMIT or ROLLBACK.  Computing
+				 * the record's flat size inlines them in place (see
+				 * ER_get_flat_size).
+				 */
+				if (!estate->atomic && (erh->flags & ER_FLAG_HAVE_EXTERNAL))
+				{
+					(void) EOH_get_flat_size(&erh->hdr);
+					Assert(!(erh->flags & ER_FLAG_HAVE_EXTERNAL));
+				}
 				assign_record_var(estate, rec, erh);
 				return;
 			}
