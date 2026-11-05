@@ -1012,6 +1012,10 @@ ExecAppendAsyncRequest(AppendState *node, TupleTableSlot **result)
  *		ExecAppendAsyncEventWait
  *
  *		Wait or poll for file descriptor events and fire callbacks.
+ *
+ *		If node->as_syncdone is true, wait until at least one event
+ *		occurs; otherwise, poll without waiting so synchronous
+ *		execution can proceed.
  * ----------------------------------------------------------------
  */
 static void
