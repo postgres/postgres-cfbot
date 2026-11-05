@@ -208,6 +208,34 @@ ORDER BY c.relpages DESC LIMIT 10;
     </listitem>
    </varlistentry>
 
+   <varlistentry>
+    <term>
+     <function>gist_index_check(index regclass, heapallindexed boolean) returns void</function>
+     <indexterm>
+      <primary>gist_index_check</primary>
+     </indexterm>
+    </term>
+
+    <listitem>
+     <para>
+      <function>gist_index_check</function> tests that its target GiST
+      index has consistent parent-child tuples relations (no parent tuples
+      require tuple adjustment) and page graph respects balanced-tree
+      invariants (internal pages reference only leaf page or only internal
+      pages).  When <parameter>heapallindexed</parameter> is
+      <literal>true</literal>, it also verifies the presence of all heap
+      tuples as index tuples within the index.
+     </para>
+     <para>
+      <function>gist_index_check</function> acquires an
+      <literal>AccessShareLock</literal> on the target index and the heap
+      relation it belongs to, so it can run while the index is being
+      modified.  A key that looks inconsistent with its parent is checked
+      again with both pages locked, to rule out a concurrent page split.
+     </para>
+    </listitem>
+   </varlistentry>
+
   </variablelist>
   <tip>
    <para>
@@ -378,8 +406,8 @@ SET client_min_messages = DEBUG1;
  <sect2 id="amcheck-optional-heapallindexed-verification">
   <title>Optional <parameter>heapallindexed</parameter> Verification</title>
  <para>
-  When the <parameter>heapallindexed</parameter> argument to B-Tree
-  verification functions is <literal>true</literal>, an additional
+  When the <parameter>heapallindexed</parameter> argument to B-Tree or
+  GiST verification functions is <literal>true</literal>, an additional
   phase of verification is performed against the table associated with
   the target index relation.  This consists of a <quote>dummy</quote>
   <command>CREATE INDEX CONCURRENTLY</command> operation, which checks for the
