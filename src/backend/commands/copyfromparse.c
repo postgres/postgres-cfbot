@@ -831,11 +831,21 @@ NextCopyFromRawFieldsInternal(CopyFromState cstate, char ***fields, int *nfields
 		if (cstate->opts.header_line == COPY_HEADER_MATCH)
 		{
 			int			fldnum;
+			char	   *save_default_print = cstate->opts.default_print;
+
+			/*
+			 * Disable DEFAULT marker recognition while parsing the header
+			 * line, so that column names matching the default string are not
+			 * treated as default markers.
+			 */
+			cstate->opts.default_print = NULL;
 
 			if (is_csv)
 				fldct = CopyReadAttributesCSV(cstate);
 			else
 				fldct = CopyReadAttributesText(cstate);
+
+			cstate->opts.default_print = save_default_print;
 
 			if (fldct != list_length(cstate->attnumlist))
 				ereport(ERROR,
