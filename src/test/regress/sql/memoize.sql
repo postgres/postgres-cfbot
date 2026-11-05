@@ -23,7 +23,7 @@ begin
         ln := regexp_replace(ln, 'Evictions: 0', 'Evictions: Zero');
         ln := regexp_replace(ln, 'Evictions: \d+', 'Evictions: N');
         ln := regexp_replace(ln, 'Memory Usage: \d+', 'Memory Usage: N');
-        ln := regexp_replace(ln, 'Heap Fetches: \d+', 'Heap Fetches: N');
+        ln := regexp_replace(ln, 'Table Block Fetches: \d+', 'Table Block Fetches: N');
         ln := regexp_replace(ln, 'loops=\d+', 'loops=N');
         ln := regexp_replace(ln, 'Index Searches: \d+', 'Index Searches: N');
         ln := regexp_replace(ln, 'Memory: \d+kB', 'Memory: NkB');
