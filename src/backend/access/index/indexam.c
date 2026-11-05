@@ -238,6 +238,26 @@ index_insert(Relation indexRelation,
 											 indexInfo);
 }
 
+/* ----------------
+ *		index_notify_delete - tell an index that a heap tuple went away
+ * ----------------
+ */
+void
+index_notify_delete(Relation indexRelation,
+					Datum *values,
+					bool *isnull,
+					ItemPointer heap_t_ctid,
+					Relation heapRelation,
+					IndexInfo *indexInfo)
+{
+	RELATION_CHECKS;
+	CHECK_REL_PROCEDURE(amnotifydelete);
+
+	indexRelation->rd_indam->amnotifydelete(indexRelation, values, isnull,
+											heap_t_ctid, heapRelation,
+											indexInfo);
+}
+
 /* -------------------------
  *		index_insert_cleanup - clean up after all index inserts are done
  * -------------------------

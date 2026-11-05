@@ -3577,6 +3577,7 @@ aminitparallelscan_function
 aminsert_function
 aminsertcleanup_function
 ammarkpos_function
+amnotifydelete_function
 amoptions_function
 amparallelrescan_function
 amproperty_function
