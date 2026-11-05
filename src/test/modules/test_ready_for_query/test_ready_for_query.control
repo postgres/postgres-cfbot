@@ -1,0 +1,4 @@
+comment = 'Test module for ReadyForQuery hook'
+default_version = '1.0'
+module_pathname = '$libdir/test_ready_for_query'
+relocatable = true

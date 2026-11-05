@@ -90,6 +90,7 @@
 #include "storage/procnumber.h"
 #include "storage/standby.h"
 #include "tcop/backend_startup.h"
+#include "tcop/dest.h"
 #include "tcop/tcopprot.h"
 #include "portability/instr_time.h"
 #include "tsearch/ts_cache.h"
@@ -427,6 +428,12 @@ static const struct config_enum_entry plan_cache_mode_options[] = {
 static const struct config_enum_entry password_encryption_options[] = {
 	{"md5", PASSWORD_TYPE_MD5, false},
 	{"scram-sha-256", PASSWORD_TYPE_SCRAM_SHA_256, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry ready_for_query_message_options[] = {
+	{"plain", READY_FOR_QUERY_PLAIN, false},
+	{"rich", READY_FOR_QUERY_RICH, false},
 	{NULL, 0, false}
 };
 
