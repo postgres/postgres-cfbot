@@ -114,6 +114,11 @@ extern void ProcessCopyOptions(ParseState *pstate, CopyFormatOptions *opts_out, 
 extern CopyFromState BeginCopyFrom(ParseState *pstate, Relation rel, Node *whereClause,
 								   const char *filename,
 								   bool is_program, copy_data_source_cb data_source_cb, List *attnamelist, List *options);
+extern CopyFromState BeginCopyFromExtended(ParseState *pstate, Relation rel,
+										   Node *whereClause, const char *filename,
+										   bool is_program, copy_data_source_cb data_source_cb,
+										   List *attnamelist, List *options,
+										   bool attnamelist_is_explicit);
 extern void EndCopyFrom(CopyFromState cstate);
 extern bool NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 						 Datum *values, bool *nulls);
