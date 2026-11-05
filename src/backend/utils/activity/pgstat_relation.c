@@ -273,6 +273,30 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 	if (!pgstat_track_counts)
 		return;
 
+	/*
+	 * The live and dead tuple counts computed by VACUUM already include the
+	 * effects of transactions previously committed by this backend whose
+	 * stats have not been flushed yet.  Forget the pending deltas for those
+	 * counters, else they would be added on top of the new values at the
+	 * next flush.  A pending truncation reset is superseded as well.
+	 *
+	 * Likewise, the pending inserts must not count towards ins_since_vacuum,
+	 * which is reset below.  We can't just zero tuples_inserted, which also
+	 * feeds the cumulative tuples_inserted counter, so remember how many of
+	 * them the flush has to skip.
+	 */
+	if (pgstat_should_count_relation(rel))
+	{
+		PgStat_RelationStatus *pending = rel->pgstat_info;
+
+		Assert(pending->kind == PGSTAT_KIND_RELATION);
+		pending->tab.counts_xact.delta_live_tuples = 0;
+		pending->tab.counts_xact.delta_dead_tuples = 0;
+		pending->tab.truncdropped = false;
+		pending->tab.ins_before_vacuum =
+			pending->tab.counts_xact.tuples_inserted;
+	}
+
 	/* Store the data in the table's hash table entry. */
 	ts = GetCurrentTimestamp();
 	elapsedtime = TimestampDifferenceMilliseconds(starttime, ts);
@@ -341,6 +365,7 @@ pgstat_report_analyze(Relation rel,
 	Oid			dboid = (rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId);
 	TimestampTz ts;
 	PgStat_Counter elapsedtime;
+	bool		truncdropped = false;
 
 	if (!pgstat_track_counts)
 		return;
@@ -360,19 +385,34 @@ pgstat_report_analyze(Relation rel,
 	if (pgstat_should_count_relation(rel) &&
 		rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 	{
+		PgStat_RelationStatus *pending = rel->pgstat_info;
 		PgStat_TableXactStatus *trans;
 
-		Assert(rel->pgstat_info->kind == PGSTAT_KIND_RELATION);
-		for (trans = rel->pgstat_info->tab.trans; trans; trans = trans->upper)
+		Assert(pending->kind == PGSTAT_KIND_RELATION);
+		for (trans = pending->tab.trans; trans; trans = trans->upper)
 		{
 			livetuples -= trans->tuples_inserted - trans->tuples_deleted;
 			deadtuples -= trans->tuples_updated + trans->tuples_deleted;
 		}
-		/* count stuff inserted by already-aborted subxacts, too */
-		deadtuples -= rel->pgstat_info->tab.counts_xact.delta_dead_tuples;
 		/* Since ANALYZE's counts are estimates, we could have underflowed */
 		livetuples = Max(livetuples, 0);
 		deadtuples = Max(deadtuples, 0);
+
+		/*
+		 * Likewise, ANALYZE has already counted the effects of transactions
+		 * previously committed by this backend (and of already-aborted
+		 * subxacts) whose stats have not been flushed yet.  Forget the
+		 * pending deltas for those, else they would be added on top of the
+		 * new values at the next flush.  A pending truncation reset of the
+		 * live/dead counters is superseded too, but we still have to apply
+		 * its reset of ins_since_vacuum below.
+		 */
+		pending->tab.counts_xact.delta_live_tuples = 0;
+		pending->tab.counts_xact.delta_dead_tuples = 0;
+		if (resetcounter)
+			pending->tab.counts_xact.changed_tuples = 0;
+		truncdropped = pending->tab.truncdropped;
+		pending->tab.truncdropped = false;
 	}
 
 	/* Store the data in the table's hash table entry. */
@@ -391,6 +431,8 @@ pgstat_report_analyze(Relation rel,
 
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
+	if (truncdropped)
+		tabentry->ins_since_vacuum = 0;
 
 	/*
 	 * If commanded, reset mod_since_analyze to zero.  This forgets any
@@ -641,9 +683,13 @@ AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 		relstat->tab.counts_xact.tuples_deleted += trans->tuples_deleted;
 		if (isCommit)
 		{
-			relstat->tab.truncdropped = trans->truncdropped;
+			/*
+			 * Don't clear a truncation still pending from an earlier
+			 * transaction whose stats have not been flushed yet.
+			 */
 			if (trans->truncdropped)
 			{
+				relstat->tab.truncdropped = true;
 				/* forget live/dead stats seen by backend thus far */
 				relstat->tab.counts_xact.delta_live_tuples = 0;
 				relstat->tab.counts_xact.delta_dead_tuples = 0;
@@ -829,9 +875,10 @@ pgstat_twophase_postcommit(FullTransactionId fxid, uint16 info,
 	pgstat_info->tab.counts_xact.tuples_inserted += rec->tuples_inserted;
 	pgstat_info->tab.counts_xact.tuples_updated += rec->tuples_updated;
 	pgstat_info->tab.counts_xact.tuples_deleted += rec->tuples_deleted;
-	pgstat_info->tab.truncdropped = rec->truncdropped;
+	/* see AtEOXact_PgStat_Relations() */
 	if (rec->truncdropped)
 	{
+		pgstat_info->tab.truncdropped = true;
 		/* forget live/dead stats seen by backend thus far */
 		pgstat_info->tab.counts_xact.delta_live_tuples = 0;
 		pgstat_info->tab.counts_xact.delta_dead_tuples = 0;
@@ -953,7 +1000,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	 * triggering for inserts more often than they maybe should, which is
 	 * probably not going to be common enough to be too concerned about here.
 	 */
-	tabentry->ins_since_vacuum += lstats->tab.counts_xact.tuples_inserted;
+	tabentry->ins_since_vacuum += lstats->tab.counts_xact.tuples_inserted -
+		lstats->tab.ins_before_vacuum;
 
 	tabentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
 	tabentry->blocks_hit += lstats->tab.counts.blocks_hit;
