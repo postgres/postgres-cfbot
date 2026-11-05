@@ -1824,7 +1824,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		/*
 		 * Calculate pathkeys that represent result ordering requirements
 		 */
-		Assert(parse->distinctClause == NIL);
 		root->sort_pathkeys = make_pathkeys_for_sortclauses(root,
 															parse->sortClause,
 															root->processed_tlist);
@@ -3874,16 +3873,46 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 
 		/* Make a copy since pathkey processing can modify the list */
 		root->processed_distinctClause = list_copy(parse->distinctClause);
-		root->distinct_pathkeys =
+		
+		if (parse->distinctSortClause)
+		{
+			/* We have DISTINCT ON with ORDER BY */
+			List *temp_distinct_clause = list_copy(parse->distinctSortClause);
+			bool temp_sortable;
+			root->distinct_pathkeys =
+				make_pathkeys_for_sortclauses_extended(root,
+													   &temp_distinct_clause,
+													   tlist,
+													   true,
+													   false,
+													   &sortable,
+													   false);
+			if (!sortable)
+				root->distinct_pathkeys = NIL;
+
+			/* We ALSO need to remove redundant keys from processed_distinctClause */
 			make_pathkeys_for_sortclauses_extended(root,
 												   &root->processed_distinctClause,
 												   tlist,
 												   true,
 												   false,
-												   &sortable,
+												   &temp_sortable,
 												   false);
-		if (!sortable)
-			root->distinct_pathkeys = NIL;
+		}
+		else
+		{
+			/* Standard DISTINCT or DISTINCT ON without ORDER BY */
+			root->distinct_pathkeys =
+				make_pathkeys_for_sortclauses_extended(root,
+													   &root->processed_distinctClause,
+													   tlist,
+													   true,
+													   false,
+													   &sortable,
+													   false);
+			if (!sortable)
+				root->distinct_pathkeys = NIL;
+		}
 	}
 	else
 		root->distinct_pathkeys = NIL;
@@ -3908,7 +3937,7 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 												   false,
 												   false,
 												   &sortable,
-												   false);
+												   true);
 		if (!sortable)
 			root->setop_pathkeys = NIL;
 	}
@@ -5235,11 +5264,11 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					continue;
 
 				/*
-				 * An empty distinct_pathkeys means all tuples have the same
-				 * value for the DISTINCT clause.  See
+				 * An empty processed_distinctClause means all tuples have the
+				 * same value for the DISTINCT clause.  See
 				 * create_final_distinct_paths()
 				 */
-				if (root->distinct_pathkeys == NIL)
+				if (root->processed_distinctClause == NIL)
 				{
 					Node	   *limitCount;
 
@@ -5272,7 +5301,7 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					add_partial_path(partial_distinct_rel, (Path *)
 									 create_unique_path(root, partial_distinct_rel,
 														sorted_path,
-														list_length(root->distinct_pathkeys),
+														list_length(root->processed_distinctClause),
 														numDistinctRows));
 				}
 			}
@@ -5285,7 +5314,9 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * path here, we treat enable_hashagg as a hard off-switch rather than the
 	 * slightly softer variant in create_final_distinct_paths.
 	 */
-	if (enable_hashagg && grouping_is_hashable(root->processed_distinctClause))
+	if (enable_hashagg && root->processed_distinctClause != NIL &&
+		(!parse->hasDistinctOn || parse->distinctSortClause != NIL) &&
+		grouping_is_hashable(root->processed_distinctClause))
 	{
 		add_partial_path(partial_distinct_rel, (Path *)
 						 create_agg_path(root,
@@ -5297,7 +5328,8 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										 root->processed_distinctClause,
 										 NIL,
 										 NULL,
-										 numDistinctRows));
+										 numDistinctRows,
+										 parse->distinctSortClause));
 	}
 
 	/*
@@ -5376,7 +5408,9 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/*
 	 * Consider sort-based implementations of DISTINCT, if possible.
 	 */
-	if (grouping_is_sortable(root->processed_distinctClause))
+	if (grouping_is_sortable(root->processed_distinctClause) &&
+		(!parse->distinctSortClause ||
+		 grouping_is_sortable(parse->distinctSortClause)))
 	{
 		/*
 		 * Firstly, if we have any adequately-presorted paths, just stick a
@@ -5387,18 +5421,19 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		 * reorder the required pathkeys to match the input path's pathkeys as
 		 * much as possible, in hopes of avoiding a possible need to re-sort.
 		 *
-		 * When we have DISTINCT ON, we must sort by the more rigorous of
-		 * DISTINCT and ORDER BY, else it won't have the desired behavior.
-		 * Also, if we do have to do an explicit sort, we might as well use
-		 * the more rigorous ordering to avoid a second sort later.  (Note
-		 * that the parser will have ensured that one clause is a prefix of
-		 * the other.)
+		 * When we have DISTINCT ON (without an inline ORDER BY), we must sort
+		 * by the more rigorous of DISTINCT and ORDER BY, else it won't have
+		 * the desired behavior.  Also, if we do have to do an explicit sort,
+		 * we might as well use the more rigorous ordering to avoid a second
+		 * sort later.  (Note that the parser will have ensured that one
+		 * clause is a prefix of the other.)
 		 */
 		List	   *needed_pathkeys;
 		ListCell   *lc;
-		double		limittuples = root->distinct_pathkeys == NIL ? 1.0 : -1.0;
+		double		limittuples = root->processed_distinctClause == NIL ? 1.0 : -1.0;
 
 		if (parse->hasDistinctOn &&
+			parse->distinctSortClause == NIL &&
 			list_length(root->distinct_pathkeys) <
 			list_length(root->sort_pathkeys))
 			needed_pathkeys = root->sort_pathkeys;
@@ -5430,19 +5465,18 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					continue;
 
 				/*
-				 * distinct_pathkeys may have become empty if all of the
-				 * pathkeys were determined to be redundant.  If all of the
-				 * pathkeys are redundant then each DISTINCT target must only
-				 * allow a single value, therefore all resulting tuples must
-				 * be identical (or at least indistinguishable by an equality
-				 * check).  We can uniquify these tuples simply by just taking
-				 * the first tuple.  All we do here is add a path to do "LIMIT
-				 * 1" atop of 'sorted_path'.  When doing a DISTINCT ON we may
-				 * still have a non-NIL sort_pathkeys list, so we must still
-				 * only do this with paths which are correctly sorted by
-				 * sort_pathkeys.
+				 * processed_distinctClause may have become empty if all of
+				 * the DISTINCT ON pathkeys were determined to be redundant.
+				 * If all of the DISTINCT ON keys are redundant then each
+				 * DISTINCT target must only allow a single value, therefore
+				 * all resulting tuples belong to a single group.  We can
+				 * uniquify these tuples simply by just taking the first tuple
+				 * ("LIMIT 1" atop of 'sorted_path').  When doing a DISTINCT
+				 * ON we may still have a non-NIL sort_pathkeys or
+				 * distinct_pathkeys list, so we must still only do this with
+				 * paths which are correctly sorted.
 				 */
-				if (root->distinct_pathkeys == NIL)
+				if (root->processed_distinctClause == NIL)
 				{
 					Node	   *limitCount;
 
@@ -5466,7 +5500,7 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					add_path(distinct_rel, (Path *)
 							 create_unique_path(root, distinct_rel,
 												sorted_path,
-												list_length(root->distinct_pathkeys),
+												list_length(root->processed_distinctClause),
 												numDistinctRows));
 				}
 			}
@@ -5477,22 +5511,25 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Consider hash-based implementations of DISTINCT, if possible.
 	 *
 	 * If we were not able to make any other types of path, we *must* hash or
-	 * die trying.  If we do have other choices, there are two things that
-	 * should prevent selection of hashing: if the query uses DISTINCT ON
-	 * (because it won't really have the expected behavior if we hash), or if
-	 * enable_hashagg is off.
+	 * die trying.  If we do have other choices, we allow hashing for plain
+	 * DISTINCT and for DISTINCT ON with an inline ORDER BY (where
+	 * HashAggregate uses ReplaceTupleHashEntryIfBetter), unless enable_hashagg
+	 * is off.
 	 *
 	 * Note: grouping_is_hashable() is much more expensive to check than the
 	 * other gating conditions, so we want to do it last.
 	 */
 	if (distinct_rel->pathlist == NIL)
 		allow_hash = true;		/* we have no alternatives */
-	else if (parse->hasDistinctOn || !enable_hashagg)
+	else if ((parse->hasDistinctOn &&
+			  parse->distinctSortClause == NIL) ||
+			 !enable_hashagg)
 		allow_hash = false;		/* policy-based decision not to hash */
 	else
 		allow_hash = true;		/* default */
 
-	if (allow_hash && grouping_is_hashable(root->processed_distinctClause))
+	if (allow_hash && root->processed_distinctClause != NIL &&
+		grouping_is_hashable(root->processed_distinctClause))
 	{
 		/* Generate hashed aggregate path --- no sort needed */
 		add_path(distinct_rel, (Path *)
@@ -5505,7 +5542,8 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 								 root->processed_distinctClause,
 								 NIL,
 								 NULL,
-								 numDistinctRows));
+								 numDistinctRows,
+								 parse->distinctSortClause));
 	}
 
 	return distinct_rel;
@@ -5539,8 +5577,8 @@ get_useful_pathkeys_for_distinct(PlannerInfo *root, List *needed_pathkeys,
 	 * prefix.
 	 *
 	 * When we have DISTINCT ON, we must ensure that the resulting pathkey
-	 * list matches initial distinctClause pathkeys; otherwise, it won't have
-	 * the desired behavior.
+	 * list matches initial distinctClause pathkeys (not inline ORDER BY
+	 * tie-breaker pathkeys); otherwise, it won't have the desired behavior.
 	 */
 	foreach_node(PathKey, pathkey, path_pathkeys)
 	{
@@ -5550,9 +5588,27 @@ get_useful_pathkeys_for_distinct(PlannerInfo *root, List *needed_pathkeys,
 		 */
 		if (!list_member_ptr(needed_pathkeys, pathkey))
 			break;
-		if (root->parse->hasDistinctOn &&
-			!list_member_ptr(root->distinct_pathkeys, pathkey))
-			break;
+		if (root->parse->hasDistinctOn)
+		{
+			int			n_distinct = list_length(root->processed_distinctClause);
+			ListCell   *dlc;
+			int			i = 0;
+			bool		is_distinct_key = false;
+
+			foreach(dlc, root->distinct_pathkeys)
+			{
+				if (i >= n_distinct)
+					break;
+				if (lfirst(dlc) == pathkey)
+				{
+					is_distinct_key = true;
+					break;
+				}
+				i++;
+			}
+			if (!is_distinct_key)
+				break;
+		}
 
 		useful_pathkeys = lappend(useful_pathkeys, pathkey);
 	}
@@ -7478,7 +7534,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 											 info->clauses,
 											 havingQual,
 											 agg_costs,
-											 dNumGroups));
+											 dNumGroups,
+											 NIL));
 				}
 				else if (parse->groupClause)
 				{
@@ -7549,7 +7606,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 												 info->clauses,
 												 havingQual,
 												 agg_final_costs,
-												 dNumFinalGroups));
+												 dNumFinalGroups,
+												 NIL));
 					else
 						add_path(grouped_rel, (Path *)
 								 create_group_path(root,
@@ -7590,7 +7648,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 									 root->processed_groupClause,
 									 havingQual,
 									 agg_costs,
-									 dNumGroups));
+									 dNumGroups,
+									 NIL));
 		}
 
 		/*
@@ -7609,7 +7668,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 									 root->processed_groupClause,
 									 havingQual,
 									 agg_final_costs,
-									 dNumFinalGroups));
+									 dNumFinalGroups,
+									 NIL));
 		}
 	}
 
@@ -7812,7 +7872,8 @@ create_partial_grouping_paths(PlannerInfo *root,
 											 info->clauses,
 											 NIL,
 											 agg_partial_costs,
-											 dNumPartialGroups));
+											 dNumPartialGroups,
+											 NIL));
 				else
 					add_path(partially_grouped_rel, (Path *)
 							 create_group_path(root,
@@ -7870,7 +7931,8 @@ create_partial_grouping_paths(PlannerInfo *root,
 													 info->clauses,
 													 NIL,
 													 agg_partial_costs,
-													 dNumPartialPartialGroups));
+													 dNumPartialPartialGroups,
+													 NIL));
 				else
 					add_partial_path(partially_grouped_rel, (Path *)
 									 create_group_path(root,
@@ -7901,7 +7963,8 @@ create_partial_grouping_paths(PlannerInfo *root,
 								 root->processed_groupClause,
 								 NIL,
 								 agg_partial_costs,
-								 dNumPartialGroups));
+								 dNumPartialGroups,
+								 NIL));
 	}
 
 	/*
@@ -7919,7 +7982,8 @@ create_partial_grouping_paths(PlannerInfo *root,
 										 root->processed_groupClause,
 										 NIL,
 										 agg_partial_costs,
-										 dNumPartialPartialGroups));
+										 dNumPartialPartialGroups,
+										 NIL));
 	}
 
 	/*
@@ -8646,48 +8710,63 @@ group_by_has_partkey(RelOptInfo *input_rel,
  * then we return an empty list.  This may leave some TLEs with unreferenced
  * ressortgroupref markings, but that's harmless.
  */
+static TargetEntry *
+get_nth_nonjunk_tle(List *tlist, int n)
+{
+	ListCell   *lc;
+	int			count = 0;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (!tle->resjunk)
+		{
+			count++;
+			if (count == n)
+				return tle;
+		}
+	}
+	return NULL;
+}
+
 static List *
 generate_setop_child_grouplist(SetOperationStmt *op, List *targetlist)
 {
-	List	   *grouplist = copyObject(op->groupClauses);
+	List	   *clauses = op->sortClauses ? op->sortClauses : op->groupClauses;
+	List	   *grouplist = copyObject(clauses);
 	ListCell   *lg;
-	ListCell   *lt;
-	ListCell   *ct;
 
-	lg = list_head(grouplist);
-	ct = list_head(op->colTypes);
-	foreach(lt, targetlist)
+	foreach(lg, grouplist)
 	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lt);
-		SortGroupClause *sgc;
+		SortGroupClause *sgc = (SortGroupClause *) lfirst(lg);
+		Index		ref = sgc->tleSortGroupRef;
+		TargetEntry *tle;
 		Oid			coltype;
 
-		/* resjunk columns could have sortgrouprefs.  Leave these alone */
-		if (tle->resjunk)
-			continue;
+		/* If tleSortGroupRef is not set, we can't map it. */
+		if (ref == 0 || ref > list_length(targetlist))
+			elog(ERROR, "missing target entry for setop groupClause ref %u", ref);
 
-		/*
-		 * We expect every non-resjunk target to have a SortGroupClause and
-		 * colTypes.
-		 */
-		Assert(lg != NULL);
-		Assert(ct != NULL);
-		sgc = (SortGroupClause *) lfirst(lg);
-		coltype = lfirst_oid(ct);
+		tle = list_nth_node(TargetEntry, targetlist, ref - 1);
+		if (tle->resjunk)
+		{
+			tle = get_nth_nonjunk_tle(targetlist, ref);
+			if (tle == NULL)
+				elog(ERROR, "missing target entry for setop groupClause ref %u", ref);
+		}
+
+		/* We also need to get the type from op->colTypes */
+		Assert(ref <= list_length(op->colTypes));
+		coltype = list_nth_oid(op->colTypes, ref - 1);
 
 		/* reject if target type isn't the same as the setop target type */
 		if (coltype != exprType((Node *) tle->expr))
 			return NIL;
 
-		lg = lnext(grouplist, lg);
-		ct = lnext(op->colTypes, ct);
-
 		/* assign a tleSortGroupRef, or reuse the existing one */
 		sgc->tleSortGroupRef = assignSortGroupRef(tle, targetlist);
 	}
-
-	Assert(lg == NULL);
-	Assert(ct == NULL);
 
 	return grouplist;
 }
@@ -9086,7 +9165,8 @@ create_final_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										groupClause,
 										NIL,
 										NULL,
-										unique_rel->rows);
+										unique_rel->rows,
+										NIL);
 
 		add_path(unique_rel, path);
 	}
@@ -9228,7 +9308,8 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										groupClause,
 										NIL,
 										NULL,
-										partial_unique_rel->rows);
+										partial_unique_rel->rows,
+										NIL);
 
 		add_partial_path(partial_unique_rel, path);
 	}

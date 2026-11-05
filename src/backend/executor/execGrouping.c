@@ -22,6 +22,7 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "utils/lsyscache.h"
+#include "utils/sortsupport.h"
 
 static int	TupleHashTableMatch(struct tuplehash_hash *tb, MinimalTuple tuple1, MinimalTuple tuple2);
 static inline uint32 TupleHashTableHash_internal(struct tuplehash_hash *tb,
@@ -639,4 +640,139 @@ TupleHashTableMatch(struct tuplehash_hash *tb, MinimalTuple tuple1, MinimalTuple
 	econtext->ecxt_innertuple = slot2;
 	econtext->ecxt_outertuple = slot1;
 	return !ExecQualAndReset(hashtable->cur_eq_func, econtext);
+}
+
+/*
+ * ExecPrepareTupleSortSupport
+ *		Initialize SortSupport array for tie-breaking tuple comparisons.
+ */
+SortSupport
+ExecPrepareTupleSortSupport(int numSortCols,
+							const AttrNumber *sortColIdx,
+							const Oid *sortOperators,
+							const Oid *sortCollations,
+							const bool *sortNullsFirst)
+{
+	SortSupport sortKeys;
+
+	Assert(numSortCols >= 0);
+	if (numSortCols == 0)
+		return NULL;
+
+	sortKeys = palloc0_array(SortSupportData, numSortCols);
+	for (int i = 0; i < numSortCols; i++)
+	{
+		SortSupport skey = &sortKeys[i];
+
+		Assert(sortColIdx[i] > 0);
+		skey->ssup_cxt = CurrentMemoryContext;
+		skey->ssup_collation = sortCollations[i];
+		skey->ssup_nulls_first = sortNullsFirst[i];
+		skey->ssup_attno = sortColIdx[i];
+		PrepareSortSupportFromOrderingOp(sortOperators[i], skey);
+	}
+
+	return sortKeys;
+}
+
+/*
+ * ReplaceTupleHashEntryIfBetter
+ *
+ * Compare the new slot with the stored tuple in the entry using the sort keys.
+ * If the new slot is "better" (comes before in sort order), replace the stored
+ * tuple in the entry.
+ *
+ * Returns true if replaced, false otherwise.
+ */
+
+bool
+ReplaceTupleHashEntryIfBetter(TupleHashTable hashtable,
+							  TupleHashEntry entry,
+							  TupleTableSlot *newslot,
+							  TupleTableSlot *firstslot,
+							  SortSupport sortKeys,
+							  int numSortCols)
+{
+	int			i;
+	bool		replace = false;
+	MemoryContext oldContext;
+
+	/* If no sort keys, we shouldn't be here */
+	if (numSortCols == 0)
+		return false;
+
+	Assert(hashtable->additionalsize == 0);
+
+	/* Retrieve stored tuple and store it in firstslot */
+	ExecStoreMinimalTuple(entry->firstTuple, firstslot, false);
+
+	/* Run comparison functions in short-lived context */
+	oldContext = MemoryContextSwitchTo(hashtable->tempcxt);
+
+	/* Compare sort keys one by one */
+	for (i = 0; i < numSortCols; i++)
+	{
+		SortSupport skey = &sortKeys[i];
+		AttrNumber	attno = skey->ssup_attno;
+		Datum		datum1, datum2;
+		bool		isnull1, isnull2;
+		int			compare;
+
+		datum1 = slot_getattr(firstslot, attno, &isnull1);
+		datum2 = slot_getattr(newslot, attno, &isnull2);
+
+		compare = ApplySortComparator(datum1, isnull1,
+									  datum2, isnull2,
+									  skey);
+
+		if (compare != 0)
+		{
+			/*
+			 * ApplySortComparator returns < 0 if datum1 comes BEFORE datum2.
+			 * So if compare > 0, datum2 comes BEFORE datum1, so it is better.
+			 */
+			if (compare > 0)
+				replace = true;
+			break; /* Found a difference, no need to compare further */
+		}
+	}
+
+	if (replace)
+	{
+		MinimalTuple oldtuple = entry->firstTuple;
+		bool		shouldFree;
+		MinimalTuple newtuple = ExecFetchSlotMinimalTuple(newslot, &shouldFree);
+
+		if (newtuple->t_len <= oldtuple->t_len)
+		{
+			/* Overwrite existing tuple in-place to avoid AllocSet churn */
+			memcpy(oldtuple, newtuple, newtuple->t_len);
+			if (shouldFree)
+				pfree(newtuple);
+		}
+		else
+		{
+			MinimalTuple copiedtuple;
+
+			MemoryContextSwitchTo(hashtable->tuplescxt);
+			if (shouldFree)
+			{
+				copiedtuple = palloc(newtuple->t_len);
+				memcpy(copiedtuple, newtuple, newtuple->t_len);
+				pfree(newtuple);
+			}
+			else
+				copiedtuple = ExecCopySlotMinimalTuple(newslot);
+
+			entry->firstTuple = copiedtuple;
+			pfree(oldtuple);
+		}
+	}
+
+	MemoryContextSwitchTo(oldContext);
+
+	/* Clear the comparison slot to avoid holding references */
+	ExecClearTuple(firstslot);
+
+	return replace;
 }

@@ -1203,30 +1203,39 @@ EXCLUDE NO OTHERS
 
    <para>
     <literal>SELECT DISTINCT ON ( <replaceable
-    class="parameter">expression</replaceable> [, ...] )</literal>
+    class="parameter">expression</replaceable> [, ...] [ ORDER BY <replaceable
+    class="parameter">sort_expression</replaceable> [ ASC | DESC ] [ NULLS { FIRST | LAST } ] [, ...] ] )</literal>
     keeps only the first row of each set of rows where the given
     expressions evaluate to equal.  The <literal>DISTINCT ON</literal>
     expressions are interpreted using the same rules as for
-    <literal>ORDER BY</literal> (see above).  Note that the <quote>first
-    row</quote> of each set is unpredictable unless <literal>ORDER
-    BY</literal> is used to ensure that the desired row appears first.  For
-    example:
+    <literal>ORDER BY</literal> (see above).
+    If the optional inline <literal>ORDER BY</literal> clause is specified,
+    it determines which row is kept from each set of duplicates (the first row
+    according to this sort order). This inline sorting applies only for duplicate
+    resolution and does not dictate the final output order of the query.
+    Note that if no inline <literal>ORDER BY</literal> is used, the <quote>first
+    row</quote> of each set is unpredictable unless a global <literal>ORDER
+    BY</literal> is used at the end of the query to ensure that the desired row appears first.
+    For example:
 <programlisting>
-SELECT DISTINCT ON (location) location, time, report
-    FROM weather_reports
-    ORDER BY location, time DESC;
+SELECT DISTINCT ON (location ORDER BY time DESC) location, time, report
+    FROM weather_reports;
 </programlisting>
     retrieves the most recent weather report for each location.  But
-    if we had not used <literal>ORDER BY</literal> to force descending order
-    of time values for each location, we'd have gotten a report from
-    an unpredictable time for each location.
+    if we had not used inline <literal>ORDER BY time DESC</literal>, we'd have gotten a report from
+    an unpredictable time for each location (unless a global <literal>ORDER BY</literal> was used).
    </para>
 
    <para>
-    The <literal>DISTINCT ON</literal> expression(s) must match the leftmost
-    <literal>ORDER BY</literal> expression(s).  The <literal>ORDER BY</literal> clause
-    will normally contain additional expression(s) that determine the
+    If a global <literal>ORDER BY</literal> clause is used at the end of the query
+    without an inline <literal>ORDER BY</literal> inside <literal>DISTINCT ON</literal>,
+    the <literal>DISTINCT ON</literal> expression(s) must match the leftmost
+    <literal>ORDER BY</literal> expression(s). The global <literal>ORDER BY</literal> clause
+    will then normally contain additional expression(s) that determine the
     desired precedence of rows within each <literal>DISTINCT ON</literal> group.
+    If an inline <literal>ORDER BY</literal> is specified, this matching requirement
+    is relaxed, and the global <literal>ORDER BY</literal> can sort the final results
+    by any columns, independent of the distinct keys.
    </para>
 
    <para>
@@ -1242,7 +1251,7 @@ SELECT DISTINCT ON (location) location, time, report
    <para>
     The <literal>UNION</literal> clause has this general form:
 <synopsis>
-<replaceable class="parameter">select_statement</replaceable> UNION [ ALL | DISTINCT ] <replaceable class="parameter">select_statement</replaceable>
+<replaceable class="parameter">select_statement</replaceable> UNION [ ALL | DISTINCT | DISTINCT ON ( <replaceable class="parameter">expression</replaceable> [, ...] [ ORDER BY <replaceable class="parameter">sort_expression</replaceable> [ ASC | DESC ] [, ...] ] ) ] <replaceable class="parameter">select_statement</replaceable>
 </synopsis><replaceable class="parameter">select_statement</replaceable> is
     any <command>SELECT</command> statement without an <literal>ORDER
     BY</literal>, <literal>LIMIT</literal>, <literal>FOR NO KEY UPDATE</literal>, <literal>FOR UPDATE</literal>,
@@ -1273,6 +1282,14 @@ SELECT DISTINCT ON (location) location, time, report
     <literal>UNION</literal>; use <literal>ALL</literal> when you can.)
     <literal>DISTINCT</literal> can be written to explicitly specify the
     default behavior of eliminating duplicate rows.
+    <literal>DISTINCT ON</literal> keeps only the first row of each set of rows
+    that are duplicates according to the specified expressions.
+    If the optional <literal>ORDER BY</literal> clause is specified inside
+    <literal>DISTINCT ON</literal>, it determines which row is kept from each set of
+    duplicates (the first row according to this sort order). Otherwise, the kept
+    row is unpredictable. When used in recursive CTEs (<literal>WITH RECURSIVE</literal>),
+    <literal>UNION DISTINCT ON</literal> with <literal>ORDER BY</literal> can be used
+    to prune the search space and find optimal solutions (e.g., shortest paths).
    </para>
 
    <para>

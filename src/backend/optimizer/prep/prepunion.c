@@ -36,6 +36,7 @@
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bitutils.h"
 #include "utils/selfuncs.h"
@@ -76,7 +77,7 @@ static List *generate_setop_tlist(List *colTypes, List *colCollations,
 static List *generate_append_tlist(List *colTypes, List *colCollations,
 								   List *input_tlists,
 								   List *refnames_tlist);
-static List *generate_setop_grouplist(SetOperationStmt *op, List *targetlist);
+static List *generate_setop_grouplist(List *clauses, List *targetlist);
 static PathTarget *create_setop_pathtarget(PlannerInfo *root, List *tlist,
 										   List *child_pathlist);
 
@@ -113,7 +114,6 @@ plan_set_operations(PlannerInfo *root)
 	Assert(parse->groupClause == NIL);
 	Assert(parse->havingQual == NULL);
 	Assert(parse->windowClause == NIL);
-	Assert(parse->distinctClause == NIL);
 
 	/*
 	 * In the outer query level, equivalence classes are limited to classes
@@ -378,6 +378,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 	bool		rpath_trivial_tlist;
 	List	   *tlist;
 	List	   *groupList;
+	List	   *sortList = NIL;
 	double		dNumGroups;
 
 	/* Parser should have rejected other cases */
@@ -439,7 +440,9 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 	else
 	{
 		/* Identify the grouping semantics */
-		groupList = generate_setop_grouplist(setOp, tlist);
+		groupList = generate_setop_grouplist(setOp->groupClauses, tlist);
+		if (setOp->sortClauses)
+			sortList = generate_setop_grouplist(setOp->sortClauses, tlist);
 
 		/* We only support hashing here */
 		if (!grouping_is_hashable(groupList))
@@ -464,6 +467,7 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 											   rpath,
 											   result_rel->reltarget,
 											   groupList,
+											   sortList,
 											   root->wt_param_id,
 											   dNumGroups);
 
@@ -707,6 +711,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	List	   *trivial_tlist_list;
 	List	   *tlist;
 	List	   *groupList = NIL;
+	List	   *sortList = NIL;
 	Path	   *apath;
 	Path	   *gpath = NULL;
 	bool		try_sorted = false;
@@ -739,14 +744,27 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	/* For UNIONs (not UNION ALL), try sorting, if sorting is possible */
 	if (!op->all)
 	{
-		/* Identify the grouping semantics */
-		groupList = generate_setop_grouplist(op, tlist);
+		/* Identify the grouping and sorting semantics */
+		groupList = generate_setop_grouplist(op->groupClauses, tlist);
+		sortList = op->sortClauses ?
+			generate_setop_grouplist(op->sortClauses, tlist) :
+			list_copy(groupList);
 
-		if (grouping_is_sortable(op->groupClauses))
+		if (grouping_is_sortable(sortList))
 		{
+			bool		sortable;
+
 			try_sorted = true;
-			/* Determine the pathkeys for sorting by the whole target list */
-			union_pathkeys = make_pathkeys_for_sortclauses(root, groupList,
+			/* Remove any redundant keys from groupList */
+			(void) make_pathkeys_for_sortclauses_extended(root,
+														  &groupList,
+														  tlist,
+														  true,
+														  false,
+														  &sortable,
+														  false);
+			/* Determine the pathkeys for sorting by the target list / sortClauses */
+			union_pathkeys = make_pathkeys_for_sortclauses(root, sortList,
 														   tlist);
 
 			root->query_pathkeys = union_pathkeys;
@@ -929,7 +947,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 
 	if (!op->all)
 	{
-		bool		can_sort = grouping_is_sortable(groupList);
+		bool		can_sort = grouping_is_sortable(sortList);
 		bool		can_hash = grouping_is_hashable(groupList);
 
 		/*
@@ -957,7 +975,8 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 											groupList,
 											NIL,
 											NULL,
-											dNumChildGroups);
+											dNumChildGroups,
+											op->sortClauses ? sortList : NIL);
 			add_path(result_rel, path);
 
 			/* Try hash aggregate on the Gather path, if valid */
@@ -973,7 +992,8 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 												groupList,
 												NIL,
 												NULL,
-												dNumChildGroups);
+												dNumChildGroups,
+												op->sortClauses ? sortList : NIL);
 				add_path(result_rel, path);
 			}
 		}
@@ -983,15 +1003,15 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			Path	   *path = apath;
 
 			/* Try Sort -> Unique on the Append path */
-			if (groupList != NIL)
+			if (union_pathkeys != NIL)
 				path = (Path *) create_sort_path(root, result_rel, path,
-												 make_pathkeys_for_sortclauses(root, groupList, tlist),
+												 union_pathkeys,
 												 -1.0);
 
 			path = (Path *) create_unique_path(root,
 											   result_rel,
 											   path,
-											   list_length(path->pathkeys),
+											   list_length(groupList),
 											   dNumChildGroups);
 
 			add_path(result_rel, path);
@@ -1001,14 +1021,15 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			{
 				path = gpath;
 
-				path = (Path *) create_sort_path(root, result_rel, path,
-												 make_pathkeys_for_sortclauses(root, groupList, tlist),
-												 -1.0);
+				if (union_pathkeys != NIL)
+					path = (Path *) create_sort_path(root, result_rel, path,
+													 union_pathkeys,
+													 -1.0);
 
 				path = (Path *) create_unique_path(root,
 												   result_rel,
 												   path,
-												   list_length(path->pathkeys),
+												   list_length(groupList),
 												   dNumChildGroups);
 				add_path(result_rel, path);
 			}
@@ -1033,7 +1054,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			path = (Path *) create_unique_path(root,
 											   result_rel,
 											   path,
-											   list_length(tlist),
+											   list_length(groupList),
 											   dNumChildGroups);
 
 			add_path(result_rel, path);
@@ -1119,7 +1140,7 @@ generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
 	*pTargetList = tlist;
 
 	/* Identify the grouping semantics */
-	groupList = generate_setop_grouplist(op, tlist);
+	groupList = generate_setop_grouplist(op->groupClauses, tlist);
 
 	/* Check whether the operators support sorting or hashing */
 	can_sort = grouping_is_sortable(groupList);
@@ -1432,6 +1453,9 @@ plan_union_children(PlannerInfo *root,
 
 			if (op->op == top_union->op &&
 				(op->all == top_union->all || op->all) &&
+				(op->all ||
+				 (equal(op->groupClauses, top_union->groupClauses) &&
+				  equal(op->sortClauses, top_union->sortClauses))) &&
 				equal(op->colTypes, top_union->colTypes) &&
 				equal(op->colCollations, top_union->colCollations))
 			{
@@ -1731,32 +1755,23 @@ generate_append_tlist(List *colTypes, List *colCollations,
  * proper sortgrouprefs into it (copying those from the targetlist).
  */
 static List *
-generate_setop_grouplist(SetOperationStmt *op, List *targetlist)
+generate_setop_grouplist(List *clauses, List *targetlist)
 {
-	List	   *grouplist = copyObject(op->groupClauses);
+	List	   *grouplist = copyObject(clauses);
 	ListCell   *lg;
-	ListCell   *lt;
 
-	lg = list_head(grouplist);
-	foreach(lt, targetlist)
+	foreach(lg, grouplist)
 	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lt);
-		SortGroupClause *sgc;
+		SortGroupClause *sgc = (SortGroupClause *) lfirst(lg);
+		Index		ref = sgc->tleSortGroupRef;
+		TargetEntry *tle;
 
+		Assert(ref > 0 && ref <= list_length(targetlist));
+		tle = list_nth(targetlist, ref - 1);
 		Assert(!tle->resjunk);
-
-		/* non-resjunk columns should have sortgroupref = resno */
-		Assert(tle->ressortgroupref == tle->resno);
-
-		/* non-resjunk columns should have grouping clauses */
-		Assert(lg != NULL);
-		sgc = (SortGroupClause *) lfirst(lg);
-		lg = lnext(grouplist, lg);
-		Assert(sgc->tleSortGroupRef == 0);
-
+		Assert(tle->ressortgroupref == ref);
 		sgc->tleSortGroupRef = tle->ressortgroupref;
 	}
-	Assert(lg == NULL);
 	return grouplist;
 }
 
