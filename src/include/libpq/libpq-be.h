@@ -208,6 +208,8 @@ typedef struct Port
 	bool		ssl_in_use;
 	char	   *peer_cn;
 	char	   *peer_dn;
+	char	   *peer_uri;
+	int			peer_uri_count;
 	bool		peer_cert_valid;
 	bool		alpn_used;
 	bool		last_read_was_eof;
@@ -320,6 +322,7 @@ extern const char *be_tls_get_cipher(Port *port);
 extern void be_tls_get_peer_subject_name(Port *port, char *ptr, size_t len);
 extern void be_tls_get_peer_issuer_name(Port *port, char *ptr, size_t len);
 extern void be_tls_get_peer_serial(Port *port, char *ptr, size_t len);
+extern void be_tls_get_peer_uri(Port *port);
 
 /*
  * Get the server certificate hash for SCRAM channel binding type
