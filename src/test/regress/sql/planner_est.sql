@@ -43,10 +43,78 @@ BEGIN
             ln := regexp_replace(ln, 'width=\d+', 'width=N');
         END IF;
 
+        ln := regexp_replace(ln,
+            'Buckets: \d+  Batches: \d+  Memory Usage: \d+kB',
+            'Buckets: N  Batches: N  Memory Usage: NkB');
+
         RETURN NEXT ln;
     END LOOP;
 END;
 $$;
+
+-- Ensure that a semi-join inner side made from two disjoint UNION ALL arms
+-- uses the high distinct-value estimate.  The low end would estimate only
+-- 2000 of the 3000 matching outer rows.
+CREATE TEMP TABLE semi_union_outer (id int);
+CREATE TEMP TABLE semi_union_arm1 (id int);
+CREATE TEMP TABLE semi_union_arm2 (id int);
+INSERT INTO semi_union_outer SELECT g FROM generate_series(1000, 3999) g;
+INSERT INTO semi_union_arm1 SELECT g FROM generate_series(1000, 2999) g;
+INSERT INTO semi_union_arm2 SELECT g FROM generate_series(3000, 3999) g;
+ANALYZE semi_union_outer;
+ANALYZE semi_union_arm1;
+ANALYZE semi_union_arm2;
+
+SELECT explain_mask_costs($$
+SELECT * FROM semi_union_outer WHERE id IN
+  (SELECT id FROM semi_union_arm1
+   UNION ALL
+   SELECT id FROM semi_union_arm2);$$,
+true, true, false, true);
+
+DROP TABLE semi_union_outer, semi_union_arm1, semi_union_arm2;
+
+-- A member proven empty must not contribute its one-row group estimate to
+-- the union's high distinct-value estimate.
+CREATE TEMP TABLE dummy_union_outer (id int);
+CREATE TEMP TABLE dummy_union_live (id int);
+CREATE TEMP TABLE dummy_union_pruned (id int);
+INSERT INTO dummy_union_outer SELECT g FROM generate_series(1, 2002) g;
+INSERT INTO dummy_union_live SELECT g FROM generate_series(1, 2000) g;
+INSERT INTO dummy_union_pruned SELECT g FROM generate_series(2002, 4001) g;
+ANALYZE dummy_union_outer;
+ANALYZE dummy_union_live;
+ANALYZE dummy_union_pruned;
+
+SELECT explain_mask_costs($$
+SELECT * FROM dummy_union_outer WHERE id IN
+  (SELECT id FROM dummy_union_live
+   UNION ALL
+   SELECT id FROM dummy_union_pruned WHERE false);$$,
+true, true, false, true);
+
+DROP TABLE dummy_union_outer, dummy_union_live, dummy_union_pruned;
+
+-- A partial low-end estimate is usable by a semi join once it already covers
+-- the outer side's distinct-value count, even though another member has no
+-- statistics.
+CREATE TEMP TABLE partial_union_outer (id int);
+CREATE TEMP TABLE partial_union_known (id int);
+CREATE TEMP TABLE partial_union_unknown (id int);
+INSERT INTO partial_union_outer SELECT g FROM generate_series(1, 1000) g;
+INSERT INTO partial_union_known SELECT g FROM generate_series(1, 1000) g;
+INSERT INTO partial_union_unknown SELECT g FROM generate_series(1001, 2000) g;
+ANALYZE partial_union_outer;
+ANALYZE partial_union_known;
+
+SELECT explain_mask_costs($$
+SELECT * FROM partial_union_outer WHERE id IN
+  (SELECT id FROM partial_union_known
+   UNION ALL
+   SELECT id FROM partial_union_unknown);$$,
+true, true, false, true);
+
+DROP TABLE partial_union_outer, partial_union_known, partial_union_unknown;
 
 --
 -- Test the SupportRequestRows support function for generate_series_timestamp()
