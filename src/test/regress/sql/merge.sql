@@ -1771,6 +1771,39 @@ WHEN NOT MATCHED THEN INSERT
    VALUES (city_id - 1, logdate, 25, 200)
 RETURNING merge_action(), m.*;
 
+-- A pruned inheritance parent still needs its INSERT RETURNING projection.
+-- The first surviving child may have columns absent from the parent.
+BEGIN;
+SET LOCAL constraint_exclusion = on;
+ALTER TABLE measurement_y2007m01 ADD COLUMN extra integer;
+ALTER TABLE measurement DISABLE ROW LEVEL SECURITY;
+MERGE INTO measurement m
+USING (VALUES (1, '2007-01-19'::date)) nm(city_id, logdate)
+ON m.city_id = nm.city_id AND m.logdate = nm.logdate
+WHEN NOT MATCHED THEN
+  INSERT (city_id, logdate, peaktemp, unitsales)
+  VALUES (0, nm.logdate, 25, 100)
+RETURNING m.city_id, m.peaktemp;
+ROLLBACK;
+
+-- Exercise the corresponding WITH CHECK OPTION attribute map as well.
+BEGIN;
+SET LOCAL constraint_exclusion = on;
+ALTER TABLE measurement_y2007m01 ADD COLUMN extra integer;
+MERGE INTO measurement m
+USING (VALUES (1, '2007-01-19'::date)) nm(city_id, logdate)
+ON m.city_id = nm.city_id AND m.logdate = nm.logdate
+WHEN NOT MATCHED THEN
+  INSERT (city_id, logdate, peaktemp, unitsales)
+  VALUES (0, nm.logdate, 25, 100);
+MERGE INTO measurement m
+USING (VALUES (1, '2007-01-19'::date)) nm(city_id, logdate)
+ON m.city_id = nm.city_id AND m.logdate = nm.logdate
+WHEN NOT MATCHED THEN
+  INSERT (city_id, logdate, peaktemp, unitsales)
+  VALUES (0, nm.logdate, NULL, 100); -- should fail
+ROLLBACK;
+
 DROP TABLE measurement, new_measurement CASCADE;
 DROP FUNCTION measurement_insert_trigger();
 
