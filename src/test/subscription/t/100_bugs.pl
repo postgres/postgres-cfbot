@@ -759,4 +759,79 @@ DROP SUBSCRIPTION sub_drop_refresh;
 $node_publisher->stop('fast');
 $node_subscriber->stop('fast');
 
+# Test that toast_flatten_tuple correctly handles both compressed and
+# uncompressed external toast values with REPLICA IDENTITY FULL.
+# Compressed external datums keep their compressed format after
+# detoast_external_attr, so the stub size must match.
+
+$node_publisher->rotate_logfile();
+$node_subscriber->rotate_logfile();
+$node_publisher->start;
+$node_subscriber->start;
+
+$publisher_connstr = $node_publisher->connstr . ' dbname=postgres';
+
+# Use a compressible column (text, default EXTENDED storage) and an
+# incompressible one (bytea forced to EXTERNAL) to cover both paths.
+$node_publisher->safe_psql(
+	'postgres', qq{
+CREATE TABLE tab_toast_flatten (
+    a int PRIMARY KEY,
+    b text,
+    c bytea);
+ALTER TABLE tab_toast_flatten ALTER COLUMN c SET STORAGE EXTERNAL;
+ALTER TABLE tab_toast_flatten REPLICA IDENTITY FULL;
+});
+
+$node_subscriber->safe_psql(
+	'postgres', qq{
+CREATE TABLE tab_toast_flatten (
+    a int PRIMARY KEY,
+    b text,
+    c bytea);
+ALTER TABLE tab_toast_flatten ALTER COLUMN c SET STORAGE EXTERNAL;
+ALTER TABLE tab_toast_flatten REPLICA IDENTITY FULL;
+});
+
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION pub_toast FOR TABLE tab_toast_flatten");
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sub_toast CONNECTION '$publisher_connstr' PUBLICATION pub_toast WITH (copy_data = false)"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sub_toast');
+
+# Insert rows with large values that will be toasted.  repeat() produces
+# highly compressible data (compressed external); random bytea will not
+# compress and goes to external storage uncompressed.
+$node_publisher->safe_psql(
+	'postgres', qq{
+INSERT INTO tab_toast_flatten VALUES (
+    1,
+    repeat('x', 100000),
+    decode(repeat('ab', 50000), 'hex'));
+});
+$node_publisher->wait_for_catchup('sub_toast');
+
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT a, length(b), length(c) FROM tab_toast_flatten WHERE a = 1");
+is($result, '1|100000|50000',
+	'toast_flatten_tuple: insert with toasted values');
+
+# Update forces the old tuple to be flattened for the change message.
+$node_publisher->safe_psql('postgres',
+	"UPDATE tab_toast_flatten SET a = 2 WHERE a = 1");
+$node_publisher->wait_for_catchup('sub_toast');
+
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT a, length(b), length(c) FROM tab_toast_flatten WHERE a = 2");
+is($result, '2|100000|50000',
+	'toast_flatten_tuple: update with compressed and uncompressed toasted values');
+
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION sub_toast");
+$node_publisher->safe_psql('postgres', "DROP PUBLICATION pub_toast");
+$node_publisher->safe_psql('postgres', "DROP TABLE tab_toast_flatten");
+
+$node_publisher->stop('fast');
+$node_subscriber->stop('fast');
+
 done_testing();
