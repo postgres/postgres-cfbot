@@ -259,9 +259,8 @@ DoCopy(ParseState *pstate, const CopyStmt *stmt,
 			 * Build target list
 			 *
 			 * If no columns are specified in the attribute list of the COPY
-			 * command, then the target list is 'all' columns. Therefore, '*'
-			 * should be used as the target list for the resulting SELECT
-			 * statement.
+			 * command, build an explicit target list from attnums (which
+			 * excludes dropped and generated columns).
 			 *
 			 * In the case that columns are specified in the attribute list,
 			 * create a ColumnRef and ResTarget for each column and add them
@@ -269,17 +268,25 @@ DoCopy(ParseState *pstate, const CopyStmt *stmt,
 			 */
 			if (!stmt->attlist)
 			{
-				cr = makeNode(ColumnRef);
-				cr->fields = list_make1(makeNode(A_Star));
-				cr->location = -1;
+				ListCell   *lc;
 
-				target = makeNode(ResTarget);
-				target->name = NULL;
-				target->indirection = NIL;
-				target->val = (Node *) cr;
-				target->location = -1;
+				foreach(lc, attnums)
+				{
+					int			attno = lfirst_int(lc);
+					Form_pg_attribute attr = TupleDescAttr(tupDesc, attno - 1);
 
-				targetList = list_make1(target);
+					cr = makeNode(ColumnRef);
+					cr->fields = list_make1(makeString(pstrdup(NameStr(attr->attname))));
+					cr->location = -1;
+
+					target = makeNode(ResTarget);
+					target->name = NULL;
+					target->indirection = NIL;
+					target->val = (Node *) cr;
+					target->location = -1;
+
+					targetList = lappend(targetList, target);
+				}
 			}
 			else
 			{
