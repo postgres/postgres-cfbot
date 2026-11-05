@@ -5610,7 +5610,7 @@ BEGIN ATOMIC
      ts_debug.dictionaries,
      ts_debug.dictionary,
      ts_debug.lexemes
-    FROM ts_debug(get_current_ts_config(), ts_debug.document) ts_debug(alias, description, token, dictionaries, dictionary, lexemes);
+    FROM ts_debug(get_current_ts_config(), $1) ts_debug(alias, description, token, dictionaries, dictionary, lexemes);
 END
 \sf+ ts_debug(text)
         CREATE OR REPLACE FUNCTION pg_catalog.ts_debug(document text, OUT alias text, OUT description text, OUT token text, OUT dictionaries regdictionary[], OUT dictionary regdictionary, OUT lexemes text[])
@@ -5624,7 +5624,7 @@ END
 5            ts_debug.dictionaries,
 6            ts_debug.dictionary,
 7            ts_debug.lexemes
-8           FROM ts_debug(get_current_ts_config(), ts_debug.document) ts_debug(alias, description, token, dictionaries, dictionary, lexemes);
+8           FROM ts_debug(get_current_ts_config(), $1) ts_debug(alias, description, token, dictionaries, dictionary, lexemes);
 9       END
 -- AUTOCOMMIT
 CREATE TABLE ac_test (a int);
