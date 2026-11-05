@@ -172,6 +172,47 @@ reset enable_bitmapscan;
 
 drop table t_gin_test_tbl;
 
+-- Test pending list scans with scan keys that have many entries.  Those
+-- sort the entries and look up the tuples of each row in them.
+create temp table t_gin_test_tbl(id int, i int4[], j int4[]);
+create index t_gin_test_tbl_i_j_idx on t_gin_test_tbl using gin (i, j)
+  with (fastupdate = on, gin_pending_list_limit = 4096);
+insert into t_gin_test_tbl
+  select g, array[g, g + 1000], array[g % 3] from generate_series(1, 100) g;
+
+set enable_seqscan = off;
+explain (costs off)
+select count(*) from t_gin_test_tbl where i && array(select generate_series(1001, 1100)) and j && '{0}';
+-- a key with many entries next to one with few
+select count(*) from t_gin_test_tbl where i && array(select generate_series(1001, 1100)) and j && '{0}';
+-- duplicate query entries
+select count(*) from t_gin_test_tbl where j @> array_fill(0, array[100]);
+-- each matching row has 500 true entries, so with a small work_mem only
+-- some of the rows are remembered, and the rest are checked while scanning
+set work_mem = '64kB';
+select count(*) from t_gin_test_tbl where j && array_fill(0, array[500]);
+reset work_mem;
+-- make sure the queries above scanned a pending list
+select gin_clean_pending_list('t_gin_test_tbl_i_j_idx') > 0 as flushed;
+
+drop table t_gin_test_tbl;
+
+-- same with partial-match and GIN_CAT_EMPTY_QUERY entries, which are
+-- still checked one by one
+create temp table t_gin_test_tbl(id int, v tsvector);
+create index t_gin_test_tbl_v_idx on t_gin_test_tbl using gin (v)
+  with (fastupdate = on, gin_pending_list_limit = 4096);
+insert into t_gin_test_tbl
+  select g, array_to_tsvector(array['a' || g, 'b' || g]) from generate_series(1, 100) g;
+select count(*) from t_gin_test_tbl
+  where v @@ (select string_agg('b' || g, ' | ') || ' | a1:*' from generate_series(1001, 1100) g)::tsquery;
+select count(*) from t_gin_test_tbl
+  where v @@ (select '!(' || string_agg('b' || g, ' | ') || ')' from generate_series(1, 90) g)::tsquery;
+select gin_clean_pending_list('t_gin_test_tbl_v_idx') > 0 as flushed;
+
+reset enable_seqscan;
+drop table t_gin_test_tbl;
+
 -- test an unlogged table, mostly to get coverage of ginbuildempty
 create unlogged table t_gin_test_tbl(i int4[], j int4[]);
 create index on t_gin_test_tbl using gin (i, j);
