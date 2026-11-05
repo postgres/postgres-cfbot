@@ -313,6 +313,83 @@ hashxid8extended(PG_FUNCTION_ARGS)
 }
 
 Datum
+xid8pl(PG_FUNCTION_ARGS)
+{
+	FullTransactionId fxid = PG_GETARG_FULLTRANSACTIONID(0);
+	int64		delta = PG_GETARG_INT64(1);
+	uint64		val = U64FromFullTransactionId(fxid);
+	uint64		abs_delta = pg_abs_s64(delta);
+	uint64		result;
+	bool		overflow;
+
+	if (delta >= 0)
+		overflow = pg_add_u64_overflow(val, abs_delta, &result);
+	else
+		overflow = pg_sub_u64_overflow(val, abs_delta, &result);
+
+	if (overflow)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("xid8 out of range")));
+
+	PG_RETURN_FULLTRANSACTIONID(FullTransactionIdFromU64(result));
+}
+
+Datum
+xid8mi(PG_FUNCTION_ARGS)
+{
+	FullTransactionId fxid = PG_GETARG_FULLTRANSACTIONID(0);
+	int64		delta = PG_GETARG_INT64(1);
+	uint64		val = U64FromFullTransactionId(fxid);
+	uint64		abs_delta = pg_abs_s64(delta);
+	uint64		result;
+	bool		overflow;
+
+	if (delta >= 0)
+		overflow = pg_sub_u64_overflow(val, abs_delta, &result);
+	else
+		overflow = pg_add_u64_overflow(val, abs_delta, &result);
+
+	if (overflow)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("xid8 out of range")));
+
+	PG_RETURN_FULLTRANSACTIONID(FullTransactionIdFromU64(result));
+}
+
+Datum
+xid8_mi_xid8(PG_FUNCTION_ARGS)
+{
+	FullTransactionId fxid1 = PG_GETARG_FULLTRANSACTIONID(0);
+	FullTransactionId fxid2 = PG_GETARG_FULLTRANSACTIONID(1);
+	uint64		val1 = U64FromFullTransactionId(fxid1);
+	uint64		val2 = U64FromFullTransactionId(fxid2);
+
+	if (val1 >= val2)
+	{
+		if (val1 - val2 > (uint64) PG_INT64_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("bigint out of range")));
+		PG_RETURN_INT64((int64) (val1 - val2));
+	}
+	else
+	{
+		uint64		diff = val2 - val1;
+
+		if (diff > (uint64) PG_INT64_MAX + 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("bigint out of range")));
+		/* diff == 2^63 maps to PG_INT64_MIN without signed overflow */
+		if (diff > (uint64) PG_INT64_MAX)
+			PG_RETURN_INT64(PG_INT64_MIN);
+		PG_RETURN_INT64(-(int64) diff);
+	}
+}
+
+Datum
 xid8_larger(PG_FUNCTION_ARGS)
 {
 	FullTransactionId fxid1 = PG_GETARG_FULLTRANSACTIONID(0);
