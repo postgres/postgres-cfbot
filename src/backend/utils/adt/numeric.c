@@ -4747,6 +4747,40 @@ numeric_pg_lsn(PG_FUNCTION_ARGS)
 	PG_RETURN_LSN(result);
 }
 
+Datum
+numeric_oid8(PG_FUNCTION_ARGS)
+{
+	Numeric		num = PG_GETARG_NUMERIC(0);
+	NumericVar	x;
+	uint64		result;
+
+	if (NUMERIC_IS_SPECIAL(num))
+	{
+		if (NUMERIC_IS_NAN(num))
+			ereturn(fcinfo->context, (Datum) 0,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot convert NaN to %s", "oid8")));
+		else
+			ereturn(fcinfo->context, (Datum) 0,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot convert infinity to %s", "oid8")));
+	}
+
+	/* Convert the rounded magnitude, then wrap negatives as oid8in() does. */
+	init_var_from_num(num, &x);
+	x.sign = NUMERIC_POS;
+
+	if (!numericvar_to_uint64(&x, &result))
+		ereturn(fcinfo->context, (Datum) 0,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("oid8 out of range")));
+
+	if (NUMERIC_SIGN(num) == NUMERIC_NEG)
+		result = -result;
+
+	PG_RETURN_OID8(result);
+}
+
 
 /* ----------------------------------------------------------------------
  *
