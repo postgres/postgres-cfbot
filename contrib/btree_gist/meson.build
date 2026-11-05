@@ -52,6 +52,7 @@ install_data(
   'btree_gist--1.7--1.8.sql',
   'btree_gist--1.8--1.9.sql',
   'btree_gist--1.9.sql',
+  'btree_gist--1.9--1.10.sql',
   kwargs: contrib_data_args,
 )
 
@@ -92,6 +93,7 @@ tests += {
       'bool',
       'partitions',
       'stratnum',
+      'int_crosstype',
       'without_overlaps',
     ],
   },

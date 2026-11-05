@@ -270,53 +270,58 @@ gbt_num_consistent(const GBT_NUMKEY_R *key,
 	bool		retval;
 
 	/*
-	 * On leaf pages we directly apply the check "key->lower OP query"; we
-	 * need not consider key->upper since it will be equal to key->lower.
+	 * Every comparison callback is invoked as f_xx(query, key): the query
+	 * value is always the left argument and the indexed key bound the right.
+	 * The integer opclasses rely on this fixed order so their cross-type
+	 * callbacks can read each side at its own width.
+	 *
+	 * On leaf pages we directly apply the check "query OP key->lower"; we need
+	 * not consider key->upper since it will be equal to key->lower.
 	 *
 	 * On internal pages we mostly need to check "is lower bound below query?"
 	 * and/or "is upper bound above query?", where we must allow equality in
 	 * both cases.
 	 */
 #define lower_is_below_query() \
-	tinfo->f_le(key->lower, query, flinfo)
+	tinfo->f_ge(query, key->lower, flinfo)
 #define upper_is_above_query() \
-	tinfo->f_ge(key->upper, query, flinfo)
+	tinfo->f_le(query, key->upper, flinfo)
 
 	switch (strategy)
 	{
 		case BTLessEqualStrategyNumber:
 			if (is_leaf)
-				retval = tinfo->f_le(key->lower, query, flinfo);
+				retval = tinfo->f_ge(query, key->lower, flinfo);
 			else
 				retval = lower_is_below_query();
 			break;
 		case BTLessStrategyNumber:
 			if (is_leaf)
-				retval = tinfo->f_lt(key->lower, query, flinfo);
+				retval = tinfo->f_gt(query, key->lower, flinfo);
 			else
 				retval = lower_is_below_query();
 			break;
 		case BTEqualStrategyNumber:
 			if (is_leaf)
-				retval = tinfo->f_eq(key->lower, query, flinfo);
+				retval = tinfo->f_eq(query, key->lower, flinfo);
 			else
 				retval = lower_is_below_query() && upper_is_above_query();
 			break;
 		case BTGreaterStrategyNumber:
 			if (is_leaf)
-				retval = tinfo->f_gt(key->lower, query, flinfo);
+				retval = tinfo->f_lt(query, key->lower, flinfo);
 			else
 				retval = upper_is_above_query();
 			break;
 		case BTGreaterEqualStrategyNumber:
 			if (is_leaf)
-				retval = tinfo->f_ge(key->lower, query, flinfo);
+				retval = tinfo->f_le(query, key->lower, flinfo);
 			else
 				retval = upper_is_above_query();
 			break;
 		case BtreeGistNotEqualStrategyNumber:
 			if (is_leaf)
-				retval = !(tinfo->f_eq(key->lower, query, flinfo));
+				retval = !(tinfo->f_eq(query, key->lower, flinfo));
 			else
 			{
 				/*
@@ -325,8 +330,8 @@ gbt_num_consistent(const GBT_NUMKEY_R *key,
 				 * descending if the query equals both bounds.  In all other
 				 * cases, we must descend.
 				 */
-				retval = !(tinfo->f_eq(key->lower, query, flinfo) &&
-						   tinfo->f_eq(key->upper, query, flinfo));
+				retval = !(tinfo->f_eq(query, key->lower, flinfo) &&
+						   tinfo->f_eq(query, key->upper, flinfo));
 			}
 			break;
 		default:
@@ -338,7 +343,6 @@ gbt_num_consistent(const GBT_NUMKEY_R *key,
 
 	return retval;
 }
-
 
 /*
  * The GiST distance method (for KNN-Gist)
@@ -356,6 +360,13 @@ gbt_num_distance(const GBT_NUMKEY_R *key,
 	if (tinfo->f_dist == NULL)
 		elog(ERROR, "KNN search is not supported for btree_gist type %d",
 			 (int) tinfo->t);
+
+	/*
+	 * As in gbt_num_consistent(), every callback is invoked as f_xx(query, key):
+	 * the query value is the left argument and the indexed key bound the right.
+	 * The integer opclasses' cross-type callbacks read each side at its own
+	 * width, so keep this argument order if you ever touch the calls below.
+	 */
 	if (tinfo->f_le(query, key->lower, flinfo))
 		retval = tinfo->f_dist(query, key->lower, flinfo);
 	else if (tinfo->f_ge(query, key->upper, flinfo))
