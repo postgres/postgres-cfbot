@@ -652,13 +652,14 @@ vm_extend(Relation rel, BlockNumber vm_nblocks)
 							  RBM_ZERO_ON_ERROR);
 
 	/*
-	 * Send a shared-inval message to force other backends to close any smgr
-	 * references they may have for this rel, which we are about to change.
-	 * This is a useful optimization because it means that backends don't have
-	 * to keep checking for creation or extension of the file, which happens
-	 * infrequently.
+	 * Send a shared-inval message to make other backends forget their cached
+	 * fork sizes for this rel, including the map's.  This is a useful
+	 * optimization because it means that backends don't have to keep checking
+	 * for creation or extension of the file, which happens infrequently.  We
+	 * don't use CacheInvalidateSmgr(), because that makes every backend that
+	 * has the rel open close all of its files.
 	 */
-	CacheInvalidateSmgr(RelationGetSmgr(rel)->smgr_rlocator);
+	CacheInvalidateSmgrNblocks(RelationGetSmgr(rel)->smgr_rlocator);
 
 	return buf;
 }

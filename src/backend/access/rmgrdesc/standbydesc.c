@@ -128,6 +128,9 @@ standby_desc_invalidations(StringInfo buf,
 		else if (msg->id == SHAREDINVALSMGR_ID)
 			appendStringInfoString(buf, " smgr");
 		/* not expected, but print something anyway */
+		else if (msg->id == SHAREDINVALSMGRNBLOCKS_ID)
+			appendStringInfoString(buf, " smgr nblocks");
+		/* not expected, but print something anyway */
 		else if (msg->id == SHAREDINVALRELMAP_ID)
 			appendStringInfo(buf, " relmap db %u", msg->rm.dbId);
 		else if (msg->id == SHAREDINVALSNAPSHOT_ID)
