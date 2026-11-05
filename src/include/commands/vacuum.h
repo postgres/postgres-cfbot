@@ -23,6 +23,7 @@
 #include "catalog/pg_type.h"
 #include "parser/parse_node.h"
 #include "storage/buf.h"
+#include "storage/spin.h"
 #include "utils/relcache.h"
 
 /*
@@ -308,6 +309,94 @@ typedef struct VacDeadItemsInfo
 } VacDeadItemsInfo;
 
 /*
+ * Struct for cost-based vacuum delay related parameters to share among an
+ * autovacuum worker and its parallel vacuum workers.
+ */
+typedef struct PVSharedCostParams
+{
+	/*
+	 * The generation counter is incremented by the leader process each time
+	 * it updates the shared cost-based vacuum delay parameters. Parallel
+	 * vacuum workers compare it with their local generation,
+	 * shared_params_generation_local, to detect whether they need to refresh
+	 * their local parameters. The generation starts from 1 so that a freshly
+	 * started worker (whose local copy is 0) will always load the initial
+	 * parameters on its first check.
+	 */
+	pg_atomic_uint32 generation;
+
+	slock_t		mutex;			/* protects all fields below */
+
+	/* Parameters to share with parallel workers */
+	double		cost_delay;
+	int			cost_limit;
+	int			cost_page_dirty;
+	int			cost_page_hit;
+	int			cost_page_miss;
+	bool		track_cost_delay_timing;
+} PVSharedCostParams;
+
+/*
+ * Shared state common to any parallel vacuum phase. A phase includes one of
+ * these in its own shared struct and drives it with the functions below.
+ */
+typedef struct PVShared
+{
+	/*
+	 * Target table relid, log level (for messages about parallel workers
+	 * launched during VACUUM VERBOSE) and query ID.  These fields are not
+	 * modified during the parallel vacuum.
+	 */
+	Oid			relid;
+	int			elevel;
+	int64		queryid;
+
+	/*
+	 * The number of buffers each worker's Buffer Access Strategy ring should
+	 * contain.
+	 */
+	int			ring_nbuffers;
+
+	/*
+	 * If 'true' then we are running parallel autovacuum. Otherwise, we are
+	 * running parallel maintenance VACUUM.
+	 */
+	bool		is_autovacuum;
+
+	/* DSA handle where the TidStore lives, DSA_HANDLE_INVALID if none */
+	dsa_handle	dead_items_dsa_handle;
+
+	/* DSA pointer to the shared TidStore */
+	dsa_pointer dead_items_handle;
+
+	/* Statistics of shared dead items */
+	VacDeadItemsInfo dead_items_info;
+
+	/*
+	 * Shared vacuum cost balance.  During parallel vacuum,
+	 * VacuumSharedCostBalance points to this value and it accumulates the
+	 * balance of each parallel vacuum worker.
+	 */
+	pg_atomic_uint32 cost_balance;
+
+	/*
+	 * Number of active parallel workers.  This is used for computing the
+	 * minimum threshold of the vacuum cost balance before a worker sleeps for
+	 * cost-based delay.
+	 */
+	pg_atomic_uint32 active_nworkers;
+
+	/* Do the workers use cost_params? Only for autovacuum. */
+	bool		share_params;
+
+	/*
+	 * Cost-based vacuum delay parameters shared between the autovacuum leader
+	 * and its parallel workers.
+	 */
+	PVSharedCostParams cost_params;
+} PVShared;
+
+/*
  * Statistics for parallel vacuum workers (planned vs. actual)
  */
 typedef struct PVWorkerStats
@@ -434,6 +523,30 @@ extern void parallel_vacuum_update_shared_delay_params(void);
 extern void parallel_vacuum_propagate_shared_delay_params(void);
 extern void parallel_vacuum_refresh_cost_params(void);
 extern void parallel_vacuum_main(dsm_segment *seg, shm_toc *toc);
+
+/* for the leader, in commands/vacuumparallel.c */
+extern void parallel_vacuum_init_shared(PVShared *shared,
+										ParallelContext *pcxt, Relation rel,
+										BufferAccessStrategy bstrategy,
+										int vac_work_mem, int elevel);
+extern TidStore *parallel_vacuum_create_dead_items(PVShared *shared);
+extern void parallel_vacuum_destroy_dead_items(PVShared *shared,
+											   TidStore *dead_items);
+extern void parallel_vacuum_set_dead_items(PVShared *shared,
+										   TidStore *dead_items);
+extern void parallel_vacuum_launch_workers(ParallelContext *pcxt,
+										   PVShared *shared);
+extern void parallel_vacuum_wait_for_workers(ParallelContext *pcxt,
+											 PVShared *shared);
+
+/* for the workers */
+extern Relation parallel_vacuum_begin_worker(PVShared *shared,
+											 const char *sharedquery,
+											 TidStore **dead_items,
+											 BufferAccessStrategy *bstrategy);
+extern void parallel_vacuum_end_worker(PVShared *shared, Relation rel,
+									   TidStore *dead_items,
+									   BufferAccessStrategy bstrategy);
 
 /* in commands/analyze.c */
 extern void analyze_rel(Oid relid, RangeVar *relation,
