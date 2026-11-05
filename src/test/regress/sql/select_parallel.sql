@@ -196,9 +196,22 @@ select count(*) from tenk1
   left join (select tenk2.unique1 from tenk2 order by 1 limit 1000) ss
   on tenk1.unique1 < ss.unique1 + 1
   where tenk1.unique1 < 2;
+
 --reset the value of workers for each table as it was before this test.
 alter table tenk1 set (parallel_workers = 4);
 alter table tenk2 reset (parallel_workers);
+
+-- likewise, but the Limit's bound changes between rescans; the workers
+-- must see the new bound, not the one from the first scan.
+set parallel_leader_participation = off;
+explain (costs off)
+select v.n, ss.* from (values (1), (10)) v(n),
+  lateral (select count(*), sum(unique1) from
+           (select unique1 from tenk2 order by 1 limit v.n) x) ss;
+select v.n, ss.* from (values (1), (10)) v(n),
+  lateral (select count(*), sum(unique1) from
+           (select unique1 from tenk2 order by 1 limit v.n) x) ss;
+reset parallel_leader_participation;
 
 reset enable_material;
 reset enable_bitmapscan;
