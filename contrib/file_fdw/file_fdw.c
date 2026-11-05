@@ -1263,6 +1263,12 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 			 * ErrorSaveContext ready for the next NextCopyFrom. Since we
 			 * don't set details_wanted and error_data is not to be filled,
 			 * just resetting error_occurred is enough.
+			 *
+			 * Note that unlike fileIterateForeignScan(), we intentionally do
+			 * not enforce reject_limit here. Statistics collected from valid
+			 * rows remain useful even when the number of errors exceeds
+			 * reject_limit, whereas aborting ANALYZE would leave the table
+			 * with outdated statistics.
 			 */
 			cstate->escontext->error_occurred = false;
 
