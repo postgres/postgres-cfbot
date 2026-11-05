@@ -186,6 +186,43 @@ SELECT idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_all_indexes
 DROP TABLE test_idx_tup_read;
 
 ----
+-- Check that TOAST statistics are visible from the owning table's row.
+-- Use temporary tables so that autovacuum can't interfere.
+----
+CREATE TEMPORARY TABLE stats_toast_test (a text);
+ALTER TABLE stats_toast_test ALTER COLUMN a SET STORAGE EXTERNAL;
+INSERT INTO stats_toast_test SELECT repeat('a', 10000) FROM generate_series(1, 5);
+DELETE FROM stats_toast_test;
+
+CREATE TEMPORARY TABLE stats_toast_test_none (a int);
+INSERT INTO stats_toast_test_none VALUES (1);
+
+SELECT pg_stat_force_next_flush();
+
+-- The toast_ columns must report the statistics of the TOAST table itself,
+-- which is visible as its own row in pg_stat_all_tables.
+SELECT st.toast_relid = c.reltoastrelid AS toast_relid_matches,
+       st.toast_n_dead_tup > 0 AS toast_n_dead_tup_positive,
+       st.toast_n_dead_tup = t.n_dead_tup AS n_dead_tup_matches,
+       st.toast_last_autovacuum IS NOT DISTINCT FROM t.last_autovacuum
+         AS last_autovacuum_matches,
+       st.toast_autovacuum_count = t.autovacuum_count
+         AS autovacuum_count_matches
+  FROM pg_stat_user_tables st
+       JOIN pg_class c ON c.oid = st.relid
+       JOIN pg_stat_all_tables t ON t.relid = st.toast_relid
+ WHERE st.relid = 'stats_toast_test'::regclass;
+
+-- a table without a TOAST table reports NULLs
+SELECT toast_relid, toast_n_dead_tup, toast_last_autovacuum,
+       toast_autovacuum_count
+  FROM pg_stat_user_tables
+ WHERE relid = 'stats_toast_test_none'::regclass;
+
+DROP TABLE stats_toast_test;
+DROP TABLE stats_toast_test_none;
+
+----
 -- Basic tests for track_functions
 ---
 CREATE FUNCTION stats_test_func1() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
