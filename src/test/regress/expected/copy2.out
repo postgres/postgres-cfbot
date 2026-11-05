@@ -658,7 +658,7 @@ NOTICE:  input = {"f1":null}
 copy check_con_tbl from stdin;
 NOTICE:  input = {"f1":0}
 ERROR:  new row for relation "check_con_tbl" violates check constraint "check_con_tbl_check"
-DETAIL:  Failing row contains (0).
+DETAIL:  Failing row contains (0). Check constraint expression: check_con_function(check_con_tbl.*).
 CONTEXT:  COPY check_con_tbl, line 1: "0"
 select * from check_con_tbl;
  f1 
