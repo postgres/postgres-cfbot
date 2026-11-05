@@ -1912,6 +1912,34 @@ RESET SESSION AUTHORIZATION;
 DROP TABLE copy_t;
 DROP TABLE copy_rel_to CASCADE;
 
+-- Check COPY TO with RLS and generated columns
+CREATE TABLE copy_rel_to_gen (a int, b int GENERATED ALWAYS AS (a * 2) STORED, c text);
+CREATE POLICY p1 ON copy_rel_to_gen USING (a % 2 = 0);
+ALTER TABLE copy_rel_to_gen ENABLE ROW LEVEL SECURITY;
+GRANT ALL ON copy_rel_to_gen TO regress_rls_bob;
+GRANT SELECT (a, c) ON copy_rel_to_gen TO regress_rls_carol;
+INSERT INTO copy_rel_to_gen (a, c) VALUES (1, 'one'), (2, 'two');
+
+-- Check COPY TO as Superuser/owner.
+RESET SESSION AUTHORIZATION;
+SET row_security TO OFF;
+COPY copy_rel_to_gen TO STDOUT WITH DELIMITER ',';
+SET row_security TO ON;
+COPY copy_rel_to_gen TO STDOUT WITH DELIMITER ',';
+
+-- Check COPY TO as user with permissions and RLS.
+SET SESSION AUTHORIZATION regress_rls_bob;
+SET row_security TO ON;
+COPY copy_rel_to_gen TO STDOUT WITH DELIMITER ',';
+
+-- Check COPY TO as user with permissions on non-generated columns only and RLS.
+SET SESSION AUTHORIZATION regress_rls_carol;
+SET row_security TO ON;
+COPY copy_rel_to_gen TO STDOUT WITH DELIMITER ',';
+
+RESET SESSION AUTHORIZATION;
+DROP TABLE copy_rel_to_gen;
+
 -- Check WHERE CURRENT OF
 SET SESSION AUTHORIZATION regress_rls_alice;
 
