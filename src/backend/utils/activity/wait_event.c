@@ -38,7 +38,63 @@ static const char *pgstat_get_wait_io(WaitEventIO w);
 
 
 static uint32 local_my_wait_event_info;
-uint32	   *my_wait_event_info = &local_my_wait_event_info;
+WaitEventReportState wait_event_report_state = {&local_my_wait_event_info, NULL, NULL};
+
+int			wait_event_hook_depth = 0;
+
+/*
+ * Slow paths for pgstat_report_wait_start_timed() and
+ * pgstat_report_wait_end_timed() in wait_event.h, reached only once a hook
+ * has actually been installed in this process.  Keeping them out of line
+ * and marked cold lets the inline callers stay down to a single hinted
+ * pointer test on the common no-consumer path.
+ *
+ * Each function re-reads its hook pointer rather than being handed the
+ * value the inline caller already loaded.  The hook cannot actually change
+ * between the inline test and this call -- both run in the same process,
+ * and there is no window for another backend to reach in -- but re-reading
+ * it here keeps that assumption local to this file instead of leaking into
+ * the header.
+ *
+ * Both functions save and restore errno around the hook call: callers look
+ * at errno after pgstat_report_wait_end_timed() (for example to retry on
+ * EINTR) and may set it just before pgstat_report_wait_start_timed(), and a
+ * hook should not have to care.
+ */
+pg_noinline pg_attribute_cold void
+pgstat_wait_event_hook_begin_slow(uint32 wait_event_info)
+{
+	int			save_errno = errno;
+	wait_event_hook_type hook = wait_event_begin_hook;
+
+	if (wait_event_hook_depth == 0)
+	{
+		wait_event_hook_depth = 1;
+		hook(wait_event_info);
+		wait_event_hook_depth = 0;
+	}
+
+	errno = save_errno;
+}
+
+pg_noinline pg_attribute_cold void
+pgstat_wait_event_hook_end_slow(void)
+{
+	int			save_errno = errno;
+	wait_event_hook_type hook = wait_event_end_hook;
+
+	if (wait_event_hook_depth == 0)
+	{
+		uint32		wait_event_info;
+
+		wait_event_info = *(volatile uint32 *) my_wait_event_info;
+		wait_event_hook_depth = 1;
+		hook(wait_event_info);
+		wait_event_hook_depth = 0;
+	}
+
+	errno = save_errno;
+}
 
 #define WAIT_EVENT_CLASS_MASK	0xFF000000
 #define WAIT_EVENT_ID_MASK		0x0000FFFF

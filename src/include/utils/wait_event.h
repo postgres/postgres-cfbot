@@ -17,11 +17,54 @@ extern const char *pgstat_get_wait_event(uint32 wait_event_info);
 extern const char *pgstat_get_wait_event_type(uint32 wait_event_info);
 static inline void pgstat_report_wait_start(uint32 wait_event_info);
 static inline void pgstat_report_wait_end(void);
+static inline void pgstat_report_wait_start_timed(uint32 wait_event_info);
+static inline void pgstat_report_wait_end_timed(void);
 extern void pgstat_set_wait_event_storage(uint32 *wait_event_info);
 extern void pgstat_reset_wait_event_storage(void);
 
-extern PGDLLIMPORT uint32 *my_wait_event_info;
+/*
+ * Hooks for explicitly instrumented waits.  Hook implementations may use only
+ * state allocated before the hook runs and written only by this process
+ * (backend-local memory, or this backend's own preallocated area of shared
+ * memory); they must not wait, allocate memory, acquire locks, or report
+ * errors.  The depth guard prevents re-entry.
+ * errno is preserved for the caller by pgstat_report_wait_start_timed() and
+ * pgstat_report_wait_end_timed(), so hooks need not save and restore it.
+ *
+ * Hook users that chain callbacks must save the previous hook pointers, call
+ * the previous begin hook before their own begin work, and perform their own
+ * end work before calling the previous end hook.
+ */
+typedef void (*wait_event_hook_type) (uint32 wait_event_info);
 
+/*
+ * The wait event reporting pointer and the hook pointers live in one struct,
+ * so that the compiler can address all of them from one base register.
+ * info must stay the first member.
+ */
+typedef struct WaitEventReportState
+{
+	uint32	   *info;			/* where wait events are reported */
+	wait_event_hook_type begin_hook;
+	wait_event_hook_type end_hook;
+} WaitEventReportState;
+
+extern PGDLLIMPORT WaitEventReportState wait_event_report_state;
+
+/* old names kept so existing code and extensions compile unchanged */
+#define my_wait_event_info (wait_event_report_state.info)
+#define wait_event_begin_hook (wait_event_report_state.begin_hook)
+#define wait_event_end_hook (wait_event_report_state.end_hook)
+
+extern PGDLLIMPORT int wait_event_hook_depth;
+
+/*
+ * Out-of-line, cold slow paths for the hook-enabled case of the timed
+ * wait-event pair below.  See pgstat_report_wait_start_timed() for why
+ * these exist.
+ */
+extern pg_noinline pg_attribute_cold void pgstat_wait_event_hook_begin_slow(uint32 wait_event_info);
+extern pg_noinline pg_attribute_cold void pgstat_wait_event_hook_end_slow(void);
 
 /*
  * Wait Events - Extension, InjectionPoint
@@ -83,6 +126,42 @@ static inline void
 pgstat_report_wait_end(void)
 {
 	/* see pgstat_report_wait_start() */
+	*(volatile uint32 *) my_wait_event_info = 0;
+}
+
+/*
+ * Explicitly instrumented variant of the ordinary wait-event reporting pair.
+ * The ordinary functions above remain unchanged for uninstrumented sites.
+ *
+ * Every backend reaches these two functions at every instrumented wait, but
+ * only a process in which a consumer has installed a hook ever takes the
+ * enabled path.  The pointer test is therefore hinted with unlikely() for the
+ * no-consumer path, which is laid out as the fall-through; without the hint,
+ * GCC's static branch predictor treats a pointer compared with NULL as
+ * non-NULL and lays out the enabled path there instead.  The enabled path --
+ * the depth guard, the volatile read in the end case, and the indirect call
+ * -- lives in a separate cold, noinline function rather than being inlined at
+ * each call site.  A process with no consumer pays one predicted-not-taken
+ * branch per call; a process with a consumer pays one additional taken jump.
+ * The hook pointers are kept in wait_event_report_state next to the wait
+ * event pointer, so the test below addresses them from the same base; the
+ * old names remain as macros.  The depth guard and the hook-chaining contract
+ * are unchanged.
+ */
+static inline void
+pgstat_report_wait_start_timed(uint32 wait_event_info)
+{
+	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+
+	if (unlikely(wait_event_begin_hook != NULL))
+		pgstat_wait_event_hook_begin_slow(wait_event_info);
+}
+
+static inline void
+pgstat_report_wait_end_timed(void)
+{
+	if (unlikely(wait_event_end_hook != NULL))
+		pgstat_wait_event_hook_end_slow();
 	*(volatile uint32 *) my_wait_event_info = 0;
 }
 

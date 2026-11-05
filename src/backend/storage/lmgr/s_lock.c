@@ -66,7 +66,7 @@
  * s_lock_test.
  */
 static uint32 local_my_wait_event_info;
-uint32	   *my_wait_event_info = &local_my_wait_event_info;
+WaitEventReportState wait_event_report_state = {&local_my_wait_event_info, NULL, NULL};
 #endif
 
 static int	spins_per_delay = DEFAULT_SPINS_PER_DELAY;
@@ -147,9 +147,9 @@ perform_spin_delay(SpinDelayStatus *status)
 		 * We might want to report something more granular at some point, but
 		 * this is better than nothing.
 		 */
-		pgstat_report_wait_start(WAIT_EVENT_SPIN_DELAY);
+		pgstat_report_wait_start_timed(WAIT_EVENT_SPIN_DELAY);
 		pg_usleep(status->cur_delay);
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 #if defined(S_LOCK_TEST)
 		fprintf(stdout, "*");
