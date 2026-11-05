@@ -997,7 +997,12 @@ CREATE PUBLICATION testpub_fortbl FOR TABLE testpub_view;
 
 CREATE TEMPORARY TABLE testpub_temptbl(a int);
 -- fail - temporary table
+-- The temporary schema in the error message is "pg_temp_N", but N varies with
+-- each run, so show only the SQLSTATE.
+-- (22023 means invalid_parameter_value)
+\set VERBOSITY sqlstate
 CREATE PUBLICATION testpub_fortemptbl FOR TABLE testpub_temptbl;
+\set VERBOSITY default
 DROP TABLE testpub_temptbl;
 
 CREATE UNLOGGED TABLE testpub_unloggedtbl(a int);

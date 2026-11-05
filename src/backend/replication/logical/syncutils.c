@@ -82,7 +82,7 @@ FinishSyncWorker(void)
 		ereport(LOG,
 				errmsg("logical replication table synchronization worker for subscription \"%s\", table \"%s\" has finished",
 					   MySubscription->name,
-					   get_rel_name(MyLogicalRepWorker->relid)));
+					   MsgQualifiedRelNameByRelId(MyLogicalRepWorker->relid)));
 		CommitTransactionCommand();
 
 		/* Find the leader apply worker and signal it. */

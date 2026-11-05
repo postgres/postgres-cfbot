@@ -266,7 +266,7 @@ DROP SUBSCRIPTION regress_pgfdw_subscription;
 -- test error case for create publication on foreign table
 -- ===================================================================
 CREATE PUBLICATION testpub_ftbl FOR TABLE ft1;  -- should fail
-ERROR:  cannot add relation "ft1" to publication
+ERROR:  cannot add relation "public.ft1" to publication
 DETAIL:  This operation is not supported for foreign tables.
 -- ===================================================================
 -- simple queries

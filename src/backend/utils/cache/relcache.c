@@ -2140,6 +2140,70 @@ RelationIdGetRelation(Oid relationId)
 	return rd;
 }
 
+/*
+ * MsgQualifiedRelName
+ *
+ * Returns a schema-qualified name of the relation in the format
+ * "nspname.relname" suitable for substitution to a log message that already
+ * has enclosing quotes \"%s\"
+ */
+char *
+MsgQualifiedRelName(const char *nspname, const char *relname)
+{
+	Assert(nspname);
+	Assert(relname);
+
+	return psprintf("%s.%s", nspname, relname);
+}
+
+/*
+ * MsgQualifiedRelNameByRel
+ *
+ * Returns a schema-qualified name of the specified `rel` suitable for
+ * substitution to a log message. Calls MsgQualifiedRelName.
+ */
+char *
+MsgQualifiedRelNameByRel(Relation rel)
+{
+	const char *nspname;
+	const char *relname;
+
+	Assert(rel);
+	nspname = get_namespace_name(RelationGetNamespace(rel));
+	relname = RelationGetRelationName(rel);
+
+	return MsgQualifiedRelName(nspname, relname);
+}
+
+/*
+ * MsgQualifiedRelNameByRelId
+ *
+ * Returns a schema-qualified name of the relation with the specified `relid`
+ * suitable for substitution to a log message. Calls MsgQualifiedRelName.
+ *
+ * Returns NULL if no relation found for this relid.
+ */
+char *
+MsgQualifiedRelNameByRelId(Oid relid)
+{
+	HeapTuple	tp;
+
+	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_class reltup = (Form_pg_class) GETSTRUCT(tp);
+		const char *nspname = get_namespace_name(reltup->relnamespace);
+		const char *relname = NameStr(reltup->relname);
+		char	   *result;
+
+		result = MsgQualifiedRelName(nspname, relname);
+		ReleaseSysCache(tp);
+		return result;
+	}
+	else
+		return NULL;
+}
+
 /* ----------------------------------------------------------------
  *				cache invalidation support routines
  * ----------------------------------------------------------------

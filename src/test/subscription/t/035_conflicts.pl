@@ -79,9 +79,9 @@ $node_publisher->safe_psql('postgres',
 $node_subscriber->wait_for_log(
 	qr/conflict detected on relation \"public.conf_tab\": conflict=multiple_unique_conflicts.*
 .*Could not apply remote change: remote row \(2, 3, 4\).*
-.*Key already exists in unique index \"conf_tab_pkey\", modified in transaction .*: key \(a\)=\(2\), local row \(2, 2, 2\).*
-.*Key already exists in unique index \"conf_tab_b_key\", modified in transaction .*: key \(b\)=\(3\), local row \(3, 3, 3\).*
-.*Key already exists in unique index \"conf_tab_c_key\", modified in transaction .*: key \(c\)=\(4\), local row \(4, 4, 4\)./,
+.*Key already exists in unique index \"public.conf_tab_pkey\", modified in transaction .*: key \(a\)=\(2\), local row \(2, 2, 2\).*
+.*Key already exists in unique index \"public.conf_tab_b_key\", modified in transaction .*: key \(b\)=\(3\), local row \(3, 3, 3\).*
+.*Key already exists in unique index \"public.conf_tab_c_key\", modified in transaction .*: key \(c\)=\(4\), local row \(4, 4, 4\)./,
 	$log_offset);
 
 pass('multiple_unique_conflicts detected during insert');
@@ -109,9 +109,9 @@ $node_publisher->safe_psql('postgres',
 $node_subscriber->wait_for_log(
 	qr/conflict detected on relation \"public.conf_tab\": conflict=multiple_unique_conflicts.*
 .*Could not apply remote change: remote row \(6, 7, 8\), replica identity \(a\)=\(5\).*
-.*Key already exists in unique index \"conf_tab_pkey\", modified in transaction .*: key \(a\)=\(6\), local row \(6, 6, 6\).*
-.*Key already exists in unique index \"conf_tab_b_key\", modified in transaction .*: key \(b\)=\(7\), local row \(7, 7, 7\).*
-.*Key already exists in unique index \"conf_tab_c_key\", modified in transaction .*: key \(c\)=\(8\), local row \(8, 8, 8\)./,
+.*Key already exists in unique index \"public.conf_tab_pkey\", modified in transaction .*: key \(a\)=\(6\), local row \(6, 6, 6\).*
+.*Key already exists in unique index \"public.conf_tab_b_key\", modified in transaction .*: key \(b\)=\(7\), local row \(7, 7, 7\).*
+.*Key already exists in unique index \"public.conf_tab_c_key\", modified in transaction .*: key \(c\)=\(8\), local row \(8, 8, 8\)./,
 	$log_offset);
 
 pass('multiple_unique_conflicts detected during update');
@@ -135,8 +135,8 @@ $node_publisher->safe_psql('postgres',
 $node_subscriber->wait_for_log(
 	qr/conflict detected on relation \"public.conf_tab_2_p1\": conflict=multiple_unique_conflicts.*
 .*Could not apply remote change: remote row \(55, 2, 3\).*
-.*Key already exists in unique index \"conf_tab_2_p1_pkey\", modified in transaction .*: key \(a\)=\(55\), local row \(55, 2, 3\).*
-.*Key already exists in unique index \"conf_tab_2_p1_a_b_key\", modified in transaction .*: key \(a, b\)=\(55, 2\), local row \(55, 2, 3\)./,
+.*Key already exists in unique index \"public.conf_tab_2_p1_pkey\", modified in transaction .*: key \(a\)=\(55\), local row \(55, 2, 3\).*
+.*Key already exists in unique index \"public.conf_tab_2_p1_a_b_key\", modified in transaction .*: key \(a, b\)=\(55, 2\), local row \(55, 2, 3\)./,
 	$log_offset);
 
 pass('multiple_unique_conflicts detected on a leaf partition during insert');
