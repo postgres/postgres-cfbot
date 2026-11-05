@@ -407,6 +407,7 @@ _hash_first(IndexScanDesc scan, ScanDirection dir)
 		hashkey = _hash_datum2hashkey_type(rel, cur->sk_argument,
 										   cur->sk_subtype);
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
 	so->hashso_sk_hash = hashkey;
 
 	buf = _hash_getbucketbuf_from_hashkey(rel, hashkey, HASH_READ, NULL);

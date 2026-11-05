@@ -18,6 +18,8 @@
 #ifndef INSTRUMENT_NODE_H
 #define INSTRUMENT_NODE_H
 
+#include "storage/buf.h"
+
 /*
  * Offset added to plan_node_id to create a second TOC key for per-worker scan
  * instrumentation. Instrumentation and parallel-awareness are independent, so
@@ -78,7 +80,34 @@ typedef struct IOStats
 typedef struct TableScanInstrumentation
 {
 	IOStats		io;
+
+	/* Buffer access strategies reported by the table AM. */
+	uint32		strategy_mask;
 } TableScanInstrumentation;
+
+/*
+ * Return the instrumentation bit for a buffer access strategy.
+ */
+static inline uint32
+BufferAccessStrategyBit(BufferAccessStrategyType strategy)
+{
+	Assert(strategy >= BAS_NORMAL && strategy <= BAS_VACUUM);
+
+	return 1U << strategy;
+}
+
+/*
+ * Record a buffer access strategy selected by a table AM.
+ *
+ * Preserve every strategy observed across rescans.
+ */
+static inline void
+InstrRecordTableScanStrategy(TableScanInstrumentation *instrument,
+							 BufferAccessStrategyType strategy)
+{
+	if (instrument)
+		instrument->strategy_mask |= BufferAccessStrategyBit(strategy);
+}
 
 /* merge IO statistics from 'src' into 'dst' */
 static inline void
@@ -96,6 +125,19 @@ AccumulateIOStats(IOStats *dst, IOStats *src)
 	dst->io_in_progress += src->io_in_progress;
 }
 
+/*
+ * Combine table scan instrumentation from 'src' into 'dst'.
+ *
+ * I/O statistics are accumulated and observed strategies are preserved.
+ */
+static inline void
+CombineTableScanInstrumentation(TableScanInstrumentation *dst,
+								TableScanInstrumentation *src)
+{
+	AccumulateIOStats(&dst->io, &src->io);
+	dst->strategy_mask |= src->strategy_mask;
+}
+
 
 /* ---------------------
  *	Instrumentation information for index scans (used by all AM interfaces)
@@ -108,7 +150,44 @@ typedef struct IndexScanInstrumentation
 
 	/* Table tuples fetched count (incremented during index-only scans) */
 	uint64		ntabletuplefetches;
+
+	/* Whether the index AM should record its buffer access strategy */
+	bool		need_strategy;
+
+	/* Buffer access strategies reported by the index AM */
+	uint32		strategy_mask;
 } IndexScanInstrumentation;
+
+/*
+ * Record a buffer access strategy selected by an index AM.
+ *
+ * Record strategies only when requested by the executor and preserve every
+ * strategy observed across rescans.
+ */
+static inline void
+InstrRecordIndexScanStrategy(IndexScanInstrumentation *instrument,
+							 BufferAccessStrategyType strategy)
+{
+	if (!instrument)
+		return;
+
+	if (instrument->need_strategy)
+		instrument->strategy_mask |= BufferAccessStrategyBit(strategy);
+}
+
+/*
+ * Combine index scan instrumentation from 'src' into 'dst'.
+ *
+ * Counter values are added and observed strategies are preserved.
+ */
+static inline void
+CombineIndexScanInstrumentation(IndexScanInstrumentation *dst,
+								IndexScanInstrumentation *src)
+{
+	dst->nsearches += src->nsearches;
+	dst->ntabletuplefetches += src->ntabletuplefetches;
+	dst->strategy_mask |= src->strategy_mask;
+}
 
 /*
  * Shared memory container for per-worker information
@@ -308,6 +387,43 @@ typedef struct SharedSeqScanInstrumentation
 	int			num_workers;
 	pg_attribute_counted_by(num_workers) SeqScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
 } SharedSeqScanInstrumentation;
+
+
+/* ---------------------
+ *	Instrumentation information for sample scans
+ * ---------------------
+ */
+typedef struct SampleScanInstrumentation
+{
+	TableScanInstrumentation stats;
+} SampleScanInstrumentation;
+
+/*
+ * Shared memory container for per-worker information
+ */
+typedef struct SharedSampleScanInstrumentation
+{
+	int			num_workers;
+	pg_attribute_counted_by(num_workers) SampleScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedSampleScanInstrumentation;
+
+/* ---------------------
+ *	Instrumentation information for TID scans
+ * ---------------------
+ */
+typedef struct TidScanInstrumentation
+{
+	TableScanInstrumentation stats;
+} TidScanInstrumentation;
+
+/*
+ * Shared memory container for per-worker information
+ */
+typedef struct SharedTidScanInstrumentation
+{
+	int			num_workers;
+	pg_attribute_counted_by(num_workers) TidScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedTidScanInstrumentation;
 
 
 /*

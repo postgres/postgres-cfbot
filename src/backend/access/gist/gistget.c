@@ -641,6 +641,7 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 		/* Begin the scan by processing the root page */
 		GISTSearchItem fakeItem;
 
+		InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
 		pgstat_count_index_scan(scan->indexRelation);
 		if (scan->instrument)
 			scan->instrument->nsearches++;
@@ -761,6 +762,7 @@ gistgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	if (!so->qual_ok)
 		return 0;
 
+	InstrRecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
 	pgstat_count_index_scan(scan->indexRelation);
 	if (scan->instrument)
 		scan->instrument->nsearches++;
