@@ -7814,6 +7814,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
        included in this total, so that this number will eventually become
        equal to <structfield>heap_blks_total</structfield> when the vacuum is complete.
        This counter only advances when the phase is <literal>scanning heap</literal>.
+       When the heap is scanned in parallel, this is the number of blocks
+       handed out to the processes so far.
       </para></entry>
      </row>
 

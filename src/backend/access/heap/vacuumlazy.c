@@ -25,8 +25,9 @@
  * been referred to colloquially as phases for so long that they are referred
  * to as such here.
  *
- * Manually invoked VACUUMs may scan indexes during phase II in parallel. For
- * more information on this, see the comment at the top of vacuumparallel.c.
+ * Phase I and the index phases may each use parallel workers. See "Parallel
+ * Heap Scan" below, and the comment at the top of vacuumparallel.c for the
+ * index phases.
  *
  * In between phases, vacuum updates the freespace map (every
  * VACUUM_FSM_EVERY_PAGES).
@@ -99,6 +100,20 @@
  * After pruning and freezing, pages that are newly all-visible and all-frozen
  * are marked as such in the visibility map.
  *
+ * Parallel Heap Scan:
+ *
+ * Phase I can be done by parallel workers. The leader creates a parallel
+ * context of its own, separate from the one vacuumparallel.c creates for the
+ * index phases, and both share the dead items TID store and the cost-based
+ * vacuum delay.
+ *
+ * Each process, the leader included, claims PARALLEL_LV_CHUNK_SIZE blocks at
+ * a time and scans them like a serial vacuum. The cutoffs come from the
+ * leader, and each process fills its own LVScanData for the leader to
+ * combine. When the dead items reach the memory limit, which a process checks
+ * only between chunks, the leader vacuums the indexes and the heap and
+ * launches workers again for the blocks that are left.
+ *
  * Dead TID Storage:
  *
  * The major space usage for vacuuming is storage for the dead tuple IDs that
@@ -133,6 +148,7 @@
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/multixact.h"
+#include "access/parallel.h"
 #include "access/tidstore.h"
 #include "access/transam.h"
 #include "access/visibilitymap.h"
@@ -144,6 +160,7 @@
 #include "common/pg_prng.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
+#include "optimizer/paths.h"
 #include "pgstat.h"
 #include "portability/instr_time.h"
 #include "postmaster/autovacuum.h"
@@ -152,6 +169,7 @@
 #include "storage/latch.h"
 #include "storage/lmgr.h"
 #include "storage/read_stream.h"
+#include "tcop/tcopprot.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_rusage.h"
@@ -214,11 +232,29 @@
  */
 #define PREFETCH_SIZE			((BlockNumber) 32)
 
+/* DSM keys for parallel heap vacuum, in a parallel context of its own */
+#define PARALLEL_LV_KEY_SHARED			1
+#define PARALLEL_LV_KEY_QUERY_TEXT		2
+#define PARALLEL_LV_KEY_BUFFER_USAGE	3
+#define PARALLEL_LV_KEY_WAL_USAGE		4
+#define PARALLEL_LV_KEY_SCAN_DATA		5
+
 /*
- * Macro to check if we are in a parallel vacuum.  If true, we are in the
- * parallel mode and the DSM segment is initialized.
+ * Number of blocks a process claims at once in a parallel heap scan. A chunk
+ * is also an eager scan region, and the unit a process finishes before it
+ * checks the dead items memory limit.
+ *
+ * XXX raise this to 32768 blocks, about what one VM page covers?
+ */
+#define PARALLEL_LV_CHUNK_SIZE	((BlockNumber) 1024)
+
+/*
+ * Macros to check if we are in a parallel vacuum. If true, we are in the
+ * parallel mode and the DSM segment is initialized. The first is for the index
+ * phases, the second for the heap scan; both can be true.
  */
 #define ParallelVacuumIsActive(vacrel) ((vacrel)->pvs != NULL)
+#define ParallelLVIsActive(vacrel) ((vacrel)->plvstate != NULL)
 
 /* Phases of vacuum during which we report error context. */
 typedef enum
@@ -296,6 +332,54 @@ typedef struct LVScanData
 	bool		skippedallvis;
 } LVScanData;
 
+/* Shared information for parallel heap vacuum, in DSM */
+typedef struct ParallelLVShared
+{
+	PVShared	base;
+
+	/* Set once by the leader */
+	int			nindexes;
+	bool		aggressive;
+	bool		skipwithvm;
+	BlockNumber rel_pages;
+	struct VacuumCutoffs cutoffs;
+	TransactionId NewRelfrozenXid;	/* initial values for each worker */
+	MultiXactId NewRelminMxid;
+	BlockNumber eager_scan_success_limit;	/* for logging */
+	BlockNumber eager_scan_max_fails_per_chunk;
+
+	/* Set by the leader before each launch */
+	bool		do_index_vacuuming;
+
+	/* Has the leader triggered the wraparound failsafe? */
+	pg_atomic_uint32 failsafe_active;
+
+	/* Eager scan successes left */
+	pg_atomic_uint32 eager_scan_remaining_successes;
+
+	/* Have the dead items outgrown their memory limit? */
+	pg_atomic_uint32 dead_items_full;
+
+	/* Blocks handed out so far; chunks are claimed here */
+	pg_atomic_uint64 nallocated;
+} ParallelLVShared;
+
+/* Per-process state for parallel heap vacuum, in the leader and workers */
+typedef struct ParallelLVState
+{
+	ParallelLVShared *shared;
+	int64		unreported_dead_items;	/* workers: not yet sent to the leader */
+
+	/* Fields below are set and used only by the leader */
+	ParallelContext *pcxt;
+	BufferUsage *buffer_usage;	/* per worker, in DSM */
+	WalUsage   *wal_usage;
+	LVScanData *scan_data_array;	/* per worker, in DSM */
+	int			nworkers_launched;	/* by the latest launch */
+	int			nlaunches;
+	BlockNumber next_failsafe_check;	/* in blocks handed out */
+} ParallelLVState;
+
 typedef struct LVRelState
 {
 	/* Target heap relation and its indexes */
@@ -305,7 +389,8 @@ typedef struct LVRelState
 
 	/* Buffer access strategy and parallel vacuum state */
 	BufferAccessStrategy bstrategy;
-	ParallelVacuumState *pvs;
+	ParallelVacuumState *pvs;	/* index phases, from vacuumparallel.c */
+	ParallelLVState *plvstate;	/* heap scan */
 
 	/* Aggressive VACUUM? (must set relfrozenxid >= FreezeLimit) */
 	bool		aggressive;
@@ -345,6 +430,7 @@ typedef struct LVRelState
 	 */
 	TidStore   *dead_items;		/* TIDs whose index tuples we'll delete */
 	VacDeadItemsInfo *dead_items_info;
+	bool		dead_items_full;	/* outgrown dead_items_info->max_bytes? */
 
 	BlockNumber rel_pages;		/* total number of pages */
 
@@ -363,13 +449,17 @@ typedef struct LVRelState
 	Size		total_dead_items_bytes;
 
 	/*
-	 * Total number of planned and actually launched parallel workers for
-	 * index vacuuming and index cleanup.
+	 * Total number of planned and actually launched parallel workers for heap
+	 * scanning, index vacuuming and index cleanup.
 	 */
 	PVWorkerUsage worker_usage;
 
+	/* Next block to vacuum the FSM from, in phase I */
+	BlockNumber next_fsm_block_to_vacuum;
+
 	/* State maintained by heap_vac_scan_next_block() */
 	BlockNumber current_block;	/* last block returned */
+	BlockNumber scan_end;		/* end of the current chunk (parallel only) */
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_eager_scanned; /* if it was eagerly scanned */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
@@ -396,8 +486,12 @@ typedef struct LVRelState
 	 * this is decremented. Once it hits 0, eager scanning is permanently
 	 * disabled. It is initialized to 0 if eager scanning starts out disabled
 	 * (including for aggressive vacuum).
+	 *
+	 * The processes of a parallel heap scan share the count in
+	 * ParallelLVShared instead.
 	 */
 	BlockNumber eager_scan_remaining_successes;
+	BlockNumber eager_scan_success_limit;	/* its initial value, for logging */
 
 	/*
 	 * The maximum number of blocks which may be eagerly scanned and not
@@ -407,6 +501,9 @@ typedef struct LVRelState
 	 * storage parameter of the same name. It is calculated as
 	 * vacuum_max_eager_freeze_failure_rate of EAGER_SCAN_REGION_SIZE blocks.
 	 * It is 0 when eager scanning is disabled.
+	 *
+	 * In a parallel heap scan, each chunk is a region, and this is the same
+	 * fraction of PARALLEL_LV_CHUNK_SIZE blocks.
 	 */
 	BlockNumber eager_scan_max_fails_per_region;
 
@@ -433,12 +530,30 @@ typedef struct LVSavedErrInfo
 
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
+static void do_lazy_scan_heap(LVRelState *vacrel);
 static void heap_vacuum_eager_scan_setup(LVRelState *vacrel,
 										 const VacuumParams *params);
+static bool lazy_scan_eager_freeze_success(LVRelState *vacrel);
 static BlockNumber heap_vac_scan_next_block(ReadStream *stream,
 											void *callback_private_data,
 											void *per_buffer_data);
-static void find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis);
+static bool find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis,
+										BlockNumber start, BlockNumber end);
+static int	parallel_lazy_scan_compute_workers(LVRelState *vacrel,
+											   int nrequested);
+static void parallel_lazy_scan_init(LVRelState *vacrel, int nworkers,
+									int vac_work_mem);
+static void parallel_lazy_scan_shutdown(LVRelState *vacrel);
+static void parallel_lazy_scan_heap_leader(LVRelState *vacrel);
+static void parallel_lazy_scan_heap_begin(LVRelState *vacrel);
+static void parallel_lazy_scan_heap_end(LVRelState *vacrel);
+static void parallel_lazy_scan_chunks(LVRelState *vacrel);
+static bool parallel_lazy_scan_next_chunk(LVRelState *vacrel,
+										  BlockNumber *next_block);
+static void parallel_lazy_scan_eager_region(LVRelState *vacrel,
+											BlockNumber start);
+static void parallel_lazy_scan_report_dead_items(LVRelState *vacrel);
+static void parallel_lazy_scan_heap_worker(LVRelState *vacrel, shm_toc *toc);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
@@ -473,6 +588,7 @@ static BlockNumber count_nondeletable_pages(LVRelState *vacrel,
 static void dead_items_alloc(LVRelState *vacrel, int nworkers);
 static void dead_items_add(LVRelState *vacrel, BlockNumber blkno, OffsetNumber *offsets,
 						   int num_offsets);
+static bool dead_items_check_memory_limit(LVRelState *vacrel);
 static void dead_items_reset(LVRelState *vacrel);
 static void dead_items_cleanup(LVRelState *vacrel);
 
@@ -520,6 +636,7 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, const VacuumParams *params)
 	vacrel->eager_scan_max_fails_per_region = 0;
 	vacrel->eager_scan_remaining_fails = 0;
 	vacrel->eager_scan_remaining_successes = 0;
+	vacrel->eager_scan_success_limit = 0;
 
 	/* If eager scanning is explicitly disabled, just return. */
 	if (params->max_eager_freeze_failure_rate == 0)
@@ -583,6 +700,7 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, const VacuumParams *params)
 	vacrel->eager_scan_remaining_successes =
 		(BlockNumber) (MAX_EAGER_FREEZE_SUCCESS_RATE *
 					   (allvisible - allfrozen));
+	vacrel->eager_scan_success_limit = vacrel->eager_scan_remaining_successes;
 
 	/* If every all-visible page is frozen, eager scanning is disabled. */
 	if (vacrel->eager_scan_remaining_successes == 0)
@@ -759,7 +877,10 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	vacrel->num_index_scans = 0;
 	vacrel->num_dead_items_resets = 0;
 	vacrel->total_dead_items_bytes = 0;
+	vacrel->next_fsm_block_to_vacuum = 0;
 
+	vacrel->worker_usage.heap_scan.nlaunched = 0;
+	vacrel->worker_usage.heap_scan.nplanned = 0;
 	vacrel->worker_usage.vacuum.nlaunched = 0;
 	vacrel->worker_usage.vacuum.nplanned = 0;
 	vacrel->worker_usage.cleanup.nlaunched = 0;
@@ -854,7 +975,8 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	 * test code to modify configuration that the leader then propagates to
 	 * workers.
 	 */
-	if (AmAutoVacuumWorkerProcess() && ParallelVacuumIsActive(vacrel))
+	if (AmAutoVacuumWorkerProcess() &&
+		(ParallelVacuumIsActive(vacrel) || ParallelLVIsActive(vacrel)))
 		INJECTION_POINT("autovacuum-start-parallel-vacuum", NULL);
 #endif
 
@@ -1122,6 +1244,12 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 							 100.0 * vacrel->scan_data->lpdead_item_pages / orig_rel_pages,
 							 vacrel->scan_data->lpdead_items);
 
+			if (vacrel->worker_usage.heap_scan.nplanned > 0)
+				appendStringInfo(&buf,
+								 _("parallel workers: heap scan: %d planned, %d launched in total\n"),
+								 vacrel->worker_usage.heap_scan.nplanned,
+								 vacrel->worker_usage.heap_scan.nlaunched);
+
 			if (vacrel->worker_usage.vacuum.nplanned > 0)
 				appendStringInfo(&buf,
 								 _("parallel workers: index vacuum: %d planned, %d launched in total\n"),
@@ -1272,14 +1400,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 static void
 lazy_scan_heap(LVRelState *vacrel)
 {
-	ReadStream *stream;
-	BlockNumber rel_pages = vacrel->rel_pages,
-				blkno = 0,
-				next_fsm_block_to_vacuum = 0;
-	BlockNumber orig_eager_scan_success_limit =
-		vacrel->eager_scan_remaining_successes; /* for logging */
-	Buffer		vmbuffer = InvalidBuffer;
-	bool		strategy_cleared = false;
+	BlockNumber rel_pages = vacrel->rel_pages;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -1298,6 +1419,71 @@ lazy_scan_heap(LVRelState *vacrel)
 	vacrel->next_unskippable_block = InvalidBlockNumber;
 	vacrel->next_unskippable_eager_scanned = false;
 	vacrel->next_unskippable_vmbuffer = InvalidBuffer;
+
+	if (ParallelLVIsActive(vacrel))
+		parallel_lazy_scan_heap_leader(vacrel);
+	else
+		do_lazy_scan_heap(vacrel);
+
+	/*
+	 * Report that everything is now scanned. We never skip scanning the last
+	 * block in the relation, so we can pass rel_pages here.
+	 */
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
+								 rel_pages);
+
+	/* now we can compute the new value for pg_class.reltuples */
+	vacrel->new_live_tuples = vac_estimate_reltuples(vacrel->rel, rel_pages,
+													 vacrel->scan_data->scanned_pages,
+													 vacrel->scan_data->live_tuples);
+
+	/*
+	 * Also compute the total number of surviving heap entries.  In the
+	 * (unlikely) scenario that new_live_tuples is -1, take it as zero.
+	 */
+	vacrel->new_rel_tuples =
+		Max(vacrel->new_live_tuples, 0) + vacrel->scan_data->recently_dead_tuples +
+		vacrel->scan_data->missed_dead_tuples;
+
+	/*
+	 * Do index vacuuming (call each index's ambulkdelete routine), then do
+	 * related heap vacuuming
+	 */
+	if (vacrel->dead_items_info->num_items > 0)
+		lazy_vacuum(vacrel);
+
+	/*
+	 * Vacuum the remainder of the Free Space Map.  We must do this whether or
+	 * not there were indexes, and whether or not we bypassed index vacuuming.
+	 * We can pass rel_pages here because we never skip scanning the last
+	 * block of the relation.
+	 */
+	if (rel_pages > vacrel->next_fsm_block_to_vacuum)
+		FreeSpaceMapVacuumRange(vacrel->rel, vacrel->next_fsm_block_to_vacuum,
+								rel_pages);
+
+	/* report all blocks vacuumed */
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, rel_pages);
+
+	/* Do final index cleanup (call each index's amvacuumcleanup routine) */
+	if (vacrel->nindexes > 0 && vacrel->do_index_cleanup)
+		lazy_cleanup_all_indexes(vacrel);
+}
+
+/*
+ * Workhorse for lazy_scan_heap(). Scans the heap with a read stream until
+ * heap_vac_scan_next_block() has no more blocks to give: the whole heap in a
+ * serial vacuum, pausing for a round of index and heap vacuuming when the dead
+ * items exceed the memory limit; in a parallel heap scan, the chunks this
+ * process claims, until the dead items exceed the memory limit.
+ */
+static void
+do_lazy_scan_heap(LVRelState *vacrel)
+{
+	ReadStream *stream;
+	BlockNumber blkno = InvalidBlockNumber;
+	Buffer		vmbuffer = InvalidBuffer;
+	bool		strategy_cleared = false;
 
 	/*
 	 * Set up the read stream for vacuum's first pass through the heap.
@@ -1334,21 +1520,34 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * that point.  This check also provides failsafe coverage for the
 		 * one-pass strategy, and the two-pass strategy with the index_cleanup
 		 * param set to 'off'.
+		 *
+		 * In a parallel heap scan, only the leader checks, by the blocks
+		 * handed out to all the processes so far.
 		 */
-		if (vacrel->scan_data->scanned_pages > 0 &&
-			vacrel->scan_data->scanned_pages % FAILSAFE_EVERY_PAGES == 0)
+		if (ParallelLVIsActive(vacrel))
+		{
+			if (!IsParallelWorker() &&
+				pg_atomic_read_u64(&vacrel->plvstate->shared->nallocated) >=
+				vacrel->plvstate->next_failsafe_check)
+			{
+				vacrel->plvstate->next_failsafe_check += FAILSAFE_EVERY_PAGES;
+				lazy_check_wraparound_failsafe(vacrel);
+			}
+		}
+		else if (vacrel->scan_data->scanned_pages > 0 &&
+				 vacrel->scan_data->scanned_pages % FAILSAFE_EVERY_PAGES == 0)
 			lazy_check_wraparound_failsafe(vacrel);
 
 		/*
 		 * Consider if we definitely have enough space to process TIDs on page
 		 * already.  If we are close to overrunning the available space for
 		 * dead_items TIDs, pause and do a cycle of vacuuming before we tackle
-		 * this page. However, let's force at least one page-worth of tuples
-		 * to be stored as to ensure we do at least some work when the memory
-		 * configured is so low that we run out before storing anything.
+		 * this page. (In a parallel heap scan, heap_vac_scan_next_block()
+		 * ends the stream at the end of the chunk instead, and the leader
+		 * vacuums once the workers have finished.)
 		 */
-		if (vacrel->dead_items_info->num_items > 0 &&
-			TidStoreMemoryUsage(vacrel->dead_items) > vacrel->dead_items_info->max_bytes)
+		if (!ParallelLVIsActive(vacrel) &&
+			dead_items_check_memory_limit(vacrel))
 		{
 			/*
 			 * Before beginning index vacuuming, we release any pin we may
@@ -1371,9 +1570,9 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * upper-level FSM pages. Note that blkno is the previously
 			 * processed block.
 			 */
-			FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+			FreeSpaceMapVacuumRange(vacrel->rel, vacrel->next_fsm_block_to_vacuum,
 									blkno + 1);
-			next_fsm_block_to_vacuum = blkno;
+			vacrel->next_fsm_block_to_vacuum = blkno;
 
 			/* Report that we are once again scanning the heap */
 			pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
@@ -1408,8 +1607,18 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (was_eager_scanned)
 			vacrel->scan_data->eager_scanned_pages++;
 
-		/* Report as block scanned, update error traceback information */
-		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
+		/*
+		 * Report as block scanned, update error traceback information. In a
+		 * parallel heap scan, the blocks are processed out of order, so the
+		 * leader reports the blocks handed out so far, and the workers don't
+		 * report.
+		 */
+		if (!ParallelLVIsActive(vacrel))
+			pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
+		else if (!IsParallelWorker())
+			pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
+										 Min(pg_atomic_read_u64(&vacrel->plvstate->shared->nallocated),
+											 vacrel->rel_pages));
 		update_vacuum_error_info(vacrel, NULL, VACUUM_ERRCB_PHASE_SCAN_HEAP,
 								 blkno, InvalidOffsetNumber);
 
@@ -1499,27 +1708,10 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			if (vm_page_frozen)
 			{
-				if (vacrel->eager_scan_remaining_successes > 0)
-					vacrel->eager_scan_remaining_successes--;
-
-				if (vacrel->eager_scan_remaining_successes == 0)
+				if (lazy_scan_eager_freeze_success(vacrel))
 				{
 					/*
-					 * Report only once that we disabled eager scanning. We
-					 * may eagerly read ahead blocks in excess of the success
-					 * or failure caps before attempting to freeze them, so we
-					 * could reach here even after disabling additional eager
-					 * scanning.
-					 */
-					if (vacrel->eager_scan_max_fails_per_region > 0)
-						ereport(vacrel->verbose ? INFO : DEBUG2,
-								(errmsg("disabling eager scanning after freezing %u eagerly scanned blocks of relation \"%s.%s.%s\"",
-										orig_eager_scan_success_limit,
-										vacrel->dbname, vacrel->relnamespace,
-										vacrel->relname)));
-
-					/*
-					 * If we hit our success cap, permanently disable eager
+					 * We hit our success cap. Permanently disable eager
 					 * scanning by setting the other eager scan management
 					 * fields to their disabled values.
 					 */
@@ -1565,13 +1757,20 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * visible on upper FSM pages. This is done after vacuuming if the
 			 * table has indexes. There will only be newly-freed space if we
 			 * held the cleanup lock and lazy_scan_prune() was called.
+			 *
+			 * A parallel heap scan leaves it to the leader, which only knows
+			 * which blocks are done once the workers have finished.
 			 */
 			if (got_cleanup_lock && vacrel->nindexes == 0 && ndeleted > 0 &&
-				blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
+				!ParallelLVIsActive(vacrel))
 			{
-				FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
-										blkno);
-				next_fsm_block_to_vacuum = blkno;
+				if (blkno > vacrel->next_fsm_block_to_vacuum &&
+					blkno - vacrel->next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
+				{
+					FreeSpaceMapVacuumRange(vacrel->rel, vacrel->next_fsm_block_to_vacuum,
+											blkno);
+					vacrel->next_fsm_block_to_vacuum = blkno;
+				}
 			}
 		}
 		else
@@ -1582,50 +1781,58 @@ lazy_scan_heap(LVRelState *vacrel)
 	if (BufferIsValid(vmbuffer))
 		ReleaseBuffer(vmbuffer);
 
-	/*
-	 * Report that everything is now scanned. We never skip scanning the last
-	 * block in the relation, so we can pass rel_pages here.
-	 */
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
-								 rel_pages);
-
-	/* now we can compute the new value for pg_class.reltuples */
-	vacrel->new_live_tuples = vac_estimate_reltuples(vacrel->rel, rel_pages,
-													 vacrel->scan_data->scanned_pages,
-													 vacrel->scan_data->live_tuples);
-
-	/*
-	 * Also compute the total number of surviving heap entries.  In the
-	 * (unlikely) scenario that new_live_tuples is -1, take it as zero.
-	 */
-	vacrel->new_rel_tuples =
-		Max(vacrel->new_live_tuples, 0) + vacrel->scan_data->recently_dead_tuples +
-		vacrel->scan_data->missed_dead_tuples;
-
 	read_stream_end(stream);
+}
 
-	/*
-	 * Do index vacuuming (call each index's ambulkdelete routine), then do
-	 * related heap vacuuming
-	 */
-	if (vacrel->dead_items_info->num_items > 0)
-		lazy_vacuum(vacrel);
+/*
+ * Count a successful eager freeze. Returns true if the success cap has been
+ * hit, so that the caller disables eager scanning. The processes of a parallel
+ * heap scan share the cap; the one that uses it up reports it.
+ */
+static bool
+lazy_scan_eager_freeze_success(LVRelState *vacrel)
+{
+	bool		hit,
+				report;
 
-	/*
-	 * Vacuum the remainder of the Free Space Map.  We must do this whether or
-	 * not there were indexes, and whether or not we bypassed index vacuuming.
-	 * We can pass rel_pages here because we never skip scanning the last
-	 * block of the relation.
-	 */
-	if (rel_pages > next_fsm_block_to_vacuum)
-		FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum, rel_pages);
+	if (ParallelLVIsActive(vacrel))
+	{
+		pg_atomic_uint32 *remaining =
+			&vacrel->plvstate->shared->eager_scan_remaining_successes;
+		uint32		old = pg_atomic_read_u32(remaining);
 
-	/* report all blocks vacuumed */
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, rel_pages);
+		while (old > 0 &&
+			   !pg_atomic_compare_exchange_u32(remaining, &old, old - 1))
+			;
 
-	/* Do final index cleanup (call each index's amvacuumcleanup routine) */
-	if (vacrel->nindexes > 0 && vacrel->do_index_cleanup)
-		lazy_cleanup_all_indexes(vacrel);
+		/* Hit if the count was 0 already, or we just made it 0 */
+		hit = (old <= 1);
+		report = (old == 1);
+	}
+	else
+	{
+		if (vacrel->eager_scan_remaining_successes > 0)
+			vacrel->eager_scan_remaining_successes--;
+
+		hit = (vacrel->eager_scan_remaining_successes == 0);
+
+		/*
+		 * Report only once that we disabled eager scanning. We may eagerly
+		 * read ahead blocks in excess of the success or failure caps before
+		 * attempting to freeze them, so we could reach here even after
+		 * disabling additional eager scanning.
+		 */
+		report = (hit && vacrel->eager_scan_max_fails_per_region > 0);
+	}
+
+	if (report)
+		ereport(vacrel->verbose ? INFO : DEBUG2,
+				(errmsg("disabling eager scanning after freezing %u eagerly scanned blocks of relation \"%s.%s.%s\"",
+						vacrel->eager_scan_success_limit,
+						vacrel->dbname, vacrel->relnamespace,
+						vacrel->relname)));
+
+	return hit;
 }
 
 /*
@@ -1639,7 +1846,10 @@ lazy_scan_heap(LVRelState *vacrel)
  * heap_vac_scan_next_block() uses the visibility map, vacuum options, and
  * various thresholds to skip blocks which do not need to be processed and
  * returns the next block to process or InvalidBlockNumber if there are no
- * remaining blocks.
+ * remaining blocks. In a parallel heap scan, the blocks come from the chunks
+ * the process claims, and InvalidBlockNumber is also returned once the dead
+ * items exceed the memory limit, so that the stream ends and the process stops
+ * where it is.
  *
  * The visibility status of the next block to process and whether or not it
  * was eager scanned is set in the per_buffer_data.
@@ -1659,12 +1869,22 @@ heap_vac_scan_next_block(ReadStream *stream,
 {
 	BlockNumber next_block;
 	LVRelState *vacrel = callback_private_data;
+	bool		end_of_scan;
+
+retry:
 
 	/* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
 	next_block = vacrel->current_block + 1;
 
-	/* Have we reached the end of the relation? */
-	if (next_block >= vacrel->rel_pages)
+	/* Have we reached the end of the relation (or of our chunks)? */
+	if (ParallelLVIsActive(vacrel))
+		end_of_scan = (next_block >= vacrel->scan_end &&
+					   (dead_items_check_memory_limit(vacrel) ||
+						!parallel_lazy_scan_next_chunk(vacrel, &next_block)));
+	else
+		end_of_scan = (next_block >= vacrel->rel_pages);
+
+	if (end_of_scan)
 	{
 		if (BufferIsValid(vacrel->next_unskippable_vmbuffer))
 		{
@@ -1686,8 +1906,30 @@ heap_vac_scan_next_block(ReadStream *stream,
 		 * visibility map.
 		 */
 		bool		skipsallvis;
+		BlockNumber end = ParallelLVIsActive(vacrel) ?
+			vacrel->scan_end : vacrel->rel_pages;
 
-		find_next_unskippable_block(vacrel, &skipsallvis);
+		if (!find_next_unskippable_block(vacrel, &skipsallvis, next_block, end))
+		{
+			/*
+			 * The rest of our chunk is skippable: skip it and move on to the
+			 * next chunk, unless it's too short to be worth skipping (see
+			 * below). Only a parallel heap scan gets here, as the last block
+			 * of the relation is never skippable.
+			 */
+			Assert(ParallelLVIsActive(vacrel));
+
+			if (end - next_block >= SKIP_PAGES_THRESHOLD)
+			{
+				if (skipsallvis)
+					vacrel->scan_data->skippedallvis = true;
+				vacrel->current_block = end - 1;
+				vacrel->next_unskippable_block = InvalidBlockNumber;
+				goto retry;
+			}
+
+			vacrel->next_unskippable_block = end - 1;
+		}
 
 		/*
 		 * We now know the next block that we must process.  It can be the
@@ -1740,9 +1982,13 @@ heap_vac_scan_next_block(ReadStream *stream,
 }
 
 /*
- * Find the next unskippable block in a vacuum scan using the visibility map.
- * The next unskippable block and its visibility information is updated in
- * vacrel.
+ * Find the next unskippable block in a vacuum scan using the visibility map,
+ * from block 'start' up to block 'end'. The next unskippable block and its
+ * visibility information is updated in vacrel.
+ *
+ * Returns false if there is none before 'end', which only a parallel heap scan
+ * can see, as the last block of the relation is never skippable.
+ * vacrel->next_unskippable_block is then 'end'.
  *
  * Note: our opinion of which blocks can be skipped can go stale immediately.
  * It's okay if caller "misses" a page whose all-visible or all-frozen marking
@@ -1752,17 +1998,19 @@ heap_vac_scan_next_block(ReadStream *stream,
  * older XIDs/MXIDs.  The *skippedallvis flag will be set here when the choice
  * to skip such a range is actually made, making everything safe.)
  */
-static void
-find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
+static bool
+find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis,
+							BlockNumber start, BlockNumber end)
 {
 	BlockNumber rel_pages = vacrel->rel_pages;
-	BlockNumber next_unskippable_block = vacrel->next_unskippable_block + 1;
+	BlockNumber next_unskippable_block = start;
 	Buffer		next_unskippable_vmbuffer = vacrel->next_unskippable_vmbuffer;
 	bool		next_unskippable_eager_scanned = false;
+	bool		found;
 
 	*skipsallvis = false;
 
-	for (;; next_unskippable_block++)
+	for (; next_unskippable_block < end; next_unskippable_block++)
 	{
 		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
 													   next_unskippable_block,
@@ -1841,10 +2089,15 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 		*skipsallvis = true;
 	}
 
+	found = (next_unskippable_block < end);
+	Assert(found || ParallelLVIsActive(vacrel));
+
 	/* write the local variables back to vacrel */
 	vacrel->next_unskippable_block = next_unskippable_block;
 	vacrel->next_unskippable_eager_scanned = next_unskippable_eager_scanned;
 	vacrel->next_unskippable_vmbuffer = next_unskippable_vmbuffer;
+
+	return found;
 }
 
 /*
@@ -2133,9 +2386,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->scan_data->live_tuples += presult.live_tuples;
 	vacrel->scan_data->recently_dead_tuples += presult.recently_dead_tuples;
 
-	/* Can't truncate this page */
+	/* Can't truncate this page (blocks come out of order when parallel) */
 	if (presult.hastup)
-		vacrel->scan_data->nonempty_pages = blkno + 1;
+		vacrel->scan_data->nonempty_pages =
+			Max(blkno + 1, vacrel->scan_data->nonempty_pages);
 
 	/* Did we find LP_DEAD items? */
 	*has_lpdead_items = (presult.lpdead_items > 0);
@@ -2350,9 +2604,10 @@ lazy_scan_noprune(LVRelState *vacrel,
 	if (missed_dead_tuples > 0)
 		vacrel->scan_data->missed_dead_pages++;
 
-	/* Can't truncate this page */
+	/* Can't truncate this page (blocks come out of order when parallel) */
 	if (hastup)
-		vacrel->scan_data->nonempty_pages = blkno + 1;
+		vacrel->scan_data->nonempty_pages =
+			Max(blkno + 1, vacrel->scan_data->nonempty_pages);
 
 	/* Did we find LP_DEAD items? */
 	*has_lpdead_items = (lpdead_items > 0);
@@ -2915,6 +3170,17 @@ lazy_check_wraparound_failsafe(LVRelState *vacrel)
 		VacuumFailsafeActive = true;
 
 		/*
+		 * Let the processes of a parallel heap scan in on it, so that they
+		 * too stop applying the cost-based delay and stop using the buffer
+		 * access strategy. Only the leader gets here.
+		 */
+		if (ParallelLVIsActive(vacrel))
+		{
+			Assert(!IsParallelWorker());
+			pg_atomic_write_u32(&vacrel->plvstate->shared->failsafe_active, 1);
+		}
+
+		/*
 		 * We abandon use of the strategy in failsafe mode to allow use of all
 		 * of shared buffers. vacrel->bstrategy is not the source of truth for
 		 * an ongoing heap scan, but clear it just for tidiness. Any ongoing
@@ -3466,13 +3732,9 @@ dead_items_alloc(LVRelState *vacrel, int nworkers)
 	int			vac_work_mem = AmAutoVacuumWorkerProcess() &&
 		autovacuum_work_mem != -1 ?
 		autovacuum_work_mem : maintenance_work_mem;
+	bool		try_parallel = false;
 
-	/*
-	 * Initialize state for a parallel vacuum.  As of now, only one worker can
-	 * be used for an index, so we invoke parallelism only if there are at
-	 * least two indexes on a table.
-	 */
-	if (nworkers >= 0 && vacrel->nindexes > 1 && vacrel->do_index_vacuuming)
+	if (nworkers >= 0)
 	{
 		/*
 		 * Since parallel workers cannot access data in temporary tables, we
@@ -3490,35 +3752,41 @@ dead_items_alloc(LVRelState *vacrel, int nworkers)
 								vacrel->relname)));
 		}
 		else
-			vacrel->pvs = parallel_vacuum_init(vacrel->rel, vacrel->indrels,
-											   vacrel->nindexes, nworkers,
-											   vac_work_mem,
-											   vacrel->verbose ? INFO : DEBUG2,
-											   vacrel->bstrategy);
-
-		/*
-		 * If parallel mode started, dead_items and dead_items_info spaces are
-		 * allocated in DSM.
-		 */
-		if (ParallelVacuumIsActive(vacrel))
-		{
-			vacrel->dead_items = parallel_vacuum_get_dead_items(vacrel->pvs,
-																&vacrel->dead_items_info);
-			return;
-		}
+			try_parallel = true;
 	}
 
 	/*
-	 * Serial VACUUM case. Allocate both dead_items and dead_items_info
-	 * locally.
+	 * Initialize state for parallel index vacuuming. As of now, only one
+	 * worker can be used for an index, so we invoke parallelism only if there
+	 * are at least two indexes on a table.
 	 */
+	if (try_parallel && vacrel->nindexes > 1 && vacrel->do_index_vacuuming)
+		vacrel->pvs = parallel_vacuum_init(vacrel->rel, vacrel->indrels,
+										   vacrel->nindexes, nworkers,
+										   vac_work_mem,
+										   vacrel->verbose ? INFO : DEBUG2,
+										   vacrel->bstrategy);
 
-	dead_items_info = palloc_object(VacDeadItemsInfo);
-	dead_items_info->max_bytes = vac_work_mem * (Size) 1024;
-	dead_items_info->num_items = 0;
-	vacrel->dead_items_info = dead_items_info;
+	if (ParallelVacuumIsActive(vacrel))
+	{
+		/* dead_items and dead_items_info spaces are allocated in DSM */
+		vacrel->dead_items = parallel_vacuum_get_dead_items(vacrel->pvs,
+															&vacrel->dead_items_info);
+	}
+	else
+	{
+		/* Allocate both dead_items and dead_items_info locally */
+		dead_items_info = palloc_object(VacDeadItemsInfo);
+		dead_items_info->max_bytes = vac_work_mem * (Size) 1024;
+		dead_items_info->num_items = 0;
+		vacrel->dead_items_info = dead_items_info;
 
-	vacrel->dead_items = TidStoreCreateLocal(dead_items_info->max_bytes, true);
+		vacrel->dead_items = TidStoreCreateLocal(dead_items_info->max_bytes, true);
+	}
+
+	/* Initialize state for parallel heap vacuuming, sharing dead_items */
+	if (try_parallel)
+		parallel_lazy_scan_init(vacrel, nworkers, vac_work_mem);
 }
 
 /*
@@ -3528,19 +3796,77 @@ static void
 dead_items_add(LVRelState *vacrel, BlockNumber blkno, OffsetNumber *offsets,
 			   int num_offsets)
 {
-	const int	prog_index[2] = {
-		PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
-		PROGRESS_VACUUM_DEAD_TUPLE_BYTES
-	};
-	int64		prog_val[2];
-
+	/* The lock matters only for the shared store of a parallel heap scan */
+	TidStoreLockExclusive(vacrel->dead_items);
 	TidStoreSetBlockOffsets(vacrel->dead_items, blkno, offsets, num_offsets);
+	TidStoreUnlock(vacrel->dead_items);
+
+	/* Each process counts its own; the leader adds the workers' at the end */
 	vacrel->dead_items_info->num_items += num_offsets;
 
-	/* update the progress information */
-	prog_val[0] = vacrel->dead_items_info->num_items;
-	prog_val[1] = TidStoreMemoryUsage(vacrel->dead_items);
-	pgstat_progress_update_multi_param(2, prog_index, prog_val);
+	if (ParallelLVIsActive(vacrel))
+	{
+		if (IsParallelWorker())
+		{
+			/* Added to the leader's row now and then, not here */
+			vacrel->plvstate->unreported_dead_items += num_offsets;
+		}
+		else
+			pgstat_progress_incr_param(PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
+									   num_offsets);
+	}
+	else
+	{
+		size_t		mem_used = TidStoreMemoryUsage(vacrel->dead_items);
+
+		/*
+		 * Note it when the dead items outgrow the memory limit, so that the
+		 * scan pauses for a round of vacuuming. The usage only grows here, so
+		 * this is the only place that has to look at it.
+		 */
+		if (mem_used > vacrel->dead_items_info->max_bytes)
+			vacrel->dead_items_full = true;
+
+		pgstat_progress_incr_param(PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
+								   num_offsets);
+		pgstat_progress_update_param(PROGRESS_VACUUM_DEAD_TUPLE_BYTES, mem_used);
+	}
+}
+
+/*
+ * Have the dead items outgrown the memory limit? In a parallel heap scan the
+ * answer is the same for every process, and the one that notices publishes it
+ * for the rest. Asking the shared store for its usage takes a lock, so only
+ * call this where the scan can act on the answer: at the end of a chunk, and
+ * at the end of a pass.
+ */
+static bool
+dead_items_check_memory_limit(LVRelState *vacrel)
+{
+	pg_atomic_uint32 *full;
+
+	if (!ParallelLVIsActive(vacrel))
+		return vacrel->dead_items_full;
+
+	full = &vacrel->plvstate->shared->dead_items_full;
+	if (pg_atomic_read_u32(full) != 0)
+		return true;
+
+	/*
+	 * Our own count, so that whoever stored the items is the one to say so.
+	 * Let's force at least one page-worth of tuples to be stored as to ensure
+	 * we do at least some work when the memory configured is so low that we
+	 * run out before storing anything.
+	 */
+	if (vacrel->dead_items_info->num_items > 0 &&
+		TidStoreMemoryUsage(vacrel->dead_items) >
+		vacrel->dead_items_info->max_bytes)
+	{
+		pg_atomic_write_u32(full, 1);
+		return true;
+	}
+
+	return false;
 }
 
 /*
@@ -3549,6 +3875,12 @@ dead_items_add(LVRelState *vacrel, BlockNumber blkno, OffsetNumber *offsets,
 static void
 dead_items_reset(LVRelState *vacrel)
 {
+	const int	prog_index[2] = {
+		PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
+		PROGRESS_VACUUM_DEAD_TUPLE_BYTES
+	};
+	const int64 prog_val[2] = {0, 0};
+
 	/* Update statistics for dead items */
 	vacrel->num_dead_items_resets++;
 	vacrel->total_dead_items_bytes += TidStoreMemoryUsage(vacrel->dead_items);
@@ -3558,15 +3890,36 @@ dead_items_reset(LVRelState *vacrel)
 		parallel_vacuum_reset_dead_items(vacrel->pvs);
 		vacrel->dead_items = parallel_vacuum_get_dead_items(vacrel->pvs,
 															&vacrel->dead_items_info);
-		return;
+	}
+	else
+	{
+		size_t		max_bytes = vacrel->dead_items_info->max_bytes;
+
+		/* Recreate the tidstore with the same max_bytes limitation */
+		if (ParallelLVIsActive(vacrel))
+		{
+			PVShared   *shared = &vacrel->plvstate->shared->base;
+
+			parallel_vacuum_destroy_dead_items(shared, vacrel->dead_items);
+			vacrel->dead_items = parallel_vacuum_create_dead_items(shared);
+		}
+		else
+		{
+			TidStoreDestroy(vacrel->dead_items);
+			vacrel->dead_items = TidStoreCreateLocal(max_bytes, true);
+		}
+
+		/* Reset the counter */
+		vacrel->dead_items_info->num_items = 0;
 	}
 
-	/* Recreate the tidstore with the same max_bytes limitation */
-	TidStoreDestroy(vacrel->dead_items);
-	vacrel->dead_items = TidStoreCreateLocal(vacrel->dead_items_info->max_bytes, true);
+	/* The store has room again */
+	vacrel->dead_items_full = false;
+	if (ParallelLVIsActive(vacrel))
+		pg_atomic_write_u32(&vacrel->plvstate->shared->dead_items_full, 0);
 
-	/* Reset the counter */
-	vacrel->dead_items_info->num_items = 0;
+	/* The progress counters are kept by increments, so start them over */
+	pgstat_progress_update_multi_param(2, prog_index, prog_val);
 }
 
 /*
@@ -3575,15 +3928,676 @@ dead_items_reset(LVRelState *vacrel)
 static void
 dead_items_cleanup(LVRelState *vacrel)
 {
-	if (!ParallelVacuumIsActive(vacrel))
+	/* End parallel mode */
+	if (ParallelLVIsActive(vacrel))
+		parallel_lazy_scan_shutdown(vacrel);
+
+	if (ParallelVacuumIsActive(vacrel))
 	{
-		/* Don't bother with pfree here */
+		parallel_vacuum_end(vacrel->pvs, vacrel->indstats);
+		vacrel->pvs = NULL;
+	}
+
+	/* Don't bother with pfree here */
+}
+
+/*
+ * Compute the number of parallel workers to request for the heap scan. With
+ * nothing requested, it comes from the number of blocks to scan.
+ */
+static int
+parallel_lazy_scan_compute_workers(LVRelState *vacrel, int nrequested)
+{
+	BlockNumber rel_pages = vacrel->rel_pages;
+	int			nchunks = rel_pages / PARALLEL_LV_CHUNK_SIZE;
+	int			parallel_workers;
+	int			max_workers;
+
+	max_workers = AmAutoVacuumWorkerProcess() ?
+		autovacuum_max_parallel_workers :
+		max_parallel_maintenance_workers;
+
+	/*
+	 * We don't allow performing parallel operation in standalone backend or
+	 * when parallelism is disabled.
+	 */
+	if (!IsUnderPostmaster || max_workers == 0)
+		return 0;
+
+	/* Small relations aren't worth it, and the leader needs a chunk too */
+	if (rel_pages < min_parallel_table_scan_size || nchunks < 2)
+		return 0;
+
+	if (nrequested > 0)
+		parallel_workers = nrequested;
+	else
+	{
+		BlockNumber scan_pages = rel_pages;
+		int			threshold;
+
+		/*
+		 * Estimate the blocks the scan will read. DISABLE_PAGE_SKIPPING means
+		 * all of them; otherwise the VM says which ones get skipped, and an
+		 * aggressive vacuum only skips the all-frozen ones. The counts can be
+		 * stale and eager scanning reads some all-visible blocks anyway, so
+		 * this is only an estimate.
+		 */
+		if (vacrel->skipwithvm)
+		{
+			BlockNumber allvisible,
+						allfrozen;
+
+			visibilitymap_count(vacrel->rel, &allvisible, &allfrozen);
+			allvisible = Min(allvisible, rel_pages);
+			allfrozen = Min(allfrozen, allvisible);
+			scan_pages -= vacrel->aggressive ? allfrozen : allvisible;
+		}
+
+		if (scan_pages < min_parallel_table_scan_size)
+			return 0;
+
+		/*
+		 * Select the number of workers based on the log of the number of
+		 * blocks to scan, as compute_parallel_worker() does for a parallel
+		 * sequential scan.
+		 */
+		parallel_workers = 1;
+		threshold = Max(min_parallel_table_scan_size, 1);
+		while (scan_pages >= (BlockNumber) (threshold * 3))
+		{
+			parallel_workers++;
+			threshold *= 3;
+			if (threshold > INT_MAX / 3)
+				break;			/* avoid overflow */
+		}
+	}
+
+	/* Each worker needs a chunk of its own, after the leader's */
+	parallel_workers = Min(parallel_workers, nchunks - 1);
+
+	return Min(parallel_workers, max_workers);
+}
+
+/*
+ * Set up the parallel heap scan, sharing the dead items if they aren't shared
+ * already. Does nothing if the scan is not worth parallelizing.
+ */
+static void
+parallel_lazy_scan_init(LVRelState *vacrel, int nworkers,
+						int vac_work_mem)
+{
+	ParallelContext *pcxt;
+	ParallelLVShared *shared;
+	ParallelLVState *plvstate;
+	Size		est_scan_data_len;
+	int			querylen;
+	BlockNumber first_chunk_end = 0;
+
+	Assert(!IsParallelWorker());
+	Assert(!ParallelLVIsActive(vacrel));
+
+	/* Not when the failsafe has triggered, like for the index phases */
+	if (VacuumFailsafeActive)
+		return;
+
+	nworkers = parallel_lazy_scan_compute_workers(vacrel, nworkers);
+	if (nworkers <= 0)
+		return;
+
+	EnterParallelMode();
+	pcxt = CreateParallelContext("postgres", "heap_parallel_vacuum_main",
+								 nworkers);
+
+	/* Estimate the space for everything, one key each */
+	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(ParallelLVShared));
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+
+	/* BufferUsage and WalUsage, as nobody can tell if anyone's looking */
+	shm_toc_estimate_chunk(&pcxt->estimator,
+						   mul_size(sizeof(BufferUsage), nworkers));
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	shm_toc_estimate_chunk(&pcxt->estimator,
+						   mul_size(sizeof(WalUsage), nworkers));
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+
+	est_scan_data_len = mul_size(sizeof(LVScanData), nworkers);
+	shm_toc_estimate_chunk(&pcxt->estimator, est_scan_data_len);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+
+	if (debug_query_string)
+	{
+		querylen = strlen(debug_query_string);
+		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
+	else
+		querylen = 0;			/* keep compiler quiet */
+
+	InitializeParallelDSM(pcxt);
+
+	/* No DSM segment available, so no workers; scan serially instead */
+	if (pcxt->nworkers == 0)
+	{
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
 		return;
 	}
 
-	/* End parallel mode */
-	parallel_vacuum_end(vacrel->pvs, vacrel->indstats);
-	vacrel->pvs = NULL;
+	plvstate = palloc0_object(ParallelLVState);
+	plvstate->pcxt = pcxt;
+	plvstate->next_failsafe_check = FAILSAFE_EVERY_PAGES;
+
+	/*
+	 * If eager scanning is on, the first chunk is the first eager scan
+	 * region, so that the chunks line up with the regions.
+	 */
+	if (BlockNumberIsValid(vacrel->next_eager_scan_region_start))
+	{
+		first_chunk_end = vacrel->next_eager_scan_region_start;
+		Assert(first_chunk_end < vacrel->rel_pages);
+	}
+
+	/* Shared information */
+	shared = shm_toc_allocate(pcxt->toc, sizeof(ParallelLVShared));
+	MemSet(shared, 0, sizeof(ParallelLVShared));
+	parallel_vacuum_init_shared(&shared->base, pcxt, vacrel->rel,
+								vacrel->bstrategy, vac_work_mem,
+								vacrel->verbose ? INFO : DEBUG2);
+	shared->nindexes = vacrel->nindexes;
+	shared->aggressive = vacrel->aggressive;
+	shared->skipwithvm = vacrel->skipwithvm;
+	shared->rel_pages = vacrel->rel_pages;
+	shared->cutoffs = vacrel->cutoffs;
+	shared->NewRelfrozenXid = vacrel->scan_data->NewRelfrozenXid;
+	shared->NewRelminMxid = vacrel->scan_data->NewRelminMxid;
+	shared->eager_scan_success_limit = vacrel->eager_scan_success_limit;
+	if (vacrel->eager_scan_max_fails_per_region > 0)
+		shared->eager_scan_max_fails_per_chunk =
+			Max(1, (BlockNumber) (vacrel->eager_scan_max_fails_per_region *
+								  ((double) PARALLEL_LV_CHUNK_SIZE /
+								   EAGER_SCAN_REGION_SIZE)));
+	pg_atomic_init_u32(&shared->eager_scan_remaining_successes,
+					   vacrel->eager_scan_remaining_successes);
+	pg_atomic_init_u32(&shared->failsafe_active, 0);
+	pg_atomic_init_u32(&shared->dead_items_full, 0);
+	pg_atomic_init_u64(&shared->nallocated, first_chunk_end);
+	shm_toc_insert(pcxt->toc, PARALLEL_LV_KEY_SHARED, shared);
+	plvstate->shared = shared;
+
+	/* Each worker's BufferUsage and WalUsage; no need to initialize */
+	plvstate->buffer_usage = shm_toc_allocate(pcxt->toc,
+											  mul_size(sizeof(BufferUsage), nworkers));
+	shm_toc_insert(pcxt->toc, PARALLEL_LV_KEY_BUFFER_USAGE, plvstate->buffer_usage);
+	plvstate->wal_usage = shm_toc_allocate(pcxt->toc,
+										   mul_size(sizeof(WalUsage), nworkers));
+	shm_toc_insert(pcxt->toc, PARALLEL_LV_KEY_WAL_USAGE, plvstate->wal_usage);
+
+	/* Each worker's LVScanData; the workers initialize them */
+	plvstate->scan_data_array = shm_toc_allocate(pcxt->toc, est_scan_data_len);
+	shm_toc_insert(pcxt->toc, PARALLEL_LV_KEY_SCAN_DATA, plvstate->scan_data_array);
+
+	/* Store query string for workers */
+	if (debug_query_string)
+	{
+		char	   *sharedquery;
+
+		sharedquery = shm_toc_allocate(pcxt->toc, querylen + 1);
+		memcpy(sharedquery, debug_query_string, querylen + 1);
+		shm_toc_insert(pcxt->toc, PARALLEL_LV_KEY_QUERY_TEXT, sharedquery);
+	}
+
+	/*
+	 * The workers need dead_items in shared memory. parallel_vacuum_init()
+	 * has put them there if it ran. Tables without indexes collect none, so
+	 * the local store stays.
+	 */
+	if (!ParallelVacuumIsActive(vacrel) && vacrel->nindexes > 0)
+	{
+		TidStoreDestroy(vacrel->dead_items);
+		vacrel->dead_items = parallel_vacuum_create_dead_items(&shared->base);
+	}
+
+	vacrel->plvstate = plvstate;
+
+	/* The leader takes the first chunk, which the counter starts after */
+	vacrel->scan_end = first_chunk_end;
+	parallel_lazy_scan_eager_region(vacrel, 0);
+}
+
+/*
+ * Destroy the parallel context, and end parallel mode.
+ */
+static void
+parallel_lazy_scan_shutdown(LVRelState *vacrel)
+{
+	ParallelLVState *plvstate = vacrel->plvstate;
+
+	Assert(!IsParallelWorker());
+
+	/* The shared dead_items created by parallel_lazy_scan_init() */
+	if (!ParallelVacuumIsActive(vacrel) && vacrel->nindexes > 0)
+		parallel_vacuum_destroy_dead_items(&vacrel->plvstate->shared->base,
+										   vacrel->dead_items);
+
+	DestroyParallelContext(plvstate->pcxt);
+	ExitParallelMode();
+
+	pfree(vacrel->plvstate);
+	vacrel->plvstate = NULL;
+}
+
+/*
+ * The parallel heap scan, as seen by the leader. Launches the workers and
+ * scans along with them, repeating with a round of index and heap vacuuming in
+ * between whenever the dead items exceed the memory limit.
+ */
+static void
+parallel_lazy_scan_heap_leader(LVRelState *vacrel)
+{
+	BlockNumber blkno;
+
+	Assert(!IsParallelWorker());
+
+	for (;;)
+	{
+		parallel_lazy_scan_heap_begin(vacrel);
+
+		/* The leader scans too, and alone when no worker got launched */
+		parallel_lazy_scan_chunks(vacrel);
+
+		parallel_lazy_scan_heap_end(vacrel);
+
+		/* A process only stops short at the memory limit, so we're done */
+		if (!dead_items_check_memory_limit(vacrel))
+			break;
+
+		/* Perform a round of index and heap vacuuming, then scan on */
+		vacrel->consider_bypass_optimization = false;
+		lazy_vacuum(vacrel);
+
+		/* Vacuum the FSM, every block handed out so far has been scanned */
+		blkno = Min(pg_atomic_read_u64(&vacrel->plvstate->shared->nallocated),
+					vacrel->rel_pages);
+		if (blkno > vacrel->next_fsm_block_to_vacuum)
+		{
+			FreeSpaceMapVacuumRange(vacrel->rel,
+									vacrel->next_fsm_block_to_vacuum, blkno);
+			vacrel->next_fsm_block_to_vacuum = blkno;
+		}
+
+		pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
+									 PROGRESS_VACUUM_PHASE_SCAN_HEAP);
+	}
+
+	Assert(pg_atomic_read_u64(&vacrel->plvstate->shared->nallocated) >=
+		   vacrel->rel_pages);
+}
+
+/*
+ * Launch the workers for one pass over the heap.
+ */
+static void
+parallel_lazy_scan_heap_begin(LVRelState *vacrel)
+{
+	ParallelLVState *plvstate = vacrel->plvstate;
+	ParallelLVShared *shared = vacrel->plvstate->shared;
+	uint64		nallocated = pg_atomic_read_u64(&shared->nallocated);
+	int			nchunks_left = 0;
+	int			nworkers;
+
+	Assert(!IsParallelWorker());
+
+	/* No more workers than the chunks left, one of which the leader takes */
+	if (nallocated < vacrel->rel_pages)
+		nchunks_left = (vacrel->rel_pages - nallocated +
+						PARALLEL_LV_CHUNK_SIZE - 1) / PARALLEL_LV_CHUNK_SIZE;
+	if (nchunks_left > 0)
+		nchunks_left--;
+	nworkers = Min(plvstate->pcxt->nworkers, nchunks_left);
+
+#ifdef USE_INJECTION_POINTS
+	/* Launch fewer workers each time, to test finishing the chunks left */
+	if (IS_INJECTION_POINT_ATTACHED("parallel-heap-vacuum-ramp-down-workers"))
+		nworkers = Max(nworkers - plvstate->nlaunches, 0);
+#endif
+
+	plvstate->nworkers_launched = 0;
+	if (nworkers == 0)
+		return;
+
+	/* Reinitialize parallel context to relaunch parallel workers */
+	if (plvstate->nlaunches > 0)
+		ReinitializeParallelDSM(plvstate->pcxt);
+	ReinitializeParallelWorkers(plvstate->pcxt, nworkers);
+
+	/* This can change between passes */
+	shared->do_index_vacuuming = vacrel->do_index_vacuuming;
+
+	/*
+	 * Where the dead items are, if there are any to share. A table without
+	 * indexes collects none, so its workers each make a store of their own.
+	 */
+	parallel_vacuum_set_dead_items(&shared->base,
+								   vacrel->nindexes > 0 ? vacrel->dead_items : NULL);
+
+	parallel_vacuum_launch_workers(plvstate->pcxt, &shared->base);
+	plvstate->nlaunches++;
+	plvstate->nworkers_launched = plvstate->pcxt->nworkers_launched;
+
+	vacrel->worker_usage.heap_scan.nplanned += nworkers;
+	vacrel->worker_usage.heap_scan.nlaunched += plvstate->nworkers_launched;
+
+	ereport(vacrel->verbose ? INFO : DEBUG2,
+			(errmsg(ngettext("launched %d parallel vacuum worker for heap scanning (planned: %d)",
+							 "launched %d parallel vacuum workers for heap scanning (planned: %d)",
+							 plvstate->nworkers_launched),
+					plvstate->nworkers_launched, nworkers)));
+}
+
+/*
+ * Wait for the workers of one pass to finish, and gather what they did.
+ */
+static void
+parallel_lazy_scan_heap_end(LVRelState *vacrel)
+{
+	ParallelLVState *plvstate = vacrel->plvstate;
+	LVScanData *scan_data = vacrel->scan_data;
+	const int	prog_index[2] = {
+		PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
+		PROGRESS_VACUUM_DEAD_TUPLE_BYTES
+	};
+	int64		prog_val[2];
+
+	Assert(!IsParallelWorker());
+
+	if (plvstate->nworkers_launched > 0)
+	{
+		parallel_vacuum_wait_for_workers(plvstate->pcxt,
+										 &vacrel->plvstate->shared->base);
+
+		/* Take the buffer and WAL usage of the workers that just finished */
+		for (int i = 0; i < plvstate->nworkers_launched; i++)
+			InstrAccumParallelQuery(&plvstate->buffer_usage[i],
+									&plvstate->wal_usage[i]);
+	}
+
+	for (int i = 0; i < plvstate->nworkers_launched; i++)
+	{
+		LVScanData *data = &plvstate->scan_data_array[i];
+
+		/* Add the worker's counters to ours (only the leader removes pages) */
+#define ACCUM_COUNT(item) scan_data->item += data->item
+		ACCUM_COUNT(scanned_pages);
+		ACCUM_COUNT(eager_scanned_pages);
+		ACCUM_COUNT(new_frozen_tuple_pages);
+		ACCUM_COUNT(new_all_visible_pages);
+		ACCUM_COUNT(new_all_visible_all_frozen_pages);
+		ACCUM_COUNT(new_all_frozen_pages);
+		ACCUM_COUNT(lpdead_item_pages);
+		ACCUM_COUNT(missed_dead_pages);
+		ACCUM_COUNT(tuples_deleted);
+		ACCUM_COUNT(tuples_frozen);
+		ACCUM_COUNT(lpdead_items);
+		ACCUM_COUNT(live_tuples);
+		ACCUM_COUNT(recently_dead_tuples);
+		ACCUM_COUNT(missed_dead_tuples);
+#undef ACCUM_COUNT
+
+		/* The worker added this many items to dead_items */
+		vacrel->dead_items_info->num_items += data->lpdead_items;
+
+		scan_data->nonempty_pages = Max(scan_data->nonempty_pages,
+										data->nonempty_pages);
+
+		/* The oldest XID and MXID seen by any process is what counts */
+		Assert(TransactionIdIsValid(data->NewRelfrozenXid));
+		Assert(MultiXactIdIsValid(data->NewRelminMxid));
+		if (TransactionIdPrecedes(data->NewRelfrozenXid, scan_data->NewRelfrozenXid))
+			scan_data->NewRelfrozenXid = data->NewRelfrozenXid;
+		if (MultiXactIdPrecedes(data->NewRelminMxid, scan_data->NewRelminMxid))
+			scan_data->NewRelminMxid = data->NewRelminMxid;
+
+		scan_data->skippedallvis |= data->skippedallvis;
+	}
+
+	/* Now that the counts are complete, report them */
+	prog_val[0] = vacrel->dead_items_info->num_items;
+	prog_val[1] = TidStoreMemoryUsage(vacrel->dead_items);
+	pgstat_progress_update_multi_param(2, prog_index, prog_val);
+}
+
+/*
+ * Scan the chunks this process can get, until none are left or the dead items
+ * are over the memory limit. Both the leader and the workers run this.
+ */
+static void
+parallel_lazy_scan_chunks(LVRelState *vacrel)
+{
+	/* Count as active for the cost-based delay while scanning */
+	if (VacuumActiveNWorkers)
+		pg_atomic_add_fetch_u32(VacuumActiveNWorkers, 1);
+
+	do_lazy_scan_heap(vacrel);
+
+	if (VacuumActiveNWorkers)
+		pg_atomic_sub_fetch_u32(VacuumActiveNWorkers, 1);
+}
+
+/*
+ * Claim the next chunk for this process. Returns false if none are left,
+ * otherwise sets 'next_block' to its first block.
+ */
+static bool
+parallel_lazy_scan_next_chunk(LVRelState *vacrel, BlockNumber *next_block)
+{
+	ParallelLVShared *shared = vacrel->plvstate->shared;
+	uint64		start;
+
+	if (IsParallelWorker())
+	{
+		/* A good time to report our dead items to the leader */
+		parallel_lazy_scan_report_dead_items(vacrel);
+
+		/*
+		 * And to pick up the wraparound failsafe, which only the leader
+		 * checks. Do as it does and stop applying the cost-based delay;
+		 * do_lazy_scan_heap() takes it from here and tells the read stream to
+		 * stop using the buffer access strategy.
+		 */
+		if (unlikely(!VacuumFailsafeActive) &&
+			pg_atomic_read_u32(&shared->failsafe_active) != 0)
+		{
+			VacuumFailsafeActive = true;
+			VacuumCostActive = false;
+		}
+	}
+
+	start = pg_atomic_fetch_add_u64(&shared->nallocated, PARALLEL_LV_CHUNK_SIZE);
+	if (start >= vacrel->rel_pages)
+		return false;
+
+	vacrel->scan_end = Min(start + PARALLEL_LV_CHUNK_SIZE, vacrel->rel_pages);
+	*next_block = start;
+
+	/* A new chunk is a new eager scan region */
+	parallel_lazy_scan_eager_region(vacrel, start);
+
+	return true;
+}
+
+/*
+ * Start an eager scan region at 'start', unless the shared success cap has
+ * been hit. Each chunk of a parallel heap scan is a region, with a failure cap
+ * of its own.
+ */
+static void
+parallel_lazy_scan_eager_region(LVRelState *vacrel, BlockNumber start)
+{
+	ParallelLVShared *shared = vacrel->plvstate->shared;
+
+	if (pg_atomic_read_u32(&shared->eager_scan_remaining_successes) > 0)
+	{
+		vacrel->eager_scan_max_fails_per_region =
+			shared->eager_scan_max_fails_per_chunk;
+		vacrel->next_eager_scan_region_start = start;
+	}
+	else
+	{
+		vacrel->eager_scan_max_fails_per_region = 0;
+		vacrel->next_eager_scan_region_start = InvalidBlockNumber;
+	}
+	vacrel->eager_scan_remaining_fails = 0;
+}
+
+/*
+ * Send the dead items a worker has added since the last time to the leader,
+ * for its progress row.
+ */
+static void
+parallel_lazy_scan_report_dead_items(LVRelState *vacrel)
+{
+	ParallelLVState *plvstate = vacrel->plvstate;
+
+	Assert(IsParallelWorker());
+
+	if (plvstate->unreported_dead_items > 0)
+	{
+		pgstat_progress_parallel_incr_param(PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,
+											plvstate->unreported_dead_items);
+		plvstate->unreported_dead_items = 0;
+	}
+}
+
+/*
+ * The heap scan a worker of a parallel heap vacuum does.
+ */
+static void
+parallel_lazy_scan_heap_worker(LVRelState *vacrel, shm_toc *toc)
+{
+	ParallelLVState *plvstate = vacrel->plvstate;
+	ParallelLVShared *shared = plvstate->shared;
+
+	Assert(IsParallelWorker());
+
+	vacrel->eager_scan_success_limit = shared->eager_scan_success_limit;
+
+	/* No chunk yet, so the read stream claims one on its first call */
+	vacrel->current_block = InvalidBlockNumber;
+	vacrel->next_unskippable_block = InvalidBlockNumber;
+
+	update_vacuum_error_info(vacrel, NULL, VACUUM_ERRCB_PHASE_SCAN_HEAP,
+							 InvalidBlockNumber, InvalidOffsetNumber);
+	pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
+								 PROGRESS_VACUUM_PHASE_SCAN_HEAP);
+
+	parallel_lazy_scan_chunks(vacrel);
+	parallel_lazy_scan_report_dead_items(vacrel);
+}
+
+/*
+ * Perform work within a launched parallel process. The setup and the teardown
+ * here are the same whatever phase of the vacuum the leader launched us for.
+ */
+void
+heap_parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
+{
+	LVRelState *vacrel;
+	ParallelLVShared *shared;
+	ParallelLVState *plvstate;
+	TidStore   *dead_items;
+	BufferAccessStrategy bstrategy;
+	LVScanData *scan_data_array;
+	BufferUsage *buffer_usage;
+	WalUsage   *wal_usage;
+	char	   *sharedquery;
+	Relation	rel;
+	ErrorContextCallback errcallback;
+
+	elog(DEBUG1, "starting parallel heap vacuum worker");
+
+	shared = shm_toc_lookup(toc, PARALLEL_LV_KEY_SHARED, false);
+	sharedquery = shm_toc_lookup(toc, PARALLEL_LV_KEY_QUERY_TEXT, true);
+
+	/*
+	 * The setup every parallel vacuum worker does. The leader holds the locks
+	 * on the indexes for us. dead_items comes back NULL for a table without
+	 * indexes, which collects none to share.
+	 */
+	rel = parallel_vacuum_begin_worker(&shared->base, sharedquery,
+									   &dead_items, &bstrategy);
+
+	/*
+	 * If the failsafe has triggered in the leader, do as it does and stop
+	 * applying the cost-based delay. This has to come after the setup above,
+	 * which turns the delay on. do_lazy_scan_heap() tells the read stream to
+	 * drop the buffer access strategy.
+	 */
+	if (pg_atomic_read_u32(&shared->failsafe_active) != 0)
+	{
+		VacuumFailsafeActive = true;
+		VacuumCostActive = false;
+	}
+
+	/* Set up what the heap scan reads from LVRelState */
+	vacrel = palloc0_object(LVRelState);
+	vacrel->rel = rel;
+	vacrel->nindexes = shared->nindexes;
+	vacrel->aggressive = shared->aggressive;
+	vacrel->skipwithvm = shared->skipwithvm;
+	vacrel->do_index_vacuuming = shared->do_index_vacuuming;
+	vacrel->verbose = shared->base.elevel == INFO;
+	vacrel->cutoffs = shared->cutoffs;
+	vacrel->vistest = GlobalVisTestFor(rel);
+	vacrel->rel_pages = shared->rel_pages;
+	vacrel->dbname = get_database_name(MyDatabaseId);
+	vacrel->relnamespace = get_namespace_name(RelationGetNamespace(rel));
+	vacrel->relname = pstrdup(RelationGetRelationName(rel));
+
+	vacrel->bstrategy = bstrategy;
+
+	/* The shared dead items, or one of our own if there are none to share */
+	vacrel->dead_items_info = palloc_object(VacDeadItemsInfo);
+	vacrel->dead_items_info->max_bytes = shared->base.dead_items_info.max_bytes;
+	vacrel->dead_items_info->num_items = 0;
+	if (dead_items != NULL)
+		vacrel->dead_items = dead_items;
+	else
+		vacrel->dead_items = TidStoreCreateLocal(shared->base.dead_items_info.max_bytes,
+												 true);
+
+	/* Our scan data lives in DSM for the leader to gather */
+	scan_data_array = shm_toc_lookup(toc, PARALLEL_LV_KEY_SCAN_DATA, false);
+	vacrel->scan_data = &scan_data_array[ParallelWorkerNumber];
+	MemSet(vacrel->scan_data, 0, sizeof(LVScanData));
+	vacrel->scan_data->NewRelfrozenXid = shared->NewRelfrozenXid;
+	vacrel->scan_data->NewRelminMxid = shared->NewRelminMxid;
+
+	plvstate = palloc0_object(ParallelLVState);
+	plvstate->shared = shared;
+	vacrel->plvstate = plvstate;
+
+	/* Setup error traceback support for ereport() */
+	errcallback.callback = vacuum_error_callback;
+	errcallback.arg = vacrel;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
+	parallel_lazy_scan_heap_worker(vacrel, toc);
+
+	/* Report buffer/WAL usage during parallel execution */
+	buffer_usage = shm_toc_lookup(toc, PARALLEL_LV_KEY_BUFFER_USAGE, false);
+	wal_usage = shm_toc_lookup(toc, PARALLEL_LV_KEY_WAL_USAGE, false);
+	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
+						  &wal_usage[ParallelWorkerNumber]);
+
+	/* Pop the error context stack */
+	error_context_stack = errcallback.previous;
+
+	/* A store we made for ourselves is ours to destroy */
+	if (dead_items == NULL)
+		TidStoreDestroy(vacrel->dead_items);
+
+	parallel_vacuum_end_worker(&shared->base, rel, dead_items, bstrategy);
 }
 
 #ifdef USE_ASSERT_CHECKING

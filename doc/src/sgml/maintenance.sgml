@@ -1196,13 +1196,14 @@ analyze threshold = analyze base threshold + analyze scale factor * number of tu
    <title>Parallel Vacuum</title>
 
    <para>
-    <command>VACUUM</command> can perform index vacuuming and index cleanup
-    phases in parallel using background workers (for the details of each
-    vacuum phase, please refer to <xref linkend="vacuum-phases"/>).  The
-    degree of parallelism is determined by the number of indexes on the
-    relation that support parallel vacuum.  For manual <command>VACUUM</command>,
-    this is limited by the <literal>PARALLEL</literal> option if specified,
-    which is further capped by <xref linkend="guc-max-parallel-maintenance-workers"/>.
+    <command>VACUUM</command> can perform the heap scanning, index vacuuming
+    and index cleanup phases in parallel using background workers (for the
+    details of each vacuum phase, please refer to
+    <xref linkend="vacuum-phases"/>).  The degree of parallelism is determined
+    separately for the heap scan and for the index phases, as described below.
+    For manual <command>VACUUM</command>, each is limited by the
+    <literal>PARALLEL</literal> option if specified, which is further capped
+    by <xref linkend="guc-max-parallel-maintenance-workers"/>.
     For autovacuum, it is limited by the table's
     <xref linkend="reloption-autovacuum-parallel-workers"/> if specified,
     which is further capped by <xref linkend="guc-autovacuum-max-parallel-workers"/>
@@ -1210,6 +1211,15 @@ analyze threshold = analyze base threshold + analyze scale factor * number of tu
     workers that was calculated will be used during execution.  It is possible for
     a vacuum to run with fewer workers than specified, or even with no workers at
     all.
+   </para>
+
+   <para>
+    The heap can be scanned in parallel only if the size of the table is more
+    than <xref linkend="guc-min-parallel-table-scan-size"/>. Its blocks are
+    handed out to the workers in ranges of a fixed size, so the number of
+    workers is also limited by the number of such ranges. Unless specified,
+    the number of workers is chosen from the blocks the scan expects to read,
+    using the same formula as a parallel sequential scan.
    </para>
 
    <para>

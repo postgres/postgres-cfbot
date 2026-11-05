@@ -410,10 +410,12 @@ typedef struct PVWorkerStats
 
 /*
  * PVWorkerUsage stores information about total number of launched and
- * planned workers during parallel vacuum (both for index vacuum and cleanup).
+ * planned workers during parallel vacuum (for heap scanning, index vacuum
+ * and index cleanup).
  */
 typedef struct PVWorkerUsage
 {
+	PVWorkerStats heap_scan;
 	PVWorkerStats vacuum;
 	PVWorkerStats cleanup;
 } PVWorkerUsage;

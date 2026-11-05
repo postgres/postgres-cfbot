@@ -2147,6 +2147,8 @@ ParallelHashJoinBatch
 ParallelHashJoinBatchAccessor
 ParallelHashJoinState
 ParallelIndexScanDesc
+ParallelLVShared
+ParallelLVState
 ParallelSlot
 ParallelSlotArray
 ParallelSlotResultHandler
