@@ -275,7 +275,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBE
 
 typedef struct PgStat_ArchiverStats
 {
@@ -433,6 +433,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter tuples_updated;
 	PgStat_Counter tuples_deleted;
 	TimestampTz last_autovac_time;
+	TimestampTz last_frozenxid_update;
 	PgStat_Counter conflict_tablespace;
 	PgStat_Counter conflict_lock;
 	PgStat_Counter conflict_snapshot;
@@ -731,6 +732,7 @@ extern PgStat_Lock *pgstat_fetch_stat_lock(void);
 
 extern void pgstat_drop_database(Oid databaseid);
 extern void pgstat_report_autovac(Oid dboid);
+extern void pgstat_report_frozenxid_update(void);
 extern void pgstat_report_recovery_conflict(int reason);
 extern void pgstat_report_deadlock(void);
 extern void pgstat_prepare_report_checksum_failure(Oid dboid);

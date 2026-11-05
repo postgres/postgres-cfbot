@@ -149,6 +149,9 @@ int			Log_autoanalyze_min_duration = 600000;
 #define MIN_AUTOVAC_SLEEPTIME 100.0 /* milliseconds */
 #define MAX_AUTOVAC_SLEEPTIME 300	/* seconds */
 
+/* Interval for periodic database frozen-ID updates, in seconds. */
+#define AUTOVAC_DATFROZENXID_UPDATE_INTERVAL (10 * 60)
+
 /*
  * Variables to save the cost-related storage parameters for the current
  * relation being vacuumed by this autovacuum worker. Using these, we can
@@ -371,6 +374,7 @@ static int	db_comparator(const void *a, const void *b);
 static void autovac_recalculate_workers_for_balance(void);
 
 static void do_autovacuum(void);
+static bool autovacuum_datfrozenxid_update_due(void);
 static void FreeWorkerInfo(int code, Datum arg);
 
 static autovac_table *table_recheck_autovac(Oid relid, HTAB *table_toast_map,
@@ -2566,6 +2570,14 @@ do_autovacuum(void)
 			 * cancel at this point.)
 			 */
 			QueryCancelPending = false;
+
+			/*
+			 * Periodically try to publish freezing progress before finishing
+			 * the whole list.  Use the database's shared completion time for
+			 * throttling, and skip the update if its frozen-ID lock is busy.
+			 */
+			if (autovacuum_datfrozenxid_update_due())
+				vac_update_datfrozenxid(true);
 		}
 		PG_CATCH();
 		{
@@ -2685,8 +2697,9 @@ deleted:
 	MemoryContextSwitchTo(TopTransactionContext);
 
 	/*
-	 * Update pg_database.datfrozenxid, and truncate pg_xact if possible. We
-	 * only need to do this once, not after each table.
+	 * Update pg_database.datfrozenxid, and truncate pg_xact if possible.
+	 * We periodically attempt this between tables and force one final update
+	 * at the end.
 	 *
 	 * Even if we didn't vacuum anything, it may still be important to do
 	 * this, because one indirect effect of vac_update_datfrozenxid() is to
@@ -2705,10 +2718,26 @@ deleted:
 	 * worker has already done it, or will do so when it finishes.
 	 */
 	if (did_vacuum || !found_concurrent_worker)
-		vac_update_datfrozenxid();
+		vac_update_datfrozenxid(false);
 
 	/* Finally close out the last transaction. */
 	CommitTransactionCommand();
+}
+
+/*
+ * Check the shared completion time so that all workers in a database use the
+ * same refresh interval.  A clock adjustment must not delay updates forever.
+ */
+static bool
+autovacuum_datfrozenxid_update_due(void)
+{
+	PgStat_StatDBEntry *dbentry = pgstat_fetch_stat_dbentry(MyDatabaseId);
+	TimestampTz last_update = dbentry ? dbentry->last_frozenxid_update : 0;
+	TimestampTz now = GetCurrentTimestamp();
+
+	return last_update == 0 || last_update > now ||
+		TimestampDifferenceExceedsSeconds(last_update, now,
+										  AUTOVAC_DATFROZENXID_UPDATE_INTERVAL);
 }
 
 /*
@@ -2914,7 +2943,8 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		/*
 		 * Select VACUUM options.  Note we don't say VACOPT_PROCESS_TOAST, so
 		 * that vacuum() skips toast relations.  Also note we tell vacuum() to
-		 * skip vac_update_datfrozenxid(); we'll do that separately.
+		 * skip vac_update_datfrozenxid(); we'll try it periodically between
+		 * tables and force a final update at the end.
 		 */
 		tab->at_params.options =
 			(dovacuum ? (VACOPT_VACUUM |
