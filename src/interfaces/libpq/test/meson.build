@@ -39,4 +39,25 @@ libpq_test_deps += executable('libpq_testclient',
   }
 )
 
+libpq_trace_regress_sources = files(
+  'libpq_trace_regress.c',
+)
+
+if host_system == 'windows'
+  libpq_trace_regress_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
+    '--NAME', 'libpq_trace_regress',
+    '--FILEDESC', 'libpq test program',])
+endif
+
+# This includes fe-trace.c, so it needs libpq's internal headers (and the
+# headers they include) but not the library
+libpq_test_deps += executable('libpq_trace_regress',
+  libpq_trace_regress_sources,
+  include_directories: [libpq_inc],
+  dependencies: [frontend_no_fe_utils_code, ssl, gssapi],
+  kwargs: default_bin_args + {
+    'install': false,
+  }
+)
+
 testprep_targets += libpq_test_deps
