@@ -679,6 +679,9 @@ XLogDumpDisplayRecord(XLogDumpConfig *config, XLogReaderState *record)
 		   LSN_FORMAT_ARGS(record->ReadRecPtr),
 		   LSN_FORMAT_ARGS(xl_prev));
 
+	if (info & XLR_COMPRESSED)
+		printf("physical len: %u, ", XLogRecGetPhysicalLen(record));
+
 	id = desc->rm_identify(info);
 	if (id == NULL)
 		printf("desc: UNKNOWN (%x) ", info & ~XLR_INFO_MASK);
@@ -703,7 +706,7 @@ XLogDumpStatsRow(const char *name,
 				 uint64 n, uint64 total_count,
 				 uint64 rec_len, uint64 total_rec_len,
 				 uint64 fpi_len, uint64 total_fpi_len,
-				 uint64 tot_len, uint64 total_len)
+				 uint64 tot_len, uint64 total_len, uint64 physical_len)
 {
 	double		n_pct,
 				rec_len_pct,
@@ -730,9 +733,9 @@ XLogDumpStatsRow(const char *name,
 		   "%20" PRIu64 " (%6.02f) "
 		   "%20" PRIu64 " (%6.02f) "
 		   "%20" PRIu64 " (%6.02f) "
-		   "%20" PRIu64 " (%6.02f)\n",
+		   "%20" PRIu64 " (%6.02f) %20" PRIu64 "\n",
 		   name, n, n_pct, rec_len, rec_len_pct, fpi_len, fpi_len_pct,
-		   tot_len, tot_len_pct);
+		   tot_len, tot_len_pct, physical_len);
 }
 
 
@@ -748,6 +751,7 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogStats *stats)
 	uint64		total_rec_len = 0;
 	uint64		total_fpi_len = 0;
 	uint64		total_len = 0;
+	uint64		total_physical_len = 0;
 	double		rec_len_pct,
 				fpi_len_pct;
 
@@ -770,21 +774,23 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogStats *stats)
 		total_count += stats->rmgr_stats[ri].count;
 		total_rec_len += stats->rmgr_stats[ri].rec_len;
 		total_fpi_len += stats->rmgr_stats[ri].fpi_len;
+		total_physical_len += stats->rmgr_stats[ri].physical_len;
 	}
 	total_len = total_rec_len + total_fpi_len;
 
 	printf("WAL statistics between %X/%08X and %X/%08X:\n",
 		   LSN_FORMAT_ARGS(stats->startptr), LSN_FORMAT_ARGS(stats->endptr));
+	printf("Record, FPI and combined sizes are before whole-record compression.\n");
 
 	/*
 	 * 27 is strlen("Transaction/COMMIT_PREPARED"), 20 is strlen(2^64), 8 is
 	 * strlen("(100.00%)")
 	 */
 
-	printf("%-27s %20s %8s %20s %8s %20s %8s %20s %8s\n"
-		   "%-27s %20s %8s %20s %8s %20s %8s %20s %8s\n",
-		   "Type", "N", "(%)", "Record size", "(%)", "FPI size", "(%)", "Combined size", "(%)",
-		   "----", "-", "---", "-----------", "---", "--------", "---", "-------------", "---");
+	printf("%-27s %20s %8s %20s %8s %20s %8s %20s %8s %20s\n"
+		   "%-27s %20s %8s %20s %8s %20s %8s %20s %8s %20s\n",
+		   "Type", "N", "(%)", "Record size", "(%)", "FPI size", "(%)", "Combined size", "(%)", "Physical size",
+		   "----", "-", "---", "-----------", "---", "--------", "---", "-------------", "---", "-------------");
 
 	for (ri = 0; ri <= RM_MAX_ID; ri++)
 	{
@@ -811,7 +817,8 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogStats *stats)
 
 			XLogDumpStatsRow(desc->rm_name,
 							 count, total_count, rec_len, total_rec_len,
-							 fpi_len, total_fpi_len, tot_len, total_len);
+							 fpi_len, total_fpi_len, tot_len, total_len,
+							 stats->rmgr_stats[ri].physical_len);
 		}
 		else
 		{
@@ -835,7 +842,8 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogStats *stats)
 
 				XLogDumpStatsRow(psprintf("%s/%s", desc->rm_name, id),
 								 count, total_count, rec_len, total_rec_len,
-								 fpi_len, total_fpi_len, tot_len, total_len);
+								 fpi_len, total_fpi_len, tot_len, total_len,
+								 stats->record_stats[ri][rj].physical_len);
 			}
 		}
 	}
@@ -862,11 +870,11 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogStats *stats)
 		   "%20" PRIu64 " %-9s"
 		   "%20" PRIu64 " %-9s"
 		   "%20" PRIu64 " %-9s"
-		   "%20" PRIu64 " %-6s\n",
+		   "%20" PRIu64 " %-8s %20" PRIu64 "\n",
 		   "Total", stats->count, "",
 		   total_rec_len, psprintf("[%.02f%%]", rec_len_pct),
 		   total_fpi_len, psprintf("[%.02f%%]", fpi_len_pct),
-		   total_len, "[100%]");
+		   total_len, "[100%]", total_physical_len);
 }
 
 /*
@@ -1412,8 +1420,14 @@ main(int argc, char **argv)
 	atexit(cleanup_tmpwal_dir_atexit);
 	xlogreader_state_cleanup = xlogreader_state;
 
-	/* first find a valid recptr to start from */
-	first_record = XLogFindNextRecord(xlogreader_state, private.startptr, &errormsg);
+	/*
+	 * Find a valid recptr to start from.  A record can be compressed against
+	 * earlier records of its stream, so this backs up to where the streams
+	 * start over and decodes from there; those earlier records rebuild the
+	 * decompressors and are not printed.
+	 */
+	first_record = XLogBeginReadStreamed(xlogreader_state, private.startptr,
+										 &errormsg);
 
 	if (!XLogRecPtrIsValid(first_record))
 	{
