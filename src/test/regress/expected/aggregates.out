@@ -3958,3 +3958,90 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+-- A sort above Gather must use values actually output by its child.
+-- In particular, y inside the computed column y * 2 is not an input column.
+CREATE TABLE agg_sort_a (x int);
+CREATE TABLE agg_sort_b (id int, y int) PARTITION BY RANGE (id);
+CREATE TABLE agg_sort_b1 PARTITION OF agg_sort_b
+  FOR VALUES FROM (MINVALUE) TO (0);
+CREATE TABLE agg_sort_b2 PARTITION OF agg_sort_b
+  FOR VALUES FROM (0) TO (MAXVALUE);
+ANALYZE agg_sort_a;
+ANALYZE agg_sort_b;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET max_parallel_workers_per_gather = 2;
+SELECT count(DISTINCT a.x + 1)
+FROM agg_sort_a a JOIN agg_sort_b b TABLESAMPLE BERNOULLI (100)
+  ON b.y = a.x + 1
+GROUP BY b.y * 2;
+ count 
+-------
+(0 rows)
+
+INSERT INTO agg_sort_a VALUES (1), (1), (2);
+INSERT INTO agg_sort_b VALUES (-1, 2), (1, 2), (2, 3);
+SELECT b.y * 2 AS g, count(DISTINCT a.x + 1),
+       array_agg(a.x + 1 ORDER BY a.x + 1)
+FROM agg_sort_a a JOIN agg_sort_b b TABLESAMPLE BERNOULLI (100)
+  ON b.y = a.x + 1
+GROUP BY b.y * 2 ORDER BY 1;
+ g | count | array_agg 
+---+-------+-----------
+ 4 |     1 | {2,2,2,2}
+ 6 |     1 | {3}
+(2 rows)
+
+SET enable_presorted_aggregate = off;
+SELECT b.y * 2 AS g, count(DISTINCT a.x + 1),
+       array_agg(a.x + 1 ORDER BY a.x + 1)
+FROM agg_sort_a a JOIN agg_sort_b b TABLESAMPLE BERNOULLI (100)
+  ON b.y = a.x + 1
+GROUP BY b.y * 2 ORDER BY 1;
+ g | count | array_agg 
+---+-------+-----------
+ 4 |     1 | {2,2,2,2}
+ 6 |     1 | {3}
+(2 rows)
+
+RESET enable_presorted_aggregate;
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+-- Distinct parent columns can become equal in only one UNION ALL child.
+-- The common sort-column position must still come from the parent layout.
+CREATE INDEX agg_sort_a_x ON agg_sort_a (x);
+CREATE INDEX agg_sort_a_neg_x ON agg_sort_a ((-x));
+ANALYZE agg_sort_a;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT u.a, u.b FROM
+  (SELECT x AS a, x AS b FROM agg_sort_a
+   UNION ALL
+   SELECT x AS a, -x AS b FROM agg_sort_a) u
+ORDER BY u.b;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Merge Append
+   Sort Key: agg_sort_a.x
+   ->  Index Only Scan using agg_sort_a_x on agg_sort_a
+   ->  Index Scan using agg_sort_a_neg_x on agg_sort_a agg_sort_a_1
+(4 rows)
+
+SELECT u.a, u.b FROM
+  (SELECT x AS a, x AS b FROM agg_sort_a
+   UNION ALL
+   SELECT x AS a, -x AS b FROM agg_sort_a) u
+ORDER BY u.b;
+ a | b  
+---+----
+ 2 | -2
+ 1 | -1
+ 1 | -1
+ 1 |  1
+ 1 |  1
+ 2 |  2
+(6 rows)
+
+RESET enable_seqscan;
+DROP TABLE agg_sort_a, agg_sort_b;
