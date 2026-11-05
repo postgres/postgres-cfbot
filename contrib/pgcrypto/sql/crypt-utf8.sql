@@ -1,0 +1,11 @@
+/* Needs UTF8; skip otherwise (truncated multibyte salt copy). */
+SELECT getdatabaseencoding() <> 'UTF8' AS skip_test \gset
+\if :skip_test
+\quit
+\endif
+-- Salt bytes e282ac41 (euro then A). DES copies only e282, which is invalid UTF8.
+SELECT crypt('password', convert_from(decode('e282ac41', 'hex'), 'utf8'));
+-- Salt bytes 5f4a392e2e6162e282ac (_J9..ab then euro). xDES copies 9 bytes and drops ac.
+SELECT crypt('password', convert_from(decode('5f4a392e2e6162e282ac', 'hex'), 'utf8'));
+-- Salt bytes 24312431323334353637e282ac ($1$1234567 then euro). MD5 copies 8 salt bytes and keeps a trailing e2.
+SELECT crypt('password', convert_from(decode('24312431323334353637e282ac', 'hex'), 'utf8'));
