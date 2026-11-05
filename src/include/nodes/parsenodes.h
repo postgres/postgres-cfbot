@@ -2417,6 +2417,7 @@ typedef enum ObjectType
 	OBJECT_TYPE,
 	OBJECT_USER_MAPPING,
 	OBJECT_VIEW,
+	OBJECT_WHOLE_ROW,
 } ObjectType;
 
 /* ----------------------
