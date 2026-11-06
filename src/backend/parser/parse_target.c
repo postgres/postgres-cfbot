@@ -46,12 +46,12 @@ static Node *transformAssignmentSubscripts(ParseState *pstate,
 										   int location);
 static List *ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 								 bool make_target_entry);
-static List *ExpandAllTables(ParseState *pstate, int location);
+static List *ExpandAllTables(ParseState *pstate, int location, StarOptions *staroptions);
 static List *ExpandIndirectionStar(ParseState *pstate, A_Indirection *ind,
 								   bool make_target_entry, ParseExprKind exprKind);
 static List *ExpandSingleTable(ParseState *pstate, ParseNamespaceItem *nsitem,
 							   int sublevels_up, int location,
-							   bool make_target_entry);
+							   bool make_target_entry, StarOptions *staroptions);
 static List *ExpandRowReference(ParseState *pstate, Node *expr,
 								bool make_target_entry);
 static int	FigureColnameInternal(Node *node, char **name);
@@ -107,6 +107,68 @@ transformTargetEntry(ParseState *pstate,
 						   resjunk);
 }
 
+/*
+ * checkStarOptionList()
+ *		Check that all columns mentioned in the list actually exist.
+ *
+ * Extract the relation and column names from the ColumnRef.
+ * We do not care about other qualification errors here,
+ * since they were already checked during column matching.
+ */
+static void
+checkStarOptionList(ParseState *pstate, List *list)
+{
+	ListCell   *lc;
+
+	foreach(lc, list)
+	{
+		Node	   *node = (Node *) lfirst(lc);
+		ColumnRef  *cref;
+		char	   *relname = NULL;
+		char	   *colname = NULL;
+
+		/* Check that the node is one of the expected star option types */
+		Assert(IsA(node, StarExcludeItem) ||
+			   IsA(node, StarReplaceItem) ||
+			   IsA(node, StarRenameItem));
+
+		switch (nodeTag(node))
+		{
+			case T_StarExcludeItem:
+				cref = ((StarExcludeItem *) node)->name;
+				break;
+			case T_StarReplaceItem:
+				cref = ((StarReplaceItem *) node)->name;
+				break;
+			case T_StarRenameItem:
+				cref = ((StarRenameItem *) node)->name;
+				break;
+			default:
+				elog(ERROR, "unexpected node type in staroptions list: %d",
+					 (int) nodeTag(node));
+		}
+
+		colname = strVal(llast(cref->fields));
+		if (list_length(cref->fields) > 1)
+			relname = strVal(list_nth(cref->fields, list_length(cref->fields) - 2));
+
+		if (!cref->staroptcol_match)
+			errorMissingColumn(pstate, relname, colname, cref->location);
+	}
+}
+
+/*
+ * checkStarOptions()
+ *		Check each star option list for missing columns.
+ */
+static void
+checkStarOptions(ParseState *pstate, StarOptions *staroptions)
+{
+	checkStarOptionList(pstate, staroptions->exclude_list);
+	checkStarOptionList(pstate, staroptions->replace_list);
+	checkStarOptionList(pstate, staroptions->rename_list);
+}
+
 
 /*
  * transformTargetList()
@@ -147,11 +209,15 @@ transformTargetList(ParseState *pstate, List *targetlist,
 
 				if (IsA(llast(cref->fields), A_Star))
 				{
+					A_Star	   *star = (A_Star *) llast(cref->fields);
+
 					/* It is something.*, expand into multiple items */
 					p_target = list_concat(p_target,
 										   ExpandColumnRefStar(pstate,
 															   cref,
 															   true));
+					if (star->staroptions)
+						checkStarOptions(pstate, star->staroptions);
 					continue;
 				}
 			}
@@ -1126,6 +1192,20 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 {
 	List	   *fields = cref->fields;
 	int			numnames = list_length(fields);
+	StarOptions *staroptions = NULL;
+
+	/*
+	 * This function should only be called when the last field is a '*'
+	 */
+	Assert(IsA(llast(fields), A_Star));
+	staroptions = ((A_Star *) llast(fields))->staroptions;
+
+	/* Reject any star options for expressions */
+	if (staroptions && !make_target_entry)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("star options are not supported here"),
+				 parser_errposition(pstate, cref->location)));
 
 	if (numnames == 1)
 	{
@@ -1138,7 +1218,7 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 		 * need not handle the make_target_entry==false case here.
 		 */
 		Assert(make_target_entry);
-		return ExpandAllTables(pstate, cref->location);
+		return ExpandAllTables(pstate, cref->location, staroptions);
 	}
 	else
 	{
@@ -1278,7 +1358,7 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 		 * OK, expand the nsitem into fields.
 		 */
 		return ExpandSingleTable(pstate, nsitem, levels_up, cref->location,
-								 make_target_entry);
+								 make_target_entry, staroptions);
 	}
 }
 
@@ -1294,7 +1374,7 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
  * The referenced relations/columns are marked as requiring SELECT access.
  */
 static List *
-ExpandAllTables(ParseState *pstate, int location)
+ExpandAllTables(ParseState *pstate, int location, StarOptions *staroptions)
 {
 	List	   *target = NIL;
 	bool		found_table = false;
@@ -1317,7 +1397,8 @@ ExpandAllTables(ParseState *pstate, int location)
 											   nsitem,
 											   0,
 											   true,
-											   location));
+											   location,
+											   staroptions));
 	}
 
 	/*
@@ -1351,6 +1432,18 @@ ExpandIndirectionStar(ParseState *pstate, A_Indirection *ind,
 {
 	Node	   *expr;
 
+	/* Reject any star options here */
+	if (IsA(llast(ind->indirection), A_Star))
+	{
+		A_Star	   *star = (A_Star *) llast(ind->indirection);
+
+		if (star->staroptions)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("star options are not supported here"),
+					 parser_errposition(pstate, exprLocation(ind->arg))));
+	}
+
 	/* Strip off the '*' to create a reference to the rowtype object */
 	ind = copyObject(ind);
 	ind->indirection = list_truncate(ind->indirection,
@@ -1374,12 +1467,12 @@ ExpandIndirectionStar(ParseState *pstate, A_Indirection *ind,
  */
 static List *
 ExpandSingleTable(ParseState *pstate, ParseNamespaceItem *nsitem,
-				  int sublevels_up, int location, bool make_target_entry)
+				  int sublevels_up, int location, bool make_target_entry, StarOptions *staroptions)
 {
 	if (make_target_entry)
 	{
 		/* expandNSItemAttrs handles permissions marking */
-		return expandNSItemAttrs(pstate, nsitem, sublevels_up, true, location);
+		return expandNSItemAttrs(pstate, nsitem, sublevels_up, true, location, staroptions);
 	}
 	else
 	{
@@ -1448,7 +1541,7 @@ ExpandRowReference(ParseState *pstate, Node *expr,
 		ParseNamespaceItem *nsitem;
 
 		nsitem = GetNSItemByVar(pstate, var);
-		return ExpandSingleTable(pstate, nsitem, var->varlevelsup, var->location, make_target_entry);
+		return ExpandSingleTable(pstate, nsitem, var->varlevelsup, var->location, make_target_entry, NULL);
 	}
 
 	/*
