@@ -114,5 +114,10 @@ extern void ReportApplyConflict(EState *estate, ResultRelInfo *relinfo,
 								TupleTableSlot *searchslot,
 								TupleTableSlot *remoteslot,
 								List *conflicttuples);
+extern void CheckAndReportConflict(ResultRelInfo *resultRelInfo,
+								   EState *estate, ConflictType type,
+								   List *recheckIndexes,
+								   TupleTableSlot *searchslot,
+								   TupleTableSlot *remoteslot);
 extern void InitConflictIndexes(ResultRelInfo *relInfo);
 #endif
