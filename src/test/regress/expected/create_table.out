@@ -128,6 +128,14 @@ CREATE TABLE default_expr_agg_column (id int DEFAULT (avg(id)));
 ERROR:  cannot use column reference in DEFAULT expression
 LINE 1: ...TE TABLE default_expr_agg_column (id int DEFAULT (avg(id)));
                                                                  ^
+-- a whole-row reference is a column reference too
+CREATE TABLE default_expr_wholerow (id int DEFAULT (ROW(default_expr_wholerow.*)).f1);
+ERROR:  cannot use column reference in DEFAULT expression
+LINE 1: ... TABLE default_expr_wholerow (id int DEFAULT (ROW(default_ex...
+                                                             ^
+-- but a row constructor with no column reference in it is fine
+CREATE TABLE default_expr_rowexpr (id int DEFAULT (ROW(1)).f1);
+DROP TABLE default_expr_rowexpr;
 -- invalid column definition
 CREATE TABLE default_expr_non_column (a int DEFAULT (avg(non_existent)));
 ERROR:  cannot use column reference in DEFAULT expression
@@ -445,6 +453,11 @@ LINE 1: ...expr_fail PARTITION OF list_parted FOR VALUES IN (somename);
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (somename.somename);
 ERROR:  cannot use column reference in partition bound expression
 LINE 1: ...expr_fail PARTITION OF list_parted FOR VALUES IN (somename.s...
+                                                             ^
+-- a whole-row reference to the partition being created is a column reference
+CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN ((ROW(part_bogus_expr_fail.*)).f1);
+ERROR:  cannot use column reference in partition bound expression
+LINE 1: ...fail PARTITION OF list_parted FOR VALUES IN ((ROW(part_bogus...
                                                              ^
 CREATE TABLE part_bogus_expr_fail PARTITION OF list_parted FOR VALUES IN (a);
 ERROR:  cannot use column reference in partition bound expression

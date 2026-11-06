@@ -237,7 +237,11 @@ transformExpressionList(ParseState *pstate, List *exprlist,
 
 			if (IsA(llast(cref->fields), A_Star))
 			{
-				/* It is something.*, expand into multiple items */
+				/*
+				 * It is something.*, expand into multiple items, as long as
+				 * column references are allowed.
+				 */
+				checkColumnRefAllowed(pstate, exprKind, cref->location);
 				result = list_concat(result,
 									 ExpandColumnRefStar(pstate, cref,
 														 false));

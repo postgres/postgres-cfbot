@@ -258,6 +258,7 @@ extern void ExecBSTruncateTriggers(EState *estate,
 								   ResultRelInfo *relinfo);
 extern void ExecASTruncateTriggers(EState *estate,
 								   ResultRelInfo *relinfo);
+extern int	errdetail_temporal_leftovers(ResultRelInfo *relinfo);
 
 extern void AfterTriggerBeginXact(void);
 extern void AfterTriggerBeginQuery(void);
@@ -277,6 +278,7 @@ extern bool RI_FKey_pk_upd_check_required(Trigger *trigger, Relation pk_rel,
 										  TupleTableSlot *oldslot, TupleTableSlot *newslot);
 extern bool RI_FKey_fk_upd_check_required(Trigger *trigger, Relation fk_rel,
 										  TupleTableSlot *oldslot, TupleTableSlot *newslot);
+
 extern bool RI_Initial_Check(Trigger *trigger,
 							 Relation fk_rel, Relation pk_rel);
 extern void RI_PartitionRemove_Check(Trigger *trigger, Relation fk_rel,

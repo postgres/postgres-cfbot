@@ -128,6 +128,8 @@ test: serializable-parallel-2
 test: serializable-parallel-3
 test: matview-write-skew
 test: lock-nowait
+test: for-portion-of
+test: for-portion-of-deadlock
 test: ddl-dependency-locking
 test: tablespace-dependency-locking
 test: pub-concurrent-drop
