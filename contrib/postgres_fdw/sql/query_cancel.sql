@@ -20,3 +20,14 @@ SET LOCAL statement_timeout = '10ms';
 -- This would take very long if not canceled:
 SELECT count(*) FROM ft1 a CROSS JOIN ft1 b CROSS JOIN ft1 c CROSS JOIN ft1 d;
 COMMIT;
+
+-- Same with streaming_fetch: canceling mid-stream must leave the connection
+-- usable.
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD streaming_fetch 'true');
+BEGIN;
+SELECT count(*) FROM ft1 a;
+SET LOCAL statement_timeout = '10ms';
+SELECT count(*) FROM ft1 a CROSS JOIN ft1 b CROSS JOIN ft1 c CROSS JOIN ft1 d;
+COMMIT;
+SELECT count(*) FROM ft1;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP streaming_fetch);
