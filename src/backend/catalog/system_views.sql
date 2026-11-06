@@ -1054,6 +1054,7 @@ CREATE VIEW pg_stat_recovery_prefetch AS
             s.skip_init,
             s.skip_new,
             s.skip_fpw,
+            s.skip_fpi,
             s.skip_rep,
             s.wal_distance,
             s.block_distance,
