@@ -96,6 +96,14 @@ typedef struct
 	XLogRecPtr	lsn[NUM_SYNC_REP_WAIT_MODE];
 
 	/*
+	 * End-of-recovery LSN that must reach the synchronous standbys before
+	 * sessions requiring each synchronization level are allowed, and whether
+	 * each condition has been satisfied.  Protected by SyncRepLock.
+	 */
+	XLogRecPtr	post_recovery_sync_lsn;
+	bool		post_recovery_sync_complete[NUM_SYNC_REP_WAIT_MODE];
+
+	/*
 	 * Status of data related to the synchronous standbys.  Waiting backends
 	 * can't reload the config file safely, so checkpointer updates this value
 	 * as needed. Protected by SyncRepLock.
