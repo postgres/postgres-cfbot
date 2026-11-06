@@ -32,6 +32,7 @@ SUBDIRS = \
 		  test_escape \
 		  test_extensible \
 		  test_extensions \
+		  test_fileops \
 		  test_ginpostinglist \
 		  test_int128 \
 		  test_integerset \
