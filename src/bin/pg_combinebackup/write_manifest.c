@@ -54,7 +54,9 @@ create_manifest_writer(char *directory, uint64 system_identifier)
 	initStringInfo(&mwriter->buf);
 	mwriter->first_file = true;
 	mwriter->still_checksumming = true;
-	pg_checksum_init(&mwriter->manifest_ctx, CHECKSUM_TYPE_SHA256);
+	if (pg_checksum_init(&mwriter->manifest_ctx, CHECKSUM_TYPE_SHA256) < 0)
+		pg_fatal("could not initialize checksum of file \"%s\"",
+				 mwriter->pathname);
 
 	appendStringInfo(&mwriter->buf,
 					 "{ \"PostgreSQL-Backup-Manifest-Version\": 2,\n"
@@ -174,6 +176,9 @@ finalize_manifest(manifest_writer *mwriter,
 	appendStringInfoString(&mwriter->buf, "\"Manifest-Checksum\": \"");
 	enlargeStringInfo(&mwriter->buf, 2 * PG_SHA256_DIGEST_STRING_LENGTH);
 	len = pg_checksum_final(&mwriter->manifest_ctx, checksumbuf);
+	if (len < 0)
+		pg_fatal("could not finalize checksum of file \"%s\"",
+				 mwriter->pathname);
 	Assert(len == PG_SHA256_DIGEST_LENGTH);
 	mwriter->buf.len +=
 		hex_encode(checksumbuf, len, &mwriter->buf.data[mwriter->buf.len]);
