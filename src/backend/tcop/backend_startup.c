@@ -25,6 +25,7 @@
 #include "libpq/libpq-be.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
+#include "libpq/proxy_protocol.h"
 #include "miscadmin.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
@@ -145,6 +146,8 @@ BackendInitialize(ClientSocket *client_sock, CAC_state cac)
 	Port	   *port;
 	char		remote_host[NI_MAXHOST];
 	char		remote_port[NI_MAXSERV];
+	char		proxy_host[NI_MAXHOST];
+	char		proxy_port[NI_MAXSERV];
 	StringInfoData ps_data;
 	MemoryContext oldcontext;
 
@@ -182,6 +185,8 @@ BackendInitialize(ClientSocket *client_sock, CAC_state cac)
 	/* set these to empty in case they are needed before we set them up */
 	port->remote_host = "";
 	port->remote_port = "";
+	port->proxy_host = "";
+	port->proxy_port = "";
 
 	/*
 	 * We arrange to do _exit(1) if we receive SIGTERM or timeout while trying
@@ -293,6 +298,61 @@ BackendInitialize(ClientSocket *client_sock, CAC_state cac)
 	 */
 	if (status == STATUS_OK)
 		status = ProcessStartupPacket(port);
+
+	/*
+	 * If a PROXY protocol header replaced port->raddr with the real client
+	 * address (marked by a non-zero proxy_addr.salen), recompute the cached
+	 * host/port strings so that log output reflects the originating client.
+	 * A LOCAL command, a v1 UNKNOWN, or an unsupported family leaves both
+	 * addresses untouched and the proxy host/port empty.
+	 */
+	if (status == STATUS_OK && port->proxy_protocol &&
+		port->proxy_addr.salen > 0)
+	{
+		remote_host[0] = '\0';
+		remote_port[0] = '\0';
+		if ((ret = pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
+									  remote_host, sizeof(remote_host),
+									  remote_port, sizeof(remote_port),
+									  (log_hostname ? 0 : NI_NUMERICHOST) | NI_NUMERICSERV)) != 0)
+			ereport(WARNING,
+					(errmsg_internal("pg_getnameinfo_all() failed: %s",
+									 gai_strerror(ret))));
+
+		port->remote_host = MemoryContextStrdup(TopMemoryContext, remote_host);
+		port->remote_port = MemoryContextStrdup(TopMemoryContext, remote_port);
+
+		if (log_hostname &&
+			ret == 0 &&
+			strspn(remote_host, "0123456789.") < strlen(remote_host) &&
+			strspn(remote_host, "0123456789ABCDEFabcdef:") < strlen(remote_host))
+			port->remote_hostname = MemoryContextStrdup(TopMemoryContext, remote_host);
+
+		/*
+		 * Also resolve the proxy's own address so that it can be reported
+		 * separately via the %H and %R log_line_prefix escapes.  As with the
+		 * client address above, log_hostname controls whether a reverse DNS
+		 * lookup is attempted.
+		 */
+		proxy_host[0] = '\0';
+		proxy_port[0] = '\0';
+		if ((ret = pg_getnameinfo_all(&port->proxy_addr.addr, port->proxy_addr.salen,
+									  proxy_host, sizeof(proxy_host),
+									  proxy_port, sizeof(proxy_port),
+									  (log_hostname ? 0 : NI_NUMERICHOST) | NI_NUMERICSERV)) != 0)
+			ereport(WARNING,
+					(errmsg_internal("pg_getnameinfo_all() failed: %s",
+									 gai_strerror(ret))));
+
+		port->proxy_host = MemoryContextStrdup(TopMemoryContext, proxy_host);
+		port->proxy_port = MemoryContextStrdup(TopMemoryContext, proxy_port);
+
+		if (log_hostname &&
+			ret == 0 &&
+			strspn(proxy_host, "0123456789.") < strlen(proxy_host) &&
+			strspn(proxy_host, "0123456789ABCDEFabcdef:") < strlen(proxy_host))
+			port->proxy_hostname = MemoryContextStrdup(TopMemoryContext, proxy_host);
+	}
 
 	/*
 	 * If we're going to reject the connection due to database state, say so
@@ -486,11 +546,13 @@ static int
 ProcessStartupPacket(Port *port)
 {
 	int32		len;
+	char		firstbytes[4];	/* raw first 4 bytes, for PROXY detection */
 	char	   *buf = NULL;
 	ProtocolVersion proto;
 	MemoryContext oldcontext;
 	bool		gss_done;
 	bool		ssl_done;
+	bool		proxy_done;
 
 	/*
 	 * Set ssl_done and/or gss_done when negotiation of an encrypted layer
@@ -502,6 +564,7 @@ ProcessStartupPacket(Port *port)
 	 */
 	gss_done = false;
 	ssl_done = false;
+	proxy_done = false;
 
 retry:
 	pq_startmsgread();
@@ -537,15 +600,62 @@ retry:
 		goto fail;
 	}
 
+	/* Preserve the raw, network-order length bytes for PROXY detection. */
+	memcpy(firstbytes, &len, 4);
+
 	len = pg_ntoh32(len);
 	len -= 4;
 
 	if (len < (int32) sizeof(ProtocolVersion) ||
 		len > MAX_STARTUP_PACKET_LENGTH)
 	{
+		/*
+		 * The length looks invalid.  Before rejecting the connection, check
+		 * whether these bytes are actually the start of a PROXY protocol
+		 * header sent by a trusted proxy (see proxy_networks).  A genuine
+		 * startup packet always begins with two zero bytes, so this test
+		 * never misfires on real client traffic.  If a header is found and
+		 * accepted, port->raddr is replaced with the real client address and
+		 * we loop back to read the genuine startup packet.
+		 */
+		if (!ssl_done && !gss_done && !proxy_done && ProxyProtocolEnabled())
+		{
+			switch (ProcessProxyProtocol(port, firstbytes))
+			{
+				case PROXY_PROTO_DONE:
+					proxy_done = true;
+
+					/*
+					 * A direct SSL negotiation happens before PROXY header
+					 * detection.  Run it now, after consuming the header.
+					 */
+					if (ProcessSSLStartup(port) != STATUS_OK)
+						goto fail;
+					goto retry;
+				case PROXY_PROTO_ERROR:
+				case PROXY_PROTO_NONE:
+					break;
+			}
+		}
+
 		ereport(COMMERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("invalid length of startup packet")));
+				 errmsg("incomplete startup packet")));
+		goto fail;
+	}
+
+	/*
+	 * We have a plausible startup, cancel, or negotiation packet.  If it
+	 * arrived from a trusted proxy network but was not preceded by a PROXY
+	 * header (proxy_done is still unset), reject it.  Such peers must
+	 * announce the real client via the PROXY protocol, which has to come
+	 * first, ahead of any SSL or GSS negotiation.
+	 */
+	if (!proxy_done && ProxyProtocolRequired(port))
+	{
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("connection from a trusted proxy network must use the PROXY protocol")));
 		goto fail;
 	}
 
