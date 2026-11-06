@@ -1172,10 +1172,10 @@ XLogInsertRecord(XLogRecData *rdata,
 	/* Report WAL traffic to the instrumentation. */
 	if (inserted)
 	{
-		pgWalUsage.wal_bytes += rechdr->xl_tot_len;
-		pgWalUsage.wal_records++;
-		pgWalUsage.wal_fpi += num_fpi;
-		pgWalUsage.wal_fpi_bytes += fpi_bytes;
+		INSTR_WALUSAGE_ADD(wal_bytes, rechdr->xl_tot_len);
+		INSTR_WALUSAGE_INCR(wal_records);
+		INSTR_WALUSAGE_ADD(wal_fpi, num_fpi);
+		INSTR_WALUSAGE_ADD(wal_fpi_bytes, fpi_bytes);
 
 		/* Required for the flush of pending stats WAL data */
 		pgstat_report_fixed = true;
@@ -2160,7 +2160,7 @@ AdvanceXLInsertBuffer(XLogRecPtr upto, TimeLineID tli, bool opportunistic)
 					WriteRqst.Flush = InvalidXLogRecPtr;
 					XLogWrite(WriteRqst, tli, false);
 					LWLockRelease(WALWriteLock);
-					pgWalUsage.wal_buffers_full++;
+					INSTR_WALUSAGE_INCR(wal_buffers_full);
 					TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_DONE();
 
 					/*

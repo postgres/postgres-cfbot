@@ -19,6 +19,7 @@
 #include "access/relscan.h"
 #include "access/tableam_indexscan.h"
 #include "access/visibilitymap.h"
+#include "executor/instrument.h"
 #include "pgstat.h"
 #include "storage/predicate.h"
 
@@ -330,6 +331,7 @@ heapam_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 	{
 		IndexScanHeapData *hscan;
 		bool		all_visible;
+		Instrumentation *table_instr = NULL;
 
 		/*
 		 * Get the next TID from the index, unless we're still working through
@@ -357,6 +359,16 @@ heapam_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 		else
 		{
 			/*
+			 * If requested, account buffer/WAL activity on the table's
+			 * visility map separately from the index.
+			 */
+			if (scan->instrument && scan->instrument->table_instr.need_stack)
+			{
+				table_instr = &scan->instrument->table_instr;
+				InstrPushStack(table_instr);
+			}
+
+			/*
 			 * Note: VM_ALL_VISIBLE does not lock the visibility map buffer,
 			 * so the result could be slightly stale.  See the comments above
 			 * visibilitymap_get_status for why this is okay.
@@ -364,6 +376,9 @@ heapam_index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
 			all_visible = VM_ALL_VISIBLE(scan->heapRelation,
 										 ItemPointerGetBlockNumber(&scan->xs_heaptid),
 										 &hscan->xs_vmbuffer);
+
+			if (table_instr)
+				InstrPopStack(table_instr);
 
 			if (unlikely(!all_visible))
 			{
@@ -434,6 +449,7 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 	HeapTuple	heapTuple;
 	bool		got_heap_tuple;
 	bool		all_dead;
+	Instrumentation *table_instr = NULL;
 
 	if (!index_only)
 	{
@@ -451,6 +467,16 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 
 		if (scan->instrument)
 			scan->instrument->ntabletuplefetches++;
+	}
+
+	/*
+	 * If requested, account buffer/WAL activity on the table separately from
+	 * that on the index, so EXPLAIN (ANALYZE, BUFFERS) can show them apart.
+	 */
+	if (scan->instrument && scan->instrument->table_instr.need_stack)
+	{
+		table_instr = &scan->instrument->table_instr;
+		InstrPushStack(table_instr);
 	}
 
 	/* We can skip the buffer-switching logic if we're on the same page. */
@@ -527,6 +553,9 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 		if (unlikely(all_dead))
 			heapam_index_kill_item(scan);
 	}
+
+	if (table_instr)
+		InstrPopStack(table_instr);
 
 	return got_heap_tuple;
 }

@@ -17,20 +17,29 @@
 
 #include "postgres.h"
 
+#include "executor/instrument.h"
 #include "storage/standby.h"
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
 
 
 static bool pgstat_should_report_connstat(void);
+static PgStat_Counter pgstat_block_io_time(const instr_time *shared_time,
+										   const instr_time *local_time);
 
 
-PgStat_Counter pgStatBlockReadTime = 0;
-PgStat_Counter pgStatBlockWriteTime = 0;
 PgStat_Counter pgStatActiveTime = 0;
 PgStat_Counter pgStatTransactionIdleTime = 0;
 SessionEndType pgStatSessionEndCause = DISCONNECT_NORMAL;
 
+
+/*
+ * Block I/O timings (in microseconds) of this process' own activity already
+ * reported to pg_stat_database, so that pgstat_update_dbstats() can compute
+ * how much they have increased since the previous report.
+ */
+static PgStat_Counter prevBlockReadTime = 0;
+static PgStat_Counter prevBlockWriteTime = 0;
 
 static int	pgStatXactCommit = 0;
 static int	pgStatXactRollback = 0;
@@ -344,13 +353,52 @@ pgstat_update_dbstats(TimestampTz ts)
 	dbentry = pgstat_prep_database_pending(MyDatabaseId);
 
 	/*
-	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
-	 * current database.
+	 * Accumulate xact commit/rollback to stats entry of the current database.
 	 */
 	dbentry->xact_commit += pgStatXactCommit;
 	dbentry->xact_rollback += pgStatXactRollback;
-	dbentry->blk_read_time += pgStatBlockReadTime;
-	dbentry->blk_write_time += pgStatBlockWriteTime;
+
+	/*
+	 * Accumulate block I/O timings from the session-level buffer usage totals
+	 * in instr_top, which only count shared and local blocks (not temporary
+	 * files).  These totals are updated whenever an instrumentation stack
+	 * entry is finalized, and the stack is empty at the points where
+	 * pgstat_report_stat() gets called, so this reflects all activity so far.
+	 *
+	 * In a parallel query leader, instr_top also includes the usage imported
+	 * from parallel workers, which the workers report themselves, so subtract
+	 * instr_from_workers to only count this process' own activity.
+	 *
+	 * Imports are recorded in instr_from_workers right away, but only reach
+	 * instr_top once the enclosing stack entry is finalized.  Should a report
+	 * ever happen in between, the own activity computed here can temporarily
+	 * be lower than at the previous report.  Simply don't advance in that
+	 * case, the next report will catch up.
+	 */
+	{
+		PgStat_Counter read_us,
+					write_us;
+
+		read_us = pgstat_block_io_time(&instr_top.bufusage.shared_blk_read_time,
+									   &instr_top.bufusage.local_blk_read_time) -
+			pgstat_block_io_time(&instr_from_workers.bufusage.shared_blk_read_time,
+								 &instr_from_workers.bufusage.local_blk_read_time);
+		write_us = pgstat_block_io_time(&instr_top.bufusage.shared_blk_write_time,
+										&instr_top.bufusage.local_blk_write_time) -
+			pgstat_block_io_time(&instr_from_workers.bufusage.shared_blk_write_time,
+								 &instr_from_workers.bufusage.local_blk_write_time);
+
+		if (read_us >= prevBlockReadTime)
+		{
+			dbentry->blk_read_time += read_us - prevBlockReadTime;
+			prevBlockReadTime = read_us;
+		}
+		if (write_us >= prevBlockWriteTime)
+		{
+			dbentry->blk_write_time += write_us - prevBlockWriteTime;
+			prevBlockWriteTime = write_us;
+		}
+	}
 
 	if (pgstat_should_report_connstat())
 	{
@@ -370,8 +418,6 @@ pgstat_update_dbstats(TimestampTz ts)
 
 	pgStatXactCommit = 0;
 	pgStatXactRollback = 0;
-	pgStatBlockReadTime = 0;
-	pgStatBlockWriteTime = 0;
 	pgStatActiveTime = 0;
 	pgStatTransactionIdleTime = 0;
 }
@@ -387,6 +433,19 @@ static bool
 pgstat_should_report_connstat(void)
 {
 	return MyBackendType == B_BACKEND;
+}
+
+/*
+ * Total of the given shared and local block I/O times in microseconds, which
+ * is what pg_stat_database counts as block read/write time.
+ */
+static PgStat_Counter
+pgstat_block_io_time(const instr_time *shared_time, const instr_time *local_time)
+{
+	instr_time	total = *shared_time;
+
+	INSTR_TIME_ADD(total, *local_time);
+	return INSTR_TIME_GET_MICROSEC(total);
 }
 
 /*

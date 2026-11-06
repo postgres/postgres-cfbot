@@ -3323,7 +3323,7 @@ initialize_change_context(ChangeContext *chgcxt,
 
 	/* Set up our ResultRelInfo to use for index updates */
 	chgcxt->cc_rri = makeNode(ResultRelInfo);
-	InitResultRelInfo(chgcxt->cc_rri, tgt_relation, 1, NULL, 0);
+	InitResultRelInfo(chgcxt->cc_rri, tgt_relation, 1, NULL, 0, NULL);
 	ExecOpenIndices(chgcxt->cc_rri, false);
 
 	/*

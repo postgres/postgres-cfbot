@@ -122,6 +122,8 @@
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
+static bool ExecFinalizeWorkerInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -413,7 +415,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAllocNode(estate->es_instrument,
+		result->instrument = InstrAllocNode(estate->es_query_instr,
+											estate->es_instrument,
 											result->async_capable);
 
 	return result;
@@ -462,7 +465,7 @@ ExecProcNodeFirst(PlanState *node)
 	 * have ExecProcNode() directly call the relevant function from now on.
 	 */
 	if (node->instrument)
-		node->ExecProcNode = ExecProcNodeInstr;
+		node->ExecProcNode = InstrNodeSetupExecProcNode(node->instrument);
 	else
 		node->ExecProcNode = node->ExecProcNodeReal;
 
@@ -768,10 +771,10 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	 * at least once already.  We don't expect much CPU consumption during
 	 * node shutdown, but in the case of Gather or Gather Merge, we may shut
 	 * down workers at this stage.  If so, their buffer usage will get
-	 * propagated into pgBufferUsage at this point, and we want to make sure
-	 * that it gets associated with the Gather node.  We skip this if the node
-	 * has never been executed, so as to avoid incorrectly making it appear
-	 * that it has.
+	 * propagated into the current instrumentation stack entry at this point,
+	 * and we want to make sure that it gets associated with the Gather node.
+	 * We skip this if the node has never been executed, so as to avoid
+	 * incorrectly making it appear that it has.
 	 */
 	if (node->instrument && node->instrument->running)
 		InstrStartNode(node->instrument);
@@ -805,6 +808,194 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
 		InstrStopNode(node->instrument, 0);
+
+	return false;
+}
+
+/*
+ * ExecFinalizeNodeInstrumentation
+ *
+ * Accumulate instrumentation stats from all execution nodes to their respective
+ * parents (or the original parent instrumentation).
+ *
+ * This must run after the cleanup done by ExecShutdownNode, and not rely on any
+ * resources cleaned up by it. We also expect shutdown actions to have occurred,
+ * e.g. parallel worker instrumentation to have been added to the leader.
+ */
+void
+ExecFinalizeNodeInstrumentation(PlanState *node)
+{
+	(void) ExecFinalizeNodeInstrumentation_walker(node, instr_stack.current);
+}
+
+static bool
+ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	Instrumentation *parent = (Instrumentation *) context;
+
+	Assert(parent != NULL);
+
+	if (node == NULL)
+		return false;
+
+	Assert(node->instrument != NULL);
+
+	/*
+	 * Recurse into children first (bottom-up accumulation), and accumulate to
+	 * this node's instrumentation as the parent context.
+	 */
+	planstate_tree_walker(node, ExecFinalizeNodeInstrumentation_walker,
+						  &node->instrument->instr);
+
+	/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr, &node->instrument->instr);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr, &node->instrument->instr);
+	}
+
+	InstrFinalizeChild(&node->instrument->instr, parent);
+
+	return false;
+}
+
+static bool
+ExecFinalizeNodeInstrumentationFlat_walker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	Assert(node->instrument != NULL);
+
+	InstrFinalizeChild(&node->instrument->instr, (Instrumentation *) context);
+
+	/*
+	 * IndexScan/IndexOnlyScan have a separate entry to track table access,
+	 * which also needs to be accounted for in the target.  (The leader gets
+	 * the per-worker copy of this entry via SharedIndexScanInstrumentation.)
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+
+	return planstate_tree_walker(node,
+								 ExecFinalizeNodeInstrumentationFlat_walker,
+								 context);
+}
+
+/*
+ * Like ExecFinalizeNodeInstrumentation, but accumulates each node's own stats
+ * directly to the target, without rolling them up into parent nodes.
+ *
+ * Used by parallel workers to account for their per-node activity in their
+ * session totals (instr_top), while leaving the per-node stats exclusive for
+ * the leader to aggregate and roll up.
+ */
+void
+ExecFinalizeNodeInstrumentationFlat(PlanState *node, Instrumentation *target)
+{
+	(void) ExecFinalizeNodeInstrumentationFlat_walker(node, target);
+}
+
+/*
+ * ExecFinalizeWorkerInstrumentation
+ *
+ * Accumulate per-worker instrumentation stats from child nodes into their
+ * parents, mirroring what ExecFinalizeNodeInstrumentation does for the
+ * leader's own stats.  Without this, per-worker buffer/WAL stats shown by
+ * EXPLAIN (ANALYZE, VERBOSE) would only reflect each node's own direct
+ * activity, not including children.
+ *
+ * This must run after ExecParallelRetrieveInstrumentation has populated
+ * worker_instrument for all nodes in the parallel subtree.
+ */
+void
+ExecFinalizeWorkerInstrumentation(PlanState *node)
+{
+	(void) ExecFinalizeWorkerInstrumentation_walker(node, NULL);
+}
+
+static bool
+ExecFinalizeWorkerInstrumentation_walker(PlanState *node, void *context)
+{
+	PlanState  *parent = (PlanState *) context;
+	int			num_workers;
+
+	if (node == NULL)
+		return false;
+
+	/*
+	 * Recurse into children first (bottom-up accumulation), passing this node
+	 * as parent context if it has worker_instrument, otherwise pass through
+	 * the previous parent.
+	 */
+	planstate_tree_walker(node, ExecFinalizeWorkerInstrumentation_walker,
+						  node->worker_instrument ? (void *) node : context);
+
+	if (!node->worker_instrument)
+		return false;
+
+	num_workers = node->worker_instrument->num_workers;
+
+	/*
+	 * Fold per-worker IndexScan/IndexOnlyScan table buffer stats into the
+	 * per-worker node stats, matching what ExecFinalizeNodeInstrumentation
+	 * does for the leader.
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		if (iss->iss_SharedInfo)
+		{
+			int			nworkers = Min(num_workers, iss->iss_SharedInfo->num_workers);
+
+			for (int n = 0; n < nworkers; n++)
+				InstrAccumStack(&node->worker_instrument->instrument[n].instr,
+								&iss->iss_SharedInfo->winstrument[n].table_instr);
+		}
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		if (ioss->ioss_SharedInfo)
+		{
+			int			nworkers = Min(num_workers, ioss->ioss_SharedInfo->num_workers);
+
+			for (int n = 0; n < nworkers; n++)
+				InstrAccumStack(&node->worker_instrument->instrument[n].instr,
+								&ioss->ioss_SharedInfo->winstrument[n].table_instr);
+		}
+	}
+
+	/* Accumulate this node's per-worker stats to parent's per-worker stats */
+	if (parent && parent->worker_instrument)
+	{
+		int			parent_workers = parent->worker_instrument->num_workers;
+
+		for (int n = 0; n < Min(num_workers, parent_workers); n++)
+			InstrAccumStack(&parent->worker_instrument->instrument[n].instr,
+							&node->worker_instrument->instrument[n].instr);
+	}
 
 	return false;
 }
