@@ -850,6 +850,81 @@ EXPLAIN (COSTS OFF)
 SELECT count(*) FROM tenk1 LEFT JOIN tenk2 ON
   tenk1.hundred = 42 AND (tenk2.thousand = 42 OR tenk2.thousand = 41 OR tenk2.tenthous = 2) AND
   tenk2.hundred = tenk1.hundred;
+
+-- A clauseless partial index scan shouldn't be ANDed with an index whose
+-- quals imply its predicate.
+CREATE TABLE bitmap_implied_partial
+  (id int, state text, depot_id int, customer_id int, pad text);
+INSERT INTO bitmap_implied_partial
+  SELECT g,
+         CASE WHEN g % 2000 = 0 THEN 'PENDING'
+              WHEN g % 200  = 0 THEN 'PACKING'
+              WHEN g % 500  = 0 THEN 'ON_HOLD'
+              WHEN g % 10   = 0 THEN 'VOIDED'
+              ELSE 'SHIPPED' END,
+         CASE WHEN g % 500 = 0 THEN NULL ELSE (g % 300) + 1 END,
+         g % 50,
+         repeat('x', 200)
+    FROM generate_series(1, 10000) g;
+CREATE INDEX bip_partial ON bitmap_implied_partial (id)
+  WHERE state = 'PENDING' OR state = 'PACKING' OR state = 'ON_HOLD';
+CREATE INDEX bip_state_depot ON bitmap_implied_partial (state, depot_id);
+CREATE INDEX bip_customer ON bitmap_implied_partial (customer_id);
+ANALYZE bitmap_implied_partial;
+
+SET enable_seqscan = OFF;
+SET enable_indexscan = OFF;
+
+-- The composite index's quals imply the partial predicate: no BitmapAnd.
+EXPLAIN (COSTS OFF)
+SELECT * FROM bitmap_implied_partial
+  WHERE state IN ('PENDING', 'PACKING') AND depot_id IS NOT NULL;
+
+-- The partial index has a qual of its own here, so it is still ANDed.
+EXPLAIN (COSTS OFF)
+SELECT * FROM bitmap_implied_partial
+  WHERE state IN ('PENDING', 'PACKING') AND id BETWEEN 1 AND 4000
+    AND depot_id IS NOT NULL;
+
+-- Three indexes: customer_id = 0 doesn't imply the predicate, so it is still
+-- ANDed with the partial index; with customer_id < 25 the composite is used.
+EXPLAIN (COSTS OFF)
+SELECT * FROM bitmap_implied_partial
+  WHERE state IN ('PENDING', 'PACKING') AND depot_id IS NOT NULL
+    AND customer_id = 0;
+EXPLAIN (COSTS OFF)
+SELECT * FROM bitmap_implied_partial
+  WHERE state IN ('PENDING', 'PACKING') AND depot_id IS NOT NULL
+    AND customer_id < 25;
+
+DROP TABLE bitmap_implied_partial;
+
+-- A BitmapOr isn't checked: "state = 'PENDING' OR customer_id = 5" doesn't
+-- imply the predicate, so the partial index still helps here.
+CREATE TABLE bitmap_implied_partial_or
+  (id int, state text, customer_id int, pad text);
+INSERT INTO bitmap_implied_partial_or
+  SELECT g,
+         CASE WHEN g % 1000 = 0 THEN 'PENDING'
+              WHEN g % 100  = 0 THEN 'PACKING'
+              WHEN g % 250  = 0 THEN 'ON_HOLD'
+              ELSE 'SHIPPED' END,
+         g % 50, repeat('x', 100)
+    FROM generate_series(1, 10000) g;
+CREATE INDEX bipo_partial ON bitmap_implied_partial_or (id)
+  WHERE state = 'PENDING' OR state = 'PACKING' OR state = 'ON_HOLD';
+CREATE INDEX bipo_customer ON bitmap_implied_partial_or (customer_id);
+CREATE INDEX bipo_state ON bitmap_implied_partial_or (state);
+ANALYZE bitmap_implied_partial_or;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM bitmap_implied_partial_or
+  WHERE state IN ('PENDING', 'PACKING')
+    AND (state = 'PENDING' OR customer_id = 5);
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+DROP TABLE bitmap_implied_partial_or;
 --
 -- Check behavior with duplicate index column contents
 --

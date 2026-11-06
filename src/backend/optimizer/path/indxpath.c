@@ -1949,6 +1949,26 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel, List *paths)
 				if (redundant)
 					continue;
 			}
+
+			/*
+			 * Conversely, if the leader is a clauseless scan of a partial
+			 * index and this path's quals imply its whole predicate, the
+			 * partial index can't exclude anything this path returns, and
+			 * ANDing them would just double-count the predicate's
+			 * selectivity.  Skip this path; it still gets considered as a
+			 * leader itself.  Only plain IndexPaths are checked, since
+			 * find_indexpath_quals() flattens BitmapOr arms into a list that
+			 * would be read as an AND.
+			 */
+			if (IsA(pathinfoarray[i]->path, IndexPath) &&
+				pathinfoarray[i]->quals == NIL &&
+				pathinfoarray[i]->preds != NIL &&
+				IsA(pathinfo->path, IndexPath) &&
+				pathinfo->quals != NIL &&
+				predicate_implied_by(pathinfoarray[i]->preds, pathinfo->quals,
+									 false))
+				continue;
+
 			/* tentatively add new path to paths, so we can estimate cost */
 			paths = lappend(paths, pathinfo->path);
 			newcost = bitmap_and_cost_est(root, rel, paths);
