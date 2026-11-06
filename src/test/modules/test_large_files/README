@@ -1,0 +1,74 @@
+test_large_files
+================
+
+This test module validates PostgreSQL's handling of files larger than
+4GB, specifically testing that pgoff_t (64-bit file offset type) is
+used correctly throughout the file I/O layer.
+
+Background
+----------
+
+On Windows with MSVC, off_t is only 32 bits, causing signed integer
+overflow at 2GB (2^31 bytes). Additionally, Windows' OVERLAPPED structure
+requires both low and high 32-bit offset fields to be set for offsets
+beyond 4GB. PostgreSQL defines pgoff_t as a 64-bit type (__int64 on
+Windows, off_t on Unix where it's already 64-bit) to handle large files
+correctly.
+
+Two bugs were fixed:
+
+1. Pervasive use of off_t where pgoff_t should be used in fd.c, md.c,
+   and related file I/O functions. This caused failures at exactly 2GB.
+
+2. Windows-specific bug in pg_pwrite()/pg_pread() where the OVERLAPPED
+   structure only set the low 32 bits of the file offset (Offset field),
+   leaving OffsetHigh at zero, causing wrap-around at 4GB.
+
+Test Design
+-----------
+
+The test validates file I/O at 4GB + 1 byte:
+
+1. Writes "OFFSET_0" at byte 0
+2. Writes "TESTDATA" at byte 4GB+1
+3. Checks FileSize() reports ~4GB (not ~16 bytes from wrap-around)
+4. Reads offset 0 to verify it wasn't corrupted by wrap-around
+5. Reads offset 4GB+1 to verify data integrity
+
+This approach catches both bugs:
+- The off_t truncation bug (would fail at 2GB writes)
+- The OVERLAPPED OffsetHigh bug (only manifests at 4GB+ where high bits != 0)
+
+Testing at 4GB+1 is critical because at 2GB+1, OffsetHigh would naturally
+be zero, so bugs in setting OffsetHigh wouldn't be detected. At 4GB+1,
+OffsetHigh must be 1, so the test verifies it's set correctly.
+
+The test catches the bug even if both read and write have the same
+truncation issue, because FileSize() provides independent verification.
+
+The test only runs on platforms with 64-bit pgoff_t (checked via
+sizeof(pgoff_t) >= 8).
+
+Platform Support
+----------------
+
+- Linux/Unix: Automatically creates sparse files (fast, no disk space used)
+- Windows NTFS: Creates sparse file efficiently
+- 32-bit offset platforms: Test is skipped automatically
+
+Running the Test
+----------------
+
+The test only runs during 'make check' or 'meson test', not on
+'make installcheck'. This is intentional, as the test creates temporary
+files and is designed for development/CI testing rather than production
+validation.
+
+  make check
+
+or with meson:
+
+  meson test test_large_files
+
+The test completes in seconds on most platforms. On Windows, the test
+may take longer as the OS allocates the sparse file structure.
