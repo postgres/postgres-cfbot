@@ -32,4 +32,9 @@ tests += {
       'heap_surgery',
     ],
   },
+  'tap': {
+    'tests': [
+      't/001_corrupt_page.pl',
+    ],
+  },
 }
