@@ -46,7 +46,11 @@ ERROR:  invalid input syntax for type integer: "b"
 LINE 1: SELECT CAST('a' as int DEFAULT 'b' ON CONVERSION ERROR);
                                        ^
 SELECT CAST(1 AS int DEFAULT 70000::int2::int4 ON CONVERSION ERROR);
-ERROR:  smallint out of range
+ int4 
+------
+    1
+(1 row)
+
 SELECT CAST('70000' AS int2 DEFAULT -1 ON CONVERSION ERROR);
  int2 
 ------
@@ -306,11 +310,7 @@ SELECT CAST(ARRAY[e] as int[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
 -- all of the following should be accepted. For an ARRAY[] argument, each
 -- element is converted to the target element type
 SELECT CAST(ARRAY['x', a::int] AS int[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
- array 
--------
- 
-(1 row)
-
+ERROR:  invalid input syntax for type integer: "a"
 SELECT CAST(ARRAY[1,2] || 3 AS boolean DEFAULT false ON CONVERSION ERROR);
  bool 
 ------
@@ -1192,3 +1192,36 @@ DROP DOMAIN dint;
 DROP DOMAIN dintnn;
 RESET extra_float_digits;
 RESET lc_monetary;
+-- errors in the input expression itself must not be turned into the DEFAULT,
+-- even when no cast path exists or the cast is known to fail
+SELECT CAST(1/0 AS date DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  division by zero
+SELECT CAST((('abc'::text)::integer) AS date DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  invalid input syntax for type integer: "abc"
+SELECT CAST((1/(g-g)) AS date DEFAULT NULL ON CONVERSION ERROR) FROM generate_series(1,1) g;
+ERROR:  division by zero
+SELECT CAST(ARRAY['x', (1/0)::text] AS date[] DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  division by zero
+SELECT CAST(ARRAY['x', (1/(g-g))::text] AS date[] DEFAULT NULL ON CONVERSION ERROR) FROM generate_series(1,1) g;
+ERROR:  division by zero
+-- the DEFAULT is not evaluated when the conversion succeeds
+SELECT CAST('1' AS int DEFAULT 1/0 ON CONVERSION ERROR);
+ int4 
+------
+    1
+(1 row)
+
+SELECT CAST(g::text AS int DEFAULT 1/0 ON CONVERSION ERROR) FROM generate_series(1,1) g;
+ g 
+---
+ 1
+(1 row)
+
+SELECT CAST(ARRAY['1'] AS int[] DEFAULT ('{' || (1/0) || '}')::int[] ON CONVERSION ERROR);
+ array 
+-------
+ {1}
+(1 row)
+
+SELECT CAST('x' AS int DEFAULT 1/0 ON CONVERSION ERROR);
+ERROR:  division by zero
