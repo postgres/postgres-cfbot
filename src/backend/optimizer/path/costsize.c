@@ -4901,14 +4901,29 @@ cost_rescan(PlannerInfo *root, Path *path,
 		case T_HashJoin:
 
 			/*
-			 * If it's a single-batch join, we don't need to rebuild the hash
-			 * table during a rescan.
+			 * If it's a single-batch join and the inner side does not depend
+			 * on outer parameters, the executor reuses the hash table during
+			 * a rescan (see ExecReScanHashJoin).  The outer side is still
+			 * rescanned, though, and its startup cost is part of the join's
+			 * startup cost; charge the outer path's own rescan cost for it.
 			 */
-			if (((HashPath *) path)->num_batches == 1)
+			if (((HashPath *) path)->num_batches == 1 &&
+				PATH_REQ_OUTER(((JoinPath *) path)->innerjoinpath) == NULL)
 			{
-				/* Startup cost is exactly the cost of hash table building */
-				*rescan_startup_cost = 0;
-				*rescan_total_cost = path->total_cost - path->startup_cost;
+				Path	   *outer_path = ((JoinPath *) path)->outerjoinpath;
+				Cost		outer_rescan_startup;
+				Cost		outer_rescan_total;
+
+				/*
+				 * No hash table build; the outer side costs what its own
+				 * rescan costs, in place of its original run cost.
+				 */
+				cost_rescan(root, outer_path,
+							&outer_rescan_startup, &outer_rescan_total);
+				*rescan_startup_cost = outer_rescan_startup;
+				*rescan_total_cost = (path->total_cost - path->startup_cost) -
+					(outer_path->total_cost - outer_path->startup_cost) +
+					outer_rescan_total;
 			}
 			else
 			{
