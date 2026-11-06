@@ -1,0 +1,1688 @@
+--
+-- Tests for OR-clause expansion into UNION ALL Append paths
+--
+CREATE TABLE orexp_a (id int, val int);
+CREATE TABLE orexp_b (x int, y int, val int);
+INSERT INTO orexp_a VALUES
+  (1, 10),
+  (2, 20),
+  (3, 30),
+  (4, NULL),
+  (5, 50);
+INSERT INTO orexp_b VALUES
+  (1, 99, 100),
+  (99, 2, 200),
+  (3, 3, 300),
+  (4, 99, 400),
+  (99, 99, 500),
+  (NULL, NULL, 600);
+CREATE TYPE orexp_c_type AS (num int, str text);
+CREATE TABLE orexp_phys (
+    a int,
+    b date,
+    c text,
+    d numeric,
+    arr int[],
+    comp orexp_c_type
+);
+CREATE TABLE orexp_phys2 (
+    x int,
+    y text,
+    z date,
+    arr int[]
+);
+INSERT INTO orexp_phys VALUES
+  (1, '2026-01-01', 'foo', 10.5, ARRAY[10, 20], ROW(1, 'c1')),
+  (2, '2026-02-01', 'bar', 20.0, ARRAY[30, 40], ROW(2, 'c2')),
+  (3, '2026-03-01', 'baz', 30.25, ARRAY[50, 60], ROW(3, 'c3')),
+  (4, '2026-04-01', 'qux', NULL, ARRAY[70, 80], ROW(4, 'c4'));
+INSERT INTO orexp_phys SELECT g, '2026-01-01'::date + g, 'txt' || g, g * 1.5, ARRAY[g, g*2], (g, 'str' || g)::orexp_c_type FROM generate_series(5, 50) g;
+INSERT INTO orexp_phys2 VALUES
+  (1, 'bar', '2026-01-01', ARRAY[10, 99]),
+  (99, 'foo', '2026-02-01', ARRAY[20, 88]),
+  (3, 'other', '2026-03-01', ARRAY[50, 77]),
+  (4, 'baz', '2026-05-01', ARRAY[99, 11]);
+INSERT INTO orexp_phys2 SELECT g, 'txt' || g, '2026-01-01'::date + g, ARRAY[g, g*3] FROM generate_series(5, 50) g;
+-- check GUC parameter
+SHOW or_expansion_limit;
+ or_expansion_limit 
+--------------------
+ 8
+(1 row)
+
+--
+-- Disjunctive join conditions
+--
+-- disjunction of join keys
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.x, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+ORDER BY a.id, b.x, b.y;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.x, b.y
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (b.x = a.id)
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+               ->  Sort
+                     Sort Key: a.id
+                     ->  Seq Scan on orexp_a a
+         ->  Merge Join
+               Merge Cond: (b_1.y = a_1.id)
+               Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+               ->  Sort
+                     Sort Key: a_1.id
+                     ->  Seq Scan on orexp_a a_1
+(20 rows)
+
+SELECT a.id, b.x, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+ORDER BY a.id, b.x, b.y;
+ id | x  | y  
+----+----+----
+  1 |  1 | 99
+  2 | 99 |  2
+  3 |  3 |  3
+  4 |  4 | 99
+(4 rows)
+
+-- ensure results match when disabled
+SET or_expansion_limit = 0;
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.x, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+ORDER BY a.id, b.x, b.y;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Sort
+   Sort Key: a.id, b.x, b.y
+   ->  Nested Loop
+         Join Filter: ((a.id = b.x) OR (a.id = b.y))
+         ->  Seq Scan on orexp_a a
+         ->  Materialize
+               ->  Seq Scan on orexp_b b
+(7 rows)
+
+SELECT a.id, b.x, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+ORDER BY a.id, b.x, b.y;
+ id | x  | y  
+----+----+----
+  1 |  1 | 99
+  2 | 99 |  2
+  3 |  3 |  3
+  4 |  4 | 99
+(4 rows)
+
+RESET or_expansion_limit;
+--
+-- Target list and projection variants
+--
+-- physical column order differs from target list order
+EXPLAIN (COSTS OFF)
+SELECT p2.y, p1.d, p1.c, p2.z, p1.b, p1.a, p2.x
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.a, p2.x, p2.y;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: p1.a, p2.x, p2.y
+   ->  Result
+         ->  Append
+               ->  Hash Join
+                     Hash Cond: (p2.x = p1.a)
+                     ->  Seq Scan on orexp_phys2 p2
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1
+               ->  Hash Join
+                     Hash Cond: (p2_1.y = p1_1.c)
+                     Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                     ->  Seq Scan on orexp_phys2 p2_1
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1_1
+(15 rows)
+
+SELECT p2.y, p1.d, p1.c, p2.z, p1.b, p1.a, p2.x
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.a, p2.x, p2.y
+LIMIT 6;
+   y   |   d   |  c  |     z      |     b      | a | x  
+-------+-------+-----+------------+------------+---+----
+ bar   |  10.5 | foo | 01-01-2026 | 01-01-2026 | 1 |  1
+ foo   |  10.5 | foo | 02-01-2026 | 01-01-2026 | 1 | 99
+ bar   |  20.0 | bar | 01-01-2026 | 02-01-2026 | 2 |  1
+ other | 30.25 | baz | 03-01-2026 | 03-01-2026 | 3 |  3
+ baz   | 30.25 | baz | 05-01-2026 | 03-01-2026 | 3 |  4
+ baz   |       | qux | 05-01-2026 | 04-01-2026 | 4 |  4
+(6 rows)
+
+-- complex expressions combining columns across relations
+EXPLAIN (COSTS OFF)
+SELECT
+    p1.a + p2.x AS sum_ax,
+    p1.c || '-' || p2.y AS str_concat,
+    p2.z - p1.b AS date_diff,
+    COALESCE(p1.d, 0) * 2.5 AS scaled_d,
+    CASE WHEN p1.a > 10 THEN 'high' ELSE 'low' END AS a_level,
+    p2.y,
+    p1.a
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY sum_ax, str_concat;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: ((p1.a + p2.x)), (((p1.c || '-'::text) || p2.y))
+   ->  Result
+         ->  Append
+               ->  Hash Join
+                     Hash Cond: (p2.x = p1.a)
+                     ->  Seq Scan on orexp_phys2 p2
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1
+               ->  Hash Join
+                     Hash Cond: (p2_1.y = p1_1.c)
+                     Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                     ->  Seq Scan on orexp_phys2 p2_1
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1_1
+(15 rows)
+
+SELECT
+    p1.a + p2.x AS sum_ax,
+    p1.c || '-' || p2.y AS str_concat,
+    p2.z - p1.b AS date_diff,
+    COALESCE(p1.d, 0) * 2.5 AS scaled_d,
+    CASE WHEN p1.a > 10 THEN 'high' ELSE 'low' END AS a_level,
+    p2.y,
+    p1.a
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY sum_ax, str_concat
+LIMIT 6;
+ sum_ax | str_concat | date_diff | scaled_d | a_level |   y   | a 
+--------+------------+-----------+----------+---------+-------+---
+      2 | foo-bar    |         0 |    26.25 | low     | bar   | 1
+      3 | bar-bar    |       -31 |    50.00 | low     | bar   | 2
+      6 | baz-other  |         0 |   75.625 | low     | other | 3
+      7 | baz-baz    |        61 |   75.625 | low     | baz   | 3
+      8 | qux-baz    |        30 |      0.0 | low     | baz   | 4
+     10 | txt5-txt5  |         0 |    18.75 | low     | txt5  | 5
+(6 rows)
+
+-- array types, subscripting, and constructors
+EXPLAIN (COSTS OFF)
+SELECT
+    p1.arr[1] AS first_elem,
+    p2.arr[2] AS second_elem,
+    p1.arr || p2.arr AS concatenated_arr,
+    ARRAY[p1.a, p2.x] AS constructed_arr,
+    p1.c,
+    p2.y
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY first_elem, second_elem;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: (p1.arr[1]), (p2.arr[2])
+   ->  Result
+         ->  Append
+               ->  Hash Join
+                     Hash Cond: (p2.x = p1.a)
+                     ->  Seq Scan on orexp_phys2 p2
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1
+               ->  Hash Join
+                     Hash Cond: (p2_1.y = p1_1.c)
+                     Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                     ->  Seq Scan on orexp_phys2 p2_1
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1_1
+(15 rows)
+
+SELECT
+    p1.arr[1] AS first_elem,
+    p2.arr[2] AS second_elem,
+    p1.arr || p2.arr AS concatenated_arr,
+    ARRAY[p1.a, p2.x] AS constructed_arr,
+    p1.c,
+    p2.y
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY first_elem, second_elem
+LIMIT 5;
+ first_elem | second_elem | concatenated_arr | constructed_arr |  c   |  y   
+------------+-------------+------------------+-----------------+------+------
+          5 |          15 | {5,10,5,15}      | {5,5}           | txt5 | txt5
+          6 |          18 | {6,12,6,18}      | {6,6}           | txt6 | txt6
+          7 |          21 | {7,14,7,21}      | {7,7}           | txt7 | txt7
+          8 |          24 | {8,16,8,24}      | {8,8}           | txt8 | txt8
+          9 |          27 | {9,18,9,27}      | {9,9}           | txt9 | txt9
+(5 rows)
+
+-- composite types and row constructors
+EXPLAIN (COSTS OFF)
+SELECT
+    (p1.comp).num AS comp_num,
+    (p1.comp).str AS comp_str,
+    ROW(p1.c, p2.x, p1.d) AS constructed_row,
+    p2.y,
+    p1.a
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY comp_num NULLS LAST, p2.y;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: ((p1.comp).num), p2.y
+   ->  Result
+         ->  Append
+               ->  Hash Join
+                     Hash Cond: (p2.x = p1.a)
+                     ->  Seq Scan on orexp_phys2 p2
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1
+               ->  Hash Join
+                     Hash Cond: (p2_1.y = p1_1.c)
+                     Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                     ->  Seq Scan on orexp_phys2 p2_1
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1_1
+(15 rows)
+
+SELECT
+    (p1.comp).num AS comp_num,
+    (p1.comp).str AS comp_str,
+    ROW(p1.c, p2.x, p1.d) AS constructed_row,
+    p2.y,
+    p1.a
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY comp_num NULLS LAST, p2.y
+LIMIT 6;
+ comp_num | comp_str | constructed_row |   y   | a 
+----------+----------+-----------------+-------+---
+        1 | c1       | (foo,1,10.5)    | bar   | 1
+        1 | c1       | (foo,99,10.5)   | foo   | 1
+        2 | c2       | (bar,1,20.0)    | bar   | 2
+        3 | c3       | (baz,4,30.25)   | baz   | 3
+        3 | c3       | (baz,3,30.25)   | other | 3
+        4 | c4       | (qux,4,)        | baz   | 4
+(6 rows)
+
+-- mixed target list with window functions atop Append
+EXPLAIN (COSTS OFF)
+SELECT
+    p2.y AS col_text,
+    p1.a + p2.x AS sum_ax,
+    (p1.comp).str AS comp_str,
+    p1.arr[1] AS first_arr_elem,
+    ROW(p1.a, p2.y) AS row_ctor,
+    'constant_str' AS literal_val,
+    NULL::int AS null_literal,
+    p1.a AS dup_col1,
+    p1.a AS dup_col2,
+    p2.z AS col_date,
+    count(*) OVER (PARTITION BY p1.a ORDER BY p2.x) AS win_cnt
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY sum_ax, p2.y, win_cnt;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Sort
+   Sort Key: ((p1.a + p2.x)), p2.y, (count(*) OVER w1)
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY p1.a ORDER BY p2.x)
+         ->  Sort
+               Sort Key: p1.a, p2.x
+               ->  Result
+                     ->  Append
+                           ->  Hash Join
+                                 Hash Cond: (p2.x = p1.a)
+                                 ->  Seq Scan on orexp_phys2 p2
+                                 ->  Hash
+                                       ->  Seq Scan on orexp_phys p1
+                           ->  Hash Join
+                                 Hash Cond: (p2_1.y = p1_1.c)
+                                 Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                                 ->  Seq Scan on orexp_phys2 p2_1
+                                 ->  Hash
+                                       ->  Seq Scan on orexp_phys p1_1
+(19 rows)
+
+SELECT
+    p2.y AS col_text,
+    p1.a + p2.x AS sum_ax,
+    (p1.comp).str AS comp_str,
+    p1.arr[1] AS first_arr_elem,
+    ROW(p1.a, p2.y) AS row_ctor,
+    'constant_str' AS literal_val,
+    NULL::int AS null_literal,
+    p1.a AS dup_col1,
+    p1.a AS dup_col2,
+    p2.z AS col_date,
+    count(*) OVER (PARTITION BY p1.a ORDER BY p2.x) AS win_cnt
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY sum_ax, p2.y, win_cnt
+LIMIT 5;
+ col_text | sum_ax | comp_str | first_arr_elem | row_ctor  | literal_val  | null_literal | dup_col1 | dup_col2 |  col_date  | win_cnt 
+----------+--------+----------+----------------+-----------+--------------+--------------+----------+----------+------------+---------
+ bar      |      2 | c1       |             10 | (1,bar)   | constant_str |              |        1 |        1 | 01-01-2026 |       1
+ bar      |      3 | c2       |             30 | (2,bar)   | constant_str |              |        2 |        2 | 01-01-2026 |       1
+ other    |      6 | c3       |             50 | (3,other) | constant_str |              |        3 |        3 | 03-01-2026 |       1
+ baz      |      7 | c3       |             50 | (3,baz)   | constant_str |              |        3 |        3 | 05-01-2026 |       2
+ baz      |      8 | c4       |             70 | (4,baz)   | constant_str |              |        4 |        4 | 05-01-2026 |       1
+(5 rows)
+
+-- grouping and aggregation atop cross-relation expressions
+SET enable_nestloop = off;
+EXPLAIN (COSTS OFF)
+SELECT p1.c, count(*), sum(p1.a + p2.x)
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+GROUP BY p1.c
+ORDER BY p1.c
+LIMIT 5;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: p1.c
+         ->  HashAggregate
+               Group Key: p1.c
+               ->  Append
+                     ->  Hash Join
+                           Hash Cond: (p2.x = p1.a)
+                           ->  Seq Scan on orexp_phys2 p2
+                           ->  Hash
+                                 ->  Seq Scan on orexp_phys p1
+                     ->  Hash Join
+                           Hash Cond: (p2_1.y = p1_1.c)
+                           Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                           ->  Seq Scan on orexp_phys2 p2_1
+                           ->  Hash
+                                 ->  Seq Scan on orexp_phys p1_1
+(17 rows)
+
+SELECT p1.c, count(*), sum(p1.a + p2.x)
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+GROUP BY p1.c
+ORDER BY p1.c
+LIMIT 5;
+   c   | count | sum 
+-------+-------+-----
+ bar   |     1 |   3
+ baz   |     2 |  13
+ foo   |     2 | 102
+ qux   |     1 |   8
+ txt10 |     1 |  20
+(5 rows)
+
+RESET enable_nestloop;
+-- whole-row references
+SET enable_nestloop = off;
+EXPLAIN (COSTS OFF)
+SELECT p1.*, p2.* FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.a, p2.x, p2.y
+LIMIT 2;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: p1.a, p2.x, p2.y
+         ->  Append
+               ->  Hash Join
+                     Hash Cond: (p2.x = p1.a)
+                     ->  Seq Scan on orexp_phys2 p2
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1
+               ->  Hash Join
+                     Hash Cond: (p2_1.y = p1_1.c)
+                     Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                     ->  Seq Scan on orexp_phys2 p2_1
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1_1
+(15 rows)
+
+SELECT p1.*, p2.* FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.a, p2.x, p2.y
+LIMIT 2;
+ a |     b      |  c  |  d   |   arr   |  comp  | x  |  y  |     z      |   arr   
+---+------------+-----+------+---------+--------+----+-----+------------+---------
+ 1 | 01-01-2026 | foo | 10.5 | {10,20} | (1,c1) |  1 | bar | 01-01-2026 | {10,99}
+ 1 | 01-01-2026 | foo | 10.5 | {10,20} | (1,c1) | 99 | foo | 02-01-2026 | {20,88}
+(2 rows)
+
+-- system columns
+EXPLAIN (COSTS OFF)
+SELECT p1.tableoid::regclass, p1.ctid, p2.ctid
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.ctid, p2.ctid
+LIMIT 2;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: p1.ctid, p2.ctid
+         ->  Result
+               ->  Append
+                     ->  Hash Join
+                           Hash Cond: (p2.x = p1.a)
+                           ->  Seq Scan on orexp_phys2 p2
+                           ->  Hash
+                                 ->  Seq Scan on orexp_phys p1
+                     ->  Hash Join
+                           Hash Cond: (p2_1.y = p1_1.c)
+                           Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                           ->  Seq Scan on orexp_phys2 p2_1
+                           ->  Hash
+                                 ->  Seq Scan on orexp_phys p1_1
+(16 rows)
+
+SELECT p1.tableoid::regclass, p1.ctid, p2.ctid
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.ctid, p2.ctid
+LIMIT 2;
+  tableoid  | ctid  | ctid  
+------------+-------+-------
+ orexp_phys | (0,1) | (0,1)
+ orexp_phys | (0,1) | (0,2)
+(2 rows)
+
+-- constants-only targetlist
+EXPLAIN (COSTS OFF)
+SELECT 1 AS one, 'const'::text AS txt, NULL::int AS nl
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY 1, 2
+LIMIT 2;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Limit
+   ->  Result
+         ->  Append
+               ->  Hash Join
+                     Hash Cond: (p2.x = p1.a)
+                     ->  Seq Scan on orexp_phys2 p2
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1
+               ->  Hash Join
+                     Hash Cond: (p2_1.y = p1_1.c)
+                     Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                     ->  Seq Scan on orexp_phys2 p2_1
+                     ->  Hash
+                           ->  Seq Scan on orexp_phys p1_1
+(14 rows)
+
+SELECT 1 AS one, 'const'::text AS txt, NULL::int AS nl
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY 1, 2
+LIMIT 2;
+ one |  txt  | nl 
+-----+-------+----
+   1 | const |   
+   1 | const |   
+(2 rows)
+
+-- DISTINCT ON with unprojected expressions
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (p1.a + p2.x) p1.c, p2.y
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.a + p2.x, p1.c
+LIMIT 3;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Limit
+   ->  Unique
+         ->  Sort
+               Sort Key: ((p1.a + p2.x)), p1.c
+               ->  Result
+                     ->  Append
+                           ->  Hash Join
+                                 Hash Cond: (p2.x = p1.a)
+                                 ->  Seq Scan on orexp_phys2 p2
+                                 ->  Hash
+                                       ->  Seq Scan on orexp_phys p1
+                           ->  Hash Join
+                                 Hash Cond: (p2_1.y = p1_1.c)
+                                 Join Filter: ((p1_1.a = p2_1.x) IS NOT TRUE)
+                                 ->  Seq Scan on orexp_phys2 p2_1
+                                 ->  Hash
+                                       ->  Seq Scan on orexp_phys p1_1
+(17 rows)
+
+SELECT DISTINCT ON (p1.a + p2.x) p1.c, p2.y
+FROM orexp_phys p1, orexp_phys2 p2
+WHERE p1.a = p2.x OR p1.c = p2.y
+ORDER BY p1.a + p2.x, p1.c
+LIMIT 3;
+  c  |   y   
+-----+-------
+ foo | bar
+ bar | bar
+ baz | other
+(3 rows)
+
+-- tables with dropped columns
+CREATE TABLE orexp_drop1 (c1 int, to_drop text, c2 int, to_drop2 date, c3 text);
+CREATE TABLE orexp_drop2 (x1 int, to_drop text, x2 int, to_drop2 text, x3 text);
+INSERT INTO orexp_drop1 SELECT g, 'drop', g*2, current_date, 'txt'||g FROM generate_series(1, 50) g;
+INSERT INTO orexp_drop2 SELECT g, 'drop', g*2, 'drop', 'txt'||g FROM generate_series(1, 50) g;
+ALTER TABLE orexp_drop1 DROP COLUMN to_drop;
+ALTER TABLE orexp_drop1 DROP COLUMN to_drop2;
+ALTER TABLE orexp_drop2 DROP COLUMN to_drop;
+ALTER TABLE orexp_drop2 DROP COLUMN to_drop2;
+EXPLAIN (COSTS OFF)
+SELECT d1.c3, d2.x1, d1.c1, d2.x3
+FROM orexp_drop1 d1, orexp_drop2 d2
+WHERE d1.c1 = d2.x1 OR d1.c3 = d2.x3
+ORDER BY d1.c1, d2.x1
+LIMIT 3;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: d1.c1, d2.x1
+         ->  Result
+               ->  Append
+                     ->  Merge Join
+                           Merge Cond: (d1.c1 = d2.x1)
+                           ->  Sort
+                                 Sort Key: d1.c1
+                                 ->  Seq Scan on orexp_drop1 d1
+                           ->  Sort
+                                 Sort Key: d2.x1
+                                 ->  Seq Scan on orexp_drop2 d2
+                     ->  Merge Join
+                           Merge Cond: (d1_1.c3 = d2_1.x3)
+                           Join Filter: ((d1_1.c1 = d2_1.x1) IS NOT TRUE)
+                           ->  Sort
+                                 Sort Key: d1_1.c3
+                                 ->  Seq Scan on orexp_drop1 d1_1
+                           ->  Sort
+                                 Sort Key: d2_1.x3
+                                 ->  Seq Scan on orexp_drop2 d2_1
+(22 rows)
+
+SELECT d1.c3, d2.x1, d1.c1, d2.x3
+FROM orexp_drop1 d1, orexp_drop2 d2
+WHERE d1.c1 = d2.x1 OR d1.c3 = d2.x3
+ORDER BY d1.c1, d2.x1
+LIMIT 3;
+  c3  | x1 | c1 |  x3  
+------+----+----+------
+ txt1 |  1 |  1 | txt1
+ txt2 |  2 |  2 | txt2
+ txt3 |  3 |  3 | txt3
+(3 rows)
+
+DROP TABLE orexp_drop1, orexp_drop2;
+RESET enable_nestloop;
+--
+-- Cross-table filter predicates
+--
+-- cross-table disjunction with separate join condition
+EXPLAIN (COSTS OFF)
+SELECT a.id, a.val, b.val FROM orexp_a a JOIN orexp_b b ON a.id = b.x
+WHERE a.val = 10 OR b.val = 300
+ORDER BY a.id, a.val, b.val;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Sort
+   Sort Key: a.id, a.val, b.val
+   ->  Append
+         ->  Hash Join
+               Hash Cond: (b.x = a.id)
+               ->  Seq Scan on orexp_b b
+               ->  Hash
+                     ->  Seq Scan on orexp_a a
+                           Filter: (val = 10)
+         ->  Hash Join
+               Hash Cond: (a_1.id = b_1.x)
+               ->  Seq Scan on orexp_a a_1
+                     Filter: ((val = 10) IS NOT TRUE)
+               ->  Hash
+                     ->  Seq Scan on orexp_b b_1
+                           Filter: (val = 300)
+(16 rows)
+
+SELECT a.id, a.val, b.val FROM orexp_a a JOIN orexp_b b ON a.id = b.x
+WHERE a.val = 10 OR b.val = 300
+ORDER BY a.id, a.val, b.val;
+ id | val | val 
+----+-----+-----
+  1 |  10 | 100
+  3 |  30 | 300
+(2 rows)
+
+--
+-- Aggregation and grouping
+--
+-- GROUP BY over an expanded join
+EXPLAIN (COSTS OFF)
+SELECT a.id, count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+GROUP BY a.id
+ORDER BY a.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Sort Key: a.id
+   ->  HashAggregate
+         Group Key: a.id
+         ->  Append
+               ->  Merge Join
+                     Merge Cond: (b.x = a.id)
+                     ->  Sort
+                           Sort Key: b.x
+                           ->  Seq Scan on orexp_b b
+                     ->  Sort
+                           Sort Key: a.id
+                           ->  Seq Scan on orexp_a a
+               ->  Merge Join
+                     Merge Cond: (b_1.y = a_1.id)
+                     Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+                     ->  Sort
+                           Sort Key: b_1.y
+                           ->  Seq Scan on orexp_b b_1
+                     ->  Sort
+                           Sort Key: a_1.id
+                           ->  Seq Scan on orexp_a a_1
+(22 rows)
+
+SELECT a.id, count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+GROUP BY a.id
+ORDER BY a.id;
+ id | count 
+----+-------
+  1 |     1
+  2 |     1
+  3 |     1
+  4 |     1
+(4 rows)
+
+-- zero-column target
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (b.x = a.id)
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+               ->  Sort
+                     Sort Key: a.id
+                     ->  Seq Scan on orexp_a a
+         ->  Merge Join
+               Merge Cond: (b_1.y = a_1.id)
+               Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+               ->  Sort
+                     Sort Key: a_1.id
+                     ->  Seq Scan on orexp_a a_1
+(19 rows)
+
+SELECT count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y;
+ count 
+-------
+     4
+(1 row)
+
+-- non-aggregate HAVING clause
+EXPLAIN (COSTS OFF)
+SELECT a.id, count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+GROUP BY a.id
+HAVING a.id > 1
+ORDER BY a.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Sort Key: a.id
+   ->  HashAggregate
+         Group Key: a.id
+         ->  Append
+               ->  Merge Join
+                     Merge Cond: (a.id = b.x)
+                     ->  Sort
+                           Sort Key: a.id
+                           ->  Seq Scan on orexp_a a
+                                 Filter: (id > 1)
+                     ->  Sort
+                           Sort Key: b.x
+                           ->  Seq Scan on orexp_b b
+               ->  Merge Join
+                     Merge Cond: (a_1.id = b_1.y)
+                     Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+                     ->  Sort
+                           Sort Key: a_1.id
+                           ->  Seq Scan on orexp_a a_1
+                                 Filter: (id > 1)
+                     ->  Sort
+                           Sort Key: b_1.y
+                           ->  Seq Scan on orexp_b b_1
+(24 rows)
+
+-- aggregate HAVING clause
+EXPLAIN (COSTS OFF)
+SELECT a.id, count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+GROUP BY a.id
+HAVING count(*) > 1
+ORDER BY a.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Sort Key: a.id
+   ->  HashAggregate
+         Group Key: a.id
+         Filter: (count(*) > 1)
+         ->  Append
+               ->  Merge Join
+                     Merge Cond: (b.x = a.id)
+                     ->  Sort
+                           Sort Key: b.x
+                           ->  Seq Scan on orexp_b b
+                     ->  Sort
+                           Sort Key: a.id
+                           ->  Seq Scan on orexp_a a
+               ->  Merge Join
+                     Merge Cond: (b_1.y = a_1.id)
+                     Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+                     ->  Sort
+                           Sort Key: b_1.y
+                           ->  Seq Scan on orexp_b b_1
+                     ->  Sort
+                           Sort Key: a_1.id
+                           ->  Seq Scan on orexp_a a_1
+(23 rows)
+
+-- grouping sets
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.x, grouping (a.id), count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+GROUP BY GROUPING SETS ((a.id), (b.x), ())
+ORDER BY 1, 2, 3, 4;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.x, (GROUPING(a.id)), (count(*))
+   ->  MixedAggregate
+         Hash Key: a.id
+         Hash Key: b.x
+         Group Key: ()
+         ->  Append
+               ->  Merge Join
+                     Merge Cond: (b.x = a.id)
+                     ->  Sort
+                           Sort Key: b.x
+                           ->  Seq Scan on orexp_b b
+                     ->  Sort
+                           Sort Key: a.id
+                           ->  Seq Scan on orexp_a a
+               ->  Merge Join
+                     Merge Cond: (b_1.y = a_1.id)
+                     Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+                     ->  Sort
+                           Sort Key: b_1.y
+                           ->  Seq Scan on orexp_b b_1
+                     ->  Sort
+                           Sort Key: a_1.id
+                           ->  Seq Scan on orexp_a a_1
+(24 rows)
+
+SELECT a.id, b.x, grouping (a.id), count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y
+GROUP BY GROUPING SETS ((a.id), (b.x), ())
+ORDER BY 1, 2, 3, 4;
+ id | x  | grouping | count 
+----+----+----------+-------
+  1 |    |        0 |     1
+  2 |    |        0 |     1
+  3 |    |        0 |     1
+  4 |    |        0 |     1
+    |  1 |        1 |     1
+    |  3 |        1 |     1
+    |  4 |        1 |     1
+    | 99 |        1 |     1
+    |    |        1 |     4
+(9 rows)
+
+--
+-- Subqueries, views, and derived tables
+--
+-- pulled-up simple subquery
+EXPLAIN (COSTS OFF)
+SELECT x.id, b.y FROM (SELECT id, val FROM orexp_a) x, orexp_b b
+WHERE x.id = b.x OR x.val = b.y
+ORDER BY 1, 2;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Sort Key: orexp_a.id, b.y
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (b.x = orexp_a.id)
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+               ->  Sort
+                     Sort Key: orexp_a.id
+                     ->  Seq Scan on orexp_a
+         ->  Merge Join
+               Merge Cond: (b_1.y = orexp_a_1.val)
+               Join Filter: ((orexp_a_1.id = b_1.x) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+               ->  Sort
+                     Sort Key: orexp_a_1.val
+                     ->  Seq Scan on orexp_a orexp_a_1
+(20 rows)
+
+SELECT x.id, b.y FROM (SELECT id, val FROM orexp_a) x, orexp_b b
+WHERE x.id = b.x OR x.val = b.y
+ORDER BY 1, 2;
+ id | y  
+----+----
+  1 | 99
+  3 |  3
+  4 | 99
+(3 rows)
+
+-- pulled-up subquery containing outer join
+CREATE TABLE orexp_c (id int, val int);
+CREATE TABLE orexp_d (id int, val int);
+INSERT INTO orexp_c VALUES (1, 10), (2, 20), (3, NULL);
+INSERT INTO orexp_d VALUES (1, 100), (3, 300), (5, 500);
+EXPLAIN (COSTS OFF)
+SELECT x.cid, b.y FROM (SELECT c.id AS cid, c.val AS cval, d.val + 1 AS dval
+                        FROM orexp_c c LEFT JOIN orexp_d d ON c.id = d.id) x,
+                      orexp_b b
+WHERE x.dval = b.y OR x.cid = b.x
+ORDER BY 1, 2;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Sort
+   Sort Key: c.id, b.y
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (c.id = d.id)
+               ->  Sort
+                     Sort Key: c.id
+                     ->  Seq Scan on orexp_c c
+               ->  Sort
+                     Sort Key: d.id
+                     ->  Merge Join
+                           Merge Cond: (b.y = ((d.val + 1)))
+                           ->  Sort
+                                 Sort Key: b.y
+                                 ->  Seq Scan on orexp_b b
+                           ->  Sort
+                                 Sort Key: ((d.val + 1))
+                                 ->  Seq Scan on orexp_d d
+         ->  Merge Right Join
+               Merge Cond: (d_1.id = c_1.id)
+               Filter: (((d_1.val + 1) = b_1.y) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: d_1.id
+                     ->  Seq Scan on orexp_d d_1
+               ->  Materialize
+                     ->  Merge Join
+                           Merge Cond: (b_1.x = c_1.id)
+                           ->  Sort
+                                 Sort Key: b_1.x
+                                 ->  Seq Scan on orexp_b b_1
+                           ->  Sort
+                                 Sort Key: c_1.id
+                                 ->  Seq Scan on orexp_c c_1
+(33 rows)
+
+SELECT x.cid, b.y FROM (SELECT c.id AS cid, c.val AS cval, d.val + 1 AS dval
+                        FROM orexp_c c LEFT JOIN orexp_d d ON c.id = d.id) x,
+                      orexp_b b
+WHERE x.dval = b.y OR x.cid = b.x
+ORDER BY 1, 2;
+ cid | y  
+-----+----
+   1 | 99
+   3 |  3
+(2 rows)
+
+-- view expanded into pulled-up subquery
+CREATE VIEW orexp_v AS
+  SELECT a.id AS aid, a.val AS aval, b.x AS bx FROM orexp_a a, orexp_b b;
+EXPLAIN (COSTS OFF)
+SELECT v.aid, b.y FROM orexp_v v, orexp_b b
+WHERE v.aval = b.y OR v.bx = b.y
+ORDER BY 1, 2;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.y
+   ->  Append
+         ->  Nested Loop
+               ->  Merge Join
+                     Merge Cond: (b.y = a.val)
+                     ->  Sort
+                           Sort Key: b.y
+                           ->  Seq Scan on orexp_b b
+                     ->  Sort
+                           Sort Key: a.val
+                           ->  Seq Scan on orexp_a a
+               ->  Materialize
+                     ->  Seq Scan on orexp_b b_1
+         ->  Nested Loop
+               Join Filter: ((a_1.val = b_2.y) IS NOT TRUE)
+               ->  Merge Join
+                     Merge Cond: (b_3.x = b_2.y)
+                     ->  Sort
+                           Sort Key: b_3.x
+                           ->  Seq Scan on orexp_b b_3
+                     ->  Sort
+                           Sort Key: b_2.y
+                           ->  Seq Scan on orexp_b b_2
+               ->  Materialize
+                     ->  Seq Scan on orexp_a a_1
+(26 rows)
+
+SELECT v.aid, b.y FROM orexp_v v, orexp_b b
+WHERE v.aval = b.y OR v.bx = b.y
+ORDER BY 1, 2;
+ aid | y  
+-----+----
+   1 |  3
+   1 | 99
+   1 | 99
+   1 | 99
+   1 | 99
+   1 | 99
+   1 | 99
+   2 |  3
+   2 | 99
+   2 | 99
+   2 | 99
+   2 | 99
+   2 | 99
+   2 | 99
+   3 |  3
+   3 | 99
+   3 | 99
+   3 | 99
+   3 | 99
+   3 | 99
+   3 | 99
+   4 |  3
+   4 | 99
+   4 | 99
+   4 | 99
+   4 | 99
+   4 | 99
+   4 | 99
+   5 |  3
+   5 | 99
+   5 | 99
+   5 | 99
+   5 | 99
+   5 | 99
+   5 | 99
+(35 rows)
+
+-- non-table RTE_RESULT derived table
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b, (SELECT 1 AS one) x
+WHERE a.id = b.x OR a.id = b.y
+ORDER BY 1, 2;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.y
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (b.x = a.id)
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+               ->  Sort
+                     Sort Key: a.id
+                     ->  Seq Scan on orexp_a a
+         ->  Merge Join
+               Merge Cond: (b_1.y = a_1.id)
+               Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+               ->  Sort
+                     Sort Key: a_1.id
+                     ->  Seq Scan on orexp_a a_1
+(20 rows)
+
+--
+-- Non-table range table entries
+--
+-- VALUES RTE with nulls
+EXPLAIN (COSTS OFF)
+SELECT v.a, b.y FROM (VALUES (1, 99), (2, NULL), (3, 3), (NULL, 4)) v (a, b), orexp_b b
+WHERE v.a = b.x OR v.b = b.y
+ORDER BY 1, 2;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Sort
+   Sort Key: "*VALUES*".column1, b.y
+   ->  Append
+         ->  Hash Join
+               Hash Cond: (b.x = "*VALUES*".column1)
+               ->  Seq Scan on orexp_b b
+               ->  Hash
+                     ->  Values Scan on "*VALUES*"
+         ->  Hash Join
+               Hash Cond: (b_1.y = "*VALUES*_1".column2)
+               Join Filter: (("*VALUES*_1".column1 = b_1.x) IS NOT TRUE)
+               ->  Seq Scan on orexp_b b_1
+               ->  Hash
+                     ->  Values Scan on "*VALUES*_1"
+(14 rows)
+
+SELECT v.a, b.y FROM (VALUES (1, 99), (2, NULL), (3, 3), (NULL, 4)) v (a, b), orexp_b b
+WHERE v.a = b.x OR v.b = b.y
+ORDER BY 1, 2;
+ a | y  
+---+----
+ 1 | 99
+ 1 | 99
+ 1 | 99
+ 3 |  3
+(4 rows)
+
+-- set-returning function RTEs
+EXPLAIN (COSTS OFF)
+SELECT g, b.y FROM generate_series(1, 4) g, orexp_b b
+WHERE g = b.x OR g = b.y
+ORDER BY 1, 2;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Sort
+   Sort Key: g.g, b.y
+   ->  Append
+         ->  Hash Join
+               Hash Cond: (b.x = g.g)
+               ->  Seq Scan on orexp_b b
+               ->  Hash
+                     ->  Function Scan on generate_series g
+         ->  Hash Join
+               Hash Cond: (b_1.y = g_1.g)
+               Join Filter: ((g_1.g = b_1.x) IS NOT TRUE)
+               ->  Seq Scan on orexp_b b_1
+               ->  Hash
+                     ->  Function Scan on generate_series g_1
+(14 rows)
+
+SELECT g, b.y FROM generate_series(1, 4) g, orexp_b b
+WHERE g = b.x OR g = b.y
+ORDER BY 1, 2;
+ g | y  
+---+----
+ 1 | 99
+ 2 |  2
+ 3 |  3
+ 4 | 99
+(4 rows)
+
+-- table functions
+EXPLAIN (COSTS OFF)
+SELECT jt.a, b.y FROM json_table('{"a": 1}'::jsonb, '$' COLUMNS (a int PATH '$.a')) jt, orexp_b b
+WHERE jt.a = b.x OR jt.a = b.y;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Append
+   ->  Hash Join
+         Hash Cond: (b.x = jt.a)
+         ->  Seq Scan on orexp_b b
+         ->  Hash
+               ->  Table Function Scan on "json_table" jt
+   ->  Hash Join
+         Hash Cond: (b_1.y = jt_1.a)
+         Join Filter: ((jt_1.a = b_1.x) IS NOT TRUE)
+         ->  Seq Scan on orexp_b b_1
+         ->  Hash
+               ->  Table Function Scan on "json_table" jt_1
+(12 rows)
+
+SELECT jt.a, b.y FROM json_table('{"a": 1}'::jsonb, '$' COLUMNS (a int PATH '$.a')) jt, orexp_b b
+WHERE jt.a = b.x OR jt.a = b.y;
+ a | y  
+---+----
+ 1 | 99
+(1 row)
+
+--
+-- Pseudoconstant predicates
+--
+-- arm with pseudoconstant qual
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR (b.y = 2 AND now() > '2000-01-01 00:00:00'::timestamp);
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
+ Append
+   ->  Merge Join
+         Merge Cond: (b.x = a.id)
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on orexp_b b
+         ->  Sort
+               Sort Key: a.id
+               ->  Seq Scan on orexp_a a
+   ->  Result
+         One-Time Filter: (now() > 'Sat Jan 01 00:00:00 2000'::timestamp without time zone)
+         ->  Nested Loop
+               Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+               ->  Seq Scan on orexp_a a_1
+               ->  Materialize
+                     ->  Seq Scan on orexp_b b_1
+                           Filter: (y = 2)
+(17 rows)
+
+SELECT count(*) FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR (b.y = 2 AND now() > '2000-01-01 00:00:00'::timestamp);
+ count 
+-------
+     8
+(1 row)
+
+-- pseudoconstant arm alongside subquery arm
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE (b.y = 2 AND now() > '2000-01-01 00:00:00'::timestamp)
+   OR (a.id = b.x AND a.val > (SELECT count(*) FROM orexp_b));
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Append
+   InitPlan expr_1
+     ->  Aggregate
+           ->  Seq Scan on orexp_b
+   ->  Result
+         One-Time Filter: (now() > 'Sat Jan 01 00:00:00 2000'::timestamp without time zone)
+         ->  Nested Loop
+               ->  Seq Scan on orexp_a a
+               ->  Materialize
+                     ->  Seq Scan on orexp_b b
+                           Filter: (y = 2)
+   ->  Merge Join
+         Merge Cond: (a_1.id = b_1.x)
+         ->  Sort
+               Sort Key: a_1.id
+               ->  Seq Scan on orexp_a a_1
+                     Filter: (val > (InitPlan expr_1).col1)
+         ->  Sort
+               Sort Key: b_1.x
+               ->  Seq Scan on orexp_b b_1
+                     Filter: (((y = 2) AND (now() > 'Sat Jan 01 00:00:00 2000'::timestamp without time zone)) IS NOT TRUE)
+(21 rows)
+
+SELECT count(*) FROM orexp_a a, orexp_b b
+WHERE (b.y = 2 AND now() > '2000-01-01 00:00:00'::timestamp)
+   OR (a.id = b.x AND a.val > (SELECT count(*) FROM orexp_b));
+ count 
+-------
+     7
+(1 row)
+
+--
+-- Outer joins
+--
+-- FULL JOIN with strict WHERE quals
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a FULL JOIN orexp_b b ON a.id = b.x
+WHERE a.id = b.y OR b.x = a.id
+ORDER BY 1, 2;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Incremental Sort
+   Sort Key: a.id, b.y
+   Presorted Key: a.id
+   ->  Merge Join
+         Merge Cond: (b.x = a.id)
+         Join Filter: ((a.id = b.y) OR (b.x = a.id))
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on orexp_b b
+         ->  Sort
+               Sort Key: a.id
+               ->  Seq Scan on orexp_a a
+(12 rows)
+
+SELECT a.id, b.y FROM orexp_a a FULL JOIN orexp_b b ON a.id = b.x
+WHERE a.id = b.y OR b.x = a.id
+ORDER BY 1, 2;
+ id | y  
+----+----
+  1 | 99
+  3 |  3
+  4 | 99
+(3 rows)
+
+-- LEFT JOIN with cross-relation disjunction in WHERE
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.x, b.y FROM orexp_a a LEFT JOIN orexp_b b ON (a.id = b.x OR a.val = b.y)
+WHERE b.val = 100 OR a.id = 1
+ORDER BY 1, 2, 3;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.x, b.y
+   ->  Append
+         ->  Nested Loop
+               Join Filter: ((a.id = b.x) OR (a.val = b.y))
+               ->  Seq Scan on orexp_a a
+               ->  Materialize
+                     ->  Seq Scan on orexp_b b
+                           Filter: (val = 100)
+         ->  Nested Loop Left Join
+               Join Filter: ((a_1.id = b_1.x) OR (a_1.val = b_1.y))
+               Filter: ((b_1.val = 100) IS NOT TRUE)
+               ->  Seq Scan on orexp_a a_1
+                     Filter: (id = 1)
+               ->  Materialize
+                     ->  Seq Scan on orexp_b b_1
+(16 rows)
+
+SELECT a.id, b.x, b.y FROM orexp_a a LEFT JOIN orexp_b b ON (a.id = b.x OR a.val = b.y)
+WHERE b.val = 100 OR a.id = 1
+ORDER BY 1, 2, 3;
+ id | x | y  
+----+---+----
+  1 | 1 | 99
+(1 row)
+
+--
+-- Queries ineligible for OR expansion
+--
+-- volatile set-returning function
+EXPLAIN (COSTS OFF)
+SELECT g, b.y FROM generate_series(1, (random() * 3)::int) g, orexp_b b
+WHERE g = b.x OR g = b.y;
+                 QUERY PLAN                  
+---------------------------------------------
+ Nested Loop
+   Join Filter: ((g.g = b.x) OR (g.g = b.y))
+   ->  Function Scan on generate_series g
+   ->  Materialize
+         ->  Seq Scan on orexp_b b
+(5 rows)
+
+-- volatile VALUES list
+EXPLAIN (COSTS OFF)
+SELECT v.a, b.y FROM (VALUES ((random() * 3)::int)) v (a), orexp_b b
+WHERE v.a = b.x OR v.a = b.y;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Nested Loop
+   Join Filter: (("*VALUES*".column1 = b.x) OR ("*VALUES*".column1 = b.y))
+   ->  Values Scan on "*VALUES*"
+   ->  Seq Scan on orexp_b b
+(4 rows)
+
+-- volatile JSON_TABLE expressions
+EXPLAIN (COSTS OFF)
+SELECT jt.a, b.y FROM json_table(('{"a":' || (random() * 2)::int || '}')::jsonb,
+                                 '$' COLUMNS (a int PATH '$.a')) jt, orexp_b b
+WHERE jt.a = b.x OR jt.a = b.y;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Nested Loop
+   Join Filter: ((jt.a = b.x) OR (jt.a = b.y))
+   ->  Table Function Scan on "json_table" jt
+   ->  Materialize
+         ->  Seq Scan on orexp_b b
+(5 rows)
+
+-- volatile function in WHERE
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR (a.id = b.y AND random() < 0.5);
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Nested Loop
+   Join Filter: ((a.id = b.x) OR ((a.id = b.y) AND (random() < '0.5'::double precision)))
+   ->  Seq Scan on orexp_a a
+   ->  Materialize
+         ->  Seq Scan on orexp_b b
+(5 rows)
+
+-- correlated SubPlan in WHERE
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE (a.id = b.x OR a.id = b.y)
+  AND a.val > (SELECT max(b2.val) FROM orexp_b b2 WHERE b2.x = a.id);
+                    QUERY PLAN                    
+--------------------------------------------------
+ Nested Loop
+   Join Filter: ((a.id = b.x) OR (a.id = b.y))
+   ->  Seq Scan on orexp_b b
+   ->  Materialize
+         ->  Seq Scan on orexp_a a
+               Filter: (val > (SubPlan expr_1))
+               SubPlan expr_1
+                 ->  Aggregate
+                       ->  Seq Scan on orexp_b b2
+                             Filter: (x = a.id)
+(10 rows)
+
+-- TABLESAMPLE
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b TABLESAMPLE SYSTEM (50)
+WHERE a.id = b.x OR a.id = b.y;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Nested Loop
+   Join Filter: ((a.id = b.x) OR (a.id = b.y))
+   ->  Seq Scan on orexp_a a
+   ->  Materialize
+         ->  Sample Scan on orexp_b b
+               Sampling: system ('50'::real)
+(6 rows)
+
+-- unreduced FULL JOIN
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a FULL JOIN orexp_b b ON a.id = b.x
+WHERE a.val IS NULL OR b.val IS NULL;
+                   QUERY PLAN                   
+------------------------------------------------
+ Merge Full Join
+   Merge Cond: (b.x = a.id)
+   Filter: ((a.val IS NULL) OR (b.val IS NULL))
+   ->  Sort
+         Sort Key: b.x
+         ->  Seq Scan on orexp_b b
+   ->  Sort
+         Sort Key: a.id
+         ->  Seq Scan on orexp_a a
+(9 rows)
+
+-- lateral reference
+EXPLAIN (COSTS OFF)
+SELECT a.id, l.ly FROM orexp_a a,
+       LATERAL (SELECT b.y AS ly FROM orexp_b b WHERE b.x = a.id OR b.y = a.val) l
+WHERE a.id = l.ly OR a.val = 1;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Nested Loop
+   Join Filter: (((b.x = a.id) OR (b.y = a.val)) AND ((a.id = b.y) OR (a.val = 1)))
+   ->  Seq Scan on orexp_a a
+   ->  Materialize
+         ->  Seq Scan on orexp_b b
+(5 rows)
+
+-- unflattened subquery with grouping
+EXPLAIN (COSTS OFF)
+SELECT a.id, s.n FROM orexp_a a,
+       (SELECT x AS sx, count(*) AS n FROM orexp_b GROUP BY x) s
+WHERE a.id = s.sx OR a.val = s.n;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop
+   Join Filter: ((a.id = s.sx) OR (a.val = s.n))
+   ->  Seq Scan on orexp_a a
+   ->  Materialize
+         ->  Subquery Scan on s
+               ->  HashAggregate
+                     Group Key: orexp_b.x
+                     ->  Seq Scan on orexp_b
+(8 rows)
+
+-- append relation from UNION ALL
+EXPLAIN (COSTS OFF)
+SELECT u.id, a.val FROM (SELECT x AS id, val FROM orexp_b
+                         UNION ALL
+                         SELECT id, val FROM orexp_a) u, orexp_a a
+WHERE u.val = a.val OR u.id = a.id;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Nested Loop
+         Join Filter: ((orexp_a.val = a.val) OR (orexp_a.id = a.id))
+         ->  Parallel Append
+               ->  Parallel Seq Scan on orexp_a
+               ->  Parallel Seq Scan on orexp_b
+         ->  Materialize
+               ->  Seq Scan on orexp_a a
+(9 rows)
+
+-- partitioned table
+CREATE TABLE orexp_part (id int, d int) PARTITION BY RANGE (d);
+CREATE TABLE orexp_part1 PARTITION OF orexp_part FOR VALUES FROM (0) TO (10);
+CREATE TABLE orexp_part2 PARTITION OF orexp_part FOR VALUES FROM (10) TO (20);
+INSERT INTO orexp_part VALUES (1, 5), (2, 15);
+EXPLAIN (COSTS OFF)
+SELECT a.id, p.d FROM orexp_a a, orexp_part p
+WHERE a.id = p.id OR a.val = p.d;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Nested Loop
+         Join Filter: ((a.id = p.id) OR (a.val = p.d))
+         ->  Parallel Append
+               ->  Parallel Seq Scan on orexp_part1 p_1
+               ->  Parallel Seq Scan on orexp_part2 p_2
+         ->  Materialize
+               ->  Seq Scan on orexp_a a
+(9 rows)
+
+-- table inheritance
+CREATE TABLE orexp_inh_parent (id int, val int);
+CREATE TABLE orexp_inh_child () INHERITS (orexp_inh_parent);
+INSERT INTO orexp_inh_parent VALUES (1, 10);
+INSERT INTO orexp_inh_child VALUES (2, 20);
+EXPLAIN (COSTS OFF)
+SELECT a.id, p.val FROM orexp_a a, orexp_inh_parent p
+WHERE a.id = p.id OR a.val = p.val;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Nested Loop
+         Join Filter: ((a.id = p.id) OR (a.val = p.val))
+         ->  Parallel Append
+               ->  Parallel Seq Scan on orexp_inh_child p_2
+               ->  Parallel Seq Scan on orexp_inh_parent p_1
+         ->  Materialize
+               ->  Seq Scan on orexp_a a
+(9 rows)
+
+--
+-- Permitted sublinks
+--
+-- uncorrelated scalar sublink
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE (a.id = b.x OR a.id = b.y)
+  AND a.val > (SELECT min(val) FROM orexp_b WHERE val > 150)
+ORDER BY 1, 2;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.y
+   InitPlan expr_1
+     ->  Aggregate
+           ->  Seq Scan on orexp_b
+                 Filter: (val > 150)
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (a.id = b.x)
+               ->  Sort
+                     Sort Key: a.id
+                     ->  Seq Scan on orexp_a a
+                           Filter: (val > (InitPlan expr_1).col1)
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+         ->  Merge Join
+               Merge Cond: (a_1.id = b_1.y)
+               Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: a_1.id
+                     ->  Seq Scan on orexp_a a_1
+                           Filter: (val > (InitPlan expr_1).col1)
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+(26 rows)
+
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE (a.id = b.x OR a.id = b.y)
+  AND a.val > (SELECT min(val) FROM orexp_b WHERE val > 150)
+ORDER BY 1, 2;
+ id | y 
+----+---
+(0 rows)
+
+--
+-- Multiple OR clauses in WHERE
+--
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.val FROM orexp_a a, orexp_b b
+WHERE (a.id = b.x OR a.id = b.y) AND (a.val = b.val OR a.val = b.x)
+ORDER BY 1, 2;
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.val
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (b.x = a.id)
+               Join Filter: ((a.val = b.val) OR (a.val = b.x))
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+               ->  Sort
+                     Sort Key: a.id
+                     ->  Seq Scan on orexp_a a
+         ->  Merge Join
+               Merge Cond: (b_1.y = a_1.id)
+               Join Filter: (((a_1.id = b_1.x) IS NOT TRUE) AND ((a_1.val = b_1.val) OR (a_1.val = b_1.x)))
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+               ->  Sort
+                     Sort Key: a_1.id
+                     ->  Seq Scan on orexp_a a_1
+(21 rows)
+
+SELECT a.id, b.val FROM orexp_a a, orexp_b b
+WHERE (a.id = b.x OR a.id = b.y) AND (a.val = b.val OR a.val = b.x)
+ORDER BY 1, 2;
+ id | val 
+----+-----
+(0 rows)
+
+--
+-- Control via or_expansion_limit
+--
+-- arm count exceeds limit
+SET or_expansion_limit = 2;
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y OR a.val = b.val
+ORDER BY 1, 2;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.y
+   ->  Nested Loop
+         Join Filter: ((a.id = b.x) OR (a.id = b.y) OR (a.val = b.val))
+         ->  Seq Scan on orexp_a a
+         ->  Materialize
+               ->  Seq Scan on orexp_b b
+(7 rows)
+
+-- arm count within limit
+SET or_expansion_limit = 3;
+EXPLAIN (COSTS OFF)
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y OR a.val = b.val
+ORDER BY 1, 2;
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: a.id, b.y
+   ->  Append
+         ->  Merge Join
+               Merge Cond: (b.x = a.id)
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on orexp_b b
+               ->  Sort
+                     Sort Key: a.id
+                     ->  Seq Scan on orexp_a a
+         ->  Merge Join
+               Merge Cond: (b_1.y = a_1.id)
+               Join Filter: ((a_1.id = b_1.x) IS NOT TRUE)
+               ->  Sort
+                     Sort Key: b_1.y
+                     ->  Seq Scan on orexp_b b_1
+               ->  Sort
+                     Sort Key: a_1.id
+                     ->  Seq Scan on orexp_a a_1
+         ->  Merge Join
+               Merge Cond: (b_2.val = a_2.val)
+               Join Filter: (((a_2.id = b_2.x) IS NOT TRUE) AND ((a_2.id = b_2.y) IS NOT TRUE))
+               ->  Sort
+                     Sort Key: b_2.val
+                     ->  Seq Scan on orexp_b b_2
+               ->  Sort
+                     Sort Key: a_2.val
+                     ->  Seq Scan on orexp_a a_2
+(29 rows)
+
+SELECT a.id, b.y FROM orexp_a a, orexp_b b
+WHERE a.id = b.x OR a.id = b.y OR a.val = b.val
+ORDER BY 1, 2;
+ id | y  
+----+----
+  1 | 99
+  2 |  2
+  3 |  3
+  4 | 99
+(4 rows)
+
+--
+-- Clean up
+--
+RESET or_expansion_limit;
+DROP VIEW orexp_v;
+DROP TABLE orexp_c, orexp_d;
+DROP TABLE orexp_part;
+DROP TABLE orexp_inh_parent CASCADE;
+NOTICE:  drop cascades to table orexp_inh_child
+DROP TABLE orexp_phys, orexp_phys2;
+DROP TYPE orexp_c_type;
+DROP TABLE orexp_a, orexp_b;
