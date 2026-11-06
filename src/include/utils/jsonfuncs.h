@@ -83,6 +83,7 @@ typedef enum
 
 extern void json_categorize_type(Oid typoid, bool is_jsonb,
 								 JsonTypeCategory *tcategory, Oid *outfuncoid);
+extern void json_validate_key_category(JsonTypeCategory tcategory);
 extern void json_check_mutability(Oid typoid, bool is_jsonb,
 								  bool *has_mutable);
 extern Datum datum_to_json(Datum val, JsonTypeCategory tcategory,
