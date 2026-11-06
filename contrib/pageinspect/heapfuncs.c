@@ -25,8 +25,10 @@
 
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -36,7 +38,9 @@
 #include "port/pg_bitutils.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 
 /*
  * It's not supported to create tuples with oids anymore, but when pg_upgrade
@@ -389,7 +393,28 @@ tuple_data_split_internal(Oid relid, char *tupdata,
 						 errmsg("unexpected end of tuple data")));
 
 			if (attr->attlen == -1 && do_detoast)
+			{
+				/* A saved page can still refer to unlogged TOAST storage. */
+				if (VARATT_IS_EXTERNAL_ONDISK(tupdata + off) &&
+					RecoveryInProgress())
+				{
+					toast_external_data toast_ext_data;
+
+					toast_external_info_get((varlena *) (tupdata + off),
+											&toast_ext_data);
+
+					/* If the relation is gone, let detoasting complain. */
+					if (SearchSysCacheExists1(RELOID,
+											  ObjectIdGetDatum(toast_ext_data.toastrelid)) &&
+						get_rel_persistence(toast_ext_data.toastrelid) !=
+						RELPERSISTENCE_PERMANENT)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("cannot access temporary or unlogged relations during recovery")));
+				}
+
 				attr_data = pg_detoast_datum_copy((varlena *) (tupdata + off));
+			}
 			else
 			{
 				attr_data = (bytea *) palloc(len + VARHDRSZ);

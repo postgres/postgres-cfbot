@@ -30,10 +30,12 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/xlog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "pgstattuple.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "utils/varlena.h"
@@ -237,6 +239,38 @@ pgstattuplebyid_v1_5(PG_FUNCTION_ARGS)
 }
 
 /*
+ * check_relation_accessible
+ *
+ * Check that a relation can be read by this session.
+ */
+void
+check_relation_accessible(Relation rel)
+{
+	/*
+	 * Reject attempts to read non-local temporary relations; we would be
+	 * likely to get wrong data since we have no visibility into the owning
+	 * session's local buffers.
+	 */
+	if (RELATION_IS_OTHER_TEMP(rel))
+	{
+		if (rel->rd_rel->relkind == RELKIND_INDEX)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot access temporary indexes of other sessions")));
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot access temporary tables of other sessions")));
+	}
+
+	/* Temporary and unlogged relations are inaccessible during recovery. */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
+}
+
+/*
  * pgstat_relation
  */
 static Datum
@@ -244,15 +278,7 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 {
 	const char *err;
 
-	/*
-	 * Reject attempts to read non-local temporary relations; we would be
-	 * likely to get wrong data since we have no visibility into the owning
-	 * session's local buffers.
-	 */
-	if (RELATION_IS_OTHER_TEMP(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot access temporary tables of other sessions")));
+	check_relation_accessible(rel);
 
 	if (RELKIND_HAS_TABLE_AM(rel->rd_rel->relkind) ||
 		rel->rd_rel->relkind == RELKIND_SEQUENCE)

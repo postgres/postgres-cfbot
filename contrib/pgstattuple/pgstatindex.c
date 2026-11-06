@@ -32,10 +32,12 @@
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "pgstattuple.h"
 #include "storage/bufmgr.h"
 #include "storage/read_stream.h"
 #include "utils/rel.h"
@@ -228,15 +230,7 @@ pgstatindex_impl(Relation rel, FunctionCallInfo fcinfo)
 				 errmsg("relation \"%s\" is not a btree index",
 						RelationGetRelationName(rel))));
 
-	/*
-	 * Reject attempts to read non-local temporary relations; we would be
-	 * likely to get wrong data since we have no visibility into the owning
-	 * session's local buffers.
-	 */
-	if (RELATION_IS_OTHER_TEMP(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot access temporary tables of other sessions")));
+	check_relation_accessible(rel);
 
 	/*
 	 * A !indisready index could lead to ERRCODE_DATA_CORRUPTED later, so exit
@@ -482,7 +476,15 @@ pg_relpages_impl(Relation rel)
 						RelationGetRelationName(rel)),
 				 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 
-	/* note: this will work OK on non-local temp tables */
+	/*
+	 * Temporary tables of other sessions are not rejected, as only the
+	 * relation size is needed, but temporary and unlogged relations are
+	 * inaccessible during recovery.
+	 */
+	if (!RelationIsPermanent(rel) && RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary or unlogged relations during recovery")));
 
 	relpages = RelationGetNumberOfBlocks(rel);
 
@@ -547,15 +549,7 @@ pgstatginindex_internal(Oid relid, FunctionCallInfo fcinfo)
 				 errmsg("relation \"%s\" is not a GIN index",
 						RelationGetRelationName(rel))));
 
-	/*
-	 * Reject attempts to read non-local temporary relations; we would be
-	 * likely to get wrong data since we have no visibility into the owning
-	 * session's local buffers.
-	 */
-	if (RELATION_IS_OTHER_TEMP(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot access temporary indexes of other sessions")));
+	check_relation_accessible(rel);
 
 	/* see pgstatindex_impl */
 	if (!rel->rd_index->indisvalid)
@@ -637,15 +631,7 @@ pgstathashindex(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a hash index",
 						RelationGetRelationName(rel))));
 
-	/*
-	 * Reject attempts to read non-local temporary relations; we would be
-	 * likely to get wrong data since we have no visibility into the owning
-	 * session's local buffers.
-	 */
-	if (RELATION_IS_OTHER_TEMP(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot access temporary indexes of other sessions")));
+	check_relation_accessible(rel);
 
 	/* see pgstatindex_impl */
 	if (!rel->rd_index->indisvalid)
