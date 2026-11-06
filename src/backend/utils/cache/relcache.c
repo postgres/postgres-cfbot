@@ -93,7 +93,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#define RELCACHE_INIT_FILEMAGIC		0x573266	/* version ID value */
+#define RELCACHE_INIT_FILEMAGIC		0x57326A	/* version ID value */
 
 /*
  * Whether to bother checking if relation cache memory needs to be freed
@@ -136,6 +136,17 @@ typedef struct relidcacheent
 } RelIdCacheEnt;
 
 static HTAB *RelationIdCache;
+
+/*
+ * Slab memory context holding all the relcache's RelationData structs.
+ * It is a child of CacheMemoryContext; only the fixed-size RelationData
+ * objects are allocated there, while all subsidiary data stays in
+ * CacheMemoryContext itself.
+ */
+static MemoryContext RelationSlabContext = NULL;
+
+#define AllocRelationData() \
+	MemoryContextAllocZero(RelationSlabContext, sizeof(RelationData))
 
 /*
  * This flag is false until we have prepared the critical relcache entries
@@ -420,13 +431,15 @@ AllocateRelationDesc(Form_pg_class relp)
 	MemoryContext oldcxt;
 	Form_pg_class relationForm;
 
-	/* Relcache entries must live in CacheMemoryContext */
-	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
-
 	/*
-	 * allocate and zero space for new relation descriptor
+	 * Allocate and zero space for new relation descriptor.  The RelationData
+	 * struct goes into RelationSlabContext; all subsidiary data is allocated
+	 * in CacheMemoryContext.
 	 */
-	relation = palloc0_object(RelationData);
+	relation = AllocRelationData();
+
+	/* Relcache subsidiary data must live in CacheMemoryContext */
+	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
@@ -1201,75 +1214,7 @@ retry:
 	 */
 	RelationBuildTupleDesc(relation);
 
-	/* foreign key data is not loaded till asked for */
-	relation->rd_fkeylist = NIL;
-	relation->rd_fkeyvalid = false;
-
-	/* TOAST type data is not loaded till asked for */
-	relation->rd_toastchunkidtype = InvalidOid;
-
-	/* partitioning data is not loaded till asked for */
-	relation->rd_partkey = NULL;
-	relation->rd_partkeycxt = NULL;
-	relation->rd_partdesc = NULL;
-	relation->rd_partdesc_nodetached = NULL;
-	relation->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-	relation->rd_pdcxt = NULL;
-	relation->rd_pddcxt = NULL;
-	relation->rd_partcheck = NIL;
-	relation->rd_partcheckvalid = false;
-	relation->rd_partcheckcxt = NULL;
-
-	/*
-	 * initialize access method information
-	 */
-	if (relation->rd_rel->relkind == RELKIND_INDEX ||
-		relation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
-		RelationInitIndexAccessInfo(relation);
-	else if (RELKIND_HAS_TABLE_AM(relation->rd_rel->relkind) ||
-			 relation->rd_rel->relkind == RELKIND_SEQUENCE)
-		RelationInitTableAccessMethod(relation);
-	else if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		/*
-		 * Do nothing: access methods are a setting that partitions can
-		 * inherit.
-		 */
-	}
-	else
-		Assert(relation->rd_rel->relam == InvalidOid);
-
-	/* extract reloptions if any */
-	RelationParseRelOptions(relation, pg_class_tuple);
-
-	/*
-	 * Fetch rules and triggers that affect this relation.
-	 *
-	 * Note that RelationBuildRuleLock() relies on this being done after
-	 * extracting the relation's reloptions.
-	 */
-	if (relation->rd_rel->relhasrules)
-		RelationBuildRuleLock(relation);
-	else
-	{
-		relation->rd_rules = NULL;
-		relation->rd_rulescxt = NULL;
-	}
-
-	if (relation->rd_rel->relhastriggers)
-		RelationBuildTriggers(relation);
-	else
-		relation->trigdesc = NULL;
-
-	if (relation->rd_rel->relrowsecurity)
-		RelationBuildRowSecurity(relation);
-	else
-		relation->rd_rsdesc = NULL;
-
-	/*
-	 * initialize the relation lock manager information
-	 */
-	RelationInitLockInfo(relation); /* see lmgr.c */
+	relation->rd_partinfo = NULL;
 
 	/*
 	 * initialize physical addressing information for the relation
@@ -1278,6 +1223,66 @@ retry:
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
+
+	if (RelationIsIndex(relation))
+	{
+		RelationInitIndexAccessInfo(relation);
+
+		/* extract reloptions if any */
+		RelationParseRelOptions(relation, pg_class_tuple);
+	}
+	else
+	{
+		/*
+		 * initialize access method information
+		 */
+		if (RELKIND_HAS_TABLE_AM(relation->rd_rel->relkind) ||
+			relation->rd_rel->relkind == RELKIND_SEQUENCE)
+			RelationInitTableAccessMethod(relation);
+		else if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			/*
+			 * Do nothing: access methods are a setting that partitions can
+			 * inherit.
+			 */
+		}
+		else
+			Assert(relation->rd_rel->relam == InvalidOid);
+
+		/* extract reloptions if any */
+		RelationParseRelOptions(relation, pg_class_tuple);
+
+		/* foreign key data is not loaded till asked for */
+		relation->rd_fkeylist = NIL;
+		relation->rd_fkeyvalid = false;
+
+		/* TOAST type data is not loaded till asked for */
+		relation->rd_toastchunkidtype = InvalidOid;
+
+		/*
+		 * Fetch rules and triggers that affect this relation.
+		 *
+		 * Note that RelationBuildRuleLock() relies on this being done after
+		 * extracting the relation's reloptions.
+		 */
+		if (relation->rd_rel->relhasrules)
+			RelationBuildRuleLock(relation);
+		else
+		{
+			relation->rd_rules = NULL;
+			relation->rd_rulescxt = NULL;
+		}
+
+		if (relation->rd_rel->relhastriggers)
+			RelationBuildTriggers(relation);
+		else
+			relation->trigdesc = NULL;
+
+		if (relation->rd_rel->relrowsecurity)
+			RelationBuildRowSecurity(relation);
+		else
+			relation->rd_rsdesc = NULL;
+	}
 
 	/*
 	 * now we can free the memory allocated for pg_class_tuple
@@ -1671,14 +1676,12 @@ LookupOpclassInfo(Oid operatorClassOid,
 	HeapTuple	htup;
 	bool		indexOK;
 
+	Assert(CacheMemoryContext != NULL);
+
 	if (OpClassCache == NULL)
 	{
 		/* First time through: initialize the opclass cache */
 		HASHCTL		ctl;
-
-		/* Also make sure CacheMemoryContext exists */
-		if (!CacheMemoryContext)
-			CreateCacheMemoryContext();
 
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(OpClassCacheEnt);
@@ -1896,9 +1899,10 @@ formrdesc(const char *relationName, Oid relationReltype,
 	bool		has_not_null;
 
 	/*
-	 * allocate new relation desc, clear all fields of reldesc
+	 * allocate new relation desc, clear all fields of reldesc; the
+	 * RelationData struct itself goes into RelationSlabContext
 	 */
-	relation = palloc0_object(RelationData);
+	relation = AllocRelationData();
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
@@ -2011,11 +2015,6 @@ formrdesc(const char *relationName, Oid relationReltype,
 		RelationMapUpdateMap(RelationGetRelid(relation),
 							 RelationGetRelid(relation),
 							 isshared, true);
-
-	/*
-	 * initialize the relation lock manager information
-	 */
-	RelationInitLockInfo(relation); /* see lmgr.c */
 
 	/*
 	 * initialize physical addressing information for the relation
@@ -2228,15 +2227,16 @@ RelationCloseCleanup(Relation relation)
 	 * stale partition descriptors it has.  This is unlikely, so check to see
 	 * if there are child contexts before expending a call to mcxt.c.
 	 */
-	if (RelationHasReferenceCountZero(relation))
+	if (RelationHasReferenceCountZero(relation) &&
+	    !RelationIsIndex(relation) && relation->rd_partinfo != NULL)
 	{
-		if (relation->rd_pdcxt != NULL &&
-			relation->rd_pdcxt->firstchild != NULL)
-			MemoryContextDeleteChildren(relation->rd_pdcxt);
+		RelationPartitionInfo *partinfo = relation->rd_partinfo;
 
-		if (relation->rd_pddcxt != NULL &&
-			relation->rd_pddcxt->firstchild != NULL)
-			MemoryContextDeleteChildren(relation->rd_pddcxt);
+		if (partinfo->pdcxt != NULL && partinfo->pdcxt->firstchild != NULL)
+			MemoryContextDeleteChildren(partinfo->pdcxt);
+
+		if (partinfo->pddcxt != NULL && partinfo->pddcxt->firstchild != NULL)
+			MemoryContextDeleteChildren(partinfo->pddcxt);
 	}
 
 #ifdef RELCACHE_FORCE_RELEASE
@@ -2275,9 +2275,7 @@ RelationReloadIndexInfo(Relation relation)
 	Form_pg_class relp;
 
 	/* Should be called only for invalidated, live indexes */
-	Assert((relation->rd_rel->relkind == RELKIND_INDEX ||
-			relation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX) &&
-		   !relation->rd_isvalid &&
+	Assert(RelationIsIndex(relation) && !relation->rd_isvalid &&
 		   relation->rd_droppedSubid == InvalidSubTransactionId);
 
 	/*
@@ -2434,6 +2432,8 @@ RelationReloadNailed(Relation relation)
 static void
 RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 {
+	const bool is_index = relation->rd_rel && RelationIsIndex(relation);
+
 	Assert(RelationHasReferenceCountZero(relation));
 
 	/*
@@ -2469,39 +2469,51 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 		else
 			FreeTupleDesc(relation->rd_att);
 	}
-	FreeTriggerDesc(relation->trigdesc);
-	list_free_deep(relation->rd_fkeylist);
-	list_free(relation->rd_indexlist);
-	list_free(relation->rd_statlist);
-	bms_free(relation->rd_keyattr);
-	bms_free(relation->rd_pkattr);
-	bms_free(relation->rd_idattr);
-	bms_free(relation->rd_hotblockingattr);
-	bms_free(relation->rd_summarizedattr);
-	if (relation->rd_pubdesc)
-		pfree(relation->rd_pubdesc);
 	if (relation->rd_options)
 		pfree(relation->rd_options);
-	if (relation->rd_indextuple)
-		pfree(relation->rd_indextuple);
 	if (relation->rd_amcache)
 		pfree(relation->rd_amcache);
-	if (relation->rd_fdwroutine)
-		pfree(relation->rd_fdwroutine);
-	if (relation->rd_indexcxt)
-		MemoryContextDelete(relation->rd_indexcxt);
-	if (relation->rd_rulescxt)
-		MemoryContextDelete(relation->rd_rulescxt);
-	if (relation->rd_rsdesc)
-		MemoryContextDelete(relation->rd_rsdesc->rscxt);
-	if (relation->rd_partkeycxt)
-		MemoryContextDelete(relation->rd_partkeycxt);
-	if (relation->rd_pdcxt)
-		MemoryContextDelete(relation->rd_pdcxt);
-	if (relation->rd_pddcxt)
-		MemoryContextDelete(relation->rd_pddcxt);
-	if (relation->rd_partcheckcxt)
-		MemoryContextDelete(relation->rd_partcheckcxt);
+	if (relation->rd_partinfo)
+	{
+		RelationPartitionInfo *partinfo = relation->rd_partinfo;
+
+		if (partinfo->partkeycxt)
+			MemoryContextDelete(partinfo->partkeycxt);
+		if (partinfo->pdcxt)
+			MemoryContextDelete(partinfo->pdcxt);
+		if (partinfo->pddcxt)
+			MemoryContextDelete(partinfo->pddcxt);
+		if (partinfo->partcheckcxt)
+			MemoryContextDelete(partinfo->partcheckcxt);
+		pfree(partinfo);
+	}
+	if (!is_index)
+	{
+		list_free(relation->rd_indexlist);
+		list_free(relation->rd_statlist);
+		FreeTriggerDesc(relation->trigdesc);
+		list_free_deep(relation->rd_fkeylist);
+		bms_free(relation->rd_keyattr);
+		bms_free(relation->rd_pkattr);
+		bms_free(relation->rd_idattr);
+		bms_free(relation->rd_hotblockingattr);
+		bms_free(relation->rd_summarizedattr);
+		if (relation->rd_pubdesc)
+			pfree(relation->rd_pubdesc);
+		if (relation->rd_fdwroutine)
+			pfree(relation->rd_fdwroutine);
+		if (relation->rd_rulescxt)
+			MemoryContextDelete(relation->rd_rulescxt);
+		if (relation->rd_rsdesc)
+			MemoryContextDelete(relation->rd_rsdesc->rscxt);
+	}
+	else
+	{
+		if (relation->rd_indextuple)
+			pfree(relation->rd_indextuple);
+		if (relation->rd_indexcxt)
+			MemoryContextDelete(relation->rd_indexcxt);
+	}
 	pfree(relation);
 }
 
@@ -2599,9 +2611,7 @@ RelationRebuildRelation(Relation relation)
 	 * pg_index tuple only after that, and then relies on
 	 * CommandCounterIncrement to load the pg_index contents.
 	 */
-	if ((relation->rd_rel->relkind == RELKIND_INDEX ||
-		 relation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX) &&
-		relation->rd_indexcxt != NULL)
+	if (RelationIsIndex(relation) && relation->rd_indexcxt != NULL)
 	{
 		RelationReloadIndexInfo(relation);
 		return;
@@ -2646,10 +2656,11 @@ RelationRebuildRelation(Relation relation)
 		 */
 		Relation	newrel;
 		Oid			save_relid = RelationGetRelid(relation);
+		bool		is_index = RelationIsIndex(relation);
 		bool		keep_tupdesc;
-		bool		keep_rules;
-		bool		keep_policies;
-		bool		keep_partkey;
+		bool		keep_rules = false;
+		bool		keep_policies = false;
+		bool		keep_partkey = false;
 
 		/* Build temporary entry, but don't link it into hashtable */
 		newrel = RelationBuildDesc(save_relid, false);
@@ -2693,10 +2704,28 @@ RelationRebuildRelation(Relation relation)
 		Assert(relation->rd_rel->relkind == newrel->rd_rel->relkind);
 
 		keep_tupdesc = equalTupleDescs(relation->rd_att, newrel->rd_att);
-		keep_rules = equalRuleLocks(relation->rd_rules, newrel->rd_rules);
-		keep_policies = equalRSDesc(relation->rd_rsdesc, newrel->rd_rsdesc);
-		/* partkey is immutable once set up, so we can always keep it */
-		keep_partkey = (relation->rd_partkey != NULL);
+
+		if (!is_index)
+		{
+			keep_rules = equalRuleLocks(relation->rd_rules, newrel->rd_rules);
+			keep_policies = equalRSDesc(relation->rd_rsdesc, newrel->rd_rsdesc);
+			/* partkey is immutable once set up, so we can always keep it */
+			keep_partkey = (relation->rd_partinfo != NULL &&
+							relation->rd_partinfo->partkey != NULL);
+		}
+
+		/*
+		 * Ensure that the destination has storage for partition metadata
+		 * before starting the descriptor swap.  Nothing in the swap region
+		 * may fail, because relation is transiently inconsistent there.
+		 */
+		if (!is_index && newrel->rd_partinfo == NULL &&
+			(keep_partkey ||
+			 (relation->rd_partinfo != NULL &&
+			  (relation->rd_partinfo->pdcxt != NULL ||
+			   relation->rd_partinfo->pddcxt != NULL))))
+			newrel->rd_partinfo = MemoryContextAllocZero(CacheMemoryContext,
+														 sizeof(RelationPartitionInfo));
 
 		/*
 		 * Perform swapping of the relcache entry contents.  Within this
@@ -2739,71 +2768,88 @@ RelationRebuildRelation(Relation relation)
 		SWAPFIELD(Form_pg_class, rd_rel);
 		/* ... but actually, we don't have to update newrel->rd_rel */
 		memcpy(relation->rd_rel, newrel->rd_rel, CLASS_TUPLE_SIZE);
-		/* preserve old tupledesc, rules, policies if no logical change */
+		/* preserve old tupledesc if there was no logical change */
 		if (keep_tupdesc)
 			SWAPFIELD(TupleDesc, rd_att);
-		if (keep_rules)
-		{
-			SWAPFIELD(RuleLock *, rd_rules);
-			SWAPFIELD(MemoryContext, rd_rulescxt);
-		}
-		if (keep_policies)
-			SWAPFIELD(RowSecurityDesc *, rd_rsdesc);
-		/* toast OID override must be preserved */
-		SWAPFIELD(Oid, rd_toastoid);
 		/* pgstat_info / enabled must be preserved */
 		SWAPFIELD(struct PgStat_RelationStatus *, pgstat_info);
 		SWAPFIELD(bool, pgstat_enabled);
-		/* preserve old partition key if we have one */
-		if (keep_partkey)
+
+		if (!is_index)
 		{
-			SWAPFIELD(PartitionKey, rd_partkey);
-			SWAPFIELD(MemoryContext, rd_partkeycxt);
-		}
-		if (newrel->rd_pdcxt != NULL || newrel->rd_pddcxt != NULL)
-		{
+			/* preserve old rules and policies if there was no logical change */
+			if (keep_rules)
+			{
+				SWAPFIELD(RuleLock *, rd_rules);
+				SWAPFIELD(MemoryContext, rd_rulescxt);
+			}
+			if (keep_policies)
+				SWAPFIELD(RowSecurityDesc *, rd_rsdesc);
+
+			/* toast OID override must be preserved */
+			SWAPFIELD(Oid, rd_toastoid);
+
 			/*
-			 * We are rebuilding a partitioned relation with a non-zero
-			 * reference count, so we must keep the old partition descriptor
-			 * around, in case there's a PartitionDirectory with a pointer to
-			 * it.  This means we can't free the old rd_pdcxt yet.  (This is
-			 * necessary because RelationGetPartitionDesc hands out direct
-			 * pointers to the relcache's data structure, unlike our usual
-			 * practice which is to hand out copies.  We'd have the same
-			 * problem with rd_partkey, except that we always preserve that
-			 * once created.)
-			 *
-			 * To ensure that it's not leaked completely, re-attach it to the
-			 * new reldesc, or make it a child of the new reldesc's rd_pdcxt
-			 * in the unlikely event that there is one already.  (Compare hack
-			 * in RelationBuildPartitionDesc.)  RelationClose will clean up
-			 * any such contexts once the reference count reaches zero.
-			 *
-			 * In the case where the reference count is zero, this code is not
-			 * reached, which should be OK because in that case there should
-			 * be no PartitionDirectory with a pointer to the old entry.
-			 *
-			 * Note that newrel and relation have already been swapped, so the
-			 * "old" partition descriptor is actually the one hanging off of
-			 * newrel.
+			 * preserve old partition key if we have one; rd_partinfo as a whole
+			 * has already been swapped above along with the rest of the struct,
+			 * so at this point "relation" holds the freshly-built (usually NULL)
+			 * rd_partinfo and "newrel" holds the old one.
 			 */
-			relation->rd_partdesc = NULL;	/* ensure rd_partdesc is invalid */
-			relation->rd_partdesc_nodetached = NULL;
-			relation->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-			if (relation->rd_pdcxt != NULL) /* probably never happens */
-				MemoryContextSetParent(newrel->rd_pdcxt, relation->rd_pdcxt);
-			else
-				relation->rd_pdcxt = newrel->rd_pdcxt;
-			if (relation->rd_pddcxt != NULL)
-				MemoryContextSetParent(newrel->rd_pddcxt, relation->rd_pddcxt);
-			else
-				relation->rd_pddcxt = newrel->rd_pddcxt;
-			/* drop newrel's pointers so we don't destroy it below */
-			newrel->rd_partdesc = NULL;
-			newrel->rd_partdesc_nodetached = NULL;
-			newrel->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-			newrel->rd_pdcxt = NULL;
-			newrel->rd_pddcxt = NULL;
+			if (keep_partkey)
+			{
+				SWAPFIELD(PartitionKey, rd_partinfo->partkey);
+				SWAPFIELD(MemoryContext, rd_partinfo->partkeycxt);
+			}
+			if (newrel->rd_partinfo != NULL &&
+				(newrel->rd_partinfo->pdcxt != NULL || newrel->rd_partinfo->pddcxt != NULL))
+			{
+				RelationPartitionInfo *old_partinfo = newrel->rd_partinfo;
+				RelationPartitionInfo *partinfo = relation->rd_partinfo;
+
+				/*
+				 * We are rebuilding a partitioned relation with a non-zero
+				 * reference count, so we must keep the old partition descriptor
+				 * around, in case there's a PartitionDirectory with a pointer to
+				 * it.  This means we can't free the old pdcxt yet.  (This is
+				 * necessary because RelationGetPartitionDesc hands out direct
+				 * pointers to the relcache's data structure, unlike our usual
+				 * practice which is to hand out copies.  We'd have the same
+				 * problem with partkey, except that we always preserve that
+				 * once created.)
+				 *
+				 * To ensure that it's not leaked completely, re-attach it to the
+				 * new reldesc, or make it a child of the new reldesc's pdcxt
+				 * in the unlikely event that there is one already.  (Compare hack
+				 * in RelationBuildPartitionDesc.)  RelationClose will clean up
+				 * any such contexts once the reference count reaches zero.
+				 *
+				 * In the case where the reference count is zero, this code is not
+				 * reached, which should be OK because in that case there should
+				 * be no PartitionDirectory with a pointer to the old entry.
+				 *
+				 * Note that newrel and relation have already been swapped, so the
+				 * "old" partition descriptor is actually the one hanging off of
+				 * newrel.
+				 */
+				Assert(partinfo != NULL);
+				partinfo->partdesc = NULL;	/* ensure partdesc is invalid */
+				partinfo->partdesc_nodetached = NULL;
+				partinfo->partdesc_nodetached_xmin = InvalidTransactionId;
+				if (partinfo->pdcxt != NULL)	/* probably never happens */
+					MemoryContextSetParent(old_partinfo->pdcxt, partinfo->pdcxt);
+				else
+					partinfo->pdcxt = old_partinfo->pdcxt;
+				if (partinfo->pddcxt != NULL)
+					MemoryContextSetParent(old_partinfo->pddcxt, partinfo->pddcxt);
+				else
+					partinfo->pddcxt = old_partinfo->pddcxt;
+				/* drop newrel's pointers so we don't destroy it below */
+				old_partinfo->partdesc = NULL;
+				old_partinfo->partdesc_nodetached = NULL;
+				old_partinfo->partdesc_nodetached_xmin = InvalidTransactionId;
+				old_partinfo->pdcxt = NULL;
+				old_partinfo->pddcxt = NULL;
+			}
 		}
 
 #undef SWAPFIELD
@@ -3562,19 +3608,18 @@ RelationBuildLocalRelation(const char *relname,
 
 	/* Shared relations had better be mapped, too */
 	Assert(mapped_relation || !shared_relation);
+	Assert(CacheMemoryContext != NULL);
 
 	/*
 	 * switch to the cache context to create the relcache entry.
 	 */
-	if (!CacheMemoryContext)
-		CreateCacheMemoryContext();
-
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	/*
-	 * allocate a new relation descriptor and fill in basic state fields.
+	 * allocate a new relation descriptor and fill in basic state fields; the
+	 * RelationData struct itself goes into RelationSlabContext
 	 */
-	rel = palloc0_object(RelationData);
+	rel = AllocRelationData();
 
 	/* make sure relation is marked as having no open file yet */
 	rel->rd_smgr = NULL;
@@ -3700,8 +3745,6 @@ RelationBuildLocalRelation(const char *relname,
 	}
 	else
 		rel->rd_rel->relfilenode = relfilenumber;
-
-	RelationInitLockInfo(rel);	/* see lmgr.c */
 
 	RelationInitPhysicalAddr(rel);
 
@@ -4006,6 +4049,14 @@ RelationCacheInitialize(void)
 	 */
 	if (!CacheMemoryContext)
 		CreateCacheMemoryContext();
+
+	/*
+	 * create the slab context holding the relcache's RelationData structs
+	 */
+	RelationSlabContext = SlabContextCreate(CacheMemoryContext,
+											"RelationSlabContext",
+											SLAB_DEFAULT_BLOCK_SIZE,
+											sizeof(RelationData));
 
 	/*
 	 * create hashtable that indexes the relcache
@@ -4346,8 +4397,8 @@ RelationCacheInitializePhase3(void)
 		}
 
 		/* Reload tableam data if needed */
-		if (relation->rd_tableam == NULL &&
-			(RELKIND_HAS_TABLE_AM(relation->rd_rel->relkind) || relation->rd_rel->relkind == RELKIND_SEQUENCE))
+		if ((RELKIND_HAS_TABLE_AM(relation->rd_rel->relkind) || relation->rd_rel->relkind == RELKIND_SEQUENCE) &&
+			relation->rd_tableam == NULL)
 		{
 			RelationInitTableAccessMethod(relation);
 			Assert(relation->rd_tableam != NULL);
@@ -5145,6 +5196,9 @@ RelationGetIndexExpressions(Relation relation)
 	char	   *exprsString;
 	MemoryContext oldcxt;
 
+	if (!RelationIsIndex(relation))
+		return NIL;
+
 	/* Quick exit if we already computed the result. */
 	if (relation->rd_indexprs)
 		return copyObject(relation->rd_indexprs);
@@ -5205,6 +5259,9 @@ RelationGetDummyIndexExpressions(Relation relation)
 	List	   *rawExprs;
 	ListCell   *lc;
 
+	if (!RelationIsIndex(relation))
+		return NIL;
+
 	/* Quick exit if there is nothing to do. */
 	if (relation->rd_indextuple == NULL ||
 		heap_attisnull(relation->rd_indextuple, Anum_pg_index_indexprs, NULL))
@@ -5257,6 +5314,9 @@ RelationGetIndexPredicate(Relation relation)
 	bool		isnull;
 	char	   *predString;
 	MemoryContext oldcxt;
+
+	if (!RelationIsIndex(relation))
+		return NIL;
 
 	/* Quick exit if we already computed the result. */
 	if (relation->rd_indpred)
@@ -6306,7 +6366,7 @@ load_relcache_init_file(bool shared)
 			rels = repalloc_array(rels, Relation, max_rels);
 		}
 
-		rel = rels[num_rels++] = (Relation) palloc(len);
+		rel = rels[num_rels++] = AllocRelationData();
 
 		/* then, read the Relation structure */
 		if (fread(rel, 1, len, fp) != len)
@@ -6503,18 +6563,6 @@ load_relcache_init_file(bool shared)
 			/* Load table AM data */
 			if (RELKIND_HAS_TABLE_AM(rel->rd_rel->relkind) || rel->rd_rel->relkind == RELKIND_SEQUENCE)
 				RelationInitTableAccessMethod(rel);
-
-			Assert(rel->rd_index == NULL);
-			Assert(rel->rd_indextuple == NULL);
-			Assert(rel->rd_indexcxt == NULL);
-			Assert(rel->rd_indam == NULL);
-			Assert(rel->rd_opfamily == NULL);
-			Assert(rel->rd_opcintype == NULL);
-			Assert(rel->rd_support == NULL);
-			Assert(rel->rd_supportinfo == NULL);
-			Assert(rel->rd_indoption == NULL);
-			Assert(rel->rd_indcollation == NULL);
-			Assert(rel->rd_opcoptions == NULL);
 		}
 
 		/*
@@ -6524,63 +6572,67 @@ load_relcache_init_file(bool shared)
 		 * be a big performance hit since few system catalogs have such. Ditto
 		 * for RLS policy data, partition info, index expressions, predicates,
 		 * exclusion info, and FDW info.
+		 *
+		 * These fields are overlaid in a union with the index-only fields
+		 * that were just set up above (see RelationData in rel_internal.h),
+		 * so this must be skipped for index relations to avoid clobbering
+		 * that data.
 		 */
-		rel->rd_rules = NULL;
-		rel->rd_rulescxt = NULL;
-		rel->trigdesc = NULL;
-		rel->rd_rsdesc = NULL;
-		rel->rd_partkey = NULL;
-		rel->rd_partkeycxt = NULL;
-		rel->rd_partdesc = NULL;
-		rel->rd_partdesc_nodetached = NULL;
-		rel->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-		rel->rd_pdcxt = NULL;
-		rel->rd_pddcxt = NULL;
-		rel->rd_partcheck = NIL;
-		rel->rd_partcheckvalid = false;
-		rel->rd_partcheckcxt = NULL;
-		rel->rd_indexprs = NIL;
-		rel->rd_indpred = NIL;
-		rel->rd_exclops = NULL;
-		rel->rd_exclprocs = NULL;
-		rel->rd_exclstrats = NULL;
-		rel->rd_fdwroutine = NULL;
+		if (!RelationIsIndex(rel))
+		{
+			rel->rd_rules = NULL;
+			rel->rd_rulescxt = NULL;
+			rel->trigdesc = NULL;
+			rel->rd_rsdesc = NULL;
+			rel->rd_keyattr = NULL;
+			rel->rd_pkattr = NULL;
+			rel->rd_idattr = NULL;
+			rel->rd_hotblockingattr = NULL;
+			rel->rd_summarizedattr = NULL;
+			rel->rd_pubdesc = NULL;
+			rel->rd_fdwroutine = NULL;
+			rel->rd_fkeyvalid = false;
+			rel->rd_fkeylist = NIL;
+			rel->rd_indexvalid = false;
+			rel->rd_indexlist = NIL;
+			rel->rd_pkindex = InvalidOid;
+			rel->rd_replidindex = InvalidOid;
+			rel->rd_attrsvalid = false;
+			rel->rd_statvalid = false;
+			rel->rd_statlist = NIL;
+			rel->rd_toastchunkidtype = InvalidOid;
+		}
+		else
+		{
+			/* These lazily built fields are not stored in the init file. */
+			rel->rd_indexprs = NIL;
+			rel->rd_indpred = NIL;
+			rel->rd_exclops = NULL;
+			rel->rd_exclprocs = NULL;
+			rel->rd_exclstrats = NULL;
+		}
 
 		/*
 		 * Reset transient-state fields in the relcache entry
 		 */
 		rel->rd_smgr = NULL;
+		rel->rd_partinfo = NULL;
 		if (rel->rd_isnailed)
 			rel->rd_refcnt = 1;
 		else
 			rel->rd_refcnt = 0;
-		rel->rd_indexvalid = false;
-		rel->rd_indexlist = NIL;
-		rel->rd_pkindex = InvalidOid;
-		rel->rd_replidindex = InvalidOid;
-		rel->rd_attrsvalid = false;
-		rel->rd_keyattr = NULL;
-		rel->rd_pkattr = NULL;
-		rel->rd_idattr = NULL;
-		rel->rd_pubdesc = NULL;
-		rel->rd_statvalid = false;
-		rel->rd_statlist = NIL;
-		rel->rd_fkeyvalid = false;
-		rel->rd_fkeylist = NIL;
 		rel->rd_createSubid = InvalidSubTransactionId;
 		rel->rd_newRelfilelocatorSubid = InvalidSubTransactionId;
 		rel->rd_firstRelfilelocatorSubid = InvalidSubTransactionId;
 		rel->rd_droppedSubid = InvalidSubTransactionId;
 		rel->rd_amcache = NULL;
-		rel->rd_toastchunkidtype = InvalidOid;
 		rel->pgstat_info = NULL;
 
 		/*
-		 * Recompute lock and physical addressing info.  This is needed in
-		 * case the pg_internal.init file was copied from some other database
-		 * by CREATE DATABASE.
+		 * Recompute physical addressing info.  This is needed in case the
+		 * pg_internal.init file was copied from some other database by
+		 * CREATE DATABASE.
 		 */
-		RelationInitLockInfo(rel);
 		RelationInitPhysicalAddr(rel);
 	}
 

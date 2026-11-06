@@ -790,7 +790,7 @@ check_index_is_clusterable(Relation OldHeap, Oid indexOid, LOCKMODE lockmode)
 	/*
 	 * Check that index is in fact an index on the given relation
 	 */
-	if (OldIndex->rd_index == NULL ||
+	if (!RelationIsIndex(OldIndex) ||
 		OldIndex->rd_index->indrelid != RelationGetRelid(OldHeap))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),

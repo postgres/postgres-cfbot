@@ -2205,7 +2205,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 	 * because the lock manager knows that both lock requests are from the
 	 * same process.
 	 */
-	lockrelid = rel->rd_lockInfo.lockRelId;
+	lockrelid = RelationGetLockRelId(rel);
 	LockRelationIdForSession(&lockrelid, lmode);
 
 	/*
