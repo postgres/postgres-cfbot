@@ -13,7 +13,9 @@
 #ifndef _PAGEINSPECT_H_
 #define _PAGEINSPECT_H_
 
+#include "common/relpath.h"
 #include "storage/bufpage.h"
+#include "utils/relcache.h"
 
 /*
  * Extension version number, for supporting older extension versions' objects
@@ -26,5 +28,6 @@ enum pageinspect_version
 
 /* in rawpage.c */
 extern Page get_page_from_raw(bytea *raw_page);
+extern void check_relation_accessible(Relation rel, ForkNumber forknum);
 
 #endif							/* _PAGEINSPECT_H_ */
