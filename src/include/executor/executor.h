@@ -751,11 +751,21 @@ extern Bitmapset *ExecGetAllUpdatedCols(ResultRelInfo *relinfo, EState *estate);
  */
 extern void ExecOpenIndices(ResultRelInfo *resultRelInfo, bool speculative);
 extern void ExecCloseIndices(ResultRelInfo *resultRelInfo);
+extern void ExecSetIndexUnchanged(ResultRelInfo *resultRelInfo,
+								  const Bitmapset *modified_idx_attrs,
+								  bool row_moved);
 
 /* flags for ExecInsertIndexTuples */
 #define		EIIT_IS_UPDATE			(1<<0)
 #define		EIIT_NO_DUPE_ERROR		(1<<1)
-#define		EIIT_ONLY_SUMMARIZING	(1<<2)
+/*
+ * EIIT_PARTIAL_UPDATE: only a subset of the row's index entries is being
+ * refreshed by this UPDATE.  The row did not move, so indexes whose referenced
+ * attributes did not change keep their existing entries, and the entries
+ * inserted here share their row locator with pre-existing entries whose keys
+ * may be stale.
+ */
+#define		EIIT_PARTIAL_UPDATE		(1<<2)
 extern List *ExecInsertIndexTuples(ResultRelInfo *resultRelInfo, EState *estate,
 								   uint32 flags, TupleTableSlot *slot,
 								   List *arbiterIndexes,
@@ -817,5 +827,8 @@ extern ResultRelInfo *ExecLookupResultRelByOid(ModifyTableState *node,
 											   Oid resultoid,
 											   bool missing_ok,
 											   bool update_cache);
+extern Bitmapset *ExecUpdateModifiedIdxAttrs(ResultRelInfo *relinfo,
+											 TupleTableSlot *old_tts,
+											 TupleTableSlot *new_tts);
 
 #endif							/* EXECUTOR_H  */

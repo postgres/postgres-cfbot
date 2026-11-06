@@ -62,6 +62,7 @@ ginhandler(PG_FUNCTION_ARGS)
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = true,
 		.amsummarizing = false,
+		.amcanvarlocator = false,
 		.amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP,
 		.amkeytype = InvalidOid,
