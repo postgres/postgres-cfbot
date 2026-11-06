@@ -72,6 +72,7 @@ typedef struct
 	Node	   *case_val;
 	bool		estimate;
 	ErrorSaveContext *escontext;
+	bool		no_eval;		/* simplify, but never evaluate */
 } eval_const_expressions_context;
 
 typedef struct
@@ -2697,6 +2698,7 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	context.case_val = NULL;	/* no CASE being examined */
 	context.estimate = false;	/* safe transformations only */
 	context.escontext = NULL;	/* for error-safe expression evaluation */
+	context.no_eval = false;	/* evaluate constant subexpressions */
 	return eval_const_expressions_mutator(node, &context);
 }
 
@@ -2840,6 +2842,7 @@ estimate_expression_value(PlannerInfo *root, Node *node)
 	context.case_val = NULL;	/* no CASE being examined */
 	context.estimate = true;	/* unsafe transformations OK */
 	context.escontext = NULL;	/* for error-safe expression evaluation */
+	context.no_eval = false;	/* evaluate constant subexpressions */
 	return eval_const_expressions_mutator(node, &context);
 }
 
@@ -2864,13 +2867,17 @@ estimate_expression_value(PlannerInfo *root, Node *node)
 #define ece_all_arguments_const(node) \
 	(!expression_tree_walker((Node *) (node), contain_non_const_walker, NULL))
 
-/* Generic macro for applying evaluate_expr */
-#define ece_evaluate_expr(node, escontext) \
-	((Node *) evaluate_expr((Expr *) (node), \
+/*
+ * Generic macro for applying evaluate_expr, unless the context forbids any
+ * evaluation, in which case the node is returned as it is.
+ */
+#define ece_evaluate_expr(node, context) \
+	((context)->no_eval ? (Node *) (node) : \
+	 (Node *) evaluate_expr((Expr *) (node), \
 							exprType((Node *) (node)), \
 							exprTypmod((Node *) (node)), \
 							exprCollation((Node *) (node)), \
-							(Node *) escontext))
+							(Node *) (context)->escontext))
 
 /*
  * Recursive guts of eval_const_expressions/estimate_expression_value
@@ -3341,7 +3348,7 @@ eval_const_expressions_mutator(Node *node,
 
 				if (!has_nonconst_input &&
 					ece_function_is_safe(expr->opfuncid, context))
-					return ece_evaluate_expr(expr, context->escontext);
+					return ece_evaluate_expr(expr, context);
 
 				return (Node *) expr;
 			}
@@ -3361,7 +3368,7 @@ eval_const_expressions_mutator(Node *node,
 				 */
 				if (ece_all_arguments_const(saop) &&
 					ece_function_is_safe(saop->opfuncid, context))
-					return ece_evaluate_expr(saop, context->escontext);
+					return ece_evaluate_expr(saop, context);
 				return (Node *) saop;
 			}
 		case T_BoolExpr:
@@ -3524,14 +3531,18 @@ eval_const_expressions_mutator(Node *node,
 				Node	   *defexpr;
 				ErrorSaveContext *save_escontext = context->escontext;
 				Node	   *save_case_val = context->case_val;
+				bool		save_no_eval = context->no_eval;
 				ErrorSaveContext *escontext = makeNode(ErrorSaveContext);
 
-				if (stc->castexpr == NULL)
-					return eval_const_expressions_mutator((Node *) stc->defexpr,
-														  context);
-
+				/*
+				 * The DEFAULT is evaluated only if the conversion fails, so
+				 * simplify it without evaluating anything: it might raise an
+				 * error that must not occur when the conversion succeeds.
+				 */
+				context->no_eval = true;
 				defexpr = eval_const_expressions_mutator((Node *) stc->defexpr,
 														 context);
+				context->no_eval = save_no_eval;
 
 				/*
 				 * arg is normally evaluated under the caller's context.  If
@@ -3544,11 +3555,36 @@ eval_const_expressions_mutator(Node *node,
 				context->escontext = save_escontext;
 
 				/*
-				 * A SafeCastElement failed to convert its constant element,
-				 * so the conversion is known to fail: the result is defexpr.
+				 * If there is no conversion at all, or a SafeCastElement
+				 * failed to convert its constant element, the conversion is
+				 * known to fail and the result is defexpr.  But arg must
+				 * still be evaluated for its own errors, so we can discard it
+				 * only if it is a constant, which cannot fail.  Otherwise
+				 * keep it, with no conversion, and let the executor evaluate
+				 * it before returning defexpr.
 				 */
-				if (escontext->error_occurred)
-					return defexpr;
+				if (stc->castexpr == NULL || escontext->error_occurred)
+				{
+					/*
+					 * The DEFAULT is now certain to be evaluated, so it can
+					 * be simplified in the ordinary way.
+					 */
+					if (IsA(arg, Const))
+						return eval_const_expressions_mutator((Node *) stc->defexpr,
+															  context);
+
+					newexpr = makeNode(SafeTypeCastExpr);
+					newexpr->arg = (Expr *) arg;
+					newexpr->arg_errorsafe = stc->arg_errorsafe;
+					newexpr->castexpr = NULL;
+					newexpr->defexpr = (Expr *) defexpr;
+					newexpr->resulttype = stc->resulttype;
+					newexpr->resulttypmod = stc->resulttypmod;
+					newexpr->resultcollid = stc->resultcollid;
+					newexpr->location = stc->location;
+
+					return (Node *) newexpr;
+				}
 
 				/* only the conversion itself is evaluated error-safe */
 				context->escontext = escontext;
@@ -3563,7 +3599,8 @@ eval_const_expressions_mutator(Node *node,
 				 * same way at runtime.
 				 */
 				if (escontext->error_occurred)
-					return defexpr;
+					return eval_const_expressions_mutator((Node *) stc->defexpr,
+														  context);
 				if (IsA(castexpr, Const))
 					return castexpr;
 
@@ -3586,21 +3623,6 @@ eval_const_expressions_mutator(Node *node,
 				ErrorSaveContext *save_escontext = context->escontext;
 				Node	   *save_case_val = context->case_val;
 
-				/*
-				 * Once an element has failed, the enclosing SafeTypeCastExpr
-				 * returns its DEFAULT and discards the array, so the
-				 * remaining elements need not be processed.
-				 */
-				if (SOFT_ERROR_OCCURRED(save_escontext))
-					return node;
-
-				/*
-				 * An element without a conversion makes the whole cast fail
-				 * at parse time, and the SafeTypeCastExpr case then never
-				 * gets here.
-				 */
-				Assert(elem->castexpr != NULL);
-
 				newelem = makeNode(SafeCastElement);
 				memcpy(newelem, elem, sizeof(SafeCastElement));
 
@@ -3609,6 +3631,14 @@ eval_const_expressions_mutator(Node *node,
 				newelem->arg = (Expr *)
 					eval_const_expressions_mutator((Node *) elem->arg, context);
 				context->escontext = save_escontext;
+
+				/*
+				 * An element without a conversion makes the enclosing cast
+				 * return its DEFAULT, but the element itself must still be
+				 * evaluated for its own errors.
+				 */
+				if (elem->castexpr == NULL)
+					return (Node *) newelem;
 
 				/* its conversion reports into the enclosing cast's context */
 				context->case_val = IsA(newelem->arg, Const) ?
@@ -3773,7 +3803,7 @@ eval_const_expressions_mutator(Node *node,
 				if (ac->arg && IsA(ac->arg, Const) &&
 					ac->elemexpr && !IsA(ac->elemexpr, CoerceToDomain) &&
 					!contain_mutable_functions((Node *) ac->elemexpr))
-					return ece_evaluate_expr(ac, context->escontext);
+					return ece_evaluate_expr(ac, context);
 
 				return (Node *) ac;
 			}
@@ -3976,7 +4006,7 @@ eval_const_expressions_mutator(Node *node,
 				node = ece_generic_processing(node);
 				/* If all arguments are Consts, we can fold to a constant */
 				if (ece_all_arguments_const(node))
-					return ece_evaluate_expr(node, context->escontext);
+					return ece_evaluate_expr(node, context);
 				return node;
 			}
 		case T_CoalesceExpr:
@@ -4076,7 +4106,7 @@ eval_const_expressions_mutator(Node *node,
 				if ((context->estimate ||
 					 xmlexpr_is_immutable((XmlExpr *) node)) &&
 					ece_all_arguments_const(node))
-					return ece_evaluate_expr(node, context->escontext);
+					return ece_evaluate_expr(node, context);
 				return node;
 			}
 		case T_FieldSelect:
@@ -4172,7 +4202,7 @@ eval_const_expressions_mutator(Node *node,
 											  newfselect->resulttype,
 											  newfselect->resulttypmod,
 											  newfselect->resultcollid))
-						return ece_evaluate_expr(newfselect, context->escontext);
+						return ece_evaluate_expr(newfselect, context);
 				}
 				return (Node *) newfselect;
 			}
@@ -4510,7 +4540,7 @@ eval_const_expressions_mutator(Node *node,
 				newcre->arg = (Expr *) arg;
 
 				if (arg != NULL && IsA(arg, Const))
-					return ece_evaluate_expr((Node *) newcre, context->escontext);
+					return ece_evaluate_expr((Node *) newcre, context);
 				return (Node *) newcre;
 			}
 		default:
@@ -5621,6 +5651,10 @@ evaluate_function(Oid funcid, Oid result_type, int32 result_typmod,
 	else if (context->estimate && funcform->provolatile == PROVOLATILE_STABLE)
 		 /* okay */ ;
 	else
+		return NULL;
+
+	/* If we may not evaluate anything, we can't simplify it either */
+	if (context->no_eval)
 		return NULL;
 
 	/*
