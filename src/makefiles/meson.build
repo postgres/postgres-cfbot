@@ -80,6 +80,8 @@ pgxs_kv = {
   'perl_includespec': perl_includespec,
   'python_includespec': python_includespec,
 
+  'ICU_CFLAGS': ' '.join(pgxs_dep_cflags['icu']),
+
   # these seem to be standard these days
   'MKDIR_P': 'mkdir -p',
   'LN_S': 'ln -s',
@@ -158,8 +160,6 @@ pgxs_bins = {
 }
 
 pgxs_empty = [
-  'ICU_CFLAGS', # needs to be added, included by public server headers
-
   # hard to see why we'd need these ones?
   'ZIC',
   'TCLSH',
