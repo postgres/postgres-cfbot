@@ -398,12 +398,12 @@ pg_datum_image_equal(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		Oid		typ;
-		Datum	arg0;
-		Datum	arg1;
-		bool	typbyval;
-		char	typalign;
-		int16	typlen;
+		Oid			typ;
+		Datum		arg0;
+		Datum		arg1;
+		bool		typbyval;
+		char		typalign;
+		int16		typlen;
 
 		typ = get_fn_expr_argtype(fcinfo->flinfo, 0);
 
