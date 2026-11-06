@@ -17,6 +17,7 @@
 #include "access/commit_ts.h"
 #include "access/subtrans.h"
 #include "access/transam.h"
+#include "access/varsup.h"
 #include "access/xact.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
