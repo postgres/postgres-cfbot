@@ -106,6 +106,13 @@
    Values are stored internally as 64-bit floating point numbers. This means
    that numbers with more than about 16 significant digits will be truncated.
   </para>
+
+   <para>
+    As with <type>double precision</type>, <literal>NaN</literal> coordinates
+    compare equal to one another and greater than all non-<literal>NaN</literal>
+    values.  Distance calculations return <literal>NaN</literal> if either cube
+    has a <literal>NaN</literal> coordinate.
+   </para>
  </sect2>
 
  <sect2 id="cube-usage">
