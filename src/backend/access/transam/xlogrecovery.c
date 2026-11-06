@@ -3867,6 +3867,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					{
 						XLogRecPtr	ptr;
 						TimeLineID	tli;
+						XLogSegNo	startSegNo;
 
 						if (fetching_ckpt)
 						{
@@ -3875,7 +3876,19 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						}
 						else
 						{
-							ptr = RecPtr;
+							/*
+							 * RecPtr is the end of the WAL we need, so start
+							 * streaming at the beginning of the segment that
+							 * holds its last byte.  If RecPtr is exactly on a
+							 * segment boundary, as it is when we need the end
+							 * of the last page of a segment, the segment
+							 * holding RecPtr itself is the next one, and we
+							 * would never fetch the end of the segment we are
+							 * reading.
+							 */
+							XLByteToPrevSeg(RecPtr, startSegNo, wal_segment_size);
+							XLogSegNoOffsetToRecPtr(startSegNo, 0, wal_segment_size,
+													ptr);
 
 							/*
 							 * Use the record begin position to determine the
