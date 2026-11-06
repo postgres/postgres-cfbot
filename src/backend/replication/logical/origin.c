@@ -266,6 +266,60 @@ replorigin_by_name(const char *roname, bool missing_ok)
 }
 
 /*
+ * replorigin_create_with_id
+ *
+ * Insert a replication origin with the given ID and name into
+ * pg_replication_origin. The caller is responsible for ensuring that the ID
+ * is not already in use and that the name is valid.
+ *
+ * If need_advance is true, the origin's progress is also set to remote_lsn,
+ * which creates its entry in the shared progress tracking state. This is
+ * allowed only in binary upgrade mode.
+ *
+ * rel must be pg_replication_origin, already opened by the caller with
+ * ExclusiveLock. Needs to be called in a transaction.
+ */
+void
+replorigin_create_with_id(ReplOriginId roident, const char *roname,
+						  XLogRecPtr remote_lsn, bool need_advance,
+						  Relation rel)
+{
+	Datum		roname_d;
+	bool		nulls[Natts_pg_replication_origin];
+	Datum		values[Natts_pg_replication_origin];
+	HeapTuple	tuple;
+
+	Assert(IsTransactionState());
+	Assert(CheckRelationLockedByMe(rel, ExclusiveLock, false));
+
+	roname_d = CStringGetTextDatum(roname);
+
+	memset(&nulls, 0, sizeof(nulls));
+	memset(&values, 0, sizeof(values));
+
+	values[Anum_pg_replication_origin_roident - 1] = ObjectIdGetDatum(roident);
+	values[Anum_pg_replication_origin_roname - 1] = roname_d;
+
+	tuple = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+	CatalogTupleInsert(rel, tuple);
+	heap_freetuple(tuple);
+	CommandCounterIncrement();
+
+	/*
+	 * If requested, set up the origin's progress tracking state with the
+	 * given remote_lsn. need_advance is separate from remote_lsn because an
+	 * InvalidXLogRecPtr remote_lsn is a legitimate value to restore.
+	 */
+	if (need_advance)
+	{
+		Assert(IsBinaryUpgrade);
+		replorigin_advance(roident, remote_lsn, InvalidXLogRecPtr,
+						   false /* backward */ ,
+						   false /* WAL log */ );
+	}
+}
+
+/*
  * Create a replication origin.
  *
  * Needs to be called in a transaction.
@@ -274,9 +328,7 @@ ReplOriginId
 replorigin_create(const char *roname)
 {
 	Oid			roident;
-	HeapTuple	tuple = NULL;
 	Relation	rel;
-	Datum		roname_d;
 	SnapshotData SnapshotDirty;
 	SysScanDesc scan;
 	ScanKeyData key;
@@ -292,8 +344,6 @@ replorigin_create(const char *roname)
 				 errmsg("replication origin name is too long"),
 				 errdetail("Replication origin names must be no longer than %d bytes.",
 						   MAX_RONAME_LEN)));
-
-	roname_d = CStringGetTextDatum(roname);
 
 	Assert(IsTransactionState());
 
@@ -329,8 +379,6 @@ replorigin_create(const char *roname)
 
 	for (roident = InvalidOid + 1; roident < PG_UINT16_MAX; roident++)
 	{
-		bool		nulls[Natts_pg_replication_origin];
-		Datum		values[Natts_pg_replication_origin];
 		bool		collides;
 
 		CHECK_FOR_INTERRUPTS();
@@ -344,38 +392,22 @@ replorigin_create(const char *roname)
 								  true /* indexOK */ ,
 								  &SnapshotDirty,
 								  1, &key);
-
 		collides = HeapTupleIsValid(systable_getnext(scan));
-
 		systable_endscan(scan);
 
 		if (!collides)
-		{
-			/*
-			 * Ok, found an unused roident, insert the new row and do a CCI,
-			 * so our callers can look it up if they want to.
-			 */
-			memset(&nulls, 0, sizeof(nulls));
-
-			values[Anum_pg_replication_origin_roident - 1] = ObjectIdGetDatum(roident);
-			values[Anum_pg_replication_origin_roname - 1] = roname_d;
-
-			tuple = heap_form_tuple(RelationGetDescr(rel), values, nulls);
-			CatalogTupleInsert(rel, tuple);
-			CommandCounterIncrement();
 			break;
-		}
 	}
 
-	/* now release lock again,	*/
-	table_close(rel, ExclusiveLock);
-
-	if (tuple == NULL)
+	if (roident >= PG_UINT16_MAX)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("could not find free replication origin ID")));
 
-	heap_freetuple(tuple);
+	replorigin_create_with_id(roident, roname, InvalidXLogRecPtr, false, rel);
+
+	table_close(rel, ExclusiveLock);
+
 	return roident;
 }
 
