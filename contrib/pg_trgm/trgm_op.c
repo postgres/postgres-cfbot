@@ -272,8 +272,8 @@ radix_key(char x, bool char_is_signed)
 	return char_is_signed ? x ^ 0x80 : x;
 }
 
-static inline size_t
-trigram_radix_sort_and_unique(trgm *trg, size_t count, bool char_is_signed)
+static inline void
+trigram_radix_sort_recurse(trgm *trg, size_t count, int base, bool char_is_signed)
 {
 	if (count < 64)
 	{
@@ -292,55 +292,50 @@ trigram_radix_sort_and_unique(trgm *trg, size_t count, bool char_is_signed)
 
 			memcpy(trg[j], &tmp, sizeof(trgm));
 		}
-
-		return qunique(trg, count, sizeof(trgm), CMPTRGM_EQ);
 	}
 	else
 	{
-		trgm *buffer = palloc_array(trgm, count);
-		trgm *starts[256];
-		trgm *from = trg;
-		trgm *to = buffer;
-		uint32_t freqs[3][256];
+		uint32_t freqs[256];
+		uint32_t starts[256];
+		uint32_t cur[256];
 
-		/*
-		* Compute frequencies to partition the buffer.
-		*/
 		memset(freqs, 0, sizeof(freqs));
+		for (size_t i = 0; i < count; i++)
+			freqs[radix_key(trg[i][base], char_is_signed)]++;
 
-		for (size_t j = 0; j < count; j++)
+		starts[0] = 0;
+		for (int k = 1; k < 256; k++)
+			starts[k] = starts[k - 1] + freqs[k - 1];
+
+		memcpy(cur, starts, sizeof(cur));
+
+		for (size_t i = 0; i < count; i++)
 		{
-			freqs[0][radix_key(trg[j][0], char_is_signed)]++;
-			freqs[1][radix_key(trg[j][1], char_is_signed)]++;
-			freqs[2][radix_key(trg[j][2], char_is_signed)]++;
-		}
+			unsigned char b = radix_key(trg[i][base], char_is_signed);
 
-		/*
-		* Do the sorting. Start with last character because that's the "LSB"
-		* in a trigram. Avoid unnecessary copies by ping-ponging between the buffers.
-		*/
-		for (int i = 2; i >= 0; i--)
-		{
-			trgm *old_from = from;
-			trgm *next = to;
-
-			for (size_t j = 0; j < 256; j++)
+			while (i < starts[b] || i >= starts[b] + freqs[b])
 			{
-				starts[j] = next;
-				next += freqs[i][j];
+				const char c = trg[i][base];
+				size_t j = cur[b];
+				trgm tmp;
+
+				while (trg[j][base] == c)
+					j++;
+
+				Assert(j < starts[b] + freqs[b]);
+
+				memcpy(tmp, trg[i], sizeof(trgm));
+				memcpy(trg[i], trg[j], sizeof(trgm));
+				memcpy(trg[j], tmp, sizeof(trgm));
+
+				cur[b] = j + 1;
+				b = radix_key(trg[i][base], char_is_signed);
 			}
-
-			for (size_t j = 0; j < count; j++)
-				memcpy(starts[radix_key(from[j][i], char_is_signed)]++, from[j], sizeof(trgm));
-
-			from = to;
-			to = old_from;
 		}
 
-		count = qunique(buffer, count, sizeof(trgm), CMPTRGM_EQ);
-		memcpy(trg, buffer, sizeof(trgm) * count);
-		pfree(buffer);
-		return count;
+		for (int k = 0; k < 256; k++)
+			if (freqs[k] > 1 && base < 2)
+				trigram_radix_sort_recurse(trg + starts[k], freqs[k], base + 1, char_is_signed);
 	}
 }
 
@@ -348,9 +343,11 @@ static size_t
 trigram_sort_and_unique(trgm *array, size_t n)
 {
 	if (GetDefaultCharSignedness())
-		return trigram_radix_sort_and_unique(array, n, true);
+		trigram_radix_sort_recurse(array, n, 0, true);
 	else
-		return trigram_radix_sort_and_unique(array, n, false);
+		trigram_radix_sort_recurse(array, n, 0, false);
+
+	return qunique(array, n, sizeof(trgm), CMPTRGM_EQ);
 }
 
 /*
