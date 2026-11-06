@@ -218,6 +218,13 @@ PgStat_LocalState pgStatLocal;
  */
 bool		pgstat_report_fixed = false;
 
+/*
+ * Does a kind use release_refs_after_flush?  If not, releasing references
+ * is skipped entirely.  Set by pgstat_register_kind(), so only custom kinds
+ * can use the option for now.
+ */
+bool		pgstat_have_release_refs_kinds = false;
+
 /* ----------
  * Local data
  *
@@ -784,10 +791,21 @@ pgstat_report_stat(bool force)
 		pgStatForceNextFlush = false;
 	}
 
+	/*
+	 * Release the references to the entries created since stats were last
+	 * reported outside a transaction, as they may be dropped before the next
+	 * flush.  Not once stats are shut down, as this flushes their statistics.
+	 */
+	if (!IsTransactionOrTransactionBlock() && !pgStatLocal.shmem->is_shutdown)
+		pgstat_release_created_entry_refs();
+
 	/* Don't expend a clock check if nothing to do */
 	if (dlist_is_empty(&pgStatPending) &&
 		!pgstat_report_fixed)
 	{
+		/* No flush will release the references without pending statistics */
+		if (!IsTransactionOrTransactionBlock())
+			pgstat_release_flushed_entry_refs();
 		return 0;
 	}
 
@@ -845,6 +863,13 @@ pgstat_report_stat(bool force)
 	{
 		/* flush of variable-numbered stats tracked in pending entries list */
 		partial_flush |= pgstat_flush_pending_entries(nowait);
+
+		/*
+		 * Release the other references of kinds that must not outlive the
+		 * flush, now that their pending statistics are flushed.
+		 */
+		if (!IsTransactionOrTransactionBlock())
+			pgstat_release_flushed_entry_refs();
 
 		/* flush of other stats kinds */
 		if (pgstat_report_fixed)
@@ -1431,6 +1456,77 @@ pgstat_delete_pending_entry(PgStat_EntryRef *entry_ref)
 }
 
 /*
+ * Flush the pending statistics of an entry, if possible.  The caller resets
+ * pgStatCurrentFlushEntry if this errors out.
+ */
+static PgStat_FlushResult
+pgstat_flush_entry_ref(PgStat_EntryRef *entry_ref, bool nowait,
+					   bool xact_boundary)
+{
+	const PgStat_KindInfo *kind_info =
+		pgstat_get_kind_info(entry_ref->shared_entry->key.kind);
+	PgStat_FlushResult result;
+
+	Assert(!kind_info->fixed_amount);
+	Assert(kind_info->flush_pending_cb != NULL);
+
+	pgStatCurrentFlushEntry = entry_ref;
+	result = kind_info->flush_pending_cb(entry_ref, nowait, xact_boundary);
+	pgStatCurrentFlushEntry = NULL;
+
+	/*
+	 * A lock conflict can only happen when we allowed the callback to give up
+	 * without waiting for a lock, and a partial flush can only happen inside
+	 * a transaction.
+	 */
+	Assert(result == PGSTAT_FLUSH_DONE ||
+		   (result == PGSTAT_FLUSH_LOCK_CONFLICT && nowait) ||
+		   (result == PGSTAT_FLUSH_PARTIAL && !xact_boundary));
+
+	/*
+	 * Mark the entry visited, unless we could not flush it at all. If a later
+	 * callback adds more data to this entry in the same pass,
+	 * pgstat_prep_pending_from_entry_ref() then re-queues it to the tail so
+	 * the new data is flushed again before the pass ends.
+	 */
+	if (result != PGSTAT_FLUSH_LOCK_CONFLICT)
+		entry_ref->flushed_generation = pgStatFlushGeneration;
+
+	return result;
+}
+
+/*
+ * Flush the pending statistics of an entry at a transaction boundary, and
+ * delete them if flushed.  Returns whether they were.
+ */
+bool
+pgstat_flush_pending_entry(PgStat_EntryRef *entry_ref, bool nowait)
+{
+	PgStat_FlushResult result;
+
+	Assert(!IsTransactionOrTransactionBlock());
+	Assert(!pgStatFlushInProgress);
+
+	/* As in pgstat_report_stat(), clear the flush state if this errors out */
+	pgStatFlushInProgress = true;
+	PG_TRY();
+	{
+		result = pgstat_flush_entry_ref(entry_ref, nowait, true);
+	}
+	PG_FINALLY();
+	{
+		pgStatCurrentFlushEntry = NULL;
+		pgStatFlushInProgress = false;
+	}
+	PG_END_TRY();
+
+	if (result != PGSTAT_FLUSH_DONE)
+		return false;
+	pgstat_delete_pending_entry(entry_ref);
+	return true;
+}
+
+/*
  * Prepare the given entry to receive pending stats, if not already done.
  */
 void
@@ -1509,9 +1605,6 @@ pgstat_flush_pending_entries(bool nowait)
 	{
 		PgStat_EntryRef *entry_ref =
 			dlist_container(PgStat_EntryRef, pending_node, cur);
-		PgStat_HashKey key = entry_ref->shared_entry->key;
-		PgStat_Kind kind = key.kind;
-		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
 		PgStat_FlushResult result;
 		bool		xact_boundary;
 		dlist_node *next;
@@ -1520,31 +1613,8 @@ pgstat_flush_pending_entries(bool nowait)
 
 		xact_boundary = !IsTransactionOrTransactionBlock();
 
-		Assert(!kind_info->fixed_amount);
-		Assert(kind_info->flush_pending_cb != NULL);
-
 		/* flush the stats, if possible */
-		pgStatCurrentFlushEntry = entry_ref;
-		result = kind_info->flush_pending_cb(entry_ref, nowait, xact_boundary);
-		pgStatCurrentFlushEntry = NULL;
-
-		/*
-		 * A lock conflict can only happen when we allowed the callback to
-		 * give up without waiting for a lock, and a partial flush can only
-		 * happen inside a transaction.
-		 */
-		Assert(result == PGSTAT_FLUSH_DONE ||
-			   (result == PGSTAT_FLUSH_LOCK_CONFLICT && nowait) ||
-			   (result == PGSTAT_FLUSH_PARTIAL && !xact_boundary));
-
-		/*
-		 * Mark the entry visited, unless we could not flush it at all. If a
-		 * later callback adds more data to this entry in the same pass,
-		 * pgstat_prep_pending_from_entry_ref() then re-queues it to the tail
-		 * so the new data is flushed again before the pass ends.
-		 */
-		if (result != PGSTAT_FLUSH_LOCK_CONFLICT)
-			entry_ref->flushed_generation = pgStatFlushGeneration;
+		result = pgstat_flush_entry_ref(entry_ref, nowait, xact_boundary);
 
 		/*
 		 * Determine the next entry after the callback ran (it may have
@@ -1699,6 +1769,10 @@ pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)
 			ereport(ERROR,
 					(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
 					 errhint("Custom cumulative statistics cannot use serialized names for fixed-numbered objects.")));
+		if (kind_info->release_refs_after_flush)
+			ereport(ERROR,
+					(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
+					 errhint("Custom cumulative statistics cannot release references after their flush for fixed-numbered objects.")));
 	}
 	else
 	{
@@ -1741,6 +1815,8 @@ pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)
 
 	/* Register it */
 	pgstat_kind_custom_infos[idx] = kind_info;
+	if (kind_info->release_refs_after_flush)
+		pgstat_have_release_refs_kinds = true;
 	ereport(LOG,
 			(errmsg("registered custom cumulative statistics \"%s\" with ID %u",
 					kind_info->name, kind)));
