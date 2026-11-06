@@ -47,6 +47,8 @@
 #include "nodes/tidbitmap.h"
 #include "storage/lwlock.h"
 #include "utils/dsa.h"
+#include "utils/memdebug.h"
+#include "utils/memutils.h"
 
 /*
  * When we have to switch over to lossy storage, we use a data structure
@@ -146,6 +148,8 @@ struct TIDBitmap
 	struct pagetable_hash *pagetable;	/* hash table of PagetableEntry's */
 	int			nentries;		/* number of entries in pagetable */
 	int			maxentries;		/* limit on same to meet maxbytes */
+	Size		maxbytes;		/* memory limit passed to tbm_create */
+	struct TBMCacheEntry *cache;	/* cache entry we own, or NULL */
 	int			npages;			/* number of exact entries in pagetable */
 	int			nchunks;		/* number of lossy entries in pagetable */
 	TBMIteratingState iterating;	/* tbm_begin_iterate called? */
@@ -225,6 +229,13 @@ static PagetableEntry *tbm_get_pageentry(TIDBitmap *tbm, BlockNumber pageno);
 static bool tbm_page_is_lossy(const TIDBitmap *tbm, BlockNumber pageno);
 static void tbm_mark_page_lossy(TIDBitmap *tbm, BlockNumber pageno);
 static void tbm_lossify(TIDBitmap *tbm);
+static void tbm_cache_trim(Size limit);
+static bool tbm_cache_room(TIDBitmap *tbm, Size oldsize, Size newsize);
+static void tbm_cache_take(TIDBitmap *tbm);
+static void tbm_cache_release(TIDBitmap *tbm);
+static PagetableEntry **tbm_alloc_spages(TIDBitmap *tbm);
+static Size tbm_cache_bytes(void);
+static void tbm_cache_wipe(struct TBMCacheEntry *c);
 static int	tbm_comparator(const void *left, const void *right);
 static int	tbm_shared_comparator(const void *left, const void *right,
 								  void *arg);
@@ -241,6 +252,83 @@ static int	tbm_shared_comparator(const void *left, const void *right,
 #define SH_DEFINE
 #define SH_DECLARE
 #include "lib/simplehash.h"
+
+/*
+ * Each backend keeps the memory of up to TBM_CACHE_ENTRIES large private
+ * bitmaps, their pagetable element arrays and sorted page lists, from one
+ * bitmap to the next.  Building a big pagetable doubles it from 256 slots
+ * up, allocating and zeroing every size on the way, and iterating it
+ * allocates the page list; with glibc's default malloc settings most of
+ * that memory goes back to the kernel when the query ends and has to be
+ * faulted in again by the next one.  Under concurrency those page faults
+ * contend in the kernel and can cost more than the bitmap scan itself.
+ *
+ * A bitmap whose pagetable gets big takes over a free cache entry and owns
+ * it until it is freed; bitmaps that find no free entry work as before.
+ * Two entries are enough for BitmapAnd, and for BitmapOr over BitmapAnd,
+ * which hold a result bitmap and one input bitmap at a time.  An owner's
+ * arrays come from tbm_cache_cxt, so a reset of the owner's context (an
+ * error, or a subtransaction abort, without tbm_free) cannot free them; a
+ * reset callback on that context just frees the entry.  The pagetable
+ * array is cleared when it is next used.
+ *
+ * All the cached memory together is kept within the maxbytes (in
+ * practice, work_mem) of the bitmap that last added to it, and trimmed
+ * when a bitmap with a smaller limit is created or takes an entry.  A table that would go
+ * over it gets its larger arrays from its own context as before, and its
+ * entry keeps the last array that fitted.  Shared bitmaps never use the
+ * cache: their arrays live in DSA.
+ */
+typedef struct TBMCacheEntry
+{
+	PagetableEntry *data;		/* pagetable element array, or NULL */
+	uint64		slots;			/* its size, in slots */
+	PagetableEntry **spages;	/* sorted page list array, or NULL */
+	Size		nspages;		/* its size, in entries */
+	bool		inuse;			/* owned by a live bitmap? */
+	MemoryContextCallback callback; /* on the owner's memory context */
+} TBMCacheEntry;
+
+#define TBM_CACHE_ENTRIES	2
+
+static MemoryContext tbm_cache_cxt = NULL;
+static TBMCacheEntry tbm_cache[TBM_CACHE_ENTRIES];
+static int	tbm_cache_ninuse = 0;
+
+/*
+ * Tables of this many slots or more use the cache.  It is the largest
+ * power of 2 whose array (96 kB) is under the 128 kB above which glibc
+ * and musl malloc map and unmap each allocation; smaller tables are cheap
+ * to build afresh, and a bitmap given a large cached array pays for
+ * clearing all of it and for visiting every slot when it iterates.
+ */
+#define TBM_CACHE_MIN_SLOTS	2048
+
+/*
+ * Call before inserting into a pagetable.  Try to take over a cache entry
+ * once the table has TBM_CACHE_MIN_SLOTS slots, before it can grow any
+ * further: simplehash grows a table from inside the insert, both when it
+ * is full enough and when its probe chains get too long, and in large
+ * tables the second is the usual reason.  This also lets a big table take
+ * over an entry another bitmap has freed.
+ *
+ * This can't take the cache inside tbm_lossify's walk over the table:
+ * lossify starts only when nentries > maxentries, about maxbytes / 64, by
+ * which time the table is over maxbytes / 96 slots, too big to take it.
+ */
+static inline void
+tbm_cache_maybe_take(TIDBitmap *tbm)
+{
+	pagetable_hash *tb = tbm->pagetable;
+
+	if (likely(tb->size < TBM_CACHE_MIN_SLOTS) || tbm->cache != NULL ||
+		tbm_cache_ninuse == TBM_CACHE_ENTRIES)
+		return;
+	if (tbm->dsa != NULL ||
+		tb->size * 2 * sizeof(PagetableEntry) > tbm->maxbytes)
+		return;
+	tbm_cache_take(tbm);
+}
 
 
 /*
@@ -264,12 +352,16 @@ tbm_create(Size maxbytes, dsa_area *dsa)
 	tbm->status = TBM_EMPTY;
 
 	tbm->maxentries = tbm_calculate_entries(maxbytes);
+	tbm->maxbytes = maxbytes;
 	tbm->lossify_start = 0;
 	tbm->dsa = dsa;
 	tbm->dsapagetable = InvalidDsaPointer;
 	tbm->dsapagetableold = InvalidDsaPointer;
 	tbm->ptpages = InvalidDsaPointer;
 	tbm->ptchunks = InvalidDsaPointer;
+
+	/* Don't keep more than the newest bitmap is allowed */
+	tbm_cache_trim(maxbytes);
 
 	return tbm;
 }
@@ -311,12 +403,15 @@ tbm_create_pagetable(TIDBitmap *tbm)
 void
 tbm_free(TIDBitmap *tbm)
 {
-	if (tbm->pagetable)
-		pagetable_destroy(tbm->pagetable);
-	if (tbm->spages)
+	if (tbm->spages && (tbm->cache == NULL || tbm->spages != tbm->cache->spages))
 		pfree(tbm->spages);
 	if (tbm->schunks)
 		pfree(tbm->schunks);
+	if (tbm->pagetable)
+		pagetable_destroy(tbm->pagetable);
+	/* last: pagetable_destroy needs to know the entry the array belongs to */
+	if (tbm->cache)
+		tbm_cache_release(tbm);
 	pfree(tbm);
 }
 
@@ -707,9 +802,7 @@ tbm_begin_private_iterate(TIDBitmap *tbm)
 		int			nchunks;
 
 		if (!tbm->spages && tbm->npages > 0)
-			tbm->spages = (PagetableEntry **)
-				MemoryContextAlloc(tbm->mcxt,
-								   tbm->npages * sizeof(PagetableEntry *));
+			tbm->spages = tbm_alloc_spages(tbm);
 		if (!tbm->schunks && tbm->nchunks > 0)
 			tbm->schunks = (PagetableEntry **)
 				MemoryContextAlloc(tbm->mcxt,
@@ -1224,6 +1317,7 @@ tbm_get_pageentry(TIDBitmap *tbm, BlockNumber pageno)
 		}
 
 		/* Look up or create an entry */
+		tbm_cache_maybe_take(tbm);
 		page = pagetable_insert(tbm->pagetable, pageno, &found);
 	}
 
@@ -1312,6 +1406,7 @@ tbm_mark_page_lossy(TIDBitmap *tbm, BlockNumber pageno)
 	}
 
 	/* Look up or create entry for chunk-header page */
+	tbm_cache_maybe_take(tbm);
 	page = pagetable_insert(tbm->pagetable, chunk_pageno, &found);
 
 	/* Initialize it if not present before */
@@ -1488,13 +1583,45 @@ tbm_attach_shared_iterate(dsa_area *dsa, dsa_pointer dp)
  * pagetable_allocate
  *
  * Callback function for allocating the memory for hashtable elements.
- * Allocate memory for hashtable elements, using DSA if available.
+ * Allocate memory for hashtable elements, using DSA if available.  A cache
+ * entry's owner gets the entry's array, or a new one in tbm_cache_cxt.
  */
 static inline void *
 pagetable_allocate(pagetable_hash *pagetable, Size size)
 {
 	TIDBitmap  *tbm = (TIDBitmap *) pagetable->private_data;
+	TBMCacheEntry *c = tbm->cache;
 	PTEntryArray *ptbase;
+
+	if (c != NULL)
+	{
+		Size		oldsize = c->slots * sizeof(PagetableEntry);
+
+		/* Use the entry's array if it is idle and the right size */
+		if (c->data != NULL && c->data != pagetable->data && size == oldsize)
+		{
+			VALGRIND_MAKE_MEM_UNDEFINED(c->data, size);
+			memset(c->data, 0, size);
+			return c->data;
+		}
+
+		/*
+		 * Otherwise replace it with a new array, which pagetable_free will
+		 * make the entry's.  If that doesn't fit, the table has outgrown the
+		 * cache: allocate it normally.
+		 */
+		if (tbm_cache_room(tbm, oldsize, size))
+		{
+			if (c->data != NULL && c->data != pagetable->data)
+			{
+				pfree(c->data);
+				c->data = NULL;
+				c->slots = 0;
+			}
+			return MemoryContextAllocExtended(tbm_cache_cxt, size,
+											  MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
+		}
+	}
 
 	if (tbm->dsa == NULL)
 		return MemoryContextAllocExtended(pagetable->ctx, size,
@@ -1516,12 +1643,45 @@ pagetable_allocate(pagetable_hash *pagetable, Size size)
 /*
  * pagetable_free
  *
- * Callback function for freeing hash table elements.
+ * Callback function for freeing hash table elements.  A cache entry's
+ * owner keeps its last array that fitted in the cache.
  */
 static inline void
 pagetable_free(pagetable_hash *pagetable, void *pointer)
 {
 	TIDBitmap  *tbm = (TIDBitmap *) pagetable->private_data;
+	TBMCacheEntry *c = tbm->cache;
+
+	if (c != NULL)
+	{
+		/*
+		 * When growing, pointer is the old array and pagetable->data the new
+		 * one.  If the new one is in the cache context, it becomes the
+		 * entry's array.  If not, the table has outgrown the cache: keep the
+		 * old array in the entry, and leave the rest of this bitmap to the
+		 * normal path.  When destroying, pointer is pagetable->data; keep it
+		 * if it is the entry's.
+		 */
+		if (pointer != pagetable->data &&
+			GetMemoryChunkContext(pagetable->data) == tbm_cache_cxt)
+		{
+			pfree(pointer);
+			c->data = pagetable->data;
+			c->slots = pagetable->size;
+			return;
+		}
+
+		if (pointer != c->data)
+			pfree(pointer);
+		if (pointer != pagetable->data)
+			tbm_cache_release(tbm);
+		return;
+	}
+
+#ifdef USE_ASSERT_CHECKING
+	for (int i = 0; i < TBM_CACHE_ENTRIES; i++)
+		Assert(pointer != tbm_cache[i].data);
+#endif
 
 	/* pfree the input pointer if DSA is not available */
 	if (tbm->dsa == NULL)
@@ -1530,6 +1690,179 @@ pagetable_free(pagetable_hash *pagetable, void *pointer)
 	{
 		dsa_free(tbm->dsa, tbm->dsapagetableold);
 		tbm->dsapagetableold = InvalidDsaPointer;
+	}
+}
+
+/*
+ * Allocate tbm's sorted page list, from its cache entry if it has one.
+ */
+static PagetableEntry **
+tbm_alloc_spages(TIDBitmap *tbm)
+{
+	TBMCacheEntry *c = tbm->cache;
+	Size		size = tbm->npages * sizeof(PagetableEntry *);
+
+	if (c != NULL)
+	{
+		if (c->nspages >= tbm->npages)
+		{
+			VALGRIND_MAKE_MEM_UNDEFINED(c->spages, size);
+			return c->spages;
+		}
+		if (tbm_cache_room(tbm, c->nspages * sizeof(PagetableEntry *), size))
+		{
+			if (c->spages != NULL)
+			{
+				pfree(c->spages);
+				c->spages = NULL;
+				c->nspages = 0;
+			}
+			c->spages = MemoryContextAlloc(tbm_cache_cxt, size);
+			c->nspages = tbm->npages;
+			return c->spages;
+		}
+	}
+
+	return MemoryContextAlloc(tbm->mcxt, size);
+}
+
+/*
+ * Can tbm's cache entry replace an array of oldsize bytes by one of newsize
+ * bytes, and the cache stay within tbm->maxbytes?  Frees idle entries'
+ * arrays to make room if need be.
+ */
+static bool
+tbm_cache_room(TIDBitmap *tbm, Size oldsize, Size newsize)
+{
+	if (newsize > tbm->maxbytes)
+		return false;
+	tbm_cache_trim(tbm->maxbytes - newsize + oldsize);
+	return tbm_cache_bytes() - oldsize + newsize <= tbm->maxbytes;
+}
+
+/*
+ * The cached memory, in bytes
+ */
+static Size
+tbm_cache_bytes(void)
+{
+	Size		total = 0;
+
+	for (int i = 0; i < TBM_CACHE_ENTRIES; i++)
+		total += tbm_cache[i].slots * sizeof(PagetableEntry) +
+			tbm_cache[i].nspages * sizeof(PagetableEntry *);
+	return total;
+}
+
+/*
+ * A cache entry has no owner now.  In builds that clobber freed memory,
+ * clobber its arrays too, so that a bitmap used after tbm_free is still
+ * caught.
+ */
+static void
+tbm_cache_wipe(TBMCacheEntry *c)
+{
+#ifdef CLOBBER_FREED_MEMORY
+	if (c->data != NULL)
+		wipe_mem(c->data, c->slots * sizeof(PagetableEntry));
+	if (c->spages != NULL)
+		wipe_mem(c->spages, c->nspages * sizeof(PagetableEntry *));
+#endif
+}
+
+/*
+ * Reset callback on an owner's memory context: the owner is going away
+ * without tbm_free.  Its arrays are in tbm_cache_cxt and stay cached.
+ */
+static void
+tbm_cache_owner_gone(void *arg)
+{
+	TBMCacheEntry *c = (TBMCacheEntry *) arg;
+
+	c->inuse = false;
+	tbm_cache_ninuse--;
+	tbm_cache_wipe(c);
+}
+
+/*
+ * tbm_cache_take - make tbm the owner of a free cache entry, if there is one
+ *
+ * Called by tbm_cache_maybe_take.  Takes the free entry with the largest
+ * array.  If that is bigger than tbm's table, switch to it at once, so the
+ * table doesn't have to grow through every size again for a bitmap like
+ * the last one.
+ */
+static void
+tbm_cache_take(TIDBitmap *tbm)
+{
+	pagetable_hash *tb = tbm->pagetable;
+	TBMCacheEntry *c = NULL;
+
+	Assert(tbm->cache == NULL);
+	Assert(tbm->dsa == NULL);
+
+	/* An entry freed since tbm_create may be more than tbm may use */
+	tbm_cache_trim(tbm->maxbytes);
+
+	for (int i = 0; i < TBM_CACHE_ENTRIES; i++)
+	{
+		if (!tbm_cache[i].inuse && (c == NULL || tbm_cache[i].slots > c->slots))
+			c = &tbm_cache[i];
+	}
+	if (c == NULL)
+		return;
+
+	if (tbm_cache_cxt == NULL)
+		tbm_cache_cxt = AllocSetContextCreate(TopMemoryContext,
+											  "TIDBitmap cache",
+											  ALLOCSET_SMALL_SIZES);
+
+	c->inuse = true;
+	tbm_cache_ninuse++;
+	c->callback.func = tbm_cache_owner_gone;
+	c->callback.arg = c;
+	MemoryContextRegisterResetCallback(tbm->mcxt, &c->callback);
+	tbm->cache = c;
+
+	if (c->slots > tb->size)
+		pagetable_grow(tb, c->slots);
+}
+
+/*
+ * tbm_cache_release - give back tbm's cache entry
+ */
+static void
+tbm_cache_release(TIDBitmap *tbm)
+{
+	TBMCacheEntry *c = tbm->cache;
+
+	MemoryContextUnregisterResetCallback(tbm->mcxt, &c->callback);
+	c->inuse = false;
+	tbm_cache_ninuse--;
+	tbm_cache_wipe(c);
+	tbm->cache = NULL;
+}
+
+/*
+ * tbm_cache_trim - free idle cached arrays until the cache fits in limit
+ */
+static void
+tbm_cache_trim(Size limit)
+{
+	for (int i = 0; i < TBM_CACHE_ENTRIES && tbm_cache_bytes() > limit; i++)
+	{
+		TBMCacheEntry *c = &tbm_cache[i];
+
+		if (c->inuse)
+			continue;
+		if (c->data != NULL)
+			pfree(c->data);
+		if (c->spages != NULL)
+			pfree(c->spages);
+		c->data = NULL;
+		c->slots = 0;
+		c->spages = NULL;
+		c->nspages = 0;
 	}
 }
 

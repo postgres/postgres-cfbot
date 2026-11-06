@@ -258,6 +258,20 @@ SELECT tbm_cache_bounded();
  t
 (1 row)
 
+-- a bitmap of 20000 pages leaves its pagetable array cached
+SELECT test_tidbitmap_check(1, 20000, 4096, 0, -1);
+ test_tidbitmap_check 
+----------------------
+                    0
+(1 row)
+
+SELECT total_bytes > 1000000 AS cached
+  FROM pg_backend_memory_contexts WHERE name = 'TIDBitmap cache';
+ cached 
+--------
+ t
+(1 row)
+
 -- two bitmaps alive at once
 EXPLAIN (COSTS OFF) SELECT count(*) FROM tbm_t WHERE a = 0 AND b = 0;
                    QUERY PLAN                   
@@ -464,6 +478,13 @@ SELECT tbm_cache_bounded();
  t
 (1 row)
 
+SELECT total_bytes < 65536 AS released
+  FROM pg_backend_memory_contexts WHERE name = 'TIDBitmap cache';
+ released 
+----------
+ t
+(1 row)
+
 SELECT count(*) FROM tbm_t WHERE a = 0 AND b = 0;
  count 
 -------
@@ -548,6 +569,20 @@ SELECT count(*) FROM tbm_t WHERE a = 0;
  count 
 -------
   2727
+(1 row)
+
+-- the owner is freed half-way; another bitmap takes over the cache
+SELECT test_tidbitmap_check(5, 20000, 4096, 0, -1);
+ test_tidbitmap_check 
+----------------------
+                    0
+(1 row)
+
+SELECT total_bytes > 1000000 AS cached
+  FROM pg_backend_memory_contexts WHERE name = 'TIDBitmap cache';
+ cached 
+--------
+ t
 (1 row)
 
 SELECT test_tidbitmap_check(1, 20000, 4096, 0, -1);
