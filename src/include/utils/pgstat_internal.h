@@ -195,6 +195,12 @@ typedef struct PgStat_EntryRef
 	dlist_node	pending_node;	/* membership in pgStatPending list */
 
 	/*
+	 * Membership in the list of the entries created in the current
+	 * transaction, for kinds with release_refs_after_flush.
+	 */
+	dlist_node	created_node;
+
+	/*
 	 * Flush-pass generation in which this entry was last flushed.  Used by
 	 * pgstat_prep_pending_from_entry_ref() to decide whether an entry being
 	 * accumulated into needs re-queuing during the current flush pass.  Zero
@@ -294,6 +300,14 @@ typedef struct PgStat_KindInfo
 	 * of entries.
 	 */
 	bool		own_hash:1;
+
+	/*
+	 * Release references to entries of this kind after their flush, and to
+	 * entries created at the end of the creating transaction?  For kinds
+	 * whose entries are dropped often, so that they are freed without asking
+	 * all backends to release their references.
+	 */
+	bool		release_refs_after_flush:1;
 
 	/*
 	 * The size of an entry pointed to by PgStatShared_HashEntry->body.  For
@@ -739,6 +753,7 @@ static inline size_t pgstat_get_entry_len(PgStat_Kind kind);
 static inline void *pgstat_get_entry_data(PgStat_Kind kind, PgStatShared_Common *entry);
 static inline void *pgstat_get_custom_shmem_data(PgStat_Kind kind);
 static inline void *pgstat_get_custom_snapshot_data(PgStat_Kind kind);
+static inline bool pgstat_entry_ref_is_stale(PgStat_EntryRef *entry_ref);
 
 
 /*
@@ -756,6 +771,7 @@ extern void pgstat_assert_is_up(void);
 #endif
 
 extern void pgstat_delete_pending_entry(PgStat_EntryRef *entry_ref);
+extern bool pgstat_flush_pending_entry(PgStat_EntryRef *entry_ref, bool nowait);
 extern void pgstat_prep_pending_from_entry_ref(PgStat_EntryRef *entry_ref);
 extern PgStat_EntryRef *pgstat_prep_pending_entry(PgStat_Kind kind, Oid dboid,
 												  uint64 objid,
@@ -913,6 +929,8 @@ extern void pgstat_reset_matching_entries(bool (*do_reset) (PgStatShared_HashEnt
 										  TimestampTz ts);
 
 extern void pgstat_request_entry_refs_gc(void);
+extern void pgstat_release_flushed_entry_refs(void);
+extern void pgstat_release_created_entry_refs(void);
 extern dsa_pointer pgstat_alloc_entry_body(PgStat_Kind kind);
 extern PgStatShared_Common *pgstat_init_entry(PgStat_Kind kind,
 											  PgStatShared_HashEntry *shhashent,
@@ -976,6 +994,9 @@ extern void pgstat_create_transactional(PgStat_Kind kind, Oid dboid, uint64 obji
  * is in charge of doing that.
  */
 extern PGDLLIMPORT bool pgstat_report_fixed;
+
+/* Is there a kind with release_refs_after_flush? */
+extern PGDLLIMPORT bool pgstat_have_release_refs_kinds;
 
 /* Backend-local stats state */
 extern PGDLLIMPORT PgStat_LocalState pgStatLocal;
@@ -1091,6 +1112,18 @@ static inline size_t
 pgstat_get_entry_len(PgStat_Kind kind)
 {
 	return pgstat_get_kind_info(kind)->shared_data_len;
+}
+
+/*
+ * Has the entry of a reference been dropped, or reinitialized, since the
+ * reference was obtained?
+ */
+static inline bool
+pgstat_entry_ref_is_stale(PgStat_EntryRef *entry_ref)
+{
+	return entry_ref->shared_entry->dropped ||
+		pg_atomic_read_u32(&entry_ref->shared_entry->generation) !=
+		entry_ref->generation;
 }
 
 /*

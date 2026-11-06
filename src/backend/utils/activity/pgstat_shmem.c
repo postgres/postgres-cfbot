@@ -50,6 +50,8 @@ static void pgstat_drop_database_and_contents(Oid dboid);
 static void pgstat_free_entry(PgStatShared_HashEntry *shent, dshash_seq_status *hstat);
 
 static void pgstat_release_entry_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref, bool discard_pending);
+static void pgstat_release_shared_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref, bool discard_pending);
+static void pgstat_remember_created_entry(PgStat_EntryRef *entry_ref);
 static bool pgstat_need_entry_refs_gc(void);
 static void pgstat_gc_entry_refs(void);
 static void pgstat_release_all_entry_refs(bool discard_pending);
@@ -97,6 +99,28 @@ static int	pgStatSharedRefAge = 0; /* cache age of pgStatLocal.shmem */
  */
 static MemoryContext pgStatSharedRefContext = NULL;
 static MemoryContext pgStatEntryRefHashContext = NULL;
+
+/*
+ * References to the entries of kinds with release_refs_after_flush that this
+ * backend created since its last transaction boundary, see
+ * pgstat_release_created_entry_refs().
+ */
+static dlist_head pgStatCreatedRefs = DLIST_STATIC_INIT(pgStatCreatedRefs);
+
+/*
+ * Number of references this backend holds to entries of kinds with
+ * release_refs_after_flush, so that releasing them is skipped when there is
+ * none, see pgstat_release_flushed_entry_refs().
+ */
+static int	pgStatNumReleaseRefs = 0;
+
+/* Does this kind release its references after their flush? */
+static inline bool
+pgstat_kind_releases_refs(PgStat_Kind kind)
+{
+	return pgstat_have_release_refs_kinds &&
+		pgstat_get_kind_info(kind)->release_refs_after_flush;
+}
 
 
 /* ------------------------------------------------------------
@@ -522,6 +546,8 @@ pgstat_acquire_entry_ref(PgStat_EntryRef *entry_ref,
 	entry_ref->shared_stats = shheader;
 	entry_ref->shared_entry = shhashent;
 	entry_ref->generation = pg_atomic_read_u32(&shhashent->generation);
+	if (pgstat_kind_releases_refs(shhashent->key.kind))
+		pgStatNumReleaseRefs++;
 
 	/*
 	 * Complete the local reference before releasing the lock.  Releasing an
@@ -572,6 +598,7 @@ pgstat_get_entry_ref_cached(PgStat_HashKey key, PgStat_EntryRef **entry_ref_p)
 		entry_ref->shared_stats = NULL;
 		entry_ref->shared_entry = NULL;
 		entry_ref->pending = NULL;
+		dlist_node_init(&entry_ref->created_node);
 
 		found = false;
 	}
@@ -649,7 +676,23 @@ pgstat_get_entry_ref(PgStat_Kind kind, Oid dboid, uint64 objid, bool create,
 	 * match here we can avoid taking locks / causing contention.
 	 */
 	if (pgstat_get_entry_ref_cached(key, &entry_ref))
-		return entry_ref;
+	{
+		/*
+		 * For a kind whose references do not outlive their flush, replace a
+		 * reference to an entry dropped or reinitialized since it was
+		 * obtained, discarding its pending statistics.  Callers must thus not
+		 * keep a pointer to pending statistics across a lookup of the same
+		 * entry.
+		 */
+		if (!pgstat_kind_releases_refs(kind) ||
+			!pgstat_entry_ref_is_stale(entry_ref))
+			return entry_ref;
+
+		/* Make it a placeholder, which the lookup below fills */
+		pgstat_release_shared_ref(key, entry_ref, true);
+		entry_ref->shared_stats = NULL;
+		entry_ref->shared_entry = NULL;
+	}
 
 	Assert(entry_ref != NULL);
 
@@ -708,6 +751,7 @@ pgstat_get_entry_ref(PgStat_Kind kind, Oid dboid, uint64 objid, bool create,
 		{
 			shheader = pgstat_init_entry(kind, shhashent, chunk);
 			pgstat_acquire_entry_ref(entry_ref, hash, shhashent, shheader);
+			pgstat_remember_created_entry(entry_ref);
 
 			if (created_entry != NULL)
 				*created_entry = true;
@@ -750,6 +794,7 @@ pgstat_get_entry_ref(PgStat_Kind kind, Oid dboid, uint64 objid, bool create,
 			 */
 			shheader = pgstat_reinit_entry(kind, shhashent);
 			pgstat_acquire_entry_ref(entry_ref, hash, shhashent, shheader);
+			pgstat_remember_created_entry(entry_ref);
 
 			if (created_entry != NULL)
 				*created_entry = true;
@@ -773,10 +818,20 @@ pgstat_get_entry_ref(PgStat_Kind kind, Oid dboid, uint64 objid, bool create,
 	}
 }
 
+/*
+ * Release the pending statistics of a reference and its reference to the
+ * shared entry, keeping it in the cache.
+ */
 static void
-pgstat_release_entry_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref,
-						 bool discard_pending)
+pgstat_release_shared_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref,
+						  bool discard_pending)
 {
+	if (entry_ref && !dlist_node_is_detached(&entry_ref->created_node))
+		dlist_delete_thoroughly(&entry_ref->created_node);
+	if (entry_ref && entry_ref->shared_stats &&
+		pgstat_kind_releases_refs(key.kind))
+		pgStatNumReleaseRefs--;
+
 	if (entry_ref && entry_ref->pending)
 	{
 		if (discard_pending)
@@ -822,6 +877,13 @@ pgstat_release_entry_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref,
 			}
 		}
 	}
+}
+
+static void
+pgstat_release_entry_ref(PgStat_HashKey key, PgStat_EntryRef *entry_ref,
+						 bool discard_pending)
+{
+	pgstat_release_shared_ref(key, entry_ref, discard_pending);
 
 	if (!pgstat_entry_ref_hash_delete(pgStatEntryRefHash, key))
 		elog(ERROR, "entry ref vanished before deletion");
@@ -949,9 +1011,7 @@ pgstat_gc_entry_refs(void)
 		 * "generation" checks for the case of entries being reinitialized,
 		 * and "dropped" for the case where these are..  dropped.
 		 */
-		if (!entry_ref->shared_entry->dropped &&
-			pg_atomic_read_u32(&entry_ref->shared_entry->generation) ==
-			entry_ref->generation)
+		if (!pgstat_entry_ref_is_stale(entry_ref))
 			continue;
 
 		/* cannot gc shared ref that has pending data */
@@ -985,6 +1045,62 @@ pgstat_release_matching_entry_refs(bool discard_pending, ReleaseMatchCB match,
 			continue;
 
 		pgstat_release_entry_ref(ent->key, ent->entry_ref, discard_pending);
+	}
+}
+
+static bool
+match_flushed_entry_ref(PgStat_EntryRefHashEntry *ent, Datum match_data)
+{
+	return ent->entry_ref->shared_stats != NULL &&
+		ent->entry_ref->pending == NULL &&
+		pgstat_kind_releases_refs(ent->key.kind);
+}
+
+/*
+ * Release this backend's references to entries of kinds with
+ * release_refs_after_flush, except those with pending statistics.  Called
+ * at a transaction boundary, after flushing pending statistics or when none
+ * are pending.
+ */
+void
+pgstat_release_flushed_entry_refs(void)
+{
+	if (pgStatNumReleaseRefs > 0)
+		pgstat_release_matching_entry_refs(false, match_flushed_entry_ref, 0);
+}
+
+/*
+ * Remember that this backend created the entry of "entry_ref", if its kind
+ * has release_refs_after_flush, see pgstat_release_created_entry_refs().
+ */
+static void
+pgstat_remember_created_entry(PgStat_EntryRef *entry_ref)
+{
+	if (pgstat_kind_releases_refs(entry_ref->shared_entry->key.kind))
+		dlist_push_tail(&pgStatCreatedRefs, &entry_ref->created_node);
+}
+
+/*
+ * Flush and release the references to the entries of kinds with
+ * release_refs_after_flush that this backend created in its last
+ * transaction, as they may be dropped before the next flush.  A reference
+ * whose statistics cannot be flushed without waiting is left to that flush.
+ */
+void
+pgstat_release_created_entry_refs(void)
+{
+	while (!dlist_is_empty(&pgStatCreatedRefs))
+	{
+		PgStat_EntryRef *entry_ref =
+			dlist_head_element(PgStat_EntryRef, created_node, &pgStatCreatedRefs);
+
+		/* Unlink first, as the flush callback may release references */
+		dlist_delete_thoroughly(&entry_ref->created_node);
+
+		if (entry_ref->pending != NULL &&
+			!pgstat_flush_pending_entry(entry_ref, true))
+			continue;
+		pgstat_release_entry_ref(entry_ref->shared_entry->key, entry_ref, false);
 	}
 }
 
@@ -1157,7 +1273,10 @@ pgstat_drop_database_and_contents(Oid dboid)
  * The callers of this function should call pgstat_request_entry_refs_gc()
  * if the stats entry could not be freed, to ensure that this entry's memory
  * can be reclaimed later by a different backend calling
- * pgstat_gc_entry_refs().
+ * pgstat_gc_entry_refs().  Kinds with release_refs_after_flush can skip
+ * this, as the references of other backends are released at their next
+ * report of statistics outside a transaction, which a long transaction only
+ * delays.
  */
 bool
 pgstat_drop_entry(PgStat_Kind kind, Oid dboid, uint64 objid,
