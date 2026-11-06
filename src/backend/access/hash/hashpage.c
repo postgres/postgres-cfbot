@@ -281,34 +281,26 @@ _hash_dropbuf(Relation rel, Buffer buf)
 }
 
 /*
- *	_hash_dropscanbuf() -- release buffers used in scan.
+ *	_hash_dropscanbuf() -- release buffers owned by scan.
  *
- * This routine unpins the buffers used during scan on which we
- * hold no lock.
+ * This routine unpins the buffers for the primary bucket page and for the
+ * bucket page of a bucket being split as needed.
  */
 void
 _hash_dropscanbuf(Relation rel, HashScanOpaque so)
 {
-	/* release pin we hold on primary bucket page */
-	if (BufferIsValid(so->hashso_bucket_buf) &&
-		so->hashso_bucket_buf != so->currPos.buf)
+	/* release pin held on primary bucket page */
+	if (BufferIsValid(so->hashso_bucket_buf))
 		_hash_dropbuf(rel, so->hashso_bucket_buf);
 	so->hashso_bucket_buf = InvalidBuffer;
 
-	/* release pin we hold on primary bucket page  of bucket being split */
-	if (BufferIsValid(so->hashso_split_bucket_buf) &&
-		so->hashso_split_bucket_buf != so->currPos.buf)
+	/* release pin held on primary bucket page of bucket being split */
+	if (BufferIsValid(so->hashso_split_bucket_buf))
 		_hash_dropbuf(rel, so->hashso_split_bucket_buf);
 	so->hashso_split_bucket_buf = InvalidBuffer;
 
-	/* release any pin we still hold */
-	if (BufferIsValid(so->currPos.buf))
-		_hash_dropbuf(rel, so->currPos.buf);
-	so->currPos.buf = InvalidBuffer;
-
 	/* reset split scan */
 	so->hashso_buc_populated = false;
-	so->hashso_buc_split = false;
 }
 
 
@@ -1263,6 +1255,8 @@ _hash_splitbucket(Relation rel,
 		opage = BufferGetPage(obuf);
 		oopaque = HashPageGetOpaque(opage);
 	}
+
+	INJECTION_POINT("hash-split-after-relocation", NULL);
 
 	/*
 	 * We're at the end of the old bucket chain, so we're done partitioning

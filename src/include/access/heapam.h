@@ -127,10 +127,28 @@ typedef struct IndexScanHeapData
 	BlockNumber xs_blk;
 
 	Buffer		xs_vmbuffer;	/* visibility map buffer */
+	int			xs_vm_items;	/* # items to resolve visibility info for */
 
 	bool		xs_readonly;	/* scan is read-only? */
 
-	uint16		xs_blkswitch_count; /* number of heap blocks fetched */
+	/* Plain index scan xs_lastinblock optimization */
+	bool		xs_lastinblock; /* last TID on this block in current batch? */
+
+	/*
+	 * Read stream state for prefetching (only used during amgetbatch scans).
+	 *
+	 * The read stream moves ahead of the scan's current position using a
+	 * prefetching position.  This is implemented using generic batchringbuf
+	 * management routines.  heapam is entirely responsible for making sure
+	 * that its read stream accurately tracks both standard scan positions.
+	 */
+	bool		xs_paused;		/* paused until next batch is read? */
+	bool		xs_prefetching_safe;	/* prefetching is safe? */
+	uint16		xs_blkswitch_count; /* determines when to prefetch */
+
+	ScanDirection xs_read_stream_dir;	/* index scan direction */
+	BlockNumber xs_prefetch_block;	/* last block returned to xs_read_stream */
+	ReadStream *xs_read_stream; /* prefetching read stream */
 } IndexScanHeapData;
 
 /* Result codes for HeapTupleSatisfiesVacuum */
@@ -434,8 +452,12 @@ extern TransactionId heap_index_delete_tuples(Relation rel,
 extern bool heapam_fetch_tid(Relation rel, ItemPointer tid, Snapshot snapshot,
 							 bool *all_dead);
 extern void heapam_index_scan_begin(IndexScanDesc scan, uint32 flags);
-extern void heapam_index_scan_reset(IndexScanDesc scan);
+extern void heapam_index_scan_batch_init(IndexScanDesc scan,
+										 IndexScanBatch batch);
+extern void heapam_index_scan_rescan(IndexScanDesc scan);
 extern void heapam_index_scan_end(IndexScanDesc scan);
+extern void heapam_index_scan_markpos(IndexScanDesc scan);
+extern void heapam_index_scan_restrpos(IndexScanDesc scan);
 extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,
 								   Buffer buffer, Snapshot snapshot, HeapTuple heapTuple,
 								   bool *all_dead, bool first_call);

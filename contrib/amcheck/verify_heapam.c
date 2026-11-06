@@ -456,7 +456,7 @@ verify_heapam(PG_FUNCTION_ARGS)
 		 * locks.
 		 */
 		stream_cb = block_range_read_stream_cb;
-		stream_flags = READ_STREAM_SEQUENTIAL |
+		stream_flags = READ_STREAM_NO_ADVICE |
 			READ_STREAM_FULL |
 			READ_STREAM_USE_BATCHING;
 		stream_data = &stream_skip_data.range;

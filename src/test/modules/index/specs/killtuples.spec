@@ -47,6 +47,9 @@ step result { SELECT ((heap_blks_read + heap_blks_hit - counter.heap_accesses) >
 
 step access { EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT * FROM kill_prior_tuple WHERE key = 1; }
 
+# nearest-neighbor (order-by operator) scan (cannot set LP_DEAD bits)
+step access_ordered { EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT * FROM kill_prior_tuple ORDER BY key <-> 1; }
+
 step delete { DELETE FROM kill_prior_tuple; }
 
 step drop_table { DROP TABLE IF EXISTS kill_prior_tuple; }
@@ -94,6 +97,18 @@ permutation
   delete flush
   measure access flush result
   measure access flush result
+  drop_table drop_ext_btree_gist
+
+# GiST doesn't set LP_DEAD bits for ordered scans, so every access re-visits
+# the heap
+permutation
+  create_table fill_500 create_ext_btree_gist create_gist flush
+  disable_seq disable_bitmap
+  measure access_ordered flush result
+  measure access_ordered flush result
+  delete flush
+  measure access_ordered flush result
+  measure access_ordered flush result
   drop_table drop_ext_btree_gist
 
 # Test gist, but with fewer rows (tests for an old bug where
