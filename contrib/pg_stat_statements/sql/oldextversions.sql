@@ -68,4 +68,20 @@ AlTER EXTENSION pg_stat_statements UPDATE TO '1.13';
 \d pg_stat_statements
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 
+-- Before 1.14, these functions are PARALLEL SAFE, and work in a worker
+SET max_parallel_workers_per_gather = 2;
+SET debug_parallel_query = on;
+SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+RESET debug_parallel_query;
+RESET max_parallel_workers_per_gather;
+
+-- pg_stat_statements() restricted to the leader in 1.14
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.14';
+SELECT oid::regprocedure, proparallel
+FROM pg_proc
+WHERE oid IN ('pg_stat_statements(boolean)'::regprocedure,
+              'pg_stat_statements_reset(oid, oid, bigint, boolean)'::regprocedure)
+ORDER BY oid::regprocedure::text COLLATE "C";
+
 DROP EXTENSION pg_stat_statements;

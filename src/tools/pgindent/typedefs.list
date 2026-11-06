@@ -4128,10 +4128,13 @@ pgsa_stash_name_table_hash
 pgsa_writer_context
 pgsocket
 pgsql_thing_t
+pgssDeallocEntry
 pgssEntry
 pgssGlobalStats
 pgssHashKey
+pgssPendingEntry
 pgssQueryState
+pgssSharedEntry
 pgssSharedState
 pgssStoreKind
 pgssVersion
