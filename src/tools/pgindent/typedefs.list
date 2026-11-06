@@ -1287,6 +1287,7 @@ InProgressEnt
 InProgressIO
 IncludeWal
 InclusionOpaque
+IncrPrefetch
 IncrementVarSublevelsUp_context
 IncrementalBackupInfo
 IncrementalSort
