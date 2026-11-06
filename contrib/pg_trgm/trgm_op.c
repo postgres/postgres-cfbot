@@ -185,30 +185,52 @@ _PG_init(void)
 	MarkGUCPrefixReserved("pg_trgm");
 }
 
-#define CMPCHAR(a,b) ( ((a)==(b)) ? 0 : ( ((a)<(b)) ? -1 : 1 ) )
-
 /*
  * Functions for comparing two trgms while treating each char as "signed char" or
  * "unsigned char".
+ *
+ * Trigrams are stored in memory as trg[0], trg[1], trg[2], ordered from most
+ * significant trigram to least significant trigram.
+ * The code adheres to that by shifting trg[0] to the most significant byte,
+ * trg[1] to the second most significant byte anbd trg[2] to the last significant
+ * byte. Only loading bytes makes this code endian-agnostic.
+ *
  */
+static pg_always_inline int
+cmptrgm(const trgm a, const trgm b, bool char_is_signed)
+{
+	const uint8 *ua = (const uint8 *)a;
+	const uint8 *ub = (const uint8 *)b;
+	uint32 ia 		= ((uint32)ua[0] << 16) | ((uint32)ua[1] << 8) | ua[2];
+	uint32 ib 		= ((uint32)ub[0] << 16) | ((uint32)ub[1] << 8) | ub[2];
+
+	/*
+	 * The signed comparator flips the sign bit of each of the three trigrams to
+	 * ensure correct ordering on compilers that tread char as signed.
+	 *
+	 * Background: When treated as unsigned, positive numbers sort after negative
+	 * numbers because negative numbers have the sign bit set in two's complement.
+	 * Flipping the sign bit reverses this order.
+	 */
+	if (char_is_signed)
+	{
+		ia ^= 0x00808080;
+		ib ^= 0x00808080;
+	}
+
+	return (ia < ib) ? -1 : ((ia > ib) ? 1 : 0);
+}
+
 static inline int
 CMPTRGM_SIGNED(const void *a, const void *b)
 {
-#define CMPPCHAR_S(a,b,i)  CMPCHAR( *(((const signed char*)(a))+i), *(((const signed char*)(b))+i) )
-
-	return CMPPCHAR_S(a, b, 0) ? CMPPCHAR_S(a, b, 0)
-		: (CMPPCHAR_S(a, b, 1) ? CMPPCHAR_S(a, b, 1)
-		   : CMPPCHAR_S(a, b, 2));
+	return cmptrgm(a, b, true);
 }
 
 static inline int
 CMPTRGM_UNSIGNED(const void *a, const void *b)
 {
-#define CMPPCHAR_UNS(a,b,i)  CMPCHAR( *(((const unsigned char*)(a))+i), *(((const unsigned char*)(b))+i) )
-
-	return CMPPCHAR_UNS(a, b, 0) ? CMPPCHAR_UNS(a, b, 0)
-		: (CMPPCHAR_UNS(a, b, 1) ? CMPPCHAR_UNS(a, b, 1)
-		   : CMPPCHAR_UNS(a, b, 2));
+	return cmptrgm(a, b, false);
 }
 
 /*
