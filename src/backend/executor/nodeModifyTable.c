@@ -877,6 +877,8 @@ ExecInsert(ModifyTableContext *context,
 	OnConflictAction onconflict = node->onConflictAction;
 	PartitionTupleRouting *proute = mtstate->mt_partition_tuple_routing;
 	MemoryContext oldContext;
+	bool		merge_insert = mtstate->operation == CMD_MERGE &&
+		mtstate->mt_merge_action->mas_action->commandType == CMD_INSERT;
 
 	/*
 	 * If the input result relation is a partitioned table, find the leaf
@@ -1031,6 +1033,10 @@ ExecInsert(ModifyTableContext *context,
 								   resultRelInfo));
 
 			resultRelInfo->ri_NumSlots++;
+
+			/* Count MERGE inserts queued for FDW batching. */
+			if (merge_insert)
+				mtstate->mt_merge_inserted++;
 
 			MemoryContextSwitchTo(oldContext);
 
@@ -1276,6 +1282,8 @@ ExecInsert(ModifyTableContext *context,
 
 	if (canSetTag)
 		(estate->es_processed)++;
+	if (merge_insert)
+		mtstate->mt_merge_inserted++;
 
 	/*
 	 * If this insert is the result of a partition key update that moved the
@@ -3921,7 +3929,6 @@ ExecMergeNotMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 
 				rslot = ExecInsert(context, mtstate->rootResultRelInfo,
 								   newslot, canSetTag, NULL, NULL);
-				mtstate->mt_merge_inserted += 1;
 				break;
 			case CMD_NOTHING:
 				/* Do nothing */
