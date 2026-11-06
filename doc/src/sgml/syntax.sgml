@@ -2133,6 +2133,45 @@ CAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> 
      <xref linkend="sql-createcast"/>.
     </para>
    </note>
+
+   <sect3 id="sql-syntax-type-casts-safe">
+    <title>Safe Type Casts</title>
+
+    <para>
+     A type cast will fail if the input value cannot be resolved to a value of
+     the destination type. To guard against such failures, you can provide an
+     <literal>ON CONVERSION ERROR</literal> clause to control what happens when
+     a cast fails. The available forms are:
+<synopsis>
+CAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> DEFAULT <replaceable>expression</replaceable> ON CONVERSION ERROR )
+CAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> ERROR ON CONVERSION ERROR )
+</synopsis>
+
+     When <literal>DEFAULT <replaceable>expression</replaceable> ON CONVERSION ERROR</literal>
+     is specified, if the first <replaceable>expression</replaceable> cannot be
+     cast to the destination type, then the specified
+     <literal>DEFAULT</literal><replaceable>expression</replaceable>
+     is evaluated and cast to the destination type, which itself will raise an
+     error if the value cannot be cast to the destination type.
+    </para>
+
+    <para>
+     Casts created with <link linkend="sql-createcast"><command>CREATE CAST</command></link>
+     are also supported, provided that the underlying cast function is marked <literal>ERROR SAFE</literal>;
+     see <link linkend="sql-createfunction"><command>CREATE FUNCTION</command></link>.
+    </para>
+
+    <para>
+     Some examples:
+<screen>
+SELECT CAST('not-a-date' AS date DEFAULT '1970-01-01' ON CONVERSION ERROR);
+<lineannotation>Result: </lineannotation><computeroutput>1970-01-01</computeroutput>
+SELECT CAST(ARRAY['x'] AS integer[] DEFAULT NULL ON CONVERSION ERROR);
+<lineannotation>Result: </lineannotation><computeroutput>NULL</computeroutput>
+</screen>
+    </para>
+
+   </sect3>
   </sect2>
 
   <sect2 id="sql-syntax-collate-exprs">

@@ -206,6 +206,12 @@ exprType(const Node *expr)
 		case T_RowCompareExpr:
 			type = BOOLOID;
 			break;
+		case T_SafeTypeCastExpr:
+			type = ((const SafeTypeCastExpr *) expr)->resulttype;
+			break;
+		case T_SafeCastElement:
+			type = ((const SafeCastElement *) expr)->resulttype;
+			break;
 		case T_CoalesceExpr:
 			type = ((const CoalesceExpr *) expr)->coalescetype;
 			break;
@@ -450,6 +456,10 @@ exprTypmod(const Node *expr)
 				return typmod;
 			}
 			break;
+		case T_SafeTypeCastExpr:
+			return ((const SafeTypeCastExpr *) expr)->resulttypmod;
+		case T_SafeCastElement:
+			return ((const SafeCastElement *) expr)->resulttypmod;
 		case T_CoalesceExpr:
 			{
 				/*
@@ -965,6 +975,12 @@ exprCollation(const Node *expr)
 			/* RowCompareExpr's result is boolean ... */
 			coll = InvalidOid;	/* ... so it has no collation */
 			break;
+		case T_SafeTypeCastExpr:
+			coll = ((const SafeTypeCastExpr *) expr)->resultcollid;
+			break;
+		case T_SafeCastElement:
+			coll = ((const SafeCastElement *) expr)->resultcollid;
+			break;
 		case T_CoalesceExpr:
 			coll = ((const CoalesceExpr *) expr)->coalescecollid;
 			break;
@@ -1239,6 +1255,12 @@ exprSetCollation(Node *expr, Oid collation)
 		case T_RowCompareExpr:
 			/* RowCompareExpr's result is boolean ... */
 			Assert(!OidIsValid(collation)); /* ... so never set a collation */
+			break;
+		case T_SafeTypeCastExpr:
+			((SafeTypeCastExpr *) expr)->resultcollid = collation;
+			break;
+		case T_SafeCastElement:
+			((SafeCastElement *) expr)->resultcollid = collation;
 			break;
 		case T_CoalesceExpr:
 			((CoalesceExpr *) expr)->coalescecollid = collation;
@@ -1560,6 +1582,12 @@ exprLocation(const Node *expr)
 		case T_RowCompareExpr:
 			/* just use leftmost argument's location */
 			loc = exprLocation((Node *) ((const RowCompareExpr *) expr)->largs);
+			break;
+		case T_SafeTypeCastExpr:
+			loc = ((const SafeTypeCastExpr *) expr)->location;
+			break;
+		case T_SafeCastElement:
+			loc = ((const SafeCastElement *) expr)->location;
 			break;
 		case T_CoalesceExpr:
 			/* COALESCE keyword should always be the first thing */
@@ -2333,6 +2361,28 @@ expression_tree_walker_impl(Node *node,
 				if (WALK(rcexpr->largs))
 					return true;
 				if (WALK(rcexpr->rargs))
+					return true;
+			}
+			break;
+		case T_SafeTypeCastExpr:
+			{
+				SafeTypeCastExpr *stcexpr = castNode(SafeTypeCastExpr, node);
+
+				if (WALK(stcexpr->arg))
+					return true;
+				if (WALK(stcexpr->castexpr))
+					return true;
+				if (WALK(stcexpr->defexpr))
+					return true;
+			}
+			break;
+		case T_SafeCastElement:
+			{
+				SafeCastElement *elem = castNode(SafeCastElement, node);
+
+				if (WALK(elem->arg))
+					return true;
+				if (WALK(elem->castexpr))
 					return true;
 			}
 			break;
@@ -3345,6 +3395,31 @@ expression_tree_mutator_impl(Node *node,
 				FLATCOPY(newnode, rcexpr, RowCompareExpr);
 				MUTATE(newnode->largs, rcexpr->largs, List *);
 				MUTATE(newnode->rargs, rcexpr->rargs, List *);
+				return (Node *) newnode;
+			}
+			break;
+		case T_SafeTypeCastExpr:
+			{
+				SafeTypeCastExpr *stcexpr = castNode(SafeTypeCastExpr, node);
+				SafeTypeCastExpr *newnode;
+
+				FLATCOPY(newnode, stcexpr, SafeTypeCastExpr);
+				MUTATE(newnode->arg, stcexpr->arg, Expr *);
+				MUTATE(newnode->castexpr, stcexpr->castexpr, Expr *);
+				MUTATE(newnode->defexpr, stcexpr->defexpr, Expr *);
+
+				return (Node *) newnode;
+			}
+			break;
+		case T_SafeCastElement:
+			{
+				SafeCastElement *elem = castNode(SafeCastElement, node);
+				SafeCastElement *newnode;
+
+				FLATCOPY(newnode, elem, SafeCastElement);
+				MUTATE(newnode->arg, elem->arg, Expr *);
+				MUTATE(newnode->castexpr, elem->castexpr, Expr *);
+
 				return (Node *) newnode;
 			}
 			break;
@@ -4484,6 +4559,8 @@ raw_expression_tree_walker_impl(Node *node,
 				if (WALK(tc->arg))
 					return true;
 				if (WALK(tc->typeName))
+					return true;
+				if (WALK(tc->defexpr))
 					return true;
 			}
 			break;

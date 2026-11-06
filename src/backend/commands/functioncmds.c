@@ -538,7 +538,8 @@ compute_common_attribute(ParseState *pstate,
 						 DefElem **cost_item,
 						 DefElem **rows_item,
 						 DefElem **support_item,
-						 DefElem **parallel_item)
+						 DefElem **parallel_item,
+						 DefElem **errorsafe_item)
 {
 	if (strcmp(defel->defname, "volatility") == 0)
 	{
@@ -614,6 +615,15 @@ compute_common_attribute(ParseState *pstate,
 
 		*parallel_item = defel;
 	}
+	else if (strcmp(defel->defname, "error") == 0)
+	{
+		if (is_procedure)
+			goto procedure_error;
+		if (*errorsafe_item)
+			errorConflictingDefElem(defel, pstate);
+
+		*errorsafe_item = defel;
+	}
 	else
 		return false;
 
@@ -663,6 +673,24 @@ interpret_func_parallel(DefElem *defel)
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE")));
 		return PROPARALLEL_UNSAFE;	/* keep compiler quiet */
+	}
+}
+
+static bool
+interpret_func_errorsafe(DefElem *defel)
+{
+	char	   *str = strVal(defel->arg);
+
+	if (strcmp(str, "safe") == 0)
+		return true;
+	else if (strcmp(str, "unsafe") == 0)
+		return false;
+	else
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_SYNTAX_ERROR),
+				errmsg("parameter \"error\" must be SAFE or UNSAFE"));
+		return false;			/* keep compiler quiet */
 	}
 }
 
@@ -756,7 +784,8 @@ compute_function_attributes(ParseState *pstate,
 							float4 *procost,
 							float4 *prorows,
 							Oid *prosupport,
-							char *parallel_p)
+							char *parallel_p,
+							bool *errorsafe_p)
 {
 	ListCell   *option;
 	DefElem    *as_item = NULL;
@@ -772,6 +801,7 @@ compute_function_attributes(ParseState *pstate,
 	DefElem    *rows_item = NULL;
 	DefElem    *support_item = NULL;
 	DefElem    *parallel_item = NULL;
+	DefElem    *errorsafe_item = NULL;
 
 	foreach(option, options)
 	{
@@ -817,7 +847,8 @@ compute_function_attributes(ParseState *pstate,
 										  &cost_item,
 										  &rows_item,
 										  &support_item,
-										  &parallel_item))
+										  &parallel_item,
+										  &errorsafe_item))
 		{
 			/* recognized common option */
 			continue;
@@ -865,6 +896,8 @@ compute_function_attributes(ParseState *pstate,
 		*prosupport = interpret_func_support(support_item);
 	if (parallel_item)
 		*parallel_p = interpret_func_parallel(parallel_item);
+	if (errorsafe_item)
+		*errorsafe_p = interpret_func_errorsafe(errorsafe_item);
 }
 
 
@@ -1067,7 +1100,8 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 	bool		isWindowFunc,
 				isStrict,
 				security,
-				isLeakProof;
+				isLeakProof,
+				isErrorSafe;
 	char		volatility;
 	ArrayType  *proconfig;
 	float4		procost;
@@ -1096,6 +1130,7 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 	security = false;
 	isLeakProof = false;
 	volatility = PROVOLATILE_VOLATILE;
+	isErrorSafe = false;
 	proconfig = NULL;
 	procost = -1;				/* indicates not set */
 	prorows = -1;				/* indicates not set */
@@ -1110,7 +1145,7 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 								&isWindowFunc, &volatility,
 								&isStrict, &security, &isLeakProof,
 								&proconfig, &procost, &prorows,
-								&prosupport, &parallel);
+								&prosupport, &parallel, &isErrorSafe);
 
 	if (!language)
 	{
@@ -1303,6 +1338,7 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 						   isStrict,
 						   volatility,
 						   parallel,
+						   isErrorSafe,
 						   parameterTypes,
 						   PointerGetDatum(allParameterTypes),
 						   PointerGetDatum(parameterModes),
@@ -1390,6 +1426,7 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 	DefElem    *rows_item = NULL;
 	DefElem    *support_item = NULL;
 	DefElem    *parallel_item = NULL;
+	DefElem    *errorsafe_item = NULL;
 	ObjectAddress address;
 
 	rel = table_open(ProcedureRelationId, RowExclusiveLock);
@@ -1433,7 +1470,8 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 									 &cost_item,
 									 &rows_item,
 									 &support_item,
-									 &parallel_item) == false)
+									 &parallel_item,
+									 &errorsafe_item) == false)
 			elog(ERROR, "option \"%s\" not recognized", defel->defname);
 	}
 
@@ -1499,6 +1537,8 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 	}
 	if (parallel_item)
 		procForm->proparallel = interpret_func_parallel(parallel_item);
+	if (errorsafe_item)
+		procForm->proerrorsafe = interpret_func_errorsafe(errorsafe_item);
 	if (set_items)
 	{
 		Datum		datum;

@@ -665,6 +665,8 @@ llvm_compile_expr(ExprState *state)
 			case EEOP_FUNCEXPR_STRICT:
 			case EEOP_FUNCEXPR_STRICT_1:
 			case EEOP_FUNCEXPR_STRICT_2:
+			case EEOP_FUNCEXPR_SAFE:
+			case EEOP_FUNCEXPR_STRICT_SAFE:
 				{
 					FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
 					LLVMValueRef v_fcinfo_isnull;
@@ -672,7 +674,8 @@ llvm_compile_expr(ExprState *state)
 
 					if (opcode == EEOP_FUNCEXPR_STRICT ||
 						opcode == EEOP_FUNCEXPR_STRICT_1 ||
-						opcode == EEOP_FUNCEXPR_STRICT_2)
+						opcode == EEOP_FUNCEXPR_STRICT_2 ||
+						opcode == EEOP_FUNCEXPR_STRICT_SAFE)
 					{
 						LLVMBasicBlockRef b_nonull;
 						LLVMBasicBlockRef *b_checkargnulls;
@@ -741,6 +744,34 @@ llvm_compile_expr(ExprState *state)
 
 					v_retval = BuildV1Call(context, b, mod, fcinfo,
 										   &v_fcinfo_isnull);
+
+					/*
+					 * A function that reported an error softly returned a
+					 * dummy datum; return NULL instead.
+					 */
+					if (opcode == EEOP_FUNCEXPR_SAFE ||
+						opcode == EEOP_FUNCEXPR_STRICT_SAFE)
+					{
+						ErrorSaveContext *escontext = (ErrorSaveContext *) fcinfo->context;
+						LLVMValueRef v_error_occurred;
+						LLVMValueRef v_error;
+
+						Assert(escontext != NULL && IsA(escontext, ErrorSaveContext));
+
+						v_error_occurred =
+							l_load(b, TypeStorageBool,
+								   l_ptr_const(&escontext->error_occurred,
+											   l_ptr(TypeStorageBool)),
+								   "");
+						v_error = LLVMBuildICmp(b, LLVMIntNE, v_error_occurred,
+												l_sbool_const(0), "");
+						v_retval = LLVMBuildSelect(b, v_error, l_datum_const(0),
+												   v_retval, "");
+						v_fcinfo_isnull = LLVMBuildSelect(b, v_error,
+														  l_sbool_const(1),
+														  v_fcinfo_isnull, "");
+					}
+
 					LLVMBuildStore(b, v_retval, v_resvaluep);
 					LLVMBuildStore(b, v_fcinfo_isnull, v_resnullp);
 
@@ -757,6 +788,18 @@ llvm_compile_expr(ExprState *state)
 
 			case EEOP_FUNCEXPR_STRICT_FUSAGE:
 				build_EvalXFunc(b, mod, "ExecEvalFuncExprStrictFusage",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_FUNCEXPR_SAFE_FUSAGE:
+				build_EvalXFunc(b, mod, "ExecEvalFuncSafeFusage",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_FUNCEXPR_STRICT_SAFE_FUSAGE:
+				build_EvalXFunc(b, mod, "ExecEvalFuncStrictSafeFusage",
 								v_state, op, v_econtext);
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
@@ -2256,6 +2299,41 @@ llvm_compile_expr(ExprState *state)
 								v_state, op);
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
+
+			case EEOP_SAFETYPE_CAST:
+				{
+					SafeTypeCastState *stcstate = op->d.stcexpr.stcstate;
+					LLVMBasicBlockRef b_error;
+					LLVMValueRef v_error_occurred_p;
+					LLVMValueRef v_error_occurred;
+
+					b_error = l_bb_before_v(opblocks[opno + 1],
+											"op.%d.error", opno);
+
+					v_error_occurred_p = l_ptr_const(&stcstate->escontext.error_occurred,
+													 l_ptr(TypeStorageBool));
+					v_error_occurred = l_load(b, TypeStorageBool,
+											  v_error_occurred_p, "");
+
+					/* no error: skip the DEFAULT expression */
+					LLVMBuildCondBr(b,
+									LLVMBuildICmp(b, LLVMIntEQ, v_error_occurred,
+												  l_sbool_const(0), ""),
+									opblocks[stcstate->jump_end],
+									b_error);
+
+					/*
+					 * The conversion failed softly: clear the error so that
+					 * the next evaluation starts afresh, and fall through to
+					 * the DEFAULT expression.
+					 */
+					LLVMPositionBuilderAtEnd(b, b_error);
+					LLVMBuildStore(b, l_sbool_const(0), v_error_occurred_p);
+					LLVMBuildStore(b, l_sbool_const(1), v_resnullp);
+					LLVMBuildStore(b, l_datum_const(0), v_resvaluep);
+					LLVMBuildBr(b, opblocks[opno + 1]);
+					break;
+				}
 
 			case EEOP_JSONEXPR_PATH:
 				{
