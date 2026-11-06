@@ -42,7 +42,7 @@ gin_extract_value_trgm(PG_FUNCTION_ARGS)
 
 	*nentries = 0;
 
-	trg = generate_trgm(VARDATA_ANY(val), VARSIZE_ANY_EXHDR(val));
+	trg = generate_trgm(VARDATA_ANY(val), VARSIZE_ANY_EXHDR(val), PG_GET_COLLATION());
 	trglen = ARRNELEM(trg);
 
 	if (trglen > 0)
@@ -93,7 +93,7 @@ gin_extract_query_trgm(PG_FUNCTION_ARGS)
 		case WordSimilarityStrategyNumber:
 		case StrictWordSimilarityStrategyNumber:
 		case EqualStrategyNumber:
-			trg = generate_trgm(VARDATA_ANY(val), VARSIZE_ANY_EXHDR(val));
+			trg = generate_trgm(VARDATA_ANY(val), VARSIZE_ANY_EXHDR(val), PG_GET_COLLATION());
 			break;
 		case ILikeStrategyNumber:
 #ifndef IGNORECASE
@@ -107,7 +107,8 @@ gin_extract_query_trgm(PG_FUNCTION_ARGS)
 			 * potentially-matching string must include.
 			 */
 			trg = generate_wildcard_trgm(VARDATA_ANY(val),
-										 VARSIZE_ANY_EXHDR(val));
+										 VARSIZE_ANY_EXHDR(val),
+										 PG_GET_COLLATION());
 			break;
 		case RegExpICaseStrategyNumber:
 #ifndef IGNORECASE

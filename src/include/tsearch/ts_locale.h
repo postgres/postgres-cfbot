@@ -18,6 +18,7 @@
 
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
+#include "catalog/pg_collation.h"
 #include "utils/pg_locale.h"
 
 /* working state for tsearch_readline (should be a local var in caller) */
@@ -56,7 +57,7 @@ ts_copychar_cstr(void *dest, const void *src)
 #define COPYCHAR ts_copychar_cstr
 
 #define GENERATE_T_ISCLASS_DECL(character_class) \
-extern int	t_is##character_class##_with_len(const char *ptr, int mblen); \
+extern int	t_is##character_class##_with_len_collation(const char *ptr, int mblen, Oid collation); \
 extern int	t_is##character_class##_cstr(const char *ptr); \
 extern int	t_is##character_class##_unbounded(const char *ptr); \
 \
