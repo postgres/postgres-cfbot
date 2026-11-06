@@ -7999,6 +7999,24 @@ resolve_special_varno(Node *node, deparse_context *context,
 		context->appendparents = save_appendparents;
 		return;
 	}
+	else if (var->varno == INNER_VAR && dpns->plan != NULL &&
+			 IsA(dpns->plan, IndexScan) &&
+			 ((IndexScan *) dpns->plan)->indexorderbynused > 0)
+	{
+		/*
+		 * An IndexScan whose targetlist reads its own ORDER BY values (see
+		 * replace_orderby_tlist_refs in setrefs.c) uses INNER_VAR Vars
+		 * numbered by ORDER BY key; they deparse as the ORDER BY expressions.
+		 */
+		List	   *orderbys = ((IndexScan *) dpns->plan)->indexorderbyorig;
+
+		if (var->varattno < 1 || var->varattno > list_length(orderbys))
+			elog(ERROR, "bogus varattno for ORDER BY value var: %d",
+				 var->varattno);
+		resolve_special_varno((Node *) list_nth(orderbys, var->varattno - 1),
+							  context, callback, callback_arg);
+		return;
+	}
 	else if (var->varno == INNER_VAR && dpns->inner_tlist)
 	{
 		TargetEntry *tle;

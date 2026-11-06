@@ -78,6 +78,7 @@ spghandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = spgbulkdelete,
 		.amvacuumcleanup = spgvacuumcleanup,
 		.amcanreturn = spgcanreturn,
+		.amcanreturnorderby = spgcanreturnorderby,
 		.amcostestimate = spgcostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = spgoptions,

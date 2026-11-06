@@ -282,6 +282,30 @@ RESET enable_seqscan;
 RESET enable_indexscan;
 RESET enable_bitmapscan;
 
+-- The distance from a point to a box is exact, so a kNN index scan, which
+-- orders by the index's own distance, returns rows in the operator's order.
+-- For the point (0.9999996,2), box 1 is 1 away and box 2 is 1.00000000000004
+-- away.  (The operator used to give box 1 1.00000000000008, out of order.)
+-- Both distances are exact on any platform: the point is above both boxes,
+-- so each is hypot(0, dy) = |dy|.
+CREATE TEMP TABLE box_knn (id int, b box);
+INSERT INTO box_knn VALUES (1, '((0,0),(1,1))'),
+  (2, box(point(0.4999996, 0), point(1.4999996, 0.99999999999996)));
+SET extra_float_digits = 0;
+SET enable_seqscan = OFF;
+SET enable_bitmapscan = OFF;
+CREATE INDEX box_knn_gist ON box_knn USING gist (b);
+SELECT id, b <-> point(0.9999996, 2) AS dist FROM box_knn
+  ORDER BY b <-> point(0.9999996, 2);
+DROP INDEX box_knn_gist;
+CREATE INDEX box_knn_spgist ON box_knn USING spgist (b);
+SELECT id, b <-> point(0.9999996, 2) AS dist FROM box_knn
+  ORDER BY b <-> point(0.9999996, 2);
+RESET extra_float_digits;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE box_knn;
+
 -- test non-error-throwing API for some core types
 SELECT pg_input_is_valid('200', 'box');
 SELECT * FROM pg_input_error_info('200', 'box');
