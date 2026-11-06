@@ -713,6 +713,23 @@ RAISE NOTICE 'ROW_COUNT = %', result;
 END;
 $$;
 SELECT * FROM target FULL OUTER JOIN source ON (sid = tid);
+
+-- A suppressed INSERT must be counted as skipped by EXPLAIN ANALYZE.
+DO $$
+DECLARE
+  plan json;
+BEGIN
+  EXECUTE $explain$
+    EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+    MERGE INTO target t USING (VALUES (4, 40)) AS s(sid, delta)
+    ON t.tid = s.sid
+    WHEN NOT MATCHED THEN INSERT VALUES (s.sid, s.delta)
+  $explain$ INTO plan;
+  RAISE NOTICE 'inserted = %, skipped = %',
+    plan->0->'Plan'->>'Tuples Inserted',
+    plan->0->'Plan'->>'Tuples Skipped';
+END;
+$$;
 DROP TRIGGER merge_skip ON target;
 DROP FUNCTION skip_merge_op();
 
