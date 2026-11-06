@@ -72,6 +72,11 @@ extern void WaitForParallelWorkersToFinish(ParallelContext *pcxt);
 extern void DestroyParallelContext(ParallelContext *pcxt);
 extern bool ParallelContextActive(void);
 
+extern int	EstimateParallelQueryText(ParallelContext *pcxt);
+extern void StoreParallelQueryText(ParallelContext *pcxt, uint64 key,
+								   int querylen);
+extern void RestoreParallelQueryText(shm_toc *toc, uint64 key);
+
 extern void HandleParallelMessageInterrupt(void);
 extern void ProcessParallelMessages(void);
 extern void AtEOXact_Parallel(bool isCommit);
