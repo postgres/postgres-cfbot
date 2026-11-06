@@ -434,8 +434,10 @@
         Collects all the key/value pairs into a JSON object.  Key arguments
         are coerced to text; value arguments are converted as per
         <function>to_json</function> or <function>to_jsonb</function>.
-        The <parameter>key</parameter> cannot be null. If the
-        <parameter>value</parameter> is null then the pair is skipped.
+        The <parameter>key</parameter> must be a non-null scalar and cannot
+        belong to a type that has a cast to <type>json</type>, even if the
+        pair is skipped. If the <parameter>value</parameter> is null then
+        the pair is skipped.
         Duplicate keys are handled as for <function>json_object_agg</function>
         and <function>jsonb_object_agg</function>, after removing any pairs
         with null values.
@@ -495,8 +497,10 @@
         Collects all the key/value pairs into a JSON object.  Key arguments
         are coerced to text; value arguments are converted as per
         <function>to_json</function> or <function>to_jsonb</function>.
-        The <parameter>key</parameter> cannot be null. If the
-        <parameter>value</parameter> is null then the pair is skipped.
+        The <parameter>key</parameter> must be a non-null scalar and cannot
+        belong to a type that has a cast to <type>json</type>, even if the
+        pair is skipped. If the <parameter>value</parameter> is null then
+        the pair is skipped.
         If there is a duplicate key (including pairs with null values)
         an error is thrown.
        </para></entry>

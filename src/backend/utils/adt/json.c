@@ -193,14 +193,8 @@ datum_to_json_internal(Datum val, bool is_null, StringInfo result,
 		return;
 	}
 
-	if (key_scalar &&
-		(tcategory == JSONTYPE_ARRAY ||
-		 tcategory == JSONTYPE_COMPOSITE ||
-		 tcategory == JSONTYPE_JSON ||
-		 tcategory == JSONTYPE_CAST))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("key value must be scalar, not array, composite, or json")));
+	if (key_scalar)
+		json_validate_key_category(tcategory);
 
 	switch (tcategory)
 	{
@@ -1056,7 +1050,10 @@ json_object_agg_transfn_worker(FunctionCallInfo fcinfo,
 		 * buffer to store the key name so that we can check it.
 		 */
 		if (!unique_keys)
+		{
+			json_validate_key_category(state->key_category);
 			PG_RETURN_POINTER(state);
+		}
 
 		out = json_unique_builder_get_throwawaybuf(&state->unique_check);
 	}
@@ -1220,6 +1217,12 @@ json_build_object_worker(int nargs, const Datum *args, const bool *nulls, const 
 		bool		skip;
 		int			key_offset;
 
+		/* Keys must not be null, even if their values will be omitted. */
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("null value not allowed for object key")));
+
 		/* Skip null values if absent_on_null */
 		skip = absent_on_null && nulls[i + 1];
 
@@ -1227,7 +1230,15 @@ json_build_object_worker(int nargs, const Datum *args, const bool *nulls, const 
 		{
 			/* If key uniqueness check is needed we must save skipped keys */
 			if (!unique_keys)
+			{
+				JsonTypeCategory tcategory;
+				Oid			outfuncoid;
+
+				/* Validate the key type without converting the omitted key. */
+				json_categorize_type(types[i], false, &tcategory, &outfuncoid);
+				json_validate_key_category(tcategory);
 				continue;
+			}
 
 			out = json_unique_builder_get_throwawaybuf(&unique_check);
 		}
@@ -1237,12 +1248,6 @@ json_build_object_worker(int nargs, const Datum *args, const bool *nulls, const 
 			sep = ", ";
 			out = result;
 		}
-
-		/* process key */
-		if (nulls[i])
-			ereport(ERROR,
-					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("null value not allowed for object key")));
 
 		/* save key offset before appending it */
 		key_offset = out->len;

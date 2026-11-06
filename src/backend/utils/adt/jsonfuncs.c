@@ -6087,6 +6087,24 @@ json_categorize_type(Oid typoid, bool is_jsonb,
 }
 
 /*
+ * Check that a JSON type category is valid for an object key.
+ * This must also be checked when a NULL value causes the pair to be omitted.
+ * The category must have been obtained from json_categorize_type().
+ */
+void
+json_validate_key_category(JsonTypeCategory tcategory)
+{
+	if (tcategory == JSONTYPE_ARRAY ||
+		tcategory == JSONTYPE_COMPOSITE ||
+		tcategory == JSONTYPE_JSON ||
+		tcategory == JSONTYPE_JSONB ||
+		tcategory == JSONTYPE_CAST)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("key value must be scalar, not array, composite, or json")));
+}
+
+/*
  * Check whether a type conversion to JSON or JSONB involves any mutable
  * functions.  This recurses into container types (arrays, composites,
  * ranges, multiranges, domains) to check their element/sub types.

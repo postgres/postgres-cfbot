@@ -724,6 +724,8 @@
          converted to the <type>text</type> type.
          It cannot be <literal>NULL</literal> nor can it
          belong to a type that has a cast to the <type>json</type> type.
+         These restrictions apply even if the pair is omitted from the output
+         due to <literal>ABSENT ON NULL</literal>.
          If <literal>WITH UNIQUE KEYS</literal> is specified, there must not
          be any duplicate <replaceable>key_expression</replaceable>.
          Any pair for which the <replaceable>value_expression</replaceable>

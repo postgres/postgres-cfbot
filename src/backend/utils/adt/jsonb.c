@@ -645,19 +645,11 @@ datum_to_jsonb_internal(Datum val, bool is_null, JsonbInState *result,
 		Assert(!key_scalar);
 		jb.type = jbvNull;
 	}
-	else if (key_scalar &&
-			 (tcategory == JSONTYPE_ARRAY ||
-			  tcategory == JSONTYPE_COMPOSITE ||
-			  tcategory == JSONTYPE_JSON ||
-			  tcategory == JSONTYPE_JSONB ||
-			  tcategory == JSONTYPE_CAST))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("key value must be scalar, not array, composite, or json")));
-	}
 	else
 	{
+		if (key_scalar)
+			json_validate_key_category(tcategory);
+
 		switch (tcategory)
 		{
 			case JSONTYPE_ARRAY:
@@ -1162,7 +1154,15 @@ jsonb_build_object_worker(int nargs, const Datum *args, const bool *nulls, const
 
 		/* we need to save skipped keys for the key uniqueness check */
 		if (skip && !unique_keys)
+		{
+			JsonTypeCategory tcategory;
+			Oid			outfuncoid;
+
+			/* Validate the key type without converting the omitted key. */
+			json_categorize_type(types[i], true, &tcategory, &outfuncoid);
+			json_validate_key_category(tcategory);
 			continue;
+		}
 
 		add_jsonb(args[i], false, &result, types[i], true);
 
@@ -1645,7 +1645,10 @@ jsonb_object_agg_transfn_worker(FunctionCallInfo fcinfo,
 	skip = absent_on_null && PG_ARGISNULL(2);
 
 	if (skip && !unique_keys)
+	{
+		json_validate_key_category(state->key_category);
 		PG_RETURN_POINTER(state);
+	}
 
 	/*
 	 * We run this code in the normal function context, so that we don't leak
