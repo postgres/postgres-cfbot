@@ -1523,17 +1523,10 @@ CopyFrom(CopyFromState cstate)
 }
 
 /*
- * Setup to read tuples from a file for COPY FROM.
+ * Wrapper for BeginCopyFromExtended() with attnamelist_is_explicit = false.
  *
- * 'rel': Used as a template for the tuples
- * 'whereClause': WHERE clause from the COPY FROM command
- * 'filename': Name of server-local file to read, NULL for STDIN
- * 'is_program': true if 'filename' is program to execute
- * 'data_source_cb': callback that provides the input data
- * 'attnamelist': List of char *, columns to include. NIL selects all cols.
- * 'options': List of DefElem. See copy_opt_item in gram.y for selections.
- *
- * Returns a CopyFromState, to be passed to NextCopyFrom and related functions.
+ * A NIL attnamelist selects all target columns that are neither dropped nor
+ * generated.
  */
 CopyFromState
 BeginCopyFrom(ParseState *pstate,
@@ -1544,6 +1537,39 @@ BeginCopyFrom(ParseState *pstate,
 			  copy_data_source_cb data_source_cb,
 			  List *attnamelist,
 			  List *options)
+{
+	return BeginCopyFromExtended(pstate, rel, whereClause, filename,
+								 is_program, data_source_cb, attnamelist,
+								 options, false);
+}
+
+/*
+ * Setup to read tuples from a file for COPY FROM.
+ *
+ * 'rel': Used as a template for the tuples
+ * 'whereClause': WHERE clause from the COPY FROM command
+ * 'filename': Name of server-local file to read, NULL for STDIN
+ * 'is_program': true if 'filename' is program to execute
+ * 'data_source_cb': callback that provides the input data
+ * 'attnamelist': List of char *, columns to include.
+ * 'options': List of DefElem. See copy_opt_item in gram.y for selections.
+ * 'attnamelist_is_explicit': If true, a NIL attnamelist means zero input
+ * columns. Otherwise, NIL selects all target columns that are neither
+ * dropped nor generated. This is needed when a logical replication source
+ * has no columns.
+ *
+ * Returns a CopyFromState, to be passed to NextCopyFrom and related functions.
+ */
+CopyFromState
+BeginCopyFromExtended(ParseState *pstate,
+					  Relation rel,
+					  Node *whereClause,
+					  const char *filename,
+					  bool is_program,
+					  copy_data_source_cb data_source_cb,
+					  List *attnamelist,
+					  List *options,
+					  bool attnamelist_is_explicit)
 {
 	CopyFromState cstate;
 	bool		pipe = (filename == NULL);
@@ -1594,7 +1620,10 @@ BeginCopyFrom(ParseState *pstate,
 	/* process common options or initialization */
 
 	/* Generate or convert list of attributes to process */
-	cstate->attnumlist = CopyGetAttnums(tupDesc, cstate->rel, attnamelist);
+	if (attnamelist_is_explicit && attnamelist == NIL)
+		cstate->attnumlist = NIL;
+	else
+		cstate->attnumlist = CopyGetAttnums(tupDesc, cstate->rel, attnamelist);
 
 	num_phys_attrs = tupDesc->natts;
 
