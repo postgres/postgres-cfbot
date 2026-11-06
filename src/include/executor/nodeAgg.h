@@ -229,6 +229,9 @@ typedef struct AggStatePerAggData
 	 * aggregates because the final function is read-write.
 	 */
 	bool		shareable;
+
+	/* ExprState for evaluating ON EMPTY default value, or NULL */
+	ExprState  *aggonemptystate;
 } AggStatePerAggData;
 
 /*
