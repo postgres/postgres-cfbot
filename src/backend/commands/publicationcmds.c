@@ -1252,7 +1252,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 	{
 		TransformPubWhereClauses(rels, queryString, pubform->pubviaroot);
 
-		publish_schema |= is_schema_publication(pubid);
+		publish_schema |= is_schema_publication(pubform);
 
 		CheckPubRelationColumnList(stmt->pubname, rels, publish_schema,
 								   pubform->pubviaroot);
@@ -1576,8 +1576,7 @@ CheckAlterPublication(AlterPublicationStmt *stmt, HeapTuple tup,
 		 * If the publication already contains specific tables or schemas, we
 		 * prevent switching to a ALL state.
 		 */
-		if (is_table_publication(pubform->oid) ||
-			is_schema_publication(pubform->oid))
+		if (is_table_publication(pubform) || is_schema_publication(pubform))
 		{
 			ereport(ERROR,
 					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -2204,7 +2203,7 @@ AlterPublicationOwner_internal(Relation rel, HeapTuple tup, Oid newOwnerId)
 		if (!superuser_arg(newOwnerId))
 		{
 			if (form->puballtables || form->puballsequences ||
-				is_schema_publication(form->oid))
+				is_schema_publication(form))
 				ereport(ERROR,
 						errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 						errmsg("permission denied to change owner of publication \"%s\"",
