@@ -125,13 +125,17 @@ SELECT cube_subset(cube('(6,7,8),(6,7,8)'), array(SELECT 1 as a FROM generate_se
 -- Test point processing
 --
 SELECT cube('(1,2),(1,2)'); -- cube_in
+SELECT cube('(NaN,NaN),(NaN,NaN)'); -- cube_in
 SELECT cube('{0,1,2}'::float[], '{0,1,2}'::float[]); -- cube_a_f8_f8
+SELECT cube('{0,1,NaN}'::float[], '{0,1,NaN}'::float[]); -- cube_a_f8_f8
 SELECT cube('{5,6,7,8}'::float[]); -- cube_a_f8
 SELECT cube(1.37); -- cube_f8
 SELECT cube(1.37, 1.37); -- cube_f8_f8
+SELECT cube('NaN'::float8, 'NaN'::float8); -- cube_f8_f8
 SELECT cube(cube(1,1), 42); -- cube_c_f8
 SELECT cube(cube(1,2), 42); -- cube_c_f8
 SELECT cube(cube(1,1), 42, 42); -- cube_c_f8_f8
+SELECT cube(cube(1,1), 'NaN'::float8, 'NaN'::float8); -- cube_c_f8_f8
 SELECT cube(cube(1,1), 42, 24); -- cube_c_f8_f8
 SELECT cube(cube(1,2), 42, 42); -- cube_c_f8_f8
 SELECT cube(cube(1,2), 42, 24); -- cube_c_f8_f8
@@ -189,6 +193,8 @@ SELECT '(2,0,0,0,1),(3,1,0,0,0)'::cube < '(2,0),(3,1)'::cube AS bool;
 SELECT '(2,0,0,0,0),(3,1,0,0,0)'::cube > '(2,0),(3,1)'::cube AS bool;
 SELECT '(2,0,0,0,0),(3,1,0,0,0)'::cube < '(2,0),(3,1)'::cube AS bool;
 
+SELECT '(1,1)'::cube = '(NaN,NaN)'::cube AS eq,
+	   '(NaN)'::cube > '(1)'::cube AS gt;
 
 -- "overlap"
 --
@@ -292,6 +298,7 @@ SELECT cube_ur_coord('(42,137)'::cube, 3);
 SELECT cube_is_point('(0)'::cube);
 SELECT cube_is_point('(0,1,2)'::cube);
 SELECT cube_is_point('(0,1,2),(0,1,2)'::cube);
+SELECT cube_is_point(cube(ARRAY['NaN'::float8], ARRAY['NaN'::float8]));
 SELECT cube_is_point('(0,1,2),(-1,1,2)'::cube);
 SELECT cube_is_point('(0,1,2),(0,-1,2)'::cube);
 SELECT cube_is_point('(0,1,2),(0,1,-2)'::cube);
@@ -341,6 +348,7 @@ SELECT cube_inter('(1,2,3)'::cube, '(5,6,3)'::cube); -- point args
 --
 SELECT cube_size('(4,8),(15,16)'::cube);
 SELECT cube_size('(42,137)'::cube);
+SELECT cube_size(cube_subset('(NaN,0),(NaN,1)'::cube, ARRAY[1]));
 
 -- Test of distances (euclidean distance may not be bit-exact)
 --
@@ -356,6 +364,11 @@ SELECT '(1,1)'::cube <#> '(4,5)'::cube as d_t;
 SELECT cube_distance('(2,2),(10,10)'::cube, '(0,0),(5,5)'::cube);
 SELECT distance_chebyshev('(2,2),(10,10)'::cube, '(0,0),(5,5)'::cube);
 SELECT distance_taxicab('(2,2),(10,10)'::cube, '(0,0),(5,5)'::cube);
+
+SELECT '(NaN,1)'::cube <-> '(2,2)'::cube AS euclidean,
+	   '(NaN,1)'::cube <#> '(2,2)'::cube AS taxicab,
+	   '(NaN,1)'::cube <=> '(2,2)'::cube AS chebyshev;
+
 -- coordinate access
 SELECT cube(array[10,20,30], array[40,50,60])->1;
 SELECT cube(array[40,50,60], array[10,20,30])->1;
@@ -436,3 +449,16 @@ SELECT c~>(-2), c FROM test_cube ORDER BY c~>(-2) LIMIT 15; -- descending by rig
 SELECT c~>(-3), c FROM test_cube ORDER BY c~>(-3) LIMIT 15; -- descending by lower bound
 SELECT c~>(-4), c FROM test_cube ORDER BY c~>(-4) LIMIT 15; -- descending by upper bound
 RESET enable_indexscan;
+
+-- Opposite coordinate orders cannot both follow the index's page order.
+TRUNCATE test_cube;
+INSERT INTO test_cube
+SELECT cube(ARRAY[number::float8, -number::float8],
+			ARRAY['NaN'::float8, 'NaN'::float8])
+FROM generate_series(1, 1000) AS numbers(number);
+SET enable_seqscan = false;
+SELECT ARRAY(SELECT c~>(-1) FROM test_cube ORDER BY c~>(-1)) =
+	   ARRAY(SELECT generate_series(-1000, -1)::float8) AS correct_order;
+SELECT ARRAY(SELECT c~>(-3) FROM test_cube ORDER BY c~>(-3)) =
+	   ARRAY(SELECT generate_series(1, 1000)::float8) AS correct_order;
+RESET enable_seqscan;

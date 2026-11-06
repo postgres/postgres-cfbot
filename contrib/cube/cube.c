@@ -177,7 +177,7 @@ cube_a_f8_f8(PG_FUNCTION_ARGS)
 	point = true;
 	for (i = 0; i < dim; i++)
 	{
-		if (dur[i] != dll[i])
+		if (float8_ne(dur[i], dll[i]))
 		{
 			point = false;
 			break;
@@ -779,20 +779,18 @@ cube_union_v0(NDBOX *a, NDBOX *b)
 	/* First compute the union of the dimensions present in both args */
 	for (i = 0; i < DIM(b); i++)
 	{
-		result->x[i] = Min(Min(LL_COORD(a, i), UR_COORD(a, i)),
-						   Min(LL_COORD(b, i), UR_COORD(b, i)));
-		result->x[i + DIM(a)] = Max(Max(LL_COORD(a, i), UR_COORD(a, i)),
-									Max(LL_COORD(b, i), UR_COORD(b, i)));
+		result->x[i] = float8_min(float8_min(LL_COORD(a, i), UR_COORD(a, i)),
+								  float8_min(LL_COORD(b, i), UR_COORD(b, i)));
+		result->x[i + DIM(a)] = float8_max(float8_max(LL_COORD(a, i), UR_COORD(a, i)),
+										   float8_max(LL_COORD(b, i), UR_COORD(b, i)));
 	}
 	/* continue on the higher dimensions only present in 'a' */
 	for (; i < DIM(a); i++)
 	{
-		result->x[i] = Min(0,
-						   Min(LL_COORD(a, i), UR_COORD(a, i))
-			);
-		result->x[i + dim] = Max(0,
-								 Max(LL_COORD(a, i), UR_COORD(a, i))
-			);
+		result->x[i] = float8_min(0.0,
+								  float8_min(LL_COORD(a, i), UR_COORD(a, i)));
+		result->x[i + dim] = float8_max(0.0,
+										float8_max(LL_COORD(a, i), UR_COORD(a, i)));
 	}
 
 	/*
@@ -854,20 +852,18 @@ cube_inter(PG_FUNCTION_ARGS)
 	/* First compute intersection of the dimensions present in both args */
 	for (i = 0; i < DIM(b); i++)
 	{
-		result->x[i] = Max(Min(LL_COORD(a, i), UR_COORD(a, i)),
-						   Min(LL_COORD(b, i), UR_COORD(b, i)));
-		result->x[i + DIM(a)] = Min(Max(LL_COORD(a, i), UR_COORD(a, i)),
-									Max(LL_COORD(b, i), UR_COORD(b, i)));
+		result->x[i] = float8_max(float8_min(LL_COORD(a, i), UR_COORD(a, i)),
+								  float8_min(LL_COORD(b, i), UR_COORD(b, i)));
+		result->x[i + DIM(a)] = float8_min(float8_max(LL_COORD(a, i), UR_COORD(a, i)),
+										   float8_max(LL_COORD(b, i), UR_COORD(b, i)));
 	}
 	/* continue on the higher dimensions only present in 'a' */
 	for (; i < DIM(a); i++)
 	{
-		result->x[i] = Max(0,
-						   Min(LL_COORD(a, i), UR_COORD(a, i))
-			);
-		result->x[i + DIM(a)] = Min(0,
-									Max(LL_COORD(a, i), UR_COORD(a, i))
-			);
+		result->x[i] = float8_max(0.0,
+								  float8_min(LL_COORD(a, i), UR_COORD(a, i)));
+		result->x[i + DIM(a)] = float8_min(0.0,
+										   float8_max(LL_COORD(a, i), UR_COORD(a, i)));
 	}
 
 	/*
@@ -922,7 +918,7 @@ rt_cube_size(NDBOX *a, double *size)
 		/* special case for GiST */
 		result = 0.0;
 	}
-	else if (IS_POINT(a) || DIM(a) == 0)
+	else if (cube_is_point_internal(a))
 	{
 		/* necessarily has zero size */
 		result = 0.0;
@@ -951,20 +947,20 @@ cube_cmp_v0(NDBOX *a, NDBOX *b)
 	/* compare the common dimensions */
 	for (i = 0; i < dim; i++)
 	{
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) >
-			Min(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_gt(float8_min(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_min(LL_COORD(b, i), UR_COORD(b, i))))
 			return 1;
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) <
-			Min(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_lt(float8_min(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_min(LL_COORD(b, i), UR_COORD(b, i))))
 			return -1;
 	}
 	for (i = 0; i < dim; i++)
 	{
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) >
-			Max(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_gt(float8_max(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_max(LL_COORD(b, i), UR_COORD(b, i))))
 			return 1;
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) <
-			Max(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_lt(float8_max(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_max(LL_COORD(b, i), UR_COORD(b, i))))
 			return -1;
 	}
 
@@ -973,16 +969,16 @@ cube_cmp_v0(NDBOX *a, NDBOX *b)
 	{
 		for (i = dim; i < DIM(a); i++)
 		{
-			if (Min(LL_COORD(a, i), UR_COORD(a, i)) > 0)
+			if (float8_gt(float8_min(LL_COORD(a, i), UR_COORD(a, i)), 0.0))
 				return 1;
-			if (Min(LL_COORD(a, i), UR_COORD(a, i)) < 0)
+			if (float8_lt(float8_min(LL_COORD(a, i), UR_COORD(a, i)), 0.0))
 				return -1;
 		}
 		for (i = dim; i < DIM(a); i++)
 		{
-			if (Max(LL_COORD(a, i), UR_COORD(a, i)) > 0)
+			if (float8_gt(float8_max(LL_COORD(a, i), UR_COORD(a, i)), 0.0))
 				return 1;
-			if (Max(LL_COORD(a, i), UR_COORD(a, i)) < 0)
+			if (float8_lt(float8_max(LL_COORD(a, i), UR_COORD(a, i)), 0.0))
 				return -1;
 		}
 
@@ -996,16 +992,16 @@ cube_cmp_v0(NDBOX *a, NDBOX *b)
 	{
 		for (i = dim; i < DIM(b); i++)
 		{
-			if (Min(LL_COORD(b, i), UR_COORD(b, i)) > 0)
+			if (float8_gt(float8_min(LL_COORD(b, i), UR_COORD(b, i)), 0.0))
 				return -1;
-			if (Min(LL_COORD(b, i), UR_COORD(b, i)) < 0)
+			if (float8_lt(float8_min(LL_COORD(b, i), UR_COORD(b, i)), 0.0))
 				return 1;
 		}
 		for (i = dim; i < DIM(b); i++)
 		{
-			if (Max(LL_COORD(b, i), UR_COORD(b, i)) > 0)
+			if (float8_gt(float8_max(LL_COORD(b, i), UR_COORD(b, i)), 0.0))
 				return -1;
-			if (Max(LL_COORD(b, i), UR_COORD(b, i)) < 0)
+			if (float8_lt(float8_max(LL_COORD(b, i), UR_COORD(b, i)), 0.0))
 				return 1;
 		}
 
@@ -1154,11 +1150,11 @@ cube_contains_v0(NDBOX *a, NDBOX *b)
 	/* Can't care less about the excess dimensions of (a), if any */
 	for (i = 0; i < Min(DIM(a), DIM(b)); i++)
 	{
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) >
-			Min(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_gt(float8_min(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_min(LL_COORD(b, i), UR_COORD(b, i))))
 			return false;
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) <
-			Max(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_lt(float8_max(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_max(LL_COORD(b, i), UR_COORD(b, i))))
 			return false;
 	}
 
@@ -1217,18 +1213,20 @@ cube_overlap_v0(NDBOX *a, NDBOX *b)
 	/* compare within the dimensions of (b) */
 	for (i = 0; i < DIM(b); i++)
 	{
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) > Max(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_gt(float8_min(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_max(LL_COORD(b, i), UR_COORD(b, i))))
 			return false;
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) < Min(LL_COORD(b, i), UR_COORD(b, i)))
+		if (float8_lt(float8_max(LL_COORD(a, i), UR_COORD(a, i)),
+					  float8_min(LL_COORD(b, i), UR_COORD(b, i))))
 			return false;
 	}
 
 	/* compare to zero those dimensions in (a) absent in (b) */
 	for (i = DIM(b); i < DIM(a); i++)
 	{
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) > 0)
+		if (float8_gt(float8_min(LL_COORD(a, i), UR_COORD(a, i)), 0.0))
 			return false;
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) < 0)
+		if (float8_lt(float8_max(LL_COORD(a, i), UR_COORD(a, i)), 0.0))
 			return false;
 	}
 
@@ -1377,16 +1375,14 @@ distance_chebyshev(PG_FUNCTION_ARGS)
 	{
 		d = fabs(distance_1D(LL_COORD(a, i), UR_COORD(a, i),
 							 LL_COORD(b, i), UR_COORD(b, i)));
-		if (d > distance)
-			distance = d;
+		distance = float8_max(distance, d);
 	}
 
 	/* compute distance to zero for those dimensions in (a) absent in (b) */
 	for (i = DIM(b); i < DIM(a); i++)
 	{
 		d = fabs(distance_1D(LL_COORD(a, i), UR_COORD(a, i), 0.0, 0.0));
-		if (d > distance)
-			distance = d;
+		distance = float8_max(distance, d);
 	}
 
 	if (swapped)
@@ -1452,9 +1448,9 @@ g_cube_distance(PG_FUNCTION_ARGS)
 				{
 					/* For leaf just return required upper/lower bound */
 					if (upper)
-						retval = Max(cube->x[index], cube->x[index + DIM(cube)]);
+						retval = float8_max(cube->x[index], cube->x[index + DIM(cube)]);
 					else
-						retval = Min(cube->x[index], cube->x[index + DIM(cube)]);
+						retval = float8_min(cube->x[index], cube->x[index + DIM(cube)]);
 				}
 				else
 				{
@@ -1466,9 +1462,9 @@ g_cube_distance(PG_FUNCTION_ARGS)
 					 * inversed value.
 					 */
 					if (!inverse)
-						retval = Min(cube->x[index], cube->x[index + DIM(cube)]);
+						retval = float8_min(cube->x[index], cube->x[index + DIM(cube)]);
 					else
-						retval = Max(cube->x[index], cube->x[index + DIM(cube)]);
+						retval = float8_max(cube->x[index], cube->x[index + DIM(cube)]);
 				}
 			}
 		}
@@ -1505,12 +1501,26 @@ g_cube_distance(PG_FUNCTION_ARGS)
 				break;
 		}
 	}
+
+	/* NaN does not bound the subtree's distances from below */
+	if (!GIST_LEAF(entry) && isnan(retval))
+		retval = -get_float8_infinity();
+
 	PG_RETURN_FLOAT8(retval);
 }
 
 static double
 distance_1D(double a1, double a2, double b1, double b2)
 {
+	/*
+	 * If any endpoint is NaN, all the comparisons below are false and we'd
+	 * fall through to the "intersecting" case and return 0.  Return NaN
+	 * instead, so that callers propagate it as ordinary float arithmetic
+	 * does.
+	 */
+	if (isnan(a1) || isnan(a2) || isnan(b1) || isnan(b2))
+		return get_float8_nan();
+
 	/* interval (a) is entirely on the left of (b) */
 	if ((a1 <= b1) && (a2 <= b1) && (a1 <= b2) && (a2 <= b2))
 		return (Min(b1, b2) - Max(a1, a2));
@@ -1543,16 +1553,10 @@ cube_is_point_internal(NDBOX *cube)
 	if (IS_POINT(cube))
 		return true;
 
-	/*
-	 * Even if the point-flag is not set, all the lower-left coordinates might
-	 * match the upper-right coordinates, so that the value is in fact a
-	 * point. Such values don't arise with current code - the point flag is
-	 * always set if appropriate - but they might be present on-disk in
-	 * clusters upgraded from pre-9.4 versions.
-	 */
+	/* The point flag isn't always set when the corners are equal */
 	for (i = 0; i < DIM(cube); i++)
 	{
-		if (LL_COORD(cube, i) != UR_COORD(cube, i))
+		if (float8_ne(LL_COORD(cube, i), UR_COORD(cube, i)))
 			return false;
 	}
 	return true;
@@ -1578,7 +1582,7 @@ cube_ll_coord(PG_FUNCTION_ARGS)
 	double		result;
 
 	if (DIM(c) >= n && n > 0)
-		result = Min(LL_COORD(c, n - 1), UR_COORD(c, n - 1));
+		result = float8_min(LL_COORD(c, n - 1), UR_COORD(c, n - 1));
 	else
 		result = 0;
 
@@ -1595,7 +1599,7 @@ cube_ur_coord(PG_FUNCTION_ARGS)
 	double		result;
 
 	if (DIM(c) >= n && n > 0)
-		result = Max(LL_COORD(c, n - 1), UR_COORD(c, n - 1));
+		result = float8_max(LL_COORD(c, n - 1), UR_COORD(c, n - 1));
 	else
 		result = 0;
 
@@ -1685,9 +1689,9 @@ cube_coord_llur(PG_FUNCTION_ARGS)
 		else
 		{
 			if (upper)
-				result = Max(cube->x[index], cube->x[index + DIM(cube)]);
+				result = float8_max(cube->x[index], cube->x[index + DIM(cube)]);
 			else
-				result = Min(cube->x[index], cube->x[index + DIM(cube)]);
+				result = float8_min(cube->x[index], cube->x[index + DIM(cube)]);
 		}
 	}
 	else
@@ -1734,7 +1738,7 @@ cube_enlarge(PG_FUNCTION_ARGS)
 
 	for (i = 0, j = dim; i < DIM(a); i++, j++)
 	{
-		if (LL_COORD(a, i) >= UR_COORD(a, i))
+		if (float8_ge(LL_COORD(a, i), UR_COORD(a, i)))
 		{
 			result->x[i] = UR_COORD(a, i) - r;
 			result->x[j] = LL_COORD(a, i) + r;
@@ -1744,7 +1748,7 @@ cube_enlarge(PG_FUNCTION_ARGS)
 			result->x[i] = LL_COORD(a, i) - r;
 			result->x[j] = UR_COORD(a, i) + r;
 		}
-		if (result->x[i] > result->x[j])
+		if (float8_gt(result->x[i], result->x[j]))
 		{
 			result->x[i] = (result->x[i] + result->x[j]) / 2;
 			result->x[j] = result->x[i];
@@ -1799,7 +1803,7 @@ cube_f8_f8(PG_FUNCTION_ARGS)
 	NDBOX	   *result;
 	int			size;
 
-	if (x0 == x1)
+	if (float8_eq(x0, x1))
 	{
 		size = POINT_SIZE(1);
 		result = (NDBOX *) palloc0(size);
@@ -1889,7 +1893,7 @@ cube_c_f8_f8(PG_FUNCTION_ARGS)
 				 errdetail("A cube cannot have more than %d dimensions.",
 						   CUBE_MAX_DIM)));
 
-	if (IS_POINT(cube) && (x1 == x2))
+	if (IS_POINT(cube) && float8_eq(x1, x2))
 	{
 		size = POINT_SIZE((DIM(cube) + 1));
 		result = (NDBOX *) palloc0(size);
