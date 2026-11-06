@@ -756,7 +756,7 @@ pg_ndistinct_in(PG_FUNCTION_ARGS)
 	sem_action.scalar = ndistinct_scalar;
 
 	lex = makeJsonLexContextCstringLen(NULL, str, strlen(str),
-									   PG_UTF8, true);
+									   PG_UTF8, true, false);
 	result = pg_parse_json(lex, &sem_action);
 	freeJsonLexContext(lex);
 
