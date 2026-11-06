@@ -18,6 +18,7 @@
 #include <ctype.h>
 
 #include "access/detoast.h"
+#include "access/toast_compression.h"
 #include "access/htup_details.h"
 #include "access/tupconvert.h"
 #include "catalog/pg_proc.h"
@@ -8916,7 +8917,8 @@ assign_simple_var(PLpgSQL_execstate *estate, PLpgSQL_var *var,
 	 * not a problem since all array entries are always detoasted.)
 	 */
 	if (!estate->atomic && !isnull && var->datatype->typlen == -1 &&
-		VARATT_IS_EXTERNAL_NON_EXPANDED(DatumGetPointer(newvalue)))
+		(VARATT_IS_EXTERNAL_NON_EXPANDED(DatumGetPointer(newvalue)) ||
+		 VARATT_IS_COMPRESSED_DICT(DatumGetPointer(newvalue))))
 	{
 		MemoryContext oldcxt;
 		Datum		detoasted;
