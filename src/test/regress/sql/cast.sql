@@ -459,3 +459,16 @@ DROP DOMAIN dint;
 DROP DOMAIN dintnn;
 RESET extra_float_digits;
 RESET lc_monetary;
+
+-- errors in the input expression itself must not be turned into the DEFAULT,
+-- even when no cast path exists or the cast is known to fail
+SELECT CAST(1/0 AS date DEFAULT NULL ON CONVERSION ERROR);
+SELECT CAST((('abc'::text)::integer) AS date DEFAULT NULL ON CONVERSION ERROR);
+SELECT CAST((1/(g-g)) AS date DEFAULT NULL ON CONVERSION ERROR) FROM generate_series(1,1) g;
+SELECT CAST(ARRAY['x', (1/0)::text] AS date[] DEFAULT NULL ON CONVERSION ERROR);
+SELECT CAST(ARRAY['x', (1/(g-g))::text] AS date[] DEFAULT NULL ON CONVERSION ERROR) FROM generate_series(1,1) g;
+-- the DEFAULT is not evaluated when the conversion succeeds
+SELECT CAST('1' AS int DEFAULT 1/0 ON CONVERSION ERROR);
+SELECT CAST(g::text AS int DEFAULT 1/0 ON CONVERSION ERROR) FROM generate_series(1,1) g;
+SELECT CAST(ARRAY['1'] AS int[] DEFAULT ('{' || (1/0) || '}')::int[] ON CONVERSION ERROR);
+SELECT CAST('x' AS int DEFAULT 1/0 ON CONVERSION ERROR);
