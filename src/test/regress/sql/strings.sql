@@ -1165,6 +1165,20 @@ SELECT rpad('hi', -5, 'xy');
 SELECT rpad('hello', 2);
 SELECT rpad('hi', 5, '');
 
+-- whole repetitions of the pad string, a partial final repetition, and
+-- fewer than one repetition
+SELECT lpad('hi', 8, 'abc'), rpad('hi', 8, 'abc');
+SELECT lpad('hi', 9, 'abc'), rpad('hi', 9, 'abc');
+SELECT lpad('hi', 12, 'ab'), rpad('hi', 12, 'ab');
+SELECT lpad('hi', 3, 'abc'), rpad('hi', 3, 'abc');
+-- padding longer than the 16 kB block that repeat_bytes() copies
+SELECT rpad('', 50000, 'abc') = (SELECT string_agg('abc', '') FROM generate_series(1, 16666)) || 'ab';
+
+-- repeat: one, several and five copies, and empty results
+SELECT repeat('abc', 1), repeat('abc', 2), repeat('ab', 5);
+SELECT repeat('abc', 0), repeat('', 5), repeat('abc', -1);
+SELECT repeat('abc', 10000) = (SELECT string_agg('abc', '') FROM generate_series(1, 10000));
+
 SELECT ltrim('zzzytrim', 'xyz');
 
 SELECT translate('', '14', 'ax');
