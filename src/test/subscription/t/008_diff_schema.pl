@@ -31,6 +31,71 @@ $node_subscriber->safe_psql('postgres',
 
 # Setup logical replication
 my $publisher_connstr = $node_publisher->connstr . ' dbname=postgres';
+
+# A zero-column publisher still sends rows.  Subscriber-only columns must
+# get their defaults during initial COPY as well as incremental replication.
+$node_publisher->safe_psql(
+	'postgres', q{
+	CREATE TABLE tab_nocols ();
+	CREATE PUBLICATION pub_nocols FOR TABLE tab_nocols;
+});
+$node_subscriber->safe_psql('postgres',
+	"CREATE TABLE tab_nocols (local_value text DEFAULT 'subscriber-default');"
+);
+
+foreach my $binary ('false', 'true')
+{
+	$node_publisher->safe_psql(
+		'postgres', q{
+		INSERT INTO tab_nocols DEFAULT VALUES;
+		INSERT INTO tab_nocols DEFAULT VALUES;
+	});
+	$node_subscriber->safe_psql('postgres',
+		"CREATE SUBSCRIPTION sub_nocols CONNECTION '$publisher_connstr' PUBLICATION pub_nocols WITH (binary = $binary);"
+	);
+
+	# Test initial sync.
+	$node_subscriber->wait_for_subscription_sync($node_publisher, 'sub_nocols');
+
+	is( $node_subscriber->safe_psql(
+			'postgres', q{
+			SELECT count(*) FROM tab_nocols
+			WHERE local_value = 'subscriber-default';
+		}),
+		'2',
+		"initial zero-column rows use local defaults (binary = $binary)");
+
+	# Test incremental replication.
+	$node_publisher->safe_psql('postgres',
+		"INSERT INTO tab_nocols DEFAULT VALUES;");
+
+	$node_publisher->wait_for_catchup('sub_nocols');
+
+	is( $node_subscriber->safe_psql(
+			'postgres', q{
+			SELECT count(*) FROM tab_nocols
+			WHERE local_value = 'subscriber-default';
+		}),
+		'3',
+		"incremental zero-column rows use local defaults (binary = $binary)");
+
+	# Drop the subscription before resetting both tables for the next mode.
+	$node_subscriber->safe_psql(
+		'postgres', q{
+		DROP SUBSCRIPTION sub_nocols;
+		TRUNCATE tab_nocols;
+	});
+	$node_publisher->safe_psql('postgres', 'TRUNCATE tab_nocols;');
+}
+
+# Clean up before creating the FOR ALL TABLES publication.
+$node_publisher->safe_psql(
+	'postgres', q{
+	DROP PUBLICATION pub_nocols;
+	DROP TABLE tab_nocols;
+});
+$node_subscriber->safe_psql('postgres', 'DROP TABLE tab_nocols;');
+
 $node_publisher->safe_psql('postgres',
 	"CREATE PUBLICATION tap_pub FOR ALL TABLES");
 
