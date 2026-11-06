@@ -18,6 +18,10 @@
   <xref linkend="guc-shared-preload-libraries"/> in
   <filename>postgresql.conf</filename>, because it requires additional shared memory.
   This means that a server restart is needed to add or remove the module.
+  Statement statistics are saved in the cumulative statistics file
+  (see <xref linkend="monitoring-stats"/>).  If the module is removed from
+  <varname>shared_preload_libraries</varname>, all cumulative statistics,
+  not only those of the module, are discarded at the next server start.
   In addition, query identifier calculation must be enabled in order for the
   module to be active, which is done automatically if <xref linkend="guc-compute-query-id"/>
   is set to <literal>auto</literal> or <literal>on</literal>, or any third-party
@@ -749,6 +753,30 @@ calls | 2
   </para>
 
   <para>
+   The statistics of an execution are kept in the local memory of its
+   session, and added to its statement's entry when the session next reports
+   cumulative statistics, normally within a second once it is idle outside a
+   transaction block (see <xref linkend="monitoring-stats-setup"/>).  Until
+   then, a statement whose executions are all still in local memory does
+   not appear in the view.  A session reading the
+   <structname>pg_stat_statements</structname> view first adds its own
+   such statistics.
+  </para>
+
+  <para>
+   The memory of a discarded statement is released once the sessions that
+   executed it have reported their statistics.  When statements are
+   discarded so fast that as many wait for that as there can be tracked
+   statements, new statements are not tracked until the memory is released,
+   normally within a second; statements already tracked are still counted.
+   This keeps memory use bounded by twice
+   <varname>pg_stat_statements.max</varname>, and by
+   <varname>pg_stat_statements.max</varname> plus 20000 when it is larger
+   than 20000, under any rate of new statements, at the cost of not
+   tracking some of them.
+  </para>
+
+  <para>
    <structfield>plans</structfield> and <structfield>calls</structfield> aren't
    always expected to match because planning and execution statistics are
    updated at their respective end phase, and only for successful operations.
@@ -914,8 +942,22 @@ calls | 2
       statements is discarded.  The number of times such information was
       discarded can be seen in the
       <structname>pg_stat_statements_info</structname> view.
+      The number of statements can exceed this value by up to 5% while such
+      information is being discarded; past that, a session tracking a new
+      statement waits for the discarding, with the wait event
+      <literal>pg_stat_statements_dealloc</literal> of type
+      <literal>LWLock</literal>.  The
+      <structfield>entry_count</structfield> column of the
+      <link linkend="monitoring-pg-stat-kind-info-view"><structname>pg_stat_kind_info</structname></link>
+      view shows the number of statements allocated in shared memory,
+      including discarded statements whose memory has not been released yet,
+      which is at most twice this value, or this value plus 20000 when it
+      is larger than 20000.
       The default value is 5000.
-      This parameter can only be set at server start.
+      This parameter can only be set in the <filename>postgresql.conf</filename>
+      file or on the server command line.  A lowered value takes effect when
+      the next new statement is tracked, and at server start for the
+      statements saved at shutdown.
      </para>
     </listitem>
    </varlistentry>
@@ -996,8 +1038,13 @@ calls | 2
      <para>
       <varname>pg_stat_statements.save</varname> specifies whether to
       save statement statistics across server shutdowns.
-      If it is <literal>off</literal> then statistics are not saved at
-      shutdown nor reloaded at server start.
+      If it is <literal>off</literal> at shutdown, statements are saved
+      without their query texts, and are not reloaded at the next server
+      start.  If it is <literal>off</literal> at server start, saved
+      statements are not reloaded, and the statistics of
+      <structname>pg_stat_statements_info</structname> are reset.
+      Statistics are not saved after a crash or an immediate shutdown,
+      like other cumulative statistics.
       The default value is <literal>on</literal>.
       This parameter can only be set in the <filename>postgresql.conf</filename>
       file or on the server command line.
@@ -1007,10 +1054,8 @@ calls | 2
   </variablelist>
 
   <para>
-   The module requires additional shared memory proportional to
-   <varname>pg_stat_statements.max</varname>.  Note that this
-   memory is consumed whenever the module is loaded, even if
-   <varname>pg_stat_statements.track</varname> is set to <literal>none</literal>.
+   The module stores statement statistics in dynamic shared memory allocated
+   as statements are tracked, proportional to their number.
   </para>
 
   <para>
