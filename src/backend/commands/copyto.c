@@ -24,6 +24,7 @@
 #include "access/xlog.h"
 #include "catalog/pg_inherits.h"
 #include "commands/copyapi.h"
+#include "commands/matview.h"
 #include "commands/progress.h"
 #include "executor/execdesc.h"
 #include "executor/executor.h"
@@ -836,6 +837,11 @@ BeginCopyTo(ParseState *pstate,
 					 errhint("Try the COPY (SELECT ...) TO variant.")));
 		else if (rel->rd_rel->relkind == RELKIND_MATVIEW)
 		{
+			/* Unlogged matviews have no data during recovery. */
+			if (!RelationIsPermanent(rel) && RecoveryInProgress())
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot access temporary or unlogged relations during recovery"));
 			if (!RelationIsPopulated(rel))
 				ereport(ERROR,
 						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

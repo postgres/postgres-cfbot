@@ -295,6 +295,8 @@ main(int argc, char *argv[])
 		   ckpttime_str);
 	printf(_("Fake LSN counter for unlogged rels:   %X/%08X\n"),
 		   LSN_FORMAT_ARGS(ControlFile->unloggedLSN));
+	printf(_("Unlogged relations reset at:          %X/%08X\n"),
+		   LSN_FORMAT_ARGS(ControlFile->unloggedResetLSN));
 	printf(_("Minimum recovery ending location:     %X/%08X\n"),
 		   LSN_FORMAT_ARGS(ControlFile->minRecoveryPoint));
 	printf(_("Min recovery ending loc's timeline:   %u\n"),
