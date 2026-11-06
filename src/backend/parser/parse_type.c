@@ -17,6 +17,7 @@
 #include "access/htup_details.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_type.h"
@@ -178,9 +179,19 @@ LookupTypeNameExtended(ParseState *pstate,
 
 			namespaceId = LookupExplicitNamespace(schemaname, missing_ok);
 			if (OidIsValid(namespaceId))
+			{
 				typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
 										 PointerGetDatum(typname),
 										 ObjectIdGetDatum(namespaceId));
+
+				/*
+				 * Treat an untrusted match as nonexistent, as
+				 * TypenameGetTypidExtended does for unqualified names.
+				 */
+				if (OidIsValid(typoid) && creating_extension &&
+					!TypeIsTrustedInExtensionScript(typoid))
+					typoid = InvalidOid;
+			}
 			else
 				typoid = InvalidOid;
 
@@ -217,6 +228,22 @@ LookupTypeNameExtended(ParseState *pstate,
 }
 
 /*
+ * errdetail_untrusted_type for a TypeName; %TYPE references name a column,
+ * not a type, so they get no detail.
+ */
+int
+errdetail_untrusted_typename(const TypeName *typeName)
+{
+	char	   *schemaname;
+	char	   *typname;
+
+	if (typeName->pct_type || !creating_extension)
+		return 0;
+	DeconstructQualifiedName(typeName->names, &schemaname, &typname);
+	return errdetail_untrusted_type(schemaname, typname);
+}
+
+/*
  * LookupTypeNameOid
  *		Given a TypeName object, lookup the pg_type syscache entry of the type.
  *		Returns InvalidOid if no such type can be found.  If the type is found,
@@ -242,6 +269,7 @@ LookupTypeNameOid(ParseState *pstate, const TypeName *typeName, bool missing_ok)
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("type \"%s\" does not exist",
 							TypeNameToString(typeName)),
+					 errdetail_untrusted_typename(typeName),
 					 parser_errposition(pstate, typeName->location)));
 
 		return InvalidOid;
@@ -271,6 +299,7 @@ typenameType(ParseState *pstate, const TypeName *typeName, int32 *typmod_p)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("type \"%s\" does not exist",
 						TypeNameToString(typeName)),
+				 errdetail_untrusted_typename(typeName),
 				 parser_errposition(pstate, typeName->location)));
 	if (!((Form_pg_type) GETSTRUCT(tup))->typisdefined)
 		ereport(ERROR,
@@ -799,7 +828,8 @@ parseTypeString(const char *str, Oid *typeid_p, int32 *typmod_p,
 		ereturn(escontext, false,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("type \"%s\" does not exist",
-						TypeNameToString(typeName))));
+						TypeNameToString(typeName)),
+				 errdetail_untrusted_typename(typeName)));
 	}
 	else
 	{
