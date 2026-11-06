@@ -25,6 +25,11 @@ libpq_testclient_sources = files(
   'libpq_testclient.c',
 )
 
+libpq_testclient_deps = [frontend_no_fe_utils_code, libpq]
+if zstd.found()
+  libpq_testclient_deps += zstd
+endif
+
 if host_system == 'windows'
   libpq_testclient_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'libpq_testclient',
@@ -33,7 +38,8 @@ endif
 
 libpq_test_deps += executable('libpq_testclient',
   libpq_testclient_sources,
-  dependencies: [frontend_no_fe_utils_code, libpq],
+  include_directories: [libpq_inc],
+  dependencies: libpq_testclient_deps,
   kwargs: default_bin_args + {
     'install': false,
   }

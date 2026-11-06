@@ -759,6 +759,7 @@ retry:
 	{
 		int32		offset = sizeof(ProtocolVersion);
 		List	   *unrecognized_protocol_options = NIL;
+		bool		compression_requested = false;
 
 		/*
 		 * Scan packet body for name/option pairs.  We can assume any string
@@ -808,11 +809,28 @@ retry:
 									valptr),
 							 errhint("Valid values are: \"false\", 0, \"true\", 1, \"database\".")));
 			}
+			else if (strcmp(nameptr, "_pq_.compression") == 0)
+			{
+				if (compression_requested)
+					ereport(FATAL,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+							 errmsg("protocol compression option specified more than once")));
+				compression_requested = true;
+#ifdef USE_ZSTD
+				if (strcmp(valptr, "zstd") == 0 &&
+					protocol_compression == PROTOCOL_COMPRESSION_ZSTD)
+					pq_enable_protocol_compression();
+				else
+#endif
+					/* Reject unknown future profiles through negotiation. */
+					unrecognized_protocol_options =
+						lappend(unrecognized_protocol_options, pstrdup(nameptr));
+			}
 			else if (strncmp(nameptr, "_pq_.", 5) == 0)
 			{
 				/*
 				 * Any option beginning with _pq_. is reserved for use as a
-				 * protocol-level option, but at present no such options are
+				 * protocol-level option, but at present only one option is
 				 * defined.
 				 */
 				unrecognized_protocol_options =
