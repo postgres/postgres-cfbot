@@ -1877,6 +1877,8 @@ PerformWalRecovery(void)
 					(errmsg("last completed transaction was at log time %s",
 							timestamptz_to_str(xtime))));
 
+		XLogPrefetchLogStatsOnRecoveryEnd();
+
 		InRedo = false;
 	}
 	else
