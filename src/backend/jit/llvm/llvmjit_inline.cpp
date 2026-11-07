@@ -767,25 +767,44 @@ function_inlinable(llvm::Function &F,
 static std::unique_ptr<llvm::ModuleSummaryIndex>
 llvm_load_summary(llvm::StringRef path)
 {
-	llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer> > MBOrErr =
-		llvm::MemoryBuffer::getFile(path);
+	LLVMMemoryBufferRef buf;
+	char	   *msg;
+	std::string pathstr(path);
 
-	if (std::error_code EC = MBOrErr.getError())
+	/*
+	 * Don't use MemoryBuffer::getFile().  That C++ overload takes
+	 * std::optional<Align>, and default arguments are instantiated at the
+	 * call site.  When llvmjit is built with GCC 13 against a distro LLVM
+	 * 17 that was built with a different compiler, the call SIGSEGVs
+	 * before the file is opened.  The C API is what load_module() already
+	 * uses, and is ABI-stable across that mix.
+	 */
+	if (LLVMCreateMemoryBufferWithContentsOfFile(pathstr.c_str(), &buf, &msg))
 	{
-		ilog(DEBUG1, "failed to open %s: %s", path.data(),
-			 EC.message().c_str());
+		ilog(DEBUG1, "failed to open %s: %s", pathstr.c_str(), msg);
+		LLVMDisposeMessage(msg);
+		return nullptr;
 	}
-	else
-	{
-		llvm::MemoryBufferRef ref(*MBOrErr.get().get());
 
+	{
+		llvm::MemoryBufferRef ref(*llvm::unwrap(buf));
 		llvm::Expected<std::unique_ptr<llvm::ModuleSummaryIndex> > IndexOrErr =
 			llvm::getModuleSummaryIndex(ref);
+
 		if (IndexOrErr)
-			return std::move(IndexOrErr.get());
+		{
+			std::unique_ptr<llvm::ModuleSummaryIndex> index =
+				std::move(IndexOrErr.get());
+
+			LLVMDisposeMemoryBuffer(buf);
+			return index;
+		}
+
+		std::string err = toString(IndexOrErr.takeError());
+
+		LLVMDisposeMemoryBuffer(buf);
 		elog(FATAL, "failed to load summary \"%s\": %s",
-			 path.data(),
-			 toString(IndexOrErr.takeError()).c_str());
+			 pathstr.c_str(), err.c_str());
 	}
 	return nullptr;
 }
