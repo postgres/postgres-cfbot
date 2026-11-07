@@ -40,8 +40,10 @@ typedef struct SMgrRelationData
 	/*
 	 * The following fields are reset to InvalidBlockNumber upon a cache flush
 	 * event, and hold the last known size for each fork.  This information is
-	 * currently only reliable during recovery, since there is no cache
-	 * invalidation for fork extension.
+	 * currently only reliable during recovery, since in general there is no
+	 * cache invalidation for fork extension.  The exception is the visibility
+	 * map, whose extension outside recovery is announced with
+	 * CacheInvalidateSmgrNblocks().
 	 */
 	BlockNumber smgr_targblock; /* current insertion target block */
 	BlockNumber smgr_cached_nblocks[MAX_FORKNUM + 1];	/* last known size */
@@ -86,6 +88,7 @@ extern void smgrdestroyall(void);
 extern void smgrrelease(SMgrRelation reln);
 extern void smgrreleaseall(void);
 extern void smgrreleaserellocator(RelFileLocatorBackend rlocator);
+extern void smgrforgetnblocks(RelFileLocatorBackend rlocator);
 extern void smgrcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo);
 extern void smgrdosyncall(SMgrRelation *rels, int nrels);
 extern void smgrdounlinkall(SMgrRelation *rels, int nrels, bool isRedo);

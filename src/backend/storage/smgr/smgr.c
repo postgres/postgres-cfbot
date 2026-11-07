@@ -456,6 +456,28 @@ smgrreleaserellocator(RelFileLocatorBackend rlocator)
 }
 
 /*
+ * smgrforgetnblocks() -- Forget the cached fork sizes for given
+ *						  RelFileLocator, if it's open.
+ */
+void
+smgrforgetnblocks(RelFileLocatorBackend rlocator)
+{
+	SMgrRelation reln;
+
+	if (SMgrRelationHash == NULL)
+		return;
+
+	reln = (SMgrRelation) hash_search(SMgrRelationHash,
+									  &rlocator,
+									  HASH_FIND, NULL);
+	if (reln != NULL)
+	{
+		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
+			reln->smgr_cached_nblocks[forknum] = InvalidBlockNumber;
+	}
+}
+
+/*
  * smgrexists() -- Does the underlying file for a fork exist?
  */
 bool
@@ -848,8 +870,9 @@ smgrnblocks_cached(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
 	 * For now, this function uses cached values only in recovery due to lack
-	 * of a shared invalidation mechanism for changes in file size.  Code
-	 * elsewhere reads smgr_cached_nblocks and copes with stale data.
+	 * of a shared invalidation mechanism for changes in file size, other than
+	 * for visibility map extension.  Code elsewhere reads smgr_cached_nblocks
+	 * and copes with stale data.
 	 */
 	if (InRecovery && reln->smgr_cached_nblocks[forknum] != InvalidBlockNumber)
 		return reln->smgr_cached_nblocks[forknum];
