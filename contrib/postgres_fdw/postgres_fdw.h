@@ -75,6 +75,13 @@ typedef struct PgFdwRelationInfo
 	Cost		rel_startup_cost;
 	Cost		rel_total_cost;
 
+	/*
+	 * Cached estimates for parameterized scans of a base relation, one
+	 * entry per ParamPathInfo (list of PgFdwParamPathCost). Only used in
+	 * use_remote_estimate mode.
+	 */
+	List	   *param_path_costs;
+
 	/* Options extracted from catalogs. */
 	bool		use_remote_estimate;
 	Cost		fdw_startup_cost;
