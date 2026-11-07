@@ -1333,9 +1333,11 @@ XLogWalRcvSendHSFeedback(bool immed)
 
 	/*
 	 * Make the expensive call to get the oldest xmin once we are certain
-	 * everything else has been checked.
+	 * everything else has been checked.  With wal_receiver_status_interval
+	 * disabled no further feedback is sent, so don't leave a valid xmin
+	 * behind on the primary.
 	 */
-	if (hot_standby_feedback)
+	if (hot_standby_feedback && wal_receiver_status_interval > 0)
 	{
 		GetReplicationHorizons(&xmin, &catalog_xmin);
 	}
