@@ -20,6 +20,8 @@
 #include "storage/bufmgr.h"
 #include "storage/read_stream.h"
 
+#define BLOOM_TBM_BATCH_SIZE 256
+
 /*
  * Begin scan of bloom index.
  */
@@ -80,10 +82,12 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	BlockNumber blkno,
 				npages;
 	int			i;
+	int			ntids_batch = 0;
 	BufferAccessStrategy bas;
 	BloomScanOpaque so = (BloomScanOpaque) scan->opaque;
 	BlockRangeReadStreamPrivate p;
 	ReadStream *stream;
+	ItemPointerData tids[BLOOM_TBM_BATCH_SIZE];
 
 	if (so->sign == NULL)
 	{
@@ -172,7 +176,13 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 				/* Add matching tuples to bitmap */
 				if (res)
 				{
-					tbm_add_tuples(tbm, &itup->heapPtr, 1, true);
+					if (ntids_batch == BLOOM_TBM_BATCH_SIZE)
+					{
+						tbm_add_tuples(tbm, tids, ntids_batch, true);
+						ntids_batch = 0;
+					}
+
+					tids[ntids_batch++] = itup->heapPtr;
 					ntids++;
 				}
 			}
@@ -181,6 +191,8 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 		UnlockReleaseBuffer(buffer);
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	tbm_add_tuples(tbm, tids, ntids_batch, true);
 
 	Assert(read_stream_next_buffer(stream, NULL) == InvalidBuffer);
 	read_stream_end(stream);
