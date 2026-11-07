@@ -1127,6 +1127,13 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 	List	   *fields = cref->fields;
 	int			numnames = list_length(fields);
 
+	/*
+	 * Check to see if the column reference is in an invalid place, before
+	 * looking up the name, as transformColumnRef does.  expandNSItemVars
+	 * would catch it anyway, but only if the name resolves.
+	 */
+	checkColumnRefAllowed(pstate, cref->location);
+
 	if (numnames == 1)
 	{
 		/*

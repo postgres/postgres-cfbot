@@ -987,6 +987,12 @@ alter table def_test alter column c2 set default 20;
 -- set defaults on a non-existent column: this should fail
 alter table def_test alter column c3 set default 30;
 
+-- a default may not reference a column, not even through a whole-row
+-- reference: these should all fail
+alter table def_test alter column c1 set default def_test.c1;
+alter table def_test alter column c1 set default (ROW(def_test.*)).f1;
+alter table def_test add column c4 int default (ROW(def_test.*)).f1;
+
 -- set defaults on views: we need to create a view, add a rule
 -- to allow insertions into it, and then alter the view to add
 -- a default
