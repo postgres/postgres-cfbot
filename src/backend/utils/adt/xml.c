@@ -5024,6 +5024,9 @@ XmlTableGetValue(TableFuncScanState *state, int colnum,
 
 	xtCxt = GetXmlTableBuilderPrivateData(state, "XmlTableGetValue");
 
+	/* Look through domains, so that they are treated like their base type */
+	typid = getBaseType(typid);
+
 	Assert(xtCxt->xpathobj &&
 		   xtCxt->xpathobj->type == XPATH_NODESET &&
 		   xtCxt->xpathobj->nodesetval != NULL);
