@@ -117,6 +117,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
@@ -433,9 +434,8 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 			if (current_lsn >= rstate->lsn)
 			{
 				char		originname[NAMEDATALEN];
-
-				rstate->state = SUBREL_STATE_READY;
-				rstate->lsn = current_lsn;
+				char		current_relstate;
+				XLogRecPtr	statelsn;
 
 				/*
 				 * Remove the tablesync origin tracking if exists.
@@ -452,8 +452,22 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 				 * are doing during DDL commands to avoid deadlocks. See
 				 * AlterSubscription_refresh.
 				 */
+				INJECTION_POINT("tablesync-before-mark-ready", NULL);
 				LockSharedObject(SubscriptionRelationId, MyLogicalRepWorker->subid,
 								 0, AccessShareLock);
+
+				/* The table may have been removed or re-added meanwhile. */
+				current_relstate = GetSubscriptionRelState(MyLogicalRepWorker->subid,
+														   rstate->relid, &statelsn);
+				if (current_relstate != SUBREL_STATE_SYNCDONE)
+				{
+					elog(DEBUG1, "skipping READY transition for relation %u of subscription \"%s\" as it is no longer SYNCDONE",
+						 rstate->relid, MySubscription->name);
+					continue;
+				}
+
+				rstate->state = SUBREL_STATE_READY;
+				rstate->lsn = current_lsn;
 
 				if (!rel)
 					rel = table_open(SubscriptionRelRelationId, RowExclusiveLock);
