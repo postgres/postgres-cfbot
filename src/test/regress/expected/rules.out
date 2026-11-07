@@ -1982,6 +1982,11 @@ pg_stat_lock| SELECT locktype,
     fastpath_exceeded,
     stats_reset
    FROM pg_stat_get_lock() l(locktype, waits, wait_time, fastpath_exceeded, stats_reset);
+pg_stat_progress| SELECT s.pid,
+    c.command,
+    c.progress_view
+   FROM (( VALUES ('ANALYZE'::text,'pg_stat_progress_analyze'::regclass), ('VACUUM'::text,'pg_stat_progress_vacuum'::regclass), ('CREATE INDEX'::text,'pg_stat_progress_create_index'::regclass), ('BASEBACKUP'::text,'pg_stat_progress_basebackup'::regclass), ('COPY'::text,'pg_stat_progress_copy'::regclass), ('REPACK'::text,'pg_stat_progress_repack'::regclass), ('DATACHECKSUMS'::text,'pg_stat_progress_data_checksums'::regclass)) c(command, progress_view)
+     CROSS JOIN LATERAL pg_stat_get_progress_info(c.command) s(pid, datid, relid, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14, param15, param16, param17, param18, param19, param20));
 pg_stat_progress_analyze| SELECT s.pid,
     s.datid,
     d.datname,
