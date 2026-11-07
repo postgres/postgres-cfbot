@@ -7,6 +7,11 @@
  * from pgstat.c to enforce the line between the statistics access / storage
  * implementation and the details about individual types of statistics.
  *
+ * I/O statistics use a per-backend array to avoid double-counting. Each
+ * process flushes I/O stats to its own ProcNumber-indexed entry. The global
+ * pg_stat_io view aggregates the global stats (which holds stats from exited
+ * processes) plus all active per-backend entries.
+ *
  * Copyright (c) 2021-2026, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -67,9 +72,6 @@ pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op,
 
 	PendingIOStats.counts[io_object][io_context][io_op] += cnt;
 	PendingIOStats.bytes[io_object][io_context][io_op] += bytes;
-
-	/* Add the per-backend counts */
-	pgstat_count_backend_io_op(io_object, io_context, io_op, cnt, bytes);
 
 	have_iostats = true;
 	pgstat_report_fixed = true;
@@ -143,10 +145,6 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 
 		INSTR_TIME_ADD(PendingIOStats.pending_times[io_object][io_context][io_op],
 					   io_time);
-
-		/* Add the per-backend count */
-		pgstat_count_backend_io_op_time(io_object, io_context, io_op,
-										io_time);
 	}
 
 	pgstat_count_io_op(io_object, io_context, io_op, cnt, bytes);
@@ -170,7 +168,7 @@ pgstat_flush_io(bool nowait)
 }
 
 /*
- * Flush out locally pending IO statistics
+ * Flush out locally pending I/O statistics to the per-backend array entry.
  *
  * If no stats have been recorded, this function returns false.
  *
@@ -180,20 +178,18 @@ pgstat_flush_io(bool nowait)
 bool
 pgstat_io_flush_cb(bool nowait)
 {
-	LWLock	   *bktype_lock;
+	PgStatShared_IOBackendEntry *entry;
 	PgStat_BktypeIO *bktype_shstats;
 
 	if (!have_iostats)
 		return false;
 
-	bktype_lock = &pgStatLocal.shmem->io.locks[MyBackendType];
-	bktype_shstats =
-		&pgStatLocal.shmem->io.stats.stats[MyBackendType];
+	entry = pgstat_lock_my_per_backend_entry(PGSTAT_KIND_IO, nowait);
 
-	if (!nowait)
-		LWLockAcquire(bktype_lock, LW_EXCLUSIVE);
-	else if (!LWLockConditionalAcquire(bktype_lock, LW_EXCLUSIVE))
-		return true;
+	if (entry == NULL)
+		return nowait;
+
+	bktype_shstats = &entry->stats.stats;
 
 	for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
 	{
@@ -217,12 +213,9 @@ pgstat_io_flush_cb(bool nowait)
 		}
 	}
 
-	Assert(pgstat_bktype_io_stats_valid(bktype_shstats, MyBackendType));
-
-	LWLockRelease(bktype_lock);
+	LWLockRelease(&entry->header.lock);
 
 	memset(&PendingIOStats, 0, sizeof(PendingIOStats));
-
 	have_iostats = false;
 
 	return false;
@@ -271,55 +264,63 @@ pgstat_io_init_shmem_cb(void *stats)
 {
 	PgStatShared_IO *stat_shmem = (PgStatShared_IO *) stats;
 
-	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
-		LWLockInitialize(&stat_shmem->locks[i], LWTRANCHE_PGSTATS_DATA);
+	LWLockInitialize(&stat_shmem->lock, LWTRANCHE_PGSTATS_DATA);
 }
 
 void
 pgstat_io_reset_all_cb(TimestampTz ts)
 {
-	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
+	PgStatShared_IO *shmem = &pgStatLocal.shmem->io;
+
+	/*
+	 * Hold the kind lock while resetting both the global stats and active
+	 * entries. Transfers hold the same lock, so pre-reset counters cannot be
+	 * moved into the global stats after it is reset.
+	 */
+	LWLockAcquire(&shmem->lock, LW_EXCLUSIVE);
+	memset(&shmem->stats, 0, sizeof(shmem->stats));
+	shmem->stats.stat_reset_timestamp = ts;
+
+	/* Reset all per-backend entries */
+	for (ProcNumber procnum = 0; procnum < NumPerBackendStatSlots; procnum++)
 	{
-		LWLock	   *bktype_lock = &pgStatLocal.shmem->io.locks[i];
-		PgStat_BktypeIO *bktype_shstats = &pgStatLocal.shmem->io.stats.stats[i];
+		PgStatShared_IOBackendEntry *entry;
 
-		LWLockAcquire(bktype_lock, LW_EXCLUSIVE);
+		entry = pgstat_get_per_backend_entry(PGSTAT_KIND_IO, procnum);
 
-		/*
-		 * Use the lock in the first BackendType's PgStat_BktypeIO to protect
-		 * the reset timestamp as well.
-		 */
-		if (i == 0)
-			pgStatLocal.shmem->io.stats.stat_reset_timestamp = ts;
-
-		memset(bktype_shstats, 0, sizeof(*bktype_shstats));
-		LWLockRelease(bktype_lock);
+		LWLockAcquire(&entry->header.lock, LW_EXCLUSIVE);
+		if (entry->header.backend_type != B_INVALID)
+		{
+			memset(&entry->stats.stats, 0, sizeof(PgStat_BktypeIO));
+			entry->stats.stat_reset_timestamp = ts;
+		}
+		LWLockRelease(&entry->header.lock);
 	}
+
+	LWLockRelease(&shmem->lock);
 }
 
+/*
+ * Build an I/O stats snapshot by aggregating global stats and all active
+ * per-backend entries.
+ */
 void
 pgstat_io_snapshot_cb(void)
 {
-	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
-	{
-		LWLock	   *bktype_lock = &pgStatLocal.shmem->io.locks[i];
-		PgStat_BktypeIO *bktype_shstats = &pgStatLocal.shmem->io.stats.stats[i];
-		PgStat_BktypeIO *bktype_snap = &pgStatLocal.snapshot.io.stats[i];
+	PgStatShared_IO *shmem = &pgStatLocal.shmem->io;
+	PgStat_IO  *snap = &pgStatLocal.snapshot.io;
 
-		LWLockAcquire(bktype_lock, LW_SHARED);
+	/*
+	 * Prevent entries from moving to the global stats between copying it and
+	 * scanning the per-backend array.
+	 */
+	LWLockAcquire(&shmem->lock, LW_SHARED);
+	memcpy(snap, &shmem->stats, sizeof(PgStat_IO));
 
-		/*
-		 * Use the lock in the first BackendType's PgStat_BktypeIO to protect
-		 * the reset timestamp as well.
-		 */
-		if (i == 0)
-			pgStatLocal.snapshot.io.stat_reset_timestamp =
-				pgStatLocal.shmem->io.stats.stat_reset_timestamp;
+	/* Add in all active per-backend entries */
+	pgstat_per_backend_snapshot(PGSTAT_KIND_IO, snap);
 
-		/* using struct assignment due to better type safety */
-		*bktype_snap = *bktype_shstats;
-		LWLockRelease(bktype_lock);
-	}
+	LWLockRelease(&shmem->lock);
 }
 
 /*
@@ -583,4 +584,112 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 
 
 	return true;
+}
+
+/*
+ * Accumulate I/O counters from src into dst.
+ */
+static inline void
+pgstat_io_accumulate_counters(PgStat_BktypeIO *dst, const PgStat_BktypeIO *src)
+{
+	for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+	{
+		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		{
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				dst->counts[io_object][io_context][io_op] +=
+					src->counts[io_object][io_context][io_op];
+				dst->bytes[io_object][io_context][io_op] +=
+					src->bytes[io_object][io_context][io_op];
+				dst->times[io_object][io_context][io_op] +=
+					src->times[io_object][io_context][io_op];
+			}
+		}
+	}
+}
+
+/*
+ * Accumulate one per-backend I/O entry into a snapshot or the global stats.
+ */
+void
+pgstat_io_per_backend_acc_cb(void *dst, void *entry)
+{
+	PgStat_IO  *stats = dst;
+	PgStatShared_IOBackendEntry *e = (PgStatShared_IOBackendEntry *) entry;
+	BackendType bktype = e->header.backend_type;
+
+	if (bktype == B_INVALID)
+		return;
+
+	pgstat_io_accumulate_counters(&stats->stats[bktype], &e->stats.stats);
+}
+
+/*
+ * Accumulate a backend's I/O stats into the global stats, then invalidate the
+ * entry.
+ *
+ * Called at backend exit after the final flush, or when a ProcNumber is
+ * being reused.
+ */
+void
+pgstat_io_acc_backend_cb(void)
+{
+	pgstat_acc_my_per_backend(PGSTAT_KIND_IO, &pgStatLocal.shmem->io.lock);
+}
+
+/*
+ * Accumulate all remaining per-backend I/O stats entries into the global
+ * stats and invalidate them. Called at clean server shutdown to ensure all
+ * flushed data is preserved in the stats file.
+ */
+void
+pgstat_io_acc_all_backends(void)
+{
+	pgstat_acc_all_per_backend(PGSTAT_KIND_IO, &pgStatLocal.shmem->io.lock);
+}
+
+/*
+ * Return per-backend I/O statistics for the given ProcNumber.
+ */
+PgStat_BackendIO *
+pgstat_fetch_stat_backend_io(ProcNumber procnum)
+{
+	return (PgStat_BackendIO *) pgstat_fetch_per_backend(PGSTAT_KIND_IO, procnum);
+}
+
+/*
+ * Reset a backend's I/O stats. Accumulate the entry's counters into the
+ * global stats, then zero the stats and set the reset timestamp.
+ */
+void
+pgstat_io_reset_backend_cb(ProcNumber procnum, TimestampTz ts)
+{
+	PgStatShared_IO *shmem = &pgStatLocal.shmem->io;
+	PgStatShared_IOBackendEntry *entry;
+
+	entry = pgstat_get_per_backend_entry(PGSTAT_KIND_IO, procnum);
+	if (entry == NULL)
+		return;
+
+	LWLockAcquire(&shmem->lock, LW_EXCLUSIVE);
+	LWLockAcquire(&entry->header.lock, LW_EXCLUSIVE);
+
+	if (entry->header.backend_type == B_INVALID)
+	{
+		LWLockRelease(&entry->header.lock);
+		LWLockRelease(&shmem->lock);
+		return;
+	}
+
+	/* Accumulate current stats into global before zeroing */
+	pgstat_io_accumulate_counters(&shmem->stats.stats[entry->header.backend_type],
+								  &entry->stats.stats);
+
+	/* Zero stats and set reset timestamp */
+	memset(&entry->stats, 0, sizeof(entry->stats));
+	entry->stats.stat_reset_timestamp = ts;
+
+	LWLockRelease(&entry->header.lock);
+	LWLockRelease(&shmem->lock);
 }

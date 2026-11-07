@@ -69,6 +69,7 @@
  * To keep things manageable, stats handling is split across several
  * files. Infrastructure pieces are in:
  * - pgstat.c - this file, to tie it all together
+ * - pgstat_per_backend.c - generic per-backend statistics infrastructure
  * - pgstat_shmem.c - nearly everything dealing with shared memory, including
  *   the maintenance of hashtable entries
  * - pgstat_xact.c - transactional integration, including the transactional
@@ -76,7 +77,6 @@
  *
  * Each statistics kind is handled in a dedicated file:
  * - pgstat_archiver.c
- * - pgstat_backend.c
  * - pgstat_bgwriter.c
  * - pgstat_checkpointer.c
  * - pgstat_database.c
@@ -189,7 +189,6 @@ static void pgstat_reset_after_failure(void);
 
 static bool pgstat_flush_pending_entries(bool nowait);
 
-static void pgstat_prep_snapshot(void);
 static void pgstat_build_snapshot(void);
 static void pgstat_build_snapshot_fixed(PgStat_Kind kind);
 
@@ -381,22 +380,6 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.reset_timestamp_cb = pgstat_subscription_reset_timestamp_cb,
 	},
 
-	[PGSTAT_KIND_BACKEND] = {
-		.name = "backend",
-
-		.fixed_amount = false,
-		.write_to_file = false,
-
-		.accessed_across_databases = true,
-
-		.shared_size = sizeof(PgStatShared_Backend),
-		.shared_data_off = offsetof(PgStatShared_Backend, stats),
-		.shared_data_len = sizeof(((PgStatShared_Backend *) 0)->stats),
-
-		.flush_static_cb = pgstat_backend_flush_cb,
-		.reset_timestamp_cb = pgstat_backend_reset_timestamp_cb,
-	},
-
 	/* stats for fixed-numbered (mostly 1) objects */
 
 	[PGSTAT_KIND_ARCHIVER] = {
@@ -462,6 +445,11 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_io_init_shmem_cb,
 		.reset_all_cb = pgstat_io_reset_all_cb,
 		.snapshot_cb = pgstat_io_snapshot_cb,
+
+		.per_backend_entry_size = sizeof(PgStatShared_IOBackendEntry),
+		.per_backend_data_off = offsetof(PgStatShared_IOBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_BackendIO),
+		.per_backend_acc_cb = pgstat_io_per_backend_acc_cb,
 	},
 
 	[PGSTAT_KIND_LOCK] = {
@@ -479,6 +467,11 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_lock_init_shmem_cb,
 		.reset_all_cb = pgstat_lock_reset_all_cb,
 		.snapshot_cb = pgstat_lock_snapshot_cb,
+
+		.per_backend_entry_size = sizeof(PgStatShared_LockBackendEntry),
+		.per_backend_data_off = offsetof(PgStatShared_LockBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_Lock),
+		.per_backend_acc_cb = pgstat_lock_per_backend_acc_cb,
 	},
 
 	[PGSTAT_KIND_SLRU] = {
@@ -514,6 +507,11 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_wal_init_shmem_cb,
 		.reset_all_cb = pgstat_wal_reset_all_cb,
 		.snapshot_cb = pgstat_wal_snapshot_cb,
+
+		.per_backend_entry_size = sizeof(PgStatShared_WalBackendEntry),
+		.per_backend_data_off = offsetof(PgStatShared_WalBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_WalStats),
+		.per_backend_acc_cb = pgstat_wal_per_backend_acc_cb,
 	},
 };
 
@@ -625,6 +623,11 @@ pgstat_before_server_shutdown(int code, Datum arg)
 	 */
 	if (code == 0)
 	{
+		/* Transfer all live per-backend stats before writing the stats file */
+		pgstat_wal_acc_all_backends();
+		pgstat_lock_acc_all_backends();
+		pgstat_io_acc_all_backends();
+
 		pgStatLocal.shmem->is_shutdown = true;
 		pgstat_write_statsfile();
 	}
@@ -664,9 +667,10 @@ pgstat_shutdown_hook(int code, Datum arg)
 	Assert(dlist_is_empty(&pgStatPending));
 	dlist_init(&pgStatPending);
 
-	/* drop the backend stats entry */
-	if (!pgstat_drop_entry(PGSTAT_KIND_BACKEND, InvalidOid, MyProcNumber, false))
-		pgstat_request_entry_refs_gc();
+	/* Accumulate per-backend stats into the global stats */
+	pgstat_wal_acc_backend_cb();
+	pgstat_lock_acc_backend_cb();
+	pgstat_io_acc_backend_cb();
 
 	pgstat_detach_shmem();
 
@@ -687,6 +691,22 @@ pgstat_initialize(void)
 	Assert(!pgstat_is_initialized);
 
 	pgstat_attach_shmem();
+
+	/*
+	 * A previous process may have left statistics in entries for this reused
+	 * ProcNumber. Transfer them to the global statistics before activating
+	 * the current process's entries.
+	 */
+	pgstat_wal_acc_backend_cb();
+	pgstat_lock_acc_backend_cb();
+	pgstat_io_acc_backend_cb();
+
+	/*
+	 * Activate per-backend statistics entries here. This also covers
+	 * processes that never call InitPostgres(), such as shared-memory-only
+	 * background workers.
+	 */
+	pgstat_create_my_per_backend_entries();
 
 	pgstat_init_snapshot_fixed();
 
@@ -1155,7 +1175,12 @@ pgstat_init_snapshot_fixed(void)
 	}
 }
 
-static void
+/*
+ * Prepare the backend-local statistics snapshot.
+ *
+ * Clear invalidated snapshot state first. NONE mode does not need a cache.
+ */
+void
 pgstat_prep_snapshot(void)
 {
 	if (force_stats_snapshot_clear)
@@ -1174,6 +1199,57 @@ pgstat_prep_snapshot(void)
 		pgstat_snapshot_create(pgStatLocal.snapshot.context,
 							   PGSTAT_SNAPSHOT_HASH_SIZE,
 							   NULL);
+}
+
+/*
+ * Look up an entry in the backend-local statistics snapshot.
+ *
+ * The snapshot must have been prepared by pgstat_prep_snapshot(). Set *found
+ * for both entries containing data and cached negative lookups.
+ */
+void *
+pgstat_lookup_snapshot_entry(const PgStat_HashKey *key, bool *found)
+{
+	PgStat_SnapshotEntry *entry;
+
+	Assert(pgstat_fetch_consistency > PGSTAT_FETCH_CONSISTENCY_NONE);
+	Assert(pgStatLocal.snapshot.stats != NULL);
+
+	entry = pgstat_snapshot_lookup(pgStatLocal.snapshot.stats, *key);
+	*found = entry != NULL;
+
+	return entry != NULL ? entry->data : NULL;
+}
+
+/*
+ * Copy an entry into the backend-local statistics snapshot.
+ *
+ * A NULL data pointer records a negative lookup. Return an existing entry
+ * without replacing it if the key was already cached.
+ */
+void *
+pgstat_cache_snapshot_entry(const PgStat_HashKey *key, const void *data,
+							Size data_len)
+{
+	PgStat_SnapshotEntry *entry;
+	bool		found;
+
+	Assert(pgstat_fetch_consistency > PGSTAT_FETCH_CONSISTENCY_NONE);
+	Assert(pgStatLocal.snapshot.stats != NULL);
+
+	entry = pgstat_snapshot_insert(pgStatLocal.snapshot.stats, *key, &found);
+	if (found)
+		return entry->data;
+
+	if (data != NULL)
+	{
+		entry->data = MemoryContextAlloc(pgStatLocal.snapshot.context, data_len);
+		memcpy(entry->data, data, data_len);
+	}
+	else
+		entry->data = NULL;
+
+	return entry->data;
 }
 
 static void
@@ -1559,6 +1635,11 @@ pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)
 				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
 				 errdetail("Custom cumulative statistics must be registered while initializing modules in \"%s\".",
 						   "shared_preload_libraries")));
+
+	if (kind_info->per_backend_entry_size != 0)
+		ereport(ERROR,
+				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
+				 errdetail("Per-backend statistics are not supported for custom cumulative statistics.")));
 
 	/*
 	 * Check some data for fixed-numbered stats.
