@@ -28,6 +28,7 @@ install_data(
   'pg_trgm--1.3.sql',
   'pg_trgm--1.4--1.5.sql',
   'pg_trgm--1.5--1.6.sql',
+  'pg_trgm--1.6--1.7.sql',
   'pg_trgm.control',
   kwargs: contrib_data_args,
 )
@@ -42,6 +43,7 @@ tests += {
       'pg_utf8_trgm',
       'pg_word_trgm',
       'pg_strict_word_trgm',
+      'pg_trgm_noeq',
     ],
   },
 }
