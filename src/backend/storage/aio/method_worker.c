@@ -44,7 +44,9 @@
 #include "storage/lwlock.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
+#include "storage/sinvaladt.h"
 #include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/injection_point.h"
 #include "utils/memdebug.h"
@@ -683,6 +685,25 @@ check_io_worker_gucs(void)
 						   "io_max_workers", io_max_workers)));
 }
 
+/*
+ * Handle cache invalidation messages for IoWorker
+ *
+ * Same as LocalExecuteInvalidationMessage for backends,
+ * but in IoWorkers handle only file invalidation messages.
+ */
+static void
+pgaio_cache_invalidation_callback(SharedInvalidationMessage *msg)
+{
+	if (msg->id == SHAREDINVALSMGR_ID)
+	{
+		RelFileLocatorBackend rlocator;
+
+		rlocator.locator = msg->sm.rlocator;
+		rlocator.backend = (msg->sm.backend_hi << 16) | (int) msg->sm.backend_lo;
+		smgrdestroyrellocator(rlocator);
+	}
+}
+
 void
 IoWorkerMain(const void *startup_data, size_t startup_data_len)
 {
@@ -698,6 +719,11 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 
 	AuxiliaryProcessMainCommon();
 
+	/*
+	 * IO workers cache file descriptors locally, subscribe to cluster-wide
+	 * cache invalidation events.
+	 */
+	SharedInvalBackendInit(false);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGINT, die);		/* to allow manually triggering worker restart */
 
@@ -1031,6 +1057,12 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 		}
 
 		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Handle pending invalidation one by one. smgrdestroyall used when
+		 * there are too many pending invalidations.
+		 */
+		ReceiveSharedInvalidMessages(pgaio_cache_invalidation_callback, smgrdestroyall);
 
 		if (ConfigReloadPending)
 		{
