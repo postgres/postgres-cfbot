@@ -1241,7 +1241,7 @@ Alter_routine_options, "CALLED ON NULL INPUT", "RETURNS NULL ON NULL INPUT", \
 /* COPY FROM options */
 #define Copy_from_options \
 Copy_common_options, "DEFAULT", "FORCE_NOT_NULL", "FORCE_NULL", "FREEZE", \
-"LOG_VERBOSITY", "ON_ERROR", "REJECT_LIMIT"
+"LOG_VERBOSITY", "ON_ERROR", "REJECT_LIMIT", "ERROR_TABLE"
 
 /* COPY TO options */
 #define Copy_to_options \
@@ -3441,7 +3441,26 @@ match_previous_words(int pattern_id,
 
 			/* Complete COPY <sth> FROM filename WITH (ON_ERROR */
 			else if (TailMatches("ON_ERROR"))
-				COMPLETE_WITH("stop", "ignore", "set_null");
+				COMPLETE_WITH("stop", "ignore", "set_null", "table");
+
+			/*
+			 * Complete COPY <sth> FROM filename WITH (ON_ERROR <value> with
+			 * nothing, lest the words_after_create fallback offer table names
+			 * after the "table" value.
+			 */
+			else if (TailMatches("ON_ERROR", MatchAny))
+			{
+				COMPLETE_WITH_CONST(true, "");
+				/* Also, prevent Readline from appending stuff to the non-match */
+				rl_completion_append_character = '\0';
+#ifdef HAVE_RL_COMPLETION_SUPPRESS_QUOTE
+				rl_completion_suppress_quote = 1;
+#endif
+			}
+
+			/* Complete COPY <sth> FROM filename WITH (ERROR_TABLE */
+			else if (TailMatches("ERROR_TABLE"))
+				COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
 
 			/* Complete COPY <sth> FROM filename WITH (LOG_VERBOSITY */
 			else if (TailMatches("LOG_VERBOSITY"))
