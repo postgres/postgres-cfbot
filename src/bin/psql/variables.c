@@ -215,14 +215,14 @@ ParseVariableDouble(const char *value, const char *name, double *result, double 
 		if (dblval < min)
 		{
 			if (name)
-				pg_log_error("invalid value \"%s\" for variable \"%s\": must be greater than %.2f",
+				pg_log_error("invalid value \"%s\" for variable \"%s\": must be greater than or equal to %.2f",
 							 value, name, min);
 			return false;
 		}
 		else if (dblval > max)
 		{
 			if (name)
-				pg_log_error("invalid value \"%s\" for variable \"%s\": must be less than %.2f",
+				pg_log_error("invalid value \"%s\" for variable \"%s\": must be less than or equal to %.2f",
 							 value, name, max);
 			return false;
 		}
