@@ -45,7 +45,7 @@ static Node *transformAssignmentSubscripts(ParseState *pstate,
 										   CoercionContext ccontext,
 										   int location);
 static List *ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
-								 bool make_target_entry);
+								 bool make_target_entry, bool *expanded);
 static List *ExpandAllTables(ParseState *pstate, int location);
 static List *ExpandIndirectionStar(ParseState *pstate, A_Indirection *ind,
 								   bool make_target_entry, ParseExprKind exprKind);
@@ -147,11 +147,15 @@ transformTargetList(ParseState *pstate, List *targetlist,
 
 				if (IsA(llast(cref->fields), A_Star))
 				{
+					bool		expanded;
+					List	   *items;
+
 					/* It is something.*, expand into multiple items */
-					p_target = list_concat(p_target,
-										   ExpandColumnRefStar(pstate,
-															   cref,
-															   true));
+					items = ExpandColumnRefStar(pstate, cref, true,
+												&expanded);
+					/* only a DEFINE condition declines, and this is not one */
+					Assert(expanded);
+					p_target = list_concat(p_target, items);
 					continue;
 				}
 			}
@@ -237,11 +241,22 @@ transformExpressionList(ParseState *pstate, List *exprlist,
 
 			if (IsA(llast(cref->fields), A_Star))
 			{
-				/* It is something.*, expand into multiple items */
-				result = list_concat(result,
-									 ExpandColumnRefStar(pstate, cref,
-														 false));
-				continue;
+				bool		expanded;
+				List	   *items;
+
+				/*
+				 * It is something.*, expand into multiple items -- unless
+				 * ExpandColumnRefStar() declines, which it does for a
+				 * reference a row pattern DEFINE condition may not expand.
+				 * Fall through then and let transformExpr() have the
+				 * reference, which is where that is diagnosed.
+				 */
+				items = ExpandColumnRefStar(pstate, cref, false, &expanded);
+				if (expanded)
+				{
+					result = list_concat(result, items);
+					continue;
+				}
 			}
 		}
 		else if (IsA(e, A_Indirection))
@@ -250,7 +265,18 @@ transformExpressionList(ParseState *pstate, List *exprlist,
 
 			if (IsA(llast(ind->indirection), A_Star))
 			{
-				/* It is something.*, expand into multiple items */
+				/*
+				 * It is something.*, expand into multiple items.
+				 *
+				 * No DEFINE test is needed here, unlike the ColumnRef arm
+				 * above.  ExpandIndirectionStar() transforms the
+				 * parenthesized argument with p_rpr_define still set, so
+				 * transformColumnRef() still rejects a range variable before
+				 * it becomes a whole-row reference; what survives is field
+				 * selection on a value, "(x).*", which occupies no qualifier
+				 * slot and is allowed in DEFINE for the same reason "(x).f"
+				 * is.
+				 */
 				result = list_concat(result,
 									 ExpandIndirectionStar(pstate, ind,
 														   false, exprKind));
@@ -1119,13 +1145,21 @@ checkInsertTargets(ParseState *pstate, List *cols, List **attrnos)
  * expressions).
  *
  * The referenced columns are marked as requiring SELECT access.
+ *
+ * *expanded is set false, and NIL returned, if the reference is one this
+ * refuses to expand; the caller is then to leave it to transformExpr().  A
+ * row pattern DEFINE condition is the only thing that brings that about, and
+ * the DEFINE branch below says why.  It is a separate flag because NIL is
+ * also what expanding a relation with no columns of its own returns.
  */
 static List *
 ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
-					bool make_target_entry)
+					bool make_target_entry, bool *expanded)
 {
 	List	   *fields = cref->fields;
 	int			numnames = list_length(fields);
+
+	*expanded = true;
 
 	if (numnames == 1)
 	{
@@ -1244,6 +1278,32 @@ ExpandColumnRefStar(ParseState *pstate, ColumnRef *cref,
 							 parser_errposition(pstate, cref->location)));
 				return ExpandRowReference(pstate, node, make_target_entry);
 			}
+		}
+
+		/*
+		 * Both hooks have had their shot, so what is left is a reference to a
+		 * FROM-clause relation, or a name that resolves to nothing at all. A
+		 * row pattern DEFINE condition may have neither, and expanding one
+		 * here binds it by RTE rather than by name, past the checks in
+		 * transformColumnRef().  Decline, so that the caller hands the whole
+		 * reference to transformExpr() and it is diagnosed there, where every
+		 * other DEFINE spelling is: a pattern variable as the qualifier it
+		 * reserves, and any other name, resolved or not, as the whole-row
+		 * reference its form makes it.
+		 *
+		 * A name a hook owns has returned above, which is the point of
+		 * deciding here rather than in the caller.  Withholding the expansion
+		 * would not reject such a name -- none of those checks has anything
+		 * to say about one the query parser never resolves -- it would leave
+		 * transformColumnRef() to read "rec.*" as the single whole value
+		 * "rec", which is a different condition rather than a refused one,
+		 * and differs silently wherever a row constructor is not counting its
+		 * entries.
+		 */
+		if (pstate->p_rpr_define)
+		{
+			*expanded = false;
+			return NIL;
 		}
 
 		/*
