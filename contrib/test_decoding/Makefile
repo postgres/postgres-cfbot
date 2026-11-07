@@ -16,7 +16,7 @@ ISOLATION = mxact delayed_startup ondisk_startup concurrent_ddl_dml \
 	oldest_xmin snapshot_transfer subxact_without_top concurrent_stream \
 	twophase_snapshot $(SLOT_CREATION_TST) catalog_change_snapshot \
 	skip_snapshot_restore invalidation_distribution parallel_session_origin \
-	tuplecid_restart tuplecid_nested
+	snapshot_build tuplecid_restart tuplecid_nested
 
 REGRESS_OPTS = --temp-config $(top_srcdir)/contrib/test_decoding/logical.conf
 ISOLATION_OPTS = --temp-config $(top_srcdir)/contrib/test_decoding/logical.conf
