@@ -400,6 +400,13 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
       <listitem>
        <para>
         Create all tables as unlogged tables, rather than permanent tables.
+        When <option>--partitions</option> is used,
+        <structname>pgbench_accounts</structname> is nevertheless created as a
+        permanent table, because a partitioned table cannot be unlogged; its
+        partitions are created unlogged.  <structname>pgbench_branches</structname>
+        is then also kept permanent, so that
+        <option>--foreign-keys</option> can reference it from the permanent
+        <structname>pgbench_accounts</structname>.
        </para>
       </listitem>
      </varlistentry>
