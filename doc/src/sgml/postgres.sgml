@@ -191,6 +191,7 @@ break is not needed in a wider output rendering.
   &lobj;
   &ecpg;
   &infoschema;
+  &binaryformat;
 
  </part>
 
