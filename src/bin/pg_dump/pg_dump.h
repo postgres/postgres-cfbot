@@ -40,6 +40,7 @@ typedef enum
 	/* When modifying this enum, update priority tables in pg_dump_sort.c! */
 	DO_NAMESPACE,
 	DO_EXTENSION,
+	DO_EXTENSION_DATA,			/* extension config table data for binary upgrade */
 	DO_TYPE,
 	DO_SHELL_TYPE,
 	DO_FUNC,
