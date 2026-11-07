@@ -603,7 +603,7 @@ read_controlfile(void)
 {
 	int			fd;
 	ssize_t		len;
-	char	   *buffer;
+	alignas(MAXIMUM_ALIGNOF) char buffer[PG_CONTROL_FILE_SIZE];
 	pg_crc32c	crc;
 
 	if ((fd = open(XLOG_CONTROL_FILE, O_RDONLY | PG_BINARY, 0)) < 0)
@@ -623,10 +623,7 @@ read_controlfile(void)
 		exit(1);
 	}
 
-	/* Use malloc to ensure we have a maxaligned buffer */
-	buffer = (char *) pg_malloc(PG_CONTROL_FILE_SIZE);
-
-	len = read(fd, buffer, PG_CONTROL_FILE_SIZE);
+	len = read(fd, buffer, sizeof buffer);
 	if (len < 0)
 		pg_fatal("could not read file \"%s\": %m", XLOG_CONTROL_FILE);
 	close(fd);
@@ -1139,7 +1136,7 @@ KillExistingWALSummaries(void)
 static void
 WriteEmptyXLOG(void)
 {
-	PGAlignedXLogBlock buffer;
+	PGIOAlignedXLogBlock buffer;
 	XLogPageHeader page;
 	XLogLongPageHeader longpage;
 	XLogRecord *record;
