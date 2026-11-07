@@ -1509,6 +1509,19 @@ CREATE VIEW pg_stat_progress_data_checksums AS
         LEFT JOIN pg_database D ON S.datid = D.oid
     ORDER BY S.datid; -- return the launcher process first
 
+CREATE VIEW pg_stat_progress AS
+    SELECT S.pid, C.command, C.progress_view
+    FROM (VALUES
+        ('ANALYZE', 'pg_catalog.pg_stat_progress_analyze'::regclass),
+        ('VACUUM', 'pg_catalog.pg_stat_progress_vacuum'::regclass),
+        ('CREATE INDEX', 'pg_catalog.pg_stat_progress_create_index'::regclass),
+        ('BASEBACKUP', 'pg_catalog.pg_stat_progress_basebackup'::regclass),
+        ('COPY', 'pg_catalog.pg_stat_progress_copy'::regclass),
+        ('REPACK', 'pg_catalog.pg_stat_progress_repack'::regclass),
+        ('DATACHECKSUMS', 'pg_catalog.pg_stat_progress_data_checksums'::regclass)
+    ) AS C(command, progress_view)
+    CROSS JOIN LATERAL pg_stat_get_progress_info(C.command) AS S;
+
 CREATE VIEW pg_user_mappings AS
     SELECT
         U.oid       AS umid,

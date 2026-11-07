@@ -382,6 +382,14 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_progress</structname><indexterm><primary>pg_stat_progress</primary></indexterm></entry>
+      <entry>One row for each backend reporting command progress, identifying
+       the command family and its detailed progress view.
+       See <xref linkend="pg-stat-progress-view"/>.
+      </entry>
+     </row>
+
+     <row>
       <entry><structname>pg_stat_progress_analyze</structname><indexterm><primary>pg_stat_progress_analyze</primary></indexterm></entry>
       <entry>One row for each backend (including autovacuum worker processes) running
        <command>ANALYZE</command>, showing current progress.
@@ -6492,6 +6500,76 @@ FROM pg_stat_get_backend_idset() AS backendid;
    a base backup), and online data checksum operations.
    This may be expanded in the future.
   </para>
+
+ <sect2 id="command-progress-reporting">
+  <title>Active Command Progress</title>
+
+  <para>
+   The <structname>pg_stat_progress</structname> view provides an overview of
+   all backends currently reporting command progress, across all databases.
+   It contains one row per reporting backend.  Use the view named in
+   <structfield>progress_view</structfield>, filtering by
+   <structfield>pid</structfield>, to examine the command-specific counters.
+   For example:
+  </para>
+
+  <programlisting>
+SELECT * FROM pg_stat_progress;
+SELECT * FROM pg_stat_progress_copy WHERE pid = 12345;
+  </programlisting>
+
+  <table id="pg-stat-progress-view" xreflabel="pg_stat_progress">
+   <title><structname>pg_stat_progress</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row><entry role="catalog_table_entry"><para role="column_definition">
+      Column Type
+     </para><para>Description</para></entry></row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pid</structfield> <type>integer</type>
+      </para>
+      <para>Process ID of the backend reporting progress.</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>command</structfield> <type>text</type>
+      </para>
+      <para>
+       Progress reporting command family: <literal>ANALYZE</literal>,
+       <literal>VACUUM</literal>, <literal>CREATE INDEX</literal>,
+       <literal>BASEBACKUP</literal>, <literal>COPY</literal>,
+       <literal>REPACK</literal>, or <literal>DATACHECKSUMS</literal>.
+       The <literal>CREATE INDEX</literal> family includes
+       <command>REINDEX</command>.  The <literal>REPACK</literal> family
+       includes <command>CLUSTER</command> and <command>VACUUM FULL</command>.
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>progress_view</structfield> <type>regclass</type>
+      </para>
+      <para>
+       The detailed progress view for this command family.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   These columns are visible to all users.  Access to command-specific
+   details follows the permission rules of the detailed progress views.
+   A row disappears when the backend stops reporting progress.  Commands
+   that do not support progress reporting are not included.  The
+   <structname>pg_stat_progress_cluster</structname> compatibility view does
+   not produce an additional overview row for <command>REPACK</command>,
+   <command>CLUSTER</command>, or <command>VACUUM FULL</command>.
+   An operation can finish before its detailed view is queried.
+  </para>
+ </sect2>
 
  <sect2 id="analyze-progress-reporting">
   <title>ANALYZE Progress Reporting</title>
