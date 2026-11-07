@@ -353,6 +353,18 @@ INSERT INTO gtest20c VALUES (1);  -- ok
 INSERT INTO gtest20c VALUES (NULL);  -- fails
 ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
 
+-- whole-row reference with a dropped column: the NULL placeholder for the
+-- dropped column must not make the row test as null
+CREATE TABLE gtest20e (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL, c int);
+ALTER TABLE gtest20e DROP COLUMN c;
+INSERT INTO gtest20e VALUES (1);
+SELECT gtest20e, gtest20e IS NOT NULL AS nn, gtest20e IS NULL AS n FROM gtest20e;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT gtest20e IS NOT NULL FROM gtest20e;
+ALTER TABLE gtest20e ADD CONSTRAINT whole_row_check CHECK (gtest20e IS NOT NULL);  -- ok
+INSERT INTO gtest20e VALUES (2);  -- ok
+INSERT INTO gtest20e VALUES (NULL);  -- fails
+
 -- index with whole-row reference needs rebuild
 CREATE TABLE gtest20d (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 INSERT INTO gtest20d VALUES (1), (1);
