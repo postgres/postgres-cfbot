@@ -350,6 +350,10 @@ build_minmax_path(PlannerInfo *root, MinMaxAggInfo *mminfo,
 	subroot->agginfos = NIL;
 	subroot->aggtransinfos = NIL;
 
+	/* don't share the parent's extension state array */
+	subroot->extension_state = NULL;
+	subroot->extension_state_allocated = 0;
+
 	subroot->parse = parse = copyObject(root->parse);
 	IncrementVarSublevelsUp((Node *) parse, 1, 1);
 
