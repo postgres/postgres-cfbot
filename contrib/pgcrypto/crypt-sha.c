@@ -188,7 +188,7 @@ px_crypt_shacrypt(const char *pw, const char *salt, char *passwd, unsigned dstle
 		char	   *endp;
 		int			srounds = strtoint(num, &endp, 10);
 
-		if (*endp != '$')
+		if (endp == num || *endp != '$')
 			ereport(ERROR,
 					errcode(ERRCODE_SYNTAX_ERROR),
 					errmsg("could not parse salt options"));
