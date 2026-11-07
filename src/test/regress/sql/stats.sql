@@ -769,7 +769,7 @@ SELECT current_setting('fsync') = 'off'
 SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
   FROM pg_stat_io
   WHERE context = 'normal' AND object = 'wal' \gset io_sum_wal_normal_after_
-SELECT current_setting('synchronous_commit') = 'on';
+SELECT current_setting('synchronous_commit') IN ('on', 'remote_apply');
 SELECT :io_sum_wal_normal_after_writes > :io_sum_wal_normal_before_writes;
 SELECT current_setting('fsync') = 'off'
   OR current_setting('wal_sync_method') IN ('open_sync', 'open_datasync')
