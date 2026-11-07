@@ -500,10 +500,33 @@ bt_page_print_tuples(ua_page_items *uargs)
 
 	id = PageGetItemId(page, offset);
 
-	if (!ItemIdIsValid(id))
-		elog(ERROR, "invalid ItemId");
+	/* Check that the line pointer and tuple lie within the page. */
+	if (!ItemIdHasStorage(id) ||
+		ItemIdGetOffset(id) != MAXALIGN(ItemIdGetOffset(id)) ||
+		ItemIdGetLength(id) < sizeof(IndexTupleData) ||
+		ItemIdGetOffset(id) + ItemIdGetLength(id) > BLCKSZ)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid line pointer at offset %u in btree page",
+						offset)));
 
 	itup = (IndexTuple) PageGetItem(page, id);
+
+	if (IndexTupleSize(itup) > ItemIdGetLength(id))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid index tuple length at offset %u in btree page",
+						offset)));
+
+	/* The posting list must lie within the tuple. */
+	if (BTreeTupleIsPosting(itup) &&
+		(BTreeTupleGetPostingOffset(itup) > IndexTupleSize(itup) ||
+		 (IndexTupleSize(itup) - BTreeTupleGetPostingOffset(itup)) / sizeof(ItemPointerData) <
+		 BTreeTupleGetNPosting(itup)))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("invalid posting list at offset %u in btree page",
+						offset)));
 
 	j = 0;
 	memset(nulls, 0, sizeof(nulls));
@@ -572,7 +595,16 @@ bt_page_print_tuples(ua_page_items *uargs)
 		values[j++] = BoolGetDatum(ItemIdIsDead(id));
 	else
 	{
-		Assert(!ItemIdIsDead(id));
+		/*
+		 * LP_DEAD is never set on a pivot tuple in a valid page, but this
+		 * function accepts an arbitrary page image, so report a corrupt one
+		 * rather than tripping an assertion.
+		 */
+		if (ItemIdIsDead(id))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("invalid pivot tuple at offset %u: line pointer marked dead",
+							offset)));
 		nulls[j++] = true;
 	}
 
@@ -755,6 +787,7 @@ bt_page_items_bytea(PG_FUNCTION_ARGS)
 		uargs = palloc_object(ua_page_items);
 
 		uargs->page = get_page_from_raw(raw_page);
+		verify_page_header(uargs->page);
 
 		if (PageIsNew(uargs->page))
 		{

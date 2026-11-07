@@ -26,5 +26,8 @@ enum pageinspect_version
 
 /* in rawpage.c */
 extern Page get_page_from_raw(bytea *raw_page);
+extern void verify_page_header(Page page);
+extern bool stored_value_fits(const char *data, Size len, Size *off,
+							  int16 typlen, char typalign);
 
 #endif							/* _PAGEINSPECT_H_ */
