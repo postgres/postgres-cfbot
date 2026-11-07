@@ -3,6 +3,7 @@
 subdir('brin')
 subdir('commit_ts')
 subdir('delay_execution')
+subdir('detoast_reuse')
 subdir('dummy_index_am')
 subdir('dummy_seclabel')
 subdir('gin')

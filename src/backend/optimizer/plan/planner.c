@@ -671,6 +671,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	result->hasReturning = (parse->returningList != NIL);
 	result->hasModifyingCTE = parse->hasModifyingCTE;
 	result->canSetTag = parse->canSetTag;
+	result->detoastReuse = detoast_reuse;
 	result->transientPlan = glob->transientPlan;
 	result->dependsOnRole = glob->dependsOnRole;
 	result->parallelModeNeeded = glob->parallelModeNeeded;

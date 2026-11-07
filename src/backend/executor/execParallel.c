@@ -473,6 +473,7 @@ RestoreParamExecParams(char *start_address, EState *estate)
 
 		/* Read datum/isnull. */
 		prm->value = datumRestore(&start_address, &prm->isnull);
+		prm->detoast_slot = NULL;
 		prm->execPlan = NULL;
 	}
 }

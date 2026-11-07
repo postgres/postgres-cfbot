@@ -147,6 +147,15 @@ typedef struct ParamExecData
 	void	   *execPlan;		/* should be "SubPlanState *" */
 	Datum		value;
 	bool		isnull;
+
+	/*
+	 * Where a detoasted copy of value may live: the slot and attribute number
+	 * of the Var the value was taken from, or NULL.  The copy is read (and
+	 * made) only by EEOP_PARAM_EXEC_DETOAST, see ExecEvalParamExecDetoast;
+	 * value itself always stays the stored datum.
+	 */
+	struct TupleTableSlot *detoast_slot;
+	int			detoast_attnum;
 } ParamExecData;
 
 /* type of argument for ParamsErrorCallback */
