@@ -23,6 +23,7 @@
 
 static void _bt_bottomupdel_finish_pending(Page page, BTDedupState state,
 										   TM_IndexDeleteOp *delstate);
+
 static bool _bt_do_singleval(Relation rel, Page page, BTDedupState state,
 							 OffsetNumber minoff, IndexTuple newitem);
 static void _bt_singleval_fillfactor(Page page, BTDedupState state,
@@ -70,6 +71,8 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	bool		singlevalstrat = false;
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
 	XLogRecPtr	recptr;
+	bool		coded = P_HASPREFIX(opaque);
+	IndexTuple *ditems = NULL;
 
 	/* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
 	newitemsz += sizeof(ItemIdData);
@@ -131,12 +134,36 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			elog(ERROR, "deduplication failed to add highkey");
 	}
 
+	/*
+	 * On a prefix-compressed page, merge decoded copies of the items, and
+	 * keep the page's directory: each output tuple is coded against the group
+	 * of its interval's base item (_bt_dedup_finish_pending_coded).  Merging
+	 * never enlarges a coded page, so the result always fits.
+	 */
+	if (coded)
+	{
+		OffsetNumber prefixoff = BTPageGetPrefixOff(opaque);
+		ItemId		diritemid = PageGetItemId(page, prefixoff);
+		IndexTuple	dummyhikey;
+		Size		dummyhikeysz;
+
+		if (PageAddItem(newpage, PageGetItem(page, diritemid),
+						ItemIdGetLength(diritemid), prefixoff,
+						false, false) == InvalidOffsetNumber)
+			elog(ERROR, "deduplication failed to add prefix directory");
+		(void) _bt_prefix_decode_items(page, &ditems, &dummyhikey,
+									   &dummyhikeysz);
+		if (dummyhikey)
+			pfree(dummyhikey);
+	}
+
 	for (offnum = minoff;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
 		ItemId		itemid = PageGetItemId(page, offnum);
-		IndexTuple	itup = (IndexTuple) PageGetItem(page, itemid);
+		IndexTuple	itup = coded ? ditems[offnum - minoff] :
+			(IndexTuple) PageGetItem(page, itemid);
 
 		Assert(!ItemIdIsDead(itemid));
 
@@ -170,7 +197,10 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			 * form new posting tuple and add it to our temp page (newpage).
 			 * Else add pending interval's base tuple to the temp page as-is.
 			 */
-			pagesaving += _bt_dedup_finish_pending(newpage, state);
+			if (coded)
+				_bt_dedup_finish_pending_coded(page, newpage, state);
+			else
+				pagesaving += _bt_dedup_finish_pending(newpage, state);
 
 			if (singlevalstrat)
 			{
@@ -203,7 +233,17 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	}
 
 	/* Handle the last item */
-	pagesaving += _bt_dedup_finish_pending(newpage, state);
+	if (coded)
+		_bt_dedup_finish_pending_coded(page, newpage, state);
+	else
+		pagesaving += _bt_dedup_finish_pending(newpage, state);
+
+	if (ditems)
+	{
+		for (int i = 0; i <= maxoff - minoff; i++)
+			pfree(ditems[i]);
+		pfree(ditems);
+	}
 
 	/*
 	 * If no items suitable for deduplication were found, newpage must be
@@ -240,6 +280,9 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 
 	START_CRIT_SECTION();
 
+	/* the copied directory's cached sizes describe the old items */
+	if (coded)
+		_bt_prefix_recount(newpage);
 	PageRestoreTempPage(newpage, page);
 	MarkBufferDirty(buf);
 
@@ -251,6 +294,7 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 		xlrec_dedup.nintervals = state->nintervals;
 
 		XLogBeginInsert();
+
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 		XLogRegisterData(&xlrec_dedup, SizeOfBtreeDedup);
 
@@ -272,7 +316,8 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	END_CRIT_SECTION();
 
 	/* Local space accounting should agree with page accounting */
-	Assert(pagesaving < newitemsz || PageGetExactFreeSpace(page) >= newitemsz);
+	Assert(coded || pagesaving < newitemsz ||
+		   PageGetExactFreeSpace(page) >= newitemsz);
 
 	/* cannot leak memory here */
 	pfree(state->htids);
@@ -317,6 +362,7 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 	BTDedupState state;
 	TM_IndexDeleteOp delstate;
 	bool		neverdedup;
+	IndexTuple *ditems = NULL;
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
 
 	/* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
@@ -362,12 +408,30 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 
 	minoff = P_FIRSTDATAKEY(opaque);
 	maxoff = PageGetMaxOffsetNumber(page);
+
+	/*
+	 * On a prefix-compressed page compare decoded copies of the items.  The
+	 * coded tuples keep their heap TIDs (and posting lists) in the standard
+	 * layout, so everything below that reads only TIDs works on them as is.
+	 */
+	if (P_HASPREFIX(opaque))
+	{
+		IndexTuple	dummyhikey;
+		Size		dummyhikeysz;
+
+		(void) _bt_prefix_decode_items(page, &ditems, &dummyhikey,
+									   &dummyhikeysz);
+		if (dummyhikey)
+			pfree(dummyhikey);
+	}
+
 	for (offnum = minoff;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
 		ItemId		itemid = PageGetItemId(page, offnum);
-		IndexTuple	itup = (IndexTuple) PageGetItem(page, itemid);
+		IndexTuple	itup = ditems ? ditems[offnum - minoff] :
+			(IndexTuple) PageGetItem(page, itemid);
 
 		Assert(!ItemIdIsDead(itemid));
 
@@ -392,6 +456,13 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 	}
 	/* Finalize final interval -- move its TIDs to delete state */
 	_bt_bottomupdel_finish_pending(page, state, &delstate);
+
+	if (ditems)
+	{
+		for (int i = 0; i <= maxoff - minoff; i++)
+			pfree(ditems[i]);
+		pfree(ditems);
+	}
 
 	/*
 	 * We don't give up now in the event of having few (or even zero)
@@ -609,6 +680,55 @@ _bt_dedup_finish_pending(Page newpage, BTDedupState state)
 }
 
 /*
+ * _bt_dedup_finish_pending for a prefix-compressed page: like the plain
+ * version, but the tuple added to newpage is coded against the group of the
+ * interval's base item, using the source page's directory (which newpage
+ * carries unchanged).  A lone base item is copied in its existing coded form.
+ * Page-only, so WAL redo replays a deduplication of a coded page with it.
+ */
+void
+_bt_dedup_finish_pending_coded(Page page, Page newpage, BTDedupState state)
+{
+	OffsetNumber tupoff = OffsetNumberNext(PageGetMaxOffsetNumber(newpage));
+	IndexTuple	out;
+	Size		outsz;
+
+	Assert(state->nitems > 0);
+	Assert(state->nitems <= state->nhtids);
+	Assert(state->intervals[state->nintervals].baseoff == state->baseoff);
+
+	if (state->nitems == 1)
+	{
+		ItemId		itemid = PageGetItemId(page, state->baseoff);
+
+		out = (IndexTuple) PageGetItem(page, itemid);
+		outsz = ItemIdGetLength(itemid);
+		if (PageAddItem(newpage, out, outsz, tupoff, false, false) == InvalidOffsetNumber)
+			elog(ERROR, "deduplication failed to add tuple to page");
+	}
+	else
+	{
+		IndexTuple	final;
+
+		final = _bt_form_posting(state->base, state->htids, state->nhtids);
+		Assert(IndexTupleSize(final) <= state->maxpostingsize);
+		state->intervals[state->nintervals].nitems = state->nitems;
+
+		out = _bt_prefix_recode(page, state->baseoff, final);
+		outsz = IndexTupleSize(out);
+		if (PageAddItem(newpage, out, outsz, tupoff, false, false) == InvalidOffsetNumber)
+			elog(ERROR, "deduplication failed to add tuple to page");
+		pfree(out);
+		pfree(final);
+		state->nintervals++;
+	}
+
+	state->nhtids = 0;
+	state->nitems = 0;
+	state->phystupsize = 0;
+}
+
+/*
  * Finalize interval during bottom-up index deletion.
  *
  * During a bottom-up pass we expect that TIDs will be recorded in dedup state
@@ -783,16 +903,14 @@ _bt_do_singleval(Relation rel, Page page, BTDedupState state,
 				 OffsetNumber minoff, IndexTuple newitem)
 {
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
-	ItemId		itemid;
 	IndexTuple	itup;
+	BTItemBuf	buf;
 
-	itemid = PageGetItemId(page, minoff);
-	itup = (IndexTuple) PageGetItem(page, itemid);
+	itup = _bt_getitem(page, minoff, &buf);
 
 	if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
 	{
-		itemid = PageGetItemId(page, PageGetMaxOffsetNumber(page));
-		itup = (IndexTuple) PageGetItem(page, itemid);
+		itup = _bt_getitem(page, PageGetMaxOffsetNumber(page), &buf);
 
 		if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
 			return true;

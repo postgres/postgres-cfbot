@@ -242,6 +242,18 @@ typedef struct BTPageState
 	uint32		btps_level;		/* tree level (0 = leaf) */
 	Size		btps_full;		/* "full" if less than this much free space */
 	struct BTPageState *btps_next;	/* link to parent level, if any */
+
+	/*
+	 * Leaf level of a prefix_compression index: tuples are collected here
+	 * (copied) instead of on btps_buf, and a leaf is laid out -- coded or
+	 * plain -- when the next tuple would overfill it.  See
+	 * _bt_buildadd_coded.
+	 */
+	IndexTuple *btps_items;		/* pending leaf tuples, palloc'd copies */
+	int			btps_nitems;
+	int			btps_maxitems;
+	BTPrefixPageEst btps_est;	/* coded estimate of btps_items */
+	Size		btps_lastkey;	/* worst-case high key from the last item */
 } BTPageState;
 
 /*
@@ -268,6 +280,10 @@ static void _bt_build_callback(Relation index, ItemPointer tid, Datum *values,
 static BulkWriteBuffer _bt_blnewpage(BTWriteState *wstate, uint32 level);
 static BTPageState *_bt_pagestate(BTWriteState *wstate, uint32 level);
 static void _bt_slideleft(Page rightmostpage);
+static void _bt_buildadd_coded(BTWriteState *wstate, BTPageState *state,
+							   IndexTuple itup, Size truncextra);
+static void _bt_flush_coded(BTWriteState *wstate, BTPageState *state,
+							bool last);
 static void _bt_sortaddtup(Page page, Size itemsize,
 						   const IndexTupleData *itup, OffsetNumber itup_off,
 						   bool newfirstdataitem);
@@ -804,6 +820,12 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	 */
 	CHECK_FOR_INTERRUPTS();
 
+	if (state->btps_level == 0 && _bt_prefix_enabled(wstate->index))
+	{
+		_bt_buildadd_coded(wstate, state, itup, truncextra);
+		return;
+	}
+
 	nbuf = state->btps_buf;
 	npage = (Page) nbuf;
 	nblkno = state->btps_blkno;
@@ -1023,6 +1045,248 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 }
 
 /*
+ * _bt_buildadd_coded -- add a leaf tuple to a prefix_compression index build.
+ *
+ * Leaf tuples are collected in state->btps_items with a running estimate of
+ * the page they would make when coded (BTPrefixPageEst).  Before adding itup,
+ * the pending leaf is laid out and written if itup would push it past either
+ * limit:
+ *
+ *	- the leaf fillfactor, applied to the coded (on-disk) size, so a coded
+ *	  leaf leaves the same insert headroom that a plain one does; and
+ *	- the split-fit budget (see _bt_prefix_split_needed): the decoded items of
+ *	  a coded page must still split into two plain pages.
+ *
+ * A pending leaf that would not compress worthwhile is laid out plain, which
+ * caps it at what a plain page holds (the coded limits above are then
+ * irrelevant), exactly as the non-prefix build does.
+ */
+static void
+_bt_buildadd_coded(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
+				   Size truncextra)
+{
+	Size		usable = BLCKSZ - SizeOfPageHeaderData -
+		MAXALIGN(sizeof(BTPageOpaqueData));
+	Size		fillsz = usable - state->btps_full;
+	Size		itupsz = MAXALIGN(IndexTupleSize(itup));
+	BTPrefixPageEst est;
+
+	CHECK_FOR_INTERRUPTS();
+
+	if (unlikely(itupsz > BTMaxItemSize))
+		_bt_check_third_page(wstate->index, wstate->heap, true,
+							 (Page) state->btps_buf, itup);
+
+	if (state->btps_items == NULL)
+	{
+		state->btps_maxitems = 2 * MaxIndexTuplesPerPage;
+		state->btps_items = palloc_array(IndexTuple, state->btps_maxitems);
+	}
+
+	/*
+	 * Mirror _bt_buildadd's two tests, in terms of the leaf the pending
+	 * tuples would make.  A finished leaf keeps all pending tuples but the
+	 * last, which moves to the next leaf and supplies the new high key (at
+	 * most its key part plus a heap TID, stored plain):
+	 *
+	 * - soft: finish the leaf once it is fillfactor-full as it stands; -
+	 * hard: finish it if admitting itup could leave it unable to hold its
+	 * tuples and high key, or (coded) beyond the split-fit budget (see
+	 * _bt_prefix_split_needed), or out of line pointers.
+	 *
+	 * Sizes are coded when coding is worthwhile and plain otherwise, so a
+	 * build that does not compress fills leaves exactly as a plain one.
+	 */
+	/*
+	 * Copy itup first: the running estimate keeps a pointer to its group's
+	 * anchor tuple, which may be this one, so it must see the copy that is
+	 * kept.  Then estimate the leaf with itup admitted, once.
+	 */
+	itup = CopyIndexTuple(itup);
+	est = state->btps_est;
+	_bt_prefix_est_add(&est, itup);
+
+	if (state->btps_nitems >= 2)
+	{
+		BTPrefixPageEst *pend = &state->btps_est;
+		Size		lastplain = MAXALIGN(IndexTupleSize(state->btps_items[state->btps_nitems - 1])) +
+			sizeof(ItemIdData);
+		Size		itupplain = itupsz + sizeof(ItemIdData);
+		Size		itupkey = itupsz - truncextra +
+			MAXALIGN(sizeof(ItemPointerData)) + sizeof(ItemIdData);
+		Size		leafnow,
+					leafwith;
+		bool		full;
+
+		if (_bt_prefix_worthwhile(_bt_prefix_est_coded(pend), pend->plainsz))
+			leafnow = _bt_prefix_est_coded(pend) - pend->lastcoded +
+				state->btps_lastkey;
+		else
+			leafnow = pend->plainsz - lastplain + state->btps_lastkey;
+		full = leafnow > fillsz;
+
+		if (!full)
+		{
+			if (_bt_prefix_worthwhile(_bt_prefix_est_coded(&est), est.plainsz))
+			{
+				leafwith = _bt_prefix_est_coded(&est) - est.lastcoded + itupkey;
+				full = est.plainsz - itupplain + itupkey + 2 * est.maxplain +
+					MAXALIGN(sizeof(ItemPointerData)) > 2 * usable;
+			}
+			else
+				leafwith = est.plainsz - itupplain + itupkey;
+			full = full || leafwith > usable ||
+				state->btps_nitems >= MaxIndexTuplesPerPage - 2;
+		}
+
+		if (full)
+		{
+			/* itup starts the next leaf: its estimate starts over */
+			_bt_flush_coded(wstate, state, false);
+			est = state->btps_est;
+			_bt_prefix_est_add(&est, itup);
+		}
+	}
+
+	if (state->btps_nitems >= state->btps_maxitems)
+	{
+		state->btps_maxitems *= 2;
+		state->btps_items = repalloc_array(state->btps_items, IndexTuple,
+										   state->btps_maxitems);
+	}
+	state->btps_items[state->btps_nitems++] = itup;
+	state->btps_est = est;
+	state->btps_lastkey = itupsz - truncextra +
+		MAXALIGN(sizeof(ItemPointerData)) + sizeof(ItemIdData);
+}
+
+/*
+ * _bt_flush_coded -- lay out and write the pending leaf of a coded build.
+ *
+ * All pending tuples but the last go on the leaf (the last one starts the next
+ * leaf and supplies the new high key, as in _bt_buildadd).  When `last' the
+ * whole pending set makes the final, rightmost leaf, which is left in
+ * state->btps_buf for _bt_uppershutdown to write.
+ */
+static void
+_bt_flush_coded(BTWriteState *wstate, BTPageState *state, bool last)
+{
+	Page		page = (Page) state->btps_buf;
+	BTPageOpaque opaque = BTPageGetOpaque(page);
+	int			nleaf = last ? state->btps_nitems : state->btps_nitems - 1;
+	IndexTuple	firstright = last ? NULL : state->btps_items[nleaf];
+	IndexTuple	hikey = NULL;
+	BTPageOpaqueData saveopaque;
+	Size		usable = BLCKSZ - SizeOfPageHeaderData -
+		MAXALIGN(sizeof(BTPageOpaqueData));
+	Size		plainsz;
+	bool		trycode;
+	BulkWriteBuffer nbuf = NULL;
+	BlockNumber nblkno = InvalidBlockNumber;
+
+	Assert(nleaf >= 1);
+
+	/*
+	 * A finished leaf is not rightmost: link it to the next leaf before
+	 * laying it out, since the layout (high key, directory offset) depends on
+	 * that.
+	 */
+	if (!last)
+	{
+		nbuf = _bt_blnewpage(wstate, 0);
+		nblkno = wstate->btws_pages_alloced++;
+		opaque->btpo_next = nblkno;
+		BTPageGetOpaque((Page) nbuf)->btpo_prev = state->btps_blkno;
+	}
+	saveopaque = *opaque;
+
+	if (!last)
+		hikey = _bt_truncate(wstate->index, state->btps_items[nleaf - 1],
+							 firstright, wstate->inskey);
+
+	/*
+	 * Lay out the leaf: coded if worthwhile, else plain.  Leaving out the
+	 * last tuple can tip the worthwhile test; if the plain layout would then
+	 * overflow a page, code it anyway (the admission test in
+	 * _bt_buildadd_coded guaranteed the coded layout fits).
+	 *
+	 * The running estimate covers all pending tuples; without the last one
+	 * (when it moves on) the leaf is coded unless its plain size, which is
+	 * exact, says otherwise.  Skip the coding attempt outright when the
+	 * estimate says it does not pay and plain fits: that is the common case
+	 * for an incompressible index, and it saves a second pass over the
+	 * tuples.
+	 */
+	plainsz = hikey ? MAXALIGN(IndexTupleSize(hikey)) + sizeof(ItemIdData) : 0;
+	for (int i = 0; i < nleaf; i++)
+		plainsz += MAXALIGN(IndexTupleSize(state->btps_items[i])) +
+			sizeof(ItemIdData);
+	trycode = plainsz > usable ||
+		_bt_prefix_worthwhile(_bt_prefix_est_coded(&state->btps_est),
+							  state->btps_est.plainsz);
+	_bt_pageinit(page, BLCKSZ);
+	*BTPageGetOpaque(page) = saveopaque;
+	opaque = BTPageGetOpaque(page);
+	if (!trycode ||
+		!_bt_prefix_form_page(page, hikey, state->btps_items,
+							  nleaf, plainsz > usable))
+	{
+		OffsetNumber off = P_FIRSTKEY;
+
+		if (plainsz > usable)
+			elog(ERROR, "could not lay out prefix-compressed leaf during build of index \"%s\"",
+				 RelationGetRelationName(wstate->index));
+
+		_bt_pageinit(page, BLCKSZ);
+		*BTPageGetOpaque(page) = saveopaque;
+		opaque = BTPageGetOpaque(page);
+		if (hikey)
+			_bt_sortaddtup(page, IndexTupleSize(hikey), hikey, P_HIKEY, false);
+		else
+			off = P_HIKEY;		/* rightmost: no high key */
+		for (int i = 0; i < nleaf; i++, off = OffsetNumberNext(off))
+			_bt_sortaddtup(page, MAXALIGN(IndexTupleSize(state->btps_items[i])),
+						   state->btps_items[i], off, false);
+	}
+
+	/* minus infinity low key for the leftmost leaf */
+	if (state->btps_lowkey == NULL)
+	{
+		state->btps_lowkey = palloc0_object(IndexTupleData);
+		state->btps_lowkey->t_info = sizeof(IndexTupleData);
+		BTreeTupleSetNAtts(state->btps_lowkey, 0, false);
+	}
+
+	if (!last)
+	{
+		/* link the finished leaf into its parent, using its low key */
+		if (state->btps_next == NULL)
+			state->btps_next = _bt_pagestate(wstate, 1);
+		BTreeTupleSetDownLink(state->btps_lowkey, state->btps_blkno);
+		_bt_buildadd(wstate, state->btps_next, state->btps_lowkey, 0);
+		pfree(state->btps_lowkey);
+		state->btps_lowkey = hikey; /* the next leaf's low key */
+
+		_bt_blwritepage(wstate, state->btps_buf, state->btps_blkno);
+		state->btps_buf = nbuf;
+		state->btps_blkno = nblkno;
+	}
+
+	/* keep only the carried-over first tuple of the next leaf */
+	for (int i = 0; i < nleaf; i++)
+		pfree(state->btps_items[i]);
+	state->btps_nitems = 0;
+	memset(&state->btps_est, 0, sizeof(BTPrefixPageEst));
+	if (!last)
+	{
+		state->btps_items[0] = firstright;
+		state->btps_nitems = 1;
+		_bt_prefix_est_add(&state->btps_est, firstright);
+		/* btps_lastkey still describes firstright */
+	}
+}
+
+/*
  * Finalize pending posting list tuple, and add it to the index.  Final tuple
  * is based on saved base tuple, and saved list of heap TIDs.
  *
@@ -1074,6 +1338,10 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 	/*
 	 * Each iteration of this loop completes one more level of the tree.
 	 */
+	/* lay out the final leaf of a prefix_compression index */
+	if (state != NULL && state->btps_items != NULL)
+		_bt_flush_coded(wstate, state, true);
+
 	for (s = state; s != NULL; s = s->btps_next)
 	{
 		BlockNumber blkno;
@@ -1114,7 +1382,8 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 		 * This is the rightmost page, so the ItemId array needs to be slid
 		 * back one slot.  Then we can dump out the page.
 		 */
-		_bt_slideleft((Page) s->btps_buf);
+		if (s->btps_items == NULL)	/* coded-build leaves are laid out exactly */
+			_bt_slideleft((Page) s->btps_buf);
 		_bt_blwritepage(wstate, s->btps_buf, s->btps_blkno);
 		s->btps_buf = NULL;		/* writepage took ownership of the buffer */
 	}

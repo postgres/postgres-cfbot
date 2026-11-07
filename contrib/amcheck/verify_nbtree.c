@@ -131,6 +131,10 @@ typedef struct BtreeCheckState
 	bloom_filter *filter;
 	/* Debug counter */
 	int64		heaptuplespresent;
+
+	/* Decode workspaces for prefix-compressed leaf items */
+	BTItemBuf	itembuf;		/* current target item */
+	BTItemBuf	nextbuf;		/* any other item looked at meanwhile */
 } BtreeCheckState;
 
 /*
@@ -1267,6 +1271,30 @@ bt_target_page_check(BtreeCheckState *state)
 	}
 
 	/*
+	 * A prefix-compressed leaf's directory caches the decoded size of its
+	 * data items; it must match a recount.
+	 */
+	if (P_HASPREFIX(topaque))
+	{
+		PGAlignedBlock copy;
+		uint32		cached,
+					actual;
+
+		memcpy(copy.data, state->target, BLCKSZ);
+		cached = _bt_prefix_cached_size((Page) copy.data);
+		_bt_prefix_recount((Page) copy.data);
+		actual = _bt_prefix_cached_size((Page) copy.data);
+		if (cached != actual)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("prefix directory decoded size is wrong in index \"%s\"",
+							RelationGetRelationName(state->rel)),
+					 errdetail_internal("Block=%u cached=%u actual=%u page lsn=%X/%08X.",
+										state->targetblock, cached, actual,
+										LSN_FORMAT_ARGS(state->targetlsn))));
+	}
+
+	/*
 	 * Loop over page items, starting from first non-highkey item, not high
 	 * key (if any).  Most tests are not performed for the "negative infinity"
 	 * real item (if any).
@@ -1312,6 +1340,16 @@ bt_target_page_check(BtreeCheckState *state)
 										tupsize, ItemIdGetLength(itemid),
 										LSN_FORMAT_ARGS(state->targetlsn)),
 					 errhint("This could be a torn page problem.")));
+
+		/*
+		 * On a prefix-compressed leaf, check the decoded data item (the coded
+		 * form's size was just checked against lp_len).
+		 */
+		if (P_HASPREFIX(topaque))
+		{
+			itup = _bt_getitem(state->target, offset, &state->itembuf);
+			tupsize = IndexTupleSize(itup);
+		}
 
 		/* Check the number of index tuple attributes */
 		if (!_bt_check_natts(state->rel, state->heapkeyspace, state->target,
@@ -1606,7 +1644,8 @@ bt_target_page_check(BtreeCheckState *state)
 			itemid = PageGetItemIdCareful(state, state->targetblock,
 										  state->target,
 										  OffsetNumberNext(offset));
-			itup = (IndexTuple) PageGetItem(state->target, itemid);
+			itup = _bt_getitem(state->target, OffsetNumberNext(offset),
+							   &state->nextbuf);
 			tid = BTreeTupleGetPointsToTID(itup);
 			nhtid = psprintf("(%u,%u)",
 							 ItemPointerGetBlockNumberNoCheck(tid),
@@ -1793,7 +1832,8 @@ bt_target_page_check(BtreeCheckState *state)
 					itemid = PageGetItemIdCareful(state, rightblock_number,
 												  rightpage,
 												  rightfirstoffset);
-					itup = (IndexTuple) PageGetItem(rightpage, itemid);
+					itup = _bt_getitem(rightpage, rightfirstoffset,
+									   &state->nextbuf);
 
 					bt_entry_unique_check(state, itup, rightblock_number, rightfirstoffset, &lVis);
 
@@ -2047,7 +2087,11 @@ bt_right_page_check_scankey(BtreeCheckState *state, OffsetNumber *rightfirstoffs
 	 * Return first real item scankey.  Note that this relies on right page
 	 * memory remaining allocated.
 	 */
-	firstitup = (IndexTuple) PageGetItem(rightpage, rightitem);
+	if (P_ISLEAF(opaque))
+		firstitup = CopyIndexTuple(_bt_getitem(rightpage, *rightfirstoffset,
+											   &state->nextbuf));
+	else
+		firstitup = (IndexTuple) PageGetItem(rightpage, rightitem);
 	return bt_mkscankey_pivotsearch(state->rel, firstitup);
 }
 
@@ -3095,14 +3139,13 @@ static inline bool
 invariant_l_offset(BtreeCheckState *state, BTScanInsert key,
 				   OffsetNumber upperbound)
 {
-	ItemId		itemid;
 	int32		cmp;
 
 	Assert(!key->nextkey && key->backward);
 
 	/* Verify line pointer before checking tuple */
-	itemid = PageGetItemIdCareful(state, state->targetblock, state->target,
-								  upperbound);
+	(void) PageGetItemIdCareful(state, state->targetblock, state->target,
+								upperbound);
 	/* pg_upgrade'd indexes may legally have equal sibling tuples */
 	if (!key->heapkeyspace)
 		return invariant_leq_offset(state, key, upperbound);
@@ -3126,8 +3169,8 @@ invariant_l_offset(BtreeCheckState *state, BTScanInsert key,
 		ItemPointer rheaptid;
 		bool		nonpivot;
 
-		ritup = (IndexTuple) PageGetItem(state->target, itemid);
 		topaque = BTPageGetOpaque(state->target);
+		ritup = _bt_getitem(state->target, upperbound, &state->nextbuf);
 		nonpivot = P_ISLEAF(topaque) && upperbound >= P_FIRSTDATAKEY(topaque);
 
 		/* Get number of keys + heap TID for item to the right */
@@ -3218,14 +3261,13 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 							 BlockNumber nontargetblock, Page nontarget,
 							 OffsetNumber upperbound)
 {
-	ItemId		itemid;
 	int32		cmp;
 
 	Assert(!key->nextkey && key->backward);
 
 	/* Verify line pointer before checking tuple */
-	itemid = PageGetItemIdCareful(state, nontargetblock, nontarget,
-								  upperbound);
+	(void) PageGetItemIdCareful(state, nontargetblock, nontarget,
+								upperbound);
 	cmp = _bt_compare(state->rel, key, nontarget, upperbound);
 
 	/* pg_upgrade'd indexes may legally have equal sibling tuples */
@@ -3241,8 +3283,8 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 		BTPageOpaque copaque;
 		bool		nonpivot;
 
-		child = (IndexTuple) PageGetItem(nontarget, itemid);
 		copaque = BTPageGetOpaque(nontarget);
+		child = _bt_getitem(nontarget, upperbound, &state->nextbuf);
 		nonpivot = P_ISLEAF(copaque) && upperbound >= P_FIRSTDATAKEY(copaque);
 
 		/* Get number of keys + heap TID for child/non-target item */
@@ -3396,6 +3438,18 @@ palloc_btree_page(BtreeCheckState *state, BlockNumber blocknum)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("non-rightmost leaf block %u in index \"%s\" lacks high key item",
+						blocknum, RelationGetRelationName(state->rel))));
+
+	/*
+	 * A prefix-compressed page is a live leaf holding its directory item and
+	 * at least one coded data item (an emptied page drops the directory).
+	 */
+	if (P_HASPREFIX(opaque) &&
+		(!P_ISLEAF(opaque) || P_ISDELETED(opaque) || P_ISHALFDEAD(opaque) ||
+		 maxoffset < P_FIRSTDATAKEY(opaque)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("block %u in index \"%s\" has an invalid prefix-compressed layout",
 						blocknum, RelationGetRelationName(state->rel))));
 
 	/*

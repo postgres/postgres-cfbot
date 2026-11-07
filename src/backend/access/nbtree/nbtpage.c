@@ -1211,6 +1211,7 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 	/* Now handle simple deletes of entire tuples */
 	if (ndeletable > 0)
 		PageIndexMultiDelete(page, deletable, ndeletable);
+	_bt_prefix_recount(page);
 
 	/*
 	 * We can clear the vacuum cycle ID since this page has certainly been
@@ -1331,6 +1332,7 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 
 	if (ndeletable > 0)
 		PageIndexMultiDelete(page, deletable, ndeletable);
+	_bt_prefix_recount(page);
 
 	/*
 	 * Unlike _bt_delitems_vacuum, we *must not* clear the vacuum cycle ID at

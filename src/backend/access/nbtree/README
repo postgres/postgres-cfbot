@@ -1081,3 +1081,127 @@ item is irrelevant, and need not be stored at all.  This arrangement
 corresponds to the fact that an L&Y non-leaf page has one more pointer
 than key.  Suffix truncation's negative infinity attributes behave in
 the same way.
+
+Notes about leaf key prefix compression
+----------------------------------------
+
+With the prefix_compression storage parameter (default off) a leaf page may
+store the leading bytes that a run of its data tuples share just once, in a
+per-page directory, and record only each tuple's unshared remainder.  This
+shrinks indexes whose keys share long leading bytes: URLs, jsonb paths,
+zero-padded codes, multi-column keys with low-cardinality leading columns.
+Like deduplication, it alters the physical representation of tuples without
+changing the logical contents of the index, and comparisons always operate on
+the reconstructed original values, so every collation and operator class is
+unaffected.
+
+Sharing is decided by equality of stored bytes, never by the opclass notion
+of equality.  That is what makes it sound for every column type, including
+types whose equal values can have different representations (numeric 1.0 and
+1.00): only bytes that are already identical are shared, so an index-only
+scan gets back exactly the bytes that were stored, and no equalimage support
+function is needed.  Deduplication needs equalimage because it merges tuples
+the comparator calls equal and keeps one copy; prefix compression never
+merges anything.  Sharing is not tied to column boundaries: a member shares
+the longest common prefix of its data area with its group's anchor, which
+covers whole leading columns plus any leading bytes of the first column that
+differs.
+
+A leaf that uses the technique carries the BTP_PREFIX page flag and one extra
+item, the PREFIX DIRECTORY, at the offset where its first data item would
+otherwise be (P_HIKEY on a rightmost page, P_FIRSTKEY otherwise); data items
+begin one offset later, which P_FIRSTDATAKEY() accounts for.  Keeping the
+whole directory in a single item preserves the "exactly one item before the
+data" property, so P_FIRSTDATAKEY depends only on the page flag, neither
+BTPageOpaqueData nor the on-disk page header changes, and binary search over
+the data items is unaffected.  The directory holds one or more GROUPS of
+consecutive data items.  A group's ANCHOR is a copy of the key part of its
+first member; a new group starts when an item shares no byte with the current
+anchor, or when it shares strictly more with its immediate predecessor than
+with the current anchor (by at least a MAXALIGN quantum) -- the latter lets a
+long run of tuples that share a long prefix with one another form its own
+group even when the leaf's first tuple only shares a short leading prefix (say
+a low-cardinality leading column) with them.  The rule looks only backwards,
+so the running size estimate used when filling pages during CREATE INDEX makes
+the identical grouping decisions one tuple at a time.
+
+Each data item is stored "coded": an IndexTupleData header whose
+t_tid is the item's own heap TID (no t_tid bit is stolen), a small code header
+(group, shared byte count, the original's t_info), the original's null bitmap,
+the residual -- the original's data-area bytes after the shared ones -- and,
+for a posting list tuple, its posting list in the standard layout.  Code that
+reads only heap TIDs (VACUUM, LP_DEAD hinting, index deletion, posting list
+splits) therefore works on coded items as is.  Pivots (high keys and
+downlinks) are never coded.  Decoding splices the anchor's shared bytes back
+in front of the residual and reproduces the original tuple byte for byte.
+
+Coding and decoding depend only on the page and the tuple, never on the
+catalog.  _bt_getitem() is the one accessor through which readers obtain a
+decoded leaf data item; _bt_compare() decodes the item it compares against,
+and _bt_readpage() skips decoding altogether when a scan needs only heap TIDs
+and no key comparison remains to be made on the page (not an index-only scan,
+every scan key already satisfied for the whole page, no array keys).
+
+A page gets a directory only when it is written as a whole: a leaf during an
+index build, or either half of a leaf page split.  An index build collects a
+leaf's tuples and fills it according to a running estimate of the coded size,
+honoring fillfactor in coded bytes, so a compressible index is built dense
+rather than coded after the fact.  An insert codes the new tuple against the
+group of its neighbor, sharing however much it happens to share (possibly
+nothing); no insert, VACUUM or deduplication ever rewrites a page to keep its
+directory "good".  Deduplication and bottom-up deletion both work on decoded
+copies of a coded page's items; deduplication re-codes each resulting tuple
+against the page's existing directory, so the page can only shrink.  When
+VACUUM or page deletion empties a coded leaf, the directory is removed and the
+flag cleared, so an emptied leaf holds only its high key, as page deletion
+expects.
+
+A coded page can hold more data than fits on a plain page, and it must still
+be possible to split it into two plain pages.  The directory caches the
+decoded size of the page's items (their sum and the largest), maintained
+exactly by every change and repeated by redo, and an insert splits the page
+before its decoded content would exceed what a size-balanced split can always
+place on two pages, counting the left half's new high key
+(_bt_prefix_split_needed has the argument).  A split decodes the page,
+chooses a split point by plain sizes (upstream _bt_findsplitloc when the
+decoded items fit one page, otherwise a size-checked balanced point), writes
+both halves plain, and codes each half as a whole page.  For the rare case
+where a large incoming tuple leaves no legal split point once it is added, the
+existing items are split alone and the insert is retried from the top.
+
+Because the format is a per-page opt-in flag with no btree version change,
+pages without the flag are read exactly as before, so pg_upgrade and
+replication keep working and existing indexes continue to work with no
+REINDEX.  Turning the parameter on with ALTER INDEX rewrites nothing; each
+leaf is converted the next time it is written whole, and compressed and
+uncompressed leaves coexist in the same index indefinitely.  Turning it off
+likewise rewrites nothing: existing BTP_PREFIX leaves keep their coded form
+and are still read correctly, since every reader decodes based on the page
+flag, not on the current setting.  Index-only scans keep their per-page tuple
+workspace sized for a plain page and grow it the first time they read a
+BTP_PREFIX page, since a decoded page can exceed one block.
+
+WAL replay never needs a full-page image for a coded page.  An in-place
+insert logs the coded tuple, which redo adds verbatim before updating the
+directory's cached size.  A split record says, in its flags, whether the
+original page and each half were coded; for a coded original page its
+offsets refer to the decoded item sequence.  Redo decodes the original page's
+items, collects the left half's items exactly as the primary did, and lays
+the left half out with the same routine the primary used
+(_bt_prefix_form_page); the right half arrives as its coded items, directory
+included, which _bt_restore_page lays out exactly as the primary did.
+Deduplication and posting list splits on a coded page are replayed by
+repeating the primary's decode, merge and re-code steps.  The coded records
+are smaller than the plain ones, since every item and the right half travel
+in coded form.
+
+Prefix compression is a separate mechanism from deduplication rather than an
+extension of it because the two attack different redundancy.  Deduplication
+collapses tuples whose whole key is equal into one posting list tuple; it does
+nothing for keys that are all distinct.  Prefix compression factors out a
+leading run shared by distinct keys and leaves their differing suffixes alone;
+it does nothing for exact duplicates that a posting list already collapses.
+The common case this targets -- a URL or jsonb-path column whose values are
+distinct but share a long prefix -- is exactly where deduplication does not
+help.  The two compose on one page: a posting list tuple is coded like any
+other, carrying its posting list after the residual.

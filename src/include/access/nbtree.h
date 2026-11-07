@@ -83,6 +83,8 @@ typedef BTPageOpaqueData *BTPageOpaque;
 #define BTP_HAS_GARBAGE (1 << 6)	/* page has LP_DEAD tuples (deprecated) */
 #define BTP_INCOMPLETE_SPLIT (1 << 7)	/* right sibling's downlink is missing */
 #define BTP_HAS_FULLXID	(1 << 8)	/* contains BTDeletedPageData */
+#define BTP_PREFIX		(1 << 9)	/* leaf keys coded against a page prefix
+									 * (see nbtprefix.c) */
 
 /*
  * The max allowed value of a cycle ID is a bit less than 64K.  This is
@@ -367,7 +369,55 @@ typedef struct BTVacState
 
 #define P_HIKEY				((OffsetNumber) 1)
 #define P_FIRSTKEY			((OffsetNumber) 2)
-#define P_FIRSTDATAKEY(opaque)	(P_RIGHTMOST(opaque) ? P_HIKEY : P_FIRSTKEY)
+
+/*
+ * Leaf key prefix compression (see nbtprefix.c for the code).
+ *
+ * A leaf of an index whose prefix_compression reloption is on may be flagged
+ * BTP_PREFIX.  Its data items are organized in GROUPS of consecutive items;
+ * each group has an ANCHOR, a copy of the key part of the group's first item,
+ * and each member is stored "coded": without the leading data-area bytes it
+ * shares with the anchor.  Sharing is by stored bytes, never by the opclass
+ * notion of equality, so it is sound for any column type (an index-only scan
+ * gets back exactly the bytes that were stored) and needs no equalimage
+ * support; it covers whole leading columns and any leading bytes of the
+ * first column that differs.
+ *
+ * Page layout.  At BTPageGetPrefixOff(opaque) (right after the high key) is a
+ * single PREFIX DIRECTORY item that holds every group's anchor; the data items
+ * follow it, in key order, starting at P_FIRSTDATAKEY.  One item before the
+ * data keeps P_FIRSTDATAKEY a function of the page flag alone, so neither
+ * BTPageOpaqueData nor the on-disk page header changes, and binary search over
+ * the data items is unaffected.  The directory item is an IndexTupleData header
+ * (invalid t_tid; t_info = its size) followed by the group count, the cached
+ * decoded size of the page's data items (see _bt_prefix_split_needed), the
+ * anchor offsets, and the anchors (BTPrefixDirHdr, BTPrefixAnchorDisk).
+ *
+ * Coded member.  An IndexTupleData header whose t_tid is the member's own heap
+ * TID (or posting list metadata), a small code header (group, shared byte
+ * count, the original's t_info), the original's null bitmap, the residual (the
+ * original's data-area bytes after the shared ones) and, for a posting list
+ * tuple, its posting list in the standard layout.  Code that reads only heap
+ * TIDs therefore works on coded items as is.  Decoding splices the anchor's
+ * shared bytes back in front of the residual and reproduces the original tuple
+ * byte for byte.  Coding and decoding use only the page and the tuple, never
+ * the catalog, so WAL redo repeats them.  Pivots (high keys, downlinks) are
+ * never coded.
+ */
+#define BTREE_PREFIX_MAXGROUPS	0xFFFE	/* group-id ceiling (uint16) */
+
+/*
+ * Worst-case extra bytes a coded member can cost over the plain tuple (the
+ * code header, MAXALIGN'd).  Insert reserves this on a prefix page so a coded
+ * PageAddItem never fails after the fit check.
+ */
+#define BTREE_PREFIX_CODE_OVERHEAD	MAXALIGN(16)
+
+#define P_HASPREFIX(opaque)		(((opaque)->btpo_flags & BTP_PREFIX) != 0)
+#define BTPageGetPrefixOff(opaque) \
+	(P_RIGHTMOST(opaque) ? P_HIKEY : P_FIRSTKEY)
+#define P_FIRSTDATAKEY(opaque) \
+	(BTPageGetPrefixOff(opaque) + (P_HASPREFIX(opaque) ? 1 : 0))
 
 /*
  * Notes on B-Tree tuple format, and key and non-key attributes:
@@ -674,6 +724,36 @@ BTreeTupleGetMaxHeapTID(IndexTuple itup)
 	}
 
 	return &itup->t_tid;
+}
+
+/*
+ * Leaf key prefix compression (see nbtprefix.c for the format).
+ *
+ * Workspace for _bt_getitem.  Every read of a leaf DATA item (any item but
+ * the high key or a pivot) that could be on a BTP_PREFIX page goes through
+ * that function rather than bare PageGetItem, so decoding has one home.  The
+ * workspace holds a decoded copy; the returned tuple is valid until the
+ * workspace is reused or the page is unlocked.  High keys and pivots, and
+ * items a caller changes in place, are read with PageGetItem.
+ */
+typedef PGAlignedBlock BTItemBuf;
+
+extern IndexTuple _bt_prefix_decode(Page page, IndexTuple itup, BTItemBuf *buf);
+
+/*
+ * Return the data item at `offnum' on `page' as a plain IndexTuple: on a
+ * BTP_PREFIX page, the tuple decoded into `buf'; otherwise the on-page tuple,
+ * and `buf' is not used.  Callers must not write through the result.
+ */
+static inline IndexTuple
+_bt_getitem(Page page, OffsetNumber offnum, BTItemBuf *buf)
+{
+	IndexTuple	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+	BTPageOpaque opaque = BTPageGetOpaque(page);
+
+	if (unlikely(P_HASPREFIX(opaque)) && offnum > BTPageGetPrefixOff(opaque))
+		return _bt_prefix_decode(page, itup, buf);
+	return itup;
 }
 
 /*
@@ -1075,10 +1155,13 @@ typedef struct BTScanOpaqueData
 	/*
 	 * If we are doing an index-only scan, these are the tuple storage
 	 * workspaces for the currPos and markPos respectively.  Each is of size
-	 * BLCKSZ, so it can hold as much as a full page's worth of tuples.
+	 * BLCKSZ, so it can hold as much as a full page's worth of tuples, or 2 *
+	 * BLCKSZ once bigTuples is set (a prefix-compressed leaf can decode to
+	 * more than one page; see _bt_prefix_split_needed).
 	 */
 	char	   *currTuples;		/* tuple storage for currPos */
 	char	   *markTuples;		/* tuple storage for markPos */
+	bool		bigTuples;		/* workspaces grown for prefix pages? */
 
 	/*
 	 * If the marked position is on the same page as current position, we
@@ -1122,6 +1205,7 @@ typedef struct BTOptions
 	int			fillfactor;		/* page fill factor in percent (0..100) */
 	float8		vacuum_cleanup_index_scale_factor;	/* deprecated */
 	bool		deduplicate_items;	/* Try to deduplicate items? */
+	bool		prefix_compression; /* Code leaf keys against a page prefix? */
 } BTOptions;
 
 #define BTGetFillFactor(relation) \
@@ -1137,6 +1221,11 @@ typedef struct BTOptions
 				 relation->rd_rel->relam == BTREE_AM_OID), \
 	((relation)->rd_options ? \
 	 ((BTOptions *) (relation)->rd_options)->deduplicate_items : true))
+#define BTGetPrefixCompression(relation) \
+	(AssertMacro(relation->rd_rel->relkind == RELKIND_INDEX && \
+				 relation->rd_rel->relam == BTREE_AM_OID), \
+	((relation)->rd_options ? \
+	 ((BTOptions *) (relation)->rd_options)->prefix_compression : false))
 
 /*
  * Constant definition for progress reporting.  Phase numbers must match
@@ -1203,6 +1292,8 @@ extern void _bt_dedup_start_pending(BTDedupState state, IndexTuple base,
 									OffsetNumber baseoff);
 extern bool _bt_dedup_save_htid(BTDedupState state, IndexTuple itup);
 extern Size _bt_dedup_finish_pending(Page newpage, BTDedupState state);
+extern void _bt_dedup_finish_pending_coded(Page page, Page newpage,
+										   BTDedupState state);
 extern IndexTuple _bt_form_posting(IndexTuple base, const ItemPointerData *htids,
 								   int nhtids);
 extern void _bt_update_posting(BTVacuumPosting vacposting);
@@ -1314,6 +1405,49 @@ extern bool _bt_check_natts(Relation rel, bool heapkeyspace, Page page,
 extern void _bt_check_third_page(Relation rel, Relation heap,
 								 bool needheaptidspace, Page page, IndexTuple newtup);
 extern bool _bt_allequalimage(Relation rel, bool debugmessage);
+
+/*
+ * prototypes for functions in nbtprefix.c
+ */
+extern const char *_bt_page_get_prefix(Page page, Size *len);
+extern bool _bt_prefix_enabled(Relation index);
+extern IndexTuple _bt_prefix_encode_insert(Page page,
+										   OffsetNumber newitemoff, IndexTuple itup);
+extern void _bt_prefix_compress_page(Relation index, Page page);
+
+/* Running estimate of a coded leaf, for filling pages during CREATE INDEX */
+typedef struct BTPrefixPageEst
+{
+	int			nitems;
+	int			ngroups;
+	IndexTuple	grouprep;		/* current group's representative */
+	IndexTuple	prev;			/* previous tuple added (NULL at start) */
+	Size		anchorsz;		/* directory anchor blobs so far */
+	Size		codedsz;		/* coded items, plus line pointers */
+	Size		lastcoded;		/* most recent item's share of codedsz */
+	Size		plainsz;		/* plain items, plus line pointers */
+	Size		maxplain;		/* largest plain item, plus line pointer */
+} BTPrefixPageEst;
+
+extern void _bt_prefix_est_add(BTPrefixPageEst *est, IndexTuple itup);
+extern Size _bt_prefix_est_coded(const BTPrefixPageEst *est);
+extern bool _bt_prefix_worthwhile(Size codedsz, Size plainsz);
+extern bool _bt_prefix_form_page(Page newpage, IndexTuple hikey,
+								 IndexTuple *items, int n, bool force);
+extern IndexTuple _bt_prefix_recode(Page page, OffsetNumber offnum,
+									IndexTuple itup);
+extern int	_bt_prefix_decode_items(Page page, IndexTuple **items_out,
+									IndexTuple *hikey, Size *hikeysz);
+extern Page _bt_prefix_try_plain_page(Relation rel, Page page, Page out);
+extern bool _bt_prefix_split_needed(Page page, Size newitemsz);
+extern OffsetNumber _bt_prefix_findsplitloc(Relation rel, Page page,
+											IndexTuple *ditems,
+											OffsetNumber newitemoff,
+											Size newitemsz,
+											bool *newitemonleft);
+extern void _bt_prefix_recount(Page page);
+extern uint32 _bt_prefix_cached_size(Page page);
+extern void _bt_prefix_note_insert(Page page, IndexTuple coded);
 
 /*
  * prototypes for functions in nbtvalidate.c
