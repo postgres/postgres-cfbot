@@ -497,6 +497,7 @@ bt_page_print_tuples(ua_page_items *uargs)
 			   *datacstring;
 	char	   *ptr;
 	ItemPointer htid;
+	ItemPointerData decoded_htid;
 
 	id = PageGetItemId(page, offset);
 
@@ -508,7 +509,19 @@ bt_page_print_tuples(ua_page_items *uargs)
 	j = 0;
 	memset(nulls, 0, sizeof(nulls));
 	values[j++] = Int16GetDatum(offset);
-	values[j++] = ItemPointerGetDatum(&itup->t_tid);
+	/*
+	 * For a prefix-compressed follower, t_tid carries BT_IS_COMPRESSED in
+	 * its offset's upper nibble and the real heap-tuple offset in the low
+	 * 12 bits.  Decode so the ctid column shows a clean heap TID rather
+	 * than the raw status-bit-bearing bytes.
+	 */
+	if (BTreeTupleIsCompressed(itup))
+	{
+		BTreeCompressedTupleGetHeapTID(itup, &decoded_htid);
+		values[j++] = ItemPointerGetDatum(&decoded_htid);
+	}
+	else
+		values[j++] = ItemPointerGetDatum(&itup->t_tid);
 	values[j++] = Int16GetDatum(IndexTupleSize(itup));
 	values[j++] = BoolGetDatum(IndexTupleHasNulls(itup));
 	values[j++] = BoolGetDatum(IndexTupleHasVarwidths(itup));
@@ -581,6 +594,18 @@ bt_page_print_tuples(ua_page_items *uargs)
 	{
 		/* Don't show bogus heap TID in !heapkeyspace pivot tuple */
 		htid = NULL;
+	}
+	else if (BTreeTupleIsCompressed(itup))
+	{
+		/*
+		 * BTreeTupleGetHeapTID() returns NULL for compressed followers
+		 * because t_tid carries encoded status bits and cannot be returned
+		 * verbatim.  Produce a decoded heap TID so the htid column is
+		 * populated (matches the ctid column, unlike pivots/postings
+		 * where ctid is synthetic).
+		 */
+		BTreeCompressedTupleGetHeapTID(itup, &decoded_htid);
+		htid = &decoded_htid;
 	}
 
 	if (htid)

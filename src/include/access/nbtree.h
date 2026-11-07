@@ -83,6 +83,7 @@ typedef BTPageOpaqueData *BTPageOpaque;
 #define BTP_HAS_GARBAGE (1 << 6)	/* page has LP_DEAD tuples (deprecated) */
 #define BTP_INCOMPLETE_SPLIT (1 << 7)	/* right sibling's downlink is missing */
 #define BTP_HAS_FULLXID	(1 << 8)	/* contains BTDeletedPageData */
+#define BTP_HAS_PREFIX_COMPRESSION (1 << 9)	/* leaf page uses prefix compression */
 
 /*
  * The max allowed value of a cycle ID is a bit less than 64K.  This is
@@ -117,6 +118,7 @@ typedef struct BTMetaPageData
 	float8		btm_last_cleanup_num_heap_tuples;
 
 	bool		btm_allequalimage;	/* are all columns "equalimage"? */
+	bool		btm_prefix_compression; /* leaf pages use prefix compression? */
 } BTMetaPageData;
 
 #define BTPageGetMeta(p) \
@@ -227,6 +229,8 @@ typedef struct BTMetaPageData
 #define P_HAS_GARBAGE(opaque)	(((opaque)->btpo_flags & BTP_HAS_GARBAGE) != 0)
 #define P_INCOMPLETE_SPLIT(opaque)	(((opaque)->btpo_flags & BTP_INCOMPLETE_SPLIT) != 0)
 #define P_HAS_FULLXID(opaque)	(((opaque)->btpo_flags & BTP_HAS_FULLXID) != 0)
+#define P_HAS_PREFIX_COMPRESSION(opaque) \
+	(((opaque)->btpo_flags & BTP_HAS_PREFIX_COMPRESSION) != 0)
 
 /*
  * BTDeletedPageData is the page contents of a deleted page
@@ -456,6 +460,28 @@ typedef struct BTVacState
  * number of columns stored is always implicitly the total number in the
  * index (in practice there can never be non-key columns stored, since
  * deduplication is not supported with INCLUDE indexes).
+ *
+ * A second alternative non-pivot tuple representation is used for prefix
+ * compression on multi-column leaf pages that set BTP_HAS_PREFIX_COMPRESSION
+ * in btpo_flags.  On such pages:
+ *
+ *  - "Anchor" tuples are byte-identical to plain non-pivot tuples: no
+ *    INDEX_ALT_TID_MASK, t_tid stores the real heap TID, and the tuple body
+ *    carries all key attributes plus any INCLUDE attributes.
+ *
+ *  - "Compressed" followers omit the leading (nkeyatts - 1) key attributes,
+ *    which are inherited from the most recent preceding anchor on the page.
+ *    They set INDEX_ALT_TID_MASK in t_info and BT_IS_COMPRESSED in t_tid's
+ *    offset status nibble.  The real heap-tuple offset fits in the low 12
+ *    bits of t_tid's offset (BT_OFFSET_MASK), since MaxHeapTuplesPerPage is
+ *    always well under 4096 for every supported BLCKSZ.  t_tid's block
+ *    number is the unchanged heap block.  The tuple body carries only the
+ *    trailing suffix key attribute plus any INCLUDE attributes -- no
+ *    trailing ItemPointerData, zero bytes of per-follower metadata.
+ *
+ *  Compressed followers require dedup to be disabled on the whole index
+ *  (btm_prefix_compression implies !btm_allequalimage), so BT_IS_POSTING and
+ *  BT_IS_COMPRESSED are mutually exclusive on any given leaf page.
  */
 #define INDEX_ALT_TID_MASK			INDEX_AM_RESERVED_BIT
 
@@ -465,6 +491,7 @@ typedef struct BTVacState
 /* BT_STATUS_OFFSET_MASK status bits */
 #define BT_PIVOT_HEAP_TID_ATTR		0x1000
 #define BT_IS_POSTING				0x2000
+#define BT_IS_COMPRESSED			0x4000
 
 /*
  * Mask allocated for number of keys in index tuple must be able to fit
@@ -482,8 +509,9 @@ BTreeTupleIsPivot(IndexTuple itup)
 {
 	if ((itup->t_info & INDEX_ALT_TID_MASK) == 0)
 		return false;
-	/* absence of BT_IS_POSTING in offset number indicates pivot tuple */
-	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_POSTING) != 0)
+	/* absence of BT_IS_POSTING and BT_IS_COMPRESSED indicates pivot tuple */
+	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) &
+		 (BT_IS_POSTING | BT_IS_COMPRESSED)) != 0)
 		return false;
 
 	return true;
@@ -501,6 +529,18 @@ BTreeTupleIsPosting(IndexTuple itup)
 	return true;
 }
 
+static inline bool
+BTreeTupleIsCompressed(IndexTuple itup)
+{
+	if ((itup->t_info & INDEX_ALT_TID_MASK) == 0)
+		return false;
+	/* presence of BT_IS_COMPRESSED in offset indicates prefix-compressed follower */
+	if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_COMPRESSED) == 0)
+		return false;
+
+	return true;
+}
+
 static inline void
 BTreeTupleSetPosting(IndexTuple itup, uint16 nhtids, int postingoffset)
 {
@@ -509,6 +549,7 @@ BTreeTupleSetPosting(IndexTuple itup, uint16 nhtids, int postingoffset)
 	Assert((size_t) postingoffset == MAXALIGN(postingoffset));
 	Assert(postingoffset < INDEX_SIZE_MASK);
 	Assert(!BTreeTupleIsPivot(itup));
+	Assert(!BTreeTupleIsCompressed(itup));
 
 	itup->t_info |= INDEX_ALT_TID_MASK;
 	ItemPointerSetOffsetNumber(&itup->t_tid, (nhtids | BT_IS_POSTING));
@@ -651,8 +692,54 @@ BTreeTupleGetHeapTID(IndexTuple itup)
 	}
 	else if (BTreeTupleIsPosting(itup))
 		return BTreeTupleGetPosting(itup);
+	else if (BTreeTupleIsCompressed(itup))
+	{
+		/*
+		 * Compressed followers store their real heap TID offset in the low
+		 * 12 bits of t_tid's offset field (BT_OFFSET_MASK), with the
+		 * BT_IS_COMPRESSED status bit occupying one of the upper 4 bits.
+		 * Because the offset field isn't a clean ItemPointerData, callers
+		 * that need a usable ItemPointer must use
+		 * BTreeCompressedTupleGetHeapTID() with a caller-provided buffer.
+		 */
+		return NULL;
+	}
 
 	return &itup->t_tid;
+}
+
+/*
+ * Write the real heap TID of a prefix-compressed follower into the
+ * caller-provided output buffer.  The follower's t_tid directly carries the
+ * heap block number, and the low 12 bits of its offset field carry the real
+ * heap-tuple offset; the upper nibble is masked off.
+ */
+static inline void
+BTreeCompressedTupleGetHeapTID(IndexTuple itup, ItemPointer out)
+{
+	OffsetNumber raw;
+
+	Assert(BTreeTupleIsCompressed(itup));
+
+	raw = ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_OFFSET_MASK;
+	out->ip_blkid = itup->t_tid.ip_blkid;
+	ItemPointerSetOffsetNumber(out, raw);
+}
+
+/*
+ * Set t_tid on a to-be-written compressed follower from a real heap TID,
+ * packing the BT_IS_COMPRESSED status bit into the offset field.
+ */
+static inline void
+BTreeCompressedTupleSetHeapTID(IndexTuple itup, ItemPointer heap_tid)
+{
+	OffsetNumber heap_off = ItemPointerGetOffsetNumberNoCheck(heap_tid);
+
+	Assert((heap_off & ~BT_OFFSET_MASK) == 0);
+	itup->t_info |= INDEX_ALT_TID_MASK;
+	itup->t_tid.ip_blkid = heap_tid->ip_blkid;
+	ItemPointerSetOffsetNumber(&itup->t_tid, heap_off | BT_IS_COMPRESSED);
+	Assert(BTreeTupleIsCompressed(itup));
 }
 
 /*
@@ -796,6 +883,7 @@ typedef struct BTScanInsertData
 {
 	bool		heapkeyspace;
 	bool		allequalimage;
+	bool		prefix_compression; /* index uses prefix-compressed leaves? */
 	bool		anynullkeys;
 	bool		nextkey;
 	bool		backward;		/* backward index scan? */
@@ -923,6 +1011,38 @@ typedef struct BTVacuumPostingData
 } BTVacuumPostingData;
 
 typedef BTVacuumPostingData *BTVacuumPosting;
+
+/*
+ * BTPrefixPageState -- per-page working state for prefix-compressed leaf
+ * pages.  Callers seed the state by passing a Page pointer to
+ * _bt_prefix_state_init(), then advance it across items on that page.  The
+ * state caches the most recently seen anchor tuple (and its deformed
+ * Datums/isnulls) so that reconstructing consecutive compressed followers in
+ * the same group is cheap: each follower only needs its own suffix deformed
+ * and merged with the cached anchor values.
+ *
+ * The state is inexpensive to initialize (no allocations until first use)
+ * and must be passed to _bt_prefix_state_cleanup() before the owning frame
+ * disappears, so that any cached trailing TupleDesc is freed.
+ */
+typedef struct BTPrefixPageState
+{
+	Page		page;			/* the leaf page being walked */
+	OffsetNumber anchor_off;	/* offset of current anchor, or Invalid */
+	IndexTuple	anchor;			/* pointer into the page for current anchor */
+	int			natts_anchor;	/* number of leading key attrs anchor supplies */
+	Datum		anchor_values[INDEX_MAX_KEYS];
+	bool		anchor_isnull[INDEX_MAX_KEYS];
+	bool		anchor_deformed;	/* are anchor_values/isnull filled in? */
+	OffsetNumber next_anchor_off;	/* offset of next anchor, or Invalid if unknown */
+
+	/*
+	 * Trailing TupleDesc covering attrs (natts_anchor+1..natts) -- the on-disk
+	 * layout of a compressed follower.  Built lazily on first reconstruction
+	 * and freed by _bt_prefix_state_cleanup().
+	 */
+	struct TupleDescData *follower_tupdesc;
+} BTPrefixPageState;
 
 /*
  * BTScanOpaqueData is the btree-private state needed for an indexscan.
@@ -1074,11 +1194,15 @@ typedef struct BTScanOpaqueData
 
 	/*
 	 * If we are doing an index-only scan, these are the tuple storage
-	 * workspaces for the currPos and markPos respectively.  Each is of size
-	 * BLCKSZ, so it can hold as much as a full page's worth of tuples.
+	 * workspaces for the currPos and markPos respectively.  Sized to hold a
+	 * full page's worth of tuples; on a prefix-compressed leaf the buffers
+	 * may grow beyond the initial size to accommodate reconstructed tuples
+	 * that are larger than their on-disk form.
 	 */
 	char	   *currTuples;		/* tuple storage for currPos */
 	char	   *markTuples;		/* tuple storage for markPos */
+	Size		currTuplesSize;	/* bytes allocated at currTuples */
+	Size		markTuplesSize;	/* bytes allocated at markTuples */
 
 	/*
 	 * If the marked position is on the same page as current position, we
@@ -1193,6 +1317,41 @@ extern void _bt_parallel_primscan_schedule(IndexScanDesc scan,
 										   BlockNumber curr_page);
 
 /*
+ * prototypes for functions in nbtprefix.c
+ */
+extern void _bt_prefix_state_init(BTPrefixPageState *st, Page page);
+extern void _bt_prefix_state_cleanup(BTPrefixPageState *st);
+extern void _bt_prefix_state_set_anchor(BTPrefixPageState *st,
+										OffsetNumber anchor_off);
+extern OffsetNumber _bt_prefix_find_anchor(Page page, OffsetNumber offnum);
+extern IndexTuple _bt_prefix_reconstruct(Relation rel, BTPrefixPageState *st,
+										 OffsetNumber offnum, char *dstbuf);
+extern IndexTuple _bt_prefix_form_tuple(Relation rel, BTPrefixPageState *st,
+										IndexTuple compressed, char *dstbuf);
+extern bool _bt_prefix_leading_equalimage(Relation rel);
+extern TupleDesc _bt_prefix_build_follower_tupdesc(Relation rel,
+												   int natts_anchor);
+extern IndexTuple _bt_prefix_compress_new_tuple(TupleDesc full_tupdesc,
+												TupleDesc follower_tupdesc,
+												int natts_anchor,
+												IndexTuple new_plain,
+												char *dstbuf);
+typedef struct BTPrefixPromotion
+{
+	OffsetNumber off;
+	IndexTuple	plain;			/* palloc'd plain form */
+	Size		plainsz;		/* MAXALIGNed */
+} BTPrefixPromotion;
+
+extern int	_bt_prefix_vacuum_plan(Relation rel, Page page,
+								   const OffsetNumber *deletable,
+								   int ndeletable,
+								   BTPrefixPromotion *promotions);
+extern void _bt_prefix_vacuum_apply(Page page,
+									BTPrefixPromotion *promotions,
+									int nprom);
+
+/*
  * prototypes for functions in nbtdedup.c
  */
 extern void _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem,
@@ -1231,7 +1390,7 @@ extern OffsetNumber _bt_findsplitloc(Relation rel, Page origpage,
  * prototypes for functions in nbtpage.c
  */
 extern void _bt_initmetapage(Page page, BlockNumber rootbknum, uint32 level,
-							 bool allequalimage);
+							 bool allequalimage, bool prefix_compression);
 extern bool _bt_vacuum_needs_cleanup(Relation rel);
 extern void _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages);
 extern void _bt_upgrademetapage(Page page);
@@ -1239,7 +1398,7 @@ extern Buffer _bt_getroot(Relation rel, Relation heaprel, int access);
 extern Buffer _bt_gettrueroot(Relation rel);
 extern int	_bt_getrootheight(Relation rel);
 extern void _bt_metaversion(Relation rel, bool *heapkeyspace,
-							bool *allequalimage);
+							bool *allequalimage, bool *prefix_compression);
 extern void _bt_checkpage(Relation rel, Buffer buf);
 extern Buffer _bt_getbuf(Relation rel, BlockNumber blkno, int access);
 extern Buffer _bt_allocbuf(Relation rel, Relation heaprel);

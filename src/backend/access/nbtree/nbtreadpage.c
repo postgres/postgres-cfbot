@@ -145,6 +145,9 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 				ignore_killed_tuples = scan->ignore_killed_tuples;
 	int			itemIndex,
 				indnatts;
+	bool		prefix_page;
+	BTPrefixPageState prefix_state;
+	char	   *rbuf = NULL;
 
 	/* save the page/buffer block number, along with its sibling links */
 	page = BufferGetPage(so->currPos.buf);
@@ -168,6 +171,20 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 	arrayKeys = so->numArrayKeys != 0;
 	minoff = P_FIRSTDATAKEY(opaque);
 	maxoff = PageGetMaxOffsetNumber(page);
+
+	/*
+	 * If the leaf uses prefix compression we must materialize compressed
+	 * followers into full IndexTuples before passing them to _bt_checkkeys
+	 * and _bt_saveitem.  The state and scratch buffer live for the duration
+	 * of this _bt_readpage call.
+	 */
+	prefix_page = P_HAS_PREFIX_COMPRESSION(opaque);
+	if (prefix_page)
+	{
+		memset(&prefix_state, 0, sizeof(prefix_state));
+		_bt_prefix_state_init(&prefix_state, page);
+		rbuf = palloc(BTMaxItemSize);
+	}
 
 	/* initialize page-level state that we'll pass to _bt_checkkeys */
 	pstate.minoff = minoff;
@@ -244,16 +261,36 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 
 			/*
 			 * If the scan specifies not to return killed tuples, then we
-			 * treat a killed tuple as not passing the qual
+			 * treat a killed tuple as not passing the qual.
+			 *
+			 * On a prefix-compressed leaf we must still track prefix-group
+			 * state across LP_DEAD plain tuples: a dead plain tuple is an
+			 * anchor for the group that physically follows it on the page,
+			 * so surviving compressed followers below must continue to
+			 * reconstruct under *it*, not under some earlier anchor whose
+			 * keys are different.  Silently skipping the anchor would leave
+			 * st->anchor_off pointing at a stale (earlier) anchor and give
+			 * every subsequent follower the wrong leading attrs.
 			 */
 			if (ignore_killed_tuples && ItemIdIsDead(iid))
 			{
+				if (prefix_page)
+				{
+					IndexTuple	deaditup = (IndexTuple) PageGetItem(page, iid);
+
+					if (!BTreeTupleIsCompressed(deaditup) &&
+						!BTreeTupleIsPivot(deaditup) &&
+						!BTreeTupleIsPosting(deaditup))
+						_bt_prefix_state_set_anchor(&prefix_state, offnum);
+				}
 				offnum = OffsetNumberNext(offnum);
 				continue;
 			}
 
 			itup = (IndexTuple) PageGetItem(page, iid);
 			Assert(!BTreeTupleIsPivot(itup));
+			if (prefix_page)
+				itup = _bt_prefix_reconstruct(rel, &prefix_state, offnum, rbuf);
 
 			pstate.offnum = offnum;
 			passes_quals = _bt_checkkeys(scan, &pstate, arrayKeys,
@@ -417,6 +454,8 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 
 			itup = (IndexTuple) PageGetItem(page, iid);
 			Assert(!BTreeTupleIsPivot(itup));
+			if (prefix_page)
+				itup = _bt_prefix_reconstruct(rel, &prefix_state, offnum, rbuf);
 
 			pstate.offnum = offnum;
 			if (arrayKeys && offnum == minoff && pstate.forcenonrequired)
@@ -524,6 +563,12 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 	 */
 	Assert(!pstate.forcenonrequired);
 
+	if (prefix_page)
+	{
+		_bt_prefix_state_cleanup(&prefix_state);
+		pfree(rbuf);
+	}
+
 	return (so->currPos.firstItem <= so->currPos.lastItem);
 }
 
@@ -623,8 +668,45 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 	iid = PageGetItemId(pstate->page, pstate->maxoff);
 	lasttup = (IndexTuple) PageGetItem(pstate->page, iid);
 
-	/* Determine the first attribute whose values change on caller's page */
-	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
+	/*
+	 * On a prefix-compressed leaf page either tuple may be a compressed
+	 * follower that _bt_keep_natts_fast cannot consume.  Reconstruct into
+	 * scratch buffers so the comparison sees plain IndexTuples.  The first
+	 * data item on a prefix-compressed page is always an anchor, so firsttup
+	 * in practice only needs reconstruction for defensiveness.
+	 */
+	if (P_HAS_PREFIX_COMPRESSION(BTPageGetOpaque(pstate->page)))
+	{
+		BTPrefixPageState prefix_st;
+		char	   *fbuf = NULL;
+		char	   *lbuf = NULL;
+
+		memset(&prefix_st, 0, sizeof(prefix_st));
+		_bt_prefix_state_init(&prefix_st, pstate->page);
+		if (BTreeTupleIsCompressed(firsttup))
+		{
+			fbuf = palloc(BTMaxItemSize);
+			firsttup = _bt_prefix_reconstruct(rel, &prefix_st,
+											  pstate->minoff, fbuf);
+		}
+		if (BTreeTupleIsCompressed(lasttup))
+		{
+			lbuf = palloc(BTMaxItemSize);
+			lasttup = _bt_prefix_reconstruct(rel, &prefix_st,
+											 pstate->maxoff, lbuf);
+		}
+		firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
+		_bt_prefix_state_cleanup(&prefix_st);
+		if (fbuf)
+			pfree(fbuf);
+		if (lbuf)
+			pfree(lbuf);
+	}
+	else
+	{
+		/* Determine the first attribute whose values change on caller's page */
+		firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
+	}
 
 	for (; startikey < so->numberOfKeys; startikey++)
 	{
@@ -1042,6 +1124,20 @@ _bt_saveitem(BTScanOpaque so, int itemIndex,
 	if (so->currTuples)
 	{
 		Size		itupsz = IndexTupleSize(itup);
+		Size		needed = so->currPos.nextTupleOffset + MAXALIGN(itupsz);
+
+		if (needed > so->currTuplesSize)
+		{
+			/*
+			 * Prefix-compressed pages can reconstruct to more bytes than the
+			 * on-disk page holds, so the initial BLCKSZ-sized workspace can
+			 * overflow.  Grow geometrically to amortize future growth.
+			 */
+			Size		newsize = Max(so->currTuplesSize * 2, needed);
+
+			so->currTuples = (char *) repalloc(so->currTuples, newsize);
+			so->currTuplesSize = newsize;
+		}
 
 		currItem->tupleOffset = so->currPos.nextTupleOffset;
 		memcpy(so->currTuples + so->currPos.nextTupleOffset, itup, itupsz);
@@ -2087,6 +2183,18 @@ _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 	else
 		aheadoffnum = Max((int) pstate->minoff,
 						  (int) pstate->offnum - pstate->targetdistance);
+
+	/*
+	 * Disable the look-ahead optimization on prefix-compressed leaves.  A
+	 * follower at aheadoffnum has its leading-attr bytes on another item on
+	 * the page (its governing anchor), and the array-key comparison below
+	 * needs those leading attrs to decide correctness.  Reconstructing the
+	 * look-ahead tuple is possible but tricky to get right in all edge
+	 * cases; simply skipping the optimization here is safe and only costs
+	 * us the speculative skip opportunity.
+	 */
+	if (P_HAS_PREFIX_COMPRESSION(BTPageGetOpaque(pstate->page)))
+		return;
 
 	ahead = (IndexTuple) PageGetItem(pstate->page,
 									 PageGetItemId(pstate->page, aheadoffnum));

@@ -542,7 +542,7 @@ SELECT DISTINCT y, x FROM distinct_tbl limit 10;
  Limit
    ->  Unique
          ->  Gather Merge
-               Workers Planned: 1
+               Workers Planned: 2
                ->  Unique
                      ->  Parallel Index Only Scan using distinct_tbl_x_y_idx on distinct_tbl
 (6 rows)

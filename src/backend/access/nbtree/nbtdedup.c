@@ -71,6 +71,17 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
 	XLogRecPtr	recptr;
 
+	/*
+	 * Dedup is mutually exclusive with prefix compression at the index level
+	 * (btm_prefix_compression ⇒ !btm_allequalimage, enforced at index build).
+	 * Callers only invoke dedup when itup_key->allequalimage is set, so a
+	 * prefix-compressed leaf page must never reach here.  Compressed
+	 * followers carry BT_IS_COMPRESSED in their t_tid and would be
+	 * misinterpreted by _bt_dedup_save_htid / _bt_form_posting as regular
+	 * heap TIDs.
+	 */
+	Assert(!P_HAS_PREFIX_COMPRESSION(opaque));
+
 	/* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
 	newitemsz += sizeof(ItemIdData);
 
@@ -665,7 +676,20 @@ _bt_bottomupdel_finish_pending(Page page, BTDedupState state,
 		if (!BTreeTupleIsPosting(itup))
 		{
 			/* Simple case: A plain non-pivot tuple */
-			ideltid->tid = itup->t_tid;
+			if (BTreeTupleIsCompressed(itup))
+			{
+				/*
+				 * Compressed follower: t_tid packs BT_IS_COMPRESSED into its
+				 * offset nibble.  Feeding the raw bytes to the heap-side
+				 * table_index_delete_tuples would point at a bogus heap
+				 * offset (> MaxHeapTuplesPerPage) and trip an internal
+				 * qsort-comparator assertion.  Decode the real heap TID
+				 * into the deltid slot instead.
+				 */
+				BTreeCompressedTupleGetHeapTID(itup, &ideltid->tid);
+			}
+			else
+				ideltid->tid = itup->t_tid;
 			ideltid->id = delstate->ndeltids;
 			istatus->idxoffnum = offnum;
 			istatus->knowndeletable = false;	/* for now */

@@ -242,6 +242,10 @@ typedef struct BTPageState
 	uint32		btps_level;		/* tree level (0 = leaf) */
 	Size		btps_full;		/* "full" if less than this much free space */
 	struct BTPageState *btps_next;	/* link to parent level, if any */
+	/* Prefix-compression bookkeeping (leaf level only) */
+	bool		btps_prefix_compression;	/* produce compressed followers? */
+	OffsetNumber btps_anchor_off;	/* offset of current anchor on btps_buf */
+	TupleDesc	btps_follower_tupdesc;	/* trailing-attrs desc, lazily built */
 } BTPageState;
 
 /*
@@ -254,6 +258,7 @@ typedef struct BTWriteState
 	BulkWriteState *bulkstate;
 	BTScanInsert inskey;		/* generic insertion scankey */
 	BlockNumber btws_pages_alloced; /* # pages allocated */
+	bool		prefix_compression; /* emit prefix-compressed leaf pages? */
 } BTWriteState;
 
 
@@ -568,6 +573,16 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
 	/* _bt_mkscankey() won't set allequalimage without metapage */
 	wstate.inskey->allequalimage = _bt_allequalimage(wstate.index, true);
 
+	/*
+	 * Decide whether this build produces prefix-compressed leaf pages.  An
+	 * index that qualifies is automatically opted in and opts out of posting
+	 * list deduplication for the duration of its life (they are mutually
+	 * exclusive on disk, so both metapage flags must never be true together).
+	 */
+	wstate.prefix_compression = _bt_prefix_leading_equalimage(wstate.index);
+	if (wstate.prefix_compression)
+		wstate.inskey->allequalimage = false;
+
 	/* reserve the metapage */
 	wstate.btws_pages_alloced = BTREE_METAPAGE + 1;
 
@@ -672,6 +687,18 @@ _bt_pagestate(BTWriteState *wstate, uint32 level)
 
 	/* no parent level, yet */
 	state->btps_next = NULL;
+
+	/* Prefix compression applies only at the leaf level */
+	state->btps_prefix_compression = (level == 0 && wstate->prefix_compression);
+	state->btps_anchor_off = InvalidOffsetNumber;
+	state->btps_follower_tupdesc = NULL;
+	if (state->btps_prefix_compression)
+	{
+		/* Mark the initial leaf page */
+		BTPageOpaque opq = BTPageGetOpaque((Page) state->btps_buf);
+
+		opq->btpo_flags |= BTP_HAS_PREFIX_COMPRESSION;
+	}
 
 	return state;
 }
@@ -797,6 +824,9 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	Size		pgspc;
 	Size		itupsz;
 	bool		isleaf;
+	IndexTuple	emit_tup;		/* tuple as it will be written (possibly compressed) */
+	char	   *emit_scratch = NULL;	/* scratch for compressed form */
+	bool		emit_is_compressed = false;
 
 	/*
 	 * This is a handy place to check for cancel interrupts during the btree
@@ -811,11 +841,48 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	last_truncextra = state->btps_lastextra;
 	state->btps_lastextra = truncextra;
 
-	pgspc = PageGetFreeSpace(npage);
-	itupsz = IndexTupleSize(itup);
-	itupsz = MAXALIGN(itupsz);
 	/* Leaf case has slightly different rules due to suffix truncation */
 	isleaf = (state->btps_level == 0);
+
+	/*
+	 * If this leaf-level build is prefix-compressing and the incoming tuple
+	 * shares the current anchor's leading (nkeyatts-1) key attrs, emit it as
+	 * a compressed follower.  Otherwise emit it plain (and record it as a
+	 * new anchor after insertion).  The first tuple on any page is always
+	 * emitted plain, per invariant #1 (leftmost data item is always an
+	 * anchor).
+	 */
+	emit_tup = itup;
+	if (isleaf && state->btps_prefix_compression &&
+		last_off >= P_FIRSTKEY &&
+		state->btps_anchor_off != InvalidOffsetNumber)
+	{
+		IndexTuple	anchor;
+		int			natts_anchor =
+			IndexRelationGetNumberOfKeyAttributes(wstate->index) - 1;
+
+		anchor = (IndexTuple) PageGetItem(npage,
+										  PageGetItemId(npage,
+														state->btps_anchor_off));
+		if (_bt_keep_natts_fast(wstate->index, anchor, itup) > natts_anchor)
+		{
+			if (state->btps_follower_tupdesc == NULL)
+				state->btps_follower_tupdesc =
+					_bt_prefix_build_follower_tupdesc(wstate->index,
+													  natts_anchor);
+			emit_scratch = palloc(BTMaxItemSize);
+			emit_tup = _bt_prefix_compress_new_tuple(RelationGetDescr(wstate->index),
+													 state->btps_follower_tupdesc,
+													 natts_anchor,
+													 itup,
+													 emit_scratch);
+			emit_is_compressed = true;
+		}
+	}
+
+	pgspc = PageGetFreeSpace(npage);
+	itupsz = IndexTupleSize(emit_tup);
+	itupsz = MAXALIGN(itupsz);
 
 	/*
 	 * Check whether the new item can fit on a btree page on current level at
@@ -867,10 +934,20 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		ItemId		ii;
 		ItemId		hii;
 		IndexTuple	oitup;
+		char	   *oitup_scratch = NULL;	/* set when last item was compressed */
+		Size		oitup_sz;
 
 		/* Create new page of same level */
 		nbuf = _bt_blnewpage(wstate, state->btps_level);
 		npage = (Page) nbuf;
+
+		/* Carry BTP_HAS_PREFIX_COMPRESSION onto the new leaf page */
+		if (isleaf && state->btps_prefix_compression)
+		{
+			BTPageOpaque nopq = BTPageGetOpaque(npage);
+
+			nopq->btpo_flags |= BTP_HAS_PREFIX_COMPRESSION;
+		}
 
 		/* and assign it a page position */
 		nblkno = wstate->btws_pages_alloced++;
@@ -885,8 +962,31 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		Assert(last_off > P_FIRSTKEY);
 		ii = PageGetItemId(opage, last_off);
 		oitup = (IndexTuple) PageGetItem(opage, ii);
-		_bt_sortaddtup(npage, ItemIdGetLength(ii), oitup, P_FIRSTKEY,
-					   !isleaf);
+		oitup_sz = ItemIdGetLength(ii);
+
+		/*
+		 * If the last-left tuple is a compressed follower, reconstruct it to
+		 * its plain form for use both as npage's first data item (an anchor)
+		 * and as _bt_truncate's firstright input.  The opage high key below
+		 * will be generated from the plain form too.
+		 */
+		if (isleaf && state->btps_prefix_compression &&
+			BTreeTupleIsCompressed(oitup))
+		{
+			BTPrefixPageState rst;
+			IndexTuple	reconstructed;
+
+			memset(&rst, 0, sizeof(rst));
+			_bt_prefix_state_init(&rst, opage);
+			oitup_scratch = palloc(BTMaxItemSize);
+			reconstructed = _bt_prefix_reconstruct(wstate->index, &rst,
+												   last_off, oitup_scratch);
+			_bt_prefix_state_cleanup(&rst);
+			oitup = reconstructed;
+			oitup_sz = IndexTupleSize(oitup);
+		}
+
+		_bt_sortaddtup(npage, oitup_sz, oitup, P_FIRSTKEY, !isleaf);
 
 		/*
 		 * Move 'last' into the high key position on opage.  _bt_blnewpage()
@@ -906,6 +1006,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		{
 			IndexTuple	lastleft;
 			IndexTuple	truncated;
+			char	   *lastleft_scratch = NULL;
 
 			/*
 			 * Truncate away any unneeded attributes from high key on leaf
@@ -933,17 +1034,43 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 			ii = PageGetItemId(opage, OffsetNumberPrev(last_off));
 			lastleft = (IndexTuple) PageGetItem(opage, ii);
 
+			/* Reconstruct a compressed lastleft before handing it to _bt_truncate */
+			if (state->btps_prefix_compression &&
+				BTreeTupleIsCompressed(lastleft))
+			{
+				BTPrefixPageState rst;
+
+				memset(&rst, 0, sizeof(rst));
+				_bt_prefix_state_init(&rst, opage);
+				lastleft_scratch = palloc(BTMaxItemSize);
+				lastleft = _bt_prefix_reconstruct(wstate->index, &rst,
+												  OffsetNumberPrev(last_off),
+												  lastleft_scratch);
+				_bt_prefix_state_cleanup(&rst);
+			}
+
 			Assert(IndexTupleSize(oitup) > last_truncextra);
 			truncated = _bt_truncate(wstate->index, lastleft, oitup,
 									 wstate->inskey);
 			if (!PageIndexTupleOverwrite(opage, P_HIKEY, truncated, IndexTupleSize(truncated)))
 				elog(ERROR, "failed to add high key to the index page");
 			pfree(truncated);
+			if (lastleft_scratch != NULL)
+				pfree(lastleft_scratch);
 
 			/* oitup should continue to point to the page's high key */
 			hii = PageGetItemId(opage, P_HIKEY);
 			oitup = (IndexTuple) PageGetItem(opage, hii);
 		}
+
+		/*
+		 * oitup_scratch (when set) held the reconstructed plain form used as
+		 * npage's new P_FIRSTKEY and as _bt_truncate's firstright.  The
+		 * bytes have been copied into their on-page homes; the scratch is no
+		 * longer needed.
+		 */
+		if (oitup_scratch != NULL)
+			pfree(oitup_scratch);
 
 		/*
 		 * Link the old page into its parent, using its low key.  If we don't
@@ -987,9 +1114,12 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		_bt_blwritepage(wstate, obuf, oblkno);
 
 		/*
-		 * Reset last_off to point to new page
+		 * Reset last_off to point to new page.  The item we just placed at
+		 * P_FIRSTKEY is the new anchor (plain form) for npage.
 		 */
 		last_off = P_FIRSTKEY;
+		if (isleaf && state->btps_prefix_compression)
+			state->btps_anchor_off = P_FIRSTKEY;
 	}
 
 	/*
@@ -1011,11 +1141,25 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 	}
 
 	/*
-	 * Add the new item into the current page.
+	 * Add the new item into the current page.  emit_tup may be a compressed
+	 * follower derived from itup (on leaf prefix-compressed builds); the
+	 * plain path always has emit_tup == itup.
 	 */
 	last_off = OffsetNumberNext(last_off);
-	_bt_sortaddtup(npage, itupsz, itup, last_off,
+	_bt_sortaddtup(npage, itupsz, emit_tup, last_off,
 				   !isleaf && last_off == P_FIRSTKEY);
+
+	/*
+	 * Anchor bookkeeping: the first tuple on a leaf page is always emitted
+	 * plain and becomes that page's first anchor; any subsequent plain
+	 * (non-compressed) tuple starts a new prefix group and becomes its
+	 * anchor.  Compressed followers leave btps_anchor_off unchanged.
+	 */
+	if (isleaf && state->btps_prefix_compression && !emit_is_compressed)
+		state->btps_anchor_off = last_off;
+
+	if (emit_scratch != NULL)
+		pfree(emit_scratch);
 
 	state->btps_buf = nbuf;
 	state->btps_blkno = nblkno;
@@ -1120,6 +1264,18 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 	}
 
 	/*
+	 * Free any cached prefix-compression state held on each page state.
+	 */
+	for (s = state; s != NULL; s = s->btps_next)
+	{
+		if (s->btps_follower_tupdesc != NULL)
+		{
+			FreeTupleDesc(s->btps_follower_tupdesc);
+			s->btps_follower_tupdesc = NULL;
+		}
+	}
+
+	/*
 	 * As the last step in the process, construct the metapage and make it
 	 * point to the new root (unless we had no data at all, in which case it's
 	 * set to point to "P_NONE").  This changes the index to the "valid" state
@@ -1127,7 +1283,9 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 	 */
 	metabuf = smgr_bulk_get_buf(wstate->bulkstate);
 	_bt_initmetapage((Page) metabuf, rootblkno, rootlevel,
-					 wstate->inskey->allequalimage);
+					 wstate->inskey->allequalimage &&
+					 !wstate->prefix_compression,
+					 wstate->prefix_compression);
 	_bt_blwritepage(wstate, metabuf, BTREE_METAPAGE);
 }
 

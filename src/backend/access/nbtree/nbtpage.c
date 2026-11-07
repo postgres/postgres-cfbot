@@ -63,13 +63,19 @@ static void _bt_pendingfsm_add(BTVacState *vstate, BlockNumber target,
 
 /*
  *	_bt_initmetapage() -- Fill a page buffer with a correct metapage image
+ *
+ * btm_allequalimage and btm_prefix_compression are mutually exclusive (the
+ * two on-disk encodings are incompatible).  Callers must honor that; we
+ * assert it here.
  */
 void
 _bt_initmetapage(Page page, BlockNumber rootbknum, uint32 level,
-				 bool allequalimage)
+				 bool allequalimage, bool prefix_compression)
 {
 	BTMetaPageData *metad;
 	BTPageOpaque metaopaque;
+
+	Assert(!(allequalimage && prefix_compression));
 
 	_bt_pageinit(page, BLCKSZ);
 
@@ -83,6 +89,7 @@ _bt_initmetapage(Page page, BlockNumber rootbknum, uint32 level,
 	metad->btm_last_cleanup_num_delpages = 0;
 	metad->btm_last_cleanup_num_heap_tuples = -1.0;
 	metad->btm_allequalimage = allequalimage;
+	metad->btm_prefix_compression = prefix_compression;
 
 	metaopaque = BTPageGetOpaque(page);
 	metaopaque->btpo_flags = BTP_META;
@@ -122,9 +129,10 @@ _bt_upgrademetapage(Page page)
 	metad->btm_version = BTREE_NOVAC_VERSION;
 	metad->btm_last_cleanup_num_delpages = 0;
 	metad->btm_last_cleanup_num_heap_tuples = -1.0;
-	/* Only a REINDEX can set this field */
+	/* Only a REINDEX can set these fields */
 	Assert(!metad->btm_allequalimage);
 	metad->btm_allequalimage = false;
+	metad->btm_prefix_compression = false;
 
 	/* Adjust pd_lower (see _bt_initmetapage() for details) */
 	((PageHeader) page)->pd_lower =
@@ -299,6 +307,7 @@ _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages)
 		md.fastlevel = metad->btm_fastlevel;
 		md.last_cleanup_num_delpages = num_delpages;
 		md.allequalimage = metad->btm_allequalimage;
+		md.prefix_compression = metad->btm_prefix_compression;
 
 		XLogRegisterBufData(0, &md, sizeof(xl_btree_metadata));
 
@@ -450,6 +459,16 @@ _bt_getroot(Relation rel, Relation heaprel, int access)
 		rootopaque = BTPageGetOpaque(rootpage);
 		rootopaque->btpo_prev = rootopaque->btpo_next = P_NONE;
 		rootopaque->btpo_flags = (BTP_LEAF | BTP_ROOT);
+		/*
+		 * The new leaf root inherits the index-wide prefix-compression
+		 * opt-in.  Without this, an initially-empty CREATE INDEX followed
+		 * by retail INSERTs produces plain-only leaves forever (the insert
+		 * path gates compression on BTP_HAS_PREFIX_COMPRESSION, and
+		 * _bt_split propagates the flag from origpage to its new right
+		 * sibling, so an unflagged first leaf poisons every descendant).
+		 */
+		if (metad->btm_prefix_compression)
+			rootopaque->btpo_flags |= BTP_HAS_PREFIX_COMPRESSION;
 		rootopaque->btpo_level = 0;
 		rootopaque->btpo_cycleid = 0;
 		/* Get raw page pointer for metapage */
@@ -490,6 +509,7 @@ _bt_getroot(Relation rel, Relation heaprel, int access)
 			md.fastlevel = 0;
 			md.last_cleanup_num_delpages = 0;
 			md.allequalimage = metad->btm_allequalimage;
+			md.prefix_compression = metad->btm_prefix_compression;
 
 			XLogRegisterBufData(2, &md, sizeof(xl_btree_metadata));
 
@@ -721,7 +741,8 @@ _bt_getrootheight(Relation rel)
  *		pg_upgrade'd from Postgres 12.
  */
 void
-_bt_metaversion(Relation rel, bool *heapkeyspace, bool *allequalimage)
+_bt_metaversion(Relation rel, bool *heapkeyspace, bool *allequalimage,
+				bool *prefix_compression)
 {
 	BTMetaPageData *metad;
 
@@ -741,6 +762,7 @@ _bt_metaversion(Relation rel, bool *heapkeyspace, bool *allequalimage)
 		{
 			*heapkeyspace = metad->btm_version > BTREE_NOVAC_VERSION;
 			*allequalimage = metad->btm_allequalimage;
+			*prefix_compression = metad->btm_prefix_compression;
 
 			_bt_relbuf(rel, metabuf);
 			return;
@@ -769,10 +791,15 @@ _bt_metaversion(Relation rel, bool *heapkeyspace, bool *allequalimage)
 	Assert(metad->btm_version <= BTREE_VERSION);
 	Assert(!metad->btm_allequalimage ||
 		   metad->btm_version > BTREE_NOVAC_VERSION);
+	Assert(!metad->btm_prefix_compression ||
+		   metad->btm_version > BTREE_NOVAC_VERSION);
+	/* Mutually exclusive with deduplication */
+	Assert(!(metad->btm_allequalimage && metad->btm_prefix_compression));
 	Assert(metad->btm_fastroot != P_NONE);
 
 	*heapkeyspace = metad->btm_version > BTREE_NOVAC_VERSION;
 	*allequalimage = metad->btm_allequalimage;
+	*prefix_compression = metad->btm_prefix_compression;
 }
 
 /*
@@ -1170,6 +1197,8 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 	Size		updatedbuflen = 0;
 	OffsetNumber updatedoffsets[MaxIndexTuplesPerPage];
 	XLogRecPtr	recptr;
+	BTPrefixPromotion promotions[MaxIndexTuplesPerPage];
+	int			nprom = 0;
 
 	/* Shouldn't be called unless there's something to do */
 	Assert(ndeletable > 0 || nupdatable > 0);
@@ -1179,6 +1208,28 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 		updatedbuf = _bt_delitems_update(updatable, nupdatable,
 										 updatedoffsets, &updatedbuflen,
 										 needswal);
+
+	/*
+	 * Plan survivor-follower promotions outside the critical section, so
+	 * _bt_prefix_reconstruct's palloc()s are safe.  The resulting
+	 * 'promotions' array carries palloc'd plain tuples that we'll overwrite
+	 * in place inside the critical section below.  The plan records
+	 * post-delete offsets: the apply step runs *after* PageIndexMultiDelete.
+	 */
+	if (ndeletable > 0)
+		nprom = _bt_prefix_vacuum_plan(rel, page, deletable, ndeletable,
+									   promotions);
+
+	/*
+	 * Prefix compression and posting-list dedup are mutually exclusive at the
+	 * index level (btm_prefix_compression ⇒ !btm_allequalimage), so a page
+	 * that produced any promotions cannot also carry posting-tuple updates.
+	 * That lets us safely reorder: promotions must run *after*
+	 * PageIndexMultiDelete (so the deleted anchors' bytes are available to
+	 * grow each survivor into its plain form), while posting updates keep
+	 * their historical pre-delete slot for pages without promotions.
+	 */
+	Assert(nprom == 0 || nupdatable == 0);
 
 	/* No ereport(ERROR) until changes are logged */
 	START_CRIT_SECTION();
@@ -1213,6 +1264,15 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 		PageIndexMultiDelete(page, deletable, ndeletable);
 
 	/*
+	 * Promote survivor followers to plain anchors now that the original
+	 * anchors' bytes have been freed by PageIndexMultiDelete.  The plan's
+	 * recorded offsets are already adjusted for the post-delete line pointer
+	 * shift.  This ordering is what makes the PageIndexTupleOverwrite
+	 * always-fit guarantee hold (see comment in _bt_prefix_vacuum_apply).
+	 */
+	_bt_prefix_vacuum_apply(page, promotions, nprom);
+
+	/*
 	 * We can clear the vacuum cycle ID since this page has certainly been
 	 * processed by the current vacuum scan.
 	 */
@@ -1235,12 +1295,20 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 	if (needswal)
 	{
 		xl_btree_vacuum xlrec_vacuum;
+		uint8		xlflags = REGBUF_STANDARD;
 
 		xlrec_vacuum.ndeleted = ndeletable;
 		xlrec_vacuum.nupdated = nupdatable;
 
 		XLogBeginInsert();
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		/*
+		 * When anchor promotion happened, the page's new layout is not
+		 * recoverable from the ndeletable/nupdatable deltas alone; force a
+		 * full page image so replay sees the post-promotion bytes.
+		 */
+		if (nprom > 0)
+			xlflags |= REGBUF_FORCE_IMAGE;
+		XLogRegisterBuffer(0, buf, xlflags);
 		XLogRegisterData(&xlrec_vacuum, SizeOfBtreeVacuum);
 
 		if (ndeletable > 0)
@@ -1269,6 +1337,9 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 	/* free tuples allocated within _bt_delitems_update() */
 	for (int i = 0; i < nupdatable; i++)
 		pfree(updatable[i]->itup);
+	/* free promoted tuples allocated within _bt_prefix_vacuum_plan() */
+	for (int i = 0; i < nprom; i++)
+		pfree(promotions[i].plain);
 }
 
 /*
@@ -1302,6 +1373,8 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 	Size		updatedbuflen = 0;
 	OffsetNumber updatedoffsets[MaxIndexTuplesPerPage];
 	XLogRecPtr	recptr;
+	BTPrefixPromotion promotions[MaxIndexTuplesPerPage];
+	int			nprom = 0;
 
 	/* Shouldn't be called unless there's something to do */
 	Assert(ndeletable > 0 || nupdatable > 0);
@@ -1311,6 +1384,18 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 		updatedbuf = _bt_delitems_update(updatable, nupdatable,
 										 updatedoffsets, &updatedbuflen,
 										 needswal);
+
+	/*
+	 * Plan survivor-follower promotions outside the critical section; the
+	 * plan records post-delete offsets and the apply step runs *after*
+	 * PageIndexMultiDelete.
+	 */
+	if (ndeletable > 0)
+		nprom = _bt_prefix_vacuum_plan(rel, page, deletable, ndeletable,
+									   promotions);
+
+	/* Mutually exclusive -- see comment in _bt_delitems_vacuum. */
+	Assert(nprom == 0 || nupdatable == 0);
 
 	/* No ereport(ERROR) until changes are logged */
 	START_CRIT_SECTION();
@@ -1331,6 +1416,9 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 
 	if (ndeletable > 0)
 		PageIndexMultiDelete(page, deletable, ndeletable);
+
+	/* Delete-first ordering frees anchor bytes; promotions always fit now. */
+	_bt_prefix_vacuum_apply(page, promotions, nprom);
 
 	/*
 	 * Unlike _bt_delitems_vacuum, we *must not* clear the vacuum cycle ID at
@@ -1353,6 +1441,7 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 	if (needswal)
 	{
 		xl_btree_delete xlrec_delete;
+		uint8		xlflags = REGBUF_STANDARD;
 
 		xlrec_delete.snapshotConflictHorizon = snapshotConflictHorizon;
 		xlrec_delete.ndeleted = ndeletable;
@@ -1360,7 +1449,9 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 		xlrec_delete.isCatalogRel = isCatalogRel;
 
 		XLogBeginInsert();
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		if (nprom > 0)
+			xlflags |= REGBUF_FORCE_IMAGE;
+		XLogRegisterBuffer(0, buf, xlflags);
 		XLogRegisterData(&xlrec_delete, SizeOfBtreeDelete);
 
 		if (ndeletable > 0)
@@ -1389,6 +1480,9 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 	/* free tuples allocated within _bt_delitems_update() */
 	for (int i = 0; i < nupdatable; i++)
 		pfree(updatable[i]->itup);
+	/* free promoted tuples allocated within _bt_prefix_vacuum_plan() */
+	for (int i = 0; i < nprom; i++)
+		pfree(promotions[i].plain);
 }
 
 /*
@@ -1588,8 +1682,23 @@ _bt_delitems_delete_check(Relation rel, Buffer buf, Relation heapRel,
 
 		if (!BTreeTupleIsPosting(itup))
 		{
-			/* Plain non-pivot tuple */
-			Assert(ItemPointerEquals(&itup->t_tid, &delstate->deltids[i].tid));
+			/*
+			 * Plain non-pivot tuple (or a prefix-compressed follower).  Deltids
+			 * entries were populated by the collector paths with decoded heap
+			 * TIDs, so compare against the follower's decoded TID rather than
+			 * the raw t_tid bytes (whose upper nibble carries BT_IS_COMPRESSED).
+			 */
+#ifdef USE_ASSERT_CHECKING
+			{
+				ItemPointerData htid;
+
+				if (BTreeTupleIsCompressed(itup))
+					BTreeCompressedTupleGetHeapTID(itup, &htid);
+				else
+					htid = itup->t_tid;
+				Assert(ItemPointerEquals(&htid, &delstate->deltids[i].tid));
+			}
+#endif
 			if (dstatus->knowndeletable)
 				deletable[ndeletable++] = idxoffnum;
 			continue;
@@ -2732,6 +2841,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
 			xlmeta.fastlevel = metad->btm_fastlevel;
 			xlmeta.last_cleanup_num_delpages = metad->btm_last_cleanup_num_delpages;
 			xlmeta.allequalimage = metad->btm_allequalimage;
+			xlmeta.prefix_compression = metad->btm_prefix_compression;
 
 			XLogRegisterBufData(4, &xlmeta, sizeof(xl_btree_metadata));
 			xlinfo = XLOG_BTREE_UNLINK_PAGE_META;

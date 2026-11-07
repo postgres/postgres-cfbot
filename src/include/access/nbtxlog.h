@@ -55,6 +55,7 @@ typedef struct xl_btree_metadata
 	uint32		fastlevel;
 	uint32		last_cleanup_num_delpages;
 	bool		allequalimage;
+	bool		prefix_compression;
 } xl_btree_metadata;
 
 /*
@@ -156,9 +157,24 @@ typedef struct xl_btree_split
 	OffsetNumber firstrightoff; /* first origpage item on rightpage */
 	OffsetNumber newitemoff;	/* new item's offset */
 	uint16		postingoff;		/* offset inside orig posting tuple */
+	/*
+	 * origpage's btpo_flags at split time.  Replay uses this to carry
+	 * forward BTP_HAS_PREFIX_COMPRESSION (and any future per-page flags)
+	 * to the reinitialized right page.  Filtered by
+	 * BTP_SPLIT_PRESERVED_FLAGS in replay so that flags that only belong
+	 * on origpage (BTP_INCOMPLETE_SPLIT, BTP_ROOT, BTP_HAS_GARBAGE,
+	 * BTP_SPLIT_END) never cross over.
+	 */
+	uint16		origflags;
 } xl_btree_split;
 
-#define SizeOfBtreeSplit	(offsetof(xl_btree_split, postingoff) + sizeof(uint16))
+#define SizeOfBtreeSplit	(offsetof(xl_btree_split, origflags) + sizeof(uint16))
+
+/*
+ * Flags that xl_btree_split replay preserves from origpage on the right
+ * page.  Anything outside this mask is cleared.
+ */
+#define BTP_SPLIT_PRESERVED_FLAGS	(BTP_LEAF | BTP_HAS_PREFIX_COMPRESSION)
 
 /*
  * When page is deduplicated, consecutive groups of tuples with equal keys are

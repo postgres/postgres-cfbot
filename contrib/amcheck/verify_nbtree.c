@@ -116,6 +116,14 @@ typedef struct BtreeCheckState
 	IndexTuple	lowkey;
 
 	/*
+	 * Scratch ItemPointerData for decoding a prefix-compressed follower's
+	 * heap TID on demand (BTreeTupleGetHeapTID returns NULL for such tuples;
+	 * callers that want a usable pointer use BTreeCompressedTupleGetHeapTID
+	 * into this buffer).  Only the last caller's decode is valid.
+	 */
+	ItemPointerData compressed_htid_scratch;
+
+	/*
 	 * The rightlink and incomplete split flag of block one level down to the
 	 * target page, which was visited last time via downlink from target page.
 	 * We use it to check for missing downlinks.
@@ -312,7 +320,8 @@ bt_index_check_callback(Relation indrel, Relation heaprel, void *state, bool rea
 {
 	BTCallbackState *args = (BTCallbackState *) state;
 	bool		heapkeyspace,
-				allequalimage;
+				allequalimage,
+				prefix_compression;
 
 	if (!smgrexists(RelationGetSmgr(indrel), MAIN_FORKNUM))
 		ereport(ERROR,
@@ -321,11 +330,16 @@ bt_index_check_callback(Relation indrel, Relation heaprel, void *state, bool rea
 						RelationGetRelationName(indrel))));
 
 	/* Extract metadata from metapage, and sanitize it in passing */
-	_bt_metaversion(indrel, &heapkeyspace, &allequalimage);
+	_bt_metaversion(indrel, &heapkeyspace, &allequalimage, &prefix_compression);
 	if (allequalimage && !heapkeyspace)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("index \"%s\" metapage has equalimage field set on unsupported nbtree version",
+						RelationGetRelationName(indrel))));
+	if (allequalimage && prefix_compression)
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index \"%s\" metapage has both deduplication and prefix compression enabled",
 						RelationGetRelationName(indrel))));
 	if (allequalimage && !_bt_allequalimage(indrel, false))
 		ereport(ERROR,
@@ -1228,12 +1242,28 @@ bt_target_page_check(BtreeCheckState *state)
 	OffsetNumber offset;
 	OffsetNumber max;
 	BTPageOpaque topaque;
+	bool		prefix_page;
+	BTPrefixPageState prefix_state;
+	char	   *rbuf = NULL;
 
 	/* Last visible entry info for checking indexes with unique constraint */
 	BtreeLastVisibleEntry lVis = {InvalidBlockNumber, InvalidOffsetNumber, -1, NULL};
 
 	topaque = BTPageGetOpaque(state->target);
 	max = PageGetMaxOffsetNumber(state->target);
+
+	/*
+	 * For prefix-compressed leaf pages, maintain a reconstruction state so
+	 * compressed followers are materialized before any downstream checks
+	 * look at their attrs, heap TID, or byte image.
+	 */
+	prefix_page = P_ISLEAF(topaque) && P_HAS_PREFIX_COMPRESSION(topaque);
+	if (prefix_page)
+	{
+		memset(&prefix_state, 0, sizeof(prefix_state));
+		_bt_prefix_state_init(&prefix_state, state->target);
+		rbuf = palloc(BTMaxItemSize);
+	}
 
 	elog(DEBUG2, "verifying %u items on %s block %u", max,
 		 P_ISLEAF(topaque) ? "leaf" : "internal", state->targetblock);
@@ -1295,6 +1325,51 @@ bt_target_page_check(BtreeCheckState *state)
 									  state->target, offset);
 		itup = (IndexTuple) PageGetItem(state->target, itemid);
 		tupsize = IndexTupleSize(itup);
+
+		/*
+		 * Prefix-compressed leaf invariants + reconstruction.
+		 *
+		 * The leftmost data item on a BTP_HAS_PREFIX_COMPRESSION leaf must
+		 * be a plain anchor.  A compressed tuple anywhere else is fine, but
+		 * a compressed tuple at P_FIRSTDATAKEY would leave every follower
+		 * below it without a governing anchor.  Raise a corruption error.
+		 *
+		 * After the invariant check, materialize any compressed tuple into
+		 * scratch storage so all downstream amcheck probes (natts check,
+		 * scankey building, root-descend search, heap-TID fetch, posting
+		 * checks) operate on a plain IndexTuple that index_getattr and
+		 * friends can deform correctly.
+		 */
+		if (prefix_page && offset == P_FIRSTDATAKEY(topaque) &&
+			BTreeTupleIsCompressed(itup))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("leftmost data item on prefix-compressed leaf page is not a plain anchor in index \"%s\"",
+							RelationGetRelationName(state->rel)),
+					 errdetail_internal("Index block=%u offset=%u page lsn=%X/%08X.",
+										state->targetblock, offset,
+										LSN_FORMAT_ARGS(state->targetlsn))));
+
+		if (!prefix_page && BTreeTupleIsCompressed(itup))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("prefix-compressed tuple found on leaf page without BTP_HAS_PREFIX_COMPRESSION in index \"%s\"",
+							RelationGetRelationName(state->rel)),
+					 errdetail_internal("Index block=%u offset=%u page lsn=%X/%08X.",
+										state->targetblock, offset,
+										LSN_FORMAT_ARGS(state->targetlsn))));
+
+		/*
+		 * Always route leaf items through _bt_prefix_reconstruct on prefix-
+		 * compressed pages.  For plain tuples (anchors) it returns the raw
+		 * pointer and refreshes the state's current anchor, so subsequent
+		 * compressed followers reconstruct from the right group -- previously
+		 * we only updated state on compressed tuples and would feed stale
+		 * anchor attrs into the bloom filter for the next group's followers.
+		 */
+		if (prefix_page)
+			itup = _bt_prefix_reconstruct(state->rel, &prefix_state,
+										  offset, rbuf);
 
 		/*
 		 * lp_len should match the IndexTuple reported length exactly, since
@@ -1827,6 +1902,12 @@ bt_target_page_check(BtreeCheckState *state)
 	{
 		bt_child_highkey_check(state, InvalidOffsetNumber,
 							   NULL, topaque->btpo_level);
+	}
+
+	if (prefix_page)
+	{
+		_bt_prefix_state_cleanup(&prefix_state);
+		pfree(rbuf);
 	}
 }
 
@@ -3540,6 +3621,18 @@ BTreeTupleGetHeapTIDCareful(BtreeCheckState *state, IndexTuple itup,
 				 errmsg_internal("block %u or its right sibling block or child block in index \"%s\" has unexpected non-pivot tuple",
 								 state->targetblock,
 								 RelationGetRelationName(state->rel))));
+
+	/*
+	 * Compressed followers carry their heap TID packed into t_tid's upper
+	 * nibble (status) + low 12 bits (offset).  Decode into the state's
+	 * scratch buffer so the caller gets a usable ItemPointer that agrees
+	 * with what regular scans would return.
+	 */
+	if (BTreeTupleIsCompressed(itup))
+	{
+		BTreeCompressedTupleGetHeapTID(itup, &state->compressed_htid_scratch);
+		return &state->compressed_htid_scratch;
+	}
 
 	htid = BTreeTupleGetHeapTID(itup);
 	if (!ItemPointerIsValid(htid) && nonpivot)

@@ -110,6 +110,8 @@ _bt_restore_meta(XLogReaderState *record, uint8 block_id)
 	md->btm_last_cleanup_num_delpages = xlrec->last_cleanup_num_delpages;
 	md->btm_last_cleanup_num_heap_tuples = -1.0;
 	md->btm_allequalimage = xlrec->allequalimage;
+	md->btm_prefix_compression = xlrec->prefix_compression;
+	Assert(!(md->btm_allequalimage && md->btm_prefix_compression));
 
 	pageop = BTPageGetOpaque(metapg);
 	pageop->btpo_flags = BTP_META;
@@ -291,7 +293,12 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 	ropaque->btpo_prev = origpagenumber;
 	ropaque->btpo_next = spagenumber;
 	ropaque->btpo_level = xlrec->level;
-	ropaque->btpo_flags = isleaf ? BTP_LEAF : 0;
+	/*
+	 * Carry forward BTP_LEAF and BTP_HAS_PREFIX_COMPRESSION (plus any future
+	 * flags added to BTP_SPLIT_PRESERVED_FLAGS) from origpage.  Non-leaf
+	 * origpages have no BTP_LEAF to carry, but the mask handles that too.
+	 */
+	ropaque->btpo_flags = xlrec->origflags & BTP_SPLIT_PRESERVED_FLAGS;
 	ropaque->btpo_cycleid = 0;
 
 	_bt_restore_page(rpage, datapos, datalen);
@@ -411,10 +418,17 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 
 		PageRestoreTempPage(leftpage, origpage);
 
-		/* Fix opaque fields */
-		oopaque->btpo_flags = BTP_INCOMPLETE_SPLIT;
-		if (isleaf)
-			oopaque->btpo_flags |= BTP_LEAF;
+		/*
+		 * Fix opaque fields.  Preserve flags that survive a split on the
+		 * primary (BTP_LEAF, BTP_HAS_PREFIX_COMPRESSION -- see
+		 * BTP_SPLIT_PRESERVED_FLAGS) and then set BTP_INCOMPLETE_SPLIT on
+		 * top.  Without the mask, compressed followers on a prefix leaf
+		 * would be left sitting on a page whose BTP_HAS_PREFIX_COMPRESSION
+		 * flag got cleared by replay, breaking scans that gate
+		 * reconstruction on the flag.
+		 */
+		oopaque->btpo_flags = (xlrec->origflags & BTP_SPLIT_PRESERVED_FLAGS) |
+			BTP_INCOMPLETE_SPLIT;
 		oopaque->btpo_next = rightpagenumber;
 		oopaque->btpo_cycleid = 0;
 
@@ -944,7 +958,24 @@ btree_xlog_newroot(XLogReaderState *record)
 	pageop->btpo_prev = pageop->btpo_next = P_NONE;
 	pageop->btpo_level = xlrec->level;
 	if (xlrec->level == 0)
+	{
+		xl_btree_metadata *md;
+		Size		mdlen;
+
 		pageop->btpo_flags |= BTP_LEAF;
+
+		/*
+		 * On the primary _bt_getroot() marks the new leaf root with
+		 * BTP_HAS_PREFIX_COMPRESSION when the index opts in.  Replay must
+		 * mirror that so standbys keep producing compressed pages.  The
+		 * relevant bit is on the metapage record regardless of level, so
+		 * peek at it here before _bt_restore_meta runs below.
+		 */
+		md = (xl_btree_metadata *) XLogRecGetBlockData(record, 2, &mdlen);
+		Assert(mdlen == sizeof(xl_btree_metadata));
+		if (md->prefix_compression)
+			pageop->btpo_flags |= BTP_HAS_PREFIX_COMPRESSION;
+	}
 	pageop->btpo_cycleid = 0;
 
 	if (xlrec->level > 0)
