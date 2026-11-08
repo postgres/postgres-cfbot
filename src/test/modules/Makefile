@@ -54,6 +54,7 @@ SUBDIRS = \
 		  test_shm_mq \
 		  test_slru \
 		  test_tidstore \
+		  test_upper_paths_hook \
 		  test_wait_lsn \
 		  unsafe_tests \
 		  worker_spi \
