@@ -73,6 +73,7 @@ tests += {
     'tests': [
       't/010_restart.pl',
       't/011_eviction.pl',
+      't/013_qtext_memory.pl',
     ],
   },
 }

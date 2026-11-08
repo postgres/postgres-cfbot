@@ -739,17 +739,11 @@ calls | 2
   </para>
 
   <para>
-   The representative query texts are kept in an external disk file, and do
-   not consume shared memory.  Therefore, even very lengthy query texts can
-   be stored successfully.  However, if many long query texts are
-   accumulated, the external file might grow unmanageably large.  As a
-   recovery method if that happens, <filename>pg_stat_statements</filename> may
-   choose to discard the query texts, whereupon all existing entries in
-   the <structname>pg_stat_statements</structname> view will show
-   null <structfield>query</structfield> fields, though the statistics associated with
-   each <structfield>queryid</structfield> are preserved.  If this happens, consider
-   reducing <varname>pg_stat_statements.max</varname> to prevent
-   recurrences.
+   The representative query texts are kept in shared memory, whose amount is
+   limited by <varname>pg_stat_statements.query_text_memory</varname>, and
+   are freed with the information about their statements.  A new statement
+   whose text does not fit in that memory is not tracked.  If this happens,
+   consider raising <varname>pg_stat_statements.query_text_memory</varname>.
   </para>
 
   <para>
@@ -825,7 +819,9 @@ calls | 2
        Total number of times <structname>pg_stat_statements</structname>
        entries about the least-executed statements were deallocated
        because more distinct statements than
-       <varname>pg_stat_statements.max</varname> were observed
+       <varname>pg_stat_statements.max</varname> were observed, or their
+       query texts did not fit in
+       <varname>pg_stat_statements.query_text_memory</varname>
       </para></entry>
      </row>
      <row>
@@ -835,6 +831,14 @@ calls | 2
       <para>
        Time at which all statistics in the
        <structname>pg_stat_statements</structname> view were last reset.
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>query_text_memory</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Shared memory allocated for query texts, in bytes
       </para></entry>
      </row>
 
@@ -912,9 +916,9 @@ calls | 2
       length.  Such tools can instead cache the first query text observed
       for each entry themselves, since that is
       all <filename>pg_stat_statements</filename> itself does, and then retrieve
-      query texts only as needed.  Since the server stores query texts in a
-      file, this approach may reduce physical I/O for repeated examination
-      of the <structname>pg_stat_statements</structname> data.
+      query texts only as needed, which reduces the amount of data copied for
+      repeated examination of the <structname>pg_stat_statements</structname>
+      data.
      </para>
     </listitem>
    </varlistentry>
@@ -958,6 +962,29 @@ calls | 2
       file or on the server command line.  A lowered value takes effect when
       the next new statement is tracked, and at server start for the
       statements saved at shutdown.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <varname>pg_stat_statements.query_text_memory</varname> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>pg_stat_statements.query_text_memory</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+
+    <listitem>
+     <para>
+      <varname>pg_stat_statements.query_text_memory</varname> is the maximum
+      amount of shared memory for the query texts of the tracked statements.
+      If this value is specified without units, it is taken as kilobytes.
+      A new statement whose text does not fit is not tracked.  A lowered value
+      prevents the memory from growing, and takes full effect as texts are
+      discarded.  The minimum value is 1 megabyte, and the default value is
+      64 megabytes.
+      This parameter can only be set in the <filename>postgresql.conf</filename>
+      file or on the server command line.
      </para>
     </listitem>
    </varlistentry>
