@@ -1133,7 +1133,19 @@ xmlroot(xmltype *data, text *version, int standalone)
 	}
 
 	initStringInfo(&buf);
-	print_xml_decl(&buf, orig_version, 0, orig_standalone);
+	if (print_xml_decl(&buf, orig_version, 0, orig_standalone) && orig_version)
+	{
+		xmlChar    *parsed_version;
+
+		/* Reject a version that the XML declaration cannot represent */
+		if (parse_xml_decl((xmlChar *) buf.data, NULL, &parsed_version,
+						   NULL, NULL) != XML_ERR_OK ||
+			xmlStrcmp(parsed_version, orig_version) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid XML version \"%s\"",
+							(char *) orig_version)));
+	}
 	appendStringInfoString(&buf, str + len);
 
 	return stringinfo_to_xmltype(&buf);
