@@ -19,6 +19,10 @@ CREATE FUNCTION test_resowner_forget_between_phases()
 	RETURNS pg_catalog.void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
+CREATE FUNCTION test_resowner_aux(nresources pg_catalog.int4)
+	RETURNS pg_catalog.void
+	AS 'MODULE_PATHNAME' LANGUAGE C;
+
 CREATE FUNCTION test_resowner_many(
    nkinds       pg_catalog.int4,
    nremember_bl pg_catalog.int4,
