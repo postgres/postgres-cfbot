@@ -588,11 +588,18 @@ xmlconcat(List *args)
 		xmlChar    *version;
 		int			standalone;
 		char	   *str;
+		int			res_code;
 
 		len = VARSIZE(x) - VARHDRSZ;
 		str = text_to_cstring((text *) x);
 
-		parse_xml_decl((xmlChar *) str, &len, &version, NULL, &standalone);
+		res_code = parse_xml_decl((xmlChar *) str, &len, &version, NULL,
+								  &standalone);
+		if (res_code != 0)
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_CORRUPTED),
+					errmsg_internal("could not parse XML declaration in stored value"),
+					errdetail_for_xml_code(res_code));
 
 		if (standalone == 0 && global_standalone == 1)
 			global_standalone = 0;
@@ -1091,11 +1098,18 @@ xmlroot(xmltype *data, text *version, int standalone)
 	xmlChar    *orig_version;
 	int			orig_standalone;
 	StringInfoData buf;
+	int			res_code;
 
 	len = VARSIZE(data) - VARHDRSZ;
 	str = text_to_cstring((text *) data);
 
-	parse_xml_decl((xmlChar *) str, &len, &orig_version, NULL, &orig_standalone);
+	res_code = parse_xml_decl((xmlChar *) str, &len, &orig_version, NULL,
+							  &orig_standalone);
+	if (res_code != 0)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg_internal("could not parse XML declaration in stored value"),
+				errdetail_for_xml_code(res_code));
 
 	if (version)
 		orig_version = xml_text2xmlChar(version);
