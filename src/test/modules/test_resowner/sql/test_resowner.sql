@@ -23,3 +23,11 @@ set client_min_messages='warning'; -- order between ERROR and NOTICE varies
 SELECT test_resowner_remember_between_phases();
 SELECT test_resowner_forget_between_phases();
 reset client_min_messages;
+
+-- Reuse an auxiliary resource owner with and without a hash table.
+-- For hash-table cases, force a resize before inserting into the reused hash.
+-- This exposes stale entries without hanging while looking for a free slot.
+SELECT test_resowner_aux(16);
+SELECT test_resowner_aux(33);
+SELECT test_resowner_aux(48);
+SELECT test_resowner_aux(64);
