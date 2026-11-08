@@ -570,3 +570,59 @@ indisvalid
 t         
 (1 row)
 
+
+starting permutation: s2snitch s1b s1s s2detach s1cancel s1c s1addck s1setdef s1altcol s1alter s1pubtables s2detachfinal s1p1ddl s1p1cols
+step s2snitch: INSERT INTO d3_pid SELECT pg_backend_pid();
+step s1b: BEGIN;
+step s1s: SELECT * FROM d3_listp;
+a
+-
+1
+(1 row)
+
+step s2detach: ALTER TABLE d3_listp DETACH PARTITION d3_listp1 CONCURRENTLY; <waiting ...>
+step s1cancel: SELECT pg_cancel_backend(pid) FROM d3_pid; <waiting ...>
+step s2detach: <... completed>
+ERROR:  canceling statement due to user request
+step s1cancel: <... completed>
+pg_cancel_backend
+-----------------
+t                
+(1 row)
+
+step s1c: COMMIT;
+step s1addck: ALTER TABLE d3_listp ADD CHECK (a > 0);
+step s1setdef: ALTER TABLE d3_listp ALTER a SET DEFAULT 1;
+step s1altcol: ALTER TABLE d3_listp ADD b int, ADD c int;
+					  ALTER TABLE d3_listp ALTER b TYPE bigint;
+					  ALTER TABLE d3_listp DROP c;
+step s1alter: ALTER TABLE d3_listp1 ALTER a DROP NOT NULL;
+ERROR:  cannot alter partition "d3_listp1" with an incomplete detach
+step s1pubtables: CREATE PUBLICATION pub_d3t FOR TABLE d3_listp;
+					  SELECT tablename FROM pg_publication_tables
+					  WHERE pubname = 'pub_d3t' ORDER BY 1;
+					  DROP PUBLICATION pub_d3t;
+tablename
+---------
+d3_listp2
+(1 row)
+
+step s2detachfinal: ALTER TABLE d3_listp DETACH PARTITION d3_listp1 FINALIZE;
+step s1p1ddl: SELECT (SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef
+							WHERE adrelid = 'd3_listp1'::regclass) AS def,
+						   (SELECT count(*) FROM pg_constraint
+							WHERE conrelid = 'd3_listp1'::regclass AND contype = 'c') AS checks;
+def|checks
+---+------
+  1|     1
+(1 row)
+
+step s1p1cols: SELECT attname, atttypid::regtype FROM pg_attribute
+					  WHERE attrelid = 'd3_listp1'::regclass AND attnum > 0
+					  AND NOT attisdropped ORDER BY attnum;
+attname|atttypid
+-------+--------
+a      |integer 
+b      |bigint  
+(2 rows)
+

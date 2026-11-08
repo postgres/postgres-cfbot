@@ -4456,7 +4456,7 @@ StorePartitionBound(Relation rel, Relation parent, PartitionBoundSpec *bound)
 	 * removed.
 	 */
 	defaultPartOid =
-		get_default_oid_from_partdesc(RelationGetPartitionDesc(parent, true));
+		get_default_oid_from_partdesc(RelationGetPartitionDesc(parent));
 	if (OidIsValid(defaultPartOid))
 		CacheInvalidateRelcacheByRelid(defaultPartOid);
 
