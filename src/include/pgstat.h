@@ -275,7 +275,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBE
 
 typedef struct PgStat_ArchiverStats
 {
@@ -433,6 +433,9 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter tuples_updated;
 	PgStat_Counter tuples_deleted;
 	TimestampTz last_autovac_time;
+	PgStat_Counter frozenxid_updated;
+	PgStat_Counter last_frozenxid_updated;
+	TimestampTz last_frozenxid_update_time;
 	PgStat_Counter conflict_tablespace;
 	PgStat_Counter conflict_lock;
 	PgStat_Counter conflict_snapshot;
@@ -729,8 +732,16 @@ extern PgStat_Lock *pgstat_fetch_stat_lock(void);
  * Functions in pgstat_database.c
  */
 
+/* Interval for periodic database frozen-ID updates, in seconds. */
+#define VAC_DATFROZENXID_UPDATE_INTERVAL (10 * 60)
+
 extern void pgstat_drop_database(Oid databaseid);
 extern void pgstat_report_autovac(Oid dboid);
+extern void pgstat_report_frozenxid_progress(void);
+extern void pgstat_prepare_frozenxid_update(PgStat_Counter *frozenxid_updated,
+											TimestampTz *last_update_time);
+extern void pgstat_report_frozenxid_update(PgStat_Counter frozenxid_updated,
+										   TimestampTz last_update_time);
 extern void pgstat_report_recovery_conflict(int reason);
 extern void pgstat_report_deadlock(void);
 extern void pgstat_prepare_report_checksum_failure(Oid dboid);
@@ -749,6 +760,7 @@ extern void pgstat_update_parallel_workers_stats(PgStat_Counter workers_to_launc
 	(pgStatTransactionIdleTime += (n))
 
 extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dboid);
+extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry_ext(Oid dboid, bool *may_free);
 
 
 /*

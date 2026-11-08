@@ -123,6 +123,7 @@ int			VacuumCostBalanceLocal = 0;
 static List *expand_vacuum_rel(VacuumRelation *vrel,
 							   MemoryContext vac_context, int options);
 static List *get_all_vacuum_rels(MemoryContext vac_context, int options);
+static bool vacuum_datfrozenxid_update_due(void);
 static void vac_truncate_clog(TransactionId frozenXID,
 							  MultiXactId minMulti,
 							  TransactionId lastSaneFrozenXid,
@@ -671,6 +672,17 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 				}
 			}
 
+			/* Publish freezing progress after the table's transactions end. */
+			if ((params->options & VACOPT_VACUUM) &&
+				!(params->options & VACOPT_SKIP_DATABASE_STATS) &&
+				vacuum_datfrozenxid_update_due() &&
+				ForceTransactionIdLimitUpdate())
+			{
+				StartTransactionCommand();
+				vac_update_datfrozenxid(true);
+				CommitTransactionCommand();
+			}
+
 			/*
 			 * Ensure VacuumFailsafeActive has been reset before vacuuming the
 			 * next relation.
@@ -709,8 +721,10 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 	{
 		/*
 		 * Update pg_database.datfrozenxid, and truncate pg_xact if possible.
+		 * Autovacuum's final update is handled by do_autovacuum().
 		 */
-		vac_update_datfrozenxid();
+		if (!AmAutoVacuumWorkerProcess())
+			vac_update_datfrozenxid(false);
 	}
 
 }
@@ -1636,6 +1650,37 @@ vac_update_relstats(Relation relation,
 
 
 /*
+ * Check for freezing progress not covered by a completed database update,
+ * and a sufficiently old completion time.
+ * All VACUUMs in a database share the interval.  A clock adjustment must not
+ * delay updates forever.
+ */
+static bool
+vacuum_datfrozenxid_update_due(void)
+{
+	PgStat_StatDBEntry *dbentry;
+	bool		due = false;
+	bool		may_free;
+
+	dbentry = pgstat_fetch_stat_dbentry_ext(MyDatabaseId, &may_free);
+	if (dbentry == NULL)
+		return false;
+
+	if (dbentry->frozenxid_updated > dbentry->last_frozenxid_updated)
+	{
+		TimestampTz now = GetCurrentTimestamp();
+
+		due = dbentry->last_frozenxid_update_time == 0 ||
+			dbentry->last_frozenxid_update_time > now ||
+			TimestampDifferenceExceedsSeconds(dbentry->last_frozenxid_update_time, now,
+											  VAC_DATFROZENXID_UPDATE_INTERVAL);
+	}
+	if (may_free)
+		pfree(dbentry);
+	return due;
+}
+
+/*
  *	vac_update_datfrozenxid() -- update pg_database.datfrozenxid for our DB
  *
  *		Update pg_database's datfrozenxid entry for our database to be the
@@ -1647,6 +1692,10 @@ vac_update_relstats(Relation relation,
  *		If we are able to advance either pg_database value, also try to
  *		truncate pg_xact and pg_multixact.
  *
+ *		If nowait is true, skip the update when the database frozen-ID
+ *		lock cannot be acquired immediately.  Once acquired, the lock is
+ *		held until transaction end.
+ *
  *		We violate transaction semantics here by overwriting the database's
  *		existing pg_database tuple with the new values.  This is reasonably
  *		safe since the new values are correct whether or not this transaction
@@ -1654,7 +1703,7 @@ vac_update_relstats(Relation relation,
  *		behind after a VACUUM.
  */
 void
-vac_update_datfrozenxid(void)
+vac_update_datfrozenxid(bool nowait)
 {
 	HeapTuple	tuple;
 	Form_pg_database dbform;
@@ -1669,6 +1718,8 @@ vac_update_datfrozenxid(void)
 	bool		dirty = false;
 	ScanKeyData key[1];
 	void	   *inplace_state;
+	PgStat_Counter saved_frozenxid_updated;
+	TimestampTz saved_update_time;
 
 	/*
 	 * Restrict this task to one backend per database.  This avoids race
@@ -1676,7 +1727,16 @@ vac_update_datfrozenxid(void)
 	 * avoids calling vac_truncate_clog() with a datfrozenxid preceding a
 	 * datfrozenxid passed to an earlier vac_truncate_clog() call.
 	 */
-	LockDatabaseFrozenIds(ExclusiveLock);
+	if (nowait)
+	{
+		if (!ConditionalLockDatabaseFrozenIds(ExclusiveLock))
+			return;
+	}
+	else
+		LockDatabaseFrozenIds(ExclusiveLock);
+
+	/* Only acknowledge progress that precedes this scan. */
+	pgstat_prepare_frozenxid_update(&saved_frozenxid_updated, &saved_update_time);
 
 	/*
 	 * Initialize the "min" calculation with
@@ -1854,6 +1914,8 @@ vac_update_datfrozenxid(void)
 	if (dirty || ForceTransactionIdLimitUpdate())
 		vac_truncate_clog(newFrozenXid, newMinMulti,
 						  lastSaneFrozenXid, lastSaneMinMulti);
+
+	pgstat_report_frozenxid_update(saved_frozenxid_updated, saved_update_time);
 }
 
 
