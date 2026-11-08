@@ -52,6 +52,8 @@ tests += {
       't/005_pitr.pl',
       't/006_verify_gin.pl',
       't/007_verify_nbtree_indexallkeysmatch.pl',
+      't/008_verify_nbtree_lost_segments.pl',
+      't/009_verify_nbtree_dangling.pl',
     ],
   },
 }
