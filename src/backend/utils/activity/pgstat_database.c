@@ -75,6 +75,76 @@ pgstat_report_autovac(Oid dboid)
 }
 
 /*
+ * Count a table's frozen-ID update immediately so that concurrent VACUUMs
+ * can coordinate database updates.
+ */
+void
+pgstat_report_frozenxid_progress(void)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Database *dbentry;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_DATABASE,
+											MyDatabaseId, InvalidOid, false);
+	dbentry = (PgStatShared_Database *) entry_ref->shared_stats;
+	dbentry->stats.frozenxid_updated++;
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
+ * Initialize a zero database update time to an expired value, so a failed scan
+ * can be retried immediately.  Save the progress count and update time under
+ * the same lock, so a statistics reset cannot separate them.  The caller must
+ * already hold the database frozen-ID lock.
+ */
+void
+pgstat_prepare_frozenxid_update(PgStat_Counter *frozenxid_updated,
+								TimestampTz *last_update_time)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Database *dbentry;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_DATABASE,
+											MyDatabaseId, InvalidOid, false);
+	dbentry = (PgStatShared_Database *) entry_ref->shared_stats;
+
+	if (dbentry->stats.last_frozenxid_update_time == 0)
+		dbentry->stats.last_frozenxid_update_time = GetCurrentTimestamp() -
+			(int64) VAC_DATFROZENXID_UPDATE_INTERVAL * USECS_PER_SEC;
+
+	*frozenxid_updated = dbentry->stats.frozenxid_updated;
+	*last_update_time = dbentry->stats.last_frozenxid_update_time;
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
+ * Record completion even when the database's frozen IDs did not advance.
+ * Only acknowledge progress saved before the scan, leaving concurrent updates
+ * outstanding.  A changed update time invalidates the saved count.
+ * The caller must still hold the database frozen-ID lock.
+ */
+void
+pgstat_report_frozenxid_update(PgStat_Counter frozenxid_updated,
+							   TimestampTz last_update_time)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Database *dbentry;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_DATABASE,
+											MyDatabaseId, InvalidOid, false);
+	dbentry = (PgStatShared_Database *) entry_ref->shared_stats;
+
+	if (dbentry->stats.last_frozenxid_update_time == last_update_time)
+	{
+		dbentry->stats.last_frozenxid_updated = frozenxid_updated;
+		dbentry->stats.last_frozenxid_update_time = GetCurrentTimestamp();
+	}
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
  * Report a Hot Standby recovery conflict.
  */
 void
@@ -287,8 +357,18 @@ pgstat_report_disconnect(Oid dboid)
 PgStat_StatDBEntry *
 pgstat_fetch_stat_dbentry(Oid dboid)
 {
+	return pgstat_fetch_stat_dbentry_ext(dboid, NULL);
+}
+
+/*
+ * Like pgstat_fetch_stat_dbentry(), but also return whether the caller can
+ * pfree() the result if desired.
+ */
+PgStat_StatDBEntry *
+pgstat_fetch_stat_dbentry_ext(Oid dboid, bool *may_free)
+{
 	return (PgStat_StatDBEntry *)
-		pgstat_fetch_entry(PGSTAT_KIND_DATABASE, dboid, InvalidOid, NULL);
+		pgstat_fetch_entry(PGSTAT_KIND_DATABASE, dboid, InvalidOid, may_free);
 }
 
 void
@@ -460,8 +540,11 @@ pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	PGSTAT_ACCUM_DBCOUNT(tuples_updated);
 	PGSTAT_ACCUM_DBCOUNT(tuples_deleted);
 
-	/* last_autovac_time is reported immediately */
+	/* These fields are reported immediately. */
 	Assert(pendingent->last_autovac_time == 0);
+	Assert(pendingent->frozenxid_updated == 0);
+	Assert(pendingent->last_frozenxid_updated == 0);
+	Assert(pendingent->last_frozenxid_update_time == 0);
 
 	PGSTAT_ACCUM_DBCOUNT(conflict_tablespace);
 	PGSTAT_ACCUM_DBCOUNT(conflict_lock);

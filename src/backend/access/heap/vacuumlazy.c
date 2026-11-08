@@ -966,6 +966,9 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 						vacrel->NewRelfrozenXid, vacrel->NewRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
 
+	if (frozenxid_updated || minmulti_updated)
+		pgstat_report_frozenxid_progress();
+
 	/*
 	 * Report results to the cumulative stats system, too.
 	 *
