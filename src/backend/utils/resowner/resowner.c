@@ -148,8 +148,9 @@ struct ResourceOwnerData
 	 * too much time searching for empty slots.
 	 *
 	 * If 'sorted' is set, the contents are no longer hashed, but sorted by
-	 * release priority.  The first 'nhash' elements are occupied, the rest
-	 * are empty.
+	 * release priority.  The first 'nhash' elements contain the remaining
+	 * resources; entries after that are not used until the owner is reset or
+	 * deleted.
 	 */
 	ResourceElem *hash;
 	uint32		capacity;		/* allocated length of hash[] */
@@ -309,7 +310,11 @@ ResourceOwnerSort(ResourceOwner owner)
 			if (owner->hash[idx].kind != NULL)
 			{
 				if (dst != idx)
+				{
 					owner->hash[dst] = owner->hash[idx];
+					owner->hash[idx].item = 0;
+					owner->hash[idx].kind = NULL;
+				}
 				dst++;
 			}
 		}
@@ -397,15 +402,19 @@ ResourceOwnerReleaseAll(ResourceOwner owner, ResourceReleasePhase phase,
 		}
 
 		/*
-		 * Update stored count to forget the item before calling its
-		 * ReleaseResource method.  This avoids double-free crashes in case an
-		 * error gets thrown within ReleaseResource.
+		 * Update stored count and clear the hash slot to forget the item
+		 * before calling its ReleaseResource method.  This avoids double-free
+		 * crashes in case an error gets thrown within ReleaseResource.
 		 */
 		nitems--;
 		if (using_arr)
 			owner->narr = nitems;
 		else
+		{
 			owner->nhash = nitems;
+			items[idx].item = 0;
+			items[idx].kind = NULL;
+		}
 
 		kind->ReleaseResource(value);
 	}
@@ -659,7 +668,8 @@ ResourceOwnerForget(ResourceOwner owner, Datum value, const ResourceOwnerDesc *k
  * resources can be remembered in the resource owner.  You also cannot call
  * ResourceOwnerForget on any previously remembered resources to release
  * resources "in retail" after that, you must let the bulk release take care
- * of them.
+ * of them.  Once all three release phases have completed, ResourceOwnerReset
+ * can be used to make the owner reusable.
  */
 void
 ResourceOwnerRelease(ResourceOwner owner,
@@ -869,6 +879,31 @@ ResourceOwnerReleaseAllOfKind(ResourceOwner owner, const ResourceOwnerDesc *kind
 }
 
 /*
+ * ResourceOwnerReset
+ *		Reset an owner object and its descendants for reuse.
+ *
+ * The caller must have completed all three release phases for the object tree.
+ * The owner objects and their allocated storage are retained.
+ */
+void
+ResourceOwnerReset(ResourceOwner owner)
+{
+	ResourceOwner child;
+
+	Assert(owner->narr == 0);
+	Assert(owner->nhash == 0);
+	Assert(owner->nlocks == 0 || owner->nlocks == MAX_RESOWNER_LOCKS + 1);
+	Assert(dlist_is_empty(&owner->aio_handles));
+
+	for (child = owner->firstchild; child != NULL; child = child->nextchild)
+		ResourceOwnerReset(child);
+
+	owner->nlocks = 0;
+	owner->releasing = false;
+	owner->sorted = false;
+}
+
+/*
  * ResourceOwnerDelete
  *		Delete an owner object and its descendants.
  *
@@ -1039,8 +1074,7 @@ ReleaseAuxProcessResources(bool isCommit)
 						 RESOURCE_RELEASE_AFTER_LOCKS,
 						 isCommit, true);
 	/* allow it to be reused */
-	AuxProcessResourceOwner->releasing = false;
-	AuxProcessResourceOwner->sorted = false;
+	ResourceOwnerReset(AuxProcessResourceOwner);
 }
 
 /*
