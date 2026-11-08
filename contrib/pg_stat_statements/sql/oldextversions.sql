@@ -83,5 +83,8 @@ FROM pg_proc
 WHERE oid IN ('pg_stat_statements(boolean)'::regprocedure,
               'pg_stat_statements_reset(oid, oid, bigint, boolean)'::regprocedure)
 ORDER BY oid::regprocedure::text COLLATE "C";
+-- Memory of query texts in pg_stat_statements_info in 1.14
+\d pg_stat_statements_info
+SELECT query_text_memory > 0 AS has_memory FROM pg_stat_statements_info;
 
 DROP EXTENSION pg_stat_statements;

@@ -504,4 +504,19 @@ ORDER BY oid::regprocedure::text COLLATE "C";
  pg_stat_statements_reset(oid,oid,bigint,boolean) | s
 (2 rows)
 
+-- Memory of query texts in pg_stat_statements_info in 1.14
+\d pg_stat_statements_info
+                     View "public.pg_stat_statements_info"
+      Column       |           Type           | Collation | Nullable | Default 
+-------------------+--------------------------+-----------+----------+---------
+ dealloc           | bigint                   |           |          | 
+ stats_reset       | timestamp with time zone |           |          | 
+ query_text_memory | bigint                   |           |          | 
+
+SELECT query_text_memory > 0 AS has_memory FROM pg_stat_statements_info;
+ has_memory 
+------------
+ t
+(1 row)
+
 DROP EXTENSION pg_stat_statements;
