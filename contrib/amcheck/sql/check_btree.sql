@@ -120,7 +120,7 @@ WHERE attrelid = 'toast_bug'::regclass AND attname = 'buggy';
 -- Insert compressible heap tuple (comfortably exceeds TOAST_TUPLE_THRESHOLD):
 INSERT INTO toast_bug SELECT repeat('a', 2200);
 -- Should not get false positive report of corruption:
-SELECT bt_index_check('toasty', true);
+SELECT bt_index_check('toasty', true, false, true);
 
 --
 -- Check that index expressions and predicates are run as the table's owner,
@@ -160,6 +160,13 @@ SELECT bt_index_check('bttest_b_idx', heapallindexed => false, checkunique => tr
 SELECT bt_index_parent_check('bttest_a_idx', heapallindexed => true, rootdescend => true, checkunique => true);
 SELECT bt_index_parent_check('bttest_b_idx', heapallindexed => true, rootdescend => false, checkunique => true);
 
+-- indexallkeysmatch: verify each index tuple points to heap tuple with same key
+SELECT bt_index_check('bttest_a_idx', heapallindexed => false, checkunique => false, indexallkeysmatch => true);
+SELECT bt_index_parent_check('bttest_a_idx', heapallindexed => false, rootdescend => false, checkunique => false, indexallkeysmatch => true);
+
+-- indexallkeysmatch on expression index (exercises FormIndexDatum/ii_ExpressionsState path)
+SELECT bt_index_check('bttest_a_expr_idx', heapallindexed => false, checkunique => false, indexallkeysmatch => true);
+
 -- Check that null values in an unique index are not treated as equal
 CREATE TABLE bttest_unique_nulls (a serial, b int, c int UNIQUE);
 INSERT INTO bttest_unique_nulls VALUES (generate_series(1, 10000), 2, default);
@@ -175,13 +182,13 @@ COPY varlena_bug from stdin;
 x
 \.
 CREATE INDEX varlena_bug_idx on varlena_bug(v);
-SELECT bt_index_check('varlena_bug_idx', true);
+SELECT bt_index_check('varlena_bug_idx', true, false, true);
 
 -- Also check that we compress varlena values, which were previously stored
 -- uncompressed in index.
 INSERT INTO varlena_bug VALUES (repeat('Test', 250));
 ALTER TABLE varlena_bug ALTER COLUMN v SET STORAGE extended;
-SELECT bt_index_check('varlena_bug_idx', true);
+SELECT bt_index_check('varlena_bug_idx', true, false, true);
 
 -- cleanup
 DROP TABLE bttest_a;
