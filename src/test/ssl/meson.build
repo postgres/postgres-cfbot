@@ -14,6 +14,7 @@ tests += {
       't/002_scram.pl',
       't/003_sslinfo.pl',
       't/004_sni.pl',
+      't/005_cert_continuous_validation.pl',
     ],
   },
 }
