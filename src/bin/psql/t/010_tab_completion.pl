@@ -422,6 +422,42 @@ check_completion(
 
 clear_line();
 
+# REPACK must recognise USING as a keyword, including after a column list.
+check_completion(
+	"REPACK USING \t",
+	qr/REPACK USING INDEX /,
+	"complete INDEX after REPACK USING");
+
+clear_query();
+
+check_completion(
+	"REPACK (VERBOSE) USING \t",
+	qr/REPACK \(VERBOSE\) USING INDEX /,
+	"complete INDEX after REPACK (VERBOSE) USING");
+
+clear_query();
+
+check_completion(
+	"REPACK tab1 USING \t",
+	qr/REPACK tab1 USING INDEX /,
+	"complete INDEX after REPACK tab1 USING");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 USING \t",
+	qr/REPACK \(ANALYZE\) tab1 USING INDEX /,
+	"complete INDEX after REPACK (ANALYZE) tab1 USING");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 (c1) USING \t",
+	qr/REPACK \(ANALYZE\) tab1 \(c1\) USING INDEX /,
+	"complete INDEX after REPACK (ANALYZE) tab1 (c1) USING");
+
+clear_query();
+
 # send psql an explicit \q to shut it down, else pty won't close properly
 $h->quit or die "psql returned $?";
 

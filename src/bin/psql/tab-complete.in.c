@@ -5129,6 +5129,13 @@ match_previous_words(int pattern_id,
 	else if (Matches("REPACK", "(*)"))
 		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_clusterables,
 										"USING INDEX");
+	else if (Matches("REPACK", "USING") ||
+			 Matches("REPACK", "(*)", "USING") ||
+			 Matches("REPACK", MatchAny, "USING") ||
+			 Matches("REPACK", "(*)", MatchAny, "USING") ||
+			 Matches("REPACK", MatchAny, "(*)", "USING") ||
+			 Matches("REPACK", "(*)", MatchAny, "(*)", "USING"))
+		COMPLETE_WITH("INDEX");
 	else if (Matches("REPACK", MatchAnyExcept("(")))
 		COMPLETE_WITH("USING INDEX");
 	else if (Matches("REPACK", "(*)", MatchAnyExcept("(")))
