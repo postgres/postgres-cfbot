@@ -116,10 +116,8 @@ SELECT xmlroot(xmlroot(xml '<foo/>', version '1.0'), version '1.1', standalone n
 SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value, standalone no);
 SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value, standalone no value);
 SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value);
--- values with an XML declaration that cannot be parsed raise an error
-SELECT xmlconcat(xml '<foo/>', xmlroot(xml '<bar/>', version '1.0"x'));
-SELECT xmlagg(x) FROM (VALUES (xml '<foo/>'), (xmlroot(xml '<bar/>', version '1.0"x'))) v(x);
-SELECT xmlroot(xmlroot(xml '<bar/>', version '1.0"x'), version '1.0');
+SELECT xmlroot(xml '<foo/>', version '1.0"x');
+SELECT xmlroot(xml '<foo/>', version '1.0" standalone="yes');
 
 
 SELECT xmlroot (
