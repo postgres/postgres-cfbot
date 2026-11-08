@@ -151,6 +151,8 @@ typedef struct BtreeCheckState
 	/* Reusable slot and executor state for FormIndexDatum() */
 	TupleTableSlot *iakm_slot;
 	EState	   *iakm_estate;
+	/* Cached heap size for unconditional beyond-EOF verification */
+	BlockNumber heapnblocks;
 } BtreeCheckState;
 
 /*
@@ -239,6 +241,10 @@ static void bt_verify_index_tuple_points_to_heap(BtreeCheckState *state,
 												 IndexTuple itup,
 												 BlockNumber targetblock,
 												 OffsetNumber offset);
+static void bt_report_dangling_index_entry(BtreeCheckState *state,
+										   ItemPointer tid,
+										   BlockNumber targetblock,
+										   OffsetNumber offset);
 static IndexTuple bt_normalize_tuple(BtreeCheckState *state,
 									 IndexTuple itup);
 static inline IndexTuple bt_posting_plain_tuple(IndexTuple itup, int n);
@@ -432,6 +438,18 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 	state->heaprel = heaprel;
 	state->heapkeyspace = heapkeyspace;
 	state->readonly = readonly;
+
+	/*
+	 * Remember the current size of the heap for beyond-EOF TID checks.  When
+	 * the main fork is missing entirely, skip those checks (by making any
+	 * comparison against heapnblocks false): the user may have deliberately
+	 * excluded the corrupt table from table-level verification, which is what
+	 * reports a missing main fork.
+	 */
+	if (smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
+		state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
+	else
+		state->heapnblocks = InvalidBlockNumber;
 	state->heapallindexed = heapallindexed;
 	state->indexallkeysmatch = indexallkeysmatch;
 	state->rootdescend = rootdescend;
@@ -1611,6 +1629,63 @@ bt_target_page_check(BtreeCheckState *state)
 				/* Be tidy */
 				if (norm != itup)
 					pfree(norm);
+			}
+		}
+
+		/* Check that leaf page tuples do not point beyond the end of heap */
+		if (P_ISLEAF(topaque) && !ItemIdIsDead(itemid))
+		{
+			int			nposting = 1;
+			int			i;
+
+			if (BTreeTupleIsPosting(itup))
+				nposting = BTreeTupleGetNPosting(itup);
+
+			for (i = 0; i < nposting; i++)
+			{
+				ItemPointer htid;
+				BlockNumber heapblk;
+				OffsetNumber heapoff;
+
+				if (nposting > 1)
+					htid = BTreeTupleGetPostingN(itup, i);
+				else
+					htid = BTreeTupleGetPointsToTID(itup);
+
+				heapblk = ItemPointerGetBlockNumber(htid);
+				heapoff = ItemPointerGetOffsetNumber(htid);
+
+				/*
+				 * Does heapblk go beyond RelationGetNumberOfBlocks(),
+				 * potentially indicating a missing relation segment?
+				 */
+				if (state->heapnblocks != InvalidBlockNumber &&
+					heapblk >= state->heapnblocks)
+				{
+					/*
+					 * The relation may have been extended concurrently;
+					 * refresh the cached value before reporting corruption.
+					 */
+					state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
+					if (heapblk >= state->heapnblocks)
+					{
+						char	   *postingoff = "";
+
+						if (nposting > 1)
+							postingoff = psprintf(" posting list offset=%d", i);
+
+						ereport(ERROR,
+								(errcode(ERRCODE_INDEX_CORRUPTED),
+								 errmsg("index line pointer in index \"%s\" points to missing page in table \"%s\"",
+										RelationGetRelationName(state->rel),
+										RelationGetRelationName(state->heaprel)),
+								 errdetail_internal("Index tid=(%u,%u)%s points to heap tid=(%u,%u) but heap has only %u blocks.",
+													state->targetblock, offset, postingoff,
+													heapblk, heapoff,
+													state->heapnblocks),
+								 errhint("This can be caused by a lost relation segment (missing or removed file).")));
+					}
+				}
 			}
 		}
 
@@ -2972,8 +3047,10 @@ bt_heap_fingerprint_callback(Relation index, ItemPointer tid, Datum *values,
  * chains, resolving the TID of the visible tuple version, which we then
  * load into a slot with table_tuple_fetch_row_version().  A "not found"
  * result means the tuple is dead or was concurrently pruned; we skip it
- * exactly as an index scan would.  Here we verify that the visible
- * heap tuple matches the index key.
+ * exactly as an index scan would.  Detecting index entries that point to
+ * nonexistent heap slots is a separate class of corruption, handled
+ * elsewhere; what we verify here is that the visible heap tuple matches the
+ * index key.
  */
 static void
 bt_verify_index_tuple_points_to_heap(BtreeCheckState *state, IndexTuple itup,
@@ -3022,7 +3099,18 @@ bt_verify_index_tuple_points_to_heap(BtreeCheckState *state, IndexTuple itup,
 		 */
 		visibletid = *tid;
 		if (!table_fetch_tid(state->heaprel, &visibletid, state->snapshot, NULL))
+		{
+			/*
+			 * No visible tuple at this TID.  Normally that just means the
+			 * index entry is for a dead (or concurrently pruned) heap tuple
+			 * and there is nothing to compare, but it can also mean the index
+			 * entry is dangling: pointing to a heap slot that holds no tuple
+			 * at all.  Try to tell these cases apart when it is safe to do
+			 * so.
+			 */
+			bt_report_dangling_index_entry(state, tid, targetblock, offset);
 			return;
+		}
 
 		if (!table_tuple_fetch_row_version(state->heaprel, &visibletid,
 										   state->snapshot, slot))
@@ -3059,6 +3147,80 @@ bt_verify_index_tuple_points_to_heap(BtreeCheckState *state, IndexTuple itup,
 			pfree(norm);
 		state->indextuplesverified++;
 	}
+}
+
+/*
+ * Try to detect a dangling index entry: an index tuple whose TID points to
+ * a heap slot that holds no tuple at all (as opposed to a dead one awaiting
+ * VACUUM).  Called when an MVCC fetch of the TID found no visible tuple.
+ *
+ * References beyond the end of the heap have already been checked in
+ * bt_target_page_check(), independently of indexallkeysmatch.
+ *
+ * Distinguishing other dangling cases (out-of-range offset, LP_UNUSED slot)
+ * from a concurrently pruned tuple requires that the heap slot cannot
+ * change under us.  Under ShareLock (bt_index_parent_check) concurrent
+ * VACUUM is blocked, so an index-referenced slot cannot become LP_UNUSED
+ * and the line pointer array cannot be truncated: opportunistic pruning may
+ * mark slots LP_DEAD or redirect them, but it only marks HOT-chain member
+ * slots LP_UNUSED, and those are never referenced from indexes.  Under
+ * AccessShareLock (bt_index_check) concurrent VACUUM may reclaim the slot
+ * between our Bloom filter probe and the fetch, so we must not report
+ * anything.
+ *
+ * Direct line pointer inspection requires heap page layout, so it is
+ * skipped for non-heap table AMs.
+ */
+static void
+bt_report_dangling_index_entry(BtreeCheckState *state, ItemPointer tid,
+							   BlockNumber targetblock, OffsetNumber offset)
+{
+	BlockNumber blkno = ItemPointerGetBlockNumber(tid);
+	OffsetNumber offnum = ItemPointerGetOffsetNumber(tid);
+	Buffer		buffer;
+	Page		page;
+	ItemId		lp;
+
+	/*
+	 * Without ShareLock a missing slot is indistinguishable from a
+	 * concurrently pruned tuple; report nothing.
+	 */
+	if (!state->readonly)
+		return;
+
+	/* Line pointer inspection below assumes heap page layout */
+	if (state->heaprel->rd_rel->relam != HEAP_TABLE_AM_OID)
+		return;
+
+	buffer = ReadBufferExtended(state->heaprel, MAIN_FORKNUM, blkno,
+								RBM_NORMAL, state->checkstrategy);
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buffer);
+
+	if (offnum > PageGetMaxOffsetNumber(page))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index tuple in index \"%s\" points to heap tuple in table \"%s\" with out-of-range offset",
+						RelationGetRelationName(state->rel),
+						RelationGetRelationName(state->heaprel)),
+				 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u), but page has only %u line pointers.",
+									targetblock, offset,
+									blkno, offnum,
+									(unsigned) PageGetMaxOffsetNumber(page))));
+
+	lp = PageGetItemId(page, offnum);
+	if (!ItemIdIsUsed(lp))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index tuple in index \"%s\" points to unused heap slot in table \"%s\"",
+						RelationGetRelationName(state->rel),
+						RelationGetRelationName(state->heaprel)),
+				 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u) marked LP_UNUSED.",
+									targetblock, offset,
+									blkno, offnum)));
+
+	/* LP_DEAD, LP_REDIRECT or a dead LP_NORMAL tuple: not corruption */
+	UnlockReleaseBuffer(buffer);
 }
 
 /*
