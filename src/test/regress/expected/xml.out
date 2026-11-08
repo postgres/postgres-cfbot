@@ -448,16 +448,10 @@ SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value)
  <?xml version="1.0" standalone="yes"?><foo/>
 (1 row)
 
--- values with an XML declaration that cannot be parsed raise an error
-SELECT xmlconcat(xml '<foo/>', xmlroot(xml '<bar/>', version '1.0"x'));
-ERROR:  could not parse XML declaration in stored value
-DETAIL:  Parsing XML declaration: '?>' expected.
-SELECT xmlagg(x) FROM (VALUES (xml '<foo/>'), (xmlroot(xml '<bar/>', version '1.0"x'))) v(x);
-ERROR:  could not parse XML declaration in stored value
-DETAIL:  Parsing XML declaration: '?>' expected.
-SELECT xmlroot(xmlroot(xml '<bar/>', version '1.0"x'), version '1.0');
-ERROR:  could not parse XML declaration in stored value
-DETAIL:  Parsing XML declaration: '?>' expected.
+SELECT xmlroot(xml '<foo/>', version '1.0"x');
+ERROR:  invalid XML version "1.0"x"
+SELECT xmlroot(xml '<foo/>', version '1.0" standalone="yes');
+ERROR:  invalid XML version "1.0" standalone="yes"
 SELECT xmlroot (
   xmlelement (
     name gazonk,
