@@ -58,7 +58,7 @@ typedef struct PartitionDescData
 } PartitionDescData;
 
 
-extern PartitionDesc RelationGetPartitionDesc(Relation rel, bool omit_detached);
+extern PartitionDesc RelationGetPartitionDesc(Relation rel);
 
 extern PartitionDirectory CreatePartitionDirectory(MemoryContext mcxt, bool omit_detached);
 extern PartitionDesc PartitionDirectoryLookup(PartitionDirectory, Relation);

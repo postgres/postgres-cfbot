@@ -860,7 +860,8 @@ BeginCopyTo(ParseState *pstate,
 			 * Collect OIDs of relation containing data, so that later
 			 * DoCopyTo can copy the data from them.
 			 */
-			children = find_all_inheritors(RelationGetRelid(rel), AccessShareLock, NULL);
+			children = find_all_inheritors_extended(RelationGetRelid(rel), true,
+													AccessShareLock, NULL);
 
 			foreach_oid(child, children)
 			{

@@ -3769,9 +3769,9 @@ apply_handle_truncate(StringInfo s)
 		if (rel->localrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 		{
 			ListCell   *child;
-			List	   *children = find_all_inheritors(rel->localreloid,
-													   lockmode,
-													   NULL);
+			List	   *children = find_all_inheritors_extended(rel->localreloid,
+																true, lockmode,
+																NULL);
 
 			foreach(child, children)
 			{

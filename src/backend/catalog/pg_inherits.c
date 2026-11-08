@@ -52,13 +52,13 @@ typedef struct SeenRelsEntry
  * then no locks are acquired, but caller must beware of race conditions
  * against possible DROPs of child relations.
  *
- * Partitions marked as being detached are omitted; see
- * find_inheritance_children_extended for details.
+ * Partitions marked as being detached are included.  Only queries omit
+ * them; see find_inheritance_children_extended.
  */
 List *
 find_inheritance_children(Oid parentrelId, LOCKMODE lockmode)
 {
-	return find_inheritance_children_extended(parentrelId, true, lockmode,
+	return find_inheritance_children_extended(parentrelId, false, lockmode,
 											  NULL, NULL);
 }
 
@@ -249,11 +249,22 @@ find_inheritance_children_extended(Oid parentrelId, bool omit_detached,
  * then no locks are acquired, but caller must beware of race conditions
  * against possible DROPs of child relations.
  *
- * NB - No current callers of this routine are interested in children being
- * concurrently detached, so there's no provision to include them.
+ * Partitions pending detach are included, as in find_inheritance_children.
  */
 List *
 find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
+{
+	return find_all_inheritors_extended(parentrelId, false, lockmode,
+										numparents);
+}
+
+/*
+ * find_all_inheritors_extended -
+ *		As find_all_inheritors, optionally omitting partitions pending detach.
+ */
+List *
+find_all_inheritors_extended(Oid parentrelId, bool omit_detached,
+							 LOCKMODE lockmode, List **numparents)
 {
 	/* hash table for O(1) rel_oid -> rel_numparents cell lookup */
 	HTAB	   *seen_rels;
@@ -290,7 +301,10 @@ find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
 		ListCell   *lc;
 
 		/* Get the direct children of this rel */
-		currentchildren = find_inheritance_children(currentrel, lockmode);
+		currentchildren = find_inheritance_children_extended(currentrel,
+															 omit_detached,
+															 lockmode,
+															 NULL, NULL);
 
 		/*
 		 * Add to the queue only those children not already seen. This avoids

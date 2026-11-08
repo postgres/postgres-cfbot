@@ -1195,8 +1195,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		 * lock the partition so as to avoid a deadlock.
 		 */
 		defaultPartOid =
-			get_default_oid_from_partdesc(RelationGetPartitionDesc(parent,
-																   true));
+			get_default_oid_from_partdesc(RelationGetPartitionDesc(parent));
 		if (OidIsValid(defaultPartOid))
 			defaultRel = table_open(defaultPartOid, AccessExclusiveLock);
 
@@ -1949,7 +1948,8 @@ ExecuteTruncate(TruncateStmt *stmt)
 			ListCell   *child;
 			List	   *children;
 
-			children = find_all_inheritors(myrelid, lockmode, NULL);
+			children = find_all_inheritors_extended(myrelid, true, lockmode,
+													NULL);
 
 			foreach(child, children)
 			{
@@ -4986,9 +4986,12 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 
 	/*
 	 * Disallow any ALTER TABLE other than ALTER TABLE DETACH FINALIZE on
-	 * partitions that are pending detach.
+	 * partitions that are pending detach.  A command recursing from the
+	 * parent must still reach such a partition, since it remains a partition
+	 * until the detach is finalized.
 	 */
-	if (rel->rd_rel->relispartition &&
+	if (!recursing &&
+		rel->rd_rel->relispartition &&
 		cmd->subtype != AT_DetachPartitionFinalize &&
 		PartitionHasPendingDetach(RelationGetRelid(rel)))
 		ereport(ERROR,
@@ -11643,7 +11646,7 @@ addFkRecurseReferenced(Constraint *fkconstraint, Relation rel,
 	 */
 	if (pkrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		PartitionDesc pd = RelationGetPartitionDesc(pkrel, true);
+		PartitionDesc pd = RelationGetPartitionDesc(pkrel);
 
 		for (int i = 0; i < pd->nparts; i++)
 		{
@@ -11814,7 +11817,7 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 	}
 	else if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		PartitionDesc pd = RelationGetPartitionDesc(rel, true);
+		PartitionDesc pd = RelationGetPartitionDesc(rel);
 		Relation	trigrel;
 
 		/*
@@ -21620,7 +21623,7 @@ QueuePartitionConstraintValidation(List **wqueue, Relation scanrel,
 	}
 	else if (scanrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		PartitionDesc partdesc = RelationGetPartitionDesc(scanrel, true);
+		PartitionDesc partdesc = RelationGetPartitionDesc(scanrel);
 		int			i;
 
 		for (i = 0; i < partdesc->nparts; i++)
@@ -21681,7 +21684,7 @@ ATExecAttachPartition(List **wqueue, Relation rel, PartitionCmd *cmd,
 	 * new partition will change its partition constraint.
 	 */
 	defaultPartOid =
-		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel, true));
+		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel));
 	if (OidIsValid(defaultPartOid))
 		LockRelationOid(defaultPartOid, AccessExclusiveLock);
 
@@ -22366,7 +22369,7 @@ ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	 * will change its partition constraint.
 	 */
 	defaultPartOid =
-		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel, true));
+		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel));
 	if (OidIsValid(defaultPartOid))
 	{
 		/*
@@ -23094,7 +23097,7 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 							   RelationGetRelationName(partIdx))));
 
 		/* Make sure it indexes a partition of the other index's table */
-		partDesc = RelationGetPartitionDesc(parentTbl, true);
+		partDesc = RelationGetPartitionDesc(parentTbl);
 		found = false;
 		for (i = 0; i < partDesc->nparts; i++)
 		{
@@ -23268,7 +23271,7 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 	 * Partitions pending detach must be counted too, because their indexes
 	 * remain attached to this index until the detach is finalized.
 	 */
-	if (tuples == RelationGetPartitionDesc(partedTbl, false)->nparts)
+	if (tuples == RelationGetPartitionDesc(partedTbl)->nparts)
 	{
 		Relation	idxRel;
 		HeapTuple	indTup;
