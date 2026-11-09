@@ -1028,37 +1028,22 @@ ProcessParallelApplyMessage(StringInfo msg)
 	{
 		case PqMsg_ErrorResponse:
 			{
-				ErrorData	edata;
-
-				/* Parse ErrorResponse. */
-				pq_parse_errornotice(msg, &edata);
-
 				/*
-				 * If desired, add a context line to show that this is a
-				 * message propagated from a parallel apply worker. Otherwise,
-				 * it can sometimes be confusing to understand what actually
-				 * happened.
-				 */
-				if (edata.context)
-					edata.context = psprintf("%s\n%s", edata.context,
-											 _("logical replication parallel apply worker"));
-				else
-					edata.context = pstrdup(_("logical replication parallel apply worker"));
-
-				/*
-				 * Context beyond that should use the error context callbacks
-				 * that were in effect in LogicalRepApplyLoop().
+				 * The parallel apply worker has already reported the error
+				 * with the context of the transaction that failed.  Report
+				 * the error of the leader apply worker with the error context
+				 * callbacks that were in effect.
 				 */
 				error_context_stack = apply_error_context_stack;
 
 				/*
-				 * The actual error must have been reported by the parallel
-				 * apply worker.
+				 * The parallel apply worker did error-out, the leader apply
+				 * worker must exit as well.
 				 */
 				ereport(ERROR,
 						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						 errmsg("logical replication parallel apply worker exited due to error"),
-						 errcontext("%s", edata.context)));
+						 errdetail("The leader apply worker will now exit and terminate any other parallel apply workers.")));
 			}
 
 			/*
