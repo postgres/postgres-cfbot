@@ -1033,7 +1033,7 @@ SELECT count(*) FROM words WHERE word = 'caterpiler';
  Aggregate  (cost=21763.99..21764.00 rows=1 width=0) (actual time=188.180..188.181 rows=1.00 loops=1)
    -&gt;  Foreign Scan on words  (cost=0.00..21761.41 rows=1032 width=0) (actual time=188.177..188.177 rows=0.00 loops=1)
          Filter: (word = 'caterpiler'::text)
-         Rows Removed by Filter: 479829
+         Rows Removed by Filter: 479829.00
          Foreign File: /usr/share/dict/words
          Foreign File Size: 4953699
  Planning time: 0.118 ms

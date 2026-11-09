@@ -199,3 +199,16 @@ select explain_filter('explain (analyze,buffers off,costs off) select count(*) f
 -- one tuplestore per function
 select explain_filter('explain (analyze,buffers off,costs off) select count(*) from rows from (generate_series(1,2500), generate_series(1,2500)) a(n,m)');
 reset work_mem;
+
+-- Rows Removed by Filter is averaged over loops, like actual rows,
+-- and must be shown with fractional digits as well
+explain (analyze, costs off, timing off, summary off, buffers off)
+select count(*) from (values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)) v(g)
+  join tenk1 b on b.unique1 = g
+where b.ten <> 0;
+-- Join Filter of a join that is itself rescanned
+explain (analyze, costs off, timing off, summary off, buffers off)
+select count(*) from (values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)) v(g),
+  lateral (select 1 from tenk1 b join tenk1 c
+             on c.unique2 = b.unique1 and b.ten <> c.ten
+           where b.unique1 = g offset 0) s;

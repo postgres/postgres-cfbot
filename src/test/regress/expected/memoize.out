@@ -43,7 +43,7 @@ WHERE t2.unique1 < 1000;', false);
    ->  Nested Loop (actual rows=1000.00 loops=N)
          ->  Seq Scan on tenk1 t2 (actual rows=1000.00 loops=N)
                Filter: (unique1 < 1000)
-               Rows Removed by Filter: 9000
+               Rows Removed by Filter: 9000.00
          ->  Memoize (actual rows=1.00 loops=N)
                Cache Key: t2.twenty
                Cache Mode: logical
@@ -75,7 +75,7 @@ WHERE t1.unique1 < 1000;', false);
    ->  Nested Loop (actual rows=1000.00 loops=N)
          ->  Seq Scan on tenk1 t1 (actual rows=1000.00 loops=N)
                Filter: (unique1 < 1000)
-               Rows Removed by Filter: 9000
+               Rows Removed by Filter: 9000.00
          ->  Memoize (actual rows=1.00 loops=N)
                Cache Key: t1.twenty
                Cache Mode: binary
@@ -117,7 +117,7 @@ WHERE t1.unique1 < 10;', false);
                Hits: 8  Misses: 2  Evictions: Zero  Overflows: 0  Memory Usage: NkB
                ->  Subquery Scan on t2 (actual rows=2.00 loops=N)
                      Filter: (t1.two = t2.two)
-                     Rows Removed by Filter: 2
+                     Rows Removed by Filter: 2.00
                      ->  Index Scan using tenk1_unique1 on tenk1 t2_1 (actual rows=4.00 loops=N)
                            Index Cond: (unique1 < 4)
                            Index Searches: N
@@ -146,14 +146,14 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
    ->  Nested Loop (actual rows=1000.00 loops=N)
          ->  Seq Scan on tenk1 t1 (actual rows=1000.00 loops=N)
                Filter: (unique1 < 1000)
-               Rows Removed by Filter: 9000
+               Rows Removed by Filter: 9000.00
          ->  Memoize (actual rows=1.00 loops=N)
                Cache Key: (t1.two + 1)
                Cache Mode: binary
                Hits: 998  Misses: 2  Evictions: Zero  Overflows: 0  Memory Usage: NkB
                ->  Index Only Scan using tenk1_unique1 on tenk1 t2 (actual rows=1.00 loops=N)
                      Filter: ((t1.two + 1) = unique1)
-                     Rows Removed by Filter: 9999
+                     Rows Removed by Filter: 9999.00
                      Heap Fetches: N
                      Index Searches: N
 (14 rows)
@@ -179,14 +179,14 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
    ->  Nested Loop (actual rows=1000.00 loops=N)
          ->  Seq Scan on tenk1 t1 (actual rows=1000.00 loops=N)
                Filter: (unique1 < 1000)
-               Rows Removed by Filter: 9000
+               Rows Removed by Filter: 9000.00
          ->  Memoize (actual rows=1.00 loops=N)
                Cache Key: t1.two, t1.twenty
                Cache Mode: binary
                Hits: 980  Misses: 20  Evictions: Zero  Overflows: 0  Memory Usage: NkB
                ->  Seq Scan on tenk1 t2 (actual rows=1.00 loops=N)
                      Filter: ((t1.twenty = unique1) AND (t1.two = two))
-                     Rows Removed by Filter: 9999
+                     Rows Removed by Filter: 9999.00
 (12 rows)
 
 -- And check we get the expected results.
@@ -246,7 +246,7 @@ WHERE t2.unique1 < 1200;', true);
    ->  Nested Loop (actual rows=1200.00 loops=N)
          ->  Seq Scan on tenk1 t2 (actual rows=1200.00 loops=N)
                Filter: (unique1 < 1200)
-               Rows Removed by Filter: 8800
+               Rows Removed by Filter: 8800.00
          ->  Memoize (actual rows=1.00 loops=N)
                Cache Key: t2.thousand
                Cache Mode: logical
@@ -698,7 +698,7 @@ WHERE t2.a IS NULL;', false);
                Hits: 97  Misses: 3  Evictions: Zero  Overflows: 0  Memory Usage: NkB
                ->  Subquery Scan on t2 (actual rows=0.67 loops=N)
                      Filter: ((t1.a + 1) = t2.a)
-                     Rows Removed by Filter: 2
+                     Rows Removed by Filter: 2.00
                      ->  Unique (actual rows=2.67 loops=N)
                            ->  Sort (actual rows=67.33 loops=N)
                                  Sort Key: t2_1.a

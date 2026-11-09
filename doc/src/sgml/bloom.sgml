@@ -120,7 +120,7 @@ SELECT 10000000
 -------------------------------------------------------------------&zwsp;-----------------------------------
  Seq Scan on tbloom  (cost=0.00..213744.00 rows=250 width=24) (actual time=357.059..357.059 rows=0.00 loops=1)
    Filter: ((i2 = 898732) AND (i5 = 123451))
-   Rows Removed by Filter: 10000000
+   Rows Removed by Filter: 10000000.00
    Buffers: shared hit=63744
  Planning Time: 0.346 ms
  Execution Time: 357.076 ms
@@ -144,7 +144,7 @@ CREATE INDEX
 -------------------------------------------------------------------&zwsp;-----------------------------------
  Seq Scan on tbloom  (cost=0.00..213744.00 rows=2 width=24) (actual time=351.016..351.017 rows=0.00 loops=1)
    Filter: ((i2 = 898732) AND (i5 = 123451))
-   Rows Removed by Filter: 10000000
+   Rows Removed by Filter: 10000000.00
    Buffers: shared hit=63744
  Planning Time: 0.138 ms
  Execution Time: 351.035 ms
@@ -168,7 +168,7 @@ CREATE INDEX
 -------------------------------------------------------------------&zwsp;--------------------------------------------------
  Bitmap Heap Scan on tbloom  (cost=1792.00..1799.69 rows=2 width=24) (actual time=22.605..22.606 rows=0.00 loops=1)
    Recheck Cond: ((i2 = 898732) AND (i5 = 123451))
-   Rows Removed by Index Recheck: 2300
+   Rows Removed by Index Recheck: 2300.00
    Heap Blocks: exact=2256
    Buffers: shared hit=21864
    -&gt;  Bitmap Index Scan on bloomidx  (cost=0.00..178436.00 rows=1 width=0) (actual time=20.005..20.005 rows=2300.00 loops=1)

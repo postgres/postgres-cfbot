@@ -2535,16 +2535,16 @@ explain (analyze, costs off, summary off, timing off, buffers off) select * from
  Append (actual rows=0.00 loops=1)
    ->  Seq Scan on list_part1 list_part_1 (actual rows=0.00 loops=1)
          Filter: (a = (list_part_fn(1) + a))
-         Rows Removed by Filter: 1
+         Rows Removed by Filter: 1.00
    ->  Seq Scan on list_part2 list_part_2 (actual rows=0.00 loops=1)
          Filter: (a = (list_part_fn(1) + a))
-         Rows Removed by Filter: 1
+         Rows Removed by Filter: 1.00
    ->  Seq Scan on list_part3 list_part_3 (actual rows=0.00 loops=1)
          Filter: (a = (list_part_fn(1) + a))
-         Rows Removed by Filter: 1
+         Rows Removed by Filter: 1.00
    ->  Seq Scan on list_part4 list_part_4 (actual rows=0.00 loops=1)
          Filter: (a = (list_part_fn(1) + a))
-         Rows Removed by Filter: 1
+         Rows Removed by Filter: 1.00
 (13 rows)
 
 rollback;
@@ -2570,7 +2570,7 @@ begin
     loop
         ln := regexp_replace(ln, 'Workers Launched: \d+', 'Workers Launched: N');
         ln := regexp_replace(ln, 'actual rows=\d+(?:\.\d+)? loops=\d+', 'actual rows=N loops=N');
-        ln := regexp_replace(ln, 'Rows Removed by Filter: \d+', 'Rows Removed by Filter: N');
+        ln := regexp_replace(ln, 'Rows Removed by Filter: \d+(?:\.\d+)?', 'Rows Removed by Filter: N');
         perform regexp_matches(ln, 'Index Searches: \d+');
         if found then
           continue;
@@ -3068,7 +3068,7 @@ explain (analyze, costs off, summary off, timing off, buffers off) execute ab_q6
          Filter: ((a = $1) AND (b = (InitPlan expr_1).col1))
    ->  Seq Scan on xy_1 (actual rows=0.00 loops=1)
          Filter: ((x = $1) AND (y = (InitPlan expr_1).col1))
-         Rows Removed by Filter: 1
+         Rows Removed by Filter: 1.00
    ->  Seq Scan on ab_a1_b1 ab_4 (never executed)
          Filter: ((a = $1) AND (b = (InitPlan expr_1).col1))
    ->  Seq Scan on ab_a1_b2 ab_5 (never executed)
@@ -3732,7 +3732,7 @@ select * from boolp where a = (select value from boolvalues where value);
    InitPlan expr_1
      ->  Seq Scan on boolvalues (actual rows=1.00 loops=1)
            Filter: value
-           Rows Removed by Filter: 1
+           Rows Removed by Filter: 1.00
    ->  Seq Scan on boolp_f boolp_1 (never executed)
          Filter: (a = (InitPlan expr_1).col1)
    ->  Seq Scan on boolp_t boolp_2 (actual rows=0.00 loops=1)
@@ -3747,7 +3747,7 @@ select * from boolp where a = (select value from boolvalues where not value);
    InitPlan expr_1
      ->  Seq Scan on boolvalues (actual rows=1.00 loops=1)
            Filter: (NOT value)
-           Rows Removed by Filter: 1
+           Rows Removed by Filter: 1.00
    ->  Seq Scan on boolp_f boolp_1 (actual rows=0.00 loops=1)
          Filter: (a = (InitPlan expr_1).col1)
    ->  Seq Scan on boolp_t boolp_2 (never executed)
@@ -3776,11 +3776,11 @@ explain (analyze, costs off, summary off, timing off, buffers off) execute mt_q1
    Subplans Removed: 1
    ->  Index Scan using ma_test_p2_b_idx on ma_test_p2 ma_test_1 (actual rows=1.00 loops=1)
          Filter: ((a >= $1) AND ((a % 10) = 5))
-         Rows Removed by Filter: 9
+         Rows Removed by Filter: 9.00
          Index Searches: 1
    ->  Index Scan using ma_test_p3_b_idx on ma_test_p3 ma_test_2 (actual rows=1.00 loops=1)
          Filter: ((a >= $1) AND ((a % 10) = 5))
-         Rows Removed by Filter: 9
+         Rows Removed by Filter: 9.00
          Index Searches: 1
 (11 rows)
 
@@ -3799,7 +3799,7 @@ explain (analyze, costs off, summary off, timing off, buffers off) execute mt_q1
    Subplans Removed: 2
    ->  Index Scan using ma_test_p3_b_idx on ma_test_p3 ma_test_1 (actual rows=1.00 loops=1)
          Filter: ((a >= $1) AND ((a % 10) = 5))
-         Rows Removed by Filter: 9
+         Rows Removed by Filter: 9.00
          Index Searches: 1
 (7 rows)
 
