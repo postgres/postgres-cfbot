@@ -55,6 +55,16 @@ em9va2E=
 -----END PGP MESSAGE-----
 ');
 
+-- corrupt (data after padding)
+select dearmor('
+-----BEGIN PGP MESSAGE-----
+
+YQ==
+AAAA
+=Pr0b
+-----END PGP MESSAGE-----
+');
+
 -- corrupt (no space after the colon)
 select * from pgp_armor_headers('
 -----BEGIN PGP MESSAGE-----
