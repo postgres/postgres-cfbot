@@ -190,6 +190,25 @@ SELECT xmlelement(name foo, xml 'b<a/>r');
  <foo>b<a/>r</foo>
 (1 row)
 
+-- an XML declaration is not kept when an xml value is embedded as content
+SELECT xmlelement(name foo, '<?xml version="1.0" standalone="yes"?><a/>'::xml);
+   xmlelement    
+-----------------
+ <foo><a/></foo>
+(1 row)
+
+SELECT xmlforest('<?xml version="1.1"?><a/>'::xml AS foo);
+    xmlforest    
+-----------------
+ <foo><a/></foo>
+(1 row)
+
+SELECT xmlelement(name foo, array['<?xml version="1.0" standalone="no"?><a/>'::xml]);
+             xmlelement             
+------------------------------------
+ <foo><element><a/></element></foo>
+(1 row)
+
 SELECT xmlelement(name foo, array[1, 2, 3]);
                                xmlelement                                
 -------------------------------------------------------------------------
