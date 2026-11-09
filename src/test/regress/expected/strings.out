@@ -2905,6 +2905,24 @@ SELECT decode(encode(('\x' || repeat('1234567890abcdef0001', 7))::bytea,
  \x1234567890abcdef00011234567890abcdef00011234567890abcdef00011234567890abcdef00011234567890abcdef00011234567890abcdef00011234567890abcdef0001
 (1 row)
 
+-- nothing but whitespace may follow base64 padding
+SELECT decode(E'YQ=\n= \n', 'base64');  -- OK
+ decode 
+--------
+ \x61
+(1 row)
+
+SELECT decode('YQ==Yg==', 'base64');  -- error
+ERROR:  invalid symbol "Y" found while decoding base64 sequence
+SELECT decode('YQ==AAAA', 'base64');  -- error
+ERROR:  invalid symbol "A" found while decoding base64 sequence
+SELECT decode('YQ=a', 'base64');  -- error
+ERROR:  invalid symbol "a" found while decoding base64 sequence
+SELECT decode('YQ======', 'base64');  -- error
+ERROR:  unexpected "=" while decoding base64 sequence
+SELECT decode('YQ=', 'base64url');  -- error
+ERROR:  invalid base64url end sequence
+HINT:  Input data is missing padding, is truncated, or is otherwise corrupted.
 SELECT encode('\x1234567890abcdef00', 'escape');
            encode            
 -----------------------------

@@ -536,8 +536,8 @@ pg_base64_decode_internal(const char *src, size_t len, char *dst, bool url)
 
 		if (c == '=')
 		{
-			/* end sequence */
-			if (!end)
+			/* end sequence, after it only the second "=" of "==" is allowed */
+			if (!end || pos != 3)
 			{
 				if (pos == 2)
 					end = 1;
@@ -556,7 +556,8 @@ pg_base64_decode_internal(const char *src, size_t len, char *dst, bool url)
 		else
 		{
 			b = -1;
-			if (c > 0 && c < 127)
+			/* no data is allowed after padding */
+			if (c > 0 && c < 127 && !end)
 				b = b64lookup[(unsigned char) c];
 			if (b < 0)
 			{
@@ -583,12 +584,12 @@ pg_base64_decode_internal(const char *src, size_t len, char *dst, bool url)
 		}
 	}
 
-	if (url && pos == 2)
+	if (url && !end && pos == 2)
 	{
 		buf <<= 12;
 		*p++ = (buf >> 16) & 0xFF;
 	}
-	else if (url && pos == 3)
+	else if (url && !end && pos == 3)
 	{
 		buf <<= 6;
 		*p++ = (buf >> 16) & 0xFF;
