@@ -524,6 +524,18 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 	}			crerr = CRERR_NO_COLUMN;
 	const char *err;
 
+	/* Reject any star options for expressions */
+	if (IsA(llast(cref->fields), A_Star))
+	{
+		A_Star	   *star = (A_Star *) llast(cref->fields);
+
+		if (star->staroptions)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("star options are not supported here"),
+					 parser_errposition(pstate, cref->location)));
+	}
+
 	/*
 	 * Check to see if the column reference is in an invalid place within the
 	 * query.  We allow column references in most places, except in default

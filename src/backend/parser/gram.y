@@ -156,6 +156,8 @@ static RawStmt *makeRawStmt(Node *stmt, int stmt_location);
 static void updateRawStmtEnd(RawStmt *rs, int end_location);
 static Node *makeColumnRef(char *colname, List *indirection,
 						   int location, core_yyscan_t yyscanner);
+static Node *makeStarOptions(List *exclude_list, List *replace_list,
+							 List *rename_list);
 static Node *makeTypeCast(Node *arg, TypeName *typename, int location);
 static Node *makeStringConstCast(char *str, int location, TypeName *typename);
 static Node *makeIntConst(int val, int location);
@@ -455,6 +457,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				vacuum_relation_list opt_vacuum_relation_list
 				drop_option_list pub_obj_list pub_all_obj_type_list
 				pub_except_obj_list opt_pub_except_clause
+				exclude_list opt_replace replace_list opt_rename rename_list
+
+%type <node>	staropt_column exclude_item replace_item rename_item opt_star_options star_options
 
 %type <retclause> returning_clause
 %type <node>	returning_option
@@ -17331,6 +17336,13 @@ indirection_el:
 				{
 					$$ = (Node *) makeNode(A_Star);
 				}
+			| '.' '*' star_options
+				{
+					A_Star *s = makeNode(A_Star);
+
+					s->staroptions = (StarOptions *) $3;
+					$$ = (Node *) s;
+				}
 			| '[' a_expr ']'
 				{
 					A_Indices *ai = makeNode(A_Indices);
@@ -17659,11 +17671,13 @@ target_el:	a_expr AS ColLabel
 					$$->val = (Node *) $1;
 					$$->location = @1;
 				}
-			| '*'
+			| '*' opt_star_options
 				{
 					ColumnRef  *n = makeNode(ColumnRef);
+					A_Star *s = makeNode(A_Star);
+					s->staroptions = (StarOptions *) $2;
 
-					n->fields = list_make1(makeNode(A_Star));
+					n->fields = list_make1(s);
 					n->location = @1;
 
 					$$ = makeNode(ResTarget);
@@ -17674,6 +17688,104 @@ target_el:	a_expr AS ColLabel
 				}
 		;
 
+star_options:
+			'(' EXCLUDE '(' exclude_list ')' opt_replace opt_rename ')'
+				{
+					$$ = makeStarOptions($4, $6, $7);
+				}
+			| '(' REPLACE '(' replace_list ')' opt_rename ')'
+				{
+					$$ = makeStarOptions(NIL, $4, $6);
+				}
+			| '(' RENAME '(' rename_list ')' ')'
+				{
+					$$ = makeStarOptions(NIL, NIL, $4);
+				}
+		;
+
+opt_star_options:
+			star_options		{ $$ = $1; }
+			| /* EMPTY */		{ $$ = NULL; }
+		;
+
+staropt_column:
+			columnref
+				{
+					ColumnRef  *c = (ColumnRef *) $1;
+
+					c->staroptcol_match = false;
+					check_qualified_name(c->fields, yyscanner);
+
+					$$ = (Node *) c;
+				}
+		;
+
+exclude_list:
+			exclude_item
+				{ $$ = list_make1($1); }
+			| exclude_list ',' exclude_item
+				{ $$ = lappend($1, $3); }
+		;
+
+exclude_item:
+			staropt_column
+				{
+					StarExcludeItem *n = makeNode(StarExcludeItem);
+
+					n->name = (ColumnRef *) $1;
+					$$ = (Node *) n;
+				}
+		;
+
+replace_list:
+			replace_item
+				{ $$ = list_make1($1); }
+			| replace_list ',' replace_item
+				{ $$ = lappend($1, $3); }
+		;
+
+replace_item:
+			staropt_column WITH a_expr
+				{
+					StarReplaceItem *n = makeNode(StarReplaceItem);
+
+					n->name = (ColumnRef *) $1;
+					n->expr = (Node *) $3;
+					$$ = (Node *) n;
+				}
+		;
+
+opt_replace:
+			REPLACE '(' replace_list ')'
+				{ $$ = $3; }
+			| /* EMPTY */
+				{ $$ = NIL; }
+		;
+
+rename_list:
+			rename_item
+				{ $$ = list_make1($1); }
+			| rename_list ',' rename_item
+				{ $$ = lappend($1, $3); }
+		;
+
+rename_item:
+			staropt_column AS ColId
+				{
+					StarRenameItem *n = makeNode(StarRenameItem);
+
+					n->name = (ColumnRef *) $1;
+					n->aliasname = $3;
+					$$ = (Node *) n;
+				}
+		;
+
+opt_rename:
+			RENAME '(' rename_list ')'
+				{ $$ = $3; }
+			| /* EMPTY */
+				{ $$ = NIL; }
+		;
 
 /*****************************************************************************
  *
@@ -19166,6 +19278,19 @@ makeColumnRef(char *colname, List *indirection,
 	/* No subscripting, so all indirection gets added to field list */
 	c->fields = lcons(makeString(colname), indirection);
 	return (Node *) c;
+}
+
+static Node *
+makeStarOptions(List *exclude_list, List *replace_list,
+				List *rename_list)
+{
+	StarOptions *n = makeNode(StarOptions);
+
+	n->exclude_list = exclude_list;
+	n->replace_list = replace_list;
+	n->rename_list = rename_list;
+
+	return (Node *) n;
 }
 
 static Node *
