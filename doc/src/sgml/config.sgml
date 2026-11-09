@@ -11784,6 +11784,7 @@ extension_control_path = 'C:\tools\postgresql;H:\my_project\share;$system'
         <literal>'$system'</literal>. If the value is set to an empty
         string, the default <literal>'$system'</literal> is also assumed.
         Empty elements within a nonempty value are ignored.
+        Relative path elements are also ignored.
        </para>
 
        <para>

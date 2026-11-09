@@ -135,21 +135,70 @@ $ret = $node->safe_psql(
 	 select count(*) from pg_available_extensions");
 is($ret, '0', 'separator-only path lists no extensions');
 
-# Empty elements must not replace an unknown-language error or prevent a hint
+# Invalid elements must not replace an unknown-language error or prevent a hint
 # from being found using the remaining directories.
-for my $sql (
-	"create function test_invalid_language() returns int language $ext_name as 'x'",
-	"do language $ext_name 'x'")
+for my $path (
+	"$sep$ext_dir_canonicalized$sep",
+	"relative$sep$ext_dir_canonicalized${sep}relative")
+{
+	for my $sql (
+		"create function test_invalid_language() returns int language $ext_name as 'x'",
+		"do language $ext_name 'x'")
+	{
+		my ($code, $stdout, $stderr) = $node->psql(
+			'postgres',
+			"set extension_control_path = '$path'; $sql");
+		is($code, 3, "unknown language is rejected by $sql");
+		like($stderr, qr/ERROR:  language "\Q$ext_name\E" does not exist/,
+			"invalid path does not replace the unknown-language error");
+		like($stderr,
+			qr/HINT:  Use CREATE EXTENSION to load the language into the database\./,
+			"remaining directory provides the extension hint");
+	}
+}
+
+# An extension found only through a relative path must not be listed or loaded.
+my $relative_dir = $node->data_dir . '/relative';
+mkpath("$relative_dir/extension");
+my $relative_ext = 'test_relative_path';
+create_extension($relative_ext, $relative_dir);
+$ret = $node->safe_psql(
+	'postgres',
+	"set extension_control_path = '\$system${sep}relative';
+	 select count(*) from pg_available_extensions where name = '$relative_ext'");
+is($ret, '0', 'extension in a relative directory is not listed');
+
 {
 	my ($code, $stdout, $stderr) = $node->psql(
 		'postgres',
-		"set extension_control_path = '$sep$ext_dir_canonicalized$sep'; $sql");
-	is($code, 3, "unknown language is rejected by $sql");
-	like($stderr, qr/ERROR:  language "\Q$ext_name\E" does not exist/,
-		"invalid path does not replace the unknown-language error");
+		"set extension_control_path = '\$system${sep}relative';
+		 create extension $relative_ext");
+	is($code, 3, 'extension in a relative directory cannot be loaded');
 	like($stderr,
-		qr/HINT:  Use CREATE EXTENSION to load the language into the database\./,
-		"remaining directory provides the extension hint");
+		qr/ERROR:  extension "\Q$relative_ext\E" is not available/,
+		'relative directory is excluded from the extension search');
+}
+
+# The same extension can be found and loaded through an absolute path, even
+# with relative elements before or after that path.
+create_extension($relative_ext, $ext_dir);
+for my $path (
+	"relative$sep$ext_dir_canonicalized",
+	"$ext_dir_canonicalized${sep}relative")
+{
+	$ret = $node->safe_psql(
+		'postgres',
+		"set extension_control_path = '$path';
+		 select location from pg_available_extensions where name = '$relative_ext'");
+	is($ret, "$ext_dir_canonicalized/extension",
+		"extension is listed from the absolute directory in path '$path'");
+	$ret = $node->safe_psql(
+		'postgres',
+		"set extension_control_path = '$path';
+		 create extension $relative_ext;
+		 select count(*) from pg_extension where extname = '$relative_ext';
+		 drop extension $relative_ext");
+	is($ret, '1', "extension can be loaded using path '$path'");
 }
 
 # Test with an extension that does not exists
