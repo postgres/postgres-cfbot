@@ -1559,6 +1559,42 @@ get_relation_constraints(PlannerInfo *root,
 			cexpr = stringToNode(constr->check[i].ccbin);
 
 			/*
+			 * If we are scanning child tables too, we cannot trust CHECK
+			 * constraints that reference virtual generated columns.  Each
+			 * child table or partition enforces CHECK constraints against its
+			 * own generation expression, which can differ from this
+			 * relation's expression.
+			 */
+			if (!include_noinherit && constr->has_generated_virtual)
+			{
+				Bitmapset  *expr_attrs = NULL;
+				bool		has_virtual = false;
+				int			j = -1;
+
+				pull_varattnos(cexpr, 1, &expr_attrs);
+				while ((j = bms_next_member(expr_attrs, j)) >= 0)
+				{
+					AttrNumber	attno = j + FirstLowInvalidHeapAttributeNumber;
+
+					/*
+					 * A whole-row Var also references any virtual generated
+					 * columns of the relation.
+					 */
+					if (attno == InvalidAttrNumber ||
+						(attno > 0 &&
+						 TupleDescAttr(relation->rd_att, attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL))
+					{
+						has_virtual = true;
+						break;
+					}
+				}
+				bms_free(expr_attrs);
+
+				if (has_virtual)
+					continue;
+			}
+
+			/*
 			 * Fix Vars to have the desired varno.  This must be done before
 			 * const-simplification because eval_const_expressions reduces
 			 * NullTest for Vars based on varno.
@@ -1600,8 +1636,18 @@ get_relation_constraints(PlannerInfo *root,
 				if (att->attnullability == ATTNULLABLE_VALID && !att->attisdropped)
 				{
 					Form_pg_attribute wholeatt = TupleDescAttr(relation->rd_att, i - 1);
-					NullTest   *ntest = makeNode(NullTest);
+					NullTest   *ntest;
 
+					/*
+					 * As above, we cannot trust a NOT NULL constraint on a
+					 * virtual generated column when scanning child tables
+					 * too.
+					 */
+					if (!include_noinherit &&
+						wholeatt->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+						continue;
+
+					ntest = makeNode(NullTest);
 					ntest->arg = (Expr *) makeVar(varno,
 												  i,
 												  wholeatt->atttypid,
