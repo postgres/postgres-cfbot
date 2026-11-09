@@ -239,6 +239,7 @@ InitPgFdwOptions(void)
 	PQconninfoOption *libpq_options;
 	PQconninfoOption *lopt;
 	PgFdwOption *popt;
+	PgFdwOption *head;
 
 	/* non-libpq FDW-specific FDW options */
 	static const PgFdwOption non_libpq_options[] = {
@@ -327,12 +328,13 @@ InitPgFdwOptions(void)
 	 * Construct an array which consists of all valid options for
 	 * postgres_fdw, by appending FDW-specific options to libpq options.
 	 */
-	postgres_fdw_options = (PgFdwOption *)
+	head = (PgFdwOption *)
 		MemoryContextAlloc(TopMemoryContext,
 						   sizeof(PgFdwOption) * num_libpq_opts +
 						   sizeof(non_libpq_options));
 
-	popt = postgres_fdw_options;
+
+	popt = head;
 	for (lopt = libpq_options; lopt->keyword; lopt++)
 	{
 		/* Hide debug options, as well as settings we override internally. */
@@ -369,6 +371,8 @@ InitPgFdwOptions(void)
 
 	/* Append FDW-specific options and dummy terminator. */
 	memcpy(popt, non_libpq_options, sizeof(non_libpq_options));
+
+	postgres_fdw_options = head;
 }
 
 /*
