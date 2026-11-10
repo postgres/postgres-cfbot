@@ -19,6 +19,7 @@
 #include "access/table.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -87,6 +88,12 @@
 
 /* check if the 'val' has 'bits' set */
 #define IsSet(val, bits)  (((val) & (bits)) == (bits))
+
+/*
+ * This will be set by the pg_upgrade_support function --
+ * binary_upgrade_set_next_pg_subscription_oid().
+ */
+Oid			binary_upgrade_next_pg_subscription_oid = InvalidOid;
 
 /*
  * Structure to hold a bitmap representing the user-provided CREATE/ALTER
@@ -846,8 +853,21 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	subid = GetNewOidWithIndex(rel, SubscriptionObjectIndexId,
-							   Anum_pg_subscription_oid);
+	/* Use binary-upgrade override for pg_subscription.oid? */
+	if (IsBinaryUpgrade)
+	{
+		if (!OidIsValid(binary_upgrade_next_pg_subscription_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("pg_subscription OID value not set when in binary upgrade mode")));
+
+		subid = binary_upgrade_next_pg_subscription_oid;
+		binary_upgrade_next_pg_subscription_oid = InvalidOid;
+	}
+	else
+		subid = GetNewOidWithIndex(rel, SubscriptionObjectIndexId,
+								   Anum_pg_subscription_oid);
+
 	values[Anum_pg_subscription_oid - 1] = ObjectIdGetDatum(subid);
 	values[Anum_pg_subscription_subdbid - 1] = ObjectIdGetDatum(MyDatabaseId);
 	values[Anum_pg_subscription_subskiplsn - 1] = LSNGetDatum(InvalidXLogRecPtr);
@@ -901,12 +921,29 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 		CStringGetTextDatum(ConflictLogDestNames[opts.conflictlogdest]);
 
 	/*
-	 * We create the conflict log table here, if required, so that its
-	 * relation OID can be stored when inserting the pg_subscription tuple
-	 * below.
+	 * Create the conflict log table here, if required, so that its relation
+	 * OID can be stored when inserting the pg_subscription tuple below. In
+	 * binary-upgrade mode, the table was already restored earlier in the dump
+	 * with its original OID and filenode, so look it up and reuse it.
 	 */
 	if (CONFLICTS_LOGGED_TO_TABLE(opts.conflictlogdest))
-		logrelid = create_conflict_log_table(subid, stmt->subname, owner);
+	{
+		if (IsBinaryUpgrade)
+		{
+			char		relname[NAMEDATALEN];
+
+			snprintf(relname, NAMEDATALEN, CONFLICT_LOG_RELATION_NAME_FMT,
+					 subid);
+			logrelid = get_relname_relid(relname, PG_CONFLICT_NAMESPACE);
+			if (!OidIsValid(logrelid))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_TABLE),
+						 errmsg("could not find conflict log table \"%s\" when in binary upgrade mode",
+								relname)));
+		}
+		else
+			logrelid = create_conflict_log_table(subid, stmt->subname, owner);
+	}
 
 	/* Store table OID in the catalog. */
 	values[Anum_pg_subscription_subconflictlogrelid - 1] =

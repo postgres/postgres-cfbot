@@ -221,6 +221,9 @@ typedef struct Subscription
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 
+/* Conflict log table name format. %u is replaced with the subscription OID. */
+#define CONFLICT_LOG_RELATION_NAME_FMT "pg_conflict_log_%u"
+
 extern Subscription *GetSubscription(Oid subid, bool missing_ok);
 extern char *SubscriptionConninfo(Subscription *sub);
 extern void DisableSubscription(Oid subid);
