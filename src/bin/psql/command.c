@@ -1219,7 +1219,10 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
 							success = listPublications(pattern);
 						break;
 					case 's':
-						success = describeSubscriptions(pattern, show_verbose);
+						if (show_verbose)
+							success = describeSubscriptions(pattern);
+						else
+							success = listSubscriptions(pattern);
 						break;
 					default:
 						status = PSQL_CMD_UNKNOWN;
