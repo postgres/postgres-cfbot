@@ -676,9 +676,10 @@ check_and_dump_old_cluster(void)
 
 	/*
 	 * Pre-PG 18 left NOT VALID foreign keys on partitions unlinked to the
-	 * parent (conparentid = 0).  If such a constraint shares its name with
-	 * a foreign key on the parent, schema restore may fail due to a name
-	 * conflict.  The check starts from PG 11, when conparentid was introduced.
+	 * parent (conparentid = 0).  If such a constraint shares its name with a
+	 * foreign key on the parent, schema restore may fail due to a name
+	 * conflict.  The check starts from PG 11, when conparentid was
+	 * introduced.
 	 */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) >= 1100 &&
 		GET_MAJOR_VERSION(old_cluster.major_version) <= 1700)
@@ -1753,7 +1754,6 @@ process_duplicate_fk_names(DbInfo *dbinfo, PGresult *res, void *arg)
 {
 	UpgradeTaskReport *report = (UpgradeTaskReport *) arg;
 	int			ntups = PQntuples(res);
-	int			i_nspname = PQfnumber(res, "nspname");
 	int			i_relname = PQfnumber(res, "relname");
 	int			i_conname = PQfnumber(res, "conname");
 
@@ -1768,8 +1768,7 @@ process_duplicate_fk_names(DbInfo *dbinfo, PGresult *res, void *arg)
 
 	for (int rowno = 0; rowno < ntups; rowno++)
 	{
-		fprintf(report->file, "  %s.%s.%s\n",
-				PQgetvalue(res, rowno, i_nspname),
+		fprintf(report->file, "  table %s, constraint %s\n",
 				PQgetvalue(res, rowno, i_relname),
 				PQgetvalue(res, rowno, i_conname));
 	}
@@ -1798,7 +1797,13 @@ check_for_duplicate_fk_names(ClusterInfo *cluster)
 			 log_opts.basedir,
 			 "duplicate_fk_names.txt");
 
-	query = "SELECT n.nspname, c.relname, con.conname "
+	/*
+	 * The names are quoted, so that the report is unambiguous even if they
+	 * contain dots or other special characters.
+	 */
+	query = "SELECT pg_catalog.quote_ident(n.nspname) || '.' || "
+		"       pg_catalog.quote_ident(c.relname) AS relname, "
+		"       pg_catalog.quote_ident(con.conname) AS conname "
 		"FROM pg_constraint con "
 		"JOIN pg_class c ON con.conrelid = c.oid "
 		"JOIN pg_namespace n ON c.relnamespace = n.oid "
@@ -1825,13 +1830,15 @@ check_for_duplicate_fk_names(ClusterInfo *cluster)
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("Your installation contains NOT VALID foreign keys on partitions that have\n"
 				 "the same name as a foreign key on the parent partitioned table.\n"
-				 "The upgrade may fail because the parent foreign key is inherited by\n"
-				 "the partition during restore, causing a name conflict.\n"
-				 "You can fix this by dropping or renaming the foreign key on the\n"
-				 "partition, using:\n"
-				 "    ALTER TABLE ONLY partition_name DROP CONSTRAINT constraint_name;\n"
-				 "or\n"
-				 "    ALTER TABLE ONLY partition_name RENAME CONSTRAINT constraint_name TO new_name;\n"
+				 "Depending on the order in which pg_dump emits these constraints, the\n"
+				 "upgrade may fail because the parent foreign key is inherited by the\n"
+				 "partition, causing a name conflict.\n"
+				 "You can avoid this by renaming the foreign key on the partition, using:\n"
+				 "    ALTER TABLE ONLY schema_name.partition_name RENAME CONSTRAINT constraint_name TO new_name;\n"
+				 "or, if the foreign key on the parent partitioned table has the same\n"
+				 "columns and referenced table, by dropping the one on the partition,\n"
+				 "which is then redundant, using:\n"
+				 "    ALTER TABLE ONLY schema_name.partition_name DROP CONSTRAINT constraint_name;\n"
 				 "A list of the problem constraints is in the file:\n"
 				 "    %s", report.path);
 	}
