@@ -2565,16 +2565,18 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 	else
 	{
 		/* Outsource everything to parallel variant */
-		parallel_vacuum_bulkdel_all_indexes(vacrel->pvs, old_live_tuples,
-											vacrel->num_index_scans,
-											&(vacrel->worker_usage.vacuum));
-
-		/*
-		 * Do a postcheck to consider applying wraparound failsafe now.  Note
-		 * that parallel VACUUM only gets the precheck and this postcheck.
-		 */
-		if (lazy_check_wraparound_failsafe(vacrel))
+		if (!parallel_vacuum_bulkdel_all_indexes(vacrel->pvs, old_live_tuples,
+												 vacrel->num_index_scans,
+												 &(vacrel->worker_usage.vacuum)))
+		{
+			/*
+			 * The failsafe was triggered by either the leader or one of the
+			 * parallel workers, so do the reporting and the resetting work
+			 * here, once per VACUUM.
+			 */
+			lazy_check_wraparound_failsafe(vacrel);
 			allindexes = false;
+		}
 	}
 
 	/*
@@ -2897,6 +2899,9 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
  * up when the failsafe triggers.  VACUUM stops applying any cost-based delay
  * that it started out with.
  *
+ * In a parallel vacuum, this also triggers the failsafe if a worker has
+ * detected it, without rechecking the age here.
+ *
  * Returns true when failsafe has been triggered.
  */
 static bool
@@ -2906,7 +2911,9 @@ lazy_check_wraparound_failsafe(LVRelState *vacrel)
 	if (VacuumFailsafeActive)
 		return true;
 
-	if (unlikely(vacuum_xid_failsafe_check(&vacrel->cutoffs)))
+	if (unlikely((ParallelVacuumIsActive(vacrel) &&
+				  parallel_vacuum_failsafe_triggered(vacrel->pvs)) ||
+				 vacuum_xid_failsafe_check(&vacrel->cutoffs)))
 	{
 		const int	progress_index[] = {
 			PROGRESS_VACUUM_INDEXES_TOTAL,
@@ -3496,7 +3503,8 @@ dead_items_alloc(LVRelState *vacrel, int nworkers)
 											   vacrel->nindexes, nworkers,
 											   vac_work_mem,
 											   vacrel->verbose ? INFO : DEBUG2,
-											   vacrel->bstrategy);
+											   vacrel->bstrategy,
+											   &vacrel->cutoffs);
 
 		/*
 		 * If parallel mode started, dead_items and dead_items_info spaces are
