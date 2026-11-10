@@ -15,12 +15,17 @@
 use strict;
 use warnings FATAL => 'all';
 
+use FindBin;
+use lib "$FindBin::RealBin/..";
+
 use PostgreSQL::Test::Cluster;
+use TwtUtil;
 use PostgreSQL::Test::Utils;
 use Test::More;
 use Time::HiRes qw(usleep);
 
 my $node = PostgreSQL::Test::Cluster->new('main');
+TwtUtil::harden($node);
 $node->init;
 $node->append_conf(
 	'postgresql.conf', q(
@@ -97,6 +102,7 @@ pass('a contended wait on a named test tranche is found and counted');
 # ---------------------------------------------------------------------
 $node->stop;
 $node = PostgreSQL::Test::Cluster->new('fill');
+TwtUtil::harden($node);
 $node->init;
 $node->append_conf(
 	'postgresql.conf', q(

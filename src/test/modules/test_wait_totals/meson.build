@@ -39,6 +39,9 @@ tests += {
       't/005_dictionary.pl',
       't/006_coherence.pl',
       't/007_restart.pl',
+      't/008_transactions.pl',
+      't/009_reset.pl',
+      't/010_report.pl',
     ],
   },
 }
