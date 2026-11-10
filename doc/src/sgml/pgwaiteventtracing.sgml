@@ -1002,7 +1002,11 @@ shared_preload_libraries = 'pg_wait_event_tracing'
      &mdash; it is called out here only because it is new: an orderly
      exit's own cleanup flushes any still-pending wait first, so this
      narrow loss window is specific to an abrupt kill, and affects at
-     most the single most recently completed wait.
+     most the single most recently completed wait.  Server-side processes that
+     record through the fixed-slot region and never attach a payload are
+     covered by an exit callback registered at process start that adds
+     their last pending wait to the lifetime ledger (see
+     <xref linkend="pgwaiteventtracing-totals"/>).
     </para>
    </listitem>
   </itemizedlist>
@@ -1915,6 +1919,118 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
    deliberately no C-level API for reaching into this module's shared
    memory directly.
   </para>
+ </sect2>
+
+ <sect2 id="pgwaiteventtracing-totals">
+  <title>Instance Totals and Interval Reports</title>
+
+  <para>
+   Extension version 1.1 adds instance-wide cumulative totals.  Unlike
+   <structname>pg_stat_wait_event_timing</structname>, whose rows belong to
+   live collecting backends and vanish when a backend exits, resets or stops
+   collecting, the totals sum a <firstterm>lifetime ledger</firstterm> kept
+   per process slot, so they include processes that have already exited.
+   Version 1.1 is not final: the transaction counters, reset, snapshot, diff
+   and report functions described in the second half of this section are
+   added to the same <literal>1.0--1.1</literal> update script before the
+   version is released.
+  </para>
+
+  <sect3 id="pgwaiteventtracing-totals-views">
+   <title>Views</title>
+   <para>
+    <structname>pg_stat_wait_event_totals</structname> has one row for every
+    event with at least one completed captured wait:
+    <structfield>wait_event_type</structfield>,
+    <structfield>wait_event</structfield>,
+    <structfield>event_key</structfield> (the full 32-bit wait event code,
+    the class in the top byte; for LWLocks the code carries the tranche id),
+    <structfield>calls</structfield>, <structfield>total_time_ms</structfield>
+    and <structfield>avg_time_us</structfield>.  Two rows are always present
+    and use reserved keys: <literal>-1</literal> collects LWLock tranches
+    that did not fit a process's dictionary (see
+    <xref linkend="guc-pg-wait-event-tracing-max-tranches"/>) and
+    <literal>-2</literal> collects events outside the flat event table.  They
+    keep both count and time; events that did not fit are merged there,
+    never dropped.  A custom event whose name cannot be resolved gets a
+    placeholder name.
+   </para>
+   <para>
+    <structname>pg_stat_wait_event_totals_info</structname> has one row:
+    <structfield>incarnation</structfield> (16 hexadecimal digits, random,
+    new whenever shared memory is created, so a change means the totals
+    restarted from zero), the overflow pairs
+    (<structfield>lwlock_overflow_calls</structfield>,
+    <structfield>lwlock_overflow_time_ms</structfield>,
+    <structfield>flat_overflow_calls</structfield>,
+    <structfield>flat_overflow_time_ms</structfield>),
+    <structfield>invalid_ledgers</structfield>,
+    <structfield>ledger_slots</structfield> and
+    <structfield>capturing_backends</structfield> (advisory, read without a
+    lock; exited processes are not counted: a server-side process that
+    exits normally withdraws its claim on its slot.  In the rare case that
+    such a process fails during start-up before it has registered its exit
+    cleanup and a later process reuses the same process id in the same slot,
+    that slot can still be counted).  A counter that would exceed the <type>bigint</type> range marks
+    its ledger invalid instead of wrapping; a reset cannot repair that, and
+    the totals view raises an error while any ledger is invalid or a sum
+    exceeds the range.  The information view still shows the diagnostics
+    (an overflow column whose sum cannot be represented is null).  Both
+    views and their functions are readable by
+    <literal>pg_read_all_stats</literal> only.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-totals-semantics">
+   <title>What Is Counted and When It Appears</title>
+   <para>
+    The totals count completed waits that were captured, that is, completed
+    while <varname>pg_wait_event_tracing.capture</varname> was
+    <literal>stats</literal> or <literal>trace</literal> in the waiting
+    process and a collection payload existed for it, summed over all slots,
+    occupied or not.  They are independent of the per-backend view: a
+    per-backend reset, a capture change or a slot being reused never
+    changes them.  Every wait completes into a single pending record, and a
+    pending record reaches the ledger when the process next begins a timed
+    wait or hits another flush point (a capture change, a reset, a read of
+    the totals by the same session, process exit).  Hence after N
+    consecutive waits with nothing in between, N-1 are visible to other
+    sessions and one remains private; ending a statement does not publish it
+    in <literal>stats</literal> mode, while the executor end does in
+    <literal>trace</literal> mode.  A process computing for a long stretch
+    without any wait delays publication without bound.
+   </para>
+   <para>
+    On an orderly exit the last completed wait is added to the ledger by an
+    exit callback registered at process start, in every process that runs
+    <function>BaseInit</function>: client backends and WAL senders,
+    autovacuum launcher and workers, background and parallel workers, and
+    the checkpointer, background writer, WAL writer, startup process, WAL
+    receiver, archiver, WAL summarizer and I/O workers.  The postmaster and
+    the logger are not covered.  An abrupt death can still lose the last
+    pending wait of that process.  A crash restart reinitializes shared
+    memory, so all totals, and the incarnation, start over.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-totals-memory">
+   <title>Memory</title>
+   <para>
+    One ledger per possible process slot is allocated unconditionally.  A
+    ledger holds a pair of counters for each flat event, a dictionary of
+    <varname>pg_wait_event_tracing.max_tranches</varname> tranches and the
+    overflow pairs; with the default <literal>max_tranches</literal> of 192
+    it takes 21376 bytes including cache line alignment.  The number of slots
+    is <literal>max_connections + autovacuum_worker_slots +
+    max_worker_processes + max_wal_senders + 2 + 38</literal> (workers and
+    auxiliary processes included): 174 slots, 3.5 MiB, with the default
+    <literal>max_connections</literal> of 100, and 1074 slots, 21.9 MiB,
+    with <literal>max_connections</literal> of 1000.  Reading the totals
+    allocates about 1 MiB of scratch (a counter pair for each of the 65536
+    possible tranche ids) plus one ledger copy, and copies every slot's
+    ledger once; it holds no lock while doing so.
+   </para>
+  </sect3>
  </sect2>
 
  <sect2 id="pgwaiteventtracing-overhead">

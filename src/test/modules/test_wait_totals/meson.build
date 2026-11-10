@@ -30,4 +30,15 @@ tests += {
       'test_wait_totals',
     ],
   },
+  'tap': {
+    'tests': [
+      't/001_publication.pl',
+      't/002_exit.pl',
+      't/003_capture_reset.pl',
+      't/004_slots_servers.pl',
+      't/005_dictionary.pl',
+      't/006_coherence.pl',
+      't/007_restart.pl',
+    ],
+  },
 }

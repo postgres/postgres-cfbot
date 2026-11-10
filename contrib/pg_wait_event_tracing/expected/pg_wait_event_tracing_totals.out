@@ -1,0 +1,195 @@
+--
+-- PG_WAIT_EVENT_TRACING_TOTALS
+--
+-- Extension version 1.1: the instance-wide totals views.  Installation and
+-- upgrade, the shape of the views, the reserved overflow keys, the
+-- incarnation format and the privileges.  Counting itself is exercised by
+-- the TAP tests of src/test/modules/test_wait_totals, where a dedicated wait
+-- event makes exact assertions possible; here only things that hold whatever
+-- other tests did to this server are asserted.
+--
+-- Version handling: 1.0 has no totals objects, the update adds them, and a
+-- fresh install of the default version has the same objects.
+DROP EXTENSION IF EXISTS pg_wait_event_tracing;
+CREATE EXTENSION pg_wait_event_tracing VERSION '1.0';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_wait_event_tracing';
+ extversion 
+------------
+ 1.0
+(1 row)
+
+SELECT count(*) AS totals_objects_in_1_0
+FROM pg_proc WHERE proname LIKE 'pg_stat_get_wait_event_totals%';
+ totals_objects_in_1_0 
+-----------------------
+                     0
+(1 row)
+
+ALTER EXTENSION pg_wait_event_tracing UPDATE TO '1.1';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_wait_event_tracing';
+ extversion 
+------------
+ 1.1
+(1 row)
+
+SELECT count(*) AS totals_objects_after_update
+FROM pg_proc WHERE proname LIKE 'pg_stat_get_wait_event_totals%';
+ totals_objects_after_update 
+-----------------------------
+                           2
+(1 row)
+
+DROP EXTENSION pg_wait_event_tracing;
+CREATE EXTENSION pg_wait_event_tracing;
+SELECT extversion FROM pg_extension WHERE extname = 'pg_wait_event_tracing';
+ extversion 
+------------
+ 1.1
+(1 row)
+
+SELECT count(*) AS totals_objects_fresh
+FROM pg_proc WHERE proname LIKE 'pg_stat_get_wait_event_totals%';
+ totals_objects_fresh 
+----------------------
+                    2
+(1 row)
+
+-- Columns of the two views.
+SELECT attname, format_type(atttypid, atttypmod) AS type
+FROM pg_attribute
+WHERE attrelid = 'pg_stat_wait_event_totals'::regclass AND attnum > 0
+ORDER BY attnum;
+     attname     |       type       
+-----------------+------------------
+ wait_event_type | text
+ wait_event      | text
+ event_key       | bigint
+ calls           | bigint
+ total_time_ms   | double precision
+ avg_time_us     | double precision
+(6 rows)
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
+FROM pg_attribute
+WHERE attrelid = 'pg_stat_wait_event_totals_info'::regclass AND attnum > 0
+ORDER BY attnum;
+         attname         |       type       
+-------------------------+------------------
+ incarnation             | text
+ lwlock_overflow_calls   | bigint
+ lwlock_overflow_time_ms | double precision
+ flat_overflow_calls     | bigint
+ flat_overflow_time_ms   | double precision
+ invalid_ledgers         | bigint
+ ledger_slots            | integer
+ capturing_backends      | integer
+(8 rows)
+
+-- One info row; the incarnation is 16 lower-case hex digits.
+SELECT count(*) AS info_rows FROM pg_stat_wait_event_totals_info;
+ info_rows 
+-----------
+         1
+(1 row)
+
+SELECT incarnation ~ '^[0-9a-f]{16}$' AS incarnation_format,
+       invalid_ledgers,
+       ledger_slots > 0 AS has_slots,
+       capturing_backends >= 0 AS has_capturing
+FROM pg_stat_wait_event_totals_info;
+ incarnation_format | invalid_ledgers | has_slots | has_capturing 
+--------------------+-----------------+-----------+---------------
+ t                  |               0 | t         | t
+(1 row)
+
+-- The incarnation does not change while the server runs.
+SELECT incarnation AS incarnation_before FROM pg_stat_wait_event_totals_info \gset
+SELECT incarnation = :'incarnation_before' AS incarnation_stable
+FROM pg_stat_wait_event_totals_info;
+ incarnation_stable 
+--------------------
+ t
+(1 row)
+
+-- The two overflow rows exist with their reserved keys, and no other row has
+-- a negative key; every other key is a full wait event code, which carries
+-- the wait event class in its top byte.
+SELECT event_key, wait_event_type, wait_event, calls >= 0 AS calls_ok
+FROM pg_stat_wait_event_totals
+WHERE event_key < 0
+ORDER BY event_key;
+ event_key | wait_event_type | wait_event | calls_ok 
+-----------+-----------------+------------+----------
+        -2 | (overflow)      | (overflow) | t
+        -1 | LWLock          | (overflow) | t
+(2 rows)
+
+SELECT count(*) AS bad_keys
+FROM pg_stat_wait_event_totals
+WHERE event_key >= 0 AND (event_key >= 4294967296 OR event_key < 16777216);
+ bad_keys 
+----------
+        0
+(1 row)
+
+SELECT count(*) AS duplicate_keys
+FROM (SELECT event_key FROM pg_stat_wait_event_totals
+      GROUP BY event_key HAVING count(*) > 1) d;
+ duplicate_keys 
+----------------
+              0
+(1 row)
+
+-- Counters are never negative, and the average is NULL exactly when there
+-- are no calls.
+SELECT count(*) AS bad_rows
+FROM pg_stat_wait_event_totals
+WHERE calls < 0 OR total_time_ms < 0 OR (calls = 0) <> (avg_time_us IS NULL);
+ bad_rows 
+----------
+        0
+(1 row)
+
+-- Privileges: not readable by PUBLIC, neither the views nor the functions
+-- behind them; readable with pg_read_all_stats.
+CREATE ROLE regress_pwet_plain;
+CREATE ROLE regress_pwet_stats IN ROLE pg_read_all_stats;
+SELECT has_function_privilege('regress_pwet_plain',
+                              'pg_stat_get_wait_event_totals()', 'EXECUTE') AS plain_totals_fn,
+       has_function_privilege('regress_pwet_plain',
+                              'pg_stat_get_wait_event_totals_info()', 'EXECUTE') AS plain_info_fn,
+       has_function_privilege('regress_pwet_stats',
+                              'pg_stat_get_wait_event_totals()', 'EXECUTE') AS stats_totals_fn,
+       has_function_privilege('regress_pwet_stats',
+                              'pg_stat_get_wait_event_totals_info()', 'EXECUTE') AS stats_info_fn;
+ plain_totals_fn | plain_info_fn | stats_totals_fn | stats_info_fn 
+-----------------+---------------+-----------------+---------------
+ f               | f             | t               | t
+(1 row)
+
+SET ROLE regress_pwet_plain;
+SELECT count(*) FROM pg_stat_wait_event_totals;
+ERROR:  permission denied for view pg_stat_wait_event_totals
+SELECT count(*) FROM pg_stat_wait_event_totals_info;
+ERROR:  permission denied for view pg_stat_wait_event_totals_info
+SELECT count(*) FROM pg_stat_get_wait_event_totals();
+ERROR:  permission denied for function pg_stat_get_wait_event_totals
+SELECT count(*) FROM pg_stat_get_wait_event_totals_info();
+ERROR:  permission denied for function pg_stat_get_wait_event_totals_info
+RESET ROLE;
+SET ROLE regress_pwet_stats;
+SELECT count(*) > 0 AS totals_visible FROM pg_stat_wait_event_totals;
+ totals_visible 
+----------------
+ t
+(1 row)
+
+SELECT count(*) AS info_visible FROM pg_stat_wait_event_totals_info;
+ info_visible 
+--------------
+            1
+(1 row)
+
+RESET ROLE;
+DROP ROLE regress_pwet_plain;
+DROP ROLE regress_pwet_stats;
