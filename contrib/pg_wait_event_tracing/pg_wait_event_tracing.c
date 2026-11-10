@@ -69,6 +69,7 @@
 #include "nodes/queryjumble.h"
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
+#include "pgstat.h"
 #include "port/pg_bitutils.h"
 #include "port/atomics.h"
 #include "portability/instr_time.h"
@@ -90,6 +91,7 @@
 #include "utils/dsa.h"
 #include "utils/guc.h"
 #include "utils/injection_point.h"
+#include "utils/pgstat_internal.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_classes.h"
 #include "utils/wait_event.h"
@@ -362,6 +364,83 @@ typedef struct PwetRegionHeader
 	int			server_region_end;
 } PwetRegionHeader;
 
+/*
+ * Lifetime ledgers (instance totals).
+ *
+ * One fixed-size ledger per possible ProcNumber, in the module's main
+ * shared memory, holds the cumulative number and total duration of every
+ * completed wait that process ever reported, per flat wait event and per
+ * LWLock tranche.  Unlike the per-backend payload above (freed or reset
+ * whenever its owner detaches, resets or exits) a ledger is NEVER cleared:
+ * not on exit, capture change, per-backend reset, reset-all or slot reuse,
+ * and the fixed-slot claim does not touch it.  Only creating shared memory
+ * (server start, crash restart) zeroes it, so summing all ledgers gives the
+ * instance-wide totals including processes that already exited.
+ *
+ * Ownership: only the process owning ProcNumber N ever writes ledger N.  An
+ * old owner cannot write after its slot is reassigned, because every
+ * before_shmem_exit callback, including the exit drain, runs before
+ * ProcKill()/AuxiliaryProcKill() release the PGPROC (ipc.c, shmem_exit();
+ * proc.c, ProcKill() and AuxiliaryProcKill()), and after the drain this
+ * process never writes its ledger again (pwet_ledger_closed).  The
+ * fixed-slot claim allocates no ProcNumber of its own.  The ledger is found
+ * from MyProcNumber, which is assigned before BaseInit(), so it does not
+ * depend on pwet_my_procno or on any legacy attachment.
+ *
+ * A ledger is updated only from pwet_flush_pending(), so the ordinary wait
+ * begin/end path does no new work: a completion reaches the ledger when it
+ * is flushed (next timed wait begin, or one of the other flush points, or
+ * the exit drain).  Writers bracket the update with a seqlock; changecount
+ * is a plain aligned 32-bit word accessed with single loads and stores,
+ * unrelated to PwetStats.struct_seq.  A reader copies the whole ledger as a
+ * block and accepts the copy only if changecount was even and unchanged
+ * around the copy, which also protects the 64-bit fields on 32-bit
+ * platforms.  Wraparound assumption: a reader is not descheduled across
+ * 2^31 updates of one slot (each bracket adds 2 to a 32-bit word).
+ *
+ * A counter that would exceed what an SQL bigint can hold sets the sticky
+ * invalid flag instead of wrapping; reset cannot repair that.
+ */
+#define PWET_PGSTAT_KIND PGSTAT_KIND_EXPERIMENTAL
+#define PWET_TOTALS_HEADER_NAME "pg_wait_event_tracing totals header"
+#define PWET_LEDGERS_NAME "pg_wait_event_tracing ledgers"
+
+typedef struct PwetTotal
+{
+	uint64		calls;
+	uint64		total_ns;
+} PwetTotal;
+
+/* Dictionary cell of one admitted LWLock tranche; tranche_plus1 == 0: empty */
+typedef struct PwetLedgerCell
+{
+	uint32		tranche_plus1;
+	uint32		pad;
+	PwetTotal	total;
+} PwetLedgerCell;
+
+typedef struct PwetLedger
+{
+	pg_atomic_uint32 changecount;	/* seqlock: odd while being written */
+	uint32		invalid;		/* sticky: a counter would exceed bigint */
+	uint32		invalid_events; /* diagnostic, saturating: updates refused */
+	uint32		num_used;		/* dictionary cells in use */
+	PwetTotal	lwlock_overflow;	/* tranches that did not fit */
+	PwetTotal	flat_overflow;	/* events outside the flat table */
+	PwetTotal	flat[PWET_NUM_EVENTS];
+	PwetLedgerCell cells[FLEXIBLE_ARRAY_MEMBER];	/* hash_size cells */
+} PwetLedger;
+
+typedef struct PwetTotalsHeader
+{
+	uint64		incarnation;	/* random, new at every shared memory init */
+} PwetTotalsHeader;
+
+typedef struct PwetPgStatShared
+{
+	uint32		unused;
+} PwetPgStatShared;
+
 static const struct config_enum_entry pwet_capture_options[] = {
 	{"off", PWET_CAPTURE_OFF, false},
 	{"stats", PWET_CAPTURE_STATS, false},
@@ -511,6 +590,21 @@ static Size pwet_stats_stride;
 static uint32 pwet_last_reset_generation;
 
 /*
+ * Lifetime ledgers (see the comment on PwetLedger).  pwet_ledger_bytes is
+ * what a reader copies; pwet_ledger_stride is the distance between two
+ * ledgers.  All of these are derived from PGC_POSTMASTER settings, so every
+ * process computes the same values.  pwet_my_ledger is cached on first use;
+ * pwet_ledger_closed is set by the exit drain and never cleared.
+ */
+static PwetTotalsHeader *pwet_totals_header;
+static char *pwet_ledgers;
+static Size pwet_ledger_bytes;
+static Size pwet_ledger_stride;
+static int	pwet_ledger_hash_size;
+static PwetLedger *pwet_my_ledger;
+static bool pwet_ledger_closed;
+
+/*
  * The owning backend's in-flight wait: written only by that backend's own
  * pwet_wait_begin_impl()/pwet_wait_end_impl(), and read by nobody else --
  * confirmed by grepping every ->wait_start/->current_event site before
@@ -584,7 +678,6 @@ static bool pwet_exit_started;
 static bool pwet_stats_writes_disabled;
 static bool pwet_trace_writes_disabled;
 static bool pwet_exit_callback_registered;
-static bool pwet_xact_callback_registered;
 
 /*
  * The single recording gate for each of the two levels, maintained by
@@ -908,6 +1001,11 @@ static void pwet_release_trace(void);
 static void emit_wait_event_trace(int procnumber, ReturnSetInfo *rsinfo);
 static void pwet_orphan_trace(void);
 static void pwet_xact_callback(XactEvent event, void *arg);
+static void pwet_exit_drain(int code, Datum arg);
+static void pwet_pgstat_init_backend(void);
+static void pwet_pgstat_init_shmem(void *stats);
+static void pwet_pgstat_reset_all(TimestampTz ts);
+static void pwet_pgstat_snapshot(void);
 
 static Size
 pwet_control_size(int nslots)
@@ -1131,6 +1229,178 @@ pwet_timing_bucket(int64 duration_ns)
 	return bucket;
 }
 
+/* ----------------------------------------------------------------------
+ * Lifetime ledgers: layout, writer and reader
+ * ----------------------------------------------------------------------
+ */
+
+static Size
+pwet_ledger_size(int max_entries)
+{
+	return add_size(offsetof(PwetLedger, cells),
+					mul_size(pwet_hash_size_for(max_entries),
+							 sizeof(PwetLedgerCell)));
+}
+
+/* Distance between consecutive ledgers: a multiple of the cache line size. */
+static Size
+pwet_ledger_stride_for(int max_entries)
+{
+	return TYPEALIGN(PG_CACHE_LINE_SIZE, pwet_ledger_size(max_entries));
+}
+
+static inline PwetLedger *
+pwet_ledger_at(int procnumber)
+{
+	return (PwetLedger *) (pwet_ledgers + (Size) procnumber * pwet_ledger_stride);
+}
+
+/*
+ * Seqlock write bracket, single writer (the owning process).  changecount
+ * is odd while the ledger is being changed.  Only non-throwing operations
+ * may sit inside, and no flush: a nested bracket would corrupt the count.
+ */
+static inline void
+pwet_ledger_begin(PwetLedger *l)
+{
+	uint32		cc = pg_atomic_read_u32(&l->changecount);
+
+	Assert((cc & 1) == 0);
+	pg_atomic_write_u32(&l->changecount, cc + 1);
+	pg_write_barrier();
+}
+
+static inline void
+pwet_ledger_end(PwetLedger *l)
+{
+	uint32		cc = pg_atomic_read_u32(&l->changecount);
+
+	Assert((cc & 1) == 1);
+	pg_write_barrier();
+	pg_atomic_write_u32(&l->changecount, cc + 1);
+}
+
+/*
+ * Find the dictionary cell of tranche_id.  The probe runs until a hit, an
+ * empty cell or a full cycle, so every admitted key is found however far
+ * from its home cell it sits (admitted keys never move and are never
+ * evicted).  Returns the cell and sets *insert = false for a hit; at an
+ * empty cell returns it with *insert = true if the dictionary still has
+ * room, else NULL (the tranche goes to the overflow pair).
+ */
+static PwetLedgerCell *
+pwet_ledger_find_cell(PwetLedger *l, uint16 tranche_id, bool *insert)
+{
+	int			hash_size = pwet_ledger_hash_size;
+	uint32		hash_value = (uint32) tranche_id * 2654435761U;
+	int			slot = hash_value & (hash_size - 1);
+	int			i;
+
+	*insert = false;
+	for (i = 0; i < hash_size; i++)
+	{
+		PwetLedgerCell *cell = &l->cells[slot];
+
+		if (cell->tranche_plus1 == (uint32) tranche_id + 1)
+			return cell;
+		if (cell->tranche_plus1 == 0)
+		{
+			if (l->num_used >= (uint32) pwet_max_tranches)
+				return NULL;
+			*insert = true;
+			return cell;
+		}
+		slot = (slot + 1) & (hash_size - 1);
+	}
+
+	return NULL;
+}
+
+/* Would adding (1, duration_ns) exceed what a bigint can hold? */
+static inline bool
+pwet_total_would_overflow(const PwetTotal *t, int64 duration_ns)
+{
+	return t->calls >= (uint64) PG_INT64_MAX ||
+		t->total_ns > (uint64) PG_INT64_MAX - (uint64) duration_ns;
+}
+
+/*
+ * The counter pair a completed wait of this event is added to: its flat
+ * entry, its tranche's dictionary cell (*insert says whether the cell is
+ * still to be claimed), or the matching overflow pair.
+ */
+static PwetTotal *
+pwet_ledger_target(PwetLedger *l, uint32 event, PwetLedgerCell **cell,
+				   bool *insert)
+{
+	int			idx = pwet_timing_index(event);
+
+	*cell = NULL;
+	*insert = false;
+	if (idx == PWET_IDX_LWLOCK)
+	{
+		*cell = pwet_ledger_find_cell(l, event & PWET_WAIT_EVENT_ID_MASK,
+									  insert);
+		return *cell != NULL ? &(*cell)->total : &l->lwlock_overflow;
+	}
+	if (idx >= 0)
+		return &l->flat[idx];
+	return &l->flat_overflow;
+}
+
+/*
+ * Add one completed wait to a ledger.  The target is looked up before the
+ * bracket; inside it only plain stores happen, so nothing can throw.  An
+ * addition that would exceed bigint is refused and marks the ledger invalid.
+ * Reachable from the begin hook through pwet_flush_pending(), so it obeys the
+ * hook rules: no allocation, locking, waiting or ereport.
+ */
+static void
+pwet_ledger_add(PwetLedger *l, uint32 event, int64 duration_ns)
+{
+	PwetLedgerCell *cell;
+	bool		insert;
+	PwetTotal  *pair = pwet_ledger_target(l, event, &cell, &insert);
+
+	pwet_ledger_begin(l);
+	if (insert)
+	{
+		cell->tranche_plus1 = (event & PWET_WAIT_EVENT_ID_MASK) + 1;
+		l->num_used++;
+	}
+	if (pwet_total_would_overflow(pair, duration_ns))
+	{
+		l->invalid = 1;
+		if (l->invalid_events < PG_UINT32_MAX)
+			l->invalid_events++;
+	}
+	else
+	{
+		pair->calls++;
+		pair->total_ns += (uint64) duration_ns;
+	}
+	pwet_ledger_end(l);
+}
+
+/*
+ * The ledger of this process, or NULL if it must not (or cannot) be written:
+ * after the exit drain, or when the process has no ProcNumber (postmaster).
+ */
+static inline PwetLedger *
+pwet_get_my_ledger(void)
+{
+	if (pwet_ledger_closed)
+		return NULL;
+	if (pwet_my_ledger == NULL)
+	{
+		if (pwet_ledgers == NULL || MyProcNumber == INVALID_PROC_NUMBER ||
+			MyProcNumber < 0 || MyProcNumber >= PWET_NUM_SLOTS)
+			return NULL;
+		pwet_my_ledger = pwet_ledger_at(MyProcNumber);
+	}
+	return pwet_my_ledger;
+}
+
 /* Initialize a freshly created control table: mark every slot empty. */
 static void
 pwet_control_init(PwetSlot *slots)
@@ -1215,6 +1485,9 @@ pwet_shmem_request(void)
 	RequestAddinShmemSpace(pwet_control_size(PWET_NUM_SLOTS));
 	RequestNamedLWLockTranche(PWET_CONTROL_NAME, 1);
 	RequestAddinShmemSpace(sizeof(PwetRegionHeader));
+	RequestAddinShmemSpace(sizeof(PwetTotalsHeader));
+	RequestAddinShmemSpace(mul_size(PWET_NUM_SLOTS,
+									pwet_ledger_stride_for(pwet_max_tranches)));
 
 	pwet_region_requested = (pwet_capture != PWET_CAPTURE_OFF);
 	if (pwet_region_requested)
@@ -1281,6 +1554,45 @@ pwet_shmem_startup(void)
 											&found);
 	if (!found)
 		pwet_control_init(pwet_ctl);
+
+	/*
+	 * Lifetime ledgers.  Zeroed, and given a new incarnation, only when the
+	 * shared memory is created (server start or crash restart); an
+	 * EXEC_BACKEND child only attaches.  A ledger is never reset anywhere
+	 * else.
+	 */
+	pwet_ledger_hash_size = pwet_hash_size_for(pwet_max_tranches);
+	pwet_ledger_bytes = pwet_ledger_size(pwet_max_tranches);
+	pwet_ledger_stride = pwet_ledger_stride_for(pwet_max_tranches);
+	pwet_my_ledger = NULL;
+	pwet_ledger_closed = false;
+
+	pwet_totals_header = (PwetTotalsHeader *)
+		ShmemInitStruct(PWET_TOTALS_HEADER_NAME, sizeof(PwetTotalsHeader),
+						&found);
+	if (!found)
+	{
+		uint64		incarnation;
+
+		if (!pg_strong_random(&incarnation, sizeof(incarnation)))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not generate a random incarnation for wait event totals")));
+		pwet_totals_header->incarnation = incarnation;
+	}
+
+	pwet_ledgers = (char *) ShmemInitStruct(PWET_LEDGERS_NAME,
+											mul_size(PWET_NUM_SLOTS,
+													 pwet_ledger_stride),
+											&found);
+	if (!found)
+	{
+		int			slot;
+
+		memset(pwet_ledgers, 0, mul_size(PWET_NUM_SLOTS, pwet_ledger_stride));
+		for (slot = 0; slot < PWET_NUM_SLOTS; slot++)
+			pg_atomic_init_u32(&pwet_ledger_at(slot)->changecount, 0);
+	}
 
 	hdr = (PwetRegionHeader *) ShmemInitStruct(PWET_REGION_HEADER_NAME,
 											   sizeof(PwetRegionHeader),
@@ -1574,16 +1886,20 @@ pwet_claim_fixed_slot(void)
 	 * Deliberately no before_shmem_exit() registration here: this runs from
 	 * the begin hook, and before_shmem_exit() raises FATAL when its fixed
 	 * array is full, which a hook must never do.  A fixed-slot process does
-	 * not need an exit callback for correctness: the slot's ownership is
-	 * validated by readers against the process's beentry (pid and start
-	 * timestamp, see pwet_fixed_owner_matches()), so a dead owner's stats
-	 * simply stop being visible, and the next owner of this ProcNumber
+	 * not need an exit callback for the per-backend payload: the slot's
+	 * ownership is validated by readers against the process's beentry (pid
+	 * and start timestamp, see pwet_fixed_owner_matches()), so a dead owner's
+	 * stats simply stop being visible, and the next owner of this ProcNumber
 	 * resets the payload (the same_owner test above).  A trace ring is not
 	 * kept in this region; it can only exist after pwet_maybe_attach() ran
 	 * in this process, and that registers pwet_before_shmem_exit() at a safe
-	 * point.  What a stats-only fixed-slot process that never reaches
-	 * pwet_maybe_attach() gives up is the exit-time flush of its last
-	 * pending wait.
+	 * point.  The last pending wait of a stats-only fixed-slot process that
+	 * never reaches pwet_maybe_attach() is not lost: pwet_exit_drain(),
+	 * registered at process start (see pwet_pgstat_init_backend()), flushes
+	 * it into the lifetime ledger on every orderly exit after BaseInit().
+	 * Only an abrupt death can still lose it, and a crash restart
+	 * reinitializes shared memory anyway.  The per-backend view of such a
+	 * process is gone with the process in any case.
 	 */
 }
 
@@ -1724,22 +2040,11 @@ pwet_attach_trace(void)
 				pwet_marker_state = PWET_MARKER_IDLE;
 
 				/*
-				 * Register once per backend, at first trace attach (a safe
-				 * point): xact.c's callback list is a backend-local static
-				 * array untouched by anything else this module does, so
-				 * there is no reentrancy or allocation concern in calling
-				 * this here.  Left registered even across a later
-				 * release/re-attach cycle (pwet_xact_callback() itself
-				 * checks pwet_capture/pwet_my_trace on every call and is a
-				 * cheap no-op otherwise), rather than calling
-				 * UnregisterXactCallback() on release, to avoid growing
-				 * churn in xact.c's list across many enable/disable cycles.
+				 * The transaction callback is registered at process start
+				 * (pwet_pgstat_init_backend()), not here; it checks
+				 * pwet_capture/pwet_my_trace on every call and is a cheap
+				 * no-op unless this ring exists.
 				 */
-				if (!pwet_xact_callback_registered)
-				{
-					RegisterXactCallback(pwet_xact_callback, NULL);
-					pwet_xact_callback_registered = true;
-				}
 			}
 		}
 	}
@@ -2300,6 +2605,139 @@ pwet_before_shmem_exit(int code, Datum arg)
 	pwet_my_procno = INVALID_PROC_NUMBER;
 }
 
+/*
+ * Exit drain and transaction callback registration, at process start.
+ *
+ * pwet_before_shmem_exit() is registered only when a process first reaches a
+ * safe point to attach, and a fixed-slot-only process (a server-side process
+ * that records through the reserved region and never runs a query) may never
+ * get there, so by itself it cannot guarantee that the last completed wait
+ * of every process reaches its lifetime ledger.  A registration from inside
+ * the begin hook is not allowed either: before_shmem_exit() raises FATAL
+ * when its array is full.  So this module registers a custom cumulative-
+ * statistics kind in _PG_init() whose only functional purpose is its
+ * init_backend_cb: pgstat_initialize() calls it once in every process that
+ * runs BaseInit(), where before_shmem_exit() and RegisterXactCallback() are
+ * both legal (the exit array is empty, and the callback list is allocated in
+ * TopMemoryContext).  The kind's other callbacks are the trivial ones core
+ * requires for a fixed-amount kind; none of them may touch the ledgers.
+ *
+ * Coverage, verified on this tree: client backends and walsenders
+ * (postgres.c, PostgresMain(), via InitPostgres()'s BaseInit() call),
+ * autovacuum launcher and workers (autovacuum.c), background and parallel
+ * workers (bgworker.c, StartBackgroundWorker()), and the auxiliary processes
+ * through AuxiliaryProcessMainCommon() (auxprocess.c): checkpointer,
+ * background writer, WAL writer, startup, WAL receiver, archiver, WAL
+ * summarizer and I/O workers.  Not covered: the postmaster and the logger,
+ * which have no ledger anyway.  A standalone backend works the same way
+ * (postgres.c), and under EXEC_BACKEND a child reloads this registration in
+ * launch_backend.c before BaseInit().
+ *
+ * Experimental kind ID: for development only; a final ID would be reserved
+ * on https://wiki.postgresql.org/wiki/CustomCumulativeStats.  A duplicate ID
+ * or name makes pgstat_register_kind() fail startup with core's own error;
+ * registration is never skipped silently, since a skipped registration would
+ * quietly bring the exit loss back.
+ */
+static const PgStat_KindInfo pwet_pgstat_kind = {
+	.name = "pg_wait_event_tracing",
+	.fixed_amount = true,
+	.write_to_file = false,
+	.shared_size = sizeof(PwetPgStatShared),
+	.shared_data_off = 0,
+	.shared_data_len = sizeof(PwetPgStatShared),
+	.init_backend_cb = pwet_pgstat_init_backend,
+	.init_shmem_cb = pwet_pgstat_init_shmem,
+	.reset_all_cb = pwet_pgstat_reset_all,
+	.snapshot_cb = pwet_pgstat_snapshot,
+};
+
+/* The three callbacks below must never touch the lifetime ledgers. */
+static void
+pwet_pgstat_init_shmem(void *stats)
+{
+}
+
+static void
+pwet_pgstat_reset_all(TimestampTz ts)
+{
+}
+
+static void
+pwet_pgstat_snapshot(void)
+{
+}
+
+/*
+ * Once per process.  Keyed by pid, not a bare flag, like
+ * pwet_fixed_slot_checked_pid: a flag set in a process would be inherited by
+ * anything it forks.
+ */
+static void
+pwet_pgstat_init_backend(void)
+{
+	static int	registered_pid = 0;
+
+	if (registered_pid == MyProcPid)
+		return;
+	registered_pid = MyProcPid;
+
+	before_shmem_exit(pwet_exit_drain, (Datum) 0);
+	RegisterXactCallback(pwet_xact_callback, NULL);
+}
+
+/*
+ * Exit drain: flush the pending completion once, then permanently stop this
+ * process's recording and reattachment and drop the in-flight wait, for every
+ * process kind including fixed-slot-only ones.  It frees no legacy resources;
+ * the existing cleanup does that.
+ *
+ * Callbacks run in reverse registration order, and this one is registered
+ * first in a process, so it runs after pwet_before_shmem_exit() (which
+ * flushes and disables recording itself) and after everything registered
+ * later, and the result is the same whether or not that one ever ran.  After
+ * this flush nothing can create a new pending completion (recording is
+ * disabled, and the begin hook returns early once the writes-disabled flags
+ * are set), and the ledger is closed so it is never written again, which is
+ * what makes the ownership argument on PwetLedger hold up to the moment the
+ * PGPROC is released.
+ */
+static void
+pwet_exit_drain(int code, Datum arg)
+{
+	pwet_flush_pending();
+	pwet_ledger_closed = true;
+
+	pwet_exit_started = true;
+	pwet_stats_writes_disabled = true;
+	pwet_trace_writes_disabled = true;
+	INSTR_TIME_SET_ZERO(pwet_wait_start);
+	pwet_current_event = 0;
+	pwet_pending_valid = false;
+	pwet_update_rec_pointers();
+
+	/*
+	 * Withdraw a fixed-slot ownership token at an orderly exit.  The token is
+	 * the only identity a reader has for a process without a backend-status
+	 * entry (see pwet_slot_owner_is_live()), and the PGPROC pid it is
+	 * compared with can be reused; with the token gone before the PGPROC is
+	 * released (this callback runs before ProcKill()/AuxiliaryProcKill()), a
+	 * successor of the slot can never be taken for its predecessor.  Only this
+	 * process writes its own slot's owner token, so no lock is needed; the
+	 * payload stays (the region is never freed) and the successor's claim
+	 * reinitializes it.  An abrupt death takes the whole cluster through a
+	 * crash restart, which reinitializes shared memory.
+	 */
+	if (pwet_ctl != NULL && MyProcNumber != INVALID_PROC_NUMBER &&
+		MyProcNumber < PWET_NUM_SLOTS &&
+		pwet_is_fixed_procnumber(MyProcNumber) &&
+		pwet_ctl[MyProcNumber].owner_pid == MyProcPid)
+	{
+		pwet_ctl[MyProcNumber].owner_pid = 0;
+		pg_atomic_fetch_add_u32(&pwet_ctl[MyProcNumber].generation, 1);
+	}
+}
+
 static void
 pwet_assign_capture(int newval, void *extra)
 {
@@ -2553,6 +2991,20 @@ pwet_flush_pending(void)
 	duration_ns = pwet_pending.duration_ns;
 	timestamp_ns = pwet_pending.timestamp_ns;
 	pwet_pending_valid = false;
+
+	/*
+	 * The lifetime ledger takes every completion that exists, whatever the
+	 * state of the legacy payload (attached or not, reset or not, overflowing
+	 * or not).  Eligibility for creating a pending completion is unchanged:
+	 * wait end still requires pwet_rec_stats.  The update is a seqlock write
+	 * of this process's own ledger and nothing in it can throw.
+	 */
+	{
+		PwetLedger *ledger = pwet_get_my_ledger();
+
+		if (ledger != NULL)
+			pwet_ledger_add(ledger, event, duration_ns);
+	}
 
 	/*
 	 * Stats eligibility needs no separate field to check here: this
@@ -4475,6 +4927,12 @@ _PG_init(void)
 							NULL,
 							NULL);
 	MarkGUCPrefixReserved("pg_wait_event_tracing");
+
+	/*
+	 * Register the process-start hook point for the exit drain; see the
+	 * comment above pwet_pgstat_kind.
+	 */
+	pgstat_register_kind(PWET_PGSTAT_KIND, &pwet_pgstat_kind);
 
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = pwet_shmem_request;
