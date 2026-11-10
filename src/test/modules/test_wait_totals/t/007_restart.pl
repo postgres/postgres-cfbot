@@ -11,11 +11,16 @@
 use strict;
 use warnings FATAL => 'all';
 
+use FindBin;
+use lib "$FindBin::RealBin/..";
+
 use PostgreSQL::Test::Cluster;
+use TwtUtil;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
 my $node = PostgreSQL::Test::Cluster->new('main');
+TwtUtil::harden($node);
 $node->init;
 $node->append_conf(
 	'postgresql.conf', q(
