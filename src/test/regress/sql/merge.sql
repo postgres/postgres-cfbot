@@ -1432,6 +1432,17 @@ MERGE INTO pa_target t
     UPDATE SET tid = tid - 1;
 ROLLBACK;
 
+-- Test a SubPlan in a partition-specific MERGE UPDATE projection
+BEGIN;
+MERGE INTO pa_target t
+USING (SELECT true AS c OFFSET 0) s ON t.tid IS NULL
+WHEN MATCHED THEN
+  UPDATE SET val = (SELECT NULL WHERE s.c)
+WHEN NOT MATCHED THEN
+  INSERT VALUES (1, 0, 'subplan test');
+SELECT * FROM pa_target WHERE val = 'subplan test';
+ROLLBACK;
+
 DROP TABLE pa_source;
 DROP TABLE pa_target CASCADE;
 
