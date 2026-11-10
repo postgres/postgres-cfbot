@@ -56,6 +56,7 @@ SUBDIRS = \
 		  test_tidstore \
 		  test_wait_hook \
 		  test_wait_lsn \
+		  test_wait_totals \
 		  unsafe_tests \
 		  worker_spi \
 		  xid_wraparound
