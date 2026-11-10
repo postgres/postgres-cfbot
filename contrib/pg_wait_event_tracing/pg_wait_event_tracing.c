@@ -60,6 +60,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/parallel.h"
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type_d.h"
@@ -92,7 +93,10 @@
 #include "utils/dsa.h"
 #include "utils/guc.h"
 #include "utils/injection_point.h"
+#include "utils/jsonb.h"
+#include "utils/numeric.h"
 #include "utils/pgstat_internal.h"
+#include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_classes.h"
 #include "utils/wait_event.h"
@@ -115,6 +119,8 @@ PG_FUNCTION_INFO_V1(pg_get_wait_event_trace);
 PG_FUNCTION_INFO_V1(pg_stat_clear_orphaned_wait_event_rings);
 PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_totals);
 PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_totals_info);
+PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_totals);
+PG_FUNCTION_INFO_V1(pg_wait_event_snapshot);
 
 PGDLLEXPORT void _PG_init(void);
 
@@ -406,6 +412,7 @@ typedef struct PwetRegionHeader
  */
 #define PWET_PGSTAT_KIND PGSTAT_KIND_EXPERIMENTAL
 #define PWET_TOTALS_HEADER_NAME "pg_wait_event_tracing totals header"
+#define PWET_TOTALS_LOCK_NAME "pg_wait_event_tracing totals"
 #define PWET_LEDGERS_NAME "pg_wait_event_tracing ledgers"
 #define PWET_NUM_TRANCHE_IDS 65536
 
@@ -435,26 +442,59 @@ typedef struct PwetLedger
 	uint32		num_used;		/* dictionary cells in use */
 	PwetTotal	lwlock_overflow;	/* tranches that did not fit */
 	PwetTotal	flat_overflow;	/* events outside the flat table */
+	uint64		xact_commit;	/* captured transaction completions */
+	uint64		xact_abort;
+	uint64		xact_prepare;
 	PwetTotal	flat[PWET_NUM_EVENTS];
 	PwetLedgerCell cells[FLEXIBLE_ARRAY_MEMBER];	/* hash_size cells */
 } PwetLedger;
-
-typedef struct PwetTotalsHeader
-{
-	uint64		incarnation;	/* random, new at every shared memory init */
-} PwetTotalsHeader;
 
 /* Sum over all ledgers; see pwet_totals_scan(). */
 typedef struct PwetTotalsScan
 {
 	PwetTotal	lwlock_overflow;
 	PwetTotal	flat_overflow;
+	uint64		xact_commit;
+	uint64		xact_abort;
+	uint64		xact_prepare;
 	int64		invalid_ledgers;
 	bool		sum_overflow;	/* some sum exceeded what bigint can hold */
 	bool		overflow_sum_overflow;	/* ... one of the two overflow pairs */
 	PwetTotal	flat[PWET_NUM_EVENTS];
 	PwetTotal	tranche[PWET_NUM_TRANCHE_IDS];
 } PwetTotalsScan;
+
+/*
+ * Instance-wide control, protected (except incarnation, written once) by the
+ * totals lock: the reset generation, the wall-clock times of the scan that
+ * produced the baseline, and the baseline itself.  The lock protects the
+ * baseline, never the ledgers.
+ */
+typedef struct PwetTotalsHeader
+{
+	uint64		incarnation;	/* random, new at every shared memory init */
+	uint64		reset_generation;
+	TimestampTz reset_scan_start;	/* 0 until the first reset */
+	TimestampTz reset_scan_end;
+	PwetTotalsScan baseline;
+#ifdef USE_ASSERT_CHECKING
+	/* Test-only: suspend one reader between its scan and its generation check. */
+	pg_atomic_uint32 test_arm;
+	pg_atomic_uint32 test_waiting;
+	pg_atomic_uint32 test_release;
+	pg_atomic_uint32 test_retries;
+#endif
+} PwetTotalsHeader;
+
+/* What a read of the totals knows besides the sums. */
+typedef struct PwetReadMeta
+{
+	uint64		generation;
+	TimestampTz scan_start;
+	TimestampTz scan_end;
+	TimestampTz reset_scan_start;
+	TimestampTz reset_scan_end;
+} PwetReadMeta;
 
 typedef struct PwetPgStatShared
 {
@@ -617,6 +657,7 @@ static uint32 pwet_last_reset_generation;
  * pwet_ledger_closed is set by the exit drain and never cleared.
  */
 static PwetTotalsHeader *pwet_totals_header;
+static LWLock *pwet_totals_lock;
 static char *pwet_ledgers;
 static Size pwet_ledger_bytes;
 static Size pwet_ledger_stride;
@@ -1515,6 +1556,16 @@ pwet_totals_scan(PwetTotalsScan *scan)
 		if (!pwet_total_sum(&scan->lwlock_overflow, &copy->lwlock_overflow) ||
 			!pwet_total_sum(&scan->flat_overflow, &copy->flat_overflow))
 			scan->sum_overflow = scan->overflow_sum_overflow = true;
+		if (copy->xact_commit > (uint64) PG_INT64_MAX - scan->xact_commit ||
+			copy->xact_abort > (uint64) PG_INT64_MAX - scan->xact_abort ||
+			copy->xact_prepare > (uint64) PG_INT64_MAX - scan->xact_prepare)
+			scan->sum_overflow = true;
+		else
+		{
+			scan->xact_commit += copy->xact_commit;
+			scan->xact_abort += copy->xact_abort;
+			scan->xact_prepare += copy->xact_prepare;
+		}
 		for (i = 0; i < PWET_NUM_EVENTS; i++)
 			if (copy->flat[i].calls != 0 &&
 				!pwet_total_sum(&scan->flat[i], &copy->flat[i]))
@@ -1532,6 +1583,80 @@ pwet_totals_scan(PwetTotalsScan *scan)
 		}
 	}
 	pfree(copy);
+}
+
+/* a -= b for one pair; false if it would go negative. */
+static bool
+pwet_total_sub(PwetTotal *a, const PwetTotal *b)
+{
+	if (a->calls < b->calls || a->total_ns < b->total_ns)
+		return false;
+	a->calls -= b->calls;
+	a->total_ns -= b->total_ns;
+	return true;
+}
+
+/* Subtract a baseline from a scan; false if anything would go negative. */
+static bool
+pwet_totals_subtract(PwetTotalsScan *scan, const PwetTotalsScan *base)
+{
+	bool		ok = true;
+	int			i;
+
+	ok &= pwet_total_sub(&scan->lwlock_overflow, &base->lwlock_overflow);
+	ok &= pwet_total_sub(&scan->flat_overflow, &base->flat_overflow);
+	if (scan->xact_commit < base->xact_commit ||
+		scan->xact_abort < base->xact_abort ||
+		scan->xact_prepare < base->xact_prepare)
+		ok = false;
+	else
+	{
+		scan->xact_commit -= base->xact_commit;
+		scan->xact_abort -= base->xact_abort;
+		scan->xact_prepare -= base->xact_prepare;
+	}
+	for (i = 0; i < PWET_NUM_EVENTS; i++)
+		ok &= pwet_total_sub(&scan->flat[i], &base->flat[i]);
+	for (i = 0; i < PWET_NUM_TRANCHE_IDS; i++)
+		ok &= pwet_total_sub(&scan->tranche[i], &base->tranche[i]);
+	return ok;
+}
+
+/*
+ * Count one captured transaction completion in this process's ledger, inside
+ * the write bracket; a counter that would exceed bigint marks the ledger
+ * invalid, like the wait pairs.  Not reachable from a wait-event hook.
+ */
+static void
+pwet_ledger_count_xact(PwetLedger *l, XactEvent event)
+{
+	uint64	   *counter;
+
+	switch (event)
+	{
+		case XACT_EVENT_COMMIT:
+			counter = &l->xact_commit;
+			break;
+		case XACT_EVENT_ABORT:
+			counter = &l->xact_abort;
+			break;
+		case XACT_EVENT_PREPARE:
+			counter = &l->xact_prepare;
+			break;
+		default:
+			return;
+	}
+
+	pwet_ledger_begin(l);
+	if (*counter >= (uint64) PG_INT64_MAX)
+	{
+		l->invalid = 1;
+		if (l->invalid_events < PG_UINT32_MAX)
+			l->invalid_events++;
+	}
+	else
+		(*counter)++;
+	pwet_ledger_end(l);
 }
 
 /* Initialize a freshly created control table: mark every slot empty. */
@@ -1617,6 +1742,7 @@ pwet_shmem_request(void)
 
 	RequestAddinShmemSpace(pwet_control_size(PWET_NUM_SLOTS));
 	RequestNamedLWLockTranche(PWET_CONTROL_NAME, 1);
+	RequestNamedLWLockTranche(PWET_TOTALS_LOCK_NAME, 1);
 	RequestAddinShmemSpace(sizeof(PwetRegionHeader));
 	RequestAddinShmemSpace(sizeof(PwetTotalsHeader));
 	RequestAddinShmemSpace(mul_size(PWET_NUM_SLOTS,
@@ -1681,6 +1807,7 @@ pwet_shmem_startup(void)
 	pwet_server_region = NULL;
 
 	pwet_lock = &(GetNamedLWLockTranche(PWET_CONTROL_NAME))->lock;
+	pwet_totals_lock = &(GetNamedLWLockTranche(PWET_TOTALS_LOCK_NAME))->lock;
 
 	pwet_ctl = (PwetSlot *) ShmemInitStruct(PWET_CONTROL_STRUCT_NAME,
 											pwet_control_size(PWET_NUM_SLOTS),
@@ -1711,7 +1838,14 @@ pwet_shmem_startup(void)
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("could not generate a random incarnation for wait event totals")));
+		memset(pwet_totals_header, 0, sizeof(PwetTotalsHeader));
 		pwet_totals_header->incarnation = incarnation;
+#ifdef USE_ASSERT_CHECKING
+		pg_atomic_init_u32(&pwet_totals_header->test_arm, 0);
+		pg_atomic_init_u32(&pwet_totals_header->test_waiting, 0);
+		pg_atomic_init_u32(&pwet_totals_header->test_release, 0);
+		pg_atomic_init_u32(&pwet_totals_header->test_retries, 0);
+#endif
 	}
 
 	pwet_ledgers = (char *) ShmemInitStruct(PWET_LEDGERS_NAME,
@@ -2476,6 +2610,22 @@ pwet_marker_txn_abort(void)
 static void
 pwet_xact_callback(XactEvent event, void *arg)
 {
+	/*
+	 * Count the transaction completion first, if capture is on right now.
+	 * The callback runs before end-of-transaction GUC restoration, so the
+	 * setting in effect is the transaction's own (a SET LOCAL one included).
+	 * Parallel workers are skipped: they also run ordinary initialization
+	 * transactions, and the leader counts the query's transaction.  Only the
+	 * counters change here; a pending wait is not flushed.
+	 */
+	if (pwet_capture != PWET_CAPTURE_OFF && !IsParallelWorker())
+	{
+		PwetLedger *ledger = pwet_get_my_ledger();
+
+		if (ledger != NULL)
+			pwet_ledger_count_xact(ledger, event);
+	}
+
 	if (pwet_capture != PWET_CAPTURE_TRACE || pwet_my_trace == NULL)
 		return;
 
@@ -4341,6 +4491,14 @@ typedef struct PwetCustomName
 	const char *name;
 } PwetCustomName;
 
+/* Lazily built table of the registered custom event names. */
+typedef struct PwetNameContext
+{
+	PwetCustomName *custom;
+	int			ncustom;
+	bool		have_custom;
+} PwetNameContext;
+
 static int
 pwet_collect_custom_names(PwetCustomName **map)
 {
@@ -4375,6 +4533,68 @@ pwet_collect_custom_names(PwetCustomName **map)
 	return n;
 }
 
+/* Type and name of an event code that has captured waits. */
+static void
+pwet_event_names(uint32 info, PwetNameContext *ctx, const char **type,
+				 const char **name)
+{
+	*type = pgstat_get_wait_event_type(info);
+	*name = NULL;
+
+	/*
+	 * The unnamed built-in Extension event is not in the custom-name table;
+	 * core resolves it as "Extension".
+	 */
+	if (info == PG_WAIT_EXTENSION)
+		*name = "Extension";
+	else if ((info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_EXTENSION ||
+			 (info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_INJECTIONPOINT)
+	{
+		int			k;
+
+		if (!ctx->have_custom)
+		{
+			ctx->ncustom = pwet_collect_custom_names(&ctx->custom);
+			ctx->have_custom = true;
+		}
+		for (k = 0; k < ctx->ncustom; k++)
+			if (ctx->custom[k].info == info)
+				*name = ctx->custom[k].name;
+	}
+	else
+		*name = pgstat_get_wait_event(info);
+
+	if (*name == NULL)
+		*name = psprintf("unknown_%u", info & PWET_WAIT_EVENT_ID_MASK);
+}
+
+/*
+ * Iterate over the events of a scan that have calls, in key order: flat
+ * events by index, then LWLock tranches by id.  The callback gets the code.
+ */
+typedef void (*PwetEventVisitor) (uint32 info, const PwetTotal *t, void *arg);
+
+static void
+pwet_visit_events(const PwetTotalsScan *scan, PwetEventVisitor visit, void *arg)
+{
+	int			i;
+	int			j;
+	int			id;
+
+	for (i = 0; i < PWET_DENSE_CLASSES; i++)
+	{
+		uint32		class_id = pwet_dense_to_classid[i];
+		int			base = pwet_class_offset[i];
+
+		for (j = 0; j < pwet_class_nevents[i]; j++)
+			if (scan->flat[base + j].calls != 0)
+				visit((class_id << 24) | (uint32) j, &scan->flat[base + j], arg);
+	}
+	for (id = 0; id < PWET_NUM_TRANCHE_IDS; id++)
+		if (scan->tranche[id].calls != 0)
+			visit(PG_WAIT_LWLOCK | (uint32) id, &scan->tranche[id], arg);
+}
+
 static void
 pwet_totals_put_row(ReturnSetInfo *rsinfo, const char *type, const char *name,
 					int64 key, const PwetTotal *t)
@@ -4395,31 +4615,112 @@ pwet_totals_put_row(ReturnSetInfo *rsinfo, const char *type, const char *name,
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 }
 
-/*
- * SQL function: pg_stat_get_wait_event_totals()
- *
- * One row per event that has completed at least one captured wait since
- * the server started, summed over all processes that ever ran, plus the
- * two overflow rows (always present).  ERRORs if any contributing ledger is
- * invalid or a sum cannot be represented.
- */
-Datum
-pg_stat_get_wait_event_totals(PG_FUNCTION_ARGS)
+typedef struct PwetRowsArg
 {
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	PwetTotalsScan *scan;
-	PwetCustomName *custom = NULL;
-	int			ncustom = 0;
-	bool		have_custom = false;
-	int			i;
-	int			j;
-	int			id;
+	ReturnSetInfo *rsinfo;
+	PwetNameContext names;
+} PwetRowsArg;
 
-	InitMaterializedSRF(fcinfo, 0);
+static void
+pwet_totals_row_visitor(uint32 info, const PwetTotal *t, void *arg)
+{
+	PwetRowsArg *ra = (PwetRowsArg *) arg;
+	const char *type;
+	const char *name;
 
-	scan = palloc0(sizeof(PwetTotalsScan));
-	pwet_totals_scan(scan);
+	pwet_event_names(info, &ra->names, &type, &name);
+	pwet_totals_put_row(ra->rsinfo, type, name, (int64) info, t);
+}
 
+/*
+ * The totals since the last reset: the sum over all ledgers minus the
+ * baseline the last reset published.
+ *
+ * Read the generation under a short shared lock, scan without the lock (the
+ * scan is interruptible and takes as long as it takes), then take the lock
+ * again: if the generation moved, a reset published a new baseline during
+ * the scan, so start over; otherwise subtract the baseline, which cannot
+ * change while the lock is held.  The lock protects the baseline, not the
+ * coherence of the ledgers.  scan_start/scan_end are wall-clock times around
+ * the scan that produced the result.  *negative is set if a pair came out
+ * negative after subtraction, which only a bug could cause; callers decide
+ * whether that is an error.
+ */
+#ifdef USE_ASSERT_CHECKING
+/*
+ * Test-only: if armed, the next reader to get here waits (interruptibly,
+ * holding no lock) until released, so a test can publish a reset while a
+ * scan is in flight.
+ */
+static void
+pwet_test_read_barrier(void)
+{
+	uint32		expected = 1;
+
+	if (pg_atomic_compare_exchange_u32(&pwet_totals_header->test_arm,
+									   &expected, 0))
+	{
+		pg_atomic_write_u32(&pwet_totals_header->test_waiting, 1);
+		PG_TRY();
+		{
+			while (pg_atomic_read_u32(&pwet_totals_header->test_release) == 0)
+			{
+				CHECK_FOR_INTERRUPTS();
+				pg_usleep(1000);
+			}
+		}
+		PG_FINALLY();
+		{
+			/* also when canceled: the flag must not stay set */
+			pg_atomic_write_u32(&pwet_totals_header->test_waiting, 0);
+		}
+		PG_END_TRY();
+	}
+}
+#endif
+
+static void
+pwet_totals_read(PwetTotalsScan *scan, PwetReadMeta *meta, bool *negative)
+{
+	for (;;)
+	{
+		uint64		gen;
+
+		LWLockAcquire(pwet_totals_lock, LW_SHARED);
+		gen = pwet_totals_header->reset_generation;
+		meta->reset_scan_start = pwet_totals_header->reset_scan_start;
+		meta->reset_scan_end = pwet_totals_header->reset_scan_end;
+		LWLockRelease(pwet_totals_lock);
+
+		memset(scan, 0, sizeof(PwetTotalsScan));
+		meta->scan_start = GetCurrentTimestamp();
+		pwet_totals_scan(scan);
+		meta->scan_end = GetCurrentTimestamp();
+#ifdef USE_ASSERT_CHECKING
+		pwet_test_read_barrier();
+#endif
+
+		LWLockAcquire(pwet_totals_lock, LW_SHARED);
+		if (pwet_totals_header->reset_generation == gen)
+		{
+			*negative = !scan->sum_overflow &&
+				!pwet_totals_subtract(scan, &pwet_totals_header->baseline);
+			LWLockRelease(pwet_totals_lock);
+			meta->generation = gen;
+			return;
+		}
+		LWLockRelease(pwet_totals_lock);
+#ifdef USE_ASSERT_CHECKING
+		pg_atomic_fetch_add_u32(&pwet_totals_header->test_retries, 1);
+#endif
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/* Raise the errors totals, snapshot and reset share. */
+static void
+pwet_totals_check(const PwetTotalsScan *scan, bool negative)
+{
 	if (scan->invalid_ledgers > 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -4430,62 +4731,39 @@ pg_stat_get_wait_event_totals(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("wait event totals exceed the bigint range")));
+	if (negative)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("wait event totals went below the reset baseline"),
+				 errdetail("This is a bug: lifetime ledgers never decrease.")));
+}
 
-	for (i = 0; i < PWET_DENSE_CLASSES; i++)
-	{
-		uint32		class_id = pwet_dense_to_classid[i];
-		int			base = pwet_class_offset[i];
+/*
+ * SQL function: pg_stat_get_wait_event_totals()
+ *
+ * One row per event that has completed at least one captured wait since
+ * the last reset (or server start), summed over all processes that ever ran,
+ * plus the two overflow rows (always present).  ERRORs if any contributing
+ * ledger is invalid or a sum cannot be represented.
+ */
+Datum
+pg_stat_get_wait_event_totals(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	PwetTotalsScan *scan;
+	PwetReadMeta meta;
+	PwetRowsArg ra;
+	bool		negative;
 
-		for (j = 0; j < pwet_class_nevents[i]; j++)
-		{
-			PwetTotal  *t = &scan->flat[base + j];
-			uint32		info = (class_id << 24) | (uint32) j;
-			const char *name = NULL;
+	InitMaterializedSRF(fcinfo, 0);
 
-			if (t->calls == 0)
-				continue;
+	scan = palloc(sizeof(PwetTotalsScan));
+	pwet_totals_read(scan, &meta, &negative);
+	pwet_totals_check(scan, negative);
 
-			/*
-			 * The unnamed built-in Extension event is not in the custom-name
-			 * table; core resolves it as "Extension".
-			 */
-			if (info == PG_WAIT_EXTENSION)
-				name = "Extension";
-			else if ((info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_EXTENSION ||
-					 (info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_INJECTIONPOINT)
-			{
-				int			k;
-
-				if (!have_custom)
-				{
-					ncustom = pwet_collect_custom_names(&custom);
-					have_custom = true;
-				}
-				for (k = 0; k < ncustom; k++)
-					if (custom[k].info == info)
-						name = custom[k].name;
-			}
-			else
-				name = pgstat_get_wait_event(info);
-
-			if (name == NULL)
-				name = psprintf("unknown_%u", info & PWET_WAIT_EVENT_ID_MASK);
-
-			pwet_totals_put_row(rsinfo, pgstat_get_wait_event_type(info),
-								name, (int64) info, t);
-		}
-	}
-
-	for (id = 0; id < PWET_NUM_TRANCHE_IDS; id++)
-	{
-		PwetTotal  *t = &scan->tranche[id];
-		uint32		info = PG_WAIT_LWLOCK | (uint32) id;
-
-		if (t->calls == 0)
-			continue;
-		pwet_totals_put_row(rsinfo, "LWLock", pgstat_get_wait_event(info),
-							(int64) info, t);
-	}
+	memset(&ra, 0, sizeof(ra));
+	ra.rsinfo = rsinfo;
+	pwet_visit_events(scan, pwet_totals_row_visitor, &ra);
 
 	pwet_totals_put_row(rsinfo, "LWLock", "(overflow)",
 						PWET_KEY_LWLOCK_OVERFLOW, &scan->lwlock_overflow);
@@ -4538,25 +4816,31 @@ pwet_slot_owner_is_live(int slot)
  * One row of bookkeeping: the incarnation (random, new for every shared
  * memory initialization, so a change means the totals restarted from zero),
  * the overflow pairs, the number of invalid ledgers, the number of ledger
- * slots, and the number of backends currently holding a collection payload
- * (advisory: read without a lock; exited processes are not counted).  Unlike the totals it never raises for
- * invalid accounting, so the diagnostics stay readable; an overflow column
- * whose sum cannot be a bigint is NULL.
+ * slots, the number of backends currently holding a collection payload
+ * (advisory: read without a lock; exited processes are not counted), the
+ * reset generation and the times of the last reset's scan, and the captured
+ * transaction completions.  Unlike the totals it never raises for invalid
+ * accounting, so the diagnostics stay readable; a column whose sum cannot be
+ * represented, or that came out negative, is NULL.
  */
 Datum
 pg_stat_get_wait_event_totals_info(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	PwetTotalsScan *scan;
-	Datum		values[8];
-	bool		nulls[8] = {0};
+	PwetReadMeta meta;
+	Datum		values[14];
+	bool		nulls[14] = {0};
 	int			capturing = 0;
+	bool		negative;
+	bool		unusable;
 	int			i;
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	scan = palloc0(sizeof(PwetTotalsScan));
-	pwet_totals_scan(scan);
+	scan = palloc(sizeof(PwetTotalsScan));
+	pwet_totals_read(scan, &meta, &negative);
+	unusable = scan->sum_overflow || negative;
 
 	for (i = 0; i < PWET_NUM_SLOTS; i++)
 		if (pwet_slot_owner_is_live(i))
@@ -4564,7 +4848,7 @@ pg_stat_get_wait_event_totals_info(PG_FUNCTION_ARGS)
 
 	values[0] = CStringGetTextDatum(psprintf("%016" PRIx64,
 											 pwet_totals_header->incarnation));
-	if (scan->overflow_sum_overflow)
+	if (unusable)
 		nulls[1] = nulls[2] = nulls[3] = nulls[4] = true;
 	else
 	{
@@ -4578,10 +4862,204 @@ pg_stat_get_wait_event_totals_info(PG_FUNCTION_ARGS)
 	values[5] = Int64GetDatum(scan->invalid_ledgers);
 	values[6] = Int32GetDatum(PWET_NUM_SLOTS);
 	values[7] = Int32GetDatum(capturing);
+	values[8] = Int64GetDatum((int64) meta.generation);
+	if (meta.reset_scan_end == 0)
+		nulls[9] = nulls[10] = true;
+	else
+	{
+		values[9] = TimestampTzGetDatum(meta.reset_scan_end);
+		values[10] = TimestampTzGetDatum(meta.reset_scan_start);
+	}
+	if (unusable)
+		nulls[11] = nulls[12] = nulls[13] = true;
+	else
+	{
+		values[11] = Int64GetDatum((int64) scan->xact_commit);
+		values[12] = Int64GetDatum((int64) scan->xact_abort);
+		values[13] = Int64GetDatum((int64) scan->xact_prepare);
+	}
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
 	pfree(scan);
 	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_totals()
+ *
+ * Superuser only.  Lifetime ledgers are never modified.  A reset scans all
+ * ledgers without the control lock into scratch, then takes the lock
+ * exclusively, checks that no other reset published meanwhile (else scans
+ * again), publishes the scan as the new baseline together with its
+ * wall-clock times, and bumps the generation.  It is therefore a scan-based
+ * cut, not an instantaneous global one: a completion that had not been
+ * flushed into its ledger when the scan read that ledger is counted after
+ * the reset.  Refuses to run while any ledger is invalid.
+ */
+Datum
+pg_stat_reset_wait_event_totals(PG_FUNCTION_ARGS)
+{
+	PwetTotalsScan *scan;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset wait event totals"),
+				 errdetail("Only roles with the %s attribute may reset wait event totals.",
+						   "SUPERUSER")));
+
+	scan = palloc(sizeof(PwetTotalsScan));
+	for (;;)
+	{
+		uint64		gen;
+		TimestampTz start;
+		TimestampTz end;
+
+		LWLockAcquire(pwet_totals_lock, LW_SHARED);
+		gen = pwet_totals_header->reset_generation;
+		LWLockRelease(pwet_totals_lock);
+
+		memset(scan, 0, sizeof(PwetTotalsScan));
+		start = GetCurrentTimestamp();
+		pwet_totals_scan(scan);
+		end = GetCurrentTimestamp();
+
+		/* Invalid or unrepresentable accounting cannot be a baseline. */
+		pwet_totals_check(scan, false);
+
+		LWLockAcquire(pwet_totals_lock, LW_EXCLUSIVE);
+		if (pwet_totals_header->reset_generation == gen)
+		{
+			memcpy(&pwet_totals_header->baseline, scan, sizeof(PwetTotalsScan));
+			pwet_totals_header->reset_scan_start = start;
+			pwet_totals_header->reset_scan_end = end;
+			pwet_totals_header->reset_generation = gen + 1;
+			LWLockRelease(pwet_totals_lock);
+			break;
+		}
+		LWLockRelease(pwet_totals_lock);
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	pfree(scan);
+	PG_RETURN_VOID();
+}
+
+/* ---- snapshot ---- */
+
+static void
+pwet_json_key(JsonbInState *state, const char *key)
+{
+	JsonbValue	k;
+
+	k.type = jbvString;
+	k.val.string.val = pstrdup(key);
+	k.val.string.len = strlen(key);
+	pushJsonbValue(state, WJB_KEY, &k);
+}
+
+static void
+pwet_json_int(JsonbInState *state, const char *key, int64 v)
+{
+	JsonbValue	val;
+
+	pwet_json_key(state, key);
+	val.type = jbvNumeric;
+	val.val.numeric = int64_to_numeric(v);
+	pushJsonbValue(state, WJB_VALUE, &val);
+}
+
+static void
+pwet_json_str(JsonbInState *state, const char *key, const char *v)
+{
+	JsonbValue	val;
+
+	pwet_json_key(state, key);
+	val.type = jbvString;
+	val.val.string.val = pstrdup(v);
+	val.val.string.len = strlen(v);
+	pushJsonbValue(state, WJB_VALUE, &val);
+}
+
+static void
+pwet_json_pair(JsonbInState *state, const char *key, const PwetTotal *t)
+{
+	pwet_json_key(state, key);
+	pushJsonbValue(state, WJB_BEGIN_OBJECT, NULL);
+	pwet_json_int(state, "calls", (int64) t->calls);
+	pwet_json_int(state, "total_ns", (int64) t->total_ns);
+	pushJsonbValue(state, WJB_END_OBJECT, NULL);
+}
+
+typedef struct PwetSnapshotArg
+{
+	JsonbInState *state;
+	PwetNameContext names;
+} PwetSnapshotArg;
+
+static void
+pwet_snapshot_visitor(uint32 info, const PwetTotal *t, void *arg)
+{
+	PwetSnapshotArg *sa = (PwetSnapshotArg *) arg;
+	const char *type;
+	const char *name;
+
+	pwet_event_names(info, &sa->names, &type, &name);
+	pushJsonbValue(sa->state, WJB_BEGIN_OBJECT, NULL);
+	pwet_json_int(sa->state, "event_key", (int64) info);
+	pwet_json_str(sa->state, "type", type);
+	pwet_json_str(sa->state, "name", name);
+	pwet_json_int(sa->state, "calls", (int64) t->calls);
+	pwet_json_int(sa->state, "total_ns", (int64) t->total_ns);
+	pushJsonbValue(sa->state, WJB_END_OBJECT, NULL);
+}
+
+/*
+ * SQL function: pg_wait_event_snapshot() RETURNS jsonb
+ *
+ * The totals since the last reset as one document with exact integers:
+ * schema_version, incarnation, reset_generation, scan_start and scan_end
+ * (wall-clock microseconds since 2000-01-01, taken before and after the
+ * scan), the transaction counters, the two overflow pairs and the events
+ * [{event_key, type, name, calls, total_ns}].  Valid with zero events.
+ * Errors like the totals view.
+ */
+Datum
+pg_wait_event_snapshot(PG_FUNCTION_ARGS)
+{
+	PwetTotalsScan *scan = palloc(sizeof(PwetTotalsScan));
+	PwetReadMeta meta;
+	bool		negative;
+	JsonbInState state;
+	PwetSnapshotArg sa;
+
+	pwet_totals_read(scan, &meta, &negative);
+	pwet_totals_check(scan, negative);
+
+	memset(&state, 0, sizeof(state));
+	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	pwet_json_int(&state, "schema_version", 1);
+	pwet_json_str(&state, "incarnation",
+				  psprintf("%016" PRIx64, pwet_totals_header->incarnation));
+	pwet_json_int(&state, "reset_generation", (int64) meta.generation);
+	pwet_json_int(&state, "scan_start", (int64) meta.scan_start);
+	pwet_json_int(&state, "scan_end", (int64) meta.scan_end);
+	pwet_json_int(&state, "xact_commit", (int64) scan->xact_commit);
+	pwet_json_int(&state, "xact_abort", (int64) scan->xact_abort);
+	pwet_json_int(&state, "xact_prepare", (int64) scan->xact_prepare);
+	pwet_json_pair(&state, "lwlock_overflow", &scan->lwlock_overflow);
+	pwet_json_pair(&state, "flat_overflow", &scan->flat_overflow);
+
+	pwet_json_key(&state, "events");
+	pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+	sa.state = &state;
+	memset(&sa.names, 0, sizeof(sa.names));
+	pwet_visit_events(scan, pwet_snapshot_visitor, &sa);
+	pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+
+	pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+	pfree(scan);
+	PG_RETURN_POINTER(JsonbValueToJsonb(state.result));
 }
 
 /*
@@ -5616,10 +6094,90 @@ pwet_test_waits(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(pwet_test_ledger_dictionary);
 PG_FUNCTION_INFO_V1(pwet_test_slot_counted);
+PG_FUNCTION_INFO_V1(pwet_test_read_barrier_arm);
+PG_FUNCTION_INFO_V1(pwet_test_read_barrier_waiting);
+PG_FUNCTION_INFO_V1(pwet_test_read_barrier_release);
+PG_FUNCTION_INFO_V1(pwet_test_read_retries);
+PG_FUNCTION_INFO_V1(pwet_test_totals_absolute);
 PG_FUNCTION_INFO_V1(pwet_test_ledger_set);
 PG_FUNCTION_INFO_V1(pwet_test_ledger_changecount);
 PG_FUNCTION_INFO_V1(pwet_test_ledger_torn_read);
 PG_FUNCTION_INFO_V1(pwet_test_ledger_odd_read);
+
+/* Arm the reader barrier: the next totals reader suspends after its scan. */
+Datum
+pwet_test_read_barrier_arm(PG_FUNCTION_ARGS)
+{
+	pg_atomic_write_u32(&pwet_totals_header->test_release, 0);
+	pg_atomic_write_u32(&pwet_totals_header->test_waiting, 0);
+	pg_atomic_write_u32(&pwet_totals_header->test_arm, 1);
+	PG_RETURN_VOID();
+}
+
+Datum
+pwet_test_read_barrier_waiting(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(pg_atomic_read_u32(&pwet_totals_header->test_waiting) != 0);
+}
+
+Datum
+pwet_test_read_barrier_release(PG_FUNCTION_ARGS)
+{
+	pg_atomic_write_u32(&pwet_totals_header->test_release, 1);
+	PG_RETURN_VOID();
+}
+
+/* How many times a reader found the generation moved and started over. */
+Datum
+pwet_test_read_retries(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64((int64) pg_atomic_read_u32(&pwet_totals_header->test_retries));
+}
+
+/*
+ * pwet_test_totals_absolute(event_key bigint, OUT absolute bigint, OUT baseline bigint)
+ *
+ * The sum of all ledgers for an event (no baseline subtracted) and the
+ * baseline of the last reset, so a test can check conservation: absolute
+ * equals everything emitted, and the totals view shows absolute - baseline.
+ */
+Datum
+pwet_test_totals_absolute(PG_FUNCTION_ARGS)
+{
+	uint32		key = (uint32) PG_GETARG_INT64(0);
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+	PwetTotalsScan *scan = palloc0(sizeof(PwetTotalsScan));
+	int			idx = pwet_timing_index(key);
+	const PwetTotal *base;
+	const PwetTotal *cur;
+	int64		basecalls;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	pwet_totals_scan(scan);
+	PWET_TEST_CHECK(!scan->sum_overflow);
+
+	LWLockAcquire(pwet_totals_lock, LW_SHARED);
+	if (idx == PWET_IDX_LWLOCK)
+	{
+		cur = &scan->tranche[key & PWET_WAIT_EVENT_ID_MASK];
+		base = &pwet_totals_header->baseline.tranche[key & PWET_WAIT_EVENT_ID_MASK];
+	}
+	else
+	{
+		PWET_TEST_CHECK(idx >= 0);
+		cur = &scan->flat[idx];
+		base = &pwet_totals_header->baseline.flat[idx];
+	}
+	basecalls = (int64) base->calls;
+	LWLockRelease(pwet_totals_lock);
+
+	values[0] = Int64GetDatum((int64) cur->calls);
+	values[1] = Int64GetDatum(basecalls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
 
 /* pwet_test_slot_counted(slot int) returns bool: would capturing_backends count it? */
 Datum

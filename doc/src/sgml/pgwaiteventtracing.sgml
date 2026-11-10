@@ -1930,10 +1930,9 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
    live collecting backends and vanish when a backend exits, resets or stops
    collecting, the totals sum a <firstterm>lifetime ledger</firstterm> kept
    per process slot, so they include processes that have already exited.
-   Version 1.1 is not final: the transaction counters, reset, snapshot, diff
-   and report functions described in the second half of this section are
-   added to the same <literal>1.0--1.1</literal> update script before the
-   version is released.
+   The second half of this section describes transaction counters, reset,
+   and snapshot, diff and report functions, all part of the same
+   <literal>1.0--1.1</literal> update script.
   </para>
 
   <sect3 id="pgwaiteventtracing-totals-views">
@@ -1965,13 +1964,21 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
     <structfield>flat_overflow_calls</structfield>,
     <structfield>flat_overflow_time_ms</structfield>),
     <structfield>invalid_ledgers</structfield>,
-    <structfield>ledger_slots</structfield> and
+    <structfield>ledger_slots</structfield>,
     <structfield>capturing_backends</structfield> (advisory, read without a
     lock; exited processes are not counted: a server-side process that
     exits normally withdraws its claim on its slot.  In the rare case that
     such a process fails during start-up before it has registered its exit
     cleanup and a later process reuses the same process id in the same slot,
-    that slot can still be counted).  A counter that would exceed the <type>bigint</type> range marks
+    that slot can still be counted),
+    <structfield>reset_generation</structfield>,
+    <structfield>stats_reset</structfield> and
+    <structfield>reset_scan_start</structfield> (the wall-clock times
+    around the scan of the last reset; null before the first one) and the
+    captured transaction completions
+    <structfield>xact_commit</structfield>,
+    <structfield>xact_abort</structfield> and
+    <structfield>xact_prepare</structfield>.  A counter that would exceed the <type>bigint</type> range marks
     its ledger invalid instead of wrapping; a reset cannot repair that, and
     the totals view raises an error while any ledger is invalid or a sum
     exceeds the range.  The information view still shows the diagnostics
@@ -2028,7 +2035,114 @@ AFTER_STATEMENT  --(QueryStart | UtilityStart)-->  OPEN   (no Idle emitted)
     with <literal>max_connections</literal> of 1000.  Reading the totals
     allocates about 1 MiB of scratch (a counter pair for each of the 65536
     possible tranche ids) plus one ledger copy, and copies every slot's
-    ledger once; it holds no lock while doing so.
+    ledger once; it holds no lock while doing so.  The reset baseline is one
+    more such 1 MiB structure, allocated once in shared memory together with
+    the reset control lock.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-totals-xacts">
+   <title>Transaction Counters</title>
+   <para>
+    <structfield>xact_commit</structfield>,
+    <structfield>xact_abort</structfield> and
+    <structfield>xact_prepare</structfield> count
+    <firstterm>captured transaction completions</firstterm>: the
+    transaction commit, abort and prepare events of top-level transactions
+    that completed while <varname>pg_wait_event_tracing.capture</varname>
+    was <literal>stats</literal> or <literal>trace</literal> in the
+    process.  The setting is the one in effect when the transaction ends, so
+    a <literal>SET LOCAL</literal> value counts, for commit and abort alike,
+    and a transaction in which capture was switched on or off counts
+    according to the final setting.  Subtransactions (savepoints) are not
+    counted.  The transactions that initialize a connection are counted
+    when capture is enabled for it from the start.  Parallel workers are
+    never counted (they also run ordinary transactions of their own); the
+    leader counts the query's transaction.
+    <command>COMMIT PREPARED</command> and <command>ROLLBACK
+    PREPARED</command> are the resolving session's own transaction, which
+    commits, and count as a commit there, not as the original prepared
+    transaction.  Counting only updates counters; it does not publish a
+    pending wait.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-totals-reset">
+   <title>Reset</title>
+   <para>
+    <function>pg_stat_reset_wait_event_totals()</function> (superuser only)
+    makes the views start from zero again.  It does not modify any ledger:
+    it scans all of them without holding a lock, then publishes the scan as
+    a baseline under a dedicated lightweight lock, together with the
+    wall-clock times of the scan, and increments
+    <structfield>reset_generation</structfield>.  The views subtract the
+    baseline.  This is a scan-based cut, not an instantaneous global one: a
+    wait that completed before the reset but had not yet been published
+    into its ledger when the scan read that ledger (see above) is counted
+    after the reset.  Resetting is refused while any ledger is invalid.
+    The per-backend reset functions never change the totals, and this reset
+    never touches the per-backend views.
+   </para>
+  </sect3>
+
+  <sect3 id="pgwaiteventtracing-totals-reports">
+   <title>Snapshots, Diffs and Reports</title>
+   <para>
+    <function>pg_wait_event_snapshot()</function> returns the totals as one
+    <type>jsonb</type> document with exact integers:
+    <literal>schema_version</literal> (1), <literal>incarnation</literal>,
+    <literal>reset_generation</literal>, <literal>scan_start</literal> and
+    <literal>scan_end</literal> (wall-clock microseconds since 2000-01-01
+    UTC, read before and after the scan), the transaction counters, the two
+    overflow pairs and <literal>events</literal>, an array of
+    <literal>{event_key, type, name, calls, total_ns}</literal>.  It is
+    valid with no events.
+   </para>
+   <para>
+    <function>pg_wait_event_diff(a, b, include_idle)</function> compares two
+    snapshots and returns, for each event that changed (the two overflow
+    rows included): <structfield>event_key</structfield>,
+    <structfield>wait_event_type</structfield>,
+    <structfield>wait_event</structfield>, <structfield>waits</structfield>,
+    <structfield>wait_time_ms</structfield>,
+    <structfield>ms_per_wait</structfield> (wait_time_ms / waits),
+    <structfield>waits_per_xact</structfield> (waits / xacts),
+    <structfield>ms_per_xact</structfield> (wait_time_ms / xacts),
+    <structfield>interval_s</structfield> and
+    <structfield>xacts</structfield>.  <structfield>xacts</structfield> is
+    the increase of <structfield>xact_commit</structfield> plus
+    <structfield>xact_abort</structfield> between the snapshots, over all
+    processes (prepare is not counted); the ratios are null when their
+    denominator is zero.  Because the denominator is captured commits plus
+    aborts, <structfield>waits_per_xact</structfield> and
+    <structfield>ms_per_xact</structfield> are not numerically comparable to
+    per-transaction figures that count committed transactions only.  For example, 10 waits taking 5 ms in total during
+    2 transactions give <literal>waits_per_xact</literal> 5,
+    <literal>ms_per_xact</literal> 2.5 and <literal>ms_per_wait</literal>
+    0.5.  <structfield>interval_s</structfield> is the wall-clock distance
+    of the scan midpoints.  Rows with no change are omitted.  Unless
+    <parameter>include_idle</parameter> is true, events of the wait event
+    type <literal>Activity</literal> and the <literal>Client</literal> event
+    <literal>ClientRead</literal> are left out; the transaction denominator
+    is never filtered.  The function checks the schema version, that every
+    count is an integer in the <type>bigint</type> range, that event keys are
+    unique and within the unsigned 32-bit range, that both snapshots have the same incarnation and reset
+    generation, and that the second scan began after the first ended; an
+    event missing from the first snapshot counts from zero, one missing from
+    the second, or any decreasing counter, is an error.
+   </para>
+   <para>
+    <function>pg_wait_event_report(seconds, include_idle)</function> takes a
+    snapshot, sleeps, takes another and returns the diff, after a
+    <literal>NOTICE</literal> with the interval, the transactions and the
+    transactions per second (the only place a result without rows shows
+    them).  <parameter>seconds</parameter> must be at least 1.  Run it from a
+    session with capture off, otherwise the report's own sleep is counted.
+    <function>pg_wait_event_diff_check(a, b)</function> is the validation
+    step they share.  The extension is not relocatable, because these
+    functions call each other by the extension's schema name.  Updating an installed version 1.0 to 1.1 makes the
+    extension non-relocatable, so it stays in the schema it is installed in.  All of these are readable by
+    <literal>pg_read_all_stats</literal> only.
    </para>
   </sect3>
  </sect2>

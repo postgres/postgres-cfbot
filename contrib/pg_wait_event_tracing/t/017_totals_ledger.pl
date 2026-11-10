@@ -14,7 +14,7 @@
 #  - counters crossing 2^32, changecount rollover;
 #  - a counter that would exceed bigint makes the ledger invalid: totals
 #    ERROR, the info view still shows it, a per-backend reset-all does not
-#    repair it;
+#    repair it, and snapshot and reset ERROR too;
 #  - sums over ledgers that exceed bigint ERROR the totals.
 
 use strict;
@@ -125,6 +125,12 @@ $s->query_safe('SELECT test_wait_totals_emit(1)');
 ($ret, $out, $err) = $node->psql('postgres', 'SELECT * FROM pg_stat_wait_event_totals');
 isnt($ret, 0, 'totals ERROR with an invalid ledger');
 like($err, qr/lifetime ledger.*exceeded the bigint range/, 'clear message');
+foreach my $fn ('pg_wait_event_snapshot()', 'pg_stat_reset_wait_event_totals()')
+{
+	($ret, $out, $err) = $node->psql('postgres', "SELECT $fn");
+	isnt($ret, 0, "$fn ERRORs with an invalid ledger");
+	like($err, qr/exceeded the bigint range/, "$fn: clear message");
+}
 is($node->safe_psql('postgres', 'SELECT invalid_ledgers FROM pg_stat_wait_event_totals_info'),
 	'1', 'the info view still shows the invalid ledger');
 $node->safe_psql('postgres', 'SELECT pg_stat_reset_wait_event_timing_all()');

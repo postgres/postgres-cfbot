@@ -9,6 +9,10 @@
 -- other tests did to this server are asserted.
 --
 
+-- CI configurations may force debug_parallel_query = regress; keep this
+-- session's statements in this session.
+SET debug_parallel_query = off;
+
 -- Version handling: 1.0 has no totals objects, the update adds them, and a
 -- fresh install of the default version has the same objects.
 DROP EXTENSION IF EXISTS pg_wait_event_tracing;
@@ -100,5 +104,128 @@ SELECT count(*) > 0 AS totals_visible FROM pg_stat_wait_event_totals;
 SELECT count(*) AS info_visible FROM pg_stat_wait_event_totals_info;
 RESET ROLE;
 
+-- Phase 2 functions: PUBLIC denied, pg_read_all_stats may read, only a
+-- superuser may reset.
+SELECT p.proname,
+       has_function_privilege('regress_pwet_plain', p.oid, 'EXECUTE') AS plain,
+       has_function_privilege('regress_pwet_stats', p.oid, 'EXECUTE') AS stats
+FROM pg_proc p
+WHERE p.proname IN ('pg_wait_event_snapshot', 'pg_wait_event_diff',
+                    'pg_wait_event_diff_check', 'pg_wait_event_report',
+                    'pg_stat_reset_wait_event_totals')
+ORDER BY p.proname;
+
+SET ROLE regress_pwet_plain;
+SELECT pg_wait_event_snapshot();
+SELECT pg_stat_reset_wait_event_totals();
+RESET ROLE;
+SET ROLE regress_pwet_stats;
+SELECT jsonb_typeof(pg_wait_event_snapshot()) AS snapshot_type;
+SELECT pg_stat_reset_wait_event_totals();
+RESET ROLE;
+
 DROP ROLE regress_pwet_plain;
 DROP ROLE regress_pwet_stats;
+
+--
+-- Snapshot, diff and report (phase 2).
+--
+SELECT array_agg(k ORDER BY k) AS snapshot_keys
+FROM jsonb_object_keys(pg_wait_event_snapshot()) k;
+SELECT pg_wait_event_snapshot()->'schema_version' AS schema_version,
+       jsonb_typeof(pg_wait_event_snapshot()->'events') AS events_type,
+       (pg_wait_event_snapshot()->>'incarnation') = (SELECT incarnation FROM pg_stat_wait_event_totals_info) AS same_incarnation;
+
+-- Reset: the generation advances by one and the scan times appear.
+SELECT reset_generation AS gen_before FROM pg_stat_wait_event_totals_info \gset
+SELECT pg_stat_reset_wait_event_totals();
+SELECT reset_generation = :gen_before + 1 AS generation_advanced,
+       stats_reset IS NOT NULL AS has_stats_reset,
+       reset_scan_start <= stats_reset AS scan_times_ordered,
+       xact_commit >= 0 AND xact_abort >= 0 AND xact_prepare >= 0 AS xact_columns
+FROM pg_stat_wait_event_totals_info;
+
+-- Crafted snapshots.  a: 10 commits, 2 aborts; b: 15 and 3, i.e. 6 transactions.
+SELECT '{"schema_version":1,"incarnation":"00000000000000aa","reset_generation":0,
+ "scan_start":100,"scan_end":200,"xact_commit":10,"xact_abort":2,"xact_prepare":1,
+ "lwlock_overflow":{"calls":0,"total_ns":0},"flat_overflow":{"calls":0,"total_ns":0},
+ "events":[{"event_key":117440513,"type":"Extension","name":"X","calls":4,"total_ns":4000000},
+           {"event_key":83886080,"type":"Activity","name":"A","calls":5,"total_ns":1000000},
+           {"event_key":100663296,"type":"Client","name":"ClientRead","calls":1,"total_ns":1000000},
+           {"event_key":50331648,"type":"Lock","name":"relation","calls":7,"total_ns":7000000}]}'::jsonb AS a \gset
+SELECT jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(:'a'::jsonb,
+  '{scan_start}', '300'), '{scan_end}', '400'),
+  '{xact_commit}', '15'), '{xact_abort}', '3'),
+  '{lwlock_overflow}', '{"calls":3,"total_ns":3000000}'),
+  '{events}', '[{"event_key":117440513,"type":"Extension","name":"X","calls":10,"total_ns":10000000},
+                {"event_key":117440514,"type":"Extension","name":"Y","calls":3,"total_ns":3000000},
+                {"event_key":83886080,"type":"Activity","name":"A","calls":9,"total_ns":2000000},
+                {"event_key":100663296,"type":"Client","name":"ClientRead","calls":4,"total_ns":4000000},
+                {"event_key":50331648,"type":"Lock","name":"relation","calls":7,"total_ns":7000000}]') AS b \gset
+
+-- waits_per_xact = waits / xacts, ms_per_xact = wait_time_ms / xacts, with
+-- xacts = commit delta + abort delta = 6; interval_s from the scan midpoints.
+SELECT * FROM pg_wait_event_diff(:'a', :'b');
+SELECT * FROM pg_wait_event_diff(:'a', :'b', true);
+-- A NULL include_idle is not true: idle rows are left out, like false.
+SELECT event_key FROM pg_wait_event_diff(:'a', :'b', NULL);
+
+-- Zero transactions: ratios per transaction are NULL.
+SELECT event_key, ms_per_wait, waits_per_xact, ms_per_xact, xacts
+FROM pg_wait_event_diff(:'a', jsonb_set(jsonb_set(:'b'::jsonb, '{xact_commit}', '10'), '{xact_abort}', '2'));
+
+-- Zero events and no change: no rows.
+SELECT count(*) AS no_rows FROM pg_wait_event_diff(
+  jsonb_set(:'a'::jsonb, '{events}', '[]'),
+  jsonb_set(jsonb_set(:'b'::jsonb, '{events}', '[]'), '{lwlock_overflow}', '{"calls":0,"total_ns":0}'));
+
+-- Errors.
+\set VERBOSITY terse
+SELECT * FROM pg_wait_event_diff(:'b', :'a');
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{scan_start}', '150'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{incarnation}', '"00000000000000bb"'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{reset_generation}', '1'));
+SELECT * FROM pg_wait_event_diff(jsonb_set(:'a'::jsonb, '{schema_version}', '2'), :'b');
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,0,calls}', '1.5'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,0,calls}', '-1'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,0,calls}', '9223372036854775808'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,0,calls}', '"7"'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,0,event_key}', '4294967296'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,0,event_key}', '-1'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events}',
+  (:'b'::jsonb->'events') || (:'b'::jsonb->'events'->0)));
+SELECT * FROM pg_wait_event_diff(:'a', :'b'::jsonb #- '{events,0,name}');
+SELECT * FROM pg_wait_event_diff(:'a', :'b'::jsonb - 'xact_abort');
+SELECT * FROM pg_wait_event_diff('[]', :'b');
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events}', '[]'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{events,4,calls}', '6'));
+SELECT * FROM pg_wait_event_diff(:'a', jsonb_set(:'b'::jsonb, '{xact_commit}', '9'));
+
+-- Report: argument validation (the sleep itself is exercised by the TAP tests).
+SELECT * FROM pg_wait_event_report(0);
+SELECT * FROM pg_wait_event_report(-5, true);
+SELECT count(*) AS null_arg_rows FROM pg_wait_event_report(NULL);
+SELECT count(*) AS null_idle_rows FROM pg_wait_event_report(1, NULL);
+\set VERBOSITY default
+
+-- The extension is not relocatable: its report functions call each other by
+-- the extension schema, so they work from a schema that is not in the
+-- search_path.
+RESET ALL;
+DROP EXTENSION pg_wait_event_tracing;
+CREATE SCHEMA pwet_s;
+CREATE EXTENSION pg_wait_event_tracing SCHEMA pwet_s;
+SELECT extrelocatable FROM pg_extension WHERE extname = 'pg_wait_event_tracing';
+SET search_path = pg_catalog;
+-- the report's NOTICE carries the measured interval, which is never stable;
+-- what a report returns is checked by the TAP tests
+SET client_min_messages = warning;
+SELECT count(*) IS NOT NULL AS report_runs_from_other_schema FROM pwet_s.pg_wait_event_report(1);
+-- the rows of the crafted snapshots from above, through the other schema
+SELECT event_key, waits, xacts FROM pwet_s.pg_wait_event_diff(:'a', :'b') ORDER BY event_key;
+RESET client_min_messages;
+RESET search_path;
+ALTER EXTENSION pg_wait_event_tracing SET SCHEMA public;
+DROP EXTENSION pg_wait_event_tracing;
+DROP SCHEMA pwet_s;
+CREATE EXTENSION pg_wait_event_tracing;
