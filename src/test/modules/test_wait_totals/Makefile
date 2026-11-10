@@ -11,6 +11,10 @@ DATA = test_wait_totals--1.0.sql
 
 REGRESS = test_wait_totals
 
+# The TAP tests preload pg_wait_event_tracing from contrib.
+EXTRA_INSTALL = contrib/pg_wait_event_tracing
+TAP_TESTS = 1
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

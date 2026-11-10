@@ -18,6 +18,7 @@ contrib_targets += pg_wait_event_tracing
 
 install_data(
   'pg_wait_event_tracing--1.0.sql',
+  'pg_wait_event_tracing--1.0--1.1.sql',
   'pg_wait_event_tracing.control',
   kwargs: contrib_data_args,
 )
@@ -30,6 +31,7 @@ tests += {
     'sql': [
       'pg_wait_event_tracing',
       'pg_wait_event_tracing_trace',
+      'pg_wait_event_tracing_totals',
     ],
     'regress_args': ['--temp-config', files('pg_wait_event_tracing.conf')],
     # Needs shared_preload_libraries, which typical runningcheck users do
@@ -57,6 +59,7 @@ tests += {
       't/014_by_statement_pre.pl',
       't/015_by_statement_pgbench.pl',
       't/016_by_statement_oracle.pl',
+      't/017_totals_ledger.pl',
     ],
   },
 }

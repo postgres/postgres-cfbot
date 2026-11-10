@@ -1,5 +1,5 @@
 # pg_wait_event_tracing extension
 comment = 'statistics and trace collection for explicitly instrumented wait events'
-default_version = '1.0'
+default_version = '1.1'
 module_pathname = '$libdir/pg_wait_event_tracing'
 relocatable = false

@@ -6,10 +6,11 @@ OBJS = \
 	pg_wait_event_tracing.o
 
 EXTENSION = pg_wait_event_tracing
-DATA = pg_wait_event_tracing--1.0.sql
+DATA = pg_wait_event_tracing--1.0.sql pg_wait_event_tracing--1.0--1.1.sql
 PGFILEDESC = "pg_wait_event_tracing - statistics and trace collection for explicitly instrumented wait events"
 
-REGRESS = pg_wait_event_tracing pg_wait_event_tracing_trace
+REGRESS = pg_wait_event_tracing pg_wait_event_tracing_trace \
+	pg_wait_event_tracing_totals
 REGRESS_OPTS = --temp-config $(top_srcdir)/contrib/pg_wait_event_tracing/pg_wait_event_tracing.conf
 
 # The tests need the module preloaded, which typical installcheck users
@@ -17,7 +18,7 @@ REGRESS_OPTS = --temp-config $(top_srcdir)/contrib/pg_wait_event_tracing/pg_wait
 NO_INSTALLCHECK = 1
 
 TAP_TESTS = 1
-EXTRA_INSTALL = src/test/modules/injection_points
+EXTRA_INSTALL = src/test/modules/injection_points src/test/modules/test_wait_totals
 export enable_injection_points
 
 ifdef USE_PGXS

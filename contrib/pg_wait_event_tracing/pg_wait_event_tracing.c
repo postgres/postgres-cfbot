@@ -59,6 +59,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type_d.h"
@@ -112,6 +113,8 @@ PG_FUNCTION_INFO_V1(pg_wait_event_tracing_hooks_installed);
 PG_FUNCTION_INFO_V1(pg_get_backend_wait_event_trace);
 PG_FUNCTION_INFO_V1(pg_get_wait_event_trace);
 PG_FUNCTION_INFO_V1(pg_stat_clear_orphaned_wait_event_rings);
+PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_totals);
+PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_totals_info);
 
 PGDLLEXPORT void _PG_init(void);
 
@@ -404,6 +407,11 @@ typedef struct PwetRegionHeader
 #define PWET_PGSTAT_KIND PGSTAT_KIND_EXPERIMENTAL
 #define PWET_TOTALS_HEADER_NAME "pg_wait_event_tracing totals header"
 #define PWET_LEDGERS_NAME "pg_wait_event_tracing ledgers"
+#define PWET_NUM_TRANCHE_IDS 65536
+
+/* Reserved event_key values of the two overflow rows (no real key is < 0). */
+#define PWET_KEY_LWLOCK_OVERFLOW (-1)
+#define PWET_KEY_FLAT_OVERFLOW (-2)
 
 typedef struct PwetTotal
 {
@@ -435,6 +443,18 @@ typedef struct PwetTotalsHeader
 {
 	uint64		incarnation;	/* random, new at every shared memory init */
 } PwetTotalsHeader;
+
+/* Sum over all ledgers; see pwet_totals_scan(). */
+typedef struct PwetTotalsScan
+{
+	PwetTotal	lwlock_overflow;
+	PwetTotal	flat_overflow;
+	int64		invalid_ledgers;
+	bool		sum_overflow;	/* some sum exceeded what bigint can hold */
+	bool		overflow_sum_overflow;	/* ... one of the two overflow pairs */
+	PwetTotal	flat[PWET_NUM_EVENTS];
+	PwetTotal	tranche[PWET_NUM_TRANCHE_IDS];
+} PwetTotalsScan;
 
 typedef struct PwetPgStatShared
 {
@@ -1399,6 +1419,119 @@ pwet_get_my_ledger(void)
 		pwet_my_ledger = pwet_ledger_at(MyProcNumber);
 	}
 	return pwet_my_ledger;
+}
+
+#ifdef USE_ASSERT_CHECKING
+/* Test-only hooks of the ledger reader; see pwet_ledger_read(). */
+static void (*pwet_test_ledger_copy_hook) (PwetLedger *src);
+static void (*pwet_test_ledger_retry_hook) (PwetLedger *src, int retries);
+static int	pwet_test_ledger_retries;
+#endif
+
+/*
+ * Copy one ledger into dst under the seqlock: accept the copy only if
+ * changecount was even before it and unchanged after it.  The reader holds
+ * no lock and checks for interrupts between retries, so a stalled writer
+ * cannot make it uncancellable.
+ */
+static void
+pwet_ledger_read(PwetLedger *src, PwetLedger *dst)
+{
+	int			retries = 0;
+
+	for (;;)
+	{
+		uint32		cc = pg_atomic_read_u32(&src->changecount);
+
+		if ((cc & 1) == 0)
+		{
+			pg_read_barrier();
+			memcpy(dst, src, pwet_ledger_bytes);
+#ifdef USE_ASSERT_CHECKING
+			if (pwet_test_ledger_copy_hook != NULL)
+				pwet_test_ledger_copy_hook(src);
+#endif
+			pg_read_barrier();
+			if (pg_atomic_read_u32(&src->changecount) == cc)
+				return;
+		}
+
+		retries++;
+#ifdef USE_ASSERT_CHECKING
+		pwet_test_ledger_retries++;
+		if (pwet_test_ledger_retry_hook != NULL)
+			pwet_test_ledger_retry_hook(src, retries);
+#endif
+		CHECK_FOR_INTERRUPTS();
+		if (retries > 100)
+			pg_usleep(100);
+	}
+}
+
+/* Add b to a; return false if the sum cannot be a bigint. */
+static bool
+pwet_total_sum(PwetTotal *a, const PwetTotal *b)
+{
+	if (a->calls > (uint64) PG_INT64_MAX - b->calls ||
+		a->total_ns > (uint64) PG_INT64_MAX - b->total_ns)
+		return false;
+	a->calls += b->calls;
+	a->total_ns += b->total_ns;
+	return true;
+}
+
+/*
+ * Sum every slot's ledger, occupied or not, into *scan (zeroed by the
+ * caller).  Each ledger is read as an accepted copy, never from live
+ * contents.  An invalid ledger is counted in invalid_ledgers (its values are
+ * still summed so the diagnostics stay visible); a sum that would exceed
+ * bigint sets sum_overflow and is left out.  Scratch is allocated in the
+ * caller's memory context.
+ */
+static void
+pwet_totals_scan(PwetTotalsScan *scan)
+{
+	PwetLedger *copy;
+	int			slot;
+
+	if (pwet_ledgers == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pg_wait_event_tracing instance totals are not available")));
+
+	copy = palloc(pwet_ledger_bytes);
+	for (slot = 0; slot < PWET_NUM_SLOTS; slot++)
+	{
+		int			i;
+
+		/* Own pending completion first, so a session sees its own waits. */
+		if (slot == MyProcNumber)
+			pwet_flush_pending();
+
+		pwet_ledger_read(pwet_ledger_at(slot), copy);
+
+		if (copy->invalid)
+			scan->invalid_ledgers++;
+		if (!pwet_total_sum(&scan->lwlock_overflow, &copy->lwlock_overflow) ||
+			!pwet_total_sum(&scan->flat_overflow, &copy->flat_overflow))
+			scan->sum_overflow = scan->overflow_sum_overflow = true;
+		for (i = 0; i < PWET_NUM_EVENTS; i++)
+			if (copy->flat[i].calls != 0 &&
+				!pwet_total_sum(&scan->flat[i], &copy->flat[i]))
+				scan->sum_overflow = true;
+		for (i = 0; i < pwet_ledger_hash_size; i++)
+		{
+			PwetLedgerCell *cell = &copy->cells[i];
+
+			if (cell->tranche_plus1 == 0 || cell->total.calls == 0)
+				continue;
+			if (cell->tranche_plus1 > PWET_NUM_TRANCHE_IDS ||
+				!pwet_total_sum(&scan->tranche[cell->tranche_plus1 - 1],
+								&cell->total))
+				scan->sum_overflow = true;
+		}
+	}
+	pfree(copy);
 }
 
 /* Initialize a freshly created control table: mark every slot empty. */
@@ -4185,6 +4318,273 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Instance totals: SQL surface.
+ *
+ * event_key is the full 32-bit wait_event_info code (class in the top byte,
+ * event or LWLock tranche id below), so it is never negative; the two
+ * overflow rows use the reserved keys -1 (LWLock tranches that did not fit
+ * the dictionary) and -2 (events outside the flat table), which no wait
+ * event can have.  Events that did not fit are merged into these rows, with
+ * both count and time, never dropped.
+ *
+ * Names are resolved only for keys known to resolve.  Built-in classes never
+ * raise an error in the resolvers.  A LWLock tranche id enters a ledger only
+ * from a completed wait on a lock of that tranche, and tranche registrations
+ * are never removed, so it resolves as well.  A custom (Extension or
+ * InjectionPoint) event id is resolved only through the table of names
+ * currently registered; the resolver that takes an id raises an error for an
+ * unknown one, so an id missing from that table gets a placeholder name.
+ */
+typedef struct PwetCustomName
+{
+	uint32		info;
+	const char *name;
+} PwetCustomName;
+
+static int
+pwet_collect_custom_names(PwetCustomName **map)
+{
+	static const uint32 classes[] = {PG_WAIT_EXTENSION, PG_WAIT_INJECTIONPOINT};
+	PwetCustomName *result = NULL;
+	int			n = 0;
+	int			c;
+
+	for (c = 0; c < lengthof(classes); c++)
+	{
+		int			count;
+		char	  **names = GetWaitEventCustomNames(classes[c], &count);
+		int			k;
+
+		if (count == 0)
+			continue;
+		result = result == NULL ?
+			palloc_array(PwetCustomName, n + count) :
+			repalloc_array(result, PwetCustomName, n + count);
+		for (k = 0; k < count; k++)
+		{
+			/* The name exists, so this finds it and never allocates an id. */
+			result[n].info = classes[c] == PG_WAIT_EXTENSION ?
+				WaitEventExtensionNew(names[k]) :
+				WaitEventInjectionPointNew(names[k]);
+			result[n].name = names[k];
+			n++;
+		}
+	}
+
+	*map = result;
+	return n;
+}
+
+static void
+pwet_totals_put_row(ReturnSetInfo *rsinfo, const char *type, const char *name,
+					int64 key, const PwetTotal *t)
+{
+	Datum		values[6];
+	bool		nulls[6] = {0};
+
+	values[0] = CStringGetTextDatum(type);
+	values[1] = CStringGetTextDatum(name);
+	values[2] = Int64GetDatum(key);
+	values[3] = Int64GetDatum((int64) t->calls);
+	values[4] = Float8GetDatum((double) t->total_ns / 1000000.0);
+	if (t->calls > 0)
+		values[5] = Float8GetDatum((double) t->total_ns / (double) t->calls /
+								   1000.0);
+	else
+		nulls[5] = true;
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_totals()
+ *
+ * One row per event that has completed at least one captured wait since
+ * the server started, summed over all processes that ever ran, plus the
+ * two overflow rows (always present).  ERRORs if any contributing ledger is
+ * invalid or a sum cannot be represented.
+ */
+Datum
+pg_stat_get_wait_event_totals(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	PwetTotalsScan *scan;
+	PwetCustomName *custom = NULL;
+	int			ncustom = 0;
+	bool		have_custom = false;
+	int			i;
+	int			j;
+	int			id;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	scan = palloc0(sizeof(PwetTotalsScan));
+	pwet_totals_scan(scan);
+
+	if (scan->invalid_ledgers > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("wait event totals are invalid: %lld lifetime ledger(s) exceeded the bigint range",
+						(long long) scan->invalid_ledgers),
+				 errhint("See pg_stat_wait_event_totals_info; the totals are valid again only after a server restart.")));
+	if (scan->sum_overflow)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("wait event totals exceed the bigint range")));
+
+	for (i = 0; i < PWET_DENSE_CLASSES; i++)
+	{
+		uint32		class_id = pwet_dense_to_classid[i];
+		int			base = pwet_class_offset[i];
+
+		for (j = 0; j < pwet_class_nevents[i]; j++)
+		{
+			PwetTotal  *t = &scan->flat[base + j];
+			uint32		info = (class_id << 24) | (uint32) j;
+			const char *name = NULL;
+
+			if (t->calls == 0)
+				continue;
+
+			/*
+			 * The unnamed built-in Extension event is not in the custom-name
+			 * table; core resolves it as "Extension".
+			 */
+			if (info == PG_WAIT_EXTENSION)
+				name = "Extension";
+			else if ((info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_EXTENSION ||
+					 (info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_INJECTIONPOINT)
+			{
+				int			k;
+
+				if (!have_custom)
+				{
+					ncustom = pwet_collect_custom_names(&custom);
+					have_custom = true;
+				}
+				for (k = 0; k < ncustom; k++)
+					if (custom[k].info == info)
+						name = custom[k].name;
+			}
+			else
+				name = pgstat_get_wait_event(info);
+
+			if (name == NULL)
+				name = psprintf("unknown_%u", info & PWET_WAIT_EVENT_ID_MASK);
+
+			pwet_totals_put_row(rsinfo, pgstat_get_wait_event_type(info),
+								name, (int64) info, t);
+		}
+	}
+
+	for (id = 0; id < PWET_NUM_TRANCHE_IDS; id++)
+	{
+		PwetTotal  *t = &scan->tranche[id];
+		uint32		info = PG_WAIT_LWLOCK | (uint32) id;
+
+		if (t->calls == 0)
+			continue;
+		pwet_totals_put_row(rsinfo, "LWLock", pgstat_get_wait_event(info),
+							(int64) info, t);
+	}
+
+	pwet_totals_put_row(rsinfo, "LWLock", "(overflow)",
+						PWET_KEY_LWLOCK_OVERFLOW, &scan->lwlock_overflow);
+	pwet_totals_put_row(rsinfo, "(overflow)", "(overflow)",
+						PWET_KEY_FLAT_OVERFLOW, &scan->flat_overflow);
+
+	pfree(scan);
+	PG_RETURN_VOID();
+}
+
+/*
+ * Does slot i hold a collection payload whose owner is the live process of
+ * that ProcNumber?  As in the per-backend readers, the owner token is
+ * checked against the backend-status entry (or, for a process without one,
+ * against the PGPROC).  A fixed-slot process withdraws its token in
+ * pwet_exit_drain() at an orderly exit, so a token that is still there
+ * belongs to a live process (an abrupt death restarts the cluster); a payload
+ * itself is never freed and is reinitialized by the next claimant.  The
+ * count is advisory.  One rare case can still count a slot wrongly: a
+ * fixed-slot process that claims its slot and then fails during start-up,
+ * before its exit callback is registered, leaves the token behind, and a
+ * later process that reuses the same PID in the same slot is taken for its
+ * predecessor until it claims the slot itself.
+ */
+static bool
+pwet_slot_owner_is_live(int slot)
+{
+	PgBackendStatus *beentry = pgstat_get_beentry_by_proc_number(slot);
+	int			pid = pwet_ctl[slot].owner_pid;
+
+	if (pid == 0)
+		return false;
+	if (beentry != NULL)
+		return beentry->st_procpid == pid &&
+			beentry->st_proc_start_timestamp == pwet_ctl[slot].owner_start;
+
+	/*
+	 * No backend-status entry: a worker without a database connection has
+	 * none.  Then the slot's PGPROC must still be held by the owner's pid.
+	 * The pid alone could be reused by a successor of the slot, so this
+	 * relies on the token being withdrawn by pwet_exit_drain() before the
+	 * PGPROC is released: a token still present belongs to a live process.
+	 */
+	return GetPGProcByNumber(slot)->pid == pid;
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_totals_info()
+ *
+ * One row of bookkeeping: the incarnation (random, new for every shared
+ * memory initialization, so a change means the totals restarted from zero),
+ * the overflow pairs, the number of invalid ledgers, the number of ledger
+ * slots, and the number of backends currently holding a collection payload
+ * (advisory: read without a lock; exited processes are not counted).  Unlike the totals it never raises for
+ * invalid accounting, so the diagnostics stay readable; an overflow column
+ * whose sum cannot be a bigint is NULL.
+ */
+Datum
+pg_stat_get_wait_event_totals_info(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	PwetTotalsScan *scan;
+	Datum		values[8];
+	bool		nulls[8] = {0};
+	int			capturing = 0;
+	int			i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	scan = palloc0(sizeof(PwetTotalsScan));
+	pwet_totals_scan(scan);
+
+	for (i = 0; i < PWET_NUM_SLOTS; i++)
+		if (pwet_slot_owner_is_live(i))
+			capturing++;
+
+	values[0] = CStringGetTextDatum(psprintf("%016" PRIx64,
+											 pwet_totals_header->incarnation));
+	if (scan->overflow_sum_overflow)
+		nulls[1] = nulls[2] = nulls[3] = nulls[4] = true;
+	else
+	{
+		values[1] = Int64GetDatum((int64) scan->lwlock_overflow.calls);
+		values[2] = Float8GetDatum((double) scan->lwlock_overflow.total_ns /
+								   1000000.0);
+		values[3] = Int64GetDatum((int64) scan->flat_overflow.calls);
+		values[4] = Float8GetDatum((double) scan->flat_overflow.total_ns /
+								   1000000.0);
+	}
+	values[5] = Int64GetDatum(scan->invalid_ledgers);
+	values[6] = Int32GetDatum(PWET_NUM_SLOTS);
+	values[7] = Int32GetDatum(capturing);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	pfree(scan);
+	PG_RETURN_VOID();
+}
+
+/*
  * Flushes the pending wait, if any, before zeroing: the wait already
  * happened and, per the decision document, its recorded values must not
  * be lost, so it is accounted first and then immediately wiped by the
@@ -5212,6 +5612,266 @@ pwet_test_waits(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pwet_test_ledger_dictionary);
+PG_FUNCTION_INFO_V1(pwet_test_slot_counted);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_set);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_changecount);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_torn_read);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_odd_read);
+
+/* pwet_test_slot_counted(slot int) returns bool: would capturing_backends count it? */
+Datum
+pwet_test_slot_counted(PG_FUNCTION_ARGS)
+{
+	int			slot = PG_GETARG_INT32(0);
+
+	PWET_TEST_CHECK(slot >= 0 && slot < PWET_NUM_SLOTS);
+	pwet_flush_pending();
+	PG_RETURN_BOOL(pwet_slot_owner_is_live(slot));
+}
+
+/*
+ * pwet_test_ledger_dictionary() returns void
+ *
+ * The ledger dictionary on a private ledger (needs max_tranches = 16, so
+ * hash_size is 32): keys base + 32 * k share one home cell, so the 16
+ * admitted keys form a cluster that wraps around the end of the cell array.
+ * With the table full every admitted key must still be found with its
+ * count, a further key must go to the overflow pair with count and time and
+ * get no cell, and admitted keys must not move.
+ */
+Datum
+pwet_test_ledger_dictionary(PG_FUNCTION_ARGS)
+{
+	PwetLedger *l = palloc0(pwet_ledger_size(pwet_max_tranches));
+	int			home;
+	int			k;
+	int			wrapped = 0;
+	int			pos[16];
+
+	PWET_TEST_CHECK(pwet_max_tranches == 16 && pwet_ledger_hash_size == 32);
+	pg_atomic_init_u32(&l->changecount, 0);
+
+	for (k = 0; k < 16; k++)
+		pwet_ledger_add(l, PG_WAIT_LWLOCK | (1 + 32 * k), 10 + k);
+	PWET_TEST_CHECK(l->num_used == 16);
+
+	home = (uint32) 1 * 2654435761U & 31;
+	for (k = 0; k < 16; k++)
+	{
+		bool		insert;
+		PwetLedgerCell *cell = pwet_ledger_find_cell(l, 1 + 32 * k, &insert);
+
+		PWET_TEST_CHECK(cell != NULL && !insert);
+		PWET_TEST_CHECK(cell->total.calls == 1 &&
+						cell->total.total_ns == (uint64) (10 + k));
+		pos[k] = cell - l->cells;
+		if (pos[k] < home)
+			wrapped++;
+	}
+	PWET_TEST_CHECK(wrapped > 0);
+
+	/* The table is full: one more tranche overflows, with count and time. */
+	for (k = 0; k < 3; k++)
+		pwet_ledger_add(l, PG_WAIT_LWLOCK | (1 + 32 * 16), 100);
+	PWET_TEST_CHECK(l->num_used == 16);
+	PWET_TEST_CHECK(l->lwlock_overflow.calls == 3 &&
+					l->lwlock_overflow.total_ns == 300);
+	{
+		bool		insert;
+
+		PWET_TEST_CHECK(pwet_ledger_find_cell(l, 1 + 32 * 16, &insert) == NULL);
+	}
+
+	/* Admitted keys are still found, did not move, and keep counting. */
+	for (k = 0; k < 16; k++)
+	{
+		bool		insert;
+		PwetLedgerCell *cell;
+
+		pwet_ledger_add(l, PG_WAIT_LWLOCK | (1 + 32 * k), 1);
+		cell = pwet_ledger_find_cell(l, 1 + 32 * k, &insert);
+		PWET_TEST_CHECK(cell != NULL && !insert && cell - l->cells == pos[k]);
+		PWET_TEST_CHECK(cell->total.calls == 2 &&
+						cell->total.total_ns == (uint64) (11 + k));
+	}
+	PWET_TEST_CHECK(l->lwlock_overflow.calls == 3);
+	PWET_TEST_CHECK(l->invalid == 0);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * pwet_test_ledger_set(event_key bigint, calls bigint, total_ns bigint)
+ *
+ * Set this process's ledger pair of the event (or of an overflow pair: key
+ * -1 is the LWLock one, -2 the flat one) to the given values, inside the
+ * write bracket, to reach counter ranges no test could reach by emitting.
+ */
+Datum
+pwet_test_ledger_set(PG_FUNCTION_ARGS)
+{
+	int64		key = PG_GETARG_INT64(0);
+	int64		calls = PG_GETARG_INT64(1);
+	int64		total_ns = PG_GETARG_INT64(2);
+	PwetLedger *l;
+	PwetTotal  *pair;
+	PwetLedgerCell *cell = NULL;
+	bool		insert = false;
+
+	pwet_flush_pending();
+	l = pwet_get_my_ledger();
+	PWET_TEST_CHECK(l != NULL);
+
+	if (key == PWET_KEY_LWLOCK_OVERFLOW)
+		pair = &l->lwlock_overflow;
+	else if (key == PWET_KEY_FLAT_OVERFLOW)
+		pair = &l->flat_overflow;
+	else
+		pair = pwet_ledger_target(l, (uint32) key, &cell, &insert);
+	PWET_TEST_CHECK(!(pair == &l->lwlock_overflow && key >= 0) ||
+					((uint32) key & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_LWLOCK);
+
+	pwet_ledger_begin(l);
+	if (insert)
+	{
+		cell->tranche_plus1 = ((uint32) key & PWET_WAIT_EVENT_ID_MASK) + 1;
+		l->num_used++;
+	}
+	pair->calls = (uint64) calls;
+	pair->total_ns = (uint64) total_ns;
+	pwet_ledger_end(l);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * pwet_test_ledger_changecount(slot int, value bigint) returns bigint
+ *
+ * Return the changecount of a slot's ledger; if value >= 0, also store it
+ * (a stand-in for a writer stalled mid-update when odd, or a counter close
+ * to wraparound when set on one's own slot).
+ */
+Datum
+pwet_test_ledger_changecount(PG_FUNCTION_ARGS)
+{
+	int			slot = PG_GETARG_INT32(0);
+	int64		value = PG_GETARG_INT64(1);
+	PwetLedger *l;
+	uint32		old;
+
+	PWET_TEST_CHECK(slot >= 0 && slot < PWET_NUM_SLOTS);
+	pwet_flush_pending();
+	l = pwet_ledger_at(slot);
+	old = pg_atomic_read_u32(&l->changecount);
+	if (value >= 0)
+		pg_atomic_write_u32(&l->changecount, (uint32) value);
+
+	PG_RETURN_INT64((int64) old);
+}
+
+static uint32 pwet_test_hook_event;
+static int	pwet_test_hook_release_at;
+static uint32 pwet_test_hook_release_value;
+
+/* Copy hook: one complete writer bracket lands inside the reader's copy. */
+static void
+pwet_test_hook_torn(PwetLedger *src)
+{
+	pwet_test_ledger_copy_hook = NULL;
+	pwet_ledger_add(src, pwet_test_hook_event, 1000);
+}
+
+/* Retry hook: the stalled writer finishes at retry number release_at. */
+static void
+pwet_test_hook_release(PwetLedger *src, int retries)
+{
+	if (retries == pwet_test_hook_release_at)
+		pg_atomic_write_u32(&src->changecount, pwet_test_hook_release_value);
+}
+
+static Datum
+pwet_test_read_result(FunctionCallInfo fcinfo, PwetLedger *copy,
+					  uint32 event, int retries)
+{
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+	PwetLedgerCell *cell = NULL;
+	bool		insert;
+	PwetTotal  *pair;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	pair = pwet_ledger_target(copy, event, &cell, &insert);
+	values[0] = Int32GetDatum(retries);
+	values[1] = Int64GetDatum((int64) pair->calls);
+	return HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+}
+
+/*
+ * pwet_test_ledger_torn_read(event_key bigint, OUT retries int, OUT calls bigint)
+ *
+ * Read this process's own ledger while a complete writer bracket lands
+ * between the reader's copy and its closing changecount check: the copy
+ * must be rejected and retried exactly once, and the accepted copy must show
+ * the extra call.
+ */
+Datum
+pwet_test_ledger_torn_read(PG_FUNCTION_ARGS)
+{
+	uint32		event = (uint32) PG_GETARG_INT64(0);
+	PwetLedger *copy = palloc(pwet_ledger_bytes);
+	int			before;
+
+	pwet_flush_pending();
+	pwet_test_hook_event = event;
+	pwet_test_ledger_copy_hook = pwet_test_hook_torn;
+	before = pwet_test_ledger_retries;
+	pwet_ledger_read(pwet_get_my_ledger(), copy);
+	pwet_test_ledger_copy_hook = NULL;
+
+	return pwet_test_read_result(fcinfo, copy, event,
+								 pwet_test_ledger_retries - before);
+}
+
+/*
+ * pwet_test_ledger_odd_read(event_key bigint, release_at int,
+ *                           OUT retries int, OUT calls bigint)
+ *
+ * Make this process's own changecount odd, as if a writer were stalled
+ * inside the bracket, and read the ledger: the reader must keep retrying
+ * until the writer finishes, which the retry hook does at retry number
+ * release_at.
+ */
+Datum
+pwet_test_ledger_odd_read(PG_FUNCTION_ARGS)
+{
+	uint32		event = (uint32) PG_GETARG_INT64(0);
+	int			release_at = PG_GETARG_INT32(1);
+	PwetLedger *l;
+	PwetLedger *copy = palloc(pwet_ledger_bytes);
+	uint32		cc;
+	int			before;
+
+	pwet_flush_pending();
+	l = pwet_get_my_ledger();
+	cc = pg_atomic_read_u32(&l->changecount);
+	PWET_TEST_CHECK((cc & 1) == 0);
+	pg_atomic_write_u32(&l->changecount, cc + 1);
+
+	pwet_test_hook_release_at = release_at;
+	pwet_test_hook_release_value = cc + 2;
+	pwet_test_ledger_retry_hook = pwet_test_hook_release;
+	before = pwet_test_ledger_retries;
+	pwet_ledger_read(l, copy);
+	pwet_test_ledger_retry_hook = NULL;
+
+	PWET_TEST_CHECK((pg_atomic_read_u32(&l->changecount) & 1) == 0);
+	return pwet_test_read_result(fcinfo, copy, event,
+								 pwet_test_ledger_retries - before);
 }
 
 #endif							/* USE_ASSERT_CHECKING */
