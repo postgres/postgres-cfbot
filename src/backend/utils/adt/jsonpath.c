@@ -1447,7 +1447,8 @@ jspIsMutableWalker(JsonPathItem *jpi, struct JsonPathMutableContext *cxt)
 						String	   *varname = lfirst_node(String, lc1);
 						Node	   *varexpr = lfirst(lc2);
 
-						if (strncmp(varname->sval, name, len))
+						if (strlen(varname->sval) != len ||
+							strncmp(varname->sval, name, len) != 0)
 							continue;
 
 						switch (exprType(varexpr))
