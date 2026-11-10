@@ -555,7 +555,7 @@ heapam_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
 
 	/* copy main fork */
 	RelationCopyStorage(RelationGetSmgr(rel), dstrel, MAIN_FORKNUM,
-						rel->rd_rel->relpersistence);
+						rel->rd_rel->relpersistence, true);
 
 	/* copy those extra forks that exist */
 	for (ForkNumber forkNum = MAIN_FORKNUM + 1;
@@ -574,7 +574,7 @@ heapam_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
 				 forkNum == INIT_FORKNUM))
 				log_smgrcreate(newrlocator, forkNum);
 			RelationCopyStorage(RelationGetSmgr(rel), dstrel, forkNum,
-								rel->rd_rel->relpersistence);
+								rel->rd_rel->relpersistence, false);
 		}
 	}
 

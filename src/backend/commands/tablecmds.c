@@ -36,6 +36,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/partition.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_collation.h"
@@ -18531,7 +18532,8 @@ index_copy_data(Relation rel, RelFileLocator newrlocator)
 
 	/* copy main fork */
 	RelationCopyStorage(RelationGetSmgr(rel), dstrel, MAIN_FORKNUM,
-						rel->rd_rel->relpersistence);
+						rel->rd_rel->relpersistence,
+						rel->rd_rel->relam == BTREE_AM_OID);
 
 	/* copy those extra forks that exist */
 	for (ForkNumber forkNum = MAIN_FORKNUM + 1;
@@ -18550,7 +18552,7 @@ index_copy_data(Relation rel, RelFileLocator newrlocator)
 				 forkNum == INIT_FORKNUM))
 				log_smgrcreate(&newrlocator, forkNum);
 			RelationCopyStorage(RelationGetSmgr(rel), dstrel, forkNum,
-								rel->rd_rel->relpersistence);
+								rel->rd_rel->relpersistence, false);
 		}
 	}
 
