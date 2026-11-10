@@ -3154,6 +3154,14 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
     dependencies on clusters before version 17.0 will silently be ignored.
    </para>
 
+   <para>
+    <application>pg_upgrade</application> also preserves the subscription's
+    OID, along with its
+    <link linkend="logical-replication-conflict-table-based-logging">conflict log table</link>,
+    if <link linkend="sql-createsubscription-params-with-conflict-log-destination"><literal>conflict_log_destination</literal></link>
+    is set to <literal>table</literal> or <literal>all</literal>.
+   </para>
+
    <note>
     <para>
      Commit timestamps and origin data are not preserved during the upgrade.

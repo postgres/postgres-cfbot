@@ -290,7 +290,7 @@ $publisher->safe_psql(
 $old_sub->safe_psql(
 	'postgres', qq[
 		CREATE TABLE tab_upgraded2(id int);
-		CREATE SUBSCRIPTION regress_sub5 CONNECTION '$connstr' PUBLICATION regress_pub5;
+		CREATE SUBSCRIPTION regress_sub5 CONNECTION '$connstr' PUBLICATION regress_pub5 with (conflict_log_destination = 'table');
 ]);
 
 # The table tab_upgraded2 will be in the init state as the subscriber's
@@ -312,7 +312,28 @@ my $tab_upgraded1_oid = $old_sub->safe_psql('postgres',
 	"SELECT oid FROM pg_class WHERE relname = 'tab_upgraded1'");
 my $tab_upgraded2_oid = $old_sub->safe_psql('postgres',
 	"SELECT oid FROM pg_class WHERE relname = 'tab_upgraded2'");
+my $sub5_oid = $old_sub->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription where subname = 'regress_sub5'");
+my $sub_clt_relid = $old_sub->safe_psql('postgres',
+	"SELECT subconflictlogrelid FROM pg_subscription WHERE subname = 'regress_sub5'");
 
+# A privilege granted on the conflict log table must survive the upgrade.
+my $sub_clt_name = $old_sub->safe_psql('postgres',
+	"SELECT relname FROM pg_class WHERE oid = $sub_clt_relid");
+$old_sub->safe_psql(
+	'postgres', qq[
+		CREATE ROLE regress_clt_reader;
+		GRANT DELETE ON pg_conflict.$sub_clt_name TO regress_clt_reader;
+]);
+
+# A comment on the table and on a column must survive the upgrade too.
+my $sub_clt_col = $old_sub->safe_psql('postgres',
+	"SELECT attname FROM pg_attribute WHERE attrelid = $sub_clt_relid AND attnum = 1");
+$old_sub->safe_psql(
+	'postgres', qq[
+		COMMENT ON TABLE pg_conflict.$sub_clt_name IS 'clt table comment';
+		COMMENT ON COLUMN pg_conflict.$sub_clt_name.$sub_clt_col IS 'clt column comment';
+]);
 $old_sub->stop;
 
 # Change configuration so that initial table sync does not get started
@@ -393,6 +414,25 @@ $result = $new_sub->safe_psql('postgres',
 	"SELECT xmin IS NOT NULL from pg_replication_slots WHERE slot_name = 'pg_conflict_detection'"
 );
 is($result, qq(t), "conflict detection slot exists");
+
+# The subscription oid and the subscription conflict log table relid should be preserved
+$result = $new_sub->safe_psql('postgres', "SELECT oid FROM pg_subscription WHERE subname = 'regress_sub5'");
+is($result, qq($sub5_oid), "subscription oid should have been preserved");
+
+$result = $new_sub->safe_psql('postgres', "SELECT subconflictlogrelid FROM pg_subscription WHERE subname = 'regress_sub5'");
+is($result, qq($sub_clt_relid), "subscription conflict log table relid should have been preserved");
+
+$result = $new_sub->safe_psql('postgres',
+	"SELECT has_table_privilege('regress_clt_reader', $sub_clt_relid, 'DELETE'), has_table_privilege('regress_clt_reader', $sub_clt_relid, 'INSERT')"
+);
+is($result, qq(t|f),
+	"privileges granted on the subscription conflict log table should have been preserved");
+
+$result = $new_sub->safe_psql('postgres',
+	"SELECT obj_description($sub_clt_relid, 'pg_class'), col_description($sub_clt_relid, 1)"
+);
+is($result, qq(clt table comment|clt column comment),
+	"comments on the subscription conflict log table should have been preserved");
 
 # Resume the initial sync and wait until all tables of subscription
 # 'regress_sub5' are synchronized

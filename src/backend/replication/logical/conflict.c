@@ -207,7 +207,7 @@ create_conflict_log_table(Oid subid, char *subname, Oid subowner)
 	Oid			relid;
 	char		relname[NAMEDATALEN];
 
-	snprintf(relname, NAMEDATALEN, "pg_conflict_log_%u", subid);
+	snprintf(relname, NAMEDATALEN, CONFLICT_LOG_RELATION_NAME_FMT, subid);
 
 	/* Build the tuple descriptor for the new table. */
 	tupdesc = create_conflict_log_table_tupdesc();
