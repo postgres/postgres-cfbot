@@ -1153,7 +1153,8 @@ EXCLUDE NO OTHERS
    <para>
     Instead of an expression, <literal>*</literal> can be written in
     the output list as a shorthand for all the columns of the selected
-    rows.  Also, you can write <literal><replaceable
+    rows (not including <link linkend="ddl-system-columns">system
+    columns</link>).  Also, you can write <literal><replaceable
     class="parameter">table_name</replaceable>.*</literal> as a
     shorthand for the columns coming from just that table.  In these
     cases it is not possible to specify new names with <literal>AS</literal>;
