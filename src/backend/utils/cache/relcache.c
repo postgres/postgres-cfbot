@@ -6329,7 +6329,7 @@ load_relcache_init_file(bool shared)
 		nread = fread(&len, 1, sizeof(len), fp);
 		if (nread != sizeof(len))
 		{
-			if (nread == 0)
+			if (nread == 0 && !ferror(fp))
 				break;			/* end of file */
 			goto read_failed;
 		}
