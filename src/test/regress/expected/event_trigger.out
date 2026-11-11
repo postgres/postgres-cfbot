@@ -639,6 +639,32 @@ ERROR:  cannot alter type "rewritetype" because column "rewritemetoo3.a" uses it
 drop table rewriteme;
 drop event trigger no_rewrite_allowed;
 drop function test_evtrig_no_rewrite();
+-- a table_rewrite event trigger cannot be used to add a foreign key between
+-- a permanent and an unlogged table, while the table being rewritten still
+-- has its old persistence
+CREATE UNLOGGED TABLE rewrite_upk (id int PRIMARY KEY);
+CREATE UNLOGGED TABLE rewrite_ufk (id int);
+CREATE TABLE rewrite_ppk (id int PRIMARY KEY);
+CREATE TABLE rewrite_pfk (id int);
+CREATE FUNCTION test_evtrig_add_fk() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF pg_event_trigger_table_rewrite_oid() = 'rewrite_ufk'::regclass THEN
+    ALTER TABLE rewrite_ufk ADD FOREIGN KEY (id) REFERENCES rewrite_upk;
+  ELSIF pg_event_trigger_table_rewrite_oid() = 'rewrite_ppk'::regclass THEN
+    ALTER TABLE rewrite_pfk ADD FOREIGN KEY (id) REFERENCES rewrite_ppk;
+  END IF;
+END;
+$$;
+CREATE EVENT TRIGGER add_fk ON table_rewrite
+  EXECUTE FUNCTION test_evtrig_add_fk();
+ALTER TABLE rewrite_ufk SET LOGGED;  -- fails
+ERROR:  could not change table "rewrite_ufk" to logged because it references unlogged table "rewrite_upk"
+ALTER TABLE rewrite_ppk SET UNLOGGED;  -- fails
+ERROR:  could not change table "rewrite_ppk" to unlogged because it references logged table "rewrite_pfk"
+DROP EVENT TRIGGER add_fk;
+DROP FUNCTION test_evtrig_add_fk();
+DROP TABLE rewrite_ufk, rewrite_upk, rewrite_pfk, rewrite_ppk;
 -- Tests for REINDEX
 CREATE OR REPLACE FUNCTION reindex_start_command()
 RETURNS event_trigger AS $$

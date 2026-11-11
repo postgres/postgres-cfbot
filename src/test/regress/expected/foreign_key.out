@@ -4460,7 +4460,14 @@ ERROR:  constraints on permanent tables may reference only permanent tables
 DETAIL:  Table "pk1" is an unlogged partition of a table referenced by permanent table "fk".
 -- ok: an unlogged table may reference unlogged partitions
 CREATE UNLOGGED TABLE ufk (x int REFERENCES pk);
-DROP TABLE ufk, pk;
+-- fails: the referencing table cannot be made permanent afterwards
+ALTER TABLE ufk SET LOGGED;
+ERROR:  could not change table "ufk" to logged because it references unlogged table "pk1"
+-- fails: nor in the same command that adds the constraint
+CREATE UNLOGGED TABLE ufk2 (x int);
+ALTER TABLE ufk2 SET LOGGED, ADD FOREIGN KEY (x) REFERENCES pk;
+ERROR:  could not change table "ufk2" to logged because it references unlogged table "pk1"
+DROP TABLE ufk, ufk2, pk;
 CREATE TABLE pk (a int PRIMARY KEY) PARTITION BY RANGE (a);
 CREATE TABLE fk (x int REFERENCES pk);
 -- fails: creating an unlogged partition of the referenced table

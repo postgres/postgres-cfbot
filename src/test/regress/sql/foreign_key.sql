@@ -3357,7 +3357,12 @@ CREATE UNLOGGED TABLE pk1 PARTITION OF pk FOR VALUES FROM (0) TO (100);
 CREATE TABLE fk (x int REFERENCES pk);
 -- ok: an unlogged table may reference unlogged partitions
 CREATE UNLOGGED TABLE ufk (x int REFERENCES pk);
-DROP TABLE ufk, pk;
+-- fails: the referencing table cannot be made permanent afterwards
+ALTER TABLE ufk SET LOGGED;
+-- fails: nor in the same command that adds the constraint
+CREATE UNLOGGED TABLE ufk2 (x int);
+ALTER TABLE ufk2 SET LOGGED, ADD FOREIGN KEY (x) REFERENCES pk;
+DROP TABLE ufk, ufk2, pk;
 CREATE TABLE pk (a int PRIMARY KEY) PARTITION BY RANGE (a);
 CREATE TABLE fk (x int REFERENCES pk);
 -- fails: creating an unlogged partition of the referenced table
