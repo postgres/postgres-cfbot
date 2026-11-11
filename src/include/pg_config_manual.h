@@ -214,6 +214,7 @@
  * The default is 128, which should be large enough for all supported
  * platforms.
  */
+#define PG_LOG2_CACHE_LINE_SIZE 7
 #define PG_CACHE_LINE_SIZE		128
 
 /*
