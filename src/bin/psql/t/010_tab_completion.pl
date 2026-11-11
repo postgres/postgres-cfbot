@@ -422,6 +422,76 @@ check_completion(
 
 clear_line();
 
+# REPACK must recognise USING as a keyword, including after a column list.
+check_completion(
+	"REPACK USING \t",
+	qr/REPACK USING INDEX /,
+	"complete INDEX after REPACK USING");
+
+clear_query();
+
+check_completion(
+	"REPACK (VERBOSE) USING \t",
+	qr/REPACK \(VERBOSE\) USING INDEX /,
+	"complete INDEX after REPACK (VERBOSE) USING");
+
+clear_query();
+
+check_completion(
+	"REPACK tab1 USING \t",
+	qr/REPACK tab1 USING INDEX /,
+	"complete INDEX after REPACK tab1 USING");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 USING \t",
+	qr/REPACK \(ANALYZE\) tab1 USING INDEX /,
+	"complete INDEX after REPACK (ANALYZE) tab1 USING");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 (c1) USING \t",
+	qr/REPACK \(ANALYZE\) tab1 \(c1\) USING INDEX /,
+	"complete INDEX after REPACK (ANALYZE) tab1 (c1) USING");
+
+clear_query();
+
+# The table reference must skip the optional column list.  repack_other is an
+# unrelated table with a primary key too, so falling back to all indexes
+# cannot uniquely complete the index name to tab1_pkey.
+$node->safe_psql('postgres',
+	'CREATE TABLE repack_other (id int PRIMARY KEY)');
+check_completion(
+	"REPACK tab1 USING INDEX \t",
+	qr/REPACK tab1 USING INDEX tab1_pkey /,
+	"complete only the target table index after REPACK tab1");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 USING INDEX \t",
+	qr/REPACK \(ANALYZE\) tab1 USING INDEX tab1_pkey /,
+	"complete only the target table index after REPACK (ANALYZE) tab1");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 (c1) USING INDEX \t",
+	qr/REPACK \(ANALYZE\) tab1 \(c1\) USING INDEX tab1_pkey /,
+	"complete only the target table index after REPACK (ANALYZE) tab1 (c1)");
+
+clear_query();
+
+check_completion(
+	"REPACK (ANALYZE) tab1 (c1, c2) USING INDEX \t",
+	qr/REPACK \(ANALYZE\) tab1 \(c1, c2\) USING INDEX tab1_pkey /,
+	"complete only the target table index after REPACK (ANALYZE) tab1 (c1, c2)"
+);
+
+clear_query();
+
 # send psql an explicit \q to shut it down, else pty won't close properly
 $h->quit or die "psql returned $?";
 
