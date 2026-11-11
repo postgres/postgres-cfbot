@@ -91,5 +91,12 @@ TRUNCATE tid_tab;
 CREATE VIEW tid_view_fake_ctid AS SELECT 1 AS ctid, 2 AS a;
 SELECT currtid2('tid_view_fake_ctid'::text, '(0,1)'::tid); -- fails
 DROP VIEW tid_view_fake_ctid;
+-- ctid cannot be traced to a base relation
+CREATE VIEW tid_view_grouped_ctid AS
+  SELECT ctid, a FROM tid_tab GROUP BY ctid, a;
+\set VERBOSITY sqlstate
+SELECT currtid2('tid_view_grouped_ctid'::text, '(0,1)'::tid); -- fails
+\set VERBOSITY default
+DROP VIEW tid_view_grouped_ctid;
 
 DROP TABLE tid_tab CASCADE;
