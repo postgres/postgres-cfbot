@@ -3941,6 +3941,22 @@ extern void InjectionPointAttach(const char *name,
     </para>
 
     <para>
+     To attach a callback and obtain a handle for detaching it later, use:
+<programlisting>
+extern void InjectionPointAttachWithHandle(const char *name,
+                                           const char *library,
+                                           const char *function,
+                                           const void *private_data,
+                                           int private_data_size,
+                                           InjectionPointHandle *handle);
+</programlisting>
+     This attaches the callback in the same way as
+     <function>InjectionPointAttach</function> and initializes
+     <literal>handle</literal>.  The handle can be used to detach only
+     the callback attached by this call.
+    </para>
+
+    <para>
      Here is an example of callback for
      <literal>InjectionPointCallback</literal>:
 <programlisting>
@@ -3993,6 +4009,18 @@ extern bool InjectionPointDetach(const char *name);
 </programlisting>
      On success, <literal>true</literal> is returned, <literal>false</literal>
      otherwise.
+    </para>
+
+    <para>
+    The handle initialized by
+    <function>InjectionPointAttachWithHandle</function> can be passed to:
+<programlisting>
+extern bool InjectionPointDetachByHandle(const InjectionPointHandle *handle);
+</programlisting>
+     This detaches only the callback attached by the corresponding
+     <function>InjectionPointAttachWithHandle</function> call.  If that callback
+     has already been detached, it returns <literal>false</literal> without
+     affecting a callback subsequently attached to the injection point.
     </para>
 
     <para>

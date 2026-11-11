@@ -46,10 +46,17 @@ PG_MODULE_MAGIC;
 #define INJ_WAIT_MAX_US			100000	/* 100ms */
 
 /*
- * List of injection points stored in TopMemoryContext attached
- * locally to this process.
+ * List of injection points stored in TopMemoryContext attached locally to this
+ * process. Handles ensure that exit cleanup does not detach a different point
+ * that reused the same name or slot.
  */
 static List *inj_list_local = NIL;
+
+typedef struct LocalInjectionPoint
+{
+	char				*name;
+	InjectionPointHandle handle;
+} LocalInjectionPoint;
 
 /*
  * Shared state information for injection points.
@@ -174,19 +181,13 @@ injection_point_allowed(const InjectionPointCondition *condition,
 static void
 injection_points_cleanup(int code, Datum arg)
 {
-	ListCell   *lc;
-
 	/* Leave if nothing is tracked locally */
 	if (!injection_point_local)
 		return;
 
 	/* Detach all the local points */
-	foreach(lc, inj_list_local)
-	{
-		char	   *name = strVal(lfirst(lc));
-
-		(void) InjectionPointDetach(name);
-	}
+	foreach_ptr(LocalInjectionPoint, local_inj, inj_list_local)
+		InjectionPointDetachByHandle(&local_inj->handle);
 }
 
 /* Set of callbacks available to be attached to an injection point. */
@@ -360,16 +361,29 @@ injection_points_attach(PG_FUNCTION_ARGS)
 		strlcpy(condition.str, str, INJ_DATA_MAXLEN);
 	}
 
-	InjectionPointAttach(name, "injection_points", function, &condition,
-						 sizeof(InjectionPointCondition));
-
-	if (injection_point_local)
+	if (!injection_point_local)
 	{
+		InjectionPointAttach(name, "injection_points", function, &condition,
+							 sizeof(InjectionPointCondition));
+	}
+	else
+	{
+		InjectionPointHandle handle = {0};
 		MemoryContext oldctx;
+		LocalInjectionPoint *local_inj;
 
 		/* Local injection point, so track it for automated cleanup */
+		InjectionPointAttachWithHandle(name, "injection_points", function,
+									   &condition,
+									   sizeof(InjectionPointCondition),
+									   &handle);
+
 		oldctx = MemoryContextSwitchTo(TopMemoryContext);
-		inj_list_local = lappend(inj_list_local, makeString(pstrdup(name)));
+		local_inj = palloc_object(LocalInjectionPoint);
+		local_inj->name = pstrdup(name);
+		local_inj->handle = handle;
+
+		inj_list_local = lappend(inj_list_local, local_inj);
 		MemoryContextSwitchTo(oldctx);
 	}
 
@@ -552,11 +566,17 @@ injection_points_detach(PG_FUNCTION_ARGS)
 	/* Remove point from local list, if required */
 	if (inj_list_local != NIL)
 	{
-		MemoryContext oldctx;
-
-		oldctx = MemoryContextSwitchTo(TopMemoryContext);
-		inj_list_local = list_delete(inj_list_local, makeString(name));
-		MemoryContextSwitchTo(oldctx);
+		foreach_ptr(LocalInjectionPoint, local_inj, inj_list_local)
+		{
+			if (strcmp(local_inj->name, name) == 0)
+			{
+				inj_list_local = foreach_delete_current(inj_list_local,
+														local_inj);
+				pfree(local_inj->name);
+				pfree(local_inj);
+				break;
+			}
+		}
 	}
 
 	PG_RETURN_VOID();

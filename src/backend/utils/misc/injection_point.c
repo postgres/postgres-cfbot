@@ -112,6 +112,7 @@ static HTAB *InjectionPointCache = NULL;
 
 static void InjectionPointShmemRequest(void *arg);
 static void InjectionPointShmemInit(void *arg);
+static void InjectionPointDetachSlot(int slot_idx, uint64 generation);
 
 /*
  * injection_point_cache_add
@@ -253,17 +254,49 @@ InjectionPointShmemInit(void *arg)
 	for (int i = 0; i < MAX_INJECTION_POINTS; i++)
 		pg_atomic_init_u64(&ActiveInjectionPoints->entries[i].generation, 0);
 }
+
+/*
+ * Mark an injection point slot as unused, and update max_inuse if needed.
+ */
+static void
+InjectionPointDetachSlot(int slot_idx, uint64 generation)
+{
+	InjectionPointEntry *entry;
+	int			max_inuse;
+
+	Assert(generation % 2 != 0);
+	Assert(LWLockHeldByMeInMode(InjectionPointLock, LW_EXCLUSIVE));
+
+	entry = &ActiveInjectionPoints->entries[slot_idx];
+	Assert(pg_atomic_read_u64(&entry->generation) == generation);
+	pg_atomic_write_u64(&entry->generation, generation + 1);
+
+	/* If we just removed the highest-numbered entry, update 'max_inuse' */
+	max_inuse = (int) pg_atomic_read_u32(&ActiveInjectionPoints->max_inuse);
+	if (slot_idx == max_inuse - 1)
+	{
+		for (; slot_idx >= 0; --slot_idx)
+		{
+			entry = &ActiveInjectionPoints->entries[slot_idx];
+			generation = pg_atomic_read_u64(&entry->generation);
+			if (generation % 2 != 0)
+				break;
+		}
+		pg_atomic_write_u32(&ActiveInjectionPoints->max_inuse, slot_idx + 1);
+	}
+}
 #endif							/* USE_INJECTION_POINTS */
 
 /*
  * Attach a new injection point.
  */
 void
-InjectionPointAttach(const char *name,
-					 const char *library,
-					 const char *function,
-					 const void *private_data,
-					 int private_data_size)
+InjectionPointAttachWithHandle(const char *name,
+							   const char *library,
+							   const char *function,
+							   const void *private_data,
+							   int private_data_size,
+							   InjectionPointHandle *handle)
 {
 #ifdef USE_INJECTION_POINTS
 	InjectionPointEntry *entry;
@@ -334,9 +367,29 @@ InjectionPointAttach(const char *name,
 
 	LWLockRelease(InjectionPointLock);
 
+	/*
+	 * Return a handle identifying this generation of the slot, if requested.
+	 */
+	if (handle)
+	{
+		handle->slot_idx = free_idx;
+		handle->generation = generation + 1;
+	}
+
 #else
 	elog(ERROR, "injection points are not supported by this build");
 #endif
+}
+
+void
+InjectionPointAttach(const char *name,
+					 const char *library,
+					 const char *function,
+					 const void *private_data,
+					 int private_data_size)
+{
+	InjectionPointAttachWithHandle(name, library, function, private_data,
+								   private_data_size, NULL);
 }
 
 /*
@@ -369,28 +422,51 @@ InjectionPointDetach(const char *name)
 		{
 			Assert(!found);
 			found = true;
-			pg_atomic_write_u64(&entry->generation, generation + 1);
+			InjectionPointDetachSlot(idx, generation);
 			break;
 		}
-	}
-
-	/* If we just removed the highest-numbered entry, update 'max_inuse' */
-	if (found && idx == max_inuse - 1)
-	{
-		for (; idx >= 0; --idx)
-		{
-			InjectionPointEntry *entry = &ActiveInjectionPoints->entries[idx];
-			uint64		generation;
-
-			generation = pg_atomic_read_u64(&entry->generation);
-			if (generation % 2 != 0)
-				break;
-		}
-		pg_atomic_write_u32(&ActiveInjectionPoints->max_inuse, idx + 1);
 	}
 	LWLockRelease(InjectionPointLock);
 
 	return found;
+#else
+	elog(ERROR, "Injection points are not supported by this build");
+	return true;				/* silence compiler */
+#endif
+}
+
+/*
+ * Detach the injection point identified by the given handle.
+ *
+ * Returns false if the slot has already been detached or reused since the
+ * handle was initialized.
+ */
+bool
+InjectionPointDetachByHandle(const InjectionPointHandle *handle)
+{
+#ifdef USE_INJECTION_POINTS
+	InjectionPointEntry *entry;
+	uint64		generation;
+	bool		found = false;
+	int			slot_idx;
+
+	Assert(handle);
+
+	LWLockAcquire(InjectionPointLock, LW_EXCLUSIVE);
+
+	slot_idx = handle->slot_idx;
+	entry = &ActiveInjectionPoints->entries[slot_idx];
+	generation = pg_atomic_read_u64(&entry->generation);
+
+	if (generation == handle->generation)
+	{
+		found = true;
+		InjectionPointDetachSlot(slot_idx, generation);
+	}
+
+	LWLockRelease(InjectionPointLock);
+	return found;
+
 #else
 	elog(ERROR, "Injection points are not supported by this build");
 	return true;				/* silence compiler */

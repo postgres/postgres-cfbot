@@ -1350,6 +1350,7 @@ InjectionPointCondition
 InjectionPointConditionType
 InjectionPointData
 InjectionPointEntry
+InjectionPointHandle
 InjectionPointSharedState
 InjectionPointsCtl
 InlineCodeBlock
@@ -1629,6 +1630,7 @@ ListenerEntry
 LoInfo
 LoadStmt
 LocalBufferLookupEnt
+LocalInjectionPoint
 LocalPgBackendStatus
 LocalTransactionId
 Location

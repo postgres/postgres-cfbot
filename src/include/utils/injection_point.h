@@ -25,6 +25,15 @@ typedef struct InjectionPointData
 } InjectionPointData;
 
 /*
+ * Identifies one generation of an injection point slot.
+ */
+typedef struct InjectionPointHandle
+{
+	int         slot_idx;
+	uint64      generation;
+} InjectionPointHandle;
+
+/*
  * Injection points require --enable-injection-points.
  */
 #ifdef USE_INJECTION_POINTS
@@ -51,11 +60,18 @@ extern void InjectionPointAttach(const char *name,
 								 const char *function,
 								 const void *private_data,
 								 int private_data_size);
+extern void InjectionPointAttachWithHandle(const char *name,
+										   const char *library,
+										   const char *function,
+										   const void *private_data,
+										   int private_data_size,
+										   InjectionPointHandle *handle);
 extern void InjectionPointLoad(const char *name);
 extern void InjectionPointRun(const char *name, void *arg);
 extern void InjectionPointCached(const char *name, void *arg);
 extern bool IsInjectionPointAttached(const char *name);
 extern bool InjectionPointDetach(const char *name);
+extern bool InjectionPointDetachByHandle(const InjectionPointHandle *handle);
 
 /* Get the current set of injection points attached */
 extern List *InjectionPointList(void);
