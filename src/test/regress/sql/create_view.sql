@@ -409,6 +409,187 @@ select pg_get_viewdef('view_of_joins_2b', true);
 select pg_get_viewdef('view_of_joins_2c', true);
 select pg_get_viewdef('view_of_joins_2d', true);
 
+-- A TABLEFUNC RTE names its columns in the clause that produces them, but it
+-- accepts a column alias list like any other RTE, and that list is where a
+-- rename of one of its columns has to be printed: the ON clause below refers
+-- to the column by the name the query sees, and without the list the two
+-- would not agree.  The anonymous FULL JOIN is what forces USING names to be
+-- unique query-wide, which is what pushes the JSON_TABLE column aside.
+create table tblnr (m int);
+create table tblnu (x int, m int);
+create table tblnl (x int);
+create table tblnm (x int);
+create table tblnw (a int, c int, d int);
+create table tblnv (c int);
+
+create view view_of_unrenamable as
+select j.m
+from (tblnl full join tblnm using (x)),
+     (json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+      join tblnr on jt.x > 0) j;
+
+select pg_get_viewdef('view_of_unrenamable', true);
+
+-- and that text is what has to reparse
+select 'create view view_of_unrenamable_2 as '
+       || pg_get_viewdef('view_of_unrenamable', true) \gexec
+select pg_get_viewdef('view_of_unrenamable', true)
+     = pg_get_viewdef('view_of_unrenamable_2', true) as round_trips;
+
+-- The name of a merged column is the other place a rename lands, and it lands
+-- on both sides at once: whatever is picked, each input has to answer to it,
+-- the TABLEFUNC through its alias list like the table through its own.
+create view view_of_unrenamable_using as
+select j.m
+from (tblnl full join tblnm using (x)),
+     (json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+      join tblnu using (x)) j;
+
+select pg_get_viewdef('view_of_unrenamable_using', true);
+
+select 'create view view_of_unrenamable_using_2 as '
+       || pg_get_viewdef('view_of_unrenamable_using', true) \gexec
+select pg_get_viewdef('view_of_unrenamable_using', true)
+     = pg_get_viewdef('view_of_unrenamable_using_2', true) as round_trips;
+
+-- The far side of an INNER or LEFT JOIN is as much a side as the near one:
+-- the merged column's expression names only the near input, but the rename
+-- reaches both.
+create view view_of_unrenamable_right as
+select j.m
+from (tblnl full join tblnm using (x)),
+     ((tblnu join json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+       using (x)) full join tblnm t2 using (x)) j;
+
+select pg_get_viewdef('view_of_unrenamable_right', true);
+select 'create view view_of_unrenamable_right_2 as '
+       || pg_get_viewdef('view_of_unrenamable_right', true) \gexec
+select pg_get_viewdef('view_of_unrenamable_right', true)
+     = pg_get_viewdef('view_of_unrenamable_right_2', true) as round_trips;
+
+create view view_of_unrenamable_left as
+select j.m
+from (tblnl full join tblnm using (x)),
+     ((tblnu left join json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+       using (x)) full join tblnm t2 using (x)) j;
+
+select pg_get_viewdef('view_of_unrenamable_left', true);
+select 'create view view_of_unrenamable_left_2 as '
+       || pg_get_viewdef('view_of_unrenamable_left', true) \gexec
+select pg_get_viewdef('view_of_unrenamable_left', true)
+     = pg_get_viewdef('view_of_unrenamable_left_2', true) as round_trips;
+
+-- An aliased join hides its inputs, and a USING name above it is taken by
+-- the join's own column: the join renames it on its alias list, and the
+-- TABLEFUNC underneath, being held to the query-wide USING names as well,
+-- renames its column on its own list.
+create view view_of_unrenamable_hidden as
+select j.m
+from (tblnl full join tblnm using (x)),
+     ((json_table(jsonb '[1,2]', '$[*]' columns (x int path '$')) as jt
+       join tblnr on true) j full join tblnm t2 using (x));
+
+select pg_get_viewdef('view_of_unrenamable_hidden', true);
+select 'create view view_of_unrenamable_hidden_2 as '
+       || pg_get_viewdef('view_of_unrenamable_hidden', true) \gexec
+select pg_get_viewdef('view_of_unrenamable_hidden', true)
+     = pg_get_viewdef('view_of_unrenamable_hidden_2', true) as round_trips;
+
+-- A name a parent join pushes down onto a merged column has to be unique in
+-- the input it lands in, whatever the USING clause underneath spells.
+create view view_of_unrenamable_pushed as
+select j2.d
+from (tblnv join (tblnw join json_table(jsonb '[1]', '$[*]' columns (a int path '$')) x
+                  using (a)) using (c)) as j2(a);
+
+select pg_get_viewdef('view_of_unrenamable_pushed', true);
+select 'create view view_of_unrenamable_pushed_2 as '
+       || pg_get_viewdef('view_of_unrenamable_pushed', true) \gexec
+select pg_get_viewdef('view_of_unrenamable_pushed', true)
+     = pg_get_viewdef('view_of_unrenamable_pushed_2', true) as round_trips;
+
+-- Two anonymous FULL JOINs merging the same name through a TABLEFUNC each
+-- still get distinct names.
+create view view_of_unrenamable_twice as
+select count(*) as n
+from (tblnl full join json_table(jsonb '[1]', '$[*]' columns (x int path '$')) jt1
+      using (x)),
+     (tblnm full join json_table(jsonb '[1]', '$[*]' columns (x int path '$')) jt2
+      using (x));
+
+select pg_get_viewdef('view_of_unrenamable_twice', true);
+select 'create view view_of_unrenamable_twice_2 as '
+       || pg_get_viewdef('view_of_unrenamable_twice', true) \gexec
+select pg_get_viewdef('view_of_unrenamable_twice', true)
+     = pg_get_viewdef('view_of_unrenamable_twice_2', true) as round_trips;
+
+-- and a column alias list the user wrote on a TABLEFUNC is part of the query
+create view view_of_tablefunc_alias as
+select t.a from json_table(jsonb '[1]', '$[*]' columns (c int path '$')) as t(a);
+
+select pg_get_viewdef('view_of_tablefunc_alias', true);
+select 'create view view_of_tablefunc_alias_2 as '
+       || pg_get_viewdef('view_of_tablefunc_alias', true) \gexec
+select pg_get_viewdef('view_of_tablefunc_alias', true)
+     = pg_get_viewdef('view_of_tablefunc_alias_2', true) as round_trips;
+
+drop view view_of_tablefunc_alias_2, view_of_tablefunc_alias;
+drop view view_of_unrenamable_twice_2, view_of_unrenamable_twice;
+drop view view_of_unrenamable_pushed_2, view_of_unrenamable_pushed;
+drop view view_of_unrenamable_hidden_2, view_of_unrenamable_hidden;
+drop view view_of_unrenamable_left_2, view_of_unrenamable_left;
+drop view view_of_unrenamable_right_2, view_of_unrenamable_right;
+drop view view_of_unrenamable_using_2, view_of_unrenamable_using;
+drop view view_of_unrenamable_2, view_of_unrenamable;
+drop table tblnr, tblnu, tblnl, tblnm, tblnw, tblnv;
+
+-- The columns a function's result type grows after the view is made are
+-- columns the RTE has now, and the alias list being positional they are
+-- printed in full: an aliased join above lays its own list over its inputs'
+-- lists end to end, so a grown column left off would shift the input after
+-- it, and a reference into that input would silently land on another column.
+create table tblfc (a int, z int);
+insert into tblfc values (1, 5);
+create function tblfc_f() returns setof tblfc language sql
+  as $$ select * from tblfc $$;
+create table tblfr (z int, val int);
+insert into tblfr values (1, 7);
+
+create view view_of_grown_input as
+select j.a, j.val from (tblfc_f() f join tblfr on true) j;
+
+select * from view_of_grown_input;
+
+alter table tblfc add column val int, add column spare int;
+
+select pg_get_viewdef('view_of_grown_input', true);
+select 'create view view_of_grown_input_2 as '
+       || pg_get_viewdef('view_of_grown_input', true) \gexec
+select pg_get_viewdef('view_of_grown_input', true)
+     = pg_get_viewdef('view_of_grown_input_2', true) as round_trips;
+select * from view_of_grown_input;
+select * from view_of_grown_input_2;
+
+drop view view_of_grown_input_2;
+
+-- A grown column that is dropped again still takes up its place in the
+-- positional alias list, as a dropped column; a column grown after it must
+-- not slide into that place.
+alter table tblfc drop column val;
+alter table tblfc add column val int;
+
+select pg_get_viewdef('view_of_grown_input', true);
+select 'create view view_of_grown_input_2 as '
+       || pg_get_viewdef('view_of_grown_input', true) \gexec
+select pg_get_viewdef('view_of_grown_input', true)
+     = pg_get_viewdef('view_of_grown_input_2', true) as round_trips;
+select * from view_of_grown_input;
+select * from view_of_grown_input_2;
+
+drop view view_of_grown_input_2, view_of_grown_input;
+drop function tblfc_f();
+drop table tblfc, tblfr;
+
 -- Test view decompilation in the face of column addition/deletion/renaming
 
 create table tt2 (a int, b int, c int);

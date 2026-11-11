@@ -72,4 +72,6 @@ extern Oid	LookupFuncWithArgs(ObjectType objtype, ObjectWithArgs *func,
 extern void check_srf_call_placement(ParseState *pstate, Node *last_srf,
 									 int location);
 
+extern bool is_rpr_navigation_name(const char *name);
+
 #endif							/* PARSE_FUNC_H */

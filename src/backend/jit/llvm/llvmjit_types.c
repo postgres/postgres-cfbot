@@ -178,6 +178,8 @@ void	   *referenced_functions[] =
 	ExecEvalScalarArrayOp,
 	ExecEvalHashedScalarArrayOp,
 	ExecEvalSubPlan,
+	ExecEvalRPRNavSet,
+	ExecEvalRPRNavRestore,
 	ExecEvalSysVar,
 	ExecEvalWholeRowVar,
 	ExecEvalXmlExpr,
