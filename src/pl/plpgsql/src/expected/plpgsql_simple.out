@@ -148,3 +148,23 @@ end $$;
 ERROR:  bigint out of range
 CONTEXT:  SQL statement "select x*x*x"
 PL/pgSQL function inline_code_block line 5 at SQL statement
+-- Check case where the type name passed to pg_input_is_valid() and
+-- pg_input_error_info() changes between evaluations
+do $$
+declare r record;
+begin
+  for r in select * from (values ('42', 'integer'), ('hello', 'text'),
+                                 ('100000', 'smallint'),
+                                 ('abcdefg', 'varchar(5)'),
+                                 ('abcdefg', 'varchar(10)'),
+                                 ('abcdefghijk', 'varchar(10)')) as v(val, typ) loop
+    raise notice '% as %: % %', r.val, r.typ, pg_input_is_valid(r.val, r.typ),
+      (pg_input_error_info(r.val, r.typ)).message;
+  end loop;
+end $$;
+NOTICE:  42 as integer: t <NULL>
+NOTICE:  hello as text: t <NULL>
+NOTICE:  100000 as smallint: f value "100000" is out of range for type smallint
+NOTICE:  abcdefg as varchar(5): f value too long for type character varying(5)
+NOTICE:  abcdefg as varchar(10): t <NULL>
+NOTICE:  abcdefghijk as varchar(10): f value too long for type character varying(10)
