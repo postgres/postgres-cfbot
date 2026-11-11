@@ -921,15 +921,23 @@ SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{7, 14, 22}') and unique1 = ANY('
 
 SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{7, 14, 22}') and unique1 = ANY('{33, 44}'::bigint[]);
 
+-- Use a generic plan, since constant NULL and all-NULL arrays are folded away
+SET plan_cache_mode = force_generic_plan;
+PREPARE null_array_key(int[]) AS
+SELECT unique1 FROM tenk1 WHERE unique1 = ANY($1);
+
 explain (costs off)
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY(NULL);
+EXECUTE null_array_key(NULL);
 
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY(NULL);
+EXECUTE null_array_key(NULL);
 
 explain (costs off)
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{NULL,NULL,NULL}');
+EXECUTE null_array_key('{NULL,NULL,NULL}');
 
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{NULL,NULL,NULL}');
+EXECUTE null_array_key('{NULL,NULL,NULL}');
+
+DEALLOCATE null_array_key;
+RESET plan_cache_mode;
 
 explain (costs off)
 SELECT unique1 FROM tenk1 WHERE unique1 IS NULL AND unique1 IS NULL;
