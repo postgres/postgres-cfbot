@@ -9891,9 +9891,10 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        <listitem>
         <para>
          Sets the maximum number of parallel workers that can be used by a
-         single autovacuum worker to process indexes. This limit applies
-         specifically to the index vacuuming and index cleanup phases (for the
-         details of each autovacuum phase, please refer to <xref linkend="vacuum-phases"/>).
+         single autovacuum worker to scan the table and to process indexes.
+         This limit applies to the heap scanning, index vacuuming and index
+         cleanup phases (for the details of each autovacuum phase, please
+         refer to <xref linkend="vacuum-phases"/>).
          The actual number of parallel workers is further limited by
          <xref linkend="guc-max-parallel-workers"/>. This is the
          per-autovacuum worker equivalent of the <literal>PARALLEL</literal>

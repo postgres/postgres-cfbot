@@ -1589,6 +1589,7 @@ LSEG
 LUID
 LVRelState
 LVSavedErrInfo
+LVScanData
 LWLock
 LWLockHandle
 LWLockMode
@@ -2110,6 +2111,7 @@ PTOKEN_PRIVILEGES
 PTOKEN_USER
 PUTENVPROC
 PVIndStats
+PVIndexShared
 PVIndVacStatus
 PVOID
 PVShared
@@ -2145,6 +2147,8 @@ ParallelHashJoinBatch
 ParallelHashJoinBatchAccessor
 ParallelHashJoinState
 ParallelIndexScanDesc
+ParallelLVShared
+ParallelLVState
 ParallelSlot
 ParallelSlotArray
 ParallelSlotResultHandler
