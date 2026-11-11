@@ -2413,32 +2413,38 @@ SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{7, 14, 22}') and unique1 = ANY('
 ---------
 (0 rows)
 
+-- Use a generic plan, since constant NULL and all-NULL arrays are folded away
+SET plan_cache_mode = force_generic_plan;
+PREPARE null_array_key(int[]) AS
+SELECT unique1 FROM tenk1 WHERE unique1 = ANY($1);
 explain (costs off)
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY(NULL);
-                   QUERY PLAN                    
--------------------------------------------------
+EXECUTE null_array_key(NULL);
+                  QUERY PLAN                  
+----------------------------------------------
  Index Only Scan using tenk1_unique1 on tenk1
-   Index Cond: (unique1 = ANY (NULL::integer[]))
+   Index Cond: (unique1 = ANY ($1))
 (2 rows)
 
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY(NULL);
+EXECUTE null_array_key(NULL);
  unique1 
 ---------
 (0 rows)
 
 explain (costs off)
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{NULL,NULL,NULL}');
-                          QUERY PLAN                           
----------------------------------------------------------------
+EXECUTE null_array_key('{NULL,NULL,NULL}');
+                  QUERY PLAN                  
+----------------------------------------------
  Index Only Scan using tenk1_unique1 on tenk1
-   Index Cond: (unique1 = ANY ('{NULL,NULL,NULL}'::integer[]))
+   Index Cond: (unique1 = ANY ($1))
 (2 rows)
 
-SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{NULL,NULL,NULL}');
+EXECUTE null_array_key('{NULL,NULL,NULL}');
  unique1 
 ---------
 (0 rows)
 
+DEALLOCATE null_array_key;
+RESET plan_cache_mode;
 explain (costs off)
 SELECT unique1 FROM tenk1 WHERE unique1 IS NULL AND unique1 IS NULL;
                        QUERY PLAN                        
