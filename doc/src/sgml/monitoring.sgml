@@ -3983,7 +3983,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>wal_fpi_bytes</structfield> <type>numeric</type>
       </para>
       <para>
-       Total amount of WAL full page images in bytes
+       Total amount of WAL full page images in bytes, after per-image
+       compression but before whole-record compression.  This can exceed
+       <structfield>wal_bytes</structfield> when whole records are compressed:
+       their compressed payload cannot be split into image and non-image
+       portions.
       </para></entry>
      </row>
 
