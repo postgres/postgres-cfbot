@@ -463,6 +463,7 @@ extern void InitArchiveFmt_Custom(ArchiveHandle *AH);
 extern void InitArchiveFmt_Null(ArchiveHandle *AH);
 extern void InitArchiveFmt_Directory(ArchiveHandle *AH);
 extern void InitArchiveFmt_Tar(ArchiveHandle *AH);
+extern void InitArchiveFmt_Blackhole(ArchiveHandle *AH);
 
 extern void ReconnectToServer(ArchiveHandle *AH, const char *dbname);
 extern void IssueCommandPerBlob(ArchiveHandle *AH, TocEntry *te,
