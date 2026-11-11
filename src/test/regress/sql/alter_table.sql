@@ -2509,6 +2509,19 @@ CREATE UNLOGGED TABLE unlogged2(f1 SERIAL PRIMARY KEY, f2 INTEGER REFERENCES unl
 CREATE UNLOGGED TABLE unlogged3(f1 SERIAL PRIMARY KEY, f2 INTEGER REFERENCES unlogged3); -- self-referencing foreign key
 ALTER TABLE unlogged3 SET LOGGED; -- skip self-referencing foreign key
 ALTER TABLE unlogged2 SET LOGGED; -- fails because a foreign key to an unlogged table exists
+CREATE UNLOGGED TABLE unlogged4(f1 INTEGER);
+ALTER TABLE unlogged4 SET LOGGED, ADD FOREIGN KEY (f1) REFERENCES unlogged1; -- fails, same with a foreign key added by the same command
+ALTER TABLE unlogged4 ADD FOREIGN KEY (f1) REFERENCES unlogged1, SET LOGGED; -- fails
+ALTER TABLE unlogged4 SET LOGGED, ADD FOREIGN KEY (f1) REFERENCES unlogged3; -- ok, unlogged3 is permanent now
+CREATE UNLOGGED TABLE unlogged5(f1 INTEGER PRIMARY KEY, f2 INTEGER);
+ALTER TABLE unlogged5 SET LOGGED, ADD FOREIGN KEY (f2) REFERENCES unlogged5; -- skip self-referencing foreign key
+CREATE TABLE logged6(f1 INTEGER PRIMARY KEY);
+CREATE UNLOGGED TABLE unlogged6(f1 INTEGER REFERENCES logged6, f2 INTEGER);
+INSERT INTO logged6 VALUES (1);
+INSERT INTO unlogged6 VALUES (1, 1);
+CREATE FUNCTION unlog_logged6(int) RETURNS bigint LANGUAGE plpgsql AS
+$$ BEGIN ALTER TABLE logged6 SET UNLOGGED; RETURN $1; END $$;
+ALTER TABLE unlogged6 SET LOGGED, ALTER f2 TYPE bigint USING unlog_logged6(f2); -- fails, logged6 became unlogged during the rewrite
 ALTER TABLE unlogged1 SET LOGGED;
 -- check relpersistence of an unlogged table after changing to permanent
 SELECT relname, relkind, relpersistence FROM pg_class WHERE relname ~ '^unlogged1'
@@ -2518,6 +2531,11 @@ UNION ALL
 SELECT r.relname || ' toast index', ri.relkind, ri.relpersistence FROM pg_class r join pg_class t ON t.oid = r.reltoastrelid JOIN pg_index i ON i.indrelid = t.oid JOIN pg_class ri ON ri.oid = i.indexrelid WHERE r.relname ~ '^unlogged1'
 ORDER BY relname;
 ALTER TABLE unlogged1 SET LOGGED; -- silently do nothing
+DROP TABLE unlogged6;
+DROP TABLE logged6;
+DROP FUNCTION unlog_logged6(int);
+DROP TABLE unlogged5;
+DROP TABLE unlogged4;
 DROP TABLE unlogged3;
 DROP TABLE unlogged2;
 DROP TABLE unlogged1;
