@@ -2567,6 +2567,8 @@ RecursiveUnionState
 RefetchForeignRow_function
 RefreshMatViewStmt
 RegProcedure
+RegexpCacheEntry
+RegexpCacheKey
 Regis
 RegisNode
 RegisteredBgWorker
@@ -4213,6 +4215,7 @@ rbt_allocfunc
 rbt_combiner
 rbt_comparator
 rbt_freefunc
+recache_hash
 reduce_outer_joins_partial_state
 reduce_outer_joins_pass1_state
 reduce_outer_joins_pass2_state
