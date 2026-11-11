@@ -4085,6 +4085,11 @@ FROM sje_agg a JOIN sje_agg a2 ON a.id = a2.id;
 EXPLAIN (COSTS OFF)
 SELECT a1.a FROM sj a1,sj a2 WHERE (a1.a=a2.a) FOR UPDATE;
 
+-- Different locking strengths can be merged, keeping the stronger one
+EXPLAIN (COSTS OFF)
+SELECT a1.a FROM sj a1,sj a2 WHERE (a1.a = a2.a)
+  FOR SHARE OF a1 FOR UPDATE OF a2;
+
 reset enable_hashjoin;
 reset enable_mergejoin;
 
