@@ -584,6 +584,13 @@ typedef struct ResultRelInfo
 	int			ri_NumGeneratedNeededI;
 	int			ri_NumGeneratedNeededU;
 
+	/*
+	 * Array of virtual generated columns ExprStates, and a slot holding the
+	 * new tuple with those columns computed, used by ExecConstraints().
+	 */
+	ExprState **ri_VirtualGeneratedExprs;
+	TupleTableSlot *ri_VirtualGeneratedSlot;
+
 	/* list of RETURNING expressions */
 	List	   *ri_returningList;
 
