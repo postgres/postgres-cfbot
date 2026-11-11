@@ -501,6 +501,25 @@ DROP EVENT TRIGGER add_fk;
 DROP FUNCTION test_evtrig_add_fk();
 DROP TABLE rewrite_ufk, rewrite_upk, rewrite_pfk, rewrite_ppk;
 
+-- changes made by a table_rewrite event trigger to the table being rewritten
+-- are not undone by the rewrite
+CREATE UNLOGGED TABLE rewrite_persist (a int);
+CREATE FUNCTION test_evtrig_set_logged() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF (pg_event_trigger_table_rewrite_reason() & 1) = 0 THEN
+    ALTER TABLE rewrite_persist SET LOGGED;
+  END IF;
+END;
+$$;
+CREATE EVENT TRIGGER set_logged ON table_rewrite
+  EXECUTE FUNCTION test_evtrig_set_logged();
+ALTER TABLE rewrite_persist ALTER a TYPE bigint;
+SELECT relpersistence FROM pg_class WHERE oid = 'rewrite_persist'::regclass;
+DROP EVENT TRIGGER set_logged;
+DROP FUNCTION test_evtrig_set_logged();
+DROP TABLE rewrite_persist;
+
 -- Tests for REINDEX
 CREATE OR REPLACE FUNCTION reindex_start_command()
 RETURNS event_trigger AS $$

@@ -5978,6 +5978,23 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			Oid			NewTableSpace;
 			char		persistence;
 
+			/*
+			 * Fire off an Event Trigger now, before actually rewriting the
+			 * table.  This must happen before we look at the relation below,
+			 * as the trigger can run commands that change it, such as its
+			 * persistence, and we must not undo those changes.
+			 *
+			 * We don't support Event Trigger for nested commands anywhere,
+			 * here included, and parsetree is given NULL when coming from
+			 * AlterTableInternal.
+			 *
+			 * And fire it only once.
+			 */
+			if (parsetree)
+				EventTriggerTableRewrite((Node *) parsetree,
+										 tab->relid,
+										 tab->rewrite);
+
 			OldHeap = table_open(tab->relid, NoLock);
 
 			/*
@@ -6034,21 +6051,6 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 				tab->newrelpersistence : OldHeap->rd_rel->relpersistence;
 
 			table_close(OldHeap, NoLock);
-
-			/*
-			 * Fire off an Event Trigger now, before actually rewriting the
-			 * table.
-			 *
-			 * We don't support Event Trigger for nested commands anywhere,
-			 * here included, and parsetree is given NULL when coming from
-			 * AlterTableInternal.
-			 *
-			 * And fire it only once.
-			 */
-			if (parsetree)
-				EventTriggerTableRewrite((Node *) parsetree,
-										 tab->relid,
-										 tab->rewrite);
 
 			/*
 			 * Create transient table that will receive the modified data.
