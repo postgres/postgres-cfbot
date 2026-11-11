@@ -91,6 +91,9 @@ option('docs_html_style', type: 'combo', choices: ['simple', 'website'],
 option('dtrace', type: 'feature', value: 'disabled',
   description: 'DTrace support')
 
+option('etw', type: 'feature', value: 'auto',
+  description: 'ETW (Event Tracing for Windows) probe support')
+
 option('gssapi', type: 'feature', value: 'auto',
   description: 'GSSAPI support')
 
