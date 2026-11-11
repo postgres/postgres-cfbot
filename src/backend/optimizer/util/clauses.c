@@ -4039,11 +4039,28 @@ eval_const_expressions_mutator(Node *node,
 					 */
 					RowExpr    *rarg = (RowExpr *) arg;
 					List	   *newargs = NIL;
+					TupleDesc	tupdesc = NULL;
+					bool		refuted = false;
 					ListCell   *l;
+
+					/*
+					 * A RowExpr of a named composite type has a placeholder
+					 * for each dropped column. Those must be ignored, as
+					 * ExecEvalRowNullInt() does, so we need the tuple
+					 * descriptor to identify them.
+					 */
+					if (rarg->row_typeid != RECORDOID)
+						tupdesc = lookup_rowtype_tupdesc(rarg->row_typeid, -1);
 
 					foreach(l, rarg->args)
 					{
 						Node	   *relem = (Node *) lfirst(l);
+						int			i = foreach_current_index(l);
+
+						/* Ignore dropped columns */
+						if (tupdesc && i < tupdesc->natts &&
+							TupleDescCompactAttr(tupdesc, i)->attisdropped)
+							continue;
 
 						/*
 						 * A constant field refutes the whole NullTest if it's
@@ -4056,7 +4073,10 @@ eval_const_expressions_mutator(Node *node,
 							if (carg->constisnull ?
 								(ntest->nulltesttype == IS_NOT_NULL) :
 								(ntest->nulltesttype == IS_NULL))
-								return makeBoolConst(false, false);
+							{
+								refuted = true;
+								break;
+							}
 							continue;
 						}
 
@@ -4070,7 +4090,10 @@ eval_const_expressions_mutator(Node *node,
 												NOTNULL_SOURCE_HASHTABLE))
 						{
 							if (ntest->nulltesttype == IS_NULL)
-								return makeBoolConst(false, false);
+							{
+								refuted = true;
+								break;
+							}
 							continue;
 						}
 
@@ -4087,6 +4110,12 @@ eval_const_expressions_mutator(Node *node,
 						newntest->location = ntest->location;
 						newargs = lappend(newargs, newntest);
 					}
+
+					if (tupdesc)
+						ReleaseTupleDesc(tupdesc);
+
+					if (refuted)
+						return makeBoolConst(false, false);
 					/* If all the inputs were constants, result is TRUE */
 					if (newargs == NIL)
 						return makeBoolConst(true, false);
