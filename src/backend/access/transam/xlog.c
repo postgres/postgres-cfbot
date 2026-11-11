@@ -1077,20 +1077,18 @@ XLogInsertRecord(XLogRecData *rdata,
 		/*
 		 * Even though we reserved the rest of the segment for us, which is
 		 * reflected in EndPos, we return a pointer to just the end of the
-		 * xlog-switch record.
+		 * xlog-switch record.  Compute it the same way as for any other
+		 * record, so that a record ending exactly on a page boundary points
+		 * to the boundary rather than past the next page header.  On a
+		 * segment boundary, the latter would be beyond the WAL we reserved.
 		 */
 		if (inserted)
 		{
-			EndPos = StartPos + SizeOfXLogRecord;
-			if (StartPos / XLOG_BLCKSZ != EndPos / XLOG_BLCKSZ)
-			{
-				uint64		offset = XLogSegmentOffset(EndPos, wal_segment_size);
+			XLogRecPtr	reservedEndPos PG_USED_FOR_ASSERTS_ONLY = EndPos;
 
-				if (offset == EndPos % XLOG_BLCKSZ)
-					EndPos += SizeOfXLogLongPHD;
-				else
-					EndPos += SizeOfXLogShortPHD;
-			}
+			EndPos = XLogBytePosToEndRecPtr(XLogRecPtrToBytePos(StartPos) +
+											MAXALIGN(SizeOfXLogRecord));
+			Assert(EndPos <= reservedEndPos);
 		}
 	}
 
