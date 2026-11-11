@@ -158,7 +158,10 @@ SELECT xmlconcat('<?xml version="1.1"?><foo/>', '<?xml version="1.1" standalone=
    </indexterm>
 
 <synopsis>
-<function>xmlelement</function> ( <literal>NAME</literal> <replaceable>name</replaceable> <optional>, <literal>XMLATTRIBUTES</literal> ( <replaceable>attvalue</replaceable> <optional> <literal>AS</literal> <replaceable>attname</replaceable> </optional> <optional>, ...</optional> ) </optional> <optional>, <replaceable>content</replaceable> <optional>, ...</optional></optional> ) <returnvalue>xml</returnvalue>
+<function>xmlelement</function> ( <literal>NAME</literal> <replaceable>name</replaceable>
+    <optional>, <literal>XMLATTRIBUTES</literal> ( <replaceable>attvalue</replaceable> <optional> <literal>AS</literal> <replaceable>attname</replaceable> </optional> <optional>, ...</optional> ) </optional>
+    <optional>, <literal>XMLNAMESPACES</literal> ( {<replaceable>regular-nsuri</replaceable> <literal>AS</literal> <replaceable>nsprefix</replaceable> | DEFAULT <replaceable>default-nsuri</replaceable> | NO DEFAULT} <optional>, ...</optional> ) </optional>
+    <optional>, <replaceable>content</replaceable> <optional>, ...</optional></optional> ) <returnvalue>xml</returnvalue>
 </synopsis>
 
     <para>
@@ -171,8 +174,39 @@ SELECT xmlconcat('<?xml version="1.1"?><foo/>', '<?xml version="1.1" standalone=
      yield any <productname>PostgreSQL</productname> data type.  The
      argument(s) within <literal>XMLATTRIBUTES</literal> generate attributes
      of the XML element; the <replaceable>content</replaceable> value(s) are
-     concatenated to form its content.
+     concatenated to form its content. The arguments within <literal>XMLNAMESPACES</literal>
+     construct namespace declarations from values provided in <replaceable>nsuri</replaceable>
+     and <replaceable>nsprefix</replaceable>, which correspond to the URI of a namespace and
+     its prefix, respectively. The option <literal>DEFAULT</literal> can be used to set the
+     default namespace declaration (without a prefix) to the URI provided in <replaceable>default-nsuri</replaceable>.
+     The option <literal>NO DEFAULT</literal> states that a namespace scope has no default namespace. A valid
+     <literal>XMLNAMESPACES</literal> item must fulfill the following conditions:
     </para>
+
+    <itemizedlist>
+    <listitem>
+     <para>
+      Only a single <literal>DEFAULT</literal> declaration item within the same scope.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      No two <replaceable>nsprefix</replaceable> values can be equal within the same scope.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      No <replaceable>nsprefix</replaceable> can be equal to <literal>xml</literal> or <literal>xmlns</literal>,
+      and no <replaceable>nsuri</replaceable> can be equal to <literal>http://www.w3.org/2000/xmlns/</literal>
+      or to <literal>http://www.w3.org/XML/1998/namespace</literal>, as they are already bound to standard XML declarations.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      The value of a <replaceable>regular-nsuri</replaceable> cannot be a zero-length string.
+     </para>
+    </listitem>
+   </itemizedlist>
 
     <para>
      Examples:
@@ -194,6 +228,24 @@ SELECT xmlelement(NAME foo, xmlattributes(current_date AS bar), 'cont', 'ent');
              xmlelement
 -------------------------------------
  <foo bar="2007-01-26">content</foo>
+
+SELECT xmlelement(NAME "foo:root", xmlnamespaces('http:/foo.bar/' AS foo), 'content');
+
+                       xmlelement
+---------------------------------------------------------
+ <foo:root xmlns:foo="http:/foo.bar/">content</foo:root>
+
+SELECT xmlelement(NAME "root", xmlnamespaces(DEFAULT 'http:/foo.bar/'), 'content');
+
+                 xmlelement
+---------------------------------------------
+ <root xmlns="http:/foo.bar/">content</root>
+
+SELECT xmlelement(NAME "root", xmlnamespaces(NO DEFAULT), 'content');
+
+          xmlelement
+-------------------------------
+ <root xmlns="">content</root>
 ]]></screen>
     </para>
 
