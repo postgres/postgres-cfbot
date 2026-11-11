@@ -1,0 +1,59 @@
+Parsed test spec with 3 sessions
+
+starting permutation: wait1 replace2 terminate3 noop3 run2 detach2
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step wait1: 
+	SELECT injection_points_run('injection-points-local-cleanup');
+ <waiting ...>
+step replace2: 
+	SELECT injection_points_detach('injection-points-local-cleanup');
+	SELECT injection_points_attach('injection-points-local-cleanup', 'notice');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step terminate3: 
+	SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+	  WHERE wait_event = 'injection-points-local-cleanup';
+ <waiting ...>
+step wait1: <... completed>
+FATAL:  terminating connection due to administrator command
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+
+step terminate3: <... completed>
+pg_terminate_backend
+--------------------
+t                   
+(1 row)
+
+step noop3: 
+s2: NOTICE:  notice triggered for injection point injection-points-local-cleanup
+step run2: 
+	SELECT injection_points_run('injection-points-local-cleanup');
+
+injection_points_run
+--------------------
+                    
+(1 row)
+
+step detach2: 
+	SELECT injection_points_detach('injection-points-local-cleanup');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
