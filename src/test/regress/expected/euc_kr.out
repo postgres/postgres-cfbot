@@ -14,3 +14,38 @@ SELECT POSITION(
         5
 (1 row)
 
+-- Maximum number of bytes per character.
+SELECT pg_encoding_max_length(pg_char_to_encoding('EUC_KR'));
+ pg_encoding_max_length 
+------------------------
+                      2
+(1 row)
+
+-- Code set 0 (ASCII) characters take one byte and code set 1 (KS X 1001)
+-- characters take two.  Count, search and match a string mixing both.
+SELECT char_length(convert_from('\x41b0fac7d0', 'EUC_KR'));
+ char_length 
+-------------
+           3
+(1 row)
+
+SELECT POSITION(
+	convert_from('\xc7d0', 'EUC_KR') IN
+	convert_from('\x41b0fac7d0', 'EUC_KR'));
+ position 
+----------
+        3
+(1 row)
+
+SELECT regexp_replace(convert_from('\x41b0fac7d0', 'EUC_KR'), '[^A]', 'x', 'g');
+ regexp_replace 
+----------------
+ Axx
+(1 row)
+
+-- Code sets 2 and 3 are not defined for EUC_KR, so SS2 (0x8e) and SS3 (0x8f)
+-- are not valid lead bytes.
+SELECT convert_from('\x8ea1', 'EUC_KR');
+ERROR:  invalid byte sequence for encoding "EUC_KR": 0x8e 0xa1
+SELECT convert_from('\x8fa1a1', 'EUC_KR');
+ERROR:  invalid byte sequence for encoding "EUC_KR": 0x8f 0xa1
