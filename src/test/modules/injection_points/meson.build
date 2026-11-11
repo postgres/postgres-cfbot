@@ -51,7 +51,10 @@ injection_points_isolation = [
 # on Windows, making the test unstable there.
 # See https://postgr.es/m/088AB35D-0860-494A-A9CF-8B301543AA51@yandex-team.ru
 if host_system != 'windows'
-  injection_points_isolation += 'wait_cleanup'
+  injection_points_isolation += [
+    'local_cleanup',
+    'wait_cleanup',
+  ]
 endif
 
 tests += {
