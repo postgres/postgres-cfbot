@@ -115,7 +115,64 @@ my $restored_count =
 is($restored_count, $rows_after_truncation,
 	'Restored backup has correct row count');
 
-$primary->stop;
 $restored->stop;
+
+# Test that blocks truncated in an intermediate backup are not resurrected
+# when a later backup bulk-extends the relation with unwritten zero-filled
+# pages.  Increase shared_buffers so COPY can bulk-extend by multiple blocks
+# at once, grow the table to 30 blocks, truncate it in an intermediate
+# backup, and then bulk-extend it with COPY.
+$primary->append_conf('postgresql.conf', 'shared_buffers = 8MB');
+$primary->restart;
+
+my $full_rows = 30;
+$primary->safe_psql(
+	'postgres',
+	"INSERT INTO t
+        SELECT i,
+            repeat('0123456789ABCDEF0123456789ABCDEF', ($block_size / (2*32)))
+    FROM generate_series($rows_after_truncation + 1, $full_rows) i;
+    VACUUM t;"
+);
+
+my $incr_backup = "$backup_path/incr";
+$primary->backup('incr2',
+	backup_options => [ '--incremental', "$incr_backup/backup_manifest" ]);
+
+$primary->safe_psql('postgres',
+	"DELETE FROM t WHERE id > $rows_after_truncation;
+	 VACUUM (TRUNCATE) t;");
+
+my $incr2_backup = "$backup_path/incr2";
+$primary->backup('incr3',
+	backup_options => [ '--incremental', "$incr2_backup/backup_manifest" ]);
+
+my $copy_rows = 17;
+my $row_data = '0123456789ABCDEF0123456789ABCDEF' x ($block_size / (2 * 32));
+my $copy_input = "COPY t FROM STDIN;\n";
+for my $i (1 .. $copy_rows)
+{
+	$copy_input .= ($full_rows + $i) . "\t$row_data\n";
+}
+$copy_input .= "\\.\n";
+$primary->safe_psql('postgres', $copy_input);
+
+my $incr3_backup = "$backup_path/incr3";
+$primary->backup('incr4',
+	backup_options => [ '--incremental', "$incr3_backup/backup_manifest" ]);
+
+my $restored2 = PostgreSQL::Test::Cluster->new('node3');
+$restored2->init_from_backup(
+	$primary, 'incr4',
+	combine_with_prior => [ 'full', 'incr', 'incr2', 'incr3' ]);
+$restored2->start();
+
+$restored_count =
+  $restored2->safe_psql('postgres', "SELECT count(*) FROM t;");
+is($restored_count, $rows_after_truncation + $copy_rows,
+	'Restored backup after intermediate truncation and bulk extension has correct row count');
+
+$primary->stop;
+$restored2->stop;
 
 done_testing();
