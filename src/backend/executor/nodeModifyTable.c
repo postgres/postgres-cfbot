@@ -4118,7 +4118,9 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 	 * Note that the planner does not build a withCheckOptionList or
 	 * returningList for the root relation, but as in ExecInitPartitionInfo,
 	 * we can use the first resultRelInfo entry as a reference to calculate
-	 * the attno's for the root table.
+	 * the attno's for the root table.  Allow columns present only in the child
+	 * when building the attribute map, since the expressions were derived from
+	 * the root relation and cannot reference such columns.
 	 */
 	if (rootRelInfo != mtstate->resultRelInfo &&
 		rootRelInfo->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
@@ -4152,7 +4154,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 				part_attmap =
 					build_attrmap_by_name(RelationGetDescr(rootRelation),
 										  RelationGetDescr(firstResultRel),
-										  false);
+										  true);
 
 				wcoList = (List *)
 					map_variable_attnos((Node *) wcoList,
@@ -4196,7 +4198,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 					part_attmap =
 						build_attrmap_by_name(RelationGetDescr(rootRelation),
 											  RelationGetDescr(firstResultRel),
-											  false);
+											  true);
 
 				returningList = (List *)
 					map_variable_attnos((Node *) returningList,
