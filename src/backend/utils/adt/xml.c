@@ -305,9 +305,11 @@ xml_in(PG_FUNCTION_ARGS)
  *
  * This is only acceptable so long as xmltype and text use the same
  * representation.
+ *
+ * If omit_xmldecl is true, no XML declaration is printed.
  */
 static char *
-xml_out_internal(xmltype *x, pg_enc target_encoding)
+xml_out_internal(xmltype *x, pg_enc target_encoding, bool omit_xmldecl)
 {
 	char	   *str = text_to_cstring((text *) x);
 
@@ -324,7 +326,8 @@ xml_out_internal(xmltype *x, pg_enc target_encoding)
 
 		initStringInfo(&buf);
 
-		if (!print_xml_decl(&buf, version, target_encoding, standalone))
+		if (omit_xmldecl ||
+			!print_xml_decl(&buf, version, target_encoding, standalone))
 		{
 			/*
 			 * If we are not going to produce an XML declaration, eat a single
@@ -361,7 +364,7 @@ xml_out(PG_FUNCTION_ARGS)
 	 * different client encoding, so we'd do more harm than good by including
 	 * it.
 	 */
-	PG_RETURN_CSTRING(xml_out_internal(x, 0));
+	PG_RETURN_CSTRING(xml_out_internal(x, 0, false));
 }
 
 
@@ -444,7 +447,7 @@ xml_send(PG_FUNCTION_ARGS)
 	 * xml_out_internal doesn't convert the encoding, it just prints the right
 	 * declaration. pq_sendtext will do the conversion.
 	 */
-	outval = xml_out_internal(x, pg_get_client_encoding());
+	outval = xml_out_internal(x, pg_get_client_encoding(), false);
 
 	pq_begintypsend(&buf);
 	pq_sendtext(&buf, outval, strlen(outval));
@@ -2726,6 +2729,13 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 		}
 
 		/*
+		 * An XML declaration is only allowed at the start of a document, so
+		 * omit it from xml values used as element content.
+		 */
+		if (type == XMLOID && xml_escape_strings)
+			return xml_out_internal(DatumGetXmlP(value), 0, true);
+
+		/*
 		 * otherwise, just use the type's native text representation
 		 */
 		getTypeOutputInfo(type, &typeOut, &isvarlena);
@@ -4836,7 +4846,7 @@ XmlTableSetDocument(TableFuncScanState *state, Datum value)
 	 * Use out function for casting to string (remove encoding property). See
 	 * comment in xml_out.
 	 */
-	str = xml_out_internal(xmlval, 0);
+	str = xml_out_internal(xmlval, 0, false);
 
 	length = strlen(str);
 	xstr = pg_xmlCharStrndup(str, length);
