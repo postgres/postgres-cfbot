@@ -142,6 +142,8 @@ static Node *eval_const_expressions_mutator(Node *node,
 static bool contain_non_const_walker(Node *node, void *context);
 static bool ece_function_is_safe(Oid funcid,
 								 eval_const_expressions_context *context);
+static bool saop_never_true(ScalarArrayOpExpr *saop);
+static Node *simplify_qual_null_saops(Node *node);
 static List *simplify_or_arguments(List *args,
 								   eval_const_expressions_context *context,
 								   bool *haveNull, bool *forceTrue);
@@ -2655,6 +2657,259 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	return eval_const_expressions_mutator(node, &context);
 }
 
+/*--------------------
+ * eval_const_expressions_qual
+ *
+ * Same as eval_const_expressions, but for an expression that is used as a
+ * qual, i.e. in a context where a NULL result has the same effect as FALSE.
+ * This allows additional simplifications; see simplify_qual_null_saops.
+ *
+ * The input should be in explicit-AND format: the extra simplification does
+ * not look into the elements of an implicit-AND List.
+ *--------------------
+ */
+Node *
+eval_const_expressions_qual(PlannerInfo *root, Node *node)
+{
+	node = eval_const_expressions(root, node);
+	return simplify_qual_null_saops(node);
+}
+
+/*
+ * saop_never_true
+ *		Can this ScalarArrayOpExpr never yield TRUE?
+ *
+ * That is so if the array is a NULL constant, in which case the result is
+ * always NULL, or if it is "x op ALL (array)" with a strict operator and an
+ * array known to contain a NULL element, in which case each comparison
+ * against the NULL element yields NULL, so the result is FALSE or NULL.
+ * ANY over an empty array is always FALSE, and ANY over an all-NULL array
+ * with a strict operator is always NULL.
+ */
+static bool
+saop_never_true(ScalarArrayOpExpr *saop)
+{
+	Node	   *arrayarg = lsecond(saop->args);
+	ArrayType  *array = NULL;
+	int			nitems = 0;
+
+	/*
+	 * If the array is NULL, the result is NULL whatever the operator and the
+	 * scalar argument are; see ExecEvalScalarArrayOp.  That holds for ANY as
+	 * well as ALL, and for a non-strict operator too.
+	 */
+	if (IsA(arrayarg, Const) && ((Const *) arrayarg)->constisnull)
+		return true;
+
+	if (IsA(arrayarg, Const))
+	{
+		array = DatumGetArrayTypeP(((Const *) arrayarg)->constvalue);
+		nitems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+		/* An empty ANY is FALSE even for a non-strict operator. */
+		if (nitems == 0)
+			return saop->useOr;
+	}
+	else if (IsA(arrayarg, ArrayExpr) &&
+			 ((ArrayExpr *) arrayarg)->elements == NIL)
+		return saop->useOr;
+
+	set_sa_opfuncid(saop);
+	if (!func_strict(saop->opfuncid))
+		return false;
+
+	if (array != NULL)
+	{
+		uint8	   *bitmap;
+		int			i;
+
+		if (!saop->useOr)
+			return array_contains_nulls(array);
+
+		/* For ANY, every element must be NULL.  A set bit means non-NULL. */
+		bitmap = ARR_NULLBITMAP(array);
+		if (bitmap == NULL)
+			return false;
+		for (i = 0; i < nitems / 8; i++)
+		{
+			if (bitmap[i] != 0)
+				return false;
+		}
+		if (nitems % 8 != 0 &&
+			(bitmap[i] & ((1 << (nitems % 8)) - 1)) != 0)
+			return false;
+		return true;
+	}
+	else if (IsA(arrayarg, ArrayExpr))
+	{
+		ArrayExpr  *arrayexpr = (ArrayExpr *) arrayarg;
+		ListCell   *lc;
+
+		/*
+		 * In a multidimensional ARRAY[] the elements are sub-arrays, and a
+		 * NULL sub-array doesn't produce a NULL element: e.g.
+		 * ARRAY[NULL::int[], NULL::int[]] is an empty array, over which ALL
+		 * is TRUE.
+		 */
+		if (arrayexpr->multidims)
+			return false;
+
+		foreach(lc, arrayexpr->elements)
+		{
+			Node	   *elem = (Node *) lfirst(lc);
+
+			if (IsA(elem, Const) && ((Const *) elem)->constisnull)
+			{
+				if (!saop->useOr)
+					return true;
+			}
+			else if (saop->useOr)
+				return false;
+		}
+		return saop->useOr;
+	}
+
+	return false;
+}
+
+/*
+ * simplify_qual_null_saops
+ *		Simplify an already const-simplified boolean expression that is used
+ *		in a context where NULL has the same effect as FALSE, such as a WHERE
+ *		or JOIN qual or an aggregate FILTER clause.
+ *
+ * In such a context a scalar-array comparison is replaced by constant FALSE if
+ * saop_never_true() says it can never yield TRUE.  We also look through
+ * AND and OR, since replacing a NULL argument by FALSE cannot change whether
+ * an AND or OR yields TRUE.  An AND with a FALSE (or NULL) argument then
+ * reduces to FALSE, and an OR whose arguments all reduce to FALSE or NULL
+ * reduces to FALSE.  A nonconstant OR is left unchanged so that it can still
+ * match an index expression simplified with plain eval_const_expressions().
+ * We must not look through NOT, since NOT NULL is NULL but NOT FALSE is TRUE.
+ *
+ * "expr IS TRUE" is replaced by constant FALSE if expr reduces to constant
+ * FALSE this way.  We do not otherwise rewrite its argument.  In particular,
+ * we must not fold "expr IS NOT TRUE" to TRUE: removing that qual can prevent
+ * the planner from proving an identical partial index predicate, which is
+ * simplified using plain eval_const_expressions().
+ *
+ * In particular, this is not applied to CASE WHEN conditions or to IS [NOT]
+ * TRUE outside of a qual, although NULL and FALSE are equivalent there too.
+ * Such a rewrite would change the structure of a scalar expression without
+ * changing its value, so the expression would no longer match an equal
+ * expression stored in the catalogs and simplified without it, such as an
+ * index expression, a partition key or an extended statistics expression.
+ * Nor can those be simplified the same way, since a partition key is checked
+ * for being constant when it is defined, and existing schemas must still be
+ * restorable.  An aggregate or window function FILTER clause cannot appear
+ * in any such expression, so eval_const_expressions_mutator applies this to
+ * it when planning a query.
+ *
+ * This is done as a separate pass over the output of
+ * eval_const_expressions_mutator, rather than while simplifying the
+ * ScalarArrayOpExpr node itself, because NOTs pushed down by negate_clause(),
+ * simplified boolean equalities such as "(expr) = true", and inlined SQL
+ * functions can all produce such a node only after its own simplification
+ * is complete.
+ */
+static Node *
+simplify_qual_null_saops(Node *node)
+{
+	/* This function recurses through boolean expressions. */
+	check_stack_depth();
+
+	if (node == NULL)
+		return NULL;
+
+	if (IsA(node, ScalarArrayOpExpr))
+	{
+		if (saop_never_true((ScalarArrayOpExpr *) node))
+			return makeBoolConst(false, false);
+	}
+	else if (IsA(node, BooleanTest))
+	{
+		BooleanTest *btest = (BooleanTest *) node;
+
+		if (btest->booltesttype == IS_TRUE)
+		{
+			Node	   *arg = simplify_qual_null_saops((Node *) btest->arg);
+
+			/* FALSE and NULL are equivalent here */
+			if (arg && IsA(arg, Const) &&
+				(((Const *) arg)->constisnull ||
+				 !DatumGetBool(((Const *) arg)->constvalue)))
+				return makeBoolConst(false, false);
+		}
+	}
+	else if (is_andclause(node) || is_orclause(node))
+	{
+		BoolExpr   *expr = (BoolExpr *) node;
+		bool		isand = (expr->boolop == AND_EXPR);
+		List	   *newargs = NIL;
+		bool		changed = false;
+		ListCell   *lc;
+
+		foreach(lc, expr->args)
+		{
+			Node	   *arg = (Node *) lfirst(lc);
+			Node	   *newarg = simplify_qual_null_saops(arg);
+
+			/* Copy the unchanged prefix only when a rewrite is needed. */
+			if (!changed &&
+				(newarg != arg || IsA(newarg, Const) ||
+				 (isand && is_andclause(newarg)) ||
+				 (!isand && is_orclause(newarg))))
+			{
+				newargs = list_copy_head(expr->args,
+										 foreach_current_index(lc));
+				changed = true;
+			}
+
+			if (!changed)
+				continue;
+
+			if (IsA(newarg, Const))
+			{
+				Const	   *c = (Const *) newarg;
+
+				/* FALSE and NULL are equivalent here */
+				if (c->constisnull || !DatumGetBool(c->constvalue))
+				{
+					if (isand)
+						return makeBoolConst(false, false);
+					/* drop it from the OR */
+				}
+				else
+				{
+					if (!isand)
+						return makeBoolConst(true, false);
+					/* drop it from the AND */
+				}
+				changed = true;
+				continue;
+			}
+
+			/* Keep the result flat, as eval_const_expressions does */
+			if ((isand && is_andclause(newarg)) ||
+				(!isand && is_orclause(newarg)))
+				newargs = list_concat(newargs, ((BoolExpr *) newarg)->args);
+			else
+				newargs = lappend(newargs, newarg);
+		}
+
+		if (!changed)
+			return node;
+		if (newargs == NIL)
+			return makeBoolConst(isand, false);
+		if (!isand)
+			return node;
+		if (list_length(newargs) == 1)
+			return (Node *) linitial(newargs);
+		return (Node *) makeBoolExpr(expr->boolop, newargs, expr->location);
+	}
+
+	return node;
+}
+
 #define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
 /*--------------------
  * convert_saop_to_hashed_saop
@@ -2949,6 +3204,10 @@ eval_const_expressions_mutator(Node *node,
 				aggfilter = (Expr *)
 					eval_const_expressions_mutator((Node *) expr->aggfilter,
 												   context);
+				/* NULL and FALSE are equivalent in a FILTER clause */
+				if (context->root != NULL)
+					aggfilter = (Expr *)
+						simplify_qual_null_saops((Node *) aggfilter);
 
 				/* And build the replacement WindowFunc node */
 				newexpr = makeNode(WindowFunc);
@@ -3015,7 +3274,12 @@ eval_const_expressions_mutator(Node *node,
 		case T_Aggref:
 			node = ece_generic_processing(node);
 			if (context->root != NULL)
+			{
+				/* NULL and FALSE are equivalent in a FILTER clause */
+				((Aggref *) node)->aggfilter = (Expr *)
+					simplify_qual_null_saops((Node *) ((Aggref *) node)->aggfilter);
 				return simplify_aggref((Aggref *) node, context);
+			}
 			return node;
 		case T_OpExpr:
 			{
@@ -4164,6 +4428,7 @@ eval_const_expressions_mutator(Node *node,
 
 				arg = eval_const_expressions_mutator((Node *) btest->arg,
 													 context);
+
 				if (arg && IsA(arg, Const))
 				{
 					/*
