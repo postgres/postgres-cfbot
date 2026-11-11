@@ -3202,8 +3202,18 @@ relation_needs_vacanalyze(Oid relid,
 	 * variable might be 0 here (i.e., a division-by-zero hazard), so in that
 	 * case we use the mxid_age as the MXID score.
 	 */
-	xid_age = TransactionIdIsNormal(relfrozenxid) ? recentXid - relfrozenxid : 0;
-	mxid_age = MultiXactIdIsValid(relminmxid) ? recentMulti - relminmxid : 0;
+	/*
+	 * recentXid and recentMulti were read before the pg_class scan, so the
+	 * table's relfrozenxid or relminmxid may have advanced past them
+	 * meanwhile, for example by a concurrent VACUUM or a table rewrite.
+	 * Treat the age as zero in that case.
+	 */
+	xid_age = (TransactionIdIsNormal(relfrozenxid) &&
+			   TransactionIdPrecedes(relfrozenxid, recentXid)) ?
+		recentXid - relfrozenxid : 0;
+	mxid_age = (MultiXactIdIsValid(relminmxid) &&
+				MultiXactIdPrecedes(relminmxid, recentMulti)) ?
+		recentMulti - relminmxid : 0;
 
 	scores->xid = (double) xid_age / freeze_max_age;
 	scores->mxid = (double) mxid_age / Max(1, multixact_freeze_max_age);
