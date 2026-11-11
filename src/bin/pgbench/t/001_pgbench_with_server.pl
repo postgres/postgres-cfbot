@@ -1245,7 +1245,6 @@ my @errors = (
 		2,
 		[
 			qr{ERROR:  syntax error},
-			qr{prepared statement .* does not exist}
 		],
 		q{-- SQL syntax error
     SELECT 1 + ;
@@ -1865,6 +1864,60 @@ $node->pgbench(
 
 # Clean up
 $node->safe_psql('postgres', 'DROP TABLE unique_table;');
+
+# Test that a client blocked in an asynchronous Prepare does not block
+# other clients: with -c 2 -j 1, both clients are driven by the same event loop,
+# so a blocking wait for the prepare result would prevent client 1 from
+# proceeding, and this test would hang.
+$node->safe_psql('postgres',
+	'CREATE TABLE blocked_prepare_locked (i int); '
+  . 'CREATE TABLE blocked_prepare_progress (i int);');
+
+$node->pgbench(
+	'-n -c 2 -j 1 -t 1 -M prepared', 0,
+	[ qr{processed: 2/2} ], [qr{^$}],
+	'client blocked in Prepare does not block other clients',
+	{
+		'001_pgbench_async_prepare' => q{
+\if :client_id = 0
+-- wait until client 1 holds the exclusive lock, then block in Prepare
+DO $$
+DECLARE
+  lockers integer;
+BEGIN
+  LOOP
+	SELECT count(*) INTO lockers FROM pg_locks
+	WHERE relation = 'blocked_prepare_locked'::regclass
+	  AND mode = 'AccessExclusiveLock' AND granted
+	  AND pid <> pg_backend_pid();
+	EXIT WHEN lockers = 1;
+  END LOOP;
+END$$;
+SELECT * FROM blocked_prepare_locked;
+\else
+BEGIN;
+LOCK TABLE blocked_prepare_locked IN ACCESS EXCLUSIVE MODE;
+-- wait until client 0's Parse is queued behind the lock
+DO $$
+DECLARE
+  waiters integer;
+BEGIN
+  LOOP
+	SELECT count(*) INTO waiters FROM pg_locks
+	WHERE relation = 'blocked_prepare_locked'::regclass
+	  AND NOT granted;
+	EXIT WHEN waiters = 1;
+  END LOOP;
+END$$;
+INSERT INTO blocked_prepare_progress VALUES (:client_id);
+COMMIT;
+\endif
+}
+	});
+
+# Clean up
+$node->safe_psql('postgres',
+	'DROP TABLE blocked_prepare_locked, blocked_prepare_progress;');
 
 # done
 $node->safe_psql('postgres', 'DROP TABLESPACE regress_pgbench_tap_1_ts');
