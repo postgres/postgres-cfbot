@@ -57,6 +57,8 @@ tests += {
       'gather',
       'join_order',
       'join_strategy',
+      'no_join',
+      'no_scan',
       'partitionwise',
       'prepared',
       'scan',
