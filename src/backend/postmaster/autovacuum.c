@@ -2683,8 +2683,8 @@ deleted:
 	MemoryContextSwitchTo(TopTransactionContext);
 
 	/*
-	 * Update pg_database.datfrozenxid, and truncate pg_xact if possible. We
-	 * only need to do this once, not after each table.
+	 * Force a final update of pg_database.datfrozenxid, and truncate pg_xact
+	 * if possible.
 	 *
 	 * Even if we didn't vacuum anything, it may still be important to do
 	 * this, because one indirect effect of vac_update_datfrozenxid() is to
@@ -2703,7 +2703,7 @@ deleted:
 	 * worker has already done it, or will do so when it finishes.
 	 */
 	if (did_vacuum || !found_concurrent_worker)
-		vac_update_datfrozenxid();
+		vac_update_datfrozenxid(false);
 
 	/* Finally close out the last transaction. */
 	CommitTransactionCommand();
@@ -2911,13 +2911,15 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 
 		/*
 		 * Select VACUUM options.  Note we don't say VACOPT_PROCESS_TOAST, so
-		 * that vacuum() skips toast relations.  Also note we tell vacuum() to
-		 * skip vac_update_datfrozenxid(); we'll do that separately.
+		 * that vacuum() skips toast relations.
+		 *
+		 * We will periodically update database frozen IDs if any table's
+		 * frozen IDs have been updated, and force a final update at the end
+		 * of our list.
 		 */
 		tab->at_params.options =
 			(dovacuum ? (VACOPT_VACUUM |
-						 VACOPT_PROCESS_MAIN |
-						 VACOPT_SKIP_DATABASE_STATS) : 0) |
+						 VACOPT_PROCESS_MAIN) : 0) |
 			(doanalyze ? VACOPT_ANALYZE : 0) |
 			(!wraparound ? VACOPT_SKIP_LOCKED : 0);
 

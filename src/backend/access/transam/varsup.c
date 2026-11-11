@@ -511,6 +511,10 @@ SetTransactionIdLimit(TransactionId oldest_datfrozenxid, Oid oldest_datoid)
  * wrap limit.  Also do it if oldestXid is old enough to be forcing
  * autovacuums or other actions; this ensures we update our state as soon
  * as possible once extra overhead is being incurred.
+ *
+ * Outside a transaction, only check the shared XID state.  Checking whether
+ * the oldest database still exists requires catalog access and is deferred
+ * until this function is called within a transaction.
  */
 bool
 ForceTransactionIdLimitUpdate(void)
@@ -534,7 +538,8 @@ ForceTransactionIdLimitUpdate(void)
 		return true;			/* this shouldn't happen anymore either */
 	if (TransactionIdFollowsOrEquals(nextXid, xidVacLimit))
 		return true;			/* past xidVacLimit, don't delay updating */
-	if (!SearchSysCacheExists1(DATABASEOID, ObjectIdGetDatum(oldestXidDB)))
+	if (IsTransactionState() &&
+		!SearchSysCacheExists1(DATABASEOID, ObjectIdGetDatum(oldestXidDB)))
 		return true;			/* could happen, per comments above */
 	return false;
 }
