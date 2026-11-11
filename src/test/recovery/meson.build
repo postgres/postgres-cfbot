@@ -69,6 +69,12 @@ tests += {
       't/058_shutdown_crash_restart.pl',
       't/059_remote_apply_status_interval.pl',
       't/060_multixact_crashed_updater.pl',
+      't/064_fileops_standby_divergence.pl',
+      't/061_fileops_2pc_deferred.pl',
+      't/062_fileops_recovery.pl',
+      't/063_fileops_2pc.pl',
+      't/065_fileops_crash_undo.pl',
+      't/066_fileops_createdb_crash.pl',
     ],
   },
 }

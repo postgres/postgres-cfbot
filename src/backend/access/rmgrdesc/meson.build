@@ -22,8 +22,15 @@ rmgr_desc_sources = files(
   'spgdesc.c',
   'standbydesc.c',
   'tblspcdesc.c',
+  'undodesc.c',
   'xactdesc.c',
   'xlogdesc.c',
 )
+
+# FILEOPS is always built (USE_FILEOPS); rmgrlist.h registers
+# fileops_desc/fileops_identify, so fileopsdesc.c must always be compiled or
+# pg_waldump fails to link.  The autoconf build picks this up via its
+# *desc*.c wildcard; meson needs it listed explicitly.
+rmgr_desc_sources += files('fileopsdesc.c')
 
 backend_sources += rmgr_desc_sources

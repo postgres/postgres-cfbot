@@ -13,6 +13,7 @@ OBJS = \
 	clogdesc.o \
 	committsdesc.o \
 	dbasedesc.o \
+	fileopsdesc.o \
 	genericdesc.o \
 	gindesc.o \
 	gistdesc.o \
@@ -29,6 +30,7 @@ OBJS = \
 	spgdesc.o \
 	standbydesc.o \
 	tblspcdesc.o \
+	undodesc.o \
 	xactdesc.o \
 	xlogdesc.o
 

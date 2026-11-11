@@ -17530,6 +17530,7 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 			if (nonemptyReloptions(tbinfo->reloptions))
 			{
 				addcomma = true;
+				/* Emits all heap reloptions */
 				appendReloptionsArrayAH(q, tbinfo->reloptions, "", fout);
 			}
 			if (nonemptyReloptions(tbinfo->toast_reloptions))

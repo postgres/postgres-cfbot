@@ -256,6 +256,11 @@ PG_SYSROOT = @PG_SYSROOT@
 
 override CPPFLAGS += $(ICU_CFLAGS) $(LIBNUMA_CFLAGS) $(LIBURING_CFLAGS)
 
+# FILEOPS transactional filesystem operations (WAL rmgr RM_FILEOPS_ID) is
+# always built.
+USE_FILEOPS = 1
+override CPPFLAGS += -DUSE_FILEOPS
+
 ifdef PGXS
 override CPPFLAGS := -I$(includedir_server) -I$(includedir_internal) $(CPPFLAGS)
 else # not PGXS
