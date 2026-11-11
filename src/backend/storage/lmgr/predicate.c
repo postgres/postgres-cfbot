@@ -1177,7 +1177,6 @@ PredicateLockShmemRequest(void *arg)
 	SimpleLruRequest(.desc = &SerialSlruDesc,
 					 .name = "serializable",
 					 .Dir = "pg_serial",
-					 .long_segment_names = false,
 
 					 .nslots = serializable_buffers,
 
