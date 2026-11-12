@@ -406,10 +406,13 @@ pg_get_replication_slots(PG_FUNCTION_ARGS)
 		}
 
 		/*
-		 * safe_wal_size is only computed for slots that have not been lost,
-		 * and only if there's a configured maximum size.
+		 * safe_wal_size is only computed for slots with a valid restart_lsn
+		 * that have not been lost, and only if there's a configured maximum
+		 * size.
 		 */
-		if (walstate == WALAVAIL_REMOVED || max_slot_wal_keep_size_mb < 0)
+		if (walstate == WALAVAIL_INVALID_LSN ||
+			walstate == WALAVAIL_REMOVED ||
+			max_slot_wal_keep_size_mb < 0)
 			nulls[i++] = true;
 		else
 		{
