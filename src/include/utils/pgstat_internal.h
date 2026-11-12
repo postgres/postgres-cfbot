@@ -42,7 +42,10 @@
  *
  * Once there are pending stats updates for a table PgStat_EntryRef->pending
  * is allocated to contain a working space for as-of-yet-unapplied stats
- * updates. Once the stats are flushed, PgStat_EntryRef->pending is freed.
+ * updates. Once the stats are fully flushed, PgStat_EntryRef->pending is
+ * freed.  An entry only partially flushed during a transaction (its
+ * transactional counters deferred) is instead retained until the transaction
+ * boundary.
  *
  * Each variable-numbered shared stats struct has PgStatShared_Common as the
  * first element.
@@ -190,6 +193,20 @@ typedef struct PgStat_EntryRef
 	 */
 	void	   *pending;
 	dlist_node	pending_node;	/* membership in pgStatPending list */
+
+	/*
+	 * Membership in the list of the entries created in the current
+	 * transaction, for kinds with release_refs_after_flush.
+	 */
+	dlist_node	created_node;
+
+	/*
+	 * Flush-pass generation in which this entry was last flushed.  Used by
+	 * pgstat_prep_pending_from_entry_ref() to decide whether an entry being
+	 * accumulated into needs re-queuing during the current flush pass.  Zero
+	 * means the entry has not been flushed since it became pending.
+	 */
+	uint64		flushed_generation;
 } PgStat_EntryRef;
 
 
@@ -226,6 +243,29 @@ typedef struct PgStat_SubXactStatus
 
 
 /*
+ * Result of a flush_pending_cb call, used to decide whether the pending entry
+ * can be removed from the pending list.
+ */
+typedef enum PgStat_FlushResult
+{
+	/*
+	 * Lock not acquired (nowait was true); retry later.  Must be 0 because
+	 * earlier versions returned a bool where false meant lock conflict.
+	 */
+	PGSTAT_FLUSH_LOCK_CONFLICT = 0,
+
+	/* Fully flushed; the entry can be removed. */
+	PGSTAT_FLUSH_DONE,
+
+	/*
+	 * Only the non-transactional counters were flushed; transactional state
+	 * was retained (e.g. flushing during a transaction) and must be flushed
+	 * again at a transaction boundary.
+	 */
+	PGSTAT_FLUSH_PARTIAL,
+} PgStat_FlushResult;
+
+/*
  * Metadata for a specific kind of statistics.
  */
 typedef struct PgStat_KindInfo
@@ -260,6 +300,14 @@ typedef struct PgStat_KindInfo
 	 * of entries.
 	 */
 	bool		own_hash:1;
+
+	/*
+	 * Release references to entries of this kind after their flush, and to
+	 * entries created at the end of the creating transaction?  For kinds
+	 * whose entries are dropped often, so that they are freed without asking
+	 * all backends to release their references.
+	 */
+	bool		release_refs_after_flush:1;
 
 	/*
 	 * The size of an entry pointed to by PgStatShared_HashEntry->body.  For
@@ -307,8 +355,25 @@ typedef struct PgStat_KindInfo
 	 * For variable-numbered stats: flush pending stats. Required if pending
 	 * data is used. See flush_static_cb when dealing with stats data that
 	 * that cannot use PgStat_EntryRef->pending.
+	 *
+	 * If nowait is true and the lock cannot be acquired, give up without
+	 * flushing.  When xact_boundary is false, a callback with
+	 * transaction-dependent state flushes only its non-transactional
+	 * counters. Returns a PgStat_FlushResult reporting what happened.
+	 *
+	 * When xact_boundary is false the pending entry is retained, so the
+	 * callback may run again for it before the transaction ends and must not
+	 * merge the same pending data twice.  Clear the flushed fields, or track
+	 * a flushed baseline and merge only the delta.  A callback must not call
+	 * pgstat_force_next_flush().
+	 *
+	 * A callback may accumulate into another kind's pending entry (e.g.
+	 * relation stats feed database stats), but it must not accumulate into
+	 * the entry currently being flushed, and such dependencies must be
+	 * acyclic (see pgstat_flush_pending_entries()).
 	 */
-	bool		(*flush_pending_cb) (PgStat_EntryRef *sr, bool nowait);
+	PgStat_FlushResult (*flush_pending_cb) (PgStat_EntryRef *sr, bool nowait,
+											bool xact_boundary);
 
 	/*
 	 * For variable-numbered stats: delete pending stats. Optional.
@@ -375,10 +440,14 @@ typedef struct PgStat_KindInfo
 	 * Returns true if some of the stats could not be flushed, due to lock
 	 * contention for example. Optional.
 	 *
+	 * xact_boundary is as for flush_pending_cb.  The built-in static kinds
+	 * are non-transactional and ignore it; a custom one may use it to defer
+	 * transaction-dependent state.
+	 *
 	 * "pgstat_report_fixed" needs to be set to trigger the flush of pending
 	 * stats.
 	 */
-	bool		(*flush_static_cb) (bool nowait);
+	bool		(*flush_static_cb) (bool nowait, bool xact_boundary);
 
 	/*
 	 * For fixed-numbered statistics: Reset All.
@@ -684,6 +753,7 @@ static inline size_t pgstat_get_entry_len(PgStat_Kind kind);
 static inline void *pgstat_get_entry_data(PgStat_Kind kind, PgStatShared_Common *entry);
 static inline void *pgstat_get_custom_shmem_data(PgStat_Kind kind);
 static inline void *pgstat_get_custom_snapshot_data(PgStat_Kind kind);
+static inline bool pgstat_entry_ref_is_stale(PgStat_EntryRef *entry_ref);
 
 
 /*
@@ -701,6 +771,7 @@ extern void pgstat_assert_is_up(void);
 #endif
 
 extern void pgstat_delete_pending_entry(PgStat_EntryRef *entry_ref);
+extern bool pgstat_flush_pending_entry(PgStat_EntryRef *entry_ref, bool nowait);
 extern void pgstat_prep_pending_from_entry_ref(PgStat_EntryRef *entry_ref);
 extern PgStat_EntryRef *pgstat_prep_pending_entry(PgStat_Kind kind, Oid dboid,
 												  uint64 objid,
@@ -732,7 +803,7 @@ extern void pgstat_archiver_snapshot_cb(void);
 #define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL | PGSTAT_BACKEND_FLUSH_LOCK)
 
 extern bool pgstat_flush_backend(bool nowait, uint32 flags);
-extern bool pgstat_backend_flush_cb(bool nowait);
+extern bool pgstat_backend_flush_cb(bool nowait, bool xact_boundary);
 extern void pgstat_backend_reset_timestamp_cb(PgStatShared_Common *header,
 											  TimestampTz ts);
 
@@ -764,7 +835,8 @@ extern void AtEOXact_PgStat_Database(bool isCommit, bool parallel);
 
 extern PgStat_StatDBEntry *pgstat_prep_database_pending(Oid dboid);
 extern void pgstat_reset_database_timestamp(Oid dboid, TimestampTz ts);
-extern bool pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern PgStat_FlushResult pgstat_database_flush_cb(PgStat_EntryRef *entry_ref,
+												   bool nowait, bool xact_boundary);
 extern void pgstat_database_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
 
 
@@ -772,7 +844,8 @@ extern void pgstat_database_reset_timestamp_cb(PgStatShared_Common *header, Time
  * Functions in pgstat_function.c
  */
 
-extern bool pgstat_function_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern PgStat_FlushResult pgstat_function_flush_cb(PgStat_EntryRef *entry_ref,
+												   bool nowait, bool xact_boundary);
 extern void pgstat_function_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
 
 
@@ -782,7 +855,7 @@ extern void pgstat_function_reset_timestamp_cb(PgStatShared_Common *header, Time
 
 extern void pgstat_flush_io(bool nowait);
 
-extern bool pgstat_io_flush_cb(bool nowait);
+extern bool pgstat_io_flush_cb(bool nowait, bool xact_boundary);
 extern void pgstat_io_init_shmem_cb(void *stats);
 extern void pgstat_io_reset_all_cb(TimestampTz ts);
 extern void pgstat_io_snapshot_cb(void);
@@ -791,7 +864,7 @@ extern void pgstat_io_snapshot_cb(void);
  * Functions in pgstat_lock.c
  */
 
-extern bool pgstat_lock_flush_cb(bool nowait);
+extern bool pgstat_lock_flush_cb(bool nowait, bool xact_boundary);
 extern void pgstat_lock_init_shmem_cb(void *stats);
 extern void pgstat_lock_reset_all_cb(TimestampTz ts);
 extern void pgstat_lock_snapshot_cb(void);
@@ -805,7 +878,8 @@ extern void AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool 
 extern void AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 extern void PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 
-extern bool pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern PgStat_FlushResult pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref,
+												   bool nowait, bool xact_boundary);
 extern void pgstat_relation_delete_pending_cb(PgStat_EntryRef *entry_ref);
 extern void pgstat_relation_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
 
@@ -814,7 +888,7 @@ extern void pgstat_relation_reset_timestamp_cb(PgStatShared_Common *header, Time
  * Functions in pgstat_index.c
  */
 
-extern bool pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern PgStat_FlushResult pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait, bool xact_boundary);
 extern void pgstat_index_delete_pending_cb(PgStat_EntryRef *entry_ref);
 extern void pgstat_index_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
 
@@ -833,7 +907,7 @@ extern bool pgstat_replslot_from_serialized_name_cb(const NameData *name, PgStat
  */
 
 extern void pgstat_attach_shmem(void);
-extern void pgstat_detach_shmem(void);
+extern void pgstat_detach_shmem(bool discard_pending);
 
 extern PgStat_EntryRef *pgstat_get_entry_ref(PgStat_Kind kind, Oid dboid, uint64 objid,
 											 bool create, bool *created_entry);
@@ -855,6 +929,8 @@ extern void pgstat_reset_matching_entries(bool (*do_reset) (PgStatShared_HashEnt
 										  TimestampTz ts);
 
 extern void pgstat_request_entry_refs_gc(void);
+extern void pgstat_release_flushed_entry_refs(void);
+extern void pgstat_release_created_entry_refs(void);
 extern dsa_pointer pgstat_alloc_entry_body(PgStat_Kind kind);
 extern PgStatShared_Common *pgstat_init_entry(PgStat_Kind kind,
 											  PgStatShared_HashEntry *shhashent,
@@ -865,7 +941,7 @@ extern PgStatShared_Common *pgstat_init_entry(PgStat_Kind kind,
  * Functions in pgstat_slru.c
  */
 
-extern bool pgstat_slru_flush_cb(bool nowait);
+extern bool pgstat_slru_flush_cb(bool nowait, bool xact_boundary);
 extern void pgstat_slru_init_shmem_cb(void *stats);
 extern void pgstat_slru_reset_all_cb(TimestampTz ts);
 extern void pgstat_slru_snapshot_cb(void);
@@ -876,7 +952,7 @@ extern void pgstat_slru_snapshot_cb(void);
  */
 
 extern void pgstat_wal_init_backend_cb(void);
-extern bool pgstat_wal_flush_cb(bool nowait);
+extern bool pgstat_wal_flush_cb(bool nowait, bool xact_boundary);
 extern void pgstat_wal_init_shmem_cb(void *stats);
 extern void pgstat_wal_reset_all_cb(TimestampTz ts);
 extern void pgstat_wal_snapshot_cb(void);
@@ -886,7 +962,8 @@ extern void pgstat_wal_snapshot_cb(void);
  * Functions in pgstat_subscription.c
  */
 
-extern bool pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern PgStat_FlushResult pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref,
+													   bool nowait, bool xact_boundary);
 extern void pgstat_subscription_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
 
 
@@ -917,6 +994,9 @@ extern void pgstat_create_transactional(PgStat_Kind kind, Oid dboid, uint64 obji
  * is in charge of doing that.
  */
 extern PGDLLIMPORT bool pgstat_report_fixed;
+
+/* Is there a kind with release_refs_after_flush? */
+extern PGDLLIMPORT bool pgstat_have_release_refs_kinds;
 
 /* Backend-local stats state */
 extern PGDLLIMPORT PgStat_LocalState pgStatLocal;
@@ -1032,6 +1112,18 @@ static inline size_t
 pgstat_get_entry_len(PgStat_Kind kind)
 {
 	return pgstat_get_kind_info(kind)->shared_data_len;
+}
+
+/*
+ * Has the entry of a reference been dropped, or reinitialized, since the
+ * reference was obtained?
+ */
+static inline bool
+pgstat_entry_ref_is_stale(PgStat_EntryRef *entry_ref)
+{
+	return entry_ref->shared_entry->dropped ||
+		pg_atomic_read_u32(&entry_ref->shared_entry->generation) !=
+		entry_ref->generation;
 }
 
 /*

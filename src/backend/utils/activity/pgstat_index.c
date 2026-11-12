@@ -23,16 +23,14 @@
 
 
 /*
- * Flush out pending stats for an index entry.
+ * Flush pending stats for an index entry.
  *
- * If nowait is true and the lock could not be immediately acquired, returns
- * false without flushing the entry.  Otherwise returns true.
- *
- * Some of the stats are copied to the corresponding pending database stats
- * entry when successfully flushing.
+ * If nowait is true and the lock could not be acquired, return
+ * PGSTAT_FLUSH_LOCK_CONFLICT.  Index stats are not transactional, so a flush
+ * always completes.
  */
-bool
-pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
+PgStat_FlushResult
+pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait, bool xact_boundary)
 {
 	Oid			dboid;
 	PgStat_RelationStatus *lstats;	/* pending stats entry */
@@ -44,43 +42,46 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	lstats = (PgStat_RelationStatus *) entry_ref->pending;
 	shidxstats = (PgStatShared_Index *) entry_ref->shared_stats;
 
-	/*
-	 * Ignore entries that didn't accumulate any actual counts, such as
-	 * indexes that were opened by the planner but not used.
-	 */
-	if (pg_memory_is_all_zeros(&lstats->idx,
-							   sizeof(struct PgStat_IndexCounts)))
-		return true;
+	/* Skip entries with nothing new to flush. */
+	if (memcmp(&lstats->idx.counts, &lstats->idx.flushed,
+			   sizeof(struct PgStat_IndexCounts)) == 0)
+		return PGSTAT_FLUSH_DONE;
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
+		return PGSTAT_FLUSH_LOCK_CONFLICT;
 
 	/* Add the values to the shared entry. */
 	idxentry = &shidxstats->stats;
 
-	idxentry->numscans += lstats->idx.numscans;
-	if (lstats->idx.numscans)
+	idxentry->numscans += lstats->idx.counts.numscans - lstats->idx.flushed.numscans;
+	if (lstats->idx.counts.numscans > lstats->idx.flushed.numscans)
 	{
-		TimestampTz t = GetCurrentTransactionStopTimestamp();
+		TimestampTz t = xact_boundary ?
+			GetCurrentTransactionStopTimestamp() :
+			GetCurrentStatementStartTimestamp();
 
 		if (t > idxentry->lastscan)
 			idxentry->lastscan = t;
 	}
-	idxentry->tuples_returned += lstats->idx.tuples_returned;
-	idxentry->tuples_fetched += lstats->idx.tuples_fetched;
-	idxentry->blocks_fetched += lstats->idx.blocks_fetched;
-	idxentry->blocks_hit += lstats->idx.blocks_hit;
+	idxentry->tuples_returned += lstats->idx.counts.tuples_returned - lstats->idx.flushed.tuples_returned;
+	idxentry->tuples_fetched += lstats->idx.counts.tuples_fetched - lstats->idx.flushed.tuples_fetched;
+	idxentry->blocks_fetched += lstats->idx.counts.blocks_fetched - lstats->idx.flushed.blocks_fetched;
+	idxentry->blocks_hit += lstats->idx.counts.blocks_hit - lstats->idx.flushed.blocks_hit;
 
 	pgstat_unlock_entry(entry_ref);
 
 	/* The entry was successfully flushed, add the same to database stats */
 	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->tuples_returned += lstats->idx.tuples_returned;
-	dbentry->tuples_fetched += lstats->idx.tuples_fetched;
-	dbentry->blocks_fetched += lstats->idx.blocks_fetched;
-	dbentry->blocks_hit += lstats->idx.blocks_hit;
+	dbentry->tuples_returned += lstats->idx.counts.tuples_returned - lstats->idx.flushed.tuples_returned;
+	dbentry->tuples_fetched += lstats->idx.counts.tuples_fetched - lstats->idx.flushed.tuples_fetched;
+	dbentry->blocks_fetched += lstats->idx.counts.blocks_fetched - lstats->idx.flushed.blocks_fetched;
+	dbentry->blocks_hit += lstats->idx.counts.blocks_hit - lstats->idx.flushed.blocks_hit;
 
-	return true;
+	/* Record the new baseline while counts keep accumulating. */
+	if (!xact_boundary)
+		lstats->idx.flushed = lstats->idx.counts;
+
+	return PGSTAT_FLUSH_DONE;
 }
 
 /*
