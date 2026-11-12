@@ -26,7 +26,9 @@
   data: <type>json</type> and <type>jsonb</type>. To implement efficient query
   mechanisms for these data types, <productname>PostgreSQL</productname>
   also provides the <type>jsonpath</type> data type described in
-  <xref linkend="datatype-jsonpath"/>.
+  <xref linkend="datatype-jsonpath"/>.  In addition, the
+  <type>json5</type> type described in <xref linkend="datatype-json5"/>
+  accepts data written in the extended JSON5 syntax.
  </para>
 
  <para>
@@ -231,6 +233,136 @@ SELECT '{"reading": 1.230e-5}'::json, '{"reading": 1.230e-5}'::jsonb;
   <para>
     For the list of built-in functions and operators available for
     constructing and processing JSON values, see <xref linkend="functions-json"/>.
+  </para>
+ </sect2>
+
+ <sect2 id="datatype-json5">
+  <title>The <type>json5</type> Type</title>
+
+  <indexterm zone="datatype-json5">
+   <primary>JSON5</primary>
+  </indexterm>
+
+  <para>
+   The <type>json5</type> type stores data written in
+   <ulink url="https://json5.org">JSON5</ulink>, an extension of JSON
+   with a more permissive syntax that is intended to be easier to
+   write and maintain by hand.  Since JSON5 is a superset of JSON,
+   every valid <type>json</type> value is also a valid
+   <type>json5</type> value.  In addition to standard JSON, the
+   following constructs are accepted:
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      Single-line (<literal>//</literal>) and block
+      (<literal>/* */</literal>) comments.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Additional whitespace: vertical tab, form feed, the byte order
+      mark (U+FEFF), all Unicode space separators such as the no-break
+      space (U+00A0), and the line terminators U+2028 and U+2029.
+      These also end a single-line comment.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A single trailing comma after the last element of an array or
+      the last member of an object.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Unquoted object keys, for keys that are valid ECMAScript 5.1
+      identifier names, e.g., <literal>{key: "value"}</literal>.  Such
+      keys start with a Unicode letter, <literal>$</literal> or
+      <literal>_</literal>, and can continue with those, digits,
+      combining marks and connector punctuation.  Characters can also
+      be written as <literal>\u<replaceable>XXXX</replaceable></literal>
+      escapes.  The words <literal>true</literal>,
+      <literal>false</literal>, <literal>null</literal>,
+      <literal>Infinity</literal> and <literal>NaN</literal> can also be
+      used as unquoted keys.  Identifiers are not accepted in place of
+      values.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Single-quoted strings, e.g., <literal>'value'</literal>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Additional string escapes: <literal>\'</literal>,
+      <literal>\v</literal>, <literal>\0</literal> and
+      <literal>\x<replaceable>HH</replaceable></literal>.  A backslash
+      followed by any other character that is not a digit stands for
+      that character, e.g., <literal>\q</literal> is
+      <literal>q</literal>.  Control characters other than line breaks
+      need not be escaped inside strings.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Strings continued across multiple lines by escaping the line
+      break with a backslash; the escaped line break is not part of
+      the string value.  The line break can be LF, CR, CR LF, U+2028 or
+      U+2029.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Extended number formats: hexadecimal integers
+      (<literal>0xFF</literal>), a leading or trailing decimal point
+      (<literal>.5</literal>, <literal>5.</literal>), an explicit
+      plus sign (<literal>+5</literal>), and the special values
+      <literal>Infinity</literal> and <literal>NaN</literal>,
+      optionally preceded by a sign.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </para>
+
+  <para>
+   Non-ASCII characters outside of strings, that is Unicode whitespace
+   and non-ASCII characters in unquoted keys, are only recognized when
+   the database encoding is <literal>UTF8</literal>.  With other
+   encodings, non-ASCII characters in unquoted keys have to be written
+   as <literal>\u</literal> escapes.
+  </para>
+
+  <para>
+   Like <type>json</type>, the <type>json5</type> type stores an exact
+   copy of the validated input text, so comments and formatting are
+   preserved.  There are no functions or operators that process
+   <type>json5</type> values directly; instead, a <type>json5</type>
+   value can be cast to <type>json</type> or <type>jsonb</type>
+   (both are assignment casts).  These casts convert the value to
+   standard JSON: comments and trailing commas are removed, object
+   keys and strings are written in double-quoted form, and numbers
+   written in one of the extended formats are rewritten in standard
+   form, e.g., <literal>.5</literal> becomes <literal>0.5</literal>
+   and <literal>0xFF</literal> becomes <literal>255</literal>.  The values <literal>Infinity</literal>,
+   <literal>-Infinity</literal> and <literal>NaN</literal> have no
+   equivalent in standard JSON, so casting a <type>json5</type> value
+   containing them raises an error.  Like <type>jsonb</type>, the
+   conversion to <type>json</type> can't represent the character
+   <literal>\u0000</literal> (also written <literal>\0</literal> or
+   <literal>\x00</literal>) unless the input is valid standard JSON,
+   which is cast unchanged.  Functions that build JSON from SQL values,
+   such as <function>to_json</function>,
+   <function>json_build_object</function> and
+   <function>jsonb_agg</function>, convert <type>json5</type> values the
+   same way, so they are embedded as JSON rather than as strings.  In the
+   other direction,
+   <type>json</type> values can be converted to <type>json5</type>
+   implicitly; as the two types share their representation this is a
+   binary-coercible cast that involves no conversion, so a
+   <type>json</type> column can be changed to <type>json5</type> without
+   rewriting the table.  <type>jsonb</type> values can be converted with
+   an assignment cast.
   </para>
  </sect2>
 
