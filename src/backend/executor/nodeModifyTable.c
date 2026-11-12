@@ -137,8 +137,7 @@ typedef struct UpdateContext
 } UpdateContext;
 
 
-static void ExecBatchInsert(ModifyTableState *mtstate,
-							ResultRelInfo *resultRelInfo,
+static void ExecBatchInsert(ResultRelInfo *resultRelInfo,
 							TupleTableSlot **slots,
 							TupleTableSlot **planSlots,
 							int numSlots,
@@ -962,7 +961,7 @@ ExecInsert(ModifyTableContext *context,
 			 */
 			if (resultRelInfo->ri_NumSlots == resultRelInfo->ri_BatchSize)
 			{
-				ExecBatchInsert(mtstate, resultRelInfo,
+				ExecBatchInsert(resultRelInfo,
 								resultRelInfo->ri_Slots,
 								resultRelInfo->ri_PlanSlots,
 								resultRelInfo->ri_NumSlots,
@@ -1394,8 +1393,7 @@ ExecInsert(ModifyTableContext *context,
  * ----------------------------------------------------------------
  */
 static void
-ExecBatchInsert(ModifyTableState *mtstate,
-				ResultRelInfo *resultRelInfo,
+ExecBatchInsert(ResultRelInfo *resultRelInfo,
 				TupleTableSlot **slots,
 				TupleTableSlot **planSlots,
 				int numSlots,
@@ -1404,48 +1402,33 @@ ExecBatchInsert(ModifyTableState *mtstate,
 {
 	int			i;
 	int			numInserted = numSlots;
-	TupleTableSlot *slot = NULL;
-	TupleTableSlot **rslots;
+
+	/*
+	 * Batching does not allow RETURNING, WITH CHECK OPTION constraints, or
+	 * BEFORE ROW and AFTER ROW INSERT triggers.
+	 */
+	Assert(resultRelInfo->ri_projectReturning == NULL);
+	Assert(resultRelInfo->ri_WithCheckOptions == NIL);
+	Assert(resultRelInfo->ri_TrigDesc == NULL ||
+		   !resultRelInfo->ri_TrigDesc->trig_insert_before_row);
+	Assert(resultRelInfo->ri_TrigDesc == NULL ||
+		   !resultRelInfo->ri_TrigDesc->trig_insert_after_row);
 
 	/*
 	 * insert into foreign table: let the FDW do it
 	 */
-	rslots = resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert(estate,
-																  resultRelInfo,
-																  slots,
-																  planSlots,
-																  &numInserted);
+	resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert(estate,
+														 resultRelInfo,
+														 slots,
+														 planSlots,
+														 &numInserted);
 
 	/*
-	 * XXX An FDW may report more rows than we gave it, which would lead to
-	 * buffer overruns in the loop below.  We clamp the count so that
-	 * statements that happen to work today keep working, at the cost of
-	 * misreporting the number of rows.  This is a stopgap; a proper fix means
-	 * reworking the batch insert API.
+	 * XXX An FDW may report more rows than we gave it.  We only use the value
+	 * to increment the number of processed tuples below, so we simply clamp
+	 * it by the number of input slots.
 	 */
 	numInserted = Min(numInserted, numSlots);
-
-	for (i = 0; i < numInserted; i++)
-	{
-		slot = rslots[i];
-
-		/*
-		 * AFTER ROW Triggers might reference the tableoid column, so
-		 * (re-)initialize tts_tableOid before evaluating them.
-		 */
-		slot->tts_tableOid = RelationGetRelid(resultRelInfo->ri_RelationDesc);
-
-		/* AFTER ROW INSERT Triggers */
-		ExecARInsertTriggers(estate, resultRelInfo, slot, NULL, NIL,
-							 mtstate->mt_transition_capture);
-
-		/*
-		 * Check any WITH CHECK OPTION constraints from parent views.  See the
-		 * comment in ExecInsert.
-		 */
-		if (resultRelInfo->ri_WithCheckOptions != NIL)
-			ExecWithCheckOptions(WCO_VIEW_CHECK, resultRelInfo, slot, estate);
-	}
 
 	if (canSetTag && numInserted > 0)
 		estate->es_processed += numInserted;
@@ -1475,7 +1458,7 @@ ExecPendingInserts(EState *estate)
 		ModifyTableState *mtstate = (ModifyTableState *) lfirst(l2);
 
 		Assert(mtstate);
-		ExecBatchInsert(mtstate, resultRelInfo,
+		ExecBatchInsert(resultRelInfo,
 						resultRelInfo->ri_Slots,
 						resultRelInfo->ri_PlanSlots,
 						resultRelInfo->ri_NumSlots,
@@ -5476,18 +5459,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	{
 		/* insert may only have one relation, inheritance is not expanded */
 		Assert(total_nrels == 1);
-		resultRelInfo = mtstate->resultRelInfo;
-		if (!resultRelInfo->ri_usesFdwDirectModify &&
-			resultRelInfo->ri_FdwRoutine != NULL &&
-			resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-			resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert)
-		{
-			resultRelInfo->ri_BatchSize =
-				resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(resultRelInfo);
-			Assert(resultRelInfo->ri_BatchSize >= 1);
-		}
-		else
-			resultRelInfo->ri_BatchSize = 1;
+		ExecInitInsertBatchSize(mtstate->resultRelInfo, NULL);
 	}
 
 	/*
