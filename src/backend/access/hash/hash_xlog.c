@@ -17,6 +17,7 @@
 #include "access/bufmask.h"
 #include "access/hash.h"
 #include "access/hash_xlog.h"
+#include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
 #include "storage/standby.h"
 
@@ -494,10 +495,18 @@ hash_xlog_move_page_contents(XLogReaderState *record)
 	else
 	{
 		/*
-		 * we don't care for return value as the purpose of reading bucketbuf
-		 * is to ensure a cleanup lock on primary bucket page.
+		 * The cleanup lock on the primary bucket page serializes replay
+		 * against scans on a hot standby, which pin the page for their whole
+		 * duration.  Scans can run only once hot standby accepts queries, so
+		 * until then we need not read or lock the page.  Skipping the read
+		 * also sidesteps a torn copy of the page whose repairing full-page
+		 * image comes later in the WAL: that hazard exists only before
+		 * consistency is reached, and queries are accepted only after that,
+		 * so once HotStandbyActiveInReplay() is true any earlier image has
+		 * already been replayed.  We do not use the page contents here.
 		 */
-		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
+		if (HotStandbyActiveInReplay())
+			(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
 
 		action = XLogReadBufferForRedo(record, 1, &writebuf);
 	}
@@ -621,10 +630,18 @@ hash_xlog_squeeze_page(XLogReaderState *record)
 	else
 	{
 		/*
-		 * we don't care for return value as the purpose of reading bucketbuf
-		 * is to ensure a cleanup lock on primary bucket page.
+		 * The cleanup lock on the primary bucket page serializes replay
+		 * against scans on a hot standby, which pin the page for their whole
+		 * duration.  Scans can run only once hot standby accepts queries, so
+		 * until then we need not read or lock the page.  Skipping the read
+		 * also sidesteps a torn copy of the page whose repairing full-page
+		 * image comes later in the WAL: that hazard exists only before
+		 * consistency is reached, and queries are accepted only after that,
+		 * so once HotStandbyActiveInReplay() is true any earlier image has
+		 * already been replayed.  We do not use the page contents here.
 		 */
-		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
+		if (HotStandbyActiveInReplay())
+			(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
 
 		if (xldata->ntups > 0 || xldata->is_prev_bucket_same_wrt)
 			action = XLogReadBufferForRedo(record, 1, &writebuf);
@@ -852,10 +869,18 @@ hash_xlog_delete(XLogReaderState *record)
 	else
 	{
 		/*
-		 * we don't care for return value as the purpose of reading bucketbuf
-		 * is to ensure a cleanup lock on primary bucket page.
+		 * The cleanup lock on the primary bucket page serializes replay
+		 * against scans on a hot standby, which pin the page for their whole
+		 * duration.  Scans can run only once hot standby accepts queries, so
+		 * until then we need not read or lock the page.  Skipping the read
+		 * also sidesteps a torn copy of the page whose repairing full-page
+		 * image comes later in the WAL: that hazard exists only before
+		 * consistency is reached, and queries are accepted only after that,
+		 * so once HotStandbyActiveInReplay() is true any earlier image has
+		 * already been replayed.  We do not use the page contents here.
 		 */
-		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
+		if (HotStandbyActiveInReplay())
+			(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
 
 		action = XLogReadBufferForRedo(record, 1, &deletebuf);
 	}
