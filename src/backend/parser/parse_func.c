@@ -1003,7 +1003,15 @@ func_lookup_failure_details(int fgc_flags, List *argnames, bool proc_call)
 	 */
 	if (!(fgc_flags & FGC_NAME_VISIBLE))
 	{
-		if (fgc_flags & FGC_SCHEMA_GIVEN)
+		if (fgc_flags & FGC_UNTRUSTED_SKIP)
+		{
+			if (proc_call)
+				(void) errdetail("A procedure of that name exists, but it is not trusted while an extension script runs.");
+			else
+				(void) errdetail("A function of that name exists, but it is not trusted while an extension script runs.");
+			return errhint("Only objects in pg_catalog, owned by a superuser, or belonging to the extension or one it requires are trusted.");
+		}
+		else if (fgc_flags & FGC_SCHEMA_GIVEN)
 			return 0;			/* schema-qualified name */
 		else if (!(fgc_flags & FGC_NAME_EXISTS))
 		{
@@ -1019,6 +1027,15 @@ func_lookup_failure_details(int fgc_flags, List *argnames, bool proc_call)
 			else
 				return errdetail("A function of that name exists, but it is not in the search_path.");
 		}
+	}
+
+	/* A trusted candidate was visible; mention any skipped one as a hint */
+	if (fgc_flags & FGC_UNTRUSTED_SKIP)
+	{
+		if (proc_call)
+			(void) errhint("A procedure of that name was ignored because it is not trusted while an extension script runs.");
+		else
+			(void) errhint("A function of that name was ignored because it is not trusted while an extension script runs.");
 	}
 
 	/*
@@ -1076,6 +1093,8 @@ func_lookup_failure_details(int fgc_flags, List *argnames, bool proc_call)
 		(void) errdetail("No procedure of that name accepts the given argument types.");
 	else
 		(void) errdetail("No function of that name accepts the given argument types.");
+	if (fgc_flags & FGC_UNTRUSTED_SKIP)
+		return 0;				/* keep the hint set above */
 	return errhint("You might need to add explicit type casts.");
 }
 
