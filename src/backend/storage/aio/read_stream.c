@@ -255,7 +255,8 @@ void
 read_stream_enable_stats(ReadStream *stream, IOStats *stats)
 {
 	stream->stats = stats;
-	if (stream->stats)
+	if (stream->stats &&
+		stream->stats->distance_capacity < stream->max_pinned_buffers)
 		stream->stats->distance_capacity = stream->max_pinned_buffers;
 }
 
