@@ -2311,6 +2311,44 @@ select viewname from pg_views where viewname = 'tt27v'; -- Ok to access a system
 (1 row)
 
 reset restrict_nonsystem_relation_kind;
+-- check that unary minus applied to a constant is not printed in a way that
+-- would be read back as a negative constant, ie, a column number (bug #19767)
+create view tt28v as
+select distinct on (- (- '1'::int4)) x, y
+from (values (1, 2)) v(x, y)
+order by - (- '1'::int4), y, - 3.5::numeric;
+select pg_get_viewdef('tt28v', true);
+                   pg_get_viewdef                    
+-----------------------------------------------------
+  SELECT DISTINCT ON ((- (- 1::integer))) x,        +
+     y                                              +
+    FROM ( VALUES (1,2)) v(x, y)                    +
+   ORDER BY (- (- 1::integer)), y, (- 3.5::numeric);
+(1 row)
+
+create view tt29v as
+select count(*) from (values (1)) v(x)
+group by - '3'::int4, rollup(- '3'::int4);
+select pg_get_viewdef('tt29v', true);
+                   pg_get_viewdef                   
+----------------------------------------------------
+  SELECT count(*) AS count                         +
+    FROM ( VALUES (1)) v(x)                        +
+   GROUP BY (- 3::integer), ROLLUP((- 3::integer));
+(1 row)
+
+-- the printed definitions must be re-loadable
+do $$ begin
+  execute 'create view tt28v_copy as ' || pg_get_viewdef('tt28v');
+  execute 'create view tt29v_copy as ' || pg_get_viewdef('tt29v');
+end $$;
+select pg_get_viewdef('tt28v_copy', true) = pg_get_viewdef('tt28v', true),
+       pg_get_viewdef('tt29v_copy', true) = pg_get_viewdef('tt29v', true);
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 NOTICE:  drop cascades to 27 other objects
@@ -2342,7 +2380,7 @@ drop cascades to view aliased_view_2
 drop cascades to view aliased_view_3
 drop cascades to view aliased_view_4
 DROP SCHEMA testviewschm2 CASCADE;
-NOTICE:  drop cascades to 82 other objects
+NOTICE:  drop cascades to 86 other objects
 DETAIL:  drop cascades to table t1
 drop cascades to view temporal1
 drop cascades to view temporal2
@@ -2425,3 +2463,7 @@ drop cascades to operator ||(xml,xml)
 drop cascades to view tt261v
 drop cascades to table tt27v_tbl
 drop cascades to view tt27v
+drop cascades to view tt28v
+drop cascades to view tt29v
+drop cascades to view tt28v_copy
+drop cascades to view tt29v_copy
