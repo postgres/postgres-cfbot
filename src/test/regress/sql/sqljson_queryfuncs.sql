@@ -625,3 +625,32 @@ SELECT JSON_VALUE(x, '$' RETURNING json) FROM (VALUES ('1'::json), ('null'), ('2
 SELECT JSON_VALUE(x, '$.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('{}'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, 'strict $.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('[]'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, '$' RETURNING jsonb) FROM (VALUES ('1'::jsonb), (NULL), ('2')) v(x);
+
+-- Check that a boolean DEFAULT expression that must be coerced to the
+-- RETURNING type at run time yields the value it evaluates to, rather than
+-- always false (bug #19625).
+SELECT JSON_VALUE(jsonb '{"a": 1}', 'strict $.b' DEFAULT true ON ERROR) AS t,
+       JSON_VALUE(jsonb '{"a": 1}', 'strict $.b' DEFAULT false ON ERROR) AS f,
+       JSON_VALUE(jsonb '{"a": 1}', 'strict $.b' DEFAULT NULL::bool ON ERROR) IS NULL AS n;
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.b' DEFAULT (1 < 2) ON EMPTY) AS t,
+       JSON_VALUE(jsonb '{"a": 1}', '$.b' DEFAULT (random() < 0) ON EMPTY) AS f;
+SELECT JSON_QUERY(jsonb '{"a": 1}', 'strict $.b' DEFAULT true ON ERROR) AS t,
+       JSON_QUERY(jsonb '{"a": 1}', '$.b' DEFAULT (1 < 2) ON EMPTY) AS t,
+       JSON_QUERY(jsonb '{"a": 1}', '$.b' RETURNING text DEFAULT false ON EMPTY) AS f;
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.b' RETURNING char(5) DEFAULT true ON EMPTY) AS t;
+CREATE DOMAIN queryfuncs_d_bool AS bool CHECK (VALUE);
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.b' RETURNING queryfuncs_d_bool DEFAULT true ON EMPTY);
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.b' RETURNING queryfuncs_d_bool DEFAULT false ON EMPTY);
+DROP DOMAIN queryfuncs_d_bool;
+SELECT * FROM JSON_TABLE(jsonb '{"a": 1}', '$'
+	COLUMNS (t text PATH 'strict $.b' DEFAULT true ON ERROR,
+			 f text PATH '$.b' DEFAULT (1 > 2) ON EMPTY,
+			 et text EXISTS PATH 'strict $.b' TRUE ON ERROR,
+			 ef text EXISTS PATH 'strict $.b' FALSE ON ERROR));
+-- the to_jsonb() call added for the coercion is visible when deparsed
+CREATE VIEW json_bool_default_view AS
+	SELECT JSON_VALUE(jsonb '{"a": 1}', 'strict $.b' DEFAULT true ON ERROR) AS t,
+		   JSON_QUERY(jsonb '{"a": 1}', '$.b' DEFAULT (1 > 2) ON EMPTY) AS f;
+\sv json_bool_default_view
+SELECT * FROM json_bool_default_view;
+DROP VIEW json_bool_default_view;
