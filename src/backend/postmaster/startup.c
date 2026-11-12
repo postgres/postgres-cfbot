@@ -302,10 +302,6 @@ startup_progress_timeout_handler(void)
 void
 disable_startup_progress_timeout(void)
 {
-	/* Feature is disabled. */
-	if (log_startup_progress_interval == 0)
-		return;
-
 	disable_timeout(STARTUP_PROGRESS_TIMEOUT, false);
 	startup_progress_timer_expired = false;
 }
