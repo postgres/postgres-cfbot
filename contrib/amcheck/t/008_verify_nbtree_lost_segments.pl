@@ -33,6 +33,8 @@ my ($result, $stdout, $stderr);
 # The test tables are small, so a second relation segment only exists when
 # the server was built with a tiny segment size (--with-segsize-blocks).
 # There is no way to simulate a lost segment otherwise; skip in that case.
+# During the CI at least one runner should be used with such setup (see
+# .github/workflows/pg-ci.yml)
 my $segpath1 = relation_filepath('missingsegs_test1') . ".1";
 my $segpath2 = relation_filepath('missingsegs_test2') . ".1";
 if (!-e $segpath1 || !-e $segpath2)
