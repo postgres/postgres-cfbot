@@ -69,6 +69,8 @@ tests += {
       't/058_shutdown_crash_restart.pl',
       't/059_remote_apply_status_interval.pl',
       't/060_multixact_crashed_updater.pl',
+      't/068a_hash_torn_primary_page_delete_first.pl',
+      't/068b_hash_torn_primary_page_standby.pl',
     ],
   },
 }

@@ -17,6 +17,7 @@
 #include "access/bufmask.h"
 #include "access/hash.h"
 #include "access/hash_xlog.h"
+#include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
 #include "storage/standby.h"
 
@@ -470,6 +471,34 @@ hash_xlog_split_complete(XLogReaderState *record)
 }
 
 /*
+ * Take a cleanup lock on the primary bucket page of a delete, squeeze or
+ * move-page-contents record during replay, when that page is registered
+ * (pin-only) as block 0 but not changed by the record.  Returns the pinned
+ * and cleanup-locked buffer, which the caller must release at the end of the
+ * replay operation, or InvalidBuffer when the page is not read (see below).
+ *
+ * The lock serializes replay against scans on a hot standby, which pin the
+ * page for their whole duration.  Scans can run only once hot standby accepts
+ * queries, so until then we need not read or lock the page.  Skipping the read
+ * also sidesteps a torn copy of the page whose repairing full-page image comes
+ * later in the WAL: that hazard exists only before consistency is reached, and
+ * queries are accepted only after that, so once HotStandbyActiveInReplay() is
+ * true any earlier image has already been replayed.  We do not use the page
+ * contents here in any case.
+ */
+static Buffer
+hash_xlog_cleanup_lock_primary(XLogReaderState *record)
+{
+	Buffer		bucketbuf = InvalidBuffer;
+
+	if (HotStandbyActiveInReplay())
+		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true,
+											 &bucketbuf);
+
+	return bucketbuf;
+}
+
+/*
  * replay move of page contents for squeeze operation of hash index
  */
 static void
@@ -493,11 +522,7 @@ hash_xlog_move_page_contents(XLogReaderState *record)
 		action = XLogReadBufferForRedoExtended(record, 1, RBM_NORMAL, true, &writebuf);
 	else
 	{
-		/*
-		 * we don't care for return value as the purpose of reading bucketbuf
-		 * is to ensure a cleanup lock on primary bucket page.
-		 */
-		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
+		bucketbuf = hash_xlog_cleanup_lock_primary(record);
 
 		action = XLogReadBufferForRedo(record, 1, &writebuf);
 	}
@@ -620,11 +645,7 @@ hash_xlog_squeeze_page(XLogReaderState *record)
 		action = XLogReadBufferForRedoExtended(record, 1, RBM_NORMAL, true, &writebuf);
 	else
 	{
-		/*
-		 * we don't care for return value as the purpose of reading bucketbuf
-		 * is to ensure a cleanup lock on primary bucket page.
-		 */
-		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
+		bucketbuf = hash_xlog_cleanup_lock_primary(record);
 
 		if (xldata->ntups > 0 || xldata->is_prev_bucket_same_wrt)
 			action = XLogReadBufferForRedo(record, 1, &writebuf);
@@ -851,11 +872,7 @@ hash_xlog_delete(XLogReaderState *record)
 		action = XLogReadBufferForRedoExtended(record, 1, RBM_NORMAL, true, &deletebuf);
 	else
 	{
-		/*
-		 * we don't care for return value as the purpose of reading bucketbuf
-		 * is to ensure a cleanup lock on primary bucket page.
-		 */
-		(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
+		bucketbuf = hash_xlog_cleanup_lock_primary(record);
 
 		action = XLogReadBufferForRedo(record, 1, &deletebuf);
 	}
