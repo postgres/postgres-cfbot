@@ -216,7 +216,8 @@ ExecGatherMerge(PlanState *pstate)
 			else
 				ExecParallelReinitialize(outerPlanState(node),
 										 node->pei,
-										 gm->initParam);
+										 gm->initParam,
+										 node->tuples_needed);
 
 			/* Try to launch workers. */
 			pcxt = node->pei->pcxt;

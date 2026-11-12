@@ -44,7 +44,8 @@ extern void ExecParallelCreateReaders(ParallelExecutorInfo *pei);
 extern void ExecParallelFinish(ParallelExecutorInfo *pei);
 extern void ExecParallelCleanup(ParallelExecutorInfo *pei);
 extern void ExecParallelReinitialize(PlanState *planstate,
-									 ParallelExecutorInfo *pei, Bitmapset *sendParams);
+									 ParallelExecutorInfo *pei, Bitmapset *sendParams,
+									 int64 tuples_needed);
 
 extern void ParallelQueryMain(dsm_segment *seg, shm_toc *toc);
 
