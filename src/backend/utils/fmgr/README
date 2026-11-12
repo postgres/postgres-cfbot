@@ -267,12 +267,15 @@ See windowapi.h for more information.
 information about the context of the CALL statement, particularly
 whether it is within an "atomic" execution context.
 
-* Some callers of datatype input functions (and in future perhaps
-other classes of functions) pass an instance of ErrorSaveContext.
-This indicates that the caller wishes to handle "soft" errors without
-a transaction-terminating exception being thrown: instead, the callee
-should store information about the error cause in the ErrorSaveContext
-struct and return a dummy result value.  Further details appear in
+* Some callers pass an instance of ErrorSaveContext, indicating that they
+wish to handle "soft" errors themselves rather than have a
+transaction-terminating exception thrown.  In that case the callee should
+record the error cause in the ErrorSaveContext struct and return a dummy
+result value.  Datatype input functions are called this way.  So is every
+function call within an expression that the executor compiles with an
+ErrorSaveContext, for example the conversion in CAST ... DEFAULT ... ON
+CONVERSION ERROR.  Reporting errors softly is up to the callee: any error
+it does not report that way is thrown as usual.  Further details appear in
 "Handling Soft Errors" below.
 
 
