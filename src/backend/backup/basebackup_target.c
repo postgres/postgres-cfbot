@@ -40,7 +40,7 @@ static void *server_check_detail(char *target, char *target_detail);
 static BaseBackupTargetType builtin_backup_targets[] =
 {
 	{
-		"blackhole", reject_target_detail, blackhole_get_sink
+		"server-blackhole", reject_target_detail, blackhole_get_sink
 	},
 	{
 		"server", server_check_detail, server_get_sink
@@ -185,7 +185,7 @@ initialize_target_list(void)
 
 /*
  * Normally, a get_sink function should construct and return a new bbsink that
- * implements the backup target, but the 'blackhole' target just throws the
+ * implements the backup target, but the 'server-blackhole' target just throws the
  * data away. We could implement that by adding a bbsink that does nothing
  * but forward, but it's even cheaper to implement that by not adding a bbsink
  * at all.
