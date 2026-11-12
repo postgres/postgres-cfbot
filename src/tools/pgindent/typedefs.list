@@ -2232,6 +2232,7 @@ PatternInfoArray
 Pattern_Prefix_Status
 Pattern_Type
 PendingCancelRequest
+PendingColTypeUsing
 PendingFsyncEntry
 PendingListenAction
 PendingListenEntry

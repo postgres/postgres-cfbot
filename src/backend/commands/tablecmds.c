@@ -102,6 +102,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -8041,6 +8042,7 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	if (colDef->raw_default)
 	{
 		RawColumnDefault *rawEnt;
+		List	   *cooked;
 
 		rawEnt = palloc_object(RawColumnDefault);
 		rawEnt->attnum = attribute->attnum;
@@ -8051,8 +8053,12 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		 * This function is intended for CREATE TABLE, so it processes a
 		 * _list_ of defaults, but we just do one.
 		 */
-		AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
-								  false, true, false, NULL);
+		cooked = AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
+										   false, true, false, NULL);
+
+		/* Only the subcommand on the named table is collected */
+		if (cooked != NIL && !recursing)
+			EventTriggerCollectColumnDefault(((CookedConstraint *) linitial(cooked))->expr);
 
 		/* Make the additional catalog changes visible */
 		CommandCounterIncrement();
@@ -8807,6 +8813,7 @@ ATExecColumnDefault(Relation rel, const char *colName,
 	{
 		/* SET DEFAULT */
 		RawColumnDefault *rawEnt;
+		List	   *cooked;
 
 		rawEnt = palloc_object(RawColumnDefault);
 		rawEnt->attnum = attnum;
@@ -8817,8 +8824,10 @@ ATExecColumnDefault(Relation rel, const char *colName,
 		 * This function is intended for CREATE TABLE, so it processes a
 		 * _list_ of defaults, but we just do one.
 		 */
-		AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
-								  false, true, false, NULL);
+		cooked = AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
+										   false, true, false, NULL);
+		if (cooked != NIL)
+			EventTriggerCollectColumnDefault(((CookedConstraint *) linitial(cooked))->expr);
 	}
 
 	ObjectAddressSubSet(address, RelationRelationId,
@@ -9243,6 +9252,7 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	Expr	   *defval;
 	NewColumnValue *newval;
 	RawColumnDefault *rawEnt;
+	List	   *cooked;
 
 	tuple = SearchSysCacheAttName(RelationGetRelid(rel), colName);
 	if (!HeapTupleIsValid(tuple))
@@ -9343,8 +9353,9 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	rawEnt->generated = attgenerated;
 
 	/* Store the generated expression */
-	AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
-							  false, true, false, NULL);
+	cooked = AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
+									   false, true, false, NULL);
+	EventTriggerCollectColumnDefault(((CookedConstraint *) linitial(cooked))->expr);
 
 	/* Make above new expression visible */
 	CommandCounterIncrement();
@@ -15527,6 +15538,28 @@ ATPrepAlterColumnType(List **wqueue,
 				 errmsg("cannot alter column \"%s\" because it is part of the partition key of relation \"%s\"",
 						colName, RelationGetRelationName(rel)),
 				 parser_errposition(pstate, def->location)));
+
+	/*
+	 * If DDL command collection is active, render the USING expression to
+	 * text now, before a sibling subcommand can drop a column it references;
+	 * see EventTriggerCollectAlterColumnTypeUsing().
+	 */
+	if (!recursing && def->cooked_default != NULL &&
+		EventTriggerCommandCollectionActive())
+	{
+		int			save_nestlevel = NewGUCNestLevel();
+		char	   *using_text;
+
+		/* Schema-qualify names so the text is portable, as the deparser does */
+		RestrictSearchPath();
+		using_text = TextDatumGetCString(DirectFunctionCall2(pg_get_expr,
+															 CStringGetTextDatum(nodeToString(def->cooked_default)),
+															 ObjectIdGetDatum(RelationGetRelid(rel))));
+		AtEOXact_GUC(true, save_nestlevel);
+
+		EventTriggerCollectAlterColumnTypeUsing(RelationGetRelid(rel), colName,
+												using_text);
+	}
 
 	/* Look up the target type */
 	typenameTypeIdAndMod(pstate, typeName, &targettype, &targettypmod);
