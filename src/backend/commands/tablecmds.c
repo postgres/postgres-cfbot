@@ -705,6 +705,7 @@ static void ATPrepSetAccessMethod(AlteredTableInfo *tab, Relation rel, const cha
 static void ATExecSetAccessMethodNoStorage(Relation rel, Oid newAccessMethodId);
 static void ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel,
 									bool toLogged);
+static void ATCheckPersistenceForeignKeys(AlteredTableInfo *tab);
 static void ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel,
 								const char *tablespacename, LOCKMODE lockmode);
 static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode);
@@ -5977,6 +5978,23 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			Oid			NewTableSpace;
 			char		persistence;
 
+			/*
+			 * Fire off an Event Trigger now, before actually rewriting the
+			 * table.  This must happen before we look at the relation below,
+			 * as the trigger can run commands that change it, such as its
+			 * persistence, and we must not undo those changes.
+			 *
+			 * We don't support Event Trigger for nested commands anywhere,
+			 * here included, and parsetree is given NULL when coming from
+			 * AlterTableInternal.
+			 *
+			 * And fire it only once.
+			 */
+			if (parsetree)
+				EventTriggerTableRewrite((Node *) parsetree,
+										 tab->relid,
+										 tab->rewrite);
+
 			OldHeap = table_open(tab->relid, NoLock);
 
 			/*
@@ -6033,21 +6051,6 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 				tab->newrelpersistence : OldHeap->rd_rel->relpersistence;
 
 			table_close(OldHeap, NoLock);
-
-			/*
-			 * Fire off an Event Trigger now, before actually rewriting the
-			 * table.
-			 *
-			 * We don't support Event Trigger for nested commands anywhere,
-			 * here included, and parsetree is given NULL when coming from
-			 * AlterTableInternal.
-			 *
-			 * And fire it only once.
-			 */
-			if (parsetree)
-				EventTriggerTableRewrite((Node *) parsetree,
-										 tab->relid,
-										 tab->rewrite);
 
 			/*
 			 * Create transient table that will receive the modified data.
@@ -6200,6 +6203,22 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			ProcessUtilityForAlterTable(stmt, context);
 			CommandCounterIncrement();
 		}
+	}
+
+	/*
+	 * Check the foreign keys of tables changing persistence last.  Foreign
+	 * keys added by this command must be seen, and so must anything done by
+	 * user code that ran above, such as table_rewrite event triggers or
+	 * expressions evaluated during a rewrite: those can add foreign keys, or
+	 * change the persistence of the other side, while this table still has
+	 * its old persistence.
+	 */
+	foreach(ltab, *wqueue)
+	{
+		AlteredTableInfo *tab = (AlteredTableInfo *) lfirst(ltab);
+
+		if (tab->chgPersistence)
+			ATCheckPersistenceForeignKeys(tab);
 	}
 }
 
@@ -11623,6 +11642,27 @@ addFkRecurseReferenced(Constraint *fkconstraint, Relation rel,
 
 	Assert(CheckRelationLockedByMe(pkrel, ShareRowExclusiveLock, true));
 	Assert(CheckRelationLockedByMe(rel, ShareRowExclusiveLock, true));
+
+	/*
+	 * ATAddForeignKeyConstraint checks the persistence of the referenced
+	 * relation named in the constraint, but that says nothing about the
+	 * partitions below it: a permanent partitioned table may contain unlogged
+	 * partitions, whose data vanishes on crash recovery just as for a
+	 * standalone unlogged table.  Every relation on the referenced side
+	 * passes through here, both when the constraint is created and when it is
+	 * cloned for a newly created or attached partition, so repeat the check
+	 * for each of them.  Only the permanent-to-unlogged combination needs to
+	 * be considered, because temporary relations cannot be partitions of
+	 * permanent ones.
+	 */
+	if (rel->rd_rel->relpersistence == RELPERSISTENCE_PERMANENT &&
+		!RelationIsPermanent(pkrel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("constraints on permanent tables may reference only permanent tables"),
+				 errdetail("Table \"%s\" is an unlogged partition of a table referenced by permanent table \"%s\".",
+						   RelationGetRelationName(pkrel),
+						   RelationGetRelationName(rel))));
 
 	/*
 	 * Create action triggers to enforce the constraint, or skip them if the
@@ -20191,18 +20231,12 @@ ATExecSetCompression(Relation rel,
 /*
  * Preparation phase for SET LOGGED/UNLOGGED
  *
- * This verifies that we're not trying to change a temp table.  Also,
- * existing foreign key constraints are checked to avoid ending up with
- * permanent tables referencing unlogged tables.
+ * This verifies that we're not trying to change a temp table.  Foreign keys
+ * are checked later, by ATCheckPersistenceForeignKeys.
  */
 static void
 ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 {
-	Relation	pg_constraint;
-	HeapTuple	tuple;
-	SysScanDesc scan;
-	ScanKeyData skey[1];
-
 	/*
 	 * Disallow changing status for a temp table.  Also verify whether we can
 	 * get away with doing nothing; in such cases we don't need to run the
@@ -20242,11 +20276,34 @@ ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 				 errdetail("Unlogged relations cannot be published or excluded via an EXCEPT clause."),
 				 errhint("Drop the table from the publication, or remove it from the publication's EXCEPT clause, first.")));
 
-	/*
-	 * Check existing foreign key constraints to preserve the invariant that
-	 * permanent tables cannot reference unlogged ones.  Self-referencing
-	 * foreign keys can safely be ignored.
-	 */
+	/* force rewrite if necessary; see comment in ATRewriteTables */
+	tab->rewrite |= AT_REWRITE_ALTER_PERSISTENCE;
+	if (toLogged)
+		tab->newrelpersistence = RELPERSISTENCE_PERMANENT;
+	else
+		tab->newrelpersistence = RELPERSISTENCE_UNLOGGED;
+	tab->chgPersistence = true;
+}
+
+/*
+ * Check foreign keys for SET LOGGED/UNLOGGED
+ *
+ * This preserves the invariant that permanent tables cannot reference
+ * unlogged ones.  It runs at the end of phase 3 rather than at preparation;
+ * see ATRewriteTables.
+ */
+static void
+ATCheckPersistenceForeignKeys(AlteredTableInfo *tab)
+{
+	bool		toLogged = (tab->newrelpersistence == RELPERSISTENCE_PERMANENT);
+	Relation	rel;
+	Relation	pg_constraint;
+	HeapTuple	tuple;
+	SysScanDesc scan;
+	ScanKeyData skey[1];
+
+	rel = table_open(tab->relid, NoLock);
+
 	pg_constraint = table_open(ConstraintRelationId, AccessShareLock);
 
 	/*
@@ -20309,13 +20366,7 @@ ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 
 	table_close(pg_constraint, AccessShareLock);
 
-	/* force rewrite if necessary; see comment in ATRewriteTables */
-	tab->rewrite |= AT_REWRITE_ALTER_PERSISTENCE;
-	if (toLogged)
-		tab->newrelpersistence = RELPERSISTENCE_PERMANENT;
-	else
-		tab->newrelpersistence = RELPERSISTENCE_UNLOGGED;
-	tab->chgPersistence = true;
+	table_close(rel, NoLock);
 }
 
 /*
