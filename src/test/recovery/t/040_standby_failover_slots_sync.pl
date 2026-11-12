@@ -1114,4 +1114,57 @@ $standby2->wait_for_log(
 
 $h->quit;
 
+##################################################
+# Test that a synced slot stays temporary when the standby cannot build a
+# consistent snapshot across multiple sync cycles.
+##################################################
+
+# Disable the subscription so lsub1_slot does not advance and serialize
+# snapshots on standby2 while still holding back catalog_xmin on standby2.
+$subscriber1->safe_psql('postgres',
+	"ALTER SUBSCRIPTION regress_mysub1 DISABLE");
+$primary->poll_query_until('postgres',
+	"SELECT NOT active FROM pg_replication_slots WHERE slot_name = 'lsub1_slot'"
+);
+
+$primary->safe_psql('postgres',
+	"SELECT pg_create_logical_replication_slot('inconsistent_slot', 'test_decoding', false, false, true);"
+);
+
+# Keep a transaction with an assigned XID open while logging xl_running_xacts
+# and advancing inconsistent_slot so its restart_lsn moves to that record and
+# concurrent bgwriter snapshots cannot make it consistent. Advance the slot
+# twice in case a concurrent xl_running_xacts record logged before the open
+# transaction was used as the candidate restart_lsn in the first call.
+my $xact_h = $primary->background_psql('postgres');
+$xact_h->query_safe('BEGIN; SELECT pg_current_xact_id();');
+
+$primary->safe_psql(
+	'postgres', qq(
+	SELECT pg_log_standby_snapshot();
+	BEGIN;
+	INSERT INTO tab_int VALUES (100);
+	COMMIT;
+	SELECT pg_replication_slot_advance('inconsistent_slot', pg_current_wal_lsn());
+	SELECT pg_replication_slot_advance('inconsistent_slot', pg_current_wal_lsn());
+));
+
+$xact_h->query_safe('COMMIT;');
+$xact_h->quit;
+
+$primary->wait_for_replay_catchup($standby2);
+
+$standby2->append_conf('postgresql.conf', 'sync_replication_slots = on');
+$standby2->reload;
+
+ok( $standby2->poll_query_until(
+		'postgres', qq(
+		SELECT slotsync_skip_count >= 2 AND temporary AND
+			   slotsync_skip_reason = 'no_consistent_snapshot'
+		FROM pg_stat_replication_slots
+		JOIN pg_replication_slots USING (slot_name)
+		WHERE slot_name = 'inconsistent_slot';
+	)),
+	'synced slot without a consistent snapshot stays temporary');
+
 done_testing();
