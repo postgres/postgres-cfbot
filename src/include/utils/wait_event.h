@@ -17,6 +17,7 @@ extern const char *pgstat_get_wait_event(uint32 wait_event_info);
 extern const char *pgstat_get_wait_event_type(uint32 wait_event_info);
 static inline void pgstat_report_wait_start(uint32 wait_event_info);
 static inline void pgstat_report_wait_end(void);
+static inline uint32 pgstat_report_wait_swap(uint32 wait_event_info);
 extern void pgstat_set_wait_event_storage(uint32 *wait_event_info);
 extern void pgstat_reset_wait_event_storage(void);
 
@@ -86,5 +87,24 @@ pgstat_report_wait_end(void)
 	*(volatile uint32 *) my_wait_event_info = 0;
 }
 
+/* ----------
+ * pgstat_report_wait_swap() -
+ *
+ *	Like pgstat_report_wait_start(), but returns the wait event that was
+ *	set before, so that the caller can put it back with a second call once
+ *	its own wait is over.
+ * ----------
+ */
+static inline uint32
+pgstat_report_wait_swap(uint32 wait_event_info)
+{
+	uint32		old_wait_event_info;
+
+	/* see pgstat_report_wait_start() */
+	old_wait_event_info = *(volatile uint32 *) my_wait_event_info;
+	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+
+	return old_wait_event_info;
+}
 
 #endif							/* WAIT_EVENT_H */
