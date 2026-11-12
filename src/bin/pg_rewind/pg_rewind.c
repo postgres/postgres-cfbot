@@ -9,6 +9,7 @@
  */
 #include "postgres_fe.h"
 
+#include <signal.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <time.h>
@@ -54,7 +55,7 @@ static void findCommonAncestorTimeline(TimeLineHistoryEntry *a_history,
 									   TimeLineHistoryEntry *b_history,
 									   int b_nentries,
 									   XLogRecPtr *recptr, int *tliIndex);
-static void ensureCleanShutdown(const char *argv0);
+static void ensureTargetNotRunning(void);
 static void disconnect_atexit(void);
 
 static ControlFileData ControlFile_target;
@@ -107,9 +108,8 @@ usage(const char *progname)
 	printf(_("  -R, --write-recovery-conf      write configuration for replication\n"
 			 "                                 (requires --source-server)\n"));
 	printf(_("      --config-file=FILENAME     use specified main server configuration\n"
-			 "                                 file when running target cluster\n"));
+			 "                                 file when reading target settings\n"));
 	printf(_("      --debug                    write a lot of debug messages\n"));
-	printf(_("      --no-ensure-shutdown       do not automatically fix unclean shutdown\n"));
 	printf(_("      --sync-method=METHOD       set method for syncing files to disk\n"));
 	printf(_("  -V, --version                  output version information, then exit\n"));
 	printf(_("  -?, --help                     show this help, then exit\n"));
@@ -127,7 +127,6 @@ main(int argc, char **argv)
 		{"write-recovery-conf", no_argument, NULL, 'R'},
 		{"source-pgdata", required_argument, NULL, 1},
 		{"source-server", required_argument, NULL, 2},
-		{"no-ensure-shutdown", no_argument, NULL, 4},
 		{"config-file", required_argument, NULL, 5},
 		{"version", no_argument, NULL, 'V'},
 		{"restore-target-wal", no_argument, NULL, 'c'},
@@ -152,7 +151,6 @@ main(int argc, char **argv)
 	XLogSegNo	last_common_segno;
 	size_t		size;
 	char	   *buffer;
-	bool		no_ensure_shutdown = false;
 	bool		rewind_needed;
 	bool		writerecoveryconf = false;
 	filemap_t  *filemap;
@@ -215,10 +213,6 @@ main(int argc, char **argv)
 
 			case 2:				/* --source-server */
 				connstr_source = pg_strdup(optarg);
-				break;
-
-			case 4:
-				no_ensure_shutdown = true;
 				break;
 
 			case 5:
@@ -325,30 +319,15 @@ main(int argc, char **argv)
 	else
 		source = init_local_source(datadir_source);
 
-	/*
-	 * Check the status of the target instance.
-	 *
-	 * If the target instance was not cleanly shut down, start and stop the
-	 * target cluster once in single-user mode to enforce recovery to finish,
-	 * ensuring that the cluster can be used by pg_rewind.  Note that if
-	 * no_ensure_shutdown is specified, pg_rewind ignores this step, and users
-	 * need to make sure by themselves that the target cluster is in a clean
-	 * state.
-	 */
+	/* The target must be stopped, but need not have shut down cleanly. */
+	ensureTargetNotRunning();
+
 	buffer = slurpFile(datadir_target, XLOG_CONTROL_FILE, &size);
 	digestControlFile(&ControlFile_target, buffer, size);
 	pg_free(buffer);
-
-	if (!no_ensure_shutdown &&
-		ControlFile_target.state != DB_SHUTDOWNED &&
+	if (ControlFile_target.state != DB_SHUTDOWNED &&
 		ControlFile_target.state != DB_SHUTDOWNED_IN_RECOVERY)
-	{
-		ensureCleanShutdown(argv[0]);
-
-		buffer = slurpFile(datadir_target, XLOG_CONTROL_FILE, &size);
-		digestControlFile(&ControlFile_target, buffer, size);
-		pg_free(buffer);
-	}
+		pg_log_debug("target was not shut down cleanly; scanning its WAL without recovery");
 
 	buffer = source->fetch_file(source, XLOG_CONTROL_FILE, &size);
 	digestControlFile(&ControlFile_source, buffer, size);
@@ -385,7 +364,6 @@ main(int argc, char **argv)
 	}
 	else
 	{
-		XLogRecPtr	chkptendrec;
 		TimeLineHistoryEntry *sourceHistory;
 		int			sourceNentries;
 
@@ -416,47 +394,7 @@ main(int argc, char **argv)
 		 */
 		pfree(sourceHistory);
 
-
-		/*
-		 * Determine the end-of-WAL on the target.
-		 *
-		 * The WAL ends at the last shutdown checkpoint, or at
-		 * minRecoveryPoint if it was a standby. (If we supported rewinding a
-		 * server that was not shut down cleanly, we would need to replay
-		 * until we reach the first invalid record, like crash recovery does.)
-		 */
-
-		/* read the checkpoint record on the target to see where it ends. */
-		chkptendrec = readOneRecord(datadir_target,
-									ControlFile_target.checkPoint,
-									targetNentries - 1,
-									restore_command);
-
-		if (ControlFile_target.minRecoveryPoint > chkptendrec)
-		{
-			target_wal_endrec = ControlFile_target.minRecoveryPoint;
-		}
-		else
-		{
-			target_wal_endrec = chkptendrec;
-		}
-
-		/*
-		 * Check for the possibility that the target is in fact a direct
-		 * ancestor of the source. In that case, there is no divergent history
-		 * in the target that needs rewinding.
-		 */
-		if (target_wal_endrec > divergerec)
-		{
-			rewind_needed = true;
-		}
-		else
-		{
-			/* the last common checkpoint record must be part of target WAL */
-			Assert(target_wal_endrec == divergerec);
-
-			rewind_needed = false;
-		}
+		rewind_needed = true;
 	}
 
 	if (!rewind_needed)
@@ -474,7 +412,7 @@ main(int argc, char **argv)
 
 	findLastCheckpoint(datadir_target, divergerec, lastcommontliIndex,
 					   &chkptrec, &chkpttli, &chkptredo, &chkptdatachecksums,
-					   restore_command);
+					   restore_command, ControlFile_target.checkPoint);
 	pg_log_info("rewinding from last common checkpoint at %X/%08X on timeline %u",
 				LSN_FORMAT_ARGS(chkptrec), chkpttli);
 
@@ -539,8 +477,19 @@ main(int argc, char **argv)
 	 */
 	if (showprogress)
 		pg_log_info("reading WAL in target");
-	extractPageMap(datadir_target, chkptrec, lastcommontliIndex,
-				   target_wal_endrec, restore_command);
+	target_wal_endrec = extractPageMap(datadir_target, chkptrec,
+									   lastcommontliIndex, restore_command);
+
+	/*
+	 * The target WAL must not end before the divergence point. If
+	 * target_wal_endrec == divergerec, the target wrote no WAL past the fork
+	 * point (yielding 0 modified blocks to extract). However, because we
+	 * already verified the timelines diverged, we must still proceed with the
+	 * file synchronization phase to capture timeline history and non-WAL file
+	 * changes.
+	 */
+	if (target_wal_endrec < divergerec)
+		pg_fatal("target WAL ends before the divergence point");
 
 	/*
 	 * We have collected all information we need from both systems. Decide
@@ -889,16 +838,6 @@ sanityChecks(void)
 		pg_log_warning("data checksums are disabled on the target server but enabled on the source server");
 		pg_log_warning_detail("The rewound server will keep data checksums disabled unless the source server enabled them online after the point of divergence.");
 	}
-
-	/*
-	 * Target cluster better not be running. This doesn't guard against
-	 * someone starting the cluster concurrently. Also, this is probably more
-	 * strict than necessary; it's OK if the target node was not shut down
-	 * cleanly, as long as it isn't running at the moment.
-	 */
-	if (ControlFile_target.state != DB_SHUTDOWNED &&
-		ControlFile_target.state != DB_SHUTDOWNED_IN_RECOVERY)
-		pg_fatal("target server must be shut down cleanly");
 
 	/*
 	 * When the source is a data directory, also require that the source
@@ -1254,79 +1193,41 @@ getRestoreCommand(const char *argv0)
 }
 
 
-/*
- * Ensure clean shutdown of target instance by launching single-user mode
- * postgres to do crash recovery.
- */
+/* Ensure that the target server is not running. */
 static void
-ensureCleanShutdown(const char *argv0)
+ensureTargetNotRunning(void)
 {
-	int			ret;
-	char		exec_path[MAXPGPATH];
-	PQExpBuffer postgres_cmd;
+	char		pidpath[MAXPGPATH];
+	FILE	   *pidfile;
+	char		line[64];
+	long		pid;
+	char	   *endptr;
 
-	/* locate postgres binary */
-	if ((ret = find_other_exec(argv0, "postgres",
-							   PG_BACKEND_VERSIONSTR,
-							   exec_path)) < 0)
+	snprintf(pidpath, sizeof(pidpath), "%s/postmaster.pid", datadir_target);
+	pidfile = fopen(pidpath, "r");
+	if (pidfile == NULL)
 	{
-		char		full_path[MAXPGPATH];
-
-		if (find_my_exec(argv0, full_path) < 0)
-			strlcpy(full_path, progname, sizeof(full_path));
-
-		if (ret == -1)
-			pg_fatal("program \"%s\" is needed by %s but was not found in the same directory as \"%s\"",
-					 "postgres", progname, full_path);
-		else
-			pg_fatal("program \"%s\" was found by \"%s\" but was not the same version as %s",
-					 "postgres", full_path, progname);
+		if (errno == ENOENT)
+			return;
+		pg_fatal("could not open file \"%s\" for reading: %m", pidpath);
 	}
+	if (fgets(line, sizeof(line), pidfile) == NULL || fclose(pidfile) != 0)
+		pg_fatal("could not read file \"%s\": %m", pidpath);
 
-	pg_log_info("executing \"%s\" for target server to complete crash recovery",
-				exec_path);
-
-	/*
-	 * Skip processing if requested, but only after ensuring presence of
-	 * postgres.
-	 */
+	errno = 0;
+	pid = strtol(line, &endptr, 10);
+	if (errno != 0 || endptr == line ||
+		(*endptr != '\n' && *endptr != '\0') ||
+		pid <= 0 || pid > PG_INT32_MAX)
+		pg_fatal("invalid PID in file \"%s\"", pidpath);
+	if (kill((pid_t) pid, 0) == 0 || errno == EPERM)
+		pg_fatal("target server is running");
+	if (errno != ESRCH)
+		pg_fatal("could not check whether target server is running: %m");
 	if (dry_run)
 		return;
-
-	/*
-	 * Finally run postgres in single-user mode.  There is no need to use
-	 * fsync here.  This makes the recovery faster, and the target data folder
-	 * is synced at the end anyway.
-	 */
-	postgres_cmd = createPQExpBuffer();
-
-	/* path to postgres, properly quoted */
-	appendShellString(postgres_cmd, exec_path);
-
-	/* add set of options with properly quoted data directory */
-	appendPQExpBufferStr(postgres_cmd, " --single -F -D ");
-	appendShellString(postgres_cmd, datadir_target);
-
-	/* add custom configuration file only if requested */
-	if (config_file != NULL)
-	{
-		appendPQExpBufferStr(postgres_cmd, " -c config_file=");
-		appendShellString(postgres_cmd, config_file);
-	}
-
-	/* finish with the database name, and a properly quoted redirection */
-	appendPQExpBufferStr(postgres_cmd, " template1 < ");
-	appendShellString(postgres_cmd, DEVNULL);
-
-	fflush(NULL);
-	if (system(postgres_cmd->data) != 0)
-	{
-		pg_log_error("postgres single-user mode in target cluster failed");
-		pg_log_error_detail("Command was: %s", postgres_cmd->data);
-		exit(1);
-	}
-
-	destroyPQExpBuffer(postgres_cmd);
+	if (unlink(pidpath) != 0)
+		pg_fatal("could not remove stale file \"%s\": %m", pidpath);
 }
 
 static void
