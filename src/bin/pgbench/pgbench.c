@@ -6782,6 +6782,7 @@ main(int argc, char **argv)
 	char	   *env;
 
 	int			exit_code = 0;
+	int			rc;
 	struct timeval tv;
 
 	/* initialize timing infrastructure (required for INSTR_* calls) */
@@ -7410,9 +7411,9 @@ main(int argc, char **argv)
 	if (duration > 0)
 		setalarm(duration);
 
-	errno = pg_thrd_barrier_init(&barrier, nthreads);
-	if (errno != 0)
-		pg_fatal("could not initialize barrier: %m");
+	if ((rc = pg_thrd_barrier_init(&barrier, nthreads)) != pg_thrd_success)
+		pg_fatal("could not initialize barrier: %s",
+				 pg_thrd_error_string_with_detail(rc));
 
 	/* start all threads but thread 0 which is executed directly later */
 	for (i = 1; i < nthreads; i++)
@@ -7420,10 +7421,10 @@ main(int argc, char **argv)
 		TState	   *thread = &threads[i];
 
 		thread->create_time = pg_time_now();
-		errno = pg_thrd_create(&thread->thread, threadRun, thread);
-
-		if (errno != 0)
-			pg_fatal("could not create thread: %m");
+		rc = pg_thrd_create(&thread->thread, threadRun, thread);
+		if (rc != pg_thrd_success)
+			pg_fatal("could not create thread: %s",
+					 pg_thrd_error_string_with_detail(rc));
 	}
 
 	/* compute when to stop */
