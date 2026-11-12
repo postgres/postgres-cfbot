@@ -2251,8 +2251,7 @@ postgresExecForeignBatchInsert(EState *estate,
  *		Determine the maximum number of tuples that can be inserted in bulk
  *
  * Returns the batch size specified for server or table. When batching is not
- * allowed (e.g. for tables with BEFORE/AFTER ROW triggers or with RETURNING
- * clause), returns 1.
+ * allowed (e.g. for tables with no columns), returns 1.
  */
 static int
 postgresGetForeignModifyBatchSize(ResultRelInfo *resultRelInfo)
@@ -2279,23 +2278,6 @@ postgresGetForeignModifyBatchSize(ResultRelInfo *resultRelInfo)
 		batch_size = fmstate->batch_size;
 	else
 		batch_size = get_batch_size_option(resultRelInfo->ri_RelationDesc);
-
-	/*
-	 * Disable batching when we have to use RETURNING, there are any
-	 * BEFORE/AFTER ROW INSERT triggers on the foreign table, or there are any
-	 * WITH CHECK OPTION constraints from parent views.
-	 *
-	 * When there are any BEFORE ROW INSERT triggers on the table, we can't
-	 * support it, because such triggers might query the table we're inserting
-	 * into and act differently if the tuples that have already been processed
-	 * and prepared for insertion are not there.
-	 */
-	if (resultRelInfo->ri_projectReturning != NULL ||
-		resultRelInfo->ri_WithCheckOptions != NIL ||
-		(resultRelInfo->ri_TrigDesc &&
-		 (resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
-		  resultRelInfo->ri_TrigDesc->trig_insert_after_row)))
-		return 1;
 
 	/*
 	 * If the foreign table has no columns, disable batching as the INSERT

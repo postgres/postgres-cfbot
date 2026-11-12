@@ -12117,6 +12117,207 @@ SELECT * FROM cmdlog ORDER BY 1;
  INSERT on batch_cp_upd_test3
 (3 rows)
 
+-- AFTER STATEMENT triggers without transition tables must not disable
+-- batching, for either direct inserts or tuple routing. With batching
+-- active we expect only one entry for batch_cp_upd_test1, as both
+-- rows get inserted in a single statement.
+CREATE TRIGGER stmt_trig AFTER INSERT ON batch_cp_upd_test1_f
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_test1_f VALUES (1), (1);
+SELECT * FROM cmdlog ORDER BY 1;
+              cmd               
+--------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1_f
+(2 rows)
+
+TRUNCATE cmdlog;
+COPY batch_cp_upd_test1_f FROM STDIN;
+SELECT * FROM cmdlog ORDER BY 1;
+              cmd               
+--------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1_f
+(2 rows)
+
+-- A statement targeting the parent fires its trigger, not the leaf's.
+CREATE TRIGGER stmt_trig AFTER INSERT ON batch_cp_upd_test
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_test VALUES (1), (1);
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+TRUNCATE cmdlog;
+COPY batch_cp_upd_test FROM STDIN;
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+DROP TRIGGER stmt_trig ON batch_cp_upd_test1_f;
+DROP TRIGGER stmt_trig ON batch_cp_upd_test;
+-- AFTER ROW triggers must disable batching and fire for each inserted row.
+-- Each two-row command should log two remote INSERTs.
+CREATE TRIGGER row_trig AFTER INSERT ON batch_cp_upd_test1_f
+	FOR EACH ROW EXECUTE FUNCTION trigger_data(23,'skidoo');
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_test1_f VALUES (1), (1);
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+TRUNCATE cmdlog;
+COPY batch_cp_upd_test1_f FROM STDIN;
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_test VALUES (1), (1);
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+TRUNCATE cmdlog;
+COPY batch_cp_upd_test FROM STDIN;
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+NOTICE:  row_trig(23, skidoo) AFTER ROW INSERT ON batch_cp_upd_test1_f
+NOTICE:  NEW: (1)
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+DROP TRIGGER row_trig ON batch_cp_upd_test1_f;
+-- RETURNING must disable batching even without local triggers.
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_test1_f VALUES (1), (1) RETURNING a;
+ a 
+---
+ 1
+ 1
+(2 rows)
+
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_test VALUES (1), (1) RETURNING a;
+ a 
+---
+ 1
+ 1
+(2 rows)
+
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+-- WITH CHECK OPTION must disable batching independently of RETURNING.
+CREATE VIEW batch_cp_upd_view AS
+	SELECT * FROM batch_cp_upd_test1_f WHERE a = 1 WITH CHECK OPTION;
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_view VALUES (1), (1);
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+CREATE OR REPLACE VIEW batch_cp_upd_view AS
+	SELECT * FROM batch_cp_upd_test WHERE a = 1 WITH CHECK OPTION;
+TRUNCATE cmdlog;
+INSERT INTO batch_cp_upd_view VALUES (1), (1);
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+DROP VIEW batch_cp_upd_view;
+-- Transition tables on the parent disable batching for the rows routed to the
+-- foreign partition, even if there's only an OLD TABLE: expect an INSERT on
+-- batch_cp_upd_test1 for each moved row.
+CREATE TRIGGER oldtab_trig AFTER UPDATE ON batch_cp_upd_test
+	REFERENCING OLD TABLE AS oldtab
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+INSERT INTO batch_cp_upd_test VALUES (2), (2);
+TRUNCATE cmdlog;
+UPDATE batch_cp_upd_test SET a = 1 WHERE a = 2;
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+ UPDATE on batch_cp_upd_test
+(3 rows)
+
+DROP TRIGGER oldtab_trig ON batch_cp_upd_test;
+-- With a NEW TABLE, batching is disabled, and the per-row code refuses to
+-- collect the rows moved to the foreign partition.
+CREATE TRIGGER newtab_trig AFTER UPDATE ON batch_cp_upd_test
+	REFERENCING NEW TABLE AS newtab
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+INSERT INTO batch_cp_upd_test VALUES (2), (2);
+UPDATE batch_cp_upd_test SET a = 1 WHERE a = 2;
+ERROR:  cannot collect transition tuples from child foreign tables
+-- MERGE prepares transition capture for all kinds of actions, so the UPDATE
+-- NEW TABLE disables batching even for rows routed by an INSERT action:
+-- expect two INSERTs on batch_cp_upd_test1.  (The condition on t.a prunes the
+-- foreign partitions, which MERGE does not support as targets.)
+TRUNCATE cmdlog;
+MERGE INTO batch_cp_upd_test t USING (VALUES (1), (1)) s(a)
+	ON t.a = 2 AND t.a = s.a
+	WHEN NOT MATCHED THEN INSERT VALUES (s.a);
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test1
+(2 rows)
+
+DROP TRIGGER newtab_trig ON batch_cp_upd_test;
 -- Clean up
 DROP TABLE batch_cp_upd_test;
 DROP TABLE batch_cp_upd_test1;
