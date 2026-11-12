@@ -70,6 +70,17 @@
 #define PX_SHACRYPT_ROUNDS_MAX 999999999
 
 /*
+ * Maximum length of the rounds value printed in the clamp NOTICEs of
+ * px_crypt_shacrypt().  The supplied token is echoed so that an
+ * out-of-range value is reported as given, but it comes from the
+ * caller-supplied salt string and can be arbitrarily long; cap the
+ * echo at one more than the number of digits of the maximum
+ * supported value, and mark where the value was truncated.
+ */
+#define PX_SHACRYPT_ROUNDS_PRINT_MAX \
+	((int) sizeof(CppAsString2(PX_SHACRYPT_ROUNDS_MAX)))
+
+/*
  * main interface
  */
 char	   *px_crypt(const char *psw, const char *salt, char *buf, unsigned len);
