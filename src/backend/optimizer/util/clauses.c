@@ -1197,6 +1197,34 @@ contain_nonstrict_functions_walker(Node *node, void *context)
 		return true;
 	else if (IsA(node, JsonConstructorExpr))
 		return true;
+	else if (IsA(node, JsonExpr))
+	{
+		JsonExpr   *jsexpr = (JsonExpr *) node;
+
+		/*
+		 * A NULL context item or path specification makes JSON_EXISTS,
+		 * JSON_QUERY, and JSON_VALUE return NULL, unless the ON EMPTY or ON
+		 * ERROR behavior supplies some other value, which can happen even
+		 * then (e.g., when RETURNING a NOT NULL domain).  A NULL PASSING
+		 * argument doesn't force a NULL result at all; it merely becomes a
+		 * jsonpath variable containing a JSON null.  So treat the construct
+		 * as non-strict unless it has no PASSING arguments and both behaviors
+		 * are NULL, UNKNOWN (which is the same as NULL), or ERROR, in which
+		 * case just check its inputs.
+		 */
+		if (jsexpr->passing_values != NIL)
+			return true;
+		if (jsexpr->on_empty &&
+			jsexpr->on_empty->btype != JSON_BEHAVIOR_NULL &&
+			jsexpr->on_empty->btype != JSON_BEHAVIOR_UNKNOWN &&
+			jsexpr->on_empty->btype != JSON_BEHAVIOR_ERROR)
+			return true;
+		if (jsexpr->on_error &&
+			jsexpr->on_error->btype != JSON_BEHAVIOR_NULL &&
+			jsexpr->on_error->btype != JSON_BEHAVIOR_UNKNOWN &&
+			jsexpr->on_error->btype != JSON_BEHAVIOR_ERROR)
+			return true;
+	}
 	else
 	{
 		/* Check other function-containing nodes */

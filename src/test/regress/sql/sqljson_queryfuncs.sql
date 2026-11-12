@@ -625,3 +625,74 @@ SELECT JSON_VALUE(x, '$' RETURNING json) FROM (VALUES ('1'::json), ('null'), ('2
 SELECT JSON_VALUE(x, '$.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('{}'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, 'strict $.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('[]'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, '$' RETURNING jsonb) FROM (VALUES ('1'::jsonb), (NULL), ('2')) v(x);
+
+-- Test the planner's strictness check for JsonExpr.  JSON_VALUE() etc. can
+-- return non-NULL for a NULL PASSING argument, and also for a NULL context
+-- item if their ON EMPTY / ON ERROR behavior is anything other than NULL,
+-- UNKNOWN, or ERROR.
+
+-- When pulling up a subquery underneath an outer join, its JsonExpr output
+-- must be wrapped in a PlaceHolderVar; this must return NULL, not '1'.
+SELECT v FROM (VALUES (1)) a
+LEFT JOIN (SELECT JSON_VALUE('1', '$' PASSING y AS p) v
+           FROM (VALUES (1), (2)) b(y)) ss ON false;
+
+-- A STRICT SQL function must not be inlined if its JsonExpr isn't strict in
+-- the function's parameters; these must return NULL for the NULL row.
+CREATE TEMP TABLE jsonexpr_strict_args (x int);
+INSERT INTO jsonexpr_strict_args VALUES (NULL), (1);
+CREATE FUNCTION jsonexpr_strict_passing(int) RETURNS text
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE(jsonb '1', '$' PASSING $1 AS p) $$;
+SELECT x, jsonexpr_strict_passing(x) FROM jsonexpr_strict_args ORDER BY x;
+CREATE FUNCTION jsonexpr_strict_default(int) RETURNS int
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE(jsonb '1', '$' RETURNING int
+                          DEFAULT $1 + 0 ON EMPTY) $$;
+SELECT x, jsonexpr_strict_default(x) FROM jsonexpr_strict_args ORDER BY x;
+
+-- But one that only depends on the context item is strict, and can be inlined.
+CREATE FUNCTION jsonexpr_strict_ctx(text) RETURNS text
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE($1::jsonb, '$') $$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT jsonexpr_strict_ctx(x::text) FROM jsonexpr_strict_args;
+SELECT x, jsonexpr_strict_ctx(x::text) FROM jsonexpr_strict_args ORDER BY x;
+CREATE FUNCTION jsonexpr_strict_exists(text) RETURNS bool
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_EXISTS($1::jsonb, 'strict $.a' UNKNOWN ON ERROR) $$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT jsonexpr_strict_exists(x::text) FROM jsonexpr_strict_args;
+SELECT x, jsonexpr_strict_exists(x::text) FROM jsonexpr_strict_args ORDER BY x;
+
+-- When RETURNING a domain, a NULL context item is still coerced to the
+-- domain, and a NOT NULL domain makes that fail, so the ON ERROR behavior
+-- can produce a non-NULL result.  These must return NULL for the NULL row.
+CREATE DOMAIN queryfuncs_jsonb_nn AS jsonb NOT NULL;
+CREATE FUNCTION jsonexpr_strict_domain(jsonb) RETURNS jsonb
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_QUERY($1, '$' RETURNING queryfuncs_jsonb_nn
+                          EMPTY ARRAY ON ERROR) $$;
+SELECT x, jsonexpr_strict_domain(x::text::jsonb)
+FROM jsonexpr_strict_args ORDER BY x;
+SELECT v FROM (VALUES (1)) a
+LEFT JOIN (SELECT JSON_QUERY(y, '$' RETURNING queryfuncs_jsonb_nn
+                             EMPTY ARRAY ON ERROR) v
+           FROM (VALUES (jsonb '1'), (NULL)) b(y)) ss ON false;
+
+-- But with the default NULL ON ERROR, the result is still NULL or an error,
+-- so this can be inlined.
+CREATE FUNCTION jsonexpr_strict_domain_null(jsonb) RETURNS jsonb
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_QUERY($1, '$' RETURNING queryfuncs_jsonb_nn) $$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT jsonexpr_strict_domain_null(x::text::jsonb) FROM jsonexpr_strict_args;
+
+DROP FUNCTION jsonexpr_strict_passing(int);
+DROP FUNCTION jsonexpr_strict_default(int);
+DROP FUNCTION jsonexpr_strict_ctx(text);
+DROP FUNCTION jsonexpr_strict_exists(text);
+DROP FUNCTION jsonexpr_strict_domain(jsonb);
+DROP FUNCTION jsonexpr_strict_domain_null(jsonb);
+DROP DOMAIN queryfuncs_jsonb_nn;
+DROP TABLE jsonexpr_strict_args;
