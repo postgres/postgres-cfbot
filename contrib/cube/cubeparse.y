@@ -223,8 +223,7 @@ write_box(int dim, char *str1, char *str2,
 		bp->x[i] = float8in_internal(s, &endptr, "cube", str2, escontext);
 		if (SOFT_ERROR_OCCURRED(escontext))
 			return false;
-		/* code this way to do right thing with NaN */
-		point &= (bp->x[i] == bp->x[0]);
+		point &= float8_eq(bp->x[i], bp->x[0]);
 		i++;
 	}
 	while ((s = strchr(s, ',')) != NULL)
@@ -233,7 +232,7 @@ write_box(int dim, char *str1, char *str2,
 		bp->x[i] = float8in_internal(s, &endptr, "cube", str2, escontext);
 		if (SOFT_ERROR_OCCURRED(escontext))
 			return false;
-		point &= (bp->x[i] == bp->x[i - dim]);
+		point &= float8_eq(bp->x[i], bp->x[i - dim]);
 		i++;
 	}
 	Assert(i == dim * 2);
