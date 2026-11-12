@@ -589,6 +589,53 @@ select description, inbytes, (test_conv(inbytes, 'iso8859-5', 'koi8r')).* from i
 (5 rows)
 
 --
+-- WIN1252
+--
+CREATE TABLE win1252_inputs (inbytes bytea, description text);
+insert into win1252_inputs  values
+  ('\x666f6f',		'valid, pure ASCII'),
+  ('\x80e9',		'valid'),
+  ('\x81',		'invalid, unassigned byte'),
+  ('\x80e99d',		'invalid, unassigned byte'),
+  ('\x00',		'invalid, NUL byte');
+-- Test WIN1252 verification
+select description, inbytes, (test_conv(inbytes, 'win1252', 'win1252')).* from win1252_inputs;
+       description        | inbytes  |  result  | errorat |                       error                        
+--------------------------+----------+----------+---------+----------------------------------------------------
+ valid, pure ASCII        | \x666f6f | \x666f6f |         | 
+ valid                    | \x80e9   | \x80e9   |         | 
+ invalid, unassigned byte | \x81     | \x       | \x81    | invalid byte sequence for encoding "WIN1252": 0x81
+ invalid, unassigned byte | \x80e99d | \x80e9   | \x9d    | invalid byte sequence for encoding "WIN1252": 0x9d
+ invalid, NUL byte        | \x00     | \x       | \x00    | invalid byte sequence for encoding "WIN1252": 0x00
+(5 rows)
+
+select description, length(inbytes, 'win1252') from win1252_inputs where inbytes = '\x80e9';
+ description | length 
+-------------+--------
+ valid       |      2
+(1 row)
+
+select description, length(inbytes, 'win1252') from win1252_inputs where inbytes = '\x80e99d';
+ERROR:  invalid byte sequence for encoding "WIN1252": 0x9d
+-- Test conversions from WIN1252
+select description, inbytes, (test_conv(inbytes, 'win1252', 'utf8')).* from win1252_inputs;
+       description        | inbytes  |    result    | errorat |                                            error                                             
+--------------------------+----------+--------------+---------+----------------------------------------------------------------------------------------------
+ valid, pure ASCII        | \x666f6f | \x666f6f     |         | 
+ valid                    | \x80e9   | \xe282acc3a9 |         | 
+ invalid, unassigned byte | \x81     | \x           | \x81    | character with byte sequence 0x81 in encoding "WIN1252" has no equivalent in encoding "UTF8"
+ invalid, unassigned byte | \x80e99d | \xe282acc3a9 | \x9d    | character with byte sequence 0x9d in encoding "WIN1252" has no equivalent in encoding "UTF8"
+ invalid, NUL byte        | \x00     | \x           | \x00    | invalid byte sequence for encoding "WIN1252": 0x00
+(5 rows)
+
+-- LATIN2 control characters that WIN1250 has no byte for
+select (test_conv('\x418142', 'latin2', 'win1250')).*;
+ result | errorat |                                             error                                              
+--------+---------+------------------------------------------------------------------------------------------------
+ \x41   | \x8142  | character with byte sequence 0x81 in encoding "LATIN2" has no equivalent in encoding "WIN1250"
+(1 row)
+
+--
 -- Big5
 --
 CREATE TABLE big5_inputs (inbytes bytea, description text);
