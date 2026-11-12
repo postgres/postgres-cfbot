@@ -40,6 +40,7 @@
 static PgStat_BackendPending PendingBackendStats;
 static bool backend_has_iostats = false;
 static bool backend_has_lockstats = false;
+static bool backend_has_aiostats = false;
 
 /*
  * WAL usage counters saved from pgWalUsage at the previous call to
@@ -117,6 +118,74 @@ pgstat_count_backend_lock_fastpath_exceeded(uint8 locktag_type)
 	PendingBackendStats.pending_lock.stats[locktag_type].fastpath_exceeded++;
 
 	backend_has_lockstats = true;
+	pgstat_report_fixed = true;
+}
+
+/*
+ * Utility routines to report AIO stats for backends, kept here to avoid
+ * exposing PendingBackendStats to the outside world.
+ */
+void
+pgstat_count_backend_aio_start(bool synchronous)
+{
+	if (!pgstat_tracks_backend_bktype(MyBackendType))
+		return;
+
+	PendingBackendStats.aio_counters.started++;
+	if (synchronous)
+		PendingBackendStats.aio_counters.executed_sync++;
+	else
+		PendingBackendStats.aio_counters.executed_async++;
+
+	backend_has_aiostats = true;
+	pgstat_report_fixed = true;
+}
+
+void
+pgstat_count_backend_aio_complete_self(void)
+{
+	if (!pgstat_tracks_backend_bktype(MyBackendType))
+		return;
+
+	PendingBackendStats.aio_counters.completed_self++;
+
+	backend_has_aiostats = true;
+	pgstat_report_fixed = true;
+}
+
+void
+pgstat_count_backend_aio_complete_other(void)
+{
+	if (!pgstat_tracks_backend_bktype(MyBackendType))
+		return;
+
+	PendingBackendStats.aio_counters.completed_other++;
+
+	backend_has_aiostats = true;
+	pgstat_report_fixed = true;
+}
+
+void
+pgstat_count_backend_aio_handle_wait(void)
+{
+	if (!pgstat_tracks_backend_bktype(MyBackendType))
+		return;
+
+	PendingBackendStats.aio_counters.handle_waits++;
+
+	backend_has_aiostats = true;
+	pgstat_report_fixed = true;
+}
+
+void
+pgstat_count_backend_aio_submitted(void)
+{
+	if (!pgstat_tracks_backend_bktype(MyBackendType))
+		return;
+
+	PendingBackendStats.aio_counters.submitted++;
+
+	backend_has_aiostats = true;
 	pgstat_report_fixed = true;
 }
 
@@ -327,6 +396,38 @@ pgstat_flush_backend_entry_lock(PgStat_EntryRef *entry_ref)
 }
 
 /*
+ * Flush out locally pending backend AIO statistics.  Locking is managed
+ * by the caller.
+ */
+static void
+pgstat_flush_backend_entry_aio(PgStat_EntryRef *entry_ref)
+{
+	PgStatShared_Backend *shbackendent;
+	PgStat_AioCounters *bktype_shstats;
+
+	if (!backend_has_aiostats)
+		return;
+
+	shbackendent = (PgStatShared_Backend *) entry_ref->shared_stats;
+	bktype_shstats = &shbackendent->stats.aio_counters;
+
+#define AIOSTAT_ACC(fld) \
+	(bktype_shstats->fld += PendingBackendStats.aio_counters.fld)
+	AIOSTAT_ACC(started);
+	AIOSTAT_ACC(executed_sync);
+	AIOSTAT_ACC(executed_async);
+	AIOSTAT_ACC(completed_self);
+	AIOSTAT_ACC(completed_other);
+	AIOSTAT_ACC(handle_waits);
+	AIOSTAT_ACC(submitted);
+#undef AIOSTAT_ACC
+
+	MemSet(&PendingBackendStats.aio_counters, 0, sizeof(PgStat_AioCounters));
+
+	backend_has_aiostats = false;
+}
+
+/*
  * Flush out locally pending backend statistics
  *
  * "flags" parameter controls which statistics to flush.  Returns true
@@ -354,6 +455,10 @@ pgstat_flush_backend(bool nowait, uint32 flags)
 	if ((flags & PGSTAT_BACKEND_FLUSH_LOCK) && backend_has_lockstats)
 		has_pending_data = true;
 
+	/* Some AIO data pending? */
+	if ((flags & PGSTAT_BACKEND_FLUSH_AIO) && backend_has_aiostats)
+		has_pending_data = true;
+
 	if (!has_pending_data)
 		return false;
 
@@ -371,6 +476,9 @@ pgstat_flush_backend(bool nowait, uint32 flags)
 
 	if (flags & PGSTAT_BACKEND_FLUSH_LOCK)
 		pgstat_flush_backend_entry_lock(entry_ref);
+
+	if (flags & PGSTAT_BACKEND_FLUSH_AIO)
+		pgstat_flush_backend_entry_aio(entry_ref);
 
 	pgstat_unlock_entry(entry_ref);
 
@@ -411,6 +519,7 @@ pgstat_create_backend(ProcNumber procnum)
 	MemSet(&PendingBackendStats, 0, sizeof(PgStat_BackendPending));
 	backend_has_iostats = false;
 	backend_has_lockstats = false;
+	backend_has_aiostats = false;
 
 	/*
 	 * Initialize prevBackendWalUsage with pgWalUsage so that
