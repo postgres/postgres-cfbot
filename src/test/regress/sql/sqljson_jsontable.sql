@@ -1107,6 +1107,19 @@ SELECT * FROM JSON_TABLE(jsonb '{}', '$' AS p0
 
 DROP VIEW json_table_view_on_empty;
 
+-- Test that JSON_TABLE with an explicit CROSS plan is correctly reproduced
+-- in a view definition.
+CREATE VIEW jt_plan_outer_cross AS
+SELECT * FROM JSON_TABLE(
+    jsonb 'null', '$' AS p
+    COLUMNS (NESTED PATH '$[*]' AS p1 COLUMNS (a int),
+             NESTED PATH '$[*]' AS p2 COLUMNS (b int),
+             NESTED PATH '$[*]' AS p3 COLUMNS (c int))
+    PLAN (p OUTER ((p1 UNION p2) CROSS p3))
+);
+\sv jt_plan_outer_cross
+DROP VIEW jt_plan_outer_cross;
+
 -- Collations must be assigned to expressions in the context item and in
 -- the PASSING arguments (bug #19768)
 SELECT * FROM JSON_TABLE(jsonb_build_object('k', ROW(1, 2) < ROW(3, 4)), '$'
