@@ -1380,11 +1380,16 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
  * transition_capture is the statement's transition capture state when routing
  * tuples to a partition, or NULL when inserting into the result relation
  * directly, because a foreign table can't have transition tables of its own.
- *
- * FIXME The transition_capture check also disables batching for OLD
- * TABLE-only UPDATE triggers. This disables batching anytime the transition
- * capture is active - a performance regression. Maybe that's too strict and
- * we should check if tcs_update_new_table is set?
+ * Don't batch if the routed tuples may have to be added to a NEW TABLE (when
+ * inserting, or when an UPDATE moves rows to another partition).  Transition
+ * tuples can't be collected from foreign partitions, so the per-row code
+ * (ExecARInsertTriggers() and ExecARUpdateTriggers()) raises an error, while
+ * batching would silently leave the tuples out of the NEW TABLE.  An OLD
+ * TABLE never contains routed tuples (the old version of a moved row is
+ * captured when it's deleted from the source partition), so it doesn't
+ * prevent batching.  MERGE sets up transition capture for all kinds of
+ * actions, so an UPDATE NEW TABLE disables batching even for tuples routed by
+ * an INSERT action.
  *
  * The FDW's GetForeignModifyBatchSize callback is called only if batching is
  * possible; otherwise the batch size is 1.
@@ -1406,7 +1411,9 @@ ExecInitInsertBatchSize(ResultRelInfo *resultRelInfo,
 		(trigdesc == NULL ||
 		 (!trigdesc->trig_insert_before_row &&
 		  !trigdesc->trig_insert_after_row)) &&
-		transition_capture == NULL)
+		(transition_capture == NULL ||
+		 (!transition_capture->tcs_insert_new_table &&
+		  !transition_capture->tcs_update_new_table)))
 	{
 		batch_size = fdwroutine->GetForeignModifyBatchSize(resultRelInfo);
 

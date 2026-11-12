@@ -675,10 +675,12 @@ ExecForeignBatchInsert(EState *estate,
      the statement has a <literal>RETURNING</literal> clause, there are
      <literal>WITH CHECK OPTION</literal> constraints to check, or the foreign
      table has <literal>BEFORE ROW</literal> or <literal>AFTER ROW</literal>
-     <command>INSERT</command> triggers.  Batching is also disabled when
-     transition-tuple capture is active for a parent table during tuple
-     routing.  Statement-level triggers without transition tables do not
-     prevent batching.
+     <command>INSERT</command> triggers.  Batching is also disabled for tuples
+     routed to a foreign-table partition when they may have to be captured in
+     a <literal>NEW TABLE</literal> transition relation of a parent table.
+     Statement-level triggers without transition tables, or with only
+     <literal>OLD TABLE</literal> transition relations, do not prevent
+     batching.
     </para>
 
     <para>
