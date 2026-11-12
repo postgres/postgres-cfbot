@@ -72,6 +72,7 @@ extern void EventTriggerSQLDropAddObject(const ObjectAddress *object,
 
 extern void EventTriggerInhibitCommandCollection(void);
 extern void EventTriggerUndoInhibitCommandCollection(void);
+extern bool EventTriggerCommandCollectionActive(void);
 extern const Node *EventTriggerGetParsetree(void);
 extern List *EventTriggerGetCollectedCommands(void);
 
@@ -83,6 +84,10 @@ extern void EventTriggerAlterTableStart(const Node *parsetree);
 extern void EventTriggerAlterTableRelid(Oid objectId);
 extern void EventTriggerCollectAlterTableSubcmd(const Node *subcmd,
 												ObjectAddress address);
+extern void EventTriggerCollectColumnDefault(Node *expr);
+extern void EventTriggerCollectAlterColumnTypeUsing(Oid relid,
+													const char *colName,
+													const char *usingText);
 extern void EventTriggerAlterTableEnd(void);
 
 extern void EventTriggerCollectGrant(InternalGrant *istmt);
