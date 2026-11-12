@@ -3219,6 +3219,21 @@ bt_report_dangling_index_entry(BtreeCheckState *state, ItemPointer tid,
 									targetblock, offset,
 									blkno, offnum)));
 
+	/*
+	 * Valid btree tuple should never point directly to a HOT tuple (HOT
+	 * should be only reached by chain).
+	 */
+	if (ItemIdIsNormal(lp) &&
+		HeapTupleHeaderIsHeapOnly((HeapTupleHeader) PageGetItem(page, lp)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index tuple in index \"%s\" points to heap-only tuple in table \"%s\"",
+						RelationGetRelationName(state->rel),
+						RelationGetRelationName(state->heaprel)),
+				 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u), which is not the root of a HOT chain.",
+									targetblock, offset,
+									blkno, offnum)));
+
 	/* LP_DEAD, LP_REDIRECT or a dead LP_NORMAL tuple: not corruption */
 	UnlockReleaseBuffer(buffer);
 }
