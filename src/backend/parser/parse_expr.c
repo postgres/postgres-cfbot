@@ -4931,19 +4931,37 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 			coerce_at_runtime = true;
 
 			/*
-			 * json_populate_type() expects to be passed a jsonb value, so gin
-			 * up a Const containing the appropriate boolean value represented
-			 * as jsonb, discarding the original Const containing a plain
-			 * boolean.
+			 * json_populate_type() expects to be passed a jsonb value, so a
+			 * boolean expression must be converted to jsonb first.
+			 *
+			 * For a user-supplied DEFAULT expression, do that by wrapping it
+			 * in a call to to_jsonb(), there being no cast from boolean to
+			 * jsonb, so that the result reflects whatever the expression
+			 * evaluates to, including NULL.
+			 *
+			 * Otherwise, the expression is the boolean Const made by
+			 * GetJsonBehaviorConst() for TRUE or FALSE, which is simply
+			 * replaced by a jsonb Const containing the same value.
 			 */
 			if (exprType(expr) == BOOLOID)
 			{
-				char	   *val = btype == JSON_BEHAVIOR_TRUE ? "true" : "false";
+				if (btype == JSON_BEHAVIOR_DEFAULT)
+					expr = (Node *) makeFuncExpr(F_TO_JSONB, JSONBOID,
+												 list_make1(expr),
+												 InvalidOid, InvalidOid,
+												 COERCE_EXPLICIT_CALL);
+				else
+				{
+					char	   *val;
 
-				expr = (Node *) makeConst(JSONBOID, -1, InvalidOid, -1,
-										  DirectFunctionCall1(jsonb_in,
-															  CStringGetDatum(val)),
-										  false, false);
+					Assert(btype == JSON_BEHAVIOR_TRUE ||
+						   btype == JSON_BEHAVIOR_FALSE);
+					val = (btype == JSON_BEHAVIOR_TRUE) ? "true" : "false";
+					expr = (Node *) makeConst(JSONBOID, -1, InvalidOid, -1,
+											  DirectFunctionCall1(jsonb_in,
+																  CStringGetDatum(val)),
+											  false, false);
+				}
 			}
 		}
 		else
