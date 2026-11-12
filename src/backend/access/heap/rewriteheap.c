@@ -108,6 +108,7 @@
 #include "access/heapam_xlog.h"
 #include "access/heaptoast.h"
 #include "access/rewriteheap.h"
+#include "access/toast_helper.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "access/xloginsert.h"
@@ -149,6 +150,7 @@ typedef struct RewriteStateData
 	XLogRecPtr	rs_begin_lsn;	/* XLogInsertLsn when starting the rewrite */
 	HTAB	   *rs_unresolved_tups; /* unmatched A tuples */
 	HTAB	   *rs_old_new_tid_map; /* unmatched B tuples */
+	double		rs_tuples_dropped;	/* # stashed tuples skipped, TOAST gone */
 	HTAB	   *rs_logical_mappings;	/* logical remapping files */
 	uint32		rs_num_rewrite_mappings;	/* # in memory mappings */
 } RewriteStateData;
@@ -172,6 +174,7 @@ typedef struct
 {
 	TidHashKey	key;			/* expected xmin/old location of B tuple */
 	ItemPointerData old_tid;	/* A's location in the old heap */
+	bool		recently_dead;	/* A was RECENTLY_DEAD */
 	HeapTuple	tuple;			/* A's tuple contents */
 } UnresolvedTupData;
 
@@ -211,7 +214,8 @@ typedef struct RewriteMappingDataEntry
 
 
 /* prototypes for internal functions */
-static void raw_heap_insert(RewriteState state, HeapTuple tup);
+static bool raw_heap_insert(RewriteState state, HeapTuple tup,
+							bool recently_dead);
 
 /* internal logical remapping prototypes */
 static void logical_begin_heap_rewrite(RewriteState state);
@@ -293,12 +297,16 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
  * End a rewrite.
  *
  * state and any other resources are freed.
+ *
+ * Returns the number of stashed tuples that were skipped because their TOAST
+ * data was gone; see rewrite_heap_tuple().
  */
-void
+double
 end_heap_rewrite(RewriteState state)
 {
 	HASH_SEQ_STATUS seq_status;
 	UnresolvedTup unresolved;
+	double		tuples_dropped;
 
 	/*
 	 * Write any remaining tuples in the UnresolvedTups table. If we have any
@@ -309,7 +317,8 @@ end_heap_rewrite(RewriteState state)
 	while ((unresolved = hash_seq_search(&seq_status)) != NULL)
 	{
 		ItemPointerSetInvalid(&unresolved->tuple->t_data->t_ctid);
-		raw_heap_insert(state, unresolved->tuple);
+		if (!raw_heap_insert(state, unresolved->tuple, unresolved->recently_dead))
+			state->rs_tuples_dropped += 1;
 	}
 
 	/* Write the last page, if any */
@@ -323,8 +332,12 @@ end_heap_rewrite(RewriteState state)
 
 	logical_end_heap_rewrite(state);
 
+	tuples_dropped = state->rs_tuples_dropped;
+
 	/* Deleting the context frees everything */
 	MemoryContextDelete(state->rs_cxt);
+
+	return tuples_dropped;
 }
 
 /*
@@ -337,10 +350,18 @@ end_heap_rewrite(RewriteState state)
  * state		opaque state as returned by begin_heap_rewrite
  * old_tuple	original tuple in the old heap
  * new_tuple	new, rewritten tuple to be inserted to new heap
+ * recently_dead	old_tuple is RECENTLY_DEAD
+ *
+ * The TOAST data of a RECENTLY_DEAD tuple may already have been removed; see
+ * raw_heap_insert().  Returns false if new_tuple was skipped for that reason,
+ * in which case the caller should count it as dead.  Skipped older versions
+ * of the same update chain, which were stashed earlier and get written out
+ * here or in end_heap_rewrite(), are counted in rs_tuples_dropped instead.
  */
-void
+bool
 rewrite_heap_tuple(RewriteState state,
-				   HeapTuple old_tuple, HeapTuple new_tuple)
+				   HeapTuple old_tuple, HeapTuple new_tuple,
+				   bool recently_dead)
 {
 	MemoryContext old_cxt;
 	ItemPointerData old_tid;
@@ -438,13 +459,14 @@ rewrite_heap_tuple(RewriteState state,
 
 			unresolved->old_tid = old_tuple->t_self;
 			unresolved->tuple = heap_copytuple(new_tuple);
+			unresolved->recently_dead = recently_dead;
 
 			/*
 			 * We can't do anything more now, since we don't know where the
 			 * tuple will be written.
 			 */
 			MemoryContextSwitchTo(old_cxt);
-			return;
+			return true;
 		}
 	}
 
@@ -462,7 +484,24 @@ rewrite_heap_tuple(RewriteState state,
 		ItemPointerData new_tid;
 
 		/* Insert the tuple and find out where it's put in new_heap */
-		raw_heap_insert(state, new_tuple);
+		if (!raw_heap_insert(state, new_tuple, recently_dead))
+		{
+			if (!free_new)
+			{
+				MemoryContextSwitchTo(old_cxt);
+				return false;
+			}
+
+			/*
+			 * This is a stashed older version, and the caller's tuple has
+			 * already been written.  Any still older version waiting for this
+			 * one is written out by end_heap_rewrite().
+			 */
+			state->rs_tuples_dropped += 1;
+			heap_freetuple(new_tuple);
+			MemoryContextSwitchTo(old_cxt);
+			return true;
+		}
 		new_tid = new_tuple->t_self;
 
 		logical_rewrite_heap_tuple(state, old_tid, new_tuple);
@@ -503,6 +542,7 @@ rewrite_heap_tuple(RewriteState state,
 				new_tuple = unresolved->tuple;
 				free_new = true;
 				old_tid = unresolved->old_tid;
+				recently_dead = unresolved->recently_dead;
 				new_tuple->t_data->t_ctid = new_tid;
 
 				/*
@@ -539,6 +579,7 @@ rewrite_heap_tuple(RewriteState state,
 	}
 
 	MemoryContextSwitchTo(old_cxt);
+	return true;
 }
 
 /*
@@ -599,9 +640,14 @@ rewrite_heap_dead_tuple(RewriteState state, HeapTuple old_tuple)
  * t_self of the tuple is set to the new TID of the tuple. If t_ctid of the
  * tuple is invalid on entry, it's replaced with the new TID as well (in
  * the inserted data only, not in the caller's copy).
+ *
+ * recently_dead must be set if the tuple is RECENTLY_DEAD.  Other backends
+ * may already consider such a tuple fully dead, and VACUUM or pruning of the
+ * TOAST relation may have removed its TOAST data.  In that case nobody can
+ * see the tuple anymore, so it is not inserted, and false is returned.
  */
-static void
-raw_heap_insert(RewriteState state, HeapTuple tup)
+static bool
+raw_heap_insert(RewriteState state, HeapTuple tup, bool recently_dead)
 {
 	Page		page;
 	Size		pageFreeSpace,
@@ -629,6 +675,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 	else if (HeapTupleHasExternal(tup) || tup->t_len > TOAST_TUPLE_THRESHOLD)
 	{
 		uint32		options = HEAP_INSERT_SKIP_FSM;
+		uint32		toastflags = recently_dead ? TOAST_MISSING_OK : 0;
 
 		/*
 		 * While rewriting the heap for REPACK, make sure data for the TOAST
@@ -638,7 +685,9 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 		options |= HEAP_INSERT_NO_LOGICAL;
 
 		heaptup = heap_toast_insert_or_update(state->rs_new_rel, tup, NULL,
-											  options);
+											  options, toastflags);
+		if (heaptup == NULL)
+			return false;
 	}
 	else
 		heaptup = tup;
@@ -712,6 +761,8 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 	/* If heaptup is a private copy, release it. */
 	if (heaptup != tup)
 		heap_freetuple(heaptup);
+
+	return true;
 }
 
 /* ------------------------------------------------------------------------

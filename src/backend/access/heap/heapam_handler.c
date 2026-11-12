@@ -19,6 +19,7 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
@@ -26,6 +27,7 @@
 #include "access/rewriteheap.h"
 #include "access/syncscan.h"
 #include "access/tableam.h"
+#include "access/toast_helper.h"
 #include "access/tsmapi.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
@@ -36,6 +38,7 @@
 #include "commands/progress.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
@@ -48,9 +51,14 @@
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
-static void reform_and_rewrite_tuple(HeapTuple tuple,
+static bool reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
-									 Datum *values, bool *isnull, RewriteState rwstate);
+									 Datum *values, bool *isnull, RewriteState rwstate,
+									 bool recently_dead);
+static HeapTuple heap_inline_recently_dead_toast(HeapTuple tuple,
+												 TupleDesc tupdesc,
+												 const Bitmapset *attrs,
+												 Datum *values, bool *isnull);
 static void heap_insert_for_repack(HeapTuple tuple, Relation OldHeap,
 								   Relation NewHeap, Datum *values, bool *isnull,
 								   BulkInsertState bistate);
@@ -703,6 +711,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		HeapTuple	tuple;
 		Buffer		buf;
 		bool		isdead;
+		bool		recently_dead = false;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -789,6 +798,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					break;
 				case HEAPTUPLE_RECENTLY_DEAD:
 					*tups_recently_dead += 1;
+					recently_dead = true;
 					pg_fallthrough;
 				case HEAPTUPLE_LIVE:
 					/* Live or recently dead, must copy it */
@@ -822,6 +832,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 							 RelationGetRelationName(OldHeap));
 					/* treat as recently dead */
 					*tups_recently_dead += 1;
+					recently_dead = true;
 					isdead = false;
 					break;
 				default:
@@ -850,7 +861,30 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		*num_tuples += 1;
 		if (tuplesort != NULL)
 		{
-			tuplesort_putheaptuple(tuplesort, tuple);
+			HeapTuple	sorttup = tuple;
+
+			/*
+			 * The tuples are written out only after the sort, by which time
+			 * the TOAST data of a recently-dead tuple may be gone, so fetch
+			 * it now.  If it is already gone, the tuple is dead to everyone
+			 * who could still read it, so skip it.
+			 */
+			if (recently_dead && HeapTupleHasExternal(tuple))
+			{
+				sorttup = heap_inline_recently_dead_toast(tuple, oldTupDesc,
+														  NULL, values, isnull);
+				if (sorttup == NULL)
+				{
+					*tups_vacuumed += 1;
+					*num_tuples -= 1;
+					*tups_recently_dead -= 1;
+					continue;
+				}
+			}
+
+			tuplesort_putheaptuple(tuplesort, sorttup);
+			if (sorttup != tuple)
+				heap_freetuple(sorttup);
 
 			/*
 			 * In scan-and-sort mode, report increase in number of tuples
@@ -868,8 +902,19 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			int64		ct_val[2];
 
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
-										 values, isnull, rwstate);
+			{
+				if (!reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
+											  values, isnull, rwstate,
+											  recently_dead))
+				{
+					/* TOAST data of a recently-dead tuple is gone */
+					Assert(recently_dead);
+					*tups_vacuumed += 1;
+					*num_tuples -= 1;
+					*tups_recently_dead -= 1;
+					continue;
+				}
+			}
 			else
 				heap_insert_for_repack(tuple, OldHeap, NewHeap,
 									   values, isnull, bistate);
@@ -920,11 +965,12 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				break;
 
 			n_tuples += 1;
+			/* TOAST data of recently-dead tuples was inlined before the sort */
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple,
-										 OldHeap, NewHeap,
-										 values, isnull,
-										 rwstate);
+				(void) reform_and_rewrite_tuple(tuple,
+												OldHeap, NewHeap,
+												values, isnull,
+												rwstate, false);
 			else
 				heap_insert_for_repack(tuple, OldHeap, NewHeap,
 									   values, isnull, bistate);
@@ -939,7 +985,14 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	/* Write out any remaining tuples, and fsync if needed */
 	if (rwstate)
-		end_heap_rewrite(rwstate);
+	{
+		double		tuples_dropped = end_heap_rewrite(rwstate);
+
+		/* Stashed tuples with missing TOAST were scanned as recently dead. */
+		*tups_vacuumed += tuples_dropped;
+		*num_tuples -= tuples_dropped;
+		*tups_recently_dead -= tuples_dropped;
+	}
 	if (bistate)
 		FreeBulkInsertState(bistate);
 
@@ -1156,6 +1209,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 	BlockNumber previous_blkno = InvalidBlockNumber;
 	BlockNumber root_blkno = InvalidBlockNumber;
 	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
+	Bitmapset  *detoast_index_attrs = NULL;
+	Datum	   *inline_values = NULL;
+	bool	   *inline_isnull = NULL;
 
 	/*
 	 * sanity checks
@@ -1251,6 +1307,50 @@ heapam_index_build_range_scan(Relation heapRelation,
 	Assert(snapshot == SnapshotAny ? TransactionIdIsValid(OldestXmin) :
 		   !TransactionIdIsValid(OldestXmin));
 	Assert(snapshot == SnapshotAny || !anyvisible);
+
+	/*
+	 * Collect the varlena columns that the index columns, expressions and
+	 * predicate reference, so that their TOAST data can be fetched for
+	 * RECENTLY_DEAD tuples; see below.  A whole-row reference needs all of
+	 * them.  The set contains plain attribute numbers.
+	 */
+	{
+		TupleDesc	desc = RelationGetDescr(heapRelation);
+		Bitmapset  *refattrs = NULL;
+		bool		wholerow;
+
+		for (int i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+		{
+			AttrNumber	attnum = indexInfo->ii_IndexAttrNumbers[i];
+
+			if (attnum != 0)
+				refattrs = bms_add_member(refattrs,
+										  attnum - FirstLowInvalidHeapAttributeNumber);
+		}
+		pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &refattrs);
+		pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &refattrs);
+
+		wholerow = bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber,
+								 refattrs);
+
+		for (AttrNumber attnum = 1; attnum <= desc->natts; attnum++)
+		{
+			if (TupleDescCompactAttr(desc, attnum - 1)->attlen != -1)
+				continue;
+			if (wholerow ||
+				bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
+							  refattrs))
+				detoast_index_attrs = bms_add_member(detoast_index_attrs,
+													 attnum);
+		}
+		bms_free(refattrs);
+
+		if (detoast_index_attrs != NULL)
+		{
+			inline_values = palloc_array(Datum, desc->natts);
+			inline_isnull = palloc_array(bool, desc->natts);
+		}
+	}
 
 	/* Publish number of blocks to scan */
 	if (progress)
@@ -1591,6 +1691,29 @@ heapam_index_build_range_scan(Relation heapRelation,
 		ExecStoreBufferHeapTuple(heapTuple, slot, hscan->rs_cbuf);
 
 		/*
+		 * The TOAST data of a RECENTLY_DEAD tuple can be removed while we
+		 * look at it; see heap_inline_recently_dead_toast().  Fetch what the
+		 * index needs up front, and skip the tuple if it is already gone.
+		 */
+		if (!tupleIsAlive && detoast_index_attrs != NULL &&
+			HeapTupleHasExternal(heapTuple))
+		{
+			HeapTuple	inlined;
+
+			inlined = heap_inline_recently_dead_toast(heapTuple,
+													  RelationGetDescr(heapRelation),
+													  detoast_index_attrs,
+													  inline_values, inline_isnull);
+			if (inlined == NULL)
+				continue;
+			if (inlined != heapTuple)
+			{
+				ExecForceStoreHeapTuple(inlined, slot, true);
+				slot->tts_tableOid = RelationGetRelid(heapRelation);
+			}
+		}
+
+		/*
 		 * In a partial index, discard tuples that don't satisfy the
 		 * predicate.
 		 */
@@ -1697,6 +1820,12 @@ heapam_index_build_range_scan(Relation heapRelation,
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+
+	bms_free(detoast_index_attrs);
+	if (inline_values)
+		pfree(inline_values);
+	if (inline_isnull)
+		pfree(inline_isnull);
 
 	return reltuples;
 }
@@ -2338,20 +2467,105 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
  * SET WITHOUT OIDS.
  *
  * So, we must reconstruct the tuple from component Datums.
+ *
+ * recently_dead must be set if the tuple is RECENTLY_DEAD.  Returns false if
+ * the tuple was skipped because its TOAST data is gone; see
+ * rewrite_heap_tuple().
  */
-static void
+static bool
 reform_and_rewrite_tuple(HeapTuple tuple,
 						 Relation OldHeap, Relation NewHeap,
-						 Datum *values, bool *isnull, RewriteState rwstate)
+						 Datum *values, bool *isnull, RewriteState rwstate,
+						 bool recently_dead)
 {
 	HeapTuple	newtuple;
+	bool		written;
 
 	newtuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
 
 	/* The heap rewrite module does the rest */
-	rewrite_heap_tuple(rwstate, tuple, newtuple);
+	written = rewrite_heap_tuple(rwstate, tuple, newtuple, recently_dead);
 
 	heap_freetuple(newtuple);
+	return written;
+}
+
+/*
+ * Fetch the out-of-line TOAST values of a RECENTLY_DEAD tuple, and return a
+ * copy of the tuple with those values stored inline, keeping the original
+ * tuple's identity and visibility information.
+ *
+ * Other backends may already consider a RECENTLY_DEAD tuple fully dead, so
+ * its TOAST data can be removed by VACUUM or pruning of the TOAST relation at
+ * any time.  If any value is already gone, return NULL: nobody can see the
+ * tuple anymore, and the caller should treat it as dead.
+ *
+ * attrs is the set of attribute numbers to fetch, or NULL for all of them.
+ * Returns the tuple itself if there is nothing to fetch.  values and isnull
+ * are caller-provided workspace of tupdesc->natts entries.
+ */
+static HeapTuple
+heap_inline_recently_dead_toast(HeapTuple tuple, TupleDesc tupdesc,
+								const Bitmapset *attrs,
+								Datum *values, bool *isnull)
+{
+	Bitmapset  *fetched = NULL;
+	HeapTuple	result = NULL;
+	int			i;
+
+	heap_deform_tuple(tuple, tupdesc, values, isnull);
+
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		CompactAttribute *att = TupleDescCompactAttr(tupdesc, i);
+		varlena    *value;
+
+		if (att->attlen != -1 || isnull[i])
+			continue;
+		if (attrs != NULL && !bms_is_member(i + 1, attrs))
+			continue;
+
+		/* reform_tuple() throws away dropped columns anyway */
+		if (att->attisdropped)
+		{
+			isnull[i] = true;
+			continue;
+		}
+
+		value = (varlena *) DatumGetPointer(values[i]);
+		if (!VARATT_IS_EXTERNAL_ONDISK(value))
+			continue;
+
+		value = detoast_external_attr_extended(value);
+		if (value == NULL)
+			goto cleanup;
+
+		values[i] = PointerGetDatum(value);
+		fetched = bms_add_member(fetched, i);
+	}
+
+	if (fetched == NULL)
+		return tuple;
+
+	result = heap_form_tuple(tupdesc, values, isnull);
+
+	result->t_data->t_choice = tuple->t_data->t_choice;
+	result->t_data->t_ctid = tuple->t_data->t_ctid;
+	result->t_data->t_infomask2 &= ~HEAP2_XACT_MASK;
+	result->t_data->t_infomask2 |=
+		tuple->t_data->t_infomask2 & HEAP2_XACT_MASK;
+	result->t_data->t_infomask &= ~HEAP_XACT_MASK;
+	result->t_data->t_infomask |= tuple->t_data->t_infomask & HEAP_XACT_MASK;
+	result->t_self = tuple->t_self;
+	result->t_tableOid = tuple->t_tableOid;
+
+cleanup:
+	i = -1;
+	while ((i = bms_next_member(fetched, i)) >= 0)
+		pfree(DatumGetPointer(values[i]));
+	bms_free(fetched);
+
+	return result;
 }
 
 /*

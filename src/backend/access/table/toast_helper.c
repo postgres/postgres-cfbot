@@ -36,9 +36,12 @@
  * toast_flags is just a single uint8, but toast_attr is a caller-provided
  * array with a length equal to tupleDesc->natts.  The caller need not
  * perform any initialization of the array before calling this function.
+ *
+ * If flags includes TOAST_MISSING_OK and an external value of the new tuple
+ * cannot be fetched, returns false instead of raising an error.
  */
-void
-toast_tuple_init(ToastTupleContext *ttc)
+bool
+toast_tuple_init(ToastTupleContext *ttc, uint32 flags)
 {
 	TupleDesc	tupleDesc = ttc->ttc_rel->rd_att;
 	int			numAttrs = tupleDesc->natts;
@@ -141,7 +144,25 @@ toast_tuple_init(ToastTupleContext *ttc)
 			if (VARATT_IS_EXTERNAL(new_value))
 			{
 				ttc->ttc_attr[i].tai_oldexternal = new_value;
-				if (att->attstorage == TYPSTORAGE_PLAIN)
+
+				if ((flags & TOAST_MISSING_OK) != 0 &&
+					VARATT_IS_EXTERNAL_ONDISK(new_value))
+				{
+					new_value = detoast_external_attr_extended(new_value);
+					if (new_value == NULL)
+						goto toast_missing;
+
+					/* PLAIN storage does not allow compressed values */
+					if (att->attstorage == TYPSTORAGE_PLAIN &&
+						VARATT_IS_COMPRESSED(new_value))
+					{
+						varlena    *decompressed = detoast_attr(new_value);
+
+						pfree(new_value);
+						new_value = decompressed;
+					}
+				}
+				else if (att->attstorage == TYPSTORAGE_PLAIN)
 					new_value = detoast_attr(new_value);
 				else
 					new_value = detoast_external_attr(new_value);
@@ -163,6 +184,20 @@ toast_tuple_init(ToastTupleContext *ttc)
 			ttc->ttc_attr[i].tai_colflags |= TOASTCOL_IGNORE;
 		}
 	}
+
+	return true;
+
+toast_missing:
+	/* release the values fetched so far */
+	for (; i >= 0; i--)
+	{
+		if (ttc->ttc_attr[i].tai_colflags & TOASTCOL_NEEDS_FREE)
+		{
+			pfree(DatumGetPointer(ttc->ttc_values[i]));
+			ttc->ttc_attr[i].tai_colflags &= ~TOASTCOL_NEEDS_FREE;
+		}
+	}
+	return false;
 }
 
 /*

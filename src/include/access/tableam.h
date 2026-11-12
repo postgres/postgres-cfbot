@@ -782,12 +782,17 @@ typedef struct TableAmRoutine
 	 * This callback is invoked when detoasting a value stored in a toast
 	 * table implemented by this AM.  See table_relation_fetch_toast_slice()
 	 * for more details.
+	 *
+	 * Returns true on success.  If flags (see toast_helper.h) includes
+	 * TOAST_MISSING_OK, returns false instead of raising an error when chunks
+	 * are missing.
 	 */
-	void		(*relation_fetch_toast_slice) (Relation toastrel, Oid8 valueid,
+	bool		(*relation_fetch_toast_slice) (Relation toastrel, Oid8 valueid,
 											   int32 attrsize,
 											   int32 sliceoffset,
 											   int32 slicelength,
-											   varlena *result);
+											   varlena *result,
+											   uint32 flags);
 
 
 	/* ------------------------------------------------------------------------
@@ -2003,11 +2008,16 @@ table_relation_toast_am(Relation rel)
  *
  * result is caller-allocated space into which the fetched bytes should be
  * stored.
+ *
+ * flags are TOAST fetch flags, see toast_helper.h.  Returns true on success.
+ * If flags includes TOAST_MISSING_OK, returns false instead of raising an
+ * error when chunks are missing.
  */
-static inline void
+static inline bool
 table_relation_fetch_toast_slice(Relation toastrel, Oid8 valueid,
 								 int32 attrsize, int32 sliceoffset,
-								 int32 slicelength, varlena *result)
+								 int32 slicelength, varlena *result,
+								 uint32 flags)
 {
 	if (attrsize < 0 || sliceoffset < 0 || slicelength < 0)
 		elog(ERROR, "invalid toast slice: offset %d, length %d, value size %d",
@@ -2015,10 +2025,10 @@ table_relation_fetch_toast_slice(Relation toastrel, Oid8 valueid,
 	if (slicelength > attrsize - sliceoffset)
 		elog(ERROR, "slice length is too big");
 
-	toastrel->rd_tableam->relation_fetch_toast_slice(toastrel, valueid,
-													 attrsize,
-													 sliceoffset, slicelength,
-													 result);
+	return toastrel->rd_tableam->relation_fetch_toast_slice(toastrel, valueid,
+															attrsize,
+															sliceoffset, slicelength,
+															result, flags);
 }
 
 
