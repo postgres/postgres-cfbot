@@ -47,7 +47,7 @@ enum
 #define PG_CND_INIT_IMPL			PTHREAD_COND_INITIALIZER
 #define PG_MTX_PLAIN_INIT_IMPL		PTHREAD_MUTEX_INITIALIZER
 #endif
-#define PG_RWLOCK_INIT_IMPL			PTHREAD_RWLOCK_INITIALIZER
+#define PG_RWLOCK_PLAIN_INIT_IMPL	PTHREAD_RWLOCK_INITIALIZER
 
 /* pg_rwlock_t */
 PG_THREADS_FORWARD_VOID(pg_rwlock_destroy, pthread_rwlock_destroy, pg_rwlock_impl *);
@@ -75,7 +75,19 @@ pg_thrd_barrier_init(pg_thrd_barrier_impl *barrier, int count)
 	return pg_thrd_map(pthread_barrier_init(barrier, NULL, count));
 }
 
-PG_THREADS_MAP(pg_thrd_barrier_wait, pthread_barrier_wait, pg_thrd_barrier_impl *);
+/*
+ * One waiter gets PTHREAD_BARRIER_SERIAL_THREAD instead of zero.  We don't
+ * expose that distinction, so treat it as success.
+ */
+static inline int
+pg_thrd_barrier_wait(pg_thrd_barrier_impl *barrier)
+{
+	int			result = pthread_barrier_wait(barrier);
+
+	if (result == PTHREAD_BARRIER_SERIAL_THREAD)
+		return pg_thrd_success_impl;
+	return pg_thrd_map(result);
+}
 #endif
 
 #ifndef PG_THREADS_USE_THREADS_H

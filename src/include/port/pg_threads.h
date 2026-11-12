@@ -95,13 +95,13 @@ enum
 enum
 {
 	pg_mtx_plain = pg_mtx_plain_impl,
-	pg_mtx_recursive = pg_mtx_plain_impl,
+	pg_mtx_recursive = pg_mtx_recursive_impl,
 	pg_mtx_timed = pg_mtx_timed_impl,
 };
 
 /* standard macros with prefix */
 #define PG_ONCE_FLAG_INIT		PG_ONCE_FLAG_INIT_IMPL
-#define PG_TSS_DTOR_ITERATIONS	PG_TSS_DTOR_ITERARATIONS_IMPL
+#define PG_TSS_DTOR_ITERATIONS	PG_TSS_DTOR_ITERATIONS_IMPL
 
 /* standard cnd_t functions with prefix */
 static inline int pg_cnd_broadcast(pg_cnd_t *cnd);

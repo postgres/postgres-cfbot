@@ -56,7 +56,7 @@ enum
 /* static initializer macros */
 #define PG_CND_INIT				PG_CND_INIT_IMPL
 #define PG_MTX_PLAIN_INIT		PG_MTX_PLAIN_INIT_IMPL
-#define PG_RWLOCK_PLAIN_INIT	PG_RWLOCK_INIT_IMPL
+#define PG_RWLOCK_PLAIN_INIT	PG_RWLOCK_PLAIN_INIT_IMPL
 
 /* pg_rwlock_t functions */
 static inline int pg_rwlock_init(pg_rwlock_t *lock, int type);

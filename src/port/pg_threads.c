@@ -41,7 +41,7 @@
 static int	pg_thrd_format_error(const char *format, ...) pg_attribute_printf(1, 2);
 
 #ifdef PG_THREADS_HAVE_DETAILED_ERRORS
-static thread_local char pg_thrd_last_error_detail[64];
+static thread_local char pg_thrd_last_error_detail[128];
 #endif
 
 /* Convert the standard errors to fixed strings. */
@@ -110,6 +110,7 @@ pg_thrd_format_error(const char *format, ...)
 	va_start(args, format);
 	vsnprintf(pg_thrd_last_error_detail, sizeof(pg_thrd_last_error_detail),
 			  format, args);
+	va_end(args);
 #endif
 
 	return pg_thrd_error;
@@ -169,8 +170,14 @@ pg_thrd_map_pthread_error(int pthread_error)
 		case ETIMEDOUT:
 			return pg_thrd_timedout;
 		default:
-			return pg_thrd_format_error("pthread error: %s",
-										strerror(pthread_error));
+			{
+				char		buffer[PG_STRERROR_R_BUFLEN];
+
+				return pg_thrd_format_error("pthread error: %s",
+											strerror_r(pthread_error,
+													   buffer,
+													   sizeof(buffer)));
+			}
 	}
 }
 #endif
