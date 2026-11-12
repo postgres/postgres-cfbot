@@ -838,7 +838,7 @@ SELECT s.x + 0 FROM prt1 t0 LEFT JOIN
 ----------------------------------------------------------------------
  Nested Loop
    ->  Merge Append
-         Sort Key: ((COALESCE(t2.a, t1.b) + 0))
+         Sort Key: t1.a
          ->  Merge Join
                Merge Cond: (t1_1.a = t2_1.b)
                Join Filter: (t1_1.a = (COALESCE(t2_1.a, t1_1.b) + 0))
