@@ -5894,16 +5894,32 @@ get_with_clause(Query *query, deparse_context *context)
 			appendStringInfo(buf, " SET %s", quote_identifier(cte->cycle_clause->cycle_mark_column));
 
 			{
-				Const	   *cmv = castNode(Const, cte->cycle_clause->cycle_mark_value);
-				Const	   *cmd = castNode(Const, cte->cycle_clause->cycle_mark_default);
+				Node	   *cmv = cte->cycle_clause->cycle_mark_value;
+				Node	   *cmd = cte->cycle_clause->cycle_mark_default;
+				bool		default_mark = false;
 
-				if (!(cmv->consttype == BOOLOID && !cmv->constisnull && DatumGetBool(cmv->constvalue) == true &&
-					  cmd->consttype == BOOLOID && !cmd->constisnull && DatumGetBool(cmd->constvalue) == false))
+				/*
+				 * Marks need not be bare Consts (e.g., domain or typmod
+				 * coercions).
+				 */
+				if (IsA(cmv, Const) && IsA(cmd, Const))
+				{
+					Const	   *mark = (Const *) cmv;
+					Const	   *def = (Const *) cmd;
+
+					default_mark =
+						mark->consttype == BOOLOID && !mark->constisnull &&
+						DatumGetBool(mark->constvalue) == true &&
+						def->consttype == BOOLOID && !def->constisnull &&
+						DatumGetBool(def->constvalue) == false;
+				}
+
+				if (!default_mark)
 				{
 					appendStringInfoString(buf, " TO ");
-					get_rule_expr(cte->cycle_clause->cycle_mark_value, context, false);
+					get_rule_expr(cmv, context, false);
 					appendStringInfoString(buf, " DEFAULT ");
-					get_rule_expr(cte->cycle_clause->cycle_mark_default, context, false);
+					get_rule_expr(cmd, context, false);
 				}
 			}
 

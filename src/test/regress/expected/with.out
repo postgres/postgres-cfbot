@@ -1777,6 +1777,141 @@ select * from v_cycle2;
  2 | 3 | arc 2 -> 3
 (25 rows)
 
+-- Domain marks need not be bare Consts when deparsing a view.
+create domain cycle_mark_domain as varchar(3);
+create temp view v_cycle_domain as
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to cycle_mark_domain 'Y' default cycle_mark_domain 'N' using p
+select n, c from s;
+select pg_get_viewdef('v_cycle_domain');
+                                                           pg_get_viewdef                                                           
+------------------------------------------------------------------------------------------------------------------------------------
+  WITH RECURSIVE s(n) AS (                                                                                                         +
+          VALUES (1)                                                                                                               +
+         UNION ALL                                                                                                                 +
+          SELECT (3 - s_1.n)                                                                                                       +
+            FROM s s_1                                                                                                             +
+         ) CYCLE n SET c TO ('Y'::character varying)::cycle_mark_domain DEFAULT ('N'::character varying)::cycle_mark_domain USING p+
+  SELECT n,                                                                                                                        +
+     c                                                                                                                             +
+    FROM s;
+(1 row)
+
+-- Check that representative mark types and values survive view recreation.
+do $test$
+declare
+  marks text;
+  pretty boolean;
+begin
+  foreach marks in array array[
+    $$'Y' default 'N'$$,
+    $$('Y')::text default ('N')::text$$,
+    $$CAST('YES' AS varchar(3)) default CAST('NO' AS varchar(3))$$,
+    $$'{YES}'::varchar(3)[] default '{NO}'::varchar(3)[]$$,
+    $$cycle_mark_domain 'YES' default cycle_mark_domain 'NO'$$,
+    $$integer '1' default numeric '0'$$,
+    $$NULL::cycle_mark_domain default 'NO'::cycle_mark_domain$$,
+    $$('-1'::integer) default ('0'::integer)$$,
+    $$interval '1.234' second(2) default interval '0' second(2)$$,
+    $$true default false$$
+  ] loop
+    execute 'create temp view cycle_mark_original as '
+      'with recursive s(n) as (values (1) union all select 3 - n from s) '
+      'cycle n set c to ' || marks || ' using p select n, c from s';
+    foreach pretty in array array[false, true] loop
+      execute 'create temp view cycle_mark_copy as ' ||
+        pg_get_viewdef('cycle_mark_original'::regclass, pretty);
+      if exists (
+        select from pg_attribute a join pg_attribute b using (attnum)
+        where a.attrelid = 'cycle_mark_original'::regclass
+          and b.attrelid = 'cycle_mark_copy'::regclass and a.attnum > 0
+          and (a.atttypid, a.atttypmod, a.attcollation) is distinct from
+              (b.atttypid, b.atttypmod, b.attcollation)
+      ) or exists (
+        (table cycle_mark_original except all table cycle_mark_copy)
+        union all
+        (table cycle_mark_copy except all table cycle_mark_original)
+      ) then
+        raise exception 'CYCLE mark types or values changed: %', marks;
+      end if;
+      drop view cycle_mark_copy;
+    end loop;
+    drop view cycle_mark_original;
+  end loop;
+end
+$test$;
+drop view v_cycle_domain;
+drop domain cycle_mark_domain;
+-- Casts and parentheses must not admit general expressions in either mark.
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to (1 + 1) default 0 using p select n from s limit 0;
+ERROR:  syntax error at or near "+"
+LINE 2: cycle n set c to (1 + 1) default 0 using p select n from s l...
+                            ^
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to 'Y' default lower('N') using p select n from s limit 0;
+ERROR:  syntax error at or near "using"
+LINE 2: cycle n set c to 'Y' default lower('N') using p select n fro...
+                                                ^
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to CAST((select 'Y') AS text) default 'N' using p
+select n from s limit 0;
+ERROR:  syntax error at or near "select"
+LINE 2: cycle n set c to CAST((select 'Y') AS text) default 'N' usin...
+                               ^
+-- Casts in cycle marks must not change value between evaluations.
+create sequence cycle_mark_seq;
+create type cycle_mark_type as (x int);
+create function cycle_mark_cast(int) returns cycle_mark_type
+language sql volatile as
+$$select row(nextval('cycle_mark_seq')::int)::cycle_mark_type$$;
+create cast (int as cycle_mark_type) with function cycle_mark_cast(int);
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to cycle_mark_type '(1)' default cycle_mark_type '(0)' using p
+select n, c from s;
+ n |  c  
+---+-----
+ 1 | (0)
+ 2 | (0)
+ 1 | (1)
+(3 rows)
+
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to 1::cycle_mark_type default cycle_mark_type '(0)' using p
+select n from s limit 0;
+ERROR:  CYCLE mark value must not contain volatile functions
+LINE 2: cycle n set c to 1::cycle_mark_type default cycle_mark_type ...
+                         ^
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to cycle_mark_type '(1)' default 0::cycle_mark_type using p
+select n from s limit 0;
+ERROR:  CYCLE mark default must not contain volatile functions
+LINE 2: cycle n set c to cycle_mark_type '(1)' default 0::cycle_mark...
+                                                       ^
+-- Common-type coercion can also introduce a volatile cast.
+create type cycle_mark_input as (x int);
+create function cycle_mark_cast(cycle_mark_input) returns cycle_mark_type
+language sql volatile as
+$$select row(nextval('cycle_mark_seq')::int)::cycle_mark_type$$;
+create cast (cycle_mark_input as cycle_mark_type)
+with function cycle_mark_cast(cycle_mark_input) as implicit;
+with recursive s(n) as (values (1) union all select 3 - n from s)
+cycle n set c to cycle_mark_input '(1)' default cycle_mark_type '(0)' using p
+select n from s limit 0;
+ERROR:  CYCLE mark value must not contain volatile functions
+LINE 2: cycle n set c to cycle_mark_input '(1)' default cycle_mark_t...
+                                          ^
+select is_called from cycle_mark_seq;
+ is_called 
+-----------
+ f
+(1 row)
+
+drop cast (int as cycle_mark_type);
+drop cast (cycle_mark_input as cycle_mark_type);
+drop function cycle_mark_cast(int), cycle_mark_cast(cycle_mark_input);
+drop type cycle_mark_input, cycle_mark_type;
+drop sequence cycle_mark_seq;
 --
 -- test multiple WITH queries
 --
