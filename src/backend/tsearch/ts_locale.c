@@ -26,27 +26,27 @@ static void tsearch_readline_callback(void *arg);
 #define GENERATE_T_ISCLASS_DEF(character_class) \
 /* mblen shall be that of the first character */ \
 int \
-t_is##character_class##_with_len(const char *ptr, int mblen) \
+t_is##character_class##_with_len_collation(const char *ptr, int mblen, Oid collation) \
 { \
 	pg_wchar	wstr[WC_BUF_LEN]; \
 	int			wlen pg_attribute_unused(); \
 	wlen = pg_mb2wchar_with_len(ptr, wstr, mblen); \
 	Assert(wlen <= 1); \
 	/* pass single character, or NUL if empty */ \
-	return pg_isw##character_class(wstr[0], pg_database_locale()); \
+	return pg_isw##character_class(wstr[0], pg_newlocale_from_collation(collation)); \
 } \
 \
 /* ptr shall point to a NUL-terminated string */ \
 int \
 t_is##character_class##_cstr(const char *ptr) \
 { \
-	return t_is##character_class##_with_len(ptr, pg_mblen_cstr(ptr)); \
+	return t_is##character_class##_with_len_collation(ptr, pg_mblen_cstr(ptr), DEFAULT_COLLATION_OID); \
 } \
 /* ptr shall point to a string with pre-validated encoding */ \
 int \
 t_is##character_class##_unbounded(const char *ptr) \
 { \
-	return t_is##character_class##_with_len(ptr, pg_mblen_unbounded(ptr)); \
+	return t_is##character_class##_with_len_collation(ptr, pg_mblen_unbounded(ptr), DEFAULT_COLLATION_OID); \
 } \
 /* historical name for _unbounded */ \
 int \
