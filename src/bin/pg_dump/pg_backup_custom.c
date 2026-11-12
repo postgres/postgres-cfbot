@@ -784,9 +784,8 @@ _CloseArchive(ArchiveHandle *AH)
 /*
  * Reopen the archive's file handle.
  *
- * We close the original file handle, except on Windows.  (The difference
- * is because on Windows, this is used within a multithreading context,
- * and we don't want a thread closing the parent file handle.)
+ * We don't close the original file handle, because parallel workers are
+ * threads whose cloned ArchiveHandles share it with the leader.
  */
 static void
 _ReopenArchive(ArchiveHandle *AH)
@@ -809,11 +808,6 @@ _ReopenArchive(ArchiveHandle *AH)
 	tpos = ftello(AH->FH);
 	if (tpos < 0)
 		pg_fatal("could not determine seek position in archive file: %m");
-
-#ifndef WIN32
-	if (fclose(AH->FH) != 0)
-		pg_fatal("could not close archive file: %m");
-#endif
 
 	AH->FH = fopen(AH->fSpec, PG_BINARY_R);
 	if (!AH->FH)
