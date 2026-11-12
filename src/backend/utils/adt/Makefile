@@ -61,6 +61,7 @@ OBJS = \
 	jsonpath_gram.o \
 	jsonpath_scan.o \
 	like.o \
+	like_bmh.o \
 	like_support.o \
 	lockfuncs.o \
 	mac.o \
