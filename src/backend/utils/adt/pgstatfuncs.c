@@ -1984,7 +1984,7 @@ CppConcat(pg_stat_get_xact_idx_,stat)(PG_FUNCTION_ARGS) \
 	if (!tabentry)										\
 		result = 0;										\
 	else												\
-		result = (int64) (tabentry->idx.stat);		\
+		result = (int64) (tabentry->idx.counts.stat);	\
 														\
 	PG_RETURN_INT64(result);							\
 }
@@ -2058,7 +2058,10 @@ pg_stat_clear_snapshot(PG_FUNCTION_ARGS)
 }
 
 
-/* Force statistics to be reported at the next occasion */
+/*
+ * Force statistics to be reported.  When called in a transaction this flushes
+ * immediately; otherwise the flush happens at the next occasion.
+ */
 Datum
 pg_stat_force_next_flush(PG_FUNCTION_ARGS)
 {
