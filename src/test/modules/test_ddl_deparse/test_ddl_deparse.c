@@ -282,16 +282,11 @@ execute_deparsed_command(const char *sql,
 }
 
 /*
- * Is it legitimate for this statement to have collected nothing?
- *
- * A command that names a missing object under IF EXISTS, or an existing one
- * under IF NOT EXISTS, does nothing, so nothing is collected and the deparser
- * has nothing to produce.  Any other empty result is a deparser bug, and is
- * reported as one by the caller.
- *
- * Every statement type ddl_deparse_command_supported() accepts is listed
- * here, as in report_declined_command(): the guard field sits in a different
- * place in each node, and a type that has no such clause must not be excused.
+ * Is it legitimate for this statement to have deparsed to nothing?  Only if IF
+ * [NOT] EXISTS found nothing to do, for the statement or, for ALTER TABLE, for
+ * every subcommand.  Every statement type ddl_deparse_command_supported()
+ * accepts must be listed, since the guard field is in a different place in
+ * each.
  */
 static bool
 noop_allowed(Node *stmt)
@@ -300,6 +295,26 @@ noop_allowed(Node *stmt)
 	{
 		case T_CreateStmt:
 			return ((CreateStmt *) stmt)->if_not_exists;
+		case T_AlterTableStmt:
+			{
+				AlterTableStmt *atstmt = (AlterTableStmt *) stmt;
+				ListCell   *lc;
+
+				if (atstmt->missing_ok)
+					return true;
+
+				/* each subcommand may have found nothing to do */
+				foreach(lc, atstmt->cmds)
+				{
+					if (!lfirst_node(AlterTableCmd, lc)->missing_ok)
+						return false;
+				}
+				return true;
+			}
+		case T_RenameStmt:
+			return ((RenameStmt *) stmt)->missing_ok;
+		case T_AlterObjectSchemaStmt:
+			return ((AlterObjectSchemaStmt *) stmt)->missing_ok;
 		default:
 			return false;
 	}
