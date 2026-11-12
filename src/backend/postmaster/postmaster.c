@@ -1851,7 +1851,11 @@ canAcceptConnections(BackendType backend_type)
 		else if (!FatalError && pmState == PM_STARTUP)
 			return CAC_STARTUP; /* normal startup */
 		else if (!FatalError && pmState == PM_RECOVERY)
-			return CAC_NOTHOTSTANDBY;	/* not yet ready for hot standby */
+		{
+			if (EnableHotStandby && reachedConsistency)
+				return CAC_NOTHOTSTANDBY;
+			return CAC_NOTCONSISTENT;
+		}
 		else
 			return CAC_RECOVERY;	/* else must be crash recovery */
 	}
