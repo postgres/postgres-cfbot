@@ -4258,9 +4258,10 @@ INSERT INTO batch_cp_upd_view VALUES (1), (1);
 SELECT * FROM cmdlog ORDER BY 1;
 DROP VIEW batch_cp_upd_view;
 
--- Transition tables on the parent disable batching for the rows routed to the
--- foreign partition, even if there's only an OLD TABLE: expect an INSERT on
--- batch_cp_upd_test1 for each moved row.
+-- Transition tables on the parent disable batching only if the routed rows
+-- may have to be captured in a NEW TABLE.  An OLD TABLE never contains them
+-- (a moved row is captured when deleting it from the source partition), so
+-- expect a single INSERT on batch_cp_upd_test1 for both moved rows.
 CREATE TRIGGER oldtab_trig AFTER UPDATE ON batch_cp_upd_test
 	REFERENCING OLD TABLE AS oldtab
 	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
@@ -4288,6 +4289,18 @@ MERGE INTO batch_cp_upd_test t USING (VALUES (1), (1)) s(a)
 	WHEN NOT MATCHED THEN INSERT VALUES (s.a);
 SELECT * FROM cmdlog ORDER BY 1;
 DROP TRIGGER newtab_trig ON batch_cp_upd_test;
+
+-- As with UPDATE, an OLD TABLE doesn't disable batching for MERGE: with only
+-- a DELETE OLD TABLE, expect a single INSERT on batch_cp_upd_test1.
+CREATE TRIGGER oldtab_del_trig AFTER DELETE ON batch_cp_upd_test
+	REFERENCING OLD TABLE AS oldtab
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+TRUNCATE cmdlog;
+MERGE INTO batch_cp_upd_test t USING (VALUES (1), (1)) s(a)
+	ON t.a = 2 AND t.a = s.a
+	WHEN NOT MATCHED THEN INSERT VALUES (s.a);
+SELECT * FROM cmdlog ORDER BY 1;
+DROP TRIGGER oldtab_del_trig ON batch_cp_upd_test;
 
 -- Clean up
 DROP TABLE batch_cp_upd_test;
