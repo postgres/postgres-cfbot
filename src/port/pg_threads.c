@@ -17,6 +17,9 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+#include <pthread_np.h>
+#endif
 
 
 /*-------------------------------------------------------------------------
@@ -276,6 +279,38 @@ pg_rwlock_init_impl(pg_rwlock_impl *lock, int type)
 }
 
 #endif
+
+/*
+ * Give the calling thread a name that debuggers and tools like ps and top
+ * can show.  This is best-effort: the name may be truncated (Linux keeps 15
+ * bytes), it is silently ignored where the system has no way to name
+ * threads, and failures are not reported.
+ *
+ * Only the calling thread can be named, because macOS provides no way to
+ * name another thread.  NB: on Linux, naming a process's main thread also
+ * changes the process name shown by ps.
+ */
+void
+pg_thrd_setname(const char *name)
+{
+#if defined(WIN32)
+	wchar_t		wname[64];
+
+	if (MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, lengthof(wname)) > 0)
+		(void) SetThreadDescription(GetCurrentThread(), wname);
+#elif defined(__APPLE__)
+	(void) pthread_setname_np(name);
+#elif defined(__linux__)
+	char		truncated[16];
+
+	strlcpy(truncated, name, sizeof(truncated));
+	(void) pthread_setname_np(pthread_self(), truncated);
+#elif defined(__NetBSD__)
+	(void) pthread_setname_np(pthread_self(), "%s", unconstify(char *, name));
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+	pthread_set_name_np(pthread_self(), name);
+#endif
+}
 
 #if defined(PG_THREADS_USE_WINDOWS_H)
 

@@ -496,6 +496,9 @@ LogStreamerMain(void *argument)
 	logstreamer_param *param = argument;
 	StreamCtl	stream = {0};
 
+	/* Linux keeps only 15 bytes of a thread name. */
+	pg_thrd_setname("pg_basebkup wal");
+
 	stream.startpos = param->startptr;
 	stream.timeline = param->timeline;
 	stream.sysidentifier = param->sysidentifier;

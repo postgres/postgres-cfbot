@@ -519,6 +519,53 @@ test_rwlock(void)
 	pg_rwlock_destroy(&rwlock);
 }
 
+/*
+ * Naming the calling thread is best-effort, so most systems just check that
+ * it doesn't crash.  On Windows and Linux, read the name back.
+ */
+static int
+setname_thread(void *arg)
+{
+	pg_thrd_setname("test_pg_threads worker with a long name");
+
+#if defined(WIN32)
+	{
+		wchar_t    *description = NULL;
+		int			result = 1;
+
+		if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &description)))
+		{
+			if (wcscmp(description, L"test_pg_threads worker with a long name") == 0)
+				result = 0;
+			LocalFree(description);
+		}
+		return result;
+	}
+#elif defined(__linux__)
+	{
+		char		name[16];
+
+		/* Linux keeps the first 15 bytes. */
+		if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0)
+			return 1;
+		return strcmp(name, "test_pg_threads") == 0 ? 0 : 1;
+	}
+#else
+	return 0;
+#endif
+}
+
+static void
+test_setname(void)
+{
+	pg_thrd_t	thread;
+	int			result = -1;
+
+	CHECK(pg_thrd_create(&thread, setname_thread, NULL) == pg_thrd_success);
+	CHECK(pg_thrd_join(thread, &result) == pg_thrd_success);
+	CHECK(result == 0);
+}
+
 /* Errors must come back with a usable description. */
 static void
 test_error_strings(void)
@@ -549,6 +596,7 @@ main(int argc, char **argv)
 	test_tss();
 	test_barrier();
 	test_rwlock();
+	test_setname();
 	test_error_strings();
 
 	if (failures > 0)

@@ -79,6 +79,9 @@ static inline int pg_thrd_barrier_wait(pg_thrd_barrier_t *barrier);
 extern const char *pg_thrd_error_string(int error);
 extern const char *pg_thrd_error_string_with_detail(int error);
 
+/* name the calling thread, for debuggers and process listings */
+extern void pg_thrd_setname(const char *name);
+
 /* internal self-test */
 static inline void pg_threads_ext_assertions(void);
 

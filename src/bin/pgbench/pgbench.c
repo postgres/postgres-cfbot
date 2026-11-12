@@ -7508,6 +7508,18 @@ threadRun(void *arg)
 	StatsData	last,
 				aggs;
 
+	/*
+	 * Name worker threads for debuggers and tools like ps.  Thread 0 is the
+	 * main thread, which keeps the process name.
+	 */
+	if (thread->tid > 0)
+	{
+		char		name[32];
+
+		snprintf(name, sizeof(name), "pgbench %d", thread->tid);
+		pg_thrd_setname(name);
+	}
+
 	/* open log file if requested */
 	if (use_log)
 	{
