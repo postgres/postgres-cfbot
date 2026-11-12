@@ -206,6 +206,32 @@ DROP TABLE attmp;
 -- Leave these tables in place, so 002_pg_upgrade, 027_stream_regress (and
 -- through those pg_dump) have such a case to deal with.
 
+-- Check that index column statistics targets survive the index rebuilds
+-- caused by ALTER TABLE ... ALTER COLUMN TYPE, including the rebuild of
+-- an exclusion constraint's index and recursion to partitions.
+CREATE TABLE attmp (a int, b int, EXCLUDE ((a + b) WITH =));
+CREATE INDEX attmp_expr_idx ON attmp ((a * b));
+ALTER INDEX attmp_expr_idx ALTER COLUMN 1 SET STATISTICS 100;
+ALTER INDEX attmp_a_b_excl ALTER COLUMN 1 SET STATISTICS 200;
+ALTER TABLE attmp ALTER COLUMN a TYPE bigint;
+SELECT c.relname, a.attstattarget
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+  WHERE c.relname IN ('attmp_expr_idx', 'attmp_a_b_excl') AND a.attnum = 1
+  ORDER BY c.relname;
+DROP TABLE attmp;
+
+CREATE TABLE attmp (a int, b int) PARTITION BY RANGE (b);
+CREATE TABLE attmp1 PARTITION OF attmp FOR VALUES FROM (0) TO (100);
+CREATE INDEX attmp_part_idx ON attmp ((a + 1));
+ALTER INDEX attmp_part_idx ALTER COLUMN 1 SET STATISTICS 100;
+ALTER TABLE attmp ALTER COLUMN a TYPE bigint;
+SELECT c.relname, a.attstattarget
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+  WHERE a.attrelid IN ('attmp_part_idx'::regclass, 'attmp1_a_1_idx'::regclass)
+    AND a.attnum = 1
+  ORDER BY c.relname;
+DROP TABLE attmp;
+
 
 -- Store composite with various smaller natts and check they can be deformed.
 CREATE TABLE atcomp_inc (c1 int);
