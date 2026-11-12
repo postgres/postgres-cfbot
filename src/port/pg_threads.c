@@ -142,6 +142,7 @@ pg_thrd_map_windows_error(DWORD windows_error)
 			return pg_thrd_nomem;
 		case ERROR_BUSY:
 			return pg_thrd_busy;
+		case ERROR_TIMEOUT:
 		case WAIT_TIMEOUT:
 			return pg_thrd_timedout;
 		default:
@@ -306,6 +307,8 @@ static thread_local pg_thrd_t pg_thrd_current_thread_local;
 static thread_local pg_tss_value pg_tss_values[PG_TSS_MAX];
 static pg_tss_slot pg_tss_slots[PG_TSS_MAX];
 static DWORD pg_tss_fls = FLS_OUT_OF_INDEXES;
+static DWORD pg_tss_fls_error;
+static pg_once_flag pg_tss_fls_once = PG_ONCE_FLAG_INIT;
 static pg_mtx_t pg_tss_lock = PG_MTX_PLAIN_INIT;
 
 static BOOL CALLBACK
@@ -623,28 +626,12 @@ pg_tss_fls_destructor(void *data)
 	}
 }
 
-static bool
-pg_tss_ensure_fls_registered(void)
+static void
+pg_tss_register_fls(void)
 {
-	bool		success;
-
-	if (pg_tss_fls != FLS_OUT_OF_INDEXES)
-		return true;			/* fast exit, already set */
-
-	pg_mtx_lock(&pg_tss_lock);
-	if (pg_tss_fls != FLS_OUT_OF_INDEXES)
-	{
-		success = true;
-	}
-	else
-	{
-		pg_tss_fls = FlsAlloc(pg_tss_fls_destructor);
-		if (pg_tss_fls != FLS_OUT_OF_INDEXES)
-			success = true;
-	}
-	pg_mtx_unlock(&pg_tss_lock);
-
-	return success;
+	pg_tss_fls = FlsAlloc(pg_tss_fls_destructor);
+	if (pg_tss_fls == FLS_OUT_OF_INDEXES)
+		pg_tss_fls_error = GetLastError();
 }
 
 int
@@ -652,8 +639,10 @@ pg_tss_create_impl(pg_tss_t *id, pg_tss_dtor_t dtor)
 {
 	bool		created = false;
 
-	if (!pg_tss_ensure_fls_registered())
-		return pg_thrd_map_windows_error(GetLastError());
+	/* Allocate the FLS index that runs our destructors, on first use. */
+	pg_call_once(&pg_tss_fls_once, pg_tss_register_fls);
+	if (pg_tss_fls == FLS_OUT_OF_INDEXES)
+		return pg_thrd_map_windows_error(pg_tss_fls_error);
 
 	pg_mtx_lock(&pg_tss_lock);
 	for (int i = 0; i < lengthof(pg_tss_slots); ++i)
