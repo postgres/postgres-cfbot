@@ -1111,9 +1111,8 @@ check_and_init_gencol(PGOutputData *data, List *publications,
 		else if (entry->include_gencols_type != pub->pubgencols_type)
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot use different values of publish_generated_columns for table \"%s.%s\" in different publications",
-						   get_namespace_name(RelationGetNamespace(relation)),
-						   RelationGetRelationName(relation)));
+					errmsg("cannot use different values of publish_generated_columns for table \"%s\" in different publications",
+						   MsgQualifiedRelNameByRel(relation)));
 	}
 }
 
@@ -1188,9 +1187,8 @@ pgoutput_column_list_init(PGOutputData *data, List *publications,
 		else if (!bms_equal(entry->columns, cols))
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot use different column lists for table \"%s.%s\" in different publications",
-						   get_namespace_name(RelationGetNamespace(relation)),
-						   RelationGetRelationName(relation)));
+					errmsg("cannot use different column lists for table \"%s\" in different publications",
+						   MsgQualifiedRelNameByRel(relation)));
 	}							/* loop all subscribed publications */
 
 	/*
@@ -1337,9 +1335,8 @@ pgoutput_row_filter(Relation relation, TupleTableSlot *old_slot,
 	if (!filter_exprstate)
 		return true;
 
-	elog(DEBUG3, "table \"%s.%s\" has row filter",
-		 get_namespace_name(RelationGetNamespace(relation)),
-		 RelationGetRelationName(relation));
+	elog(DEBUG3, "table \"%s\" has row filter",
+		 MsgQualifiedRelNameByRel(relation));
 
 	ResetPerTupleExprContext(entry->estate);
 

@@ -271,22 +271,20 @@ logicalrep_report_missing_or_gen_attrs(LogicalRepRelation *remoterel,
 	if (!bms_is_empty(missingatts))
 		ereport(ERROR,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				errmsg_plural("logical replication target relation \"%s.%s\" is missing replicated column: %s",
-							  "logical replication target relation \"%s.%s\" is missing replicated columns: %s",
+				errmsg_plural("logical replication target relation \"%s\" is missing replicated column: %s",
+							  "logical replication target relation \"%s\" is missing replicated columns: %s",
 							  bms_num_members(missingatts),
-							  remoterel->nspname,
-							  remoterel->relname,
+							  MsgQualifiedRelName(remoterel->nspname, remoterel->relname),
 							  logicalrep_get_attrs_str(remoterel,
 													   missingatts)));
 
 	if (!bms_is_empty(generatedatts))
 		ereport(ERROR,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				errmsg_plural("logical replication target relation \"%s.%s\" has incompatible generated column: %s",
-							  "logical replication target relation \"%s.%s\" has incompatible generated columns: %s",
+				errmsg_plural("logical replication target relation \"%s\" has incompatible generated column: %s",
+							  "logical replication target relation \"%s\" has incompatible generated columns: %s",
 							  bms_num_members(generatedatts),
-							  remoterel->nspname,
-							  remoterel->relname,
+							  MsgQualifiedRelName(remoterel->nspname, remoterel->relname),
 							  logicalrep_get_attrs_str(remoterel,
 													   generatedatts)));
 }
@@ -337,9 +335,9 @@ logicalrep_rel_mark_updatable(LogicalRepRelMapEntry *entry)
 		if (!AttrNumberIsForUserDefinedAttr(attnum))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("logical replication target relation \"%s.%s\" uses "
+					 errmsg("logical replication target relation \"%s\" uses "
 							"system columns in REPLICA IDENTITY index",
-							remoterel->nspname, remoterel->relname)));
+							MsgQualifiedRelName(remoterel->nspname, remoterel->relname))));
 
 		attnum = AttrNumberGetAttrOffset(attnum);
 
@@ -430,8 +428,8 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 		if (!OidIsValid(relid))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("logical replication target relation \"%s.%s\" does not exist",
-							remoterel->nspname, remoterel->relname)));
+					 errmsg("logical replication target relation \"%s\" does not exist",
+							MsgQualifiedRelName(remoterel->nspname, remoterel->relname))));
 		entry->localrel = table_open(relid, NoLock);
 		entry->localreloid = relid;
 
