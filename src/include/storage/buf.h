@@ -37,6 +37,21 @@ typedef int Buffer;
 #define BufferIsLocal(buffer)	((buffer) < 0)
 
 /*
+ * Possible arguments for GetAccessStrategy().
+ *
+ * If adding a new BufferAccessStrategyType, also add a new IOContext so
+ * IO statistics using this strategy are tracked.
+ */
+typedef enum BufferAccessStrategyType
+{
+	BAS_NORMAL,					/* Normal random access */
+	BAS_BULKREAD,				/* Large read-only scan (hint bit updates are
+								 * ok) */
+	BAS_BULKWRITE,				/* Large multi-block write (e.g. COPY IN) */
+	BAS_VACUUM,					/* VACUUM */
+} BufferAccessStrategyType;
+
+/*
  * Buffer access strategy objects.
  *
  * BufferAccessStrategyData is private to freelist.c

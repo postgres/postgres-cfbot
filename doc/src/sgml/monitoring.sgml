@@ -3122,7 +3122,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <structfield>context</structfield> <type>text</type>
        </para>
        <para>
-        The context of an I/O operation. Possible values are:
+        The context of an I/O operation. Possible values are listed below (see
+        also <glossterm linkend="glossary-buffer-access-strategy">Buffer
+        Access Strategy</glossterm>):
        </para>
        <itemizedlist>
         <listitem>
@@ -3144,8 +3146,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </listitem>
         <listitem>
          <para>
-          <literal>vacuum</literal>: I/O operations performed outside of shared
-          buffers while vacuuming and analyzing permanent relations. Temporary
+          <literal>vacuum</literal>: I/O operations performed using the
+          <literal>vacuum</literal> strategy, for example, while vacuuming or
+          analyzing permanent relations or enabling data checksums. Temporary
           table vacuums use the same local buffer pool as other temporary table
           I/O operations and are tracked in <varname>context</varname>
           <literal>normal</literal>.
@@ -3154,14 +3157,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <listitem>
          <para>
           <literal>bulkread</literal>: Certain large read I/O operations
-          done outside of shared buffers, for example, a sequential scan of a
-          large table.
+          performed using the <literal>bulkread</literal> strategy, for
+          example, a sequential scan of a large table.
          </para>
         </listitem>
         <listitem>
          <para>
           <literal>bulkwrite</literal>: Certain large write I/O operations
-          done outside of shared buffers, such as <command>COPY</command>.
+          performed using the <literal>bulkwrite</literal> strategy, such as
+          <command>COPY FROM</command>.
          </para>
         </listitem>
        </itemizedlist>
@@ -3340,8 +3344,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         another block. In <varname>context</varname>s
         <literal>bulkwrite</literal>, <literal>bulkread</literal>, and
         <literal>vacuum</literal>, this counts the number of times a block was
-        evicted from shared buffers in order to add the shared buffer to a
-        separate, size-limited ring buffer for use in a bulk I/O operation.
+        evicted from a shared buffer in order to add that buffer to a Buffer
+        Access Strategy ring for use in a bulk I/O operation.
         </para>
       </entry>
      </row>
@@ -3352,10 +3356,10 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <structfield>reuses</structfield> <type>bigint</type>
        </para>
        <para>
-        The number of times an existing buffer in a size-limited ring buffer
-        outside of shared buffers was reused as part of an I/O operation in the
-        <literal>bulkread</literal>, <literal>bulkwrite</literal>, or
-        <literal>vacuum</literal> <varname>context</varname>s.
+        The number of times a shared buffer in a Buffer Access Strategy ring
+        was reused as part of an I/O operation in the <literal>bulkread</literal>,
+        <literal>bulkwrite</literal>, or <literal>vacuum</literal>
+        <varname>context</varname>s.
        </para>
       </entry>
      </row>
