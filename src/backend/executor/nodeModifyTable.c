@@ -5457,42 +5457,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 */
 	if (operation == CMD_INSERT)
 	{
-		bool		allow_batching = true;
-
 		/* insert may only have one relation, inheritance is not expanded */
 		Assert(total_nrels == 1);
-		resultRelInfo = mtstate->resultRelInfo;
-
-		/*
-		 * Disable batching when we have to use RETURNING, there are any
-		 * BEFORE/AFTER ROW INSERT triggers on the foreign table, or there are
-		 * any WITH CHECK OPTION constraints from parent views.
-		 *
-		 * We could allow batching for BEFORE ROW triggers, but it would be
-		 * mostly useless. We would end up flushing the inserts before every
-		 * row, which effectively disables batching.
-		 *
-		 * FIXME another copy of this check, replace with a helper somewhere
-		 */
-		if (resultRelInfo->ri_projectReturning != NULL ||
-			resultRelInfo->ri_WithCheckOptions != NIL ||
-			(resultRelInfo->ri_TrigDesc &&
-			 (resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
-			  resultRelInfo->ri_TrigDesc->trig_insert_after_row)))
-			allow_batching = false;
-
-		if (!resultRelInfo->ri_usesFdwDirectModify &&
-			resultRelInfo->ri_FdwRoutine != NULL &&
-			resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-			resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert &&
-			allow_batching)
-		{
-			resultRelInfo->ri_BatchSize =
-				resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(resultRelInfo);
-			Assert(resultRelInfo->ri_BatchSize >= 1);
-		}
-		else
-			resultRelInfo->ri_BatchSize = 1;
+		ExecInitInsertBatchSize(mtstate->resultRelInfo, NULL);
 	}
 
 	/*

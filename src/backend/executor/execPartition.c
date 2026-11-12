@@ -1113,7 +1113,6 @@ ExecInitRoutingInfo(ModifyTableState *mtstate,
 {
 	MemoryContext oldcxt;
 	int			rri_index;
-	bool		allow_batching = true;
 
 	oldcxt = MemoryContextSwitchTo(proute->memcxt);
 
@@ -1147,51 +1146,17 @@ ExecInitRoutingInfo(ModifyTableState *mtstate,
 		partRelInfo->ri_FdwRoutine->BeginForeignInsert(mtstate, partRelInfo);
 
 	/*
-	 * Disable batching when we have to use RETURNING, there are any
-	 * BEFORE/AFTER ROW INSERT triggers on the foreign table, or there are any
-	 * WITH CHECK OPTION constraints from parent views.
-	 *
-	 * The parent may have triggers with transition tables even if the
-	 * partition has no triggers. Disable batching in that case, too, so the
-	 * per-row trigger code can reject collecting transition tuples from
-	 * foreign partitions.
-	 *
-	 * FIXME Another copy of this check, we should replace it with a helper
-	 * (with an additional condition on the parent transition capture).
-	 *
-	 * FIXME I'm not 100% sure about the combination of partRelInfo and
-	 * mtstate in this check. Are there other combinations we should check?
-	 *
-	 * FIXME The mtstate->mt_transition_capture also disables batching for OLD
-	 * TABLE-only UPDATE triggers. This disables batching anytime the
-	 * transition capture is active - a performance regression. Maybe that's
-	 * too strict and we should check if tcs_update_new_table is set?
-	 */
-	if (partRelInfo->ri_projectReturning != NULL ||
-		partRelInfo->ri_WithCheckOptions != NIL ||
-		mtstate->mt_transition_capture ||
-		(partRelInfo->ri_TrigDesc &&
-		 (partRelInfo->ri_TrigDesc->trig_insert_before_row ||
-		  partRelInfo->ri_TrigDesc->trig_insert_after_row)))
-		allow_batching = false;
-
-	/*
 	 * Determine if the FDW supports batch insert and determine the batch size
 	 * (a FDW may support batching, but it may be disabled for the
 	 * server/table or for this particular query).
 	 *
-	 * If the FDW does not support batching, we set the batch size to 1.
+	 * partRelInfo has the partition's WITH CHECK OPTIONs and RETURNING list
+	 * set up already (by ExecInitPartitionInfo(), or by ExecInitModifyTable()
+	 * for a reused UPDATE result relation), and its triggers include the row
+	 * triggers cloned from partitioned ancestors.  Transition tables belong
+	 * to the statement's target table, so pass its transition capture state.
 	 */
-	if (partRelInfo->ri_FdwRoutine != NULL &&
-		partRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-		partRelInfo->ri_FdwRoutine->ExecForeignBatchInsert &&
-		allow_batching)
-		partRelInfo->ri_BatchSize =
-			partRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(partRelInfo);
-	else
-		partRelInfo->ri_BatchSize = 1;
-
-	Assert(partRelInfo->ri_BatchSize >= 1);
+	ExecInitInsertBatchSize(partRelInfo, mtstate->mt_transition_capture);
 
 	partRelInfo->ri_CopyMultiInsertBuffer = NULL;
 
