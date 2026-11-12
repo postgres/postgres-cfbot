@@ -607,6 +607,19 @@ $node->command_checks_all(
 $node->command_checks_all(
 	[
 		@cmd,
+		'--schema' => 's1',
+		'--index' => 't1_btree',
+		'--heapallindexed',
+		'--rootdescend', '--checkunique', '--indexallkeysmatch', 'db1'
+	],
+	2,
+	[$index_missing_relation_fork_re],
+	[$no_output_re],
+	'pg_amcheck smoke test --heapallindexed --rootdescend --checkunique --indexallkeysmatch');
+
+$node->command_checks_all(
+	[
+		@cmd,
 		'--checkunique',
 		'--database' => 'db1',
 		'--database' => 'db2',
@@ -635,4 +648,16 @@ $node->command_checks_all(
 		qr/pg_amcheck: warning: option --checkunique is not supported by amcheck version 1.3/
 	],
 	'pg_amcheck smoke test --checkunique');
+
+#
+# Same for the indexallkeysmatch option for not supported versions.
+#
+$node->command_checks_all(
+	[ @cmd, '--indexallkeysmatch', '--parent-check', 'db3' ],
+	0,
+	[$no_output_re],
+	[
+		qr/pg_amcheck: warning: option --indexallkeysmatch is not supported by amcheck version 1.3/
+	],
+	'pg_amcheck smoke test --indexallkeysmatch --parent-check');
 done_testing();

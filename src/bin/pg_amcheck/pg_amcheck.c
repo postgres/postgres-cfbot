@@ -104,6 +104,7 @@ typedef struct AmcheckOptions
 	bool		rootdescend;
 	bool		heapallindexed;
 	bool		checkunique;
+	bool		indexallkeysmatch;
 
 	/* heap and btree hybrid option */
 	bool		no_btree_expansion;
@@ -135,6 +136,7 @@ static AmcheckOptions opts = {
 	.rootdescend = false,
 	.heapallindexed = false,
 	.checkunique = false,
+	.indexallkeysmatch = false,
 	.no_btree_expansion = false
 };
 
@@ -152,6 +154,7 @@ typedef struct DatabaseInfo
 	char	   *datname;
 	char	   *amcheck_schema; /* escaped, quoted literal */
 	bool		is_checkunique;
+	bool		is_indexallkeysmatch;
 } DatabaseInfo;
 
 typedef struct RelationInfo
@@ -271,6 +274,7 @@ main(int argc, char *argv[])
 		{"parent-check", no_argument, NULL, 12},
 		{"install-missing", optional_argument, NULL, 13},
 		{"checkunique", no_argument, NULL, 14},
+		{"indexallkeysmatch", no_argument, NULL, 15},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -441,6 +445,9 @@ main(int argc, char *argv[])
 			case 14:
 				opts.checkunique = true;
 				break;
+			case 15:
+				opts.indexallkeysmatch = true;
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -598,12 +605,8 @@ main(int argc, char *argv[])
 		dat->amcheck_schema = PQescapeIdentifier(conn, amcheck_schema,
 												 strlen(amcheck_schema));
 
-		/*
-		 * Check the version of amcheck extension. Skip requested unique
-		 * constraint check with warning if it is not yet supported by
-		 * amcheck.
-		 */
-		if (opts.checkunique == true)
+		/* Verify the version of amcheck extension */
+		if (opts.checkunique || opts.indexallkeysmatch)
 		{
 			/*
 			 * Now amcheck has only major and minor versions in the string but
@@ -620,14 +623,32 @@ main(int argc, char *argv[])
 			/*
 			 * checkunique option is supported in amcheck since version 1.4
 			 */
-			if ((vmaj == 1 && vmin < 4) || vmaj == 0)
+			if (opts.checkunique)
 			{
-				pg_log_warning("option %s is not supported by amcheck version %s",
-							   "--checkunique", amcheck_version);
-				dat->is_checkunique = false;
+				if ((vmaj == 1 && vmin < 4) || vmaj == 0)
+				{
+					pg_log_warning("option %s is not supported by amcheck version %s",
+								   "--checkunique", amcheck_version);
+					dat->is_checkunique = false;
+				}
+				else
+					dat->is_checkunique = true;
 			}
-			else
-				dat->is_checkunique = true;
+
+			/*
+			 * indexallkeysmatch option is supported in amcheck since version 1.6
+			 */
+			if (opts.indexallkeysmatch)
+			{
+				if ((vmaj == 1 && vmin < 6) || vmaj == 0)
+				{
+					pg_log_warning("option %s is not supported by amcheck version %s",
+								   "--indexallkeysmatch", amcheck_version);
+					dat->is_indexallkeysmatch = false;
+				}
+				else
+					dat->is_indexallkeysmatch = true;
+			}
 		}
 
 		PQclear(result);
@@ -881,7 +902,24 @@ prepare_heap_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 static void
 prepare_btree_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 {
+	const char *extra_args;
+
 	resetPQExpBuffer(sql);
+
+	/*
+	 * The amcheck functions have no parameter defaults: each added parameter
+	 * came with a new function taking all of the previous ones too.  So
+	 * indexallkeysmatch can only be passed along with an explicit
+	 * checkunique, which every amcheck version supporting the former has.
+	 */
+	if (rel->datinfo->is_indexallkeysmatch)
+		extra_args = rel->datinfo->is_checkunique ?
+			", checkunique := true, indexallkeysmatch := true" :
+			", checkunique := false, indexallkeysmatch := true";
+	else if (rel->datinfo->is_checkunique)
+		extra_args = ", checkunique := true";
+	else
+		extra_args = "";
 
 	if (opts.parent_check)
 		appendPQExpBuffer(sql,
@@ -896,7 +934,7 @@ prepare_btree_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 						  rel->datinfo->amcheck_schema,
 						  (opts.heapallindexed ? "true" : "false"),
 						  (opts.rootdescend ? "true" : "false"),
-						  (rel->datinfo->is_checkunique ? ", checkunique := true" : ""),
+						  extra_args,
 						  rel->reloid);
 	else
 		appendPQExpBuffer(sql,
@@ -910,7 +948,7 @@ prepare_btree_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 						  "AND i.indisready AND i.indisvalid AND i.indislive",
 						  rel->datinfo->amcheck_schema,
 						  (opts.heapallindexed ? "true" : "false"),
-						  (rel->datinfo->is_checkunique ? ", checkunique := true" : ""),
+						  extra_args,
 						  rel->reloid);
 }
 
@@ -1208,6 +1246,7 @@ help(const char *progname)
 	printf(_("\nB-tree index checking options:\n"));
 	printf(_("      --checkunique               check unique constraint if index is unique\n"));
 	printf(_("      --heapallindexed            check that all heap tuples are found within indexes\n"));
+	printf(_("      --indexallkeysmatch         check that all index tuples match their heap tuples\n"));
 	printf(_("      --parent-check              check index parent/child relationships\n"));
 	printf(_("      --rootdescend               search from root page to refind tuples\n"));
 	printf(_("\nConnection options:\n"));
