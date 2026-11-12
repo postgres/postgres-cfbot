@@ -113,6 +113,14 @@ int			xmloption = XMLOPTION_CONTENT;
 /* random number to identify PgXmlErrorContext */
 #define ERRCXT_MAGIC	68275028
 
+/*
+ * Maximum number of libxml messages accumulated in err_buf.  This mimics
+ * libxml2's XML_MAX_ERRORS, which limits the parser errors reported per
+ * parser context since libxml2 2.11.  Older versions report them all, so
+ * we apply the same limit ourselves.
+ */
+#define PG_XML_MAX_ERRORS	100
+
 struct PgXmlErrorContext
 {
 	int			magic;
@@ -121,6 +129,8 @@ struct PgXmlErrorContext
 	/* current error status and accumulated message, if any */
 	bool		err_occurred;
 	StringInfoData err_buf;
+	/* number of messages in err_buf */
+	int			err_count;
 	/* previous libxml error handling state (saved by pg_xml_init) */
 	xmlStructuredErrorFunc saved_errfunc;
 	void	   *saved_errcxt;
@@ -1245,6 +1255,7 @@ pg_xml_init(PgXmlStrictness strictness)
 	errcxt->strictness = strictness;
 	errcxt->err_occurred = false;
 	initStringInfo(&errcxt->err_buf);
+	errcxt->err_count = 0;
 
 	/*
 	 * Save original error handler and install ours. libxml originally didn't
@@ -2227,6 +2238,21 @@ xml_errorHandler(void *data, PgXmlErrorPtr error)
 			break;
 	}
 
+	/*
+	 * Stop accumulating messages in err_buf once there are enough of them. A
+	 * document can produce one non-fatal error per element, and an unbounded
+	 * err_buf could exceed MaxAllocSize, which would ereport() from here and
+	 * longjmp out of libxml.
+	 */
+	if ((xmlerrcxt->strictness == PG_XML_STRICTNESS_LEGACY ||
+		 level >= XML_ERR_ERROR) &&
+		xmlerrcxt->err_count >= PG_XML_MAX_ERRORS)
+	{
+		if (xmlerrcxt->strictness != PG_XML_STRICTNESS_LEGACY)
+			xmlerrcxt->err_occurred = true;
+		return;
+	}
+
 	/* Prepare error message in errorBuf */
 	initStringInfo(&errorBuf);
 
@@ -2283,6 +2309,7 @@ xml_errorHandler(void *data, PgXmlErrorPtr error)
 		appendStringInfoLineSeparator(&xmlerrcxt->err_buf);
 		appendBinaryStringInfo(&xmlerrcxt->err_buf, errorBuf.data,
 							   errorBuf.len);
+		xmlerrcxt->err_count++;
 
 		pfree(errorBuf.data);
 		return;
@@ -2301,6 +2328,7 @@ xml_errorHandler(void *data, PgXmlErrorPtr error)
 		appendStringInfoLineSeparator(&xmlerrcxt->err_buf);
 		appendBinaryStringInfo(&xmlerrcxt->err_buf, errorBuf.data,
 							   errorBuf.len);
+		xmlerrcxt->err_count++;
 
 		xmlerrcxt->err_occurred = true;
 	}
