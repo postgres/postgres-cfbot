@@ -660,7 +660,9 @@ UPDATE main_view SET b = 32 WHERE a = 21 AND b = 31 RETURNING a, b;
 UPDATE main_view SET b = 0 WHERE false;
 
 -- Delete from view using trigger
-DELETE FROM main_view WHERE a IN (20,21);
+DELETE FROM main_view WHERE a = 20 AND b = 31;
+DELETE FROM main_view WHERE a = 21 AND b = 10;
+DELETE FROM main_view WHERE a = 21 AND b = 32;
 DELETE FROM main_view WHERE a = 31 RETURNING a, b;
 
 \set QUIET true

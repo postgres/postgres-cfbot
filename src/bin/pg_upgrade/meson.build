@@ -70,6 +70,8 @@ tests += {
       't/007_multixact_conversion.pl',
       't/008_extension_control_path.pl',
       't/009_composite_types.pl',
+      't/010_vm_conversion.pl',
+      't/011_hot_indexed.pl',
     ],
     'deps': [test_ext],
     'test_kwargs': {'priority': 40}, # pg_upgrade tests are slow
