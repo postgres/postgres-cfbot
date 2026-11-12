@@ -143,6 +143,9 @@ typedef struct ControlFileData
 	CheckPoint	checkPointCopy; /* copy of last check point record */
 
 	XLogRecPtr	unloggedLSN;	/* current fake LSN value, for unlogged rels */
+	XLogRecPtr	unloggedResetLSN;	/* end of WAL when unlogged relations
+									 * were last reset (end of recovery) or
+									 * became unsafe to trust (pg_resetwal) */
 
 	/*
 	 * These two values determine the minimum point we must recover up to
