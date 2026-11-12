@@ -1119,6 +1119,15 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					fix_scan_list(root, splan->withCheckOptionLists,
 								  rtoffset, 1);
 
+				/*
+				 * FOR PORTION OF cannot contain subplan variable refs, so
+				 * fix_scan_expr works for it.
+				 */
+				if (splan->forPortionOf)
+					splan->forPortionOf = fix_scan_expr(root,
+														splan->forPortionOf,
+														rtoffset, 1);
+
 				if (splan->returningLists)
 				{
 					List	   *newRL = NIL;

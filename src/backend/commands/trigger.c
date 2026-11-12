@@ -34,6 +34,7 @@
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
+#include "executor/nodeModifyTable.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
@@ -2510,7 +2511,7 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	HeapTuple	newtuple = NULL;
-	bool		should_free;
+	bool		should_free = false;
 	TriggerData LocTriggerData = {0};
 	int			i;
 
@@ -2579,6 +2580,10 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 		}
 	}
 
+	/* Free our copy of the tuple, if the last trigger handed it back. */
+	if (newtuple != NULL && should_free)
+		heap_freetuple(newtuple);
+
 	return true;
 }
 
@@ -2616,7 +2621,7 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	HeapTuple	newtuple = NULL;
-	bool		should_free;
+	bool		should_free = false;
 	TriggerData LocTriggerData = {0};
 	int			i;
 
@@ -2667,6 +2672,10 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 			newtuple = NULL;
 		}
 	}
+
+	/* Free our copy of the tuple, if the last trigger handed it back. */
+	if (newtuple != NULL && should_free)
+		heap_freetuple(newtuple);
 
 	return true;
 }
@@ -3170,6 +3179,10 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 			newtuple = NULL;
 		}
 	}
+
+	/* Likewise free our copy of the new tuple, if we still have it. */
+	if (newtuple != NULL && should_free_new)
+		heap_freetuple(newtuple);
 	if (should_free_trig)
 		heap_freetuple(trigtuple);
 
@@ -3265,7 +3278,7 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	TupleTableSlot *oldslot = ExecGetTriggerOldSlot(estate, relinfo);
 	HeapTuple	newtuple = NULL;
-	bool		should_free;
+	bool		should_free = false;
 	TriggerData LocTriggerData = {0};
 	int			i;
 
@@ -3307,6 +3320,8 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 									   GetPerTupleMemoryContext(estate));
 		if (newtuple == NULL)
 		{
+			if (should_free)
+				heap_freetuple(oldtuple);
 			return false;		/* "do nothing" */
 		}
 		else if (newtuple != oldtuple)
@@ -3320,6 +3335,10 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 			newtuple = NULL;
 		}
 	}
+
+	/* Free our copy of the new tuple, if the last trigger handed it back. */
+	if (newtuple != NULL && should_free)
+		heap_freetuple(newtuple);
 
 	return true;
 }
@@ -3387,6 +3406,25 @@ ExecASTruncateTriggers(EState *estate, ResultRelInfo *relinfo)
 
 
 /*
+ * Explain an "already modified by an operation triggered by the current
+ * command" error when FOR PORTION OF is involved.
+ *
+ * The accompanying hint blames a BEFORE trigger, which is the only way an
+ * ordinary statement reaches these errors.  But FOR PORTION OF gives a
+ * second way: temporal leftovers fire AFTER triggers before the main command
+ * completes.  We can't tell which one it was here, so just add some extra
+ * detail under FOR PORTION OF.
+ */
+int
+errdetail_temporal_leftovers(ResultRelInfo *relinfo)
+{
+	if (relinfo->ri_forPortionOf == NULL)
+		return 0;
+
+	return errdetail("FOR PORTION OF inserts temporal leftovers while the statement is still running, and those inserts fire their own triggers.");
+}
+
+/*
  * Fetch tuple into "oldslot", dealing with locking and EPQ if necessary
  */
 static bool
@@ -3408,6 +3446,7 @@ GetTupleForTrigger(EState *estate,
 		TM_Result	test;
 		TM_FailureData tmfd;
 		int			lockflags = 0;
+		ItemPointerData origtid = *tid;
 
 		*epqslot = NULL;
 
@@ -3447,6 +3486,7 @@ GetTupleForTrigger(EState *estate,
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
+							 errdetail_temporal_leftovers(relinfo),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
 				/* treat it as deleted; do not process */
@@ -3455,6 +3495,20 @@ GetTupleForTrigger(EState *estate,
 			case TM_Ok:
 				if (tmfd.traversed)
 				{
+					/*
+					 * For FOR PORTION OF, following the update chain isn't
+					 * enough: complain if the concurrent change moved part of
+					 * our target out of this row.  table_tuple_lock() has
+					 * advanced tid to the latest version, so look up the
+					 * range the row had when we chose it by its original tid.
+					 * See ExecForPortionOfCheckSplit().
+					 */
+					if (relinfo->ri_forPortionOf)
+						ExecForPortionOfCheckSplit(relinfo,
+												   ExecForPortionOfOldRange(relinfo,
+																			&origtid),
+												   oldslot);
+
 					/*
 					 * Recheck the tuple using EPQ, if requested.  Otherwise,
 					 * just return that it was concurrently updated.
@@ -3498,6 +3552,8 @@ GetTupleForTrigger(EState *estate,
 					ereport(ERROR,
 							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 							 errmsg("could not serialize access due to concurrent delete")));
+				if (relinfo->ri_forPortionOf)
+					ExecForPortionOfConcurrentDelete();
 				/* tuple was deleted */
 				return false;
 
