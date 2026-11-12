@@ -219,21 +219,14 @@ sub run_pg_rewind
 	if ($test_mode eq 'archive')
 	{
 		# pg_rewind is tested with --restore-target-wal by moving all
-		# WAL files to a secondary location.  Note that this leads to
-		# a failure in ensureCleanShutdown(), forcing to the use of
-		# --no-ensure-shutdown in this mode as the initial set of WAL
-		# files needed to ensure a clean restart is gone.  This could
-		# be improved by keeping around only a minimum set of WAL
-		# segments but that would just make the test more costly,
-		# without improving the coverage.  Hence, instead, stop
-		# gracefully the primary here.
+		# WAL files to a secondary location. Stop gracefully here because the
+		# target's final WAL record must remain available locally.
 		$node_primary->stop;
 	}
 	else
 	{
-		# Stop the primary and be ready to perform the rewind.  The cluster
-		# needs recovery to finish once, and pg_rewind makes sure that it
-		# happens automatically.
+		# Stop the primary and be ready to perform the rewind. pg_rewind scans
+		# its WAL to locate the final valid record without performing recovery.
 		$node_primary->stop('immediate');
 	}
 
@@ -329,8 +322,7 @@ sub run_pg_rewind
 		# Stop the new primary and be ready to perform the rewind.
 		$node_standby->stop;
 
-		# Note the use of --no-ensure-shutdown here.  WAL files are
-		# gone in this mode and the primary has been stopped
+		# WAL files are gone in this mode and the primary has been stopped
 		# gracefully already.  --config-file reuses the original
 		# postgresql.conf as restore_command has been enabled above.
 		command_ok(
@@ -340,7 +332,6 @@ sub run_pg_rewind
 				'--source-pgdata' => $standby_pgdata,
 				'--target-pgdata' => $primary_pgdata,
 				'--no-sync',
-				'--no-ensure-shutdown',
 				'--restore-target-wal',
 				'--config-file' => "$primary_pgdata/postgresql.conf",
 			],
