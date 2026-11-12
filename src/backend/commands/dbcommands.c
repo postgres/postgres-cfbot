@@ -1567,6 +1567,8 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 	if (dbstrategy == CREATEDB_WAL_LOG)
 		LockSharedObject(DatabaseRelationId, dboid, 0, AccessShareLock);
 
+	XLogRecoveryBoundary();
+
 	/*
 	 * Once we start copying subdirectories, we need to be able to clean 'em
 	 * up if we fail.  Use an ENSURE block to make sure this happens.  (This
@@ -1858,6 +1860,8 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 * Tell the cumulative stats system to forget it immediately, too.
 	 */
 	pgstat_drop_database(db_id);
+
+	XLogRecoveryBoundary();
 
 	/*
 	 * Except for the deletion of the catalog row, subsequent actions are not
@@ -2248,6 +2252,8 @@ movedb(const char *dbname, const char *tblspcname)
 		 * Copy files from the old tablespace to the new one
 		 */
 		copydir(src_dbpath, dst_dbpath, false);
+
+		XLogRecoveryBoundary();
 
 		/*
 		 * Record the filesystem change in XLOG

@@ -4487,6 +4487,15 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         will proceed.
         The precise stopping point is also influenced by
         <xref linkend="guc-recovery-target-inclusive"/>.
+        <command>CREATE DATABASE</command>, <command>DROP DATABASE</command>,
+        <command>ALTER DATABASE ... SET TABLESPACE</command>,
+        <command>CREATE TABLESPACE</command> and
+        <command>DROP TABLESPACE</command> write a WAL record carrying a time
+        stamp before the record of their first change that takes effect
+        without waiting for the commit.
+        Recovery stops before the time-stamped record if its time stamp is at
+        or after the target time, regardless of
+        <varname>recovery_target_inclusive</varname>.
        </para>
 
        <para>
@@ -5685,10 +5694,16 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         than typical time deviations between servers.
        </para>
        <para>
-        The delay occurs only on WAL records for transaction commits.
+        The delay occurs only on WAL records for transaction commits and on
+        the time-stamped records that database and tablespace commands write
+        (see <xref linkend="guc-recovery-target-time"/>).
         Other records are replayed as quickly as possible, which
         is not a problem because MVCC visibility rules ensure their effects
         are not visible until the corresponding commit record is applied.
+        Database and tablespace commands change files without waiting for the
+        commit, but each such command writes its time-stamped record before
+        those changes in the WAL, so the changes are not replayed until that
+        record's delay has passed.
        </para>
        <para>
         The delay occurs once the database in recovery has reached a consistent
