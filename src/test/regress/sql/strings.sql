@@ -1179,6 +1179,9 @@ SELECT chr(0);
 
 SELECT repeat('Pg', 4);
 SELECT repeat('Pg', -4);
+SELECT repeat('', 10);
+SELECT repeat('x', 0);
+SELECT repeat('x', 4);
 
 SELECT SUBSTRING('1234567890'::bytea FROM 3) "34567890";
 SELECT SUBSTRING('1234567890'::bytea FROM 4 FOR 3) AS "456";
