@@ -254,6 +254,29 @@ ERROR:  system column "ctid" reference in check constraint is invalid
 LINE 3:       CHECK (NOT (is_capital AND ctid::text = 'sys_col_check...
                                          ^
 --
+-- Drop column should also drop all check constraints that contains whole-row references
+--
+-- Change column data type should fail since whole-row referenced check constraint still exists
+--
+-- No need to worry about partitioned tables, since the whole-row check constraint
+-- can not span multi relations
+CREATE TABLE wholerow_check_tbl (
+    city int,
+    state int,
+    CONSTRAINT cc0 CHECK (wholerow_check_tbl is null) NOT ENFORCED,
+    CONSTRAINT cc1 CHECK (wholerow_check_tbl is not null) NOT ENFORCED);
+ALTER TABLE wholerow_check_tbl ALTER COLUMN city SET DATA TYPE INT8; -- error
+ERROR:  cannot alter table "wholerow_check_tbl" because constraint cc0 on table wholerow_check_tbl uses its row type
+HINT:  You might need to drop constraint cc0 on table wholerow_check_tbl first
+ALTER TABLE wholerow_check_tbl DROP COLUMN city; -- ok
+\d wholerow_check_tbl
+         Table "public.wholerow_check_tbl"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ state  | integer |           |          | 
+
+DROP TABLE wholerow_check_tbl;
+--
 -- Check inheritance of defaults and constraints
 --
 CREATE TABLE INSERT_CHILD (cx INT default 42,

@@ -159,6 +159,23 @@ COMMENT ON TRIGGER before_ins_stmt_trig ON main_table IS 'right';
 COMMENT ON TRIGGER before_ins_stmt_trig ON main_table IS NULL;
 
 --
+-- test triggers with WHEN clause contain wholerow reference
+--
+CREATE TABLE test_tbl1 (a int, b int) PARTITION BY RANGE (a);
+CREATE TABLE test_tbl1p1 PARTITION OF test_tbl1 FOR VALUES FROM (0) TO (1000);
+
+CREATE TRIGGER test_tbl1p1_trig
+  BEFORE INSERT OR UPDATE ON test_tbl1p1 FOR EACH ROW
+  WHEN (new = ROW (1, 1))
+  EXECUTE PROCEDURE trigger_func ('test_tbl1p1');
+
+ALTER TABLE test_tbl1 ALTER COLUMN b SET DATA TYPE bigint; -- error
+ALTER TABLE test_tbl1 DROP COLUMN b; -- error
+ALTER TABLE test_tbl1 DROP COLUMN b CASCADE; -- ok
+\d+ test_tbl1
+DROP TABLE test_tbl1;
+
+--
 -- test triggers with WHEN clause
 --
 
