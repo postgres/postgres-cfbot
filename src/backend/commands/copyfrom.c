@@ -786,7 +786,6 @@ CopyFrom(CopyFromState cstate)
 	bool		has_before_insert_row_trig;
 	bool		has_instead_insert_row_trig;
 	bool		leafpart_use_multi_insert = false;
-	bool		allow_batching = true;
 
 	Assert(cstate->rel);
 	Assert(list_length(cstate->range_table) == 1);
@@ -929,45 +928,11 @@ CopyFrom(CopyFromState cstate)
 														 resultRelInfo);
 
 	/*
-	 * Disable batching when we have to use RETURNING, there are any
-	 * BEFORE/AFTER ROW INSERT triggers on the foreign table, or there are any
-	 * WITH CHECK OPTION constraints from parent views.
-	 *
-	 * It might seem we can allow BEFORE ROW INSERT triggers on the table, but
-	 * such triggers might query the table we're inserting into and misbehave
-	 * due to not finding processed but not-yet-flushed tuples.
-	 *
-	 * FIXME We have this check in multiple places, we should replace it with
-	 * some helper.
-	 */
-	if (resultRelInfo->ri_projectReturning != NULL ||
-		resultRelInfo->ri_WithCheckOptions != NIL ||
-		(resultRelInfo->ri_TrigDesc &&
-		 (resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
-		  resultRelInfo->ri_TrigDesc->trig_insert_after_row)))
-		allow_batching = false;
-
-	/*
 	 * Also, if the named relation is a foreign table, determine if the FDW
 	 * supports batch insert and determine the batch size (a FDW may support
 	 * batching, but it may be disabled for the server/table).
-	 *
-	 * If the FDW does not support batching, we set the batch size to 1.
 	 */
-	if (resultRelInfo->ri_FdwRoutine != NULL &&
-		resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-		resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert &&
-		allow_batching)
-		resultRelInfo->ri_BatchSize =
-			resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(resultRelInfo);
-	else
-		resultRelInfo->ri_BatchSize = 1;
-
-	/*
-	 * Don't rely on the FDW to return a valid batch size. With a batch size
-	 * below 1, CopyMultiInsertBufferFlush() would loop forever.
-	 */
-	resultRelInfo->ri_BatchSize = Max(resultRelInfo->ri_BatchSize, 1);
+	ExecInitInsertBatchSize(resultRelInfo, NULL);
 
 	/* Prepare to catch AFTER triggers. */
 	AfterTriggerBeginQuery();
