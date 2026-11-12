@@ -406,6 +406,17 @@ PostgreSQL documentation
     </varlistentry>
 
     <varlistentry>
+     <term><option>--indexallkeysmatch</option></term>
+     <listitem>
+      <para>
+       For each index checked, verify that each index tuple points to a heap
+       tuple with the same key using <xref linkend="amcheck"/>'s
+       <option>indexallkeysmatch</option> option.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
      <term><option>--parent-check</option></term>
      <listitem>
       <para>
