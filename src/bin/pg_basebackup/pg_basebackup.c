@@ -176,7 +176,8 @@ static char *progress_filename = NULL;
 static pg_thrd_t wal_streamer_thread;
 
 /* Flag set by WAL streamer thread if it exits early. */
-static volatile bool wal_streamer_thread_exited = false;
+static bool wal_streamer_thread_exited = false;
+static pg_mtx_t wal_streamer_thread_exited_lock = PG_MTX_PLAIN_INIT;
 
 /* End position for xlog streaming, empty string if unknown yet */
 static XLogRecPtr xlogendptr;
@@ -465,6 +466,30 @@ typedef struct
 	int			wal_compress_level;
 } logstreamer_param;
 
+/*
+ * The WAL streamer thread sets this flag when it fails, and the main thread
+ * polls it while receiving the base backup.
+ */
+static void
+set_wal_streamer_thread_exited(void)
+{
+	pg_mtx_lock(&wal_streamer_thread_exited_lock);
+	wal_streamer_thread_exited = true;
+	pg_mtx_unlock(&wal_streamer_thread_exited_lock);
+}
+
+static bool
+get_wal_streamer_thread_exited(void)
+{
+	bool		result;
+
+	pg_mtx_lock(&wal_streamer_thread_exited_lock);
+	result = wal_streamer_thread_exited;
+	pg_mtx_unlock(&wal_streamer_thread_exited_lock);
+
+	return result;
+}
+
 static int
 LogStreamerMain(void *argument)
 {
@@ -500,14 +525,14 @@ LogStreamerMain(void *argument)
 		 * but we need to tell the parent that we didn't shutdown in a nice
 		 * way.
 		 */
-		wal_streamer_thread_exited = true;
+		set_wal_streamer_thread_exited();
 		return 1;
 	}
 
 	if (!stream.walmethod->ops->finish(stream.walmethod))
 	{
 		pg_log_error("could not finish writing WAL files: %m");
-		wal_streamer_thread_exited = true;
+		set_wal_streamer_thread_exited();
 		return 1;
 	}
 
@@ -927,7 +952,7 @@ ReceiveCopyData(PGconn *conn, WriteDataCallback callback,
 					 PQerrorMessage(conn));
 
 		/* Periodic check for early exit of WAL streamer thread. */
-		if (wal_streamer_thread_exited)
+		if (get_wal_streamer_thread_exited())
 			pg_fatal("background thread terminated unexpectedly");
 
 		(*callback) (r, copybuf, callback_data);
