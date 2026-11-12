@@ -2135,6 +2135,7 @@ ParallelAppendState
 ParallelApplyWorkerEntry
 ParallelApplyWorkerInfo
 ParallelApplyWorkerShared
+ParallelApplyWorkerStatus
 ParallelBitmapHeapState
 ParallelBlockTableScanDesc
 ParallelBlockTableScanWorker
