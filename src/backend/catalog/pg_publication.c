@@ -1078,6 +1078,25 @@ GetAllTablesPublications(void)
 }
 
 /*
+ * Returns true if the given partition still has ancestors.
+ *
+ * A partition whose concurrent detach has been committed but not finalized
+ * has relispartition set, but get_partition_ancestors() reports nothing for
+ * it.  Publications treat such a partition as a standalone table, as after
+ * the detach is finalized, so relispartition alone must not be used to
+ * decide whether a relation is published via its root.
+ */
+static bool
+partition_has_ancestors(Oid relid)
+{
+	List	   *ancestors = get_partition_ancestors(relid);
+	bool		result = (ancestors != NIL);
+
+	list_free(ancestors);
+	return result;
+}
+
+/*
  * Gets list of all relations published by FOR ALL TABLES/SEQUENCES
  * publication.
  *
@@ -1122,7 +1141,8 @@ GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot)
 		Oid			relid = relForm->oid;
 
 		if (is_publishable_class(relid, relForm) &&
-			!(relForm->relispartition && pubviaroot) &&
+			!(pubviaroot && relForm->relispartition &&
+			  partition_has_ancestors(relid)) &&
 			!list_member_oid(exceptlist, relid))
 			result = lappend_oid(result, relid);
 	}
@@ -1144,7 +1164,8 @@ GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot)
 			Oid			relid = relForm->oid;
 
 			if (is_publishable_class(relid, relForm) &&
-				!relForm->relispartition &&
+				!(relForm->relispartition &&
+				  partition_has_ancestors(relid)) &&
 				!list_member_oid(exceptlist, relid))
 				result = lappend_oid(result, relid);
 		}
@@ -1370,7 +1391,6 @@ GetPublicationByName(const char *pubname, bool missing_ok)
 static bool
 is_table_publishable_in_publication(Oid relid, Publication *pub)
 {
-	bool		relispartition;
 	List	   *ancestors = NIL;
 
 	/*
@@ -1380,9 +1400,13 @@ is_table_publishable_in_publication(Oid relid, Publication *pub)
 	if (!pub->pubviaroot && get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
 		return false;
 
-	relispartition = get_rel_relispartition(relid);
-
-	if (relispartition)
+	/*
+	 * A partition whose concurrent detach has been committed but not
+	 * finalized reports no ancestors, even though relispartition is still
+	 * set.  Treat such a partition as a standalone table, as after the detach
+	 * is finalized.
+	 */
+	if (get_rel_relispartition(relid))
 		ancestors = get_partition_ancestors(relid);
 
 	if (pub->alltables)
@@ -1391,7 +1415,7 @@ is_table_publishable_in_publication(Oid relid, Publication *pub)
 		 * ALL TABLES with pubviaroot includes only regular tables or top-most
 		 * partitioned tables -- never child partitions.
 		 */
-		if (pub->pubviaroot && relispartition)
+		if (pub->pubviaroot && ancestors)
 			return false;
 
 		/*
@@ -1428,7 +1452,7 @@ is_table_publishable_in_publication(Oid relid, Publication *pub)
 	 * If it's false, the partition is covered by its ancestor's presence in
 	 * the publication, it should be included (return true).
 	 */
-	if (relispartition &&
+	if (ancestors &&
 		OidIsValid(GetTopMostAncestorInPublication(pub->oid, ancestors, NULL)))
 		return !pub->pubviaroot;
 
