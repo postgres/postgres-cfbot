@@ -478,6 +478,12 @@
         <entry><literal>TMMonth</literal></entry>
        </row>
        <row>
+        <entry><literal>TAM</literal> prefix</entry>
+        <entry>translation alternative mode (use localized alternative month names based on
+         <xref linkend="guc-lc-time"/>; see usage notes)</entry>
+        <entry><literal>TAMMonth</literal></entry>
+       </row>
+       <row>
         <entry><literal>SP</literal> suffix</entry>
         <entry>spell mode (not implemented)</entry>
         <entry><literal>DDSP</literal></entry>
@@ -504,8 +510,29 @@
 
      <listitem>
       <para>
-       <literal>TM</literal> suppresses trailing blanks whether or
-       not <literal>FM</literal> is specified.
+       <literal>TM</literal> and <literal>TAM</literal> suppress trailing
+       blanks whether or not <literal>FM</literal> is specified.
+      </para>
+     </listitem>
+
+     <listitem>
+      <para>
+       <literal>TM</literal> and <literal>TAM</literal> both produce
+       localized month names according to <xref linkend="guc-lc-time"/>,
+       but they can differ for certain languages that inflect month names
+       (e.g., Slavic languages).  In such languages <literal>TM</literal>
+       produces the form used together with a day number, which is often the
+       genitive case, while <literal>TAM</literal> produces the standalone
+       (nominative) form.  For example, with <literal>lc_time</literal> set to
+       a Czech locale, <literal>to_char('2026-08-01'::date, 'TMMONTH')</literal>
+       returns <literal>SRPNA</literal> (genitive), whereas
+       <literal>to_char('2026-08-01'::date, 'TAMMONTH')</literal> returns
+       <literal>SRPEN</literal> (nominative).  For languages that do not draw
+       this distinction, and for the <literal>C</literal> locale, the two
+       modifiers produce the same result.  This distinction relies on
+       alternative month names being available from the underlying operating
+       system's locale support, so <literal>TAM</literal> may not be effective
+       on all platforms.
       </para>
      </listitem>
 
