@@ -186,6 +186,9 @@ typedef bool (*IsForeignScanParallelSafe_function) (PlannerInfo *root,
 typedef List *(*ReparameterizeForeignPathByChild_function) (PlannerInfo *root,
 															List *fdw_private,
 															RelOptInfo *child_rel);
+typedef Path *(*ReparameterizeForeignPath_function) (PlannerInfo *root,
+													 ForeignPath *path,
+													 Relids required_outer);
 
 typedef bool (*IsForeignPathAsyncCapable_function) (ForeignPath *path);
 
@@ -277,6 +280,7 @@ typedef struct FdwRoutine
 
 	/* Support functions for path reparameterization. */
 	ReparameterizeForeignPathByChild_function ReparameterizeForeignPathByChild;
+	ReparameterizeForeignPath_function ReparameterizeForeignPath;
 
 	/* Support functions for asynchronous execution */
 	IsForeignPathAsyncCapable_function IsForeignPathAsyncCapable;
