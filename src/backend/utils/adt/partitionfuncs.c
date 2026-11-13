@@ -25,32 +25,6 @@
 #include "utils/syscache.h"
 
 /*
- * Checks if a given relation can be part of a partition tree.  Returns
- * false if the relation cannot be processed, in which case it is up to
- * the caller to decide what to do, by either raising an error or doing
- * something else.
- */
-static bool
-check_rel_can_be_partition(Oid relid)
-{
-	char		relkind;
-	bool		relispartition;
-
-	/* Check if relation exists */
-	if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid)))
-		return false;
-
-	relkind = get_rel_relkind(relid);
-	relispartition = get_rel_relispartition(relid);
-
-	/* Only allow relation types that can appear in partition trees. */
-	if (!relispartition && !RELKIND_HAS_PARTITIONS(relkind))
-		return false;
-
-	return true;
-}
-
-/*
  * pg_partition_tree
  *
  * Produce a view with one row per member of a partition tree, beginning
@@ -165,23 +139,11 @@ pg_partition_root(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	Oid			rootrelid;
-	List	   *ancestors;
 
 	if (!check_rel_can_be_partition(relid))
 		PG_RETURN_NULL();
 
-	/* fetch the list of ancestors */
-	ancestors = get_partition_ancestors(relid);
-
-	/*
-	 * If the input relation is already the top-most parent, just return
-	 * itself.
-	 */
-	if (ancestors == NIL)
-		PG_RETURN_OID(relid);
-
-	rootrelid = llast_oid(ancestors);
-	list_free(ancestors);
+	rootrelid = get_partition_root(relid, true);
 
 	/*
 	 * "rootrelid" must contain a valid OID, given that the input relation is
