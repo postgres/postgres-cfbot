@@ -249,7 +249,20 @@ write_csvlog(ErrorData *edata)
 
 	/* query id */
 	appendStringInfo(&buf, "%" PRId64, pgstat_get_my_query_id());
+	appendStringInfoChar(&buf, ',');
 
+	/* Proxy host and port */
+	if (MyProcPort && MyProcPort->proxy_host && MyProcPort->proxy_host[0] != '\0')
+	{
+		appendStringInfoChar(&buf, '"');
+		appendStringInfoString(&buf, MyProcPort->proxy_host);
+		if (MyProcPort->proxy_port && MyProcPort->proxy_port[0] != '\0')
+		{
+			appendStringInfoChar(&buf, ':');
+			appendStringInfoString(&buf, MyProcPort->proxy_port);
+		}
+		appendStringInfoChar(&buf, '"');
+	}
 	appendStringInfoChar(&buf, '\n');
 
 	/* If in the syslogger process, try to write messages direct to file */
