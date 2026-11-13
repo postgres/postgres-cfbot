@@ -138,6 +138,20 @@ SELECT JSON_OBJECT('a': '1', 'b': NULL, 'c': 2);
 SELECT JSON_OBJECT('a': '1', 'b': NULL, 'c': 2 NULL ON NULL);
 SELECT JSON_OBJECT('a': '1', 'b': NULL, 'c': 2 ABSENT ON NULL);
 
+-- Keys must be valid even when ABSENT ON NULL omits their values.
+SELECT JSON_OBJECT((NULL::text) VALUE NULL::text ABSENT ON NULL RETURNING json);
+SELECT JSON_OBJECT((NULL::text) VALUE NULL::text ABSENT ON NULL WITH UNIQUE KEYS RETURNING json);
+SELECT JSON_OBJECT((ARRAY[1,2]) VALUE NULL::text ABSENT ON NULL RETURNING json);
+SELECT JSON_OBJECT((ROW(1,2)) VALUE NULL::text ABSENT ON NULL RETURNING json);
+SELECT JSON_OBJECT((json '1') VALUE NULL::text ABSENT ON NULL RETURNING json);
+SELECT JSON_OBJECT((jsonb '1') VALUE NULL::text ABSENT ON NULL RETURNING json);
+SELECT JSON_OBJECT((NULL::text) VALUE NULL::text ABSENT ON NULL RETURNING jsonb);
+SELECT JSON_OBJECT((NULL::text) VALUE NULL::text ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb);
+SELECT JSON_OBJECT((ARRAY[1,2]) VALUE NULL::text ABSENT ON NULL RETURNING jsonb);
+SELECT JSON_OBJECT((ROW(1,2)) VALUE NULL::text ABSENT ON NULL RETURNING jsonb);
+SELECT JSON_OBJECT((json '1') VALUE NULL::text ABSENT ON NULL RETURNING jsonb);
+SELECT JSON_OBJECT((jsonb '1') VALUE NULL::text ABSENT ON NULL RETURNING jsonb);
+
 SELECT JSON_OBJECT(1: 1, '2': NULL, '3': 1, repeat('x', 1000): 1, 2: repeat('a', 100) WITH UNIQUE);
 
 SELECT JSON_OBJECT(1: 1, '1': NULL WITH UNIQUE);
@@ -171,6 +185,10 @@ CREATE FUNCTION mood_to_json(mood) RETURNS json AS $$
 $$ LANGUAGE sql IMMUTABLE;
 CREATE CAST (mood AS json) WITH FUNCTION mood_to_json(mood) AS IMPLICIT;
 SELECT JSON_OBJECT('happy'::mood: '123'::jsonb);
+SELECT JSON_OBJECT('happy'::mood: NULL ABSENT ON NULL RETURNING json);
+SELECT JSON_OBJECT('happy'::mood: NULL ABSENT ON NULL RETURNING jsonb);
+SELECT json_object_agg_strict('happy'::mood, NULL);
+SELECT jsonb_object_agg_strict('happy'::mood, NULL);
 DROP CAST (mood AS json);
 DROP FUNCTION mood_to_json;
 DROP TYPE mood;
@@ -292,6 +310,18 @@ WHERE FALSE;
 SELECT JSON_OBJECTAGG(NULL: 1);
 
 SELECT JSON_OBJECTAGG(NULL: 1 RETURNING jsonb);
+
+-- Aggregate keys must also be valid when NULL values are omitted.
+SELECT json_object_agg_strict(ARRAY[1,2], NULL);
+SELECT json_object_agg_strict(ROW(1,2), NULL);
+SELECT json_object_agg_strict(json '1', NULL);
+SELECT json_object_agg_strict(jsonb '1', NULL);
+SELECT JSON_OBJECTAGG((jsonb '1'): NULL ABSENT ON NULL RETURNING json);
+SELECT jsonb_object_agg_strict(ARRAY[1,2], NULL);
+SELECT jsonb_object_agg_strict(ROW(1,2), NULL);
+SELECT jsonb_object_agg_strict(json '1', NULL);
+SELECT jsonb_object_agg_strict(jsonb '1', NULL);
+SELECT JSON_OBJECTAGG((jsonb '1'): NULL ABSENT ON NULL RETURNING jsonb);
 
 SELECT
 	JSON_OBJECTAGG(i: i),
