@@ -221,6 +221,8 @@ typedef struct
 	uint64		chkpnt_nxtmxoff;
 	uint32		chkpnt_oldstMulti;
 	uint32		chkpnt_oldstxid;
+	uint32		chkpnt_oldstCommitTsxid;
+	uint32		chkpnt_newstCommitTsxid;
 	uint32		align;
 	uint32		blocksz;
 	uint32		largesz;
@@ -317,6 +319,7 @@ typedef struct
 	bool		check;			/* check clusters only, don't change any data */
 	bool		live_check;		/* check clusters only, old server is running */
 	bool		do_sync;		/* flush changes to disk */
+	bool		do_copy_pg_commit_ts;	/* copy pg_commit_ts directory */
 	transferMode transfer_mode; /* copy files or link them? */
 	int			jobs;			/* number of processes/threads to use */
 	char	   *socketdir;		/* directory to use for Unix sockets */
@@ -358,7 +361,6 @@ extern UserOpts user_opts;
 extern ClusterInfo old_cluster,
 			new_cluster;
 extern OSInfo os_info;
-
 
 /* check.c */
 
