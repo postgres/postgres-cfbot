@@ -7636,7 +7636,11 @@ make_result_safe(const NumericVar *var, Node *escontext)
 			  sign == NUMERIC_NINF))
 			elog(ERROR, "invalid numeric sign value 0x%x", sign);
 
-		result = (Numeric) palloc(NUMERIC_HDRSZ_SHORT);
+		/*
+		 * We must allocate at least the full struct size, even though the
+		 * datum only uses NUMERIC_HDRSZ_SHORT bytes.
+		 */
+		result = (Numeric) palloc(sizeof(struct NumericData));
 
 		SET_VARSIZE(result, NUMERIC_HDRSZ_SHORT);
 		result->choice.n_header = sign;
