@@ -165,6 +165,17 @@ gin_extract_query_trgm(PG_FUNCTION_ARGS)
 	if (trglen == 0)
 		*searchMode = GIN_SEARCH_MODE_ALL;
 
+	/*
+	 * Likewise when the similarity threshold is zero: every row satisfies the
+	 * operator then, including the rows that share no trigram with the query,
+	 * which the extracted trigrams alone would never lead to.
+	 */
+	if ((strategy == SimilarityStrategyNumber ||
+		 strategy == WordSimilarityStrategyNumber ||
+		 strategy == StrictWordSimilarityStrategyNumber) &&
+		index_strategy_get_limit(strategy) <= 0.0)
+		*searchMode = GIN_SEARCH_MODE_ALL;
+
 	PG_RETURN_POINTER(entries);
 }
 
@@ -216,8 +227,11 @@ gin_trgm_consistent(PG_FUNCTION_ARGS)
 			 * just by definition and, consequently, upper bound of
 			 * similarity is just c / len1.
 			 * So, independently on DIVUNION the upper bound formula is the same.
+			 *
+			 * A query with no trigrams has a similarity of zero with any
+			 * value, which only a threshold of zero accepts.
 			 */
-			res = (nkeys == 0) ? false :
+			res = (nkeys == 0) ? (nlimit <= 0.0) :
 				(((((float4) ntrue) / ((float4) nkeys))) >= nlimit);
 			break;
 		case ILikeStrategyNumber:
@@ -302,9 +316,11 @@ gin_trgm_triconsistent(PG_FUNCTION_ARGS)
 			 * See comment in gin_trgm_consistent() about * upper bound
 			 * formula
 			 */
-			res = (nkeys == 0)
-				? GIN_FALSE : (((((float4) ntrue) / ((float4) nkeys)) >= nlimit)
-							   ? GIN_MAYBE : GIN_FALSE);
+			if (nkeys == 0)
+				res = (nlimit <= 0.0) ? GIN_MAYBE : GIN_FALSE;
+			else
+				res = (((((float4) ntrue) / ((float4) nkeys)) >= nlimit)
+					   ? GIN_MAYBE : GIN_FALSE);
 			break;
 		case ILikeStrategyNumber:
 #ifndef IGNORECASE
