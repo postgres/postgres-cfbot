@@ -975,6 +975,14 @@ XLogPrefetcherBeginRead(XLogPrefetcher *prefetcher, XLogRecPtr recPtr)
 
 	prefetcher->no_readahead_until = InvalidXLogRecPtr;
 
+	/*
+	 * Forget the record we were examining, if any.  It is about to be
+	 * discarded along with the rest of the decoder's queue, and continuing
+	 * with its remaining block references could fill up the new I/O queue
+	 * before the record at recPtr is decoded.
+	 */
+	prefetcher->record = NULL;
+
 	/* This will forget about any queued up records in the decoder. */
 	XLogBeginRead(prefetcher->reader, recPtr);
 }
