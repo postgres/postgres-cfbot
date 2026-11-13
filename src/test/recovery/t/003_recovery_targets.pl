@@ -229,6 +229,28 @@ like(
 	qr/cannot specify more than one recovery target/,
 	'recovery_target=immediate conflicting with another target is rejected');
 
+# recovery_target = 'immediate' must also be reached if there is no WAL at all
+# after the checkpoint that recovery starts from, as with a cluster that was
+# shut down cleanly: recovery is consistent before replaying anything.  The
+# node's own archive is empty.
+my $immediate_target_no_redo_node =
+  PostgreSQL::Test::Cluster->new('immediate_target_no_redo_node');
+$immediate_target_no_redo_node->init(allows_streaming => 1);
+$immediate_target_no_redo_node->start;
+$immediate_target_no_redo_node->stop;
+$immediate_target_no_redo_node->enable_restoring(
+	$immediate_target_no_redo_node, 0);
+$immediate_target_no_redo_node->append_conf('postgresql.conf',
+	"recovery_target = 'immediate'");
+$immediate_target_no_redo_node->start;
+$immediate_target_no_redo_node->poll_query_until('postgres',
+	"SELECT pg_get_wal_replay_pause_state() = 'paused'")
+  or die "Timed out while waiting for recovery to pause at consistency";
+ok( $immediate_target_no_redo_node->log_contains(
+		'recovery stopping after reaching consistency'),
+	'immediate target reached when there is no WAL to replay');
+$immediate_target_no_redo_node->teardown_node;
+
 # Same-GUC set-then-clear: setting a recovery_target_* GUC and then setting the
 # same GUC to an empty string leaves no target, so recovery runs to the end of
 # WAL.  Duplicate keys collapse in postgresql.conf, so "pg_ctl --options" passes
