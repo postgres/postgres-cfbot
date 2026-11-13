@@ -2847,8 +2847,11 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 									ParallelTableScanFromBrinShared(brinshared),
 									SO_NONE);
 
+	pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX,
+								  RelationGetRelid(heap));
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
 									   brinbuildCallbackParallel, state, scan);
+	pgstat_progress_end_command();
 
 	/* insert the last item */
 	form_and_spill_tuple(state);

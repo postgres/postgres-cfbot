@@ -607,6 +607,7 @@ DefineIndex(ParseState *pstate,
 	Oid			root_save_userid;
 	int			root_save_sec_context;
 	int			root_save_nestlevel;
+	bool		progress_started = false;
 
 	root_save_nestlevel = NewGUCNestLevel();
 
@@ -635,16 +636,21 @@ DefineIndex(ParseState *pstate,
 		concurrent = false;
 
 	/*
-	 * Start progress report.  If we're building a partition, this was already
-	 * done.
+	 * Start progress report if not done yet.
+	 *
+	 * We could check parentIndexId and only start the reporting when
+	 * processing the parent index (i.e. parentIndexId is invalid), however
+	 * that wouldn't work when adding a partition to an existing table:
+	 * parentIndexId is always valid in that cases.
 	 */
-	if (!OidIsValid(parentIndexId))
+	if (MyBEEntry->st_progress.command == PROGRESS_COMMAND_INVALID)
 	{
 		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, tableId);
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_COMMAND,
 									 concurrent ?
 									 PROGRESS_CREATEIDX_COMMAND_CREATE_CONCURRENTLY :
 									 PROGRESS_CREATEIDX_COMMAND_CREATE);
+		progress_started = true;
 	}
 
 	/*
@@ -1306,8 +1312,7 @@ DefineIndex(ParseState *pstate,
 
 		table_close(rel, NoLock);
 
-		/* If this is the top-level index, we're done */
-		if (!OidIsValid(parentIndexId))
+		if (progress_started)
 			pgstat_progress_end_command();
 
 		return address;
@@ -1600,20 +1605,17 @@ DefineIndex(ParseState *pstate,
 			}
 		}
 
-		/*
-		 * Indexes on partitioned tables are not themselves built, so we're
-		 * done here.
-		 */
 		AtEOXact_GUC(false, root_save_nestlevel);
 		SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
 		table_close(rel, NoLock);
-		if (!OidIsValid(parentIndexId))
-			pgstat_progress_end_command();
-		else
+		if (OidIsValid(parentIndexId))
 		{
 			/* Update progress for an intermediate partitioned index itself */
 			pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
 		}
+
+		if (progress_started)
+			pgstat_progress_end_command();
 
 		return address;
 	}
@@ -1627,13 +1629,13 @@ DefineIndex(ParseState *pstate,
 		table_close(rel, NoLock);
 
 		/*
-		 * If this is the top-level index, the command is done overall;
-		 * otherwise, increment progress to report one child index is done.
+		 * Increment progress to report one child index is done.
 		 */
-		if (!OidIsValid(parentIndexId))
-			pgstat_progress_end_command();
-		else
+		if (OidIsValid(parentIndexId))
 			pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
+
+		if (progress_started)
+			pgstat_progress_end_command();
 
 		return address;
 	}
@@ -1848,7 +1850,8 @@ DefineIndex(ParseState *pstate,
 	 */
 	UnlockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock);
 
-	pgstat_progress_end_command();
+	if (progress_started)
+		pgstat_progress_end_command();
 
 	return address;
 }
@@ -3130,7 +3133,6 @@ ReindexIndex(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 	{
 		ReindexParams newparams = *params;
 
-		newparams.options |= REINDEXOPT_REPORT_PROGRESS;
 		reindex_index(stmt, indOid, false, persistence, &newparams);
 	}
 }
@@ -3253,7 +3255,6 @@ ReindexTable(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 	{
 		ReindexParams newparams = *params;
 
-		newparams.options |= REINDEXOPT_REPORT_PROGRESS;
 		result = reindex_relation(stmt, heapOid,
 								  REINDEX_REL_PROCESS_TOAST |
 								  REINDEX_REL_CHECK_CONSTRAINTS,
@@ -3678,8 +3679,7 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 		{
 			ReindexParams newparams = *params;
 
-			newparams.options |=
-				REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;
+			newparams.options |= REINDEXOPT_MISSING_OK;
 			reindex_index(stmt, relid, false, relpersistence, &newparams);
 			PopActiveSnapshot();
 			/* reindex_index() does the verbose output */
@@ -3689,8 +3689,7 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 			bool		result;
 			ReindexParams newparams = *params;
 
-			newparams.options |=
-				REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;
+			newparams.options |= REINDEXOPT_MISSING_OK;
 			result = reindex_relation(stmt, relid,
 									  REINDEX_REL_PROCESS_TOAST |
 									  REINDEX_REL_CHECK_CONSTRAINTS,
@@ -4151,7 +4150,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 			elog(ERROR, "cannot reindex a temporary table concurrently");
 
 		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, idx->tableId);
-
 		progress_vals[0] = PROGRESS_CREATEIDX_COMMAND_REINDEX_CONCURRENTLY;
 		progress_vals[1] = 0;	/* initializing */
 		progress_vals[2] = idx->indexId;
@@ -4175,11 +4173,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/* Create new index definition based on given index */
 		newIndexId = index_create_copy(heapRel,
 									   INDEX_CREATE_CONCURRENT |
-									   INDEX_CREATE_SKIP_BUILD |
-									   INDEX_CREATE_SUPPRESS_PROGRESS,
+									   INDEX_CREATE_SKIP_BUILD,
 									   idx->indexId,
 									   tablespaceid,
 									   concurrentName);
+		pgstat_progress_end_command();
 
 		/*
 		 * Now open the relation of the new index, a session-level lock is
@@ -4298,9 +4296,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * DefineIndex() for more details.
 	 */
 
+	pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, relationOid);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_1);
 	WaitForLockersMultiple(lockTags, ShareLock, true);
+	pgstat_progress_end_command();
 	CommitTransactionCommand();
 
 	foreach(lc, newIndexIds)
@@ -4344,6 +4344,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		/* Perform concurrent build of new index */
 		index_concurrently_build(newidx->tableId, newidx->indexId);
+		pgstat_progress_end_command();
 
 		ReindexUnpinRelations(pinnedRels);
 
@@ -4368,9 +4369,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * for more details.
 	 */
 
+	pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, relationOid);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
 	WaitForLockersMultiple(lockTags, ShareLock, true);
+	pgstat_progress_end_command();
 	CommitTransactionCommand();
 
 	foreach(lc, newIndexIds)
@@ -4450,6 +4453,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 									 PROGRESS_CREATEIDX_PHASE_WAIT_3);
 		WaitForOlderSnapshots(limitXmin, true);
+		pgstat_progress_end_command();
 
 		CommitTransactionCommand();
 	}
@@ -4545,6 +4549,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 */
 
 	INJECTION_POINT("reindex-relation-concurrently-before-set-dead", NULL);
+	pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, relationOid);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_4);
 	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
@@ -4591,6 +4596,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_5);
 	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
+	pgstat_progress_end_command();
 
 	PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -4665,8 +4671,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	}
 
 	MemoryContextDelete(private_context);
-
-	pgstat_progress_end_command();
 
 	return true;
 }
