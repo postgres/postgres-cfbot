@@ -23,6 +23,7 @@
 #include "postgres.h"
 
 #include "executor/executor.h"
+#include "executor/execParallel.h"
 #include "executor/nodeForeignscan.h"
 #include "foreign/fdwapi.h"
 #include "utils/rel.h"
@@ -493,3 +494,80 @@ ExecAsyncForeignScanNotify(AsyncRequest *areq)
 	Assert(fdwroutine->ForeignAsyncNotify != NULL);
 	fdwroutine->ForeignAsyncNotify(areq);
 }
+
+/* ----------------------------------------------------------------
+ *		Parallel instrumentation support
+ *
+ *		Unlike the parallel-aware callbacks above, these are invoked for
+ *		any ForeignScan node that runs in parallel workers, so that the
+ *		FDW can report per-worker statistics in EXPLAIN ANALYZE.  The
+ *		core executor owns the shm_toc chunk; the FDW only estimates its
+ *		size and fills it in.
+ * ----------------------------------------------------------------
+ */
+void
+ExecForeignScanEstimateInstrumentation(ForeignScanState *node,
+									   ParallelContext *pcxt)
+{
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	if (!node->ss.ps.instrument || pcxt->nworkers == 0 ||
+		!fdwroutine->EstimateDSMInstrumentationForeignScan)
+		return;
+
+	node->pinstrument_len =
+		fdwroutine->EstimateDSMInstrumentationForeignScan(node, pcxt);
+	if (node->pinstrument_len > 0)
+	{
+		shm_toc_estimate_chunk(&pcxt->estimator, node->pinstrument_len);
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
+}
+
+void
+ExecForeignScanInitializeDSMInstrumentation(ForeignScanState *node,
+											ParallelContext *pcxt)
+{
+	FdwRoutine *fdwroutine = node->fdwroutine;
+	void	   *coordinate;
+
+	if (!node->ss.ps.instrument || pcxt->nworkers == 0 ||
+		!fdwroutine->InitializeDSMInstrumentationForeignScan ||
+		node->pinstrument_len == 0)
+		return;
+
+	coordinate = shm_toc_allocate(pcxt->toc, node->pinstrument_len);
+	fdwroutine->InitializeDSMInstrumentationForeignScan(node, pcxt, coordinate);
+	shm_toc_insert(pcxt->toc,
+				   PARALLEL_KEY_NODE_INSTRUMENTATION(node->ss.ps.plan->plan_node_id),
+				   coordinate);
+}
+
+void
+ExecForeignScanInitializeWorkerInstrumentation(ForeignScanState *node,
+											   ParallelWorkerContext *pwcxt)
+{
+	FdwRoutine *fdwroutine = node->fdwroutine;
+	void	   *coordinate;
+
+	if (!node->ss.ps.instrument ||
+		!fdwroutine->InitializeWorkerInstrumentationForeignScan)
+		return;
+
+	coordinate = shm_toc_lookup(pwcxt->toc,
+								PARALLEL_KEY_NODE_INSTRUMENTATION(node->ss.ps.plan->plan_node_id),
+								true);
+	if (coordinate)
+		fdwroutine->InitializeWorkerInstrumentationForeignScan(node, pwcxt,
+															   coordinate);
+}
+
+void
+ExecForeignScanRetrieveInstrumentation(ForeignScanState *node)
+{
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	if (fdwroutine->RetrieveInstrumentationForeignScan)
+		fdwroutine->RetrieveInstrumentationForeignScan(node);
+}
+

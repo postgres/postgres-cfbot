@@ -290,6 +290,9 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanEstimate((ForeignScanState *) planstate,
 										e->pcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecForeignScanEstimateInstrumentation((ForeignScanState *) planstate,
+												   e->pcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)
@@ -549,6 +552,9 @@ ExecParallelInitializeDSM(PlanState *planstate,
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanInitializeDSM((ForeignScanState *) planstate,
 											 d->pcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecForeignScanInitializeDSMInstrumentation((ForeignScanState *) planstate,
+														d->pcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)
@@ -1202,6 +1208,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		case T_CustomScanState:
 			ExecCustomScanRetrieveInstrumentation((CustomScanState *) planstate);
 			break;
+		case T_ForeignScanState:
+			ExecForeignScanRetrieveInstrumentation((ForeignScanState *) planstate);
+			break;
 		default:
 			break;
 	}
@@ -1470,6 +1479,9 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanInitializeWorker((ForeignScanState *) planstate,
 												pwcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecForeignScanInitializeWorkerInstrumentation((ForeignScanState *) planstate,
+														   pwcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)
