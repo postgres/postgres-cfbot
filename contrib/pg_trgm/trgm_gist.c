@@ -78,7 +78,10 @@ gtrgm_alloc(bool isalltrue, int siglen, BITVECP sign)
 {
 	int			flag = SIGNKEY | (isalltrue ? ALLISTRUE : 0);
 	int			size = CALCGTSIZE(flag, siglen);
-	TRGM	   *res = palloc(size);
+	TRGM	   *res;
+
+	/* allocate at least sizeof(TRGM), to cover padding */
+	res = palloc(Max(size, sizeof(TRGM)));
 
 	SET_VARSIZE(res, size);
 	res->flag = flag;

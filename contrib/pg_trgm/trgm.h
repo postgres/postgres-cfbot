@@ -55,6 +55,11 @@ extern int	(*CMPTRGM) (const void *a, const void *b);
 #define ISWILDCARDCHAR(x) (*(x) == '_' || *(x) == '%')	/* Wildcard
 														 * meta-character */
 
+/*
+ * Note: This structure has trailing padding. When allocating a header-only
+ * value, at least sizeof(TRGM) must be allocated, to avoid -Warray-bounds
+ * compiler warnings.
+ */
 typedef struct
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
