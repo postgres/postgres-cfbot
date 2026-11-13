@@ -2279,6 +2279,111 @@ select aa, bb, unique1, unique1
 (0 rows)
 
 --
+-- A LEFT or ANTI join to a provably empty rel need not be executed at all,
+-- if nothing above references the empty side
+--
+explain (costs off)
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where i2.f1 is null;
+       QUERY PLAN        
+-------------------------
+ Seq Scan on int4_tbl i1
+(1 row)
+
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where i2.f1 is null;
+     f1      
+-------------
+           0
+      123456
+     -123456
+  2147483647
+ -2147483647
+(5 rows)
+
+-- the outer rel's sort order can still be used
+explain (costs off)
+select unique1 from tenk1 left join int4_tbl i2 on false
+  order by unique1 limit 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Index Only Scan using tenk1_unique1 on tenk1
+(2 rows)
+
+explain (costs off)
+select i1.f1 from int4_tbl i1
+  where not exists (select 1 from int4_tbl i2 where i2.f1 = i1.f1 and false);
+       QUERY PLAN        
+-------------------------
+ Seq Scan on int4_tbl i1
+(1 row)
+
+-- the join must stay if a pushed-down qual can filter rows
+explain (costs off)
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where coalesce(i2.f1, 0) = 1;
+             QUERY PLAN             
+------------------------------------
+ Nested Loop Left Join
+   Join Filter: false
+   Filter: (COALESCE(i2.f1, 0) = 1)
+   ->  Seq Scan on int4_tbl i1
+   ->  Result
+         Replaces: Scan on i2
+         One-Time Filter: false
+(7 rows)
+
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where coalesce(i2.f1, 0) = 1;
+ f1 
+----
+(0 rows)
+
+-- ... or if the empty side's columns are needed
+explain (costs off)
+select * from int4_tbl i1 left join int4_tbl i2 on false;
+           QUERY PLAN           
+--------------------------------
+ Nested Loop Left Join
+   Join Filter: false
+   ->  Seq Scan on int4_tbl i1
+   ->  Result
+         Replaces: Scan on i2
+         One-Time Filter: false
+(6 rows)
+
+-- no such shortcut for FULL JOIN, whose outputs are nulled by the join
+explain (costs off)
+select a.f1 from (int4_tbl a join int4_tbl b on a.f1 = b.f1)
+  full join (select * from int4_tbl where false) s on a.f1 = s.f1;
+                QUERY PLAN                
+------------------------------------------
+ Hash Full Join
+   Hash Cond: (a.f1 = int4_tbl.f1)
+   ->  Hash Join
+         Hash Cond: (a.f1 = b.f1)
+         ->  Seq Scan on int4_tbl a
+         ->  Hash
+               ->  Seq Scan on int4_tbl b
+   ->  Hash
+         ->  Result
+               Replaces: Scan on int4_tbl
+               One-Time Filter: false
+(11 rows)
+
+select a.f1 from (int4_tbl a join int4_tbl b on a.f1 = b.f1)
+  full join (select * from int4_tbl where false) s on a.f1 = s.f1;
+     f1      
+-------------
+           0
+      123456
+     -123456
+  2147483647
+ -2147483647
+(5 rows)
+
+--
 -- regression test: check handling of empty-FROM subquery underneath outer join
 --
 explain (costs off)
