@@ -170,21 +170,26 @@ VARTAG_SIZE(vartag_external tag)
  * compiler might otherwise think it could generate code that assumes
  * alignment while touching fields of a 1-byte-header varlena.
  */
-typedef union
+
+/*
+ * Normal varlena (4-byte length)
+ */
+typedef struct
 {
-	struct						/* Normal varlena (4-byte length) */
-	{
-		uint32		va_header;
-		char		va_data[FLEXIBLE_ARRAY_MEMBER];
-	}			va_4byte;
-	struct						/* Compressed-in-line format */
-	{
-		uint32		va_header;
-		uint32		va_tcinfo;	/* Original data size (excludes header) and
+	uint32		va_header;
+	char		va_data[FLEXIBLE_ARRAY_MEMBER];
+} varattrib_4b_normal;
+
+/*
+ * Compressed-in-line format
+ */
+typedef struct
+{
+	uint32		va_header;
+	uint32		va_tcinfo;		/* Original data size (excludes header) and
 								 * compression method; see va_extinfo */
-		char		va_data[FLEXIBLE_ARRAY_MEMBER]; /* Compressed data */
-	}			va_compressed;
-} varattrib_4b;
+	char		va_data[FLEXIBLE_ARRAY_MEMBER]; /* Compressed data */
+} varattrib_4b_compressed;
 
 typedef struct
 {
@@ -254,16 +259,16 @@ typedef struct
 
 /* VARSIZE_4B() should only be used on known-aligned data */
 #define VARSIZE_4B(PTR) \
-	(((const varattrib_4b *) (PTR))->va_4byte.va_header & 0x3FFFFFFF)
+	(((const varattrib_4b_normal *) (PTR))->va_header & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
 	(((const varattrib_1b *) (PTR))->va_header & 0x7F)
 #define VARTAG_1B_E(PTR) \
 	((vartag_external) ((const varattrib_1b_e *) (PTR))->va_tag)
 
 #define SET_VARSIZE_4B(PTR,len) \
-	(((varattrib_4b *) (PTR))->va_4byte.va_header = (len) & 0x3FFFFFFF)
+	(((varattrib_4b_normal *) (PTR))->va_header = (len) & 0x3FFFFFFF)
 #define SET_VARSIZE_4B_C(PTR,len) \
-	(((varattrib_4b *) (PTR))->va_4byte.va_header = ((len) & 0x3FFFFFFF) | 0x40000000)
+	(((varattrib_4b_normal *) (PTR))->va_header = ((len) & 0x3FFFFFFF) | 0x40000000)
 #define SET_VARSIZE_1B(PTR,len) \
 	(((varattrib_1b *) (PTR))->va_header = (len) | 0x80)
 #define SET_VARTAG_1B_E(PTR,tag) \
@@ -287,16 +292,16 @@ typedef struct
 
 /* VARSIZE_4B() should only be used on known-aligned data */
 #define VARSIZE_4B(PTR) \
-	((((const varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
+	((((const varattrib_4b_normal *) (PTR))->va_header >> 2) & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
 	((((const varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
 #define VARTAG_1B_E(PTR) \
 	((vartag_external) ((const varattrib_1b_e *) (PTR))->va_tag)
 
 #define SET_VARSIZE_4B(PTR,len) \
-	(((varattrib_4b *) (PTR))->va_4byte.va_header = (((uint32) (len)) << 2))
+	(((varattrib_4b_normal *) (PTR))->va_header = (((uint32) (len)) << 2))
 #define SET_VARSIZE_4B_C(PTR,len) \
-	(((varattrib_4b *) (PTR))->va_4byte.va_header = (((uint32) (len)) << 2) | 0x02)
+	(((varattrib_4b_normal *) (PTR))->va_header = (((uint32) (len)) << 2) | 0x02)
 #define SET_VARSIZE_1B(PTR,len) \
 	(((varattrib_1b *) (PTR))->va_header = (((uint8) (len)) << 1) | 0x01)
 #define SET_VARTAG_1B_E(PTR,tag) \
@@ -305,8 +310,8 @@ typedef struct
 
 #endif							/* WORDS_BIGENDIAN */
 
-#define VARDATA_4B(PTR)		(((varattrib_4b *) (PTR))->va_4byte.va_data)
-#define VARDATA_4B_C(PTR)	(((varattrib_4b *) (PTR))->va_compressed.va_data)
+#define VARDATA_4B(PTR)		(((varattrib_4b_normal *) (PTR))->va_data)
+#define VARDATA_4B_C(PTR)	(((varattrib_4b_compressed *) (PTR))->va_data)
 #define VARDATA_1B(PTR)		(((varattrib_1b *) (PTR))->va_data)
 #define VARDATA_1B_E(PTR)	(((varattrib_1b_e *) (PTR))->va_data)
 
@@ -321,7 +326,7 @@ typedef struct
  */
 
 #define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
-#define VARHDRSZ_COMPRESSED		offsetof(varattrib_4b, va_compressed.va_data)
+#define VARHDRSZ_COMPRESSED		offsetof(varattrib_4b_compressed, va_data)
 #define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
 #define VARATT_SHORT_MAX		0x7F
 
@@ -544,14 +549,14 @@ VARDATA_ANY(const void *PTR)
 static inline Size
 VARDATA_COMPRESSED_GET_EXTSIZE(const void *PTR)
 {
-	return ((const varattrib_4b *) PTR)->va_compressed.va_tcinfo & VARLENA_EXTSIZE_MASK;
+	return ((const varattrib_4b_compressed *) PTR)->va_tcinfo & VARLENA_EXTSIZE_MASK;
 }
 
 /* Compression method of a compressed-in-line varlena datum */
 static inline uint32
 VARDATA_COMPRESSED_GET_COMPRESS_METHOD(const void *PTR)
 {
-	return ((const varattrib_4b *) PTR)->va_compressed.va_tcinfo >> VARLENA_EXTSIZE_BITS;
+	return ((const varattrib_4b_compressed *) PTR)->va_tcinfo >> VARLENA_EXTSIZE_BITS;
 }
 
 /*
@@ -565,7 +570,7 @@ VARDATA_COMPRESSED_SET_TCINFO(void *PTR, uint32 extsize, uint32 cmethod)
 	Assert(extsize > 0 && extsize <= VARLENA_EXTSIZE_MASK);
 	Assert(cmethod < (1U << (32 - VARLENA_EXTSIZE_BITS)));
 
-	((varattrib_4b *) PTR)->va_compressed.va_tcinfo =
+	((varattrib_4b_compressed *) PTR)->va_tcinfo =
 		extsize | (cmethod << VARLENA_EXTSIZE_BITS);
 }
 

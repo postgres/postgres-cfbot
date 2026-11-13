@@ -1637,7 +1637,7 @@ check_toast_tuple(HeapTuple toasttup, HeapCheckContext *ctx,
 	else
 	{
 		/* should never happen */
-		uint32		header = ((varattrib_4b *) chunk)->va_4byte.va_header;
+		uint32		header = ((varattrib_4b_normal *) chunk)->va_header;
 
 		report_toast_corruption(ctx, ta,
 								psprintf("toast value %" PRIu64 " chunk %d has invalid varlena header %0x",
