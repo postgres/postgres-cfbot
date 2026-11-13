@@ -234,9 +234,42 @@ CREATE PUBLICATION testpub6 FOR ALL TABLES EXCEPT (TABLE testpub_tbl_parent *);
 CREATE PUBLICATION testpub7 FOR ALL TABLES EXCEPT (TABLE ONLY testpub_tbl_parent);
 \dRp+ testpub7
 
+-- Specifying same table twice is OK when the mentions agree on ONLY-ness.
+CREATE TABLE tbl_plain(a int);
+CREATE PUBLICATION testpub_dup1 FOR TABLE
+  testpub_tbl_parent, testpub_tbl_parent,
+  testpub_tbl_child, testpub_tbl_child,
+  tbl_plain, tbl_plain;
+\dRp+ testpub_dup1
+CREATE PUBLICATION testpub_dup2 FOR TABLE
+  ONLY testpub_tbl_parent, ONLY testpub_tbl_parent,
+  ONLY testpub_tbl_child, ONLY testpub_tbl_child,
+  ONLY tbl_plain, ONLY tbl_plain;
+\dRp+ testpub_dup2
+CREATE PUBLICATION testpub_dup3 FOR ALL TABLES EXCEPT (TABLE
+  testpub_tbl_parent, testpub_tbl_parent,
+  testpub_tbl_child, testpub_tbl_child,
+  tbl_plain, tbl_plain);
+ALTER PUBLICATION testpub_dup3 SET ALL TABLES EXCEPT (TABLE
+  ONLY testpub_tbl_parent, ONLY testpub_tbl_parent,
+  ONLY testpub_tbl_child, ONLY testpub_tbl_child,
+  ONLY tbl_plain, ONLY tbl_plain);
+
+-- Otherwise, mixing ONLY and non-ONLY mentions of the same table is a
+-- contradiction that should be rejected.
 RESET client_min_messages;
-DROP TABLE testpub_tbl_parent, testpub_tbl_child;
+CREATE PUBLICATION testpub_conflict1 FOR TABLE testpub_tbl_parent, ONLY testpub_tbl_parent;
+CREATE PUBLICATION testpub_conflict2 FOR TABLE ONLY testpub_tbl_parent, testpub_tbl_parent;
+CREATE PUBLICATION testpub_conflict3 FOR TABLE testpub_tbl_child, ONLY testpub_tbl_child;
+CREATE PUBLICATION testpub_conflict4 FOR TABLE ONLY testpub_tbl_child, testpub_tbl_child;
+CREATE PUBLICATION testpub_conflict5 FOR TABLE tbl_plain, ONLY tbl_plain;
+CREATE PUBLICATION testpub_conflict6 FOR TABLE ONLY tbl_plain, tbl_plain;
+ALTER PUBLICATION testpub_dup3 SET ALL TABLES EXCEPT(TABLE ONLY testpub_tbl_parent, testpub_tbl_parent);
+
+SET client_min_messages = 'ERROR';
+DROP TABLE testpub_tbl_parent, testpub_tbl_child, tbl_plain;
 DROP PUBLICATION testpub3, testpub4, testpub5, testpub6, testpub7;
+DROP PUBLICATION testpub_dup1, testpub_dup2, testpub_dup3;
 
 ---------------------------------------------
 -- EXCEPT clause tests for partitioned tables
@@ -244,7 +277,9 @@ DROP PUBLICATION testpub3, testpub4, testpub5, testpub6, testpub7;
 SET client_min_messages = 'ERROR';
 CREATE TABLE testpub_root(a int) PARTITION BY RANGE(a);
 CREATE TABLE testpub_part1 PARTITION OF testpub_root FOR VALUES FROM (0) TO (100);
-CREATE PUBLICATION testpub8 FOR ALL TABLES EXCEPT (TABLE testpub_root);
+-- Mixing ONLY and non-ONLY mentions of the same partitioned table is silently
+-- tolerated because ONLY has no effect for partitioned tables anyway.
+CREATE PUBLICATION testpub8 FOR ALL TABLES EXCEPT (TABLE testpub_root, ONLY testpub_root);
 \dRp+ testpub8;
 \d testpub_part1
 \d testpub_root
@@ -335,8 +370,15 @@ UPDATE testpub_parted2 SET a = 2;
 ALTER PUBLICATION testpub_forparted DROP TABLE testpub_parted;
 -- works again, because update is no longer replicated
 UPDATE testpub_parted2 SET a = 2;
+-- Mixing ONLY and non-ONLY mentions of the same partitioned table is silently
+-- tolerated because ONLY has no effect for partitioned tables anyway.
+CREATE PUBLICATION testpub_dup1 FOR TABLE testpub_parted, TABLE ONLY testpub_parted;
+\dRp+ testpub_dup1
+CREATE PUBLICATION testpub_dup2 FOR TABLE ONLY testpub_parted, TABLE testpub_parted;
+\dRp+ testpub_dup2
+
 DROP TABLE testpub_parted1, testpub_parted2;
-DROP PUBLICATION testpub_forparted, testpub_forparted1;
+DROP PUBLICATION testpub_forparted, testpub_forparted1, testpub_dup1, testpub_dup2;
 
 -- Tests for row filters
 CREATE TABLE testpub_rf_tbl1 (a integer, b text);
