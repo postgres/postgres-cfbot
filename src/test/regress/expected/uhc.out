@@ -1,0 +1,95 @@
+-- This test is about UHC (Windows-949 / CP949) encoding.  UHC is a
+-- client-only encoding, so exercise pg_uhc_verifychar() via convert_from()
+-- in a UTF8 database.
+SELECT getdatabaseencoding() <> 'UTF8' AS skip_test \gset
+\if :skip_test
+\quit
+\endif
+-- valid: EUC_KR-compatible Hangul (U+AC00 "가")
+SELECT encode(convert_to(convert_from('\xb0a1', 'UHC'), 'UTF8'), 'hex');
+ encode 
+--------
+ eab080
+(1 row)
+
+-- valid: CP949 lead/trail boundary values
+SELECT encode(convert_to(convert_from('\x8141', 'UHC'), 'UTF8'), 'hex');	-- trail 0x41
+ encode 
+--------
+ eab082
+(1 row)
+
+SELECT encode(convert_to(convert_from('\x815a', 'UHC'), 'UTF8'), 'hex');	-- trail 0x5A
+ encode 
+--------
+ eab0b4
+(1 row)
+
+SELECT encode(convert_to(convert_from('\x8161', 'UHC'), 'UTF8'), 'hex');	-- trail 0x61
+ encode 
+--------
+ eab0b5
+(1 row)
+
+SELECT encode(convert_to(convert_from('\x817a', 'UHC'), 'UTF8'), 'hex');	-- trail 0x7A
+ encode 
+--------
+ eab195
+(1 row)
+
+SELECT encode(convert_to(convert_from('\x8181', 'UHC'), 'UTF8'), 'hex');	-- trail 0x81
+ encode 
+--------
+ eab196
+(1 row)
+
+SELECT encode(convert_to(convert_from('\x81fe', 'UHC'), 'UTF8'), 'hex');	-- trail 0xFE
+ encode 
+--------
+ eab493
+(1 row)
+
+SELECT encode(convert_to(convert_from('\xc7a1', 'UHC'), 'UTF8'), 'hex');	-- high lead 0xC7
+ encode 
+--------
+ ed9088
+(1 row)
+
+SELECT encode(convert_to(convert_from('\xfda1', 'UHC'), 'UTF8'), 'hex');	-- high lead 0xFD
+ encode 
+--------
+ e788bb
+(1 row)
+
+SELECT encode(convert_to(convert_from('\xfea1', 'UHC'), 'UTF8'), 'hex');	-- high lead 0xFE (upper boundary)
+ encode 
+--------
+ ee819e
+(1 row)
+
+-- invalid lead byte (0x80 and 0xFF are unused in CP949)
+SELECT convert_from('\x8041', 'UHC');
+ERROR:  invalid byte sequence for encoding "UHC": 0x80 0x41
+SELECT convert_from('\xff41', 'UHC');
+ERROR:  invalid byte sequence for encoding "UHC": 0xff 0x41
+-- invalid trail byte
+SELECT convert_from('\x8140', 'UHC');	-- 0x40
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x40
+SELECT convert_from('\x815b', 'UHC');	-- 0x5B
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x5b
+SELECT convert_from('\x8160', 'UHC');	-- 0x60
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x60
+SELECT convert_from('\x817b', 'UHC');	-- 0x7B
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x7b
+SELECT convert_from('\x8180', 'UHC');	-- 0x80
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x80
+SELECT convert_from('\x81ff', 'UHC');	-- 0xFF
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0xff
+SELECT convert_from('\x8d20', 'UHC');	-- NONUTF8_INVALID sentinel pair
+ERROR:  invalid byte sequence for encoding "UHC": 0x8d 0x20
+-- truncated two-byte character
+SELECT convert_from('\x81', 'UHC');
+ERROR:  invalid byte sequence for encoding "UHC": 0x81
+-- invalid trail byte 0x00 (NUL); the one trail the old verifier also rejected
+SELECT convert_from('\x8100', 'UHC');	-- trail 0x00
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x00
