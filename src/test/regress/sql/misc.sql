@@ -273,3 +273,9 @@ SELECT *, (equipment(CAST((h.*) AS hobbies_r))).name FROM hobbies_r h;
 --
 -- rewrite rules
 --
+
+do $$ declare a text;
+begin a := 's'::text::unknown;
+end$$;
+
+select 's'::text::unknown;
