@@ -40,6 +40,7 @@
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/shmem_internal.h"
+#include "utils/backend_progress.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -1190,7 +1191,15 @@ build_indices(void)
 		heap = table_open(ILHead->il_heap, NoLock);
 		ind = index_open(ILHead->il_ind, NoLock);
 
-		index_build(heap, ind, ILHead->il_info, false, false, false);
+		/*
+		 * Progress tracking is not really needed here, but it's simpler to
+		 * start it than to disable it everywhere (including the specific
+		 * AMs).
+		 */
+		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX,
+									  RelationGetRelid(heap));
+		index_build(heap, ind, ILHead->il_info, false, false);
+		pgstat_progress_end_command();
 
 		index_close(ind, NoLock);
 		table_close(heap, NoLock);

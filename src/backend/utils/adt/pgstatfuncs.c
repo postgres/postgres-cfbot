@@ -384,7 +384,7 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 		 * Report values for only those backends which are running the given
 		 * command.
 		 */
-		if (beentry->st_progress_command != cmdtype)
+		if (beentry->st_progress.command != cmdtype)
 			continue;
 
 		/* Value available to all callers */
@@ -394,9 +394,9 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 		/* show rest of the values including relid only to role members */
 		if (HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
 		{
-			values[2] = ObjectIdGetDatum(beentry->st_progress_command_target);
+			values[2] = ObjectIdGetDatum(beentry->st_progress.command_target);
 			for (i = 0; i < PGSTAT_NUM_PROGRESS_PARAM; i++)
-				values[i + 3] = Int64GetDatum(beentry->st_progress_param[i]);
+				values[i + 3] = Int64GetDatum(beentry->st_progress.param[i]);
 		}
 		else
 		{

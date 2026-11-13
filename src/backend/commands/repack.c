@@ -2049,11 +2049,19 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 {
 	ObjectAddress object;
 	Oid			mapped_tables[4];
+	bool		is_repack;
 	int			i;
 
+	/*
+	 * XXX Shouldn't we add an argument indicating that the function is being
+	 * called from REPACK?
+	 */
+	is_repack = MyBEEntry->st_progress.command == PROGRESS_COMMAND_REPACK;
+
 	/* Report that we are now swapping relation files */
-	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
-								 PROGRESS_REPACK_PHASE_SWAP_REL_FILES);
+	if (is_repack)
+		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
+									 PROGRESS_REPACK_PHASE_SWAP_REL_FILES);
 
 	/* Zero out possible results from swapped_relation_files */
 	memset(mapped_tables, 0, sizeof(mapped_tables));
@@ -2110,15 +2118,17 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 			reindex_flags |= REINDEX_REL_FORCE_INDEXES_PERMANENT;
 
 		/* Report that we are now reindexing relations */
-		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
-									 PROGRESS_REPACK_PHASE_REBUILD_INDEX);
+		if (is_repack)
+			pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
+										 PROGRESS_REPACK_PHASE_REBUILD_INDEX);
 
 		reindex_relation(NULL, OIDOldHeap, reindex_flags, &reindex_params);
 	}
 
 	/* Report that we are now doing clean up */
-	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
-								 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
+	if (is_repack)
+		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
+									 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
 
 	/*
 	 * If the relation being rebuilt is pg_class, swap_relation_files()
@@ -3661,9 +3671,20 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 									 "repacknew",
 									 get_rel_namespace(ind->rd_index->indrelid),
 									 false);
-		newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
+
+		/*
+		 * We build the index on the new heap, but after the swap phase it'll
+		 * become an index on the old heap. It makes more sense to report the
+		 * progress this way. (The reporting API expects that both command and
+		 * subcommand deal with the same target.)
+		 */
+		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX,
+									  RelationGetRelid(OldHeap));
+		newindex = index_create_copy(NewHeap, 0,
 									 oldindex, ind->rd_rel->reltablespace,
 									 newName);
+		pgstat_progress_end_command();
+
 		copy_index_constraints(ind, newindex, RelationGetRelid(NewHeap));
 		result = lappend_oid(result, newindex);
 

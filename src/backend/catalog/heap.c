@@ -3896,10 +3896,15 @@ RelationTruncateIndexes(Relation heapRelation)
 		 */
 		RelationTruncate(currentIndex, 0);
 
-		/* Initialize the index and rebuild */
-		/* Note: we do not need to re-establish pkey setting */
-		index_build(heapRelation, currentIndex, indexInfo, true, false,
-					true);
+		/*
+		 * Initialize the index and rebuild
+		 *
+		 * Note: we do not need to re-establish pkey setting
+		 */
+		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX,
+									  RelationGetRelid(heapRelation));
+		index_build(heapRelation, currentIndex, indexInfo, true, false);
+		pgstat_progress_end_command();
 
 		/* We're done with this index */
 		index_close(currentIndex, NoLock);
