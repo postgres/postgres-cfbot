@@ -1,7 +1,7 @@
 # Copyright (c) 2021-2026, PostgreSQL Global Development Group
 
-# Tests statistics handling around restarts, including handling of crashes and
-# invalid stats files, as well as restoring stats after "normal" restarts.
+# Tests statistics snapshot consistency and handling around restarts, including
+# crashes, invalid stats files, and restoring stats after normal restarts.
 
 use strict;
 use warnings FATAL => 'all';
@@ -17,6 +17,38 @@ $node->start;
 
 my $connect_db = 'postgres';
 my $db_under_test = 'test';
+
+# Verify that a statistics snapshot excludes backends that started after the
+# snapshot was created.
+my $snapshot_session = $node->background_psql($connect_db);
+
+$snapshot_session->query_safe(
+	q[
+	BEGIN;
+	SET LOCAL stats_fetch_consistency = 'snapshot';
+	SELECT count(*) FROM pg_stat_wal;
+]);
+
+# Establish this connection only after the first session built its snapshot.
+my $late_session = $node->background_psql($connect_db);
+my $late_pid = $late_session->query_safe('SELECT pg_backend_pid()');
+
+# WAL returns one scalar composite, so count a field to distinguish a NULL
+# result from the fabricated all-zero row.
+is( $snapshot_session->query_safe(
+		qq[
+		SELECT
+			(SELECT count(wal_records)
+			 FROM pg_stat_get_backend_wal($late_pid)),
+			(SELECT count(*) FROM pg_stat_get_backend_io($late_pid)),
+			(SELECT count(*) FROM pg_stat_get_backend_lock($late_pid));
+	]),
+	'0|0|0',
+	'statistics snapshot excludes a backend created later');
+
+$snapshot_session->query_safe('ROLLBACK');
+$late_session->quit;
+$snapshot_session->quit;
 
 my $sect = "startup";
 
