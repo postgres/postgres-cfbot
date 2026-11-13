@@ -22,3 +22,10 @@ backend_sources += files(
   'waiteventset.c',
 
 )
+
+# Windows-specific files
+if host_system == 'windows'
+  backend_sources += files(
+    'pg_job_object.c',
+  )
+endif

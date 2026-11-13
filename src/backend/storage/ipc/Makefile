@@ -29,4 +29,8 @@ OBJS = \
 	standby.o \
 	waiteventset.o
 
+ifeq ($(PORTNAME), win32)
+OBJS += pg_job_object.o
+endif
+
 include $(top_srcdir)/src/backend/common.mk
